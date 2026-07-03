@@ -228,14 +228,8 @@ fn ac_fres1_clothoid_offset_matches_quadrature() {
 #[test]
 fn ac_samp1_constant_speed_times_arclength_followers() {
     let line = Line::try_new(ORIGIN, [10.0, 0.0, 0.0]).unwrap();
-    let seg = PathSegment::try_new(
-        Segment::Line(line),
-        vec![FollowerDemand {
-            axis_index: 3,
-            ratio: 0.3,
-        }],
-    )
-    .unwrap();
+    let seg =
+        PathSegment::try_new(Segment::Line(line), vec![FollowerDemand::constant(3, 0.3)]).unwrap();
     let samples = lower_constant_speed(&seg, 5.0, 10.0).unwrap();
     assert_eq!(samples.len(), 21);
     assert_eq!(
@@ -257,15 +251,33 @@ fn ac_samp1_constant_speed_times_arclength_followers() {
 }
 
 #[test]
+fn ramped_follower_lowers_to_the_closed_form_offset() {
+    // e(s) = r0·s + (r1−r0)·s²/(2L). A follower ramping 0.2 → 0.4 over a 10 mm
+    // line, lowered at constant speed, must match that quadratic at every sample.
+    let len = 10.0;
+    let (r0, r1) = (0.2, 0.4);
+    let line = Line::try_new(ORIGIN, [len, 0.0, 0.0]).unwrap();
+    let follower = FollowerDemand::ramp(3, r0, r1);
+    let seg = PathSegment::try_new(Segment::Line(line), vec![follower]).unwrap();
+    let speed = 5.0;
+    let samples = lower_constant_speed(&seg, speed, 10.0).unwrap();
+    for sample in &samples {
+        let s = (speed * sample.t_s).min(len);
+        let expected = r0 * s + (r1 - r0) * s * s / (2.0 * len);
+        assert!(
+            (sample.followers[0] - expected).abs() < 1e-12,
+            "s={s}: {} vs {expected}",
+            sample.followers[0]
+        );
+    }
+    // Total delivered E equals the trapezoidal mean over the span.
+    let last = samples.last().unwrap();
+    assert!((last.followers[0] - 0.5 * (r0 + r1) * len).abs() < 1e-12);
+}
+
+#[test]
 fn ac_samp2_virtual_move_has_no_position_and_advances_followers() {
-    let seg = PathSegment::try_new_virtual(
-        vec![FollowerDemand {
-            axis_index: 3,
-            ratio: 1.0,
-        }],
-        4.0,
-    )
-    .unwrap();
+    let seg = PathSegment::try_new_virtual(vec![FollowerDemand::constant(3, 1.0)], 4.0).unwrap();
     let samples = lower_constant_speed(&seg, 2.0, 5.0).unwrap();
     assert!(samples.iter().all(|s| s.position.is_none()));
     let last = samples.last().unwrap();
@@ -276,10 +288,7 @@ fn ac_samp2_virtual_move_has_no_position_and_advances_followers() {
 fn invalid_speed_rejected() {
     let seg = PathSegment::try_new(
         Segment::Line(make_line()),
-        vec![FollowerDemand {
-            axis_index: 3,
-            ratio: 0.3,
-        }],
+        vec![FollowerDemand::constant(3, 0.3)],
     )
     .unwrap();
     for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
@@ -296,10 +305,7 @@ fn invalid_speed_rejected() {
 fn invalid_rate_rejected() {
     let seg = PathSegment::try_new(
         Segment::Line(make_line()),
-        vec![FollowerDemand {
-            axis_index: 3,
-            ratio: 0.3,
-        }],
+        vec![FollowerDemand::constant(3, 0.3)],
     )
     .unwrap();
     for bad in [0.0, -2.0, f64::NAN, f64::INFINITY] {
@@ -314,12 +320,7 @@ fn invalid_rate_rejected() {
 
 #[test]
 fn non_finite_anchor_rejected() {
-    let followers = || {
-        vec![FollowerDemand {
-            axis_index: 3,
-            ratio: 0.3,
-        }]
-    };
+    let followers = || vec![FollowerDemand::constant(3, 0.3)];
     let nan_line = Line::try_new([f64::NAN, 0.0, 0.0], [1.0, 0.0, 0.0]).unwrap();
     let nan_origin_arc = Arc::try_new([f64::NAN, 0.0, 0.0], UNIT_U, UNIT_V, 2.0, 0.0, 1.0).unwrap();
     let nan_angle_arc = Arc::try_new(ORIGIN, UNIT_U, UNIT_V, 2.0, f64::NAN, 1.0).unwrap();
@@ -346,10 +347,7 @@ fn non_finite_anchor_rejected() {
 fn unaddressable_sample_count_rejected() {
     let seg = PathSegment::try_new(
         Segment::Line(make_line()),
-        vec![FollowerDemand {
-            axis_index: 3,
-            ratio: 0.3,
-        }],
+        vec![FollowerDemand::constant(3, 0.3)],
     )
     .unwrap();
     assert_eq!(

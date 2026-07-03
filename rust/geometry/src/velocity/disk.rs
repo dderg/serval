@@ -541,15 +541,19 @@ fn jerk_smooth(
     v[0] = entry_v.min(track[0]);
     v[n - 1] = exit_v.min(track[n - 1]);
 
-    // The tangential accel is the true derivative of the reconstructed speed:
-    // `a = d(v^2/2)/ds`, by central difference, so it agrees with the emitted `v`
-    // exactly (and stays disk-feasible, since `v` is). Rest ends carry `a = 0`.
+    // The tangential accel is the derivative of the reconstructed speed:
+    // `a = d(v^2/2)/ds`, by central difference, so it agrees with the emitted `v`.
+    // The difference straddles two grid cells, so where the profile lands on a
+    // cap while the curvature (and with it the centripetal share) is rising, the
+    // smeared value can poke past the pointwise disk budget — clamp it back to
+    // the rail at the sample's own speed. Rest ends carry `a = 0`.
     let mut a = vec![0.0_f64; n];
     for i in 0..n {
         let (lo, hi) = (i.saturating_sub(1), (i + 1).min(n - 1));
         let span = s[hi] - s[lo];
         a[i] = if span > 1e-12 {
-            (v[hi] * v[hi] - v[lo] * v[lo]) / (2.0 * span)
+            let rail = disk_rail_accel(accel[i], kappa[i], v[i]);
+            ((v[hi] * v[hi] - v[lo] * v[lo]) / (2.0 * span)).clamp(-rail, rail)
         } else {
             0.0
         };
@@ -576,11 +580,12 @@ fn jerk_smooth(
 /// centripetal) unbilled. The normal part spends jerk budget first; the circle
 /// that remains bounds the tangential accel about its rotation-driven `center`.
 ///
-/// The arc accelerates at the disk rail until coasting the accel back to zero
-/// would already reach the `cap`, then jerks the accel down to land tangent to it
-/// (`a = 0`) — so it rejoins the ceiling, or meets a brake arc at a velocity peak,
-/// with continuous acceleration. It only integrates where it is *below* the cap,
-/// off the constraint boundary, so a `cap` that plunges faster than the disk can
+/// The arc accelerates at the disk rail until jerking the accel down to the
+/// cap's own slope-accel would land the speed on the cap, then aims for that
+/// slope so the landing is tangent — flat ceilings are met at `a = 0`,
+/// descending brake envelopes at their braking accel — and the acceleration is
+/// continuous either way. It only integrates where it is *below* the cap, off
+/// the constraint boundary, so a `cap` that plunges faster than the disk can
 /// brake never traps it on an unreachable ceiling.
 #[allow(clippy::too_many_arguments)]
 fn reach_pass(
@@ -613,10 +618,34 @@ fn reach_pass(
             .max(0.0)
             .sqrt();
         let rail = disk_rail_accel(accel[i], kappa[i], v_pred);
-        // Accelerate at the rail until coasting the accel to zero would reach the
-        // cap, then aim for zero accel so the speed lands tangent to the cap.
-        let coast_peak = v_pred + a_prev.max(0.0) * a_prev.max(0.0) / (2.0 * j_max);
-        let a_target = if coast_peak >= cap[i] { 0.0 } else { rail };
+        // Accelerate at the rail until jerking the accel down to the cap's own
+        // slope-accel would land the speed on the cap, then aim for that slope so
+        // the landing is tangent. A flat cruise ceiling has slope zero; a
+        // descending brake envelope has a negative slope, and aiming for zero
+        // there would ride the rail right up to the crossing and snap the accel
+        // from `+rail` to the brake's `-rail` in one step — the very jerk spike
+        // this pass exists to remove.
+        let a_land = {
+            let hi = (i + 1).min(n - 1);
+            let span = s[hi] - s[i - 1];
+            let slope = (cap[hi] * cap[hi] - cap[i - 1] * cap[i - 1]) / (2.0 * span.max(1e-12));
+            slope.clamp(-rail, rail)
+        };
+        // Landing test in cap-relative terms: jerking from `a_prev` down to
+        // `a_land` takes `(a_prev - a_land) / j`, during which the profile gains
+        // `(a_prev² - a_land²) / 2j` while the cap itself falls by
+        // `a_land · (a_prev - a_land) / j` — their difference collapses to the
+        // relative-accel form below.
+        let coast_gap = if a_prev > a_land {
+            (a_prev - a_land) * (a_prev - a_land) / (2.0 * j_max)
+        } else {
+            0.0
+        };
+        let a_target = if v_pred + coast_gap >= cap[i] {
+            a_land
+        } else {
+            rail
+        };
         let a = a_target
             .clamp(center - tang, center + tang)
             .clamp(-rail, rail);

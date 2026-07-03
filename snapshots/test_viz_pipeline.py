@@ -26,15 +26,13 @@ def test_constant_velocity_gives_flat_speed_and_zero_higher_orders():
     # x(t) = v*t  ->  velocity v, acceleration 0, jerk 0.
     snap = _one_piece(0.0, 20.0, 0.0, 0.0, t_end=1.0)
 
-    _, vx, vy, v_scalar, ax, ay, a_scalar, _, _, j_scalar = (
-        viz_pipeline._build_time_series(snap)
-    )
+    series = viz_pipeline._build_time_series(snap)
 
-    assert np.allclose(vx, 20.0)
-    assert np.allclose(vy, 0.0)
-    assert np.allclose(v_scalar, 20.0)
-    assert np.allclose(a_scalar, 0.0)
-    assert np.allclose(j_scalar, 0.0)
+    assert np.allclose(series["vel"]["X"], 20.0)
+    assert np.allclose(series["vel"]["Y"], 0.0)
+    assert np.allclose(series["v_scalar"], 20.0)
+    assert np.allclose(series["a_scalar"], 0.0)
+    assert np.allclose(series["j_scalar"], 0.0)
 
 
 def test_constant_acceleration_piece_is_exact():
@@ -42,11 +40,11 @@ def test_constant_acceleration_piece_is_exact():
     a = 1000.0
     snap = _one_piece(0.0, 0.0, 0.5 * a, 0.0, t_end=0.1)
 
-    *_, ax, ay, a_scalar, _, _, j_scalar = viz_pipeline._build_time_series(snap)
+    series = viz_pipeline._build_time_series(snap)
 
-    assert np.allclose(ax, a)
-    assert np.allclose(a_scalar, a)
-    assert np.allclose(j_scalar, 0.0)
+    assert np.allclose(series["acc"]["X"], a)
+    assert np.allclose(series["a_scalar"], a)
+    assert np.allclose(series["j_scalar"], 0.0)
 
 
 def test_constant_jerk_piece_is_exact():
@@ -54,7 +52,7 @@ def test_constant_jerk_piece_is_exact():
     j = 50000.0
     snap = _one_piece(0.0, 0.0, 0.0, j / 6.0, t_end=0.05)
 
-    *_, jx, _, j_scalar = viz_pipeline._build_time_series(snap)
+    series = viz_pipeline._build_time_series(snap)
 
-    assert np.allclose(jx, j)
-    assert np.allclose(j_scalar, j)
+    assert np.allclose(series["jerk"]["X"], j)
+    assert np.allclose(series["j_scalar"], j)

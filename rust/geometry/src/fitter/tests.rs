@@ -55,7 +55,7 @@ fn total_extrusion(moves: &[Move], axis: usize) -> f64 {
                 .followers
                 .iter()
                 .filter(|f| f.axis_index == axis)
-                .map(|f| f.ratio * s)
+                .map(|f| f.delta_over(s))
                 .sum::<f64>()
         })
         .sum()
@@ -295,6 +295,84 @@ fn extrusion_is_conserved_across_a_blend() {
     );
 }
 
+fn e_follower(m: &Move) -> FollowerDemand {
+    *m.segment
+        .followers
+        .iter()
+        .find(|f| f.axis_index == E_AXIS)
+        .expect("extruder follower present")
+}
+
+#[test]
+fn modest_ratio_step_blends_with_a_continuous_extrusion_ramp() {
+    // Two legs at slightly different extrusion ratios (0.10 vs 0.12, a 16.7%
+    // relative step, under the 25% gate). The corner blends, total E is
+    // conserved, and the two clothoid halves meet at one shared ratio so ė is
+    // continuous across the blend midpoint.
+    let moves = vec![
+        seg(1, 3000.0, 5.0, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 5.0),
+        seg(2, 3000.0, 5.0, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 6.0),
+    ];
+    let before = total_extrusion(&moves, E_AXIS);
+    let out = fit_corners(&moves, CornerFitConfig::default()).unwrap();
+    assert_eq!(out.report.blended, 1);
+    assert!(out.report.unblended.is_empty());
+    let after = total_extrusion(&out.moves, E_AXIS);
+    assert!(
+        (before - after).abs() <= 1e-9,
+        "before {before} after {after}"
+    );
+
+    let half1 = e_follower(&out.moves[1]);
+    let half2 = e_follower(&out.moves[2]);
+    assert!(half1.is_ramped() && half2.is_ramped());
+    assert!(
+        (half1.ratio_end - half2.ratio).abs() <= 1e-12,
+        "midpoint ratio discontinuous: {} vs {}",
+        half1.ratio_end,
+        half2.ratio
+    );
+}
+
+#[test]
+fn abrupt_ratio_step_is_left_unblended_as_a_stop() {
+    // 0.10 vs 0.30 — a 66% relative step, above the gate. The corner stays sharp
+    // (unblended), which forces the planner to a full stop across the seam.
+    let moves = vec![
+        seg(1, 3000.0, 5.0, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 5.0),
+        seg(2, 3000.0, 5.0, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 15.0),
+    ];
+    let out = fit_corners(&moves, CornerFitConfig::default()).unwrap();
+    assert_eq!(out.report.blended, 0);
+    assert_eq!(out.report.unblended.len(), 1);
+    assert_eq!(out.report.unblended[0].reason, UnblendReason::ExtrusionStep);
+}
+
+#[test]
+fn travel_to_extrude_corner_still_blends_and_ramps_to_zero() {
+    // One side is a travel (ratio 0). The relative step is 1.0, but a ramp to or
+    // from zero extrusion is desirable, so the gate exempts it and the corner
+    // blends. Total E (all on the extruding leg) is conserved.
+    let moves = vec![
+        seg(1, 3000.0, 5.0, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.0),
+        seg(2, 3000.0, 5.0, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 5.0),
+    ];
+    let before = total_extrusion(&moves, E_AXIS);
+    let out = fit_corners(&moves, CornerFitConfig::default()).unwrap();
+    assert_eq!(out.report.blended, 1);
+    let after = total_extrusion(&out.moves, E_AXIS);
+    assert!(
+        (before - after).abs() <= 1e-9,
+        "before {before} after {after}"
+    );
+    let half1 = e_follower(&out.moves[1]);
+    assert!(
+        half1.ratio.abs() <= 1e-12,
+        "half1 must start at zero extrusion, got {}",
+        half1.ratio
+    );
+}
+
 #[test]
 fn extrusion_conserved_when_short_leg_is_consumed_by_two_blends() {
     let accel = 1000.0;
@@ -333,7 +411,9 @@ fn non_finite_line_yields_fit_error_with_source_line() {
     };
 
     let err = fit_corners(&[good, bad], CornerFitConfig::default()).unwrap_err();
-    let FitError::Internal { line_no, source } = err;
+    let FitError::Internal { line_no, source } = err else {
+        panic!("expected internal error, got {err:?}");
+    };
     assert_eq!(line_no, 2);
     assert!(matches!(source, GeometryError::DegenerateClothoid { .. }));
 }

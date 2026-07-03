@@ -15,7 +15,7 @@ const ANGLE_EPS_RAD: f64 = 1e-9;
 const EASE_LEAD_MAX_RAD: f64 = FRAC_PI_6;
 pub(super) const EPMM_MIN: f64 = 1e-9;
 const EPMM_REL_TOL: f64 = 0.25;
-const ARC_EPMM_REL_TOL: f64 = 0.02;
+const ARC_EPMM_REL_TOL: f64 = 5e-3;
 
 pub(super) struct Reconstruction {
     pub up: Vec<Clothoid>,
@@ -179,9 +179,12 @@ pub(super) fn ease_run(
 
 fn scale_followers(f: &[FollowerDemand], s: f64) -> Vec<FollowerDemand> {
     f.iter()
-        .map(|x| FollowerDemand {
-            axis_index: x.axis_index,
-            ratio: x.ratio * s,
+        .map(|x| {
+            assert!(
+                !x.is_ramped(),
+                "arc easing operates on constant-ratio lines"
+            );
+            FollowerDemand::constant(x.axis_index, x.ratio * s)
         })
         .collect()
 }
@@ -392,8 +395,13 @@ fn build_spiral(
     Ok(Some((clo, b, line_trim)))
 }
 
+/// A spiral may consume at most half of the neighbor line: the far half
+/// belongs to whatever claims the line's other end — another run's easing or a
+/// corner blend — which under streaming causality is unknown when this run
+/// seals. Claims beyond half can overlap on a short shared line, and the
+/// emitted geometry then jumps backward by the overlap.
 fn within_line(trim: f64, length: f64) -> bool {
-    trim > -BUDGET_EPS_MM && trim < 0.9 * length
+    trim > -BUDGET_EPS_MM && trim < 0.5 * length
 }
 
 fn project_to_circle(origin: [f64; 3], radius: f64, p: [f64; 3]) -> [f64; 3] {
@@ -478,27 +486,25 @@ pub(super) fn reverse_clothoid(c: &Clothoid) -> Option<Clothoid> {
 }
 
 pub(super) fn epmm(m: &Move) -> f64 {
-    m.segment.followers.iter().map(|f| f.ratio.abs()).sum()
+    m.segment
+        .followers
+        .iter()
+        .map(|f| {
+            assert!(
+                !f.is_ramped(),
+                "arc-run facets and neighbors must carry constant follower ratios"
+            );
+            f.ratio.abs()
+        })
+        .sum()
 }
 
-pub(super) fn grow_turning_band(
-    moves: &[Move],
-    start: usize,
-    corner: CornerFitConfig,
-    gate_epmm: bool,
-) -> usize {
+pub(super) fn grow_turning_band(moves: &[Move], start: usize, corner: CornerFitConfig) -> usize {
     let n = moves.len();
     let mut end = start;
     let mut plane: Option<[f64; 3]> = None;
     let mut turn_sign: Option<f64> = None;
-    let e0 = epmm(&moves[start]);
     while end + 1 < n {
-        if gate_epmm {
-            let e_next = epmm(&moves[end + 1]);
-            if e_next < EPMM_MIN || (e_next - e0).abs() > EPMM_REL_TOL * e0 {
-                break;
-            }
-        }
         let (la, lb) = match (line_of(&moves[end]), line_of(&moves[end + 1])) {
             (Some(a), Some(b)) => (a, b),
             _ => break,
@@ -551,7 +557,7 @@ pub(super) fn arc_candidate(moves: &[Move], corner: CornerFitConfig, tol: f64) -
     if !moves.iter().skip(1).all(epmm_ok) {
         return false;
     }
-    if grow_turning_band(moves, 0, corner, false) + 1 != moves.len() {
+    if grow_turning_band(moves, 0, corner) + 1 != moves.len() {
         return false;
     }
     moves.len() < 3 || cocircular(moves, tol)
@@ -752,6 +758,10 @@ fn run_followers(
             lines[i].s_len()
         };
         for f in &m.segment.followers {
+            assert!(
+                !f.is_ramped(),
+                "arc-run facets must carry constant follower ratios"
+            );
             let delta_e = f.ratio * covered;
             match totals.iter_mut().find(|(a, _)| *a == f.axis_index) {
                 Some(entry) => entry.1 += delta_e,
@@ -762,10 +772,7 @@ fn run_followers(
     totals
         .into_iter()
         .filter(|(_, e)| e.abs() > 1e-12)
-        .map(|(axis_index, e)| FollowerDemand {
-            axis_index,
-            ratio: e / recon_len,
-        })
+        .map(|(axis_index, e)| FollowerDemand::constant(axis_index, e / recon_len))
         .collect()
 }
 

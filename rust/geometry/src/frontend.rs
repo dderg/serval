@@ -189,7 +189,7 @@ impl MoveContext {
 }
 
 fn extruder_follower(axis_index: usize, ratio: f64) -> FollowerDemand {
-    FollowerDemand { axis_index, ratio }
+    FollowerDemand::constant(axis_index, ratio)
 }
 
 fn segment_err(line_no: u32) -> impl Fn(GeometryError) -> FrontendError {

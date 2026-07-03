@@ -7,9 +7,22 @@ use trajectory::{ChainStage, CompiledChain, ShapedSegment};
 const MIN_PIECE_DURATION_S: f64 = 1e-9;
 const MAX_SUBDIVISION_DEPTH: u32 = 22;
 
-const MIN_FIT_PIECE_S: f64 = 5e-4;
+const MIN_FIT_PIECE_S: f64 = 1e-4;
 
 const RESIDUAL_PROBES: [f64; 3] = [0.25, 0.5, 0.75];
+
+/// Absolute acceleration-error budget for a fitted piece, probed at the knots
+/// as well as the interior. The positional weighting alone (`accel_err·h²/8`)
+/// lets a short piece end with an acceleration hundreds of mm/s² off the
+/// profile — positionally invisible, but adjacent pieces then step by twice
+/// that error at their shared knot, and the dispatched trajectory carries a
+/// jerk spike the planner never asked for.
+const FIT_TOL_ACCEL_MM_S2: f64 = 50.0;
+
+const ACCEL_PROBES: [f64; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
+
+const PROFILE_OVERSHOOT_EPS: f64 = 1e-6;
+const PROFILE_VELOCITY_FLOOR: f64 = 1e-9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoweringError {
@@ -37,57 +50,113 @@ impl std::fmt::Display for LoweringError {
 
 impl std::error::Error for LoweringError {}
 
-struct Phase {
-    t0: f64,
+/// Quintic Hermite piece for `s(t)` over one sample window, in local time `τ`. It
+/// matches `(s, v, a)` at both knots, so adjacent windows — which share those knot
+/// values — join C2, and the whole move's `s(t)` is C2 by construction.
+struct QuinticWindow {
     dt: f64,
+    coeffs: [f64; 6],
     s0: f64,
-    v0: f64,
-    accel: f64,
-    s_end: f64,
+    s1: f64,
 }
 
-impl Phase {
-    fn s_v_at(&self, t_local: f64) -> (f64, f64) {
-        let tau = (t_local - self.t0).clamp(0.0, self.dt);
-        let s = self
-            .v0
-            .mul_add(tau, 0.5 * self.accel * tau * tau + self.s0)
-            .clamp(self.s0, self.s_end);
-        let v = self.accel.mul_add(tau, self.v0).max(0.0);
-        (s, v)
+impl QuinticWindow {
+    fn state_at(&self, tau: f64) -> (f64, f64, f64) {
+        let c = &self.coeffs;
+        let s = (((((c[5] * tau) + c[4]) * tau + c[3]) * tau + c[2]) * tau + c[1]) * tau + c[0];
+        let v = ((((5.0 * c[5] * tau) + 4.0 * c[4]) * tau + 3.0 * c[3]) * tau + 2.0 * c[2]) * tau
+            + c[1];
+        let a = ((20.0 * c[5] * tau) + 12.0 * c[4]) * tau * tau + 6.0 * c[3] * tau + 2.0 * c[2];
+        (s, v, a)
     }
 }
 
-fn build_phases(samples: &[VelSample]) -> Result<(Vec<Phase>, f64), LoweringError> {
+/// Monomial coefficients `c0..c5` of the quintic matching `(s0, v0, a0)` at `τ = 0`
+/// and `(s1, v1, a1)` at `τ = h`.
+fn quintic_hermite_coeffs(
+    s0: f64,
+    v0: f64,
+    a0: f64,
+    s1: f64,
+    v1: f64,
+    a1: f64,
+    h: f64,
+) -> [f64; 6] {
+    let ds = s1 - s0;
+    let h2 = h * h;
+    let h3 = h2 * h;
+    let c3 = (20.0 * ds - (8.0 * v1 + 12.0 * v0) * h - (3.0 * a0 - a1) * h2) / (2.0 * h3);
+    let c4 =
+        (-30.0 * ds + (14.0 * v1 + 16.0 * v0) * h + (3.0 * a0 - 2.0 * a1) * h2) / (2.0 * h3 * h);
+    let c5 = (12.0 * ds - 6.0 * (v1 + v0) * h - (a0 - a1) * h2) / (2.0 * h3 * h2);
+    [s0, v0, 0.5 * a0, c3, c4, c5]
+}
+
+/// C2 scalar arc-length profile `s(t)` for a curved move, one quintic Hermite per
+/// sample window over the dense `(s, v, a)` grid.
+struct ScalarProfile {
+    windows: Vec<QuinticWindow>,
+    knot_t: Vec<f64>,
+}
+
+impl ScalarProfile {
+    fn locate(&self, t: f64) -> (usize, f64) {
+        let count = self.knot_t.partition_point(|&kt| kt <= t);
+        let idx = count.saturating_sub(1).min(self.windows.len() - 1);
+        let tau = (t - self.knot_t[idx]).clamp(0.0, self.windows[idx].dt);
+        (idx, tau)
+    }
+
+    fn state_at(&self, t: f64) -> (f64, f64, f64) {
+        let (idx, tau) = self.locate(t);
+        let w = &self.windows[idx];
+        let (s, v, a) = w.state_at(tau);
+        let margin = PROFILE_OVERSHOOT_EPS * (1.0 + (w.s1 - w.s0).abs());
+        debug_assert!(
+            s >= w.s0 - margin && s <= w.s1 + margin,
+            "quintic profile position {s} escaped window [{}, {}]",
+            w.s0,
+            w.s1
+        );
+        debug_assert!(
+            v >= -PROFILE_VELOCITY_FLOOR,
+            "quintic profile velocity {v} below zero"
+        );
+        (s, v, a)
+    }
+}
+
+fn build_profile(samples: &[VelSample]) -> Result<(ScalarProfile, f64), LoweringError> {
     if samples.len() < 2 {
         return Err(LoweringError::EmptyProfile);
     }
-    let mut phases = Vec::with_capacity(samples.len() - 1);
+    let mut windows = Vec::with_capacity(samples.len() - 1);
+    let mut knot_t = Vec::with_capacity(samples.len());
+    knot_t.push(0.0);
     let mut t_acc = 0.0;
     for w in samples.windows(2) {
-        let (s0, v0) = (w[0].s, w[0].v);
-        let (s1, v1) = (w[1].s, w[1].v);
+        let (s0, v0, a0) = (w[0].s, w[0].v, w[0].a);
+        let (s1, v1, a1) = (w[1].s, w[1].v, w[1].a);
         let ds = s1 - s0;
         let v_sum = v0 + v1;
-        if !(ds.is_finite() && ds > 0.0 && v_sum > 0.0) {
+        let finite = v0.is_finite() && v1.is_finite() && a0.is_finite() && a1.is_finite();
+        if !(ds.is_finite() && ds > 0.0 && v_sum > 0.0 && finite) {
             return Err(LoweringError::DegeneratePhase);
         }
-        let accel = (v1 * v1 - v0 * v0) / (2.0 * ds);
         let dt = 2.0 * ds / v_sum;
         if !(dt.is_finite() && dt > 0.0) {
             return Err(LoweringError::DegeneratePhase);
         }
-        phases.push(Phase {
-            t0: t_acc,
+        windows.push(QuinticWindow {
             dt,
+            coeffs: quintic_hermite_coeffs(s0, v0, a0, s1, v1, a1, dt),
             s0,
-            v0,
-            accel,
-            s_end: s1,
+            s1,
         });
         t_acc += dt;
+        knot_t.push(t_acc);
     }
-    Ok((phases, t_acc))
+    Ok((ScalarProfile { windows, knot_t }, t_acc))
 }
 
 /// Cubic Hermite piece in monomial form matching position and velocity at both
@@ -121,41 +190,42 @@ pub(crate) fn hermite_cubic(
 }
 
 struct Sampler<'a> {
-    phases: &'a [Phase],
+    profile: &'a ScalarProfile,
     spatial: Option<&'a geometry::path::Segment>,
     start_pos: &'a [f64],
     followers: &'a [geometry::FollowerDemand],
+    s_len: f64,
     axis_chains: &'a [CompiledChain],
 }
 
 impl Sampler<'_> {
     fn axis_base_state(&self, axis: usize, t: f64) -> (f64, f64, f64) {
-        let phase = locate(self.phases, t);
-        let (s, v) = phase.s_v_at(t);
+        let (s, v, a_t) = self.profile.state_at(t);
         if axis < 3 {
             match self.spatial {
                 Some(seg) => {
-                    // Exact per-axis acceleration `a_t·ĥ + v²·(dĥ/ds)`: the planner's
-                    // tangential accel `a_t = phase.accel` along the heading, plus the
-                    // centripetal term from the path curving. No finite difference, so
-                    // it stays smooth where a difference of headings would jitter.
-                    let accel =
-                        phase.accel * seg.heading_at(s)[axis] + v * v * seg.dheading_ds(s)[axis];
+                    let accel = a_t * seg.heading_at(s)[axis] + v * v * seg.dheading_ds(s)[axis];
                     (seg.point_at(s)[axis], seg.heading_at(s)[axis] * v, accel)
                 }
                 None => (self.start_pos.get(axis).copied().unwrap_or(0.0), 0.0, 0.0),
             }
         } else if let Some(f) = self.followers.iter().find(|f| f.axis_index == axis) {
-            let pos = f.ratio.mul_add(s, self.start_pos[axis]);
-            let e_dot = f.ratio * v;
-            let e_ddot = f.ratio * phase.accel;
-            (pos, e_dot, e_ddot)
+            if f.is_ramped() {
+                let len = self.s_len;
+                let r = f.ratio_at(s, len);
+                let pos = self.start_pos[axis] + f.offset_at(s, len);
+                let accel = f.ratio_slope(len).mul_add(v * v, r * a_t);
+                (pos, r * v, accel)
+            } else {
+                let pos = f.ratio.mul_add(s, self.start_pos[axis]);
+                (pos, f.ratio * v, f.ratio * a_t)
+            }
         } else {
             (self.start_pos.get(axis).copied().unwrap_or(0.0), 0.0, 0.0)
         }
     }
 
-    fn axis_state(&self, axis: usize, t: f64, apply_zero_support: bool) -> (f64, f64) {
+    fn axis_state_full(&self, axis: usize, t: f64, apply_zero_support: bool) -> (f64, f64, f64) {
         let (mut pos, mut vel, mut accel) = self.axis_base_state(axis, t);
         if apply_zero_support {
             if let Some(chain) = self.axis_chains.get(axis) {
@@ -171,30 +241,44 @@ impl Sampler<'_> {
                 }
             }
         }
+        (pos, vel, accel)
+    }
+
+    fn axis_state(&self, axis: usize, t: f64, apply_zero_support: bool) -> (f64, f64) {
+        let (pos, vel, _) = self.axis_state_full(axis, t, apply_zero_support);
         (pos, vel)
     }
 
-    fn span_residual(&self, driven: &[usize], ta: f64, tb: f64) -> f64 {
-        let mut worst = 0.0_f64;
+    fn axis_accel(&self, axis: usize, t: f64, apply_zero_support: bool) -> f64 {
+        self.axis_state_full(axis, t, apply_zero_support).2
+    }
+
+    fn span_fits(&self, driven: &[usize], ta: f64, tb: f64, tol_mm: f64) -> bool {
+        let h = tb - ta;
+        let accel_scale = h * h / 8.0;
         for &axis in driven {
             let (pa, va) = self.axis_state(axis, ta, false);
             let (pb, vb) = self.axis_state(axis, tb, false);
             let piece = hermite_cubic(ta, tb, pa, va, pb, vb);
+            let (c2, c3) = (piece.coeffs[2], piece.coeffs[3]);
+            for &frac in &ACCEL_PROBES {
+                let tm = frac.mul_add(h, ta);
+                let accel_fit = 6.0_f64.mul_add(c3 * (tm - ta), 2.0 * c2);
+                let accel_err = (accel_fit - self.axis_accel(axis, tm, false)).abs();
+                if accel_err > FIT_TOL_ACCEL_MM_S2 || accel_err * accel_scale > tol_mm {
+                    return false;
+                }
+            }
             for &frac in &RESIDUAL_PROBES {
-                let tm = frac.mul_add(tb - ta, ta);
+                let tm = frac.mul_add(h, ta);
                 let (truth, _) = self.axis_state(axis, tm, false);
-                worst = worst.max((piece.evaluate(tm) - truth).abs());
+                if (piece.evaluate(tm) - truth).abs() > tol_mm {
+                    return false;
+                }
             }
         }
-        worst
+        true
     }
-}
-
-fn locate(phases: &[Phase], t: f64) -> &Phase {
-    phases
-        .iter()
-        .find(|p| t < p.t0 + p.dt)
-        .unwrap_or(&phases[phases.len() - 1])
 }
 
 fn refine_span(
@@ -209,7 +293,7 @@ fn refine_span(
     let h = tb - ta;
     let accept = depth >= MAX_SUBDIVISION_DEPTH
         || h <= 2.0 * MIN_FIT_PIECE_S
-        || sampler.span_residual(driven, ta, tb) <= tol_mm;
+        || sampler.span_fits(driven, ta, tb, tol_mm);
     if accept {
         out.push(tb);
     } else {
@@ -258,10 +342,14 @@ pub fn lower_move_pieces(
     if gm.source != vm.source {
         return Err(LoweringError::SourceMismatch);
     }
-    if !vm.phases.is_empty() {
+    // The closed-form phase path expresses each axis as one constant scale times
+    // the arc-length profile; a ramped follower's ratio varies along the move, so
+    // route those through the sampled fit instead. Constant followers (every
+    // straight slicer move) keep the exact phase path.
+    if !vm.phases.is_empty() && !gm.segment.followers.iter().any(|f| f.is_ramped()) {
         return lower_straight_from_phases(gm, vm, t_start, start_pos, axis_chains);
     }
-    let (phases, total_t) = build_phases(&vm.samples)?;
+    let (profile, total_t) = build_profile(&vm.samples)?;
     let spatial = gm.segment.spatial.as_ref();
 
     let n_axes = start_pos.len().max(3);
@@ -274,10 +362,11 @@ pub fn lower_move_pieces(
     }
 
     let sampler = Sampler {
-        phases: &phases,
+        profile: &profile,
         spatial,
         start_pos,
         followers: &gm.segment.followers,
+        s_len: gm.segment.s_len(),
         axis_chains,
     };
     let mut driven: Vec<usize> = (0..3).collect();

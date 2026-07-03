@@ -416,6 +416,74 @@ fn extrusion_is_conserved_and_continuous_across_blends() {
     );
 }
 
+fn axis_velocity(seg: &ShapedSegment, axis: usize, t: f64) -> f64 {
+    let h = 1e-6;
+    (eval(&seg.axes[axis], t + h) - eval(&seg.axes[axis], t - h)) / (2.0 * h)
+}
+
+#[test]
+fn extrusion_velocity_is_continuous_across_a_ramped_blend() {
+    // A shallow corner between two legs at different extrusion ratios (0.20 vs
+    // ~0.24, under the gate) blends and cruises near feedrate. The extrusion ramp
+    // keeps ė continuous: with the old constant-ratio halves the blend midpoint
+    // would step by (Δratio)·v ≈ 3 mm/s at this speed. Every interior E-axis seam
+    // stays well under that.
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 8.0),
+        line(2, [40.0, 0.0, 0.0], [80.0, 4.0, 0.0], 9.65),
+    ];
+    let segs = replay(
+        cfg(),
+        AxisChainSet::default(),
+        &[0.0, 0.0, 0.0, 0.0],
+        0.0,
+        &moves,
+    );
+    assert!(segs.len() > 2, "expected a rounded (multi-piece) corner");
+    let mut worst = 0.0_f64;
+    for w in segs.windows(2) {
+        let spatial = boundary_speed(&w[0], &w[1]);
+        assert!(
+            spatial > 1.0,
+            "corner stopped ({spatial} mm/s): not blended"
+        );
+        let jump =
+            (axis_velocity(&w[1], 3, w[1].t_start) - axis_velocity(&w[0], 3, w[0].t_end)).abs();
+        worst = worst.max(jump);
+    }
+    assert!(
+        worst < 1.0,
+        "extrusion velocity discontinuous across blend: {worst} mm/s"
+    );
+    let last = segs.last().unwrap();
+    assert!((eval(&last.axes[3], last.t_end) - 17.65).abs() < 1e-3);
+}
+
+#[test]
+fn abrupt_extrusion_step_rests_at_the_seam() {
+    // Legs at 0.10 vs 0.30 extrusion ratio — above the gate. The corner is left
+    // unblended, so the toolhead comes to rest across the seam.
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 5.0),
+        line(2, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 15.0),
+    ];
+    let segs = replay(
+        cfg(),
+        AxisChainSet::default(),
+        &[0.0, 0.0, 0.0, 0.0],
+        0.0,
+        &moves,
+    );
+    let min_seam = segs
+        .windows(2)
+        .map(|w| boundary_speed(&w[0], &w[1]))
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        min_seam < 1e-2,
+        "abrupt extrusion step should rest at the seam, min seam speed {min_seam}"
+    );
+}
+
 #[test]
 fn odometer_accumulates_extrusion_across_emissions() {
     let moves = [

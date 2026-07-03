@@ -1,3 +1,4 @@
+M83 ; use relative distances for extrusion
 ;AFTER_LAYER_CHANGE
 ;1
 ;_SET_FAN_SPEED_CHANGING_LAYER

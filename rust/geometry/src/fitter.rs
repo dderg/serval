@@ -16,19 +16,30 @@ use vec3::{dot, madd, turn_normal};
 
 const COLLINEAR_EPS_RAD: f64 = 1e-3;
 const BUDGET_EPS_MM: f64 = 1e-9;
+/// Over-trim beyond this is a real overlap of two neighbors' claims, not
+/// floating-point noise — the same order as the pipeline's position-contiguity
+/// tolerance at ingress.
+const OVER_TRIM_TOL_MM: f64 = 1e-6;
 pub(crate) const TURN_NORMAL_EPS: f64 = 1e-9;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CornerFitConfig {
     pub theta_min_rad: f64,
     pub theta_max_rad: f64,
+    /// Above this relative difference in per-axis extrusion ratio across a
+    /// corner, the junction is left unblended (a full stop) rather than blended
+    /// with a mid-corner ramp — see [`UnblendReason::ExtrusionStep`].
+    pub extrusion_ramp_rel_tol: f64,
 }
+
+const EXTRUSION_RAMP_REL_TOL: f64 = 0.25;
 
 impl Default for CornerFitConfig {
     fn default() -> Self {
         Self {
             theta_min_rad: COLLINEAR_EPS_RAD,
             theta_max_rad: PI - COLLINEAR_EPS_RAD,
+            extrusion_ramp_rel_tol: EXTRUSION_RAMP_REL_TOL,
         }
     }
 }
@@ -74,6 +85,15 @@ pub enum UnblendReason {
     /// empty, so this junction was cut without a blend: the toolhead must be
     /// at rest across it regardless of what a blend could have achieved.
     StreamCut,
+    /// The two extruding lines demand extrusion ratios (`de/ds`) that differ by
+    /// more than [`CornerFitConfig::extrusion_ramp_rel_tol`]. A blend ramps the
+    /// ratio across the corner, but only a modest step can be ramped at corner
+    /// speed without a visible flow surge; an abrupt step (e.g. wall→infill
+    /// width change) is left as a sharp corner so the planner stops there and
+    /// the ratio changes at rest. Travel↔extrude transitions (one side ratio 0)
+    /// are exempt: ramping to or from zero is always desirable, so they still
+    /// blend.
+    ExtrusionStep,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +118,18 @@ pub struct FitOutcome {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FitError {
-    Internal { line_no: u32, source: GeometryError },
+    Internal {
+        line_no: u32,
+        source: GeometryError,
+    },
+    /// The trims claimed at a line's two ends exceed its length by more than a
+    /// rounding margin: two neighbors (runs, blends) each consumed geometry the
+    /// other also claimed. Emitting would silently drop the overlap and leave a
+    /// position discontinuity, so the fit fails here instead.
+    OverTrimmedLine {
+        line_no: u32,
+        excess_mm: f64,
+    },
 }
 
 /// A solved biclothoid corner blend, opaque outside the fitter. `trim` is the
@@ -167,7 +198,11 @@ pub fn spatial_end(m: &Move) -> Option<[f64; 3]> {
 #[must_use]
 pub fn is_travel(m: &Move) -> bool {
     matches!(m.segment.spatial, Some(Segment::Line(_)))
-        && !m.segment.followers.iter().any(|f| f.ratio.abs() > 1e-12)
+        && !m
+            .segment
+            .followers
+            .iter()
+            .any(|f| f.max_abs_ratio() > 1e-12)
 }
 
 /// Whether one arc can pass through all these facets within the junction
@@ -463,6 +498,14 @@ fn classify_junction(
         }
     };
 
+    if extrusion_step(
+        &m_in.segment.followers,
+        &m_out.segment.followers,
+        config.extrusion_ramp_rel_tol,
+    ) {
+        return Ok(JunctionPlan::Unblended(UnblendReason::ExtrusionStep));
+    }
+
     let t_in = line_in.heading_at(line_in.s_len());
     let t_out = line_out.heading_at(0.0);
     let theta = dot(t_in, t_out).clamp(-1.0, 1.0).acos();
@@ -515,6 +558,12 @@ fn emit_move(
     let line_no = m.source.start_line;
     let heading = line.heading_at(0.0);
     let new_len = line.s_len() - trim_start - trim_end;
+    if new_len < -OVER_TRIM_TOL_MM {
+        return Err(FitError::OverTrimmedLine {
+            line_no,
+            excess_mm: -new_len,
+        });
+    }
     if new_len <= BUDGET_EPS_MM {
         return Ok(true);
     }
@@ -539,11 +588,18 @@ fn emit_blend(
     m_in: &Move,
     m_out: &Move,
 ) -> Result<(), FitError> {
-    let scale = bi.trim / bi.half1.s_len();
-    let followers_in = scaled_followers(&m_in.segment.followers, scale);
-    let followers_out = scaled_followers(&m_out.segment.followers, scale);
+    let len1 = bi.half1.s_len();
+    let len2 = bi.half2.s_len();
+    let (f_in, f_out) = blend_followers(
+        &m_in.segment.followers,
+        &m_out.segment.followers,
+        bi.trim,
+        len1,
+        bi.trim,
+        len2,
+    );
 
-    let seg_in = PathSegment::try_new(Segment::Clothoid(bi.half1.clone()), followers_in)
+    let seg_in = PathSegment::try_new(Segment::Clothoid(bi.half1.clone()), f_in)
         .map_err(internal(m_in.source.start_line))?;
     out.push(Move {
         segment: seg_in,
@@ -552,7 +608,7 @@ fn emit_blend(
         source: m_in.source,
     });
 
-    let seg_out = PathSegment::try_new(Segment::Clothoid(bi.half2.clone()), followers_out)
+    let seg_out = PathSegment::try_new(Segment::Clothoid(bi.half2.clone()), f_out)
         .map_err(internal(m_out.source.start_line))?;
     out.push(Move {
         segment: seg_out,
@@ -563,14 +619,79 @@ fn emit_blend(
     Ok(())
 }
 
-fn scaled_followers(followers: &[FollowerDemand], scale: f64) -> Vec<FollowerDemand> {
+/// The ratio a demand carries for `axis`, or 0 when the axis has no follower.
+fn ratio_start_for(followers: &[FollowerDemand], axis: usize) -> f64 {
     followers
         .iter()
-        .map(|f| FollowerDemand {
-            axis_index: f.axis_index,
-            ratio: f.ratio * scale,
+        .find(|f| f.axis_index == axis)
+        .map_or(0.0, |f| f.ratio)
+}
+
+fn ratio_end_for(followers: &[FollowerDemand], axis: usize) -> f64 {
+    followers
+        .iter()
+        .find(|f| f.axis_index == axis)
+        .map_or(0.0, |f| f.ratio_end)
+}
+
+fn follower_axes(a: &[FollowerDemand], b: &[FollowerDemand]) -> Vec<usize> {
+    let mut axes: Vec<usize> = Vec::new();
+    for f in a.iter().chain(b) {
+        if !axes.contains(&f.axis_index) {
+            axes.push(f.axis_index);
+        }
+    }
+    axes
+}
+
+/// Whether two extruding lines' ratios differ enough to leave the corner
+/// unblended. Only axes that extrude on *both* sides gate; a side with ratio 0
+/// (travel) is exempt, so travel↔extrude corners still blend and ramp to zero.
+fn extrusion_step(
+    in_followers: &[FollowerDemand],
+    out_followers: &[FollowerDemand],
+    rel_tol: f64,
+) -> bool {
+    follower_axes(in_followers, out_followers)
+        .into_iter()
+        .any(|axis| {
+            let r_in = ratio_end_for(in_followers, axis);
+            let r_out = ratio_start_for(out_followers, axis);
+            r_in != 0.0
+                && r_out != 0.0
+                && (r_out - r_in).abs() > rel_tol * r_in.abs().max(r_out.abs())
         })
-        .collect()
+}
+
+/// Split a blend's inbound/outbound demands into the two clothoid halves as a
+/// pair of linear ratio ramps. The blend's endpoints anchor at the neighbors'
+/// own ratios, so `ė = r·v` is continuous where the blend meets the trimmed
+/// lines; the shared midpoint ratio is then whatever conserves the E the
+/// trimmed line material carried (`r_in·trim_in + r_out·trim_out`) across the
+/// halves' actual arc lengths. Anchoring at rescaled ratios instead (the
+/// trimmed E spread uniformly over the shorter clothoid) would conserve E too,
+/// but it steps the extrusion rate by `trim/len` at both outer seams — the
+/// very discontinuity the ramp exists to remove.
+fn blend_followers(
+    in_followers: &[FollowerDemand],
+    out_followers: &[FollowerDemand],
+    trim_in: f64,
+    len1: f64,
+    trim_out: f64,
+    len2: f64,
+) -> (Vec<FollowerDemand>, Vec<FollowerDemand>) {
+    let axes = follower_axes(in_followers, out_followers);
+    let mut half1 = Vec::with_capacity(axes.len());
+    let mut half2 = Vec::with_capacity(axes.len());
+    for axis in axes {
+        let r_in = ratio_end_for(in_followers, axis);
+        let r_out = ratio_start_for(out_followers, axis);
+        let e_target = r_in * trim_in + r_out * trim_out;
+        let r_mid = (2.0 * e_target - r_in * len1 - r_out * len2) / (len1 + len2);
+        half1.push(FollowerDemand::ramp(axis, r_in, r_mid));
+        half2.push(FollowerDemand::ramp(axis, r_mid, r_out));
+    }
+    (half1, half2)
 }
 
 fn junction_deviation(limits: VelocityLimits) -> f64 {

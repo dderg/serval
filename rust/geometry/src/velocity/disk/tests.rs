@@ -125,3 +125,113 @@ fn limit_speed_is_infinite_for_a_line() {
     assert_eq!(limit_speed(0.0, 1000.0), f64::INFINITY);
     assert!((limit_speed(0.02, 2000.0) - (2000.0_f64 / 0.02).sqrt()).abs() < 1e-9);
 }
+
+fn dump_stats(name: &str, samples: &[(f64, f64, f64)], a_max: f64, j_max: f64) {
+    let mut worst_a = 0.0_f64;
+    let mut worst_j = 0.0_f64;
+    let mut worst_j_s = 0.0_f64;
+    for w in samples.windows(2) {
+        let (s0, v0, a0) = w[0];
+        let (s1, v1, a1) = w[1];
+        let ds = s1 - s0;
+        if ds <= 1e-12 {
+            continue;
+        }
+        let dt = 2.0 * ds / (v0 + v1).max(1e-9);
+        let j = (a1 - a0) / dt;
+        if j.abs() > worst_j {
+            worst_j = j.abs();
+            worst_j_s = s0;
+        }
+        worst_a = worst_a.max(a0.abs()).max(a1.abs());
+    }
+    println!(
+        "{name}: n={} worst_a={worst_a:.1} (a_max={a_max}) worst_j={worst_j:.0} at s={worst_j_s:.4} (j_max={j_max})",
+        samples.len()
+    );
+}
+
+#[test]
+fn diag_straight_grid_vs_closed() {
+    let k = kin(0.0, 0.0, 30.0, 1000.0, 1e5, 60.0);
+    let member = RunMember {
+        kin: &k,
+        entry_v: 0.0,
+        exit_v: 0.0,
+        fwd_s: 0.0,
+        bwd_s: 0.0,
+    };
+    let members = [member];
+    let (closed, _) = reconstruct_straight(&members, 0.0, 60.0, 1000.0, 1e5);
+    dump_stats("closed", &closed[0], 1000.0, 1e5);
+
+    let ctxs = build_ctxs(&members, 0.0, 0.0).unwrap();
+    let (grid, _) = reconstruct_flat(&ctxs, 0.0, 1e-8).unwrap();
+    dump_stats("grid", &grid, 1000.0, 1e5);
+    for &(s, v, a) in grid.iter().take(40) {
+        println!("  s={s:.5} v={v:.4} a={a:.1}");
+    }
+    let vmax = grid.iter().fold(0.0_f64, |m, p| m.max(p.1));
+    println!("grid vmax={vmax}");
+}
+
+#[test]
+fn diag_line_clothoid_line_from_rest() {
+    // 10mm line -> 2mm clothoid ramping to kappa=0.2 -> 10mm line back to zero curvature
+    let l1 = kin(0.0, 0.0, 10.0, 1000.0, 1e5, 60.0);
+    let c1 = kin(0.0, 0.1, 2.0, 1000.0, 1e5, 60.0);
+    let c2 = kin(0.2, -0.1, 2.0, 1000.0, 1e5, 60.0);
+    let l2 = kin(0.0, 0.0, 10.0, 1000.0, 1e5, 60.0);
+    let kins = [&l1, &c1, &c2, &l2];
+    let mut fwd = 0.0;
+    let total: f64 = kins.iter().map(|k| k.length).sum();
+    let mut members = Vec::new();
+    for k in kins {
+        members.push(RunMember {
+            kin: k,
+            entry_v: 60.0,
+            exit_v: 60.0,
+            fwd_s: fwd,
+            bwd_s: total - fwd - k.length,
+        });
+        fwd += k.length;
+    }
+    members[0].entry_v = 0.0;
+    members[3].exit_v = 0.0;
+    let ctxs = build_ctxs(&members, 0.0, 0.0).unwrap();
+    let (grid, _) = reconstruct_flat(&ctxs, 0.0, 1e-8).unwrap();
+    dump_stats("line-clothoid-line", &grid, 1000.0, 1e5);
+    for &(s, v, a) in grid.iter().take(30) {
+        println!("  s={s:.5} v={v:.4} a={a:.1}");
+    }
+}
+
+#[test]
+fn diag_apex_triangle() {
+    // Short run from rest to rest: accel meets brake, triangular peak (image 3 shape).
+    let k = kin(0.0, 0.0, 8.0, 1000.0, 1e5, 500.0);
+    let member = RunMember {
+        kin: &k,
+        entry_v: 0.0,
+        exit_v: 0.0,
+        fwd_s: 0.0,
+        bwd_s: 0.0,
+    };
+    let members = [member];
+    // force grid path by pretending curvature? no: call reconstruct_flat directly
+    let ctxs = build_ctxs(&members, 0.0, 0.0).unwrap();
+    let (grid, _) = reconstruct_flat(&ctxs, 0.0, 1e-8).unwrap();
+    dump_stats("apex-grid", &grid, 1000.0, 1e5);
+    let (closed, _) = reconstruct_straight(&members, 0.0, 500.0, 1000.0, 1e5);
+    dump_stats("apex-closed", &closed[0], 1000.0, 1e5);
+    // print around the apex
+    let apex = grid
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.1.partial_cmp(&b.1.1).unwrap())
+        .unwrap()
+        .0;
+    for &(s, v, a) in &grid[apex.saturating_sub(10)..(apex + 10).min(grid.len())] {
+        println!("  s={s:.5} v={v:.4} a={a:.1}");
+    }
+}

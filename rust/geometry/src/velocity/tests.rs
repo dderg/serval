@@ -86,14 +86,8 @@ fn clothoid_move(kappa_peak: f64, length: f64, feed: f64, accel: f64, line_no: u
 }
 
 fn virtual_move(virtual_path: f64, feed: f64, max_v: f64, accel: f64, line_no: u32) -> Move {
-    let seg = PathSegment::try_new_virtual(
-        vec![FollowerDemand {
-            axis_index: 3,
-            ratio: 0.05,
-        }],
-        virtual_path,
-    )
-    .unwrap();
+    let seg = PathSegment::try_new_virtual(vec![FollowerDemand::constant(3, 0.05)], virtual_path)
+        .unwrap();
     Move {
         segment: seg,
         feedrate_mm_s: feed,
@@ -904,14 +898,7 @@ fn wipe_into_retract() -> (Vec<Move>, Vec<bool>) {
         }
     };
     let retract = Move {
-        segment: PathSegment::try_new_virtual(
-            vec![FollowerDemand {
-                axis_index: 3,
-                ratio: 1.0,
-            }],
-            0.8,
-        )
-        .unwrap(),
+        segment: PathSegment::try_new_virtual(vec![FollowerDemand::constant(3, 1.0)], 0.8).unwrap(),
         feedrate_mm_s: 25.0,
         limits: lims,
         source: src(3),
@@ -1028,14 +1015,7 @@ fn graded_wipe_into_retract() -> (Vec<Move>, Vec<bool>) {
         }
     };
     let extrude_only = |line_no: u32| Move {
-        segment: PathSegment::try_new_virtual(
-            vec![FollowerDemand {
-                axis_index: 3,
-                ratio: 1.0,
-            }],
-            0.8,
-        )
-        .unwrap(),
+        segment: PathSegment::try_new_virtual(vec![FollowerDemand::constant(3, 1.0)], 0.8).unwrap(),
         feedrate_mm_s: 25.0,
         limits: lims,
         source: src(line_no),

@@ -4,7 +4,7 @@ use crate::segment::FollowerDemand;
 
 use super::biclothoid::GeneralBlend;
 use super::kernels::Reconstruction;
-use super::{FitError, internal, scaled_followers};
+use super::{FitError, blend_followers, internal};
 
 pub(super) fn trim_arc(arc: &Arc, head: f64, tail: f64) -> Result<Arc, crate::GeometryError> {
     if head <= 0.0 && tail <= 0.0 {
@@ -26,8 +26,14 @@ pub(super) fn emit_general_blend(
 ) -> Result<(), FitError> {
     let len1 = blend.half1.s_len();
     let len2 = blend.half2.s_len();
-    let f_in = scaled_followers(in_followers, blend.trim_in / len1);
-    let f_out = scaled_followers(out_followers, blend.trim_out / len2);
+    let (f_in, f_out) = blend_followers(
+        in_followers,
+        out_followers,
+        blend.trim_in,
+        len1,
+        blend.trim_out,
+        len2,
+    );
 
     let seg_in = PathSegment::try_new(Segment::Clothoid(blend.half1.clone()), f_in)
         .map_err(internal(m_in.source.start_line))?;

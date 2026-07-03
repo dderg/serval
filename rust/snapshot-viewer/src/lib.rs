@@ -17,7 +17,23 @@ struct Snapshot {
     // planner fallback on a format mismatch. Differentiated analytically.
     traj_x_pieces: Option<Vec<Vec<f64>>>,
     traj_y_pieces: Option<Vec<Vec<f64>>>,
+    // Z (axis 2) and E (axis 3) lanes. Optional so legacy baselines that only
+    // stored X/Y still deserialize; a missing lane plots as a flat zero track.
+    #[serde(default)]
+    traj_z_pieces: Option<Vec<Vec<f64>>>,
+    #[serde(default)]
+    traj_e_pieces: Option<Vec<Vec<f64>>>,
     traj_t_end: Option<f64>,
+    // Per-axis (x, y, z, e) worst continuity jumps across piece seams, plus the
+    // top offending seams. Optional so pre-seam-metric baselines still load.
+    #[serde(default)]
+    seam_max_dp: Option<Vec<f64>>,
+    #[serde(default)]
+    seam_max_dv: Option<Vec<f64>>,
+    #[serde(default)]
+    seam_max_da: Option<Vec<f64>>,
+    #[serde(default)]
+    worst_seams: Option<Vec<serde_json::Value>>,
     // Legacy baselines stored sampled position + speed instead of the cubics.
     kin_x: Option<Vec<f64>>,
     kin_y: Option<Vec<f64>>,
@@ -124,13 +140,45 @@ struct TimeSeries {
     kin_y: Vec<f64>,
     vx: Vec<f64>,
     vy: Vec<f64>,
+    vz: Vec<f64>,
+    ve: Vec<f64>,
     v_scalar: Vec<f64>,
     ax: Vec<f64>,
     ay: Vec<f64>,
+    az: Vec<f64>,
+    ae: Vec<f64>,
     a_scalar: Vec<f64>,
     jx: Vec<f64>,
     jy: Vec<f64>,
+    jz: Vec<f64>,
+    je: Vec<f64>,
     j_scalar: Vec<f64>,
+}
+
+impl TimeSeries {
+    fn zeroed(n: usize) -> Self {
+        let z = || vec![0.0; n];
+        Self {
+            t: z(),
+            kin_x: z(),
+            kin_y: z(),
+            vx: z(),
+            vy: z(),
+            vz: z(),
+            ve: z(),
+            v_scalar: z(),
+            ax: z(),
+            ay: z(),
+            az: z(),
+            ae: z(),
+            a_scalar: z(),
+            jx: z(),
+            jy: z(),
+            jz: z(),
+            je: z(),
+            j_scalar: z(),
+        }
+    }
 }
 
 // Evaluate one per-axis monomial piece [t0, t1, c0, c1, …] -- the lowered
@@ -158,33 +206,34 @@ fn piece_at(pieces: &[Vec<f64>], ti: f64) -> usize {
         .min(pieces.len() - 1)
 }
 
-fn time_series_from_pieces(xp: &[Vec<f64>], yp: &[Vec<f64>], t_end: f64) -> TimeSeries {
+// Evaluate a lane on the shared time grid; an absent lane (empty) reads zero so
+// legacy X/Y-only baselines still produce full-length Z/E tracks.
+fn eval_lane(pieces: &[Vec<f64>], ti: f64) -> (f64, f64, f64, f64) {
+    if pieces.is_empty() {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    eval_piece(&pieces[piece_at(pieces, ti)], ti)
+}
+
+fn time_series_from_pieces(
+    xp: &[Vec<f64>],
+    yp: &[Vec<f64>],
+    zp: &[Vec<f64>],
+    ep: &[Vec<f64>],
+    t_end: f64,
+) -> TimeSeries {
     if xp.is_empty() || yp.is_empty() || t_end <= 0.0 {
-        let z = vec![0.0];
-        return TimeSeries {
-            t: z.clone(),
-            kin_x: z.clone(),
-            kin_y: z.clone(),
-            vx: z.clone(),
-            vy: z.clone(),
-            v_scalar: z.clone(),
-            ax: z.clone(),
-            ay: z.clone(),
-            a_scalar: z.clone(),
-            jx: z.clone(),
-            jy: z.clone(),
-            j_scalar: z,
-        };
+        return TimeSeries::zeroed(1);
     }
 
     // Acceleration is linear within a cubic piece and steps at a piece boundary,
     // so every accel peak sits exactly on a boundary -- a uniform grid lands a
     // hair off it and the peak wobbles as t_end shifts between before/after.
-    // Sample each interval between consecutive boundaries (of BOTH axes) on its
+    // Sample each interval between consecutive boundaries (of ALL lanes) on its
     // own piece with both endpoints included: every step gets a sample on each
     // side, so the plotted accel/jerk are exact and stable.
     let mut bounds: Vec<f64> = vec![0.0, t_end];
-    for p in xp.iter().chain(yp.iter()) {
+    for p in xp.iter().chain(yp).chain(zp).chain(ep) {
         for edge in [p[0], p[1]] {
             if edge > 0.0 && edge < t_end {
                 bounds.push(edge);
@@ -202,16 +251,17 @@ fn time_series_from_pieces(xp: &[Vec<f64>], yp: &[Vec<f64>], t_end: f64) -> Time
     let mut t = new();
     let (mut kin_x, mut vx, mut ax, mut jx) = (new(), new(), new(), new());
     let (mut kin_y, mut vy, mut ay, mut jy) = (new(), new(), new(), new());
+    let (mut vz, mut az, mut jz) = (new(), new(), new());
+    let (mut ve, mut ae, mut je) = (new(), new(), new());
 
     for w in bounds.windows(2) {
         let (a, b) = (w[0], w[1]);
-        let mid = 0.5 * (a + b);
-        let px = &xp[piece_at(xp, mid)];
-        let py = &yp[piece_at(yp, mid)];
         for k in 0..per_interval {
             let ti = a + (b - a) * (k as f64) / ((per_interval - 1) as f64);
-            let (x, vxk, axk, jxk) = eval_piece(px, ti);
-            let (y, vyk, ayk, jyk) = eval_piece(py, ti);
+            let (x, vxk, axk, jxk) = eval_lane(xp, ti);
+            let (y, vyk, ayk, jyk) = eval_lane(yp, ti);
+            let (_, vzk, azk, jzk) = eval_lane(zp, ti);
+            let (_, vek, aek, jek) = eval_lane(ep, ti);
             t.push(ti);
             kin_x.push(x);
             vx.push(vxk);
@@ -221,6 +271,12 @@ fn time_series_from_pieces(xp: &[Vec<f64>], yp: &[Vec<f64>], t_end: f64) -> Time
             vy.push(vyk);
             ay.push(ayk);
             jy.push(jyk);
+            vz.push(vzk);
+            az.push(azk);
+            jz.push(jzk);
+            ve.push(vek);
+            ae.push(aek);
+            je.push(jek);
         }
     }
 
@@ -234,12 +290,18 @@ fn time_series_from_pieces(xp: &[Vec<f64>], yp: &[Vec<f64>], t_end: f64) -> Time
         kin_y,
         vx,
         vy,
+        vz,
+        ve,
         v_scalar,
         ax,
         ay,
+        az,
+        ae,
         a_scalar,
         jx,
         jy,
+        jz,
+        je,
         j_scalar,
     }
 }
@@ -322,7 +384,10 @@ fn discontinuities(
 fn build_time_series(snap: &Snapshot) -> TimeSeries {
     if let (Some(xp), Some(yp)) = (&snap.traj_x_pieces, &snap.traj_y_pieces) {
         let t_end = snap.traj_t_end.unwrap_or(0.0);
-        return time_series_from_pieces(xp, yp, t_end);
+        let empty: Vec<Vec<f64>> = Vec::new();
+        let zp = snap.traj_z_pieces.as_ref().unwrap_or(&empty);
+        let ep = snap.traj_e_pieces.as_ref().unwrap_or(&empty);
+        return time_series_from_pieces(xp, yp, zp, ep, t_end);
     }
     time_series_from_position(snap)
 }
@@ -332,21 +397,7 @@ fn time_series_from_position(snap: &Snapshot) -> TimeSeries {
     let v_raw: Vec<f64> = snap.kin_v.clone().unwrap_or_default();
 
     if x_raw.is_empty() || v_raw.is_empty() {
-        let z = vec![0.0];
-        return TimeSeries {
-            t: z.clone(),
-            kin_x: z.clone(),
-            kin_y: z.clone(),
-            vx: z.clone(),
-            vy: z.clone(),
-            v_scalar: z.clone(),
-            ax: z.clone(),
-            ay: z.clone(),
-            a_scalar: z.clone(),
-            jx: z.clone(),
-            jy: z.clone(),
-            j_scalar: z,
-        };
+        return TimeSeries::zeroed(1);
     }
 
     // Filter distinct points
@@ -368,20 +419,10 @@ fn time_series_from_position(snap: &Snapshot) -> TimeSeries {
 
     let n = x.len();
     if n < 2 {
-        return TimeSeries {
-            t: vec![0.0; n],
-            kin_x: x,
-            kin_y: y,
-            vx: vec![0.0; n],
-            vy: vec![0.0; n],
-            v_scalar: vec![0.0; n],
-            ax: vec![0.0; n],
-            ay: vec![0.0; n],
-            a_scalar: vec![0.0; n],
-            jx: vec![0.0; n],
-            jy: vec![0.0; n],
-            j_scalar: vec![0.0; n],
-        };
+        let mut ts = TimeSeries::zeroed(n);
+        ts.kin_x = x;
+        ts.kin_y = y;
+        return ts;
     }
 
     // Build time axis: dt = ds / v_avg
@@ -423,18 +464,25 @@ fn time_series_from_position(snap: &Snapshot) -> TimeSeries {
     let jy = gradient(&ay, &t);
     let j_scalar = scalar_derivative(&jx, &jy);
 
+    let zeros = || vec![0.0; n];
     TimeSeries {
         t,
         kin_x: x,
         kin_y: y,
         vx,
         vy,
+        vz: zeros(),
+        ve: zeros(),
         v_scalar,
         ax,
         ay,
+        az: zeros(),
+        ae: zeros(),
         a_scalar,
         jx,
         jy,
+        jz: zeros(),
+        je: zeros(),
         j_scalar,
     }
 }
@@ -502,17 +550,27 @@ pub struct TrajectoryData {
     t: Vec<f64>,
     vx: Vec<f64>,
     vy: Vec<f64>,
+    vz: Vec<f64>,
+    ve: Vec<f64>,
     v_scalar: Vec<f64>,
     ax: Vec<f64>,
     ay: Vec<f64>,
+    az: Vec<f64>,
+    ae: Vec<f64>,
     a_scalar: Vec<f64>,
     jx: Vec<f64>,
     jy: Vec<f64>,
+    jz: Vec<f64>,
+    je: Vec<f64>,
     j_scalar: Vec<f64>,
     jerk_impulse_t: Vec<f64>,
     jerk_impulse_mag: Vec<f64>,
     accel_impulse_t: Vec<f64>,
     accel_impulse_mag: Vec<f64>,
+    seam_max_dp: Vec<f64>,
+    seam_max_dv: Vec<f64>,
+    seam_max_da: Vec<f64>,
+    worst_seams_json: String,
     traversal_time_s: f64,
 }
 
@@ -539,6 +597,8 @@ impl TrajectoryData {
                 _ => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
             };
 
+        let seam_axis = |v: &Option<Vec<f64>>| v.clone().unwrap_or_default();
+
         Ok(TrajectoryData {
             raw_x: snap.raw_x,
             raw_y: snap.raw_y,
@@ -548,17 +608,31 @@ impl TrajectoryData {
             t: ts.t,
             vx: ts.vx,
             vy: ts.vy,
+            vz: ts.vz,
+            ve: ts.ve,
             v_scalar: ts.v_scalar,
             ax: ts.ax,
             ay: ts.ay,
+            az: ts.az,
+            ae: ts.ae,
             a_scalar: ts.a_scalar,
             jx: ts.jx,
             jy: ts.jy,
+            jz: ts.jz,
+            je: ts.je,
             j_scalar: ts.j_scalar,
             jerk_impulse_t,
             jerk_impulse_mag,
             accel_impulse_t,
             accel_impulse_mag,
+            seam_max_dp: seam_axis(&snap.seam_max_dp),
+            seam_max_dv: seam_axis(&snap.seam_max_dv),
+            seam_max_da: seam_axis(&snap.seam_max_da),
+            worst_seams_json: snap
+                .worst_seams
+                .as_ref()
+                .and_then(|w| serde_json::to_string(w).ok())
+                .unwrap_or_else(|| "[]".to_string()),
             traversal_time_s: snap.traversal_time_s,
         })
     }
@@ -623,6 +697,43 @@ impl TrajectoryData {
     }
     pub fn accel_impulse_mag(&self) -> Float64Array {
         Float64Array::from(&self.accel_impulse_mag[..])
+    }
+
+    // Z and E lane derivatives (axes 2 and 3). Empty on legacy X/Y baselines.
+    pub fn vz(&self) -> Float64Array {
+        Float64Array::from(&self.vz[..])
+    }
+    pub fn ve(&self) -> Float64Array {
+        Float64Array::from(&self.ve[..])
+    }
+    pub fn az(&self) -> Float64Array {
+        Float64Array::from(&self.az[..])
+    }
+    pub fn ae(&self) -> Float64Array {
+        Float64Array::from(&self.ae[..])
+    }
+    pub fn jz(&self) -> Float64Array {
+        Float64Array::from(&self.jz[..])
+    }
+    pub fn je(&self) -> Float64Array {
+        Float64Array::from(&self.je[..])
+    }
+
+    // Per-axis (x, y, z, e) worst seam continuity jumps. Empty on baselines
+    // recorded before seam metrics existed.
+    pub fn seam_max_dp(&self) -> Float64Array {
+        Float64Array::from(&self.seam_max_dp[..])
+    }
+    pub fn seam_max_dv(&self) -> Float64Array {
+        Float64Array::from(&self.seam_max_dv[..])
+    }
+    pub fn seam_max_da(&self) -> Float64Array {
+        Float64Array::from(&self.seam_max_da[..])
+    }
+
+    // The top offending seams as a JSON array of {t, axis, dp, dv, da}.
+    pub fn worst_seams_json(&self) -> String {
+        self.worst_seams_json.clone()
     }
 
     // Metadata

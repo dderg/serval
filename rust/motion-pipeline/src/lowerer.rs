@@ -67,6 +67,12 @@ pub fn run_lowerer(
             event = "pipe_lower",
             line = seg.source_line,
             lower_us = clock.elapsed().as_micros(),
+            n_pieces = seg
+                .axes
+                .iter()
+                .map(|a| nurbs::bezier::extract_bezier_pieces(a).len())
+                .max()
+                .unwrap_or(0),
             t_us = crate::timing::mono_us(),
             "[pipe] lower"
         );
@@ -98,7 +104,7 @@ pub fn advance_odometer(pos: &mut [f64], gm: &Move) {
     }
     for f in &gm.segment.followers {
         if let Some(slot) = pos.get_mut(f.axis_index) {
-            *slot += f.ratio * s_len;
+            *slot += f.delta_over(s_len);
         }
     }
 }

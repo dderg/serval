@@ -165,9 +165,15 @@ def run_case(case: Case) -> dict:
             f"case '{case.name}': missing config {case.config_path.name}"
         )
 
-    max_velocity, max_accel, scv, max_jerk, arc_fit = (
-        viz_pipeline.read_printer_config(case.config_path)
-    )
+    (
+        max_velocity,
+        max_accel,
+        scv,
+        max_jerk,
+        arc_fit,
+        extrude_only_velocity,
+        extrude_only_accel,
+    ) = viz_pipeline.read_printer_config(case.config_path)
     waypoints = viz_pipeline.parse_gcode(case.gcode_path, max_velocity)
     if len(waypoints) < 2:
         raise ValueError(
@@ -183,6 +189,8 @@ def run_case(case: Case) -> dict:
         scv,
         max_jerk,
         arc_fit=arc_fit,
+        max_extrude_only_velocity=extrude_only_velocity,
+        max_extrude_only_accel=extrude_only_accel,
     )
 
 

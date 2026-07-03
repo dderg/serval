@@ -80,25 +80,53 @@ def read_printer_config(cfg_path: Path):
     config = loader.read_config(str(cfg_path))
     printer = config.getsection("printer")
     max_accel = printer.getfloat("max_accel", above=0.0)
+    if config.has_section("extruder"):
+        extruder = config.getsection("extruder")
+        extrude_only_velocity = extruder.getfloat(
+            "max_extrude_only_velocity", None, above=0.0
+        )
+        extrude_only_accel = extruder.getfloat(
+            "max_extrude_only_accel", None, above=0.0
+        )
+    else:
+        extrude_only_velocity = extrude_only_accel = None
     return (
         printer.getfloat("max_velocity", above=0.0),
         max_accel,
         printer.getfloat("square_corner_velocity", 5.0, minval=0.0),
         printer.getfloat("max_jerk", max_accel * 2.0, above=0.0),
         arc_fit_from_config(config),
+        extrude_only_velocity,
+        extrude_only_accel,
     )
 
 
 def parse_gcode(
     path: Path, max_velocity: float
-) -> list[tuple[float, float, float, float]]:
-    waypoints: list[tuple[float, float, float, float]] = []
-    x, y, z = 0.0, 0.0, 0.0
+) -> list[tuple[float, float, float, float, float]]:
+    # Waypoints carry absolute (x, y, z, e, feedrate). E rides as a fifth
+    # coordinate so retracts (E-only moves) and extruding moves flow through the
+    # pipeline as followers; the engine differences consecutive E to a per-move
+    # delta. Extruder mode is M82 (absolute) / M83 (relative), independent of the
+    # G90/G91 flag that governs X/Y/Z; under G91 an undeclared extruder rides
+    # along as relative, and an E word with no mode declared at all is refused
+    # rather than guessed. G92 resets any axis's position (commonly `G92 E0`)
+    # without emitting a move.
+    waypoints: list[tuple[float, float, float, float, float]] = []
+    x, y, z, e = 0.0, 0.0, 0.0, 0.0
     feedrate = max_velocity
     relative = False
+    e_relative: bool | None = None
     motion_cmd = re.compile(r"^G0?([0-3])\b", re.IGNORECASE)
     mode_cmd = re.compile(r"^G(90|91)\b", re.IGNORECASE)
-    coord = re.compile(r"([XYZFIJ])([-+]?[0-9]*\.?[0-9]+)", re.IGNORECASE)
+    set_pos_cmd = re.compile(r"^G92\b", re.IGNORECASE)
+    e_mode_cmd = re.compile(r"^M(82|83)\b", re.IGNORECASE)
+    coord = re.compile(r"([XYZEFIJ])([-+]?[0-9]*\.?[0-9]+)", re.IGNORECASE)
+
+    def params_of(line: str) -> dict[str, float]:
+        return {
+            c.group(1).upper(): float(c.group(2)) for c in coord.finditer(line)
+        }
 
     for line in path.read_text().splitlines():
         line = line.split(";", 1)[0].strip()
@@ -108,14 +136,26 @@ def parse_gcode(
             relative = mm.group(1) == "91"
             continue
 
+        em = e_mode_cmd.match(line)
+        if em:
+            e_relative = em.group(1) == "83"
+            continue
+
+        if set_pos_cmd.match(line):
+            params = params_of(line)
+            x = params.get("X", x)
+            y = params.get("Y", y)
+            z = params.get("Z", z)
+            e = params.get("E", e)
+            continue
+
         m = motion_cmd.match(line)
         if not m:
             continue
         cmd = int(m.group(1))
-        params = {
-            c.group(1).upper(): float(c.group(2)) for c in coord.finditer(line)
-        }
+        params = params_of(line)
         has_position = any(axis in params for axis in ("X", "Y", "Z"))
+        has_extrusion = "E" in params
 
         if relative:
             nx = x + params.get("X", 0.0)
@@ -126,24 +166,40 @@ def parse_gcode(
             ny = params.get("Y", y)
             nz = params.get("Z", z)
 
-        if cmd == 0:
-            if not has_position:
-                continue
-            x, y, z = nx, ny, nz
-            waypoints.append((x, y, z, max_velocity))
-        elif cmd == 1:
-            feedrate = params.get("F", feedrate * 60.0) / 60.0
-            if not has_position:
-                continue
-            x, y, z = nx, ny, nz
-            waypoints.append((x, y, z, feedrate))
-        elif cmd in (2, 3):
+        if has_extrusion:
+            if e_relative is None and not relative:
+                raise ValueError(
+                    f"{path.name}: E word before any M82/M83 (or G91) — the "
+                    "extruder mode is ambiguous, and guessing absolute turns "
+                    "relative-E slicer output into garbage extrusion ratios. "
+                    "Declare the mode (slicer excerpts printed with relative "
+                    "extrusion need an 'M83' line at the top)."
+                )
+            e_is_relative = True if e_relative is None else e_relative
+            ne = e + params["E"] if e_is_relative else params["E"]
+        else:
+            ne = e
+
+        if cmd in (2, 3):
             raise ValueError(
                 f"G{cmd} arc command is not supported: the motion engine has no "
                 "native arc ingestion yet, and silently linearizing it here would "
                 "let a snapshot claim to exercise an arc while feeding the engine "
                 "straight segments"
             )
+        if cmd == 1:
+            feedrate = params.get("F", feedrate * 60.0) / 60.0
+        if not (has_position or ne != e):
+            continue
+        x, y, z, e = nx, ny, nz, ne
+        if not waypoints and not has_position:
+            # A prime or retract before any positional command: there is no
+            # known toolhead position yet, so anchoring a waypoint would invent
+            # a move from the parser's arbitrary origin. Fold the E change into
+            # the state; the first positional waypoint carries it.
+            continue
+        move_feedrate = max_velocity if cmd == 0 else feedrate
+        waypoints.append((x, y, z, e, move_feedrate))
 
     return waypoints
 
@@ -176,6 +232,16 @@ def _build_time_series(snapshot):
     return _time_series_from_position(snapshot)
 
 
+# Axis lane -> (snapshot piece key, plot color). X/Y drive the |v| magnitude
+# trace; Z and E are extra per-axis lanes captured from the lowered trajectory.
+_AXIS_LANES = (
+    ("X", "traj_x_pieces", "C0"),
+    ("Y", "traj_y_pieces", "C1"),
+    ("Z", "traj_z_pieces", "C2"),
+    ("E", "traj_e_pieces", "C4"),
+)
+
+
 def _time_series_from_pieces(snapshot):
     import numpy as np
 
@@ -184,25 +250,48 @@ def _time_series_from_pieces(snapshot):
     # derivative is exact and continuous (no position differencing, nothing copied
     # from the planner's own acceleration), so the curves stay an independent check.
     xp = snapshot["traj_x_pieces"]
-    yp = snapshot["traj_y_pieces"]
     t_end = float(snapshot["traj_t_end"])
     if not xp or t_end <= 0.0:
         z = np.zeros(1)
-        return (z, z, z, z, z, z, z, z, z, z)
+        empty = {name: z for name, _, _ in _AXIS_LANES}
+        return {
+            "t": z,
+            "vel": empty,
+            "acc": empty,
+            "jerk": empty,
+            "v_scalar": z,
+            "a_scalar": z,
+            "j_scalar": z,
+        }
 
     # Dense evaluation grid plus the exact piece boundaries (where the C1 Hermite
     # lets acceleration step), so the piecewise structure draws faithfully.
-    bounds = np.asarray(xp, dtype=float)[:, 1]
+    all_bounds = [np.asarray(xp, dtype=float)[:, 1]]
+    for _, key, _ in _AXIS_LANES:
+        pieces = snapshot.get(key)
+        if pieces:
+            all_bounds.append(np.asarray(pieces, dtype=float)[:, 1])
     grid = np.linspace(0.0, t_end, max(2000, 8 * len(xp)))
-    t = np.unique(np.concatenate([grid, bounds]))
+    t = np.unique(np.concatenate([grid, *all_bounds]))
 
-    _, vx, ax, jx = _eval_pieces(xp, t)
-    _, vy, ay, jy = _eval_pieces(yp, t)
-    v_scalar = np.hypot(vx, vy)
-    a_scalar = np.hypot(ax, ay)
-    j_scalar = np.hypot(jx, jy)
+    vel, acc, jerk = {}, {}, {}
+    for name, key, _ in _AXIS_LANES:
+        pieces = snapshot.get(key)
+        if pieces:
+            _, v, a, j = _eval_pieces(pieces, t)
+        else:
+            v = a = j = np.zeros_like(t)
+        vel[name], acc[name], jerk[name] = v, a, j
 
-    return t, vx, vy, v_scalar, ax, ay, a_scalar, jx, jy, j_scalar
+    return {
+        "t": t,
+        "vel": vel,
+        "acc": acc,
+        "jerk": jerk,
+        "v_scalar": np.hypot(vel["X"], vel["Y"]),
+        "a_scalar": np.hypot(acc["X"], acc["Y"]),
+        "j_scalar": np.hypot(jerk["X"], jerk["Y"]),
+    }
 
 
 def _time_series_from_position(snapshot):
@@ -234,7 +323,16 @@ def _time_series_from_position(snapshot):
     jy = np.gradient(ay, t)
     j_scalar = np.hypot(jx, jy)
 
-    return t, vx, vy, v_scalar, ax, ay, a_scalar, jx, jy, j_scalar
+    zeros = np.zeros_like(t)
+    return {
+        "t": t,
+        "vel": {"X": vx, "Y": vy, "Z": zeros, "E": zeros},
+        "acc": {"X": ax, "Y": ay, "Z": zeros, "E": zeros},
+        "jerk": {"X": jx, "Y": jy, "Z": zeros, "E": zeros},
+        "v_scalar": v_scalar,
+        "a_scalar": a_scalar,
+        "j_scalar": j_scalar,
+    }
 
 
 def _toolhead_position(snapshot):
@@ -253,21 +351,36 @@ def _toolhead_position(snapshot):
     return x, y
 
 
-def _plot_derivative(
-    ax, t, comp_x, comp_y, scalar, ylabel, title, drawstyle="default"
-):
+def _plot_derivative(ax, t, comps, scalar, ylabel, title, drawstyle="default"):
     import numpy as np
 
     def plot(y, **kw):
         ax.plot(t, y, drawstyle=drawstyle, **kw)
 
-    plot(np.abs(comp_x), linewidth=0.6, color="C0", label="|X|")
-    plot(np.abs(comp_y), linewidth=0.6, color="C1", label="|Y|")
-    plot(scalar, linewidth=0.8, color="C3", label="scalar")
+    for name, _, color in _AXIS_LANES:
+        lane = comps.get(name)
+        if lane is None or not np.any(lane):
+            continue
+        plot(np.abs(lane), linewidth=0.6, color=color, label=f"|{name}|")
+    plot(scalar, linewidth=0.8, color="C3", label="|XY|")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel(ylabel)
     ax.set_title(title, fontsize=9)
     ax.legend(fontsize=7, loc="upper right")
+
+
+def _seam_summary(snapshot) -> str | None:
+    # Worst per-axis continuity jumps across piece seams: position/velocity should
+    # be ~0 (C1 Hermite), acceleration steps by design. Absent on legacy baselines.
+    dp = snapshot.get("seam_max_dp")
+    dv = snapshot.get("seam_max_dv")
+    da = snapshot.get("seam_max_da")
+    if dp is None or dv is None or da is None:
+        return None
+    return (
+        f"seam max  |Δp|={max(dp):.2e} mm  "
+        f"|Δv|={max(dv):.2e} mm/s  |Δa|={max(da):.2e} mm/s²"
+    )
 
 
 def render(snapshot, out_path, stem, ts):
@@ -279,9 +392,8 @@ def render(snapshot, out_path, stem, ts):
     raw_x, raw_y = snapshot["raw_x"], snapshot["raw_y"]
     segments = list(snapshot["fitted_segments"])
 
-    t, vx, vy, v_sc, ax_d, ay, a_sc, jx, jy, j_sc = _build_time_series(
-        snapshot,
-    )
+    series = _build_time_series(snapshot)
+    t = series["t"]
 
     fig, axes = plt.subplots(
         4,
@@ -352,25 +464,26 @@ def render(snapshot, out_path, stem, ts):
     for seg in segments:
         seg_counts[seg["type"]] = seg_counts.get(seg["type"], 0) + 1
     seg_summary = ", ".join(f"{v} {k}" for k, v in sorted(seg_counts.items()))
-    ax_path.set_title(
-        f"{stem}  [{seg_summary}]  "
-        f"{snapshot['blended_corners']} blended, "
-        f"{snapshot['chain_fits']} chains",
-        fontsize=9,
-    )
+    ax_path.set_title(f"{stem}  [{seg_summary}]", fontsize=9)
 
+    seam_text = _seam_summary(snapshot)
+    vel_title = f"Velocity  (t={snapshot['traversal_time_s']:.3f}s)"
+    if seam_text:
+        vel_title = f"{vel_title}\n{seam_text}"
     _plot_derivative(
-        ax_vel,
-        t,
-        vx,
-        vy,
-        v_sc,
-        "mm/s",
-        f"Velocity  (t={snapshot['traversal_time_s']:.3f}s)",
+        ax_vel, t, series["vel"], series["v_scalar"], "mm/s", vel_title
     )
-    _plot_derivative(ax_acc, t, ax_d, ay, a_sc, "mm/s²", "Acceleration")
     _plot_derivative(
-        ax_jrk, t, jx, jy, j_sc, "mm/s³", "Jerk", drawstyle="steps-post"
+        ax_acc, t, series["acc"], series["a_scalar"], "mm/s²", "Acceleration"
+    )
+    _plot_derivative(
+        ax_jrk,
+        t,
+        series["jerk"],
+        series["j_scalar"],
+        "mm/s³",
+        "Jerk",
+        drawstyle="steps-post",
     )
 
     out_file = out_path / f"{stem}_{ts}.png"
@@ -413,9 +526,15 @@ def main():
     sys.path.insert(0, str(repo_root / "klippy"))
     sys.path.insert(0, str(repo_root))
 
-    max_velocity, max_accel, scv, max_jerk, arc_fit = read_printer_config(
-        args.config
-    )
+    (
+        max_velocity,
+        max_accel,
+        scv,
+        max_jerk,
+        arc_fit,
+        extrude_only_velocity,
+        extrude_only_accel,
+    ) = read_printer_config(args.config)
 
     gcode_path = Path(args.gcode)
     if not gcode_path.exists():
@@ -444,6 +563,8 @@ def main():
         scv,
         max_jerk,
         arc_fit=arc_fit,
+        max_extrude_only_velocity=extrude_only_velocity,
+        max_extrude_only_accel=extrude_only_accel,
     )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)

@@ -453,6 +453,157 @@ fn pressure_advance_shifts_follower_and_leaves_xyz_byte_identical() {
     }
 }
 
+fn piece_accel_at(pieces: &[BezierPiece<f64>], t: f64) -> f64 {
+    let p = pieces
+        .iter()
+        .find(|p| t >= p.u_start - 1e-12 && t <= p.u_end + 1e-12)
+        .unwrap_or_else(|| pieces.last().unwrap());
+    let z = t - p.u_start;
+    2.0 * p.coeffs[2] + 6.0 * p.coeffs[3] * z
+}
+
+fn quarter_arc() -> geometry::Move {
+    arc_move(
+        [0.0, 0.0, 0.0],
+        [20.0, 20.0, 0.0],
+        0.0,
+        20.0,
+        true,
+        0.0,
+        ctx(3, 50.0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn scalar_profile_reproduces_samples_at_every_knot() {
+    let planned = fit_and_plan(std::slice::from_ref(&quarter_arc()));
+    let vm = &planned[0].velocity;
+    assert!(vm.phases.is_empty(), "arc is a curved move (no phases)");
+    assert!(vm.samples.len() >= 2);
+
+    let (profile, _total_t) = build_profile(&vm.samples).unwrap();
+    for (i, sample) in vm.samples.iter().enumerate() {
+        let (s, v, a) = profile.state_at(profile.knot_t[i]);
+        assert!(
+            (s - sample.s).abs() < 1e-9,
+            "s at knot {i}: {s} vs {}",
+            sample.s
+        );
+        assert!(
+            (v - sample.v).abs() < 1e-9,
+            "v at knot {i}: {v} vs {}",
+            sample.v
+        );
+        assert!(
+            (a - sample.a).abs() < 1e-9,
+            "a at knot {i}: {a} vs {}",
+            sample.a
+        );
+    }
+}
+
+/// The fitted acceleration (second derivative of the cubic pieces) must join
+/// continuously across interior knots, and converge to the analytic profile
+/// acceleration as the fit tolerance tightens.
+#[test]
+fn curved_fit_acceleration_is_continuous_and_converges() {
+    let gm = quarter_arc();
+    let planned = fit_and_plan(std::slice::from_ref(&gm));
+    let vm = &planned[0].velocity;
+    assert!(vm.phases.is_empty());
+
+    let (profile, total_t) = build_profile(&vm.samples).unwrap();
+    let start = [0.0_f64; 4];
+    let sampler = Sampler {
+        profile: &profile,
+        spatial: gm.segment.spatial.as_ref(),
+        start_pos: &start,
+        followers: &gm.segment.followers,
+        s_len: gm.segment.s_len(),
+        axis_chains: &[],
+    };
+
+    let max_analytic_err = |tol: f64| -> f64 {
+        let (axes, _t) =
+            lower_move_pieces(&planned[0].geometry, vm, 0.0, &start, tol, &[]).unwrap();
+        let mut worst = 0.0_f64;
+        for axis in 0..2 {
+            let pieces = &axes[axis];
+            // Interior-knot continuity, scaled into mm like the residual (h^2/8).
+            for w in pieces.windows(2) {
+                let (left, right) = (&w[0], &w[1]);
+                let h = (right.u_end - right.u_start).min(left.u_end - left.u_start);
+                let jump = (piece_accel_at(std::slice::from_ref(left), left.u_end)
+                    - piece_accel_at(std::slice::from_ref(right), right.u_start))
+                .abs();
+                assert!(
+                    jump * h * h / 8.0 <= 40.0 * tol,
+                    "axis {axis}: accel jump {jump} at {} exceeds bound",
+                    right.u_start
+                );
+            }
+            // Convergence to the analytic accel over the interior, away from the
+            // rest cusps at either end (`v(s) ~ s^(2/3)` there gives an unbounded
+            // accel slope no finite piece resolves).
+            let n = 400;
+            for k in 1..n {
+                let frac = f64::from(k) / f64::from(n);
+                if !(0.1..=0.9).contains(&frac) {
+                    continue;
+                }
+                let t = total_t * frac;
+                let fit = piece_accel_at(pieces, t);
+                let truth = sampler.axis_accel(axis, t, false);
+                worst = worst.max((fit - truth).abs());
+            }
+        }
+        worst
+    };
+
+    let loose = max_analytic_err(1e-3);
+    let tight = max_analytic_err(1e-4);
+    assert!(
+        tight < loose,
+        "tighter tolerance did not reduce analytic accel error: {tight} vs {loose}"
+    );
+    assert!(
+        tight < 0.6 * loose,
+        "analytic accel error did not converge meaningfully: {tight} vs {loose}"
+    );
+}
+
+/// A straight move is lowered through the closed-form phase path, which ignores
+/// `fit_tol_mm` entirely — so two very different tolerances produce bit-identical
+/// pieces. The grid fit would subdivide differently under each.
+#[test]
+fn straight_move_ignores_fit_tolerance_and_stays_bit_identical() {
+    let m = line_move([0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0, straight_ctx(1)).unwrap();
+    let planned = fit_and_plan(std::slice::from_ref(&m));
+    assert!(!planned[0].velocity.phases.is_empty());
+
+    let (coarse, _) = lower_move_pieces(
+        &planned[0].geometry,
+        &planned[0].velocity,
+        0.0,
+        &[0.0; 4],
+        1e-2,
+        &[],
+    )
+    .unwrap();
+    let (fine, _) = lower_move_pieces(
+        &planned[0].geometry,
+        &planned[0].velocity,
+        0.0,
+        &[0.0; 4],
+        1e-6,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(coarse, fine, "straight path must not depend on fit_tol_mm");
+    assert_eq!(coarse[0].len(), planned[0].velocity.phases.len());
+}
+
 #[test]
 fn pressure_advance_k_zero_is_identical_to_no_post_processor() {
     let m = line_move([0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 4.0, ctx(1, 100.0)).unwrap();
