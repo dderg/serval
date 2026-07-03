@@ -19,7 +19,7 @@ pub use junction::{
     JUNCTION_POSITION_FATAL_MM, JUNCTION_POSITION_LOG_MM, JunctionSeam, JunctionTracker,
     junction_jumps,
 };
-pub use sched::{AxisFrame, AxisQueue, FramePlan, Schedule, schedule};
+pub use sched::{AxisFrame, AxisQueue, FramePlan, Schedule, append_pieces_merging_holds, schedule};
 #[cfg(test)]
 pub(crate) use wire_sink::pushpieces_retransmit_serial;
 pub use wire_sink::{McuTransport, WireSink};
@@ -326,12 +326,23 @@ where
             }
         }
         let ring_depth = (self.ring_depth_of)(key);
+        // Hold merging is off during drip cohorts: their release floor is
+        // piece-count-based and coalescing would starve it. Without a synced
+        // clock there is no freq to prove seam contiguity, so append as-is.
+        let hold_merge_freq = if self.cohort.is_none() {
+            (self.mcu_clock_of)(key.mcu_id).map(|(_, freq)| freq)
+        } else {
+            None
+        };
         let q = self
             .queues
             .entry(key)
             .or_insert_with(|| AxisQueue::new(ring_depth));
         q.lead_secs = lead_secs;
-        q.pieces.extend(pieces);
+        match hold_merge_freq {
+            Some(freq) => append_pieces_merging_holds(&mut q.pieces, pieces, freq, !fresh_stream),
+            None => q.pieces.extend(pieces),
+        }
     }
 
     fn horizon_of(&self, k: &AxisKey, q: &AxisQueue) -> Option<u64> {

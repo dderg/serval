@@ -39,6 +39,66 @@ impl AxisQueue {
     }
 }
 
+// Merged holds keep f32 `duration` rounding of `end_time` far inside the
+// walker's 200 µs start-in-past budget (ulp(30 s) ≈ 3.8 µs).
+pub const MAX_MERGED_HOLD_SECS: f64 = 30.0;
+
+// Consecutive segments project to abutting ticks; anything wider than this is
+// a genuine gap (dwell, stream restart) and must stay a separate piece.
+const HOLD_MERGE_SEAM_SLOP_SECS: f64 = 2e-6;
+
+fn try_extend_hold(last: &mut PieceEntry, next: &PieceEntry, freq: f64) -> bool {
+    let same_hold = last.coeff_count == 1
+        && next.coeff_count == 1
+        && last.motor_mask == next.motor_mask
+        && last.coeffs[0].to_bits() == next.coeffs[0].to_bits();
+    if !same_hold {
+        return false;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let last_end = last.end_time(freq as f32);
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let slop = (freq * HOLD_MERGE_SEAM_SLOP_SECS) as u64;
+    if last_end.abs_diff(next.start_time) > slop {
+        return false;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let merged_secs =
+        next.start_time.saturating_sub(last.start_time) as f64 / freq + f64::from(next.duration);
+    if merged_secs > MAX_MERGED_HOLD_SECS {
+        return false;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        last.duration = merged_secs as f32;
+    }
+    true
+}
+
+/// Append `pieces`, coalescing runs of bit-identical constant (hold) pieces
+/// with the queue tail — a stationary axis otherwise ships one 20-byte wire
+/// entry per planner segment. Tick-anchored duration recomputation keeps the
+/// merged end time drift-free. `allow_tail_merge=false` fences the first
+/// incoming piece from a pre-existing tail (fresh stream re-anchor).
+pub fn append_pieces_merging_holds(
+    queue: &mut VecDeque<(PieceEntry, f64)>,
+    pieces: Vec<(PieceEntry, f64)>,
+    freq: f64,
+    allow_tail_merge: bool,
+) {
+    let mut merge_with_tail = allow_tail_merge;
+    for (piece, host) in pieces {
+        let merged = merge_with_tail
+            && queue
+                .back_mut()
+                .is_some_and(|(last, _)| try_extend_hold(last, &piece, freq));
+        if !merged {
+            queue.push_back((piece, host));
+        }
+        merge_with_tail = true;
+    }
+}
+
 #[derive(Debug)]
 pub struct FramePlan {
     pub key: AxisKey,

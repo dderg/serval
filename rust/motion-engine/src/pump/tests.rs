@@ -430,14 +430,15 @@ fn flush_clears_queued_pieces_and_junctions() {
         key,
         pieces: (0u64..4)
             .map(|i| {
-                (
-                    PieceEntry {
-                        start_time: gated_tick + i,
-                        duration: 0.001,
-                        ..PieceEntry::zeroed()
-                    },
-                    (gated_tick + i) as f64,
-                )
+                let mut p = PieceEntry {
+                    start_time: gated_tick + i,
+                    duration: 0.001,
+                    ..PieceEntry::zeroed()
+                };
+                // Distinct hold values so enqueue's hold merging cannot
+                // coalesce the gated pieces this test counts one by one.
+                p.coeffs[0] = 1.0 + i as f32;
+                (p, (gated_tick + i) as f64)
             })
             .collect(),
         fresh_stream: true,
@@ -532,14 +533,15 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
         key,
         pieces: (0u64..4)
             .map(|i| {
-                (
-                    PieceEntry {
-                        start_time: gated_tick + i,
-                        duration: 0.001,
-                        ..PieceEntry::zeroed()
-                    },
-                    (gated_tick + i) as f64,
-                )
+                let mut p = PieceEntry {
+                    start_time: gated_tick + i,
+                    duration: 0.001,
+                    ..PieceEntry::zeroed()
+                };
+                // Distinct hold values so enqueue's hold merging cannot
+                // coalesce the gated pieces this test counts one by one.
+                p.coeffs[0] = 1.0 + i as f32;
+                (p, (gated_tick + i) as f64)
             })
             .collect(),
         fresh_stream: true,

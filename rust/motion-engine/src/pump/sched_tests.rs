@@ -1,4 +1,6 @@
 use super::*;
+use crate::pump::sched::MAX_MERGED_HOLD_SECS;
+use std::collections::VecDeque;
 
 fn q_with_host(ring_depth: u32, starts: &[(u64, f64)]) -> AxisQueue {
     let mut q = AxisQueue::new(ring_depth);
@@ -442,4 +444,89 @@ fn bundle_byte_budget_always_admits_the_head_piece() {
         }
         other => panic!("expected Send; got {other:?}"),
     }
+}
+
+fn hold(start_ticks: u64, dur_secs: f32, value: f32, host: f64) -> (PieceEntry, f64) {
+    let mut p = PieceEntry::zeroed();
+    p.start_time = start_ticks;
+    p.duration = dur_secs;
+    p.coeffs[0] = value;
+    (p, host)
+}
+
+const FREQ: f64 = 1.0e8;
+
+#[test]
+fn contiguous_identical_holds_merge_across_appends() {
+    let mut queue = VecDeque::new();
+    append_pieces_merging_holds(&mut queue, vec![hold(0, 0.5, 3.25, 0.0)], FREQ, true);
+    append_pieces_merging_holds(
+        &mut queue,
+        vec![
+            hold(50_000_000, 0.25, 3.25, 0.5),
+            hold(75_000_000, 0.25, 3.25, 0.75),
+        ],
+        FREQ,
+        true,
+    );
+    assert_eq!(queue.len(), 1);
+    let merged = &queue[0].0;
+    assert_eq!(merged.start_time, 0);
+    assert!((f64::from(merged.duration) - 1.0).abs() < 1e-6);
+    assert_eq!(merged.coeff_count, 1);
+    assert_eq!(
+        queue[0].1, 0.0,
+        "merged hold keeps the tail piece's host time"
+    );
+}
+
+#[test]
+fn holds_stay_separate_on_value_gap_motion_or_fresh_stream() {
+    let value_changed = vec![hold(0, 0.5, 1.0, 0.0), hold(50_000_000, 0.5, 2.0, 0.5)];
+    let gapped = vec![hold(0, 0.5, 1.0, 0.0), hold(50_100_000, 0.5, 1.0, 0.501)];
+    let mut moving_tail = vec![hold(0, 0.5, 1.0, 0.0), hold(50_000_000, 0.5, 1.0, 0.5)];
+    moving_tail[0].0.coeff_count = 3;
+    for pieces in [value_changed, gapped, moving_tail] {
+        let mut queue = VecDeque::new();
+        append_pieces_merging_holds(&mut queue, pieces, FREQ, true);
+        assert_eq!(queue.len(), 2);
+    }
+
+    let mut queue = VecDeque::new();
+    append_pieces_merging_holds(&mut queue, vec![hold(0, 0.5, 1.0, 0.0)], FREQ, true);
+    append_pieces_merging_holds(
+        &mut queue,
+        vec![hold(50_000_000, 0.5, 1.0, 0.5)],
+        FREQ,
+        false,
+    );
+    assert_eq!(
+        queue.len(),
+        2,
+        "fresh stream must not merge into the old tail"
+    );
+}
+
+#[test]
+fn hold_merge_respects_the_duration_cap() {
+    let mut queue = VecDeque::new();
+    let step_ticks = (10.0 * FREQ) as u64;
+    for i in 0..4u64 {
+        append_pieces_merging_holds(
+            &mut queue,
+            vec![hold(i * step_ticks, 10.0, 7.0, 10.0 * i as f64)],
+            FREQ,
+            true,
+        );
+    }
+    assert_eq!(
+        queue.len(),
+        2,
+        "30 s cap splits 40 s of holds as 10+10+10|10"
+    );
+    assert!(
+        queue
+            .iter()
+            .all(|(p, _)| f64::from(p.duration) <= MAX_MERGED_HOLD_SECS)
+    );
 }
