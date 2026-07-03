@@ -498,8 +498,11 @@ fn phase_end_s(p: &StraightPhase) -> f64 {
 /// state is the next phase's start state. A chain with a kicked joint (a
 /// landing snap, a rail clamp, a splice contact) still serves as sampling
 /// truth, but must not lower to exact cubics: the kick would dispatch as a
-/// genuine trajectory discontinuity.
-pub(super) fn chain_is_c1(chain: &[StraightPhase]) -> bool {
+/// genuine trajectory discontinuity. Under a jerk limit acceleration is part
+/// of the continuous state; with jerk unlimited the profile steps its
+/// acceleration at phase joints by design, so only position and velocity
+/// gate (`require_accel = false`).
+pub(super) fn chain_is_continuous(chain: &[StraightPhase], require_accel: bool) -> bool {
     chain.windows(2).all(|w| {
         let (p, q) = (&w[0], &w[1]);
         let e = advance(
@@ -514,7 +517,7 @@ pub(super) fn chain_is_c1(chain: &[StraightPhase]) -> bool {
         );
         (e.s - q.s0).abs() <= 1e-9 * (1.0 + q.s0.abs())
             && (e.v - q.v0).abs() <= 1e-8 * (1.0 + q.v0)
-            && (e.a - q.a0).abs() <= 1e-4 * (1.0 + q.a0.abs())
+            && (!require_accel || (e.a - q.a0).abs() <= 1e-4 * (1.0 + q.a0.abs()))
     })
 }
 

@@ -1098,15 +1098,33 @@ fn infinite_jerk_disables_jerk_limiting_and_still_plans_to_rest() {
     let finite = plan(&outcome(with_jerk(moves.clone(), 30_000.0), Vec::new())).unwrap();
     let inf = plan(&outcome(with_jerk(moves, f64::INFINITY), Vec::new())).unwrap();
 
-    assert!(
-        inf.moves.iter().all(|m| m.phases.is_empty()),
-        "no jerk phases exist without a jerk limit"
-    );
     assert!(inf.report.traversal_time_s <= finite.report.traversal_time_s + 1e-9);
     assert_eq!(inf.boundaries.last().copied(), Some(BoundaryState::REST));
     let a_rail = 3000.0 * (1.0 + 1e-6);
     for m in &inf.moves {
         assert!(m.samples.iter().all(|s| s.a.abs() <= a_rail));
         assert!(m.samples.iter().all(|s| s.v <= 100.0 * (1.0 + 1e-6)));
+        assert!(
+            !m.phases.is_empty(),
+            "a straight move under infinite jerk carries its trapezoid as zero-jerk phases"
+        );
+        for p in &m.phases {
+            assert_eq!(p.j, 0.0);
+            assert!(p.a0.abs() <= a_rail, "phase accel {} beyond rail", p.a0);
+        }
+        let phase_len: f64 = m
+            .phases
+            .iter()
+            .map(|p| p.v0 * p.dt + 0.5 * p.a0 * p.dt * p.dt)
+            .sum();
+        assert!(
+            (phase_len - 5.0).abs() <= 1e-6,
+            "phases cover the move: {phase_len}"
+        );
     }
+    let trapezoid_accels: Vec<f64> = inf.moves[0].phases.iter().map(|p| p.a0).collect();
+    assert!(
+        trapezoid_accels.iter().any(|&a| a > 2999.0),
+        "leading move accelerates at the rail: {trapezoid_accels:?}"
+    );
 }

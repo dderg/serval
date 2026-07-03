@@ -243,7 +243,12 @@ fn chord_slopes(s: &[f64], cap: &[f64]) -> Vec<f64> {
 
 /// Reconstruct under infinite jerk: the acceleration-disk boundary itself is
 /// the answer (nothing to ramp). Forward–backward disk passes over the
-/// velocity-limit curve, acceleration from the realized slope.
+/// velocity-limit curve give the grid velocities; between grid points the
+/// motion is constant-acceleration (`v²` linear in `s`), so the profile is
+/// exactly a chain of zero-jerk phases whose boundaries — the trapezoid
+/// corners — land on grid knots. Samples are re-derived from that chain, and
+/// straight members lower each phase to an exact quadratic instead of fitting
+/// cubics across an acceleration step.
 fn infinite_jerk_profile(
     s: &[f64],
     vlc: &[f64],
@@ -251,7 +256,7 @@ fn infinite_jerk_profile(
     kappa: &[f64],
     entry_v: f64,
     exit_v: f64,
-) -> Vec<(f64, f64, f64)> {
+) -> (Vec<(f64, f64, f64)>, Vec<StraightPhase>) {
     let n = s.len();
     let mut ceil = vlc.to_vec();
     ceil[0] = ceil[0].min(entry_v);
@@ -270,21 +275,78 @@ fn infinite_jerk_profile(
     }
     ceil[0] = entry_v;
     ceil[n - 1] = exit_v;
-    (0..n)
-        .map(|i| {
-            let a = if (i == 0 && entry_v <= VELOCITY_FLOOR)
-                || (i == n - 1 && exit_v <= VELOCITY_FLOOR)
-            {
-                0.0
-            } else {
+
+    let entry_rest = entry_v <= VELOCITY_FLOOR;
+    let exit_rest = exit_v <= VELOCITY_FLOOR;
+    let chain = infinite_jerk_chain(s, &ceil);
+    let mut samples: Vec<(f64, f64, f64)> = if chain.is_empty() {
+        (0..n)
+            .map(|i| {
                 let (lo, hi) = (i.saturating_sub(1), (i + 1).min(n - 1));
                 let dvds = (ceil[hi] - ceil[lo]) / (s[hi] - s[lo]).max(1e-12);
                 let rail = disk_rail_accel(accel[i], kappa[i], ceil[i]);
-                (ceil[i] * dvds).clamp(-rail, rail)
-            };
-            (s[i], ceil[i], a)
-        })
-        .collect()
+                (s[i], ceil[i], (ceil[i] * dvds).clamp(-rail, rail))
+            })
+            .collect()
+    } else {
+        ride::chain_states(&chain, s)
+            .into_iter()
+            .zip(s)
+            .map(|((v, a), &x)| (x, v, a))
+            .collect()
+    };
+    samples[0].1 = entry_v;
+    samples[n - 1].1 = exit_v;
+    if entry_rest {
+        samples[0].2 = 0.0;
+    }
+    if exit_rest {
+        samples[n - 1].2 = 0.0;
+    }
+    (samples, chain)
+}
+
+/// The disk profile's `v²` slope is constant within a grid cell and — on rail
+/// and cruise stretches — bit-identical across cells, so maximal equal-slope
+/// spans merge into single constant-acceleration phases. A trapezoid becomes
+/// rail / transition-cell / cruise / transition-cell / rail rather than one
+/// phase per 0.01mm grid cell.
+const INFINITE_JERK_SLOPE_MERGE_REL_TOL: f64 = 1e-6;
+
+fn infinite_jerk_chain(s: &[f64], v: &[f64]) -> Vec<StraightPhase> {
+    let n = s.len();
+    let slope = |i: usize| (v[i + 1] * v[i + 1] - v[i] * v[i]) / (2.0 * (s[i + 1] - s[i]));
+    let mut chain = Vec::new();
+    let mut t0 = 0.0;
+    let mut i = 0;
+    while i < n - 1 {
+        if v[i] + v[i + 1] <= VELOCITY_FLOOR {
+            return Vec::new();
+        }
+        let a_first = slope(i);
+        let mut j = i + 1;
+        while j < n - 1
+            && v[j] + v[j + 1] > VELOCITY_FLOOR
+            && (slope(j) - a_first).abs()
+                <= INFINITE_JERK_SLOPE_MERGE_REL_TOL * (1.0 + a_first.abs())
+        {
+            j += 1;
+        }
+        let ds = s[j] - s[i];
+        let a_span = (v[j] * v[j] - v[i] * v[i]) / (2.0 * ds);
+        let dt = 2.0 * ds / (v[i] + v[j]);
+        chain.push(StraightPhase {
+            t0,
+            dt,
+            s0: s[i],
+            v0: v[i],
+            a0: a_span,
+            j: 0.0,
+        });
+        t0 += dt;
+        i = j;
+    }
+    chain
 }
 
 /// Reconstruct the run's `(s, v, a)` profile and its phase chain.
@@ -316,10 +378,7 @@ fn reconstruct_flat(
         .map(|m| m.kin.jerk)
         .fold(f64::INFINITY, f64::min);
     if !jerk.is_finite() {
-        return (
-            infinite_jerk_profile(&s, &vlc, &accel, &kappa, entry_v, exit_v),
-            Vec::new(),
-        );
+        return infinite_jerk_profile(&s, &vlc, &accel, &kappa, entry_v, exit_v);
     }
     let (bwd_v, brake_chain, bwd_feasible) = {
         let s_rev: Vec<f64> = (0..n).map(|k| s[n - 1] - s[n - 1 - k]).collect();
@@ -461,7 +520,7 @@ pub(super) fn reconstruct_run(
             Vec::new()
         } else {
             let clipped = ride::clip_phases(&chain, s0, s1);
-            if ride::chain_is_c1(&clipped) {
+            if ride::chain_is_continuous(&clipped, m.kin.jerk.is_finite()) {
                 clipped
             } else {
                 Vec::new()
