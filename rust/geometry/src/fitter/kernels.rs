@@ -138,9 +138,10 @@ pub(super) fn ease_run(
     recon.arc =
         build_arc(ease.origin, ease.radius, b_head, b_tail, pn, sgn).map_err(internal(line_no))?;
 
+    let mut arc_extra_e: Vec<(usize, f64)> = Vec::new();
     if let Some(s) = &ease.head {
         recon.up_followers = head
-            .map(|n| scale_followers(&n.followers, s.trim / s.clo.s_len()))
+            .map(|n| spiral_followers(&n.followers, s, &mut arc_extra_e))
             .unwrap_or_default();
         recon.head_line_trim = s.trim;
         recon.up = vec![s.clo.clone()];
@@ -153,7 +154,7 @@ pub(super) fn ease_run(
             },
         })?;
         recon.down_followers = tail
-            .map(|n| scale_followers(&n.followers, s.trim / s.clo.s_len()))
+            .map(|n| spiral_followers(&n.followers, s, &mut arc_extra_e))
             .unwrap_or_default();
         recon.tail_line_trim = s.trim;
         recon.down = vec![reversed];
@@ -170,19 +171,32 @@ pub(super) fn ease_run(
         recon.head_consumption,
         recon.tail_consumption,
         arc_len(&recon.arc),
+        &arc_extra_e,
     );
 
     Ok(())
 }
 
-fn scale_followers(f: &[FollowerDemand], s: f64) -> Vec<FollowerDemand> {
+/// A spiral extrudes at its neighbor line's own rate — `ė = r·v` is then
+/// continuous where line meets spiral. The spiral's arc length rarely equals
+/// the line footage it replaced (an anchored circle can slide the spiral far
+/// along its line), so extruding the trimmed footage's E over the spiral
+/// itself would spike the rate by `trim / s_len`. The difference in E belongs
+/// to the arc, whose sweep is what actually covers the replaced footage.
+fn spiral_followers(
+    f: &[FollowerDemand],
+    s: &SpiralFit,
+    arc_extra_e: &mut Vec<(usize, f64)>,
+) -> Vec<FollowerDemand> {
+    let remainder = s.trim - s.clo.s_len();
     f.iter()
         .map(|x| {
             assert!(
                 !x.is_ramped(),
                 "arc easing operates on constant-ratio lines"
             );
-            FollowerDemand::constant(x.axis_index, x.ratio * s)
+            arc_extra_e.push((x.axis_index, x.ratio * remainder));
+            FollowerDemand::constant(x.axis_index, x.ratio)
         })
         .collect()
 }
@@ -783,6 +797,7 @@ pub(super) fn reconstruct(facets: &[Move], tol: f64) -> Result<Option<Reconstruc
         head_consumption,
         tail_consumption,
         recon_len,
+        &[],
     );
 
     Ok(Some(Reconstruction {
@@ -811,8 +826,15 @@ fn run_followers(
     head_consumption: f64,
     tail_consumption: f64,
     recon_len: f64,
+    extra_e: &[(usize, f64)],
 ) -> Vec<FollowerDemand> {
     let mut totals: Vec<(usize, f64)> = Vec::new();
+    for &(axis, e) in extra_e {
+        match totals.iter_mut().find(|(a, _)| *a == axis) {
+            Some(entry) => entry.1 += e,
+            None => totals.push((axis, e)),
+        }
+    }
     let last = lines.len() - 1;
     for (i, m) in facets.iter().enumerate() {
         let covered = if i == 0 {
