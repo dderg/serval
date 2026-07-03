@@ -6,7 +6,7 @@ use geometry::fitter::{
 use geometry::path::{Line, PathSegment, Segment};
 use geometry::{ChainFitConfig, Move};
 
-use crate::{Control, StreamInput, dist3};
+use crate::{CONTIGUITY_EPS_MM, Control, StreamInput, dist3};
 
 const ALIGN_EPS_MM: f64 = 1e-9;
 
@@ -502,6 +502,15 @@ impl TravelAligningSender {
         if is_travel(&m) {
             self.parked_travel = Some(m);
             return true;
+        }
+        if let Some(prev_end) = self.last_spatial_end {
+            let gap = dist3(prev_end, start);
+            assert!(
+                gap <= CONTIGUITY_EPS_MM,
+                "fitter emitted discontinuous geometry at line {}: previous piece ends at \
+                 {prev_end:?}, next starts at {start:?} ({gap:.9}mm gap)",
+                m.source.start_line
+            );
         }
         self.last_spatial_end = spatial_end(&m);
         self.tx.send(m.into()).is_ok()

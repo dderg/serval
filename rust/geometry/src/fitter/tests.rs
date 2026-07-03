@@ -396,6 +396,66 @@ fn extrusion_conserved_when_short_leg_is_consumed_by_two_blends() {
 }
 
 #[test]
+fn run_whose_tail_spiral_overclaims_its_neighbor_still_touches_the_run_endpoints() {
+    // Slicer polyline from neptune_cube/discontinuity.gcode around Y=105: at
+    // accel 10000 / scv 20 the tail easing spiral wants 0.246mm of a 0.313mm
+    // neighbor — over the half-line claim limit — which used to strand the
+    // arc's tail end ~15µm off the neighbor line.
+    let accel = 10_000.0;
+    let scv = 20.0;
+    let ratio = 0.0337;
+    let mk =
+        |line_no: u32, a: [f64; 3], b: [f64; 3]| seg(line_no, accel, scv, a, b, ratio * dist(a, b));
+    let head = mk(1, [124.414, 103.283, 0.0], [124.414, 104.107, 0.0]);
+    let facets = vec![
+        mk(2, [124.414, 104.107, 0.0], [124.447, 104.481, 0.0]),
+        mk(3, [124.447, 104.481, 0.0], [124.561, 104.756, 0.0]),
+        mk(4, [124.561, 104.756, 0.0], [124.786, 105.022, 0.0]),
+    ];
+    let tail = mk(5, [124.786, 105.022, 0.0], [125.053, 105.185, 0.0]);
+
+    let corner = CornerFitConfig::default();
+    let mut fit = RunFit::fit(&facets, Some(&head), Some(&tail))
+        .unwrap()
+        .expect("run reconstructs");
+    let first = &facets[0];
+    let last = facets.last().unwrap();
+    let head_blend = fit.blend_head_with_line(&head, first, corner).unwrap();
+    let tail_blend = fit.blend_tail_with_line(last, &tail, corner).unwrap();
+
+    let mut chain: Vec<Move> = Vec::new();
+    chain.push(
+        trim_line_move(&head, 0.0, fit.head_boundary_trim())
+            .unwrap()
+            .expect("head neighbor keeps a body"),
+    );
+    chain.extend(head_blend);
+    if let Some(stub) = trim_line_move(first, 0.0, fit.head_consumption()).unwrap() {
+        chain.push(stub);
+    }
+    chain.extend(fit.pieces(first, last).unwrap());
+    if let Some(stub) = trim_line_move(last, fit.tail_consumption(), 0.0).unwrap() {
+        chain.push(stub);
+    }
+    chain.extend(tail_blend);
+    chain.push(
+        trim_line_move(&tail, fit.tail_boundary_trim(), 0.0)
+            .unwrap()
+            .expect("tail neighbor keeps a body"),
+    );
+
+    for pair in chain.windows(2) {
+        let end = spatial_end(&pair[0]).unwrap();
+        let start = spatial_start(&pair[1]).unwrap();
+        let gap = dist(end, start);
+        assert!(
+            gap <= 1e-6,
+            "emitted chain is discontinuous: {end:?} -> {start:?} ({gap:.9}mm gap)"
+        );
+    }
+}
+
+#[test]
 fn non_finite_line_yields_fit_error_with_source_line() {
     let good = seg(1, 3000.0, 5.0, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0);
     let bad_line = Line::try_new([10.0, 0.0, 0.0], [f64::NAN, 5.0, 0.0]).unwrap();

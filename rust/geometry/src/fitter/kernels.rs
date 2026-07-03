@@ -75,90 +75,88 @@ pub(super) fn ease_run(
         return Ok(());
     }
 
+    let head_len = head.map_or(0.0, |n| n.length);
+    let tail_len = tail.map_or(0.0, |n| n.length);
     let mut fit = None;
-    for &shrink in &[1.0, 0.5, 0.25, 0.125] {
-        let hp = head_max.map(|p| EndPlan {
-            phi: p.phi * shrink,
-            ..p
-        });
-        let tp = tail_max.map(|p| EndPlan {
-            phi: p.phi * shrink,
-            ..p
-        });
-        if hp.map_or(true, |p| p.phi < ANGLE_EPS_RAD) && tp.map_or(true, |p| p.phi < ANGLE_EPS_RAD)
-        {
-            break;
+    'search: for &(use_head, use_tail) in &[(true, true), (true, false), (false, true)] {
+        let hp0 = if use_head { head_max } else { None };
+        let tp0 = if use_tail { tail_max } else { None };
+        if hp0.is_none() && tp0.is_none() {
+            continue;
         }
-        if let Some((origin, radius)) = ease_circle(
-            hp.as_ref(),
-            tp.as_ref(),
-            o0,
-            r0,
-            recon.arc.u,
-            recon.arc.v,
-            &verts,
-            tol,
-        ) {
-            fit = Some((hp, tp, origin, radius));
-            break;
+        if use_head && use_tail && (head_max.is_none() || tail_max.is_none()) {
+            continue;
+        }
+        for &shrink in &[1.0, 0.5, 0.25, 0.125] {
+            let hp = hp0.map(|p| EndPlan {
+                phi: p.phi * shrink,
+                ..p
+            });
+            let tp = tp0.map(|p| EndPlan {
+                phi: p.phi * shrink,
+                ..p
+            });
+            if hp.map_or(true, |p| p.phi < ANGLE_EPS_RAD)
+                && tp.map_or(true, |p| p.phi < ANGLE_EPS_RAD)
+            {
+                break;
+            }
+            let attempt = try_ease(
+                hp.as_ref(),
+                tp.as_ref(),
+                head_len,
+                tail_len,
+                o0,
+                r0,
+                recon.arc.u,
+                recon.arc.v,
+                &verts,
+                tol,
+                pn,
+            )
+            .map_err(internal(line_no))?;
+            if let Some(f) = attempt {
+                fit = Some(f);
+                break 'search;
+            }
         }
     }
 
-    let Some((head_plan, tail_plan, origin, radius)) = fit else {
+    let Some(ease) = fit else {
         return Ok(());
     };
 
-    let mut head_clo = None;
-    let mut tail_clo = None;
-    let mut head_trim = 0.0;
-    let mut tail_trim = 0.0;
-    let b_head = match &head_plan {
-        Some(p) => match build_spiral(origin, radius, p, pn).map_err(internal(line_no))? {
-            Some((clo, b, trim)) if within_line(trim, head.unwrap().length) => {
-                head_trim = trim;
-                head_clo = Some(clo);
-                b
-            }
-            _ => project_to_circle(origin, radius, verts[0]),
-        },
-        None => project_to_circle(origin, radius, verts[0]),
+    let b_head = match &ease.head {
+        Some(s) => s.b,
+        None => project_to_circle(ease.origin, ease.radius, verts[0]),
     };
-    let b_tail = match &tail_plan {
-        Some(p) => match build_spiral(origin, radius, p, pn).map_err(internal(line_no))? {
-            Some((clo, b, trim)) if within_line(trim, tail.unwrap().length) => {
-                tail_clo = Some(reverse_clothoid(&clo).ok_or(FitError::Internal {
-                    line_no,
-                    source: GeometryError::DegenerateClothoid {
-                        reason: "tail spiral reverse failed",
-                    },
-                })?);
-                tail_trim = trim;
-                b
-            }
-            _ => project_to_circle(origin, radius, *verts.last().unwrap()),
-        },
-        None => project_to_circle(origin, radius, *verts.last().unwrap()),
+    let b_tail = match &ease.tail {
+        Some(s) => s.b,
+        None => project_to_circle(ease.origin, ease.radius, *verts.last().unwrap()),
     };
 
-    if head_clo.is_none() && tail_clo.is_none() {
-        return Ok(());
-    }
+    recon.arc =
+        build_arc(ease.origin, ease.radius, b_head, b_tail, pn, sgn).map_err(internal(line_no))?;
 
-    recon.arc = build_arc(origin, radius, b_head, b_tail, pn, sgn).map_err(internal(line_no))?;
-
-    if let Some(clo) = head_clo {
+    if let Some(s) = &ease.head {
         recon.up_followers = head
-            .map(|n| scale_followers(&n.followers, head_trim / clo.s_len()))
+            .map(|n| scale_followers(&n.followers, s.trim / s.clo.s_len()))
             .unwrap_or_default();
-        recon.head_line_trim = head_trim;
-        recon.up = vec![clo];
+        recon.head_line_trim = s.trim;
+        recon.up = vec![s.clo.clone()];
     }
-    if let Some(clo) = tail_clo {
+    if let Some(s) = &ease.tail {
+        let reversed = reverse_clothoid(&s.clo).ok_or(FitError::Internal {
+            line_no,
+            source: GeometryError::DegenerateClothoid {
+                reason: "tail spiral reverse failed",
+            },
+        })?;
         recon.down_followers = tail
-            .map(|n| scale_followers(&n.followers, tail_trim / clo.s_len()))
+            .map(|n| scale_followers(&n.followers, s.trim / s.clo.s_len()))
             .unwrap_or_default();
-        recon.tail_line_trim = tail_trim;
-        recon.down = vec![clo];
+        recon.tail_line_trim = s.trim;
+        recon.down = vec![reversed];
     }
 
     let lines: Vec<&Line> = facets
@@ -195,6 +193,65 @@ struct EndPlan {
     curve_sgn: f64,
     phi: f64,
     vertex: [f64; 3],
+}
+
+struct SpiralFit {
+    clo: Clothoid,
+    b: [f64; 3],
+    trim: f64,
+}
+
+struct EaseFit {
+    head: Option<SpiralFit>,
+    tail: Option<SpiralFit>,
+    origin: [f64; 3],
+    radius: f64,
+}
+
+/// Solve one easing configuration end to end: refit the circle for the given
+/// end plans, then build every planned spiral and validate its line trim. A
+/// planned end whose spiral is degenerate or over-claims its neighbor rejects
+/// the whole attempt — the caller retries with a smaller lead angle or fewer
+/// eased ends — because the refit circle is only valid together with the
+/// spirals it was solved for: keeping it while dropping a spiral strands that
+/// arc end off the run's vertex.
+#[allow(clippy::too_many_arguments)]
+fn try_ease(
+    hp: Option<&EndPlan>,
+    tp: Option<&EndPlan>,
+    head_len: f64,
+    tail_len: f64,
+    o0: [f64; 3],
+    r0: f64,
+    u: [f64; 3],
+    v: [f64; 3],
+    verts: &[[f64; 3]],
+    tol: f64,
+    pn: [f64; 3],
+) -> Result<Option<EaseFit>, GeometryError> {
+    let Some((origin, radius)) = ease_circle(hp, tp, o0, r0, u, v, verts, tol) else {
+        return Ok(None);
+    };
+    let head = match hp {
+        Some(p) => match build_spiral(origin, radius, p, pn)? {
+            Some((clo, b, trim)) if within_line(trim, head_len) => Some(SpiralFit { clo, b, trim }),
+            _ => return Ok(None),
+        },
+        None => None,
+    };
+    let tail = match tp {
+        Some(p) => match build_spiral(origin, radius, p, pn)? {
+            Some((clo, b, trim)) if within_line(trim, tail_len) => Some(SpiralFit { clo, b, trim }),
+            _ => return Ok(None),
+        },
+        None => None,
+    };
+    Ok(Some(EaseFit {
+        head,
+        tail,
+        origin,
+        radius,
+    }))
 }
 
 fn max_ease_angle(radius: f64, neighbor_len: f64) -> f64 {
@@ -305,7 +362,8 @@ fn one_end_center(
     }
     let shift = d - dot(sub(o0, e.vertex), normal);
     let fallback = add(o0, scale(normal, shift));
-    if interior_residual(&fallback, radius, verts) <= tol {
+    let bare_contact = (norm(sub(fallback, bare_vertex)) - radius).abs() <= BUDGET_EPS_MM;
+    if bare_contact && interior_residual(&fallback, radius, verts) <= tol {
         Some((fallback, radius))
     } else {
         None
@@ -417,28 +475,34 @@ fn max_radial_dev(lines: &[&Line], origin: [f64; 3], radius: f64) -> f64 {
     worst.max((norm(sub(last.point_at(last.s_len()), origin)) - radius).abs())
 }
 
+/// The circle of (at least) the given radius through both endpoints whose
+/// center is nearest the least-squares fit. The radius grows to the half-chord
+/// when the fit's radius falls short of reaching both endpoints — the caller's
+/// deviation check still gates the enlarged circle against the tolerance.
 fn center_through_endpoints(
     p0: [f64; 3],
     p1: [f64; 3],
     radius: f64,
     ls_origin: [f64; 3],
     plane_normal: [f64; 3],
-) -> Option<[f64; 3]> {
+) -> Option<([f64; 3], f64)> {
     let chord = sub(p1, p0);
     let c = norm(chord);
-    if c < BUDGET_EPS_MM || radius < 0.5 * c {
+    if c < BUDGET_EPS_MM {
         return None;
     }
+    let radius = radius.max(0.5 * c);
     let mid = scale(add(p0, p1), 0.5);
-    let half = (radius * radius - 0.25 * c * c).sqrt();
+    let half = (radius * radius - 0.25 * c * c).max(0.0).sqrt();
     let perp = normalize(cross(plane_normal, chord));
     let a = madd(mid, half, perp);
     let b = madd(mid, -half, perp);
-    Some(if norm(sub(a, ls_origin)) <= norm(sub(b, ls_origin)) {
+    let center = if norm(sub(a, ls_origin)) <= norm(sub(b, ls_origin)) {
         a
     } else {
         b
-    })
+    };
+    Some((center, radius))
 }
 
 fn build_arc(
@@ -678,21 +742,22 @@ pub(super) fn reconstruct(facets: &[Move], tol: f64) -> Result<Option<Reconstruc
     if fit.residual > tol {
         return Ok(None);
     }
-    let (mut origin, rho) = (fit.origin, fit.radius);
-    if !(rho.is_finite() && rho > BUDGET_EPS_MM) {
+    if !(fit.radius.is_finite() && fit.radius > BUDGET_EPS_MM) {
         return Ok(None);
     }
-    if max_sagitta(&lines, rho) > tol {
+    if max_sagitta(&lines, fit.radius) > tol {
         return Ok(None);
     }
 
     let last = lines[lines.len() - 1];
     let p1 = last.point_at(last.s_len());
-    if let Some(anchored) = center_through_endpoints(lines[0].start, p1, rho, origin, plane_normal)
-    {
-        if max_radial_dev(&lines, anchored, rho) <= tol {
-            origin = anchored;
-        }
+    let Some((origin, rho)) =
+        center_through_endpoints(lines[0].start, p1, fit.radius, fit.origin, plane_normal)
+    else {
+        return Ok(None);
+    };
+    if max_radial_dev(&lines, origin, rho) > tol {
+        return Ok(None);
     }
 
     let u = normalize(sub(lines[0].start, origin));
