@@ -66,11 +66,10 @@ pub fn pipeline_snapshot(
     dict.set_item("fitted_segments", seg_list)?;
 
     let traj = collect_trajectory_pieces(&shaped);
-    let pieces = |ps: &[[f64; 6]]| ps.iter().map(|p| p.to_vec()).collect::<Vec<_>>();
-    dict.set_item("traj_x_pieces", pieces(&traj.x))?;
-    dict.set_item("traj_y_pieces", pieces(&traj.y))?;
-    dict.set_item("traj_z_pieces", pieces(&traj.z))?;
-    dict.set_item("traj_e_pieces", pieces(&traj.e))?;
+    dict.set_item("traj_x_pieces", traj.x.clone())?;
+    dict.set_item("traj_y_pieces", traj.y.clone())?;
+    dict.set_item("traj_z_pieces", traj.z.clone())?;
+    dict.set_item("traj_e_pieces", traj.e.clone())?;
     dict.set_item("traj_t_end", traj.t_end)?;
     dict.set_item("traversal_time_s", traj.t_end)?;
 
@@ -285,28 +284,38 @@ fn run_pipeline(
     (fitted, shaped)
 }
 
-/// The trajectory the firmware actually executes: the host lowering's own per-axis
-/// cubic Bézier pieces of position-versus-time. Each piece is a cubic in local time
-/// `tau = t - t0`, `pos = c0 + c1*tau + c2*tau^2 + c3*tau^3`, stored as
-/// `[t0, t1, c0, c1, c2, c3]`. The visualizer differentiates these analytically
-/// (velocity quadratic, acceleration linear, jerk constant per piece), so every
-/// derivative is exact and continuous — no position sampling, and nothing copied
-/// from the planner's own acceleration, so it stays an independent check while
-/// storing only a handful of coefficients per piece.
+/// The trajectory the firmware actually executes: the host lowering's own
+/// per-axis polynomial pieces of position-versus-time. Each row is
+/// `[t0, t1, c0, c1, ..., cn]` — monomial coefficients in local time
+/// `tau = t - t0`, trailing near-zero coefficients trimmed so each piece's
+/// true degree is visible in the snapshot. The visualizer differentiates
+/// these analytically, so every derivative is exact and continuous — no
+/// position sampling, and nothing copied from the planner's own acceleration,
+/// so it stays an independent check.
 struct TrajectoryPieces {
-    x: Vec<[f64; 6]>,
-    y: Vec<[f64; 6]>,
-    z: Vec<[f64; 6]>,
-    e: Vec<[f64; 6]>,
+    x: Vec<Vec<f64>>,
+    y: Vec<Vec<f64>>,
+    z: Vec<Vec<f64>>,
+    e: Vec<Vec<f64>>,
     t_end: f64,
 }
 
 fn collect_trajectory_pieces(shaped: &[ShapedSegment]) -> TrajectoryPieces {
-    fn collect(dst: &mut Vec<[f64; 6]>, axis: Option<&nurbs::ScalarNurbs<f64>>) {
+    fn collect(dst: &mut Vec<Vec<f64>>, axis: Option<&nurbs::ScalarNurbs<f64>>) {
         let Some(axis) = axis else { return };
         for p in extract_bezier_pieces(axis) {
-            let c = |i: usize| p.coeffs.get(i).copied().unwrap_or(0.0);
-            dst.push([p.u_start, p.u_end, c(0), c(1), c(2), c(3)]);
+            let scale = p.coeffs.iter().fold(0.0_f64, |m, c| m.max(c.abs()));
+            let mut coeffs = p.coeffs.clone();
+            while coeffs.len() > 1
+                && coeffs
+                    .last()
+                    .is_some_and(|c| c.abs() <= 1e-12 * (scale + 1.0))
+            {
+                coeffs.pop();
+            }
+            let mut row = vec![p.u_start, p.u_end];
+            row.extend_from_slice(&coeffs);
+            dst.push(row);
         }
     }
 
@@ -349,16 +358,29 @@ struct SeamMetrics {
 
 const WORST_SEAM_COUNT: usize = 10;
 
-fn piece_end_state(p: &[f64; 6]) -> (f64, f64, f64) {
-    let tau = p[1] - p[0];
-    let pos = p[2] + p[3] * tau + p[4] * tau * tau + p[5] * tau * tau * tau;
-    let vel = p[3] + 2.0 * p[4] * tau + 3.0 * p[5] * tau * tau;
-    let acc = 2.0 * p[4] + 6.0 * p[5] * tau;
+fn piece_state_at(p: &[f64], tau: f64) -> (f64, f64, f64) {
+    let c = &p[2..];
+    let mut pos = 0.0;
+    let mut vel = 0.0;
+    let mut acc = 0.0;
+    for (k, &ck) in c.iter().enumerate().rev() {
+        pos = pos * tau + ck;
+        if k >= 1 {
+            vel = vel * tau + k as f64 * ck;
+        }
+        if k >= 2 {
+            acc = acc * tau + (k * (k - 1)) as f64 * ck;
+        }
+    }
     (pos, vel, acc)
 }
 
-fn piece_start_state(p: &[f64; 6]) -> (f64, f64, f64) {
-    (p[2], p[3], 2.0 * p[4])
+fn piece_end_state(p: &[f64]) -> (f64, f64, f64) {
+    piece_state_at(p, p[1] - p[0])
+}
+
+fn piece_start_state(p: &[f64]) -> (f64, f64, f64) {
+    piece_state_at(p, 0.0)
 }
 
 fn seam_metrics(traj: &TrajectoryPieces) -> SeamMetrics {

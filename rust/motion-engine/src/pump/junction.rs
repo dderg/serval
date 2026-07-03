@@ -75,7 +75,7 @@ impl JunctionTracker {
         let seam = self.ends.get(&key).map(|prev| JunctionSeam {
             key,
             prev_end_pos: prev.end_pos,
-            next_start_pos: first_entry.coeffs[0],
+            next_start_pos: first_entry.pos_start(),
             prev_end_host: prev.end_host,
             next_start_host: *first_host,
             prev_source_line: prev.source_line,
@@ -92,7 +92,7 @@ impl JunctionTracker {
             JunctionEnd {
                 end_ticks: last_end_ticks,
                 end_host: last_end_host,
-                end_pos: last_entry.coeffs[3],
+                end_pos: last_entry.pos_end(),
                 source_line,
             },
         );

@@ -59,9 +59,9 @@ fn fitted_outcome_has_spatial_segments() {
     assert!(spatial_count > 0);
 }
 
-fn eval_piece(p: &[f64; 6], t: f64) -> f64 {
+fn eval_piece(p: &[f64], t: f64) -> f64 {
     let z = t - p[0];
-    p[2] + p[3] * z + p[4] * z * z + p[5] * z * z * z
+    p[2..].iter().rev().fold(0.0, |acc, &c| acc * z + c)
 }
 
 #[test]
@@ -216,8 +216,8 @@ fn seam_metrics_flag_a_known_discontinuity() {
     // at pos=5 (Δp=4), vel=3 (Δv=3), acc=2*2=4 (Δa=4).
     let traj = TrajectoryPieces {
         x: vec![
-            [0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
-            [1.0, 2.0, 5.0, 3.0, 2.0, 0.0],
+            vec![0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+            vec![1.0, 2.0, 5.0, 3.0, 2.0, 0.0],
         ],
         y: Vec::new(),
         z: Vec::new(),

@@ -2,13 +2,15 @@ use ethercat_rt::curves::{AxisRing, AXIS_RING_CAPACITY, EC_DC_PERIOD_NS};
 use runtime::piece_ring::PieceEntry;
 
 fn ramp_piece(from_mm: f32, to_mm: f32, start_ns: u64) -> PieceEntry {
-    let d = to_mm - from_mm;
+    let mut coeffs = [0.0_f32; runtime::piece_ring::MAX_PIECE_COEFFS];
+    coeffs[0] = (from_mm + to_mm) / 2.0;
+    coeffs[1] = (to_mm - from_mm) / 2.0;
     PieceEntry {
         start_time: start_ns,
-        coeffs: [from_mm, from_mm + d / 3.0, from_mm + 2.0 * d / 3.0, to_mm],
         duration: 0.001_f32,
-        motor_mask: 0,
-        _reserved: [0; 3],
+        coeff_count: 2,
+        coeffs,
+        ..PieceEntry::zeroed()
     }
 }
 

@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use host_rt::passthrough_queue::PassthroughRouter;
-use runtime::piece_ring::PieceEntry;
+use nurbs::chebyshev::monomial_tau_to_chebyshev;
+use runtime::piece_ring::{MAX_PIECE_COEFFS, PieceEntry};
 
 use crate::motion_history::{HISTORY_CAPACITY, HistoryError, HistoryPiece, HistoryStore};
 use crate::types::AxisKey;
@@ -43,19 +44,46 @@ fn key() -> AxisKey {
     AxisKey { mcu_id: 7, axis: 2 }
 }
 
-fn entry(start_time: u64, duration: f32, coeffs: [f32; 4]) -> PieceEntry {
+fn entry(start_time: u64, duration: f32, bernstein_cubic: [f32; 4]) -> PieceEntry {
+    let [b0, b1, b2, b3] = bernstein_cubic.map(f64::from);
+    let d = f64::from(duration);
+    let mono = if d > 0.0 {
+        [
+            b0,
+            3.0 * (b1 - b0) / d,
+            3.0 * (b2 - 2.0 * b1 + b0) / (d * d),
+            (b3 - 3.0 * b2 + 3.0 * b1 - b0) / (d * d * d),
+        ]
+    } else {
+        [b0, 0.0, 0.0, 0.0]
+    };
+    let cheb = monomial_tau_to_chebyshev(&mono, d);
+    let mut coeffs = [0.0_f32; MAX_PIECE_COEFFS];
+    for (dst, &src) in coeffs.iter_mut().zip(cheb.iter()) {
+        *dst = src as f32;
+    }
     PieceEntry {
         start_time,
-        coeffs,
         duration,
         motor_mask: 0,
-        _reserved: [0; 3],
+        coeff_count: cheb.len() as u8,
+        coeffs,
+        ..PieceEntry::zeroed()
     }
 }
 
 fn linear(start_time: u64, duration: f32, p0: f32, p1: f32) -> PieceEntry {
-    let third = (p1 - p0) / 3.0;
-    entry(start_time, duration, [p0, p0 + third, p0 + 2.0 * third, p1])
+    let mut coeffs = [0.0_f32; MAX_PIECE_COEFFS];
+    coeffs[0] = (p0 + p1) / 2.0;
+    coeffs[1] = (p1 - p0) / 2.0;
+    PieceEntry {
+        start_time,
+        duration,
+        motor_mask: 0,
+        coeff_count: 2,
+        coeffs,
+        ..PieceEntry::zeroed()
+    }
 }
 
 fn h(clock: u64) -> f64 {

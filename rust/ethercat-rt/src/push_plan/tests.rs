@@ -1,6 +1,21 @@
 use super::{plan_bundle, resolve_slot};
-use mcu_protocol::messages::{AxisPieces, PIECE_ENTRY_LEN};
+use mcu_protocol::messages::AxisPieces;
 use mcu_protocol::result_codes::RING_FULL;
+
+const WIRE_HEADER_LEN: usize = 16;
+
+fn valid_piece_bytes(count: u8) -> Vec<u8> {
+    let mut out = Vec::new();
+    for _ in 0..count {
+        out.extend_from_slice(&0u64.to_le_bytes()); // start_time
+        out.extend_from_slice(&0.0f32.to_le_bytes()); // duration
+        out.push(0); // motor_mask
+        out.push(1); // coeff_count
+        out.extend_from_slice(&[0u8; 2]); // reserved
+        out.extend_from_slice(&0.0f32.to_le_bytes()); // coeffs[0]
+    }
+    out
+}
 
 fn axis(axis_idx: u8, piece_count: u8) -> AxisPieces {
     AxisPieces {
@@ -8,7 +23,7 @@ fn axis(axis_idx: u8, piece_count: u8) -> AxisPieces {
         piece_count,
         start_slot: 0,
         new_head: 0,
-        pieces_bytes: vec![0u8; usize::from(piece_count) * PIECE_ENTRY_LEN],
+        pieces_bytes: valid_piece_bytes(piece_count),
     }
 }
 
@@ -70,6 +85,21 @@ fn capacity_accumulates_across_axes_targeting_one_slot() {
 fn short_payload_rejects_before_any_push() {
     let slave_axes = [0u8];
     let mut a = axis(0, 4);
-    a.pieces_bytes.truncate(PIECE_ENTRY_LEN);
+    a.pieces_bytes.truncate(WIRE_HEADER_LEN + 4);
+    assert_eq!(plan_bundle(&[a], &slave_axes, |_| 100), Err(RING_FULL));
+}
+
+#[test]
+fn bad_coeff_count_rejects_before_any_push() {
+    let slave_axes = [0u8];
+    let mut bytes = valid_piece_bytes(1);
+    bytes[13] = 0;
+    let a = AxisPieces {
+        axis_idx: 0,
+        piece_count: 1,
+        start_slot: 0,
+        new_head: 0,
+        pieces_bytes: bytes,
+    };
     assert_eq!(plan_bundle(&[a], &slave_axes, |_| 100), Err(RING_FULL));
 }

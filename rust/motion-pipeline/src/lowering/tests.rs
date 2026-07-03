@@ -459,7 +459,11 @@ fn piece_accel_at(pieces: &[BezierPiece<f64>], t: f64) -> f64 {
         .find(|p| t >= p.u_start - 1e-12 && t <= p.u_end + 1e-12)
         .unwrap_or_else(|| pieces.last().unwrap());
     let z = t - p.u_start;
-    2.0 * p.coeffs[2] + 6.0 * p.coeffs[3] * z
+    let mut acc = 0.0;
+    for (k, &ck) in p.coeffs.iter().enumerate().skip(2).rev() {
+        acc = acc * z + (k * (k - 1)) as f64 * ck;
+    }
+    acc
 }
 
 fn quarter_arc() -> geometry::Move {
@@ -530,16 +534,16 @@ fn curved_fit_acceleration_is_continuous_and_converges() {
         let mut worst = 0.0_f64;
         for axis in 0..2 {
             let pieces = &axes[axis];
-            // Interior-knot continuity, scaled into mm like the residual (h^2/8).
+            // Seams are C² by construction; the only permitted step is the
+            // Chebyshev truncation budget, once per adjoining piece.
             for w in pieces.windows(2) {
                 let (left, right) = (&w[0], &w[1]);
-                let h = (right.u_end - right.u_start).min(left.u_end - left.u_start);
                 let jump = (piece_accel_at(std::slice::from_ref(left), left.u_end)
                     - piece_accel_at(std::slice::from_ref(right), right.u_start))
                 .abs();
                 assert!(
-                    jump * h * h / 8.0 <= 40.0 * tol,
-                    "axis {axis}: accel jump {jump} at {} exceeds bound",
+                    jump <= 2.0 * FIT_TRUNC_ACC_MM_S2 + 1e-6,
+                    "axis {axis}: accel jump {jump} at {} exceeds the truncation budget",
                     right.u_start
                 );
             }
@@ -561,16 +565,21 @@ fn curved_fit_acceleration_is_continuous_and_converges() {
         worst
     };
 
+    // Interior accel error no longer scales with the position tolerance — the
+    // ladder holds it under FIT_TOL_ACCEL_MM_S2 at any tolerance, with a floor
+    // set by the truncation budget. Assert the absolute contract instead.
     let loose = max_analytic_err(1e-3);
     let tight = max_analytic_err(1e-4);
     assert!(
-        tight < loose,
-        "tighter tolerance did not reduce analytic accel error: {tight} vs {loose}"
+        tight <= loose + FIT_TRUNC_ACC_MM_S2,
+        "tightening the tolerance regressed accel error: {tight} vs {loose}"
     );
-    assert!(
-        tight < 0.6 * loose,
-        "analytic accel error did not converge meaningfully: {tight} vs {loose}"
-    );
+    for (name, err) in [("loose", loose), ("tight", tight)] {
+        assert!(
+            err < 0.1 * FIT_TOL_ACCEL_MM_S2,
+            "{name} interior accel error {err} not comfortably inside the budget"
+        );
+    }
 }
 
 /// A straight move is lowered through the closed-form phase path, which ignores
@@ -634,6 +643,72 @@ fn pressure_advance_k_zero_is_identical_to_no_post_processor() {
             extract_bezier_pieces(&none.axes[axis]),
             extract_bezier_pieces(&zero.axes[axis]),
             "axis {axis} differs between no-PP and k=0"
+        );
+    }
+}
+
+fn wire_degree(coeffs: &[f64], h: f64) -> usize {
+    // The degree the wire recovers: Chebyshev truncation at enqueue's
+    // noise-level budgets (1e-6 mm / 1e-3 mm/s / 0.1 mm/s²).
+    let cheb = nurbs::chebyshev::monomial_tau_to_chebyshev(coeffs, h);
+    nurbs::chebyshev::truncate_chebyshev_c2(&cheb, h, 1e-6, 1e-3, 0.1).len()
+}
+
+#[test]
+fn ladder_collapses_synthetic_profiles_to_natural_degrees() {
+    let h = 0.02;
+    // Cruise: p = 5 + 120·τ → 2 Chebyshev coefficients.
+    assert_eq!(wire_degree(&[5.0, 120.0, 0.0, 0.0, 0.0, 0.0], h), 2);
+    // Trapezoid leg (constant accel): + 1500·τ² → 3.
+    assert_eq!(wire_degree(&[5.0, 120.0, 1500.0, 0.0, 0.0, 0.0], h), 3);
+    // Constant jerk: + 2e5·τ³ → 4.
+    assert_eq!(wire_degree(&[5.0, 120.0, 1500.0, 2.0e5, 0.0, 0.0], h), 4);
+}
+
+#[test]
+fn arc_member_fits_within_the_wire_degree_cap() {
+    let gm = quarter_arc();
+    let planned = fit_and_plan(std::slice::from_ref(&gm));
+    let vm = &planned[0].velocity;
+    let start = [0.0_f64; 4];
+    let (axes, total_t) =
+        lower_move_pieces(&planned[0].geometry, vm, 0.0, &start, 5e-3, &[]).unwrap();
+    for pieces in &axes[..2] {
+        assert!(!pieces.is_empty());
+        for p in pieces {
+            assert!(
+                p.coeffs.len() <= MAX_PIECE_COEFFS,
+                "piece exceeds the wire cap: {} coeffs",
+                p.coeffs.len()
+            );
+        }
+    }
+    // The higher-degree ladder resolves the arc without deep bisection: the
+    // spans stay long relative to the move (cubic fitting needed an order of
+    // magnitude more pieces at this tolerance).
+    let count = axes[0].len();
+    let mean_span = total_t / count as f64;
+    assert!(
+        mean_span > 1e-3,
+        "{count} pieces over {total_t:.4}s — mean span {mean_span:.6}s suggests deep bisection"
+    );
+}
+
+#[test]
+fn straight_phase_pieces_carry_natural_length() {
+    let m = line_move([0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 0.0, straight_ctx(1)).unwrap();
+    let planned = fit_and_plan(std::slice::from_ref(&m));
+    let vm = &planned[0].velocity;
+    assert!(!vm.phases.is_empty());
+    let start = [0.0_f64; 4];
+    let (axes, _t) = lower_move_pieces(&planned[0].geometry, vm, 0.0, &start, 1e-3, &[]).unwrap();
+    let has_jerk_phase = vm.phases.iter().any(|p| p.j != 0.0);
+    let expect = if has_jerk_phase { 4 } else { 3 };
+    for p in &axes[0] {
+        assert_eq!(
+            p.coeffs.len(),
+            expect,
+            "move-wide padding to the max phase degree"
         );
     }
 }

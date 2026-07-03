@@ -11,7 +11,13 @@
 //   then axis_count axis blocks, each:
 //     axis block header(8): axis_idx u8 | piece_count u8 | start_slot u16_le
 //                           | new_head u32_le
-//     then piece_count entries of 32 bytes each.
+//     then piece_count variable-length entries:
+//       entry header (16): start_time u64_le | duration f32_le | motor_mask u8
+//                          | coeff_count u8 (1..=8) | reserved u16
+//       then coeff_count * 4 bytes of f32_le Chebyshev coefficients.
+//     Each entry is zero-extended into the MCU_PIECE_SLOT_LEN ring slot; a
+//     coeff_count outside 1..=8 marks the frame malformed (rejected at commit,
+//     no frontier advance).
 // Each piece lands at (start_slot + index) % ring_depth for its axis; the
 // per-axis frontier advances only in commit, after the demuxer validates CRC.
 #include <stdint.h>
@@ -26,7 +32,7 @@ extern uint32_t stats_send_time_high;
 uint32_t timer_read_time(void);
 
 #define AXIS_BLOCK_HEADER_LEN 8u
-#define PIECE_ENTRY_LEN       32u
+#define PIECE_COEFF_COUNT_OFF 13u
 // Upper bound on axis blocks per frame; sizes the per-axis commit/echo arrays.
 // A frame declaring more blocks is rejected before any ring write.
 #define MCU_MAX_FRAME_AXES    8u
@@ -78,7 +84,7 @@ send_push_pieces_response(uint32_t correlation_id, int32_t result,
 static struct {
     uint8_t  hdr[PER_MESSAGE_HEADER_LEN];
     uint8_t  blk[AXIS_BLOCK_HEADER_LEN];
-    uint8_t  scratch[PIECE_ENTRY_LEN];
+    uint8_t  scratch[MCU_PIECE_SLOT_LEN];
     uint32_t correlation_id;
     uint8_t  hdr_seen;        // bytes of the message header accumulated
     uint8_t  have_axis_count;
@@ -92,6 +98,7 @@ static struct {
     uint32_t cur_new_head;
     uint32_t cur_pieces_seen; // pieces of the current block written
     uint8_t  cur_piece_off;   // byte offset within the current piece
+    uint8_t  cur_piece_len;   // wire length of the current piece (16 + 4*count)
     uint8_t  axis_idx[MCU_MAX_FRAME_AXES];
     uint32_t new_head[MCU_MAX_FRAME_AXES];
     uint64_t first_start_time[MCU_MAX_FRAME_AXES];
@@ -112,6 +119,7 @@ piece_sink_begin(void)
     piece_sink.blk_seen = 0;
     piece_sink.cur_pieces_seen = 0;
     piece_sink.cur_piece_off = 0;
+    piece_sink.cur_piece_len = 0;
     piece_sink.blocks_done = 0;
     piece_sink.write_rc = 0;
     piece_sink.malformed = 0;
@@ -181,15 +189,29 @@ piece_sink_feed(uint8_t b)
         piece_sink.in_block_header = 0;
         piece_sink.cur_pieces_seen = 0;
         piece_sink.cur_piece_off = 0;
+        piece_sink.cur_piece_len = 0;
         if (piece_sink.cur_piece_count == 0)
             piece_sink_finish_block();
         return;
     }
 
     piece_sink.scratch[piece_sink.cur_piece_off++] = b;
-    if (piece_sink.cur_piece_off < PIECE_ENTRY_LEN)
+    if (piece_sink.cur_piece_off == MCU_PIECE_WIRE_HEADER_LEN) {
+        uint8_t coeff_count = piece_sink.scratch[PIECE_COEFF_COUNT_OFF];
+        if (coeff_count == 0 || coeff_count > MCU_PIECE_MAX_COEFFS) {
+            piece_sink.malformed = 1;
+            return;
+        }
+        piece_sink.cur_piece_len =
+            (uint8_t)(MCU_PIECE_WIRE_HEADER_LEN + 4u * coeff_count);
+        for (uint32_t i = MCU_PIECE_WIRE_HEADER_LEN; i < MCU_PIECE_SLOT_LEN; i++)
+            piece_sink.scratch[i] = 0;
+    }
+    if (piece_sink.cur_piece_off < MCU_PIECE_WIRE_HEADER_LEN
+        || piece_sink.cur_piece_off < piece_sink.cur_piece_len)
         return;
     piece_sink.cur_piece_off = 0;
+    piece_sink.cur_piece_len = 0;
     if (piece_sink.cur_pieces_seen == 0) {
         const uint8_t *s = piece_sink.scratch;
         piece_sink.first_start_time[piece_sink.cur_axis] =

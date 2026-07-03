@@ -1,7 +1,7 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use runtime::fault_sink::FaultSink;
-use runtime::motion_core::{eval_accel, get_position_and_velocity, ArmedPiece};
+use runtime::motion_core::{get_position_and_velocity, ArmedPiece};
 use runtime::piece_ring::{PieceEntry, RingDescriptor};
 
 pub const CLOCK_FREQ_HZ: f32 = 1_000_000_000.0;
@@ -54,13 +54,7 @@ impl AxisRing {
 
     pub fn with_slot(slot: usize) -> Self {
         Self {
-            storage: [PieceEntry {
-                start_time: 0,
-                coeffs: [0.0; 4],
-                duration: 0.0,
-                motor_mask: 0,
-                _reserved: [0; 3],
-            }; AXIS_RING_CAPACITY],
+            storage: [PieceEntry::zeroed(); AXIS_RING_CAPACITY],
             desc: RingDescriptor::new(0, AXIS_RING_CAPACITY),
             armed: None,
             fault: AtomicU32::new(FAULT_REG_NONE),
@@ -77,20 +71,23 @@ impl AxisRing {
     }
 
     pub fn push_from_bytes(&mut self, piece_count: u8, bytes: &[u8]) -> u8 {
-        let n = piece_count as usize;
-        if bytes.len() < n * 32 {
-            tracing::warn!(
-                subsystem = "ethercat",
-                event = "push_from_bytes_short_payload",
-                payload_len = bytes.len(),
-                required_len = n * 32,
-                "AxisRing::push_from_bytes: short payload"
-            );
-            return 0;
-        }
         let mut pushed = 0u8;
-        for chunk in bytes[..n * 32].chunks_exact(32) {
-            let entry = parse_piece_entry(chunk);
+        let mut rest = bytes;
+        for _ in 0..piece_count {
+            let (entry, wire_len) = match PieceEntry::parse_wire(rest) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        subsystem = "ethercat",
+                        event = "push_from_bytes_malformed_entry",
+                        error = ?e,
+                        pushed,
+                        piece_count,
+                        "AxisRing::push_from_bytes: malformed wire entry"
+                    );
+                    return pushed;
+                }
+            };
             if self.desc.push(&mut self.storage, entry).is_err() {
                 tracing::warn!(
                     subsystem = "ethercat",
@@ -102,6 +99,7 @@ impl AxisRing {
                 break;
             }
             pushed += 1;
+            rest = &rest[wire_len..];
         }
         pushed
     }
@@ -129,7 +127,7 @@ impl AxisRing {
         let p = armed
             .as_ref()
             .expect("sample yielded a value with no armed piece");
-        let acc = eval_accel(&p.vel_coeffs, p.piece_start_cycles, now_ns, CLOCK_FREQ_HZ);
+        let acc = p.eval_accel(now_ns);
         Some((pos, vel, acc))
     }
 
@@ -169,26 +167,6 @@ impl core::fmt::Debug for AxisRing {
             .field("len", &self.desc.len())
             .field("retired", &self.desc.retired_count())
             .finish()
-    }
-}
-
-fn parse_piece_entry(chunk: &[u8]) -> PieceEntry {
-    debug_assert_eq!(chunk.len(), 32, "piece entry must be 32 bytes");
-    let rd4 = |i: usize| u32::from_le_bytes([chunk[i], chunk[i + 1], chunk[i + 2], chunk[i + 3]]);
-    let start_time = u64::from_le_bytes([
-        chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
-    ]);
-    let c0 = f32::from_bits(rd4(8));
-    let c1 = f32::from_bits(rd4(12));
-    let c2 = f32::from_bits(rd4(16));
-    let c3 = f32::from_bits(rd4(20));
-    let duration = f32::from_bits(rd4(24));
-    PieceEntry {
-        start_time,
-        coeffs: [c0, c1, c2, c3],
-        duration,
-        motor_mask: 0,
-        _reserved: [0; 3],
     }
 }
 

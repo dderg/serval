@@ -17,10 +17,8 @@ fn pulse_binding(oid: u8) -> StepperBindingRust {
 fn zero_entry() -> PieceEntry {
     PieceEntry {
         start_time: 0,
-        coeffs: [0.0; 4],
         duration: 0.001,
-        motor_mask: 0,
-        _reserved: [0; 3],
+        ..PieceEntry::zeroed()
     }
 }
 

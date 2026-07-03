@@ -53,8 +53,12 @@ fn rt() -> *mut c_api::Runtime {
 }
 
 fn write_one_piece(handle: *mut c_api::Runtime, start_slot: u16) {
-    let mut piece = [0u8; 32];
-    piece[0..8].copy_from_slice(&7777u64.to_le_bytes());
+    let piece = runtime::piece_ring::PieceEntry {
+        start_time: 7777,
+        duration: 0.001,
+        ..runtime::piece_ring::PieceEntry::zeroed()
+    }
+    .to_le_bytes();
     let rc = unsafe { c_api::runtime_write_piece(handle, 0, start_slot, 0, piece.as_ptr()) };
     assert_eq!(rc, c_api::RUNTIME_OK, "write_piece failed: {rc}");
 }

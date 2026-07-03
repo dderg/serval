@@ -205,23 +205,50 @@ def parse_gcode(
     return waypoints
 
 
-def _eval_pieces(pieces, t):
-    # Evaluate the per-axis cubic Bezier pieces -- the trajectory the firmware runs
-    # -- and their analytic derivatives at times `t`. Each piece is
-    # [t0, t1, c0, c1, c2, c3]: pos = c0 + c1*tau + c2*tau^2 + c3*tau^3, tau = t-t0,
-    # so velocity/acceleration/jerk are exact polynomial derivatives, no differencing.
+def _pad_pieces(pieces):
+    # Pieces are [t0, t1, c0, c1, ..., cn] and rows may be ragged (degree
+    # varies per row, 4..10 floats). Zero-pad to the row with the highest
+    # degree so the rest of the module can evaluate them as one matrix; a
+    # missing high coefficient contributes nothing, matching the firmware's
+    # own degree-generic reader.
     import numpy as np
 
-    p = np.asarray(pieces, dtype=float)
+    max_len = max(len(row) for row in pieces)
+    p = np.zeros((len(pieces), max_len))
+    for i, row in enumerate(pieces):
+        p[i, : len(row)] = row
+    return p
+
+
+def _eval_pieces(pieces, t):
+    # Evaluate the per-axis monomial pieces -- the trajectory the firmware runs
+    # -- and their analytic derivatives at times `t`. Each piece is
+    # [t0, t1, c0, c1, ..., cn]: pos = sum(ck * tau^k), tau = t - t0, so
+    # velocity/acceleration/jerk are exact polynomial derivatives, no
+    # differencing. Degree-generic via Horner over the (zero-padded) rows.
+    import numpy as np
+
+    p = _pad_pieces(pieces)
     starts = p[:, 0]
     idx = np.clip(np.searchsorted(starts, t, side="right") - 1, 0, len(p) - 1)
     sel = p[idx]
     tau = t - sel[:, 0]
-    c0, c1, c2, c3 = sel[:, 2], sel[:, 3], sel[:, 4], sel[:, 5]
-    pos = c0 + c1 * tau + c2 * tau**2 + c3 * tau**3
-    vel = c1 + 2 * c2 * tau + 3 * c3 * tau**2
-    acc = 2 * c2 + 6 * c3 * tau
-    jerk = 6 * c3
+    coeffs = sel[:, 2:]
+    n_terms = coeffs.shape[1]
+
+    pos = np.zeros_like(tau)
+    vel = np.zeros_like(tau)
+    acc = np.zeros_like(tau)
+    jerk = np.zeros_like(tau)
+    for k in range(n_terms - 1, -1, -1):
+        ck = coeffs[:, k]
+        pos = pos * tau + ck
+        if k >= 1:
+            vel = vel * tau + ck * k
+        if k >= 2:
+            acc = acc * tau + ck * k * (k - 1)
+        if k >= 3:
+            jerk = jerk * tau + ck * k * (k - 1) * (k - 2)
     return pos, vel, acc, jerk
 
 
@@ -265,19 +292,38 @@ def _time_series_from_pieces(snapshot):
             "j_scalar": z,
         }
 
-    # Dense evaluation grid plus the exact piece boundaries (where the C1 Hermite
-    # lets acceleration step), so the piecewise structure draws faithfully.
-    all_bounds = [np.asarray(xp, dtype=float)[:, 1]]
-    for _, key, _ in _AXIS_LANES:
-        pieces = snapshot.get(key)
+    # Every piece boundary is a candidate C1-Hermite acceleration step, and
+    # higher-degree pieces (once the writer emits them) can also carry an
+    # acceleration peak strictly inside a piece, not just at its edges. Sample
+    # each boundary-to-boundary interval on its own dense sub-grid (rather
+    # than one uniform grid over the whole trajectory) so both the exact
+    # steps and any interior curvature peaks are captured regardless of how
+    # many pieces the trajectory has.
+    lane_pieces = {name: snapshot.get(key) for name, key, _ in _AXIS_LANES}
+    bounds = {0.0, t_end}
+    for pieces in lane_pieces.values():
         if pieces:
-            all_bounds.append(np.asarray(pieces, dtype=float)[:, 1])
-    grid = np.linspace(0.0, t_end, max(2000, 8 * len(xp)))
-    t = np.unique(np.concatenate([grid, *all_bounds]))
+            for row in pieces:
+                t0, t1 = row[0], row[1]
+                if 0.0 < t0 < t_end:
+                    bounds.add(t0)
+                if 0.0 < t1 < t_end:
+                    bounds.add(t1)
+    bounds = np.array(sorted(bounds))
+
+    n_intervals = max(len(bounds) - 1, 1)
+    per_interval = max(int(max(8 * len(xp), 2000) / n_intervals), 32)
+    t = np.unique(
+        np.concatenate(
+            [
+                np.linspace(a, b, per_interval)
+                for a, b in zip(bounds[:-1], bounds[1:])
+            ]
+        )
+    )
 
     vel, acc, jerk = {}, {}, {}
-    for name, key, _ in _AXIS_LANES:
-        pieces = snapshot.get(key)
+    for name, pieces in lane_pieces.items():
         if pieces:
             _, v, a, j = _eval_pieces(pieces, t)
         else:
@@ -352,11 +398,11 @@ def _toolhead_position(snapshot):
     return x, y
 
 
-def _plot_derivative(ax, t, comps, scalar, ylabel, title, drawstyle="default"):
+def _plot_derivative(ax, t, comps, scalar, ylabel, title):
     import numpy as np
 
     def plot(y, **kw):
-        ax.plot(t, y, drawstyle=drawstyle, **kw)
+        ax.plot(t, y, **kw)
 
     for name, _, color in _AXIS_LANES:
         lane = comps.get(name)
@@ -478,13 +524,7 @@ def render(snapshot, out_path, stem, ts):
         ax_acc, t, series["acc"], series["a_scalar"], "mm/s²", "Acceleration"
     )
     _plot_derivative(
-        ax_jrk,
-        t,
-        series["jerk"],
-        series["j_scalar"],
-        "mm/s³",
-        "Jerk",
-        drawstyle="steps-post",
+        ax_jrk, t, series["jerk"], series["j_scalar"], "mm/s³", "Jerk"
     )
 
     out_file = out_path / f"{stem}_{ts}.png"

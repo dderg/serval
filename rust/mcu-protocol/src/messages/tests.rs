@@ -1,6 +1,14 @@
 use super::roundtrip;
 use super::*;
 
+/// One valid variable-length wire entry: `PIECE_WIRE_HEADER_LEN + 4 * coeff_count`
+/// bytes, filled with `fill` except for the `coeff_count` byte at offset 13.
+fn one_piece(fill: u8, coeff_count: u8) -> Vec<u8> {
+    let mut v = vec![fill; PIECE_WIRE_HEADER_LEN + 4 * coeff_count as usize];
+    v[13] = coeff_count;
+    v
+}
+
 #[test]
 fn message_kind_round_trips_via_u16() {
     for &k in &[
@@ -180,8 +188,8 @@ fn status_heartbeat_short_frame_missing_ff_saturation_is_decode_error() {
 
 #[test]
 fn push_pieces_single_axis_round_trips() {
-    // axis_count(1) + block header(8) + 1 piece(32) = 41 bytes.
-    let msg = PushPieces::single(2, 1, 41, 5000, vec![0xAB; 32]);
+    // axis_count(1) + block header(8) + 1 piece(16 + 4*4 = 32) = 41 bytes.
+    let msg = PushPieces::single(2, 1, 41, 5000, one_piece(0xAB, 4));
     let buf = msg.encoded_to_vec();
     assert_eq!(buf.len(), 1 + 8 + 32);
     assert_eq!(buf[0], 1, "leading axis_count byte");
@@ -192,7 +200,7 @@ fn push_pieces_single_axis_round_trips() {
         (a.axis_idx, a.piece_count, a.start_slot, a.new_head),
         (2, 1, 41, 5000)
     );
-    assert_eq!(a.pieces_bytes, vec![0xAB; 32]);
+    assert_eq!(a.pieces_bytes, one_piece(0xAB, 4));
 }
 
 #[test]
@@ -204,21 +212,21 @@ fn push_pieces_three_axes_round_trip() {
                 piece_count: 1,
                 start_slot: 0,
                 new_head: 1,
-                pieces_bytes: vec![0x10; 32],
+                pieces_bytes: one_piece(0x10, 4),
             },
             AxisPieces {
                 axis_idx: 1,
                 piece_count: 2,
                 start_slot: 4,
                 new_head: 6,
-                pieces_bytes: vec![0x20; 64],
+                pieces_bytes: [one_piece(0x20, 4), one_piece(0x20, 4)].concat(),
             },
             AxisPieces {
                 axis_idx: 2,
                 piece_count: 1,
                 start_slot: 7,
                 new_head: 8,
-                pieces_bytes: vec![0x30; 32],
+                pieces_bytes: one_piece(0x30, 4),
             },
         ],
     };
@@ -236,7 +244,7 @@ fn push_pieces_three_axes_one_piece_fits_frame_budget() {
         piece_count: 1,
         start_slot: 0,
         new_head: 1,
-        pieces_bytes: vec![0; 32],
+        pieces_bytes: one_piece(0, 4),
     };
     let msg = PushPieces {
         axes: vec![block(0), block(1), block(2)],
@@ -249,12 +257,15 @@ fn push_pieces_three_axes_one_piece_fits_frame_budget() {
 
 #[test]
 fn max_pieces_per_axis_is_at_least_one_for_realistic_axis_counts() {
-    for n in 1..=6u8 {
+    // `ConfigureAxes::steps_per_mm` fixes the dispatcher at 4 axes — the
+    // realistic single-MCU axis count this budget must serve.
+    for n in 1..=4u8 {
         assert!(
             max_pieces_per_axis(n) >= 1,
             "axis_count {n} must admit at least one piece per axis within the frame budget"
         );
-        // And a frame built to that cap must actually fit.
+        // And a frame built to that cap must actually fit, sized at the
+        // worst-case (8-coefficient, PIECE_WIRE_MAX_LEN) entry.
         let pc = max_pieces_per_axis(n) as u8;
         let axes = (0..n)
             .map(|axis| AxisPieces {
@@ -262,10 +273,24 @@ fn max_pieces_per_axis_is_at_least_one_for_realistic_axis_counts() {
                 piece_count: pc,
                 start_slot: 0,
                 new_head: u32::from(pc),
-                pieces_bytes: vec![0; 32 * pc as usize],
+                pieces_bytes: vec![0; PIECE_WIRE_MAX_LEN * pc as usize],
             })
             .collect();
         assert!(PushPieces { axes }.encoded_to_vec().len() <= PIECE_FRAME_PAYLOAD_MAX);
+    }
+}
+
+#[test]
+fn max_pieces_per_axis_saturates_to_zero_beyond_the_worst_case_budget() {
+    // At `PIECE_WIRE_MAX_LEN`-sized (8-coefficient) worst-case entries, 5+
+    // axes on one frame can no longer fit even one piece per axis — the
+    // documented "too many axes for the buffer" case.
+    for n in 5..=6u8 {
+        assert_eq!(
+            max_pieces_per_axis(n),
+            0,
+            "axis_count {n} must saturate to 0 under the worst-case entry budget"
+        );
     }
 }
 
@@ -298,10 +323,35 @@ fn push_pieces_decode_duplicate_axis_idx_is_err() {
 
 #[test]
 fn push_pieces_decode_truncated_is_err() {
-    let full = PushPieces::single(0, 1, 0, 0, vec![0xCD; 32]).encoded_to_vec();
+    let full = PushPieces::single(0, 1, 0, 0, one_piece(0xCD, 4)).encoded_to_vec();
     assert!(
-        PushPieces::decode(&full[..full.len() - 5]).is_err(),
-        "a frame missing piece bytes must fail to decode, not read garbage"
+        matches!(
+            PushPieces::decode(&full[..full.len() - 5]),
+            Err(DecodeError::UnexpectedEof)
+        ),
+        "a frame missing coefficient bytes must fail with UnexpectedEof, not read garbage"
+    );
+}
+
+#[test]
+fn push_pieces_decode_bad_coeff_count_is_err() {
+    let full = PushPieces::single(0, 1, 0, 0, one_piece(0, 0)).encoded_to_vec();
+    assert_eq!(
+        PushPieces::decode(&full).unwrap_err(),
+        DecodeError::BadCoeffCount { raw: 0 }
+    );
+}
+
+#[test]
+fn push_pieces_decode_coeff_count_above_max_is_err() {
+    let mut bytes = one_piece(0, 1);
+    bytes[13] = MAX_PIECE_COEFFS as u8 + 1;
+    let full = PushPieces::single(0, 1, 0, 0, bytes).encoded_to_vec();
+    assert_eq!(
+        PushPieces::decode(&full).unwrap_err(),
+        DecodeError::BadCoeffCount {
+            raw: MAX_PIECE_COEFFS as u8 + 1
+        }
     );
 }
 

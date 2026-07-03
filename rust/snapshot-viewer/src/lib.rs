@@ -2,6 +2,9 @@ use js_sys::Float64Array;
 use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 
+#[cfg(test)]
+mod tests;
+
 // -- Snapshot input types (matching Python snapshot dict) ---------------------
 
 #[derive(Deserialize)]
@@ -181,20 +184,29 @@ impl TimeSeries {
     }
 }
 
-// Evaluate one per-axis monomial piece [t0, t1, c0, c1, …] -- the lowered
+// Evaluate one per-axis monomial piece [t0, t1, c0, c1, …, cn] -- the lowered
 // trajectory the firmware runs -- and its analytic derivatives at time `ti`.
-// Within a piece pos = c0 + c1*tau + … (tau = ti - t0), so velocity,
+// Within a piece pos = sum(ck * tau^k) (tau = ti - t0), so velocity,
 // acceleration, and jerk are exact polynomial derivatives, no differencing.
-// Length-tolerant: a 6-float cubic reads c4 = c5 = 0, evaluating as the cubic.
+// Degree-generic: any coefficient count from the row (c0..cn, n = len - 3) is
+// summed via Horner; a piece with fewer than 6 floats (e.g. a linear or
+// quadratic row) simply has no higher terms to contribute.
 fn eval_piece(p: &[f64], ti: f64) -> (f64, f64, f64, f64) {
-    let g = |i: usize| p.get(i).copied().unwrap_or(0.0);
     let tau = ti - p[0];
-    let (c0, c1, c2, c3, c4, c5) = (g(2), g(3), g(4), g(5), g(6), g(7));
-    let (t2, t3, t4, t5) = (tau * tau, tau.powi(3), tau.powi(4), tau.powi(5));
-    let pos = c0 + c1 * tau + c2 * t2 + c3 * t3 + c4 * t4 + c5 * t5;
-    let vel = c1 + 2.0 * c2 * tau + 3.0 * c3 * t2 + 4.0 * c4 * t3 + 5.0 * c5 * t4;
-    let acc = 2.0 * c2 + 6.0 * c3 * tau + 12.0 * c4 * t2 + 20.0 * c5 * t3;
-    let jerk = 6.0 * c3 + 24.0 * c4 * tau + 60.0 * c5 * t2;
+    let coeffs = &p[2..];
+    let (mut pos, mut vel, mut acc, mut jerk) = (0.0, 0.0, 0.0, 0.0);
+    for (k, &ck) in coeffs.iter().enumerate().rev() {
+        pos = pos * tau + ck;
+        if k >= 1 {
+            vel = vel * tau + ck * (k as f64);
+        }
+        if k >= 2 {
+            acc = acc * tau + ck * (k as f64) * ((k - 1) as f64);
+        }
+        if k >= 3 {
+            jerk = jerk * tau + ck * (k as f64) * ((k - 1) as f64) * ((k - 2) as f64);
+        }
+    }
     (pos, vel, acc, jerk)
 }
 

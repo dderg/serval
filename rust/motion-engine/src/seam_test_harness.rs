@@ -210,19 +210,11 @@ pub fn parse_gcode_to_moves(source: &str, limits: VelocityLimits) -> Vec<Move> {
 }
 
 fn endpoint_velocity_out(p: &PieceEntry) -> f32 {
-    if p.duration > 0.0 {
-        3.0 * (p.coeffs[3] - p.coeffs[2]) / p.duration
-    } else {
-        0.0
-    }
+    p.vel_end()
 }
 
 fn endpoint_velocity_in(p: &PieceEntry) -> f32 {
-    if p.duration > 0.0 {
-        3.0 * (p.coeffs[1] - p.coeffs[0]) / p.duration
-    } else {
-        0.0
-    }
+    p.vel_start()
 }
 
 struct Ingestor {
@@ -310,6 +302,19 @@ pub fn run_schedule(source: &str, config: StreamConfig) -> SeamReport {
 /// checks guard.
 pub fn run_moves(moves: &[Move], config: StreamConfig) -> SeamReport {
     let n_moves = moves.len();
+    let segs = collect_shaped_segments(moves, config);
+
+    let mut ingestor = Ingestor::new();
+    ingestor.ingest(&segs, 0);
+    let mut report = ingestor.report;
+    report.moves = n_moves;
+    report.commits = 1;
+    report
+}
+
+/// Feed the moves through the full streaming pipeline and return the shaped
+/// segments it emits — the trajectory enqueue would dispatch.
+pub fn collect_shaped_segments(moves: &[Move], config: StreamConfig) -> Vec<ShapedSegment> {
     let home = moves
         .first()
         .and_then(|m| m.segment.spatial.as_ref())
@@ -332,14 +337,7 @@ pub fn run_moves(moves: &[Move], config: StreamConfig) -> SeamReport {
             .expect("pipeline input closed while feeding — a stage died");
     }
     drop(handle.input);
-    let segs = collector.join().expect("pipeline collector panicked");
-
-    let mut ingestor = Ingestor::new();
-    ingestor.ingest(&segs, 0);
-    let mut report = ingestor.report;
-    report.moves = n_moves;
-    report.commits = 1;
-    report
+    collector.join().expect("pipeline collector panicked")
 }
 
 #[cfg(test)]

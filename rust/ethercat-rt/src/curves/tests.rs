@@ -1,12 +1,53 @@
 use super::*;
+use runtime::piece_ring::MAX_PIECE_COEFFS;
+
+/// Chebyshev coefficients (u ∈ [−1, 1]) for the cubic Bezier control points
+/// `[b0, b0, b3, b3]` — a symmetric ease-in/ease-out curve. Duration-independent,
+/// since Chebyshev position coefficients (like Bernstein ones) only depend on
+/// the shape over the normalized parameter, not on how fast it is traversed.
+fn cheb_from_ease(b0: f32, b3: f32) -> [f32; MAX_PIECE_COEFFS] {
+    let b1 = b0;
+    let b2 = b3;
+    let mut a = [0.0_f32; MAX_PIECE_COEFFS];
+    a[0] = (5.0 * b0 + 3.0 * b1 + 3.0 * b2 + 5.0 * b3) / 16.0;
+    a[1] = (-15.0 * b0 - 3.0 * b1 + 3.0 * b2 + 15.0 * b3) / 32.0;
+    a[2] = (3.0 * b0 - 3.0 * b1 - 3.0 * b2 + 3.0 * b3) / 16.0;
+    a[3] = (-b0 + 3.0 * b1 - 3.0 * b2 + b3) / 32.0;
+    a
+}
 
 fn ease_entry(from: f32, to: f32, start_time_ns: u64, dur_s: f32) -> PieceEntry {
     PieceEntry {
         start_time: start_time_ns,
-        coeffs: [from, from, to, to],
         duration: dur_s,
-        motor_mask: 0,
-        _reserved: [0; 3],
+        coeff_count: 4,
+        coeffs: cheb_from_ease(from, to),
+        ..PieceEntry::zeroed()
+    }
+}
+
+fn linear_entry(p0: f32, p1: f32, start_time_ns: u64, dur_s: f32) -> PieceEntry {
+    let mut coeffs = [0.0_f32; MAX_PIECE_COEFFS];
+    coeffs[0] = (p0 + p1) / 2.0;
+    coeffs[1] = (p1 - p0) / 2.0;
+    PieceEntry {
+        start_time: start_time_ns,
+        duration: dur_s,
+        coeff_count: 2,
+        coeffs,
+        ..PieceEntry::zeroed()
+    }
+}
+
+fn constant_entry(pos: f32, start_time_ns: u64, dur_s: f32) -> PieceEntry {
+    let mut coeffs = [0.0_f32; MAX_PIECE_COEFFS];
+    coeffs[0] = pos;
+    PieceEntry {
+        start_time: start_time_ns,
+        duration: dur_s,
+        coeff_count: 1,
+        coeffs,
+        ..PieceEntry::zeroed()
     }
 }
 
@@ -69,9 +110,9 @@ fn ring_walk_two_pieces_contiguous() {
 #[test]
 fn push_from_bytes_round_trips() {
     let entry = ease_entry(0.0, 5.0, 500_000_000, 0.5);
-    let bytes = entry.to_le_bytes();
-    let mut all_bytes = bytes.to_vec();
-    all_bytes.extend_from_slice(&bytes);
+    let mut all_bytes = Vec::new();
+    entry.to_wire_bytes(&mut all_bytes);
+    entry.to_wire_bytes(&mut all_bytes);
 
     let mut ring = AxisRing::new();
     let pushed = ring.push_from_bytes(2, &all_bytes);
@@ -161,19 +202,12 @@ fn no_jump_at_origin_capture() {
     let dur_s: f32 = 0.001;
     let pos_mm = 5.0_f32;
 
-    ring.push_entry(PieceEntry {
-        start_time: t0,
-        coeffs: [pos_mm; 4],
-        duration: dur_s,
-        motor_mask: 0,
-        _reserved: [0; 3],
-    })
-    .unwrap();
+    ring.push_entry(constant_entry(pos_mm, t0, dur_s)).unwrap();
 
     let (sampled_pos, _vel, _acc) = ring.sample(t0).expect("sample at t0 must return Some");
     assert!(
         (sampled_pos - pos_mm).abs() < 1e-4_f32,
-        "sample at t0 must return b0={pos_mm:.4}, got {sampled_pos:.6}"
+        "sample at t0 must return the constant position {pos_mm:.4}, got {sampled_pos:.6}"
     );
 
     let counts_per_mm = 3276.8_f64;
@@ -196,26 +230,9 @@ fn piece_boundary_c0_c1_continuity() {
     let dur_s: f32 = 0.001_f32;
     let boundary_ns: u64 = t0 + dur_ns;
 
-    // De Casteljau midpoint split of the linear ramp 0→10 mm over 2ms.
-    let b0_piece0: [f32; 4] = [0.0, 5.0 / 3.0, 10.0 / 3.0, 5.0];
-    let b0_piece1: [f32; 4] = [5.0, 5.0 + 5.0 / 3.0, 5.0 + 10.0 / 3.0, 10.0];
-
-    ring.push_entry(PieceEntry {
-        start_time: t0,
-        coeffs: b0_piece0,
-        duration: dur_s,
-        motor_mask: 0,
-        _reserved: [0; 3],
-    })
-    .unwrap();
-    ring.push_entry(PieceEntry {
-        start_time: boundary_ns,
-        coeffs: b0_piece1,
-        duration: dur_s,
-        motor_mask: 0,
-        _reserved: [0; 3],
-    })
-    .unwrap();
+    ring.push_entry(linear_entry(0.0, 5.0, t0, dur_s)).unwrap();
+    ring.push_entry(linear_entry(5.0, 10.0, boundary_ns, dur_s))
+        .unwrap();
 
     let (pos_before, vel_before, _) = ring
         .sample(boundary_ns - 1)
@@ -279,13 +296,7 @@ fn fault_boundary_exact() {
 
     let mut ring_a = AxisRing::new();
     ring_a
-        .push_entry(PieceEntry {
-            start_time: start_a,
-            coeffs: [0.0_f32; 4],
-            duration: 10.0_f32,
-            motor_mask: 0,
-            _reserved: [0; 3],
-        })
+        .push_entry(constant_entry(0.0, start_a, 10.0_f32))
         .unwrap();
 
     let result_a = ring_a.sample(now_a);
@@ -303,13 +314,7 @@ fn fault_boundary_exact() {
 
     let mut ring_b = AxisRing::new();
     ring_b
-        .push_entry(PieceEntry {
-            start_time: start_b,
-            coeffs: [0.0_f32; 4],
-            duration: 10.0_f32,
-            motor_mask: 0,
-            _reserved: [0; 3],
-        })
+        .push_entry(constant_entry(0.0, start_b, 10.0_f32))
         .unwrap();
 
     let result_b = ring_b.sample(now_a);
@@ -339,16 +344,8 @@ fn fault_boundary_exact() {
 
 #[test]
 fn end_time_ns_precision() {
-    use runtime::piece_ring::PieceEntry;
-
     let start: u64 = 7_000_000_000;
-    let entry = PieceEntry {
-        start_time: start,
-        coeffs: [0.0_f32; 4],
-        duration: 0.001_f32,
-        motor_mask: 0,
-        _reserved: [0; 3],
-    };
+    let entry = constant_entry(0.0, start, 0.001_f32);
 
     let end = entry.end_time(CLOCK_FREQ_HZ);
     assert_eq!(
@@ -392,10 +389,8 @@ fn sample_reports_acceleration_consistent_with_velocity_slope() {
     let t0: u64 = 1_000_000_000;
     let dur: f32 = 1.0;
 
-    // ease_entry(0.0, 10.0, ...) → coeffs=[0,0,10,10], duration=1.0
-    // Bernstein→monomial: c1=0, c2=30, c3=−20
-    // vel_coeffs: vc0=0, vc1=60, vc2=−60  →  v(t) = 60t − 60t²
-    // a(t) = 60 − 120t  →  a(0.25) = 30.0 mm/s²
+    // ease_entry(0.0, 10.0, ...) has monomial-τ motion p(τ)=30τ²−20τ³ (dur=1s):
+    // v(τ)=60τ−60τ², a(τ)=60−120τ → a(0.25)=30.0 mm/s².
     const EXPECTED_ACCEL_AT_QUARTER: f32 = 30.0;
 
     ring.push_entry(ease_entry(0.0, 10.0, t0, dur)).unwrap();

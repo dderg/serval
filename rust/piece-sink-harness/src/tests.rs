@@ -87,12 +87,19 @@ fn frame_for(corr: u32, body: &[u8]) -> Vec<u8> {
     f
 }
 
-/// A 32-byte piece whose first 8 bytes (the start_time the parser echoes) are
-/// `start_time`.
-fn piece(start_time: u64) -> Vec<u8> {
-    let mut p = vec![0u8; 32];
+/// A variable-length wire piece entry: 16-byte header (start_time in the first
+/// 8 bytes, `coeff_count` at offset 13) followed by `coeff_count` zeroed f32
+/// coefficients.
+fn piece_with_coeffs(start_time: u64, coeff_count: u8) -> Vec<u8> {
+    let mut p = vec![0u8; 16 + 4 * coeff_count as usize];
     p[..8].copy_from_slice(&start_time.to_le_bytes());
+    p[13] = coeff_count;
     p
+}
+
+/// `piece_with_coeffs` at the harness' default coeff_count (4 -> 32 bytes).
+fn piece(start_time: u64) -> Vec<u8> {
+    piece_with_coeffs(start_time, 4)
 }
 
 fn resp_result(resp: &[u8]) -> i32 {
@@ -131,21 +138,21 @@ fn differential_three_axes_round_trips() {
                 piece_count: 1,
                 start_slot: 10,
                 new_head: 1,
-                pieces_bytes: piece(0x111),
+                pieces_bytes: piece_with_coeffs(0x111, 1),
             },
             AxisPieces {
                 axis_idx: 1,
                 piece_count: 2,
                 start_slot: 20,
                 new_head: 2,
-                pieces_bytes: [piece(0x222), piece(0x999)].concat(),
+                pieces_bytes: [piece_with_coeffs(0x222, 8), piece_with_coeffs(0x999, 4)].concat(),
             },
             AxisPieces {
                 axis_idx: 2,
                 piece_count: 1,
                 start_slot: 30,
                 new_head: 3,
-                pieces_bytes: piece(0x333),
+                pieces_bytes: piece_with_coeffs(0x333, 8),
             },
         ],
     };
@@ -217,6 +224,60 @@ fn truncated_frame_rejected_no_commit() {
         &PushPieces::single(0, 1, 0, 1, piece(7)).encoded_to_vec(),
     );
     let out = run(&full[..full.len() - 8]); // ends mid-piece
+    assert!(out.commits.is_empty());
+    assert_ne!(resp_result(&out.resp), OK);
+}
+
+#[test]
+fn coeff_count_zero_rejected_no_commit() {
+    let mut p = piece(1);
+    p[13] = 0;
+    let body = PushPieces::single(0, 1, 0, 1, p).encoded_to_vec();
+    let out = run(&frame_for(0, &body));
+    assert!(out.commits.is_empty());
+    assert_ne!(resp_result(&out.resp), OK);
+}
+
+#[test]
+fn coeff_count_nine_rejected_no_commit() {
+    let mut p = piece(1);
+    p[13] = 9;
+    let body = PushPieces::single(0, 1, 0, 1, p).encoded_to_vec();
+    let out = run(&frame_for(0, &body));
+    assert!(out.commits.is_empty());
+    assert_ne!(resp_result(&out.resp), OK);
+}
+
+#[test]
+fn coeff_count_255_rejected_no_commit() {
+    let mut p = piece(1);
+    p[13] = 255;
+    let body = PushPieces::single(0, 1, 0, 1, p).encoded_to_vec();
+    let out = run(&frame_for(0, &body));
+    assert!(out.commits.is_empty());
+    assert_ne!(resp_result(&out.resp), OK);
+}
+
+#[test]
+fn truncated_mid_entry_header_rejected_no_commit() {
+    let full = frame_for(
+        0,
+        &PushPieces::single(0, 1, 0, 1, piece_with_coeffs(7, 4)).encoded_to_vec(),
+    );
+    let msg_len = 7 + 1 + 8 + 10; // message header + axis_count + block header + 10/16 of the entry header
+    let out = run(&full[..msg_len]);
+    assert!(out.commits.is_empty());
+    assert_ne!(resp_result(&out.resp), OK);
+}
+
+#[test]
+fn truncated_mid_coefficients_rejected_no_commit() {
+    let full = frame_for(
+        0,
+        &PushPieces::single(0, 1, 0, 1, piece_with_coeffs(7, 8)).encoded_to_vec(),
+    );
+    let msg_len = 7 + 1 + 8 + 16 + 10; // ... + full entry header + 10/32 coefficient bytes
+    let out = run(&full[..msg_len]);
     assert!(out.commits.is_empty());
     assert_ne!(resp_result(&out.resp), OK);
 }
@@ -299,9 +360,14 @@ fn differential_random_valid_frames() {
                 if k == 0 {
                     first_st = st;
                 }
-                let mut p = vec![0u8; 32];
+                let coeff_count = 1 + (next() % 8) as u8; // 1..=8
+                let mut p = vec![0u8; 16 + 4 * coeff_count as usize];
                 p[..8].copy_from_slice(&st.to_le_bytes());
-                for b in p[8..].iter_mut() {
+                for b in p[8..13].iter_mut() {
+                    *b = (next() & 0xFF) as u8;
+                }
+                p[13] = coeff_count;
+                for b in p[14..].iter_mut() {
                     *b = (next() & 0xFF) as u8;
                 }
                 pb.extend_from_slice(&p);

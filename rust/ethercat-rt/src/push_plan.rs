@@ -1,5 +1,6 @@
-use mcu_protocol::messages::{AxisPieces, PIECE_ENTRY_LEN};
+use mcu_protocol::messages::AxisPieces;
 use mcu_protocol::result_codes::RING_FULL;
+use runtime::piece_ring::PieceEntry;
 
 /// Route an axis block's `axis_idx` to a ring slot. A single-slave endpoint
 /// sends every block to slot 0 — the chain has one drive, so the host need not
@@ -33,8 +34,12 @@ pub fn plan_bundle(
     for axis in axes {
         let slot = resolve_slot(axis.axis_idx, slave_axes).ok_or(RING_FULL)?;
         let count = usize::from(axis.piece_count);
-        if axis.pieces_bytes.len() < count * PIECE_ENTRY_LEN {
-            return Err(RING_FULL);
+        // Walk the variable-length entries so a malformed bundle is rejected
+        // before any ring mutation.
+        let mut rest = axis.pieces_bytes.as_slice();
+        for _ in 0..count {
+            let (_, wire_len) = PieceEntry::parse_wire(rest).map_err(|_| RING_FULL)?;
+            rest = &rest[wire_len..];
         }
         if staged[slot] + count > free(slot) {
             return Err(RING_FULL);

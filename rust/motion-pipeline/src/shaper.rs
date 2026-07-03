@@ -4,8 +4,14 @@ use crossbeam_channel::{Receiver, Sender};
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
 use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedSignal};
 
-use crate::lowering::hermite_cubic;
+use crate::lowering::{
+    FIT_TRUNC_ACC_MM_S2, FIT_TRUNC_VEL_MM_S, LADDER_PROBES_U, eval_mono, eval_mono_dd,
+    ladder_candidate, quintic_in_u,
+};
 use crate::{Control, LoweredItem, PostProcessError, ShapedItem};
+use nurbs::chebyshev::{
+    chebyshev_to_monomial_tau, monomial_u_to_chebyshev, truncate_chebyshev_c2_anchored,
+};
 
 const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 
@@ -173,7 +179,32 @@ fn apply_axis_chains(
         let chain = chains.get(axis).unwrap_or(&default_chain);
         apply_axis_chain(history, base, &mut out, axis, force, chain)?;
     }
+    for seg in &mut out {
+        pad_segment_axes_to_uniform_degree(seg);
+    }
     Ok(out)
+}
+
+/// Refit tracks can come out at different degrees per axis; the kinematics
+/// lane mixing in enqueue adds axis curves together, which needs one degree
+/// across the segment. Zero-padding the monomial pieces is exact.
+fn pad_segment_axes_to_uniform_degree(seg: &mut ShapedSegment) {
+    let max_degree = seg
+        .axes
+        .iter()
+        .map(|curve| curve.degree() as usize)
+        .max()
+        .unwrap_or(0);
+    for curve in &mut seg.axes {
+        if (curve.degree() as usize) == max_degree {
+            continue;
+        }
+        let mut pieces = extract_bezier_pieces(curve);
+        for piece in &mut pieces {
+            piece.coeffs.resize(max_degree + 1, 0.0);
+        }
+        *curve = bezier_pieces_to_nurbs(&pieces);
+    }
 }
 
 fn apply_axis_chain(
@@ -304,26 +335,116 @@ fn fit_axis_from_signal(
             &mut pieces,
         )?;
     }
+    let max_len = pieces.iter().map(|p| p.coeffs.len()).max().unwrap_or(1);
+    for piece in &mut pieces {
+        piece.coeffs.resize(max_len, 0.0);
+    }
     Ok(bezier_pieces_to_nurbs(&pieces))
 }
 
 const SHAPED_FIT_TOL_MM: f64 = 1e-3;
 const SHAPED_FIT_MAX_DEPTH: u32 = 16;
 const SHAPED_FIT_MIN_SPAN_S: f64 = 5e-5;
+/// Looser than the lowering's 50 mm/s²: the shaped signal's acceleration truth
+/// comes from a second-difference stencil, not an analytic profile.
+const SHAPED_FIT_TOL_ACCEL_MM_S2: f64 = 200.0;
 
-fn shaped_hermite(
+/// Sampled truth for one span, taken up front so stencil errors surface as
+/// `PostProcessError` instead of poisoning the ladder closures.
+struct SpanTruth {
+    pos: Vec<(f64, f64)>,
+    acc: Vec<(f64, f64)>,
+}
+
+impl SpanTruth {
+    fn pos_at(&self, u: f64) -> f64 {
+        self.pos
+            .iter()
+            .find(|(uu, _)| *uu == u)
+            .unwrap_or_else(|| panic!("ladder probed unsampled node u={u}"))
+            .1
+    }
+
+    fn acc_at(&self, u: f64) -> f64 {
+        self.acc
+            .iter()
+            .find(|(uu, _)| *uu == u)
+            .unwrap_or_else(|| panic!("ladder probed unsampled accel node u={u}"))
+            .1
+    }
+}
+
+const LADDER_FIT_NODES_U: [f64; 3] = [0.0, 0.5, -0.5];
+
+/// Ladder fit of the shaped signal over one span: quintic Hermite matching
+/// sampled (p, v, a) at both ends, degrees 6/7 from interior residuals.
+/// Returns the accepted monomial-in-u fit, or the degree-7 candidate with
+/// `fits = false` so the caller can bisect.
+#[allow(clippy::type_complexity)]
+fn shaped_ladder(
     axis: usize,
     sig: &ShapedSignal<'_>,
     t0: f64,
     t1: f64,
     domain_lo: f64,
     domain_hi: f64,
-) -> Result<BezierPiece<f64>, PostProcessError> {
+) -> Result<(Vec<f64>, bool), PostProcessError> {
+    let h = t1 - t0;
+    let t_of = |u: f64| (0.5 * (u + 1.0)).mul_add(h, t0);
     let p0 = finite_sample(axis, sig, t0)?;
     let p1 = finite_sample(axis, sig, t1)?;
     let v0 = finite_derivative(axis, sig, t0, t1, domain_lo, domain_hi)?;
     let v1 = finite_derivative(axis, sig, t1, t0, domain_lo, domain_hi)?;
-    Ok(hermite_cubic(t0, t1, p0, v0, p1, v1))
+    let a0 = finite_second_derivative(axis, sig, t0, h, domain_lo, domain_hi)?;
+    let a1 = finite_second_derivative(axis, sig, t1, h, domain_lo, domain_hi)?;
+    let base = quintic_in_u((p0, v0, a0), (p1, v1, a1), h);
+
+    let mut truth = SpanTruth {
+        pos: Vec::with_capacity(LADDER_FIT_NODES_U.len() + LADDER_PROBES_U.len()),
+        acc: Vec::with_capacity(LADDER_PROBES_U.len()),
+    };
+    for &u in LADDER_FIT_NODES_U.iter().chain(LADDER_PROBES_U.iter()) {
+        truth.pos.push((u, finite_sample(axis, sig, t_of(u))?));
+    }
+    for &u in &LADDER_PROBES_U {
+        truth.acc.push((
+            u,
+            finite_second_derivative(axis, sig, t_of(u), h, domain_lo, domain_hi)?,
+        ));
+    }
+
+    let truth_p = |u: f64| truth.pos_at(u);
+    let dd_scale = (2.0 / h) * (2.0 / h);
+    let ok = |c: &[f64]| {
+        LADDER_PROBES_U.iter().all(|&u| {
+            (eval_mono(c, u) - truth.pos_at(u)).abs() <= SHAPED_FIT_TOL_MM
+                && (eval_mono_dd(c, u) * dd_scale - truth.acc_at(u)).abs()
+                    <= SHAPED_FIT_TOL_ACCEL_MM_S2
+        })
+    };
+    for &degree in crate::lowering::ladder_degrees(h) {
+        let c = ladder_candidate(&base, degree, &truth_p);
+        if ok(&c) {
+            return Ok((c, true));
+        }
+    }
+    Ok((base, false))
+}
+
+fn shaped_piece_from_mono_u(mono_u: &[f64], t0: f64, t1: f64) -> BezierPiece<f64> {
+    let h = t1 - t0;
+    let cheb = truncate_chebyshev_c2_anchored(
+        &monomial_u_to_chebyshev(mono_u),
+        h,
+        0.1 * SHAPED_FIT_TOL_MM,
+        FIT_TRUNC_VEL_MM_S,
+        FIT_TRUNC_ACC_MM_S2,
+    );
+    BezierPiece {
+        u_start: t0,
+        u_end: t1,
+        coeffs: chebyshev_to_monomial_tau(&cheb, h),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -337,22 +458,39 @@ fn refine_shaped_span(
     depth: u32,
     out: &mut Vec<BezierPiece<f64>>,
 ) -> Result<(), PostProcessError> {
-    let piece = shaped_hermite(axis, sig, t0, t1, domain_lo, domain_hi)?;
-    let mut worst = 0.0_f64;
-    for frac in [0.25_f64, 0.5, 0.75] {
-        let tm = frac.mul_add(t1 - t0, t0);
-        worst = worst.max((piece.evaluate(tm) - finite_sample(axis, sig, tm)?).abs());
-    }
-    if depth >= SHAPED_FIT_MAX_DEPTH
-        || (t1 - t0) <= 2.0 * SHAPED_FIT_MIN_SPAN_S
-        || worst <= SHAPED_FIT_TOL_MM
-    {
-        out.push(piece);
+    let (mono_u, fits) = shaped_ladder(axis, sig, t0, t1, domain_lo, domain_hi)?;
+    if fits || depth >= SHAPED_FIT_MAX_DEPTH || (t1 - t0) <= 2.0 * SHAPED_FIT_MIN_SPAN_S {
+        out.push(shaped_piece_from_mono_u(&mono_u, t0, t1));
         return Ok(());
     }
     let tm = 0.5 * (t0 + t1);
     refine_shaped_span(axis, sig, t0, tm, domain_lo, domain_hi, depth + 1, out)?;
     refine_shaped_span(axis, sig, tm, t1, domain_lo, domain_hi, depth + 1, out)
+}
+
+/// Second-difference acceleration estimate with a stencil ~10× the velocity
+/// stencil (h² in the denominator amplifies sample noise quadratically).
+/// The general non-uniform 3-point formula handles domain-edge clamping.
+fn finite_second_derivative(
+    axis: usize,
+    sig: &ShapedSignal<'_>,
+    t: f64,
+    span: f64,
+    domain_lo: f64,
+    domain_hi: f64,
+) -> Result<f64, PostProcessError> {
+    let h = (span.abs() * 0.05).clamp(1e-5, 5e-4);
+    let a = (t - h).max(domain_lo);
+    let c = (t + h).min(domain_hi);
+    if c - a <= f64::EPSILON {
+        return Err(PostProcessError::DegenerateAxisTrack { axis });
+    }
+    let b = 0.5 * (a + c);
+    let fa = finite_sample(axis, sig, a)?;
+    let fb = finite_sample(axis, sig, b)?;
+    let fc = finite_sample(axis, sig, c)?;
+    let (ba, cb, ca) = (b - a, c - b, c - a);
+    Ok(2.0 * (fa / (ba * ca) - fb / (ba * cb) + fc / (ca * cb)))
 }
 
 fn finite_sample(axis: usize, sig: &ShapedSignal<'_>, t: f64) -> Result<f64, PostProcessError> {

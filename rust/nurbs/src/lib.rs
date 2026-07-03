@@ -60,6 +60,8 @@ pub use knot::KnotVector;
 #[cfg(feature = "host")]
 pub mod bezier;
 #[cfg(feature = "host")]
+pub mod chebyshev;
+#[cfg(feature = "host")]
 pub use bezier::BezierPiece;
 
 pub const MAX_DEGREE: usize = 20;

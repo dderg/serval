@@ -8,10 +8,8 @@ fn make_piece_dur(t: u64, duration_secs: f32) -> (PieceEntry, f64) {
     (
         PieceEntry {
             start_time: t,
-            coeffs: [0.0; 4],
             duration: duration_secs,
-            motor_mask: 0,
-            _reserved: [0; 3],
+            ..PieceEntry::zeroed()
         },
         t as f64,
     )
