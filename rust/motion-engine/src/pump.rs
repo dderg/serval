@@ -144,6 +144,13 @@ const PUMP_INTAKE_BACKLOG_CAP: u64 = 16384;
 
 const MAX_PER_FRAME: usize = 32;
 
+// A PushPieces bundle occupies the serial line for its whole wire length
+// (~20 ms/KiB at 500 kbaud) while its front piece's arrival lead keeps
+// draining, so the cap must be in bytes — variable-degree entries span
+// 20..=48 B and a count cap is wrong at both ends. send_ready() loops until
+// Idle, so this bounds per-transaction latency, not throughput.
+const BUNDLE_WIRE_BYTE_BUDGET: usize = 1024;
+
 fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
     let staged: u64 = queues.values().map(|q| q.pieces.len() as u64).sum();
     staged < PUMP_INTAKE_BACKLOG_CAP
@@ -431,7 +438,13 @@ where
         loop {
             let sched = {
                 let hz_of = |k: &AxisKey, q: &AxisQueue| self.horizon_of(k, q);
-                schedule(&self.queues, MAX_PER_FRAME, hz_of, |_| usize::MAX)
+                schedule(
+                    &self.queues,
+                    MAX_PER_FRAME,
+                    BUNDLE_WIRE_BYTE_BUDGET,
+                    hz_of,
+                    |_| usize::MAX,
+                )
             };
             match sched {
                 Schedule::Idle => break,

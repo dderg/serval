@@ -78,7 +78,13 @@ fn schedule_resends_orphan_when_retired_overtook_pushed() {
     queues.insert(key, q);
 
     const MAX_PER_FRAME: usize = 32;
-    match schedule(&queues, MAX_PER_FRAME, |_, _| None, |_| usize::MAX) {
+    match schedule(
+        &queues,
+        MAX_PER_FRAME,
+        usize::MAX,
+        |_, _| None,
+        |_| usize::MAX,
+    ) {
         Schedule::Send(frames) => {
             assert_eq!(frames.len(), 1, "exactly the inverted axis is scheduled");
             assert_eq!(frames[0].key, key);

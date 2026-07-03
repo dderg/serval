@@ -28,7 +28,13 @@ fn no_cap(_: &AxisKey) -> usize {
 fn idle_when_empty() {
     let queues: BTreeMap<AxisKey, AxisQueue> = BTreeMap::new();
     assert!(matches!(
-        schedule(&queues, 255, |_: &AxisKey, _: &AxisQueue| None, no_cap),
+        schedule(
+            &queues,
+            255,
+            usize::MAX,
+            |_: &AxisKey, _: &AxisQueue| None,
+            no_cap
+        ),
         Schedule::Idle
     ));
 }
@@ -41,7 +47,13 @@ fn stalls_when_global_head_ring_full() {
     queues.insert(AxisKey { mcu_id: 1, axis: 0 }, a);
     queues.insert(AxisKey { mcu_id: 2, axis: 0 }, q_with(8, &[20]));
     assert!(matches!(
-        schedule(&queues, 255, |_: &AxisKey, _: &AxisQueue| None, no_cap),
+        schedule(
+            &queues,
+            255,
+            usize::MAX,
+            |_: &AxisKey, _: &AxisQueue| None,
+            no_cap
+        ),
         Schedule::StallFull(AxisKey { mcu_id: 1, axis: 0 })
     ));
 }
@@ -52,7 +64,13 @@ fn batches_head_mcu_past_other_mcu_interleave() {
     queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_with(8, &[0, 3]));
     queues.insert(AxisKey { mcu_id: 1, axis: 1 }, q_with(8, &[1]));
     queues.insert(AxisKey { mcu_id: 2, axis: 0 }, q_with(8, &[2]));
-    let s = schedule(&queues, 255, |_: &AxisKey, _: &AxisQueue| None, no_cap);
+    let s = schedule(
+        &queues,
+        255,
+        usize::MAX,
+        |_: &AxisKey, _: &AxisQueue| None,
+        no_cap,
+    );
     match s {
         Schedule::Send(frames) => {
             let ax: Vec<_> = frames.iter().map(|f| (f.key, f.pieces.len())).collect();
@@ -81,7 +99,13 @@ fn fanned_out_trajectory_still_batches_full_frames() {
             queues.insert(AxisKey { mcu_id, axis }, q_with(64, &starts));
         }
     }
-    let s = schedule(&queues, 32, |_: &AxisKey, _: &AxisQueue| None, no_cap);
+    let s = schedule(
+        &queues,
+        32,
+        usize::MAX,
+        |_: &AxisKey, _: &AxisQueue| None,
+        no_cap,
+    );
     match s {
         Schedule::Send(frames) => {
             assert!(frames.iter().all(|f| f.key.mcu_id == 1));
@@ -103,7 +127,13 @@ fn fanned_out_trajectory_still_batches_full_frames() {
 fn frame_cap_splits() {
     let mut queues = BTreeMap::new();
     queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_with(8, &[0, 1, 2, 3]));
-    let s = schedule(&queues, 2, |_: &AxisKey, _: &AxisQueue| None, no_cap);
+    let s = schedule(
+        &queues,
+        2,
+        usize::MAX,
+        |_: &AxisKey, _: &AxisQueue| None,
+        no_cap,
+    );
     match s {
         Schedule::Send(frames) => {
             assert_eq!(frames.len(), 1);
@@ -121,7 +151,13 @@ fn full_axis_does_not_block_same_mcu_sibling() {
     xq.pushed = 1;
     q.insert(AxisKey { mcu_id: 1, axis: 1 }, yq);
     q.insert(AxisKey { mcu_id: 1, axis: 0 }, xq);
-    match schedule(&q, 255, |_: &AxisKey, _: &AxisQueue| None, no_cap) {
+    match schedule(
+        &q,
+        255,
+        usize::MAX,
+        |_: &AxisKey, _: &AxisQueue| None,
+        no_cap,
+    ) {
         Schedule::Send(frames) => {
             let yf = frames
                 .iter()
@@ -143,7 +179,13 @@ fn time_gate_blocks_piece_beyond_horizon() {
     let mut queues = BTreeMap::new();
     queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_with(8, &[100]));
     queues.insert(AxisKey { mcu_id: 1, axis: 1 }, q_with(8, &[200]));
-    match schedule(&queues, 255, |_: &AxisKey, _: &AxisQueue| Some(150), no_cap) {
+    match schedule(
+        &queues,
+        255,
+        usize::MAX,
+        |_: &AxisKey, _: &AxisQueue| Some(150),
+        no_cap,
+    ) {
         Schedule::Send(frames) => {
             assert_eq!(frames.len(), 1, "only axis 0 should be batched");
             assert_eq!(frames[0].key, AxisKey { mcu_id: 1, axis: 0 });
@@ -159,7 +201,13 @@ fn all_beyond_horizon_returns_stall_ahead() {
     queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_with(8, &[1000]));
     assert!(
         matches!(
-            schedule(&queues, 255, |_: &AxisKey, _: &AxisQueue| Some(500), no_cap),
+            schedule(
+                &queues,
+                255,
+                usize::MAX,
+                |_: &AxisKey, _: &AxisQueue| Some(500),
+                no_cap
+            ),
             Schedule::StallAhead(AxisKey { mcu_id: 1, axis: 0 })
         ),
         "expected StallAhead when sole piece is beyond horizon"
@@ -170,7 +218,13 @@ fn all_beyond_horizon_returns_stall_ahead() {
 fn no_horizon_none_uses_count_only_gate() {
     let mut queues = BTreeMap::new();
     queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_with(8, &[u64::MAX]));
-    match schedule(&queues, 255, |_: &AxisKey, _: &AxisQueue| None, no_cap) {
+    match schedule(
+        &queues,
+        255,
+        usize::MAX,
+        |_: &AxisKey, _: &AxisQueue| None,
+        no_cap,
+    ) {
         Schedule::Send(frames) => {
             assert_eq!(frames.len(), 1);
             assert_eq!(frames[0].pieces.len(), 1);
@@ -205,7 +259,7 @@ fn cross_mcu_host_time_ordering_bench_regression() {
         }
     };
 
-    match schedule(&queues, 255, horizon_of, no_cap) {
+    match schedule(&queues, 255, usize::MAX, horizon_of, no_cap) {
         Schedule::Send(frames) => {
             assert_eq!(frames.len(), 1);
             assert_eq!(
@@ -241,7 +295,7 @@ fn homing_lead_gates_piece_release() {
         }
     };
 
-    match schedule(&queues, 255, &horizon_of, no_cap) {
+    match schedule(&queues, 255, usize::MAX, &horizon_of, no_cap) {
         Schedule::Send(frames) => {
             assert_eq!(frames.len(), 1);
             assert_eq!(
@@ -267,7 +321,7 @@ fn homing_lead_gates_piece_release() {
         }
     };
 
-    match schedule(&queues2, 255, &horizon_of_max, no_cap) {
+    match schedule(&queues2, 255, usize::MAX, &horizon_of_max, no_cap) {
         Schedule::Send(frames) => {
             assert_eq!(frames.len(), 1);
             assert_eq!(
@@ -302,7 +356,7 @@ fn cross_lead_per_queue_horizon_independent() {
         Some(ack_now + (q.lead_secs * freq) as u64)
     };
 
-    match schedule(&queues, 255, &horizon_of, no_cap) {
+    match schedule(&queues, 255, usize::MAX, &horizon_of, no_cap) {
         Schedule::Send(frames) => {
             let a_frame = frames.iter().find(|f| f.key == key_a);
             let b_frame = frames.iter().find(|f| f.key == key_b);
@@ -344,9 +398,48 @@ fn stall_full_on_globally_earliest_gates_all() {
 
     assert!(
         matches!(
-            schedule(&queues, 255, |_: &AxisKey, _: &AxisQueue| None, no_cap),
+            schedule(
+                &queues,
+                255,
+                usize::MAX,
+                |_: &AxisKey, _: &AxisQueue| None,
+                no_cap
+            ),
             Schedule::StallFull(AxisKey { mcu_id: 0, axis: 0 })
         ),
         "StallFull on the globally host-earliest queue must gate all issuance"
     );
+}
+
+#[test]
+fn bundle_byte_budget_bounds_the_send() {
+    let mut queues = BTreeMap::new();
+    queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_with(64, &[0, 2, 4, 6]));
+    queues.insert(AxisKey { mcu_id: 1, axis: 1 }, q_with(64, &[1, 3, 5, 7]));
+    // zeroed() entries carry one coefficient: 20 wire bytes each, so a 65-byte
+    // budget admits three pieces, taken in global start-time order.
+    let s = schedule(&queues, 255, 65, |_: &AxisKey, _: &AxisQueue| None, no_cap);
+    match s {
+        Schedule::Send(frames) => {
+            let counts: BTreeMap<AxisKey, usize> =
+                frames.iter().map(|f| (f.key, f.pieces.len())).collect();
+            assert_eq!(counts[&AxisKey { mcu_id: 1, axis: 0 }], 2);
+            assert_eq!(counts[&AxisKey { mcu_id: 1, axis: 1 }], 1);
+        }
+        other => panic!("expected Send; got {other:?}"),
+    }
+}
+
+#[test]
+fn bundle_byte_budget_always_admits_the_head_piece() {
+    let mut queues = BTreeMap::new();
+    queues.insert(AxisKey { mcu_id: 1, axis: 0 }, q_with(64, &[0, 1]));
+    let s = schedule(&queues, 255, 1, |_: &AxisKey, _: &AxisQueue| None, no_cap);
+    match s {
+        Schedule::Send(frames) => {
+            assert_eq!(frames.len(), 1);
+            assert_eq!(frames[0].pieces.len(), 1);
+        }
+        other => panic!("expected Send; got {other:?}"),
+    }
 }

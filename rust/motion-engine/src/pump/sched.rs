@@ -69,6 +69,7 @@ pub enum Schedule {
 pub fn schedule(
     queues: &BTreeMap<AxisKey, AxisQueue>,
     max_per_frame: usize,
+    bundle_wire_budget: usize,
     horizon_of: impl Fn(&AxisKey, &AxisQueue) -> Option<u64>,
     releasable_cap_of: impl Fn(&AxisKey) -> usize,
 ) -> Schedule {
@@ -118,6 +119,7 @@ pub fn schedule(
 
     let mut taken: BTreeMap<AxisKey, usize> = BTreeMap::new();
     let mut maxed: BTreeSet<AxisKey> = cap_skipped;
+    let mut bundle_bytes = 0usize;
     loop {
         let next = queues
             .iter()
@@ -128,13 +130,16 @@ pub fn schedule(
                 let already = taken.get(k).copied().unwrap_or(0);
                 q.pieces
                     .get(already)
-                    .map(|&(ref p, host)| (*k, p.start_time, host))
+                    .map(|&(ref p, host)| (*k, p.start_time, host, p.wire_len()))
             })
-            .min_by(|(ka, _, ha), (kb, _, hb)| ha.total_cmp(hb).then(ka.cmp(kb)));
-        let (k, start_ticks, _host) = match next {
+            .min_by(|(ka, _, ha, _), (kb, _, hb, _)| ha.total_cmp(hb).then(ka.cmp(kb)));
+        let (k, start_ticks, _host, wire_len) = match next {
             Some(n) => n,
             None => break,
         };
+        if !taken.is_empty() && bundle_bytes + wire_len > bundle_wire_budget {
+            break;
+        }
         let already = taken.get(&k).copied().unwrap_or(0);
         let q = &queues[&k];
         let room = q.room() as usize;
@@ -152,6 +157,7 @@ pub fn schedule(
                 continue;
             }
         }
+        bundle_bytes += wire_len;
         *taken.entry(k).or_insert(0) += 1;
     }
 
