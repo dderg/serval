@@ -11,7 +11,7 @@ use motion_pipeline::planner::Planner;
 use motion_pipeline::{StreamConfig, run_lowerer};
 
 #[pyfunction]
-#[pyo3(signature = (waypoints, max_velocity, max_accel, square_corner_velocity, max_jerk, arc_fit = None, max_extrude_only_velocity = None, max_extrude_only_accel = None))]
+#[pyo3(signature = (waypoints, max_velocity, max_accel, square_corner_velocity, max_jerk, arc_fit = None, max_extrude_only_velocity = None, max_extrude_only_accel = None, max_path_deviation = None, max_accel_deviation = None))]
 pub fn pipeline_snapshot(
     py: Python<'_>,
     waypoints: Vec<(f64, f64, f64, f64, f64)>,
@@ -22,7 +22,23 @@ pub fn pipeline_snapshot(
     arc_fit: Option<u32>,
     max_extrude_only_velocity: Option<f64>,
     max_extrude_only_accel: Option<f64>,
+    max_path_deviation: Option<f64>,
+    max_accel_deviation: Option<f64>,
 ) -> PyResult<Py<PyDict>> {
+    if let Some(v) = max_path_deviation {
+        if !(v.is_finite() && v > 0.0) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "max_path_deviation must be finite and positive, got {v}"
+            )));
+        }
+    }
+    if let Some(v) = max_accel_deviation {
+        if !(v > 0.0) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "max_accel_deviation must be positive, got {v}"
+            )));
+        }
+    }
     if waypoints.len() < 2 {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "need at least 2 waypoints",
@@ -46,7 +62,8 @@ pub fn pipeline_snapshot(
         integration_tol: VELOCITY_INTEGRATION_TOL,
         max_extrude_only_velocity_mm_s: max_extrude_only_velocity.unwrap_or(f64::INFINITY),
         max_extrude_only_accel_mm_s2: max_extrude_only_accel.unwrap_or(f64::INFINITY),
-        fit_tol_mm: TRAJECTORY_FIT_TOL_MM,
+        fit_tol_mm: max_path_deviation.unwrap_or(TRAJECTORY_FIT_TOL_MM),
+        fit_tol_accel_mm_s2: max_accel_deviation.unwrap_or(TRAJECTORY_FIT_TOL_ACCEL_MM_S2),
         max_buffer_moves: SNAPSHOT_MAX_BUFFER_MOVES,
         limits,
     };
@@ -209,6 +226,7 @@ const SAMPLES_PER_MM: f64 = 2.0;
 const EXTRUDER_AXIS: usize = 3;
 // Position tolerance for the cubic lowering — the same order the streamer ships.
 const TRAJECTORY_FIT_TOL_MM: f64 = 0.005;
+const TRAJECTORY_FIT_TOL_ACCEL_MM_S2: f64 = 50.0;
 const VELOCITY_INTEGRATION_TOL: f64 = 1e-7;
 /// Comfortably above any snapshot case's move count, so a case is always
 /// planned as a single window instead of being split by the streaming
@@ -265,7 +283,10 @@ fn run_pipeline(
     run_lowerer(
         planned_rx,
         lowered_tx,
-        config.fit_tol_mm,
+        motion_pipeline::FitTol {
+            pos_mm: config.fit_tol_mm,
+            accel_mm_s2: config.fit_tol_accel_mm_s2,
+        },
         axis_chains.clone(),
         home_pos,
         0.0,

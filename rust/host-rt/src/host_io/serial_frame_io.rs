@@ -1,5 +1,5 @@
 use std::io::{self, Read};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serialport::SerialPort;
 
@@ -57,8 +57,31 @@ impl SerialFrameIo {
         self.port.write_all(bytes).map_err(TransportError::Io)
     }
 
+    // NOT `self.port.flush()`: that is tcdrain(), whose in-kernel wait sleeps
+    // in whole jiffies — 4 ms at HZ=250 — so every frame paid a 4–12 ms stall
+    // on a raw tty (and the reactor cannot read while it waits). Polling the
+    // kernel's unsent-byte count with hrtimer-backed sleeps keeps the same
+    // drained-on-return backpressure at microsecond granularity.
     pub fn flush(&mut self) -> Result<(), TransportError> {
-        self.port.flush().map_err(TransportError::Io)
+        const DRAIN_POLL: Duration = Duration::from_micros(200);
+        const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+        let deadline = Instant::now() + DRAIN_TIMEOUT;
+        loop {
+            let pending = self
+                .port
+                .bytes_to_write()
+                .map_err(|e| TransportError::Io(io::Error::other(e.to_string())))?;
+            if pending == 0 {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(TransportError::Io(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("serial drain stalled: {pending} bytes unsent after {DRAIN_TIMEOUT:?}"),
+                )));
+            }
+            std::thread::sleep(DRAIN_POLL);
+        }
     }
 
     #[cfg(any(test, feature = "test-harness"))]

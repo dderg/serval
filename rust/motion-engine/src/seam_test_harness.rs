@@ -29,6 +29,7 @@ pub fn default_stream_config() -> StreamConfig {
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
         fit_tol_mm: 1e-3,
+        fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 512,
         limits: VelocityLimits::try_new(100.0, 1000.0, 5.0, 100_000.0)
             .expect("bench limits (max_v=100 accel=1000 scv=5 jerk=100000) are valid"),

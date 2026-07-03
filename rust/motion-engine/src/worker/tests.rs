@@ -49,6 +49,7 @@ fn cfg_cap(max_buffer_moves: usize) -> StreamConfig {
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
         fit_tol_mm: 1e-3,
+        fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves,
         limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
     }

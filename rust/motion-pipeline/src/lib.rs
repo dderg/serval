@@ -13,7 +13,7 @@ mod types;
 
 pub use fitter::Fitter;
 pub use lowerer::{advance_odometer, dist3, run_lowerer};
-pub use lowering::{LoweringError, lower_move, lower_move_pieces};
+pub use lowering::{FitTol, LoweringError, lower_move, lower_move_pieces};
 pub use planner::Planner;
 pub use shaper::Shaper;
 pub use types::{
@@ -45,7 +45,10 @@ pub fn setup_stages(
     let planner = Planner::new(config);
     spawn_stage("kalico-plan", move || planner.run(fitted_rx, planned_tx));
 
-    let fit_tol = config.fit_tol_mm;
+    let fit_tol = FitTol {
+        pos_mm: config.fit_tol_mm,
+        accel_mm_s2: config.fit_tol_accel_mm_s2,
+    };
     let lower_chains = axis_chains.clone();
     spawn_stage("kalico-lower", move || {
         run_lowerer(

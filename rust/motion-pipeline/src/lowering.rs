@@ -18,13 +18,20 @@ const MAX_SUBDIVISION_DEPTH: u32 = 22;
 
 const MIN_FIT_PIECE_S: f64 = 1e-4;
 
-/// Absolute acceleration-error budget for a fitted piece, probed at the knots
-/// as well as the interior. The positional weighting alone (`accel_err·h²/8`)
-/// lets a short piece end with an acceleration hundreds of mm/s² off the
-/// profile — positionally invisible, but adjacent pieces then step by twice
-/// that error at their shared knot, and the dispatched trajectory carries a
-/// jerk spike the planner never asked for.
-const FIT_TOL_ACCEL_MM_S2: f64 = 50.0;
+/// Fit acceptance budgets for one lowered piece, probed at the interior
+/// Chebyshev nodes (endpoints are matched exactly by construction).
+#[derive(Debug, Clone, Copy)]
+pub struct FitTol {
+    pub pos_mm: f64,
+    /// Absolute acceleration-error budget for a fitted piece. The positional
+    /// weighting alone (`accel_err·h²/8`) lets a short piece end with an
+    /// acceleration hundreds of mm/s² off the profile — positionally
+    /// invisible, but adjacent pieces then step by twice that error at their
+    /// shared knot, and the dispatched trajectory carries a jerk spike the
+    /// planner never asked for. Only accel-feedforward consumers (EtherCAT
+    /// servos) can tell; steppers just follow positions.
+    pub accel_mm_s2: f64,
+}
 
 /// Interior probe nodes `cos(kπ/8)` on u ∈ [−1, 1] — endpoints are matched
 /// exactly by construction, so all probing is interior.
@@ -118,14 +125,14 @@ pub(crate) fn ladder_candidate(
 fn candidate_ok(
     mono_u: &[f64],
     h: f64,
-    tol_mm: f64,
+    tol: FitTol,
     truth_p: &dyn Fn(f64) -> f64,
     truth_a: &dyn Fn(f64) -> f64,
 ) -> bool {
     let dd_scale = (2.0 / h) * (2.0 / h);
     LADDER_PROBES_U.iter().all(|&u| {
-        (eval_mono(mono_u, u) - truth_p(u)).abs() <= tol_mm
-            && (eval_mono_dd(mono_u, u) * dd_scale - truth_a(u)).abs() <= FIT_TOL_ACCEL_MM_S2
+        (eval_mono(mono_u, u) - truth_p(u)).abs() <= tol.pos_mm
+            && (eval_mono_dd(mono_u, u) * dd_scale - truth_a(u)).abs() <= tol.accel_mm_s2
     })
 }
 
@@ -148,13 +155,13 @@ pub(crate) fn ladder_degrees(h: f64) -> &'static [usize] {
 fn ladder_fit(
     base: &[f64],
     h: f64,
-    tol_mm: f64,
+    tol: FitTol,
     truth_p: &dyn Fn(f64) -> f64,
     truth_a: &dyn Fn(f64) -> f64,
 ) -> Option<Vec<f64>> {
     ladder_degrees(h).iter().find_map(|&degree| {
         let c = ladder_candidate(base, degree, truth_p);
-        candidate_ok(&c, h, tol_mm, truth_p, truth_a).then_some(c)
+        candidate_ok(&c, h, tol, truth_p, truth_a).then_some(c)
     })
 }
 
@@ -360,10 +367,10 @@ impl Sampler<'_> {
         self.axis_state_full(axis, t, apply_zero_support).2
     }
 
-    fn span_fits(&self, driven: &[usize], ta: f64, tb: f64, tol_mm: f64) -> bool {
+    fn span_fits(&self, driven: &[usize], ta: f64, tb: f64, tol: FitTol) -> bool {
         driven
             .iter()
-            .all(|&axis| self.ladder_fit_axis(axis, ta, tb, tol_mm, false).is_some())
+            .all(|&axis| self.ladder_fit_axis(axis, ta, tb, tol, false).is_some())
     }
 
     fn ladder_fit_axis(
@@ -371,7 +378,7 @@ impl Sampler<'_> {
         axis: usize,
         ta: f64,
         tb: f64,
-        tol_mm: f64,
+        tol: FitTol,
         apply_zero_support: bool,
     ) -> Option<Vec<f64>> {
         let h = tb - ta;
@@ -381,7 +388,7 @@ impl Sampler<'_> {
         let t_of = |u: f64| (0.5 * (u + 1.0)).mul_add(h, ta);
         let truth_p = |u: f64| self.axis_state(axis, t_of(u), apply_zero_support).0;
         let truth_a = |u: f64| self.axis_accel(axis, t_of(u), apply_zero_support);
-        ladder_fit(&base, h, tol_mm, &truth_p, &truth_a)
+        ladder_fit(&base, h, tol, &truth_p, &truth_a)
     }
 
     /// Fitted output piece for one accepted span: ladder fit on the
@@ -397,11 +404,11 @@ impl Sampler<'_> {
         tb: f64,
         ua: f64,
         ub: f64,
-        tol_mm: f64,
+        tol: FitTol,
     ) -> BezierPiece<f64> {
         let h = tb - ta;
         let mono_u = self
-            .ladder_fit_axis(axis, ta, tb, tol_mm, true)
+            .ladder_fit_axis(axis, ta, tb, tol, true)
             .unwrap_or_else(|| {
                 let sa = self.axis_state_full(axis, ta, true);
                 let sb = self.axis_state_full(axis, tb, true);
@@ -410,7 +417,7 @@ impl Sampler<'_> {
         let cheb = truncate_chebyshev_c2_anchored(
             &monomial_u_to_chebyshev(&mono_u),
             h,
-            FIT_TRUNC_POS_FACTOR * tol_mm,
+            FIT_TRUNC_POS_FACTOR * tol.pos_mm,
             FIT_TRUNC_VEL_MM_S,
             FIT_TRUNC_ACC_MM_S2,
         );
@@ -446,7 +453,7 @@ fn pad_to_uniform_degree(axes_pieces: &mut [Vec<BezierPiece<f64>>]) {
 fn refine_span(
     sampler: &Sampler<'_>,
     driven: &[usize],
-    tol_mm: f64,
+    tol: FitTol,
     ta: f64,
     tb: f64,
     depth: u32,
@@ -455,13 +462,13 @@ fn refine_span(
     let h = tb - ta;
     let accept = depth >= MAX_SUBDIVISION_DEPTH
         || h <= 2.0 * MIN_FIT_PIECE_S
-        || sampler.span_fits(driven, ta, tb, tol_mm);
+        || sampler.span_fits(driven, ta, tb, tol);
     if accept {
         out.push(tb);
     } else {
         let tm = 0.5 * (ta + tb);
-        refine_span(sampler, driven, tol_mm, ta, tm, depth + 1, out);
-        refine_span(sampler, driven, tol_mm, tm, tb, depth + 1, out);
+        refine_span(sampler, driven, tol, ta, tm, depth + 1, out);
+        refine_span(sampler, driven, tol, tm, tb, depth + 1, out);
     }
 }
 
@@ -470,11 +477,11 @@ pub fn lower_move(
     vm: &MoveVelocity,
     t_start: f64,
     start_pos: &[f64],
-    fit_tol_mm: f64,
+    fit_tol: FitTol,
     axis_chains: &[CompiledChain],
 ) -> Result<ShapedSegment, LoweringError> {
     let (axes_pieces, total_t) =
-        lower_move_pieces(gm, vm, t_start, start_pos, fit_tol_mm, axis_chains)?;
+        lower_move_pieces(gm, vm, t_start, start_pos, fit_tol, axis_chains)?;
     let axes: Vec<ScalarNurbs<f64>> = axes_pieces
         .iter()
         .map(|p| bezier_pieces_to_nurbs(p))
@@ -498,7 +505,7 @@ pub fn lower_move_pieces(
     vm: &MoveVelocity,
     t_start: f64,
     start_pos: &[f64],
-    fit_tol_mm: f64,
+    fit_tol: FitTol,
     axis_chains: &[CompiledChain],
 ) -> Result<(Vec<Vec<BezierPiece<f64>>>, f64), LoweringError> {
     if gm.source != vm.source {
@@ -539,7 +546,7 @@ pub fn lower_move_pieces(
     refine_span(
         &sampler,
         &driven,
-        fit_tol_mm,
+        fit_tol,
         0.0,
         total_t,
         0,
@@ -555,7 +562,7 @@ pub fn lower_move_pieces(
         }
         let (ua, ub) = (t_start + ta, t_start + tb);
         for (axis, pieces) in axes_pieces.iter_mut().enumerate() {
-            pieces.push(sampler.fitted_piece(axis, ta, tb, ua, ub, fit_tol_mm));
+            pieces.push(sampler.fitted_piece(axis, ta, tb, ua, ub, fit_tol));
         }
     }
     pad_to_uniform_degree(&mut axes_pieces);

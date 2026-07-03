@@ -99,6 +99,8 @@ def read_printer_config(cfg_path: Path):
         arc_fit_from_config(config),
         extrude_only_velocity,
         extrude_only_accel,
+        printer.getfloat("max_path_deviation", 0.005, above=0.0, maxval=1.0),
+        printer.getfloat("max_accel_deviation", 50.0, above=0.0),
     )
 
 
@@ -575,6 +577,8 @@ def main():
         arc_fit,
         extrude_only_velocity,
         extrude_only_accel,
+        max_path_deviation,
+        max_accel_deviation,
     ) = read_printer_config(args.config)
 
     gcode_path = Path(args.gcode)
@@ -606,6 +610,8 @@ def main():
         arc_fit=arc_fit,
         max_extrude_only_velocity=extrude_only_velocity,
         max_extrude_only_accel=extrude_only_accel,
+        max_path_deviation=max_path_deviation,
+        max_accel_deviation=max_accel_deviation,
     )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)

@@ -5,7 +5,7 @@ use geometry::Move;
 use geometry::path::lowering::PositionProfile;
 use trajectory::AxisChainSet;
 
-use crate::lowering::lower_move;
+use crate::lowering::{FitTol, lower_move};
 use crate::{Control, LoweredItem, LoweredSegment, PlannedItem};
 
 const REST_EPS_MM_S: f64 = 1e-9;
@@ -18,7 +18,7 @@ const REST_EPS_MM_S: f64 = 1e-9;
 pub fn run_lowerer(
     input: Receiver<PlannedItem>,
     output: Sender<LoweredItem>,
-    fit_tol_mm: f64,
+    fit_tol: FitTol,
     mut axis_chains: AxisChainSet,
     home_pos: Vec<f64>,
     t_start: f64,
@@ -54,7 +54,7 @@ pub fn run_lowerer(
             &planned.velocity,
             t,
             &odometer,
-            fit_tol_mm,
+            fit_tol,
             &axis_chains.chains,
         )
         .unwrap_or_else(|e| panic!("lowerer: line {}: {e}", planned.geometry.source.start_line));

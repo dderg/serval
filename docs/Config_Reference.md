@@ -252,6 +252,18 @@ max_accel:
 #   memory-constrained boards at the cost of slightly coarser path
 #   following. This is unrelated to [arc_fit], which reconstructs arcs
 #   from faceted segments. The default is 0.005 (5 microns).
+#max_accel_deviation: 50.0
+#   Maximum amount (in mm/s^2) the acceleration implied by a polynomial
+#   piece may deviate from the planned motion profile in the piece
+#   interior. Acceleration accuracy only matters to drives that consume
+#   an acceleration feedforward (EtherCAT servos); stepper drivers
+#   follow positions and are unaffected. This budget, not
+#   max_path_deviation, is usually what forces the planner to subdivide
+#   curved moves, so raising it substantially reduces piece counts (and
+#   with them MCU piece-ring pressure and host-to-MCU serial bandwidth)
+#   at the cost of coarser acceleration feedforward. Endpoint
+#   acceleration at piece seams stays exact regardless of this value,
+#   so trajectories remain smooth. The default is 50.0.
 #max_accel_to_decel:
 #   This parameter is deprecated and should no longer be used.
 ```

@@ -12,6 +12,7 @@ fn cfg() -> StreamConfig {
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
         fit_tol_mm: 1e-3,
+        fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 64,
         limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
     }
@@ -40,6 +41,7 @@ fn cfg_bench() -> StreamConfig {
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
         fit_tol_mm: 0.005,
+        fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 512,
         limits: VelocityLimits::try_new(100.0, 1000.0, 5.0, 1_000_000.0).unwrap(),
     }
@@ -86,7 +88,10 @@ fn replay(
     run_lowerer(
         planned_rx,
         lowered_tx,
-        config.fit_tol_mm,
+        FitTol {
+            pos_mm: config.fit_tol_mm,
+            accel_mm_s2: config.fit_tol_accel_mm_s2,
+        },
         chains.clone(),
         home.to_vec(),
         t_start,

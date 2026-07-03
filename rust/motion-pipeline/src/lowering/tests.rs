@@ -17,6 +17,7 @@ fn stream_config() -> StreamConfig {
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
         fit_tol_mm: FIT_TOL_MM,
+        fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 512,
         limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
     }
@@ -62,7 +63,7 @@ fn lowering_emits_coarse_pieces_above_the_sample_floor() {
             &planned[0].velocity,
             0.0,
             &[0.0; 4],
-            FIT_TOL_MM,
+            FIT_TOL,
             &[],
         )
         .unwrap();
@@ -88,6 +89,17 @@ fn lowering_emits_coarse_pieces_above_the_sample_floor() {
 }
 
 const FIT_TOL_MM: f64 = 1e-3;
+const FIT_TOL: FitTol = FitTol {
+    pos_mm: FIT_TOL_MM,
+    accel_mm_s2: 50.0,
+};
+
+fn tol_pos(pos_mm: f64) -> FitTol {
+    FitTol {
+        pos_mm,
+        accel_mm_s2: 50.0,
+    }
+}
 
 fn ctx(line_no: u32, feed: f64) -> MoveContext {
     MoveContext {
@@ -148,7 +160,7 @@ fn straight_move_lowers_one_cubic_per_phase_without_accel_overshoot() {
     assert!(!vm.phases.is_empty(), "straight move should carry phases");
 
     let (axes, total_t) =
-        lower_move_pieces(&planned[0].geometry, vm, 0.0, &[0.0; 4], FIT_TOL_MM, &[]).unwrap();
+        lower_move_pieces(&planned[0].geometry, vm, 0.0, &[0.0; 4], FIT_TOL, &[]).unwrap();
 
     assert_eq!(axes[0].len(), vm.phases.len(), "one cubic per phase");
     // The grid fit overshot the 1000 cap to ~1170 here; the phase fit is exact.
@@ -182,7 +194,7 @@ fn collinear_run_slices_phases_c1_continuous_at_the_seam() {
         &planned[0].velocity,
         0.0,
         &[0.0; 4],
-        FIT_TOL_MM,
+        FIT_TOL,
         &[],
     )
     .unwrap();
@@ -191,7 +203,7 @@ fn collinear_run_slices_phases_c1_continuous_at_the_seam() {
         &planned[1].velocity,
         t0,
         &[5.0, 0.0, 0.0, 0.0],
-        FIT_TOL_MM,
+        FIT_TOL,
         &[],
     )
     .unwrap();
@@ -247,7 +259,7 @@ fn lower_single(m: geometry::Move, t_start: f64, start_pos: &[f64]) -> ShapedSeg
         &planned[0].velocity,
         t_start,
         start_pos,
-        FIT_TOL_MM,
+        FIT_TOL,
         &[],
     )
     .expect("lower")
@@ -374,7 +386,7 @@ fn source_mismatch_is_rejected() {
             &planned[0].velocity,
             0.0,
             &[0.0, 0.0, 0.0],
-            FIT_TOL_MM,
+            FIT_TOL,
             &[]
         ),
         Err(LoweringError::SourceMismatch)
@@ -403,7 +415,7 @@ fn pressure_advance_shifts_follower_and_leaves_xyz_byte_identical() {
         &planned[0].velocity,
         0.0,
         &start,
-        FIT_TOL_MM,
+        FIT_TOL,
         &[],
     )
     .unwrap();
@@ -414,7 +426,7 @@ fn pressure_advance_shifts_follower_and_leaves_xyz_byte_identical() {
         &planned[0].velocity,
         0.0,
         &start,
-        FIT_TOL_MM,
+        FIT_TOL,
         &linear_pa_chains(3, k),
     )
     .unwrap();
@@ -530,7 +542,7 @@ fn curved_fit_acceleration_is_continuous_and_converges() {
 
     let max_analytic_err = |tol: f64| -> f64 {
         let (axes, _t) =
-            lower_move_pieces(&planned[0].geometry, vm, 0.0, &start, tol, &[]).unwrap();
+            lower_move_pieces(&planned[0].geometry, vm, 0.0, &start, tol_pos(tol), &[]).unwrap();
         let mut worst = 0.0_f64;
         for axis in 0..2 {
             let pieces = &axes[axis];
@@ -566,7 +578,7 @@ fn curved_fit_acceleration_is_continuous_and_converges() {
     };
 
     // Interior accel error no longer scales with the position tolerance — the
-    // ladder holds it under FIT_TOL_ACCEL_MM_S2 at any tolerance, with a floor
+    // ladder holds it under the accel budget at any tolerance, with a floor
     // set by the truncation budget. Assert the absolute contract instead.
     let loose = max_analytic_err(1e-3);
     let tight = max_analytic_err(1e-4);
@@ -576,7 +588,7 @@ fn curved_fit_acceleration_is_continuous_and_converges() {
     );
     for (name, err) in [("loose", loose), ("tight", tight)] {
         assert!(
-            err < 0.1 * FIT_TOL_ACCEL_MM_S2,
+            err < 0.1 * FIT_TOL.accel_mm_s2,
             "{name} interior accel error {err} not comfortably inside the budget"
         );
     }
@@ -596,7 +608,7 @@ fn straight_move_ignores_fit_tolerance_and_stays_bit_identical() {
         &planned[0].velocity,
         0.0,
         &[0.0; 4],
-        1e-2,
+        tol_pos(1e-2),
         &[],
     )
     .unwrap();
@@ -605,7 +617,7 @@ fn straight_move_ignores_fit_tolerance_and_stays_bit_identical() {
         &planned[0].velocity,
         0.0,
         &[0.0; 4],
-        1e-6,
+        tol_pos(1e-6),
         &[],
     )
     .unwrap();
@@ -624,7 +636,7 @@ fn pressure_advance_k_zero_is_identical_to_no_post_processor() {
         &planned[0].velocity,
         0.0,
         &start,
-        FIT_TOL_MM,
+        FIT_TOL,
         &[],
     )
     .unwrap();
@@ -633,7 +645,7 @@ fn pressure_advance_k_zero_is_identical_to_no_post_processor() {
         &planned[0].velocity,
         0.0,
         &start,
-        FIT_TOL_MM,
+        FIT_TOL,
         &linear_pa_chains(3, 0.0),
     )
     .unwrap();
@@ -672,7 +684,7 @@ fn arc_member_fits_within_the_wire_degree_cap() {
     let vm = &planned[0].velocity;
     let start = [0.0_f64; 4];
     let (axes, total_t) =
-        lower_move_pieces(&planned[0].geometry, vm, 0.0, &start, 5e-3, &[]).unwrap();
+        lower_move_pieces(&planned[0].geometry, vm, 0.0, &start, tol_pos(5e-3), &[]).unwrap();
     for pieces in &axes[..2] {
         assert!(!pieces.is_empty());
         for p in pieces {
@@ -701,7 +713,8 @@ fn straight_phase_pieces_carry_natural_length() {
     let vm = &planned[0].velocity;
     assert!(!vm.phases.is_empty());
     let start = [0.0_f64; 4];
-    let (axes, _t) = lower_move_pieces(&planned[0].geometry, vm, 0.0, &start, 1e-3, &[]).unwrap();
+    let (axes, _t) =
+        lower_move_pieces(&planned[0].geometry, vm, 0.0, &start, tol_pos(1e-3), &[]).unwrap();
     let has_jerk_phase = vm.phases.iter().any(|p| p.j != 0.0);
     let expect = if has_jerk_phase { 4 } else { 3 };
     for p in &axes[0] {

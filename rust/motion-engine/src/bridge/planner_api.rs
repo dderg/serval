@@ -20,6 +20,7 @@ fn build_planner_config(
     max_extrude_only_velocity: Option<f64>,
     max_extrude_only_accel: Option<f64>,
     fit_tolerance_mm: Option<f64>,
+    fit_tolerance_accel_mm_s2: Option<f64>,
 ) -> PyResult<config::PlannerConfig> {
     let axis_registry = config::AxisRegistry::try_new(
         axes.into_iter()
@@ -97,6 +98,14 @@ fn build_planner_config(
         }
     }
 
+    if let Some(v) = fit_tolerance_accel_mm_s2 {
+        if !(v > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "[printer] max_accel_deviation must be positive, got {v}"
+            )));
+        }
+    }
+
     let mut cfg = config::PlannerConfig::default();
     cfg.axis_registry = axis_registry;
     cfg.limit_sections = limit_sections;
@@ -106,6 +115,9 @@ fn build_planner_config(
     cfg.max_extrude_only_accel = max_extrude_only_accel;
     if let Some(v) = fit_tolerance_mm {
         cfg.fit_tolerance_mm = v;
+    }
+    if let Some(v) = fit_tolerance_accel_mm_s2 {
+        cfg.fit_tolerance_accel_mm_s2 = v;
     }
     cfg.chain = match arc_fit {
         Some(min_run_facets) => {
@@ -175,6 +187,7 @@ impl PyMotionEngine {
         max_extrude_only_velocity = None,
         max_extrude_only_accel = None,
         fit_tolerance_mm = None,
+        fit_tolerance_accel_mm_s2 = None,
     ))]
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn init_planner(
@@ -189,6 +202,7 @@ impl PyMotionEngine {
         max_extrude_only_velocity: Option<f64>,
         max_extrude_only_accel: Option<f64>,
         fit_tolerance_mm: Option<f64>,
+        fit_tolerance_accel_mm_s2: Option<f64>,
     ) -> PyResult<()> {
         if self
             .planner
@@ -209,6 +223,7 @@ impl PyMotionEngine {
             max_extrude_only_velocity,
             max_extrude_only_accel,
             fit_tolerance_mm,
+            fit_tolerance_accel_mm_s2,
         )?;
         *self
             .planner_config
@@ -854,6 +869,7 @@ impl PyMotionEngine {
                     .unwrap_or(f64::INFINITY),
                 max_extrude_only_accel_mm_s2: cfg.max_extrude_only_accel.unwrap_or(f64::INFINITY),
                 fit_tol_mm: cfg.fit_tolerance_mm,
+                fit_tol_accel_mm_s2: cfg.fit_tolerance_accel_mm_s2,
                 max_buffer_moves: STREAM_MAX_BUFFER_MOVES,
                 limits: geometry::VelocityLimits::try_new(
                     cart.max_velocity,

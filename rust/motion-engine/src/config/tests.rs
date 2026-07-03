@@ -4,6 +4,7 @@ use super::*;
 fn default_config_has_sensible_values() {
     let c = PlannerConfig::default();
     assert_eq!(c.fit_tolerance_mm, 0.005);
+    assert_eq!(c.fit_tolerance_accel_mm_s2, 50.0);
 }
 
 #[test]

@@ -173,6 +173,8 @@ def run_case(case: Case) -> dict:
         arc_fit,
         extrude_only_velocity,
         extrude_only_accel,
+        max_path_deviation,
+        max_accel_deviation,
     ) = viz_pipeline.read_printer_config(case.config_path)
     waypoints = viz_pipeline.parse_gcode(case.gcode_path, max_velocity)
     if len(waypoints) < 2:
@@ -191,6 +193,8 @@ def run_case(case: Case) -> dict:
         arc_fit=arc_fit,
         max_extrude_only_velocity=extrude_only_velocity,
         max_extrude_only_accel=extrude_only_accel,
+        max_path_deviation=max_path_deviation,
+        max_accel_deviation=max_accel_deviation,
     )
 
 

@@ -13,6 +13,7 @@ pub struct StreamConfig {
     pub max_extrude_only_velocity_mm_s: f64,
     pub max_extrude_only_accel_mm_s2: f64,
     pub fit_tol_mm: f64,
+    pub fit_tol_accel_mm_s2: f64,
     /// Backstop cap on the planner's look-ahead window. A normal continuous
     /// path always offers a clean seam, so the window stays small; this only
     /// fires for a pathological window with no clean seam within the finality

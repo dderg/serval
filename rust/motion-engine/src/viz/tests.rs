@@ -21,6 +21,7 @@ fn default_config(limits: geometry::VelocityLimits) -> StreamConfig {
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
         fit_tol_mm: TRAJECTORY_FIT_TOL_MM,
+        fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: SNAPSHOT_MAX_BUFFER_MOVES,
         limits,
     }
