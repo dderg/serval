@@ -7,6 +7,7 @@ use crate::segment::SourceRange;
 
 mod disk;
 mod profile;
+mod ride;
 mod scurve;
 
 pub use profile::StraightPhase;
@@ -373,14 +374,12 @@ pub fn plan_velocity_stops(
         let members: Vec<disk::RunMember> = (run_start..run_end)
             .map(|j| disk::RunMember {
                 kin: &caps[j].kin,
-                entry_v: v[j],
                 exit_v: v[j + 1],
                 fwd_s: arc_from_run_start[j],
-                bwd_s: arc_to_run_end[j],
             })
             .collect();
         let run_start_line = moves[run_start].source.start_line;
-        let (reconstructed, run_exit_states) = disk::reconstruct_run(
+        let (reconstructed, run_exit_states, reconstructed_phases) = disk::reconstruct_run(
             &members,
             run_start_v[run_start],
             run_start_a[run_start],
@@ -389,8 +388,6 @@ pub fn plan_velocity_stops(
         .ok_or(VelocityError::Diverged {
             line_no: run_start_line,
         })?;
-        let reconstructed_phases =
-            disk::reconstruct_run_phases(&members, run_start_v[run_start], run_start_a[run_start]);
 
         for (idx, j) in (run_start..run_end).enumerate() {
             let kin = &caps[j].kin;
@@ -412,9 +409,7 @@ pub fn plan_velocity_stops(
                 return Err(VelocityError::NegativeVelocity { line_no, v });
             }
             let peak_v = samples.iter().fold(0.0_f64, |acc, p| acc.max(p.v));
-            let phases = reconstructed_phases
-                .as_ref()
-                .map_or_else(Vec::new, |p| p[idx].clone());
+            let phases = reconstructed_phases[idx].clone();
             // A straight move's phases give the exact traversal time; the sampled
             // estimate mistimes the jerk-from-rest at v = 0 (the singularity the
             // closed-form profile avoids), so prefer the phases when present.

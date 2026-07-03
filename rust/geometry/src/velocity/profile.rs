@@ -11,8 +11,10 @@
 //! under a flat speed ceiling: ramp up to a peak, optionally cruise, ramp down —
 //! each ramp itself jerk-up / hold-accel / jerk-down as the limits allow.
 
+#[cfg(test)]
 const EPS: f64 = 1e-12;
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 struct Break {
     s: f64,
@@ -24,11 +26,13 @@ struct Break {
     dt: f64,
 }
 
+#[cfg(test)]
 pub(super) struct Profile {
     breaks: Vec<Break>,
     length: f64,
 }
 
+#[cfg(test)]
 impl Profile {
     /// `(v, a)` at arc-length `s`, clamped to the profile's span. The terminal
     /// breakpoint carries the exact exit state `(v1, 0)`, returned directly at the
@@ -55,6 +59,7 @@ impl Profile {
     }
 }
 
+#[cfg(test)]
 impl Break {
     /// Time `tau` into this phase at which it has advanced `ds` in arc-length,
     /// i.e. the root of `v*tau + a*tau^2/2 + j*tau^3/6 = ds` on `[0, dt]`. The
@@ -86,6 +91,7 @@ impl Break {
     }
 }
 
+#[cfg(test)]
 /// Duration of a velocity ramp of magnitude `dv >= 0` that starts and ends at
 /// zero acceleration, under `a_max` / `j_max`. Triangular (jerk never reaches
 /// `a_max`) below `a_max^2 / j_max`, trapezoidal above; `a/0` accel-limited when
@@ -104,6 +110,7 @@ fn ramp_time(dv: f64, a_max: f64, j_max: f64) -> f64 {
     }
 }
 
+#[cfg(test)]
 /// Distance covered by a ramp from `v0` to `v1` (either direction). The speed
 /// profile of a zero-accel-to-zero-accel ramp is point-symmetric about its
 /// midpoint, so its mean speed is exactly `(v0 + v1) / 2`.
@@ -111,6 +118,7 @@ fn ramp_dist(v0: f64, v1: f64, a_max: f64, j_max: f64) -> f64 {
     0.5 * (v0 + v1) * ramp_time((v1 - v0).abs(), a_max, j_max)
 }
 
+#[cfg(test)]
 /// Highest peak speed `<= v_max` whose ramp-up-from-`v0` plus ramp-down-to-`v1`
 /// fits in `length`. Distance is monotone in the peak, so a bisection pins it;
 /// if even `v_max` fits, the surplus becomes cruise (handled by the caller).
@@ -132,6 +140,7 @@ fn peak_velocity(v0: f64, v1: f64, length: f64, v_max: f64, a_max: f64, j_max: f
     0.5 * (lo + hi)
 }
 
+#[cfg(test)]
 struct Builder {
     breaks: Vec<Break>,
     s: f64,
@@ -139,6 +148,7 @@ struct Builder {
     a: f64,
 }
 
+#[cfg(test)]
 impl Builder {
     fn phase(&mut self, j: f64, dt: f64) {
         if dt <= 0.0 {
@@ -201,87 +211,7 @@ pub struct StraightPhase {
     pub j: f64,
 }
 
-impl Profile {
-    /// Per-span closed-form phases, each rebased to span-local time and
-    /// arc-length (`t0 = 0`, `s0 = 0` at the span start). `spans` are
-    /// `(s_start, len)` in the profile's own arc-length — one per move of a
-    /// straight run, so every move lowers from the run's single analytic profile
-    /// and collinear seams stay C1-continuous by construction.
-    pub(super) fn phases_for_spans(&self, spans: &[(f64, f64)]) -> Vec<Vec<StraightPhase>> {
-        let mut timed: Vec<(f64, &Break)> = Vec::with_capacity(self.breaks.len());
-        let mut t = 0.0;
-        for b in &self.breaks {
-            if b.dt <= 0.0 {
-                continue;
-            }
-            timed.push((t, b));
-            t += b.dt;
-        }
-        spans
-            .iter()
-            .map(|&(s0, len)| self.clip(s0, s0 + len, &timed))
-            .collect()
-    }
-
-    fn phase_end_s(&self, i: usize, timed: &[(f64, &Break)]) -> f64 {
-        if i + 1 < timed.len() {
-            timed[i + 1].1.s
-        } else {
-            self.length
-        }
-    }
-
-    fn time_at(&self, s: f64, timed: &[(f64, &Break)]) -> f64 {
-        for (i, &(t0, b)) in timed.iter().enumerate() {
-            if s <= self.phase_end_s(i, timed) + EPS {
-                return t0 + b.solve_tau((s - b.s).max(0.0));
-            }
-        }
-        timed.last().map_or(0.0, |&(t0, b)| t0 + b.dt)
-    }
-
-    fn clip(&self, s_lo: f64, s_hi: f64, timed: &[(f64, &Break)]) -> Vec<StraightPhase> {
-        let t_base = self.time_at(s_lo, timed);
-        let mut out = Vec::new();
-        for (i, &(t0, b)) in timed.iter().enumerate() {
-            let p_end = self.phase_end_s(i, timed);
-            if p_end <= s_lo + EPS || b.s >= s_hi - EPS {
-                continue;
-            }
-            // Use the phase's own exact `0` / `dt` at natural boundaries, so an
-            // interior phase chains bit-exactly (the arc-length `s_hi - b.s` loses
-            // precision against a large `b.s`); only solve for a genuine clip,
-            // which happens once per phase at a move seam.
-            let entry = if s_lo <= b.s + EPS {
-                0.0
-            } else {
-                b.solve_tau(s_lo - b.s)
-            };
-            let exit = if s_hi >= p_end - EPS {
-                b.dt
-            } else {
-                b.solve_tau(s_hi - b.s)
-            };
-            if exit <= entry + EPS {
-                continue;
-            }
-            out.push(StraightPhase {
-                t0: (t0 + entry) - t_base,
-                dt: exit - entry,
-                s0: b.s
-                    + b.v * entry
-                    + 0.5 * b.a * entry * entry
-                    + b.j * entry * entry * entry / 6.0
-                    - s_lo,
-                v0: b.v + b.a * entry + 0.5 * b.j * entry * entry,
-                a0: b.a + b.j * entry,
-                j: b.j,
-            });
-        }
-        out
-    }
-}
-
+#[cfg(test)]
 /// Plan a triple-limited profile from `v0` to `v1` across `length` under a flat
 /// ceiling `v_max`. Entry and exit sit at zero acceleration (run anchors).
 pub(super) fn plan(v0: f64, v1: f64, length: f64, v_max: f64, a_max: f64, j_max: f64) -> Profile {

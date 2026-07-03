@@ -6,17 +6,6 @@ pub(super) enum ReachError {
     InvalidInput,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct SevenSeg {
-    pub(super) v0: f64,
-    pub(super) a0: f64,
-    pub(super) s_jup_end: f64,
-    pub(super) s_hold_end: f64,
-    pub(super) ds: f64,
-    pub(super) accel_max: f64,
-    pub(super) jerk_max: f64,
-}
-
 #[cfg(test)]
 pub(super) fn max_reachable_velocity(v_in: f64, length: f64, accel: f64, jerk: f64) -> f64 {
     let triangular_distance = (2.0 * accel / jerk) * (v_in + accel * accel / (2.0 * jerk));
@@ -148,87 +137,6 @@ pub(super) fn reach_v(v0: f64, ds: f64, accel: f64, jerk: f64) -> Option<f64> {
     reach_velocity_with_accel(v0, 0.0, ds, accel, jerk)
         .ok()
         .map(|(v, _)| v)
-}
-
-pub(super) fn breakpoints(
-    v0: f64,
-    a0: f64,
-    ds: f64,
-    accel_max: f64,
-    jerk_max: f64,
-) -> Result<SevenSeg, ReachError> {
-    validate_inputs(v0, a0, ds, accel_max, jerk_max)?;
-
-    let (s_jup_end, s_hold_end) = match jerkup_phase(v0, a0, ds, accel_max, jerk_max) {
-        JerkUpOutcome::PartialJerkUp { .. } => (ds, ds),
-        JerkUpOutcome::FullJerkUp { s_jup } => (s_jup, ds),
-    };
-
-    Ok(SevenSeg {
-        v0,
-        a0,
-        s_jup_end,
-        s_hold_end,
-        ds,
-        accel_max,
-        jerk_max,
-    })
-}
-
-pub(super) fn accel_at(seg: &SevenSeg, s: f64) -> f64 {
-    let s = s.clamp(0.0, seg.ds);
-
-    if s <= seg.s_jup_end {
-        if seg.jerk_max == f64::INFINITY {
-            seg.accel_max
-        } else {
-            let t = time_in_jerkup(seg, s);
-            seg.a0 + seg.jerk_max * t
-        }
-    } else {
-        seg.accel_max
-    }
-}
-
-pub(super) fn velocity_at(seg: &SevenSeg, s: f64) -> f64 {
-    let s = s.clamp(0.0, seg.ds);
-
-    if s <= seg.s_jup_end {
-        if seg.jerk_max == f64::INFINITY {
-            (seg.v0 * seg.v0 + 2.0 * seg.accel_max * s).sqrt()
-        } else {
-            let t = time_in_jerkup(seg, s);
-            jerkup_velocity(seg.v0, seg.a0, t, seg.jerk_max)
-        }
-    } else {
-        let (v_j, a_hold) = jerkup_exit_state(seg);
-        let d = s - seg.s_jup_end;
-        (v_j * v_j + 2.0 * a_hold * d).sqrt()
-    }
-}
-
-fn time_in_jerkup(seg: &SevenSeg, s: f64) -> f64 {
-    if s == 0.0 {
-        return 0.0;
-    }
-    let t_jup = if seg.jerk_max == f64::INFINITY || seg.a0 == seg.accel_max {
-        0.0
-    } else {
-        (seg.accel_max - seg.a0) / seg.jerk_max
-    };
-    solve_jerkup_cubic(seg.v0, seg.a0, seg.jerk_max, s, t_jup)
-}
-
-fn jerkup_exit_state(seg: &SevenSeg) -> (f64, f64) {
-    if seg.jerk_max == f64::INFINITY || seg.a0 == seg.accel_max {
-        (seg.v0, seg.accel_max)
-    } else {
-        let t_jup = (seg.accel_max - seg.a0) / seg.jerk_max;
-        (
-            jerkup_velocity(seg.v0, seg.a0, t_jup, seg.jerk_max),
-            seg.accel_max,
-        )
-    }
 }
 
 #[cfg(test)]
