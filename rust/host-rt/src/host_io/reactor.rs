@@ -57,6 +57,10 @@ pub struct Reactor {
     /// Queued fire-and-forget payloads; the bool marks a `get_clock` frame
     /// whose RAW send stamp is captured at the actual wire write.
     pub(crate) pending_fire_and_forget: VecDeque<(Vec<u8>, bool)>,
+    /// Piece-channel (motion) frames, keyed by correlation id, awaiting a
+    /// shallow kernel tty queue; see `drain_piece_frames` for the priority
+    /// rule this enforces.
+    pub(crate) pending_piece_frames: VecDeque<(u32, Vec<u8>)>,
     pub(crate) pending_outbound_order: VecDeque<PendingOutboundKind>,
     pub(crate) zero_byte_first_seen: Option<Instant>,
     pub(crate) last_recv_time: Instant,
@@ -146,6 +150,7 @@ impl Reactor {
             pending_clock_sent_raw: None,
             pending_submissions: VecDeque::new(),
             pending_fire_and_forget: VecDeque::new(),
+            pending_piece_frames: VecDeque::new(),
             pending_outbound_order: VecDeque::new(),
             zero_byte_first_seen: None,
             last_recv_time: clock.now(),
@@ -197,8 +202,9 @@ impl Reactor {
         // No drain here: waiting for the wire makes this single thread deaf to
         // responses for the frame's whole line time (~20 ms/KiB at 500 kbaud),
         // which times out unrelated transactions during heavy piece traffic.
-        // The kernel tty buffer queues the bytes; the pump's ring-room and
-        // arrival-lead pacing bound how far writes can run ahead of the wire.
+        // The kernel tty buffer queues the bytes; drain_piece_frames bounds
+        // how deep piece traffic may fill it, so control frames written here
+        // are never far from the wire.
         let result = self.io.write_all(frame);
         if result.is_ok() {
             self.last_write_time = std::time::Instant::now();
@@ -235,6 +241,15 @@ pub enum RetransmitTrigger {
 
 const PENDING_SUBMISSION_CEILING: usize = 256;
 pub const PENDING_FIRE_AND_FORGET_CEILING: usize = 256;
+pub(crate) const PENDING_PIECE_FRAMES_CEILING: usize = 64;
+
+/// Max bytes of kalico (piece) traffic allowed in the kernel tty out-buffer
+/// before further kalico frames are held back. Klipper-channel control
+/// commands write unconditionally, so this is the most piece traffic a
+/// control frame can ever be queued behind — small enough to bound control
+/// latency to a few ms of wire time, large enough (vs the ~1 ms reactor
+/// tick) to keep the wire saturated with pieces when nothing else wants it.
+pub(crate) const PIECE_OUTQ_BUDGET_BYTES: u32 = 2048;
 const MAX_RETRY_COUNT: u32 = 8;
 
 // Retry exhaustion alone is not sufficient to declare Closed: under Renode
@@ -444,6 +459,48 @@ impl Reactor {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    /// Write queued piece frames while the kernel tty queue is
+    /// shallow. Piece frames yield to control traffic: klipper-channel frames
+    /// (heater/fan PWM, endstops, clocksync) write unconditionally, while a
+    /// piece frame waits until pending wire bytes drop under the budget — so
+    /// a control command is never queued behind more than
+    /// `PIECE_OUTQ_BUDGET_BYTES` of piece bytes. Without this, a print-start
+    /// piece flood keeps the tty queue deep, control acks inflate, the
+    /// passthrough router backs up, and a `queue_digital_out` arrives seconds
+    /// late — the "Timer too close" shutdown this replaces.
+    pub(crate) fn drain_piece_frames(&mut self) {
+        while !self.pending_piece_frames.is_empty() {
+            match self.io.bytes_to_write() {
+                Ok(pending) if pending > PIECE_OUTQ_BUDGET_BYTES => return,
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        subsystem = "mcu-comms",
+                        event = "piece_outq_poll_error",
+                        error = %e,
+                        "drain_piece_frames: kernel out-queue poll failed; transitioning Closed"
+                    );
+                    self.transition_closed_on_io_fault();
+                    return;
+                }
+            }
+            let (cid, frame) = self
+                .pending_piece_frames
+                .pop_front()
+                .expect("checked non-empty");
+            if let Err(e) = self.write_frame(&frame) {
+                let is_io = matches!(e, TransportError::Io(_));
+                if let Some(p) = self.transport_state.pending.remove(&cid) {
+                    let _ = p.completion.send(Err(e));
+                }
+                if is_io {
+                    self.transition_closed_on_io_fault();
+                }
+                return;
             }
         }
     }
@@ -1159,24 +1216,21 @@ impl Reactor {
                     )));
                     return;
                 }
+                if self.pending_piece_frames.len() >= PENDING_PIECE_FRAMES_CEILING {
+                    let _ = completion.send(Err(TransportError::Backpressure));
+                    return;
+                }
                 let cid = self.transport_state.allocate_correlation_id();
                 let frame = build_kalico_frame(channel, kind, cid, &body);
                 self.transport_state.pending.insert(
                     cid,
                     PendingMcuCall {
-                        completion: completion.clone(),
+                        completion,
                         deadline,
                     },
                 );
-                if let Err(e) = self.write_frame(&frame) {
-                    let is_io = matches!(e, TransportError::Io(_));
-                    if let Some(p) = self.transport_state.pending.remove(&cid) {
-                        let _ = p.completion.send(Err(e));
-                    }
-                    if is_io {
-                        self.transition_closed_on_io_fault();
-                    }
-                }
+                self.pending_piece_frames.push_back((cid, frame));
+                self.drain_piece_frames();
             }
             ReactorCommand::GetClockAndDeliver => match self.parser.encode("get_clock") {
                 Ok(payload) => {
@@ -1273,6 +1327,7 @@ impl Reactor {
             let _ = p.completion.send(Err(TransportError::Closed));
         }
         self.pending_fire_and_forget.clear();
+        self.pending_piece_frames.clear();
         self.pending_outbound_order.clear();
         self.passthrough_notify_map.clear();
 
@@ -1352,6 +1407,7 @@ impl Reactor {
 
         let s3b = std::time::Instant::now();
         self.drain_passthrough();
+        self.drain_piece_frames();
         let t_step3b = s3b.elapsed();
 
         let s4 = std::time::Instant::now();
@@ -1452,6 +1508,9 @@ mod a3_awaiting_response_gc;
 
 #[cfg(test)]
 mod a5_passthrough_integration;
+
+#[cfg(test)]
+mod piece_priority;
 
 #[cfg(test)]
 mod a8_fire_and_forget_backpressure;

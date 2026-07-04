@@ -24,6 +24,8 @@ use crate::transport::{MessageParams, TransportError};
 pub struct FakePortHandles {
     pub rx: Arc<Mutex<VecDeque<u8>>>,
     pub tx: Arc<Mutex<Vec<u8>>>,
+    /// Simulated kernel tty out-queue depth reported by `bytes_to_write`.
+    pub outq: Arc<Mutex<u32>>,
 }
 
 pub struct FakeSerialPort {
@@ -35,6 +37,7 @@ impl FakeSerialPort {
         let h = FakePortHandles {
             rx: Arc::new(Mutex::new(VecDeque::new())),
             tx: Arc::new(Mutex::new(Vec::new())),
+            outq: Arc::new(Mutex::new(0)),
         };
         (Box::new(Self { handles: h.clone() }), h)
     }
@@ -139,7 +142,7 @@ impl SerialPort for FakeSerialPort {
         Ok(self.handles.rx.lock().unwrap().len() as u32)
     }
     fn bytes_to_write(&self) -> serialport::Result<u32> {
-        Ok(0)
+        Ok(*self.handles.outq.lock().unwrap())
     }
     fn clear(&self, _: serialport::ClearBuffer) -> serialport::Result<()> {
         Ok(())
