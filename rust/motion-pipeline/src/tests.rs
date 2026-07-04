@@ -651,3 +651,101 @@ fn smooth_shaper_first_emission_after_nonzero_start_time_is_valid() {
     let segs = replay(cfg(), smooth_x_chains(18.0), &[0.0, 0.0, 0.0], 5.0, &moves);
     assert_eq!(segs[0].t_start, 5.0);
 }
+
+const NEPTUNE_SCV25_FILLET: [(f64, f64, f64); 7] = [
+    (124.102, 100.688, 0.01272),
+    (124.102, 101.679, 0.03333),
+    (124.13, 101.951, 0.00921),
+    (124.178, 102.09, 0.00494),
+    (122.055, 101.676, 0.07276),
+    (121.2, 100.821, 0.04068),
+    (120.826, 98.898, 0.0659),
+];
+
+#[test]
+fn arc_run_into_sharp_corner_stays_contiguous_at_high_scv() {
+    // Voron cube Z6.2 fillet slice that crashed the Neptune bench mid-print:
+    // with arc fitting enabled and square_corner_velocity raised to 25, the
+    // fitter emitted a 0.27mm gap between the corner blend leaving the fitted
+    // run and the following long line, tripping the TravelAligningSender
+    // contiguity assert.
+    let limits = VelocityLimits::try_new(100.0, 1000.0, 25.0, 1_000_000.0).unwrap();
+    let config = StreamConfig {
+        chain: ChainFitConfig::with_arc_fit(3),
+        integration_tol: 1e-4,
+        max_extrude_only_velocity_mm_s: f64::INFINITY,
+        max_extrude_only_accel_mm_s2: f64::INFINITY,
+        fit_tol_mm: 0.005,
+        fit_tol_accel_mm_s2: 50.0,
+        max_buffer_moves: 512,
+        limits,
+    };
+    let mut prev = [124.155, 100.313, 0.0];
+    let mut moves = Vec::new();
+    for (i, (x, y, e)) in NEPTUNE_SCV25_FILLET.into_iter().enumerate() {
+        let end = [x, y, 0.0];
+        let ctx = MoveContext {
+            extruder_axis: 3,
+            feedrate_mm_s: 80.0,
+            limits,
+            source: SourceRange {
+                start_line: i as u32 + 1,
+                end_line: i as u32 + 1,
+            },
+        };
+        moves.push(line_move(prev, end, e, ctx).unwrap());
+        prev = end;
+    }
+    let home = vec![124.155, 100.313, 0.0, 0.0];
+    let segs = replay(config, AxisChainSet::default(), &home, 0.0, &moves);
+    assert!(!segs.is_empty());
+    assert_position_contiguous(&segs);
+}
+
+#[test]
+fn blends_consuming_a_full_arc_emit_no_degenerate_remainder() {
+    // From the same print at SCV 25, one layer up: the corner blends at both
+    // ends of a short fitted arc consume its entire length. The remainder
+    // (2e-16 mm) must be skipped, not emitted — the planner rejects segments
+    // at or below its 1e-9 mm length epsilon.
+    let limits = VelocityLimits::try_new(100.0, 1000.0, 25.0, 1_000_000.0).unwrap();
+    let config = StreamConfig {
+        chain: ChainFitConfig::with_arc_fit(3),
+        integration_tol: 1e-4,
+        max_extrude_only_velocity_mm_s: f64::INFINITY,
+        max_extrude_only_accel_mm_s2: f64::INFINITY,
+        fit_tol_mm: 0.005,
+        fit_tol_accel_mm_s2: 50.0,
+        max_buffer_moves: 512,
+        limits,
+    };
+    let points = [
+        (118.225, 104.096, 0.0, 150.0),
+        (118.295, 103.844, 0.00878, 98.87),
+        (118.314, 103.664, 0.00609, 98.87),
+        (118.315, 102.438, 0.04125, 98.87),
+        (121.855, 98.898, 0.16839, 98.87),
+        (126.102, 98.898, 0.14286, 98.87),
+        (118.153, 106.847, 0.37817, 98.87),
+    ];
+    let mut prev = [114.719, 104.739, 0.0];
+    let mut moves = Vec::new();
+    for (i, (x, y, e, feed)) in points.into_iter().enumerate() {
+        let end = [x, y, 0.0];
+        let ctx = MoveContext {
+            extruder_axis: 3,
+            feedrate_mm_s: feed,
+            limits,
+            source: SourceRange {
+                start_line: i as u32 + 1,
+                end_line: i as u32 + 1,
+            },
+        };
+        moves.push(line_move(prev, end, e, ctx).unwrap());
+        prev = end;
+    }
+    let home = vec![114.719, 104.739, 0.0, 0.0];
+    let segs = replay(config, AxisChainSet::default(), &home, 0.0, &moves);
+    assert!(!segs.is_empty());
+    assert_position_contiguous(&segs);
+}

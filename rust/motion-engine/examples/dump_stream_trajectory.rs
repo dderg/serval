@@ -78,12 +78,17 @@ fn main() {
     let in_path = &args[1];
     let out_path = &args[2];
     let mut dt = 0.005;
+    let mut scv = 10.0;
     let mut i = 3;
     while i < args.len() {
         match args[i].as_str() {
             "--dt" => {
                 i += 1;
                 dt = args[i].parse().unwrap();
+            }
+            "--scv" => {
+                i += 1;
+                scv = args[i].parse().unwrap();
             }
             other => {
                 eprintln!("unknown arg {other}");
@@ -98,19 +103,19 @@ fn main() {
         process::exit(1);
     });
 
-    let limits = VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap();
+    let limits = VelocityLimits::try_new(100.0, 1000.0, scv, 1_000_000.0).unwrap();
     let cfg = StreamConfig {
-        chain: ChainFitConfig::default(),
+        chain: ChainFitConfig::with_arc_fit(3),
         integration_tol: 1e-4,
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
-        fit_tol_mm: 1e-3,
+        fit_tol_mm: 0.005,
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 512,
         limits,
     };
 
-    let handle = setup_stages(cfg, AxisChainSet::default(), vec![0.0, 0.0, 0.0], 0.0);
+    let handle = setup_stages(cfg, AxisChainSet::default(), vec![0.0, 0.0, 0.0, 0.0], 0.0);
     let output = handle.output;
     let collector = std::thread::spawn(move || {
         let mut segs: Vec<ShapedSegment> = Vec::new();
@@ -145,17 +150,18 @@ fn main() {
                 else {
                     continue;
                 };
-                if dx.abs() < 1e-9 && dy.abs() < 1e-9 && dz.abs() < 1e-9 {
+                let de = params.e().unwrap_or(0.0);
+                if dx.abs() < 1e-9 && dy.abs() < 1e-9 && dz.abs() < 1e-9 && de.abs() < 1e-9 {
                     continue;
                 }
-                let m =
-                    match build_move(start, dx, dy, dz, 3, 0.0, limits, p.feed, submitted as u32) {
-                        Ok(m) => m,
-                        Err(e) => {
-                            eprintln!("build_move line {submitted}: {e:?}");
-                            continue;
-                        }
-                    };
+                let m = match build_move(start, dx, dy, dz, 3, de, limits, p.feed, submitted as u32)
+                {
+                    Ok(m) => m,
+                    Err(e) => {
+                        eprintln!("build_move line {submitted}: {e:?}");
+                        continue;
+                    }
+                };
                 if handle.input.send(m.into()).is_err() {
                     eprintln!("pipeline input closed at line {submitted}");
                     process::exit(1);

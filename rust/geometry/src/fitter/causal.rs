@@ -82,9 +82,18 @@ pub(super) fn emit_reconstruction(
             recon.up_followers.clone(),
         )?;
     }
-    let arc = trim_arc(&recon.arc, head_blend_trim, tail_blend_trim)
-        .map_err(internal(m_in.source.start_line))?;
-    push(Segment::Arc(arc), m_in, recon.followers.clone())?;
+    let arc_len = recon.arc.s_len();
+    let remaining = arc_len - head_blend_trim - tail_blend_trim;
+    assert!(
+        remaining >= -1e-9 * arc_len.max(1.0),
+        "fitter: blend trims exceed the arc at line {}: len={arc_len} head={head_blend_trim} tail={tail_blend_trim}",
+        m_in.source.start_line
+    );
+    if remaining > crate::LENGTH_EPS_MM {
+        let arc = trim_arc(&recon.arc, head_blend_trim, tail_blend_trim)
+            .map_err(internal(m_in.source.start_line))?;
+        push(Segment::Arc(arc), m_in, recon.followers.clone())?;
+    }
     for down in &recon.down {
         push(
             Segment::Clothoid(down.clone()),
