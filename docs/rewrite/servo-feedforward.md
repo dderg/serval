@@ -118,9 +118,11 @@ All 8 fields are required. Validation rules (any failure = hard claim error):
 
 ## Identification workflow
 
-The whole loop is driven from the console by the macros in
-`config/servo_calibration.cfg` (include it from `printer.cfg`). One-time
-prerequisite: build the fitter on the host with
+The whole loop is driven from the console by the `SERVO_*` commands the
+`[servo_calibration]` extension registers (add a bare `[servo_calibration]`
+to `printer.cfg`; the motor datasheet values, safe stroke window, drive
+names, and excitation grid go in that section as overridable defaults). One-
+time prerequisite: build the fitter on the host with
 `cargo build --release -p servo-ident` (from `rust/`).
 
 ### Step 1 — excite, capture, and fit in one command
@@ -139,7 +141,7 @@ new fit never replaces an existing profile; switching is an explicit config
 edit. `TORQUE_NM`/`INERTIA_KGM2`/`ROT_DIST` are optional; when given, the fit
 also prints the recommended drive load-inertia ratio C00.06.
 
-`_SERVO_STROKES` refuses any (speed, accel) pair where `v²/a` exceeds the
+The stroke engine refuses any (speed, accel) pair where `v²/a` exceeds the
 stroke span — that combination cannot reach the target speed within the
 available travel and would not produce the intended excitation.
 

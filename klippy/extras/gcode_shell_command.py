@@ -14,11 +14,7 @@ class ShellCommand:
         self.name = config.get_name().split()[-1]
         self.printer = config.get_printer()
         self.gcode = self.printer.lookup_object("gcode")
-        klipper_dir = os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
         cmd = config.get("command")
-        cmd = cmd.replace("${klipper_dir}", klipper_dir)
         cmd = os.path.expandvars(cmd)
         self.command = [os.path.expanduser(tok) for tok in shlex.split(cmd)]
         self.timeout = config.getfloat("timeout", 2.0, above=0.0)

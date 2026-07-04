@@ -40,21 +40,6 @@ verbose: True
 Execute with:
 `RUN_SHELL_COMMAND CMD=hello_world`
 
-### Referencing scripts that ship with the repo:
-
-`${klipper_dir}` in a `command:` expands to the root of the Kalico checkout the
-running klippy lives in. Use it for helper scripts under the repo's `scripts/`
-so the same config works no matter what the checkout is named (`~/klipper`,
-`~/kalico`, a worktree, ...):
-
-```
-[gcode_shell_command servo_fit_dynamics]
-command: ~/klippy-env/bin/python ${klipper_dir}/scripts/servo_fit_dynamics.py
-```
-
-`${HOME}` and other environment variables expand too, and a leading `~`
-expands to the home directory.
-
 ### Passing parameters:
 
 As of commit [f231fa9](https://github.com/dw-0/kiauh/commit/f231fa9c69191f23277b4e3319f6b675bfa0ee42) it is also possible to pass optional parameters to a `gcode_shell_command`.
