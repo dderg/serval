@@ -35,7 +35,7 @@ struct fault_record {
 // Bump on any live_snapshot layout change so a reflash (RAM survives, old magic
 // still matches) can't seed the new fields with stale bytes — a mismatch forces
 // the cold-init zero pass.
-#define LIVE_MAGIC 0x4C495646u
+#define LIVE_MAGIC 0x4C495647u
 
 struct live_snapshot {
     uint32_t magic;
@@ -65,6 +65,10 @@ struct live_snapshot {
     uint32_t worst_msg_head;
     uint32_t demux_backlog_max;
     uint32_t demux_msgs_max;
+    uint32_t ttc_caller;
+    uint32_t ttc_func;
+    uint32_t ttc_late;
+    uint32_t ttc_count;
 };
 
 // .persistent_diag must stay a NOLOAD section outside [_bss_start.._bss_end] or
@@ -724,6 +728,33 @@ diag_note_msg_exit(void)
     live_snap.cur_msg_kind = 0;
 }
 
+// Called by sched_add_timer just before the "Timer too close" try_shutdown;
+// latches the first offender (caller PC, timer callback, lateness) into the
+// reset-surviving snapshot so the crash replay can name the timer.
+__attribute__((used, externally_visible))
+void
+diag_note_timer_too_close(uint32_t caller, uint32_t func, uint32_t late)
+{
+    if (!live_snap.ttc_count) {
+        live_snap.ttc_caller = caller;
+        live_snap.ttc_func   = func;
+        live_snap.ttc_late   = late;
+    }
+    live_snap.ttc_count++;
+    diag_cache_clean();
+}
+
+// Called by sched_main after a shutdown longjmp: the aborted work never
+// reached diag_note_msg_exit, so an in-progress message/task marker would let
+// the TIM5 growing-duration monitor inflate the worst slots forever.
+__attribute__((used, externally_visible))
+void
+diag_note_shutdown_reset(void)
+{
+    live_snap.cur_msg_kind = 0;
+    live_snap.cur_task_func = 0;
+}
+
 __attribute__((used, externally_visible))
 void
 diag_note_demux(uint32_t backlog, uint32_t msgs)
@@ -914,6 +945,9 @@ static uint32_t saved_prior_samples;
 static uint32_t prior_run_froze;
 static uint32_t saved_prior_last_dispatch_func;
 static uint32_t saved_prior_last_dispatch_addr;
+// Full copy of the crashed run's live_snap, taken at boot before the per-run
+// fields are zeroed; all "prior run" reporting reads this, never live_snap.
+static struct live_snapshot prior_snap;
 
 #if CONFIG_MACH_STM32H7
 #include "board/internal.h"
@@ -954,36 +988,42 @@ fault_handler_report_task(void)
         clear_reset_cause();
         if (live_snap.magic == LIVE_MAGIC) {
             prior_live_present_at_boot = 1;
+            memcpy(&prior_snap, (const void *)&live_snap, sizeof(prior_snap));
             saved_prior_live          = live_snap.live;
             saved_prior_engine        = live_snap.engine_status;
             saved_prior_tick          = live_snap.tick_counter;
             saved_prior_last_run_tick = live_snap.last_engine_running_tick;
             saved_prior_samples       = live_snap.samples_taken;
             prior_run_froze           = live_snap.this_run_froze;
-            live_snap.this_run_froze  = 0;
             saved_prior_last_dispatch_func = live_snap.last_dispatch_func;
             saved_prior_last_dispatch_addr = live_snap.last_dispatch_addr;
         } else {
-            live_snap.worst_fg_stall_ticks = 0;
-            live_snap.worst_fg_stall_pc    = 0;
-            live_snap.worst_fg_stall_exc   = 0;
-            live_snap.iwdg_reset_count     = 0;
-            live_snap.last_dispatch_func   = 0;
-            live_snap.last_dispatch_addr   = 0;
-            live_snap.this_run_froze       = 0;
-            live_snap.cur_task_func        = 0;
-            live_snap.cur_task_start       = 0;
-            live_snap.worst_task_func      = 0;
-            live_snap.worst_task_cyc       = 0;
-            live_snap.cur_msg_kind         = 0;
-            live_snap.cur_msg_start        = 0;
-            live_snap.cur_msg_head         = 0;
-            live_snap.worst_msg_kind       = 0;
-            live_snap.worst_msg_cyc        = 0;
-            live_snap.worst_msg_head       = 0;
-            live_snap.demux_backlog_max    = 0;
-            live_snap.demux_msgs_max       = 0;
+            live_snap.iwdg_reset_count = 0;
         }
+        // Per-run stats: replay the prior run's values (prior_snap) at boot,
+        // then start this run from zero so each boot reports its own run.
+        live_snap.worst_fg_stall_ticks = 0;
+        live_snap.worst_fg_stall_pc    = 0;
+        live_snap.worst_fg_stall_exc   = 0;
+        live_snap.last_dispatch_func   = 0;
+        live_snap.last_dispatch_addr   = 0;
+        live_snap.this_run_froze       = 0;
+        live_snap.cur_task_func        = 0;
+        live_snap.cur_task_start       = 0;
+        live_snap.worst_task_func      = 0;
+        live_snap.worst_task_cyc       = 0;
+        live_snap.cur_msg_kind         = 0;
+        live_snap.cur_msg_start        = 0;
+        live_snap.cur_msg_head         = 0;
+        live_snap.worst_msg_kind       = 0;
+        live_snap.worst_msg_cyc        = 0;
+        live_snap.worst_msg_head       = 0;
+        live_snap.demux_backlog_max    = 0;
+        live_snap.demux_msgs_max       = 0;
+        live_snap.ttc_caller           = 0;
+        live_snap.ttc_func             = 0;
+        live_snap.ttc_late             = 0;
+        live_snap.ttc_count            = 0;
 #if CONFIG_MACH_STM32H7
         if (reset_cause_raw & RCC_RSR_IWDG1RSTF)
             live_snap.iwdg_reset_count++;
@@ -1144,25 +1184,30 @@ fault_handler_report_task(void)
                saved_prior_samples);
     }
     output("fg_freeze stall_ticks %u pc %u exc %u iwdg %u last_disp_func %u last_disp_addr %u",
-           live_snap.worst_fg_stall_ticks,
-           live_snap.worst_fg_stall_pc,
-           live_snap.worst_fg_stall_exc,
+           prior_snap.worst_fg_stall_ticks,
+           prior_snap.worst_fg_stall_pc,
+           prior_snap.worst_fg_stall_exc,
            live_snap.iwdg_reset_count,
-           live_snap.last_dispatch_func,
-           live_snap.last_dispatch_addr);
+           prior_snap.last_dispatch_func,
+           prior_snap.last_dispatch_addr);
     output("fg_task worst_func %u worst_cyc %u cur_func %u",
-           live_snap.worst_task_func,
-           live_snap.worst_task_cyc,
-           live_snap.cur_task_func);
+           prior_snap.worst_task_func,
+           prior_snap.worst_task_cyc,
+           prior_snap.cur_task_func);
     output("fg_msg worst_kind %u worst_cyc %u cur_kind %u backlog_max %u msgs_max %u",
-           live_snap.worst_msg_kind,
-           live_snap.worst_msg_cyc,
-           live_snap.cur_msg_kind,
-           live_snap.demux_backlog_max,
-           live_snap.demux_msgs_max);
+           prior_snap.worst_msg_kind,
+           prior_snap.worst_msg_cyc,
+           prior_snap.cur_msg_kind,
+           prior_snap.demux_backlog_max,
+           prior_snap.demux_msgs_max);
     output("fg_msg_head worst_head %u cur_head %u",
-           live_snap.worst_msg_head,
-           live_snap.cur_msg_head);
+           prior_snap.worst_msg_head,
+           prior_snap.cur_msg_head);
+    output("timer_too_close caller %u func %u late_cyc %u count %u",
+           prior_snap.ttc_caller,
+           prior_snap.ttc_func,
+           prior_snap.ttc_late,
+           prior_snap.ttc_count);
     if (fault_rec.magic == FAULT_MAGIC) {
         output("prior_fault kind %u count %u pc %u lr %u psr %u"
                " r0 %u r1 %u r2 %u r3 %u r12 %u",
@@ -1339,7 +1384,10 @@ kalico_diag_emit_prior_crash(void)
     // klippy's connect-reset overwrites the RCC cause with SFTRST, so a real
     // foreground freeze survives only via prior_run_froze (in BKPSRAM); do not
     // drop it from this condition.
-    uint8_t abnormal = iwdg || had_fault || prior_run_froze;
+    // A "Timer too close" run must also replay the deep forensics (ring,
+    // block_source, tim5_ia) — it is a clean shutdown, not an iwdg/fault.
+    uint8_t abnormal = iwdg || had_fault || prior_run_froze
+                       || prior_snap.ttc_count != 0;
 
     event_log_emit(abnormal ? EVENT_LOG_LEVEL_WARN : EVENT_LOG_LEVEL_DEBUG,
                     EVENT_LOG_SUBSYS_RUNTIME, EVENT_LOG_EVENT_RUNTIME_MCU_RESET,
@@ -1354,33 +1402,46 @@ kalico_diag_emit_prior_crash(void)
                         fault_rec.cfsr, fault_rec.hfsr);
     }
 
-    if (live_snap.worst_fg_stall_ticks) {
+    if (prior_snap.worst_fg_stall_ticks) {
         event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
                         EVENT_LOG_EVENT_RUNTIME_FG_FREEZE, 0,
-                        live_snap.worst_fg_stall_pc,
-                        live_snap.worst_fg_stall_ticks);
+                        prior_snap.worst_fg_stall_pc,
+                        prior_snap.worst_fg_stall_ticks);
     }
 
-    if (live_snap.worst_task_cyc) {
+    if (prior_snap.worst_task_cyc) {
         event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
                         EVENT_LOG_EVENT_RUNTIME_FG_TASK, 0,
-                        live_snap.worst_task_func,
-                        live_snap.worst_task_cyc);
+                        prior_snap.worst_task_func,
+                        prior_snap.worst_task_cyc);
     }
 
-    if (live_snap.worst_msg_cyc || live_snap.demux_msgs_max) {
+    if (prior_snap.worst_msg_cyc || prior_snap.demux_msgs_max) {
         event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
                         EVENT_LOG_EVENT_RUNTIME_FG_MSG, 0,
-                        live_snap.worst_msg_kind,
-                        live_snap.worst_msg_cyc);
+                        prior_snap.worst_msg_kind,
+                        prior_snap.worst_msg_cyc);
         event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
                         EVENT_LOG_EVENT_RUNTIME_FG_MSG_HEAD, 0,
-                        live_snap.worst_msg_head,
-                        live_snap.cur_msg_head);
+                        prior_snap.worst_msg_head,
+                        prior_snap.cur_msg_head);
         event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
                         EVENT_LOG_EVENT_RUNTIME_FG_DEMUX, 0,
-                        live_snap.demux_backlog_max,
-                        live_snap.demux_msgs_max);
+                        prior_snap.demux_backlog_max,
+                        prior_snap.demux_msgs_max);
+    }
+
+    if (prior_snap.ttc_count) {
+        event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_TIMER_TOO_CLOSE,
+                        (uint16_t)(prior_snap.ttc_count > 0xFFFFu
+                                   ? 0xFFFFu : prior_snap.ttc_count),
+                        prior_snap.ttc_caller,
+                        prior_snap.ttc_func);
+        event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_TIMER_TOO_CLOSE_LATE, 0,
+                        prior_snap.ttc_late,
+                        prior_snap.ttc_count);
     }
 
     if (abnormal) {
@@ -1502,6 +1563,19 @@ kalico_diag_emit_live(void)
                         EVENT_LOG_EVENT_RUNTIME_FG_DEMUX, 0,
                         live_snap.demux_backlog_max,
                         live_snap.demux_msgs_max);
+    }
+
+    if (live_snap.ttc_count) {
+        event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_TIMER_TOO_CLOSE,
+                        (uint16_t)(live_snap.ttc_count > 0xFFFFu
+                                   ? 0xFFFFu : live_snap.ttc_count),
+                        live_snap.ttc_caller,
+                        live_snap.ttc_func);
+        event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_TIMER_TOO_CLOSE_LATE, 0,
+                        live_snap.ttc_late,
+                        live_snap.ttc_count);
     }
 
     for (uint32_t i = 0; i < DIAG_RING_LEN; i++) {

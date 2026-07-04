@@ -179,8 +179,16 @@ sched_add_timer(struct timer *add)
     struct timer *tl = SchedState.timer_list;
     if (unlikely(timer_is_before(waketime, tl->waketime))) {
         // This timer is before all other scheduled timers
-        if (timer_is_before(waketime, timer_read_time()))
+        uint32_t now = timer_read_time();
+        if (timer_is_before(waketime, now)) {
+            extern void diag_note_timer_too_close(uint32_t caller,
+                                                  uint32_t func,
+                                                  uint32_t late);
+            diag_note_timer_too_close(
+                (uint32_t)(uintptr_t)__builtin_return_address(0),
+                (uint32_t)(uintptr_t)add->func, now - waketime);
             try_shutdown("Timer too close");
+        }
         if (tl == &SchedState.deleted_timer)
             add->next = SchedState.deleted_timer.next;
         else
@@ -478,6 +486,11 @@ sched_main(void)
         // non-zero. Reset before running shutdown handlers so the
         // protection re-engages cleanly.
         sched_writable_reset();
+        // The longjmp also skips any pending diag_note_msg_exit; clear the
+        // in-progress markers so the TIM5 growing-duration monitor can't
+        // keep inflating worst_msg_cyc/worst_task_cyc across the shutdown.
+        extern void diag_note_shutdown_reset(void);
+        diag_note_shutdown_reset();
         run_shutdown(ret);
     }
     irq_enable();

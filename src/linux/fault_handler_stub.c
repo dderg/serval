@@ -158,6 +158,15 @@ void diag_note_msg_exit(void)
 {
 }
 
+void diag_note_timer_too_close(uint32_t caller, uint32_t func, uint32_t late)
+{
+    (void)caller; (void)func; (void)late;
+}
+
+void diag_note_shutdown_reset(void)
+{
+}
+
 void diag_note_demux(uint32_t backlog, uint32_t msgs)
 {
     (void)backlog; (void)msgs;
