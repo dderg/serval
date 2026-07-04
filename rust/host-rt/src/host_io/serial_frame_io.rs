@@ -54,10 +54,11 @@ impl SerialFrameIo {
     }
 
     // A single stalled poll must not kill the session: the MCU buffers ~2 s of
-    // motion, and observed link stalls (~100 ms, self-healing) are far below
+    // motion, and observed link stalls (100–337 ms, self-healing) are far below
     // that. Writes retry through transient TimedOut polls — each retry logged —
-    // and only a stall past WRITE_STALL_LIMIT is a transport fault.
-    const WRITE_STALL_LIMIT: Duration = Duration::from_millis(500);
+    // and only a stall past WRITE_STALL_LIMIT (half the MCU motion buffer) is a
+    // transport fault.
+    const WRITE_STALL_LIMIT: Duration = Duration::from_millis(1000);
     const WRITE_POLL: Duration = Duration::from_millis(25);
 
     pub fn write_all(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
