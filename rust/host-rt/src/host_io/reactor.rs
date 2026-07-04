@@ -871,6 +871,17 @@ impl Reactor {
             TransportError::Io(io) => (io.raw_os_error(), Some(io.kind())),
             _ => (None, None),
         };
+        let drain_curve: Vec<String> = (0..10)
+            .map(|_| {
+                let depth = self
+                    .io
+                    .bytes_to_write()
+                    .map(|b| b.to_string())
+                    .unwrap_or_else(|e| format!("err:{e}"));
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                depth
+            })
+            .collect();
         tracing::error!(
             subsystem = "mcu-comms",
             event = "transport_io_fault",
@@ -880,6 +891,7 @@ impl Reactor {
             error = %error,
             unacked_n = self.unacked_window.len(),
             pending_piece_frames = self.pending_piece_frames.len(),
+            outq_drain_curve_20ms = %drain_curve.join(","),
             "transport IO fault; transitioning Closed"
         );
         if self.pending_host_fault.is_none() {

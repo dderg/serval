@@ -260,6 +260,8 @@ struct diag_counters {
     uint32_t usb_in_dtxfsts;
     uint32_t usb_out_doepctl;
     uint32_t usb_out_doepint;
+    uint32_t out_unarmed_worst_cyc;
+    uint32_t out_unarmed_worst_end;
 
     uint32_t stepout_late_max_cyc;
     uint32_t stepout_late_count;
@@ -671,6 +673,34 @@ diag_snapshot_otg_regs(uint32_t gintmsk, uint32_t gintsts)
     diag.otg_gintsts_now = gintsts;
 }
 
+// An armed idle OUT endpoint keeps DOEPCTL.EPENA set, so unarmed time only
+// accrues between packet reception and the foreground's consume-and-rearm —
+// exactly the window where the host's writes back up. Latch the worst episode
+// and when it ended so a host-side write timeout can be matched against it.
+#define USB_OUT_DOEPCTL_EPENA_BIT (1u << 31)
+
+static void
+diag_track_out_unarmed(uint32_t out_doepctl)
+{
+    extern uint32_t timer_read_time(void);
+    static uint32_t unarmed_since;
+    static uint8_t unarmed;
+    uint32_t now = timer_read_time();
+    if (!(out_doepctl & USB_OUT_DOEPCTL_EPENA_BIT)) {
+        if (!unarmed) {
+            unarmed = 1;
+            unarmed_since = now;
+        }
+        uint32_t dur = now - unarmed_since;
+        if (dur > diag.out_unarmed_worst_cyc) {
+            diag.out_unarmed_worst_cyc = dur;
+            diag.out_unarmed_worst_end = now;
+        }
+    } else {
+        unarmed = 0;
+    }
+}
+
 void
 diag_usb_poll(uint32_t gintsts, uint32_t gintmsk, uint32_t in_diepctl,
               uint32_t in_diepint, uint32_t in_dtxfsts, uint32_t out_doepctl,
@@ -684,6 +714,7 @@ diag_usb_poll(uint32_t gintsts, uint32_t gintmsk, uint32_t in_diepctl,
     diag.usb_in_dtxfsts = in_dtxfsts;
     diag.usb_out_doepctl = out_doepctl;
     diag.usb_out_doepint = out_doepint;
+    diag_track_out_unarmed(out_doepctl);
 }
 
 void
@@ -1125,6 +1156,8 @@ fault_handler_report_task(void)
             prior_diag.usb_in_dtxfsts         = diag.usb_in_dtxfsts;
             prior_diag.usb_out_doepctl        = diag.usb_out_doepctl;
             prior_diag.usb_out_doepint        = diag.usb_out_doepint;
+            prior_diag.out_unarmed_worst_cyc  = diag.out_unarmed_worst_cyc;
+            prior_diag.out_unarmed_worst_end  = diag.out_unarmed_worst_end;
             {
                 extern void kalico_stepout_late_get(uint32_t *out_max_late,
                                                     uint32_t *out_late_count,
@@ -1335,6 +1368,9 @@ fault_handler_report_task(void)
                prior_diag.usb_in_dtxfsts,
                prior_diag.usb_out_doepctl,
                prior_diag.usb_out_doepint);
+        output("prior_diag_out_unarmed worst_cyc %u end_tick %u",
+               prior_diag.out_unarmed_worst_cyc,
+               prior_diag.out_unarmed_worst_end);
         output("prior_diag_tasks out_n %u out_max_gap %u in_n %u in_max_gap %u"
                " drain_n %u drain_max_gap %u stat_n %u stat_max_gap %u",
                prior_diag.usb_out_calls,
