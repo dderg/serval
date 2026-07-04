@@ -41,8 +41,7 @@ class FakeMcu:
 # Mirrors the bridge's entry gate: submit_move pushes into a fixed-capacity
 # entry channel and reports full when the number of in-flight moves reaches the
 # capacity. In-flight moves drain as the wall clock (reactor) advances;
-# `stalled` pins them so the channel never frees -- the PIPE_FULL_TIMEOUT guard
-# case.
+# `stalled` pins them so the channel never frees.
 class FakeEngine:
     def __init__(self, reactor, in_flight=0, capacity=64, stalled=False):
         self.reactor = reactor
@@ -127,16 +126,6 @@ def test_retries_until_pipe_frees_space():
     assert m.reactor.pauses > 0
 
 
-def test_timeout_when_pipe_never_frees():
-    # channel stalled full => never frees => PIPE_FULL_TIMEOUT fail-loud.
-    m = FakeMotion(in_flight=64, stalled=True)
-    m.reactor.step = 100.0
-    with pytest.raises(FakeCommandError) as excinfo:
-        m.submit()
-    assert "%.0fs" % motion.PIPE_FULL_TIMEOUT in str(excinfo.value)
-    assert m.engine.accepted == 0
-
-
 def test_drip_submits_without_pacing():
     m = FakeMotion(in_flight=1, drip=True)
     m.submit()
@@ -159,8 +148,8 @@ def test_no_mcu_submits_without_pacing():
 
 
 def test_shutdown_breaks_the_wait():
-    # an estop/shutdown during a full-pipe wait must break promptly, not spin
-    # to PIPE_FULL_TIMEOUT.
+    # an estop/shutdown during a full-pipe wait must break promptly; it is the
+    # only thing that ends the wait besides the channel freeing.
     m = FakeMotion(in_flight=64, stalled=True, shutdown=True)
     with pytest.raises(FakeCommandError):
         m.submit()
