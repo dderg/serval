@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -12,13 +12,13 @@ use host_rt::clock::RealClock;
 use host_rt::host_io::parser::{DataDictionary, FieldValue, MsgProtoParser};
 use host_rt::host_io::{McuHostIo, McuHostIoConfig};
 use host_rt::mcu_serial_conn::McuSerialConn;
-use host_rt::passthrough_queue::{NotifyId, PassthroughEntry, PassthroughRouter};
+use host_rt::passthrough_queue::PassthroughRouter;
 
 use crate::classify;
 use crate::config::{self, PlannerConfig};
 use crate::kinematics::{KinematicsModule, SPATIAL_AXES};
 use crate::mcu_config::{McuAxisConfig, McuCaps, build_mcu_configs};
-use crate::types::{cq_id_from_raw, mcu_handle_from_raw, stats_to_pydict};
+use crate::types::mcu_handle_from_raw;
 use crate::worker::{StreamWorkerError, StreamWorkerHandle};
 
 mod ethercat_endpoint;
@@ -47,9 +47,7 @@ use runtime_caps::{
     collect_motor_positions_inner, query_ethercat_runtime_caps, query_runtime_caps,
     require_positive, slot_for_axis,
 };
-use state::{
-    EngineEvent, EthercatDrive, FlushWait, HomingRun, McuConnection, trip_position_to_motor_frame,
-};
+use state::{EthercatDrive, FlushWait, HomingRun, McuConnection, trip_position_to_motor_frame};
 
 fn abort_after_tracing_appender_drains() {
     let _ = std::io::Write::flush(&mut std::io::stderr());
@@ -135,9 +133,7 @@ pub struct PyMotionEngine {
     router: Arc<Mutex<PassthroughRouter>>,
     parser: Arc<Mutex<Option<Arc<MsgProtoParser>>>>,
     mcus: Arc<Mutex<HashMap<u32, McuConnection>>>,
-    events: Arc<Mutex<VecDeque<EngineEvent>>>,
     #[allow(dead_code)]
-    handlers: Mutex<HashMap<(u32, String, u32), Py<PyAny>>>,
     planner: Mutex<Option<StreamWorkerHandle>>,
     planner_config: Mutex<PlannerConfig>,
     commanded_pos: Mutex<[f64; 3]>,
@@ -191,8 +187,6 @@ impl PyMotionEngine {
             router: Arc::new(Mutex::new(PassthroughRouter::with_clock(clock))),
             parser: Arc::new(Mutex::new(None)),
             mcus: Arc::new(Mutex::new(HashMap::new())),
-            events: Arc::new(Mutex::new(VecDeque::new())),
-            handlers: Mutex::new(HashMap::new()),
             planner: Mutex::new(None),
             planner_config: Mutex::new(PlannerConfig::default()),
             commanded_pos: Mutex::new([0.0; 3]),
@@ -386,10 +380,6 @@ impl PyMotionEngine {
 
         let mut router = self.router.lock().unwrap_or_else(|p| p.into_inner());
         router.release_mcu(mcu_handle_from_raw(handle));
-        self.handlers
-            .lock()
-            .unwrap()
-            .retain(|&(mcu, _, _), _| mcu != handle);
         Ok(())
     }
 

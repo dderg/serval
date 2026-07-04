@@ -4,8 +4,6 @@
 
 use super::*;
 use crate::host_io::test_harness::ReactorHarness;
-use crate::passthrough_queue::{NotifyId, PassthroughEntry, PassthroughRouter};
-use std::sync::Arc;
 use std::sync::mpsc::sync_channel;
 use std::time::Duration;
 
@@ -68,24 +66,13 @@ fn piece_frame_deferred_while_outq_deep_then_flushed() {
 #[test]
 fn control_frame_bypasses_deep_outq_that_defers_pieces() {
     let mut h = identified_harness();
-    let mut router = PassthroughRouter::with_clock(
-        Arc::clone(&h.clock) as Arc<dyn crate::clock::Clock + Send + Sync>
-    );
-    let mcu = router.claim_mcu("test_mcu");
-    let qid = router.alloc_command_queue(mcu).unwrap();
-    h.reactor.set_passthrough_router(router, mcu);
 
     set_outq(&h, PIECE_OUTQ_BUDGET_BYTES + 1);
     submit_piece_call(&h);
-    h.reactor
-        .passthrough_router
-        .as_mut()
-        .unwrap()
-        .push(
-            mcu,
-            qid,
-            PassthroughEntry::new(vec![0xAA, 0xBB], 0, 0, NotifyId::none()),
-        )
+    h.submission_tx
+        .send(ReactorCommand::FireAndForgetTyped {
+            payload: vec![0xAA, 0xBB],
+        })
         .unwrap();
     h.tick();
 

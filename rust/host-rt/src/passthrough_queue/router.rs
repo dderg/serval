@@ -1,16 +1,8 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use indexmap::IndexMap;
 
-use super::config_stage::{ConfigStage, ConfigStagePhase};
-use super::debug_log::{DebugEntry, DebugLog};
-use super::entry::{NotifyId, PassthroughEntry};
-use super::mcu_state::{CommandQueueId, McuState, PushError};
-use super::notify::{NotifyCallback, NotifyResponse, NotifyTable};
-use super::receive_window::ReceiveWindow;
-use super::stats::{PassthroughStats, StatsCounters};
 use crate::clock::{Clock, instant_to_f64};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -29,56 +21,25 @@ impl McuHandle {
 #[derive(Debug)]
 pub enum RouterError {
     UnknownMcu(McuHandle),
-    Push(PushError),
-    WindowFull,
 }
 
 impl std::fmt::Display for RouterError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnknownMcu(h) => write!(f, "unknown MCU handle {}", h.0),
-            Self::Push(e) => write!(f, "push error: {e}"),
-            Self::WindowFull => write!(f, "receive window full"),
         }
     }
 }
 
 impl std::error::Error for RouterError {}
 
+#[derive(Debug)]
 struct McuRecord {
     #[allow(dead_code)]
     label: String,
-    state: McuState,
-    notify_table: NotifyTable,
-    window: ReceiveWindow,
-    sent_times: HashMap<NotifyId, f64>,
-    config_stage: ConfigStage,
     clock_freq: f64,
     clock_offset: f64,
     last_clock: u64,
-    flush_callbacks: Vec<Box<dyn Fn() + Send>>,
-    was_non_empty: bool,
-    stats: StatsCounters,
-    debug_log: DebugLog,
-}
-
-impl std::fmt::Debug for McuRecord {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("McuRecord")
-            .field("label", &self.label)
-            .field("state", &self.state)
-            .field("notify_table", &self.notify_table)
-            .field("window", &self.window)
-            .field("sent_times_count", &self.sent_times.len())
-            .field("config_stage", &self.config_stage)
-            .field("clock_freq", &self.clock_freq)
-            .field("last_clock", &self.last_clock)
-            .field("flush_callbacks_count", &self.flush_callbacks.len())
-            .field("was_non_empty", &self.was_non_empty)
-            .field("stats", &self.stats)
-            .field("debug_log", &self.debug_log)
-            .finish()
-    }
 }
 
 pub struct PassthroughRouter {
@@ -105,10 +66,6 @@ impl PassthroughRouter {
         }
     }
 
-    pub fn mcu_handles(&self) -> impl Iterator<Item = &McuHandle> {
-        self.mcus.keys()
-    }
-
     pub fn claim_mcu(&mut self, label: &str) -> McuHandle {
         let handle = McuHandle(self.next_handle);
         self.next_handle += 1;
@@ -116,18 +73,9 @@ impl PassthroughRouter {
             handle,
             McuRecord {
                 label: label.to_owned(),
-                state: McuState::new(),
-                notify_table: NotifyTable::new(),
-                window: ReceiveWindow::new(),
-                sent_times: HashMap::new(),
-                config_stage: ConfigStage::new(),
                 clock_freq: 0.0,
                 clock_offset: 0.0,
                 last_clock: 0,
-                flush_callbacks: Vec::new(),
-                was_non_empty: false,
-                stats: StatsCounters::new(),
-                debug_log: DebugLog::new(),
             },
         );
         handle
@@ -135,200 +83,6 @@ impl PassthroughRouter {
 
     pub fn release_mcu(&mut self, handle: McuHandle) {
         self.mcus.swap_remove(&handle);
-    }
-
-    pub fn alloc_command_queue(&mut self, mcu: McuHandle) -> Result<CommandQueueId, RouterError> {
-        let rec = self
-            .mcus
-            .get_mut(&mcu)
-            .ok_or(RouterError::UnknownMcu(mcu))?;
-        Ok(rec.state.alloc_command_queue())
-    }
-
-    pub fn register_notify(
-        &mut self,
-        mcu: McuHandle,
-        cb: NotifyCallback,
-    ) -> Result<NotifyId, RouterError> {
-        let rec = self
-            .mcus
-            .get_mut(&mcu)
-            .ok_or(RouterError::UnknownMcu(mcu))?;
-        Ok(rec.notify_table.register(cb))
-    }
-
-    pub fn push(
-        &mut self,
-        mcu: McuHandle,
-        queue_id: CommandQueueId,
-        entry: PassthroughEntry,
-    ) -> Result<(), RouterError> {
-        self.note_if_late(mcu, &entry, "passthrough_pushed_late");
-        let rec = self
-            .mcus
-            .get_mut(&mcu)
-            .ok_or(RouterError::UnknownMcu(mcu))?;
-        rec.state.push(queue_id, entry).map_err(RouterError::Push)
-    }
-
-    /// Warn when a timed command's req_clock is already behind the projected
-    /// MCU clock. Fired at push (klippy handed it over stale — scheduling
-    /// problem) and at emission (it aged in this queue — transport problem);
-    /// which one fires locates a "Timer too close" without guesswork.
-    fn note_if_late(&self, mcu: McuHandle, entry: &PassthroughEntry, event: &'static str) {
-        if entry.req_clock() == 0 || entry.is_background_priority() {
-            return;
-        }
-        let est_clock = self.compute_ack_clock(mcu).unwrap_or(0);
-        if est_clock == 0 || entry.req_clock() >= est_clock {
-            return;
-        }
-        let late_ticks = est_clock - entry.req_clock();
-        let freq = self.mcus.get(&mcu).map(|r| r.clock_freq).unwrap_or(0.0);
-        let late_ms = if freq > 0.0 {
-            late_ticks as f64 / freq * 1e3
-        } else {
-            0.0
-        };
-        tracing::warn!(
-            subsystem = "mcu-comms",
-            event,
-            cmd = entry.bytes().first().copied().unwrap_or(0),
-            req_clock = entry.req_clock(),
-            est_clock,
-            late_ticks,
-            late_ms,
-            "passthrough command req_clock is behind the projected MCU clock"
-        );
-    }
-
-    pub fn promote_all(&mut self, mcu: McuHandle, ack_clock: u64) -> Result<(), RouterError> {
-        let rec = self
-            .mcus
-            .get_mut(&mcu)
-            .ok_or(RouterError::UnknownMcu(mcu))?;
-        rec.state.promote_all(ack_clock);
-        Ok(())
-    }
-
-    pub fn pop_next_for_emission(
-        &mut self,
-        mcu: McuHandle,
-    ) -> Result<Option<PassthroughEntry>, RouterError> {
-        {
-            let rec = self.mcus.get(&mcu).ok_or(RouterError::UnknownMcu(mcu))?;
-            if !rec.window.can_emit() {
-                return Ok(None);
-            }
-        }
-        let rec = self
-            .mcus
-            .get_mut(&mcu)
-            .ok_or(RouterError::UnknownMcu(mcu))?;
-        let entry = rec.state.pop_next();
-        if let Some(ref e) = entry {
-            self.note_if_late(mcu, e, "passthrough_emitted_late");
-        }
-        let rec = self
-            .mcus
-            .get_mut(&mcu)
-            .ok_or(RouterError::UnknownMcu(mcu))?;
-        if let Some(ref e) = entry {
-            rec.was_non_empty = true;
-            let bytes_len = e.bytes().len() as u64;
-            rec.window.record_emit(bytes_len);
-            rec.stats.bytes_write += bytes_len;
-            rec.stats.send_seq += 1;
-            let now = instant_to_f64(self.clock.now());
-            rec.debug_log
-                .record_sent(rec.stats.send_seq, e.bytes().to_vec(), now);
-            if !e.notify_id().is_none() {
-                rec.sent_times.insert(e.notify_id(), now);
-            }
-        }
-        Ok(entry)
-    }
-
-    pub fn dispatch_response(
-        &mut self,
-        mcu: McuHandle,
-        notify_id: NotifyId,
-        response_bytes: Vec<u8>,
-    ) -> Result<(), RouterError> {
-        let rec = self
-            .mcus
-            .get_mut(&mcu)
-            .ok_or(RouterError::UnknownMcu(mcu))?;
-        rec.stats.bytes_read += response_bytes.len() as u64;
-        rec.stats.receive_seq += 1;
-        let sent_time = rec.sent_times.remove(&notify_id).unwrap_or(0.0);
-        let receive_time = instant_to_f64(self.clock.now());
-        rec.debug_log
-            .record_received(rec.stats.receive_seq, response_bytes.clone(), receive_time);
-        rec.notify_table.dispatch(
-            notify_id,
-            NotifyResponse {
-                bytes: response_bytes,
-                sent_time,
-                receive_time,
-            },
-        );
-        Ok(())
-    }
-
-    pub fn record_ack(&mut self, mcu: McuHandle, acked_bytes: u64) -> Result<(), RouterError> {
-        let rec = self
-            .mcus
-            .get_mut(&mcu)
-            .ok_or(RouterError::UnknownMcu(mcu))?;
-        rec.window.record_ack(acked_bytes);
-        Ok(())
-    }
-
-    pub fn add_config_cmd(&mut self, mcu: McuHandle, bytes: Vec<u8>) -> Result<bool, RouterError> {
-        let rec = self
-            .mcus
-            .get_mut(&mcu)
-            .ok_or(RouterError::UnknownMcu(mcu))?;
-        Ok(rec.config_stage.add_config_cmd(bytes))
-    }
-
-    pub fn add_init_cmd(&mut self, mcu: McuHandle, bytes: Vec<u8>) -> Result<bool, RouterError> {
-        let rec = self
-            .mcus
-            .get_mut(&mcu)
-            .ok_or(RouterError::UnknownMcu(mcu))?;
-        Ok(rec.config_stage.add_init_cmd(bytes))
-    }
-
-    pub fn add_restart_cmd(&mut self, mcu: McuHandle, bytes: Vec<u8>) -> Result<bool, RouterError> {
-        let rec = self
-            .mcus
-            .get_mut(&mcu)
-            .ok_or(RouterError::UnknownMcu(mcu))?;
-        Ok(rec.config_stage.add_restart_cmd(bytes))
-    }
-
-    pub fn begin_config_phase(&mut self, mcu: McuHandle) -> Result<(), RouterError> {
-        let rec = self
-            .mcus
-            .get_mut(&mcu)
-            .ok_or(RouterError::UnknownMcu(mcu))?;
-        rec.config_stage.begin_config_send();
-        Ok(())
-    }
-
-    pub fn next_config_entry(&mut self, mcu: McuHandle) -> Result<Option<Vec<u8>>, RouterError> {
-        let rec = self
-            .mcus
-            .get_mut(&mcu)
-            .ok_or(RouterError::UnknownMcu(mcu))?;
-        Ok(rec.config_stage.next_config_entry())
-    }
-
-    pub fn config_phase(&self, mcu: McuHandle) -> Result<ConfigStagePhase, RouterError> {
-        let rec = self.mcus.get(&mcu).ok_or(RouterError::UnknownMcu(mcu))?;
-        Ok(rec.config_stage.phase())
     }
 
     pub fn set_clock_est(
@@ -606,52 +360,6 @@ impl PassthroughRouter {
                 "[seg0-lead] segment 0 lead over the MCU ack clock"
             );
         }
-    }
-
-    pub fn get_stats(&self, mcu: McuHandle) -> Result<PassthroughStats, RouterError> {
-        let rec = self.mcus.get(&mcu).ok_or(RouterError::UnknownMcu(mcu))?;
-        let mut snap = rec.stats.snapshot();
-        snap.ready_bytes = rec.state.total_ready_bytes();
-        snap.upcoming_bytes = rec.state.total_upcoming_bytes();
-        Ok(snap)
-    }
-
-    pub fn extract_old(
-        &mut self,
-        mcu: McuHandle,
-    ) -> Result<(Vec<DebugEntry>, Vec<DebugEntry>), RouterError> {
-        let rec = self
-            .mcus
-            .get_mut(&mcu)
-            .ok_or(RouterError::UnknownMcu(mcu))?;
-        Ok(rec.debug_log.extract_old())
-    }
-
-    pub fn register_flush_callback(
-        &mut self,
-        mcu: McuHandle,
-        cb: Box<dyn Fn() + Send>,
-    ) -> Result<(), RouterError> {
-        let rec = self
-            .mcus
-            .get_mut(&mcu)
-            .ok_or(RouterError::UnknownMcu(mcu))?;
-        rec.flush_callbacks.push(cb);
-        Ok(())
-    }
-
-    pub fn check_flush(&mut self, mcu: McuHandle) -> Result<(), RouterError> {
-        let rec = self
-            .mcus
-            .get_mut(&mcu)
-            .ok_or(RouterError::UnknownMcu(mcu))?;
-        if rec.was_non_empty && rec.state.is_all_ready_empty() {
-            rec.was_non_empty = false;
-            for cb in &rec.flush_callbacks {
-                cb();
-            }
-        }
-        Ok(())
     }
 }
 

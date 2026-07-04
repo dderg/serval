@@ -18,7 +18,6 @@ use crate::host_io::rtt::RttEstimator;
 use crate::host_io::runtime_events::{FaultEvent, StatusEvent};
 use crate::host_io::serial_frame_io::SerialFrameIo;
 use crate::host_io::window::{AwaitingResponse, UnackedWindow};
-use crate::passthrough_queue::{McuHandle, NotifyId, PassthroughRouter};
 use crate::transport::TransportError;
 use mcu_transport::demux::{Frame, KlipperFrame, PollOutcome};
 use runtime::error::FaultCode;
@@ -67,9 +66,6 @@ pub struct Reactor {
     pub(crate) last_write_time: Instant,
     pub(crate) zero_byte_consec: u32,
     pub(crate) clock: Arc<dyn Clock>,
-    pub(crate) passthrough_router: Option<PassthroughRouter>,
-    pub(crate) passthrough_notify_map: std::collections::HashMap<u64, (McuHandle, NotifyId)>,
-    pub(crate) passthrough_mcu: Option<McuHandle>,
     pub(crate) transport_state: McuTransportState,
     pub(crate) interceptors: crate::host_io::interceptor::InterceptorTable,
 }
@@ -157,9 +153,6 @@ impl Reactor {
             last_write_time: clock.now(),
             zero_byte_consec: 0,
             clock,
-            passthrough_router: None,
-            passthrough_notify_map: std::collections::HashMap::new(),
-            passthrough_mcu: None,
             transport_state: McuTransportState::default(),
             interceptors: crate::host_io::interceptor::InterceptorTable::new(),
         }
@@ -223,13 +216,6 @@ impl Reactor {
             "frame write"
         );
         result
-    }
-}
-
-impl Reactor {
-    pub fn set_passthrough_router(&mut self, router: PassthroughRouter, mcu: McuHandle) {
-        self.passthrough_router = Some(router);
-        self.passthrough_mcu = Some(mcu);
     }
 }
 
@@ -469,9 +455,8 @@ impl Reactor {
     /// piece frame waits until pending wire bytes drop under the budget — so
     /// a control command is never queued behind more than
     /// `PIECE_OUTQ_BUDGET_BYTES` of piece bytes. Without this, a print-start
-    /// piece flood keeps the tty queue deep, control acks inflate, the
-    /// passthrough router backs up, and a `queue_digital_out` arrives seconds
-    /// late — the "Timer too close" shutdown this replaces.
+    /// piece flood keeps the tty queue deep, control acks inflate, and a
+    /// `queue_digital_out` arrives seconds late.
     pub(crate) fn drain_piece_frames(&mut self) {
         while !self.pending_piece_frames.is_empty() {
             match self.io.bytes_to_write() {
@@ -505,71 +490,6 @@ impl Reactor {
         }
     }
 
-    pub(crate) fn drain_passthrough(&mut self) {
-        let mcu = match self.passthrough_mcu {
-            Some(m) => m,
-            None => return,
-        };
-
-        let mut router = match self.passthrough_router.take() {
-            Some(r) => r,
-            None => return,
-        };
-
-        let ack_clock = router.compute_ack_clock(mcu).unwrap_or(0);
-        let _ = router.promote_all(mcu, ack_clock);
-
-        loop {
-            if self.unacked_window.is_full() {
-                break;
-            }
-            let entry = match router.pop_next_for_emission(mcu) {
-                Ok(Some(e)) => e,
-                _ => break,
-            };
-
-            let seq = self.send_seq;
-            self.send_seq += 1;
-            let wire_seq = (seq & 0x0F) as u8;
-            let frame = crate::host_io::wire::build_frame(entry.bytes(), wire_seq);
-
-            if let Err(_e) = self.write_frame(&frame) {
-                if self.pending_host_fault.is_none() {
-                    self.pending_host_fault = Some(crate::host_io::runtime_events::FaultEvent {
-                        fault_code: FaultCode::HostDisconnect.as_u16(),
-                        fault_detail: 0,
-                        segment_id: 0,
-                        synthesized: false,
-                    });
-                }
-                self.state = ReactorState::Closed;
-                self.passthrough_router = Some(router);
-                return;
-            }
-
-            let now = self.clock.now();
-            self.unacked_window
-                .push(crate::host_io::window::UnackedEntry {
-                    seq,
-                    frame_bytes: frame,
-                    sent_at: now,
-                    retry_count: 0,
-                });
-
-            if !entry.notify_id().is_none() {
-                self.passthrough_notify_map
-                    .insert(seq, (mcu, entry.notify_id()));
-            }
-
-            if !self.rtt_sample_armed {
-                self.rtt_sample_seq = seq;
-                self.rtt_sample_armed = true;
-            }
-        }
-
-        self.passthrough_router = Some(router);
-    }
-
     fn update_receive_seq(&mut self, rseq: u64) -> Result<(), TransportError> {
         if self.unacked_window.is_empty() {
             self.send_seq = rseq;
@@ -583,16 +503,6 @@ impl Reactor {
                 self.rtt.update(rtt);
                 self.rtt_sample_armed = false;
                 break;
-            }
-        }
-        if let (Some(router), Some(mcu)) = (self.passthrough_router.as_mut(), self.passthrough_mcu)
-        {
-            for entry in &popped {
-                let payload_len = entry
-                    .frame_bytes
-                    .len()
-                    .saturating_sub(crate::host_io::wire::MESSAGE_MIN);
-                let _ = router.record_ack(mcu, payload_len as u64);
             }
         }
         self.receive_seq = rseq;
@@ -717,16 +627,6 @@ impl Reactor {
                 return Ok(());
             }
         };
-        let raw_payload = {
-            let msglen = bytes[0] as usize;
-            let trailer = crate::host_io::wire::MESSAGE_TRAILER_SIZE;
-            let header = crate::host_io::wire::MESSAGE_HEADER_SIZE;
-            if msglen > header + trailer {
-                bytes[header..msglen - trailer].to_vec()
-            } else {
-                Vec::new()
-            }
-        };
 
         match decoded {
             crate::host_io::parser::DecodedFrame::Response { name, params } => {
@@ -795,22 +695,19 @@ impl Reactor {
 
                     self.interceptors.dispatch(&name, oid, &params);
 
-                    if !self.try_dispatch_passthrough_response(&raw_payload) {
-                        tracing::debug!(
-                            subsystem = "mcu-comms",
-                            event = "unsolicited_no_interceptor",
-                            tid = ?std::thread::current().id(),
-                            %name,
-                            await_len = await_len_before,
-                            "unsolicited frame with no interceptor match"
-                        );
-                        let event =
-                            crate::host_io::runtime_events::RuntimeEvent::PassthroughResponse {
-                                name,
-                                params,
-                            };
-                        self.dispatch_runtime_event(event);
-                    }
+                    tracing::debug!(
+                        subsystem = "mcu-comms",
+                        event = "unsolicited_no_interceptor",
+                        tid = ?std::thread::current().id(),
+                        %name,
+                        await_len = await_len_before,
+                        "unsolicited frame with no interceptor match"
+                    );
+                    let event = crate::host_io::runtime_events::RuntimeEvent::PassthroughResponse {
+                        name,
+                        params,
+                    };
+                    self.dispatch_runtime_event(event);
                 }
             }
             crate::host_io::parser::DecodedFrame::Output { name, params } => {
@@ -836,24 +733,6 @@ impl Reactor {
             }
         }
         Ok(())
-    }
-
-    fn try_dispatch_passthrough_response(&mut self, raw_payload: &[u8]) -> bool {
-        if self.passthrough_notify_map.is_empty() {
-            return false;
-        }
-        let oldest_seq = match self.passthrough_notify_map.keys().copied().min() {
-            Some(s) => s,
-            None => return false,
-        };
-        let (mcu, notify_id) = match self.passthrough_notify_map.remove(&oldest_seq) {
-            Some(pair) => pair,
-            None => return false,
-        };
-        if let Some(router) = self.passthrough_router.as_mut() {
-            let _ = router.dispatch_response(mcu, notify_id, raw_payload.to_vec());
-        }
-        true
     }
 
     fn dispatch_runtime_event(&mut self, event: crate::host_io::runtime_events::RuntimeEvent) {
@@ -1111,20 +990,6 @@ impl Reactor {
                     .subscribe(sender);
                 let _ = reply.send(result);
             }
-            ReactorCommand::InstallPassthroughRouter(router) => {
-                let mcu = router.mcu_handles().next().copied();
-                self.passthrough_router = Some(router);
-                self.passthrough_mcu = mcu;
-            }
-            ReactorCommand::PassthroughSend {
-                mcu,
-                queue_id,
-                entry,
-            } => {
-                if let Some(ref mut router) = self.passthrough_router {
-                    let _ = router.push(mcu, queue_id, entry);
-                }
-            }
             ReactorCommand::FireAndForget { cmd } => match self.parser.encode(&cmd) {
                 Ok(payload) => {
                     let cmd_disp = if cmd.len() > 120 {
@@ -1330,7 +1195,6 @@ impl Reactor {
         self.pending_fire_and_forget.clear();
         self.pending_piece_frames.clear();
         self.pending_outbound_order.clear();
-        self.passthrough_notify_map.clear();
 
         let drained: Vec<PendingMcuCall> = self
             .transport_state
@@ -1407,7 +1271,6 @@ impl Reactor {
         let t_step3 = s3.elapsed();
 
         let s3b = std::time::Instant::now();
-        self.drain_passthrough();
         self.drain_piece_frames();
         let t_step3b = s3b.elapsed();
 
@@ -1506,9 +1369,6 @@ mod a4_nak_submit_race;
 
 #[cfg(test)]
 mod a3_awaiting_response_gc;
-
-#[cfg(test)]
-mod a5_passthrough_integration;
 
 #[cfg(test)]
 mod piece_priority;

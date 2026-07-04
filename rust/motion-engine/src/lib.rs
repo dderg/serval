@@ -24,7 +24,6 @@ pub mod position_query;
 #[doc(hidden)]
 pub mod pump;
 pub mod remote_trigger;
-mod router_transport;
 mod servo_call;
 #[doc(hidden)]
 pub mod servo_capture;
