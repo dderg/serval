@@ -180,6 +180,12 @@ pub struct PyMotionEngine {
     latched_endpoint_death: Arc<Mutex<HashMap<u32, String>>>,
     remote_triggers: Mutex<HashMap<u8, (u32, host_rt::host_io::InterceptorId)>>,
     shut_down: AtomicBool,
+    /// Seconds of queued motion (committed + planner intake) at which
+    /// `submit_move` reports the pipe full instead of accepting. The host
+    /// feeds by retrying, so this is the whole backpressure gate: it bounds
+    /// how far print time runs ahead of the playhead (MCU clock horizon,
+    /// pause responsiveness) while keeping every buffer in the pipe topped up.
+    pipe_depth_secs: Mutex<f64>,
 }
 
 #[pymethods]
@@ -226,6 +232,7 @@ impl PyMotionEngine {
             latched_endpoint_death: Arc::new(Mutex::new(HashMap::new())),
             remote_triggers: Mutex::new(HashMap::new()),
             shut_down: AtomicBool::new(false),
+            pipe_depth_secs: Mutex::new(2.0),
         }
     }
 

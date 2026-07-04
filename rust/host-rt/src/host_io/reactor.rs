@@ -590,6 +590,14 @@ impl Reactor {
         for entry in self.unacked_window.iter_mut() {
             entry.retry_count += 1;
             if entry.retry_count >= MAX_RETRY_COUNT && silence >= MCU_SILENCE_FOR_CLOSE {
+                tracing::error!(
+                    subsystem = "mcu-comms",
+                    event = "retransmit_exhausted",
+                    retry_count = entry.retry_count,
+                    seq = entry.seq,
+                    silence_ms = silence.as_millis() as u64,
+                    "MCU silent through retransmit budget — closing transport"
+                );
                 self.state = ReactorState::Closed;
                 self.pending_host_fault = Some(crate::host_io::runtime_events::FaultEvent {
                     fault_code: FaultCode::HostRetransmitExhausted.as_u16(),
@@ -843,7 +851,14 @@ impl Reactor {
                 for f in frames {
                     match f {
                         Frame::Klipper(kf) => {
-                            if self.handle_inbound_frame(kf).is_err() {
+                            if let Err(e) = self.handle_inbound_frame(kf) {
+                                tracing::error!(
+                                    subsystem = "mcu-comms",
+                                    event = "inbound_frame_fatal",
+                                    error = ?e,
+                                    "inbound frame handling failed (ack/retransmit write?) — \
+                                     closing transport"
+                                );
                                 return;
                             }
                         }

@@ -423,6 +423,9 @@ class MotionEngineWrapper:
     def submit_move(self, dx, dy, dz, de, feedrate):
         return self._engine.submit_move(dx, dy, dz, de, feedrate)
 
+    def set_pipe_depth_secs(self, depth):
+        return self._engine.set_pipe_depth_secs(depth)
+
     def wait_moves(self):
         flush_id = self._engine.wait_moves_start()
         while not self._engine.wait_moves_poll(flush_id):

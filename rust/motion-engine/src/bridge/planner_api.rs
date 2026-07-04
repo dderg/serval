@@ -251,6 +251,11 @@ impl PyMotionEngine {
 
         Ok(())
     }
+    /// Push one move into the pipe. Returns `false` when the pipe is full —
+    /// queued motion has reached the configured depth, or the entry channel
+    /// itself is full — in which case nothing was consumed and the caller
+    /// retries after yielding. This return value is the host's entire feed
+    /// throttle: the reader pushes as much as fits, the pipe defines "fits".
     #[pyo3(signature = (dx, dy, dz, de, feedrate))]
     fn submit_move(
         &self,
@@ -260,18 +265,25 @@ impl PyMotionEngine {
         dz: f64,
         de: f64,
         feedrate: f64,
-    ) -> PyResult<()> {
-        tracing::info!(
-            subsystem = "motion",
-            event = "submit_move_enter",
-            dx,
-            dy,
-            dz,
-            de,
-            feedrate,
-            "engine.submit_move enter"
-        );
-        py.detach(|| -> PyResult<()> {
+    ) -> PyResult<bool> {
+        py.detach(|| -> PyResult<bool> {
+            let depth = *self
+                .pipe_depth_secs
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if self.queued_motion_secs() >= depth {
+                return Ok(false);
+            }
+            tracing::info!(
+                subsystem = "motion",
+                event = "submit_move_enter",
+                dx,
+                dy,
+                dz,
+                de,
+                feedrate,
+                "engine.submit_move enter"
+            );
             let followers = self.e_followers(de)?;
             let (extruder_axis, e_delta) = match followers.as_slice() {
                 [] => (0usize, 0.0),
@@ -323,14 +335,18 @@ impl PyMotionEngine {
                 let planner = guard.as_ref().ok_or_else(|| {
                     PyRuntimeError::new_err("planner not initialized — call init_planner first")
                 })?;
-                planner.submit_move(m).map_err(planner_err)?;
+                match planner.submit_move(m) {
+                    Ok(()) => {}
+                    Err(crate::worker::StreamWorkerError::ChannelFull) => return Ok(false),
+                    Err(e) => return Err(planner_err(e)),
+                }
                 tracing::info!(
                     subsystem = "motion",
                     event = "intake_submit",
                     line_no,
                     channel_pending = planner.pending_channel_moves(),
                     uncommitted_secs = planner.uncommitted_intake_secs(),
-                    "[intake] move pushed to channel; channel_pending grows when the planner thread can't pull (backpressure blind spot)"
+                    "[intake] move accepted into the pipe"
                 );
             }
 
@@ -339,8 +355,24 @@ impl PyMotionEngine {
             pos[1] += dy;
             pos[2] += dz;
             *self.last_g5_pq.lock().unwrap_or_else(|p| p.into_inner()) = None;
-            Ok(())
+            Ok(true)
         })
+    }
+
+    /// Configure the pipe's time depth: how many seconds of motion may be
+    /// queued (committed runway plus planner intake) before `submit_move`
+    /// reports full.
+    fn set_pipe_depth_secs(&self, depth: f64) -> PyResult<()> {
+        if !(depth > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "pipe depth must be positive, got {depth}"
+            )));
+        }
+        *self
+            .pipe_depth_secs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = depth;
+        Ok(())
     }
     #[pyo3(signature = (i, j, p, q, dx, dy, dz, de, feedrate))]
     fn submit_bezier(

@@ -1,4 +1,4 @@
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use geometry::path::lowering::PositionProfile;
 use geometry::path::{CurvatureProfile, Segment};
 use geometry::{BoundaryState, Move, VelocityProfile, plan_velocity_stops};
@@ -12,6 +12,13 @@ use crate::{
 /// keeps absorbing input and a re-plan fires once this many moves have arrived
 /// since the last one (an input-empty drain still plans immediately).
 const REPLAN_BATCH_MOVES: usize = 64;
+
+/// When the input runs momentarily dry the planner stops batching and commits
+/// what it can, so a rate-matched feed keeps the committed runway topped up
+/// instead of letting it sag for up to a whole batch. Requiring a few arrivals
+/// since the last plan bounds the re-plan rate when the feed trickles in one
+/// move per wakeup.
+const QUIET_PLAN_MIN_MOVES: usize = 4;
 
 /// Second pipeline stage: plans jerk-limited S-curve velocity over the
 /// incoming geometry and emits `PlannedMove`s whose velocity bodies are final
@@ -37,7 +44,7 @@ const REPLAN_BATCH_MOVES: usize = 64;
 pub struct Planner {
     moves: Vec<Move>,
     entry: BoundaryState,
-    next_plan_len: usize,
+    moves_since_plan: usize,
     config: StreamConfig,
 }
 
@@ -46,13 +53,31 @@ impl Planner {
         Self {
             moves: Vec::new(),
             entry: BoundaryState::REST,
-            next_plan_len: REPLAN_BATCH_MOVES,
+            moves_since_plan: 0,
             config,
         }
     }
 
+    /// Reads only what planning needs: drains whatever the input already
+    /// holds, and the moment it would block with unplanned arrivals in the
+    /// window, plans and emits the committable prefix before waiting. Anything
+    /// beyond the window's own lookahead needs stays queued upstream, so a
+    /// full pipeline backpressures to the entry instead of pooling here.
     pub fn run(mut self, input: Receiver<StreamInput>, output: Sender<PlannedItem>) {
-        while let Ok(item) = input.recv() {
+        loop {
+            let item = match input.try_recv() {
+                Ok(item) => item,
+                Err(TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Empty) => {
+                    if !self.plan_on_quiet_input(&output) {
+                        return;
+                    }
+                    match input.recv() {
+                        Ok(item) => item,
+                        Err(_) => break,
+                    }
+                }
+            };
             let ok = match item {
                 StreamInput::Move(m) => self.absorb(m, &output),
                 StreamInput::Drain => self.drain_to_rest(&output),
@@ -65,6 +90,14 @@ impl Planner {
         self.drain_to_rest(&output);
     }
 
+    fn plan_on_quiet_input(&mut self, output: &Sender<PlannedItem>) -> bool {
+        if self.moves_since_plan < QUIET_PLAN_MIN_MOVES {
+            return true;
+        }
+        self.moves_since_plan = 0;
+        self.emit_committable(output)
+    }
+
     /// `Reset` discards the window (nothing ahead of it may dispatch — the
     /// sender gates the dispatcher); every other token requires the window to
     /// have been drained first, because it is meaningless (or hides a
@@ -74,7 +107,7 @@ impl Planner {
             Control::Reset { .. } => {
                 self.moves.clear();
                 self.entry = BoundaryState::REST;
-                self.next_plan_len = REPLAN_BATCH_MOVES;
+                self.moves_since_plan = 0;
             }
             Control::Dwell { .. } | Control::SetAxisChains(_) | Control::Barrier(_) => {
                 assert!(
@@ -90,9 +123,13 @@ impl Planner {
 
     fn absorb(&mut self, m: Move, output: &Sender<PlannedItem>) -> bool {
         self.moves.push(m);
-        if self.moves.len() < self.next_plan_len.min(self.config.max_buffer_moves) {
+        self.moves_since_plan += 1;
+        if self.moves_since_plan < REPLAN_BATCH_MOVES
+            && self.moves.len() < self.config.max_buffer_moves
+        {
             return true;
         }
+        self.moves_since_plan = 0;
         if !self.emit_committable(output) {
             return false;
         }
@@ -145,6 +182,7 @@ impl Planner {
     /// Materialize the brake-to-rest: plan the whole window to terminal rest
     /// and emit everything.
     fn drain_to_rest(&mut self, output: &Sender<PlannedItem>) -> bool {
+        self.moves_since_plan = 0;
         if self.moves.is_empty() {
             return true;
         }
@@ -170,7 +208,6 @@ impl Planner {
                 chosen = i;
             }
         }
-        self.next_plan_len = self.moves.len() - chosen + REPLAN_BATCH_MOVES;
         if chosen == 0 {
             return true;
         }
@@ -193,7 +230,6 @@ impl Planner {
                 return false;
             }
         }
-        self.next_plan_len = self.moves.len() + REPLAN_BATCH_MOVES;
         true
     }
 

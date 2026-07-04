@@ -212,7 +212,7 @@ impl PyMotionEngine {
             None => 0.0,
         }
     }
-    fn queued_motion_secs(&self) -> f64 {
+    pub(crate) fn queued_motion_secs(&self) -> f64 {
         let Some((last_move_time, uncommitted)) = ({
             let planner = self.planner.lock().unwrap_or_else(|p| p.into_inner());
             planner

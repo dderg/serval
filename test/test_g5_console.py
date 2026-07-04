@@ -48,6 +48,7 @@ def test_move_curve_rejects_out_of_range_control_point():
     # endpoints in range, but P1 control point at Y=500 bulges off the bed
     def submit(dx, dy, dz, de, fr):
         m.engine.submit_bezier(dx, dy, dz, de, fr)
+        return True
 
     interior = [[10.0, 500.0, 0.0], [10.0, 0.0, 0.0]]
     try:
@@ -62,6 +63,7 @@ def test_move_curve_submits_and_advances_when_in_range():
 
     def submit(dx, dy, dz, de, fr):
         m.engine.submit_bezier(dx, dy, dz, de, fr)
+        return True
 
     interior = [[10.0, 5.0, 0.0], [10.0, -5.0, 0.0]]
     m.move_curve([20.0, 0.0, 0.0, 0.0], interior, submit, 100.0)
