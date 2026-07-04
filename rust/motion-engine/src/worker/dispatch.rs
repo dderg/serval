@@ -369,6 +369,7 @@ impl Consumer {
                     self.discard.store(false, Ordering::Release);
                     self.frontier.clear();
                     self.dispatched_through = None;
+                    self.shared.fences.on_reset();
                     self.shared
                         .last_move_time_bits
                         .store(0.0_f64.to_bits(), Ordering::Release);

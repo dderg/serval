@@ -38,6 +38,12 @@ struct Inner {
     /// stream was reset (or nothing was ever dispatched) — the caller falls
     /// back to its command-time floor.
     resolved: HashMap<u64, Option<f64>>,
+    /// Dispatched frontier before the segment currently being reported: the
+    /// resolution time for fences the segment crosses. Using the frontier
+    /// from *before* the crossing segment keeps resolutions at-or-early
+    /// (a boundary blend labeled with the next line still carries the tail
+    /// of the fenced move), never late by the crossing segment itself.
+    prev_t_end: f64,
 }
 
 impl FenceRegistry {
@@ -68,6 +74,8 @@ impl FenceRegistry {
     /// and the committed timeline now reaches `t_end`.
     pub fn on_dispatch(&self, source_line: u32, t_end: f64) {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let resolve_at = inner.prev_t_end;
+        inner.prev_t_end = t_end;
         if inner.armed.iter().all(|f| f.after_line >= source_line) {
             return;
         }
@@ -76,8 +84,14 @@ impl FenceRegistry {
             .partition(|f| f.after_line < source_line);
         inner.armed = still_armed;
         for f in done {
-            inner.resolved.insert(f.id, Some(t_end));
+            inner.resolved.insert(f.id, Some(resolve_at));
         }
+    }
+
+    /// The stream timeline restarted; the previous frontier is meaningless.
+    pub fn on_reset(&self) {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.prev_t_end = 0.0;
     }
 
     /// Barrier hook: everything ahead of every armed fence has been

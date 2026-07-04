@@ -13,8 +13,27 @@ fn pending_until_dispatch_passes_the_fence_line() {
         "segments at the fence line must not resolve it"
     );
     r.on_dispatch(11, 2.5);
-    assert_eq!(r.take(id), Some(Some(2.5)));
+    assert_eq!(
+        r.take(id),
+        Some(Some(1.5)),
+        "resolution is the frontier before the crossing segment"
+    );
     assert_eq!(r.take(id), None, "take consumes the resolution");
+}
+
+#[test]
+fn reset_clears_the_previous_frontier() {
+    let r = FenceRegistry::default();
+    r.on_dispatch(1, 100.0);
+    r.on_reset();
+    let id = r.alloc_id();
+    r.arm(id, 2);
+    r.on_dispatch(3, 0.5);
+    assert_eq!(
+        r.take(id),
+        Some(Some(0.0)),
+        "a pre-reset frontier must not leak into the new timeline"
+    );
 }
 
 #[test]
@@ -55,8 +74,13 @@ fn progress_only_resolves_fences_behind_the_line() {
     let late = r.alloc_id();
     r.arm(early, 5);
     r.arm(late, 20);
+    r.on_dispatch(5, 2.0);
     r.on_dispatch(12, 3.0);
-    assert_eq!(r.take(early), Some(Some(3.0)));
+    assert_eq!(
+        r.take(early),
+        Some(Some(2.0)),
+        "resolved at the end of the line-5 motion, not the crossing segment"
+    );
     assert_eq!(r.take(late), None);
     assert!(r.has_armed());
 }
