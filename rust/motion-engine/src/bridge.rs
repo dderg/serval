@@ -175,6 +175,7 @@ pub struct PyMotionEngine {
     latched_drive_fault: Arc<Mutex<HashMap<u32, u16>>>,
     latched_endpoint_death: Arc<Mutex<HashMap<u32, String>>>,
     remote_triggers: Mutex<HashMap<u8, (u32, host_rt::host_io::InterceptorId)>>,
+    endpoint_calls: crate::bg_call::BgCalls,
     shut_down: AtomicBool,
 }
 
@@ -219,6 +220,7 @@ impl PyMotionEngine {
             latched_drive_fault: Arc::new(Mutex::new(HashMap::new())),
             latched_endpoint_death: Arc::new(Mutex::new(HashMap::new())),
             remote_triggers: Mutex::new(HashMap::new()),
+            endpoint_calls: crate::bg_call::BgCalls::default(),
             shut_down: AtomicBool::new(false),
         }
     }

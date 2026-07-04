@@ -52,12 +52,14 @@ _STUB_MOTION_METHODS = frozenset(
         "set_msgproto_dict",
         "engine_call",
         "engine_send",
-        "set_torque",
-        "set_drive_limits",
-        "restore_drive_limits",
+        "set_torque_start",
+        "set_drive_limits_start",
+        "restore_drive_limits_start",
+        "arm_sensorless_endstop_start",
+        "endpoint_call_done",
         "take_drive_fault",
         "take_endpoint_death",
-        "finalize_homed_axis",
+        "finalize_homed_axis_start",
         "sdo_read",
         "sdo_write",
     }
@@ -162,26 +164,44 @@ class MotionEngineWrapper:
             drives,
         )
 
+    def _wait_endpoint_call(self, call_id):
+        # Endpoint round-trips run on a background thread; blocking the
+        # reactor here would starve heater PWM refreshes ("Timer too close").
+        while not self._engine.endpoint_call_done(call_id):
+            self._reactor.pause(self._reactor.monotonic() + 0.005)
+
     def set_drive_limits(
         self, mcu_handle, slot, following_error_counts, max_torque_tenth_pct
     ):
-        return self._engine.set_drive_limits(
-            mcu_handle, slot, following_error_counts, max_torque_tenth_pct
+        self._wait_endpoint_call(
+            self._engine.set_drive_limits_start(
+                mcu_handle, slot, following_error_counts, max_torque_tenth_pct
+            )
         )
 
     def restore_drive_limits(self, mcu_handle, slot):
-        return self._engine.restore_drive_limits(mcu_handle, slot)
+        self._wait_endpoint_call(
+            self._engine.restore_drive_limits_start(mcu_handle, slot)
+        )
 
     def arm_sensorless_endstop(
         self, mcu_handle, slot, endstop_id, torque_trip_tenth_pct, enable
     ):
-        return self._engine.arm_sensorless_endstop(
-            mcu_handle, slot, endstop_id, torque_trip_tenth_pct, bool(enable)
+        self._wait_endpoint_call(
+            self._engine.arm_sensorless_endstop_start(
+                mcu_handle,
+                slot,
+                endstop_id,
+                torque_trip_tenth_pct,
+                bool(enable),
+            )
         )
 
     def disarm_sensorless_endstop(self, mcu_handle, slot, endstop_id):
-        return self._engine.arm_sensorless_endstop(
-            mcu_handle, slot, endstop_id, 0, False
+        self._wait_endpoint_call(
+            self._engine.arm_sensorless_endstop_start(
+                mcu_handle, slot, endstop_id, 0, False
+            )
         )
 
     def take_drive_fault(self, mcu_handle):
@@ -194,10 +214,14 @@ class MotionEngineWrapper:
         return self._engine.stop_node(mcu_handle)
 
     def finalize_homed_axis(self, mcu_handle, axis, pos_mm):
-        return self._engine.finalize_homed_axis(mcu_handle, axis, pos_mm)
+        self._wait_endpoint_call(
+            self._engine.finalize_homed_axis_start(mcu_handle, axis, pos_mm)
+        )
 
     def set_torque(self, mcu_handle, value, print_time):
-        self._engine.set_torque(mcu_handle, bool(value), print_time)
+        self._wait_endpoint_call(
+            self._engine.set_torque_start(mcu_handle, bool(value), print_time)
+        )
 
     def start_servo_capture(self, mcu_handle, path, started_utc, drives):
         return self._engine.start_servo_capture(

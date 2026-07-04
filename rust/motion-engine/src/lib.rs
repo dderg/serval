@@ -1,5 +1,6 @@
 #[doc(hidden)]
 pub mod anchor;
+pub mod bg_call;
 mod bridge;
 #[doc(hidden)]
 pub mod classify;
