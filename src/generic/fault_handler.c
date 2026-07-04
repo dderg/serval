@@ -913,6 +913,25 @@ FAULT_TRAMPOLINE(UsageFault_Handler, 3, -10);
 FAULT_TRAMPOLINE(MemManage_Handler, 4, -12);
 #endif
 
+static uint32_t preboot_cur_task_func;
+static uint32_t preboot_cur_msg_kind;
+
+// A task/msg marker left open across a reset would be closed by the first
+// task hook against the fresh clock epoch — a wrapped duration that clamps to
+// DIAG_STALL_CAP_CYC and poisons the boot replay's worst slots. Save the
+// markers for the replay and clear them before any task hook runs.
+static void
+discard_preboot_progress_markers(void)
+{
+    if (live_snap.magic != LIVE_MAGIC)
+        return;
+    preboot_cur_task_func = live_snap.cur_task_func;
+    preboot_cur_msg_kind = live_snap.cur_msg_kind;
+    live_snap.cur_task_func = 0;
+    live_snap.cur_msg_kind = 0;
+    diag_cache_clean();
+}
+
 void
 fault_handler_init(void)
 {
@@ -932,6 +951,7 @@ fault_handler_init(void)
         while (!(PWR->CR2 & PWR_CR2_BRRDY) && spin < 100000) spin++;
     }
 #endif
+    discard_preboot_progress_markers();
 }
 DECL_INIT(fault_handler_init);
 
@@ -995,6 +1015,8 @@ fault_handler_report_task(void)
         if (live_snap.magic == LIVE_MAGIC) {
             prior_live_present_at_boot = 1;
             memcpy(&prior_snap, (const void *)&live_snap, sizeof(prior_snap));
+            prior_snap.cur_task_func = preboot_cur_task_func;
+            prior_snap.cur_msg_kind = preboot_cur_msg_kind;
             saved_prior_live          = live_snap.live;
             saved_prior_engine        = live_snap.engine_status;
             saved_prior_tick          = live_snap.tick_counter;

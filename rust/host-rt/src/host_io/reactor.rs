@@ -203,6 +203,19 @@ impl Reactor {
             self.last_write_time = std::time::Instant::now();
         }
         let dt = t0.elapsed();
+        if dt > std::time::Duration::from_millis(20) {
+            let outq_after = self.io.bytes_to_write().unwrap_or(u32::MAX);
+            tracing::warn!(
+                subsystem = "mcu-comms",
+                event = "slow_frame_write",
+                proto,
+                bytes,
+                dt_ms = dt.as_secs_f64() * 1000.0,
+                outq_after,
+                ok = result.is_ok(),
+                "frame write exceeded 20ms — kernel out-queue not draining"
+            );
+        }
         tracing::trace!(
             subsystem = "mcu-comms",
             event = "frame_write",
