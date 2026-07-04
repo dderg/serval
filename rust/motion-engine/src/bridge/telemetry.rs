@@ -194,12 +194,18 @@ impl PyMotionEngine {
     fn input_channel_capacity(&self) -> u64 {
         crate::worker::INPUT_CHANNEL_CAP as u64
     }
-    fn fence_start(&self, force: bool) -> PyResult<u64> {
+    /// `None` when the move channel is full — the caller yields and retries;
+    /// blocking here would stall the whole klippy reactor thread.
+    fn fence_start(&self, force: bool) -> PyResult<Option<u64>> {
         let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
         let planner = guard.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("planner not initialized — call init_planner first")
         })?;
-        planner.fence_start(force).map_err(planner_err)
+        match planner.fence_start(force) {
+            Ok(id) => Ok(Some(id)),
+            Err(crate::worker::StreamWorkerError::ChannelFull) => Ok(None),
+            Err(e) => Err(planner_err(e)),
+        }
     }
     /// `None` while pending; once resolved, the seconds from now until the
     /// fenced motion ends (0.0 when the stream was reset or already idle).

@@ -49,12 +49,14 @@ class SyncReactor:
 
 
 class FakeEngine:
-    """Engine stub with the fence protocol: each fence resolves with the
+    """Engine stub with the fence protocol: fence_start reports a full pipe
+    (None) `full_starts` times, then each fence resolves with the
     queued-motion lead after `polls_until_resolved` poll attempts."""
 
-    def __init__(self, queued_secs=0.0, polls_until_resolved=0):
+    def __init__(self, queued_secs=0.0, polls_until_resolved=0, full_starts=0):
         self.queued_secs = queued_secs
         self.polls_until_resolved = polls_until_resolved
+        self.full_starts = full_starts
         self.fences = {}
         self._next_fence = 1
 
@@ -62,6 +64,9 @@ class FakeEngine:
         return self.queued_secs
 
     def fence_start(self, force):
+        if self.full_starts > 0:
+            self.full_starts -= 1
+            return None
         fence_id = self._next_fence
         self._next_fence += 1
         self.fences[fence_id] = self.polls_until_resolved
@@ -76,12 +81,14 @@ class FakeEngine:
         return self.queued_secs
 
 
-def _make_motion(mcus, reactor, queued_secs=0.0, polls_until_resolved=0):
+def _make_motion(
+    mcus, reactor, queued_secs=0.0, polls_until_resolved=0, full_starts=0
+):
     motion = Motion.__new__(Motion)
     motion.reactor = reactor
     motion.all_mcus = mcus
     motion.mcu = mcus[0]
-    motion.engine = FakeEngine(queued_secs, polls_until_resolved)
+    motion.engine = FakeEngine(queued_secs, polls_until_resolved, full_starts)
     motion.motion_lead = 0.25
     motion._mcu_pending_end_time = 0.0
     motion.need_flush_time = 0.0
@@ -245,3 +252,45 @@ def test_lookahead_callback_waits_for_the_fence_to_resolve():
     est = mcu.estimated_print_time(reactor.monotonic())
     assert seen == [pytest.approx(est + 2.0)]
     assert waketime == reactor.NEVER
+
+
+def test_lookahead_callback_survives_a_full_move_channel():
+    # Regression: fence_start returning None (move channel at capacity) must
+    # never block the reactor — registration parks the callback and the poll
+    # timer retries the start until the pipe admits the fence.
+    reactor = SyncReactor()
+    mcu = RecordingMcu()
+    # 3 rejections: one eaten at registration, one by the timer kick that
+    # registration fires, one by the first explicit handler call below.
+    motion = _make_motion([mcu], reactor, queued_secs=1.0, full_starts=3)
+    shim = ToolheadShim(motion)
+
+    seen = []
+    shim.register_lookahead_callback(seen.append)
+    assert seen == []
+    assert motion._lookahead_fences[0][0] is None
+
+    waketime = motion._lookahead_fence_handler(reactor.monotonic())
+    assert seen == [] and waketime == reactor.monotonic() + 0.020
+
+    waketime = motion._lookahead_fence_handler(reactor.monotonic())
+    est = mcu.estimated_print_time(reactor.monotonic())
+    assert seen == [pytest.approx(est + 1.0)]
+    assert waketime == reactor.NEVER
+
+
+def test_blocking_fence_wait_retries_start_and_yields():
+    reactor = SyncReactor()
+    mcu = RecordingMcu()
+    motion = _make_motion([mcu], reactor, queued_secs=3.0, full_starts=3)
+
+    class NeverShutdownPrinter:
+        def is_shutdown(self):
+            return False
+
+    motion.printer = NeverShutdownPrinter()
+    pauses = []
+    reactor.pause = pauses.append
+    est = mcu.estimated_print_time(reactor.monotonic())
+    assert motion.get_last_move_time() == pytest.approx(est + 3.0)
+    assert len(pauses) >= 3, "full channel must yield to the reactor, not spin"

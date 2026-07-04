@@ -26,6 +26,8 @@ _STUB_MOTION_METHODS = frozenset(
         "submit_bezier",
         "submit_quadratic",
         "wait_moves",
+        "fence_start",
+        "fence_poll",
         "drain_motion",
         "motion_drain_poll",
         "motion_drain_finalize",
@@ -105,9 +107,6 @@ class _StubEngine:
 
     def input_channel_capacity(self):
         return 8192
-
-    def fence_start(self, force):
-        return None
 
     def __getattr__(self, name):
         if name in _STUB_MOTION_METHODS:

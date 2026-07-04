@@ -623,11 +623,13 @@ class Motion:
     def _fence_wait_blocking(self):
         if self.mcu is None:
             return 0.0
-        fence_id = self.engine.fence_start(True)
-        if fence_id is None:
-            return 0.0
+        fence_id = None
         while True:
-            lead = self.engine.fence_poll(fence_id)
+            if fence_id is None:
+                fence_id = self.engine.fence_start(True)
+            lead = None
+            if fence_id is not None:
+                lead = self.engine.fence_poll(fence_id)
             if lead is not None:
                 return lead
             if self.printer.is_shutdown():
@@ -638,16 +640,11 @@ class Motion:
             self.reactor.pause(self.reactor.monotonic() + 0.002)
 
     def register_lookahead_callback(self, callback):
-        fence_id = None
-        if self.mcu is not None:
-            fence_id = self.engine.fence_start(False)
-        if fence_id is None:
-            est = 0.0
-            if self.mcu is not None:
-                est = self.mcu.estimated_print_time(self.reactor.monotonic())
-            callback(est + self.motion_lead)
+        if self.mcu is None:
+            callback(self.motion_lead)
             return
-        self._lookahead_fences.append((fence_id, callback))
+        fence_id = self.engine.fence_start(False)
+        self._lookahead_fences.append([fence_id, callback])
         if len(self._lookahead_fences) == 1:
             self.reactor.update_timer(
                 self._lookahead_fence_timer, self.reactor.NOW
@@ -655,13 +652,17 @@ class Motion:
 
     def _lookahead_fence_handler(self, eventtime):
         while self._lookahead_fences:
-            fence_id, callback = self._lookahead_fences[0]
-            lead = self.engine.fence_poll(fence_id)
+            entry = self._lookahead_fences[0]
+            if entry[0] is None:
+                entry[0] = self.engine.fence_start(False)
+                if entry[0] is None:
+                    return eventtime + 0.020
+            lead = self.engine.fence_poll(entry[0])
             if lead is None:
                 return eventtime + 0.020
             self._lookahead_fences.pop(0)
             est = self.mcu.estimated_print_time(self.reactor.monotonic())
-            callback(est + max(lead, self.motion_lead))
+            entry[1](est + max(lead, self.motion_lead))
         return self.reactor.NEVER
 
     def _ground_pending_end_time_after_engine_drain(self):
