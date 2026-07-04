@@ -8,6 +8,7 @@ pub mod config;
 pub mod drain;
 #[doc(hidden)]
 pub mod enqueue;
+pub mod fence;
 #[doc(hidden)]
 pub mod homing;
 #[doc(hidden)]

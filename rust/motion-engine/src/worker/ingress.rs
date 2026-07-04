@@ -62,6 +62,9 @@ pub(super) struct Ingress {
     /// The pipeline holds moves ingested since the last `Drain`; the pacer
     /// only schedules a drain while this is set.
     pub(super) undrained: bool,
+    /// Source line of the last move forwarded into the pipeline; a fence
+    /// arriving now sequences after it.
+    pub(super) last_line: u32,
 }
 
 impl Ingress {
@@ -115,6 +118,7 @@ impl Ingress {
         if let Some(t) = ack.dispatched_through {
             self.t_next = t;
         }
+        self.shared.fences.resolve_armed(ack.dispatched_through);
         ack
     }
 
@@ -153,6 +157,7 @@ impl Ingress {
             }
         }
         advance_odometer(&mut self.odometer, &m);
+        self.last_line = m.source.start_line;
         self.send(m.into());
         self.undrained = true;
     }
@@ -176,6 +181,9 @@ impl Ingress {
         );
         self.send(StreamInput::Drain);
         self.undrained = false;
+        if self.shared.fences.has_armed() {
+            self.barrier();
+        }
         None
     }
 
@@ -191,6 +199,17 @@ impl Ingress {
                         .unwrap_or(Duration::ZERO)
                 });
                 let _ = notify.send(finish);
+            }
+            StreamMsg::Fence { id, force } => {
+                if !self.undrained {
+                    let ack = self.barrier();
+                    self.shared.fences.resolve(id, ack.dispatched_through);
+                } else if force {
+                    let ack = self.drain_and_fence();
+                    self.shared.fences.resolve(id, ack.dispatched_through);
+                } else {
+                    self.shared.fences.arm(id, self.last_line);
+                }
             }
             StreamMsg::Dwell { duration_s, notify } => {
                 self.drain_and_fence();

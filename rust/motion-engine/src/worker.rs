@@ -111,10 +111,27 @@ pub const INPUT_CHANNEL_CAP: usize = 64;
 #[derive(Debug)]
 pub enum StreamMsg {
     Move(geometry::Move),
-    Flush { notify: Sender<Option<Instant>> },
-    Dwell { duration_s: f64, notify: Sender<()> },
-    StreamOpen { home_pos: Vec<f64> },
-    Reset { recovered_pos: Vec<f64> },
+    Flush {
+        notify: Sender<Option<Instant>>,
+    },
+    /// Sequence point: resolves with the stream time at which everything
+    /// submitted before it ends. `force` drains the pipeline (brake to rest)
+    /// so the answer is immediate; otherwise it resolves as the stream
+    /// naturally commits past it.
+    Fence {
+        id: u64,
+        force: bool,
+    },
+    Dwell {
+        duration_s: f64,
+        notify: Sender<()>,
+    },
+    StreamOpen {
+        home_pos: Vec<f64>,
+    },
+    Reset {
+        recovered_pos: Vec<f64>,
+    },
     SetAxisChains(AxisChainSet),
     HomeDrip(HomeDripParams),
     Nudge(NudgeParams),
@@ -127,6 +144,7 @@ pub struct StreamWorkerHandle {
     join_handle: Option<JoinHandle<()>>,
     last_move_time_bits: Arc<AtomicU64>,
     commit_fire_count: Arc<AtomicU32>,
+    fences: Arc<crate::fence::FenceRegistry>,
 }
 
 #[derive(Debug)]
@@ -276,11 +294,13 @@ impl StreamWorkerHandle {
         let (tx, rx) = bounded(INPUT_CHANNEL_CAP);
         let last_move_time_bits = Arc::new(AtomicU64::new(0));
         let commit_fire_count = Arc::new(AtomicU32::new(0));
+        let fences = Arc::new(crate::fence::FenceRegistry::default());
         let shared = ConsumerShared {
             dispatch,
             sync_instant: Arc::new(Mutex::new(None)),
             last_move_time_bits: Arc::clone(&last_move_time_bits),
             commit_fire_count: Arc::clone(&commit_fire_count),
+            fences: Arc::clone(&fences),
         };
         let join = thread::Builder::new()
             .name("kalico-stream-worker".to_string())
@@ -312,6 +332,7 @@ impl StreamWorkerHandle {
                     shared,
                     frontier,
                     undrained: false,
+                    last_line: 0,
                 }
                 .run(rx);
             })
@@ -322,6 +343,7 @@ impl StreamWorkerHandle {
             join_handle: Some(join),
             last_move_time_bits,
             commit_fire_count,
+            fences,
         }
     }
 
@@ -351,6 +373,21 @@ impl StreamWorkerHandle {
             .send(StreamMsg::Flush { notify: tx })
             .map_err(|_| StreamWorkerError::ChannelClosed)?;
         Ok(rx)
+    }
+
+    pub fn fence_start(&self, force: bool) -> Result<u64, StreamWorkerError> {
+        let id = self.fences.alloc_id();
+        self.sender
+            .send(StreamMsg::Fence { id, force })
+            .map_err(|_| StreamWorkerError::ChannelClosed)?;
+        Ok(id)
+    }
+
+    /// `None` while the fence is pending; `Some(t)` once resolved, where `t`
+    /// is the stream time the fenced motion ends at (`None` inside when the
+    /// stream was reset or nothing was ever dispatched). Consumes the result.
+    pub fn fence_take(&self, id: u64) -> Option<Option<f64>> {
+        self.fences.take(id)
     }
 
     pub fn dwell(&self, duration_s: f64) -> Result<(), StreamWorkerError> {

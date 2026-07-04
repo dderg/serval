@@ -275,6 +275,7 @@ pub(crate) struct ConsumerShared {
     pub(crate) sync_instant: Arc<Mutex<Option<Instant>>>,
     pub(crate) last_move_time_bits: Arc<AtomicU64>,
     pub(crate) commit_fire_count: Arc<AtomicU32>,
+    pub(crate) fences: Arc<crate::fence::FenceRegistry>,
 }
 
 impl ConsumerShared {
@@ -313,6 +314,7 @@ impl ConsumerShared {
         self.last_move_time_bits
             .store(seg.t_end.to_bits(), Ordering::Release);
         self.commit_fire_count.fetch_add(1, Ordering::AcqRel);
+        self.fences.on_dispatch(seg.source_line, seg.t_end);
         Ok(())
     }
 }

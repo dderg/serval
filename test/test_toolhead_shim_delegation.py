@@ -84,7 +84,6 @@ def test_fossil_methods_only_on_shim(toolhead_fixture):
     motion = printer.lookup_object("motion")
     shim = printer.lookup_object("toolhead")
     for fossil in (
-        "register_lookahead_callback",
         "note_step_generation_scan_time",
         "get_trapq",
         "note_mcu_movequeue_activity",
@@ -92,6 +91,10 @@ def test_fossil_methods_only_on_shim(toolhead_fixture):
     ):
         assert not hasattr(motion, fossil)
         assert callable(getattr(shim, fossil))
+    # register_lookahead_callback graduated from fossil to a real Motion
+    # method (fence-backed); the shim only delegates it.
+    assert callable(motion.register_lookahead_callback)
+    assert callable(shim.register_lookahead_callback)
 
 
 def test_shim_delegates_state(toolhead_fixture):

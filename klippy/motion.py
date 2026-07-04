@@ -121,6 +121,10 @@ class Motion:
         self.need_flush_time = 0.0
         self.do_kick_flush_timer = True
         self.flush_timer = self.reactor.register_timer(self._flush_handler)
+        self._lookahead_fences = []
+        self._lookahead_fence_timer = self.reactor.register_timer(
+            self._lookahead_fence_handler
+        )
         self.commanded_pos = [0.0, 0.0, 0.0, 0.0]
         self._planner_ready = False
         self._read_limits(config)
@@ -610,18 +614,55 @@ class Motion:
         self._ground_pending_end_time_after_engine_drain()
 
     def get_last_move_time(self):
+        lead = self._fence_wait_blocking()
         est = 0.0
         if self.mcu is not None:
             est = self.mcu.estimated_print_time(self.reactor.monotonic())
-        floor = est + self.motion_lead
-        if self._mcu_pending_end_time > est:
-            return max(self._mcu_pending_end_time, floor)
-        return floor
+        return est + max(lead, self.motion_lead)
 
-    def lookahead_end_print_time(self):
-        est = self.mcu.estimated_print_time(self.reactor.monotonic())
-        floor = est + self.motion_lead
-        return max(est + self.engine.queued_motion_secs(), floor)
+    def _fence_wait_blocking(self):
+        if self.mcu is None:
+            return 0.0
+        fence_id = self.engine.fence_start(True)
+        if fence_id is None:
+            return 0.0
+        while True:
+            lead = self.engine.fence_poll(fence_id)
+            if lead is not None:
+                return lead
+            if self.printer.is_shutdown():
+                raise self.printer.command_error(
+                    "get_last_move_time: shutdown while waiting for the "
+                    "motion fence"
+                )
+            self.reactor.pause(self.reactor.monotonic() + 0.002)
+
+    def register_lookahead_callback(self, callback):
+        fence_id = None
+        if self.mcu is not None:
+            fence_id = self.engine.fence_start(False)
+        if fence_id is None:
+            est = 0.0
+            if self.mcu is not None:
+                est = self.mcu.estimated_print_time(self.reactor.monotonic())
+            callback(est + self.motion_lead)
+            return
+        self._lookahead_fences.append((fence_id, callback))
+        if len(self._lookahead_fences) == 1:
+            self.reactor.update_timer(
+                self._lookahead_fence_timer, self.reactor.NOW
+            )
+
+    def _lookahead_fence_handler(self, eventtime):
+        while self._lookahead_fences:
+            fence_id, callback = self._lookahead_fences[0]
+            lead = self.engine.fence_poll(fence_id)
+            if lead is None:
+                return eventtime + 0.020
+            self._lookahead_fences.pop(0)
+            est = self.mcu.estimated_print_time(self.reactor.monotonic())
+            callback(est + max(lead, self.motion_lead))
+        return self.reactor.NEVER
 
     def _ground_pending_end_time_after_engine_drain(self):
         if self.mcu is None:
@@ -683,7 +724,10 @@ class Motion:
 
     def check_busy(self, eventtime):
         est_print_time = self.mcu.estimated_print_time(eventtime)
-        print_time = self._mcu_pending_end_time
+        print_time = max(
+            self._mcu_pending_end_time,
+            est_print_time + self.engine.queued_motion_secs(),
+        )
         lookahead_empty = print_time <= est_print_time
         return print_time, est_print_time, lookahead_empty
 
@@ -1452,7 +1496,7 @@ class ToolheadShim:
         self.motion = motion
 
     def register_lookahead_callback(self, callback):
-        callback(self.motion.lookahead_end_print_time())
+        self.motion.register_lookahead_callback(callback)
 
     def note_step_generation_scan_time(self, delay, old_delay=0.0):
         self.motion.flush_step_generation()

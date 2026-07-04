@@ -194,6 +194,39 @@ impl PyMotionEngine {
     fn input_channel_capacity(&self) -> u64 {
         crate::worker::INPUT_CHANNEL_CAP as u64
     }
+    fn fence_start(&self, force: bool) -> PyResult<u64> {
+        let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+        let planner = guard.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("planner not initialized — call init_planner first")
+        })?;
+        planner.fence_start(force).map_err(planner_err)
+    }
+    /// `None` while pending; once resolved, the seconds from now until the
+    /// fenced motion ends (0.0 when the stream was reset or already idle).
+    /// Consumes the resolution.
+    fn fence_poll(&self, id: u64) -> Option<f64> {
+        let taken = {
+            let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+            guard.as_ref()?.fence_take(id)
+        }?;
+        let Some(t_end) = taken else {
+            return Some(0.0);
+        };
+        let anchored = self
+            .dispatch_anchor
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .t0();
+        let Some(t0) = anchored else {
+            return Some(0.0);
+        };
+        let host_now = self
+            .router
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .host_now_secs();
+        Some((t0 + t_end - host_now).max(0.0))
+    }
     fn get_last_move_time(&self) -> f64 {
         match self
             .planner

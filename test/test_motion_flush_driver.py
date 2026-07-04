@@ -49,24 +49,48 @@ class SyncReactor:
 
 
 class FakeEngine:
-    def __init__(self, queued_secs=0.0):
+    """Engine stub with the fence protocol: each fence resolves with the
+    queued-motion lead after `polls_until_resolved` poll attempts."""
+
+    def __init__(self, queued_secs=0.0, polls_until_resolved=0):
         self.queued_secs = queued_secs
+        self.polls_until_resolved = polls_until_resolved
+        self.fences = {}
+        self._next_fence = 1
 
     def queued_motion_secs(self):
         return self.queued_secs
 
+    def fence_start(self, force):
+        fence_id = self._next_fence
+        self._next_fence += 1
+        self.fences[fence_id] = self.polls_until_resolved
+        return fence_id
 
-def _make_motion(mcus, reactor, queued_secs=0.0):
+    def fence_poll(self, fence_id):
+        remaining = self.fences[fence_id]
+        if remaining > 0:
+            self.fences[fence_id] = remaining - 1
+            return None
+        del self.fences[fence_id]
+        return self.queued_secs
+
+
+def _make_motion(mcus, reactor, queued_secs=0.0, polls_until_resolved=0):
     motion = Motion.__new__(Motion)
     motion.reactor = reactor
     motion.all_mcus = mcus
     motion.mcu = mcus[0]
-    motion.engine = FakeEngine(queued_secs)
+    motion.engine = FakeEngine(queued_secs, polls_until_resolved)
     motion.motion_lead = 0.25
     motion._mcu_pending_end_time = 0.0
     motion.need_flush_time = 0.0
     motion.do_kick_flush_timer = True
     motion.flush_timer = reactor.register_timer(motion._flush_handler)
+    motion._lookahead_fences = []
+    motion._lookahead_fence_timer = reactor.register_timer(
+        motion._lookahead_fence_handler
+    )
     return motion
 
 
@@ -184,7 +208,8 @@ def test_m106_queued_request_drains_on_idle_printer():
     assert len(applied) == 1
     print_time, value = applied[0]
     assert value == 1.0
-    assert print_time == pytest.approx(motion.lookahead_end_print_time())
+    est = mcu.estimated_print_time(reactor.monotonic())
+    assert print_time == pytest.approx(est + motion.motion_lead)
 
 
 def test_lookahead_callback_schedules_at_engine_queued_end_while_printing():
@@ -198,7 +223,25 @@ def test_lookahead_callback_schedules_at_engine_queued_end_while_printing():
     seen = []
     shim.register_lookahead_callback(seen.append)
 
-    # Scheduled at the engine's true queue end (est + 1.5), not the stale
+    # Scheduled at the fence-resolved queue end (est + 1.5), not the stale
     # _mcu_pending_end_time / motion_lead floor that fired the fan early.
     assert seen == [pytest.approx(est + 1.5)]
-    assert seen[0] > motion.get_last_move_time()
+    assert seen[0] > est + motion.motion_lead
+
+
+def test_lookahead_callback_waits_for_the_fence_to_resolve():
+    reactor = SyncReactor()
+    mcu = RecordingMcu()
+    motion = _make_motion(
+        [mcu], reactor, queued_secs=2.0, polls_until_resolved=1
+    )
+    shim = ToolheadShim(motion)
+
+    seen = []
+    shim.register_lookahead_callback(seen.append)
+    assert seen == [], "callback must not fire before the fence resolves"
+
+    waketime = motion._lookahead_fence_handler(reactor.monotonic())
+    est = mcu.estimated_print_time(reactor.monotonic())
+    assert seen == [pytest.approx(est + 2.0)]
+    assert waketime == reactor.NEVER

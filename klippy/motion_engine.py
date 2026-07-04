@@ -106,6 +106,9 @@ class _StubEngine:
     def input_channel_capacity(self):
         return 8192
 
+    def fence_start(self, force):
+        return None
+
     def __getattr__(self, name):
         if name in _STUB_MOTION_METHODS:
 
@@ -455,6 +458,12 @@ class MotionEngineWrapper:
 
     def get_last_move_time(self):
         return self._engine.get_last_move_time()
+
+    def fence_start(self, force):
+        return self._engine.fence_start(force)
+
+    def fence_poll(self, fence_id):
+        return self._engine.fence_poll(fence_id)
 
     def queued_motion_secs(self):
         return self._engine.queued_motion_secs() or 0.0

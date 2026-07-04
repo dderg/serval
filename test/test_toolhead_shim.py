@@ -133,6 +133,12 @@ class _RecordingEngine:
     def motion_lead_secs(self):
         return 0.25
 
+    def fence_start(self, force):
+        return 1
+
+    def fence_poll(self, fence_id):
+        return 0.0
+
     def wait_moves(self):
         self.waits += 1
 
