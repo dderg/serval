@@ -13,10 +13,10 @@ impl CommandQueue {
     }
 
     pub fn push(&mut self, entry: PassthroughEntry) {
-        if entry.min_clock() <= self.ack_clock {
+        if entry.emit_clock() <= self.ack_clock {
             sorted_insert_by_req_clock(&mut self.ready, entry);
         } else {
-            sorted_insert_by_min_clock(&mut self.upcoming, entry);
+            sorted_insert_by_emit_clock(&mut self.upcoming, entry);
         }
     }
 
@@ -24,7 +24,7 @@ impl CommandQueue {
         self.ack_clock = ack_clock;
         let split = self
             .upcoming
-            .partition_point(|e| e.min_clock() <= ack_clock);
+            .partition_point(|e| e.emit_clock() <= ack_clock);
         let promoted: Vec<_> = self.upcoming.drain(..split).collect();
         for entry in promoted {
             sorted_insert_by_req_clock(&mut self.ready, entry);
@@ -71,8 +71,8 @@ fn sorted_insert_by_req_clock(vec: &mut Vec<PassthroughEntry>, entry: Passthroug
     vec.insert(pos, entry);
 }
 
-fn sorted_insert_by_min_clock(vec: &mut Vec<PassthroughEntry>, entry: PassthroughEntry) {
-    let pos = vec.partition_point(|e| e.min_clock() <= entry.min_clock());
+fn sorted_insert_by_emit_clock(vec: &mut Vec<PassthroughEntry>, entry: PassthroughEntry) {
+    let pos = vec.partition_point(|e| e.emit_clock() <= entry.emit_clock());
     vec.insert(pos, entry);
 }
 

@@ -1,5 +1,11 @@
 pub const BACKGROUND_PRIORITY_CLOCK: u64 = u64::MAX;
 
+/// MCU timers compare 32-bit clocks: a waketime more than 2^31 ticks ahead of
+/// the MCU's now reads as the past and trips "Timer too close". Timed commands
+/// are therefore held until within 2^30 ticks, which stays deep inside the
+/// half-range on every supported clock frequency.
+pub const MCU_TIMER_HORIZON_TICKS: u64 = 1 << 30;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NotifyId(u64);
 
@@ -57,6 +63,14 @@ impl PassthroughEntry {
 
     pub fn is_background_priority(&self) -> bool {
         self.req_clock == BACKGROUND_PRIORITY_CLOCK
+    }
+
+    pub fn emit_clock(&self) -> u64 {
+        if self.req_clock == 0 || self.is_background_priority() {
+            return self.min_clock;
+        }
+        self.min_clock
+            .max(self.req_clock.saturating_sub(MCU_TIMER_HORIZON_TICKS))
     }
 }
 

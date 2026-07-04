@@ -99,3 +99,29 @@ fn has_non_background_ready_distinguishes() {
     assert!(q.has_non_background_ready());
     assert!(!q.has_only_background_ready());
 }
+
+#[test]
+fn far_future_req_clock_is_held_until_within_timer_horizon() {
+    use crate::passthrough_queue::entry::MCU_TIMER_HORIZON_TICKS;
+    let mut q = CommandQueue::new();
+    let req = MCU_TIMER_HORIZON_TICKS + 1_000;
+    q.push(entry(0, req));
+
+    assert!(q.is_ready_empty());
+
+    q.promote(999);
+    assert!(q.is_ready_empty());
+
+    q.promote(1_000);
+    assert_eq!(q.pop_ready().unwrap().req_clock(), req);
+}
+
+#[test]
+fn untimed_and_background_entries_bypass_the_horizon_hold() {
+    use crate::passthrough_queue::entry::BACKGROUND_PRIORITY_CLOCK;
+    let mut q = CommandQueue::new();
+    q.push(entry(0, 0));
+    q.push(entry(0, BACKGROUND_PRIORITY_CLOCK));
+
+    assert_eq!(q.ready.len(), 2);
+}
