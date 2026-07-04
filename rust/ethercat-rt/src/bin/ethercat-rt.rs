@@ -316,95 +316,149 @@ fn main() {
     }
 
     let cif = CString::new(ifname.clone()).expect("ifname must not contain NUL");
-    let rc = unsafe {
-        ffi::ec_rt_bringup_preop(
-            cif.as_ptr(),
-            cycle_ns,
-            rt_cpu,
-            rt_prio,
-            slave_positions.as_ptr(),
-            num_slaves as std::os::raw::c_int,
-        )
-    };
-    tracing::info!(
-        subsystem = "ethercat",
-        event = "bringup_preop",
-        rc,
-        num_slaves,
-        "PREOP bringup result"
-    );
-    if rc != 0 {
-        log_al_states(num_slaves, "preop_fail");
-        bringup_fail(&mut server, rc);
-    }
 
-    let run_limits: Vec<(u32, u16)> = (0..num_slaves)
-        .map(|s| {
-            let slot = s as std::os::raw::c_int;
-            let mut ferr = 0u32;
-            let mut tmo = 0u16;
-            let mut tq = 0u16;
-            let rc = unsafe { ffi::ec_rt_read_limits(slot, &mut ferr, &mut tmo, &mut tq) };
-            if rc != 0 {
-                tracing::error!(
-                    subsystem = "ethercat",
-                    event = "drive_limits_read_fail",
-                    slot = s,
-                    rc,
-                    "SDO read of protection limits failed — aborting bringup"
-                );
-                unsafe { ffi::ec_rt_shutdown() };
-                std::process::exit(1);
+    // A non-reference drive brings its DC clock up a random offset from the
+    // reference each activation and only reaches OP if it drift-converges before
+    // the OP walk times out; the offset is re-measured from scratch on every
+    // activation. Re-run the whole PREOP -> limits -> OP sequence, releasing the
+    // master between tries so each attempt re-rolls DC — the automatic equivalent
+    // of the manual FIRMWARE_RESTART that already recovers this. Still fails
+    // loudly, with the per-slot AL state, once the attempts are exhausted.
+    const MAX_BRINGUP_ATTEMPTS: u32 = 6;
+    const BRINGUP_RETRY_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+    let log_retry = |attempt: u32, stage: &str, rc: i32| {
+        tracing::warn!(
+            subsystem = "ethercat",
+            event = "bringup_retry",
+            attempt,
+            max_attempts = MAX_BRINGUP_ATTEMPTS,
+            stage,
+            rc,
+            "bringup attempt failed; releasing master and re-activating (DC re-measured each try)"
+        );
+    };
+
+    let mut attempt: u32 = 0;
+    let run_limits: Vec<(u32, u16)> = loop {
+        attempt += 1;
+        let last = attempt >= MAX_BRINGUP_ATTEMPTS;
+
+        let rc = unsafe {
+            ffi::ec_rt_bringup_preop(
+                cif.as_ptr(),
+                cycle_ns,
+                rt_cpu,
+                rt_prio,
+                slave_positions.as_ptr(),
+                num_slaves as std::os::raw::c_int,
+            )
+        };
+        tracing::info!(
+            subsystem = "ethercat",
+            event = "bringup_preop",
+            rc,
+            attempt,
+            num_slaves,
+            "PREOP bringup result"
+        );
+        if rc != 0 {
+            log_al_states(num_slaves, "preop_fail");
+            unsafe { ffi::ec_rt_shutdown() };
+            if last {
+                bringup_fail(&mut server, rc);
             }
-            tracing::info!(
-                subsystem = "ethercat",
-                event = "drive_limits",
-                slot = s,
-                ferr_6065h = ferr,
-                timeout_6066h = tmo,
-                torque_6072h = tq,
-                "drive protection limits read at bringup"
-            );
-            let cli_ferr = slaves[s].following_error_counts;
-            let cli_tq = slaves[s].max_torque_tenth_pct;
-            let run = (cli_ferr.unwrap_or(ferr), cli_tq.unwrap_or(tq));
-            if cli_ferr.is_some() || cli_tq.is_some() {
-                let rc = unsafe { ffi::ec_rt_write_limits(slot, run.0, run.1) };
+            log_retry(attempt, "preop", rc);
+            std::thread::sleep(BRINGUP_RETRY_SETTLE);
+            continue;
+        }
+
+        let limits: Result<Vec<(u32, u16)>, i32> = (0..num_slaves)
+            .map(|s| {
+                let slot = s as std::os::raw::c_int;
+                let mut ferr = 0u32;
+                let mut tmo = 0u16;
+                let mut tq = 0u16;
+                let rc = unsafe { ffi::ec_rt_read_limits(slot, &mut ferr, &mut tmo, &mut tq) };
                 if rc != 0 {
                     tracing::error!(
                         subsystem = "ethercat",
-                        event = "drive_limits_write_fail",
+                        event = "drive_limits_read_fail",
                         slot = s,
                         rc,
-                        "SDO write of session limits failed — aborting bringup"
+                        "SDO read of protection limits failed"
                     );
-                    unsafe { ffi::ec_rt_shutdown() };
-                    std::process::exit(1);
+                    return Err(rc);
                 }
                 tracing::info!(
                     subsystem = "ethercat",
-                    event = "drive_limits_applied",
+                    event = "drive_limits",
                     slot = s,
-                    ferr_6065h = run.0,
-                    torque_6072h = run.1,
-                    "session protection limits applied"
+                    ferr_6065h = ferr,
+                    timeout_6066h = tmo,
+                    torque_6072h = tq,
+                    "drive protection limits read at bringup"
                 );
+                let cli_ferr = slaves[s].following_error_counts;
+                let cli_tq = slaves[s].max_torque_tenth_pct;
+                let run = (cli_ferr.unwrap_or(ferr), cli_tq.unwrap_or(tq));
+                if cli_ferr.is_some() || cli_tq.is_some() {
+                    let rc = unsafe { ffi::ec_rt_write_limits(slot, run.0, run.1) };
+                    if rc != 0 {
+                        tracing::error!(
+                            subsystem = "ethercat",
+                            event = "drive_limits_write_fail",
+                            slot = s,
+                            rc,
+                            "SDO write of session limits failed"
+                        );
+                        return Err(rc);
+                    }
+                    tracing::info!(
+                        subsystem = "ethercat",
+                        event = "drive_limits_applied",
+                        slot = s,
+                        ferr_6065h = run.0,
+                        torque_6072h = run.1,
+                        "session protection limits applied"
+                    );
+                }
+                Ok(run)
+            })
+            .collect();
+        let run_limits = match limits {
+            Ok(limits) => limits,
+            Err(rc) => {
+                unsafe { ffi::ec_rt_shutdown() };
+                if last {
+                    bringup_fail(&mut server, rc);
+                }
+                log_retry(attempt, "limits", rc);
+                std::thread::sleep(BRINGUP_RETRY_SETTLE);
+                continue;
             }
-            run
-        })
-        .collect();
+        };
 
-    let rc = unsafe { ffi::ec_rt_bringup_finish() };
-    tracing::info!(
-        subsystem = "ethercat",
-        event = "bringup_finish",
-        rc,
-        "OP bringup result"
-    );
-    if rc != 0 {
-        log_al_states(num_slaves, "finish_fail");
-        bringup_fail(&mut server, rc);
-    }
+        let rc = unsafe { ffi::ec_rt_bringup_finish() };
+        tracing::info!(
+            subsystem = "ethercat",
+            event = "bringup_finish",
+            rc,
+            attempt,
+            "OP bringup result"
+        );
+        if rc != 0 {
+            log_al_states(num_slaves, "finish_fail");
+            unsafe { ffi::ec_rt_shutdown() };
+            if last {
+                bringup_fail(&mut server, rc);
+            }
+            log_retry(attempt, "finish", rc);
+            std::thread::sleep(BRINGUP_RETRY_SETTLE);
+            continue;
+        }
+
+        break run_limits;
+    };
     log_al_states(num_slaves, "parked");
     tracing::info!(
         subsystem = "ethercat",
