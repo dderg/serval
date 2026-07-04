@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -106,7 +106,7 @@ impl std::fmt::Debug for HomeDripParams {
     }
 }
 
-pub const INPUT_CHANNEL_CAP: usize = 8192;
+pub const INPUT_CHANNEL_CAP: usize = 64;
 
 #[derive(Debug)]
 pub enum StreamMsg {
@@ -127,7 +127,6 @@ pub struct StreamWorkerHandle {
     join_handle: Option<JoinHandle<()>>,
     last_move_time_bits: Arc<AtomicU64>,
     commit_fire_count: Arc<AtomicU32>,
-    uncommitted_intake_secs: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -277,17 +276,11 @@ impl StreamWorkerHandle {
         let (tx, rx) = bounded(INPUT_CHANNEL_CAP);
         let last_move_time_bits = Arc::new(AtomicU64::new(0));
         let commit_fire_count = Arc::new(AtomicU32::new(0));
-        let uncommitted_intake_secs = Arc::new(AtomicU64::new(0));
-
-        let tally = Arc::new(Mutex::new(IntakeTally::new(Arc::clone(
-            &uncommitted_intake_secs,
-        ))));
         let shared = ConsumerShared {
             dispatch,
             sync_instant: Arc::new(Mutex::new(None)),
             last_move_time_bits: Arc::clone(&last_move_time_bits),
             commit_fire_count: Arc::clone(&commit_fire_count),
-            tally: Arc::clone(&tally),
         };
         let join = thread::Builder::new()
             .name("kalico-stream-worker".to_string())
@@ -317,7 +310,6 @@ impl StreamWorkerHandle {
                     discard,
                     capture_errors,
                     shared,
-                    tally,
                     frontier,
                     undrained: false,
                 }
@@ -330,7 +322,6 @@ impl StreamWorkerHandle {
             join_handle: Some(join),
             last_move_time_bits,
             commit_fire_count,
-            uncommitted_intake_secs,
         }
     }
 
@@ -413,11 +404,6 @@ impl StreamWorkerHandle {
         self.commit_fire_count.load(Ordering::Acquire)
     }
 
-    #[must_use]
-    pub fn uncommitted_intake_secs(&self) -> f64 {
-        f64::from_bits(self.uncommitted_intake_secs.load(Ordering::Acquire))
-    }
-
     pub fn shutdown(&mut self) {
         let _ = self.sender.send(StreamMsg::Shutdown);
         if let Some(h) = self.join_handle.take() {
@@ -439,70 +425,6 @@ fn try_submit_move(sender: &Sender<StreamMsg>, m: geometry::Move) -> Result<(), 
         TrySendError::Full(_) => StreamWorkerError::ChannelFull,
         TrySendError::Disconnected(_) => StreamWorkerError::ChannelClosed,
     })
-}
-
-fn nominal_t(m: &geometry::Move) -> Option<f64> {
-    if m.feedrate_mm_s > 0.0 {
-        Some(m.segment.s_len() / m.feedrate_mm_s)
-    } else {
-        None
-    }
-}
-
-/// Nominal seconds of motion ingested into the pipeline but not yet dispatched
-/// to the pump, published for the host's backpressure gate. Entries retire as
-/// the consumer's dispatched-line frontier passes them.
-pub(crate) struct IntakeTally {
-    per_move: VecDeque<(u32, f64)>,
-    secs: f64,
-    atomic: Arc<AtomicU64>,
-}
-
-impl IntakeTally {
-    pub(crate) fn new(atomic: Arc<AtomicU64>) -> Self {
-        Self {
-            per_move: VecDeque::new(),
-            secs: 0.0,
-            atomic,
-        }
-    }
-
-    fn publish(&self) {
-        self.atomic.store(self.secs.to_bits(), Ordering::Release);
-    }
-
-    pub(crate) fn record_intake(&mut self, m: &geometry::Move) {
-        let Some(dt) = nominal_t(m) else {
-            fatal(&format!(
-                "intake tally: non-positive feedrate {} on line {}",
-                m.feedrate_mm_s, m.source.start_line
-            ));
-        };
-        self.per_move.push_back((m.source.start_line, dt));
-        self.secs += dt;
-        self.publish();
-    }
-
-    pub(crate) fn retire_dispatched(&mut self, dispatched_line: u32) {
-        while self
-            .per_move
-            .front()
-            .is_some_and(|&(line, _)| line < dispatched_line)
-        {
-            let (_, dt) = self.per_move.pop_front().expect("front checked");
-            self.secs -= dt;
-        }
-        if self.per_move.is_empty() {
-            self.secs = 0.0;
-        }
-        self.publish();
-    }
-
-    pub(crate) fn reset(&mut self) {
-        self.per_move.clear();
-        self.secs = 0.0;
-        self.publish();
-    }
 }
 
 pub(crate) fn fatal(msg: &str) -> ! {

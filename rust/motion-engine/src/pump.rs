@@ -136,11 +136,12 @@ pub const PUMP_DATA_CHANNEL_CAP: usize = 1024;
 // shared channel — starving the cohort floor and freezing the planner on the
 // full channel. Drip is finite, so greedy draining is safe there.
 //
-// Sized several times the total MCU ring cache (≈1024 pieces/MCU): the host
-// staging buffer must be DEEPER than the MCU rings, or the pump throttles the
-// planner before the frontier is deep enough to absorb host scheduling gaps —
-// the playhead then overruns the committed end (anchor_underrun → drive fault).
-const PUMP_INTAKE_BACKLOG_CAP: u64 = 16384;
+// Sized ≈4× a typical MCU ring (an F407 ring holds ~1877 pieces), roughly
+// 5–15 s of typical motion: the host staging buffer must be DEEPER than the
+// MCU rings, or the pump throttles the planner before the frontier is deep
+// enough to absorb host scheduling gaps — the playhead then overruns the
+// committed end (anchor_underrun → drive fault).
+const PUMP_INTAKE_BACKLOG_CAP: u64 = 8192;
 
 const MAX_PER_FRAME: usize = 32;
 

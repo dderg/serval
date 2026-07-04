@@ -123,7 +123,17 @@ fn nonstop_flood_of_real_perimeter_drains_without_crashing() {
     for _loop_idx in 0..12 {
         for (x, y, e) in VORON_PERIMETER {
             let end = [x, y, 0.2];
-            h.submit_move(line_e(line_no, 50.0, prev, end, e)).unwrap();
+            let mut m = line_e(line_no, 50.0, prev, end, e);
+            loop {
+                match h.submit_move(m) {
+                    Ok(()) => break,
+                    Err(StreamWorkerError::ChannelFull) => {
+                        m = line_e(line_no, 50.0, prev, end, e);
+                        std::thread::yield_now();
+                    }
+                    Err(e) => panic!("submit failed: {e}"),
+                }
+            }
             prev = end;
             line_no += 1;
             submitted += 1;
@@ -320,139 +330,6 @@ fn nudge_dispatches_pieces_and_advances_time() {
     assert!(
         h.last_move_time() > 0.0,
         "time did not advance past the nudge"
-    );
-    h.shutdown();
-}
-
-fn nominal_secs(m: &geometry::Move) -> f64 {
-    nominal_t(m).unwrap()
-}
-
-#[test]
-fn intake_tally_accrues_nominal_on_intake() {
-    let atomic = Arc::new(AtomicU64::new(0));
-    let mut tally = IntakeTally::new(Arc::clone(&atomic));
-    let a = line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0]);
-    let b = line(2, [40.0, 0.0, 0.0], [60.0, 0.0, 0.0]);
-    let expected = nominal_secs(&a) + nominal_secs(&b);
-
-    tally.record_intake(&a);
-    tally.record_intake(&b);
-
-    assert!(expected > 0.0);
-    assert!((f64::from_bits(atomic.load(Ordering::Acquire)) - expected).abs() < 1e-12);
-}
-
-#[test]
-fn intake_tally_subtracts_committed_nominal() {
-    let atomic = Arc::new(AtomicU64::new(0));
-    let mut tally = IntakeTally::new(Arc::clone(&atomic));
-    let a = line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0]);
-    let b = line(2, [40.0, 0.0, 0.0], [60.0, 0.0, 0.0]);
-    let c = line(3, [60.0, 0.0, 0.0], [100.0, 0.0, 0.0]);
-    tally.record_intake(&a);
-    tally.record_intake(&b);
-    tally.record_intake(&c);
-
-    tally.retire_dispatched(2);
-
-    let remaining = nominal_secs(&b) + nominal_secs(&c);
-    assert!((f64::from_bits(atomic.load(Ordering::Acquire)) - remaining).abs() < 1e-12);
-}
-
-#[test]
-fn intake_tally_empties_to_exactly_zero_on_full_commit() {
-    let atomic = Arc::new(AtomicU64::new(0));
-    let mut tally = IntakeTally::new(Arc::clone(&atomic));
-    tally.record_intake(&line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0]));
-    tally.record_intake(&line(2, [40.0, 0.0, 0.0], [60.0, 0.0, 0.0]));
-
-    tally.retire_dispatched(3);
-
-    assert_eq!(f64::from_bits(atomic.load(Ordering::Acquire)), 0.0);
-}
-
-#[test]
-fn intake_tally_reset_zeroes_the_signal() {
-    let atomic = Arc::new(AtomicU64::new(0));
-    let mut tally = IntakeTally::new(Arc::clone(&atomic));
-    tally.record_intake(&line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0]));
-
-    tally.reset();
-
-    assert_eq!(f64::from_bits(atomic.load(Ordering::Acquire)), 0.0);
-}
-
-#[test]
-fn flushed_stream_reads_zero_uncommitted_intake() {
-    let cap = Capture::default();
-    let mut h = StreamWorkerHandle::spawn(
-        cfg(),
-        AxisChainSet::default(),
-        vec![0.0, 0.0, 0.0],
-        cap.dispatch(),
-        cap.nudge_dispatch(),
-        Arc::default(),
-    );
-    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
-        .unwrap();
-    h.submit_move(line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0]))
-        .unwrap();
-    h.flush().unwrap();
-
-    assert_eq!(h.uncommitted_intake_secs(), 0.0);
-    h.shutdown();
-}
-
-#[test]
-fn mid_stream_dispatch_keeps_intake_tally_bounded() {
-    let cap = Capture::default();
-    let mut h = StreamWorkerHandle::spawn(
-        cfg_cap(256),
-        AxisChainSet::default(),
-        vec![0.0, 0.0, 0.0],
-        cap.dispatch(),
-        cap.nudge_dispatch(),
-        Arc::default(),
-    );
-
-    let n: u32 = 16;
-    let mut prev = [0.0, 0.0, 0.0];
-    let mut total_nominal = 0.0;
-    for i in 0..n {
-        let x = f64::from(i + 1) * 20.0;
-        let y = if i % 2 == 0 { 3.0 } else { 0.0 };
-        let end = [x, y, 0.0];
-        let m = line(i + 1, prev, end);
-        total_nominal += nominal_secs(&m);
-        h.submit_move(m).unwrap();
-        prev = end;
-    }
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while cap.snapshot().len() < 6 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "continuity commit never dispatched the blend run"
-        );
-        std::thread::yield_now();
-    }
-
-    let mid = h.uncommitted_intake_secs();
-    assert!(
-        mid >= 0.0,
-        "tally went negative through the real head-trim path: {mid}"
-    );
-    assert!(
-        mid < total_nominal,
-        "committed moves were not subtracted on the real commit path: {mid} !< {total_nominal}"
-    );
-
-    h.flush().unwrap();
-    assert_eq!(
-        h.uncommitted_intake_secs(),
-        0.0,
-        "tally must be exactly zero after flush through the partial-commit path"
     );
     h.shutdown();
 }

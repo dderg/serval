@@ -267,13 +267,6 @@ impl PyMotionEngine {
         feedrate: f64,
     ) -> PyResult<bool> {
         py.detach(|| -> PyResult<bool> {
-            let depth = *self
-                .pipe_depth_secs
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            if self.queued_motion_secs() >= depth {
-                return Ok(false);
-            }
             tracing::info!(
                 subsystem = "motion",
                 event = "submit_move_enter",
@@ -345,7 +338,6 @@ impl PyMotionEngine {
                     event = "intake_submit",
                     line_no,
                     channel_pending = planner.pending_channel_moves(),
-                    uncommitted_secs = planner.uncommitted_intake_secs(),
                     "[intake] move accepted into the pipe"
                 );
             }
@@ -359,21 +351,6 @@ impl PyMotionEngine {
         })
     }
 
-    /// Configure the pipe's time depth: how many seconds of motion may be
-    /// queued (committed runway plus planner intake) before `submit_move`
-    /// reports full.
-    fn set_pipe_depth_secs(&self, depth: f64) -> PyResult<()> {
-        if !(depth > 0.0) {
-            return Err(PyValueError::new_err(format!(
-                "pipe depth must be positive, got {depth}"
-            )));
-        }
-        *self
-            .pipe_depth_secs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = depth;
-        Ok(())
-    }
     #[pyo3(signature = (i, j, p, q, dx, dy, dz, de, feedrate))]
     fn submit_bezier(
         &self,

@@ -1,8 +1,7 @@
 //! The pipe's front door. One thread owns three jobs, in order of importance:
 //!
 //! 1. **Ingress guard** — every move entering the pipeline is checked for
-//!    position contiguity against the odometer and recorded in the intake
-//!    tally that backs the host's entry gate.
+//!    position contiguity against the odometer.
 //! 2. **Pacing** — the single place that decides what a silent inbox means.
 //!    The host feeds by pushing as much as fits, so a silent inbox means the
 //!    gcode stream is genuinely dry; when the committed runway counts down to
@@ -17,7 +16,6 @@
 //! a clock; time lives here and in the dispatcher.
 
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -29,7 +27,7 @@ use motion_pipeline::{
 };
 
 use super::dispatch::{ConsumerShared, NudgeDispatchFn};
-use super::{CommittedFrontier, HomeDripParams, IntakeTally, NudgeParams, StreamMsg, fatal};
+use super::{CommittedFrontier, HomeDripParams, NudgeParams, StreamMsg, fatal};
 
 /// Runway kept in reserve when the pacer waits out a silent input instead of
 /// sending `Drain`. A drain fired at the reserve must still travel
@@ -60,7 +58,6 @@ pub(super) struct Ingress {
     pub(super) discard: Arc<AtomicBool>,
     pub(super) capture_errors: Arc<AtomicBool>,
     pub(super) shared: ConsumerShared,
-    pub(super) tally: Arc<Mutex<IntakeTally>>,
     pub(super) frontier: Arc<CommittedFrontier>,
     /// The pipeline holds moves ingested since the last `Drain`; the pacer
     /// only schedules a drain while this is set.
@@ -127,9 +124,7 @@ impl Ingress {
     fn drain_and_fence(&mut self) -> BarrierAck {
         self.send(StreamInput::Drain);
         self.undrained = false;
-        let ack = self.barrier();
-        self.tally.lock().unwrap_or_else(|p| p.into_inner()).reset();
-        ack
+        self.barrier()
     }
 
     fn handle_move(&mut self, m: geometry::Move) {
@@ -157,10 +152,6 @@ impl Ingress {
                 );
             }
         }
-        self.tally
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .record_intake(&m);
         advance_odometer(&mut self.odometer, &m);
         self.send(m.into());
         self.undrained = true;
@@ -252,7 +243,6 @@ impl Ingress {
         self.barrier();
         self.odometer = pos;
         self.t_next = 0.0;
-        self.tally.lock().unwrap_or_else(|p| p.into_inner()).reset();
     }
 
     /// Run a homing drip through the pipeline with dispatch errors captured,

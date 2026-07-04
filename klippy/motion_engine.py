@@ -423,9 +423,6 @@ class MotionEngineWrapper:
     def submit_move(self, dx, dy, dz, de, feedrate):
         return self._engine.submit_move(dx, dy, dz, de, feedrate)
 
-    def set_pipe_depth_secs(self, depth):
-        return self._engine.set_pipe_depth_secs(depth)
-
     def wait_moves(self):
         flush_id = self._engine.wait_moves_start()
         while not self._engine.wait_moves_poll(flush_id):
@@ -518,9 +515,6 @@ class MotionEngineWrapper:
 
     def input_channel_capacity(self):
         return self._engine.input_channel_capacity()
-
-    def uncommitted_intake_secs(self):
-        return self._engine.uncommitted_intake_secs() or 0.0
 
     def pump_backlog(self):
         return self._engine.pump_backlog() or 0

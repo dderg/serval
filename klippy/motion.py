@@ -10,7 +10,6 @@ from .arc_fit_config import arc_fit_from_config
 from .extras import servo_axis
 from .kinematics import extruder
 
-DRAIN_TIMEOUT = 60.0
 REACTOR_YIELD_INTERVAL = 0.020
 _LEGACY_STEPPER_AXES = frozenset("xyzab")
 _LEGACY_SERVO_SECTIONS = ("servo_x", "servo_y", "servo_z")
@@ -129,13 +128,12 @@ class Motion:
         self._read_post_processors(config)
         self._read_arc_fit(config)
         self.print_stall = 0
-        self.buffer_time_high = config.getfloat(
+        _deprecated_buffer_time_high = config.getfloat(
             "buffer_time_high", 2.0, above=0.0
         )
         _deprecated_buffer_time_low = config.getfloat(
             "buffer_time_low", 1.0, minval=0.0
         )
-        self.engine.set_pipe_depth_secs(self.buffer_time_high)
         self._drip_active = False
         self._last_reactor_yield = 0.0
         gcode = printer.lookup_object("gcode")
@@ -551,15 +549,12 @@ class Motion:
         self._wait_mcu_drained()
 
     def _wait_mcu_drained(self):
-        deadline = self.reactor.monotonic() + DRAIN_TIMEOUT
         while not self.engine.motion_drain_poll():
-            now = self.reactor.monotonic()
-            if now >= deadline:
+            if self.printer.is_shutdown():
                 raise self.printer.command_error(
-                    "wait_moves: motion drain timed out after %.0fs"
-                    % (DRAIN_TIMEOUT,)
+                    "wait_moves: shutdown while waiting for motion drain"
                 )
-            self.reactor.pause(now + 0.010)
+            self.reactor.pause(self.reactor.monotonic() + 0.010)
         self.engine.motion_drain_finalize()
         self._ground_pending_end_time_after_engine_drain()
 
@@ -667,23 +662,14 @@ class Motion:
             "feed_throttle_enter",
             queued_motion=round(self.engine.queued_motion_secs(), 4),
             dispatched_lead=round(self.engine.dispatched_lead_secs(), 4),
-            uncommitted_intake=round(self.engine.uncommitted_intake_secs(), 4),
             engine_frontier=round(self.engine.get_last_move_time(), 4),
         )
-        deadline = now + DRAIN_TIMEOUT
         while True:
             if self.printer.is_shutdown():
                 raise self.printer.command_error(
                     "motion pipe: shutdown while waiting for space"
                 )
-            now = self.reactor.monotonic()
-            if now >= deadline:
-                raise self.printer.command_error(
-                    "motion pipe full for %.0fs "
-                    "(planner/MCU not retiring moves; queued=%.3fs)"
-                    % (DRAIN_TIMEOUT, self.engine.queued_motion_secs())
-                )
-            self.reactor.pause(now + 0.005)
+            self.reactor.pause(self.reactor.monotonic() + 0.005)
             self._last_reactor_yield = self.reactor.monotonic()
             if submit(*args):
                 break

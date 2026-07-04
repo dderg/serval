@@ -118,7 +118,7 @@ fn open_serial_with_retry(
 /// normally hovers near the open-tail length past the finality barrier; this
 /// force-drain to rest fires solely when no clean seam exists within reach. Set
 /// well above a realistic open tail so a dense (but normal) stream never trips it.
-const STREAM_MAX_BUFFER_MOVES: usize = 512;
+const STREAM_MAX_BUFFER_MOVES: usize = 128;
 /// Velocity-profile ODE/sampling tolerance for the streaming planner, in v²
 /// units. The offline default (1e-7) drives the adaptive RK4 to a precision far
 /// below the physical noise floor — ~0.015 mm/s velocity error at this value on
@@ -180,12 +180,6 @@ pub struct PyMotionEngine {
     latched_endpoint_death: Arc<Mutex<HashMap<u32, String>>>,
     remote_triggers: Mutex<HashMap<u8, (u32, host_rt::host_io::InterceptorId)>>,
     shut_down: AtomicBool,
-    /// Seconds of queued motion (committed + planner intake) at which
-    /// `submit_move` reports the pipe full instead of accepting. The host
-    /// feeds by retrying, so this is the whole backpressure gate: it bounds
-    /// how far print time runs ahead of the playhead (MCU clock horizon,
-    /// pause responsiveness) while keeping every buffer in the pipe topped up.
-    pipe_depth_secs: Mutex<f64>,
 }
 
 #[pymethods]
@@ -232,7 +226,6 @@ impl PyMotionEngine {
             latched_endpoint_death: Arc::new(Mutex::new(HashMap::new())),
             remote_triggers: Mutex::new(HashMap::new()),
             shut_down: AtomicBool::new(false),
-            pipe_depth_secs: Mutex::new(2.0),
         }
     }
 

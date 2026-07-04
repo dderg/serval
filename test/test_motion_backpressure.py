@@ -38,35 +38,36 @@ class FakeMcu:
         return eventtime
 
 
-# Mirrors the bridge's entry gate: submit_move accepts while queued motion is
-# below the pipe depth and reports full otherwise. Queued motion drains as the
-# wall clock (reactor) advances; `stalled` pins it so it never drains -- the
-# DRAIN_TIMEOUT guard case.
+# Mirrors the bridge's entry gate: submit_move pushes into a fixed-capacity
+# entry channel and reports full when the number of in-flight moves reaches the
+# capacity. In-flight moves drain as the wall clock (reactor) advances;
+# `stalled` pins them so the channel never frees -- the PIPE_FULL_TIMEOUT guard
+# case.
 class FakeEngine:
-    def __init__(self, reactor, queued=0.0, depth=2.0, stalled=False):
+    def __init__(self, reactor, in_flight=0, capacity=64, stalled=False):
         self.reactor = reactor
-        self._queued0 = queued
+        self._in_flight0 = in_flight
         self._t0 = reactor.now
-        self._depth = depth
+        self._capacity = capacity
         self.stalled = stalled
         self.accepted = 0
 
-    def queued_motion_secs(self):
+    def _in_flight(self):
         if self.stalled:
-            return self._queued0
-        drained = self.reactor.now - self._t0
-        return max(0.0, self._queued0 - drained)
+            return self._in_flight0
+        drained = int(self.reactor.now - self._t0)
+        return max(0, self._in_flight0 - drained)
+
+    def queued_motion_secs(self):
+        return float(self._in_flight())
 
     def submit_move(self, dx, dy, dz, de, feedrate):
-        if self.queued_motion_secs() >= self._depth:
+        if self._in_flight() >= self._capacity:
             return False
         self.accepted += 1
         return True
 
     def dispatched_lead_secs(self):
-        return 0.0
-
-    def uncommitted_intake_secs(self):
         return 0.0
 
     def get_last_move_time(self):
@@ -79,18 +80,21 @@ class FakeMotion:
 
     def __init__(
         self,
-        queued=0.0,
+        in_flight=0,
         mcu=True,
         drip=False,
         stalled=False,
-        depth=2.0,
+        capacity=64,
         shutdown=False,
     ):
         self.reactor = FakeReactor()
         self.printer = FakePrinter(shutdown=shutdown)
         self.mcu = FakeMcu() if mcu else None
         self.engine = FakeEngine(
-            self.reactor, queued=queued, depth=depth, stalled=stalled
+            self.reactor,
+            in_flight=in_flight,
+            capacity=capacity,
+            stalled=stalled,
         )
         self._drip_active = drip
         self._last_reactor_yield = 0.0
@@ -100,14 +104,14 @@ class FakeMotion:
 
 
 def test_accepts_without_pause_when_pipe_has_space():
-    m = FakeMotion(queued=1.0)
+    m = FakeMotion(in_flight=1)
     m.submit()
     assert m.engine.accepted == 1
     assert m.reactor.pauses == 0
 
 
 def test_periodic_reactor_yield_even_when_pipe_has_space():
-    m = FakeMotion(queued=1.0)
+    m = FakeMotion(in_flight=1)
     m._last_reactor_yield = -1.0  # last yield long ago => due for a yield
     m.submit()
     assert m.engine.accepted == 1
@@ -115,39 +119,40 @@ def test_periodic_reactor_yield_even_when_pipe_has_space():
 
 
 def test_retries_until_pipe_frees_space():
-    # queued starts above the pipe depth; it drains as the wall clock advances
-    # with each reactor pause until the entry gate accepts.
-    m = FakeMotion(queued=5.0)
+    # channel starts full; in-flight moves retire as the wall clock advances
+    # with each reactor pause until the entry channel accepts.
+    m = FakeMotion(in_flight=64)
     m.submit()
     assert m.engine.accepted == 1
     assert m.reactor.pauses > 0
 
 
 def test_timeout_when_pipe_never_frees():
-    # playhead stalled => queued pinned at the depth => DRAIN_TIMEOUT fail-loud.
-    m = FakeMotion(queued=5.0, stalled=True)
-    m.reactor.step = 10.0
-    with pytest.raises(FakeCommandError):
+    # channel stalled full => never frees => PIPE_FULL_TIMEOUT fail-loud.
+    m = FakeMotion(in_flight=64, stalled=True)
+    m.reactor.step = 100.0
+    with pytest.raises(FakeCommandError) as excinfo:
         m.submit()
+    assert "%.0fs" % motion.PIPE_FULL_TIMEOUT in str(excinfo.value)
     assert m.engine.accepted == 0
 
 
 def test_drip_submits_without_pacing():
-    m = FakeMotion(queued=1.0, drip=True)
+    m = FakeMotion(in_flight=1, drip=True)
     m.submit()
     assert m.engine.accepted == 1
     assert m.reactor.pauses == 0
 
 
 def test_drip_fails_loud_when_pipe_full():
-    m = FakeMotion(queued=5.0, drip=True)
+    m = FakeMotion(in_flight=64, drip=True)
     with pytest.raises(FakeCommandError):
         m.submit()
     assert m.reactor.pauses == 0
 
 
 def test_no_mcu_submits_without_pacing():
-    m = FakeMotion(queued=1.0, mcu=False)
+    m = FakeMotion(in_flight=1, mcu=False)
     m.submit()
     assert m.engine.accepted == 1
     assert m.reactor.pauses == 0
@@ -155,8 +160,8 @@ def test_no_mcu_submits_without_pacing():
 
 def test_shutdown_breaks_the_wait():
     # an estop/shutdown during a full-pipe wait must break promptly, not spin
-    # to DRAIN_TIMEOUT.
-    m = FakeMotion(queued=5.0, stalled=True, shutdown=True)
+    # to PIPE_FULL_TIMEOUT.
+    m = FakeMotion(in_flight=64, stalled=True, shutdown=True)
     with pytest.raises(FakeCommandError):
         m.submit()
     assert m.reactor.pauses == 0
