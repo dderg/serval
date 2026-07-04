@@ -397,18 +397,14 @@ impl Reactor {
                         p.deadline,
                     ) {
                         let is_io = matches!(e, TransportError::Io(_));
+                        if is_io {
+                            self.transition_closed_on_io_fault(
+                                "drain_pending_submissions/submission",
+                                &e,
+                            );
+                        }
                         let _ = p.completion.send(Err(e));
                         if is_io {
-                            if self.pending_host_fault.is_none() {
-                                self.pending_host_fault =
-                                    Some(crate::host_io::runtime_events::FaultEvent {
-                                        fault_code: FaultCode::HostDisconnect.as_u16(),
-                                        fault_detail: 0,
-                                        segment_id: 0,
-                                        synthesized: false,
-                                    });
-                            }
-                            self.state = ReactorState::Closed;
                             return;
                         }
                     }
@@ -425,16 +421,10 @@ impl Reactor {
                     };
                     if let Err(e) = self.dispatch_fire_and_forget(payload, is_get_clock) {
                         if matches!(e, TransportError::Io(_)) {
-                            if self.pending_host_fault.is_none() {
-                                self.pending_host_fault =
-                                    Some(crate::host_io::runtime_events::FaultEvent {
-                                        fault_code: FaultCode::HostDisconnect.as_u16(),
-                                        fault_detail: 0,
-                                        segment_id: 0,
-                                        synthesized: false,
-                                    });
-                            }
-                            self.state = ReactorState::Closed;
+                            self.transition_closed_on_io_fault(
+                                "drain_pending_submissions/fire_and_forget",
+                                &e,
+                            );
                             return;
                         }
                         tracing::warn!(
@@ -463,13 +453,7 @@ impl Reactor {
                 Ok(pending) if pending > PIECE_OUTQ_BUDGET_BYTES => return,
                 Ok(_) => {}
                 Err(e) => {
-                    tracing::warn!(
-                        subsystem = "mcu-comms",
-                        event = "piece_outq_poll_error",
-                        error = %e,
-                        "drain_piece_frames: kernel out-queue poll failed; transitioning Closed"
-                    );
-                    self.transition_closed_on_io_fault();
+                    self.transition_closed_on_io_fault("drain_piece_frames/outq_poll", &e);
                     return;
                 }
             }
@@ -478,12 +462,11 @@ impl Reactor {
                 .pop_front()
                 .expect("checked non-empty");
             if let Err(e) = self.write_frame(&frame) {
-                let is_io = matches!(e, TransportError::Io(_));
+                if matches!(e, TransportError::Io(_)) {
+                    self.transition_closed_on_io_fault("drain_piece_frames/write_frame", &e);
+                }
                 if let Some(p) = self.transport_state.pending.remove(&cid) {
                     let _ = p.completion.send(Err(e));
-                }
-                if is_io {
-                    self.transition_closed_on_io_fault();
                 }
                 return;
             }
@@ -866,7 +849,26 @@ impl Reactor {
 }
 
 impl Reactor {
-    pub(crate) fn transition_closed_on_io_fault(&mut self) {
+    pub(crate) fn transition_closed_on_io_fault(
+        &mut self,
+        context: &'static str,
+        error: &TransportError,
+    ) {
+        let (os_errno, io_kind) = match error {
+            TransportError::Io(io) => (io.raw_os_error(), Some(io.kind())),
+            _ => (None, None),
+        };
+        tracing::error!(
+            subsystem = "mcu-comms",
+            event = "transport_io_fault",
+            context,
+            os_errno = ?os_errno,
+            io_kind = ?io_kind,
+            error = %error,
+            unacked_n = self.unacked_window.len(),
+            pending_piece_frames = self.pending_piece_frames.len(),
+            "transport IO fault; transitioning Closed"
+        );
         if self.pending_host_fault.is_none() {
             self.pending_host_fault = Some(crate::host_io::runtime_events::FaultEvent {
                 fault_code: FaultCode::HostDisconnect.as_u16(),
@@ -896,11 +898,10 @@ impl Reactor {
                         completion.clone(),
                         deadline,
                     ) {
-                        let is_io = matches!(e, TransportError::Io(_));
-                        let _ = completion.send(Err(e));
-                        if is_io {
-                            self.transition_closed_on_io_fault();
+                        if matches!(e, TransportError::Io(_)) {
+                            self.transition_closed_on_io_fault("handle_command/submit", &e);
                         }
+                        let _ = completion.send(Err(e));
                     }
                 }
                 Err(e) => {
@@ -932,11 +933,10 @@ impl Reactor {
                     completion.clone(),
                     deadline,
                 ) {
-                    let is_io = matches!(e, TransportError::Io(_));
-                    let _ = completion.send(Err(e));
-                    if is_io {
-                        self.transition_closed_on_io_fault();
+                    if matches!(e, TransportError::Io(_)) {
+                        self.transition_closed_on_io_fault("handle_command/submit_typed", &e);
                     }
+                    let _ = completion.send(Err(e));
                 }
             }
             ReactorCommand::Abandon(call_id) => {
@@ -1011,7 +1011,6 @@ impl Reactor {
                         "FireAndForget encoded OK"
                     );
                     if let Err(e) = self.dispatch_fire_and_forget(payload, false) {
-                        let is_io = matches!(e, TransportError::Io(_));
                         tracing::error!(
                             subsystem = "mcu-comms",
                             event = "fire_and_forget_send_error",
@@ -1019,8 +1018,11 @@ impl Reactor {
                             error = %e,
                             "FireAndForget dispatch failed"
                         );
-                        if is_io {
-                            self.transition_closed_on_io_fault();
+                        if matches!(e, TransportError::Io(_)) {
+                            self.transition_closed_on_io_fault(
+                                "handle_command/fire_and_forget",
+                                &e,
+                            );
                         }
                     }
                 }
@@ -1036,15 +1038,17 @@ impl Reactor {
             },
             ReactorCommand::FireAndForgetTyped { payload } => {
                 if let Err(e) = self.dispatch_fire_and_forget(payload, false) {
-                    let is_io = matches!(e, TransportError::Io(_));
                     tracing::warn!(
                         subsystem = "mcu-comms",
                         event = "fire_and_forget_typed_send_error",
                         error = %e,
                         "FireAndForgetTyped: send error"
                     );
-                    if is_io {
-                        self.transition_closed_on_io_fault();
+                    if matches!(e, TransportError::Io(_)) {
+                        self.transition_closed_on_io_fault(
+                            "handle_command/fire_and_forget_typed",
+                            &e,
+                        );
                     }
                 }
             }
@@ -1060,12 +1064,11 @@ impl Reactor {
                 }
                 self.transport_state.identify_pending = Some(completion);
                 if let Err(e) = self.write_frame(&frame) {
-                    let is_io = matches!(e, TransportError::Io(_));
+                    if matches!(e, TransportError::Io(_)) {
+                        self.transition_closed_on_io_fault("handle_command/mcu_identify", &e);
+                    }
                     if let Some(c) = self.transport_state.identify_pending.take() {
                         let _ = c.send(Err(e));
-                    }
-                    if is_io {
-                        self.transition_closed_on_io_fault();
                     }
                 }
             }
@@ -1105,15 +1108,17 @@ impl Reactor {
                     // never here, where the frame may still queue behind a
                     // busy link for milliseconds.
                     if let Err(e) = self.dispatch_fire_and_forget(payload, true) {
-                        let is_io = matches!(e, TransportError::Io(_));
                         tracing::error!(
                             subsystem = "mcu-comms",
                             event = "get_clock_async_send_error",
                             error = %e,
                             "GetClockAndDeliver dispatch failed"
                         );
-                        if is_io {
-                            self.transition_closed_on_io_fault();
+                        if matches!(e, TransportError::Io(_)) {
+                            self.transition_closed_on_io_fault(
+                                "handle_command/get_clock_and_deliver",
+                                &e,
+                            );
                         }
                     }
                 }
@@ -1303,13 +1308,7 @@ impl Reactor {
                         "retransmit error"
                     );
                     if matches!(e, TransportError::Io(_)) {
-                        tracing::warn!(
-                            subsystem = "mcu-comms",
-                            event = "retransmit_io_error",
-                            error = ?e,
-                            "retransmit Io error; transitioning Closed"
-                        );
-                        self.transition_closed_on_io_fault();
+                        self.transition_closed_on_io_fault("tick_once/retransmit", &e);
                     }
                 }
             }
