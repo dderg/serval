@@ -46,7 +46,6 @@ _STUB_MOTION_METHODS = frozenset(
         "release_mcu",
         "detach_serial",
         "attach_serial",
-        "alloc_command_queue",
         "set_clock_est",
         "set_msgproto_dict",
         "engine_call",
@@ -245,50 +244,6 @@ class MotionEngineWrapper:
     def shutdown(self):
         return self._engine.shutdown()
 
-    def alloc_command_queue(self, handle):
-        return self._engine.alloc_command_queue(handle)
-
-    def passthrough_send(self, handle, cq, data, minclock=0, reqclock=0):
-        return self._engine.passthrough_send(
-            handle, cq, data, minclock, reqclock
-        )
-
-    def passthrough_query(self, handle, cq, data, minclock=0, reqclock=0):
-        return self._engine.passthrough_query(
-            handle, cq, data, minclock, reqclock
-        )
-
-    def passthrough_register_handler(self, handle, msg, oid, callback):
-        return self._engine.passthrough_register_handler(
-            handle, msg, oid, callback
-        )
-
-    def passthrough_register_flush_callback(self, handle, callback):
-        return self._engine.passthrough_register_flush_callback(
-            handle, callback
-        )
-
-    def poll_event(self):
-        return self._engine.poll_event()
-
-    def add_config_cmd(self, handle, cmd_bytes):
-        return self._engine.add_config_cmd(handle, cmd_bytes)
-
-    def add_init_cmd(self, handle, cmd_bytes):
-        return self._engine.add_init_cmd(handle, cmd_bytes)
-
-    def add_restart_cmd(self, handle, cmd_bytes):
-        return self._engine.add_restart_cmd(handle, cmd_bytes)
-
-    def begin_config_phase(self, handle):
-        return self._engine.begin_config_phase(handle)
-
-    def next_config_entry(self, handle):
-        return self._engine.next_config_entry(handle)
-
-    def get_stats(self, handle):
-        return self._engine.get_stats(handle)
-
     def set_clock_est(self, handle, freq, offset, last_clock, host_now_raw):
         return self._engine.set_clock_est(
             handle, freq, offset, last_clock, host_now_raw
@@ -299,9 +254,6 @@ class MotionEngineWrapper:
 
     def engine_get_clock_async(self, handle):
         return self._engine.engine_get_clock_async(handle)
-
-    def extract_old(self, handle):
-        return self._engine.extract_old(handle)
 
     def attach_serial(
         self,
@@ -403,6 +355,8 @@ class MotionEngineWrapper:
         arc_fit=None,
         max_extrude_only_velocity=None,
         max_extrude_only_accel=None,
+        fit_tolerance_mm=None,
+        fit_tolerance_accel_mm_s2=None,
     ):
         return self._engine.init_planner(
             axes,
@@ -414,6 +368,8 @@ class MotionEngineWrapper:
             arc_fit,
             max_extrude_only_velocity,
             max_extrude_only_accel,
+            fit_tolerance_mm,
+            fit_tolerance_accel_mm_s2,
         )
 
     def submit_move(self, dx, dy, dz, de, feedrate):
@@ -511,9 +467,6 @@ class MotionEngineWrapper:
 
     def input_channel_capacity(self):
         return self._engine.input_channel_capacity()
-
-    def uncommitted_intake_secs(self):
-        return self._engine.uncommitted_intake_secs() or 0.0
 
     def pump_backlog(self):
         return self._engine.pump_backlog() or 0

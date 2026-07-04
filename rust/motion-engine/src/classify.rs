@@ -54,9 +54,8 @@ pub fn classify_and_build(
         let xyz = build_cubic(to_collinear_bezier(start, end))?;
         let demands = active_followers
             .iter()
-            .map(|&(axis_index, delta)| FollowerDemand {
-                axis_index,
-                ratio: delta / spatial_distance,
+            .map(|&(axis_index, delta)| {
+                FollowerDemand::constant(axis_index, delta / spatial_distance)
             })
             .collect();
         let segment = CubicSegment::try_new(xyz, demands, feedrate_mm_s, source, None)
@@ -74,10 +73,7 @@ pub fn classify_and_build(
     let xyz = build_cubic(to_collinear_bezier(start, start))?;
     let demands = active_followers
         .iter()
-        .map(|&(axis_index, delta)| FollowerDemand {
-            axis_index,
-            ratio: delta / virtual_path_mm,
-        })
+        .map(|&(axis_index, delta)| FollowerDemand::constant(axis_index, delta / virtual_path_mm))
         .collect();
     let segment =
         CubicSegment::try_new_virtual(xyz, demands, feedrate_mm_s, source, virtual_path_mm)
@@ -128,10 +124,7 @@ fn classify_curve(
         .iter()
         .copied()
         .filter(|&(_, d)| d.abs() > DISPLACEMENT_EPSILON)
-        .map(|(axis_index, delta)| FollowerDemand {
-            axis_index,
-            ratio: delta / arc_len,
-        })
+        .map(|(axis_index, delta)| FollowerDemand::constant(axis_index, delta / arc_len))
         .collect();
     let source = SourceRange {
         start_line: 0,

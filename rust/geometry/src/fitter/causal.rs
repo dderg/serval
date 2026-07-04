@@ -4,7 +4,7 @@ use crate::segment::FollowerDemand;
 
 use super::biclothoid::GeneralBlend;
 use super::kernels::Reconstruction;
-use super::{FitError, internal, scaled_followers};
+use super::{FitError, blend_followers, internal};
 
 pub(super) fn trim_arc(arc: &Arc, head: f64, tail: f64) -> Result<Arc, crate::GeometryError> {
     if head <= 0.0 && tail <= 0.0 {
@@ -26,8 +26,14 @@ pub(super) fn emit_general_blend(
 ) -> Result<(), FitError> {
     let len1 = blend.half1.s_len();
     let len2 = blend.half2.s_len();
-    let f_in = scaled_followers(in_followers, blend.trim_in / len1);
-    let f_out = scaled_followers(out_followers, blend.trim_out / len2);
+    let (f_in, f_out) = blend_followers(
+        in_followers,
+        out_followers,
+        blend.trim_in,
+        len1,
+        blend.trim_out,
+        len2,
+    );
 
     let seg_in = PathSegment::try_new(Segment::Clothoid(blend.half1.clone()), f_in)
         .map_err(internal(m_in.source.start_line))?;
@@ -76,9 +82,18 @@ pub(super) fn emit_reconstruction(
             recon.up_followers.clone(),
         )?;
     }
-    let arc = trim_arc(&recon.arc, head_blend_trim, tail_blend_trim)
-        .map_err(internal(m_in.source.start_line))?;
-    push(Segment::Arc(arc), m_in, recon.followers.clone())?;
+    let arc_len = recon.arc.s_len();
+    let remaining = arc_len - head_blend_trim - tail_blend_trim;
+    assert!(
+        remaining >= -1e-9 * arc_len.max(1.0),
+        "fitter: blend trims exceed the arc at line {}: len={arc_len} head={head_blend_trim} tail={tail_blend_trim}",
+        m_in.source.start_line
+    );
+    if remaining > crate::LENGTH_EPS_MM {
+        let arc = trim_arc(&recon.arc, head_blend_trim, tail_blend_trim)
+            .map_err(internal(m_in.source.start_line))?;
+        push(Segment::Arc(arc), m_in, recon.followers.clone())?;
+    }
     for down in &recon.down {
         push(
             Segment::Clothoid(down.clone()),

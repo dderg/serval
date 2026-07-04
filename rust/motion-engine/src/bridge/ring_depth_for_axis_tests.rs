@@ -24,7 +24,7 @@ fn configs() -> Vec<McuAxisConfig> {
 
 #[test]
 fn success_two_axis_mcu() {
-    let expected = (1984 / 2) as u16;
+    let expected = (1322 / 2) as u16;
     assert_eq!(
         ring_depth_for_axis_inner(&configs(), 1, AXIS_X as u8).unwrap(),
         expected
@@ -37,7 +37,7 @@ fn success_two_axis_mcu() {
 
 #[test]
 fn success_single_axis_mcu() {
-    let expected = 1984u16;
+    let expected = 1322u16;
     assert_eq!(
         ring_depth_for_axis_inner(&configs(), 2, AXIS_Z as u8).unwrap(),
         expected
@@ -63,7 +63,7 @@ fn ring_depth_over_u16_is_hard_error_not_clamp() {
         axes: vec![AXIS_X],
         kinematics: 0,
         caps: McuCaps {
-            total_piece_memory: 70_000 * 32,
+            total_piece_memory: 70_000 * 48,
         },
     }];
     let res = ring_depth_for_axis_inner(&configs, 0, AXIS_X as u8);

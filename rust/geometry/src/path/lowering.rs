@@ -60,7 +60,11 @@ pub fn lower_constant_speed(
         let t = (k as f64 * dt).min(total_t);
         let s = (speed_mm_s * t).min(s_len);
         let position = seg.spatial.as_ref().map(|spatial| spatial.point_at(s));
-        let followers = seg.followers.iter().map(|f| f.ratio * s).collect();
+        let followers = seg
+            .followers
+            .iter()
+            .map(|f| f.offset_at(s, s_len))
+            .collect();
         samples.push(LoweredSample {
             t_s: t,
             position,

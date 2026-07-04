@@ -1,20 +1,21 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
+use crossbeam_channel::{Sender, TrySendError, bounded};
 use trajectory::AxisChainSet;
 
-use motion_pipeline::{
-    BarrierAck, CONTIGUITY_EPS_MM, Control, StreamConfig, StreamInput, advance_odometer, dist3,
-    setup_stages,
-};
+use motion_pipeline::{StreamConfig, setup_stages};
 
 use crate::types::AxisKey;
 
 mod dispatch;
+mod ingress;
+
+#[cfg(test)]
+pub(crate) use ingress::lead_secs;
 
 pub use dispatch::DispatchError;
 pub(crate) use dispatch::{
@@ -53,22 +54,6 @@ impl CommittedFrontier {
                 d.saturating_duration_since(Instant::now()).as_secs_f64()
             })
     }
-}
-
-/// Runway kept in reserve when the pacer waits out a silent input instead of
-/// sending `Drain`. A drain fired at the reserve must still travel
-/// fit → plan → lower → shape → dispatch and reach the pump before the
-/// playhead overruns the committed frontier; those stages take milliseconds,
-/// so this covers them with a wide margin while staying under the anchor's
-/// 250 ms initial lead. Overrunning anyway is not fatal — the anchor
-/// re-anchors forward with a logged stutter.
-const RUNWAY_RESERVE_S: f64 = 0.1;
-
-const LEAD: f64 = crate::anchor::DEFAULT_LEAD_SECS;
-
-#[cfg(test)]
-pub(crate) fn lead_secs() -> f64 {
-    LEAD
 }
 
 pub struct HomeDripParams {
@@ -121,7 +106,7 @@ impl std::fmt::Debug for HomeDripParams {
     }
 }
 
-pub const INPUT_CHANNEL_CAP: usize = 8192;
+pub const INPUT_CHANNEL_CAP: usize = 64;
 
 #[derive(Debug)]
 pub enum StreamMsg {
@@ -142,7 +127,6 @@ pub struct StreamWorkerHandle {
     join_handle: Option<JoinHandle<()>>,
     last_move_time_bits: Arc<AtomicU64>,
     commit_fire_count: Arc<AtomicU32>,
-    uncommitted_intake_secs: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -157,8 +141,7 @@ impl std::fmt::Display for StreamWorkerError {
             Self::ChannelClosed => write!(f, "stream worker channel closed"),
             Self::ChannelFull => write!(
                 f,
-                "stream worker input channel full ({INPUT_CHANNEL_CAP} \
-                 moves) — host backpressure gate bypassed"
+                "stream worker input channel full ({INPUT_CHANNEL_CAP} moves)"
             ),
         }
     }
@@ -293,17 +276,11 @@ impl StreamWorkerHandle {
         let (tx, rx) = bounded(INPUT_CHANNEL_CAP);
         let last_move_time_bits = Arc::new(AtomicU64::new(0));
         let commit_fire_count = Arc::new(AtomicU32::new(0));
-        let uncommitted_intake_secs = Arc::new(AtomicU64::new(0));
-
-        let tally = Arc::new(Mutex::new(IntakeTally::new(Arc::clone(
-            &uncommitted_intake_secs,
-        ))));
         let shared = ConsumerShared {
             dispatch,
             sync_instant: Arc::new(Mutex::new(None)),
             last_move_time_bits: Arc::clone(&last_move_time_bits),
             commit_fire_count: Arc::clone(&commit_fire_count),
-            tally: Arc::clone(&tally),
         };
         let join = thread::Builder::new()
             .name("kalico-stream-worker".to_string())
@@ -324,7 +301,7 @@ impl StreamWorkerHandle {
                     .name("kalico-dispatch".to_string())
                     .spawn(move || consumer.run(&output))
                     .expect("spawn pipeline consumer thread");
-                let worker = Worker {
+                ingress::Ingress {
                     config,
                     nudge_dispatch,
                     odometer: home_pos,
@@ -333,11 +310,10 @@ impl StreamWorkerHandle {
                     discard,
                     capture_errors,
                     shared,
-                    tally,
                     frontier,
                     undrained: false,
-                };
-                run_loop(rx, worker);
+                }
+                .run(rx);
             })
             .expect("spawn stream worker thread");
 
@@ -346,7 +322,6 @@ impl StreamWorkerHandle {
             join_handle: Some(join),
             last_move_time_bits,
             commit_fire_count,
-            uncommitted_intake_secs,
         }
     }
 
@@ -429,11 +404,6 @@ impl StreamWorkerHandle {
         self.commit_fire_count.load(Ordering::Acquire)
     }
 
-    #[must_use]
-    pub fn uncommitted_intake_secs(&self) -> f64 {
-        f64::from_bits(self.uncommitted_intake_secs.load(Ordering::Acquire))
-    }
-
     pub fn shutdown(&mut self) {
         let _ = self.sender.send(StreamMsg::Shutdown);
         if let Some(h) = self.join_handle.take() {
@@ -457,70 +427,6 @@ fn try_submit_move(sender: &Sender<StreamMsg>, m: geometry::Move) -> Result<(), 
     })
 }
 
-fn nominal_t(m: &geometry::Move) -> Option<f64> {
-    if m.feedrate_mm_s > 0.0 {
-        Some(m.segment.s_len() / m.feedrate_mm_s)
-    } else {
-        None
-    }
-}
-
-/// Nominal seconds of motion ingested into the pipeline but not yet dispatched
-/// to the pump, published for the host's backpressure gate. Entries retire as
-/// the consumer's dispatched-line frontier passes them.
-pub(crate) struct IntakeTally {
-    per_move: VecDeque<(u32, f64)>,
-    secs: f64,
-    atomic: Arc<AtomicU64>,
-}
-
-impl IntakeTally {
-    pub(crate) fn new(atomic: Arc<AtomicU64>) -> Self {
-        Self {
-            per_move: VecDeque::new(),
-            secs: 0.0,
-            atomic,
-        }
-    }
-
-    fn publish(&self) {
-        self.atomic.store(self.secs.to_bits(), Ordering::Release);
-    }
-
-    pub(crate) fn record_intake(&mut self, m: &geometry::Move) {
-        let Some(dt) = nominal_t(m) else {
-            fatal(&format!(
-                "intake tally: non-positive feedrate {} on line {}",
-                m.feedrate_mm_s, m.source.start_line
-            ));
-        };
-        self.per_move.push_back((m.source.start_line, dt));
-        self.secs += dt;
-        self.publish();
-    }
-
-    pub(crate) fn retire_dispatched(&mut self, dispatched_line: u32) {
-        while self
-            .per_move
-            .front()
-            .is_some_and(|&(line, _)| line < dispatched_line)
-        {
-            let (_, dt) = self.per_move.pop_front().expect("front checked");
-            self.secs -= dt;
-        }
-        if self.per_move.is_empty() {
-            self.secs = 0.0;
-        }
-        self.publish();
-    }
-
-    pub(crate) fn reset(&mut self) {
-        self.per_move.clear();
-        self.secs = 0.0;
-        self.publish();
-    }
-}
-
 pub(crate) fn fatal(msg: &str) -> ! {
     tracing::error!(
         subsystem = "motion",
@@ -531,272 +437,6 @@ pub(crate) fn fatal(msg: &str) -> ! {
     eprintln!("kalico stream worker fatal: {msg}");
     std::thread::sleep(Duration::from_millis(100));
     std::process::abort();
-}
-
-struct Worker {
-    config: StreamConfig,
-    nudge_dispatch: NudgeDispatchFn,
-    /// Expected toolhead position after every move ingested so far; the
-    /// ingress contiguity check anchors here.
-    odometer: Vec<f64>,
-    /// Stream time the dispatched timeline has reached, mirrored from barrier
-    /// acks; nudges (which bypass the pipeline) plan from it.
-    t_next: f64,
-    input: Sender<StreamInput>,
-    discard: Arc<AtomicBool>,
-    capture_errors: Arc<AtomicBool>,
-    shared: ConsumerShared,
-    tally: Arc<Mutex<IntakeTally>>,
-    frontier: Arc<CommittedFrontier>,
-    /// The pipeline holds moves ingested since the last `Drain`; the pacer
-    /// only schedules a drain while this is set.
-    undrained: bool,
-}
-
-impl Worker {
-    fn send(&mut self, item: StreamInput) {
-        if self.input.send(item).is_err() {
-            fatal("pipeline input closed — a stage died");
-        }
-    }
-
-    /// Fence: everything sent before this has been dispatched (or discarded)
-    /// once it returns. Advances the worker's timeline mirror.
-    fn barrier(&mut self) -> BarrierAck {
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        self.send(StreamInput::Control(Control::Barrier(tx)));
-        let ack = rx
-            .recv()
-            .unwrap_or_else(|_| fatal("pipeline dropped a barrier — a stage died"));
-        if let Some(t) = ack.dispatched_through {
-            self.t_next = t;
-        }
-        ack
-    }
-
-    /// Drain the lookahead and fence: the pipeline is empty and the full
-    /// braked-to-rest trajectory is dispatched when this returns, so no
-    /// intake remains uncommitted.
-    fn drain_and_fence(&mut self) -> BarrierAck {
-        self.send(StreamInput::Drain);
-        self.undrained = false;
-        let ack = self.barrier();
-        self.tally.lock().unwrap_or_else(|p| p.into_inner()).reset();
-        ack
-    }
-
-    fn handle_move(&mut self, m: geometry::Move) {
-        tracing::info!(
-            subsystem = "motion",
-            event = "pipe_ingress",
-            line = m.source.start_line,
-            t_us = crate::timing::mono_us(),
-            "[pipe] ingress"
-        );
-        if let Some(seg) = &m.segment.spatial {
-            use geometry::path::lowering::PositionProfile;
-            let got = seg.point_at(0.0);
-            let expected = [self.odometer[0], self.odometer[1], self.odometer[2]];
-            let gap_mm = dist3(expected, got);
-            if gap_mm > CONTIGUITY_EPS_MM {
-                fatal(&format!(
-                    "ingress: discontinuous move at line {}: starts at {got:?} but \
-                     the toolhead is at {expected:?} ({gap_mm:.6}mm gap) — move \
-                     stream is not position-contiguous",
-                    m.source.start_line
-                ));
-            }
-        }
-        self.tally
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .record_intake(&m);
-        advance_odometer(&mut self.odometer, &m);
-        self.send(m.into());
-        self.undrained = true;
-    }
-
-    /// The pacer's one decision. Called when the inbox is silent while the
-    /// pipeline holds undrained moves: with runway beyond the reserve there is
-    /// provably time to wait for more input, so report how long; at the
-    /// reserve, send `Drain` so the fitter and planner materialize the
-    /// brake-to-rest and the drained trajectory beats the playhead to the
-    /// pump.
-    fn drain_or_runway(&mut self) -> Option<Duration> {
-        let wait_s = self.frontier.runway_secs() - RUNWAY_RESERVE_S;
-        if wait_s > 0.0 {
-            return Some(Duration::from_secs_f64(wait_s));
-        }
-        tracing::info!(
-            subsystem = "motion",
-            event = "pipe_drain",
-            t_us = crate::timing::mono_us(),
-            "[pipe] runway exhausted — draining pipeline to rest"
-        );
-        self.send(StreamInput::Drain);
-        self.undrained = false;
-        None
-    }
-
-    /// Handle one non-move control message. Returns `true` when the loop
-    /// should exit (shutdown).
-    fn handle_control(&mut self, msg: StreamMsg) -> bool {
-        match msg {
-            StreamMsg::Move(_) => unreachable!("moves handled by the ingress path"),
-            StreamMsg::Flush { notify } => {
-                let ack = self.drain_and_fence();
-                let finish = ack.sync_instant.map(|t| {
-                    t + Duration::try_from_secs_f64((self.t_next + LEAD).max(0.0))
-                        .unwrap_or(Duration::ZERO)
-                });
-                let _ = notify.send(finish);
-            }
-            StreamMsg::Dwell { duration_s, notify } => {
-                self.drain_and_fence();
-                if duration_s > 0.0 {
-                    self.send(StreamInput::Control(Control::Dwell { secs: duration_s }));
-                    let before = self.t_next;
-                    if self.barrier().dispatched_through.is_none() {
-                        self.t_next = before + duration_s;
-                    }
-                }
-                let _ = notify.send(());
-            }
-            StreamMsg::StreamOpen { home_pos } => {
-                self.reset_to(home_pos);
-            }
-            StreamMsg::Reset { recovered_pos } => {
-                self.reset_to(recovered_pos);
-            }
-            StreamMsg::SetAxisChains(chains) => {
-                self.drain_and_fence();
-                self.send(StreamInput::Control(Control::SetAxisChains(chains)));
-                self.barrier();
-            }
-            StreamMsg::HomeDrip(p) => {
-                let result = self.run_home_drip(&p);
-                let _ = p.notify.send(result);
-            }
-            StreamMsg::Nudge(p) => {
-                let result = self.run_nudge(&p);
-                let _ = p.notify.send(result);
-            }
-            StreamMsg::Shutdown => {
-                self.drain_and_fence();
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Drop everything queued without dispatching it and restart the timeline
-    /// at rest at `pos`. The discard gate goes up out-of-band (segments
-    /// already past the shaper are dropped immediately) and the in-band
-    /// `Reset` lifts it when it catches up, so nothing sent before this call
-    /// reaches the pump and everything sent after does.
-    fn reset_to(&mut self, pos: Vec<f64>) {
-        self.discard.store(true, Ordering::Release);
-        self.frontier.clear();
-        self.send(StreamInput::Control(Control::Reset { pos: pos.clone() }));
-        self.undrained = false;
-        self.barrier();
-        self.odometer = pos;
-        self.t_next = 0.0;
-        self.tally.lock().unwrap_or_else(|p| p.into_inner()).reset();
-    }
-
-    /// Run a homing drip through the pipeline with dispatch errors captured,
-    /// so a failure surfaces to the homing caller instead of aborting.
-    fn run_home_drip(&mut self, p: &HomeDripParams) -> Result<(), String> {
-        self.reset_to(p.home_pos.to_vec());
-        let travel = p.direction * p.max_travel_mm;
-        let (dx, dy, dz) = match p.axis {
-            0 => (travel, 0.0, 0.0),
-            1 => (0.0, travel, 0.0),
-            2 => (0.0, 0.0, travel),
-            other => return Err(format!("HomeDrip: unsupported axis {other} (only 0/1/2)")),
-        };
-        let m = crate::classify::build_move(
-            p.start,
-            dx,
-            dy,
-            dz,
-            0,
-            0.0,
-            self.config.limits,
-            p.speed_mm_s,
-            0,
-        )
-        .map_err(|e| format!("HomeDrip build_move: {e:?}"))?;
-        advance_odometer(&mut self.odometer, &m);
-
-        self.capture_errors.store(true, Ordering::Release);
-        self.send(m.into());
-        self.undrained = true;
-        let ack = self.drain_and_fence();
-        self.capture_errors.store(false, Ordering::Release);
-        ack.result
-    }
-
-    fn run_nudge(&mut self, p: &NudgeParams) -> Result<(), String> {
-        self.drain_and_fence();
-        let nudge_segs = crate::nudge::plan_nudge_profile(
-            p.axis,
-            p.delta_mm,
-            p.speed,
-            p.accel,
-            p.motor_mask,
-            self.t_next,
-        )?;
-        let total_dur: f64 = nudge_segs
-            .iter()
-            .map(|s| s.piece.u_end - s.piece.u_start)
-            .sum();
-        for s in &nudge_segs {
-            (self.nudge_dispatch)(p.mcu_id, s).map_err(|e| format!("nudge dispatch: {e}"))?;
-        }
-        self.t_next += total_dur;
-        if total_dur > 0.0 {
-            self.send(StreamInput::Control(Control::Dwell { secs: total_dur }));
-        }
-        self.shared
-            .last_move_time_bits
-            .store(self.t_next.to_bits(), Ordering::Release);
-        Ok(())
-    }
-}
-
-fn run_loop(rx: Receiver<StreamMsg>, mut worker: Worker) {
-    loop {
-        let received = if worker.undrained {
-            match rx.try_recv() {
-                Ok(msg) => Some(msg),
-                Err(crossbeam_channel::TryRecvError::Empty) => match worker.drain_or_runway() {
-                    None => continue,
-                    Some(wait) => match rx.recv_timeout(wait) {
-                        Ok(msg) => Some(msg),
-                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => None,
-                    },
-                },
-                Err(crossbeam_channel::TryRecvError::Disconnected) => None,
-            }
-        } else {
-            rx.recv().ok()
-        };
-        let Some(msg) = received else {
-            worker.drain_and_fence();
-            return;
-        };
-        match msg {
-            StreamMsg::Move(m) => worker.handle_move(m),
-            other => {
-                if worker.handle_control(other) {
-                    return;
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]

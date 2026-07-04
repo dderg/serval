@@ -10,7 +10,6 @@ from .arc_fit_config import arc_fit_from_config
 from .extras import servo_axis
 from .kinematics import extruder
 
-DRAIN_TIMEOUT = 60.0
 REACTOR_YIELD_INTERVAL = 0.020
 _LEGACY_STEPPER_AXES = frozenset("xyzab")
 _LEGACY_SERVO_SECTIONS = ("servo_x", "servo_y", "servo_z")
@@ -129,15 +128,12 @@ class Motion:
         self._read_post_processors(config)
         self._read_arc_fit(config)
         self.print_stall = 0
-        self.buffer_time_high = config.getfloat(
+        _deprecated_buffer_time_high = config.getfloat(
             "buffer_time_high", 2.0, above=0.0
         )
-        self.buffer_time_low = config.getfloat(
-            "buffer_time_low", 1.0, minval=0.0, maxval=self.buffer_time_high
+        _deprecated_buffer_time_low = config.getfloat(
+            "buffer_time_low", 1.0, minval=0.0
         )
-        channel_cap = self.engine.input_channel_capacity()
-        self._channel_high = channel_cap * 3 // 4
-        self._channel_low = channel_cap // 2
         self._drip_active = False
         self._last_reactor_yield = 0.0
         gcode = printer.lookup_object("gcode")
@@ -469,11 +465,10 @@ class Motion:
             feedrate,
         )
         self._fire_active_callbacks(move.axes_d)
-        self.engine.submit_move(dx, dy, dz, de, feedrate)
+        self._submit_paced(self.engine.submit_move, dx, dy, dz, de, feedrate)
         self._bump_pending_end_time(move.min_move_t)
         self.commanded_pos[:] = move.end_pos
         self._sync_print_time()
-        self._check_pause()
 
     def move_curve(self, newpos, interior_control_points, submit, speed):
         self.resync_parked_servos()
@@ -496,11 +491,10 @@ class Motion:
         if abs(dz) > 1e-9 and abs(dx) < 1e-9 and abs(dy) < 1e-9:
             feedrate = min(feedrate, self.max_z_velocity)
         self._fire_active_callbacks([dx, dy, dz, de])
-        submit(dx, dy, dz, de, feedrate)
+        self._submit_paced(submit, dx, dy, dz, de, feedrate)
         self._bump_pending_end_time(move.min_move_t)
         self.commanded_pos[:] = list(newpos)
         self._sync_print_time()
-        self._check_pause()
 
     def _fire_active_callbacks(self, axes_d):
         if self.kin is None:
@@ -547,7 +541,6 @@ class Motion:
         if delay > 0.0:
             self._bump_pending_end_time(delay)
             self._sync_print_time()
-        self._check_pause()
 
     def wait_moves(self):
         self._wait_mcu_drained()
@@ -556,15 +549,12 @@ class Motion:
         self._wait_mcu_drained()
 
     def _wait_mcu_drained(self):
-        deadline = self.reactor.monotonic() + DRAIN_TIMEOUT
         while not self.engine.motion_drain_poll():
-            now = self.reactor.monotonic()
-            if now >= deadline:
+            if self.printer.is_shutdown():
                 raise self.printer.command_error(
-                    "wait_moves: motion drain timed out after %.0fs"
-                    % (DRAIN_TIMEOUT,)
+                    "wait_moves: shutdown while waiting for motion drain"
                 )
-            self.reactor.pause(now + 0.010)
+            self.reactor.pause(self.reactor.monotonic() + 0.010)
         self.engine.motion_drain_finalize()
         self._ground_pending_end_time_after_engine_drain()
 
@@ -655,66 +645,39 @@ class Motion:
             self._last_reactor_yield = now
         return now
 
-    def _check_pause(self):
+    def _submit_paced(self, submit, *args):
         if self.mcu is None or self._drip_active:
+            if not submit(*args):
+                raise self.printer.command_error(
+                    "motion pipe reported full on an unpaced submit "
+                    "(drip move or no mcu)"
+                )
             return
         now = self._yield_to_reactor_if_due(self.reactor.monotonic())
-        buffer_time = self.engine.queued_motion_secs()
-        channel_pending = self.engine.pending_channel_moves()
-        over_time = buffer_time > self.buffer_time_high
-        over_channel = channel_pending >= self._channel_high
-        structured_log.event(
-            "motion",
-            "backpressure_view",
-            buffer_time=round(buffer_time, 4),
-            buffer_time_high=self.buffer_time_high,
-            buffer_time_low=self.buffer_time_low,
-            dispatched_lead=round(self.engine.dispatched_lead_secs(), 4),
-            uncommitted_intake=round(self.engine.uncommitted_intake_secs(), 4),
-            channel_pending=channel_pending,
-            channel_high=self._channel_high,
-            channel_low=self._channel_low,
-            throttling=over_time or over_channel,
-        )
-        if not over_time and not over_channel:
+        if submit(*args):
             return
         wait_start = now
         structured_log.event(
             "motion",
             "feed_throttle_enter",
-            buffer_time=round(buffer_time, 4),
-            channel_pending=channel_pending,
+            queued_motion=round(self.engine.queued_motion_secs(), 4),
+            dispatched_lead=round(self.engine.dispatched_lead_secs(), 4),
             engine_frontier=round(self.engine.get_last_move_time(), 4),
         )
-        deadline = now + DRAIN_TIMEOUT
-        while (
-            buffer_time > self.buffer_time_low
-            or channel_pending > self._channel_low
-        ):
+        while True:
             if self.printer.is_shutdown():
                 raise self.printer.command_error(
-                    "motion backpressure: shutdown while draining "
-                    "(buffer_time=%.3fs channel_pending=%d)"
-                    % (buffer_time, channel_pending)
+                    "motion pipe: shutdown while waiting for space"
                 )
-            now = self.reactor.monotonic()
-            if now >= deadline:
-                raise self.printer.command_error(
-                    "motion backpressure: buffer_time=%.3fs "
-                    "channel_pending=%d did not drain within %.0fs "
-                    "(planner/MCU not retiring moves)"
-                    % (buffer_time, channel_pending, DRAIN_TIMEOUT)
-                )
-            self.reactor.pause(now + 0.010)
+            self.reactor.pause(self.reactor.monotonic() + 0.005)
             self._last_reactor_yield = self.reactor.monotonic()
-            buffer_time = self.engine.queued_motion_secs()
-            channel_pending = self.engine.pending_channel_moves()
+            if submit(*args):
+                break
         structured_log.event(
             "motion",
             "feed_throttle_exit",
             waited_s=round(self.reactor.monotonic() - wait_start, 4),
-            buffer_time=round(buffer_time, 4),
-            channel_pending=channel_pending,
+            queued_motion=round(self.engine.queued_motion_secs(), 4),
             engine_frontier=round(self.engine.get_last_move_time(), 4),
         )
 
@@ -816,9 +779,10 @@ class Motion:
         self._square_corner_velocity = config.getfloat(
             "square_corner_velocity", 5.0, minval=0.0
         )
-        self.max_jerk = config.getfloat(
-            "max_jerk", self._max_accel * 2.0, above=0.0
+        max_jerk = config.getfloat(
+            "max_jerk", self._max_accel * 2.0, minval=0.0
         )
+        self.max_jerk = max_jerk if max_jerk > 0.0 else float("inf")
         self.max_z_velocity = config.getfloat(
             "max_z_velocity",
             self._max_velocity,
@@ -827,6 +791,12 @@ class Motion:
         )
         self.max_z_accel = config.getfloat(
             "max_z_accel", self._max_accel, above=0.0, maxval=self._max_accel
+        )
+        self.max_path_deviation = config.getfloat(
+            "max_path_deviation", 0.005, above=0.0, maxval=1.0
+        )
+        self.max_accel_deviation = config.getfloat(
+            "max_accel_deviation", 50.0, above=0.0
         )
         self.limit_sections = []
         for sc in config.get_prefix_sections("limit "):
@@ -1032,6 +1002,8 @@ class Motion:
                 arc_fit=self.arc_fit,
                 max_extrude_only_velocity=max_extrude_only_velocity,
                 max_extrude_only_accel=max_extrude_only_accel,
+                fit_tolerance_mm=self.max_path_deviation,
+                fit_tolerance_accel_mm_s2=self.max_accel_deviation,
             )
             self._configure_axes_per_mcu(engine_mcus)
             self._planner_ready = True

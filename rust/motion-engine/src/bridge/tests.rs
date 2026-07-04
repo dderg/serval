@@ -276,6 +276,7 @@ fn stream_config_from(cfg: &PlannerConfig) -> (motion_pipeline::StreamConfig, Ve
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
         fit_tol_mm: cfg.fit_tolerance_mm,
+        fit_tol_accel_mm_s2: cfg.fit_tolerance_accel_mm_s2,
         max_buffer_moves: 64,
         limits: test_limits(),
     };
@@ -491,10 +492,8 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
     let pieces_to_enqueue = vec![(
         PieceEntry {
             start_time: 1_000_000,
-            coeffs: [0.0; 4],
             duration: 0.001,
-            motor_mask: 0,
-            _reserved: [0; 3],
+            ..PieceEntry::zeroed()
         },
         1.0_f64,
     )];

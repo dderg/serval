@@ -118,6 +118,13 @@ vendor tuning GUI. And the inertia ratio comment isn't a guess:
 routine, which excites the axis, fits its dynamics, and feeds the result
 forward.
 
+Standing this up on a Raspberry Pi 5 — the PREEMPT_RT kernel, the IgH EtherCAT
+master built with the native `ec_macb` driver, and the drive bring-up — is
+documented in
+[Installing the IgH EtherCAT master with native `ec_macb`](docs/rewrite/ethercat-igh-macb-install.md),
+with [`ethercat-bench-bringup.md`](docs/rewrite/ethercat-bench-bringup.md) for
+the drive side.
+
 ## The MCU plays motion, not steps
 
 The host writes every axis's final motion — planned, followed, shaped,

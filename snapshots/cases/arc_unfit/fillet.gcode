@@ -1,3 +1,4 @@
+M83 ; use relative distances for extrusion
 
 ;WIDTH:0.599618
 G1 F4444.468

@@ -22,7 +22,6 @@ compile_error!(
      (e.g. motion-module-stepper); none is active"
 );
 
-pub mod bezier_root;
 pub mod segment;
 pub mod sizing;
 pub use sizing::RT_STORAGE_SIZE;
@@ -31,6 +30,7 @@ pub mod buzz_gen;
 pub mod buzz_stream;
 pub mod buzz_sweep;
 pub mod buzz_xdirect;
+pub mod chebyshev;
 pub mod clock;
 pub mod dispatch_stepper;
 pub mod engine;
@@ -39,7 +39,6 @@ pub mod fault_helpers;
 pub mod fault_sink;
 pub(crate) mod isr_phase;
 pub mod log_codes;
-pub mod monomial;
 pub mod motion_core;
 pub mod per_axis_timer;
 pub mod phase_handover;

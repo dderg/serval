@@ -686,6 +686,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "crossbeam-channel",
+ "ethercat-rt",
  "gcode",
  "geometry",
  "heapless",

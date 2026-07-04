@@ -42,6 +42,13 @@ pub(super) fn resolve_arc_arc(
     config: CornerFitConfig,
     delta: f64,
 ) -> Option<GeneralBlend> {
+    let plane_n = plane_of(arc_in);
+    // Anchor curvature is signed relative to the shared blend plane. Each
+    // arc's own kappa is signed relative to its own u x v normal, and two
+    // reconstructions meeting at an S-seam carry opposite normals - so the
+    // out arc's kappa must be re-expressed in the in arc's frame or its
+    // contact point walks around the wrong center.
+    let out_orientation = dot(plane_of(arc_out), plane_n).signum();
     let a_in = Anchor {
         pose: arc_in.point_at(arc_in.s_len()),
         tangent: arc_in.heading_at(arc_in.s_len()),
@@ -50,14 +57,14 @@ pub(super) fn resolve_arc_arc(
     let a_out = Anchor {
         pose: arc_out.point_at(0.0),
         tangent: arc_out.heading_at(0.0),
-        kappa: arc_out.kappa(0.0),
+        kappa: out_orientation * arc_out.kappa(0.0),
     };
     let apex = midpoint(a_in.pose, a_out.pose);
     resolve(
         a_in,
         a_out,
         apex,
-        plane_of(arc_in),
+        plane_n,
         config,
         delta,
         0.5 * arc_len(arc_in),

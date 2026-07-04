@@ -8,6 +8,7 @@ use core::sync::atomic::Ordering;
 
 use crate::engine::Engine;
 use crate::error::RUNTIME_OK;
+use crate::motion_core::arm_piece;
 use crate::piece_ring::PieceEntry;
 use crate::state::SharedState;
 use crate::step_queue::{StepQueue, pop as queue_pop};
@@ -18,18 +19,43 @@ const TICK_CLOCK_FREQ: u32 = 520_000_000;
 const TICK_SAMPLE_RATE: u32 = 40_000;
 const TICK_CYCLES: u64 = (TICK_CLOCK_FREQ / TICK_SAMPLE_RATE) as u64;
 
+/// Build a `PieceEntry` from an old-style cubic Bernstein control point
+/// quadruple, converting through monomial-in-tau to the new Chebyshev basis.
+fn bernstein_piece(
+    start_time: u64,
+    bernstein: [f32; 4],
+    duration: f32,
+    motor_mask: u8,
+) -> PieceEntry {
+    let d = duration as f64;
+    let b0 = bernstein[0] as f64;
+    let b1 = bernstein[1] as f64;
+    let b2 = bernstein[2] as f64;
+    let b3 = bernstein[3] as f64;
+    let mono = [
+        b0,
+        3.0 * (b1 - b0) / d,
+        3.0 * (b2 - 2.0 * b1 + b0) / (d * d),
+        (b3 - 3.0 * b2 + 3.0 * b1 - b0) / (d * d * d),
+    ];
+    let cheb = nurbs::chebyshev::monomial_tau_to_chebyshev(&mono, d);
+    let mut coeffs = [0.0_f32; 8];
+    for (dst, &src) in coeffs.iter_mut().zip(cheb.iter()) {
+        *dst = src as f32;
+    }
+    PieceEntry {
+        start_time,
+        duration,
+        motor_mask,
+        coeff_count: cheb.len() as u8,
+        _reserved: [0; 2],
+        coeffs,
+    }
+}
+
 fn engine_with_z_axis(mode: StepMode) -> (Engine, Vec<PieceEntry>) {
     let mut engine = Engine::default();
-    let storage = vec![
-        PieceEntry {
-            start_time: 0,
-            coeffs: [0.0; 4],
-            duration: 0.0,
-            motor_mask: 0,
-            _reserved: [0; 3]
-        };
-        TEST_TOTAL_RING_PIECES
-    ];
+    let storage = vec![PieceEntry::zeroed(); TEST_TOTAL_RING_PIECES];
     let bindings = [
         StepperBindingRust {
             stepper_oid: 10,
@@ -63,16 +89,7 @@ fn motor_state_reads_seeded_position() {
 
 fn tickable_z_engine() -> (Engine, Vec<PieceEntry>) {
     let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
-    let storage = vec![
-        PieceEntry {
-            start_time: 0,
-            coeffs: [0.0; 4],
-            duration: 0.0,
-            motor_mask: 0,
-            _reserved: [0; 3]
-        };
-        TEST_TOTAL_RING_PIECES
-    ];
+    let storage = vec![PieceEntry::zeroed(); TEST_TOTAL_RING_PIECES];
     let bindings = [
         StepperBindingRust {
             stepper_oid: 10,
@@ -103,13 +120,7 @@ fn tickable_z_engine() -> (Engine, Vec<PieceEntry>) {
 }
 
 fn moving_piece(start_time: u64, delta_mm: f32, motor_mask: u8) -> PieceEntry {
-    PieceEntry {
-        start_time,
-        coeffs: [0.0, 0.0, delta_mm, delta_mm],
-        duration: 0.01,
-        motor_mask,
-        _reserved: [0; 3],
-    }
+    bernstein_piece(start_time, [0.0, 0.0, delta_mm, delta_mm], 0.01, motor_mask)
 }
 
 #[allow(unsafe_code)]
@@ -154,13 +165,7 @@ fn overlay_uses_own_step_frame_not_axis_frame() {
         .load(Ordering::Acquire);
 
     let overlay_start = normal_start + 200 * TICK_CYCLES;
-    let overlay = PieceEntry {
-        start_time: overlay_start,
-        coeffs: [0.0, 0.01, 0.01, 0.01],
-        duration: 0.01,
-        motor_mask: 0b0000_0010,
-        _reserved: [0; 3],
-    };
+    let overlay = bernstein_piece(overlay_start, [0.0, 0.01, 0.01, 0.01], 0.01, 0b0000_0010);
     assert_eq!(engine.push_pieces(2, &[overlay], &mut storage), RUNTIME_OK);
     drain_through_piece(&mut engine, &shared, &mut storage, &mut q, overlay_start);
 
@@ -199,16 +204,7 @@ impl OverlayHarness {
     fn new_single_motor(mstep_mm: f32) -> Self {
         let axis = 2usize;
         let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
-        let storage = vec![
-            PieceEntry {
-                start_time: 0,
-                coeffs: [0.0; 4],
-                duration: 0.0,
-                motor_mask: 0,
-                _reserved: [0; 3]
-            };
-            TEST_TOTAL_RING_PIECES
-        ];
+        let storage = vec![PieceEntry::zeroed(); TEST_TOTAL_RING_PIECES];
         let bindings = [
             StepperBindingRust {
                 stepper_oid: 10,
@@ -387,12 +383,12 @@ fn resonance_buzz_conflicts_with_armed_piece_on_same_axis() {
     configure_pulse_axis(&mut engine, axis, 0.01);
     let shared = SharedState::new();
 
-    engine.stepping_axes[axis].as_mut().unwrap().armed = Some(crate::motion_core::ArmedPiece {
-        mono_coeffs: [0.0; 4],
-        vel_coeffs: [0.0; 3],
-        piece_start_cycles: 0,
-        piece_end_cycles: 0,
-    });
+    let dummy_entry = PieceEntry {
+        duration: 0.001,
+        ..PieceEntry::zeroed()
+    };
+    engine.stepping_axes[axis].as_mut().unwrap().armed =
+        Some(arm_piece(&dummy_entry, TICK_CLOCK_FREQ as f32));
 
     assert_eq!(
         engine.resonance_buzz(&shared, 1u8 << axis, 0, 100_000, 100_000, 100_000, 20, 2, 0),
@@ -569,16 +565,7 @@ fn overlay_multi_piece_no_sample_exceeds_max_steps() {
     let mask: u8 = 0b0000_0010;
 
     let mut engine = Engine::new(TICK_CLOCK_FREQ, TICK_SAMPLE_RATE);
-    let mut storage = vec![
-        PieceEntry {
-            start_time: 0,
-            coeffs: [0.0; 4],
-            duration: 0.0,
-            motor_mask: 0,
-            _reserved: [0; 3],
-        };
-        TEST_TOTAL_RING_PIECES
-    ];
+    let mut storage = vec![PieceEntry::zeroed(); TEST_TOTAL_RING_PIECES];
     let bindings = [
         StepperBindingRust {
             stepper_oid: 10,
@@ -609,13 +596,8 @@ fn overlay_multi_piece_no_sample_exceeds_max_steps() {
     engine.test_install_step_queues(qs);
     let shared = SharedState::new();
 
-    let mk_piece = |start: u64, span: f32, dur: f32| PieceEntry {
-        start_time: start,
-        coeffs: [0.0_f32, 0.0, span, span],
-        duration: dur,
-        motor_mask: mask,
-        _reserved: [0; 3],
-    };
+    let mk_piece =
+        |start: u64, span: f32, dur: f32| bernstein_piece(start, [0.0, 0.0, span, span], dur, mask);
 
     let accel_dur = 0.008_f32;
     let cruise_dur = 0.084_f32;

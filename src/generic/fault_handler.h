@@ -27,8 +27,8 @@ extern "C" {
 #define RT_PHASE_GUARD         3
 #define RT_PHASE_TICK          4
 #define RT_PHASE_WALK          5
-#define RT_PHASE_MONOMIAL      6
-#define RT_PHASE_HORNER        7
+#define RT_PHASE_ARM           6
+#define RT_PHASE_CLENSHAW      7
 #define RT_PHASE_STEP_ENQ      8
 #define RT_PHASE_ISR_EXIT      9
 #define RT_PHASE_STEPOUT_ENTER 10

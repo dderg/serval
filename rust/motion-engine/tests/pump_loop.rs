@@ -49,10 +49,8 @@ fn p(start: u64) -> (PieceEntry, f64) {
     (
         PieceEntry {
             start_time: start,
-            coeffs: [0.0; 4],
             duration: 0.001,
-            motor_mask: 0,
-            _reserved: [0; 3],
+            ..PieceEntry::zeroed()
         },
         start as f64,
     )
@@ -117,13 +115,31 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
 }
 
 fn piece_at(start: u64, host: f64, start_pos: f32, end_pos: f32) -> (PieceEntry, f64) {
+    let d = 0.001_f64;
+    let (b0, b1, b2, b3) = (
+        start_pos as f64,
+        start_pos as f64,
+        end_pos as f64,
+        end_pos as f64,
+    );
+    let mono = [
+        b0,
+        3.0 * (b1 - b0) / d,
+        3.0 * (b2 - 2.0 * b1 + b0) / (d * d),
+        (b3 - 3.0 * b2 + 3.0 * b1 - b0) / (d * d * d),
+    ];
+    let cheb = nurbs::chebyshev::monomial_tau_to_chebyshev(&mono, d);
+    let mut coeffs = [0.0_f32; runtime::piece_ring::MAX_PIECE_COEFFS];
+    for (dst, src) in coeffs.iter_mut().zip(&cheb) {
+        *dst = *src as f32;
+    }
     (
         PieceEntry {
             start_time: start,
-            coeffs: [start_pos, start_pos, end_pos, end_pos],
-            duration: 0.001,
-            motor_mask: 0,
-            _reserved: [0; 3],
+            duration: d as f32,
+            coeff_count: cheb.len() as u8,
+            coeffs,
+            ..PieceEntry::zeroed()
         },
         host,
     )

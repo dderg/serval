@@ -86,14 +86,8 @@ fn clothoid_move(kappa_peak: f64, length: f64, feed: f64, accel: f64, line_no: u
 }
 
 fn virtual_move(virtual_path: f64, feed: f64, max_v: f64, accel: f64, line_no: u32) -> Move {
-    let seg = PathSegment::try_new_virtual(
-        vec![FollowerDemand {
-            axis_index: 3,
-            ratio: 0.05,
-        }],
-        virtual_path,
-    )
-    .unwrap();
+    let seg = PathSegment::try_new_virtual(vec![FollowerDemand::constant(3, 0.05)], virtual_path)
+        .unwrap();
     Move {
         segment: seg,
         feedrate_mm_s: feed,
@@ -904,14 +898,7 @@ fn wipe_into_retract() -> (Vec<Move>, Vec<bool>) {
         }
     };
     let retract = Move {
-        segment: PathSegment::try_new_virtual(
-            vec![FollowerDemand {
-                axis_index: 3,
-                ratio: 1.0,
-            }],
-            0.8,
-        )
-        .unwrap(),
+        segment: PathSegment::try_new_virtual(vec![FollowerDemand::constant(3, 1.0)], 0.8).unwrap(),
         feedrate_mm_s: 25.0,
         limits: lims,
         source: src(3),
@@ -1028,14 +1015,7 @@ fn graded_wipe_into_retract() -> (Vec<Move>, Vec<bool>) {
         }
     };
     let extrude_only = |line_no: u32| Move {
-        segment: PathSegment::try_new_virtual(
-            vec![FollowerDemand {
-                axis_index: 3,
-                ratio: 1.0,
-            }],
-            0.8,
-        )
-        .unwrap(),
+        segment: PathSegment::try_new_virtual(vec![FollowerDemand::constant(3, 1.0)], 0.8).unwrap(),
         feedrate_mm_s: 25.0,
         limits: lims,
         source: src(line_no),
@@ -1107,4 +1087,44 @@ fn boundaries_span_the_window_and_anchor_entry() {
     assert_eq!(p.boundaries.len(), moves.len() + 1);
     assert_eq!(p.boundaries[0], entry);
     assert_eq!(p.boundaries.last().copied(), Some(BoundaryState::REST));
+}
+
+#[test]
+fn infinite_jerk_disables_jerk_limiting_and_still_plans_to_rest() {
+    let moves = vec![
+        line_move(5.0, 100.0, 300.0, 3000.0, 1),
+        line_move(5.0, 100.0, 300.0, 3000.0, 2),
+    ];
+    let finite = plan(&outcome(with_jerk(moves.clone(), 30_000.0), Vec::new())).unwrap();
+    let inf = plan(&outcome(with_jerk(moves, f64::INFINITY), Vec::new())).unwrap();
+
+    assert!(inf.report.traversal_time_s <= finite.report.traversal_time_s + 1e-9);
+    assert_eq!(inf.boundaries.last().copied(), Some(BoundaryState::REST));
+    let a_rail = 3000.0 * (1.0 + 1e-6);
+    for m in &inf.moves {
+        assert!(m.samples.iter().all(|s| s.a.abs() <= a_rail));
+        assert!(m.samples.iter().all(|s| s.v <= 100.0 * (1.0 + 1e-6)));
+        assert!(
+            !m.phases.is_empty(),
+            "a straight move under infinite jerk carries its trapezoid as zero-jerk phases"
+        );
+        for p in &m.phases {
+            assert_eq!(p.j, 0.0);
+            assert!(p.a0.abs() <= a_rail, "phase accel {} beyond rail", p.a0);
+        }
+        let phase_len: f64 = m
+            .phases
+            .iter()
+            .map(|p| p.v0 * p.dt + 0.5 * p.a0 * p.dt * p.dt)
+            .sum();
+        assert!(
+            (phase_len - 5.0).abs() <= 1e-6,
+            "phases cover the move: {phase_len}"
+        );
+    }
+    let trapezoid_accels: Vec<f64> = inf.moves[0].phases.iter().map(|p| p.a0).collect();
+    assert!(
+        trapezoid_accels.iter().any(|&a| a > 2999.0),
+        "leading move accelerates at the rail: {trapezoid_accels:?}"
+    );
 }

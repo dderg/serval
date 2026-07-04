@@ -43,8 +43,8 @@ impl VelocityLimits {
         {
             return Err("square_corner_velocity must be finite and non-negative");
         }
-        if !(self.max_jerk_mm_s3.is_finite() && self.max_jerk_mm_s3 > 0.0) {
-            return Err("max_jerk must be finite and positive");
+        if !(self.max_jerk_mm_s3 > 0.0) {
+            return Err("max_jerk must be positive (infinity disables jerk limiting)");
         }
         Ok(())
     }
@@ -189,7 +189,7 @@ impl MoveContext {
 }
 
 fn extruder_follower(axis_index: usize, ratio: f64) -> FollowerDemand {
-    FollowerDemand { axis_index, ratio }
+    FollowerDemand::constant(axis_index, ratio)
 }
 
 fn segment_err(line_no: u32) -> impl Fn(GeometryError) -> FrontendError {

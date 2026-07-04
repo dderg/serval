@@ -1,8 +1,6 @@
-We are working on a complete rewrite of the motion planner and more:
-
 # Non-negotiable constraints
 
-- **Print throughput is non-negotiable.** The planner never knowingly chooses a cheaper algorithmic architecture that produces a measurably slower trajectory than the best one we can compute on the active hardware. "Best we can compute" is realistic — finite discretization N, local-optimum convergence (SLP for the non-convex jerk relaxation; the Consolini-Locatelli SOCP itself is convex but not a closed-form), tolerance settings tuned to the hardware budget. Within those engineering realities, the planner aims for the tightest trajectory it can; we do not give up trajectory time to make planning easier. Host compute is something we spend in service of trajectory optimality — not the other way around. If the Pi can't keep up, the answer is to optimize the implementation, parallelize across cores, or upgrade the host; the answer is never to ship a cheaper algorithm that produces a measurably slower trajectory on representative slicer output. State-of-the-art is the target, not safe-and-good-enough.
+- The goal of this repository is to expand the boundaries of ultra fast printing at good quality.
 
 - Fail loudly. When adding checks for unexpected things to the code, instead of trying
   to recover, unless it was discussed and agreed on explicitly, the default solution is
@@ -48,7 +46,7 @@ and `query-logs` skills.
 
 - **MCU C/Rust boundary — architectural invariant:** [`docs/rewrite/mcu-c-rust-boundary.md`](docs/rewrite/mcu-c-rust-boundary.md). Read this before adding shared state between C and Rust on the MCU, or before reaching for `#[link_section]` on a Rust static. Rules: C owns boot, safety-critical paths, and all shared-memory placement; Rust owns the motion engine; the seam is `extern "C"` + `#[repr(C)]` only.
 
-- **Motion planner entry point:** `setup_pipeline` in `rust/motion-engine/src/stream_worker.rs` wires the streaming stages (fitter → planner → lowerer → shaper) — read it first when exploring the planner.
+- **Motion planner entry point:** `setup_pipeline` in `rust/motion-engine/src/worker.rs` wires the streaming stages (fitter → planner → lowerer → shaper); the pipe's front door (ingress guard, pacing, control tokens) is `rust/motion-engine/src/worker/ingress.rs` — read those first when exploring the planner.
 
 # Git
 

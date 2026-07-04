@@ -53,6 +53,7 @@ mcu-transport = { path = "../mcu-transport" }
 # building tests, so the production cdylib build is unaffected.
 host-rt = { path = "../host-rt", features = ["python-engine", "test-harness"] }
 motion-engine = { path = ".", features = ["test-support"] }
+ethercat-rt = { path = "../ethercat-rt" }
 serialport = "4"
 
 [lints]

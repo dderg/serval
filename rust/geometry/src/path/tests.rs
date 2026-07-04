@@ -342,10 +342,7 @@ fn degenerate_clothoid_non_orthonormal_basis_fails() {
 
 #[test]
 fn virtual_move_valid_with_follower() {
-    let followers = vec![FollowerDemand {
-        axis_index: 3,
-        ratio: 0.5,
-    }];
+    let followers = vec![FollowerDemand::constant(3, 0.5)];
     let path = PathSegment::try_new_virtual(followers, 10.0).unwrap();
     assert!(path.virtual_path_mm.is_some());
     assert_eq!(path.s_len(), 10.0);
@@ -360,10 +357,7 @@ fn virtual_move_empty_followers_fails_zero_motion() {
 
 #[test]
 fn virtual_move_zero_virtual_path_fails() {
-    let followers = vec![FollowerDemand {
-        axis_index: 3,
-        ratio: 0.5,
-    }];
+    let followers = vec![FollowerDemand::constant(3, 0.5)];
     let result = PathSegment::try_new_virtual(followers, 0.0);
     assert_eq!(
         result,
@@ -375,10 +369,7 @@ fn virtual_move_zero_virtual_path_fails() {
 
 #[test]
 fn virtual_move_negative_virtual_path_fails() {
-    let followers = vec![FollowerDemand {
-        axis_index: 3,
-        ratio: 0.5,
-    }];
+    let followers = vec![FollowerDemand::constant(3, 0.5)];
     let result = PathSegment::try_new_virtual(followers, -5.0);
     assert_eq!(
         result,
@@ -399,15 +390,12 @@ fn path_segment_try_new_line_valid() {
 #[test]
 fn path_segment_with_followers_validates_ratio() {
     let line = Line::try_new([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]).unwrap();
-    let bad_followers = vec![FollowerDemand {
-        axis_index: 3,
-        ratio: 0.0,
-    }];
+    let bad_followers = vec![FollowerDemand::constant(3, 0.0)];
     let result = PathSegment::try_new(Segment::Line(line), bad_followers);
     assert_eq!(
         result,
         Err(GeometryError::FollowerInvariantViolation {
-            reason: "follower ratio must be finite and nonzero"
+            reason: "follower ratio must be nonzero"
         })
     );
 }
@@ -416,14 +404,8 @@ fn path_segment_with_followers_validates_ratio() {
 fn path_segment_with_duplicate_followers_fails() {
     let line = Line::try_new([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]).unwrap();
     let dup_followers = vec![
-        FollowerDemand {
-            axis_index: 3,
-            ratio: 0.5,
-        },
-        FollowerDemand {
-            axis_index: 3,
-            ratio: -0.5,
-        },
+        FollowerDemand::constant(3, 0.5),
+        FollowerDemand::constant(3, -0.5),
     ];
     let result = PathSegment::try_new(Segment::Line(line), dup_followers);
     assert_eq!(

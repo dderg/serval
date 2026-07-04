@@ -134,10 +134,10 @@ fn corexy_x_slot_is_x_plus_y() {
         .find(|m| m.key == AxisKey { mcu_id: 1, axis: 0 })
         .expect("motor-A (AXIS_X slot) must be present");
 
-    let last_coeff = a.pieces.last().unwrap().0.coeffs[3];
+    let last_pos = a.pieces.last().unwrap().0.pos_end();
     assert!(
-        (last_coeff - 14.0_f32).abs() < 1e-3,
-        "motor-A endpoint coefficient expected ≈14, got {last_coeff}"
+        (last_pos - 14.0_f32).abs() < 1e-3,
+        "motor-A endpoint expected ≈14, got {last_pos}"
     );
 
     let b = msgs
@@ -145,37 +145,45 @@ fn corexy_x_slot_is_x_plus_y() {
         .find(|m| m.key == AxisKey { mcu_id: 1, axis: 1 })
         .expect("motor-B (AXIS_Y slot) must be present");
 
-    let b_last = b.pieces.last().unwrap().0.coeffs[3];
+    let b_last = b.pieces.last().unwrap().0.pos_end();
     assert!(
         (b_last - 6.0_f32).abs() < 1e-3,
-        "motor-B endpoint coefficient expected ≈6, got {b_last}"
+        "motor-B endpoint expected ≈6, got {b_last}"
     );
 }
 
 #[test]
 fn subdivide_preserves_curve_and_continuity() {
-    let coeffs = [1.0_f64, 4.0, 2.0, 8.0];
-    let pieces = subdivide_bernstein(coeffs, 0.2, 0.025);
+    let bern = [1.0_f64, 4.0, 2.0, 8.0];
+    let d = 0.2_f64;
+    let mono = [
+        bern[0],
+        3.0 * (bern[1] - bern[0]) / d,
+        3.0 * (bern[2] - 2.0 * bern[1] + bern[0]) / d.powi(2),
+        (bern[3] - 3.0 * bern[2] + 3.0 * bern[1] - bern[0]) / d.powi(3),
+    ];
+    let pieces = subdivide_monomial(&mono, d, 0.025);
     assert_eq!(pieces.len(), 8);
     let total: f64 = pieces.iter().map(|(_, d)| *d).sum();
-    assert!((total - 0.2).abs() < 1e-12);
+    assert!((total - d).abs() < 1e-12);
+
+    let horner = |c: &[f64], tau: f64| c.iter().rev().fold(0.0_f64, |acc, &x| acc * tau + x);
+
     for w in pieces.windows(2) {
-        assert!((w[0].0[3] - w[1].0[0]).abs() < 1e-12);
+        let (c0, d0) = w[0].clone();
+        let (c1, _) = w[1].clone();
+        assert!((horner(&c0, d0) - horner(&c1, 0.0)).abs() < 1e-9);
     }
-    let eval = |c: &[f64; 4], u: f64| {
-        let v = 1.0 - u;
-        c[0] * v * v * v + 3.0 * c[1] * v * v * u + 3.0 * c[2] * v * u * u + c[3] * u * u * u
-    };
     for s in [0.0, 0.07, 0.13, 0.2] {
-        let direct = eval(&coeffs, s / 0.2);
+        let direct = horner(&mono, s);
         let mut acc = 0.0;
         let mut found = None;
-        for (c, d) in &pieces {
-            if s <= acc + d + 1e-12 {
-                found = Some(eval(c, ((s - acc) / d).clamp(0.0, 1.0)));
+        for (c, dur) in &pieces {
+            if s <= acc + dur + 1e-12 {
+                found = Some(horner(c, (s - acc).clamp(0.0, *dur)));
                 break;
             }
-            acc += d;
+            acc += dur;
         }
         assert!((found.unwrap() - direct).abs() < 1e-9);
     }
@@ -183,7 +191,7 @@ fn subdivide_preserves_curve_and_continuity() {
 
 #[test]
 fn short_pieces_pass_through_unsplit() {
-    let pieces = subdivide_bernstein([0.0, 1.0, 2.0, 3.0], 0.02, 0.025);
+    let pieces = subdivide_monomial(&[0.0, 1.0, 2.0, 3.0], 0.02, 0.025);
     assert_eq!(pieces.len(), 1);
 }
 
@@ -317,9 +325,11 @@ fn constant_follower_axis_merges_all_knots_to_one_piece() {
         "merged duration must equal sum of knot durations {total}, got {}",
         piece.duration
     );
+    assert_eq!(piece.coeff_count, 1, "merged constant run must be degree 0");
     assert!(
-        piece.coeffs.iter().all(|&c| (c - 5.0_f32).abs() < 1e-5),
-        "all coefficients must equal the constant value 5.0"
+        (piece.coeffs[0] - 5.0_f32).abs() < 1e-5,
+        "constant coefficient must equal 5.0, got {}",
+        piece.coeffs[0]
     );
 }
 
@@ -456,8 +466,9 @@ fn constant_runs_at_different_values_do_not_merge_across_motion_boundary() {
     );
 
     assert!(
-        pb.coeffs.windows(2).all(|w| (w[0] - w[1]).abs() > 1e-5),
-        "middle piece (transition) must not be constant"
+        pb.coeff_count > 1,
+        "middle piece (transition) must not be constant, got coeff_count={}",
+        pb.coeff_count
     );
     assert!(
         (pb.duration as f64 - dur).abs() < 1e-9,
@@ -525,15 +536,16 @@ fn constant_run_subdivides_under_max_piece_secs_after_merging() {
     );
     for (p, _) in &axis.pieces {
         assert!(p.duration as f64 <= max_piece + 1e-6);
-        assert!(p.coeffs.iter().all(|&c| (f64::from(c) - 3.0).abs() < 1e-6));
+        assert_eq!(p.coeff_count, 1, "constant sub-piece must be degree 0");
+        assert!((f64::from(p.coeffs[0]) - 3.0).abs() < 1e-6);
     }
 }
 
 #[test]
 fn constant_at_or_under_max_piece_secs_stays_whole() {
-    let subs = subdivide_bernstein([2.0; 4], 0.020, 0.025);
+    let subs = subdivide_monomial(&[2.0], 0.020, 0.025);
     assert_eq!(subs.len(), 1);
-    assert_eq!(subs[0], ([2.0; 4], 0.020));
+    assert_eq!(subs[0], (vec![2.0], 0.020));
 }
 
 fn shifted_axis(pieces_bern: &[([f64; 4], f64)], u_base: f64) -> ScalarNurbs<f64> {
@@ -747,11 +759,11 @@ fn overlay_pieces_are_relativized_to_start_at_zero() {
     );
     let overlay_piece = &overlay_msgs[0].pieces[0].0;
     assert!(
-        overlay_piece.coeffs[0].abs() < 1e-6,
+        overlay_piece.pos_start().abs() < 1e-6,
         "overlay piece must start at 0, got {}",
-        overlay_piece.coeffs[0]
+        overlay_piece.pos_start()
     );
-    let span = overlay_piece.coeffs[3] - overlay_piece.coeffs[0];
+    let span = overlay_piece.pos_end() - overlay_piece.pos_start();
     let expected_span = (b3 - b0) as f32;
     assert!(
         (span - expected_span).abs() < 1e-5,
@@ -770,14 +782,14 @@ fn overlay_pieces_are_relativized_to_start_at_zero() {
     );
     let normal_piece = &normal_msgs[0].pieces[0].0;
     assert!(
-        (normal_piece.coeffs[0] - b0 as f32).abs() < 1e-5,
+        (normal_piece.pos_start() - b0 as f32).abs() < 1e-5,
         "normal piece must keep absolute b0={b0}, got {}",
-        normal_piece.coeffs[0]
+        normal_piece.pos_start()
     );
     assert!(
-        (normal_piece.coeffs[3] - b3 as f32).abs() < 1e-5,
+        (normal_piece.pos_end() - b3 as f32).abs() < 1e-5,
         "normal piece must keep absolute b3={b3}, got {}",
-        normal_piece.coeffs[3]
+        normal_piece.pos_end()
     );
 }
 
@@ -838,7 +850,7 @@ fn overlay_multi_piece_cumulative_positions_produce_individual_spans() {
 
     let spans: Vec<f32> = all_pieces
         .iter()
-        .map(|(p, _)| p.coeffs[3] - p.coeffs[0])
+        .map(|(p, _)| p.pos_end() - p.pos_start())
         .collect();
     let expected = [accel_end as f32, cruise_span as f32, decel_span as f32];
 
@@ -847,7 +859,7 @@ fn overlay_multi_piece_cumulative_positions_produce_individual_spans() {
             (got - exp).abs() < 1e-5,
             "piece {i} span must be {exp}, got {got}"
         );
-        let b0 = all_pieces[i].0.coeffs[0];
+        let b0 = all_pieces[i].0.pos_start();
         assert!(
             b0.abs() < 1e-6,
             "piece {i} must start at 0 (relativized), got b0={b0}"

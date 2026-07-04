@@ -12,6 +12,7 @@ fn cfg() -> StreamConfig {
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
         fit_tol_mm: 1e-3,
+        fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 64,
         limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
     }
@@ -40,6 +41,7 @@ fn cfg_bench() -> StreamConfig {
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
         fit_tol_mm: 0.005,
+        fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 512,
         limits: VelocityLimits::try_new(100.0, 1000.0, 5.0, 1_000_000.0).unwrap(),
     }
@@ -86,7 +88,10 @@ fn replay(
     run_lowerer(
         planned_rx,
         lowered_tx,
-        config.fit_tol_mm,
+        FitTol {
+            pos_mm: config.fit_tol_mm,
+            accel_mm_s2: config.fit_tol_accel_mm_s2,
+        },
         chains.clone(),
         home.to_vec(),
         t_start,
@@ -416,6 +421,74 @@ fn extrusion_is_conserved_and_continuous_across_blends() {
     );
 }
 
+fn axis_velocity(seg: &ShapedSegment, axis: usize, t: f64) -> f64 {
+    let h = 1e-6;
+    (eval(&seg.axes[axis], t + h) - eval(&seg.axes[axis], t - h)) / (2.0 * h)
+}
+
+#[test]
+fn extrusion_velocity_is_continuous_across_a_ramped_blend() {
+    // A shallow corner between two legs at different extrusion ratios (0.20 vs
+    // ~0.24, under the gate) blends and cruises near feedrate. The extrusion ramp
+    // keeps ė continuous: with the old constant-ratio halves the blend midpoint
+    // would step by (Δratio)·v ≈ 3 mm/s at this speed. Every interior E-axis seam
+    // stays well under that.
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 8.0),
+        line(2, [40.0, 0.0, 0.0], [80.0, 4.0, 0.0], 9.65),
+    ];
+    let segs = replay(
+        cfg(),
+        AxisChainSet::default(),
+        &[0.0, 0.0, 0.0, 0.0],
+        0.0,
+        &moves,
+    );
+    assert!(segs.len() > 2, "expected a rounded (multi-piece) corner");
+    let mut worst = 0.0_f64;
+    for w in segs.windows(2) {
+        let spatial = boundary_speed(&w[0], &w[1]);
+        assert!(
+            spatial > 1.0,
+            "corner stopped ({spatial} mm/s): not blended"
+        );
+        let jump =
+            (axis_velocity(&w[1], 3, w[1].t_start) - axis_velocity(&w[0], 3, w[0].t_end)).abs();
+        worst = worst.max(jump);
+    }
+    assert!(
+        worst < 1.0,
+        "extrusion velocity discontinuous across blend: {worst} mm/s"
+    );
+    let last = segs.last().unwrap();
+    assert!((eval(&last.axes[3], last.t_end) - 17.65).abs() < 1e-3);
+}
+
+#[test]
+fn abrupt_extrusion_step_rests_at_the_seam() {
+    // Legs at 0.10 vs 0.30 extrusion ratio — above the gate. The corner is left
+    // unblended, so the toolhead comes to rest across the seam.
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 5.0),
+        line(2, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 15.0),
+    ];
+    let segs = replay(
+        cfg(),
+        AxisChainSet::default(),
+        &[0.0, 0.0, 0.0, 0.0],
+        0.0,
+        &moves,
+    );
+    let min_seam = segs
+        .windows(2)
+        .map(|w| boundary_speed(&w[0], &w[1]))
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        min_seam < 1e-2,
+        "abrupt extrusion step should rest at the seam, min seam speed {min_seam}"
+    );
+}
+
 #[test]
 fn odometer_accumulates_extrusion_across_emissions() {
     let moves = [
@@ -577,4 +650,102 @@ fn smooth_shaper_first_emission_after_nonzero_start_time_is_valid() {
     let moves = [line(1, [0.0, 0.0, 0.0], [20.0, 0.0, 0.0], 0.0)];
     let segs = replay(cfg(), smooth_x_chains(18.0), &[0.0, 0.0, 0.0], 5.0, &moves);
     assert_eq!(segs[0].t_start, 5.0);
+}
+
+const NEPTUNE_SCV25_FILLET: [(f64, f64, f64); 7] = [
+    (124.102, 100.688, 0.01272),
+    (124.102, 101.679, 0.03333),
+    (124.13, 101.951, 0.00921),
+    (124.178, 102.09, 0.00494),
+    (122.055, 101.676, 0.07276),
+    (121.2, 100.821, 0.04068),
+    (120.826, 98.898, 0.0659),
+];
+
+#[test]
+fn arc_run_into_sharp_corner_stays_contiguous_at_high_scv() {
+    // Voron cube Z6.2 fillet slice that crashed the Neptune bench mid-print:
+    // with arc fitting enabled and square_corner_velocity raised to 25, the
+    // fitter emitted a 0.27mm gap between the corner blend leaving the fitted
+    // run and the following long line, tripping the TravelAligningSender
+    // contiguity assert.
+    let limits = VelocityLimits::try_new(100.0, 1000.0, 25.0, 1_000_000.0).unwrap();
+    let config = StreamConfig {
+        chain: ChainFitConfig::with_arc_fit(3),
+        integration_tol: 1e-4,
+        max_extrude_only_velocity_mm_s: f64::INFINITY,
+        max_extrude_only_accel_mm_s2: f64::INFINITY,
+        fit_tol_mm: 0.005,
+        fit_tol_accel_mm_s2: 50.0,
+        max_buffer_moves: 512,
+        limits,
+    };
+    let mut prev = [124.155, 100.313, 0.0];
+    let mut moves = Vec::new();
+    for (i, (x, y, e)) in NEPTUNE_SCV25_FILLET.into_iter().enumerate() {
+        let end = [x, y, 0.0];
+        let ctx = MoveContext {
+            extruder_axis: 3,
+            feedrate_mm_s: 80.0,
+            limits,
+            source: SourceRange {
+                start_line: i as u32 + 1,
+                end_line: i as u32 + 1,
+            },
+        };
+        moves.push(line_move(prev, end, e, ctx).unwrap());
+        prev = end;
+    }
+    let home = vec![124.155, 100.313, 0.0, 0.0];
+    let segs = replay(config, AxisChainSet::default(), &home, 0.0, &moves);
+    assert!(!segs.is_empty());
+    assert_position_contiguous(&segs);
+}
+
+#[test]
+fn blends_consuming_a_full_arc_emit_no_degenerate_remainder() {
+    // From the same print at SCV 25, one layer up: the corner blends at both
+    // ends of a short fitted arc consume its entire length. The remainder
+    // (2e-16 mm) must be skipped, not emitted — the planner rejects segments
+    // at or below its 1e-9 mm length epsilon.
+    let limits = VelocityLimits::try_new(100.0, 1000.0, 25.0, 1_000_000.0).unwrap();
+    let config = StreamConfig {
+        chain: ChainFitConfig::with_arc_fit(3),
+        integration_tol: 1e-4,
+        max_extrude_only_velocity_mm_s: f64::INFINITY,
+        max_extrude_only_accel_mm_s2: f64::INFINITY,
+        fit_tol_mm: 0.005,
+        fit_tol_accel_mm_s2: 50.0,
+        max_buffer_moves: 512,
+        limits,
+    };
+    let points = [
+        (118.225, 104.096, 0.0, 150.0),
+        (118.295, 103.844, 0.00878, 98.87),
+        (118.314, 103.664, 0.00609, 98.87),
+        (118.315, 102.438, 0.04125, 98.87),
+        (121.855, 98.898, 0.16839, 98.87),
+        (126.102, 98.898, 0.14286, 98.87),
+        (118.153, 106.847, 0.37817, 98.87),
+    ];
+    let mut prev = [114.719, 104.739, 0.0];
+    let mut moves = Vec::new();
+    for (i, (x, y, e, feed)) in points.into_iter().enumerate() {
+        let end = [x, y, 0.0];
+        let ctx = MoveContext {
+            extruder_axis: 3,
+            feedrate_mm_s: feed,
+            limits,
+            source: SourceRange {
+                start_line: i as u32 + 1,
+                end_line: i as u32 + 1,
+            },
+        };
+        moves.push(line_move(prev, end, e, ctx).unwrap());
+        prev = end;
+    }
+    let home = vec![114.719, 104.739, 0.0, 0.0];
+    let segs = replay(config, AxisChainSet::default(), &home, 0.0, &moves);
+    assert!(!segs.is_empty());
+    assert_position_contiguous(&segs);
 }

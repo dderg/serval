@@ -78,7 +78,13 @@ fn schedule_resends_orphan_when_retired_overtook_pushed() {
     queues.insert(key, q);
 
     const MAX_PER_FRAME: usize = 32;
-    match schedule(&queues, MAX_PER_FRAME, |_, _| None, |_| usize::MAX) {
+    match schedule(
+        &queues,
+        MAX_PER_FRAME,
+        usize::MAX,
+        |_, _| None,
+        |_| usize::MAX,
+    ) {
         Schedule::Send(frames) => {
             assert_eq!(frames.len(), 1, "exactly the inverted axis is scheduled");
             assert_eq!(frames[0].key, key);
@@ -187,10 +193,8 @@ fn make_piece(t: u64) -> (PieceEntry, f64) {
     (
         PieceEntry {
             start_time: t,
-            coeffs: [0.0; 4],
             duration: 0.001,
-            motor_mask: 0,
-            _reserved: [0; 3],
+            ..PieceEntry::zeroed()
         },
         t as f64,
     )
@@ -276,13 +280,27 @@ fn run_pump_sets_start_slot_from_cursor_and_advances_it() {
 }
 
 fn make_piece_pos(t: u64, mask: u8, c0: f32, c3: f32) -> (PieceEntry, f64) {
+    let d = 0.001_f64;
+    let (b0, b1, b2, b3) = (c0 as f64, c0 as f64, c3 as f64, c3 as f64);
+    let mono = [
+        b0,
+        3.0 * (b1 - b0) / d,
+        3.0 * (b2 - 2.0 * b1 + b0) / (d * d),
+        (b3 - 3.0 * b2 + 3.0 * b1 - b0) / (d * d * d),
+    ];
+    let cheb = nurbs::chebyshev::monomial_tau_to_chebyshev(&mono, d);
+    let mut coeffs = [0.0_f32; runtime::piece_ring::MAX_PIECE_COEFFS];
+    for (dst, src) in coeffs.iter_mut().zip(&cheb) {
+        *dst = *src as f32;
+    }
     (
         PieceEntry {
             start_time: t,
-            coeffs: [c0, c0, c3, c3],
-            duration: 0.001,
+            duration: d as f32,
             motor_mask: mask,
-            _reserved: [0; 3],
+            coeff_count: cheb.len() as u8,
+            coeffs,
+            ..PieceEntry::zeroed()
         },
         t as f64,
     )
@@ -412,16 +430,15 @@ fn flush_clears_queued_pieces_and_junctions() {
         key,
         pieces: (0u64..4)
             .map(|i| {
-                (
-                    PieceEntry {
-                        start_time: gated_tick + i,
-                        coeffs: [0.0; 4],
-                        duration: 0.001,
-                        motor_mask: 0,
-                        _reserved: [0; 3],
-                    },
-                    (gated_tick + i) as f64,
-                )
+                let mut p = PieceEntry {
+                    start_time: gated_tick + i,
+                    duration: 0.001,
+                    ..PieceEntry::zeroed()
+                };
+                // Distinct hold values so enqueue's hold merging cannot
+                // coalesce the gated pieces this test counts one by one.
+                p.coeffs[0] = 1.0 + i as f32;
+                (p, (gated_tick + i) as f64)
             })
             .collect(),
         fresh_stream: true,
@@ -444,10 +461,8 @@ fn flush_clears_queued_pieces_and_junctions() {
                 // A deliverable "now" probe (== the advanced clock), not a stale
                 // past piece — the pump's in-past guard aborts on past start_times.
                 start_time: gated_tick + 1_000,
-                coeffs: [0.0; 4],
                 duration: 0.001,
-                motor_mask: 0,
-                _reserved: [0; 3],
+                ..PieceEntry::zeroed()
             },
             (gated_tick + 1_000) as f64,
         )],
@@ -518,16 +533,15 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
         key,
         pieces: (0u64..4)
             .map(|i| {
-                (
-                    PieceEntry {
-                        start_time: gated_tick + i,
-                        coeffs: [0.0; 4],
-                        duration: 0.001,
-                        motor_mask: 0,
-                        _reserved: [0; 3],
-                    },
-                    (gated_tick + i) as f64,
-                )
+                let mut p = PieceEntry {
+                    start_time: gated_tick + i,
+                    duration: 0.001,
+                    ..PieceEntry::zeroed()
+                };
+                // Distinct hold values so enqueue's hold merging cannot
+                // coalesce the gated pieces this test counts one by one.
+                p.coeffs[0] = 1.0 + i as f32;
+                (p, (gated_tick + i) as f64)
             })
             .collect(),
         fresh_stream: true,
@@ -548,10 +562,8 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
                 // A deliverable "now" probe (== the advanced clock), not a stale
                 // past piece — the pump's in-past guard aborts on past start_times.
                 start_time: gated_tick + 1_000,
-                coeffs: [0.0; 4],
                 duration: 0.001,
-                motor_mask: 0,
-                _reserved: [0; 3],
+                ..PieceEntry::zeroed()
             },
             (gated_tick + 1_000) as f64,
         )],

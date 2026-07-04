@@ -19,7 +19,7 @@ pub use junction::{
     JUNCTION_POSITION_FATAL_MM, JUNCTION_POSITION_LOG_MM, JunctionSeam, JunctionTracker,
     junction_jumps,
 };
-pub use sched::{AxisFrame, AxisQueue, FramePlan, Schedule, schedule};
+pub use sched::{AxisFrame, AxisQueue, FramePlan, Schedule, append_pieces_merging_holds, schedule};
 #[cfg(test)]
 pub(crate) use wire_sink::pushpieces_retransmit_serial;
 pub use wire_sink::{McuTransport, WireSink};
@@ -136,13 +136,21 @@ pub const PUMP_DATA_CHANNEL_CAP: usize = 1024;
 // shared channel — starving the cohort floor and freezing the planner on the
 // full channel. Drip is finite, so greedy draining is safe there.
 //
-// Sized several times the total MCU ring cache (≈1024 pieces/MCU): the host
-// staging buffer must be DEEPER than the MCU rings, or the pump throttles the
-// planner before the frontier is deep enough to absorb host scheduling gaps —
-// the playhead then overruns the committed end (anchor_underrun → drive fault).
-const PUMP_INTAKE_BACKLOG_CAP: u64 = 16384;
+// Sized ≈4× a typical MCU ring (an F407 ring holds ~1877 pieces), roughly
+// 5–15 s of typical motion: the host staging buffer must be DEEPER than the
+// MCU rings, or the pump throttles the planner before the frontier is deep
+// enough to absorb host scheduling gaps — the playhead then overruns the
+// committed end (anchor_underrun → drive fault).
+const PUMP_INTAKE_BACKLOG_CAP: u64 = 8192;
 
 const MAX_PER_FRAME: usize = 32;
+
+// A PushPieces bundle occupies the serial line for its whole wire length
+// (~20 ms/KiB at 500 kbaud) while its front piece's arrival lead keeps
+// draining, so the cap must be in bytes — variable-degree entries span
+// 20..=48 B and a count cap is wrong at both ends. send_ready() loops until
+// Idle, so this bounds per-transaction latency, not throughput.
+const BUNDLE_WIRE_BYTE_BUDGET: usize = 1024;
 
 fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
     let staged: u64 = queues.values().map(|q| q.pieces.len() as u64).sum();
@@ -319,12 +327,23 @@ where
             }
         }
         let ring_depth = (self.ring_depth_of)(key);
+        // Hold merging is off during drip cohorts: their release floor is
+        // piece-count-based and coalescing would starve it. Without a synced
+        // clock there is no freq to prove seam contiguity, so append as-is.
+        let hold_merge_freq = if self.cohort.is_none() {
+            (self.mcu_clock_of)(key.mcu_id).map(|(_, freq)| freq)
+        } else {
+            None
+        };
         let q = self
             .queues
             .entry(key)
             .or_insert_with(|| AxisQueue::new(ring_depth));
         q.lead_secs = lead_secs;
-        q.pieces.extend(pieces);
+        match hold_merge_freq {
+            Some(freq) => append_pieces_merging_holds(&mut q.pieces, pieces, freq, !fresh_stream),
+            None => q.pieces.extend(pieces),
+        }
     }
 
     fn horizon_of(&self, k: &AxisKey, q: &AxisQueue) -> Option<u64> {
@@ -431,7 +450,13 @@ where
         loop {
             let sched = {
                 let hz_of = |k: &AxisKey, q: &AxisQueue| self.horizon_of(k, q);
-                schedule(&self.queues, MAX_PER_FRAME, hz_of, |_| usize::MAX)
+                schedule(
+                    &self.queues,
+                    MAX_PER_FRAME,
+                    BUNDLE_WIRE_BYTE_BUDGET,
+                    hz_of,
+                    |_| usize::MAX,
+                )
             };
             match sched {
                 Schedule::Idle => break,

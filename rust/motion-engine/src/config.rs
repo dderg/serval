@@ -393,6 +393,7 @@ pub struct PlannerConfig {
     pub max_extrude_only_velocity: Option<f64>,
     pub max_extrude_only_accel: Option<f64>,
     pub fit_tolerance_mm: f64,
+    pub fit_tolerance_accel_mm_s2: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -438,11 +439,13 @@ impl CartesianLimits {
         let ok = |c: f64| c.is_finite() && c > 0.0;
         if !(ok(self.max_velocity)
             && ok(self.max_accel)
-            && ok(self.max_jerk)
             && ok(self.max_z_velocity)
             && ok(self.max_z_accel))
         {
             return Err("[printer] motion limits must be finite and positive");
+        }
+        if !(self.max_jerk > 0.0) {
+            return Err("[printer] max_jerk must be positive (infinity disables jerk limiting)");
         }
         if !(self.square_corner_velocity.is_finite() && self.square_corner_velocity >= 0.0) {
             return Err("[printer] square_corner_velocity must be finite and non-negative");
@@ -515,6 +518,7 @@ impl Default for PlannerConfig {
             max_extrude_only_velocity: None,
             max_extrude_only_accel: None,
             fit_tolerance_mm: 0.005,
+            fit_tolerance_accel_mm_s2: 50.0,
         }
     }
 }

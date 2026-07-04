@@ -19,6 +19,8 @@ fn build_planner_config(
     arc_fit: Option<u32>,
     max_extrude_only_velocity: Option<f64>,
     max_extrude_only_accel: Option<f64>,
+    fit_tolerance_mm: Option<f64>,
+    fit_tolerance_accel_mm_s2: Option<f64>,
 ) -> PyResult<config::PlannerConfig> {
     let axis_registry = config::AxisRegistry::try_new(
         axes.into_iter()
@@ -88,6 +90,22 @@ fn build_planner_config(
         }
     }
 
+    if let Some(v) = fit_tolerance_mm {
+        if !(v.is_finite() && v > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "[printer] max_path_deviation must be finite and positive, got {v}"
+            )));
+        }
+    }
+
+    if let Some(v) = fit_tolerance_accel_mm_s2 {
+        if !(v > 0.0) {
+            return Err(PyValueError::new_err(format!(
+                "[printer] max_accel_deviation must be positive, got {v}"
+            )));
+        }
+    }
+
     let mut cfg = config::PlannerConfig::default();
     cfg.axis_registry = axis_registry;
     cfg.limit_sections = limit_sections;
@@ -95,6 +113,12 @@ fn build_planner_config(
     cfg.post_processors = post_processor_set;
     cfg.max_extrude_only_velocity = max_extrude_only_velocity;
     cfg.max_extrude_only_accel = max_extrude_only_accel;
+    if let Some(v) = fit_tolerance_mm {
+        cfg.fit_tolerance_mm = v;
+    }
+    if let Some(v) = fit_tolerance_accel_mm_s2 {
+        cfg.fit_tolerance_accel_mm_s2 = v;
+    }
     cfg.chain = match arc_fit {
         Some(min_run_facets) => {
             if min_run_facets < 3 {
@@ -162,6 +186,8 @@ impl PyMotionEngine {
         arc_fit = None,
         max_extrude_only_velocity = None,
         max_extrude_only_accel = None,
+        fit_tolerance_mm = None,
+        fit_tolerance_accel_mm_s2 = None,
     ))]
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn init_planner(
@@ -175,6 +201,8 @@ impl PyMotionEngine {
         arc_fit: Option<u32>,
         max_extrude_only_velocity: Option<f64>,
         max_extrude_only_accel: Option<f64>,
+        fit_tolerance_mm: Option<f64>,
+        fit_tolerance_accel_mm_s2: Option<f64>,
     ) -> PyResult<()> {
         if self
             .planner
@@ -194,6 +222,8 @@ impl PyMotionEngine {
             arc_fit,
             max_extrude_only_velocity,
             max_extrude_only_accel,
+            fit_tolerance_mm,
+            fit_tolerance_accel_mm_s2,
         )?;
         *self
             .planner_config
@@ -221,6 +251,11 @@ impl PyMotionEngine {
 
         Ok(())
     }
+    /// Push one move into the pipe. Returns `false` when the pipe is full —
+    /// queued motion has reached the configured depth, or the entry channel
+    /// itself is full — in which case nothing was consumed and the caller
+    /// retries after yielding. This return value is the host's entire feed
+    /// throttle: the reader pushes as much as fits, the pipe defines "fits".
     #[pyo3(signature = (dx, dy, dz, de, feedrate))]
     fn submit_move(
         &self,
@@ -230,18 +265,18 @@ impl PyMotionEngine {
         dz: f64,
         de: f64,
         feedrate: f64,
-    ) -> PyResult<()> {
-        tracing::info!(
-            subsystem = "motion",
-            event = "submit_move_enter",
-            dx,
-            dy,
-            dz,
-            de,
-            feedrate,
-            "engine.submit_move enter"
-        );
-        py.detach(|| -> PyResult<()> {
+    ) -> PyResult<bool> {
+        py.detach(|| -> PyResult<bool> {
+            tracing::info!(
+                subsystem = "motion",
+                event = "submit_move_enter",
+                dx,
+                dy,
+                dz,
+                de,
+                feedrate,
+                "engine.submit_move enter"
+            );
             let followers = self.e_followers(de)?;
             let (extruder_axis, e_delta) = match followers.as_slice() {
                 [] => (0usize, 0.0),
@@ -293,14 +328,17 @@ impl PyMotionEngine {
                 let planner = guard.as_ref().ok_or_else(|| {
                     PyRuntimeError::new_err("planner not initialized — call init_planner first")
                 })?;
-                planner.submit_move(m).map_err(planner_err)?;
+                match planner.submit_move(m) {
+                    Ok(()) => {}
+                    Err(crate::worker::StreamWorkerError::ChannelFull) => return Ok(false),
+                    Err(e) => return Err(planner_err(e)),
+                }
                 tracing::info!(
                     subsystem = "motion",
                     event = "intake_submit",
                     line_no,
                     channel_pending = planner.pending_channel_moves(),
-                    uncommitted_secs = planner.uncommitted_intake_secs(),
-                    "[intake] move pushed to channel; channel_pending grows when the planner thread can't pull (backpressure blind spot)"
+                    "[intake] move accepted into the pipe"
                 );
             }
 
@@ -309,9 +347,10 @@ impl PyMotionEngine {
             pos[1] += dy;
             pos[2] += dz;
             *self.last_g5_pq.lock().unwrap_or_else(|p| p.into_inner()) = None;
-            Ok(())
+            Ok(true)
         })
     }
+
     #[pyo3(signature = (i, j, p, q, dx, dy, dz, de, feedrate))]
     fn submit_bezier(
         &self,
@@ -839,6 +878,7 @@ impl PyMotionEngine {
                     .unwrap_or(f64::INFINITY),
                 max_extrude_only_accel_mm_s2: cfg.max_extrude_only_accel.unwrap_or(f64::INFINITY),
                 fit_tol_mm: cfg.fit_tolerance_mm,
+                fit_tol_accel_mm_s2: cfg.fit_tolerance_accel_mm_s2,
                 max_buffer_moves: STREAM_MAX_BUFFER_MOVES,
                 limits: geometry::VelocityLimits::try_new(
                     cart.max_velocity,

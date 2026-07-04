@@ -194,13 +194,6 @@ impl PyMotionEngine {
     fn input_channel_capacity(&self) -> u64 {
         crate::worker::INPUT_CHANNEL_CAP as u64
     }
-    fn uncommitted_intake_secs(&self) -> f64 {
-        self.planner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-            .map_or(0.0, |p| p.uncommitted_intake_secs())
-    }
     fn get_last_move_time(&self) -> f64 {
         match self
             .planner
@@ -212,31 +205,13 @@ impl PyMotionEngine {
             None => 0.0,
         }
     }
-    fn queued_motion_secs(&self) -> f64 {
-        let Some((last_move_time, uncommitted)) = ({
-            let planner = self.planner.lock().unwrap_or_else(|p| p.into_inner());
-            planner
-                .as_ref()
-                .map(|p| (p.last_move_time(), p.uncommitted_intake_secs()))
-        }) else {
-            return 0.0;
-        };
-        let anchored = self
-            .dispatch_anchor
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .t0();
-        let Some(t0) = anchored else {
-            return uncommitted.max(0.0);
-        };
-        let host_now = self
-            .router
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .host_now_secs();
-        ((t0 + last_move_time - host_now) + uncommitted).max(0.0)
+    pub(crate) fn queued_motion_secs(&self) -> f64 {
+        self.committed_lead_secs()
     }
     fn dispatched_lead_secs(&self) -> f64 {
+        self.committed_lead_secs()
+    }
+    pub(crate) fn committed_lead_secs(&self) -> f64 {
         let last_move_time = {
             let planner = self.planner.lock().unwrap_or_else(|p| p.into_inner());
             let Some(p) = planner.as_ref() else {
