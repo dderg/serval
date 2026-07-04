@@ -199,7 +199,9 @@ class CommandWrapper:
         if getattr(self._serial, "mcu", None) and getattr(
             self._serial.mcu, "_motion_engine", None
         ):
-            self._serial.send(_format_engine_msg(self._cmd, data), minclock)
+            self._serial.send(
+                _format_engine_msg(self._cmd, data), minclock, reqclock
+            )
         else:
             self._serial.raw_send(
                 self._cmd.encode(data), minclock, reqclock, self._cmd_queue
@@ -209,7 +211,9 @@ class CommandWrapper:
         if getattr(self._serial, "mcu", None) and getattr(
             self._serial.mcu, "_motion_engine", None
         ):
-            self._serial.send(_format_engine_msg(self._cmd, data), minclock)
+            self._serial.send(
+                _format_engine_msg(self._cmd, data), minclock, reqclock
+            )
         else:
             self._serial.raw_send_wait_ack(
                 self._cmd.encode(data), minclock, reqclock, self._cmd_queue

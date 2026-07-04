@@ -17,6 +17,13 @@ class error(Exception):
     pass
 
 
+# MCU timers compare 32-bit clocks: a waketime more than 2^31 ticks ahead of
+# the MCU's now reads as the past and trips "Timer too close".  Commands are
+# held host-side until within 2^30 ticks, deep inside the half-range on every
+# supported clock frequency.
+MCU_TIMER_HORIZON = 1 << 30
+
+
 class SerialReader:
     def __init__(self, reactor, warn_prefix="", mcu=None):
         self.reactor = reactor
@@ -594,6 +601,10 @@ class SerialReader:
         if engine is not None:
             if self._engine_detached:
                 return
+            if reqclock and self._held_until_timer_horizon(
+                msg, minclock, reqclock
+            ):
+                return
             handle = self.mcu._engine_handle
             try:
                 engine.engine_send(handle, msg)
@@ -611,6 +622,19 @@ class SerialReader:
                 reqclock,
                 0,
             )
+
+    def _held_until_timer_horizon(self, msg, minclock, reqclock):
+        clocksync = self.mcu._clocksync
+        est_clock = clocksync.get_clock(self.reactor.monotonic())
+        if reqclock - est_clock <= MCU_TIMER_HORIZON:
+            return False
+        release_systime = clocksync.estimate_clock_systime(
+            reqclock - MCU_TIMER_HORIZON
+        )
+        self.reactor.register_callback(
+            lambda et: self.send(msg, minclock, reqclock), release_systime
+        )
+        return True
 
     def send_with_response(self, msg, response):
         engine = getattr(self.mcu, "_motion_engine", None)

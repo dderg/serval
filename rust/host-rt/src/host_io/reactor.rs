@@ -516,7 +516,8 @@ impl Reactor {
             None => return,
         };
 
-        let _ = router.promote_all(mcu, 0);
+        let ack_clock = router.compute_ack_clock(mcu).unwrap_or(0);
+        let _ = router.promote_all(mcu, ack_clock);
 
         loop {
             if self.unacked_window.is_full() {
