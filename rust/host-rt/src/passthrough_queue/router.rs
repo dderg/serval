@@ -163,11 +163,43 @@ impl PassthroughRouter {
         queue_id: CommandQueueId,
         entry: PassthroughEntry,
     ) -> Result<(), RouterError> {
+        self.note_if_late(mcu, &entry, "passthrough_pushed_late");
         let rec = self
             .mcus
             .get_mut(&mcu)
             .ok_or(RouterError::UnknownMcu(mcu))?;
         rec.state.push(queue_id, entry).map_err(RouterError::Push)
+    }
+
+    /// Warn when a timed command's req_clock is already behind the projected
+    /// MCU clock. Fired at push (klippy handed it over stale — scheduling
+    /// problem) and at emission (it aged in this queue — transport problem);
+    /// which one fires locates a "Timer too close" without guesswork.
+    fn note_if_late(&self, mcu: McuHandle, entry: &PassthroughEntry, event: &'static str) {
+        if entry.req_clock() == 0 || entry.is_background_priority() {
+            return;
+        }
+        let est_clock = self.compute_ack_clock(mcu).unwrap_or(0);
+        if est_clock == 0 || entry.req_clock() >= est_clock {
+            return;
+        }
+        let late_ticks = est_clock - entry.req_clock();
+        let freq = self.mcus.get(&mcu).map(|r| r.clock_freq).unwrap_or(0.0);
+        let late_ms = if freq > 0.0 {
+            late_ticks as f64 / freq * 1e3
+        } else {
+            0.0
+        };
+        tracing::warn!(
+            subsystem = "mcu-comms",
+            event,
+            cmd = entry.bytes().first().copied().unwrap_or(0),
+            req_clock = entry.req_clock(),
+            est_clock,
+            late_ticks,
+            late_ms,
+            "passthrough command req_clock is behind the projected MCU clock"
+        );
     }
 
     pub fn promote_all(&mut self, mcu: McuHandle, ack_clock: u64) -> Result<(), RouterError> {
@@ -183,14 +215,24 @@ impl PassthroughRouter {
         &mut self,
         mcu: McuHandle,
     ) -> Result<Option<PassthroughEntry>, RouterError> {
+        {
+            let rec = self.mcus.get(&mcu).ok_or(RouterError::UnknownMcu(mcu))?;
+            if !rec.window.can_emit() {
+                return Ok(None);
+            }
+        }
         let rec = self
             .mcus
             .get_mut(&mcu)
             .ok_or(RouterError::UnknownMcu(mcu))?;
-        if !rec.window.can_emit() {
-            return Ok(None);
-        }
         let entry = rec.state.pop_next();
+        if let Some(ref e) = entry {
+            self.note_if_late(mcu, e, "passthrough_emitted_late");
+        }
+        let rec = self
+            .mcus
+            .get_mut(&mcu)
+            .ok_or(RouterError::UnknownMcu(mcu))?;
         if let Some(ref e) = entry {
             rec.was_non_empty = true;
             let bytes_len = e.bytes().len() as u64;

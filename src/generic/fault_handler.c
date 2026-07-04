@@ -364,6 +364,8 @@ diag_get_tx_drops_klipper(void)
     return diag.tx_drops_klipper;
 }
 
+static uint32_t boot_tick_initialized;
+
 void
 diag_tim5_account(uint32_t enter_cycles, uint32_t exit_cycles)
 {
@@ -421,6 +423,11 @@ diag_tim5_account(uint32_t enter_cycles, uint32_t exit_cycles)
     // A task/message that never returns is invisible to the foreground enter
     // hooks (they only close completed work), so promote the in-progress task
     // and message growing durations into their worst slots here each tick.
+    // Not before boot init: a cur_task/cur_msg left open by a reset-command
+    // reboot persists in this RAM, and timing it against the fresh (near-zero)
+    // clock caps worst_msg_cyc with garbage before report_task zeroes it.
+    if (!boot_tick_initialized)
+        return;
     uint32_t mon_now = timer_read_time();
     if (live_snap.cur_task_func)
         diag_update_worst(&live_snap.worst_task_cyc, &live_snap.worst_task_func,
@@ -931,7 +938,6 @@ DECL_INIT(fault_handler_init);
 #include "board/misc.h"
 
 static uint32_t boot_first_tick;
-static uint32_t boot_tick_initialized;
 static uint32_t last_emit_tick;
 static uint32_t emits_done;
 static uint32_t reset_cause_snapshot;
