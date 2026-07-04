@@ -53,8 +53,62 @@ impl SerialFrameIo {
         }
     }
 
+    // A single stalled poll must not kill the session: the MCU buffers ~2 s of
+    // motion, and observed link stalls (~100 ms, self-healing) are far below
+    // that. Writes retry through transient TimedOut polls — each retry logged —
+    // and only a stall past WRITE_STALL_LIMIT is a transport fault.
+    const WRITE_STALL_LIMIT: Duration = Duration::from_millis(500);
+    const WRITE_POLL: Duration = Duration::from_millis(25);
+
     pub fn write_all(&mut self, bytes: &[u8]) -> Result<(), TransportError> {
-        self.port.write_all(bytes).map_err(TransportError::Io)
+        let deadline = Instant::now() + Self::WRITE_STALL_LIMIT;
+        if let Err(e) = self.port.set_timeout(Self::WRITE_POLL) {
+            return Err(TransportError::Io(io::Error::other(e.to_string())));
+        }
+        let mut off = 0;
+        let mut stalled_polls = 0u32;
+        while off < bytes.len() {
+            match io::Write::write(&mut self.port, &bytes[off..]) {
+                Ok(0) => {
+                    return Err(TransportError::Io(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "serial write returned 0 bytes",
+                    )));
+                }
+                Ok(n) => off += n,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::TimedOut
+                            | io::ErrorKind::Interrupted
+                            | io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    stalled_polls += 1;
+                    tracing::warn!(
+                        subsystem = "mcu-comms",
+                        event = "write_stall_retry",
+                        written = off,
+                        total = bytes.len(),
+                        stalled_polls,
+                        outq = ?self.port.bytes_to_write(),
+                        "serial write poll stalled; retrying within stall limit"
+                    );
+                    if Instant::now() >= deadline {
+                        return Err(TransportError::Io(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!(
+                                "serial write stalled past {:?}: {off}/{} bytes written",
+                                Self::WRITE_STALL_LIMIT,
+                                bytes.len()
+                            ),
+                        )));
+                    }
+                }
+                Err(e) => return Err(TransportError::Io(e)),
+            }
+        }
+        Ok(())
     }
 
     /// Bytes queued in the kernel tty out-buffer, not yet on the wire.
