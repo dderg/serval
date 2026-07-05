@@ -63,6 +63,6 @@ pub(crate) type EthercatDrive = (
 #[derive(Debug, Clone)]
 
 pub(crate) struct FlushWait {
-    pub(crate) rx: crossbeam_channel::Receiver<Option<std::time::Instant>>,
+    pub(crate) rx: Option<crossbeam_channel::Receiver<Option<std::time::Instant>>>,
     pub(crate) deadline: Option<std::time::Instant>,
 }

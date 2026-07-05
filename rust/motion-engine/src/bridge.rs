@@ -162,6 +162,7 @@ pub struct PyMotionEngine {
     homing_run: Arc<Mutex<Option<HomingRun>>>,
     pending_trip: Arc<Mutex<Option<(u32, u8, u64)>>>,
     pending_flushes: Mutex<HashMap<u64, FlushWait>>,
+    pending_drain_flush: Mutex<Option<crossbeam_channel::Receiver<Option<std::time::Instant>>>>,
     next_flush_id: std::sync::atomic::AtomicU64,
     // Monotonic id stamped on every streamed move as its `source.start_line`.
     // The continuity-commit drains the look-ahead buffer by line number
@@ -214,6 +215,7 @@ impl PyMotionEngine {
             homing_run: Arc::new(Mutex::new(None)),
             pending_trip: Arc::new(Mutex::new(None)),
             pending_flushes: Mutex::new(HashMap::new()),
+            pending_drain_flush: Mutex::new(None),
             next_flush_id: std::sync::atomic::AtomicU64::new(1),
             move_seq: std::sync::atomic::AtomicU64::new(0),
             homing_result: Mutex::new(None),

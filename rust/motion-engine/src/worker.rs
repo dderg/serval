@@ -376,6 +376,23 @@ impl StreamWorkerHandle {
     }
 
     /// Non-blocking: `ChannelFull` means the caller must retry after
+    /// yielding, exactly like `fence_start` — a blocking send here wedges
+    /// the klippy reactor for as long as the backpressured pipe takes to
+    /// admit one message.
+    pub fn flush_try_start(
+        &self,
+    ) -> Result<crossbeam_channel::Receiver<Option<Instant>>, StreamWorkerError> {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.sender
+            .try_send(StreamMsg::Flush { notify: tx })
+            .map_err(|e| match e {
+                TrySendError::Full(_) => StreamWorkerError::ChannelFull,
+                TrySendError::Disconnected(_) => StreamWorkerError::ChannelClosed,
+            })?;
+        Ok(rx)
+    }
+
+    /// Non-blocking: `ChannelFull` means the caller must retry after
     /// yielding. A blocking send here would freeze the klippy reactor thread
     /// (and with it the heater keepalives) for as long as the backpressured
     /// pipe takes to admit one message — seconds at full buffers.

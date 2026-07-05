@@ -788,6 +788,168 @@ fn pump_backlog_drains_to_zero_when_pushed() {
     handle.join().unwrap();
 }
 
+fn stalled_queue_pump<D>(
+    key: AxisKey,
+    retirement_stall_fatal: Duration,
+    on_drip_stall: D,
+) -> Pump<
+    NullSink,
+    impl Fn(AxisKey) -> u32,
+    impl Fn(u32) -> Option<(u64, f64)>,
+    impl Fn(AxisKey) + Send + 'static,
+    impl Fn(AxisKey, u32),
+    D,
+>
+where
+    D: Fn(String) + Send,
+{
+    let mut queues = BTreeMap::new();
+    let mut q = AxisQueue::new(1);
+    q.pushed = 1;
+    q.retired = 0;
+    q.pieces.push_back(make_piece(0));
+    queues.insert(key, q);
+    Pump {
+        queues,
+        junctions: JunctionTracker::default(),
+        cohort: None,
+        sink: NullSink,
+        ring_depth_of: |_key: AxisKey| 1,
+        mcu_clock_of: |_mcu: u32| None,
+        on_fatal_transport: |_: AxisKey| {},
+        on_abandon: |_: AxisKey, _: u32| {},
+        on_drip_stall,
+        backlog: Arc::new(AtomicU64::new(0)),
+        holding_ahead: false,
+        data_open: true,
+        last_stallfull_log: None,
+        retirement_stall_fatal,
+        stall_full_since: None,
+    }
+}
+
+#[test]
+fn retirement_stall_past_threshold_with_frozen_retired_escalates() {
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    let threshold = Duration::from_millis(50);
+    let escalated: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let escalated_cb = Arc::clone(&escalated);
+    let mut pump = stalled_queue_pump(key, threshold, move |msg: String| {
+        escalated_cb.lock().unwrap().push(msg)
+    });
+
+    assert_eq!(
+        pump.send_ready()
+            .expect("first stall observation is not fatal"),
+        false
+    );
+    assert!(escalated.lock().unwrap().is_empty());
+
+    std::thread::sleep(threshold * 2);
+
+    let result = pump.send_ready();
+    assert!(
+        result.is_err(),
+        "retired frozen past the threshold must escalate and stop the pump loop"
+    );
+    let msgs = escalated.lock().unwrap();
+    assert_eq!(msgs.len(), 1, "on_drip_stall must fire exactly once");
+    assert!(
+        msgs[0].contains("retirement stall"),
+        "escalation message should explain the retirement stall: {}",
+        msgs[0]
+    );
+}
+
+#[test]
+fn retirement_stall_resets_when_heartbeat_advances_retired() {
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    let threshold = Duration::from_millis(50);
+    let escalated: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let escalated_cb = Arc::clone(&escalated);
+    let mut pump = stalled_queue_pump(key, threshold, move |msg: String| {
+        escalated_cb.lock().unwrap().push(msg)
+    });
+    pump.queues.get_mut(&key).unwrap().ring_depth = 2;
+    pump.queues.get_mut(&key).unwrap().pushed = 2;
+
+    pump.send_ready().unwrap();
+    let (_, retired_at_onset, _) = pump.stall_full_since.expect("first observation tracked");
+    assert_eq!(retired_at_onset, 0);
+
+    std::thread::sleep(threshold / 2);
+    pump.handle_control_msg(PumpMsg::Heartbeat(HeartbeatMsg {
+        mcu_id: 1,
+        retired_counts: vec![1],
+    }));
+    pump.queues.get_mut(&key).unwrap().pushed = 3;
+
+    let result = pump.send_ready();
+    assert!(
+        result.is_ok(),
+        "retired advancing before the threshold must not escalate"
+    );
+    assert!(
+        escalated.lock().unwrap().is_empty(),
+        "no escalation once retired progressed"
+    );
+    let (tracked_key, tracked_retired, _) = pump
+        .stall_full_since
+        .expect("still stalled on a full ring, just with a fresh timer");
+    assert_eq!(tracked_key, key);
+    assert_eq!(
+        tracked_retired, 1,
+        "stall tracking must reset to the newly observed retired count"
+    );
+
+    std::thread::sleep(threshold / 2 + Duration::from_millis(5));
+    let result = pump.send_ready();
+    assert!(
+        result.is_ok(),
+        "elapsed time since the reset is still under the threshold"
+    );
+    assert!(escalated.lock().unwrap().is_empty());
+}
+
+#[test]
+fn non_stallfull_outcome_between_stalls_resets_the_timer() {
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    let threshold = Duration::from_millis(50);
+    let escalated: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let escalated_cb = Arc::clone(&escalated);
+    let mut pump = stalled_queue_pump(key, threshold, move |msg: String| {
+        escalated_cb.lock().unwrap().push(msg)
+    });
+
+    pump.send_ready().unwrap();
+    assert!(pump.stall_full_since.is_some());
+
+    std::thread::sleep(threshold * 2);
+
+    pump.queues.get_mut(&key).unwrap().pieces.clear();
+    let result = pump.send_ready();
+    assert!(result.is_ok());
+    assert!(
+        pump.stall_full_since.is_none(),
+        "an Idle outcome must clear the stall tracking even though the old \
+         stall was already past the threshold"
+    );
+
+    pump.queues
+        .get_mut(&key)
+        .unwrap()
+        .pieces
+        .push_back(make_piece(0));
+    let result = pump.send_ready();
+    assert!(
+        result.is_ok(),
+        "the timer restarts fresh after the Idle outcome, so this new \
+         StallFull observation is not immediately fatal"
+    );
+    assert!(escalated.lock().unwrap().is_empty());
+    assert!(pump.stall_full_since.is_some());
+}
+
 mod pushpieces_retransmit_tests {
     use super::super::{SendError, pushpieces_retransmit_serial};
     use host_rt::transport::TransportError;
