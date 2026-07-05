@@ -86,23 +86,32 @@ def render(steps, out_path):
     colors = plt.cm.viridis(np.linspace(0.0, 0.85, len(steps)))
 
     spec_ax, time_ax = axes[0]
+    linestyles = ["-", "--", ":", "-."]
     for (ratio, met), color in zip(steps, colors):
-        label = "inertia %d%%%s" % (
-            ratio,
-            "  RESONANT" if met["resonant"] else "",
-        )
-        freqs, spectrum = met["spectrum"]
-        spec_ax.loglog(
-            freqs[1:],
-            np.convolve(spectrum[1:] * 1000.0, np.ones(3) / 3, "same"),
-            color=color,
-            lw=1.0,
-            label=label,
-        )
-        seg = met["cruise_ferr"][:1500]
-        time_ax.plot(
-            np.arange(len(seg)) / 1000.0, seg * 1000.0, color=color, lw=0.7
-        )
+        for k, dm in enumerate(met["drives"]):
+            label = "inertia %d%%%s%s" % (
+                ratio,
+                " [%s]" % dm["drive"] if len(met["drives"]) > 1 else "",
+                "  RESONANT" if dm["resonant"] else "",
+            )
+            ls = linestyles[k % len(linestyles)]
+            freqs, spectrum = dm["spectrum"]
+            spec_ax.loglog(
+                freqs[1:],
+                np.convolve(spectrum[1:] * 1000.0, np.ones(3) / 3, "same"),
+                color=color,
+                ls=ls,
+                lw=1.0,
+                label=label,
+            )
+            seg = dm["cruise_ferr"][:1500]
+            time_ax.plot(
+                np.arange(len(seg)) / 1000.0,
+                seg * 1000.0,
+                color=color,
+                ls=ls,
+                lw=0.7,
+            )
     spec_ax.axvspan(*RESONANCE_BAND_HZ, alpha=0.06, color="red")
     spec_ax.set_xlabel("Hz")
     spec_ax.set_ylabel("ferr amplitude (um)")

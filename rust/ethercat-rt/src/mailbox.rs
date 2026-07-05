@@ -50,15 +50,6 @@ pub enum MailboxRequest {
         torque_tenth_pct: u16,
         restore: bool,
     },
-    SeedHomeSetup {
-        correlation_id: u32,
-        slot: u8,
-        offset_counts: i32,
-    },
-    SeedHomeRestore {
-        correlation_id: u32,
-        slot: u8,
-    },
 }
 
 pub enum MailboxReply {
@@ -78,15 +69,6 @@ pub enum MailboxReply {
         ferr_counts: u32,
         torque_tenth_pct: u16,
         restore: bool,
-    },
-    SeedHomeSetup {
-        correlation_id: u32,
-        rc: i32,
-        offset_counts: i32,
-    },
-    SeedHomeRestore {
-        correlation_id: u32,
-        rc: i32,
     },
 }
 
@@ -143,22 +125,6 @@ impl MailboxWorker {
                             ferr_counts,
                             torque_tenth_pct,
                             restore,
-                        },
-                        MailboxRequest::SeedHomeSetup {
-                            correlation_id,
-                            slot,
-                            offset_counts,
-                        } => MailboxReply::SeedHomeSetup {
-                            correlation_id,
-                            rc: crate::seed_home::seed_home_setup(&mut bus, slot, offset_counts),
-                            offset_counts,
-                        },
-                        MailboxRequest::SeedHomeRestore {
-                            correlation_id,
-                            slot,
-                        } => MailboxReply::SeedHomeRestore {
-                            correlation_id,
-                            rc: crate::seed_home::seed_home_restore(&mut bus, slot),
                         },
                     };
                     if rep_tx.send(reply).is_err() {

@@ -121,6 +121,39 @@ class ServoCalibration:
             )
         return servo
 
+    def _servos(self, gcmd, axis=None):
+        servo = gcmd.get("SERVO", None)
+        if servo is not None:
+            return [s.strip() for s in servo.split(",") if s.strip()]
+        if axis is None:
+            axis = gcmd.get("AXIS", None)
+        if axis is not None:
+            return self._axis_servos(gcmd, axis.upper())
+        if len(self.servos) == 1:
+            return [self.servos[0]]
+        raise gcmd.error(
+            "AXIS= or SERVO= is required (SERVO= accepts a comma list)"
+        )
+
+    def _axis_servos(self, gcmd, axis):
+        from . import servo_axis
+
+        if axis not in ("X", "Y", "Z"):
+            raise gcmd.error("AXIS must be X, Y or Z (got %r)" % (axis,))
+        kin = self.printer.lookup_object("toolhead").get_kinematics()
+        lane = "XYZ".index(axis)
+        lanes = [0, 1] if kin.coupled_xy() and lane in (0, 1) else [lane]
+        names = []
+        for i in lanes:
+            rail = kin.rails[i]
+            if not isinstance(rail, servo_axis.ServoRail):
+                raise gcmd.error(
+                    "axis %s is driven by non-servo rail %r"
+                    % (axis, rail.get_name())
+                )
+            names.append(rail.get_motor_name())
+        return names
+
     def _strokes(self, axis, start, end, speed, accel, iterations, dwell):
         if end <= start:
             raise self.gcode.error(
@@ -380,13 +413,38 @@ class ServoCalibration:
             120.0,
         )
 
+    def _write_gains(self, servos, pos_gain, speed_gain, integral):
+        lines = []
+        for servo in servos:
+            lines += [
+                "SERVO_PARAM SERVO=%s SET=0x2001.0x01 VALUE=%d TYPE=u16"
+                % (servo, pos_gain),
+                "SERVO_PARAM SERVO=%s SET=0x2001.0x02 VALUE=%d TYPE=u16"
+                % (servo, speed_gain),
+                "SERVO_PARAM SERVO=%s SET=0x2001.0x03 VALUE=%d TYPE=u16"
+                % (servo, integral),
+            ]
+        self.gcode.run_script_from_command("\n".join(lines))
+
+    def _set_manual_tuning(self, servos):
+        self.gcode.run_script_from_command(
+            "\n".join(
+                "SERVO_PARAM SERVO=%s SET=0x2000.0x05 VALUE=0 TYPE=u16"
+                % (servo,)
+                for servo in servos
+            )
+        )
+
     cmd_SERVO_SHOW_TUNING_help = (
         "Read back tuning mode, inertia ratio, gain set 1 and feedforward "
-        "params from the drive. Param SERVO"
+        "params from the drive(s). Params SERVO (comma list) or AXIS"
     )
 
     def cmd_SERVO_SHOW_TUNING(self, gcmd):
-        servo = self._servo(gcmd)
+        for servo in self._servos(gcmd):
+            self._show_tuning(servo)
+
+    def _show_tuning(self, servo):
         reads = [
             (
                 "C00.04 auto-tuning mode (0=manual 1=stiffness 2=positioning):",
@@ -409,7 +467,7 @@ class ServoCalibration:
                 ["0x2001.0x17", "0x2001.0x18", "0x2001.0x19"],
             ),
         ]
-        script = []
+        script = ['RESPOND MSG="=== %s ==="' % (servo,)]
         for msg, addrs in reads:
             script.append('RESPOND MSG="%s"' % (msg,))
             for addr in addrs:
@@ -429,42 +487,34 @@ class ServoCalibration:
         )
 
     cmd_SERVO_APPLY_GAINS_help = (
-        "Switch the drive to manual tuning (C00.04=0) and write gain set 1. "
-        "POS_GAIN 0.1 rad/s, SPEED_GAIN 0.1 Hz, INTEGRAL 0.01 ms. Param SERVO"
+        "Switch the drive(s) to manual tuning (C00.04=0) and write gain set "
+        "1 to every servo driving the axis. POS_GAIN 0.1 rad/s, SPEED_GAIN "
+        "0.1 Hz, INTEGRAL 0.01 ms. Params AXIS or SERVO (comma list)"
     )
 
     def cmd_SERVO_APPLY_GAINS(self, gcmd):
-        servo = self._servo(gcmd)
+        servos = self._servos(gcmd)
         pos_gain = gcmd.get_int("POS_GAIN", 400)
         speed_gain = gcmd.get_int("SPEED_GAIN", 250)
         integral = gcmd.get_int("INTEGRAL", 3184)
-        self.gcode.run_script_from_command(
-            "\n".join(
-                [
-                    "SERVO_PARAM SERVO=%s SET=0x2000.0x05 VALUE=0 TYPE=u16"
-                    % servo,
-                    "SERVO_PARAM SERVO=%s SET=0x2001.0x01 VALUE=%d TYPE=u16"
-                    % (servo, pos_gain),
-                    "SERVO_PARAM SERVO=%s SET=0x2001.0x02 VALUE=%d TYPE=u16"
-                    % (servo, speed_gain),
-                    "SERVO_PARAM SERVO=%s SET=0x2001.0x03 VALUE=%d TYPE=u16"
-                    % (servo, integral),
-                ]
-            )
-        )
-        self.cmd_SERVO_SHOW_TUNING(gcmd)
+        self._set_manual_tuning(servos)
+        self._write_gains(servos, pos_gain, speed_gain, integral)
+        for servo in servos:
+            self._show_tuning(servo)
 
     cmd_SERVO_CALIBRATE_GAINS_help = (
-        "Gain sweep, shaper-calibrate style. Tests each SPEED_GAINS entry "
-        "(0.1 Hz units, comma list), one capture per step, renders a "
-        "comparison PNG and prints a recommendation. Reverts to the lowest "
-        "gains afterwards. Params SPEED_GAINS AXIS START END SPEED ACCEL "
-        "ITERATIONS DWELL_MS TAG SERVO"
+        "Gain sweep, shaper-calibrate style. Resolves every servo driving "
+        "AXIS (both drives on CoreXY), writes each SPEED_GAINS entry (0.1 Hz "
+        "units, comma list) to all of them, one capture per step of all "
+        "drives, renders a comparison PNG and prints a recommendation. "
+        "Reverts to the lowest gains afterwards. Params SPEED_GAINS AXIS "
+        "START END SPEED ACCEL ITERATIONS DWELL_MS TAG SERVO (comma list "
+        "override)"
     )
 
     def cmd_SERVO_CALIBRATE_GAINS(self, gcmd):
         axis = gcmd.get("AXIS", "X").upper()
-        servo = self._servo(gcmd)
+        servos = self._servos(gcmd, axis)
         start, end = self._axis_bounds(gcmd, axis)
         speed = gcmd.get_float("SPEED", 100.0, above=0.0)
         accel = gcmd.get_float("ACCEL", 3000.0, above=0.0)
@@ -479,9 +529,7 @@ class ServoCalibration:
                 )
         sgains = [int(sg) for sg in sgains]
         self._prep(axis, dwell)
-        self.gcode.run_script_from_command(
-            "SERVO_PARAM SERVO=%s SET=0x2000.0x05 VALUE=0 TYPE=u16" % (servo,)
-        )
+        self._set_manual_tuning(servos)
         step_names = []
         for i, sg in enumerate(sgains):
             pg = round(sg * 1.6)
@@ -489,21 +537,20 @@ class ServoCalibration:
             step_names.append("%s_p%d_s%d_i%d" % (tag, pg, sg, ig))
             gcmd.respond_info(
                 "gain step %d/%d: pos %.1f rad/s, speed %.1f Hz, Ti %.2f ms"
-                % (i + 1, len(sgains), pg / 10.0, sg / 10.0, ig / 100.0)
-            )
-            self.gcode.run_script_from_command(
-                "\n".join(
-                    [
-                        "SERVO_PARAM SERVO=%s SET=0x2001.0x01 VALUE=%d TYPE=u16"
-                        % (servo, pg),
-                        "SERVO_PARAM SERVO=%s SET=0x2001.0x02 VALUE=%d TYPE=u16"
-                        % (servo, sg),
-                        "SERVO_PARAM SERVO=%s SET=0x2001.0x03 VALUE=%d TYPE=u16"
-                        % (servo, ig),
-                        "SERVO_CAPTURE_START SERVO=%s NAME=%s"
-                        % (servo, step_names[-1]),
-                    ]
+                " on %s"
+                % (
+                    i + 1,
+                    len(sgains),
+                    pg / 10.0,
+                    sg / 10.0,
+                    ig / 100.0,
+                    ", ".join(servos),
                 )
+            )
+            self._write_gains(servos, pg, sg, ig)
+            self.gcode.run_script_from_command(
+                "SERVO_CAPTURE_START SERVO=%s NAME=%s"
+                % (",".join(servos), step_names[-1])
             )
             self._strokes(axis, start, end, speed, accel, iterations, dwell)
             self.gcode.run_script_from_command("SERVO_CAPTURE_STOP")
@@ -512,23 +559,19 @@ class ServoCalibration:
             "sweep done - reverting to first step (%.1f Hz) until you apply "
             "the recommendation" % (sg0 / 10.0,)
         )
-        self.gcode.run_script_from_command(
-            "\n".join(
-                [
-                    "SERVO_PARAM SERVO=%s SET=0x2001.0x01 VALUE=%d TYPE=u16"
-                    % (servo, round(sg0 * 1.6)),
-                    "SERVO_PARAM SERVO=%s SET=0x2001.0x02 VALUE=%d TYPE=u16"
-                    % (servo, sg0),
-                    "SERVO_PARAM SERVO=%s SET=0x2001.0x03 VALUE=%d TYPE=u16"
-                    % (servo, round(1250000 / sg0)),
-                ]
-            )
-        )
+        self._write_gains(servos, round(sg0 * 1.6), sg0, round(1250000 / sg0))
         self._restore()
         self._run(
             gcmd,
             "servo_gain_report.py",
-            ["--tag", tag, "--steps", ",".join(step_names)],
+            [
+                "--tag",
+                tag,
+                "--steps",
+                ",".join(step_names),
+                "--axis",
+                axis,
+            ],
             120.0,
         )
 

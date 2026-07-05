@@ -226,11 +226,7 @@ impl PyMotionEngine {
                 Ok(())
             }))
     }
-    // The endpoint answers SeedServoHome only after the full method-35
-    // handshake (SDO mode switch to Homing with a bounded poll, DC-loop
-    // controlword pulse with a 12s attain window, switch back to CSP), so the
-    // per-call timeout must cover the endpoint's own worst case with margin.
-    #[pyo3(signature = (mcu_handle, axis, pos_mm, timeout_s = 20.0))]
+    #[pyo3(signature = (mcu_handle, axis, pos_mm, timeout_s = 5.0))]
     fn finalize_homed_axis_start(
         &self,
         mcu_handle: u32,

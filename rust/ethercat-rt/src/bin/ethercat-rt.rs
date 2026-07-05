@@ -24,9 +24,7 @@ use ethercat_rt::mailbox::{MailboxReply, MailboxRequest, MailboxWorker, WorkerSc
 use ethercat_rt::push_plan::plan_bundle;
 use ethercat_rt::scale::{mm_to_counts, CountMap};
 use ethercat_rt::sdo::SdoBus;
-use ethercat_rt::seed_home::{
-    ERR_SEED_HOME_BUSY, ERR_SEED_HOME_NOT_ENABLED, ERR_SEED_HOME_RESTORE, ERR_SEED_HOME_STREAMING,
-};
+use ethercat_rt::seed_home::ERR_SEED_HOME_STREAMING;
 use ethercat_rt::sensorless::{SensorlessBank, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
 use ethercat_rt::server::FrameServer;
 use ethercat_rt::stream_halt::StreamHalt;
@@ -257,10 +255,11 @@ fn main() {
         .iter()
         .map(|c| (c.abs() * TARGET_JUMP_LOG_MM).round() as i64)
         .collect();
-    let mut framed = vec![false; num_slaves];
-    let mut seed_home_inflight: Option<u32> = None;
-    let mut seed_home_slot: u8 = 0;
-    let mut seed_home_homing_rc: i32 = 0;
+    // Per-slot report frame: (position_actual counts, host mm) captured at the
+    // homing finalize. Maps the drive's raw encoder counts into the host frame
+    // for QueryMotorState — the drive's own coordinate frame is never touched,
+    // exactly like a stepper's step counter.
+    let mut report_anchor: Vec<Option<(i32, f64)>> = vec![None; num_slaves];
     let mut last_sent_retired: u32 = 0;
     let mut heartbeat_sent = false;
 
@@ -764,22 +763,6 @@ fn main() {
                             counts_per_mm.len()
                         );
                         server.respond(&seed_servo_home_response_frame(correlation_id, -309));
-                    } else if seed_home_inflight.is_some() {
-                        eprintln!("ec-rt: SeedServoHome rejected — handshake already in flight");
-                        server.respond(&seed_servo_home_response_frame(
-                            correlation_id,
-                            ERR_SEED_HOME_BUSY,
-                        ));
-                    } else if gate.state() != TorqueState::Enabled {
-                        eprintln!(
-                            "ec-rt: SeedServoHome rejected — drive not operation-enabled \
-                             (state={:?}); method-35 needs torque on",
-                            gate.state()
-                        );
-                        server.respond(&seed_servo_home_response_frame(
-                            correlation_id,
-                            ERR_SEED_HOME_NOT_ENABLED,
-                        ));
                     } else if rings.iter().any(|r| !r.is_empty()) {
                         eprintln!("ec-rt: SeedServoHome rejected — motion ring not empty");
                         server.respond(&seed_servo_home_response_frame(
@@ -787,20 +770,15 @@ fn main() {
                             ERR_SEED_HOME_STREAMING,
                         ));
                     } else {
-                        let offset_counts = ((f64::from(home_q16) / 65536.0)
-                            * cmd_counts_per_mm[slot as usize])
-                            .round() as i32;
+                        let anchor_mm = f64::from(home_q16) / 65536.0;
+                        let anchor_counts =
+                            unsafe { ffi::ec_rt_get_position_actual(i32::from(slot)) };
+                        report_anchor[slot as usize] = Some((anchor_counts, anchor_mm));
                         eprintln!(
-                            "ec-rt: SeedServoHome slot={slot} home_q16={home_q16} \
-                             -> 607Ch={offset_counts} counts; staging method-35 mode switch"
+                            "ec-rt: SeedServoHome slot={slot} report anchor \
+                             {anchor_counts} counts = {anchor_mm:.4} mm (drive frame untouched)"
                         );
-                        seed_home_inflight = Some(correlation_id);
-                        seed_home_slot = slot;
-                        mailbox.submit(MailboxRequest::SeedHomeSetup {
-                            correlation_id,
-                            slot,
-                            offset_counts,
-                        });
+                        server.respond(&seed_servo_home_response_frame(correlation_id, 0));
                     }
                 }
                 Command::ArmSensorlessEndstop {
@@ -859,11 +837,7 @@ fn main() {
                             ethercat_rt::buzz::ERR_BUZZ_STREAMING
                         }
                     } else {
-                        let base_counts = if framed[0] {
-                            unsafe { ffi::ec_rt_get_position_actual(0) }
-                        } else {
-                            0
-                        };
+                        let base_counts = unsafe { ffi::ec_rt_get_position_actual(0) };
                         let rc = buzz.arm(
                             msg.axis_mask,
                             msg.sign_mask,
@@ -940,8 +914,8 @@ fn main() {
                 }
                 Command::QueryMotorState { correlation_id } => {
                     let samples: Vec<(u8, f64, f64)> = (0..num_slaves)
-                        .filter(|&s| framed[s])
-                        .map(|s| {
+                        .filter_map(|s| {
+                            let (anchor_counts, anchor_mm) = report_anchor[s]?;
                             let slot = s as std::os::raw::c_int;
                             let (pos_counts, vel_rpm) = unsafe {
                                 (
@@ -949,10 +923,11 @@ fn main() {
                                     ffi::ec_rt_get_velocity_actual(slot),
                                 )
                             };
-                            let pos_mm = f64::from(pos_counts) / cmd_counts_per_mm[s];
+                            let delta_counts = i64::from(pos_counts) - i64::from(anchor_counts);
+                            let pos_mm = anchor_mm + delta_counts as f64 / cmd_counts_per_mm[s];
                             let vel_mm_s = cmd_counts_per_mm[s].signum()
                                 * ethercat_rt::scale::velocity_mm_s(vel_rpm, rotation_distance[s]);
-                            (s as u8, pos_mm, vel_mm_s)
+                            Some((s as u8, pos_mm, vel_mm_s))
                         })
                         .collect();
                     if samples.is_empty() {
@@ -1058,54 +1033,6 @@ fn main() {
                     };
                     server.respond(&frame);
                 }
-                MailboxReply::SeedHomeSetup {
-                    correlation_id,
-                    rc,
-                    offset_counts,
-                } => {
-                    seed_home_homing_rc = if rc != 0 {
-                        eprintln!(
-                            "ec-rt: SeedServoHome setup failed rc={rc} (offset={offset_counts}); \
-                             restoring CSP and failing"
-                        );
-                        rc
-                    } else {
-                        let hrc = unsafe { ffi::ec_rt_run_homing(i32::from(seed_home_slot)) };
-                        if hrc != 0 {
-                            eprintln!(
-                                "ec-rt: SeedServoHome controlword phase failed rc={hrc}; \
-                                 restoring CSP and failing"
-                            );
-                        } else {
-                            eprintln!(
-                                "ec-rt: SeedServoHome homing attained (607Ch={offset_counts}); \
-                                 restoring CSP"
-                            );
-                        }
-                        hrc
-                    };
-                    mailbox.submit(MailboxRequest::SeedHomeRestore {
-                        correlation_id,
-                        slot: seed_home_slot,
-                    });
-                }
-                MailboxReply::SeedHomeRestore { correlation_id, rc } => {
-                    seed_home_inflight = None;
-                    let result = if seed_home_homing_rc != 0 {
-                        seed_home_homing_rc
-                    } else if rc != 0 {
-                        eprintln!("ec-rt: SeedServoHome CSP restore failed rc={rc}");
-                        ERR_SEED_HOME_RESTORE
-                    } else {
-                        framed[seed_home_slot as usize] = true;
-                        eprintln!(
-                            "ec-rt: SeedServoHome complete — slot {seed_home_slot} framed=true"
-                        );
-                        0
-                    };
-                    seed_home_homing_rc = 0;
-                    server.respond(&seed_servo_home_response_frame(correlation_id, result));
-                }
             }
         }
 
@@ -1191,18 +1118,18 @@ fn main() {
                         None
                     }
                 } else if let Some((pos_mm, vel_mm_s, acc_mm_s2)) = rings[s].sample(now) {
-                    let counts = if framed[s] {
-                        mm_to_counts(f64::from(pos_mm), cmd_counts_per_mm[s])
-                    } else {
-                        let cpm = cmd_counts_per_mm[s];
-                        let map = cmaps[s].get_or_insert_with(|| {
-                            let actual =
-                                unsafe { ffi::ec_rt_get_position_actual(s as std::os::raw::c_int) };
-                            CountMap::new(cpm, actual, f64::from(pos_mm))
-                        });
-                        map.target_counts(f64::from(pos_mm))
-                    };
-                    Some((counts, vel_mm_s, acc_mm_s2))
+                    // Streaming is always relative: each stream anchors the
+                    // drive's actual position to the host's first commanded
+                    // value, so a homing set_position (host frame shift) can
+                    // never yank a drive. The report_anchor covers absolute
+                    // position queries; the drive frame itself is never used.
+                    let cpm = cmd_counts_per_mm[s];
+                    let map = cmaps[s].get_or_insert_with(|| {
+                        let actual =
+                            unsafe { ffi::ec_rt_get_position_actual(s as std::os::raw::c_int) };
+                        CountMap::new(cpm, actual, f64::from(pos_mm))
+                    });
+                    Some((map.target_counts(f64::from(pos_mm)), vel_mm_s, acc_mm_s2))
                 } else {
                     if !buzz.active() {
                         cmaps[s] = None;
@@ -1509,7 +1436,7 @@ fn main() {
                     torque_offset = t.torque_offset,
                     motion = !all_empty_now,
                     ff_sat = ff_saturation,
-                    framed = framed[s],
+                    framed = report_anchor[s].is_some(),
                     "per-slot drive telemetry"
                 );
             }
