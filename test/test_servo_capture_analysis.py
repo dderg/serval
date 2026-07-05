@@ -829,12 +829,24 @@ def test_combine_corexy_inverted_motor_flips_on_axis(tmp_path):
     assert c["cross_ferr"][0] == pytest.approx(0.15)
 
 
-def test_stroke_windows_split_on_move_starts():
-    flags = np.array([0, 0, 2, 2, 0, 0, 2, 2, 2, 0], dtype=np.uint8)
+def test_round_trip_windows_pairs_forward_and_reverse():
+    flags = np.zeros(40, dtype=np.uint8)
+    for s, e in [(2, 6), (10, 14), (20, 24), (28, 32)]:
+        flags[s:e] = 2
     segs = sc.motion_segments(flags)
-    wins = sc.stroke_windows(segs, len(flags))
-    assert [(w[0], w[1]) for w in wins] == [(2, 6), (6, 10)]
-    assert [w[2] for w in wins] == [4, 9]
+    wins = sc.round_trip_windows(segs, len(flags))
+    # trip 0 spans forward seg (2..6) + reverse seg (10..14) up to next trip;
+    # trip 1 spans the remaining pair to end of capture.
+    assert wins == [(2, 20), (20, 40)]
+
+
+def test_round_trip_windows_trailing_odd_move():
+    flags = np.zeros(20, dtype=np.uint8)
+    for s, e in [(2, 6), (10, 14), (16, 18)]:
+        flags[s:e] = 2
+    segs = sc.motion_segments(flags)
+    wins = sc.round_trip_windows(segs, len(flags))
+    assert wins == [(2, 16), (16, 20)]
 
 
 def synth_two_drive_strokes(tmp_path, n_strokes=3, move=150, dwell=40):

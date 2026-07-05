@@ -397,15 +397,15 @@ def compute_corexy_combine(header, drive_datas, spec, axis):
     }
 
 
-def stroke_windows(segs, n):
-    """One window per stroke: from a move's start to the next move's start, so
-    each window carries the move plus its ring-down and dwell. Returns
-    (win_start, win_end, move_end)."""
+def round_trip_windows(segs, n):
+    """One window per out-and-back round trip: a forward move paired with the
+    reverse move that follows it, plus the dwells. From the start of each even
+    moving segment to the start of the next round trip (or end of capture)."""
     if not segs:
         return []
-    starts = [s for s, _ in segs]
+    starts = [segs[i][0] for i in range(0, len(segs), 2)]
     bounds = starts + [n]
-    return [(bounds[i], bounds[i + 1], segs[i][1]) for i in range(len(starts))]
+    return [(bounds[i], bounds[i + 1]) for i in range(len(starts))]
 
 
 def _print_combine(c):
@@ -484,70 +484,69 @@ def _figure_multi(plt, header, drive_datas, fs):
     return fig
 
 
-FWD_REV = ("tab:blue", "tab:red")
 MOTOR_COLORS = ("tab:green", "tab:purple")
 
 
-def _overlay(ax, y, windows, direction, fs, colors):
-    for ws, we, me in windows:
-        forward = direction[me - 1] >= direction[ws]
+def _trip_colors(plt, count):
+    return plt.cm.viridis(np.linspace(0.0, 0.85, max(count, 1)))
+
+
+def _overlay(ax, y, windows, fs, colors):
+    for (ws, we), col in zip(windows, colors):
         tt = np.arange(we - ws) / fs
-        ax.plot(
-            tt,
-            y[ws:we],
-            color=colors[0] if forward else colors[1],
-            lw=0.7,
-            alpha=0.55,
-        )
+        ax.plot(tt, y[ws:we], color=col, lw=0.8, alpha=0.85)
 
 
-def _fwd_rev_legend(plt, ax, colors):
+def _trip_legend(plt, ax, colors):
     ax.legend(
         handles=[
-            plt.Line2D([], [], color=colors[0], label="forward stroke"),
-            plt.Line2D([], [], color=colors[1], label="reverse stroke"),
+            plt.Line2D([], [], color=col, label="trip %d" % (i + 1))
+            for i, col in enumerate(colors)
         ],
         loc="upper right",
-        fontsize=8,
+        fontsize=7,
+        ncol=1 if len(colors) <= 6 else 2,
     )
 
 
 def _figure_combined(plt, header, drive_datas, fs, c):
     n = len(drive_datas[0][2])
     t = np.arange(n) / fs
-    windows = stroke_windows(c["segs"], n)
+    windows = round_trip_windows(c["segs"], n)
+    trip_colors = _trip_colors(plt, len(windows))
     fig, axes = plt.subplots(2, 2, figsize=(14, 9))
 
     on_ax = axes[0, 0]
-    _overlay(on_ax, c["on_ferr"], windows, c["on_target"], fs, FWD_REV)
+    _overlay(on_ax, c["on_ferr"], windows, fs, trip_colors)
     on_ax.axhline(0, color="k", lw=0.5, alpha=0.3)
-    on_ax.set_xlabel("s into stroke")
+    on_ax.set_xlabel("s into round trip")
     on_ax.set_ylabel("following error (mm)")
     on_ax.set_title(
-        "On-axis (%s) tracking error — strokes overlaid" % c["on_label"]
+        "On-axis (%s) tracking error — round trips overlaid" % c["on_label"]
     )
-    _fwd_rev_legend(plt, on_ax, FWD_REV)
+    _trip_legend(plt, on_ax, trip_colors)
 
     cross_ax = axes[0, 1]
-    _overlay(cross_ax, c["cross_ferr"], windows, c["on_target"], fs, FWD_REV)
+    _overlay(cross_ax, c["cross_ferr"], windows, fs, trip_colors)
     cross_ax.axhline(0, color="k", lw=0.5, alpha=0.3)
-    cross_ax.set_xlabel("s into stroke")
+    cross_ax.set_xlabel("s into round trip")
     cross_ax.set_ylabel("following error (mm)")
     cross_ax.set_title(
-        "Cross-axis (%s, want ~0) skew — strokes overlaid" % c["cross_label"]
+        "Cross-axis (%s, want ~0) skew — round trips overlaid"
+        % c["cross_label"]
     )
-    _fwd_rev_legend(plt, cross_ax, FWD_REV)
+    _trip_legend(plt, cross_ax, trip_colors)
 
     tq_ax = axes[1, 0]
     for (_, name, data), col in zip(drive_datas, MOTOR_COLORS):
-        for ws, we, _me in windows:
+        for ws, we in windows:
             tt = np.arange(we - ws) / fs
             tq_ax.plot(
                 tt, data["torque_actual"][ws:we], color=col, lw=0.6, alpha=0.5
             )
-    tq_ax.set_xlabel("s into stroke")
+    tq_ax.set_xlabel("s into round trip")
     tq_ax.set_ylabel("torque (per-mille)")
-    tq_ax.set_title("Per-motor torque — strokes overlaid")
+    tq_ax.set_title("Per-motor torque — round trips overlaid")
     tq_ax.legend(
         handles=[
             plt.Line2D([], [], color=col, label=name)
