@@ -46,6 +46,7 @@ class ServoCalibration:
             "SERVO_MEASURE_INERTIA_COREXY",
             "SERVO_MEASURE_FRICTION",
             "SERVO_FIT_DYNAMICS",
+            "SERVO_FIT_DYNAMICS_COREXY",
             "SERVO_CALIBRATE_INERTIA_RATIO",
             "SERVO_CALIBRATE_INERTIA_RATIO_COREXY",
             "SERVO_SHOW_TUNING",
@@ -361,8 +362,30 @@ class ServoCalibration:
             ]
         self._run(gcmd, "servo_fit_dynamics.py", args, 120.0)
 
+    cmd_SERVO_FIT_DYNAMICS_COREXY_help = (
+        "Identify the coupled CoreXY dynamics for torque feedforward - runs "
+        "the two-drive X+Y excitation grid, fits the coupled mass matrix, "
+        "and writes a timestamped profile. Optional TORQUE_NM + INERTIA_KGM2 "
+        "add the C00.06 recommendation. Params as "
+        "SERVO_MEASURE_INERTIA_COREXY plus TORQUE_NM INERTIA_KGM2"
+    )
+
+    def cmd_SERVO_FIT_DYNAMICS_COREXY(self, gcmd):
+        name = gcmd.get("NAME", "ident")
+        torque, inertia = self._motor(gcmd, required=False)
+        self._measure_inertia_corexy(gcmd, name)
+        args = ["--name", name, "--structure", "corexy"]
+        if torque is not None:
+            args += [
+                "--rated-torque-nm",
+                "%g" % (torque,),
+                "--rotor-inertia-kgm2",
+                "%g" % (inertia,),
+            ]
+        self._run(gcmd, "servo_fit_dynamics.py", args, 120.0)
+
     cmd_SERVO_CALIBRATE_INERTIA_RATIO_help = (
-        "Step 1 of servo tuning - identify the load inertia and print the "
+        "Step 2 of servo tuning - identify the load inertia and print the "
         "recommended C00.06. TORQUE_NM and INERTIA_KGM2 required (config or "
         "param). Params AXIS TORQUE_NM INERTIA_KGM2 START END ACCELS SPEEDS "
         "ITERATIONS DWELL_MS NAME"
@@ -387,7 +410,7 @@ class ServoCalibration:
         )
 
     cmd_SERVO_CALIBRATE_INERTIA_RATIO_COREXY_help = (
-        "Step 1 of CoreXY servo tuning - runs the two-drive X+Y excitation "
+        "Step 2 of CoreXY servo tuning - runs the two-drive X+Y excitation "
         "grid, fits the coupled mass matrix, and prints C00.06 for both "
         "directions. TORQUE_NM and INERTIA_KGM2 required (config or param). "
         "Params as SERVO_MEASURE_INERTIA_COREXY plus TORQUE_NM INERTIA_KGM2"
