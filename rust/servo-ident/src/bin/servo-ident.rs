@@ -136,20 +136,26 @@ fn main() {
         opt_f64(&args, "--rotation-distance-mm"),
     ) {
         let n = r.params.mass.len();
-        let m_light = if n == 2 {
-            r.params.mass[0][0] + r.params.mass[0][1]
-        } else {
-            r.params.mass[0][0]
-        };
-        eprintln!(
-            "recommended C00.06 (light direction): {:.0}%",
-            c0006_recommendation(m_light, t, d, j)
-        );
         if n == 2 {
-            let m_heavy = r.params.mass[0][0] - r.params.mass[0][1];
+            // The sign of the fitted off-diagonal follows the capture frame
+            // (invert_direction flips it per drive), so the eigen-directions
+            // are labeled by magnitude, not by which formula produced them.
+            let sum = r.params.mass[0][0] + r.params.mass[0][1];
+            let diff = r.params.mass[0][0] - r.params.mass[0][1];
+            let m_light = sum.min(diff);
+            let m_heavy = sum.max(diff);
+            eprintln!(
+                "recommended C00.06 (light direction): {:.0}%",
+                c0006_recommendation(m_light, t, d, j)
+            );
             eprintln!(
                 "heavy-direction equivalent (reference only): {:.0}%",
                 c0006_recommendation(m_heavy, t, d, j)
+            );
+        } else {
+            eprintln!(
+                "recommended C00.06 (light direction): {:.0}%",
+                c0006_recommendation(r.params.mass[0][0], t, d, j)
             );
         }
     }

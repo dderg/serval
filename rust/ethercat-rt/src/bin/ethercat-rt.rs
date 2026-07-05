@@ -1152,6 +1152,15 @@ fn main() {
                 }
             }
 
+            // The dynamics profile is fitted in the drive frame (the capture
+            // flips each drive's commanded kinematics by its direction sign),
+            // so the model must be evaluated on drive-frame vectors — flipping
+            // only the output torque by the slot's own sign would negate the
+            // off-diagonal coupling terms whenever the drives' inverts differ.
+            let drive_dir = |s: usize| cmd_counts_per_mm.get(s).map_or(1.0, |c| c.signum()) as f32;
+            let (acc_drive, vel_drive): (Vec<f32>, Vec<f32>) = (0..num_slaves)
+                .map(|s| (drive_dir(s) * all_acc[s], drive_dir(s) * all_vel[s]))
+                .unzip();
             for s in 0..num_slaves {
                 let slot = s as std::os::raw::c_int;
                 if let Some(counts) = sp_counts[s] {
@@ -1162,8 +1171,7 @@ fn main() {
                     };
                     let torque_offset = match &dynamics {
                         Some(model) => {
-                            let dir_sign = cmd_counts_per_mm[s].signum() as f32;
-                            let raw = dir_sign * model.torque_ff(s, &all_acc, &all_vel);
+                            let raw = model.torque_ff(s, &acc_drive, &vel_drive);
                             if !raw.is_finite() {
                                 eprintln!(
                                     "ec-rt: FAULT non-finite torque FF on slot {s} \
