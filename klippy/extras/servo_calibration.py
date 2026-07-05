@@ -14,6 +14,74 @@ SCRIPTS_DIR = os.path.join(
     "scripts",
 )
 
+GAIN_PARAMS = {
+    "position": (
+        "0x2001.0x01",
+        1,
+        30000,
+        "C01.00 position loop gain",
+        "0.1 rad/s",
+        10.0,
+    ),
+    "speed": (
+        "0x2001.0x02",
+        1,
+        20000,
+        "C01.01 speed loop gain",
+        "0.1 Hz",
+        10.0,
+    ),
+    "integral": (
+        "0x2001.0x03",
+        15,
+        51200,
+        "C01.02 speed integral time",
+        "0.01 ms",
+        100.0,
+    ),
+}
+
+
+def refine_values(current, values_text, span, steps):
+    if values_text is not None:
+        vals = [
+            int(round(float(v))) for v in values_text.split(",") if v.strip()
+        ]
+        if not vals:
+            raise ValueError("VALUES lists no usable numbers")
+    else:
+        if steps < 2:
+            raise ValueError("STEPS must be at least 2")
+        if not 0.0 < span < 1.0:
+            raise ValueError(
+                "SPAN must be between 0 and 1 (fraction of current)"
+            )
+        lo, hi = 1.0 - span, 1.0 + span
+        vals = [
+            int(round(current * (lo + (hi - lo) * i / (steps - 1))))
+            for i in range(steps)
+        ]
+        vals.append(int(round(current)))
+    return sorted(set(vals))
+
+
+def validate_gain_values(values, param):
+    if param not in GAIN_PARAMS:
+        raise ValueError(
+            "PARAM must be position, speed or integral (got %r)" % (param,)
+        )
+    _addr, lo, hi, _desc, _unit, _scale = GAIN_PARAMS[param]
+    for v in values:
+        if v <= 0:
+            raise ValueError(
+                "%s value %d is not a positive integer" % (param, v)
+            )
+        if not lo <= v <= hi:
+            raise ValueError(
+                "%s value %d outside drive range %d..%d" % (param, v, lo, hi)
+            )
+    return values
+
 
 class ServoCalibration:
     def __init__(self, config):
@@ -54,6 +122,7 @@ class ServoCalibration:
             "SERVO_SET_INERTIA_RATIO",
             "SERVO_APPLY_GAINS",
             "SERVO_CALIBRATE_GAINS",
+            "SERVO_REFINE_GAIN",
             "SERVO_SWEEP_INERTIA",
             "SERVO_SET_STIFFNESS",
         ):
@@ -482,6 +551,44 @@ class ServoCalibration:
             ]
         self.gcode.run_script_from_command("\n".join(lines))
 
+    def _resolve_node_slot(self, servo):
+        from . import servo_axis
+
+        toolhead = self.printer.lookup_object("toolhead")
+        for rail in getattr(toolhead.get_kinematics(), "rails", ()):
+            if not isinstance(rail, servo_axis.ServoRail):
+                continue
+            if servo in (
+                rail.get_motor_name(),
+                rail.get_name(),
+                rail.get_name(short=True),
+            ):
+                node = self.printer.lookup_object(
+                    "ethercat_node " + rail.get_node_name()
+                )
+                return node, node.get_slot_for_motor(rail.get_motor_name())
+        raise self.printer.command_error("no servo motor named %r" % (servo,))
+
+    def _read_param(self, servo, addr):
+        from . import servo_param
+
+        node, slot = self._resolve_node_slot(servo)
+        handle = node.get_engine_handle()
+        if handle is None:
+            raise self.printer.command_error(
+                "ethercat_node %s has no engine handle" % (node.name,)
+            )
+        engine = self.printer.lookup_object("motion_engine")
+        index, subindex = servo_param.parse_address(addr)
+        _size, raw = engine.sdo_read(handle, slot, index, subindex)
+        return raw
+
+    def _read_gains(self, servo):
+        return {
+            name: self._read_param(servo, GAIN_PARAMS[name][0])
+            for name in ("position", "speed", "integral")
+        }
+
     def _set_manual_tuning(self, servos):
         self.gcode.run_script_from_command(
             "\n".join(
@@ -631,16 +738,113 @@ class ServoCalibration:
             120.0,
         )
 
+    cmd_SERVO_REFINE_GAIN_help = (
+        "1-D sensitivity sweep of a single drive gain around the current "
+        "operating point, holding the other two fixed. PARAM=position|speed|"
+        "integral. Reads the current gains from the drive; sweeps either an "
+        "explicit VALUES= list or the current value +-SPAN over STEPS points "
+        "(default +-30%% in 5 steps, always including the current value). "
+        "Writes each step to EVERY drive on AXIS (both CoreXY lanes), one "
+        "capture per step, restores the original gains afterwards (also on "
+        "failure), then renders the comparison. Params PARAM AXIS VALUES SPAN "
+        "STEPS CURRENT START END SPEED ACCEL ITERATIONS DWELL_MS TAG SERVO "
+        "(comma list override)"
+    )
+
+    def cmd_SERVO_REFINE_GAIN(self, gcmd):
+        param = gcmd.get("PARAM", "").lower()
+        if param not in GAIN_PARAMS:
+            raise gcmd.error(
+                "PARAM must be position, speed or integral (got %r)"
+                % (gcmd.get("PARAM", ""),)
+            )
+        axis = gcmd.get("AXIS", "X").upper()
+        servos = self._servos(gcmd, axis)
+        start, end = self._axis_bounds(gcmd, axis)
+        speed = gcmd.get_float("SPEED", 100.0, above=0.0)
+        accel = gcmd.get_float("ACCEL", 3000.0, above=0.0)
+        iterations = gcmd.get_int("ITERATIONS", 2, minval=1)
+        dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
+        tag = gcmd.get("TAG", "refine")
+        gains = self._read_gains(servos[0])
+        current = gcmd.get_int("CURRENT", gains[param], minval=1)
+        span = gcmd.get_float("SPAN", 0.3, above=0.0, below=1.0)
+        stepcount = gcmd.get_int("STEPS", 5, minval=2)
+        values_text = gcmd.get("VALUES", None)
+        try:
+            values = refine_values(current, values_text, span, stepcount)
+            validate_gain_values(values, param)
+        except ValueError as e:
+            raise gcmd.error("SERVO_REFINE_GAIN: %s" % (e,))
+        _addr, _lo, _hi, desc, unit, scale = GAIN_PARAMS[param]
+        self._prep(axis, dwell)
+        self._set_manual_tuning(servos)
+        original = (gains["position"], gains["speed"], gains["integral"])
+        step_names = []
+        try:
+            for i, v in enumerate(values):
+                step = dict(gains)
+                step[param] = v
+                step_names.append("%s_%s_v%d" % (tag, param, v))
+                gcmd.respond_info(
+                    "refine %s step %d/%d: %s = %d (%.4g %s)%s on %s"
+                    % (
+                        param,
+                        i + 1,
+                        len(values),
+                        desc,
+                        v,
+                        v / scale,
+                        unit,
+                        "  <- current" if v == current else "",
+                        ", ".join(servos),
+                    )
+                )
+                self._write_gains(
+                    servos, step["position"], step["speed"], step["integral"]
+                )
+                self.gcode.run_script_from_command(
+                    "SERVO_CAPTURE_START SERVO=%s NAME=%s"
+                    % (",".join(servos), step_names[-1])
+                )
+                self._strokes(axis, start, end, speed, accel, iterations, dwell)
+                self.gcode.run_script_from_command("SERVO_CAPTURE_STOP")
+        finally:
+            gcmd.respond_info(
+                "restoring original gains pos %d / speed %d / integral %d on %s"
+                % (original[0], original[1], original[2], ", ".join(servos))
+            )
+            self._write_gains(servos, *original)
+            self._restore()
+        self._run(
+            gcmd,
+            "servo_refine_report.py",
+            [
+                "--param",
+                param,
+                "--tag",
+                tag,
+                "--steps",
+                ",".join(step_names),
+                "--reference",
+                "%d" % (current,),
+            ],
+            120.0,
+        )
+
     cmd_SERVO_SWEEP_INERTIA_help = (
-        "Empirical inertia sweep, gain-sweep style. Writes each C00.06 ratio "
-        "in RATIOS (percent, comma list), one capture per step, renders a "
-        "comparison PNG. Reverts to the lowest ratio afterwards. Params "
-        "RATIOS AXIS START END SPEED ACCEL ITERATIONS DWELL_MS TAG SERVO"
+        "Empirical inertia sweep, gain-sweep style. Resolves every servo "
+        "driving AXIS (both drives on CoreXY), writes each C00.06 ratio in "
+        "RATIOS (percent, comma list) identically to all of them, one capture "
+        "per step of all drives, renders a comparison PNG. Restores the "
+        "original ratio afterwards (also on failure). Params RATIOS AXIS "
+        "START END SPEED ACCEL ITERATIONS DWELL_MS TAG SERVO (comma list "
+        "override)"
     )
 
     def cmd_SERVO_SWEEP_INERTIA(self, gcmd):
         axis = gcmd.get("AXIS", "X").upper()
-        servo = self._servo(gcmd)
+        servos = self._servos(gcmd, axis)
         start, end = self._axis_bounds(gcmd, axis)
         speed = gcmd.get_float("SPEED", 100.0, above=0.0)
         accel = gcmd.get_float("ACCEL", 3000.0, above=0.0)
@@ -657,36 +861,41 @@ class ServoCalibration:
             if rv not in ratios:
                 ratios.append(rv)
         ratios.sort()
+        original = self._read_param(servos[0], "0x2000.0x07")
         self._prep(axis, dwell)
         step_names = []
-        for i, rv in enumerate(ratios):
-            step_names.append("%s_r%d" % (tag, rv))
+        try:
+            for i, rv in enumerate(ratios):
+                step_names.append("%s_r%d" % (tag, rv))
+                gcmd.respond_info(
+                    "inertia step %d/%d: C00.06 ratio %d%% on %s"
+                    % (i + 1, len(ratios), rv, ", ".join(servos))
+                )
+                lines = [
+                    "SERVO_PARAM SERVO=%s SET=0x2000.0x07 VALUE=%d TYPE=u16"
+                    % (servo, rv)
+                    for servo in servos
+                ]
+                lines.append(
+                    "SERVO_CAPTURE_START SERVO=%s NAME=%s"
+                    % (",".join(servos), step_names[-1])
+                )
+                self.gcode.run_script_from_command("\n".join(lines))
+                self._strokes(axis, start, end, speed, accel, iterations, dwell)
+                self.gcode.run_script_from_command("SERVO_CAPTURE_STOP")
+        finally:
             gcmd.respond_info(
-                "inertia step %d/%d: C00.06 ratio %d%%"
-                % (i + 1, len(ratios), rv)
+                "restoring C00.06 ratio %d%% on %s"
+                % (original, ", ".join(servos))
             )
             self.gcode.run_script_from_command(
                 "\n".join(
-                    [
-                        "SERVO_PARAM SERVO=%s SET=0x2000.0x07 VALUE=%d TYPE=u16"
-                        % (servo, rv),
-                        "SERVO_CAPTURE_START SERVO=%s NAME=%s"
-                        % (servo, step_names[-1]),
-                    ]
+                    "SERVO_PARAM SERVO=%s SET=0x2000.0x07 VALUE=%d TYPE=u16"
+                    % (servo, original)
+                    for servo in servos
                 )
             )
-            self._strokes(axis, start, end, speed, accel, iterations, dwell)
-            self.gcode.run_script_from_command("SERVO_CAPTURE_STOP")
-        rv0 = ratios[0]
-        gcmd.respond_info(
-            "sweep done - reverting to first ratio (%d%%) until you apply your "
-            "choice with SERVO_SET_INERTIA_RATIO" % (rv0,)
-        )
-        self.gcode.run_script_from_command(
-            "SERVO_PARAM SERVO=%s SET=0x2000.0x07 VALUE=%d TYPE=u16"
-            % (servo, rv0)
-        )
-        self._restore()
+            self._restore()
         self._run(
             gcmd,
             "servo_inertia_report.py",

@@ -104,14 +104,15 @@ def render(steps, out_path):
                 lw=1.0,
                 label=label,
             )
-            seg = dm["cruise_ferr"][: int(round(1.5 * dm["fs"]))]
-            time_ax.plot(
-                np.arange(len(seg)) / dm["fs"],
-                seg * 1000.0,
-                color=color,
-                ls=ls,
-                lw=0.7,
-            )
+            for w, window in enumerate(dm["stop_windows"]):
+                time_ax.plot(
+                    np.arange(len(window)) / dm["fs"] - dm["stop_lookback_s"],
+                    window * 1000.0,
+                    color=color,
+                    ls=ls,
+                    lw=0.7,
+                    label=label if w == 0 else None,
+                )
     spec_ax.axvspan(*RESONANCE_BAND_HZ, alpha=0.06, color="red")
     spec_ax.set_xlabel("Hz")
     spec_ax.set_ylabel("ferr amplitude (um)")
@@ -120,9 +121,10 @@ def render(steps, out_path):
     )
     spec_ax.legend(fontsize=8)
     spec_ax.grid(True, which="both", alpha=0.3)
-    time_ax.set_xlabel("s into cruise")
-    time_ax.set_ylabel("ferr (mm)")
-    time_ax.set_title("Cruise following error, time domain")
+    time_ax.axvline(0.0, color="k", lw=0.8, alpha=0.5)
+    time_ax.set_xlabel("s relative to stop")
+    time_ax.set_ylabel("ferr toward endpoint (um)")
+    time_ax.set_title("Following error around each stop (decel edges overlaid)")
     time_ax.grid(alpha=0.3)
 
     curve_ax, table_ax = axes[1]

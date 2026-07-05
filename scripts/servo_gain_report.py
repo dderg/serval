@@ -179,12 +179,14 @@ def drive_metrics(path, drive):
     settle = int(round(0.05 * fs))
     lookback = int(round(0.1 * fs))
     overshoots = []
+    stop_windows = []
     for e in ends:
         if e + post >= n or e < lookback:
             continue
         endpos = target[e + settle]
         direction = np.sign(target[e] - target[e - lookback])
         overshoots.append(np.max((actual[e : e + post] - endpos) * direction))
+        stop_windows.append(direction * ferr[e - lookback : e + post])
     return {
         "path": path,
         "drive": header["drives"][drive_idx]["name"],
@@ -202,6 +204,8 @@ def drive_metrics(path, drive):
         else 0.0,
         "spectrum": (freqs, spectrum),
         "cruise_ferr": ferr[m],
+        "stop_windows": stop_windows,
+        "stop_lookback_s": lookback / fs,
         "fs": fs,
     }
 
