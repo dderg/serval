@@ -1191,20 +1191,18 @@ fn main() {
                         None
                     }
                 } else if let Some((pos_mm, vel_mm_s, acc_mm_s2)) = rings[s].sample(now) {
-                    // Streaming is ALWAYS relative: each stream re-anchors the
-                    // drive's actual position to the host's commanded value.
-                    // Absolute (framed) streaming is unsound — homing's
-                    // set_position shifts the host frame, and any absolute
-                    // target after that is offset by the homing correction,
-                    // which yanks the seeded drive against the others.
-                    // `framed` gates only position REPORTING (QueryMotorState).
-                    let cpm = cmd_counts_per_mm[s];
-                    let map = cmaps[s].get_or_insert_with(|| {
-                        let actual =
-                            unsafe { ffi::ec_rt_get_position_actual(s as std::os::raw::c_int) };
-                        CountMap::new(cpm, actual, f64::from(pos_mm))
-                    });
-                    Some((map.target_counts(f64::from(pos_mm)), vel_mm_s, acc_mm_s2))
+                    let counts = if framed[s] {
+                        mm_to_counts(f64::from(pos_mm), cmd_counts_per_mm[s])
+                    } else {
+                        let cpm = cmd_counts_per_mm[s];
+                        let map = cmaps[s].get_or_insert_with(|| {
+                            let actual =
+                                unsafe { ffi::ec_rt_get_position_actual(s as std::os::raw::c_int) };
+                            CountMap::new(cpm, actual, f64::from(pos_mm))
+                        });
+                        map.target_counts(f64::from(pos_mm))
+                    };
+                    Some((counts, vel_mm_s, acc_mm_s2))
                 } else {
                     if !buzz.active() {
                         cmaps[s] = None;
