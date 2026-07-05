@@ -24,7 +24,7 @@ fn circular_arc_within_tolerance() {
         .map(|i| {
             let t = i as f64 / n as f64;
             let angle = t * std::f64::consts::FRAC_PI_2;
-            [10.0 * angle.cos(), 10.0 * angle.sin(), 0.0]
+            [10.0 * libm::cos(angle), 10.0 * libm::sin(angle), 0.0]
         })
         .collect();
     let pieces = fit_subrun(&pts, 0.005, None, None);

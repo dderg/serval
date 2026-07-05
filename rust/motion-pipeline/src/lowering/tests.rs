@@ -134,7 +134,7 @@ fn peak_accel(axes: &[Vec<BezierPiece<f64>>]) -> f64 {
     for (px, py) in axes[0].iter().zip(&axes[1]) {
         for k in 0..=64 {
             let t = px.u_start + (px.u_end - px.u_start) * f64::from(k) / 64.0;
-            peak = peak.max(accel(px, t).hypot(accel(py, t)));
+            peak = peak.max(libm::hypot(accel(px, t), accel(py, t)));
         }
     }
     peak

@@ -150,7 +150,7 @@ fn blend_deviation_stays_within_delta_at_a_shallow_corner() {
     let theta = PI / 6.0;
     let leg = 80.0;
     let mid = [leg, 0.0, 0.0];
-    let end = [leg + leg * theta.cos(), leg * theta.sin(), 0.0];
+    let end = [leg + leg * libm::cos(theta), leg * libm::sin(theta), 0.0];
     let moves = vec![
         seg(1, accel, scv, [0.0, 0.0, 0.0], mid, 0.0),
         seg(2, accel, scv, mid, end, 0.0),

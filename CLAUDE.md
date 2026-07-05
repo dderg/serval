@@ -13,13 +13,6 @@
 
 - Unit tests live in a separate file from the tested code.
 
-- In Rust planning/motion code, transcendentals (`sin`, `cos`, `atan2`, `acos`,
-  `hypot`, `cbrt`, ...) must go through the `libm` crate (`libm::sin(x)`), never
-  the inherent `f64` methods — those call the OS libm, whose last-ulp differences
-  between macOS and glibc break bit-reproducibility of planned trajectories (and
-  with it the snapshot tests). IEEE basic ops, `sqrt`, `mul_add`, and `powi` are
-  deterministic everywhere and fine as-is.
-
 # Testing
 
 Run the Rust suite with `cargo nextest run` from `rust/`, not `cargo test`.

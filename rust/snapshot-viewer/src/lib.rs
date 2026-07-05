@@ -99,7 +99,7 @@ fn scalar_derivative(comp_x: &[f64], comp_y: &[f64]) -> Vec<f64> {
     comp_x
         .iter()
         .zip(comp_y)
-        .map(|(ax, ay)| ax.hypot(*ay))
+        .map(|(ax, ay)| libm::hypot(ax, *ay))
         .collect()
 }
 
@@ -384,7 +384,7 @@ fn discontinuities(
         let dxr = derivative_at(&xp[piece_at(xp, hi)], b);
         let dyl = derivative_at(&yp[piece_at(yp, lo)], b);
         let dyr = derivative_at(&yp[piece_at(yp, hi)], b);
-        let d = (dxr - dxl).hypot(dyr - dyl);
+        let d = libm::hypot(dxr - dxl, dyr - dyl);
         if d > floor {
             times.push(b);
             mags.push(d);
@@ -422,7 +422,7 @@ fn time_series_from_position(snap: &Snapshot) -> TimeSeries {
     for i in 1..x_raw.len() {
         let dx = x_raw[i] - x_raw[i - 1];
         let dy = y_raw[i] - y_raw[i - 1];
-        if dx.hypot(dy) > 1e-9 {
+        if libm::hypot(dx, dy) > 1e-9 {
             x.push(x_raw[i]);
             y.push(y_raw[i]);
             v.push(v_raw[i]);
@@ -443,7 +443,7 @@ fn time_series_from_position(snap: &Snapshot) -> TimeSeries {
     for i in 0..n - 1 {
         let dx = x[i + 1] - x[i];
         let dy = y[i + 1] - y[i];
-        ds.push(dx.hypot(dy));
+        ds.push(libm::hypot(dx, dy));
     }
 
     let mut v_avg = Vec::with_capacity(n - 1);
@@ -466,7 +466,7 @@ fn time_series_from_position(snap: &Snapshot) -> TimeSeries {
     // Derivatives
     let vx = gradient(&x, &t);
     let vy = gradient(&y, &t);
-    let v_scalar: Vec<f64> = vx.iter().zip(&vy).map(|(vx, vy)| vx.hypot(*vy)).collect();
+    let v_scalar: Vec<f64> = vx.iter().zip(&vy).map(|(vx, vy)| libm::hypot(vx, *vy)).collect();
 
     let ax = gradient(&vx, &t);
     let ay = gradient(&vy, &t);

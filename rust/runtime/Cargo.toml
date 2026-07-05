@@ -62,3 +62,6 @@ loom = []  # gates loom-tests under cfg(loom)
 
 [lints]
 workspace = true
+
+[build-dependencies]
+libm = { version = "0.2", default-features = false }

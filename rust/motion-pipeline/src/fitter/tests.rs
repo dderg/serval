@@ -59,7 +59,7 @@ fn half_circle(
     (1..=n)
         .map(|i| {
             let a = a0 + std::f64::consts::PI * f64::from(i) / f64::from(n);
-            let end = [c[0] + r * a.cos(), c[1] + r * a.sin(), 0.0];
+            let end = [c[0] + r * libm::cos(a), c[1] + r * libm::sin(a), 0.0];
             let m = line(first_line_no + i - 1, prev, end, e_per_facet);
             prev = end;
             m
@@ -105,7 +105,7 @@ fn circle_facets(n: u32, e_of: impl Fn(u32) -> f64) -> Vec<Move> {
     (1..=n)
         .map(|i| {
             let a = 2.0 * std::f64::consts::PI * f64::from(i) / f64::from(n + 4);
-            let end = [c[0] + r * a.cos(), c[1] + r * a.sin(), 0.0];
+            let end = [c[0] + r * libm::cos(a), c[1] + r * libm::sin(a), 0.0];
             let m = line(i, prev, end, e_of(i));
             prev = end;
             m
