@@ -152,6 +152,7 @@ class MotionEngineWrapper:
         socket_path,
         interface,
         endpoint,
+        cycle_us,
         dynamics_profile,
         drives,
     ):
@@ -160,6 +161,7 @@ class MotionEngineWrapper:
             socket_path,
             interface,
             endpoint,
+            cycle_us,
             dynamics_profile,
             drives,
         )

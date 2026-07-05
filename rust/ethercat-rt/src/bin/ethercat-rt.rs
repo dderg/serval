@@ -52,11 +52,12 @@ static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
 /// preempts the master's receive busy-poll.
 const MAILBOX_RT_PRIO: i32 = 40;
 
-/// A commanded target stepping more than this many mm in one DC cycle is
-/// physically impossible for these axes (2 mm/cycle at 1 kHz is 2 m/s) — it is a
-/// trajectory discontinuity, the signature the drive latches as Er87.1. Log the
-/// offending command so the jump is visible the cycle it happens, not inferred.
-const TARGET_JUMP_LOG_MM: f64 = 2.0;
+/// A commanded target moving faster than this (2 m/s) is physically impossible
+/// for these axes — a trajectory discontinuity, the signature the drive latches
+/// as Er87.1. Scaled by the cycle time into a per-cycle count bound so it means
+/// the same velocity at any DC rate. Log the offending command so the jump is
+/// visible the cycle it happens, not inferred.
+const TARGET_JUMP_LOG_MM_S: f64 = 2000.0;
 
 extern "C" fn on_sigterm(_: libc::c_int) {
     SIGTERM_RECEIVED.store(true, Ordering::Release);
@@ -160,7 +161,7 @@ fn main() {
     }
     let cycle_us: i64 = arg_val(&args, "--cycle-us")
         .and_then(|s| s.parse().ok())
-        .unwrap_or(1000);
+        .unwrap_or(250);
     let slaves = parse_slaves(&args).unwrap_or_else(|e| {
         eprintln!("ec-rt: bad --slave config: {e}");
         std::process::exit(1);
@@ -251,9 +252,10 @@ fn main() {
     let mut buzz = BuzzOsc::new();
     let mut cmaps: Vec<Option<CountMap>> = (0..num_slaves).map(|_| None).collect();
     let mut last_counts: Vec<Option<i32>> = vec![None; num_slaves];
+    let jump_log_mm = TARGET_JUMP_LOG_MM_S * cycle_us as f64 / 1_000_000.0;
     let jump_log_counts: Vec<i64> = cmd_counts_per_mm
         .iter()
-        .map(|c| (c.abs() * TARGET_JUMP_LOG_MM).round() as i64)
+        .map(|c| (c.abs() * jump_log_mm).round() as i64)
         .collect();
     // Per-slot report frame: (counts, host mm) captured at the homing finalize.
     // Maps the drive's raw encoder counts into the host frame for

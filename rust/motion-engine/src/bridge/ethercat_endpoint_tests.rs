@@ -21,6 +21,7 @@ fn endpoint_args_single_drive_uses_legacy_form() {
     let args = endpoint_args(
         "eth0",
         "/tmp/x.sock",
+        250,
         None,
         None,
         &[(
@@ -38,6 +39,13 @@ fn endpoint_args_single_drive_uses_legacy_form() {
     );
     assert!(!args.iter().any(|a| a == "--slave"));
     assert!(!args.iter().any(|a| a == "--axis"));
+    let cycle: Vec<&String> = args
+        .iter()
+        .enumerate()
+        .filter(|(i, a)| *a == "--cycle-us" && args.get(i + 1).is_some())
+        .map(|(i, _)| &args[i + 1])
+        .collect();
+    assert_eq!(cycle, vec!["250"]);
     assert!(args.iter().any(|a| a == "--counts-per-mm"));
     assert!(args.iter().any(|a| a == "--following-error-counts"));
     assert!(!args.iter().any(|a| a == "--velocity-ff"));
@@ -50,6 +58,7 @@ fn endpoint_args_per_drive_ff_flags() {
     let args = endpoint_args(
         "eth0",
         "/tmp/x.sock",
+        250,
         None,
         None,
         &[
@@ -75,6 +84,7 @@ fn endpoint_args_multi_drive_emits_slave_and_axis_groups() {
     let args = endpoint_args(
         "eth0",
         "/tmp/x.sock",
+        250,
         None,
         None,
         &[
@@ -114,6 +124,7 @@ fn endpoint_args_emits_per_slave_dynamics_profile() {
     let args = endpoint_args(
         "eth0",
         "/tmp/x.sock",
+        250,
         None,
         None,
         &[
@@ -159,6 +170,7 @@ fn spawn_nonexistent_binary_errors_with_binary_path() {
         "/nonexistent/binary/kalico-ec",
         "eth0",
         "/tmp/test.sock",
+        250,
         None,
         None,
         &[],

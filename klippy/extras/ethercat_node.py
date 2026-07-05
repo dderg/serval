@@ -16,6 +16,8 @@ DRIVE_FAULT_POLL_PERIOD = 1.0
 
 EC_RT_MAX_SLAVES = 8
 
+CYCLE_US_QUANTUM = 250
+
 
 class EtherCatNode:
     def __init__(self, config):
@@ -38,6 +40,13 @@ class EtherCatNode:
         self.endpoint = os.path.abspath(
             config.get("endpoint", _DEFAULT_ENDPOINT)
         )
+        self.cycle_us = config.getint("cycle_us", CYCLE_US_QUANTUM)
+        if self.cycle_us <= 0 or self.cycle_us % CYCLE_US_QUANTUM != 0:
+            raise config.error(
+                "ethercat_node %s: cycle_us=%d is invalid — the sync cycle "
+                "must be a positive integer multiple of %d us"
+                % (self.name, self.cycle_us, CYCLE_US_QUANTUM)
+            )
         self.dynamics_profile = config.get("dynamics_profile", None)
         self.engine_handle = None
         self._counts_per_mm = None
@@ -160,6 +169,7 @@ class EtherCatNode:
                 self.socket_path,
                 self.interface,
                 self.endpoint,
+                self.cycle_us,
                 self.dynamics_profile,
                 drives,
             )
@@ -243,6 +253,9 @@ class EtherCatNode:
 
     def get_counts_per_mm(self):
         return self._counts_per_mm
+
+    def get_cycle_us(self):
+        return self.cycle_us
 
     def get_slot_for_motor(self, motor_name):
         return self._slot_by_motor.get(motor_name)

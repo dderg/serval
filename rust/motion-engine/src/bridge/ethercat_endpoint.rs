@@ -164,6 +164,7 @@ fn push_drive_flags(args: &mut Vec<String>, d: &EthercatDrive) {
 pub(crate) fn endpoint_args(
     interface: &str,
     socket_path: &str,
+    cycle_us: u32,
     dynamics_profile: Option<&str>,
     events_dir: Option<&std::path::Path>,
     drives: &[EthercatDrive],
@@ -172,6 +173,8 @@ pub(crate) fn endpoint_args(
         interface.to_string(),
         "--socket".into(),
         socket_path.to_string(),
+        "--cycle-us".into(),
+        cycle_us.to_string(),
     ];
     if let Some(p) = dynamics_profile {
         args.push("--dynamics-profile".into());
@@ -200,11 +203,19 @@ pub(crate) fn spawn_ethercat_endpoint(
     binary: &str,
     interface: &str,
     socket_path: &str,
+    cycle_us: u32,
     dynamics_profile: Option<&str>,
     events_dir: Option<&std::path::Path>,
     drives: &[EthercatDrive],
 ) -> Result<std::process::Child, String> {
-    let args = endpoint_args(interface, socket_path, dynamics_profile, events_dir, drives);
+    let args = endpoint_args(
+        interface,
+        socket_path,
+        cycle_us,
+        dynamics_profile,
+        events_dir,
+        drives,
+    );
     std::process::Command::new(binary)
         .args(&args)
         .spawn()

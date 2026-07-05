@@ -15,7 +15,7 @@ pub const ERR_CAPTURE_OVERFLOW: i32 = -323;
 pub const ERR_CAPTURE_BAD_ARG: i32 = -324;
 pub const ERR_CAPTURE_BAD_DRIVE_LIST: i32 = -325;
 
-pub const CAPTURE_RING_CAPACITY: usize = 4096;
+pub const CAPTURE_RING_CAPACITY: usize = 16384;
 
 pub const MAX_DRIVES: usize = EC_RT_MAX_SLAVES;
 pub const RECORD_PREFIX_SIZE: usize = 9;
