@@ -685,9 +685,15 @@ int ec_rt_run_homing(int slave) {
         sl->tx.target_position = EC_READ_S32(g_pd + sl->i_position_actual);
         rt_exchange(&toff);
     }
-    for (int64_t pc = 0; pc < 3000; pc++) {
+    /* Attain latency is drive- and slot-dependent: on the trident bench slot 0
+     * attains in well under a second while slot 1 routinely needs more than
+     * the old 3000-cycle window. 12000 cycles (~12 s at 1 kHz) bounds the
+     * worst observed case with margin; the loop exits on bit 12 immediately. */
+    uint16_t last_sw = 0;
+    for (int64_t pc = 0; pc < 12000; pc++) {
         stage_hold_others(slave);
         uint16_t sw = EC_READ_U16(g_pd + sl->i_statusword);
+        last_sw = sw;
         sl->tx.controlword = 0x001F;
         sl->tx.target_position = EC_READ_S32(g_pd + sl->i_position_actual);
         if (sw & 0x2000) {
@@ -704,6 +710,9 @@ int ec_rt_run_homing(int slave) {
     }
     sl->tx.controlword = 0x000F;
     rt_exchange(&toff);
+    fprintf(stderr,
+            "ec_rt: homing attain timeout slave=%d final statusword=0x%04x\n",
+            slave, last_sw);
     return EC_RT_ERR_HOMING_ATTAIN;
 }
 
