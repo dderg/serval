@@ -34,10 +34,24 @@
 #define PRODUCT_CODE 0x00000715u
 #define SLAVE_ALIAS  0
 
-/* DC AssignActivate for SYNC0-only operation: SYNC0 at the cycle period,
- * shifted half a cycle. The A6-EC requires SYNC0 active before SAFE-OP (else
- * AL 0x0030). */
+/* DC AssignActivate from the A6 ESI (Dc/OpMode "DC-Synchron"): SYNC0-only at
+ * 1x the cycle period. The A6-EC requires SYNC0 active before SAFE-OP (else
+ * AL 0x0030). The ESI ships ShiftTimeSync0=0; we shift SYNC0 half a cycle so
+ * the process-data frame (sent at the cycle boundary) arrives mid-window,
+ * maximizing margin to the drive's latch instant. */
 #define DC_ASSIGN_ACTIVATE 0x0300
+
+/* DC convergence gate: a non-reference slave counts as clock-locked once
+ * DC_LOCK_SAMPLES consecutive reads of its ESC System Time Difference register
+ * (0x092C) are within DC_LOCK_TOLERANCE_NS of the reference clock. Gate budget
+ * DC_CONVERGE_BUDGET_NS; OP walk budget OP_WALK_BUDGET_NS is generous because
+ * the kernel master's FSM keeps retrying the OP transition on its own while the
+ * clocks converge — tearing down and re-activating would only restart
+ * convergence from a fresh random offset. */
+#define DC_LOCK_TOLERANCE_NS  2000
+#define DC_LOCK_SAMPLES       100
+#define DC_CONVERGE_BUDGET_NS 15.0e9
+#define OP_WALK_BUDGET_NS     20.0e9
 
 #define OUT_BYTES 18
 #define IN_BYTES  32
@@ -49,6 +63,10 @@ static uint8_t     *g_pd;     /* domain process image (the LRW datagram buffer) 
 typedef struct {
     ec_slave_config_t *sc;
     ec_reg_request_t  *al_req; /* reads AL status register 0x0134 for diagnostics */
+    ec_reg_request_t  *dc_req; /* reads System Time Difference register 0x092C */
+    int32_t            dc_diff_ns;     /* last decoded 0x092C sample */
+    int                dc_have_diff;   /* at least one 0x092C sample landed */
+    unsigned           dc_lock_streak; /* consecutive in-tolerance 0x092C samples */
     int32_t            pos;    /* topological ring position (0-based) */
 
     /* Output field offsets in the domain image (SM2 / RxPDO 1600h = out_t). */
@@ -305,6 +323,12 @@ static int configure_slave(slave_t *sl) {
                          (int32_t)(g_cycle_ns / 2), 0, 0);
 
     sl->al_req = ecrt_slave_config_create_reg_request(sl->sc, 2);
+    sl->dc_req = ecrt_slave_config_create_reg_request(sl->sc, 4);
+    if (!sl->al_req || !sl->dc_req) {
+        fprintf(stderr, "ec_rt: reg request allocation failed (slave %d)\n",
+                (int)sl->pos);
+        return EC_RT_ERR_EC_INIT;
+    }
 
     clear_latched_alarm_in_preop(sl);
     return 0;
@@ -385,6 +409,63 @@ static int park_step(slave_t *sl, int64_t pc) {
     return 0;
 }
 
+/* ESC System Time Difference (0x092C) is sign-magnitude: bit 31 is the sign,
+ * bits 30..0 the offset magnitude in ns. */
+static int32_t decode_system_time_diff(uint32_t raw) {
+    int32_t mag = (int32_t)(raw & 0x7FFFFFFFu);
+    return (raw & 0x80000000u) ? -mag : mag;
+}
+
+/* Keep a continuous stream of 0x092C samples flowing for one slave: harvest a
+ * completed register read into dc_diff_ns / dc_lock_streak and immediately
+ * re-issue. Call once per rt_exchange cycle. */
+static void pump_dc_diff(slave_t *sl) {
+    switch (ecrt_reg_request_state(sl->dc_req)) {
+    case EC_REQUEST_BUSY:
+        return;
+    case EC_REQUEST_SUCCESS:
+        sl->dc_diff_ns = decode_system_time_diff(
+            EC_READ_U32(ecrt_reg_request_data(sl->dc_req)));
+        sl->dc_have_diff = 1;
+        if (sl->dc_diff_ns >= -DC_LOCK_TOLERANCE_NS &&
+            sl->dc_diff_ns <= DC_LOCK_TOLERANCE_NS)
+            sl->dc_lock_streak++;
+        else
+            sl->dc_lock_streak = 0;
+        break;
+    case EC_REQUEST_UNUSED:
+    case EC_REQUEST_ERROR:
+        break;
+    }
+    ecrt_reg_request_read(sl->dc_req, 0x092C, 4);
+}
+
+static void pump_dc_diff_all(void) {
+    for (int s = 0; s < g_num_slaves; s++) pump_dc_diff(&g_slaves[s]);
+}
+
+/* Slot 0 is the DC reference clock — its 0x092C measures against the master's
+ * CLOCK_MONOTONIC grid, not against the bus reference, so only non-reference
+ * slots gate the bring-up. */
+static int dc_locked_all(void) {
+    for (int s = 1; s < g_num_slaves; s++)
+        if (g_slaves[s].dc_lock_streak < DC_LOCK_SAMPLES) return 0;
+    return 1;
+}
+
+static void log_dc_diffs(const char *tag) {
+    for (int s = 0; s < g_num_slaves; s++) {
+        slave_t *sl = &g_slaves[s];
+        ec_slave_config_state_t st;
+        ecrt_slave_config_state(sl->sc, &st);
+        fprintf(stderr,
+                "ec_rt: %s slot %d (position %d) al_state=0x%02x dc_diff=%s%d ns streak=%u\n",
+                tag, s, (int)sl->pos, st.al_state,
+                sl->dc_have_diff ? "" : "unsampled ", sl->dc_have_diff ? sl->dc_diff_ns : 0,
+                sl->dc_lock_streak);
+    }
+}
+
 /* Phase 2: activate the master (it walks every slave PRE-OP -> SAFE-OP -> OP as
  * we cycle, applying the staged config SDOs and DC), stabilize the DC loop,
  * confirm all OP, then park each at CiA402 Ready-to-Switch-On (no torque). From
@@ -413,19 +494,22 @@ int ec_rt_bringup_finish(void) {
     }
 
     int64_t toff = 0;
+    const int64_t cycles_per_sec = (int64_t)(1.0e9 / g_cycle_ns);
 
-    /* Walk every slave to OP: the master FSM advances each PRE-OP -> SAFE-OP ->
-     * OP at roughly one datagram per cycle while we hold controlword 0 / target
-     * = actual. Phase lock is not yet possible — the DC clock isn't running
-     * until OP. The budget is generous (8 s) — the walk applies every config SDO
-     * and the DC handshake, and a cold drive right after power-on is slower. */
+    /* Walk every slave to OP while continuously sampling each slave's DC offset
+     * (0x092C): the master FSM advances each PRE-OP -> SAFE-OP -> OP on its own
+     * and keeps retrying a refused OP transition, and sync_slave_clocks pulls a
+     * non-reference slave's clock in from any starting offset — so the right
+     * move on a slow slave is to keep cycling, never to tear down and re-roll. */
     int all_op = 0;
-    for (int64_t i = 0; i < (int64_t)(8.0e9 / g_cycle_ns); i++) {
+    for (int64_t i = 0; i < (int64_t)(OP_WALK_BUDGET_NS / g_cycle_ns); i++) {
         for (int s = 0; s < g_num_slaves; s++) {
             g_slaves[s].tx.controlword = 0;
             g_slaves[s].tx.target_position = EC_READ_S32(g_pd + g_slaves[s].i_position_actual);
         }
         rt_exchange(&toff);
+        pump_dc_diff_all();
+        if (i % cycles_per_sec == cycles_per_sec - 1) log_dc_diffs("op_walk");
         all_op = 1;
         for (int s = 0; s < g_num_slaves; s++) {
             ec_slave_config_state_t st;
@@ -435,26 +519,30 @@ int ec_rt_bringup_finish(void) {
         if (all_op) break;
     }
     if (!all_op) {
-        for (int s = 0; s < g_num_slaves; s++) {
-            ec_slave_config_state_t st;
-            ecrt_slave_config_state(g_slaves[s].sc, &st);
-            if (!st.operational)
-                fprintf(stderr, "ec_rt: slot %d (position %d) not OP (al_state=0x%02x)\n",
-                        s, (int)g_slaves[s].pos, st.al_state);
-        }
+        log_dc_diffs("op_timeout");
         return EC_RT_ERR_OP_TIMEOUT;
     }
 
-    /* DC is running now: settle for 1.5 s with controlword 0 before walking
-     * CiA-402, so the SYNC0 alignment is tight and any latched sync error
-     * (0x8700) is steady enough for the park loop to reset. */
-    for (int64_t i = 0; i < (int64_t)(1.5e9 / g_cycle_ns); i++) {
+    /* Hold at controlword 0 until every non-reference slave's clock is measured
+     * as locked to the reference (0x092C within tolerance for a sustained
+     * streak) before walking CiA-402 — commanding the drive on an unconverged
+     * clock is what latches the sync-loss alarms (ErC1.1 / 0x8700). */
+    int dc_locked = 0;
+    for (int64_t i = 0; i < (int64_t)(DC_CONVERGE_BUDGET_NS / g_cycle_ns); i++) {
         for (int s = 0; s < g_num_slaves; s++) {
             g_slaves[s].tx.controlword = 0;
             g_slaves[s].tx.target_position = EC_READ_S32(g_pd + g_slaves[s].i_position_actual);
         }
         rt_exchange(&toff);
+        pump_dc_diff_all();
+        if (i % cycles_per_sec == cycles_per_sec - 1) log_dc_diffs("dc_converge");
+        if (dc_locked_all()) { dc_locked = 1; break; }
     }
+    if (!dc_locked) {
+        log_dc_diffs("dc_converge_timeout");
+        return EC_RT_ERR_DC_CONVERGE;
+    }
+    log_dc_diffs("dc_locked");
     for (int s = 0; s < g_num_slaves; s++)
         fprintf(stderr, "ec_rt: OP reached slot %d; park entry sw=0x%04x err=0x%04x\n",
                 s, EC_READ_U16(g_pd + g_slaves[s].i_statusword),
@@ -685,9 +773,15 @@ int ec_rt_run_homing(int slave) {
         sl->tx.target_position = EC_READ_S32(g_pd + sl->i_position_actual);
         rt_exchange(&toff);
     }
-    for (int64_t pc = 0; pc < 3000; pc++) {
+    /* Attain latency is drive- and slot-dependent: on the trident bench slot 0
+     * attains in well under a second while slot 1 routinely needs more than
+     * the old 3000-cycle window. 12000 cycles (~12 s at 1 kHz) bounds the
+     * worst observed case with margin; the loop exits on bit 12 immediately. */
+    uint16_t last_sw = 0;
+    for (int64_t pc = 0; pc < 12000; pc++) {
         stage_hold_others(slave);
         uint16_t sw = EC_READ_U16(g_pd + sl->i_statusword);
+        last_sw = sw;
         sl->tx.controlword = 0x001F;
         sl->tx.target_position = EC_READ_S32(g_pd + sl->i_position_actual);
         if (sw & 0x2000) {
@@ -704,6 +798,9 @@ int ec_rt_run_homing(int slave) {
     }
     sl->tx.controlword = 0x000F;
     rt_exchange(&toff);
+    fprintf(stderr,
+            "ec_rt: homing attain timeout slave=%d final statusword=0x%04x\n",
+            slave, last_sw);
     return EC_RT_ERR_HOMING_ATTAIN;
 }
 

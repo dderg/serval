@@ -23,6 +23,7 @@
 #define EC_RT_ERR_HOMING_ERROR    (-16)
 #define EC_RT_ERR_TOO_MANY_SLAVES (-17)
 #define EC_RT_ERR_BAD_SLAVE_IDX   (-18)
+#define EC_RT_ERR_DC_CONVERGE     (-19)
 
 /* Two-phase bring-up for N slaves on one chain (one master, one domain, one DC
  * grid). `slave_positions[num_slaves]` are the topological ring positions

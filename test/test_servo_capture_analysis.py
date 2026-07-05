@@ -609,15 +609,75 @@ def test_export_ident_csv_writes_commanded_kinematics(tmp_path):
     path = synth_v2_capture(tmp_path, n=20)
     header, data, _ = sc.load_capture(path)
     out = os.path.join(str(tmp_path), "ident.csv")
-    sc.export_ident_csv(out, header, data)
+    sc.export_ident_csv(out, header, [(0, data)])
     with open(out) as f:
         lines = f.read().splitlines()
-    assert lines[0] == "t,accel_x,vel_x,torque_x"
+    assert lines[0] == "t,accel_x,vel_x,vel_act_x,torque_x"
     # all 20 cycles are motion-active in the synthetic capture
     assert len(lines) == 1 + 20
     first = lines[1].split(",")
     assert float(first[1]) == pytest.approx(1234.5)
     assert float(first[2]) == pytest.approx(-67.25)
+
+
+def synth_v2_two_drive_capture(tmp_path, n=8):
+    header = {
+        "version": 2,
+        "cycle_ns": 1_000_000,
+        "record_size": 81,
+        "started_utc": "2026-06-28T10:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [
+            {"name": "x", "counts_per_mm": 3276.8, "rotation_distance": 40},
+            {"name": "y", "counts_per_mm": 3276.8, "rotation_distance": 40},
+        ],
+        "channels": V2_CHANNELS,
+    }
+    path = os.path.join(str(tmp_path), "v2_xy.scap")
+    block = "iiihHHihiff"
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+        for i in range(n):
+            f.write(
+                struct.pack("<QB", i, FLAG_TORQUE_ENABLED | FLAG_MOTION_ACTIVE)
+            )
+            for base in (0.0, 1000.0):
+                f.write(
+                    struct.pack(
+                        "<" + block,
+                        100 * i,
+                        100 * i - 3,
+                        3,
+                        50 + int(base),
+                        0x0627,
+                        0,
+                        7,
+                        -2,
+                        100 * i - 3,
+                        base + 1234.5 + i,
+                        base - 67.25 + i,
+                    )
+                )
+    return path
+
+
+def test_export_ident_csv_two_drive_capture(tmp_path):
+    path = synth_v2_two_drive_capture(tmp_path, n=8)
+    header, data_x, _ = sc.load_capture(path, "x")
+    _, data_y, _ = sc.load_capture(path, "y")
+    out = os.path.join(str(tmp_path), "ident_xy.csv")
+    sc.export_ident_csv(out, header, [(0, data_x), (1, data_y)])
+    with open(out) as f:
+        lines = f.read().splitlines()
+    assert lines[0] == (
+        "t,accel_x,vel_x,vel_act_x,torque_x,accel_y,vel_y,vel_act_y,torque_y"
+    )
+    assert len(lines) == 1 + 8
+    first = lines[1].split(",")
+    assert float(first[1]) == pytest.approx(1234.5)
+    assert float(first[4]) == pytest.approx(50.0)
+    assert float(first[5]) == pytest.approx(2234.5)
+    assert float(first[8]) == pytest.approx(1050.0)
 
 
 def test_export_ident_csv_rejects_pre_v2_capture(tmp_path):
@@ -628,5 +688,5 @@ def test_export_ident_csv_rejects_pre_v2_capture(tmp_path):
         sc.export_ident_csv(
             os.path.join(str(tmp_path), "x.csv"),
             header,
-            data,
+            [(0, data)],
         )

@@ -126,6 +126,30 @@ def resonance_protrusion(freqs, spectrum, lo, hi):
 
 
 def step_metrics(path, drive=None):
+    """Metrics for every drive in the capture (or just `drive`), merged
+    worst-case: a gain step is only as good as its worst motor."""
+    header, _, _ = load_capture(path, drive)
+    names = (
+        [drive] if drive is not None else [d["name"] for d in header["drives"]]
+    )
+    per_drive = [drive_metrics(path, name) for name in names]
+    worst_res = max(per_drive, key=lambda m: m["res_ratio"])
+    return {
+        "path": path,
+        "cruise_mm_s": per_drive[0]["cruise_mm_s"],
+        "lag_ms": max(m["lag_ms"] for m in per_drive),
+        "ferr_std_um": max(m["ferr_std_um"] for m in per_drive),
+        "low_band_um": max(m["low_band_um"] for m in per_drive),
+        "res_peak_um": worst_res["res_peak_um"],
+        "res_peak_hz": worst_res["res_peak_hz"],
+        "res_ratio": worst_res["res_ratio"],
+        "resonant": any(m["resonant"] for m in per_drive),
+        "overshoot_max_um": max(m["overshoot_max_um"] for m in per_drive),
+        "drives": per_drive,
+    }
+
+
+def drive_metrics(path, drive):
     header, data, drive_idx = load_capture(path, drive)
     cpm = header["drives"][drive_idx]["counts_per_mm"]
     n = len(data)
@@ -155,6 +179,7 @@ def step_metrics(path, drive=None):
         overshoots.append(np.max((actual[e : e + 400] - endpos) * direction))
     return {
         "path": path,
+        "drive": header["drives"][drive_idx]["name"],
         "cruise_mm_s": float(vnom),
         "lag_ms": float(np.mean(np.abs(ferr[m])) / vnom * 1000.0),
         "ferr_std_um": float(np.std(np.abs(ferr[m])) * 1000.0),
@@ -182,24 +207,33 @@ def render(steps, out_path):
     colors = plt.cm.viridis(np.linspace(0.0, 0.85, len(steps)))
 
     spec_ax, time_ax = axes[0]
+    linestyles = ["-", "--", ":", "-."]
     for (gains, met), color in zip(steps, colors):
-        label = "pos %.0f rad/s / speed %.0f Hz%s" % (
-            gains[0] / 10.0,
-            gains[1] / 10.0,
-            "  RESONANT" if met["resonant"] else "",
-        )
-        freqs, spectrum = met["spectrum"]
-        spec_ax.loglog(
-            freqs[1:],
-            np.convolve(spectrum[1:] * 1000.0, np.ones(3) / 3, "same"),
-            color=color,
-            lw=1.0,
-            label=label,
-        )
-        seg = met["cruise_ferr"][:1500]
-        time_ax.plot(
-            np.arange(len(seg)) / 1000.0, seg * 1000.0, color=color, lw=0.7
-        )
+        for k, dm in enumerate(met["drives"]):
+            label = "pos %.0f rad/s / speed %.0f Hz%s%s" % (
+                gains[0] / 10.0,
+                gains[1] / 10.0,
+                " [%s]" % dm["drive"] if len(met["drives"]) > 1 else "",
+                "  RESONANT" if dm["resonant"] else "",
+            )
+            ls = linestyles[k % len(linestyles)]
+            freqs, spectrum = dm["spectrum"]
+            spec_ax.loglog(
+                freqs[1:],
+                np.convolve(spectrum[1:] * 1000.0, np.ones(3) / 3, "same"),
+                color=color,
+                ls=ls,
+                lw=1.0,
+                label=label,
+            )
+            seg = dm["cruise_ferr"][:1500]
+            time_ax.plot(
+                np.arange(len(seg)) / 1000.0,
+                seg * 1000.0,
+                color=color,
+                ls=ls,
+                lw=0.7,
+            )
     spec_ax.axvspan(*RESONANCE_BAND_HZ, alpha=0.06, color="red")
     spec_ax.set_xlabel("Hz")
     spec_ax.set_ylabel("ferr amplitude (um)")
@@ -315,8 +349,13 @@ def main(argv=None):
     p.add_argument("--out", help="explicit output PNG path")
     p.add_argument(
         "--drive",
-        help="drive name to analyze in a multi-drive capture "
-        "(default: the first drive in the file)",
+        help="restrict analysis to one drive of a multi-drive capture "
+        "(default: analyze all drives, merged worst-case)",
+    )
+    p.add_argument(
+        "--axis",
+        help="axis the sweep ran on; included in the recommended "
+        "SERVO_APPLY_GAINS command so it targets all drives on that axis",
     )
     args = p.parse_args(argv)
 
@@ -379,11 +418,27 @@ def main(argv=None):
                 "YES" if met["resonant"] else "no",
             )
         )
+        if len(met["drives"]) > 1:
+            for dm in met["drives"]:
+                print(
+                    "    %-12s %7.1f %7.0f %7.0f %6.0f@%3.0fHz %8.0f %s"
+                    % (
+                        dm["drive"],
+                        dm["lag_ms"],
+                        dm["ferr_std_um"],
+                        dm["low_band_um"],
+                        dm["res_peak_um"],
+                        dm["res_peak_hz"],
+                        dm["overshoot_max_um"],
+                        "YES" if dm["resonant"] else "no",
+                    )
+                )
     gains, note = recommend(steps)
     if gains is not None:
+        target = " AXIS=%s" % args.axis if args.axis else ""
         print(
-            "recommended: SERVO_APPLY_GAINS POS_GAIN=%d SPEED_GAIN=%d INTEGRAL=%d  (%s)"
-            % (gains[0], gains[1], gains[2], note)
+            "recommended: SERVO_APPLY_GAINS%s POS_GAIN=%d SPEED_GAIN=%d INTEGRAL=%d  (%s)"
+            % (target, gains[0], gains[1], gains[2], note)
         )
     else:
         print("recommendation: %s" % (note,))

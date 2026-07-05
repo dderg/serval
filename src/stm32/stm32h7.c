@@ -251,7 +251,8 @@ boot_guard(void)
     // Flush to SRAM so the count survives the reset a boot hang triggers: the
     // bootloader may hand off with the D-cache on, and a cached-only write would
     // be lost at reset, leaving the loop undetected.
-    SCB_CleanDCache_by_Addr(&boot_guard_state, sizeof(boot_guard_state));
+    SCB_CleanDCache_by_Addr((uint32_t *)&boot_guard_state,
+                            sizeof(boot_guard_state));
 
     // Arm the IWDG so a hang anywhere in boot resets and re-enters this guard.
     // PR=5 (/128), RLR=0xFFF over the ~32 kHz LSI is ~16 s — vastly longer than a
@@ -271,7 +272,8 @@ boot_guard_clear(void)
 {
     if (boot_guard_state.count) {
         boot_guard_state.count = 0;
-        SCB_CleanDCache_by_Addr(&boot_guard_state, sizeof(boot_guard_state));
+        SCB_CleanDCache_by_Addr((uint32_t *)&boot_guard_state,
+                                sizeof(boot_guard_state));
     }
 }
 

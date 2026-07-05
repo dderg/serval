@@ -48,13 +48,21 @@ def ident_binary():
     return path
 
 
-def resolve_rotation_distance(args, header, drive_idx):
+def resolve_rotation_distance(args, header, drive_indices):
     if args.rotation_distance_mm is not None:
         return args.rotation_distance_mm
-    return header["drives"][drive_idx].get("rotation_distance")
+    distances = {
+        header["drives"][i].get("rotation_distance") for i in drive_indices
+    }
+    if len(distances) != 1:
+        raise SystemExit(
+            "drives disagree on rotation_distance (%s); pass "
+            "--rotation-distance-mm explicitly" % (sorted(distances),)
+        )
+    return distances.pop()
 
 
-def ident_cmd(binary, csv_path, axis, out_path, args):
+def ident_cmd(binary, csv_path, axes, out_path, args):
     cmd = [
         binary,
         "--capture",
@@ -62,7 +70,7 @@ def ident_cmd(binary, csv_path, axis, out_path, args):
         "--structure",
         args.structure,
         "--axes",
-        axis,
+        ",".join(axes),
         "--out",
         out_path,
     ]
@@ -95,10 +103,27 @@ def main(argv=None):
     args = p.parse_args(argv)
 
     capture_path = resolve_newest_capture(args.captures_dir, args.name)
-    header, data, drive_idx = load_capture(capture_path, args.drive)
-    axis = header["drives"][drive_idx]["name"]
+    if args.structure == "corexy":
+        if args.drive is not None:
+            raise SystemExit("--drive conflicts with --structure corexy")
+        header, _, _ = load_capture(capture_path)
+        drive_names = [d["name"] for d in header["drives"]]
+        if len(drive_names) != 2:
+            raise SystemExit(
+                "corexy fit needs a 2-drive capture, got drives: %s"
+                % (", ".join(drive_names),)
+            )
+        drive_datas = [
+            (idx, load_capture(capture_path, name)[1])
+            for idx, name in enumerate(drive_names)
+        ]
+    else:
+        header, data, drive_idx = load_capture(capture_path, args.drive)
+        drive_datas = [(drive_idx, data)]
+    drive_indices = [idx for idx, _ in drive_datas]
+    axes = [header["drives"][idx]["name"] for idx in drive_indices]
     args.rotation_distance_mm = resolve_rotation_distance(
-        args, header, drive_idx
+        args, header, drive_indices
     )
     if args.rotation_distance_mm is None and args.rated_torque_nm is not None:
         print(
@@ -117,9 +142,9 @@ def main(argv=None):
     ) as tmp:
         csv_path = tmp.name
     try:
-        export_ident_csv(csv_path, header, data, drive_idx)
+        export_ident_csv(csv_path, header, drive_datas)
         proc = subprocess.run(
-            ident_cmd(binary, csv_path, axis, out_path, args),
+            ident_cmd(binary, csv_path, axes, out_path, args),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -129,11 +154,17 @@ def main(argv=None):
     sys.stdout.write(proc.stdout)
     if proc.returncode != 0:
         raise SystemExit(proc.returncode)
+    if not os.path.exists(out_path):
+        print(
+            "no dynamics profile written (nonphysical fit - see analysis above)"
+        )
+        return 0
     print("profile: %s" % (out_path,))
-    print(
-        "to use it: set dynamics_profile: %s under [servo_%s] and RESTART"
-        % (out_path, axis.split("_")[-1])
-    )
+    for axis in axes:
+        print(
+            "to use it: set dynamics_profile: %s under [servo_%s] and RESTART"
+            % (out_path, axis.split("_")[-1])
+        )
     return 0
 
 

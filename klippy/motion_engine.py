@@ -215,7 +215,9 @@ class MotionEngineWrapper:
 
     def finalize_homed_axis(self, mcu_handle, axis, pos_mm):
         self._wait_endpoint_call(
-            self._engine.finalize_homed_axis_start(mcu_handle, axis, pos_mm)
+            self._engine.finalize_homed_axis_start(
+                mcu_handle, axis, list(pos_mm)
+            )
         )
 
     def set_torque(self, mcu_handle, value, print_time):
