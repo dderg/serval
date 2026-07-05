@@ -81,9 +81,18 @@ impl Shaper {
                                 return;
                             }
                             if let Control::SetAxisChains(chains) = &ctrl {
-                                (self.forward_support, self.back_support) = supports_of(chains);
+                                let (new_forward, new_back) = supports_of(chains);
+                                // The signal eras agree at the rest point this swap
+                                // happens at, so kept history makes the resumed
+                                // track exactly continuous with what was committed
+                                // (a k-only change keeps the kernel bit-identical).
+                                // Only a grown back support invalidates retention —
+                                // fall back to the stream-boundary clamp then.
+                                if new_back > self.back_support {
+                                    self.history.clear();
+                                }
+                                (self.forward_support, self.back_support) = (new_forward, new_back);
                                 self.chains = chains.clone();
-                                self.history.clear();
                             }
                         }
                     }

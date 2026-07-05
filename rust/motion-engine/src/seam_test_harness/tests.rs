@@ -77,10 +77,14 @@ fn arc_fit_voron_cube_perimeter_is_c0() {
 }
 
 fn extruder_pa_smooth_chain_set() -> trajectory::AxisChainSet {
+    extruder_chain_set_with_k(0.03)
+}
+
+fn extruder_chain_set_with_k(k: f64) -> trajectory::AxisChainSet {
     let pa = trajectory::PostProcessorInstance::new(
         "pa",
         &trajectory::post_processors::LinearPressureAdvance,
-        vec![0.03],
+        vec![k],
     );
     let st = trajectory::PostProcessorInstance::new(
         "st",
@@ -161,6 +165,90 @@ fn voron_cube_with_extruder_kernel_survives_pacer_drains() {
             "axis {axis} track jumps {worst:.6} mm across a shaped-segment seam"
         );
     }
+}
+
+/// Same replay, observed at the piece level through enqueue — the stream the
+/// junction monitor and the MCU actually see.
+#[test]
+fn voron_cube_with_extruder_kernel_has_no_piece_seams() {
+    let config = bench_config_arc_fit();
+    let moves = parse_gcode_to_moves(CRASH_VORON_CUBE, config.limits);
+    let rep = run_moves_with_chains(&moves, config, extruder_pa_smooth_chain_set(), Some(40));
+    assert_eq!(
+        rep.boundaries.len(),
+        0,
+        "piece-level seams (worst {:.6} mm): first {:?}",
+        rep.worst(),
+        rep.boundaries.first()
+    );
+}
+
+/// SET_PRESSURE_ADVANCE mid-print (a PA calibration pattern does this every
+/// band): drain, swap the chain set to a new k, keep printing. The E track
+/// must stay continuous through the swap.
+#[test]
+fn extruder_track_is_continuous_across_a_pressure_advance_change() {
+    let config = default_stream_config();
+    let band = |x0: f64, line: u32| {
+        build_move(
+            [x0, 0.0, 0.0],
+            10.0,
+            0.0,
+            0.0,
+            EXTRUDER_AXIS,
+            0.5,
+            config.limits,
+            30.0,
+            line,
+        )
+        .expect("band move builds")
+    };
+
+    let handle = setup_stages(
+        config,
+        extruder_chain_set_with_k(0.03),
+        vec![0.0, 0.0, 0.0, 0.0],
+        0.0,
+    );
+    let output = handle.output;
+    let collector = std::thread::spawn(move || {
+        let mut segs: Vec<ShapedSegment> = Vec::new();
+        while let Ok(item) = output.recv() {
+            if let motion_pipeline::ShapedItem::Seg(seg) = item {
+                segs.push(seg);
+            }
+        }
+        segs
+    });
+    let mut x0 = 0.0;
+    for (i, k) in [0.03, 0.042, 0.054, 0.066].into_iter().enumerate() {
+        if i > 0 {
+            handle
+                .input
+                .send(motion_pipeline::StreamInput::Drain)
+                .expect("pipeline accepts drain");
+            handle
+                .input
+                .send(motion_pipeline::StreamInput::Control(
+                    motion_pipeline::Control::SetAxisChains(extruder_chain_set_with_k(k)),
+                ))
+                .expect("pipeline accepts chain swap");
+        }
+        for _ in 0..3 {
+            handle
+                .input
+                .send(band(x0, (i * 3) as u32).into())
+                .expect("pipeline accepts move");
+            x0 += 10.0;
+        }
+    }
+    drop(handle.input);
+    let segs = collector.join().expect("collector thread");
+    let worst = worst_track_seam(&segs, EXTRUDER_AXIS);
+    assert!(
+        worst < 1e-3,
+        "extruder track jumps {worst:.6} mm across a PA change"
+    );
 }
 
 /// A drain flushed while the shaper's window is clamped ("signal constant past

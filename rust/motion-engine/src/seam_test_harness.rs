@@ -314,8 +314,20 @@ pub fn run_schedule(source: &str, config: StreamConfig) -> SeamReport {
 /// the stages varies them run to run, which is exactly the surface the seam
 /// checks guard.
 pub fn run_moves(moves: &[Move], config: StreamConfig) -> SeamReport {
+    run_moves_with_chains(moves, config, AxisChainSet::default(), None)
+}
+
+/// `run_moves` with post-processing chains active and, optionally, a `Drain`
+/// injected after every `drain_every` moves — the cadence the pacer uses when
+/// the feed runs dry mid-print.
+pub fn run_moves_with_chains(
+    moves: &[Move],
+    config: StreamConfig,
+    chains: AxisChainSet,
+    drain_every: Option<usize>,
+) -> SeamReport {
     let n_moves = moves.len();
-    let segs = collect_shaped_segments(moves, config);
+    let segs = collect_shaped_segments_scripted(moves, config, chains, drain_every);
 
     let mut ingestor = Ingestor::new();
     ingestor.ingest(&segs, 0);
@@ -328,13 +340,22 @@ pub fn run_moves(moves: &[Move], config: StreamConfig) -> SeamReport {
 /// Feed the moves through the full streaming pipeline and return the shaped
 /// segments it emits — the trajectory enqueue would dispatch.
 pub fn collect_shaped_segments(moves: &[Move], config: StreamConfig) -> Vec<ShapedSegment> {
+    collect_shaped_segments_scripted(moves, config, AxisChainSet::default(), None)
+}
+
+pub fn collect_shaped_segments_scripted(
+    moves: &[Move],
+    config: StreamConfig,
+    chains: AxisChainSet,
+    drain_every: Option<usize>,
+) -> Vec<ShapedSegment> {
     let spatial_home = moves
         .iter()
         .find_map(|m| m.segment.spatial.as_ref())
         .map_or([0.0, 0.0, 0.0], |seg| seg.point_at(0.0));
     let mut home = spatial_home.to_vec();
     home.push(0.0);
-    let handle = setup_stages(config, AxisChainSet::default(), home, 0.0);
+    let handle = setup_stages(config, chains, home, 0.0);
     let output = handle.output;
     let collector = std::thread::spawn(move || {
         let mut segs: Vec<ShapedSegment> = Vec::new();
@@ -345,11 +366,17 @@ pub fn collect_shaped_segments(moves: &[Move], config: StreamConfig) -> Vec<Shap
         }
         segs
     });
-    for m in moves.iter().cloned() {
+    for (i, m) in moves.iter().cloned().enumerate() {
         handle
             .input
             .send(m.into())
             .expect("pipeline input closed while feeding — a stage died");
+        if drain_every.is_some_and(|n| i % n == n - 1) {
+            handle
+                .input
+                .send(motion_pipeline::StreamInput::Drain)
+                .expect("pipeline input closed at drain — a stage died");
+        }
     }
     drop(handle.input);
     collector.join().expect("pipeline collector panicked")
