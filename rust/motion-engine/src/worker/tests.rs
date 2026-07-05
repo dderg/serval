@@ -497,3 +497,96 @@ fn flush_returns_after_commit_without_sleeping_until_playout() {
     );
     h.shutdown();
 }
+
+fn poll_fence(h: &StreamWorkerHandle, id: u64, timeout: Duration) -> Option<f64> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(t) = h.fence_take(id) {
+            return t;
+        }
+        assert!(Instant::now() < deadline, "fence {id} did not resolve");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn forcing_fence_resolves_to_the_end_of_submitted_motion() {
+    let cap = Capture::default();
+    let mut h = StreamWorkerHandle::spawn(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0],
+        cap.dispatch(),
+        cap.nudge_dispatch(),
+        Arc::default(),
+    );
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    h.submit_move(line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0]))
+        .unwrap();
+
+    let id = h.fence_start(true).unwrap();
+    let t = poll_fence(&h, id, Duration::from_secs(5))
+        .expect("forcing fence on live motion resolves with a stream time");
+    let segs = cap.snapshot();
+    let dispatched_end = segs.last().unwrap().1;
+    assert!(
+        (t - dispatched_end).abs() < 1e-9,
+        "fence time {t} must equal the dispatched end {dispatched_end}"
+    );
+    h.shutdown();
+}
+
+#[test]
+fn fence_on_an_idle_pipe_resolves_without_new_motion() {
+    let cap = Capture::default();
+    let mut h = StreamWorkerHandle::spawn(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0],
+        cap.dispatch(),
+        cap.nudge_dispatch(),
+        Arc::default(),
+    );
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    h.flush().unwrap();
+    let end = cap.snapshot().last().unwrap().1;
+
+    let id = h.fence_start(false).unwrap();
+    let t = poll_fence(&h, id, Duration::from_secs(5))
+        .expect("idle-pipe fence resolves with the dispatched end");
+    assert!(
+        (t - end).abs() < 1e-9,
+        "idle fence {t} vs dispatched end {end}"
+    );
+    h.shutdown();
+}
+
+#[test]
+fn passive_fence_resolves_as_the_stream_commits_past_it() {
+    let cap = Capture::default();
+    let mut h = StreamWorkerHandle::spawn(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0],
+        cap.dispatch(),
+        cap.nudge_dispatch(),
+        Arc::default(),
+    );
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    let id = h.fence_start(false).unwrap();
+    let t = poll_fence(&h, id, Duration::from_secs(10))
+        .expect("passive fence resolves once the pacer drains the quiet stream");
+    let segs = cap.snapshot();
+    assert!(
+        !segs.is_empty(),
+        "fence resolved but nothing was dispatched"
+    );
+    assert!(
+        t >= segs.last().unwrap().1 - 1e-9,
+        "fence time {t} must cover the motion before it"
+    );
+    h.shutdown();
+}

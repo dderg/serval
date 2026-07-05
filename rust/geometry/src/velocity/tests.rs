@@ -259,7 +259,7 @@ fn clothoid_rides_the_disk_above_the_old_cruise_ceiling() {
     let line = &plan.moves[0];
     let clothoid = &plan.moves[1];
     let sigma = kappa_peak / length;
-    let old_cruise = (DEFAULT_JERK_MM_S3 / sigma).cbrt();
+    let old_cruise = libm::cbrt(DEFAULT_JERK_MM_S3 / sigma);
     assert!(
         line.exit_v < line.peak_v - 1.0,
         "the approach line must still decelerate into the clothoid"

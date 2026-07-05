@@ -10,7 +10,7 @@ fn time_to_cross_from_rest_is_the_jerk_cubic() {
     };
     let (j, ds) = (1e5, 0.01);
     let t = time_to_cross(st, j, ds).unwrap();
-    let expected = (6.0 * ds / j).cbrt();
+    let expected = libm::cbrt(6.0 * ds / j);
     assert!((t - expected).abs() < 1e-12 * expected, "t={t}");
 }
 

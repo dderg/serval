@@ -133,7 +133,7 @@ files by hand. It carries the 6.18.33 file set (`macb.h`, `macb_main.c`,
 `macb_ptp.c` as `*-6.18-orig.*` and `*-6.18-ethercat.*`, plus `Kbuild`,
 `Makefile.am`, `update.sh`, and `PORTING-NOTES.md`). To (re)generate it for a
 different kernel, see
-[Obtaining / regenerating `ec_macb`](#obtaining--regenerating-ec_macb) — but note
+[Obtaining or regenerating `ec_macb`](#obtaining-or-regenerating-ec_macb) — but note
 the driver is pinned to 6.18.33 for a reason.
 
 ## Step 3 — Build and install the master
@@ -345,7 +345,7 @@ cleanly against a 6.18.33 kernel tree**. This is why:
 To ride a different kernel you must regenerate the driver for it (next section)
 and accept that you are off the tested path.
 
-## Obtaining / regenerating `ec_macb`
+## Obtaining or regenerating `ec_macb`
 
 The driver was ported from the Pi 4 `genet` native-driver recipe. The hooks are
 **additive and gated by `get_ecdev(bp)`** so a non-EtherCAT load is unaffected:

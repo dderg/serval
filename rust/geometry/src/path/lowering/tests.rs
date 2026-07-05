@@ -77,8 +77,8 @@ fn gauss_legendre_offset(kappa_0: f64, sigma: f64, s: f64) -> (f64, f64) {
         for k in 0..5 {
             let t = mid + half * nodes[k];
             let w = weights[k] * half;
-            cx += w * phi(t).cos();
-            cy += w * phi(t).sin();
+            cx += w * libm::cos(phi(t));
+            cy += w * libm::sin(phi(t));
         }
     }
     (cx, cy)
@@ -161,12 +161,12 @@ fn ac_pos1_endpoints_match_anchors() {
 
     let arc = make_arc(2.0, std::f64::consts::FRAC_PI_2);
     let start = arc.point_at(0.0);
-    let expected_start = [2.0 * 0.3_f64.cos(), 2.0 * 0.3_f64.sin(), 0.0];
+    let expected_start = [2.0 * libm::cos(0.3_f64), 2.0 * libm::sin(0.3_f64), 0.0];
     for i in 0..3 {
         assert!((start[i] - expected_start[i]).abs() < 1e-12);
     }
     let theta_end = 0.3 + std::f64::consts::FRAC_PI_2;
-    let expected_end = [2.0 * theta_end.cos(), 2.0 * theta_end.sin(), 0.0];
+    let expected_end = [2.0 * libm::cos(theta_end), 2.0 * libm::sin(theta_end), 0.0];
     let end = arc.point_at(arc.s_len());
     for i in 0..3 {
         assert!((end[i] - expected_end[i]).abs() < 1e-12);

@@ -12,6 +12,8 @@ runs only the case comparisons; the harness's own unit tests live in
 from __future__ import annotations
 
 import argparse
+import gzip
+import os
 import sys
 from pathlib import Path
 
@@ -63,6 +65,12 @@ def main() -> int:
             d = harness.drift_envelope(baseline, snapshot)
             print(f"             worst rel {d['rel']:.2e} at {d['rel_at']}")
             print(f"             worst abs {d['abs']:.2e} at {d['abs_at']}")
+            dump_dir = os.environ.get("SNAPSHOT_DUMP_DIR")
+            if dump_dir:
+                out = Path(dump_dir) / f"{case.name}.json.gz"
+                out.parent.mkdir(parents=True, exist_ok=True)
+                data = (harness.canonical_json(snapshot) + "\n").encode()
+                out.write_bytes(gzip.compress(data, compresslevel=9, mtime=0))
 
     ok = buckets[harness.Status.EXACT]
     changed = buckets[harness.Status.CHANGED]

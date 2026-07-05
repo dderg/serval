@@ -44,7 +44,7 @@ pub(crate) fn normalize(a: [f64; 3]) -> [f64; 3] {
 }
 
 pub(crate) fn signed_angle(from: [f64; 3], to: [f64; 3], plane_normal: [f64; 3]) -> f64 {
-    dot(cross(from, to), plane_normal).atan2(dot(from, to))
+    libm::atan2(dot(cross(from, to), plane_normal), dot(from, to))
 }
 
 pub(crate) fn turn_normal(t_in: [f64; 3], t_out: [f64; 3]) -> Option<[f64; 3]> {

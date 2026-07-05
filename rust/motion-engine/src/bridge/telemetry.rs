@@ -127,13 +127,7 @@ impl PyMotionEngine {
             .map_err(PyRuntimeError::new_err)
     }
     fn wait_moves_start(&self) -> PyResult<u64> {
-        let rx = {
-            let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
-            let planner = guard.as_ref().ok_or_else(|| {
-                PyRuntimeError::new_err("planner not initialized — call init_planner first")
-            })?;
-            planner.flush_start().map_err(planner_err)?
-        };
+        let rx = self.flush_try_start_inner()?;
         let mut pending = self
             .pending_flushes
             .lock()
@@ -143,6 +137,26 @@ impl PyMotionEngine {
         Ok(id)
     }
     fn wait_moves_poll(&self, flush_id: u64) -> PyResult<bool> {
+        let started_rx = {
+            let pending = self
+                .pending_flushes
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let Some(wait) = pending.get(&flush_id) else {
+                return Err(PyRuntimeError::new_err(format!(
+                    "wait_moves_poll: unknown flush id {flush_id}"
+                )));
+            };
+            wait.rx.is_some()
+        };
+        let late_rx = if started_rx {
+            None
+        } else {
+            match self.flush_try_start_inner()? {
+                Some(rx) => Some(rx),
+                None => return Ok(false),
+            }
+        };
         let mut pending = self
             .pending_flushes
             .lock()
@@ -152,8 +166,15 @@ impl PyMotionEngine {
                 "wait_moves_poll: unknown flush id {flush_id}"
             )));
         };
+        if let Some(rx) = late_rx {
+            wait.rx = Some(rx);
+        }
         if wait.deadline.is_none() {
-            match wait.rx.try_recv() {
+            let rx = wait
+                .rx
+                .as_ref()
+                .expect("flush receiver present past the try-start gate");
+            match rx.try_recv() {
                 Ok(finish) => {
                     wait.deadline = Some(finish.unwrap_or_else(std::time::Instant::now));
                 }
@@ -175,15 +196,40 @@ impl PyMotionEngine {
         }
         Ok(done)
     }
-    fn motion_drain_poll(&self, py: Python<'_>) -> PyResult<bool> {
-        let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
-        let planner = guard.as_ref().ok_or_else(|| {
-            PyRuntimeError::new_err("planner not initialized — call init_planner first")
-        })?;
-        py.detach(|| planner.flush()).map_err(planner_err)?;
-        Ok(self.drain.is_drained_now())
+    fn motion_drain_poll(&self) -> PyResult<bool> {
+        let mut pending = self
+            .pending_drain_flush
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if pending.is_none() {
+            match self.flush_try_start_inner()? {
+                Some(rx) => *pending = Some(rx),
+                None => return Ok(false),
+            }
+        }
+        let rx = pending
+            .as_ref()
+            .expect("drain flush receiver just installed");
+        match rx.try_recv() {
+            Ok(_committed_through) => {
+                *pending = None;
+                Ok(self.drain.is_drained_now())
+            }
+            Err(crossbeam_channel::TryRecvError::Empty) => Ok(false),
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                *pending = None;
+                Err(PyRuntimeError::new_err(
+                    "motion_drain_poll: planner channel closed",
+                ))
+            }
+        }
     }
-    fn motion_drain_finalize(&self) {}
+    fn motion_drain_finalize(&self) {
+        *self
+            .pending_drain_flush
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
+    }
     fn pending_channel_moves(&self) -> u64 {
         self.planner
             .lock()
@@ -193,6 +239,45 @@ impl PyMotionEngine {
     }
     fn input_channel_capacity(&self) -> u64 {
         crate::worker::INPUT_CHANNEL_CAP as u64
+    }
+    /// `None` when the move channel is full — the caller yields and retries;
+    /// blocking here would stall the whole klippy reactor thread.
+    fn fence_start(&self, force: bool) -> PyResult<Option<u64>> {
+        let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+        let planner = guard.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("planner not initialized — call init_planner first")
+        })?;
+        match planner.fence_start(force) {
+            Ok(id) => Ok(Some(id)),
+            Err(crate::worker::StreamWorkerError::ChannelFull) => Ok(None),
+            Err(e) => Err(planner_err(e)),
+        }
+    }
+    /// `None` while pending; once resolved, the seconds from now until the
+    /// fenced motion ends (0.0 when the stream was reset or already idle).
+    /// Consumes the resolution.
+    fn fence_poll(&self, id: u64) -> Option<f64> {
+        let taken = {
+            let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+            guard.as_ref()?.fence_take(id)
+        }?;
+        let Some(t_end) = taken else {
+            return Some(0.0);
+        };
+        let anchored = self
+            .dispatch_anchor
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .t0();
+        let Some(t0) = anchored else {
+            return Some(0.0);
+        };
+        let host_now = self
+            .router
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .host_now_secs();
+        Some((t0 + t_end - host_now).max(0.0))
     }
     fn get_last_move_time(&self) -> f64 {
         match self
@@ -262,5 +347,21 @@ impl PyMotionEngine {
             .unwrap_or_else(|p| p.into_inner())
             .0
             .clone()
+    }
+}
+
+impl PyMotionEngine {
+    fn flush_try_start_inner(
+        &self,
+    ) -> PyResult<Option<crossbeam_channel::Receiver<Option<std::time::Instant>>>> {
+        let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+        let planner = guard.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("planner not initialized — call init_planner first")
+        })?;
+        match planner.flush_try_start() {
+            Ok(rx) => Ok(Some(rx)),
+            Err(crate::worker::StreamWorkerError::ChannelFull) => Ok(None),
+            Err(e) => Err(planner_err(e)),
+        }
     }
 }

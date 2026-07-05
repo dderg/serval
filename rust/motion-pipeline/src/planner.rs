@@ -263,7 +263,7 @@ impl Planner {
         let t_in = a.heading_at(a.s_len());
         let t_out = b.heading_at(0.0);
         let cos_theta = t_in[0] * t_out[0] + t_in[1] * t_out[1] + t_in[2] * t_out[2];
-        if cos_theta.clamp(-1.0, 1.0).acos() > self.config.chain.corner.theta_min_rad {
+        if libm::acos(cos_theta.clamp(-1.0, 1.0)) > self.config.chain.corner.theta_min_rad {
             return true;
         }
         follower_rate_step(prev, next, self.config.chain.corner.extrusion_ramp_rel_tol)

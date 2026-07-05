@@ -29,8 +29,8 @@ fn convolve_then_restrict_preserves_endpoint_on_offset_second_segment() {
         let u1 = t_start + total * f64::from(i + 1) / f64::from(n_ramp_pieces);
         let u_lin = u0;
         let omega = 2.0 * std::f64::consts::PI * modulation_freq;
-        let s = (omega * u_lin).sin();
-        let cs = (omega * u_lin).cos();
+        let s = libm::sin(omega * u_lin);
+        let cs = libm::cos(omega * u_lin);
         let c0 = 50.0 + slope * (u0 - t_start) + modulation_amp * s;
         let c1 = slope + modulation_amp * omega * cs;
         let c2 = -modulation_amp * omega.powi(2) / 2.0 * s;

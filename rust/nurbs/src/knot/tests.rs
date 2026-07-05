@@ -231,7 +231,7 @@ fn refined_to_full_multiplicity_matches_reference_on_mixed_multiplicity_curve() 
     let cps: Vec<f64> = (0..n_cps)
         .map(|i| {
             let t = i as f64 / (n_cps - 1) as f64;
-            t * t - 0.5 * t + 0.1 * (i as f64 * 1.3).sin()
+            t * t - 0.5 * t + 0.1 * libm::sin(i as f64 * 1.3)
         })
         .collect();
 
