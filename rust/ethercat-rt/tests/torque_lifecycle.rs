@@ -464,7 +464,7 @@ fn resume_stream_without_halt_is_rejected() {
 }
 
 #[test]
-fn stop_discards_queued_pieces() {
+fn stop_discards_queued_pieces_and_disables_torque() {
     let (mut guard, conn, path) = spawn_and_claim("stop-discard", &[]);
 
     let r = set_torque(&conn, true, now_ns() + 50_000_000);
@@ -475,16 +475,13 @@ fn stop_discards_queued_pieces() {
     let (result, _clock) = send_stop(&conn);
     assert_eq!(result, 0, "Stop mid-stream must return 0, got {result}");
 
-    let r = set_torque(&conn, false, now_ns() + 200_000_000);
-    assert_eq!(r, 0, "scheduling disable after Stop must return 0, got {r}");
-
     thread::sleep(Duration::from_millis(400));
 
     let r = set_torque(&conn, true, now_ns() + 50_000_000);
     assert_eq!(
         r, 0,
-        "re-enable must return 0 — nonzero means pieces survived Stop \
-         and the scheduled disable faulted, got {r}"
+        "enable after Stop must return 0 — ERR_BAD_TORQUE_STATE means Stop \
+         left torque on, any fault means pieces survived Stop, got {r}"
     );
 
     drop(conn);

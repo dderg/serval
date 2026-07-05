@@ -255,11 +255,16 @@ fn main() {
         .iter()
         .map(|c| (c.abs() * TARGET_JUMP_LOG_MM).round() as i64)
         .collect();
-    // Per-slot report frame: (position_actual counts, host mm) captured at the
-    // homing finalize. Maps the drive's raw encoder counts into the host frame
-    // for QueryMotorState — the drive's own coordinate frame is never touched,
-    // exactly like a stepper's step counter.
+    // Per-slot report frame: (counts, host mm) captured at the homing finalize.
+    // Maps the drive's raw encoder counts into the host frame for
+    // QueryMotorState — the drive's own coordinate frame is never touched,
+    // exactly like a stepper's step counter. The counts side of the pair is the
+    // last COMMANDED target, not position_actual: at finalize the ring is empty
+    // (pieces retired by time) but the servo may still be settling several mm
+    // behind, and anchoring against a lagging actual bakes that transient in as
+    // a permanent report offset.
     let mut report_anchor: Vec<Option<(i32, f64)>> = vec![None; num_slaves];
+    let mut last_streamed_target: Vec<Option<i32>> = vec![None; num_slaves];
     let mut last_sent_retired: u32 = 0;
     let mut heartbeat_sent = false;
 
@@ -633,6 +638,12 @@ fn main() {
                 },
                 Command::Stop { correlation_id } => {
                     let now_ns = monotonic_ns();
+                    unsafe {
+                        for s in 0..num_slaves {
+                            ffi::ec_rt_disable(s as std::os::raw::c_int);
+                        }
+                    }
+                    gate.disable_finished();
                     for r in &mut rings {
                         r.reset();
                     }
@@ -641,7 +652,8 @@ fn main() {
                     }
                     stream_halt.halt();
                     eprintln!(
-                        "ec-rt: Stop — rings discarded, stream halted, discard_clock={now_ns}"
+                        "ec-rt: Stop — torque disabled on {num_slaves} slave(s), rings \
+                         discarded, stream halted, discard_clock={now_ns}"
                     );
                     server.respond(&stop_response_frame(correlation_id, 0, now_ns));
                 }
@@ -772,7 +784,9 @@ fn main() {
                     } else {
                         let anchor_mm = f64::from(home_q16) / 65536.0;
                         let anchor_counts =
-                            unsafe { ffi::ec_rt_get_position_actual(i32::from(slot)) };
+                            last_streamed_target[slot as usize].unwrap_or_else(|| unsafe {
+                                ffi::ec_rt_get_position_actual(i32::from(slot))
+                            });
                         report_anchor[slot as usize] = Some((anchor_counts, anchor_mm));
                         eprintln!(
                             "ec-rt: SeedServoHome slot={slot} report anchor \
@@ -1199,6 +1213,7 @@ fn main() {
                         }
                     }
                     last_counts[s] = Some(counts);
+                    last_streamed_target[s] = Some(counts);
                     unsafe {
                         ffi::ec_rt_set_target_position(slot, counts);
                         ffi::ec_rt_set_velocity_offset(slot, vel_offset);

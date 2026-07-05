@@ -248,11 +248,12 @@ fn main() {
                 Command::QueryMotorState { .. } => {}
                 Command::Stop { correlation_id } => {
                     let now_ns = monotonic_ns();
+                    gate.disable_finished();
                     ring.reset();
                     stream_halt.halt();
                     eprintln!(
-                        "ec-rt-stub: Stop — ring discarded, stream halted, \
-                         discard_clock={now_ns}"
+                        "ec-rt-stub: Stop — torque disabled, ring discarded, stream \
+                         halted, discard_clock={now_ns}"
                     );
                     server.respond(&stop_response_frame(correlation_id, 0, now_ns));
                 }
