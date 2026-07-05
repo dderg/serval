@@ -40,6 +40,7 @@ class ServoCalibration:
         self.speeds = config.getfloatlist("speeds", [100.0, 400.0])
         self.iterations = config.getint("iterations", 3, minval=1)
         self.dwell_ms = config.getint("dwell_ms", 700, minval=0)
+        self.travel_speed = config.getfloat("travel_speed", 100.0, above=0.0)
         for name in (
             "SERVO_MEASURE_TRACKING",
             "SERVO_MEASURE_INERTIA",
@@ -181,6 +182,19 @@ class ServoCalibration:
             ]
         self.gcode.run_script_from_command("\n".join(lines))
 
+    def _goto_xy(self, x, y, dwell):
+        self.gcode.run_script_from_command(
+            "\n".join(
+                [
+                    "G90",
+                    "G1 X%.3f Y%.3f F%d" % (x, y, int(self.travel_speed * 60)),
+                    "M400",
+                    "G4 P%d" % (dwell,),
+                    "M400",
+                ]
+            )
+        )
+
     def _prep(self, axis, dwell):
         curtime = self.printer.get_reactor().monotonic()
         toolhead = self.printer.lookup_object("toolhead")
@@ -303,6 +317,8 @@ class ServoCalibration:
         servos = gcmd.get("SERVOS", ",".join(self.servos))
         x_start, x_end, y_start, y_end = self._xy_bounds(gcmd)
         accels, speeds, iterations, dwell = self._grid(gcmd)
+        x_center = (x_start + x_end) / 2.0
+        y_center = (y_start + y_end) / 2.0
         self._prep("X", dwell)
         self._prep("Y", dwell)
         self.gcode.run_script_from_command(
@@ -310,9 +326,11 @@ class ServoCalibration:
         )
         for accel in accels:
             for speed in speeds:
+                self._goto_xy(x_start, y_center, dwell)
                 self._strokes(
                     "X", x_start, x_end, speed, accel, iterations, dwell
                 )
+                self._goto_xy(x_center, y_start, dwell)
                 self._strokes(
                     "Y", y_start, y_end, speed, accel, iterations, dwell
                 )

@@ -43,6 +43,7 @@ they are configured or passed.
 | `speeds` | `100, 400` | excitation grid (`SPEEDS=`) |
 | `iterations` | `3` | strokes per grid point (`ITERATIONS=`) |
 | `dwell_ms` | `700` | settle between strokes (`DWELL_MS=`) |
+| `travel_speed` | `100` | CoreXY centering moves between grid points |
 
 Prerequisites: the EtherCAT servo stack (`[servo_param]`, `[servo_capture]`)
 must be configured, and the fitter must be built once on the host with
@@ -85,7 +86,10 @@ capture building block behind the fit commands). Params: `AXIS` (X) `START`
 #### SERVO_MEASURE_INERTIA_COREXY
 One capture of **both** drives with X and Y strokes at every grid point, so the
 coupled fit can separate the diagonal and off-diagonal inertia (X strokes
-excite `m_diag+m_off`, Y strokes `m_diag−m_off`). Params: `SERVOS` `X_START`
+excite `m_diag+m_off`, Y strokes `m_diag−m_off`). Before each stroke set the
+toolhead moves (at `travel_speed`) to the active axis' start with the idle axis
+centered in its range, so both belt runs are near-equal length during the
+measurement. Params: `SERVOS` `X_START`
 `X_END` `Y_START` `Y_END` `ACCELS` `SPEEDS` `ITERATIONS` `DWELL_MS` `NAME`
 (ident).
 
