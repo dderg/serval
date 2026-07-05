@@ -1,5 +1,5 @@
 use thiserror::Error;
-use trajectory::{AxisChainSet, CompiledChain, PostProcessorInstance, PostProcessorType};
+use trajectory::{AxisChainSet, CompiledChain, PostProcessorInstance, post_processors};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PostProcessorDecl {
@@ -10,20 +10,16 @@ pub struct PostProcessorDecl {
 
 #[derive(Debug, Error)]
 pub enum PostProcessorConfigError {
-    #[error(
-        "unsupported [post_processor {name}] type: '{kind}'. Use smooth_zv,          smooth_mzv or linear_pressure_advance"
-    )]
-    UnsupportedKind { name: String, kind: String },
+    #[error("unsupported [post_processor {name}] type: '{kind}'. Supported types: {supported}")]
+    UnsupportedKind {
+        name: String,
+        kind: String,
+        supported: String,
+    },
     #[error("duplicate [post_processor {name}]")]
     Duplicate { name: String },
     #[error("[post_processor {name}]: missing required parameter '{key}'")]
     MissingParam { name: String, key: String },
-    #[error("[post_processor {name}]: parameter '{key}' must be finite and > 0, got {value}")]
-    BadParamValue {
-        name: String,
-        key: String,
-        value: f64,
-    },
     #[error("{0}")]
     Param(#[from] trajectory::PostProcessorError),
     #[error("unknown post_processor '{name}'")]
@@ -126,68 +122,39 @@ impl PostProcessorSet {
 fn build_instance(
     d: &PostProcessorDecl,
 ) -> Result<PostProcessorInstance, PostProcessorConfigError> {
-    let required_param = match d.ty.as_str() {
-        "smooth_zv" | "smooth_mzv" => "frequency_hz",
-        "linear_pressure_advance" => "k",
-        other => {
-            return Err(PostProcessorConfigError::UnsupportedKind {
+    let algo = post_processors::lookup(&d.ty).ok_or_else(|| {
+        PostProcessorConfigError::UnsupportedKind {
+            name: d.name.clone(),
+            kind: d.ty.clone(),
+            supported: post_processors::supported_type_names().join(", "),
+        }
+    })?;
+    for (key, _) in &d.params {
+        if !algo.params().iter().any(|spec| spec.key == key) {
+            return Err(trajectory::PostProcessorError::UnknownParam {
                 name: d.name.clone(),
-                kind: other.to_string(),
-            });
+                key: key.clone(),
+            }
+            .into());
         }
-    };
-    let required_value = d
-        .params
+    }
+    let values = algo
+        .params()
         .iter()
-        .find(|(k, _)| k == required_param)
-        .map(|(_, v)| *v)
-        .ok_or_else(|| PostProcessorConfigError::MissingParam {
-            name: d.name.clone(),
-            key: required_param.to_string(),
-        })?;
-    let ty = match d.ty.as_str() {
-        "smooth_zv" => {
-            require_positive(d, required_param, required_value)?;
-            PostProcessorType::SmoothZv {
-                frequency_hz: required_value,
-            }
-        }
-        "smooth_mzv" => {
-            require_positive(d, required_param, required_value)?;
-            PostProcessorType::SmoothMzv {
-                frequency_hz: required_value,
-            }
-        }
-        "linear_pressure_advance" => PostProcessorType::LinearPressureAdvance { k: required_value },
-        _ => unreachable!("ty validated above"),
-    };
-    let mut inst = PostProcessorInstance::new(&d.name, ty);
-    if d.ty == "linear_pressure_advance" {
-        inst.set_param(required_param, required_value)?;
-    }
-    for (key, value) in &d.params {
-        if key == required_param {
-            continue;
-        }
-        inst.set_param(key, *value)?;
-    }
-    Ok(inst)
-}
-
-fn require_positive(
-    d: &PostProcessorDecl,
-    key: &str,
-    value: f64,
-) -> Result<(), PostProcessorConfigError> {
-    if value.is_finite() && value > 0.0 {
-        Ok(())
-    } else {
-        Err(PostProcessorConfigError::BadParamValue {
-            name: d.name.clone(),
-            key: key.to_string(),
-            value,
+        .map(|spec| {
+            d.params
+                .iter()
+                .find(|(key, _)| key == spec.key)
+                .map(|(_, value)| *value)
+                .ok_or_else(|| PostProcessorConfigError::MissingParam {
+                    name: d.name.clone(),
+                    key: spec.key.to_string(),
+                })
         })
-    }
+        .collect::<Result<Vec<f64>, _>>()?;
+    let inst = PostProcessorInstance::new(&d.name, algo, values);
+    inst.validate()?;
+    Ok(inst)
 }
 
 const SPATIAL: [&str; 3] = ["x", "y", "z"];

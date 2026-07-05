@@ -1,28 +1,11 @@
-use crate::kernel::{build_smooth_mzv_kernel, build_smooth_zv_kernel};
+use crate::post_processors::PostProcessorAlgo;
 use nurbs::algebra::PiecewisePolynomialKernel;
-
-pub const SMOOTH_ZV_T_SM_PER_HZ: f64 = 0.8025;
-pub const SMOOTH_MZV_T_SM_PER_HZ: f64 = 0.95625;
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum PostProcessorType {
-    SmoothZv { frequency_hz: f64 },
-    SmoothMzv { frequency_hz: f64 },
-    LinearPressureAdvance { k: f64 },
-}
-
-impl PostProcessorType {
-    #[must_use]
-    pub fn into_chain(self) -> CompiledChain {
-        CompiledChain::compile(&[PostProcessorInstance::new("inline", self)])
-            .expect("a single post-processor always compiles")
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct PostProcessorInstance {
     name: String,
-    ty: PostProcessorType,
+    algo: &'static dyn PostProcessorAlgo,
+    values: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +22,13 @@ impl ChainStage {
             Self::LinearPressureAdvance { .. } => (0.0, 0.0),
         }
     }
+
+    fn composition_slot(&self) -> (usize, &'static str) {
+        match self {
+            Self::SmoothKernel(_) => (0, "kernel"),
+            Self::LinearPressureAdvance { .. } => (1, "derivative-gain"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -50,7 +40,7 @@ pub struct CompiledChain {
 pub enum PostProcessorError {
     #[error("post_processor '{name}': unknown parameter '{key}'")]
     UnknownParam { name: String, key: String },
-    #[error("post_processor '{name}': '{key}' must be finite and >= 0, got {value}")]
+    #[error("post_processor '{name}': parameter '{key}' is out of range, got {value}")]
     BadParam {
         name: String,
         key: String,
@@ -64,10 +54,19 @@ pub enum PostProcessorError {
 }
 
 impl PostProcessorInstance {
-    pub fn new(name: &str, ty: PostProcessorType) -> Self {
+    pub fn new(name: &str, algo: &'static dyn PostProcessorAlgo, values: Vec<f64>) -> Self {
+        assert_eq!(
+            values.len(),
+            algo.params().len(),
+            "post_processor '{name}': {} expects {} param values, got {}",
+            algo.type_name(),
+            algo.params().len(),
+            values.len()
+        );
         Self {
             name: name.to_string(),
-            ty,
+            algo,
+            values,
         }
     }
 
@@ -77,134 +76,66 @@ impl PostProcessorInstance {
     }
 
     #[must_use]
-    pub fn ty(&self) -> &PostProcessorType {
-        &self.ty
+    pub fn algo(&self) -> &'static dyn PostProcessorAlgo {
+        self.algo
+    }
+
+    #[must_use]
+    pub fn param(&self, key: &str) -> Option<f64> {
+        self.algo
+            .params()
+            .iter()
+            .position(|spec| spec.key == key)
+            .map(|idx| self.values[idx])
     }
 
     pub fn validate(&self) -> Result<(), PostProcessorError> {
-        match self.ty {
-            PostProcessorType::SmoothZv { frequency_hz }
-            | PostProcessorType::SmoothMzv { frequency_hz } => {
-                if frequency_hz.is_finite() && frequency_hz > 0.0 {
-                    Ok(())
-                } else {
-                    Err(PostProcessorError::BadParam {
-                        name: self.name.clone(),
-                        key: "frequency_hz".to_string(),
-                        value: frequency_hz,
-                    })
-                }
-            }
-            PostProcessorType::LinearPressureAdvance { k } => {
-                if k.is_finite() && k >= 0.0 {
-                    Ok(())
-                } else {
-                    Err(PostProcessorError::BadParam {
-                        name: self.name.clone(),
-                        key: "k".to_string(),
-                        value: k,
-                    })
-                }
-            }
-        }
+        self.algo
+            .params()
+            .iter()
+            .zip(&self.values)
+            .try_for_each(|(spec, value)| spec.check(&self.name, *value))
     }
 
     pub fn set_param(&mut self, key: &str, value: f64) -> Result<(), PostProcessorError> {
-        let unknown = || PostProcessorError::UnknownParam {
-            name: self.name.clone(),
-            key: key.to_string(),
-        };
-        match &mut self.ty {
-            PostProcessorType::SmoothZv { frequency_hz }
-            | PostProcessorType::SmoothMzv { frequency_hz } => {
-                if key == "frequency_hz" {
-                    if !(value.is_finite() && value > 0.0) {
-                        return Err(PostProcessorError::BadParam {
-                            name: self.name.clone(),
-                            key: key.to_string(),
-                            value,
-                        });
-                    }
-                    *frequency_hz = value;
-                    Ok(())
-                } else {
-                    Err(unknown())
-                }
-            }
-            PostProcessorType::LinearPressureAdvance { k } => {
-                if key == "k" {
-                    if !(value.is_finite() && value >= 0.0) {
-                        return Err(PostProcessorError::BadParam {
-                            name: self.name.clone(),
-                            key: key.to_string(),
-                            value,
-                        });
-                    }
-                    *k = value;
-                    Ok(())
-                } else {
-                    Err(unknown())
-                }
-            }
-        }
+        let idx = self
+            .algo
+            .params()
+            .iter()
+            .position(|spec| spec.key == key)
+            .ok_or_else(|| PostProcessorError::UnknownParam {
+                name: self.name.clone(),
+                key: key.to_string(),
+            })?;
+        self.algo.params()[idx].check(&self.name, value)?;
+        self.values[idx] = value;
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn into_chain(self) -> CompiledChain {
+        CompiledChain::compile(&[self]).expect("a single post-processor always compiles")
     }
 }
 
 impl CompiledChain {
     pub fn compile(chain: &[PostProcessorInstance]) -> Result<Self, PostProcessorError> {
         let mut compiled = Self::default();
-        let mut kernel_source: Option<&str> = None;
-        let mut gain_source: Option<&str> = None;
+        let mut slot_sources: [Option<&str>; 2] = [None, None];
         for inst in chain {
             inst.validate()?;
-            match inst.ty() {
-                PostProcessorType::SmoothZv { frequency_hz } => {
-                    if let Some(prev) = kernel_source {
-                        return Err(PostProcessorError::UnsupportedComposition {
-                            detail: format!(
-                                "second kernel post-processor '{}' after '{prev}'",
-                                inst.name()
-                            ),
-                        });
-                    }
-                    kernel_source = Some(inst.name());
-                    compiled
-                        .stages
-                        .push(ChainStage::SmoothKernel(build_smooth_zv_kernel(
-                            SMOOTH_ZV_T_SM_PER_HZ / *frequency_hz,
-                        )));
-                }
-                PostProcessorType::SmoothMzv { frequency_hz } => {
-                    if let Some(prev) = kernel_source {
-                        return Err(PostProcessorError::UnsupportedComposition {
-                            detail: format!(
-                                "second kernel post-processor '{}' after '{prev}'",
-                                inst.name()
-                            ),
-                        });
-                    }
-                    kernel_source = Some(inst.name());
-                    compiled
-                        .stages
-                        .push(ChainStage::SmoothKernel(build_smooth_mzv_kernel(
-                            SMOOTH_MZV_T_SM_PER_HZ / *frequency_hz,
-                        )));
-                }
-                PostProcessorType::LinearPressureAdvance { k } => {
-                    if let Some(prev) = gain_source {
-                        return Err(PostProcessorError::UnsupportedComposition {
-                            detail: format!(
-                                "second derivative-gain post-processor '{}' after '{prev}'",
-                                inst.name()
-                            ),
-                        });
-                    }
-                    gain_source = Some(inst.name());
-                    compiled
-                        .stages
-                        .push(ChainStage::LinearPressureAdvance { k: *k });
-                }
+            let stage = inst.algo.compile(&inst.values);
+            let (slot, kind) = stage.composition_slot();
+            if let Some(prev) = slot_sources[slot] {
+                return Err(PostProcessorError::UnsupportedComposition {
+                    detail: format!(
+                        "second {kind} post-processor '{}' after '{prev}'",
+                        inst.name()
+                    ),
+                });
             }
+            slot_sources[slot] = Some(inst.name());
+            compiled.stages.push(stage);
         }
         Ok(compiled)
     }

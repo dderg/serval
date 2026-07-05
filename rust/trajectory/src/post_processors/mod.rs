@@ -1,0 +1,58 @@
+use crate::post_processor::{ChainStage, PostProcessorError};
+
+mod linear_pressure_advance;
+mod smooth_mzv;
+mod smooth_zv;
+
+pub use linear_pressure_advance::LinearPressureAdvance;
+pub use smooth_mzv::{SmoothMzv, SMOOTH_MZV_T_SM_PER_HZ};
+pub use smooth_zv::{SmoothZv, SMOOTH_ZV_T_SM_PER_HZ};
+
+pub static REGISTRY: &[&dyn PostProcessorAlgo] = &[&SmoothZv, &SmoothMzv, &LinearPressureAdvance];
+
+pub fn lookup(type_name: &str) -> Option<&'static dyn PostProcessorAlgo> {
+    REGISTRY
+        .iter()
+        .copied()
+        .find(|algo| algo.type_name() == type_name)
+}
+
+pub fn supported_type_names() -> Vec<&'static str> {
+    REGISTRY.iter().map(|algo| algo.type_name()).collect()
+}
+
+pub trait PostProcessorAlgo: std::fmt::Debug + Send + Sync {
+    fn type_name(&self) -> &'static str;
+    fn params(&self) -> &'static [ParamSpec];
+    fn compile(&self, values: &[f64]) -> ChainStage;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bound {
+    Positive,
+    NonNegative,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ParamSpec {
+    pub key: &'static str,
+    pub bound: Bound,
+}
+
+impl ParamSpec {
+    pub fn check(&self, owner_name: &str, value: f64) -> Result<(), PostProcessorError> {
+        let ok = match self.bound {
+            Bound::Positive => value.is_finite() && value > 0.0,
+            Bound::NonNegative => value.is_finite() && value >= 0.0,
+        };
+        if ok {
+            Ok(())
+        } else {
+            Err(PostProcessorError::BadParam {
+                name: owner_name.to_string(),
+                key: self.key.to_string(),
+                value,
+            })
+        }
+    }
+}

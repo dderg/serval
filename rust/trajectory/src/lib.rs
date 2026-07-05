@@ -4,11 +4,11 @@ mod kernel;
 #[cfg(test)]
 mod pad;
 pub mod post_processor;
+pub mod post_processors;
 mod shaper;
 
 pub use post_processor::{
     AxisChainSet, ChainStage, CompiledChain, PostProcessorError, PostProcessorInstance,
-    PostProcessorType,
 };
 pub use shaper::ShapedSignal;
 
