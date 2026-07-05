@@ -309,23 +309,46 @@ class FakeFaultEngine:
         return self._fault
 
 
+def make_servo_entries(*specs):
+    return [
+        {
+            "rail": FakeRail([], name),
+            "handle": handle,
+            "slot": slot,
+            "limits": limits,
+        }
+        for name, handle, slot, limits in specs
+    ]
+
+
 def test_post_trip_fault_check_raises_on_fault():
     engine = FakeFaultEngine(0x8611)
+    entries = make_servo_entries(("servo_x", 7, 0, (8192, 500)))
     with pytest.raises(RuntimeError, match="drive fault 0x8611"):
-        homing_mod._check_servo_drive_fault(FakeGcmd(), engine, 0, 7)
+        homing_mod._check_servo_drive_fault(FakeGcmd(), engine, 0, entries)
     assert engine.taken == [7]
 
 
 def test_post_trip_fault_check_passes_without_fault():
     engine = FakeFaultEngine(None)
-    homing_mod._check_servo_drive_fault(FakeGcmd(), engine, 0, 7)
+    entries = make_servo_entries(("servo_x", 7, 0, (8192, 500)))
+    homing_mod._check_servo_drive_fault(FakeGcmd(), engine, 0, entries)
     assert engine.taken == [7]
 
 
 def test_post_trip_fault_check_skips_non_servo():
     engine = FakeFaultEngine(0x8611)
-    homing_mod._check_servo_drive_fault(FakeGcmd(), engine, 0, None)
+    homing_mod._check_servo_drive_fault(FakeGcmd(), engine, 0, [])
     assert engine.taken == []
+
+
+def test_post_trip_fault_check_queries_shared_handle_once():
+    engine = FakeFaultEngine(None)
+    entries = make_servo_entries(
+        ("servo_x", 7, 0, (8192, 500)), ("servo_y", 7, 1, (8192, 500))
+    )
+    homing_mod._check_servo_drive_fault(FakeGcmd(), engine, 0, entries)
+    assert engine.taken == [7]
 
 
 class FakeServoEngine(FakeLimitsEngine):
@@ -339,9 +362,14 @@ class FakeServoEngine(FakeLimitsEngine):
 
 
 def run_guarded_trip(engine, se, servo_handle, servo_limits, trip):
-    rail = FakeRail([], "servo_x")
+    if servo_handle is None:
+        servo_rails = []
+    else:
+        servo_rails = make_servo_entries(
+            ("servo_x", servo_handle, 0, servo_limits)
+        )
     return homing_mod._run_servo_guarded_trip(
-        FakeGcmd(), engine, 0, se, rail, servo_handle, 0, servo_limits, trip
+        FakeGcmd(), engine, 0, se, servo_rails, trip
     )
 
 
@@ -524,6 +552,47 @@ def test_guarded_trip_success_keeps_servo_motor_enabled():
     result = run_guarded_trip(engine, se, 7, (8192, 500), lambda: (1.0, 2.0))
     assert result == (1.0, 2.0)
     assert se.calls == []
+
+
+def test_guarded_trip_applies_limits_to_every_servo_rail():
+    engine = FakeServoEngine()
+    se = FakeStepperEnable()
+    servo_rails = make_servo_entries(
+        ("servo_x", 7, 0, (8192, 500)), ("servo_y", 7, 1, (4096, 300))
+    )
+    homing_mod._run_servo_guarded_trip(
+        FakeGcmd(), engine, 0, se, servo_rails, lambda: (1.0, 2.0)
+    )
+    assert engine.calls == [
+        ("set", 7, 0, 8192, 500),
+        ("set", 7, 1, 4096, 300),
+        ("restore", 7, 1),
+        ("restore", 7, 0),
+        ("take_fault", 7),
+    ]
+
+
+def test_guarded_trip_failure_disables_every_servo_rail():
+    engine = FakeServoEngine()
+    se = FakeStepperEnable()
+    servo_rails = make_servo_entries(
+        ("servo_x", 7, 0, (8192, 500)), ("servo_y", 7, 1, (4096, 300))
+    )
+
+    def trip():
+        raise RuntimeError("trip move failed")
+
+    with pytest.raises(RuntimeError, match="trip move failed"):
+        homing_mod._run_servo_guarded_trip(
+            FakeGcmd(), engine, 0, se, servo_rails, trip
+        )
+    assert se.calls == [("servo_x", False), ("servo_y", False)]
+    assert engine.calls == [
+        ("set", 7, 0, 8192, 500),
+        ("set", 7, 1, 4096, 300),
+        ("restore", 7, 1),
+        ("restore", 7, 0),
+    ]
 
 
 def test_guarded_trip_stepper_rail_failure_skips_servo_disable():

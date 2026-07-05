@@ -50,34 +50,45 @@ def _run_servo_guarded_trip(
     engine,
     axis,
     stepper_enable,
-    rail,
-    servo_handle,
-    servo_slot,
-    servo_limits,
+    servo_rails,
     trip,
 ):
     try:
-        with _servo_drive_limits(
-            engine, servo_handle, servo_slot, servo_limits
-        ):
+        with contextlib.ExitStack() as stack:
+            for entry in servo_rails:
+                stack.enter_context(
+                    _servo_drive_limits(
+                        engine,
+                        entry["handle"],
+                        entry["slot"],
+                        entry["limits"],
+                    )
+                )
             result = trip()
-        _check_servo_drive_fault(gcmd, engine, axis, servo_handle)
+        _check_servo_drive_fault(gcmd, engine, axis, servo_rails)
     except BaseException:
-        if servo_handle is not None:
-            stepper_enable.motor_debug_enable(rail.get_name(), False)
+        for entry in servo_rails:
+            stepper_enable.motor_debug_enable(entry["rail"].get_name(), False)
         raise
     return result
 
 
-def _check_servo_drive_fault(gcmd, engine, axis, servo_handle):
-    if servo_handle is None:
-        return
-    fault = engine.take_drive_fault(servo_handle)
-    if fault is not None:
-        raise gcmd.error(
-            "%s homing: drive fault 0x%04x at endstop contact — "
-            "following-error/torque limit exceeded" % ("XYZ"[axis], fault)
-        )
+def _servo_handles(servo_rails):
+    handles = []
+    for entry in servo_rails:
+        if all(entry["handle"] is not h for h in handles):
+            handles.append(entry["handle"])
+    return handles
+
+
+def _check_servo_drive_fault(gcmd, engine, axis, servo_rails):
+    for handle in _servo_handles(servo_rails):
+        fault = engine.take_drive_fault(handle)
+        if fault is not None:
+            raise gcmd.error(
+                "%s homing: drive fault 0x%04x at endstop contact — "
+                "following-error/torque limit exceeded" % ("XYZ"[axis], fault)
+            )
 
 
 def _homed_axis_position(provider, axis, trip_pos, final_pos, trigger_position):
@@ -362,20 +373,14 @@ class Homing:
         max_travel,
         entry,
         stepper_enable,
-        rail,
-        servo_handle,
-        servo_slot,
-        servo_limits,
+        servo_rails,
     ):
         return _run_servo_guarded_trip(
             gcmd,
             engine,
             axis,
             stepper_enable,
-            rail,
-            servo_handle,
-            servo_slot,
-            servo_limits,
+            servo_rails,
             lambda: self.trip_move(
                 gcmd,
                 toolhead,
@@ -418,21 +423,17 @@ class Homing:
         stepper_enable = self.printer.lookup_object("stepper_enable")
         homing_deltas = [0.0, 0.0, 0.0]
         homing_deltas[axis] = 1.0
+        active_rails = kin.active_rails(*homing_deltas)
         homing_names = []
-        for active_rail in kin.active_rails(*homing_deltas):
+        for active_rail in active_rails:
             homing_names.extend(_homing_motor_names(active_rail))
         stepper_enable.motor_enable_group(homing_names)
 
+        servo_rails = self._active_servo_rails(gcmd, axis, active_rails)
         servo_handle = None
-        servo_slot = None
-        servo_limits = None
-        if hasattr(rail, "get_node_name"):
-            node = self.printer.lookup_object(
-                "ethercat_node " + rail.get_node_name()
-            )
-            servo_handle = node.get_engine_handle()
-            servo_slot = node.get_slot_for_motor(rail.get_motor_name())
-            servo_limits = rail.get_homing_drive_limits()
+        for entry in servo_rails:
+            if entry["rail"] is rail:
+                servo_handle = entry["handle"]
 
         self._set_homing_current(toolhead, rail, pre_homing=True)
         try:
@@ -450,10 +451,7 @@ class Homing:
                     mt,
                     entry,
                     stepper_enable,
-                    rail,
-                    servo_handle,
-                    servo_slot,
-                    servo_limits,
+                    servo_rails,
                 )
 
             trip_pos, final_pos = _run_homing_attempts(
@@ -480,7 +478,7 @@ class Homing:
                 provider,
                 servo_handle,
             )
-            _check_servo_drive_fault(gcmd, engine, axis, servo_handle)
+            _check_servo_drive_fault(gcmd, engine, axis, servo_rails)
         except BaseException:
             try:
                 self._set_homing_current(toolhead, rail, pre_homing=False)
@@ -491,6 +489,33 @@ class Homing:
             raise
         else:
             self._set_homing_current(toolhead, rail, pre_homing=False)
+
+    def _active_servo_rails(self, gcmd, axis, active_rails):
+        servo_rails = []
+        for active_rail in active_rails:
+            if not hasattr(active_rail, "get_node_name"):
+                continue
+            limits = active_rail.get_homing_drive_limits()
+            if limits[1] <= 0:
+                raise gcmd.error(
+                    "%s homing: motor %s drives this axis but has no homing"
+                    " torque limit (its axis has no endstop_pin)"
+                    % ("XYZ"[axis], active_rail.get_motor_name())
+                )
+            node = self.printer.lookup_object(
+                "ethercat_node " + active_rail.get_node_name()
+            )
+            servo_rails.append(
+                {
+                    "rail": active_rail,
+                    "handle": node.get_engine_handle(),
+                    "slot": node.get_slot_for_motor(
+                        active_rail.get_motor_name()
+                    ),
+                    "limits": limits,
+                }
+            )
+        return servo_rails
 
     def _set_homing_current(self, toolhead, rail, pre_homing):
         print_time = toolhead.get_last_move_time()

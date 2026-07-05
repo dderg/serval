@@ -1,25 +1,36 @@
-use servo_ident::capture::{parse_capture_csv, restrict_to_steady_accel, Capture, PlateauOptions};
+use servo_ident::capture::{
+    parse_capture_csv, restrict_to_steady_accel, restrict_to_tracking, Capture, PlateauOptions,
+    TrackingOptions,
+};
 use servo_ident::model::PhysicalParams;
 use servo_ident::profile_out::{c0006_recommendation, render_profile};
 
 #[test]
 fn parses_commanded_kinematics_columns() {
-    let mut csv = String::from("t,accel_x,vel_x,torque_x\n");
+    let mut csv = String::from("t,accel_x,vel_x,vel_act_x,torque_x\n");
     for k in 0..100 {
         let t = k as f64 * 0.001;
-        csv.push_str(&format!("{t},{},{},{}\n", 1000.0, 50.0 * t, 12.0));
+        csv.push_str(&format!(
+            "{t},{},{},{},{}\n",
+            1000.0,
+            50.0 * t,
+            50.0 * t - 0.5,
+            12.0
+        ));
     }
     let cap = parse_capture_csv(&csv, &["x"]).unwrap();
     assert_eq!(cap.torque[0][50], 12.0);
     assert_eq!(cap.acc[0][50], 1000.0);
     assert!((cap.vel[0][50] - 50.0 * 0.050).abs() < 1e-9);
+    assert!((cap.vel_act[0][50] - (50.0 * 0.050 - 0.5)).abs() < 1e-9);
     assert_eq!(cap.acc[0].len(), 100);
 }
 
 #[test]
 fn rejects_missing_column() {
-    // accel, vel, and torque columns are all required now.
-    assert!(parse_capture_csv("t,accel_x,vel_x\n0,0,0\n", &["x"]).is_err());
+    // accel, vel, vel_act, and torque columns are all required.
+    assert!(parse_capture_csv("t,accel_x,vel_x,vel_act_x\n0,0,0,0\n", &["x"]).is_err());
+    assert!(parse_capture_csv("t,accel_x,vel_x,torque_x\n0,0,0,0\n", &["x"]).is_err());
     assert!(parse_capture_csv("t,target_x,torque_x\n0,0,0\n", &["x"]).is_err());
 }
 
@@ -41,6 +52,7 @@ fn steady_accel_mask_keeps_plateau_drops_ramp() {
         t,
         acc: vec![acc],
         vel: vec![vec![0.0; n]],
+        vel_act: vec![vec![0.0; n]],
         torque: vec![vec![5.0; n]],
     };
     let masked = restrict_to_steady_accel(&cap, &PlateauOptions::default());
@@ -52,6 +64,42 @@ fn steady_accel_mask_keeps_plateau_drops_ramp() {
         masked.acc[0].len() >= 40 && masked.acc[0].len() <= 60,
         "kept {}",
         masked.acc[0].len()
+    );
+}
+
+#[test]
+fn tracking_mask_drops_stiction_and_overshoot() {
+    // 1 kHz stroke launch: commanded velocity ramps 0→300; the motor sticks
+    // at zero for the first 40 cycles, overshoots to ~1.6x for the next 30,
+    // then tracks within a small lag.
+    let n = 200;
+    let t: Vec<f64> = (0..n).map(|k| k as f64 * 0.001).collect();
+    let vel: Vec<f64> = (0..n).map(|k| (k as f64 * 3.0).min(300.0)).collect();
+    let vel_act: Vec<f64> = (0..n)
+        .map(|k| match k {
+            0..=39 => 0.0,
+            40..=69 => 480.0,
+            _ => (k as f64 * 3.0).min(300.0) - 20.0,
+        })
+        .collect();
+    let cap = Capture {
+        t,
+        acc: vec![vec![3000.0; n]],
+        vel: vec![vel],
+        vel_act: vec![vel_act],
+        torque: vec![vec![100.0; n]],
+    };
+    // tol = 0.2 * 300 = 60 mm/s: the first cycles of the stuck phase pass
+    // (commanded velocity still small), the rest of the stick and the whole
+    // overshoot are dropped, the lagging-but-tracking tail is kept.
+    let masked = restrict_to_tracking(&cap, &TrackingOptions::default());
+    assert_eq!(masked.t.len(), 21 + (n - 70));
+    assert!(
+        masked
+            .t
+            .iter()
+            .all(|&t| t <= 0.020 + 1e-9 || t >= 0.070 - 1e-9),
+        "kept a stuck/overshoot sample"
     );
 }
 

@@ -154,6 +154,9 @@ def main(argv=None):
     sys.stdout.write(proc.stdout)
     if proc.returncode != 0:
         raise SystemExit(proc.returncode)
+    if not os.path.exists(out_path):
+        print("no dynamics profile written (nonphysical fit - see analysis above)")
+        return 0
     print("profile: %s" % (out_path,))
     for axis in axes:
         print(

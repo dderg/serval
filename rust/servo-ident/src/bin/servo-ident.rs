@@ -3,7 +3,10 @@
 //!   [--rated-torque-nm T --rotor-inertia-kgm2 J --rotation-distance-mm D]
 #![allow(clippy::exit)]
 
-use servo_ident::capture::{parse_capture_csv, restrict_to_steady_accel, PlateauOptions};
+use servo_ident::capture::{
+    parse_capture_csv, restrict_to_steady_accel, restrict_to_tracking, PlateauOptions,
+    TrackingOptions,
+};
 use servo_ident::fit::{fit, FitInput, FitOptions};
 use servo_ident::model::Structure;
 use servo_ident::profile_out::{c0006_recommendation, render_profile};
@@ -84,9 +87,22 @@ fn main() {
         std::process::exit(1);
     });
     let total = cap.t.len();
+    let cap = restrict_to_tracking(&cap, &TrackingOptions::default());
+    let tracked = cap.t.len();
+    eprintln!(
+        "tracking mask: kept {tracked}/{total} samples where actual velocity follows commanded"
+    );
+    if tracked == 0 {
+        eprintln!(
+            "servo-ident: the drive never tracked the commanded trajectory — \
+             stiction breakaway or an untuned/lagging loop; enable velocity \
+             feedforward and check the mechanics, then re-capture"
+        );
+        std::process::exit(2);
+    }
     let cap = restrict_to_steady_accel(&cap, &PlateauOptions::default());
     let kept = cap.t.len();
-    eprintln!("plateau mask: kept {kept}/{total} samples on steady-accel plateaus");
+    eprintln!("plateau mask: kept {kept}/{tracked} tracked samples on steady-accel plateaus");
     if kept == 0 {
         eprintln!(
             "servo-ident: no steady-accel plateaus in capture — strokes too short \
@@ -109,6 +125,11 @@ fn main() {
         "fit: {} samples/motor, rms residual {:.2} (0.1% rated), condition {:.1e}",
         r.samples, r.rms_residual, r.condition
     );
+    let min_diag = (0..r.params.mass.len())
+        .map(|i| r.params.mass[i][i])
+        .fold(f64::INFINITY, f64::min);
+    let physical = min_diag > 0.0;
+
     if let (Some(t), Some(j), Some(d)) = (
         opt_f64(&args, "--rated-torque-nm"),
         opt_f64(&args, "--rotor-inertia-kgm2"),
@@ -131,6 +152,18 @@ fn main() {
                 c0006_recommendation(m_heavy, t, d, j)
             );
         }
+    }
+
+    if !physical {
+        eprintln!(
+            "servo-ident: fitted diagonal mass {min_diag:.5} <= 0 is physically \
+             impossible — C00.06 is J_load/J_rotor and load inertia cannot be \
+             negative (drive accepts 0..12000%). The captured torque runs opposite \
+             to the commanded acceleration: a drive torque-polarity / \
+             invert_direction sign mismatch, not a real inertia. No profile written \
+             — fix the capture sign convention and re-run."
+        );
+        return;
     }
 
     let rms = vec![r.rms_residual; axes.len()];

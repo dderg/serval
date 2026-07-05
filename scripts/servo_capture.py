@@ -292,15 +292,23 @@ def export_ident_csv(path, header, drive_datas):
     t = (cycle_index - cycle_index[0]) * (header["cycle_ns"] * 1e-9)
     moving = (first["flags"] & FLAG_MOTION_ACTIVE) != 0
     columns = [t[moving]]
-    for _, data in drive_datas:
-        for channel in ("accel_cmd", "vel_cmd", "torque_actual"):
-            columns.append(data[channel].astype(np.float64)[moving])
+    for idx, data in drive_datas:
+        counts_per_mm = header["drives"][idx]["counts_per_mm"]
+        columns.append(data["accel_cmd"].astype(np.float64)[moving])
+        columns.append(data["vel_cmd"].astype(np.float64)[moving])
+        columns.append(
+            data["velocity_actual"].astype(np.float64)[moving] / counts_per_mm
+        )
+        columns.append(data["torque_actual"].astype(np.float64)[moving])
     rows = list(zip(*columns))
     fmt = "%.6f" + ",%.9g" * (len(columns) - 1) + "\n"
     with open(path, "w") as f:
         f.write(
             "t,"
-            + ",".join("accel_%s,vel_%s,torque_%s" % (a, a, a) for a in axes)
+            + ",".join(
+                "accel_%s,vel_%s,vel_act_%s,torque_%s" % (a, a, a, a)
+                for a in axes
+            )
             + "\n"
         )
         for row in rows:

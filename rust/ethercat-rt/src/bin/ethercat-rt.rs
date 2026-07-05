@@ -29,6 +29,7 @@ use ethercat_rt::seed_home::{
 };
 use ethercat_rt::sensorless::{SensorlessBank, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
 use ethercat_rt::server::FrameServer;
+use ethercat_rt::stream_halt::StreamHalt;
 use ethercat_rt::torque::{
     CommandAction, TickAction, TorqueGate, TorqueState, ERR_ENABLE_FAILED, ERR_PIECES_WHILE_FAULTED,
 };
@@ -527,6 +528,7 @@ fn main() {
     let mut wkc_consecutive = 0u8;
     let mut latched_drive_err: u16 = 0;
     let mut sensorless = SensorlessBank::new(num_slaves);
+    let mut stream_halt = StreamHalt::default();
     'dc: loop {
         if SIGTERM_RECEIVED.load(Ordering::Acquire) {
             eprintln!("ec-rt: SIGTERM received — disabling drive and exiting");
@@ -579,6 +581,8 @@ fn main() {
                         .collect();
                     let result = if gate.state() == TorqueState::Faulted {
                         ERR_PIECES_WHILE_FAULTED
+                    } else if let Err(code) = stream_halt.check_push_allowed() {
+                        code
                     } else {
                         match plan_bundle(&msg.axes, &slave_axes, |slot| rings[slot].free()) {
                             Ok(slots) => {
@@ -671,7 +675,10 @@ fn main() {
                     for c in &mut cmaps {
                         *c = None;
                     }
-                    eprintln!("ec-rt: Stop — rings discarded, discard_clock={now_ns}");
+                    stream_halt.halt();
+                    eprintln!(
+                        "ec-rt: Stop — rings discarded, stream halted, discard_clock={now_ns}"
+                    );
                     server.respond(&stop_response_frame(correlation_id, 0, now_ns));
                 }
                 Command::StartCapture {
@@ -715,9 +722,24 @@ fn main() {
                 Command::StopCapture { correlation_id } => {
                     pending_stops.push((correlation_id, capture.stop_async()));
                 }
-                Command::ResumeStream { correlation_id } => {
-                    server.respond(&resume_stream_response_frame(correlation_id, 0));
-                }
+                Command::ResumeStream { correlation_id } => match stream_halt.resume() {
+                    Ok(()) => {
+                        for r in &mut rings {
+                            r.reset();
+                        }
+                        for c in &mut cmaps {
+                            *c = None;
+                        }
+                        eprintln!("ec-rt: ResumeStream — stream reopened");
+                        server.respond(&resume_stream_response_frame(correlation_id, 0));
+                    }
+                    Err(code) => {
+                        eprintln!(
+                            "ec-rt: ResumeStream rejected code={code} — stream was not halted"
+                        );
+                        server.respond(&resume_stream_response_frame(correlation_id, code));
+                    }
+                },
                 Command::ClaimHandshake { .. } => {
                     eprintln!(
                         "ec-rt: protocol violation: ClaimHandshake after handshake \
@@ -1165,7 +1187,7 @@ fn main() {
             |slot, endstop_id, torque| {
                 eprintln!(
                     "ec-rt: sensorless endstop {endstop_id} tripped on slot {slot} \
-                     torque={torque} — local stop, trip_clock={now}"
+                     torque={torque} — local stop, stream halted, trip_clock={now}"
                 );
                 server.respond(&endstop_trip_frame(endstop_id, now));
             },
@@ -1177,6 +1199,7 @@ fn main() {
             for c in &mut cmaps {
                 *c = None;
             }
+            stream_halt.halt();
         }
 
         let mut motion_active = false;
