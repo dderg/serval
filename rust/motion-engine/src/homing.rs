@@ -1,5 +1,7 @@
 use std::sync::{Arc, Mutex};
 
+use crate::kinematics::{KinematicsModule, SPATIAL_AXES};
+use crate::mcu_config::McuAxisConfig;
 use crate::types::AxisKey;
 use host_rt::passthrough_queue::PassthroughRouter;
 
@@ -82,6 +84,52 @@ pub fn trajectory_final_position(
     store.final_position(axis_key).ok_or_else(|| {
         format!("trajectory_final_position: no recorded motion for axis {axis_key:?}")
     })
+}
+
+fn cartesian_from_motor_lanes(
+    cfg: &McuAxisConfig,
+    mut lane_position: impl FnMut(AxisKey) -> Result<f64, String>,
+) -> Result<[f64; SPATIAL_AXES], String> {
+    let mut motor_frame = [0.0_f64; SPATIAL_AXES];
+    for &lane in &cfg.axes {
+        if lane >= SPATIAL_AXES {
+            continue;
+        }
+        motor_frame[lane] = lane_position(AxisKey {
+            mcu_id: cfg.mcu_id,
+            axis: lane as u8,
+        })?;
+    }
+    Ok(KinematicsModule::from_tag(cfg.kinematics)
+        .map_err(|e| e.to_string())?
+        .inverse(motor_frame))
+}
+
+pub fn reconstruct_cartesian_position(
+    endstop_mcu: u32,
+    trip_clock: u64,
+    cfg: &McuAxisConfig,
+    router: &Arc<Mutex<PassthroughRouter>>,
+    history: &Arc<Mutex<crate::motion_history::HistoryStore>>,
+    window_start_host: f64,
+) -> Result<[f64; SPATIAL_AXES], String> {
+    cartesian_from_motor_lanes(cfg, |key| {
+        reconstruct_axis_position(
+            endstop_mcu,
+            trip_clock,
+            key,
+            router,
+            history,
+            window_start_host,
+        )
+    })
+}
+
+pub fn final_cartesian_position(
+    cfg: &McuAxisConfig,
+    history: &Arc<Mutex<crate::motion_history::HistoryStore>>,
+) -> Result<[f64; SPATIAL_AXES], String> {
+    cartesian_from_motor_lanes(cfg, |key| trajectory_final_position(key, history))
 }
 
 pub fn broadcast_stop<S, F>(

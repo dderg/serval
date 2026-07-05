@@ -2,14 +2,15 @@ use std::process::{Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use ethercat_rt::stream_halt::{ERR_PIECES_WHILE_HALTED, ERR_RESUME_STREAM_NOT_HALTED};
 use ethercat_rt::torque::ERR_PIECES_WHILE_FAULTED;
 use host_rt::mcu_call::McuCall;
 use host_rt::mcu_serial_conn::McuSerialConn;
 use mcu_protocol::codec::{Cursor, Decode, Encode};
 use mcu_protocol::messages::{
     ClaimHandshakeReply, MessageKind, PushPieces, PushPiecesResponse, RestoreDriveLimits,
-    RestoreDriveLimitsResponse, SetDriveLimits, SetDriveLimitsResponse, SetTorque,
-    SetTorqueResponse, StopResponse,
+    RestoreDriveLimitsResponse, ResumeStreamResponse, SetDriveLimits, SetDriveLimitsResponse,
+    SetTorque, SetTorqueResponse, StopResponse,
 };
 use runtime::piece_ring::PieceEntry;
 
@@ -103,6 +104,25 @@ fn send_stop(conn: &McuSerialConn) -> (i32, u64) {
     );
     let r = StopResponse::decode(&resp).expect("StopResponse must decode");
     (r.result, r.discard_clock)
+}
+
+fn send_resume_stream(conn: &McuSerialConn) -> i32 {
+    let (kind, resp) = conn
+        .mcu_call(
+            MessageKind::ResumeStream,
+            Vec::new(),
+            Duration::from_secs(5),
+        )
+        .expect("ResumeStream call must succeed");
+    assert_eq!(
+        kind,
+        MessageKind::ResumeStreamResponse,
+        "expected ResumeStreamResponse, got 0x{:04x}",
+        kind.as_u16()
+    );
+    ResumeStreamResponse::decode(&resp)
+        .expect("ResumeStreamResponse must decode")
+        .result
 }
 
 fn set_torque(conn: &McuSerialConn, value: bool, execute_at_ns: u64) -> i32 {
@@ -391,6 +411,51 @@ fn simulated_drive_fault_parks_keeps_serving_and_recovers() {
     assert_eq!(
         r, 0,
         "enable from Faulted must run the ladder and return 0, got {r}"
+    );
+
+    drop(conn);
+    let _ = guard.defuse().wait();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn stop_halts_stream_until_resume() {
+    let (mut guard, conn, path) = spawn_and_claim("halt-resume", &[]);
+
+    let r = set_torque(&conn, true, now_ns() + 50_000_000);
+    assert_eq!(r, 0, "enable must return 0, got {r}");
+
+    let r = push_one_piece(&conn, now_ns() + 10_000_000_000);
+    assert_eq!(r, 0, "push before Stop must be accepted, got {r}");
+
+    let (result, _clock) = send_stop(&conn);
+    assert_eq!(result, 0, "Stop must return 0, got {result}");
+
+    let r = push_one_piece(&conn, now_ns() + 10_000_000_000);
+    assert_eq!(
+        r, ERR_PIECES_WHILE_HALTED,
+        "push while halted must be rejected, got {r}"
+    );
+
+    let r = send_resume_stream(&conn);
+    assert_eq!(r, 0, "ResumeStream after Stop must return 0, got {r}");
+
+    let r = push_one_piece(&conn, now_ns() + 10_000_000_000);
+    assert_eq!(r, 0, "push after ResumeStream must be accepted, got {r}");
+
+    drop(conn);
+    let _ = guard.defuse().wait();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn resume_stream_without_halt_is_rejected() {
+    let (mut guard, conn, path) = spawn_and_claim("resume-nohalt", &[]);
+
+    let r = send_resume_stream(&conn);
+    assert_eq!(
+        r, ERR_RESUME_STREAM_NOT_HALTED,
+        "ResumeStream on an open stream must be rejected, got {r}"
     );
 
     drop(conn);

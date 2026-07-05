@@ -524,3 +524,136 @@ mod broadcast_stop_tests {
         assert!(err.contains("did not report a discard clock"), "got: {err}");
     }
 }
+
+mod corexy_reconstruction_tests {
+    use super::{FREQ, make_linear_piece, record_synced, router_with_clock, shared};
+    use crate::homing::{final_cartesian_position, reconstruct_cartesian_position};
+    use crate::mcu_config::{AXIS_X, AXIS_Y, McuAxisConfig, McuCaps};
+    use crate::motion_history::HistoryStore;
+    use crate::types::AxisKey;
+    use runtime::segment::KinematicTag;
+
+    fn corexy_cfg(mcu_id: u32) -> McuAxisConfig {
+        McuAxisConfig {
+            mcu_id,
+            axes: vec![AXIS_X, AXIS_Y],
+            kinematics: KinematicTag::CoreXy as u8,
+            caps: McuCaps {
+                total_piece_memory: 4096,
+            },
+        }
+    }
+
+    fn key(mcu_id: u32, axis: usize) -> AxisKey {
+        AxisKey {
+            mcu_id,
+            axis: axis as u8,
+        }
+    }
+
+    #[test]
+    fn trip_reconstruction_inverts_both_motor_lanes() {
+        const MCU_ID: u32 = 20;
+        const FREQ_F64: f64 = 180_000_000.0;
+        let router = router_with_clock(MCU_ID, FREQ_F64);
+
+        let piece_start: u64 = 1_000_000;
+        let duration_secs: f32 = 0.025;
+        #[allow(clippy::cast_possible_truncation)]
+        let duration_ticks = (duration_secs as f64 * FREQ_F64) as u64;
+
+        // Pure-X homing move from (0, 40): lane A = x + y goes 40 -> 140,
+        // lane B = x - y goes -40 -> 60.
+        let mut store = HistoryStore::default();
+        record_synced(
+            &mut store,
+            &router,
+            key(MCU_ID, AXIS_X),
+            &make_linear_piece(piece_start, duration_secs, 40.0, 140.0),
+            FREQ,
+        );
+        record_synced(
+            &mut store,
+            &router,
+            key(MCU_ID, AXIS_Y),
+            &make_linear_piece(piece_start, duration_secs, -40.0, 60.0),
+            FREQ,
+        );
+
+        let trip_clock = piece_start + duration_ticks / 2;
+        let cart = reconstruct_cartesian_position(
+            MCU_ID,
+            trip_clock,
+            &corexy_cfg(MCU_ID),
+            &router,
+            &shared(store),
+            f64::NEG_INFINITY,
+        )
+        .expect("corexy reconstruction must succeed");
+
+        assert!(
+            (cart[0] - 50.0).abs() < 0.5,
+            "x = (A+B)/2 midway must be ~50, got {:.4}",
+            cart[0]
+        );
+        assert!(
+            (cart[1] - 40.0).abs() < 0.5,
+            "y = (A-B)/2 must stay ~40 through a pure-X move, got {:.4}",
+            cart[1]
+        );
+    }
+
+    #[test]
+    fn trip_reconstruction_fails_when_a_lane_is_missing() {
+        const MCU_ID: u32 = 21;
+        let router = router_with_clock(MCU_ID, 180_000_000.0);
+
+        let mut store = HistoryStore::default();
+        record_synced(
+            &mut store,
+            &router,
+            key(MCU_ID, AXIS_X),
+            &make_linear_piece(1_000_000, 0.025, 0.0, 100.0),
+            FREQ,
+        );
+
+        let err = reconstruct_cartesian_position(
+            MCU_ID,
+            2_000_000,
+            &corexy_cfg(MCU_ID),
+            &router,
+            &shared(store),
+            f64::NEG_INFINITY,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("no motion history"),
+            "missing Y lane must fail loudly, got: {err}"
+        );
+    }
+
+    #[test]
+    fn final_position_inverts_both_motor_lanes() {
+        const MCU_ID: u32 = 22;
+        let mut store = HistoryStore::default();
+        store.record(
+            key(MCU_ID, AXIS_X),
+            &make_linear_piece(1_000_000, 0.025, 0.0, 300.0),
+            FREQ,
+            0.0,
+        );
+        store.record(
+            key(MCU_ID, AXIS_Y),
+            &make_linear_piece(1_000_000, 0.025, 0.0, 100.0),
+            FREQ,
+            0.0,
+        );
+
+        let cart = final_cartesian_position(&corexy_cfg(MCU_ID), &shared(store))
+            .expect("final corexy position must succeed");
+        assert!(
+            (cart[0] - 200.0).abs() < 1e-3 && (cart[1] - 100.0).abs() < 1e-3,
+            "A=300 B=100 must invert to x=200 y=100, got {cart:?}"
+        );
+    }
+}

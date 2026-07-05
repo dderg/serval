@@ -3,6 +3,7 @@ pub struct Capture {
     pub t: Vec<f64>,
     pub acc: Vec<Vec<f64>>,
     pub vel: Vec<Vec<f64>>,
+    pub vel_act: Vec<Vec<f64>>,
     pub torque: Vec<Vec<f64>>,
 }
 
@@ -33,6 +34,10 @@ pub fn parse_capture_csv(text: &str, axes: &[&str]) -> Result<Capture, CaptureEr
         .iter()
         .map(|a| col(&format!("vel_{a}")))
         .collect::<Result<_, _>>()?;
+    let vel_act_cols: Vec<usize> = axes
+        .iter()
+        .map(|a| col(&format!("vel_act_{a}")))
+        .collect::<Result<_, _>>()?;
     let torque_cols: Vec<usize> = axes
         .iter()
         .map(|a| col(&format!("torque_{a}")))
@@ -41,6 +46,7 @@ pub fn parse_capture_csv(text: &str, axes: &[&str]) -> Result<Capture, CaptureEr
     let mut t: Vec<f64> = Vec::new();
     let mut acc: Vec<Vec<f64>> = vec![Vec::new(); axes.len()];
     let mut vel: Vec<Vec<f64>> = vec![Vec::new(); axes.len()];
+    let mut vel_act: Vec<Vec<f64>> = vec![Vec::new(); axes.len()];
     let mut torque: Vec<Vec<f64>> = vec![Vec::new(); axes.len()];
 
     for (lineno, line) in lines {
@@ -58,14 +64,16 @@ pub fn parse_capture_csv(text: &str, axes: &[&str]) -> Result<Capture, CaptureEr
                 })
         };
         t.push(num(t_col)?);
-        for (a, ((&ac, &vc), &qc)) in accel_cols
+        for (a, (((&ac, &vc), &wc), &qc)) in accel_cols
             .iter()
             .zip(&vel_cols)
+            .zip(&vel_act_cols)
             .zip(&torque_cols)
             .enumerate()
         {
             acc[a].push(num(ac)?);
             vel[a].push(num(vc)?);
+            vel_act[a].push(num(wc)?);
             torque[a].push(num(qc)?);
         }
     }
@@ -78,8 +86,63 @@ pub fn parse_capture_csv(text: &str, axes: &[&str]) -> Result<Capture, CaptureEr
         t,
         acc,
         vel,
+        vel_act,
         torque,
     })
+}
+
+fn select(cap: &Capture, keep: &[usize]) -> Capture {
+    let pick = |cols: &[Vec<f64>]| -> Vec<Vec<f64>> {
+        cols.iter()
+            .map(|c| keep.iter().map(|&k| c[k]).collect())
+            .collect()
+    };
+    Capture {
+        t: keep.iter().map(|&k| cap.t[k]).collect(),
+        acc: pick(&cap.acc),
+        vel: pick(&cap.vel),
+        vel_act: pick(&cap.vel_act),
+        torque: pick(&cap.torque),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TrackingOptions {
+    /// Allowed |vel_act - vel_cmd| as a fraction of the capture's peak
+    /// |vel_cmd|. Wide enough to pass ordinary closed-loop lag on an accel
+    /// plateau, tight enough to drop stiction breakaway (actual velocity
+    /// stuck at zero) and post-breakaway overshoot.
+    pub tol_frac: f64,
+    /// Absolute floor on the tolerance (mm/s).
+    pub tol_floor: f64,
+}
+
+impl Default for TrackingOptions {
+    fn default() -> Self {
+        Self {
+            tol_frac: 0.2,
+            tol_floor: 5.0,
+        }
+    }
+}
+
+/// Keep only cycles where every motor's measured velocity tracks its
+/// commanded velocity. The fit regresses measured torque against COMMANDED
+/// kinematics, which is only valid where the drive actually executed them —
+/// an untuned or sticking drive produces torque for a motion unrelated to
+/// the command, and fitting through those samples yields negative inertia.
+pub fn restrict_to_tracking(cap: &Capture, opts: &TrackingOptions) -> Capture {
+    let peak = cap
+        .vel
+        .iter()
+        .flatten()
+        .fold(0.0_f64, |m, &v| m.max(v.abs()));
+    let tol = opts.tol_floor.max(opts.tol_frac * peak);
+    let n_motors = cap.vel.len();
+    let keep: Vec<usize> = (0..cap.t.len())
+        .filter(|&k| (0..n_motors).all(|m| (cap.vel_act[m][k] - cap.vel[m][k]).abs() <= tol))
+        .collect();
+    select(cap, &keep)
 }
 
 #[derive(Debug, Clone)]
@@ -149,22 +212,5 @@ pub fn restrict_to_steady_accel(cap: &Capture, opts: &PlateauOptions) -> Capture
         }
     }
 
-    Capture {
-        t: keep.iter().map(|&k| cap.t[k]).collect(),
-        acc: cap
-            .acc
-            .iter()
-            .map(|c| keep.iter().map(|&k| c[k]).collect())
-            .collect(),
-        vel: cap
-            .vel
-            .iter()
-            .map(|c| keep.iter().map(|&k| c[k]).collect())
-            .collect(),
-        torque: cap
-            .torque
-            .iter()
-            .map(|c| keep.iter().map(|&k| c[k]).collect())
-            .collect(),
-    }
+    select(cap, &keep)
 }

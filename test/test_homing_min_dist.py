@@ -87,7 +87,7 @@ def test_commit_and_seed_seeds_post_retract_position():
         servo_handle="h",
     )
     assert toolhead.get_position()[axis] == 15.0
-    assert engine.finalize_calls == [("h", 0, 15.0)]
+    assert engine.finalize_calls == [("h", 0, [15.0, 0.0, 0.0])]
 
 
 def test_commit_and_seed_no_servo_does_not_seed():

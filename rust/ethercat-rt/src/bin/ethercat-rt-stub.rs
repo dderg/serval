@@ -14,6 +14,7 @@ use ethercat_rt::curves::{AxisRing, AXIS_RING_CAPACITY, ENGINE_STATE_FAULT};
 use ethercat_rt::sdo::{execute_sdo_read, execute_sdo_write, DictObject, DictSdoBus};
 use ethercat_rt::sensorless::{SensorlessBank, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
 use ethercat_rt::server::FrameServer;
+use ethercat_rt::stream_halt::StreamHalt;
 use ethercat_rt::torque::{
     CommandAction, TickAction, TorqueGate, TorqueState, ERR_ENABLE_FAILED, ERR_PIECES_WHILE_FAULTED,
 };
@@ -125,6 +126,7 @@ fn main() {
     let mut drive_fault_fired = false;
     let mut stored_limits: Option<(u32, u16)> = None;
     let mut sensorless = SensorlessBank::new(1);
+    let mut stream_halt = StreamHalt::default();
     let mut sim_torque: i16 = 0;
 
     let mut server = FrameServer::bind(&socket).expect("bind socket");
@@ -192,6 +194,14 @@ fn main() {
                             0,
                             0,
                         ));
+                    } else if let Err(code) = stream_halt.check_push_allowed() {
+                        server.respond(&push_pieces_response_frame(
+                            correlation_id,
+                            code,
+                            now_ns,
+                            0,
+                            0,
+                        ));
                     } else {
                         let axis = &msg.axes[0];
                         let front_start_time = if axis.piece_count > 0
@@ -239,12 +249,27 @@ fn main() {
                 Command::Stop { correlation_id } => {
                     let now_ns = monotonic_ns();
                     ring.reset();
-                    eprintln!("ec-rt-stub: Stop — ring discarded, discard_clock={now_ns}");
+                    stream_halt.halt();
+                    eprintln!(
+                        "ec-rt-stub: Stop — ring discarded, stream halted, \
+                         discard_clock={now_ns}"
+                    );
                     server.respond(&stop_response_frame(correlation_id, 0, now_ns));
                 }
-                Command::ResumeStream { correlation_id } => {
-                    server.respond(&resume_stream_response_frame(correlation_id, 0));
-                }
+                Command::ResumeStream { correlation_id } => match stream_halt.resume() {
+                    Ok(()) => {
+                        ring.reset();
+                        eprintln!("ec-rt-stub: ResumeStream — stream reopened");
+                        server.respond(&resume_stream_response_frame(correlation_id, 0));
+                    }
+                    Err(code) => {
+                        eprintln!(
+                            "ec-rt-stub: ResumeStream rejected code={code} — stream was \
+                             not halted"
+                        );
+                        server.respond(&resume_stream_response_frame(correlation_id, code));
+                    }
+                },
                 Command::ClaimHandshake { .. } => {
                     eprintln!(
                         "ec-rt-stub: protocol violation: ClaimHandshake after handshake \
@@ -459,13 +484,14 @@ fn main() {
             |_slot, endstop_id, torque| {
                 eprintln!(
                     "ec-rt-stub: sensorless endstop {endstop_id} tripped torque={torque} \
-                     — local stop, trip_clock={now}"
+                     — local stop, stream halted, trip_clock={now}"
                 );
                 server.respond(&endstop_trip_frame(endstop_id, now));
             },
         );
         if sensorless_tripped {
             ring.reset();
+            stream_halt.halt();
         }
 
         let sampled_pos = if gate.state() == TorqueState::Enabled {

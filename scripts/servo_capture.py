@@ -272,32 +272,50 @@ def _print_metrics(m, counts_per_mm):
         )
 
 
-def export_ident_csv(path, header, data, drive_idx=0):
+def export_ident_csv(path, header, drive_datas):
     # The fitter regresses measured torque against the planner's exact commanded
     # acceleration (accel_cmd) and velocity (vel_cmd) — noise-free and
     # independent of any drive gain or inertia-ratio setting. Differentiating
     # the measured encoder trajectory instead couples the fit to C00.06 through
     # the closed-loop response (and yields negative inertia on a soft loop).
-    if "accel_cmd" not in (data.dtype.names or ()):
-        raise SystemExit(
-            "%s predates the commanded-kinematics channels (capture format v2); "
-            "re-capture before fitting dynamics" % (path,)
-        )
-    axis = header["drives"][drive_idx]["name"]
-    cycle_index = data["cycle_index"].astype(np.int64)
+    # drive_datas: [(drive_idx, data)] views of ONE capture, so the per-record
+    # prefix channels (cycle_index, flags) are identical across entries.
+    for _, data in drive_datas:
+        if "accel_cmd" not in (data.dtype.names or ()):
+            raise SystemExit(
+                "%s predates the commanded-kinematics channels (capture "
+                "format v2); re-capture before fitting dynamics" % (path,)
+            )
+    first = drive_datas[0][1]
+    axes = [header["drives"][idx]["name"] for idx, _ in drive_datas]
+    cycle_index = first["cycle_index"].astype(np.int64)
     t = (cycle_index - cycle_index[0]) * (header["cycle_ns"] * 1e-9)
-    moving = (data["flags"] & FLAG_MOTION_ACTIVE) != 0
-    accel = data["accel_cmd"].astype(np.float64)
-    vel = data["vel_cmd"].astype(np.float64)
-    torque = data["torque_actual"].astype(np.float64)
-    rows = list(zip(t[moving], accel[moving], vel[moving], torque[moving]))
+    moving = (first["flags"] & FLAG_MOTION_ACTIVE) != 0
+    columns = [t[moving]]
+    for idx, data in drive_datas:
+        counts_per_mm = header["drives"][idx]["counts_per_mm"]
+        columns.append(data["accel_cmd"].astype(np.float64)[moving])
+        columns.append(data["vel_cmd"].astype(np.float64)[moving])
+        columns.append(
+            data["velocity_actual"].astype(np.float64)[moving] / counts_per_mm
+        )
+        columns.append(data["torque_actual"].astype(np.float64)[moving])
+    rows = list(zip(*columns))
+    fmt = "%.6f" + ",%.9g" * (len(columns) - 1) + "\n"
     with open(path, "w") as f:
-        f.write("t,accel_%s,vel_%s,torque_%s\n" % (axis, axis, axis))
+        f.write(
+            "t,"
+            + ",".join(
+                "accel_%s,vel_%s,vel_act_%s,torque_%s" % (a, a, a, a)
+                for a in axes
+            )
+            + "\n"
+        )
         for row in rows:
-            f.write("%.6f,%.9g,%.9g,%.9g\n" % row)
+            f.write(fmt % row)
     print(
-        "wrote %d motion samples for axis %r to %s (feed to servo-ident --capture)"
-        % (len(rows), axis, path)
+        "wrote %d motion samples for axes %s to %s (feed to servo-ident "
+        "--capture)" % (len(rows), ",".join(axes), path)
     )
 
 
@@ -357,7 +375,7 @@ def main(argv=None):
     counts_per_mm = header["drives"][drive_idx]["counts_per_mm"]
 
     if args.csv:
-        export_ident_csv(args.csv, header, data, drive_idx)
+        export_ident_csv(args.csv, header, [(drive_idx, data)])
         return 0
 
     print("file: %s" % (capture_path,))
