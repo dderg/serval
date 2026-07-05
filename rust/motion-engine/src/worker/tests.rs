@@ -115,6 +115,7 @@ fn nonstop_flood_of_real_perimeter_drains_without_crashing() {
         cap.dispatch(),
         cap.nudge_dispatch(),
         Arc::default(),
+        None,
     );
 
     let mut prev = [99.158, 99.158, 0.2];
@@ -177,6 +178,7 @@ fn streams_collinear_moves_to_a_contiguous_trajectory() {
         cap.dispatch(),
         cap.nudge_dispatch(),
         Arc::default(),
+        None,
     );
 
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
@@ -215,6 +217,7 @@ fn dwell_inserts_a_time_gap_then_resumes() {
         cap.dispatch(),
         cap.nudge_dispatch(),
         Arc::default(),
+        None,
     );
 
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
@@ -247,6 +250,7 @@ fn stream_open_restarts_the_timeline_at_zero() {
         cap.dispatch(),
         cap.nudge_dispatch(),
         Arc::default(),
+        None,
     );
 
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
@@ -279,6 +283,7 @@ fn home_drip_moves_to_the_travel_endpoint_on_the_new_pipeline() {
         cap.dispatch(),
         cap.nudge_dispatch(),
         Arc::default(),
+        None,
     );
     let (tx, rx) = crossbeam_channel::bounded(1);
     h.home_drip(HomeDripParams {
@@ -313,6 +318,7 @@ fn nudge_dispatches_pieces_and_advances_time() {
         cap.dispatch(),
         cap.nudge_dispatch(),
         Arc::default(),
+        None,
     );
     let (tx, rx) = crossbeam_channel::bounded(1);
     h.submit_nudge(NudgeParams {
@@ -373,6 +379,7 @@ fn continuous_blend_run_dispatches_continuously_without_flush() {
         cap.dispatch(),
         cap.nudge_dispatch(),
         Arc::default(),
+        None,
     );
 
     // A gentle zig-zag: every vertex blends (no unblended seam). The old
@@ -433,6 +440,7 @@ fn live_retune_pressure_advance_applies_to_plans_after_the_swap() {
         dispatch,
         noop_nudge,
         Arc::default(),
+        None,
     );
 
     h.submit_move(co_move(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 4.0))
@@ -477,6 +485,7 @@ fn flush_returns_after_commit_without_sleeping_until_playout() {
         cap.dispatch(),
         cap.nudge_dispatch(),
         Arc::default(),
+        None,
     );
     h.submit_move(line_e(1, 5.0, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0))
         .unwrap();
@@ -519,6 +528,7 @@ fn forcing_fence_resolves_to_the_end_of_submitted_motion() {
         cap.dispatch(),
         cap.nudge_dispatch(),
         Arc::default(),
+        None,
     );
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
         .unwrap();
@@ -547,6 +557,7 @@ fn fence_on_an_idle_pipe_resolves_without_new_motion() {
         cap.dispatch(),
         cap.nudge_dispatch(),
         Arc::default(),
+        None,
     );
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
         .unwrap();
@@ -573,6 +584,7 @@ fn passive_fence_resolves_as_the_stream_commits_past_it() {
         cap.dispatch(),
         cap.nudge_dispatch(),
         Arc::default(),
+        None,
     );
     h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
         .unwrap();

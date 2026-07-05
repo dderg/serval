@@ -172,6 +172,11 @@ struct Pump<S, F, C, A, O, D> {
     on_fatal_transport: A,
     on_abandon: O,
     on_drip_stall: D,
+    ledger: Arc<crate::drain::DrainLedger>,
+    /// Barrier acks are held until the end of the loop iteration, after
+    /// intake and the ledger publish — so a caller that receives the ack has
+    /// a ledger covering everything it enqueued before sending the barrier.
+    pending_barrier_acks: Vec<std::sync::mpsc::SyncSender<()>>,
     backlog: Arc<AtomicU64>,
     holding_ahead: bool,
     data_open: bool,
@@ -258,7 +263,7 @@ where
                 }
             }
             PumpMsg::Barrier(ack) => {
-                let _ = ack.send(());
+                self.pending_barrier_acks.push(ack);
             }
         }
         true
@@ -727,6 +732,24 @@ where
         Ok(())
     }
 
+    fn publish_ledger(&self) {
+        let snapshot = self
+            .queues
+            .iter()
+            .map(|(k, q)| {
+                (
+                    (k.mcu_id, k.axis),
+                    crate::drain::AxisDrainState {
+                        pending: q.pieces.len() as u32,
+                        pushed: q.pushed,
+                        retired: q.retired,
+                    },
+                )
+            })
+            .collect();
+        self.ledger.publish(snapshot);
+    }
+
     fn run(&mut self, control_rx: Receiver<PumpMsg>, data_rx: Receiver<EnqueueMsg>) {
         loop {
             let poll_ms = self.poll_ms();
@@ -750,6 +773,11 @@ where
             let unpushed: u64 = self.queues.values().map(|q| q.pieces.len() as u64).sum();
             self.backlog.store(unpushed, Ordering::Release);
 
+            self.publish_ledger();
+            for ack in self.pending_barrier_acks.drain(..) {
+                let _ = ack.send(());
+            }
+
             if activity {
                 continue;
             }
@@ -761,6 +789,7 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_pump<S, F, C, A, O, D>(
     control_rx: Receiver<PumpMsg>,
     data_rx: Receiver<EnqueueMsg>,
@@ -769,6 +798,7 @@ pub fn run_pump<S, F, C, A, O, D>(
     mcu_clock_of: C,
     on_fatal_transport: A,
     on_abandon: O,
+    ledger: Arc<crate::drain::DrainLedger>,
     on_drip_stall: D,
     backlog: Arc<AtomicU64>,
 ) where
@@ -789,6 +819,8 @@ pub fn run_pump<S, F, C, A, O, D>(
         on_fatal_transport,
         on_abandon,
         on_drip_stall,
+        ledger,
+        pending_barrier_acks: Vec::new(),
         backlog,
         holding_ahead: false,
         data_open: true,

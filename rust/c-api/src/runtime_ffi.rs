@@ -1176,6 +1176,49 @@ pub mod exports {
         }
     }
 
+    /// Foreground-only, call under `irq_save` — the ISR mutates the armed
+    /// piece and a torn u64 read would fabricate a bogus stall window.
+    /// Returns 1 with the armed piece window, 0 when nothing is armed,
+    /// negative on error. `out_occupancy` is the axis ring depth in pieces.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn runtime_axis_head_window(
+        rt: *mut Runtime,
+        axis_idx: u32,
+        out_start: *mut u64,
+        out_end: *mut u64,
+        out_occupancy: *mut u32,
+    ) -> i32 {
+        if rt.is_null() || out_start.is_null() || out_end.is_null() || out_occupancy.is_null() {
+            return RUNTIME_ERR_NULL_PTR;
+        }
+        if !INIT_DONE.load(Ordering::Acquire) {
+            return RUNTIME_ERR_NOT_INIT;
+        }
+        let ctx = rt.cast::<RuntimeContext>();
+        // SAFETY: foreground-only; §11.2 raw-pointer projection.
+        unsafe {
+            let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
+            let engine = &(*isr_ptr).engine;
+            let idx = axis_idx as usize;
+            if idx >= engine.num_axes as usize {
+                return RUNTIME_ERR_INVALID_ARG;
+            }
+            *out_occupancy = engine.occupancy_counts().get(idx).copied().unwrap_or(0);
+            match engine.armed_window(idx) {
+                Some((start, end)) => {
+                    *out_start = start;
+                    *out_end = end;
+                    1
+                }
+                None => {
+                    *out_start = 0;
+                    *out_end = 0;
+                    0
+                }
+            }
+        }
+    }
+
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn runtime_query_motor_state(
         rt: *mut Runtime,

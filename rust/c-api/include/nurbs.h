@@ -34,6 +34,18 @@ float nurbs_param_from_arc_length_f32(const struct nurbs_ArcLengthTableRef_f32 *
 
 void nurbs_vector_eval_3_f32(const struct nurbs_VectorNurbsRef_f32__3 *curve, float u, float *out);
 
+/**
+ * Foreground-only, call under `irq_save` — the ISR mutates the armed
+ * piece and a torn u64 read would fabricate a bogus stall window.
+ * Returns 1 with the armed piece window, 0 when nothing is armed,
+ * negative on error. `out_occupancy` is the axis ring depth in pieces.
+ */
+int32_t runtime_axis_head_window(nurbs_Runtime *rt,
+                                 uint32_t axis_idx,
+                                 uint64_t *out_start,
+                                 uint64_t *out_end,
+                                 uint32_t *out_occupancy);
+
 int32_t runtime_bind_phase_motor(nurbs_Runtime *rt, uint8_t motor_idx, uint8_t slot_idx);
 
 int32_t runtime_clock_sync_request(nurbs_Runtime *rt,
