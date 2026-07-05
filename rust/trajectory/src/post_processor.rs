@@ -124,7 +124,9 @@ impl CompiledChain {
         let mut slot_sources: [Option<&str>; 2] = [None, None];
         for inst in chain {
             inst.validate()?;
-            let stage = inst.algo.compile(&inst.values);
+            let Some(stage) = inst.algo.compile(&inst.values) else {
+                continue;
+            };
             let (slot, kind) = stage.composition_slot();
             if let Some(prev) = slot_sources[slot] {
                 return Err(PostProcessorError::UnsupportedComposition {

@@ -19,12 +19,12 @@ impl PostProcessorAlgo for SmoothMzv {
         }]
     }
 
-    fn compile(&self, values: &[f64]) -> ChainStage {
+    fn compile(&self, values: &[f64]) -> Option<ChainStage> {
         let [frequency_hz] = values else {
             panic!("smooth_mzv expects exactly one param value");
         };
-        ChainStage::SmoothKernel(build_smooth_mzv_kernel(
+        Some(ChainStage::SmoothKernel(build_smooth_mzv_kernel(
             SMOOTH_MZV_T_SM_PER_HZ / frequency_hz,
-        ))
+        )))
     }
 }

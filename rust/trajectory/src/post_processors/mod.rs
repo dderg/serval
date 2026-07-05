@@ -2,13 +2,20 @@ use crate::post_processor::{ChainStage, PostProcessorError};
 
 mod linear_pressure_advance;
 mod smooth_mzv;
+mod smooth_triangle;
 mod smooth_zv;
 
 pub use linear_pressure_advance::LinearPressureAdvance;
 pub use smooth_mzv::{SmoothMzv, SMOOTH_MZV_T_SM_PER_HZ};
+pub use smooth_triangle::SmoothTriangle;
 pub use smooth_zv::{SmoothZv, SMOOTH_ZV_T_SM_PER_HZ};
 
-pub static REGISTRY: &[&dyn PostProcessorAlgo] = &[&SmoothZv, &SmoothMzv, &LinearPressureAdvance];
+pub static REGISTRY: &[&dyn PostProcessorAlgo] = &[
+    &SmoothZv,
+    &SmoothMzv,
+    &SmoothTriangle,
+    &LinearPressureAdvance,
+];
 
 pub fn lookup(type_name: &str) -> Option<&'static dyn PostProcessorAlgo> {
     REGISTRY
@@ -24,7 +31,9 @@ pub fn supported_type_names() -> Vec<&'static str> {
 pub trait PostProcessorAlgo: std::fmt::Debug + Send + Sync {
     fn type_name(&self) -> &'static str;
     fn params(&self) -> &'static [ParamSpec];
-    fn compile(&self, values: &[f64]) -> ChainStage;
+    /// `None` means the parameters compile to a no-op — the post-processor
+    /// contributes no stage to the axis chain (e.g. `smooth_time = 0`).
+    fn compile(&self, values: &[f64]) -> Option<ChainStage>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
