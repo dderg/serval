@@ -44,7 +44,7 @@ fn fit_and_plan(moves: &[geometry::Move]) -> Vec<PlannedMove> {
         .into_iter()
         .filter_map(|item| match item {
             crate::PlannedItem::Move(m) => Some(m),
-            crate::PlannedItem::Control(_) => None,
+            crate::PlannedItem::Drain | crate::PlannedItem::Control(_) => None,
         })
         .collect()
 }

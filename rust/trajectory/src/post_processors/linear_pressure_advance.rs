@@ -16,10 +16,10 @@ impl PostProcessorAlgo for LinearPressureAdvance {
         }]
     }
 
-    fn compile(&self, values: &[f64]) -> ChainStage {
+    fn compile(&self, values: &[f64]) -> Option<ChainStage> {
         let [k] = values else {
             panic!("linear_pressure_advance expects exactly one param value");
         };
-        ChainStage::LinearPressureAdvance { k: *k }
+        Some(ChainStage::LinearPressureAdvance { k: *k })
     }
 }

@@ -151,15 +151,21 @@ pub struct BarrierAck {
     pub result: Result<(), String>,
 }
 
-/// Planner → lowerer.
+/// Planner → lowerer. `Drain` marks that the trajectory emitted so far ends
+/// in a materialized brake-to-rest: the lowerer holds the timeline at that
+/// rest for the chain set's forward support before the next move, and the
+/// shaper flushes its buffered tail with the convolution window clamped —
+/// which the hold makes exact rather than speculative.
 pub enum PlannedItem {
     Move(PlannedMove),
+    Drain,
     Control(Control),
 }
 
 /// Lowerer → shaper.
 pub enum LoweredItem {
     Seg(LoweredSegment),
+    Drain,
     Control(Control),
 }
 

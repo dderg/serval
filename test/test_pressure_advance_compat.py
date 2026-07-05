@@ -137,6 +137,12 @@ DECLARED = [
     post_processor("pa", type="linear_pressure_advance", k="0.04"),
 ]
 
+DECLARED_WITH_SMOOTH = [
+    axis("e", follows="x,y,z", post_processors="pa,st"),
+    post_processor("pa", type="linear_pressure_advance", k="0.04"),
+    post_processor("st", type="smooth_triangle", smooth_time="0.04"),
+]
+
 
 def test_auto_discovers_single_pa_post_processor():
     obj, gcode, _ = make(DECLARED)
@@ -195,13 +201,77 @@ def test_no_advance_reports_last_value():
     assert any("0.04" in r for r in gcmd.responses)
 
 
-def test_smooth_time_is_accepted_and_warned():
+def test_smooth_time_ignored_without_smooth_post_processor():
     engine = StubEngine()
     obj, gcode, _ = make(DECLARED, engine=engine)
+    assert obj.smooth_post_processor is None
     gcmd = StubGcmd({"ADVANCE": "0.05", "SMOOTH_TIME": "0.04"})
     gcode.commands["SET_PRESSURE_ADVANCE"](gcmd)
     assert engine.calls == [("pa", "k", 0.05)]
     assert any("SMOOTH_TIME" in r for r in gcmd.responses)
+
+
+def test_auto_discovers_smooth_post_processor():
+    obj, _, _ = make(DECLARED_WITH_SMOOTH)
+    assert obj.smooth_post_processor == "st"
+    assert obj.last_smooth_time == pytest.approx(0.04)
+
+
+def test_multiple_smooth_post_processors_fail_without_override():
+    sections = [
+        axis("e", post_processors="pa,st1,st2"),
+        post_processor("pa", type="linear_pressure_advance", k="0.04"),
+        post_processor("st1", type="smooth_triangle", smooth_time="0.02"),
+        post_processor("st2", type="smooth_triangle", smooth_time="0.06"),
+    ]
+    with pytest.raises(ConfigError, match="smooth_post_processor"):
+        make(sections)
+
+
+def test_smooth_override_selects_named_post_processor():
+    sections = [
+        axis("e", post_processors="pa,st1,st2"),
+        post_processor("pa", type="linear_pressure_advance", k="0.04"),
+        post_processor("st1", type="smooth_triangle", smooth_time="0.02"),
+        post_processor("st2", type="smooth_triangle", smooth_time="0.06"),
+    ]
+    obj, _, _ = make(sections, options={"smooth_post_processor": "st2"})
+    assert obj.smooth_post_processor == "st2"
+    assert obj.last_smooth_time == pytest.approx(0.06)
+
+
+def test_smooth_override_unknown_name_fails():
+    with pytest.raises(ConfigError, match="ghost"):
+        make(DECLARED_WITH_SMOOTH, options={"smooth_post_processor": "ghost"})
+
+
+def test_smooth_time_updates_smooth_post_processor():
+    engine = StubEngine()
+    obj, gcode, _ = make(DECLARED_WITH_SMOOTH, engine=engine)
+    gcmd = StubGcmd({"ADVANCE": "0.05", "SMOOTH_TIME": "0.06"})
+    gcode.commands["SET_PRESSURE_ADVANCE"](gcmd)
+    assert ("st", "smooth_time", 0.06) in engine.calls
+    assert ("pa", "k", 0.05) in engine.calls
+    assert obj.last_smooth_time == pytest.approx(0.06)
+    assert obj.last_advance == pytest.approx(0.05)
+
+
+def test_smooth_time_only_leaves_advance_untouched():
+    engine = StubEngine()
+    obj, gcode, _ = make(DECLARED_WITH_SMOOTH, engine=engine)
+    gcmd = StubGcmd({"SMOOTH_TIME": "0.02"})
+    gcode.commands["SET_PRESSURE_ADVANCE"](gcmd)
+    assert engine.calls == [("st", "smooth_time", 0.02)]
+    assert obj.last_advance == pytest.approx(0.04)
+
+
+def test_smooth_time_zero_disables_smoothing():
+    engine = StubEngine()
+    obj, gcode, _ = make(DECLARED_WITH_SMOOTH, engine=engine)
+    gcmd = StubGcmd({"SMOOTH_TIME": "0"})
+    gcode.commands["SET_PRESSURE_ADVANCE"](gcmd)
+    assert engine.calls == [("st", "smooth_time", 0.0)]
+    assert obj.last_smooth_time == pytest.approx(0.0)
 
 
 def test_engine_error_becomes_command_error():

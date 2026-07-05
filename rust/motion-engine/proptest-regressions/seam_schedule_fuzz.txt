@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc f1c77d1e881b03b409c90444847e224e611e6d594327e3ab080a5791d25e7e7d # shrinks to start = 163, len = 37, cap = 1, forced = []
+cc 45c4659cc70888b301f21382c30ab779b0add9afef5799baac4df7738162afd0 # shrinks to start = 310, len = 4

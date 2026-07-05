@@ -63,8 +63,11 @@ impl<'a> ShapedSignal<'a> {
         let input_hi = t_end + k_hi;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let n_input = ((input_hi - input_lo) / dt_in).ceil() as usize + 1;
+        // The grid's last node can land up to one dt past input_hi; the signal
+        // is only guaranteed evaluable inside [input_lo, input_hi], so clamp
+        // the probe like `Self::new`'s clamped evaluator does.
         let input_samples = (0..n_input)
-            .map(|i| eval(input_lo + (i as f64) * dt_in))
+            .map(|i| eval((input_lo + (i as f64) * dt_in).min(input_hi)))
             .collect();
         Self {
             input_samples,

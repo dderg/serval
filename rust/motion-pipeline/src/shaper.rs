@@ -18,9 +18,11 @@ const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 /// Final pipeline stage: streaming axis-chain post-processing. Buffers lowered
 /// segments until each one's convolution window is covered by lookahead, then
 /// emits the shaped segment; keeps just-emitted raw segments as the history the
-/// next windows read. A rest ending lets the buffer flush with the window
-/// clamped (the signal is constant past a rest point), so the trajectory's
-/// tail is never held hostage to input that may not come.
+/// next windows read. A `Drain` marker flushes the buffered tail with the
+/// window clamped past the terminal rest — exact, not speculative, because the
+/// lowerer holds the timeline at that rest for the chains' forward support
+/// before any subsequent motion. Time gaps in the signal (dwells, drain holds)
+/// evaluate as the position held at the preceding rest.
 pub struct Shaper {
     chains: AxisChainSet,
     history: VecDeque<ShapedSegment>,
@@ -52,9 +54,13 @@ impl Shaper {
                     if !self.emit(self.supported_count(), false, &output) {
                         return;
                     }
-                    let at_rest = self.pending_rest.back() == Some(&true);
-                    if at_rest && input.is_empty() && !self.emit(self.pending.len(), true, &output)
-                    {
+                }
+                Ok(LoweredItem::Drain) => {
+                    assert!(
+                        self.pending.is_empty() || self.pending_rest.back() == Some(&true),
+                        "shaper: drain marker arrived while the trajectory is not at rest"
+                    );
+                    if !self.emit(self.pending.len(), true, &output) {
                         return;
                     }
                 }
@@ -75,9 +81,18 @@ impl Shaper {
                                 return;
                             }
                             if let Control::SetAxisChains(chains) = &ctrl {
-                                (self.forward_support, self.back_support) = supports_of(chains);
+                                let (new_forward, new_back) = supports_of(chains);
+                                // The signal eras agree at the rest point this swap
+                                // happens at, so kept history makes the resumed
+                                // track exactly continuous with what was committed
+                                // (a k-only change keeps the kernel bit-identical).
+                                // Only a grown back support invalidates retention —
+                                // fall back to the stream-boundary clamp then.
+                                if new_back > self.back_support {
+                                    self.history.clear();
+                                }
+                                (self.forward_support, self.back_support) = (new_forward, new_back);
                                 self.chains = chains.clone();
-                                self.history.clear();
                             }
                         }
                     }
@@ -166,6 +181,7 @@ fn apply_axis_chains(
         return Ok(out);
     }
     let n_axes = out.iter().map(|seg| seg.axes.len()).max().unwrap_or(0);
+    let mut prev: Option<&ShapedSegment> = None;
     for seg in history.iter().chain(base.iter()) {
         if seg.axes.len() != n_axes {
             return Err(PostProcessError::AxisCountMismatch {
@@ -173,6 +189,10 @@ fn apply_axis_chains(
                 got: seg.axes.len(),
             });
         }
+        if let Some(p) = prev {
+            assert_gap_is_a_hold(p, seg);
+        }
+        prev = Some(seg);
     }
     let default_chain = CompiledChain::default();
     for axis in 0..n_axes {
@@ -298,10 +318,34 @@ fn eval_axis_with_edges(
             return eval_segment_axis(seg, axis, t);
         }
     }
+    if idx > 0 && segments[idx].t_start > t {
+        return eval_segment_axis(segments[idx - 1], axis, segments[idx - 1].t_end);
+    }
     if force && (t - last_t).abs() <= SEGMENT_TIME_EPS_S {
         return eval_segment_axis(segments.last().expect("non-empty base"), axis, last_t);
     }
     f64::NAN
+}
+
+/// A time gap in the signal is evaluated as the position held at the
+/// preceding rest, which is only sound if both sides of the gap agree on that
+/// position.
+fn assert_gap_is_a_hold(prev: &ShapedSegment, next: &ShapedSegment) {
+    const GAP_HOLD_EPS_MM: f64 = 1e-6;
+    if next.t_start - prev.t_end <= SEGMENT_TIME_EPS_S {
+        return;
+    }
+    for axis in 0..prev.axes.len() {
+        let held = eval_segment_axis(prev, axis, prev.t_end);
+        let resumed = eval_segment_axis(next, axis, next.t_start);
+        assert!(
+            (held - resumed).abs() <= GAP_HOLD_EPS_MM,
+            "shaper: axis {axis} moved across a signal time gap \
+             [{:.9}, {:.9}]: held {held} vs resumed {resumed}",
+            prev.t_end,
+            next.t_start,
+        );
+    }
 }
 
 fn eval_segment_axis(seg: &ShapedSegment, axis: usize, t: f64) -> f64 {

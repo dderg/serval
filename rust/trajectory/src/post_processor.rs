@@ -124,7 +124,9 @@ impl CompiledChain {
         let mut slot_sources: [Option<&str>; 2] = [None, None];
         for inst in chain {
             inst.validate()?;
-            let stage = inst.algo.compile(&inst.values);
+            let Some(stage) = inst.algo.compile(&inst.values) else {
+                continue;
+            };
             let (slot, kind) = stage.composition_slot();
             if let Some(prev) = slot_sources[slot] {
                 return Err(PostProcessorError::UnsupportedComposition {
@@ -203,6 +205,22 @@ impl AxisChainSet {
     #[must_use]
     pub fn is_follower_axis(&self, axis: usize) -> bool {
         self.followers.iter().any(|(f, _)| *f == axis)
+    }
+
+    #[must_use]
+    pub fn forward_support(&self) -> f64 {
+        self.chains
+            .iter()
+            .map(|chain| chain.max_half_support().1)
+            .fold(0.0, f64::max)
+    }
+
+    #[must_use]
+    pub fn back_support(&self) -> f64 {
+        self.chains
+            .iter()
+            .map(|chain| chain.max_half_support().0.abs())
+            .fold(0.0, f64::max)
     }
 }
 
