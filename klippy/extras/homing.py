@@ -430,10 +430,9 @@ class Homing:
         stepper_enable.motor_enable_group(homing_names)
 
         servo_rails = self._active_servo_rails(gcmd, axis, active_rails)
-        servo_handle = None
-        for entry in servo_rails:
-            if entry["rail"] is rail:
-                servo_handle = entry["handle"]
+        servo_handle = next(
+            (sr["handle"] for sr in servo_rails if sr["rail"] is rail), None
+        )
 
         self._set_homing_current(toolhead, rail, pre_homing=True)
         try:

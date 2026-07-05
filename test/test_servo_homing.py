@@ -443,21 +443,36 @@ class FakeHomingStepperEnable:
 
 
 class FakeHomingPrinter:
-    def __init__(self, stepper_enable):
-        self._stepper_enable = stepper_enable
+    def __init__(self, stepper_enable, extra_objects=()):
+        self._objects = {"stepper_enable": stepper_enable}
+        self._objects.update(dict(extra_objects))
 
     def lookup_object(self, name):
-        assert name == "stepper_enable"
-        return self._stepper_enable
+        return self._objects[name]
 
 
-def run_home_axis(overshoot, retract_dist, positive_dir):
+class FakeServoHomingRail(FakeHomingRail):
+    def get_node_name(self):
+        return "xy_drives"
+
+    def get_motor_name(self):
+        return "servo_z"
+
+    def get_homing_drive_limits(self):
+        return (8192, 500)
+
+
+def run_home_axis(overshoot, retract_dist, positive_dir, servo=False):
     toolhead = FakeHomingToolhead()
     hi = FakeHomingInfo(positive_dir, retract_dist, retract_speed=10.0)
-    rail = FakeHomingRail(hi, pos_min=-6.0, pos_max=235.0)
+    rail_cls = FakeServoHomingRail if servo else FakeHomingRail
+    rail = rail_cls(hi, pos_min=-6.0, pos_max=235.0)
     kin = FakeKin(rail)
     homer = homing_mod.Homing.__new__(homing_mod.Homing)
-    homer.printer = FakeHomingPrinter(FakeHomingStepperEnable())
+    extra = {"ethercat_node xy_drives": FakeNode(7)} if servo else {}
+    homer.printer = FakeHomingPrinter(
+        FakeHomingStepperEnable(), extra_objects=extra
+    )
 
     direction = 1.0 if positive_dir else -1.0
     trigger_position = hi.position_endstop
@@ -483,7 +498,7 @@ def run_home_axis(overshoot, retract_dist, positive_dir):
         homer._home_axis(
             FakeGcmd(),
             toolhead,
-            engine=None,
+            engine=FakeLimitsEngine() if servo else None,
             kin=kin,
             axis=2,
             entry={"trigger_position": trigger_position, "provider": None},
@@ -524,6 +539,14 @@ def test_retract_with_zero_overshoot_unchanged():
     )
     target, _ = toolhead.moves[-1]
     assert target[2] == pytest.approx(trigger_position + retract_dist)
+
+
+def test_home_axis_with_servo_rail_keeps_endstop_entry_intact():
+    toolhead, trigger_position = run_home_axis(
+        0.7, 5.0, positive_dir=False, servo=True
+    )
+    target, _ = toolhead.moves[-1]
+    assert target[2] == pytest.approx(trigger_position + 5.0)
 
 
 def test_guarded_trip_failure_disables_servo_motor_and_reraises():
