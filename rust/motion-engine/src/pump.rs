@@ -162,7 +162,7 @@ fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
     staged < PUMP_INTAKE_BACKLOG_CAP
 }
 
-struct Pump<S, F, C, A, O, D> {
+struct Pump<S, F, C, A, O, P, D> {
     queues: BTreeMap<AxisKey, AxisQueue>,
     junctions: JunctionTracker,
     cohort: Option<DripCohort>,
@@ -171,6 +171,7 @@ struct Pump<S, F, C, A, O, D> {
     mcu_clock_of: C,
     on_fatal_transport: A,
     on_abandon: O,
+    on_pushed: P,
     on_drip_stall: D,
     backlog: Arc<AtomicU64>,
     holding_ahead: bool,
@@ -180,13 +181,14 @@ struct Pump<S, F, C, A, O, D> {
     stall_full_since: Option<(AxisKey, u32, Instant)>,
 }
 
-impl<S, F, C, A, O, D> Pump<S, F, C, A, O, D>
+impl<S, F, C, A, O, P, D> Pump<S, F, C, A, O, P, D>
 where
     S: PieceSink,
     F: Fn(AxisKey) -> u32,
     C: Fn(u32) -> Option<(u64, f64)>,
     A: Fn(AxisKey) + Send + 'static,
     O: Fn(AxisKey, u32),
+    P: Fn(AxisKey, u32),
     D: Fn(String) + Send,
 {
     fn handle_control_msg(&mut self, msg: PumpMsg) -> bool {
@@ -654,6 +656,7 @@ where
                                 }
                                 q.pushed = q.pushed.wrapping_add(n);
                                 q.advance_write_cursor(n);
+                                (self.on_pushed)(key, n);
                             }
                         }
                         Err(SendError::Fatal(ref e)) => {
@@ -761,7 +764,7 @@ where
     }
 }
 
-pub fn run_pump<S, F, C, A, O, D>(
+pub fn run_pump<S, F, C, A, O, P, D>(
     control_rx: Receiver<PumpMsg>,
     data_rx: Receiver<EnqueueMsg>,
     sink: S,
@@ -769,6 +772,7 @@ pub fn run_pump<S, F, C, A, O, D>(
     mcu_clock_of: C,
     on_fatal_transport: A,
     on_abandon: O,
+    on_pushed: P,
     on_drip_stall: D,
     backlog: Arc<AtomicU64>,
 ) where
@@ -777,6 +781,7 @@ pub fn run_pump<S, F, C, A, O, D>(
     C: Fn(u32) -> Option<(u64, f64)>,
     A: Fn(AxisKey) + Send + 'static,
     O: Fn(AxisKey, u32),
+    P: Fn(AxisKey, u32),
     D: Fn(String) + Send,
 {
     let mut pump = Pump {
@@ -788,6 +793,7 @@ pub fn run_pump<S, F, C, A, O, D>(
         mcu_clock_of,
         on_fatal_transport,
         on_abandon,
+        on_pushed,
         on_drip_stall,
         backlog,
         holding_ahead: false,

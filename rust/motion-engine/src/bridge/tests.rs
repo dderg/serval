@@ -483,6 +483,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
                     fatal_flag.store(true, Ordering::SeqCst);
                 },
                 |_key: AxisKey, _n: u32| {},
+                |_key: AxisKey, _n: u32| {},
                 |_msg: String| {},
                 Arc::new(AtomicU64::new(0)),
             );

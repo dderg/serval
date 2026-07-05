@@ -800,7 +800,7 @@ impl PyMotionEngine {
 
         let ring_depth_table_for_pump = ring_depth_table;
         let router_for_pump = Arc::clone(&self.router);
-        let drain_for_pump = self.drain.clone();
+        let drain_for_pushed = self.drain.clone();
         let router_for_freq = Arc::clone(&self.router);
         let endpoint_death_for_pump = Arc::clone(&self.latched_endpoint_death);
         let pump_resources = crate::worker::PumpResources {
@@ -842,7 +842,17 @@ impl PyMotionEngine {
                 }
             }),
             on_abandon: Box::new(move |key: crate::types::AxisKey, n: u32| {
-                drain_for_pump.unsend(key.mcu_id, key.axis, n);
+                tracing::debug!(
+                    subsystem = "motion",
+                    event = "pump_abandon_unpushed",
+                    mcu = key.mcu_id,
+                    axis = key.axis,
+                    dropped = n,
+                    "pump flush dropped pieces that never reached the wire"
+                );
+            }),
+            on_pushed: Box::new(move |key: crate::types::AxisKey, n: u32| {
+                drain_for_pushed.add_sent(key.mcu_id, key.axis, n);
             }),
             on_drip_stall: Box::new(|msg: String| {
                 tracing::error!(
@@ -861,7 +871,6 @@ impl PyMotionEngine {
             router: Arc::clone(&router_arc),
             anchor: anchor_mutex,
             mcu_configs: mcu_configs.to_vec(),
-            drain: self.drain.clone(),
             counter: Arc::clone(&counter),
             active_drip_cohort: Arc::clone(&self.active_drip_cohort),
             motion_history: Arc::clone(&self.motion_history),

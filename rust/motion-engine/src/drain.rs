@@ -30,14 +30,6 @@ impl DrainSync {
         *e = e.wrapping_add(n);
     }
 
-    pub fn unsend(&self, mcu: u32, axis: u8, n: u32) {
-        let mut c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
-        let e = c.sent.entry((mcu, axis)).or_insert(0);
-        *e = e.wrapping_sub(n);
-        drop(c);
-        self.cv.notify_all();
-    }
-
     pub fn set_retired(&self, mcu: u32, axis: u8, retired: u32) {
         let mut c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
         c.retired.insert((mcu, axis), retired);
@@ -45,14 +37,18 @@ impl DrainSync {
         self.cv.notify_all();
     }
 
+    /// Everything sent before the reset will still retire on the MCU, so it
+    /// rolls into the baseline; snapshotting the retired counter instead
+    /// would let in-flight-at-reset pieces overshoot the post-reset sent
+    /// count and make exact-equality drain unsatisfiable.
     pub fn reset(&self) {
         let mut c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
-        c.sent.clear();
-        let retired_snapshot: Vec<(AxisKey, u32)> =
-            c.retired.iter().map(|(&k, &v)| (k, v)).collect();
-        for (key, retired_at_reset) in retired_snapshot {
-            c.baseline.insert(key, retired_at_reset);
+        let sent_snapshot: Vec<(AxisKey, u32)> = c.sent.iter().map(|(&k, &v)| (k, v)).collect();
+        for (key, sent_before_reset) in sent_snapshot {
+            let b = c.baseline.entry(key).or_insert(0);
+            *b = b.wrapping_add(sent_before_reset);
         }
+        c.sent.clear();
         drop(c);
         self.cv.notify_all();
     }

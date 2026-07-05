@@ -85,6 +85,7 @@ fn stall_detection_fires_when_floor_stuck() {
             |_| None,
             |_| {},
             |_, _| {},
+            |_, _| {},
             move |msg: String| {
                 stall_msgs_clone.lock().unwrap().push(msg);
             },
@@ -149,6 +150,7 @@ fn non_participant_enqueue_aborts_cohort_and_drops_pieces() {
             |_| 64,
             |_| Some((0u64, 1000.0)),
             |_| {},
+            |_, _| {},
             |_, _| {},
             move |msg: String| {
                 stall_msgs_clone.lock().unwrap().push(msg);
@@ -216,6 +218,7 @@ fn participant_release_tracks_mcu_clock_horizon() {
             |_| 64,
             move |_| Some((*clock_for_pump.lock().unwrap(), 1000.0)),
             |_| {},
+            |_, _| {},
             |_, _| {},
             |_| {},
             Arc::new(AtomicU64::new(0)),
@@ -296,6 +299,7 @@ fn unsynced_clock_releases_nothing_for_participants() {
             |_| None,
             |_| {},
             |_, _| {},
+            |_, _| {},
             |_| {},
             Arc::new(AtomicU64::new(0)),
         );
@@ -327,6 +331,7 @@ fn retired_regression_triggers_on_drip_stall() {
             |_| 64,
             |_| None,
             |_| {},
+            |_, _| {},
             |_, _| {},
             move |msg: String| {
                 stall_msgs_clone.lock().unwrap().push(msg);
@@ -383,6 +388,7 @@ fn mcu_reboot_retired_to_zero_triggers_regression() {
             |_| 64,
             |_| None,
             |_| {},
+            |_, _| {},
             |_, _| {},
             move |msg: String| {
                 stall_msgs_clone.lock().unwrap().push(msg);
@@ -450,6 +456,7 @@ fn drip_disarm_clears_cohort() {
             |_| Some((0u64, 1000.0)),
             |_| {},
             |_, _| {},
+            |_, _| {},
             move |msg: String| {
                 stall_msgs_clone.lock().unwrap().push(msg);
             },
@@ -505,6 +512,7 @@ fn drip_disarm_wrong_cohort_id_is_noop() {
             |_| 64,
             |_| None,
             |_| {},
+            |_, _| {},
             |_, _| {},
             move |msg: String| {
                 stall_msgs_clone.lock().unwrap().push(msg);

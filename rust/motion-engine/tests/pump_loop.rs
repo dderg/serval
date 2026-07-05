@@ -72,6 +72,7 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
             |_| None,
             |_| {},
             |_, _| {},
+            |_, _| {},
             |_| {},
             Arc::new(AtomicU64::new(0)),
         )
@@ -158,6 +159,7 @@ fn run_pump_with_clock(
             |_k| 64u32,
             |_mcu| Some((0u64, 1e6_f64)),
             |_| {},
+            |_, _| {},
             |_, _| {},
             |_| {},
             Arc::new(AtomicU64::new(0)),
@@ -276,6 +278,7 @@ fn bundles_same_mcu_axes_into_one_transaction() {
             |_| None,
             |_| {},
             |_, _| {},
+            |_, _| {},
             |_| {},
             Arc::new(AtomicU64::new(0)),
         )
@@ -334,6 +337,7 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
             depth,
             |_| None,
             |_| {},
+            |_, _| {},
             |_, _| {},
             |_| {},
             Arc::new(AtomicU64::new(0)),
@@ -419,6 +423,7 @@ fn intake_feeds_a_second_axis_even_when_the_first_axis_ring_is_full() {
             |_| None,
             |_| {},
             |_, _| {},
+            |_, _| {},
             |_| {},
             Arc::new(AtomicU64::new(0)),
         )
@@ -485,6 +490,7 @@ fn drip_cohort_intake_bypasses_cap_and_feeds_all_participants() {
             depth,
             |_mcu| Some((0u64, 1e6_f64)),
             |_| {},
+            |_, _| {},
             |_, _| {},
             |_| {},
             Arc::new(AtomicU64::new(0)),

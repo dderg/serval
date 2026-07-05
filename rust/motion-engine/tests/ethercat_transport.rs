@@ -95,6 +95,7 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
             |_| None,
             |_| {},
             |_, _| {},
+            |_, _| {},
             |_| {},
             Arc::new(AtomicU64::new(0)),
         );
