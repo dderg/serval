@@ -19,9 +19,9 @@ pub fn arc_to_g5(params: &ArcParams) -> Vec<G5Line> {
     let ex = params.end[0] - cx;
     let ey = params.end[1] - cy;
 
-    let r = sx.hypot(sy);
+    let r = libm::hypot(sx, sy);
 
-    let start_angle = sy.atan2(sx);
+    let start_angle = libm::atan2(sy, sx);
     let theta = compute_sweep(sx, sy, ex, ey, params.clockwise);
 
     let n = piece_count(r, theta, params.tolerance_mm);
@@ -35,13 +35,13 @@ pub fn arc_to_g5(params: &ArcParams) -> Vec<G5Line> {
         let a0 = start_angle + piece_angle * i as f64;
         let a1 = start_angle + piece_angle * (i + 1) as f64;
 
-        let p0x = cx + r * a0.cos();
-        let p0y = cy + r * a0.sin();
+        let p0x = cx + r * libm::cos(a0);
+        let p0y = cy + r * libm::sin(a0);
 
         let (p3x, p3y) = if i == n - 1 {
             (params.end[0], params.end[1])
         } else {
-            (cx + r * a1.cos(), cy + r * a1.sin())
+            (cx + r * libm::cos(a1), cy + r * libm::sin(a1))
         };
 
         let z = if i == n - 1 {
@@ -50,9 +50,9 @@ pub fn arc_to_g5(params: &ArcParams) -> Vec<G5Line> {
             params.start[2] + dz * (i + 1) as f64 / n as f64
         };
 
-        let k = (4.0 / 3.0) * (piece_angle.abs() / 4.0).tan();
-        let t0 = [-a0.sin(), a0.cos()];
-        let t1 = [-a1.sin(), a1.cos()];
+        let k = (4.0 / 3.0) * libm::tan(piece_angle.abs() / 4.0);
+        let t0 = [-libm::sin(a0), libm::cos(a0)];
+        let t1 = [-libm::sin(a1), libm::cos(a1)];
         let sign = if piece_angle >= 0.0 { 1.0 } else { -1.0 };
         let cp1x = p0x + sign * k * r * t0[0];
         let cp1y = p0y + sign * k * r * t0[1];
@@ -78,7 +78,7 @@ pub fn arc_to_g5(params: &ArcParams) -> Vec<G5Line> {
 pub fn arc_start_tangent(params: &ArcParams) -> [f64; 2] {
     let sx = params.start[0] - params.center[0];
     let sy = params.start[1] - params.center[1];
-    let r = sx.hypot(sy);
+    let r = libm::hypot(sx, sy);
     if r < 1e-12 {
         return [1.0, 0.0];
     }
@@ -92,7 +92,7 @@ pub fn arc_start_tangent(params: &ArcParams) -> [f64; 2] {
 pub fn arc_endpoint_tangent(params: &ArcParams) -> [f64; 2] {
     let ex = params.end[0] - params.center[0];
     let ey = params.end[1] - params.center[1];
-    let r = ex.hypot(ey);
+    let r = libm::hypot(ex, ey);
     if r < 1e-12 {
         return [1.0, 0.0];
     }
@@ -106,7 +106,7 @@ pub fn arc_endpoint_tangent(params: &ArcParams) -> [f64; 2] {
 fn compute_sweep(sx: f64, sy: f64, ex: f64, ey: f64, clockwise: bool) -> f64 {
     let cross = sx * ey - sy * ex;
     let dot = sx * ex + sy * ey;
-    let mut theta = cross.atan2(dot);
+    let mut theta = libm::atan2(cross, dot);
 
     if theta < 0.0 {
         theta += TAU;
@@ -119,7 +119,7 @@ fn compute_sweep(sx: f64, sy: f64, ex: f64, ey: f64, clockwise: bool) -> f64 {
     if theta.abs() < 1e-10 {
         let dx = ex - sx;
         let dy = ey - sy;
-        if dx.hypot(dy) < 1e-10 {
+        if libm::hypot(dx, dy) < 1e-10 {
             theta = if clockwise { -TAU } else { TAU };
         }
     }
@@ -141,7 +141,7 @@ fn piece_count(r: f64, theta: f64, tolerance: f64) -> usize {
             continue;
         }
         let half = alpha / 2.0;
-        let cos_half = half.cos();
+        let cos_half = libm::cos(half);
         if cos_half.abs() < 1e-15 {
             n += 1;
             continue;

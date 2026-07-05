@@ -127,8 +127,8 @@ class MoveMotion(FakeMotion):
     def _sync_print_time(self):
         pass
 
-    def _check_pause(self):
-        pass
+    def _submit_paced(self, submit, *args):
+        submit(*args)
 
 
 def test_move_resyncs_before_computing_deltas():

@@ -1,12 +1,52 @@
+use crate::chebyshev::{clenshaw, derivative_series};
 use crate::fault_sink::FaultSink;
-use crate::piece_ring::{PieceEntry, RingDescriptor};
+use crate::piece_ring::{MAX_PIECE_COEFFS, PieceEntry, RingDescriptor};
 
+/// A piece armed for the ISR: the Chebyshev position series plus both
+/// derivative series, computed once at arm. Per tick the evaluation is
+/// `u = elapsed_cycles·inv_scale − 1` and one Clenshaw pass per series.
 #[derive(Debug, Clone, Copy)]
 pub struct ArmedPiece {
-    pub mono_coeffs: [f32; 4],
-    pub vel_coeffs: [f32; 3],
+    pub cheb: [f32; MAX_PIECE_COEFFS],
+    pub vel: [f32; MAX_PIECE_COEFFS],
+    pub acc: [f32; MAX_PIECE_COEFFS],
+    pub n: u8,
+    /// `2 / (duration · cycles_per_second)` — cycles → u without a divide.
+    pub inv_scale: f32,
     pub piece_start_cycles: u64,
     pub piece_end_cycles: u64,
+}
+
+impl ArmedPiece {
+    #[inline]
+    fn u_at(&self, now: u64) -> f32 {
+        #[allow(clippy::cast_precision_loss)]
+        let elapsed = now.saturating_sub(self.piece_start_cycles) as f32;
+        let u = elapsed * self.inv_scale - 1.0;
+        debug_assert!(u <= 1.0 + 1e-3, "u = {u} escaped the piece domain");
+        u
+    }
+
+    #[inline]
+    fn series(a: &[f32; MAX_PIECE_COEFFS], n: usize) -> &[f32] {
+        a.get(..n.clamp(1, MAX_PIECE_COEFFS)).unwrap_or(a)
+    }
+
+    #[inline]
+    pub fn eval_pos_vel(&self, now: u64) -> (f32, f32) {
+        let u = self.u_at(now);
+        let n = self.n as usize;
+        let pos = clenshaw(Self::series(&self.cheb, n), u);
+        let vel = clenshaw(Self::series(&self.vel, n.saturating_sub(1)), u);
+        (pos, vel)
+    }
+
+    #[inline]
+    pub fn eval_accel(&self, now: u64) -> f32 {
+        let u = self.u_at(now);
+        let n = self.n as usize;
+        clenshaw(Self::series(&self.acc, n.saturating_sub(2)), u)
+    }
 }
 
 #[inline]
@@ -50,14 +90,8 @@ pub fn get_position_and_velocity_armed<F: FaultSink>(
     *just_armed = false;
     if let Some(p) = &*armed {
         if now < p.piece_end_cycles {
-            crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_HORNER);
-            return Some(eval_horner(
-                &p.mono_coeffs,
-                &p.vel_coeffs,
-                p.piece_start_cycles,
-                now,
-                cycles_per_second,
-            ));
+            crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_CLENSHAW);
+            return Some(p.eval_pos_vel(now));
         }
         *armed = None;
         ring.advance_counter();
@@ -76,8 +110,8 @@ pub fn get_position_and_velocity_armed<F: FaultSink>(
     )?;
     crate::isr_phase::walk_account(crate::isr_phase::cyccnt().wrapping_sub(walk_start));
 
-    crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_MONOMIAL);
-    let mono_start = crate::isr_phase::cyccnt();
+    crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_ARM);
+    let arm_start = crate::isr_phase::cyccnt();
     // SAFETY: `slot` is `ring_offset + tail` from `get_piece_for_time` →
     // `ring.front_slot()`. `configure_axis` guarantees
     // `ring_offset + ring_depth <= storage.len()`, and `tail < ring_depth`
@@ -86,16 +120,10 @@ pub fn get_position_and_velocity_armed<F: FaultSink>(
     #[allow(clippy::indexing_slicing)]
     let p = arm_and_load(armed, &storage[slot], cycles_per_second);
     *just_armed = true;
-    crate::isr_phase::monomial_account(crate::isr_phase::cyccnt().wrapping_sub(mono_start));
+    crate::isr_phase::arm_account(crate::isr_phase::cyccnt().wrapping_sub(arm_start));
 
-    crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_HORNER);
-    Some(eval_horner(
-        &p.mono_coeffs,
-        &p.vel_coeffs,
-        p.piece_start_cycles,
-        now,
-        cycles_per_second,
-    ))
+    crate::isr_phase::set_phase(crate::isr_phase::RT_PHASE_CLENSHAW);
+    Some(p.eval_pos_vel(now))
 }
 
 // CRITICAL: the fault-check runs BEFORE the `now < end` window return so
@@ -135,51 +163,42 @@ fn get_piece_for_time<F: FaultSink>(
 }
 
 #[inline]
+pub fn arm_piece(entry: &PieceEntry, cycles_per_second: f32) -> ArmedPiece {
+    debug_assert!(
+        entry.duration > 0.0,
+        "piece with non-positive duration reached arm — write acceptance must reject it"
+    );
+    debug_assert!(
+        entry.coeff_count >= 1 && (entry.coeff_count as usize) <= MAX_PIECE_COEFFS,
+        "coeff_count {} reached arm — write acceptance must reject it",
+        entry.coeff_count
+    );
+    let n = (entry.coeff_count as usize).clamp(1, MAX_PIECE_COEFFS);
+    let du_dt = 2.0 / entry.duration;
+    let mut vel = [0.0_f32; MAX_PIECE_COEFFS];
+    let nv = derivative_series(
+        entry.coeffs.get(..n).unwrap_or(&entry.coeffs),
+        du_dt,
+        &mut vel,
+    );
+    let mut acc = [0.0_f32; MAX_PIECE_COEFFS];
+    derivative_series(vel.get(..nv).unwrap_or(&vel), du_dt, &mut acc);
+    ArmedPiece {
+        cheb: entry.coeffs,
+        vel,
+        acc,
+        n: n as u8,
+        inv_scale: 2.0 / (entry.duration * cycles_per_second),
+        piece_start_cycles: entry.start_time,
+        piece_end_cycles: entry.end_time(cycles_per_second),
+    }
+}
+
+#[inline]
 fn arm_and_load<'a>(
     armed: &'a mut Option<ArmedPiece>,
     entry: &PieceEntry,
     cycles_per_second: f32,
 ) -> &'a ArmedPiece {
-    let (mono, vel) = entry.to_monomial();
-    armed.insert(ArmedPiece {
-        mono_coeffs: mono,
-        vel_coeffs: vel,
-        piece_start_cycles: entry.start_time,
-        piece_end_cycles: entry.end_time(cycles_per_second),
-    })
-}
-
-#[inline]
-pub fn eval_horner(
-    mono: &[f32; 4],
-    vel: &[f32; 3],
-    piece_start_cycles: u64,
-    now: u64,
-    cycles_per_second: f32,
-) -> (f32, f32) {
-    let elapsed_cycles = now.saturating_sub(piece_start_cycles);
-    let t = if cycles_per_second > 0.0 {
-        elapsed_cycles as f32 / cycles_per_second
-    } else {
-        0.0_f32
-    };
-    let p = mono[0] + t * (mono[1] + t * (mono[2] + t * mono[3]));
-    let v = vel[0] + t * (vel[1] + t * vel[2]);
-    (p, v)
-}
-
-#[inline]
-pub fn eval_accel(
-    vel: &[f32; 3],
-    piece_start_cycles: u64,
-    now: u64,
-    cycles_per_second: f32,
-) -> f32 {
-    let elapsed_cycles = now.saturating_sub(piece_start_cycles);
-    let t = if cycles_per_second > 0.0 {
-        elapsed_cycles as f32 / cycles_per_second
-    } else {
-        0.0_f32
-    };
-    vel[1] + 2.0 * t * vel[2]
+    armed.insert(arm_piece(entry, cycles_per_second))
 }

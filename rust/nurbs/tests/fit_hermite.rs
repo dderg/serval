@@ -171,10 +171,10 @@ fn adversarial_nonpolynomial_asymmetric_pins() {
             let u0 = i as f64 * two_pi / n as f64;
             let u1 = (i + 1) as f64 * two_pi / n as f64;
             let h = u1 - u0;
-            let f0 = u0.sin();
-            let df0 = u0.cos();
-            let f1 = u1.sin();
-            let df1 = u1.cos();
+            let f0 = libm::sin(u0);
+            let df0 = libm::cos(u0);
+            let f1 = libm::sin(u1);
+            let df1 = libm::cos(u1);
             let det = h * h * h * h;
             let c2 = (3.0 * h * h * (f1 - f0 - df0 * h) - h * h * h * (df1 - df0)) / det;
             let c3 = (h * h * (df1 - df0) - 2.0 * h * (f1 - f0 - df0 * h)) / det;

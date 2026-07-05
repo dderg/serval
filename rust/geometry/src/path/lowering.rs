@@ -60,7 +60,11 @@ pub fn lower_constant_speed(
         let t = (k as f64 * dt).min(total_t);
         let s = (speed_mm_s * t).min(s_len);
         let position = seg.spatial.as_ref().map(|spatial| spatial.point_at(s));
-        let followers = seg.followers.iter().map(|f| f.ratio * s).collect();
+        let followers = seg
+            .followers
+            .iter()
+            .map(|f| f.offset_at(s, s_len))
+            .collect();
         samples.push(LoweredSample {
             t_s: t,
             position,
@@ -128,9 +132,9 @@ impl PositionProfile for Arc {
     fn point_at(&self, s: f64) -> [f64; 3] {
         let theta = self.angle_at(s);
         let offset = axpby(
-            self.radius * theta.cos(),
+            self.radius * libm::cos(theta),
             self.u,
-            self.radius * theta.sin(),
+            self.radius * libm::sin(theta),
             self.v,
         );
         translate(self.origin, offset)
@@ -139,7 +143,12 @@ impl PositionProfile for Arc {
     fn heading_at(&self, s: f64) -> [f64; 3] {
         let theta = self.angle_at(s);
         let sign = self.sweep.signum();
-        axpby(-sign * theta.sin(), self.u, sign * theta.cos(), self.v)
+        axpby(
+            -sign * libm::sin(theta),
+            self.u,
+            sign * libm::cos(theta),
+            self.v,
+        )
     }
 
     fn dheading_ds(&self, s: f64) -> [f64; 3] {
@@ -147,7 +156,12 @@ impl PositionProfile for Arc {
         // of sweep direction: `-(1/r)·(cosθ·u + sinθ·v)` (the inward radial).
         let theta = self.angle_at(s);
         let inv_r = 1.0 / self.radius;
-        axpby(-inv_r * theta.cos(), self.u, -inv_r * theta.sin(), self.v)
+        axpby(
+            -inv_r * libm::cos(theta),
+            self.u,
+            -inv_r * libm::sin(theta),
+            self.v,
+        )
     }
 }
 
@@ -165,7 +179,7 @@ impl PositionProfile for Clothoid {
 
     fn heading_at(&self, s: f64) -> [f64; 3] {
         let phi = self.heading_angle_at(s);
-        axpby(phi.cos(), self.u, phi.sin(), self.v)
+        axpby(libm::cos(phi), self.u, libm::sin(phi), self.v)
     }
 
     fn dheading_ds(&self, s: f64) -> [f64; 3] {
@@ -173,7 +187,12 @@ impl PositionProfile for Clothoid {
         // rotated +90°), `-sinφ·u + cosφ·v`.
         let phi = self.heading_angle_at(s);
         let kappa = self.kappa_0 + self.sigma * s;
-        axpby(-kappa * phi.sin(), self.u, kappa * phi.cos(), self.v)
+        axpby(
+            -kappa * libm::sin(phi),
+            self.u,
+            kappa * libm::cos(phi),
+            self.v,
+        )
     }
 }
 

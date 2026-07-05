@@ -55,7 +55,7 @@ fn total_extrusion(moves: &[Move], axis: usize) -> f64 {
                 .followers
                 .iter()
                 .filter(|f| f.axis_index == axis)
-                .map(|f| f.ratio * s)
+                .map(|f| f.delta_over(s))
                 .sum::<f64>()
         })
         .sum()
@@ -150,7 +150,7 @@ fn blend_deviation_stays_within_delta_at_a_shallow_corner() {
     let theta = PI / 6.0;
     let leg = 80.0;
     let mid = [leg, 0.0, 0.0];
-    let end = [leg + leg * theta.cos(), leg * theta.sin(), 0.0];
+    let end = [leg + leg * libm::cos(theta), leg * libm::sin(theta), 0.0];
     let moves = vec![
         seg(1, accel, scv, [0.0, 0.0, 0.0], mid, 0.0),
         seg(2, accel, scv, mid, end, 0.0),
@@ -295,6 +295,84 @@ fn extrusion_is_conserved_across_a_blend() {
     );
 }
 
+fn e_follower(m: &Move) -> FollowerDemand {
+    *m.segment
+        .followers
+        .iter()
+        .find(|f| f.axis_index == E_AXIS)
+        .expect("extruder follower present")
+}
+
+#[test]
+fn modest_ratio_step_blends_with_a_continuous_extrusion_ramp() {
+    // Two legs at slightly different extrusion ratios (0.10 vs 0.12, a 16.7%
+    // relative step, under the 25% gate). The corner blends, total E is
+    // conserved, and the two clothoid halves meet at one shared ratio so ė is
+    // continuous across the blend midpoint.
+    let moves = vec![
+        seg(1, 3000.0, 5.0, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 5.0),
+        seg(2, 3000.0, 5.0, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 6.0),
+    ];
+    let before = total_extrusion(&moves, E_AXIS);
+    let out = fit_corners(&moves, CornerFitConfig::default()).unwrap();
+    assert_eq!(out.report.blended, 1);
+    assert!(out.report.unblended.is_empty());
+    let after = total_extrusion(&out.moves, E_AXIS);
+    assert!(
+        (before - after).abs() <= 1e-9,
+        "before {before} after {after}"
+    );
+
+    let half1 = e_follower(&out.moves[1]);
+    let half2 = e_follower(&out.moves[2]);
+    assert!(half1.is_ramped() && half2.is_ramped());
+    assert!(
+        (half1.ratio_end - half2.ratio).abs() <= 1e-12,
+        "midpoint ratio discontinuous: {} vs {}",
+        half1.ratio_end,
+        half2.ratio
+    );
+}
+
+#[test]
+fn abrupt_ratio_step_is_left_unblended_as_a_stop() {
+    // 0.10 vs 0.30 — a 66% relative step, above the gate. The corner stays sharp
+    // (unblended), which forces the planner to a full stop across the seam.
+    let moves = vec![
+        seg(1, 3000.0, 5.0, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 5.0),
+        seg(2, 3000.0, 5.0, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 15.0),
+    ];
+    let out = fit_corners(&moves, CornerFitConfig::default()).unwrap();
+    assert_eq!(out.report.blended, 0);
+    assert_eq!(out.report.unblended.len(), 1);
+    assert_eq!(out.report.unblended[0].reason, UnblendReason::ExtrusionStep);
+}
+
+#[test]
+fn travel_to_extrude_corner_still_blends_and_ramps_to_zero() {
+    // One side is a travel (ratio 0). The relative step is 1.0, but a ramp to or
+    // from zero extrusion is desirable, so the gate exempts it and the corner
+    // blends. Total E (all on the extruding leg) is conserved.
+    let moves = vec![
+        seg(1, 3000.0, 5.0, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.0),
+        seg(2, 3000.0, 5.0, [50.0, 0.0, 0.0], [50.0, 50.0, 0.0], 5.0),
+    ];
+    let before = total_extrusion(&moves, E_AXIS);
+    let out = fit_corners(&moves, CornerFitConfig::default()).unwrap();
+    assert_eq!(out.report.blended, 1);
+    let after = total_extrusion(&out.moves, E_AXIS);
+    assert!(
+        (before - after).abs() <= 1e-9,
+        "before {before} after {after}"
+    );
+    let half1 = e_follower(&out.moves[1]);
+    assert!(
+        half1.ratio.abs() <= 1e-12,
+        "half1 must start at zero extrusion, got {}",
+        half1.ratio
+    );
+}
+
 #[test]
 fn extrusion_conserved_when_short_leg_is_consumed_by_two_blends() {
     let accel = 1000.0;
@@ -318,6 +396,144 @@ fn extrusion_conserved_when_short_leg_is_consumed_by_two_blends() {
 }
 
 #[test]
+fn run_whose_tail_spiral_overclaims_its_neighbor_still_touches_the_run_endpoints() {
+    // Slicer polyline from neptune_cube/discontinuity.gcode around Y=105: at
+    // accel 10000 / scv 20 the tail easing spiral wants 0.246mm of a 0.313mm
+    // neighbor — over the half-line claim limit — which used to strand the
+    // arc's tail end ~15µm off the neighbor line.
+    let accel = 10_000.0;
+    let scv = 20.0;
+    let ratio = 0.0337;
+    let mk =
+        |line_no: u32, a: [f64; 3], b: [f64; 3]| seg(line_no, accel, scv, a, b, ratio * dist(a, b));
+    let head = mk(1, [124.414, 103.283, 0.0], [124.414, 104.107, 0.0]);
+    let facets = vec![
+        mk(2, [124.414, 104.107, 0.0], [124.447, 104.481, 0.0]),
+        mk(3, [124.447, 104.481, 0.0], [124.561, 104.756, 0.0]),
+        mk(4, [124.561, 104.756, 0.0], [124.786, 105.022, 0.0]),
+    ];
+    let tail = mk(5, [124.786, 105.022, 0.0], [125.053, 105.185, 0.0]);
+
+    let corner = CornerFitConfig::default();
+    let mut fit = RunFit::fit(&facets, Some(&head), Some(&tail))
+        .unwrap()
+        .expect("run reconstructs");
+    let first = &facets[0];
+    let last = facets.last().unwrap();
+    let head_blend = fit.blend_head_with_line(&head, first, corner).unwrap();
+    let tail_blend = fit.blend_tail_with_line(last, &tail, corner).unwrap();
+
+    let mut chain: Vec<Move> = Vec::new();
+    chain.push(
+        trim_line_move(&head, 0.0, fit.head_boundary_trim())
+            .unwrap()
+            .expect("head neighbor keeps a body"),
+    );
+    chain.extend(head_blend);
+    if let Some(stub) = trim_line_move(first, 0.0, fit.head_consumption()).unwrap() {
+        chain.push(stub);
+    }
+    chain.extend(fit.pieces(first, last).unwrap());
+    if let Some(stub) = trim_line_move(last, fit.tail_consumption(), 0.0).unwrap() {
+        chain.push(stub);
+    }
+    chain.extend(tail_blend);
+    chain.push(
+        trim_line_move(&tail, fit.tail_boundary_trim(), 0.0)
+            .unwrap()
+            .expect("tail neighbor keeps a body"),
+    );
+
+    for pair in chain.windows(2) {
+        let end = spatial_end(&pair[0]).unwrap();
+        let start = spatial_start(&pair[1]).unwrap();
+        let gap = dist(end, start);
+        assert!(
+            gap <= 1e-6,
+            "emitted chain is discontinuous: {end:?} -> {start:?} ({gap:.9}mm gap)"
+        );
+    }
+}
+
+#[test]
+fn displaced_spiral_keeps_extrusion_rate_continuous_and_conserves_e() {
+    // Slicer polyline from neptune_cube/layer_5.gcode around (119.5, 117.7):
+    // the anchored one-end easing slides the head spiral ~0.63mm along a
+    // 1.27mm neighbor line while the spiral itself is only ~0.14mm long.
+    // Spreading the trimmed footage's E over the spiral spiked `de/ds` 4.4×,
+    // which the planner rest-anchored — a full stop mid-perimeter.
+    let accel = 10_000.0;
+    let scv = 20.0;
+    let mk = |line_no: u32, a: [f64; 3], b: [f64; 3], e: f64| seg(line_no, accel, scv, a, b, e);
+    let head = mk(1, [120.191, 116.647, 0.0], [119.505, 117.714, 0.0], 0.04268);
+    let facets = vec![
+        mk(2, [119.505, 117.714, 0.0], [118.91, 118.433, 0.0], 0.03139),
+        mk(3, [118.91, 118.433, 0.0], [118.261, 119.065, 0.0], 0.0305),
+        mk(4, [118.261, 119.065, 0.0], [117.549, 119.627, 0.0], 0.0305),
+        mk(5, [117.549, 119.627, 0.0], [116.728, 120.147, 0.0], 0.03268),
+    ];
+    let tail = mk(6, [116.728, 120.147, 0.0], [115.574, 120.674, 0.0], 0.04268);
+
+    let corner = CornerFitConfig::default();
+    let mut fit = RunFit::fit(&facets, Some(&head), Some(&tail))
+        .unwrap()
+        .expect("run reconstructs");
+    let first = &facets[0];
+    let last = facets.last().unwrap();
+    let head_blend = fit.blend_head_with_line(&head, first, corner).unwrap();
+    let tail_blend = fit.blend_tail_with_line(last, &tail, corner).unwrap();
+
+    let mut chain: Vec<Move> = Vec::new();
+    chain.push(
+        trim_line_move(&head, 0.0, fit.head_boundary_trim())
+            .unwrap()
+            .expect("head neighbor keeps a body"),
+    );
+    chain.extend(head_blend);
+    if let Some(stub) = trim_line_move(first, 0.0, fit.head_consumption()).unwrap() {
+        chain.push(stub);
+    }
+    chain.extend(fit.pieces(first, last).unwrap());
+    if let Some(stub) = trim_line_move(last, fit.tail_consumption(), 0.0).unwrap() {
+        chain.push(stub);
+    }
+    chain.extend(tail_blend);
+    chain.push(
+        trim_line_move(&tail, fit.tail_boundary_trim(), 0.0)
+            .unwrap()
+            .expect("tail neighbor keeps a body"),
+    );
+
+    let e_rate = |m: &Move, s: f64| {
+        let len = m.segment.s_len();
+        m.segment
+            .followers
+            .iter()
+            .find(|f| f.axis_index == E_AXIS)
+            .map_or(0.0, |f| f.ratio_at(s, len))
+    };
+    for (i, pair) in chain.windows(2).enumerate() {
+        let r_in = e_rate(&pair[0], pair[0].segment.s_len());
+        let r_out = e_rate(&pair[1], 0.0);
+        let step = (r_out - r_in).abs() / r_in.abs().max(r_out.abs());
+        assert!(
+            step <= corner.extrusion_ramp_rel_tol,
+            "seam {i}: de/ds steps {r_in} -> {r_out} ({:.0}%), planner would rest-anchor",
+            step * 100.0
+        );
+    }
+
+    let before = total_extrusion(&facets, E_AXIS)
+        + total_extrusion(std::slice::from_ref(&head), E_AXIS)
+        + total_extrusion(std::slice::from_ref(&tail), E_AXIS);
+    let after = total_extrusion(&chain, E_AXIS);
+    assert!(
+        (before - after).abs() <= 1e-9,
+        "extrusion not conserved: before {before} after {after}"
+    );
+}
+
+#[test]
 fn non_finite_line_yields_fit_error_with_source_line() {
     let good = seg(1, 3000.0, 5.0, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0);
     let bad_line = Line::try_new([10.0, 0.0, 0.0], [f64::NAN, 5.0, 0.0]).unwrap();
@@ -333,7 +549,9 @@ fn non_finite_line_yields_fit_error_with_source_line() {
     };
 
     let err = fit_corners(&[good, bad], CornerFitConfig::default()).unwrap_err();
-    let FitError::Internal { line_no, source } = err;
+    let FitError::Internal { line_no, source } = err else {
+        panic!("expected internal error, got {err:?}");
+    };
     assert_eq!(line_no, 2);
     assert!(matches!(source, GeometryError::DegenerateClothoid { .. }));
 }

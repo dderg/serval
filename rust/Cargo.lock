@@ -221,6 +221,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "gcode",
+ "libm",
 ]
 
 [[package]]
@@ -426,6 +427,7 @@ name = "geometry"
 version = "0.1.0"
 dependencies = [
  "gcode",
+ "libm",
  "nurbs",
  "proptest",
  "thiserror",
@@ -686,6 +688,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "crossbeam-channel",
+ "ethercat-rt",
  "gcode",
  "geometry",
  "heapless",
@@ -719,6 +722,7 @@ dependencies = [
  "crossbeam-channel",
  "geometry",
  "libc",
+ "libm",
  "nurbs",
  "thiserror",
  "tracing",

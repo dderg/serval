@@ -11,6 +11,7 @@ license.workspace = true
 name = "motion_pipeline"
 
 [dependencies]
+libm = { version = "0.2", default-features = false }
 geometry = { path = "../geometry" }
 trajectory = { path = "../trajectory" }
 nurbs = { path = "../nurbs", features = ["host"] }

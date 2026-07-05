@@ -19,8 +19,12 @@ endif
 MOTION_ENGINE_SRC  = rust/target/release/lib_motion_engine.$(MOTION_ENGINE_EXT)
 MOTION_ENGINE_DEST = klippy/_motion_engine.so
 
+# rm before cp: overwriting the existing inode in place invalidates the
+# dylib's ad-hoc code signature on macOS and the kernel SIGKILLs every
+# process that imports it; a fresh inode keeps the linker's signature valid.
 motion-engine:
 	cd rust && cargo build -p motion-engine --release --features extension-module
+	rm -f $(MOTION_ENGINE_DEST)
 	cp $(MOTION_ENGINE_SRC) $(MOTION_ENGINE_DEST)
 
 clean-motion-engine:

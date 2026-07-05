@@ -1,9 +1,6 @@
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
-use pyo3::prelude::*;
-use pyo3::types::PyDict;
-
 use host_rt::host_io::McuHostIo;
 use host_rt::mcu_serial_conn::McuSerialConn;
 
@@ -64,29 +61,8 @@ pub(crate) type EthercatDrive = (
 );
 
 #[derive(Debug, Clone)]
-pub(crate) struct EngineEvent {
-    pub(crate) kind: String,
-    pub(crate) mcu: u32,
-    pub(crate) notify_id: u64,
-    pub(crate) response_bytes: Vec<u8>,
-    pub(crate) sent_time: f64,
-    pub(crate) receive_time: f64,
-}
-
-impl EngineEvent {
-    pub(crate) fn to_pydict(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {
-        let d = PyDict::new(py);
-        d.set_item("type", &self.kind)?;
-        d.set_item("mcu", self.mcu)?;
-        d.set_item("notify_id", self.notify_id)?;
-        d.set_item("data", pyo3::types::PyBytes::new(py, &self.response_bytes))?;
-        d.set_item("sent_time", self.sent_time)?;
-        d.set_item("receive_time", self.receive_time)?;
-        Ok(d.unbind())
-    }
-}
 
 pub(crate) struct FlushWait {
-    pub(crate) rx: crossbeam_channel::Receiver<Option<std::time::Instant>>,
+    pub(crate) rx: Option<crossbeam_channel::Receiver<Option<std::time::Instant>>>,
     pub(crate) deadline: Option<std::time::Instant>,
 }

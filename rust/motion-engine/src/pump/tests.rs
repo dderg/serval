@@ -78,7 +78,13 @@ fn schedule_resends_orphan_when_retired_overtook_pushed() {
     queues.insert(key, q);
 
     const MAX_PER_FRAME: usize = 32;
-    match schedule(&queues, MAX_PER_FRAME, |_, _| None, |_| usize::MAX) {
+    match schedule(
+        &queues,
+        MAX_PER_FRAME,
+        usize::MAX,
+        |_, _| None,
+        |_| usize::MAX,
+    ) {
         Schedule::Send(frames) => {
             assert_eq!(frames.len(), 1, "exactly the inverted axis is scheduled");
             assert_eq!(frames[0].key, key);
@@ -187,10 +193,8 @@ fn make_piece(t: u64) -> (PieceEntry, f64) {
     (
         PieceEntry {
             start_time: t,
-            coeffs: [0.0; 4],
             duration: 0.001,
-            motor_mask: 0,
-            _reserved: [0; 3],
+            ..PieceEntry::zeroed()
         },
         t as f64,
     )
@@ -276,13 +280,27 @@ fn run_pump_sets_start_slot_from_cursor_and_advances_it() {
 }
 
 fn make_piece_pos(t: u64, mask: u8, c0: f32, c3: f32) -> (PieceEntry, f64) {
+    let d = 0.001_f64;
+    let (b0, b1, b2, b3) = (c0 as f64, c0 as f64, c3 as f64, c3 as f64);
+    let mono = [
+        b0,
+        3.0 * (b1 - b0) / d,
+        3.0 * (b2 - 2.0 * b1 + b0) / (d * d),
+        (b3 - 3.0 * b2 + 3.0 * b1 - b0) / (d * d * d),
+    ];
+    let cheb = nurbs::chebyshev::monomial_tau_to_chebyshev(&mono, d);
+    let mut coeffs = [0.0_f32; runtime::piece_ring::MAX_PIECE_COEFFS];
+    for (dst, src) in coeffs.iter_mut().zip(&cheb) {
+        *dst = *src as f32;
+    }
     (
         PieceEntry {
             start_time: t,
-            coeffs: [c0, c0, c3, c3],
-            duration: 0.001,
+            duration: d as f32,
             motor_mask: mask,
-            _reserved: [0; 3],
+            coeff_count: cheb.len() as u8,
+            coeffs,
+            ..PieceEntry::zeroed()
         },
         t as f64,
     )
@@ -412,16 +430,15 @@ fn flush_clears_queued_pieces_and_junctions() {
         key,
         pieces: (0u64..4)
             .map(|i| {
-                (
-                    PieceEntry {
-                        start_time: gated_tick + i,
-                        coeffs: [0.0; 4],
-                        duration: 0.001,
-                        motor_mask: 0,
-                        _reserved: [0; 3],
-                    },
-                    (gated_tick + i) as f64,
-                )
+                let mut p = PieceEntry {
+                    start_time: gated_tick + i,
+                    duration: 0.001,
+                    ..PieceEntry::zeroed()
+                };
+                // Distinct hold values so enqueue's hold merging cannot
+                // coalesce the gated pieces this test counts one by one.
+                p.coeffs[0] = 1.0 + i as f32;
+                (p, (gated_tick + i) as f64)
             })
             .collect(),
         fresh_stream: true,
@@ -444,10 +461,8 @@ fn flush_clears_queued_pieces_and_junctions() {
                 // A deliverable "now" probe (== the advanced clock), not a stale
                 // past piece — the pump's in-past guard aborts on past start_times.
                 start_time: gated_tick + 1_000,
-                coeffs: [0.0; 4],
                 duration: 0.001,
-                motor_mask: 0,
-                _reserved: [0; 3],
+                ..PieceEntry::zeroed()
             },
             (gated_tick + 1_000) as f64,
         )],
@@ -518,16 +533,15 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
         key,
         pieces: (0u64..4)
             .map(|i| {
-                (
-                    PieceEntry {
-                        start_time: gated_tick + i,
-                        coeffs: [0.0; 4],
-                        duration: 0.001,
-                        motor_mask: 0,
-                        _reserved: [0; 3],
-                    },
-                    (gated_tick + i) as f64,
-                )
+                let mut p = PieceEntry {
+                    start_time: gated_tick + i,
+                    duration: 0.001,
+                    ..PieceEntry::zeroed()
+                };
+                // Distinct hold values so enqueue's hold merging cannot
+                // coalesce the gated pieces this test counts one by one.
+                p.coeffs[0] = 1.0 + i as f32;
+                (p, (gated_tick + i) as f64)
             })
             .collect(),
         fresh_stream: true,
@@ -548,10 +562,8 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
                 // A deliverable "now" probe (== the advanced clock), not a stale
                 // past piece — the pump's in-past guard aborts on past start_times.
                 start_time: gated_tick + 1_000,
-                coeffs: [0.0; 4],
                 duration: 0.001,
-                motor_mask: 0,
-                _reserved: [0; 3],
+                ..PieceEntry::zeroed()
             },
             (gated_tick + 1_000) as f64,
         )],
@@ -774,6 +786,168 @@ fn pump_backlog_drains_to_zero_when_pushed() {
 
     ctl.send(PumpMsg::Shutdown).unwrap();
     handle.join().unwrap();
+}
+
+fn stalled_queue_pump<D>(
+    key: AxisKey,
+    retirement_stall_fatal: Duration,
+    on_drip_stall: D,
+) -> Pump<
+    NullSink,
+    impl Fn(AxisKey) -> u32,
+    impl Fn(u32) -> Option<(u64, f64)>,
+    impl Fn(AxisKey) + Send + 'static,
+    impl Fn(AxisKey, u32),
+    D,
+>
+where
+    D: Fn(String) + Send,
+{
+    let mut queues = BTreeMap::new();
+    let mut q = AxisQueue::new(1);
+    q.pushed = 1;
+    q.retired = 0;
+    q.pieces.push_back(make_piece(0));
+    queues.insert(key, q);
+    Pump {
+        queues,
+        junctions: JunctionTracker::default(),
+        cohort: None,
+        sink: NullSink,
+        ring_depth_of: |_key: AxisKey| 1,
+        mcu_clock_of: |_mcu: u32| None,
+        on_fatal_transport: |_: AxisKey| {},
+        on_abandon: |_: AxisKey, _: u32| {},
+        on_drip_stall,
+        backlog: Arc::new(AtomicU64::new(0)),
+        holding_ahead: false,
+        data_open: true,
+        last_stallfull_log: None,
+        retirement_stall_fatal,
+        stall_full_since: None,
+    }
+}
+
+#[test]
+fn retirement_stall_past_threshold_with_frozen_retired_escalates() {
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    let threshold = Duration::from_millis(50);
+    let escalated: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let escalated_cb = Arc::clone(&escalated);
+    let mut pump = stalled_queue_pump(key, threshold, move |msg: String| {
+        escalated_cb.lock().unwrap().push(msg)
+    });
+
+    assert_eq!(
+        pump.send_ready()
+            .expect("first stall observation is not fatal"),
+        false
+    );
+    assert!(escalated.lock().unwrap().is_empty());
+
+    std::thread::sleep(threshold * 2);
+
+    let result = pump.send_ready();
+    assert!(
+        result.is_err(),
+        "retired frozen past the threshold must escalate and stop the pump loop"
+    );
+    let msgs = escalated.lock().unwrap();
+    assert_eq!(msgs.len(), 1, "on_drip_stall must fire exactly once");
+    assert!(
+        msgs[0].contains("retirement stall"),
+        "escalation message should explain the retirement stall: {}",
+        msgs[0]
+    );
+}
+
+#[test]
+fn retirement_stall_resets_when_heartbeat_advances_retired() {
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    let threshold = Duration::from_millis(50);
+    let escalated: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let escalated_cb = Arc::clone(&escalated);
+    let mut pump = stalled_queue_pump(key, threshold, move |msg: String| {
+        escalated_cb.lock().unwrap().push(msg)
+    });
+    pump.queues.get_mut(&key).unwrap().ring_depth = 2;
+    pump.queues.get_mut(&key).unwrap().pushed = 2;
+
+    pump.send_ready().unwrap();
+    let (_, retired_at_onset, _) = pump.stall_full_since.expect("first observation tracked");
+    assert_eq!(retired_at_onset, 0);
+
+    std::thread::sleep(threshold / 2);
+    pump.handle_control_msg(PumpMsg::Heartbeat(HeartbeatMsg {
+        mcu_id: 1,
+        retired_counts: vec![1],
+    }));
+    pump.queues.get_mut(&key).unwrap().pushed = 3;
+
+    let result = pump.send_ready();
+    assert!(
+        result.is_ok(),
+        "retired advancing before the threshold must not escalate"
+    );
+    assert!(
+        escalated.lock().unwrap().is_empty(),
+        "no escalation once retired progressed"
+    );
+    let (tracked_key, tracked_retired, _) = pump
+        .stall_full_since
+        .expect("still stalled on a full ring, just with a fresh timer");
+    assert_eq!(tracked_key, key);
+    assert_eq!(
+        tracked_retired, 1,
+        "stall tracking must reset to the newly observed retired count"
+    );
+
+    std::thread::sleep(threshold / 2 + Duration::from_millis(5));
+    let result = pump.send_ready();
+    assert!(
+        result.is_ok(),
+        "elapsed time since the reset is still under the threshold"
+    );
+    assert!(escalated.lock().unwrap().is_empty());
+}
+
+#[test]
+fn non_stallfull_outcome_between_stalls_resets_the_timer() {
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    let threshold = Duration::from_millis(50);
+    let escalated: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let escalated_cb = Arc::clone(&escalated);
+    let mut pump = stalled_queue_pump(key, threshold, move |msg: String| {
+        escalated_cb.lock().unwrap().push(msg)
+    });
+
+    pump.send_ready().unwrap();
+    assert!(pump.stall_full_since.is_some());
+
+    std::thread::sleep(threshold * 2);
+
+    pump.queues.get_mut(&key).unwrap().pieces.clear();
+    let result = pump.send_ready();
+    assert!(result.is_ok());
+    assert!(
+        pump.stall_full_since.is_none(),
+        "an Idle outcome must clear the stall tracking even though the old \
+         stall was already past the threshold"
+    );
+
+    pump.queues
+        .get_mut(&key)
+        .unwrap()
+        .pieces
+        .push_back(make_piece(0));
+    let result = pump.send_ready();
+    assert!(
+        result.is_ok(),
+        "the timer restarts fresh after the Idle outcome, so this new \
+         StallFull observation is not immediately fatal"
+    );
+    assert!(escalated.lock().unwrap().is_empty());
+    assert!(pump.stall_full_since.is_some());
 }
 
 mod pushpieces_retransmit_tests {

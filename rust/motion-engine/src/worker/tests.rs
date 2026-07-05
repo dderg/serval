@@ -49,6 +49,7 @@ fn cfg_cap(max_buffer_moves: usize) -> StreamConfig {
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
         fit_tol_mm: 1e-3,
+        fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves,
         limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
     }
@@ -122,7 +123,17 @@ fn nonstop_flood_of_real_perimeter_drains_without_crashing() {
     for _loop_idx in 0..12 {
         for (x, y, e) in VORON_PERIMETER {
             let end = [x, y, 0.2];
-            h.submit_move(line_e(line_no, 50.0, prev, end, e)).unwrap();
+            let mut m = line_e(line_no, 50.0, prev, end, e);
+            loop {
+                match h.submit_move(m) {
+                    Ok(()) => break,
+                    Err(StreamWorkerError::ChannelFull) => {
+                        m = line_e(line_no, 50.0, prev, end, e);
+                        std::thread::yield_now();
+                    }
+                    Err(e) => panic!("submit failed: {e}"),
+                }
+            }
             prev = end;
             line_no += 1;
             submitted += 1;
@@ -323,139 +334,6 @@ fn nudge_dispatches_pieces_and_advances_time() {
     h.shutdown();
 }
 
-fn nominal_secs(m: &geometry::Move) -> f64 {
-    nominal_t(m).unwrap()
-}
-
-#[test]
-fn intake_tally_accrues_nominal_on_intake() {
-    let atomic = Arc::new(AtomicU64::new(0));
-    let mut tally = IntakeTally::new(Arc::clone(&atomic));
-    let a = line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0]);
-    let b = line(2, [40.0, 0.0, 0.0], [60.0, 0.0, 0.0]);
-    let expected = nominal_secs(&a) + nominal_secs(&b);
-
-    tally.record_intake(&a);
-    tally.record_intake(&b);
-
-    assert!(expected > 0.0);
-    assert!((f64::from_bits(atomic.load(Ordering::Acquire)) - expected).abs() < 1e-12);
-}
-
-#[test]
-fn intake_tally_subtracts_committed_nominal() {
-    let atomic = Arc::new(AtomicU64::new(0));
-    let mut tally = IntakeTally::new(Arc::clone(&atomic));
-    let a = line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0]);
-    let b = line(2, [40.0, 0.0, 0.0], [60.0, 0.0, 0.0]);
-    let c = line(3, [60.0, 0.0, 0.0], [100.0, 0.0, 0.0]);
-    tally.record_intake(&a);
-    tally.record_intake(&b);
-    tally.record_intake(&c);
-
-    tally.retire_dispatched(2);
-
-    let remaining = nominal_secs(&b) + nominal_secs(&c);
-    assert!((f64::from_bits(atomic.load(Ordering::Acquire)) - remaining).abs() < 1e-12);
-}
-
-#[test]
-fn intake_tally_empties_to_exactly_zero_on_full_commit() {
-    let atomic = Arc::new(AtomicU64::new(0));
-    let mut tally = IntakeTally::new(Arc::clone(&atomic));
-    tally.record_intake(&line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0]));
-    tally.record_intake(&line(2, [40.0, 0.0, 0.0], [60.0, 0.0, 0.0]));
-
-    tally.retire_dispatched(3);
-
-    assert_eq!(f64::from_bits(atomic.load(Ordering::Acquire)), 0.0);
-}
-
-#[test]
-fn intake_tally_reset_zeroes_the_signal() {
-    let atomic = Arc::new(AtomicU64::new(0));
-    let mut tally = IntakeTally::new(Arc::clone(&atomic));
-    tally.record_intake(&line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0]));
-
-    tally.reset();
-
-    assert_eq!(f64::from_bits(atomic.load(Ordering::Acquire)), 0.0);
-}
-
-#[test]
-fn flushed_stream_reads_zero_uncommitted_intake() {
-    let cap = Capture::default();
-    let mut h = StreamWorkerHandle::spawn(
-        cfg(),
-        AxisChainSet::default(),
-        vec![0.0, 0.0, 0.0],
-        cap.dispatch(),
-        cap.nudge_dispatch(),
-        Arc::default(),
-    );
-    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
-        .unwrap();
-    h.submit_move(line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0]))
-        .unwrap();
-    h.flush().unwrap();
-
-    assert_eq!(h.uncommitted_intake_secs(), 0.0);
-    h.shutdown();
-}
-
-#[test]
-fn mid_stream_dispatch_keeps_intake_tally_bounded() {
-    let cap = Capture::default();
-    let mut h = StreamWorkerHandle::spawn(
-        cfg_cap(256),
-        AxisChainSet::default(),
-        vec![0.0, 0.0, 0.0],
-        cap.dispatch(),
-        cap.nudge_dispatch(),
-        Arc::default(),
-    );
-
-    let n: u32 = 16;
-    let mut prev = [0.0, 0.0, 0.0];
-    let mut total_nominal = 0.0;
-    for i in 0..n {
-        let x = f64::from(i + 1) * 20.0;
-        let y = if i % 2 == 0 { 3.0 } else { 0.0 };
-        let end = [x, y, 0.0];
-        let m = line(i + 1, prev, end);
-        total_nominal += nominal_secs(&m);
-        h.submit_move(m).unwrap();
-        prev = end;
-    }
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while cap.snapshot().len() < 6 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "continuity commit never dispatched the blend run"
-        );
-        std::thread::yield_now();
-    }
-
-    let mid = h.uncommitted_intake_secs();
-    assert!(
-        mid >= 0.0,
-        "tally went negative through the real head-trim path: {mid}"
-    );
-    assert!(
-        mid < total_nominal,
-        "committed moves were not subtracted on the real commit path: {mid} !< {total_nominal}"
-    );
-
-    h.flush().unwrap();
-    assert_eq!(
-        h.uncommitted_intake_secs(),
-        0.0,
-        "tally must be exactly zero after flush through the partial-commit path"
-    );
-    h.shutdown();
-}
-
 #[test]
 fn submit_move_errors_when_channel_full_instead_of_blocking() {
     let (tx, _rx) = crossbeam_channel::bounded::<StreamMsg>(1);
@@ -616,6 +494,99 @@ fn flush_returns_after_commit_without_sleeping_until_playout() {
         "flush blocked {elapsed:?} on a ~2s move: it slept until the play-out \
          deadline instead of returning after commit and letting the caller poll \
          the drain counter"
+    );
+    h.shutdown();
+}
+
+fn poll_fence(h: &StreamWorkerHandle, id: u64, timeout: Duration) -> Option<f64> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(t) = h.fence_take(id) {
+            return t;
+        }
+        assert!(Instant::now() < deadline, "fence {id} did not resolve");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn forcing_fence_resolves_to_the_end_of_submitted_motion() {
+    let cap = Capture::default();
+    let mut h = StreamWorkerHandle::spawn(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0],
+        cap.dispatch(),
+        cap.nudge_dispatch(),
+        Arc::default(),
+    );
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    h.submit_move(line(2, [30.0, 0.0, 0.0], [60.0, 0.0, 0.0]))
+        .unwrap();
+
+    let id = h.fence_start(true).unwrap();
+    let t = poll_fence(&h, id, Duration::from_secs(5))
+        .expect("forcing fence on live motion resolves with a stream time");
+    let segs = cap.snapshot();
+    let dispatched_end = segs.last().unwrap().1;
+    assert!(
+        (t - dispatched_end).abs() < 1e-9,
+        "fence time {t} must equal the dispatched end {dispatched_end}"
+    );
+    h.shutdown();
+}
+
+#[test]
+fn fence_on_an_idle_pipe_resolves_without_new_motion() {
+    let cap = Capture::default();
+    let mut h = StreamWorkerHandle::spawn(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0],
+        cap.dispatch(),
+        cap.nudge_dispatch(),
+        Arc::default(),
+    );
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    h.flush().unwrap();
+    let end = cap.snapshot().last().unwrap().1;
+
+    let id = h.fence_start(false).unwrap();
+    let t = poll_fence(&h, id, Duration::from_secs(5))
+        .expect("idle-pipe fence resolves with the dispatched end");
+    assert!(
+        (t - end).abs() < 1e-9,
+        "idle fence {t} vs dispatched end {end}"
+    );
+    h.shutdown();
+}
+
+#[test]
+fn passive_fence_resolves_as_the_stream_commits_past_it() {
+    let cap = Capture::default();
+    let mut h = StreamWorkerHandle::spawn(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0],
+        cap.dispatch(),
+        cap.nudge_dispatch(),
+        Arc::default(),
+    );
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    let id = h.fence_start(false).unwrap();
+    let t = poll_fence(&h, id, Duration::from_secs(10))
+        .expect("passive fence resolves once the pacer drains the quiet stream");
+    let segs = cap.snapshot();
+    assert!(
+        !segs.is_empty(),
+        "fence resolved but nothing was dispatched"
+    );
+    assert!(
+        t >= segs.last().unwrap().1 - 1e-9,
+        "fence time {t} must cover the motion before it"
     );
     h.shutdown();
 }

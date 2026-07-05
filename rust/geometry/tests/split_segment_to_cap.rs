@@ -199,10 +199,7 @@ fn follower_segment_splits_with_invariant_ratio() {
         ],
     )
     .unwrap();
-    let followers = vec![FollowerDemand {
-        axis_index: 3,
-        ratio: 5.0 / 30.0,
-    }];
+    let followers = vec![FollowerDemand::constant(3, 5.0 / 30.0)];
     let seg = CubicSegment::try_new(
         xyz,
         followers.clone(),
@@ -220,4 +217,43 @@ fn follower_segment_splits_with_invariant_ratio() {
     for child in &out {
         assert_eq!(child.followers, followers);
     }
+}
+
+#[test]
+fn ramped_follower_splits_by_arc_length_span() {
+    // A follower ramping r0 → r1 over the parent must yield child ramps that
+    // interpolate the parent at each child's arc-length span: consecutive
+    // children meet continuously, the ends match r0/r1, and total E is conserved.
+    let length = 30.0;
+    let (r0, r1) = (0.1, 0.4);
+    let seg = {
+        let mut s = straight_cubic(length);
+        s.followers = vec![FollowerDemand::ramp(3, r0, r1)];
+        s
+    };
+    let out = split_segment_to_cap(&seg, 8.0).unwrap();
+    assert!(out.len() > 2, "30mm at 8mm cap should split into >2");
+
+    let ratio_at = |s: f64| r0 + (r1 - r0) * s / length;
+    let mut total_e = 0.0;
+    for (i, child) in out.iter().enumerate() {
+        let info = child.split_info.expect("child carries split info");
+        let f = child.followers[0];
+        assert!((f.ratio - ratio_at(info.s_lo_mm)).abs() < 1e-9);
+        assert!((f.ratio_end - ratio_at(info.s_hi_mm)).abs() < 1e-9);
+        if i + 1 < out.len() {
+            let next = out[i + 1].followers[0];
+            assert!(
+                (f.ratio_end - next.ratio).abs() < 1e-9,
+                "child ramps discontinuous at boundary {i}"
+            );
+        }
+        total_e += f.delta_over(info.s_hi_mm - info.s_lo_mm);
+    }
+    assert!((out[0].followers[0].ratio - r0).abs() < 1e-9);
+    assert!((out.last().unwrap().followers[0].ratio_end - r1).abs() < 1e-9);
+    assert!(
+        (total_e - 0.5 * (r0 + r1) * length).abs() < 1e-9,
+        "total extrusion not conserved: {total_e}"
+    );
 }

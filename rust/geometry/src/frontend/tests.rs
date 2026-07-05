@@ -323,6 +323,7 @@ fn invalid_limits_rejected() {
 fn velocity_limits_try_new_validates() {
     assert!(VelocityLimits::try_new(300.0, 3000.0, 5.0, 100_000.0).is_ok());
     assert!(VelocityLimits::try_new(300.0, 3000.0, 0.0, 100_000.0).is_ok());
+    assert!(VelocityLimits::try_new(300.0, 3000.0, 5.0, f64::INFINITY).is_ok());
     assert!(VelocityLimits::try_new(0.0, 3000.0, 5.0, 100_000.0).is_err());
     assert!(VelocityLimits::try_new(300.0, -1.0, 5.0, 100_000.0).is_err());
     assert!(VelocityLimits::try_new(300.0, 3000.0, f64::NAN, 100_000.0).is_err());

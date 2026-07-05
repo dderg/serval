@@ -93,8 +93,8 @@ fn hermite_opposite_sign_sharp_apex() {
 
 fn rot_z(v: [f64; 3], ang: f64) -> [f64; 3] {
     [
-        v[0] * ang.cos() - v[1] * ang.sin(),
-        v[0] * ang.sin() + v[1] * ang.cos(),
+        v[0] * libm::cos(ang) - v[1] * libm::sin(ang),
+        v[0] * libm::sin(ang) + v[1] * libm::cos(ang),
         0.0,
     ]
 }

@@ -70,8 +70,12 @@ fn write_piece_then_commit_head_makes_one_piece_visible() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handle = rt();
 
-    let mut piece = [0u8; 32];
-    piece[0..8].copy_from_slice(&7777u64.to_le_bytes());
+    let piece = runtime::piece_ring::PieceEntry {
+        start_time: 7777,
+        duration: 0.001,
+        ..runtime::piece_ring::PieceEntry::zeroed()
+    }
+    .to_le_bytes();
 
     unsafe {
         let rc = c_api::runtime_write_piece(handle, 0, 0, 0, piece.as_ptr());
@@ -86,7 +90,11 @@ fn write_piece_then_commit_head_makes_one_piece_visible() {
 fn write_piece_rejects_unconfigured_axis() {
     let _guard = TEST_LOCK.lock().unwrap();
     let handle = rt();
-    let piece = [0u8; 32];
+    let piece = runtime::piece_ring::PieceEntry {
+        duration: 0.001,
+        ..runtime::piece_ring::PieceEntry::zeroed()
+    }
+    .to_le_bytes();
     unsafe {
         let rc = c_api::runtime_write_piece(handle, 3, 0, 0, piece.as_ptr());
         assert_eq!(rc, c_api::RUNTIME_ERR_INVALID_ARG);
@@ -94,9 +102,25 @@ fn write_piece_rejects_unconfigured_axis() {
 }
 
 #[test]
+fn write_piece_rejects_unarmable_entries() {
+    let _guard = TEST_LOCK.lock().unwrap();
+    let handle = rt();
+    let mut zero_duration = runtime::piece_ring::PieceEntry::zeroed();
+    zero_duration.duration = 0.0;
+    let mut bad_count = runtime::piece_ring::PieceEntry::zeroed();
+    bad_count.duration = 0.001;
+    bad_count.coeff_count = 9;
+    for entry in [zero_duration, bad_count] {
+        let bytes = entry.to_le_bytes();
+        let rc = unsafe { c_api::runtime_write_piece(handle, 0, 0, 0, bytes.as_ptr()) };
+        assert_eq!(rc, c_api::RUNTIME_ERR_INVALID_ARG);
+    }
+}
+
+#[test]
 fn write_piece_null_rt_is_null_ptr_error() {
     let _guard = TEST_LOCK.lock().unwrap();
-    let piece = [0u8; 32];
+    let piece = [0u8; 48];
     unsafe {
         let rc = c_api::runtime_write_piece(core::ptr::null_mut(), 0, 0, 0, piece.as_ptr());
         assert_eq!(rc, c_api::RUNTIME_ERR_NULL_PTR);

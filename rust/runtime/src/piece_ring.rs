@@ -1,5 +1,3 @@
-use crate::monomial::bernstein_to_monomial_with_duration;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommitOutcome {
     Applied,
@@ -180,10 +178,10 @@ impl RingDescriptor {
 /// ```rust
 /// use runtime::piece_ring::{PieceEntry, PieceRing};
 ///
-/// let mut storage = [PieceEntry { start_time: 0, coeffs: [0.0; 4], duration: 0.0, motor_mask: 0, _reserved: [0; 3] }; 4];
+/// let mut storage = [PieceEntry::zeroed(); 4];
 /// let mut ring = PieceRing::new(&mut storage);
 ///
-/// let entry = PieceEntry { start_time: 1000, coeffs: [0.0; 4], duration: 0.001, motor_mask: 0, _reserved: [0; 3] };
+/// let entry = PieceEntry { start_time: 1000, duration: 0.001, ..PieceEntry::zeroed() };
 /// assert!(ring.push(entry).is_ok());
 /// assert_eq!(ring.peek().unwrap().start_time, 1000);
 /// ring.pop();
@@ -277,18 +275,31 @@ impl<'a> PieceRing<'a> {
     }
 }
 
-/// Layout contract (C ABI, matches the corresponding C struct):
+/// Maximum Chebyshev coefficients per piece (degree ≤ 7).
+pub const MAX_PIECE_COEFFS: usize = 8;
+/// Full ring-slot size — also the maximum wire entry length.
+pub const PIECE_ENTRY_BYTES: usize = 48;
+/// Wire entry header: everything before the coefficient block.
+pub const PIECE_WIRE_HEADER_LEN: usize = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PieceWireError {
+    BadCoeffCount(u8),
+    Truncated { need: usize, have: usize },
+}
+
+/// Layout contract (C ABI, matches `mcu_protocol_schema.h`; the wire entry is
+/// a truncated prefix of the ring slot — header plus `coeff_count` f32s):
 ///
 /// ```text
-/// offset  0 ..  7 : start_time  (u64, little-endian MCU clock cycles)
-/// offset  8 .. 11 : coeffs[0]   (f32, Bernstein b0)
-/// offset 12 .. 15 : coeffs[1]   (f32, Bernstein b1)
-/// offset 16 .. 19 : coeffs[2]   (f32, Bernstein b2)
-/// offset 20 .. 23 : coeffs[3]   (f32, Bernstein b3)
-/// offset 24 .. 27 : duration     (f32, piece duration in seconds)
-/// offset 28      : motor_mask  (u8, 0 => normal full-axis move)
-/// offset 29 .. 31 : _reserved   ([u8; 3], must be zero)
-/// total           : 32 bytes, align 8
+/// offset  0 ..  8 : start_time  (u64, little-endian MCU clock cycles)
+/// offset  8 .. 12 : duration    (f32, piece duration in seconds)
+/// offset 12       : motor_mask  (u8, 0 => normal full-axis move)
+/// offset 13       : coeff_count (u8, 1..=8 — fail loud outside)
+/// offset 14 .. 16 : _reserved   ([u8; 2], must be zero)
+/// offset 16 .. 48 : coeffs      ([f32; 8], Chebyshev on u ∈ [−1, 1],
+///                                u = 2·(t − start)/duration − 1)
+/// total           : 48 bytes, align 8
 /// ```
 ///
 /// # Example
@@ -296,30 +307,36 @@ impl<'a> PieceRing<'a> {
 /// ```rust
 /// use runtime::piece_ring::PieceEntry;
 ///
-/// let entry = PieceEntry {
-///     start_time: 0,
-///     coeffs: [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0],
-///     duration: 0.01,
-///     motor_mask: 0,
-///     _reserved: [0; 3],
-/// };
-/// let (pos, vel) = entry.to_monomial();
-/// assert!((pos[1] - 100.0).abs() < 1e-3);
+/// // pos(u) = 50 + 50·u over 10 ms: 0 → 100 at a constant 10 m/s.
+/// let mut entry = PieceEntry::zeroed();
+/// entry.duration = 0.01;
+/// entry.coeff_count = 2;
+/// entry.coeffs[0] = 50.0;
+/// entry.coeffs[1] = 50.0;
+/// assert_eq!(entry.pos_start(), 0.0);
+/// assert_eq!(entry.pos_end(), 100.0);
+/// assert_eq!(entry.vel_end(), 10_000.0);
+/// assert_eq!(entry.wire_len(), 24);
 /// ```
 #[derive(Clone, Copy, Debug)]
 #[repr(C, align(8))]
 pub struct PieceEntry {
     pub start_time: u64,
-    pub coeffs: [f32; 4],
     pub duration: f32,
     pub motor_mask: u8,
+    pub coeff_count: u8,
     #[allow(clippy::pub_underscore_fields)]
-    pub _reserved: [u8; 3],
+    pub _reserved: [u8; 2],
+    pub coeffs: [f32; MAX_PIECE_COEFFS],
 }
 
 const _: () = {
-    assert!(core::mem::size_of::<PieceEntry>() == 32);
+    assert!(core::mem::size_of::<PieceEntry>() == PIECE_ENTRY_BYTES);
     assert!(core::mem::align_of::<PieceEntry>() == 8);
+    assert!(core::mem::offset_of!(PieceEntry, duration) == 8);
+    assert!(core::mem::offset_of!(PieceEntry, motor_mask) == 12);
+    assert!(core::mem::offset_of!(PieceEntry, coeff_count) == 13);
+    assert!(core::mem::offset_of!(PieceEntry, coeffs) == PIECE_WIRE_HEADER_LEN);
 };
 
 #[inline]
@@ -336,9 +353,24 @@ pub fn stepper_sel_from_mask(mask: u8) -> Result<u8, ()> {
 
 impl PieceEntry {
     #[inline]
-    pub fn to_monomial(&self) -> ([f32; 4], [f32; 3]) {
-        let m = bernstein_to_monomial_with_duration(self.coeffs, self.duration);
-        (m.coeffs, m.vel_coeffs)
+    #[must_use]
+    pub const fn zeroed() -> Self {
+        Self {
+            start_time: 0,
+            duration: 0.0,
+            motor_mask: 0,
+            coeff_count: 1,
+            _reserved: [0; 2],
+            coeffs: [0.0; MAX_PIECE_COEFFS],
+        }
+    }
+
+    /// Bytes this entry occupies on the wire — the header plus only the
+    /// coefficients actually present.
+    #[inline]
+    #[must_use]
+    pub const fn wire_len(&self) -> usize {
+        PIECE_WIRE_HEADER_LEN + 4 * self.coeff_count as usize
     }
 
     /// `end = start_time + ⌊duration × clock_freq⌋`
@@ -353,78 +385,150 @@ impl PieceEntry {
         self.start_time + cycles
     }
 
+    fn live_coeffs(&self) -> &[f32] {
+        let n = (self.coeff_count as usize).clamp(1, MAX_PIECE_COEFFS);
+        self.coeffs.get(..n).unwrap_or(&self.coeffs)
+    }
+
+    /// Position at the piece start: `T_k(−1) = (−1)^k`.
+    #[inline]
+    pub fn pos_start(&self) -> f32 {
+        let mut sum = 0.0;
+        let mut sign = 1.0_f32;
+        for &a in self.live_coeffs() {
+            sum += sign * a;
+            sign = -sign;
+        }
+        sum
+    }
+
+    /// Position at the piece end: `T_k(1) = 1`.
+    #[inline]
+    pub fn pos_end(&self) -> f32 {
+        self.live_coeffs().iter().sum()
+    }
+
+    /// Velocity at the piece start: `T_k′(−1) = (−1)^{k+1}·k²`, × `2/duration`.
+    #[inline]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn vel_start(&self) -> f32 {
+        if self.duration <= 0.0 {
+            return 0.0;
+        }
+        let mut sum = 0.0;
+        let mut sign = -1.0_f32;
+        for (k, &a) in self.live_coeffs().iter().enumerate() {
+            sum += sign * (k * k) as f32 * a;
+            sign = -sign;
+        }
+        sum * 2.0 / self.duration
+    }
+
+    /// Velocity at the piece end: `T_k′(1) = k²`, × `2/duration`.
+    #[inline]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn vel_end(&self) -> f32 {
+        if self.duration <= 0.0 {
+            return 0.0;
+        }
+        let mut sum = 0.0;
+        for (k, &a) in self.live_coeffs().iter().enumerate() {
+            sum += (k * k) as f32 * a;
+        }
+        sum * 2.0 / self.duration
+    }
+
     /// # Example
     ///
     /// ```rust
     /// use runtime::piece_ring::PieceEntry;
     ///
-    /// let p = PieceEntry { start_time: 1, coeffs: [0.0; 4], duration: 0.001, motor_mask: 0, _reserved: [0; 3] };
+    /// let p = PieceEntry { start_time: 1, duration: 0.001, ..PieceEntry::zeroed() };
     /// let b = p.to_le_bytes();
-    /// assert_eq!(b.len(), 32);
+    /// assert_eq!(b.len(), 48);
     /// assert_eq!(&b[0..8], &1u64.to_le_bytes());
     /// ```
     #[inline]
-    pub fn to_le_bytes(&self) -> [u8; 32] {
-        let mut b = [0u8; 32];
+    pub fn to_le_bytes(&self) -> [u8; PIECE_ENTRY_BYTES] {
+        let mut b = [0u8; PIECE_ENTRY_BYTES];
         b[0..8].copy_from_slice(&self.start_time.to_le_bytes());
-        b[8..12].copy_from_slice(&self.coeffs[0].to_le_bytes());
-        b[12..16].copy_from_slice(&self.coeffs[1].to_le_bytes());
-        b[16..20].copy_from_slice(&self.coeffs[2].to_le_bytes());
-        b[20..24].copy_from_slice(&self.coeffs[3].to_le_bytes());
-        b[24..28].copy_from_slice(&self.duration.to_le_bytes());
-        b[28] = self.motor_mask;
-        b[29..32].copy_from_slice(&self._reserved);
+        b[8..12].copy_from_slice(&self.duration.to_le_bytes());
+        b[12] = self.motor_mask;
+        b[13] = self.coeff_count;
+        b[14..16].copy_from_slice(&self._reserved);
+        for (k, c) in self.coeffs.iter().enumerate() {
+            let off = PIECE_WIRE_HEADER_LEN + 4 * k;
+            if let Some(dst) = b.get_mut(off..off + 4) {
+                dst.copy_from_slice(&c.to_le_bytes());
+            }
+        }
         b
     }
 
     #[inline]
-    pub fn from_le_bytes(b: &[u8; 32]) -> Self {
-        let &[
-            t0,
-            t1,
-            t2,
-            t3,
-            t4,
-            t5,
-            t6,
-            t7,
-            c00,
-            c01,
-            c02,
-            c03,
-            c10,
-            c11,
-            c12,
-            c13,
-            c20,
-            c21,
-            c22,
-            c23,
-            c30,
-            c31,
-            c32,
-            c33,
-            d0,
-            d1,
-            d2,
-            d3,
-            motor_mask,
-            r0,
-            r1,
-            r2,
-        ] = b;
-        Self {
-            start_time: u64::from_le_bytes([t0, t1, t2, t3, t4, t5, t6, t7]),
-            coeffs: [
-                f32::from_le_bytes([c00, c01, c02, c03]),
-                f32::from_le_bytes([c10, c11, c12, c13]),
-                f32::from_le_bytes([c20, c21, c22, c23]),
-                f32::from_le_bytes([c30, c31, c32, c33]),
-            ],
-            duration: f32::from_le_bytes([d0, d1, d2, d3]),
-            motor_mask,
-            _reserved: [r0, r1, r2],
+    pub fn from_le_bytes(b: &[u8; PIECE_ENTRY_BYTES]) -> Self {
+        let rd4 = |off: usize| {
+            let mut w = [0u8; 4];
+            if let Some(src) = b.get(off..off + 4) {
+                w.copy_from_slice(src);
+            }
+            f32::from_le_bytes(w)
+        };
+        let mut coeffs = [0.0_f32; MAX_PIECE_COEFFS];
+        for (k, c) in coeffs.iter_mut().enumerate() {
+            *c = rd4(PIECE_WIRE_HEADER_LEN + 4 * k);
         }
+        Self {
+            start_time: u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
+            duration: rd4(8),
+            motor_mask: b[12],
+            coeff_count: b[13],
+            _reserved: [b[14], b[15]],
+            coeffs,
+        }
+    }
+
+    /// Append this entry's wire form — the 16-byte header followed by exactly
+    /// `coeff_count` coefficients.
+    #[cfg(feature = "host")]
+    pub fn to_wire_bytes(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.start_time.to_le_bytes());
+        out.extend_from_slice(&self.duration.to_le_bytes());
+        out.push(self.motor_mask);
+        out.push(self.coeff_count);
+        out.extend_from_slice(&self._reserved);
+        for c in self.live_coeffs() {
+            out.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+
+    /// Parse one variable-length wire entry from the front of `bytes`,
+    /// zero-filling the coefficient tail. Returns the entry and its consumed
+    /// wire length. The single wire parser — mcu-protocol decode walking and
+    /// the EtherCAT ring both route through here.
+    pub fn parse_wire(bytes: &[u8]) -> Result<(Self, usize), PieceWireError> {
+        let header = bytes
+            .get(..PIECE_WIRE_HEADER_LEN)
+            .ok_or(PieceWireError::Truncated {
+                need: PIECE_WIRE_HEADER_LEN,
+                have: bytes.len(),
+            })?;
+        let coeff_count = header.get(13).copied().unwrap_or(0);
+        if coeff_count == 0 || coeff_count as usize > MAX_PIECE_COEFFS {
+            return Err(PieceWireError::BadCoeffCount(coeff_count));
+        }
+        let wire_len = PIECE_WIRE_HEADER_LEN + 4 * coeff_count as usize;
+        if bytes.len() < wire_len {
+            return Err(PieceWireError::Truncated {
+                need: wire_len,
+                have: bytes.len(),
+            });
+        }
+        let mut full = [0u8; PIECE_ENTRY_BYTES];
+        if let (Some(dst), Some(src)) = (full.get_mut(..wire_len), bytes.get(..wire_len)) {
+            dst.copy_from_slice(src);
+        }
+        Ok((Self::from_le_bytes(&full), wire_len))
     }
 }
 

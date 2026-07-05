@@ -131,7 +131,7 @@ fn small_arc() {
     let angle = 3.0_f64.to_radians();
     let params = ArcParams {
         start: [10.0, 0.0, 0.0],
-        end: [10.0 * angle.cos(), 10.0 * angle.sin(), 0.0],
+        end: [10.0 * libm::cos(angle), 10.0 * libm::sin(angle), 0.0],
         center: [0.0, 0.0],
         clockwise: false,
         tolerance_mm: 0.001,
@@ -202,7 +202,7 @@ fn radial_error_verification() {
         for k in 0..=100 {
             let t = f64::from(k) / 100.0;
             let pt = bezier_eval(p0, p1, p2, p3, t);
-            let dist = pt[0].hypot(pt[1]);
+            let dist = libm::hypot(pt[0], pt[1]);
             let err = (dist - r).abs();
             max_err = max_err.max(err);
         }

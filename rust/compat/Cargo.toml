@@ -12,6 +12,7 @@ name = "kalico-compat"
 path = "src/main.rs"
 
 [dependencies]
+libm = { version = "0.2", default-features = false }
 gcode = { path = "../gcode" }
 clap = { version = "4", features = ["derive"] }
 

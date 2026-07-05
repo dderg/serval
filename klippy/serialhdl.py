@@ -9,12 +9,25 @@ import threading
 
 import serial
 
-from . import chelper, msgproto, util
+from . import chelper, msgproto, structured_log, util
 from .extras.danger_options import get_danger_options
 
 
 class error(Exception):
     pass
+
+
+# MCU timers compare 32-bit clocks: a waketime more than 2^31 ticks ahead of
+# the MCU's now reads as the past and trips "Timer too close".  Commands are
+# held host-side until within 2^30 ticks, deep inside the half-range on every
+# supported clock frequency.
+MCU_TIMER_HORIZON = 1 << 30
+
+# Engine-path commands carrying a near-term reqclock (heater PWM schedules
+# ~0.3 s ahead) die as "Timer too close" if delivery eats the margin.  Sends
+# whose remaining margin is already below this threshold get logged so a
+# late-arrival crash can be split into generated-late vs delivered-late.
+DEADLINE_MARGIN_WARN = 0.150
 
 
 class SerialReader:
@@ -594,6 +607,12 @@ class SerialReader:
         if engine is not None:
             if self._engine_detached:
                 return
+            if reqclock and self._held_until_timer_horizon(
+                msg, minclock, reqclock
+            ):
+                return
+            if reqclock:
+                self._warn_if_deadline_margin_thin(msg, reqclock)
             handle = self.mcu._engine_handle
             try:
                 engine.engine_send(handle, msg)
@@ -611,6 +630,33 @@ class SerialReader:
                 reqclock,
                 0,
             )
+
+    def _warn_if_deadline_margin_thin(self, msg, reqclock):
+        clocksync = self.mcu._clocksync
+        est_clock = clocksync.get_clock(self.reactor.monotonic())
+        margin = (reqclock - est_clock) / clocksync.mcu_freq
+        if margin < DEADLINE_MARGIN_WARN:
+            structured_log.event(
+                "mcu-comms",
+                "thin_deadline_margin",
+                level=logging.WARNING,
+                msg="engine-path command sent with thin clock margin",
+                command=msg.split()[0],
+                margin_s=margin,
+            )
+
+    def _held_until_timer_horizon(self, msg, minclock, reqclock):
+        clocksync = self.mcu._clocksync
+        est_clock = clocksync.get_clock(self.reactor.monotonic())
+        if reqclock - est_clock <= MCU_TIMER_HORIZON:
+            return False
+        release_systime = clocksync.estimate_clock_systime(
+            reqclock - MCU_TIMER_HORIZON
+        )
+        self.reactor.register_callback(
+            lambda et: self.send(msg, minclock, reqclock), release_systime
+        )
+        return True
 
     def send_with_response(self, msg, response):
         engine = getattr(self.mcu, "_motion_engine", None)

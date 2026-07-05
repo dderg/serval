@@ -4,7 +4,14 @@ use super::{
 
 #[pymethods]
 impl PyMotionEngine {
-    fn set_torque(&self, mcu_handle: u32, value: bool, print_time: f64) -> PyResult<()> {
+    /// `Ok(false)` while the endpoint call is still in flight; `Ok(true)`
+    /// once done. Poll from a reactor-yielding loop — see `bg_call`.
+    fn endpoint_call_done(&self, call_id: u64) -> PyResult<bool> {
+        self.endpoint_calls
+            .done(call_id)
+            .map_err(PyRuntimeError::new_err)
+    }
+    fn set_torque_start(&self, mcu_handle: u32, value: bool, print_time: f64) -> PyResult<u64> {
         let reference_mcu = {
             let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
             *mcus
@@ -52,23 +59,24 @@ impl PyMotionEngine {
             execute_at_ns,
             "servo torque command"
         );
-        let result = crate::servo_torque::send_set_torque(&conn, value, execute_at_ns)
-            .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            tracing::error!(
-                subsystem = "engine",
-                event = "servo_torque_rejected",
-                mcu_handle,
-                value,
-                result,
-                "servo torque command rejected"
-            );
-            return Err(PyRuntimeError::new_err(format!(
-                "servo torque {} failed: endpoint result {result}",
-                if value { "enable" } else { "disable" }
-            )));
-        }
-        Ok(())
+        Ok(self.endpoint_calls.start("set_torque", move || {
+            let result = crate::servo_torque::send_set_torque(&conn, value, execute_at_ns)?;
+            if result != 0 {
+                tracing::error!(
+                    subsystem = "engine",
+                    event = "servo_torque_rejected",
+                    mcu_handle,
+                    value,
+                    result,
+                    "servo torque command rejected"
+                );
+                return Err(format!(
+                    "servo torque {} failed: endpoint result {result}",
+                    if value { "enable" } else { "disable" }
+                ));
+            }
+            Ok(())
+        }))
     }
     fn start_servo_capture(
         &self,
@@ -117,13 +125,13 @@ impl PyMotionEngine {
             .then_some(resp.overflow_cycle);
         Ok((resp.result, resp.samples, overflow))
     }
-    fn set_drive_limits(
+    fn set_drive_limits_start(
         &self,
         mcu_handle: u32,
         slot: u8,
         following_error_counts: u32,
         max_torque_tenth_pct: u16,
-    ) -> PyResult<()> {
+    ) -> PyResult<u64> {
         let conn = self.ethercat_conn(mcu_handle, "set_drive_limits")?;
         tracing::info!(
             subsystem = "engine",
@@ -133,21 +141,22 @@ impl PyMotionEngine {
             max_torque_tenth_pct,
             "servo drive limits set"
         );
-        let result = crate::servo_torque::send_drive_limits(
-            &conn,
-            slot,
-            following_error_counts,
-            max_torque_tenth_pct,
-        )
-        .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "set_drive_limits: SDO write failed: endpoint result {result}"
-            )));
-        }
-        Ok(())
+        Ok(self.endpoint_calls.start("set_drive_limits", move || {
+            let result = crate::servo_torque::send_drive_limits(
+                &conn,
+                slot,
+                following_error_counts,
+                max_torque_tenth_pct,
+            )?;
+            if result != 0 {
+                return Err(format!(
+                    "set_drive_limits: SDO write failed: endpoint result {result}"
+                ));
+            }
+            Ok(())
+        }))
     }
-    fn restore_drive_limits(&self, mcu_handle: u32, slot: u8) -> PyResult<()> {
+    fn restore_drive_limits_start(&self, mcu_handle: u32, slot: u8) -> PyResult<u64> {
         let conn = self.ethercat_conn(mcu_handle, "restore_drive_limits")?;
         tracing::info!(
             subsystem = "engine",
@@ -155,14 +164,15 @@ impl PyMotionEngine {
             mcu_handle,
             "servo drive limits restored"
         );
-        let result = crate::servo_torque::send_restore_drive_limits(&conn, slot)
-            .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "restore_drive_limits: SDO write failed: endpoint result {result}"
-            )));
-        }
-        Ok(())
+        Ok(self.endpoint_calls.start("restore_drive_limits", move || {
+            let result = crate::servo_torque::send_restore_drive_limits(&conn, slot)?;
+            if result != 0 {
+                return Err(format!(
+                    "restore_drive_limits: SDO write failed: endpoint result {result}"
+                ));
+            }
+            Ok(())
+        }))
     }
     fn stop_node(&self, mcu_handle: u32) -> PyResult<()> {
         let conn = self.ethercat_conn(mcu_handle, "stop_node")?;
@@ -180,14 +190,14 @@ impl PyMotionEngine {
         }
         Ok(())
     }
-    fn arm_sensorless_endstop(
+    fn arm_sensorless_endstop_start(
         &self,
         mcu_handle: u32,
         slot: u8,
         endstop_id: u8,
         torque_trip_tenth_pct: u16,
         enable: bool,
-    ) -> PyResult<()> {
+    ) -> PyResult<u64> {
         let conn = self.ethercat_conn(mcu_handle, "arm_sensorless_endstop")?;
         tracing::info!(
             subsystem = "engine",
@@ -198,30 +208,32 @@ impl PyMotionEngine {
             enable,
             "servo sensorless endstop arm/disarm"
         );
-        let result = crate::servo_torque::send_arm_sensorless_endstop(
-            &conn,
-            slot,
-            endstop_id,
-            torque_trip_tenth_pct,
-            enable,
-        )
-        .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "arm_sensorless_endstop: endpoint rejected arm (result {result})"
-            )));
-        }
-        Ok(())
+        Ok(self
+            .endpoint_calls
+            .start("arm_sensorless_endstop", move || {
+                let result = crate::servo_torque::send_arm_sensorless_endstop(
+                    &conn,
+                    slot,
+                    endstop_id,
+                    torque_trip_tenth_pct,
+                    enable,
+                )?;
+                if result != 0 {
+                    return Err(format!(
+                        "arm_sensorless_endstop: endpoint rejected arm (result {result})"
+                    ));
+                }
+                Ok(())
+            }))
     }
     #[pyo3(signature = (mcu_handle, axis, pos_mm, timeout_s = 2.0))]
-    fn finalize_homed_axis(
+    fn finalize_homed_axis_start(
         &self,
-        py: Python<'_>,
         mcu_handle: u32,
         axis: usize,
         pos_mm: f64,
         timeout_s: f64,
-    ) -> PyResult<()> {
+    ) -> PyResult<u64> {
         let (conn, slot) = {
             let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
             let mc = mcus.get(&mcu_handle).ok_or_else(|| {
@@ -231,7 +243,9 @@ impl PyMotionEngine {
             })?;
             let conn = match mc.endpoint_conn.clone() {
                 Some(conn) => conn,
-                None => return Ok(()),
+                None => {
+                    return Ok(self.endpoint_calls.start("finalize_noop", || Ok(())));
+                }
             };
             let slot = slot_for_axis(&mc.ethercat_slot_axes, axis).ok_or_else(|| {
                 PyRuntimeError::new_err(format!(
@@ -252,15 +266,15 @@ impl PyMotionEngine {
             "servo home finalize"
         );
         let timeout = std::time::Duration::from_secs_f64(timeout_s);
-        let result = py
-            .detach(|| crate::servo_torque::send_seed_servo_home(&conn, slot, home_q16, timeout))
-            .map_err(PyRuntimeError::new_err)?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "finalize_homed_axis: method-35 home-set failed: endpoint result {result}"
-            )));
-        }
-        Ok(())
+        Ok(self.endpoint_calls.start("finalize_homed_axis", move || {
+            let result = crate::servo_torque::send_seed_servo_home(&conn, slot, home_q16, timeout)?;
+            if result != 0 {
+                return Err(format!(
+                    "finalize_homed_axis: method-35 home-set failed: endpoint result {result}"
+                ));
+            }
+            Ok(())
+        }))
     }
     fn take_drive_fault(&self, mcu_handle: u32) -> PyResult<Option<u16>> {
         Ok(self

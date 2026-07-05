@@ -875,6 +875,15 @@ pub mod exports {
             let slot = (start_slot as usize + index as usize) % depth;
             let entry =
                 core::ptr::read_unaligned(piece_ptr.cast::<runtime::piece_ring::PieceEntry>());
+            // Write acceptance: a piece the ISR cannot arm must never enter the
+            // ring. The parser rejects bad coeff_count already; duration is
+            // checked here because 2/duration is computed at arm.
+            if entry.coeff_count == 0
+                || entry.coeff_count as usize > runtime::piece_ring::MAX_PIECE_COEFFS
+                || !(entry.duration > 0.0)
+            {
+                return RUNTIME_ERR_INVALID_ARG;
+            }
             axis.ring.write_slot(storage, slot, entry);
         }
         RUNTIME_OK

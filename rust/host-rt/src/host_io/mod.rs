@@ -31,7 +31,6 @@ use crate::host_io::parser::MsgProtoParser;
 use crate::host_io::runtime_events::{
     FaultEvent, McuLogEvent, RuntimeEvent, StatusEvent, TraceEvent,
 };
-use crate::passthrough_queue::{CommandQueueId, McuHandle, PassthroughEntry, PassthroughRouter};
 use crate::transport::{MessageParams, SubscribeError, Transport, TransportError};
 use std::sync::mpsc::SyncSender;
 
@@ -111,12 +110,6 @@ pub enum ReactorCommand {
     SubscribeHostEvents {
         sender: SyncSender<HostEvent>,
         reply: SyncSender<Result<(), SubscribeError>>,
-    },
-    InstallPassthroughRouter(PassthroughRouter),
-    PassthroughSend {
-        mcu: McuHandle,
-        queue_id: CommandQueueId,
-        entry: PassthroughEntry,
     },
     FireAndForget {
         cmd: String,

@@ -104,9 +104,14 @@ pub fn split_segment_to_cap(
             s_lo_mm: s_lo,
             s_hi_mm: s_hi,
         };
+        let child_followers = segment
+            .followers
+            .iter()
+            .map(|f| f.span(s_lo, s_hi, total_length))
+            .collect();
         let child = CubicSegment::try_new(
             xyz,
-            segment.followers.clone(),
+            child_followers,
             segment.feedrate_mm_s,
             segment.source,
             Some(split_info),

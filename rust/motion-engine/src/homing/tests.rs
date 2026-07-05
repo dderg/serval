@@ -6,7 +6,7 @@ use host_rt::passthrough_queue::PassthroughRouter;
 
 use crate::homing::{reconstruct_axis_position, trajectory_final_position};
 use crate::mcu_config::{AXIS_X, AXIS_Z};
-use crate::motion_history::{HistoryStore, eval_bernstein_cubic};
+use crate::motion_history::{HistoryStore, eval_chebyshev};
 use crate::types::AxisKey;
 
 const FREQ: u32 = 180_000_000;
@@ -17,12 +17,16 @@ fn make_linear_piece(
     pos_start: f32,
     pos_end: f32,
 ) -> PieceEntry {
+    let mut coeffs = [0.0_f32; runtime::piece_ring::MAX_PIECE_COEFFS];
+    coeffs[0] = (pos_start + pos_end) / 2.0;
+    coeffs[1] = (pos_end - pos_start) / 2.0;
     PieceEntry {
         start_time,
-        coeffs: [pos_start, pos_start, pos_end, pos_end],
+        coeffs,
         duration: duration_secs,
         motor_mask: 0,
-        _reserved: [0; 3],
+        coeff_count: 2,
+        ..PieceEntry::zeroed()
     }
 }
 
@@ -67,38 +71,38 @@ fn record_synced(
 }
 
 #[test]
-fn eval_bernstein_cubic_linear_piece_endpoints() {
-    let coeffs = [0.0f32, 0.0, 1.0, 1.0];
-    let at_start = eval_bernstein_cubic(coeffs, 0.0);
-    let at_end = eval_bernstein_cubic(coeffs, 1.0);
+fn eval_chebyshev_linear_piece_endpoints() {
+    let coeffs = [0.5_f32, 0.5];
+    let at_start = eval_chebyshev(&coeffs, -1.0);
+    let at_end = eval_chebyshev(&coeffs, 1.0);
     assert!(
         at_start.abs() < 1e-6,
-        "u=0 should give pos_start=0, got {at_start}"
+        "cu=-1 should give pos_start=0, got {at_start}"
     );
     assert!(
         (at_end - 1.0).abs() < 1e-6,
-        "u=1 should give pos_end=1, got {at_end}"
+        "cu=1 should give pos_end=1, got {at_end}"
     );
 }
 
 #[test]
-fn eval_bernstein_cubic_midpoint_linear() {
-    let coeffs = [0.0f32, 0.0, 100.0, 100.0];
-    let at_half = eval_bernstein_cubic(coeffs, 0.5);
+fn eval_chebyshev_midpoint_linear() {
+    let coeffs = [50.0_f32, 50.0];
+    let at_mid = eval_chebyshev(&coeffs, 0.0);
     assert!(
-        (at_half - 50.0).abs() < 1e-4,
-        "midpoint of linear piece should be 50, got {at_half}"
+        (at_mid - 50.0).abs() < 1e-4,
+        "midpoint of linear piece should be 50, got {at_mid}"
     );
 }
 
 #[test]
-fn eval_bernstein_cubic_constant_piece() {
-    let coeffs = [42.5f32; 4];
-    for u in [0.0, 0.25, 0.5, 0.75, 1.0] {
-        let v = eval_bernstein_cubic(coeffs, u);
+fn eval_chebyshev_constant_piece() {
+    let coeffs = [42.5_f32];
+    for cu in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+        let v = eval_chebyshev(&coeffs, cu);
         assert!(
             (v - 42.5).abs() < 1e-5,
-            "constant piece: expected 42.5 at u={u}, got {v}"
+            "constant piece: expected 42.5 at cu={cu}, got {v}"
         );
     }
 }
@@ -361,7 +365,7 @@ fn trajectory_final_position_single_piece() {
         trajectory_final_position(key, &shared(store)).expect("single-piece store must succeed");
     assert!(
         (pos - 45.0).abs() < 1e-4,
-        "final position must equal last coeffs[3]=45.0, got {pos:.6}"
+        "final position must equal piece end position 45.0, got {pos:.6}"
     );
 }
 
@@ -381,7 +385,7 @@ fn trajectory_final_position_multi_piece_takes_last() {
         trajectory_final_position(key, &shared(store)).expect("multi-piece store must succeed");
     assert!(
         (pos - 82.5).abs() < 1e-4,
-        "final position must equal last piece's coeffs[3]=82.5, got {pos:.6}"
+        "final position must equal last piece's end position 82.5, got {pos:.6}"
     );
 }
 
@@ -413,10 +417,14 @@ fn trajectory_final_position_constant_piece() {
     };
     let piece = runtime::piece_ring::PieceEntry {
         start_time: 0,
-        coeffs: [99.0_f32; 4],
         duration: 0.01,
-        motor_mask: 0,
-        _reserved: [0; 3],
+        coeff_count: 1,
+        coeffs: {
+            let mut c = [0.0_f32; runtime::piece_ring::MAX_PIECE_COEFFS];
+            c[0] = 99.0;
+            c
+        },
+        ..runtime::piece_ring::PieceEntry::zeroed()
     };
     let mut store = HistoryStore::default();
     store.record(key, &piece, FREQ, 0.0);

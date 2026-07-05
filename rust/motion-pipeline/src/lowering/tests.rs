@@ -17,6 +17,7 @@ fn stream_config() -> StreamConfig {
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
         fit_tol_mm: FIT_TOL_MM,
+        fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 512,
         limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
     }
@@ -62,7 +63,7 @@ fn lowering_emits_coarse_pieces_above_the_sample_floor() {
             &planned[0].velocity,
             0.0,
             &[0.0; 4],
-            FIT_TOL_MM,
+            FIT_TOL,
             &[],
         )
         .unwrap();
@@ -88,6 +89,17 @@ fn lowering_emits_coarse_pieces_above_the_sample_floor() {
 }
 
 const FIT_TOL_MM: f64 = 1e-3;
+const FIT_TOL: FitTol = FitTol {
+    pos_mm: FIT_TOL_MM,
+    accel_mm_s2: 50.0,
+};
+
+fn tol_pos(pos_mm: f64) -> FitTol {
+    FitTol {
+        pos_mm,
+        accel_mm_s2: 50.0,
+    }
+}
 
 fn ctx(line_no: u32, feed: f64) -> MoveContext {
     MoveContext {
@@ -122,7 +134,7 @@ fn peak_accel(axes: &[Vec<BezierPiece<f64>>]) -> f64 {
     for (px, py) in axes[0].iter().zip(&axes[1]) {
         for k in 0..=64 {
             let t = px.u_start + (px.u_end - px.u_start) * f64::from(k) / 64.0;
-            peak = peak.max(accel(px, t).hypot(accel(py, t)));
+            peak = peak.max(libm::hypot(accel(px, t), accel(py, t)));
         }
     }
     peak
@@ -148,7 +160,7 @@ fn straight_move_lowers_one_cubic_per_phase_without_accel_overshoot() {
     assert!(!vm.phases.is_empty(), "straight move should carry phases");
 
     let (axes, total_t) =
-        lower_move_pieces(&planned[0].geometry, vm, 0.0, &[0.0; 4], FIT_TOL_MM, &[]).unwrap();
+        lower_move_pieces(&planned[0].geometry, vm, 0.0, &[0.0; 4], FIT_TOL, &[]).unwrap();
 
     assert_eq!(axes[0].len(), vm.phases.len(), "one cubic per phase");
     // The grid fit overshot the 1000 cap to ~1170 here; the phase fit is exact.
@@ -182,7 +194,7 @@ fn collinear_run_slices_phases_c1_continuous_at_the_seam() {
         &planned[0].velocity,
         0.0,
         &[0.0; 4],
-        FIT_TOL_MM,
+        FIT_TOL,
         &[],
     )
     .unwrap();
@@ -191,7 +203,7 @@ fn collinear_run_slices_phases_c1_continuous_at_the_seam() {
         &planned[1].velocity,
         t0,
         &[5.0, 0.0, 0.0, 0.0],
-        FIT_TOL_MM,
+        FIT_TOL,
         &[],
     )
     .unwrap();
@@ -247,7 +259,7 @@ fn lower_single(m: geometry::Move, t_start: f64, start_pos: &[f64]) -> ShapedSeg
         &planned[0].velocity,
         t_start,
         start_pos,
-        FIT_TOL_MM,
+        FIT_TOL,
         &[],
     )
     .expect("lower")
@@ -374,7 +386,7 @@ fn source_mismatch_is_rejected() {
             &planned[0].velocity,
             0.0,
             &[0.0, 0.0, 0.0],
-            FIT_TOL_MM,
+            FIT_TOL,
             &[]
         ),
         Err(LoweringError::SourceMismatch)
@@ -403,7 +415,7 @@ fn pressure_advance_shifts_follower_and_leaves_xyz_byte_identical() {
         &planned[0].velocity,
         0.0,
         &start,
-        FIT_TOL_MM,
+        FIT_TOL,
         &[],
     )
     .unwrap();
@@ -414,7 +426,7 @@ fn pressure_advance_shifts_follower_and_leaves_xyz_byte_identical() {
         &planned[0].velocity,
         0.0,
         &start,
-        FIT_TOL_MM,
+        FIT_TOL,
         &linear_pa_chains(3, k),
     )
     .unwrap();
@@ -453,6 +465,166 @@ fn pressure_advance_shifts_follower_and_leaves_xyz_byte_identical() {
     }
 }
 
+fn piece_accel_at(pieces: &[BezierPiece<f64>], t: f64) -> f64 {
+    let p = pieces
+        .iter()
+        .find(|p| t >= p.u_start - 1e-12 && t <= p.u_end + 1e-12)
+        .unwrap_or_else(|| pieces.last().unwrap());
+    let z = t - p.u_start;
+    let mut acc = 0.0;
+    for (k, &ck) in p.coeffs.iter().enumerate().skip(2).rev() {
+        acc = acc * z + (k * (k - 1)) as f64 * ck;
+    }
+    acc
+}
+
+fn quarter_arc() -> geometry::Move {
+    arc_move(
+        [0.0, 0.0, 0.0],
+        [20.0, 20.0, 0.0],
+        0.0,
+        20.0,
+        true,
+        0.0,
+        ctx(3, 50.0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn scalar_profile_reproduces_samples_at_every_knot() {
+    let planned = fit_and_plan(std::slice::from_ref(&quarter_arc()));
+    let vm = &planned[0].velocity;
+    assert!(vm.phases.is_empty(), "arc is a curved move (no phases)");
+    assert!(vm.samples.len() >= 2);
+
+    let (profile, _total_t) = build_profile(&vm.samples).unwrap();
+    for (i, sample) in vm.samples.iter().enumerate() {
+        let (s, v, a) = profile.state_at(profile.knot_t[i]);
+        assert!(
+            (s - sample.s).abs() < 1e-9,
+            "s at knot {i}: {s} vs {}",
+            sample.s
+        );
+        assert!(
+            (v - sample.v).abs() < 1e-9,
+            "v at knot {i}: {v} vs {}",
+            sample.v
+        );
+        assert!(
+            (a - sample.a).abs() < 1e-9,
+            "a at knot {i}: {a} vs {}",
+            sample.a
+        );
+    }
+}
+
+/// The fitted acceleration (second derivative of the cubic pieces) must join
+/// continuously across interior knots, and converge to the analytic profile
+/// acceleration as the fit tolerance tightens.
+#[test]
+fn curved_fit_acceleration_is_continuous_and_converges() {
+    let gm = quarter_arc();
+    let planned = fit_and_plan(std::slice::from_ref(&gm));
+    let vm = &planned[0].velocity;
+    assert!(vm.phases.is_empty());
+
+    let (profile, total_t) = build_profile(&vm.samples).unwrap();
+    let start = [0.0_f64; 4];
+    let sampler = Sampler {
+        profile: &profile,
+        spatial: gm.segment.spatial.as_ref(),
+        start_pos: &start,
+        followers: &gm.segment.followers,
+        s_len: gm.segment.s_len(),
+        axis_chains: &[],
+    };
+
+    let max_analytic_err = |tol: f64| -> f64 {
+        let (axes, _t) =
+            lower_move_pieces(&planned[0].geometry, vm, 0.0, &start, tol_pos(tol), &[]).unwrap();
+        let mut worst = 0.0_f64;
+        for axis in 0..2 {
+            let pieces = &axes[axis];
+            // Seams are C² by construction; the only permitted step is the
+            // Chebyshev truncation budget, once per adjoining piece.
+            for w in pieces.windows(2) {
+                let (left, right) = (&w[0], &w[1]);
+                let jump = (piece_accel_at(std::slice::from_ref(left), left.u_end)
+                    - piece_accel_at(std::slice::from_ref(right), right.u_start))
+                .abs();
+                assert!(
+                    jump <= 2.0 * FIT_TRUNC_ACC_MM_S2 + 1e-6,
+                    "axis {axis}: accel jump {jump} at {} exceeds the truncation budget",
+                    right.u_start
+                );
+            }
+            // Convergence to the analytic accel over the interior, away from the
+            // rest cusps at either end (`v(s) ~ s^(2/3)` there gives an unbounded
+            // accel slope no finite piece resolves).
+            let n = 400;
+            for k in 1..n {
+                let frac = f64::from(k) / f64::from(n);
+                if !(0.1..=0.9).contains(&frac) {
+                    continue;
+                }
+                let t = total_t * frac;
+                let fit = piece_accel_at(pieces, t);
+                let truth = sampler.axis_accel(axis, t, false);
+                worst = worst.max((fit - truth).abs());
+            }
+        }
+        worst
+    };
+
+    // Interior accel error no longer scales with the position tolerance — the
+    // ladder holds it under the accel budget at any tolerance, with a floor
+    // set by the truncation budget. Assert the absolute contract instead.
+    let loose = max_analytic_err(1e-3);
+    let tight = max_analytic_err(1e-4);
+    assert!(
+        tight <= loose + FIT_TRUNC_ACC_MM_S2,
+        "tightening the tolerance regressed accel error: {tight} vs {loose}"
+    );
+    for (name, err) in [("loose", loose), ("tight", tight)] {
+        assert!(
+            err < 0.1 * FIT_TOL.accel_mm_s2,
+            "{name} interior accel error {err} not comfortably inside the budget"
+        );
+    }
+}
+
+/// A straight move is lowered through the closed-form phase path, which ignores
+/// `fit_tol_mm` entirely — so two very different tolerances produce bit-identical
+/// pieces. The grid fit would subdivide differently under each.
+#[test]
+fn straight_move_ignores_fit_tolerance_and_stays_bit_identical() {
+    let m = line_move([0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0, straight_ctx(1)).unwrap();
+    let planned = fit_and_plan(std::slice::from_ref(&m));
+    assert!(!planned[0].velocity.phases.is_empty());
+
+    let (coarse, _) = lower_move_pieces(
+        &planned[0].geometry,
+        &planned[0].velocity,
+        0.0,
+        &[0.0; 4],
+        tol_pos(1e-2),
+        &[],
+    )
+    .unwrap();
+    let (fine, _) = lower_move_pieces(
+        &planned[0].geometry,
+        &planned[0].velocity,
+        0.0,
+        &[0.0; 4],
+        tol_pos(1e-6),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(coarse, fine, "straight path must not depend on fit_tol_mm");
+    assert_eq!(coarse[0].len(), planned[0].velocity.phases.len());
+}
+
 #[test]
 fn pressure_advance_k_zero_is_identical_to_no_post_processor() {
     let m = line_move([0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 4.0, ctx(1, 100.0)).unwrap();
@@ -464,7 +636,7 @@ fn pressure_advance_k_zero_is_identical_to_no_post_processor() {
         &planned[0].velocity,
         0.0,
         &start,
-        FIT_TOL_MM,
+        FIT_TOL,
         &[],
     )
     .unwrap();
@@ -473,7 +645,7 @@ fn pressure_advance_k_zero_is_identical_to_no_post_processor() {
         &planned[0].velocity,
         0.0,
         &start,
-        FIT_TOL_MM,
+        FIT_TOL,
         &linear_pa_chains(3, 0.0),
     )
     .unwrap();
@@ -483,6 +655,73 @@ fn pressure_advance_k_zero_is_identical_to_no_post_processor() {
             extract_bezier_pieces(&none.axes[axis]),
             extract_bezier_pieces(&zero.axes[axis]),
             "axis {axis} differs between no-PP and k=0"
+        );
+    }
+}
+
+fn wire_degree(coeffs: &[f64], h: f64) -> usize {
+    // The degree the wire recovers: Chebyshev truncation at enqueue's
+    // noise-level budgets (1e-6 mm / 1e-3 mm/s / 0.1 mm/s²).
+    let cheb = nurbs::chebyshev::monomial_tau_to_chebyshev(coeffs, h);
+    nurbs::chebyshev::truncate_chebyshev_c2(&cheb, h, 1e-6, 1e-3, 0.1).len()
+}
+
+#[test]
+fn ladder_collapses_synthetic_profiles_to_natural_degrees() {
+    let h = 0.02;
+    // Cruise: p = 5 + 120·τ → 2 Chebyshev coefficients.
+    assert_eq!(wire_degree(&[5.0, 120.0, 0.0, 0.0, 0.0, 0.0], h), 2);
+    // Trapezoid leg (constant accel): + 1500·τ² → 3.
+    assert_eq!(wire_degree(&[5.0, 120.0, 1500.0, 0.0, 0.0, 0.0], h), 3);
+    // Constant jerk: + 2e5·τ³ → 4.
+    assert_eq!(wire_degree(&[5.0, 120.0, 1500.0, 2.0e5, 0.0, 0.0], h), 4);
+}
+
+#[test]
+fn arc_member_fits_within_the_wire_degree_cap() {
+    let gm = quarter_arc();
+    let planned = fit_and_plan(std::slice::from_ref(&gm));
+    let vm = &planned[0].velocity;
+    let start = [0.0_f64; 4];
+    let (axes, total_t) =
+        lower_move_pieces(&planned[0].geometry, vm, 0.0, &start, tol_pos(5e-3), &[]).unwrap();
+    for pieces in &axes[..2] {
+        assert!(!pieces.is_empty());
+        for p in pieces {
+            assert!(
+                p.coeffs.len() <= MAX_PIECE_COEFFS,
+                "piece exceeds the wire cap: {} coeffs",
+                p.coeffs.len()
+            );
+        }
+    }
+    // The higher-degree ladder resolves the arc without deep bisection: the
+    // spans stay long relative to the move (cubic fitting needed an order of
+    // magnitude more pieces at this tolerance).
+    let count = axes[0].len();
+    let mean_span = total_t / count as f64;
+    assert!(
+        mean_span > 1e-3,
+        "{count} pieces over {total_t:.4}s — mean span {mean_span:.6}s suggests deep bisection"
+    );
+}
+
+#[test]
+fn straight_phase_pieces_carry_natural_length() {
+    let m = line_move([0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 0.0, straight_ctx(1)).unwrap();
+    let planned = fit_and_plan(std::slice::from_ref(&m));
+    let vm = &planned[0].velocity;
+    assert!(!vm.phases.is_empty());
+    let start = [0.0_f64; 4];
+    let (axes, _t) =
+        lower_move_pieces(&planned[0].geometry, vm, 0.0, &start, tol_pos(1e-3), &[]).unwrap();
+    let has_jerk_phase = vm.phases.iter().any(|p| p.j != 0.0);
+    let expect = if has_jerk_phase { 4 } else { 3 };
+    for p in &axes[0] {
+        assert_eq!(
+            p.coeffs.len(),
+            expect,
+            "move-wide padding to the max phase degree"
         );
     }
 }

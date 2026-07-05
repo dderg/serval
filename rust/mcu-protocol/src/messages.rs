@@ -195,8 +195,16 @@ pub const PIECE_FRAME_PAYLOAD_MAX: usize = 250;
 /// Bytes of one axis block header (`axis_idx + piece_count + start_slot + new_head`).
 pub const AXIS_BLOCK_HEADER_LEN: usize = 8;
 
-/// Bytes of one encoded `PieceEntry`.
-pub const PIECE_ENTRY_LEN: usize = 32;
+/// Bytes of one wire piece-entry header (start_time + duration + motor_mask +
+/// coeff_count + reserved) — everything before the coefficient block.
+pub const PIECE_WIRE_HEADER_LEN: usize = 16;
+
+/// Largest wire piece entry (header + 8 coefficients) — also the MCU ring-slot
+/// size the entry is zero-extended into.
+pub const PIECE_WIRE_MAX_LEN: usize = 48;
+
+/// Maximum Chebyshev coefficients per piece (degree ≤ 7).
+pub const MAX_PIECE_COEFFS: usize = 8;
 
 /// Largest `piece_count` per axis that still lets an `axis_count`-axis frame fit
 /// `PIECE_FRAME_PAYLOAD_MAX`, assuming an even split. Parameterized off the
@@ -205,7 +213,7 @@ pub const PIECE_ENTRY_LEN: usize = 32;
 pub fn max_pieces_per_axis(axis_count: u8) -> usize {
     let n = axis_count.max(1) as usize;
     let avail = PIECE_FRAME_PAYLOAD_MAX.saturating_sub(1 + n * AXIS_BLOCK_HEADER_LEN);
-    (avail / PIECE_ENTRY_LEN) / n
+    (avail / PIECE_WIRE_MAX_LEN) / n
 }
 
 /// One axis' pieces within a single-MCU `PushPieces` frame. Byte-identical to
@@ -274,26 +282,27 @@ impl Decode for PushPieces {
             let piece_count = get_u8(c)?;
             let start_slot = get_u16(c)?;
             let new_head = get_u32(c)?;
-            let pieces_len = (piece_count as usize).checked_mul(PIECE_ENTRY_LEN).ok_or(
-                DecodeError::ArrayLengthExceedsBuffer {
-                    claimed: u32::from(piece_count),
-                    available: c.remaining(),
-                },
-            )?;
-            if pieces_len > c.remaining() {
-                return Err(DecodeError::ArrayLengthExceedsBuffer {
-                    claimed: u32::from(piece_count),
-                    available: c.remaining(),
-                });
-            }
             if axes.iter().any(|a| a.axis_idx == axis_idx) {
                 return Err(DecodeError::DuplicateField {
                     field: "PushPieces.axis_idx",
                 });
             }
-            let mut pieces_bytes = vec![0u8; pieces_len];
-            for b in &mut pieces_bytes {
-                *b = get_u8(c)?;
+            // Entries are variable-length: 16-byte header + 4·coeff_count
+            // coefficient bytes, coeff_count at offset 13 of each entry.
+            let mut pieces_bytes: Vec<u8> = Vec::new();
+            for _ in 0..piece_count {
+                let mut header = [0u8; PIECE_WIRE_HEADER_LEN];
+                for b in &mut header {
+                    *b = get_u8(c)?;
+                }
+                let coeff_count = header[13];
+                if coeff_count == 0 || coeff_count as usize > MAX_PIECE_COEFFS {
+                    return Err(DecodeError::BadCoeffCount { raw: coeff_count });
+                }
+                pieces_bytes.extend_from_slice(&header);
+                for _ in 0..(4 * coeff_count as usize) {
+                    pieces_bytes.push(get_u8(c)?);
+                }
             }
             axes.push(AxisPieces {
                 axis_idx,

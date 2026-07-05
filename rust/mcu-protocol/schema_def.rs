@@ -84,13 +84,13 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
     SchemaMessage {
         type_tag: 0x0060,
         name: "PushPieces",
-        version: 3,
+        version: 4,
         channel: "pieces",
         fields: &[
             SchemaField { name: "axis_count", ty: "u8" },
             SchemaField {
                 name: "axes",
-                ty: "array<axis_pieces{axis_idx:u8,piece_count:u8,start_slot:u16,new_head:u32,pieces:array<u8>}>",
+                ty: "array<axis_pieces{axis_idx:u8,piece_count:u8,start_slot:u16,new_head:u32,pieces:array<piece_entry{start_time:u64,duration:f32,motor_mask:u8,coeff_count:u8,reserved:u16,cheb_coeffs:array<f32;1..=8>}>}>",
             },
         ],
     },

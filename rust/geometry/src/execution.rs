@@ -146,7 +146,13 @@ pub fn lower_profile(
             + p.jerk * dt_local * dt_local * dt_local / 6.0)
             .clamp(p.s_start, p.s_end);
         let position = p.seg.spatial.as_ref().map(|spatial| spatial.point_at(s));
-        let followers = p.seg.followers.iter().map(|f| f.ratio * s).collect();
+        let seg_len = p.seg.s_len();
+        let followers = p
+            .seg
+            .followers
+            .iter()
+            .map(|f| f.offset_at(s, seg_len))
+            .collect();
         out.push(LoweredSample {
             t_s: t,
             position,

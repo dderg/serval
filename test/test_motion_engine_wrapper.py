@@ -60,7 +60,7 @@ def test_stub_motion_methods_updated():
 
 
 def test_dispatched_lead_secs_forwards_and_coerces_none():
-    # The host backpressure gate (motion._check_pause) calls this on the wrapper.
+    # The host feed pacing (motion._submit_paced) calls this on the wrapper.
     # A missing forwarder raises AttributeError on real hardware — the wrapper
     # only forwards native calls it explicitly defines (no __getattr__).
     handle = FakeNativeHandle(return_value=0.72)

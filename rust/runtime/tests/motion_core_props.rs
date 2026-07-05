@@ -20,7 +20,6 @@
 use std::cell::Cell;
 
 use runtime::fault_sink::FaultSink;
-use runtime::monomial::bernstein_to_monomial_with_duration;
 use runtime::motion_core::get_position_and_velocity;
 use runtime::piece_ring::{PieceEntry, RingDescriptor};
 
@@ -52,14 +51,22 @@ impl FaultSink for TestFaultSink {
     }
 }
 
-fn make_entry(start: u64, coeffs: [f32; 4], duration: f32) -> PieceEntry {
+fn make_entry(start: u64, coeffs: &[f32], duration: f32) -> PieceEntry {
+    let mut c = [0.0_f32; 8];
+    c.get_mut(..coeffs.len())
+        .expect("test coeffs must fit MAX_PIECE_COEFFS")
+        .copy_from_slice(coeffs);
     PieceEntry {
         start_time: start,
-        coeffs,
         duration,
-        motor_mask: 0,
-        _reserved: [0; 3],
+        coeff_count: coeffs.len() as u8,
+        coeffs: c,
+        ..PieceEntry::zeroed()
     }
+}
+
+fn linear_entry(start: u64, p0: f32, p1: f32, duration: f32) -> PieceEntry {
+    make_entry(start, &[(p0 + p1) / 2.0, (p1 - p0) / 2.0], duration)
 }
 
 fn empty_ring() -> RingDescriptor {
@@ -80,7 +87,7 @@ fn walker_branch1_current_piece_eval() {
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     let dur_cycles: u64 = (duration_s * CLOCK_FREQ) as u64;
 
-    let entry = make_entry(start, [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0], duration_s);
+    let entry = linear_entry(start, 0.0, 1.0, duration_s);
     let (mut ring, storage) = ring_with_one(entry);
 
     let fault = TestFaultSink::new();
@@ -100,7 +107,7 @@ fn walker_branch1_current_piece_eval() {
     let (p0, _) = res.unwrap();
     assert!(
         p0.abs() < 1e-4,
-        "P(0) must be 0.0 mm; got {p0}. c0=0 for this Bernstein piece."
+        "P(0) must be 0.0 mm; got {p0}. Linear piece runs 0.0 -> 1.0."
     );
     assert_eq!(fault.fault_count(), 0, "no fault on valid arm");
 
@@ -128,10 +135,9 @@ fn walker_branch1_current_piece_eval() {
     );
     let (p2, v2) = res2.unwrap();
 
-    let m = bernstein_to_monomial_with_duration([0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0], duration_s);
-    let t = 0.025_f32;
-    let p_analytic = m.coeffs[0] + t * (m.coeffs[1] + t * (m.coeffs[2] + t * m.coeffs[3]));
-    let v_analytic = m.vel_coeffs[0] + t * (m.vel_coeffs[1] + t * m.vel_coeffs[2]);
+    let tau = 0.025_f32;
+    let p_analytic = tau / duration_s;
+    let v_analytic = 1.0 / duration_s;
 
     assert!(
         (p2 - p_analytic).abs() < 1e-4,
@@ -169,16 +175,7 @@ fn walker_branch2_empty_ring_returns_none() {
 
 #[test]
 fn walker_branch2_configured_empty_ring_returns_none() {
-    let mut storage = vec![
-        PieceEntry {
-            start_time: 0,
-            coeffs: [0.0; 4],
-            duration: 0.0,
-            motor_mask: 0,
-            _reserved: [0; 3]
-        };
-        8
-    ];
+    let mut storage = vec![PieceEntry::zeroed(); 8];
     let mut ring = RingDescriptor::new(0, 8);
     let fault = TestFaultSink::new();
     let mut armed = None;
@@ -200,7 +197,7 @@ fn walker_branch2_configured_empty_ring_returns_none() {
 #[test]
 fn walker_branch3_past_piece_faults() {
     let start = 1_000_u64;
-    let entry = make_entry(start, [0.0; 4], 0.1);
+    let entry = make_entry(start, &[0.0], 0.1);
     let (mut ring, mut storage) = ring_with_one(entry);
 
     let fault = TestFaultSink::new();
@@ -245,7 +242,7 @@ fn walker_branch3_past_piece_faults() {
 fn walker_fault_boundary_exact_is_not_a_fault() {
     let start = 1_000_u64;
 
-    let entry = make_entry(start, [0.0; 4], 0.1);
+    let entry = make_entry(start, &[0.0], 0.1);
     let (mut ring, mut storage) = ring_with_one(entry);
     let fault = TestFaultSink::new();
     let mut armed = None;
@@ -278,7 +275,7 @@ fn walker_fault_boundary_exact_is_not_a_fault() {
 fn walker_fault_boundary_plus_one_is_a_fault() {
     let start = 1_000_u64;
 
-    let entry = make_entry(start, [0.0; 4], 0.1);
+    let entry = make_entry(start, &[0.0], 0.1);
     let (mut ring, mut storage) = ring_with_one(entry);
     let fault = TestFaultSink::new();
     let mut armed = None;
@@ -320,16 +317,7 @@ proptest! {
         #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
         let dur_cycles: u64 = (duration_s * CLOCK_FREQ) as u64;
 
-        let mut storage_vec: Vec<PieceEntry> = Vec::with_capacity(n_pieces + 2);
-        for _ in 0..n_pieces + 2 {
-            storage_vec.push(PieceEntry {
-                start_time: 0,
-                coeffs: [0.0; 4],
-                duration: 0.0,
-                motor_mask: 0,
-            _reserved: [0; 3],
-            });
-        }
+        let mut storage_vec: Vec<PieceEntry> = vec![PieceEntry::zeroed(); n_pieces + 2];
 
         let mut ring = RingDescriptor::new(0, n_pieces);
         let base_start = TICK_U64 * 1_000;
@@ -339,18 +327,7 @@ proptest! {
             #[allow(clippy::cast_possible_truncation)]
             let piece_start = base_start + i as u64 * dur_cycles;
             let offset = prev_pos;
-            let entry = PieceEntry {
-                start_time: piece_start,
-                coeffs: [
-                    offset,
-                    offset + target_mm / 3.0,
-                    offset + 2.0 * target_mm / 3.0,
-                    offset + target_mm,
-                ],
-                duration: duration_s,
-                motor_mask: 0,
-            _reserved: [0; 3],
-            };
+            let entry = linear_entry(piece_start, offset, offset + target_mm, duration_s);
             ring.push(&mut storage_vec, entry)
                 .expect("ring must not be full while filling");
             prev_pos += target_mm;
@@ -368,7 +345,7 @@ proptest! {
             let res = get_position_and_velocity(
                 &mut armed,
                 &mut ring,
-                &mut storage_vec,
+                &storage_vec,
                 now,
                 TICK_CYCLES,
                 CLOCK_FREQ,

@@ -8,7 +8,7 @@ use trajectory::ShapedSegment;
 
 use motion_pipeline::{BarrierAck, Control, ShapedItem};
 
-use super::{CommittedFrontier, IntakeTally, fatal};
+use super::{CommittedFrontier, fatal};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DispatchError {
@@ -275,8 +275,7 @@ pub(crate) struct ConsumerShared {
     pub(crate) sync_instant: Arc<Mutex<Option<Instant>>>,
     pub(crate) last_move_time_bits: Arc<AtomicU64>,
     pub(crate) commit_fire_count: Arc<AtomicU32>,
-    /// Shared with the worker: entries retire as segments dispatch.
-    pub(crate) tally: Arc<Mutex<IntakeTally>>,
+    pub(crate) fences: Arc<crate::fence::FenceRegistry>,
 }
 
 impl ConsumerShared {
@@ -314,11 +313,8 @@ impl ConsumerShared {
         drop(sync);
         self.last_move_time_bits
             .store(seg.t_end.to_bits(), Ordering::Release);
-        self.tally
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .retire_dispatched(seg.source_line);
         self.commit_fire_count.fetch_add(1, Ordering::AcqRel);
+        self.fences.on_dispatch(seg.source_line, seg.t_end);
         Ok(())
     }
 }
@@ -373,6 +369,10 @@ impl Consumer {
                     self.discard.store(false, Ordering::Release);
                     self.frontier.clear();
                     self.dispatched_through = None;
+                    self.shared.fences.on_reset();
+                    self.shared
+                        .last_move_time_bits
+                        .store(0.0_f64.to_bits(), Ordering::Release);
                     *self
                         .shared
                         .sync_instant

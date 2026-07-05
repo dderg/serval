@@ -239,10 +239,7 @@ fn followers_advance_monotonically() {
     let rate = 1000.0;
     let seg = PathSegment::try_new(
         Segment::Line(Line::try_new([0.0, 0.0, 0.0], [20.0, 0.0, 0.0]).unwrap()),
-        vec![FollowerDemand {
-            axis_index: 3,
-            ratio: 0.1,
-        }],
+        vec![FollowerDemand::constant(3, 0.1)],
     )
     .unwrap();
     let m = Move {
@@ -331,14 +328,7 @@ fn stop_node_is_reached_in_finite_time_without_dwell() {
 #[test]
 fn virtual_path_lowers_with_no_position() {
     let rate = 500.0;
-    let seg = PathSegment::try_new_virtual(
-        vec![FollowerDemand {
-            axis_index: 3,
-            ratio: 1.0,
-        }],
-        2.0,
-    )
-    .unwrap();
+    let seg = PathSegment::try_new_virtual(vec![FollowerDemand::constant(3, 1.0)], 2.0).unwrap();
     let m = Move {
         segment: seg,
         feedrate_mm_s: 10.0,

@@ -14,10 +14,8 @@ const TICK_CYCLES: u64 = (CLOCK_FREQ / SAMPLE_RATE) as u64;
 fn const_piece(start_time: u64, duration: f32) -> PieceEntry {
     PieceEntry {
         start_time,
-        coeffs: [0.0; 4],
         duration,
-        motor_mask: 0,
-        _reserved: [0; 3],
+        ..PieceEntry::zeroed()
     }
 }
 
@@ -50,16 +48,7 @@ fn tick_arms_piece_when_start_time_reached() {
     let mut engine = make_engine();
     configure_axis0(&mut engine, 64);
 
-    let mut storage = vec![
-        PieceEntry {
-            start_time: 0,
-            coeffs: [0.0; 4],
-            duration: 0.0,
-            motor_mask: 0,
-            _reserved: [0; 3]
-        };
-        TOTAL_RING_PIECES
-    ];
+    let mut storage = vec![PieceEntry::zeroed(); TOTAL_RING_PIECES];
 
     let piece = const_piece(TICK_CYCLES, 0.001);
     let rc = engine.push_pieces(0, &[piece], &mut storage);
@@ -97,16 +86,7 @@ fn tick_holds_at_t0_before_start_time() {
     let mut engine = make_engine();
     configure_axis0(&mut engine, 64);
 
-    let mut storage = vec![
-        PieceEntry {
-            start_time: 0,
-            coeffs: [0.0; 4],
-            duration: 0.0,
-            motor_mask: 0,
-            _reserved: [0; 3]
-        };
-        TOTAL_RING_PIECES
-    ];
+    let mut storage = vec![PieceEntry::zeroed(); TOTAL_RING_PIECES];
 
     let piece = const_piece(100_000, 0.001);
     let rc = engine.push_pieces(0, &[piece], &mut storage);
@@ -149,16 +129,7 @@ fn tick_idle_when_ring_empty() {
     let mut engine = make_engine();
     configure_axis0(&mut engine, 64);
 
-    let mut storage = vec![
-        PieceEntry {
-            start_time: 0,
-            coeffs: [0.0; 4],
-            duration: 0.0,
-            motor_mask: 0,
-            _reserved: [0; 3]
-        };
-        TOTAL_RING_PIECES
-    ];
+    let mut storage = vec![PieceEntry::zeroed(); TOTAL_RING_PIECES];
 
     let mut q0 = StepQueue::new();
     let mut qs: [*mut StepQueue; MAX_AXES] = [core::ptr::null_mut(); MAX_AXES];
@@ -181,16 +152,7 @@ fn tick_faults_on_piece_start_in_past() {
     let mut engine = make_engine();
     configure_axis0(&mut engine, 64);
 
-    let mut storage = vec![
-        PieceEntry {
-            start_time: 0,
-            coeffs: [0.0; 4],
-            duration: 0.0,
-            motor_mask: 0,
-            _reserved: [0; 3]
-        };
-        TOTAL_RING_PIECES
-    ];
+    let mut storage = vec![PieceEntry::zeroed(); TOTAL_RING_PIECES];
 
     let start = 1_000_u64;
     let piece = const_piece(start, 0.001);
@@ -218,16 +180,7 @@ fn tick_within_fault_tolerance_arms_ok() {
     let mut engine = make_engine();
     configure_axis0(&mut engine, 64);
 
-    let mut storage = vec![
-        PieceEntry {
-            start_time: 0,
-            coeffs: [0.0; 4],
-            duration: 0.0,
-            motor_mask: 0,
-            _reserved: [0; 3]
-        };
-        TOTAL_RING_PIECES
-    ];
+    let mut storage = vec![PieceEntry::zeroed(); TOTAL_RING_PIECES];
 
     let start = 1_000_u64;
     let piece = const_piece(start, 0.001);
@@ -260,16 +213,7 @@ fn tick_advances_through_consecutive_pieces() {
     let mut engine = make_engine();
     configure_axis0(&mut engine, 64);
 
-    let mut storage = vec![
-        PieceEntry {
-            start_time: 0,
-            coeffs: [0.0; 4],
-            duration: 0.0,
-            motor_mask: 0,
-            _reserved: [0; 3]
-        };
-        TOTAL_RING_PIECES
-    ];
+    let mut storage = vec![PieceEntry::zeroed(); TOTAL_RING_PIECES];
 
     let a_start = TICK_CYCLES;
     let a_duration = 0.001_f32;
@@ -322,16 +266,7 @@ fn retired_count_bumps_at_window_end_not_arm() {
     let mut engine = make_engine();
     configure_axis0(&mut engine, 64);
 
-    let mut storage = vec![
-        PieceEntry {
-            start_time: 0,
-            coeffs: [0.0; 4],
-            duration: 0.0,
-            motor_mask: 0,
-            _reserved: [0; 3],
-        };
-        TOTAL_RING_PIECES
-    ];
+    let mut storage = vec![PieceEntry::zeroed(); TOTAL_RING_PIECES];
 
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     let d: u64 = (0.010_f32 * CLOCK_FREQ as f32) as u64;
@@ -341,17 +276,13 @@ fn retired_count_bumps_at_window_end_not_arm() {
 
     let piece0 = PieceEntry {
         start_time: p0_start,
-        coeffs: [0.0; 4],
         duration: 0.010,
-        motor_mask: 0,
-        _reserved: [0; 3],
+        ..PieceEntry::zeroed()
     };
     let piece1 = PieceEntry {
         start_time: p1_start,
-        coeffs: [0.0; 4],
         duration: 0.010,
-        motor_mask: 0,
-        _reserved: [0; 3],
+        ..PieceEntry::zeroed()
     };
 
     let rc = engine.push_pieces(0, &[piece0, piece1], &mut storage);
@@ -424,16 +355,7 @@ fn push_pieces_rejects_when_ring_full() {
     );
     assert_eq!(rc, 0, "configure_axis failed");
 
-    let mut storage = vec![
-        PieceEntry {
-            start_time: 0,
-            coeffs: [0.0; 4],
-            duration: 0.0,
-            motor_mask: 0,
-            _reserved: [0; 3]
-        };
-        TOTAL_RING_PIECES
-    ];
+    let mut storage = vec![PieceEntry::zeroed(); TOTAL_RING_PIECES];
 
     for i in 0..4_u64 {
         let piece = const_piece(100_000_000 + i * 520_000, 0.001);

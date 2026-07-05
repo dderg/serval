@@ -392,6 +392,14 @@ static int park_step(slave_t *sl, int64_t pc) {
  * goes through the cycle/park helpers, else the SM watchdog drops a drive to
  * SAFE-OP. */
 int ec_rt_bringup_finish(void) {
+    /* Seed the application time from the DC-loop clock grid before activating.
+     * ecrt_master_activate derives each slave's SYNC0 cyclic start time from the
+     * master application time; activating with the default 0 places the
+     * non-reference slaves' SYNC0 at a per-boot-random phase they may never lock,
+     * so a second drive stalls below OP and the walk times out while the
+     * reference slave (SYNC0 off its own clock) always makes OP. */
+    clock_gettime(CLOCK_MONOTONIC, &g_ts);
+    ecrt_master_application_time(g_master, TIMESPEC2NS(g_ts));
     if (ecrt_master_activate(g_master) != 0) return EC_RT_ERR_EC_INIT;
     g_activated = 1;
 
@@ -405,7 +413,6 @@ int ec_rt_bringup_finish(void) {
     }
 
     int64_t toff = 0;
-    clock_gettime(CLOCK_MONOTONIC, &g_ts);
 
     /* Walk every slave to OP: the master FSM advances each PRE-OP -> SAFE-OP ->
      * OP at roughly one datagram per cycle while we hold controlword 0 / target

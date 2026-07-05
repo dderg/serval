@@ -115,9 +115,14 @@ impl PathSegment {
 
 fn validate_followers(followers: &[FollowerDemand]) -> Result<(), GeometryError> {
     for (i, f) in followers.iter().enumerate() {
-        if !f.ratio.is_finite() || f.ratio == 0.0 {
+        if !f.ratio.is_finite() || !f.ratio_end.is_finite() {
             return Err(GeometryError::FollowerInvariantViolation {
-                reason: "follower ratio must be finite and nonzero",
+                reason: "follower ratio must be finite",
+            });
+        }
+        if f.max_abs_ratio() == 0.0 {
+            return Err(GeometryError::FollowerInvariantViolation {
+                reason: "follower ratio must be nonzero",
             });
         }
         if followers[..i].iter().any(|p| p.axis_index == f.axis_index) {

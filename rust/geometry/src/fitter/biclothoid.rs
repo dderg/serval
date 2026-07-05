@@ -283,7 +283,7 @@ pub(super) struct Anchor {
 const KAPPA_LINE_EPS: f64 = 1e-9;
 
 fn rotate_in_plane(w: [f64; 3], ang: f64, n: [f64; 3]) -> [f64; 3] {
-    add(scale(w, ang.cos()), scale(cross(n, w), ang.sin()))
+    add(scale(w, libm::cos(ang)), scale(cross(n, w), libm::sin(ang)))
 }
 
 fn contact(

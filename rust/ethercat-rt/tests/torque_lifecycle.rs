@@ -132,13 +132,11 @@ fn now_ns() -> u64 {
 fn push_one_piece(conn: &McuSerialConn, start_time: u64) -> i32 {
     let entry = PieceEntry {
         start_time,
-        coeffs: [0.0_f32; 4],
         duration: 0.001,
-        motor_mask: 0,
-        _reserved: [0; 3],
+        ..PieceEntry::zeroed()
     };
-    let mut pieces_bytes = Vec::with_capacity(32);
-    pieces_bytes.extend_from_slice(&entry.to_le_bytes());
+    let mut pieces_bytes = Vec::with_capacity(20);
+    entry.to_wire_bytes(&mut pieces_bytes);
     let msg = PushPieces::single(0, 1, 0, 1, pieces_bytes);
     let body = msg.encoded_to_vec();
     let (_, resp) = conn

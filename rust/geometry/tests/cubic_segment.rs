@@ -47,10 +47,7 @@ fn try_new_accepts_valid_travel() {
 fn try_new_accepts_follower_with_signed_ratio() {
     let result = CubicSegment::try_new(
         valid_cubic_xyz(),
-        vec![FollowerDemand {
-            axis_index: 3,
-            ratio: -0.05,
-        }],
+        vec![FollowerDemand::constant(3, -0.05)],
         100.0,
         dummy_source(),
         None,
@@ -62,10 +59,7 @@ fn try_new_accepts_follower_with_signed_ratio() {
 fn try_new_rejects_zero_follower_ratio() {
     let result = CubicSegment::try_new(
         valid_cubic_xyz(),
-        vec![FollowerDemand {
-            axis_index: 3,
-            ratio: 0.0,
-        }],
+        vec![FollowerDemand::constant(3, 0.0)],
         100.0,
         dummy_source(),
         None,
@@ -81,14 +75,8 @@ fn try_new_rejects_duplicate_follower_axis() {
     let result = CubicSegment::try_new(
         valid_cubic_xyz(),
         vec![
-            FollowerDemand {
-                axis_index: 3,
-                ratio: 0.1,
-            },
-            FollowerDemand {
-                axis_index: 3,
-                ratio: 0.2,
-            },
+            FollowerDemand::constant(3, 0.1),
+            FollowerDemand::constant(3, 0.2),
         ],
         100.0,
         dummy_source(),
@@ -173,10 +161,7 @@ fn try_new_rejects_non_finite_follower_ratio() {
     .unwrap();
     let result = CubicSegment::try_new(
         xyz,
-        vec![FollowerDemand {
-            axis_index: 3,
-            ratio: f64::NAN,
-        }],
+        vec![FollowerDemand::constant(3, f64::NAN)],
         100.0,
         SourceRange {
             start_line: 1,

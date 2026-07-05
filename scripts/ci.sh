@@ -123,7 +123,7 @@ job_miri() {
     cd "$RUST"
     MIRIFLAGS="-Zmiri-ignore-leaks" cargo +nightly miri test -p runtime --features host \
         --test fault_encoding \
-        --test monomial_eval \
+        --test motion_core_accel \
         --test phase_lut_anchors \
         --test seqlock_unit
 }

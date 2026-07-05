@@ -137,9 +137,9 @@ fn run_endpoint(socket_path: String, faulted: Arc<AtomicBool>) {
 
 fn push_pieces_body(pieces: &[PieceEntry], start: usize, end: usize) -> Vec<u8> {
     let batch = &pieces[start..end];
-    let mut bytes = Vec::with_capacity(batch.len() * 32);
+    let mut bytes = Vec::with_capacity(batch.len() * 20);
     for p in batch {
-        bytes.extend_from_slice(&p.to_le_bytes());
+        p.to_wire_bytes(&mut bytes);
     }
     let msg = PushPieces::single(0, batch.len() as u8, 0, end as u32, bytes);
     let mut body = Vec::new();
@@ -155,10 +155,8 @@ fn mcu_serial_conn_and_frame_server_sustain_streaming_past_ring_depth() {
     let pieces: Vec<PieceEntry> = (0..N)
         .map(|i| PieceEntry {
             start_time: BASE_NS + i as u64 * PIECE_DUR_NS,
-            coeffs: [0.0_f32; 4],
             duration: PIECE_DUR_NS as f32 / 1_000_000_000.0,
-            motor_mask: 0,
-            _reserved: [0; 3],
+            ..PieceEntry::zeroed()
         })
         .collect();
 

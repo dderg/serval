@@ -37,7 +37,7 @@ impl From<mcu_protocol::messages::RuntimeCapsResponse> for McuCaps {
 
 impl McuCaps {
     pub fn total_pieces(&self) -> usize {
-        self.total_piece_memory as usize / 32
+        self.total_piece_memory as usize / core::mem::size_of::<runtime::piece_ring::PieceEntry>()
     }
 }
 

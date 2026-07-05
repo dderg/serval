@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use host_rt::passthrough_queue::{McuHandle, PassthroughRouter};
-use runtime::piece_ring::PieceEntry;
+use runtime::piece_ring::{MAX_PIECE_COEFFS, PieceEntry};
 
 use crate::types::AxisKey;
 
@@ -48,7 +48,8 @@ pub struct HistoryPiece {
     pub start_clock: u64,
     pub end_clock: u64,
     pub duration_secs: f32,
-    pub coeffs: [f32; 4],
+    pub coeff_count: u8,
+    pub coeffs: [f32; MAX_PIECE_COEFFS],
 }
 
 impl HistoryPiece {
@@ -59,6 +60,7 @@ impl HistoryPiece {
             start_clock: entry.start_time,
             end_clock,
             duration_secs: entry.duration,
+            coeff_count: entry.coeff_count,
             coeffs: entry.coeffs,
         }
     }
@@ -67,10 +69,19 @@ impl HistoryPiece {
         self.start_host + f64::from(self.duration_secs)
     }
 
+    fn live_coeffs(&self) -> &[f32] {
+        let n = (self.coeff_count as usize).clamp(1, MAX_PIECE_COEFFS);
+        &self.coeffs[..n]
+    }
+
+    fn end_position(&self) -> f64 {
+        self.live_coeffs().iter().map(|&a| f64::from(a)).sum()
+    }
+
     fn endpoint(&self) -> AxisEndpoint {
         AxisEndpoint {
             host: self.end_host(),
-            position: f64::from(self.coeffs[3]),
+            position: self.end_position(),
         }
     }
 }
@@ -98,32 +109,65 @@ impl AxisEndpoint {
     }
 }
 
+/// f64 Clenshaw over the Chebyshev series at `cu ∈ [−1, 1]`.
 #[inline]
-pub fn eval_bernstein_cubic(coeffs: [f32; 4], u: f64) -> f64 {
-    let v = 1.0 - u;
-    let b0 = f64::from(coeffs[0]);
-    let b1 = f64::from(coeffs[1]);
-    let b2 = f64::from(coeffs[2]);
-    let b3 = f64::from(coeffs[3]);
-    v * v * v * b0 + 3.0 * v * v * u * b1 + 3.0 * v * u * u * b2 + u * u * u * b3
+pub fn eval_chebyshev(coeffs: &[f32], cu: f64) -> f64 {
+    let Some((&a0, rest)) = coeffs.split_first() else {
+        return 0.0;
+    };
+    let mut b1 = 0.0_f64;
+    let mut b2 = 0.0_f64;
+    for &ak in rest.iter().rev() {
+        let b0 = f64::from(ak) + 2.0 * cu * b1 - b2;
+        b2 = b1;
+        b1 = b0;
+    }
+    f64::from(a0) + cu * b1 - b2
+}
+
+fn chebyshev_derivative(a: &[f64]) -> Vec<f64> {
+    let n = a.len();
+    if n <= 1 {
+        return vec![0.0];
+    }
+    let mut d = vec![0.0; n - 1];
+    d[n - 2] = 2.0 * (n - 1) as f64 * a[n - 1];
+    for j in (0..n.saturating_sub(2)).rev() {
+        let d_j2 = d.get(j + 2).copied().unwrap_or(0.0);
+        d[j] = d_j2 + 2.0 * (j + 1) as f64 * a[j + 1];
+    }
+    d[0] *= 0.5;
+    d
 }
 
 fn eval_at_u(piece: &HistoryPiece, u: f64) -> AxisState {
-    let v = 1.0 - u;
-    let b0 = f64::from(piece.coeffs[0]);
-    let b1 = f64::from(piece.coeffs[1]);
-    let b2 = f64::from(piece.coeffs[2]);
-    let b3 = f64::from(piece.coeffs[3]);
+    let cu = 2.0 * u - 1.0;
+    let a: Vec<f64> = piece.live_coeffs().iter().map(|&c| f64::from(c)).collect();
     let t = f64::from(piece.duration_secs);
+    let position = eval_chebyshev(piece.live_coeffs(), cu);
     let (velocity, acceleration) = if t > 0.0 {
-        let db = 3.0 * ((b1 - b0) * v * v + 2.0 * (b2 - b1) * v * u + (b3 - b2) * u * u);
-        let d2b = 6.0 * ((b2 - 2.0 * b1 + b0) * v + (b3 - 2.0 * b2 + b1) * u);
-        (db / t, d2b / (t * t))
+        let du_dt = 2.0 / t;
+        let dv = chebyshev_derivative(&a);
+        let da = chebyshev_derivative(&dv);
+        let clenshaw64 = |c: &[f64]| {
+            let Some((&c0, rest)) = c.split_first() else {
+                return 0.0;
+            };
+            let mut b1 = 0.0_f64;
+            let mut b2 = 0.0_f64;
+            for &ck in rest.iter().rev() {
+                let b0 = ck + 2.0 * cu * b1 - b2;
+                b2 = b1;
+                b1 = b0;
+            }
+            c0 + cu * b1 - b2
+        };
+        (clenshaw64(&dv) * du_dt, clenshaw64(&da) * du_dt * du_dt)
     } else {
         (0.0, 0.0)
     };
     AxisState {
-        position: eval_bernstein_cubic(piece.coeffs, u),
+        position,
         velocity,
         acceleration,
     }
@@ -261,7 +305,7 @@ impl HistoryStore {
             return None;
         }
         Some(AxisState {
-            position: f64::from(piece.coeffs[3]),
+            position: piece.end_position(),
             velocity: 0.0,
             acceleration: 0.0,
         })

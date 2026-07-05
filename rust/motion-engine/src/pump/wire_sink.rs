@@ -150,9 +150,10 @@ impl WireSink {
         let axes: Vec<mcu_protocol::messages::AxisPieces> = frames
             .iter()
             .map(|f| {
-                let mut pieces_bytes = Vec::with_capacity(f.pieces.len() * 32);
+                let mut pieces_bytes =
+                    Vec::with_capacity(f.pieces.len() * runtime::piece_ring::PIECE_ENTRY_BYTES);
                 for p in &f.pieces {
-                    pieces_bytes.extend_from_slice(&p.to_le_bytes());
+                    p.to_wire_bytes(&mut pieces_bytes);
                 }
                 mcu_protocol::messages::AxisPieces {
                     axis_idx: f.axis,

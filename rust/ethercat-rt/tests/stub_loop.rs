@@ -30,9 +30,9 @@ fn encode_frame(channel: u8, payload: &[u8]) -> Vec<u8> {
 }
 
 fn push_pieces_wire_frame(cid: u32, axis: u8, pieces: &[PieceEntry], new_head: u32) -> Vec<u8> {
-    let mut pieces_bytes = Vec::with_capacity(pieces.len() * 32);
+    let mut pieces_bytes = Vec::with_capacity(pieces.len() * 20);
     for p in pieces {
-        pieces_bytes.extend_from_slice(&p.to_le_bytes());
+        p.to_wire_bytes(&mut pieces_bytes);
     }
     let msg = PushPieces::single(axis, pieces.len() as u8, 0, new_head, pieces_bytes);
     let mut body = Vec::new();
@@ -100,10 +100,8 @@ fn push_pieces_and_heartbeat_closes_the_loop() {
     let pieces: Vec<PieceEntry> = (0..N)
         .map(|i| PieceEntry {
             start_time: BASE_NS + i as u64 * PIECE_DUR_NS,
-            coeffs: [0.0_f32; 4],
             duration: PIECE_DUR_NS as f32 / 1_000_000_000.0,
-            motor_mask: 0,
-            _reserved: [0; 3],
+            ..PieceEntry::zeroed()
         })
         .collect();
 
@@ -318,10 +316,8 @@ fn piece_start_in_past_faults_and_returns_none() {
 
     ring.push_entry(PieceEntry {
         start_time: stale_start,
-        coeffs: [0.0_f32; 4],
         duration: 0.001,
-        motor_mask: 0,
-        _reserved: [0; 3],
+        ..PieceEntry::zeroed()
     })
     .unwrap();
 
