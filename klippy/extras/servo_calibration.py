@@ -261,8 +261,9 @@ class ServoCalibration:
 
     cmd_SERVO_MEASURE_TRACKING_help = (
         "Single accel/speed stroke run with capture - the before/after check "
-        "for any tuning change. Params AXIS START END SPEED ACCEL ITERATIONS "
-        "DWELL_MS NAME"
+        "for any tuning change. Records every motor driving the axis (both "
+        "lanes on CoreXY) and saves a per-motor + combined tracking PNG. "
+        "Params AXIS START END SPEED ACCEL ITERATIONS DWELL_MS NAME"
     )
 
     def cmd_SERVO_MEASURE_TRACKING(self, gcmd):
@@ -273,14 +274,24 @@ class ServoCalibration:
         iterations = gcmd.get_int("ITERATIONS", 3, minval=1)
         dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
         name = gcmd.get("NAME", "track")
+        servos = self._axis_servos(gcmd, axis)
         self._prep(axis, dwell)
         self.gcode.run_script_from_command(
-            "SERVO_CAPTURE_START AXIS=%s NAME=%s" % (axis, name)
+            "SERVO_CAPTURE_START SERVO=%s NAME=%s" % (",".join(servos), name)
         )
         self._strokes(axis, start, end, speed, accel, iterations, dwell)
         self.gcode.run_script_from_command("SERVO_CAPTURE_STOP")
         self._restore()
-        self._run(gcmd, "servo_capture.py", ["--name", name], 60.0)
+        report_args = ["--name", name, "--png"]
+        kin = self.printer.lookup_object("toolhead").get_kinematics()
+        if len(servos) == 2 and kin.coupled_xy() and axis in ("X", "Y"):
+            report_args += [
+                "--axis",
+                axis,
+                "--combine-corexy",
+                ",".join(servos),
+            ]
+        self._run(gcmd, "servo_capture.py", report_args, 120.0)
 
     cmd_SERVO_MEASURE_INERTIA_help = (
         "Excitation grid for the inertia/friction fit (servo-ident). Params "

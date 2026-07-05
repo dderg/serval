@@ -175,7 +175,7 @@ Vendor-table tuning path: standard mode (C00.04=1) + C00.05 stiffness level
 
 | Command | Script | Output |
 |---|---|---|
-| `SERVO_MEASURE_TRACKING` | `servo_capture.py` | tracking metrics to console |
+| `SERVO_MEASURE_TRACKING` | `servo_capture.py` | tracking metrics to console + per-motor & combined PNG in `~/printer_data/config/servo_calibrate_results/` (records every motor driving the axis — both lanes on CoreXY) |
 | `SERVO_FIT_DYNAMICS[_COREXY]`, `SERVO_CALIBRATE_INERTIA_RATIO[_COREXY]` | `servo_fit_dynamics.py` | `~/printer_data/config/servo_dynamics/dynamics_<name>_<stamp>.toml` + C00.06 |
 | `SERVO_CALIBRATE_GAINS` | `servo_gain_report.py` | comparison PNG in `~/printer_data/config/servo_calibrate_results/` |
 | `SERVO_SWEEP_INERTIA` | `servo_inertia_report.py` | comparison PNG in `~/printer_data/config/servo_calibrate_results/` |
@@ -190,9 +190,12 @@ Each script runs standalone (`--help` for the full option list); the commands
 above invoke them with the running klippy interpreter.
 
 - **`servo_capture.py`** — analyze a `.scap`: following-error, overshoot/
-  settling, torque-saturation metrics; `--fft` prints resonance peaks,
-  `--plot` opens a time-series dashboard, `--drive` selects one drive in a
-  multi-drive capture, `--csv` exports samples.
+  settling, torque-saturation metrics per drive; `--fft` prints resonance peaks,
+  `--plot` opens a time-series dashboard, `--png` saves one headless (into
+  `--plot-dir`, or `--plot-out PATH`), `--combine-corexy A,B` with `--axis`
+  adds CoreXY combined on-axis `(A+B)/2` and cross-axis `(A-B)/2` traces,
+  `--drive` restricts to one drive in a multi-drive capture, `--csv` exports
+  samples.
 - **`servo_fit_dynamics.py`** — resolve the newest capture for `--name`, export
   the fitter CSV, run `servo-ident`, and write the profile TOML (`--structure
   scalar|corexy`, `--rated-torque-nm`, `--rotor-inertia-kgm2`,

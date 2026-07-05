@@ -690,3 +690,130 @@ def test_export_ident_csv_rejects_pre_v2_capture(tmp_path):
             header,
             [(0, data)],
         )
+
+
+def synth_two_drive_ferr(tmp_path, ferr_a, ferr_b, cpm_a=1000.0, cpm_b=1000.0):
+    """Two-drive capture (motors a, b) carrying prescribed per-motor
+    following errors, every sample motion-active."""
+    n = len(ferr_a)
+    header = {
+        "version": 1,
+        "cycle_ns": 1_000_000,
+        "record_size": 9 + 2 * 28,
+        "started_utc": "2026-07-05T00:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [
+            {"name": "a", "counts_per_mm": cpm_a},
+            {"name": "b", "counts_per_mm": cpm_b},
+        ],
+        "channels": DRIVE_CHANNELS,
+    }
+    path = os.path.join(str(tmp_path), "combine.scap")
+
+    def block(fe):
+        return struct.pack("<iiihHHihi", 0, 0, int(fe), 0, 0x0627, 0, 0, 0, 0)
+
+    flag = FLAG_TORQUE_ENABLED | FLAG_MOTION_ACTIVE
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+        for i in range(n):
+            f.write(struct.pack("<QB", i, flag))
+            f.write(block(ferr_a[i]))
+            f.write(block(ferr_b[i]))
+    return path
+
+
+def _drive_datas(path):
+    header, _, _ = sc.load_capture(path)
+    return header, [
+        (i, d["name"], sc.load_capture(path, d["name"])[1])
+        for i, d in enumerate(header["drives"])
+    ]
+
+
+def test_combine_corexy_matrix():
+    x, y = sc.combine_corexy([2.0, 4.0], [1.0, 2.0])
+    assert list(x) == [1.5, 3.0]
+    assert list(y) == [0.5, 1.0]
+
+
+def test_combine_corexy_on_and_cross_axis(tmp_path):
+    n = 100
+    path = synth_two_drive_ferr(tmp_path, np.full(n, 200.0), np.full(n, 100.0))
+    header, drive_datas = _drive_datas(path)
+    cx = sc.compute_corexy_combine(header, drive_datas, "a,b", "X")
+    # a=200/1000=0.2mm, b=100/1000=0.1mm -> X=(0.2+0.1)/2, Y=(0.2-0.1)/2
+    assert cx["on_ferr"][0] == pytest.approx(0.15)
+    assert cx["cross_ferr"][0] == pytest.approx(0.05)
+    cy = sc.compute_corexy_combine(header, drive_datas, "a,b", "Y")
+    assert cy["on_ferr"][0] == pytest.approx(0.05)
+    assert cy["cross_ferr"][0] == pytest.approx(0.15)
+
+
+def test_combine_corexy_honors_per_motor_counts_per_mm(tmp_path):
+    n = 10
+    path = synth_two_drive_ferr(
+        tmp_path,
+        np.full(n, 200.0),
+        np.full(n, 200.0),
+        cpm_a=1000.0,
+        cpm_b=2000.0,
+    )
+    header, drive_datas = _drive_datas(path)
+    c = sc.compute_corexy_combine(header, drive_datas, "a,b", "X")
+    # a=200/1000=0.2mm, b=200/2000=0.1mm -> X=0.15, Y=0.05
+    assert c["on_ferr"][0] == pytest.approx(0.15)
+    assert c["cross_ferr"][0] == pytest.approx(0.05)
+
+
+def test_combine_corexy_missing_drive_raises(tmp_path):
+    path = synth_two_drive_ferr(tmp_path, np.zeros(5), np.zeros(5))
+    header, drive_datas = _drive_datas(path)
+    with pytest.raises(SystemExit):
+        sc.compute_corexy_combine(header, drive_datas, "a,zzz", "X")
+
+
+def test_combine_corexy_requires_two_motors(tmp_path):
+    path = synth_two_drive_ferr(tmp_path, np.zeros(5), np.zeros(5))
+    header, drive_datas = _drive_datas(path)
+    with pytest.raises(SystemExit):
+        sc.compute_corexy_combine(header, drive_datas, "a", "X")
+
+
+def test_main_multi_drive_prints_each_drive(tmp_path, capsys):
+    path = synth_two_drive_ferr(tmp_path, np.full(50, 100.0), np.full(50, 50.0))
+    assert sc.main([path]) == 0
+    out = capsys.readouterr().out
+    assert "drive: a" in out and "drive: b" in out
+
+
+def test_png_written_single_drive(tmp_path):
+    pytest.importorskip("matplotlib")
+    path, _ = synth_capture(tmp_path)
+    out_dir = tmp_path / "out"
+    assert sc.main([path, "--png", "--plot-dir", str(out_dir)]) == 0
+    pngs = list(out_dir.glob("*.png"))
+    assert len(pngs) == 1 and pngs[0].stat().st_size > 0
+
+
+def test_png_renders_without_position_demand(tmp_path):
+    # Real firmware captures (v2) carry no position_demand channel; the plot
+    # must not reference it.
+    pytest.importorskip("matplotlib")
+    path = synth_v2_capture(tmp_path)
+    out = tmp_path / "v2.png"
+    assert sc.main([path, "--plot-out", str(out)]) == 0
+    assert out.stat().st_size > 0
+
+
+def test_png_combined_corexy(tmp_path):
+    pytest.importorskip("matplotlib")
+    t = np.arange(500)
+    ferr_a = 50.0 * np.sin(2 * np.pi * t / 50.0)
+    ferr_b = 30.0 * np.sin(2 * np.pi * t / 40.0)
+    path = synth_two_drive_ferr(tmp_path, ferr_a, ferr_b)
+    out = tmp_path / "combined.png"
+    rc = sc.main(
+        [path, "--plot-out", str(out), "--combine-corexy", "a,b", "--axis", "X"]
+    )
+    assert rc == 0 and out.stat().st_size > 0
