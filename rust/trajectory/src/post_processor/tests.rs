@@ -1,12 +1,17 @@
 use super::*;
 use crate::kernel::build_smooth_zv_kernel;
-use crate::post_processors::{LinearPressureAdvance, SmoothZv, SMOOTH_ZV_T_SM_PER_HZ};
+use crate::post_processors::{
+    LinearPressureAdvance, SmoothTriangle, SmoothZv, SMOOTH_ZV_T_SM_PER_HZ,
+};
 
 fn pa(k: f64) -> PostProcessorInstance {
     PostProcessorInstance::new("pa", &LinearPressureAdvance, vec![k])
 }
 fn zv(hz: f64) -> PostProcessorInstance {
     PostProcessorInstance::new("is", &SmoothZv, vec![hz])
+}
+fn st(smooth_time: f64) -> PostProcessorInstance {
+    PostProcessorInstance::new("st", &SmoothTriangle, vec![smooth_time])
 }
 
 #[test]
@@ -42,12 +47,81 @@ fn compile_preserves_declaration_order() {
 }
 
 #[test]
+fn compile_smooth_triangle_plus_gain() {
+    let c = CompiledChain::compile(&[st(0.04), pa(0.04)]).unwrap();
+    assert!(matches!(c.stages[0], ChainStage::SmoothKernel(_)));
+    assert!(matches!(
+        c.stages[1],
+        ChainStage::LinearPressureAdvance { k } if k == 0.04
+    ));
+    let (lo, hi) = c.max_half_support();
+    assert!((hi - 0.02).abs() < 1e-12 && (lo + 0.02).abs() < 1e-12);
+}
+
+#[test]
+fn compile_gain_before_smooth_triangle_preserves_order() {
+    let c = CompiledChain::compile(&[pa(0.04), st(0.04)]).unwrap();
+    assert!(matches!(
+        c.stages[0],
+        ChainStage::LinearPressureAdvance { .. }
+    ));
+    assert!(matches!(c.stages[1], ChainStage::SmoothKernel(_)));
+}
+
+#[test]
 fn compile_two_kernels_rejected() {
     let err = CompiledChain::compile(&[zv(50.0), zv(40.0)]).unwrap_err();
     assert!(matches!(
         err,
         PostProcessorError::UnsupportedComposition { .. }
     ));
+}
+
+#[test]
+fn compile_smooth_triangle_and_input_shaper_rejected_as_two_kernels() {
+    let err = CompiledChain::compile(&[zv(50.0), st(0.04)]).unwrap_err();
+    assert!(matches!(
+        err,
+        PostProcessorError::UnsupportedComposition { .. }
+    ));
+}
+
+#[test]
+fn compile_zero_smooth_time_is_passthrough() {
+    let c = CompiledChain::compile(&[st(0.0)]).unwrap();
+    assert!(
+        c.stages.is_empty(),
+        "smooth_time=0 must contribute no stage"
+    );
+    assert_eq!(c.max_half_support(), (0.0, 0.0));
+}
+
+#[test]
+fn compile_zero_smooth_time_leaves_only_the_gain() {
+    let c = CompiledChain::compile(&[st(0.0), pa(0.04)]).unwrap();
+    assert_eq!(c.stages.len(), 1);
+    assert!(matches!(
+        c.stages[0],
+        ChainStage::LinearPressureAdvance { k } if k == 0.04
+    ));
+}
+
+#[test]
+fn compile_disabled_smooth_triangle_does_not_conflict_with_input_shaper() {
+    let c = CompiledChain::compile(&[zv(50.0), st(0.0)]).unwrap();
+    assert_eq!(c.stages.len(), 1);
+    assert!(matches!(c.stages[0], ChainStage::SmoothKernel(_)));
+}
+
+#[test]
+fn compile_rejects_negative_or_non_finite_smooth_time() {
+    for bad in [-0.01, f64::NAN, f64::INFINITY] {
+        let err = CompiledChain::compile(&[st(bad)]).unwrap_err();
+        assert!(
+            matches!(err, PostProcessorError::BadParam { .. }),
+            "smooth_time={bad} should be rejected"
+        );
+    }
 }
 
 #[test]
