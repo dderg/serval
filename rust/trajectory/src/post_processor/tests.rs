@@ -1,10 +1,12 @@
 use super::*;
+use crate::kernel::build_smooth_zv_kernel;
+use crate::post_processors::{LinearPressureAdvance, SmoothZv, SMOOTH_ZV_T_SM_PER_HZ};
 
 fn pa(k: f64) -> PostProcessorInstance {
-    PostProcessorInstance::new("pa", PostProcessorType::LinearPressureAdvance { k })
+    PostProcessorInstance::new("pa", &LinearPressureAdvance, vec![k])
 }
 fn zv(hz: f64) -> PostProcessorInstance {
-    PostProcessorInstance::new("is", PostProcessorType::SmoothZv { frequency_hz: hz })
+    PostProcessorInstance::new("is", &SmoothZv, vec![hz])
 }
 
 #[test]

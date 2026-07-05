@@ -3,7 +3,7 @@ use crossbeam_channel::unbounded;
 use geometry::segment::SourceRange;
 use geometry::{ChainFitConfig, MoveContext, VelocityLimits, line_move};
 use nurbs::eval::eval;
-use trajectory::{AxisChainSet, PostProcessorType, ShapedSegment};
+use trajectory::{AxisChainSet, PostProcessorInstance, ShapedSegment};
 
 fn cfg() -> StreamConfig {
     StreamConfig {
@@ -577,7 +577,12 @@ fn drained_prefix_is_invariant_under_append() {
 
 fn smooth_x_chains(frequency_hz: f64) -> AxisChainSet {
     AxisChainSet::spatial(
-        PostProcessorType::SmoothZv { frequency_hz }.into_chain(),
+        PostProcessorInstance::new(
+            "is",
+            &trajectory::post_processors::SmoothZv,
+            vec![frequency_hz],
+        )
+        .into_chain(),
         trajectory::CompiledChain::default(),
         trajectory::CompiledChain::default(),
     )
