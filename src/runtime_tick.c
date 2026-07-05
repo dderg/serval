@@ -180,6 +180,59 @@ DECL_INIT(runtime_init);
 #define FAST_STATUS_RETIREMENT_MIN_TICKS \
     ((uint32_t)((CONFIG_CLOCK_FREQ) / 100))
 
+#define AXIS_STALL_DETECT_TICKS ((uint32_t)(CONFIG_CLOCK_FREQ) * 2u)
+#define AXIS_STALL_REPORT_PERIOD_TICKS ((uint32_t)(CONFIG_CLOCK_FREQ) * 5u)
+
+static int32_t
+saturate_ticks_to_ms(int64_t ticks)
+{
+    int64_t ms = ticks / (int64_t)(CONFIG_CLOCK_FREQ / 1000);
+    if (ms > INT32_MAX) return INT32_MAX;
+    if (ms < INT32_MIN) return INT32_MIN;
+    return (int32_t)ms;
+}
+
+// Observability only: an axis with pieces pending whose retired counter has
+// been frozen for AXIS_STALL_DETECT_TICKS gets its armed-piece window
+// reported against the current clock. A far-future start/end here is the
+// silent-hold signature (the ISR arms a future piece and parks at its start
+// position); a long dwell also reports and is benign.
+static void
+report_stalled_axes(int32_t nr, const uint32_t *retired_change_time,
+                    uint32_t *stall_report_time, uint32_t cur_time)
+{
+    for (int32_t i = 0; i < nr; i++) {
+        if ((cur_time - retired_change_time[i]) < AXIS_STALL_DETECT_TICKS)
+            continue;
+        if ((cur_time - stall_report_time[i]) < AXIS_STALL_REPORT_PERIOD_TICKS)
+            continue;
+        uint64_t start = 0, end = 0;
+        uint32_t occupancy = 0;
+        irqstatus_t flag = irq_save();
+        int32_t armed = runtime_axis_head_window(runtime_handle, (uint32_t)i,
+                                                 &start, &end, &occupancy);
+        uint64_t now64 = runtime_now_ticks(runtime_handle);
+        irq_restore(flag);
+        if (armed <= 0 && occupancy == 0)
+            continue;
+        stall_report_time[i] = cur_time;
+        uint32_t stalled_ms = (uint32_t)((uint64_t)(cur_time
+                                                    - retired_change_time[i])
+                                         / (CONFIG_CLOCK_FREQ / 1000));
+        event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_MOTION,
+                       EVENT_LOG_EVENT_MOTION_AXIS_STALLED, 0,
+                       (((uint32_t)i) << 16) | (occupancy & 0xFFFFu),
+                       stalled_ms);
+        if (armed == 1)
+            event_log_emit(EVENT_LOG_LEVEL_WARN, EVENT_LOG_SUBSYS_MOTION,
+                           EVENT_LOG_EVENT_MOTION_AXIS_STALLED_HEAD, 0,
+                           (uint32_t)saturate_ticks_to_ms(
+                               (int64_t)(start - now64)),
+                           (uint32_t)saturate_ticks_to_ms(
+                               (int64_t)(end - now64)));
+    }
+}
+
 void
 runtime_drain(void)
 {
@@ -251,6 +304,8 @@ runtime_drain(void)
 
     {
         static uint32_t last_retired_seen[FAST_STATUS_MAX_AXES];
+        static uint32_t retired_change_time[FAST_STATUS_MAX_AXES];
+        static uint32_t stall_report_time[FAST_STATUS_MAX_AXES];
         uint32_t retired[FAST_STATUS_MAX_AXES];
         uint8_t st = 0;
         uint16_t fc = 0;
@@ -263,6 +318,7 @@ runtime_drain(void)
                 if (retired[i] != last_retired_seen[i]) {
                     pending_advance = 1;
                     last_retired_seen[i] = retired[i];
+                    retired_change_time[i] = cur_time;
                 }
             }
             uint32_t elapsed = cur_time - last_status_emit_time;
@@ -272,6 +328,8 @@ runtime_drain(void)
                 last_status_emit_time = cur_time;
                 pending_advance = 0;
             }
+            report_stalled_axes(nr, retired_change_time, stall_report_time,
+                                cur_time);
         }
     }
 

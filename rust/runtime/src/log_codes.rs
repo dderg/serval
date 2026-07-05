@@ -63,6 +63,8 @@ pub const EVENT_RUNTIME_TIMER_TOO_CLOSE_LATE: u16 = 22;
 
 pub const EVENT_MOTION_PIECE_START_PAST: u16 = 1;
 pub const EVENT_MOTION_RING_FULL: u16 = 2;
+pub const EVENT_MOTION_AXIS_STALLED: u16 = 3;
+pub const EVENT_MOTION_AXIS_STALLED_HEAD: u16 = 4;
 
 pub const EVENT_TICK_INTERVAL_EXCEEDED: u16 = 1;
 pub const EVENT_TICK_UNDERRUN: u16 = 2;
@@ -222,6 +224,14 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         (SUBSYSTEM_MOTION, EVENT_MOTION_RING_FULL) => {
             ("motion.ring_full", "axis ring full axis={arg0}")
         }
+        (SUBSYSTEM_MOTION, EVENT_MOTION_AXIS_STALLED) => (
+            "motion.axis_stalled",
+            "axis retirement stalled with pieces pending axis<<16|occupancy={arg0} stalled_ms={arg1}",
+        ),
+        (SUBSYSTEM_MOTION, EVENT_MOTION_AXIS_STALLED_HEAD) => (
+            "motion.axis_stalled_head",
+            "stalled axis armed piece window vs now (signed ms) start-now={arg0} end-now={arg1}",
+        ),
         (SUBSYSTEM_TICK, EVENT_TICK_INTERVAL_EXCEEDED) => (
             "tick.interval_exceeded",
             "TIM5 inter-arrival exceeded: got={arg0} limit={arg1}",
