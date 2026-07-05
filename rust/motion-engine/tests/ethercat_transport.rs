@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use _motion_engine::drain::DrainSync;
+use _motion_engine::drain::DrainLedger;
 use _motion_engine::pump::{
     AxisKey, EnqueueMsg, HeartbeatMsg, PieceSink, PumpMsg, SendError, WireSink, run_pump,
 };
@@ -95,6 +95,7 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
             |_| None,
             |_| {},
             |_, _| {},
+            std::sync::Arc::new(_motion_engine::drain::DrainLedger::new()),
             |_| {},
             Arc::new(AtomicU64::new(0)),
         );
@@ -147,74 +148,69 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
 }
 
 #[test]
-fn ethercat_heartbeat_callback_advances_drain_and_pump() {
-    let drain = Arc::new(DrainSync::new());
-    let (pump_tx, pump_rx) = unbounded::<PumpMsg>();
+fn heartbeat_retirement_drains_pump_ledger() {
+    let sink = PerMcuCountSink::new();
+    let ledger = Arc::new(DrainLedger::new());
+    let ledger_pump = Arc::clone(&ledger);
 
-    drain.add_sent(42, 0, 3);
-
-    let drain_hb = Arc::clone(&drain);
-    let pump_tx_hb = pump_tx.clone();
-    let mcu_id = 42u32;
-    let callback: Arc<dyn Fn(&[u32]) + Send + Sync> = Arc::new(move |retired: &[u32]| {
-        let _ = pump_tx_hb.send(PumpMsg::Heartbeat(HeartbeatMsg {
-            mcu_id,
-            retired_counts: retired.to_vec(),
-        }));
-        for (axis, &r) in retired.iter().enumerate() {
-            drain_hb.set_retired(mcu_id, axis as u8, r);
-        }
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            control_rx,
+            data_rx,
+            sink,
+            |_k| 8u32,
+            |_| None,
+            |_| {},
+            |_, _| {},
+            ledger_pump,
+            |_| {},
+            Arc::new(AtomicU64::new(0)),
+        );
     });
 
-    callback(&[3u32]);
+    let barrier = |ctl: &crossbeam_channel::Sender<PumpMsg>| {
+        let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
+        ctl.send(PumpMsg::Barrier(ack_tx)).unwrap();
+        ack_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("pump must ack the barrier");
+    };
 
-    drain
+    assert!(ledger.drained(), "empty pump is trivially drained");
+
+    data.send(EnqueueMsg {
+        key: AxisKey {
+            mcu_id: 42,
+            axis: 0,
+        },
+        pieces: vec![piece(0)],
+        fresh_stream: true,
+        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
+    })
+    .unwrap();
+    barrier(&ctl);
+    assert!(
+        !ledger.drained(),
+        "a pushed but unretired wire piece must keep the ledger undrained"
+    );
+
+    ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
+        mcu_id: 42,
+        retired_counts: vec![1],
+    }))
+    .unwrap();
+    barrier(&ctl);
+    assert!(
+        ledger.drained(),
+        "heartbeat retirement matching the pushed count must drain the ledger"
+    );
+    ledger
         .wait_drained(Duration::from_millis(100))
-        .expect("drain must complete after heartbeat callback fires with retired==sent");
+        .expect("wait_drained agrees");
 
-    match pump_rx.recv_timeout(Duration::from_millis(100)) {
-        Ok(PumpMsg::Heartbeat(hb)) => {
-            assert_eq!(hb.mcu_id, 42, "Heartbeat.mcu_id must match");
-            assert_eq!(
-                hb.retired_counts,
-                vec![3u32],
-                "Heartbeat.retired_counts must match"
-            );
-        }
-        Ok(_) => panic!("expected PumpMsg::Heartbeat"),
-        Err(e) => panic!("pump did not receive Heartbeat: {e}"),
-    }
-}
-
-#[test]
-fn ethercat_heartbeat_partial_then_full_retirement() {
-    let drain = Arc::new(DrainSync::new());
-    let (pump_tx, _pump_rx) = unbounded::<PumpMsg>();
-
-    drain.add_sent(7, 0, 5);
-
-    let drain_hb = Arc::clone(&drain);
-    let pump_tx_hb = pump_tx.clone();
-    let mcu_id = 7u32;
-    let callback: Arc<dyn Fn(&[u32]) + Send + Sync> = Arc::new(move |retired: &[u32]| {
-        let _ = pump_tx_hb.send(PumpMsg::Heartbeat(HeartbeatMsg {
-            mcu_id,
-            retired_counts: retired.to_vec(),
-        }));
-        for (axis, &r) in retired.iter().enumerate() {
-            drain_hb.set_retired(mcu_id, axis as u8, r);
-        }
-    });
-
-    callback(&[2u32]);
-    assert!(
-        drain.wait_drained(Duration::from_millis(20)).is_err(),
-        "drain must not unblock with partial retirement (2/5)"
-    );
-
-    callback(&[5u32]);
-    assert!(
-        drain.wait_drained(Duration::from_millis(100)).is_ok(),
-        "drain must unblock after full retirement (5/5)"
-    );
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
 }

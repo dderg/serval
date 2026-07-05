@@ -50,14 +50,13 @@ pub(crate) type NudgeDispatchFn =
     Arc<dyn Fn(u32, &crate::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync>;
 
 /// State a committed `ShapedSegment` needs to reach the pump: per-MCU clock
-/// anchoring/projection, the axis-lane split, and the motion-history/drain
+/// anchoring/projection, the axis-lane split, and the motion-history
 /// bookkeeping that split feeds.
 pub(crate) struct SegmentDispatchCtx {
     pub(crate) router: Arc<Mutex<host_rt::passthrough_queue::PassthroughRouter>>,
     pub(crate) anchor: Arc<Mutex<crate::anchor::Anchor>>,
     pub(crate) mcu_configs: Vec<crate::mcu_config::McuAxisConfig>,
     pub(crate) pump_tx: Sender<crate::pump::EnqueueMsg>,
-    pub(crate) drain: Arc<crate::drain::DrainSync>,
     pub(crate) counter: Arc<AtomicU64>,
     pub(crate) active_drip_cohort: Arc<Mutex<Option<u64>>>,
     pub(crate) motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
@@ -158,8 +157,6 @@ pub(crate) fn dispatch_segment(
                 store.record(m.key, piece, nominal_freq, *host_t);
             }
         }
-        ctx.drain
-            .add_sent(m.key.mcu_id, m.key.axis, m.pieces.len() as u32);
         ctx.pump_tx.send(m).map_err(|_| DispatchError::PumpGone)?;
     }
 
@@ -252,7 +249,6 @@ pub(crate) fn dispatch_nudge(
                 store.record(key, piece, nominal_freq, *host_t);
             }
         }
-        ctx.drain.add_sent(mcu_id, axis, pieces.len() as u32);
         ctx.pump_tx
             .send(crate::pump::EnqueueMsg {
                 key,

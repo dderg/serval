@@ -448,8 +448,6 @@ impl PyMotionEngine {
                 .stream_open(vec![x, y, z, 0.0])
                 .map_err(planner_err)?;
 
-            self.drain.reset();
-
             let sends = {
                 let configs = self
                     .mcu_axis_configs
@@ -842,8 +840,16 @@ impl PyMotionEngine {
                 }
             }),
             on_abandon: Box::new(move |key: crate::types::AxisKey, n: u32| {
-                drain_for_pump.unsend(key.mcu_id, key.axis, n);
+                tracing::debug!(
+                    subsystem = "motion",
+                    event = "pump_abandon_unpushed",
+                    mcu = key.mcu_id,
+                    axis = key.axis,
+                    dropped = n,
+                    "pump flush dropped pieces that never reached the wire"
+                );
             }),
+            drain: drain_for_pump,
             on_drip_stall: Box::new(|msg: String| {
                 tracing::error!(
                     msg,
@@ -861,7 +867,6 @@ impl PyMotionEngine {
             router: Arc::clone(&router_arc),
             anchor: anchor_mutex,
             mcu_configs: mcu_configs.to_vec(),
-            drain: self.drain.clone(),
             counter: Arc::clone(&counter),
             active_drip_cohort: Arc::clone(&self.active_drip_cohort),
             motion_history: Arc::clone(&self.motion_history),
@@ -967,7 +972,6 @@ impl PyMotionEngine {
         for cfg_mcu in mcu_configs {
             let mcu_id = cfg_mcu.mcu_id;
             let pump_tx_hb = pump_control.clone();
-            let drain_hb = self.drain.clone();
 
             if ethercat_mcu_ids.contains(&mcu_id) {
                 let conn = ec_conns
@@ -988,7 +992,6 @@ impl PyMotionEngine {
                 let pump_tx_fault = pump_control.clone();
                 let latched_fault_hb = Arc::clone(&self.latched_drive_fault);
                 let mcu_label_hb = mcu_label.clone();
-                let slot_axes_hb = cfg_mcu.axes.clone();
                 conn.attach_heartbeat_callback(Arc::new(
                     move |hb: &mcu_protocol::messages::StatusHeartbeat| {
                         if hb.fault_code != 0 {
@@ -1049,11 +1052,6 @@ impl PyMotionEngine {
                                 retired_counts: hb.retired_counts.clone(),
                             },
                         ));
-                        for (slot, &r) in hb.retired_counts.iter().enumerate() {
-                            if let Some(&axis) = slot_axes_hb.get(slot) {
-                                drain_hb.set_retired(mcu_id, axis as u8, r);
-                            }
-                        }
                     },
                 ));
 
@@ -1133,9 +1131,6 @@ impl PyMotionEngine {
                             retired_counts: retired.to_vec(),
                         },
                     ));
-                    for (axis, &r) in retired.iter().enumerate() {
-                        drain_hb.set_retired(mcu_id, axis as u8, r);
-                    }
                 }));
             }
         }

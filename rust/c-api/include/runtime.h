@@ -35,6 +35,18 @@ extern void event_log_emit(uint8_t level,
                            uint32_t arg0,
                            uint32_t arg1);
 
+/**
+ * Foreground-only, call under `irq_save` — the ISR mutates the armed
+ * piece and a torn u64 read would fabricate a bogus stall window.
+ * Returns 1 with the armed piece window, 0 when nothing is armed,
+ * negative on error. `out_occupancy` is the axis ring depth in pieces.
+ */
+int32_t runtime_axis_head_window(struct Runtime *rt,
+                                 uint32_t axis_idx,
+                                 uint64_t *out_start,
+                                 uint64_t *out_end,
+                                 uint32_t *out_occupancy);
+
 int32_t runtime_bind_phase_motor(struct Runtime *rt, uint8_t motor_idx, uint8_t slot_idx);
 
 int32_t runtime_clock_sync_request(struct Runtime *rt,

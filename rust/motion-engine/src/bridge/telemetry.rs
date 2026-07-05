@@ -197,6 +197,7 @@ impl PyMotionEngine {
         Ok(done)
     }
     fn motion_drain_poll(&self) -> PyResult<bool> {
+        self.report_lagging_drain_wait();
         let mut pending = self
             .pending_drain_flush
             .lock()
@@ -213,7 +214,14 @@ impl PyMotionEngine {
         match rx.try_recv() {
             Ok(_committed_through) => {
                 *pending = None;
-                Ok(self.drain.is_drained_now())
+                let drained = self.drain.drained();
+                if drained {
+                    *self
+                        .drain_wait_diag
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner()) = None;
+                }
+                Ok(drained)
             }
             Err(crossbeam_channel::TryRecvError::Empty) => Ok(false),
             Err(crossbeam_channel::TryRecvError::Disconnected) => {
@@ -227,6 +235,10 @@ impl PyMotionEngine {
     fn motion_drain_finalize(&self) {
         *self
             .pending_drain_flush
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
+        *self
+            .drain_wait_diag
             .lock()
             .unwrap_or_else(|p| p.into_inner()) = None;
     }
@@ -351,6 +363,39 @@ impl PyMotionEngine {
 }
 
 impl PyMotionEngine {
+    fn report_lagging_drain_wait(&self) {
+        const DRAIN_WAIT_REPORT_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+        let now = std::time::Instant::now();
+        let mut diag = self
+            .drain_wait_diag
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let (started, last_report) = diag.get_or_insert((now, None));
+        if now.duration_since(*started) < DRAIN_WAIT_REPORT_AFTER {
+            return;
+        }
+        if last_report.is_some_and(|t| now.duration_since(t) < DRAIN_WAIT_REPORT_AFTER) {
+            return;
+        }
+        *last_report = Some(now);
+        let waited_s = now.duration_since(*started).as_secs_f64();
+        drop(diag);
+        for (mcu, axis, state) in self.drain.lagging_axes() {
+            tracing::warn!(
+                subsystem = "motion",
+                event = "drain_wait_lagging",
+                mcu,
+                axis,
+                pending = state.pending,
+                pushed = state.pushed,
+                retired = state.retired,
+                waited_s,
+                "drain wait not completing — this axis still has staged or \
+                 unretired wire pieces"
+            );
+        }
+    }
+
     fn flush_try_start_inner(
         &self,
     ) -> PyResult<Option<crossbeam_channel::Receiver<Option<std::time::Instant>>>> {

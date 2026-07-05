@@ -65,6 +65,11 @@ pub(super) struct Ingress {
     /// Source line of the last move forwarded into the pipeline; a fence
     /// arriving now sequences after it.
     pub(super) last_line: u32,
+    /// `Flush` completion runs a pump barrier through this before notifying,
+    /// so a completed flush guarantees the pump has ingested everything
+    /// dispatched and published a current drain ledger. `None` only in the
+    /// pump-less test seam.
+    pub(super) pump_control: Option<crossbeam_channel::Sender<crate::pump::PumpMsg>>,
 }
 
 impl Ingress {
@@ -194,6 +199,7 @@ impl Ingress {
             StreamMsg::Move(_) => unreachable!("moves handled by the ingress path"),
             StreamMsg::Flush { notify } => {
                 let ack = self.drain_and_fence();
+                self.pump_barrier();
                 let finish = ack.sync_instant.map(|t| {
                     t + Duration::try_from_secs_f64((self.t_next + LEAD).max(0.0))
                         .unwrap_or(Duration::ZERO)
@@ -247,6 +253,19 @@ impl Ingress {
             }
         }
         false
+    }
+
+    fn pump_barrier(&self) {
+        let Some(tx) = &self.pump_control else {
+            return;
+        };
+        let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
+        if tx.send(crate::pump::PumpMsg::Barrier(ack_tx)).is_err() {
+            fatal("pump control channel closed — the pump thread died");
+        }
+        if ack_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+            fatal("pump did not acknowledge the flush barrier within 5s");
+        }
     }
 
     /// Drop everything queued without dispatching it and restart the timeline
