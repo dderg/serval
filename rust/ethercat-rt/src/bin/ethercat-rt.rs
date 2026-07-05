@@ -931,7 +931,7 @@ fn main() {
                         .filter_map(|s| {
                             let (anchor_counts, anchor_mm) = report_anchor[s]?;
                             let slot = s as std::os::raw::c_int;
-                            let (pos_counts, vel_rpm) = unsafe {
+                            let (pos_counts, vel_counts_s) = unsafe {
                                 (
                                     ffi::ec_rt_get_position_actual(slot),
                                     ffi::ec_rt_get_velocity_actual(slot),
@@ -939,8 +939,10 @@ fn main() {
                             };
                             let delta_counts = i64::from(pos_counts) - i64::from(anchor_counts);
                             let pos_mm = anchor_mm + delta_counts as f64 / cmd_counts_per_mm[s];
-                            let vel_mm_s = cmd_counts_per_mm[s].signum()
-                                * ethercat_rt::scale::velocity_mm_s(vel_rpm, rotation_distance[s]);
+                            let vel_mm_s = ethercat_rt::scale::velocity_mm_s(
+                                vel_counts_s,
+                                cmd_counts_per_mm[s],
+                            );
                             Some((s as u8, pos_mm, vel_mm_s))
                         })
                         .collect();
