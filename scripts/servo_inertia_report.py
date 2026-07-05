@@ -104,9 +104,9 @@ def render(steps, out_path):
                 lw=1.0,
                 label=label,
             )
-            seg = dm["cruise_ferr"][:1500]
+            seg = dm["cruise_ferr"][: int(round(1.5 * dm["fs"]))]
             time_ax.plot(
-                np.arange(len(seg)) / 1000.0,
+                np.arange(len(seg)) / dm["fs"],
                 seg * 1000.0,
                 color=color,
                 ls=ls,
