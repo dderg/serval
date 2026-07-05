@@ -231,10 +231,32 @@ impl PyMotionEngine {
         &self,
         mcu_handle: u32,
         axis: usize,
-        pos_mm: f64,
+        pos_mm: [f64; 3],
         timeout_s: f64,
     ) -> PyResult<u64> {
-        let (conn, slot) = {
+        let cfg = {
+            let configs = self
+                .mcu_axis_configs
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            configs
+                .iter()
+                .find(|c| c.mcu_id == mcu_handle)
+                .cloned()
+                .ok_or_else(|| {
+                    PyRuntimeError::new_err(format!(
+                        "finalize_homed_axis: no axis config for mcu_handle {mcu_handle}"
+                    ))
+                })?
+        };
+        let motor = crate::mcu_config::motor_frame(&cfg, pos_mm);
+        let seed_lanes: &[usize] =
+            if cfg.kinematics == crate::mcu_config::KINEMATICS_COREXY && axis <= 1 {
+                &[0, 1]
+            } else {
+                &[axis]
+            };
+        let (conn, seeds) = {
             let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
             let mc = mcus.get(&mcu_handle).ok_or_else(|| {
                 PyRuntimeError::new_err(format!(
@@ -247,31 +269,44 @@ impl PyMotionEngine {
                     return Ok(self.endpoint_calls.start("finalize_noop", || Ok(())));
                 }
             };
-            let slot = slot_for_axis(&mc.ethercat_slot_axes, axis).ok_or_else(|| {
-                PyRuntimeError::new_err(format!(
-                    "finalize_homed_axis: axis {axis} not driven by mcu {mcu_handle} \
-                     (slot map {:?})",
-                    mc.ethercat_slot_axes
-                ))
-            })?;
-            (conn, slot)
+            let seeds = seed_lanes
+                .iter()
+                .map(|&lane| {
+                    slot_for_axis(&mc.ethercat_slot_axes, lane)
+                        .map(|slot| (slot, crate::mcu_config::encode_q16(motor[lane])))
+                        .ok_or_else(|| {
+                            PyRuntimeError::new_err(format!(
+                                "finalize_homed_axis: axis {lane} not driven by mcu \
+                                 {mcu_handle} (slot map {:?})",
+                                mc.ethercat_slot_axes
+                            ))
+                        })
+                })
+                .collect::<PyResult<Vec<(u8, i32)>>>()?;
+            (conn, seeds)
         };
-        let home_q16 = crate::mcu_config::encode_q16(pos_mm);
         tracing::info!(
             subsystem = "engine",
             event = "servo_finalize_home",
             mcu_handle,
-            pos_mm,
-            home_q16,
-            "servo home finalize"
+            axis,
+            x = pos_mm[0],
+            y = pos_mm[1],
+            z = pos_mm[2],
+            seeds = format!("{seeds:?}"),
+            "servo home finalize (motor-frame seeds per slot)"
         );
         let timeout = std::time::Duration::from_secs_f64(timeout_s);
         Ok(self.endpoint_calls.start("finalize_homed_axis", move || {
-            let result = crate::servo_torque::send_seed_servo_home(&conn, slot, home_q16, timeout)?;
-            if result != 0 {
-                return Err(format!(
-                    "finalize_homed_axis: method-35 home-set failed: endpoint result {result}"
-                ));
+            for (slot, home_q16) in seeds {
+                let result =
+                    crate::servo_torque::send_seed_servo_home(&conn, slot, home_q16, timeout)?;
+                if result != 0 {
+                    return Err(format!(
+                        "finalize_homed_axis: method-35 home-set failed for slot {slot}: \
+                         endpoint result {result}"
+                    ));
+                }
             }
             Ok(())
         }))

@@ -1,7 +1,6 @@
 use super::{
-    Arc, DRAIN_TIMEOUT, Duration, HomingRun, KinematicsModule, Ordering, PyMotionEngine, PyResult,
-    PyRuntimeError, Python, TripDeps, dispatch_endstop_trip, drip_cohort_participants, planner_err,
-    pymethods, trip_position_to_motor_frame,
+    Arc, DRAIN_TIMEOUT, Duration, HomingRun, Ordering, PyMotionEngine, PyResult, PyRuntimeError,
+    Python, TripDeps, dispatch_endstop_trip, drip_cohort_participants, planner_err, pymethods,
 };
 
 #[pymethods]
@@ -112,7 +111,6 @@ impl PyMotionEngine {
                 cohort,
                 endstop_id,
                 endstop_mcu,
-                axis,
                 axis_key,
                 all_axis_keys: all_axis_keys.clone(),
                 window_start_host,
@@ -309,7 +307,6 @@ impl PyMotionEngine {
             all_axis_keys: Vec<crate::types::AxisKey>,
             cohort: u64,
             axis_key: crate::types::AxisKey,
-            axis: u8,
         }
 
         let ctx = {
@@ -318,7 +315,6 @@ impl PyMotionEngine {
                 all_axis_keys: r.all_axis_keys.clone(),
                 cohort: r.cohort,
                 axis_key: r.axis_key,
-                axis: r.axis,
             })
         };
 
@@ -350,10 +346,19 @@ impl PyMotionEngine {
 
         self.finish_homing();
 
-        let final_motor_pos =
-            crate::homing::trajectory_final_position(ctx.axis_key, &self.motion_history);
+        let final_cartesian = {
+            let configs = self
+                .mcu_axis_configs
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            configs
+                .iter()
+                .find(|c| c.mcu_id == ctx.axis_key.mcu_id)
+                .ok_or_else(|| format!("no axis config for mcu {}", ctx.axis_key.mcu_id))
+                .and_then(|cfg| crate::homing::final_cartesian_position(cfg, &self.motion_history))
+        };
 
-        let final_motor_pos = match final_motor_pos {
+        let cartesian = match final_cartesian {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!(
@@ -376,22 +381,6 @@ impl PyMotionEngine {
             );
             return;
         }
-
-        let configs = self
-            .mcu_axis_configs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let kinematics = configs
-            .iter()
-            .find(|c| c.mcu_id == ctx.axis_key.mcu_id)
-            .map_or(1u8, |c| c.kinematics);
-        drop(configs);
-
-        let motor_frame =
-            trip_position_to_motor_frame(ctx.axis, final_motor_pos, &[], ctx.axis_key.mcu_id);
-        let cartesian = KinematicsModule::from_tag(kinematics)
-            .expect("build_mcu_configs validated the kinematics tag")
-            .inverse(motor_frame);
 
         let planner_guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(planner) = planner_guard.as_ref() {

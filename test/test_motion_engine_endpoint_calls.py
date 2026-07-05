@@ -60,4 +60,4 @@ def test_endpoint_call_error_propagates_to_the_caller():
     native = FakeNativeEngine(error="servo torque enable failed: result -312")
     wrapper = _make_wrapper(native)
     with pytest.raises(RuntimeError, match="-312"):
-        wrapper.finalize_homed_axis(1, 0, 235.0)
+        wrapper.finalize_homed_axis(1, 0, [235.0, 0.0, 0.0])

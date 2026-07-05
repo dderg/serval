@@ -16,7 +16,7 @@ use host_rt::passthrough_queue::PassthroughRouter;
 
 use crate::classify;
 use crate::config::{self, PlannerConfig};
-use crate::kinematics::{KinematicsModule, SPATIAL_AXES};
+use crate::kinematics::SPATIAL_AXES;
 use crate::mcu_config::{McuAxisConfig, McuCaps, build_mcu_configs};
 use crate::types::mcu_handle_from_raw;
 use crate::worker::{StreamWorkerError, StreamWorkerHandle};
@@ -47,7 +47,7 @@ use runtime_caps::{
     collect_motor_positions_inner, query_ethercat_runtime_caps, query_runtime_caps,
     require_positive, slot_for_axis,
 };
-use state::{EthercatDrive, FlushWait, HomingRun, McuConnection, trip_position_to_motor_frame};
+use state::{EthercatDrive, FlushWait, HomingRun, McuConnection};
 
 fn abort_after_tracing_appender_drains() {
     let _ = std::io::Write::flush(&mut std::io::stderr());
@@ -990,26 +990,22 @@ pub(crate) fn dispatch_endstop_trip(
                 }
             };
 
-            let axis = run.axis;
             let axis_key = run.axis_key;
-            let kinematics = configs
-                .iter()
-                .find(|c| c.mcu_id == axis_key.mcu_id)
-                .map_or(1u8, |c| c.kinematics);
             let reconstruct_cartesian = |source_mcu: u32, clock: u64| -> Result<[f64; 3], String> {
-                let motor_pos = crate::homing::reconstruct_axis_position(
+                let cfg = configs
+                    .iter()
+                    .find(|c| c.mcu_id == axis_key.mcu_id)
+                    .ok_or_else(|| {
+                        format!("EndstopTrip: no axis config for mcu {}", axis_key.mcu_id)
+                    })?;
+                crate::homing::reconstruct_cartesian_position(
                     source_mcu,
                     clock,
-                    axis_key,
+                    cfg,
                     &router_arc,
                     &history_arc,
                     run.window_start_host,
-                )?;
-                let motor_frame =
-                    trip_position_to_motor_frame(axis, motor_pos, &configs, axis_key.mcu_id);
-                Ok(KinematicsModule::from_tag(kinematics)
-                    .map_err(|e| e.to_string())?
-                    .inverse(motor_frame))
+                )
             };
 
             let outcome = reconstruct_cartesian(run.endstop_mcu, trip_clock).and_then(|trip| {

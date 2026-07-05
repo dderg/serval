@@ -134,7 +134,7 @@ def _commit_and_seed(
         toolhead.wait_moves()
     if servo_handle is not None:
         engine.finalize_homed_axis(
-            servo_handle, axis, toolhead.get_position()[axis]
+            servo_handle, axis, toolhead.get_position()[:3]
         )
 
 

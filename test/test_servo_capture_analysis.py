@@ -612,7 +612,7 @@ def test_export_ident_csv_writes_commanded_kinematics(tmp_path):
     sc.export_ident_csv(out, header, [(0, data)])
     with open(out) as f:
         lines = f.read().splitlines()
-    assert lines[0] == "t,accel_x,vel_x,torque_x"
+    assert lines[0] == "t,accel_x,vel_x,vel_act_x,torque_x"
     # all 20 cycles are motion-active in the synthetic capture
     assert len(lines) == 1 + 20
     first = lines[1].split(",")
@@ -669,13 +669,15 @@ def test_export_ident_csv_two_drive_capture(tmp_path):
     sc.export_ident_csv(out, header, [(0, data_x), (1, data_y)])
     with open(out) as f:
         lines = f.read().splitlines()
-    assert lines[0] == "t,accel_x,vel_x,torque_x,accel_y,vel_y,torque_y"
+    assert lines[0] == (
+        "t,accel_x,vel_x,vel_act_x,torque_x,accel_y,vel_y,vel_act_y,torque_y"
+    )
     assert len(lines) == 1 + 8
     first = lines[1].split(",")
     assert float(first[1]) == pytest.approx(1234.5)
-    assert float(first[3]) == pytest.approx(50.0)
-    assert float(first[4]) == pytest.approx(2234.5)
-    assert float(first[6]) == pytest.approx(1050.0)
+    assert float(first[4]) == pytest.approx(50.0)
+    assert float(first[5]) == pytest.approx(2234.5)
+    assert float(first[8]) == pytest.approx(1050.0)
 
 
 def test_export_ident_csv_rejects_pre_v2_capture(tmp_path):
