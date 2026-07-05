@@ -22,8 +22,8 @@ pub(super) fn build_arc(
     }
 
     let center = [start[0] + i, start[1] + j];
-    let radius = i.hypot(j);
-    let end_radius = (end[0] - center[0]).hypot(end[1] - center[1]);
+    let radius = nurbs::det::hypot(i, j);
+    let end_radius = nurbs::det::hypot(end[0] - center[0], end[1] - center[1]);
     if (end_radius - radius).abs() > radius_tolerance(radius) {
         return Err(FrontendError::ArcRadiusMismatch {
             line_no,
@@ -32,8 +32,8 @@ pub(super) fn build_arc(
         });
     }
 
-    let start_angle = (start[1] - center[1]).atan2(start[0] - center[0]);
-    let end_angle = (end[1] - center[1]).atan2(end[0] - center[0]);
+    let start_angle = nurbs::det::atan2(start[1] - center[1], start[0] - center[0]);
+    let end_angle = nurbs::det::atan2(end[1] - center[1], end[0] - center[0]);
     let sweep = normalize_sweep(start_angle, end_angle, ccw);
 
     let origin = [center[0], center[1], start[2]];

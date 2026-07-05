@@ -112,7 +112,7 @@ fn fresnel_cs(x: f64) -> (f64, f64) {
         let f = 1.0 - u * polevl(u, &FN) / p1evl(u, &FD);
         let g = inv * polevl(u, &GN) / p1evl(u, &GD);
         let arg = FRAC_PI_2 * x2;
-        let (sin_a, cos_a) = arg.sin_cos();
+        let (sin_a, cos_a) = nurbs::det::sin_cos(arg);
         let pix = PI * ax;
         let c = 0.5 + (f * sin_a - g * cos_a) / pix;
         let s = 0.5 - (f * cos_a + g * sin_a) / pix;
@@ -128,8 +128,8 @@ pub(super) fn clothoid_offset(kappa_0: f64, sigma: f64, s: f64) -> (f64, f64) {
             return (s, 0.0);
         }
         return (
-            (kappa_0 * s).sin() / kappa_0,
-            (1.0 - (kappa_0 * s).cos()) / kappa_0,
+            nurbs::det::sin(kappa_0 * s) / kappa_0,
+            (1.0 - nurbs::det::cos(kappa_0 * s)) / kappa_0,
         );
     }
 
@@ -146,7 +146,7 @@ pub(super) fn clothoid_offset(kappa_0: f64, sigma: f64, s: f64) -> (f64, f64) {
     let d_s = s1 - s0;
 
     let k = (PI / abs_sigma).sqrt();
-    let (cos_a, sin_a) = (a.cos(), a.sin());
+    let (sin_a, cos_a) = nurbs::det::sin_cos(a);
     let cx = k * (cos_a * d_c + sign * sin_a * d_s);
     let cy = k * (sign * cos_a * d_s - sin_a * d_c);
     (cx, cy)

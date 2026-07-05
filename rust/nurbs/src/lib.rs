@@ -21,6 +21,8 @@ compile_error!("feature `host` is incompatible with `mcu-*` features");
 )))]
 compile_error!("must specify exactly one of: `host`, `mcu-h7`, `mcu-f4`, `mcu-g0`");
 
+pub mod det;
+
 mod float;
 pub use float::Float;
 

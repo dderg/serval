@@ -508,7 +508,7 @@ fn classify_junction(
 
     let t_in = line_in.heading_at(line_in.s_len());
     let t_out = line_out.heading_at(0.0);
-    let theta = dot(t_in, t_out).clamp(-1.0, 1.0).acos();
+    let theta = nurbs::det::acos(dot(t_in, t_out).clamp(-1.0, 1.0));
     if theta <= config.theta_min_rad {
         return Ok(JunctionPlan::Unblended(UnblendReason::Collinear));
     }

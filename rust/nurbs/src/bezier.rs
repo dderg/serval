@@ -348,7 +348,7 @@ fn givens_rotation(a: f64, b: f64) -> (f64, f64, f64) {
     if a.abs() < 1e-300 {
         return (0.0, b.signum(), b.abs());
     }
-    let r = a.hypot(b);
+    let r = crate::det::hypot(a, b);
     (a / r, b / r, r)
 }
 

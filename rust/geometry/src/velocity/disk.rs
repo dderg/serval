@@ -66,11 +66,11 @@ pub(super) fn const_kappa_reach_w(w_in: f64, length: f64, accel: f64, kappa_abs:
     }
     let w_lim = accel / kappa_abs;
     let x0 = (w_in / w_lim).clamp(0.0, 1.0);
-    let arg = 2.0 * kappa_abs * length + x0.asin();
+    let arg = 2.0 * kappa_abs * length + nurbs::det::asin(x0);
     if arg >= FRAC_PI_2 {
         w_lim
     } else {
-        w_lim * arg.sin()
+        w_lim * nurbs::det::sin(arg)
     }
 }
 
