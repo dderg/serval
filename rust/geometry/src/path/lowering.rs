@@ -132,9 +132,9 @@ impl PositionProfile for Arc {
     fn point_at(&self, s: f64) -> [f64; 3] {
         let theta = self.angle_at(s);
         let offset = axpby(
-            self.radius * nurbs::det::cos(theta),
+            self.radius * libm::cos(theta),
             self.u,
-            self.radius * nurbs::det::sin(theta),
+            self.radius * libm::sin(theta),
             self.v,
         );
         translate(self.origin, offset)
@@ -144,9 +144,9 @@ impl PositionProfile for Arc {
         let theta = self.angle_at(s);
         let sign = self.sweep.signum();
         axpby(
-            -sign * nurbs::det::sin(theta),
+            -sign * libm::sin(theta),
             self.u,
-            sign * nurbs::det::cos(theta),
+            sign * libm::cos(theta),
             self.v,
         )
     }
@@ -157,9 +157,9 @@ impl PositionProfile for Arc {
         let theta = self.angle_at(s);
         let inv_r = 1.0 / self.radius;
         axpby(
-            -inv_r * nurbs::det::cos(theta),
+            -inv_r * libm::cos(theta),
             self.u,
-            -inv_r * nurbs::det::sin(theta),
+            -inv_r * libm::sin(theta),
             self.v,
         )
     }
@@ -179,7 +179,7 @@ impl PositionProfile for Clothoid {
 
     fn heading_at(&self, s: f64) -> [f64; 3] {
         let phi = self.heading_angle_at(s);
-        axpby(nurbs::det::cos(phi), self.u, nurbs::det::sin(phi), self.v)
+        axpby(libm::cos(phi), self.u, libm::sin(phi), self.v)
     }
 
     fn dheading_ds(&self, s: f64) -> [f64; 3] {
@@ -188,9 +188,9 @@ impl PositionProfile for Clothoid {
         let phi = self.heading_angle_at(s);
         let kappa = self.kappa_0 + self.sigma * s;
         axpby(
-            -kappa * nurbs::det::sin(phi),
+            -kappa * libm::sin(phi),
             self.u,
-            kappa * nurbs::det::cos(phi),
+            kappa * libm::cos(phi),
             self.v,
         )
     }

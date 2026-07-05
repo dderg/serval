@@ -109,7 +109,7 @@ fn time_to_cross(st: State, j: f64, ds: f64) -> Option<f64> {
     let mut hi = {
         let by_v = ds / st.v.max(1e-9);
         let by_a = (2.0 * ds / st.a.abs().max(1e-9)).sqrt();
-        let by_j = nurbs::det::cbrt(6.0 * ds / j.abs().max(1e-9));
+        let by_j = libm::cbrt(6.0 * ds / j.abs().max(1e-9));
         by_v.min(by_a).min(by_j).max(1e-12)
     };
     let mut guard = 0;

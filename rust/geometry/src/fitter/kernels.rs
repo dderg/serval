@@ -589,7 +589,7 @@ pub(super) fn grow_turning_band(moves: &[Move], start: usize, corner: CornerFitC
         };
         let t_in = la.heading_at(la.s_len());
         let t_out = lb.heading_at(0.0);
-        let theta = nurbs::det::acos(dot(t_in, t_out).clamp(-1.0, 1.0));
+        let theta = libm::acos(dot(t_in, t_out).clamp(-1.0, 1.0));
         if theta <= corner.theta_min_rad || theta >= corner.theta_max_rad {
             break;
         }
@@ -780,7 +780,7 @@ pub(super) fn reconstruct(facets: &[Move], tol: f64) -> Result<Option<Reconstruc
     let mut prev = sub(lines[0].start, origin);
     for l in &lines {
         let cur = sub(l.point_at(l.s_len()), origin);
-        sweep += nurbs::det::atan2(dot(cross(prev, cur), plane_normal), dot(prev, cur));
+        sweep += libm::atan2(dot(cross(prev, cur), plane_normal), dot(prev, cur));
         prev = cur;
     }
     if !(sweep.is_finite() && sweep.abs() > ANGLE_EPS_RAD) {

@@ -25,7 +25,7 @@ fn resolve(
     budget_in: f64,
     budget_out: f64,
 ) -> Option<GeneralBlend> {
-    let theta = nurbs::det::acos(dot(anchor_in.tangent, anchor_out.tangent).clamp(-1.0, 1.0));
+    let theta = libm::acos(dot(anchor_in.tangent, anchor_out.tangent).clamp(-1.0, 1.0));
     if theta <= config.theta_min_rad {
         return None;
     }
