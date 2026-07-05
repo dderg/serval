@@ -1,113 +1,82 @@
-use std::collections::HashMap;
+//! Drained-ness of the motion pipeline, observed rather than re-counted.
+//!
+//! The pump is the single owner of every per-axis counter that matters here
+//! (`pending` staged pieces, `pushed` wire pieces, MCU-confirmed `retired`)
+//! and publishes a snapshot of them after every loop iteration. Readers only
+//! ever compare counters that were written together, in the same unit, by the
+//! same thread — there is no parallel ledger to drift out of sync.
+//!
+//! Ordering: a snapshot can lag what the dispatcher has handed the pump. A
+//! reader that needs "everything submitted so far is reflected" must sequence
+//! behind a `PumpMsg::Barrier`, whose ack the pump sends only after
+//! publishing — the pipeline `Flush` does exactly that.
+
+use std::collections::BTreeMap;
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 type AxisKey = (u32, u8);
 
-#[derive(Default)]
-struct Counts {
-    sent: HashMap<AxisKey, u32>,
-    retired: HashMap<AxisKey, u32>,
-    baseline: HashMap<AxisKey, u32>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AxisDrainState {
+    pub pending: u32,
+    pub pushed: u32,
+    pub retired: u32,
 }
 
-pub struct DrainSync {
-    counts: Mutex<Counts>,
+impl AxisDrainState {
+    fn drained(&self) -> bool {
+        self.pending == 0 && self.pushed == self.retired
+    }
+}
+
+pub struct DrainLedger {
+    axes: Mutex<BTreeMap<AxisKey, AxisDrainState>>,
     cv: Condvar,
 }
 
-impl DrainSync {
+impl DrainLedger {
     pub fn new() -> Self {
         Self {
-            counts: Mutex::new(Counts::default()),
+            axes: Mutex::new(BTreeMap::new()),
             cv: Condvar::new(),
         }
     }
 
-    pub fn add_sent(&self, mcu: u32, axis: u8, n: u32) {
-        let mut c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
-        let e = c.sent.entry((mcu, axis)).or_insert(0);
-        *e = e.wrapping_add(n);
-    }
-
-    pub fn set_retired(&self, mcu: u32, axis: u8, retired: u32) {
-        let mut c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
-        c.retired.insert((mcu, axis), retired);
-        drop(c);
+    /// Pump-only: replace the snapshot and wake waiters.
+    pub fn publish(&self, snapshot: BTreeMap<AxisKey, AxisDrainState>) {
+        let mut axes = self.axes.lock().unwrap_or_else(|p| p.into_inner());
+        *axes = snapshot;
+        drop(axes);
         self.cv.notify_all();
-    }
-
-    /// Everything sent before the reset will still retire on the MCU, so it
-    /// rolls into the baseline; snapshotting the retired counter instead
-    /// would let in-flight-at-reset pieces overshoot the post-reset sent
-    /// count and make exact-equality drain unsatisfiable.
-    pub fn reset(&self) {
-        let mut c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
-        let sent_snapshot: Vec<(AxisKey, u32)> = c.sent.iter().map(|(&k, &v)| (k, v)).collect();
-        for (key, sent_before_reset) in sent_snapshot {
-            let b = c.baseline.entry(key).or_insert(0);
-            *b = b.wrapping_add(sent_before_reset);
-        }
-        c.sent.clear();
-        drop(c);
-        self.cv.notify_all();
-    }
-
-    pub fn is_drained_now(&self) -> bool {
-        let c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
-        Self::is_drained(&c)
-    }
-
-    fn is_drained(c: &Counts) -> bool {
-        c.sent.iter().all(|(k, &s)| {
-            let r = c.retired.get(k).copied().unwrap_or(0);
-            let b = c.baseline.get(k).copied().unwrap_or(0);
-            r.saturating_sub(b) == s
-        })
-    }
-
-    pub fn lagging_axes(&self) -> Vec<(u32, u8, u32, u32, u32)> {
-        let c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
-        c.sent
-            .iter()
-            .filter_map(|(&(mcu, axis), &s)| {
-                let r = c.retired.get(&(mcu, axis)).copied().unwrap_or(0);
-                let b = c.baseline.get(&(mcu, axis)).copied().unwrap_or(0);
-                (r.saturating_sub(b) != s).then_some((mcu, axis, s, r, b))
-            })
-            .collect()
     }
 
     pub fn drained(&self) -> bool {
-        let c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
-        Self::is_drained(&c)
+        let axes = self.axes.lock().unwrap_or_else(|p| p.into_inner());
+        axes.values().all(AxisDrainState::drained)
+    }
+
+    pub fn lagging_axes(&self) -> Vec<(u32, u8, AxisDrainState)> {
+        let axes = self.axes.lock().unwrap_or_else(|p| p.into_inner());
+        axes.iter()
+            .filter(|(_, s)| !s.drained())
+            .map(|(&(mcu, axis), &s)| (mcu, axis, s))
+            .collect()
     }
 
     pub fn wait_drained(&self, timeout: Duration) -> Result<(), String> {
         let deadline = Instant::now() + timeout;
-        let mut c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
-        while !Self::is_drained(&c) {
+        let mut axes = self.axes.lock().unwrap_or_else(|p| p.into_inner());
+        while !axes.values().all(AxisDrainState::drained) {
             let now = Instant::now();
             if now >= deadline {
-                let lagging: Vec<String> = c
-                    .sent
+                let lagging: Vec<String> = axes
                     .iter()
-                    .filter(|(k, s)| {
-                        let r = c.retired.get(*k).copied().unwrap_or(0);
-                        let b = c.baseline.get(*k).copied().unwrap_or(0);
-                        r.saturating_sub(b) != **s
-                    })
-                    .map(|(k, s)| {
-                        let r = c.retired.get(k).copied().unwrap_or(0);
-                        let b = c.baseline.get(k).copied().unwrap_or(0);
+                    .filter(|(_, s)| !s.drained())
+                    .map(|(&(mcu, axis), s)| {
                         format!(
-                            "mcu{} axis{}: retired {} baseline {} delta {} / sent {}",
-                            k.0,
-                            k.1,
-                            r,
-                            b,
-                            r.saturating_sub(b),
-                            s
+                            "mcu{mcu} axis{axis}: pending {} pushed {} retired {}",
+                            s.pending, s.pushed, s.retired
                         )
                     })
                     .collect();
@@ -119,9 +88,9 @@ impl DrainSync {
             }
             let (guard, _) = self
                 .cv
-                .wait_timeout(c, deadline - now)
+                .wait_timeout(axes, deadline - now)
                 .unwrap_or_else(|p| p.into_inner());
-            c = guard;
+            axes = guard;
         }
         Ok(())
     }

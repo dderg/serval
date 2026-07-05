@@ -162,7 +162,7 @@ fn wants_pieces(queues: &BTreeMap<AxisKey, AxisQueue>) -> bool {
     staged < PUMP_INTAKE_BACKLOG_CAP
 }
 
-struct Pump<S, F, C, A, O, P, D> {
+struct Pump<S, F, C, A, O, D> {
     queues: BTreeMap<AxisKey, AxisQueue>,
     junctions: JunctionTracker,
     cohort: Option<DripCohort>,
@@ -171,8 +171,12 @@ struct Pump<S, F, C, A, O, P, D> {
     mcu_clock_of: C,
     on_fatal_transport: A,
     on_abandon: O,
-    on_pushed: P,
     on_drip_stall: D,
+    ledger: Arc<crate::drain::DrainLedger>,
+    /// Barrier acks are held until the end of the loop iteration, after
+    /// intake and the ledger publish — so a caller that receives the ack has
+    /// a ledger covering everything it enqueued before sending the barrier.
+    pending_barrier_acks: Vec<std::sync::mpsc::SyncSender<()>>,
     backlog: Arc<AtomicU64>,
     holding_ahead: bool,
     data_open: bool,
@@ -181,14 +185,13 @@ struct Pump<S, F, C, A, O, P, D> {
     stall_full_since: Option<(AxisKey, u32, Instant)>,
 }
 
-impl<S, F, C, A, O, P, D> Pump<S, F, C, A, O, P, D>
+impl<S, F, C, A, O, D> Pump<S, F, C, A, O, D>
 where
     S: PieceSink,
     F: Fn(AxisKey) -> u32,
     C: Fn(u32) -> Option<(u64, f64)>,
     A: Fn(AxisKey) + Send + 'static,
     O: Fn(AxisKey, u32),
-    P: Fn(AxisKey, u32),
     D: Fn(String) + Send,
 {
     fn handle_control_msg(&mut self, msg: PumpMsg) -> bool {
@@ -260,7 +263,7 @@ where
                 }
             }
             PumpMsg::Barrier(ack) => {
-                let _ = ack.send(());
+                self.pending_barrier_acks.push(ack);
             }
         }
         true
@@ -656,7 +659,6 @@ where
                                 }
                                 q.pushed = q.pushed.wrapping_add(n);
                                 q.advance_write_cursor(n);
-                                (self.on_pushed)(key, n);
                             }
                         }
                         Err(SendError::Fatal(ref e)) => {
@@ -730,6 +732,24 @@ where
         Ok(())
     }
 
+    fn publish_ledger(&self) {
+        let snapshot = self
+            .queues
+            .iter()
+            .map(|(k, q)| {
+                (
+                    (k.mcu_id, k.axis),
+                    crate::drain::AxisDrainState {
+                        pending: q.pieces.len() as u32,
+                        pushed: q.pushed,
+                        retired: q.retired,
+                    },
+                )
+            })
+            .collect();
+        self.ledger.publish(snapshot);
+    }
+
     fn run(&mut self, control_rx: Receiver<PumpMsg>, data_rx: Receiver<EnqueueMsg>) {
         loop {
             let poll_ms = self.poll_ms();
@@ -753,6 +773,11 @@ where
             let unpushed: u64 = self.queues.values().map(|q| q.pieces.len() as u64).sum();
             self.backlog.store(unpushed, Ordering::Release);
 
+            self.publish_ledger();
+            for ack in self.pending_barrier_acks.drain(..) {
+                let _ = ack.send(());
+            }
+
             if activity {
                 continue;
             }
@@ -764,7 +789,8 @@ where
     }
 }
 
-pub fn run_pump<S, F, C, A, O, P, D>(
+#[allow(clippy::too_many_arguments)]
+pub fn run_pump<S, F, C, A, O, D>(
     control_rx: Receiver<PumpMsg>,
     data_rx: Receiver<EnqueueMsg>,
     sink: S,
@@ -772,7 +798,7 @@ pub fn run_pump<S, F, C, A, O, P, D>(
     mcu_clock_of: C,
     on_fatal_transport: A,
     on_abandon: O,
-    on_pushed: P,
+    ledger: Arc<crate::drain::DrainLedger>,
     on_drip_stall: D,
     backlog: Arc<AtomicU64>,
 ) where
@@ -781,7 +807,6 @@ pub fn run_pump<S, F, C, A, O, P, D>(
     C: Fn(u32) -> Option<(u64, f64)>,
     A: Fn(AxisKey) + Send + 'static,
     O: Fn(AxisKey, u32),
-    P: Fn(AxisKey, u32),
     D: Fn(String) + Send,
 {
     let mut pump = Pump {
@@ -793,8 +818,9 @@ pub fn run_pump<S, F, C, A, O, P, D>(
         mcu_clock_of,
         on_fatal_transport,
         on_abandon,
-        on_pushed,
         on_drip_stall,
+        ledger,
+        pending_barrier_acks: Vec::new(),
         backlog,
         holding_ahead: false,
         data_open: true,

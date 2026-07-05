@@ -70,9 +70,24 @@ impl PyMotionEngine {
         }
 
         {
+            let pump_tx = self
+                .pump_tx
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+                .ok_or_else(|| PyRuntimeError::new_err("home_axis: pump not started"))?;
             let drain = self.drain.clone();
-            py.detach(|| drain.wait_drained(DRAIN_TIMEOUT))
-                .map_err(PyRuntimeError::new_err)?;
+            py.detach(|| {
+                let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
+                pump_tx
+                    .send(crate::pump::PumpMsg::Barrier(ack_tx))
+                    .map_err(|_| "home_axis: pump control channel closed".to_string())?;
+                ack_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|_| "home_axis: pump barrier not acknowledged".to_string())?;
+                drain.wait_drained(DRAIN_TIMEOUT)
+            })
+            .map_err(PyRuntimeError::new_err)?;
         }
 
         let window_start_host = {
@@ -404,7 +419,6 @@ impl PyMotionEngine {
                 );
                 return;
             }
-            self.drain.reset();
         }
         drop(planner_guard);
 

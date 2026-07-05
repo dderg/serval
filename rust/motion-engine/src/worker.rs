@@ -178,7 +178,7 @@ pub(crate) struct PumpResources {
     pub(crate) mcu_clock_of: Box<dyn Fn(u32) -> Option<(u64, f64)> + Send>,
     pub(crate) on_fatal_transport: Box<dyn Fn(AxisKey) + Send + 'static>,
     pub(crate) on_abandon: Box<dyn Fn(AxisKey, u32) + Send>,
-    pub(crate) on_pushed: Box<dyn Fn(AxisKey, u32) + Send>,
+    pub(crate) drain: Arc<crate::drain::DrainLedger>,
     pub(crate) on_drip_stall: Box<dyn Fn(String) + Send>,
     pub(crate) backlog: Arc<AtomicU64>,
 }
@@ -230,7 +230,7 @@ pub(crate) fn setup_pipeline(
                 pump.mcu_clock_of,
                 pump.on_fatal_transport,
                 pump.on_abandon,
-                pump.on_pushed,
+                pump.drain,
                 pump.on_drip_stall,
                 pump.backlog,
             );
@@ -247,7 +247,13 @@ pub(crate) fn setup_pipeline(
         motion_history: dispatch.motion_history,
         nominal_freqs: dispatch.nominal_freqs,
     });
-    let worker = StreamWorkerHandle::spawn_with_ctx(config, axis_chains, home_pos, ctx);
+    let worker = StreamWorkerHandle::spawn_with_ctx(
+        config,
+        axis_chains,
+        home_pos,
+        ctx,
+        Some(pump_control.clone()),
+    );
     MotionPipeline {
         worker,
         pump_control,
@@ -264,6 +270,7 @@ impl StreamWorkerHandle {
         axis_chains: AxisChainSet,
         home_pos: Vec<f64>,
         ctx: Arc<SegmentDispatchCtx>,
+        pump_control: Option<Sender<crate::pump::PumpMsg>>,
     ) -> Self {
         let frontier = Arc::clone(&ctx.frontier);
         let dispatch_ctx = Arc::clone(&ctx);
@@ -277,6 +284,7 @@ impl StreamWorkerHandle {
             dispatch,
             nudge_dispatch,
             frontier,
+            pump_control,
         )
     }
 
@@ -290,6 +298,7 @@ impl StreamWorkerHandle {
         dispatch: DispatchFn,
         nudge_dispatch: NudgeDispatchFn,
         frontier: Arc<CommittedFrontier>,
+        pump_control: Option<Sender<crate::pump::PumpMsg>>,
     ) -> Self {
         let (tx, rx) = bounded(INPUT_CHANNEL_CAP);
         let last_move_time_bits = Arc::new(AtomicU64::new(0));
@@ -333,6 +342,7 @@ impl StreamWorkerHandle {
                     frontier,
                     undrained: false,
                     last_line: 0,
+                    pump_control,
                 }
                 .run(rx);
             })

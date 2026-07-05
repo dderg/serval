@@ -295,6 +295,7 @@ fn shutdown_takes_and_joins_planner() {
         dispatch,
         noop_nudge_dispatch(),
         Arc::default(),
+        None,
     ));
 
     assert!(
@@ -351,6 +352,7 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
         dispatch,
         noop_nudge_dispatch(),
         Arc::default(),
+        None,
     );
     planner
         .submit_move(
@@ -483,7 +485,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
                     fatal_flag.store(true, Ordering::SeqCst);
                 },
                 |_key: AxisKey, _n: u32| {},
-                |_key: AxisKey, _n: u32| {},
+                std::sync::Arc::new(crate::drain::DrainLedger::new()),
                 |_msg: String| {},
                 Arc::new(AtomicU64::new(0)),
             );
@@ -526,6 +528,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
         dispatch,
         noop_nudge_dispatch(),
         Arc::default(),
+        None,
     ));
 
     engine.shutdown();

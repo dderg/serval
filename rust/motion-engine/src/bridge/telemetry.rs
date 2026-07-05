@@ -214,7 +214,7 @@ impl PyMotionEngine {
         match rx.try_recv() {
             Ok(_committed_through) => {
                 *pending = None;
-                let drained = self.drain.is_drained_now();
+                let drained = self.drain.drained();
                 if drained {
                     *self
                         .drain_wait_diag
@@ -380,19 +380,18 @@ impl PyMotionEngine {
         *last_report = Some(now);
         let waited_s = now.duration_since(*started).as_secs_f64();
         drop(diag);
-        for (mcu, axis, sent, retired, baseline) in self.drain.lagging_axes() {
+        for (mcu, axis, state) in self.drain.lagging_axes() {
             tracing::warn!(
                 subsystem = "motion",
                 event = "drain_wait_lagging",
                 mcu,
                 axis,
-                sent,
-                retired,
-                baseline,
-                retired_delta = retired.saturating_sub(baseline),
+                pending = state.pending,
+                pushed = state.pushed,
+                retired = state.retired,
                 waited_s,
-                "drain wait not completing — this axis' retired delta does not \
-                 match its sent count"
+                "drain wait not completing — this axis still has staged or \
+                 unretired wire pieces"
             );
         }
     }
