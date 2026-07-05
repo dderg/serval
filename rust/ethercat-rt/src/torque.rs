@@ -54,10 +54,7 @@ impl TorqueGate {
             self.pending_disable_at = None;
             CommandAction::Enable
         } else {
-            let can_disable = (self.state == TorqueState::Enabled
-                || self.state == TorqueState::Faulted)
-                && self.pending_disable_at.is_none();
-            if !can_disable {
+            if self.pending_disable_at.is_some() {
                 return CommandAction::Reject {
                     code: ERR_BAD_TORQUE_STATE,
                 };

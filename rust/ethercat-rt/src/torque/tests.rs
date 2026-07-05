@@ -33,14 +33,15 @@ fn double_enable_rejected() {
 }
 
 #[test]
-fn disable_while_parked_rejected() {
+fn disable_while_parked_is_idempotent() {
     let mut g = TorqueGate::new();
     assert_eq!(
         g.on_set_torque(false, T0 + 1),
-        CommandAction::Reject {
-            code: ERR_BAD_TORQUE_STATE
-        }
+        CommandAction::ScheduleDisable
     );
+    assert_eq!(g.on_tick(T0 + 2, true), TickAction::ExecuteDisable);
+    g.disable_finished();
+    assert_eq!(g.state(), TorqueState::Parked);
 }
 
 #[test]

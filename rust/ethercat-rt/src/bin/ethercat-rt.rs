@@ -638,12 +638,6 @@ fn main() {
                 },
                 Command::Stop { correlation_id } => {
                     let now_ns = monotonic_ns();
-                    unsafe {
-                        for s in 0..num_slaves {
-                            ffi::ec_rt_disable(s as std::os::raw::c_int);
-                        }
-                    }
-                    gate.disable_finished();
                     for r in &mut rings {
                         r.reset();
                     }
@@ -652,8 +646,7 @@ fn main() {
                     }
                     stream_halt.halt();
                     eprintln!(
-                        "ec-rt: Stop — torque disabled on {num_slaves} slave(s), rings \
-                         discarded, stream halted, discard_clock={now_ns}"
+                        "ec-rt: Stop — rings discarded, stream halted, discard_clock={now_ns}"
                     );
                     server.respond(&stop_response_frame(correlation_id, 0, now_ns));
                 }

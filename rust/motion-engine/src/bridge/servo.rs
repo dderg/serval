@@ -188,6 +188,13 @@ impl PyMotionEngine {
                 "stop_node: endpoint rejected Stop: result {result}"
             )));
         }
+        let result = crate::servo_torque::send_set_torque(&conn, false, 0)
+            .map_err(PyRuntimeError::new_err)?;
+        if result != 0 {
+            return Err(PyRuntimeError::new_err(format!(
+                "stop_node: endpoint rejected torque disable: result {result}"
+            )));
+        }
         Ok(())
     }
     fn arm_sensorless_endstop_start(
