@@ -337,52 +337,75 @@ def _drive_view(drive_datas, name):
     )
 
 
+def _parse_combine_spec(spec):
+    """Parse `name[:sign],name[:sign]`; sign is -1 for a motor whose servo
+    invert_direction flips its encoder counts out of the kinematic frame."""
+    terms = []
+    for tok in spec.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        name, _, sign = tok.partition(":")
+        terms.append((name.strip(), int(sign) if sign else 1))
+    return terms
+
+
 def compute_corexy_combine(header, drive_datas, spec, axis):
-    names = [t.strip() for t in spec.split(",")]
-    if len(names) != 2:
+    terms = _parse_combine_spec(spec)
+    if len(terms) != 2:
         raise SystemExit(
             "--combine-corexy needs exactly two motor names (got %r)" % (spec,)
         )
-    a_idx, a_data = _drive_view(drive_datas, names[0])
-    b_idx, b_data = _drive_view(drive_datas, names[1])
+    (name_a, sign_a), (name_b, sign_b) = terms
+    a_idx, a_data = _drive_view(drive_datas, name_a)
+    b_idx, b_data = _drive_view(drive_datas, name_b)
     cpm_a = header["drives"][a_idx]["counts_per_mm"]
     cpm_b = header["drives"][b_idx]["counts_per_mm"]
 
-    def mm(data, cpm, field):
-        return data[field].astype(np.float64) / cpm
+    def axis_mm(field):
+        a = sign_a * a_data[field].astype(np.float64) / cpm_a
+        b = sign_b * b_data[field].astype(np.float64) / cpm_b
+        return combine_corexy(a, b)
 
-    x_ferr, y_ferr = combine_corexy(
-        mm(a_data, cpm_a, "following_error"),
-        mm(b_data, cpm_b, "following_error"),
-    )
-    x_act, y_act = combine_corexy(
-        mm(a_data, cpm_a, "position_actual"),
-        mm(b_data, cpm_b, "position_actual"),
-    )
-    x_tgt, y_tgt = combine_corexy(
-        mm(a_data, cpm_a, "target_counts"),
-        mm(b_data, cpm_b, "target_counts"),
-    )
+    x_ferr, y_ferr = axis_mm("following_error")
+    x_act, y_act = axis_mm("position_actual")
+    x_tgt, y_tgt = axis_mm("target_counts")
     axis = (axis or "X").upper()
     if axis == "Y":
         on_ferr, cross_ferr = y_ferr, x_ferr
-        on_act, on_tgt = y_act, y_tgt
+        on_act, cross_act = y_act, x_act
+        on_tgt, cross_tgt = y_tgt, x_tgt
         on_label, cross_label = "Y", "X"
     else:
         on_ferr, cross_ferr = x_ferr, y_ferr
-        on_act, on_tgt = x_act, x_tgt
+        on_act, cross_act = x_act, y_act
+        on_tgt, cross_tgt = x_tgt, y_tgt
         on_label, cross_label = "X", "Y"
     return {
         "axis": axis,
         "on_label": on_label,
         "cross_label": cross_label,
-        "motors": (names[0], names[1]),
+        "motors": (name_a, name_b),
         "on_ferr": on_ferr,
         "cross_ferr": cross_ferr,
         "on_actual": on_act,
         "on_target": on_tgt,
+        "cross_actual": cross_act,
+        "cross_target": cross_tgt,
         "moving": (a_data["flags"] & FLAG_MOTION_ACTIVE) != 0,
+        "segs": motion_segments(a_data["flags"]),
     }
+
+
+def stroke_windows(segs, n):
+    """One window per stroke: from a move's start to the next move's start, so
+    each window carries the move plus its ring-down and dwell. Returns
+    (win_start, win_end, move_end)."""
+    if not segs:
+        return []
+    starts = [s for s, _ in segs]
+    bounds = starts + [n]
+    return [(bounds[i], bounds[i + 1], segs[i][1]) for i in range(len(starts))]
 
 
 def _print_combine(c):
@@ -461,56 +484,119 @@ def _figure_multi(plt, header, drive_datas, fs):
     return fig
 
 
+FWD_REV = ("tab:blue", "tab:red")
+MOTOR_COLORS = ("tab:green", "tab:purple")
+
+
+def _overlay(ax, y, windows, direction, fs, colors):
+    for ws, we, me in windows:
+        forward = direction[me - 1] >= direction[ws]
+        tt = np.arange(we - ws) / fs
+        ax.plot(
+            tt,
+            y[ws:we],
+            color=colors[0] if forward else colors[1],
+            lw=0.7,
+            alpha=0.55,
+        )
+
+
+def _fwd_rev_legend(plt, ax, colors):
+    ax.legend(
+        handles=[
+            plt.Line2D([], [], color=colors[0], label="forward stroke"),
+            plt.Line2D([], [], color=colors[1], label="reverse stroke"),
+        ],
+        loc="upper right",
+        fontsize=8,
+    )
+
+
 def _figure_combined(plt, header, drive_datas, fs, c):
-    first = drive_datas[0][2]
-    t = np.arange(len(first)) / fs
+    n = len(drive_datas[0][2])
+    t = np.arange(n) / fs
+    windows = stroke_windows(c["segs"], n)
     fig, axes = plt.subplots(2, 2, figsize=(14, 9))
 
-    err_ax = axes[0, 0]
-    err_ax.plot(
-        t,
-        c["on_ferr"],
-        color="tab:red",
-        lw=1.2,
-        label="%s on-axis" % c["on_label"],
+    on_ax = axes[0, 0]
+    _overlay(on_ax, c["on_ferr"], windows, c["on_target"], fs, FWD_REV)
+    on_ax.axhline(0, color="k", lw=0.5, alpha=0.3)
+    on_ax.set_xlabel("s into stroke")
+    on_ax.set_ylabel("following error (mm)")
+    on_ax.set_title(
+        "On-axis (%s) tracking error — strokes overlaid" % c["on_label"]
     )
-    err_ax.plot(
-        t,
-        c["cross_ferr"],
-        color="tab:orange",
-        lw=0.7,
-        alpha=0.8,
-        label="%s cross-axis" % c["cross_label"],
-    )
-    err_ax.set_ylabel("following error (mm)")
-    err_ax.set_title("Combined axis tracking error")
-    err_ax.legend(loc="upper right", fontsize=8)
+    _fwd_rev_legend(plt, on_ax, FWD_REV)
 
-    fe_ax = axes[0, 1]
-    for _, name, data in drive_datas:
-        fe_ax.plot(t, data["following_error"], lw=0.8, label=name)
-    fe_ax.set_ylabel("following error (counts)")
-    fe_ax.set_title("Per-motor following error")
-    fe_ax.legend(loc="upper right", fontsize=8)
+    cross_ax = axes[0, 1]
+    _overlay(cross_ax, c["cross_ferr"], windows, c["on_target"], fs, FWD_REV)
+    cross_ax.axhline(0, color="k", lw=0.5, alpha=0.3)
+    cross_ax.set_xlabel("s into stroke")
+    cross_ax.set_ylabel("following error (mm)")
+    cross_ax.set_title(
+        "Cross-axis (%s, want ~0) skew — strokes overlaid" % c["cross_label"]
+    )
+    _fwd_rev_legend(plt, cross_ax, FWD_REV)
 
     tq_ax = axes[1, 0]
-    for _, name, data in drive_datas:
-        tq_ax.plot(t, data["torque_actual"], lw=0.8, label=name)
+    for (_, name, data), col in zip(drive_datas, MOTOR_COLORS):
+        for ws, we, _me in windows:
+            tt = np.arange(we - ws) / fs
+            tq_ax.plot(
+                tt, data["torque_actual"][ws:we], color=col, lw=0.6, alpha=0.5
+            )
+    tq_ax.set_xlabel("s into stroke")
     tq_ax.set_ylabel("torque (per-mille)")
-    tq_ax.set_xlabel("time (s)")
-    tq_ax.set_title("Per-motor torque")
-    tq_ax.legend(loc="upper right", fontsize=8)
+    tq_ax.set_title("Per-motor torque — strokes overlaid")
+    tq_ax.legend(
+        handles=[
+            plt.Line2D([], [], color=col, label=name)
+            for (_, name, _), col in zip(drive_datas, MOTOR_COLORS)
+        ],
+        loc="upper right",
+        fontsize=8,
+    )
 
     pos_ax = axes[1, 1]
-    pos_ax.plot(t, c["on_target"], color="tab:gray", ls="--", label="target")
-    pos_ax.plot(t, c["on_actual"], color="tab:blue", lw=0.9, label="actual")
-    pos_ax.set_ylabel("%s position (mm)" % c["on_label"])
+    pos_ax.plot(
+        t,
+        c["on_actual"],
+        color="tab:blue",
+        lw=0.8,
+        label="%s actual" % c["on_label"],
+    )
+    pos_ax.plot(
+        t,
+        c["on_target"],
+        color="tab:gray",
+        ls="--",
+        lw=0.8,
+        label="%s target" % c["on_label"],
+    )
+    pos_ax.set_ylabel("%s position (mm)" % c["on_label"], color="tab:blue")
     pos_ax.set_xlabel("time (s)")
-    pos_ax.set_title("Combined axis position")
-    pos_ax.legend(loc="upper right", fontsize=8)
+    pos_ax.set_title(
+        "Axis position — moving %s vs stationary %s"
+        % (c["on_label"], c["cross_label"])
+    )
+    _shade_moving(pos_ax, t, c["moving"])
+    stat_ax = pos_ax.twinx()
+    stat_ax.plot(
+        t,
+        c["cross_actual"],
+        color="tab:orange",
+        lw=0.8,
+        label="%s actual (stationary)" % c["cross_label"],
+    )
+    stat_ax.set_ylabel(
+        "%s position (mm)" % c["cross_label"], color="tab:orange"
+    )
+    lines, labels = pos_ax.get_legend_handles_labels()
+    lines2, labels2 = stat_ax.get_legend_handles_labels()
+    pos_ax.legend(
+        lines + lines2, labels + labels2, loc="upper right", fontsize=7
+    )
 
-    for ax in axes.flat:
-        _shade_moving(ax, t, c["moving"])
     fig.suptitle(
         "%s-axis tracking (motors %s+%s) — %s"
         % (c["axis"], c["motors"][0], c["motors"][1], header["started_utc"])

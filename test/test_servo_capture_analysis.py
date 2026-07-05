@@ -817,3 +817,103 @@ def test_png_combined_corexy(tmp_path):
         [path, "--plot-out", str(out), "--combine-corexy", "a,b", "--axis", "X"]
     )
     assert rc == 0 and out.stat().st_size > 0
+
+
+def test_combine_corexy_inverted_motor_flips_on_axis(tmp_path):
+    n = 10
+    path = synth_two_drive_ferr(tmp_path, np.full(n, 200.0), np.full(n, 100.0))
+    header, drive_datas = _drive_datas(path)
+    c = sc.compute_corexy_combine(header, drive_datas, "a:1,b:-1", "X")
+    # b inverted: kinematic b = -0.1 -> X=(0.2-0.1)/2, Y=(0.2+0.1)/2
+    assert c["on_ferr"][0] == pytest.approx(0.05)
+    assert c["cross_ferr"][0] == pytest.approx(0.15)
+
+
+def test_stroke_windows_split_on_move_starts():
+    flags = np.array([0, 0, 2, 2, 0, 0, 2, 2, 2, 0], dtype=np.uint8)
+    segs = sc.motion_segments(flags)
+    wins = sc.stroke_windows(segs, len(flags))
+    assert [(w[0], w[1]) for w in wins] == [(2, 6), (6, 10)]
+    assert [w[2] for w in wins] == [4, 9]
+
+
+def synth_two_drive_strokes(tmp_path, n_strokes=3, move=150, dwell=40):
+    """Forward/reverse strokes separated by dwell; drive b is inverted (its
+    counts run opposite the kinematic frame), so combined X = (a - b)/2."""
+
+    def block(tgt, act, fe, tq):
+        return struct.pack(
+            "<iiihHHihi",
+            int(tgt),
+            int(act),
+            int(fe),
+            int(tq),
+            0x0627,
+            0,
+            0,
+            0,
+            0,
+        )
+
+    rows, pos, direction = [], 0, 1
+    for _ in range(n_strokes):
+        for _ in range(move):
+            pos += direction
+            rows.append((True, pos, 5 * direction))
+        for _ in range(dwell):
+            rows.append((False, pos, 0))
+        direction = -direction
+
+    header = {
+        "version": 1,
+        "cycle_ns": 1_000_000,
+        "record_size": 9 + 2 * 28,
+        "started_utc": "2026-07-05T00:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [
+            {"name": "a", "counts_per_mm": 1000.0},
+            {"name": "b", "counts_per_mm": 1000.0},
+        ],
+        "channels": DRIVE_CHANNELS,
+    }
+    path = os.path.join(str(tmp_path), "strokes.scap")
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+        for i, (moving, p, fe) in enumerate(rows):
+            flag = FLAG_TORQUE_ENABLED | (FLAG_MOTION_ACTIVE if moving else 0)
+            tq = 100 if moving else 0
+            f.write(struct.pack("<QB", i, flag))
+            f.write(block(p, p - fe, fe, tq))
+            f.write(block(-p, -(p - fe), -fe, -tq))
+    return path
+
+
+def test_combine_corexy_recovers_stroke_when_motor_inverted(tmp_path):
+    path = synth_two_drive_strokes(tmp_path)
+    header, drive_datas = _drive_datas(path)
+    c = sc.compute_corexy_combine(header, drive_datas, "a:1,b:-1", "X")
+    # Naive (a+b)/2 would cancel to ~0; the inverted-b sign recovers the ramp.
+    assert np.ptp(c["on_target"]) == pytest.approx(0.15)
+    assert np.max(np.abs(c["cross_target"])) < 1e-6
+    # Without the inversion sign the ramp lands on the wrong axis.
+    naive = sc.compute_corexy_combine(header, drive_datas, "a,b", "X")
+    assert np.max(np.abs(naive["on_target"])) < 1e-6
+    assert np.ptp(naive["cross_target"]) == pytest.approx(0.15)
+
+
+def test_png_combined_corexy_overlay_multi_stroke(tmp_path):
+    pytest.importorskip("matplotlib")
+    path = synth_two_drive_strokes(tmp_path)
+    out = tmp_path / "overlay.png"
+    rc = sc.main(
+        [
+            path,
+            "--plot-out",
+            str(out),
+            "--combine-corexy",
+            "a:1,b:-1",
+            "--axis",
+            "X",
+        ]
+    )
+    assert rc == 0 and out.stat().st_size > 0

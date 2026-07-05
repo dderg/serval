@@ -137,7 +137,7 @@ class ServoCalibration:
             "AXIS= or SERVO= is required (SERVO= accepts a comma list)"
         )
 
-    def _axis_servos(self, gcmd, axis):
+    def _axis_rails(self, gcmd, axis):
         from . import servo_axis
 
         if axis not in ("X", "Y", "Z"):
@@ -145,7 +145,7 @@ class ServoCalibration:
         kin = self.printer.lookup_object("toolhead").get_kinematics()
         lane = "XYZ".index(axis)
         lanes = [0, 1] if kin.coupled_xy() and lane in (0, 1) else [lane]
-        names = []
+        rails = []
         for i in lanes:
             rail = kin.rails[i]
             if not isinstance(rail, servo_axis.ServoRail):
@@ -153,8 +153,11 @@ class ServoCalibration:
                     "axis %s is driven by non-servo rail %r"
                     % (axis, rail.get_name())
                 )
-            names.append(rail.get_motor_name())
-        return names
+            rails.append(rail)
+        return rails
+
+    def _axis_servos(self, gcmd, axis):
+        return [r.get_motor_name() for r in self._axis_rails(gcmd, axis)]
 
     def _strokes(self, axis, start, end, speed, accel, iterations, dwell):
         if end <= start:
@@ -274,7 +277,8 @@ class ServoCalibration:
         iterations = gcmd.get_int("ITERATIONS", 3, minval=1)
         dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
         name = gcmd.get("NAME", "track")
-        servos = self._axis_servos(gcmd, axis)
+        rails = self._axis_rails(gcmd, axis)
+        servos = [r.get_motor_name() for r in rails]
         self._prep(axis, dwell)
         self.gcode.run_script_from_command(
             "SERVO_CAPTURE_START SERVO=%s NAME=%s" % (",".join(servos), name)
@@ -284,13 +288,13 @@ class ServoCalibration:
         self._restore()
         report_args = ["--name", name, "--png"]
         kin = self.printer.lookup_object("toolhead").get_kinematics()
-        if len(servos) == 2 and kin.coupled_xy() and axis in ("X", "Y"):
-            report_args += [
-                "--axis",
-                axis,
-                "--combine-corexy",
-                ",".join(servos),
-            ]
+        if len(rails) == 2 and kin.coupled_xy() and axis in ("X", "Y"):
+            terms = ",".join(
+                "%s:%d"
+                % (r.get_motor_name(), -1 if r.get_invert_direction() else 1)
+                for r in rails
+            )
+            report_args += ["--axis", axis, "--combine-corexy", terms]
         self._run(gcmd, "servo_capture.py", report_args, 120.0)
 
     cmd_SERVO_MEASURE_INERTIA_help = (

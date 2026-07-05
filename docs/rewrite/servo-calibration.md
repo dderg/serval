@@ -192,8 +192,11 @@ above invoke them with the running klippy interpreter.
 - **`servo_capture.py`** — analyze a `.scap`: following-error, overshoot/
   settling, torque-saturation metrics per drive; `--fft` prints resonance peaks,
   `--plot` opens a time-series dashboard, `--png` saves one headless (into
-  `--plot-dir`, or `--plot-out PATH`), `--combine-corexy A,B` with `--axis`
-  adds CoreXY combined on-axis `(A+B)/2` and cross-axis `(A-B)/2` traces,
+  `--plot-dir`, or `--plot-out PATH`), `--combine-corexy A[:s],B[:s]` with
+  `--axis` renders the CoreXY dashboard — on-axis and cross-axis tracking error
+  with each stroke overlaid, per-motor torque, and moving-vs-stationary axis
+  position; the optional per-motor sign `:-1` un-inverts a servo whose
+  `invert_direction` flips its encoder counts out of the kinematic frame,
   `--drive` restricts to one drive in a multi-drive capture, `--csv` exports
   samples.
 - **`servo_fit_dynamics.py`** — resolve the newest capture for `--name`, export
