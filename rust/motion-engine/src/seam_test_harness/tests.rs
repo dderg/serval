@@ -110,6 +110,59 @@ fn worst_track_seam(segs: &[ShapedSegment], axis: usize) -> f64 {
         .fold(0.0, f64::max)
 }
 
+/// Real print gcode (retractions, unretracts, arcs) with the extruder chain
+/// active, drained mid-stream at the cadence the pacer uses when the feed
+/// runs dry. Every track on every axis must stay continuous through it.
+#[test]
+fn voron_cube_with_extruder_kernel_survives_pacer_drains() {
+    let config = bench_config_arc_fit();
+    let moves = parse_gcode_to_moves(CRASH_VORON_CUBE, config.limits);
+    assert!(
+        moves
+            .iter()
+            .any(|m| m.segment.spatial.is_none() && !m.segment.followers.is_empty()),
+        "gcode must contain extrude-only moves for this test to mean anything"
+    );
+    let handle = setup_stages(
+        config,
+        extruder_pa_smooth_chain_set(),
+        vec![0.0, 0.0, 0.0, 0.0],
+        0.0,
+    );
+    let output = handle.output;
+    let collector = std::thread::spawn(move || {
+        let mut segs: Vec<ShapedSegment> = Vec::new();
+        while let Ok(item) = output.recv() {
+            if let motion_pipeline::ShapedItem::Seg(seg) = item {
+                segs.push(seg);
+            }
+        }
+        segs
+    });
+    for (i, m) in moves.into_iter().enumerate() {
+        handle.input.send(m.into()).expect("pipeline accepts move");
+        if i % 40 == 39 {
+            handle
+                .input
+                .send(motion_pipeline::StreamInput::Drain)
+                .expect("pipeline accepts drain");
+        }
+    }
+    drop(handle.input);
+    let segs = collector.join().expect("collector thread");
+    assert!(
+        segs.len() > 100,
+        "expected a full print's worth of segments"
+    );
+    for axis in 0..4 {
+        let worst = worst_track_seam(&segs, axis);
+        assert!(
+            worst < 0.0125,
+            "axis {axis} track jumps {worst:.6} mm across a shaped-segment seam"
+        );
+    }
+}
+
 /// A drain flushed while the shaper's window is clamped ("signal constant past
 /// the rest") must not disagree with the shaped trajectory once motion
 /// resumes: the seam becomes a one-sample step burst on the MCU (fault -310).
