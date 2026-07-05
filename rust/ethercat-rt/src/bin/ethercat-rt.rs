@@ -318,32 +318,14 @@ fn main() {
 
     let cif = CString::new(ifname.clone()).expect("ifname must not contain NUL");
 
-    // A non-reference drive brings its DC clock up a random offset from the
-    // reference each activation and only reaches OP if it drift-converges before
-    // the OP walk times out; the offset is re-measured from scratch on every
-    // activation. Re-run the whole PREOP -> limits -> OP sequence, releasing the
-    // master between tries so each attempt re-rolls DC — the automatic equivalent
-    // of the manual FIRMWARE_RESTART that already recovers this. Still fails
-    // loudly, with the per-slot AL state, once the attempts are exhausted.
-    const MAX_BRINGUP_ATTEMPTS: u32 = 6;
-    const BRINGUP_RETRY_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
-    let log_retry = |attempt: u32, stage: &str, rc: i32| {
-        tracing::warn!(
-            subsystem = "ethercat",
-            event = "bringup_retry",
-            attempt,
-            max_attempts = MAX_BRINGUP_ATTEMPTS,
-            stage,
-            rc,
-            "bringup attempt failed; releasing master and re-activating (DC re-measured each try)"
-        );
-    };
-
-    let mut attempt: u32 = 0;
-    let run_limits: Vec<(u32, u16)> = loop {
-        attempt += 1;
-        let last = attempt >= MAX_BRINGUP_ATTEMPTS;
-
+    // Single-shot bring-up: sync_slave_clocks converges a non-reference drive's
+    // DC clock from any starting offset while the kernel master's FSM keeps
+    // retrying the OP transition, and ec_rt_bringup_finish gates on the measured
+    // per-slave clock offset (ESC 0x092C) before CiA-402. Releasing the master
+    // and retrying would only discard convergence progress and re-roll a fresh
+    // random offset, so a failure here is terminal and reported with per-slot
+    // AL state and DC offset.
+    let run_limits: Vec<(u32, u16)> = {
         let rc = unsafe {
             ffi::ec_rt_bringup_preop(
                 cif.as_ptr(),
@@ -358,19 +340,13 @@ fn main() {
             subsystem = "ethercat",
             event = "bringup_preop",
             rc,
-            attempt,
             num_slaves,
             "PREOP bringup result"
         );
         if rc != 0 {
             log_al_states(num_slaves, "preop_fail");
             unsafe { ffi::ec_rt_shutdown() };
-            if last {
-                bringup_fail(&mut server, rc);
-            }
-            log_retry(attempt, "preop", rc);
-            std::thread::sleep(BRINGUP_RETRY_SETTLE);
-            continue;
+            bringup_fail(&mut server, rc);
         }
 
         let limits: Result<Vec<(u32, u16)>, i32> = (0..num_slaves)
@@ -430,12 +406,7 @@ fn main() {
             Ok(limits) => limits,
             Err(rc) => {
                 unsafe { ffi::ec_rt_shutdown() };
-                if last {
-                    bringup_fail(&mut server, rc);
-                }
-                log_retry(attempt, "limits", rc);
-                std::thread::sleep(BRINGUP_RETRY_SETTLE);
-                continue;
+                bringup_fail(&mut server, rc);
             }
         };
 
@@ -444,21 +415,15 @@ fn main() {
             subsystem = "ethercat",
             event = "bringup_finish",
             rc,
-            attempt,
             "OP bringup result"
         );
         if rc != 0 {
             log_al_states(num_slaves, "finish_fail");
             unsafe { ffi::ec_rt_shutdown() };
-            if last {
-                bringup_fail(&mut server, rc);
-            }
-            log_retry(attempt, "finish", rc);
-            std::thread::sleep(BRINGUP_RETRY_SETTLE);
-            continue;
+            bringup_fail(&mut server, rc);
         }
 
-        break run_limits;
+        run_limits
     };
     log_al_states(num_slaves, "parked");
     tracing::info!(
