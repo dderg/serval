@@ -70,6 +70,18 @@ impl DrainSync {
         })
     }
 
+    pub fn lagging_axes(&self) -> Vec<(u32, u8, u32, u32, u32)> {
+        let c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
+        c.sent
+            .iter()
+            .filter_map(|(&(mcu, axis), &s)| {
+                let r = c.retired.get(&(mcu, axis)).copied().unwrap_or(0);
+                let b = c.baseline.get(&(mcu, axis)).copied().unwrap_or(0);
+                (r.saturating_sub(b) != s).then_some((mcu, axis, s, r, b))
+            })
+            .collect()
+    }
+
     pub fn drained(&self) -> bool {
         let c = self.counts.lock().unwrap_or_else(|p| p.into_inner());
         Self::is_drained(&c)
