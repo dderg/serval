@@ -210,6 +210,35 @@ def drive_metrics(path, drive):
     }
 
 
+def add_resonance_zoom(spec_ax, steps, colors, linestyles):
+    peaks = [
+        dm["res_peak_hz"]
+        for _, met in steps
+        for dm in met["drives"]
+        if dm["res_peak_hz"] > 0
+    ]
+    if not peaks:
+        return
+    center = float(np.median(peaks))
+    lo, hi = max(center - 60.0, 10.0), center + 60.0
+    ins = spec_ax.inset_axes([0.60, 0.52, 0.38, 0.36])
+    for (_, met), color in zip(steps, colors):
+        for k, dm in enumerate(met["drives"]):
+            freqs, spectrum = dm["spectrum"]
+            band = (freqs >= lo) & (freqs <= hi)
+            ins.plot(
+                freqs[band],
+                spectrum[band] * 1000.0,
+                color=color,
+                ls=linestyles[k % len(linestyles)],
+                lw=0.8,
+            )
+    ins.axvline(center, color="red", lw=0.8, alpha=0.6)
+    ins.set_title("%.1f Hz peak (linear)" % center, fontsize=8)
+    ins.tick_params(labelsize=7)
+    ins.grid(alpha=0.3)
+
+
 def render(steps, out_path):
     import matplotlib
 
@@ -255,6 +284,7 @@ def render(steps, out_path):
     )
     spec_ax.legend(fontsize=8)
     spec_ax.grid(True, which="both", alpha=0.3)
+    add_resonance_zoom(spec_ax, steps, colors, linestyles)
     time_ax.set_xlabel("s into cruise")
     time_ax.set_ylabel("ferr (mm)")
     time_ax.set_title("Cruise following error, time domain")

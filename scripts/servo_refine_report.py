@@ -36,6 +36,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from servo_gain_report import (  # noqa: E402
     RESONANCE_BAND_HZ,
+    add_resonance_zoom,
     step_metrics,
 )
 
@@ -154,6 +155,7 @@ def render(steps, param, reference, out_path):
                 lw=0.7,
             )
     spec_ax.axvspan(*RESONANCE_BAND_HZ, alpha=0.06, color="red")
+    add_resonance_zoom(spec_ax, steps, colors, linestyles)
     spec_ax.set_xlabel("Hz")
     spec_ax.set_ylabel("ferr amplitude (um)")
     spec_ax.set_title(
