@@ -75,3 +75,105 @@ fn arc_fit_voron_cube_perimeter_is_c0() {
         rep.worst_fatal()
     );
 }
+
+fn extruder_pa_smooth_chain_set() -> trajectory::AxisChainSet {
+    let pa = trajectory::PostProcessorInstance::new(
+        "pa",
+        &trajectory::post_processors::LinearPressureAdvance,
+        vec![0.03],
+    );
+    let st = trajectory::PostProcessorInstance::new(
+        "st",
+        &trajectory::post_processors::SmoothTriangle,
+        vec![0.02],
+    );
+    let e_chain =
+        trajectory::CompiledChain::compile(&[pa, st]).expect("pa + smooth_triangle composes");
+    trajectory::AxisChainSet {
+        chains: vec![
+            trajectory::CompiledChain::default(),
+            trajectory::CompiledChain::default(),
+            trajectory::CompiledChain::default(),
+            e_chain,
+        ],
+        followers: vec![(EXTRUDER_AXIS, vec![0, 1, 2])],
+    }
+}
+
+fn worst_track_seam(segs: &[ShapedSegment], axis: usize) -> f64 {
+    segs.windows(2)
+        .map(|w| {
+            let prev_end = nurbs::eval::eval(&w[0].axes[axis], w[0].t_end);
+            let next_start = nurbs::eval::eval(&w[1].axes[axis], w[1].t_start);
+            (next_start - prev_end).abs()
+        })
+        .fold(0.0, f64::max)
+}
+
+/// A drain flushed while the shaper's window is clamped ("signal constant past
+/// the rest") must not disagree with the shaped trajectory once motion
+/// resumes: the seam becomes a one-sample step burst on the MCU (fault -310).
+#[test]
+fn extruder_kernel_track_is_continuous_across_a_drain() {
+    let config = default_stream_config();
+    let m1 = build_move(
+        [0.0, 0.0, 0.0],
+        10.0,
+        0.0,
+        0.0,
+        EXTRUDER_AXIS,
+        0.5,
+        config.limits,
+        30.0,
+        0,
+    )
+    .expect("printing move 1 builds");
+    let m2 = build_move(
+        [10.0, 0.0, 0.0],
+        0.1,
+        0.0,
+        0.0,
+        EXTRUDER_AXIS,
+        1.0,
+        config.limits,
+        40.0,
+        1,
+    )
+    .expect("unretract-like move builds");
+
+    let handle = setup_stages(
+        config,
+        extruder_pa_smooth_chain_set(),
+        vec![0.0, 0.0, 0.0, 0.0],
+        0.0,
+    );
+    let output = handle.output;
+    let collector = std::thread::spawn(move || {
+        let mut segs: Vec<ShapedSegment> = Vec::new();
+        while let Ok(item) = output.recv() {
+            if let motion_pipeline::ShapedItem::Seg(seg) = item {
+                segs.push(seg);
+            }
+        }
+        segs
+    });
+    handle.input.send(m1.into()).expect("pipeline accepts m1");
+    handle
+        .input
+        .send(motion_pipeline::StreamInput::Drain)
+        .expect("pipeline accepts drain");
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    handle.input.send(m2.into()).expect("pipeline accepts m2");
+    drop(handle.input);
+    let segs = collector.join().expect("collector thread");
+
+    assert!(
+        segs.len() >= 2,
+        "expected segments on both sides of the drain"
+    );
+    let worst = worst_track_seam(&segs, EXTRUDER_AXIS);
+    assert!(
+        worst < 1e-3,
+        "extruder track jumps {worst:.6} mm across a shaped-segment seam"
+    );
+}

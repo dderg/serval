@@ -80,14 +80,18 @@ impl Planner {
             };
             let ok = match item {
                 StreamInput::Move(m) => self.absorb(m, &output),
-                StreamInput::Drain => self.drain_to_rest(&output),
+                StreamInput::Drain => {
+                    self.drain_to_rest(&output) && output.send(PlannedItem::Drain).is_ok()
+                }
                 StreamInput::Control(ctrl) => self.forward_control(ctrl, &output),
             };
             if !ok {
                 return;
             }
         }
-        self.drain_to_rest(&output);
+        if self.drain_to_rest(&output) {
+            let _ = output.send(PlannedItem::Drain);
+        }
     }
 
     fn plan_on_quiet_input(&mut self, output: &Sender<PlannedItem>) -> bool {
@@ -143,7 +147,7 @@ impl Planner {
                 buffered = self.moves.len(),
                 "[buffer-cap-drain] no committable seam — draining to rest"
             );
-            return self.drain_to_rest(output);
+            return self.drain_to_rest(output) && output.send(PlannedItem::Drain).is_ok();
         }
         true
     }

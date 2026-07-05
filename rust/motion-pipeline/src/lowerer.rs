@@ -25,10 +25,18 @@ pub fn run_lowerer(
 ) {
     let mut odometer = home_pos;
     let mut t = t_start;
+    let mut rest_hold_pending = false;
 
     while let Ok(item) = input.recv() {
         let planned = match item {
             PlannedItem::Move(planned) => planned,
+            PlannedItem::Drain => {
+                rest_hold_pending = true;
+                if output.send(LoweredItem::Drain).is_err() {
+                    return;
+                }
+                continue;
+            }
             PlannedItem::Control(ctrl) => {
                 match &ctrl {
                     Control::Dwell { secs } => {
@@ -38,6 +46,7 @@ pub fn run_lowerer(
                     Control::Reset { pos } => {
                         odometer.clone_from(pos);
                         t = 0.0;
+                        rest_hold_pending = false;
                     }
                     Control::SetAxisChains(chains) => axis_chains = chains.clone(),
                     Control::Barrier(_) => {}
@@ -48,17 +57,36 @@ pub fn run_lowerer(
                 continue;
             }
         };
+        let hold_pad = if rest_hold_pending {
+            axis_chains.forward_support()
+        } else {
+            0.0
+        };
+        rest_hold_pending = false;
         let clock = Instant::now();
         let mut seg = lower_move(
             &planned.geometry,
             &planned.velocity,
-            t,
+            t + hold_pad,
             &odometer,
             fit_tol,
             &axis_chains.chains,
         )
         .unwrap_or_else(|e| panic!("lowerer: line {}: {e}", planned.geometry.source.start_line));
         seg.source_line = planned.geometry.source.start_line;
+        if hold_pad > 0.0 {
+            let hold =
+                rest_hold_segment(&odometer, t, seg.t_start, seg.axes.len(), seg.source_line);
+            if output
+                .send(LoweredItem::Seg(LoweredSegment {
+                    seg: hold,
+                    rest_at_end: true,
+                }))
+                .is_err()
+            {
+                return;
+            }
+        }
 
         t = seg.t_end;
         advance_odometer(&mut odometer, &planned.geometry);
@@ -84,6 +112,37 @@ pub fn run_lowerer(
         {
             return;
         }
+    }
+}
+
+/// The rest the shaper's drain flush clamped against, materialized as real
+/// trajectory once the next move is known: the shaped output creeps toward
+/// the resumed motion inside this window, and that creep must be emitted,
+/// not skipped over by a bare clock jump.
+fn rest_hold_segment(
+    odometer: &[f64],
+    t_start: f64,
+    t_end: f64,
+    n_axes: usize,
+    source_line: u32,
+) -> trajectory::ShapedSegment {
+    use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
+    let axes = (0..n_axes)
+        .map(|axis| {
+            bezier_pieces_to_nurbs(&[BezierPiece {
+                u_start: t_start,
+                u_end: t_end,
+                coeffs: vec![odometer.get(axis).copied().unwrap_or(0.0)],
+            }])
+        })
+        .collect();
+    trajectory::ShapedSegment {
+        axes,
+        followers: Vec::new(),
+        t_start,
+        t_end,
+        motor_mask: 0,
+        source_line,
     }
 }
 
