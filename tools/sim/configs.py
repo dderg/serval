@@ -106,100 +106,6 @@ rotation_distance: 4
 {_tail(gcode_dir)}"""
 
 
-def multi_z_config(h7_pty: str, gcode_dir: str) -> str:
-    """CoreXY with three Z motors, for MOTOR_ADJUST testing."""
-    return f"""\
-[mcu]
-serial: {h7_pty}
-
-[printer]
-max_velocity: 100
-max_accel: 1000
-
-[kinematics]
-type: corexy
-axis_x: x
-axis_y: y
-axis_z: z
-a_motors: a
-b_motors: b
-z_motors: z, z1, z2
-
-[axis x]
-position_endstop: 0
-position_max: 250
-endstop_pin: ^gpiochip0/gpio10
-homing_speed: 10
-post_processors: is_xy
-
-[axis y]
-position_endstop: 0
-position_max: 250
-endstop_pin: ^gpiochip0/gpio11
-homing_speed: 10
-post_processors: is_xy
-
-[axis z]
-position_min: -5
-position_endstop: 0
-position_max: 250
-endstop_pin: ^gpiochip0/gpio12
-homing_speed: 5
-
-[limit gantry]
-axes: x, y
-max_velocity: 100
-max_accel: 1000
-
-[limit z]
-axes: z
-max_velocity: 10
-max_accel: 30
-
-[motor a]
-drive: stepper
-step_pin: gpiochip0/gpio0
-dir_pin: gpiochip0/gpio1
-enable_pin: !gpiochip0/gpio2
-microsteps: 16
-rotation_distance: 40
-
-[motor b]
-drive: stepper
-step_pin: gpiochip0/gpio3
-dir_pin: gpiochip0/gpio4
-enable_pin: !gpiochip0/gpio5
-microsteps: 16
-rotation_distance: 40
-
-[motor z]
-drive: stepper
-step_pin: gpiochip0/gpio6
-dir_pin: gpiochip0/gpio7
-enable_pin: !gpiochip0/gpio8
-microsteps: 16
-rotation_distance: 4
-
-[motor z1]
-drive: stepper
-step_pin: gpiochip0/gpio13
-dir_pin: gpiochip0/gpio14
-enable_pin: !gpiochip0/gpio15
-microsteps: 16
-rotation_distance: 4
-
-[motor z2]
-drive: stepper
-step_pin: gpiochip0/gpio16
-dir_pin: gpiochip0/gpio17
-enable_pin: !gpiochip0/gpio18
-microsteps: 16
-rotation_distance: 4
-
-[motor_adjust]
-{_tail(gcode_dir)}"""
-
-
 def phase_stepping_config(h7_pty: str, gcode_dir: str) -> str:
     """TMC5160 phase stepping on X."""
     return f"""\
@@ -733,21 +639,11 @@ G1 X100 Y10 F3000
 G1 X100 Y100 F3000
 G1 X10 Y100 F3000
 G1 X10 Y10 F3000
-G1 X20 Y20 F3000
-G1 X90 Y20 F3000
-G1 X90 Y90 F3000
-G1 X20 Y90 F3000
-G1 X20 Y20 F3000
 G1 X30 Y30 F2000
 G1 X80 Y30 F2000
 G1 X80 Y80 F2000
 G1 X30 Y80 F2000
 G1 X30 Y30 F2000
-G1 X40 Y40 F1500
-G1 X70 Y40 F1500
-G1 X70 Y70 F1500
-G1 X40 Y70 F1500
-G1 X40 Y40 F1500
 G1 Z125 F300
 M400
 """

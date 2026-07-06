@@ -162,12 +162,18 @@ class SimWorld:
         dual_mcu: bool = True,
         beacon: bool = False,
         verbose: bool = False,
+        vtime_speed: float = 1.0,
     ):
         self.workdir = pathlib.Path(workdir)
         self.repo_root = repo_root
         self.dual_mcu = dual_mcu
         self.want_beacon = beacon
         self.verbose = verbose
+        # Virtual-clock speed relative to real time. Below 1.0 the simulated
+        # world runs slower than reality, inflating every host-side latency
+        # budget (drip windows, trsync timeouts) by 1/speed — the margin that
+        # keeps timing-sensitive scenarios deterministic under CPU load.
+        self.vtime_speed = vtime_speed
 
         self.log_dir = self.workdir / "logs"
         self.gcode_dir = self.workdir / "gcodes"
@@ -278,7 +284,9 @@ class SimWorld:
         # The motion tick thread registers as a vtime pacer: virtual time
         # can never advance past the tick the engine is about to execute.
         env["LD_PRELOAD"] = f"{vtime_so}:{shim_so}"
-        env.setdefault("VTIME_SPEED", "1")
+        env["VTIME_SPEED"] = os.environ.get(
+            "VTIME_SPEED", str(self.vtime_speed)
+        )
         env["MCU_SIM_SOCK_DIR"] = str(sock_dir)
         if self.verbose:
             env["MCU_SIM_SHIM_VERBOSE"] = "1"
@@ -502,6 +510,29 @@ class SimWorld:
 
     def mark_log(self) -> None:
         self.log_tail()
+
+    def expect_log(self, needle: str, timeout: float = 10.0) -> str:
+        """Wait for `needle` to appear in klippy.log after the last
+        mark_log()/log_tail() call; returns everything appended since the
+        mark. klippy's log writer is async, so response text can land in
+        the file a moment after the API response returns."""
+        deadline = time.monotonic() + timeout
+        while True:
+            data = (
+                self.klippy_log.read_bytes()
+                if self.klippy_log.exists()
+                else b""
+            )
+            appended = data[self._log_offset :].decode(errors="replace")
+            if needle in appended:
+                self._log_offset = len(data)
+                return appended
+            if time.monotonic() >= deadline:
+                raise SimError(
+                    f"{needle!r} did not appear in klippy.log within "
+                    f"{timeout}s; appended:\n{appended[-2000:]}"
+                )
+            time.sleep(READY_POLL_S)
 
     def shutdown_line(self) -> Optional[str]:
         for line in self.klippy_log_text().splitlines():

@@ -70,7 +70,11 @@ def _clean_serve_dir(data_dir: pathlib.Path) -> None:
 def run_print(args) -> int:
     wall_start = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="sim_") as tmpdir:
-        world = SimWorld(pathlib.Path(tmpdir), verbose=args.verbose)
+        world = SimWorld(
+            pathlib.Path(tmpdir),
+            verbose=args.verbose,
+            vtime_speed=args.vtime_speed,
+        )
         try:
             world.boot(
                 configs.minimal_config(world.h7_pty, str(world.gcode_dir)),
@@ -137,6 +141,13 @@ def main() -> int:
     )
     parser.add_argument(
         "--data-dir", help="Stable printer_data dir for --serve"
+    )
+    parser.add_argument(
+        "--vtime-speed",
+        type=float,
+        default=1.0,
+        help="Virtual clock speed vs real time (default 1.0; below 1.0 "
+        "inflates host-side latency budgets for timing determinism)",
     )
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
