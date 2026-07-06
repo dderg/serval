@@ -120,11 +120,16 @@ fn main() {
         match (letter, major) {
             (b'G', 0) | (b'G', 1) => {
                 let e_word = params.e();
-                let Some((start, dx, dy, dz)) = p.apply(params.x(), params.y(), params.z(), params.f())
+                let Some((start, dx, dy, dz)) =
+                    p.apply(params.x(), params.y(), params.z(), params.f())
                 else {
                     continue;
                 };
-                let de = if p.relative_e { e_word.unwrap_or(0.0) } else { 0.0 };
+                let de = if p.relative_e {
+                    e_word.unwrap_or(0.0)
+                } else {
+                    0.0
+                };
                 if dx.abs() < 1e-9 && dy.abs() < 1e-9 && dz.abs() < 1e-9 && de.abs() < 1e-9 {
                     continue;
                 }
