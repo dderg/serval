@@ -612,10 +612,14 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
     let last = base.last().unwrap().t_end;
 
     for (base_seg, shaped_seg) in base.iter().zip(&shaped) {
+        let mut breaks: Vec<f64> = Vec::new();
+        for seg in &base {
+            breaks.push(seg.t_start);
+            breaks.extend_from_slice(seg.axes[0].knots());
+            breaks.push(seg.t_end);
+        }
         let sig = trajectory::ShapedSignal::new_from_evaluator(
             kernel,
-            base_seg.t_start,
-            base_seg.t_end,
             |t| {
                 let clamped = t.clamp(first, last);
                 base.iter()
@@ -625,6 +629,7 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
                         |seg| eval(&seg.axes[0], clamped),
                     )
             },
+            breaks,
         );
         for frac in [0.1_f64, 0.3, 0.5, 0.7, 0.9] {
             let t = frac.mul_add(base_seg.t_end - base_seg.t_start, base_seg.t_start);
