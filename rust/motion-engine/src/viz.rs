@@ -11,7 +11,7 @@ use motion_pipeline::planner::Planner;
 use motion_pipeline::{StreamConfig, run_lowerer};
 
 #[pyfunction]
-#[pyo3(signature = (waypoints, max_velocity, max_accel, square_corner_velocity, max_jerk, arc_fit = None, max_extrude_only_velocity = None, max_extrude_only_accel = None, max_path_deviation = None, max_accel_deviation = None, pressure_advance = None, smooth_zv_hz = None))]
+#[pyo3(signature = (waypoints, max_velocity, max_accel, square_corner_velocity, max_jerk, arc_fit = None, max_extrude_only_velocity = None, max_extrude_only_accel = None, max_path_deviation = None, max_accel_deviation = None, pressure_advance = None, smooth_zv_hz = None, e_smooth_zv_hz = None))]
 #[allow(clippy::too_many_arguments)]
 pub fn pipeline_snapshot(
     py: Python<'_>,
@@ -27,6 +27,7 @@ pub fn pipeline_snapshot(
     max_accel_deviation: Option<f64>,
     pressure_advance: Option<f64>,
     smooth_zv_hz: Option<f64>,
+    e_smooth_zv_hz: Option<f64>,
 ) -> PyResult<Py<PyDict>> {
     if let Some(v) = max_path_deviation {
         if !(v.is_finite() && v > 0.0) {
@@ -70,7 +71,7 @@ pub fn pipeline_snapshot(
         max_buffer_moves: SNAPSHOT_MAX_BUFFER_MOVES,
         limits,
     };
-    let axis_chains = build_axis_chains(pressure_advance, smooth_zv_hz)
+    let axis_chains = build_axis_chains(pressure_advance, smooth_zv_hz, e_smooth_zv_hz)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
     let (fitted, shaped) = run_pipeline(&moves, config, axis_chains);
 
@@ -113,18 +114,20 @@ pub fn pipeline_snapshot(
     Ok(dict.into())
 }
 
-/// The snapshot's optional post-processor chains: smoothing on x/y, pressure
-/// advance on the extruder lane — the same compiled stages the live config
-/// builds, so snapshot piece counts and seams reflect the real wire.
+/// The snapshot's optional post-processor chains: smoothing on x/y, and on
+/// the extruder lane an optional smoother ahead of pressure advance — the
+/// same compiled stages the live config builds, so snapshot piece counts and
+/// seams reflect the real wire.
 fn build_axis_chains(
     pressure_advance: Option<f64>,
     smooth_zv_hz: Option<f64>,
+    e_smooth_zv_hz: Option<f64>,
 ) -> Result<AxisChainSet, trajectory::PostProcessorError> {
     use trajectory::post_processor::PostProcessorInstance;
     use trajectory::post_processors::{LinearPressureAdvance, SmoothZv};
     use trajectory::{CompiledChain, PostProcessorError};
 
-    if pressure_advance.is_none() && smooth_zv_hz.is_none() {
+    if pressure_advance.is_none() && smooth_zv_hz.is_none() && e_smooth_zv_hz.is_none() {
         return Ok(AxisChainSet::default());
     }
     let spatial_chain = |hz: Option<f64>| -> Result<CompiledChain, PostProcessorError> {
@@ -137,14 +140,18 @@ fn build_axis_chains(
             None => Ok(CompiledChain::default()),
         }
     };
-    let e_chain = match pressure_advance {
-        Some(k) => CompiledChain::compile(&[PostProcessorInstance::new(
+    let mut e_stages = Vec::new();
+    if let Some(hz) = e_smooth_zv_hz {
+        e_stages.push(PostProcessorInstance::new("smooth_zv", &SmoothZv, vec![hz]));
+    }
+    if let Some(k) = pressure_advance {
+        e_stages.push(PostProcessorInstance::new(
             "pressure_advance",
             &LinearPressureAdvance,
             vec![k],
-        )])?,
-        None => CompiledChain::default(),
-    };
+        ));
+    }
+    let e_chain = CompiledChain::compile(&e_stages)?;
     Ok(AxisChainSet {
         chains: vec![
             spatial_chain(smooth_zv_hz)?,
