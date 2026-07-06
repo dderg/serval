@@ -39,7 +39,7 @@ fn piece_frame_writes_immediately_on_shallow_outq() {
         !h.tx_log().is_empty(),
         "piece frame must reach the wire when the tty queue is shallow"
     );
-    assert!(h.reactor.pending_piece_frames.is_empty());
+    assert!(h.reactor.outbound.pending_piece_frames.is_empty());
 }
 
 #[test]
@@ -52,7 +52,7 @@ fn piece_frame_deferred_while_outq_deep_then_flushed() {
         h.tx_log().is_empty(),
         "piece frame must be held back while the tty queue exceeds the budget"
     );
-    assert_eq!(h.reactor.pending_piece_frames.len(), 1);
+    assert_eq!(h.reactor.outbound.pending_piece_frames.len(), 1);
 
     set_outq(&h, 0);
     h.tick();
@@ -60,7 +60,7 @@ fn piece_frame_deferred_while_outq_deep_then_flushed() {
         !h.tx_log().is_empty(),
         "held piece frame must flush once the tty queue drains"
     );
-    assert!(h.reactor.pending_piece_frames.is_empty());
+    assert!(h.reactor.outbound.pending_piece_frames.is_empty());
 }
 
 #[test]
@@ -82,7 +82,7 @@ fn control_frame_bypasses_deep_outq_that_defers_pieces() {
         "control frame must reach the wire despite the deep tty queue"
     );
     assert_eq!(
-        h.reactor.pending_piece_frames.len(),
+        h.reactor.outbound.pending_piece_frames.len(),
         1,
         "piece frame must still be held back"
     );

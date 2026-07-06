@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
@@ -22,6 +21,12 @@ use crate::transport::TransportError;
 use mcu_transport::demux::{Frame, KlipperFrame, PollOutcome};
 use runtime::error::FaultCode;
 
+mod outbound;
+mod seq_window;
+
+use outbound::{OutboundQueues, PendingOutboundKind, PendingSubmission};
+use seq_window::SeqWindow;
+
 pub struct Reactor {
     pub(crate) io: SerialFrameIo,
     pub(crate) parser: Arc<MsgProtoParser>,
@@ -31,13 +36,7 @@ pub struct Reactor {
     pub(crate) rtt: RttEstimator,
     pub(crate) event_dispatcher: EventDispatcher,
 
-    pub(crate) send_seq: u64,
-    pub(crate) receive_seq: u64,
-    pub(crate) last_ack_seq: u64,
-    pub(crate) ignore_nak_seq: u64,
-    pub(crate) retransmit_seq: u64,
-    pub(crate) rtt_sample_seq: u64,
-    pub(crate) rtt_sample_armed: bool,
+    pub(crate) seq_window: SeqWindow,
 
     pub(crate) state: ReactorState,
 
@@ -45,7 +44,7 @@ pub struct Reactor {
 
     pub(crate) pending_host_fault: Option<FaultEvent>,
 
-    pub(crate) pending_submissions: VecDeque<PendingSubmission>,
+    pub(crate) outbound: OutboundQueues,
 
     /// When `get_clock_async` is in flight: the CLOCK_MONOTONIC_RAW sent-time
     /// captured before the frame was written to wire.  The next unsolicited
@@ -53,14 +52,6 @@ pub struct Reactor {
     /// with RAW RTT stamps rather than going through the generic path.
     pub(crate) pending_clock_sent_raw: Option<f64>,
 
-    /// Queued fire-and-forget payloads; the bool marks a `get_clock` frame
-    /// whose RAW send stamp is captured at the actual wire write.
-    pub(crate) pending_fire_and_forget: VecDeque<(Vec<u8>, bool)>,
-    /// Piece-channel (motion) frames, keyed by correlation id, awaiting a
-    /// shallow kernel tty queue; see `drain_piece_frames` for the priority
-    /// rule this enforces.
-    pub(crate) pending_piece_frames: VecDeque<(u32, Vec<u8>)>,
-    pub(crate) pending_outbound_order: VecDeque<PendingOutboundKind>,
     pub(crate) zero_byte_first_seen: Option<Instant>,
     pub(crate) last_recv_time: Instant,
     pub(crate) last_write_time: Instant,
@@ -68,21 +59,6 @@ pub struct Reactor {
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) transport_state: McuTransportState,
     pub(crate) interceptors: crate::host_io::interceptor::InterceptorTable,
-}
-
-pub(crate) struct PendingSubmission {
-    pub call_id: u64,
-    pub payload: Vec<u8>,
-    pub expected_response_name: String,
-    pub completion:
-        std::sync::mpsc::SyncSender<Result<crate::transport::MessageParams, TransportError>>,
-    pub deadline: Instant,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PendingOutboundKind {
-    Submission,
-    FireAndForget,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -133,21 +109,12 @@ impl Reactor {
             awaiting_response: AwaitingResponse::default(),
             rtt: RttEstimator::default(),
             event_dispatcher,
-            send_seq: seq.next_send_seq_abs,
-            receive_seq: seq.mcu_receive_seq_abs,
-            last_ack_seq: seq.mcu_receive_seq_abs.saturating_sub(1),
-            ignore_nak_seq: 0,
-            retransmit_seq: 0,
-            rtt_sample_seq: 0,
-            rtt_sample_armed: false,
+            seq_window: SeqWindow::new(seq.next_send_seq_abs, seq.mcu_receive_seq_abs),
             state: ReactorState::Active,
             closed_via_shutdown: false,
             pending_host_fault: None,
             pending_clock_sent_raw: None,
-            pending_submissions: VecDeque::new(),
-            pending_fire_and_forget: VecDeque::new(),
-            pending_piece_frames: VecDeque::new(),
-            pending_outbound_order: VecDeque::new(),
+            outbound: OutboundQueues::default(),
             zero_byte_first_seen: None,
             last_recv_time: clock.now(),
             last_write_time: clock.now(),
@@ -273,24 +240,21 @@ impl Reactor {
         deadline: Instant,
     ) -> Result<(), TransportError> {
         if self.unacked_window.is_full() {
-            if self.pending_submissions.len() >= PENDING_SUBMISSION_CEILING {
+            if self.outbound.pending_submissions.len() >= PENDING_SUBMISSION_CEILING {
                 let _ = completion.send(Err(TransportError::Backpressure));
                 return Ok(());
             }
-            self.pending_submissions.push_back(PendingSubmission {
+            self.outbound.enqueue_submission(PendingSubmission {
                 call_id,
                 payload,
                 expected_response_name,
                 completion,
                 deadline,
             });
-            self.pending_outbound_order
-                .push_back(PendingOutboundKind::Submission);
             return Ok(());
         }
 
-        let seq = self.send_seq;
-        self.send_seq += 1;
+        let seq = self.seq_window.next_send_seq();
         let wire_seq = (seq & 0x0F) as u8;
         let frame = crate::host_io::wire::build_frame(&payload, wire_seq);
 
@@ -328,10 +292,7 @@ impl Reactor {
             "push await entry"
         );
 
-        if !self.rtt_sample_armed {
-            self.rtt_sample_seq = seq;
-            self.rtt_sample_armed = true;
-        }
+        self.seq_window.arm_rtt_sample(seq);
         Ok(())
     }
 
@@ -341,7 +302,7 @@ impl Reactor {
         is_get_clock: bool,
     ) -> Result<(), TransportError> {
         if self.unacked_window.is_full() {
-            if self.pending_fire_and_forget.len() >= PENDING_FIRE_AND_FORGET_CEILING {
+            if self.outbound.pending_fire_and_forget.len() >= PENDING_FIRE_AND_FORGET_CEILING {
                 tracing::error!(
                     subsystem = "mcu-comms",
                     event = "fire_and_forget_ceiling",
@@ -350,14 +311,10 @@ impl Reactor {
                 );
                 return Err(TransportError::Backpressure);
             }
-            self.pending_fire_and_forget
-                .push_back((payload, is_get_clock));
-            self.pending_outbound_order
-                .push_back(PendingOutboundKind::FireAndForget);
+            self.outbound.enqueue_fire_and_forget(payload, is_get_clock);
             return Ok(());
         }
-        let seq = self.send_seq;
-        self.send_seq += 1;
+        let seq = self.seq_window.next_send_seq();
         let wire_seq = (seq & 0x0F) as u8;
         let frame = crate::host_io::wire::build_frame(&payload, wire_seq);
         // get_clock send stamps MUST be captured at the wire write, not at
@@ -388,12 +345,12 @@ impl Reactor {
 
     pub(crate) fn drain_pending_submissions(&mut self) {
         while !self.unacked_window.is_full() {
-            let Some(kind) = self.pending_outbound_order.pop_front() else {
+            let Some(kind) = self.outbound.pending_outbound_order.pop_front() else {
                 break;
             };
             match kind {
                 PendingOutboundKind::Submission => {
-                    let Some(p) = self.pending_submissions.pop_front() else {
+                    let Some(p) = self.outbound.pending_submissions.pop_front() else {
                         tracing::error!(
                             subsystem = "mcu-comms",
                             event = "outbound_order_missing_submission",
@@ -409,13 +366,8 @@ impl Reactor {
                         completion,
                         p.deadline,
                     ) {
-                        let is_io = matches!(e, TransportError::Io(_));
-                        if is_io {
-                            self.transition_closed_on_io_fault(
-                                "drain_pending_submissions/submission",
-                                &e,
-                            );
-                        }
+                        let is_io =
+                            self.close_if_io_fault("drain_pending_submissions/submission", &e);
                         let _ = p.completion.send(Err(e));
                         if is_io {
                             return;
@@ -423,7 +375,8 @@ impl Reactor {
                     }
                 }
                 PendingOutboundKind::FireAndForget => {
-                    let Some((payload, is_get_clock)) = self.pending_fire_and_forget.pop_front()
+                    let Some((payload, is_get_clock)) =
+                        self.outbound.pending_fire_and_forget.pop_front()
                     else {
                         tracing::error!(
                             subsystem = "mcu-comms",
@@ -433,11 +386,7 @@ impl Reactor {
                         continue;
                     };
                     if let Err(e) = self.dispatch_fire_and_forget(payload, is_get_clock) {
-                        if matches!(e, TransportError::Io(_)) {
-                            self.transition_closed_on_io_fault(
-                                "drain_pending_submissions/fire_and_forget",
-                                &e,
-                            );
+                        if self.close_if_io_fault("drain_pending_submissions/fire_and_forget", &e) {
                             return;
                         }
                         tracing::warn!(
@@ -461,7 +410,7 @@ impl Reactor {
     /// piece flood keeps the tty queue deep, control acks inflate, and a
     /// `queue_digital_out` arrives seconds late.
     pub(crate) fn drain_piece_frames(&mut self) {
-        while !self.pending_piece_frames.is_empty() {
+        while !self.outbound.pending_piece_frames.is_empty() {
             match self.io.bytes_to_write() {
                 Ok(pending) if pending > PIECE_OUTQ_BUDGET_BYTES => return,
                 Ok(_) => {}
@@ -471,13 +420,12 @@ impl Reactor {
                 }
             }
             let (cid, frame) = self
+                .outbound
                 .pending_piece_frames
                 .pop_front()
                 .expect("checked non-empty");
             if let Err(e) = self.write_frame(&frame) {
-                if matches!(e, TransportError::Io(_)) {
-                    self.transition_closed_on_io_fault("drain_piece_frames/write_frame", &e);
-                }
+                self.close_if_io_fault("drain_piece_frames/write_frame", &e);
                 if let Some(p) = self.transport_state.pending.remove(&cid) {
                     let _ = p.completion.send(Err(e));
                 }
@@ -488,33 +436,33 @@ impl Reactor {
 
     fn update_receive_seq(&mut self, rseq: u64) -> Result<(), TransportError> {
         if self.unacked_window.is_empty() {
-            self.send_seq = rseq;
-            self.receive_seq = rseq;
+            self.seq_window.reset_to(rseq);
             return Ok(());
         }
         let popped = self.unacked_window.pop_acked(rseq);
         for entry in &popped {
-            if self.rtt_sample_armed && entry.seq >= self.rtt_sample_seq {
+            if self.seq_window.rtt_sample_matches(entry.seq) {
                 let rtt = self.clock.now() - entry.sent_at;
                 self.rtt.update(rtt);
-                self.rtt_sample_armed = false;
+                self.seq_window.disarm_rtt_sample();
                 break;
             }
         }
-        self.receive_seq = rseq;
+        self.seq_window.receive_seq = rseq;
         Ok(())
     }
 
     pub(crate) fn handle_ack_nak(&mut self, wire_seq_nibble: u8) -> Result<(), TransportError> {
-        let rseq = crate::host_io::wire::decode_absolute(self.receive_seq, wire_seq_nibble);
+        let rseq =
+            crate::host_io::wire::decode_absolute(self.seq_window.receive_seq, wire_seq_nibble);
 
-        if rseq > self.receive_seq {
+        if rseq > self.seq_window.receive_seq {
             self.update_receive_seq(rseq)?;
         }
 
-        if self.last_ack_seq < rseq {
-            self.last_ack_seq = rseq;
-        } else if rseq > self.ignore_nak_seq && !self.unacked_window.is_empty() {
+        if self.seq_window.last_ack_seq < rseq {
+            self.seq_window.last_ack_seq = rseq;
+        } else if rseq > self.seq_window.ignore_nak_seq && !self.unacked_window.is_empty() {
             self.write_retransmit(RetransmitTrigger::NakDriven)?;
         }
         Ok(())
@@ -534,20 +482,7 @@ impl Reactor {
         };
         self.write_frame(&buf)?;
 
-        match trigger {
-            RetransmitTrigger::NakDriven => {
-                if self.receive_seq < self.retransmit_seq {
-                    self.ignore_nak_seq = self.retransmit_seq;
-                } else {
-                    self.ignore_nak_seq = self.receive_seq;
-                }
-            }
-            RetransmitTrigger::TimeoutDriven => {
-                self.ignore_nak_seq = self.send_seq;
-            }
-        }
-        self.retransmit_seq = self.send_seq;
-        self.rtt_sample_armed = false;
+        self.seq_window.set_ignore_nak_for_retransmit(trigger);
 
         let now = self.clock.now();
         let silence = now.duration_since(self.last_recv_time);
@@ -594,19 +529,20 @@ impl Reactor {
             self.handle_ack_nak(wire_seq_nibble)?;
             return Ok(());
         }
-        let rseq = crate::host_io::wire::decode_absolute(self.receive_seq, wire_seq_nibble);
-        let rseq_jump = rseq.saturating_sub(self.receive_seq);
+        let rseq =
+            crate::host_io::wire::decode_absolute(self.seq_window.receive_seq, wire_seq_nibble);
+        let rseq_jump = rseq.saturating_sub(self.seq_window.receive_seq);
         if rseq_jump > 1 {
             tracing::warn!(
                 subsystem = "mcu-comms",
                 event = "rx_seq_jump",
-                receive_seq_prev = self.receive_seq,
+                receive_seq_prev = self.seq_window.receive_seq,
                 receive_seq_new = rseq,
                 jump = rseq_jump,
                 "receive_seq jumped >1: MCU dropped a response or we missed a frame"
             );
         }
-        if rseq != self.receive_seq {
+        if rseq != self.seq_window.receive_seq {
             self.update_receive_seq(rseq)?;
         }
         let decoded = match self.parser.decode(bytes) {
@@ -648,11 +584,7 @@ impl Reactor {
                     params.recv_time_raw = crate::clock::monotonic_raw_secs();
                     let _ = entry.completion.send(Ok(params));
                 } else {
-                    let oid = params.fields.get("oid").and_then(|v| match v {
-                        crate::transport::MessageValue::U32(n) => Some(*n),
-                        crate::transport::MessageValue::I32(n) => Some(*n as u32),
-                        _ => None,
-                    });
+                    let oid = oid_from_params(&params);
                     if name.contains("software_trip") || name.contains("trsync_state") {
                         tracing::debug!(
                             subsystem = "mcu-comms",
@@ -707,11 +639,7 @@ impl Reactor {
                 }
             }
             crate::host_io::parser::DecodedFrame::Output { name, params } => {
-                let oid = params.fields.get("oid").and_then(|v| match v {
-                    crate::transport::MessageValue::U32(n) => Some(*n),
-                    crate::transport::MessageValue::I32(n) => Some(*n as u32),
-                    _ => None,
-                });
+                let oid = oid_from_params(&params);
                 let interceptor_count = self.interceptors.entry_count();
                 if interceptor_count > 0 {
                     tracing::debug!(
@@ -734,7 +662,17 @@ impl Reactor {
     fn dispatch_runtime_event(&mut self, event: crate::host_io::runtime_events::RuntimeEvent) {
         self.event_dispatcher.dispatch(event);
     }
+}
 
+fn oid_from_params(params: &crate::transport::MessageParams) -> Option<u32> {
+    params.fields.get("oid").and_then(|v| match v {
+        crate::transport::MessageValue::U32(n) => Some(*n),
+        crate::transport::MessageValue::I32(n) => Some(*n as u32),
+        _ => None,
+    })
+}
+
+impl Reactor {
     pub(crate) fn handle_kalico_frame(&mut self, channel: u8, payload: &[u8]) {
         match dispatch_mcu_frame(&mut self.transport_state, channel, payload) {
             McuDispatchResult::Handled | McuDispatchResult::Ignored => {}
@@ -890,7 +828,7 @@ impl Reactor {
             io_kind = ?io_kind,
             error = %error,
             unacked_n = self.unacked_window.len(),
-            pending_piece_frames = self.pending_piece_frames.len(),
+            pending_piece_frames = self.outbound.pending_piece_frames.len(),
             outq_drain_curve_20ms = %drain_curve.join(","),
             "transport IO fault; transitioning Closed"
         );
@@ -905,6 +843,18 @@ impl Reactor {
         self.state = ReactorState::Closed;
     }
 
+    pub(crate) fn close_if_io_fault(
+        &mut self,
+        context: &'static str,
+        error: &TransportError,
+    ) -> bool {
+        let is_io = matches!(error, TransportError::Io(_));
+        if is_io {
+            self.transition_closed_on_io_fault(context, error);
+        }
+        is_io
+    }
+
     fn handle_command(&mut self, cmd: crate::host_io::ReactorCommand) {
         use crate::host_io::ReactorCommand;
         match cmd {
@@ -914,56 +864,20 @@ impl Reactor {
                 expected_response_name,
                 completion,
                 deadline,
-            } => match self.parser.encode(&cmd) {
-                Ok(payload) => {
-                    if let Err(e) = self.dispatch_submission(
-                        call_id,
-                        payload,
-                        expected_response_name,
-                        completion.clone(),
-                        deadline,
-                    ) {
-                        if matches!(e, TransportError::Io(_)) {
-                            self.transition_closed_on_io_fault("handle_command/submit", &e);
-                        }
-                        let _ = completion.send(Err(e));
-                    }
-                }
-                Err(e) => {
-                    let _ = completion.send(Err(TransportError::Parse(format!("{e:?}"))));
-                }
-            },
+            } => self.handle_submit(call_id, cmd, expected_response_name, completion, deadline),
             ReactorCommand::SubmitTyped {
                 call_id,
                 payload,
                 expected_response_name,
                 completion,
                 deadline,
-            } => {
-                tracing::debug!(
-                    subsystem = "mcu-comms",
-                    event = "submit_typed",
-                    call_id,
-                    resp = %expected_response_name,
-                    payload_len = payload.len(),
-                    unacked = self.unacked_window.len(),
-                    pending_sub = self.pending_submissions.len(),
-                    state = ?self.state,
-                    "SubmitTyped"
-                );
-                if let Err(e) = self.dispatch_submission(
-                    call_id,
-                    payload,
-                    expected_response_name,
-                    completion.clone(),
-                    deadline,
-                ) {
-                    if matches!(e, TransportError::Io(_)) {
-                        self.transition_closed_on_io_fault("handle_command/submit_typed", &e);
-                    }
-                    let _ = completion.send(Err(e));
-                }
-            }
+            } => self.handle_submit_typed(
+                call_id,
+                payload,
+                expected_response_name,
+                completion,
+                deadline,
+            ),
             ReactorCommand::Abandon(call_id) => {
                 self.awaiting_response.mark_abandoned(call_id);
             }
@@ -971,17 +885,7 @@ impl Reactor {
                 self.state = ReactorState::Closed;
                 self.closed_via_shutdown = true;
             }
-            ReactorCommand::MarkExpectedDisconnect => {
-                tracing::info!(
-                    subsystem = "mcu-comms",
-                    event = "expected_disconnect",
-                    transport_pending = self.transport_state.pending.len(),
-                    await_n = self.awaiting_response.len(),
-                    unacked_n = self.unacked_window.len(),
-                    "MarkExpectedDisconnect received"
-                );
-                self.closed_via_shutdown = true;
-            }
+            ReactorCommand::MarkExpectedDisconnect => self.handle_mark_expected_disconnect(),
             ReactorCommand::AttachHeartbeatCallback(wrapper) => {
                 self.event_dispatcher.heartbeat_callback = Some(wrapper.0);
             }
@@ -1001,13 +905,7 @@ impl Reactor {
                 priority,
                 bulk,
                 reply,
-            } => {
-                let result = self
-                    .event_dispatcher
-                    .runtime_event_dispatcher
-                    .subscribe(priority, bulk);
-                let _ = reply.send(result);
-            }
+            } => self.handle_subscribe_runtime_events(priority, bulk, reply),
             ReactorCommand::SubscribeHostEvents { sender, reply } => {
                 let result = self
                     .event_dispatcher
@@ -1015,147 +913,22 @@ impl Reactor {
                     .subscribe(sender);
                 let _ = reply.send(result);
             }
-            ReactorCommand::FireAndForget { cmd } => match self.parser.encode(&cmd) {
-                Ok(payload) => {
-                    let cmd_disp = if cmd.len() > 120 {
-                        &cmd[..120]
-                    } else {
-                        cmd.as_str()
-                    };
-                    let head: Vec<String> = payload
-                        .iter()
-                        .take(16)
-                        .map(|b| format!("{b:02x}"))
-                        .collect();
-                    tracing::debug!(
-                        subsystem = "mcu-comms",
-                        event = "fire_and_forget_sent",
-                        cmd = %cmd_disp,
-                        payload_len = payload.len(),
-                        head = %head.join(","),
-                        "FireAndForget encoded OK"
-                    );
-                    if let Err(e) = self.dispatch_fire_and_forget(payload, false) {
-                        tracing::error!(
-                            subsystem = "mcu-comms",
-                            event = "fire_and_forget_send_error",
-                            cmd = %cmd_disp,
-                            error = %e,
-                            "FireAndForget dispatch failed"
-                        );
-                        if matches!(e, TransportError::Io(_)) {
-                            self.transition_closed_on_io_fault(
-                                "handle_command/fire_and_forget",
-                                &e,
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(
-                        subsystem = "mcu-comms",
-                        event = "fire_and_forget_encode_error",
-                        cmd = ?cmd,
-                        error = ?e,
-                        "FireAndForget encode failed"
-                    );
-                }
-            },
+            ReactorCommand::FireAndForget { cmd } => self.handle_fire_and_forget(cmd),
             ReactorCommand::FireAndForgetTyped { payload } => {
-                if let Err(e) = self.dispatch_fire_and_forget(payload, false) {
-                    tracing::warn!(
-                        subsystem = "mcu-comms",
-                        event = "fire_and_forget_typed_send_error",
-                        error = %e,
-                        "FireAndForgetTyped: send error"
-                    );
-                    if matches!(e, TransportError::Io(_)) {
-                        self.transition_closed_on_io_fault(
-                            "handle_command/fire_and_forget_typed",
-                            &e,
-                        );
-                    }
-                }
+                self.handle_fire_and_forget_typed(payload)
             }
             ReactorCommand::McuIdentify {
                 completion,
                 deadline: _,
-            } => {
-                let cid = self.transport_state.allocate_correlation_id();
-                let frame = build_kalico_identify_frame(cid);
-                if self.transport_state.identify_pending.is_some() {
-                    let _ = completion.send(Err(TransportError::Backpressure));
-                    return;
-                }
-                self.transport_state.identify_pending = Some(completion);
-                if let Err(e) = self.write_frame(&frame) {
-                    if matches!(e, TransportError::Io(_)) {
-                        self.transition_closed_on_io_fault("handle_command/mcu_identify", &e);
-                    }
-                    if let Some(c) = self.transport_state.identify_pending.take() {
-                        let _ = c.send(Err(e));
-                    }
-                }
-            }
+            } => self.handle_mcu_identify(completion),
             ReactorCommand::McuCall {
                 channel,
                 kind,
                 body,
                 completion,
                 deadline,
-            } => {
-                if !self.transport_state.identified {
-                    let _ = completion.send(Err(TransportError::Parse(
-                        "kalico transport not yet identified".into(),
-                    )));
-                    return;
-                }
-                if self.pending_piece_frames.len() >= PENDING_PIECE_FRAMES_CEILING {
-                    let _ = completion.send(Err(TransportError::Backpressure));
-                    return;
-                }
-                let cid = self.transport_state.allocate_correlation_id();
-                let frame = build_kalico_frame(channel, kind, cid, &body);
-                self.transport_state.pending.insert(
-                    cid,
-                    PendingMcuCall {
-                        completion,
-                        deadline,
-                    },
-                );
-                self.pending_piece_frames.push_back((cid, frame));
-                self.drain_piece_frames();
-            }
-            ReactorCommand::GetClockAndDeliver => match self.parser.encode("get_clock") {
-                Ok(payload) => {
-                    // The RAW send stamp is captured inside
-                    // dispatch_fire_and_forget at the actual wire write —
-                    // never here, where the frame may still queue behind a
-                    // busy link for milliseconds.
-                    if let Err(e) = self.dispatch_fire_and_forget(payload, true) {
-                        tracing::error!(
-                            subsystem = "mcu-comms",
-                            event = "get_clock_async_send_error",
-                            error = %e,
-                            "GetClockAndDeliver dispatch failed"
-                        );
-                        if matches!(e, TransportError::Io(_)) {
-                            self.transition_closed_on_io_fault(
-                                "handle_command/get_clock_and_deliver",
-                                &e,
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(
-                        subsystem = "mcu-comms",
-                        event = "get_clock_async_encode_error",
-                        error = ?e,
-                        "GetClockAndDeliver: encode 'get_clock' failed"
-                    );
-                }
-            },
+            } => self.handle_mcu_call(channel, kind, body, completion, deadline),
+            ReactorCommand::GetClockAndDeliver => self.handle_get_clock_and_deliver(),
             ReactorCommand::Noop => {}
             ReactorCommand::RegisterInterceptor {
                 msg_name,
@@ -1171,6 +944,231 @@ impl Reactor {
             }
         }
     }
+
+    fn handle_submit(
+        &mut self,
+        call_id: u64,
+        cmd: String,
+        expected_response_name: String,
+        completion: std::sync::mpsc::SyncSender<
+            Result<crate::transport::MessageParams, TransportError>,
+        >,
+        deadline: Instant,
+    ) {
+        match self.parser.encode(&cmd) {
+            Ok(payload) => {
+                if let Err(e) = self.dispatch_submission(
+                    call_id,
+                    payload,
+                    expected_response_name,
+                    completion.clone(),
+                    deadline,
+                ) {
+                    self.close_if_io_fault("handle_command/submit", &e);
+                    let _ = completion.send(Err(e));
+                }
+            }
+            Err(e) => {
+                let _ = completion.send(Err(TransportError::Parse(format!("{e:?}"))));
+            }
+        }
+    }
+
+    fn handle_submit_typed(
+        &mut self,
+        call_id: u64,
+        payload: Vec<u8>,
+        expected_response_name: String,
+        completion: std::sync::mpsc::SyncSender<
+            Result<crate::transport::MessageParams, TransportError>,
+        >,
+        deadline: Instant,
+    ) {
+        tracing::debug!(
+            subsystem = "mcu-comms",
+            event = "submit_typed",
+            call_id,
+            resp = %expected_response_name,
+            payload_len = payload.len(),
+            unacked = self.unacked_window.len(),
+            pending_sub = self.outbound.pending_submissions.len(),
+            state = ?self.state,
+            "SubmitTyped"
+        );
+        if let Err(e) = self.dispatch_submission(
+            call_id,
+            payload,
+            expected_response_name,
+            completion.clone(),
+            deadline,
+        ) {
+            self.close_if_io_fault("handle_command/submit_typed", &e);
+            let _ = completion.send(Err(e));
+        }
+    }
+
+    fn handle_mark_expected_disconnect(&mut self) {
+        tracing::info!(
+            subsystem = "mcu-comms",
+            event = "expected_disconnect",
+            transport_pending = self.transport_state.pending.len(),
+            await_n = self.awaiting_response.len(),
+            unacked_n = self.unacked_window.len(),
+            "MarkExpectedDisconnect received"
+        );
+        self.closed_via_shutdown = true;
+    }
+
+    fn handle_subscribe_runtime_events(
+        &mut self,
+        priority: std::sync::mpsc::SyncSender<crate::host_io::runtime_events::RuntimeEvent>,
+        bulk: std::sync::mpsc::SyncSender<crate::host_io::runtime_events::RuntimeEvent>,
+        reply: std::sync::mpsc::SyncSender<Result<(), crate::transport::SubscribeError>>,
+    ) {
+        let result = self
+            .event_dispatcher
+            .runtime_event_dispatcher
+            .subscribe(priority, bulk);
+        let _ = reply.send(result);
+    }
+
+    fn handle_fire_and_forget(&mut self, cmd: String) {
+        match self.parser.encode(&cmd) {
+            Ok(payload) => {
+                let cmd_disp = if cmd.len() > 120 {
+                    &cmd[..120]
+                } else {
+                    cmd.as_str()
+                };
+                let head: Vec<String> = payload
+                    .iter()
+                    .take(16)
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
+                tracing::debug!(
+                    subsystem = "mcu-comms",
+                    event = "fire_and_forget_sent",
+                    cmd = %cmd_disp,
+                    payload_len = payload.len(),
+                    head = %head.join(","),
+                    "FireAndForget encoded OK"
+                );
+                if let Err(e) = self.dispatch_fire_and_forget(payload, false) {
+                    tracing::error!(
+                        subsystem = "mcu-comms",
+                        event = "fire_and_forget_send_error",
+                        cmd = %cmd_disp,
+                        error = %e,
+                        "FireAndForget dispatch failed"
+                    );
+                    self.close_if_io_fault("handle_command/fire_and_forget", &e);
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    subsystem = "mcu-comms",
+                    event = "fire_and_forget_encode_error",
+                    cmd = ?cmd,
+                    error = ?e,
+                    "FireAndForget encode failed"
+                );
+            }
+        }
+    }
+
+    fn handle_fire_and_forget_typed(&mut self, payload: Vec<u8>) {
+        if let Err(e) = self.dispatch_fire_and_forget(payload, false) {
+            tracing::warn!(
+                subsystem = "mcu-comms",
+                event = "fire_and_forget_typed_send_error",
+                error = %e,
+                "FireAndForgetTyped: send error"
+            );
+            self.close_if_io_fault("handle_command/fire_and_forget_typed", &e);
+        }
+    }
+
+    fn handle_mcu_identify(
+        &mut self,
+        completion: std::sync::mpsc::SyncSender<
+            Result<crate::host_io::mcu_session::IdentifyOutcome, TransportError>,
+        >,
+    ) {
+        let cid = self.transport_state.allocate_correlation_id();
+        let frame = build_kalico_identify_frame(cid);
+        if self.transport_state.identify_pending.is_some() {
+            let _ = completion.send(Err(TransportError::Backpressure));
+            return;
+        }
+        self.transport_state.identify_pending = Some(completion);
+        if let Err(e) = self.write_frame(&frame) {
+            self.close_if_io_fault("handle_command/mcu_identify", &e);
+            if let Some(c) = self.transport_state.identify_pending.take() {
+                let _ = c.send(Err(e));
+            }
+        }
+    }
+
+    fn handle_mcu_call(
+        &mut self,
+        channel: u8,
+        kind: mcu_protocol::MessageKind,
+        body: Vec<u8>,
+        completion: std::sync::mpsc::SyncSender<
+            Result<crate::host_io::mcu_session::McuCallOutcome, TransportError>,
+        >,
+        deadline: Instant,
+    ) {
+        if !self.transport_state.identified {
+            let _ = completion.send(Err(TransportError::Parse(
+                "kalico transport not yet identified".into(),
+            )));
+            return;
+        }
+        if self.outbound.pending_piece_frames.len() >= PENDING_PIECE_FRAMES_CEILING {
+            let _ = completion.send(Err(TransportError::Backpressure));
+            return;
+        }
+        let cid = self.transport_state.allocate_correlation_id();
+        let frame = build_kalico_frame(channel, kind, cid, &body);
+        self.transport_state.pending.insert(
+            cid,
+            PendingMcuCall {
+                completion,
+                deadline,
+            },
+        );
+        self.outbound.pending_piece_frames.push_back((cid, frame));
+        self.drain_piece_frames();
+    }
+
+    fn handle_get_clock_and_deliver(&mut self) {
+        match self.parser.encode("get_clock") {
+            Ok(payload) => {
+                // The RAW send stamp is captured inside
+                // dispatch_fire_and_forget at the actual wire write —
+                // never here, where the frame may still queue behind a
+                // busy link for milliseconds.
+                if let Err(e) = self.dispatch_fire_and_forget(payload, true) {
+                    tracing::error!(
+                        subsystem = "mcu-comms",
+                        event = "get_clock_async_send_error",
+                        error = %e,
+                        "GetClockAndDeliver dispatch failed"
+                    );
+                    self.close_if_io_fault("handle_command/get_clock_and_deliver", &e);
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    subsystem = "mcu-comms",
+                    event = "get_clock_async_encode_error",
+                    error = ?e,
+                    "GetClockAndDeliver: encode 'get_clock' failed"
+                );
+            }
+        }
+    }
 }
 
 impl Reactor {
@@ -1179,7 +1177,7 @@ impl Reactor {
         response_name: &str,
         params: &crate::transport::MessageParams,
     ) {
-        if self.awaiting_response.len() == 0 && self.pending_submissions.is_empty() {
+        if self.awaiting_response.len() == 0 && self.outbound.pending_submissions.is_empty() {
             return;
         }
         let reason = params
@@ -1198,7 +1196,7 @@ impl Reactor {
             response = %response_name,
             %reason,
             awaiting = self.awaiting_response.len(),
-            pending = self.pending_submissions.len(),
+            pending = self.outbound.pending_submissions.len(),
             "MCU reports shutdown; failing pending calls instead of timing out"
         );
         for entry in self.awaiting_response.drain_all() {
@@ -1206,7 +1204,7 @@ impl Reactor {
                 .completion
                 .send(Err(TransportError::McuShutdown(reason.clone())));
         }
-        for p in self.pending_submissions.drain(..) {
+        for p in self.outbound.pending_submissions.drain(..) {
             let _ = p
                 .completion
                 .send(Err(TransportError::McuShutdown(reason.clone())));
@@ -1219,12 +1217,12 @@ impl Reactor {
             let _ = entry.completion.send(Err(TransportError::Closed));
         }
         self.unacked_window.clear();
-        for p in self.pending_submissions.drain(..) {
+        for p in self.outbound.pending_submissions.drain(..) {
             let _ = p.completion.send(Err(TransportError::Closed));
         }
-        self.pending_fire_and_forget.clear();
-        self.pending_piece_frames.clear();
-        self.pending_outbound_order.clear();
+        self.outbound.pending_fire_and_forget.clear();
+        self.outbound.pending_piece_frames.clear();
+        self.outbound.pending_outbound_order.clear();
 
         let drained: Vec<PendingMcuCall> = self
             .transport_state
@@ -1332,9 +1330,7 @@ impl Reactor {
                         error = ?e,
                         "retransmit error"
                     );
-                    if matches!(e, TransportError::Io(_)) {
-                        self.transition_closed_on_io_fault("tick_once/retransmit", &e);
-                    }
+                    self.close_if_io_fault("tick_once/retransmit", &e);
                 }
             }
         }

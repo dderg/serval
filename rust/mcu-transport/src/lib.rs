@@ -3,6 +3,7 @@ pub mod connection;
 pub mod demux;
 pub mod frame;
 pub mod frame_source;
+pub mod klipper_frame;
 pub mod transport;
 pub mod wire_helpers;
 

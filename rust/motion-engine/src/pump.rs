@@ -39,6 +39,39 @@ pub struct EnqueueMsg {
     pub source_line: u32,
 }
 
+/// Records each piece into the motion-history store at the moment it is
+/// accepted by the MCU, so the store mirrors what the MCU can actually
+/// execute. Recording at dispatch time instead would flood the ring with an
+/// entire move up front — a long homing move evicts its own start before the
+/// endstop trip is resolved against it.
+pub struct HistoryRecorder {
+    pub store: Arc<std::sync::Mutex<crate::motion_history::HistoryStore>>,
+    pub nominal_freqs: Arc<std::sync::Mutex<std::collections::HashMap<u32, u32>>>,
+}
+
+impl HistoryRecorder {
+    fn record(&self, key: AxisKey, piece: &PieceEntry, host_t: f64) {
+        let nominal_freq = *self
+            .nominal_freqs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&key.mcu_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no nominal clock frequency registered for mcu {} \
+                     — set_nominal_clock_freq was not called before streaming",
+                    key.mcu_id
+                )
+            });
+        self.store.lock().unwrap_or_else(|p| p.into_inner()).record(
+            key,
+            piece,
+            nominal_freq,
+            host_t,
+        );
+    }
+}
+
 pub struct HeartbeatMsg {
     pub mcu_id: u32,
     pub retired_counts: Vec<u32>,
@@ -188,6 +221,7 @@ struct Pump<S, F, C, A, O, D> {
     on_fatal_transport: A,
     on_abandon: O,
     on_drip_stall: D,
+    history: Option<HistoryRecorder>,
     ledger: Arc<crate::drain::DrainLedger>,
     /// Barrier acks are held until the end of the loop iteration, after
     /// intake and the ledger publish — so a caller that receives the ack has
@@ -634,7 +668,11 @@ where
                             elapsed_ms = send_elapsed.as_millis() as u64,
                             frames = bundle.len(),
                             ok = send_result.is_ok(),
-                            "[pump-send] send_mcu_frames blocked — which transport (mcu serial vs ethercat socket) ate the wall-clock"
+                            "[pump-send] send_mcu_frames blocked {}ms on mcu {} ({} frames, ok={})",
+                            send_elapsed.as_millis() as u64,
+                            mcu_id,
+                            bundle.len(),
+                            send_result.is_ok()
                         );
                     }
                     match send_result {
@@ -650,7 +688,7 @@ where
                                     let end_ticks: u64 = freq.map_or(0, |f| piece.end_time(f));
                                     let gap_ticks_in_frame: i64 = prev_end
                                         .map_or(0, |pe| piece.start_time as i64 - pe as i64);
-                                    tracing::info!(
+                                    tracing::trace!(
                                         subsystem = "motion",
                                         event = "pump_piece_submit",
                                         mcu = mcu_id,
@@ -670,7 +708,13 @@ where
                                 let n = af.pieces.len() as u32;
                                 let q = self.queues.get_mut(&key).expect("planned key exists");
                                 for _ in 0..af.pieces.len() {
-                                    q.pieces.pop_front();
+                                    let (piece, host_t) = q
+                                        .pieces
+                                        .pop_front()
+                                        .expect("sent frame outran its axis queue");
+                                    if let Some(history) = &self.history {
+                                        history.record(key, &piece, host_t);
+                                    }
                                 }
                                 q.pushed = q.pushed.wrapping_add(n);
                                 q.advance_write_cursor(n);
@@ -818,6 +862,7 @@ pub fn run_pump<S, F, C, A, O, D>(
     mcu_clock_of: C,
     on_fatal_transport: A,
     on_abandon: O,
+    history: Option<HistoryRecorder>,
     ledger: Arc<crate::drain::DrainLedger>,
     on_drip_stall: D,
     backlog: Arc<AtomicU64>,
@@ -839,6 +884,7 @@ pub fn run_pump<S, F, C, A, O, D>(
         on_fatal_transport,
         on_abandon,
         on_drip_stall,
+        history,
         ledger,
         pending_barrier_acks: Vec::new(),
         backlog,

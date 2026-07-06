@@ -2,10 +2,9 @@
 and accelerometer streaming against the beacon_klipper fork
 (fetched into tools/sim/third_party_repos by fetch_plugins.sh).
 
-The contact-method scenarios are currently expected failures: the
-emulator's contact model and the fork disagree on trigger timing under
-the virtual clock (see the xfail/skip reasons on each test). Proximity
-homing/probing and accelerometer streaming are fully green.
+The emulator tracks toolhead Z from the shim's step counters, so both
+proximity (threshold-crossing) and contact (Z reaching the bed at 0)
+triggers fire at step-accurate positions and clocks.
 """
 
 import pathlib
@@ -70,12 +69,6 @@ def test_proximity_homing(world):
     assert "z" in toolhead.get("homed_axes", "")
 
 
-@pytest.mark.xfail(
-    reason="the emulator's step-tracked Z drifts through the homing "
-    "descent, so post-home it reports a frequency below the calibrated "
-    "model range ('Attempted to probe with Beacon below calibrated model "
-    "range') — the emulator's Z anchor needs re-seeding at trigger time",
-)
 def test_proximity_probing(world):
     _home(world)
     # Hop into the calibrated model range (0.2..5mm) before probing, as a
@@ -86,22 +79,12 @@ def test_proximity_probing(world):
     assert world.shutdown_line() is None
 
 
-@pytest.mark.xfail(
-    reason="contact detect time lands just outside the retained motion "
-    "history window under the virtual clock ('query host time precedes "
-    "retained motion history')",
-)
 def test_contact_probing(world):
     _home(world)
     world.gcode_ok("PROBE PROBE_METHOD=contact SAMPLES=1", timeout=120)
     assert world.shutdown_line() is None
 
 
-@pytest.mark.xfail(
-    reason="emulator contact descend finishes with trsync reason 2 "
-    "(comms timeout), not endstop-hit — the emulator's contact trigger "
-    "model needs to key off Z position instead of a fixed delay",
-)
 def test_contact_auto_calibrate(world):
     world.gcode_ok("SET_KINEMATIC_POSITION X=150 Y=150 Z=10", timeout=10)
     world.gcode_ok("G4 P1000", timeout=15)
@@ -110,10 +93,6 @@ def test_contact_auto_calibrate(world):
     assert world.shutdown_line() is None
 
 
-@pytest.mark.skip(
-    reason="hangs: BEACON_POKE never returns — same emulator contact-model "
-    "gap as test_contact_auto_calibrate; skip rather than burn 120s",
-)
 def test_poke(world):
     world.gcode_ok("SET_KINEMATIC_POSITION X=150 Y=150 Z=10", timeout=10)
     world.gcode_ok("G4 P1000", timeout=15)
@@ -125,8 +104,12 @@ def test_poke(world):
 
 
 @pytest.mark.skip(
-    reason="hangs: BED_MESH_CALIBRATE dies with an unhandled reactor "
-    "exception and never responds; needs a dedicated debugging session",
+    reason="hangs: mid-scan the emulator's beacon stream stalls ('Beacon "
+    "sensor not receiving data' shutdown), then the fork's mesh scan "
+    "callback (beacon.py cb, sample['pos']) KeyErrors on the pos-less "
+    "samples flushed after shutdown, killing the reactor — beacon stream "
+    "throughput/stall issue, needs a dedicated session (NOT the shaper "
+    "stream-boundary bug, which is fixed)",
 )
 def test_bed_mesh(sim_world):
     world = sim_world(_cfg(bed_mesh=True), beacon=True)

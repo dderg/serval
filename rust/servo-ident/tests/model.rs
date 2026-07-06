@@ -1,4 +1,4 @@
-use servo_ident::model::{Structure, COULOMB_DEADBAND_MM_S};
+use servo_ident::model::{coulomb_cols, Structure, COULOMB_DEADBAND_MM_S};
 
 fn physical_torque(
     p: &servo_ident::model::PhysicalParams,
@@ -40,9 +40,10 @@ fn row_dot_theta_matches_unpacked_physics() {
             ),
         ];
         for (acc, vel) in probes {
+            let (cf, cr): (Vec<f64>, Vec<f64>) = vel.iter().map(|&v| coulomb_cols(v)).unzip();
             for motor in 0..n {
                 let via_row: f64 = s
-                    .row(motor, acc, vel)
+                    .row(motor, acc, vel, &cf, &cr)
                     .iter()
                     .zip(theta)
                     .map(|(r, t)| r * t)
@@ -61,11 +62,14 @@ fn row_dot_theta_matches_unpacked_physics() {
 fn scalar_row_layout() {
     let s = Structure::CartesianScalar;
     assert_eq!(s.param_count(), 4);
-    let row = s.row(0, &[1000.0], &[100.0]);
+    let (cf, cr) = coulomb_cols(100.0);
+    let row = s.row(0, &[1000.0], &[100.0], &[cf], &[cr]);
     assert_eq!(row, vec![1000.0, 100.0, 1.0, 0.0]);
-    let row_rev = s.row(0, &[1000.0], &[-100.0]);
+    let (cf, cr) = coulomb_cols(-100.0);
+    let row_rev = s.row(0, &[1000.0], &[-100.0], &[cf], &[cr]);
     assert_eq!(row_rev, vec![1000.0, -100.0, 0.0, 1.0]);
-    let row_dead = s.row(0, &[1000.0], &[COULOMB_DEADBAND_MM_S / 2.0]);
+    let (cf, cr) = coulomb_cols(COULOMB_DEADBAND_MM_S / 2.0);
+    let row_dead = s.row(0, &[1000.0], &[COULOMB_DEADBAND_MM_S / 2.0], &[cf], &[cr]);
     assert_eq!(row_dead[2], 0.0);
     assert_eq!(row_dead[3], 0.0);
 }
@@ -74,9 +78,11 @@ fn scalar_row_layout() {
 fn corexy_rows_share_mass_params() {
     let s = Structure::CoreXY;
     assert_eq!(s.param_count(), 8);
-    let ra = s.row(0, &[100.0, 50.0], &[10.0, -10.0]);
+    let cf = [1.0, 0.0];
+    let cr = [0.0, 1.0];
+    let ra = s.row(0, &[100.0, 50.0], &[10.0, -10.0], &cf, &cr);
     assert_eq!(ra, vec![100.0, 50.0, 10.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
-    let rb = s.row(1, &[100.0, 50.0], &[10.0, -10.0]);
+    let rb = s.row(1, &[100.0, 50.0], &[10.0, -10.0], &cf, &cr);
     assert_eq!(rb, vec![50.0, 100.0, 0.0, 0.0, 0.0, -10.0, 0.0, 1.0]);
 }
 

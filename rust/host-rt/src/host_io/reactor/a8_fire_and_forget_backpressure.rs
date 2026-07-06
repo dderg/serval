@@ -41,13 +41,13 @@ fn a8_fire_and_forget_enqueues_under_window_full() {
         tx_len_before,
         "no bytes should hit the wire while window is full"
     );
-    assert_eq!(h.reactor.pending_fire_and_forget.len(), 1);
+    assert_eq!(h.reactor.outbound.pending_fire_and_forget.len(), 1);
 
     h.feed_rx(&build_frame(&[], 2));
     h.tick();
 
     assert_eq!(
-        h.reactor.pending_fire_and_forget.len(),
+        h.reactor.outbound.pending_fire_and_forget.len(),
         0,
         "fire-and-forget queue should be drained after window opens",
     );
@@ -82,6 +82,7 @@ fn a8_pending_fire_and_submission_drain_in_fifo_order() {
 
     assert_eq!(
         h.reactor
+            .outbound
             .pending_outbound_order
             .iter()
             .copied()
@@ -110,7 +111,7 @@ fn a8_pending_fire_and_submission_drain_in_fifo_order() {
         vec![vec![0xF1], vec![0xA5], vec![0xF2]],
         "queued fire-and-forget and response-bearing submissions must preserve FIFO wire order",
     );
-    assert!(h.reactor.pending_outbound_order.is_empty());
+    assert!(h.reactor.outbound.pending_outbound_order.is_empty());
 }
 
 #[test]
@@ -124,7 +125,7 @@ fn a8_overflow_returns_backpressure_error() {
             .expect("enqueue should succeed up to ceiling");
     }
     assert_eq!(
-        h.reactor.pending_fire_and_forget.len(),
+        h.reactor.outbound.pending_fire_and_forget.len(),
         PENDING_FIRE_AND_FORGET_CEILING,
     );
 
@@ -134,7 +135,7 @@ fn a8_overflow_returns_backpressure_error() {
         "overflow must return Backpressure, got {result:?}",
     );
     assert_eq!(
-        h.reactor.pending_fire_and_forget.len(),
+        h.reactor.outbound.pending_fire_and_forget.len(),
         PENDING_FIRE_AND_FORGET_CEILING,
     );
 }

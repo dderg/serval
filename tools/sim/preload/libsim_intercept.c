@@ -93,11 +93,16 @@ static pthread_mutex_t iio_state_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 // Each auto-endstop models a wall 'wall_steps' steps from the boot
 // position along the step queue feeding 'step_line'. The approach
-// direction is latched at the first wall crossing; the endstop GPIO is
-// asserted exactly while the position is at or past the wall, so
-// homing retracts clear it and repeated probe descents trigger at the
-// same height.
+// direction is latched when the position crosses the wall from inside;
+// the endstop GPIO is asserted exactly while the position is at or past
+// the latched wall, so homing retracts clear it and repeated probe
+// descents trigger at the same height. A homing approach halts within a
+// few steps of the wall, so travelling far past a latched wall proves
+// that crossing was ordinary motion (e.g. a pre-homing z-hop), not an
+// endstop hit — the latch is released and re-arms once the position
+// returns inside the window.
 #define MAX_AUTO_ENDSTOPS 8
+#define AUTO_ENDSTOP_OVERRUN_SLOP_FACTOR 4
 struct auto_endstop {
     int active;
     int step_chip, step_line;
@@ -105,6 +110,7 @@ struct auto_endstop {
     long wall_steps;
     long pos;
     int toward_sign;
+    int latch_armed;
     int triggered;
 };
 static struct auto_endstop auto_endstops[MAX_AUTO_ENDSTOPS];
@@ -117,10 +123,10 @@ static void iio_init(void) {
     // X→gpio18, Y→gpio7, Z→gpio15. Endstops: X→gpio200, Y→gpio201,
     // Z→gpio202, plus a second Z-linked line gpio203 for probe pins so a
     // config can have both a plain Z endstop and a motion-triggered probe.
-    auto_endstops[0] = (struct auto_endstop){1, 0,18, 0,200, 50, 0, 0, 0};
-    auto_endstops[1] = (struct auto_endstop){1, 0,7,  0,201, 50, 0, 0, 0};
-    auto_endstops[2] = (struct auto_endstop){1, 0,15, 0,202, 50, 0, 0, 0};
-    auto_endstops[3] = (struct auto_endstop){1, 0,15, 0,203, 50, 0, 0, 0};
+    auto_endstops[0] = (struct auto_endstop){1, 0,18, 0,200, 50, 0, 0, 1, 0};
+    auto_endstops[1] = (struct auto_endstop){1, 0,7,  0,201, 50, 0, 0, 1, 0};
+    auto_endstops[2] = (struct auto_endstop){1, 0,15, 0,202, 50, 0, 0, 1, 0};
+    auto_endstops[3] = (struct auto_endstop){1, 0,15, 0,203, 50, 0, 0, 1, 0};
 }
 
 static int alloc_fake_fd(enum sim_slot_kind kind) {
@@ -580,8 +586,18 @@ static void auto_endstop_advance(int chip_id, int offset, long delta) {
         if (!ae->active) continue;
         if (ae->step_chip != chip_id || ae->step_line != offset) continue;
         ae->pos += delta;
-        if (ae->toward_sign == 0 && labs(ae->pos) >= ae->wall_steps)
+        if (labs(ae->pos) < ae->wall_steps)
+            ae->latch_armed = 1;
+        if (ae->toward_sign == 0 && ae->latch_armed
+            && labs(ae->pos) >= ae->wall_steps) {
             ae->toward_sign = (ae->pos > 0) ? 1 : -1;
+            ae->latch_armed = 0;
+        }
+        long overrun_limit
+            = ae->wall_steps * (1 + AUTO_ENDSTOP_OVERRUN_SLOP_FACTOR);
+        if (ae->toward_sign != 0
+            && ae->toward_sign * ae->pos >= overrun_limit)
+            ae->toward_sign = 0;
         int trig = ae->toward_sign != 0
                    && ae->toward_sign * ae->pos >= ae->wall_steps;
         if (trig != ae->triggered) {

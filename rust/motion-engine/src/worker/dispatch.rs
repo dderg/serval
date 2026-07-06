@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -36,11 +35,6 @@ pub enum DispatchError {
     ConnectionDropped(u32),
     #[error("piece pump thread is gone; cannot dispatch")]
     PumpGone,
-    #[error(
-        "no nominal clock frequency registered for mcu {0} \
-         — set_nominal_clock_freq was not called"
-    )]
-    MissingNominalFreq(u32),
     #[error("nudge target mcu_id={mcu_id} axis={axis} not present in mcu_configs")]
     NudgeTargetMissing { mcu_id: u32, axis: u8 },
 }
@@ -50,8 +44,8 @@ pub(crate) type NudgeDispatchFn =
     Arc<dyn Fn(u32, &crate::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync>;
 
 /// State a committed `ShapedSegment` needs to reach the pump: per-MCU clock
-/// anchoring/projection, the axis-lane split, and the motion-history
-/// bookkeeping that split feeds.
+/// anchoring/projection, the axis-lane split, and the motion-history store
+/// whose retained pieces a re-anchor invalidates.
 pub(crate) struct SegmentDispatchCtx {
     pub(crate) router: Arc<Mutex<host_rt::passthrough_queue::PassthroughRouter>>,
     pub(crate) anchor: Arc<Mutex<crate::anchor::Anchor>>,
@@ -60,7 +54,6 @@ pub(crate) struct SegmentDispatchCtx {
     pub(crate) counter: Arc<AtomicU64>,
     pub(crate) active_drip_cohort: Arc<Mutex<Option<u64>>>,
     pub(crate) motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
-    pub(crate) nominal_freqs: Arc<Mutex<HashMap<u32, u32>>>,
     pub(crate) frontier: Arc<CommittedFrontier>,
 }
 
@@ -136,11 +129,6 @@ pub(crate) fn dispatch_segment(
         max_piece_secs,
     );
 
-    let nominal_freqs = ctx
-        .nominal_freqs
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .clone();
     if fresh {
         ctx.motion_history
             .lock()
@@ -148,19 +136,10 @@ pub(crate) fn dispatch_segment(
             .drop_pieces_on_reanchor();
     }
     for m in msgs {
-        let nominal_freq = *nominal_freqs
-            .get(&m.key.mcu_id)
-            .ok_or(DispatchError::MissingNominalFreq(m.key.mcu_id))?;
-        {
-            let mut store = ctx.motion_history.lock().unwrap_or_else(|p| p.into_inner());
-            for (piece, host_t) in &m.pieces {
-                store.record(m.key, piece, nominal_freq, *host_t);
-            }
-        }
         ctx.pump_tx.send(m).map_err(|_| DispatchError::PumpGone)?;
     }
 
-    tracing::info!(
+    tracing::trace!(
         subsystem = "motion",
         event = "pipe_pump_in",
         line = seg.source_line,
@@ -237,18 +216,6 @@ pub(crate) fn dispatch_nudge(
 
     if !pieces.is_empty() {
         let key = crate::types::AxisKey { mcu_id, axis };
-        let nominal_freq = {
-            let freqs = ctx.nominal_freqs.lock().unwrap_or_else(|p| p.into_inner());
-            *freqs
-                .get(&mcu_id)
-                .ok_or(DispatchError::MissingNominalFreq(mcu_id))?
-        };
-        {
-            let mut store = ctx.motion_history.lock().unwrap_or_else(|p| p.into_inner());
-            for (piece, host_t) in &pieces {
-                store.record(key, piece, nominal_freq, *host_t);
-            }
-        }
         ctx.pump_tx
             .send(crate::pump::EnqueueMsg {
                 key,
@@ -277,7 +244,7 @@ pub(crate) struct ConsumerShared {
 impl ConsumerShared {
     pub(crate) fn dispatch_segment(&self, seg: &ShapedSegment) -> Result<(), DispatchError> {
         let n_ax = seg.axes.len();
-        tracing::info!(
+        tracing::trace!(
             subsystem = "motion",
             event = "pipe_dispatch",
             line = seg.source_line,
