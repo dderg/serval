@@ -1553,7 +1553,7 @@ fn evaluate_wkc(ctx: &mut EndpointCtx, wkc: i32) -> ControlFlow<()> {
                 expected_wkc,
                 consecutive_bad = n,
                 halt_threshold = crate::claim::WKC_CONSECUTIVE_LOSS_LIMIT,
-                "working counter below expected; tolerating (USB-NIC frame loss)"
+                "working counter below expected; tolerating one bad cycle"
             );
         }
         WkcDecision::Halt => {
