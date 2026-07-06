@@ -133,7 +133,6 @@ pub struct PyMotionEngine {
     router: Arc<Mutex<PassthroughRouter>>,
     parser: Arc<Mutex<Option<Arc<MsgProtoParser>>>>,
     mcus: Arc<Mutex<HashMap<u32, McuConnection>>>,
-    #[allow(dead_code)]
     planner: Mutex<Option<StreamWorkerHandle>>,
     planner_config: Mutex<PlannerConfig>,
     commanded_pos: Mutex<[f64; 3]>,

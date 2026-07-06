@@ -1499,17 +1499,8 @@ class ToolheadShim:
     def register_lookahead_callback(self, callback):
         self.motion.register_lookahead_callback(callback)
 
-    def note_step_generation_scan_time(self, delay, old_delay=0.0):
-        self.motion.flush_step_generation()
-
-    def get_trapq(self):
-        return None
-
     def note_mcu_movequeue_activity(self, mq_time, set_step_gen_time=False):
         self.motion.advance_flush_time(mq_time)
-
-    def limit_next_junction_speed(self, speed):
-        pass
 
     def __getattr__(self, name):
         return getattr(self.motion, name)

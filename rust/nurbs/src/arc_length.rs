@@ -47,11 +47,6 @@ impl<T: Float> ArcLengthTable<T> {
             u: &self.u,
         }
     }
-
-    #[must_use]
-    pub fn into_parts(self) -> (Vec<T>, Vec<T>) {
-        (self.s, self.u)
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
