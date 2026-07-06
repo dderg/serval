@@ -19,10 +19,17 @@
 //                                the wire contract (it feeds the hash), but
 //                                the codec is hand-written
 //
+// Variable-array length convention: an `array<...>` field takes its element
+// count from the most recent preceding integer field in the same struct whose
+// name ends with `count` or starts with `num_`; when no such field precedes
+// it, the array carries its own u8 count prefix on the wire.
+//
 // Codec placement rule: a message whose fields are all scalars or T[N] gets
 // its struct and codec generated into `src/messages/generated.rs`; a message
 // with any `string` or `array<` field keeps its hand-written struct and codec
-// in `src/messages.rs`.
+// in `src/messages.rs` — and `tests/schema_layout.rs` decodes that codec's
+// real output using only the description written here, so a codec edit
+// without the matching schema edit fails the suite.
 
 #[derive(Clone, Copy)]
 struct SchemaField {
