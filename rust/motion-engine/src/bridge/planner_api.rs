@@ -659,7 +659,10 @@ impl PyMotionEngine {
                  of Z at your XY limits; Z allows {:.2}mm/s / {:.1}mm/s² — the bed is \
                  warped or the Z limits are too conservative (mesh range {:.3}..{:.3}mm, \
                  max slope {:.4})",
-                limits.max_z_velocity, limits.max_z_accel, bounds.z_min, bounds.z_max,
+                limits.max_z_velocity,
+                limits.max_z_accel,
+                bounds.z_min,
+                bounds.z_max,
                 bounds.max_gradient
             )));
         }
@@ -728,10 +731,7 @@ impl PyMotionEngine {
     /// re-expressed as a gcode Z through the *new* transform, and that rebase
     /// rides the token so every gcode-space odometer moves together. Returns
     /// the rebased gcode Z for the host's own position bookkeeping.
-    fn swap_bed_mesh(
-        &self,
-        new: Option<Arc<geometry::SurfaceTransform>>,
-    ) -> PyResult<f64> {
+    fn swap_bed_mesh(&self, new: Option<Arc<geometry::SurfaceTransform>>) -> PyResult<f64> {
         let pos = *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
         let mut current = self.bed_mesh.lock().unwrap_or_else(|p| p.into_inner());
         let machine_z = pos[2]

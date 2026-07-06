@@ -321,11 +321,7 @@ enum ZWarp<'a> {
 const WARP_CONST_EPS_MM: f64 = 2e-3;
 const WARP_BBOX_SAMPLES: usize = 8;
 
-fn z_warp_mode<'a>(
-    mesh: Option<&'a SurfaceTransform>,
-    gm: &Move,
-    start_pos: &[f64],
-) -> ZWarp<'a> {
+fn z_warp_mode<'a>(mesh: Option<&'a SurfaceTransform>, gm: &Move, start_pos: &[f64]) -> ZWarp<'a> {
     let Some(t) = mesh else {
         return ZWarp::None;
     };
@@ -410,8 +406,10 @@ impl Sampler<'_> {
                     + w.wz * acc[2]
                     + w.wxx * vel[0] * vel[0]
                     + w.wyy * vel[1] * vel[1]
-                    + 2.0 * (w.wxy * vel[0] * vel[1] + w.wxz * vel[0] * vel[2]
-                        + w.wyz * vel[1] * vel[2]);
+                    + 2.0
+                        * (w.wxy * vel[0] * vel[1]
+                            + w.wxz * vel[0] * vel[2]
+                            + w.wyz * vel[1] * vel[2]);
                 (base.0 + w.w, base.1 + w_dot, base.2 + w_ddot)
             }
         }

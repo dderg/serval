@@ -7,7 +7,8 @@ fn wavy_grid() -> MeshGrid {
     let z = (0..ny)
         .flat_map(|j| {
             (0..nx).map(move |i| {
-                0.08 * libm::sin(0.9 * i as f64) + 0.05 * libm::cos(1.3 * j as f64) - 0.02 * i as f64
+                0.08 * libm::sin(0.9 * i as f64) + 0.05 * libm::cos(1.3 * j as f64)
+                    - 0.02 * i as f64
             })
         })
         .collect();
@@ -199,7 +200,10 @@ fn z_spread_bounds_the_true_spread() {
         }
     }
     assert!(spread >= z_max - z_min);
-    assert!(spread <= (z_max - z_min) * 2.0 + 1e-9, "bound uselessly loose");
+    assert!(
+        spread <= (z_max - z_min) * 2.0 + 1e-9,
+        "bound uselessly loose"
+    );
 }
 
 #[test]
@@ -263,7 +267,16 @@ fn constructor_rejects_bad_grids() {
         Err(SurfaceError::NonPositiveSpacing { .. })
     ));
     assert!(matches!(
-        MeshGrid::new(0.0, 0.0, 1.0, 1.0, 2, 2, vec![0.0, 1.0, f64::NAN, 0.0], TENSION),
+        MeshGrid::new(
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            2,
+            2,
+            vec![0.0, 1.0, f64::NAN, 0.0],
+            TENSION
+        ),
         Err(SurfaceError::NonFinitePoint { index: 2 })
     ));
 }

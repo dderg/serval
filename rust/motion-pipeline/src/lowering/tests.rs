@@ -547,8 +547,16 @@ fn curved_fit_acceleration_is_continuous_and_converges() {
     };
 
     let max_analytic_err = |tol: f64| -> f64 {
-        let (axes, _t) =
-            lower_move_pieces(&planned[0].geometry, vm, 0.0, &start, tol_pos(tol), &[], None).unwrap();
+        let (axes, _t) = lower_move_pieces(
+            &planned[0].geometry,
+            vm,
+            0.0,
+            &start,
+            tol_pos(tol),
+            &[],
+            None,
+        )
+        .unwrap();
         let mut worst = 0.0_f64;
         for axis in 0..2 {
             let pieces = &axes[axis];
@@ -693,8 +701,16 @@ fn arc_member_fits_within_the_wire_degree_cap() {
     let planned = fit_and_plan(std::slice::from_ref(&gm));
     let vm = &planned[0].velocity;
     let start = [0.0_f64; 4];
-    let (axes, total_t) =
-        lower_move_pieces(&planned[0].geometry, vm, 0.0, &start, tol_pos(5e-3), &[], None).unwrap();
+    let (axes, total_t) = lower_move_pieces(
+        &planned[0].geometry,
+        vm,
+        0.0,
+        &start,
+        tol_pos(5e-3),
+        &[],
+        None,
+    )
+    .unwrap();
     for pieces in &axes[..2] {
         assert!(!pieces.is_empty());
         for p in pieces {
@@ -723,8 +739,16 @@ fn straight_phase_pieces_carry_natural_length() {
     let vm = &planned[0].velocity;
     assert!(!vm.phases.is_empty());
     let start = [0.0_f64; 4];
-    let (axes, _t) =
-        lower_move_pieces(&planned[0].geometry, vm, 0.0, &start, tol_pos(1e-3), &[], None).unwrap();
+    let (axes, _t) = lower_move_pieces(
+        &planned[0].geometry,
+        vm,
+        0.0,
+        &start,
+        tol_pos(1e-3),
+        &[],
+        None,
+    )
+    .unwrap();
     let has_jerk_phase = vm.phases.iter().any(|p| p.j != 0.0);
     let expect = if has_jerk_phase { 4 } else { 3 };
     for p in &axes[0] {
@@ -740,7 +764,8 @@ fn wavy_transform(fade: geometry::Fade) -> geometry::SurfaceTransform {
     let (nx, ny) = (6, 6);
     let z = (0..ny)
         .flat_map(|j| {
-            (0..nx).map(move |i| 0.12 * libm::sin(0.8 * i as f64) + 0.09 * libm::cos(1.1 * j as f64))
+            (0..nx)
+                .map(move |i| 0.12 * libm::sin(0.8 * i as f64) + 0.09 * libm::cos(1.1 * j as f64))
         })
         .collect();
     let mesh = geometry::MeshGrid::new(0.0, 0.0, 50.0, 50.0, nx, ny, z, 0.2).unwrap();
@@ -812,8 +837,16 @@ fn flat_surface_keeps_the_phase_path_with_a_constant_offset() {
     let planned = fit_and_plan(std::slice::from_ref(&m));
     let start = [10.0, 20.0, 0.2, 0.0];
 
-    let base = lower_move(&planned[0].geometry, &planned[0].velocity, 0.0, &start, FIT_TOL, &[], None)
-        .unwrap();
+    let base = lower_move(
+        &planned[0].geometry,
+        &planned[0].velocity,
+        0.0,
+        &start,
+        FIT_TOL,
+        &[],
+        None,
+    )
+    .unwrap();
     let warped = lower_move(
         &planned[0].geometry,
         &planned[0].velocity,
@@ -848,8 +881,16 @@ fn fully_faded_move_gets_exactly_the_fade_target_offset() {
     let planned = fit_and_plan(std::slice::from_ref(&m));
     let start = [10.0, 20.0, 12.0, 0.0];
 
-    let base = lower_move(&planned[0].geometry, &planned[0].velocity, 0.0, &start, FIT_TOL, &[], None)
-        .unwrap();
+    let base = lower_move(
+        &planned[0].geometry,
+        &planned[0].velocity,
+        0.0,
+        &start,
+        FIT_TOL,
+        &[],
+        None,
+    )
+    .unwrap();
     let warped = lower_move(
         &planned[0].geometry,
         &planned[0].velocity,

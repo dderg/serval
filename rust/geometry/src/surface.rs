@@ -187,7 +187,12 @@ impl MeshGrid {
             *row = hermite(p, u, self.tension);
         }
         let col = |pick: fn(&(f64, f64, f64)) -> f64| {
-            [pick(&rows[0]), pick(&rows[1]), pick(&rows[2]), pick(&rows[3])]
+            [
+                pick(&rows[0]),
+                pick(&rows[1]),
+                pick(&rows[2]),
+                pick(&rows[3]),
+            ]
         };
         let (z, zy_v, zyy_v) = hermite(col(|r| r.0), v, self.tension);
         let (zx_u, zxy_uv, _) = hermite(col(|r| r.1), v, self.tension);
