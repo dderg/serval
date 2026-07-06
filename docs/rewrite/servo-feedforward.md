@@ -105,9 +105,14 @@ lead to the transport share of it — leading past the true latency flips the
 sign of the edge error. Lookahead past the end of the streamed trajectory, or
 into a dwell gap, reads as a stationary target (zero FF), which is the same
 thing the un-led path converges to. The option is per-motor because the
-latency it compensates is a per-drive property; on a coupled node (node-level
-`dynamics_profile`) every motor's torque FF mixes all motors' accelerations,
-so all motors there must use the same lead — a mismatch is a config error.
+latency it compensates is a per-drive property.
+
+On a coupled node (node-level `dynamics_profile`) every motor's torque FF
+mixes all motors' commanded kinematics, so asymmetry in the FF path skews the
+shared model instead of tuning one motor. The per-motor FF options —
+`velocity_ff`, `ff_torque_clamp`, `ff_lead_cycles` (the
+`COUPLED_UNIFORM_OPTIONS` list in `ethercat_node.py`) — must therefore be
+identical across the node's motors; a mismatch is a config error.
 
 ## Dynamics profile TOML
 

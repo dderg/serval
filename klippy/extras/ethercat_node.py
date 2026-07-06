@@ -18,6 +18,16 @@ EC_RT_MAX_SLAVES = 8
 
 CYCLE_US_QUANTUM = 250
 
+# Per-motor options that must be identical across a coupled node: a
+# node-level dynamics profile computes each motor's torque feedforward
+# from every motor's commanded kinematics, so asymmetry in the FF path
+# skews the coupled model instead of tuning one motor.
+COUPLED_UNIFORM_OPTIONS = (
+    ("velocity_ff", lambda rail: rail.get_ff_config()[0]),
+    ("ff_torque_clamp", lambda rail: rail.get_ff_config()[1]),
+    ("ff_lead_cycles", lambda rail: rail.get_ff_config()[2]),
+)
+
 
 class EtherCatNode:
     def __init__(self, config):
@@ -131,27 +141,29 @@ class EtherCatNode:
                 "or none — missing on: %s" % (self.name, ", ".join(missing))
             )
 
-    def _validate_ff_lead(self, rails):
+    def _validate_coupled_uniformity(self, rails):
         if self.dynamics_profile is None:
             return
-        leads = {
-            rail.get_motor_name(): rail.get_ff_config()[2]
-            for _global_axis, rail in rails
-        }
-        if len(set(leads.values())) > 1:
-            raise self.printer.config_error(
-                "ethercat_node %s: a coupled (node-level) dynamics_profile "
-                "computes each motor's torque feedforward from every motor's "
-                "commanded acceleration, so ff_lead_cycles must be identical "
-                "across the node — got %s"
-                % (
-                    self.name,
-                    ", ".join(
-                        "%s=%d" % (name, lead)
-                        for name, lead in sorted(leads.items())
-                    ),
+        for option, read in COUPLED_UNIFORM_OPTIONS:
+            values = {
+                rail.get_motor_name(): read(rail)
+                for _global_axis, rail in rails
+            }
+            if len(set(values.values())) > 1:
+                raise self.printer.config_error(
+                    "ethercat_node %s: a coupled (node-level) "
+                    "dynamics_profile computes each motor's torque "
+                    "feedforward from every motor's commanded kinematics, "
+                    "so %s must be identical across the node — got %s"
+                    % (
+                        self.name,
+                        option,
+                        ", ".join(
+                            "%s=%s" % (name, value)
+                            for name, value in sorted(values.items())
+                        ),
+                    )
                 )
-            )
 
     def _claim(self):
         if self.engine_handle is not None:
@@ -163,7 +175,7 @@ class EtherCatNode:
             for slot, (_global_axis, rail) in enumerate(rails)
         }
         self._validate_dynamics_profiles(rails)
-        self._validate_ff_lead(rails)
+        self._validate_coupled_uniformity(rails)
         drives = []
         for global_axis, rail in rails:
             following_error_counts, max_torque_tenth_pct = (

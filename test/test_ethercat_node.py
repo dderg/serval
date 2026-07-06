@@ -164,7 +164,7 @@ def test_set_motor_torque_without_engine_handle_raises():
         ethercat_node.EtherCatNode.set_motor_torque(node, "x", True, 1.0)
 
 
-def test_validate_ff_lead_rejects_mismatch_on_coupled_node():
+def test_coupled_uniformity_rejects_mismatched_ff_lead():
     node, rails = _dyn_node(
         [
             (0, FakeRail("x", 0, ff_config=(True, 30.0, 2))),
@@ -173,12 +173,38 @@ def test_validate_ff_lead_rejects_mismatch_on_coupled_node():
         node_profile="/cfg/node.toml",
     )
     with pytest.raises(FakeConfigError) as e:
-        ethercat_node.EtherCatNode._validate_ff_lead(node, rails)
+        ethercat_node.EtherCatNode._validate_coupled_uniformity(node, rails)
     assert "ff_lead_cycles must be identical" in str(e.value)
     assert "x=2" in str(e.value) and "y=0" in str(e.value)
 
 
-def test_validate_ff_lead_allows_equal_leads_on_coupled_node():
+def test_coupled_uniformity_rejects_mismatched_velocity_ff():
+    node, rails = _dyn_node(
+        [
+            (0, FakeRail("x", 0, ff_config=(True, 30.0, 0))),
+            (1, FakeRail("y", 1, ff_config=(False, 30.0, 0))),
+        ],
+        node_profile="/cfg/node.toml",
+    )
+    with pytest.raises(FakeConfigError) as e:
+        ethercat_node.EtherCatNode._validate_coupled_uniformity(node, rails)
+    assert "velocity_ff must be identical" in str(e.value)
+
+
+def test_coupled_uniformity_rejects_mismatched_torque_clamp():
+    node, rails = _dyn_node(
+        [
+            (0, FakeRail("x", 0, ff_config=(True, 30.0, 0))),
+            (1, FakeRail("y", 1, ff_config=(True, 60.0, 0))),
+        ],
+        node_profile="/cfg/node.toml",
+    )
+    with pytest.raises(FakeConfigError) as e:
+        ethercat_node.EtherCatNode._validate_coupled_uniformity(node, rails)
+    assert "ff_torque_clamp must be identical" in str(e.value)
+
+
+def test_coupled_uniformity_allows_identical_ff_config():
     node, rails = _dyn_node(
         [
             (0, FakeRail("x", 0, ff_config=(True, 30.0, 2))),
@@ -186,14 +212,14 @@ def test_validate_ff_lead_allows_equal_leads_on_coupled_node():
         ],
         node_profile="/cfg/node.toml",
     )
-    ethercat_node.EtherCatNode._validate_ff_lead(node, rails)
+    ethercat_node.EtherCatNode._validate_coupled_uniformity(node, rails)
 
 
-def test_validate_ff_lead_allows_mismatch_on_independent_motors():
+def test_coupled_uniformity_allows_mismatch_on_independent_motors():
     node, rails = _dyn_node(
         [
             (0, FakeRail("x", 0, ff_config=(True, 30.0, 3))),
-            (1, FakeRail("y", 1, ff_config=(True, 30.0, 0))),
+            (1, FakeRail("y", 1, ff_config=(False, 60.0, 0))),
         ]
     )
-    ethercat_node.EtherCatNode._validate_ff_lead(node, rails)
+    ethercat_node.EtherCatNode._validate_coupled_uniformity(node, rails)
