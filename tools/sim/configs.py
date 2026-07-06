@@ -491,6 +491,7 @@ z_hop_speed: 15
 """
 
     remote_section = ""
+    z_min_home_dist = ""
     if variant == "remote":
         if f4_pty is None:
             raise ValueError(
@@ -498,6 +499,11 @@ z_hop_speed: 15
                 " the trsync lives on a different MCU than the steppers"
             )
         probe_section = ""
+        # The trigger is a wall-clock timer, not a position, so the trip
+        # point moves with each approach — the min_home_dist re-approach
+        # check would reject it. This variant exercises the cross-MCU
+        # trsync relay, not the early-trigger guard.
+        z_min_home_dist = "min_home_dist: 0"
         remote_section = f"""
 [mcu bottom]
 serial: {f4_pty}
@@ -592,6 +598,7 @@ post_processors: is_xy
 position_min: -5
 position_max: 250
 homing_speed: 5
+{z_min_home_dist}
 {z_endstop}
 
 [limit gantry]

@@ -70,12 +70,6 @@ def test_proximity_homing(world):
     assert "z" in toolhead.get("homed_axes", "")
 
 
-@pytest.mark.xfail(
-    reason="the emulator's step-tracked Z drifts through the homing "
-    "descent, so post-home it reports a frequency below the calibrated "
-    "model range ('Attempted to probe with Beacon below calibrated model "
-    "range') — the emulator's Z anchor needs re-seeding at trigger time",
-)
 def test_proximity_probing(world):
     _home(world)
     # Hop into the calibrated model range (0.2..5mm) before probing, as a
@@ -86,11 +80,6 @@ def test_proximity_probing(world):
     assert world.shutdown_line() is None
 
 
-@pytest.mark.xfail(
-    reason="contact detect time lands just outside the retained motion "
-    "history window under the virtual clock ('query host time precedes "
-    "retained motion history')",
-)
 def test_contact_probing(world):
     _home(world)
     world.gcode_ok("PROBE PROBE_METHOD=contact SAMPLES=1", timeout=120)
