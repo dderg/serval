@@ -36,14 +36,6 @@ impl<T: Float> KnotVector<T> {
     pub fn into_inner(self) -> Vec<T> {
         self.knots
     }
-
-    pub fn find_span(&self, u: T, p: usize, n: usize) -> usize {
-        find_knot_span(&self.knots, p, n, u)
-    }
-
-    pub fn multiplicity_at(&self, u: T) -> usize {
-        self.knots.iter().filter(|k| **k == u).count()
-    }
 }
 
 pub fn find_knot_span<T: Float>(knots: &[T], p: usize, n: usize, u: T) -> usize {

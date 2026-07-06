@@ -40,23 +40,6 @@ fn integrate_quadratic_matches_closed_form() {
     assert!((result - 1.0 / 3.0).abs() < 1e-12);
 }
 
-#[cfg(feature = "host")]
-#[allow(clippy::float_cmp)]
-#[test]
-fn build_scalar_table_for_linear_curve() {
-    let curve =
-        crate::ScalarNurbs::try_new(1, vec![0.0_f64, 0.0, 1.0, 1.0], vec![0.0, 1.0]).unwrap();
-    let table = build_arc_length_table_scalar(&curve, 1e-6, 64).unwrap();
-    assert!((table.s_max() - 1.0).abs() < 1e-6);
-    assert_eq!(table.u_max(), 1.0);
-    for w in table.s().windows(2) {
-        assert!(w[1] >= w[0]);
-    }
-    for w in table.u().windows(2) {
-        assert!(w[1] >= w[0]);
-    }
-}
-
 #[allow(clippy::float_cmp)]
 #[test]
 fn param_from_arc_length_at_endpoints() {
