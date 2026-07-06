@@ -30,6 +30,7 @@ pub struct Shaper {
     pending_rest: VecDeque<bool>,
     forward_support: f64,
     back_support: f64,
+    history_trimmed: bool,
 }
 
 impl Shaper {
@@ -42,6 +43,7 @@ impl Shaper {
             pending_rest: VecDeque::new(),
             forward_support,
             back_support,
+            history_trimmed: false,
         }
     }
 
@@ -70,6 +72,7 @@ impl Shaper {
                             self.pending.clear();
                             self.pending_rest.clear();
                             self.history.clear();
+                            self.history_trimmed = false;
                         }
                         Control::Dwell { .. } | Control::SetAxisChains(_) | Control::Barrier(_) => {
                             assert!(
@@ -90,6 +93,7 @@ impl Shaper {
                                 // fall back to the stream-boundary clamp then.
                                 if new_back > self.back_support {
                                     self.history.clear();
+                                    self.history_trimmed = false;
                                 }
                                 (self.forward_support, self.back_support) = (new_forward, new_back);
                                 self.chains = chains.clone();
@@ -126,8 +130,15 @@ impl Shaper {
             return true;
         }
         let base = self.pending.make_contiguous();
-        let shaped = apply_axis_chains(&self.history, base, count, force, &self.chains.chains)
-            .unwrap_or_else(|e| panic!("shaper: {e}"));
+        let shaped = apply_axis_chains(
+            &self.history,
+            base,
+            count,
+            force,
+            !self.history_trimmed,
+            &self.chains.chains,
+        )
+        .unwrap_or_else(|e| panic!("shaper: {e}"));
         for seg in shaped {
             if output.send(ShapedItem::Seg(seg)).is_err() {
                 return false;
@@ -150,6 +161,7 @@ impl Shaper {
             .is_some_and(|seg| seg.t_end < keep_after)
         {
             self.history.pop_front();
+            self.history_trimmed = true;
         }
         true
     }
@@ -174,6 +186,7 @@ fn apply_axis_chains(
     base: &[ShapedSegment],
     commit_count: usize,
     force: bool,
+    at_stream_boundary: bool,
     chains: &[CompiledChain],
 ) -> Result<Vec<ShapedSegment>, PostProcessError> {
     let mut out: Vec<ShapedSegment> = base.iter().take(commit_count).cloned().collect();
@@ -197,7 +210,15 @@ fn apply_axis_chains(
     let default_chain = CompiledChain::default();
     for axis in 0..n_axes {
         let chain = chains.get(axis).unwrap_or(&default_chain);
-        apply_axis_chain(history, base, &mut out, axis, force, chain)?;
+        apply_axis_chain(
+            history,
+            base,
+            &mut out,
+            axis,
+            force,
+            at_stream_boundary,
+            chain,
+        )?;
     }
     for seg in &mut out {
         pad_segment_axes_to_uniform_degree(seg);
@@ -227,12 +248,14 @@ fn pad_segment_axes_to_uniform_degree(seg: &mut ShapedSegment) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_axis_chain(
     history: &VecDeque<ShapedSegment>,
     base: &[ShapedSegment],
     out: &mut [ShapedSegment],
     axis: usize,
     force: bool,
+    at_stream_boundary: bool,
     chain: &CompiledChain,
 ) -> Result<(), PostProcessError> {
     let Some(kernel) = chain.stages.iter().find_map(|stage| match stage {
@@ -247,7 +270,6 @@ fn apply_axis_chain(
         .or_else(|| base.first())
         .map_or(0.0, |seg| seg.t_start);
     let last_t = base.last().map_or(first_t, |seg| seg.t_end);
-    let at_stream_boundary = history.is_empty();
     let signal_segments: Vec<&ShapedSegment> = history.iter().chain(base.iter()).collect();
     for seg in out.iter_mut() {
         let need_lo = seg.t_start + k_lo;
