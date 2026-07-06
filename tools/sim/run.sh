@@ -29,7 +29,6 @@ GCODE=""
 EXTRA_ARGS=()
 DOCKER_ARGS=(--rm)
 DOCKER_BUILD_ARGS=()
-TAG_SUFFIX=""
 
 case "${1:-}" in
     test|serve|shell)
@@ -42,7 +41,6 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --branch|-b)
             BRANCH="$2"
-            TAG_SUFFIX="-${2//\//-}"
             shift 2
             ;;
         --gcode|-g)
@@ -64,14 +62,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-IMAGE_TAG="kalico-sim${TAG_SUFFIX}"
-
 # Cache key partitions the BuildKit compile caches (Rust target/, per-MCU
 # firmware OUT dirs) by branch, so two branches building in parallel get
 # independent caches instead of serializing or clobbering each other.
 CACHE_KEY="${BRANCH:-$(cd "$REPO_ROOT" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo head)}"
 CACHE_KEY="${CACHE_KEY//\//-}"
 DOCKER_BUILD_ARGS+=(--build-arg "SIM_CACHE_KEY=${CACHE_KEY}")
+
+# The image tag is branch-partitioned for the same reason as the cache key:
+# a shared "kalico-sim" tag lets a concurrent session on another worktree
+# silently retag the image between one session's build and its test run.
+IMAGE_TAG="kalico-sim-${CACHE_KEY}"
 
 echo "=== Kalico Simulator ==="
 echo "  Mode:      $MODE"
