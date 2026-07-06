@@ -77,7 +77,7 @@ def _summary(tmp_path, torque, moving, cycle_ns=1_000_000):
     path = synth_torque_capture(tmp_path, torque, moving, cycle_ns)
     _, data, _ = sc.load_capture(path)
     fs = 1e9 / cycle_ns
-    return sc.torque_summary(data, torque_limit=900, fs=fs)
+    return sc.torque_summary(data, torque_limit=1450, fs=fs)
 
 
 def test_clean_trace_reports_no_rail(tmp_path):
@@ -99,12 +99,24 @@ def test_clipped_trace_detects_rail(tmp_path):
     assert s["rail_detected"]
     assert s["peak"] == 1493
     assert s["peak_pct_rated"] == pytest.approx(149.3)
-    assert s["rail_level"] == round(1493 * 0.97)
+    assert s["rail_level"] == 1450
     assert s["rail_samples"] == 150
     assert s["rail_pct_moving"] == pytest.approx(15.0)
-    # 1 kHz -> 150 samples = 150 ms, one contiguous burst
     assert s["rail_ms"] == pytest.approx(150.0)
     assert s["longest_burst_ms"] == pytest.approx(150.0)
+
+
+def test_clean_peak_below_ceiling_is_not_a_rail(tmp_path):
+    n = 1000
+    moving = np.ones(n, dtype=bool)
+    ramp = np.linspace(500, 1294, 100)
+    torque = np.full(n, 500, dtype=np.float64)
+    torque[100:200] = ramp
+    torque[200:300] = ramp[::-1]
+    s = _summary(tmp_path, torque.astype(np.int16), moving)
+    assert s["peak"] == 1294
+    assert not s["rail_detected"]
+    assert s["rail_samples"] == 0
 
 
 def test_rail_counts_only_moving_samples(tmp_path):

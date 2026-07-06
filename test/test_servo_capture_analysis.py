@@ -929,3 +929,81 @@ def test_png_combined_corexy_overlay_multi_stroke(tmp_path):
         ]
     )
     assert rc == 0 and out.stat().st_size > 0
+
+
+def synth_capture_with_flagged_dwell(tmp_path, n=4000):
+    """Motion flag held across a queued dwell: flag active 1000..3000, but the
+    target only moves 2000..3000. Post-move settle decay after 3000."""
+    fs = 1000.0
+    t = np.arange(n) / fs
+    flags = np.full(n, FLAG_TORQUE_ENABLED, dtype=np.uint8)
+    flags[1000:3000] |= FLAG_MOTION_ACTIVE
+    step = np.zeros(n)
+    step[2000:3000] = 100
+    target = np.cumsum(step).astype(np.int64)
+    ferr = np.zeros(n)
+    ferr[2000:3000] = 120.0
+    decay = DECAY_AMP_COUNTS * np.exp(-(t[3000:] - t[3000]) / DECAY_TAU_S)
+    ferr[3000:] = decay
+    header = {
+        "version": 1,
+        "cycle_ns": 1_000_000,
+        "record_size": 31,
+        "started_utc": "2026-06-10T12:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [{"name": "x", "counts_per_mm": 3276.8}],
+        "channels": CHANNELS,
+    }
+    path = os.path.join(str(tmp_path), "dwell.scap")
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+        for i in range(n):
+            fe = int(round(ferr[i]))
+            tgt = int(target[i])
+            f.write(
+                struct.pack(
+                    "<QBiiiihHH",
+                    i,
+                    int(flags[i]),
+                    tgt,
+                    tgt,
+                    tgt - fe,
+                    fe,
+                    0,
+                    0x0627,
+                    0,
+                )
+            )
+    return path
+
+
+def test_move_windows_come_from_target_not_motion_flag(tmp_path):
+    path = synth_capture_with_flagged_dwell(tmp_path)
+    _, data, _ = sc.load_capture(path)
+    m = sc.compute_metrics(data, settle_band=10, torque_limit=900)
+    assert len(m["moves"]) == 1
+    mv = m["moves"][0]
+    assert mv["start_ms"] == pytest.approx(2000.0, abs=25.0)
+    assert mv["end_ms"] == pytest.approx(3000.0, abs=25.0)
+    assert mv["settle_ms"] is not None
+    assert not mv["settle_window_truncated"]
+
+
+def test_settle_window_truncated_is_reported(tmp_path):
+    path = synth_capture_with_flagged_dwell(tmp_path)
+    _, data, _ = sc.load_capture(path)
+    data = data[:3010]
+    m = sc.compute_metrics(data, settle_band=10, torque_limit=900)
+    mv = m["moves"][0]
+    assert mv["settle_ms"] is None
+    assert mv["settle_window_truncated"]
+
+
+def test_target_segments_bridge_reversal_pauses(tmp_path):
+    fs = 1000.0
+    step = np.zeros(2000)
+    step[100:500] = 50
+    step[510:900] = -50
+    target = np.cumsum(step).astype(np.int64)
+    segs = sc.target_motion_segments(target, fs)
+    assert segs == [(100, 900)]

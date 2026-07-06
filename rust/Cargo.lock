@@ -1161,6 +1161,9 @@ dependencies = [
 [[package]]
 name = "servo-ident"
 version = "0.1.0"
+dependencies = [
+ "libm",
+]
 
 [[package]]
 name = "sha2"
