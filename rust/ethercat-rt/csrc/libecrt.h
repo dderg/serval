@@ -59,6 +59,13 @@ int  ec_rt_run_homing(int slave);
  * counter (3*num_slaves == healthy). */
 int  ec_rt_cycle(int64_t *toff_ns);
 
+/* Nominal CLOCK_MONOTONIC time (ns) of the last exchange's wake deadline —
+ * the grid point the DC network is disciplined to via application_time.
+ * Targets staged now are flushed one cycle after this value, so evaluating
+ * the trajectory there (instead of at a live clock read) keeps loop
+ * scheduling jitter out of the commanded positions. */
+uint64_t ec_rt_cycle_time_ns(void);
+
 /* Stage slot `slave`'s CSP target for the next cycle's send. */
 void ec_rt_set_target_position(int slave, int32_t counts);
 

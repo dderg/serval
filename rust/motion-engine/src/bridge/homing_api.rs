@@ -351,6 +351,7 @@ impl PyMotionEngine {
             let barrier = py.detach(move || ack_rx.recv_timeout(std::time::Duration::from_secs(1)));
             if barrier.is_err() {
                 tracing::error!(
+                    event = "home_abort_flush_barrier_timeout",
                     "home_abort: pump did not acknowledge the flush barrier — \
                      commanded_pos is STALE; a firmware restart is required"
                 );
@@ -377,6 +378,8 @@ impl PyMotionEngine {
             Ok(p) => p,
             Err(e) => {
                 tracing::error!(
+                    event = "home_abort_position_reconcile_failed",
+                    axis_key = ?ctx.axis_key,
                     "home_abort: cannot reconcile position after aborted homing move \
                      (trajectory store empty or missing for axis {:?}): {e} — \
                      commanded_pos is STALE; a firmware restart is required to \
@@ -391,6 +394,8 @@ impl PyMotionEngine {
         let drain_result = py.detach(|| drain.wait_drained(DRAIN_TIMEOUT));
         if let Err(e) = drain_result {
             tracing::error!(
+                event = "home_abort_drain_timeout",
+                error = %e,
                 "home_abort: drain timed out after aborted homing move — \
                  commanded_pos is STALE; a firmware restart is required: {e}"
             );
@@ -403,6 +408,8 @@ impl PyMotionEngine {
                 planner.stream_open(vec![cartesian[0], cartesian[1], cartesian[2], 0.0]);
             if let Err(e) = open_result {
                 tracing::error!(
+                    event = "home_abort_stream_open_failed",
+                    error = ?e,
                     "home_abort: runtime_stream_open failed after drain — \
                      commanded_pos is STALE; a firmware restart is required: {e:?}"
                 );
@@ -501,7 +508,7 @@ impl PyMotionEngine {
         *self.homing_result.lock().unwrap_or_else(|p| p.into_inner()) = None;
         *self.pending_trip.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
-    pub(crate) fn trip_deps(&self) -> TripDeps {
+    pub(super) fn trip_deps(&self) -> TripDeps {
         TripDeps {
             homing_run: Arc::clone(&self.homing_run),
             pending_trip: Arc::clone(&self.pending_trip),

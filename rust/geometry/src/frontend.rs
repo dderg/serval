@@ -1,7 +1,5 @@
-pub mod arc;
-
 use crate::GeometryError;
-use crate::path::{CurvatureProfile, Line, PathSegment, Segment};
+use crate::path::{Line, PathSegment, Segment};
 use crate::segment::{FollowerDemand, SourceRange};
 
 const DISPLACEMENT_EPSILON: f64 = 1e-9;
@@ -68,31 +66,11 @@ pub struct Move {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FrontendError {
-    ZeroMotion {
-        line_no: u32,
-    },
-    NonFiniteInput {
-        line_no: u32,
-    },
-    HelicalArc {
-        line_no: u32,
-    },
-    ArcRadiusMismatch {
-        line_no: u32,
-        radius: f64,
-        end_radius: f64,
-    },
-    InvalidFeedrate {
-        line_no: u32,
-    },
-    InvalidLimits {
-        line_no: u32,
-        reason: &'static str,
-    },
-    Segment {
-        line_no: u32,
-        source: GeometryError,
-    },
+    ZeroMotion { line_no: u32 },
+    NonFiniteInput { line_no: u32 },
+    InvalidFeedrate { line_no: u32 },
+    InvalidLimits { line_no: u32, reason: &'static str },
+    Segment { line_no: u32, source: GeometryError },
 }
 
 pub fn line_move(
@@ -138,33 +116,6 @@ pub fn line_move(
     }
 
     Err(FrontendError::ZeroMotion { line_no })
-}
-
-pub fn arc_move(
-    start: [f64; 3],
-    end: [f64; 3],
-    i: f64,
-    j: f64,
-    ccw: bool,
-    e_delta: f64,
-    ctx: MoveContext,
-) -> Result<Move, FrontendError> {
-    ctx.validate()?;
-    let line_no = ctx.source.start_line;
-    if !(coords_finite(&[start, end]) && i.is_finite() && j.is_finite() && e_delta.is_finite()) {
-        return Err(FrontendError::NonFiniteInput { line_no });
-    }
-
-    let arc = arc::build_arc(start, end, i, j, ccw, line_no)?;
-    let arc_length = arc.s_len();
-    let followers = if e_delta.abs() > DISPLACEMENT_EPSILON {
-        vec![extruder_follower(ctx.extruder_axis, e_delta / arc_length)]
-    } else {
-        Vec::new()
-    };
-    let segment =
-        PathSegment::try_new(Segment::Arc(arc), followers).map_err(segment_err(line_no))?;
-    Ok(ctx.into_move(segment))
 }
 
 impl MoveContext {

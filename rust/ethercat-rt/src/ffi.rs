@@ -44,6 +44,8 @@ extern "C" {
 
     pub fn ec_rt_cycle(toff_ns: *mut i64) -> c_int;
 
+    pub fn ec_rt_cycle_time_ns() -> u64;
+
     pub fn ec_rt_park_cycle(toff_ns: *mut i64) -> c_int;
 
     pub fn ec_rt_al_status(slave: c_int, state: *mut u16, alstatuscode: *mut u16);

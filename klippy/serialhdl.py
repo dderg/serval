@@ -83,6 +83,109 @@ class SerialReader:
                     "%sException in serial callback", self.warn_prefix
                 )
 
+    def _engine_handle_status_event(self, ev):
+        name = "kalico_status_v6"
+        prev = getattr(self, "_last_status_state", None)
+        cur = (ev.get("engine_status"), ev.get("last_fault"))
+        if prev != cur:
+            self._last_status_state = cur
+            logging.info(
+                "%s[engine-async] kalico_status_v6 "
+                "engine_status=%s last_fault=%s",
+                self.warn_prefix,
+                cur[0],
+                cur[1],
+            )
+        return name
+
+    def _engine_handle_output_event(self, ev, now):
+        ev["#name"] = "#output"
+        ev["#sent_time"] = now
+        ev["#receive_time"] = now
+        ev["#msg"] = ev.get("msg", "")
+        with self.lock:
+            hdl = self.handlers.get(("#output", None), self.handle_default)
+        try:
+            hdl(ev)
+        except Exception:
+            logging.exception(
+                "%sException in engine output callback",
+                self.warn_prefix,
+            )
+
+    def _engine_handle_response_event(self, ev, now):
+        name = ev.get("name", "")
+        if name == "trsync_state":
+            logging.info(
+                "%s[engine-poller] trsync_state response: "
+                "oid=%s can_trigger=%s trigger_reason=%s",
+                self.warn_prefix,
+                ev.get("oid"),
+                ev.get("can_trigger"),
+                ev.get("trigger_reason"),
+            )
+        ev["#name"] = name
+        # Use CLOCK_MONOTONIC_RAW stamps when the Rust engine supplied
+        # them (non-zero); this happens for "clock" responses dispatched
+        # via engine_get_clock_async so _handle_clock sees honest RTTs.
+        sent_raw = ev.get("#sent_time_raw", 0.0)
+        recv_raw = ev.get("#receive_time_raw", 0.0)
+        if sent_raw != 0.0 and recv_raw != 0.0:
+            ev["#sent_time"] = sent_raw
+            ev["#receive_time"] = recv_raw
+        elif name == "clock":
+            # A clock sample without wire stamps (missed interception,
+            # duplicate, late arrival) must be DROPPED by clocksync —
+            # fabricating sent==recv here would feed half_rtt=0 into
+            # min_half_rtt and permanently bias the estimate.
+            # _handle_clock's `if not sent_time: return` does the drop.
+            ev["#sent_time"] = 0.0
+            ev["#receive_time"] = now
+        else:
+            ev["#sent_time"] = now
+            ev["#receive_time"] = now
+        oid = ev.get("oid")
+        with self.lock:
+            hdl = (
+                self.handlers.get((name, oid))
+                or self.handlers.get((name, None))
+                or self.handle_default
+            )
+            if name == "trsync_state":
+                logging.info(
+                    "%s[engine-poller] trsync_state handler "
+                    "lookup: key=(%s,%s) found=%s",
+                    self.warn_prefix,
+                    name,
+                    oid,
+                    hdl is not self.handle_default,
+                )
+        try:
+            hdl(ev)
+        except Exception:
+            logging.exception(
+                "%sException in engine response callback (name=%s, oid=%s)",
+                self.warn_prefix,
+                name,
+                oid,
+            )
+
+    def _engine_dispatch_named_event(self, ev, name, now):
+        ev["#name"] = name
+        ev["#sent_time"] = now
+        ev["#receive_time"] = now
+        hdl_key = (name, None)
+        with self.lock:
+            hdl = self.handlers.get(hdl_key, None)
+        if hdl is None:
+            hdl = self.handle_default
+        try:
+            hdl(ev)
+        except Exception:
+            logging.exception(
+                "%sException in engine event callback", self.warn_prefix
+            )
+
     def _engine_event_poller(self, eventtime):
         if self.mcu is None:
             return self.reactor.NEVER
@@ -102,18 +205,7 @@ class SerialReader:
                 break
             ev_type = ev.get("type")
             if ev_type == "status":
-                name = "kalico_status_v6"
-                prev = getattr(self, "_last_status_state", None)
-                cur = (ev.get("engine_status"), ev.get("last_fault"))
-                if prev != cur:
-                    self._last_status_state = cur
-                    logging.info(
-                        "%s[engine-async] kalico_status_v6 "
-                        "engine_status=%s last_fault=%s",
-                        self.warn_prefix,
-                        cur[0],
-                        cur[1],
-                    )
+                name = self._engine_handle_status_event(ev)
             elif ev_type == "credit_freed":
                 # Handled directly by Rust EventDispatcher; skip Python routing.
                 continue
@@ -122,96 +214,14 @@ class SerialReader:
             elif ev_type == "endstop_tripped":
                 name = "kalico_endstop_tripped"
             elif ev_type == "output":
-                name = "#output"
-                ev["#name"] = "#output"
-                ev["#sent_time"] = now
-                ev["#receive_time"] = now
-                ev["#msg"] = ev.get("msg", "")
-                with self.lock:
-                    hdl = self.handlers.get(
-                        ("#output", None), self.handle_default
-                    )
-                try:
-                    hdl(ev)
-                except Exception:
-                    logging.exception(
-                        "%sException in engine output callback",
-                        self.warn_prefix,
-                    )
+                self._engine_handle_output_event(ev, now)
                 continue
             elif ev_type == "response":
-                name = ev.get("name", "")
-                if name == "trsync_state":
-                    logging.info(
-                        "%s[engine-poller] trsync_state response: "
-                        "oid=%s can_trigger=%s trigger_reason=%s",
-                        self.warn_prefix,
-                        ev.get("oid"),
-                        ev.get("can_trigger"),
-                        ev.get("trigger_reason"),
-                    )
-                ev["#name"] = name
-                # Use CLOCK_MONOTONIC_RAW stamps when the Rust engine supplied
-                # them (non-zero); this happens for "clock" responses dispatched
-                # via engine_get_clock_async so _handle_clock sees honest RTTs.
-                sent_raw = ev.get("#sent_time_raw", 0.0)
-                recv_raw = ev.get("#receive_time_raw", 0.0)
-                if sent_raw != 0.0 and recv_raw != 0.0:
-                    ev["#sent_time"] = sent_raw
-                    ev["#receive_time"] = recv_raw
-                elif name == "clock":
-                    # A clock sample without wire stamps (missed interception,
-                    # duplicate, late arrival) must be DROPPED by clocksync —
-                    # fabricating sent==recv here would feed half_rtt=0 into
-                    # min_half_rtt and permanently bias the estimate.
-                    # _handle_clock's `if not sent_time: return` does the drop.
-                    ev["#sent_time"] = 0.0
-                    ev["#receive_time"] = now
-                else:
-                    ev["#sent_time"] = now
-                    ev["#receive_time"] = now
-                oid = ev.get("oid")
-                with self.lock:
-                    hdl = (
-                        self.handlers.get((name, oid))
-                        or self.handlers.get((name, None))
-                        or self.handle_default
-                    )
-                    if name == "trsync_state":
-                        logging.info(
-                            "%s[engine-poller] trsync_state handler "
-                            "lookup: key=(%s,%s) found=%s",
-                            self.warn_prefix,
-                            name,
-                            oid,
-                            hdl is not self.handle_default,
-                        )
-                try:
-                    hdl(ev)
-                except Exception:
-                    logging.exception(
-                        "%sException in engine response callback (name=%s, oid=%s)",
-                        self.warn_prefix,
-                        name,
-                        oid,
-                    )
+                self._engine_handle_response_event(ev, now)
                 continue
             else:
                 continue
-            ev["#name"] = name
-            ev["#sent_time"] = now
-            ev["#receive_time"] = now
-            hdl_key = (name, None)
-            with self.lock:
-                hdl = self.handlers.get(hdl_key, None)
-            if hdl is None:
-                hdl = self.handle_default
-            try:
-                hdl(ev)
-            except Exception:
-                logging.exception(
-                    "%sException in engine event callback", self.warn_prefix
-                )
+            self._engine_dispatch_named_event(ev, name, now)
         return eventtime + 0.001
 
     def _error(self, msg, *params):

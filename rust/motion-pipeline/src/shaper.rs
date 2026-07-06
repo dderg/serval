@@ -5,13 +5,9 @@ use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
 use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedSignal};
 
 use crate::lowering::{
-    FIT_TRUNC_ACC_MM_S2, FIT_TRUNC_VEL_MM_S, LADDER_PROBES_U, eval_mono, eval_mono_dd,
-    ladder_candidate, quintic_in_u,
+    FIT_TRUNC_POS_FACTOR, FitTol, LADDER_PROBES_U, ladder_fit, quintic_in_u, truncated_piece,
 };
 use crate::{Control, LoweredItem, PostProcessError, ShapedItem};
-use nurbs::chebyshev::{
-    chebyshev_to_monomial_tau, monomial_u_to_chebyshev, truncate_chebyshev_c2_anchored,
-};
 
 const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 
@@ -30,6 +26,7 @@ pub struct Shaper {
     pending_rest: VecDeque<bool>,
     forward_support: f64,
     back_support: f64,
+    history_trimmed: bool,
 }
 
 impl Shaper {
@@ -42,6 +39,7 @@ impl Shaper {
             pending_rest: VecDeque::new(),
             forward_support,
             back_support,
+            history_trimmed: false,
         }
     }
 
@@ -70,6 +68,7 @@ impl Shaper {
                             self.pending.clear();
                             self.pending_rest.clear();
                             self.history.clear();
+                            self.history_trimmed = false;
                         }
                         Control::Dwell { .. } | Control::SetAxisChains(_) | Control::Barrier(_) => {
                             assert!(
@@ -90,6 +89,7 @@ impl Shaper {
                                 // fall back to the stream-boundary clamp then.
                                 if new_back > self.back_support {
                                     self.history.clear();
+                                    self.history_trimmed = false;
                                 }
                                 (self.forward_support, self.back_support) = (new_forward, new_back);
                                 self.chains = chains.clone();
@@ -126,8 +126,15 @@ impl Shaper {
             return true;
         }
         let base = self.pending.make_contiguous();
-        let shaped = apply_axis_chains(&self.history, base, count, force, &self.chains.chains)
-            .unwrap_or_else(|e| panic!("shaper: {e}"));
+        let shaped = apply_axis_chains(
+            &self.history,
+            base,
+            count,
+            force,
+            !self.history_trimmed,
+            &self.chains.chains,
+        )
+        .unwrap_or_else(|e| panic!("shaper: {e}"));
         for seg in shaped {
             if output.send(ShapedItem::Seg(seg)).is_err() {
                 return false;
@@ -150,6 +157,7 @@ impl Shaper {
             .is_some_and(|seg| seg.t_end < keep_after)
         {
             self.history.pop_front();
+            self.history_trimmed = true;
         }
         true
     }
@@ -174,6 +182,7 @@ fn apply_axis_chains(
     base: &[ShapedSegment],
     commit_count: usize,
     force: bool,
+    at_stream_boundary: bool,
     chains: &[CompiledChain],
 ) -> Result<Vec<ShapedSegment>, PostProcessError> {
     let mut out: Vec<ShapedSegment> = base.iter().take(commit_count).cloned().collect();
@@ -197,7 +206,15 @@ fn apply_axis_chains(
     let default_chain = CompiledChain::default();
     for axis in 0..n_axes {
         let chain = chains.get(axis).unwrap_or(&default_chain);
-        apply_axis_chain(history, base, &mut out, axis, force, chain)?;
+        apply_axis_chain(
+            history,
+            base,
+            &mut out,
+            axis,
+            force,
+            at_stream_boundary,
+            chain,
+        )?;
     }
     for seg in &mut out {
         pad_segment_axes_to_uniform_degree(seg);
@@ -227,12 +244,14 @@ fn pad_segment_axes_to_uniform_degree(seg: &mut ShapedSegment) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_axis_chain(
     history: &VecDeque<ShapedSegment>,
     base: &[ShapedSegment],
     out: &mut [ShapedSegment],
     axis: usize,
     force: bool,
+    at_stream_boundary: bool,
     chain: &CompiledChain,
 ) -> Result<(), PostProcessError> {
     let Some(kernel) = chain.stages.iter().find_map(|stage| match stage {
@@ -247,7 +266,6 @@ fn apply_axis_chain(
         .or_else(|| base.first())
         .map_or(0.0, |seg| seg.t_start);
     let last_t = base.last().map_or(first_t, |seg| seg.t_end);
-    let at_stream_boundary = history.is_empty();
     let signal_segments: Vec<&ShapedSegment> = history.iter().chain(base.iter()).collect();
     let input_breaks = signal_breakpoints(&signal_segments, axis);
     for seg in out.iter_mut() {
@@ -458,8 +476,9 @@ const LADDER_FIT_NODES_U: [f64; 3] = [0.0, 0.5, -0.5];
 
 /// Ladder fit of the shaped signal over one span: quintic Hermite matching
 /// the convolution's exact (p, v, a) at both ends, degrees 6/7 from interior
-/// residuals. Returns the accepted monomial-in-u fit, or the degree-7
-/// candidate with `fits = false` so the caller can bisect.
+/// residuals — the lowering ladder against pre-sampled truth, with the
+/// shaper's own budgets. Returns the accepted monomial-in-u fit, or the
+/// quintic base with `fits = false` so the caller can bisect.
 #[allow(clippy::type_complexity)]
 fn shaped_ladder(
     axis: usize,
@@ -490,37 +509,13 @@ fn shaped_ladder(
             .push((u, exact_value(axis, sig.second_deriv(t_of(u)), t_of(u))?));
     }
 
-    let truth_p = |u: f64| truth.pos_at(u);
-    let dd_scale = (2.0 / h) * (2.0 / h);
-    let ok = |c: &[f64]| {
-        LADDER_PROBES_U.iter().all(|&u| {
-            (eval_mono(c, u) - truth.pos_at(u)).abs() <= SHAPED_FIT_TOL_MM
-                && (eval_mono_dd(c, u) * dd_scale - truth.acc_at(u)).abs()
-                    <= SHAPED_FIT_TOL_ACCEL_MM_S2
-        })
+    let tol = FitTol {
+        pos_mm: SHAPED_FIT_TOL_MM,
+        accel_mm_s2: SHAPED_FIT_TOL_ACCEL_MM_S2,
     };
-    for &degree in crate::lowering::ladder_degrees(h) {
-        let c = ladder_candidate(&base, degree, &truth_p);
-        if ok(&c) {
-            return Ok((c, true));
-        }
-    }
-    Ok((base, false))
-}
-
-fn shaped_piece_from_mono_u(mono_u: &[f64], t0: f64, t1: f64) -> BezierPiece<f64> {
-    let h = t1 - t0;
-    let cheb = truncate_chebyshev_c2_anchored(
-        &monomial_u_to_chebyshev(mono_u),
-        h,
-        0.1 * SHAPED_FIT_TOL_MM,
-        FIT_TRUNC_VEL_MM_S,
-        FIT_TRUNC_ACC_MM_S2,
-    );
-    BezierPiece {
-        u_start: t0,
-        u_end: t1,
-        coeffs: chebyshev_to_monomial_tau(&cheb, h),
+    match ladder_fit(&base, h, tol, &|u| truth.pos_at(u), &|u| truth.acc_at(u)) {
+        Some(c) => Ok((c, true)),
+        None => Ok((base, false)),
     }
 }
 
@@ -534,7 +529,13 @@ fn refine_shaped_span(
 ) -> Result<(), PostProcessError> {
     let (mono_u, fits) = shaped_ladder(axis, sig, t0, t1)?;
     if fits || depth >= SHAPED_FIT_MAX_DEPTH || (t1 - t0) <= 2.0 * SHAPED_FIT_MIN_SPAN_S {
-        out.push(shaped_piece_from_mono_u(&mono_u, t0, t1));
+        out.push(truncated_piece(
+            &mono_u,
+            t0,
+            t1,
+            t1 - t0,
+            FIT_TRUNC_POS_FACTOR * SHAPED_FIT_TOL_MM,
+        ));
         return Ok(());
     }
     let tm = 0.5 * (t0 + t1);

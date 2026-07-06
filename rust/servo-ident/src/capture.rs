@@ -132,17 +132,21 @@ impl Default for TrackingOptions {
 /// an untuned or sticking drive produces torque for a motion unrelated to
 /// the command, and fitting through those samples yields negative inertia.
 pub fn restrict_to_tracking(cap: &Capture, opts: &TrackingOptions) -> Capture {
-    let peak = cap
-        .vel
-        .iter()
-        .flatten()
-        .fold(0.0_f64, |m, &v| m.max(v.abs()));
-    let tol = opts.tol_floor.max(opts.tol_frac * peak);
-    let n_motors = cap.vel.len();
-    let keep: Vec<usize> = (0..cap.t.len())
-        .filter(|&k| (0..n_motors).all(|m| (cap.vel_act[m][k] - cap.vel[m][k]).abs() <= tol))
-        .collect();
+    let keep_mask = tracking_keep(&cap.vel, &cap.vel_act, opts);
+    let keep: Vec<usize> = (0..cap.t.len()).filter(|&k| keep_mask[k]).collect();
     select(cap, &keep)
+}
+
+/// Per-sample tracking mask: true where every motor's measured velocity
+/// follows its commanded velocity. See `restrict_to_tracking` for why.
+pub fn tracking_keep(vel: &[Vec<f64>], vel_act: &[Vec<f64>], opts: &TrackingOptions) -> Vec<bool> {
+    let peak = vel.iter().flatten().fold(0.0_f64, |m, &v| m.max(v.abs()));
+    let tol = opts.tol_floor.max(opts.tol_frac * peak);
+    let n_motors = vel.len();
+    let n = vel[0].len();
+    (0..n)
+        .map(|k| (0..n_motors).all(|m| (vel_act[m][k] - vel[m][k]).abs() <= tol))
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -183,15 +187,20 @@ fn median(values: &[f64]) -> f64 {
 /// The jerk transitions — where the closed loop lags and the soft-loop
 /// "negative inertia" artifact lives — are dropped.
 pub fn restrict_to_steady_accel(cap: &Capture, opts: &PlateauOptions) -> Capture {
-    let n = cap.t.len();
-    let n_motors = cap.acc.len();
-    let peak = cap
-        .acc
-        .iter()
-        .flatten()
-        .fold(0.0_f64, |m, &a| m.max(a.abs()));
+    let keep_mask = steady_accel_keep(&cap.t, &cap.acc, opts);
+    let keep: Vec<usize> = (0..cap.t.len()).filter(|&k| keep_mask[k]).collect();
+    select(cap, &keep)
+}
+
+/// Per-sample plateau mask: true on cycles where every motor's commanded
+/// acceleration has held within tolerance over a contiguous settle window.
+/// See `restrict_to_steady_accel` for why.
+pub fn steady_accel_keep(t: &[f64], acc: &[Vec<f64>], opts: &PlateauOptions) -> Vec<bool> {
+    let n = t.len();
+    let n_motors = acc.len();
+    let peak = acc.iter().flatten().fold(0.0_f64, |m, &a| m.max(a.abs()));
     let tol = opts.tol_floor.max(opts.tol_frac * peak);
-    let dts: Vec<f64> = (1..n).map(|k| cap.t[k] - cap.t[k - 1]).collect();
+    let dts: Vec<f64> = (1..n).map(|k| t[k] - t[k - 1]).collect();
     let dt_med = median(&dts);
     let window = if dt_med > 0.0 {
         ((opts.settle_s / dt_med).round() as usize).max(1)
@@ -199,18 +208,17 @@ pub fn restrict_to_steady_accel(cap: &Capture, opts: &PlateauOptions) -> Capture
         1
     };
 
-    let mut keep: Vec<usize> = Vec::new();
+    let mut keep = vec![false; n];
     for k in window..n {
-        let contiguous = (k - window..k).all(|j| cap.t[j + 1] - cap.t[j] <= 1.5 * dt_med);
+        let contiguous = (k - window..k).all(|j| t[j + 1] - t[j] <= 1.5 * dt_med);
         if !contiguous {
             continue;
         }
-        let steady = (k - window..=k)
-            .all(|j| (0..n_motors).all(|m| (cap.acc[m][j] - cap.acc[m][k]).abs() <= tol));
+        let steady =
+            (k - window..=k).all(|j| (0..n_motors).all(|m| (acc[m][j] - acc[m][k]).abs() <= tol));
         if steady {
-            keep.push(k);
+            keep[k] = true;
         }
     }
-
-    select(cap, &keep)
+    keep
 }

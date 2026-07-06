@@ -565,48 +565,6 @@ fn absolute_to_pascal_shift<T: Float>(absolute: &[T], shift: T) -> Vec<T> {
 }
 
 #[cfg(feature = "host")]
-pub fn restrict_to_domain<T: Float>(
-    curve: &crate::ScalarNurbs<T>,
-    t_lo: T,
-    t_hi: T,
-) -> Result<crate::ScalarNurbs<T>, AlgebraError> {
-    use crate::bezier::{bezier_pieces_to_nurbs, extract_bezier_pieces, split_piece_at};
-
-    if t_lo >= t_hi {
-        return Err(AlgebraError::SupportMismatch);
-    }
-
-    let pieces = extract_bezier_pieces(curve);
-    let mut result = Vec::new();
-
-    for piece in &pieces {
-        if piece.u_end <= t_lo || piece.u_start >= t_hi {
-            continue;
-        }
-
-        let mut p = piece.clone();
-
-        if p.u_start < t_lo {
-            let (_, right) = split_piece_at(&p, t_lo);
-            p = right;
-        }
-
-        if p.u_end > t_hi {
-            let (left, _) = split_piece_at(&p, t_hi);
-            p = left;
-        }
-
-        result.push(p);
-    }
-
-    if result.is_empty() {
-        return Err(AlgebraError::SupportMismatch);
-    }
-
-    Ok(bezier_pieces_to_nurbs(&result))
-}
-
-#[cfg(feature = "host")]
 pub(crate) fn knot_remove_redundant<T: Float>(curve: &mut crate::ScalarNurbs<T>, tol: T) {
     let p = curve.degree() as usize;
     loop {

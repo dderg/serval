@@ -641,6 +641,10 @@ int ec_rt_cycle(int64_t *toff_ns) {
     return rt_exchange(toff_ns);
 }
 
+uint64_t ec_rt_cycle_time_ns(void) {
+    return TIMESPEC2NS(g_ts);
+}
+
 void ec_rt_set_target_position(int slave, int32_t counts) {
     check_idx(slave);
     g_slaves[slave].tx.target_position = counts;

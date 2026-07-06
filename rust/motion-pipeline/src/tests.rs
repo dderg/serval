@@ -79,7 +79,7 @@ fn replay(
     drop(raw_tx);
 
     let (fitted_tx, fitted_rx) = unbounded();
-    Fitter::new(config.chain).run(raw_rx, fitted_tx);
+    FitStage::new(config.chain).run(raw_rx, fitted_tx);
 
     let (planned_tx, planned_rx) = unbounded();
     Planner::new(config).run(fitted_rx, planned_tx);
@@ -577,12 +577,12 @@ fn drained_prefix_is_invariant_under_append() {
 
 fn smooth_x_chains(frequency_hz: f64) -> AxisChainSet {
     AxisChainSet::spatial(
-        PostProcessorInstance::new(
+        trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
             "is",
             &trajectory::post_processors::SmoothZv,
             vec![frequency_hz],
-        )
-        .into_chain(),
+        )])
+        .expect("single post-processor always compiles"),
         trajectory::CompiledChain::default(),
         trajectory::CompiledChain::default(),
     )
@@ -662,6 +662,72 @@ fn smooth_shaper_first_emission_after_nonzero_start_time_is_valid() {
     assert_eq!(segs[0].t_start, 5.0);
 }
 
+/// A later emit batch whose back convolution window reaches before the stream
+/// start must clamp to the stream-start rest (like the first batch does), not
+/// die on "needs unavailable history": nothing was trimmed, so the signal
+/// before the retained front is the same held rest. Regression for the
+/// BEACON_POKE hang, where the first move after `SET_KINEMATIC_POSITION` +
+/// `G4 P1000` panicked the shape thread at t = 1.0 - 1ulp.
+#[test]
+fn smooth_shaper_second_batch_window_before_stream_start_clamps() {
+    let chains = smooth_x_chains(18.0);
+    let (_, back) = chains.chains[0].max_half_support();
+    let back = back.abs();
+    let t0 = 1.0;
+    let step = 0.4 * back;
+
+    let constant_seg = |t_start: f64, t_end: f64| ShapedSegment {
+        axes: (0..3)
+            .map(|_| {
+                nurbs::bezier::bezier_pieces_to_nurbs(&[nurbs::bezier::BezierPiece {
+                    u_start: t_start,
+                    u_end: t_end,
+                    coeffs: vec![150.0],
+                }])
+            })
+            .collect(),
+        followers: vec![],
+        t_start,
+        t_end,
+        motor_mask: 0,
+        source_line: 1,
+    };
+
+    let (lowered_tx, lowered_rx) = unbounded();
+    for i in 0..8 {
+        let (a, b) = (i as f64, (i + 1) as f64);
+        lowered_tx
+            .send(LoweredItem::Seg(LoweredSegment {
+                seg: constant_seg(a.mul_add(step, t0), b.mul_add(step, t0)),
+                rest_at_end: true,
+            }))
+            .unwrap();
+    }
+    drop(lowered_tx);
+
+    let (shaped_tx, shaped_rx) = unbounded();
+    Shaper::new(chains).run(lowered_rx, shaped_tx);
+
+    let segs: Vec<ShapedSegment> = shaped_rx
+        .into_iter()
+        .filter_map(|item| match item {
+            ShapedItem::Seg(seg) => Some(seg),
+            ShapedItem::Control(_) => None,
+        })
+        .collect();
+    assert_eq!(segs.len(), 8);
+    for seg in &segs {
+        let mid = 0.5 * (seg.t_start + seg.t_end);
+        let got = eval(&seg.axes[0], mid);
+        assert!(
+            (got - 150.0).abs() < 1e-3,
+            "seg [{}, {}]: shaped constant drifted to {got}",
+            seg.t_start,
+            seg.t_end,
+        );
+    }
+}
+
 const NEPTUNE_SCV25_FILLET: [(f64, f64, f64); 7] = [
     (124.102, 100.688, 0.01272),
     (124.102, 101.679, 0.03333),
@@ -676,7 +742,7 @@ const NEPTUNE_SCV25_FILLET: [(f64, f64, f64); 7] = [
 fn arc_run_into_sharp_corner_stays_contiguous_at_high_scv() {
     // Voron cube Z6.2 fillet slice that crashed the Neptune bench mid-print:
     // with arc fitting enabled and square_corner_velocity raised to 25, the
-    // fitter emitted a 0.27mm gap between the corner blend leaving the fitted
+    // fit stage emitted a 0.27mm gap between the corner blend leaving the fitted
     // run and the following long line, tripping the TravelAligningSender
     // contiguity assert.
     let limits = VelocityLimits::try_new(100.0, 1000.0, 25.0, 1_000_000.0).unwrap();

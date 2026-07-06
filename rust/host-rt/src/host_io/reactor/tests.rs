@@ -137,7 +137,7 @@ fn test_reactor_with_inflight(seqs: &[u64]) -> (Reactor, Arc<Mutex<Vec<u8>>>) {
             });
     }
     if max_seq > 0 {
-        reactor.send_seq = max_seq + 1;
+        reactor.seq_window.send_seq = max_seq + 1;
     }
 
     (reactor, written)
@@ -146,11 +146,14 @@ fn test_reactor_with_inflight(seqs: &[u64]) -> (Reactor, Arc<Mutex<Vec<u8>>>) {
 #[test]
 fn decode_absolute_wraps_correctly() {
     let (reactor, _) = test_reactor_with_inflight(&[]);
-    assert_eq!(wire::decode_absolute(reactor.receive_seq, 0x02), 2);
+    assert_eq!(
+        wire::decode_absolute(reactor.seq_window.receive_seq, 0x02),
+        2
+    );
 
     let mut r2 = test_reactor_with_inflight(&[]).0;
-    r2.receive_seq = 14;
-    assert_eq!(wire::decode_absolute(r2.receive_seq, 0x01), 17);
+    r2.seq_window.receive_seq = 14;
+    assert_eq!(wire::decode_absolute(r2.seq_window.receive_seq, 0x01), 17);
 }
 
 #[test]
@@ -158,7 +161,7 @@ fn forward_progress_ack_updates_last_ack_seq() {
     let (mut reactor, _written) = test_reactor_with_inflight(&[2]);
 
     reactor.handle_ack_nak(0x02).expect("handle_ack_nak");
-    assert_eq!(reactor.last_ack_seq, 2);
+    assert_eq!(reactor.seq_window.last_ack_seq, 2);
 }
 
 #[test]
@@ -166,7 +169,7 @@ fn duplicate_ack_triggers_retransmit() {
     let (mut reactor, written) = test_reactor_with_inflight(&[1, 2]);
 
     reactor.handle_ack_nak(0x02).expect("first handle_ack_nak");
-    assert_eq!(reactor.last_ack_seq, 2);
+    assert_eq!(reactor.seq_window.last_ack_seq, 2);
 
     let bytes_before = written.lock().unwrap().len();
 
@@ -182,7 +185,7 @@ fn duplicate_ack_triggers_retransmit() {
 #[test]
 fn stale_ack_damped_by_ignore_nak_seq() {
     let (mut reactor, written) = test_reactor_with_inflight(&[1, 2]);
-    reactor.ignore_nak_seq = 10;
+    reactor.seq_window.ignore_nak_seq = 10;
 
     reactor.handle_ack_nak(0x02).expect("first handle_ack_nak");
 
@@ -200,33 +203,33 @@ fn stale_ack_damped_by_ignore_nak_seq() {
 #[test]
 fn nak_driven_sets_ignore_nak_to_receive_seq() {
     let (mut reactor, _port) = test_reactor_with_inflight(&[1, 2, 3]);
-    reactor.receive_seq = 5;
-    reactor.retransmit_seq = 0;
+    reactor.seq_window.receive_seq = 5;
+    reactor.seq_window.retransmit_seq = 0;
     reactor
         .write_retransmit(RetransmitTrigger::NakDriven)
         .unwrap();
-    assert_eq!(reactor.ignore_nak_seq, 5);
+    assert_eq!(reactor.seq_window.ignore_nak_seq, 5);
 }
 
 #[test]
 fn second_nak_uses_retransmit_seq() {
     let (mut reactor, _port) = test_reactor_with_inflight(&[1, 2, 3]);
-    reactor.receive_seq = 3;
-    reactor.retransmit_seq = 7;
+    reactor.seq_window.receive_seq = 3;
+    reactor.seq_window.retransmit_seq = 7;
     reactor
         .write_retransmit(RetransmitTrigger::NakDriven)
         .unwrap();
-    assert_eq!(reactor.ignore_nak_seq, 7);
+    assert_eq!(reactor.seq_window.ignore_nak_seq, 7);
 }
 
 #[test]
 fn timeout_driven_sets_ignore_nak_to_send_seq() {
     let (mut reactor, _port) = test_reactor_with_inflight(&[1, 2, 3]);
-    reactor.send_seq = 10;
+    reactor.seq_window.send_seq = 10;
     reactor
         .write_retransmit(RetransmitTrigger::TimeoutDriven)
         .unwrap();
-    assert_eq!(reactor.ignore_nak_seq, 10);
+    assert_eq!(reactor.seq_window.ignore_nak_seq, 10);
 }
 
 #[test]
@@ -467,14 +470,18 @@ fn drain_pending_surfaces_write_failure() {
 
     let (tx, completion_rx) =
         std::sync::mpsc::sync_channel::<Result<crate::transport::MessageParams, TransportError>>(1);
-    reactor.pending_submissions.push_back(PendingSubmission {
-        call_id: 7,
-        payload: vec![0xAA, 0xBB],
-        expected_response_name: "noop".into(),
-        completion: tx,
-        deadline: Instant::now() + std::time::Duration::from_secs(1),
-    });
     reactor
+        .outbound
+        .pending_submissions
+        .push_back(PendingSubmission {
+            call_id: 7,
+            payload: vec![0xAA, 0xBB],
+            expected_response_name: "noop".into(),
+            completion: tx,
+            deadline: Instant::now() + std::time::Duration::from_secs(1),
+        });
+    reactor
+        .outbound
         .pending_outbound_order
         .push_back(PendingOutboundKind::Submission);
 
@@ -498,7 +505,7 @@ fn drain_pending_surfaces_write_failure() {
         .expect("host fault must be staged");
     assert_eq!(fault.fault_code, FaultCode::HostDisconnect.as_u16());
     assert!(
-        reactor.pending_submissions.is_empty(),
+        reactor.outbound.pending_submissions.is_empty(),
         "draining must stop after I/O failure"
     );
 }

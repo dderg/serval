@@ -710,33 +710,11 @@ impl Engine {
         }
     }
 
-    pub fn debug_steps_per_mm(&self, i: usize) -> f32 {
-        self.step_state
-            .get(i)
-            .map(|s| s.debug_steps_per_mm())
-            .unwrap_or(0.0)
-    }
-
-    pub fn debug_accumulator(&self, i: usize) -> f64 {
-        self.step_state
-            .get(i)
-            .map(|s| s.debug_accumulator())
-            .unwrap_or(0.0)
-    }
-
-    pub fn debug_last_motor(&self, i: usize) -> f32 {
-        self.last_motors.get(i).copied().unwrap_or(0.0)
-    }
-
     pub fn motor_state(&self, i: usize) -> Option<(f32, f32)> {
         self.stepping_axes
             .get(i)
             .and_then(|s| s.as_ref())
             .map(|axis| (axis.p_prev, axis.v_prev))
-    }
-
-    pub fn debug_last_timing(&self) -> (u64, u64, u64) {
-        (0, 0, 0)
     }
 
     pub fn runtime_force_idle(&mut self, shared: &SharedState) {
@@ -781,13 +759,6 @@ impl Engine {
             .get(axis_idx)
             .copied()
             .unwrap_or(core::ptr::null_mut())
-    }
-
-    #[cfg(any(test, feature = "host"))]
-    pub fn debug_current_is_some(&self) -> bool {
-        self.stepping_axes
-            .iter()
-            .any(|a| a.as_ref().map_or(false, |ax| ax.armed.is_some()))
     }
 }
 

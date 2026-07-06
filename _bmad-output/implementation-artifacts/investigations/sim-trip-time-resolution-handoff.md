@@ -1,96 +1,75 @@
-# Handoff: G28 trip-time resolution fails under the simulator's virtual clock
+# RESOLVED: G28 trip-time resolution fails under the simulator's virtual clock
 
-**Date:** 2026-07-06 · **Branch:** sim-improvements · **Status:** deterministic repro, root cause NARROWED (clock-domain mismatch), fix not started
+**Date:** 2026-07-06 · **Branch:** sim-trip-time-resolution · **Status:** RESOLVED — root cause was history-ring eviction, not a clock-domain mismatch
 
-## TL;DR
+## What it actually was
 
-In the unified simulator (`tools/sim/`), any homing move that resolves its final
-position through the motion-history/trip pipeline fails with:
+The trigger clock and the router's `clock_to_host` mapping were **correct all
+along**. The failing query (`query host time 0.69s precedes retained motion
+history … window 23.99..25.70s`) happened because `HistoryStore` recorded the
+**entire homing move at dispatch time** — a 37.6 s homing segment flattens
+into ~42 k pieces per axis, and `HISTORY_CAPACITY = 4096` popped the front of
+the ring, retaining only the last ~1.8 s of the *planned future*. The endstop
+trips near the *start* of the move, whose pieces had already been evicted.
+The "23s earlier" in the original error was the distance between the trip
+(early in the move) and the retained tail (end of the move) in stream time,
+not a clock-domain offset.
 
-```
-X trip move failed: query host time 0.692161s precedes retained motion history
-for axis AxisKey { mcu_id: 0, axis: 0 } (window 23.991060..25.695626s)
-```
+Fix: motion history is now recorded in the pump at the moment each piece is
+**sent to the MCU** (`HistoryRecorder` in `rust/motion-engine/src/pump.rs`),
+so the store mirrors what the MCU can actually execute. An endstop can only
+trip on pieces the MCU has received, so the trip query always lands inside
+the retained window. This also stops history from being polluted by planned
+pieces that a trip-flush later discards.
 
-The trigger clock maps ~23s earlier than the motion-history window recorded for
-the very move that tripped. Five probe-suite tests are `xfail`-marked with this
-diagnosis (`tools/sim/tests/test_probe.py`, `_TRIP_RESOLUTION_XFAIL`); remove
-the mark or run pytest with `--runxfail` to work on it.
+## Other bugs fixed on the way (each was masking the next)
 
-## Repro
+1. **Sim step-direction sign** (`src/linux/runtime_tick_host.c`): the drain
+   passed `dir ? -1 : 1` to `sim_intercept_notify_step`, but `dispatch_pulse`
+   emits `dir` as **+1/−1** — every step counted as −1. Homing approaches
+   looked right by coincidence (they are negative); retracts counted the
+   wrong way, so the auto-endstop wall never released and re-approaches
+   tripped at 0.00 mm. Now passes the signed value.
+2. **Auto-endstop wall latch** (`tools/sim/preload/libsim_intercept.c`): the
+   approach direction latched at the *first* wall crossing, so safe-z's
+   pre-homing z-hop latched the wall upward and the real descent started
+   "already tripped". The wall now unlatches when motion travels far past a
+   latched wall (a real endstop can't be traveled through) and re-arms on the
+   next crossing from inside.
+3. **`run_probe` left the nozzle in contact** (`klippy/extras/probe.py`):
+   mainline restores the toolhead after a probe session
+   (`always_restore_toolhead`); the rewrite didn't, so `PROBE` →
+   `PROBE_ACCURACY` hit "Probe triggered prior to movement". `run_probe` now
+   retracts after the final sample.
+4. **Test/config fixes**: `SCREWS_TILT_CALCULATE` (not `_ADJUST`); bed-mesh
+   activation is expected to be rejected by the planner (not yet ported);
+   `min_home_dist: 0` for the remote (timer-based) endstop variant; ±10 µm
+   tolerance on cross-MCU trip-vs-stop reconstruction float noise.
 
-```bash
-tools/sim/run.sh test -k "probe_homing" --runxfail       # 3 variants
-# or interactively:
-tools/sim/run.sh shell
-python3 - <<EOF
-import pathlib, sys; sys.path.insert(0, "/kalico")
-from tools.sim.world import SimWorld
-from tools.sim import configs
-w = SimWorld(pathlib.Path("/tmp/dbg")); w.dual_mcu = False
-w.boot(configs.probe_config(w.h7_pty, str(w.gcode_dir), "virtual"))
-print(w.gcode("G28 X", timeout=60))
-EOF
-```
+All five probe xfails are removed; `test_contact_probing` and
+`test_proximity_probing` (beacon) xfails removed too — both were downstream
+of the same eviction/step-sign bugs.
 
-Fails every run. Physical stepping works (the shim's auto-endstop wall on
-gpio200 does trigger — steps flow, `get_steps` counts move); only the
-*time-domain resolution* of the trip is wrong.
+## Still open
 
-## What is known
+- **vtime crawl under host load** (`test_probe_multi_point_tools`, xfail
+  strict=False): split into its own handoff —
+  [`sim-vtime-crawl-handoff.md`](sim-vtime-crawl-handoff.md) — with the
+  diagnostic signature, mechanism, repro, and attack ideas.
+- `set_position` rebases history endpoints with `host_now` taken from a
+  different epoch than the piece keys (observed host=1433.8 vs keys ~1s).
+  Harmless today (endpoints are only consulted when rings are empty and the
+  host key is not compared), but worth unifying.
+- The timer.c rebase-across-wrap seam is still unaudited (pre-existing TODO).
 
-- The failing conversion is `clock_to_host(endstop_mcu, trip_clock)` in
-  `rust/motion-engine/src/homing.rs::final_cartesian_position` →
-  `motion_history.rs::clock_to_host` → `PassthroughRouter::clock_to_host_secs`.
-- Numbers from one instrumented run (single MCU, `probe_config("virtual")`):
-  - history window: engine-relative host seconds ≈ 24.0..25.7 (consistent with
-    when the homing move actually ran, ~24s after the pytest session started)
-  - `clock_to_host(trip_clock)` ≈ 0.69s — i.e. `trip_clock / freq +
-    clock_offset` with `clock_offset ≈ -0.36`, `freq ≈ 50e6` → the reported
-    trip clock corresponds to ~1.05s of MCU uptime, though homing ran seconds
-    later. Either the trsync-reported trigger clock is stale/wrong-domain, or
-    the router's clocksync estimate is stale relative to the history keying.
-  - `[clock-seed] set_clock_est_rebased` events show `offset_raw` in the VM
-    monotonic domain and `clock_offset` rebased against `bridge_now` at rebase
-    time; `last_clock` near boot. The remote-endstop variant logs the trigger
-    with `clock32=0` and a synthesized `clock64` — worth auditing that
-    widening path first.
-- History-shadow divergence warnings (`history_shadow_divergence`, ~0.2mm)
-  fire during beacon homing — same family of host-keyed vs stepper-clock-keyed
-  disagreement.
-- Pre-existing context: the vtime pacer commit (81ed5fa21) already noted
-  "drip refill margin hovers at the engine's adoption tolerance" as a known
-  issue; this was never solved, only masked because the old sim firmware had
-  no stepper module compiled in at all.
+## Tooling traps hit during this work (read before trusting sim results)
 
-## What was already fixed on this branch (don't re-diagnose)
-
-- vtime is now a strict linear function of real time (wall-driver thread in
-  `tools/sim/preload/libvtime.c`) — it used to be demand-driven and leapt,
-  which broke clocksync far worse (PieceStartInPast storms). The trip
-  failure survives the driver, so nonuniform vtime is NOT the whole story.
-- The Linux MCU timer starts at 0 under `CONFIG_MCU_SIM` (upstream starts at
-  -1s → boot-adjacent 32-bit wrap collided with the early clocksync rebase).
-  The rebase-across-wrap seam itself is still unaudited (TODO in
-  `src/linux/timer.c`).
-- `dispatch_stepper` carries steps beyond `MAX_STEPS_PER_SAMPLE` forward under
-  `mcu-sim` instead of faulting; the sensorless-homing test (pulsed TMC DIAG
-  endstop, `test_phase_stepping.py`) passes — so trip resolution *can* work;
-  the wall-triggered gpio-endstop path is what fails.
-
-## Suggested attack
-
-1. Instrument the trsync/endstop trigger clock at the source (MCU endstop.c
-   report + host-rust ingestion) and log all three domains side by side:
-   raw trigger clock32, widened clock64, router `clock_to_host_secs` output,
-   and the history window keys for the same move.
-2. Audit `clock32=0` trigger widening in the remote/trip-relay path.
-3. Check whether the router's clocksync estimate and the motion-history
-   recorder use the same host epoch (rebase events vs `bridge_now_instant`).
-
-## Danger
-
-Do NOT bump `STEP_QUEUE_DEPTH` under mcu-sim as a shortcut for anything here:
-that was tried (256) and smashed the installed queue-pointer table
-(`rt_storage` sizing) — axis queue_ptr came back garbage and the firmware
-segfaulted in `dispatch_pulse`. Reverted; see branch history.
+- **Shared image tag**: `run.sh` used one `kalico-sim` tag for every worktree;
+  a concurrent session rebuilding it silently swaps the image under you
+  mid-investigation. Fixed: the tag is now branch-partitioned
+  (`kalico-sim-<branch>`), like the compile caches.
+- **BuildKit + cargo staleness**: the cache-mounted cargo target dir can go
+  stale (context mtime scanning on macOS misses edits; poisoned incremental
+  artifacts even produced a binary with *mixed old/new code*). When sim
+  behavior contradicts the source, byte-grep the built `.so` for a
+  known-new string, and `docker builder prune -af` + rebuild if it's wrong.

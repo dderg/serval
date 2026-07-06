@@ -4,7 +4,7 @@ use crate::segment::FollowerDemand;
 
 use super::biclothoid::GeneralBlend;
 use super::kernels::Reconstruction;
-use super::{FitError, blend_followers, internal};
+use super::{FitError, internal};
 
 pub(super) fn trim_arc(arc: &Arc, head: f64, tail: f64) -> Result<Arc, crate::GeometryError> {
     if head <= 0.0 && tail <= 0.0 {
@@ -19,22 +19,11 @@ pub(super) fn trim_arc(arc: &Arc, head: f64, tail: f64) -> Result<Arc, crate::Ge
 pub(super) fn emit_general_blend(
     out: &mut Vec<Move>,
     blend: &GeneralBlend,
-    in_followers: &[FollowerDemand],
-    out_followers: &[FollowerDemand],
+    f_in: Vec<FollowerDemand>,
+    f_out: Vec<FollowerDemand>,
     m_in: &Move,
     m_out: &Move,
 ) -> Result<(), FitError> {
-    let len1 = blend.half1.s_len();
-    let len2 = blend.half2.s_len();
-    let (f_in, f_out) = blend_followers(
-        in_followers,
-        out_followers,
-        blend.trim_in,
-        len1,
-        blend.trim_out,
-        len2,
-    );
-
     let seg_in = PathSegment::try_new(Segment::Clothoid(blend.half1.clone()), f_in)
         .map_err(internal(m_in.source.start_line))?;
     out.push(Move {
@@ -92,7 +81,13 @@ pub(super) fn emit_reconstruction(
     if remaining > crate::LENGTH_EPS_MM {
         let arc = trim_arc(&recon.arc, head_blend_trim, tail_blend_trim)
             .map_err(internal(m_in.source.start_line))?;
-        push(Segment::Arc(arc), m_in, recon.followers.clone())?;
+        let followers = recon
+            .followers
+            .iter()
+            .map(|f| f.span(head_blend_trim, arc_len - tail_blend_trim, arc_len))
+            .filter(|f| f.max_abs_ratio() > 0.0)
+            .collect();
+        push(Segment::Arc(arc), m_in, followers)?;
     }
     for down in &recon.down {
         push(

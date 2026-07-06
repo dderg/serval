@@ -53,7 +53,7 @@ const BUMP7: [f64; 8] = [0.0, 1.0, 0.0, -3.0, 0.0, 3.0, 0.0, -1.0];
 /// Post-fit Chebyshev truncation budgets: position at a tenth of the fit
 /// tolerance, endpoint velocity/acceleration bounded so collapsing a piece can
 /// never step the seam feedforward.
-const FIT_TRUNC_POS_FACTOR: f64 = 0.1;
+pub(crate) const FIT_TRUNC_POS_FACTOR: f64 = 0.1;
 pub(crate) const FIT_TRUNC_VEL_MM_S: f64 = 0.05;
 pub(crate) const FIT_TRUNC_ACC_MM_S2: f64 = 0.25;
 
@@ -152,7 +152,7 @@ pub(crate) fn ladder_degrees(h: f64) -> &'static [usize] {
 
 /// First ladder degree (5 → 6 → 7, span-capped) whose interior position and
 /// acceleration residuals pass; `None` asks the caller to bisect.
-fn ladder_fit(
+pub(crate) fn ladder_fit(
     base: &[f64],
     h: f64,
     tol: FitTol,
@@ -441,18 +441,32 @@ impl Sampler<'_> {
                 let sb = self.axis_state_full(axis, tb, true);
                 quintic_in_u(sa, sb, h)
             });
-        let cheb = truncate_chebyshev_c2_anchored(
-            &monomial_u_to_chebyshev(&mono_u),
-            h,
-            FIT_TRUNC_POS_FACTOR * tol.pos_mm,
-            FIT_TRUNC_VEL_MM_S,
-            FIT_TRUNC_ACC_MM_S2,
-        );
-        BezierPiece {
-            u_start: ua,
-            u_end: ub,
-            coeffs: chebyshev_to_monomial_tau(&cheb, h),
-        }
+        truncated_piece(&mono_u, ua, ub, h, FIT_TRUNC_POS_FACTOR * tol.pos_mm)
+    }
+}
+
+/// Chebyshev-truncate an accepted monomial-in-u fit to its true degree, then
+/// back to monomial-τ for the NURBS carrier. `h` is the span duration the fit
+/// was built with (not recomputed from the bounds — they may live on a shifted
+/// timeline, and the truncation weights must match the fit's own scaling).
+pub(crate) fn truncated_piece(
+    mono_u: &[f64],
+    u_start: f64,
+    u_end: f64,
+    h: f64,
+    pos_budget_mm: f64,
+) -> BezierPiece<f64> {
+    let cheb = truncate_chebyshev_c2_anchored(
+        &monomial_u_to_chebyshev(mono_u),
+        h,
+        pos_budget_mm,
+        FIT_TRUNC_VEL_MM_S,
+        FIT_TRUNC_ACC_MM_S2,
+    );
+    BezierPiece {
+        u_start,
+        u_end,
+        coeffs: chebyshev_to_monomial_tau(&cheb, h),
     }
 }
 
