@@ -34,6 +34,13 @@ struct PlaygroundConfig {
 pub fn plan(gcode_text: &str, config_json: &str) -> Result<String, JsValue> {
     let cfg: PlaygroundConfig = serde_json::from_str(config_json)
         .map_err(|e| JsValue::from_str(&format!("config: {e}")))?;
+    // JSON has no Infinity literal, so 0 encodes "jerk limiting off" — the
+    // same convention printer.cfg uses for max_jerk.
+    let max_jerk = if cfg.max_jerk == 0.0 {
+        f64::INFINITY
+    } else {
+        cfg.max_jerk
+    };
     let waypoints =
         parse_gcode(gcode_text, cfg.max_velocity).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let snap = pipeline_snapshot(
@@ -42,7 +49,7 @@ pub fn plan(gcode_text: &str, config_json: &str) -> Result<String, JsValue> {
             max_velocity: cfg.max_velocity,
             max_accel: cfg.max_accel,
             square_corner_velocity: cfg.square_corner_velocity,
-            max_jerk: cfg.max_jerk,
+            max_jerk,
             arc_fit: cfg.arc_fit,
             max_extrude_only_velocity: cfg.max_extrude_only_velocity,
             max_extrude_only_accel: cfg.max_extrude_only_accel,

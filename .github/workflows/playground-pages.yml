@@ -51,7 +51,7 @@ jobs:
           mkdir -p dist/playground
           cd snapshots/web/static
           cp playground.html playground.js playground-worker.js \
-            trajectory-view.js "$GITHUB_WORKSPACE/dist/playground/"
+            trajectory-view.js default.gcode "$GITHUB_WORKSPACE/dist/playground/"
           cp playground.html "$GITHUB_WORKSPACE/dist/playground/index.html"
           cp -r wasm wasm-playground "$GITHUB_WORKSPACE/dist/playground/"
           # wasm-pack writes a catch-all .gitignore into its out-dirs; it must
