@@ -3,22 +3,22 @@ GCODE move.gcode
 
 # Example kinematic files
 #
-# The new motion-bridge planner only supports the kinematics that
-# `BridgeKinematics` accepts (klippy/motion_toolhead.py:96):
+# The new motion-engine planner only supports the kinematics that
+# `EngineKinematics` accepts (klippy/motion.py):
 #   cartesian / corexy / hybrid_corexy
-# Configs whose kinematics the bridge does not yet implement are excluded
-# below (see "Unsupported bridge kinematics") so their failure is an
+# Configs whose kinematics the engine does not yet implement are excluded
+# below (see "Unsupported engine kinematics") so their failure is an
 # explicit, auditable gap rather than a silent breakage in this list.
 DICTIONARY atmega2560.dict
 CONFIG ../../config/example-cartesian.cfg
 CONFIG ../../config/example-corexy.cfg
 CONFIG ../../config/example-hybrid-corexy.cfg
 
-# --- Unsupported bridge kinematics (TRACKED — excluded from CI) ----------
-# BridgeKinematics (klippy/motion_toolhead.py:96) rejects these kinematics
-# with "Unsupported bridge kinematics" because the new planner has no
+# --- Unsupported engine kinematics (TRACKED — excluded from CI) ----------
+# EngineKinematics (klippy/motion.py) rejects these kinematics
+# with "Unsupported engine kinematics" because the new planner has no
 # kinematic transform for them yet. They are intentionally NOT collected
-# here. Re-add each line once BridgeKinematics implements that kinematic;
+# here. Re-add each line once EngineKinematics implements that kinematic;
 # do not delete them — this list is the tracking record of the gap.
 #   corexz       (example-corexz.cfg)
 #   hybrid_corexz(example-hybrid-corexz.cfg)

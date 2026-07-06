@@ -1,37 +1,31 @@
 # `geometry`
 
-Layer 1 geometry pipeline for the kalico motion planner. Token stream →
-typed segments. Phase 1 (current): degree-1 NURBS for G1, 3D rational
-quadratic for G2/G3, JunctionDeviation between consecutive G1s. Phase 2
-adds the LSPIA fitter, classifier, and corner-blend slot construction.
-
-See `docs/superpowers/specs/2026-04-26-layer-1-rust-architecture-design.md`.
+Geometry and velocity-planning primitives for the kalico motion planner.
+`motion-engine/src/stream/fitter.rs` is the main consumer — read it first to
+see these primitives assembled into the live streaming pipeline.
 
 ## Public surface
 
+Build `Move`s from G-code-shaped waypoints, fit them into a G2-continuous
+chain (lines blended by biclothoid corners, or reconstructed into arcs when
+`ChainFitConfig::arc_fit` is set), plan a velocity profile over the fitted
+chain, then lower it to fixed-rate trajectory samples:
+
 ```rust
-let mut pipeline = GeometryPipeline::new(FitterParams::default());
-let mut sink = |event: TelemetryEvent| { /* observability */ };
-for item in pipeline.process(&gcode_text, &mut sink) {
-    match item {
-        Item::Segment(s) => { /* normal */ }
-        Item::Recovered(s, recovery) => { /* anomaly + segment */ }
-        Item::Fatal(f) => { /* terminal */ break; }
-    }
-}
+use geometry::{ChainFitConfig, MoveContext, VelocityLimits, fit_corners, line_move, lower_profile};
+use geometry::velocity::{BoundaryState, plan_velocity_warm_start};
+
+let limits = VelocityLimits::try_new(max_velocity, max_accel, square_corner_velocity, max_jerk)?;
+let ctx = MoveContext { extruder_axis, feedrate_mm_s, limits, source };
+let moves = vec![line_move(start, end, e_delta, ctx)?];
+
+let fitted = fit_corners(&moves, ChainFitConfig::default().corner)?;
+let profile = plan_velocity_warm_start(&fitted, integration_tol, max_v_cap, max_a_cap, BoundaryState::REST)?;
+let samples = lower_profile(&fitted, &profile, sample_rate_hz)?;
 ```
 
-## Phase 1 vs Phase 2
-
-Public API is identical across phases. Phase 1 produces a subset of segment
-kinds:
-
-- Emitted in Phase 1: `Segment::Fitted` (degree 1 only), `Segment::Arc`,
-  `Segment::Junction`.
-- Defined but never produced in Phase 1: `Segment::CornerBlend`,
-  `Recovery::WindowCapHit`, `Recovery::DegenerateSlotFallback`,
-  `Recovery::ToleranceExceeded`, `Recovery::LspiaNotConverged`,
-  `TelemetryEvent::WindowFlush`, `TelemetryEvent::FitObservation`.
-
-Consumers handle the full enum from day one — no API churn at the phase
-boundary.
+The streaming fitter (`motion-engine`) drives the same primitives
+incrementally — `plan_junction_reduced`, `arc_candidate_fits`, `RunFit`, and
+`blend_moves` in `geometry::fitter` — rather than calling `fit_corners` over
+a complete move buffer; see `stream/fitter.rs` for how a bounded lookahead
+window decides run extents before committing.

@@ -1,6 +1,6 @@
 from klippy.extras import servo_axis
 from klippy.extras.stepper_enable import EnableTracking, StepperEnablePin
-from klippy.motion_toolhead import BridgeKinematics, MotionToolhead
+from klippy.motion import Motion
 
 
 class FakeLine:
@@ -39,24 +39,14 @@ def test_enable_tracking_drives_torque_line_like_a_stepper():
 
 
 class FakeNode:
-    def __init__(self, handle):
-        self._h = handle
-
-    def get_bridge_handle(self):
-        return self._h
-
-
-class FakeBridge:
     def __init__(self):
         self.calls = []
 
-    def set_torque(self, handle, value, print_time):
-        self.calls.append((handle, value, print_time))
+    def set_motor_torque(self, motor_name, value, print_time):
+        self.calls.append((motor_name, value, print_time))
 
 
 class FakePrinter:
-    command_error = RuntimeError
-
     def __init__(self, objs):
         self._objs = objs
 
@@ -64,37 +54,15 @@ class FakePrinter:
         return self._objs[name]
 
 
-def test_bridge_torque_line_maps_set_digital_to_set_torque():
-    bridge = FakeBridge()
-    printer = FakePrinter(
-        {"ethercat_node node_y": FakeNode(7), "motion_bridge": bridge}
-    )
-    line = servo_axis.BridgeTorqueLine(printer, "node_y")
+def test_torque_line_delegates_to_node_with_motor_name():
+    node = FakeNode()
+    printer = FakePrinter({"ethercat_node node_y": node})
+    line = servo_axis.MotionTorqueLine(printer, "node_y", "servo_x")
     line.set_digital(20.0, 1)
     line.set_digital(21.0, 0)
-    assert bridge.calls == [(7, True, 20.0), (7, False, 21.0)]
-
-
-def test_bridge_torque_line_fails_loudly_without_handle():
-    printer = FakePrinter(
-        {"ethercat_node node_y": FakeNode(None), "motion_bridge": FakeBridge()}
-    )
-    line = servo_axis.BridgeTorqueLine(printer, "node_y")
-    try:
-        line.set_digital(20.0, 1)
-        raise AssertionError("expected command_error")
-    except RuntimeError as e:
-        assert "no bridge handle" in str(e)
-
-
-def test_bridge_torque_line_accepts_handle_zero():
-    bridge = FakeBridge()
-    printer = FakePrinter(
-        {"ethercat_node node_y": FakeNode(0), "motion_bridge": bridge}
-    )
-    line = servo_axis.BridgeTorqueLine(printer, "node_y")
-    line.set_digital(20.0, 1)
-    assert bridge.calls == [(0, True, 20.0)]
+    # Per-motor enable/disable carries the motor name so the node can
+    # coalesce its node-wide gate across multiple motors.
+    assert node.calls == [("servo_x", True, 20.0), ("servo_x", False, 21.0)]
 
 
 def test_servo_rail_active_callback_contract():
@@ -106,13 +74,13 @@ def test_servo_rail_active_callback_contract():
 
 
 class FakeKin:
-    kinematics = "corexy"
-    active_rails = BridgeKinematics.active_rails
-
     def __init__(self, rails):
         self.rails = rails
 
     def get_steppers(self):
+        return []
+
+    def active_rails(self, dx, dy, dz):
         return []
 
 
@@ -125,11 +93,11 @@ def make_servo_rail(axis):
 
 
 class FakeToolhead:
-    kinematics_name = "corexy"
-    _fire_active_callbacks = MotionToolhead._fire_active_callbacks
+    _fire_active_callbacks = Motion._fire_active_callbacks
 
     def __init__(self, kin):
         self.kin = kin
+        self.follower_steppers = []
 
     def get_last_move_time(self):
         return 42.0
@@ -140,12 +108,12 @@ def test_servo_fires_on_any_motion_regardless_of_its_own_axis():
     fired = []
     rail.add_active_callback(fired.append)
     th = FakeToolhead(FakeKin([rail]))
-    assert th._fire_active_callbacks() is True
+    assert th._fire_active_callbacks((0.0, 0.0, 0.0, 1.0)) is True
     assert fired == [42.0]
-    assert th._fire_active_callbacks() is False
+    assert th._fire_active_callbacks((0.0, 0.0, 0.0, 1.0)) is False
     assert fired == [42.0]
     rail.add_active_callback(fired.append)
-    assert th._fire_active_callbacks() is True
+    assert th._fire_active_callbacks((0.0, 0.0, 0.0, 1.0)) is True
     assert fired == [42.0, 42.0]
 
 
@@ -154,5 +122,5 @@ def test_servo_pass_uses_toolhead_print_time():
     fired = []
     rail.add_active_callback(fired.append)
     th = FakeToolhead(FakeKin([rail]))
-    assert th._fire_active_callbacks() is True
+    assert th._fire_active_callbacks((1.0, 0.0, 0.0, 0.0)) is True
     assert fired == [42.0]

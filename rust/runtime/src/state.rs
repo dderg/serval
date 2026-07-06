@@ -13,6 +13,12 @@ pub use crate::sizing::TOTAL_RING_PIECES;
 
 pub use crate::sizing::PIECE_RING_SIZE;
 
+// Guard against divisor drift between build.rs (which computes
+// TOTAL_RING_PIECES from the byte budget) and the actual PieceEntry size.
+#[allow(dead_code, clippy::integer_division)]
+const RING_PIECES_FROM_BYTES: usize = PIECE_RING_SIZE / core::mem::size_of::<PieceEntry>();
+const _: () = assert!(RING_PIECES_FROM_BYTES == TOTAL_RING_PIECES);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum StepMode {
@@ -62,7 +68,7 @@ pub struct FgState {
 }
 
 /// ISR-half state. Written exclusively by the TIM5 ISR
-/// (`kalico_runtime_tick_sample`). Mutual exclusion is enforced by
+/// (`runtime_tick_sample`). Mutual exclusion is enforced by
 /// Cortex-M NVIC priority arbitration.
 #[allow(missing_debug_implementations)]
 #[repr(C)]
@@ -193,8 +199,10 @@ pub struct SharedState {
     /// → instant retire ("ghost retire" symptom).
     pub isr_last_arm_participating: AtomicU32,
     /// f32-bits of `pieces[0].duration` for the X curve at arm. If 0
-    /// (= 0.0 s), `bernstein_to_monomial_with_duration` divides by 0
-    /// → inf/NaN → signed_steps=0.
+    /// (= 0.0 s), `arm_piece` computes `inv_scale = 2 / (duration ·
+    /// cycles_per_second)` as inf/NaN → signed_steps=0. Coefficients stay
+    /// Chebyshev on `u ∈ [-1, 1]`; this 2/duration derivative scale is the
+    /// only place duration enters the arm path.
     pub isr_last_arm_x_piece0_duration_bits: AtomicU32,
     /// Incremented in `producer_step` every time `producer_current.is_none()`
     /// is entered. Cross-check with `producer_segment_dequeued_total`:
@@ -413,7 +421,7 @@ impl Default for SharedState {
 ///
 /// C/Rust boundary: `piece_storage` lives inside the C-declared `rt_storage`
 /// buffer; C owns linker-section placement on the MCU
-/// (docs/kalico-rewrite/mcu-c-rust-boundary.md rule B2). No additional
+/// (docs/rewrite/mcu-c-rust-boundary.md rule B2). No additional
 /// `#[link_section]` is needed here.
 #[allow(missing_debug_implementations)]
 pub struct RuntimeContext {
@@ -432,7 +440,7 @@ unsafe impl Sync for RuntimeContext {}
 unsafe extern "C" {
     static runtime_clock_freq: u32;
     /// TIM5 ISR fire rate (Hz). Defined in `src/runtime_tick.c` as
-    /// `CONFIG_KALICO_MOTION_SAMPLE_RATE_HZ` (defaults: 40000 on H7,
+    /// `CONFIG_MOTION_SAMPLE_RATE_HZ` (defaults: 40000 on H7,
     /// 20000 on F4, 10000 on Linux sim).
     static runtime_sample_rate_hz: u32;
 }

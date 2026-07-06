@@ -49,6 +49,8 @@ class GCodeMove:
             desc = getattr(self, "cmd_" + cmd + "_help", None)
             gcode.register_command(cmd, func, False, desc)
         gcode.register_command("G0", self.cmd_G1)
+        gcode.register_command("G5", self.cmd_G5)
+        gcode.register_command("G5.1", self.cmd_G5_1)
         gcode.register_command("M114", self.cmd_M114, True)
         gcode.register_command(
             "GET_POSITION",
@@ -147,9 +149,13 @@ class GCodeMove:
         if self.is_printer_ready:
             self.last_position = self.position_with_transform()
 
+    def _resync_toolhead_before_move(self):
+        self.printer.lookup_object("toolhead").resync_parked_servos()
+
     # G-Code movement commands
     def cmd_G1(self, gcmd):
         # Move
+        self._resync_toolhead_before_move()
         params = gcmd.get_command_parameters()
         try:
             for pos, axis in enumerate("XYZ"):
@@ -181,6 +187,120 @@ class GCodeMove:
                 "Unable to parse move '%s'" % (gcmd.get_commandline(),)
             )
         self.move_with_transform(self.last_position, self.speed)
+
+    def _reject_curve_if_transform_active(self, gcmd):
+        toolhead = self.printer.lookup_object("toolhead")
+        raw = toolhead.get_position()
+        transformed = self.position_with_transform()
+        if any(abs(a - b) > 1e-9 for a, b in zip(raw[:3], transformed[:3])):
+            raise gcmd.error(
+                "G5/G5.1 not supported with an active move transform yet "
+                "(skew_correction / bed_tilt / bed_mesh)"
+            )
+
+    def _resolve_curve_endpoint(self, gcmd, params):
+        try:
+            for pos, axis in enumerate("XYZ"):
+                if axis in params:
+                    v = float(params[axis])
+                    if not self.absolute_coord:
+                        self.last_position[pos] += v
+                    else:
+                        self.last_position[pos] = v + self.base_position[pos]
+            if "E" in params:
+                v = float(params["E"]) * self.extrude_factor
+                if not self.absolute_coord or not self.absolute_extrude:
+                    self.last_position[3] += v
+                else:
+                    self.last_position[3] = v + self.base_position[3]
+            if "F" in params:
+                gcode_speed = float(params["F"])
+                if gcode_speed <= 0.0:
+                    raise gcmd.error(
+                        "Invalid speed in '%s'" % (gcmd.get_commandline(),)
+                    )
+                self.speed = gcode_speed * self.speed_factor
+        except ValueError:
+            raise gcmd.error(
+                "Unable to parse curve '%s'" % (gcmd.get_commandline(),)
+            )
+
+    def cmd_G5(self, gcmd):
+        self._resync_toolhead_before_move()
+        self._reject_curve_if_transform_active(gcmd)
+        params = gcmd.get_command_parameters()
+        if "P" not in params or "Q" not in params:
+            raise gcmd.error("G5 requires P and Q")
+        has_i, has_j = "I" in params, "J" in params
+        if has_i != has_j:
+            raise gcmd.error("G5 I and J must both be present or both omitted")
+        start = list(self.last_position)
+        self._resolve_curve_endpoint(gcmd, params)
+        try:
+            p = float(params["P"])
+            q = float(params["Q"])
+            i = float(params["I"]) if has_i else None
+            j = float(params["J"]) if has_j else None
+        except ValueError:
+            raise gcmd.error(
+                "Unable to parse curve '%s'" % (gcmd.get_commandline(),)
+            )
+        end = self.last_position
+        dz = end[2] - start[2]
+        interior = []
+        if i is not None:
+            interior.append([start[0] + i, start[1] + j, start[2] + dz / 3.0])
+        interior.append([end[0] + p, end[1] + q, start[2] + 2.0 * dz / 3.0])
+
+        def submit(sdx, sdy, sdz, sde, fr):
+            self._submit_bezier_to_engine(i, j, p, q, sdx, sdy, sdz, sde, fr)
+
+        toolhead = self.printer.lookup_object("toolhead")
+        try:
+            toolhead.move_curve(
+                list(self.last_position), interior, submit, self.speed
+            )
+        except self.printer.command_error:
+            self.last_position[:] = start
+            raise
+
+    def _submit_bezier_to_engine(self, i, j, p, q, dx, dy, dz, de, fr):
+        motion = self.printer.lookup_object("motion")
+        try:
+            motion.engine.submit_bezier(i, j, p, q, dx, dy, dz, de, fr)
+        except ValueError as e:
+            raise self.printer.command_error(str(e))
+
+    def cmd_G5_1(self, gcmd):
+        self._resync_toolhead_before_move()
+        self._reject_curve_if_transform_active(gcmd)
+        params = gcmd.get_command_parameters()
+        if "I" not in params and "J" not in params:
+            raise gcmd.error("G5.1 requires I and/or J")
+        start = list(self.last_position)
+        self._resolve_curve_endpoint(gcmd, params)
+        try:
+            i = float(params.get("I", 0.0))
+            j = float(params.get("J", 0.0))
+        except ValueError:
+            raise gcmd.error(
+                "Unable to parse curve '%s'" % (gcmd.get_commandline(),)
+            )
+        end = self.last_position
+        dz = end[2] - start[2]
+        interior = [[start[0] + i, start[1] + j, start[2] + dz / 2.0]]
+
+        def submit(sdx, sdy, sdz, sde, fr):
+            self._submit_quadratic_to_engine(i, j, sdx, sdy, sdz, sde, fr)
+
+        toolhead = self.printer.lookup_object("toolhead")
+        toolhead.move_curve(
+            list(self.last_position), interior, submit, self.speed
+        )
+
+    def _submit_quadratic_to_engine(self, i, j, dx, dy, dz, de, fr):
+        motion = self.printer.lookup_object("motion")
+        motion.engine.submit_quadratic(i, j, dx, dy, dz, de, fr)
 
     # G-Code coordinate manipulation
     def cmd_G20(self, gcmd):
@@ -306,15 +426,17 @@ class GCodeMove:
         toolhead = self.printer.lookup_object("toolhead", None)
         if toolhead is None:
             raise gcmd.error("Printer not ready")
-        kin = toolhead.get_kinematics()
-        steppers = kin.get_steppers()
-        mcu_pos = " ".join(
-            ["%s:%d" % (s.get_name(), s.get_mcu_position()) for s in steppers]
-        )
-        cinfo = [(s.get_name(), s.get_commanded_position()) for s in steppers]
-        stepper_pos = " ".join(["%s:%.6f" % (a, v) for a, v in cinfo])
-        kinfo = zip("XYZ", kin.calc_position(dict(cinfo)))
-        kin_pos = " ".join(["%s:%.6f" % (a, v) for a, v in kinfo])
+        engine = self.printer.lookup_object("motion_engine", None)
+        try:
+            axes = engine.query_motor_positions() if engine is not None else {}
+            measured = " ".join(
+                "%s:%.6f" % (a.upper(), axes[a][0])
+                for a in ("x", "y", "z", "e")
+                if a in axes
+            )
+            measured_pos = measured if measured else "ERR"
+        except Exception as e:
+            measured_pos = "ERR (%s)" % (e,)
         toolhead_pos = " ".join(
             [
                 "%s:%.6f" % (a, v)
@@ -331,17 +453,13 @@ class GCodeMove:
             ["%s:%.6f" % (a, v) for a, v in zip("XYZ", self.homing_position)]
         )
         gcmd.respond_info(
-            "mcu: %s\n"
-            "stepper: %s\n"
-            "kinematic: %s\n"
+            "measured: %s\n"
             "toolhead: %s\n"
             "gcode: %s\n"
             "gcode base: %s\n"
             "gcode homing: %s"
             % (
-                mcu_pos,
-                stepper_pos,
-                kin_pos,
+                measured_pos,
                 toolhead_pos,
                 gcode_pos,
                 base_pos,

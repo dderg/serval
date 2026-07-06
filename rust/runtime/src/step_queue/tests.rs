@@ -2,14 +2,25 @@ use super::*;
 
 #[test]
 fn step_entry_carries_stepper_sel() {
-    let entry = StepEntry {
-        cycle_abs: 100,
-        dir: 1,
-        stepper_sel: 3,
-        _pad: [0; 2],
-    };
+    let entry = StepEntry::pulse(100, 1, 3);
     assert_eq!(core::mem::size_of::<StepEntry>(), 8);
-    assert_eq!(entry.stepper_sel, 3);
+    assert_eq!(entry.cycle_abs, 100);
+    assert_eq!(entry.dir(), 1);
+    assert_eq!(entry.stepper_sel(), 3);
+}
+
+#[test]
+fn step_entry_pulse_roundtrips_negative_dir() {
+    let entry = StepEntry::pulse(7, -1, 2);
+    assert_eq!(entry.dir(), -1);
+    assert_eq!(entry.stepper_sel(), 2);
+}
+
+#[test]
+fn step_entry_xdirect_carries_signed_offset() {
+    let entry = StepEntry::xdirect(42, -12345);
+    assert_eq!(entry.cycle_abs, 42);
+    assert_eq!(entry.offset_steps(), -12345);
 }
 
 #[test]

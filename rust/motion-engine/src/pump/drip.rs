@@ -1,0 +1,37 @@
+use super::{AxisKey, AxisQueue};
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
+
+pub const DRIP_WINDOW_SECS: f64 = 0.100;
+
+pub struct DripArm {
+    pub cohort: u64,
+    pub participants: Vec<AxisKey>,
+    pub timeout: Duration,
+}
+
+pub(super) struct DripCohort {
+    pub id: u64,
+    pub participants: BTreeSet<AxisKey>,
+    pub timeout: Duration,
+    pub baseline: BTreeMap<AxisKey, u32>,
+    pub last_retired: BTreeMap<AxisKey, u32>,
+    pub step_deadline: Instant,
+    pub deadline_floor: u32,
+}
+
+impl DripCohort {
+    pub(super) fn executed(&self, k: &AxisKey, queues: &BTreeMap<AxisKey, AxisQueue>) -> u32 {
+        let retired = queues.get(k).map_or(0, |q| q.retired);
+        let baseline = self.baseline.get(k).copied().unwrap_or(0);
+        retired.wrapping_sub(baseline)
+    }
+
+    pub(super) fn floor(&self, queues: &BTreeMap<AxisKey, AxisQueue>) -> u32 {
+        self.participants
+            .iter()
+            .map(|k| self.executed(k, queues))
+            .min()
+            .unwrap_or(0)
+    }
+}

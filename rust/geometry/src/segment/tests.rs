@@ -16,9 +16,7 @@ fn cubic_variant_constructs() {
     .expect("valid cubic");
     let cs = CubicSegment::try_new(
         xyz,
-        EMode::Travel,
-        0.0,
-        None,
+        vec![],
         100.0,
         SourceRange {
             start_line: 1,

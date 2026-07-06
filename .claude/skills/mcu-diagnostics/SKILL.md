@@ -5,17 +5,19 @@ description: Use when reading MCU diagnostics / crash forensics from the kalico 
 
 # Reading MCU diagnostics & crash forensics
 
-The MCU emits structured records (no `printf`) over `KALICO_MSG_LOG` → the host
+The MCU emits structured records (no `printf`) over `MCU_MSG_LOG` → the host
 writes them to `~/printer_data/logs/events/<source>.jsonl`. **This is the source
 of truth for MCU diagnostics — it supersedes the old `klippy.log` text dump.**
 
 Sources: `mcu` (H7 / main), `bottom` (F4) — the value is each MCU's klippy name.
 Also present: `host-py` (mirrors klippy.log content, structured), `host-rust`
-(motion-bridge). Rotating: 32 MB × 5 backups (`.1`..`.5`) per source.
+(motion-engine). Rotating: 32 MB × 5 backups (`.1`..`.5`) per source.
 
-**For querying by session/print/level/field, use the `query-logs` skill** (LogsQL
-over VictoriaLogs). This skill covers the MCU-specific *features and event
-catalog* and direct raw-file reading.
+**For querying, use `scripts/logq.py`** (see the `query-logs` skill) —
+`tail`, `session`, `q '<LogsQL>'`, `resolve <code>` all cover MCU records
+(`source:=mcu` etc.) and health-check VL first. This skill covers the
+MCU-specific *features and event catalog*, plus raw-file reading for when the
+VL pipeline itself is down.
 
 ## Three ways MCU diag reaches the store
 
@@ -41,7 +43,12 @@ It sends `kalico_diag_dump` to every MCU; each emits (all `debug`):
 `block_source` / `tim5_ia` + `runtime.fg_freeze` (if a stall latched) + the live
 event ring as `diag.*`, oldest-first. Then read the tail (recipe below).
 
-Manual-test flow: run your test → `KALICO_DIAG_DUMP` → read `events/<mcu>.jsonl`.
+Manual-test flow: run your test → `KALICO_DIAG_DUMP` → read the dump:
+```bash
+KALICO_VL=http://<bench>:9428 python3 scripts/logq.py q \
+  'source:=mcu event:~"(runtime|diag)\." _time:10m | sort by (_time)'
+```
+(or read `events/<mcu>.jsonl` directly if VL is down — recipe below).
 
 ## Reading "why did it crash?"
 
@@ -66,7 +73,9 @@ rest as a story:
 
 Decode a `pc` (from `fg_freeze`/`hard_fault`) — the elf must match the flashed build:
 `ssh trident "arm-none-eabi-addr2line -e ~/klipper/out/klipper.elf <pc-as-hex>"`
-(the `arg0` values are decimal in the log; convert to hex first).
+(the rendered `_msg` already shows PC/address args as `0x`-prefixed hex —
+copy that straight into `addr2line`; the raw `arg0`/`arg1` fields in the JSON
+record are still plain decimal).
 
 **Gotcha:** `block_source`/`tim5_ia` are **whole-run maxima since boot**, not
 instantaneous. In a *crash-replay* they're the doomed run's worst → the real
@@ -106,7 +115,7 @@ carry `code` + `code_name`. Canonical table: `rust/runtime/src/log_codes.rs`.
 | `tick.interval_exceeded` / `tick.underrun` | … | tick ISR |
 | `endstop.trip` / `endstop.arm_timeout` | … | endstop |
 
-## Reading the raw files
+## Reading the raw files (fallback — when VL/Vector is down)
 
 Fetch a snapshot first (don't analyze the live file):
 ```bash
@@ -132,7 +141,7 @@ block right after the most recent `mcu_ready`. A record looks like:
 `{"_time":"…","level":"warn","source":"mcu","event":"runtime.block_source","arg0":137808,"arg1":0,"_msg":"block usb_burst=137808 cyc stepout_burst=0 cyc"}`
 
 For indexed queries (by `session_id`, `print_id`, numeric ranges, code
-resolution), use **`query-logs`** instead of grepping.
+resolution), use **`scripts/logq.py`** (`query-logs` skill) instead of grepping.
 
 ## When klippy.log is still useful
 

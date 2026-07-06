@@ -126,7 +126,7 @@ jobs:
           workspaces: rust
           key: mcu-h7
       - name: cargo build (mcu-h7)
-        # Env (KALICO_RUNTIME_STORAGE_SIZE / _PIECE_RING_SIZE) and the
+        # Env (RUNTIME_STORAGE_SIZE / _PIECE_RING_SIZE) and the
         # motion-module-stepper feature live inside scripts/ci.sh so CI and
         # local stay one source of truth — see job_rust_mcu_h7.
         run: ./scripts/ci.sh rust-mcu-h7
@@ -222,6 +222,21 @@ jobs:
           key: c-smoke
       - name: Build release staticlib + run c_smoke_build test
         run: ./scripts/ci.sh c-smoke
+
+  rust-ethercat-hw:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+          key: ethercat-hw
+      - name: Compile-check the IgH hw endpoint against the CI ecrt.h stub
+        run: ./scripts/ci.sh rust-ethercat-hw
 
   rust-deny:
     needs: changes

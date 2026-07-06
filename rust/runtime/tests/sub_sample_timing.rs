@@ -41,7 +41,9 @@ fn step_times_in_sample_for_constant_velocity() {
     assert_eq!(times.len(), 4, "expected exactly 4 step times");
 
     for k in 0..4u32 {
-        let expected = ((k + 1) as u64 * SAMPLE_PERIOD_CYCLES as u64 / 4u64) as u32;
+        let half_step_threshold_cycles =
+            ((2 * k + 1) as u64 * SAMPLE_PERIOD_CYCLES as u64 / 8u64) as u32;
+        let expected = half_step_threshold_cycles;
         let got = times[k as usize];
         let drift = if got > expected {
             got - expected

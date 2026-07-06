@@ -55,21 +55,6 @@ fn find_knot_span_returns_correct_span() {
 }
 
 #[test]
-fn knot_vector_find_span_delegates() {
-    let kv = KnotVector::<f64>::try_new(vec![0.0, 0.0, 0.5, 1.0, 1.0]).unwrap();
-    assert_eq!(kv.find_span(0.25, 1, 3), 1);
-}
-
-#[test]
-fn multiplicity_at_counts_repeated_knots() {
-    let kv = KnotVector::<f64>::try_new(vec![0.0, 0.0, 0.5, 0.5, 1.0, 1.0]).unwrap();
-    assert_eq!(kv.multiplicity_at(0.0), 2);
-    assert_eq!(kv.multiplicity_at(0.5), 2);
-    assert_eq!(kv.multiplicity_at(1.0), 2);
-    assert_eq!(kv.multiplicity_at(0.25), 0);
-}
-
-#[test]
 fn remove_knot_returns_zero_when_tolerance_not_met() {
     let curve = ScalarNurbs::<f64>::try_new(
         2,
@@ -131,13 +116,6 @@ fn remove_knot_undoes_insertion_for_cubic_with_irregular_cps() {
 
 #[test]
 fn remove_knot_two_round_trips_for_cubic_with_irregular_cps() {
-    // Degree-4 curve with no interior knots, irregular non-symmetric CPs.
-    // Insert at u=0.4 twice to lift multiplicity to 2, then attempt to
-    // remove both. With p=4 and s=2, iteration t=1 of remove_knot exits its
-    // inner loop with j == i (i.e. j < i + t strictly), exercising the
-    // convergence-branch predicate. With the buggy `j + t < i` predicate
-    // this routes to the else branch, reads outside the temp window, and
-    // either panics or returns count=1 with displaced cps.
     let curve = ScalarNurbs::<f64>::try_new(
         4,
         vec![0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0],
@@ -238,7 +216,7 @@ fn refined_to_full_multiplicity_matches_reference_on_mixed_multiplicity_curve() 
     let cps: Vec<f64> = (0..n_cps)
         .map(|i| {
             let t = i as f64 / (n_cps - 1) as f64;
-            t * t - 0.5 * t + 0.1 * (i as f64 * 1.3).sin()
+            t * t - 0.5 * t + 0.1 * libm::sin(i as f64 * 1.3)
         })
         .collect();
 
@@ -281,9 +259,6 @@ fn refined_to_full_multiplicity_matches_reference_on_mixed_multiplicity_curve() 
 
 #[test]
 fn insert_knot_multifold_at_existing_preserves_evaluation_for_failing_case() {
-    // From the algebra_proptest shrunk failure: cubic with interior knot at 0.1
-    // (multiplicity 1), inserted twice — Boehm A5.3 multi-fold + existing path
-    // produced wrong control points pre-fix.
     use crate::eval::eval;
     let curve = ScalarNurbs::<f64>::try_new(
         3,

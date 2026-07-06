@@ -1,5 +1,5 @@
-#ifndef KALICO_RUNTIME_STORAGE_H
-#define KALICO_RUNTIME_STORAGE_H
+#ifndef RUNTIME_STORAGE_H
+#define RUNTIME_STORAGE_H
 
 #include "autoconf.h"
 #include <stdint.h>

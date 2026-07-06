@@ -49,15 +49,15 @@ fn event_info_all_runtime_events() {
 
     let (name, tmpl) = event_info(SUBSYSTEM_RUNTIME, EVENT_RUNTIME_HARD_FAULT);
     assert_eq!(name, "runtime.hard_fault");
-    assert!(tmpl.contains("{arg0}") && tmpl.contains("{arg1}"));
+    assert!(tmpl.contains("{arg0:hex}") && tmpl.contains("{arg1:hex}"));
 
     let (name, tmpl) = event_info(SUBSYSTEM_RUNTIME, EVENT_RUNTIME_FAULT_STATUS);
     assert_eq!(name, "runtime.fault_status");
-    assert!(tmpl.contains("{arg0}") && tmpl.contains("{arg1}"));
+    assert!(tmpl.contains("{arg0:hex}") && tmpl.contains("{arg1:hex}"));
 
     let (name, tmpl) = event_info(SUBSYSTEM_RUNTIME, EVENT_RUNTIME_FG_FREEZE);
     assert_eq!(name, "runtime.fg_freeze");
-    assert!(tmpl.contains("{arg0}") && tmpl.contains("{arg1}"));
+    assert!(tmpl.contains("{arg0:hex}") && tmpl.contains("{arg1}"));
 
     let (name, tmpl) = event_info(SUBSYSTEM_RUNTIME, EVENT_RUNTIME_RT_PROGRESS);
     assert_eq!(name, "runtime.rt_progress");
@@ -195,7 +195,7 @@ fn event_info_diag_unknown_boundaries() {
 fn event_info_new_runtime_crash_discriminators() {
     let (name, tmpl) = event_info(SUBSYSTEM_RUNTIME, EVENT_RUNTIME_LAST_DISPATCH);
     assert_eq!(name, "runtime.last_dispatch");
-    assert!(tmpl.contains("{arg0}") && tmpl.contains("{arg1}"));
+    assert!(tmpl.contains("{arg0:hex}") && tmpl.contains("{arg1:hex}"));
 
     let (name, tmpl) = event_info(SUBSYSTEM_RUNTIME, EVENT_RUNTIME_ISR_PHASE);
     assert_eq!(name, "runtime.isr_phase");
@@ -248,4 +248,89 @@ fn compose_msg_real_tick_template() {
 fn compose_msg_zero_args() {
     let msg = compose_msg("code={arg0} detail={arg1}", 0, 0);
     assert_eq!(msg, "code=0 detail=0");
+}
+
+#[cfg(feature = "host")]
+#[test]
+fn compose_msg_i32_renders_negative() {
+    let msg = compose_msg(
+        "start-now={arg0:i32}ms end-now={arg1:i32}ms",
+        (-2000i32) as u32,
+        (-1i32) as u32,
+    );
+    assert_eq!(msg, "start-now=-2000ms end-now=-1ms");
+}
+
+#[cfg(feature = "host")]
+#[test]
+fn compose_msg_i32_renders_positive_same_as_plain() {
+    let msg = compose_msg("delta={arg0:i32}", 42, 0);
+    assert_eq!(msg, "delta=42");
+}
+
+#[cfg(feature = "host")]
+#[test]
+fn compose_msg_hex_renders_with_prefix() {
+    let msg = compose_msg("pc={arg0:hex} lr={arg1:hex}", 0x0800_1234, 0xDEAD_BEEF);
+    assert_eq!(msg, "pc=0x8001234 lr=0xdeadbeef");
+}
+
+#[cfg(feature = "host")]
+#[test]
+fn compose_msg_hex_zero() {
+    let msg = compose_msg("pc={arg0:hex}", 0, 0);
+    assert_eq!(msg, "pc=0x0");
+}
+
+#[cfg(feature = "host")]
+#[test]
+fn compose_msg_hi16_lo16_split_packed_field() {
+    let packed = (7u32 << 16) | 42u32;
+    let msg = compose_msg("axis={arg0:hi16} occupancy={arg0:lo16}", packed, 0);
+    assert_eq!(msg, "axis=7 occupancy=42");
+}
+
+#[cfg(feature = "host")]
+#[test]
+fn compose_msg_mixes_typed_and_plain_placeholders() {
+    let msg = compose_msg(
+        "func={arg0:hex} dur_cyc={arg1} plain={arg0}",
+        0x2000_0100,
+        99,
+    );
+    assert_eq!(msg, "func=0x20000100 dur_cyc=99 plain=536871168");
+}
+
+#[cfg(feature = "host")]
+#[test]
+fn compose_msg_axis_stalled_template() {
+    let (name, tmpl) = event_info(SUBSYSTEM_MOTION, EVENT_MOTION_AXIS_STALLED);
+    assert_eq!(name, "motion.axis_stalled");
+    let packed = (2u32 << 16) | 3u32;
+    let msg = compose_msg(tmpl, packed, 500);
+    assert_eq!(
+        msg,
+        "axis retirement stalled with pieces pending axis=2 occupancy=3 stalled_ms=500"
+    );
+}
+
+#[cfg(feature = "host")]
+#[test]
+fn compose_msg_axis_stalled_head_template_renders_signed_ms() {
+    let (name, tmpl) = event_info(SUBSYSTEM_MOTION, EVENT_MOTION_AXIS_STALLED_HEAD);
+    assert_eq!(name, "motion.axis_stalled_head");
+    let msg = compose_msg(tmpl, (-2000i32) as u32, 500);
+    assert_eq!(
+        msg,
+        "stalled axis armed piece window vs now start-now=-2000ms end-now=500ms"
+    );
+}
+
+#[cfg(feature = "host")]
+#[test]
+fn compose_msg_hard_fault_template_renders_hex() {
+    let (name, tmpl) = event_info(SUBSYSTEM_RUNTIME, EVENT_RUNTIME_HARD_FAULT);
+    assert_eq!(name, "runtime.hard_fault");
+    let msg = compose_msg(tmpl, 0x0800_1234, 0x2000_5678);
+    assert_eq!(msg, "cpu hard fault pc=0x8001234 lr=0x20005678");
 }

@@ -1,0 +1,58 @@
+[package]
+name = "ethercat-rt"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license.workspace = true
+
+[lib]
+name = "ethercat_rt"
+crate-type = ["rlib"]
+
+# `hw` gates the EtherCAT FFI (`ffi` module) and the build.rs compile + link of the
+# IgH master backend (csrc/libecrt_igh.c, -lethercat) over the ec_rt_* surface. OFF
+# by default so the pure scale/wire/curves unit tests build and run on any machine
+# (and in CI) without a master library installed.
+[features]
+default = []
+hw = []
+
+# The endpoint binary drives real hardware via the FFI; it only exists with `hw`.
+[[bin]]
+name = "ethercat-rt"
+path = "src/bin/ethercat-rt.rs"
+required-features = ["hw"]
+
+# The test client speaks the socket protocol only (no FFI) — builds without `hw`.
+[[bin]]
+name = "ec-test-client"
+path = "src/bin/ec-test-client.rs"
+
+# No-hardware stub: serves the kalico-native socket and answers the protocol
+# without driving EtherCAT. For drive-off integration testing. No `hw` feature.
+[[bin]]
+name = "ethercat-rt-stub"
+path = "src/bin/ethercat-rt-stub.rs"
+
+[dependencies]
+runtime = { path = "../runtime", default-features = false, features = ["host"] }  # servo node: no stepper dispatch
+mcu-protocol = { path = "../mcu-protocol" }
+mcu-transport = { path = "../mcu-transport" }
+libc = "0.2"                                       # raw clock_gettime(CLOCK_MONOTONIC)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "env-filter", "std"] }
+tracing-appender = "0.2"                            # non-blocking file writer so the RT cycle never blocks on log I/O
+time = { version = "0.3", default-features = false, features = ["formatting", "macros", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+[build-dependencies]
+cc = "1"                                            # compiles csrc/libecrt_igh.c under `hw`
+
+[dev-dependencies]
+host-rt = { path = "../host-rt" }
+servo-ident = { path = "../servo-ident" }
+
+[lints]
+workspace = true

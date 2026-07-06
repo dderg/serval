@@ -1,4 +1,4 @@
-#include "../../kalico-c-api/include/kalico_nurbs.h"
+#include "../../c-api/include/nurbs.h"
 #include <stdio.h>
 #include <stdlib.h>
 

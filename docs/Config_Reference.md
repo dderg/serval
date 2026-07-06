@@ -241,8 +241,55 @@ max_accel:
 #   decelerate to zero at each corner. The value specified here may be
 #   changed at runtime using the SET_VELOCITY_LIMIT command. The
 #   default is 5mm/s.
+#max_path_deviation: 0.005
+#   Maximum distance (in mm) the executed motion may deviate from the
+#   commanded path. The planner represents each move as a series of
+#   polynomial pieces and subdivides a move until every piece tracks the
+#   path to within this value, so a smaller value yields more pieces
+#   (tighter path following) and a larger value yields fewer pieces.
+#   Loosening it reduces the per-move piece count, which lowers MCU
+#   piece-ring pressure and host-to-MCU serial bandwidth on
+#   memory-constrained boards at the cost of slightly coarser path
+#   following. This is unrelated to [arc_fit], which reconstructs arcs
+#   from faceted segments. The default is 0.005 (5 microns).
+#max_accel_deviation: 50.0
+#   Maximum amount (in mm/s^2) the acceleration implied by a polynomial
+#   piece may deviate from the planned motion profile in the piece
+#   interior. Acceleration accuracy only matters to drives that consume
+#   an acceleration feedforward (EtherCAT servos); stepper drivers
+#   follow positions and are unaffected. This budget, not
+#   max_path_deviation, is usually what forces the planner to subdivide
+#   curved moves, so raising it substantially reduces piece counts (and
+#   with them MCU piece-ring pressure and host-to-MCU serial bandwidth)
+#   at the cost of coarser acceleration feedforward. Endpoint
+#   acceleration at piece seams stays exact regardless of this value,
+#   so trajectories remain smooth. The default is 50.0.
 #max_accel_to_decel:
 #   This parameter is deprecated and should no longer be used.
+```
+
+### [arc_fit]
+
+Opt-in faceted-arc recovery. Some slicers emit a curve as a run of many
+short straight `G1` segments instead of a `G2`/`G3` arc. When this section
+is present, the planner detects runs of such facets and reconstructs them
+as a single smooth arc, so the toolhead cruises the curve instead of
+dipping at every facet. **The section is off by default**: with no
+`[arc_fit]` section the planner never reconstructs arcs from straight
+segments, so an intentional polygon (e.g. a square) keeps its corners.
+Arcs you actually want are best emitted directly as `G2`/`G3`.
+
+```
+[arc_fit]
+#facet_length_mm: 1.0
+#   Only runs whose every segment is no longer than this (in mm) are
+#   considered faceting. Longer segments are treated as intentional
+#   straight moves and are never merged into an arc. The default is 1.0.
+#max_angle_deg: 12.0
+#   Only runs whose every corner turns by no more than this (in degrees)
+#   are considered faceting. Sharper corners are treated as intentional
+#   and are never merged into an arc; this is what keeps a square square.
+#   Must be greater than 0 and less than 180. The default is 12.0.
 ```
 
 ### [stepper]
@@ -1826,43 +1873,6 @@ gcode:
 #   disables homing checks for that axis. This may be useful if the
 #   head must move prior to invoking the normal G28 mechanism for an
 #   axis. The default is to not force a position for an axis.
-```
-
-### [endstop_phase]
-
-Stepper phase adjusted endstops. To use this feature, define a config
-section with an "endstop_phase" prefix followed by the name of the
-corresponding stepper config section (for example,
-"[endstop_phase stepper_z]"). This feature can improve the accuracy of
-endstop switches. Add a bare "[endstop_phase]" declaration to enable
-the ENDSTOP_PHASE_CALIBRATE command.
-
-See the [endstop phases guide](Endstop_Phase.md) and
-[command reference](G-Codes.md#endstop_phase) for additional
-information.
-
-```
-[endstop_phase stepper_z]
-#endstop_accuracy:
-#   Sets the expected accuracy (in mm) of the endstop. This represents
-#   the maximum error distance the endstop may trigger (eg, if an
-#   endstop may occasionally trigger 100um early or up to 100um late
-#   then set this to 0.200 for 200um). The default is
-#   4*rotation_distance/full_steps_per_rotation.
-#trigger_phase:
-#   This specifies the phase of the stepper motor driver to expect
-#   when hitting the endstop. It is composed of two numbers separated
-#   by a forward slash character - the phase and the total number of
-#   phases (eg, "7/64"). Only set this value if one is sure the
-#   stepper motor driver is reset every time the mcu is reset. If this
-#   is not set, then the stepper phase will be detected on the first
-#   home and that phase will be used on all subsequent homes.
-#endstop_align_zero: False
-#   If true then the position_endstop of the axis will effectively be
-#   modified so that the zero position for the axis occurs at a full
-#   step on the stepper motor. (If used on the Z axis and the print
-#   layer height is a multiple of a full step distance then every
-#   layer will occur on a full step.) The default is False.
 ```
 
 ## G-Code macros and events

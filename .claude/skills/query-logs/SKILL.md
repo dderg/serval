@@ -1,6 +1,6 @@
 ---
 name: query-logs
-description: Use when investigating the kalico host logs — finding why homing/a print/an MCU op failed, filtering by session or print or subsystem or level or event type, resolving a numeric fault code, checking whether the logging pipeline itself is healthy, or comparing host-py vs host-rust behavior. Queries the structured logs in VictoriaLogs via LogsQL over curl, instead of grepping klippy.log.
+description: Use when investigating the kalico host logs — finding why homing/a print/an MCU op failed, filtering by session or print or subsystem or level or event type, resolving a numeric fault code, checking whether the logging pipeline itself is healthy, or comparing host-py vs host-rust behavior. Primary tool is `scripts/logq.py` (health/sessions/prints/print/session/tail/schema/resolve); raw LogsQL via `logq.py q` is the escape hatch for bespoke queries.
 ---
 
 # Querying kalico structured logs (VictoriaLogs / LogsQL)
@@ -10,93 +10,72 @@ The kalico host writes structured NDJSON to `~/printer_data/logs/events/*.jsonl`
 which indexes **every** field — so instead of grepping a flat log you query by
 `session_id` / `print_id` / `subsystem` / `level` / `event` / numeric payload.
 
-## Endpoint + how to query
+## Use `scripts/logq.py` — don't hand-write LogsQL for routine questions
+
+Every subcommand health-checks VL first, so the classic trap ("empty output
+= dead VL, silently misread as clean") can't happen — a down pipeline exits
+**2** and prints where to find the durable JSONL instead.
 
 ```bash
-VL="${KALICO_VL:-http://127.0.0.1:9428}"   # set KALICO_VL to a remote box if VL runs off-printer
-
-curl -s "$VL/select/logsql/query" \
-  --data-urlencode 'query=<LogsQL here>' \
-  --data-urlencode 'limit=50'
+python3 scripts/logq.py <command> [args] [--since 24h]
+KALICO_VL=http://ethercatpi5.local:9428 python3 scripts/logq.py health   # remote bench
+python3 scripts/logq.py --vl http://ethercatpi5.local:9428 health       # same, via flag
 ```
 
-- **Output is NDJSON** — one JSON object per line. Parse per line (`... | jq -c .`),
-  do NOT pipe the whole body to one `jq` filter.
-- **Always include a time bound** on every query so you never full-scan the store.
-  Relative bounds are anchored to *now*: `_time:1h`, `_time:6h`, `_time:24h`, `_time:7d`.
-  Absolute range (rarely needed): `_time:[2026-06-01T00:00:00Z, 2026-06-02T00:00:00Z]`.
-- VL renders all field values as **strings** in the output (it's a logs store), but
-  numeric range filters still work at query time (see the numeric recipe below).
-- **Check VL is up BEFORE interpreting any result** (hard rule): `curl -s "$VL/health"`
-  must print `OK`. With `curl -s`, a dead VL produces **empty output that is
-  indistinguishable from "no matching records"** — on 2026-06-10 this made an
-  uninstalled VL read as "clean boot" for weeks. An empty query result is only
-  meaningful after a passing health check; a non-zero curl exit or empty `/health`
-  means *pipeline down*, and the answer lives in the raw JSONL instead.
+- `--vl URL` (or `$KALICO_VL` env) points at a remote bench's VL instead of `127.0.0.1:9428`.
+- `--since` is `\d+[smhdw]` (e.g. `24h`, `30m`, `7d`) — every time-scoped subcommand takes it.
+- Repeated identical records (same source/subsystem/event/level, or same message) are condensed to one line with a `time_range ×N` suffix — that's normal, not a bug.
+- Exit code **2** = pipeline down (VL unreachable); **1** = bad usage (e.g. invalid `--since`); **0** = ran, even if 0 records matched.
+
+Subcommands:
+
+- `health` — VL reachable? heartbeat freshness. Run this first when anything looks off.
+  `python3 scripts/logq.py health`
+- `sessions [--since 24h] [-n 20]` — recent sessions, busiest/most-recent first.
+  `python3 scripts/logq.py sessions --since 24h -n 10`
+- `prints [--since 7d] [-n 20]` — recent prints: id, start, duration, outcome, reason.
+  `python3 scripts/logq.py prints --since 7d`
+- `print <id|last> [--since 7d] [--all]` — **main investigation view** for one print: header (session/print ids, file, start/end, outcome/reason/duration) + condensed warn/error timeline; add `--all` to include info-level records too.
+  `python3 scripts/logq.py print last`
+  `python3 scripts/logq.py print print-1783354078 --since 24h`
+- `session <id> [--since 24h] [--all]` — same investigation view, scoped to a session_id instead of a print.
+  `python3 scripts/logq.py session k-1783352398-15015`
+- `tail [--since 10m] [--level warn]` — most recent records at or above a level (`trace|debug|info|warn|error`).
+  `python3 scripts/logq.py tail --since 10m --level warn`
+- `schema [--since 24h]` — **live ground truth**: source/subsystem counts, top events, level counts. Prefer this over any schema notes in docs or this file — schemas drift, this doesn't.
+  `python3 scripts/logq.py schema --since 24h`
+- `resolve <code> [--since 30d]` — numeric fault code → `code_name` / event / sample message.
+  `python3 scripts/logq.py resolve 65228`
+- `q '<raw LogsQL>' [--limit 50] [--raw]` — escape hatch for anything the above don't cover; still runs the health check first. `--raw` prints NDJSON verbatim instead of the formatted view.
+  `python3 scripts/logq.py q 'subsystem:=homing trigger_mm:>10 _time:24h'`
 
 ## The schema (fields you filter on)
 
+Run `python3 scripts/logq.py schema` for current ground truth — the list below is a
+starting point and can lag what's actually live.
+
 Core (every record): `_time`, `_msg`, `level` (`trace|debug|info|warn|error`),
-`source` (`host-py|host-rust|mcu-h7|mcu-f4|sim`), `subsystem`, `session_id`
-(`k-<unix>-<pid>`), `target`. Optional: `print_id` (empty when idle), `event`
-(stable key like `homing.endstop_trip`), `code`/`code_name`, plus typed payload
-(`axis`, `trigger_mm`, `gcode_line`, `oid`, …). `_stream = {source, subsystem}`.
+`source` — open set, values observed live: `host-py`, `host-rust`, `host-ec`, `mcu`
+(each MCU logs under its klippy name, e.g. `mcu`, `bottom`) — `subsystem`,
+`session_id`, `target`. Session id shape is `k-<unix>-<pid>` for the main host
+process; `host-ec` sessions instead look like `ec-<pid>` and carry no `print_id`.
+Optional: `print_id` (empty when idle), `event` (stable key like
+`homing.endstop_trip`), `code`/`code_name`, plus typed payload (`axis`,
+`trigger_mm`, `gcode_line`, `oid`, …). `_stream = {source, subsystem}`.
 
-LogsQL operators you'll use: `field:=value` (exact), `field:in(a,b)` (set),
-`field:>N` / `field:<N` (numeric range), `field:!=""` (present), `"text"`
-(full-text on `_msg`), `| sort by (_time)` / `desc`, `| fields a, b`, `| limit N`,
-and `| stats by (f) count() as n` — **alias aggregates** (`as n`) so you can then
-`| sort by (n)`; `sort by (count(*))` does not parse.
-
-## Recipe cookbook
-
-```bash
-VL="${KALICO_VL:-http://127.0.0.1:9428}"
-q(){ curl -s "$VL/select/logsql/query" --data-urlencode "query=$1" --data-urlencode "limit=${2:-50}"; }
-
-# --- orient yourself ---
-# current/recent sessions (most active first). NOTE: alias aggregates (`as hits`)
-# — LogsQL cannot `sort by (count(*))` directly:
-q '* _time:1h | stats by (session_id) count() as hits | sort by (hits) desc'
-# prints in the last day with their start/end:
-q 'print_id:!="" _time:24h | stats by (print_id) min(_time) as first, max(_time) as last'
-
-# --- investigate a failure ---
-# all warnings+errors in a session, oldest first:
-q 'session_id:=k-1748700131-4412 level:in(warn,error) _time:6h | sort by (_time)'
-# one print's homing activity:
-q 'print_id:=print-1748700500 subsystem:=homing _time:24h | sort by (_time)'
-# latest of a noisy subsystem:
-q 'subsystem:=clocksync _time:1h | sort by (_time) desc' 50
-
-# --- by event type / code ---
-# how often an event fired, grouped by resolved code name:
-q 'event:=step_queue_overflow _time:7d | stats by (code_name) count() as n | sort by (n) desc'
-# resolve "what is 65228?":
-q 'code:65228 _time:30d | fields code_name, _msg' 5
-# numeric range (works despite string rendering):
-q 'subsystem:=homing trigger_mm:>10 _time:24h'
-
-# --- host-py vs host-rust ---
-q 'source:=host-rust level:in(warn,error) _time:1h | sort by (_time)'
-q 'source:=host-py  subsystem:=motion       _time:1h | sort by (_time) desc' 100
-
-# --- free-text fallback (searches _msg) ---
-q '"needs rehome" _time:1h'
-```
+Print lifecycle (subsystem `print_stats`, `logq.py prints`/`print` already join
+these for you — only reach for raw LogsQL if you need something else):
+- `print.start` — field `file`
+- `print.pause`
+- `print.resume` — field `pause_duration_s`
+- `print.end` — `outcome` ∈ `complete|cancelled|error|reset`, `reason`, `duration_s`, `filament_mm`
 
 ## Is the pipeline itself healthy?
 
 "VL is down / Vector stalled" is exactly the case that can't self-report through
-the logs. The host emits a heartbeat every ~30 s (`subsystem=observability`,
-`event=heartbeat`). If this returns **nothing**, the printer may still be logging
-to disk but the records aren't reaching VL — check Vector + VL, not the printer:
-
-```bash
-q 'subsystem:=observability event:=heartbeat _time:10m | sort by (_time) desc' 1
-# a logged shipper-lag warning, if any:
-q 'subsystem:=observability event:=shipper_lag _time:6h | sort by (_time) desc' 5
-```
+the logs. First step: `python3 scripts/logq.py health` — it checks VL reachability
+and heartbeat freshness (`subsystem=observability event=heartbeat`, emitted ~30s)
+in one call and warns if the heartbeat is stale (>60s).
 
 Service-level check (run on the printer; both must be `active`):
 
@@ -120,13 +99,69 @@ will backfill from Vector's checkpoint once it's healthy.
 
 ## How records get here (context)
 
-`structured_log.event(...)` / Rust `tracing` → `events/{host-py,host-rust}.jsonl`
-(durable) → Vector tails + checkpoints → VL `/insert/jsonline` → you query
+`structured_log.event(...)` / Rust `tracing` → `events/{host-py,host-rust,...}.jsonl`
+(durable) → Vector tails + checkpoints → VL `/insert/jsonline` → `logq.py` queries
 `/select/logsql/query`. See `config/observability/vector.toml` and the design
 spec `docs/superpowers/specs/2026-05-31-observability-logging-pipeline-design.md`.
 
+## Not here: host-process coredumps
+
+This skill covers **structured logs** only; `mcu-diagnostics` covers **MCU**
+faults. Neither covers native **host-process coredumps**. When a host process
+crashes (Rust `motion-engine`/`ethercat-rt` threads, or the klippy `python`
+interpreter), the kernel writes a full ELF core to
+`~/printer_data/logs/coredumps/core.<exe>.<pid>.<time>` via `core_pattern` —
+**not** `systemd-coredump`, so `coredumpctl` and `/var/lib/systemd/coredump`
+are empty and LogsQL will not show them. Read one with
+`gdb <matching-binary> <core> -ex bt -ex 'thread apply all bt'` (the release
+build keeps symbols). These are large (~40–80 MB each) and accumulate
+unbounded, so a crash storm both fills the SD and shows up only as a gap in the
+structured stream around the crash `_time`.
+
+## Appendix: raw LogsQL (for queries logq doesn't cover)
+
+Everything below goes through `python3 scripts/logq.py q '<LogsQL>'` — that
+keeps the pre-flight health check. Only reach for this when `health`,
+`sessions`, `prints`, `print`, `session`, `tail`, `schema`, or `resolve` don't
+answer the question directly.
+
+- **Always include a time bound**: `_time:1h`, `_time:24h`, `_time:7d`. Absolute
+  range (rarely needed): `_time:[2026-06-01T00:00:00Z, 2026-06-02T00:00:00Z]`.
+- VL renders all field values as **strings**, but numeric range filters still
+  work at query time.
+- LogsQL operators: `field:=value` (exact), `field:in(a,b)` (set), `field:>N` /
+  `field:<N` (numeric range), `field:!=""` (present), `"text"` (full-text on
+  `_msg`), `| sort by (_time)` / `desc`, `| fields a, b`, `| limit N`, and
+  `| stats by (f) count() as n` — **alias aggregates** (`as n`) so you can then
+  `| sort by (n)`; `sort by (count(*))` does not parse.
+
+Recipes:
+
+```bash
+# --- orient yourself (logq.py sessions / prints cover these; shown for reference) ---
+python3 scripts/logq.py q '* _time:1h | stats by (session_id) count() as hits | sort by (hits) desc'
+python3 scripts/logq.py q 'print_id:!="" _time:24h | stats by (print_id) min(_time) as first, max(_time) as last'
+
+# --- investigate a failure beyond logq.py session/print ---
+python3 scripts/logq.py q 'session_id:=k-1748700131-4412 level:in(warn,error) _time:6h | sort by (_time)'
+python3 scripts/logq.py q 'print_id:=print-1748700500 subsystem:=homing _time:24h | sort by (_time)'
+python3 scripts/logq.py q 'subsystem:=clocksync _time:1h | sort by (_time) desc' --limit 50
+
+# --- by event type / code ---
+python3 scripts/logq.py q 'event:=step_queue_overflow _time:7d | stats by (code_name) count() as n | sort by (n) desc'
+python3 scripts/logq.py q 'subsystem:=homing trigger_mm:>10 _time:24h'
+
+# --- host-py vs host-rust ---
+python3 scripts/logq.py q 'source:=host-rust level:in(warn,error) _time:1h | sort by (_time)'
+python3 scripts/logq.py q 'source:=host-py subsystem:=motion _time:1h | sort by (_time) desc' --limit 100
+
+# --- free-text fallback (searches _msg) ---
+python3 scripts/logq.py q '"needs rehome" _time:1h'
+```
+
 ## Optional: mcp-victorialogs
 
-If you prefer tool-calls over curl, `mcp-victorialogs` is a first-party MCP that
-talks to the **same** VL endpoint (`$KALICO_VL`) — drop it in, no code from us.
-The LogsQL recipes above are identical through the MCP.
+If you prefer tool-calls over `logq.py`, `mcp-victorialogs` is a first-party
+MCP that talks to the **same** VL endpoint (`$KALICO_VL`) — drop it in, no code
+from us. It bypasses `logq.py`'s health check, so confirm the pipeline is up
+(`logq.py health`) before trusting an empty result.

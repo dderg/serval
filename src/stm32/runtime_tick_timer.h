@@ -1,5 +1,5 @@
-#ifndef __KALICO_RUNTIME_TICK_TIMER_H
-#define __KALICO_RUNTIME_TICK_TIMER_H
+#ifndef __RUNTIME_TICK_TIMER_H
+#define __RUNTIME_TICK_TIMER_H
 // Motion-engine ISR timer alias.
 //
 // The motion engine evaluates the trajectory and emits steps from a hardware
@@ -23,14 +23,14 @@
 // STM32G0B1 has no TIM5. TIM2 is Klipper's 32-bit scheduler clock
 // (stm32f0_timer.c). TIM6/TIM7 are basic timers (no output channels), so
 // hard_pwm can never claim them — the safe choices. Selected via the
-// KALICO_MOTION_TIMER_* Kconfig choice (default TIM7). Both share their NVIC
+// MOTION_TIMER_* Kconfig choice (default TIM7). Both share their NVIC
 // vector with low-power timers a toolhead board does not use.
 //
 // All G0 timers run at CONFIG_CLOCK_FREQ (64 MHz; STM32G0 applies no APB
 // timer-clock doubling), which is exactly the value runtime_clock_freq holds —
 // so the standard ARR = clock_freq / sample_rate - 1 formula is correct, and
 // TIM6/TIM7 being 16-bit is fine for sample rates >= ~977 Hz (PSC stays 0).
-  #if CONFIG_KALICO_MOTION_TIMER_TIM6
+  #if CONFIG_MOTION_TIMER_TIM6
     #define MOTION_TIM               TIM6
     #define MOTION_TIM_IRQn          TIM6_DAC_LPTIM1_IRQn
     #define MOTION_TIM_IRQHandler    TIM6_DAC_LPTIM1_IRQHandler

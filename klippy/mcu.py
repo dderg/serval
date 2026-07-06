@@ -28,7 +28,7 @@ MIN_SCHEDULE_LEAD = 0.050
 MAX_NOMINAL_DURATION = 3.0
 
 
-def _format_bridge_msg(cmd, data):
+def _format_engine_msg(cmd, data):
     parts = [cmd.name]
     for i, (name, _) in enumerate(cmd.param_names):
         val = data[i]
@@ -125,11 +125,11 @@ class CommandQueryWrapper:
         except serialhdl.error as e:
             raise self._error(str(e))
 
-    def _bridge_send(self, data):
-        msg = _format_bridge_msg(self._cmd, data)
+    def _engine_send(self, data):
+        msg = _format_engine_msg(self._cmd, data)
         _t0 = time.monotonic()
         logging.info(
-            "[py-trace] _bridge_send enter cmd=%s response=%s",
+            "[py-trace] _engine_send enter cmd=%s response=%s",
             getattr(self._cmd, "msgformat", "<unknown>"),
             self._response,
         )
@@ -138,7 +138,7 @@ class CommandQueryWrapper:
             _dt_ms = (time.monotonic() - _t0) * 1000.0
             if _dt_ms > 5.0:
                 logging.info(
-                    "[py-trace] _bridge_send exit OK cmd=%s dt_ms=%.2f",
+                    "[py-trace] _engine_send exit OK cmd=%s dt_ms=%.2f",
                     getattr(self._cmd, "msgformat", "<unknown>"),
                     _dt_ms,
                 )
@@ -146,7 +146,7 @@ class CommandQueryWrapper:
         except serialhdl.error as e:
             _dt_ms = (time.monotonic() - _t0) * 1000.0
             logging.info(
-                "[py-trace] _bridge_send exit ERR cmd=%s dt_ms=%.2f err=%s",
+                "[py-trace] _engine_send exit ERR cmd=%s dt_ms=%.2f err=%s",
                 getattr(self._cmd, "msgformat", "<unknown>"),
                 _dt_ms,
                 e,
@@ -155,7 +155,7 @@ class CommandQueryWrapper:
         except Exception as e:
             _dt_ms = (time.monotonic() - _t0) * 1000.0
             logging.info(
-                "[py-trace] _bridge_send exit EXC cmd=%s dt_ms=%.2f exc=%s msg=%s",
+                "[py-trace] _engine_send exit EXC cmd=%s dt_ms=%.2f exc=%s msg=%s",
                 getattr(self._cmd, "msgformat", "<unknown>"),
                 _dt_ms,
                 type(e).__name__,
@@ -165,9 +165,9 @@ class CommandQueryWrapper:
 
     def send(self, data=(), minclock=0, reqclock=0, retry=True):
         if getattr(self._serial, "mcu", None) and getattr(
-            self._serial.mcu, "_motion_bridge", None
+            self._serial.mcu, "_motion_engine", None
         ):
-            return self._bridge_send(data)
+            return self._engine_send(data)
         cmds = self._cmd.encode(data)
         return self._do_send(cmds, minclock, reqclock, retry)
 
@@ -181,7 +181,7 @@ class CommandQueryWrapper:
         retry=True,
     ):
         preface_cmd.send(preface_data, minclock=minclock)
-        return self._bridge_send(data)
+        return self._engine_send(data)
 
 
 # Wrapper around command sending
@@ -197,9 +197,11 @@ class CommandWrapper:
 
     def send(self, data=(), minclock=0, reqclock=0):
         if getattr(self._serial, "mcu", None) and getattr(
-            self._serial.mcu, "_motion_bridge", None
+            self._serial.mcu, "_motion_engine", None
         ):
-            self._serial.send(_format_bridge_msg(self._cmd, data), minclock)
+            self._serial.send(
+                _format_engine_msg(self._cmd, data), minclock, reqclock
+            )
         else:
             self._serial.raw_send(
                 self._cmd.encode(data), minclock, reqclock, self._cmd_queue
@@ -207,9 +209,11 @@ class CommandWrapper:
 
     def send_wait_ack(self, data=(), minclock=0, reqclock=0):
         if getattr(self._serial, "mcu", None) and getattr(
-            self._serial.mcu, "_motion_bridge", None
+            self._serial.mcu, "_motion_engine", None
         ):
-            self._serial.send(_format_bridge_msg(self._cmd, data), minclock)
+            self._serial.send(
+                _format_engine_msg(self._cmd, data), minclock, reqclock
+            )
         else:
             self._serial.raw_send_wait_ack(
                 self._cmd.encode(data), minclock, reqclock, self._cmd_queue
@@ -407,7 +411,7 @@ class TriggerDispatch:
     def start(self, print_time):
         raise error(
             "TriggerDispatch.start(): probe homing is not supported on the "
-            "bridge motion engine"
+            "engine motion engine"
         )
 
     def wait_end(self, end_time):
@@ -420,7 +424,7 @@ class TriggerDispatch:
     def stop(self):
         raise error(
             "TriggerDispatch.stop(): probe homing is not supported on the "
-            "bridge motion engine"
+            "engine motion engine"
         )
 
 
@@ -717,6 +721,14 @@ class MCU:
     error = error
 
     def __init__(self, config, clocksync):
+        self._init_identity(config, clocksync)
+        self._init_serial_port(config)
+        self._init_restart_state(config)
+        self._init_config_state()
+        self._init_non_critical(config)
+        self._init_event_handlers()
+
+    def _init_identity(self, config, clocksync):
         self._config = config
         self._printer = printer = config.get_printer()
         self.danger_options = printer.lookup_object("danger_options")
@@ -730,9 +742,10 @@ class MCU:
         self._expect_native = declared_via_mcu_section
         if self._name.startswith("mcu "):
             self._name = self._name[4:]
-        self._motion_bridge = printer.lookup_object("motion_bridge", None)
-        self._bridge_handle = None
-        # Serial port
+        self._motion_engine = printer.lookup_object("motion_engine", None)
+        self._engine_handle = None
+
+    def _init_serial_port(self, config):
         wp = "mcu '%s': " % (self._name)
         self._serial = serialhdl.SerialReader(
             self._reactor, warn_prefix=wp, mcu=self
@@ -753,7 +766,8 @@ class MCU:
                 or self._serialport.startswith("/tmp/klipper_host_")
             ):
                 self._baud = config.getint("baud", 250000, minval=2400)
-        # Restarts
+
+    def _init_restart_state(self, config):
         restart_methods = [None, "arduino", "cheetah", "command", "rpi_usb"]
         self._restart_method = "command"
         if self._baud:
@@ -761,23 +775,22 @@ class MCU:
                 "restart_method", restart_methods, None
             )
         self._reset_cmd = self._config_reset_cmd = None
-        self._is_mcu_bridge = False
+        self._is_mcu_engine = False
         self._emergency_stop_cmd = None
         self._is_shutdown = self._is_timeout = False
         self._shutdown_clock = 0
         self._shutdown_msg = ""
-        # Config building
-        printer.lookup_object("pins").register_chip(self._name, self)
+
+    def _init_config_state(self):
+        self._printer.lookup_object("pins").register_chip(self._name, self)
         self._oid_count = 0
         self._config_callbacks = []
         self._config_cmds = []
         self._restart_cmds = []
         self._init_cmds = []
         self._mcu_freq = 0.0
-        # Move command queuing
         self._reserved_move_slots = 0
         self._flush_callbacks = []
-        # Stats
         self._get_status_info = {}
         self._stats_sumsq_base = 0.0
         self._mcu_tick_avg = 0.0
@@ -785,7 +798,7 @@ class MCU:
         self._mcu_tick_awake = 0.0
         self._config_crc = 0
 
-        # noncritical mcus
+    def _init_non_critical(self, config):
         self.is_non_critical = config.getboolean("is_non_critical", False)
         if self.is_non_critical and self.get_name() == "mcu":
             raise error("Primary MCU cannot be marked as non-critical!")
@@ -808,17 +821,20 @@ class MCU:
         self._config_cmds_post_inits = []
         self._init_cmds_post_inits = []
         self._restart_cmds_post_inits = []
-        # Register handlers
-        printer.register_event_handler(
+
+    def _init_event_handlers(self):
+        self._printer.register_event_handler(
             "klippy:firmware_restart", self._firmware_restart
         )
-        printer.register_event_handler(
+        self._printer.register_event_handler(
             "klippy:mcu_identify", self._mcu_identify
         )
-        printer.register_event_handler("klippy:connect", self._connect)
-        printer.register_event_handler("klippy:shutdown", self._shutdown)
-        printer.register_event_handler("klippy:disconnect", self._disconnect)
-        printer.register_event_handler("klippy:ready", self._ready)
+        self._printer.register_event_handler("klippy:connect", self._connect)
+        self._printer.register_event_handler("klippy:shutdown", self._shutdown)
+        self._printer.register_event_handler(
+            "klippy:disconnect", self._disconnect
+        )
+        self._printer.register_event_handler("klippy:ready", self._ready)
 
     # Serial callbacks
     def _handle_mcu_stats(self, params):
@@ -1024,8 +1040,7 @@ class MCU:
 
     def _recover_latched_peripheral_shutdown(self, get_config_cmd, exc):
         is_motion_mcu = (
-            "kalico_runtime_reset"
-            in self._serial.get_msgparser().messages_by_name
+            "runtime_reset" in self._serial.get_msgparser().messages_by_name
         )
         if is_motion_mcu:
             raise error(
@@ -1161,6 +1176,18 @@ class MCU:
             return self._serial.check_connect(self._serialport, self._baud, rts)
 
     def _mcu_identify(self):
+        if not self._identify_check_serial_available():
+            return False
+        self._identify_connect_serial()
+        self._identify_log_and_reserve_pins()
+        self._identify_set_mcu_freq()
+        self._identify_lookup_commands_and_restart_method()
+        self._identify_record_version_info()
+        self._identify_register_responses()
+        self._identify_setup_motion_engine()
+        return True
+
+    def _identify_check_serial_available(self):
         if self.is_non_critical and not self._check_serial_exists():
             self.non_critical_disconnected = True
             if self.is_non_critical:
@@ -1170,6 +1197,9 @@ class MCU:
             self.non_critical_disconnected = False
             if self.is_non_critical:
                 self._get_status_info["non_critical_disconnected"] = False
+            return True
+
+    def _identify_connect_serial(self):
         if self.is_fileoutput():
             self._connect_file()
         else:
@@ -1194,6 +1224,8 @@ class MCU:
                 self._clocksync.connect(self._serial)
             except serialhdl.error as e:
                 raise error(str(e))
+
+    def _identify_log_and_reserve_pins(self):
         if get_danger_options().log_startup_info:
             logging.info(self._log_info())
         ppins = self._printer.lookup_object("pins")
@@ -1202,6 +1234,8 @@ class MCU:
             if cname.startswith("RESERVE_PINS_"):
                 for pin in value.split(","):
                     pin_resolver.reserve_pin(pin, cname[13:])
+
+    def _identify_set_mcu_freq(self):
         self._mcu_freq = self.get_constant_float("CLOCK_FREQ")
         if MAX_NOMINAL_DURATION * self._mcu_freq > MAX_SCHEDULE_TICKS:
             max_possible = MAX_SCHEDULE_TICKS / self._mcu_freq
@@ -1211,6 +1245,8 @@ class MCU:
                 + "of %ds. " % (MAX_NOMINAL_DURATION,)
                 + "Max possible duration: %ds" % (max_possible,)
             )
+
+    def _identify_lookup_commands_and_restart_method(self):
         self._stats_sumsq_base = self.get_constant_float("STATS_SUMSQ_BASE")
         self._emergency_stop_cmd = self.lookup_command("emergency_stop")
         self._reset_cmd = self.try_lookup_command("reset")
@@ -1232,10 +1268,13 @@ class MCU:
         if self._restart_method is None and mbaud is None and not ext_only:
             self._restart_method = "command"
         if msgparser.get_constant("CANBUS_BRIDGE", 0):
-            self._is_mcu_bridge = True
+            self._is_mcu_engine = True
             self._printer.register_event_handler(
-                "klippy:firmware_restart", self._firmware_restart_bridge
+                "klippy:firmware_restart", self._firmware_restart_engine
             )
+
+    def _identify_record_version_info(self):
+        msgparser = self._serial.get_msgparser()
         app = msgparser.get_app_info()
         version, build_versions = msgparser.get_version_info()
         self._get_status_info["app"] = app
@@ -1249,36 +1288,40 @@ class MCU:
                 f" It is recommended to re-flash for best compatiblity with Kalico"
             )
 
+    def _identify_register_responses(self):
         self.register_response(self._handle_shutdown, "shutdown")
         self.register_response(self._handle_shutdown, "is_shutdown")
         self.register_response(self._handle_mcu_stats, "stats")
+
+    def _identify_setup_motion_engine(self):
+        msgparser = self._serial.get_msgparser()
         raw_dict = msgparser.get_raw_data_dictionary()
-        if self._motion_bridge is not None:
+        if self._motion_engine is not None:
             if raw_dict:
                 if isinstance(raw_dict, str):
                     raw_dict = raw_dict.encode("utf-8")
-                self._motion_bridge.set_msgproto_dict(raw_dict)
-            if self._bridge_handle is None:
-                self._bridge_handle = self._motion_bridge.claim_mcu(
+                self._motion_engine.set_msgproto_dict(raw_dict)
+            if self._engine_handle is None:
+                self._engine_handle = self._motion_engine.claim_mcu(
                     self._name,
                     self._serialport or "",
                     int(self._baud or 0),
                 )
-            bridge = self._motion_bridge
-            handle = self._bridge_handle
+            engine = self._motion_engine
+            handle = self._engine_handle
             if not self._mcu_freq:
                 raise error(
-                    "MCU '%s': CLOCK_FREQ unknown at bridge claim time"
+                    "MCU '%s': CLOCK_FREQ unknown at engine claim time"
                     % (self._name,)
                 )
-            self._motion_bridge.set_nominal_clock_freq(
+            self._motion_engine.set_nominal_clock_freq(
                 handle, int(self._mcu_freq)
             )
 
             reactor = self._reactor
 
-            def _bridge_clock_est_cb(
-                freq, offset, last_clock, b=bridge, h=handle, r=reactor
+            def _engine_clock_est_cb(
+                freq, offset, last_clock, b=engine, h=handle, r=reactor
             ):
                 host_now_raw = r.monotonic()
                 try:
@@ -1290,10 +1333,9 @@ class MCU:
                         host_now_raw,
                     )
                 except Exception:
-                    logging.exception("motion_bridge: set_clock_est failed")
+                    logging.exception("motion_engine: set_clock_est failed")
 
-            self._clocksync.set_clock_est_callback(_bridge_clock_est_cb)
-        return True
+            self._clocksync.set_clock_est_callback(_engine_clock_est_cb)
 
     def _ready(self):
         if self.is_fileoutput():
@@ -1463,13 +1505,13 @@ class MCU:
             )
             return
         try:
-            if self._motion_bridge is not None:
-                self._motion_bridge.bridge_mark_expected_disconnect(
-                    self._bridge_handle
+            if self._motion_engine is not None:
+                self._motion_engine.engine_mark_expected_disconnect(
+                    self._engine_handle
                 )
         except Exception:
             logging.exception(
-                "MCU '%s' bridge_mark_expected_disconnect failed"
+                "MCU '%s' engine_mark_expected_disconnect failed"
                 " (continuing with reset)",
                 self._name,
             )
@@ -1496,12 +1538,12 @@ class MCU:
 
     def _firmware_restart(self, force=False):
         logging.info(
-            "[firmware-restart-trace] mcu=%s force=%s _is_mcu_bridge=%s "
+            "[firmware-restart-trace] mcu=%s force=%s _is_mcu_engine=%s "
             "non_critical_disconnected=%s _restart_method=%s "
             "_reset_cmd_present=%s clocksync_active=%s",
             self._name,
             force,
-            self._is_mcu_bridge,
+            self._is_mcu_engine,
             self.non_critical_disconnected,
             self._restart_method,
             self._reset_cmd is not None,
@@ -1510,7 +1552,7 @@ class MCU:
             else "no-clocksync",
         )
         if (
-            self._is_mcu_bridge and not force
+            self._is_mcu_engine and not force
         ) or self.non_critical_disconnected:
             return
         if self._restart_method == "rpi_usb":
@@ -1522,7 +1564,7 @@ class MCU:
         else:
             self._restart_arduino()
 
-    def _firmware_restart_bridge(self):
+    def _firmware_restart_engine(self):
         self._firmware_restart(True)
 
     # Move queue tracking
@@ -1533,7 +1575,11 @@ class MCU:
         self._flush_callbacks.append(callback)
 
     def flush_moves(self, print_time, clear_history_time):
-        return
+        clock = self.print_time_to_clock(print_time)
+        if clock < 0:
+            return
+        for cb in self._flush_callbacks:
+            cb(print_time, clock)
 
     def check_active(self, print_time, eventtime):
         self._clocksync.calibrate_clock(print_time, eventtime)

@@ -9,9 +9,7 @@ An accurate Z endstop position is critical to obtaining high quality
 prints.
 
 Note, though, the accuracy of the Z endstop switch itself can be a
-limiting factor. If one is using Trinamic stepper motor drivers then
-consider enabling [endstop phase](Endstop_Phase.md) detection to
-improve the accuracy of the switch.
+limiting factor.
 
 To perform a Z endstop calibration, home the printer, command the head
 to move to a Z position that is at least five millimeters above the

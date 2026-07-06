@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Snapshot Viewer</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,sans-serif;overflow:hidden}
+.container{display:grid;grid-template-rows:auto auto 1fr;height:100vh}
+.toolbar{display:flex;align-items:center;gap:16px;padding:8px 16px;background:#1d2026;border-bottom:1px solid #2a2d35;font-size:13px}
+.toolbar .title{font-weight:600;color:#fff}
+.toolbar .meta{color:#888}
+.toolbar button{background:#2a2d35;color:#e0e0e0;border:1px solid #3a3d45;border-radius:4px;padding:4px 10px;cursor:pointer;font-size:12px}
+.toolbar button:hover{background:#3a3d45}
+.toolbar button.active{background:rgba(224,81,138,0.2);border-color:#e0518a;color:#e0518a}
+#toggle-variant{min-width:128px}
+#toggle-variant.after{background:rgba(78,203,113,0.18);border-color:#4ecb71;color:#4ecb71}
+#toggle-variant.before{background:rgba(245,166,35,0.22);border-color:#f5a623;color:#f5a623}
+.toolbar button:disabled{opacity:0.4;cursor:default}
+.toolbar button#accept{background:rgba(78,203,113,0.18);border-color:#4ecb71;color:#4ecb71;font-weight:600;min-width:88px}
+.toolbar button#accept:hover:not(:disabled){background:rgba(78,203,113,0.30)}
+.toolbar #back-link{color:#888;text-decoration:none;font-size:12px}
+.toolbar #back-link:hover{color:#e0e0e0}
+.toolbar .nav{display:flex;align-items:center;gap:4px}
+.toolbar .nav button{padding:4px 8px;font-size:14px;line-height:1}
+.toolbar select{background:#2a2d35;color:#e0e0e0;border:1px solid #3a3d45;border-radius:4px;padding:4px 8px;font-size:12px;font-family:'Courier Prime',monospace;max-width:340px}
+.toolbar .case-path{color:#9aa3b2;font-family:'Courier Prime',monospace;font-size:12px;white-space:nowrap}
+.png-overlay{display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,0.92)}
+.png-overlay.open{display:block}
+.png-scroll{position:absolute;inset:0;overflow:auto}
+.png-scroll img{display:block;width:100%;height:auto}
+.readout{font-family:'Courier Prime',monospace;font-size:12px;color:#9aa3b2;padding:4px 16px;background:#1d2026;border-bottom:1px solid #2a2d35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:22px;display:flex;align-items:center;gap:14px}
+.readout .v{color:#4a9eff}
+.readout .p{color:#4ecb71}
+.readout .r{color:#ef5350}
+.readout .g{color:#888}
+.panels{display:grid;grid-template-columns:var(--path-w,60%) 6px 1fr;grid-template-rows:1fr 1fr 1fr;gap:1px;background:#2a2d35;overflow:hidden}
+#panel-path{grid-column:1;grid-row:1 / span 3}
+.splitter{grid-column:2;grid-row:1 / span 3;background:#2a2d35;cursor:col-resize}
+.splitter:hover{background:#4a4f5a}
+#panel-vel{grid-column:3;grid-row:1}
+#panel-acc{grid-column:3;grid-row:2}
+#panel-jrk{grid-column:3;grid-row:3}
+.panel{position:relative;background:#1a1c22;overflow:hidden;min-width:0;min-height:0}
+.panel canvas{position:absolute;inset:0;width:100%;height:100%}
+.cursor{position:absolute;inset:0;pointer-events:none;z-index:1;display:none}
+.cursor.on{display:block}
+.cursor i{position:absolute;top:0;left:0;will-change:transform}
+.cursor .cv{width:1px;background:repeating-linear-gradient(to bottom,rgba(255,255,255,0.35) 0 4px,transparent 4px 7px)}
+.cursor .ch{height:1px;display:none;background:repeating-linear-gradient(to right,rgba(255,255,255,0.35) 0 3px,transparent 3px 6px)}
+.cursor .cdot{width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;background:#e0518a;border:2px solid #14161a;box-sizing:border-box;display:none}
+.panel-label{position:absolute;top:4px;left:8px;font-size:11px;color:#888;pointer-events:none;z-index:2}
+.panel-label .lg{cursor:pointer;pointer-events:auto;padding:0 2px}
+.panel-label .lg:hover{text-decoration:underline}
+.panel-label .lg.off{opacity:0.35;text-decoration:line-through}
+.panel-label .lg.off:hover{text-decoration:line-through underline}
+.tooltip{position:fixed;pointer-events:none;background:rgba(20,22,26,0.92);border:1px solid #3a3d45;border-radius:4px;padding:6px 10px;font-size:12px;font-family:'Courier Prime',monospace;color:#e0e0e0;z-index:100;white-space:pre-line;display:none}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="toolbar">
+    <a id="back-link" href="/" title="Back to gallery">← back</a>
+    <div class="nav">
+      <button id="case-prev" title="Previous test (←)">‹</button>
+      <select id="case-select" title="Switch test"></select>
+      <button id="case-next" title="Next test (→)">›</button>
+    </div>
+    <span class="case-path" id="case-path" title="folder / config / gcode"></span>
+    <span class="meta" id="meta"></span>
+    <button id="toggle-variant" title="Compare before/after (space)">After</button>
+    <button id="reset-zoom">Reset Zoom</button>
+    <button id="toggle-peaks" class="active">Peaks</button>
+    <button id="open-png" title="Open the rendered PNG">PNG</button>
+    <button id="accept" title="Accept this snapshot as the new baseline (a)">Accept</button>
+  </div>
+  <div class="readout" id="readout"><span class="g">hover a panel to scrub</span></div>
+  <div class="panels">
+    <div class="panel" id="panel-path">
+      <span class="panel-label">Path</span>
+      <canvas id="canvas-path"></canvas>
+      <div class="cursor" id="cursor-path"><i class="cv"></i><i class="ch"></i><i class="cdot"></i></div>
+    </div>
+    <div class="splitter" id="splitter" title="Drag to resize"></div>
+    <div class="panel" id="panel-vel">
+      <span class="panel-label">Velocity</span>
+      <canvas id="canvas-vel"></canvas>
+      <div class="cursor" id="cursor-vel"><i class="cv"></i><i class="ch"></i><i class="cdot"></i></div>
+    </div>
+    <div class="panel" id="panel-acc">
+      <span class="panel-label">Acceleration</span>
+      <canvas id="canvas-acc"></canvas>
+      <div class="cursor" id="cursor-acc"><i class="cv"></i><i class="ch"></i><i class="cdot"></i></div>
+    </div>
+    <div class="panel" id="panel-jrk">
+      <span class="panel-label">Jerk</span>
+      <canvas id="canvas-jrk"></canvas>
+      <div class="cursor" id="cursor-jrk"><i class="cv"></i><i class="ch"></i><i class="cdot"></i></div>
+    </div>
+  </div>
+</div>
+<div class="tooltip" id="tooltip"></div>
+<div class="png-overlay" id="png-overlay"><div class="png-scroll" id="png-scroll"></div></div>
+<script type="module" src="/static/viewer.js"></script>
+</body>
+</html>

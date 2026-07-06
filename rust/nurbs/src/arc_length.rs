@@ -1,5 +1,3 @@
-// `unsafe_code` is workspace-denied; targeted exception for MCU hot-path arc-length
-// lookup — release builds must not call the panic symbol from inside binary search.
 #![allow(unsafe_code)]
 
 use crate::Float;
@@ -48,11 +46,6 @@ impl<T: Float> ArcLengthTable<T> {
             s: &self.s,
             u: &self.u,
         }
-    }
-
-    #[must_use]
-    pub fn into_parts(self) -> (Vec<T>, Vec<T>) {
-        (self.s, self.u)
     }
 }
 
@@ -132,14 +125,10 @@ pub(crate) fn integrate_arc_length<T: Float, F: Fn(T) -> T>(
 
 use crate::MIN_PARAMETRIC_SPEED;
 #[cfg(feature = "host")]
-use crate::eval::{eval, vector_derivative, vector_eval};
+use crate::eval::{vector_derivative, vector_eval};
 #[cfg(feature = "host")]
-use crate::{ArcLengthError, NurbsView, VectorNurbsView};
+use crate::{ArcLengthError, VectorNurbsView};
 
-// SAFETY invariant for param_from_arc_length and arc_length_from_param:
-// Table construction asserts len >= 2. Binary search maintains lo = 0, hi = last = len-1;
-// loop exits with hi - lo == 1, so lo ∈ [0, last-1] and lo+1 ≤ last < len.
-// All get_unchecked accesses are to indices in [0, last].
 #[inline]
 pub fn param_from_arc_length<T: Float>(table: &ArcLengthTableRef<'_, T>, s: T) -> T {
     debug_assert!(s >= T::ZERO);
@@ -150,12 +139,10 @@ pub fn param_from_arc_length<T: Float>(table: &ArcLengthTableRef<'_, T>, s: T) -
     let u_arr = table.u();
     debug_assert!(s_arr.len() >= 2);
     debug_assert_eq!(s_arr.len(), u_arr.len());
-    // SAFETY: len >= 2 → index 0 is valid.
     if s_clamped <= unsafe { *s_arr.get_unchecked(0) } {
         return unsafe { *u_arr.get_unchecked(0) };
     }
     let last = s_arr.len() - 1;
-    // SAFETY: last = len-1 < len.
     if s_clamped >= unsafe { *s_arr.get_unchecked(last) } {
         return unsafe { *u_arr.get_unchecked(last) };
     }
@@ -164,14 +151,13 @@ pub fn param_from_arc_length<T: Float>(table: &ArcLengthTableRef<'_, T>, s: T) -
     let mut hi = last;
     while hi - lo > 1 {
         let mid = usize::midpoint(lo, hi);
-        // SAFETY: mid ∈ (lo, hi) ⊆ [0, last] < len.
         if unsafe { *s_arr.get_unchecked(mid) } <= s_clamped {
             lo = mid;
         } else {
             hi = mid;
         }
     }
-    // SAFETY: loop invariant → lo ∈ [0, last-1], lo+1 ≤ last < len; u_arr same length.
+    debug_assert!(lo < last);
     let s_lo = unsafe { *s_arr.get_unchecked(lo) };
     let s_hi = unsafe { *s_arr.get_unchecked(lo + 1) };
     let u_lo = unsafe { *u_arr.get_unchecked(lo) };
@@ -193,12 +179,10 @@ pub fn arc_length_from_param<T: Float>(table: &ArcLengthTableRef<'_, T>, u: T) -
     let u_arr = table.u();
     debug_assert!(u_arr.len() >= 2);
     debug_assert_eq!(s_arr.len(), u_arr.len());
-    // SAFETY: len >= 2 → index 0 is valid.
     if u_clamped <= unsafe { *u_arr.get_unchecked(0) } {
         return unsafe { *s_arr.get_unchecked(0) };
     }
     let last = u_arr.len() - 1;
-    // SAFETY: last = len-1 < len.
     if u_clamped >= unsafe { *u_arr.get_unchecked(last) } {
         return unsafe { *s_arr.get_unchecked(last) };
     }
@@ -207,14 +191,13 @@ pub fn arc_length_from_param<T: Float>(table: &ArcLengthTableRef<'_, T>, u: T) -
     let mut hi = last;
     while hi - lo > 1 {
         let mid = usize::midpoint(lo, hi);
-        // SAFETY: mid ∈ (lo, hi) ⊆ [0, last] < len.
         if unsafe { *u_arr.get_unchecked(mid) } <= u_clamped {
             lo = mid;
         } else {
             hi = mid;
         }
     }
-    // SAFETY: loop invariant → lo ∈ [0, last-1], lo+1 ≤ last < len.
+    debug_assert!(lo < last);
     let u_lo = unsafe { *u_arr.get_unchecked(lo) };
     let u_hi = unsafe { *u_arr.get_unchecked(lo + 1) };
     let s_lo = unsafe { *s_arr.get_unchecked(lo) };
@@ -224,27 +207,6 @@ pub fn arc_length_from_param<T: Float>(table: &ArcLengthTableRef<'_, T>, u: T) -
     let floor = T::from_f64(MIN_PARAMETRIC_SPEED);
     let frac = (u_clamped - u_lo) / span.max(floor);
     s_lo + (s_hi - s_lo) * frac
-}
-
-#[cfg(feature = "host")]
-pub fn build_arc_length_table_scalar<T: Float, V: NurbsView<T>>(
-    curve: &V,
-    tolerance: T,
-    max_samples: usize,
-) -> Result<ArcLengthTable<T>, ArcLengthError<T>> {
-    let h = T::from_f64(1e-6);
-    let knots = curve.knots();
-    let u_start = knots[0];
-    let u_end = knots[knots.len() - 1];
-
-    let integrand = |u: T| {
-        let u_safe = u.max(u_start + h).min(u_end - h);
-        let plus = eval(curve, u_safe + h);
-        let minus = eval(curve, u_safe - h);
-        ((plus - minus) / (h + h)).abs()
-    };
-
-    build_table_via_integrand(integrand, u_start, u_end, tolerance, max_samples)
 }
 
 #[cfg(feature = "host")]
@@ -274,23 +236,16 @@ pub fn build_arc_length_table_vector<T: Float, V: VectorNurbsView<T, 3>>(
 
 #[cfg(feature = "host")]
 #[must_use]
-pub fn xy_arc_length<const D: usize>(xyz: &crate::VectorNurbs<f64, D>) -> f64
-where
-    [(); D]:,
-{
-    debug_assert!(D >= 2, "xy_arc_length requires D >= 2 (X and Y axes)");
-
+pub fn path_arc_length(xyz: &crate::VectorNurbs<f64, 3>) -> f64 {
     let knots = xyz.knots();
     let u_start = knots[0];
     let u_end = knots[knots.len() - 1];
 
     let deriv = vector_derivative(xyz);
 
-    let xy_speed = |u: f64| -> f64 {
+    let speed = |u: f64| -> f64 {
         let d = vector_eval(&deriv, u);
-        let dx = d[0];
-        let dy = d[1];
-        (dx * dx + dy * dy).sqrt()
+        (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
     };
 
     let span = u_end - u_start;
@@ -302,7 +257,7 @@ where
         for i in 0..subintervals {
             let a = u_start + span * (i as f64) / (subintervals as f64);
             let b = u_start + span * ((i + 1) as f64) / (subintervals as f64);
-            sum += integrate_arc_length(xy_speed, a, b, 5);
+            sum += integrate_arc_length(speed, a, b, 5);
         }
 
         if let Some(prev) = prev_estimate {
@@ -318,61 +273,6 @@ where
 
         prev_estimate = Some(sum);
         subintervals *= 2;
-    }
-}
-
-use crate::WireError;
-use crate::wire::{ARC_LENGTH_HEADER_BYTES, FORMAT_VERSION_V1};
-
-impl<'a> ArcLengthTableRef<'a, f32> {
-    pub fn try_from_wire(buf: &'a [u8]) -> Result<Self, WireError> {
-        if (buf.as_ptr() as usize) % core::mem::align_of::<f32>() != 0 {
-            return Err(WireError::Misaligned);
-        }
-        if buf.len() < ARC_LENGTH_HEADER_BYTES {
-            return Err(WireError::TruncatedBuffer {
-                expected_len: ARC_LENGTH_HEADER_BYTES,
-                got: buf.len(),
-            });
-        }
-        let version = buf[0];
-        if version != FORMAT_VERSION_V1 {
-            return Err(WireError::UnknownVersion(version));
-        }
-        let sample_count = u16::from_ne_bytes([buf[2], buf[3]]) as usize;
-        if sample_count < 2 {
-            return Err(WireError::TruncatedBuffer {
-                expected_len: ARC_LENGTH_HEADER_BYTES + 2 * core::mem::size_of::<f32>() * 2,
-                got: buf.len(),
-            });
-        }
-
-        let bytes_per_axis = sample_count * core::mem::size_of::<f32>();
-        let total = ARC_LENGTH_HEADER_BYTES + 2 * bytes_per_axis;
-        if buf.len() < total {
-            return Err(WireError::TruncatedBuffer {
-                expected_len: total,
-                got: buf.len(),
-            });
-        }
-
-        // SAFETY: alignment of `buf` to `align_of::<f32>()` is checked above; the
-        // header is 8 bytes (multiple of 4) so `s_ptr` and `u_ptr` remain 4-byte
-        // aligned. The total length covers `2 * sample_count * size_of::<f32>()`
-        // bytes after the header. Lifetime `'a` is inherited from `buf`.
-        #[allow(unsafe_code)]
-        let (s, u) = unsafe {
-            let s_ptr = buf.as_ptr().add(ARC_LENGTH_HEADER_BYTES).cast::<f32>();
-            let u_ptr = buf
-                .as_ptr()
-                .add(ARC_LENGTH_HEADER_BYTES + bytes_per_axis)
-                .cast::<f32>();
-            (
-                core::slice::from_raw_parts(s_ptr, sample_count),
-                core::slice::from_raw_parts(u_ptr, sample_count),
-            )
-        };
-        Ok(Self::new(s, u))
     }
 }
 

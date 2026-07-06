@@ -17,7 +17,7 @@ fn synthetic_postshape_curve() -> ScalarNurbs<f64> {
     let cps: Vec<f64> = (0..n_cps)
         .map(|i| {
             let t = i as f64 / (n_cps - 1) as f64;
-            10.0 * t + 5.0 * (t * std::f64::consts::PI).sin()
+            10.0 * t + 5.0 * libm::sin(t * std::f64::consts::PI)
         })
         .collect();
 

@@ -74,25 +74,29 @@ def gains_from_name(path):
     return tuple(int(g) for g in m.groups())
 
 
-def cruise_mask(target_mm, t):
-    v = np.gradient(np.convolve(target_mm, np.ones(11) / 11, "same"), t)
+def cruise_mask(target_mm, t, fs):
+    smooth_win = max(3, int(round(0.011 * fs)))
+    v = np.gradient(
+        np.convolve(target_mm, np.ones(smooth_win) / smooth_win, "same"), t
+    )
     speed = np.abs(v)
     moving = speed > 5.0
     if not moving.any():
         raise SystemExit("capture has no motion")
     vnom = np.percentile(speed[moving], 90)
     mask = np.abs(speed - vnom) < max(2.0, 0.02 * vnom)
-    m = mask & np.roll(mask, 50) & np.roll(mask, -50)
+    guard = int(round(0.05 * fs))
+    m = mask & np.roll(mask, guard) & np.roll(mask, -guard)
     return m, vnom, v
 
 
-def amplitude_spectrum(x):
+def amplitude_spectrum(x, fs):
     seg = np.asarray(x, dtype=np.float64)
     seg = seg - seg.mean()
     n = min(len(seg), 16384)
     seg = seg[:n] * np.hanning(n)
     spectrum = np.abs(np.fft.rfft(seg)) / n * 2.0
-    freqs = np.fft.rfftfreq(n, 1e-3)
+    freqs = np.fft.rfftfreq(n, 1.0 / fs)
     return freqs, spectrum
 
 
@@ -125,19 +129,44 @@ def resonance_protrusion(freqs, spectrum, lo, hi):
     return worst_ratio, worst_hz, worst_amp
 
 
-def step_metrics(path):
-    header, data = load_capture(path)
-    cpm = header["drives"][0]["counts_per_mm"]
+def step_metrics(path, drive=None):
+    """Metrics for every drive in the capture (or just `drive`), merged
+    worst-case: a gain step is only as good as its worst motor."""
+    header, _, _ = load_capture(path, drive)
+    names = (
+        [drive] if drive is not None else [d["name"] for d in header["drives"]]
+    )
+    per_drive = [drive_metrics(path, name) for name in names]
+    worst_res = max(per_drive, key=lambda m: m["res_ratio"])
+    return {
+        "path": path,
+        "cruise_mm_s": per_drive[0]["cruise_mm_s"],
+        "lag_ms": max(m["lag_ms"] for m in per_drive),
+        "ferr_std_um": max(m["ferr_std_um"] for m in per_drive),
+        "low_band_um": max(m["low_band_um"] for m in per_drive),
+        "res_peak_um": worst_res["res_peak_um"],
+        "res_peak_hz": worst_res["res_peak_hz"],
+        "res_ratio": worst_res["res_ratio"],
+        "resonant": any(m["resonant"] for m in per_drive),
+        "overshoot_max_um": max(m["overshoot_max_um"] for m in per_drive),
+        "drives": per_drive,
+    }
+
+
+def drive_metrics(path, drive):
+    header, data, drive_idx = load_capture(path, drive)
+    cpm = header["drives"][drive_idx]["counts_per_mm"]
     n = len(data)
-    t = np.arange(n) / 1000.0
+    fs = 1e9 / header["cycle_ns"]
+    t = np.arange(n) / fs
     target = data["target_counts"].astype(np.float64) / cpm
     actual = data["position_actual"].astype(np.float64) / cpm
     ferr = data["following_error"].astype(np.float64) / cpm
 
-    m, vnom, vt = cruise_mask(target, t)
+    m, vnom, vt = cruise_mask(target, t, fs)
     if m.sum() < 1024:
         raise SystemExit("%s: not enough cruise samples" % (path,))
-    freqs, spectrum = amplitude_spectrum(ferr[m])
+    freqs, spectrum = amplitude_spectrum(ferr[m], fs)
     low_amp, low_hz = band_peak(freqs, spectrum, *LOW_BAND_HZ)
     res_ratio, res_hz, res_amp = resonance_protrusion(
         freqs, spectrum, *RESONANCE_BAND_HZ
@@ -146,15 +175,21 @@ def step_metrics(path):
 
     moving = np.abs(vt) > 5.0
     ends = np.where(moving[:-1] & ~moving[1:])[0]
+    post = int(round(0.4 * fs))
+    settle = int(round(0.05 * fs))
+    lookback = int(round(0.1 * fs))
     overshoots = []
+    stop_windows = []
     for e in ends:
-        if e + 400 >= n or e < 100:
+        if e + post >= n or e < lookback:
             continue
-        endpos = target[e + 50]
-        direction = np.sign(target[e] - target[e - 100])
-        overshoots.append(np.max((actual[e : e + 400] - endpos) * direction))
+        endpos = target[e + settle]
+        direction = np.sign(target[e] - target[e - lookback])
+        overshoots.append(np.max((actual[e : e + post] - endpos) * direction))
+        stop_windows.append(direction * ferr[e - lookback : e + post])
     return {
         "path": path,
+        "drive": header["drives"][drive_idx]["name"],
         "cruise_mm_s": float(vnom),
         "lag_ms": float(np.mean(np.abs(ferr[m])) / vnom * 1000.0),
         "ferr_std_um": float(np.std(np.abs(ferr[m])) * 1000.0),
@@ -169,7 +204,52 @@ def step_metrics(path):
         else 0.0,
         "spectrum": (freqs, spectrum),
         "cruise_ferr": ferr[m],
+        "stop_windows": stop_windows,
+        "stop_lookback_s": lookback / fs,
+        "fs": fs,
     }
+
+
+def resonance_zoom_panel(ax, steps, colors, linestyles):
+    peaks = [
+        (dm["res_peak_hz"], dm["res_peak_um"])
+        for _, met in steps
+        for dm in met["drives"]
+        if dm["res_peak_hz"] > 0
+    ]
+    if not peaks:
+        ax.axis("off")
+        ax.set_title("no resonance peak detected", fontsize=9)
+        return
+    hz = np.array([p[0] for p in peaks])
+    center = float(hz[int(np.argmax([p[1] for p in peaks]))])
+    lo = max(min(hz.min(), center) - 80.0, 10.0)
+    hi = max(hz.max(), center) + 80.0
+    for (_, met), color in zip(steps, colors):
+        for k, dm in enumerate(met["drives"]):
+            freqs, spectrum = dm["spectrum"]
+            band = (freqs >= lo) & (freqs <= hi)
+            ax.plot(
+                freqs[band],
+                spectrum[band] * 1000.0,
+                color=color,
+                ls=linestyles[k % len(linestyles)],
+                lw=0.9,
+            )
+    for peak_hz in sorted(set(np.round(hz, 1))):
+        ax.axvline(peak_hz, color="red", lw=0.8, alpha=0.5)
+        ax.text(
+            peak_hz,
+            ax.get_ylim()[1],
+            " %.1f" % peak_hz,
+            color="red",
+            fontsize=8,
+            va="top",
+        )
+    ax.set_xlabel("Hz")
+    ax.set_ylabel("ferr amplitude (um)")
+    ax.set_title("Resonance zoom, linear frequency (red: detected peaks)")
+    ax.grid(alpha=0.3)
 
 
 def render(steps, out_path):
@@ -182,24 +262,33 @@ def render(steps, out_path):
     colors = plt.cm.viridis(np.linspace(0.0, 0.85, len(steps)))
 
     spec_ax, time_ax = axes[0]
+    linestyles = ["-", "--", ":", "-."]
     for (gains, met), color in zip(steps, colors):
-        label = "pos %.0f rad/s / speed %.0f Hz%s" % (
-            gains[0] / 10.0,
-            gains[1] / 10.0,
-            "  RESONANT" if met["resonant"] else "",
-        )
-        freqs, spectrum = met["spectrum"]
-        spec_ax.loglog(
-            freqs[1:],
-            np.convolve(spectrum[1:] * 1000.0, np.ones(3) / 3, "same"),
-            color=color,
-            lw=1.0,
-            label=label,
-        )
-        seg = met["cruise_ferr"][:1500]
-        time_ax.plot(
-            np.arange(len(seg)) / 1000.0, seg * 1000.0, color=color, lw=0.7
-        )
+        for k, dm in enumerate(met["drives"]):
+            label = "pos %.0f rad/s / speed %.0f Hz%s%s" % (
+                gains[0] / 10.0,
+                gains[1] / 10.0,
+                " [%s]" % dm["drive"] if len(met["drives"]) > 1 else "",
+                "  RESONANT" if dm["resonant"] else "",
+            )
+            ls = linestyles[k % len(linestyles)]
+            freqs, spectrum = dm["spectrum"]
+            spec_ax.loglog(
+                freqs[1:],
+                np.convolve(spectrum[1:] * 1000.0, np.ones(3) / 3, "same"),
+                color=color,
+                ls=ls,
+                lw=1.0,
+                label=label,
+            )
+            seg = dm["cruise_ferr"][: int(round(1.5 * dm["fs"]))]
+            time_ax.plot(
+                np.arange(len(seg)) / dm["fs"],
+                seg * 1000.0,
+                color=color,
+                ls=ls,
+                lw=0.7,
+            )
     spec_ax.axvspan(*RESONANCE_BAND_HZ, alpha=0.06, color="red")
     spec_ax.set_xlabel("Hz")
     spec_ax.set_ylabel("ferr amplitude (um)")
@@ -213,7 +302,7 @@ def render(steps, out_path):
     time_ax.set_title("Cruise following error, time domain")
     time_ax.grid(alpha=0.3)
 
-    curve_ax, table_ax = axes[1]
+    curve_ax, zoom_ax = axes[1]
     hz = [g[1] / 10.0 for g, _ in steps]
     for key, label, scale in (
         ("ferr_std_um", "cruise error std (um)", 1.0),
@@ -232,35 +321,7 @@ def render(steps, out_path):
     curve_ax.legend(fontsize=8)
     curve_ax.grid(alpha=0.3)
 
-    table_ax.axis("off")
-    rows = [
-        [
-            "%.0f/%.0f/%.0f" % (g[0] / 10.0, g[1] / 10.0, g[2] / 100.0),
-            "%.1f" % m["lag_ms"],
-            "%.0f" % m["ferr_std_um"],
-            "%.0f" % m["low_band_um"],
-            "%.0f @ %.0fHz" % (m["res_peak_um"], m["res_peak_hz"]),
-            "%.0f" % m["overshoot_max_um"],
-            "YES" if m["resonant"] else "no",
-        ]
-        for g, m in steps
-    ]
-    table = table_ax.table(
-        cellText=rows,
-        colLabels=[
-            "pos/spd/Ti",
-            "lag ms",
-            "err um",
-            "low um",
-            "res peak",
-            "ovsh um",
-            "resonant",
-        ],
-        loc="center",
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(8)
-    table_ax.set_title("rad/s / Hz / ms", fontsize=9)
+    resonance_zoom_panel(zoom_ax, steps, colors, linestyles)
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=110)
@@ -313,6 +374,16 @@ def main(argv=None):
         "--out-dir", default="~/printer_data/config/servo_calibrate_results"
     )
     p.add_argument("--out", help="explicit output PNG path")
+    p.add_argument(
+        "--drive",
+        help="restrict analysis to one drive of a multi-drive capture "
+        "(default: analyze all drives, merged worst-case)",
+    )
+    p.add_argument(
+        "--axis",
+        help="axis the sweep ran on; included in the recommended "
+        "SERVO_APPLY_GAINS command so it targets all drives on that axis",
+    )
     args = p.parse_args(argv)
 
     if args.captures and args.steps:
@@ -335,7 +406,7 @@ def main(argv=None):
     if not files:
         raise SystemExit("no sweep captures found (tag %r)" % (args.tag,))
 
-    steps = [(gains, step_metrics(path)) for gains, path in files]
+    steps = [(gains, step_metrics(path, args.drive)) for gains, path in files]
 
     if args.out:
         out_path = os.path.expanduser(args.out)
@@ -374,11 +445,27 @@ def main(argv=None):
                 "YES" if met["resonant"] else "no",
             )
         )
+        if len(met["drives"]) > 1:
+            for dm in met["drives"]:
+                print(
+                    "    %-12s %7.1f %7.0f %7.0f %6.0f@%3.0fHz %8.0f %s"
+                    % (
+                        dm["drive"],
+                        dm["lag_ms"],
+                        dm["ferr_std_um"],
+                        dm["low_band_um"],
+                        dm["res_peak_um"],
+                        dm["res_peak_hz"],
+                        dm["overshoot_max_um"],
+                        "YES" if dm["resonant"] else "no",
+                    )
+                )
     gains, note = recommend(steps)
     if gains is not None:
+        target = " AXIS=%s" % args.axis if args.axis else ""
         print(
-            "recommended: SERVO_APPLY_GAINS POS_GAIN=%d SPEED_GAIN=%d INTEGRAL=%d  (%s)"
-            % (gains[0], gains[1], gains[2], note)
+            "recommended: SERVO_APPLY_GAINS%s POS_GAIN=%d SPEED_GAIN=%d INTEGRAL=%d  (%s)"
+            % (target, gains[0], gains[1], gains[2], note)
         )
     else:
         print("recommendation: %s" % (note,))

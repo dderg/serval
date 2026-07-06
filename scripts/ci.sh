@@ -5,10 +5,6 @@
 #   ./scripts/ci.sh install-hooks   # enable the pre-push hook (runs `quick` per push)
 #   ./scripts/ci.sh <job>           # run one gate, exit with its status (CI)
 #
-# Jobs: ruff rust-host rust-build rust-test rust-clippy rust-fmt rust-loom
-#       rust-mcu-h7 rust-mcu-f4 rust-mcu-g0 rust-no-stepper cbindgen-drift
-#       c-smoke deny miri panic-grep watchdog-canary py docs sim
-#
 # Prerequisites (one-time, for the full local run):
 #   rustup target add thumbv7em-none-eabi
 #   rustup component add --toolchain nightly miri
@@ -53,28 +49,28 @@ job_rust_loom() {
         --test loom
 }
 
-KALICO_MCU_ENV=(KALICO_RUNTIME_STORAGE_SIZE=122880 KALICO_RUNTIME_PIECE_RING_SIZE=63488)
+MCU_ENV=(RUNTIME_STORAGE_SIZE=122880 RUNTIME_PIECE_RING_SIZE=63488)
 
 job_rust_mcu_h7() {
     cd "$RUST"
-    env "${KALICO_MCU_ENV[@]}" \
-        cargo build -p kalico-c-api --no-default-features \
+    env "${MCU_ENV[@]}" \
+        cargo build -p c-api --no-default-features \
         --features mcu-h7,header-nurbs,header-runtime,motion-module-stepper \
         --target thumbv7em-none-eabi
 }
 
 job_rust_mcu_f4() {
     cd "$RUST"
-    env "${KALICO_MCU_ENV[@]}" \
-        cargo build -p kalico-c-api --no-default-features \
+    env "${MCU_ENV[@]}" \
+        cargo build -p c-api --no-default-features \
         --features mcu-f4,header-nurbs,header-runtime,motion-module-stepper \
         --target thumbv7em-none-eabi
 }
 
 job_rust_mcu_g0() {
     cd "$RUST"
-    env "${KALICO_MCU_ENV[@]}" \
-        cargo build -p kalico-c-api --no-default-features \
+    env "${MCU_ENV[@]}" \
+        cargo build -p c-api --no-default-features \
         --features mcu-g0,header-nurbs,header-runtime,motion-module-stepper \
         --target thumbv6m-none-eabi
 }
@@ -87,16 +83,32 @@ job_rust_no_stepper() {
 
 job_cbindgen_drift() {
     "$ROOT/tools/regen_headers.sh"
-    git -C "$ROOT" diff --exit-code rust/kalico-c-api/include/
+    git -C "$ROOT" diff --exit-code rust/c-api/include/
 }
 
 job_c_smoke() {
     cd "$RUST"
-    cargo build -p kalico-c-api --no-default-features \
+    cargo build -p c-api --no-default-features \
         --features host,header-nurbs,header-runtime --release
-    cargo test -p kalico-c-api --no-default-features \
+    cargo test -p c-api --no-default-features \
         --features host,header-nurbs,header-runtime \
         --test c_smoke_build
+}
+
+# The hw EtherCAT endpoint (`--features hw`) links libethercat, present only on
+# the bench Pi, so it is built nowhere else — its compile errors otherwise only
+# surface on a flash. `cargo check` runs build.rs (compiling csrc/libecrt_igh.c
+# via cc against the committed CI stub of ecrt.h) and typechecks the binary,
+# catching both the C and Rust compile errors without linking libethercat.
+# Linux-only: libecrt_igh.c uses Linux sched/clock APIs absent on macOS.
+job_rust_ethercat_hw() {
+    if [ "$(uname -s)" != Linux ]; then
+        echo "rust-ethercat-hw: skipped on $(uname -s) (libecrt_igh.c needs Linux sched/clock APIs)"
+        return 0
+    fi
+    cd "$RUST"
+    IGH_DIR="$RUST/ethercat-rt/csrc/ci-igh" \
+        cargo check -p ethercat-rt --features hw --bin ethercat-rt
 }
 
 job_deny() {
@@ -111,15 +123,15 @@ job_miri() {
     cd "$RUST"
     MIRIFLAGS="-Zmiri-ignore-leaks" cargo +nightly miri test -p runtime --features host \
         --test fault_encoding \
-        --test monomial_eval \
+        --test motion_core_accel \
         --test phase_lut_anchors \
         --test seqlock_unit
 }
 
 job_panic_grep() {
     cd "$RUST"
-    env "${KALICO_MCU_ENV[@]}" \
-        cargo rustc -p kalico-c-api --release \
+    env "${MCU_ENV[@]}" \
+        cargo rustc -p c-api --release \
         --no-default-features \
         --features mcu-h7,header-nurbs,header-runtime,motion-module-stepper \
         --target thumbv7em-none-eabi -- --emit=llvm-ir
@@ -177,21 +189,30 @@ job_py() {
 }
 
 job_sim() {
-    local sel="sim_unit and not needs_hardware and not needs_renode"
-    local paths="tools/sim_klippy \
-        tools/test_kalico_host_io_seq_wrap.py \
-        tools/test_motion_toolhead_static.py"
+    local sel="sim_unit and not needs_hardware"
+    local paths="tools/sim \
+        tools/test_host_io_seq_wrap.py \
+        tools/test_motion_idle_timeout.py \
+        tools/test_motion_static.py"
     if command -v docker >/dev/null 2>&1; then
         docker run --rm -v "$ROOT:/klipper" -w /klipper --entrypoint bash "$DOCKER_IMAGE" -lc \
-            "make -C tools/sim_klippy/preload >/dev/null && uv run py.test -n auto $paths -m '$sel'"
+            "make -C tools/sim/preload >/dev/null && uv run py.test -n auto $paths -m '$sel'"
     else
-        echo "docker unavailable — running kalico-sim unit tests on the local interpreter"
-        make -C "$ROOT/tools/sim_klippy/preload" >/dev/null 2>&1 || true
-        cd "$ROOT" && python -m pytest -n auto $paths -m "$sel"
+        echo "docker unavailable — running sim unit tests on the local interpreter"
+        make -C "$ROOT/tools/sim/preload" >/dev/null 2>&1 || true
+        cd "$ROOT" && python -m pytest -n auto "$paths" -m "$sel"
     fi
 }
 
 job_docs() { cd "$ROOT/docs/_kalico" && uv run mkdocs build --strict; }
+
+job_snapshot() {
+    if command -v uv >/dev/null 2>&1; then
+        cd "$ROOT" && uv run snapshots/snapshot-tests.sh --ci
+    else
+        "$ROOT/snapshots/snapshot-tests.sh" --ci
+    fi
+}
 
 PASS=0; FAIL=0
 FAILED_JOBS=()
@@ -224,6 +245,7 @@ run_all() {
     if [ "$quick" != "true" ]; then
         run_check "cbindgen-drift"  job_cbindgen_drift
         run_check "c-smoke"         job_c_smoke
+        run_check "rust-ethercat-hw" job_rust_ethercat_hw
         run_check "rust-mcu-h7"     job_rust_mcu_h7
         run_check "rust-mcu-f4"     job_rust_mcu_f4
         run_check "rust-mcu-g0"     job_rust_mcu_g0
@@ -235,6 +257,7 @@ run_all() {
         run_check "docs"            job_docs
         run_check "py"              job_py
         run_check "sim"             job_sim
+        run_check "snapshot"        job_snapshot
     fi
     echo "────────────────────────────────────────"
     printf '  %s   %s\n' "$(green "$PASS pass")" "$([ "$FAIL" -gt 0 ] && red "$FAIL fail" || echo "0 fail")"
@@ -273,6 +296,7 @@ case "${1:-all}" in
     rust-no-stepper)  job_rust_no_stepper ;;
     cbindgen-drift)   job_cbindgen_drift ;;
     c-smoke)          job_c_smoke ;;
+    rust-ethercat-hw) job_rust_ethercat_hw ;;
     deny)             job_deny ;;
     miri)             job_miri ;;
     panic-grep)       job_panic_grep ;;
@@ -281,6 +305,7 @@ case "${1:-all}" in
     py)               shift; job_py "${1:-3.13}" ;;
     docs)             job_docs ;;
     sim)              job_sim ;;
+    snapshot)         job_snapshot ;;
     all)              run_all false ;;
     quick|--quick)    run_all true ;;
     install-hooks|hooks) job_install_hooks ;;

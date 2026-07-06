@@ -242,44 +242,6 @@ fn curvature_of_straight_line_is_zero() {
     assert!(k.abs() < 1e-10, "got {k}");
 }
 
-#[test]
-fn pos_vel_accel_on_quadratic_polynomial() {
-    let cps = vec![0.0_f32, 0.0, 1.0];
-    let knots = vec![0.0_f32, 0.0, 0.0, 1.0, 1.0, 1.0];
-    let (p, v, a) = eval_polynomial_f32_with_pos_vel_accel_f64(&cps, &knots, 2, 0.5);
-    assert!((p - 0.25).abs() < 1e-9, "pos={}", p);
-    assert!((v - 1.0_f64).abs() < 1e-9, "vel={}", v);
-    assert!((a - 2.0_f64).abs() < 1e-9, "accel={}", a);
-}
-
-#[test]
-fn pos_vel_accel_on_cubic_polynomial() {
-    let cps = vec![0.0_f32, 0.0, 0.0, 1.0];
-    let knots = vec![0.0_f32, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
-    let (p, v, a) = eval_polynomial_f32_with_pos_vel_accel_f64(&cps, &knots, 3, 0.5);
-    assert!((p - 0.125).abs() < 1e-9, "pos={}", p);
-    assert!((v - 0.75_f64).abs() < 1e-9, "vel={}", v);
-    assert!((a - 3.0_f64).abs() < 1e-9, "accel={}", a);
-}
-
-#[test]
-fn pos_vel_accel_on_linear_polynomial_returns_zero_accel() {
-    // f(u) = u, degree-1 Bézier cps=[0,1], knots=[0,0,1,1].
-    // Note: 0.3_f32 widens to ~0.30000001192 in f64, so position tolerance
-    // accommodates the f32→f64 round-trip on u (~1.2e-8). Velocity and
-    // acceleration are exact (rational arithmetic on exact knots/cps).
-    let cps = vec![0.0_f32, 1.0];
-    let knots = vec![0.0_f32, 0.0, 1.0, 1.0];
-    let (p, v, a) = eval_polynomial_f32_with_pos_vel_accel_f64(&cps, &knots, 1, 0.3);
-    assert!((p - 0.3).abs() < 1e-6, "pos={}", p);
-    assert!((v - 1.0_f64).abs() < 1e-9, "vel={}", v);
-    assert!(
-        a.abs() < 1e-9,
-        "linear curve must have zero second derivative; got {}",
-        a
-    );
-}
-
 #[cfg(feature = "host")]
 #[test]
 fn curvature_of_arc_matches_known_value() {

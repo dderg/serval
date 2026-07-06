@@ -11,7 +11,7 @@
 #include "board/misc.h" // console_sendf
 #include "board/pgm.h" // READP
 #include "command.h" // DECL_CONSTANT
-#include "kalico_demux.h" // kalico_demux_pump
+#include "mcu_demux.h" // mcu_demux_pump
 #include "sched.h" // sched_wake_tasks
 #include "serial_irq.h" // serial_enable_tx_irq
 
@@ -50,7 +50,7 @@ serial_rx_byte(uint_fast8_t data)
 {
     if (data == MESSAGE_SYNC) {
         sched_wake_tasks();
-    } else if (data == 0x55 /* KALICO_FRAME_SYNC */) {
+    } else if (data == 0x55 /* MCU_FRAME_SYNC */) {
         // Without a wake per kalico frame start, a long frame can fill
         // receive_buf before a Klipper 0x7E sync byte happens to occur in
         // its payload, dropping bytes silently mid-frame.
@@ -80,7 +80,7 @@ console_task(void)
 {
     receive_pos_t rpos = read_rpos(&receive_pos);
 
-    kalico_demux_pump(receive_buf, rpos);
+    mcu_demux_pump(receive_buf, rpos);
 
     // The rebasing memmove must run with IRQs masked: a fresh RX IRQ
     // between reading receive_pos and the move would write into a slot

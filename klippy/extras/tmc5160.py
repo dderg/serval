@@ -397,8 +397,9 @@ class TMC5160:
         # Allow virtual pins to be created
         self._virtual_pin_helper = tmc.TMCVirtualPinHelper(config, self.mcu_tmc)
         stepper_name = " ".join(config.get_name().split()[1:])
-        if config.has_section(stepper_name):
-            stepper_section = config.getsection(stepper_name)
+        motor_section = "motor " + stepper_name
+        if config.has_section(motor_section):
+            stepper_section = config.getsection(motor_section)
         else:
             stepper_section = None
         self.name = stepper_name
@@ -524,7 +525,7 @@ class TMC5160:
         if self._phase_stepper_oid is None:
             raise self.printer.command_error(
                 "phase_stepping: stepper oid not registered for %s "
-                "(motion_toolhead init_planner did not run?)" % (self.name,)
+                "(motion init_planner did not run?)" % (self.name,)
             )
         enable_spi = mcu_obj.lookup_command("kalico_phase_stepping_enable_spi")
         disable_spi = mcu_obj.lookup_command(
@@ -543,7 +544,7 @@ class TMC5160:
         if self._phase_state_query is None:
             self._phase_state_query = mcu_obj.lookup_query_command(
                 "kalico_get_phase_state oid=%c",
-                "kalico_phase_state oid=%c axis_idx=%c mode=%c phase=%hu"
+                "motion_phase_state oid=%c axis_idx=%c mode=%c phase=%hu"
                 " settled=%c",
                 oid=self._phase_stepper_oid,
             )

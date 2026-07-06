@@ -103,19 +103,19 @@ class FakeGcmd:
         self.responses.append(msg)
 
 
-class FakeBridge:
+class FakeEngine:
     def __init__(self):
         self.reads = []
         self.writes = []
         self.read_result = (2, 100)
         self.write_result = (2, 100)
 
-    def sdo_read(self, handle, index, subindex):
-        self.reads.append((handle, index, subindex))
+    def sdo_read(self, handle, slot, index, subindex):
+        self.reads.append((handle, slot, index, subindex))
         return self.read_result
 
-    def sdo_write(self, handle, index, subindex, size, value):
-        self.writes.append((handle, index, subindex, size, value))
+    def sdo_write(self, handle, slot, index, subindex, size, value):
+        self.writes.append((handle, slot, index, subindex, size, value))
         return self.write_result
 
 
@@ -125,8 +125,11 @@ class FakeNode:
     def __init__(self, handle):
         self._h = handle
 
-    def get_bridge_handle(self):
+    def get_engine_handle(self):
         return self._h
+
+    def get_slot_for_motor(self, motor_name):
+        return 0
 
 
 class FakeKin:
@@ -152,60 +155,61 @@ class FakePrinter:
         return self._objs[name]
 
 
-def make_servo_param(bridge, node):
+def make_servo_param(engine, node):
     rail = servo_axis.ServoRail.__new__(servo_axis.ServoRail)
-    rail.name = "servo_x"
+    rail.name = "axis x"
     rail.axis = "x"
     rail.node_name = "node_x"
+    rail.motor_name = "motor_x"
     sp = servo_param.ServoParam.__new__(servo_param.ServoParam)
     sp.printer = FakePrinter(
         {
             "toolhead": FakeToolhead(FakeKin([rail])),
             "ethercat_node node_x": node,
-            "motion_bridge": bridge,
+            "motion_engine": engine,
         }
     )
     return sp
 
 
 def test_cmd_get_reads_and_formats():
-    bridge = FakeBridge()
-    sp = make_servo_param(bridge, FakeNode(7))
-    gcmd = FakeGcmd({"SERVO": "servo_x", "GET": "0x2002.0"})
+    engine = FakeEngine()
+    sp = make_servo_param(engine, FakeNode(7))
+    gcmd = FakeGcmd({"SERVO": "motor_x", "GET": "0x2002.0"})
     sp.cmd_SERVO_PARAM(gcmd)
-    assert bridge.reads == [(7, 0x2002, 0)]
+    assert engine.reads == [(7, 0, 0x2002, 0)]
     assert gcmd.responses == ["0x2002.0 = 0x0064 (u16: 100, i16: 100)"]
 
 
 def test_cmd_set_typed_passes_size():
-    bridge = FakeBridge()
-    bridge.write_result = (2, 250)
-    sp = make_servo_param(bridge, FakeNode(7))
+    engine = FakeEngine()
+    engine.write_result = (2, 250)
+    sp = make_servo_param(engine, FakeNode(7))
     gcmd = FakeGcmd(
-        {"SERVO": "servo_x", "SET": "0x2002.0", "VALUE": "250", "TYPE": "u16"}
+        {"SERVO": "motor_x", "SET": "0x2002.0", "VALUE": "250", "TYPE": "u16"}
     )
     sp.cmd_SERVO_PARAM(gcmd)
-    assert bridge.writes == [(7, 0x2002, 0, 2, 250)]
+    assert engine.writes == [(7, 0, 0x2002, 0, 2, 250)]
     assert gcmd.responses == ["set 0x2002.0 = 0x00fa (u16: 250)"]
 
 
 def test_cmd_set_untyped_passes_size_zero():
-    bridge = FakeBridge()
-    sp = make_servo_param(bridge, FakeNode(7))
-    gcmd = FakeGcmd({"SERVO": "servo_x", "SET": "0x2002.0", "VALUE": "100"})
+    engine = FakeEngine()
+    sp = make_servo_param(engine, FakeNode(7))
+    gcmd = FakeGcmd({"SERVO": "motor_x", "SET": "0x2002.0", "VALUE": "100"})
     sp.cmd_SERVO_PARAM(gcmd)
-    assert bridge.writes == [(7, 0x2002, 0, 0, 100)]
+    assert engine.writes == [(7, 0, 0x2002, 0, 0, 100)]
 
 
 def test_cmd_requires_exactly_one_of_get_set():
-    sp = make_servo_param(FakeBridge(), FakeNode(7))
+    sp = make_servo_param(FakeEngine(), FakeNode(7))
     with pytest.raises(RuntimeError, match="exactly one"):
-        sp.cmd_SERVO_PARAM(FakeGcmd({"SERVO": "servo_x"}))
+        sp.cmd_SERVO_PARAM(FakeGcmd({"SERVO": "motor_x"}))
     with pytest.raises(RuntimeError, match="exactly one"):
         sp.cmd_SERVO_PARAM(
             FakeGcmd(
                 {
-                    "SERVO": "servo_x",
+                    "SERVO": "motor_x",
                     "GET": "0x2002.0",
                     "SET": "0x2002.0",
                     "VALUE": "1",
@@ -214,27 +218,35 @@ def test_cmd_requires_exactly_one_of_get_set():
         )
 
 
-def test_cmd_fails_without_bridge_handle():
-    sp = make_servo_param(FakeBridge(), FakeNode(None))
-    with pytest.raises(RuntimeError, match="no bridge handle"):
-        sp.cmd_SERVO_PARAM(FakeGcmd({"SERVO": "servo_x", "GET": "0x2002.0"}))
+def test_cmd_fails_without_engine_handle():
+    sp = make_servo_param(FakeEngine(), FakeNode(None))
+    with pytest.raises(RuntimeError, match="no engine handle"):
+        sp.cmd_SERVO_PARAM(FakeGcmd({"SERVO": "motor_x", "GET": "0x2002.0"}))
 
 
 def test_cmd_unknown_servo_fails():
-    sp = make_servo_param(FakeBridge(), FakeNode(7))
-    with pytest.raises(RuntimeError, match="no servo rail"):
+    sp = make_servo_param(FakeEngine(), FakeNode(7))
+    with pytest.raises(RuntimeError, match="no servo motor"):
         sp.cmd_SERVO_PARAM(FakeGcmd({"SERVO": "servo_q", "GET": "0x2002.0"}))
 
 
-def test_cmd_propagates_bridge_failure():
-    class FailingBridge(FakeBridge):
+@pytest.mark.parametrize("servo", ["motor_x", "axis x", "x"])
+def test_cmd_resolves_by_motor_axis_or_short_name(servo):
+    engine = FakeEngine()
+    sp = make_servo_param(engine, FakeNode(7))
+    sp.cmd_SERVO_PARAM(FakeGcmd({"SERVO": servo, "GET": "0x2002.0"}))
+    assert engine.reads == [(7, 0, 0x2002, 0)]
+
+
+def test_cmd_propagates_engine_failure():
+    class FailingEngine(FakeEngine):
         def sdo_write(self, *args):
             raise RuntimeError("CoE abort 0x06010002")
 
-    sp = make_servo_param(FailingBridge(), FakeNode(7))
+    sp = make_servo_param(FailingEngine(), FakeNode(7))
     with pytest.raises(RuntimeError, match="CoE abort"):
         sp.cmd_SERVO_PARAM(
-            FakeGcmd({"SERVO": "servo_x", "SET": "0x6041.0", "VALUE": "1"})
+            FakeGcmd({"SERVO": "motor_x", "SET": "0x6041.0", "VALUE": "1"})
         )
 
 
@@ -242,14 +254,14 @@ class FakeConfigError(Exception):
     pass
 
 
-def make_node_for_claim(bridge, rail):
+def make_node_for_claim(engine, rail):
     node = ethercat_node.EtherCatNode.__new__(ethercat_node.EtherCatNode)
     node.name = "node_x"
-    node.bridge_handle = 5
+    node.engine_handle = 5
     node.printer = FakePrinter(
         {
             "toolhead": FakeToolhead(FakeKin([rail])),
-            "motion_bridge": bridge,
+            "motion_engine": engine,
         }
     )
     node.printer.config_error = FakeConfigError
@@ -266,30 +278,33 @@ def make_rail_with_params(params):
 
 
 def test_claim_push_writes_params_in_order():
-    bridge = FakeBridge()
+    engine = FakeEngine()
     rail = make_rail_with_params([(0x2002, 0, 0, 100), (0x2003, 0, 2, 250)])
-    node = make_node_for_claim(bridge, rail)
-    node._push_drive_params(rail)
-    assert bridge.writes == [(5, 0x2002, 0, 0, 100), (5, 0x2003, 0, 2, 250)]
+    node = make_node_for_claim(engine, rail)
+    node._push_drive_params(rail, 0)
+    assert engine.writes == [
+        (5, 0, 0x2002, 0, 0, 100),
+        (5, 0, 0x2003, 0, 2, 250),
+    ]
 
 
 def test_claim_push_failure_is_config_error_with_address():
-    class FailingBridge(FakeBridge):
+    class FailingEngine(FakeEngine):
         def sdo_write(self, *args):
             raise RuntimeError("readback mismatch")
 
     rail = make_rail_with_params([(0x2003, 0, 2, 600)])
-    node = make_node_for_claim(FailingBridge(), rail)
+    node = make_node_for_claim(FailingEngine(), rail)
     with pytest.raises(FakeConfigError, match="0x2003.0"):
-        node._push_drive_params(rail)
+        node._push_drive_params(rail, 0)
 
 
 def test_claim_push_no_params_is_noop():
-    bridge = FakeBridge()
+    engine = FakeEngine()
     rail = make_rail_with_params([])
-    node = make_node_for_claim(bridge, rail)
-    node._push_drive_params(rail)
-    assert bridge.writes == []
+    node = make_node_for_claim(engine, rail)
+    node._push_drive_params(rail, 0)
+    assert engine.writes == []
 
 
 class FakeReactor:
@@ -299,10 +314,15 @@ class FakeReactor:
         return 100.0
 
 
-class FakeFaultPollBridge:
-    def __init__(self, fault=None):
+class FakeFaultPollEngine:
+    def __init__(self, fault=None, death=None):
         self._fault = fault
+        self._death = death
         self.taken = []
+
+    def take_endpoint_death(self, handle):
+        death, self._death = self._death, None
+        return death
 
     def take_drive_fault(self, handle):
         self.taken.append(handle)
@@ -310,11 +330,11 @@ class FakeFaultPollBridge:
         return fault
 
 
-def make_node_for_fault_poll(bridge):
+def make_node_for_fault_poll(engine):
     node = ethercat_node.EtherCatNode.__new__(ethercat_node.EtherCatNode)
     node.name = "node_x"
-    node.bridge_handle = 5
-    printer = FakePrinter({"motion_bridge": bridge})
+    node.engine_handle = 5
+    printer = FakePrinter({"motion_engine": engine})
     printer.reactor = FakeReactor()
     printer.get_reactor = lambda: printer.reactor
     printer.shutdown_msgs = []
@@ -324,19 +344,36 @@ def make_node_for_fault_poll(bridge):
 
 
 def test_fault_poll_rearms_when_drive_is_healthy():
-    bridge = FakeFaultPollBridge(fault=None)
-    node = make_node_for_fault_poll(bridge)
+    engine = FakeFaultPollEngine(fault=None)
+    node = make_node_for_fault_poll(engine)
     waketime = node._poll_drive_fault(7.0)
     assert waketime == 7.0 + ethercat_node.DRIVE_FAULT_POLL_PERIOD
-    assert bridge.taken == [5]
+    assert engine.taken == [5]
     assert node.printer.shutdown_msgs == []
 
 
 def test_fault_poll_shuts_down_klippy_on_latched_fault():
-    bridge = FakeFaultPollBridge(fault=0x8611)
-    node = make_node_for_fault_poll(bridge)
+    engine = FakeFaultPollEngine(fault=0x8611)
+    node = make_node_for_fault_poll(engine)
     waketime = node._poll_drive_fault(7.0)
     assert waketime == FakeReactor.NEVER
     assert len(node.printer.shutdown_msgs) == 1
     assert "0x8611" in node.printer.shutdown_msgs[0]
     assert "node_x" in node.printer.shutdown_msgs[0]
+
+
+def test_fault_poll_shuts_down_on_endpoint_death():
+    # Endpoint death is the clear, primary cause and takes precedence over the
+    # collateral drive fault / -308 — klippy reports it and stays shut down.
+    engine = FakeFaultPollEngine(
+        fault=0x8611,
+        death="conn EOF (fault -203)",
+    )
+    node = make_node_for_fault_poll(engine)
+    waketime = node._poll_drive_fault(7.0)
+    assert waketime == FakeReactor.NEVER
+    assert len(node.printer.shutdown_msgs) == 1
+    msg = node.printer.shutdown_msgs[0]
+    assert "endpoint died" in msg
+    assert "node_x" in msg
+    assert "-203" in msg

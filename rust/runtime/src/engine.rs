@@ -1,10 +1,10 @@
 use core::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 
 use crate::clock::TickCounter;
-use crate::error::{KALICO_ERR_INVALID_ARG, KALICO_ERR_RING_FULL, KALICO_OK};
+use crate::error::{RUNTIME_ERR_INVALID_ARG, RUNTIME_ERR_RING_FULL, RUNTIME_OK};
 use crate::fault_sink::FaultSink;
 use crate::piece_ring::PieceEntry;
-use crate::state::{MAX_STEPPER_OIDS, SharedState};
+use crate::state::SharedState;
 use crate::step::StepMotorState;
 use crate::stepping_state::{AxisState, MAX_AXES, StepMode, StepperBindingRust, TMC_CS_OID_NONE};
 
@@ -56,6 +56,7 @@ pub struct Engine {
     pub(crate) last_motors: [f32; MAX_AXES],
     pub tick_caches: crate::stepping_state::TickCaches,
     pieces_gated: bool,
+    pub(crate) buzz: crate::buzz::Buzz,
     #[cfg(any(test, feature = "host"))]
     test_queue_ptrs: [*mut crate::step_queue::StepQueue; MAX_AXES],
 }
@@ -76,6 +77,7 @@ impl Engine {
             last_motors: [0.0; MAX_AXES],
             tick_caches: crate::stepping_state::TickCaches::new(),
             pieces_gated: false,
+            buzz: crate::buzz::Buzz::new(),
             #[cfg(any(test, feature = "host"))]
             test_queue_ptrs: [core::ptr::null_mut(); MAX_AXES],
         }
@@ -116,6 +118,7 @@ impl Engine {
             addr_of_mut!((*ptr).last_motors).write([0.0; MAX_AXES]);
             addr_of_mut!((*ptr).tick_caches).write(crate::stepping_state::TickCaches::new());
             addr_of_mut!((*ptr).pieces_gated).write(false);
+            addr_of_mut!((*ptr).buzz).write(crate::buzz::Buzz::new());
             #[cfg(any(test, feature = "host"))]
             addr_of_mut!((*ptr).test_queue_ptrs).write([core::ptr::null_mut(); MAX_AXES]);
         }
@@ -162,21 +165,17 @@ impl Engine {
         total_ring_pieces: usize,
     ) -> i32 {
         if (axis_idx as usize) >= MAX_AXES {
-            return KALICO_ERR_INVALID_ARG;
+            return RUNTIME_ERR_INVALID_ARG;
         }
         if !microstep_distance.is_finite() || microstep_distance <= 0.0 {
-            return KALICO_ERR_INVALID_ARG;
+            return RUNTIME_ERR_INVALID_ARG;
         }
-        if self.ring_alloc_cursor + ring_depth + crate::stepping_state::CORRECTION_RING_DEPTH
-            > total_ring_pieces
-        {
-            return KALICO_ERR_RING_FULL;
+        if self.ring_alloc_cursor + ring_depth > total_ring_pieces {
+            return RUNTIME_ERR_RING_FULL;
         }
 
         let offset = self.ring_alloc_cursor;
         self.ring_alloc_cursor += ring_depth;
-        let correction_offset = self.ring_alloc_cursor;
-        self.ring_alloc_cursor += crate::stepping_state::CORRECTION_RING_DEPTH;
 
         let idx = axis_idx as usize;
         // SAFETY: `idx < MAX_AXES` is guaranteed by the bounds check above.
@@ -186,10 +185,6 @@ impl Engine {
 
         axis.microstep_distance = microstep_distance;
         axis.ring = crate::piece_ring::RingDescriptor::new(offset, ring_depth);
-        axis.correction_ring = crate::piece_ring::RingDescriptor::new(
-            correction_offset,
-            crate::stepping_state::CORRECTION_RING_DEPTH,
-        );
         axis.reset_isr_cache();
         axis.steppers.clear();
         for b in bindings {
@@ -210,7 +205,7 @@ impl Engine {
             }
         }
 
-        KALICO_OK
+        RUNTIME_OK
     }
 
     /// Preserves `sample_period_cycles`, `cycles_per_second`, and the running
@@ -237,13 +232,6 @@ impl Engine {
                 axis.ring.advance_counter();
             }
             axis.armed = None;
-            while axis.correction_ring.front_slot().is_some() {
-                axis.correction_ring.advance_counter();
-            }
-            axis.correction_armed = None;
-            axis.correction_motor_idx = crate::stepping_state::CORRECTION_MOTOR_NONE;
-            axis.correction_last_step_count = 0;
-            axis.correction_p_prev = 0.0;
         }
     }
 
@@ -254,11 +242,11 @@ impl Engine {
 
     pub fn ungate_pieces(&mut self) -> i32 {
         if !self.pieces_gated {
-            return crate::error::KALICO_ERR_STREAM_STATE_VIOLATION;
+            return crate::error::RUNTIME_ERR_STREAM_STATE_VIOLATION;
         }
         self.discard_pending();
         self.pieces_gated = false;
-        crate::error::KALICO_OK
+        crate::error::RUNTIME_OK
     }
 
     pub fn pieces_gated(&self) -> bool {
@@ -271,99 +259,30 @@ impl Engine {
         pieces: &[PieceEntry],
         storage: &mut [PieceEntry],
     ) -> i32 {
+        if crate::buzz_stream::axis_active(axis_idx as usize) {
+            return RUNTIME_ERR_INVALID_ARG;
+        }
         let Some(axis) = self
             .stepping_axes
             .get_mut(axis_idx as usize)
             .and_then(|s| s.as_mut())
         else {
-            return KALICO_ERR_INVALID_ARG;
+            return RUNTIME_ERR_INVALID_ARG;
         };
         for &piece in pieces {
             if axis.ring.push(storage, piece).is_err() {
-                return KALICO_ERR_RING_FULL;
+                return RUNTIME_ERR_RING_FULL;
             }
         }
-        KALICO_OK
-    }
-
-    pub fn write_correction_piece(
-        &mut self,
-        axis_idx: u8,
-        start_slot: u16,
-        index: u8,
-        entry: PieceEntry,
-        storage: &mut [PieceEntry],
-    ) -> i32 {
-        let Some(axis) = self
-            .stepping_axes
-            .get_mut(axis_idx as usize)
-            .and_then(|s| s.as_mut())
-        else {
-            return KALICO_ERR_INVALID_ARG;
-        };
-        if !axis.correction_ring.is_configured() {
-            return KALICO_ERR_INVALID_ARG;
-        }
-        let slot = (start_slot as usize + index as usize) % axis.correction_ring.ring_depth;
-        axis.correction_ring.write_slot(storage, slot, entry);
-        KALICO_OK
-    }
-
-    pub fn commit_correction(&mut self, axis_idx: u8, motor_idx: u8, new_head: u32) -> i32 {
-        let any_other_active = self.stepping_axes.iter().enumerate().any(|(i, a)| {
-            i != axis_idx as usize && a.as_ref().map_or(false, |ax| ax.correction_active())
-        });
-        let Some(axis) = self
-            .stepping_axes
-            .get_mut(axis_idx as usize)
-            .and_then(|s| s.as_mut())
-        else {
-            return KALICO_ERR_INVALID_ARG;
-        };
-        if !axis.correction_ring.is_configured() {
-            return KALICO_ERR_INVALID_ARG;
-        }
-        if (motor_idx as usize) >= axis.steppers.len() {
-            return KALICO_ERR_INVALID_ARG;
-        }
-        if !axis.ring.is_empty() || axis.armed.is_some() {
-            return crate::error::KALICO_ERR_MOTION_IN_PROGRESS;
-        }
-        if any_other_active {
-            return crate::error::KALICO_ERR_CORRECTION_IN_PROGRESS;
-        }
-        if axis.correction_active() && axis.correction_motor_idx != motor_idx {
-            return crate::error::KALICO_ERR_CORRECTION_IN_PROGRESS;
-        }
-        if !axis.correction_active() {
-            axis.correction_ring.reset_cursors();
-            axis.correction_motor_idx = motor_idx;
-            axis.correction_last_step_count = 0;
-            axis.correction_p_prev = 0.0;
-            crate::dispatch_correction::emit_correction_start(axis_idx, motor_idx);
-        }
-        match axis.correction_ring.commit_head(new_head) {
-            crate::piece_ring::CommitOutcome::Applied | crate::piece_ring::CommitOutcome::Stale => {
-                KALICO_OK
-            }
-            crate::piece_ring::CommitOutcome::Overcommit => KALICO_ERR_RING_FULL,
-        }
-    }
-
-    pub fn guard_normal_commit(&self, axis_idx: u8) -> i32 {
-        let active = self
-            .stepping_axes
-            .get(axis_idx as usize)
-            .and_then(|s| s.as_ref())
-            .map_or(false, |ax| ax.correction_active());
-        if active {
-            crate::error::KALICO_ERR_CORRECTION_IN_PROGRESS
-        } else {
-            KALICO_OK
-        }
+        RUNTIME_OK
     }
 
     pub fn tick(&mut self, now: u64, shared: &SharedState, storage: &mut [PieceEntry]) -> bool {
+        let refill_fault = crate::buzz_stream::take_refill_fault();
+        if refill_fault != 0 {
+            shared.last_error.store(refill_fault, Ordering::Release);
+        }
+
         #[cfg(feature = "motion-module-stepper")]
         use crate::dispatch_stepper::dispatch_axis;
 
@@ -390,53 +309,17 @@ impl Engine {
         #[allow(clippy::cast_possible_truncation)]
         let now_lo = now as u32;
 
-        let corr_sample_period_sec =
-            if self.sample_period_cycles == 0 || self.cycles_per_second == 0.0 {
-                0.0_f32
-            } else {
-                self.sample_period_cycles as f32 / self.cycles_per_second
-            };
-        #[allow(clippy::cast_possible_truncation)]
-        let corr_now_lo = now as u32;
-
         let mut active = false;
 
         for i in 0..(self.num_axes as usize) {
-            {
-                #[cfg(feature = "motion-module-stepper")]
-                let corr_queue = get_queue(i);
-                #[cfg(not(feature = "motion-module-stepper"))]
-                let corr_queue = core::ptr::null_mut();
-                let sample_period_cycles = self.sample_period_cycles;
-                let cps = self.cycles_per_second;
-                let Some(axis) = self.stepping_axes.get_mut(i).and_then(|s| s.as_mut()) else {
-                    continue;
-                };
-                let fault = SharedFaultSink { shared };
-                if crate::dispatch_correction::tick_correction(
-                    i,
-                    axis,
-                    corr_queue,
-                    shared,
-                    storage,
-                    now,
-                    sample_period_cycles,
-                    corr_sample_period_sec,
-                    corr_now_lo,
-                    cps,
-                    &fault,
-                ) {
-                    active = true;
-                }
-            }
-
-            let (p_end, v_end, p_sample_start) = {
+            let (p_end, v_end, p_sample_start, overlay_just_armed) = {
                 let Some(axis) = self.stepping_axes.get_mut(i).and_then(|s| s.as_mut()) else {
                     continue;
                 };
                 let cps = self.cycles_per_second;
                 let fault = SharedFaultSink { shared };
-                match crate::motion_core::get_position_and_velocity(
+                let mut just_armed = false;
+                match crate::motion_core::get_position_and_velocity_armed(
                     &mut axis.armed,
                     &mut axis.ring,
                     storage,
@@ -445,20 +328,31 @@ impl Engine {
                     cps,
                     i,
                     &fault,
+                    &mut just_armed,
                 ) {
                     Some((p_end, v_end)) => {
                         active = true;
-                        let p_sample_start = axis.p_prev;
-                        axis.p_prev = p_end;
-                        axis.v_prev = v_end;
-                        (p_end, v_end, p_sample_start)
+                        let is_overlay = axis.ring.peek(storage).map_or(0, |p| p.motor_mask) != 0;
+                        if is_overlay {
+                            if just_armed {
+                                axis.overlay_last_p = 0.0;
+                            }
+                            let p_sample_start = axis.overlay_last_p;
+                            axis.overlay_last_p = p_end;
+                            (p_end, v_end, p_sample_start, just_armed)
+                        } else {
+                            let p_sample_start = axis.p_prev;
+                            axis.p_prev = p_end;
+                            axis.v_prev = v_end;
+                            (p_end, v_end, p_sample_start, false)
+                        }
                     }
                     None => {
                         if !idle_phase_slew_pending(axis) {
                             continue;
                         }
                         active = true;
-                        (axis.p_prev, 0.0, axis.p_prev)
+                        (axis.p_prev, 0.0, axis.p_prev, false)
                     }
                 }
             };
@@ -468,10 +362,12 @@ impl Engine {
                 let Some(axis) = self.stepping_axes.get_mut(i).and_then(|s| s.as_mut()) else {
                     continue;
                 };
+                let active_mask = axis.ring.peek(storage).map_or(0, |p| p.motor_mask);
                 let queue_ptr = get_queue(i);
                 dispatch_axis(
                     i,
                     axis,
+                    active_mask,
                     queue_ptr,
                     shared,
                     p_end,
@@ -480,12 +376,13 @@ impl Engine {
                     sample_period_sec,
                     now_lo,
                     self.cycles_per_second,
+                    overlay_just_armed,
                 );
             }
 
             #[cfg(not(feature = "motion-module-stepper"))]
             {
-                let _ = (p_end, v_end, p_sample_start);
+                let _ = (p_end, v_end, p_sample_start, overlay_just_armed);
             }
         }
 
@@ -500,6 +397,15 @@ impl Engine {
             }
         }
         out
+    }
+
+    pub fn armed_window(&self, axis_idx: usize) -> Option<(u64, u64)> {
+        self.stepping_axes
+            .get(axis_idx)?
+            .as_ref()?
+            .armed
+            .as_ref()
+            .map(|p| (p.piece_start_cycles, p.piece_end_cycles))
     }
 
     pub fn occupancy_counts(&self) -> [u32; MAX_AXES] {
@@ -643,6 +549,97 @@ impl Engine {
         -1
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn resonance_buzz(
+        &mut self,
+        shared: &SharedState,
+        axis_mask: u8,
+        sign_mask: u8,
+        freq_start_millihz: u32,
+        freq_end_millihz: u32,
+        amplitude_nm: u32,
+        duration_ms: u32,
+        ramp_ms: u32,
+        now_cycle: u32,
+    ) -> i32 {
+        let rc = self.buzz.arm(
+            self.num_axes,
+            axis_mask,
+            sign_mask,
+            freq_start_millihz,
+            freq_end_millihz,
+            amplitude_nm,
+            duration_ms,
+            ramp_ms,
+        );
+        if rc != 0 {
+            return rc;
+        }
+        if !self.buzz.has_pending() {
+            return 0;
+        }
+        let excitations = self.buzz.take_excitations();
+        if excitations.is_empty() {
+            for i in 0..crate::step_queue::N_AXIS_STEP_QUEUES {
+                crate::buzz_stream::clear_axis(i);
+            }
+            return 0;
+        }
+        for ex in &excitations {
+            if ex.axis_idx >= crate::step_queue::N_AXIS_STEP_QUEUES {
+                crate::fault_helpers::raise_jog_parameters_invalid(shared);
+                return -1;
+            }
+            let Some(axis) = self.stepping_axes.get(ex.axis_idx).and_then(|s| s.as_ref()) else {
+                continue;
+            };
+            let axis_idle = axis.armed.is_none() && axis.ring.is_empty();
+            if !axis_idle {
+                crate::fault_helpers::raise_buzz_axis_conflict(shared, ex.axis_idx);
+                return -1;
+            }
+        }
+        let cps = f64::from(self.cycles_per_second);
+        for ex in &excitations {
+            let Some(axis) = self.stepping_axes.get(ex.axis_idx).and_then(|s| s.as_ref()) else {
+                continue;
+            };
+            let params = ex.into_params(
+                f64::from(axis.p_prev),
+                f64::from(axis.microstep_distance),
+                cps,
+                now_cycle,
+            );
+            if axis.mode.load(Ordering::Acquire) == StepMode::Phase as u8 {
+                let cfg = crate::buzz_xdirect::XdirectConfig::new(
+                    axis.microstep_distance,
+                    crate::buzz_xdirect::DEFAULT_XDIRECT_UPDATE_HZ,
+                );
+                crate::buzz_stream::arm_axis_xdirect(ex.axis_idx, params, cfg);
+            } else if params.mu != 0.0 {
+                crate::buzz_stream::arm_axis_sweep(ex.axis_idx, params);
+            } else {
+                crate::buzz_stream::arm_axis(ex.axis_idx, params);
+            }
+        }
+        #[cfg(not(any(test, feature = "host")))]
+        #[allow(unsafe_code)]
+        unsafe {
+            crate::buzz_stream::refill_foreground_all(
+                now_cycle,
+                crate::step_queue::queue_for_axis,
+                crate::dispatch_stepper::kick_per_axis_timer_foreground,
+            );
+        }
+        0
+    }
+
+    pub fn emit_xdirect_buzz(&self, axis_idx: usize, offset_steps: i32, shared: &SharedState) {
+        if let Some(Some(axis)) = self.stepping_axes.get(axis_idx) {
+            crate::dispatch_stepper::write_phase_coils(axis_idx, axis, shared, offset_steps);
+        }
+    }
+
     pub fn phase_jog_to(
         &self,
         shared: &SharedState,
@@ -694,13 +691,6 @@ impl Engine {
                 axis.ring.advance_counter();
             }
             axis.armed = None;
-            while axis.correction_ring.front_slot().is_some() {
-                axis.correction_ring.advance_counter();
-            }
-            axis.correction_armed = None;
-            axis.correction_motor_idx = crate::stepping_state::CORRECTION_MOTOR_NONE;
-            axis.correction_last_step_count = 0;
-            axis.correction_p_prev = 0.0;
             let axis_pos_mm = motor_positions.get(i).copied().unwrap_or(0.0);
             let microstep_distance = axis.microstep_distance;
             if !microstep_distance.is_finite() || microstep_distance <= 0.0 {
@@ -720,26 +710,11 @@ impl Engine {
         }
     }
 
-    pub fn debug_steps_per_mm(&self, i: usize) -> f32 {
-        self.step_state
+    pub fn motor_state(&self, i: usize) -> Option<(f32, f32)> {
+        self.stepping_axes
             .get(i)
-            .map(|s| s.debug_steps_per_mm())
-            .unwrap_or(0.0)
-    }
-
-    pub fn debug_accumulator(&self, i: usize) -> f64 {
-        self.step_state
-            .get(i)
-            .map(|s| s.debug_accumulator())
-            .unwrap_or(0.0)
-    }
-
-    pub fn debug_last_motor(&self, i: usize) -> f32 {
-        self.last_motors.get(i).copied().unwrap_or(0.0)
-    }
-
-    pub fn debug_last_timing(&self) -> (u64, u64, u64) {
-        (0, 0, 0)
+            .and_then(|s| s.as_ref())
+            .map(|axis| (axis.p_prev, axis.v_prev))
     }
 
     pub fn runtime_force_idle(&mut self, shared: &SharedState) {
@@ -750,7 +725,6 @@ impl Engine {
             if let Some(axis) = axis_opt.as_mut() {
                 axis.reset_isr_cache();
                 axis.ring.drain();
-                axis.correction_ring.drain();
             }
         }
         self.last_motors = [0.0; MAX_AXES];
@@ -785,13 +759,6 @@ impl Engine {
             .get(axis_idx)
             .copied()
             .unwrap_or(core::ptr::null_mut())
-    }
-
-    #[cfg(any(test, feature = "host"))]
-    pub fn debug_current_is_some(&self) -> bool {
-        self.stepping_axes
-            .iter()
-            .any(|a| a.as_ref().map_or(false, |ax| ax.armed.is_some()))
     }
 }
 

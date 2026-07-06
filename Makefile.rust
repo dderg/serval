@@ -1,0 +1,69 @@
+# Makefile.rust — build the PyO3 motion-engine module.
+#
+# Builds the Rust cdylib and copies it to klippy/_motion_engine.so so
+# that klippy can import it as a normal Python extension module.  Python
+# requires the .so extension on all platforms; on macOS the Rust toolchain
+# produces a .dylib which we rename on copy.
+#
+# Usage:
+#   make -f Makefile.rust motion-engine
+#   make -f Makefile.rust clean-motion-engine
+
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+  MOTION_ENGINE_EXT = dylib
+else
+  MOTION_ENGINE_EXT = so
+endif
+
+MOTION_ENGINE_SRC  = rust/target/release/lib_motion_engine.$(MOTION_ENGINE_EXT)
+MOTION_ENGINE_DEST = klippy/_motion_engine.so
+
+# rm before cp: overwriting the existing inode in place invalidates the
+# dylib's ad-hoc code signature on macOS and the kernel SIGKILLs every
+# process that imports it; a fresh inode keeps the linker's signature valid.
+motion-engine:
+	cd rust && cargo build -p motion-engine --release --features extension-module
+	rm -f $(MOTION_ENGINE_DEST)
+	cp $(MOTION_ENGINE_SRC) $(MOTION_ENGINE_DEST)
+
+# Same module under the `snapshot` cargo profile: float-identical output,
+# much faster edit-rebuild cycle (no fat LTO, parallel codegen, incremental).
+# The snapshot test loop uses this target.
+MOTION_ENGINE_FAST_SRC = rust/target/snapshot/lib_motion_engine.$(MOTION_ENGINE_EXT)
+
+motion-engine-fast:
+	cd rust && cargo build -p motion-engine --profile snapshot --features extension-module
+	rm -f $(MOTION_ENGINE_DEST)
+	cp $(MOTION_ENGINE_FAST_SRC) $(MOTION_ENGINE_DEST)
+
+clean-motion-engine:
+	rm -f $(MOTION_ENGINE_DEST)
+	cd rust && cargo clean -p motion-engine
+
+# Hardware EtherCAT endpoint — build.rs compiles csrc/libecrt_igh.c and links the
+# IgH (EtherLab) kernel master via libethercat under --features hw; build on the
+# Pi. The full link runs only here (libethercat is bench-only), but CI
+# compile-checks this path via `scripts/ci.sh rust-ethercat-hw` (cargo check
+# against the csrc/ci-igh stub header). IGH_DIR (headers under include/) defaults
+# to /opt/etherlab and IGH_LIB_DIR to $IGH_DIR/lib in build.rs, so no env is
+# needed for the standard bench layout.
+ethercat-endpoint-hw:
+	cd rust && cargo build -p ethercat-rt --features hw --bin ethercat-rt --release
+
+# Capabilities so the endpoint runs unprivileged (raw socket, RT sched, mlockall).
+# sudo, once per rebuild of the binary. Not run in CI.
+setcap-ethercat:
+	sudo setcap cap_net_raw,cap_sys_nice,cap_ipc_lock+ep rust/target/release/ethercat-rt
+
+ethercat-stub:
+	cd rust && cargo build -p ethercat-rt --bin ethercat-rt-stub --release
+
+# Offline dynamics fitter, run on the host at SERVO_FIT_DYNAMICS time (not part
+# of the runtime). Built here so a capture-format change can't leave a stale
+# binary behind a cryptic MissingColumn error.
+servo-ident:
+	cd rust && cargo build -p servo-ident --release
+
+.PHONY: motion-engine motion-engine-fast clean-motion-engine \
+	ethercat-endpoint-hw setcap-ethercat ethercat-stub servo-ident

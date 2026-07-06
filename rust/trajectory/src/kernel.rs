@@ -1,10 +1,10 @@
 use nurbs::algebra::PiecewisePolynomialKernel;
+use nurbs::bezier::BezierPiece;
 
+#[inline(never)]
 fn build_bell_kernel(t_sm: f64) -> PiecewisePolynomialKernel<f64> {
     let h = t_sm / 2.0;
     let c = 15.0 / (16.0 * h.powi(5));
-    // w(t) = c·(h² − t²)² = c·h⁴ − 2c·h²·t² + c·t⁴
-    // Absolute monomial basis: coeffs[k] is the coefficient of t^k.
     let coeffs = vec![
         c * h.powi(4),    // t^0
         0.0,              // t^1
@@ -23,16 +23,25 @@ pub fn build_smooth_mzv_kernel(t_sm: f64) -> PiecewisePolynomialKernel<f64> {
     build_bell_kernel(t_sm)
 }
 
-impl crate::AxisShaper {
-    pub fn to_kernel(&self) -> Option<PiecewisePolynomialKernel<f64>> {
-        match self {
-            Self::SmoothZv { frequency_hz } => Some(build_smooth_zv_kernel(0.8025 / frequency_hz)),
-            Self::SmoothMzv { frequency_hz } => {
-                Some(build_smooth_mzv_kernel(0.95625 / frequency_hz))
-            }
-            Self::Passthrough => None,
-        }
-    }
+pub fn build_smooth_triangle_kernel(smooth_time: f64) -> PiecewisePolynomialKernel<f64> {
+    assert!(
+        smooth_time > 0.0,
+        "build_smooth_triangle_kernel requires smooth_time > 0, got {smooth_time}"
+    );
+    let hst = smooth_time / 2.0;
+    let inv_hst2 = 1.0 / (hst * hst);
+    let rising = BezierPiece {
+        u_start: -hst,
+        u_end: 0.0,
+        coeffs: vec![0.0, inv_hst2],
+    };
+    let falling = BezierPiece {
+        u_start: 0.0,
+        u_end: hst,
+        coeffs: vec![1.0 / hst, -inv_hst2],
+    };
+    PiecewisePolynomialKernel::from_pieces(vec![rising, falling])
+        .expect("triangle kernel pieces are contiguous by construction")
 }
 
 #[cfg(test)]

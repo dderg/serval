@@ -1,6 +1,7 @@
 // Linux-host stubs for the diag/fault-handler API declared in
-// src/generic/fault_handler.h. The real implementation in
-// src/generic/fault_handler.c is Cortex-M / STM32 specific (custom
+// src/generic/fault_handler.h. The real implementation, split across
+// src/generic/fault_capture.c, diag_counters.c, diag_ring.c,
+// diag_boot_report.c and diag_emit.c, is Cortex-M / STM32 specific (custom
 // link sections, SCB cache ops, exception handlers) and cannot be
 // compiled for the Linux MCU build. The host sim doesn't need the
 // wedge counters or fault-record persistence — provide no-ops so
@@ -106,7 +107,7 @@ void diag_record_engine_xition(uint8_t prev, uint8_t cur,
 // ring. The Linux MCU has no persisted crash-diag RAM (no NOLOAD section that
 // survives a reset, no BKPSRAM), so there is nothing to replay — no-op stubs.
 // Referenced unconditionally from src/stepper.c (configure-axis "runtime ready"
-// path and the kalico_diag_dump command), so they must link.
+// path and the runtime_diag_dump command), so they must link.
 void kalico_diag_emit_prior_crash(void)
 {
 }
@@ -115,56 +116,42 @@ void kalico_diag_emit_live(void)
 {
 }
 
-void diag_take_snapshot(struct diag_snapshot *s)
-{
-    if (s) {
-        for (uint32_t *p = (uint32_t *)s;
-             p < (uint32_t *)(s + 1); p++) {
-            *p = 0;
-        }
-    }
-}
-
-void diag_snapshot_otg_regs(uint32_t gintmsk, uint32_t gintsts)
-{
-    (void)gintmsk; (void)gintsts;
-}
-
-void diag_snapshot_out_ep(uint32_t doepctl, uint32_t doeptsiz, uint32_t doepint)
-{
-    (void)doepctl; (void)doeptsiz; (void)doepint;
-}
-
 void diag_note_dispatch(uint32_t func, uint32_t addr)
 {
     (void)func; (void)addr;
 }
 
-#define DIAG_GET_STUB(name) \
-    uint32_t diag_get_##name(void) { return 0; }
+void diag_note_task_enter(uint32_t func)
+{
+    (void)func;
+}
 
-DIAG_GET_STUB(otg_rxflvl)
-DIAG_GET_STUB(otg_iepint)
-DIAG_GET_STUB(otg_other)
-DIAG_GET_STUB(otg_other_sts)
-DIAG_GET_STUB(notify_bulk_out)
-DIAG_GET_STUB(task_invoke)
-DIAG_GET_STUB(read_zero)
-DIAG_GET_STUB(read_data)
-DIAG_GET_STUB(otg_gintmsk_now)
-DIAG_GET_STUB(otg_gintsts_now)
-DIAG_GET_STUB(out_ep_doepctl)
-DIAG_GET_STUB(out_ep_doeptsiz)
-DIAG_GET_STUB(out_ep_doepint)
-DIAG_GET_STUB(enable_rx_n)
-DIAG_GET_STUB(enable_rx_rearm)
-DIAG_GET_STUB(peek_empty)
-DIAG_GET_STUB(peek_data)
-DIAG_GET_STUB(tim5_count)
-DIAG_GET_STUB(tx_drops_kalico)
-DIAG_GET_STUB(tx_drops_klipper)
-DIAG_GET_STUB(rt_tick_count)
-DIAG_GET_STUB(rt_tick_cycles_max)
+void diag_note_task_loop_end(void)
+{
+}
+
+void diag_note_msg_enter(uint32_t kind, uint32_t head)
+{
+    (void)kind; (void)head;
+}
+
+void diag_note_msg_exit(void)
+{
+}
+
+void diag_note_timer_too_close(uint32_t caller, uint32_t func, uint32_t late)
+{
+    (void)caller; (void)func; (void)late;
+}
+
+void diag_note_shutdown_reset(void)
+{
+}
+
+void diag_note_demux(uint32_t backlog, uint32_t msgs)
+{
+    (void)backlog; (void)msgs;
+}
 
 // Linux build doesn't have armcm_timer.c or mpu_protect.c — provide
 // stubs for symbols referenced by sched.c.

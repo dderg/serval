@@ -9,12 +9,25 @@ import threading
 
 import serial
 
-from . import chelper, msgproto, util
+from . import chelper, msgproto, structured_log, util
 from .extras.danger_options import get_danger_options
 
 
 class error(Exception):
     pass
+
+
+# MCU timers compare 32-bit clocks: a waketime more than 2^31 ticks ahead of
+# the MCU's now reads as the past and trips "Timer too close".  Commands are
+# held host-side until within 2^30 ticks, deep inside the half-range on every
+# supported clock frequency.
+MCU_TIMER_HORIZON = 1 << 30
+
+# Engine-path commands carrying a near-term reqclock (heater PWM schedules
+# ~0.3 s ahead) die as "Timer too close" if delivery eats the margin.  Sends
+# whose remaining margin is already below this threshold get logged so a
+# late-arrival crash can be split into generated-late vs delivered-late.
+DEADLINE_MARGIN_WARN = 0.150
 
 
 class SerialReader:
@@ -25,7 +38,7 @@ class SerialReader:
         # Serial port
         self.serial_dev = None
         self._event_poller_timer = None
-        self._bridge_detached = False
+        self._engine_detached = False
         self.msgparser = msgproto.MessageParser(warn_prefix=warn_prefix)
         self.ffi_main, self.ffi_lib = chelper.get_ffi()
         self.serialqueue = None
@@ -70,130 +83,145 @@ class SerialReader:
                     "%sException in serial callback", self.warn_prefix
                 )
 
-    def _bridge_event_poller(self, eventtime):
+    def _engine_handle_status_event(self, ev):
+        name = "kalico_status_v6"
+        prev = getattr(self, "_last_status_state", None)
+        cur = (ev.get("engine_status"), ev.get("last_fault"))
+        if prev != cur:
+            self._last_status_state = cur
+            logging.info(
+                "%s[engine-async] kalico_status_v6 "
+                "engine_status=%s last_fault=%s",
+                self.warn_prefix,
+                cur[0],
+                cur[1],
+            )
+        return name
+
+    def _engine_handle_output_event(self, ev, now):
+        ev["#name"] = "#output"
+        ev["#sent_time"] = now
+        ev["#receive_time"] = now
+        ev["#msg"] = ev.get("msg", "")
+        with self.lock:
+            hdl = self.handlers.get(("#output", None), self.handle_default)
+        try:
+            hdl(ev)
+        except Exception:
+            logging.exception(
+                "%sException in engine output callback",
+                self.warn_prefix,
+            )
+
+    def _engine_handle_response_event(self, ev, now):
+        name = ev.get("name", "")
+        if name == "trsync_state":
+            logging.info(
+                "%s[engine-poller] trsync_state response: "
+                "oid=%s can_trigger=%s trigger_reason=%s",
+                self.warn_prefix,
+                ev.get("oid"),
+                ev.get("can_trigger"),
+                ev.get("trigger_reason"),
+            )
+        ev["#name"] = name
+        # Use CLOCK_MONOTONIC_RAW stamps when the Rust engine supplied
+        # them (non-zero); this happens for "clock" responses dispatched
+        # via engine_get_clock_async so _handle_clock sees honest RTTs.
+        sent_raw = ev.get("#sent_time_raw", 0.0)
+        recv_raw = ev.get("#receive_time_raw", 0.0)
+        if sent_raw != 0.0 and recv_raw != 0.0:
+            ev["#sent_time"] = sent_raw
+            ev["#receive_time"] = recv_raw
+        elif name == "clock":
+            # A clock sample without wire stamps (missed interception,
+            # duplicate, late arrival) must be DROPPED by clocksync —
+            # fabricating sent==recv here would feed half_rtt=0 into
+            # min_half_rtt and permanently bias the estimate.
+            # _handle_clock's `if not sent_time: return` does the drop.
+            ev["#sent_time"] = 0.0
+            ev["#receive_time"] = now
+        else:
+            ev["#sent_time"] = now
+            ev["#receive_time"] = now
+        oid = ev.get("oid")
+        with self.lock:
+            hdl = (
+                self.handlers.get((name, oid))
+                or self.handlers.get((name, None))
+                or self.handle_default
+            )
+            if name == "trsync_state":
+                logging.info(
+                    "%s[engine-poller] trsync_state handler "
+                    "lookup: key=(%s,%s) found=%s",
+                    self.warn_prefix,
+                    name,
+                    oid,
+                    hdl is not self.handle_default,
+                )
+        try:
+            hdl(ev)
+        except Exception:
+            logging.exception(
+                "%sException in engine response callback (name=%s, oid=%s)",
+                self.warn_prefix,
+                name,
+                oid,
+            )
+
+    def _engine_dispatch_named_event(self, ev, name, now):
+        ev["#name"] = name
+        ev["#sent_time"] = now
+        ev["#receive_time"] = now
+        hdl_key = (name, None)
+        with self.lock:
+            hdl = self.handlers.get(hdl_key, None)
+        if hdl is None:
+            hdl = self.handle_default
+        try:
+            hdl(ev)
+        except Exception:
+            logging.exception(
+                "%sException in engine event callback", self.warn_prefix
+            )
+
+    def _engine_event_poller(self, eventtime):
         if self.mcu is None:
             return self.reactor.NEVER
-        bridge = self.mcu._motion_bridge
-        handle = self.mcu._bridge_handle
+        engine = self.mcu._motion_engine
+        handle = self.mcu._engine_handle
         if handle is None:
             return self.reactor.NEVER
         now = eventtime
         for _ in range(32):
-            ev = bridge.take_runtime_event(handle)
+            try:
+                ev = engine.take_runtime_event(handle)
+            except RuntimeError as e:
+                if not self._is_engine_transport_drop(e):
+                    raise
+                break
             if ev is None:
                 break
             ev_type = ev.get("type")
             if ev_type == "status":
-                name = "kalico_status_v6"
-                prev = getattr(self, "_last_status_state", None)
-                cur = (ev.get("engine_status"), ev.get("last_fault"))
-                if prev != cur:
-                    self._last_status_state = cur
-                    logging.info(
-                        "%s[bridge-async] kalico_status_v6 "
-                        "engine_status=%s last_fault=%s",
-                        self.warn_prefix,
-                        cur[0],
-                        cur[1],
-                    )
+                name = self._engine_handle_status_event(ev)
             elif ev_type == "credit_freed":
                 # Handled directly by Rust EventDispatcher; skip Python routing.
                 continue
             elif ev_type == "fault":
-                name = "kalico_fault"
+                name = "runtime_fault"
             elif ev_type == "endstop_tripped":
                 name = "kalico_endstop_tripped"
             elif ev_type == "output":
-                name = "#output"
-                ev["#name"] = "#output"
-                ev["#sent_time"] = now
-                ev["#receive_time"] = now
-                ev["#msg"] = ev.get("msg", "")
-                with self.lock:
-                    hdl = self.handlers.get(
-                        ("#output", None), self.handle_default
-                    )
-                try:
-                    hdl(ev)
-                except Exception:
-                    logging.exception(
-                        "%sException in bridge output callback",
-                        self.warn_prefix,
-                    )
+                self._engine_handle_output_event(ev, now)
                 continue
             elif ev_type == "response":
-                name = ev.get("name", "")
-                if name == "trsync_state":
-                    logging.info(
-                        "%s[bridge-poller] trsync_state response: "
-                        "oid=%s can_trigger=%s trigger_reason=%s",
-                        self.warn_prefix,
-                        ev.get("oid"),
-                        ev.get("can_trigger"),
-                        ev.get("trigger_reason"),
-                    )
-                ev["#name"] = name
-                # Use CLOCK_MONOTONIC_RAW stamps when the Rust bridge supplied
-                # them (non-zero); this happens for "clock" responses dispatched
-                # via bridge_get_clock_async so _handle_clock sees honest RTTs.
-                sent_raw = ev.get("#sent_time_raw", 0.0)
-                recv_raw = ev.get("#receive_time_raw", 0.0)
-                if sent_raw != 0.0 and recv_raw != 0.0:
-                    ev["#sent_time"] = sent_raw
-                    ev["#receive_time"] = recv_raw
-                elif name == "clock":
-                    # A clock sample without wire stamps (missed interception,
-                    # duplicate, late arrival) must be DROPPED by clocksync —
-                    # fabricating sent==recv here would feed half_rtt=0 into
-                    # min_half_rtt and permanently bias the estimate.
-                    # _handle_clock's `if not sent_time: return` does the drop.
-                    ev["#sent_time"] = 0.0
-                    ev["#receive_time"] = now
-                else:
-                    ev["#sent_time"] = now
-                    ev["#receive_time"] = now
-                oid = ev.get("oid")
-                with self.lock:
-                    hdl = (
-                        self.handlers.get((name, oid))
-                        or self.handlers.get((name, None))
-                        or self.handle_default
-                    )
-                    if name == "trsync_state":
-                        logging.info(
-                            "%s[bridge-poller] trsync_state handler "
-                            "lookup: key=(%s,%s) found=%s",
-                            self.warn_prefix,
-                            name,
-                            oid,
-                            hdl is not self.handle_default,
-                        )
-                try:
-                    hdl(ev)
-                except Exception:
-                    logging.exception(
-                        "%sException in bridge response callback (name=%s, oid=%s)",
-                        self.warn_prefix,
-                        name,
-                        oid,
-                    )
+                self._engine_handle_response_event(ev, now)
                 continue
             else:
                 continue
-            ev["#name"] = name
-            ev["#sent_time"] = now
-            ev["#receive_time"] = now
-            hdl_key = (name, None)
-            with self.lock:
-                hdl = self.handlers.get(hdl_key, None)
-            if hdl is None:
-                hdl = self.handle_default
-            try:
-                hdl(ev)
-            except Exception:
-                logging.exception(
-                    "%sException in bridge event callback", self.warn_prefix
-                )
+            self._engine_dispatch_named_event(ev, name, now)
         return eventtime + 0.001
 
     def _error(self, msg, *params):
@@ -383,22 +411,22 @@ class SerialReader:
 
     def connect_pipe(self, filename, baud=0):
         logging.info("%sStarting connect", self.warn_prefix)
-        bridge = self.mcu._motion_bridge
+        engine = self.mcu._motion_engine
         # claim_mcu may not have been called yet (it normally happens in
         # _mcu_identify after connect_pipe returns). Allocate the handle
         # here so attach_serial has something to bind to; the later guard
         # in _mcu_identify will skip the second claim_mcu call.
-        if self.mcu._bridge_handle is None:
-            self.mcu._bridge_handle = bridge.claim_mcu(
+        if self.mcu._engine_handle is None:
+            self.mcu._engine_handle = engine.claim_mcu(
                 self.mcu._name,
                 filename,
                 baud,
             )
-        handle = self.mcu._bridge_handle
+        handle = self.mcu._engine_handle
         klippy_non_critical = bool(getattr(self.mcu, "is_non_critical", False))
         expect_native = bool(getattr(self.mcu, "_expect_native", True))
         logging.info(
-            "%sbridge attach_serial %s (handle=%s, non_critical=%s,"
+            "%sengine attach_serial %s (handle=%s, non_critical=%s,"
             " expect_native=%s)",
             self.warn_prefix,
             filename,
@@ -406,7 +434,7 @@ class SerialReader:
             klippy_non_critical,
             expect_native,
         )
-        bridge.attach_serial(
+        engine.attach_serial(
             handle,
             filename,
             baud,
@@ -414,9 +442,9 @@ class SerialReader:
             klippy_non_critical=klippy_non_critical,
             expect_native=expect_native,
         )
-        identify_data = bridge.get_identify_data(handle)
+        identify_data = engine.get_identify_data(handle)
         logging.info(
-            "%sbridge identify done (%d bytes)",
+            "%sengine identify done (%d bytes)",
             self.warn_prefix,
             len(identify_data),
         )
@@ -426,7 +454,7 @@ class SerialReader:
         self.register_response(self.handle_unknown, "#unknown")
         self.register_response(lambda params: None, "kalico_status_v6")
         self._event_poller_timer = self.reactor.register_timer(
-            self._bridge_event_poller, self.reactor.NOW
+            self._engine_event_poller, self.reactor.NOW
         )
 
     def connect_uart(self, serialport, baud, rts=True):
@@ -453,11 +481,11 @@ class SerialReader:
         self.default_cmd_queue = self.alloc_command_queue()
 
     def set_clock_est(self, freq, conv_time, conv_clock, last_clock):
-        if self.mcu._motion_bridge is None:
+        if self.mcu._motion_engine is None:
             return
         host_now_raw = self.reactor.monotonic()
-        self.mcu._motion_bridge.set_clock_est(
-            self.mcu._bridge_handle,
+        self.mcu._motion_engine.set_clock_est(
+            self.mcu._engine_handle,
             float(freq),
             float(conv_time),
             int(conv_clock),
@@ -474,28 +502,28 @@ class SerialReader:
         # Post-disconnect sends are defined no-ops, mirroring mainline's
         # `if self.serialqueue is None: return` contract — klippy components
         # legitimately fire commands during the disconnect dispatch.
-        self._bridge_detached = True
-        # Release the serial port through the bridge so firmware_restart's
+        self._engine_detached = True
+        # Release the serial port through the engine so firmware_restart's
         # arduino_reset() can open it for the DTR toggle.  Mirrors
         # mainline's disconnect() which closes the FD before the reset.
-        bridge = getattr(self.mcu, "_motion_bridge", None)
-        handle = getattr(self.mcu, "_bridge_handle", None)
-        if bridge is not None and handle is not None:
+        engine = getattr(self.mcu, "_motion_engine", None)
+        handle = getattr(self.mcu, "_engine_handle", None)
+        if engine is not None and handle is not None:
             # Fail loud: a silently-swallowed detach failure masks exactly the
             # class of bug (leaked fd holding the pts in exclusive mode) that
             # causes the next process's attach_serial to spin on EBUSY. Log for
             # context, then re-raise so the failure surfaces.
             try:
-                bridge.detach_serial(handle)
+                engine.detach_serial(handle)
             except Exception:
-                logging.exception("bridge detach_serial failed")
+                logging.exception("engine detach_serial failed")
                 raise
         for pn in self.pending_notifications.values():
             pn.complete(None)
         self.pending_notifications.clear()
 
     def stats(self, eventtime):
-        return "bridge_mode=1"
+        return "motion_engine=1"
 
     def get_reactor(self):
         return self.reactor
@@ -521,26 +549,36 @@ class SerialReader:
         if self.mcu is not None and self.mcu.non_critical_disconnected:
             self._error("non-critical MCU is disconnected")
 
+    def _is_engine_transport_drop(self, exc):
+        if "transport closed" not in str(exc):
+            return False
+        self._engine_detached = True
+        return True
+
     # Command sending
-    def bridge_get_clock_async(self):
-        """Send a get_clock request through the bridge with RAW timestamp
+    def engine_get_clock_async(self):
+        """Send a get_clock request through the engine with RAW timestamp
         capture.  Used by clocksync._get_clock_event to replace the no-op
         raw_send path.  The response arrives via take_runtime_event as a
         PassthroughResponse with sent_time_raw/recv_time_raw filled in.
 
         This no-arg form is the hasattr target in clocksync._get_clock_event
-        (``hasattr(self.serial, "bridge_get_clock_async")``); it resolves the
-        MCU handle internally.  MotionBridgeWrapper also exposes a
-        bridge_get_clock_async(handle) method — passing a wrapper object where
+        (``hasattr(self.serial, "engine_get_clock_async")``); it resolves the
+        MCU handle internally.  MotionEngineWrapper also exposes a
+        engine_get_clock_async(handle) method — passing a wrapper object where
         a SerialReader is expected would TypeError at the hasattr call site
         because the wrapper's method requires an explicit handle argument."""
-        bridge = getattr(self.mcu, "_motion_bridge", None)
-        if bridge is None:
+        engine = getattr(self.mcu, "_motion_engine", None)
+        if engine is None:
             return
-        handle = self.mcu._bridge_handle
+        handle = self.mcu._engine_handle
         if handle is None:
             return
-        bridge.bridge_get_clock_async(handle)
+        try:
+            engine.engine_get_clock_async(handle)
+        except RuntimeError as e:
+            if not self._is_engine_transport_drop(e):
+                raise
 
     def raw_send(self, cmd, minclock, reqclock, cmd_queue):
         self._check_noncritical_disconnected()
@@ -575,12 +613,22 @@ class SerialReader:
                 )
 
     def send(self, msg, minclock=0, reqclock=0):
-        bridge = getattr(self.mcu, "_motion_bridge", None)
-        if bridge is not None:
-            if self._bridge_detached:
+        engine = getattr(self.mcu, "_motion_engine", None)
+        if engine is not None:
+            if self._engine_detached:
                 return
-            handle = self.mcu._bridge_handle
-            bridge.bridge_send(handle, msg)
+            if reqclock and self._held_until_timer_horizon(
+                msg, minclock, reqclock
+            ):
+                return
+            if reqclock:
+                self._warn_if_deadline_margin_thin(msg, reqclock)
+            handle = self.mcu._engine_handle
+            try:
+                engine.engine_send(handle, msg)
+            except RuntimeError as e:
+                if not self._is_engine_transport_drop(e):
+                    raise
         elif self.serialqueue is not None:
             cmd = self.msgparser.create_command(msg)
             self.ffi_lib.serialqueue_send(
@@ -593,17 +641,49 @@ class SerialReader:
                 0,
             )
 
-    def send_with_response(self, msg, response):
-        bridge = getattr(self.mcu, "_motion_bridge", None)
-        if bridge is not None:
-            if self._bridge_detached:
-                raise error("serial connection closed")
-            params = bridge.bridge_call(
-                self.mcu._bridge_handle,
-                msg,
-                response,
+    def _warn_if_deadline_margin_thin(self, msg, reqclock):
+        clocksync = self.mcu._clocksync
+        est_clock = clocksync.get_clock(self.reactor.monotonic())
+        margin = (reqclock - est_clock) / clocksync.mcu_freq
+        if margin < DEADLINE_MARGIN_WARN:
+            structured_log.event(
+                "mcu-comms",
+                "thin_deadline_margin",
+                level=logging.WARNING,
+                msg="engine-path command sent with thin clock margin",
+                command=msg.split()[0],
+                margin_s=margin,
             )
-            # Use CLOCK_MONOTONIC_RAW timestamps if the Rust bridge supplied them
+
+    def _held_until_timer_horizon(self, msg, minclock, reqclock):
+        clocksync = self.mcu._clocksync
+        est_clock = clocksync.get_clock(self.reactor.monotonic())
+        if reqclock - est_clock <= MCU_TIMER_HORIZON:
+            return False
+        release_systime = clocksync.estimate_clock_systime(
+            reqclock - MCU_TIMER_HORIZON
+        )
+        self.reactor.register_callback(
+            lambda et: self.send(msg, minclock, reqclock), release_systime
+        )
+        return True
+
+    def send_with_response(self, msg, response):
+        engine = getattr(self.mcu, "_motion_engine", None)
+        if engine is not None:
+            if self._engine_detached:
+                raise error("serial connection closed")
+            try:
+                params = engine.engine_call(
+                    self.mcu._engine_handle,
+                    msg,
+                    response,
+                )
+            except RuntimeError as e:
+                if not self._is_engine_transport_drop(e):
+                    raise
+                raise error("serial connection closed")
+            # Use CLOCK_MONOTONIC_RAW timestamps if the Rust engine supplied them
             # (non-zero means a real RTT was measured on the wire).  Fall back to
             # reactor.monotonic() only when both sides stamp the same instant (the
             # old behaviour, which gives half_rtt=0 and breaks min_half_rtt).
@@ -617,7 +697,7 @@ class SerialReader:
                 params["#sent_time"] = now
                 params["#receive_time"] = now
             return params
-        raise error("send_with_response requires motion bridge")
+        raise error("send_with_response requires motion engine")
 
     def alloc_command_queue(self):
         if self.serialqueue is not None:
@@ -629,7 +709,7 @@ class SerialReader:
 
     # Dumping debug lists
     def dump_debug(self):
-        return "SerialReader: bridge mode (no C serialqueue)"
+        return "SerialReader: engine mode (no C serialqueue)"
 
     # Default message handlers
     def _handle_unknown_init(self, params):

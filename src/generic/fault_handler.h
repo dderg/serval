@@ -27,8 +27,8 @@ extern "C" {
 #define RT_PHASE_GUARD         3
 #define RT_PHASE_TICK          4
 #define RT_PHASE_WALK          5
-#define RT_PHASE_MONOMIAL      6
-#define RT_PHASE_HORNER        7
+#define RT_PHASE_ARM           6
+#define RT_PHASE_CLENSHAW      7
 #define RT_PHASE_STEP_ENQ      8
 #define RT_PHASE_ISR_EXIT      9
 #define RT_PHASE_STEPOUT_ENTER 10
@@ -41,7 +41,7 @@ void diag_ring_push(uint8_t tag, uint32_t a, uint32_t b);
 // Call once from the post-host-connect path (host mcu-log hook must be up).
 void kalico_diag_emit_prior_crash(void);
 
-// On-demand live snapshot (KALICO_DIAG_DUMP). Foreground-only.
+// On-demand live snapshot (DIAG_DUMP). Foreground-only.
 void kalico_diag_emit_live(void);
 
 // event_tag=0 suppresses event emission (counters still update).
@@ -80,21 +80,6 @@ void diag_record_tx_drop_klipper(uint32_t max_size, uint32_t tpos);
 void diag_record_engine_xition(uint8_t prev, uint8_t cur,
                                uint32_t samples_taken);
 
-// Cycles are DWT cycles (520 MHz on H7); gaps are timer ticks (CONFIG_CLOCK_FREQ).
-struct diag_snapshot {
-    uint32_t tim5_n, tim5_total, tim5_max;
-    uint32_t otg_n,  otg_total,  otg_max;
-    uint32_t usb_out_calls, usb_out_max_gap;
-    uint32_t usb_in_calls,  usb_in_max_gap;
-    uint32_t runtime_drain_calls, runtime_drain_max_gap;
-    uint32_t runtime_status_calls, runtime_status_max_gap;
-    uint32_t tx_drops_kalico, tx_drops_klipper;
-    uint32_t ring_seq, ring_overflow;
-};
-
-// Resets per-interval max trackers; coherent under irq_save.
-void diag_take_snapshot(struct diag_snapshot *s);
-
 volatile uint32_t *diag_slot_otg_rxflvl(void);
 volatile uint32_t *diag_slot_otg_iepint(void);
 volatile uint32_t *diag_slot_otg_other(void);
@@ -104,39 +89,10 @@ volatile uint32_t *diag_slot_task_invoke(void);
 volatile uint32_t *diag_slot_read_zero(void);
 volatile uint32_t *diag_slot_read_data(void);
 
-void diag_snapshot_otg_regs(uint32_t gintmsk, uint32_t gintsts);
-
-uint32_t diag_get_otg_rxflvl(void);
-uint32_t diag_get_otg_iepint(void);
-uint32_t diag_get_otg_other(void);
-uint32_t diag_get_otg_other_sts(void);
-uint32_t diag_get_notify_bulk_out(void);
-uint32_t diag_get_task_invoke(void);
-uint32_t diag_get_read_zero(void);
-uint32_t diag_get_read_data(void);
-uint32_t diag_get_otg_gintmsk_now(void);
-uint32_t diag_get_otg_gintsts_now(void);
-
 volatile uint32_t *diag_slot_enable_rx(void);
 volatile uint32_t *diag_slot_enable_rx_rearm(void);
 volatile uint32_t *diag_slot_peek_empty(void);
 volatile uint32_t *diag_slot_peek_data(void);
-void diag_snapshot_out_ep(uint32_t doepctl, uint32_t doeptsiz, uint32_t doepint);
-uint32_t diag_get_out_ep_doepctl(void);
-uint32_t diag_get_out_ep_doeptsiz(void);
-uint32_t diag_get_out_ep_doepint(void);
-uint32_t diag_get_enable_rx_n(void);
-uint32_t diag_get_enable_rx_rearm(void);
-uint32_t diag_get_peek_empty(void);
-uint32_t diag_get_peek_data(void);
-
-uint32_t diag_get_tim5_count(void);
-
-uint32_t diag_get_rt_tick_count(void);
-uint32_t diag_get_rt_tick_cycles_max(void);
-
-uint32_t diag_get_tx_drops_kalico(void);
-uint32_t diag_get_tx_drops_klipper(void);
 
 #ifdef __cplusplus
 }

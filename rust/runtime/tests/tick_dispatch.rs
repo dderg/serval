@@ -13,6 +13,7 @@ fn make_stepper() -> StepperRef {
     StepperRef {
         stepper_oid: 0,
         position_count: AtomicI32::new(0),
+        overlay_step_frame: AtomicI32::new(0),
         tmc_cs_oid: None,
         last_coil_A: AtomicI16::new(0),
         last_coil_B: AtomicI16::new(0),
@@ -43,6 +44,7 @@ fn pulse_zero_motion_no_steps_scheduled() {
     dispatch_axis(
         0,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         0.0,
@@ -51,6 +53,7 @@ fn pulse_zero_motion_no_steps_scheduled() {
         25e-6,
         0,
         520_000_000.0,
+        /* overlay_just_armed */ false,
     );
 
     assert_eq!(q.tail, q.head);
@@ -68,6 +71,7 @@ fn pulse_positive_motion_enqueues_n_steps() {
     dispatch_axis(
         0,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         0.05,
@@ -76,6 +80,7 @@ fn pulse_positive_motion_enqueues_n_steps() {
         25e-6,
         1_000,
         520_000_000.0,
+        /* overlay_just_armed */ false,
     );
 
     assert_eq!(q.tail.wrapping_sub(q.head), 4);
@@ -96,6 +101,7 @@ fn pulse_partial_push_commits_position_count_for_pushed_steps() {
     dispatch_axis(
         0,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         0.05,
@@ -104,6 +110,7 @@ fn pulse_partial_push_commits_position_count_for_pushed_steps() {
         25e-6,
         1_000,
         520_000_000.0,
+        /* overlay_just_armed */ false,
     );
 
     assert_eq!(
@@ -138,6 +145,7 @@ fn pulse_queue_overflow_latches_fault() {
     dispatch_axis(
         2,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         0.0125,
@@ -146,6 +154,7 @@ fn pulse_queue_overflow_latches_fault() {
         25e-6,
         0,
         520_000_000.0,
+        /* overlay_just_armed */ false,
     );
 
     assert_eq!(
@@ -165,6 +174,7 @@ fn pulse_steps_per_sample_exceeded_hard_faults() {
     dispatch_axis(
         1,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         0.5,
@@ -173,6 +183,7 @@ fn pulse_steps_per_sample_exceeded_hard_faults() {
         25e-6,
         0,
         520_000_000.0,
+        /* overlay_just_armed */ false,
     );
 
     assert_eq!(
@@ -202,6 +213,7 @@ fn phase_mode_updates_coil_state_no_queue_writes() {
     dispatch_axis(
         0,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         256.0 * 0.0125,
@@ -210,6 +222,7 @@ fn phase_mode_updates_coil_state_no_queue_writes() {
         25e-6,
         0,
         520_000_000.0,
+        /* overlay_just_armed */ false,
     );
 
     assert_eq!(q.tail, q.head, "phase mode must not enqueue step pulses");
@@ -236,6 +249,7 @@ fn phase_mode_honors_phase_offset() {
     dispatch_axis(
         0,
         &mut axis,
+        0,
         q_ptr,
         &shared,
         256.0 * 0.0125,
@@ -244,6 +258,7 @@ fn phase_mode_honors_phase_offset() {
         25e-6,
         0,
         520_000_000.0,
+        /* overlay_just_armed */ false,
     );
 
     assert_eq!(

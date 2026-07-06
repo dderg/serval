@@ -1,0 +1,24 @@
+[package]
+name = "motion-pipeline"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "Pure streaming motion pipeline: fitter → planner → lowerer → shaper. Hardware-free stages shared by the motion engine and offline consumers."
+license.workspace = true
+
+[lib]
+name = "motion_pipeline"
+
+[dependencies]
+libm = { version = "0.2", default-features = false }
+geometry = { path = "../geometry" }
+trajectory = { path = "../trajectory" }
+nurbs = { path = "../nurbs", features = ["host"] }
+crossbeam-channel = "0.5"
+thiserror = { workspace = true }
+tracing = "0.1"
+libc = "0.2"
+
+[lints]
+workspace = true

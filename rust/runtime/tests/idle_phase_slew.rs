@@ -40,15 +40,7 @@ fn jog_slews_to_target_while_no_motion_is_armed() {
     let mut engine = make_engine_with_phase_axis();
     let mut q0 = StepQueue::new();
     install_queues(&mut engine, &mut q0);
-    let mut storage = vec![
-        PieceEntry {
-            start_time: 0,
-            coeffs: [0.0; 4],
-            duration: 0.0,
-            _reserved: 0
-        };
-        TOTAL_RING_PIECES
-    ];
+    let mut storage = vec![PieceEntry::zeroed(); TOTAL_RING_PIECES];
     let shared = SharedState::new();
     shared.phase_motor_count.store(1, Ordering::Release);
     shared.phase_slot_idx[0].store(0, Ordering::Release);
@@ -96,15 +88,7 @@ fn idle_pulse_axis_does_not_dispatch() {
     );
     let mut q0 = StepQueue::new();
     install_queues(&mut engine, &mut q0);
-    let mut storage = vec![
-        PieceEntry {
-            start_time: 0,
-            coeffs: [0.0; 4],
-            duration: 0.0,
-            _reserved: 0
-        };
-        TOTAL_RING_PIECES
-    ];
+    let mut storage = vec![PieceEntry::zeroed(); TOTAL_RING_PIECES];
     let shared = SharedState::new();
 
     let active = engine.tick(TICK_CYCLES, &shared, &mut storage);

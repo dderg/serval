@@ -1,16 +1,20 @@
 # Sim-only virtual-endstop provider exercising the Spec B remote-trigger
-# contract end to end: RemoteBridgeEndstop arming, trsync relay, terminal
+# contract end to end: RemoteMotionEndstop arming, trsync relay, terminal
 # reason verification, and the measured-position override. Reference
 # implementation for external-probe providers (Spec D).
 import logging
 
 from klippy import pins
-from klippy.bridge_endstop import RemoteBridgeEndstop
+from klippy.motion_endstop import RemoteMotionEndstop
 
 REASON_ENDSTOP_HIT = 1
 REASON_COMMS_TIMEOUT = 4
 
 MAX_TRIP_TO_STOP_TRAVEL = 0.5
+# The trip and stop positions are reconstructed independently through the
+# motion-history interpolation, so the trip can land a few µm past the stop
+# from float noise alone; only a gross negative indicates a clock-domain bug.
+MIN_TRIP_TO_STOP_TRAVEL = -0.01
 
 
 def trip_to_stop_travel(axis, start_pos, trip_pos, final_pos):
@@ -38,7 +42,7 @@ class SimRemoteEndstop:
         self.mcu.register_response(
             self._handle_trsync_state, "trsync_state", self.oid
         )
-        self._endstop = RemoteBridgeEndstop(
+        self._endstop = RemoteMotionEndstop(
             self.printer, self.mcu, trsync_oid=self.oid
         )
         ppins = self.printer.lookup_object("pins")
@@ -58,7 +62,7 @@ class SimRemoteEndstop:
         if not params["can_trigger"]:
             self._last_reason = params["trigger_reason"]
 
-    def setup_bridge_endstop(self, pin_params, axis):
+    def setup_motion_endstop(self, pin_params, axis):
         if pin_params["pin"] != "z_virtual_endstop" or axis != 2:
             raise pins.error(
                 "sim_remote_endstop only provides z_virtual_endstop on Z"
@@ -115,7 +119,7 @@ class SimRemoteEndstop:
             final_pos[axis],
             travel,
         )
-        if not 0.0 <= travel < MAX_TRIP_TO_STOP_TRAVEL:
+        if not MIN_TRIP_TO_STOP_TRAVEL <= travel < MAX_TRIP_TO_STOP_TRAVEL:
             raise self.printer.command_error(
                 "sim_remote_endstop: reconstructed trip position %.4f is not"
                 " within %.2fmm before the stop position %.4f — cross-mcu"

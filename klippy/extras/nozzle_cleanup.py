@@ -8,7 +8,7 @@ from klippy import Printer
 from klippy.configfile import ConfigWrapper
 from klippy.extras.probe import PrinterProbe
 from klippy.gcode import GCodeCommand, GCodeDispatch
-from klippy.motion_toolhead import MotionToolhead
+from klippy.motion import Motion
 
 
 class NozzleCleanupOptions:
@@ -111,7 +111,7 @@ class NozzleCleanup:
         self.retry_policy: RetryPolicy = RetryPolicy(config)
         self.nozzle_scrubber: GcodeNozzleScrubber = GcodeNozzleScrubber(config)
 
-    def _get_toolhead(self) -> MotionToolhead:
+    def _get_toolhead(self) -> Motion:
         return self.printer.lookup_object("toolhead")
 
     def _get_probe(self) -> PrinterProbe:

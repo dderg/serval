@@ -600,6 +600,7 @@ class PrinterConfig:
         self.status_settings = {}
         for (section, option), value in config.access_tracking.items():
             self.status_settings.setdefault(section, {})[option] = value
+        self._mirror_axes_to_legacy_steppers()
         for (section, option, value), msg in self.deprecated.items():
             _type = "deprecated_value"
             self.warn(_type, msg, section, option, value)
@@ -615,6 +616,15 @@ class PrinterConfig:
             _type = "unused_section"
             msg = f"Section '{section}' is invalid"
             self.warn(_type, msg, section)
+
+    def _mirror_axes_to_legacy_steppers(self):
+        axis_prefix = "axis "
+        for store in (self.status_settings, self.status_raw_config):
+            for section in list(store):
+                if not section.startswith(axis_prefix):
+                    continue
+                legacy = "stepper_" + section[len(axis_prefix) :]
+                store.setdefault(legacy, dict(store[section]))
 
     def get_status(self, eventtime):
         return {

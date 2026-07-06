@@ -26,9 +26,9 @@ pub fn detect_corners(points: &[[f64; 3]], tolerance: f64) -> Vec<usize> {
 
         let cross = dx0 * dy1 - dy0 * dx1;
         let dot = dx0 * dx1 + dy0 * dy1;
-        let theta = cross.abs().atan2(dot);
+        let theta = libm::atan2(cross.abs(), dot);
 
-        let deviation = shorter * (theta / 4.0).tan();
+        let deviation = shorter * libm::tan(theta / 4.0);
 
         if deviation > tolerance {
             corners.push(i);

@@ -3,8 +3,8 @@
 use core::sync::atomic::Ordering;
 
 use crate::fault_helpers::{
-    raise_position_count_overflow, raise_step_queue_overflow, raise_steps_per_sample_exceeded,
-    raise_unknown_step_mode,
+    raise_multi_motor_mask, raise_position_count_overflow, raise_step_queue_overflow,
+    raise_steps_per_sample_exceeded, raise_unknown_step_mode,
 };
 use crate::phase_lut::{PHASE_LUT, PHASE_LUT_SIZE};
 use crate::state::SharedState;
@@ -35,6 +35,61 @@ unsafe extern "C" {
     fn kalico_kick_step_output(axis_idx: u8, cycle_abs: u32);
 }
 
+// Bare-metal MCU only: the MACH_LINUX build links a fault_handler stub without
+// the diag ring, so the survivable capture is hardware-only (like the step kick).
+#[cfg(not(any(test, feature = "host")))]
+unsafe extern "C" {
+    fn diag_ring_push(tag: u8, a: u32, b: u32);
+}
+
+// Must match fault_handler.c's DIAG_EV_* tags.
+// TODO: only read on the cfg(not(test, host)) bare-metal path below; host/test builds see them as dead.
+#[allow(dead_code)]
+const DIAG_TAG_RUST_FAULT: u8 = 8;
+#[allow(dead_code)]
+const DIAG_TAG_FAULT_POSITIONS: u8 = 9;
+#[allow(dead_code)]
+const DIAG_TAG_FAULT_STEP_COUNTS: u8 = 10;
+
+#[inline]
+fn capture_steps_fault_context(
+    axis_idx: usize,
+    p_end: f32,
+    p_sample_start: f32,
+    prev_step_count: i32,
+    target_step_count: i32,
+    abs_steps: u32,
+) {
+    #[cfg(not(any(test, feature = "host")))]
+    // SAFETY: diag_ring_push is a pure irq-guarded C ring writer; no aliasing.
+    unsafe {
+        let detail = ((axis_idx as u32 & 0xFF) << 16) | abs_steps.min(0xFFFF);
+        let code = crate::error::FaultCode::StepsPerSampleExceeded.as_i32() as u32;
+        diag_ring_push(
+            DIAG_TAG_FAULT_POSITIONS,
+            p_end.to_bits(),
+            p_sample_start.to_bits(),
+        );
+        diag_ring_push(
+            DIAG_TAG_FAULT_STEP_COUNTS,
+            prev_step_count as u32,
+            target_step_count as u32,
+        );
+        diag_ring_push(DIAG_TAG_RUST_FAULT, code, detail);
+    }
+    #[cfg(any(test, feature = "host"))]
+    {
+        let _ = (
+            axis_idx,
+            p_end,
+            p_sample_start,
+            prev_step_count,
+            target_step_count,
+            abs_steps,
+        );
+    }
+}
+
 #[inline]
 pub(crate) fn kick_per_axis_timer(axis_idx: usize, cycle_abs: u32) {
     #[cfg(not(any(test, feature = "host")))]
@@ -46,6 +101,18 @@ pub(crate) fn kick_per_axis_timer(axis_idx: usize, cycle_abs: u32) {
     #[cfg(any(test, feature = "host"))]
     {
         let _ = (axis_idx, cycle_abs);
+    }
+}
+
+#[inline]
+#[cfg(not(any(test, feature = "host")))]
+pub(crate) fn kick_per_axis_timer_foreground(axis_idx: usize, cycle_abs: u32) {
+    // SAFETY: writes only a timer compare register and an owned-mask bit,
+    // guarded by the same runtime IRQ save/restore used by the ISR path.
+    unsafe {
+        let flags = crate::state::runtime_irq_save();
+        kalico_kick_step_output(axis_idx as u8, cycle_abs);
+        crate::state::runtime_irq_restore(flags);
     }
 }
 
@@ -61,6 +128,7 @@ pub const AXIS_E: usize = 3;
 pub fn dispatch_axis(
     axis_idx: usize,
     axis: &mut AxisConfig,
+    motor_mask: u8,
     queue_ptr: *mut StepQueue,
     shared: &SharedState,
     p_end: f32,
@@ -69,6 +137,7 @@ pub fn dispatch_axis(
     sample_period_sec: f32,
     sample_start_cycles: u32,
     cycles_per_second: f32,
+    overlay_just_armed: bool,
 ) {
     let _ = v_end;
 
@@ -81,6 +150,7 @@ pub fn dispatch_axis(
         m if m == StepMode::Pulse as u8 => dispatch_pulse(
             axis_idx,
             axis,
+            motor_mask,
             queue_ptr,
             shared,
             p_end,
@@ -88,10 +158,27 @@ pub fn dispatch_axis(
             sample_period_sec,
             sample_start_cycles,
             cycles_per_second,
+            overlay_just_armed,
         ),
         m if m == StepMode::Phase as u8 => {
             bump_relaxed(&shared.isr_phase_call_count);
-            dispatch_phase(axis_idx, axis, shared, p_end);
+            // An XDIRECT buzz owns this axis's coils via the step-output timer;
+            // the motion tick must not overwrite them with the parked position.
+            if crate::buzz_stream::is_xdirect(axis_idx) {
+                return;
+            }
+            if motor_mask != 0 {
+                dispatch_phase_overlay(
+                    axis_idx,
+                    axis,
+                    shared,
+                    p_end,
+                    motor_mask,
+                    overlay_just_armed,
+                );
+            } else {
+                dispatch_phase(axis_idx, axis, shared, p_end);
+            }
         }
         _ => {
             raise_unknown_step_mode(shared, axis_idx, mode);
@@ -103,6 +190,7 @@ pub fn dispatch_axis(
 fn dispatch_pulse(
     axis_idx: usize,
     axis: &mut AxisConfig,
+    motor_mask: u8,
     queue_ptr: *mut StepQueue,
     shared: &SharedState,
     p_end: f32,
@@ -110,6 +198,7 @@ fn dispatch_pulse(
     sample_period_sec: f32,
     sample_start_cycles: u32,
     cycles_per_second: f32,
+    overlay_just_armed: bool,
 ) {
     bump_relaxed(&shared.isr_pulse_call_count);
     let microstep_distance = axis.microstep_distance;
@@ -123,16 +212,51 @@ fn dispatch_pulse(
         return;
     }
 
-    let prev_step_count = axis.last_step_count;
+    let stepper_sel = match crate::piece_ring::stepper_sel_from_mask(motor_mask) {
+        Ok(sel) => sel,
+        Err(()) => {
+            raise_multi_motor_mask(shared, axis_idx, motor_mask);
+            return;
+        }
+    };
+
+    let overlay_motor_idx: Option<usize> = if motor_mask == 0 {
+        None
+    } else {
+        let idx = (stepper_sel - 1) as usize;
+        if axis.steppers.get(idx).is_none() {
+            raise_multi_motor_mask(shared, axis_idx, motor_mask);
+            return;
+        }
+        Some(idx)
+    };
+    let load_step_frame = |axis: &AxisConfig| -> i32 {
+        match overlay_motor_idx.and_then(|idx| axis.steppers.get(idx)) {
+            None => axis.last_step_count,
+            Some(stepper) => stepper.overlay_step_frame.load(Ordering::Acquire),
+        }
+    };
+    let store_step_frame = |axis: &mut AxisConfig, v: i32| match overlay_motor_idx
+        .and_then(|idx| axis.steppers.get(idx))
+    {
+        None => axis.last_step_count = v,
+        Some(stepper) => stepper.overlay_step_frame.store(v, Ordering::Release),
+    };
+
     #[allow(clippy::cast_possible_truncation)]
     let target_step_count = libm::roundf(p_end / microstep_distance) as i32;
+    let prev_step_count = if overlay_just_armed && overlay_motor_idx.is_some() {
+        0
+    } else {
+        load_step_frame(axis)
+    };
     let signed_steps = target_step_count.wrapping_sub(prev_step_count);
     if axis_idx == AXIS_A {
         shared
             .isr_last_p_end_bits
             .store(p_end.to_bits(), Ordering::Relaxed);
     }
-    axis.last_step_count = target_step_count;
+    store_step_frame(axis, target_step_count);
 
     if signed_steps == 0 {
         bump_relaxed(&shared.isr_pulse_zero_step_count);
@@ -144,6 +268,21 @@ fn dispatch_pulse(
             core::sync::atomic::Ordering::Relaxed,
         );
     }
+    // mcu-sim: a virtual-clock stall packs many periods of steps into one
+    // sample. Emit up to the cap and carry the remainder into subsequent
+    // samples (steps conserved) instead of faulting on sim jitter.
+    #[cfg(feature = "mcu-sim")]
+    let (target_step_count, signed_steps) = {
+        let cap = crate::sub_sample_timing::MAX_STEPS_PER_SAMPLE as i32;
+        if signed_steps.abs() > cap {
+            let clamped_steps = signed_steps.signum() * cap;
+            let clamped_target = prev_step_count.wrapping_add(clamped_steps);
+            store_step_frame(axis, clamped_target);
+            (clamped_target, clamped_steps)
+        } else {
+            (target_step_count, signed_steps)
+        }
+    };
     let abs_steps = signed_steps.unsigned_abs();
     if abs_steps > crate::sub_sample_timing::MAX_STEPS_PER_SAMPLE as u32 {
         shared
@@ -159,7 +298,15 @@ fn dispatch_pulse(
             );
         }
         bump_relaxed(&shared.isr_overrun_count);
-        axis.last_step_count = prev_step_count;
+        store_step_frame(axis, prev_step_count);
+        capture_steps_fault_context(
+            axis_idx,
+            p_end,
+            p_sample_start,
+            prev_step_count,
+            target_step_count,
+            abs_steps,
+        );
         raise_steps_per_sample_exceeded(shared, axis_idx, abs_steps);
         return;
     }
@@ -193,12 +340,7 @@ fn dispatch_pulse(
     let mut steps_committed: i32 = 0;
     #[allow(clippy::explicit_counter_loop)]
     for cycle_abs in times.iter().copied() {
-        let entry = StepEntry {
-            cycle_abs,
-            dir,
-            stepper_sel: crate::step_queue::STEPPER_SEL_ALL,
-            _pad: [0; 2],
-        };
+        let entry = StepEntry::pulse(cycle_abs, dir, stepper_sel);
         // SAFETY: `queue_ptr` is supplied by the TIM5 ISR, sole producer.
         let push_res = unsafe { queue_push(queue_ptr, entry) };
         if push_res.is_ok() {
@@ -206,14 +348,14 @@ fn dispatch_pulse(
         }
         if push_res.is_err() {
             let committed_delta = steps_committed * (i32::from(dir));
-            commit_position_count(axis, axis_idx, shared, committed_delta);
+            commit_position_count_masked(axis, axis_idx, shared, motor_mask, committed_delta);
             if was_empty && steps_committed > 0 {
                 if let Some(wt) = first_cycle_abs {
                     kick_per_axis_timer(axis_idx, wt);
                 }
             }
             raise_step_queue_overflow(shared, axis_idx);
-            axis.last_step_count = prev_step_count + committed_delta;
+            store_step_frame(axis, prev_step_count + committed_delta);
             return;
         }
         steps_committed += 1;
@@ -225,13 +367,14 @@ fn dispatch_pulse(
         }
     }
 
-    commit_position_count(axis, axis_idx, shared, signed_steps);
+    commit_position_count_masked(axis, axis_idx, shared, motor_mask, signed_steps);
 }
 
-pub(crate) fn commit_position_count(
+pub(crate) fn commit_position_count_masked(
     axis: &AxisConfig,
     axis_idx: usize,
     shared: &SharedState,
+    motor_mask: u8,
     delta: i32,
 ) {
     if delta == 0 {
@@ -242,7 +385,13 @@ pub(crate) fn commit_position_count(
     }) {
         return;
     }
-    for stepper in &axis.steppers {
+    for (i, stepper) in axis.steppers.iter().enumerate() {
+        if i >= 8 {
+            break;
+        }
+        if motor_mask != 0 && (motor_mask & (1u8 << i)) == 0 {
+            continue;
+        }
         let prev = stepper.position_count.load(Ordering::Acquire);
         let Some(next) = prev.checked_add(delta) else {
             raise_position_count_overflow(shared, axis_idx);
@@ -274,6 +423,50 @@ fn ramp_phase_offset(stepper: &crate::stepping_state::StepperRef, max_per_sample
         .store(current.wrapping_add(step), Ordering::Release);
 }
 
+fn dispatch_phase_overlay(
+    axis_idx: usize,
+    axis: &mut AxisConfig,
+    shared: &SharedState,
+    p_end: f32,
+    motor_mask: u8,
+    overlay_just_armed: bool,
+) {
+    let microstep_distance = axis.microstep_distance;
+    if !microstep_distance.is_finite() || microstep_distance == 0.0 {
+        return;
+    }
+    let sel = match crate::piece_ring::stepper_sel_from_mask(motor_mask) {
+        Ok(sel) => sel,
+        Err(()) => {
+            raise_multi_motor_mask(shared, axis_idx, motor_mask);
+            return;
+        }
+    };
+    let idx = (sel - 1) as usize;
+    let Some(stepper) = axis.steppers.get(idx) else {
+        raise_multi_motor_mask(shared, axis_idx, motor_mask);
+        return;
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    let target = libm::roundf(p_end / microstep_distance) as i32;
+    let prev = if overlay_just_armed {
+        0
+    } else {
+        stepper.overlay_step_frame.load(Ordering::Acquire)
+    };
+    stepper.overlay_step_frame.store(target, Ordering::Release);
+    let delta = target.wrapping_sub(prev);
+    let cur = stepper.phase_offset_microsteps.load(Ordering::Acquire);
+    let new_off = cur.wrapping_add(delta);
+    stepper
+        .phase_offset_microsteps
+        .store(new_off, Ordering::Release);
+    stepper
+        .phase_offset_target
+        .store(new_off, Ordering::Release);
+    write_phase_coils(axis_idx, axis, shared, 0);
+}
+
 fn dispatch_phase(axis_idx: usize, axis: &mut AxisConfig, shared: &SharedState, p_end: f32) {
     let microstep_distance = axis.microstep_distance;
     if !microstep_distance.is_finite() || microstep_distance == 0.0 {
@@ -289,11 +482,24 @@ fn dispatch_phase(axis_idx: usize, axis: &mut AxisConfig, shared: &SharedState, 
             .max_phase_offset_ramp_per_sample
             .load(Ordering::Acquire),
     );
-
     for stepper in &axis.steppers {
         ramp_phase_offset(stepper, max_ramp);
+    }
+
+    write_phase_coils(axis_idx, axis, shared, 0);
+}
+
+pub(crate) fn write_phase_coils(
+    axis_idx: usize,
+    axis: &AxisConfig,
+    shared: &SharedState,
+    buzz_offset: i32,
+) {
+    let base = axis.last_step_count;
+
+    for stepper in &axis.steppers {
         let phase_offset = stepper.phase_offset_microsteps.load(Ordering::Acquire);
-        let target_stepper = target_microsteps_axis.wrapping_add(phase_offset);
+        let target_stepper = base.wrapping_add(phase_offset).wrapping_add(buzz_offset);
         let prev_stepper = stepper.last_phase_target.load(Ordering::Acquire);
         let delta_stepper = target_stepper.wrapping_sub(prev_stepper);
         stepper

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from klippy.motion_toolhead import _derive_mcu_topology
+from klippy.motion import _derive_mcu_topology
 
 
 def test_corexy_two_mcu_extruder_on_octopus():

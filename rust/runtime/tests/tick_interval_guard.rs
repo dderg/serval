@@ -18,15 +18,7 @@ fn make_engine() -> Engine {
 }
 
 fn make_storage() -> Vec<PieceEntry> {
-    vec![
-        PieceEntry {
-            start_time: 0,
-            coeffs: [0.0; 4],
-            duration: 0.0,
-            _reserved: 0,
-        };
-        TOTAL_RING_PIECES
-    ]
+    vec![PieceEntry::zeroed(); TOTAL_RING_PIECES]
 }
 
 fn make_isr(engine: Engine) -> IsrState {
@@ -68,9 +60,8 @@ fn install_queue(engine: &mut Engine) -> ([*mut StepQueue; MAX_AXES], StepQueue)
 fn const_piece(start_time: u64, dur_s: f32) -> PieceEntry {
     PieceEntry {
         start_time,
-        coeffs: [0.0; 4],
         duration: dur_s,
-        _reserved: 0,
+        ..PieceEntry::zeroed()
     }
 }
 

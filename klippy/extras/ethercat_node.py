@@ -9,10 +9,14 @@ _REPO_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
 _DEFAULT_ENDPOINT = os.path.join(
-    _REPO_ROOT, "rust", "target", "release", "kalico-ethercat-rt"
+    _REPO_ROOT, "rust", "target", "release", "ethercat-rt"
 )
 
 DRIVE_FAULT_POLL_PERIOD = 1.0
+
+EC_RT_MAX_SLAVES = 8
+
+CYCLE_US_QUANTUM = 250
 
 
 class EtherCatNode:
@@ -36,86 +40,181 @@ class EtherCatNode:
         self.endpoint = os.path.abspath(
             config.get("endpoint", _DEFAULT_ENDPOINT)
         )
-        self.bridge_handle = None
-        # Derived at claim time, not __init__: the [servo_*] sections are parsed
-        # by the toolhead AFTER [ethercat_node] sections (printer._read_config
-        # loads prefix sections before motion_toolhead), so the matching
-        # ServoRail does not exist yet here.
+        self.cycle_us = config.getint("cycle_us", CYCLE_US_QUANTUM)
+        if self.cycle_us <= 0 or self.cycle_us % CYCLE_US_QUANTUM != 0:
+            raise config.error(
+                "ethercat_node %s: cycle_us=%d is invalid — the sync cycle "
+                "must be a positive integer multiple of %d us"
+                % (self.name, self.cycle_us, CYCLE_US_QUANTUM)
+            )
+        self.dynamics_profile = config.get("dynamics_profile", None)
+        self.engine_handle = None
         self._counts_per_mm = None
-        # Claim during mcu-identify. printer._connect sends
-        # "klippy:mcu_identify" before invoking the "klippy:connect"
-        # handlers (klippy/printer.py), and motion_toolhead._init_planner
-        # runs on "klippy:connect" — so the handle is populated before the
-        # planner is built. This mirrors MCU._mcu_identify's claim_mcu call.
+        self._slot_by_motor = {}
+        self._torque_motors = set()
         self.printer.register_event_handler("klippy:mcu_identify", self._claim)
+        self.printer.register_event_handler(
+            "klippy:shutdown", self._handle_shutdown
+        )
         self.printer.load_object(config, "servo_capture")
         self.printer.load_object(config, "servo_param")
 
-    def _find_rail(self):
-        # ServoRails are not printer objects (the toolhead builds them directly
-        # into kin.rails), so iterate the toolhead's rails rather than
-        # printer.lookup_objects.
+    def _find_rails(self):
         toolhead = self.printer.lookup_object("toolhead")
-        for rail in getattr(toolhead.get_kinematics(), "rails", ()):
+        kin = toolhead.get_kinematics()
+        found = []
+        for lane_idx, _axis_name, _motor_names in kin.lanes():
+            rail = kin.rails[lane_idx]
             if (
                 isinstance(rail, servo_axis.ServoRail)
                 and rail.get_node_name() == self.name
             ):
-                return rail
-        raise self.printer.config_error(
-            "ethercat_node %s: no [servo_*] section with node=%s — "
-            "cannot locate the servo rail" % (self.name, self.name)
-        )
+                found.append((lane_idx, rail))
+        if not found:
+            raise self.printer.config_error(
+                "ethercat_node %s: no [servo_*] section with node=%s — "
+                "cannot locate the servo rail" % (self.name, self.name)
+            )
+        return found
+
+    def _validate_chain(self, rails):
+        by_index = {}
+        for _global_axis, rail in rails:
+            idx = rail.get_chain_index()
+            if idx >= EC_RT_MAX_SLAVES:
+                raise self.printer.config_error(
+                    "ethercat_node %s: motor %s ethercat_chain_index=%d "
+                    "exceeds the %d-drive endpoint limit (valid 0..%d)"
+                    % (
+                        self.name,
+                        rail.get_motor_name(),
+                        idx,
+                        EC_RT_MAX_SLAVES,
+                        EC_RT_MAX_SLAVES - 1,
+                    )
+                )
+            if idx in by_index:
+                raise self.printer.config_error(
+                    "ethercat_node %s: motors %s and %s share "
+                    "ethercat_chain_index=%d — each drive on a chain needs a "
+                    "distinct position"
+                    % (
+                        self.name,
+                        by_index[idx],
+                        rail.get_motor_name(),
+                        idx,
+                    )
+                )
+            by_index[idx] = rail.get_motor_name()
+
+    def _validate_dynamics_profiles(self, rails):
+        per_servo = [
+            (rail.get_motor_name(), rail.get_dynamics_profile())
+            for _global_axis, rail in rails
+        ]
+        configured = [
+            name for name, profile in per_servo if profile is not None
+        ]
+        if not configured:
+            return
+        if self.dynamics_profile is not None:
+            raise self.printer.config_error(
+                "ethercat_node %s: dynamics_profile is set on [ethercat_node] "
+                "and on [motor %s]; a node is either coupled (one node-level "
+                "profile) or independent (one profile per motor), not both"
+                % (self.name, configured[0])
+            )
+        missing = [name for name, profile in per_servo if profile is None]
+        if missing:
+            raise self.printer.config_error(
+                "ethercat_node %s: dynamics_profile must be set on every motor "
+                "or none — missing on: %s" % (self.name, ", ".join(missing))
+            )
 
     def _claim(self):
-        if self.bridge_handle is not None:
+        if self.engine_handle is not None:
             return
-        rail = self._find_rail()
-        self._counts_per_mm = rail.get_counts_per_mm()
-        velocity_ff, dynamics_profile, ff_torque_clamp = rail.get_ff_config()
-        following_error_counts, max_torque_tenth_pct = (
-            rail.get_session_drive_limits()
-        )
-        bridge = self.printer.lookup_object("motion_bridge")
+        rails = sorted(self._find_rails(), key=lambda pair: pair[0])
+        self._validate_chain(rails)
+        self._slot_by_motor = {
+            rail.get_motor_name(): slot
+            for slot, (_global_axis, rail) in enumerate(rails)
+        }
+        self._validate_dynamics_profiles(rails)
+        drives = []
+        for global_axis, rail in rails:
+            following_error_counts, max_torque_tenth_pct = (
+                rail.get_session_drive_limits()
+            )
+            velocity_ff, ff_torque_clamp = rail.get_ff_config()
+            drives.append(
+                (
+                    rail.get_chain_index(),
+                    global_axis,
+                    rail.get_counts_per_mm(),
+                    rail.get_rotation_distance(),
+                    following_error_counts,
+                    max_torque_tenth_pct,
+                    velocity_ff,
+                    ff_torque_clamp,
+                    rail.get_invert_direction(),
+                    rail.get_dynamics_profile(),
+                )
+            )
+        self._counts_per_mm = rails[0][1].get_counts_per_mm()
+        engine = self.printer.lookup_object("motion_engine")
         try:
-            self.bridge_handle = bridge.claim_ethercat_node(
+            self.engine_handle = engine.claim_ethercat_node(
                 self.name,
                 self.socket_path,
                 self.interface,
                 self.endpoint,
-                self._counts_per_mm,
-                velocity_ff,
-                dynamics_profile,
-                ff_torque_clamp,
-                following_error_counts,
-                max_torque_tenth_pct,
+                self.cycle_us,
+                self.dynamics_profile,
+                drives,
             )
         except RuntimeError as e:
             raise self.printer.config_error(str(e))
         logging.info(
             "ethercat_node %s: claimed handle=%s socket=%s interface=%s "
-            "endpoint=%s counts_per_mm=%s velocity_ff=%s "
-            "dynamics_profile=%s ff_torque_clamp=%s",
+            "endpoint=%s drives=%s dynamics_profile=%s",
             self.name,
-            self.bridge_handle,
+            self.engine_handle,
             self.socket_path,
             self.interface,
             self.endpoint,
-            self._counts_per_mm,
-            velocity_ff,
-            dynamics_profile,
-            ff_torque_clamp,
+            drives,
+            self.dynamics_profile,
         )
-        self._push_drive_params(rail)
+        for slot, (_global_axis, rail) in enumerate(rails):
+            self._push_drive_params(rail, slot)
         reactor = self.printer.get_reactor()
         reactor.register_timer(
             self._poll_drive_fault,
             reactor.monotonic() + DRIVE_FAULT_POLL_PERIOD,
         )
 
+    def _handle_shutdown(self):
+        if self.engine_handle is None:
+            return
+        engine = self.printer.lookup_object("motion_engine")
+        engine.stop_node(self.engine_handle)
+        logging.info(
+            "ethercat_node %s: servo motion discarded on shutdown (handle=%s)",
+            self.name,
+            self.engine_handle,
+        )
+
     def _poll_drive_fault(self, eventtime):
-        bridge = self.printer.lookup_object("motion_bridge")
-        fault = bridge.take_drive_fault(self.bridge_handle)
+        engine = self.printer.lookup_object("motion_engine")
+        death = engine.take_endpoint_death(self.engine_handle)
+        if death is not None:
+            self.printer.invoke_shutdown(
+                "EtherCAT endpoint died mid-session on node %s: %s"
+                % (self.name, death)
+            )
+            return self.printer.get_reactor().NEVER
+        fault = engine.take_drive_fault(self.engine_handle)
         if fault is None:
             return eventtime + DRIVE_FAULT_POLL_PERIOD
         self.printer.invoke_shutdown(
@@ -124,35 +223,62 @@ class EtherCatNode:
         )
         return self.printer.get_reactor().NEVER
 
-    def _push_drive_params(self, rail):
+    def _push_drive_params(self, rail, slot):
         params = rail.get_sdo_params()
         if not params:
             return
-        bridge = self.printer.lookup_object("motion_bridge")
+        engine = self.printer.lookup_object("motion_engine")
         for index, subindex, size, value in params:
             try:
-                bridge.sdo_write(
-                    self.bridge_handle, index, subindex, size, value
+                engine.sdo_write(
+                    self.engine_handle, slot, index, subindex, size, value
                 )
             except RuntimeError as e:
                 raise self.printer.config_error(
                     "ethercat_node %s: claim-time drive param "
-                    "0x%04x.%d = %d failed: %s"
-                    % (self.name, index, subindex, value, e)
+                    "0x%04x.%d = %d (slot %d) failed: %s"
+                    % (self.name, index, subindex, value, slot, e)
                 )
             logging.info(
-                "ethercat_node %s: drive param 0x%04x.%d = %d pushed",
+                "ethercat_node %s: drive param 0x%04x.%d = %d pushed (slot %d)",
                 self.name,
                 index,
                 subindex,
                 value,
+                slot,
             )
 
-    def get_bridge_handle(self):
-        return self.bridge_handle
+    def get_engine_handle(self):
+        return self.engine_handle
 
     def get_counts_per_mm(self):
         return self._counts_per_mm
+
+    def get_cycle_us(self):
+        return self.cycle_us
+
+    def get_slot_for_motor(self, motor_name):
+        return self._slot_by_motor.get(motor_name)
+
+    def get_drive_count(self):
+        return len(self._slot_by_motor)
+
+    def set_motor_torque(self, motor_name, value, print_time):
+        if self.engine_handle is None:
+            raise self.printer.command_error(
+                "servo torque: ethercat_node %s has no engine handle"
+                % (self.name,)
+            )
+        engine = self.printer.lookup_object("motion_engine")
+        if value:
+            first = not self._torque_motors
+            self._torque_motors.add(motor_name)
+            if first:
+                engine.set_torque(self.engine_handle, True, print_time)
+        else:
+            self._torque_motors.discard(motor_name)
+            if not self._torque_motors:
+                engine.set_torque(self.engine_handle, False, print_time)
 
 
 def load_config_prefix(config):

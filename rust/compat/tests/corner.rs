@@ -38,7 +38,7 @@ fn gentle_curve_no_corners() {
         .map(|k| {
             let t = k as f64 / n as f64;
             let angle = t * total_angle;
-            [radius * angle.cos(), radius * angle.sin(), 0.0]
+            [radius * libm::cos(angle), radius * libm::sin(angle), 0.0]
         })
         .collect();
 

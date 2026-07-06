@@ -450,7 +450,7 @@ fn handle_g5(ctx: &mut Ctx, params: &gcode::Params, line_no: u32) -> Result<(), 
 
     let tx = -cp;
     let ty = -cq;
-    let tlen = tx.hypot(ty);
+    let tlen = libm::hypot(tx, ty);
     if tlen > 1e-12 {
         ctx.state.prev_tangent = Some([tx / tlen, ty / tlen]);
     }
@@ -502,7 +502,7 @@ fn handle_g51(ctx: &mut Ctx, params: &gcode::Params, line_no: u32) -> Result<(),
 
     let tx = p2[0] - p1[0];
     let ty = p2[1] - p1[1];
-    let tlen = tx.hypot(ty);
+    let tlen = libm::hypot(tx, ty);
     if tlen > 1e-12 {
         ctx.state.prev_tangent = Some([tx / tlen, ty / tlen]);
     }
@@ -634,7 +634,7 @@ fn flush_run(ctx: &mut Ctx, end_tangent: Option<[f64; 2]>) {
 
         let tx = -last.p;
         let ty = -last.q;
-        let tlen = tx.hypot(ty);
+        let tlen = libm::hypot(tx, ty);
         if tlen > 1e-12 {
             ctx.state.prev_tangent = Some([tx / tlen, ty / tlen]);
         }
@@ -711,7 +711,7 @@ fn peek_tangent_for_flush(
             ..
         }) => {
             let (i, j, _, _) = canonicalize_g5(params, state.prev_g5_pq).ok()?;
-            let len = i.hypot(j);
+            let len = libm::hypot(i, j);
             if len > 1e-12 {
                 Some([i / len, j / len])
             } else {

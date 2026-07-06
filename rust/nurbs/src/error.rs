@@ -30,46 +30,6 @@ impl fmt::Display for ConstructError {
 
 impl core::error::Error for ConstructError {}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WireError {
-    Misaligned,
-    UnknownVersion(u8),
-    TruncatedBuffer { expected_len: usize, got: usize },
-    AxisCountMismatch { expected: usize, got: u8 },
-    WeightsUnsupported,
-    Construct(ConstructError),
-}
-
-impl fmt::Display for WireError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Misaligned => write!(f, "wire buffer not aligned to T"),
-            Self::UnknownVersion(v) => write!(f, "unknown wire format version {v}"),
-            Self::TruncatedBuffer { expected_len, got } => write!(
-                f,
-                "wire buffer truncated: expected {expected_len} bytes, got {got}"
-            ),
-            Self::AxisCountMismatch { expected, got } => write!(
-                f,
-                "axis count mismatch: header says {got}, type expects {expected}"
-            ),
-            Self::WeightsUnsupported => write!(
-                f,
-                "wire header has has_weights set; rational curves are unsupported"
-            ),
-            Self::Construct(e) => write!(f, "wire content invalid: {e}"),
-        }
-    }
-}
-
-impl core::error::Error for WireError {}
-
-impl From<ConstructError> for WireError {
-    fn from(e: ConstructError) -> Self {
-        Self::Construct(e)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArcLengthError<T: Float> {
     ToleranceNotMet {
@@ -161,7 +121,6 @@ impl core::error::Error for KnotError {}
 #[derive(Debug, Clone, PartialEq)]
 pub enum NurbsError<T: Float> {
     Construct(ConstructError),
-    Wire(WireError),
     ArcLength(ArcLengthError<T>),
     Algebra(AlgebraError),
     Knot(KnotError),
@@ -171,7 +130,6 @@ impl<T: Float> fmt::Display for NurbsError<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Construct(e) => write!(f, "{e}"),
-            Self::Wire(e) => write!(f, "{e}"),
             Self::ArcLength(e) => write!(f, "{e}"),
             Self::Algebra(e) => write!(f, "{e}"),
             Self::Knot(e) => write!(f, "{e}"),
@@ -184,11 +142,6 @@ impl<T: Float> core::error::Error for NurbsError<T> {}
 impl<T: Float> From<ConstructError> for NurbsError<T> {
     fn from(e: ConstructError) -> Self {
         Self::Construct(e)
-    }
-}
-impl<T: Float> From<WireError> for NurbsError<T> {
-    fn from(e: WireError) -> Self {
-        Self::Wire(e)
     }
 }
 impl<T: Float> From<ArcLengthError<T>> for NurbsError<T> {

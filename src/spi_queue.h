@@ -1,10 +1,10 @@
 // SPSC SPI write queue per bus. Producer = TIM5 ISR (Rust), consumer =
 // foreground struct-timer (Klipper SysTick). Storage C-owned per the B2/B3
-// invariant in docs/kalico-rewrite/mcu-c-rust-boundary.md; struct layout
+// invariant in docs/rewrite/mcu-c-rust-boundary.md; struct layout
 // mirrors rust/runtime/src/spi_queue.rs.
 
-#ifndef __KALICO_SPI_QUEUE_H
-#define __KALICO_SPI_QUEUE_H
+#ifndef __SPI_QUEUE_H
+#define __SPI_QUEUE_H
 
 #include <stdint.h>
 #include <stddef.h>

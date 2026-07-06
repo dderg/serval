@@ -33,8 +33,6 @@ communication with the Kalico developers.
     similar).
   - [Bed Mesh](Bed_Mesh.md): Bed height correction based on XY
     locations.
-  - [Endstop phase](Endstop_Phase.md): Stepper assisted Z endstop
-    positioning.
   - [Axis Twist Compensation](Axis_Twist_Compensation.md): A tool to compensate
     for inaccurate probe readings due to twist in X gantry.
 - [Resonance compensation](Resonance_Compensation.md): A tool to

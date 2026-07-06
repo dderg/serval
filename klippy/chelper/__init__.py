@@ -5,6 +5,7 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
 import os
+import platform
 
 import cffi
 
@@ -26,7 +27,7 @@ SOURCE_FILES = [
     "msgblock.c",
     "trdispatch.c",
 ]
-DEST_LIB = "c_helper.so"
+DEST_LIB = "c_helper.%s-%s.so" % (platform.system(), platform.machine())
 OTHER_FILES = [
     "list.h",
     "serialqueue.h",
@@ -59,8 +60,6 @@ defs_serialqueue = """
         , double frequency);
     void serialqueue_set_receive_window(struct serialqueue *sq
         , int receive_window);
-    void serialqueue_set_clock_est(struct serialqueue *sq, double est_freq
-        , double conv_time, uint64_t conv_clock, uint64_t last_clock);
     void serialqueue_get_stats(struct serialqueue *sq, char *buf, int len);
     int serialqueue_extract_old(struct serialqueue *sq, int sentq
         , struct pull_queue_message *q, int max);

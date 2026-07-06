@@ -1,12 +1,13 @@
 import math
 
 from klippy import pins
-from klippy.bridge_endstop import BridgeEndstop, allocate_provider_id
+from klippy.motion_endstop import MotionEndstop, allocate_provider_id
 
 from . import manual_probe
 
 Z_AXIS = 2
 ACCURACY_DEFAULT_SAMPLES = 10
+NO_MOVEMENT_EPSILON = 0.005
 
 
 def calc_probe_z_result(values, method):
@@ -39,6 +40,7 @@ class PrinterProbe:
     cmd_PROBE_help = "Probe Z-height at the current XY position"
     cmd_QUERY_PROBE_help = "Return the current probe state"
     cmd_PROBE_ACCURACY_help = "Probe Z-height repeatedly and report statistics"
+    cmd_Z_OFFSET_APPLY_PROBE_help = "Adjust the probe's z_offset"
 
     def __init__(self, config):
         self.printer = config.get_printer()
@@ -52,7 +54,7 @@ class PrinterProbe:
                 "[probe] pin must be a GPIO pin on an MCU, not '%s'"
                 % (pin_desc,)
             )
-        self._endstop = BridgeEndstop(
+        self._endstop = MotionEndstop(
             pin_params, allocate_provider_id(self.printer)
         )
 
@@ -78,6 +80,8 @@ class PrinterProbe:
         self.last_query = False
         self.last_z_result = 0.0
 
+        self.name = config.get_name()
+        self.gcode_move = self.printer.load_object(config, "gcode_move")
         ppins.register_chip("probe", self)
         gcode = self.printer.lookup_object("gcode")
         gcode.register_command(
@@ -91,10 +95,15 @@ class PrinterProbe:
             self.cmd_PROBE_ACCURACY,
             desc=self.cmd_PROBE_ACCURACY_help,
         )
+        gcode.register_command(
+            "Z_OFFSET_APPLY_PROBE",
+            self.cmd_Z_OFFSET_APPLY_PROBE,
+            desc=self.cmd_Z_OFFSET_APPLY_PROBE_help,
+        )
         query_endstops = self.printer.load_object(config, "query_endstops")
         query_endstops.register_endstop(self._endstop, "probe")
 
-    def setup_bridge_endstop(self, pin_params, axis):
+    def setup_motion_endstop(self, pin_params, axis):
         validate_virtual_endstop_request(pin_params, axis)
         return self._endstop
 
@@ -128,7 +137,7 @@ class PrinterProbe:
         if "z" not in kin_status["homed_axes"]:
             raise gcmd.error("Must home before probe")
 
-    def _probe_once(self, gcmd, toolhead, homing_obj, bridge, speed):
+    def _probe_once(self, gcmd, toolhead, homing_obj, engine, speed):
         kin = toolhead.get_kinematics()
         rail = kin._axis_rails().get(Z_AXIS)
         if rail is None:
@@ -141,7 +150,7 @@ class PrinterProbe:
         trip_pos, final_pos = homing_obj.trip_move(
             gcmd,
             toolhead,
-            bridge,
+            engine,
             Z_AXIS,
             -1.0,
             speed,
@@ -149,9 +158,14 @@ class PrinterProbe:
             {
                 "endstop": self._endstop,
                 "provider": self,
-                "trigger_height": None,
+                "trigger_position": None,
             },
         )
+        if abs(trip_pos[Z_AXIS] - current_z) < NO_MOVEMENT_EPSILON:
+            raise gcmd.error(
+                "Probe triggered prior to movement — probe is already in"
+                " contact or the trigger is stuck"
+            )
         newpos = list(toolhead.get_position())
         newpos[Z_AXIS] = final_pos[Z_AXIS]
         toolhead.set_position(newpos)
@@ -166,7 +180,7 @@ class PrinterProbe:
     def run_probe(self, gcmd):
         toolhead = self.printer.lookup_object("toolhead")
         homing_obj = self.printer.lookup_object("homing")
-        bridge = self.printer.lookup_object("motion_bridge")
+        engine = self.printer.lookup_object("motion_engine")
         speed = gcmd.get_float("PROBE_SPEED", self.speed, above=0.0)
         lift_speed = gcmd.get_float("LIFT_SPEED", self.lift_speed, above=0.0)
         sample_count = gcmd.get_int("SAMPLES", self.samples, minval=1)
@@ -186,7 +200,7 @@ class PrinterProbe:
         retries = 0
         measured = []
         while True:
-            z = self._probe_once(gcmd, toolhead, homing_obj, bridge, speed)
+            z = self._probe_once(gcmd, toolhead, homing_obj, engine, speed)
             measured.append(z)
             if max(measured) - min(measured) > tolerance:
                 if retries >= max_retries:
@@ -194,9 +208,9 @@ class PrinterProbe:
                 gcmd.respond_info("Probe samples exceed tolerance. Retrying...")
                 retries += 1
                 measured = []
+            self._retract(toolhead, z + retract, lift_speed)
             if len(measured) >= sample_count:
                 break
-            self._retract(toolhead, z + retract, lift_speed)
         epos = list(toolhead.get_position()[:3])
         epos[Z_AXIS] = calc_probe_z_result(measured, method)
         return epos
@@ -216,7 +230,7 @@ class PrinterProbe:
     def cmd_PROBE_ACCURACY(self, gcmd):
         toolhead = self.printer.lookup_object("toolhead")
         homing_obj = self.printer.lookup_object("homing")
-        bridge = self.printer.lookup_object("motion_bridge")
+        engine = self.printer.lookup_object("motion_engine")
         speed = gcmd.get_float("PROBE_SPEED", self.speed, above=0.0)
         lift_speed = gcmd.get_float("LIFT_SPEED", self.lift_speed, above=0.0)
         sample_count = gcmd.get_int(
@@ -234,7 +248,7 @@ class PrinterProbe:
         )
         measured = []
         for _ in range(sample_count):
-            z = self._probe_once(gcmd, toolhead, homing_obj, bridge, speed)
+            z = self._probe_once(gcmd, toolhead, homing_obj, engine, speed)
             measured.append(z)
             self._retract(toolhead, z + retract, lift_speed)
         average = calc_probe_z_result(measured, "average")
@@ -254,6 +268,21 @@ class PrinterProbe:
                 sigma,
             )
         )
+
+    def cmd_Z_OFFSET_APPLY_PROBE(self, gcmd):
+        offset = self.gcode_move.get_status()["homing_origin"].z
+        if offset == 0.0:
+            gcmd.respond_info("Nothing to do: Z Offset is 0")
+            return
+        new_calibrate = self.z_offset - offset
+        gcmd.respond_info(
+            "%s: z_offset: %.3f\n"
+            "The SAVE_CONFIG command will update the printer config file\n"
+            "with the above and restart the printer."
+            % (self.name, new_calibrate)
+        )
+        configfile = self.printer.lookup_object("configfile")
+        configfile.set(self.name, "z_offset", "%.3f" % (new_calibrate,))
 
 
 class ProbePointsHelper:

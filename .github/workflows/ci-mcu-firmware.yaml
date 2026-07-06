@@ -8,7 +8,7 @@ name: MCU firmware build (C + Rust full link)
 # FFI drift and stale per-arch C files — the class of bug that `cargo build`-only
 # CI cannot see (e.g. runtime_tick_g0.c calling a removed c-api symbol, or the
 # real Linux MCU dropping phase_stepping_write_xdirect: staticlib builds, link
-# fails). See scripts/ci-build-mcu-kalico.sh.
+# fails). See scripts/ci-build-mcu.sh.
 
 on:
   workflow_dispatch:
@@ -18,8 +18,8 @@ on:
       - 'lib/**'
       - 'rust/**'
       - 'Cargo.lock'
-      - 'test/configs/kalico-*.config'
-      - 'scripts/ci-build-mcu-kalico.sh'
+      - 'test/configs/*.config'
+      - 'scripts/ci-build-mcu.sh'
       - '.github/workflows/ci-mcu-firmware.yaml'
 
 concurrency:
@@ -51,11 +51,11 @@ jobs:
           workspaces: rust
           key: mcu-firmware-full
 
-      # Full firmware build for every test/configs/kalico-*.config.
+      # Full firmware build for every test/configs/*.config.
       # A missing Rust FFI symbol => arm-none-eabi-ld undefined reference =>
       # make fails => job fails.
       - name: Build kalico firmware (all MCU archs)
-        run: bash scripts/ci-build-mcu-kalico.sh
+        run: bash scripts/ci-build-mcu.sh
 
       - name: Upload firmware data dictionaries
         if: always()
@@ -67,7 +67,7 @@ jobs:
 
   # Native MACH_LINUX firmware: the first-class Linux MCU (real /dev/gpiochip,
   # /dev/spidev) plus the sim variant. This is the link-coverage that catches
-  # the class of bug the unhack fixed — the real (kalico-sim ABSENT) build must
+  # the class of bug the unhack fixed — the real (mcu-sim ABSENT) build must
   # resolve the C step/SPI FFI (phase_stepping_write_xdirect) against
   # linux/phase_stepping_spi.c via the `mcu-linux` Rust feature.
   linux-mcu:
@@ -92,10 +92,10 @@ jobs:
           workspaces: rust
           key: linux-mcu-firmware
 
-      - name: Build REAL Linux MCU (kalico-linux.config, KALICO_SIM=n)
+      - name: Build REAL Linux MCU (kalico-linux.config, MCU_SIM=n)
         run: |
           make clean && make distclean
-          cp test/configs/kalico-linux.config .config
+          cp test/configs/linux.config .config
           make olddefconfig
           make V=1 -j"$(nproc)"
           test -f out/klipper.elf
@@ -107,11 +107,11 @@ jobs:
           # 'T'-in-elf check alone would still pass if that gate regressed
           # (phase_stepping_spi.c keeps the symbol live via __attribute__((used))),
           # silently losing FFI-edge coverage — this asserts the edge is real.
-          nm rust/target-linux/release/libkalico_c_api.a 2>/dev/null | grep -qE ' U _?phase_stepping_write_xdirect' \
+          nm rust/target-linux/release/libc_api.a 2>/dev/null | grep -qE ' U _?phase_stepping_write_xdirect' \
             || { echo "ERROR: Rust staticlib has no UNDEFINED phase_stepping_write_xdirect ref — mcu-linux FFI gate not emitting the call"; exit 1; }
           echo "OK: real Linux MCU linked; FFI edge live (Rust U -> C T phase_stepping_write_xdirect)"
 
-      - name: Build SIM Linux MCU (.config.linux, KALICO_SIM=y)
+      - name: Build SIM Linux MCU (.config.linux, MCU_SIM=y)
         run: |
           make clean && make distclean
           cp .config.linux .config

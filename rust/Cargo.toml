@@ -1,21 +1,23 @@
 [workspace]
 members = [
     "nurbs",
-    "kalico-c-api",
+    "c-api",
     "gcode",
     "geometry",
-    "temporal",
     "trajectory",
     "runtime",
-    "kalico-host-rt",
+    "host-rt",
     "compat",
-    "motion-bridge",
-    "kalico-native-transport",
-    "kalico-protocol",
-    "kalico-ethercat-rt",
+    "motion-engine",
+    "motion-pipeline",
+    "pipeline-snapshot",
+    "mcu-transport",
+    "mcu-protocol",
+    "ethercat-rt",
     "servo-ident",
+    "piece-sink-harness",
 ]
-exclude = ["gcode/fuzz"]
+exclude = ["gcode/fuzz", "snapshot-viewer", "motion-playground"]
 resolver = "2"
 
 [workspace.package]
@@ -27,7 +29,6 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 # Shared deps versioned here from day one.
 thiserror = "2"
-clarabel = "0.11"  # Pinned to current minor at implementation time (0.11.1). Task 5.
 heapless = { version = "0.8", default-features = false }
 
 # Workspace-wide lint configuration. Crates opt in via `[lints] workspace = true`.
@@ -40,8 +41,8 @@ heapless = { version = "0.8", default-features = false }
 [workspace.lints.rust]
 unsafe_code = "deny"
 missing_debug_implementations = "allow"
-dead_code = "allow"
-unused_imports = "allow"
+dead_code = "warn"
+unused_imports = "warn"
 unexpected_cfgs = "allow"
 
 [workspace.lints.clippy]
@@ -168,7 +169,7 @@ overflow-checks = false
 opt-level = 0
 debug = false
 
-# `cbindgen` is a normal `[dependencies]` entry (kalico-c-api, behind the
+# `cbindgen` is a normal `[dependencies]` entry (c-api, behind the
 # `dep:cbindgen` feature, used by the gen-headers binary), so cargo's
 # build-override above does NOT cover it. `syn` is pulled in again via
 # cbindgen → serde_derive on that path and compiles at opt-level=3 under the
@@ -187,3 +188,15 @@ debug = false
 [profile.dev]
 opt-level = 1            # eval correctness tests run faster than -O0; still debuggable
 debug = true
+
+# Snapshot-iteration profile: identical float semantics to `release` (Rust
+# never reassociates or contracts FP regardless of opt/LTO settings), but no
+# fat-LTO + single-codegen-unit relink on every planner edit. The snapshot
+# suite validates this empirically — baselines built under `release` compare
+# EXACT against a `snapshot`-profile engine.
+[profile.snapshot]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+debug = false

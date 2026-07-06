@@ -1,0 +1,325 @@
+#![cfg(any(test, feature = "test-harness"))]
+
+use std::collections::VecDeque;
+use std::io::{self, Read, Write};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::mpsc::{Sender, sync_channel};
+use std::time::{Duration, Instant};
+
+use arc_swap::ArcSwap;
+use serialport::SerialPort;
+
+use crate::clock::{Clock, MockClock};
+use crate::host_io::McuHostIoConfig;
+use crate::host_io::ReactorCommand;
+use crate::host_io::identify::IdentifySeqState;
+use crate::host_io::parser::MsgProtoParser;
+use crate::host_io::reactor::{Reactor, TickOutcome};
+use crate::host_io::runtime_events::StatusEvent;
+use crate::host_io::serial_frame_io::SerialFrameIo;
+use crate::transport::{MessageParams, TransportError};
+
+#[derive(Clone)]
+pub struct FakePortHandles {
+    pub rx: Arc<Mutex<VecDeque<u8>>>,
+    pub tx: Arc<Mutex<Vec<u8>>>,
+    /// Simulated kernel tty out-queue depth reported by `bytes_to_write`.
+    pub outq: Arc<Mutex<u32>>,
+}
+
+pub struct FakeSerialPort {
+    handles: FakePortHandles,
+}
+
+impl FakeSerialPort {
+    pub fn new() -> (Box<Self>, FakePortHandles) {
+        let h = FakePortHandles {
+            rx: Arc::new(Mutex::new(VecDeque::new())),
+            tx: Arc::new(Mutex::new(Vec::new())),
+            outq: Arc::new(Mutex::new(0)),
+        };
+        (Box::new(Self { handles: h.clone() }), h)
+    }
+}
+
+impl Read for FakeSerialPort {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut g = self.handles.rx.lock().unwrap();
+        let n = std::cmp::min(g.len(), buf.len());
+        for slot in buf.iter_mut().take(n) {
+            *slot = g.pop_front().unwrap();
+        }
+        if n == 0 {
+            Err(io::Error::new(io::ErrorKind::TimedOut, "no data"))
+        } else {
+            Ok(n)
+        }
+    }
+}
+
+impl Write for FakeSerialPort {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.handles.tx.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl SerialPort for FakeSerialPort {
+    fn name(&self) -> Option<String> {
+        Some("fake".into())
+    }
+    fn baud_rate(&self) -> serialport::Result<u32> {
+        Ok(0)
+    }
+    fn data_bits(&self) -> serialport::Result<serialport::DataBits> {
+        Err(serialport::Error::new(
+            serialport::ErrorKind::Unknown,
+            "unsupported",
+        ))
+    }
+    fn flow_control(&self) -> serialport::Result<serialport::FlowControl> {
+        Err(serialport::Error::new(
+            serialport::ErrorKind::Unknown,
+            "unsupported",
+        ))
+    }
+    fn parity(&self) -> serialport::Result<serialport::Parity> {
+        Err(serialport::Error::new(
+            serialport::ErrorKind::Unknown,
+            "unsupported",
+        ))
+    }
+    fn stop_bits(&self) -> serialport::Result<serialport::StopBits> {
+        Err(serialport::Error::new(
+            serialport::ErrorKind::Unknown,
+            "unsupported",
+        ))
+    }
+    fn timeout(&self) -> Duration {
+        Duration::from_millis(0)
+    }
+    fn set_baud_rate(&mut self, _: u32) -> serialport::Result<()> {
+        Ok(())
+    }
+    fn set_flow_control(&mut self, _: serialport::FlowControl) -> serialport::Result<()> {
+        Ok(())
+    }
+    fn set_parity(&mut self, _: serialport::Parity) -> serialport::Result<()> {
+        Ok(())
+    }
+    fn set_data_bits(&mut self, _: serialport::DataBits) -> serialport::Result<()> {
+        Ok(())
+    }
+    fn set_stop_bits(&mut self, _: serialport::StopBits) -> serialport::Result<()> {
+        Ok(())
+    }
+    fn set_timeout(&mut self, _: Duration) -> serialport::Result<()> {
+        Ok(())
+    }
+    fn write_request_to_send(&mut self, _: bool) -> serialport::Result<()> {
+        Ok(())
+    }
+    fn write_data_terminal_ready(&mut self, _: bool) -> serialport::Result<()> {
+        Ok(())
+    }
+    fn read_clear_to_send(&mut self) -> serialport::Result<bool> {
+        Ok(false)
+    }
+    fn read_data_set_ready(&mut self) -> serialport::Result<bool> {
+        Ok(false)
+    }
+    fn read_ring_indicator(&mut self) -> serialport::Result<bool> {
+        Ok(false)
+    }
+    fn read_carrier_detect(&mut self) -> serialport::Result<bool> {
+        Ok(false)
+    }
+    fn bytes_to_read(&self) -> serialport::Result<u32> {
+        Ok(self.handles.rx.lock().unwrap().len() as u32)
+    }
+    fn bytes_to_write(&self) -> serialport::Result<u32> {
+        Ok(*self.handles.outq.lock().unwrap())
+    }
+    fn clear(&self, _: serialport::ClearBuffer) -> serialport::Result<()> {
+        Ok(())
+    }
+    fn try_clone(&self) -> serialport::Result<Box<dyn SerialPort>> {
+        Err(serialport::Error::new(
+            serialport::ErrorKind::Unknown,
+            "unsupported",
+        ))
+    }
+    fn set_break(&self) -> serialport::Result<()> {
+        Ok(())
+    }
+    fn clear_break(&self) -> serialport::Result<()> {
+        Ok(())
+    }
+}
+
+pub struct ReactorHarness {
+    pub reactor: Reactor,
+    pub clock: Arc<MockClock>,
+    pub port_handles: FakePortHandles,
+    pub submission_tx: Sender<ReactorCommand>,
+}
+
+impl ReactorHarness {
+    pub fn new() -> Self {
+        let (port, port_handles) = FakeSerialPort::new();
+        let clock = MockClock::new();
+        let parser = Arc::new(MsgProtoParser::new_empty());
+        let (submission_tx, submission_rx) = std::sync::mpsc::channel();
+        let status_snapshot = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
+        let config = McuHostIoConfig::default();
+        let reactor = Reactor::new_for_tests(
+            port,
+            parser,
+            submission_rx,
+            status_snapshot,
+            config,
+            clock.clone(),
+        );
+        Self {
+            reactor,
+            clock,
+            port_handles,
+            submission_tx,
+        }
+    }
+
+    pub fn new_with_parser(parser: Arc<MsgProtoParser>) -> Self {
+        let (port, port_handles) = FakeSerialPort::new();
+        let clock = MockClock::new();
+        let (submission_tx, submission_rx) = std::sync::mpsc::channel();
+        let status_snapshot = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
+        let config = McuHostIoConfig::default();
+        let reactor = Reactor::new_for_tests(
+            port,
+            parser,
+            submission_rx,
+            status_snapshot,
+            config,
+            clock.clone(),
+        );
+        Self {
+            reactor,
+            clock,
+            port_handles,
+            submission_tx,
+        }
+    }
+
+    pub fn new_with_seq_state(seq: IdentifySeqState) -> Self {
+        let (port, port_handles) = FakeSerialPort::new();
+        let clock = MockClock::new();
+        let parser = Arc::new(MsgProtoParser::new_empty());
+        let (submission_tx, submission_rx) = std::sync::mpsc::channel();
+        let status_snapshot = Arc::new(ArcSwap::from_pointee(StatusEvent::default()));
+        let config = McuHostIoConfig::default();
+        let clock_dyn: Arc<dyn Clock> = clock.clone();
+        let reactor = Reactor::new_with_clock(
+            SerialFrameIo::new(port),
+            parser,
+            submission_rx,
+            status_snapshot,
+            seq,
+            config,
+            clock_dyn,
+        );
+        Self {
+            reactor,
+            clock,
+            port_handles,
+            submission_tx,
+        }
+    }
+
+    pub fn feed_rx(&self, bytes: &[u8]) {
+        self.port_handles.rx.lock().unwrap().extend(bytes);
+    }
+
+    pub fn advance_clock(&self, by: Duration) {
+        self.clock.advance(by);
+    }
+
+    pub fn tick(&mut self) -> TickOutcome {
+        self.reactor.tick_once()
+    }
+
+    pub fn tx_log(&self) -> Vec<u8> {
+        self.port_handles.tx.lock().unwrap().clone()
+    }
+
+    pub fn unacked_depth(&self) -> usize {
+        self.reactor.unacked_window.len()
+    }
+    pub fn awaiting_depth(&self) -> usize {
+        self.reactor.awaiting_response.len()
+    }
+    pub fn send_seq(&self) -> u64 {
+        self.reactor.seq_window.send_seq
+    }
+
+    pub fn feed_ack_all(&self) {
+        let seq_nibble = (self.reactor.seq_window.send_seq & 0x0F) as u8;
+        let frame = crate::host_io::wire::build_frame(&[], seq_nibble);
+        self.feed_rx(&frame);
+    }
+
+    pub fn submit_via_dispatch(
+        &mut self,
+        call_id: u64,
+        payload: Vec<u8>,
+        expected_response_name: &str,
+        deadline: Instant,
+    ) -> std::sync::mpsc::Receiver<Result<MessageParams, TransportError>> {
+        let (tx, rx) = sync_channel(1);
+        let _ = self.reactor.dispatch_submission(
+            call_id,
+            payload,
+            expected_response_name.to_string(),
+            tx,
+            deadline,
+        );
+        rx
+    }
+
+    pub fn register_interceptor(
+        &mut self,
+        msg_name: &str,
+        oid: Option<u32>,
+        callback: Box<dyn Fn(&crate::transport::MessageParams) + Send + Sync>,
+    ) -> crate::host_io::InterceptorId {
+        let (reply_tx, reply_rx) = std::sync::mpsc::sync_channel(1);
+        self.submission_tx
+            .send(crate::host_io::ReactorCommand::RegisterInterceptor {
+                msg_name: msg_name.to_owned(),
+                oid,
+                callback: crate::host_io::interceptor::InterceptorCallback(callback),
+                reply: reply_tx,
+            })
+            .expect("submission_tx send failed in register_interceptor");
+        self.reactor.tick_once();
+        reply_rx
+            .recv()
+            .expect("reply_rx recv failed in register_interceptor")
+    }
+
+    pub fn into_background_io(self) -> (Arc<crate::host_io::McuHostIo>, FakePortHandles) {
+        let submission_tx = self.submission_tx.clone();
+        let port_handles = self.port_handles.clone();
+        let mut reactor = self.reactor;
+        let handle = std::thread::spawn(move || reactor.run());
+        let io =
+            crate::host_io::McuHostIo::from_submission_tx_for_test(submission_tx, Some(handle));
+        (io, port_handles)
+    }
+}
+
+#[cfg(test)]
+mod smoke;

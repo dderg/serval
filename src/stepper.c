@@ -12,8 +12,8 @@
 #include "command.h" // DECL_COMMAND, command_decode_ptr
 #include "sched.h" // DECL_SHUTDOWN
 #include "trsync.h" // trsync_add_signal
-#include "kalico_runtime.h" // StepperBindingRust
-#include "kalico_log.h" // kalico_log_emit (mcu structured-log ready marker)
+#include "runtime.h" // StepperBindingRust
+#include "event_log.h" // event_log_emit (mcu structured-log ready marker)
 #include "generic/fault_handler.h" // kalico_diag_emit_prior_crash (Stage 5)
 
 struct stepper {
@@ -212,7 +212,7 @@ command_kalico_configure_axis(uint32_t *args)
         bindings[i]._pad[0] = 0;
         bindings[i]._pad[1] = 0;
     }
-    int32_t rc = kalico_runtime_configure_axis(
+    int32_t rc = runtime_configure_axis(
         runtime_handle, axis_idx, mode, mstep_bits,
         ring_depth,
         stepper_count > 0 ? bindings : 0,
@@ -250,11 +250,11 @@ command_kalico_configure_axis(uint32_t *args)
     // host's identify/attach handshake installs the mcu-log hook. Emitting at
     // MCU boot / first drain races ahead of the host connecting; the frame is
     // lost.
-    static uint8_t kalico_log_ready_emitted;
-    if (!kalico_log_ready_emitted) {
-        kalico_log_ready_emitted = 1;
-        kalico_log_emit(KALICO_LOG_LEVEL_DEBUG, KALICO_LOG_SUBSYS_RUNTIME,
-                        KALICO_LOG_EVENT_RUNTIME_MCU_READY, 0, 0, 0);
+    static uint8_t event_log_ready_emitted;
+    if (!event_log_ready_emitted) {
+        event_log_ready_emitted = 1;
+        event_log_emit(EVENT_LOG_LEVEL_DEBUG, EVENT_LOG_SUBSYS_RUNTIME,
+                        EVENT_LOG_EVENT_RUNTIME_MCU_READY, 0, 0, 0);
         kalico_diag_emit_prior_crash();
     }
 }
@@ -264,26 +264,26 @@ DECL_COMMAND(command_kalico_configure_axis,
              " steppers=%*s");
 
 void
-command_kalico_runtime_reset(uint32_t *args)
+command_runtime_reset(uint32_t *args)
 {
     (void)args;
     if (!runtime_handle)
         shutdown("runtime reset before runtime init");
     irqstatus_t flag = irq_save();
-    int32_t rc = kalico_runtime_reset(runtime_handle);
+    int32_t rc = runtime_reset(runtime_handle);
     irq_restore(flag);
     if (rc != 0)
         shutdown("runtime reset rejected");
 }
-DECL_COMMAND(command_kalico_runtime_reset, "kalico_runtime_reset");
+DECL_COMMAND(command_runtime_reset, "runtime_reset");
 
 void
-command_kalico_diag_dump(uint32_t *args)
+command_runtime_diag_dump(uint32_t *args)
 {
     (void)args;
     kalico_diag_emit_live();
 }
-DECL_COMMAND(command_kalico_diag_dump, "kalico_diag_dump");
+DECL_COMMAND(command_runtime_diag_dump, "runtime_diag_dump");
 
 void
 command_kalico_phase_stepping_enable_spi(uint32_t *args)
@@ -312,7 +312,7 @@ command_kalico_set_axis_mode(uint32_t *args)
         shutdown("kalico_set_axis_mode before runtime init");
     uint8_t axis_idx = args[0];
     uint8_t mode = args[1];
-    int32_t rc = kalico_runtime_set_axis_mode(runtime_handle, axis_idx, mode);
+    int32_t rc = runtime_set_axis_mode(runtime_handle, axis_idx, mode);
     if (rc != 0)
         shutdown("kalico_set_axis_mode rejected (motion in progress or bad arg)");
 }
@@ -327,7 +327,7 @@ command_kalico_set_stepper_offset(uint32_t *args)
     uint8_t stepper_idx = args[0];
     int32_t delta = (int32_t)args[1];
     uint16_t max_per_sample = args[2];
-    int32_t rc = kalico_runtime_set_stepper_offset(
+    int32_t rc = runtime_set_stepper_offset(
         runtime_handle, stepper_idx, delta, max_per_sample);
     if (rc != 0)
         shutdown("kalico_set_stepper_offset rejected (bad parameters)");
@@ -337,6 +337,29 @@ DECL_COMMAND(command_kalico_set_stepper_offset,
              " max_microsteps_per_sample=%hu");
 
 void
+command_kalico_resonance_buzz(uint32_t *args)
+{
+    if (!runtime_handle)
+        shutdown("kalico_resonance_buzz before runtime init");
+    uint8_t axis_mask = args[0];
+    uint8_t sign_mask = args[1];
+    uint32_t freq_start_millihz = args[2];
+    uint32_t freq_end_millihz = args[3];
+    uint32_t amplitude_nm = args[4];
+    uint32_t duration_ms = args[5];
+    uint32_t ramp_ms = args[6];
+    int32_t rc = runtime_resonance_buzz(
+        runtime_handle, axis_mask, sign_mask, freq_start_millihz,
+        freq_end_millihz, amplitude_nm, duration_ms, ramp_ms);
+    if (rc != 0)
+        shutdown("kalico_resonance_buzz rejected (bad parameters)");
+}
+DECL_COMMAND(command_kalico_resonance_buzz,
+             "kalico_resonance_buzz axis_mask=%c sign_mask=%c"
+             " freq_start_millihz=%u freq_end_millihz=%u amplitude_nm=%u"
+             " duration_ms=%u ramp_ms=%u");
+
+void
 command_kalico_phase_jog_to(uint32_t *args)
 {
     if (!runtime_handle)
@@ -344,7 +367,7 @@ command_kalico_phase_jog_to(uint32_t *args)
     uint8_t stepper_oid = args[0];
     uint16_t target_phase = args[1];
     uint16_t max_per_sample = args[2];
-    int32_t rc = kalico_runtime_phase_jog_to(
+    int32_t rc = runtime_phase_jog_to(
         runtime_handle, stepper_oid, target_phase, max_per_sample);
     if (rc != 0)
         shutdown("kalico_phase_jog_to rejected (bad args or not in phase mode)");
@@ -360,7 +383,7 @@ command_kalico_phase_align_to(uint32_t *args)
         shutdown("kalico_phase_align_to before runtime init");
     uint8_t stepper_oid = args[0];
     uint16_t target_phase = args[1];
-    int32_t rc = kalico_runtime_phase_align_to(
+    int32_t rc = runtime_phase_align_to(
         runtime_handle, stepper_oid, target_phase);
     if (rc != 0)
         shutdown("kalico_phase_align_to rejected (motion in progress or bad args)");
@@ -376,11 +399,11 @@ command_kalico_get_phase_state(uint32_t *args)
     uint8_t stepper_oid = args[0];
     uint8_t axis_idx = 0, mode = 0, settled = 0;
     uint16_t phase = 0;
-    int32_t rc = kalico_runtime_get_phase_state(
+    int32_t rc = runtime_get_phase_state(
         runtime_handle, stepper_oid, &axis_idx, &mode, &phase, &settled);
     if (rc != 0)
         shutdown("kalico_get_phase_state unknown stepper oid");
-    sendf("kalico_phase_state oid=%c axis_idx=%c mode=%c phase=%hu settled=%c",
+    sendf("motion_phase_state oid=%c axis_idx=%c mode=%c phase=%hu settled=%c",
           stepper_oid, axis_idx, mode, phase, settled);
 }
 DECL_COMMAND(command_kalico_get_phase_state,

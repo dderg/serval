@@ -47,15 +47,48 @@ fn make_engine() -> Engine {
 }
 
 fn make_storage() -> Vec<PieceEntry> {
-    vec![
-        PieceEntry {
-            start_time: 0,
-            coeffs: [0.0; 4],
-            duration: 0.0,
-            _reserved: 0,
-        };
-        TOTAL_RING_PIECES
-    ]
+    vec![PieceEntry::zeroed(); TOTAL_RING_PIECES]
+}
+
+fn linear_piece(start_time: u64, duration: f32, p0: f32, p1: f32) -> PieceEntry {
+    PieceEntry {
+        start_time,
+        duration,
+        coeff_count: 2,
+        coeffs: [
+            (p0 + p1) / 2.0,
+            (p1 - p0) / 2.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ],
+        ..PieceEntry::zeroed()
+    }
+}
+
+fn ease_piece(start_time: u64, duration: f32, target: f32) -> PieceEntry {
+    let d = f64::from(duration);
+    let mono = [
+        0.0,
+        0.0,
+        3.0 * f64::from(target) / (d * d),
+        -2.0 * f64::from(target) / (d * d * d),
+    ];
+    let cheb = nurbs::chebyshev::monomial_tau_to_chebyshev(&mono, d);
+    let mut coeffs = [0.0_f32; 8];
+    for (dst, src) in coeffs.iter_mut().zip(cheb.iter()) {
+        *dst = *src as f32;
+    }
+    PieceEntry {
+        start_time,
+        duration,
+        coeff_count: cheb.len() as u8,
+        coeffs,
+        ..PieceEntry::zeroed()
+    }
 }
 
 fn pulse_binding() -> StepperBindingRust {
@@ -105,12 +138,7 @@ fn e2e_linear_ramp_full_window() {
     let mut storage = make_storage();
     let (mut qs, shared) = setup_queues(&mut engine);
 
-    let piece = PieceEntry {
-        start_time: TICK_CYCLES,
-        coeffs: [0.0, TARGET_MM / 3.0, 2.0 * TARGET_MM / 3.0, TARGET_MM],
-        duration: DURATION_S,
-        _reserved: 0,
-    };
+    let piece = linear_piece(TICK_CYCLES, DURATION_S, 0.0, TARGET_MM);
     let rc = engine.push_pieces(0, &[piece], &mut storage);
     assert_eq!(rc, 0, "push_pieces failed");
 
@@ -198,12 +226,7 @@ fn e2e_ease_ramp_full_window() {
     let mut storage = make_storage();
     let (mut qs, shared) = setup_queues(&mut engine);
 
-    let piece = PieceEntry {
-        start_time: TICK_CYCLES,
-        coeffs: [0.0, 0.0, TARGET_MM, TARGET_MM],
-        duration: DURATION_S,
-        _reserved: 0,
-    };
+    let piece = ease_piece(TICK_CYCLES, DURATION_S, TARGET_MM);
     let rc = engine.push_pieces(0, &[piece], &mut storage);
     assert_eq!(rc, 0);
 
@@ -280,23 +303,8 @@ fn e2e_two_consecutive_moving_pieces() {
     let a_start = TICK_CYCLES;
     let b_start = a_start + half_dur_cycles;
 
-    let piece_a = PieceEntry {
-        start_time: a_start,
-        coeffs: [0.0, half_mm / 3.0, 2.0 * half_mm / 3.0, half_mm],
-        duration: half_dur,
-        _reserved: 0,
-    };
-    let piece_b = PieceEntry {
-        start_time: b_start,
-        coeffs: [
-            half_mm,
-            half_mm + (half_mm / 3.0),
-            half_mm + 2.0 * (half_mm / 3.0),
-            TARGET_MM,
-        ],
-        duration: half_dur,
-        _reserved: 0,
-    };
+    let piece_a = linear_piece(a_start, half_dur, 0.0, half_mm);
+    let piece_b = linear_piece(b_start, half_dur, half_mm, TARGET_MM);
 
     let rc = engine.push_pieces(0, &[piece_a, piece_b], &mut storage);
     assert_eq!(rc, 0, "push_pieces failed");

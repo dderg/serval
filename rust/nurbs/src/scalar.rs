@@ -47,11 +47,6 @@ impl<T: Float> ScalarNurbs<T> {
             control_points: &self.control_points,
         }
     }
-
-    #[must_use]
-    pub fn into_parts(self) -> (u8, Vec<T>, Vec<T>) {
-        (self.degree, self.knots.into_inner(), self.control_points)
-    }
 }
 
 #[cfg(feature = "host")]
@@ -171,61 +166,6 @@ pub(crate) fn validate<T: Float>(
     }
 
     Ok(())
-}
-
-use crate::{
-    WireError,
-    wire::{FORMAT_VERSION_V1, SCALAR_HEADER_BYTES},
-};
-
-impl<'a> ScalarNurbsRef<'a, f32> {
-    pub fn try_from_wire(buf: &'a [u8]) -> Result<Self, WireError> {
-        if (buf.as_ptr() as usize) % core::mem::align_of::<f32>() != 0 {
-            return Err(WireError::Misaligned);
-        }
-        if buf.len() < SCALAR_HEADER_BYTES {
-            return Err(WireError::TruncatedBuffer {
-                expected_len: SCALAR_HEADER_BYTES,
-                got: buf.len(),
-            });
-        }
-        let version = buf[0];
-        if version != FORMAT_VERSION_V1 {
-            return Err(WireError::UnknownVersion(version));
-        }
-        let degree = buf[1];
-        if buf[2] != 0 {
-            return Err(WireError::WeightsUnsupported);
-        }
-        let knot_count = u16::from_ne_bytes([buf[4], buf[5]]) as usize;
-        let cp_count = u16::from_ne_bytes([buf[6], buf[7]]) as usize;
-
-        let knots_bytes = knot_count * core::mem::size_of::<f32>();
-        let cps_bytes = cp_count * core::mem::size_of::<f32>();
-        let total = SCALAR_HEADER_BYTES + knots_bytes + cps_bytes;
-        if buf.len() < total {
-            return Err(WireError::TruncatedBuffer {
-                expected_len: total,
-                got: buf.len(),
-            });
-        }
-
-        // SAFETY: alignment checked above; lengths checked above; T = f32 has
-        // no invalid bit patterns for any 4-byte sequence.
-        #[allow(unsafe_code)]
-        let (knots, cps) = unsafe {
-            let knots_ptr = buf.as_ptr().add(SCALAR_HEADER_BYTES).cast::<f32>();
-            let cps_ptr = buf
-                .as_ptr()
-                .add(SCALAR_HEADER_BYTES + knots_bytes)
-                .cast::<f32>();
-            let knots = core::slice::from_raw_parts(knots_ptr, knot_count);
-            let cps = core::slice::from_raw_parts(cps_ptr, cp_count);
-            (knots, cps)
-        };
-
-        Self::try_new(degree, knots, cps).map_err(WireError::from)
-    }
 }
 
 #[cfg(all(test, feature = "host"))]

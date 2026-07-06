@@ -1,8 +1,8 @@
-use runtime::piece_ring::PieceEntry;
+use runtime::piece_ring::{PIECE_ENTRY_BYTES, PieceEntry};
 
 #[test]
-fn piece_entry_is_32_bytes() {
-    assert_eq!(core::mem::size_of::<PieceEntry>(), 32);
+fn piece_entry_is_48_bytes() {
+    assert_eq!(core::mem::size_of::<PieceEntry>(), PIECE_ENTRY_BYTES);
 }
 
 #[test]
@@ -11,80 +11,66 @@ fn piece_entry_is_8_byte_aligned() {
 }
 
 #[test]
-fn piece_entry_to_monomial_constant() {
+fn piece_entry_constant_endpoints() {
     let entry = PieceEntry {
         start_time: 0,
-        coeffs: [5.0, 5.0, 5.0, 5.0],
         duration: 0.001,
-        _reserved: 0,
+        coeff_count: 1,
+        coeffs: [5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ..PieceEntry::zeroed()
     };
-    let (pos, vel) = entry.to_monomial();
 
     assert!(
-        (pos[0] - 5.0).abs() < 1e-5,
-        "constant c0 expected 5.0, got {}",
-        pos[0]
+        (entry.pos_start() - 5.0).abs() < 1e-5,
+        "constant pos_start expected 5.0, got {}",
+        entry.pos_start()
     );
-    for k in 1..4 {
-        assert!(
-            pos[k].abs() < 1e-5,
-            "constant c{k} expected 0.0, got {}",
-            pos[k]
-        );
-    }
-    for (k, &v) in vel.iter().enumerate() {
-        assert!(
-            v.abs() < 1e-5,
-            "constant vel_coeff[{k}] expected 0.0, got {v}"
-        );
-    }
+    assert!(
+        (entry.pos_end() - 5.0).abs() < 1e-5,
+        "constant pos_end expected 5.0, got {}",
+        entry.pos_end()
+    );
+    assert!(
+        entry.vel_start().abs() < 1e-5,
+        "constant vel_start expected 0.0, got {}",
+        entry.vel_start()
+    );
+    assert!(
+        entry.vel_end().abs() < 1e-5,
+        "constant vel_end expected 0.0, got {}",
+        entry.vel_end()
+    );
 }
 
 #[test]
-fn piece_entry_to_monomial_linear() {
+fn piece_entry_linear_endpoints() {
     let entry = PieceEntry {
         start_time: 0,
-        coeffs: [0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0],
         duration: 0.01,
-        _reserved: 0,
+        coeff_count: 2,
+        coeffs: [0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ..PieceEntry::zeroed()
     };
-    let (pos, vel) = entry.to_monomial();
 
     assert!(
-        pos[0].abs() < 1e-5,
-        "linear c0 expected 0.0, got {}",
-        pos[0]
+        entry.pos_start().abs() < 1e-5,
+        "linear pos_start expected 0.0, got {}",
+        entry.pos_start()
     );
     assert!(
-        (pos[1] - 100.0).abs() < 1e-3,
-        "linear c1 expected 100.0, got {}",
-        pos[1]
+        (entry.pos_end() - 1.0).abs() < 1e-5,
+        "linear pos_end expected 1.0, got {}",
+        entry.pos_end()
     );
     assert!(
-        pos[2].abs() < 1e-3,
-        "linear c2 expected 0.0, got {}",
-        pos[2]
+        (entry.vel_start() - 100.0).abs() < 1e-3,
+        "linear vel_start expected 100.0, got {}",
+        entry.vel_start()
     );
     assert!(
-        pos[3].abs() < 1e-3,
-        "linear c3 expected 0.0, got {}",
-        pos[3]
-    );
-
-    assert!(
-        (vel[0] - 100.0).abs() < 1e-3,
-        "linear vel[0] expected 100.0, got {}",
-        vel[0]
-    );
-    assert!(
-        vel[1].abs() < 1e-3,
-        "linear vel[1] expected 0.0, got {}",
-        vel[1]
-    );
-    assert!(
-        vel[2].abs() < 1e-3,
-        "linear vel[2] expected 0.0, got {}",
-        vel[2]
+        (entry.vel_end() - 100.0).abs() < 1e-3,
+        "linear vel_end expected 100.0, got {}",
+        entry.vel_end()
     );
 }
 
@@ -92,9 +78,8 @@ fn piece_entry_to_monomial_linear() {
 fn piece_entry_end_time() {
     let entry = PieceEntry {
         start_time: 1000,
-        coeffs: [0.0; 4],
         duration: 0.001,
-        _reserved: 0,
+        ..PieceEntry::zeroed()
     };
     let end = entry.end_time(550_000_000.0_f32);
     assert_eq!(end, 551_000, "end_time mismatch: got {end}");
@@ -105,19 +90,13 @@ use runtime::piece_ring::PieceRing;
 fn make_piece(start: u64, duration: f32) -> PieceEntry {
     PieceEntry {
         start_time: start,
-        coeffs: [0.0, 0.0, 0.0, 0.0],
         duration,
-        _reserved: 0,
+        ..PieceEntry::zeroed()
     }
 }
 
 fn make_storage<const N: usize>() -> [PieceEntry; N] {
-    [PieceEntry {
-        start_time: 0,
-        coeffs: [0.0; 4],
-        duration: 0.0,
-        _reserved: 0,
-    }; N]
+    [PieceEntry::zeroed(); N]
 }
 
 #[test]
@@ -210,20 +189,13 @@ fn ring_pop_empty_is_noop() {
 use runtime::piece_ring::RingDescriptor;
 
 fn make_rd_storage<const N: usize>() -> [PieceEntry; N] {
-    [PieceEntry {
-        start_time: 0,
-        coeffs: [0.0; 4],
-        duration: 0.0,
-        _reserved: 0,
-    }; N]
+    [PieceEntry::zeroed(); N]
 }
 
 fn pe(start: u64) -> PieceEntry {
     PieceEntry {
         start_time: start,
-        coeffs: [0.0; 4],
-        duration: 0.0,
-        _reserved: 0,
+        ..PieceEntry::zeroed()
     }
 }
 

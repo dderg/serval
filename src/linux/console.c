@@ -19,8 +19,8 @@
 #include "board/misc.h" // console_sendf
 #include "command.h" // command_find_block
 #include "internal.h" // console_setup
-#include "kalico_demux.h" // kalico_demux_*
-#include "kalico_dispatch.h" // kalico_dispatch_frame
+#include "mcu_demux.h" // mcu_demux_*
+#include "mcu_transport_dispatch.h" // mcu_transport_dispatch_frame
 #include "sched.h" // sched_wake_task
 
 static struct pollfd main_pfd[1];
@@ -153,8 +153,13 @@ kalico_console_write_raw(const uint8_t *buf, uint16_t len)
 void
 console_task(void)
 {
+#if !CONFIG_MCU_SIM
+    // In the sim the runtime tick monopolizes the cooperative scheduler
+    // and irq_wait() never reaches ppoll, so console_wake is never set;
+    // skipping the gate costs one EWOULDBLOCK read() per task round.
     if (!sched_check_wake(&console_wake))
         return;
+#endif
 
     // Read data
     int ret = read(main_pfd[MP_TTY_IDX].fd, &receive_buf[receive_pos]
@@ -172,7 +177,7 @@ console_task(void)
         shutdown("Force shutdown command");
 
     if (ret > 0)
-        kalico_demux_pump(&receive_buf[receive_pos], (uint16_t)ret);
+        mcu_demux_pump(&receive_buf[receive_pos], (uint16_t)ret);
     receive_pos = 0;
 }
 DECL_TASK(console_task);
