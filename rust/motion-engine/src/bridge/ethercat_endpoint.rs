@@ -132,6 +132,7 @@ fn push_drive_flags(args: &mut Vec<String>, d: &EthercatDrive) {
         max_torque,
         velocity_ff,
         ff_torque_clamp,
+        ff_lead_cycles,
         invert_direction,
         dynamics_profile,
     ) = d;
@@ -155,6 +156,10 @@ fn push_drive_flags(args: &mut Vec<String>, d: &EthercatDrive) {
     }
     args.push("--torque-clamp-pct".into());
     args.push(ff_torque_clamp.to_string());
+    if *ff_lead_cycles > 0 {
+        args.push("--ff-lead-cycles".into());
+        args.push(ff_lead_cycles.to_string());
+    }
     if let Some(profile) = dynamics_profile {
         args.push("--slave-dynamics-profile".into());
         args.push(profile.to_string());

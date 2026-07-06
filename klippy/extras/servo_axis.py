@@ -94,6 +94,9 @@ class ServoRail(BaseRail):
         self.ff_torque_clamp = motor_config.getfloat(
             "ff_torque_clamp", 30.0, above=0.0, maxval=400.0
         )
+        self.ff_lead_cycles = motor_config.getint(
+            "ff_lead_cycles", 0, minval=0, maxval=40
+        )
         self.invert_direction = motor_config.getboolean(
             "invert_direction", False
         )
@@ -188,7 +191,7 @@ class ServoRail(BaseRail):
         return self.rotation_distance
 
     def get_ff_config(self):
-        return (self.velocity_ff, self.ff_torque_clamp)
+        return (self.velocity_ff, self.ff_torque_clamp, self.ff_lead_cycles)
 
     def get_invert_direction(self):
         return self.invert_direction

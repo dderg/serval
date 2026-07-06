@@ -802,11 +802,13 @@ dependencies = [
  "crossbeam-channel",
  "gcode",
  "geometry",
+ "libm",
  "motion-pipeline",
  "nurbs",
  "serde",
  "serde_json",
  "thiserror",
+ "tracing",
  "trajectory",
 ]
 
