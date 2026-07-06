@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -o pipefail
 
-make -f Makefile.rust motion-engine
+make -f Makefile.rust motion-engine-fast
 
 # Ensure cargo/rustup are on PATH (macOS Homebrew or manual installs may not add ~/.cargo/bin)
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -82,7 +82,10 @@ if [ "$ci" = 1 ]; then
   exec "$PYTHON" "$SCRIPT_DIR/run.py" "${run_args[@]}"
 fi
 
-if "$PYTHON" "$SCRIPT_DIR/run.py" "${run_args[@]}"; then
+RESULTS_DIR="$(mktemp -d -t snapshot-results)"
+trap 'rm -rf "$RESULTS_DIR"' EXIT
+
+if "$PYTHON" "$SCRIPT_DIR/run.py" --results-dir "$RESULTS_DIR" "${run_args[@]}"; then
   exit 0
 fi
 
@@ -96,9 +99,10 @@ cat <<EOF
 EOF
 
 trap 'exit 130' INT
-"$PYTHON" "$SCRIPT_DIR/web/server.py" --port "$PORT"
+"$PYTHON" "$SCRIPT_DIR/web/server.py" --port "$PORT" --results "$RESULTS_DIR"
 trap - INT
 
 echo
 echo "re-checking snapshots after review..."
-exec "$PYTHON" "$SCRIPT_DIR/run.py" "${run_args[@]}"
+"$PYTHON" "$SCRIPT_DIR/run.py" "${run_args[@]}"
+exit $?
