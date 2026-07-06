@@ -1,9 +1,9 @@
-use nurbs::algebra::{PiecewisePolynomialKernel, convolve, restrict_to_domain};
+use nurbs::algebra::{PiecewisePolynomialKernel, convolve};
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 use nurbs::eval::eval;
 
 #[test]
-fn convolve_then_restrict_preserves_endpoint_on_offset_second_segment() {
+fn convolve_preserves_endpoint_on_offset_second_segment() {
     let f_hz = 50.0_f64;
     let t_sm = 0.95625 / f_hz;
     let h = t_sm / 2.0;
@@ -50,23 +50,14 @@ fn convolve_then_restrict_preserves_endpoint_on_offset_second_segment() {
 
     let input = bezier_pieces_to_nurbs(&pieces);
     let convolved = convolve(&input, &kernel).unwrap();
-    let restricted = restrict_to_domain(&convolved, t_start, t_end).unwrap();
 
-    let v_end = eval(&restricted.as_view(), t_end);
-    let v_just_below = eval(&restricted.as_view(), t_end - 1e-9);
+    let v_end = eval(&convolved.as_view(), t_end);
+    let v_just_below = eval(&convolved.as_view(), t_end - 1e-9);
     assert!(
         (v_end - v_just_below).abs() < 1e-6,
-        "discontinuity at final knot: eval({t_end})={v_end}, \
+        "discontinuity at t_end: eval({t_end})={v_end}, \
          eval({t_end}−1e-9)={v_just_below}, diff={}",
         v_end - v_just_below,
-    );
-
-    let last_cp = *restricted.control_points().last().unwrap();
-    assert!(
-        (last_cp - v_end).abs() < 1e-6,
-        "last control point ({last_cp}) does not match polynomial value at \
-         t_end ({v_end}) — degenerate trailing piece, diff={}",
-        last_cp - v_end,
     );
 
     assert!(

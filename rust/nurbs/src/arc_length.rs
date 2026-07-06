@@ -125,9 +125,9 @@ pub(crate) fn integrate_arc_length<T: Float, F: Fn(T) -> T>(
 
 use crate::MIN_PARAMETRIC_SPEED;
 #[cfg(feature = "host")]
-use crate::eval::{eval, vector_derivative, vector_eval};
+use crate::eval::{vector_derivative, vector_eval};
 #[cfg(feature = "host")]
-use crate::{ArcLengthError, NurbsView, VectorNurbsView};
+use crate::{ArcLengthError, VectorNurbsView};
 
 #[inline]
 pub fn param_from_arc_length<T: Float>(table: &ArcLengthTableRef<'_, T>, s: T) -> T {
@@ -207,27 +207,6 @@ pub fn arc_length_from_param<T: Float>(table: &ArcLengthTableRef<'_, T>, u: T) -
     let floor = T::from_f64(MIN_PARAMETRIC_SPEED);
     let frac = (u_clamped - u_lo) / span.max(floor);
     s_lo + (s_hi - s_lo) * frac
-}
-
-#[cfg(feature = "host")]
-pub fn build_arc_length_table_scalar<T: Float, V: NurbsView<T>>(
-    curve: &V,
-    tolerance: T,
-    max_samples: usize,
-) -> Result<ArcLengthTable<T>, ArcLengthError<T>> {
-    let h = T::from_f64(1e-6);
-    let knots = curve.knots();
-    let u_start = knots[0];
-    let u_end = knots[knots.len() - 1];
-
-    let integrand = |u: T| {
-        let u_safe = u.max(u_start + h).min(u_end - h);
-        let plus = eval(curve, u_safe + h);
-        let minus = eval(curve, u_safe - h);
-        ((plus - minus) / (h + h)).abs()
-    };
-
-    build_table_via_integrand(integrand, u_start, u_end, tolerance, max_samples)
 }
 
 #[cfg(feature = "host")]
