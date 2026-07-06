@@ -85,13 +85,6 @@ def test_contact_probing(world):
     assert world.shutdown_line() is None
 
 
-@pytest.mark.xfail(
-    reason="calibration stream samples during the pre-descend dwell query "
-    "motion state at host times the engine retains no history for (idle "
-    "axes answer with a ~10ms window), so samples lack 'pos' and the "
-    "fork's _calibrate raises KeyError — motion-history retention issue, "
-    "not an emulator gap (see sim-trip-time-resolution-handoff.md)",
-)
 def test_contact_auto_calibrate(world):
     world.gcode_ok("SET_KINEMATIC_POSITION X=150 Y=150 Z=10", timeout=10)
     world.gcode_ok("G4 P1000", timeout=15)
@@ -100,13 +93,6 @@ def test_contact_auto_calibrate(world):
     assert world.shutdown_line() is None
 
 
-@pytest.mark.skip(
-    reason="hangs: the first travel move panics the kalico-shape thread "
-    "('shaping window needs unavailable history at t=1.0', "
-    "motion-pipeline/src/shaper.rs:130) so the move never completes and "
-    "BEACON_POKE never responds — motion-pipeline issue, not an emulator "
-    "gap; skip rather than burn 120s",
-)
 def test_poke(world):
     world.gcode_ok("SET_KINEMATIC_POSITION X=150 Y=150 Z=10", timeout=10)
     world.gcode_ok("G4 P1000", timeout=15)
@@ -118,8 +104,12 @@ def test_poke(world):
 
 
 @pytest.mark.skip(
-    reason="hangs: BED_MESH_CALIBRATE dies with an unhandled reactor "
-    "exception and never responds; needs a dedicated debugging session",
+    reason="hangs: mid-scan the emulator's beacon stream stalls ('Beacon "
+    "sensor not receiving data' shutdown), then the fork's mesh scan "
+    "callback (beacon.py cb, sample['pos']) KeyErrors on the pos-less "
+    "samples flushed after shutdown, killing the reactor — beacon stream "
+    "throughput/stall issue, needs a dedicated session (NOT the shaper "
+    "stream-boundary bug, which is fixed)",
 )
 def test_bed_mesh(sim_world):
     world = sim_world(_cfg(bed_mesh=True), beacon=True)

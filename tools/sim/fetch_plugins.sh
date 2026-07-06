@@ -16,7 +16,7 @@ DEST="${1:-$REPO_ROOT/tools/sim/third_party_repos}"
 
 # url | dir name | pinned rev
 PLUGINS=(
-  "https://github.com/dderg/beacon_klipper.git|beacon_klipper|d08ea46edfc74ac9e8181a46acff0d17c942936f"
+  "https://github.com/dderg/beacon_klipper.git|beacon_klipper|ac20aee06c8b759096789fe3cb1eebd4892c0173"
 )
 
 mkdir -p "$DEST"
