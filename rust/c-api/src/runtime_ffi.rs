@@ -59,6 +59,30 @@ pub mod exports {
         fn event_log_emit(level: u8, subsystem: u8, event: u16, code: u16, arg0: u32, arg1: u32);
     }
 
+    macro_rules! guarded_ctx {
+        ($rt:expr) => {{
+            if $rt.is_null() {
+                return;
+            }
+            if !INIT_DONE.load(Ordering::Acquire) {
+                return;
+            }
+            $rt.cast::<RuntimeContext>()
+        }};
+        ($rt:expr, $default:expr) => {
+            guarded_ctx!($rt, $default, $default)
+        };
+        ($rt:expr, $null_default:expr, $init_default:expr) => {{
+            if $rt.is_null() {
+                return $null_default;
+            }
+            if !INIT_DONE.load(Ordering::Acquire) {
+                return $init_default;
+            }
+            $rt.cast::<RuntimeContext>()
+        }};
+    }
+
     #[unsafe(no_mangle)]
     pub extern "C" fn runtime_handle_create() -> *mut Runtime {
         // Plain store not compare_exchange: Renode H7 v1.16 silently drops STREXB, leaving INIT_DONE=0 after CAS succeeds in code.
@@ -84,13 +108,7 @@ pub mod exports {
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn runtime_tick_sample(rt: *mut Runtime) {
-        if rt.is_null() {
-            return;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
+        let ctx = guarded_ctx!(rt);
         // SAFETY: rt non-null, INIT_DONE=true. TIM5 is the sole writer of IsrState; ISR owns ring tail, foreground writes only HEAD positions not yet seen by ISR. UnsafeCell::raw_get yields provenance without a shared ref.
         unsafe {
             let raw = runtime_cyccnt_read();
@@ -107,13 +125,7 @@ pub mod exports {
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn runtime_handle_status(rt: *mut Runtime) -> u8 {
-        if rt.is_null() {
-            return RuntimeStatus::Fault as u8;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return RuntimeStatus::Fault as u8;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
+        let ctx = guarded_ctx!(rt, RuntimeStatus::Fault as u8);
         // SAFETY: read-only SharedState atomics; no &mut.
         unsafe {
             let shared_ptr: *const SharedState = core::ptr::addr_of!((*ctx).shared);
@@ -123,13 +135,7 @@ pub mod exports {
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn runtime_handle_last_error(rt: *mut Runtime) -> i32 {
-        if rt.is_null() {
-            return RUNTIME_ERR_NULL_PTR;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return RUNTIME_ERR_NOT_INIT;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
+        let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
         // SAFETY: read-only SharedState atomics; no &mut.
         unsafe {
             let shared_ptr: *const SharedState = core::ptr::addr_of!((*ctx).shared);
@@ -139,13 +145,7 @@ pub mod exports {
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn runtime_handle_tick_counter(rt: *mut Runtime) -> u32 {
-        if rt.is_null() {
-            return 0;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return 0;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
+        let ctx = guarded_ctx!(rt, 0);
         // SAFETY: ISR is sole writer of IsrState; atomic read is safe from foreground.
         unsafe {
             let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
@@ -155,13 +155,7 @@ pub mod exports {
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn runtime_handle_fault_detail(rt: *mut Runtime) -> u32 {
-        if rt.is_null() {
-            return 0;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return 0;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
+        let ctx = guarded_ctx!(rt, 0);
         // SAFETY: read-only SharedState atomics; no &mut.
         unsafe {
             let shared_ptr: *const SharedState = core::ptr::addr_of!((*ctx).shared);
@@ -171,13 +165,7 @@ pub mod exports {
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn runtime_handle_tick_blocker(rt: *mut Runtime) -> u32 {
-        if rt.is_null() {
-            return 0;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return 0;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
+        let ctx = guarded_ctx!(rt, 0);
         // SAFETY: read-only SharedState atomics; no &mut.
         unsafe {
             let shared_ptr: *const SharedState = core::ptr::addr_of!((*ctx).shared);
@@ -187,13 +175,7 @@ pub mod exports {
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn runtime_handle_tick_blocker_pc(rt: *mut Runtime) -> u32 {
-        if rt.is_null() {
-            return 0;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return 0;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
+        let ctx = guarded_ctx!(rt, 0);
         // SAFETY: read-only SharedState atomics; no &mut.
         unsafe {
             let shared_ptr: *const SharedState = core::ptr::addr_of!((*ctx).shared);
@@ -274,14 +256,9 @@ pub mod exports {
         rt: *mut Runtime,
         out_credit_epoch: *mut u32,
     ) -> i32 {
-        if rt.is_null() {
-            return RUNTIME_ERR_NULL_PTR;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return RUNTIME_ERR_NOT_INIT;
-        }
+        let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
         // SAFETY: rt non-null + INIT_DONE verified; flush() performs its own half-split projections.
-        unsafe { runtime::stream::flush(rt.cast::<RuntimeContext>(), out_credit_epoch) }
+        unsafe { runtime::stream::flush(ctx, out_credit_epoch) }
     }
 
     #[unsafe(no_mangle)]
@@ -322,13 +299,7 @@ pub mod exports {
         motor_idx: u8,
         slot_idx: u8,
     ) -> i32 {
-        if rt.is_null() {
-            return RUNTIME_ERR_INVALID_HANDLE;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return RUNTIME_ERR_NOT_INIT;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
+        let ctx = guarded_ctx!(rt, RUNTIME_ERR_INVALID_HANDLE, RUNTIME_ERR_NOT_INIT);
         // SAFETY: phase_slot_idx/phase_motor_count/step_modes are atomics in
         // SharedState; shared &SharedState, no &mut. Foreground-only caller.
         unsafe {
@@ -407,13 +378,7 @@ pub mod exports {
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn runtime_reset(rt: *mut Runtime) -> i32 {
-        if rt.is_null() {
-            return RUNTIME_ERR_NULL_PTR;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return RUNTIME_ERR_NOT_INIT;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
+        let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
         // SAFETY: foreground under C-side IRQ guard; §11.2 raw-pointer projection.
         unsafe {
             let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
@@ -434,13 +399,7 @@ pub mod exports {
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn runtime_gate_pieces(rt: *mut Runtime) -> i32 {
-        if rt.is_null() {
-            return RUNTIME_ERR_NULL_PTR;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return RUNTIME_ERR_NOT_INIT;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
+        let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
         unsafe {
             let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
             (*isr_ptr).engine.gate_pieces();
@@ -450,13 +409,7 @@ pub mod exports {
 
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn runtime_ungate_pieces(rt: *mut Runtime) -> i32 {
-        if rt.is_null() {
-            return RUNTIME_ERR_NULL_PTR;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return RUNTIME_ERR_NOT_INIT;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
+        let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
         unsafe {
             let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
             (*isr_ptr).engine.ungate_pieces()
@@ -519,13 +472,7 @@ pub mod exports {
         axis_idx: u8,
         new_head: u32,
     ) -> i32 {
-        if rt.is_null() {
-            return RUNTIME_ERR_NULL_PTR;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return RUNTIME_ERR_NOT_INIT;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
+        let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
         // SAFETY: §11.2 foreground-only. ring.head is a plain u32 written only by foreground; on single-core ARMv7E-M exception entry/return are memory barriers — no explicit fence needed.
         unsafe {
             let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
@@ -570,13 +517,7 @@ pub mod exports {
         axis_idx: u8,
         new_mode: u8,
     ) -> i32 {
-        if rt.is_null() {
-            return RUNTIME_ERR_NULL_PTR;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return RUNTIME_ERR_NOT_INIT;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
+        let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
         // SAFETY: foreground-only; §11.2 raw-pointer projection.
         unsafe {
             let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
@@ -591,13 +532,7 @@ pub mod exports {
         delta_microsteps: i32,
         max_microsteps_per_sample: u16,
     ) -> i32 {
-        if rt.is_null() {
-            return RUNTIME_ERR_NULL_PTR;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return RUNTIME_ERR_NOT_INIT;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
+        let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
         // SAFETY: foreground-only; &SharedState borrow is independent of &mut IsrState — SharedState is atomics-only.
         unsafe {
             let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
@@ -619,13 +554,7 @@ pub mod exports {
         target_phase: u16,
         max_microsteps_per_sample: u16,
     ) -> i32 {
-        if rt.is_null() {
-            return RUNTIME_ERR_NULL_PTR;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return RUNTIME_ERR_NOT_INIT;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
+        let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
         // SAFETY: foreground-only; &SharedState borrow is independent of &mut IsrState — SharedState is atomics-only.
         unsafe {
             let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
@@ -652,13 +581,7 @@ pub mod exports {
         duration_ms: u32,
         ramp_ms: u32,
     ) -> i32 {
-        if rt.is_null() {
-            return RUNTIME_ERR_NULL_PTR;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return RUNTIME_ERR_NOT_INIT;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
+        let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
         // SAFETY: foreground-only; §11.2 raw-pointer projection; command dispatch serialised against TIM5.
         unsafe {
             let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
@@ -709,13 +632,7 @@ pub mod exports {
         stepper_oid: u8,
         target_phase: u16,
     ) -> i32 {
-        if rt.is_null() {
-            return RUNTIME_ERR_NULL_PTR;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return RUNTIME_ERR_NOT_INIT;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
+        let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
         // SAFETY: foreground-only; §11.2 raw-pointer projection.
         unsafe {
             let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
