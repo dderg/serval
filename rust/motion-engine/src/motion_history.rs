@@ -7,11 +7,6 @@ use crate::types::AxisKey;
 
 pub const HISTORY_CAPACITY: usize = 4096;
 
-/// Provisional alarm threshold for the host-keyed vs legacy MCU-clock-keyed
-/// position cross-check. Refine from the bench `history_shadow_divergence`
-/// distribution once real probe runs land.
-pub const SHADOW_DIVERGENCE_TOL_MM: f64 = 0.01;
-
 #[derive(Debug, thiserror::Error)]
 pub enum HistoryError {
     #[error(
@@ -198,16 +193,6 @@ fn eval_state(piece: &HistoryPiece, host_t: f64) -> AxisState {
     eval_at_u(piece, u)
 }
 
-fn eval_state_by_clock(piece: &HistoryPiece, clock: u64) -> AxisState {
-    let dur_ticks = piece.end_clock.saturating_sub(piece.start_clock) as f64;
-    let u = if dur_ticks > 0.0 {
-        (clock.saturating_sub(piece.start_clock) as f64 / dur_ticks).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    eval_at_u(piece, u)
-}
-
 #[derive(Debug, Default)]
 pub struct HistoryStore {
     rings: HashMap<AxisKey, VecDeque<HistoryPiece>>,
@@ -330,35 +315,6 @@ impl HistoryStore {
         self.endpoints.get(&key).map(|e| e.position)
     }
 
-    /// Shadow lookup in the legacy per-axis MCU-clock domain, used only to
-    /// cross-check the host-keyed result. Returns `None` when the ring cannot
-    /// resolve the clock (no pieces, before window, or future) — those cases
-    /// carry no divergence signal and are skipped by the caller.
-    pub fn state_at_clock_legacy(
-        &self,
-        key: AxisKey,
-        clock: u64,
-        now_clock: u64,
-    ) -> Option<AxisState> {
-        let ring = self.rings.get(&key).filter(|r| !r.is_empty())?;
-        let idx = ring.partition_point(|p| p.start_clock <= clock);
-        if idx == 0 {
-            return None;
-        }
-        let piece = &ring[idx - 1];
-        if clock < piece.end_clock {
-            return Some(eval_state_by_clock(piece, clock));
-        }
-        if clock > now_clock {
-            return None;
-        }
-        Some(AxisState {
-            position: piece.end_position(),
-            velocity: 0.0,
-            acceleration: 0.0,
-        })
-    }
-
     pub fn state_at_host(
         &self,
         key: AxisKey,
@@ -414,25 +370,6 @@ impl HistoryStore {
             }
         }
         Ok(hold.hold_state())
-    }
-}
-
-pub fn check_shadow_divergence(key: AxisKey, host_pos: f64, shadow: Option<AxisState>) {
-    let Some(shadow) = shadow else {
-        return;
-    };
-    let delta_mm = (host_pos - shadow.position).abs();
-    if delta_mm > SHADOW_DIVERGENCE_TOL_MM {
-        tracing::warn!(
-            subsystem = "motion",
-            event = "history_shadow_divergence",
-            mcu = key.mcu_id,
-            axis = key.axis,
-            host_pos,
-            shadow_pos = shadow.position,
-            delta_mm,
-            "[history-shadow] host-keyed vs stepper-clock-keyed position diverged"
-        );
     }
 }
 

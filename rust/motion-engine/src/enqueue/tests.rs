@@ -2,7 +2,7 @@ use super::*;
 use crate::kinematics::KinematicsModule;
 use crate::mcu_config::{AXIS_X, AXIS_Y, KINEMATICS_COREXY, McuCaps};
 
-fn constant_axis(value: f64, n_pieces: usize, piece_dur: f64) -> ScalarNurbs<f64> {
+fn constant_axis(value: f64, n_pieces: usize, piece_dur: f64) -> ScalarNurbs {
     let bern = [value; 4];
     let mut pieces = Vec::with_capacity(n_pieces);
     let mut u = 0.0_f64;
@@ -14,7 +14,7 @@ fn constant_axis(value: f64, n_pieces: usize, piece_dur: f64) -> ScalarNurbs<f64
     nurbs::bezier::bezier_pieces_to_nurbs(&pieces)
 }
 
-fn multi_piece_axis(pieces_bern: &[([f64; 4], f64)]) -> ScalarNurbs<f64> {
+fn multi_piece_axis(pieces_bern: &[([f64; 4], f64)]) -> ScalarNurbs {
     let mut pieces = Vec::with_capacity(pieces_bern.len());
     let mut u = 0.0_f64;
     for (bern, dur) in pieces_bern {
@@ -25,7 +25,7 @@ fn multi_piece_axis(pieces_bern: &[([f64; 4], f64)]) -> ScalarNurbs<f64> {
     nurbs::bezier::bezier_pieces_to_nurbs(&pieces)
 }
 
-fn linear_axis(p0: f64, p1: f64) -> ScalarNurbs<f64> {
+fn linear_axis(p0: f64, p1: f64) -> ScalarNurbs {
     let d = p1 - p0;
     let bern = [p0, p0 + d / 3.0, p0 + 2.0 * d / 3.0, p1];
     let piece = nurbs::bezier::BezierPiece::from_bernstein(&bern, 0.0_f64, 1.0_f64);
@@ -206,7 +206,7 @@ fn flatten_axis_max_piece_secs_splits_long_piece() {
         },
     }];
 
-    fn linear_axis_scaled(p0: f64, p1: f64, duration: f64) -> ScalarNurbs<f64> {
+    fn linear_axis_scaled(p0: f64, p1: f64, duration: f64) -> ScalarNurbs {
         let d = p1 - p0;
         let bern = [p0, p0 + d / 3.0, p0 + 2.0 * d / 3.0, p1];
         let piece = nurbs::bezier::BezierPiece::from_bernstein(&bern, 0.0_f64, duration);
@@ -548,7 +548,7 @@ fn constant_at_or_under_max_piece_secs_stays_whole() {
     assert_eq!(subs[0], (vec![2.0], 0.020));
 }
 
-fn shifted_axis(pieces_bern: &[([f64; 4], f64)], u_base: f64) -> ScalarNurbs<f64> {
+fn shifted_axis(pieces_bern: &[([f64; 4], f64)], u_base: f64) -> ScalarNurbs {
     let mut pieces = Vec::with_capacity(pieces_bern.len());
     let mut u = u_base;
     for (bern, dur) in pieces_bern {
@@ -814,7 +814,7 @@ fn overlay_multi_piece_cumulative_positions_produce_individual_spans() {
     );
 
     let mut u = 0.0_f64;
-    let pieces_with_u: Vec<nurbs::bezier::BezierPiece<f64>> =
+    let pieces_with_u: Vec<nurbs::bezier::BezierPiece> =
         [(accel, 0.1_f64), (cruise, 0.2), (decel, 0.1)]
             .iter()
             .map(|(bp, dur)| {
