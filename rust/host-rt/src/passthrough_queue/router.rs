@@ -133,7 +133,7 @@ impl PassthroughRouter {
         let bridge_now_instant = instant_to_f64(self.clock.now());
         let bridge_now_raw = crate::clock::monotonic_raw_secs();
         let clock_offset = offset_raw - (bridge_now_raw - bridge_now_instant);
-        tracing::info!(
+        tracing::debug!(
             subsystem = "clocksync",
             event = "set_clock_est_rebased",
             mcu = ?mcu,

@@ -12,7 +12,7 @@
 //!   which everything ahead of every armed fence has been dispatched or
 //!   discarded.
 //!
-//! Progress resolution can be late by one fitter run (a run is labeled with
+//! Progress resolution can be late by one fit-stage run (a run is labeled with
 //! its first move's line), never early.
 
 use std::collections::HashMap;

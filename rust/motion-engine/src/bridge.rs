@@ -443,7 +443,12 @@ impl PyMotionEngine {
             .take()
         {
             if let Err(e) = h.join() {
-                log::error!("engine.shutdown(): live-position-poll join panicked: {e:?}");
+                tracing::error!(
+                    subsystem = "engine",
+                    event = "shutdown_position_poll_join_panicked",
+                    error = ?e,
+                    "engine.shutdown(): live-position-poll join panicked"
+                );
             }
         }
 

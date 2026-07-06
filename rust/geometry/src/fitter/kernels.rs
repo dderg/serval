@@ -12,11 +12,11 @@ use super::{BUDGET_EPS_MM, CornerFitConfig, FitError, internal, line_of};
 
 const COPLANAR_TOL: f64 = 1e-6;
 const ANGLE_EPS_RAD: f64 = 1e-9;
-const EASE_LEAD_MAX_RAD: f64 = FRAC_PI_6;
 pub(super) const EPMM_MIN: f64 = 1e-9;
 const EPMM_REL_TOL: f64 = 0.25;
-const ARC_EPMM_REL_TOL: f64 = 5e-3;
+const EASE_LEAD_MAX_RAD: f64 = FRAC_PI_6;
 
+#[derive(Clone)]
 pub(super) struct Reconstruction {
     pub up: Vec<Clothoid>,
     pub up_followers: Vec<FollowerDemand>,
@@ -61,7 +61,8 @@ pub(super) fn ease_run(
     tail: Option<&Neighbor>,
     tol: f64,
 ) -> Result<(), FitError> {
-    let run_epmm = epmm(&facets[0]);
+    let head_epmm = epmm(&facets[0]);
+    let tail_epmm = epmm(facets.last().expect("run has facets"));
     let line_no = facets[0].source.start_line;
     let verts = run_vertices(facets);
     let pn = normalize(cross(recon.arc.u, recon.arc.v));
@@ -69,8 +70,8 @@ pub(super) fn ease_run(
     let o0 = recon.arc.origin;
     let r0 = recon.arc.radius;
 
-    let head_max = head.and_then(|n| ease_plan(n, n.dir, sgn, run_epmm, pn, o0, r0));
-    let tail_max = tail.and_then(|n| ease_plan(n, scale(n.dir, -1.0), -sgn, run_epmm, pn, o0, r0));
+    let head_max = head.and_then(|n| ease_plan(n, n.dir, sgn, head_epmm, pn, o0, r0));
+    let tail_max = tail.and_then(|n| ease_plan(n, scale(n.dir, -1.0), -sgn, tail_epmm, pn, o0, r0));
     if head_max.is_none() && tail_max.is_none() {
         return Ok(());
     }
@@ -138,11 +139,7 @@ pub(super) fn ease_run(
     recon.arc =
         build_arc(ease.origin, ease.radius, b_head, b_tail, pn, sgn).map_err(internal(line_no))?;
 
-    let mut arc_extra_e: Vec<(usize, f64)> = Vec::new();
     if let Some(s) = &ease.head {
-        recon.up_followers = head
-            .map(|n| spiral_followers(&n.followers, s, &mut arc_extra_e))
-            .unwrap_or_default();
         recon.head_line_trim = s.trim;
         recon.up = vec![s.clo.clone()];
     }
@@ -153,9 +150,6 @@ pub(super) fn ease_run(
                 reason: "tail spiral reverse failed",
             },
         })?;
-        recon.down_followers = tail
-            .map(|n| spiral_followers(&n.followers, s, &mut arc_extra_e))
-            .unwrap_or_default();
         recon.tail_line_trim = s.trim;
         recon.down = vec![reversed];
     }
@@ -165,40 +159,39 @@ pub(super) fn ease_run(
         .map(line_of)
         .collect::<Option<Vec<_>>>()
         .expect("run facets are lines");
-    recon.followers = run_followers(
+    let head_end = ease.head.as_ref().zip(head).map(|(s, n)| EasedEnd {
+        neighbor_followers: &n.followers,
+        spiral_len: s.clo.s_len(),
+        line_trim: s.trim,
+    });
+    let tail_end = ease.tail.as_ref().zip(tail).map(|(s, n)| EasedEnd {
+        neighbor_followers: &n.followers,
+        spiral_len: s.clo.s_len(),
+        line_trim: s.trim,
+    });
+    let (up_followers, arc_followers, down_followers) = construct_followers(
         facets,
         &lines,
         recon.head_consumption,
         recon.tail_consumption,
         arc_len(&recon.arc),
-        &arc_extra_e,
+        head_end.as_ref(),
+        tail_end.as_ref(),
     );
+    recon.up_followers = up_followers;
+    recon.followers = arc_followers;
+    recon.down_followers = down_followers;
 
     Ok(())
 }
 
-/// A spiral extrudes at its neighbor line's own rate — `ė = r·v` is then
-/// continuous where line meets spiral. The spiral's arc length rarely equals
-/// the line footage it replaced (an anchored circle can slide the spiral far
-/// along its line), so extruding the trimmed footage's E over the spiral
-/// itself would spike the rate by `trim / s_len`. The difference in E belongs
-/// to the arc, whose sweep is what actually covers the replaced footage.
-fn spiral_followers(
-    f: &[FollowerDemand],
-    s: &SpiralFit,
-    arc_extra_e: &mut Vec<(usize, f64)>,
-) -> Vec<FollowerDemand> {
-    let remainder = s.trim - s.clo.s_len();
-    f.iter()
-        .map(|x| {
-            assert!(
-                !x.is_ramped(),
-                "arc easing operates on constant-ratio lines"
-            );
-            arc_extra_e.push((x.axis_index, x.ratio * remainder));
-            FollowerDemand::constant(x.axis_index, x.ratio)
-        })
-        .collect()
+/// An end of the reconstruction that eases into its neighbor line through a
+/// spiral: the neighbor's demands, the spiral's arc length, and the line
+/// footage the spiral replaced.
+struct EasedEnd<'a> {
+    neighbor_followers: &'a [FollowerDemand],
+    spiral_len: f64,
+    line_trim: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -624,21 +617,62 @@ pub(super) fn arc_candidate(moves: &[Move], corner: CornerFitConfig, tol: f64) -
     if moves.len() < 2 {
         return true;
     }
-    let e0 = epmm(&moves[0]);
-    let epmm_ok = |m: &Move| {
-        if e0 <= EPMM_MIN {
-            epmm(m) <= EPMM_MIN
-        } else {
-            (epmm(m) - e0).abs() <= ARC_EPMM_REL_TOL * e0
-        }
-    };
-    if !moves.iter().skip(1).all(epmm_ok) {
+    if !follower_band_ok(moves, corner.extrusion_ramp_rel_tol) {
         return false;
     }
     if grow_turning_band(moves, 0, corner) + 1 != moves.len() {
         return false;
     }
     moves.len() < 3 || cocircular(moves, tol)
+}
+
+/// Whether every facet's per-axis ratio sits inside a band the run's single
+/// linear extrusion ramp can track within `rel_tol`: the signed spread must
+/// not exceed `rel_tol` times the smallest magnitude in the window. Both
+/// sides are monotone under append (the spread only grows, the floor only
+/// shrinks), so a failed prefix stays failed — the growth loop's finality
+/// invariant. An axis extruding on one facet but not another has floor zero
+/// and only passes with zero spread, so travel and extruding facets never
+/// share a run; ratios below `EPMM_MIN` snap to zero first so numeric dust
+/// does not split an otherwise-travel run.
+fn follower_band_ok(moves: &[Move], rel_tol: f64) -> bool {
+    facet_axes(moves).into_iter().all(|axis| {
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        let mut floor = f64::INFINITY;
+        for m in moves {
+            let raw = facet_ratio(m, axis);
+            let r = if raw.abs() <= EPMM_MIN { 0.0 } else { raw };
+            lo = lo.min(r);
+            hi = hi.max(r);
+            floor = floor.min(r.abs());
+        }
+        hi - lo <= rel_tol * floor
+    })
+}
+
+fn facet_axes(moves: &[Move]) -> Vec<usize> {
+    let mut axes: Vec<usize> = Vec::new();
+    for f in moves.iter().flat_map(|m| &m.segment.followers) {
+        if !axes.contains(&f.axis_index) {
+            axes.push(f.axis_index);
+        }
+    }
+    axes
+}
+
+fn facet_ratio(m: &Move, axis: usize) -> f64 {
+    m.segment
+        .followers
+        .iter()
+        .find(|f| f.axis_index == axis)
+        .map_or(0.0, |f| {
+            assert!(
+                !f.is_ramped(),
+                "arc-run facets and neighbors must carry constant follower ratios"
+            );
+            f.ratio
+        })
 }
 
 pub(super) fn cocircular(facets: &[Move], tol: f64) -> bool {
@@ -791,13 +825,14 @@ pub(super) fn reconstruct(facets: &[Move], tol: f64) -> Result<Option<Reconstruc
     let head_consumption = lines[0].s_len();
     let tail_consumption = lines[lines.len() - 1].s_len();
     let recon_len = arc_len(&arc);
-    let followers = run_followers(
+    let (_, followers, _) = construct_followers(
         facets,
         &lines,
         head_consumption,
         tail_consumption,
         recon_len,
-        &[],
+        None,
+        None,
     );
 
     Ok(Some(Reconstruction {
@@ -820,47 +855,101 @@ pub(super) struct CircleFit {
     pub residual: f64,
 }
 
-fn run_followers(
+/// Solve the whole reconstruction's extrusion as one rate-continuous chain:
+/// up spiral (ramp `r_h → r_a`), arc (ramp `r_a → r_b`), down spiral (ramp
+/// `r_b → r_t`). The outer seams anchor hard at the neighbor lines' own
+/// ratios (`r_h`, `r_t`), so `ė = r·v` is continuous where the construct
+/// meets them; the arc's slope is fixed to what the facets commanded
+/// (`r_last − r_first` over the arc length); the one remaining degree of
+/// freedom — a common offset on the arc's endpoint ratios — is solved so the
+/// construct deposits exactly the E of the material it replaced: the facets'
+/// covered footage plus the eased neighbors' trimmed footage. That offset
+/// absorbs the footage-vs-arc-length mismatch today's constant-ratio version
+/// buried in its single averaged rate.
+fn construct_followers(
     facets: &[Move],
     lines: &[&Line],
     head_consumption: f64,
     tail_consumption: f64,
-    recon_len: f64,
-    extra_e: &[(usize, f64)],
-) -> Vec<FollowerDemand> {
-    let mut totals: Vec<(usize, f64)> = Vec::new();
-    for &(axis, e) in extra_e {
-        match totals.iter_mut().find(|(a, _)| *a == axis) {
-            Some(entry) => entry.1 += e,
-            None => totals.push((axis, e)),
-        }
-    }
-    let last = lines.len() - 1;
-    for (i, m) in facets.iter().enumerate() {
-        let covered = if i == 0 {
-            head_consumption
-        } else if i == last {
-            tail_consumption
-        } else {
-            lines[i].s_len()
-        };
-        for f in &m.segment.followers {
-            assert!(
-                !f.is_ramped(),
-                "arc-run facets must carry constant follower ratios"
-            );
-            let delta_e = f.ratio * covered;
-            match totals.iter_mut().find(|(a, _)| *a == f.axis_index) {
-                Some(entry) => entry.1 += delta_e,
-                None => totals.push((f.axis_index, delta_e)),
+    arc_len: f64,
+    head: Option<&EasedEnd>,
+    tail: Option<&EasedEnd>,
+) -> (
+    Vec<FollowerDemand>,
+    Vec<FollowerDemand>,
+    Vec<FollowerDemand>,
+) {
+    let mut axes = facet_axes(facets);
+    for end in [head, tail].into_iter().flatten() {
+        for f in end.neighbor_followers {
+            if !axes.contains(&f.axis_index) {
+                axes.push(f.axis_index);
             }
         }
     }
-    totals
-        .into_iter()
-        .filter(|(_, e)| e.abs() > 1e-12)
-        .map(|(axis_index, e)| FollowerDemand::constant(axis_index, e / recon_len))
-        .collect()
+
+    let last = lines.len() - 1;
+    let mut up = Vec::new();
+    let mut arc = Vec::new();
+    let mut down = Vec::new();
+    for axis in axes {
+        let r_first = facet_ratio(&facets[0], axis);
+        let r_last = facet_ratio(facets.last().expect("run has facets"), axis);
+        let delta = r_last - r_first;
+        let neighbor_ratio = |end: &EasedEnd| {
+            end.neighbor_followers
+                .iter()
+                .find(|f| f.axis_index == axis)
+                .map_or(0.0, |f| {
+                    assert!(
+                        !f.is_ramped(),
+                        "arc-run facets and neighbors must carry constant follower ratios"
+                    );
+                    f.ratio
+                })
+        };
+        let r_h = head.map_or(0.0, &neighbor_ratio);
+        let r_t = tail.map_or(0.0, &neighbor_ratio);
+        let len_up = head.map_or(0.0, |e| e.spiral_len);
+        let len_down = tail.map_or(0.0, |e| e.spiral_len);
+
+        let mut e_total = 0.0;
+        for (i, m) in facets.iter().enumerate() {
+            let covered = if i == 0 {
+                head_consumption
+            } else if i == last {
+                tail_consumption
+            } else {
+                lines[i].s_len()
+            };
+            e_total += facet_ratio(m, axis) * covered;
+        }
+        if let Some(end) = head {
+            e_total += r_h * end.line_trim;
+        }
+        if let Some(end) = tail {
+            e_total += r_t * end.line_trim;
+        }
+
+        let r_a =
+            (e_total - 0.5 * r_h * len_up - 0.5 * delta * arc_len - 0.5 * (delta + r_t) * len_down)
+                / (0.5 * len_up + arc_len + 0.5 * len_down);
+        let r_b = r_a + delta;
+
+        let push_nonzero = |v: &mut Vec<FollowerDemand>, d: FollowerDemand| {
+            if d.max_abs_ratio() > 1e-12 {
+                v.push(d);
+            }
+        };
+        if head.is_some() {
+            push_nonzero(&mut up, FollowerDemand::ramp(axis, r_h, r_a));
+        }
+        push_nonzero(&mut arc, FollowerDemand::ramp(axis, r_a, r_b));
+        if tail.is_some() {
+            push_nonzero(&mut down, FollowerDemand::ramp(axis, r_b, r_t));
+        }
+    }
+    (up, arc, down)
 }
 
 pub(super) fn arc_len(arc: &Arc) -> f64 {

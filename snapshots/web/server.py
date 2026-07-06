@@ -248,6 +248,12 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_static("index.html", "text/html; charset=utf-8")
         elif path == "/viewer.html":
             self._serve_static("viewer.html", "text/html; charset=utf-8")
+        elif path in ("/playground", "/playground.html"):
+            # The playground uses page-relative asset URLs so the static/
+            # directory is hostable as-is; here it must live under /static/.
+            self.send_response(302)
+            self.send_header("Location", "/static/playground.html")
+            self.end_headers()
         elif path.startswith("/static/"):
             self._serve_static(path[len("/static/") :], None)
         elif path == "/api/cases":
@@ -317,6 +323,11 @@ class Handler(BaseHTTPRequestHandler):
                 snapshot = None  # gallery shows committed baselines; no prior
             else:
                 snapshot = harness.baseline_snapshot(entry["case"])
+        # A missing "before" is an expected state (baselines gallery, NEW
+        # case), not an error — 200 null keeps the browser console clean.
+        if snapshot is None and which == "before":
+            self._json(None)
+            return
         if snapshot is None:
             self._json({"error": "no baseline"}, 404)
             return

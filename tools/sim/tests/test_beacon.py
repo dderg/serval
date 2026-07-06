@@ -2,10 +2,9 @@
 and accelerometer streaming against the beacon_klipper fork
 (fetched into tools/sim/third_party_repos by fetch_plugins.sh).
 
-The contact-method scenarios are currently expected failures: the
-emulator's contact model and the fork disagree on trigger timing under
-the virtual clock (see the xfail/skip reasons on each test). Proximity
-homing/probing and accelerometer streaming are fully green.
+The emulator tracks toolhead Z from the shim's step counters, so both
+proximity (threshold-crossing) and contact (Z reaching the bed at 0)
+triggers fire at step-accurate positions and clocks.
 """
 
 import pathlib
@@ -87,9 +86,11 @@ def test_contact_probing(world):
 
 
 @pytest.mark.xfail(
-    reason="emulator contact descend finishes with trsync reason 2 "
-    "(comms timeout), not endstop-hit — the emulator's contact trigger "
-    "model needs to key off Z position instead of a fixed delay",
+    reason="calibration stream samples during the pre-descend dwell query "
+    "motion state at host times the engine retains no history for (idle "
+    "axes answer with a ~10ms window), so samples lack 'pos' and the "
+    "fork's _calibrate raises KeyError — motion-history retention issue, "
+    "not an emulator gap (see sim-trip-time-resolution-handoff.md)",
 )
 def test_contact_auto_calibrate(world):
     world.gcode_ok("SET_KINEMATIC_POSITION X=150 Y=150 Z=10", timeout=10)
@@ -100,8 +101,11 @@ def test_contact_auto_calibrate(world):
 
 
 @pytest.mark.skip(
-    reason="hangs: BEACON_POKE never returns — same emulator contact-model "
-    "gap as test_contact_auto_calibrate; skip rather than burn 120s",
+    reason="hangs: the first travel move panics the kalico-shape thread "
+    "('shaping window needs unavailable history at t=1.0', "
+    "motion-pipeline/src/shaper.rs:130) so the move never completes and "
+    "BEACON_POKE never responds — motion-pipeline issue, not an emulator "
+    "gap; skip rather than burn 120s",
 )
 def test_poke(world):
     world.gcode_ok("SET_KINEMATIC_POSITION X=150 Y=150 Z=10", timeout=10)

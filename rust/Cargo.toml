@@ -10,13 +10,14 @@ members = [
     "compat",
     "motion-engine",
     "motion-pipeline",
+    "pipeline-snapshot",
     "mcu-transport",
     "mcu-protocol",
     "ethercat-rt",
     "servo-ident",
     "piece-sink-harness",
 ]
-exclude = ["gcode/fuzz", "snapshot-viewer"]
+exclude = ["gcode/fuzz", "snapshot-viewer", "motion-playground"]
 resolver = "2"
 
 [workspace.package]

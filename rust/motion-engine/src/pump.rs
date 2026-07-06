@@ -668,7 +668,11 @@ where
                             elapsed_ms = send_elapsed.as_millis() as u64,
                             frames = bundle.len(),
                             ok = send_result.is_ok(),
-                            "[pump-send] send_mcu_frames blocked — which transport (mcu serial vs ethercat socket) ate the wall-clock"
+                            "[pump-send] send_mcu_frames blocked {}ms on mcu {} ({} frames, ok={})",
+                            send_elapsed.as_millis() as u64,
+                            mcu_id,
+                            bundle.len(),
+                            send_result.is_ok()
                         );
                     }
                     match send_result {
@@ -684,7 +688,7 @@ where
                                     let end_ticks: u64 = freq.map_or(0, |f| piece.end_time(f));
                                     let gap_ticks_in_frame: i64 = prev_end
                                         .map_or(0, |pe| piece.start_time as i64 - pe as i64);
-                                    tracing::info!(
+                                    tracing::trace!(
                                         subsystem = "motion",
                                         event = "pump_piece_submit",
                                         mcu = mcu_id,

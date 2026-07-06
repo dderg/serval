@@ -111,7 +111,10 @@ def load_capture(path, drive=None):
 def motion_segments(flags):
     if not len(flags):
         return []
-    moving = (flags & FLAG_MOTION_ACTIVE) != 0
+    return _segments_from_mask((flags & FLAG_MOTION_ACTIVE) != 0)
+
+
+def _segments_from_mask(moving):
     edges = np.flatnonzero(np.diff(moving.astype(np.int8)))
     bounds = np.concatenate(([0], edges + 1, [len(moving)]))
     return [
@@ -119,6 +122,23 @@ def motion_segments(flags):
         for i in range(len(bounds) - 1)
         if moving[bounds[i]]
     ]
+
+
+def target_motion_segments(target_counts, fs):
+    """Move windows from the commanded trajectory itself. FLAG_MOTION_ACTIVE
+    stays set across queued dwells, which folds the dwell into the move and
+    leaves only the inter-segment gap as the settle window — too short for
+    the settle hold, so overshoot/settle were measured on the wrong span.
+    A stationary target is the ground truth for 'the move is over'."""
+    if not len(target_counts):
+        return []
+    moving = np.zeros(len(target_counts), dtype=bool)
+    moving[1:] = np.diff(target_counts.astype(np.int64)) != 0
+    close = int(round(0.02 * fs))
+    for s, e in _segments_from_mask(~moving):
+        if e - s <= close and s > 0 and e < len(moving):
+            moving[s:e] = True
+    return [(s, e) for s, e in _segments_from_mask(moving) if e - s > close]
 
 
 def _settle_index(err, band, hold):
@@ -140,9 +160,11 @@ def _longest_true_run(mask):
 
 
 def torque_summary(data, torque_limit, fs):
-    """Peak torque and rail detection over the moving samples. The rail is the
-    band within 3% of the observed absolute peak; it counts as a rail only when
-    that peak clears torque_limit (per-mille of rated)."""
+    """Peak torque and rail detection over the moving samples. The rail is
+    torque at or above torque_limit (per-mille of rated); set torque_limit to
+    the drive's real available-torque ceiling as measured from a saturating
+    run — proximity to a capture's own peak cannot distinguish a clean torque
+    pulse from a clipped one."""
     torque = np.abs(data["torque_actual"].astype(np.int64))
     ms_per_sample = 1000.0 / fs
     moving = (data["flags"] & FLAG_MOTION_ACTIVE) != 0
@@ -153,15 +175,15 @@ def torque_summary(data, torque_limit, fs):
         "peak_pct_rated": peak / 10.0,
         "moving_samples": moving_n,
         "rail_detected": False,
-        "rail_level": 0,
+        "rail_level": int(torque_limit),
         "rail_samples": 0,
         "rail_pct_moving": 0.0,
         "rail_ms": 0.0,
         "longest_burst_ms": 0.0,
     }
-    if peak <= torque_limit or moving_n == 0:
+    if peak < torque_limit or moving_n == 0:
         return summary
-    rail_level = int(round(peak * 0.97))
+    rail_level = int(torque_limit)
     on_rail = (torque >= rail_level) & moving
     rail_samples = int(np.count_nonzero(on_rail))
     summary.update(
@@ -184,7 +206,7 @@ def compute_metrics(data, settle_band, torque_limit, fs=1000.0):
     recomputed = data["target_counts"].astype(np.int64) - data[
         "position_actual"
     ].astype(np.int64)
-    segs = motion_segments(data["flags"])
+    segs = target_motion_segments(data["target_counts"], fs)
     moves = []
     for idx, (s, e) in enumerate(segs):
         move_err = ferr[s:e]
@@ -210,6 +232,8 @@ def compute_metrics(data, settle_band, torque_limit, fs=1000.0):
                 if overshoot_end > 0
                 else 0.0,
                 "settle_ms": settle_ms,
+                "settle_window_truncated": settle_sample is None
+                and len(post) < hold,
             }
         )
     torque = np.abs(data["torque_actual"].astype(np.int64))
@@ -314,11 +338,12 @@ def _print_metrics(m, counts_per_mm):
             )
         )
     for mv in m["moves"]:
-        settle = (
-            "%.1f ms" % mv["settle_ms"]
-            if mv["settle_ms"] is not None
-            else "NEVER"
-        )
+        if mv["settle_ms"] is not None:
+            settle = "%.1f ms" % mv["settle_ms"]
+        elif mv["settle_window_truncated"]:
+            settle = "unknown (capture ended before hold window)"
+        else:
+            settle = "NEVER"
         print(
             "move %d [%.1f..%.1f ms]: ferr peak %.0f counts (%.4f mm), "
             "rms %.1f counts (%.4f mm), overshoot %.0f counts, settle %s"
@@ -735,8 +760,9 @@ def main(argv=None):
     p.add_argument(
         "--torque-limit",
         type=int,
-        default=900,
-        help="saturation threshold, per-mille of rated (default 900)",
+        default=1400,
+        help="drive's available-torque ceiling, per-mille of rated "
+        "(default 1400); samples at/above it count as railed",
     )
     p.add_argument(
         "--fft",

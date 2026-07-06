@@ -267,7 +267,7 @@ impl PyMotionEngine {
         feedrate: f64,
     ) -> PyResult<bool> {
         py.detach(|| -> PyResult<bool> {
-            tracing::info!(
+            tracing::trace!(
                 subsystem = "motion",
                 event = "submit_move_enter",
                 dx,
@@ -333,7 +333,7 @@ impl PyMotionEngine {
                     Err(crate::worker::StreamWorkerError::ChannelFull) => return Ok(false),
                     Err(e) => return Err(planner_err(e)),
                 }
-                tracing::info!(
+                tracing::trace!(
                     subsystem = "motion",
                     event = "intake_submit",
                     line_no,
@@ -856,6 +856,8 @@ impl PyMotionEngine {
             drain: drain_for_pump,
             on_drip_stall: Box::new(|msg: String| {
                 tracing::error!(
+                    subsystem = "motion",
+                    event = "drip_cohort_stalled",
                     msg,
                     "EXIT_ON_FAULT — drip cohort stalled; \
                      aborting klippy so systemd restarts it"
@@ -936,6 +938,10 @@ impl PyMotionEngine {
                 use std::sync::atomic::Ordering;
                 let period = std::time::Duration::from_millis(200);
                 let timeout = std::time::Duration::from_millis(250);
+                const WARN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+                let mut consecutive_failures: u64 = 0;
+                let mut suppressed_since_warn: u64 = 0;
+                let mut last_warn: Option<std::time::Instant> = None;
                 while !stop.load(Ordering::Relaxed) {
                     std::thread::sleep(period);
                     if stop.load(Ordering::Relaxed) {
@@ -945,13 +951,47 @@ impl PyMotionEngine {
                         Ok(map) => {
                             let mut c = cache.lock().unwrap_or_else(|p| p.into_inner());
                             *c = (map, std::time::Instant::now());
+                            if consecutive_failures > 0 {
+                                tracing::info!(
+                                    event = "live_position_poll_recovered",
+                                    after_failures = consecutive_failures,
+                                    "live-position poll recovered"
+                                );
+                            }
+                            consecutive_failures = 0;
+                            suppressed_since_warn = 0;
+                            last_warn = None;
                         }
                         Err(e) => {
                             if !e.contains("no axes configured") {
-                                tracing::warn!(
-                                    error = %e,
-                                    "live-position poll failed; serving stale cache"
-                                );
+                                consecutive_failures += 1;
+                                let now = std::time::Instant::now();
+                                let should_warn = match last_warn {
+                                    None => true,
+                                    Some(t) => now.duration_since(t) >= WARN_INTERVAL,
+                                };
+                                if should_warn {
+                                    if consecutive_failures == 1 {
+                                        tracing::warn!(
+                                            event = "live_position_poll_failed",
+                                            error = %e,
+                                            "live-position poll failed; serving stale cache"
+                                        );
+                                    } else {
+                                        tracing::warn!(
+                                            event = "live_position_poll_failed",
+                                            error = %e,
+                                            consecutive_failures,
+                                            suppressed = suppressed_since_warn,
+                                            "live-position poll still failing ({consecutive_failures} consecutive, \
+                                             {suppressed_since_warn} suppressed in last 30s): {e}"
+                                        );
+                                    }
+                                    last_warn = Some(now);
+                                    suppressed_since_warn = 0;
+                                } else {
+                                    suppressed_since_warn += 1;
+                                }
                             }
                         }
                     }
@@ -1039,6 +1079,7 @@ impl PyMotionEngine {
                                         .insert(mcu_id, hb.fault_code);
                                     if prev != Some(hb.fault_code) {
                                         tracing::error!(
+                                            event = "ethercat_drive_fault_latched",
                                             mcu_id,
                                             mcu_label = %mcu_label_hb,
                                             fault_code = hb.fault_code,
