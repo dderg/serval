@@ -39,7 +39,11 @@ pub fn setup_stages(
     let (lowered_tx, lowered_rx) = bounded::<LoweredItem>(64);
     let (shaped_tx, shaped_rx) = bounded::<ShapedItem>(64);
 
-    let fitter = Fitter::new(config.chain);
+    let mut chain = config.chain;
+    chain.corner.ramp_gate.max_velocity_mm_s = config.max_extrude_only_velocity_mm_s;
+    chain.corner.ramp_gate.max_accel_mm_s2 = config.max_extrude_only_accel_mm_s2;
+    chain.corner.ramp_gate.pressure_advance_s = axis_chains.max_pressure_advance_s();
+    let fitter = Fitter::new(chain);
     spawn_stage("kalico-fit", move || fitter.run(raw_rx, fitted_tx));
 
     let planner = Planner::new(config);

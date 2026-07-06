@@ -111,7 +111,10 @@ impl Fitter {
 
     /// `Reset` drops all buffered fit state and forgets the emitted-geometry
     /// anchor (the timeline restarts elsewhere); every other token requires
-    /// the fit buffers to have been drained first.
+    /// the fit buffers to have been drained first. `SetAxisChains` also
+    /// refreshes the extrusion-ramp gate's pressure-advance worst case — the
+    /// drained-buffer requirement means every buffered move already fits
+    /// under the gain it was fitted with.
     fn forward_control(&mut self, ctrl: Control, out: &mut TravelAligningSender) -> bool {
         match &ctrl {
             Control::Reset { .. } => {
@@ -122,7 +125,14 @@ impl Fitter {
                 self.seam_in_reduction = 0.0;
                 out.reset();
             }
-            Control::Dwell { .. } | Control::SetAxisChains(_) | Control::Barrier(_) => {
+            Control::SetAxisChains(chains) => {
+                assert!(
+                    self.decided.is_empty() && self.tail.is_empty(),
+                    "fitter: control token arrived with undrained moves — a Drain must precede it"
+                );
+                self.config.corner.ramp_gate.pressure_advance_s = chains.max_pressure_advance_s();
+            }
+            Control::Dwell { .. } | Control::Barrier(_) => {
                 assert!(
                     self.decided.is_empty() && self.tail.is_empty(),
                     "fitter: control token arrived with undrained moves — a Drain must precede it"
@@ -202,7 +212,7 @@ impl Fitter {
             }
             let head = (idx > 0).then(|| &self.decided[idx - 1]).and_then(piece_of);
             let tail = self.decided.get(idx + 1).and_then(piece_of);
-            let fit = RunFit::fit(&re.facets, head, tail)
+            let fit = RunFit::fit(&re.facets, head, tail, self.config.corner)
                 .unwrap_or_else(|e| panic!("fitter: run reconstruction failed: {e:?}"));
             let head = head.cloned();
             match fit {

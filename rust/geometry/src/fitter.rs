@@ -28,8 +28,11 @@ pub struct CornerFitConfig {
     pub theta_max_rad: f64,
     /// Above this relative difference in per-axis extrusion ratio across a
     /// corner, the junction is left unblended (a full stop) rather than blended
-    /// with a mid-corner ramp — see [`UnblendReason::ExtrusionStep`].
+    /// with a mid-corner ramp — see [`UnblendReason::ExtrusionStep`]. The same
+    /// band bounds how far an arc run's facet ratios may spread around the
+    /// single linear ramp the reconstruction carries.
     pub extrusion_ramp_rel_tol: f64,
+    pub ramp_gate: FollowerRampGate,
 }
 
 const EXTRUSION_RAMP_REL_TOL: f64 = 0.25;
@@ -40,8 +43,93 @@ impl Default for CornerFitConfig {
             theta_min_rad: COLLINEAR_EPS_RAD,
             theta_max_rad: PI - COLLINEAR_EPS_RAD,
             extrusion_ramp_rel_tol: EXTRUSION_RAMP_REL_TOL,
+            ramp_gate: FollowerRampGate::default(),
         }
     }
+}
+
+/// Worst-case kinematic budget for the extrusion-rate ramps the fitter
+/// creates (corner blends, arc-run ramps, easing spirals). The planner
+/// deliberately applies `max_extrude_only_*` to extrude-only moves alone —
+/// coupling the follower into print-move velocity planning would make every
+/// plan iteration solve a joint ODE — so the fitter instead proves each ramp
+/// feasible in closed form against the box the planner does guarantee:
+/// `v ≤ V`, `|a| ≤ A`, `|j| ≤ J` on the carrying piece.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FollowerRampGate {
+    /// `max_extrude_only_velocity` — cap on worst-case commanded `ė`.
+    pub max_velocity_mm_s: f64,
+    /// `max_extrude_only_accel` — cap on worst-case commanded `ë`.
+    pub max_accel_mm_s2: f64,
+    /// Largest live pressure-advance gain across follower axes; PA commands
+    /// `e + k·ė`, amplifying rate demands by the next derivative.
+    pub pressure_advance_s: f64,
+}
+
+impl Default for FollowerRampGate {
+    fn default() -> Self {
+        Self {
+            max_velocity_mm_s: f64::INFINITY,
+            max_accel_mm_s2: f64::INFINITY,
+            pressure_advance_s: 0.0,
+        }
+    }
+}
+
+impl FollowerRampGate {
+    /// Whether a ramped demand stays within budget on a piece whose path
+    /// speed never exceeds `v_cap`. With ratio slope `m = dr/ds` and the path
+    /// at speed `v`, accel `a`, jerk `j`: `ė = r·v`, `ë = r·a + m·v²`,
+    /// `e⃛ = r·j + 3·m·v·a`; pressure advance `k` commands `e + k·ė`, so its
+    /// velocity/accel are `ė + k·ë` and `ë + k·e⃛`. Every term is monotone in
+    /// `v`, `a`, `j`, so the corner of the box is the worst case. Constant
+    /// demands pass unconditionally: the fitter only answers for the ramps it
+    /// creates, not for the flow the G-code itself commanded.
+    fn admits(
+        &self,
+        demand: &FollowerDemand,
+        len: f64,
+        v_cap: f64,
+        limits: VelocityLimits,
+    ) -> bool {
+        let m = demand.ratio_slope(len).abs();
+        if m == 0.0 {
+            return true;
+        }
+        let r = demand.max_abs_ratio();
+        let v = v_cap;
+        let a = limits.accel_mm_s2;
+        let j = limits.max_jerk_mm_s3;
+        let k = self.pressure_advance_s;
+        let e_vel = r * v + k * (r * a + m * v * v);
+        let e_acc = r * a + m * v * v + k * (r * j + 3.0 * m * v * a);
+        e_vel <= self.max_velocity_mm_s && e_acc <= self.max_accel_mm_s2
+    }
+}
+
+/// The fastest the planner can drive a piece: its feedrate, the machine cap,
+/// and the centripetal ceiling `√(A/κ)` at the piece's curvature peak — the
+/// same `disk::limit_speed` bound velocity planning enforces.
+fn worst_case_speed(seg: &impl CurvatureProfile, feedrate: f64, limits: VelocityLimits) -> f64 {
+    let (_, kappa_peak) = seg.kappa_peak();
+    let curvature_cap = if kappa_peak > 0.0 {
+        (limits.accel_mm_s2 / kappa_peak).sqrt()
+    } else {
+        f64::INFINITY
+    };
+    feedrate.min(limits.max_velocity_mm_s).min(curvature_cap)
+}
+
+pub(crate) fn ramps_admitted(
+    gate: FollowerRampGate,
+    followers: &[FollowerDemand],
+    seg: &impl CurvatureProfile,
+    feedrate: f64,
+    limits: VelocityLimits,
+) -> bool {
+    let len = seg.s_len();
+    let v_cap = worst_case_speed(seg, feedrate, limits);
+    followers.iter().all(|d| gate.admits(d, len, v_cap, limits))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -94,6 +182,10 @@ pub enum UnblendReason {
     /// are exempt: ramping to or from zero is always desirable, so they still
     /// blend.
     ExtrusionStep,
+    /// The blend's extrusion ramp would demand more extruder velocity or
+    /// acceleration than [`FollowerRampGate`] budgets in the worst case, so
+    /// the corner stays sharp and the planner stops there instead.
+    ExtrusionRampInfeasible,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,10 +343,14 @@ impl RunFit {
     /// moves when they are plain (not part of another run); `None` when the
     /// run abuts another run, a stream edge, or nothing. Returns `Ok(None)`
     /// when no valid reconstruction exists — the facets stay plain lines.
+    /// A bare reconstruction whose extrusion ramp fails the kinematic gate
+    /// dissolves the same way; an easing that fails it is dropped while the
+    /// bare reconstruction stands.
     pub fn fit(
         facets: &[Move],
         head: Option<&Move>,
         tail: Option<&Move>,
+        corner: CornerFitConfig,
     ) -> Result<Option<RunFit>, FitError> {
         let tol = span_tolerance(facets);
         if !tol.is_finite() {
@@ -263,9 +359,16 @@ impl RunFit {
         let Some(mut recon) = kernels::reconstruct(facets, tol)? else {
             return Ok(None);
         };
+        if !construct_admitted(&recon, facets, corner.ramp_gate) {
+            return Ok(None);
+        }
+        let bare = recon.clone();
         let head_nb = head.and_then(|m| kernels::neighbor(m, true));
         let tail_nb = tail.and_then(|m| kernels::neighbor(m, false));
         kernels::ease_run(&mut recon, facets, head_nb.as_ref(), tail_nb.as_ref(), tol)?;
+        if !construct_admitted(&recon, facets, corner.ramp_gate) {
+            recon = bare;
+        }
         Ok(Some(RunFit {
             recon,
             tol,
@@ -313,7 +416,8 @@ impl RunFit {
 
     /// Blend the run's un-eased head into the bare neighbor line before it.
     /// Returns the blend's clothoid halves to emit between the neighbor and
-    /// the run (empty when no blend applies).
+    /// the run (empty when no blend applies or its extrusion ramp fails the
+    /// kinematic gate — the seam then stays sharp and the planner stops).
     pub fn blend_head_with_line(
         &mut self,
         neighbor: &Move,
@@ -330,17 +434,27 @@ impl RunFit {
         else {
             return Ok(Vec::new());
         };
+        let (f_in, f_out) = blend_followers(
+            &SeamSide {
+                followers: &neighbor.segment.followers,
+                seg_len: line.s_len(),
+                trim: blend.trim_in,
+            },
+            &SeamSide {
+                followers: &self.recon.followers,
+                seg_len: self.recon.arc.s_len(),
+                trim: blend.trim_out,
+            },
+            blend.half1.s_len(),
+            blend.half2.s_len(),
+        );
+        if !general_blend_admitted(&blend, &f_in, &f_out, neighbor, run_first, corner.ramp_gate) {
+            return Ok(Vec::new());
+        }
         self.head_line_extra = blend.trim_in;
         self.head_blend_trim = blend.trim_out;
         let mut out = Vec::with_capacity(2);
-        causal::emit_general_blend(
-            &mut out,
-            &blend,
-            &neighbor.segment.followers,
-            &self.recon.followers,
-            neighbor,
-            run_first,
-        )?;
+        causal::emit_general_blend(&mut out, &blend, f_in, f_out, neighbor, run_first)?;
         Ok(out)
     }
 
@@ -361,17 +475,27 @@ impl RunFit {
         else {
             return Ok(Vec::new());
         };
+        let (f_in, f_out) = blend_followers(
+            &SeamSide {
+                followers: &self.recon.followers,
+                seg_len: self.recon.arc.s_len(),
+                trim: blend.trim_in,
+            },
+            &SeamSide {
+                followers: &neighbor.segment.followers,
+                seg_len: line.s_len(),
+                trim: blend.trim_out,
+            },
+            blend.half1.s_len(),
+            blend.half2.s_len(),
+        );
+        if !general_blend_admitted(&blend, &f_in, &f_out, run_last, neighbor, corner.ramp_gate) {
+            return Ok(Vec::new());
+        }
         self.tail_blend_trim = blend.trim_in;
         self.tail_line_extra = blend.trim_out;
         let mut out = Vec::with_capacity(2);
-        causal::emit_general_blend(
-            &mut out,
-            &blend,
-            &self.recon.followers,
-            &neighbor.segment.followers,
-            run_last,
-            neighbor,
-        )?;
+        causal::emit_general_blend(&mut out, &blend, f_in, f_out, run_last, neighbor)?;
         Ok(out)
     }
 
@@ -391,17 +515,34 @@ impl RunFit {
         else {
             return Ok(Vec::new());
         };
+        let (f_in, f_out) = blend_followers(
+            &SeamSide {
+                followers: &self.recon.followers,
+                seg_len: self.recon.arc.s_len(),
+                trim: blend.trim_in,
+            },
+            &SeamSide {
+                followers: &next.recon.followers,
+                seg_len: next.recon.arc.s_len(),
+                trim: blend.trim_out,
+            },
+            blend.half1.s_len(),
+            blend.half2.s_len(),
+        );
+        if !general_blend_admitted(
+            &blend,
+            &f_in,
+            &f_out,
+            run_last,
+            next_first,
+            corner.ramp_gate,
+        ) {
+            return Ok(Vec::new());
+        }
         self.tail_blend_trim = blend.trim_in;
         next.head_blend_trim = blend.trim_out;
         let mut out = Vec::with_capacity(2);
-        causal::emit_general_blend(
-            &mut out,
-            &blend,
-            &self.recon.followers,
-            &next.recon.followers,
-            run_last,
-            next_first,
-        )?;
+        causal::emit_general_blend(&mut out, &blend, f_in, f_out, run_last, next_first)?;
         Ok(out)
     }
 
@@ -420,6 +561,53 @@ impl RunFit {
         )?;
         Ok(out)
     }
+}
+
+fn general_blend_admitted(
+    blend: &biclothoid::GeneralBlend,
+    f_in: &[FollowerDemand],
+    f_out: &[FollowerDemand],
+    m_in: &Move,
+    m_out: &Move,
+    gate: FollowerRampGate,
+) -> bool {
+    ramps_admitted(gate, f_in, &blend.half1, m_in.feedrate_mm_s, m_in.limits)
+        && ramps_admitted(gate, f_out, &blend.half2, m_out.feedrate_mm_s, m_out.limits)
+}
+
+/// Every ramp the reconstruction carries — easing spirals and the arc — must
+/// pass the kinematic gate on its carrying piece (the same move whose
+/// feedrate and limits the emitted piece inherits).
+fn construct_admitted(
+    recon: &kernels::Reconstruction,
+    facets: &[Move],
+    gate: FollowerRampGate,
+) -> bool {
+    let first = &facets[0];
+    let last = facets.last().expect("run has facets");
+    recon.up.iter().all(|c| {
+        ramps_admitted(
+            gate,
+            &recon.up_followers,
+            c,
+            first.feedrate_mm_s,
+            first.limits,
+        )
+    }) && ramps_admitted(
+        gate,
+        &recon.followers,
+        &recon.arc,
+        first.feedrate_mm_s,
+        first.limits,
+    ) && recon.down.iter().all(|c| {
+        ramps_admitted(
+            gate,
+            &recon.down_followers,
+            c,
+            last.feedrate_mm_s,
+            last.limits,
+        )
+    })
 }
 
 /// The cocircularity tolerance the run detector derives from the moves' corner
@@ -532,12 +720,55 @@ fn classify_junction(
     let budget = 0.5 * in_len.min(out_len);
     let line_no = m_out.source.start_line;
 
-    match biclothoid::solve(vertex, t_in, v, theta, delta, budget)
+    let Some(bi) = biclothoid::solve(vertex, t_in, v, theta, delta, budget)
         .map_err(|source| FitError::Internal { line_no, source })?
-    {
-        Some(bi) => Ok(JunctionPlan::Blend(JunctionBlend(bi))),
-        None => Ok(JunctionPlan::Unblended(UnblendReason::NoBudget)),
+    else {
+        return Ok(JunctionPlan::Unblended(UnblendReason::NoBudget));
+    };
+
+    let (f_in, f_out) = biclothoid_followers(&bi, m_in, m_out, line_in, line_out);
+    let admitted = ramps_admitted(
+        config.ramp_gate,
+        &f_in,
+        &bi.half1,
+        m_in.feedrate_mm_s,
+        m_in.limits,
+    ) && ramps_admitted(
+        config.ramp_gate,
+        &f_out,
+        &bi.half2,
+        m_out.feedrate_mm_s,
+        m_out.limits,
+    );
+    if !admitted {
+        return Ok(JunctionPlan::Unblended(
+            UnblendReason::ExtrusionRampInfeasible,
+        ));
     }
+    Ok(JunctionPlan::Blend(JunctionBlend(bi)))
+}
+
+fn biclothoid_followers(
+    bi: &biclothoid::Biclothoid,
+    m_in: &Move,
+    m_out: &Move,
+    line_in: &Line,
+    line_out: &Line,
+) -> (Vec<FollowerDemand>, Vec<FollowerDemand>) {
+    blend_followers(
+        &SeamSide {
+            followers: &m_in.segment.followers,
+            seg_len: line_in.s_len(),
+            trim: bi.trim,
+        },
+        &SeamSide {
+            followers: &m_out.segment.followers,
+            seg_len: line_out.s_len(),
+            trim: bi.trim,
+        },
+        bi.half1.s_len(),
+        bi.half2.s_len(),
+    )
 }
 
 fn emit_move(
@@ -571,8 +802,15 @@ fn emit_move(
     let new_start = madd(line.start, trim_start, heading);
     let new_end = madd(line.start, trim_start + new_len, heading);
     let trimmed = Line::try_new(new_start, new_end).map_err(internal(line_no))?;
-    let segment = PathSegment::try_new(Segment::Line(trimmed), m.segment.followers.clone())
-        .map_err(internal(line_no))?;
+    let followers = m
+        .segment
+        .followers
+        .iter()
+        .map(|f| f.span(trim_start, trim_start + new_len, line.s_len()))
+        .filter(|f| f.max_abs_ratio() > 0.0)
+        .collect();
+    let segment =
+        PathSegment::try_new(Segment::Line(trimmed), followers).map_err(internal(line_no))?;
     out.push(Move {
         segment,
         feedrate_mm_s: m.feedrate_mm_s,
@@ -588,16 +826,11 @@ fn emit_blend(
     m_in: &Move,
     m_out: &Move,
 ) -> Result<(), FitError> {
-    let len1 = bi.half1.s_len();
-    let len2 = bi.half2.s_len();
-    let (f_in, f_out) = blend_followers(
-        &m_in.segment.followers,
-        &m_out.segment.followers,
-        bi.trim,
-        len1,
-        bi.trim,
-        len2,
-    );
+    let (line_in, line_out) = match (line_of(m_in), line_of(m_out)) {
+        (Some(a), Some(b)) => (a, b),
+        _ => unreachable!("biclothoid blends are only planned between lines"),
+    };
+    let (f_in, f_out) = biclothoid_followers(bi, m_in, m_out, line_in, line_out);
 
     let seg_in = PathSegment::try_new(Segment::Clothoid(bi.half1.clone()), f_in)
         .map_err(internal(m_in.source.start_line))?;
@@ -663,33 +896,75 @@ fn extrusion_step(
         })
 }
 
-/// Split a blend's inbound/outbound demands into the two clothoid halves as a
+/// One side of a blend as the follower solver sees it: the neighbor's
+/// demands over its full segment, and how much of that segment's tail (for
+/// the inbound side) or head (outbound) the blend replaces.
+pub(super) struct SeamSide<'a> {
+    pub followers: &'a [FollowerDemand],
+    pub seg_len: f64,
+    pub trim: f64,
+}
+
+impl SeamSide<'_> {
+    fn demand(&self, axis: usize) -> Option<&FollowerDemand> {
+        self.followers.iter().find(|f| f.axis_index == axis)
+    }
+
+    /// Ratio at the post-trim end seam, and the E the trimmed tail carried.
+    fn exit_anchor(&self, axis: usize) -> (f64, f64) {
+        let Some(d) = self.demand(axis) else {
+            return (0.0, 0.0);
+        };
+        let seam = self.seg_len - self.trim;
+        let e = d.offset_at(self.seg_len, self.seg_len) - d.offset_at(seam, self.seg_len);
+        (d.ratio_at(seam, self.seg_len), e)
+    }
+
+    /// Ratio at the post-trim start seam, and the E the trimmed head carried.
+    fn entry_anchor(&self, axis: usize) -> (f64, f64) {
+        let Some(d) = self.demand(axis) else {
+            return (0.0, 0.0);
+        };
+        (
+            d.ratio_at(self.trim, self.seg_len),
+            d.offset_at(self.trim, self.seg_len),
+        )
+    }
+}
+
+/// Split a blend's inbound/outbound demands into the two blend halves as a
 /// pair of linear ratio ramps. The blend's endpoints anchor at the neighbors'
-/// own ratios, so `ė = r·v` is continuous where the blend meets the trimmed
-/// lines; the shared midpoint ratio is then whatever conserves the E the
-/// trimmed line material carried (`r_in·trim_in + r_out·trim_out`) across the
-/// halves' actual arc lengths. Anchoring at rescaled ratios instead (the
-/// trimmed E spread uniformly over the shorter clothoid) would conserve E too,
-/// but it steps the extrusion rate by `trim/len` at both outer seams — the
-/// very discontinuity the ramp exists to remove.
-fn blend_followers(
-    in_followers: &[FollowerDemand],
-    out_followers: &[FollowerDemand],
-    trim_in: f64,
+/// ratios *at the trimmed seams* — for a constant neighbor that is its one
+/// ratio, for a ramped neighbor (an arc-run reconstruction) the ratio its
+/// window now starts or ends with — so `ė = r·v` is continuous where the
+/// blend meets the trimmed neighbors. The shared midpoint ratio is then
+/// whatever conserves the E the trimmed material carried across the halves'
+/// actual arc lengths. Anchoring at rescaled ratios instead (the trimmed E
+/// spread uniformly over the shorter half) would conserve E too, but it steps
+/// the extrusion rate by `trim/len` at both outer seams — the very
+/// discontinuity the ramp exists to remove.
+pub(super) fn blend_followers(
+    inbound: &SeamSide,
+    outbound: &SeamSide,
     len1: f64,
-    trim_out: f64,
     len2: f64,
 ) -> (Vec<FollowerDemand>, Vec<FollowerDemand>) {
-    let axes = follower_axes(in_followers, out_followers);
+    let axes = follower_axes(inbound.followers, outbound.followers);
     let mut half1 = Vec::with_capacity(axes.len());
     let mut half2 = Vec::with_capacity(axes.len());
     for axis in axes {
-        let r_in = ratio_end_for(in_followers, axis);
-        let r_out = ratio_start_for(out_followers, axis);
-        let e_target = r_in * trim_in + r_out * trim_out;
+        let (r_in, e_in) = inbound.exit_anchor(axis);
+        let (r_out, e_out) = outbound.entry_anchor(axis);
+        let e_target = e_in + e_out;
         let r_mid = (2.0 * e_target - r_in * len1 - r_out * len2) / (len1 + len2);
-        half1.push(FollowerDemand::ramp(axis, r_in, r_mid));
-        half2.push(FollowerDemand::ramp(axis, r_mid, r_out));
+        let a = FollowerDemand::ramp(axis, r_in, r_mid);
+        let b = FollowerDemand::ramp(axis, r_mid, r_out);
+        if a.max_abs_ratio() > 0.0 {
+            half1.push(a);
+        }
+        if b.max_abs_ratio() > 0.0 {
+            half2.push(b);
+        }
     }
     (half1, half2)
 }

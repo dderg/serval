@@ -128,17 +128,35 @@ fn extrusion_ratio_step_splits_the_arc() {
 }
 
 #[test]
-fn small_extrusion_drift_splits_the_stream_arc() {
-    // A 10% epmm step exceeds the stream fitter's rounding tolerance for a
-    // single run: two arcs come out where a looser tolerance would keep one.
+fn small_extrusion_drift_rides_one_arc_with_a_ramp() {
+    // A 10% epmm step sits inside the ramp band: one arc absorbs the whole
+    // window and carries a linear extrusion-rate ramp that conserves total E.
     let n = 400;
     let moves = circle_facets(n, |i| if i <= n / 2 { 0.30 } else { 0.33 });
     let streamed = run_fitter(&moves, ChainFitConfig::with_arc_fit(3));
-    let arcs = streamed
+    let arcs: Vec<&Move> = streamed
         .iter()
         .filter(|m| matches!(m.segment.spatial, Some(geometry::path::Segment::Arc(_))))
-        .count();
-    assert_eq!(arcs, 2, "expected the epmm drift to split the run");
+        .collect();
+    assert_eq!(arcs.len(), 1, "expected the drift to ride one ramped arc");
+    assert!(
+        arcs[0].segment.followers.iter().any(|f| f.is_ramped()),
+        "expected the arc to carry the drift as a ratio ramp"
+    );
+    let total_e = |ms: &[Move]| -> f64 {
+        ms.iter()
+            .flat_map(|m| {
+                let len = m.segment.s_len();
+                m.segment.followers.iter().map(move |f| f.delta_over(len))
+            })
+            .sum()
+    };
+    let e_in = total_e(&moves);
+    let e_out = total_e(&streamed);
+    assert!(
+        (e_in - e_out).abs() <= 1e-6 * e_in,
+        "fitted stream must conserve E: in={e_in} out={e_out}"
+    );
 }
 
 #[test]
