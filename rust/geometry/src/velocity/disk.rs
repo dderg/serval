@@ -9,6 +9,23 @@ const SAMPLE_MAX_POINTS: usize = 16_384;
 const GRID_STEP_MM: f64 = 0.01;
 const GRID_MIN_STEPS: usize = 16;
 const REST_REFINE_MIN_MM: f64 = 1e-5;
+const GRID_DEDUP_MM: f64 = 1e-9;
+/// A curvature (or boundary) speed limit this close to the flat ceiling is
+/// the fitter's own blend sizing — it solves the corner radius so the apex
+/// speed lands *at* the feedrate, to float tolerance. Taking the raw `min`
+/// would notch the cap by ~1e-6 mm/s at every blend, and the jerk-limited
+/// pass would dutifully dip into each notch with a nanosecond full-rail
+/// bang whose phase joints then ring through the lowering as absurd
+/// acceleration slivers. Snap such limits up to the ceiling instead.
+pub(super) const CAP_NOTCH_REL: f64 = 1e-6;
+
+pub(super) fn notch_free_min(flat_ceiling: f64, limit: f64) -> f64 {
+    if limit >= flat_ceiling * (1.0 - CAP_NOTCH_REL) {
+        flat_ceiling
+    } else {
+        limit
+    }
+}
 const VELOCITY_FLOOR: f64 = 1e-9;
 const KAPPA_EPS: f64 = 1e-9;
 
@@ -180,7 +197,11 @@ fn integration_grid(members: &[RunMember], entry_rest: bool, exit_rest: bool) ->
     }
     s.push(end);
     s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    s.dedup_by(|a, b| (*a - *b).abs() <= 1e-12);
+    // Collapse sub-nanometre node pairs (ladder vs uniform collisions): the
+    // per-node sample noise between two such nodes is a real velocity step
+    // over a ~picosecond span, which the lowering would bridge as a sliver
+    // piece with a physically absurd acceleration spike.
+    s.dedup_by(|a, b| (*a - *b).abs() <= GRID_DEDUP_MM);
     s
 }
 
@@ -221,7 +242,8 @@ fn constraint_arrays(members: &[RunMember], s: &[f64]) -> (Vec<f64>, Vec<f64>, V
         let mut k = 0.0_f64;
         for (m, local) in members_at(&members[first..(first + 2).min(members.len())], x) {
             let kappa_abs = m.kin.kappa_abs(local);
-            v = v.min(m.kin.flat_ceiling.min(limit_speed(kappa_abs, m.kin.accel)));
+            let curv = notch_free_min(m.kin.flat_ceiling, limit_speed(kappa_abs, m.kin.accel));
+            v = v.min(m.kin.flat_ceiling.min(curv));
             a = a.min(m.kin.accel);
             k = k.max(kappa_abs);
         }
@@ -504,7 +526,7 @@ pub(super) fn reconstruct_run(
             .iter()
             .map(|p| ((p.0 - s0).clamp(0.0, m.kin.length), p.1, p.2))
             .collect();
-        local.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-12);
+        local.dedup_by(|a, b| (a.0 - b.0).abs() <= GRID_DEDUP_MM);
         if local.first().is_none_or(|p| p.0 > 1e-9) {
             let (v, a) = interp_flat(&flat, s0)?;
             local.insert(0, (0.0, v, a));
