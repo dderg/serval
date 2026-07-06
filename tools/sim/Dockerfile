@@ -189,7 +189,7 @@ COPY --from=firmware /kalico/tools/sim/third_party_repos/ \
 
 # Symlink the beacon plugin into klippy/extras so config [beacon]
 # sections resolve; PYTHONPATH for its imports is set by world.py.
-RUN for f in beacon.py beacon_kalico.py; do \
+RUN for f in beacon.py beacon_motion_engine.py; do \
         src=/kalico/tools/sim/third_party_repos/beacon_klipper/$f; \
         if [ -f "$src" ]; then ln -sf "$src" /kalico/klippy/extras/$f; fi; \
     done
