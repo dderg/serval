@@ -257,8 +257,6 @@ class BeaconMcuStub:
             if line.startswith(b"steps="):
                 steps = int(line[6:])
                 self._steps_now = steps
-                # TODO: export kalico-runtime steps via
-                # sim_intercept_notify_step so a line can ever lock.
                 if self._z_line_locked and not self._step_tracking:
                     self._step_tracking = True
                     self._z_anchor_steps = steps
@@ -591,7 +589,8 @@ class BeaconMcuStub:
 
         if self._homing_trigger_timer is not None:
             self._homing_trigger_timer.cancel()
-        if not self._step_tracking:
+        step_tracking_will_fire_at_bed_contact = self._step_thread is not None
+        if not step_tracking_will_fire_at_bed_contact:
             self._homing_trigger_timer = threading.Timer(
                 self._homing_trigger_delay, self._fire_contact_trigger
             )
@@ -606,6 +605,10 @@ class BeaconMcuStub:
         self._contact_trigger_clock = self._now_clock()
         self._contact_trigger_sample = self._sample_index
         self._contact_trigger_freq = self._z_to_frequency(0.0)
+        self._trsync_can_trigger[self._contact_trsync_oid] = False
+        self._trsync_trigger_reason[self._contact_trsync_oid] = (
+            self._contact_trigger_reason
+        )
         nozzle_touches_bed_z = 0.0
         self._anchor_z(nozzle_touches_bed_z)
         self._send_msg(
