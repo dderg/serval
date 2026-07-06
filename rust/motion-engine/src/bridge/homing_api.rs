@@ -508,7 +508,7 @@ impl PyMotionEngine {
         *self.homing_result.lock().unwrap_or_else(|p| p.into_inner()) = None;
         *self.pending_trip.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
-    pub(crate) fn trip_deps(&self) -> TripDeps {
+    pub(super) fn trip_deps(&self) -> TripDeps {
         TripDeps {
             homing_run: Arc::clone(&self.homing_run),
             pending_trip: Arc::clone(&self.pending_trip),

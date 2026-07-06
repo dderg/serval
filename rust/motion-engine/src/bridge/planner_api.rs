@@ -9,19 +9,18 @@ use super::{
     resolve_motion_caps,
 };
 
-#[allow(clippy::too_many_arguments)]
-fn build_planner_config(
+fn read_planner_config_sections(
     axes: Vec<(String, Vec<String>, Vec<String>, Vec<String>)>,
     limits: Vec<(String, Vec<String>, Option<f64>, Option<f64>, Option<f64>)>,
     post_processors: Vec<(String, String, Vec<(String, f64)>)>,
     kinematics_axes: &[String],
     cartesian_limits: (f64, f64, f64, f64, f64, f64),
-    arc_fit: Option<u32>,
-    max_extrude_only_velocity: Option<f64>,
-    max_extrude_only_accel: Option<f64>,
-    fit_tolerance_mm: Option<f64>,
-    fit_tolerance_accel_mm_s2: Option<f64>,
-) -> PyResult<config::PlannerConfig> {
+) -> PyResult<(
+    config::AxisRegistry,
+    config::PostProcessorSet,
+    Vec<config::LimitSection>,
+    config::CartesianLimits,
+)> {
     let axis_registry = config::AxisRegistry::try_new(
         axes.into_iter()
             .map(
@@ -77,6 +76,15 @@ fn build_planner_config(
     };
     cartesian.validate().map_err(PyValueError::new_err)?;
 
+    Ok((axis_registry, post_processor_set, limit_sections, cartesian))
+}
+
+fn validate_extrude_and_fit_params(
+    max_extrude_only_velocity: Option<f64>,
+    max_extrude_only_accel: Option<f64>,
+    fit_tolerance_mm: Option<f64>,
+    fit_tolerance_accel_mm_s2: Option<f64>,
+) -> PyResult<()> {
     for (label, value) in [
         ("max_extrude_only_velocity", max_extrude_only_velocity),
         ("max_extrude_only_accel", max_extrude_only_accel),
@@ -106,6 +114,21 @@ fn build_planner_config(
         }
     }
 
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_planner_config(
+    axis_registry: config::AxisRegistry,
+    limit_sections: Vec<config::LimitSection>,
+    cartesian: config::CartesianLimits,
+    post_processor_set: config::PostProcessorSet,
+    max_extrude_only_velocity: Option<f64>,
+    max_extrude_only_accel: Option<f64>,
+    fit_tolerance_mm: Option<f64>,
+    fit_tolerance_accel_mm_s2: Option<f64>,
+    arc_fit: Option<u32>,
+) -> PyResult<config::PlannerConfig> {
     let mut cfg = config::PlannerConfig::default();
     cfg.axis_registry = axis_registry;
     cfg.limit_sections = limit_sections;
@@ -132,6 +155,68 @@ fn build_planner_config(
     };
 
     Ok(cfg)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_planner_config(
+    axes: Vec<(String, Vec<String>, Vec<String>, Vec<String>)>,
+    limits: Vec<(String, Vec<String>, Option<f64>, Option<f64>, Option<f64>)>,
+    post_processors: Vec<(String, String, Vec<(String, f64)>)>,
+    kinematics_axes: &[String],
+    cartesian_limits: (f64, f64, f64, f64, f64, f64),
+    arc_fit: Option<u32>,
+    max_extrude_only_velocity: Option<f64>,
+    max_extrude_only_accel: Option<f64>,
+    fit_tolerance_mm: Option<f64>,
+    fit_tolerance_accel_mm_s2: Option<f64>,
+) -> PyResult<config::PlannerConfig> {
+    let (axis_registry, post_processor_set, limit_sections, cartesian) =
+        read_planner_config_sections(
+            axes,
+            limits,
+            post_processors,
+            kinematics_axes,
+            cartesian_limits,
+        )?;
+
+    validate_extrude_and_fit_params(
+        max_extrude_only_velocity,
+        max_extrude_only_accel,
+        fit_tolerance_mm,
+        fit_tolerance_accel_mm_s2,
+    )?;
+
+    apply_planner_config(
+        axis_registry,
+        limit_sections,
+        cartesian,
+        post_processor_set,
+        max_extrude_only_velocity,
+        max_extrude_only_accel,
+        fit_tolerance_mm,
+        fit_tolerance_accel_mm_s2,
+        arc_fit,
+    )
+}
+
+fn build_stream_config(cfg: &config::PlannerConfig) -> PyResult<motion_pipeline::StreamConfig> {
+    let cart = cfg.cartesian;
+    Ok(motion_pipeline::StreamConfig {
+        chain: cfg.chain,
+        integration_tol: STREAM_INTEGRATION_TOL,
+        max_extrude_only_velocity_mm_s: cfg.max_extrude_only_velocity.unwrap_or(f64::INFINITY),
+        max_extrude_only_accel_mm_s2: cfg.max_extrude_only_accel.unwrap_or(f64::INFINITY),
+        fit_tol_mm: cfg.fit_tolerance_mm,
+        fit_tol_accel_mm_s2: cfg.fit_tolerance_accel_mm_s2,
+        max_buffer_moves: STREAM_MAX_BUFFER_MOVES,
+        limits: geometry::VelocityLimits::try_new(
+            cart.max_velocity,
+            cart.max_accel,
+            cart.square_corner_velocity,
+            cart.max_jerk,
+        )
+        .map_err(PyRuntimeError::new_err)?,
+    })
 }
 
 #[pymethods]
@@ -435,6 +520,20 @@ impl PyMotionEngine {
             *pos = [x, y, z];
         }
         *self.last_g5_pq.lock().unwrap_or_else(|p| p.into_inner()) = None;
+
+        self.reseed_mcus_after_position_set(py, x, y, z)?;
+        self.rebase_motion_history_after_position_set(host_now, x, y, z);
+
+        Ok(())
+    }
+
+    fn reseed_mcus_after_position_set(
+        &self,
+        py: Python<'_>,
+        x: f64,
+        y: f64,
+        z: f64,
+    ) -> PyResult<()> {
         let planner_guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(planner) = planner_guard.as_ref() {
             py.detach(|| planner.flush()).map_err(planner_err)?;
@@ -496,61 +595,60 @@ impl PyMotionEngine {
                 })?;
             }
         }
+        Ok(())
+    }
 
+    fn rebase_motion_history_after_position_set(&self, host_now: f64, x: f64, y: f64, z: f64) {
+        let configs: Vec<crate::mcu_config::McuAxisConfig> = self
+            .mcu_axis_configs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let positions = [x, y, z];
+        let rebases: Vec<(crate::types::AxisKey, f64)> = configs
+            .iter()
+            .flat_map(|cfg| {
+                cfg.axes
+                    .iter()
+                    .filter(|&&a| a < SPATIAL_AXES)
+                    .map(move |&axis| {
+                        (
+                            crate::types::AxisKey {
+                                mcu_id: cfg.mcu_id,
+                                axis: axis as u8,
+                            },
+                            positions[axis],
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let follower_keys: Vec<crate::types::AxisKey> = configs
+            .iter()
+            .flat_map(|cfg| {
+                cfg.axes
+                    .iter()
+                    .filter(|&&a| a >= 3)
+                    .map(move |&axis| crate::types::AxisKey {
+                        mcu_id: cfg.mcu_id,
+                        axis: axis as u8,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         {
-            let configs: Vec<crate::mcu_config::McuAxisConfig> = self
-                .mcu_axis_configs
+            let mut store = self
+                .motion_history
                 .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .clone();
-            let positions = [x, y, z];
-            let rebases: Vec<(crate::types::AxisKey, f64)> = configs
-                .iter()
-                .flat_map(|cfg| {
-                    cfg.axes
-                        .iter()
-                        .filter(|&&a| a < SPATIAL_AXES)
-                        .map(move |&axis| {
-                            (
-                                crate::types::AxisKey {
-                                    mcu_id: cfg.mcu_id,
-                                    axis: axis as u8,
-                                },
-                                positions[axis],
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-            let follower_keys: Vec<crate::types::AxisKey> = configs
-                .iter()
-                .flat_map(|cfg| {
-                    cfg.axes
-                        .iter()
-                        .filter(|&&a| a >= 3)
-                        .map(move |&axis| crate::types::AxisKey {
-                            mcu_id: cfg.mcu_id,
-                            axis: axis as u8,
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-            {
-                let mut store = self
-                    .motion_history
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-                for (key, pos) in rebases {
-                    store.rebase_axis(key, host_now, pos);
-                }
-                for key in follower_keys {
-                    let held_position = store.final_position(key).unwrap_or(0.0);
-                    store.rebase_axis(key, host_now, held_position);
-                }
+                .unwrap_or_else(|p| p.into_inner());
+            for (key, pos) in rebases {
+                store.rebase_axis(key, host_now, pos);
+            }
+            for key in follower_keys {
+                let held_position = store.final_position(key).unwrap_or(0.0);
+                store.rebase_axis(key, host_now, held_position);
             }
         }
-
-        Ok(())
     }
     fn effective_limits(&self) -> (f64, f64, f64) {
         self.planner_config
@@ -771,17 +869,12 @@ impl PyMotionEngine {
         }
     }
 
-    fn spawn_pipeline(
+    fn build_pump_resources(
         &self,
-        cfg: &config::PlannerConfig,
-        mcu_configs: &[McuAxisConfig],
         host_ios: &HashMap<u32, Arc<McuHostIo>>,
         ec_conns: &HashMap<u32, Arc<McuSerialConn>>,
         ring_depth_table: HashMap<crate::types::AxisKey, u32>,
-    ) -> PyResult<crossbeam_channel::Sender<crate::pump::PumpMsg>> {
-        let counter = Arc::clone(&self.dispatched_segments);
-        let router_arc = Arc::clone(&self.router);
-
+    ) -> crate::worker::PumpResources {
         let wire_transports: HashMap<u32, crate::pump::McuTransport> = {
             let mut t = HashMap::new();
             for (&id, io) in host_ios {
@@ -801,7 +894,7 @@ impl PyMotionEngine {
         let drain_for_pump = self.drain.clone();
         let router_for_freq = Arc::clone(&self.router);
         let endpoint_death_for_pump = Arc::clone(&self.latched_endpoint_death);
-        let pump_resources = crate::worker::PumpResources {
+        crate::worker::PumpResources {
             sink: crate::pump::WireSink {
                 transports: wire_transports,
                 timeout: Duration::from_secs(5),
@@ -865,7 +958,21 @@ impl PyMotionEngine {
                 abort_after_tracing_appender_drains();
             }),
             backlog: Arc::clone(&self.pump_backlog),
-        };
+        }
+    }
+
+    fn spawn_pipeline(
+        &self,
+        cfg: &config::PlannerConfig,
+        mcu_configs: &[McuAxisConfig],
+        host_ios: &HashMap<u32, Arc<McuHostIo>>,
+        ec_conns: &HashMap<u32, Arc<McuSerialConn>>,
+        ring_depth_table: HashMap<crate::types::AxisKey, u32>,
+    ) -> PyResult<crossbeam_channel::Sender<crate::pump::PumpMsg>> {
+        let counter = Arc::clone(&self.dispatched_segments);
+        let router_arc = Arc::clone(&self.router);
+
+        let pump_resources = self.build_pump_resources(host_ios, ec_conns, ring_depth_table);
 
         let anchor_mutex = Arc::clone(&self.dispatch_anchor);
         *anchor_mutex.lock().unwrap_or_else(|p| p.into_inner()) = crate::anchor::Anchor::new();
@@ -878,27 +985,7 @@ impl PyMotionEngine {
             motion_history: Arc::clone(&self.motion_history),
         };
 
-        let stream_cfg = {
-            let cart = cfg.cartesian;
-            motion_pipeline::StreamConfig {
-                chain: cfg.chain,
-                integration_tol: STREAM_INTEGRATION_TOL,
-                max_extrude_only_velocity_mm_s: cfg
-                    .max_extrude_only_velocity
-                    .unwrap_or(f64::INFINITY),
-                max_extrude_only_accel_mm_s2: cfg.max_extrude_only_accel.unwrap_or(f64::INFINITY),
-                fit_tol_mm: cfg.fit_tolerance_mm,
-                fit_tol_accel_mm_s2: cfg.fit_tolerance_accel_mm_s2,
-                max_buffer_moves: STREAM_MAX_BUFFER_MOVES,
-                limits: geometry::VelocityLimits::try_new(
-                    cart.max_velocity,
-                    cart.max_accel,
-                    cart.square_corner_velocity,
-                    cart.max_jerk,
-                )
-                .map_err(PyRuntimeError::new_err)?,
-            }
-        };
+        let stream_cfg = build_stream_config(cfg)?;
         let axis_chains = cfg
             .post_processors
             .compile(&cfg.axis_registry)
@@ -1013,170 +1100,179 @@ impl PyMotionEngine {
         pump_control: crossbeam_channel::Sender<crate::pump::PumpMsg>,
     ) {
         for cfg_mcu in mcu_configs {
-            let mcu_id = cfg_mcu.mcu_id;
-            let pump_tx_hb = pump_control.clone();
+            self.wire_mcu_supervision_for(
+                cfg_mcu,
+                ethercat_mcu_ids,
+                ec_conns,
+                host_ios,
+                &pump_control,
+            );
+        }
+    }
 
-            if ethercat_mcu_ids.contains(&mcu_id) {
-                let conn = ec_conns
+    fn wire_mcu_supervision_for(
+        &self,
+        cfg_mcu: &McuAxisConfig,
+        ethercat_mcu_ids: &HashSet<u32>,
+        ec_conns: &HashMap<u32, Arc<McuSerialConn>>,
+        host_ios: &HashMap<u32, Arc<McuHostIo>>,
+        pump_control: &crossbeam_channel::Sender<crate::pump::PumpMsg>,
+    ) {
+        let mcu_id = cfg_mcu.mcu_id;
+        let pump_tx_hb = pump_control.clone();
+
+        if ethercat_mcu_ids.contains(&mcu_id) {
+            let conn = ec_conns
+                .get(&mcu_id)
+                .expect("ec_conns built from ethercat_mcu_ids")
+                .clone();
+
+            let mcu_label = {
+                let mcus_lock = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+                mcus_lock
                     .get(&mcu_id)
-                    .expect("ec_conns built from ethercat_mcu_ids")
-                    .clone();
+                    .map(|c| c.label.clone())
+                    .unwrap_or_else(|| format!("mcu-{mcu_id}"))
+            };
 
-                let mcu_label = {
-                    let mcus_lock = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
-                    mcus_lock
-                        .get(&mcu_id)
-                        .map(|c| c.label.clone())
-                        .unwrap_or_else(|| format!("mcu-{mcu_id}"))
-                };
-
-                let homing_run_hb = Arc::clone(&self.homing_run);
-                let active_cohort_hb = Arc::clone(&self.active_drip_cohort);
-                let pump_tx_fault = pump_control.clone();
-                let latched_fault_hb = Arc::clone(&self.latched_drive_fault);
-                let mcu_label_hb = mcu_label.clone();
-                conn.attach_heartbeat_callback(Arc::new(
-                    move |hb: &mcu_protocol::messages::StatusHeartbeat| {
-                        if hb.fault_code != 0 {
-                            let run_opt = {
-                                let mut guard =
-                                    homing_run_hb.lock().unwrap_or_else(|p| p.into_inner());
-                                match guard.as_ref().map(|r| r.axis_key.mcu_id) {
-                                    Some(axis_mcu)
-                                        if crate::homing::route_drive_fault(
-                                            mcu_id,
-                                            Some(axis_mcu),
-                                        ) == crate::homing::DriveFaultRoute::HomingError =>
-                                    {
-                                        guard.take()
-                                    }
-                                    _ => None,
+            let homing_run_hb = Arc::clone(&self.homing_run);
+            let active_cohort_hb = Arc::clone(&self.active_drip_cohort);
+            let pump_tx_fault = pump_control.clone();
+            let latched_fault_hb = Arc::clone(&self.latched_drive_fault);
+            let mcu_label_hb = mcu_label.clone();
+            conn.attach_heartbeat_callback(Arc::new(
+                move |hb: &mcu_protocol::messages::StatusHeartbeat| {
+                    if hb.fault_code != 0 {
+                        let run_opt = {
+                            let mut guard = homing_run_hb.lock().unwrap_or_else(|p| p.into_inner());
+                            match guard.as_ref().map(|r| r.axis_key.mcu_id) {
+                                Some(axis_mcu)
+                                    if crate::homing::route_drive_fault(mcu_id, Some(axis_mcu))
+                                        == crate::homing::DriveFaultRoute::HomingError =>
+                                {
+                                    guard.take()
                                 }
-                            };
-                            match run_opt {
-                                Some(run) => {
-                                    latched_fault_hb
-                                        .lock()
-                                        .unwrap_or_else(|p| p.into_inner())
-                                        .insert(mcu_id, hb.fault_code);
-                                    *active_cohort_hb.lock().unwrap_or_else(|p| p.into_inner()) =
-                                        None;
-                                    let _ = pump_tx_fault.send(crate::pump::PumpMsg::Flush(
-                                        run.all_axis_keys.clone(),
-                                    ));
-                                    let _ = pump_tx_fault
-                                        .send(crate::pump::PumpMsg::DripDisarm(run.cohort));
-                                    let _ = run.notify.send(Err(format!(
-                                        "drive fault 0x{:04x} during homing — \
-                                     following-error/torque limit exceeded (endstop failure?)",
-                                        hb.fault_code
-                                    )));
-                                }
-                                None => {
-                                    let prev = latched_fault_hb
-                                        .lock()
-                                        .unwrap_or_else(|p| p.into_inner())
-                                        .insert(mcu_id, hb.fault_code);
-                                    if prev != Some(hb.fault_code) {
-                                        tracing::error!(
-                                            event = "ethercat_drive_fault_latched",
-                                            mcu_id,
-                                            mcu_label = %mcu_label_hb,
-                                            fault_code = hb.fault_code,
-                                            "ethercat drive fault — latched for klippy to report"
-                                        );
-                                    }
-                                }
+                                _ => None,
                             }
-                            return;
-                        }
-                        let _ = pump_tx_hb.send(crate::pump::PumpMsg::Heartbeat(
-                            crate::pump::HeartbeatMsg {
-                                mcu_id,
-                                retired_counts: hb.retired_counts.clone(),
-                            },
-                        ));
-                    },
-                ));
-
-                let trip_deps = self.trip_deps();
-                conn.attach_endstop_trip_callback(Arc::new(
-                    move |endstop_id: u8, trip_clock: u64| {
-                        dispatch_endstop_trip(&trip_deps, mcu_id, endstop_id, trip_clock);
-                    },
-                ));
-
-                let conn_for_poll = Arc::downgrade(&conn);
-                let mcus_for_supervision = Arc::clone(&self.mcus);
-                let endpoint_death_for_supervision = Arc::clone(&self.latched_endpoint_death);
-                let on_endpoint_death: Box<dyn Fn(&str) + Send + 'static> =
-                    Box::new(move |reason: &str| {
-                        if report_ethercat_endpoint_death(
-                            &endpoint_death_for_supervision,
-                            mcu_id,
-                            reason,
-                        ) {
-                            arm_endpoint_death_watchdog(
-                                Arc::clone(&endpoint_death_for_supervision),
-                                mcu_id,
-                            );
-                        }
-                    });
-
-                let _ = std::thread::Builder::new()
-                    .name(format!("ec-heartbeat-poll-{mcu_id}"))
-                    .spawn(move || {
-                        loop {
-                            let Some(conn) = conn_for_poll.upgrade() else {
-                                return;
-                            };
-
-                            let peer_eof = conn.peer_closed();
-                            drop(conn);
-
-                            let fault_reason = {
-                                let mut mcus = mcus_for_supervision
+                        };
+                        match run_opt {
+                            Some(run) => {
+                                latched_fault_hb
                                     .lock()
-                                    .unwrap_or_else(|p| p.into_inner());
-                                let Some(c) = mcus.get_mut(&mcu_id) else {
-                                    return;
-                                };
-                                if peer_eof {
-                                    Some("conn EOF".to_string())
-                                } else if let Some(ref mut child) = c.endpoint_process {
-                                    match child.try_wait() {
-                                        Ok(Some(status)) => Some(format!("child exited: {status}")),
-                                        Ok(None) => None,
-                                        Err(e) => Some(format!("try_wait error: {e}")),
-                                    }
-                                } else {
-                                    None
-                                }
-                            };
-
-                            if let Some(reason) = fault_reason {
-                                on_endpoint_death(&reason);
-                                return;
+                                    .unwrap_or_else(|p| p.into_inner())
+                                    .insert(mcu_id, hb.fault_code);
+                                *active_cohort_hb.lock().unwrap_or_else(|p| p.into_inner()) = None;
+                                let _ = pump_tx_fault
+                                    .send(crate::pump::PumpMsg::Flush(run.all_axis_keys.clone()));
+                                let _ = pump_tx_fault
+                                    .send(crate::pump::PumpMsg::DripDisarm(run.cohort));
+                                let _ = run.notify.send(Err(format!(
+                                    "drive fault 0x{:04x} during homing — \
+                                     following-error/torque limit exceeded (endstop failure?)",
+                                    hb.fault_code
+                                )));
                             }
-
-                            std::thread::sleep(Duration::from_millis(1));
+                            None => {
+                                let prev = latched_fault_hb
+                                    .lock()
+                                    .unwrap_or_else(|p| p.into_inner())
+                                    .insert(mcu_id, hb.fault_code);
+                                if prev != Some(hb.fault_code) {
+                                    tracing::error!(
+                                        event = "ethercat_drive_fault_latched",
+                                        mcu_id,
+                                        mcu_label = %mcu_label_hb,
+                                        fault_code = hb.fault_code,
+                                        "ethercat drive fault — latched for klippy to report"
+                                    );
+                                }
+                            }
                         }
-                    })
-                    .expect("spawn ec-heartbeat-poll thread");
-            } else {
-                let io = host_ios
-                    .get(&mcu_id)
-                    .expect("host_io map built from mcu_configs")
-                    .clone();
-                io.attach_heartbeat_callback(Arc::new(move |retired: &[u32]| {
+                        return;
+                    }
                     let _ = pump_tx_hb.send(crate::pump::PumpMsg::Heartbeat(
                         crate::pump::HeartbeatMsg {
                             mcu_id,
-                            retired_counts: retired.to_vec(),
+                            retired_counts: hb.retired_counts.clone(),
                         },
                     ));
-                }));
-            }
+                },
+            ));
+
+            let trip_deps = self.trip_deps();
+            conn.attach_endstop_trip_callback(Arc::new(move |endstop_id: u8, trip_clock: u64| {
+                dispatch_endstop_trip(&trip_deps, mcu_id, endstop_id, trip_clock);
+            }));
+
+            let conn_for_poll = Arc::downgrade(&conn);
+            let mcus_for_supervision = Arc::clone(&self.mcus);
+            let endpoint_death_for_supervision = Arc::clone(&self.latched_endpoint_death);
+            let on_endpoint_death: Box<dyn Fn(&str) + Send + 'static> =
+                Box::new(move |reason: &str| {
+                    if report_ethercat_endpoint_death(
+                        &endpoint_death_for_supervision,
+                        mcu_id,
+                        reason,
+                    ) {
+                        arm_endpoint_death_watchdog(
+                            Arc::clone(&endpoint_death_for_supervision),
+                            mcu_id,
+                        );
+                    }
+                });
+
+            let _ = std::thread::Builder::new()
+                .name(format!("ec-heartbeat-poll-{mcu_id}"))
+                .spawn(move || {
+                    loop {
+                        let Some(conn) = conn_for_poll.upgrade() else {
+                            return;
+                        };
+
+                        let peer_eof = conn.peer_closed();
+                        drop(conn);
+
+                        let fault_reason = {
+                            let mut mcus = mcus_for_supervision
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner());
+                            let Some(c) = mcus.get_mut(&mcu_id) else {
+                                return;
+                            };
+                            if peer_eof {
+                                Some("conn EOF".to_string())
+                            } else if let Some(ref mut child) = c.endpoint_process {
+                                match child.try_wait() {
+                                    Ok(Some(status)) => Some(format!("child exited: {status}")),
+                                    Ok(None) => None,
+                                    Err(e) => Some(format!("try_wait error: {e}")),
+                                }
+                            } else {
+                                None
+                            }
+                        };
+
+                        if let Some(reason) = fault_reason {
+                            on_endpoint_death(&reason);
+                            return;
+                        }
+
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                })
+                .expect("spawn ec-heartbeat-poll thread");
+        } else {
+            let io = host_ios
+                .get(&mcu_id)
+                .expect("host_io map built from mcu_configs")
+                .clone();
+            io.attach_heartbeat_callback(Arc::new(move |retired: &[u32]| {
+                let _ =
+                    pump_tx_hb.send(crate::pump::PumpMsg::Heartbeat(crate::pump::HeartbeatMsg {
+                        mcu_id,
+                        retired_counts: retired.to_vec(),
+                    }));
+            }));
         }
     }
 

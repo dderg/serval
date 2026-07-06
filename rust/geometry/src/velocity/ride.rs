@@ -21,8 +21,18 @@
 //! to short time substeps that bill the normal jerk share of the rotating
 //! acceleration vector before steering with what remains.
 
-use super::disk::disk_rail_accel;
 use super::profile::StraightPhase;
+
+mod chain;
+mod grid;
+mod phase_log;
+mod state;
+
+use grid::Grid;
+use phase_log::{LogMark, Mode, PhaseLog};
+use state::{State, advance, march_step, step_within};
+
+pub(super) use chain::{chain_is_continuous, chain_states, clip_phases, reverse_chain};
 
 const SUBSTEP_TIME_FRACTION: f64 = 1.0 / 16.0;
 const EVENT_BISECT_ITERS: u32 = 48;
@@ -39,7 +49,6 @@ const TRIGGER_BISECT_ITERS: u32 = 32;
 const CONTACT_SNAP_REL: f64 = 1e-5;
 const FEASIBILITY_GUARD_STEPS: u32 = 200_000;
 const CELL_GUARD_STEPS: u32 = 100_000;
-const RANGE_MIN_BLOCK: usize = 64;
 /// In Ride and Flight the trajectory is oracle-independent — `peel_feasible`
 /// only decides when the mode ends — so the pass verifies it once per stride
 /// and, on a flip or any unverified mode change, rolls back to the last
@@ -49,7 +58,6 @@ const RANGE_MIN_BLOCK: usize = 64;
 /// unstrided pass would and the stride is a pure cost cut.
 const ORACLE_STRIDE: u32 = 32;
 const POS_EPS_MM: f64 = 1e-12;
-const KAPPA_EPS: f64 = 1e-12;
 
 fn rel_eps(x: f64) -> f64 {
     1e-9 * (1.0 + x.abs())
@@ -94,265 +102,6 @@ pub(super) struct Pass {
     pub complete: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct State {
-    t: f64,
-    s: f64,
-    v: f64,
-    a: f64,
-}
-
-fn advance(st: State, j: f64, dt: f64) -> State {
-    State {
-        t: st.t + dt,
-        s: st.s + st.v * dt + 0.5 * st.a * dt * dt + j * dt * dt * dt / 6.0,
-        v: (st.v + st.a * dt + 0.5 * j * dt * dt).max(0.0),
-        a: st.a + j * dt,
-    }
-}
-
-/// Time for the constant-jerk motion from `st` to advance `ds`, or `None` if
-/// it stalls (speed reaches zero) first. The bisection bracket is capped at
-/// the stall, where the position curve folds — a bracket extending past it
-/// would converge onto the fold instead of the crossing.
-fn time_to_cross(st: State, j: f64, ds: f64) -> Option<f64> {
-    if ds <= 0.0 {
-        return Some(0.0);
-    }
-    let pos = |dt: f64| st.v * dt + 0.5 * st.a * dt * dt + j * dt * dt * dt / 6.0;
-    let stall = next_stall(st, j);
-    let mut hi = {
-        let by_v = ds / st.v.max(1e-9);
-        let by_a = (2.0 * ds / st.a.abs().max(1e-9)).sqrt();
-        let mut hi = by_v.min(by_a);
-        // The jerk-term seed only matters starting near rest; cbrt is too
-        // expensive to pay on every crossing solve.
-        if hi > 1.0 {
-            hi = hi.min(libm::cbrt(6.0 * ds / j.abs().max(1e-9)));
-        }
-        hi.max(1e-12)
-    };
-    let mut guard = 0;
-    loop {
-        if let Some(ts) = stall {
-            if hi >= ts {
-                if pos(ts) < ds {
-                    return None;
-                }
-                hi = ts;
-                break;
-            }
-        }
-        if pos(hi) >= ds {
-            break;
-        }
-        hi *= 2.0;
-        guard += 1;
-        if guard > 200 {
-            return None;
-        }
-    }
-    let vel = |dt: f64| st.v + st.a * dt + 0.5 * j * dt * dt;
-    let mut lo = 0.0;
-    let mut t = hi;
-    for _ in 0..EVENT_BISECT_ITERS {
-        let f = pos(t) - ds;
-        if f >= 0.0 {
-            hi = t;
-        } else {
-            lo = t;
-        }
-        let dv = vel(t);
-        let newton = if dv > 0.0 { t - f / dv } else { f64::NAN };
-        let next = if newton > lo && newton < hi {
-            newton
-        } else {
-            0.5 * (lo + hi)
-        };
-        if (next - t).abs() <= 1e-15 * (1.0 + t) {
-            return Some(next);
-        }
-        t = next;
-    }
-    Some(t)
-}
-
-/// Smallest non-negative time at which the speed reaches zero from above, in
-/// closed form. A root the motion departs from positively (rest with
-/// positive jerk or acceleration behind it) is not a stall.
-fn next_stall(st: State, j: f64) -> Option<f64> {
-    let arriving = |t: f64| st.a + j * t < 0.0 || (st.a + j * t == 0.0 && j <= 0.0 && st.v <= 0.0);
-    if j.abs() < 1e-300 {
-        if st.a >= 0.0 {
-            return (st.v <= 0.0 && st.a == 0.0).then_some(0.0);
-        }
-        return Some((st.v / -st.a).max(0.0));
-    }
-    let disc = st.a * st.a - 2.0 * j * st.v;
-    if disc < 0.0 {
-        return None;
-    }
-    let sq = disc.sqrt();
-    let (r1, r2) = ((-st.a - sq) / j, (-st.a + sq) / j);
-    [r1.min(r2), r1.max(r2)]
-        .into_iter()
-        .find(|&t| t >= 0.0 && arriving(t))
-}
-
-struct Grid<'a> {
-    t: &'a Track<'a>,
-    cap_range_min: Vec<f64>,
-    /// Per cell: the last cell of its maximal uniform span — contiguous
-    /// straight cells sharing one accel budget and one cap slope-accel (to
-    /// integration noise). Flat cruise and constant-decel envelope stretches
-    /// merge; a kink or the envelope's jerk swing breaks the span. Within a
-    /// span the peel march may step to its tangency aim directly instead of
-    /// cell by cell — slope and rail are constant there and the cap is one
-    /// linear-in-`v²` chord, so nothing the march reads changes mid-span.
-    span_last: Vec<usize>,
-}
-
-impl<'a> Grid<'a> {
-    fn new(t: &'a Track<'a>) -> Self {
-        let cap_range_min = t
-            .cap_v
-            .chunks(RANGE_MIN_BLOCK)
-            .map(|c| c.iter().fold(f64::INFINITY, |m, &x| m.min(x)))
-            .collect();
-        let n = t.s.len();
-        let cells = n - 1;
-        let straight_cell =
-            |c: usize| t.kappa[c].abs() <= KAPPA_EPS && t.kappa[c + 1].abs() <= KAPPA_EPS;
-        let mut span_last = vec![0usize; cells];
-        span_last[cells - 1] = cells - 1;
-        for c in (0..cells.saturating_sub(1)).rev() {
-            let mergeable = straight_cell(c)
-                && straight_cell(c + 1)
-                && (t.cap_a[c + 1] - t.cap_a[c]).abs() <= 1e-9 * (1.0 + t.cap_a[c].abs())
-                && t.accel[c] == t.accel[c + 1]
-                && t.accel[c + 1] == t.accel[c + 2];
-            span_last[c] = if mergeable { span_last[c + 1] } else { c };
-        }
-        Self {
-            t,
-            cap_range_min,
-            span_last,
-        }
-    }
-
-    fn n(&self) -> usize {
-        self.t.s.len()
-    }
-
-    /// Cell whose span contains `s` (clamped).
-    fn cell(&self, s: f64) -> usize {
-        let n = self.n();
-        let i = self.t.s.partition_point(|&x| x <= s);
-        i.clamp(1, n - 1) - 1
-    }
-
-    /// `cell` walked forward from `hint` to contain `s`. The peel march only
-    /// moves forward, so the walk is amortized O(cells crossed) per call
-    /// instead of a binary search per lookup.
-    fn cell_ahead(&self, hint: usize, s: f64) -> usize {
-        let last = self.n() - 2;
-        let mut c = hint.min(last);
-        while c < last && s >= self.t.s[c + 1] {
-            c += 1;
-        }
-        c
-    }
-
-    fn lerp_in(&self, arr: &[f64], c: usize, s: f64) -> f64 {
-        let span = self.t.s[c + 1] - self.t.s[c];
-        let f = if span > POS_EPS_MM {
-            ((s - self.t.s[c]) / span).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        arr[c] + f * (arr[c + 1] - arr[c])
-    }
-
-    fn lerp_node(&self, arr: &[f64], s: f64) -> f64 {
-        self.lerp_in(arr, self.cell(s), s)
-    }
-
-    /// Cap speed within cell `c`, linear in `v²` between nodes: a
-    /// constant-decel brake segment of the envelope is linear in `v²`, so
-    /// this represents it exactly where a linear-in-`v` chord would sag
-    /// below it.
-    fn cap_in(&self, c: usize, s: f64) -> f64 {
-        let span = self.t.s[c + 1] - self.t.s[c];
-        let f = if span > POS_EPS_MM {
-            ((s - self.t.s[c]) / span).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let (w0, w1) = (
-            self.t.cap_v[c] * self.t.cap_v[c],
-            self.t.cap_v[c + 1] * self.t.cap_v[c + 1],
-        );
-        (w0 + f * (w1 - w0)).max(0.0).sqrt()
-    }
-
-    fn cap_at(&self, s: f64) -> f64 {
-        self.cap_in(self.cell(s), s)
-    }
-
-    fn slope_at(&self, s: f64) -> f64 {
-        self.t.cap_a[self.cell(s)]
-    }
-
-    fn rail_in(&self, c: usize, s: f64, v: f64) -> f64 {
-        disk_rail_accel(
-            self.lerp_in(self.t.accel, c, s),
-            self.lerp_in(self.t.kappa, c, s),
-            v,
-        )
-    }
-
-    fn rail_at(&self, s: f64, v: f64) -> f64 {
-        self.rail_in(self.cell(s), s, v)
-    }
-
-    fn kappa_at(&self, s: f64) -> f64 {
-        self.lerp_node(self.t.kappa, s)
-    }
-
-    fn curved_near(&self, s: f64) -> bool {
-        let c = self.cell(s);
-        self.t.kappa[c].abs() > KAPPA_EPS || self.t.kappa[c + 1].abs() > KAPPA_EPS
-    }
-
-    /// Lower bound of the cap over `[s, s + dist]`.
-    fn cap_min_over(&self, s: f64, dist: f64) -> f64 {
-        let lo = self.cell(s);
-        let hi = self.cell(s + dist) + 1;
-        let (b_lo, b_hi) = (lo / RANGE_MIN_BLOCK, hi / RANGE_MIN_BLOCK);
-        let mut m = f64::INFINITY;
-        if b_lo == b_hi {
-            for &x in &self.t.cap_v[lo..=hi] {
-                m = m.min(x);
-            }
-            return m;
-        }
-        for &x in &self.t.cap_v[lo..(b_lo + 1) * RANGE_MIN_BLOCK] {
-            m = m.min(x);
-        }
-        for &x in &self.cap_range_min[(b_lo + 1)..b_hi] {
-            m = m.min(x);
-        }
-        for &x in &self.t.cap_v[b_hi * RANGE_MIN_BLOCK..=hi] {
-            m = m.min(x);
-        }
-        m
-    }
-
-    fn end_s(&self) -> f64 {
-        self.t.s[self.n() - 1]
-    }
-}
-
 /// Whether a committed jerk-down from `st` lands tangent on the cap (value
 /// and slope both met) without ever crossing it. Marches the analytic arc,
 /// clamping the tangency target to the disk rail so an unreachable plunge in
@@ -395,7 +144,7 @@ fn peel_feasible(g: &Grid, st: State) -> bool {
         if st.s >= g.end_s() - POS_EPS_MM {
             return true;
         }
-        let to_span_end = g.t.s[g.span_last[cell] + 1] - st.s;
+        let to_span_end = g.span_end_s(cell) - st.s;
         let dt_tan = if st.a > slope {
             (st.a - slope) / j
         } else {
@@ -422,363 +171,6 @@ fn peel_feasible(g: &Grid, st: State) -> bool {
         st = advance(st, -j, dt);
         cell = g.cell_ahead(cell, st.s);
     }
-}
-
-/// A feasibility-march step: like [`step_within`] but the boundary crossing
-/// is a one-shot trapezoid estimate, not a solve. The march re-reads its cell
-/// after every advance and its verdict comes from state checks, so landing a
-/// cell-fraction past (or short of) the boundary costs nothing — cell-exact
-/// crossing times are wasted precision here. Near a stall the estimate is
-/// unsafe (the position cubic folds), so that case falls through to the
-/// exact solve.
-fn march_step(st: State, j: f64, dt_aim: f64, ds: f64) -> f64 {
-    let stall = next_stall(st, j);
-    if stall.is_none_or(|ts| ts >= dt_aim) {
-        let pos = st.v * dt_aim + 0.5 * st.a * dt_aim * dt_aim + j * dt_aim * dt_aim * dt_aim / 6.0;
-        if pos <= ds {
-            return dt_aim;
-        }
-        if st.v > 1e-6 {
-            let dt0 = (ds / st.v).min(dt_aim);
-            let v1 = (st.v + st.a * dt0 + 0.5 * j * dt0 * dt0).max(0.0);
-            if v1 > 1e-6 {
-                let dt = (2.0 * ds / (st.v + v1)).min(dt_aim);
-                if stall.is_none_or(|ts| ts >= dt) {
-                    return dt;
-                }
-            }
-        }
-    }
-    match time_to_cross(st, j, ds) {
-        Some(t) => t.min(dt_aim),
-        None => dt_aim,
-    }
-}
-
-/// Step duration: the aim `dt_aim`, clipped to the crossing of `ds` ahead.
-/// The crossing solve is skipped when the aim provably stays inside — the
-/// position cubic is monotone up to the stall, so one eval decides.
-fn step_within(st: State, j: f64, dt_aim: f64, ds: f64) -> f64 {
-    let stalls_first = next_stall(st, j).is_some_and(|ts| ts < dt_aim);
-    if !stalls_first && dt_aim.is_finite() {
-        let pos = st.v * dt_aim + 0.5 * st.a * dt_aim * dt_aim + j * dt_aim * dt_aim * dt_aim / 6.0;
-        if pos <= ds {
-            return dt_aim;
-        }
-    }
-    match time_to_cross(st, j, ds) {
-        Some(t) => t.min(dt_aim),
-        None => dt_aim,
-    }
-}
-
-#[derive(PartialEq, Clone, Copy, Debug)]
-enum Mode {
-    Flight,
-    Peel,
-    Ride,
-}
-
-struct PhaseLog {
-    phases: Vec<StraightPhase>,
-    active: bool,
-    complete: bool,
-    open: Option<(State, f64)>,
-}
-
-/// Whether `st` lies on the constant-jerk cubic from `p0` — i.e. the open
-/// phase still describes the motion. A rail clamp or a node snap mutates the
-/// state off the cubic; the phase must close there so the chain stays exact.
-fn on_cubic(p0: State, j: f64, st: State) -> bool {
-    let e = advance(p0, j, st.t - p0.t);
-    (e.s - st.s).abs() <= rel_eps(st.s)
-        && (e.v - st.v).abs() <= rel_eps(st.v)
-        && (e.a - st.a).abs() <= rel_eps(st.a)
-}
-
-impl PhaseLog {
-    fn new() -> Self {
-        Self {
-            phases: Vec::new(),
-            active: true,
-            complete: true,
-            open: None,
-        }
-    }
-
-    fn set_jerk(&mut self, st: State, j: f64) {
-        if !self.active {
-            return;
-        }
-        if let Some((p0, j0)) = self.open {
-            if j0 == j && on_cubic(p0, j0, st) {
-                return;
-            }
-        }
-        self.close(st);
-        self.open = Some((st, j));
-    }
-
-    fn close(&mut self, st: State) {
-        if let Some((p0, j)) = self.open.take() {
-            let dt = st.t - p0.t;
-            if dt > 0.0 {
-                self.phases.push(StraightPhase {
-                    t0: p0.t,
-                    dt,
-                    s0: p0.s,
-                    v0: p0.v,
-                    a0: p0.a,
-                    j,
-                });
-            }
-        }
-    }
-
-    fn opaque(&mut self, st: State) {
-        self.close(st);
-        self.complete = false;
-        self.active = false;
-        self.phases.clear();
-    }
-
-    /// Adopt the brake chain over `[st.s, s_hi]`: append its clipped phases in
-    /// place of integrating the stretch, returning the state at `s_hi` for the
-    /// pass to resume from. `None` (no log mutation) if the chain does not
-    /// meet the pass's state at `st` — the pass then integrates the stretch
-    /// itself. Only the velocity is checked at the joint: the landing state
-    /// carries up to a cell of chord smear in `a`, which the chain absorbs.
-    fn splice(&mut self, st: State, chain: &[StraightPhase], s_hi: f64) -> Option<State> {
-        if !self.active {
-            return None;
-        }
-        let tail = clip_chain_from(chain, st.s)?;
-        let head = &tail[0];
-        if (head.v0 - st.v).abs() > 1e-5 * (1.0 + st.v) {
-            return None;
-        }
-        self.close(st);
-        let mut end = st;
-        for p in &tail {
-            if p.s0 >= s_hi - POS_EPS_MM {
-                break;
-            }
-            let p_state = State {
-                t: 0.0,
-                s: p.s0,
-                v: p.v0,
-                a: p.a0,
-            };
-            let dt = if phase_end_s(p) <= s_hi + POS_EPS_MM {
-                p.dt
-            } else {
-                match time_to_cross(p_state, p.j, s_hi - p.s0) {
-                    Some(tau) => tau,
-                    None => break,
-                }
-            };
-            if dt <= 0.0 {
-                break;
-            }
-            self.phases.push(StraightPhase {
-                t0: end.t,
-                dt,
-                ..*p
-            });
-            let e = advance(p_state, p.j, dt);
-            end = State {
-                t: end.t + dt,
-                s: e.s,
-                v: e.v,
-                a: e.a,
-            };
-        }
-        end.s = s_hi;
-        Some(end)
-    }
-}
-
-/// The chain's suffix starting at run-arc `s_from`: the containing phase is
-/// entered mid-flight (state advanced to `s_from`), the rest follow whole.
-fn clip_chain_from(chain: &[StraightPhase], s_from: f64) -> Option<Vec<StraightPhase>> {
-    let idx = chain
-        .iter()
-        .position(|p| phase_end_s(p) > s_from + POS_EPS_MM)?;
-    let p = &chain[idx];
-    let mut out = Vec::with_capacity(chain.len() - idx);
-    if s_from > p.s0 + POS_EPS_MM {
-        let st = State {
-            t: 0.0,
-            s: p.s0,
-            v: p.v0,
-            a: p.a0,
-        };
-        let tau = time_to_cross(st, p.j, s_from - p.s0)?;
-        let at = advance(st, p.j, tau);
-        out.push(StraightPhase {
-            t0: 0.0,
-            dt: p.dt - tau,
-            s0: at.s,
-            v0: at.v,
-            a0: at.a,
-            j: p.j,
-        });
-    } else {
-        out.push(*p);
-    }
-    out.extend_from_slice(&chain[idx + 1..]);
-    Some(out)
-}
-
-fn phase_end_s(p: &StraightPhase) -> f64 {
-    p.s0 + p.v0 * p.dt + 0.5 * p.a0 * p.dt * p.dt + p.j * p.dt * p.dt * p.dt / 6.0
-}
-
-/// Whether every joint in the chain is state-continuous — each phase's end
-/// state is the next phase's start state. A chain with a kicked joint (a
-/// landing snap, a rail clamp, a splice contact) still serves as sampling
-/// truth, but must not lower to exact cubics: the kick would dispatch as a
-/// genuine trajectory discontinuity. Under a jerk limit acceleration is part
-/// of the continuous state; with jerk unlimited the profile steps its
-/// acceleration at phase joints by design, so only position and velocity
-/// gate (`require_accel = false`).
-pub(super) fn chain_is_continuous(chain: &[StraightPhase], require_accel: bool) -> bool {
-    chain.windows(2).all(|w| {
-        let (p, q) = (&w[0], &w[1]);
-        let e = advance(
-            State {
-                t: 0.0,
-                s: p.s0,
-                v: p.v0,
-                a: p.a0,
-            },
-            p.j,
-            p.dt,
-        );
-        (e.s - q.s0).abs() <= 1e-9 * (1.0 + q.s0.abs())
-            && (e.v - q.v0).abs() <= 1e-8 * (1.0 + q.v0)
-            && (!require_accel || (e.a - q.a0).abs() <= 1e-4 * (1.0 + q.a0.abs()))
-    })
-}
-
-/// The chain's phases clipped to `[s_lo, s_hi]`, rebased to span-local time
-/// and arc-length (`t0 = 0`, `s0 = 0` at the span start). Natural phase
-/// boundaries chain bit-exactly; a genuine clip solves the interior time —
-/// once per boundary, so abutting spans read the same float and their
-/// durations tile the chain's total.
-pub(super) fn clip_phases(chain: &[StraightPhase], s_lo: f64, s_hi: f64) -> Vec<StraightPhase> {
-    let mut out = Vec::new();
-    let mut t_base: Option<f64> = None;
-    for p in chain {
-        let p_end = phase_end_s(p);
-        if p_end <= s_lo + POS_EPS_MM || p.s0 >= s_hi - POS_EPS_MM {
-            continue;
-        }
-        let st = State {
-            t: 0.0,
-            s: p.s0,
-            v: p.v0,
-            a: p.a0,
-        };
-        let entry = if s_lo <= p.s0 + POS_EPS_MM {
-            0.0
-        } else {
-            time_to_cross(st, p.j, s_lo - p.s0).unwrap_or(0.0)
-        };
-        let exit = if s_hi >= p_end - POS_EPS_MM {
-            p.dt
-        } else {
-            time_to_cross(st, p.j, s_hi - p.s0).unwrap_or(p.dt)
-        };
-        if exit <= entry + 1e-15 {
-            continue;
-        }
-        let at = advance(st, p.j, entry);
-        let base = *t_base.get_or_insert(p.t0 + entry);
-        out.push(StraightPhase {
-            t0: (p.t0 + entry) - base,
-            dt: exit - entry,
-            s0: at.s - s_lo,
-            v0: at.v,
-            a0: at.a,
-            j: p.j,
-        });
-    }
-    out
-}
-
-/// Exact `(v, a)` at each grid arc-length from the phase chain, so a
-/// completed run's samples come from the same closed-form phases the lowering
-/// executes — never from ride chords, whose half-cell smear the sampled
-/// profile would otherwise carry.
-pub(super) fn chain_states(chain: &[StraightPhase], s: &[f64]) -> Vec<(f64, f64)> {
-    let mut out = Vec::with_capacity(s.len());
-    let mut idx = 0usize;
-    for &x in s {
-        while idx + 1 < chain.len() && phase_end_s(&chain[idx]) < x - POS_EPS_MM {
-            idx += 1;
-        }
-        let p = &chain[idx];
-        let st = State {
-            t: 0.0,
-            s: p.s0,
-            v: p.v0,
-            a: p.a0,
-        };
-        let end = phase_end_s(p);
-        let state = if x <= p.s0 + POS_EPS_MM {
-            (p.v0, p.a0)
-        } else if x >= end - POS_EPS_MM {
-            let e = advance(st, p.j, p.dt);
-            (e.v, e.a)
-        } else {
-            match time_to_cross(st, p.j, x - p.s0) {
-                Some(tau) => {
-                    let e = advance(st, p.j, tau);
-                    (e.v, e.a)
-                }
-                None => (p.v0, p.a0),
-            }
-        };
-        out.push(state);
-    }
-    out
-}
-
-/// Map the backward pass's phase chain into the forward frame: time reverses,
-/// so each phase enters at its backward end state with negated acceleration
-/// and the same jerk, and the chain order flips.
-pub(super) fn reverse_chain(rev: &[StraightPhase], total_len: f64) -> Vec<StraightPhase> {
-    let mut out: Vec<StraightPhase> = rev
-        .iter()
-        .rev()
-        .map(|p| {
-            let end = advance(
-                State {
-                    t: 0.0,
-                    s: p.s0,
-                    v: p.v0,
-                    a: p.a0,
-                },
-                p.j,
-                p.dt,
-            );
-            StraightPhase {
-                t0: 0.0,
-                dt: p.dt,
-                s0: total_len - end.s,
-                v0: end.v,
-                a0: -end.a,
-                j: p.j,
-            }
-        })
-        .collect();
-    let mut t = 0.0;
-    for p in &mut out {
-        p.t0 = t;
-        t += p.dt;
-    }
-    out
 }
 
 /// Integrate the fastest feasible profile under the track's cap from
@@ -839,8 +231,7 @@ pub(super) fn reach_pass(
         st: State,
         i: usize,
         mode: Mode,
-        phases_len: usize,
-        open: Option<(State, f64)>,
+        mark: LogMark,
     }
     let mut ckpt: Option<StrideCkpt> = None;
     let mut skip_left: u32 = 0;
@@ -871,8 +262,7 @@ pub(super) fn reach_pass(
                     st = c.st;
                     i = c.i;
                     mode = c.mode;
-                    log.phases.truncate(c.phases_len);
-                    log.open = c.open;
+                    log.rewind(c.mark);
                     skip_left = 0;
                     fine_left = 2 * ORACLE_STRIDE;
                     continue 'nodes;
@@ -886,8 +276,7 @@ pub(super) fn reach_pass(
                         st,
                         i,
                         mode,
-                        phases_len: log.phases.len(),
-                        open: log.open,
+                        mark: log.mark(),
                     });
                     skip_left = ORACLE_STRIDE;
                 } else if let Some(c) = ckpt.take() {
