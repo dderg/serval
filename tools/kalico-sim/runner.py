@@ -1800,6 +1800,8 @@ enable_pin: !gpiochip0/gpio11
 microsteps: 16
 rotation_distance: 4
 
+[motor_adjust]
+
 [z_tilt]
 z_positions:
     0, 125
@@ -1934,6 +1936,14 @@ def _query_toolhead_z(api_socket: str) -> Optional[float]:
     if pos and len(pos) >= 3:
         return float(pos[2])
     return None
+
+
+def _parse_probe_z(log_text: str) -> Optional[float]:
+    probe_lines = [l.strip() for l in log_text.split("\n") if " is z=" in l]
+    if not probe_lines:
+        return None
+    m = re.search(r"is z=(-?\d+\.?\d*)", probe_lines[-1])
+    return float(m.group(1)) if m else None
 
 
 def run_probe_test(
@@ -2249,20 +2259,49 @@ def run_probe_test(
                         )
 
                         resp = send_gcode(
+                            api_socket,
+                            "MOTOR_ADJUST MOTOR=stepper_z DELTA=0.5 SPEED=5",
+                            timeout=60,
+                        )
+                        out, offset = _log_tail_since(klippy_log, offset)
+                        check(
+                            "motor-adjust",
+                            not resp.get("error"),
+                            resp.get("error") or "ok",
+                        )
+
+                        resp = send_gcode(api_socket, "PROBE", timeout=90)
+                        out, offset = _log_tail_since(klippy_log, offset)
+                        probe_z = _parse_probe_z(out)
+                        check(
+                            "probe-sees-motor-shift",
+                            not resp.get("error")
+                            and probe_z is not None
+                            and abs(abs(probe_z - 1.5) - 0.5) < 0.1,
+                            "probe z=%s expected 1.5±0.5" % (probe_z,),
+                        )
+
+                        resp = send_gcode(
                             api_socket, "Z_TILT_ADJUST", timeout=300
                         )
                         out, offset = _log_tail_since(klippy_log, offset)
-                        err = str(resp.get("error", ""))
                         check(
-                            "z-tilt-fails-loudly",
-                            "per-motor Z adjustment is not yet implemented"
-                            in err,
-                            err or "expected not-yet-implemented error",
+                            "z-tilt-adjust",
+                            not resp.get("error")
+                            and "Making the following Z adjustments" in out,
+                            resp.get("error") or "adjustments applied",
                         )
+
+                        resp = send_gcode(api_socket, "PROBE", timeout=90)
+                        out, offset = _log_tail_since(klippy_log, offset)
+                        probe_z = _parse_probe_z(out)
                         check(
-                            "z-tilt-reports-adjustments",
-                            "Z adjustments needed" in out,
-                            "measured deviations reported before the raise",
+                            "probe-consistent-after-z-tilt",
+                            not resp.get("error")
+                            and probe_z is not None
+                            and abs(probe_z - 1.5) < 0.1,
+                            "probe z=%s expected ~1.5 after common-mode"
+                            " rebase" % (probe_z,),
                         )
 
                 shutdown = (

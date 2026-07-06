@@ -53,6 +53,9 @@ class ZAdjustHelper:
             if delta < 1e-6:
                 continue
             adjuster.adjust(stepper.get_name(), delta, speed, accel)
+        curpos = toolhead.get_position()
+        curpos[2] -= reference
+        toolhead.set_position(curpos)
 
 
 class ZAdjustStatus:
