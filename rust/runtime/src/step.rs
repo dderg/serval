@@ -23,14 +23,6 @@ impl Default for StepMotorState {
 }
 
 impl StepMotorState {
-    pub fn debug_steps_per_mm(&self) -> f32 {
-        self.steps_per_mm
-    }
-
-    pub fn debug_accumulator(&self) -> f64 {
-        self.step_accumulator
-    }
-
     pub fn new(steps_per_mm: f32) -> Self {
         Self {
             step_accumulator: 0.0,

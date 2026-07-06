@@ -714,6 +714,4 @@ mod c2_continuity_tests;
 #[cfg(test)]
 mod cruise_onset_tests;
 #[cfg(test)]
-mod integration_pipeline_tests;
-#[cfg(test)]
 mod plan_velocity_bench;

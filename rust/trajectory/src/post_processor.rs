@@ -111,11 +111,6 @@ impl PostProcessorInstance {
         self.values[idx] = value;
         Ok(())
     }
-
-    #[must_use]
-    pub fn into_chain(self) -> CompiledChain {
-        CompiledChain::compile(&[self]).expect("a single post-processor always compiles")
-    }
 }
 
 impl CompiledChain {
