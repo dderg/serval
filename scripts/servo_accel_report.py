@@ -31,7 +31,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from servo_capture import load_capture, torque_summary  # noqa: E402
-from servo_gain_report import drive_metrics  # noqa: E402
+from servo_gain_report import cruise_mask  # noqa: E402
 
 STEP_RE = re.compile(r"_a(\d+)_\d{8}_\d{6}\.scap$")
 
@@ -76,11 +76,25 @@ def accel_drive_metrics(path, drive, torque_limit):
     header, data, drive_idx = load_capture(path, drive)
     fs = 1e9 / header["cycle_ns"]
     tq = torque_summary(data, torque_limit, fs)
-    gm = drive_metrics(path, header["drives"][drive_idx]["name"])
+    cpm = header["drives"][drive_idx]["counts_per_mm"]
+    n = len(data)
+    t = np.arange(n) / fs
+    target = data["target_counts"].astype(np.float64) / cpm
+    ferr = data["following_error"].astype(np.float64) / cpm
+    m, _vnom, vt = cruise_mask(target, t, fs)
+    cruise_std_um = (
+        float(np.std(np.abs(ferr[m])) * 1000.0) if m.sum() >= 256 else None
+    )
+    moving = np.abs(vt) > 5.0
+    ends = np.where(moving[:-1] & ~moving[1:])[0]
+    post = int(round(0.4 * fs))
+    lookback = int(round(0.1 * fs))
     edge_peak_um = 0.0
-    for window in gm["stop_windows"]:
+    for e in ends:
+        if e + post >= n or e < lookback:
+            continue
+        window = ferr[e - lookback : e + post]
         edge_peak_um = max(edge_peak_um, float(np.max(np.abs(window))) * 1000.0)
-    t = np.arange(len(data)) / fs
     return {
         "drive": header["drives"][drive_idx]["name"],
         "torque_peak": tq["peak"],
@@ -88,7 +102,7 @@ def accel_drive_metrics(path, drive, torque_limit):
         "rail_pct": tq["rail_pct_moving"],
         "rail_ms": tq["rail_ms"],
         "edge_peak_um": edge_peak_um,
-        "cruise_std_um": gm["ferr_std_um"],
+        "cruise_std_um": cruise_std_um,
         "torque_trace": data["torque_actual"].astype(np.float64),
         "t": t,
     }
@@ -101,13 +115,16 @@ def step_metrics(path, drive, torque_limit):
     )
     per_drive = [accel_drive_metrics(path, n, torque_limit) for n in names]
     worst_torque = max(per_drive, key=lambda m: m["torque_peak"])
+    cruise_stds = [
+        m["cruise_std_um"] for m in per_drive if m["cruise_std_um"] is not None
+    ]
     return {
         "path": path,
         "torque_peak": max(m["torque_peak"] for m in per_drive),
         "rail_pct": max(m["rail_pct"] for m in per_drive),
         "rail_detected": any(m["rail_detected"] for m in per_drive),
         "edge_peak_um": max(m["edge_peak_um"] for m in per_drive),
-        "cruise_std_um": max(m["cruise_std_um"] for m in per_drive),
+        "cruise_std_um": max(cruise_stds) if cruise_stds else None,
         "worst_torque_drive": worst_torque,
         "drives": per_drive,
     }
@@ -162,12 +179,18 @@ def render(steps, out_path):
         marker="o",
         label="edge peak ferr (um)",
     )
-    ferr_ax.plot(
-        accels,
-        [m["cruise_std_um"] for _, m in steps],
-        marker="s",
-        label="cruise ferr std (um)",
-    )
+    cruise_pts = [
+        (a, m["cruise_std_um"])
+        for a, m in steps
+        if m["cruise_std_um"] is not None
+    ]
+    if cruise_pts:
+        ferr_ax.plot(
+            [a for a, _ in cruise_pts],
+            [c for _, c in cruise_pts],
+            marker="s",
+            label="cruise ferr std (um)",
+        )
     ferr_ax.set_xlabel("accel (mm/s^2)")
     ferr_ax.set_ylabel("following error (um)")
     ferr_ax.set_title("Following error vs accel")
@@ -219,8 +242,9 @@ def main(argv=None):
     p.add_argument(
         "--torque-limit",
         type=int,
-        default=900,
-        help="rail threshold, per-mille of rated (default 900)",
+        default=1400,
+        help="drive's available-torque ceiling, per-mille of rated "
+        "(default 1400); samples at/above it count as railed",
     )
     args = p.parse_args(argv)
 
@@ -271,14 +295,19 @@ def main(argv=None):
         )
     )
     for accel, met in steps:
+        cruise = (
+            "%10.0f" % met["cruise_std_um"]
+            if met["cruise_std_um"] is not None
+            else "%10s" % "-"
+        )
         print(
-            "%-10d %10d %8.1f %10.0f %10.0f %s"
+            "%-10d %10d %8.1f %10.0f %s %s"
             % (
                 accel,
                 met["torque_peak"],
                 met["rail_pct"],
                 met["edge_peak_um"],
-                met["cruise_std_um"],
+                cruise,
                 "YES" if met["rail_detected"] else "no",
             )
         )

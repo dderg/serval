@@ -66,7 +66,7 @@ where
 
             let curve = lane_curve(&module, &seg.axes, axis_idx);
 
-            tracing::info!(
+            tracing::trace!(
                 subsystem = "motion",
                 event = "pipe_axis",
                 line = seg.source_line,

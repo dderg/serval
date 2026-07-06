@@ -79,7 +79,7 @@ fn replay(
     drop(raw_tx);
 
     let (fitted_tx, fitted_rx) = unbounded();
-    Fitter::new(config.chain).run(raw_rx, fitted_tx);
+    FitStage::new(config.chain).run(raw_rx, fitted_tx);
 
     let (planned_tx, planned_rx) = unbounded();
     Planner::new(config).run(fitted_rx, planned_tx);
@@ -671,7 +671,7 @@ const NEPTUNE_SCV25_FILLET: [(f64, f64, f64); 7] = [
 fn arc_run_into_sharp_corner_stays_contiguous_at_high_scv() {
     // Voron cube Z6.2 fillet slice that crashed the Neptune bench mid-print:
     // with arc fitting enabled and square_corner_velocity raised to 25, the
-    // fitter emitted a 0.27mm gap between the corner blend leaving the fitted
+    // fit stage emitted a 0.27mm gap between the corner blend leaving the fitted
     // run and the following long line, tripping the TravelAligningSender
     // contiguity assert.
     let limits = VelocityLimits::try_new(100.0, 1000.0, 25.0, 1_000_000.0).unwrap();

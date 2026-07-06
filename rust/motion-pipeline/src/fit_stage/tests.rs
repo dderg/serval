@@ -4,7 +4,7 @@ use crossbeam_channel::{bounded, unbounded};
 use geometry::segment::SourceRange;
 use geometry::{ChainFitConfig, Move, MoveContext, VelocityLimits, line_move};
 
-use super::Fitter;
+use super::FitStage;
 use crate::StreamInput;
 
 fn moves_of(rx: crossbeam_channel::Receiver<StreamInput>) -> Vec<Move> {
@@ -32,17 +32,17 @@ fn line(line_no: u32, start: [f64; 3], end: [f64; 3], e: f64) -> Move {
     line_move(start, end, e, ctx(line_no, 80.0)).unwrap()
 }
 
-/// Pre-fills the input channel and closes it before the fitter runs, so the
-/// fitter never observes a transient-empty input: the output is the pure
-/// end-of-stream fit.
-fn run_fitter(moves: &[Move], config: ChainFitConfig) -> Vec<Move> {
+/// Pre-fills the input channel and closes it before the fit stage runs, so
+/// the fit stage never observes a transient-empty input: the output is the
+/// pure end-of-stream fit.
+fn run_fit_stage(moves: &[Move], config: ChainFitConfig) -> Vec<Move> {
     let (tx, rx) = unbounded();
     let (out_tx, out_rx) = unbounded();
     for m in moves {
         tx.send(m.clone().into()).unwrap();
     }
     drop(tx);
-    Fitter::new(config).run(rx, out_tx);
+    FitStage::new(config).run(rx, out_tx);
     moves_of(out_rx)
 }
 
@@ -90,7 +90,7 @@ fn arc_mode_all_line_input_reconstructs_arc() {
         moves.push(line(405 + i, prev, end, 0.3));
         prev = end;
     }
-    let streamed = run_fitter(&moves, ChainFitConfig::with_arc_fit(3));
+    let streamed = run_fit_stage(&moves, ChainFitConfig::with_arc_fit(3));
     assert!(
         streamed
             .iter()
@@ -119,7 +119,7 @@ fn extrusion_ratio_step_splits_the_arc() {
     // absorb both extrusion ratios, so two runs (two Arc pieces) come out.
     let n = 400;
     let moves = circle_facets(n, |i| if i <= n / 2 { 0.3 } else { 0.6 });
-    let streamed = run_fitter(&moves, ChainFitConfig::with_arc_fit(3));
+    let streamed = run_fit_stage(&moves, ChainFitConfig::with_arc_fit(3));
     let arcs = streamed
         .iter()
         .filter(|m| matches!(m.segment.spatial, Some(geometry::path::Segment::Arc(_))))
@@ -128,25 +128,43 @@ fn extrusion_ratio_step_splits_the_arc() {
 }
 
 #[test]
-fn small_extrusion_drift_splits_the_stream_arc() {
-    // A 10% epmm step exceeds the stream fitter's rounding tolerance for a
-    // single run: two arcs come out where a looser tolerance would keep one.
+fn small_extrusion_drift_rides_one_arc_with_a_ramp() {
+    // A 10% epmm step sits inside the ramp band: one arc absorbs the whole
+    // window and carries a linear extrusion-rate ramp that conserves total E.
     let n = 400;
     let moves = circle_facets(n, |i| if i <= n / 2 { 0.30 } else { 0.33 });
-    let streamed = run_fitter(&moves, ChainFitConfig::with_arc_fit(3));
-    let arcs = streamed
+    let streamed = run_fit_stage(&moves, ChainFitConfig::with_arc_fit(3));
+    let arcs: Vec<&Move> = streamed
         .iter()
         .filter(|m| matches!(m.segment.spatial, Some(geometry::path::Segment::Arc(_))))
-        .count();
-    assert_eq!(arcs, 2, "expected the epmm drift to split the run");
+        .collect();
+    assert_eq!(arcs.len(), 1, "expected the drift to ride one ramped arc");
+    assert!(
+        arcs[0].segment.followers.iter().any(|f| f.is_ramped()),
+        "expected the arc to carry the drift as a ratio ramp"
+    );
+    let total_e = |ms: &[Move]| -> f64 {
+        ms.iter()
+            .flat_map(|m| {
+                let len = m.segment.s_len();
+                m.segment.followers.iter().map(move |f| f.delta_over(len))
+            })
+            .sum()
+    };
+    let e_in = total_e(&moves);
+    let e_out = total_e(&streamed);
+    assert!(
+        (e_in - e_out).abs() <= 1e-6 * e_in,
+        "fitted stream must conserve E: in={e_in} out={e_out}"
+    );
 }
 
 #[test]
 fn drain_flushes_buffered_moves_without_close() {
     let (tx, rx) = bounded::<StreamInput>(64);
     let (out_tx, out_rx) = bounded::<StreamInput>(64);
-    let fitter = Fitter::new(ChainFitConfig::default());
-    let handle = std::thread::spawn(move || fitter.run(rx, out_tx));
+    let fit_stage = FitStage::new(ChainFitConfig::default());
+    let handle = std::thread::spawn(move || fit_stage.run(rx, out_tx));
 
     tx.send(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.5).into())
         .unwrap();
@@ -160,7 +178,7 @@ fn drain_flushes_buffered_moves_without_close() {
     for _ in 0..4 {
         let item = out_rx
             .recv_timeout(Duration::from_secs(10))
-            .expect("fitter held moves across a drain");
+            .expect("fit stage held moves across a drain");
         assert!(matches!(item, StreamInput::Move(_)), "move expected");
         got.push(item);
     }

@@ -16,8 +16,8 @@ const ALIGN_EPS_MM: f64 = 1e-9;
 /// It reads ahead only while the next move can still change how the buffered
 /// prefix fits, and commits (emits) as soon as a fitted piece is final under
 /// any future append. `Drain` (or the input closing) resolves and emits
-/// everything unconditionally and is forwarded downstream; the fitter never
-/// gives up its lookahead on its own.
+/// everything unconditionally and is forwarded downstream; the fit stage
+/// never gives up its lookahead on its own.
 ///
 /// Structure is decided greedily at the undecided tail: the longest prefix
 /// through which one arc still fits keeps growing, and the first move that
@@ -32,7 +32,7 @@ const ALIGN_EPS_MM: f64 = 1e-9;
 /// junction classification uses full raw lengths (minus explicit easing
 /// reductions) exactly as the batch fit does — and length already paid out to
 /// an emitted blend or easing is applied only when a body is finally emitted.
-pub struct Fitter {
+pub struct FitStage {
     config: ChainFitConfig,
     min_run: usize,
     decided: Vec<Element>,
@@ -72,7 +72,7 @@ fn piece_of(e: &Element) -> Option<&Move> {
     }
 }
 
-impl Fitter {
+impl FitStage {
     pub fn new(config: ChainFitConfig) -> Self {
         let min_run = config
             .arc_fit
@@ -125,7 +125,7 @@ impl Fitter {
             Control::Dwell { .. } | Control::SetAxisChains(_) | Control::Barrier(_) => {
                 assert!(
                     self.decided.is_empty() && self.tail.is_empty(),
-                    "fitter: control token arrived with undrained moves — a Drain must precede it"
+                    "fit_stage: control token arrived with undrained moves — a Drain must precede it"
                 );
             }
         }
@@ -202,8 +202,8 @@ impl Fitter {
             }
             let head = (idx > 0).then(|| &self.decided[idx - 1]).and_then(piece_of);
             let tail = self.decided.get(idx + 1).and_then(piece_of);
-            let fit = RunFit::fit(&re.facets, head, tail)
-                .unwrap_or_else(|e| panic!("fitter: run reconstruction failed: {e:?}"));
+            let fit = RunFit::fit(&re.facets, head, tail, self.config.corner)
+                .unwrap_or_else(|e| panic!("fit_stage: run reconstruction failed: {e:?}"));
             let head = head.cloned();
             match fit {
                 Some(mut fit) => {
@@ -213,7 +213,7 @@ impl Fitter {
                     re.head_blend = match &head {
                         Some(prev) => fit
                             .blend_head_with_line(prev, &re.facets[0], self.config.corner)
-                            .unwrap_or_else(|e| panic!("fitter: head blend failed: {e:?}")),
+                            .unwrap_or_else(|e| panic!("fit_stage: head blend failed: {e:?}")),
                         None => Vec::new(),
                     };
                     re.fit = Some(fit);
@@ -268,7 +268,7 @@ impl Fitter {
                         .as_mut()
                         .expect("fit checked above")
                         .blend_tail_with_line(&run_last, &next, corner)
-                        .unwrap_or_else(|e| panic!("fitter: tail blend failed: {e:?}"))
+                        .unwrap_or_else(|e| panic!("fit_stage: tail blend failed: {e:?}"))
                 }
                 Some(Element::Run(next)) => {
                     if next.fit.is_none() {
@@ -290,7 +290,7 @@ impl Fitter {
                             &next.facets[0],
                             corner,
                         )
-                        .unwrap_or_else(|e| panic!("fitter: arc-arc blend failed: {e:?}"))
+                        .unwrap_or_else(|e| panic!("fit_stage: arc-arc blend failed: {e:?}"))
                 }
             };
             let Element::Run(re) = &mut self.decided[idx] else {
@@ -380,7 +380,7 @@ impl Fitter {
             self.seam_in_reduction,
             out_reduction,
         )
-        .unwrap_or_else(|e| panic!("fitter: junction plan failed: {e:?}"));
+        .unwrap_or_else(|e| panic!("fit_stage: junction plan failed: {e:?}"));
         let (trim_end, blend) = match plan {
             JunctionPlan::Blend(b) => (b.trim(), Some(b)),
             JunctionPlan::Unblended(_) => (0.0, None),
@@ -389,7 +389,10 @@ impl Fitter {
             unreachable!()
         };
         let body = trim_line_move(&m, self.seam_head_trim, trim_end).unwrap_or_else(|e| {
-            panic!("fitter: trim of line {} failed: {e:?}", m.source.start_line)
+            panic!(
+                "fit_stage: trim of line {} failed: {e:?}",
+                m.source.start_line
+            )
         });
         if let Some(body) = body {
             if !out.send(body) {
@@ -400,7 +403,7 @@ impl Fitter {
             let next = piece_of(&self.decided[0]).expect("checked above");
             let halves = blend_moves(&b, &m, next).unwrap_or_else(|e| {
                 panic!(
-                    "fitter: blend at line {} failed: {e:?}",
+                    "fit_stage: blend at line {} failed: {e:?}",
                     next.source.start_line
                 )
             });
@@ -421,7 +424,10 @@ impl Fitter {
             unreachable!("caller matched a front piece")
         };
         let body = trim_line_move(&m, self.seam_head_trim, trim_end).unwrap_or_else(|e| {
-            panic!("fitter: trim of line {} failed: {e:?}", m.source.start_line)
+            panic!(
+                "fit_stage: trim of line {} failed: {e:?}",
+                m.source.start_line
+            )
         });
         match body {
             Some(body) => out.send(body),
@@ -440,7 +446,7 @@ impl Fitter {
         let first = &re.facets[0];
         let last = re.facets.last().expect("run has facets");
         let head_stub = trim_line_move(first, 0.0, fit.head_consumption())
-            .unwrap_or_else(|e| panic!("fitter: run head stub failed: {e:?}"));
+            .unwrap_or_else(|e| panic!("fit_stage: run head stub failed: {e:?}"));
         if let Some(stub) = head_stub {
             if !out.send(stub) {
                 return false;
@@ -448,14 +454,14 @@ impl Fitter {
         }
         for p in fit
             .pieces(first, last)
-            .unwrap_or_else(|e| panic!("fitter: run emission failed: {e:?}"))
+            .unwrap_or_else(|e| panic!("fit_stage: run emission failed: {e:?}"))
         {
             if !out.send(p) {
                 return false;
             }
         }
         let tail_stub = trim_line_move(last, fit.tail_consumption(), 0.0)
-            .unwrap_or_else(|e| panic!("fitter: run tail stub failed: {e:?}"));
+            .unwrap_or_else(|e| panic!("fit_stage: run tail stub failed: {e:?}"));
         if let Some(stub) = tail_stub {
             if !out.send(stub) {
                 return false;
@@ -515,7 +521,7 @@ impl TravelAligningSender {
             let gap = dist3(prev_end, start);
             assert!(
                 gap <= CONTIGUITY_EPS_MM,
-                "fitter emitted discontinuous geometry at line {}: previous piece ends at \
+                "fit_stage emitted discontinuous geometry at line {}: previous piece ends at \
                  {prev_end:?}, next starts at {start:?} ({gap:.9}mm gap)",
                 m.source.start_line
             );
@@ -570,9 +576,9 @@ fn align_travel(m: Move, prev_end: Option<[f64; 3]>, next_start: Option<[f64; 3]
     }
     let line_no = m.source.start_line;
     let aligned = Line::try_new(a, b)
-        .unwrap_or_else(|e| panic!("fitter: travel align of line {line_no} failed: {e:?}"));
+        .unwrap_or_else(|e| panic!("fit_stage: travel align of line {line_no} failed: {e:?}"));
     let segment = PathSegment::try_new(Segment::Line(aligned), m.segment.followers.clone())
-        .unwrap_or_else(|e| panic!("fitter: travel align of line {line_no} failed: {e:?}"));
+        .unwrap_or_else(|e| panic!("fit_stage: travel align of line {line_no} failed: {e:?}"));
     Move {
         segment,
         feedrate_mm_s: m.feedrate_mm_s,
