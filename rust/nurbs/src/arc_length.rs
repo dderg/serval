@@ -1,37 +1,33 @@
 #![allow(unsafe_code)]
 
-use crate::Float;
-
-#[cfg(feature = "host")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct ArcLengthTable<T: Float> {
-    s: Vec<T>,
-    u: Vec<T>,
+pub struct ArcLengthTable {
+    s: Vec<f64>,
+    u: Vec<f64>,
 }
 
-#[cfg(feature = "host")]
-impl<T: Float> ArcLengthTable<T> {
+impl ArcLengthTable {
     #[must_use]
-    pub fn new(s: Vec<T>, u: Vec<T>) -> Self {
+    pub fn new(s: Vec<f64>, u: Vec<f64>) -> Self {
         debug_assert_eq!(s.len(), u.len());
         debug_assert!(s.len() >= 2);
         Self { s, u }
     }
 
     #[must_use]
-    pub fn s(&self) -> &[T] {
+    pub fn s(&self) -> &[f64] {
         &self.s
     }
     #[must_use]
-    pub fn u(&self) -> &[T] {
+    pub fn u(&self) -> &[f64] {
         &self.u
     }
     #[must_use]
-    pub fn s_max(&self) -> T {
+    pub fn s_max(&self) -> f64 {
         *self.s.last().expect("table is non-empty")
     }
     #[must_use]
-    pub fn u_max(&self) -> T {
+    pub fn u_max(&self) -> f64 {
         *self.u.last().expect("table is non-empty")
     }
     #[must_use]
@@ -41,7 +37,7 @@ impl<T: Float> ArcLengthTable<T> {
 
     #[inline]
     #[must_use]
-    pub fn as_view(&self) -> ArcLengthTableRef<'_, T> {
+    pub fn as_view(&self) -> ArcLengthTableRef<'_> {
         ArcLengthTableRef {
             s: &self.s,
             u: &self.u,
@@ -50,37 +46,36 @@ impl<T: Float> ArcLengthTable<T> {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct ArcLengthTableRef<'a, T: Float> {
-    pub(crate) s: &'a [T],
-    pub(crate) u: &'a [T],
+pub struct ArcLengthTableRef<'a> {
+    pub(crate) s: &'a [f64],
+    pub(crate) u: &'a [f64],
 }
 
-impl<'a, T: Float> ArcLengthTableRef<'a, T> {
-    pub fn new(s: &'a [T], u: &'a [T]) -> Self {
+impl<'a> ArcLengthTableRef<'a> {
+    pub fn new(s: &'a [f64], u: &'a [f64]) -> Self {
         debug_assert_eq!(s.len(), u.len());
         debug_assert!(s.len() >= 2);
         Self { s, u }
     }
 
     #[must_use]
-    pub fn s(&self) -> &[T] {
+    pub fn s(&self) -> &[f64] {
         self.s
     }
     #[must_use]
-    pub fn u(&self) -> &[T] {
+    pub fn u(&self) -> &[f64] {
         self.u
     }
     #[must_use]
-    pub fn s_max(&self) -> T {
+    pub fn s_max(&self) -> f64 {
         *self.s.last().expect("table is non-empty")
     }
     #[must_use]
-    pub fn u_max(&self) -> T {
+    pub fn u_max(&self) -> f64 {
         *self.u.last().expect("table is non-empty")
     }
 }
 
-#[cfg(feature = "host")]
 const GAUSS_LEGENDRE_5_NODES: [f64; 5] = [
     -0.906_179_845_938_664,
     -0.538_469_310_105_683_1,
@@ -88,7 +83,6 @@ const GAUSS_LEGENDRE_5_NODES: [f64; 5] = [
     0.538_469_310_105_683_1,
     0.906_179_845_938_664,
 ];
-#[cfg(feature = "host")]
 const GAUSS_LEGENDRE_5_WEIGHTS: [f64; 5] = [
     0.236_926_885_056_189_1,
     0.478_628_670_499_366_5,
@@ -97,25 +91,24 @@ const GAUSS_LEGENDRE_5_WEIGHTS: [f64; 5] = [
     0.236_926_885_056_189_1,
 ];
 
-#[cfg(feature = "host")]
-pub(crate) fn integrate_arc_length<T: Float, F: Fn(T) -> T>(
+pub(crate) fn integrate_arc_length<F: Fn(f64) -> f64>(
     integrand: F,
-    u_start: T,
-    u_end: T,
+    u_start: f64,
+    u_end: f64,
     quadrature_points: usize,
-) -> T {
+) -> f64 {
     debug_assert_eq!(
         quadrature_points, 5,
         "v1 supports only 5-point Gauss-Legendre"
     );
 
-    let half_range = (u_end - u_start) * T::from_f64(0.5);
-    let midpoint = (u_start + u_end) * T::from_f64(0.5);
+    let half_range = (u_end - u_start) * (0.5);
+    let midpoint = (u_start + u_end) * (0.5);
 
-    let mut sum = T::ZERO;
+    let mut sum = 0.0;
     for i in 0..5 {
-        let node = T::from_f64(GAUSS_LEGENDRE_5_NODES[i]);
-        let weight = T::from_f64(GAUSS_LEGENDRE_5_WEIGHTS[i]);
+        let node = GAUSS_LEGENDRE_5_NODES[i];
+        let weight = GAUSS_LEGENDRE_5_WEIGHTS[i];
         let u = midpoint + half_range * node;
         sum = integrand(u).mul_add(weight, sum);
     }
@@ -124,16 +117,14 @@ pub(crate) fn integrate_arc_length<T: Float, F: Fn(T) -> T>(
 }
 
 use crate::MIN_PARAMETRIC_SPEED;
-#[cfg(feature = "host")]
 use crate::eval::{vector_derivative, vector_eval};
-#[cfg(feature = "host")]
 use crate::{ArcLengthError, VectorNurbsView};
 
 #[inline]
-pub fn param_from_arc_length<T: Float>(table: &ArcLengthTableRef<'_, T>, s: T) -> T {
-    debug_assert!(s >= T::ZERO);
+pub fn param_from_arc_length(table: &ArcLengthTableRef<'_>, s: f64) -> f64 {
+    debug_assert!(s >= 0.0);
     debug_assert!(s <= table.s_max());
-    let s_clamped = s.max(T::ZERO).min(table.s_max());
+    let s_clamped = s.max(0.0).min(table.s_max());
 
     let s_arr = table.s();
     let u_arr = table.u();
@@ -164,16 +155,16 @@ pub fn param_from_arc_length<T: Float>(table: &ArcLengthTableRef<'_, T>, s: T) -
     let u_hi = unsafe { *u_arr.get_unchecked(lo + 1) };
 
     let span = s_hi - s_lo;
-    let floor = T::from_f64(MIN_PARAMETRIC_SPEED);
+    let floor = MIN_PARAMETRIC_SPEED;
     let frac = (s_clamped - s_lo) / span.max(floor);
     u_lo + (u_hi - u_lo) * frac
 }
 
 #[inline]
-pub fn arc_length_from_param<T: Float>(table: &ArcLengthTableRef<'_, T>, u: T) -> T {
-    debug_assert!(u >= T::ZERO);
+pub fn arc_length_from_param(table: &ArcLengthTableRef<'_>, u: f64) -> f64 {
+    debug_assert!(u >= 0.0);
     debug_assert!(u <= table.u_max());
-    let u_clamped = u.max(T::ZERO).min(table.u_max());
+    let u_clamped = u.max(0.0).min(table.u_max());
 
     let s_arr = table.s();
     let u_arr = table.u();
@@ -204,23 +195,22 @@ pub fn arc_length_from_param<T: Float>(table: &ArcLengthTableRef<'_, T>, u: T) -
     let s_hi = unsafe { *s_arr.get_unchecked(lo + 1) };
 
     let span = u_hi - u_lo;
-    let floor = T::from_f64(MIN_PARAMETRIC_SPEED);
+    let floor = MIN_PARAMETRIC_SPEED;
     let frac = (u_clamped - u_lo) / span.max(floor);
     s_lo + (s_hi - s_lo) * frac
 }
 
-#[cfg(feature = "host")]
-pub fn build_arc_length_table_vector<T: Float, V: VectorNurbsView<T, 3>>(
+pub fn build_arc_length_table_vector<V: VectorNurbsView<3>>(
     curve: &V,
-    tolerance: T,
+    tolerance: f64,
     max_samples: usize,
-) -> Result<ArcLengthTable<T>, ArcLengthError<T>> {
-    let h = T::from_f64(1e-6);
+) -> Result<ArcLengthTable, ArcLengthError> {
+    let h = 1e-6;
     let knots = curve.knots();
     let u_start = knots[0];
     let u_end = knots[knots.len() - 1];
 
-    let integrand = |u: T| {
+    let integrand = |u: f64| {
         let u_safe = u.max(u_start + h).min(u_end - h);
         let plus = vector_eval(curve, u_safe + h);
         let minus = vector_eval(curve, u_safe - h);
@@ -234,9 +224,8 @@ pub fn build_arc_length_table_vector<T: Float, V: VectorNurbsView<T, 3>>(
     build_table_via_integrand(integrand, u_start, u_end, tolerance, max_samples)
 }
 
-#[cfg(feature = "host")]
 #[must_use]
-pub fn path_arc_length(xyz: &crate::VectorNurbs<f64, 3>) -> f64 {
+pub fn path_arc_length(xyz: &crate::VectorNurbs<3>) -> f64 {
     let knots = xyz.knots();
     let u_start = knots[0];
     let u_end = knots[knots.len() - 1];
@@ -276,26 +265,25 @@ pub fn path_arc_length(xyz: &crate::VectorNurbs<f64, 3>) -> f64 {
     }
 }
 
-#[cfg(feature = "host")]
-fn build_table_via_integrand<T: Float, F: Fn(T) -> T + Copy>(
+fn build_table_via_integrand<F: Fn(f64) -> f64 + Copy>(
     integrand: F,
-    u_start: T,
-    u_end: T,
-    tolerance: T,
+    u_start: f64,
+    u_end: f64,
+    tolerance: f64,
     max_samples: usize,
-) -> Result<ArcLengthTable<T>, ArcLengthError<T>> {
+) -> Result<ArcLengthTable, ArcLengthError> {
     let mut count = 8;
     loop {
-        let mut u_samples: Vec<T> = Vec::with_capacity(count);
-        let mut s_samples: Vec<T> = Vec::with_capacity(count);
+        let mut u_samples: Vec<f64> = Vec::with_capacity(count);
+        let mut s_samples: Vec<f64> = Vec::with_capacity(count);
 
         let span = u_end - u_start;
         for i in 0..count {
-            let frac = T::from_f64(i as f64 / (count - 1) as f64);
+            let frac = i as f64 / (count - 1) as f64;
             u_samples.push(u_start + span * frac);
         }
 
-        s_samples.push(T::ZERO);
+        s_samples.push(0.0);
         for i in 1..count {
             let segment_length = integrate_arc_length(integrand, u_samples[i - 1], u_samples[i], 5);
             let prev = s_samples[i - 1];
@@ -303,14 +291,13 @@ fn build_table_via_integrand<T: Float, F: Fn(T) -> T + Copy>(
         }
 
         let span_full = u_end - u_start;
-        let s_refined: T = {
+        let s_refined: f64 = {
             let count_refined = (count - 1) * 2 + 1;
-            let mut acc = T::ZERO;
+            let mut acc = 0.0;
             for i in 1..count_refined {
-                let a =
-                    u_start + span_full * T::from_f64((i - 1) as f64 / (count_refined - 1) as f64);
-                let b = u_start + span_full * T::from_f64(i as f64 / (count_refined - 1) as f64);
-                acc = acc + integrate_arc_length(integrand, a, b, 5);
+                let a = u_start + span_full * ((i - 1) as f64 / (count_refined - 1) as f64);
+                let b = u_start + span_full * (i as f64 / (count_refined - 1) as f64);
+                acc += integrate_arc_length(integrand, a, b, 5);
             }
             acc
         };
@@ -318,7 +305,7 @@ fn build_table_via_integrand<T: Float, F: Fn(T) -> T + Copy>(
         let residual = (s_samples[count - 1] - s_refined).abs();
         if residual <= tolerance {
             let s_total = *s_samples.last().expect("s_samples is non-empty");
-            if s_total <= T::from_f64(MIN_PARAMETRIC_SPEED) {
+            if s_total <= (MIN_PARAMETRIC_SPEED) {
                 return Err(ArcLengthError::DegenerateCurve);
             }
             return Ok(ArcLengthTable::new(s_samples, u_samples));

@@ -1,19 +1,17 @@
-use crate::{ConstructError, Float, VectorNurbsView, scalar::validate};
+use crate::{ConstructError, VectorNurbsView, scalar::validate};
 
-#[cfg(feature = "host")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct VectorNurbs<T: Float, const N: usize> {
+pub struct VectorNurbs<const N: usize> {
     degree: u8,
-    knots: crate::knot::KnotVector<T>,
-    control_points: Vec<[T; N]>,
+    knots: crate::knot::KnotVector,
+    control_points: Vec<[f64; N]>,
 }
 
-#[cfg(feature = "host")]
-impl<T: Float, const N: usize> VectorNurbs<T, N> {
+impl<const N: usize> VectorNurbs<N> {
     pub fn try_new(
         degree: u8,
-        knots: Vec<T>,
-        control_points: Vec<[T; N]>,
+        knots: Vec<f64>,
+        control_points: Vec<[f64; N]>,
     ) -> Result<Self, ConstructError> {
         validate(degree, &knots, control_points.len())?;
         let knot_vector = crate::knot::KnotVector::try_new(knots)
@@ -30,17 +28,17 @@ impl<T: Float, const N: usize> VectorNurbs<T, N> {
         self.degree
     }
     #[must_use]
-    pub fn knots(&self) -> &[T] {
+    pub fn knots(&self) -> &[f64] {
         self.knots.as_slice()
     }
     #[must_use]
-    pub fn control_points(&self) -> &[[T; N]] {
+    pub fn control_points(&self) -> &[[f64; N]] {
         &self.control_points
     }
 
     #[inline]
     #[must_use]
-    pub fn as_view(&self) -> VectorNurbsRef<'_, T, N> {
+    pub fn as_view(&self) -> VectorNurbsRef<'_, N> {
         VectorNurbsRef {
             degree: self.degree,
             knots: self.knots.as_slice(),
@@ -49,34 +47,33 @@ impl<T: Float, const N: usize> VectorNurbs<T, N> {
     }
 }
 
-#[cfg(feature = "host")]
-impl<T: Float, const N: usize> VectorNurbsView<T, N> for VectorNurbs<T, N> {
+impl<const N: usize> VectorNurbsView<N> for VectorNurbs<N> {
     #[inline]
     fn degree(&self) -> u8 {
         self.degree
     }
     #[inline]
-    fn knots(&self) -> &[T] {
+    fn knots(&self) -> &[f64] {
         self.knots.as_slice()
     }
     #[inline]
-    fn control_points(&self) -> &[[T; N]] {
+    fn control_points(&self) -> &[[f64; N]] {
         &self.control_points
     }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct VectorNurbsRef<'a, T: Float, const N: usize> {
+pub struct VectorNurbsRef<'a, const N: usize> {
     pub(crate) degree: u8,
-    pub(crate) knots: &'a [T],
-    pub(crate) control_points: &'a [[T; N]],
+    pub(crate) knots: &'a [f64],
+    pub(crate) control_points: &'a [[f64; N]],
 }
 
-impl<'a, T: Float, const N: usize> VectorNurbsRef<'a, T, N> {
+impl<'a, const N: usize> VectorNurbsRef<'a, N> {
     pub fn try_new(
         degree: u8,
-        knots: &'a [T],
-        control_points: &'a [[T; N]],
+        knots: &'a [f64],
+        control_points: &'a [[f64; N]],
     ) -> Result<Self, ConstructError> {
         validate(degree, knots, control_points.len())?;
         Ok(Self {
@@ -91,30 +88,30 @@ impl<'a, T: Float, const N: usize> VectorNurbsRef<'a, T, N> {
         self.degree
     }
     #[must_use]
-    pub fn knots(&self) -> &[T] {
+    pub fn knots(&self) -> &[f64] {
         self.knots
     }
     #[must_use]
-    pub fn control_points(&self) -> &[[T; N]] {
+    pub fn control_points(&self) -> &[[f64; N]] {
         self.control_points
     }
 }
 
-impl<T: Float, const N: usize> VectorNurbsView<T, N> for VectorNurbsRef<'_, T, N> {
+impl<const N: usize> VectorNurbsView<N> for VectorNurbsRef<'_, N> {
     #[inline]
     fn degree(&self) -> u8 {
         self.degree
     }
     #[inline]
-    fn knots(&self) -> &[T] {
+    fn knots(&self) -> &[f64] {
         self.knots
     }
     #[inline]
-    fn control_points(&self) -> &[[T; N]] {
+    fn control_points(&self) -> &[[f64; N]] {
         self.control_points
     }
 }
 
-#[cfg(all(test, feature = "host"))]
+#[cfg(test)]
 #[allow(clippy::float_cmp)]
 mod tests;

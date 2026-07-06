@@ -344,7 +344,7 @@ pub struct TrajectoryPieces {
 }
 
 pub fn collect_trajectory_pieces(shaped: &[ShapedSegment]) -> TrajectoryPieces {
-    fn collect(dst: &mut Vec<Vec<f64>>, axis: Option<&nurbs::ScalarNurbs<f64>>) {
+    fn collect(dst: &mut Vec<Vec<f64>>, axis: Option<&nurbs::ScalarNurbs>) {
         let Some(axis) = axis else { return };
         for p in extract_bezier_pieces(axis) {
             let scale = p.coeffs.iter().fold(0.0_f64, |m, c| m.max(c.abs()));

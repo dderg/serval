@@ -109,24 +109,6 @@ pub fn chebyshev_to_monomial_tau(a: &[f64], h: f64) -> Vec<f64> {
         .collect()
 }
 
-/// Drop trailing Chebyshev coefficients while the exact sup-norm bound of the
-/// dropped tail (Σ|dropped|, since |T_k| ≤ 1) stays within `tol`. Always keeps
-/// at least one coefficient.
-pub fn truncate_chebyshev(a: &[f64], tol: f64) -> Vec<f64> {
-    let mut n = a.len().max(1);
-    let mut dropped = 0.0;
-    while n > 1 {
-        let c = a[n - 1].abs();
-        if dropped + c <= tol {
-            dropped += c;
-            n -= 1;
-        } else {
-            break;
-        }
-    }
-    a.get(..n).map_or_else(|| vec![0.0], <[f64]>::to_vec)
-}
-
 /// Endpoint-derivative magnitudes of `T_k` on `u ∈ [−1, 1]`:
 /// `|T_k(±1)| = 1`, `|T_k′(±1)| = k²`, `|T_k″(±1)| = k²(k²−1)/3`.
 fn endpoint_weights(k: usize) -> (f64, f64) {
@@ -134,11 +116,13 @@ fn endpoint_weights(k: usize) -> (f64, f64) {
     (k2, k2 * (k2 - 1.0) / 3.0)
 }
 
-/// [`truncate_chebyshev`] with the dropped tail additionally bounded in
+/// Drop trailing Chebyshev coefficients with the dropped tail bounded in
+/// sup-norm position (Σ|dropped|, since |T_k| ≤ 1) and additionally in
 /// endpoint velocity and acceleration (time-domain units, piece duration `h`):
 /// dropping `a_k` moves the seam accel by up to `|a_k|·k²(k²−1)/3·(2/h)²`,
 /// which for a short piece dwarfs the positional effect — a sup-norm-only
-/// budget would silently break C² seams.
+/// budget would silently break C² seams. Always keeps at least one
+/// coefficient.
 pub fn truncate_chebyshev_c2(
     a: &[f64],
     h: f64,

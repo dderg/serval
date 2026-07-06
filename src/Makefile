@@ -44,7 +44,7 @@ src-$(CONFIG_NEED_LOAD_CELL_PROBE) += load_cell_probe.c
 # (CONFIG_MCU_SIM=y) appends `mcu-sim` to keep MCU-style tick paths
 # active under the sim clock. Never in production firmware.
 ifeq ($(CONFIG_MACH_STM32H7),y)
-MCU_RUST_FEATURES := mcu-h7,header-nurbs,header-runtime
+MCU_RUST_FEATURES := mcu-h7,header-runtime
 # Per-MCU cargo target dir. H7 and F4 both use the thumbv7em-none-eabi
 # rustc triple but emit different `#[link_section]` attributes (`.axi_bss`
 # vs `.bss` for RT_CELL); a shared incremental cache forces a full rebuild
@@ -53,7 +53,7 @@ MCU_RUST_FEATURES := mcu-h7,header-nurbs,header-runtime
 MCU_CARGO_TARGET_DIR := target-h7
 MCU_RUST_TARGET := thumbv7em-none-eabi
 else ifeq ($(CONFIG_MACH_STM32F4),y)
-MCU_RUST_FEATURES := mcu-f4,header-nurbs,header-runtime
+MCU_RUST_FEATURES := mcu-f4,header-runtime
 MCU_CARGO_TARGET_DIR := target-f4
 MCU_RUST_TARGET := thumbv7em-none-eabi
 else ifeq ($(CONFIG_MACH_STM32G0),y)
@@ -62,7 +62,7 @@ else ifeq ($(CONFIG_MACH_STM32G0),y)
 # `--cfg portable_atomic_unsafe_assume_single_core` in rust/.cargo/config.toml
 # because ARMv6-M has no LDREX/STREX (see the design record). Own target dir
 # keeps the thumbv6m cache from colliding with the thumbv7em caches.
-MCU_RUST_FEATURES := mcu-g0,header-nurbs,header-runtime
+MCU_RUST_FEATURES := mcu-g0,header-runtime
 MCU_CARGO_TARGET_DIR := target-g0
 MCU_RUST_TARGET := thumbv6m-none-eabi
 endif
@@ -94,7 +94,6 @@ $(MCU_RUST_LIB): FORCE
 			cargo clean -p c-api 2>/dev/null || true; \
 			cargo clean -p host-rt 2>/dev/null || true; \
 			cargo clean -p runtime 2>/dev/null || true; \
-			cargo clean -p nurbs 2>/dev/null || true; \
 		fi && \
 		RUNTIME_STORAGE_SIZE=$(if $(filter y,$(CONFIG_RUNTIME_TARGET_LARGE)),$(CONFIG_RUNTIME_STORAGE_SIZE_LARGE),$(CONFIG_RUNTIME_STORAGE_SIZE_SMALL)) \
 		RUNTIME_PIECE_RING_SIZE=$(CONFIG_RUNTIME_PIECE_RING_SIZE) \
@@ -114,7 +113,7 @@ ifeq ($(CONFIG_MACH_LINUX),y)
 # reference that symbol. mcu-sim is OPT-IN here exactly like the STM32
 # families (CONFIG_MCU_SIM), not hardwired: a Linux MCU drives real
 # /dev/gpiochip / /dev/spidev by default.
-MCU_RUST_FEATURES := mcu-linux,header-nurbs,header-runtime
+MCU_RUST_FEATURES := mcu-linux,header-runtime
 ifeq ($(CONFIG_MCU_SIM),y)
 MCU_RUST_FEATURES := $(MCU_RUST_FEATURES),mcu-sim
 endif
@@ -122,7 +121,7 @@ ifeq ($(CONFIG_MOTION_MODULE_STEPPER),y)
 MCU_RUST_FEATURES := $(MCU_RUST_FEATURES),motion-module-stepper
 endif
 # Own target dir: the motion-engine cdylib builds the shared crates (runtime,
-# nurbs, ...) with different host features into rust/target/, and a mcu-sim
+# ...) with different host features into rust/target/, and a mcu-sim
 # flip changes this firmware's feature set — keeping them separate avoids
 # mutual incremental-cache thrash (slow on the Pi). Mirrors the per-arch STM32
 # dirs. Exported for src/linux/Makefile's link rule.
@@ -139,7 +138,6 @@ $(MCU_RUST_LIB): FORCE
 			cargo clean -p c-api 2>/dev/null || true; \
 			cargo clean -p host-rt 2>/dev/null || true; \
 			cargo clean -p runtime 2>/dev/null || true; \
-			cargo clean -p nurbs 2>/dev/null || true; \
 		fi && \
 		RUNTIME_PIECE_RING_SIZE=$(CONFIG_RUNTIME_PIECE_RING_SIZE) \
 		RUNTIME_SAMPLE_RATE_HZ=$(CONFIG_MOTION_SAMPLE_RATE_HZ) \

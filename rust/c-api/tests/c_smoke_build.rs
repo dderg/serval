@@ -13,7 +13,7 @@ fn c_smoke_compiles_and_links() {
         eprintln!(
             "c_smoke skipped: {static_lib} not found.\n\
              Run: cargo build -p c-api --no-default-features \
-             --features host,header-nurbs,header-runtime --release\n\
+             --features host,header-runtime --release\n\
              then re-run this test."
         );
         return;
