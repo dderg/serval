@@ -37,6 +37,8 @@ _STUB_MOTION_METHODS = frozenset(
         "set_accel_cap",
         "set_square_corner_velocity",
         "update_post_processor",
+        "set_bed_mesh",
+        "clear_bed_mesh",
         "fallback_clock_conversions",
         "dispatched_segment_count",
         "register_phase_bus",
@@ -482,6 +484,19 @@ class MotionEngineWrapper:
 
     def update_post_processor(self, name, key, value):
         return self._engine.update_post_processor(name, key, value)
+
+    def set_bed_mesh(
+        self, points, x_min, y_min, dx, dy, nx, ny, tension, fade, zx, zy
+    ):
+        return self._engine.set_bed_mesh(
+            points, x_min, y_min, dx, dy, nx, ny, tension, fade, zx, zy
+        )
+
+    def clear_bed_mesh(self):
+        return self._engine.clear_bed_mesh()
+
+    def bed_mesh_gcode_z(self, x, y, z_machine):
+        return self._engine.bed_mesh_gcode_z(x, y, z_machine)
 
     def get_last_move_time(self):
         return self._engine.get_last_move_time()

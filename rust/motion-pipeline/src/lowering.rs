@@ -1,5 +1,5 @@
 use geometry::path::lowering::PositionProfile;
-use geometry::{Move, MoveVelocity, VelSample};
+use geometry::{Move, MoveVelocity, SurfaceTransform, VelSample};
 use nurbs::ScalarNurbs;
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 use nurbs::chebyshev::{
@@ -303,6 +303,74 @@ fn build_profile(samples: &[VelSample]) -> Result<(ScalarProfile, f64), Lowering
     Ok((ScalarProfile { windows, knot_t }, t_acc))
 }
 
+/// How the bed surface transform applies to this move's Z axis. `Constant`
+/// is the flat-region/faded-out fast form: the correction varies by less
+/// than [`WARP_CONST_EPS_MM`] over the move, so one offset stands in for the
+/// surface and the closed-form phase path stays available.
+#[derive(Clone, Copy)]
+enum ZWarp<'a> {
+    None,
+    Constant(f64),
+    Surface(&'a SurfaceTransform),
+}
+
+/// Correction treated as constant over a move when it cannot vary more than
+/// this. Each move's constant is evaluated at its own gcode start, so the
+/// error does not accumulate: consecutive machine-space Z steps at seams stay
+/// under this bound.
+const WARP_CONST_EPS_MM: f64 = 2e-3;
+const WARP_BBOX_SAMPLES: usize = 8;
+
+fn z_warp_mode<'a>(
+    mesh: Option<&'a SurfaceTransform>,
+    gm: &Move,
+    start_pos: &[f64],
+) -> ZWarp<'a> {
+    let Some(t) = mesh else {
+        return ZWarp::None;
+    };
+    let Some(seg) = gm.segment.spatial.as_ref() else {
+        let p = [
+            start_pos.first().copied().unwrap_or(0.0),
+            start_pos.get(1).copied().unwrap_or(0.0),
+            start_pos.get(2).copied().unwrap_or(0.0),
+        ];
+        return ZWarp::Constant(t.correction_at(p[0], p[1], p[2]));
+    };
+    let s_len = gm.segment.s_len();
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for k in 0..=WARP_BBOX_SAMPLES {
+        let p = seg.point_at(s_len * k as f64 / WARP_BBOX_SAMPLES as f64);
+        for axis in 0..3 {
+            lo[axis] = lo[axis].min(p[axis]);
+            hi[axis] = hi[axis].max(p[axis]);
+        }
+    }
+    // Between samples the curve deviates from the chord by at most the
+    // sagitta bound κ·Δs²/8 — exactly zero for straight moves, so their
+    // sampled bbox is tight.
+    let ds = s_len / WARP_BBOX_SAMPLES as f64;
+    let pad = {
+        use geometry::path::CurvatureProfile;
+        seg.kappa_peak().1.abs() * ds * ds / 8.0
+    };
+    let spread = t.correction_spread_over(
+        lo[0] - pad,
+        hi[0] + pad,
+        lo[1] - pad,
+        hi[1] + pad,
+        lo[2] - pad,
+        hi[2] + pad,
+    );
+    if spread <= WARP_CONST_EPS_MM {
+        let p0 = seg.point_at(0.0);
+        ZWarp::Constant(t.correction_at(p0[0], p0[1], p0[2]))
+    } else {
+        ZWarp::Surface(t)
+    }
+}
+
 struct Sampler<'a> {
     profile: &'a ScalarProfile,
     spatial: Option<&'a geometry::path::Segment>,
@@ -310,18 +378,69 @@ struct Sampler<'a> {
     followers: &'a [geometry::FollowerDemand],
     s_len: f64,
     axis_chains: &'a [CompiledChain],
+    z_warp: ZWarp<'a>,
 }
 
 impl Sampler<'_> {
+    fn warped_z(
+        &self,
+        seg: &geometry::path::Segment,
+        s: f64,
+        v: f64,
+        a_t: f64,
+        base: (f64, f64, f64),
+    ) -> (f64, f64, f64) {
+        match self.z_warp {
+            ZWarp::None => base,
+            ZWarp::Constant(c) => (base.0 + c, base.1, base.2),
+            ZWarp::Surface(t) => {
+                let p = seg.point_at(s);
+                let h = seg.heading_at(s);
+                let dh = seg.dheading_ds(s);
+                let vel = [h[0] * v, h[1] * v, h[2] * v];
+                let acc = [
+                    a_t * h[0] + v * v * dh[0],
+                    a_t * h[1] + v * v * dh[1],
+                    a_t * h[2] + v * v * dh[2],
+                ];
+                let w = t.warp(p[0], p[1], p[2]);
+                let w_dot = w.wx * vel[0] + w.wy * vel[1] + w.wz * vel[2];
+                let w_ddot = w.wx * acc[0]
+                    + w.wy * acc[1]
+                    + w.wz * acc[2]
+                    + w.wxx * vel[0] * vel[0]
+                    + w.wyy * vel[1] * vel[1]
+                    + 2.0 * (w.wxy * vel[0] * vel[1] + w.wxz * vel[0] * vel[2]
+                        + w.wyz * vel[1] * vel[2]);
+                (base.0 + w.w, base.1 + w_dot, base.2 + w_ddot)
+            }
+        }
+    }
+
     fn axis_base_state(&self, axis: usize, t: f64) -> (f64, f64, f64) {
         let (s, v, a_t) = self.profile.state_at(t);
         if axis < 3 {
             match self.spatial {
                 Some(seg) => {
                     let accel = a_t * seg.heading_at(s)[axis] + v * v * seg.dheading_ds(s)[axis];
-                    (seg.point_at(s)[axis], seg.heading_at(s)[axis] * v, accel)
+                    let base = (seg.point_at(s)[axis], seg.heading_at(s)[axis] * v, accel);
+                    if axis == 2 {
+                        self.warped_z(seg, s, v, a_t, base)
+                    } else {
+                        base
+                    }
                 }
-                None => (self.start_pos.get(axis).copied().unwrap_or(0.0), 0.0, 0.0),
+                None => {
+                    let hold = self.start_pos.get(axis).copied().unwrap_or(0.0);
+                    let offset = match self.z_warp {
+                        ZWarp::Constant(c) if axis == 2 => c,
+                        ZWarp::Surface(_) => {
+                            unreachable!("z_warp_mode returns Constant for virtual moves")
+                        }
+                        _ => 0.0,
+                    };
+                    (hold + offset, 0.0, 0.0)
+                }
             }
         } else if let Some(f) = self.followers.iter().find(|f| f.axis_index == axis) {
             if f.is_ramped() {
@@ -479,9 +598,10 @@ pub fn lower_move(
     start_pos: &[f64],
     fit_tol: FitTol,
     axis_chains: &[CompiledChain],
+    mesh: Option<&SurfaceTransform>,
 ) -> Result<ShapedSegment, LoweringError> {
     let (axes_pieces, total_t) =
-        lower_move_pieces(gm, vm, t_start, start_pos, fit_tol, axis_chains)?;
+        lower_move_pieces(gm, vm, t_start, start_pos, fit_tol, axis_chains, mesh)?;
     let axes: Vec<ScalarNurbs<f64>> = axes_pieces
         .iter()
         .map(|p| bezier_pieces_to_nurbs(p))
@@ -507,17 +627,24 @@ pub fn lower_move_pieces(
     start_pos: &[f64],
     fit_tol: FitTol,
     axis_chains: &[CompiledChain],
+    mesh: Option<&SurfaceTransform>,
 ) -> Result<(Vec<Vec<BezierPiece<f64>>>, f64), LoweringError> {
     if gm.source != vm.source {
         return Err(LoweringError::SourceMismatch);
     }
+    let z_warp = z_warp_mode(mesh, gm, start_pos);
     // The closed-form phase path expresses each axis as one constant scale times
-    // the arc-length profile; a ramped follower's ratio varies along the move, so
-    // route those through the sampled fit instead. Constant followers (every
-    // straight slicer move) keep the exact phase path.
+    // the arc-length profile; a ramped follower's ratio varies along the move —
+    // and a surface-warped Z varies with XY — so route those through the sampled
+    // fit instead. Constant followers (every straight slicer move) keep the
+    // exact phase path, as does a warp flat enough to be one constant offset.
     let ramped = gm.segment.followers.iter().any(|f| f.is_ramped());
-    if !vm.phases.is_empty() && !ramped {
-        return lower_straight_from_phases(gm, vm, t_start, start_pos, axis_chains);
+    if !vm.phases.is_empty() && !ramped && !matches!(z_warp, ZWarp::Surface(_)) {
+        let z_offset = match z_warp {
+            ZWarp::Constant(c) => c,
+            _ => 0.0,
+        };
+        return lower_straight_from_phases(gm, vm, t_start, start_pos, axis_chains, z_offset);
     }
     let (profile, total_t) = build_profile(&vm.samples)?;
     let spatial = gm.segment.spatial.as_ref();
@@ -538,6 +665,7 @@ pub fn lower_move_pieces(
         followers: &gm.segment.followers,
         s_len: gm.segment.s_len(),
         axis_chains,
+        z_warp,
     };
     let mut driven: Vec<usize> = (0..3).collect();
     driven.extend(gm.segment.followers.iter().map(|f| f.axis_index));
@@ -598,6 +726,7 @@ fn lower_straight_from_phases(
     t_start: f64,
     start_pos: &[f64],
     axis_chains: &[CompiledChain],
+    z_offset: f64,
 ) -> Result<(Vec<Vec<BezierPiece<f64>>>, f64), LoweringError> {
     let n_axes = start_pos.len().max(3);
     for f in &gm.segment.followers {
@@ -614,10 +743,11 @@ fn lower_straight_from_phases(
         .map(|seg| (seg.point_at(0.0), seg.heading_at(0.0)));
 
     let axis_scale_base = |axis: usize| -> (f64, f64) {
+        let warp = if axis == 2 { z_offset } else { 0.0 };
         if axis < 3 {
             match spatial {
-                Some((origin, heading)) => (heading[axis], origin[axis]),
-                None => (0.0, start_pos.get(axis).copied().unwrap_or(0.0)),
+                Some((origin, heading)) => (heading[axis], origin[axis] + warp),
+                None => (0.0, start_pos.get(axis).copied().unwrap_or(0.0) + warp),
             }
         } else if let Some(f) = gm.segment.followers.iter().find(|f| f.axis_index == axis) {
             (f.ratio, start_pos[axis])

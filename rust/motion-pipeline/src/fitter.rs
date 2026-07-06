@@ -122,7 +122,10 @@ impl Fitter {
                 self.seam_in_reduction = 0.0;
                 out.reset();
             }
-            Control::Dwell { .. } | Control::SetAxisChains(_) | Control::Barrier(_) => {
+            Control::Dwell { .. }
+            | Control::SetAxisChains(_)
+            | Control::SetMesh { .. }
+            | Control::Barrier(_) => {
                 assert!(
                     self.decided.is_empty() && self.tail.is_empty(),
                     "fitter: control token arrived with undrained moves — a Drain must precede it"

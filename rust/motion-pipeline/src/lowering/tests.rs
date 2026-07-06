@@ -65,6 +65,7 @@ fn lowering_emits_coarse_pieces_above_the_sample_floor() {
             &[0.0; 4],
             FIT_TOL,
             &[],
+            None,
         )
         .unwrap();
         for axis in 0..3 {
@@ -160,7 +161,7 @@ fn straight_move_lowers_one_cubic_per_phase_without_accel_overshoot() {
     assert!(!vm.phases.is_empty(), "straight move should carry phases");
 
     let (axes, total_t) =
-        lower_move_pieces(&planned[0].geometry, vm, 0.0, &[0.0; 4], FIT_TOL, &[]).unwrap();
+        lower_move_pieces(&planned[0].geometry, vm, 0.0, &[0.0; 4], FIT_TOL, &[], None).unwrap();
 
     assert_eq!(axes[0].len(), vm.phases.len(), "one cubic per phase");
     // The grid fit overshot the 1000 cap to ~1170 here; the phase fit is exact.
@@ -196,6 +197,7 @@ fn collinear_run_slices_phases_c1_continuous_at_the_seam() {
         &[0.0; 4],
         FIT_TOL,
         &[],
+        None,
     )
     .unwrap();
     let (a1, t1) = lower_move_pieces(
@@ -205,6 +207,7 @@ fn collinear_run_slices_phases_c1_continuous_at_the_seam() {
         &[5.0, 0.0, 0.0, 0.0],
         FIT_TOL,
         &[],
+        None,
     )
     .unwrap();
 
@@ -261,6 +264,7 @@ fn lower_single(m: geometry::Move, t_start: f64, start_pos: &[f64]) -> ShapedSeg
         start_pos,
         FIT_TOL,
         &[],
+        None,
     )
     .expect("lower")
 }
@@ -387,7 +391,8 @@ fn source_mismatch_is_rejected() {
             0.0,
             &[0.0, 0.0, 0.0],
             FIT_TOL,
-            &[]
+            &[],
+            None
         ),
         Err(LoweringError::SourceMismatch)
     ));
@@ -417,6 +422,7 @@ fn pressure_advance_shifts_follower_and_leaves_xyz_byte_identical() {
         &start,
         FIT_TOL,
         &[],
+        None,
     )
     .unwrap();
 
@@ -428,6 +434,7 @@ fn pressure_advance_shifts_follower_and_leaves_xyz_byte_identical() {
         &start,
         FIT_TOL,
         &linear_pa_chains(3, k),
+        None,
     )
     .unwrap();
 
@@ -538,11 +545,12 @@ fn curved_fit_acceleration_is_continuous_and_converges() {
         followers: &gm.segment.followers,
         s_len: gm.segment.s_len(),
         axis_chains: &[],
+        z_warp: ZWarp::None,
     };
 
     let max_analytic_err = |tol: f64| -> f64 {
         let (axes, _t) =
-            lower_move_pieces(&planned[0].geometry, vm, 0.0, &start, tol_pos(tol), &[]).unwrap();
+            lower_move_pieces(&planned[0].geometry, vm, 0.0, &start, tol_pos(tol), &[], None).unwrap();
         let mut worst = 0.0_f64;
         for axis in 0..2 {
             let pieces = &axes[axis];
@@ -610,6 +618,7 @@ fn straight_move_ignores_fit_tolerance_and_stays_bit_identical() {
         &[0.0; 4],
         tol_pos(1e-2),
         &[],
+        None,
     )
     .unwrap();
     let (fine, _) = lower_move_pieces(
@@ -619,6 +628,7 @@ fn straight_move_ignores_fit_tolerance_and_stays_bit_identical() {
         &[0.0; 4],
         tol_pos(1e-6),
         &[],
+        None,
     )
     .unwrap();
     assert_eq!(coarse, fine, "straight path must not depend on fit_tol_mm");
@@ -638,6 +648,7 @@ fn pressure_advance_k_zero_is_identical_to_no_post_processor() {
         &start,
         FIT_TOL,
         &[],
+        None,
     )
     .unwrap();
     let zero = lower_move(
@@ -647,6 +658,7 @@ fn pressure_advance_k_zero_is_identical_to_no_post_processor() {
         &start,
         FIT_TOL,
         &linear_pa_chains(3, 0.0),
+        None,
     )
     .unwrap();
 
@@ -684,7 +696,7 @@ fn arc_member_fits_within_the_wire_degree_cap() {
     let vm = &planned[0].velocity;
     let start = [0.0_f64; 4];
     let (axes, total_t) =
-        lower_move_pieces(&planned[0].geometry, vm, 0.0, &start, tol_pos(5e-3), &[]).unwrap();
+        lower_move_pieces(&planned[0].geometry, vm, 0.0, &start, tol_pos(5e-3), &[], None).unwrap();
     for pieces in &axes[..2] {
         assert!(!pieces.is_empty());
         for p in pieces {
@@ -714,7 +726,7 @@ fn straight_phase_pieces_carry_natural_length() {
     assert!(!vm.phases.is_empty());
     let start = [0.0_f64; 4];
     let (axes, _t) =
-        lower_move_pieces(&planned[0].geometry, vm, 0.0, &start, tol_pos(1e-3), &[]).unwrap();
+        lower_move_pieces(&planned[0].geometry, vm, 0.0, &start, tol_pos(1e-3), &[], None).unwrap();
     let has_jerk_phase = vm.phases.iter().any(|p| p.j != 0.0);
     let expect = if has_jerk_phase { 4 } else { 3 };
     for p in &axes[0] {
@@ -723,5 +735,138 @@ fn straight_phase_pieces_carry_natural_length() {
             expect,
             "move-wide padding to the max phase degree"
         );
+    }
+}
+
+fn wavy_transform(fade: geometry::Fade) -> geometry::SurfaceTransform {
+    let (nx, ny) = (6, 6);
+    let z = (0..ny)
+        .flat_map(|j| {
+            (0..nx).map(move |i| 0.12 * libm::sin(0.8 * i as f64) + 0.09 * libm::cos(1.1 * j as f64))
+        })
+        .collect();
+    let mesh = geometry::MeshGrid::new(0.0, 0.0, 50.0, 50.0, nx, ny, z, 0.2).unwrap();
+    geometry::SurfaceTransform::new(mesh, fade)
+}
+
+fn flat_transform(height: f64) -> geometry::SurfaceTransform {
+    let mesh = geometry::MeshGrid::new(0.0, 0.0, 250.0, 250.0, 2, 2, vec![height; 4], 0.2).unwrap();
+    geometry::SurfaceTransform::new(mesh, geometry::Fade::new(1.0, 10.0, 0.05).unwrap())
+}
+
+fn eval_piece_any_degree(p: &BezierPiece<f64>, t: f64) -> f64 {
+    eval_mono(&p.coeffs, t - p.u_start)
+}
+
+#[test]
+fn surface_warped_move_tracks_the_mesh_along_the_path() {
+    let t = wavy_transform(geometry::Fade::new(1.0, 10.0, 0.0).unwrap());
+    let m = line_move([10.0, 20.0, 0.2], [210.0, 120.0, 0.2], 0.0, ctx(1, 150.0)).unwrap();
+    let planned = fit_and_plan(std::slice::from_ref(&m));
+    assert!(!planned[0].velocity.phases.is_empty(), "straight move");
+
+    let start = [10.0, 20.0, 0.2, 0.0];
+    let warped = lower_move(
+        &planned[0].geometry,
+        &planned[0].velocity,
+        0.0,
+        &start,
+        FIT_TOL,
+        &[],
+        Some(&t),
+    )
+    .unwrap();
+
+    let x_pieces = extract_bezier_pieces(&warped.axes[0]);
+    let y_pieces = extract_bezier_pieces(&warped.axes[1]);
+    let z_pieces = extract_bezier_pieces(&warped.axes[2]);
+    assert!(
+        z_pieces.len() > planned[0].velocity.phases.len(),
+        "a mesh-warped move must leave the closed-form phase path"
+    );
+    let eval_axis = |pieces: &[BezierPiece<f64>], time: f64| -> f64 {
+        let p = pieces
+            .iter()
+            .find(|p| (p.u_start..=p.u_end).contains(&time))
+            .expect("time inside the move");
+        eval_piece_any_degree(p, time)
+    };
+    let t_end = warped.t_end;
+    let mut worst = 0.0_f64;
+    for k in 0..=200 {
+        let time = t_end * k as f64 / 200.0;
+        let x = eval_axis(&x_pieces, time);
+        let y = eval_axis(&y_pieces, time);
+        let z = eval_axis(&z_pieces, time);
+        let expected = 0.2 + t.correction_at(x, y, 0.2);
+        worst = worst.max((z - expected).abs());
+    }
+    assert!(
+        worst <= 5.0 * FIT_TOL_MM,
+        "warped Z drifted {worst} from the surface"
+    );
+}
+
+#[test]
+fn flat_surface_keeps_the_phase_path_with_a_constant_offset() {
+    let t = flat_transform(0.15);
+    let m = line_move([10.0, 20.0, 0.2], [210.0, 120.0, 0.2], 0.0, ctx(1, 150.0)).unwrap();
+    let planned = fit_and_plan(std::slice::from_ref(&m));
+    let start = [10.0, 20.0, 0.2, 0.0];
+
+    let base = lower_move(&planned[0].geometry, &planned[0].velocity, 0.0, &start, FIT_TOL, &[], None)
+        .unwrap();
+    let warped = lower_move(
+        &planned[0].geometry,
+        &planned[0].velocity,
+        0.0,
+        &start,
+        FIT_TOL,
+        &[],
+        Some(&t),
+    )
+    .unwrap();
+
+    for axis in [0, 1, 3] {
+        assert_eq!(
+            extract_bezier_pieces(&base.axes[axis]),
+            extract_bezier_pieces(&warped.axes[axis]),
+            "non-Z axes unchanged"
+        );
+    }
+    let bz = extract_bezier_pieces(&base.axes[2]);
+    let wz = extract_bezier_pieces(&warped.axes[2]);
+    assert_eq!(bz.len(), wz.len(), "phase path retained");
+    for (b, w) in bz.iter().zip(&wz) {
+        assert!((w.coeffs[0] - b.coeffs[0] - 0.15).abs() < 1e-12);
+        assert_eq!(&w.coeffs[1..], &b.coeffs[1..]);
+    }
+}
+
+#[test]
+fn fully_faded_move_gets_exactly_the_fade_target_offset() {
+    let t = wavy_transform(geometry::Fade::new(1.0, 10.0, 0.07).unwrap());
+    let m = line_move([10.0, 20.0, 12.0], [210.0, 120.0, 12.0], 0.0, ctx(1, 150.0)).unwrap();
+    let planned = fit_and_plan(std::slice::from_ref(&m));
+    let start = [10.0, 20.0, 12.0, 0.0];
+
+    let base = lower_move(&planned[0].geometry, &planned[0].velocity, 0.0, &start, FIT_TOL, &[], None)
+        .unwrap();
+    let warped = lower_move(
+        &planned[0].geometry,
+        &planned[0].velocity,
+        0.0,
+        &start,
+        FIT_TOL,
+        &[],
+        Some(&t),
+    )
+    .unwrap();
+    let bz = extract_bezier_pieces(&base.axes[2]);
+    let wz = extract_bezier_pieces(&warped.axes[2]);
+    assert_eq!(bz.len(), wz.len(), "fade-out keeps the phase path");
+    for (b, w) in bz.iter().zip(&wz) {
+        assert!((w.coeffs[0] - b.coeffs[0] - 0.07).abs() < 1e-12);
+        assert_eq!(&w.coeffs[1..], &b.coeffs[1..]);
     }
 }

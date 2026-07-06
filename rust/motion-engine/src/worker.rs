@@ -133,6 +133,10 @@ pub enum StreamMsg {
         recovered_pos: Vec<f64>,
     },
     SetAxisChains(AxisChainSet),
+    SetMesh {
+        mesh: Option<std::sync::Arc<geometry::SurfaceTransform>>,
+        gcode_z_rebase: f64,
+    },
     HomeDrip(HomeDripParams),
     Nudge(NudgeParams),
     Shutdown,
@@ -450,6 +454,19 @@ impl StreamWorkerHandle {
     pub fn update_axis_chains(&self, chains: AxisChainSet) -> Result<(), StreamWorkerError> {
         self.sender
             .send(StreamMsg::SetAxisChains(chains))
+            .map_err(|_| StreamWorkerError::ChannelClosed)
+    }
+
+    pub fn update_mesh(
+        &self,
+        mesh: Option<std::sync::Arc<geometry::SurfaceTransform>>,
+        gcode_z_rebase: f64,
+    ) -> Result<(), StreamWorkerError> {
+        self.sender
+            .send(StreamMsg::SetMesh {
+                mesh,
+                gcode_z_rebase,
+            })
             .map_err(|_| StreamWorkerError::ChannelClosed)
     }
 

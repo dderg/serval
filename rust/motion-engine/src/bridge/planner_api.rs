@@ -593,6 +593,108 @@ impl PyMotionEngine {
             .runtime_square_corner_velocity = square_corner_velocity;
         Ok(())
     }
+    /// Activate a bed mesh: build the spline surface, normalize it to zero at
+    /// the reference point, run the activation-time gross-error gate against
+    /// the machine's Z limits, and swap it into the lowerer in stream order.
+    /// The gate is deliberately not a soundness proof (see
+    /// docs/rewrite/toolpath-surface-transforms.md): it refuses meshes whose
+    /// coupling alone exceeds the Z axis limits, and the accepted transient
+    /// exceedance envelope is logged.
+    #[pyo3(signature = (points, x_min, y_min, dx, dy, nx, ny, tension, fade, zero_ref_x, zero_ref_y))]
+    #[allow(clippy::too_many_arguments)]
+    fn set_bed_mesh(
+        &self,
+        points: Vec<f64>,
+        x_min: f64,
+        y_min: f64,
+        dx: f64,
+        dy: f64,
+        nx: usize,
+        ny: usize,
+        tension: f64,
+        fade: Option<(f64, f64, f64)>,
+        zero_ref_x: f64,
+        zero_ref_y: f64,
+    ) -> PyResult<f64> {
+        let mut mesh = geometry::MeshGrid::new(x_min, y_min, dx, dy, nx, ny, points, tension)
+            .map_err(|e| PyValueError::new_err(format!("set_bed_mesh: {e}")))?;
+        if !mesh.contains(zero_ref_x, zero_ref_y) {
+            return Err(PyValueError::new_err(format!(
+                "set_bed_mesh: zero reference ({zero_ref_x}, {zero_ref_y}) is outside the \
+                 mesh area {:?} x {:?} — a mesh nonzero at the Z datum would shift it",
+                mesh.x_range(),
+                mesh.y_range()
+            )));
+        }
+        mesh.zero_at(zero_ref_x, zero_ref_y);
+        let fade = match fade {
+            Some((start, end, target)) => geometry::Fade::new(start, end, target)
+                .map_err(|e| PyValueError::new_err(format!("set_bed_mesh: {e}")))?,
+            None => geometry::Fade::disabled(),
+        };
+        let transform = geometry::SurfaceTransform::new(mesh, fade);
+        let bounds = transform.bounds();
+        if !fade.is_disabled() {
+            let (start, end) = fade.band();
+            let mesh_span = bounds.z_max.abs().max(bounds.z_min.abs());
+            if end - start <= mesh_span {
+                return Err(PyValueError::new_err(format!(
+                    "set_bed_mesh: fade band {:.3}mm is not wider than the mesh deviation \
+                     {mesh_span:.3}mm — the transform would not be invertible",
+                    end - start
+                )));
+            }
+        }
+        let limits = self
+            .planner_config
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .cartesian;
+        let coupled_v = bounds.max_gradient * limits.max_velocity;
+        let coupled_a = bounds.max_gradient * limits.max_accel
+            + bounds.max_curvature * limits.max_velocity * limits.max_velocity;
+        if coupled_v > limits.max_z_velocity || coupled_a > limits.max_z_accel {
+            return Err(PyValueError::new_err(format!(
+                "set_bed_mesh: bed deviation needs {coupled_v:.2}mm/s / {coupled_a:.1}mm/s² \
+                 of Z at your XY limits; Z allows {:.2}mm/s / {:.1}mm/s² — the bed is \
+                 warped or the Z limits are too conservative (mesh range {:.3}..{:.3}mm, \
+                 max slope {:.4})",
+                limits.max_z_velocity, limits.max_z_accel, bounds.z_min, bounds.z_max,
+                bounds.max_gradient
+            )));
+        }
+        tracing::info!(
+            subsystem = "motion",
+            event = "bed_mesh_activated",
+            z_min = bounds.z_min,
+            z_max = bounds.z_max,
+            max_slope = bounds.max_gradient,
+            envelope_v_mm_s = limits.max_z_velocity + coupled_v,
+            envelope_a_mm_s2 = limits.max_z_accel + coupled_a,
+            "bed mesh activated; transient Z exceedance envelope logged"
+        );
+        self.swap_bed_mesh(Some(Arc::new(transform)))
+    }
+
+    fn clear_bed_mesh(&self) -> PyResult<f64> {
+        self.swap_bed_mesh(None)
+    }
+
+    /// Gcode-space Z the toolhead is commanded at, given a machine-space Z at
+    /// (x, y) — the single machine→gcode crossing, used by the host after
+    /// homing and probing. Identity when no mesh is active.
+    fn bed_mesh_gcode_z(&self, x: f64, y: f64, z_machine: f64) -> f64 {
+        match self
+            .bed_mesh
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+        {
+            Some(t) => t.gcode_z(x, y, z_machine),
+            None => z_machine,
+        }
+    }
+
     fn update_post_processor(&self, name: &str, key: &str, value: f64) -> PyResult<()> {
         let axis_chains = {
             let mut cfg = self
@@ -621,6 +723,52 @@ impl PyMotionEngine {
 }
 
 impl PyMotionEngine {
+    /// Swap the active surface transform behind a pipeline drain, keeping the
+    /// physical position invariant: the machine Z at the current rest point is
+    /// re-expressed as a gcode Z through the *new* transform, and that rebase
+    /// rides the token so every gcode-space odometer moves together. Returns
+    /// the rebased gcode Z for the host's own position bookkeeping.
+    fn swap_bed_mesh(
+        &self,
+        new: Option<Arc<geometry::SurfaceTransform>>,
+    ) -> PyResult<f64> {
+        let pos = *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
+        let mut current = self.bed_mesh.lock().unwrap_or_else(|p| p.into_inner());
+        let machine_z = pos[2]
+            + current
+                .as_ref()
+                .map_or(0.0, |t| t.correction_at(pos[0], pos[1], pos[2]));
+        let rebase = new
+            .as_ref()
+            .map_or(machine_z, |t| t.gcode_z(pos[0], pos[1], machine_z));
+        if let Some(handle) = self
+            .planner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+        {
+            handle
+                .update_mesh(new.clone(), rebase)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        }
+        *current = new;
+        drop(current);
+        self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner())[2] = rebase;
+        Ok(rebase)
+    }
+
+    pub(crate) fn machine_to_gcode(&self, pos: [f64; 3]) -> [f64; 3] {
+        match self
+            .bed_mesh
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+        {
+            Some(t) => [pos[0], pos[1], t.gcode_z(pos[0], pos[1], pos[2])],
+            None => pos,
+        }
+    }
+
     fn resolve_mcu_topology(
         &self,
         mcus: &[(u32, Vec<u8>, u8)],
@@ -917,6 +1065,19 @@ impl PyMotionEngine {
         *self.pump_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(pipeline.pump_control);
         *self.pump_thread.lock().unwrap_or_else(|p| p.into_inner()) = Some(pipeline.pump_thread);
         *planner_guard = Some(pipeline.worker);
+        let mesh = self
+            .bed_mesh
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if mesh.is_some() {
+            let z = self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner())[2];
+            planner_guard
+                .as_ref()
+                .expect("planner installed above")
+                .update_mesh(mesh, z)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        }
         drop(planner_guard);
 
         Ok(pump_control)

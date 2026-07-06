@@ -11,6 +11,7 @@ pub mod params;
 pub mod path;
 pub mod segment;
 pub mod splitter;
+pub mod surface;
 pub mod telemetry;
 pub(crate) mod vec3;
 pub mod velocity;
@@ -34,6 +35,7 @@ pub struct FollowerWord {
     pub axis_index: usize,
 }
 pub use splitter::{SplitError, split_segment_to_cap};
+pub use surface::{Fade, MeshGrid, SurfaceBounds, SurfaceError, SurfaceSample, SurfaceTransform};
 
 pub use telemetry::TelemetryEvent;
 pub use velocity::{

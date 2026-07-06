@@ -239,6 +239,18 @@ impl Ingress {
                 self.send(StreamInput::Control(Control::SetAxisChains(chains)));
                 self.barrier();
             }
+            StreamMsg::SetMesh {
+                mesh,
+                gcode_z_rebase,
+            } => {
+                self.drain_and_fence();
+                self.odometer[2] = gcode_z_rebase;
+                self.send(StreamInput::Control(Control::SetMesh {
+                    mesh,
+                    gcode_z_rebase,
+                }));
+                self.barrier();
+            }
             StreamMsg::HomeDrip(p) => {
                 let result = self.run_home_drip(&p);
                 let _ = p.notify.send(result);

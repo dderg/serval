@@ -380,7 +380,7 @@ impl Consumer {
                         *t += secs;
                     }
                 }
-                ShapedItem::Control(Control::SetAxisChains(_)) => {}
+                ShapedItem::Control(Control::SetAxisChains(_) | Control::SetMesh { .. }) => {}
             }
         }
     }

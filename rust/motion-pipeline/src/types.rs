@@ -1,7 +1,8 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
-use geometry::{ChainFitConfig, Move, MoveVelocity, VelocityLimits};
+use geometry::{ChainFitConfig, Move, MoveVelocity, SurfaceTransform, VelocityLimits};
 use trajectory::{AxisChainSet, ShapedSegment};
 
 pub const CONTIGUITY_EPS_MM: f64 = 1e-6;
@@ -131,6 +132,18 @@ pub enum Control {
     Reset { pos: Vec<f64> },
     /// Swap the post-processing chains (lowerer and shaper apply it).
     SetAxisChains(AxisChainSet),
+    /// Swap the bed surface transform future moves are lowered against
+    /// (lowerer applies it); `None` clears it. Upstream of the lowerer is
+    /// gcode space, downstream is machine space — the warp is part of
+    /// lowering, so the planner never sees it. `gcode_z_rebase` is the gcode
+    /// Z that maps to the unchanged machine Z through the *new* transform,
+    /// computed by the sender: rebasing the odometers keeps the physical
+    /// position invariant across the swap instead of stepping Z by the
+    /// correction delta on the next move.
+    SetMesh {
+        mesh: Option<Arc<SurfaceTransform>>,
+        gcode_z_rebase: f64,
+    },
     /// Acknowledged by the dispatcher once everything ahead of it has been
     /// dispatched (or discarded): the pipeline-wide "everything before this
     /// point is done" fence.

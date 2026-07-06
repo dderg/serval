@@ -1,8 +1,9 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
-use geometry::Move;
 use geometry::path::lowering::PositionProfile;
+use geometry::{Move, SurfaceTransform};
 use trajectory::AxisChainSet;
 
 use crate::lowering::{FitTol, lower_move};
@@ -14,7 +15,9 @@ const REST_EPS_MM_S: f64 = 1e-9;
 /// `ShapedSegment`. It is the persistent owner of the trajectory clock and
 /// odometer: `Dwell` advances the clock without motion, `Reset` restarts the
 /// timeline at rest at the given position, `SetAxisChains` swaps the chain
-/// set future moves are lowered against.
+/// set future moves are lowered against, `SetMesh` swaps the bed surface
+/// transform. The odometer and everything upstream are gcode space; the
+/// emitted segments are machine space — this stage owns the warp.
 pub fn run_lowerer(
     input: Receiver<PlannedItem>,
     output: Sender<LoweredItem>,
@@ -26,6 +29,7 @@ pub fn run_lowerer(
     let mut odometer = home_pos;
     let mut t = t_start;
     let mut rest_hold_pending = false;
+    let mut mesh: Option<Arc<SurfaceTransform>> = None;
 
     while let Ok(item) = input.recv() {
         let planned = match item {
@@ -49,6 +53,15 @@ pub fn run_lowerer(
                         rest_hold_pending = false;
                     }
                     Control::SetAxisChains(chains) => axis_chains = chains.clone(),
+                    Control::SetMesh {
+                        mesh: m,
+                        gcode_z_rebase,
+                    } => {
+                        mesh = m.clone();
+                        if let Some(z) = odometer.get_mut(2) {
+                            *z = *gcode_z_rebase;
+                        }
+                    }
                     Control::Barrier(_) => {}
                 }
                 if output.send(LoweredItem::Control(ctrl)).is_err() {
@@ -71,12 +84,19 @@ pub fn run_lowerer(
             &odometer,
             fit_tol,
             &axis_chains.chains,
+            mesh.as_deref(),
         )
         .unwrap_or_else(|e| panic!("lowerer: line {}: {e}", planned.geometry.source.start_line));
         seg.source_line = planned.geometry.source.start_line;
         if hold_pad > 0.0 {
-            let hold =
-                rest_hold_segment(&odometer, t, seg.t_start, seg.axes.len(), seg.source_line);
+            let hold = rest_hold_segment(
+                &odometer,
+                rest_z_warp(mesh.as_deref(), &odometer),
+                t,
+                seg.t_start,
+                seg.axes.len(),
+                seg.source_line,
+            );
             if output
                 .send(LoweredItem::Seg(LoweredSegment {
                     seg: hold,
@@ -115,12 +135,25 @@ pub fn run_lowerer(
     }
 }
 
+/// The gcode-space odometer is warped like any commanded position when a
+/// segment holds it as machine-space output.
+fn rest_z_warp(mesh: Option<&SurfaceTransform>, odometer: &[f64]) -> f64 {
+    mesh.map_or(0.0, |t| {
+        t.correction_at(
+            odometer.first().copied().unwrap_or(0.0),
+            odometer.get(1).copied().unwrap_or(0.0),
+            odometer.get(2).copied().unwrap_or(0.0),
+        )
+    })
+}
+
 /// The rest the shaper's drain flush clamped against, materialized as real
 /// trajectory once the next move is known: the shaped output creeps toward
 /// the resumed motion inside this window, and that creep must be emitted,
 /// not skipped over by a bare clock jump.
 fn rest_hold_segment(
     odometer: &[f64],
+    z_warp: f64,
     t_start: f64,
     t_end: f64,
     n_axes: usize,
@@ -129,10 +162,11 @@ fn rest_hold_segment(
     use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
     let axes = (0..n_axes)
         .map(|axis| {
+            let warp = if axis == 2 { z_warp } else { 0.0 };
             bezier_pieces_to_nurbs(&[BezierPiece {
                 u_start: t_start,
                 u_end: t_end,
-                coeffs: vec![odometer.get(axis).copied().unwrap_or(0.0)],
+                coeffs: vec![odometer.get(axis).copied().unwrap_or(0.0) + warp],
             }])
         })
         .collect();
