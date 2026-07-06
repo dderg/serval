@@ -1,7 +1,7 @@
 #![allow(deprecated)]
 
 use super::*;
-use crate::fitter::Fitter;
+use crate::fit_stage::FitStage;
 use crate::planner::Planner;
 use crate::{PlannedMove, StreamConfig};
 use crossbeam_channel::unbounded;
@@ -24,9 +24,9 @@ fn stream_config() -> StreamConfig {
     }
 }
 
-/// Fits and plans `moves` through the real streaming `Fitter`/`Planner`
+/// Fits and plans `moves` through the real streaming `FitStage`/`Planner`
 /// stages, synchronously over unbounded channels (no threads needed — see
-/// `stream/fitter_tests.rs`'s `run_fitter` for the same technique).
+/// `fit_stage/tests.rs`'s `run_fit_stage` for the same technique).
 fn fit_and_plan(moves: &[geometry::Move]) -> Vec<PlannedMove> {
     let (raw_tx, raw_rx) = unbounded();
     for m in moves.iter().cloned() {
@@ -37,7 +37,7 @@ fn fit_and_plan(moves: &[geometry::Move]) -> Vec<PlannedMove> {
     drop(raw_tx);
 
     let (fitted_tx, fitted_rx) = unbounded();
-    Fitter::new(ChainFitConfig::default()).run(raw_rx, fitted_tx);
+    FitStage::new(ChainFitConfig::default()).run(raw_rx, fitted_tx);
 
     let (planned_tx, planned_rx) = unbounded();
     Planner::new(stream_config()).run(fitted_rx, planned_tx);
