@@ -99,7 +99,7 @@ fn scalar_derivative(comp_x: &[f64], comp_y: &[f64]) -> Vec<f64> {
     comp_x
         .iter()
         .zip(comp_y)
-        .map(|(ax, ay)| libm::hypot(ax, *ay))
+        .map(|(ax, ay)| libm::hypot(*ax, *ay))
         .collect()
 }
 
@@ -466,7 +466,11 @@ fn time_series_from_position(snap: &Snapshot) -> TimeSeries {
     // Derivatives
     let vx = gradient(&x, &t);
     let vy = gradient(&y, &t);
-    let v_scalar: Vec<f64> = vx.iter().zip(&vy).map(|(vx, vy)| libm::hypot(vx, *vy)).collect();
+    let v_scalar: Vec<f64> = vx
+        .iter()
+        .zip(&vy)
+        .map(|(vx, vy)| libm::hypot(*vx, *vy))
+        .collect();
 
     let ax = gradient(&vx, &t);
     let ay = gradient(&vy, &t);
