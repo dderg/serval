@@ -8,11 +8,9 @@ pub mod reactor;
 pub mod rtt;
 pub mod runtime_events;
 pub mod serial_frame_io;
-pub mod tcp_serial_port;
 pub use identify::IdentifySeqState;
 pub use interceptor::InterceptorId;
 pub use serial_frame_io::SerialFrameIo;
-pub use tcp_serial_port::TcpSerialPort;
 #[cfg(any(test, feature = "test-harness"))]
 pub mod test_harness;
 pub mod window;
@@ -300,12 +298,6 @@ impl McuHostIo {
                     "serialport::open({path}@{baud}): {e}"
                 )))
             })?;
-        Self::open_with_port(port_box, config)
-    }
-
-    pub fn open_tcp(addr: &str, config: McuHostIoConfig) -> Result<Self, TransportError> {
-        let port_box: Box<dyn serialport::SerialPort> =
-            Box::new(tcp_serial_port::TcpSerialPort::connect(addr)?);
         Self::open_with_port(port_box, config)
     }
 
