@@ -163,7 +163,7 @@ fn submit_typed_io_error_transitions_closed() {
         TickOutcome::Closed,
         "tick_once returns Closed when state transitioned this tick"
     );
-    assert_eq!(reactor.send_seq, 2);
+    assert_eq!(reactor.seq_window.send_seq, 2);
 }
 
 #[test]
@@ -281,17 +281,21 @@ fn drain_path_transitions_closed_on_io_error() {
                 retry_count: 0,
             });
     }
-    reactor.send_seq = crate::host_io::window::MAX_PENDING_BLOCKS as u64;
+    reactor.seq_window.send_seq = crate::host_io::window::MAX_PENDING_BLOCKS as u64;
 
     let (completion_tx, completion_rx) = sync_channel(1);
-    reactor.pending_submissions.push_back(PendingSubmission {
-        call_id: 99,
-        payload: vec![0xCC],
-        expected_response_name: "noop".into(),
-        completion: completion_tx,
-        deadline: Instant::now() + Duration::from_secs(1),
-    });
     reactor
+        .outbound
+        .pending_submissions
+        .push_back(PendingSubmission {
+            call_id: 99,
+            payload: vec![0xCC],
+            expected_response_name: "noop".into(),
+            completion: completion_tx,
+            deadline: Instant::now() + Duration::from_secs(1),
+        });
+    reactor
+        .outbound
         .pending_outbound_order
         .push_back(PendingOutboundKind::Submission);
 
