@@ -97,6 +97,9 @@ impl<'a> ShapedSignal<'a> {
 }
 
 #[cfg(test)]
+mod fixtures;
+
+#[cfg(test)]
 mod tests;
 
 #[cfg(test)]
