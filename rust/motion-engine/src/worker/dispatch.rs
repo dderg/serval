@@ -160,7 +160,7 @@ pub(crate) fn dispatch_segment(
         ctx.pump_tx.send(m).map_err(|_| DispatchError::PumpGone)?;
     }
 
-    tracing::info!(
+    tracing::trace!(
         subsystem = "motion",
         event = "pipe_pump_in",
         line = seg.source_line,
@@ -277,7 +277,7 @@ pub(crate) struct ConsumerShared {
 impl ConsumerShared {
     pub(crate) fn dispatch_segment(&self, seg: &ShapedSegment) -> Result<(), DispatchError> {
         let n_ax = seg.axes.len();
-        tracing::info!(
+        tracing::trace!(
             subsystem = "motion",
             event = "pipe_dispatch",
             line = seg.source_line,
