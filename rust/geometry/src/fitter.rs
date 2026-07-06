@@ -32,7 +32,14 @@ pub struct CornerFitConfig {
     /// band bounds how far an arc run's facet ratios may spread around the
     /// single linear ramp the reconstruction carries.
     pub extrusion_ramp_rel_tol: f64,
-    pub ramp_gate: FollowerRampGate,
+    /// `max_extrude_only_accel` — worst-case budget for the extruder
+    /// acceleration a fitter-created ramp adds on top of the G-code's own
+    /// constant-ratio flow. The planner deliberately applies the
+    /// `max_extrude_only_*` limits to extrude-only moves alone (coupling the
+    /// follower into print-move velocity planning would make every plan
+    /// iteration solve a joint ODE), so the fitter instead proves each ramp
+    /// feasible in closed form — see [`ramps_admitted`].
+    pub ramp_accel_budget_mm_s2: f64,
 }
 
 const EXTRUSION_RAMP_REL_TOL: f64 = 0.25;
@@ -43,60 +50,8 @@ impl Default for CornerFitConfig {
             theta_min_rad: COLLINEAR_EPS_RAD,
             theta_max_rad: PI - COLLINEAR_EPS_RAD,
             extrusion_ramp_rel_tol: EXTRUSION_RAMP_REL_TOL,
-            ramp_gate: FollowerRampGate::default(),
+            ramp_accel_budget_mm_s2: f64::INFINITY,
         }
-    }
-}
-
-/// Worst-case kinematic budget for the extrusion-rate ramps the fitter
-/// creates (corner blends, arc-run ramps, easing spirals). The planner
-/// deliberately applies `max_extrude_only_*` to extrude-only moves alone —
-/// coupling the follower into print-move velocity planning would make every
-/// plan iteration solve a joint ODE — so the fitter instead proves each ramp
-/// feasible in closed form against the box the planner does guarantee:
-/// `v ≤ V`, `|a| ≤ A` on the carrying piece.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct FollowerRampGate {
-    /// `max_extrude_only_velocity` — cap on the extra commanded `ė` the
-    /// ramp introduces over a constant-ratio demand.
-    pub max_velocity_mm_s: f64,
-    /// `max_extrude_only_accel` — cap on the extra commanded `ë` the ramp
-    /// introduces over a constant-ratio demand.
-    pub max_accel_mm_s2: f64,
-    /// Largest live pressure-advance gain across follower axes; PA commands
-    /// `e + k·ė`, amplifying rate demands by the next derivative.
-    pub pressure_advance_s: f64,
-}
-
-impl Default for FollowerRampGate {
-    fn default() -> Self {
-        Self {
-            max_velocity_mm_s: f64::INFINITY,
-            max_accel_mm_s2: f64::INFINITY,
-            pressure_advance_s: 0.0,
-        }
-    }
-}
-
-impl FollowerRampGate {
-    /// Whether a ramped demand's *additional* extruder load stays within
-    /// budget on a piece whose path speed never exceeds `v_cap`. With ratio
-    /// slope `m = dr/ds` and the path at speed `v`: `ė = r·v`,
-    /// `ë = r·a + m·v²`. The `r`-terms are the load the G-code's own
-    /// constant-ratio flow already commands — not the fitter's to police — so
-    /// the gate charges only the slope's marginal demand: `m·v²` of extruder
-    /// acceleration, and under pressure advance (which commands `e + k·ė`)
-    /// the `k·m·v²` of commanded velocity that acceleration turns into. Both
-    /// are monotone in `v`, so `v_cap` is the worst case; constant demands
-    /// pass unconditionally.
-    fn admits(&self, demand: &FollowerDemand, len: f64, v_cap: f64) -> bool {
-        let m = demand.ratio_slope(len).abs();
-        if m == 0.0 {
-            return true;
-        }
-        let extra_acc = m * v_cap * v_cap;
-        let extra_vel = self.pressure_advance_s * extra_acc;
-        extra_vel <= self.max_velocity_mm_s && extra_acc <= self.max_accel_mm_s2
     }
 }
 
@@ -113,8 +68,15 @@ fn worst_case_speed(seg: &impl CurvatureProfile, feedrate: f64, limits: Velocity
     feedrate.min(limits.max_velocity_mm_s).min(curvature_cap)
 }
 
+/// Whether every ramp on the piece keeps its *additional* extruder load
+/// within `accel_budget`. With ratio slope `m = dr/ds` and the path at speed
+/// `v ≤ v_cap`: `ė = r·v` and `ë = r·a + m·v²`. The `r`-terms are the load
+/// the G-code's own constant-ratio flow already commands — not the fitter's
+/// to police — so the gate charges only the slope's marginal `m·v²` of
+/// extruder acceleration, monotone in `v`, worst-cased at `v_cap`. Constant
+/// demands pass unconditionally.
 pub(crate) fn ramps_admitted(
-    gate: FollowerRampGate,
+    accel_budget: f64,
     followers: &[FollowerDemand],
     seg: &impl CurvatureProfile,
     feedrate: f64,
@@ -122,7 +84,9 @@ pub(crate) fn ramps_admitted(
 ) -> bool {
     let len = seg.s_len();
     let v_cap = worst_case_speed(seg, feedrate, limits);
-    followers.iter().all(|d| gate.admits(d, len, v_cap))
+    followers
+        .iter()
+        .all(|d| d.ratio_slope(len).abs() * v_cap * v_cap <= accel_budget)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -175,9 +139,9 @@ pub enum UnblendReason {
     /// are exempt: ramping to or from zero is always desirable, so they still
     /// blend.
     ExtrusionStep,
-    /// The blend's extrusion ramp would demand more extruder velocity or
-    /// acceleration than [`FollowerRampGate`] budgets in the worst case, so
-    /// the corner stays sharp and the planner stops there instead.
+    /// The blend's extrusion ramp would demand more extruder acceleration
+    /// than [`CornerFitConfig::ramp_accel_budget_mm_s2`] allows in the worst
+    /// case, so the corner stays sharp and the planner stops there instead.
     ExtrusionRampInfeasible,
 }
 
@@ -352,14 +316,14 @@ impl RunFit {
         let Some(mut recon) = kernels::reconstruct(facets, tol)? else {
             return Ok(None);
         };
-        if !construct_admitted(&recon, facets, corner.ramp_gate) {
+        if !construct_admitted(&recon, facets, corner.ramp_accel_budget_mm_s2) {
             return Ok(None);
         }
         let bare = recon.clone();
         let head_nb = head.and_then(|m| kernels::neighbor(m, true));
         let tail_nb = tail.and_then(|m| kernels::neighbor(m, false));
         kernels::ease_run(&mut recon, facets, head_nb.as_ref(), tail_nb.as_ref(), tol)?;
-        if !construct_admitted(&recon, facets, corner.ramp_gate) {
+        if !construct_admitted(&recon, facets, corner.ramp_accel_budget_mm_s2) {
             recon = bare;
         }
         Ok(Some(RunFit {
@@ -441,7 +405,14 @@ impl RunFit {
             blend.half1.s_len(),
             blend.half2.s_len(),
         );
-        if !general_blend_admitted(&blend, &f_in, &f_out, neighbor, run_first, corner.ramp_gate) {
+        if !general_blend_admitted(
+            &blend,
+            &f_in,
+            &f_out,
+            neighbor,
+            run_first,
+            corner.ramp_accel_budget_mm_s2,
+        ) {
             return Ok(Vec::new());
         }
         self.head_line_extra = blend.trim_in;
@@ -482,7 +453,14 @@ impl RunFit {
             blend.half1.s_len(),
             blend.half2.s_len(),
         );
-        if !general_blend_admitted(&blend, &f_in, &f_out, run_last, neighbor, corner.ramp_gate) {
+        if !general_blend_admitted(
+            &blend,
+            &f_in,
+            &f_out,
+            run_last,
+            neighbor,
+            corner.ramp_accel_budget_mm_s2,
+        ) {
             return Ok(Vec::new());
         }
         self.tail_blend_trim = blend.trim_in;
@@ -528,7 +506,7 @@ impl RunFit {
             &f_out,
             run_last,
             next_first,
-            corner.ramp_gate,
+            corner.ramp_accel_budget_mm_s2,
         ) {
             return Ok(Vec::new());
         }
@@ -562,39 +540,46 @@ fn general_blend_admitted(
     f_out: &[FollowerDemand],
     m_in: &Move,
     m_out: &Move,
-    gate: FollowerRampGate,
+    accel_budget: f64,
 ) -> bool {
-    ramps_admitted(gate, f_in, &blend.half1, m_in.feedrate_mm_s, m_in.limits)
-        && ramps_admitted(gate, f_out, &blend.half2, m_out.feedrate_mm_s, m_out.limits)
+    ramps_admitted(
+        accel_budget,
+        f_in,
+        &blend.half1,
+        m_in.feedrate_mm_s,
+        m_in.limits,
+    ) && ramps_admitted(
+        accel_budget,
+        f_out,
+        &blend.half2,
+        m_out.feedrate_mm_s,
+        m_out.limits,
+    )
 }
 
 /// Every ramp the reconstruction carries — easing spirals and the arc — must
 /// pass the kinematic gate on its carrying piece (the same move whose
 /// feedrate and limits the emitted piece inherits).
-fn construct_admitted(
-    recon: &kernels::Reconstruction,
-    facets: &[Move],
-    gate: FollowerRampGate,
-) -> bool {
+fn construct_admitted(recon: &kernels::Reconstruction, facets: &[Move], accel_budget: f64) -> bool {
     let first = &facets[0];
     let last = facets.last().expect("run has facets");
     recon.up.iter().all(|c| {
         ramps_admitted(
-            gate,
+            accel_budget,
             &recon.up_followers,
             c,
             first.feedrate_mm_s,
             first.limits,
         )
     }) && ramps_admitted(
-        gate,
+        accel_budget,
         &recon.followers,
         &recon.arc,
         first.feedrate_mm_s,
         first.limits,
     ) && recon.down.iter().all(|c| {
         ramps_admitted(
-            gate,
+            accel_budget,
             &recon.down_followers,
             c,
             last.feedrate_mm_s,
@@ -721,13 +706,13 @@ fn classify_junction(
 
     let (f_in, f_out) = biclothoid_followers(&bi, m_in, m_out, line_in, line_out);
     let admitted = ramps_admitted(
-        config.ramp_gate,
+        config.ramp_accel_budget_mm_s2,
         &f_in,
         &bi.half1,
         m_in.feedrate_mm_s,
         m_in.limits,
     ) && ramps_admitted(
-        config.ramp_gate,
+        config.ramp_accel_budget_mm_s2,
         &f_out,
         &bi.half2,
         m_out.feedrate_mm_s,

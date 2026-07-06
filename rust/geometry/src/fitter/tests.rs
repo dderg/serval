@@ -558,10 +558,7 @@ fn corner_ramp_beyond_extruder_budget_leaves_the_junction_unblended() {
     ));
 
     let tight = CornerFitConfig {
-        ramp_gate: FollowerRampGate {
-            max_accel_mm_s2: 20.0,
-            ..FollowerRampGate::default()
-        },
+        ramp_accel_budget_mm_s2: 20.0,
         ..CornerFitConfig::default()
     };
     assert!(matches!(
@@ -572,10 +569,11 @@ fn corner_ramp_beyond_extruder_budget_leaves_the_junction_unblended() {
 
 #[test]
 fn disabled_jerk_limiting_never_rejects_ramps_on_its_own() {
-    // `max_jerk = ∞` (jerk limiting off) with finite extruder budgets: the
-    // gate charges only the ramp's marginal demand, so the unbounded `r·j`
-    // the G-code itself commands must not poison it (0·∞ once NaN-rejected
-    // every ramp and left a no-jerk stream with no fits at all).
+    // `max_jerk = ∞` (jerk limiting off) with a finite extruder budget: the
+    // gate charges only the ramp's marginal `m·v²`, so nothing the G-code
+    // itself commands (like the unbounded `r·j` under PA) may poison it — a
+    // `0·∞ = NaN` there once rejected every ramp and left a no-jerk stream
+    // with no fits at all.
     let no_jerk = |line_no: u32, start: [f64; 3], end: [f64; 3], e: f64| {
         let ctx = MoveContext {
             extruder_axis: E_AXIS,
@@ -592,43 +590,12 @@ fn disabled_jerk_limiting_never_rejects_ramps_on_its_own() {
     let b = no_jerk(2, [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], 0.5);
 
     let config = CornerFitConfig {
-        ramp_gate: FollowerRampGate {
-            max_velocity_mm_s: 100.0,
-            max_accel_mm_s2: 1000.0,
-            pressure_advance_s: 0.0,
-        },
+        ramp_accel_budget_mm_s2: 1000.0,
         ..CornerFitConfig::default()
     };
     assert!(matches!(
         plan_junction(&a, &b, config).unwrap(),
         JunctionPlan::Blend(_)
-    ));
-}
-
-#[test]
-fn pressure_advance_amplifies_the_corner_ramp_gate() {
-    // The same corner under the same velocity budget: fine without pressure
-    // advance (a ramp adds no commanded velocity on its own), infeasible once
-    // the gain turns the ramp's `m·v²` of extruder acceleration into `k·m·v²`
-    // of commanded velocity.
-    let a = seg(1, 3000.0, 5.0, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.5);
-    let b = seg(2, 3000.0, 5.0, [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], 0.6);
-
-    let gate = |pa: f64| CornerFitConfig {
-        ramp_gate: FollowerRampGate {
-            max_velocity_mm_s: 5.0,
-            pressure_advance_s: pa,
-            ..FollowerRampGate::default()
-        },
-        ..CornerFitConfig::default()
-    };
-    assert!(matches!(
-        plan_junction(&a, &b, gate(0.0)).unwrap(),
-        JunctionPlan::Blend(_)
-    ));
-    assert!(matches!(
-        plan_junction(&a, &b, gate(0.2)).unwrap(),
-        JunctionPlan::Unblended(UnblendReason::ExtrusionRampInfeasible)
     ));
 }
 
@@ -647,10 +614,7 @@ fn arc_ramp_beyond_extruder_budget_dissolves_the_run() {
     let tail = mk(6, [116.728, 120.147, 0.0], [115.574, 120.674, 0.0], 0.04268);
 
     let tight = CornerFitConfig {
-        ramp_gate: FollowerRampGate {
-            max_accel_mm_s2: 0.01,
-            ..FollowerRampGate::default()
-        },
+        ramp_accel_budget_mm_s2: 0.01,
         ..CornerFitConfig::default()
     };
     let fit = RunFit::fit(&facets, Some(&head), Some(&tail), tight).unwrap();

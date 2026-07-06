@@ -207,20 +207,6 @@ impl AxisChainSet {
         self.followers.iter().any(|(f, _)| *f == axis)
     }
 
-    /// The largest linear-pressure-advance gain across all axis chains —
-    /// the worst case the fitter's extrusion-ramp gate must budget for.
-    #[must_use]
-    pub fn max_pressure_advance_s(&self) -> f64 {
-        self.chains
-            .iter()
-            .flat_map(|chain| &chain.stages)
-            .map(|stage| match stage {
-                ChainStage::LinearPressureAdvance { k } => *k,
-                ChainStage::SmoothKernel(_) => 0.0,
-            })
-            .fold(0.0, f64::max)
-    }
-
     #[must_use]
     pub fn forward_support(&self) -> f64 {
         self.chains

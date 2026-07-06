@@ -111,10 +111,7 @@ impl Fitter {
 
     /// `Reset` drops all buffered fit state and forgets the emitted-geometry
     /// anchor (the timeline restarts elsewhere); every other token requires
-    /// the fit buffers to have been drained first. `SetAxisChains` also
-    /// refreshes the extrusion-ramp gate's pressure-advance worst case — the
-    /// drained-buffer requirement means every buffered move already fits
-    /// under the gain it was fitted with.
+    /// the fit buffers to have been drained first.
     fn forward_control(&mut self, ctrl: Control, out: &mut TravelAligningSender) -> bool {
         match &ctrl {
             Control::Reset { .. } => {
@@ -125,14 +122,7 @@ impl Fitter {
                 self.seam_in_reduction = 0.0;
                 out.reset();
             }
-            Control::SetAxisChains(chains) => {
-                assert!(
-                    self.decided.is_empty() && self.tail.is_empty(),
-                    "fitter: control token arrived with undrained moves — a Drain must precede it"
-                );
-                self.config.corner.ramp_gate.pressure_advance_s = chains.max_pressure_advance_s();
-            }
-            Control::Dwell { .. } | Control::Barrier(_) => {
+            Control::Dwell { .. } | Control::SetAxisChains(_) | Control::Barrier(_) => {
                 assert!(
                     self.decided.is_empty() && self.tail.is_empty(),
                     "fitter: control token arrived with undrained moves — a Drain must precede it"
