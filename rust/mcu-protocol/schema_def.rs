@@ -1,7 +1,28 @@
 // Shared schema definition included by `build.rs` and the integration test
-// `tests/schema_hash_change.rs`. Pure data + a pure canonicalization function.
+// `tests/schema_hash.rs`. Pure data + a pure canonicalization function.
 // MUST NOT depend on any other module of this crate (it's `include!`'d, not
 // imported as a Rust module).
+//
+// This table is the single source of truth for message layouts. `build.rs`
+// derives three artifacts from it:
+//   - `SCHEMA_HASH` (host/MCU lockstep check, exchanged during Identify)
+//   - the C header `src/mcu_protocol_schema.h` (type tags + hash)
+//   - `src/messages/generated.rs` (`MessageKind` + struct + Encode/Decode
+//     impls for every flat message)
+//
+// Field type language:
+//   u8 u16 u32 u64 i32 i64 f32   little-endian scalars (i64 rides the wire
+//                                as its two's-complement u64 bytes)
+//   T[N]                         fixed-size array, packed, no length prefix
+//   string                       u16-le byte length + UTF-8 bytes
+//   array<...>                   variable-length; the layout written here is
+//                                the wire contract (it feeds the hash), but
+//                                the codec is hand-written
+//
+// Codec placement rule: a message whose fields are all scalars or T[N] gets
+// its struct and codec generated into `src/messages/generated.rs`; a message
+// with any `string` or `array<` field keeps its hand-written struct and codec
+// in `src/messages.rs`.
 
 #[derive(Clone, Copy)]
 struct SchemaField {
@@ -36,10 +57,7 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
             SchemaField { name: "present_mask", ty: "u8" },
             SchemaField { name: "awd_mask", ty: "u8" },
             SchemaField { name: "invert_mask", ty: "u8" },
-            SchemaField { name: "steps_per_mm_0", ty: "f32" },
-            SchemaField { name: "steps_per_mm_1", ty: "f32" },
-            SchemaField { name: "steps_per_mm_2", ty: "f32" },
-            SchemaField { name: "steps_per_mm_3", ty: "f32" },
+            SchemaField { name: "steps_per_mm", ty: "f32[4]" },
         ],
     },
     SchemaMessage {
@@ -68,6 +86,25 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
         ],
     },
     SchemaMessage {
+        type_tag: 0x0042,
+        name: "ClaimHandshake",
+        version: 1,
+        channel: "control",
+        fields: &[],
+    },
+    SchemaMessage {
+        type_tag: 0x0043,
+        name: "ClaimHandshakeReply",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField {
+                name: "slave_statuses",
+                ty: "array<slave_status{slave_idx:u8,state:u8,fault_code:u16}>",
+            },
+        ],
+    },
+    SchemaMessage {
         type_tag: 0x0044,
         name: "QueryMotorState",
         version: 1,
@@ -79,7 +116,12 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
         name: "MotorStateResponse",
         version: 1,
         channel: "control",
-        fields: &[],
+        fields: &[
+            SchemaField {
+                name: "motors",
+                ty: "array<motor_sample{slot:u8,pos_q16:i32,vel_q16:i32}>",
+            },
+        ],
     },
     SchemaMessage {
         type_tag: 0x0060,
@@ -151,11 +193,36 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
         ],
     },
     SchemaMessage {
+        type_tag: 0x006C,
+        name: "ResonanceBuzz",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "axis_mask", ty: "u8" },
+            SchemaField { name: "sign_mask", ty: "u8" },
+            SchemaField { name: "freq_start_millihz", ty: "u32" },
+            SchemaField { name: "freq_end_millihz", ty: "u32" },
+            SchemaField { name: "amplitude_nm", ty: "u32" },
+            SchemaField { name: "duration_ms", ty: "u32" },
+            SchemaField { name: "ramp_ms", ty: "u32" },
+        ],
+    },
+    SchemaMessage {
+        type_tag: 0x006D,
+        name: "ResonanceBuzzResponse",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "result", ty: "i32" },
+        ],
+    },
+    SchemaMessage {
         type_tag: 0x006E,
         name: "ArmSensorlessEndstop",
         version: 1,
         channel: "control",
         fields: &[
+            SchemaField { name: "slot", ty: "u8" },
             SchemaField { name: "endstop_id", ty: "u8" },
             SchemaField {
                 name: "torque_trip_tenth_pct",
@@ -215,6 +282,7 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
         version: 1,
         channel: "control",
         fields: &[
+            SchemaField { name: "slot", ty: "u8" },
             SchemaField { name: "following_error_counts", ty: "u32" },
             SchemaField { name: "max_torque_tenth_pct", ty: "u16" },
         ],
@@ -233,7 +301,9 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
         name: "RestoreDriveLimits",
         version: 1,
         channel: "control",
-        fields: &[],
+        fields: &[
+            SchemaField { name: "slot", ty: "u8" },
+        ],
     },
     SchemaMessage {
         type_tag: 0x0077,
@@ -266,6 +336,7 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
         version: 1,
         channel: "control",
         fields: &[
+            SchemaField { name: "slot", ty: "u8" },
             SchemaField { name: "home_q16", ty: "i32" },
         ],
     },
@@ -276,6 +347,52 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
         channel: "control",
         fields: &[
             SchemaField { name: "result", ty: "i32" },
+        ],
+    },
+    SchemaMessage {
+        type_tag: 0x007C,
+        name: "SdoRead",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "slot", ty: "u8" },
+            SchemaField { name: "index", ty: "u16" },
+            SchemaField { name: "subindex", ty: "u8" },
+        ],
+    },
+    SchemaMessage {
+        type_tag: 0x007D,
+        name: "SdoReadResponse",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "result", ty: "i32" },
+            SchemaField { name: "size", ty: "u8" },
+            SchemaField { name: "data", ty: "u8[4]" },
+        ],
+    },
+    SchemaMessage {
+        type_tag: 0x007E,
+        name: "SdoWrite",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "slot", ty: "u8" },
+            SchemaField { name: "index", ty: "u16" },
+            SchemaField { name: "subindex", ty: "u8" },
+            SchemaField { name: "size", ty: "u8" },
+            SchemaField { name: "value", ty: "i64" },
+        ],
+    },
+    SchemaMessage {
+        type_tag: 0x007F,
+        name: "SdoWriteResponse",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "result", ty: "i32" },
+            SchemaField { name: "readback_size", ty: "u8" },
+            SchemaField { name: "readback_data", ty: "u8[4]" },
         ],
     },
     SchemaMessage {
@@ -299,6 +416,7 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
             SchemaField { name: "fault_code", ty: "u16" },
             SchemaField { name: "num_axes", ty: "u8" },
             SchemaField { name: "retired_counts", ty: "array<u32>" },
+            SchemaField { name: "ff_saturation_count", ty: "u32" },
         ],
     },
     SchemaMessage {
@@ -313,8 +431,7 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
             SchemaField { name: "event", ty: "u16" },
             SchemaField { name: "code", ty: "u16" },
             SchemaField { name: "seq", ty: "u16" },
-            SchemaField { name: "arg0", ty: "u32" },
-            SchemaField { name: "arg1", ty: "u32" },
+            SchemaField { name: "args", ty: "u32[2]" },
         ],
     },
     SchemaMessage {
