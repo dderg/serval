@@ -27,6 +27,16 @@ motion-engine:
 	rm -f $(MOTION_ENGINE_DEST)
 	cp $(MOTION_ENGINE_SRC) $(MOTION_ENGINE_DEST)
 
+# Same module under the `snapshot` cargo profile: float-identical output,
+# much faster edit-rebuild cycle (no fat LTO, parallel codegen, incremental).
+# The snapshot test loop uses this target.
+MOTION_ENGINE_FAST_SRC = rust/target/snapshot/lib_motion_engine.$(MOTION_ENGINE_EXT)
+
+motion-engine-fast:
+	cd rust && cargo build -p motion-engine --profile snapshot --features extension-module
+	rm -f $(MOTION_ENGINE_DEST)
+	cp $(MOTION_ENGINE_FAST_SRC) $(MOTION_ENGINE_DEST)
+
 clean-motion-engine:
 	rm -f $(MOTION_ENGINE_DEST)
 	cd rust && cargo clean -p motion-engine
@@ -55,5 +65,5 @@ ethercat-stub:
 servo-ident:
 	cd rust && cargo build -p servo-ident --release
 
-.PHONY: motion-engine clean-motion-engine \
+.PHONY: motion-engine motion-engine-fast clean-motion-engine \
 	ethercat-endpoint-hw setcap-ethercat ethercat-stub servo-ident

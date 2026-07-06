@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import json
 import os
 import sys
 from pathlib import Path
@@ -25,6 +26,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "-k", dest="filter", help="only run cases whose name contains this"
+    )
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        help="write per-case statuses and non-matching snapshots here, so the "
+        "review server can serve them without re-running every case",
     )
     args = parser.parse_args()
 
@@ -48,29 +55,45 @@ def main() -> int:
         harness.Status.CHANGED: [],
         harness.Status.NEW: [],
     }
-    for case in cases:
-        try:
-            snapshot = harness.run_case(case)
-        except (ImportError, ValueError) as exc:
-            print(f"  ERROR   {case.name}: {exc}")
-            return 2
-        status = harness.compare(case, snapshot)
-        buckets[status].append(case.name)
-        label = (
-            "PENDING" if status is harness.Status.NEW else status.value.upper()
-        )
-        print(f"  {label:8} {case.name}")
-        if status is harness.Status.CHANGED:
-            baseline = harness.baseline_snapshot(case)
-            d = harness.drift_envelope(baseline, snapshot)
-            print(f"             worst rel {d['rel']:.2e} at {d['rel_at']}")
-            print(f"             worst abs {d['abs']:.2e} at {d['abs_at']}")
-            dump_dir = os.environ.get("SNAPSHOT_DUMP_DIR")
-            if dump_dir:
-                out = Path(dump_dir) / f"{case.name}.json.gz"
+    statuses: dict[str, str] = {}
+    try:
+        for case, snapshot in harness.run_cases_parallel(cases):
+            status = harness.compare(case, snapshot)
+            buckets[status].append(case.name)
+            statuses[case.name] = status.value
+            label = (
+                "PENDING"
+                if status is harness.Status.NEW
+                else status.value.upper()
+            )
+            print(f"  {label:8} {case.name}")
+            if status is not harness.Status.EXACT and args.results_dir:
+                out = (
+                    args.results_dir / f"{case.name.replace('/', '__')}.json.gz"
+                )
                 out.parent.mkdir(parents=True, exist_ok=True)
                 data = (harness.canonical_json(snapshot) + "\n").encode()
-                out.write_bytes(gzip.compress(data, compresslevel=9, mtime=0))
+                out.write_bytes(gzip.compress(data, compresslevel=1))
+            if status is harness.Status.CHANGED:
+                baseline = harness.baseline_snapshot(case)
+                d = harness.drift_envelope(baseline, snapshot)
+                print(f"             worst rel {d['rel']:.2e} at {d['rel_at']}")
+                print(f"             worst abs {d['abs']:.2e} at {d['abs_at']}")
+                dump_dir = os.environ.get("SNAPSHOT_DUMP_DIR")
+                if dump_dir:
+                    out = Path(dump_dir) / f"{case.name}.json.gz"
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    data = (harness.canonical_json(snapshot) + "\n").encode()
+                    out.write_bytes(
+                        gzip.compress(data, compresslevel=9, mtime=0)
+                    )
+    except (ImportError, ValueError) as exc:
+        print(f"  ERROR   {exc}")
+        return 2
+
+    if args.results_dir:
+        args.results_dir.mkdir(parents=True, exist_ok=True)
+        (args.results_dir / "status.json").write_text(json.dumps(statuses))
 
     ok = buckets[harness.Status.EXACT]
     changed = buckets[harness.Status.CHANGED]
