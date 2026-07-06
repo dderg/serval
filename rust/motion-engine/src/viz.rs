@@ -1,14 +1,10 @@
-use crossbeam_channel::unbounded;
-use geometry::path::CurvatureProfile;
-use geometry::path::lowering::PositionProfile;
-use nurbs::bezier::extract_bezier_pieces;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use trajectory::{AxisChainSet, ShapedSegment};
 
 use motion_pipeline::fit_stage::FitStage;
 use motion_pipeline::planner::Planner;
 use motion_pipeline::{StreamConfig, run_lowerer};
+use snapshot_core::{FittedSegment, SnapshotParams};
 
 #[pyfunction]
 #[pyo3(signature = (waypoints, max_velocity, max_accel, square_corner_velocity, max_jerk, arc_fit = None, max_extrude_only_velocity = None, max_extrude_only_accel = None, max_path_deviation = None, max_accel_deviation = None))]
@@ -25,77 +21,44 @@ pub fn pipeline_snapshot(
     max_path_deviation: Option<f64>,
     max_accel_deviation: Option<f64>,
 ) -> PyResult<Py<PyDict>> {
-    if let Some(v) = max_path_deviation {
-        if !(v.is_finite() && v > 0.0) {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "max_path_deviation must be finite and positive, got {v}"
-            )));
-        }
-    }
-    if let Some(v) = max_accel_deviation {
-        if !(v > 0.0) {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "max_accel_deviation must be positive, got {v}"
-            )));
-        }
-    }
-    if waypoints.len() < 2 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "need at least 2 waypoints",
-        ));
-    }
-
-    let limits = geometry::VelocityLimits::try_new(
-        max_velocity,
-        max_accel,
-        square_corner_velocity,
-        max_jerk,
+    let snap = snapshot_core::pipeline_snapshot(
+        &waypoints,
+        SnapshotParams {
+            max_velocity,
+            max_accel,
+            square_corner_velocity,
+            max_jerk,
+            arc_fit,
+            max_extrude_only_velocity,
+            max_extrude_only_accel,
+            max_path_deviation,
+            max_accel_deviation,
+        },
     )
-    .map_err(pyo3::exceptions::PyValueError::new_err)?;
-    let chain_cfg = arc_fit_config(arc_fit)?;
-
-    let moves = build_moves(&waypoints, limits)?;
-    let raw_points = extract_raw_path(&moves);
-
-    let config = StreamConfig {
-        chain: chain_cfg,
-        integration_tol: VELOCITY_INTEGRATION_TOL,
-        max_extrude_only_velocity_mm_s: max_extrude_only_velocity.unwrap_or(f64::INFINITY),
-        max_extrude_only_accel_mm_s2: max_extrude_only_accel.unwrap_or(f64::INFINITY),
-        fit_tol_mm: max_path_deviation.unwrap_or(TRAJECTORY_FIT_TOL_MM),
-        fit_tol_accel_mm_s2: max_accel_deviation.unwrap_or(TRAJECTORY_FIT_TOL_ACCEL_MM_S2),
-        max_buffer_moves: SNAPSHOT_MAX_BUFFER_MOVES,
-        limits,
-    };
-    let (fitted, shaped) = run_pipeline(&moves, config, AxisChainSet::default());
+    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
-    dict.set_item("raw_x", raw_points.iter().map(|p| p.0).collect::<Vec<_>>())?;
-    dict.set_item("raw_y", raw_points.iter().map(|p| p.1).collect::<Vec<_>>())?;
+    dict.set_item("raw_x", snap.raw_x)?;
+    dict.set_item("raw_y", snap.raw_y)?;
 
     let seg_list = PyList::empty(py);
-    for fm in &fitted {
-        if let Some(spatial) = &fm.segment.spatial {
-            let d = segment_to_pydict(py, spatial)?;
-            seg_list.append(d)?;
-        }
+    for seg in &snap.fitted_segments {
+        seg_list.append(segment_to_pydict(py, seg)?)?;
     }
     dict.set_item("fitted_segments", seg_list)?;
 
-    let traj = collect_trajectory_pieces(&shaped);
-    dict.set_item("traj_x_pieces", traj.x.clone())?;
-    dict.set_item("traj_y_pieces", traj.y.clone())?;
-    dict.set_item("traj_z_pieces", traj.z.clone())?;
-    dict.set_item("traj_e_pieces", traj.e.clone())?;
-    dict.set_item("traj_t_end", traj.t_end)?;
-    dict.set_item("traversal_time_s", traj.t_end)?;
+    dict.set_item("traj_x_pieces", snap.traj_x_pieces)?;
+    dict.set_item("traj_y_pieces", snap.traj_y_pieces)?;
+    dict.set_item("traj_z_pieces", snap.traj_z_pieces)?;
+    dict.set_item("traj_e_pieces", snap.traj_e_pieces)?;
+    dict.set_item("traj_t_end", snap.traj_t_end)?;
+    dict.set_item("traversal_time_s", snap.traversal_time_s)?;
 
-    let seams = seam_metrics(&traj);
-    dict.set_item("seam_max_dp", seams.max_dp.to_vec())?;
-    dict.set_item("seam_max_dv", seams.max_dv.to_vec())?;
-    dict.set_item("seam_max_da", seams.max_da.to_vec())?;
+    dict.set_item("seam_max_dp", snap.seam_max_dp.to_vec())?;
+    dict.set_item("seam_max_dv", snap.seam_max_dv.to_vec())?;
+    dict.set_item("seam_max_da", snap.seam_max_da.to_vec())?;
     let worst = PyList::empty(py);
-    for s in &seams.worst {
+    for s in &snap.worst_seams {
         let d = PyDict::new(py);
         d.set_item("t", s.t)?;
         d.set_item("axis", s.axis)?;
@@ -108,48 +71,25 @@ pub fn pipeline_snapshot(
     Ok(dict.into())
 }
 
-fn segment_to_pydict<'py>(
-    py: Python<'py>,
-    spatial: &geometry::path::Segment,
-) -> PyResult<Bound<'py, PyDict>> {
+fn segment_to_pydict<'py>(py: Python<'py>, seg: &FittedSegment) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
-    match spatial {
-        geometry::path::Segment::Line(line) => {
+    match seg {
+        FittedSegment::Line { x0, y0, x1, y1 } => {
             d.set_item("type", "line")?;
-            d.set_item("x0", line.start[0])?;
-            d.set_item("y0", line.start[1])?;
-            d.set_item("x1", line.end[0])?;
-            d.set_item("y1", line.end[1])?;
+            d.set_item("x0", x0)?;
+            d.set_item("y0", y0)?;
+            d.set_item("x1", x1)?;
+            d.set_item("y1", y1)?;
         }
-        geometry::path::Segment::Arc(_) => {
+        FittedSegment::Arc { x, y } => {
             d.set_item("type", "arc")?;
-            let len = spatial.s_len();
-            let n = ((len * SAMPLES_PER_MM).ceil() as usize).max(20);
-            let mut xs = Vec::with_capacity(n);
-            let mut ys = Vec::with_capacity(n);
-            for k in 0..n {
-                let s = len * (k as f64) / ((n - 1) as f64);
-                let pt = spatial.point_at(s);
-                xs.push(pt[0]);
-                ys.push(pt[1]);
-            }
-            d.set_item("x", xs)?;
-            d.set_item("y", ys)?;
+            d.set_item("x", x.clone())?;
+            d.set_item("y", y.clone())?;
         }
-        geometry::path::Segment::Clothoid(_) => {
+        FittedSegment::Clothoid { x, y } => {
             d.set_item("type", "clothoid")?;
-            let len = spatial.s_len();
-            let n = ((len * SAMPLES_PER_MM).ceil() as usize).max(20);
-            let mut xs = Vec::with_capacity(n);
-            let mut ys = Vec::with_capacity(n);
-            for k in 0..n {
-                let s = len * (k as f64) / ((n - 1) as f64);
-                let pt = spatial.point_at(s);
-                xs.push(pt[0]);
-                ys.push(pt[1]);
-            }
-            d.set_item("x", xs)?;
-            d.set_item("y", ys)?;
+            d.set_item("x", x.clone())?;
+            d.set_item("y", y.clone())?;
         }
     }
     Ok(d)

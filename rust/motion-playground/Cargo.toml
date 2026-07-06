@@ -1,0 +1,22 @@
+[package]
+name = "motion-playground"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "WASM binding for the interactive playground: pasted gcode + config in, pipeline snapshot JSON out. Runs the real fitter → planner → lowerer → shaper stages client-side."
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+console_error_panic_hook = "0.1"
+pipeline-snapshot = { path = "../pipeline-snapshot" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasm-bindgen = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true

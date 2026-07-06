@@ -156,7 +156,7 @@ impl Planner {
         let stop_before: Vec<bool> = (0..self.moves.len())
             .map(|i| i > 0 && self.stop_at_seam(i))
             .collect();
-        let clock = std::time::Instant::now();
+        let clock = crate::timing::stopwatch();
         let profile = plan_velocity_stops(
             &self.moves,
             &stop_before,
@@ -176,7 +176,7 @@ impl Planner {
             v_barrier = profile.v_barrier,
             entry_v = self.entry.v,
             entry_a = self.entry.a,
-            plan_us = clock.elapsed().as_micros(),
+            plan_us = clock.elapsed_us(),
             t_us = crate::timing::mono_us(),
             "[pipe] plan"
         );
