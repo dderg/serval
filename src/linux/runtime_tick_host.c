@@ -163,8 +163,7 @@ host_tick_main(void *arg)
                 q->head++;
 #if CONFIG_MCU_SIM
                 if (sim_notify_step && step_gpio_lines[axis] >= 0)
-                    sim_notify_step(0, step_gpio_lines[axis],
-                                    dir ? -1 : 1);
+                    sim_notify_step(0, step_gpio_lines[axis], dir);
 #endif
             }
         }
