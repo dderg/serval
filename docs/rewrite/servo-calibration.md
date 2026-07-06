@@ -43,6 +43,7 @@ they are configured or passed.
 | `speeds` | `100, 400` | excitation grid (`SPEEDS=`) |
 | `iterations` | `3` | strokes per grid point (`ITERATIONS=`) |
 | `dwell_ms` | `700` | settle between strokes (`DWELL_MS=`) |
+| `travel_speed` | `100` | CoreXY centering moves between grid points |
 
 Prerequisites: the EtherCAT servo stack (`[servo_param]`, `[servo_capture]`)
 must be configured, and the fitter must be built once on the host with
@@ -50,13 +51,19 @@ must be configured, and the fitter must be built once on the host with
 
 ## Tuning order
 
-1. **`SERVO_CALIBRATE_INERTIA_RATIO[_COREXY]`** — identify the load inertia and
+1. **Enable feedforward** — set `velocity_ff: True` on each `[motor]` so the
+   tuning runs measure the loop as it will actually be driven (see
+   [servo-feedforward.md](servo-feedforward.md)).
+2. **`SERVO_CALIBRATE_INERTIA_RATIO[_COREXY]`** — identify the load inertia and
    set the base C00.06, before touching the loop gains.
-2. **`SERVO_APPLY_GAINS`** then **`SERVO_CALIBRATE_GAINS`** — find the loop
+   `SERVO_SWEEP_INERTIA` empirically verifies / refines C00.06 later, at the
+   tuned gains.
+3. **`SERVO_APPLY_GAINS`** then **`SERVO_CALIBRATE_GAINS`** — find the loop
    gains.
-3. **`SERVO_SWEEP_INERTIA`** — empirically verify / refine C00.06 at the tuned
-   gains.
-4. **`SERVO_MEASURE_TRACKING`** — the before/after check for any single change.
+4. **`SERVO_FIT_DYNAMICS[_COREXY]`** — fit the dynamic profile at the final
+   gains and point `dynamics_profile` at it to enable torque feedforward.
+
+**`SERVO_MEASURE_TRACKING`** is the before/after check for any single change.
 
 Every stroke is paced `M400 / G4 / M400` so it replans from idle, and the
 stroke engine refuses any `(speed, accel)` pair whose `v²/a` exceeds the stroke
@@ -79,7 +86,10 @@ capture building block behind the fit commands). Params: `AXIS` (X) `START`
 #### SERVO_MEASURE_INERTIA_COREXY
 One capture of **both** drives with X and Y strokes at every grid point, so the
 coupled fit can separate the diagonal and off-diagonal inertia (X strokes
-excite `m_diag+m_off`, Y strokes `m_diag−m_off`). Params: `SERVOS` `X_START`
+excite `m_diag+m_off`, Y strokes `m_diag−m_off`). Before each stroke set the
+toolhead moves (at `travel_speed`) to the active axis' start with the idle axis
+centered in its range, so both belt runs are near-equal length during the
+measurement. Params: `SERVOS` `X_START`
 `X_END` `Y_START` `Y_END` `ACCELS` `SPEEDS` `ITERATIONS` `DWELL_MS` `NAME`
 (ident).
 
@@ -98,8 +108,15 @@ print the recommended C00.06. Params: as `SERVO_MEASURE_INERTIA` plus
 profile lands in `~/printer_data/config/servo_dynamics/` and a new fit never
 overwrites an existing profile.
 
+#### SERVO_FIT_DYNAMICS_COREXY
+As above for CoreXY: runs the two-drive X+Y grid (`SERVO_MEASURE_INERTIA_COREXY`)
+and fits the coupled mass matrix (`--structure corexy`). The resulting profile
+goes on `[ethercat_node] dynamics_profile` (node-level, coupled) rather than
+per-motor. Params: as `SERVO_MEASURE_INERTIA_COREXY` plus `TORQUE_NM`
+`INERTIA_KGM2` `NAME` (ident).
+
 #### SERVO_CALIBRATE_INERTIA_RATIO
-Step 1 of tuning: identify the load inertia and print the recommended C00.06.
+Step 2 of tuning: identify the load inertia and print the recommended C00.06.
 `TORQUE_NM` and `INERTIA_KGM2` are **required** (config or param). Params: as
 `SERVO_MEASURE_INERTIA` plus `TORQUE_NM` `INERTIA_KGM2` `NAME` (inertia). Apply
 the printed number with `SERVO_SET_INERTIA_RATIO`.
@@ -158,8 +175,8 @@ Vendor-table tuning path: standard mode (C00.04=1) + C00.05 stiffness level
 
 | Command | Script | Output |
 |---|---|---|
-| `SERVO_MEASURE_TRACKING` | `servo_capture.py` | tracking metrics to console |
-| `SERVO_FIT_DYNAMICS`, `SERVO_CALIBRATE_INERTIA_RATIO[_COREXY]` | `servo_fit_dynamics.py` | `~/printer_data/config/servo_dynamics/dynamics_<name>_<stamp>.toml` + C00.06 |
+| `SERVO_MEASURE_TRACKING` | `servo_capture.py` | tracking metrics to console + per-motor & combined PNG in `~/printer_data/config/servo_calibrate_results/` (records every motor driving the axis — both lanes on CoreXY) |
+| `SERVO_FIT_DYNAMICS[_COREXY]`, `SERVO_CALIBRATE_INERTIA_RATIO[_COREXY]` | `servo_fit_dynamics.py` | `~/printer_data/config/servo_dynamics/dynamics_<name>_<stamp>.toml` + C00.06 |
 | `SERVO_CALIBRATE_GAINS` | `servo_gain_report.py` | comparison PNG in `~/printer_data/config/servo_calibrate_results/` |
 | `SERVO_SWEEP_INERTIA` | `servo_inertia_report.py` | comparison PNG in `~/printer_data/config/servo_calibrate_results/` |
 | `SERVO_MEASURE_INERTIA[_COREXY]`, `SERVO_MEASURE_FRICTION` | — | `.scap` capture only |
@@ -173,9 +190,15 @@ Each script runs standalone (`--help` for the full option list); the commands
 above invoke them with the running klippy interpreter.
 
 - **`servo_capture.py`** — analyze a `.scap`: following-error, overshoot/
-  settling, torque-saturation metrics; `--fft` prints resonance peaks,
-  `--plot` opens a time-series dashboard, `--drive` selects one drive in a
-  multi-drive capture, `--csv` exports samples.
+  settling, torque-saturation metrics per drive; `--fft` prints resonance peaks,
+  `--plot` opens a time-series dashboard, `--png` saves one headless (into
+  `--plot-dir`, or `--plot-out PATH`), `--combine-corexy A[:s],B[:s]` with
+  `--axis` renders the CoreXY dashboard — on-axis and cross-axis tracking error
+  with each stroke overlaid, per-motor torque, and moving-vs-stationary axis
+  position; the optional per-motor sign `:-1` un-inverts a servo whose
+  `invert_direction` flips its encoder counts out of the kinematic frame,
+  `--drive` restricts to one drive in a multi-drive capture, `--csv` exports
+  samples.
 - **`servo_fit_dynamics.py`** — resolve the newest capture for `--name`, export
   the fitter CSV, run `servo-ident`, and write the profile TOML (`--structure
   scalar|corexy`, `--rated-torque-nm`, `--rotor-inertia-kgm2`,

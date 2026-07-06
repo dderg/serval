@@ -106,10 +106,10 @@ class ServoCapture:
         return servo_rails
 
     cmd_SERVO_CAPTURE_START_help = (
-        "Start a servo telemetry capture (1 kHz). Target the drive with AXIS= "
-        "or SERVO= (motor name; comma list captures several drives on one "
-        "node). Wrap test moves and finish with M400 before "
-        "SERVO_CAPTURE_STOP."
+        "Start a servo telemetry capture at the node's DC sync rate. Target "
+        "the drive with AXIS= or SERVO= (motor name; comma list captures "
+        "several drives on one node). Wrap test moves and finish with M400 "
+        "before SERVO_CAPTURE_STOP."
     )
 
     def cmd_SERVO_CAPTURE_START(self, gcmd):
@@ -163,10 +163,17 @@ class ServoCapture:
                 "Servo capture FAILED (endpoint code %d, overflow_cycle=%s); "
                 "partial data in %s" % (result, overflow_cycle, failed)
             )
+        cycle_us = node.get_cycle_us()
+        sample_rate_hz = 1_000_000.0 / cycle_us
         gcmd.respond_info(
             "Servo capture stopped: %s\n"
-            "samples=%d (%.2f s at the 1 kHz DC cycle)"
-            % (path, samples, samples / 1000.0)
+            "samples=%d (%.2f s at the %.1f kHz DC cycle)"
+            % (
+                path,
+                samples,
+                samples * cycle_us / 1_000_000.0,
+                sample_rate_hz / 1000.0,
+            )
         )
 
 

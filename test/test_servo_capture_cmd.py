@@ -23,6 +23,9 @@ class FakeNode:
     def get_slot_for_motor(self, motor_name):
         return self._slots.get(motor_name)
 
+    def get_cycle_us(self):
+        return 250
+
 
 class FakeEngine:
     def __init__(self, stop_result=(0, 1234, None)):

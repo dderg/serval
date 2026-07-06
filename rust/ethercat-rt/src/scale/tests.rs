@@ -64,8 +64,8 @@ fn mm_to_counts_inverts_reporting_scale() {
 }
 
 #[test]
-fn velocity_mm_s_rpm_to_mm_per_s() {
-    assert!((velocity_mm_s(600, 40.0) - 400.0).abs() < 1e-9);
-    assert_eq!(velocity_mm_s(0, 40.0), 0.0);
-    assert!((velocity_mm_s(-600, 40.0) - (-400.0)).abs() < 1e-9);
+fn velocity_mm_s_counts_per_s_to_mm_per_s() {
+    assert!((velocity_mm_s(983_040, 3276.8) - 300.0).abs() < 1e-9);
+    assert_eq!(velocity_mm_s(0, 3276.8), 0.0);
+    assert!((velocity_mm_s(983_040, -3276.8) - (-300.0)).abs() < 1e-9);
 }

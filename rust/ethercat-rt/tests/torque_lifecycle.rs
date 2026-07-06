@@ -3,7 +3,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ethercat_rt::stream_halt::{ERR_PIECES_WHILE_HALTED, ERR_RESUME_STREAM_NOT_HALTED};
-use ethercat_rt::torque::ERR_PIECES_WHILE_FAULTED;
+use ethercat_rt::torque::{ERR_BAD_TORQUE_STATE, ERR_PIECES_WHILE_FAULTED};
 use host_rt::mcu_call::McuCall;
 use host_rt::mcu_serial_conn::McuSerialConn;
 use mcu_protocol::codec::{Cursor, Decode, Encode};
@@ -252,21 +252,6 @@ fn disable_in_past_executes_immediately() {
 }
 
 #[test]
-fn disable_while_parked_rejects_and_exits() {
-    let (mut guard, conn, path) = spawn_and_claim("tq-dis-park", &[]);
-
-    let result = set_torque(&conn, false, now_ns() + 200_000_000);
-    assert_eq!(
-        result, -312,
-        "disable while parked must return -312, got {result}"
-    );
-
-    let mut child = guard.defuse();
-    wait_for_exit(&mut child, Instant::now() + Duration::from_secs(4));
-    let _ = std::fs::remove_file(&path);
-}
-
-#[test]
 fn reenable_with_pending_disable_cancels_it() {
     let (mut guard, conn, path) = spawn_and_claim("tq-cancel", &[]);
 
@@ -464,7 +449,7 @@ fn resume_stream_without_halt_is_rejected() {
 }
 
 #[test]
-fn stop_discards_queued_pieces() {
+fn stop_discards_queued_pieces_and_keeps_torque() {
     let (mut guard, conn, path) = spawn_and_claim("stop-discard", &[]);
 
     let r = set_torque(&conn, true, now_ns() + 50_000_000);
@@ -475,16 +460,36 @@ fn stop_discards_queued_pieces() {
     let (result, _clock) = send_stop(&conn);
     assert_eq!(result, 0, "Stop mid-stream must return 0, got {result}");
 
-    let r = set_torque(&conn, false, now_ns() + 200_000_000);
-    assert_eq!(r, 0, "scheduling disable after Stop must return 0, got {r}");
-
     thread::sleep(Duration::from_millis(400));
 
     let r = set_torque(&conn, true, now_ns() + 50_000_000);
     assert_eq!(
+        r, ERR_BAD_TORQUE_STATE,
+        "re-enable after Stop must reject as already-enabled — Stop must leave \
+         torque on so the homing retract that follows it can move, got {r}"
+    );
+
+    drop(conn);
+    let _ = guard.defuse().wait();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn disable_while_parked_is_idempotent() {
+    let (mut guard, conn, path) = spawn_and_claim("disable-parked", &[]);
+
+    let r = set_torque(&conn, false, 0);
+    assert_eq!(
         r, 0,
-        "re-enable must return 0 — nonzero means pieces survived Stop \
-         and the scheduled disable faulted, got {r}"
+        "disable with torque already off must be a no-op, got {r}"
+    );
+
+    thread::sleep(Duration::from_millis(200));
+
+    let r = set_torque(&conn, true, now_ns() + 50_000_000);
+    assert_eq!(
+        r, 0,
+        "enable after idempotent disable must return 0, got {r}"
     );
 
     drop(conn);

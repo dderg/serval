@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Analyze a servo telemetry capture (.scap) produced by SERVO_CAPTURE_START.
 
-Prints following-error, overshoot/settling, and torque-saturation metrics;
---fft prints resonance peaks (notch-filter candidates); --plot opens a
-time-series dashboard.
+Prints per-drive following-error, overshoot/settling, and torque-saturation
+metrics; --fft prints resonance peaks (notch-filter candidates); --plot opens a
+time-series dashboard and --png saves one; --combine-corexy A,B with --axis adds
+the CoreXY combined on-axis (A+B)/2 and cross-axis (A-B)/2 tracking traces.
 """
 
 import argparse
@@ -129,6 +130,51 @@ def _settle_index(err, band, hold):
     return int(ok[0]) if len(ok) else None
 
 
+def _longest_true_run(mask):
+    if not mask.any():
+        return 0
+    idx = np.flatnonzero(mask)
+    splits = np.flatnonzero(np.diff(idx) > 1)
+    bounds = np.concatenate(([-1], splits, [len(idx) - 1]))
+    return int(np.max(np.diff(bounds)))
+
+
+def torque_summary(data, torque_limit, fs):
+    """Peak torque and rail detection over the moving samples. The rail is the
+    band within 3% of the observed absolute peak; it counts as a rail only when
+    that peak clears torque_limit (per-mille of rated)."""
+    torque = np.abs(data["torque_actual"].astype(np.int64))
+    ms_per_sample = 1000.0 / fs
+    moving = (data["flags"] & FLAG_MOTION_ACTIVE) != 0
+    moving_n = int(np.count_nonzero(moving))
+    peak = int(torque.max()) if len(torque) else 0
+    summary = {
+        "peak": peak,
+        "peak_pct_rated": peak / 10.0,
+        "moving_samples": moving_n,
+        "rail_detected": False,
+        "rail_level": 0,
+        "rail_samples": 0,
+        "rail_pct_moving": 0.0,
+        "rail_ms": 0.0,
+        "longest_burst_ms": 0.0,
+    }
+    if peak <= torque_limit or moving_n == 0:
+        return summary
+    rail_level = int(round(peak * 0.97))
+    on_rail = (torque >= rail_level) & moving
+    rail_samples = int(np.count_nonzero(on_rail))
+    summary.update(
+        rail_detected=True,
+        rail_level=rail_level,
+        rail_samples=rail_samples,
+        rail_pct_moving=100.0 * rail_samples / moving_n,
+        rail_ms=rail_samples * ms_per_sample,
+        longest_burst_ms=_longest_true_run(on_rail) * ms_per_sample,
+    )
+    return summary
+
+
 def compute_metrics(data, settle_band, torque_limit, fs=1000.0):
     if not len(data):
         raise SystemExit("capture contains no records")
@@ -173,6 +219,7 @@ def compute_metrics(data, settle_band, torque_limit, fs=1000.0):
         "torque_saturation_pct": float(
             100.0 * np.count_nonzero(torque >= torque_limit) / max(len(data), 1)
         ),
+        "torque": torque_summary(data, torque_limit, fs),
         "ferr_crosscheck_max": int(
             np.max(np.abs(recomputed - ferr.astype(np.int64)))
         ),
@@ -231,10 +278,27 @@ def top_peaks(freqs, psd, count=5):
 
 def _print_metrics(m, counts_per_mm):
     print("capture: %d samples, %d move(s)" % (m["samples"], len(m["moves"])))
-    print(
-        "torque saturation: %.1f%% of samples at/above limit"
-        % (m["torque_saturation_pct"],)
-    )
+    tq = m["torque"]
+    if tq["rail_detected"]:
+        print(
+            "torque: peak %d per-mille (%.0f%% rated); >=%d per-mille for "
+            "%.1f%% of moving samples (%d samples, %.0f ms; longest burst "
+            "%.0f ms)"
+            % (
+                tq["peak"],
+                tq["peak_pct_rated"],
+                tq["rail_level"],
+                tq["rail_pct_moving"],
+                tq["rail_samples"],
+                tq["rail_ms"],
+                tq["longest_burst_ms"],
+            )
+        )
+    else:
+        print(
+            "torque: no rail detected (peak %d per-mille, %.0f%% rated)"
+            % (tq["peak"], tq["peak_pct_rated"])
+        )
     print(
         "drive-vs-recomputed following error: max delta %d counts"
         % (m["ferr_crosscheck_max"],)
@@ -319,6 +383,333 @@ def export_ident_csv(path, header, drive_datas):
     )
 
 
+def combine_corexy(a, b):
+    """CoreXY motor->axis mix (COREXY_MOTOR_TO_AXIS): X=(A+B)/2, Y=(A-B)/2."""
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    return 0.5 * (a + b), 0.5 * (a - b)
+
+
+def _drive_view(drive_datas, name):
+    for idx, dname, data in drive_datas:
+        if dname == name:
+            return idx, data
+    raise SystemExit(
+        "--combine-corexy motor %r not in capture (have: %s)"
+        % (name, ", ".join(d[1] for d in drive_datas))
+    )
+
+
+def _parse_combine_spec(spec):
+    """Parse `name[:sign],name[:sign]`; sign is -1 for a motor whose servo
+    invert_direction flips its encoder counts out of the kinematic frame."""
+    terms = []
+    for tok in spec.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        name, _, sign = tok.partition(":")
+        terms.append((name.strip(), int(sign) if sign else 1))
+    return terms
+
+
+def compute_corexy_combine(header, drive_datas, spec, axis):
+    terms = _parse_combine_spec(spec)
+    if len(terms) != 2:
+        raise SystemExit(
+            "--combine-corexy needs exactly two motor names (got %r)" % (spec,)
+        )
+    (name_a, sign_a), (name_b, sign_b) = terms
+    a_idx, a_data = _drive_view(drive_datas, name_a)
+    b_idx, b_data = _drive_view(drive_datas, name_b)
+    cpm_a = header["drives"][a_idx]["counts_per_mm"]
+    cpm_b = header["drives"][b_idx]["counts_per_mm"]
+
+    def axis_mm(field):
+        a = sign_a * a_data[field].astype(np.float64) / cpm_a
+        b = sign_b * b_data[field].astype(np.float64) / cpm_b
+        return combine_corexy(a, b)
+
+    x_ferr, y_ferr = axis_mm("following_error")
+    x_act, y_act = axis_mm("position_actual")
+    x_tgt, y_tgt = axis_mm("target_counts")
+    axis = (axis or "X").upper()
+    if axis == "Y":
+        on_ferr, cross_ferr = y_ferr, x_ferr
+        on_act, cross_act = y_act, x_act
+        on_tgt, cross_tgt = y_tgt, x_tgt
+        on_label, cross_label = "Y", "X"
+    else:
+        on_ferr, cross_ferr = x_ferr, y_ferr
+        on_act, cross_act = x_act, y_act
+        on_tgt, cross_tgt = x_tgt, y_tgt
+        on_label, cross_label = "X", "Y"
+    return {
+        "axis": axis,
+        "on_label": on_label,
+        "cross_label": cross_label,
+        "motors": (name_a, name_b),
+        "on_ferr": on_ferr,
+        "cross_ferr": cross_ferr,
+        "on_actual": on_act,
+        "on_target": on_tgt,
+        "cross_actual": cross_act,
+        "cross_target": cross_tgt,
+        "moving": (a_data["flags"] & FLAG_MOTION_ACTIVE) != 0,
+        "segs": motion_segments(a_data["flags"]),
+    }
+
+
+def round_trip_windows(segs, n):
+    """One window per out-and-back round trip: a forward move paired with the
+    reverse move that follows it, plus the dwells. From the start of each even
+    moving segment to the start of the next round trip (or end of capture)."""
+    if not segs:
+        return []
+    starts = [segs[i][0] for i in range(0, len(segs), 2)]
+    bounds = starts + [n]
+    return [(bounds[i], bounds[i + 1]) for i in range(len(starts))]
+
+
+def _print_combine(c):
+    moving = c["moving"]
+    on = c["on_ferr"][moving] if moving.any() else c["on_ferr"]
+    cross = c["cross_ferr"][moving] if moving.any() else c["cross_ferr"]
+    print(
+        "combined %s-axis following error: peak %.4f mm, rms %.4f mm "
+        "(motors %s+%s)"
+        % (
+            c["on_label"],
+            float(np.max(np.abs(on))),
+            float(np.sqrt(np.mean(on**2))),
+            c["motors"][0],
+            c["motors"][1],
+        )
+    )
+    print(
+        "cross-axis (%s) motor-skew error: peak %.4f mm"
+        % (c["cross_label"], float(np.max(np.abs(cross))))
+    )
+
+
+def _shade_moving(ax, t, moving):
+    ax.fill_between(
+        t, *ax.get_ylim(), where=moving, alpha=0.08, color="tab:blue"
+    )
+
+
+def _figure_single(plt, header, data, fs, drive_idx):
+    t = np.arange(len(data)) / fs
+    fig, axes = plt.subplots(3, 1, sharex=True, figsize=(12, 8))
+    axes[0].plot(t, data["position_actual"], label="actual (6064h)")
+    axes[0].plot(
+        t,
+        data["target_counts"],
+        label="host target (607Ah)",
+        linestyle="--",
+        alpha=0.6,
+    )
+    axes[0].set_ylabel("counts")
+    axes[0].legend(loc="upper right")
+    axes[1].plot(t, data["following_error"], color="tab:red")
+    axes[1].set_ylabel("following error (counts)")
+    axes[2].plot(t, data["torque_actual"], color="tab:green")
+    axes[2].set_ylabel("torque (per-mille)")
+    axes[2].set_xlabel("time (s)")
+    moving = (data["flags"] & FLAG_MOTION_ACTIVE) != 0
+    for ax in axes:
+        _shade_moving(ax, t, moving)
+    fig.suptitle(
+        header["drives"][drive_idx]["name"] + " — " + header["started_utc"]
+    )
+    fig.tight_layout()
+    return fig
+
+
+def _figure_multi(plt, header, drive_datas, fs):
+    first = drive_datas[0][2]
+    t = np.arange(len(first)) / fs
+    fig, axes = plt.subplots(3, 1, sharex=True, figsize=(12, 9))
+    for _, name, data in drive_datas:
+        axes[0].plot(t, data["position_actual"], lw=0.8, label=name)
+        axes[1].plot(t, data["following_error"], lw=0.8, label=name)
+        axes[2].plot(t, data["torque_actual"], lw=0.8, label=name)
+    axes[0].set_ylabel("position actual (counts)")
+    axes[1].set_ylabel("following error (counts)")
+    axes[2].set_ylabel("torque (per-mille)")
+    axes[2].set_xlabel("time (s)")
+    moving = (first["flags"] & FLAG_MOTION_ACTIVE) != 0
+    for ax in axes:
+        ax.legend(loc="upper right", fontsize=8)
+        _shade_moving(ax, t, moving)
+    fig.suptitle("per-motor tracking — " + header["started_utc"])
+    fig.tight_layout()
+    return fig
+
+
+MOTOR_COLORS = ("tab:green", "tab:purple")
+
+
+def _trip_colors(plt, count):
+    return plt.cm.viridis(np.linspace(0.0, 0.85, max(count, 1)))
+
+
+def _overlay(ax, y, windows, fs, colors):
+    for (ws, we), col in zip(windows, colors):
+        tt = np.arange(we - ws) / fs
+        ax.plot(tt, y[ws:we], color=col, lw=0.8, alpha=0.85)
+
+
+def _trip_legend(plt, ax, colors):
+    ax.legend(
+        handles=[
+            plt.Line2D([], [], color=col, label="trip %d" % (i + 1))
+            for i, col in enumerate(colors)
+        ],
+        loc="upper right",
+        fontsize=7,
+        ncol=1 if len(colors) <= 6 else 2,
+    )
+
+
+def _figure_combined(plt, header, drive_datas, fs, c):
+    n = len(drive_datas[0][2])
+    t = np.arange(n) / fs
+    windows = round_trip_windows(c["segs"], n)
+    trip_colors = _trip_colors(plt, len(windows))
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
+
+    on_ax = axes[0, 0]
+    _overlay(on_ax, c["on_ferr"], windows, fs, trip_colors)
+    on_ax.axhline(0, color="k", lw=0.5, alpha=0.3)
+    on_ax.set_xlabel("s into round trip")
+    on_ax.set_ylabel("following error (mm)")
+    on_ax.set_title(
+        "On-axis (%s) tracking error — round trips overlaid" % c["on_label"]
+    )
+    _trip_legend(plt, on_ax, trip_colors)
+
+    cross_ax = axes[0, 1]
+    _overlay(cross_ax, c["cross_ferr"], windows, fs, trip_colors)
+    cross_ax.axhline(0, color="k", lw=0.5, alpha=0.3)
+    cross_ax.set_xlabel("s into round trip")
+    cross_ax.set_ylabel("following error (mm)")
+    cross_ax.set_title(
+        "Cross-axis (%s, want ~0) skew — round trips overlaid"
+        % c["cross_label"]
+    )
+    _trip_legend(plt, cross_ax, trip_colors)
+
+    tq_ax = axes[1, 0]
+    for (_, name, data), col in zip(drive_datas, MOTOR_COLORS):
+        for ws, we in windows:
+            tt = np.arange(we - ws) / fs
+            tq_ax.plot(
+                tt, data["torque_actual"][ws:we], color=col, lw=0.6, alpha=0.5
+            )
+    tq_ax.set_xlabel("s into round trip")
+    tq_ax.set_ylabel("torque (per-mille)")
+    tq_ax.set_title("Per-motor torque — round trips overlaid")
+    tq_ax.legend(
+        handles=[
+            plt.Line2D([], [], color=col, label=name)
+            for (_, name, _), col in zip(drive_datas, MOTOR_COLORS)
+        ],
+        loc="upper right",
+        fontsize=8,
+    )
+
+    pos_ax = axes[1, 1]
+    pos_ax.plot(
+        t,
+        c["on_actual"],
+        color="tab:blue",
+        lw=0.8,
+        label="%s actual" % c["on_label"],
+    )
+    pos_ax.plot(
+        t,
+        c["on_target"],
+        color="tab:gray",
+        ls="--",
+        lw=0.8,
+        label="%s target" % c["on_label"],
+    )
+    pos_ax.set_ylabel("%s position (mm)" % c["on_label"], color="tab:blue")
+    pos_ax.set_xlabel("time (s)")
+    pos_ax.set_title(
+        "Axis position — moving %s vs stationary %s"
+        % (c["on_label"], c["cross_label"])
+    )
+    _shade_moving(pos_ax, t, c["moving"])
+    stat_ax = pos_ax.twinx()
+    stat_ax.plot(
+        t,
+        c["cross_actual"],
+        color="tab:orange",
+        lw=0.8,
+        label="%s actual (stationary)" % c["cross_label"],
+    )
+    stat_ax.set_ylabel(
+        "%s position (mm)" % c["cross_label"], color="tab:orange"
+    )
+    lines, labels = pos_ax.get_legend_handles_labels()
+    lines2, labels2 = stat_ax.get_legend_handles_labels()
+    pos_ax.legend(
+        lines + lines2, labels + labels2, loc="upper right", fontsize=7
+    )
+
+    fig.suptitle(
+        "%s-axis tracking (motors %s+%s) — %s"
+        % (c["axis"], c["motors"][0], c["motors"][1], header["started_utc"])
+    )
+    fig.tight_layout()
+    return fig
+
+
+def build_tracking_figure(header, drive_datas, fs, combine=None):
+    import matplotlib.pyplot as plt
+
+    if combine is not None:
+        return _figure_combined(plt, header, drive_datas, fs, combine)
+    if len(drive_datas) > 1:
+        return _figure_multi(plt, header, drive_datas, fs)
+    idx, _, data = drive_datas[0]
+    return _figure_single(plt, header, data, fs, idx)
+
+
+def _png_path(capture_path, plot_out, plot_dir):
+    if plot_out:
+        out = os.path.expanduser(plot_out)
+    else:
+        base = os.path.splitext(os.path.basename(capture_path))[0]
+        out = os.path.join(os.path.expanduser(plot_dir), base + ".png")
+    parent = os.path.dirname(out)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    return out
+
+
+def save_tracking_png(header, drive_datas, fs, combine, out_path):
+    import matplotlib
+
+    matplotlib.use("Agg")
+    fig = build_tracking_figure(header, drive_datas, fs, combine)
+    fig.savefig(out_path, dpi=110)
+
+
+def _load_all_drives(capture_path, only_drive):
+    header, _, _ = load_capture(capture_path, only_drive)
+    names = (
+        [only_drive] if only_drive else [d["name"] for d in header["drives"]]
+    )
+    drive_datas = []
+    for name in names:
+        _, data, idx = load_capture(capture_path, name)
+        drive_datas.append((idx, name, data))
+    return header, drive_datas
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("capture", nargs="?", help="path to a .scap capture file")
@@ -332,8 +723,8 @@ def main(argv=None):
     )
     p.add_argument(
         "--drive",
-        help="drive name to analyze in a multi-drive capture "
-        "(default: the first drive in the file)",
+        help="restrict analysis to one drive in a multi-drive capture "
+        "(default: every drive in the file)",
     )
     p.add_argument(
         "--settle-band",
@@ -358,6 +749,31 @@ def main(argv=None):
         help="show a time-series dashboard (requires matplotlib)",
     )
     p.add_argument(
+        "--png",
+        action="store_true",
+        help="render and save a tracking dashboard PNG (headless)",
+    )
+    p.add_argument(
+        "--plot-dir",
+        default="~/printer_data/config/servo_calibrate_results",
+        help="directory for the --png output",
+    )
+    p.add_argument(
+        "--plot-out",
+        metavar="PATH",
+        help="explicit PNG path (overrides --plot-dir); implies --png",
+    )
+    p.add_argument(
+        "--combine-corexy",
+        metavar="A,B",
+        help="two motor names; adds CoreXY combined (A+B)/2 on-axis and "
+        "(A-B)/2 cross-axis traces",
+    )
+    p.add_argument(
+        "--axis",
+        help="axis being measured (X/Y), selects the on-axis for --combine-corexy",
+    )
+    p.add_argument(
         "--csv",
         metavar="PATH",
         help="export t/target/torque in servo-ident's CSV contract "
@@ -370,59 +786,45 @@ def main(argv=None):
         args.captures_dir, args.name
     )
 
-    header, data, drive_idx = load_capture(capture_path, args.drive)
-    fs = 1e9 / header["cycle_ns"]
-    counts_per_mm = header["drives"][drive_idx]["counts_per_mm"]
-
     if args.csv:
+        header, data, drive_idx = load_capture(capture_path, args.drive)
         export_ident_csv(args.csv, header, [(drive_idx, data)])
         return 0
 
-    print("file: %s" % (capture_path,))
-    m = compute_metrics(data, args.settle_band, args.torque_limit, fs=fs)
-    _print_metrics(m, counts_per_mm)
+    header, drive_datas = _load_all_drives(capture_path, args.drive)
+    fs = 1e9 / header["cycle_ns"]
 
-    if args.fft:
-        freqs, psd = moving_psd(data, motion_segments(data["flags"]), fs)
-        print("resonance peaks (notch-filter candidates):")
-        for f_hz, power in top_peaks(freqs, psd):
-            print("  %7.1f Hz  power %.3e" % (f_hz, power))
+    print("file: %s" % (capture_path,))
+    for idx, name, data in drive_datas:
+        if len(drive_datas) > 1:
+            print("drive: %s" % (name,))
+        counts_per_mm = header["drives"][idx]["counts_per_mm"]
+        m = compute_metrics(data, args.settle_band, args.torque_limit, fs=fs)
+        _print_metrics(m, counts_per_mm)
+        if args.fft:
+            freqs, psd = moving_psd(data, motion_segments(data["flags"]), fs)
+            print("resonance peaks (notch-filter candidates):")
+            for f_hz, power in top_peaks(freqs, psd):
+                print("  %7.1f Hz  power %.3e" % (f_hz, power))
+
+    combine = None
+    if args.combine_corexy:
+        combine = compute_corexy_combine(
+            header, drive_datas, args.combine_corexy, args.axis
+        )
+        _print_combine(combine)
+
+    if args.png or args.plot_out:
+        out_path = _png_path(capture_path, args.plot_out, args.plot_dir)
+        save_tracking_png(header, drive_datas, fs, combine, out_path)
+        print("report: %s" % (out_path,))
 
     if args.plot:
-        _plot(header, data, fs, drive_idx)
+        import matplotlib.pyplot as plt
+
+        build_tracking_figure(header, drive_datas, fs, combine)
+        plt.show()
     return 0
-
-
-def _plot(header, data, fs, drive_idx=0):
-    import matplotlib.pyplot as plt
-
-    t = np.arange(len(data)) / fs
-    fig, axes = plt.subplots(3, 1, sharex=True, figsize=(12, 8))
-    axes[0].plot(t, data["position_demand"], label="demand (6062h)")
-    axes[0].plot(t, data["position_actual"], label="actual (6064h)")
-    axes[0].plot(
-        t,
-        data["target_counts"],
-        label="host target (607Ah)",
-        linestyle="--",
-        alpha=0.6,
-    )
-    axes[0].set_ylabel("counts")
-    axes[0].legend(loc="upper right")
-    axes[1].plot(t, data["following_error"], color="tab:red")
-    axes[1].set_ylabel("following error (counts)")
-    axes[2].plot(t, data["torque_actual"], color="tab:green")
-    axes[2].set_ylabel("torque (per-mille)")
-    axes[2].set_xlabel("time (s)")
-    moving = (data["flags"] & FLAG_MOTION_ACTIVE) != 0
-    for ax in axes:
-        ax.fill_between(
-            t, *ax.get_ylim(), where=moving, alpha=0.08, color="tab:blue"
-        )
-    fig.suptitle(
-        header["drives"][drive_idx]["name"] + " — " + header["started_utc"]
-    )
-    plt.show()
 
 
 if __name__ == "__main__":

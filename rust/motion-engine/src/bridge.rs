@@ -273,13 +273,14 @@ impl PyMotionEngine {
         Ok(raw)
     }
 
-    #[pyo3(signature = (label, socket_path, interface, endpoint_binary, dynamics_profile, drives))]
+    #[pyo3(signature = (label, socket_path, interface, endpoint_binary, cycle_us, dynamics_profile, drives))]
     fn claim_ethercat_node(
         &self,
         label: &str,
         socket_path: &str,
         interface: &str,
         endpoint_binary: &str,
+        cycle_us: u32,
         dynamics_profile: Option<String>,
         drives: Vec<EthercatDrive>,
     ) -> PyResult<u32> {
@@ -309,6 +310,7 @@ impl PyMotionEngine {
             endpoint_binary,
             interface,
             socket_path,
+            cycle_us,
             dynamics_profile.as_deref(),
             events_dir.as_deref(),
             &drives,

@@ -34,6 +34,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from servo_gain_report import (  # noqa: E402
     RESONANCE_BAND_HZ,
+    resonance_zoom_panel,
     step_metrics,
 )
 
@@ -104,14 +105,15 @@ def render(steps, out_path):
                 lw=1.0,
                 label=label,
             )
-            seg = dm["cruise_ferr"][:1500]
-            time_ax.plot(
-                np.arange(len(seg)) / 1000.0,
-                seg * 1000.0,
-                color=color,
-                ls=ls,
-                lw=0.7,
-            )
+            for w, window in enumerate(dm["stop_windows"]):
+                time_ax.plot(
+                    np.arange(len(window)) / dm["fs"] - dm["stop_lookback_s"],
+                    window * 1000.0,
+                    color=color,
+                    ls=ls,
+                    lw=0.7,
+                    label=label if w == 0 else None,
+                )
     spec_ax.axvspan(*RESONANCE_BAND_HZ, alpha=0.06, color="red")
     spec_ax.set_xlabel("Hz")
     spec_ax.set_ylabel("ferr amplitude (um)")
@@ -120,12 +122,13 @@ def render(steps, out_path):
     )
     spec_ax.legend(fontsize=8)
     spec_ax.grid(True, which="both", alpha=0.3)
-    time_ax.set_xlabel("s into cruise")
-    time_ax.set_ylabel("ferr (mm)")
-    time_ax.set_title("Cruise following error, time domain")
+    time_ax.axvline(0.0, color="k", lw=0.8, alpha=0.5)
+    time_ax.set_xlabel("s relative to stop")
+    time_ax.set_ylabel("ferr toward endpoint (um)")
+    time_ax.set_title("Following error around each stop (decel edges overlaid)")
     time_ax.grid(alpha=0.3)
 
-    curve_ax, table_ax = axes[1]
+    curve_ax, zoom_ax = axes[1]
     ratios = [r for r, _ in steps]
     for key, label, scale in (
         ("overshoot_max_um", "overshoot max (um)", 1.0),
@@ -144,35 +147,7 @@ def render(steps, out_path):
     curve_ax.legend(fontsize=8)
     curve_ax.grid(alpha=0.3)
 
-    table_ax.axis("off")
-    rows = [
-        [
-            "%d" % ratio,
-            "%.1f" % m["lag_ms"],
-            "%.0f" % m["ferr_std_um"],
-            "%.0f" % m["low_band_um"],
-            "%.0f @ %.0fHz" % (m["res_peak_um"], m["res_peak_hz"]),
-            "%.0f" % m["overshoot_max_um"],
-            "YES" if m["resonant"] else "no",
-        ]
-        for ratio, m in steps
-    ]
-    table = table_ax.table(
-        cellText=rows,
-        colLabels=[
-            "ratio %",
-            "lag ms",
-            "err um",
-            "low um",
-            "res peak",
-            "ovsh um",
-            "resonant",
-        ],
-        loc="center",
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(8)
-    table_ax.set_title("C00.06 % / um / ms", fontsize=9)
+    resonance_zoom_panel(zoom_ax, steps, colors, linestyles)
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=110)

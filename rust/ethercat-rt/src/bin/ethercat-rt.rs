@@ -52,11 +52,12 @@ static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
 /// preempts the master's receive busy-poll.
 const MAILBOX_RT_PRIO: i32 = 40;
 
-/// A commanded target stepping more than this many mm in one DC cycle is
-/// physically impossible for these axes (2 mm/cycle at 1 kHz is 2 m/s) — it is a
-/// trajectory discontinuity, the signature the drive latches as Er87.1. Log the
-/// offending command so the jump is visible the cycle it happens, not inferred.
-const TARGET_JUMP_LOG_MM: f64 = 2.0;
+/// A commanded target moving faster than this (2 m/s) is physically impossible
+/// for these axes — a trajectory discontinuity, the signature the drive latches
+/// as Er87.1. Scaled by the cycle time into a per-cycle count bound so it means
+/// the same velocity at any DC rate. Log the offending command so the jump is
+/// visible the cycle it happens, not inferred.
+const TARGET_JUMP_LOG_MM_S: f64 = 2000.0;
 
 extern "C" fn on_sigterm(_: libc::c_int) {
     SIGTERM_RECEIVED.store(true, Ordering::Release);
@@ -160,7 +161,7 @@ fn main() {
     }
     let cycle_us: i64 = arg_val(&args, "--cycle-us")
         .and_then(|s| s.parse().ok())
-        .unwrap_or(1000);
+        .unwrap_or(250);
     let slaves = parse_slaves(&args).unwrap_or_else(|e| {
         eprintln!("ec-rt: bad --slave config: {e}");
         std::process::exit(1);
@@ -251,15 +252,21 @@ fn main() {
     let mut buzz = BuzzOsc::new();
     let mut cmaps: Vec<Option<CountMap>> = (0..num_slaves).map(|_| None).collect();
     let mut last_counts: Vec<Option<i32>> = vec![None; num_slaves];
+    let jump_log_mm = TARGET_JUMP_LOG_MM_S * cycle_us as f64 / 1_000_000.0;
     let jump_log_counts: Vec<i64> = cmd_counts_per_mm
         .iter()
-        .map(|c| (c.abs() * TARGET_JUMP_LOG_MM).round() as i64)
+        .map(|c| (c.abs() * jump_log_mm).round() as i64)
         .collect();
-    // Per-slot report frame: (position_actual counts, host mm) captured at the
-    // homing finalize. Maps the drive's raw encoder counts into the host frame
-    // for QueryMotorState — the drive's own coordinate frame is never touched,
-    // exactly like a stepper's step counter.
+    // Per-slot report frame: (counts, host mm) captured at the homing finalize.
+    // Maps the drive's raw encoder counts into the host frame for
+    // QueryMotorState — the drive's own coordinate frame is never touched,
+    // exactly like a stepper's step counter. The counts side of the pair is the
+    // last COMMANDED target, not position_actual: at finalize the ring is empty
+    // (pieces retired by time) but the servo may still be settling several mm
+    // behind, and anchoring against a lagging actual bakes that transient in as
+    // a permanent report offset.
     let mut report_anchor: Vec<Option<(i32, f64)>> = vec![None; num_slaves];
+    let mut last_streamed_target: Vec<Option<i32>> = vec![None; num_slaves];
     let mut last_sent_retired: u32 = 0;
     let mut heartbeat_sent = false;
 
@@ -772,7 +779,9 @@ fn main() {
                     } else {
                         let anchor_mm = f64::from(home_q16) / 65536.0;
                         let anchor_counts =
-                            unsafe { ffi::ec_rt_get_position_actual(i32::from(slot)) };
+                            last_streamed_target[slot as usize].unwrap_or_else(|| unsafe {
+                                ffi::ec_rt_get_position_actual(i32::from(slot))
+                            });
                         report_anchor[slot as usize] = Some((anchor_counts, anchor_mm));
                         eprintln!(
                             "ec-rt: SeedServoHome slot={slot} report anchor \
@@ -917,7 +926,7 @@ fn main() {
                         .filter_map(|s| {
                             let (anchor_counts, anchor_mm) = report_anchor[s]?;
                             let slot = s as std::os::raw::c_int;
-                            let (pos_counts, vel_rpm) = unsafe {
+                            let (pos_counts, vel_counts_s) = unsafe {
                                 (
                                     ffi::ec_rt_get_position_actual(slot),
                                     ffi::ec_rt_get_velocity_actual(slot),
@@ -925,8 +934,10 @@ fn main() {
                             };
                             let delta_counts = i64::from(pos_counts) - i64::from(anchor_counts);
                             let pos_mm = anchor_mm + delta_counts as f64 / cmd_counts_per_mm[s];
-                            let vel_mm_s = cmd_counts_per_mm[s].signum()
-                                * ethercat_rt::scale::velocity_mm_s(vel_rpm, rotation_distance[s]);
+                            let vel_mm_s = ethercat_rt::scale::velocity_mm_s(
+                                vel_counts_s,
+                                cmd_counts_per_mm[s],
+                            );
                             Some((s as u8, pos_mm, vel_mm_s))
                         })
                         .collect();
@@ -1143,6 +1154,15 @@ fn main() {
                 }
             }
 
+            // The dynamics profile is fitted in the drive frame (the capture
+            // flips each drive's commanded kinematics by its direction sign),
+            // so the model must be evaluated on drive-frame vectors — flipping
+            // only the output torque by the slot's own sign would negate the
+            // off-diagonal coupling terms whenever the drives' inverts differ.
+            let drive_dir = |s: usize| cmd_counts_per_mm.get(s).map_or(1.0, |c| c.signum()) as f32;
+            let (acc_drive, vel_drive): (Vec<f32>, Vec<f32>) = (0..num_slaves)
+                .map(|s| (drive_dir(s) * all_acc[s], drive_dir(s) * all_vel[s]))
+                .unzip();
             for s in 0..num_slaves {
                 let slot = s as std::os::raw::c_int;
                 if let Some(counts) = sp_counts[s] {
@@ -1153,8 +1173,7 @@ fn main() {
                     };
                     let torque_offset = match &dynamics {
                         Some(model) => {
-                            let dir_sign = cmd_counts_per_mm[s].signum() as f32;
-                            let raw = dir_sign * model.torque_ff(s, &all_acc, &all_vel);
+                            let raw = model.torque_ff(s, &acc_drive, &vel_drive);
                             if !raw.is_finite() {
                                 eprintln!(
                                     "ec-rt: FAULT non-finite torque FF on slot {s} \
@@ -1199,6 +1218,7 @@ fn main() {
                         }
                     }
                     last_counts[s] = Some(counts);
+                    last_streamed_target[s] = Some(counts);
                     unsafe {
                         ffi::ec_rt_set_target_position(slot, counts);
                         ffi::ec_rt_set_velocity_offset(slot, vel_offset);

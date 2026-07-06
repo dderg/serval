@@ -74,25 +74,29 @@ def gains_from_name(path):
     return tuple(int(g) for g in m.groups())
 
 
-def cruise_mask(target_mm, t):
-    v = np.gradient(np.convolve(target_mm, np.ones(11) / 11, "same"), t)
+def cruise_mask(target_mm, t, fs):
+    smooth_win = max(3, int(round(0.011 * fs)))
+    v = np.gradient(
+        np.convolve(target_mm, np.ones(smooth_win) / smooth_win, "same"), t
+    )
     speed = np.abs(v)
     moving = speed > 5.0
     if not moving.any():
         raise SystemExit("capture has no motion")
     vnom = np.percentile(speed[moving], 90)
     mask = np.abs(speed - vnom) < max(2.0, 0.02 * vnom)
-    m = mask & np.roll(mask, 50) & np.roll(mask, -50)
+    guard = int(round(0.05 * fs))
+    m = mask & np.roll(mask, guard) & np.roll(mask, -guard)
     return m, vnom, v
 
 
-def amplitude_spectrum(x):
+def amplitude_spectrum(x, fs):
     seg = np.asarray(x, dtype=np.float64)
     seg = seg - seg.mean()
     n = min(len(seg), 16384)
     seg = seg[:n] * np.hanning(n)
     spectrum = np.abs(np.fft.rfft(seg)) / n * 2.0
-    freqs = np.fft.rfftfreq(n, 1e-3)
+    freqs = np.fft.rfftfreq(n, 1.0 / fs)
     return freqs, spectrum
 
 
@@ -153,15 +157,16 @@ def drive_metrics(path, drive):
     header, data, drive_idx = load_capture(path, drive)
     cpm = header["drives"][drive_idx]["counts_per_mm"]
     n = len(data)
-    t = np.arange(n) / 1000.0
+    fs = 1e9 / header["cycle_ns"]
+    t = np.arange(n) / fs
     target = data["target_counts"].astype(np.float64) / cpm
     actual = data["position_actual"].astype(np.float64) / cpm
     ferr = data["following_error"].astype(np.float64) / cpm
 
-    m, vnom, vt = cruise_mask(target, t)
+    m, vnom, vt = cruise_mask(target, t, fs)
     if m.sum() < 1024:
         raise SystemExit("%s: not enough cruise samples" % (path,))
-    freqs, spectrum = amplitude_spectrum(ferr[m])
+    freqs, spectrum = amplitude_spectrum(ferr[m], fs)
     low_amp, low_hz = band_peak(freqs, spectrum, *LOW_BAND_HZ)
     res_ratio, res_hz, res_amp = resonance_protrusion(
         freqs, spectrum, *RESONANCE_BAND_HZ
@@ -170,13 +175,18 @@ def drive_metrics(path, drive):
 
     moving = np.abs(vt) > 5.0
     ends = np.where(moving[:-1] & ~moving[1:])[0]
+    post = int(round(0.4 * fs))
+    settle = int(round(0.05 * fs))
+    lookback = int(round(0.1 * fs))
     overshoots = []
+    stop_windows = []
     for e in ends:
-        if e + 400 >= n or e < 100:
+        if e + post >= n or e < lookback:
             continue
-        endpos = target[e + 50]
-        direction = np.sign(target[e] - target[e - 100])
-        overshoots.append(np.max((actual[e : e + 400] - endpos) * direction))
+        endpos = target[e + settle]
+        direction = np.sign(target[e] - target[e - lookback])
+        overshoots.append(np.max((actual[e : e + post] - endpos) * direction))
+        stop_windows.append(direction * ferr[e - lookback : e + post])
     return {
         "path": path,
         "drive": header["drives"][drive_idx]["name"],
@@ -194,7 +204,52 @@ def drive_metrics(path, drive):
         else 0.0,
         "spectrum": (freqs, spectrum),
         "cruise_ferr": ferr[m],
+        "stop_windows": stop_windows,
+        "stop_lookback_s": lookback / fs,
+        "fs": fs,
     }
+
+
+def resonance_zoom_panel(ax, steps, colors, linestyles):
+    peaks = [
+        (dm["res_peak_hz"], dm["res_peak_um"])
+        for _, met in steps
+        for dm in met["drives"]
+        if dm["res_peak_hz"] > 0
+    ]
+    if not peaks:
+        ax.axis("off")
+        ax.set_title("no resonance peak detected", fontsize=9)
+        return
+    hz = np.array([p[0] for p in peaks])
+    center = float(hz[int(np.argmax([p[1] for p in peaks]))])
+    lo = max(min(hz.min(), center) - 80.0, 10.0)
+    hi = max(hz.max(), center) + 80.0
+    for (_, met), color in zip(steps, colors):
+        for k, dm in enumerate(met["drives"]):
+            freqs, spectrum = dm["spectrum"]
+            band = (freqs >= lo) & (freqs <= hi)
+            ax.plot(
+                freqs[band],
+                spectrum[band] * 1000.0,
+                color=color,
+                ls=linestyles[k % len(linestyles)],
+                lw=0.9,
+            )
+    for peak_hz in sorted(set(np.round(hz, 1))):
+        ax.axvline(peak_hz, color="red", lw=0.8, alpha=0.5)
+        ax.text(
+            peak_hz,
+            ax.get_ylim()[1],
+            " %.1f" % peak_hz,
+            color="red",
+            fontsize=8,
+            va="top",
+        )
+    ax.set_xlabel("Hz")
+    ax.set_ylabel("ferr amplitude (um)")
+    ax.set_title("Resonance zoom, linear frequency (red: detected peaks)")
+    ax.grid(alpha=0.3)
 
 
 def render(steps, out_path):
@@ -226,9 +281,9 @@ def render(steps, out_path):
                 lw=1.0,
                 label=label,
             )
-            seg = dm["cruise_ferr"][:1500]
+            seg = dm["cruise_ferr"][: int(round(1.5 * dm["fs"]))]
             time_ax.plot(
-                np.arange(len(seg)) / 1000.0,
+                np.arange(len(seg)) / dm["fs"],
                 seg * 1000.0,
                 color=color,
                 ls=ls,
@@ -247,7 +302,7 @@ def render(steps, out_path):
     time_ax.set_title("Cruise following error, time domain")
     time_ax.grid(alpha=0.3)
 
-    curve_ax, table_ax = axes[1]
+    curve_ax, zoom_ax = axes[1]
     hz = [g[1] / 10.0 for g, _ in steps]
     for key, label, scale in (
         ("ferr_std_um", "cruise error std (um)", 1.0),
@@ -266,35 +321,7 @@ def render(steps, out_path):
     curve_ax.legend(fontsize=8)
     curve_ax.grid(alpha=0.3)
 
-    table_ax.axis("off")
-    rows = [
-        [
-            "%.0f/%.0f/%.0f" % (g[0] / 10.0, g[1] / 10.0, g[2] / 100.0),
-            "%.1f" % m["lag_ms"],
-            "%.0f" % m["ferr_std_um"],
-            "%.0f" % m["low_band_um"],
-            "%.0f @ %.0fHz" % (m["res_peak_um"], m["res_peak_hz"]),
-            "%.0f" % m["overshoot_max_um"],
-            "YES" if m["resonant"] else "no",
-        ]
-        for g, m in steps
-    ]
-    table = table_ax.table(
-        cellText=rows,
-        colLabels=[
-            "pos/spd/Ti",
-            "lag ms",
-            "err um",
-            "low um",
-            "res peak",
-            "ovsh um",
-            "resonant",
-        ],
-        loc="center",
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(8)
-    table_ax.set_title("rad/s / Hz / ms", fontsize=9)
+    resonance_zoom_panel(zoom_ax, steps, colors, linestyles)
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=110)
