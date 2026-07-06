@@ -50,6 +50,10 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
 .cursor .ch{height:1px;display:none;background:repeating-linear-gradient(to right,rgba(255,255,255,0.35) 0 3px,transparent 3px 6px)}
 .cursor .cdot{width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;background:#e0518a;border:2px solid #14161a;box-sizing:border-box;display:none}
 .panel-label{position:absolute;top:4px;left:8px;font-size:11px;color:#888;pointer-events:none;z-index:2}
+.panel-label .lg{cursor:pointer;pointer-events:auto;padding:0 2px}
+.panel-label .lg:hover{text-decoration:underline}
+.panel-label .lg.off{opacity:0.35;text-decoration:line-through}
+.panel-label .lg.off:hover{text-decoration:line-through underline}
 .tooltip{position:fixed;pointer-events:none;background:rgba(20,22,26,0.92);border:1px solid #3a3d45;border-radius:4px;padding:6px 10px;font-size:12px;font-family:'Courier Prime',monospace;color:#e0e0e0;z-index:100;white-space:pre-line;display:none}
 </style>
 </head>
