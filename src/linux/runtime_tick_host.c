@@ -158,13 +158,13 @@ host_tick_main(void *arg)
             while (q->head != q->tail) {
 #if CONFIG_MCU_SIM
                 uint16_t idx = q->head & (STEP_QUEUE_DEPTH - 1);
-                int8_t dir = q->buf[idx].dir;
+                int8_t signed_step_delta = q->buf[idx].dir;
 #endif
                 q->head++;
 #if CONFIG_MCU_SIM
                 if (sim_notify_step && step_gpio_lines[axis] >= 0)
                     sim_notify_step(0, step_gpio_lines[axis],
-                                    dir ? -1 : 1);
+                                    signed_step_delta);
 #endif
             }
         }

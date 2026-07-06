@@ -1,13 +1,11 @@
 use crate::frame::{FRAME_MIN_LEN_FIELD, FRAME_SYNC, crc16_ccitt};
+use crate::klipper_frame::{
+    MESSAGE_DEST, MESSAGE_MAX, MESSAGE_MIN, MESSAGE_SEQ_MASK, MESSAGE_SYNC, MESSAGE_TRAILER_SIZE,
+};
 
-const KLIPPER_LEN_MIN: u8 = 5;
-const KLIPPER_LEN_MAX: u8 = 64;
-const KLIPPER_INTERFRAME_SYNC: u8 = 0x7E;
-// Must stay in sync with host-rt/src/host_io/wire.rs constants.
-const MESSAGE_DEST: u8 = 0x10;
-const MESSAGE_SEQ_MASK: u8 = 0x0F;
-const MESSAGE_SYNC: u8 = 0x7E;
-const MESSAGE_TRAILER_SIZE: usize = 3;
+const KLIPPER_LEN_MIN: u8 = MESSAGE_MIN as u8;
+const KLIPPER_LEN_MAX: u8 = MESSAGE_MAX as u8;
+const KLIPPER_INTERFRAME_SYNC: u8 = MESSAGE_SYNC;
 
 #[derive(Debug)]
 enum State {

@@ -3,7 +3,7 @@ use std::thread;
 use crossbeam_channel::bounded;
 use trajectory::AxisChainSet;
 
-pub mod fitter;
+pub mod fit_stage;
 pub mod lowerer;
 pub mod lowering;
 pub mod planner;
@@ -11,7 +11,7 @@ pub mod shaper;
 pub mod timing;
 mod types;
 
-pub use fitter::Fitter;
+pub use fit_stage::FitStage;
 pub use lowerer::{advance_odometer, dist3, run_lowerer};
 pub use lowering::{FitTol, LoweringError, lower_move, lower_move_pieces};
 pub use planner::Planner;
@@ -22,7 +22,7 @@ pub use types::{
     jerk_limited_brake_time,
 };
 
-/// Wires the pure stream stages (fitter → planner → lowerer → shaper) into
+/// Wires the pure stream stages (fit stage → planner → lowerer → shaper) into
 /// OS threads. Production goes through `motion_engine::worker::setup_pipeline`,
 /// which wraps these stages with the dispatcher and pump; this stage-only
 /// wiring is also used standalone by offline consumers (seam harness,
@@ -41,8 +41,8 @@ pub fn setup_stages(
 
     let mut chain = config.chain;
     chain.corner.ramp_accel_budget_mm_s2 = config.max_extrude_only_accel_mm_s2;
-    let fitter = Fitter::new(chain);
-    spawn_stage("kalico-fit", move || fitter.run(raw_rx, fitted_tx));
+    let fit_stage = FitStage::new(chain);
+    spawn_stage("kalico-fit", move || fit_stage.run(raw_rx, fitted_tx));
 
     let planner = Planner::new(config);
     spawn_stage("kalico-plan", move || planner.run(fitted_rx, planned_tx));

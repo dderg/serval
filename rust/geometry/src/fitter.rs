@@ -126,7 +126,7 @@ pub enum UnblendReason {
     NoBudget,
     ArcIncident,
     NonSpatial,
-    /// The streaming fitter emitted the upstream move while its input was
+    /// The streaming fit stage emitted the upstream move while its input was
     /// empty, so this junction was cut without a blend: the toolhead must be
     /// at rest across it regardless of what a blend could have achieved.
     StreamCut,
