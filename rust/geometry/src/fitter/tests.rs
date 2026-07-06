@@ -607,15 +607,16 @@ fn disabled_jerk_limiting_never_rejects_ramps_on_its_own() {
 
 #[test]
 fn pressure_advance_amplifies_the_corner_ramp_gate() {
-    // The same corner under the same accel budget: fine without pressure
-    // advance, infeasible once the gain amplifies the ramp's marginal demand
-    // by `k·3·m·v·a`.
+    // The same corner under the same velocity budget: fine without pressure
+    // advance (a ramp adds no commanded velocity on its own), infeasible once
+    // the gain turns the ramp's `m·v²` of extruder acceleration into `k·m·v²`
+    // of commanded velocity.
     let a = seg(1, 3000.0, 5.0, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.5);
     let b = seg(2, 3000.0, 5.0, [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], 0.6);
 
     let gate = |pa: f64| CornerFitConfig {
         ramp_gate: FollowerRampGate {
-            max_accel_mm_s2: 1000.0,
+            max_velocity_mm_s: 5.0,
             pressure_advance_s: pa,
             ..FollowerRampGate::default()
         },

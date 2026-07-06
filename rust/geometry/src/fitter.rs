@@ -81,31 +81,21 @@ impl Default for FollowerRampGate {
 impl FollowerRampGate {
     /// Whether a ramped demand's *additional* extruder load stays within
     /// budget on a piece whose path speed never exceeds `v_cap`. With ratio
-    /// slope `m = dr/ds` and the path at speed `v`, accel `a`, jerk `j`:
-    /// `ė = r·v`, `ë = r·a + m·v²`, `e⃛ = r·j + 3·m·v·a`; pressure advance
-    /// `k` commands `e + k·ė`. The `r`-terms are the load the G-code's own
-    /// constant-ratio flow already commands — not the fitter's to police, and
-    /// with jerk limiting disabled (`j = ∞`) `r·j` is unbounded for every
-    /// extruding move — so the gate charges only the slope's marginal demand:
-    /// `k·m·v²` of commanded velocity, `m·v² + 3·k·m·v·a` of commanded
-    /// acceleration. Both are monotone in `v` and `a`, so the box corner is
-    /// the worst case; constant demands pass unconditionally.
-    fn admits(
-        &self,
-        demand: &FollowerDemand,
-        len: f64,
-        v_cap: f64,
-        limits: VelocityLimits,
-    ) -> bool {
+    /// slope `m = dr/ds` and the path at speed `v`: `ė = r·v`,
+    /// `ë = r·a + m·v²`. The `r`-terms are the load the G-code's own
+    /// constant-ratio flow already commands — not the fitter's to police — so
+    /// the gate charges only the slope's marginal demand: `m·v²` of extruder
+    /// acceleration, and under pressure advance (which commands `e + k·ė`)
+    /// the `k·m·v²` of commanded velocity that acceleration turns into. Both
+    /// are monotone in `v`, so `v_cap` is the worst case; constant demands
+    /// pass unconditionally.
+    fn admits(&self, demand: &FollowerDemand, len: f64, v_cap: f64) -> bool {
         let m = demand.ratio_slope(len).abs();
         if m == 0.0 {
             return true;
         }
-        let v = v_cap;
-        let a = limits.accel_mm_s2;
-        let k = self.pressure_advance_s;
-        let extra_vel = k * m * v * v;
-        let extra_acc = m * v * v + 3.0 * k * m * v * a;
+        let extra_acc = m * v_cap * v_cap;
+        let extra_vel = self.pressure_advance_s * extra_acc;
         extra_vel <= self.max_velocity_mm_s && extra_acc <= self.max_accel_mm_s2
     }
 }
@@ -132,7 +122,7 @@ pub(crate) fn ramps_admitted(
 ) -> bool {
     let len = seg.s_len();
     let v_cap = worst_case_speed(seg, feedrate, limits);
-    followers.iter().all(|d| gate.admits(d, len, v_cap, limits))
+    followers.iter().all(|d| gate.admits(d, len, v_cap))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
