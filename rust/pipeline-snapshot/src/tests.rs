@@ -1,4 +1,5 @@
 use super::*;
+use motion_pipeline::StreamConfig;
 
 fn square_waypoints() -> Vec<(f64, f64, f64, f64, f64)> {
     vec![
@@ -247,4 +248,46 @@ fn continuous_pieces_report_no_seam_jumps() {
         assert!(m.max_dp[axis] < 1e-6, "axis {axis} position jump");
         assert!(m.max_dv[axis] < 1e-6, "axis {axis} velocity jump");
     }
+}
+
+#[test]
+fn snapshot_serializes_to_the_baseline_schema() {
+    let snap = pipeline_snapshot(
+        &square_waypoints(),
+        SnapshotParams {
+            max_velocity: 300.0,
+            max_accel: 3000.0,
+            square_corner_velocity: 5.0,
+            max_jerk: 100_000.0,
+            arc_fit: None,
+            max_extrude_only_velocity: None,
+            max_extrude_only_accel: None,
+            max_path_deviation: None,
+            max_accel_deviation: None,
+        },
+    )
+    .unwrap();
+    let json: serde_json::Value = serde_json::to_value(&snap).unwrap();
+    for key in [
+        "raw_x",
+        "raw_y",
+        "fitted_segments",
+        "traj_x_pieces",
+        "traj_y_pieces",
+        "traj_z_pieces",
+        "traj_e_pieces",
+        "traj_t_end",
+        "traversal_time_s",
+        "seam_max_dp",
+        "seam_max_dv",
+        "seam_max_da",
+        "worst_seams",
+    ] {
+        assert!(json.get(key).is_some(), "missing snapshot key {key}");
+    }
+    let seg = json["fitted_segments"][0]
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .expect("fitted segment carries a type tag");
+    assert!(["line", "arc", "clothoid"].contains(&seg));
 }
