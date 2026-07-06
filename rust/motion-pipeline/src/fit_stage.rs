@@ -202,7 +202,7 @@ impl FitStage {
             }
             let head = (idx > 0).then(|| &self.decided[idx - 1]).and_then(piece_of);
             let tail = self.decided.get(idx + 1).and_then(piece_of);
-            let fit = RunFit::fit(&re.facets, head, tail)
+            let fit = RunFit::fit(&re.facets, head, tail, self.config.corner)
                 .unwrap_or_else(|e| panic!("fit_stage: run reconstruction failed: {e:?}"));
             let head = head.cloned();
             match fit {
