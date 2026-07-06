@@ -149,8 +149,8 @@ pub fn pipeline_snapshot(
         max_buffer_moves: SNAPSHOT_MAX_BUFFER_MOVES,
         limits,
     };
-    let axis_chains = build_axis_chains(&params)
-        .map_err(|e| SnapshotError::InvalidChain(e.to_string()))?;
+    let axis_chains =
+        build_axis_chains(&params).map_err(|e| SnapshotError::InvalidChain(e.to_string()))?;
     let (fitted, shaped) = run_pipeline(&moves, config, axis_chains);
 
     let fitted_segments = fitted
