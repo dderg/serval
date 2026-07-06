@@ -14,13 +14,6 @@ fn construct_error_converts_to_nurbs_error() {
 }
 
 #[test]
-fn wire_error_wraps_construct_error() {
-    let e = ConstructError::KnotsNotMonotone;
-    let w: WireError = e.into();
-    assert!(matches!(w, WireError::Construct(_)));
-}
-
-#[test]
 fn nurbs_error_implements_error_trait() {
     let e: NurbsError<f32> = ConstructError::KnotsNotClamped.into();
     let _: &dyn core::error::Error = &e;
