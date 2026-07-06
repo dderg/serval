@@ -137,7 +137,7 @@ impl Ingress {
     }
 
     fn handle_move(&mut self, m: geometry::Move) {
-        tracing::info!(
+        tracing::trace!(
             subsystem = "motion",
             event = "pipe_ingress",
             line = m.source.start_line,
@@ -178,7 +178,7 @@ impl Ingress {
         if wait_s > 0.0 {
             return Some(Duration::from_secs_f64(wait_s));
         }
-        tracing::info!(
+        tracing::debug!(
             subsystem = "motion",
             event = "pipe_drain",
             t_us = crate::timing::mono_us(),

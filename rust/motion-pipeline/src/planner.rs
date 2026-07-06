@@ -166,7 +166,7 @@ impl Planner {
             self.entry,
         )
         .unwrap_or_else(|e| panic!("planner: velocity plan failed: {e:?}"));
-        tracing::info!(
+        tracing::debug!(
             subsystem = "motion",
             event = "pipe_plan",
             line_lo = self.moves.first().map_or(0, |m| m.source.start_line),

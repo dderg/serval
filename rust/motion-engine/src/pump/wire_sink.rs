@@ -332,7 +332,7 @@ impl WireSink {
                 "[transit-diag] alert"
             );
         } else {
-            tracing::info!(
+            tracing::debug!(
                 subsystem = "motion",
                 event = "transit_diag",
                 mcu = key.mcu_id,
