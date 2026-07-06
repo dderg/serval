@@ -336,36 +336,6 @@ diag_task_heartbeat(volatile uint32_t *calls,
     }
 }
 
-uint32_t
-diag_get_tim5_count(void)
-{
-    return diag.tim5_irq_count;
-}
-
-uint32_t
-diag_get_rt_tick_count(void)
-{
-    return diag.rt_tick_count;
-}
-
-uint32_t
-diag_get_rt_tick_cycles_max(void)
-{
-    return diag.rt_tick_cycles_max;
-}
-
-uint32_t
-diag_get_tx_drops_kalico(void)
-{
-    return diag.tx_drops_kalico;
-}
-
-uint32_t
-diag_get_tx_drops_klipper(void)
-{
-    return diag.tx_drops_klipper;
-}
-
 static uint32_t boot_tick_initialized;
 
 void
@@ -572,54 +542,6 @@ diag_usb_burst_track(uint32_t enter_cycles, uint32_t exit_cycles)
                     enter_cycles, exit_cycles);
 }
 
-struct diag_snapshot {
-    uint32_t tim5_n, tim5_total, tim5_max;
-    uint32_t otg_n,  otg_total,  otg_max;
-    uint32_t usb_out_calls, usb_out_max_gap;
-    uint32_t usb_in_calls,  usb_in_max_gap;
-    uint32_t runtime_drain_calls, runtime_drain_max_gap;
-    uint32_t runtime_status_calls, runtime_status_max_gap;
-    uint32_t tx_drops_kalico, tx_drops_klipper;
-    uint32_t ring_seq, ring_overflow;
-};
-
-void
-diag_take_snapshot(struct diag_snapshot *s)
-{
-    irqstatus_t flag = irq_save();
-    s->tim5_n      = diag.tim5_irq_count;
-    s->tim5_total  = (uint32_t)diag.tim5_irq_cycles_total;
-    s->tim5_max    = diag.tim5_irq_cycles_max;
-    s->otg_n       = diag.otg_irq_count;
-    s->otg_total   = (uint32_t)diag.otg_irq_cycles_total;
-    s->otg_max     = diag.otg_irq_cycles_max;
-    s->usb_out_calls    = diag.usb_out_calls;
-    s->usb_out_max_gap  = diag.usb_out_max_gap_ticks;
-    s->usb_in_calls     = diag.usb_in_calls;
-    s->usb_in_max_gap   = diag.usb_in_max_gap_ticks;
-    s->runtime_drain_calls   = diag.runtime_drain_calls;
-    s->runtime_drain_max_gap = diag.runtime_drain_max_gap_ticks;
-    s->runtime_status_calls   = diag.runtime_status_calls;
-    s->runtime_status_max_gap = diag.runtime_status_max_gap_ticks;
-    s->tx_drops_kalico  = diag.tx_drops_kalico;
-    s->tx_drops_klipper = diag.tx_drops_klipper;
-    s->ring_seq      = diag.ring_seq;
-    s->ring_overflow = diag.ring_overflow;
-    diag.tim5_irq_cycles_max = 0;
-    diag.otg_irq_cycles_max  = 0;
-    diag.usb_out_max_gap_ticks = 0;
-    diag.usb_in_max_gap_ticks  = 0;
-    diag.runtime_drain_max_gap_ticks = 0;
-    diag.runtime_status_max_gap_ticks = 0;
-    extern void kalico_stepout_late_reset(void);
-    kalico_stepout_late_reset();
-    diag.stepout_late_max_cyc    = 0;
-    diag.stepout_late_count      = 0;
-    diag.stepout_late_max_drained = 0;
-    diag_cache_clean();
-    irq_restore(flag);
-}
-
 volatile uint32_t *diag_slot_usb_out_calls(void)        { return &diag.usb_out_calls; }
 volatile uint32_t *diag_slot_usb_out_last_tick(void)    { return &diag.usb_out_last_tick; }
 volatile uint32_t *diag_slot_usb_out_max_gap(void)      { return &diag.usb_out_max_gap_ticks; }
@@ -665,13 +587,6 @@ volatile uint32_t *diag_slot_notify_bulk_out(void)    { return &diag.notify_bulk
 volatile uint32_t *diag_slot_task_invoke(void)        { return &diag.task_invoke_count; }
 volatile uint32_t *diag_slot_read_zero(void)          { return &diag.usb_read_zero_returns; }
 volatile uint32_t *diag_slot_read_data(void)          { return &diag.usb_read_data_returns; }
-
-void
-diag_snapshot_otg_regs(uint32_t gintmsk, uint32_t gintsts)
-{
-    diag.otg_gintmsk_now = gintmsk;
-    diag.otg_gintsts_now = gintsts;
-}
 
 // An armed idle OUT endpoint keeps DOEPCTL.EPENA set, so unarmed time only
 // accrues between packet reception and the foreground's consume-and-rearm —
@@ -825,37 +740,10 @@ diag_note_task_loop_end(void)
     live_snap.cur_task_func = 0;
 }
 
-uint32_t diag_get_otg_rxflvl(void)        { return diag.otg_rxflvl_fires; }
-uint32_t diag_get_otg_iepint(void)        { return diag.otg_iepint_fires; }
-uint32_t diag_get_otg_other(void)         { return diag.otg_otherflag_fires; }
-uint32_t diag_get_otg_other_sts(void)     { return diag.otg_otherflag_last_sts; }
-uint32_t diag_get_notify_bulk_out(void)   { return diag.notify_bulk_out_calls; }
-uint32_t diag_get_task_invoke(void)       { return diag.task_invoke_count; }
-uint32_t diag_get_read_zero(void)         { return diag.usb_read_zero_returns; }
-uint32_t diag_get_read_data(void)         { return diag.usb_read_data_returns; }
-uint32_t diag_get_otg_gintmsk_now(void)   { return diag.otg_gintmsk_now; }
-uint32_t diag_get_otg_gintsts_now(void)   { return diag.otg_gintsts_now; }
-
 volatile uint32_t *diag_slot_enable_rx(void)        { return &diag.enable_rx_n; }
 volatile uint32_t *diag_slot_enable_rx_rearm(void)  { return &diag.enable_rx_rearmed_n; }
 volatile uint32_t *diag_slot_peek_empty(void)       { return &diag.peek_empty_n; }
 volatile uint32_t *diag_slot_peek_data(void)        { return &diag.peek_data_n; }
-
-void
-diag_snapshot_out_ep(uint32_t doepctl, uint32_t doeptsiz, uint32_t doepint)
-{
-    diag.out_ep_doepctl  = doepctl;
-    diag.out_ep_doeptsiz = doeptsiz;
-    diag.out_ep_doepint  = doepint;
-}
-
-uint32_t diag_get_out_ep_doepctl(void)    { return diag.out_ep_doepctl; }
-uint32_t diag_get_out_ep_doeptsiz(void)   { return diag.out_ep_doeptsiz; }
-uint32_t diag_get_out_ep_doepint(void)    { return diag.out_ep_doepint; }
-uint32_t diag_get_enable_rx_n(void)       { return diag.enable_rx_n; }
-uint32_t diag_get_enable_rx_rearm(void)   { return diag.enable_rx_rearmed_n; }
-uint32_t diag_get_peek_empty(void)        { return diag.peek_empty_n; }
-uint32_t diag_get_peek_data(void)         { return diag.peek_data_n; }
 
 void __attribute__((noreturn, used))
 fault_capture_and_reset(uint32_t kind, uint32_t *frame, uint32_t exc_return)

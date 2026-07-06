@@ -8,6 +8,5 @@ pub mod degree_elev;
 pub mod emit;
 pub mod fitter;
 pub mod g5_canon;
-pub mod hausdorff;
 pub mod modal;
 pub mod run;

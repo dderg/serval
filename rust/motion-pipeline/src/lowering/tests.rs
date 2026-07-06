@@ -5,8 +5,9 @@ use crate::fitter::Fitter;
 use crate::planner::Planner;
 use crate::{PlannedMove, StreamConfig};
 use crossbeam_channel::unbounded;
+use geometry::path::{Arc, PathSegment, Segment};
 use geometry::segment::SourceRange;
-use geometry::{ChainFitConfig, MoveContext, VelocityLimits, arc_move, line_move};
+use geometry::{ChainFitConfig, MoveContext, VelocityLimits, line_move};
 use nurbs::bezier::extract_bezier_pieces;
 use nurbs::eval::eval;
 
@@ -335,16 +336,7 @@ fn follower_base_offsets_from_start_position() {
 fn arc_lowers_within_tolerance_of_the_circle() {
     let center = [0.0, 20.0, 0.0];
     let radius = 20.0;
-    let m = arc_move(
-        [0.0, 0.0, 0.0],
-        [20.0, 20.0, 0.0],
-        0.0,
-        20.0,
-        true,
-        0.0,
-        ctx(3, 50.0),
-    )
-    .unwrap();
+    let m = quarter_arc();
     let seg = lower_single(m, 0.0, &[0.0, 0.0, 0.0]);
 
     let n = 300;
@@ -479,16 +471,22 @@ fn piece_accel_at(pieces: &[BezierPiece<f64>], t: f64) -> f64 {
 }
 
 fn quarter_arc() -> geometry::Move {
-    arc_move(
-        [0.0, 0.0, 0.0],
-        [20.0, 20.0, 0.0],
-        0.0,
+    let arc_ctx = ctx(3, 50.0);
+    let arc = Arc::try_new(
+        [0.0, 20.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
         20.0,
-        true,
-        0.0,
-        ctx(3, 50.0),
+        -std::f64::consts::FRAC_PI_2,
+        std::f64::consts::FRAC_PI_2,
     )
-    .unwrap()
+    .unwrap();
+    geometry::Move {
+        segment: PathSegment::try_new(Segment::Arc(arc), Vec::new()).unwrap(),
+        feedrate_mm_s: arc_ctx.feedrate_mm_s,
+        limits: arc_ctx.limits,
+        source: arc_ctx.source,
+    }
 }
 
 #[test]

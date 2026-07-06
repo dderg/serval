@@ -111,11 +111,6 @@ impl PostProcessorInstance {
         self.values[idx] = value;
         Ok(())
     }
-
-    #[must_use]
-    pub fn into_chain(self) -> CompiledChain {
-        CompiledChain::compile(&[self]).expect("a single post-processor always compiles")
-    }
 }
 
 impl CompiledChain {
@@ -172,14 +167,6 @@ impl AxisChainSet {
     }
 
     #[must_use]
-    pub fn passthrough_spatial() -> Self {
-        Self {
-            chains: vec![CompiledChain::default(); 3],
-            followers: Vec::new(),
-        }
-    }
-
-    #[must_use]
     pub fn spatial_from_kernels(kernels: &[Option<PiecewisePolynomialKernel<f64>>; 4]) -> Self {
         assert!(
             kernels[3].is_none(),
@@ -200,11 +187,6 @@ impl AxisChainSet {
     #[must_use]
     pub fn n_axes(&self) -> usize {
         self.chains.len()
-    }
-
-    #[must_use]
-    pub fn is_follower_axis(&self, axis: usize) -> bool {
-        self.followers.iter().any(|(f, _)| *f == axis)
     }
 
     #[must_use]

@@ -10,9 +10,7 @@ license.workspace = true
 # Plan-decision C (Round-3-corrected): Step 6 ships a minimal `host_io.rs` shim
 # (connect/identify/send/recv-with-timeout) implementing the `Transport` trait.
 # Production-grade hardening (NAK retransmit, async event dispatch thread,
-# reconnect race recovery) is Step 7 MVP work. The optional `python-engine`
-# feature is reserved for a future PyO3 shim against `tools/host_io.py`;
-# Step 6 only declares the dependency.
+# reconnect race recovery) is Step 7 MVP work.
 
 [dependencies]
 serialport = "4"
@@ -36,13 +34,8 @@ mcu-protocol = { path = "../mcu-protocol" }
 mcu-transport = { path = "../mcu-transport" }
 thiserror = { workspace = true }
 
-[dependencies.pyo3]
-version = "0.29"
-optional = true
-
 [features]
 default = []
-python-engine = ["dep:pyo3"]
 test-harness = []
 hardware-test = []
 

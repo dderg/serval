@@ -12,9 +12,8 @@ pub mod exports {
     use runtime::RT_STORAGE_SIZE;
     use runtime::engine::RuntimeStatus;
     use runtime::error::{
-        RUNTIME_ERR_CAPABILITY_MISSING, RUNTIME_ERR_INVALID_ARG, RUNTIME_ERR_INVALID_HANDLE,
-        RUNTIME_ERR_NOT_INIT, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_PROTOCOL_VERSION_UNSUPPORTED,
-        RUNTIME_OK,
+        RUNTIME_ERR_INVALID_ARG, RUNTIME_ERR_INVALID_HANDLE, RUNTIME_ERR_NOT_INIT,
+        RUNTIME_ERR_NULL_PTR, RUNTIME_OK,
     };
     use runtime::state::{IsrState, RuntimeContext, SharedState};
 
@@ -80,22 +79,6 @@ pub mod exports {
             RuntimeContext::init(rt_ptr);
             INIT_DONE.store(true, Ordering::Release);
             rt_ptr.cast::<Runtime>()
-        }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_handle_check_blob_version(
-        payload_ptr: *const u8,
-        payload_len: u32,
-    ) -> i32 {
-        if payload_ptr.is_null() || payload_len == 0 {
-            return RUNTIME_ERR_PROTOCOL_VERSION_UNSUPPORTED;
-        }
-        // SAFETY: caller contracts payload_ptr is valid for payload_len bytes.
-        let blob = unsafe { core::slice::from_raw_parts(payload_ptr, payload_len as usize) };
-        match runtime::wire::check_version(blob) {
-            Ok(()) => RUNTIME_OK,
-            Err(_) => RUNTIME_ERR_PROTOCOL_VERSION_UNSUPPORTED,
         }
     }
 
@@ -171,95 +154,6 @@ pub mod exports {
     }
 
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_get_tick_counter(rt: *mut Runtime) -> u32 {
-        unsafe { runtime_handle_tick_counter(rt) }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_handle_widened_now(rt: *mut Runtime) -> u64 {
-        // rt is unused (widening reads Klipper globals), but kept for ABI stability.
-        let _ = rt;
-        unsafe extern "C" {
-            fn timer_read_time() -> u32;
-            static stats_send_time: u32;
-            static stats_send_time_high: u32;
-        }
-        // SAFETY: timer_read_time is a u32 MMIO read, safe from non-ISR context. stats_send_time* are u32 globals; torn reads self-correct within ~5 s.
-        unsafe {
-            let low = timer_read_time();
-            let high = stats_send_time_high + ((low < stats_send_time) as u32);
-            ((high as u64) << 32) | (low as u64)
-        }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_handle_last_modulated_elapsed_lo(rt: *mut Runtime) -> u32 {
-        if rt.is_null() || !INIT_DONE.load(Ordering::Acquire) {
-            return 0;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
-        unsafe {
-            (*core::ptr::addr_of!((*ctx).shared))
-                .last_modulated_elapsed_lo
-                .load(Ordering::Acquire)
-        }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_handle_last_modulated_duration_lo(rt: *mut Runtime) -> u32 {
-        if rt.is_null() || !INIT_DONE.load(Ordering::Acquire) {
-            return 0;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
-        unsafe {
-            (*core::ptr::addr_of!((*ctx).shared))
-                .last_modulated_duration_lo
-                .load(Ordering::Acquire)
-        }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_handle_modulated_retire_attempts(rt: *mut Runtime) -> u32 {
-        if rt.is_null() || !INIT_DONE.load(Ordering::Acquire) {
-            return 0;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
-        unsafe {
-            (*core::ptr::addr_of!((*ctx).shared))
-                .modulated_retire_attempts
-                .load(Ordering::Acquire)
-        }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_handle_modulated_retire_successes(rt: *mut Runtime) -> u32 {
-        if rt.is_null() || !INIT_DONE.load(Ordering::Acquire) {
-            return 0;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
-        unsafe {
-            (*core::ptr::addr_of!((*ctx).shared))
-                .modulated_retire_successes
-                .load(Ordering::Acquire)
-        }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_handle_last_retire_consumers_after_clear(
-        rt: *mut Runtime,
-    ) -> u32 {
-        if rt.is_null() || !INIT_DONE.load(Ordering::Acquire) {
-            return 0;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
-        unsafe {
-            (*core::ptr::addr_of!((*ctx).shared))
-                .last_retire_consumers_after_clear
-                .load(Ordering::Acquire)
-        }
-    }
-
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn runtime_handle_fault_detail(rt: *mut Runtime) -> u32 {
         if rt.is_null() {
             return 0;
@@ -308,37 +202,6 @@ pub mod exports {
     }
 
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_handle_tick_blocker_exc(rt: *mut Runtime) -> u32 {
-        if rt.is_null() {
-            return 0;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return 0;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
-        // SAFETY: read-only SharedState atomics; no &mut.
-        unsafe {
-            let shared_ptr: *const SharedState = core::ptr::addr_of!((*ctx).shared);
-            (*shared_ptr).tick_blocker_exc.load(Ordering::Acquire)
-        }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_handle_get_axis_steps_per_mm(
-        rt: *mut Runtime,
-        oid: u8,
-    ) -> f32 {
-        if rt.is_null() || !INIT_DONE.load(Ordering::Acquire) || oid >= 4 {
-            return 0.0;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
-        unsafe {
-            let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
-            (*isr_ptr).engine.debug_steps_per_mm(oid as usize)
-        }
-    }
-
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn runtime_handle_seed_widen(
         rt: *mut Runtime,
         baseline_widened_clock: u64,
@@ -350,56 +213,6 @@ pub mod exports {
         unsafe {
             let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
             (*isr_ptr).widen_state.seed_high(baseline_widened_clock);
-        }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_get_axis_motor(rt: *mut Runtime, oid: u8) -> f32 {
-        if rt.is_null() || !INIT_DONE.load(Ordering::Acquire) || oid >= 4 {
-            return 0.0;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
-        unsafe {
-            let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
-            (*isr_ptr).engine.debug_last_motor(oid as usize)
-        }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_get_last_timing(
-        rt: *mut Runtime,
-        now_out: *mut u64,
-        t_start_out: *mut u64,
-        duration_out: *mut u64,
-    ) {
-        if rt.is_null() || !INIT_DONE.load(Ordering::Acquire) {
-            return;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
-        unsafe {
-            let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
-            let (n, ts, dur) = (*isr_ptr).engine.debug_last_timing();
-            if !now_out.is_null() {
-                *now_out = n;
-            }
-            if !t_start_out.is_null() {
-                *t_start_out = ts;
-            }
-            if !duration_out.is_null() {
-                *duration_out = dur;
-            }
-        }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_get_axis_accumulator(rt: *mut Runtime, oid: u8) -> f64 {
-        if rt.is_null() || !INIT_DONE.load(Ordering::Acquire) || oid >= 4 {
-            return 0.0;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
-        unsafe {
-            let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
-            (*isr_ptr).engine.debug_accumulator(oid as usize)
         }
     }
 
@@ -504,39 +317,6 @@ pub mod exports {
     }
 
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_set_step_mode(
-        rt: *mut Runtime,
-        stepper_idx: u8,
-        mode: u8,
-        mcu_supports_phase: u8,
-    ) -> i32 {
-        if rt.is_null() {
-            return RUNTIME_ERR_INVALID_HANDLE;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return RUNTIME_ERR_NOT_INIT;
-        }
-        let mode = match runtime::state::StepMode::from_u8(mode) {
-            Some(m) => m,
-            None => return RUNTIME_ERR_INVALID_ARG,
-        };
-        let ctx = rt.cast::<RuntimeContext>();
-        // SAFETY: step_modes are AtomicU8 in SharedState; shared &SharedState, no &mut.
-        unsafe {
-            let shared_ptr: *const SharedState = core::ptr::addr_of!((*ctx).shared);
-            let shared: &SharedState = &*shared_ptr;
-            match runtime::state::set_step_mode(shared, stepper_idx, mode, mcu_supports_phase != 0)
-            {
-                Ok(()) => RUNTIME_OK,
-                Err(runtime::state::SetStepModeError::CapabilityMissing) => {
-                    RUNTIME_ERR_CAPABILITY_MISSING
-                }
-                Err(runtime::state::SetStepModeError::OutOfRange) => RUNTIME_ERR_INVALID_HANDLE,
-            }
-        }
-    }
-
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn runtime_bind_phase_motor(
         rt: *mut Runtime,
         motor_idx: u8,
@@ -558,146 +338,6 @@ pub mod exports {
                 Err(_) => RUNTIME_ERR_INVALID_ARG,
             }
         }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_enqueue_success_lo(rt: *mut Runtime) -> u32 {
-        if rt.is_null() {
-            return 0;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return 0;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
-        unsafe {
-            let shared: &SharedState = &*core::ptr::addr_of!((*ctx).shared);
-            shared
-                .producer_enqueue_success_total
-                .load(Ordering::Acquire) as u32
-        }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_push_seg_all_unused_lo(rt: *mut Runtime) -> u32 {
-        if rt.is_null() {
-            return 0;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return 0;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
-        unsafe {
-            let shared: &SharedState = &*core::ptr::addr_of!((*ctx).shared);
-            shared.push_segment_all_unused_total.load(Ordering::Acquire) as u32
-        }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_last_push_x_handle(rt: *mut Runtime) -> u32 {
-        if rt.is_null() {
-            return 0;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return 0;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
-        unsafe {
-            let shared: &SharedState = &*core::ptr::addr_of!((*ctx).shared);
-            shared.last_push_x_handle_packed.load(Ordering::Acquire)
-        }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_last_push_y_handle(rt: *mut Runtime) -> u32 {
-        if rt.is_null() {
-            return 0;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return 0;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
-        unsafe {
-            let shared: &SharedState = &*core::ptr::addr_of!((*ctx).shared);
-            shared.last_push_y_handle_packed.load(Ordering::Acquire)
-        }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_last_push_consumers_remaining(rt: *mut Runtime) -> u32 {
-        if rt.is_null() {
-            return 0;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return 0;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
-        unsafe {
-            let shared: &SharedState = &*core::ptr::addr_of!((*ctx).shared);
-            shared.last_push_consumers_remaining.load(Ordering::Acquire)
-        }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_get_step_mode(rt: *mut Runtime, stepper_idx: u8) -> u8 {
-        use runtime::state::MAX_STEPPER_OIDS;
-        if rt.is_null() || (stepper_idx as usize) >= MAX_STEPPER_OIDS {
-            return 0xFF;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return 0xFF;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
-        // SAFETY: step_modes are AtomicU8 in SharedState; shared &SharedState, no &mut.
-        unsafe {
-            let shared_ptr: *const SharedState = core::ptr::addr_of!((*ctx).shared);
-            let shared: &SharedState = &*shared_ptr;
-            shared.step_modes[stepper_idx as usize].load(Ordering::Acquire)
-        }
-    }
-
-    fn runtime_handle_or_null() -> Option<*const RuntimeContext> {
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return None;
-        }
-        #[cfg(target_os = "none")]
-        let rt_ptr: *const RuntimeContext = {
-            // SAFETY: .get() on C extern static yields a raw pointer without an aliasing ref; gated by INIT_DONE.
-            #[allow(unsafe_code)]
-            unsafe {
-                rt_storage.get().cast::<RuntimeContext>()
-            }
-        };
-        #[cfg(not(target_os = "none"))]
-        let rt_ptr: *const RuntimeContext = rt_storage.0.get().cast::<RuntimeContext>();
-        Some(rt_ptr)
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn runtime_get_dispatcher_floor_cycles() -> u32 {
-        let Some(rt_ptr) = runtime_handle_or_null() else {
-            return 5_000_000;
-        };
-        // SAFETY: rt_storage projection; read-only SharedState atomics, no &mut.
-        let v = unsafe {
-            let shared_ptr: *const SharedState = core::ptr::addr_of!((*rt_ptr).shared);
-            (*shared_ptr)
-                .dispatcher_floor_cycles
-                .load(Ordering::Acquire)
-        };
-        if v == 0 { 5_000_000 } else { v }
-    }
-
-    #[unsafe(no_mangle)]
-    pub extern "C" fn runtime_get_sample_period_cycles() -> u32 {
-        let Some(rt_ptr) = runtime_handle_or_null() else {
-            return 5_000_000;
-        };
-        // SAFETY: rt_storage projection; read-only SharedState atomics, no &mut.
-        let v = unsafe {
-            let shared_ptr: *const SharedState = core::ptr::addr_of!((*rt_ptr).shared);
-            (*shared_ptr).sample_period_cycles.load(Ordering::Acquire)
-        };
-        if v == 0 { 5_000_000 } else { v }
     }
 
     #[unsafe(no_mangle)]
@@ -789,22 +429,6 @@ pub mod exports {
         }
         #[cfg(not(any(test, feature = "host")))]
         runtime::step_queue::reset_all_queues();
-        RUNTIME_OK
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_discard_pending(rt: *mut Runtime) -> i32 {
-        if rt.is_null() {
-            return RUNTIME_ERR_NULL_PTR;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return RUNTIME_ERR_NOT_INIT;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
-        unsafe {
-            let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
-            (*isr_ptr).engine.discard_pending();
-        }
         RUNTIME_OK
     }
 
@@ -1268,34 +892,6 @@ pub mod exports {
         unsafe {
             let shared_ptr: *const SharedState = core::ptr::addr_of!((*ctx).shared);
             runtime::clock::read_widened_now(&*shared_ptr)
-        }
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_get_occupancy(
-        rt: *mut Runtime,
-        out_occupancy: *mut u32,
-        max_axes: usize,
-    ) -> i32 {
-        if rt.is_null() || out_occupancy.is_null() {
-            return RUNTIME_ERR_NULL_PTR;
-        }
-        if !INIT_DONE.load(Ordering::Acquire) {
-            return RUNTIME_ERR_NOT_INIT;
-        }
-        let ctx = rt.cast::<RuntimeContext>();
-        unsafe {
-            let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
-            let engine = &(*isr_ptr).engine;
-            let num_axes = engine.num_axes as usize;
-            let counts = engine.occupancy_counts();
-            let n_write = num_axes.min(max_axes);
-            for i in 0..n_write {
-                out_occupancy.add(i).write(counts[i]);
-            }
-            #[allow(clippy::cast_possible_truncation)]
-            let result = n_write as i32;
-            result
         }
     }
 

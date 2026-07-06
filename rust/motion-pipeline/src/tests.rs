@@ -577,12 +577,12 @@ fn drained_prefix_is_invariant_under_append() {
 
 fn smooth_x_chains(frequency_hz: f64) -> AxisChainSet {
     AxisChainSet::spatial(
-        PostProcessorInstance::new(
+        trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
             "is",
             &trajectory::post_processors::SmoothZv,
             vec![frequency_hz],
-        )
-        .into_chain(),
+        )])
+        .expect("single post-processor always compiles"),
         trajectory::CompiledChain::default(),
         trajectory::CompiledChain::default(),
     )

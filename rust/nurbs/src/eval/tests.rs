@@ -242,42 +242,6 @@ fn curvature_of_straight_line_is_zero() {
     assert!(k.abs() < 1e-10, "got {k}");
 }
 
-#[test]
-fn pos_vel_accel_on_quadratic_polynomial() {
-    let cps = vec![0.0_f32, 0.0, 1.0];
-    let knots = vec![0.0_f32, 0.0, 0.0, 1.0, 1.0, 1.0];
-    let (p, v, a) = eval_polynomial_f32_with_pos_vel_accel_f64(&cps, &knots, 2, 0.5);
-    assert!((p - 0.25).abs() < 1e-9, "pos={}", p);
-    assert!((v - 1.0_f64).abs() < 1e-9, "vel={}", v);
-    assert!((a - 2.0_f64).abs() < 1e-9, "accel={}", a);
-}
-
-#[test]
-fn pos_vel_accel_on_cubic_polynomial() {
-    let cps = vec![0.0_f32, 0.0, 0.0, 1.0];
-    let knots = vec![0.0_f32, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
-    let (p, v, a) = eval_polynomial_f32_with_pos_vel_accel_f64(&cps, &knots, 3, 0.5);
-    assert!((p - 0.125).abs() < 1e-9, "pos={}", p);
-    assert!((v - 0.75_f64).abs() < 1e-9, "vel={}", v);
-    assert!((a - 3.0_f64).abs() < 1e-9, "accel={}", a);
-}
-
-#[test]
-fn pos_vel_accel_on_linear_polynomial_returns_zero_accel() {
-    let cps = vec![0.0_f32, 1.0];
-    let knots = vec![0.0_f32, 0.0, 1.0, 1.0];
-    let f32_round_trip_tol = 1e-6;
-    let exact_arithmetic_tol = 1e-9;
-    let (p, v, a) = eval_polynomial_f32_with_pos_vel_accel_f64(&cps, &knots, 1, 0.3);
-    assert!((p - 0.3).abs() < f32_round_trip_tol, "pos={}", p);
-    assert!((v - 1.0_f64).abs() < exact_arithmetic_tol, "vel={}", v);
-    assert!(
-        a.abs() < exact_arithmetic_tol,
-        "linear curve must have zero second derivative; got {}",
-        a
-    );
-}
-
 #[cfg(feature = "host")]
 #[test]
 fn curvature_of_arc_matches_known_value() {

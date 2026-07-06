@@ -1,8 +1,4 @@
-#[cfg(test)]
-mod fit;
 mod kernel;
-#[cfg(test)]
-mod pad;
 pub mod post_processor;
 pub mod post_processors;
 mod shaper;

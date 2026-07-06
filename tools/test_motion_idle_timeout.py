@@ -35,27 +35,35 @@ class _FakePrinter:
         return []
 
 
+class _FakeEngine:
+    def __init__(self, queued_secs):
+        self._queued_secs = queued_secs
+
+    def queued_motion_secs(self):
+        return self._queued_secs
+
+
 class _Stub:
-    def __init__(self, pending_end, est, now=1000.0):
+    def __init__(self, pending_end, est, queued_secs=0.0, now=1000.0):
         self._mcu_pending_end_time = pending_end
         self.mcu = _FakeMcu(est)
+        self.engine = _FakeEngine(queued_secs)
         self.reactor = _FakeReactor(now)
         self.printer = _FakePrinter()
 
 
 def test_check_busy_reports_idle_when_motion_has_drained():
-    stub = _Stub(pending_end=10.0, est=70.0)
+    stub = _Stub(pending_end=10.0, est=70.0, queued_secs=0.0)
     print_time, est_print_time, lookahead_empty = Motion.check_busy(
         stub, eventtime=123.0
     )
-    assert print_time == 10.0
+    assert print_time == 70.0
     assert est_print_time == 70.0
     assert lookahead_empty is True
-    assert est_print_time - print_time == 60.0
 
 
 def test_check_busy_reports_busy_while_motion_queued():
-    stub = _Stub(pending_end=80.0, est=70.0)
+    stub = _Stub(pending_end=80.0, est=70.0, queued_secs=2.5)
     _, _, lookahead_empty = Motion.check_busy(stub, eventtime=123.0)
     assert lookahead_empty is False
 

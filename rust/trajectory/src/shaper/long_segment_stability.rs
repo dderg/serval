@@ -1,6 +1,5 @@
-use crate::fit::FittedSegment;
+use super::fixtures::{pad_segment_axis, FittedSegment};
 use crate::kernel::build_smooth_mzv_kernel;
-use crate::pad::pad_segment_axis;
 use crate::shaper::ShapedSignal;
 use nurbs::bezier::{bezier_pieces_to_nurbs, BezierPiece};
 

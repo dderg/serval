@@ -115,26 +115,6 @@ void kalico_diag_emit_live(void)
 {
 }
 
-void diag_take_snapshot(struct diag_snapshot *s)
-{
-    if (s) {
-        for (uint32_t *p = (uint32_t *)s;
-             p < (uint32_t *)(s + 1); p++) {
-            *p = 0;
-        }
-    }
-}
-
-void diag_snapshot_otg_regs(uint32_t gintmsk, uint32_t gintsts)
-{
-    (void)gintmsk; (void)gintsts;
-}
-
-void diag_snapshot_out_ep(uint32_t doepctl, uint32_t doeptsiz, uint32_t doepint)
-{
-    (void)doepctl; (void)doeptsiz; (void)doepint;
-}
-
 void diag_note_dispatch(uint32_t func, uint32_t addr)
 {
     (void)func; (void)addr;
@@ -171,32 +151,6 @@ void diag_note_demux(uint32_t backlog, uint32_t msgs)
 {
     (void)backlog; (void)msgs;
 }
-
-#define DIAG_GET_STUB(name) \
-    uint32_t diag_get_##name(void) { return 0; }
-
-DIAG_GET_STUB(otg_rxflvl)
-DIAG_GET_STUB(otg_iepint)
-DIAG_GET_STUB(otg_other)
-DIAG_GET_STUB(otg_other_sts)
-DIAG_GET_STUB(notify_bulk_out)
-DIAG_GET_STUB(task_invoke)
-DIAG_GET_STUB(read_zero)
-DIAG_GET_STUB(read_data)
-DIAG_GET_STUB(otg_gintmsk_now)
-DIAG_GET_STUB(otg_gintsts_now)
-DIAG_GET_STUB(out_ep_doepctl)
-DIAG_GET_STUB(out_ep_doeptsiz)
-DIAG_GET_STUB(out_ep_doepint)
-DIAG_GET_STUB(enable_rx_n)
-DIAG_GET_STUB(enable_rx_rearm)
-DIAG_GET_STUB(peek_empty)
-DIAG_GET_STUB(peek_data)
-DIAG_GET_STUB(tim5_count)
-DIAG_GET_STUB(tx_drops_kalico)
-DIAG_GET_STUB(tx_drops_klipper)
-DIAG_GET_STUB(rt_tick_count)
-DIAG_GET_STUB(rt_tick_cycles_max)
 
 // Linux build doesn't have armcm_timer.c or mpu_protect.c — provide
 // stubs for symbols referenced by sched.c.
