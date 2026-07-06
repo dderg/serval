@@ -16,6 +16,15 @@ flat) and klippy's real-time homing deadline (`max_travel/speed +
 TRIP_DEADLINE_MARGIN`) expires. Marked `xfail(strict=False)` on
 `test_probe_multi_point_tools` in `tools/sim/tests/test_probe.py`.
 
+After merging sota-motion's prescheduling work (PR #171, 2026-07-06) the
+safe-z variant of `test_probe_homing_and_probing` hits the same class at
+~50% even solo on an idle machine (second failure shape: the final retract
+stalls, so the closing QUERY_PROBE reads `probe: TRIGGERED`). The flow
+itself is sound — the identical G-code sequence run manually against the
+same image passes with clean step traces. safe-z carries the same
+`xfail(strict=False)` mark. If the crawl gets fixed, un-mark both and
+re-check `axis_stalled` stays absent.
+
 ## Diagnostic signature
 
 In `events/mcu.jsonl` right before the failure:
