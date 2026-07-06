@@ -184,6 +184,10 @@ fn main() {
     let slave_axes: Vec<u8> = slaves.iter().map(|s| s.axis).collect();
     let velocity_ff: Vec<bool> = slaves.iter().map(|s| s.velocity_ff).collect();
     let torque_clamp_tenths: Vec<i16> = slaves.iter().map(|s| s.torque_clamp_tenths).collect();
+    let ff_lead_ns: Vec<u64> = slaves
+        .iter()
+        .map(|s| u64::from(s.ff_lead_cycles) * (cycle_us as u64) * 1000)
+        .collect();
     let rt_cpu: i32 = arg_val(&args, "--rt-cpu")
         .and_then(|s| s.parse().ok())
         .unwrap_or(3);
@@ -1150,8 +1154,13 @@ fn main() {
                 };
                 if let Some((counts, vel_mm_s, acc_mm_s2)) = sampled {
                     sp_counts[s] = Some(counts);
-                    all_vel[s] = vel_mm_s;
-                    all_acc[s] = acc_mm_s2;
+                    let (ff_vel, ff_acc) = if ff_lead_ns[s] > 0 && !buzz.active() {
+                        rings[s].peek_vel_acc(now + ff_lead_ns[s])
+                    } else {
+                        (vel_mm_s, acc_mm_s2)
+                    };
+                    all_vel[s] = ff_vel;
+                    all_acc[s] = ff_acc;
                 }
             }
 

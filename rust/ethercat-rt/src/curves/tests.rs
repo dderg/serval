@@ -423,3 +423,67 @@ fn sample_reports_acceleration_consistent_with_velocity_slope() {
         "eval_accel={a_mid} vs closed-form={EXPECTED_ACCEL_AT_QUARTER}"
     );
 }
+
+#[test]
+fn peek_vel_acc_matches_armed_piece_within_its_window() {
+    let mut ring = AxisRing::new();
+    let t0: u64 = 1_000_000_000;
+    ring.push_entry(linear_entry(0.0, 10.0, t0, 0.001)).unwrap();
+
+    let (_, vel_now, acc_now) = ring.sample(t0 + 500_000).unwrap();
+    let (vel_peek, acc_peek) = ring.peek_vel_acc(t0 + 500_000);
+    assert!((vel_peek - vel_now).abs() < 1e-3, "{vel_peek} vs {vel_now}");
+    assert!((acc_peek - acc_now).abs() < 1e-3, "{acc_peek} vs {acc_now}");
+}
+
+#[test]
+fn peek_across_piece_boundary_does_not_retire() {
+    let mut ring = AxisRing::new();
+    let t0: u64 = 1_000_000_000;
+    let dur_ns: u64 = 1_000_000;
+    ring.push_entry(linear_entry(0.0, 10.0, t0, 0.001)).unwrap();
+    ring.push_entry(linear_entry(10.0, 30.0, t0 + dur_ns, 0.001))
+        .unwrap();
+
+    ring.sample(t0 + 900_000).unwrap();
+    let retired_before = ring.retired_count();
+
+    let (vel_peek, _) = ring.peek_vel_acc(t0 + dur_ns + 500_000);
+    assert!(
+        (vel_peek - 20_000.0).abs() < 1.0,
+        "peek must see piece 1 velocity, got {vel_peek}"
+    );
+    assert_eq!(
+        ring.retired_count(),
+        retired_before,
+        "lookahead retired a piece"
+    );
+
+    let (pos_now, vel_now, _) = ring.sample(t0 + 950_000).unwrap();
+    assert!((pos_now - 9.5).abs() < 0.01, "position cursor moved: {pos_now}");
+    assert!((vel_now - 10_000.0).abs() < 1.0, "sample vel {vel_now}");
+}
+
+#[test]
+fn peek_in_gap_and_past_stream_end_is_stationary() {
+    let mut ring = AxisRing::new();
+    let t0: u64 = 1_000_000_000;
+    let dur_ns: u64 = 1_000_000;
+    ring.push_entry(linear_entry(0.0, 10.0, t0, 0.001)).unwrap();
+    ring.push_entry(linear_entry(10.0, 20.0, t0 + 3 * dur_ns, 0.001))
+        .unwrap();
+
+    ring.sample(t0 + 500_000).unwrap();
+
+    let (vel_gap, acc_gap) = ring.peek_vel_acc(t0 + dur_ns + 500_000);
+    assert_eq!((vel_gap, acc_gap), (0.0, 0.0), "gap must read stationary");
+
+    let (vel_end, acc_end) = ring.peek_vel_acc(t0 + 10 * dur_ns);
+    assert_eq!((vel_end, acc_end), (0.0, 0.0), "past end must read stationary");
+
+    let (vel_next, _) = ring.peek_vel_acc(t0 + 3 * dur_ns + 500_000);
+    assert!(
+        (vel_next - 10_000.0).abs() < 1.0,
+        "peek into the post-gap piece, got {vel_next}"
+    );
+}

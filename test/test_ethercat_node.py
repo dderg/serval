@@ -14,7 +14,7 @@ class FakeRail:
         self,
         motor_name,
         chain_index,
-        ff_config=(False, 30.0),
+        ff_config=(False, 30.0, 0),
         dynamics_profile=None,
     ):
         self._motor_name = motor_name
@@ -65,8 +65,8 @@ def test_validate_chain_rejects_out_of_range_index():
 def test_validate_chain_accepts_per_motor_ff_differences():
     node, rails = _node(
         [
-            (0, FakeRail("x", 0, ff_config=(False, 30.0))),
-            (1, FakeRail("y", 1, ff_config=(True, 60.0))),
+            (0, FakeRail("x", 0, ff_config=(False, 30.0, 0))),
+            (1, FakeRail("y", 1, ff_config=(True, 60.0, 2))),
         ]
     )
     ethercat_node.EtherCatNode._validate_chain(node, rails)
