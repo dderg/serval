@@ -104,7 +104,10 @@ position target itself is untouched. Measure the latency first (cross-correlate
 lead to the transport share of it — leading past the true latency flips the
 sign of the edge error. Lookahead past the end of the streamed trajectory, or
 into a dwell gap, reads as a stationary target (zero FF), which is the same
-thing the un-led path converges to.
+thing the un-led path converges to. The option is per-motor because the
+latency it compensates is a per-drive property; on a coupled node (node-level
+`dynamics_profile`) every motor's torque FF mixes all motors' accelerations,
+so all motors there must use the same lead — a mismatch is a config error.
 
 ## Dynamics profile TOML
 

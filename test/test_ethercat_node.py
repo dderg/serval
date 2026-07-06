@@ -162,3 +162,38 @@ def test_set_motor_torque_without_engine_handle_raises():
     node.engine_handle = None
     with pytest.raises(FakeConfigError):
         ethercat_node.EtherCatNode.set_motor_torque(node, "x", True, 1.0)
+
+
+def test_validate_ff_lead_rejects_mismatch_on_coupled_node():
+    node, rails = _dyn_node(
+        [
+            (0, FakeRail("x", 0, ff_config=(True, 30.0, 2))),
+            (1, FakeRail("y", 1, ff_config=(True, 30.0, 0))),
+        ],
+        node_profile="/cfg/node.toml",
+    )
+    with pytest.raises(FakeConfigError) as e:
+        ethercat_node.EtherCatNode._validate_ff_lead(node, rails)
+    assert "ff_lead_cycles must be identical" in str(e.value)
+    assert "x=2" in str(e.value) and "y=0" in str(e.value)
+
+
+def test_validate_ff_lead_allows_equal_leads_on_coupled_node():
+    node, rails = _dyn_node(
+        [
+            (0, FakeRail("x", 0, ff_config=(True, 30.0, 2))),
+            (1, FakeRail("y", 1, ff_config=(True, 30.0, 2))),
+        ],
+        node_profile="/cfg/node.toml",
+    )
+    ethercat_node.EtherCatNode._validate_ff_lead(node, rails)
+
+
+def test_validate_ff_lead_allows_mismatch_on_independent_motors():
+    node, rails = _dyn_node(
+        [
+            (0, FakeRail("x", 0, ff_config=(True, 30.0, 3))),
+            (1, FakeRail("y", 1, ff_config=(True, 30.0, 0))),
+        ]
+    )
+    ethercat_node.EtherCatNode._validate_ff_lead(node, rails)

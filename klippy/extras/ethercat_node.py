@@ -131,6 +131,28 @@ class EtherCatNode:
                 "or none — missing on: %s" % (self.name, ", ".join(missing))
             )
 
+    def _validate_ff_lead(self, rails):
+        if self.dynamics_profile is None:
+            return
+        leads = {
+            rail.get_motor_name(): rail.get_ff_config()[2]
+            for _global_axis, rail in rails
+        }
+        if len(set(leads.values())) > 1:
+            raise self.printer.config_error(
+                "ethercat_node %s: a coupled (node-level) dynamics_profile "
+                "computes each motor's torque feedforward from every motor's "
+                "commanded acceleration, so ff_lead_cycles must be identical "
+                "across the node — got %s"
+                % (
+                    self.name,
+                    ", ".join(
+                        "%s=%d" % (name, lead)
+                        for name, lead in sorted(leads.items())
+                    ),
+                )
+            )
+
     def _claim(self):
         if self.engine_handle is not None:
             return
@@ -141,6 +163,7 @@ class EtherCatNode:
             for slot, (_global_axis, rail) in enumerate(rails)
         }
         self._validate_dynamics_profiles(rails)
+        self._validate_ff_lead(rails)
         drives = []
         for global_axis, rail in rails:
             following_error_counts, max_torque_tenth_pct = (
