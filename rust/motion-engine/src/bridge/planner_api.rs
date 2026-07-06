@@ -645,25 +645,41 @@ impl PyMotionEngine {
                 )));
             }
         }
-        let limits = self
-            .planner_config
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .cartesian;
+        let (limits, z_velocity_budget, z_accel_budget) = {
+            let cfg = self
+                .planner_config
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let z_axis = cfg
+                .axis_registry
+                .axis_index("z")
+                .map_err(|e| PyValueError::new_err(format!("set_bed_mesh: {e}")))?;
+            let mut z_v = cfg.cartesian.max_z_velocity;
+            let mut z_a = cfg.cartesian.max_z_accel;
+            for section in cfg
+                .limit_sections
+                .iter()
+                .filter(|s| s.axes.contains(&z_axis))
+            {
+                if let Some(v) = section.max_velocity {
+                    z_v = z_v.min(v);
+                }
+                if let Some(a) = section.max_accel {
+                    z_a = z_a.min(a);
+                }
+            }
+            (cfg.cartesian, z_v, z_a)
+        };
         let coupled_v = bounds.max_gradient * limits.max_velocity;
         let coupled_a = bounds.max_gradient * limits.max_accel
             + bounds.max_curvature * limits.max_velocity * limits.max_velocity;
-        if coupled_v > limits.max_z_velocity || coupled_a > limits.max_z_accel {
+        if coupled_v > z_velocity_budget || coupled_a > z_accel_budget {
             return Err(PyValueError::new_err(format!(
                 "set_bed_mesh: bed deviation needs {coupled_v:.2}mm/s / {coupled_a:.1}mm/s² \
-                 of Z at your XY limits; Z allows {:.2}mm/s / {:.1}mm/s² — the bed is \
-                 warped or the Z limits are too conservative (mesh range {:.3}..{:.3}mm, \
-                 max slope {:.4})",
-                limits.max_z_velocity,
-                limits.max_z_accel,
-                bounds.z_min,
-                bounds.z_max,
-                bounds.max_gradient
+                 of Z at your XY limits; Z allows {z_velocity_budget:.2}mm/s / \
+                 {z_accel_budget:.1}mm/s² — the bed is warped or the Z limits are too \
+                 conservative (mesh range {:.3}..{:.3}mm, max slope {:.4})",
+                bounds.z_min, bounds.z_max, bounds.max_gradient
             )));
         }
         tracing::info!(
@@ -672,8 +688,8 @@ impl PyMotionEngine {
             z_min = bounds.z_min,
             z_max = bounds.z_max,
             max_slope = bounds.max_gradient,
-            envelope_v_mm_s = limits.max_z_velocity + coupled_v,
-            envelope_a_mm_s2 = limits.max_z_accel + coupled_a,
+            envelope_v_mm_s = z_velocity_budget + coupled_v,
+            envelope_a_mm_s2 = z_accel_budget + coupled_a,
             "bed mesh activated; transient Z exceedance envelope logged"
         );
         self.swap_bed_mesh(Some(Arc::new(transform)))

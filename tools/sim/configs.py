@@ -630,6 +630,142 @@ rotation_distance: 4
 {safe_z_section}{probe_section}{remote_section}{points_sections}{_tail(gcode_dir)}"""
 
 
+def bed_mesh_config(h7_pty: str, gcode_dir: str) -> str:
+    """Cartesian printer with two stored bed_mesh profiles.
+
+    - "wavy": +/-0.1mm corrections, zero at the (45,45) zero reference,
+      loadable without probing via BED_MESH_PROFILE LOAD=wavy. The mesh
+      spans only 20..70mm so node-to-node verification moves stay short
+      enough for the sim's virtual clock to execute them faithfully.
+    - "steep": a +/-4mm linear tilt whose XY-coupled Z demand exceeds the
+      [limit z] velocity/accel budget, so activation must be refused by
+      the motion engine's gross-error gate.
+
+    Z homes against the auto-endstop wall (step line 15 -> gpio202), the
+    same arrangement as probe_config's "gpio-z" variant.
+    """
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[printer]
+max_velocity: 100
+max_accel: 1000
+
+[kinematics]
+type: cartesian
+axis_x: x
+axis_y: y
+axis_z: z
+x_motors: x
+y_motors: y
+z_motors: z
+
+[axis x]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio200
+homing_speed: 10
+post_processors: is_xy
+
+[axis y]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio201
+homing_speed: 10
+post_processors: is_xy
+
+[axis z]
+position_min: -5
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio202
+homing_speed: 5
+
+[limit gantry]
+axes: x, y
+max_velocity: 100
+max_accel: 1000
+
+[limit z]
+axes: z
+max_velocity: 10
+max_accel: 100
+
+[motor x]
+drive: stepper
+step_pin: gpiochip0/gpio0
+dir_pin: gpiochip0/gpio1
+enable_pin: !gpiochip0/gpio2
+microsteps: 16
+rotation_distance: 40
+
+[motor y]
+drive: stepper
+step_pin: gpiochip0/gpio3
+dir_pin: gpiochip0/gpio4
+enable_pin: !gpiochip0/gpio5
+microsteps: 16
+rotation_distance: 40
+
+[motor z]
+drive: stepper
+step_pin: gpiochip0/gpio6
+dir_pin: gpiochip0/gpio7
+enable_pin: !gpiochip0/gpio8
+microsteps: 16
+rotation_distance: 4
+
+[bed_mesh]
+mesh_min: 20, 20
+mesh_max: 70, 70
+probe_count: 3, 3
+zero_reference_position: 45, 45
+fade_start: 1
+fade_end: 10
+fade_target: 0
+{_tail(gcode_dir)}
+#*# <---------------------- SAVE_CONFIG ---------------------->
+#*# DO NOT EDIT THIS BLOCK OR BELOW. The contents are auto-generated.
+#*#
+#*# [bed_mesh wavy]
+#*# version = 1
+#*# points =
+#*#   0.10, 0.00, -0.10
+#*#   0.05, 0.00, -0.05
+#*#   -0.10, 0.00, 0.10
+#*# min_x = 20.0
+#*# max_x = 70.0
+#*# min_y = 20.0
+#*# max_y = 70.0
+#*# x_count = 3
+#*# y_count = 3
+#*# mesh_x_pps = 2
+#*# mesh_y_pps = 2
+#*# algo = lagrange
+#*# tension = 0.2
+#*#
+#*# [bed_mesh steep]
+#*# version = 1
+#*# points =
+#*#   -4.0, 0.0, 4.0
+#*#   -4.0, 0.0, 4.0
+#*#   -4.0, 0.0, 4.0
+#*# min_x = 20.0
+#*# max_x = 70.0
+#*# min_y = 20.0
+#*# max_y = 70.0
+#*# x_count = 3
+#*# y_count = 3
+#*# mesh_x_pps = 2
+#*# mesh_y_pps = 2
+#*# algo = lagrange
+#*# tension = 0.2
+"""
+
+
 SELF_TEST_GCODE = """\
 ; Sim self-test: square spiral with Z moves
 SET_KINEMATIC_POSITION X=125 Y=125 Z=125

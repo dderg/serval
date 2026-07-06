@@ -754,3 +754,101 @@ fn blends_consuming_a_full_arc_emit_no_degenerate_remainder() {
     assert!(!segs.is_empty());
     assert_position_contiguous(&segs);
 }
+
+fn replay_inputs(
+    config: StreamConfig,
+    chains: AxisChainSet,
+    home: &[f64],
+    inputs: Vec<StreamInput>,
+) -> Vec<ShapedSegment> {
+    let (raw_tx, raw_rx) = unbounded();
+    for item in inputs {
+        raw_tx.send(item).unwrap();
+    }
+    drop(raw_tx);
+    let (fitted_tx, fitted_rx) = unbounded();
+    FitStage::new(config.chain).run(raw_rx, fitted_tx);
+    let (planned_tx, planned_rx) = unbounded();
+    Planner::new(config).run(fitted_rx, planned_tx);
+    let (lowered_tx, lowered_rx) = unbounded();
+    run_lowerer(
+        planned_rx,
+        lowered_tx,
+        FitTol {
+            pos_mm: config.fit_tol_mm,
+            accel_mm_s2: config.fit_tol_accel_mm_s2,
+        },
+        chains.clone(),
+        home.to_vec(),
+        0.0,
+    );
+    let (shaped_tx, shaped_rx) = unbounded();
+    Shaper::new(chains).run(lowered_rx, shaped_tx);
+    shaped_rx
+        .into_iter()
+        .filter_map(|item| match item {
+            ShapedItem::Seg(seg) => Some(seg),
+            ShapedItem::Control(_) => None,
+        })
+        .collect()
+}
+
+#[test]
+fn mesh_warp_tracks_across_a_fenced_move_sequence() {
+    let z = vec![0.10, 0.00, -0.10, 0.05, 0.00, -0.05, -0.10, 0.00, 0.10];
+    let mut mesh = geometry::MeshGrid::new(20.0, 20.0, 100.0, 100.0, 3, 3, z, 0.2).unwrap();
+    mesh.zero_at(120.0, 120.0);
+    let transform = std::sync::Arc::new(geometry::SurfaceTransform::new(
+        mesh,
+        geometry::Fade::new(1.0, 10.0, 0.0).unwrap(),
+    ));
+    let t = transform.clone();
+
+    let waypoints = [
+        [120.0, 120.0, 5.0],
+        [120.0, 120.0, 0.5],
+        [20.0, 20.0, 0.5],
+        [220.0, 20.0, 0.5],
+        [220.0, 220.0, 0.5],
+    ];
+    let mut inputs = vec![StreamInput::Control(Control::SetMesh {
+        mesh: Some(transform),
+        gcode_z_rebase: 5.0,
+    })];
+    for (i, pair) in waypoints.windows(2).enumerate() {
+        inputs.push(StreamInput::Move(
+            line_move(pair[0], pair[1], 0.0, ctx(i as u32 + 1, 50.0)).unwrap(),
+        ));
+        inputs.push(StreamInput::Drain);
+    }
+
+    let xy_chain = trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
+        "is_xy",
+        &trajectory::post_processors::SmoothMzv,
+        vec![50.0],
+    )])
+    .unwrap();
+    let chains = AxisChainSet::spatial(
+        xy_chain.clone(),
+        xy_chain,
+        trajectory::CompiledChain::default(),
+    );
+    let home = vec![120.0, 120.0, 5.0, 0.0];
+    let segs = replay_inputs(cfg_bench(), chains, &home, inputs);
+    assert!(!segs.is_empty());
+
+    let last = segs.last().unwrap();
+    let t_end = last.t_end;
+    let x = eval(&last.axes[0], t_end);
+    let y = eval(&last.axes[1], t_end);
+    let z_machine = eval(&last.axes[2], t_end);
+    let expected = 0.5 + t.correction_at(220.0, 220.0, 0.5);
+    assert!(
+        (x - 220.0).abs() < 1e-2 && (y - 220.0).abs() < 1e-2,
+        "sequence should end at (220,220), got ({x}, {y})"
+    );
+    assert!(
+        (z_machine - expected).abs() < 5e-3,
+        "final machine Z {z_machine} should be {expected}"
+    );
+}

@@ -831,6 +831,50 @@ fn surface_warped_move_tracks_the_mesh_along_the_path() {
 }
 
 #[test]
+fn surface_warped_single_axis_move_tracks_the_mesh() {
+    let z = vec![0.10, 0.00, -0.10, 0.05, 0.00, -0.05, -0.10, 0.00, 0.10];
+    let mut mesh = geometry::MeshGrid::new(20.0, 20.0, 100.0, 100.0, 3, 3, z, 0.2).unwrap();
+    mesh.zero_at(120.0, 120.0);
+    let t = geometry::SurfaceTransform::new(mesh, geometry::Fade::new(1.0, 10.0, 0.0).unwrap());
+
+    let m = line_move([220.0, 20.0, 0.5], [220.0, 220.0, 0.5], 0.0, ctx(1, 150.0)).unwrap();
+    let planned = fit_and_plan(std::slice::from_ref(&m));
+    let start = [220.0, 20.0, 0.5, 0.0];
+    let warped = lower_move(
+        &planned[0].geometry,
+        &planned[0].velocity,
+        0.0,
+        &start,
+        FIT_TOL,
+        &[],
+        Some(&t),
+    )
+    .unwrap();
+
+    let y_pieces = extract_bezier_pieces(&warped.axes[1]);
+    let z_pieces = extract_bezier_pieces(&warped.axes[2]);
+    let eval_axis = |pieces: &[BezierPiece<f64>], time: f64| -> f64 {
+        let p = pieces
+            .iter()
+            .find(|p| (p.u_start..=p.u_end).contains(&time))
+            .expect("time inside the move");
+        eval_piece_any_degree(p, time)
+    };
+    let mut worst = 0.0_f64;
+    for k in 0..=200 {
+        let time = warped.t_end * k as f64 / 200.0;
+        let y = eval_axis(&y_pieces, time);
+        let z = eval_axis(&z_pieces, time);
+        let expected = 0.5 + t.correction_at(220.0, y, 0.5);
+        worst = worst.max((z - expected).abs());
+    }
+    assert!(
+        worst <= 5.0 * FIT_TOL_MM,
+        "pure-Y warped Z drifted {worst} from the surface"
+    );
+}
+
+#[test]
 fn flat_surface_keeps_the_phase_path_with_a_constant_offset() {
     let t = flat_transform(0.15);
     let m = line_move([10.0, 20.0, 0.2], [210.0, 120.0, 0.2], 0.0, ctx(1, 150.0)).unwrap();
