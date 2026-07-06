@@ -276,6 +276,14 @@ pub fn bringup(args: Args) -> EndpointCtx {
     let last_sent_retired: u32 = 0;
     let heartbeat_sent = false;
 
+    // The capture-io thread spawn and the first record-channel buffer are
+    // multi-millisecond stalls under mlockall(MCL_FUTURE); they must happen
+    // before ec_rt_bringup_preop, while no drive is DC-synced and no park
+    // cycle is being pumped on this thread (claim-time Capture::new stalled
+    // the park loop past the sync watchdog and halted the bus at every claim,
+    // bench 2026-07-06).
+    let capture = Capture::new();
+
     let mut server = FrameServer::bind(&socket).expect("bind socket");
     tracing::info!(
         subsystem = "ethercat",
@@ -451,7 +459,6 @@ pub fn bringup(args: Args) -> EndpointCtx {
     );
 
     let gate = TorqueGate::new();
-    let capture = Capture::new();
     let cycle_index: u64 = 0;
     let mailbox = MailboxWorker::spawn(
         FfiSdoBus,
