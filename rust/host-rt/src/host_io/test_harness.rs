@@ -262,11 +262,11 @@ impl ReactorHarness {
         self.reactor.awaiting_response.len()
     }
     pub fn send_seq(&self) -> u64 {
-        self.reactor.send_seq
+        self.reactor.seq_window.send_seq
     }
 
     pub fn feed_ack_all(&self) {
-        let seq_nibble = (self.reactor.send_seq & 0x0F) as u8;
+        let seq_nibble = (self.reactor.seq_window.send_seq & 0x0F) as u8;
         let frame = crate::host_io::wire::build_frame(&[], seq_nibble);
         self.feed_rx(&frame);
     }

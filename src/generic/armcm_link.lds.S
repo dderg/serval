@@ -25,7 +25,7 @@ MEMORY
   // and runtime-engine snapshots so we can read out what state the
   // firmware was in just before a watchdog-triggered reset.
   // Requires runtime enable: PWR->CR2 |= BREN, RCC->AHB4ENR |= BKPRAMEN
-  // (see generic/fault_handler.c::fault_handler_init).
+  // (see generic/diag_boot_report.c::fault_handler_init).
   bkp_ram (rwx) : ORIGIN = 0x38800000 , LENGTH = 4K
 #endif
 }

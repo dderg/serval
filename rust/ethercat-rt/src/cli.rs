@@ -190,5 +190,118 @@ fn arg_val(args: &[String], key: &str) -> Option<String> {
         .and_then(|i| args.get(i + 1).cloned())
 }
 
+pub struct Args {
+    pub ifname: String,
+    pub socket: String,
+    pub cycle_us: i64,
+    pub slaves: Vec<SlaveCfg>,
+    pub rt_cpu: i32,
+    pub rt_prio: i32,
+    pub mailbox_cpu: Option<usize>,
+    pub dynamics: Option<crate::dynamics::DynamicsModel>,
+}
+
+fn load_dynamics_profile(path: &str) -> crate::dynamics::DynamicsModel {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("ec-rt: dynamics profile {path}: {e}");
+        std::process::exit(1);
+    });
+    crate::dynamics::DynamicsModel::from_toml_str(&text).unwrap_or_else(|e| {
+        eprintln!("ec-rt: dynamics profile {path} invalid: {e:?}");
+        std::process::exit(1);
+    })
+}
+
+fn resolve_dynamics(
+    slaves: &[SlaveCfg],
+    node_profile: Option<String>,
+    num_slaves: usize,
+) -> Option<crate::dynamics::DynamicsModel> {
+    let per_slot: Vec<Option<String>> = slaves.iter().map(|s| s.dynamics_profile.clone()).collect();
+    if per_slot.iter().any(Option::is_some) {
+        if node_profile.is_some() {
+            eprintln!(
+                "ec-rt: --dynamics-profile and --slave-dynamics-profile are mutually exclusive"
+            );
+            std::process::exit(1);
+        }
+        if !per_slot.iter().all(Option::is_some) {
+            eprintln!("ec-rt: per-slave dynamics profiles must cover every drive or none");
+            std::process::exit(1);
+        }
+        let parts: Vec<crate::dynamics::DynamicsModel> = per_slot
+            .iter()
+            .map(|p| load_dynamics_profile(p.as_ref().unwrap()))
+            .collect();
+        let model = crate::dynamics::DynamicsModel::block_diagonal(parts).unwrap_or_else(|e| {
+            eprintln!("ec-rt: per-slave dynamics profiles invalid: {e:?}");
+            std::process::exit(1);
+        });
+        if model.n != num_slaves {
+            eprintln!(
+                "ec-rt: per-slave dynamics profiles cover {} axes, endpoint drives {num_slaves}",
+                model.n
+            );
+            std::process::exit(1);
+        }
+        Some(model)
+    } else {
+        node_profile.map(|path| {
+            let model = load_dynamics_profile(&path);
+            if model.n != num_slaves {
+                eprintln!(
+                    "ec-rt: dynamics profile {path} has {} axes, endpoint drives {num_slaves}",
+                    model.n
+                );
+                std::process::exit(1);
+            }
+            model
+        })
+    }
+}
+
+impl Args {
+    pub fn parse() -> Self {
+        let raw: Vec<String> = std::env::args().collect();
+        let ifname = raw.get(1).cloned().unwrap_or_else(|| "eth0".into());
+        let socket =
+            arg_val(&raw, "--socket").unwrap_or_else(|| "/tmp/kalico-ethercat.sock".into());
+        if let Some(events_dir) = arg_val(&raw, "--events-dir") {
+            crate::obs::init(
+                std::path::Path::new(&events_dir),
+                format!("ec-{}", std::process::id()),
+            );
+        }
+        let cycle_us: i64 = arg_val(&raw, "--cycle-us")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(250);
+        let slaves = parse_slaves(&raw).unwrap_or_else(|e| {
+            eprintln!("ec-rt: bad --slave config: {e}");
+            std::process::exit(1);
+        });
+        let num_slaves = slaves.len();
+        let rt_cpu: i32 = arg_val(&raw, "--rt-cpu")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3);
+        let rt_prio: i32 = arg_val(&raw, "--rt-prio")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(80);
+        let mailbox_cpu: Option<usize> =
+            arg_val(&raw, "--mailbox-cpu").and_then(|s| s.parse().ok());
+        let node_profile = arg_val(&raw, "--dynamics-profile");
+        let dynamics = resolve_dynamics(&slaves, node_profile, num_slaves);
+        Args {
+            ifname,
+            socket,
+            cycle_us,
+            slaves,
+            rt_cpu,
+            rt_prio,
+            mailbox_cpu,
+            dynamics,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;

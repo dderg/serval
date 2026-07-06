@@ -22,15 +22,15 @@ fn submit_one(h: &mut ReactorHarness, payload: u8) {
 #[test]
 fn empty_window_snap_advances_both_counters() {
     let mut h = ReactorHarness::new();
-    assert_eq!(h.reactor.send_seq, 1);
-    assert_eq!(h.reactor.receive_seq, 1);
+    assert_eq!(h.reactor.seq_window.send_seq, 1);
+    assert_eq!(h.reactor.seq_window.receive_seq, 1);
     assert!(h.reactor.unacked_window.is_empty());
 
     h.feed_rx(&ack_frame(5));
     h.tick();
 
-    assert_eq!(h.reactor.send_seq, 5);
-    assert_eq!(h.reactor.receive_seq, 5);
+    assert_eq!(h.reactor.seq_window.send_seq, 5);
+    assert_eq!(h.reactor.seq_window.receive_seq, 5);
 }
 
 #[test]
@@ -41,13 +41,13 @@ fn mid_range_mod16_wrap_pops_correct_entries() {
     }
     h.tick();
     assert_eq!(h.unacked_depth(), 12);
-    assert_eq!(h.reactor.send_seq, 13);
-    assert_eq!(h.reactor.receive_seq, 1);
+    assert_eq!(h.reactor.seq_window.send_seq, 13);
+    assert_eq!(h.reactor.seq_window.receive_seq, 1);
 
     h.feed_rx(&ack_frame(12));
     h.tick();
-    assert_eq!(h.reactor.last_ack_seq, 12);
-    assert_eq!(h.reactor.receive_seq, 12);
+    assert_eq!(h.reactor.seq_window.last_ack_seq, 12);
+    assert_eq!(h.reactor.seq_window.receive_seq, 12);
     assert_eq!(h.unacked_depth(), 1);
 
     for p in 13u8..=20 {
@@ -55,21 +55,21 @@ fn mid_range_mod16_wrap_pops_correct_entries() {
     }
     h.tick();
     assert_eq!(h.unacked_depth(), 9);
-    assert_eq!(h.reactor.send_seq, 21);
+    assert_eq!(h.reactor.seq_window.send_seq, 21);
 
     h.feed_rx(&ack_frame(2));
     h.tick();
-    assert_eq!(h.reactor.last_ack_seq, 18);
-    assert_eq!(h.reactor.receive_seq, 18);
+    assert_eq!(h.reactor.seq_window.last_ack_seq, 18);
+    assert_eq!(h.reactor.seq_window.receive_seq, 18);
     assert_eq!(h.unacked_depth(), 3);
 }
 
 #[test]
 fn near_u64_max_decode_does_not_panic() {
     let mut h = ReactorHarness::new();
-    h.reactor.receive_seq = u64::MAX - 5;
-    h.reactor.send_seq = u64::MAX - 5;
-    h.reactor.last_ack_seq = u64::MAX - 6;
+    h.reactor.seq_window.receive_seq = u64::MAX - 5;
+    h.reactor.seq_window.send_seq = u64::MAX - 5;
+    h.reactor.seq_window.last_ack_seq = u64::MAX - 6;
 
     submit_one(&mut h, 0);
     h.tick();
@@ -79,10 +79,10 @@ fn near_u64_max_decode_does_not_panic() {
     let nibble = (target_rseq & 0x0F) as u8;
     h.feed_rx(&ack_frame(nibble));
     h.tick();
-    assert_eq!(h.reactor.last_ack_seq, target_rseq);
-    assert_eq!(h.reactor.receive_seq, target_rseq);
+    assert_eq!(h.reactor.seq_window.last_ack_seq, target_rseq);
+    assert_eq!(h.reactor.seq_window.receive_seq, target_rseq);
 
-    let nibble_behind = ((h.reactor.receive_seq - 8) & 0x0F) as u8;
+    let nibble_behind = ((h.reactor.seq_window.receive_seq - 8) & 0x0F) as u8;
     h.feed_rx(&ack_frame(nibble_behind));
     h.tick();
 }
