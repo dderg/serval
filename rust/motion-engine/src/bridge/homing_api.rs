@@ -499,6 +499,7 @@ impl PyMotionEngine {
             .unwrap_or_else(|p| p.into_inner()) = None;
         *self.homing_run.lock().unwrap_or_else(|p| p.into_inner()) = None;
         *self.homing_result.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.pending_trip.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
     pub(crate) fn trip_deps(&self) -> TripDeps {
         TripDeps {

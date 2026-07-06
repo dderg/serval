@@ -61,6 +61,38 @@ fn eval_piece_degree_seven() {
 }
 
 #[test]
+fn frenet_components_split_dot_and_cross() {
+    // v = (3, 4) (speed 5), f = (1, 2): tangential = (3+8)/5, normal = |6-4|/5.
+    let (tang, norm) = frenet_components(&[3.0], &[4.0], &[1.0], &[2.0]);
+    assert!((tang[0] - 2.2).abs() < 1e-12);
+    assert!((norm[0] - 0.4).abs() < 1e-12);
+}
+
+#[test]
+fn frenet_tangential_is_signed_while_braking() {
+    // f anti-parallel to v: all tangential, negative; no normal component.
+    let (tang, norm) = frenet_components(&[5.0], &[0.0], &[-100.0], &[0.0]);
+    assert_eq!(tang[0], -100.0);
+    assert_eq!(norm[0], 0.0);
+}
+
+#[test]
+fn frenet_components_read_zero_when_stopped() {
+    let (tang, norm) = frenet_components(&[0.0], &[0.0], &[100.0], &[-50.0]);
+    assert_eq!(tang[0], 0.0);
+    assert_eq!(norm[0], 0.0);
+}
+
+#[test]
+fn frenet_components_recover_pure_centripetal_turn() {
+    // Circular motion: v = (0, 2), a = (-8, 0) — a ⟂ v, so the whole
+    // acceleration is centripetal (|a| = v²/r) and none is tangential.
+    let (tang, norm) = frenet_components(&[0.0], &[2.0], &[-8.0], &[0.0]);
+    assert_eq!(tang[0], 0.0);
+    assert_eq!(norm[0], 8.0);
+}
+
+#[test]
 fn eval_piece_length_tolerance_matches_explicit_zero_padding() {
     // A short cubic row (6 floats) must evaluate identically to the same
     // coefficients padded out to degree 7 with trailing zeros.

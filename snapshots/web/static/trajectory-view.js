@@ -14,6 +14,10 @@ export const COLORS = {
   clothoid: "#f5a623",
   vx: "#4a9eff",
   vy: "#4ecb71",
+  vz: "#ab7df8",
+  ve: "#e874c8",
+  tang: "#f5a623",
+  cent: "#4dd0e1",
   scalar: "#ef5350",
   grid: "#22252b",
   axis: "#555",
@@ -25,9 +29,9 @@ export const COLORS = {
 // -- Panel configuration -----------------------------------------------------
 const PANELS = [
   { canvasId: "canvas-path", type: "path" },
-  { canvasId: "canvas-vel", type: "vel", scalarKey: "v_scalar", compXKey: "vx", compYKey: "vy" },
-  { canvasId: "canvas-acc", type: "acc", scalarKey: "a_scalar", compXKey: "ax", compYKey: "ay" },
-  { canvasId: "canvas-jrk", type: "jrk", scalarKey: "j_scalar", compXKey: "jx", compYKey: "jy" },
+  { canvasId: "canvas-vel", type: "vel" },
+  { canvasId: "canvas-acc", type: "acc" },
+  { canvasId: "canvas-jrk", type: "jrk" },
 ];
 
 // Tooltip wording for the derivative-discontinuity impulses drawn on the
@@ -57,6 +61,9 @@ function niceStep(range, targetTicks) {
 
 // -- Helpers -----------------------------------------------------------------
 export function formatNum(v) {
+  // Past six digits a raw integer overflows the 56px axis gutter (jerk runs
+  // into the millions), so switch to compact notation before it clips.
+  if (Math.abs(v) >= 1e6) return v.toExponential(1);
   if (Math.abs(v) >= 1000) return v.toFixed(0);
   if (Math.abs(v) >= 1) return v.toFixed(1);
   if (Math.abs(v) >= 0.01) return v.toFixed(3);
@@ -115,9 +122,17 @@ function findPeaks(scalar) {
 // accessors as passthroughs so call sites stay `data.t()`.
 const ARRAY_KEYS = [
   "raw_x", "raw_y", "kin_x", "kin_y", "t",
-  "vx", "vy", "v_scalar", "ax", "ay", "a_scalar", "jx", "jy", "j_scalar",
+  "vx", "vy", "vz", "ve", "v_scalar",
+  "ax", "ay", "az", "ae", "a_scalar",
+  "jx", "jy", "jz", "je", "j_scalar",
+  "a_tang", "a_cent", "j_tang", "j_cent",
   "jerk_impulse_t", "jerk_impulse_mag", "accel_impulse_t", "accel_impulse_mag",
 ];
+
+function anyNonZero(arr) {
+  for (let i = 0; i < arr.length; i++) if (arr[i] !== 0) return true;
+  return false;
+}
 
 export function memoizeTrajectory(td) {
   const wrap = { free: () => td.free() };
@@ -176,6 +191,10 @@ class PanelRenderer {
     this.canvas.width = this.w * dpr;
     this.canvas.height = this.h * dpr;
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this._applyMargins();
+  }
+
+  _applyMargins() {
     this.plotW = this.w - this.margin.left - this.margin.right;
     this.plotH = this.h - this.margin.top - this.margin.bottom;
     this.cv.style.height = this.plotH + "px";
@@ -362,11 +381,25 @@ class PanelRenderer {
   }
 
   // -- Render time-series panel to buffer ------------------------------------
-  renderTimeBuffer(tMin, tMax, yMin, yMax, compX, compY, scalar, drawPeaks) {
+  // `series` is a list of { arr, color, label, yMax, dash?, scalar?, axis? }
+  // lanes plotted as |value|, each against its own yMax. Entries with
+  // axis:"right" (the E lane, whose magnitudes dwarf or vanish next to XY)
+  // get a secondary right-hand axis; the `scalar` entry is the headline
+  // magnitude trace (wider, carries the peak markers). Hidden entries are
+  // filtered out by the caller.
+  renderTimeBuffer(tMin, tMax, yMin, yMax, series, drawPeaks) {
     const DATA = this.view.data;
+    const right = series.find(s => s.axis === "right");
+    const wantRight = right ? 46 : 14;
+    if (this.margin.right !== wantRight) {
+      this.margin.right = wantRight;
+      this._applyMargins();
+    }
+
     const bctx = this.ctx;
     bctx.clearRect(0, 0, this.w, this.h);
     this._drawGrid(bctx, tMin, tMax, yMin, yMax);
+    if (right) this._drawRightAxis(bctx, 0, right.yMax, right.color);
 
     const t = DATA.t();
     bctx.save();
@@ -374,35 +407,54 @@ class PanelRenderer {
     bctx.rect(this.plotX0, this.plotY0, this.plotW, this.plotH);
     bctx.clip();
 
-    bctx.strokeStyle = COLORS.vx;
-    bctx.lineWidth = 1.0;
-    this._strokeSeries(bctx, t, (i) => Math.abs(compX[i]), tMin, tMax, yMin, yMax);
+    let scalarEntry = null;
+    for (const s of series) {
+      if (s.scalar) { scalarEntry = s; continue; }
+      bctx.strokeStyle = s.color;
+      bctx.lineWidth = 1.0;
+      bctx.setLineDash(s.dash || []);
+      this._strokeSeries(bctx, t, (i) => Math.abs(s.arr[i]), tMin, tMax, yMin, s.yMax);
+    }
+    bctx.setLineDash([]);
 
-    bctx.strokeStyle = COLORS.vy;
-    bctx.lineWidth = 1.0;
-    this._strokeSeries(bctx, t, (i) => Math.abs(compY[i]), tMin, tMax, yMin, yMax);
-
-    bctx.strokeStyle = COLORS.scalar;
-    bctx.lineWidth = 1.2;
-    this._strokeSeries(bctx, t, (i) => scalar[i], tMin, tMax, yMin, yMax);
-
-    // Peak markers
     this._peaks = [];
-    if (drawPeaks) {
-      const peaks = findPeaks(scalar);
-      for (const pi of peaks) {
-        if (t[pi] < tMin || t[pi] > tMax) continue;
-        const px = this.toPixelX(t[pi], tMin, tMax);
-        const py = this.toPixelY(scalar[pi], yMin, yMax);
-        bctx.beginPath();
-        bctx.fillStyle = COLORS.marker;
-        bctx.arc(px, py, 3, 0, Math.PI * 2);
-        bctx.fill();
-        this._peaks.push({ px, py, tVal: t[pi], val: scalar[pi], idx: pi });
+    if (scalarEntry) {
+      const scalar = scalarEntry.arr;
+      bctx.strokeStyle = scalarEntry.color;
+      bctx.lineWidth = 1.2;
+      this._strokeSeries(bctx, t, (i) => scalar[i], tMin, tMax, yMin, yMax);
+
+      if (drawPeaks) {
+        const peaks = findPeaks(scalar);
+        for (const pi of peaks) {
+          if (t[pi] < tMin || t[pi] > tMax) continue;
+          const px = this.toPixelX(t[pi], tMin, tMax);
+          const py = this.toPixelY(scalar[pi], yMin, yMax);
+          bctx.beginPath();
+          bctx.fillStyle = COLORS.marker;
+          bctx.arc(px, py, 3, 0, Math.PI * 2);
+          bctx.fill();
+          this._peaks.push({ px, py, tVal: t[pi], val: scalar[pi], idx: pi });
+        }
       }
     }
 
     bctx.restore();
+  }
+
+  _drawRightAxis(ctx, yMin, yMax, color) {
+    const { plotX0, plotY0, plotW, plotH } = this;
+    ctx.save();
+    ctx.fillStyle = color;
+    ctx.font = "10px 'Courier Prime', monospace";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    const yStep = niceStep(yMax - yMin, Math.max(2, Math.floor(plotH / 50)));
+    for (let y = Math.ceil(yMin / yStep) * yStep; y <= yMax; y += yStep) {
+      const py = plotY0 + plotH - ((y - yMin) / (yMax - yMin)) * plotH;
+      ctx.fillText(formatNum(y), plotX0 + plotW + 4, py);
+    }
+    ctx.restore();
   }
 
   // -- Find nearest peak within pixel radius ---------------------------------
@@ -523,7 +575,19 @@ function computeTimeBounds(data) {
 // pair. Page chrome hooks in via `onChanged`, fired after every data or
 // variant change so the page can sync its own meta/buttons.
 export class TrajectoryView {
-  constructor() {
+  constructor({ hiddenSeriesKey = "snapshotViewer.hiddenSeries" } = {}) {
+    // Per-panel hidden series, toggled by clicking legend chips; persisted so
+    // a preferred view (e.g. XY-scalar-only) survives reloads and case
+    // switches.
+    this.hiddenSeriesKey = hiddenSeriesKey;
+    this.hiddenSeries = { vel: new Set(), acc: new Set(), jrk: new Set() };
+    try {
+      const saved = JSON.parse(localStorage.getItem(hiddenSeriesKey)) || {};
+      for (const type of Object.keys(this.hiddenSeries)) {
+        for (const label of saved[type] || []) this.hiddenSeries[type].add(label);
+      }
+    } catch (e) { /* corrupt storage — start with everything visible */ }
+
     this.timeView = { tMin: 0, tMax: 0 };
     this.pathView = { xMin: 0, xMax: 0, yMin: 0, yMax: 0 };
     this.defaultTimeView = { tMin: 0, tMax: 0 };
@@ -558,6 +622,29 @@ export class TrajectoryView {
     this._setupPathInteraction();
     for (let i = 1; i < this.renderers.length; i++) {
       this._setupTimeInteraction(i);
+    }
+    this._setupLegendToggles();
+  }
+
+  _saveHiddenSeries() {
+    const out = {};
+    for (const [type, set] of Object.entries(this.hiddenSeries)) out[type] = [...set];
+    localStorage.setItem(this.hiddenSeriesKey, JSON.stringify(out));
+  }
+
+  _setupLegendToggles() {
+    for (const type of Object.keys(this.hiddenSeries)) {
+      const el = document.querySelector(`#panel-${type} .panel-label`);
+      el.addEventListener("click", (e) => {
+        const label = e.target.dataset && e.target.dataset.series;
+        if (!label) return;
+        const set = this.hiddenSeries[type];
+        if (set.has(label)) set.delete(label);
+        else set.add(label);
+        this._saveHiddenSeries();
+        this.lastBoundsKey = "";
+        this.scheduleFull();
+      });
     }
   }
 
@@ -603,13 +690,23 @@ export class TrajectoryView {
     const v = this.data.v_scalar()[idx];
     const a = this.data.a_scalar()[idx];
     const j = this.data.j_scalar()[idx];
+    const aTang = this.data.a_tang()[idx];
+    const aCent = this.data.a_cent()[idx];
+    const vz = this.data.vz(), ve = this.data.ve();
+
+    let extra = "";
+    if (anyNonZero(vz)) extra += `<span class="g">vZ=${formatNum(vz[idx])}</span>`;
+    if (anyNonZero(ve)) extra += `<span class="g">vE=${formatNum(ve[idx])}</span>`;
 
     el.innerHTML =
       `<span class="g">t=${formatNum(t)}s</span>` +
       `<span class="v">X=${formatNum(kx)}</span>` +
       `<span class="p">Y=${formatNum(ky)}</span>` +
       `<span class="g">|v|=${formatNum(v)}</span>` +
+      extra +
       `<span class="r">a=${formatNum(a)}</span>` +
+      `<span class="g">a∥=${formatNum(aTang)}</span>` +
+      `<span class="g">a⊥=${formatNum(aCent)}</span>` +
       `<span class="g">j=${formatNum(j)}</span>`;
   }
 
@@ -664,46 +761,101 @@ export class TrajectoryView {
     }
   }
 
+  // Lanes for one derivative panel: X/Y always, Z/E only when the case moves
+  // them, the tangent/normal projection of the XY vector (dashed), and the
+  // |XY| magnitude last so it draws on top. E rides its own right-hand axis.
+  // Hidden state comes from the per-panel legend toggles.
+  _panelSeries(type, xKey, yKey, zKey, eKey, tangKey, centKey, scalarKey) {
+    const DATA = this.data;
+    const series = [
+      { key: xKey, color: COLORS.vx, label: "|X|" },
+      { key: yKey, color: COLORS.vy, label: "|Y|" },
+    ];
+    if (anyNonZero(DATA[zKey]())) series.push({ key: zKey, color: COLORS.vz, label: "|Z|" });
+    if (anyNonZero(DATA[eKey]())) series.push({ key: eKey, color: COLORS.ve, label: "|E|", axis: "right" });
+    if (tangKey) {
+      series.push({ key: tangKey, color: COLORS.tang, dash: [5, 3], label: "∥" });
+      series.push({ key: centKey, color: COLORS.cent, dash: [5, 3], label: "⊥" });
+    }
+    series.push({ key: scalarKey, color: COLORS.scalar, label: "|XY|", scalar: true });
+    for (const s of series) {
+      s.arr = DATA[s.key]();
+      s.hidden = this.hiddenSeries[type].has(s.label);
+    }
+    return series;
+  }
+
+  _updateLegend(type, title, series) {
+    const el = document.querySelector(`#panel-${type} .panel-label`);
+    const entries = series.map(s =>
+      `<span class="lg${s.hidden ? " off" : ""}" data-series="${s.label}"` +
+      ` style="color:${s.color}">${s.label}</span>`
+    );
+    el.innerHTML = `${title}&ensp;${entries.join(" ")}`;
+  }
+
   // -- Render all buffers (only when bounds change) ----------------------------
   renderAll() {
     if (!this.data) return;
     const { tMin, tMax } = this.timeView;
     const { xMin, xMax, yMin, yMax } = this.pathView;
-    const DATA = this.data;
-
-    const vScalar = DATA.v_scalar();
-    const aScalar = DATA.a_scalar();
-    const jScalar = DATA.j_scalar();
 
     // Scale across both variants so blinking before/after keeps a fixed axis —
     // a peak that shrinks must visibly drop, not get renormalized to the top.
-    function visibleMaxOf(data, scalarKey) {
+    // Only visible series count, so hiding a dominant lane rescales the rest;
+    // right-axis (E) series get their own independent scale.
+    function visibleMaxOf(data, key) {
       const dt = data.t();
-      const arr = data[scalarKey]();
+      const arr = data[key]();
       let m = 0;
       for (let i = 0; i < dt.length; i++) {
-        if (dt[i] >= tMin && dt[i] <= tMax && arr[i] > m) m = arr[i];
+        const a = Math.abs(arr[i]);
+        if (dt[i] >= tMin && dt[i] <= tMax && a > m) m = a;
       }
       return m;
     }
-    const visibleMax = (scalarKey) => {
-      let m = visibleMaxOf(this.dataAfter, scalarKey);
-      if (this.dataBefore) m = Math.max(m, visibleMaxOf(this.dataBefore, scalarKey));
+    const visibleMax = (keys) => {
+      let m = 0;
+      for (const key of keys) {
+        m = Math.max(m, visibleMaxOf(this.dataAfter, key));
+        if (this.dataBefore) m = Math.max(m, visibleMaxOf(this.dataBefore, key));
+      }
       return m * 1.15 || 1;
     };
-    const vYMax = visibleMax("v_scalar");
-    const aYMax = visibleMax("a_scalar");
-    const jYMax = visibleMax("j_scalar");
+    function scaleSeries(series) {
+      const shown = series.filter(s => !s.hidden);
+      const axisKeys = (axis) => shown.filter(s => s.axis === axis).map(s => s.key);
+      const leftMax = visibleMax(axisKeys(undefined));
+      const rightMax = visibleMax(axisKeys("right"));
+      for (const s of shown) s.yMax = s.axis === "right" ? rightMax : leftMax;
+      return { shown, leftMax };
+    }
 
-    const key = `${tMin},${tMax},${xMin},${xMax},${yMin},${yMax},${vYMax},${aYMax},${jYMax},${this.variant}`;
+    const velSeries = this._panelSeries("vel", "vx", "vy", "vz", "ve", null, null, "v_scalar");
+    const accSeries = this._panelSeries("acc", "ax", "ay", "az", "ae", "a_tang", "a_cent", "a_scalar");
+    const jrkSeries = this._panelSeries("jrk", "jx", "jy", "jz", "je", "j_tang", "j_cent", "j_scalar");
+    const vel = scaleSeries(velSeries);
+    const acc = scaleSeries(accSeries);
+    const jrk = scaleSeries(jrkSeries);
+
+    const hiddenKey = Object.entries(this.hiddenSeries)
+      .map(([k, v]) => `${k}:${[...v].join("+")}`)
+      .join(";");
+    const key = `${tMin},${tMax},${xMin},${xMax},${yMin},${yMax},` +
+      `${vel.leftMax},${acc.leftMax},${jrk.leftMax},${hiddenKey},${this.variant}`;
     if (key !== this.lastBoundsKey) {
       this.lastBoundsKey = key;
 
-      this.renderers[0].renderPathBuffer(xMin, xMax, yMin, yMax);
-      this.renderers[1].renderTimeBuffer(tMin, tMax, 0, vYMax, DATA.vx(), DATA.vy(), vScalar, this.showPeaks);
-      this.renderers[2].renderTimeBuffer(tMin, tMax, 0, aYMax, DATA.ax(), DATA.ay(), aScalar, this.showPeaks);
-      this.renderers[3].renderTimeBuffer(tMin, tMax, 0, jYMax, DATA.jx(), DATA.jy(), jScalar, this.showPeaks);
+      this._updateLegend("vel", "Velocity", velSeries);
+      this._updateLegend("acc", "Acceleration", accSeries);
+      this._updateLegend("jrk", "Jerk", jrkSeries);
 
+      this.renderers[0].renderPathBuffer(xMin, xMax, yMin, yMax);
+      this.renderers[1].renderTimeBuffer(tMin, tMax, 0, vel.leftMax, vel.shown, this.showPeaks);
+      this.renderers[2].renderTimeBuffer(tMin, tMax, 0, acc.leftMax, acc.shown, this.showPeaks);
+      this.renderers[3].renderTimeBuffer(tMin, tMax, 0, jrk.leftMax, jrk.shown, this.showPeaks);
+
+      const DATA = this.data;
       const drawImpulsesOn = (renderer, times, mags) => {
         let max = 0;
         for (let i = 0; i < mags.length; i++) if (mags[i] > max) max = mags[i];

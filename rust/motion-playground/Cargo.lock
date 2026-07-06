@@ -50,7 +50,6 @@ dependencies = [
 name = "geometry"
 version = "0.1.0"
 dependencies = [
- "gcode",
  "libm",
  "nurbs",
  "thiserror",

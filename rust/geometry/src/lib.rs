@@ -11,7 +11,6 @@ pub mod params;
 pub mod path;
 pub mod segment;
 pub mod splitter;
-pub mod telemetry;
 pub(crate) mod vec3;
 pub mod velocity;
 
@@ -35,7 +34,6 @@ pub struct FollowerWord {
 }
 pub use splitter::{SplitError, split_segment_to_cap};
 
-pub use telemetry::TelemetryEvent;
 pub use velocity::{
     BoundaryState, MoveVelocity, StraightPhase, VelSample, VelocityError, VelocityProfile,
     VelocityReport, plan_velocity_stops, plan_velocity_warm_start,

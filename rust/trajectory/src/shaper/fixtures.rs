@@ -1,6 +1,12 @@
-use crate::fit::FittedSegment;
 use nurbs::bezier::{bezier_pieces_to_nurbs, extract_bezier_pieces, BezierPiece};
 use nurbs::ScalarNurbs;
+
+#[derive(Debug, Clone)]
+pub struct FittedSegment {
+    pub axes: [ScalarNurbs<f64>; 3],
+    pub t_start: f64,
+    pub t_end: f64,
+}
 
 pub fn pad_segment_axis(
     seg_idx: usize,
@@ -245,6 +251,3 @@ fn last_axis_value(seg_idx: usize, axis: usize, fitted: &[FittedSegment]) -> f64
     }
     0.0
 }
-
-#[cfg(test)]
-mod tests;

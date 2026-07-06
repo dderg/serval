@@ -1,7 +1,9 @@
-# Servo calibration toolkit (A6-EC over EtherCAT). Enable with a bare
-# [servo_calibration]; run-invariant values (motor datasheet, stroke window,
-# drive names, excitation grid) live in the config section and every command
-# reads them as overridable defaults.
+# Servo calibration toolkit (A6-EC over EtherCAT). Loaded only when a
+# printer.cfg contains a [servo_calibration] section (typically on the
+# EtherCAT bench, so no config in this repo references it); run-invariant
+# values (motor datasheet, stroke window, drive names, excitation grid) live
+# in the config section and every command reads them as overridable defaults.
+# Command and option reference: docs/rewrite/servo-calibration.md.
 import logging
 import math
 import os

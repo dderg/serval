@@ -6,6 +6,7 @@ from klippy.extras.danger_options import get_danger_options
 from klippy.motion_endstop import AXIS_ENDSTOP_IDS, MotionEndstop
 
 HOMING_POLL_PERIOD = 0.001
+HOMING_TRAVEL_MARGIN_FACTOR = 1.5
 TRIP_DEADLINE_MARGIN = 5.0
 _DRAIN_PAUSE_TIMEOUT = 60.0
 
@@ -183,6 +184,14 @@ def _run_homing_attempts(
             "stuck/miswired endstop" % ("XYZ"[axis], traveled, hi.min_home_dist)
         )
     return trip_pos, final_pos
+
+
+def _homing_max_travel(hi, pos_min, pos_max):
+    if hi.positive_dir:
+        homing_span = hi.position_endstop - pos_min
+    else:
+        homing_span = pos_max - hi.position_endstop
+    return HOMING_TRAVEL_MARGIN_FACTOR * homing_span
 
 
 def _trigger_too_early(traveled, min_home_dist, tolerance):
@@ -417,7 +426,7 @@ class Homing:
         max_travel = (
             max_travel_override
             if max_travel_override is not None
-            else abs(pos_max - pos_min)
+            else _homing_max_travel(hi, pos_min, pos_max)
         )
 
         stepper_enable = self.printer.lookup_object("stepper_enable")

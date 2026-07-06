@@ -190,7 +190,7 @@ function restoreState() {
 async function main() {
   await initWasm();
 
-  view = new TrajectoryView();
+  view = new TrajectoryView({ hiddenSeriesKey: "motionPlayground.hiddenSeries" });
   view.onChanged = syncControls;
   setupSplitter("motionPlayground.pathSplit");
   spawnWorker();

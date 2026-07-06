@@ -47,11 +47,6 @@ impl<T: Float> ArcLengthTable<T> {
             u: &self.u,
         }
     }
-
-    #[must_use]
-    pub fn into_parts(self) -> (Vec<T>, Vec<T>) {
-        (self.s, self.u)
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -299,57 +294,6 @@ pub fn path_arc_length(xyz: &crate::VectorNurbs<f64, 3>) -> f64 {
 
         prev_estimate = Some(sum);
         subintervals *= 2;
-    }
-}
-
-use crate::WireError;
-use crate::wire::{ARC_LENGTH_HEADER_BYTES, FORMAT_VERSION_V1};
-
-impl<'a> ArcLengthTableRef<'a, f32> {
-    pub fn try_from_wire(buf: &'a [u8]) -> Result<Self, WireError> {
-        if (buf.as_ptr() as usize) % core::mem::align_of::<f32>() != 0 {
-            return Err(WireError::Misaligned);
-        }
-        if buf.len() < ARC_LENGTH_HEADER_BYTES {
-            return Err(WireError::TruncatedBuffer {
-                expected_len: ARC_LENGTH_HEADER_BYTES,
-                got: buf.len(),
-            });
-        }
-        let version = buf[0];
-        if version != FORMAT_VERSION_V1 {
-            return Err(WireError::UnknownVersion(version));
-        }
-        let sample_count = u16::from_ne_bytes([buf[2], buf[3]]) as usize;
-        if sample_count < 2 {
-            return Err(WireError::TruncatedBuffer {
-                expected_len: ARC_LENGTH_HEADER_BYTES + 2 * core::mem::size_of::<f32>() * 2,
-                got: buf.len(),
-            });
-        }
-
-        let bytes_per_axis = sample_count * core::mem::size_of::<f32>();
-        let total = ARC_LENGTH_HEADER_BYTES + 2 * bytes_per_axis;
-        if buf.len() < total {
-            return Err(WireError::TruncatedBuffer {
-                expected_len: total,
-                got: buf.len(),
-            });
-        }
-
-        #[allow(unsafe_code)]
-        let (s, u) = unsafe {
-            let s_ptr = buf.as_ptr().add(ARC_LENGTH_HEADER_BYTES).cast::<f32>();
-            let u_ptr = buf
-                .as_ptr()
-                .add(ARC_LENGTH_HEADER_BYTES + bytes_per_axis)
-                .cast::<f32>();
-            (
-                core::slice::from_raw_parts(s_ptr, sample_count),
-                core::slice::from_raw_parts(u_ptr, sample_count),
-            )
-        };
-        Ok(Self::new(s, u))
     }
 }
 
