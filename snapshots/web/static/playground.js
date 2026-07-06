@@ -196,6 +196,12 @@ async function main() {
     document.getElementById(`cfg-${f.id}`).addEventListener("input", schedulePlan);
   }
 
+  document.getElementById("reset-everything").addEventListener("click", () => {
+    for (const key of [STORAGE_KEY, "motionPlayground.hiddenSeries", "motionPlayground.pathSplit"]) {
+      localStorage.removeItem(key);
+    }
+    location.reload();
+  });
   document.getElementById("pin").addEventListener("click", togglePin);
   document.getElementById("toggle-variant").addEventListener("click", () => view.toggleVariant());
   document.getElementById("reset-zoom").addEventListener("click", () => view.resetZoom());
