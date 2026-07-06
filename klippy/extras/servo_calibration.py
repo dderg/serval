@@ -3,6 +3,7 @@
 # drive names, excitation grid) live in the config section and every command
 # reads them as overridable defaults.
 import logging
+import math
 import os
 import subprocess
 import sys
@@ -124,6 +125,7 @@ class ServoCalibration:
             "SERVO_CALIBRATE_GAINS",
             "SERVO_REFINE_GAIN",
             "SERVO_SWEEP_INERTIA",
+            "SERVO_SWEEP_ACCEL",
             "SERVO_SET_STIFFNESS",
         ):
             self.gcode.register_command(
@@ -229,30 +231,112 @@ class ServoCalibration:
         return [r.get_motor_name() for r in self._axis_rails(gcmd, axis)]
 
     def _strokes(self, axis, start, end, speed, accel, iterations, dwell):
+        self._emit_strokes(
+            lambda u: "%s%.3f" % (axis, u),
+            start,
+            end,
+            1.0,
+            speed,
+            accel,
+            iterations,
+            dwell,
+        )
+
+    def _emit_strokes(
+        self,
+        coord,
+        start,
+        end,
+        th_per_unit,
+        speed,
+        accel,
+        iterations,
+        dwell,
+    ):
         if end <= start:
             raise self.gcode.error(
                 "END=%.1f must exceed START=%.1f" % (end, start)
             )
+        length = (end - start) * th_per_unit
         reach = speed * speed / accel
-        if reach > (end - start):
+        if reach > length:
             raise self.gcode.error(
-                "stroke %.0fmm too short to reach %.0fmm/s at %.0fmm/s^2 "
-                "(needs %.1fmm)" % (end - start, speed, accel, reach)
+                "stroke %.1fmm (toolhead frame) too short to reach %.0fmm/s "
+                "at %.0fmm/s^2 (needs %.1fmm)" % (length, speed, accel, reach)
             )
         feed = int(speed * 60)
         lines = ["SET_VELOCITY_LIMIT ACCEL=%.0f" % (accel,), "G90"]
         for _ in range(iterations):
             lines += [
-                "G1 %s%.3f F%d" % (axis, end, feed),
+                "G1 %s F%d" % (coord(end), feed),
                 "M400",
                 "G4 P%d" % (dwell,),
                 "M400",
-                "G1 %s%.3f F%d" % (axis, start, feed),
+                "G1 %s F%d" % (coord(start), feed),
                 "M400",
                 "G4 P%d" % (dwell,),
                 "M400",
             ]
         self.gcode.run_script_from_command("\n".join(lines))
+
+    def _diagonal_rail(self, gcmd, axis):
+        from . import servo_axis
+
+        kin = self.printer.lookup_object("toolhead").get_kinematics()
+        if not kin.coupled_xy():
+            raise gcmd.error(
+                "AXIS=%s runs a CoreXY diagonal - the active kinematics is "
+                "not coupled_xy" % (axis,)
+            )
+        lane = 0 if axis == "A" else 1
+        rail = kin.rails[lane]
+        if not isinstance(rail, servo_axis.ServoRail):
+            raise gcmd.error(
+                "CoreXY lane %d is driven by non-servo rail %r"
+                % (lane, rail.get_name())
+            )
+        return rail
+
+    def _stroke_plan(self, gcmd, axis):
+        if axis in ("A", "B"):
+            rail = self._diagonal_rail(gcmd, axis)
+            x_start, x_end, y_start, y_end = self._xy_bounds(gcmd)
+            xc = (x_start + x_end) / 2.0
+            yc = (y_start + y_end) / 2.0
+            half = min(abs(x_end - x_start), abs(y_end - y_start)) / 2.0
+            start = gcmd.get_float("START", -half)
+            end = gcmd.get_float("END", half)
+            sign = 1.0 if axis == "A" else -1.0
+
+            def coord(u):
+                return "X%.3f Y%.3f" % (xc + u, yc + sign * u)
+
+            return {
+                "coord": coord,
+                "start": start,
+                "end": end,
+                "th_per_unit": math.sqrt(2.0),
+                "servos": [rail.get_motor_name()],
+                "rails": [rail],
+                "prep": ("X", "Y"),
+                "diagonal": True,
+            }
+        start, end = self._axis_bounds(gcmd, axis)
+        rails = self._axis_rails(gcmd, axis)
+
+        def coord(u):
+            return "%s%.3f" % (axis, u)
+
+        return {
+            "coord": coord,
+            "start": start,
+            "end": end,
+            "th_per_unit": 1.0,
+            "servos": [r.get_motor_name() for r in rails],
+            "rails": rails,
+            "prep": (axis,),
+            "diagonal": False,
+        }
 
     def _goto_xy(self, x, y, dwell):
         self.gcode.run_script_from_command(
@@ -333,31 +417,43 @@ class ServoCalibration:
 
     cmd_SERVO_MEASURE_TRACKING_help = (
         "Single accel/speed stroke run with capture - the before/after check "
-        "for any tuning change. Records every motor driving the axis (both "
-        "lanes on CoreXY) and saves a per-motor + combined tracking PNG. "
+        "for any tuning change. AXIS=X/Y records every motor driving the axis "
+        "(both lanes on CoreXY) and saves a per-motor + combined tracking PNG. "
+        "AXIS=A/B run a CoreXY 45-degree diagonal that exercises one motor "
+        "alone (A=+45 x&y up, motor A; B=-45 x up y down, motor B); SPEED is "
+        "the toolhead feedrate, so belt speed is sqrt(2)x SPEED on a diagonal. "
         "Params AXIS START END SPEED ACCEL ITERATIONS DWELL_MS NAME"
     )
 
     def cmd_SERVO_MEASURE_TRACKING(self, gcmd):
         axis = gcmd.get("AXIS", "X").upper()
-        start, end = self._axis_bounds(gcmd, axis)
+        plan = self._stroke_plan(gcmd, axis)
         speed = gcmd.get_float("SPEED", 100.0, above=0.0)
         accel = gcmd.get_float("ACCEL", 3000.0, above=0.0)
         iterations = gcmd.get_int("ITERATIONS", 3, minval=1)
         dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
         name = gcmd.get("NAME", "track")
-        rails = self._axis_rails(gcmd, axis)
-        servos = [r.get_motor_name() for r in rails]
-        self._prep(axis, dwell)
+        servos = plan["servos"]
+        for prep_axis in plan["prep"]:
+            self._prep(prep_axis, dwell)
         self.gcode.run_script_from_command(
             "SERVO_CAPTURE_START SERVO=%s NAME=%s" % (",".join(servos), name)
         )
-        self._strokes(axis, start, end, speed, accel, iterations, dwell)
+        self._emit_strokes(
+            plan["coord"],
+            plan["start"],
+            plan["end"],
+            plan["th_per_unit"],
+            speed,
+            accel,
+            iterations,
+            dwell,
+        )
         self.gcode.run_script_from_command("SERVO_CAPTURE_STOP")
         self._restore()
         report_args = ["--name", name, "--png"]
-        kin = self.printer.lookup_object("toolhead").get_kinematics()
-        if len(rails) == 2 and kin.coupled_xy() and axis in ("X", "Y"):
+        rails = plan["rails"]
+        if not plan["diagonal"] and len(rails) == 2 and axis in ("X", "Y"):
             terms = ",".join(
                 "%s:%d"
                 % (r.get_motor_name(), -1 if r.get_invert_direction() else 1)
@@ -899,6 +995,69 @@ class ServoCalibration:
         self._run(
             gcmd,
             "servo_inertia_report.py",
+            ["--tag", tag, "--steps", ",".join(step_names)],
+            120.0,
+        )
+
+    cmd_SERVO_SWEEP_ACCEL_help = (
+        "Accel sweep to find the max non-saturating acceleration. Runs one "
+        "capture of strokes per ACCELS entry (mm/s^2, comma list, toolhead "
+        "frame) named <TAG>_a<ACCEL>, then renders a torque-saturation report. "
+        "AXIS=X/Y strokes a single axis; AXIS=A/B strokes a CoreXY diagonal so "
+        "one motor carries the whole load (belt accel is sqrt(2)x on a "
+        "diagonal). Restores the velocity limit afterwards (also on failure). "
+        "Params ACCELS AXIS SPEED START END ITERATIONS DWELL_MS TAG"
+    )
+
+    def cmd_SERVO_SWEEP_ACCEL(self, gcmd):
+        axis = gcmd.get("AXIS", "X").upper()
+        plan = self._stroke_plan(gcmd, axis)
+        speed = gcmd.get_float("SPEED", 100.0, above=0.0)
+        iterations = gcmd.get_int("ITERATIONS", 2, minval=1)
+        dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
+        tag = gcmd.get("TAG", "accel")
+        raw = self._floats(gcmd.get("ACCELS", None))
+        if not raw:
+            raise gcmd.error("ACCELS= required (comma list of mm/s^2)")
+        accels = []
+        for a in raw:
+            av = int(a)
+            if av <= 0:
+                raise gcmd.error("accel %d must be positive (mm/s^2)" % (av,))
+            if av not in accels:
+                accels.append(av)
+        accels.sort()
+        servos = plan["servos"]
+        for prep_axis in plan["prep"]:
+            self._prep(prep_axis, dwell)
+        step_names = []
+        try:
+            for i, av in enumerate(accels):
+                step_names.append("%s_a%d" % (tag, av))
+                gcmd.respond_info(
+                    "accel step %d/%d: %d mm/s^2 on %s"
+                    % (i + 1, len(accels), av, ", ".join(servos))
+                )
+                self.gcode.run_script_from_command(
+                    "SERVO_CAPTURE_START SERVO=%s NAME=%s"
+                    % (",".join(servos), step_names[-1])
+                )
+                self._emit_strokes(
+                    plan["coord"],
+                    plan["start"],
+                    plan["end"],
+                    plan["th_per_unit"],
+                    speed,
+                    float(av),
+                    iterations,
+                    dwell,
+                )
+                self.gcode.run_script_from_command("SERVO_CAPTURE_STOP")
+        finally:
+            self._restore()
+        self._run(
+            gcmd,
+            "servo_accel_report.py",
             ["--tag", tag, "--steps", ",".join(step_names)],
             120.0,
         )

@@ -130,6 +130,51 @@ def _settle_index(err, band, hold):
     return int(ok[0]) if len(ok) else None
 
 
+def _longest_true_run(mask):
+    if not mask.any():
+        return 0
+    idx = np.flatnonzero(mask)
+    splits = np.flatnonzero(np.diff(idx) > 1)
+    bounds = np.concatenate(([-1], splits, [len(idx) - 1]))
+    return int(np.max(np.diff(bounds)))
+
+
+def torque_summary(data, torque_limit, fs):
+    """Peak torque and rail detection over the moving samples. The rail is the
+    band within 3% of the observed absolute peak; it counts as a rail only when
+    that peak clears torque_limit (per-mille of rated)."""
+    torque = np.abs(data["torque_actual"].astype(np.int64))
+    ms_per_sample = 1000.0 / fs
+    moving = (data["flags"] & FLAG_MOTION_ACTIVE) != 0
+    moving_n = int(np.count_nonzero(moving))
+    peak = int(torque.max()) if len(torque) else 0
+    summary = {
+        "peak": peak,
+        "peak_pct_rated": peak / 10.0,
+        "moving_samples": moving_n,
+        "rail_detected": False,
+        "rail_level": 0,
+        "rail_samples": 0,
+        "rail_pct_moving": 0.0,
+        "rail_ms": 0.0,
+        "longest_burst_ms": 0.0,
+    }
+    if peak <= torque_limit or moving_n == 0:
+        return summary
+    rail_level = int(round(peak * 0.97))
+    on_rail = (torque >= rail_level) & moving
+    rail_samples = int(np.count_nonzero(on_rail))
+    summary.update(
+        rail_detected=True,
+        rail_level=rail_level,
+        rail_samples=rail_samples,
+        rail_pct_moving=100.0 * rail_samples / moving_n,
+        rail_ms=rail_samples * ms_per_sample,
+        longest_burst_ms=_longest_true_run(on_rail) * ms_per_sample,
+    )
+    return summary
+
+
 def compute_metrics(data, settle_band, torque_limit, fs=1000.0):
     if not len(data):
         raise SystemExit("capture contains no records")
@@ -174,6 +219,7 @@ def compute_metrics(data, settle_band, torque_limit, fs=1000.0):
         "torque_saturation_pct": float(
             100.0 * np.count_nonzero(torque >= torque_limit) / max(len(data), 1)
         ),
+        "torque": torque_summary(data, torque_limit, fs),
         "ferr_crosscheck_max": int(
             np.max(np.abs(recomputed - ferr.astype(np.int64)))
         ),
@@ -232,10 +278,27 @@ def top_peaks(freqs, psd, count=5):
 
 def _print_metrics(m, counts_per_mm):
     print("capture: %d samples, %d move(s)" % (m["samples"], len(m["moves"])))
-    print(
-        "torque saturation: %.1f%% of samples at/above limit"
-        % (m["torque_saturation_pct"],)
-    )
+    tq = m["torque"]
+    if tq["rail_detected"]:
+        print(
+            "torque: peak %d per-mille (%.0f%% rated); >=%d per-mille for "
+            "%.1f%% of moving samples (%d samples, %.0f ms; longest burst "
+            "%.0f ms)"
+            % (
+                tq["peak"],
+                tq["peak_pct_rated"],
+                tq["rail_level"],
+                tq["rail_pct_moving"],
+                tq["rail_samples"],
+                tq["rail_ms"],
+                tq["longest_burst_ms"],
+            )
+        )
+    else:
+        print(
+            "torque: no rail detected (peak %d per-mille, %.0f%% rated)"
+            % (tq["peak"], tq["peak_pct_rated"])
+        )
     print(
         "drive-vs-recomputed following error: max delta %d counts"
         % (m["ferr_crosscheck_max"],)
