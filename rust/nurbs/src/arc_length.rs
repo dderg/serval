@@ -47,11 +47,6 @@ impl<T: Float> ArcLengthTable<T> {
             u: &self.u,
         }
     }
-
-    #[must_use]
-    pub fn into_parts(self) -> (Vec<T>, Vec<T>) {
-        (self.s, self.u)
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -130,9 +125,9 @@ pub(crate) fn integrate_arc_length<T: Float, F: Fn(T) -> T>(
 
 use crate::MIN_PARAMETRIC_SPEED;
 #[cfg(feature = "host")]
-use crate::eval::{eval, vector_derivative, vector_eval};
+use crate::eval::{vector_derivative, vector_eval};
 #[cfg(feature = "host")]
-use crate::{ArcLengthError, NurbsView, VectorNurbsView};
+use crate::{ArcLengthError, VectorNurbsView};
 
 #[inline]
 pub fn param_from_arc_length<T: Float>(table: &ArcLengthTableRef<'_, T>, s: T) -> T {
@@ -215,27 +210,6 @@ pub fn arc_length_from_param<T: Float>(table: &ArcLengthTableRef<'_, T>, u: T) -
 }
 
 #[cfg(feature = "host")]
-pub fn build_arc_length_table_scalar<T: Float, V: NurbsView<T>>(
-    curve: &V,
-    tolerance: T,
-    max_samples: usize,
-) -> Result<ArcLengthTable<T>, ArcLengthError<T>> {
-    let h = T::from_f64(1e-6);
-    let knots = curve.knots();
-    let u_start = knots[0];
-    let u_end = knots[knots.len() - 1];
-
-    let integrand = |u: T| {
-        let u_safe = u.max(u_start + h).min(u_end - h);
-        let plus = eval(curve, u_safe + h);
-        let minus = eval(curve, u_safe - h);
-        ((plus - minus) / (h + h)).abs()
-    };
-
-    build_table_via_integrand(integrand, u_start, u_end, tolerance, max_samples)
-}
-
-#[cfg(feature = "host")]
 pub fn build_arc_length_table_vector<T: Float, V: VectorNurbsView<T, 3>>(
     curve: &V,
     tolerance: T,
@@ -299,57 +273,6 @@ pub fn path_arc_length(xyz: &crate::VectorNurbs<f64, 3>) -> f64 {
 
         prev_estimate = Some(sum);
         subintervals *= 2;
-    }
-}
-
-use crate::WireError;
-use crate::wire::{ARC_LENGTH_HEADER_BYTES, FORMAT_VERSION_V1};
-
-impl<'a> ArcLengthTableRef<'a, f32> {
-    pub fn try_from_wire(buf: &'a [u8]) -> Result<Self, WireError> {
-        if (buf.as_ptr() as usize) % core::mem::align_of::<f32>() != 0 {
-            return Err(WireError::Misaligned);
-        }
-        if buf.len() < ARC_LENGTH_HEADER_BYTES {
-            return Err(WireError::TruncatedBuffer {
-                expected_len: ARC_LENGTH_HEADER_BYTES,
-                got: buf.len(),
-            });
-        }
-        let version = buf[0];
-        if version != FORMAT_VERSION_V1 {
-            return Err(WireError::UnknownVersion(version));
-        }
-        let sample_count = u16::from_ne_bytes([buf[2], buf[3]]) as usize;
-        if sample_count < 2 {
-            return Err(WireError::TruncatedBuffer {
-                expected_len: ARC_LENGTH_HEADER_BYTES + 2 * core::mem::size_of::<f32>() * 2,
-                got: buf.len(),
-            });
-        }
-
-        let bytes_per_axis = sample_count * core::mem::size_of::<f32>();
-        let total = ARC_LENGTH_HEADER_BYTES + 2 * bytes_per_axis;
-        if buf.len() < total {
-            return Err(WireError::TruncatedBuffer {
-                expected_len: total,
-                got: buf.len(),
-            });
-        }
-
-        #[allow(unsafe_code)]
-        let (s, u) = unsafe {
-            let s_ptr = buf.as_ptr().add(ARC_LENGTH_HEADER_BYTES).cast::<f32>();
-            let u_ptr = buf
-                .as_ptr()
-                .add(ARC_LENGTH_HEADER_BYTES + bytes_per_axis)
-                .cast::<f32>();
-            (
-                core::slice::from_raw_parts(s_ptr, sample_count),
-                core::slice::from_raw_parts(u_ptr, sample_count),
-            )
-        };
-        Ok(Self::new(s, u))
     }
 }
 

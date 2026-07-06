@@ -19,10 +19,12 @@ non-finite sample on write).
 
 from __future__ import annotations
 
+import concurrent.futures
 import enum
 import gzip
 import json
 import math
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -196,6 +198,30 @@ def run_case(case: Case) -> dict:
         max_path_deviation=max_path_deviation,
         max_accel_deviation=max_accel_deviation,
     )
+
+
+def _run_case_named(case: Case) -> tuple[str, dict]:
+    return case.name, run_case(case)
+
+
+def run_cases_parallel(cases: list[Case], max_workers: int | None = None):
+    """Snapshot every case, one worker process per core: the engine call is
+    single-threaded Rust holding the GIL, so in-process threads would
+    serialize. Yields `(case, snapshot)` in completion order; a worker's
+    ImportError/ValueError propagates to the consumer.
+    """
+    if len(cases) == 1:
+        yield cases[0], run_case(cases[0])
+        return
+    if max_workers is None:
+        max_workers = min(len(cases), os.cpu_count() or 1)
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=max_workers
+    ) as pool:
+        futures = {pool.submit(_run_case_named, c): c for c in cases}
+        for fut in concurrent.futures.as_completed(futures):
+            _, snapshot = fut.result()
+            yield futures[fut], snapshot
 
 
 def canonical_json(snapshot: dict) -> str:

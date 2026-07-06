@@ -58,6 +58,38 @@ def test_constant_jerk_piece_is_exact():
     assert np.allclose(series["j_scalar"], j)
 
 
+def test_frenet_components_split_dot_and_cross():
+    # v = (3, 4) (speed 5), f = (1, 2): tangential = (3+8)/5, normal = |6-4|/5.
+    tang, norm = viz_pipeline._frenet_components(
+        np.array([3.0]), np.array([4.0]), np.array([1.0]), np.array([2.0])
+    )
+    assert np.allclose(tang, 2.2)
+    assert np.allclose(norm, 0.4)
+
+
+def test_frenet_tangential_is_signed_and_zero_when_stopped():
+    vx = np.array([5.0, 0.0])
+    vy = np.array([0.0, 0.0])
+    fx = np.array([-100.0, 100.0])
+    fy = np.array([0.0, -50.0])
+    tang, norm = viz_pipeline._frenet_components(vx, vy, fx, fy)
+    assert np.allclose(tang, [-100.0, 0.0])
+    assert np.allclose(norm, [0.0, 0.0])
+
+
+def test_straight_accelerating_move_is_purely_tangential():
+    # x(t) = 20t + 500t^2: always moving along +X, accelerating along +X, so
+    # all acceleration is tangential and the centripetal component is zero.
+    snap = _one_piece(0.0, 20.0, 500.0, 0.0, t_end=0.1)
+
+    series = viz_pipeline._build_time_series(snap)
+
+    assert np.allclose(series["a_tang"], series["a_scalar"])
+    assert np.allclose(series["a_cent"], 0.0)
+    assert np.allclose(series["j_tang"], 0.0)
+    assert np.allclose(series["j_cent"], 0.0)
+
+
 def _direct_eval(coeffs, tau):
     # Ground truth independent of viz_pipeline's Horner evaluation: plain
     # term-by-term power sums for pos and its first three derivatives.

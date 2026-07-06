@@ -40,23 +40,6 @@ fn integrate_quadratic_matches_closed_form() {
     assert!((result - 1.0 / 3.0).abs() < 1e-12);
 }
 
-#[cfg(feature = "host")]
-#[allow(clippy::float_cmp)]
-#[test]
-fn build_scalar_table_for_linear_curve() {
-    let curve =
-        crate::ScalarNurbs::try_new(1, vec![0.0_f64, 0.0, 1.0, 1.0], vec![0.0, 1.0]).unwrap();
-    let table = build_arc_length_table_scalar(&curve, 1e-6, 64).unwrap();
-    assert!((table.s_max() - 1.0).abs() < 1e-6);
-    assert_eq!(table.u_max(), 1.0);
-    for w in table.s().windows(2) {
-        assert!(w[1] >= w[0]);
-    }
-    for w in table.u().windows(2) {
-        assert!(w[1] >= w[0]);
-    }
-}
-
 #[allow(clippy::float_cmp)]
 #[test]
 fn param_from_arc_length_at_endpoints() {
@@ -100,52 +83,4 @@ fn build_vector_table_for_3d_linear_curve() {
     .unwrap();
     let table = build_arc_length_table_vector(&curve, 1e-5, 64).unwrap();
     assert!((table.s_max() - 5.0).abs() < 1e-4);
-}
-
-#[test]
-fn try_from_wire_parses_small_table() {
-    let mut buf = Vec::new();
-    buf.extend_from_slice(&[1u8, 0]); // version, reserved
-    buf.extend_from_slice(&3u16.to_ne_bytes()); // sample_count
-    buf.extend_from_slice(&[0u8; 4]); // reserved2
-    for v in [0.0_f32, 0.5, 1.0] {
-        buf.extend_from_slice(&v.to_ne_bytes());
-    }
-    for v in [0.0_f32, 0.6, 1.0] {
-        buf.extend_from_slice(&v.to_ne_bytes());
-    }
-
-    let aligned = test_align(&buf, 4);
-    let r = ArcLengthTableRef::<f32>::try_from_wire(aligned.as_slice()).unwrap();
-    assert_eq!(r.s(), &[0.0_f32, 0.5, 1.0]);
-    assert_eq!(r.u(), &[0.0_f32, 0.6, 1.0]);
-}
-
-struct AlignedBytes {
-    backing: Vec<u32>,
-    len: usize,
-}
-
-impl AlignedBytes {
-    fn as_slice(&self) -> &[u8] {
-        debug_assert!(self.len <= self.backing.len() * core::mem::size_of::<u32>());
-        #[allow(unsafe_code)]
-        unsafe {
-            core::slice::from_raw_parts(self.backing.as_ptr().cast::<u8>(), self.len)
-        }
-    }
-}
-
-fn test_align(data: &[u8], _align: usize) -> AlignedBytes {
-    let n = data.len().div_ceil(4);
-    let mut backing: Vec<u32> = vec![0; n];
-    debug_assert!(data.len() <= n * core::mem::size_of::<u32>());
-    #[allow(unsafe_code)]
-    let bytes: &mut [u8] =
-        unsafe { core::slice::from_raw_parts_mut(backing.as_mut_ptr().cast::<u8>(), n * 4) };
-    bytes[..data.len()].copy_from_slice(data);
-    AlignedBytes {
-        backing,
-        len: data.len(),
-    }
 }

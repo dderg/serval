@@ -223,6 +223,14 @@ impl Fitter {
                     let Element::Run(re) = self.decided.remove(idx) else {
                         unreachable!()
                     };
+                    tracing::warn!(
+                        subsystem = "motion",
+                        event = "arc_run_dissolved",
+                        line_lo = re.facets.first().map_or(0, |m| m.source.start_line),
+                        line_hi = re.facets.last().map_or(0, |m| m.source.start_line),
+                        n_facets = re.facets.len(),
+                        "arc run failed reconstruction; falling back to per-corner blending"
+                    );
                     self.decided
                         .splice(idx..idx, re.facets.into_iter().map(Element::Piece));
                 }

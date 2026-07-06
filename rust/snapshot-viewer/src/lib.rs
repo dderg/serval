@@ -99,8 +99,33 @@ fn scalar_derivative(comp_x: &[f64], comp_y: &[f64]) -> Vec<f64> {
     comp_x
         .iter()
         .zip(comp_y)
-        .map(|(ax, ay)| libm::hypot(ax, *ay))
+        .map(|(ax, ay)| libm::hypot(*ax, *ay))
         .collect()
+}
+
+// Project a per-sample XY vector series onto the velocity's tangent/normal
+// frame: tangential = (v·f)/|v| (signed — negative while braking), normal =
+// |v×f|/|v|. For acceleration this splits speed change from direction change
+// (centripetal); the same projection of jerk shows which of the two is
+// changing. Where the toolhead is stopped the frame is undefined, so both
+// components read zero.
+const FRENET_SPEED_FLOOR: f64 = 1e-9;
+
+fn frenet_components(vx: &[f64], vy: &[f64], fx: &[f64], fy: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let n = vx.len();
+    let mut tang = Vec::with_capacity(n);
+    let mut norm = Vec::with_capacity(n);
+    for i in 0..n {
+        let speed = libm::hypot(vx[i], vy[i]);
+        if speed <= FRENET_SPEED_FLOOR {
+            tang.push(0.0);
+            norm.push(0.0);
+        } else {
+            tang.push((vx[i] * fx[i] + vy[i] * fy[i]) / speed);
+            norm.push((vx[i] * fy[i] - vy[i] * fx[i]).abs() / speed);
+        }
+    }
+    (tang, norm)
 }
 
 // -- Toolhead position (handles legacy format) ------------------------------
@@ -466,7 +491,11 @@ fn time_series_from_position(snap: &Snapshot) -> TimeSeries {
     // Derivatives
     let vx = gradient(&x, &t);
     let vy = gradient(&y, &t);
-    let v_scalar: Vec<f64> = vx.iter().zip(&vy).map(|(vx, vy)| libm::hypot(vx, *vy)).collect();
+    let v_scalar: Vec<f64> = vx
+        .iter()
+        .zip(&vy)
+        .map(|(vx, vy)| libm::hypot(*vx, *vy))
+        .collect();
 
     let ax = gradient(&vx, &t);
     let ay = gradient(&vy, &t);
@@ -575,6 +604,10 @@ pub struct TrajectoryData {
     jz: Vec<f64>,
     je: Vec<f64>,
     j_scalar: Vec<f64>,
+    a_tang: Vec<f64>,
+    a_cent: Vec<f64>,
+    j_tang: Vec<f64>,
+    j_cent: Vec<f64>,
     jerk_impulse_t: Vec<f64>,
     jerk_impulse_mag: Vec<f64>,
     accel_impulse_t: Vec<f64>,
@@ -611,6 +644,9 @@ impl TrajectoryData {
 
         let seam_axis = |v: &Option<Vec<f64>>| v.clone().unwrap_or_default();
 
+        let (a_tang, a_cent) = frenet_components(&ts.vx, &ts.vy, &ts.ax, &ts.ay);
+        let (j_tang, j_cent) = frenet_components(&ts.vx, &ts.vy, &ts.jx, &ts.jy);
+
         Ok(TrajectoryData {
             raw_x: snap.raw_x,
             raw_y: snap.raw_y,
@@ -633,6 +669,10 @@ impl TrajectoryData {
             jz: ts.jz,
             je: ts.je,
             j_scalar: ts.j_scalar,
+            a_tang,
+            a_cent,
+            j_tang,
+            j_cent,
             jerk_impulse_t,
             jerk_impulse_mag,
             accel_impulse_t,
@@ -729,6 +769,21 @@ impl TrajectoryData {
     }
     pub fn je(&self) -> Float64Array {
         Float64Array::from(&self.je[..])
+    }
+
+    // XY acceleration and jerk projected onto the velocity tangent/normal
+    // frame: tangential (signed) and centripetal/normal (magnitude).
+    pub fn a_tang(&self) -> Float64Array {
+        Float64Array::from(&self.a_tang[..])
+    }
+    pub fn a_cent(&self) -> Float64Array {
+        Float64Array::from(&self.a_cent[..])
+    }
+    pub fn j_tang(&self) -> Float64Array {
+        Float64Array::from(&self.j_tang[..])
+    }
+    pub fn j_cent(&self) -> Float64Array {
+        Float64Array::from(&self.j_cent[..])
     }
 
     // Per-axis (x, y, z, e) worst seam continuity jumps. Empty on baselines

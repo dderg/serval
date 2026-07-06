@@ -25,6 +25,39 @@ def test_trigger_too_early_disabled_when_min_zero():
     assert homing_mod._trigger_too_early(0.0, 0.0, 0.5) is False
 
 
+def _hi_for_travel(position_endstop, positive_dir):
+    from klippy.rail import HomingInfo
+
+    return HomingInfo(
+        speed=50.0,
+        position_endstop=position_endstop,
+        retract_speed=25.0,
+        retract_dist=5.0,
+        positive_dir=positive_dir,
+        second_homing_speed=50.0,
+        use_sensorless_homing=False,
+        min_home_dist=0.0,
+        accel=None,
+    )
+
+
+def test_homing_max_travel_positive_dir_pads_span():
+    hi = _hi_for_travel(position_endstop=300.0, positive_dir=True)
+    assert homing_mod._homing_max_travel(hi, 0.0, 300.0) == pytest.approx(450.0)
+
+
+def test_homing_max_travel_negative_dir_pads_span():
+    hi = _hi_for_travel(position_endstop=0.0, positive_dir=False)
+    assert homing_mod._homing_max_travel(hi, 0.0, 300.0) == pytest.approx(450.0)
+
+
+def test_homing_max_travel_endstop_inside_range():
+    hi = _hi_for_travel(position_endstop=-2.0, positive_dir=False)
+    assert homing_mod._homing_max_travel(hi, -5.0, 250.0) == pytest.approx(
+        1.5 * 252.0
+    )
+
+
 class FakeToolhead:
     def __init__(self, pos):
         self.pos = list(pos)

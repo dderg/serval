@@ -187,3 +187,15 @@ debug = false
 [profile.dev]
 opt-level = 1            # eval correctness tests run faster than -O0; still debuggable
 debug = true
+
+# Snapshot-iteration profile: identical float semantics to `release` (Rust
+# never reassociates or contracts FP regardless of opt/LTO settings), but no
+# fat-LTO + single-codegen-unit relink on every planner edit. The snapshot
+# suite validates this empirically — baselines built under `release` compare
+# EXACT against a `snapshot`-profile engine.
+[profile.snapshot]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+debug = false

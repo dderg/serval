@@ -25,7 +25,7 @@ mod float;
 pub use float::Float;
 
 pub mod error;
-pub use error::{AlgebraError, ArcLengthError, ConstructError, KnotError, NurbsError, WireError};
+pub use error::{AlgebraError, ArcLengthError, ConstructError, KnotError, NurbsError};
 
 mod view;
 pub use view::{NurbsView, VectorNurbsView};
@@ -39,8 +39,6 @@ mod vector;
 #[cfg(feature = "host")]
 pub use vector::VectorNurbs;
 pub use vector::VectorNurbsRef;
-
-pub mod wire;
 
 pub mod eval;
 

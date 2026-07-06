@@ -139,7 +139,12 @@ fn get_piece_for_time<F: FaultSink>(
     axis_idx: usize,
     fault: &F,
 ) -> Option<usize> {
+    // mcu-sim: the virtual clock races far ahead of klippy's clock
+    // estimate, so the grace window must absorb sim jitter.
+    #[cfg(not(feature = "mcu-sim"))]
     const MAX_START_IN_PAST_SECS: f32 = 200e-6;
+    #[cfg(feature = "mcu-sim")]
+    const MAX_START_IN_PAST_SECS: f32 = 10.0;
     let drift_budget = (MAX_START_IN_PAST_SECS * cycles_per_second) as u64;
     let fault_tolerance = drift_budget + u64::from(sample_period_cycles);
     loop {

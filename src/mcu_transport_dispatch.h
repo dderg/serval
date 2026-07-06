@@ -31,7 +31,6 @@ void encode_message_header(uint8_t *out, uint16_t kind, uint8_t version,
                            uint32_t correlation_id);
 
 void kalico_reset_epoch_init(void);
-uint32_t kalico_reset_epoch_get(void);
 
 void mcu_transport_emit_fault_event(uint16_t fault_code,
                                     uint32_t fault_detail,

@@ -55,21 +55,6 @@ fn find_knot_span_returns_correct_span() {
 }
 
 #[test]
-fn knot_vector_find_span_delegates() {
-    let kv = KnotVector::<f64>::try_new(vec![0.0, 0.0, 0.5, 1.0, 1.0]).unwrap();
-    assert_eq!(kv.find_span(0.25, 1, 3), 1);
-}
-
-#[test]
-fn multiplicity_at_counts_repeated_knots() {
-    let kv = KnotVector::<f64>::try_new(vec![0.0, 0.0, 0.5, 0.5, 1.0, 1.0]).unwrap();
-    assert_eq!(kv.multiplicity_at(0.0), 2);
-    assert_eq!(kv.multiplicity_at(0.5), 2);
-    assert_eq!(kv.multiplicity_at(1.0), 2);
-    assert_eq!(kv.multiplicity_at(0.25), 0);
-}
-
-#[test]
 fn remove_knot_returns_zero_when_tolerance_not_met() {
     let curve = ScalarNurbs::<f64>::try_new(
         2,

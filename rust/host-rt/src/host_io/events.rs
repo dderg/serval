@@ -26,8 +26,6 @@ pub enum HostEvent {
 
 #[derive(Debug)]
 pub struct TraceRing {
-    #[allow(dead_code)]
-    capacity: usize,
     sticky_overflow: bool,
     subscriber: Option<SyncSender<TraceEvent>>,
     drop_count_since_event: u64,
@@ -35,9 +33,8 @@ pub struct TraceRing {
 }
 
 impl TraceRing {
-    pub fn new(capacity: usize) -> Self {
+    pub fn new(_capacity: usize) -> Self {
         Self {
-            capacity,
             sticky_overflow: false,
             subscriber: None,
             drop_count_since_event: 0,

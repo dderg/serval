@@ -186,7 +186,12 @@ timer_dispatch(void)
                     }
                     fclose(dbg_f);
                 }
+#if !CONFIG_MCU_SIM
+                // Under the sim's virtual clock the MCU races
+                // arbitrarily far ahead of klippy's clock estimate, so
+                // a late timer is sim jitter, not a bug.
                 try_shutdown("Rescheduled timer in the past");
+#endif
             }
             if (sched_check_set_tasks_busy())
                 return;
@@ -241,7 +246,15 @@ timer_init(void)
     }
     // Initialize timespec_to_time() and timespec_from_time()
     struct timespec curtime = timespec_read();
+#if CONFIG_MCU_SIM
+    // Upstream starts the clock at -1s so 32-bit wrap bugs surface right
+    // after boot. In the sim that boot-adjacent wrap collides with the
+    // host clocksync's early rebase and corrupts trip-time resolution
+    // (TODO: root-cause the rebase-across-wrap seam); start at 0 instead.
+    TimerInfo.start_sec = curtime.tv_sec;
+#else
     TimerInfo.start_sec = curtime.tv_sec + 1;
+#endif
     TimerInfo.next_wake = curtime;
     TimerInfo.next_wake_counter = timespec_to_time(curtime);
     // Initialize t_alarm signal based timer

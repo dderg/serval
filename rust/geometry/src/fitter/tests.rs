@@ -1,7 +1,7 @@
 use super::*;
 use crate::frontend::{MoveContext, line_move};
 use crate::path::lowering::PositionProfile;
-use crate::path::{Clothoid, CurvatureProfile};
+use crate::path::{Arc, Clothoid, CurvatureProfile};
 use crate::segment::SourceRange;
 use crate::vec3::dist;
 use std::f64::consts::{PI, SQRT_2};
@@ -237,16 +237,22 @@ fn vanishing_leg_leaves_the_corner_sharp() {
 #[test]
 fn arc_incident_junction_is_left_sharp() {
     let line = seg(1, 3000.0, 5.0, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0);
-    let arc = crate::frontend::arc_move(
-        [10.0, 0.0, 0.0],
-        [15.0, 5.0, 0.0],
-        0.0,
+    let arc_ctx = ctx(2, 3000.0, 5.0);
+    let quarter_arc = Arc::try_new(
+        [10.0, 5.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
         5.0,
-        true,
-        0.0,
-        ctx(2, 3000.0, 5.0),
+        -std::f64::consts::FRAC_PI_2,
+        std::f64::consts::FRAC_PI_2,
     )
     .unwrap();
+    let arc = Move {
+        segment: PathSegment::try_new(Segment::Arc(quarter_arc), Vec::new()).unwrap(),
+        feedrate_mm_s: arc_ctx.feedrate_mm_s,
+        limits: arc_ctx.limits,
+        source: arc_ctx.source,
+    };
     let moves = vec![line, arc];
     let out = fit_corners(&moves, CornerFitConfig::default()).unwrap();
 

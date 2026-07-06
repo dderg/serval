@@ -250,12 +250,6 @@ pub struct MsgProtoParser {
     pub(crate) by_command_name: IndexMap<String, OutboundSpec>,
     pub(crate) enumerations: IndexMap<String, EnumTable>,
     pub(crate) static_strings: HashMap<i32, String>,
-    // TODO: mirrors the MCU identify dict's config/version wire fields; no
-    // consumer reads them yet — pending decision on whether to surface them.
-    #[allow(dead_code)]
-    pub(crate) config: serde_json::Value,
-    #[allow(dead_code)]
-    pub(crate) version: String,
 }
 
 #[derive(Debug)]
@@ -293,8 +287,6 @@ impl MsgProtoParser {
             by_command_name: IndexMap::new(),
             enumerations: IndexMap::new(),
             static_strings: std::collections::HashMap::new(),
-            config: serde_json::json!({}),
-            version: "empty".into(),
         }
     }
 
@@ -402,8 +394,6 @@ impl MsgProtoParser {
             by_command_name,
             enumerations,
             static_strings,
-            config: dict.config,
-            version: dict.version,
         })
     }
 }

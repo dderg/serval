@@ -1,7 +1,6 @@
+use super::fixtures::{pad_segment_axis, FittedSegment};
 use super::*;
-use crate::fit::FittedSegment;
 use crate::kernel::build_smooth_zv_kernel;
-use crate::pad::pad_segment_axis;
 use nurbs::algebra::convolve;
 use nurbs::bezier::{bezier_pieces_to_nurbs, extract_bezier_pieces, BezierPiece};
 

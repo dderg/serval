@@ -153,8 +153,13 @@ kalico_console_write_raw(const uint8_t *buf, uint16_t len)
 void
 console_task(void)
 {
+#if !CONFIG_MCU_SIM
+    // In the sim the runtime tick monopolizes the cooperative scheduler
+    // and irq_wait() never reaches ppoll, so console_wake is never set;
+    // skipping the gate costs one EWOULDBLOCK read() per task round.
     if (!sched_check_wake(&console_wake))
         return;
+#endif
 
     // Read data
     int ret = read(main_pfd[MP_TTY_IDX].fd, &receive_buf[receive_pos]
