@@ -1155,7 +1155,7 @@ fn main() {
                 if let Some((counts, vel_mm_s, acc_mm_s2)) = sampled {
                     sp_counts[s] = Some(counts);
                     let (ff_vel, ff_acc) = if ff_lead_ns[s] > 0 && !buzz.active() {
-                        rings[s].peek_vel_acc(now + ff_lead_ns[s])
+                        rings[s].peek_vel_acc(apply_time + ff_lead_ns[s])
                     } else {
                         (vel_mm_s, acc_mm_s2)
                     };
