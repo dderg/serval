@@ -26,6 +26,13 @@ use super::profile::StraightPhase;
 
 const SUBSTEP_TIME_FRACTION: f64 = 1.0 / 16.0;
 const EVENT_BISECT_ITERS: u32 = 48;
+/// Iterations for the peel-trigger and ride-departure bisections, where every
+/// probe is a full feasibility march. Trigger placement feeds the downstream
+/// piece tiling: 20 iterations demonstrably shifts seams past the lowering's
+/// contiguity slop (seam_accel_feedforward), 24 does not; 32 keeps four
+/// doublings of margin while still cutting a third of the probes from the
+/// crossing solver's 48.
+const TRIGGER_BISECT_ITERS: u32 = 32;
 /// Near-contact snap band, relative: where the peel arc and the cap coincide
 /// (a triangle apex), the gap closes only asymptotically — a slope-matched
 /// state this close to the cap is on it.
@@ -33,14 +40,14 @@ const CONTACT_SNAP_REL: f64 = 1e-5;
 const FEASIBILITY_GUARD_STEPS: u32 = 200_000;
 const CELL_GUARD_STEPS: u32 = 100_000;
 const RANGE_MIN_BLOCK: usize = 64;
-/// During Flight the trajectory is oracle-independent — `peel_feasible` only
-/// decides when to stop flying — so the pass verifies it once per stride and,
-/// on a flip (or an unverified cap landing), rolls back to the last verified
-/// checkpoint and re-marches the window with the per-step oracle. The verdict
-/// is monotone along a flight stretch (the in-step trigger bisection already
-/// relies on that), so the re-march finds the exact trigger the unstrided
-/// pass would and the stride is a pure cost cut.
-const FLIGHT_ORACLE_STRIDE: u32 = 32;
+/// In Ride and Flight the trajectory is oracle-independent — `peel_feasible`
+/// only decides when the mode ends — so the pass verifies it once per stride
+/// and, on a flip or any unverified mode change, rolls back to the last
+/// verified checkpoint and re-marches the window with the per-step oracle.
+/// The verdict is monotone along a stretch (the in-step trigger bisection
+/// already relies on that), so the re-march finds the exact trigger the
+/// unstrided pass would and the stride is a pure cost cut.
+const ORACLE_STRIDE: u32 = 32;
 const POS_EPS_MM: f64 = 1e-12;
 const KAPPA_EPS: f64 = 1e-12;
 
@@ -828,13 +835,14 @@ pub(super) fn reach_pass(
         }
     }
 
-    struct FlightCkpt {
+    struct StrideCkpt {
         st: State,
         i: usize,
+        mode: Mode,
         phases_len: usize,
         open: Option<(State, f64)>,
     }
-    let mut ckpt: Option<FlightCkpt> = None;
+    let mut ckpt: Option<StrideCkpt> = None;
     let mut skip_left: u32 = 0;
     let mut fine_left: u32 = 0;
 
@@ -850,60 +858,64 @@ pub(super) fn reach_pass(
                 st.v = st.v.min(track.cap_v[i]);
                 break;
             }
+            // Rewind to the stride checkpoint and re-march the window with
+            // the per-step oracle; everything a skipped step may have touched
+            // (position in the node loop, phase log, per-node feasibility) is
+            // restored or rewritten by the re-march.
+            macro_rules! rollback {
+                ($c:expr) => {{
+                    let c = $c;
+                    for k in feasible.iter_mut().take(i.min(n - 1) + 1).skip(c.i) {
+                        *k = true;
+                    }
+                    st = c.st;
+                    i = c.i;
+                    mode = c.mode;
+                    log.phases.truncate(c.phases_len);
+                    log.open = c.open;
+                    skip_left = 0;
+                    fine_left = 2 * ORACLE_STRIDE;
+                    continue 'nodes;
+                }};
+            }
             let was = mode;
+            let strided = matches!(mode, Mode::Ride | Mode::Flight);
+            if strided && fine_left == 0 && skip_left == 0 {
+                if peel_feasible(&g, st) {
+                    ckpt = Some(StrideCkpt {
+                        st,
+                        i,
+                        mode,
+                        phases_len: log.phases.len(),
+                        open: log.open,
+                    });
+                    skip_left = ORACLE_STRIDE;
+                } else if let Some(c) = ckpt.take() {
+                    rollback!(c);
+                }
+                // Oracle already false with nothing to rewind to: the checked
+                // step below finds the trigger itself.
+            }
+            let assume = strided && skip_left > 0;
+            if assume {
+                skip_left -= 1;
+            } else {
+                fine_left = fine_left.saturating_sub(1);
+            }
             match mode {
                 Mode::Ride => {
-                    if !ride_step(&g, &mut st, &mut log, &mut mode, i, &mut feasible) {
-                        continue;
-                    }
+                    ride_step(&g, &mut st, &mut log, &mut mode, i, &mut feasible, assume);
                 }
-                Mode::Flight if fine_left > 0 => {
-                    fine_left -= 1;
-                    flight_step(&g, &mut st, &mut log, &mut mode, i, false);
-                }
-                Mode::Flight if skip_left > 0 => {
-                    skip_left -= 1;
-                    flight_step(&g, &mut st, &mut log, &mut mode, i, true);
-                    if mode != Mode::Flight {
-                        // Unverified landing inside the stride window: rewind
-                        // and let the checked march decide.
-                        let c = ckpt
-                            .take()
-                            .expect("strided flight step without a checkpoint");
-                        st = c.st;
-                        i = c.i;
-                        mode = Mode::Flight;
-                        log.phases.truncate(c.phases_len);
-                        log.open = c.open;
-                        skip_left = 0;
-                        fine_left = 2 * FLIGHT_ORACLE_STRIDE;
-                        continue 'nodes;
-                    }
-                }
-                Mode::Flight => {
-                    if peel_feasible(&g, st) {
-                        ckpt = Some(FlightCkpt {
-                            st,
-                            i,
-                            phases_len: log.phases.len(),
-                            open: log.open,
-                        });
-                        skip_left = FLIGHT_ORACLE_STRIDE;
-                        continue;
-                    }
-                    if let Some(c) = ckpt.take() {
-                        st = c.st;
-                        i = c.i;
-                        log.phases.truncate(c.phases_len);
-                        log.open = c.open;
-                        fine_left = 2 * FLIGHT_ORACLE_STRIDE;
-                        continue 'nodes;
-                    }
-                    flight_step(&g, &mut st, &mut log, &mut mode, i, false);
-                }
+                Mode::Flight => flight_step(&g, &mut st, &mut log, &mut mode, i, assume),
                 Mode::Peel => peel_step(&g, &mut st, &mut log, &mut mode, i),
             }
-            if mode != Mode::Flight {
+            if mode != was {
+                if assume {
+                    // Unverified transition inside the stride window: rewind
+                    // and let the checked march decide.
+                    let c = ckpt.take().expect("strided step without a checkpoint");
+                    rollback!(c);
+                }
                 ckpt = None;
                 skip_left = 0;
                 fine_left = 0;
@@ -987,6 +999,7 @@ fn ride_step(
     mode: &mut Mode,
     i: usize,
     feasible: &mut [bool],
+    assume_feasible: bool,
 ) -> bool {
     let track = g.t;
     let cell = i - 1;
@@ -1013,11 +1026,11 @@ fn ride_step(
         feasible[i] = false;
     }
     // Kink lookahead: leaving from the next node must still be feasible.
-    if !peel_feasible(g, next_state) {
+    if !assume_feasible && !peel_feasible(g, next_state) {
         // Departure point within this cell: latest cap state that can still
         // peel tangentially under the kink.
         let (mut lo, mut hi) = (st.s, track.s[i]);
-        for _ in 0..EVENT_BISECT_ITERS {
+        for _ in 0..TRIGGER_BISECT_ITERS {
             let mid = 0.5 * (lo + hi);
             if peel_feasible(g, cap_state(g, *st, mid, cell)) {
                 lo = mid;
@@ -1137,7 +1150,7 @@ fn flight_step(
     }
     // The peel trigger fires inside this step: bisect it.
     let (mut lo, mut hi) = (0.0, dt);
-    for _ in 0..EVENT_BISECT_ITERS {
+    for _ in 0..TRIGGER_BISECT_ITERS {
         let mid = 0.5 * (lo + hi);
         if peel_feasible(g, advance(*st, j_cmd, mid)) {
             lo = mid;

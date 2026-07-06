@@ -21,7 +21,7 @@ const REPLAN_BATCH_MOVES: usize = 64;
 /// trickle-fed planner spends `window / QUIET_PLAN_MIN_MOVES` plan passes per
 /// move — at high move rates this quotient, not the per-plan cost, is what
 /// decides whether planning keeps up with the print.
-const QUIET_PLAN_MIN_MOVES: usize = 16;
+const QUIET_PLAN_MIN_MOVES: usize = 32;
 
 /// Second pipeline stage: plans jerk-limited S-curve velocity over the
 /// incoming geometry and emits `PlannedMove`s whose velocity bodies are final

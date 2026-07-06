@@ -197,30 +197,39 @@ fn members_at<'a, 'b>(
     })
 }
 
-/// Speed ceiling at run-arc `s_run`, the min over every member whose span covers
-/// it. At a curvature-discontinuous seam two members abut, and the ceiling must
-/// honor the tighter side — otherwise the dip's own endpoint (read by the member
-/// that ends there) could overshoot its curvature limit.
-fn vlc_at(members: &[RunMember], s_run: f64) -> f64 {
-    members_at(members, s_run)
-        .map(|(m, local)| {
+/// The per-node constraint arrays `(vlc, accel, kappa)` for ascending grid
+/// arcs `s`: at each node the tightest ceiling and budget, and the largest
+/// curvature, over every member whose span covers it (two at a seam, one in
+/// an interior). At a curvature-discontinuous seam the ceiling must honor
+/// the tighter side — otherwise the dip's own endpoint (read by the member
+/// that ends there) could overshoot its curvature limit. Members tile the
+/// run in order, so a forward walk visits each once instead of scanning the
+/// whole run per node.
+fn constraint_arrays(members: &[RunMember], s: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let mut vlc = Vec::with_capacity(s.len());
+    let mut accel = Vec::with_capacity(s.len());
+    let mut kappa = Vec::with_capacity(s.len());
+    let mut first = 0usize;
+    for &x in s {
+        while first + 1 < members.len()
+            && members[first].fwd_s + members[first].kin.length < x - 1e-9
+        {
+            first += 1;
+        }
+        let mut v = f64::INFINITY;
+        let mut a = f64::INFINITY;
+        let mut k = 0.0_f64;
+        for (m, local) in members_at(&members[first..(first + 2).min(members.len())], x) {
             let kappa_abs = m.kin.kappa_abs(local);
-            m.kin.flat_ceiling.min(limit_speed(kappa_abs, m.kin.accel))
-        })
-        .fold(f64::INFINITY, f64::min)
-}
-
-/// Acceleration budget at `s_run`, tightest across abutting members.
-fn accel_cap(members: &[RunMember], s_run: f64) -> f64 {
-    members_at(members, s_run)
-        .map(|(m, _)| m.kin.accel)
-        .fold(f64::INFINITY, f64::min)
-}
-
-fn kappa_abs_at(members: &[RunMember], s_run: f64) -> f64 {
-    members_at(members, s_run)
-        .map(|(m, local)| m.kin.kappa_abs(local))
-        .fold(0.0, f64::max)
+            v = v.min(m.kin.flat_ceiling.min(limit_speed(kappa_abs, m.kin.accel)));
+            a = a.min(m.kin.accel);
+            k = k.max(kappa_abs);
+        }
+        vlc.push(v);
+        accel.push(a);
+        kappa.push(k);
+    }
+    (vlc, accel, kappa)
 }
 
 /// Per-cell slope-accel of a piecewise-linear-in-`v` cap: `d(v²/2)/ds` of the
@@ -369,9 +378,7 @@ fn reconstruct_flat(
     let exit_v = members[members.len() - 1].exit_v;
     let s = integration_grid(members, entry_v <= VELOCITY_FLOOR, exit_v <= VELOCITY_FLOOR);
     let n = s.len();
-    let vlc: Vec<f64> = s.iter().map(|&x| vlc_at(members, x)).collect();
-    let accel: Vec<f64> = s.iter().map(|&x| accel_cap(members, x)).collect();
-    let kappa: Vec<f64> = s.iter().map(|&x| kappa_abs_at(members, x)).collect();
+    let (vlc, accel, kappa) = constraint_arrays(members, &s);
 
     let jerk = members
         .iter()
@@ -491,9 +498,10 @@ pub(super) fn reconstruct_run(
     for m in members {
         let s0 = m.fwd_s;
         let s1 = m.fwd_s + m.kin.length;
-        let mut local: Vec<(f64, f64, f64)> = flat
+        let lo = flat.partition_point(|p| p.0 < s0 - 1e-9);
+        let hi = flat.partition_point(|p| p.0 <= s1 + 1e-9);
+        let mut local: Vec<(f64, f64, f64)> = flat[lo..hi]
             .iter()
-            .filter(|p| p.0 >= s0 - 1e-9 && p.0 <= s1 + 1e-9)
             .map(|p| ((p.0 - s0).clamp(0.0, m.kin.length), p.1, p.2))
             .collect();
         local.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-12);
