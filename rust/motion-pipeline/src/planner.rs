@@ -159,7 +159,7 @@ impl Planner {
         let stop_before: Vec<bool> = (0..self.moves.len())
             .map(|i| i > 0 && self.stop_at_seam(i))
             .collect();
-        let clock = std::time::Instant::now();
+        let clock = crate::timing::stopwatch();
         let profile = plan_velocity_stops(
             &self.moves,
             &stop_before,
@@ -179,7 +179,7 @@ impl Planner {
             v_barrier = profile.v_barrier,
             entry_v = self.entry.v,
             entry_a = self.entry.a,
-            plan_us = clock.elapsed().as_micros(),
+            plan_us = clock.elapsed_us(),
             t_us = crate::timing::mono_us(),
             "[pipe] plan"
         );
@@ -251,13 +251,13 @@ impl Planner {
     /// The toolhead must be at rest across the seam entering move `i` unless
     /// the path is tangent-continuous there: both sides have spatial bodies
     /// and the exit heading of one is the entry heading of the other (within
-    /// the same collinearity tolerance the fitter blends corners against).
+    /// the same collinearity tolerance the fit stage blends corners against).
     /// Anchoring every non-tangent seam to rest makes a velocity
     /// discontinuity impossible regardless of what produced the moves. The
     /// same principle covers the followers: a seam where an extruding axis's
-    /// `de/ds` would step by more than the fitter's ramp tolerance anchors to
-    /// rest too — the fitter ramps modest steps through its blends (its ramps
-    /// anchor at the neighbors' own ratios, so blended seams pass here by
+    /// `de/ds` would step by more than the fit stage's ramp tolerance anchors
+    /// to rest too — the fit stage ramps modest steps through its blends (its
+    /// ramps anchor at the neighbors' own ratios, so blended seams pass here by
     /// construction), but an abrupt flow change on a collinear continuation
     /// has no corner to ramp through and would otherwise step `ė = r·v` at
     /// full speed.
@@ -278,7 +278,7 @@ impl Planner {
 }
 
 /// Whether any axis extruding on both sides of the seam demands a `de/ds`
-/// step beyond `rel_tol`. Mirrors the fitter's `ExtrusionStep` gate; axes
+/// step beyond `rel_tol`. Mirrors the fit stage's `ExtrusionStep` gate; axes
 /// absent from a side carry ratio zero and are exempt (ramping to or from
 /// zero is always allowed).
 fn follower_rate_step(prev: &Move, next: &Move, rel_tol: f64) -> bool {

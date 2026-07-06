@@ -113,7 +113,7 @@ async function renderPathPreview(canvas, name) {
     if (!resp.ok) return;
     const snap = await resp.json();
 
-    const kx = snap.kin_x, ky = snap.kin_y;
+    const kx = snap.raw_x, ky = snap.raw_y;
     if (!kx || !ky || kx.length < 2) return;
 
     // Compute bounds

@@ -49,7 +49,7 @@ def _open_sim_control():
     if not os.path.exists(sock_path):
         return None
     try:
-        from tools.sim_klippy.orchestrator.sim_control_client import (
+        from tools.sim.emulators.sim_control_client import (
             SimControlClient,
         )
     except ImportError:
@@ -732,10 +732,10 @@ class Motion:
 
     def check_busy(self, eventtime):
         est_print_time = self.mcu.estimated_print_time(eventtime)
-        print_time = max(
-            self._mcu_pending_end_time,
-            est_print_time + self.engine.queued_motion_secs(),
-        )
+        print_time = self._mcu_pending_end_time
+        queued = self.engine.queued_motion_secs()
+        if queued > 0.0:
+            print_time = max(print_time, est_print_time + queued)
         lookahead_empty = print_time <= est_print_time
         return print_time, est_print_time, lookahead_empty
 
@@ -1506,17 +1506,8 @@ class ToolheadShim:
     def register_lookahead_callback(self, callback):
         self.motion.register_lookahead_callback(callback)
 
-    def note_step_generation_scan_time(self, delay, old_delay=0.0):
-        self.motion.flush_step_generation()
-
-    def get_trapq(self):
-        return None
-
     def note_mcu_movequeue_activity(self, mq_time, set_step_gen_time=False):
         self.motion.advance_flush_time(mq_time)
-
-    def limit_next_junction_speed(self, speed):
-        pass
 
     def __getattr__(self, name):
         return getattr(self.motion, name)

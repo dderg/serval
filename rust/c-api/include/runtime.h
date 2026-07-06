@@ -67,8 +67,6 @@ int32_t runtime_configure_axis(struct Runtime *rt,
 
 extern uint32_t runtime_cyccnt_read(void);
 
-int32_t runtime_discard_pending(struct Runtime *rt);
-
 /**
  * Step-output consumer entry for a phase-mode buzz: drive `axis_idx`'s coils
  * to base + `offset_steps` via XDIRECT. Called from `step_output_event` (TIM3
@@ -78,28 +76,13 @@ int32_t runtime_discard_pending(struct Runtime *rt);
  */
 void runtime_emit_xdirect(struct Runtime *rt, uint8_t axis_idx, int32_t offset_steps);
 
-uint32_t runtime_enqueue_success_lo(struct Runtime *rt);
-
 int32_t runtime_gate_pieces(struct Runtime *rt);
-
-double runtime_get_axis_accumulator(struct Runtime *rt, uint8_t oid);
-
-float runtime_get_axis_motor(struct Runtime *rt, uint8_t oid);
-
-uint32_t runtime_get_dispatcher_floor_cycles(void);
 
 int32_t runtime_get_heartbeat(struct Runtime *rt,
                               uint8_t *out_engine_state,
                               uint16_t *out_fault_code,
                               uint32_t *out_retired,
                               uintptr_t max_axes);
-
-void runtime_get_last_timing(struct Runtime *rt,
-                             uint64_t *now_out,
-                             uint64_t *t_start_out,
-                             uint64_t *duration_out);
-
-int32_t runtime_get_occupancy(struct Runtime *rt, uint32_t *out_occupancy, uintptr_t max_axes);
 
 int32_t runtime_get_phase_state(struct Runtime *rt,
                                 uint8_t stepper_oid,
@@ -108,35 +91,15 @@ int32_t runtime_get_phase_state(struct Runtime *rt,
                                 uint16_t *out_phase,
                                 uint8_t *out_settled);
 
-uint32_t runtime_get_sample_period_cycles(void);
-
-uint8_t runtime_get_step_mode(struct Runtime *rt, uint8_t stepper_idx);
-
 int32_t runtime_get_stepper_count(struct Runtime *rt, uint8_t oid);
 
-uint32_t runtime_get_tick_counter(struct Runtime *rt);
-
 uint32_t runtime_get_xdirect_write_count(void);
-
-int32_t runtime_handle_check_blob_version(const uint8_t *payload_ptr, uint32_t payload_len);
 
 struct Runtime *runtime_handle_create(void);
 
 uint32_t runtime_handle_fault_detail(struct Runtime *rt);
 
-float runtime_handle_get_axis_steps_per_mm(struct Runtime *rt, uint8_t oid);
-
 int32_t runtime_handle_last_error(struct Runtime *rt);
-
-uint32_t runtime_handle_last_modulated_duration_lo(struct Runtime *rt);
-
-uint32_t runtime_handle_last_modulated_elapsed_lo(struct Runtime *rt);
-
-uint32_t runtime_handle_last_retire_consumers_after_clear(struct Runtime *rt);
-
-uint32_t runtime_handle_modulated_retire_attempts(struct Runtime *rt);
-
-uint32_t runtime_handle_modulated_retire_successes(struct Runtime *rt);
 
 void runtime_handle_seed_widen(struct Runtime *rt, uint64_t baseline_widened_clock);
 
@@ -144,21 +107,11 @@ uint8_t runtime_handle_status(struct Runtime *rt);
 
 uint32_t runtime_handle_tick_blocker(struct Runtime *rt);
 
-uint32_t runtime_handle_tick_blocker_exc(struct Runtime *rt);
-
 uint32_t runtime_handle_tick_blocker_pc(struct Runtime *rt);
 
 uint32_t runtime_handle_tick_counter(struct Runtime *rt);
 
-uint64_t runtime_handle_widened_now(struct Runtime *rt);
-
 int32_t runtime_install_step_queues(struct Runtime *rt, uint8_t *queues);
-
-uint32_t runtime_last_push_consumers_remaining(struct Runtime *rt);
-
-uint32_t runtime_last_push_x_handle(struct Runtime *rt);
-
-uint32_t runtime_last_push_y_handle(struct Runtime *rt);
 
 uint64_t runtime_now_ticks(struct Runtime *rt);
 
@@ -168,8 +121,6 @@ int32_t runtime_phase_jog_to(struct Runtime *rt,
                              uint8_t stepper_oid,
                              uint16_t target_phase,
                              uint16_t max_microsteps_per_sample);
-
-uint32_t runtime_push_seg_all_unused_lo(struct Runtime *rt);
 
 int32_t runtime_query_motor_state(struct Runtime *rt,
                                   uint8_t *out_slots,
@@ -191,11 +142,6 @@ int32_t runtime_resonance_buzz(struct Runtime *rt,
 int32_t runtime_seed_position(struct Runtime *rt, int32_t x_q16, int32_t y_q16, int32_t z_q16);
 
 int32_t runtime_set_axis_mode(struct Runtime *rt, uint8_t axis_idx, uint8_t new_mode);
-
-int32_t runtime_set_step_mode(struct Runtime *rt,
-                              uint8_t stepper_idx,
-                              uint8_t mode,
-                              uint8_t mcu_supports_phase);
 
 int32_t runtime_set_stepper_offset(struct Runtime *rt,
                                    uint8_t stepper_idx,

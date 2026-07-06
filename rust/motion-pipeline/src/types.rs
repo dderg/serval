@@ -34,7 +34,7 @@ pub enum StreamError {
     /// toolhead where the previous move left it. Real slicer output is always
     /// position-contiguous; a gap means the move stream was stitched wrong
     /// upstream. Caught at ingress so the offending move is named there, not
-    /// as a downstream `ZeroMotion` deep in the fitter.
+    /// as a downstream `ZeroMotion` deep in the fit stage.
     Discontinuity {
         line_no: u32,
         expected: [f64; 3],
@@ -95,13 +95,13 @@ pub struct PipelineHandle {
     pub output: Receiver<ShapedItem>,
 }
 
-/// What flows into the fitter and planner: geometry, the command to stop
+/// What flows into the fit stage and planner: geometry, the command to stop
 /// looking ahead, or an ordered control token. `Drain` makes each stage
-/// resolve and emit everything it is holding — the fitter finalizes runs and
-/// blends, the planner materializes the brake-to-rest — exactly what a closed
-/// input does, but without ending the stream. The stages themselves never
-/// consult a clock or peek at channel occupancy; whoever owns the notion of
-/// time decides when to send `Drain`.
+/// resolve and emit everything it is holding — the fit stage finalizes runs
+/// and blends, the planner materializes the brake-to-rest — exactly what a
+/// closed input does, but without ending the stream. The stages themselves
+/// never consult a clock or peek at channel occupancy; whoever owns the
+/// notion of time decides when to send `Drain`.
 #[derive(Debug)]
 pub enum StreamInput {
     Move(Move),

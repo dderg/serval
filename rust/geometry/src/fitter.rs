@@ -81,7 +81,7 @@ pub enum UnblendReason {
     NoBudget,
     ArcIncident,
     NonSpatial,
-    /// The streaming fitter emitted the upstream move while its input was
+    /// The streaming fit stage emitted the upstream move while its input was
     /// empty, so this junction was cut without a blend: the toolhead must be
     /// at rest across it regardless of what a blend could have achieved.
     StreamCut,
@@ -146,17 +146,6 @@ impl JunctionBlend {
 pub enum JunctionPlan {
     Blend(JunctionBlend),
     Unblended(UnblendReason),
-}
-
-/// Classify a single line-line junction in isolation, exactly as a fresh batch
-/// fit would (full original lengths, no reductions). The streaming fitter's
-/// pairwise primitive.
-pub fn plan_junction(
-    m_in: &Move,
-    m_out: &Move,
-    config: CornerFitConfig,
-) -> Result<JunctionPlan, FitError> {
-    classify_junction(m_in, m_out, config, 0.0, 0.0)
 }
 
 /// The two clothoid-half moves a blend contributes between `m_in` and `m_out`.
@@ -724,7 +713,5 @@ mod tests;
 mod c2_continuity_tests;
 #[cfg(test)]
 mod cruise_onset_tests;
-#[cfg(test)]
-mod integration_pipeline_tests;
 #[cfg(test)]
 mod plan_velocity_bench;

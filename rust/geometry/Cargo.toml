@@ -10,11 +10,7 @@ license.workspace = true
 [dependencies]
 libm = { version = "0.2", default-features = false }
 nurbs = { path = "../nurbs" }
-gcode = { path = "../gcode" }
 thiserror = { workspace = true }
-
-[dev-dependencies]
-proptest = "1.5"
 
 [lints]
 workspace = true

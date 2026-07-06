@@ -70,12 +70,6 @@ kalico_reset_epoch_init(void)
 }
 DECL_INIT(kalico_reset_epoch_init);
 
-uint32_t
-kalico_reset_epoch_get(void)
-{
-    return reset_epoch;
-}
-
 int
 mcu_transport_send_frame(uint8_t channel, const uint8_t *payload,
                             uint16_t payload_len)

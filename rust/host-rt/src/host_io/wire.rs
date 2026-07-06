@@ -1,12 +1,8 @@
-pub const MESSAGE_MIN: usize = 5;
-pub const MESSAGE_HEADER_SIZE: usize = 2;
-pub const MESSAGE_TRAILER_SIZE: usize = 3;
-pub const MESSAGE_SEQ_MASK: u8 = 0x0F;
-pub const MESSAGE_DEST: u8 = 0x10;
-pub const MESSAGE_SYNC: u8 = 0x7E;
-pub const MESSAGE_MAX: usize = 64;
-
 pub use mcu_transport::frame::crc16_ccitt;
+pub use mcu_transport::klipper_frame::{
+    MESSAGE_DEST, MESSAGE_HEADER_SIZE, MESSAGE_MAX, MESSAGE_MIN, MESSAGE_SEQ_MASK, MESSAGE_SYNC,
+    MESSAGE_TRAILER_SIZE,
+};
 
 pub fn build_frame(payload: &[u8], seq: u8) -> Vec<u8> {
     let msglen = MESSAGE_MIN + payload.len();

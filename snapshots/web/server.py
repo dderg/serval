@@ -19,6 +19,7 @@ the committed baseline. Accept writes the current snapshot under baselines/.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import sys
 import threading
@@ -42,12 +43,34 @@ _RENDER_LOCK = threading.Lock()
 class ReviewState:
     """Holds the latest scan and cached rendered PNG bytes."""
 
-    def __init__(self, mode: str):
+    def __init__(self, mode: str, results_dir: Path | None = None):
         self._lock = threading.Lock()
         self.mode = mode
+        self.results_dir = results_dir
         self.cases: dict[str, dict] = {}
         self.error: str | None = None
         self.scan()
+
+    def _load_results(self, discovered):
+        statuses = json.loads((self.results_dir / "status.json").read_text())
+        by_name = {case.name: case for case in discovered}
+        for name, status_value in statuses.items():
+            case = by_name.get(name)
+            if case is None:
+                continue
+            status = harness.Status(status_value)
+            snapshot = None
+            if status is not harness.Status.EXACT:
+                blob = (
+                    self.results_dir / f"{name.replace('/', '__')}.json.gz"
+                ).read_bytes()
+                snapshot = json.loads(gzip.decompress(blob))
+            self.cases[name] = {
+                "case": case,
+                "snapshot": snapshot,
+                "status": status,
+                "png": {},
+            }
 
     def scan(self):
         with self._lock:
@@ -57,6 +80,13 @@ class ReviewState:
                 discovered = harness.discover_cases()
             except Exception as exc:
                 self.error = f"discover failed: {exc}"
+                return
+            if self.results_dir is not None:
+                try:
+                    self._load_results(discovered)
+                except (OSError, ValueError, KeyError) as exc:
+                    self.error = f"loading run results failed: {exc}"
+                    self.cases = {}
                 return
             if self.mode == "baselines":
                 expected = {case.baseline_path.resolve() for case in discovered}
@@ -87,20 +117,18 @@ class ReviewState:
                         "png": {},
                     }
                 return
-            for case in discovered:
-                try:
-                    snapshot = harness.run_case(case)
-                except (ImportError, ValueError) as exc:
-                    self.error = str(exc)
-                    self.cases = {}
-                    return
-                status = harness.compare(case, snapshot)
-                self.cases[case.name] = {
-                    "case": case,
-                    "snapshot": snapshot,
-                    "status": status,
-                    "png": {},
-                }
+            try:
+                for case, snapshot in harness.run_cases_parallel(discovered):
+                    status = harness.compare(case, snapshot)
+                    self.cases[case.name] = {
+                        "case": case,
+                        "snapshot": snapshot,
+                        "status": status,
+                        "png": {},
+                    }
+            except (ImportError, ValueError) as exc:
+                self.error = str(exc)
+                self.cases = {}
 
     def summary(self) -> dict:
         with self._lock:
@@ -178,7 +206,8 @@ class ReviewState:
             for n in targets:
                 entry = self.cases[n]
                 harness.write_baseline(entry["case"], entry["snapshot"])
-        self.scan()
+                entry["status"] = harness.Status.EXACT
+                entry["png"] = {}
         return targets
 
 
@@ -219,6 +248,12 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_static("index.html", "text/html; charset=utf-8")
         elif path == "/viewer.html":
             self._serve_static("viewer.html", "text/html; charset=utf-8")
+        elif path in ("/playground", "/playground.html"):
+            # The playground uses page-relative asset URLs so the static/
+            # directory is hostable as-is; here it must live under /static/.
+            self.send_response(302)
+            self.send_header("Location", "/static/playground.html")
+            self.end_headers()
         elif path.startswith("/static/"):
             self._serve_static(path[len("/static/") :], None)
         elif path == "/api/cases":
@@ -288,6 +323,11 @@ class Handler(BaseHTTPRequestHandler):
                 snapshot = None  # gallery shows committed baselines; no prior
             else:
                 snapshot = harness.baseline_snapshot(entry["case"])
+        # A missing "before" is an expected state (baselines gallery, NEW
+        # case), not an error — 200 null keeps the browser console clean.
+        if snapshot is None and which == "before":
+            self._json(None)
+            return
         if snapshot is None:
             self._json({"error": "no baseline"}, 404)
             return
@@ -317,14 +357,22 @@ def main():
     parser.add_argument(
         "--mode", choices=("review", "baselines"), default="review"
     )
+    parser.add_argument(
+        "--results",
+        type=Path,
+        help="directory of statuses/snapshots written by run.py "
+        "--results-dir; review serves these instead of re-running the cases",
+    )
     args = parser.parse_args()
+    if args.results and args.mode == "baselines":
+        parser.error("--results only applies to review mode")
 
     global STATE, _RENDER_DIR
     import tempfile
 
     with tempfile.TemporaryDirectory(prefix="snapshot-review-") as tmp:
         _RENDER_DIR = Path(tmp)
-        STATE = ReviewState(args.mode)
+        STATE = ReviewState(args.mode, results_dir=args.results)
         if STATE.error:
             print(f"warning: {STATE.error}", file=sys.stderr)
         server = ThreadingHTTPServer((args.host, args.port), Handler)

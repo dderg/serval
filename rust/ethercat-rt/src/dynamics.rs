@@ -9,8 +9,6 @@ struct ProfileFile {
     coulomb_fwd: Vec<f64>,
     coulomb_rev: Vec<f64>,
     coulomb_deadband_mm_s: f64,
-    #[allow(dead_code)]
-    fit_rms_residual: Vec<f64>,
 }
 
 #[derive(Debug)]

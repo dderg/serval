@@ -409,13 +409,8 @@ impl Reactor {
                         completion,
                         p.deadline,
                     ) {
-                        let is_io = matches!(e, TransportError::Io(_));
-                        if is_io {
-                            self.transition_closed_on_io_fault(
-                                "drain_pending_submissions/submission",
-                                &e,
-                            );
-                        }
+                        let is_io =
+                            self.close_if_io_fault("drain_pending_submissions/submission", &e);
                         let _ = p.completion.send(Err(e));
                         if is_io {
                             return;
@@ -433,11 +428,7 @@ impl Reactor {
                         continue;
                     };
                     if let Err(e) = self.dispatch_fire_and_forget(payload, is_get_clock) {
-                        if matches!(e, TransportError::Io(_)) {
-                            self.transition_closed_on_io_fault(
-                                "drain_pending_submissions/fire_and_forget",
-                                &e,
-                            );
+                        if self.close_if_io_fault("drain_pending_submissions/fire_and_forget", &e) {
                             return;
                         }
                         tracing::warn!(
@@ -475,9 +466,7 @@ impl Reactor {
                 .pop_front()
                 .expect("checked non-empty");
             if let Err(e) = self.write_frame(&frame) {
-                if matches!(e, TransportError::Io(_)) {
-                    self.transition_closed_on_io_fault("drain_piece_frames/write_frame", &e);
-                }
+                self.close_if_io_fault("drain_piece_frames/write_frame", &e);
                 if let Some(p) = self.transport_state.pending.remove(&cid) {
                     let _ = p.completion.send(Err(e));
                 }
@@ -905,6 +894,18 @@ impl Reactor {
         self.state = ReactorState::Closed;
     }
 
+    pub(crate) fn close_if_io_fault(
+        &mut self,
+        context: &'static str,
+        error: &TransportError,
+    ) -> bool {
+        let is_io = matches!(error, TransportError::Io(_));
+        if is_io {
+            self.transition_closed_on_io_fault(context, error);
+        }
+        is_io
+    }
+
     fn handle_command(&mut self, cmd: crate::host_io::ReactorCommand) {
         use crate::host_io::ReactorCommand;
         match cmd {
@@ -923,9 +924,7 @@ impl Reactor {
                         completion.clone(),
                         deadline,
                     ) {
-                        if matches!(e, TransportError::Io(_)) {
-                            self.transition_closed_on_io_fault("handle_command/submit", &e);
-                        }
+                        self.close_if_io_fault("handle_command/submit", &e);
                         let _ = completion.send(Err(e));
                     }
                 }
@@ -958,9 +957,7 @@ impl Reactor {
                     completion.clone(),
                     deadline,
                 ) {
-                    if matches!(e, TransportError::Io(_)) {
-                        self.transition_closed_on_io_fault("handle_command/submit_typed", &e);
-                    }
+                    self.close_if_io_fault("handle_command/submit_typed", &e);
                     let _ = completion.send(Err(e));
                 }
             }
@@ -1043,12 +1040,7 @@ impl Reactor {
                             error = %e,
                             "FireAndForget dispatch failed"
                         );
-                        if matches!(e, TransportError::Io(_)) {
-                            self.transition_closed_on_io_fault(
-                                "handle_command/fire_and_forget",
-                                &e,
-                            );
-                        }
+                        self.close_if_io_fault("handle_command/fire_and_forget", &e);
                     }
                 }
                 Err(e) => {
@@ -1069,12 +1061,7 @@ impl Reactor {
                         error = %e,
                         "FireAndForgetTyped: send error"
                     );
-                    if matches!(e, TransportError::Io(_)) {
-                        self.transition_closed_on_io_fault(
-                            "handle_command/fire_and_forget_typed",
-                            &e,
-                        );
-                    }
+                    self.close_if_io_fault("handle_command/fire_and_forget_typed", &e);
                 }
             }
             ReactorCommand::McuIdentify {
@@ -1089,9 +1076,7 @@ impl Reactor {
                 }
                 self.transport_state.identify_pending = Some(completion);
                 if let Err(e) = self.write_frame(&frame) {
-                    if matches!(e, TransportError::Io(_)) {
-                        self.transition_closed_on_io_fault("handle_command/mcu_identify", &e);
-                    }
+                    self.close_if_io_fault("handle_command/mcu_identify", &e);
                     if let Some(c) = self.transport_state.identify_pending.take() {
                         let _ = c.send(Err(e));
                     }
@@ -1139,12 +1124,7 @@ impl Reactor {
                             error = %e,
                             "GetClockAndDeliver dispatch failed"
                         );
-                        if matches!(e, TransportError::Io(_)) {
-                            self.transition_closed_on_io_fault(
-                                "handle_command/get_clock_and_deliver",
-                                &e,
-                            );
-                        }
+                        self.close_if_io_fault("handle_command/get_clock_and_deliver", &e);
                     }
                 }
                 Err(e) => {
@@ -1332,9 +1312,7 @@ impl Reactor {
                         error = ?e,
                         "retransmit error"
                     );
-                    if matches!(e, TransportError::Io(_)) {
-                        self.transition_closed_on_io_fault("tick_once/retransmit", &e);
-                    }
+                    self.close_if_io_fault("tick_once/retransmit", &e);
                 }
             }
         }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -o pipefail
 
-make -f Makefile.rust motion-engine
+make -f Makefile.rust motion-engine-fast
 
 # Ensure cargo/rustup are on PATH (macOS Homebrew or manual installs may not add ~/.cargo/bin)
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -53,6 +53,26 @@ if [ ! -f "$WASM_OUT/snapshot_viewer_bg.wasm" ] || \
   echo "building snapshot-viewer WASM..."
   "$WP" build --target web --release --out-dir "$WASM_OUT" "$SNAPSHOT_VIEWER" 2>&1
 fi
+
+# Build the playground WASM (the pipeline itself, for /playground) if stale.
+# It links half the workspace, so compare against every source it pulls in.
+MOTION_PLAYGROUND="$SCRIPT_DIR/../rust/motion-playground"
+PLAYGROUND_OUT="$SCRIPT_DIR/web/static/wasm-playground"
+playground_stale() {
+  [ ! -f "$PLAYGROUND_OUT/motion_playground_bg.wasm" ] && return 0
+  local newer
+  newer=$(find "$SCRIPT_DIR/../rust" \
+    \( -path "*/motion-playground/src/*" -o -path "*/pipeline-snapshot/src/*" \
+       -o -path "*/motion-pipeline/src/*" -o -path "*/geometry/src/*" \
+       -o -path "*/trajectory/src/*" -o -path "*/nurbs/src/*" \
+       -o -path "*/gcode/src/*" \) \
+    -name "*.rs" -newer "$PLAYGROUND_OUT/motion_playground_bg.wasm" -print -quit)
+  [ -n "$newer" ]
+}
+if playground_stale; then
+  echo "building motion-playground WASM..."
+  "$WP" build --target web --release --out-dir "$PLAYGROUND_OUT" "$MOTION_PLAYGROUND" 2>&1
+fi
 PORT="${SNAPSHOT_PORT:-8765}"
 PYTHON="${PYTHON:-python3}"
 
@@ -82,7 +102,10 @@ if [ "$ci" = 1 ]; then
   exec "$PYTHON" "$SCRIPT_DIR/run.py" "${run_args[@]}"
 fi
 
-if "$PYTHON" "$SCRIPT_DIR/run.py" "${run_args[@]}"; then
+RESULTS_DIR="$(mktemp -d -t snapshot-results)"
+trap 'rm -rf "$RESULTS_DIR"' EXIT
+
+if "$PYTHON" "$SCRIPT_DIR/run.py" --results-dir "$RESULTS_DIR" "${run_args[@]}"; then
   exit 0
 fi
 
@@ -96,9 +119,10 @@ cat <<EOF
 EOF
 
 trap 'exit 130' INT
-"$PYTHON" "$SCRIPT_DIR/web/server.py" --port "$PORT"
+"$PYTHON" "$SCRIPT_DIR/web/server.py" --port "$PORT" --results "$RESULTS_DIR"
 trap - INT
 
 echo
 echo "re-checking snapshots after review..."
-exec "$PYTHON" "$SCRIPT_DIR/run.py" "${run_args[@]}"
+"$PYTHON" "$SCRIPT_DIR/run.py" "${run_args[@]}"
+exit $?

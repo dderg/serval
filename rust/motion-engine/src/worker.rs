@@ -209,7 +209,7 @@ pub(crate) struct MotionPipeline {
 }
 
 /// Boot-time constructor of the entire motion pipeline:
-/// fitter → planner → lowerer → shaper → dispatcher → pump, wired once and
+/// fit stage → planner → lowerer → shaper → dispatcher → pump, wired once and
 /// never torn down. Everything downstream of the ingress — including the pump
 /// thread and the enqueue channel between dispatcher and pump — is owned
 /// here; the bridge only supplies the connection-layer resources.

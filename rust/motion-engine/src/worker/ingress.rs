@@ -12,7 +12,7 @@
 //!    control tokens riding the stream, with barrier rendezvous for the
 //!    replies.
 //!
-//! The stages downstream (fitter → planner → lowerer → shaper) never consult
+//! The stages downstream (fit stage → planner → lowerer → shaper) never consult
 //! a clock; time lives here and in the dispatcher.
 
 use std::sync::Arc;
@@ -170,7 +170,7 @@ impl Ingress {
     /// The pacer's one decision. Called when the inbox is silent while the
     /// pipeline holds undrained moves: with runway beyond the reserve there is
     /// provably time to wait for more input, so report how long; at the
-    /// reserve, send `Drain` so the fitter and planner materialize the
+    /// reserve, send `Drain` so the fit stage and planner materialize the
     /// brake-to-rest and the drained trajectory beats the playhead to the
     /// pump.
     fn drain_or_runway(&mut self) -> Option<Duration> {

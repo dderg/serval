@@ -133,7 +133,6 @@ pub struct PyMotionEngine {
     router: Arc<Mutex<PassthroughRouter>>,
     parser: Arc<Mutex<Option<Arc<MsgProtoParser>>>>,
     mcus: Arc<Mutex<HashMap<u32, McuConnection>>>,
-    #[allow(dead_code)]
     planner: Mutex<Option<StreamWorkerHandle>>,
     planner_config: Mutex<PlannerConfig>,
     commanded_pos: Mutex<[f64; 3]>,
@@ -917,6 +916,16 @@ pub(crate) fn dispatch_endstop_trip(
         Some(r) => r,
     };
     if run.endstop_id != endstop_id || run.endstop_mcu != event_mcu {
+        tracing::warn!(
+            subsystem = "trip-relay",
+            event = "trip_identity_mismatch",
+            mcu = event_mcu,
+            endstop_id,
+            expected_mcu = run.endstop_mcu,
+            expected_endstop_id = run.endstop_id,
+            trip_clock,
+            "terminal report does not match the active homing run — ignored"
+        );
         let mut guard = deps.homing_run.lock().unwrap_or_else(|p| p.into_inner());
         *guard = Some(run);
         return;

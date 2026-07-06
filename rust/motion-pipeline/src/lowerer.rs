@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
 use geometry::path::lowering::PositionProfile;
@@ -76,7 +75,7 @@ pub fn run_lowerer(
             0.0
         };
         rest_hold_pending = false;
-        let clock = Instant::now();
+        let clock = crate::timing::stopwatch();
         let mut seg = lower_move(
             &planned.geometry,
             &planned.velocity,
@@ -114,7 +113,7 @@ pub fn run_lowerer(
             subsystem = "motion",
             event = "pipe_lower",
             line = seg.source_line,
-            lower_us = clock.elapsed().as_micros(),
+            lower_us = clock.elapsed_us(),
             n_pieces = seg
                 .axes
                 .iter()
