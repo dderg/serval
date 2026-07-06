@@ -1006,7 +1006,10 @@ class ServoCalibration:
         "AXIS=X/Y strokes a single axis; AXIS=A/B strokes a CoreXY diagonal so "
         "one motor carries the whole load (belt accel is sqrt(2)x on a "
         "diagonal). Restores the velocity limit afterwards (also on failure). "
-        "Params ACCELS AXIS SPEED START END ITERATIONS DWELL_MS TAG"
+        "TORQUE_LIMIT is the drive's available-torque ceiling in per-mille "
+        "of rated (default 1400); samples at/above it count as railed. "
+        "Params ACCELS AXIS SPEED START END ITERATIONS DWELL_MS TAG "
+        "TORQUE_LIMIT"
     )
 
     def cmd_SERVO_SWEEP_ACCEL(self, gcmd):
@@ -1055,10 +1058,18 @@ class ServoCalibration:
                 self.gcode.run_script_from_command("SERVO_CAPTURE_STOP")
         finally:
             self._restore()
+        torque_limit = gcmd.get_int("TORQUE_LIMIT", 1400, minval=1)
         self._run(
             gcmd,
             "servo_accel_report.py",
-            ["--tag", tag, "--steps", ",".join(step_names)],
+            [
+                "--tag",
+                tag,
+                "--steps",
+                ",".join(step_names),
+                "--torque-limit",
+                "%d" % (torque_limit,),
+            ],
             120.0,
         )
 

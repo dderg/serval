@@ -140,9 +140,11 @@ def _longest_true_run(mask):
 
 
 def torque_summary(data, torque_limit, fs):
-    """Peak torque and rail detection over the moving samples. The rail is the
-    band within 3% of the observed absolute peak; it counts as a rail only when
-    that peak clears torque_limit (per-mille of rated)."""
+    """Peak torque and rail detection over the moving samples. The rail is
+    torque at or above torque_limit (per-mille of rated); set torque_limit to
+    the drive's real available-torque ceiling as measured from a saturating
+    run — proximity to a capture's own peak cannot distinguish a clean torque
+    pulse from a clipped one."""
     torque = np.abs(data["torque_actual"].astype(np.int64))
     ms_per_sample = 1000.0 / fs
     moving = (data["flags"] & FLAG_MOTION_ACTIVE) != 0
@@ -153,15 +155,15 @@ def torque_summary(data, torque_limit, fs):
         "peak_pct_rated": peak / 10.0,
         "moving_samples": moving_n,
         "rail_detected": False,
-        "rail_level": 0,
+        "rail_level": int(torque_limit),
         "rail_samples": 0,
         "rail_pct_moving": 0.0,
         "rail_ms": 0.0,
         "longest_burst_ms": 0.0,
     }
-    if peak <= torque_limit or moving_n == 0:
+    if peak < torque_limit or moving_n == 0:
         return summary
-    rail_level = int(round(peak * 0.97))
+    rail_level = int(torque_limit)
     on_rail = (torque >= rail_level) & moving
     rail_samples = int(np.count_nonzero(on_rail))
     summary.update(
@@ -735,8 +737,9 @@ def main(argv=None):
     p.add_argument(
         "--torque-limit",
         type=int,
-        default=900,
-        help="saturation threshold, per-mille of rated (default 900)",
+        default=1400,
+        help="drive's available-torque ceiling, per-mille of rated "
+        "(default 1400); samples at/above it count as railed",
     )
     p.add_argument(
         "--fft",
