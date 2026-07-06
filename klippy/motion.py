@@ -725,10 +725,10 @@ class Motion:
 
     def check_busy(self, eventtime):
         est_print_time = self.mcu.estimated_print_time(eventtime)
-        print_time = max(
-            self._mcu_pending_end_time,
-            est_print_time + self.engine.queued_motion_secs(),
-        )
+        print_time = self._mcu_pending_end_time
+        queued = self.engine.queued_motion_secs()
+        if queued > 0.0:
+            print_time = max(print_time, est_print_time + queued)
         lookahead_empty = print_time <= est_print_time
         return print_time, est_print_time, lookahead_empty
 
