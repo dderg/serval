@@ -20,7 +20,7 @@ tools/sim/run.sh --branch X test    # any mode against another branch
 tools/sim/run.sh --no-cache         # force full rebuild
 ```
 
-Branch comparison: run the same mode with and without `--branch <base>`; each branch gets its own image tag (`kalico-sim-<branch>`) and its own BuildKit compile caches, so parallel builds don't clobber each other.
+Every build is tagged `kalico-sim-<branch>` (the worktree's branch, or `--branch`'s argument), so agents/sessions on different worktrees build and test in parallel without clobbering each other's images.
 
 ## Writing a new scenario test
 
@@ -69,7 +69,9 @@ Run one test: `tools/sim/run.sh test -k my_scenario`.
 
 ## Build caching
 
-BuildKit cache mounts keyed by branch (`SIM_CACHE_KEY`): Rust target/, per-MCU firmware OUT dirs (out-h7/, out-f4/). Warm rebuild costs: python-only edit ~seconds (firmware stage not invalidated — tools/sim python is deliberately NOT copied into the firmware stage), one C file ~10s, one Rust crate ~seconds. Cold build ~a few minutes.
+No incremental compile caches: cargo target/ and firmware OUT dirs are rebuilt from scratch whenever their stage's sources change (mtime-based incrementalism served stale artifacts in practice — including a firmware ELF speaking an older wire protocol than the host beside it). Skipping unchanged work is Docker's content-addressed layer cache's job. Rebuild costs: nothing changed ~3s (all layers cached), python-only edit ~seconds (firmware stage not invalidated — tools/sim python is deliberately NOT copied into the firmware stage), any C or Rust edit ~1min (full clean recompile of the affected stage). run.sh also touches all source mtimes pre-build to defeat a macOS BuildKit context-scan staleness that served stale file content; this does not defeat layer caching (content-keyed).
+
+If sim behavior ever contradicts the source anyway, byte-grep the built artifacts for a known-new string (`docker run --rm --entrypoint bash <tag> -c "grep -c STRING /kalico/klippy/_motion_engine.so"`) and `docker builder prune -af` if it's wrong.
 
 ## Common issues
 

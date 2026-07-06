@@ -16,13 +16,17 @@ pub const SHADOW_DIVERGENCE_TOL_MM: f64 = 0.01;
 pub enum HistoryError {
     #[error(
         "query host time {queried:.6}s precedes retained motion history for axis \
-         {key:?} (window {window_start:.6}..{window_end:.6}s)"
+         {key:?} (window {window_start:.6}..{window_end:.6}s, {ring_len} pieces \
+         retained, {evicted} evicted, first piece {first_dur_s:.6}s)"
     )]
     BeforeRetainedWindow {
         key: AxisKey,
         queried: f64,
         window_start: f64,
         window_end: f64,
+        ring_len: usize,
+        evicted: u64,
+        first_dur_s: f64,
     },
 
     #[error(
@@ -208,6 +212,7 @@ fn eval_state_by_clock(piece: &HistoryPiece, clock: u64) -> AxisState {
 pub struct HistoryStore {
     rings: HashMap<AxisKey, VecDeque<HistoryPiece>>,
     endpoints: HashMap<AxisKey, AxisEndpoint>,
+    evicted: HashMap<AxisKey, u64>,
     holds_before_ring: HashMap<AxisKey, HoldBeforeRing>,
 }
 
@@ -279,6 +284,7 @@ impl HistoryStore {
         }
         if ring.len() == HISTORY_CAPACITY {
             ring.pop_front();
+            *self.evicted.entry(key).or_default() += 1;
         }
         self.endpoints.insert(key, piece.endpoint());
         ring.push_back(piece);
@@ -289,12 +295,28 @@ impl HistoryStore {
     /// its held position instead of `NoHistoryForAxis` — which the beacon probe
     /// position lookup depends on.
     pub fn drop_pieces_on_reanchor(&mut self) {
+        let dropped: usize = self.rings.values().map(VecDeque::len).sum();
+        tracing::info!(
+            subsystem = "motion",
+            event = "history_drop_on_reanchor",
+            dropped,
+            "[history] stream re-anchored — dropped retained pieces, endpoints held"
+        );
         for ring in self.rings.values_mut() {
             ring.clear();
         }
     }
 
     pub fn rebase_axis(&mut self, key: AxisKey, host: f64, position: f64) {
+        tracing::info!(
+            subsystem = "motion",
+            event = "history_rebase_axis",
+            mcu = key.mcu_id,
+            axis = key.axis,
+            host,
+            position,
+            "[history] axis rebased to an externally set position"
+        );
         self.rings.entry(key).or_default().clear();
         self.holds_before_ring.remove(&key);
         self.endpoints.insert(key, AxisEndpoint { host, position });
@@ -366,6 +388,9 @@ impl HistoryStore {
                         queried: host_t,
                         window_start: ring.front().map_or(0.0, |p| p.start_host),
                         window_end: ring.back().map_or(0.0, |p| p.end_host()),
+                        ring_len: ring.len(),
+                        evicted: self.evicted.get(&key).copied().unwrap_or(0),
+                        first_dur_s: ring.front().map_or(0.0, |p| f64::from(p.duration_secs)),
                     });
                 }
                 let piece = &ring[idx - 1];

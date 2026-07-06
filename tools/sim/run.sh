@@ -29,7 +29,6 @@ GCODE=""
 EXTRA_ARGS=()
 DOCKER_ARGS=(--rm)
 DOCKER_BUILD_ARGS=()
-TAG_SUFFIX=""
 
 case "${1:-}" in
     test|serve|shell)
@@ -42,7 +41,6 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --branch|-b)
             BRANCH="$2"
-            TAG_SUFFIX="-${2//\//-}"
             shift 2
             ;;
         --gcode|-g)
@@ -64,21 +62,30 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-IMAGE_TAG="kalico-sim${TAG_SUFFIX}"
-
-# Cache key partitions the BuildKit compile caches (Rust target/, per-MCU
-# firmware OUT dirs) by branch, so two branches building in parallel get
-# independent caches instead of serializing or clobbering each other.
-CACHE_KEY="${BRANCH:-$(cd "$REPO_ROOT" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo head)}"
-CACHE_KEY="${CACHE_KEY//\//-}"
-DOCKER_BUILD_ARGS+=(--build-arg "SIM_CACHE_KEY=${CACHE_KEY}")
+# The image tag is branch-partitioned so agents/sessions on different
+# worktrees never race on one tag: with a single shared "kalico-sim" tag, a
+# concurrent session could silently retag the image between this session's
+# build and its test run.
+BUILD_BRANCH="${BRANCH:-$(cd "$REPO_ROOT" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo head)}"
+IMAGE_TAG="kalico-sim-${BUILD_BRANCH//\//-}"
 
 echo "=== Kalico Simulator ==="
 echo "  Mode:      $MODE"
-echo "  Branch:    ${BRANCH:-HEAD}"
+echo "  Branch:    ${BUILD_BRANCH}"
 echo "  Image:     $IMAGE_TAG"
-echo "  Cache key: $CACHE_KEY"
 echo ""
+
+if [[ -z "$BRANCH" ]]; then
+    # BuildKit's local context scan trusts mtimes; on macOS file sharing it
+    # has been observed to serve stale file CONTENT for files whose mtimes
+    # it thought it knew — the built image then quietly disagrees with the
+    # worktree. Bumping every source mtime forces a re-read. Layer caching
+    # is unaffected: it keys on content, so untouched-in-content files
+    # still hit cache.
+    (cd "$REPO_ROOT" && find Makefile pyproject.toml src lib scripts klippy rust tools \
+        \( -name target -o -name target-linux -o -name __pycache__ \
+           -o -name third_party_repos \) -prune -o -type f -exec touch {} +)
+fi
 
 if [[ -n "$BRANCH" ]]; then
     # Extract the branch into a unique, self-cleaning staging dir. A unique
