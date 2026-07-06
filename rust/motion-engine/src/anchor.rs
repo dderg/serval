@@ -16,10 +16,11 @@ impl Anchor {
         }
     }
 
-    /// Map a committed segment's stream time onto the absolute host/MCU clock.
-    /// `host_now` is the current playhead (MCU `est_print_time` projected into
-    /// the host-seconds domain). Returns `(t0, fresh)` where the segment's
-    /// absolute start is `t0 + seg_t_start` and `fresh` marks a (re)anchor.
+    /// Map a committed segment's stream time onto the absolute host clock.
+    /// `host_now` is the current playhead in host-monotonic seconds
+    /// (`router.host_now_secs()`); the dispatched lead reconciles against the
+    /// same clock. Returns `(t0, fresh)` where the segment's absolute start is
+    /// `t0 + seg_t_start` and `fresh` marks a (re)anchor.
     ///
     /// The timeline floats ahead of the playhead and is only re-anchored when it
     /// must be: the first segment, a backward jump (idle restart), or a genuine

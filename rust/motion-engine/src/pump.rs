@@ -751,16 +751,21 @@ where
     }
 
     fn run(&mut self, control_rx: Receiver<PumpMsg>, data_rx: Receiver<EnqueueMsg>) {
+        self.run_loop(&control_rx, &data_rx);
+        self.backlog.store(0, Ordering::Release);
+    }
+
+    fn run_loop(&mut self, control_rx: &Receiver<PumpMsg>, data_rx: &Receiver<EnqueueMsg>) {
         loop {
             let poll_ms = self.poll_ms();
             let mut activity = false;
 
-            match self.drain_control(&control_rx) {
+            match self.drain_control(control_rx) {
                 Ok(a) => activity |= a,
                 Err(()) => return,
             }
 
-            activity |= self.drain_data(&data_rx);
+            activity |= self.drain_data(data_rx);
 
             self.check_cohort_deadline();
 
@@ -782,7 +787,7 @@ where
                 continue;
             }
 
-            if self.idle_wait(&control_rx, &data_rx, poll_ms).is_err() {
+            if self.idle_wait(control_rx, data_rx, poll_ms).is_err() {
                 return;
             }
         }
