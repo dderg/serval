@@ -721,6 +721,14 @@ class MCU:
     error = error
 
     def __init__(self, config, clocksync):
+        self._init_identity(config, clocksync)
+        self._init_serial_port(config)
+        self._init_restart_state(config)
+        self._init_config_state()
+        self._init_non_critical(config)
+        self._init_event_handlers()
+
+    def _init_identity(self, config, clocksync):
         self._config = config
         self._printer = printer = config.get_printer()
         self.danger_options = printer.lookup_object("danger_options")
@@ -736,7 +744,8 @@ class MCU:
             self._name = self._name[4:]
         self._motion_engine = printer.lookup_object("motion_engine", None)
         self._engine_handle = None
-        # Serial port
+
+    def _init_serial_port(self, config):
         wp = "mcu '%s': " % (self._name)
         self._serial = serialhdl.SerialReader(
             self._reactor, warn_prefix=wp, mcu=self
@@ -757,7 +766,8 @@ class MCU:
                 or self._serialport.startswith("/tmp/klipper_host_")
             ):
                 self._baud = config.getint("baud", 250000, minval=2400)
-        # Restarts
+
+    def _init_restart_state(self, config):
         restart_methods = [None, "arduino", "cheetah", "command", "rpi_usb"]
         self._restart_method = "command"
         if self._baud:
@@ -770,18 +780,17 @@ class MCU:
         self._is_shutdown = self._is_timeout = False
         self._shutdown_clock = 0
         self._shutdown_msg = ""
-        # Config building
-        printer.lookup_object("pins").register_chip(self._name, self)
+
+    def _init_config_state(self):
+        self._printer.lookup_object("pins").register_chip(self._name, self)
         self._oid_count = 0
         self._config_callbacks = []
         self._config_cmds = []
         self._restart_cmds = []
         self._init_cmds = []
         self._mcu_freq = 0.0
-        # Move command queuing
         self._reserved_move_slots = 0
         self._flush_callbacks = []
-        # Stats
         self._get_status_info = {}
         self._stats_sumsq_base = 0.0
         self._mcu_tick_avg = 0.0
@@ -789,7 +798,7 @@ class MCU:
         self._mcu_tick_awake = 0.0
         self._config_crc = 0
 
-        # noncritical mcus
+    def _init_non_critical(self, config):
         self.is_non_critical = config.getboolean("is_non_critical", False)
         if self.is_non_critical and self.get_name() == "mcu":
             raise error("Primary MCU cannot be marked as non-critical!")
@@ -812,17 +821,20 @@ class MCU:
         self._config_cmds_post_inits = []
         self._init_cmds_post_inits = []
         self._restart_cmds_post_inits = []
-        # Register handlers
-        printer.register_event_handler(
+
+    def _init_event_handlers(self):
+        self._printer.register_event_handler(
             "klippy:firmware_restart", self._firmware_restart
         )
-        printer.register_event_handler(
+        self._printer.register_event_handler(
             "klippy:mcu_identify", self._mcu_identify
         )
-        printer.register_event_handler("klippy:connect", self._connect)
-        printer.register_event_handler("klippy:shutdown", self._shutdown)
-        printer.register_event_handler("klippy:disconnect", self._disconnect)
-        printer.register_event_handler("klippy:ready", self._ready)
+        self._printer.register_event_handler("klippy:connect", self._connect)
+        self._printer.register_event_handler("klippy:shutdown", self._shutdown)
+        self._printer.register_event_handler(
+            "klippy:disconnect", self._disconnect
+        )
+        self._printer.register_event_handler("klippy:ready", self._ready)
 
     # Serial callbacks
     def _handle_mcu_stats(self, params):
@@ -1164,6 +1176,18 @@ class MCU:
             return self._serial.check_connect(self._serialport, self._baud, rts)
 
     def _mcu_identify(self):
+        if not self._identify_check_serial_available():
+            return False
+        self._identify_connect_serial()
+        self._identify_log_and_reserve_pins()
+        self._identify_set_mcu_freq()
+        self._identify_lookup_commands_and_restart_method()
+        self._identify_record_version_info()
+        self._identify_register_responses()
+        self._identify_setup_motion_engine()
+        return True
+
+    def _identify_check_serial_available(self):
         if self.is_non_critical and not self._check_serial_exists():
             self.non_critical_disconnected = True
             if self.is_non_critical:
@@ -1173,6 +1197,9 @@ class MCU:
             self.non_critical_disconnected = False
             if self.is_non_critical:
                 self._get_status_info["non_critical_disconnected"] = False
+            return True
+
+    def _identify_connect_serial(self):
         if self.is_fileoutput():
             self._connect_file()
         else:
@@ -1197,6 +1224,8 @@ class MCU:
                 self._clocksync.connect(self._serial)
             except serialhdl.error as e:
                 raise error(str(e))
+
+    def _identify_log_and_reserve_pins(self):
         if get_danger_options().log_startup_info:
             logging.info(self._log_info())
         ppins = self._printer.lookup_object("pins")
@@ -1205,6 +1234,8 @@ class MCU:
             if cname.startswith("RESERVE_PINS_"):
                 for pin in value.split(","):
                     pin_resolver.reserve_pin(pin, cname[13:])
+
+    def _identify_set_mcu_freq(self):
         self._mcu_freq = self.get_constant_float("CLOCK_FREQ")
         if MAX_NOMINAL_DURATION * self._mcu_freq > MAX_SCHEDULE_TICKS:
             max_possible = MAX_SCHEDULE_TICKS / self._mcu_freq
@@ -1214,6 +1245,8 @@ class MCU:
                 + "of %ds. " % (MAX_NOMINAL_DURATION,)
                 + "Max possible duration: %ds" % (max_possible,)
             )
+
+    def _identify_lookup_commands_and_restart_method(self):
         self._stats_sumsq_base = self.get_constant_float("STATS_SUMSQ_BASE")
         self._emergency_stop_cmd = self.lookup_command("emergency_stop")
         self._reset_cmd = self.try_lookup_command("reset")
@@ -1239,6 +1272,9 @@ class MCU:
             self._printer.register_event_handler(
                 "klippy:firmware_restart", self._firmware_restart_engine
             )
+
+    def _identify_record_version_info(self):
+        msgparser = self._serial.get_msgparser()
         app = msgparser.get_app_info()
         version, build_versions = msgparser.get_version_info()
         self._get_status_info["app"] = app
@@ -1252,9 +1288,13 @@ class MCU:
                 f" It is recommended to re-flash for best compatiblity with Kalico"
             )
 
+    def _identify_register_responses(self):
         self.register_response(self._handle_shutdown, "shutdown")
         self.register_response(self._handle_shutdown, "is_shutdown")
         self.register_response(self._handle_mcu_stats, "stats")
+
+    def _identify_setup_motion_engine(self):
+        msgparser = self._serial.get_msgparser()
         raw_dict = msgparser.get_raw_data_dictionary()
         if self._motion_engine is not None:
             if raw_dict:
@@ -1296,7 +1336,6 @@ class MCU:
                     logging.exception("motion_engine: set_clock_est failed")
 
             self._clocksync.set_clock_est_callback(_engine_clock_est_cb)
-        return True
 
     def _ready(self):
         if self.is_fileoutput():
