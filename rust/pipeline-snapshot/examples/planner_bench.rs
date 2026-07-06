@@ -1,5 +1,5 @@
 //! Offline throughput bench for the streaming planner: drives the real
-//! `Fitter` + `Planner` with the production streaming config over realistic
+//! `FitStage` + `Planner` with the production streaming config over realistic
 //! print paths and reports wall time against the planned motion time. A
 //! ratio below 1.0 means the planner cannot keep up with the print and the
 //! toolhead stalls.
@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use crossbeam_channel::{bounded, unbounded};
 use geometry::MoveVelocity;
-use motion_pipeline::fitter::Fitter;
+use motion_pipeline::fit_stage::FitStage;
 use motion_pipeline::planner::Planner;
 use motion_pipeline::{PlannedItem, StreamConfig, StreamInput};
 
@@ -149,7 +149,7 @@ fn run_fitter(moves: &[geometry::Move], config: &StreamConfig) -> Vec<StreamInpu
     }
     drop(raw_tx);
     let (fitted_tx, fitted_rx) = unbounded();
-    Fitter::new(config.chain).run(raw_rx, fitted_tx);
+    FitStage::new(config.chain).run(raw_rx, fitted_tx);
     fitted_rx.into_iter().collect()
 }
 
