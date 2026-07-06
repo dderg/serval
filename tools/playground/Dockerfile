@@ -1,14 +1,14 @@
-# Playground "printer" image: our klippy + simulated MCUs (from the mcu-sim
+# Playground "printer" image: our klippy + simulated MCUs (from the sim
 # image) PLUS Moonraker + Mainsail + nginx, run together by supervisord — the
 # MainsailOS model in one container. Socket sharing is trivial (one filesystem).
 # VictoriaLogs + Vector are sidecars (see docker-compose.yml).
 #
-# BASE must be a mcu-sim image already built for the branch under test, e.g.
-#   bash tools/mcu-sim/run.sh --branch <branch>     # -> mcu-sim-<branch>
+# BASE must be a sim image already built for the branch under test, e.g.
+#   bash tools/sim/run.sh --branch <branch>     # -> kalico-sim-<branch>
 #   docker build -t playground \
-#     --build-arg BASE=mcu-sim-<branch>:latest \
+#     --build-arg BASE=kalico-sim-<branch>:latest \
 #     -f tools/playground/Dockerfile tools/playground
-ARG BASE=mcu-sim:latest
+ARG BASE=kalico-sim:latest
 FROM ${BASE}
 
 ENV DEBIAN_FRONTEND=noninteractive

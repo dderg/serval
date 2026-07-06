@@ -189,16 +189,17 @@ job_py() {
 }
 
 job_sim() {
-    local sel="sim_unit and not needs_hardware and not needs_renode"
-    local paths="tools/sim_klippy \
+    local sel="sim_unit and not needs_hardware"
+    local paths="tools/sim \
         tools/test_host_io_seq_wrap.py \
+        tools/test_motion_idle_timeout.py \
         tools/test_motion_static.py"
     if command -v docker >/dev/null 2>&1; then
         docker run --rm -v "$ROOT:/klipper" -w /klipper --entrypoint bash "$DOCKER_IMAGE" -lc \
-            "make -C tools/sim_klippy/preload >/dev/null && uv run py.test -n auto $paths -m '$sel'"
+            "make -C tools/sim/preload >/dev/null && uv run py.test -n auto $paths -m '$sel'"
     else
-        echo "docker unavailable — running mcu-sim unit tests on the local interpreter"
-        make -C "$ROOT/tools/sim_klippy/preload" >/dev/null 2>&1 || true
+        echo "docker unavailable — running sim unit tests on the local interpreter"
+        make -C "$ROOT/tools/sim/preload" >/dev/null 2>&1 || true
         cd "$ROOT" && python -m pytest -n auto "$paths" -m "$sel"
     fi
 }

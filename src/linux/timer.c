@@ -186,7 +186,12 @@ timer_dispatch(void)
                     }
                     fclose(dbg_f);
                 }
+#if !CONFIG_MCU_SIM
+                // Under the sim's virtual clock the MCU races
+                // arbitrarily far ahead of klippy's clock estimate, so
+                // a late timer is sim jitter, not a bug.
                 try_shutdown("Rescheduled timer in the past");
+#endif
             }
             if (sched_check_set_tasks_busy())
                 return;

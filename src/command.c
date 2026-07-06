@@ -13,15 +13,22 @@
 #include "board/misc.h" // crc16_ccitt
 #include "board/pgm.h" // READP
 #include "command.h" // output_P
+#include "mcu_demux.h" // mcu_demux_klipper_buf
 #include "sched.h" // sched_is_shutdown
 
 static uint8_t next_sequence = MESSAGE_DEST;
 
+// On >32-bit targets a buffer pointer cannot ride in a uint32_t arg, so
+// it is encoded as an offset from the buffer commands are dispatched
+// from. Since the transport demux landed, that is mcu_demux's klipper
+// buffer — NOT console_receive_buffer(); encoding against the console
+// buffer only round-trips when the linker happens to place the two
+// statics within range, and segfaults otherwise.
 static uint32_t
 command_encode_ptr(void *p)
 {
     if (sizeof(size_t) > sizeof(uint32_t))
-        return p - console_receive_buffer();
+        return (const uint8_t *)p - mcu_demux_klipper_buf();
     return (size_t)p;
 }
 
@@ -29,7 +36,7 @@ void *
 command_decode_ptr(uint32_t v)
 {
     if (sizeof(size_t) > sizeof(uint32_t))
-        return console_receive_buffer() + v;
+        return (void *)(uintptr_t)(mcu_demux_klipper_buf() + v);
     return (void*)(size_t)v;
 }
 

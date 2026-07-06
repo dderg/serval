@@ -49,7 +49,7 @@ def _open_sim_control():
     if not os.path.exists(sock_path):
         return None
     try:
-        from tools.sim_klippy.orchestrator.sim_control_client import (
+        from tools.sim.emulators.sim_control_client import (
             SimControlClient,
         )
     except ImportError:
