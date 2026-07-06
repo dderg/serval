@@ -173,11 +173,13 @@ async function restoreState() {
     state = JSON.parse(localStorage.getItem(STORAGE_KEY));
   } catch (e) { /* corrupted — start fresh */ }
   document.getElementById("gcode").value = state?.gcode || (await defaultGcode());
+  // Always write every field: on reload the browser's form restoration
+  // repopulates typed inputs, which must lose to the saved state — and to
+  // the HTML defaults after a reset.
   for (const f of CONFIG_FIELDS) {
+    const el = document.getElementById(`cfg-${f.id}`);
     const saved = state?.config?.[f.id];
-    if (saved != null && saved !== "") {
-      document.getElementById(`cfg-${f.id}`).value = saved;
-    }
+    el.value = saved != null ? saved : el.defaultValue;
   }
 }
 
@@ -197,9 +199,7 @@ async function main() {
   }
 
   document.getElementById("reset-everything").addEventListener("click", () => {
-    for (const key of [STORAGE_KEY, "motionPlayground.hiddenSeries", "motionPlayground.pathSplit"]) {
-      localStorage.removeItem(key);
-    }
+    localStorage.clear();
     location.reload();
   });
   document.getElementById("pin").addEventListener("click", togglePin);
