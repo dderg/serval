@@ -148,17 +148,6 @@ pub enum JunctionPlan {
     Unblended(UnblendReason),
 }
 
-/// Classify a single line-line junction in isolation, exactly as a fresh batch
-/// fit would (full original lengths, no reductions). The streaming fitter's
-/// pairwise primitive.
-pub fn plan_junction(
-    m_in: &Move,
-    m_out: &Move,
-    config: CornerFitConfig,
-) -> Result<JunctionPlan, FitError> {
-    classify_junction(m_in, m_out, config, 0.0, 0.0)
-}
-
 /// The two clothoid-half moves a blend contributes between `m_in` and `m_out`.
 pub fn blend_moves(
     blend: &JunctionBlend,

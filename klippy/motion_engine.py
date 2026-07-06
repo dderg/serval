@@ -37,8 +37,6 @@ _STUB_MOTION_METHODS = frozenset(
         "set_accel_cap",
         "set_square_corner_velocity",
         "update_post_processor",
-        "fallback_clock_conversions",
-        "dispatched_segment_count",
         "register_phase_bus",
         "register_phase_motor",
         "get_mcu_capabilities",
@@ -362,15 +360,6 @@ class MotionEngineWrapper:
     def take_runtime_event(self, mcu_handle):
         return self._engine.take_runtime_event(mcu_handle)
 
-    def on_credit_freed(
-        self, mcu_handle, retired_through_segment_id, free_slots
-    ):
-        return self._engine.on_credit_freed(
-            mcu_handle,
-            retired_through_segment_id,
-            free_slots,
-        )
-
     def set_msgproto_dict(self, dict_json):
         return self._engine.set_msgproto_dict(dict_json)
 
@@ -509,12 +498,6 @@ class MotionEngineWrapper:
 
     def motion_lead_secs(self):
         return self._engine.motion_lead_secs()
-
-    def fallback_clock_conversions(self):
-        return self._engine.fallback_clock_conversions()
-
-    def dispatched_segment_count(self):
-        return self._engine.dispatched_segment_count()
 
     def motion_state_at(self, mcu, clock=None, print_time=None):
         if (clock is None) == (print_time is None):

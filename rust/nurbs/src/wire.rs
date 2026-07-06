@@ -1,6 +1,6 @@
 pub const FORMAT_VERSION_V1: u8 = 0x01;
 
-#[allow(dead_code)]
+#[allow(dead_code)] // referenced only inside `const _` asserts, which the lint does not credit
 const MAX_SCALAR_ALIGN_BYTES: usize = core::mem::align_of::<f64>();
 pub const SCALAR_HEADER_BYTES: usize = 8;
 pub const VECTOR_HEADER_BYTES: usize = 8;

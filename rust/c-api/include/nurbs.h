@@ -64,8 +64,6 @@ int32_t runtime_configure_axis(nurbs_Runtime *rt,
                                const nurbs_StepperBindingRust *bindings_ptr,
                                uint8_t stepper_count);
 
-int32_t runtime_discard_pending(nurbs_Runtime *rt);
-
 /**
  * Step-output consumer entry for a phase-mode buzz: drive `axis_idx`'s coils
  * to base + `offset_steps` via XDIRECT. Called from `step_output_event` (TIM3
@@ -75,28 +73,13 @@ int32_t runtime_discard_pending(nurbs_Runtime *rt);
  */
 void runtime_emit_xdirect(nurbs_Runtime *rt, uint8_t axis_idx, int32_t offset_steps);
 
-uint32_t runtime_enqueue_success_lo(nurbs_Runtime *rt);
-
 int32_t runtime_gate_pieces(nurbs_Runtime *rt);
-
-double runtime_get_axis_accumulator(nurbs_Runtime *rt, uint8_t oid);
-
-float runtime_get_axis_motor(nurbs_Runtime *rt, uint8_t oid);
-
-uint32_t runtime_get_dispatcher_floor_cycles(void);
 
 int32_t runtime_get_heartbeat(nurbs_Runtime *rt,
                               uint8_t *out_engine_state,
                               uint16_t *out_fault_code,
                               uint32_t *out_retired,
                               uintptr_t max_axes);
-
-void runtime_get_last_timing(nurbs_Runtime *rt,
-                             uint64_t *now_out,
-                             uint64_t *t_start_out,
-                             uint64_t *duration_out);
-
-int32_t runtime_get_occupancy(nurbs_Runtime *rt, uint32_t *out_occupancy, uintptr_t max_axes);
 
 int32_t runtime_get_phase_state(nurbs_Runtime *rt,
                                 uint8_t stepper_oid,
@@ -105,49 +88,19 @@ int32_t runtime_get_phase_state(nurbs_Runtime *rt,
                                 uint16_t *out_phase,
                                 uint8_t *out_settled);
 
-uint32_t runtime_get_sample_period_cycles(void);
-
-uint8_t runtime_get_step_mode(nurbs_Runtime *rt, uint8_t stepper_idx);
-
 int32_t runtime_get_stepper_count(nurbs_Runtime *rt, uint8_t oid);
-
-uint32_t runtime_get_tick_counter(nurbs_Runtime *rt);
 
 uint32_t runtime_get_xdirect_write_count(void);
 
-int32_t runtime_handle_check_blob_version(const uint8_t *payload_ptr, uint32_t payload_len);
-
 uint32_t runtime_handle_fault_detail(nurbs_Runtime *rt);
-
-float runtime_handle_get_axis_steps_per_mm(nurbs_Runtime *rt, uint8_t oid);
-
-uint32_t runtime_handle_last_modulated_duration_lo(nurbs_Runtime *rt);
-
-uint32_t runtime_handle_last_modulated_elapsed_lo(nurbs_Runtime *rt);
-
-uint32_t runtime_handle_last_retire_consumers_after_clear(nurbs_Runtime *rt);
-
-uint32_t runtime_handle_modulated_retire_attempts(nurbs_Runtime *rt);
-
-uint32_t runtime_handle_modulated_retire_successes(nurbs_Runtime *rt);
 
 void runtime_handle_seed_widen(nurbs_Runtime *rt, uint64_t baseline_widened_clock);
 
 uint32_t runtime_handle_tick_blocker(nurbs_Runtime *rt);
 
-uint32_t runtime_handle_tick_blocker_exc(nurbs_Runtime *rt);
-
 uint32_t runtime_handle_tick_blocker_pc(nurbs_Runtime *rt);
 
-uint64_t runtime_handle_widened_now(nurbs_Runtime *rt);
-
 int32_t runtime_install_step_queues(nurbs_Runtime *rt, uint8_t *queues);
-
-uint32_t runtime_last_push_consumers_remaining(nurbs_Runtime *rt);
-
-uint32_t runtime_last_push_x_handle(nurbs_Runtime *rt);
-
-uint32_t runtime_last_push_y_handle(nurbs_Runtime *rt);
 
 uint64_t runtime_now_ticks(nurbs_Runtime *rt);
 
@@ -157,8 +110,6 @@ int32_t runtime_phase_jog_to(nurbs_Runtime *rt,
                              uint8_t stepper_oid,
                              uint16_t target_phase,
                              uint16_t max_microsteps_per_sample);
-
-uint32_t runtime_push_seg_all_unused_lo(nurbs_Runtime *rt);
 
 int32_t runtime_query_motor_state(nurbs_Runtime *rt,
                                   uint8_t *out_slots,
@@ -180,11 +131,6 @@ int32_t runtime_resonance_buzz(nurbs_Runtime *rt,
 int32_t runtime_seed_position(nurbs_Runtime *rt, int32_t x_q16, int32_t y_q16, int32_t z_q16);
 
 int32_t runtime_set_axis_mode(nurbs_Runtime *rt, uint8_t axis_idx, uint8_t new_mode);
-
-int32_t runtime_set_step_mode(nurbs_Runtime *rt,
-                              uint8_t stepper_idx,
-                              uint8_t mode,
-                              uint8_t mcu_supports_phase);
 
 int32_t runtime_set_stepper_offset(nurbs_Runtime *rt,
                                    uint8_t stepper_idx,

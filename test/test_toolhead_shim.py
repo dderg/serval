@@ -37,10 +37,7 @@ LEGACY_METHODS = [
     "get_extruder",
     "set_extruder",
     "register_lookahead_callback",
-    "note_step_generation_scan_time",
     "note_mcu_movequeue_activity",
-    "limit_next_junction_speed",
-    "get_trapq",
 ]
 
 EVENTTIME = 100.0

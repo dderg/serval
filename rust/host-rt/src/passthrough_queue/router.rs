@@ -35,8 +35,6 @@ impl std::error::Error for RouterError {}
 
 #[derive(Debug)]
 struct McuRecord {
-    #[allow(dead_code)]
-    label: String,
     clock_freq: f64,
     clock_offset: f64,
     last_clock: u64,
@@ -66,13 +64,12 @@ impl PassthroughRouter {
         }
     }
 
-    pub fn claim_mcu(&mut self, label: &str) -> McuHandle {
+    pub fn claim_mcu(&mut self, _label: &str) -> McuHandle {
         let handle = McuHandle(self.next_handle);
         self.next_handle += 1;
         self.mcus.insert(
             handle,
             McuRecord {
-                label: label.to_owned(),
                 clock_freq: 0.0,
                 clock_offset: 0.0,
                 last_clock: 0,

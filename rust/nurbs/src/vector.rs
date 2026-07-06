@@ -47,11 +47,6 @@ impl<T: Float, const N: usize> VectorNurbs<T, N> {
             control_points: &self.control_points,
         }
     }
-
-    #[must_use]
-    pub fn into_parts(self) -> (u8, Vec<T>, Vec<[T; N]>) {
-        (self.degree, self.knots.into_inner(), self.control_points)
-    }
 }
 
 #[cfg(feature = "host")]

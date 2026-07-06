@@ -47,11 +47,6 @@ impl<T: Float> ScalarNurbs<T> {
             control_points: &self.control_points,
         }
     }
-
-    #[must_use]
-    pub fn into_parts(self) -> (u8, Vec<T>, Vec<T>) {
-        (self.degree, self.knots.into_inner(), self.control_points)
-    }
 }
 
 #[cfg(feature = "host")]
