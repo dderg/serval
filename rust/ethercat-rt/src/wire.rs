@@ -367,10 +367,6 @@ fn mm_to_q16(mm: f64) -> i32 {
     (mm * 65536.0).round() as i32
 }
 
-pub fn motor_state_response_frame(correlation_id: u32, pos_mm: f64, vel_mm_s: f64) -> Vec<u8> {
-    motor_state_response_frame_multi(correlation_id, &[(0, pos_mm, vel_mm_s)])
-}
-
 /// One `MotorSample` per slot, in `(slot, pos_mm, vel_mm_s)` order, so the host
 /// receives the full chain's state in a single query.
 pub fn motor_state_response_frame_multi(
