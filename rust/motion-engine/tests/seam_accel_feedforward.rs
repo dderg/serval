@@ -94,7 +94,7 @@ fn accel_feedforward_is_continuous_across_piece_seams() {
             if left_seg != right_seg {
                 // A segment boundary is a planner move junction (corner blends
                 // split one G-code line into several moves); its accel step is
-                // the planner's, not the fitter's. The C² guarantee is within
+                // the planner's, not the fit stage's. The C² guarantee is within
                 // a move.
                 worst_junction = worst_junction.max(step.abs());
                 continue;

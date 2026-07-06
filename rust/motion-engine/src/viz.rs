@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use trajectory::{AxisChainSet, ShapedSegment};
 
-use motion_pipeline::fitter::Fitter;
+use motion_pipeline::fit_stage::FitStage;
 use motion_pipeline::planner::Planner;
 use motion_pipeline::{StreamConfig, run_lowerer};
 
@@ -233,7 +233,7 @@ const VELOCITY_INTEGRATION_TOL: f64 = 1e-7;
 /// planner's look-ahead backstop.
 const SNAPSHOT_MAX_BUFFER_MOVES: usize = 65_536;
 
-/// Drives the real pipeline stages — the same `Fitter`/`Planner`/
+/// Drives the real pipeline stages — the same `FitStage`/`Planner`/
 /// `run_lowerer`/`Shaper` types `setup_stages` wires into OS threads for a
 /// live print — synchronously over unbounded channels on the calling thread.
 /// No stage is reimplemented: this is the production pipeline observed with
@@ -259,7 +259,7 @@ fn run_pipeline(
     drop(raw_tx);
 
     let (fitted_tx, fitted_rx) = unbounded();
-    Fitter::new(config.chain).run(raw_rx, fitted_tx);
+    FitStage::new(config.chain).run(raw_rx, fitted_tx);
     let fitted: Vec<geometry::Move> = fitted_rx
         .into_iter()
         .filter_map(|item| match item {
