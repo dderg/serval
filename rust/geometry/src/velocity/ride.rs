@@ -33,6 +33,14 @@ const CONTACT_SNAP_REL: f64 = 1e-5;
 const FEASIBILITY_GUARD_STEPS: u32 = 200_000;
 const CELL_GUARD_STEPS: u32 = 100_000;
 const RANGE_MIN_BLOCK: usize = 64;
+/// During Flight the trajectory is oracle-independent — `peel_feasible` only
+/// decides when to stop flying — so the pass verifies it once per stride and,
+/// on a flip (or an unverified cap landing), rolls back to the last verified
+/// checkpoint and re-marches the window with the per-step oracle. The verdict
+/// is monotone along a flight stretch (the in-step trigger bisection already
+/// relies on that), so the re-march finds the exact trigger the unstrided
+/// pass would and the stride is a pure cost cut.
+const FLIGHT_ORACLE_STRIDE: u32 = 32;
 const POS_EPS_MM: f64 = 1e-12;
 const KAPPA_EPS: f64 = 1e-12;
 
@@ -820,6 +828,16 @@ pub(super) fn reach_pass(
         }
     }
 
+    struct FlightCkpt {
+        st: State,
+        i: usize,
+        phases_len: usize,
+        open: Option<(State, f64)>,
+    }
+    let mut ckpt: Option<FlightCkpt> = None;
+    let mut skip_left: u32 = 0;
+    let mut fine_left: u32 = 0;
+
     'nodes: while i < n {
         let mut guard = 0;
         while st.s < track.s[i] - POS_EPS_MM {
@@ -839,8 +857,56 @@ pub(super) fn reach_pass(
                         continue;
                     }
                 }
-                Mode::Flight => flight_step(&g, &mut st, &mut log, &mut mode, i),
+                Mode::Flight if fine_left > 0 => {
+                    fine_left -= 1;
+                    flight_step(&g, &mut st, &mut log, &mut mode, i, false);
+                }
+                Mode::Flight if skip_left > 0 => {
+                    skip_left -= 1;
+                    flight_step(&g, &mut st, &mut log, &mut mode, i, true);
+                    if mode != Mode::Flight {
+                        // Unverified landing inside the stride window: rewind
+                        // and let the checked march decide.
+                        let c = ckpt
+                            .take()
+                            .expect("strided flight step without a checkpoint");
+                        st = c.st;
+                        i = c.i;
+                        mode = Mode::Flight;
+                        log.phases.truncate(c.phases_len);
+                        log.open = c.open;
+                        skip_left = 0;
+                        fine_left = 2 * FLIGHT_ORACLE_STRIDE;
+                        continue 'nodes;
+                    }
+                }
+                Mode::Flight => {
+                    if peel_feasible(&g, st) {
+                        ckpt = Some(FlightCkpt {
+                            st,
+                            i,
+                            phases_len: log.phases.len(),
+                            open: log.open,
+                        });
+                        skip_left = FLIGHT_ORACLE_STRIDE;
+                        continue;
+                    }
+                    if let Some(c) = ckpt.take() {
+                        st = c.st;
+                        i = c.i;
+                        log.phases.truncate(c.phases_len);
+                        log.open = c.open;
+                        fine_left = 2 * FLIGHT_ORACLE_STRIDE;
+                        continue 'nodes;
+                    }
+                    flight_step(&g, &mut st, &mut log, &mut mode, i, false);
+                }
                 Mode::Peel => peel_step(&g, &mut st, &mut log, &mut mode, i),
+            }
+            if mode != Mode::Flight {
+                ckpt = None;
+                skip_left = 0;
+                fine_left = 0;
             }
             if mode == Mode::Ride && was != Mode::Ride {
                 if let Some((k, end)) = try_splice(st, brake, &g, &mut log, i) {
@@ -1018,7 +1084,14 @@ fn effective_jerk(g: &Grid, st: State, dt: f64) -> f64 {
 /// trigger. The trigger is bisected inside the step so the emitted jerk stays
 /// bang-bang; on straight cells the step spans the whole cell and every
 /// event is exact.
-fn flight_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i: usize) {
+fn flight_step(
+    g: &Grid,
+    st: &mut State,
+    log: &mut PhaseLog,
+    mode: &mut Mode,
+    i: usize,
+    assume_feasible: bool,
+) {
     let track = g.t;
     let curved = g.curved_near(st.s);
     let rem = track.s[i] - st.s;
@@ -1050,7 +1123,7 @@ fn flight_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i:
         let r = g.rail_at(next.s, next.v);
         next.a = next.a.clamp(-r, r);
     }
-    if peel_feasible(g, next) {
+    if assume_feasible || peel_feasible(g, next) {
         log.set_jerk(*st, j_cmd);
         // Landed on the cap from below (tangential arrival)?
         if next.v >= g.cap_at(next.s) - rel_eps(next.v) {
