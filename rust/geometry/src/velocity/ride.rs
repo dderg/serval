@@ -109,8 +109,13 @@ fn time_to_cross(st: State, j: f64, ds: f64) -> Option<f64> {
     let mut hi = {
         let by_v = ds / st.v.max(1e-9);
         let by_a = (2.0 * ds / st.a.abs().max(1e-9)).sqrt();
-        let by_j = libm::cbrt(6.0 * ds / j.abs().max(1e-9));
-        by_v.min(by_a).min(by_j).max(1e-12)
+        let mut hi = by_v.min(by_a);
+        // The jerk-term seed only matters starting near rest; cbrt is too
+        // expensive to pay on every crossing solve.
+        if hi > 1.0 {
+            hi = hi.min(libm::cbrt(6.0 * ds / j.abs().max(1e-9)));
+        }
+        hi.max(1e-12)
     };
     let mut guard = 0;
     loop {
@@ -132,16 +137,29 @@ fn time_to_cross(st: State, j: f64, ds: f64) -> Option<f64> {
             return None;
         }
     }
+    let vel = |dt: f64| st.v + st.a * dt + 0.5 * j * dt * dt;
     let mut lo = 0.0;
+    let mut t = hi;
     for _ in 0..EVENT_BISECT_ITERS {
-        let mid = 0.5 * (lo + hi);
-        if pos(mid) < ds {
-            lo = mid;
+        let f = pos(t) - ds;
+        if f >= 0.0 {
+            hi = t;
         } else {
-            hi = mid;
+            lo = t;
         }
+        let dv = vel(t);
+        let newton = if dv > 0.0 { t - f / dv } else { f64::NAN };
+        let next = if newton > lo && newton < hi {
+            newton
+        } else {
+            0.5 * (lo + hi)
+        };
+        if (next - t).abs() <= 1e-15 * (1.0 + t) {
+            return Some(next);
+        }
+        t = next;
     }
-    Some(0.5 * (lo + hi))
+    Some(t)
 }
 
 /// Smallest non-negative time at which the speed reaches zero from above, in
@@ -169,6 +187,14 @@ fn next_stall(st: State, j: f64) -> Option<f64> {
 struct Grid<'a> {
     t: &'a Track<'a>,
     cap_range_min: Vec<f64>,
+    /// Per cell: the last cell of its maximal uniform span — contiguous
+    /// straight cells sharing one accel budget and one cap slope-accel (to
+    /// integration noise). Flat cruise and constant-decel envelope stretches
+    /// merge; a kink or the envelope's jerk swing breaks the span. Within a
+    /// span the peel march may step to its tangency aim directly instead of
+    /// cell by cell — slope and rail are constant there and the cap is one
+    /// linear-in-`v²` chord, so nothing the march reads changes mid-span.
+    span_last: Vec<usize>,
 }
 
 impl<'a> Grid<'a> {
@@ -178,7 +204,25 @@ impl<'a> Grid<'a> {
             .chunks(RANGE_MIN_BLOCK)
             .map(|c| c.iter().fold(f64::INFINITY, |m, &x| m.min(x)))
             .collect();
-        Self { t, cap_range_min }
+        let n = t.s.len();
+        let cells = n - 1;
+        let straight_cell =
+            |c: usize| t.kappa[c].abs() <= KAPPA_EPS && t.kappa[c + 1].abs() <= KAPPA_EPS;
+        let mut span_last = vec![0usize; cells];
+        span_last[cells - 1] = cells - 1;
+        for c in (0..cells.saturating_sub(1)).rev() {
+            let mergeable = straight_cell(c)
+                && straight_cell(c + 1)
+                && (t.cap_a[c + 1] - t.cap_a[c]).abs() <= 1e-9 * (1.0 + t.cap_a[c].abs())
+                && t.accel[c] == t.accel[c + 1]
+                && t.accel[c + 1] == t.accel[c + 2];
+            span_last[c] = if mergeable { span_last[c + 1] } else { c };
+        }
+        Self {
+            t,
+            cap_range_min,
+            span_last,
+        }
     }
 
     fn n(&self) -> usize {
@@ -192,8 +236,19 @@ impl<'a> Grid<'a> {
         i.clamp(1, n - 1) - 1
     }
 
-    fn lerp_node(&self, arr: &[f64], s: f64) -> f64 {
-        let c = self.cell(s);
+    /// `cell` walked forward from `hint` to contain `s`. The peel march only
+    /// moves forward, so the walk is amortized O(cells crossed) per call
+    /// instead of a binary search per lookup.
+    fn cell_ahead(&self, hint: usize, s: f64) -> usize {
+        let last = self.n() - 2;
+        let mut c = hint.min(last);
+        while c < last && s >= self.t.s[c + 1] {
+            c += 1;
+        }
+        c
+    }
+
+    fn lerp_in(&self, arr: &[f64], c: usize, s: f64) -> f64 {
         let span = self.t.s[c + 1] - self.t.s[c];
         let f = if span > POS_EPS_MM {
             ((s - self.t.s[c]) / span).clamp(0.0, 1.0)
@@ -203,11 +258,15 @@ impl<'a> Grid<'a> {
         arr[c] + f * (arr[c + 1] - arr[c])
     }
 
-    /// Cap speed at `s`, linear in `v²` between nodes: a constant-decel brake
-    /// segment of the envelope is linear in `v²`, so this represents it
-    /// exactly where a linear-in-`v` chord would sag below it.
-    fn cap_at(&self, s: f64) -> f64 {
-        let c = self.cell(s);
+    fn lerp_node(&self, arr: &[f64], s: f64) -> f64 {
+        self.lerp_in(arr, self.cell(s), s)
+    }
+
+    /// Cap speed within cell `c`, linear in `v²` between nodes: a
+    /// constant-decel brake segment of the envelope is linear in `v²`, so
+    /// this represents it exactly where a linear-in-`v` chord would sag
+    /// below it.
+    fn cap_in(&self, c: usize, s: f64) -> f64 {
         let span = self.t.s[c + 1] - self.t.s[c];
         let f = if span > POS_EPS_MM {
             ((s - self.t.s[c]) / span).clamp(0.0, 1.0)
@@ -221,16 +280,24 @@ impl<'a> Grid<'a> {
         (w0 + f * (w1 - w0)).max(0.0).sqrt()
     }
 
+    fn cap_at(&self, s: f64) -> f64 {
+        self.cap_in(self.cell(s), s)
+    }
+
     fn slope_at(&self, s: f64) -> f64 {
         self.t.cap_a[self.cell(s)]
     }
 
-    fn rail_at(&self, s: f64, v: f64) -> f64 {
+    fn rail_in(&self, c: usize, s: f64, v: f64) -> f64 {
         disk_rail_accel(
-            self.lerp_node(self.t.accel, s),
-            self.lerp_node(self.t.kappa, s),
+            self.lerp_in(self.t.accel, c, s),
+            self.lerp_in(self.t.kappa, c, s),
             v,
         )
+    }
+
+    fn rail_at(&self, s: f64, v: f64) -> f64 {
+        self.rail_in(self.cell(s), s, v)
     }
 
     fn kappa_at(&self, s: f64) -> f64 {
@@ -294,41 +361,99 @@ fn peel_feasible(g: &Grid, st: State) -> bool {
         }
     }
     let mut st = st;
+    let mut cell = g.cell(st.s);
     let mut guard = 0;
     loop {
         guard += 1;
         if guard > FEASIBILITY_GUARD_STEPS {
             return false;
         }
-        let cap = g.cap_at(st.s);
+        let cap = g.cap_in(cell, st.s);
         if st.v > cap + rel_eps(cap) {
             return false;
         }
-        let rail = g.rail_at(st.s, st.v);
-        let slope = g.slope_at(st.s).max(-rail);
+        let rail = g.rail_in(cell, st.s, st.v);
+        let slope = g.t.cap_a[cell].max(-rail);
         if st.a <= slope + rel_eps(st.a.abs().max(slope.abs())) {
             return true;
         }
         if st.s >= g.end_s() - POS_EPS_MM {
             return true;
         }
-        let cell = g.cell(st.s);
-        let to_cell_end = g.t.s[cell + 1] - st.s;
+        let to_span_end = g.t.s[g.span_last[cell] + 1] - st.s;
         let dt_tan = if st.a > slope {
             (st.a - slope) / j
         } else {
             substep_budget(g, st, j)
         };
-        let dt = match time_to_cross(st, -j, to_cell_end) {
-            Some(t) => t.min(dt_tan).max(1e-12),
-            None => dt_tan.max(1e-12),
-        };
-        // Midpoint violation check within the step.
+        let dt = march_step(st, -j, dt_tan, to_span_end).max(1e-12);
+        // The arc's velocity peak is its critical point against the span's
+        // monotone cap chord; check it exactly, plus the midpoint.
+        if st.a > 0.0 {
+            let t_peak = st.a / j;
+            if t_peak < dt {
+                let peak = advance(st, -j, t_peak);
+                let c = g.cell_ahead(cell, peak.s);
+                if peak.v > g.cap_in(c, peak.s) + rel_eps(peak.v) {
+                    return false;
+                }
+            }
+        }
         let mid = advance(st, -j, 0.5 * dt);
-        if mid.v > g.cap_at(mid.s) + rel_eps(mid.v) {
+        let c_mid = g.cell_ahead(cell, mid.s);
+        if mid.v > g.cap_in(c_mid, mid.s) + rel_eps(mid.v) {
             return false;
         }
         st = advance(st, -j, dt);
+        cell = g.cell_ahead(cell, st.s);
+    }
+}
+
+/// A feasibility-march step: like [`step_within`] but the boundary crossing
+/// is a one-shot trapezoid estimate, not a solve. The march re-reads its cell
+/// after every advance and its verdict comes from state checks, so landing a
+/// cell-fraction past (or short of) the boundary costs nothing — cell-exact
+/// crossing times are wasted precision here. Near a stall the estimate is
+/// unsafe (the position cubic folds), so that case falls through to the
+/// exact solve.
+fn march_step(st: State, j: f64, dt_aim: f64, ds: f64) -> f64 {
+    let stall = next_stall(st, j);
+    if stall.is_none_or(|ts| ts >= dt_aim) {
+        let pos = st.v * dt_aim + 0.5 * st.a * dt_aim * dt_aim + j * dt_aim * dt_aim * dt_aim / 6.0;
+        if pos <= ds {
+            return dt_aim;
+        }
+        if st.v > 1e-6 {
+            let dt0 = (ds / st.v).min(dt_aim);
+            let v1 = (st.v + st.a * dt0 + 0.5 * j * dt0 * dt0).max(0.0);
+            if v1 > 1e-6 {
+                let dt = (2.0 * ds / (st.v + v1)).min(dt_aim);
+                if stall.is_none_or(|ts| ts >= dt) {
+                    return dt;
+                }
+            }
+        }
+    }
+    match time_to_cross(st, j, ds) {
+        Some(t) => t.min(dt_aim),
+        None => dt_aim,
+    }
+}
+
+/// Step duration: the aim `dt_aim`, clipped to the crossing of `ds` ahead.
+/// The crossing solve is skipped when the aim provably stays inside — the
+/// position cubic is monotone up to the stall, so one eval decides.
+fn step_within(st: State, j: f64, dt_aim: f64, ds: f64) -> f64 {
+    let stalls_first = next_stall(st, j).is_some_and(|ts| ts < dt_aim);
+    if !stalls_first && dt_aim.is_finite() {
+        let pos = st.v * dt_aim + 0.5 * st.a * dt_aim * dt_aim + j * dt_aim * dt_aim * dt_aim / 6.0;
+        if pos <= ds {
+            return dt_aim;
+        }
+    }
+    match time_to_cross(st, j, ds) {
+        Some(t) => t.min(dt_aim),
+        None => dt_aim,
     }
 }
 
@@ -919,8 +1044,7 @@ fn flight_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i:
     } else {
         (j_up, (rail - st.a) / j_up.max(1e-9))
     };
-    let dt_cross = time_to_cross(*st, j_cmd, rem).unwrap_or(f64::INFINITY);
-    let dt = dt_cross.min(dt_event).min(dt_budget).max(1e-12);
+    let dt = step_within(*st, j_cmd, dt_event.min(dt_budget), rem).max(1e-12);
     let mut next = advance(*st, j_cmd, dt);
     if curved {
         let r = g.rail_at(next.s, next.v);
@@ -984,8 +1108,7 @@ fn peel_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i: u
     } else {
         substep_budget(g, *st, track.j_max)
     };
-    let dt_cross = time_to_cross(*st, j_cmd, rem).unwrap_or(f64::INFINITY);
-    let dt = dt_aim.min(dt_cross).min(dt_budget).max(1e-12);
+    let dt = step_within(*st, j_cmd, dt_aim.min(dt_budget), rem).max(1e-12);
     let next = advance(*st, j_cmd, dt);
     let cap_next = g.cap_at(next.s);
     if next.v >= cap_next - rel_eps(next.v) {
