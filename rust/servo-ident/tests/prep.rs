@@ -1,0 +1,279 @@
+use servo_ident::capture::{
+    steady_accel_keep, tracking_keep, Capture, PlateauOptions, TrackingOptions,
+};
+use servo_ident::fit::{fit, residual_by_motor, FitInput, FitOptions};
+use servo_ident::model::Structure;
+use servo_ident::prep::{band_limited_rms, median_dt, prep, segments, sinc_kernel, PrepOptions};
+
+const DT: f64 = 0.00025;
+
+fn white(k: usize) -> f64 {
+    let h = (k as u32).wrapping_mul(2654435761);
+    f64::from(h % 1000) / 1000.0 - 0.5
+}
+
+/// Trapezoid strokes with dwell gaps (only motion samples, like the ident
+/// CSV): accel to cruise, cruise, decel to zero, alternating direction.
+fn strokes(accel: f64, vmax: f64, cruise_s: f64, reps: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let mut t = Vec::new();
+    let mut acc = Vec::new();
+    let mut vel = Vec::new();
+    let mut now = 0.0;
+    for rep in 0..reps {
+        let speed = vmax * (0.4 + 0.15 * (rep % 5) as f64);
+        let ramp = (speed / accel / DT) as usize;
+        let cruise = (cruise_s / DT) as usize;
+        let dir = if rep % 2 == 0 { 1.0 } else { -1.0 };
+        let mut v = 0.0;
+        for phase in 0..(2 * ramp + cruise) {
+            let a = if phase < ramp {
+                dir * accel
+            } else if phase < ramp + cruise {
+                0.0
+            } else {
+                -dir * accel
+            };
+            v += a * DT;
+            t.push(now);
+            acc.push(a);
+            vel.push(v);
+            now += DT;
+        }
+        now += 0.1;
+    }
+    (t, acc, vel)
+}
+
+fn make_capture(delay_samples: usize, ripple_period_mm: f64) -> (Capture, f64, f64, f64, f64) {
+    let (m, b, cf, cr) = (0.008, 0.09, 200.0, -210.0);
+    let (t, acc, vel) = strokes(10000.0, 500.0, 0.4, 8);
+    let n = t.len();
+    let clean: Vec<f64> = (0..n)
+        .map(|k| {
+            let c = if vel[k] > 0.5 {
+                cf
+            } else if vel[k] < -0.5 {
+                cr
+            } else {
+                0.0
+            };
+            m * acc[k] + b * vel[k] + c
+        })
+        .collect();
+    let mut ring = vec![0.0; n];
+    for k in 1..n {
+        let jerk = acc[k] - acc[k - 1];
+        if jerk.abs() > 1.0 {
+            let sign = jerk.signum();
+            let onset = k + delay_samples;
+            for j in onset..n.min(onset + 400) {
+                let tau = (j - onset) as f64 * DT;
+                ring[j] += sign
+                    * 60.0
+                    * libm::exp(-tau / 0.02)
+                    * libm::cos(2.0 * std::f64::consts::PI * 55.0 * tau);
+            }
+        }
+    }
+    let mut pos = 0.0;
+    let mut torque = vec![0.0; n];
+    for k in 0..n {
+        pos += vel[k] * DT;
+        let src = k.saturating_sub(delay_samples);
+        let ripple = 30.0 * libm::sin(2.0 * std::f64::consts::PI * pos / ripple_period_mm);
+        torque[k] = (clean[src] + ripple + ring[k] + 2.0 * white(k)).round();
+    }
+    (
+        Capture {
+            t,
+            acc: vec![acc],
+            vel: vec![vel.clone()],
+            vel_act: vec![vel],
+            torque: vec![torque],
+        },
+        m,
+        b,
+        cf,
+        cr,
+    )
+}
+
+fn run_fit(cap: &Capture, opts: &PrepOptions) -> (servo_ident::fit::FitResult, f64) {
+    run_fit_with(cap, opts, &FitOptions::default())
+}
+
+fn run_fit_with(
+    cap: &Capture,
+    opts: &PrepOptions,
+    fit_opts: &FitOptions,
+) -> (servo_ident::fit::FitResult, f64) {
+    let pp = prep(cap, opts);
+    let track = tracking_keep(&cap.vel, &cap.vel_act, &TrackingOptions::default());
+    let plateau = steady_accel_keep(&cap.t, &cap.acc, &PlateauOptions::default());
+    let keep: Vec<usize> = (0..cap.t.len())
+        .filter(|&k| pp.valid[k] && track[k] && plateau[k])
+        .collect();
+    assert!(keep.len() > 1000, "mask kept only {} samples", keep.len());
+    let pick = |cols: &[Vec<f64>]| -> Vec<Vec<f64>> {
+        cols.iter()
+            .map(|c| keep.iter().map(|&k| c[k]).collect())
+            .collect()
+    };
+    let input = FitInput {
+        structure: Structure::CartesianScalar,
+        acc: pick(&pp.acc),
+        vel: pick(&pp.vel),
+        cf: pick(&pp.cf),
+        cr: pick(&pp.cr),
+        torque: pick(&pp.torque),
+        extra: pp.extra.iter().map(|cols| pick(cols)).collect(),
+    };
+    (fit(&input, fit_opts).unwrap(), pp.delay_s)
+}
+
+#[test]
+fn kernel_preserves_dc_and_kills_out_of_band() {
+    let k = sinc_kernel(30.0, DT);
+    assert_eq!(k.len() % 2, 1);
+    let dc: f64 = k.iter().sum();
+    assert!((dc - 1.0).abs() < 1e-9);
+    let n = 8000;
+    let sine: Vec<f64> = (0..n)
+        .map(|i| libm::sin(2.0 * std::f64::consts::PI * 300.0 * i as f64 * DT))
+        .collect();
+    let filtered: Vec<f64> = (k.len()..n - k.len())
+        .map(|i| {
+            let half = k.len() / 2;
+            k.iter()
+                .enumerate()
+                .map(|(j, &kv)| kv * sine[i + j - half])
+                .sum::<f64>()
+        })
+        .collect();
+    let amp = filtered.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
+    assert!(amp < 0.02, "300 Hz leaked through 30 Hz cutoff: {amp}");
+}
+
+#[test]
+fn segments_split_on_time_gaps() {
+    let (cap, _, _, _, _) = make_capture(0, 40.0);
+    let dt = median_dt(&cap.t);
+    let segs = segments(&cap.t, dt);
+    assert_eq!(segs.len(), 8);
+    let total: usize = segs.iter().map(|s| s.len()).sum();
+    assert_eq!(total, cap.t.len());
+}
+
+#[test]
+fn recovers_injected_delay() {
+    let (cap, _, _, _, _) = make_capture(4, 40.0);
+    let pp = prep(&cap, &PrepOptions::default());
+    assert!(
+        (pp.delay_s - 4.0 * DT).abs() < DT / 2.0,
+        "delay {} vs injected {}",
+        pp.delay_s,
+        4.0 * DT
+    );
+}
+
+#[test]
+fn reversal_neighborhoods_are_blanked() {
+    let (cap, _, _, _, _) = make_capture(0, 40.0);
+    let pp = prep(&cap, &PrepOptions::default());
+    let blank = (PrepOptions::default().blank_reversal_s / DT) as usize;
+    for k in 0..cap.t.len() {
+        if cap.vel[0][k].abs() <= 0.5 {
+            for j in k.saturating_sub(blank / 2)..(k + blank / 2).min(cap.t.len()) {
+                if (cap.t[j] - cap.t[k]).abs() < 0.05 {
+                    assert!(!pp.valid[j], "sample {j} near deadband {k} not blanked");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn prepped_fit_recovers_truth_through_pollution() {
+    let (cap, m, b, cf, cr) = make_capture(4, 40.0);
+    let opts = PrepOptions {
+        ripple_period_mm: Some(40.0),
+        ..PrepOptions::default()
+    };
+    let (r, delay) = run_fit(&cap, &opts);
+    assert!(delay > 0.0);
+    let p = &r.params;
+    assert!(
+        (p.mass[0][0] - m).abs() < 0.02 * m,
+        "mass {} vs {m}",
+        p.mass[0][0]
+    );
+    assert!(
+        (p.viscous[0] - b).abs() < 0.05 * b,
+        "viscous {} vs {b}",
+        p.viscous[0]
+    );
+    assert!((p.coulomb_fwd[0] - cf).abs() < 0.02 * cf);
+    assert!((p.coulomb_rev[0] - cr).abs() < 0.02 * cr.abs());
+    assert!(
+        r.rms_residual < 8.0,
+        "residual {} with ripple columns and band-limiting",
+        r.rms_residual
+    );
+    let amp = (r.extra_params[0][0].powi(2) + r.extra_params[0][1].powi(2)).sqrt();
+    assert!(
+        (amp - 30.0).abs() < 3.0,
+        "ripple amplitude {amp} vs injected 30"
+    );
+    assert!(r.param_stderr.iter().all(|se| se.is_finite() && *se > 0.0));
+}
+
+#[test]
+fn ripple_columns_debias_the_mass() {
+    let (cap, m, _, _, _) = make_capture(4, 40.0);
+    let with_cols = PrepOptions {
+        ripple_period_mm: Some(40.0),
+        ..PrepOptions::default()
+    };
+    let (r_with, _) = run_fit(&cap, &with_cols);
+    let (r_without, _) = run_fit(&cap, &PrepOptions::default());
+    let err_with = (r_with.params.mass[0][0] - m).abs() / m;
+    let err_without = (r_without.params.mass[0][0] - m).abs() / m;
+    assert!(
+        err_without > 0.05,
+        "stroke-locked ripple should bias the plain fit; got {err_without}"
+    );
+    assert!(err_with < 0.02, "ripple-column fit error {err_with}");
+}
+
+#[test]
+fn in_band_residual_excludes_out_of_band_pollution() {
+    let (cap, _, _, _, _) = make_capture(4, 40.0);
+    let opts = PrepOptions {
+        ripple_period_mm: Some(40.0),
+        ..PrepOptions::default()
+    };
+    let pp = prep(&cap, &opts);
+    let (r, _) = run_fit(&cap, &opts);
+    let full = FitInput {
+        structure: Structure::CartesianScalar,
+        acc: pp.acc.clone(),
+        vel: pp.vel.clone(),
+        cf: pp.cf.clone(),
+        cr: pp.cr.clone(),
+        torque: pp.torque.clone(),
+        extra: pp.extra.clone(),
+    };
+    let res = residual_by_motor(&full, &r.params, &r.extra_params);
+    let track = tracking_keep(&cap.vel, &cap.vel_act, &TrackingOptions::default());
+    let plateau = steady_accel_keep(&cap.t, &cap.acc, &PlateauOptions::default());
+    let keep: Vec<bool> = (0..cap.t.len())
+        .map(|k| pp.valid[k] && track[k] && plateau[k])
+        .collect();
+    let inband = band_limited_rms(&res, &pp.t, &keep, 30.0);
+    assert!(
+        inband < r.rms_residual,
+        "in-band {inband} vs raw {}",
+        r.rms_residual
+    );
+    assert!(inband < 5.0, "in-band residual {inband}");
+}
