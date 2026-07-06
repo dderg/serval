@@ -53,14 +53,9 @@ of the same eviction/step-sign bugs.
 ## Still open
 
 - **vtime crawl under host load** (`test_probe_multi_point_tools`, xfail
-  strict=False): the vtime pacer ties virtual time to the deprioritized MCU
-  tick thread; under load the MCU clock crawls behind klippy's ~50 MHz
-  clocksync extrapolation. After long XY travels `wait_moves` returns while
-  the MCU still owes seconds of queued motion, and the real-time homing
-  deadline expires ("Z endstop did not trigger within 13.0mm"). This is the
-  known "drip refill margin" issue — needs the dedicated clocksync/vtime
-  session. Diagnostic signature: `motion.axis_stalled` with an armed piece
-  window straddling now by seconds.
+  strict=False): split into its own handoff —
+  [`sim-vtime-crawl-handoff.md`](sim-vtime-crawl-handoff.md) — with the
+  diagnostic signature, mechanism, repro, and attack ideas.
 - `set_position` rebases history endpoints with `host_now` taken from a
   different epoch than the piece keys (observed host=1433.8 vs keys ~1s).
   Harmless today (endpoints are only consulted when rings are empty and the
