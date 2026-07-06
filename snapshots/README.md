@@ -51,7 +51,10 @@ plan so config changes can be A/B-flipped exactly like snapshot review.
 
 Reach it at `http://127.0.0.1:8765/playground` while any review/`--view`
 server runs, or host `snapshots/web/static/` anywhere static (both WASM
-bundles live inside it; `snapshot-tests.sh` builds them when stale).
+bundles live inside it; `snapshot-tests.sh` builds them when stale). The
+public copy lives at <https://dderg.github.io/kalico/playground/> — the
+`playground-pages` workflow rebuilds it into the `playground/` corner of
+the `gh-pages` branch on every push to `sota-motion`.
 
 ## Layout
 
