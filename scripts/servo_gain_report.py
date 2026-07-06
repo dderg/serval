@@ -210,33 +210,46 @@ def drive_metrics(path, drive):
     }
 
 
-def add_resonance_zoom(spec_ax, steps, colors, linestyles):
+def resonance_zoom_panel(ax, steps, colors, linestyles):
     peaks = [
-        dm["res_peak_hz"]
+        (dm["res_peak_hz"], dm["res_peak_um"])
         for _, met in steps
         for dm in met["drives"]
         if dm["res_peak_hz"] > 0
     ]
     if not peaks:
+        ax.axis("off")
+        ax.set_title("no resonance peak detected", fontsize=9)
         return
-    center = float(np.median(peaks))
-    lo, hi = max(center - 60.0, 10.0), center + 60.0
-    ins = spec_ax.inset_axes([0.60, 0.52, 0.38, 0.36])
+    hz = np.array([p[0] for p in peaks])
+    center = float(hz[int(np.argmax([p[1] for p in peaks]))])
+    lo = max(min(hz.min(), center) - 80.0, 10.0)
+    hi = max(hz.max(), center) + 80.0
     for (_, met), color in zip(steps, colors):
         for k, dm in enumerate(met["drives"]):
             freqs, spectrum = dm["spectrum"]
             band = (freqs >= lo) & (freqs <= hi)
-            ins.plot(
+            ax.plot(
                 freqs[band],
                 spectrum[band] * 1000.0,
                 color=color,
                 ls=linestyles[k % len(linestyles)],
-                lw=0.8,
+                lw=0.9,
             )
-    ins.axvline(center, color="red", lw=0.8, alpha=0.6)
-    ins.set_title("%.1f Hz peak (linear)" % center, fontsize=8)
-    ins.tick_params(labelsize=7)
-    ins.grid(alpha=0.3)
+    for peak_hz in sorted(set(np.round(hz, 1))):
+        ax.axvline(peak_hz, color="red", lw=0.8, alpha=0.5)
+        ax.text(
+            peak_hz,
+            ax.get_ylim()[1],
+            " %.1f" % peak_hz,
+            color="red",
+            fontsize=8,
+            va="top",
+        )
+    ax.set_xlabel("Hz")
+    ax.set_ylabel("ferr amplitude (um)")
+    ax.set_title("Resonance zoom, linear frequency (red: detected peaks)")
+    ax.grid(alpha=0.3)
 
 
 def render(steps, out_path):
@@ -284,13 +297,12 @@ def render(steps, out_path):
     )
     spec_ax.legend(fontsize=8)
     spec_ax.grid(True, which="both", alpha=0.3)
-    add_resonance_zoom(spec_ax, steps, colors, linestyles)
     time_ax.set_xlabel("s into cruise")
     time_ax.set_ylabel("ferr (mm)")
     time_ax.set_title("Cruise following error, time domain")
     time_ax.grid(alpha=0.3)
 
-    curve_ax, table_ax = axes[1]
+    curve_ax, zoom_ax = axes[1]
     hz = [g[1] / 10.0 for g, _ in steps]
     for key, label, scale in (
         ("ferr_std_um", "cruise error std (um)", 1.0),
@@ -309,35 +321,7 @@ def render(steps, out_path):
     curve_ax.legend(fontsize=8)
     curve_ax.grid(alpha=0.3)
 
-    table_ax.axis("off")
-    rows = [
-        [
-            "%.0f/%.0f/%.0f" % (g[0] / 10.0, g[1] / 10.0, g[2] / 100.0),
-            "%.1f" % m["lag_ms"],
-            "%.0f" % m["ferr_std_um"],
-            "%.0f" % m["low_band_um"],
-            "%.0f @ %.0fHz" % (m["res_peak_um"], m["res_peak_hz"]),
-            "%.0f" % m["overshoot_max_um"],
-            "YES" if m["resonant"] else "no",
-        ]
-        for g, m in steps
-    ]
-    table = table_ax.table(
-        cellText=rows,
-        colLabels=[
-            "pos/spd/Ti",
-            "lag ms",
-            "err um",
-            "low um",
-            "res peak",
-            "ovsh um",
-            "resonant",
-        ],
-        loc="center",
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(8)
-    table_ax.set_title("rad/s / Hz / ms", fontsize=9)
+    resonance_zoom_panel(zoom_ax, steps, colors, linestyles)
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=110)
