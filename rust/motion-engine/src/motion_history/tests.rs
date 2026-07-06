@@ -264,6 +264,59 @@ fn drop_pieces_on_reanchor_keeps_unrecorded_axis_answerable() {
 }
 
 #[test]
+fn rest_between_endpoint_and_next_ring_answers_held_position() {
+    let mut store = HistoryStore::default();
+    rec(&mut store, key(), linear(0, 1.0, 0.0, 10.0));
+    store.drop_pieces_on_reanchor();
+    rec(&mut store, key(), linear(2_000_000_000, 1.0, 10.0, 20.0));
+
+    let held = store
+        .state_at_host(key(), h(1_500_000_000), Some(f64::INFINITY))
+        .unwrap();
+    assert!((held.position - 10.0).abs() < 1e-6);
+    assert_eq!(held.velocity, 0.0);
+
+    let err = store
+        .state_at_host(key(), h(FREQ as u64 / 2), Some(f64::INFINITY))
+        .unwrap_err();
+    assert!(
+        matches!(err, HistoryError::BeforeRetainedWindow { .. }),
+        "times inside the dropped motion are not a held rest: {err:?}"
+    );
+}
+
+#[test]
+fn eviction_does_not_stretch_the_pre_ring_hold() {
+    let mut store = HistoryStore::default();
+    rec(&mut store, key(), linear(0, 1.0, 0.0, 10.0));
+    store.drop_pieces_on_reanchor();
+    let dur = 0.001_f32;
+    let dur_ticks = (dur * FREQ as f32) as u64;
+    let ring_start = 2_000_000_000_u64;
+    for i in 0..(HISTORY_CAPACITY as u64 + 10) {
+        rec(
+            &mut store,
+            key(),
+            linear(ring_start + i * dur_ticks, dur, 0.0, 1.0),
+        );
+    }
+
+    let held = store
+        .state_at_host(key(), h(1_500_000_000), Some(f64::INFINITY))
+        .unwrap();
+    assert!((held.position - 10.0).abs() < 1e-6);
+
+    let evicted_t = h(ring_start + 5 * dur_ticks);
+    let err = store
+        .state_at_host(key(), evicted_t, Some(f64::INFINITY))
+        .unwrap_err();
+    assert!(
+        matches!(err, HistoryError::BeforeRetainedWindow { .. }),
+        "evicted motion must not answer as a held rest: {err:?}"
+    );
+}
+
+#[test]
 fn rebase_to_earlier_clock_accepts_post_rewind_pieces() {
     let mut store = HistoryStore::default();
     rec(&mut store, key(), linear(3_000_000, 1.0, 0.0, 5.0));
