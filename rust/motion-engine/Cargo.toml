@@ -20,6 +20,7 @@ mcu-protocol = { path = "../mcu-protocol" }
 trajectory = { path = "../trajectory" }
 geometry = { path = "../geometry" }
 motion-pipeline = { path = "../motion-pipeline" }
+snapshot-core = { path = "../pipeline-snapshot", package = "pipeline-snapshot" }
 gcode = { path = "../gcode" }
 nurbs = { path = "../nurbs", features = ["host"] }
 runtime = { path = "../runtime" }
