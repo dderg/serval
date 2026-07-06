@@ -167,6 +167,28 @@ vtime_advance_by(uint64_t delta_ns)
 
 static void vtimer_check_and_fire(void);
 
+// Steady wall driver: raises virtual time to the speed cap every 1ms so
+// vtime is a strict linear function of real time (speed x real) instead
+// of demand-driven. Demand-driven advancement stalls while nothing
+// sleeps and then leaps to the cap, which klippy's clocksync tracks as a
+// wildly nonuniform MCU clock — projections made across a leap land
+// seconds off (PieceStartInPast, trip-time resolution failures). With
+// the driver the MCU clock is uniform and clocksync stays honest.
+static void *
+vtime_driver_main(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        vtime_raise_to(vtime_speed_cap());
+        vtimer_check_and_fire();
+        struct timespec w = { 0, 1000000 };
+        real_nanosleep(&w, NULL);
+    }
+    return NULL;
+}
+
+static void vtimer_check_and_fire(void);
+
 __attribute__((visibility("default"))) int
 vtime_pacer_register(uint64_t period_ns)
 {
@@ -278,6 +300,13 @@ vtime_init(void)
 
     vtime_real_t0_ns = real_monotonic_ns();
     atomic_fetch_add(&vshm->num_participants, 1);
+
+    pthread_t driver;
+    if (pthread_create(&driver, NULL, vtime_driver_main, NULL) == 0)
+        pthread_detach(driver);
+    else
+        fprintf(stderr, "[vtime] driver thread create failed\n");
+
     VLOG("init, participants=%u, vtime=%lu ns, speed=%.0fx",
          atomic_load(&vshm->num_participants),
          (unsigned long)vtime_now(), vtime_speed);

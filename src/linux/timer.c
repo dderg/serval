@@ -246,7 +246,15 @@ timer_init(void)
     }
     // Initialize timespec_to_time() and timespec_from_time()
     struct timespec curtime = timespec_read();
+#if CONFIG_MCU_SIM
+    // Upstream starts the clock at -1s so 32-bit wrap bugs surface right
+    // after boot. In the sim that boot-adjacent wrap collides with the
+    // host clocksync's early rebase and corrupts trip-time resolution
+    // (TODO: root-cause the rebase-across-wrap seam); start at 0 instead.
+    TimerInfo.start_sec = curtime.tv_sec;
+#else
     TimerInfo.start_sec = curtime.tv_sec + 1;
+#endif
     TimerInfo.next_wake = curtime;
     TimerInfo.next_wake_counter = timespec_to_time(curtime);
     // Initialize t_alarm signal based timer
