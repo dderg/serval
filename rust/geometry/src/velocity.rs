@@ -273,7 +273,8 @@ pub fn plan_velocity_stops(
             let kappa_dn = dn.kappa0.abs();
             let boundary_vlim =
                 disk::limit_speed(kappa_up, up.accel).min(disk::limit_speed(kappa_dn, dn.accel));
-            v[k] = up.flat_ceiling.min(dn.flat_ceiling).min(boundary_vlim);
+            let ceiling = up.flat_ceiling.min(dn.flat_ceiling);
+            v[k] = ceiling.min(disk::notch_free_min(ceiling, boundary_vlim));
         }
     }
 

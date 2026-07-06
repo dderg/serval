@@ -27,6 +27,14 @@ fn on_cubic(p0: State, j: f64, st: State) -> bool {
         && (e.a - st.a).abs() <= rel_eps(st.a)
 }
 
+/// The log state a stride checkpoint captures; rewinding to it discards
+/// everything a rolled-back window recorded.
+#[derive(Clone, Copy)]
+pub(super) struct LogMark {
+    phases_len: usize,
+    open: Option<(State, f64)>,
+}
+
 impl PhaseLog {
     pub(super) fn new() -> Self {
         Self {
@@ -35,6 +43,18 @@ impl PhaseLog {
             complete: true,
             open: None,
         }
+    }
+
+    pub(super) fn mark(&self) -> LogMark {
+        LogMark {
+            phases_len: self.phases.len(),
+            open: self.open,
+        }
+    }
+
+    pub(super) fn rewind(&mut self, mark: LogMark) {
+        self.phases.truncate(mark.phases_len);
+        self.open = mark.open;
     }
 
     pub(super) fn set_jerk(&mut self, st: State, j: f64) {
