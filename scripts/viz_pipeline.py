@@ -254,12 +254,39 @@ def _eval_pieces(pieces, t):
     return pos, vel, acc, jerk
 
 
+def _frenet_components(vx, vy, fx, fy):
+    # Project an XY vector series onto the velocity tangent/normal frame:
+    # tangential = (v·f)/|v| (signed — negative while braking), normal =
+    # |v×f|/|v|. For acceleration this splits speed change from direction
+    # change (centripetal). Where the toolhead is stopped the frame is
+    # undefined, so both components read zero.
+    import numpy as np
+
+    speed = np.hypot(vx, vy)
+    safe = np.maximum(speed, 1e-9)
+    moving = speed > 1e-9
+    tang = np.where(moving, (vx * fx + vy * fy) / safe, 0.0)
+    norm = np.where(moving, np.abs(vx * fy - vy * fx) / safe, 0.0)
+    return tang, norm
+
+
+def _with_frenet(series):
+    vx, vy = series["vel"]["X"], series["vel"]["Y"]
+    series["a_tang"], series["a_cent"] = _frenet_components(
+        vx, vy, series["acc"]["X"], series["acc"]["Y"]
+    )
+    series["j_tang"], series["j_cent"] = _frenet_components(
+        vx, vy, series["jerk"]["X"], series["jerk"]["Y"]
+    )
+    return series
+
+
 def _build_time_series(snapshot):
     # New baselines store the lowered cubic trajectory; older ones stored sampled
     # position + speed. Dispatch on which is present so both still render.
     if "traj_x_pieces" in snapshot:
-        return _time_series_from_pieces(snapshot)
-    return _time_series_from_position(snapshot)
+        return _with_frenet(_time_series_from_pieces(snapshot))
+    return _with_frenet(_time_series_from_position(snapshot))
 
 
 # Axis lane -> (snapshot piece key, plot color). X/Y drive the |v| magnitude
@@ -400,22 +427,48 @@ def _toolhead_position(snapshot):
     return x, y
 
 
-def _plot_derivative(ax, t, comps, scalar, ylabel, title):
+def _plot_derivative(ax, t, comps, scalar, ylabel, title, frenet=()):
+    # The E lane rides a twinx right-hand axis: extruder magnitudes are far
+    # smaller than XY on a print move (and far larger on a bare retract), so
+    # sharing the XY scale flattens one or the other into the floor.
     import numpy as np
 
     def plot(y, **kw):
         ax.plot(t, y, **kw)
 
+    ax_e = None
     for name, _, color in _AXIS_LANES:
         lane = comps.get(name)
         if lane is None or not np.any(lane):
             continue
+        if name == "E":
+            ax_e = ax.twinx()
+            ax_e.plot(
+                t, np.abs(lane), linewidth=0.6, color=color, label="|E| →"
+            )
+            ax_e.set_ylabel(f"E ({ylabel})", color=color, fontsize=8)
+            ax_e.tick_params(axis="y", labelcolor=color, labelsize=7)
+            ax_e.set_ylim(bottom=0)
+            continue
         plot(np.abs(lane), linewidth=0.6, color=color, label=f"|{name}|")
+    for label, lane, color in frenet:
+        plot(
+            np.abs(lane),
+            linewidth=0.6,
+            linestyle="--",
+            color=color,
+            label=label,
+        )
     plot(scalar, linewidth=0.8, color="C3", label="|XY|")
     ax.set_xlabel("Time (s)")
     ax.set_ylabel(ylabel)
     ax.set_title(title, fontsize=9)
-    ax.legend(fontsize=7, loc="upper right")
+    handles, labels = ax.get_legend_handles_labels()
+    if ax_e is not None:
+        e_handles, e_labels = ax_e.get_legend_handles_labels()
+        handles += e_handles
+        labels += e_labels
+    ax.legend(handles, labels, fontsize=7, loc="upper right")
 
 
 def _seam_summary(snapshot) -> str | None:
@@ -523,10 +576,28 @@ def render(snapshot, out_path, stem, ts):
         ax_vel, t, series["vel"], series["v_scalar"], "mm/s", vel_title
     )
     _plot_derivative(
-        ax_acc, t, series["acc"], series["a_scalar"], "mm/s²", "Acceleration"
+        ax_acc,
+        t,
+        series["acc"],
+        series["a_scalar"],
+        "mm/s²",
+        "Acceleration",
+        frenet=(
+            ("a∥ tangential", series["a_tang"], "C8"),
+            ("a⊥ centripetal", series["a_cent"], "C9"),
+        ),
     )
     _plot_derivative(
-        ax_jrk, t, series["jerk"], series["j_scalar"], "mm/s³", "Jerk"
+        ax_jrk,
+        t,
+        series["jerk"],
+        series["j_scalar"],
+        "mm/s³",
+        "Jerk",
+        frenet=(
+            ("j∥", series["j_tang"], "C8"),
+            ("j⊥", series["j_cent"], "C9"),
+        ),
     )
 
     out_file = out_path / f"{stem}_{ts}.png"
