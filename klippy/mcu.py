@@ -751,21 +751,17 @@ class MCU:
             self._reactor, warn_prefix=wp, mcu=self
         )
         self._baud = 0
-        self._canbus_iface = None
-        canbus_uuid = config.get("canbus_uuid", None)
-        if canbus_uuid is not None:
-            self._serialport = canbus_uuid
-            self._canbus_iface = config.get("canbus_interface", "can0")
-            cbid = self._printer.load_object(config, "canbus_ids")
-            cbid.add_uuid(config, canbus_uuid, self._canbus_iface)
-            self._printer.load_object(config, "canbus_stats %s" % (self._name,))
-        else:
-            self._serialport = config.get("serial")
-            if not (
-                self._serialport.startswith("/dev/rpmsg_")
-                or self._serialport.startswith("/tmp/klipper_host_")
-            ):
-                self._baud = config.getint("baud", 250000, minval=2400)
+        if config.get("canbus_uuid", None) is not None:
+            raise config.error(
+                "CAN bus is not supported on the engine motion engine"
+                " (mcu '%s' sets canbus_uuid)" % (self._name,)
+            )
+        self._serialport = config.get("serial")
+        if not (
+            self._serialport.startswith("/dev/rpmsg_")
+            or self._serialport.startswith("/tmp/klipper_host_")
+        ):
+            self._baud = config.getint("baud", 250000, minval=2400)
 
     def _init_restart_state(self, config):
         restart_methods = [None, "arduino", "cheetah", "command", "rpi_usb"]
@@ -1165,15 +1161,8 @@ class MCU:
         self._printer.set_rollover_info(self._name, log_info, log=False)
 
     def _check_serial_exists(self):
-        if self._canbus_iface is not None:
-            cbid = self._printer.lookup_object("canbus_ids")
-            nodeid = cbid.get_nodeid(self._serialport)
-            return self._serial.check_canbus_connect(
-                self._serialport, nodeid, self._canbus_iface
-            )
-        else:
-            rts = self._restart_method != "cheetah"
-            return self._serial.check_connect(self._serialport, self._baud, rts)
+        rts = self._restart_method != "cheetah"
+        return self._serial.check_connect(self._serialport, self._baud, rts)
 
     def _mcu_identify(self):
         if not self._identify_check_serial_available():
@@ -1208,13 +1197,7 @@ class MCU:
                 # Try toggling usb power
                 self._check_restart("enable power")
             try:
-                if self._canbus_iface is not None:
-                    cbid = self._printer.lookup_object("canbus_ids")
-                    nodeid = cbid.get_nodeid(self._serialport)
-                    self._serial.connect_canbus(
-                        self._serialport, nodeid, self._canbus_iface
-                    )
-                elif self._baud:
+                if self._baud:
                     # Cheetah boards require RTS to be deasserted
                     # else a reset will trigger the built-in bootloader.
                     rts = resmeth != "cheetah"
