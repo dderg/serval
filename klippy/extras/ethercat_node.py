@@ -146,9 +146,7 @@ class EtherCatNode:
             following_error_counts, max_torque_tenth_pct = (
                 rail.get_session_drive_limits()
             )
-            velocity_ff, ff_torque_clamp, ff_lead_cycles = (
-                rail.get_ff_config()
-            )
+            velocity_ff, ff_torque_clamp, ff_lead_cycles = rail.get_ff_config()
             drives.append(
                 (
                     rail.get_chain_index(),

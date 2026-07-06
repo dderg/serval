@@ -460,7 +460,10 @@ fn peek_across_piece_boundary_does_not_retire() {
     );
 
     let (pos_now, vel_now, _) = ring.sample(t0 + 950_000).unwrap();
-    assert!((pos_now - 9.5).abs() < 0.01, "position cursor moved: {pos_now}");
+    assert!(
+        (pos_now - 9.5).abs() < 0.01,
+        "position cursor moved: {pos_now}"
+    );
     assert!((vel_now - 10_000.0).abs() < 1.0, "sample vel {vel_now}");
 }
 
@@ -479,7 +482,11 @@ fn peek_in_gap_and_past_stream_end_is_stationary() {
     assert_eq!((vel_gap, acc_gap), (0.0, 0.0), "gap must read stationary");
 
     let (vel_end, acc_end) = ring.peek_vel_acc(t0 + 10 * dur_ns);
-    assert_eq!((vel_end, acc_end), (0.0, 0.0), "past end must read stationary");
+    assert_eq!(
+        (vel_end, acc_end),
+        (0.0, 0.0),
+        "past end must read stationary"
+    );
 
     let (vel_next, _) = ring.peek_vel_acc(t0 + 3 * dur_ns + 500_000);
     assert!(

@@ -139,9 +139,7 @@ impl AxisRing {
     /// A gap between pieces or a time past the stream end is a stationary
     /// target: (0, 0).
     pub fn peek_vel_acc(&mut self, t_ns: u64) -> (f32, f32) {
-        let covers = |p: &ArmedPiece| {
-            t_ns >= p.piece_start_cycles && t_ns < p.piece_end_cycles
-        };
+        let covers = |p: &ArmedPiece| t_ns >= p.piece_start_cycles && t_ns < p.piece_end_cycles;
         if !self.lookahead_armed.as_ref().is_some_and(covers) {
             self.lookahead_armed = match &self.armed {
                 Some(p) if covers(p) => Some(*p),
@@ -156,10 +154,7 @@ impl AxisRing {
 
     fn find_piece_covering(&self, t_ns: u64) -> Option<ArmedPiece> {
         for k in 0..self.desc.len() {
-            let slot = self
-                .desc
-                .slot_at(k)
-                .expect("slot_at within len must exist");
+            let slot = self.desc.slot_at(k).expect("slot_at within len must exist");
             let entry = self
                 .storage
                 .get(slot)
