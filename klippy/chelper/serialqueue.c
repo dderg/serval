@@ -907,21 +907,6 @@ serialqueue_set_receive_window(struct serialqueue *sq, int receive_window)
     pthread_mutex_unlock(&sq->lock);
 }
 
-// Set the estimated clock rate of the mcu on the other end of the
-// serial port
-void __visible
-serialqueue_set_clock_est(struct serialqueue *sq, double est_freq
-                          , double conv_time, uint64_t conv_clock
-                          , uint64_t last_clock)
-{
-    pthread_mutex_lock(&sq->lock);
-    sq->ce.est_freq = est_freq;
-    sq->ce.conv_time = conv_time;
-    sq->ce.conv_clock = conv_clock;
-    sq->ce.last_clock = last_clock;
-    pthread_mutex_unlock(&sq->lock);
-}
-
 // Return the latest clock estimate
 void
 serialqueue_get_clock_est(struct serialqueue *sq, struct clock_estimate *ce)

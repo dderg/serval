@@ -40,6 +40,7 @@ pub(crate) fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 
 pub(crate) fn normalize(a: [f64; 3]) -> [f64; 3] {
     let n = norm(a);
+    debug_assert!(n > 0.0, "normalize of zero-length vector {a:?}");
     [a[0] / n, a[1] / n, a[2] / n]
 }
 
