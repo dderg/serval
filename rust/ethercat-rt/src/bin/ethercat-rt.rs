@@ -16,7 +16,7 @@ use ethercat_rt::claim::{
     WkcDecision,
 };
 use ethercat_rt::cli::parse_slaves;
-use ethercat_rt::clock::monotonic_ns;
+use ethercat_rt::clock::{monotonic_ns, raw_from_monotonic_ns};
 use ethercat_rt::curves::{AxisRing, AXIS_RING_CAPACITY, ENGINE_STATE_FAULT};
 use ethercat_rt::dynamics::{clamp_torque, DynamicsModel};
 use ethercat_rt::ffi;
@@ -1047,10 +1047,11 @@ fn main() {
             }
         }
 
-        let now = monotonic_ns();
+        let next_flush_mono_ns = unsafe { ffi::ec_rt_cycle_time_ns() } + cycle_ns as u64;
+        let apply_time = raw_from_monotonic_ns(next_flush_mono_ns);
 
         let all_rings_empty = rings.iter().all(|r| r.is_empty());
-        match gate.on_tick(now, all_rings_empty) {
+        match gate.on_tick(apply_time, all_rings_empty) {
             TickAction::None => {}
             TickAction::ExecuteDisable => {
                 eprintln!("ec-rt: scheduled torque disable executing");
@@ -1090,9 +1091,9 @@ fn main() {
             |slot, endstop_id, torque| {
                 eprintln!(
                     "ec-rt: sensorless endstop {endstop_id} tripped on slot {slot} \
-                     torque={torque} — local stop, stream halted, trip_clock={now}"
+                     torque={torque} — local stop, stream halted, trip_clock={apply_time}"
                 );
-                server.respond(&endstop_trip_frame(endstop_id, now));
+                server.respond(&endstop_trip_frame(endstop_id, apply_time));
             },
         );
         if sensorless_tripped {
@@ -1118,7 +1119,7 @@ fn main() {
             for s in 0..num_slaves {
                 let sampled = if buzz.active() {
                     if s == 0 {
-                        buzz.eval(now).map(|(rel_mm, vel_mm_s, acc_mm_s2)| {
+                        buzz.eval(apply_time).map(|(rel_mm, vel_mm_s, acc_mm_s2)| {
                             let counts = buzz.base_counts().wrapping_add(mm_to_counts(
                                 f64::from(rel_mm),
                                 cmd_counts_per_mm[0],
@@ -1128,7 +1129,7 @@ fn main() {
                     } else {
                         None
                     }
-                } else if let Some((pos_mm, vel_mm_s, acc_mm_s2)) = rings[s].sample(now) {
+                } else if let Some((pos_mm, vel_mm_s, acc_mm_s2)) = rings[s].sample(apply_time) {
                     // Streaming is always relative: each stream anchors the
                     // drive's actual position to the host's first commanded
                     // value, so a homing set_position (host frame shift) can

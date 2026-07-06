@@ -1,7 +1,8 @@
 # Handoff: beacon emulator's contact model doesn't track Z — RESOLVED (emulator side)
 
 **Date:** 2026-07-06 · **Branch:** beacon-emulator · **Status:** emulator contact
-model fixed; remaining failures re-diagnosed as motion-engine issues
+model fixed; motion-engine follow-ups fixed too (poke and auto-calibrate
+green, unmarked); only bed_mesh (beacon stream stall) remains
 
 ## Outcome
 
@@ -55,18 +56,35 @@ to 0 at bed contact via `_anchor_z(0.0)`.
 
 ## Remaining failures — motion-engine, not emulator
 
-- `test_contact_auto_calibrate` (xfail): calibration streams samples during a
-  0.25s dwell before the descend; those samples query motion state at host
-  times where the axes are idle, and the engine retains no history for idle
-  axes (observed X-axis window: 18.169644..18.179207s — 10ms). The samples
-  come back without `pos` and the fork's `_calibrate` KeyErrors on
-  `s["pos"]`. On real hardware every sample is answerable from klippy stepper
-  history. Same family as `sim-trip-time-resolution-handoff.md`.
-- `test_poke` (skip): hangs because the *first plain travel move* panics the
-  `kalico-shape` thread — "shaper: axis 0: shaping window needs unavailable
-  history at t=0.9999999999999999" (`motion-pipeline/src/shaper.rs:130`) —
-  the move never completes, BEACON_POKE never responds. Reproduce with
-  `tools/sim/run.sh test -k test_poke` after dropping the skip; the panic is
-  in klippy.stdout.
-- `test_bed_mesh` (skip): unhandled reactor exception, untriaged; likely the
-  same shaper/history family. Needs its own session.
+RESOLVED 2026-07-06 (follow-up session), except bed_mesh:
+
+- `test_poke` — FIXED, unmarked, green. Root cause was in the shaper
+  (`motion-pipeline/src/shaper.rs`): `at_stream_boundary` was derived as
+  `history.is_empty()`, so only the *first* emit batch of a stream clamped
+  its convolution window before the stream start; a second batch whose back
+  window still reached before the start (the lowerer's front hold pad covers
+  *forward* support, which for a symmetric kernel puts the back need exactly
+  on the stream start, 1 ulp of rounding from failure) hit the
+  `MissingHistory` panic. Now the shaper tracks `history_trimmed` — the
+  clamp stays valid until real history has been dropped. Regression test:
+  `smooth_shaper_second_batch_window_before_stream_start_clamps`.
+- `test_contact_auto_calibrate` — FIXED, unmarked, green. Three parts:
+  1. Engine: `HistoryStore` now keeps a `HoldBeforeRing` per axis — the rest
+     between the surviving endpoint and the first piece recorded into an
+     emptied ring answers with the held position (pieces are the only way an
+     axis moves). This unblocked the contact nozzle-touch phase entirely.
+  2. Fork: one stale sample (streamed pre-reanchor, flushed post-reanchor)
+     is legitimately unanswerable in the new frame; the seam drops it (no
+     `pos`) but `_calibrate` KeyError'd. Fixed via dderg/beacon_klipper PR #5
+     (merged, `ac20aee`); pin bumped in `tools/sim/fetch_plugins.sh` and the
+     sim Dockerfile symlink updated for master's beacon_kalico.py →
+     beacon_motion_engine.py rename.
+  3. Flake: the fork's nozzle-touch repeatability gate (`autocal_tolerance`,
+     default 0.008) is marginal against the emulator's ~0.01mm trigger
+     quantization ("Sample spread too large (0.0082 > 0.0080)"); the sim
+     config sets `autocal_tolerance: 0.02`.
+- `test_bed_mesh` (still skip): NOT the same family. Mid-scan the emulator's
+  beacon stream stalls → "Beacon sensor not receiving data" shutdown → the
+  fork's mesh scan callback KeyErrors on the pos-less samples flushed after
+  shutdown, killing the reactor. Beacon stream throughput/stall under the
+  virtual clock; needs its own session.

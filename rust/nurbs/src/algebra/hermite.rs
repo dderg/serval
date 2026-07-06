@@ -132,6 +132,71 @@ fn hermite_fit_recursive_clamped<const D: usize>(
     Ok(())
 }
 
+/// Per-axis `(f, f′)` at both ends of the fitted range — the Hermite data every
+/// candidate construction interpolates exactly.
+#[cfg(feature = "host")]
+fn endpoint_constraints<const D: usize>(
+    pieces: &[[crate::bezier::BezierPiece<f64>; D]],
+    lo: usize,
+    hi: usize,
+    u_lo: f64,
+    u_hi: f64,
+) -> Vec<(f64, f64, f64, f64)> {
+    (0..D)
+        .map(|axis| {
+            let f_lo = pieces[lo][axis].evaluate(u_lo);
+            let df_lo = pieces[lo][axis].differentiate().evaluate(u_lo);
+            let f_hi = pieces[hi - 1][axis].evaluate(u_hi);
+            let df_hi = pieces[hi - 1][axis].differentiate().evaluate(u_hi);
+            (f_lo, df_lo, f_hi, df_hi)
+        })
+        .collect()
+}
+
+/// The free `c2` coefficient minimizing the max position error against the
+/// reference pieces on a uniform sample grid. Candidates at `c2 = 0` and
+/// `c2 = 1` span the affine family `construct(axis, c2)`, so the 1-D minimax
+/// over their difference picks the optimum for the whole family.
+#[cfg(feature = "host")]
+fn minimax_c2_for<const D: usize>(
+    pieces: &[[crate::bezier::BezierPiece<f64>; D]],
+    lo: usize,
+    hi: usize,
+    d: usize,
+    construct: &dyn Fn(usize, f64) -> crate::bezier::BezierPiece<f64>,
+) -> f64 {
+    let u_lo = pieces[lo][0].u_start;
+    let u_hi = pieces[hi - 1][0].u_end;
+    let n_check = 4 * (d + 1);
+    let mut sample_u: Vec<f64> = Vec::with_capacity(n_check + 1);
+    let mut sample_piece_idx: Vec<usize> = Vec::with_capacity(n_check + 1);
+    for i in 0..=n_check {
+        let t = i as f64 / n_check as f64;
+        let u = u_lo + (u_hi - u_lo) * t;
+        sample_u.push(u);
+        sample_piece_idx.push(hermite_find_piece_at(pieces, lo, hi, u));
+    }
+
+    let cand_0: Vec<crate::bezier::BezierPiece<f64>> =
+        (0..D).map(|axis| construct(axis, 0.0)).collect();
+    let cand_1: Vec<crate::bezier::BezierPiece<f64>> =
+        (0..D).map(|axis| construct(axis, 1.0)).collect();
+
+    let mut a_vals: Vec<f64> = Vec::new();
+    let mut b_vals: Vec<f64> = Vec::new();
+    for (si, &u) in sample_u.iter().enumerate() {
+        let pidx = sample_piece_idx[si];
+        for axis in 0..D {
+            let ref_val = pieces[pidx][axis].evaluate(u);
+            let p0 = cand_0[axis].evaluate(u);
+            let p1 = cand_1[axis].evaluate(u);
+            a_vals.push(ref_val - p0);
+            b_vals.push(p1 - p0);
+        }
+    }
+    minimax_1d(&a_vals, &b_vals)
+}
+
 #[cfg(feature = "host")]
 #[allow(clippy::too_many_arguments)]
 fn hermite_fit_one_piece_clamped<const D: usize>(
@@ -147,15 +212,7 @@ fn hermite_fit_one_piece_clamped<const D: usize>(
     let h = u_hi - u_lo;
     let d = target_degree as usize;
 
-    let constraints: Vec<(f64, f64, f64, f64)> = (0..D)
-        .map(|axis| {
-            let f_lo = pieces[lo][axis].evaluate(u_lo);
-            let df_lo = pieces[lo][axis].differentiate().evaluate(u_lo);
-            let f_hi = pieces[hi - 1][axis].evaluate(u_hi);
-            let df_hi = pieces[hi - 1][axis].differentiate().evaluate(u_hi);
-            (f_lo, df_lo, f_hi, df_hi)
-        })
-        .collect();
+    let constraints = endpoint_constraints(pieces, lo, hi, u_lo, u_hi);
 
     if h.abs() < 1e-300 {
         return std::array::from_fn(|axis| {
@@ -182,52 +239,14 @@ fn hermite_fit_one_piece_clamped<const D: usize>(
                     hermite_construct_poly(f_lo, df_lo, f_hi, df_hi, u_lo, h, d, 0.0)
                 });
             }
-            let n_check = 4 * (d + 1);
-            let sample_u: Vec<f64> = (0..=n_check)
-                .map(|i| u_lo + (u_hi - u_lo) * (i as f64 / n_check as f64))
-                .collect();
-            let sample_piece_idx: Vec<usize> = sample_u
-                .iter()
-                .map(|&u| hermite_find_piece_at(pieces, lo, hi, u))
-                .collect();
-
-            let cand_0: Vec<crate::bezier::BezierPiece<f64>> = (0..D)
-                .map(|axis| {
-                    let (f_lo, df_lo, f_hi, df_hi) = constraints[axis];
-                    hermite_construct_poly_end_clamped(
-                        f_lo, df_lo, f_hi, df_hi, u_lo, h, d, d2e[axis], 0.0,
-                    )
-                })
-                .collect();
-            let cand_1: Vec<crate::bezier::BezierPiece<f64>> = (0..D)
-                .map(|axis| {
-                    let (f_lo, df_lo, f_hi, df_hi) = constraints[axis];
-                    hermite_construct_poly_end_clamped(
-                        f_lo, df_lo, f_hi, df_hi, u_lo, h, d, d2e[axis], 1.0,
-                    )
-                })
-                .collect();
-
-            let mut a_vals: Vec<f64> = Vec::new();
-            let mut b_vals: Vec<f64> = Vec::new();
-            for (si, &u) in sample_u.iter().enumerate() {
-                let pidx = sample_piece_idx[si];
-                for axis in 0..D {
-                    let ref_val = pieces[pidx][axis].evaluate(u);
-                    let p0 = cand_0[axis].evaluate(u);
-                    let p1 = cand_1[axis].evaluate(u);
-                    a_vals.push(ref_val - p0);
-                    b_vals.push(p1 - p0);
-                }
-            }
-            let optimal_c2 = minimax_1d(&a_vals, &b_vals);
-
-            std::array::from_fn(|axis| {
+            let construct = |axis: usize, c2: f64| {
                 let (f_lo, df_lo, f_hi, df_hi) = constraints[axis];
                 hermite_construct_poly_end_clamped(
-                    f_lo, df_lo, f_hi, df_hi, u_lo, h, d, d2e[axis], optimal_c2,
+                    f_lo, df_lo, f_hi, df_hi, u_lo, h, d, d2e[axis], c2,
                 )
-            })
+            };
+            let optimal_c2 = minimax_c2_for(pieces, lo, hi, d, &construct);
+            std::array::from_fn(|axis| construct(axis, optimal_c2))
         }
         (None, None) => hermite_fit_one_piece::<D>(pieces, lo, hi, target_degree),
     }
@@ -399,65 +418,19 @@ fn hermite_fit_one_piece<const D: usize>(
     let h = u_hi - u_lo;
     let d = target_degree as usize;
 
-    let constraints: Vec<(f64, f64, f64, f64)> = (0..D)
-        .map(|axis| {
-            let f_lo = pieces[lo][axis].evaluate(u_lo);
-            let df_lo = pieces[lo][axis].differentiate().evaluate(u_lo);
-            let f_hi = pieces[hi - 1][axis].evaluate(u_hi);
-            let df_hi = pieces[hi - 1][axis].differentiate().evaluate(u_hi);
-            (f_lo, df_lo, f_hi, df_hi)
-        })
-        .collect();
+    let constraints = endpoint_constraints(pieces, lo, hi, u_lo, u_hi);
+
+    let construct = |axis: usize, c2: f64| {
+        let (f_lo, df_lo, f_hi, df_hi) = constraints[axis];
+        hermite_construct_poly(f_lo, df_lo, f_hi, df_hi, u_lo, h, d, c2)
+    };
 
     if d <= 3 || h.abs() < 1e-300 {
-        return std::array::from_fn(|axis| {
-            let (f_lo, df_lo, f_hi, df_hi) = constraints[axis];
-            hermite_construct_poly(f_lo, df_lo, f_hi, df_hi, u_lo, h, d, 0.0)
-        });
+        return std::array::from_fn(|axis| construct(axis, 0.0));
     }
 
-    let n_check = 4 * (d + 1);
-    let mut sample_u: Vec<f64> = Vec::with_capacity(n_check + 1);
-    let mut sample_piece_idx: Vec<usize> = Vec::with_capacity(n_check + 1);
-    for i in 0..=n_check {
-        let t = i as f64 / n_check as f64;
-        let u = u_lo + (u_hi - u_lo) * t;
-        sample_u.push(u);
-        sample_piece_idx.push(hermite_find_piece_at(pieces, lo, hi, u));
-    }
-
-    let cand_0: Vec<crate::bezier::BezierPiece<f64>> = (0..D)
-        .map(|axis| {
-            let (f_lo, df_lo, f_hi, df_hi) = constraints[axis];
-            hermite_construct_poly(f_lo, df_lo, f_hi, df_hi, u_lo, h, d, 0.0)
-        })
-        .collect();
-    let cand_1: Vec<crate::bezier::BezierPiece<f64>> = (0..D)
-        .map(|axis| {
-            let (f_lo, df_lo, f_hi, df_hi) = constraints[axis];
-            hermite_construct_poly(f_lo, df_lo, f_hi, df_hi, u_lo, h, d, 1.0)
-        })
-        .collect();
-
-    let mut a_vals: Vec<f64> = Vec::new();
-    let mut b_vals: Vec<f64> = Vec::new();
-    for (si, &u) in sample_u.iter().enumerate() {
-        let pidx = sample_piece_idx[si];
-        for axis in 0..D {
-            let ref_val = pieces[pidx][axis].evaluate(u);
-            let p0 = cand_0[axis].evaluate(u);
-            let p1 = cand_1[axis].evaluate(u);
-            a_vals.push(ref_val - p0);
-            b_vals.push(p1 - p0);
-        }
-    }
-
-    let optimal_c2 = minimax_1d(&a_vals, &b_vals);
-
-    std::array::from_fn(|axis| {
-        let (f_lo, df_lo, f_hi, df_hi) = constraints[axis];
-        hermite_construct_poly(f_lo, df_lo, f_hi, df_hi, u_lo, h, d, optimal_c2)
-    })
+    let optimal_c2 = minimax_c2_for(pieces, lo, hi, d, &construct);
+    std::array::from_fn(|axis| construct(axis, optimal_c2))
 }
 
 #[cfg(feature = "host")]

@@ -113,6 +113,17 @@ impl AxisEndpoint {
     }
 }
 
+/// The rest an axis held between its last endpoint and the first piece
+/// recorded after the ring was (re)started — pieces are the only way an axis
+/// moves, so that whole span answers with the endpoint position. Kept
+/// separately from the ring because capacity eviction moves the ring's front
+/// past `until`, and queries in that evicted gap must still fail.
+#[derive(Debug, Clone, Copy)]
+struct HoldBeforeRing {
+    endpoint: AxisEndpoint,
+    until: f64,
+}
+
 /// f64 Clenshaw over the Chebyshev series at `cu ∈ [−1, 1]`.
 #[inline]
 pub fn eval_chebyshev(coeffs: &[f32], cu: f64) -> f64 {
@@ -202,6 +213,7 @@ pub struct HistoryStore {
     rings: HashMap<AxisKey, VecDeque<HistoryPiece>>,
     endpoints: HashMap<AxisKey, AxisEndpoint>,
     evicted: HashMap<AxisKey, u64>,
+    holds_before_ring: HashMap<AxisKey, HoldBeforeRing>,
 }
 
 impl HistoryStore {
@@ -225,6 +237,19 @@ impl HistoryStore {
         }
         let piece = HistoryPiece::from_entry(entry, nominal_freq_hz, host_secs);
         let ring = self.rings.entry(key).or_default();
+        if ring.is_empty() {
+            if let Some(endpoint) = self.endpoints.get(&key).copied() {
+                if endpoint.host <= piece.start_host {
+                    self.holds_before_ring.insert(
+                        key,
+                        HoldBeforeRing {
+                            endpoint,
+                            until: piece.start_host,
+                        },
+                    );
+                }
+            }
+        }
         let prev = ring.back().map(|p| (p.start_clock, p.start_host));
         if let Some((last_clock, last_host)) = prev {
             if piece.start_clock < last_clock {
@@ -293,6 +318,7 @@ impl HistoryStore {
             "[history] axis rebased to an externally set position"
         );
         self.rings.entry(key).or_default().clear();
+        self.holds_before_ring.remove(&key);
         self.endpoints.insert(key, AxisEndpoint { host, position });
     }
 
@@ -350,6 +376,13 @@ impl HistoryStore {
             Some(ring) => {
                 let idx = ring.partition_point(|p| p.start_host <= host_t);
                 if idx == 0 {
+                    let held_rest_before_ring = self
+                        .holds_before_ring
+                        .get(&key)
+                        .filter(|hold| hold.endpoint.host <= host_t && host_t <= hold.until);
+                    if let Some(hold) = held_rest_before_ring {
+                        return Ok(hold.endpoint.hold_state());
+                    }
                     return Err(HistoryError::BeforeRetainedWindow {
                         key,
                         queried: host_t,
