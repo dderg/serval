@@ -4,7 +4,6 @@
 //
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
-#include "autoconf.h" // CONFIG_MACH_AVR
 #include "board/gpio.h" // gpio_out_write
 #include "board/irq.h" // irq_poll
 #include "board/misc.h" // timer_read_time
@@ -55,11 +54,6 @@ nsecs_to_ticks(uint32_t ns)
 static void
 hx71x_delay_noirq(void)
 {
-    if (CONFIG_MACH_AVR) {
-        // Optimize avr, as calculating time takes longer than needed delay
-        asm("nop\n    nop");
-        return;
-    }
     uint32_t end = timer_read_time() + MIN_PULSE_TIME;
     while (timer_is_before(timer_read_time(), end))
         ;
@@ -69,9 +63,6 @@ hx71x_delay_noirq(void)
 static void
 hx71x_delay(void)
 {
-    if (CONFIG_MACH_AVR)
-        // Optimize avr, as calculating time takes longer than needed delay
-        return;
     uint32_t end = timer_read_time() + MIN_PULSE_TIME;
     while (timer_is_before(timer_read_time(), end))
         irq_poll();
