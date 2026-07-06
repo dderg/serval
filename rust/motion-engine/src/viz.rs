@@ -11,7 +11,8 @@ use motion_pipeline::planner::Planner;
 use motion_pipeline::{StreamConfig, run_lowerer};
 
 #[pyfunction]
-#[pyo3(signature = (waypoints, max_velocity, max_accel, square_corner_velocity, max_jerk, arc_fit = None, max_extrude_only_velocity = None, max_extrude_only_accel = None, max_path_deviation = None, max_accel_deviation = None))]
+#[pyo3(signature = (waypoints, max_velocity, max_accel, square_corner_velocity, max_jerk, arc_fit = None, max_extrude_only_velocity = None, max_extrude_only_accel = None, max_path_deviation = None, max_accel_deviation = None, pressure_advance = None, smooth_zv_hz = None))]
+#[allow(clippy::too_many_arguments)]
 pub fn pipeline_snapshot(
     py: Python<'_>,
     waypoints: Vec<(f64, f64, f64, f64, f64)>,
@@ -24,6 +25,8 @@ pub fn pipeline_snapshot(
     max_extrude_only_accel: Option<f64>,
     max_path_deviation: Option<f64>,
     max_accel_deviation: Option<f64>,
+    pressure_advance: Option<f64>,
+    smooth_zv_hz: Option<f64>,
 ) -> PyResult<Py<PyDict>> {
     if let Some(v) = max_path_deviation {
         if !(v.is_finite() && v > 0.0) {
@@ -67,7 +70,9 @@ pub fn pipeline_snapshot(
         max_buffer_moves: SNAPSHOT_MAX_BUFFER_MOVES,
         limits,
     };
-    let (fitted, shaped) = run_pipeline(&moves, config, AxisChainSet::default());
+    let axis_chains = build_axis_chains(pressure_advance, smooth_zv_hz)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    let (fitted, shaped) = run_pipeline(&moves, config, axis_chains);
 
     let dict = PyDict::new(py);
     dict.set_item("raw_x", raw_points.iter().map(|p| p.0).collect::<Vec<_>>())?;
@@ -106,6 +111,49 @@ pub fn pipeline_snapshot(
     }
     dict.set_item("worst_seams", worst)?;
     Ok(dict.into())
+}
+
+/// The snapshot's optional post-processor chains: smoothing on x/y, pressure
+/// advance on the extruder lane — the same compiled stages the live config
+/// builds, so snapshot piece counts and seams reflect the real wire.
+fn build_axis_chains(
+    pressure_advance: Option<f64>,
+    smooth_zv_hz: Option<f64>,
+) -> Result<AxisChainSet, trajectory::PostProcessorError> {
+    use trajectory::post_processor::PostProcessorInstance;
+    use trajectory::post_processors::{LinearPressureAdvance, SmoothZv};
+    use trajectory::{CompiledChain, PostProcessorError};
+
+    if pressure_advance.is_none() && smooth_zv_hz.is_none() {
+        return Ok(AxisChainSet::default());
+    }
+    let spatial_chain = |hz: Option<f64>| -> Result<CompiledChain, PostProcessorError> {
+        match hz {
+            Some(hz) => CompiledChain::compile(&[PostProcessorInstance::new(
+                "smooth_zv",
+                &SmoothZv,
+                vec![hz],
+            )]),
+            None => Ok(CompiledChain::default()),
+        }
+    };
+    let e_chain = match pressure_advance {
+        Some(k) => CompiledChain::compile(&[PostProcessorInstance::new(
+            "pressure_advance",
+            &LinearPressureAdvance,
+            vec![k],
+        )])?,
+        None => CompiledChain::default(),
+    };
+    Ok(AxisChainSet {
+        chains: vec![
+            spatial_chain(smooth_zv_hz)?,
+            spatial_chain(smooth_zv_hz)?,
+            CompiledChain::default(),
+            e_chain,
+        ],
+        followers: Vec::new(),
+    })
 }
 
 fn segment_to_pydict<'py>(
