@@ -545,8 +545,9 @@ fn displaced_spiral_keeps_extrusion_rate_continuous_and_conserves_e() {
 
 #[test]
 fn corner_ramp_beyond_extruder_budget_leaves_the_junction_unblended() {
-    // A 17% extrusion-rate step blends under the default (infinite) gate; a
-    // tight extruder accel budget rejects the very same ramp in closed form.
+    // A 17% extrusion-rate step blends under the default (infinite) gate; an
+    // extruder accel budget below the ramp's marginal `m·v²` demand rejects
+    // the very same ramp in closed form.
     let a = seg(1, 3000.0, 5.0, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.5);
     let b = seg(2, 3000.0, 5.0, [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], 0.6);
 
@@ -558,7 +559,7 @@ fn corner_ramp_beyond_extruder_budget_leaves_the_junction_unblended() {
 
     let tight = CornerFitConfig {
         ramp_gate: FollowerRampGate {
-            max_accel_mm_s2: 100.0,
+            max_accel_mm_s2: 20.0,
             ..FollowerRampGate::default()
         },
         ..CornerFitConfig::default()
@@ -570,10 +571,45 @@ fn corner_ramp_beyond_extruder_budget_leaves_the_junction_unblended() {
 }
 
 #[test]
+fn disabled_jerk_limiting_never_rejects_ramps_on_its_own() {
+    // `max_jerk = ∞` (jerk limiting off) with finite extruder budgets: the
+    // gate charges only the ramp's marginal demand, so the unbounded `r·j`
+    // the G-code itself commands must not poison it (0·∞ once NaN-rejected
+    // every ramp and left a no-jerk stream with no fits at all).
+    let no_jerk = |line_no: u32, start: [f64; 3], end: [f64; 3], e: f64| {
+        let ctx = MoveContext {
+            extruder_axis: E_AXIS,
+            feedrate_mm_s: 100.0,
+            limits: VelocityLimits::try_new(200.0, 3000.0, 5.0, f64::INFINITY).unwrap(),
+            source: SourceRange {
+                start_line: line_no,
+                end_line: line_no,
+            },
+        };
+        line_move(start, end, e, ctx).unwrap()
+    };
+    let a = no_jerk(1, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.5);
+    let b = no_jerk(2, [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], 0.5);
+
+    let config = CornerFitConfig {
+        ramp_gate: FollowerRampGate {
+            max_velocity_mm_s: 100.0,
+            max_accel_mm_s2: 1000.0,
+            pressure_advance_s: 0.0,
+        },
+        ..CornerFitConfig::default()
+    };
+    assert!(matches!(
+        plan_junction(&a, &b, config).unwrap(),
+        JunctionPlan::Blend(_)
+    ));
+}
+
+#[test]
 fn pressure_advance_amplifies_the_corner_ramp_gate() {
     // The same corner under the same accel budget: fine without pressure
-    // advance, infeasible once the gain amplifies the worst-case demand by
-    // `k·(r·J + 3·m·v·a)`.
+    // advance, infeasible once the gain amplifies the ramp's marginal demand
+    // by `k·3·m·v·a`.
     let a = seg(1, 3000.0, 5.0, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.5);
     let b = seg(2, 3000.0, 5.0, [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], 0.6);
 
@@ -611,7 +647,7 @@ fn arc_ramp_beyond_extruder_budget_dissolves_the_run() {
 
     let tight = CornerFitConfig {
         ramp_gate: FollowerRampGate {
-            max_accel_mm_s2: 10.0,
+            max_accel_mm_s2: 0.01,
             ..FollowerRampGate::default()
         },
         ..CornerFitConfig::default()

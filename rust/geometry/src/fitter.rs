@@ -54,12 +54,14 @@ impl Default for CornerFitConfig {
 /// coupling the follower into print-move velocity planning would make every
 /// plan iteration solve a joint ODE — so the fitter instead proves each ramp
 /// feasible in closed form against the box the planner does guarantee:
-/// `v ≤ V`, `|a| ≤ A`, `|j| ≤ J` on the carrying piece.
+/// `v ≤ V`, `|a| ≤ A` on the carrying piece.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FollowerRampGate {
-    /// `max_extrude_only_velocity` — cap on worst-case commanded `ė`.
+    /// `max_extrude_only_velocity` — cap on the extra commanded `ė` the
+    /// ramp introduces over a constant-ratio demand.
     pub max_velocity_mm_s: f64,
-    /// `max_extrude_only_accel` — cap on worst-case commanded `ë`.
+    /// `max_extrude_only_accel` — cap on the extra commanded `ë` the ramp
+    /// introduces over a constant-ratio demand.
     pub max_accel_mm_s2: f64,
     /// Largest live pressure-advance gain across follower axes; PA commands
     /// `e + k·ė`, amplifying rate demands by the next derivative.
@@ -77,14 +79,17 @@ impl Default for FollowerRampGate {
 }
 
 impl FollowerRampGate {
-    /// Whether a ramped demand stays within budget on a piece whose path
-    /// speed never exceeds `v_cap`. With ratio slope `m = dr/ds` and the path
-    /// at speed `v`, accel `a`, jerk `j`: `ė = r·v`, `ë = r·a + m·v²`,
-    /// `e⃛ = r·j + 3·m·v·a`; pressure advance `k` commands `e + k·ė`, so its
-    /// velocity/accel are `ė + k·ë` and `ë + k·e⃛`. Every term is monotone in
-    /// `v`, `a`, `j`, so the corner of the box is the worst case. Constant
-    /// demands pass unconditionally: the fitter only answers for the ramps it
-    /// creates, not for the flow the G-code itself commanded.
+    /// Whether a ramped demand's *additional* extruder load stays within
+    /// budget on a piece whose path speed never exceeds `v_cap`. With ratio
+    /// slope `m = dr/ds` and the path at speed `v`, accel `a`, jerk `j`:
+    /// `ė = r·v`, `ë = r·a + m·v²`, `e⃛ = r·j + 3·m·v·a`; pressure advance
+    /// `k` commands `e + k·ė`. The `r`-terms are the load the G-code's own
+    /// constant-ratio flow already commands — not the fitter's to police, and
+    /// with jerk limiting disabled (`j = ∞`) `r·j` is unbounded for every
+    /// extruding move — so the gate charges only the slope's marginal demand:
+    /// `k·m·v²` of commanded velocity, `m·v² + 3·k·m·v·a` of commanded
+    /// acceleration. Both are monotone in `v` and `a`, so the box corner is
+    /// the worst case; constant demands pass unconditionally.
     fn admits(
         &self,
         demand: &FollowerDemand,
@@ -96,14 +101,12 @@ impl FollowerRampGate {
         if m == 0.0 {
             return true;
         }
-        let r = demand.max_abs_ratio();
         let v = v_cap;
         let a = limits.accel_mm_s2;
-        let j = limits.max_jerk_mm_s3;
         let k = self.pressure_advance_s;
-        let e_vel = r * v + k * (r * a + m * v * v);
-        let e_acc = r * a + m * v * v + k * (r * j + 3.0 * m * v * a);
-        e_vel <= self.max_velocity_mm_s && e_acc <= self.max_accel_mm_s2
+        let extra_vel = k * m * v * v;
+        let extra_acc = m * v * v + 3.0 * k * m * v * a;
+        extra_vel <= self.max_velocity_mm_s && extra_acc <= self.max_accel_mm_s2
     }
 }
 
