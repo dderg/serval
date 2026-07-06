@@ -38,6 +38,7 @@ pub(crate) type EthercatDrive = (
     Option<u16>,
     bool,
     f64,
+    u32,
     bool,
     Option<String>,
 );
