@@ -849,6 +849,10 @@ impl PyMotionEngine {
                     "pump flush dropped pieces that never reached the wire"
                 );
             }),
+            history: crate::pump::HistoryRecorder {
+                store: Arc::clone(&self.motion_history),
+                nominal_freqs: Arc::clone(&self.nominal_clock_freqs),
+            },
             drain: drain_for_pump,
             on_drip_stall: Box::new(|msg: String| {
                 tracing::error!(
@@ -870,7 +874,6 @@ impl PyMotionEngine {
             counter: Arc::clone(&counter),
             active_drip_cohort: Arc::clone(&self.active_drip_cohort),
             motion_history: Arc::clone(&self.motion_history),
-            nominal_freqs: Arc::clone(&self.nominal_clock_freqs),
         };
 
         let stream_cfg = {

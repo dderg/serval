@@ -113,6 +113,7 @@ fn run_pump_delivers_piece_despite_retired_over_pushed_inversion() {
             |_mcu| None,
             |_| {},
             |_, _| {},
+            None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
             |_| {},
             Arc::new(AtomicU64::new(0)),
@@ -144,6 +145,67 @@ fn run_pump_delivers_piece_despite_retired_over_pushed_inversion() {
         || sink.recorded().len() == 2,
         "second piece delivered despite retired(2) > pushed(1): buggy room() \
          underflows to 0 and wedges here; the fix reopens room",
+    );
+
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+}
+
+#[test]
+fn history_records_pieces_at_send_time_not_enqueue_time() {
+    const RING_DEPTH: u32 = 8;
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+
+    let store = Arc::new(Mutex::new(crate::motion_history::HistoryStore::default()));
+    let nominal_freqs = Arc::new(Mutex::new(std::collections::HashMap::from([(
+        1u32,
+        50_000_000u32,
+    )])));
+    let history = HistoryRecorder {
+        store: Arc::clone(&store),
+        nominal_freqs,
+    };
+
+    let sink = RecordingSink::new();
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let sink_clone = sink.clone();
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            control_rx,
+            data_rx,
+            sink_clone,
+            |_key| RING_DEPTH,
+            |_mcu| None,
+            |_| {},
+            |_, _| {},
+            Some(history),
+            std::sync::Arc::new(crate::drain::DrainLedger::new()),
+            |_| {},
+            Arc::new(AtomicU64::new(0)),
+        );
+    });
+
+    let host_t = 2.5_f64;
+    let piece = (
+        PieceEntry {
+            start_time: 100,
+            duration: 0.001,
+            ..PieceEntry::zeroed()
+        },
+        host_t,
+    );
+    data.send(make_enqueue(key, vec![piece], false)).unwrap();
+    wait_until(|| sink.recorded().len() == 1, "piece sent to the MCU");
+    wait_until(
+        || {
+            store
+                .lock()
+                .unwrap()
+                .state_at_host(key, host_t, None)
+                .is_ok()
+        },
+        "sent piece recorded into motion history with its host key",
     );
 
     ctl.send(PumpMsg::Shutdown).unwrap();
@@ -219,6 +281,7 @@ fn run_pump_sets_start_slot_from_cursor_and_advances_it() {
             |_mcu| None,
             |_| {},
             |_, _| {},
+            None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
             |_| {},
             Arc::new(AtomicU64::new(0)),
@@ -323,6 +386,7 @@ fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
             |_mcu| Some((0u64, 180_000_000.0)),
             |_| {},
             |_, _| {},
+            None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
             |_| {},
             Arc::new(AtomicU64::new(0)),
@@ -424,6 +488,7 @@ fn flush_clears_queued_pieces_and_junctions() {
             move |_mcu| *clock_pump.lock().unwrap(),
             |_| {},
             |_, _| {},
+            None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
             |_| {},
             Arc::new(AtomicU64::new(0)),
@@ -528,6 +593,7 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
             move |_k: AxisKey, n: u32| {
                 *abandoned_pump.lock().unwrap() += n;
             },
+            None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
             |_| {},
             Arc::new(AtomicU64::new(0)),
@@ -611,6 +677,7 @@ fn flush_unknown_key_is_noop() {
             |_mcu| None,
             |_| {},
             |_, _| {},
+            None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
             |_| {},
             Arc::new(AtomicU64::new(0)),
@@ -646,6 +713,7 @@ fn barrier_ack_means_flushed_axes_emit_nothing() {
             |_| None,
             |_| {},
             |_, _| {},
+            None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
             |_| {},
             backlog_pump,
@@ -699,6 +767,7 @@ fn barrier_acks_on_idle_pump() {
             |_| None,
             |_| {},
             |_, _| {},
+            None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
             |_| {},
             Arc::new(AtomicU64::new(0)),
@@ -736,6 +805,7 @@ fn pump_backlog_reflects_unpushed_pieces() {
             |_mcu| None,
             |_| {},
             |_, _| {},
+            None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
             |_| {},
             backlog_thread,
@@ -775,6 +845,7 @@ fn pump_backlog_drains_to_zero_when_pushed() {
             |_mcu| None,
             |_| {},
             |_, _| {},
+            None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
             |_| {},
             backlog_thread,
@@ -829,6 +900,7 @@ where
         on_fatal_transport: |_: AxisKey| {},
         on_abandon: |_: AxisKey, _: u32| {},
         on_drip_stall,
+        history: None,
         ledger: Arc::new(crate::drain::DrainLedger::new()),
         pending_barrier_acks: Vec::new(),
         backlog: Arc::new(AtomicU64::new(0)),

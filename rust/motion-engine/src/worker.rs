@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -178,6 +177,7 @@ pub(crate) struct PumpResources {
     pub(crate) mcu_clock_of: Box<dyn Fn(u32) -> Option<(u64, f64)> + Send>,
     pub(crate) on_fatal_transport: Box<dyn Fn(AxisKey) + Send + 'static>,
     pub(crate) on_abandon: Box<dyn Fn(AxisKey, u32) + Send>,
+    pub(crate) history: crate::pump::HistoryRecorder,
     pub(crate) drain: Arc<crate::drain::DrainLedger>,
     pub(crate) on_drip_stall: Box<dyn Fn(String) + Send>,
     pub(crate) backlog: Arc<AtomicU64>,
@@ -193,7 +193,6 @@ pub(crate) struct DispatchResources {
     pub(crate) counter: Arc<AtomicU64>,
     pub(crate) active_drip_cohort: Arc<Mutex<Option<u64>>>,
     pub(crate) motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
-    pub(crate) nominal_freqs: Arc<Mutex<HashMap<u32, u32>>>,
 }
 
 pub(crate) struct MotionPipeline {
@@ -230,6 +229,7 @@ pub(crate) fn setup_pipeline(
                 pump.mcu_clock_of,
                 pump.on_fatal_transport,
                 pump.on_abandon,
+                Some(pump.history),
                 pump.drain,
                 pump.on_drip_stall,
                 pump.backlog,
@@ -245,7 +245,6 @@ pub(crate) fn setup_pipeline(
         counter: dispatch.counter,
         active_drip_cohort: dispatch.active_drip_cohort,
         motion_history: dispatch.motion_history,
-        nominal_freqs: dispatch.nominal_freqs,
     });
     let worker = StreamWorkerHandle::spawn_with_ctx(
         config,
