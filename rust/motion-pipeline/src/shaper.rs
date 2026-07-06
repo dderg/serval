@@ -5,13 +5,9 @@ use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
 use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedSignal};
 
 use crate::lowering::{
-    FIT_TRUNC_ACC_MM_S2, FIT_TRUNC_VEL_MM_S, LADDER_PROBES_U, eval_mono, eval_mono_dd,
-    ladder_candidate, quintic_in_u,
+    FIT_TRUNC_POS_FACTOR, FitTol, LADDER_PROBES_U, ladder_fit, quintic_in_u, truncated_piece,
 };
 use crate::{Control, LoweredItem, PostProcessError, ShapedItem};
-use nurbs::chebyshev::{
-    chebyshev_to_monomial_tau, monomial_u_to_chebyshev, truncate_chebyshev_c2_anchored,
-};
 
 const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 
@@ -421,8 +417,9 @@ impl SpanTruth {
 const LADDER_FIT_NODES_U: [f64; 3] = [0.0, 0.5, -0.5];
 
 /// Ladder fit of the shaped signal over one span: quintic Hermite matching
-/// sampled (p, v, a) at both ends, degrees 6/7 from interior residuals.
-/// Returns the accepted monomial-in-u fit, or the degree-7 candidate with
+/// sampled (p, v, a) at both ends, degrees 6/7 from interior residuals — the
+/// lowering ladder against pre-sampled truth, with the shaper's own budgets.
+/// Returns the accepted monomial-in-u fit, or the quintic base with
 /// `fits = false` so the caller can bisect.
 #[allow(clippy::type_complexity)]
 fn shaped_ladder(
@@ -457,37 +454,13 @@ fn shaped_ladder(
         ));
     }
 
-    let truth_p = |u: f64| truth.pos_at(u);
-    let dd_scale = (2.0 / h) * (2.0 / h);
-    let ok = |c: &[f64]| {
-        LADDER_PROBES_U.iter().all(|&u| {
-            (eval_mono(c, u) - truth.pos_at(u)).abs() <= SHAPED_FIT_TOL_MM
-                && (eval_mono_dd(c, u) * dd_scale - truth.acc_at(u)).abs()
-                    <= SHAPED_FIT_TOL_ACCEL_MM_S2
-        })
+    let tol = FitTol {
+        pos_mm: SHAPED_FIT_TOL_MM,
+        accel_mm_s2: SHAPED_FIT_TOL_ACCEL_MM_S2,
     };
-    for &degree in crate::lowering::ladder_degrees(h) {
-        let c = ladder_candidate(&base, degree, &truth_p);
-        if ok(&c) {
-            return Ok((c, true));
-        }
-    }
-    Ok((base, false))
-}
-
-fn shaped_piece_from_mono_u(mono_u: &[f64], t0: f64, t1: f64) -> BezierPiece<f64> {
-    let h = t1 - t0;
-    let cheb = truncate_chebyshev_c2_anchored(
-        &monomial_u_to_chebyshev(mono_u),
-        h,
-        0.1 * SHAPED_FIT_TOL_MM,
-        FIT_TRUNC_VEL_MM_S,
-        FIT_TRUNC_ACC_MM_S2,
-    );
-    BezierPiece {
-        u_start: t0,
-        u_end: t1,
-        coeffs: chebyshev_to_monomial_tau(&cheb, h),
+    match ladder_fit(&base, h, tol, &|u| truth.pos_at(u), &|u| truth.acc_at(u)) {
+        Some(c) => Ok((c, true)),
+        None => Ok((base, false)),
     }
 }
 
@@ -504,7 +477,13 @@ fn refine_shaped_span(
 ) -> Result<(), PostProcessError> {
     let (mono_u, fits) = shaped_ladder(axis, sig, t0, t1, domain_lo, domain_hi)?;
     if fits || depth >= SHAPED_FIT_MAX_DEPTH || (t1 - t0) <= 2.0 * SHAPED_FIT_MIN_SPAN_S {
-        out.push(shaped_piece_from_mono_u(&mono_u, t0, t1));
+        out.push(truncated_piece(
+            &mono_u,
+            t0,
+            t1,
+            t1 - t0,
+            FIT_TRUNC_POS_FACTOR * SHAPED_FIT_TOL_MM,
+        ));
         return Ok(());
     }
     let tm = 0.5 * (t0 + t1);
