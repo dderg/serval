@@ -20,8 +20,15 @@ const CONFIG_FIELDS = [
   { id: "max_extrude_only_accel", required: false },
 ];
 
-function defaultGcode() {
-  const lines = [
+// A real print excerpt (Voron cube layer 5, from the snapshot cases), shipped
+// as a sibling asset so the static bundle stays gcode-free JS. The inline
+// fallback keeps the page usable if the fetch fails.
+async function defaultGcode() {
+  try {
+    const resp = await fetch("./default.gcode");
+    if (resp.ok) return await resp.text();
+  } catch (e) { /* offline / stripped-down deploy — fall through */ }
+  return [
     "; Motion playground — edit me. G0/G1, G90/G91, G92, M82/M83.",
     "G90",
     "G1 X0 Y0 F9000",
@@ -29,19 +36,7 @@ function defaultGcode() {
     "G1 X40 Y40",
     "G1 X0 Y40",
     "G1 X0 Y0",
-    "; faceted arc — [arc_fit] fuses these 24 segments into one true arc;",
-    "; clear min_run_facets to see the raw clothoid-per-corner version",
-    "; (the fit budget derives from square_corner_velocity² / max_accel)",
-    "G0 X65 Y20",
-  ];
-  const n = 96;
-  for (let k = 1; k <= n / 4; k++) {
-    const a = (2 * Math.PI * k) / n;
-    const x = 60 + 5 * Math.cos(a);
-    const y = 20 + 5 * Math.sin(a);
-    lines.push(`G1 X${x.toFixed(3)} Y${y.toFixed(3)}`);
-  }
-  return lines.join("\n") + "\n";
+  ].join("\n") + "\n";
 }
 
 let view = null;
@@ -172,12 +167,12 @@ function saveState(gcode) {
   } catch (e) { /* quota / private mode — persistence is best-effort */ }
 }
 
-function restoreState() {
+async function restoreState() {
   let state = null;
   try {
     state = JSON.parse(localStorage.getItem(STORAGE_KEY));
   } catch (e) { /* corrupted — start fresh */ }
-  document.getElementById("gcode").value = state?.gcode || defaultGcode();
+  document.getElementById("gcode").value = state?.gcode || (await defaultGcode());
   for (const f of CONFIG_FIELDS) {
     const saved = state?.config?.[f.id];
     if (saved != null && saved !== "") {
@@ -194,7 +189,7 @@ async function main() {
   view.onChanged = syncControls;
   setupSplitter("motionPlayground.pathSplit");
   spawnWorker();
-  restoreState();
+  await restoreState();
 
   document.getElementById("gcode").addEventListener("input", schedulePlan);
   for (const f of CONFIG_FIELDS) {
