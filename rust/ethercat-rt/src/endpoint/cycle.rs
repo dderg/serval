@@ -117,125 +117,146 @@ fn compute_motion_targets(ctx: &mut EndpointCtx, apply_time: u64) -> (bool, Vec<
     let mut all_acc = vec![0f32; num_slaves];
     let mut all_vel = vec![0f32; num_slaves];
     if ctx.gate.state() == TorqueState::Enabled {
-        // The coupled torque model needs every axis' accel/vel before any
-        // one slot's feedforward can be computed, so sample all slots first.
-        let mut sp_counts: Vec<Option<i32>> = vec![None; num_slaves];
-        for s in 0..num_slaves {
-            let sampled = if ctx.buzz.active() {
-                if s == 0 {
-                    let cmd_counts_per_mm0 = ctx.cmd_counts_per_mm[0];
-                    ctx.buzz
-                        .eval(apply_time)
-                        .map(|(rel_mm, vel_mm_s, acc_mm_s2)| {
-                            let counts = ctx
-                                .buzz
-                                .base_counts()
-                                .wrapping_add(mm_to_counts(f64::from(rel_mm), cmd_counts_per_mm0));
-                            (counts, vel_mm_s, acc_mm_s2)
-                        })
-                } else {
-                    None
-                }
-            } else if let Some((pos_mm, vel_mm_s, acc_mm_s2)) = ctx.rings[s].sample(apply_time) {
-                // Streaming is always relative: each stream anchors the
-                // drive's actual position to the host's first commanded
-                // value, so a homing set_position (host frame shift) can
-                // never yank a drive. The report_anchor covers absolute
-                // position queries; the drive frame itself is never used.
-                let cpm = ctx.cmd_counts_per_mm[s];
-                let map = ctx.cmaps[s].get_or_insert_with(|| {
-                    let actual =
-                        unsafe { ffi::ec_rt_get_position_actual(s as std::os::raw::c_int) };
-                    CountMap::new(cpm, actual, f64::from(pos_mm))
-                });
-                Some((map.target_counts(f64::from(pos_mm)), vel_mm_s, acc_mm_s2))
-            } else {
-                if !ctx.buzz.active() {
-                    ctx.cmaps[s] = None;
-                }
-                None
-            };
-            if let Some((counts, vel_mm_s, acc_mm_s2)) = sampled {
-                sp_counts[s] = Some(counts);
-                let (ff_vel, ff_acc) = if ctx.ff_lead_ns[s] > 0 && !ctx.buzz.active() {
-                    ctx.rings[s].peek_vel_acc(apply_time + ctx.ff_lead_ns[s])
-                } else {
-                    (vel_mm_s, acc_mm_s2)
-                };
-                all_vel[s] = ff_vel;
-                all_acc[s] = ff_acc;
-            }
-        }
-
-        // The dynamics profile is fitted in the drive frame (the capture
-        // flips each drive's commanded kinematics by its direction sign),
-        // so the model must be evaluated on drive-frame vectors — flipping
-        // only the output torque by the slot's own sign would negate the
-        // off-diagonal coupling terms whenever the drives' inverts differ.
-        let drive_dir = |s: usize| ctx.cmd_counts_per_mm.get(s).map_or(1.0, |c| c.signum()) as f32;
-        let (acc_drive, vel_drive): (Vec<f32>, Vec<f32>) = (0..num_slaves)
-            .map(|s| (drive_dir(s) * all_acc[s], drive_dir(s) * all_vel[s]))
-            .unzip();
-        for s in 0..num_slaves {
-            let slot = s as std::os::raw::c_int;
-            if let Some(counts) = sp_counts[s] {
-                let vel_offset = if ctx.velocity_ff[s] {
-                    (f64::from(all_vel[s]) * ctx.cmd_counts_per_mm[s]).round() as i32
-                } else {
-                    0
-                };
-                let raw_ff = ctx
-                    .dynamics
-                    .as_ref()
-                    .map(|model| model.torque_ff(s, &acc_drive, &vel_drive));
-                let torque_offset = match raw_ff {
-                    Some(raw) => {
-                        if !raw.is_finite() {
-                            fault_non_finite_torque(ctx, s, all_acc[s], all_vel[s]);
-                        }
-                        clamp_torque(raw, ctx.torque_clamp_tenths[s], &mut ctx.ff_saturation)
-                    }
-                    None => 0,
-                };
-                if let Some(prev) = ctx.last_counts[s] {
-                    let increment = i64::from(counts) - i64::from(prev);
-                    if increment.abs() > ctx.jump_log_counts[s] {
-                        tracing::warn!(
-                            subsystem = "ethercat",
-                            event = "target_jump",
-                            slot = s,
-                            prev_target = prev,
-                            new_target = counts,
-                            increment,
-                            vel_mm_s = f64::from(all_vel[s]),
-                            acc_mm_s2 = f64::from(all_acc[s]),
-                            invert = ctx.invert[s],
-                            "commanded target increment exceeds sane per-cycle bound"
-                        );
-                    }
-                }
-                ctx.last_counts[s] = Some(counts);
-                ctx.last_streamed_target[s] = Some(counts);
-                unsafe {
-                    ffi::ec_rt_set_target_position(slot, counts);
-                    ffi::ec_rt_set_velocity_offset(slot, vel_offset);
-                    ffi::ec_rt_set_torque_offset(slot, torque_offset);
-                }
-                motion_active = true;
-            } else {
-                ctx.last_counts[s] = None;
-                unsafe {
-                    ffi::ec_rt_set_velocity_offset(slot, 0);
-                    ffi::ec_rt_set_torque_offset(slot, 0);
-                }
-            }
-        }
+        let sp_counts = sample_slot_targets(ctx, apply_time, &mut all_acc, &mut all_vel);
+        motion_active = emit_slot_commands(ctx, &sp_counts, &all_acc, &all_vel);
     } else {
         for lc in &mut ctx.last_counts {
             *lc = None;
         }
     }
     (motion_active, all_acc, all_vel)
+}
+
+// The coupled torque model needs every axis' accel/vel before any
+// one slot's feedforward can be computed, so sample all slots first.
+fn sample_slot_targets(
+    ctx: &mut EndpointCtx,
+    apply_time: u64,
+    all_acc: &mut [f32],
+    all_vel: &mut [f32],
+) -> Vec<Option<i32>> {
+    let num_slaves = ctx.num_slaves;
+    let mut sp_counts: Vec<Option<i32>> = vec![None; num_slaves];
+    for s in 0..num_slaves {
+        let sampled = if ctx.buzz.active() {
+            if s == 0 {
+                let cmd_counts_per_mm0 = ctx.cmd_counts_per_mm[0];
+                ctx.buzz
+                    .eval(apply_time)
+                    .map(|(rel_mm, vel_mm_s, acc_mm_s2)| {
+                        let counts = ctx
+                            .buzz
+                            .base_counts()
+                            .wrapping_add(mm_to_counts(f64::from(rel_mm), cmd_counts_per_mm0));
+                        (counts, vel_mm_s, acc_mm_s2)
+                    })
+            } else {
+                None
+            }
+        } else if let Some((pos_mm, vel_mm_s, acc_mm_s2)) = ctx.rings[s].sample(apply_time) {
+            // Streaming is always relative: each stream anchors the
+            // drive's actual position to the host's first commanded
+            // value, so a homing set_position (host frame shift) can
+            // never yank a drive. The report_anchor covers absolute
+            // position queries; the drive frame itself is never used.
+            let cpm = ctx.cmd_counts_per_mm[s];
+            let map = ctx.cmaps[s].get_or_insert_with(|| {
+                let actual = unsafe { ffi::ec_rt_get_position_actual(s as std::os::raw::c_int) };
+                CountMap::new(cpm, actual, f64::from(pos_mm))
+            });
+            Some((map.target_counts(f64::from(pos_mm)), vel_mm_s, acc_mm_s2))
+        } else {
+            if !ctx.buzz.active() {
+                ctx.cmaps[s] = None;
+            }
+            None
+        };
+        if let Some((counts, vel_mm_s, acc_mm_s2)) = sampled {
+            sp_counts[s] = Some(counts);
+            let (ff_vel, ff_acc) = if ctx.ff_lead_ns[s] > 0 && !ctx.buzz.active() {
+                ctx.rings[s].peek_vel_acc(apply_time + ctx.ff_lead_ns[s])
+            } else {
+                (vel_mm_s, acc_mm_s2)
+            };
+            all_vel[s] = ff_vel;
+            all_acc[s] = ff_acc;
+        }
+    }
+    sp_counts
+}
+
+fn emit_slot_commands(
+    ctx: &mut EndpointCtx,
+    sp_counts: &[Option<i32>],
+    all_acc: &[f32],
+    all_vel: &[f32],
+) -> bool {
+    let num_slaves = ctx.num_slaves;
+    let mut motion_active = false;
+    // The dynamics profile is fitted in the drive frame (the capture
+    // flips each drive's commanded kinematics by its direction sign),
+    // so the model must be evaluated on drive-frame vectors — flipping
+    // only the output torque by the slot's own sign would negate the
+    // off-diagonal coupling terms whenever the drives' inverts differ.
+    let drive_dir = |s: usize| ctx.cmd_counts_per_mm.get(s).map_or(1.0, |c| c.signum()) as f32;
+    let (acc_drive, vel_drive): (Vec<f32>, Vec<f32>) = (0..num_slaves)
+        .map(|s| (drive_dir(s) * all_acc[s], drive_dir(s) * all_vel[s]))
+        .unzip();
+    for s in 0..num_slaves {
+        let slot = s as std::os::raw::c_int;
+        if let Some(counts) = sp_counts[s] {
+            let vel_offset = if ctx.velocity_ff[s] {
+                (f64::from(all_vel[s]) * ctx.cmd_counts_per_mm[s]).round() as i32
+            } else {
+                0
+            };
+            let raw_ff = ctx
+                .dynamics
+                .as_ref()
+                .map(|model| model.torque_ff(s, &acc_drive, &vel_drive));
+            let torque_offset = match raw_ff {
+                Some(raw) => {
+                    if !raw.is_finite() {
+                        fault_non_finite_torque(ctx, s, all_acc[s], all_vel[s]);
+                    }
+                    clamp_torque(raw, ctx.torque_clamp_tenths[s], &mut ctx.ff_saturation)
+                }
+                None => 0,
+            };
+            if let Some(prev) = ctx.last_counts[s] {
+                let increment = i64::from(counts) - i64::from(prev);
+                if increment.abs() > ctx.jump_log_counts[s] {
+                    tracing::warn!(
+                        subsystem = "ethercat",
+                        event = "target_jump",
+                        slot = s,
+                        prev_target = prev,
+                        new_target = counts,
+                        increment,
+                        vel_mm_s = f64::from(all_vel[s]),
+                        acc_mm_s2 = f64::from(all_acc[s]),
+                        invert = ctx.invert[s],
+                        "commanded target increment exceeds sane per-cycle bound"
+                    );
+                }
+            }
+            ctx.last_counts[s] = Some(counts);
+            ctx.last_streamed_target[s] = Some(counts);
+            unsafe {
+                ffi::ec_rt_set_target_position(slot, counts);
+                ffi::ec_rt_set_velocity_offset(slot, vel_offset);
+                ffi::ec_rt_set_torque_offset(slot, torque_offset);
+            }
+            motion_active = true;
+        } else {
+            ctx.last_counts[s] = None;
+            unsafe {
+                ffi::ec_rt_set_velocity_offset(slot, 0);
+                ffi::ec_rt_set_torque_offset(slot, 0);
+            }
+        }
+    }
+    motion_active
 }
 
 fn fault_non_finite_torque(ctx: &mut EndpointCtx, slot: usize, acc: f32, vel: f32) -> ! {
