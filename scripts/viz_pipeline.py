@@ -340,12 +340,17 @@ def _time_series_from_pieces(snapshot):
                     bounds.add(t1)
     bounds = np.array(sorted(bounds))
 
-    n_intervals = max(len(bounds) - 1, 1)
-    per_interval = max(int(max(8 * len(xp), 2000) / n_intervals), 32)
+    # Sample density follows time, not piece count: the lowering fits one
+    # long piece where the signal is smooth (an arc can span tens of
+    # milliseconds), so a fixed per-interval count would leave chords that
+    # render a genuinely smooth trajectory as a polyline.
+    target_dt = 2.5e-4
     t = np.unique(
         np.concatenate(
             [
-                np.linspace(a, b, per_interval)
+                np.linspace(
+                    a, b, int(np.clip(np.ceil((b - a) / target_dt), 4, 512))
+                )
                 for a, b in zip(bounds[:-1], bounds[1:])
             ]
         )

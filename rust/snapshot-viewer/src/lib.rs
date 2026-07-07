@@ -280,9 +280,14 @@ fn time_series_from_pieces(
     bounds.sort_by(|a, b| a.partial_cmp(b).unwrap());
     bounds.dedup();
 
-    let n_intervals = bounds.len() - 1;
-    let per_interval = ((8 * xp.len()).max(2000) / n_intervals.max(1)).max(4);
-    let cap = per_interval * n_intervals;
+    // Sample density must follow time, not piece count: since the lowering
+    // fits one long piece where the signal is smooth (an arc can span tens of
+    // milliseconds), a fixed per-interval count leaves millimeter-scale chords
+    // that render a genuinely smooth trajectory as a polyline.
+    const TARGET_SAMPLE_DT_S: f64 = 2.5e-4;
+    let per_interval_of =
+        |a: f64, b: f64| -> usize { (((b - a) / TARGET_SAMPLE_DT_S).ceil() as usize).clamp(4, 512) };
+    let cap: usize = bounds.windows(2).map(|w| per_interval_of(w[0], w[1])).sum();
 
     let new = || Vec::with_capacity(cap);
     let mut t = new();
@@ -293,6 +298,7 @@ fn time_series_from_pieces(
 
     for w in bounds.windows(2) {
         let (a, b) = (w[0], w[1]);
+        let per_interval = per_interval_of(a, b);
         for k in 0..per_interval {
             let ti = a + (b - a) * (k as f64) / ((per_interval - 1) as f64);
             let (x, vxk, axk, jxk) = eval_lane(xp, ti);

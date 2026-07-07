@@ -124,7 +124,31 @@ pub(super) fn cocircular(facets: &[Move], tol: f64) -> bool {
     let Some(lines) = facets.iter().map(line_of).collect::<Option<Vec<_>>>() else {
         return false;
     };
-    max_sagitta(&lines, fit.radius) <= tol
+    if max_sagitta(&lines, fit.radius) > tol {
+        return false;
+    }
+    anchored_radial_dev_within(&lines, &fit, tol)
+}
+
+/// Reconstruction anchors the circle through the run's endpoints
+/// (`center_through_endpoints`), which is stricter than the free
+/// least-squares residual — and ill-conditioned when the run nearly closes
+/// on itself (tiny endpoint chord). Checking it during candidate growth
+/// keeps every sealed run reconstructable instead of dissolving later.
+fn anchored_radial_dev_within(lines: &[&Line], fit: &CircleFit, tol: f64) -> bool {
+    let t0 = lines[0].heading_at(0.0);
+    let Some(v0) = turn_normal(t0, lines[1].heading_at(0.0)) else {
+        return false;
+    };
+    let plane_normal = normalize(cross(t0, v0));
+    let last = lines[lines.len() - 1];
+    let p1 = last.point_at(last.s_len());
+    let Some((origin, rho)) =
+        center_through_endpoints(lines[0].start, p1, fit.radius, fit.origin, plane_normal)
+    else {
+        return false;
+    };
+    max_radial_dev(lines, origin, rho) <= tol
 }
 
 pub(super) fn max_sagitta(lines: &[&Line], radius: f64) -> f64 {

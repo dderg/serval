@@ -267,6 +267,7 @@ fn apply_axis_chain(
         .map_or(0.0, |seg| seg.t_start);
     let last_t = base.last().map_or(first_t, |seg| seg.t_end);
     let signal_segments: Vec<&ShapedSegment> = history.iter().chain(base.iter()).collect();
+    let input_breaks = signal_breakpoints(&signal_segments, axis);
     for seg in out.iter_mut() {
         let need_lo = seg.t_start + k_lo;
         let need_hi = seg.t_end + k_hi;
@@ -276,17 +277,21 @@ fn apply_axis_chain(
         if need_hi > last_t && !force {
             return Err(PostProcessError::MissingLookahead { axis, t: need_hi });
         }
-        let sig = ShapedSignal::new_from_evaluator(kernel, seg.t_start, seg.t_end, |t| {
-            eval_axis_with_edges(
-                &signal_segments,
-                axis,
-                t,
-                first_t,
-                last_t,
-                at_stream_boundary,
-                force,
-            )
-        });
+        let sig = ShapedSignal::new_from_evaluator(
+            kernel,
+            |t| {
+                eval_axis_with_edges(
+                    &signal_segments,
+                    axis,
+                    t,
+                    first_t,
+                    last_t,
+                    at_stream_boundary,
+                    force,
+                )
+            },
+            input_breaks.clone(),
+        );
         let shaped = fit_axis_from_signal(axis, &seg.axes[axis], &sig)?;
         seg.axes[axis] = apply_trailing_zero_support(chain, shaped);
         if !seg.axes[axis]
@@ -301,6 +306,20 @@ fn apply_axis_chain(
         }
     }
     Ok(())
+}
+
+/// Every time the window's signal changes polynomial on this axis: each
+/// segment's NURBS knots plus the segment edges (a gap between segments is a
+/// constant hold, which the edges delimit). The exact convolution integrates
+/// between these, so its Gauss rule never straddles a polynomial change.
+fn signal_breakpoints(segments: &[&ShapedSegment], axis: usize) -> Vec<f64> {
+    let mut breaks = Vec::new();
+    for seg in segments {
+        breaks.push(seg.t_start);
+        breaks.extend_from_slice(seg.axes[axis].knots());
+        breaks.push(seg.t_end);
+    }
+    breaks
 }
 
 fn eval_axis_with_edges(
@@ -379,23 +398,42 @@ fn fit_axis_from_signal(
     if template_pieces.is_empty() {
         return Err(PostProcessError::DegenerateAxisTrack { axis });
     }
-    let domain_lo = template_pieces.first().expect("checked non-empty").u_start;
-    let domain_hi = template_pieces.last().expect("checked non-empty").u_end;
     // The template's breakpoints seed the partition, but the convolved signal can
     // need finer pieces than the unshaped trajectory had — so refine each span to
     // the shaper's own tolerance rather than inheriting the template's resolution.
-    let mut pieces = Vec::with_capacity(template_pieces.len());
+    // Seed spans from the template's boundaries, coalescing any closer than
+    // the fit floor: a sliver template piece (repeated NURBS knot, sub-µs
+    // remainder) fitted on its own divides by its near-zero duration and
+    // mints garbage endpoint accelerations at the seam.
+    let t_lo = template_pieces.first().expect("checked non-empty").u_start;
+    let t_hi = template_pieces.last().expect("checked non-empty").u_end;
+    if t_hi - t_lo < SHAPED_FIT_MIN_SPAN_S {
+        // A sliver segment (float-noise trim stub upstream) is too short for
+        // the Hermite fit's 1/h² conditioning; a linear piece through the
+        // exact endpoint positions carries its (physically invisible)
+        // nanoseconds without minting garbage endpoint accelerations.
+        let p0 = finite_sample(axis, sig, t_lo)?;
+        let p1 = finite_sample(axis, sig, t_hi)?;
+        let piece = BezierPiece {
+            u_start: t_lo,
+            u_end: t_hi,
+            coeffs: vec![p0, (p1 - p0) / (t_hi - t_lo)],
+        };
+        return Ok(bezier_pieces_to_nurbs(&[piece]));
+    }
+    let mut seeds = vec![t_lo];
     for piece in &template_pieces {
-        refine_shaped_span(
-            axis,
-            sig,
-            piece.u_start,
-            piece.u_end,
-            domain_lo,
-            domain_hi,
-            0,
-            &mut pieces,
-        )?;
+        if piece.u_end - seeds.last().expect("seeded") >= SHAPED_FIT_MIN_SPAN_S {
+            seeds.push(piece.u_end);
+        }
+    }
+    while seeds.len() > 1 && t_hi - *seeds.last().expect("seeded") < SHAPED_FIT_MIN_SPAN_S {
+        seeds.pop();
+    }
+    seeds.push(t_hi);
+    let mut pieces = Vec::with_capacity(template_pieces.len());
+    for w in seeds.windows(2) {
+        refine_shaped_span(axis, sig, w[0], w[1], 0, &mut pieces)?;
     }
     let max_len = pieces.iter().map(|p| p.coeffs.len()).max().unwrap_or(1);
     for piece in &mut pieces {
@@ -407,9 +445,7 @@ fn fit_axis_from_signal(
 const SHAPED_FIT_TOL_MM: f64 = 1e-3;
 const SHAPED_FIT_MAX_DEPTH: u32 = 16;
 const SHAPED_FIT_MIN_SPAN_S: f64 = 5e-5;
-/// Looser than the lowering's 50 mm/s²: the shaped signal's acceleration truth
-/// comes from a second-difference stencil, not an analytic profile.
-const SHAPED_FIT_TOL_ACCEL_MM_S2: f64 = 200.0;
+const SHAPED_FIT_TOL_ACCEL_MM_S2: f64 = 50.0;
 
 /// Sampled truth for one span, taken up front so stencil errors surface as
 /// `PostProcessError` instead of poisoning the ladder closures.
@@ -439,27 +475,25 @@ impl SpanTruth {
 const LADDER_FIT_NODES_U: [f64; 3] = [0.0, 0.5, -0.5];
 
 /// Ladder fit of the shaped signal over one span: quintic Hermite matching
-/// sampled (p, v, a) at both ends, degrees 6/7 from interior residuals — the
-/// lowering ladder against pre-sampled truth, with the shaper's own budgets.
-/// Returns the accepted monomial-in-u fit, or the quintic base with
-/// `fits = false` so the caller can bisect.
+/// the convolution's exact (p, v, a) at both ends, degrees 6/7 from interior
+/// residuals — the lowering ladder against pre-sampled truth, with the
+/// shaper's own budgets. Returns the accepted monomial-in-u fit, or the
+/// quintic base with `fits = false` so the caller can bisect.
 #[allow(clippy::type_complexity)]
 fn shaped_ladder(
     axis: usize,
     sig: &ShapedSignal<'_>,
     t0: f64,
     t1: f64,
-    domain_lo: f64,
-    domain_hi: f64,
 ) -> Result<(Vec<f64>, bool), PostProcessError> {
     let h = t1 - t0;
     let t_of = |u: f64| (0.5 * (u + 1.0)).mul_add(h, t0);
     let p0 = finite_sample(axis, sig, t0)?;
     let p1 = finite_sample(axis, sig, t1)?;
-    let v0 = finite_derivative(axis, sig, t0, t1, domain_lo, domain_hi)?;
-    let v1 = finite_derivative(axis, sig, t1, t0, domain_lo, domain_hi)?;
-    let a0 = finite_second_derivative(axis, sig, t0, h, domain_lo, domain_hi)?;
-    let a1 = finite_second_derivative(axis, sig, t1, h, domain_lo, domain_hi)?;
+    let v0 = exact_value(axis, sig.deriv(t0), t0)?;
+    let v1 = exact_value(axis, sig.deriv(t1), t1)?;
+    let a0 = exact_value(axis, sig.second_deriv(t0), t0)?;
+    let a1 = exact_value(axis, sig.second_deriv(t1), t1)?;
     let base = quintic_in_u((p0, v0, a0), (p1, v1, a1), h);
 
     let mut truth = SpanTruth {
@@ -470,10 +504,9 @@ fn shaped_ladder(
         truth.pos.push((u, finite_sample(axis, sig, t_of(u))?));
     }
     for &u in &LADDER_PROBES_U {
-        truth.acc.push((
-            u,
-            finite_second_derivative(axis, sig, t_of(u), h, domain_lo, domain_hi)?,
-        ));
+        truth
+            .acc
+            .push((u, exact_value(axis, sig.second_deriv(t_of(u)), t_of(u))?));
     }
 
     let tol = FitTol {
@@ -486,18 +519,15 @@ fn shaped_ladder(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn refine_shaped_span(
     axis: usize,
     sig: &ShapedSignal<'_>,
     t0: f64,
     t1: f64,
-    domain_lo: f64,
-    domain_hi: f64,
     depth: u32,
     out: &mut Vec<BezierPiece>,
 ) -> Result<(), PostProcessError> {
-    let (mono_u, fits) = shaped_ladder(axis, sig, t0, t1, domain_lo, domain_hi)?;
+    let (mono_u, fits) = shaped_ladder(axis, sig, t0, t1)?;
     if fits || depth >= SHAPED_FIT_MAX_DEPTH || (t1 - t0) <= 2.0 * SHAPED_FIT_MIN_SPAN_S {
         out.push(truncated_piece(
             &mono_u,
@@ -509,61 +539,20 @@ fn refine_shaped_span(
         return Ok(());
     }
     let tm = 0.5 * (t0 + t1);
-    refine_shaped_span(axis, sig, t0, tm, domain_lo, domain_hi, depth + 1, out)?;
-    refine_shaped_span(axis, sig, tm, t1, domain_lo, domain_hi, depth + 1, out)
-}
-
-/// Second-difference acceleration estimate with a stencil ~10× the velocity
-/// stencil (h² in the denominator amplifies sample noise quadratically).
-/// The general non-uniform 3-point formula handles domain-edge clamping.
-fn finite_second_derivative(
-    axis: usize,
-    sig: &ShapedSignal<'_>,
-    t: f64,
-    span: f64,
-    domain_lo: f64,
-    domain_hi: f64,
-) -> Result<f64, PostProcessError> {
-    let h = (span.abs() * 0.05).clamp(1e-5, 5e-4);
-    let a = (t - h).max(domain_lo);
-    let c = (t + h).min(domain_hi);
-    if c - a <= f64::EPSILON {
-        return Err(PostProcessError::DegenerateAxisTrack { axis });
-    }
-    let b = 0.5 * (a + c);
-    let fa = finite_sample(axis, sig, a)?;
-    let fb = finite_sample(axis, sig, b)?;
-    let fc = finite_sample(axis, sig, c)?;
-    let (ba, cb, ca) = (b - a, c - b, c - a);
-    Ok(2.0 * (fa / (ba * ca) - fb / (ba * cb) + fc / (ca * cb)))
+    refine_shaped_span(axis, sig, t0, tm, depth + 1, out)?;
+    refine_shaped_span(axis, sig, tm, t1, depth + 1, out)
 }
 
 fn finite_sample(axis: usize, sig: &ShapedSignal<'_>, t: f64) -> Result<f64, PostProcessError> {
-    let value = sig.eval(t);
+    exact_value(axis, sig.eval(t), t)
+}
+
+fn exact_value(axis: usize, value: f64, t: f64) -> Result<f64, PostProcessError> {
     if value.is_finite() {
         Ok(value)
     } else {
         Err(PostProcessError::NonFiniteSample { axis, t })
     }
-}
-
-fn finite_derivative(
-    axis: usize,
-    sig: &ShapedSignal<'_>,
-    t: f64,
-    other: f64,
-    domain_lo: f64,
-    domain_hi: f64,
-) -> Result<f64, PostProcessError> {
-    let h = ((t - other).abs() * 1e-5).clamp(1e-7, 1e-4);
-    let lo = (t - h).max(domain_lo);
-    let hi = (t + h).min(domain_hi);
-    if hi <= lo {
-        return Err(PostProcessError::DegenerateAxisTrack { axis });
-    }
-    let dlo = finite_sample(axis, sig, lo)?;
-    let dhi = finite_sample(axis, sig, hi)?;
-    Ok((dhi - dlo) / (hi - lo))
 }
 
 fn apply_trailing_zero_support(
