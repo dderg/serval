@@ -1,5 +1,7 @@
+#[cfg(any(test, feature = "test-util"))]
 use std::collections::VecDeque;
 use std::io;
+#[cfg(any(test, feature = "test-util"))]
 use std::sync::{Arc, Mutex};
 
 pub trait Connection: Send {
