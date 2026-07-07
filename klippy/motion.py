@@ -175,6 +175,7 @@ class Motion:
             "manual_probe",
             "tuning_tower",
             "garbage_collection",
+            "motion_report",
         ):
             printer.load_object(config, module_name)
 

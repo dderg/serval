@@ -1,10 +1,34 @@
 import logging
 import struct
-from collections import defaultdict
+from collections import defaultdict, namedtuple
 
 from . import motion_kinematics, stepper
 from .arc_fit_config import arc_fit_from_config
 from .extras import servo_axis
+
+# The engine's init_planner extracts each of these by attribute name (they are
+# named tuples on the Rust side too), so a reordered field fails loud instead
+# of silently misconfiguring the planner. namedtuples stay tuple-compatible,
+# so existing positional unpacking of these sections keeps working.
+AxisSection = namedtuple(
+    "AxisSection", ["name", "follows", "motors", "post_processors"]
+)
+LimitSection = namedtuple(
+    "LimitSection", ["name", "axes", "max_velocity", "max_accel", "max_jerk"]
+)
+PostProcessor = namedtuple("PostProcessor", ["name", "type", "params"])
+CartesianLimits = namedtuple(
+    "CartesianLimits",
+    [
+        "max_velocity",
+        "max_accel",
+        "max_jerk",
+        "max_z_velocity",
+        "max_z_accel",
+        "square_corner_velocity",
+    ],
+)
+McuTopology = namedtuple("McuTopology", ["mcu_id", "axes", "kinematics"])
 
 _LEGACY_STEPPER_AXES = frozenset("xyzab")
 _LEGACY_SERVO_SECTIONS = ("servo_x", "servo_y", "servo_z")
@@ -65,7 +89,9 @@ def read_axes(motion, config):
         follows = [a.strip().lower() for a in sc.getlist("follows", [])]
         motors = [m.strip() for m in sc.getlist("motors", [])]
         post_processors = [p.strip() for p in sc.getlist("post_processors", [])]
-        motion.axis_sections.append((name, follows, motors, post_processors))
+        motion.axis_sections.append(
+            AxisSection(name, follows, motors, post_processors)
+        )
     declared = {name for name, _, _, _ in motion.axis_sections}
     for _, axes, _, _, _ in motion.limit_sections:
         for a in axes:
@@ -110,7 +136,7 @@ def read_post_processors(motion, config):
             for opt in sc.get_prefix_options("")
             if opt != "type"
         ]
-        motion.post_processor_sections.append((name, ty, params))
+        motion.post_processor_sections.append(PostProcessor(name, ty, params))
     declared = {name for name, _, _ in motion.post_processor_sections}
     for axis_name, _, _, post_processors in motion.axis_sections:
         for ref in post_processors:
@@ -161,7 +187,7 @@ def read_limits(motion, config):
         v = sc.getfloat("max_velocity", None, above=0.0)
         a = sc.getfloat("max_accel", None, above=0.0)
         j = sc.getfloat("max_jerk", None, above=0.0)
-        motion.limit_sections.append((name, axes, v, a, j))
+        motion.limit_sections.append(LimitSection(name, axes, v, a, j))
     motion.min_cruise_ratio = 0.0
     motion.orig_cfg = {}
 
@@ -211,7 +237,7 @@ def derive_mcu_topology(motion, axis_to_handle):
     topo = []
     for handle in sorted(by_handle):
         axes = sorted(by_handle[handle])
-        topo.append((handle, axes, motion.kin.mcu_tag(axes)))
+        topo.append(McuTopology(handle, axes, motion.kin.mcu_tag(axes)))
     return topo
 
 
@@ -249,7 +275,7 @@ def init_planner(motion):
             list(motion.post_processor_sections),
             topology,
             motion.kin.claimed_axes(),
-            (
+            CartesianLimits(
                 motion._max_velocity,
                 motion._max_accel,
                 motion.max_jerk,

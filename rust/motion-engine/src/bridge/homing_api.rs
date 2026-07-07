@@ -47,7 +47,7 @@ impl PyMotionEngine {
         let cohort = next_homing_cohort();
         let start_pos = *self.commanded_pos.lock_ok();
 
-        self.latched_drive_fault.lock_ok().remove(&axis_key.mcu_id);
+        self.latched.drive.lock_ok().remove(&axis_key.mcu_id);
 
         self.quiesce_pump_and_drain(py)?;
 
@@ -56,7 +56,7 @@ impl PyMotionEngine {
             router.host_now_secs()
         };
 
-        *self.active_drip_cohort.lock_ok() = Some(cohort);
+        *self.homing.active_drip_cohort.lock_ok() = Some(cohort);
 
         self.homing_pump_tx()?
             .send(crate::pump::PumpMsg::DripArm(crate::pump::DripArm {
@@ -69,7 +69,7 @@ impl PyMotionEngine {
         let (result_tx, result_rx) =
             crossbeam_channel::bounded::<Result<([f64; 3], [f64; 3], u64), String>>(1);
 
-        *self.homing_run.lock_ok() = Some(HomingRun {
+        *self.homing.run.lock_ok() = Some(HomingRun {
             cohort,
             endstop_id,
             endstop_mcu,
@@ -99,7 +99,7 @@ impl PyMotionEngine {
             })?;
         self.await_homing_dispatch(py, &planner_done_rx)?;
 
-        *self.homing_result.lock_ok() = Some(result_rx);
+        *self.homing.result.lock_ok() = Some(result_rx);
 
         self.consume_buffered_early_trip(endstop_mcu, endstop_id);
         Ok(())
@@ -109,7 +109,7 @@ impl PyMotionEngine {
     }
     fn home_axis_poll(&self) -> PyResult<Option<([f64; 3], [f64; 3], u64)>> {
         let rx = {
-            let guard = self.homing_result.lock_ok();
+            let guard = self.homing.result.lock_ok();
             match guard.as_ref() {
                 Some(rx) => rx.clone(),
                 None => {
@@ -161,7 +161,7 @@ impl PyMotionEngine {
                 ))
             })?;
         let deps = self.trip_deps();
-        *self.pending_trip.lock_ok() = None;
+        *self.homing.pending_trip.lock_ok() = None;
         let router = Arc::clone(&self.router);
         let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let id = host_io
@@ -344,7 +344,8 @@ impl PyMotionEngine {
     }
 
     fn homing_pump_tx(&self) -> PyResult<crossbeam_channel::Sender<crate::pump::PumpMsg>> {
-        self.pump_tx
+        self.pump
+            .tx
             .lock_ok()
             .clone()
             .ok_or_else(|| PyRuntimeError::new_err("home_axis: pump not started"))
@@ -385,7 +386,7 @@ impl PyMotionEngine {
     }
 
     fn consume_buffered_early_trip(&self, endstop_mcu: u32, endstop_id: u8) {
-        let pending = self.pending_trip.lock_ok().take();
+        let pending = self.homing.pending_trip.lock_ok().take();
         if let Some((p_mcu, p_endstop, p_clock)) = pending {
             if p_mcu == endstop_mcu && p_endstop == endstop_id {
                 tracing::warn!(
@@ -402,7 +403,7 @@ impl PyMotionEngine {
     }
 
     fn abort_context(&self) -> Option<AbortContext> {
-        let guard = self.homing_run.lock_ok();
+        let guard = self.homing.run.lock_ok();
         guard.as_ref().map(|r| AbortContext {
             all_axis_keys: r.all_axis_keys.clone(),
             cohort: r.cohort,
@@ -416,7 +417,7 @@ impl PyMotionEngine {
         all_axis_keys: Vec<crate::types::AxisKey>,
         cohort: u64,
     ) -> bool {
-        let Some(tx) = self.pump_tx.lock_ok().clone() else {
+        let Some(tx) = self.pump.tx.lock_ok().clone() else {
             return true;
         };
         let _ = tx.send(crate::pump::PumpMsg::Flush(all_axis_keys));
@@ -476,17 +477,12 @@ impl PyMotionEngine {
     }
 
     fn finish_homing(&self) {
-        *self.active_drip_cohort.lock_ok() = None;
-        *self.homing_run.lock_ok() = None;
-        *self.homing_result.lock_ok() = None;
-        *self.pending_trip.lock_ok() = None;
+        self.homing.finish();
     }
     pub(super) fn trip_deps(&self) -> TripDeps {
         TripDeps {
-            homing_run: Arc::clone(&self.homing_run),
-            pending_trip: Arc::clone(&self.pending_trip),
-            active_drip_cohort: Arc::clone(&self.active_drip_cohort),
-            pump_tx: Arc::clone(&self.pump_tx),
+            homing: Arc::clone(&self.homing),
+            pump_tx: Arc::clone(&self.pump.tx),
             mcus: Arc::clone(&self.mcus),
             router: Arc::clone(&self.router),
             motion_history: Arc::clone(&self.motion_history),

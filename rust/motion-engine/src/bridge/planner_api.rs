@@ -3,36 +3,122 @@ use super::{
     PyValueError, Python, SPATIAL_AXES, classify, config, planner_err, pymethods, require_positive,
 };
 use crate::lock_ext::LockExt;
+use pyo3::FromPyObject;
 
 fn unsupported_curve(py: Python<'_>, message: &'static str) -> PyResult<()> {
     py.detach(|| Err(PyRuntimeError::new_err(message)))
 }
 
+/// One `[axis <name>]` section. Extracted by attribute from the Python
+/// `AxisSection` namedtuple — a reordered field fails loud instead of, say,
+/// silently swapping `motors` and `follows`.
+#[derive(FromPyObject)]
+struct AxisSection {
+    name: String,
+    follows: Vec<String>,
+    motors: Vec<String>,
+    post_processors: Vec<String>,
+}
+
+impl From<AxisSection> for config::AxisDecl {
+    fn from(a: AxisSection) -> Self {
+        config::AxisDecl {
+            name: a.name,
+            follows: a.follows,
+            motors: a.motors,
+            post_processors: a.post_processors,
+        }
+    }
+}
+
+/// One `[limit <name>]` section. `axes` are axis names here; they resolve to
+/// indices against the registry in `read_planner_config_sections`.
+#[derive(FromPyObject)]
+struct LimitSection {
+    name: String,
+    axes: Vec<String>,
+    max_velocity: Option<f64>,
+    max_accel: Option<f64>,
+    max_jerk: Option<f64>,
+}
+
+/// One `[post_processor <name>]` section. `type` is a Rust keyword, so the
+/// field is `ty`, extracted from the namedtuple's `type` attribute.
+#[derive(FromPyObject)]
+struct PostProcessor {
+    name: String,
+    #[pyo3(attribute("type"))]
+    ty: String,
+    params: Vec<(String, f64)>,
+}
+
+impl From<PostProcessor> for config::PostProcessorDecl {
+    fn from(p: PostProcessor) -> Self {
+        config::PostProcessorDecl {
+            name: p.name,
+            ty: p.ty,
+            params: p.params,
+        }
+    }
+}
+
+/// The `[printer]` cartesian limits, as six named floats rather than a bare
+/// 6-tuple where a transposed velocity/accel would type-check silently.
+#[derive(FromPyObject)]
+struct CartesianLimitsArg {
+    max_velocity: f64,
+    max_accel: f64,
+    max_jerk: f64,
+    max_z_velocity: f64,
+    max_z_accel: f64,
+    square_corner_velocity: f64,
+}
+
+impl From<CartesianLimitsArg> for config::CartesianLimits {
+    fn from(c: CartesianLimitsArg) -> Self {
+        config::CartesianLimits {
+            max_velocity: c.max_velocity,
+            max_accel: c.max_accel,
+            max_jerk: c.max_jerk,
+            max_z_velocity: c.max_z_velocity,
+            max_z_accel: c.max_z_accel,
+            square_corner_velocity: c.square_corner_velocity,
+        }
+    }
+}
+
+/// One MCU's axis assignment: which engine handle owns which global axis
+/// indices, under which kinematics tag. `build_mcu_configs` (in motion-core)
+/// still speaks the `(handle, axes, tag)` tuple, so this converts back to it
+/// at the boundary.
+#[derive(FromPyObject)]
+struct McuTopology {
+    mcu_id: u32,
+    axes: Vec<u8>,
+    kinematics: u8,
+}
+
+impl McuTopology {
+    fn into_tuple(self) -> (u32, Vec<u8>, u8) {
+        (self.mcu_id, self.axes, self.kinematics)
+    }
+}
+
 fn read_planner_config_sections(
-    axes: Vec<(String, Vec<String>, Vec<String>, Vec<String>)>,
-    limits: Vec<(String, Vec<String>, Option<f64>, Option<f64>, Option<f64>)>,
-    post_processors: Vec<(String, String, Vec<(String, f64)>)>,
+    axes: Vec<AxisSection>,
+    limits: Vec<LimitSection>,
+    post_processors: Vec<PostProcessor>,
     kinematics_axes: &[String],
-    cartesian_limits: (f64, f64, f64, f64, f64, f64),
+    cartesian_limits: CartesianLimitsArg,
 ) -> PyResult<(
     config::AxisRegistry,
     config::PostProcessorSet,
     Vec<config::LimitSection>,
     config::CartesianLimits,
 )> {
-    let axis_registry = config::AxisRegistry::try_new(
-        axes.into_iter()
-            .map(
-                |(name, follows, motors, post_processors)| config::AxisDecl {
-                    name,
-                    follows,
-                    motors,
-                    post_processors,
-                },
-            )
-            .collect(),
-    )
-    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let axis_registry =
+        config::AxisRegistry::try_new(axes.into_iter().map(config::AxisDecl::from).collect())
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     axis_registry
         .validate_motor_mapping(kinematics_axes)
@@ -40,39 +126,31 @@ fn read_planner_config_sections(
 
     let pp_decls: Vec<config::PostProcessorDecl> = post_processors
         .into_iter()
-        .map(|(name, ty, params)| config::PostProcessorDecl { name, ty, params })
+        .map(config::PostProcessorDecl::from)
         .collect();
     let post_processor_set = config::PostProcessorSet::try_new(&axis_registry, &pp_decls)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let limit_sections: Vec<config::LimitSection> = limits
         .into_iter()
-        .map(|(name, axes, max_velocity, max_accel, max_jerk)| {
-            let axes = axes
+        .map(|limit| {
+            let axes = limit
+                .axes
                 .iter()
                 .map(|a| axis_registry.axis_index(a))
                 .collect::<Result<Vec<usize>, _>>()
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
             Ok(config::LimitSection {
-                name,
+                name: limit.name,
                 axes,
-                max_velocity,
-                max_accel,
-                max_jerk,
+                max_velocity: limit.max_velocity,
+                max_accel: limit.max_accel,
+                max_jerk: limit.max_jerk,
             })
         })
         .collect::<PyResult<_>>()?;
 
-    let (max_velocity, max_accel, max_jerk, max_z_velocity, max_z_accel, square_corner_velocity) =
-        cartesian_limits;
-    let cartesian = config::CartesianLimits {
-        max_velocity,
-        max_accel,
-        max_jerk,
-        max_z_velocity,
-        max_z_accel,
-        square_corner_velocity,
-    };
+    let cartesian = config::CartesianLimits::from(cartesian_limits);
     cartesian.validate().map_err(PyValueError::new_err)?;
 
     Ok((axis_registry, post_processor_set, limit_sections, cartesian))
@@ -160,11 +238,11 @@ fn apply_planner_config(
 }
 
 fn build_planner_config(
-    axes: Vec<(String, Vec<String>, Vec<String>, Vec<String>)>,
-    limits: Vec<(String, Vec<String>, Option<f64>, Option<f64>, Option<f64>)>,
-    post_processors: Vec<(String, String, Vec<(String, f64)>)>,
+    axes: Vec<AxisSection>,
+    limits: Vec<LimitSection>,
+    post_processors: Vec<PostProcessor>,
     kinematics_axes: &[String],
-    cartesian_limits: (f64, f64, f64, f64, f64, f64),
+    cartesian_limits: CartesianLimitsArg,
     tuning: &PlannerTuning,
 ) -> PyResult<config::PlannerConfig> {
     let (axis_registry, post_processor_set, limit_sections, cartesian) =
@@ -247,15 +325,15 @@ impl PyMotionEngine {
         fit_tolerance_mm = None,
         fit_tolerance_accel_mm_s2 = None,
     ))]
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments)]
     fn init_planner(
         &self,
-        axes: Vec<(String, Vec<String>, Vec<String>, Vec<String>)>,
-        limits: Vec<(String, Vec<String>, Option<f64>, Option<f64>, Option<f64>)>,
-        post_processors: Vec<(String, String, Vec<(String, f64)>)>,
-        mcus: Vec<(u32, Vec<u8>, u8)>,
+        axes: Vec<AxisSection>,
+        limits: Vec<LimitSection>,
+        post_processors: Vec<PostProcessor>,
+        mcus: Vec<McuTopology>,
         kinematics_axes: Vec<String>,
-        cartesian_limits: (f64, f64, f64, f64, f64, f64),
+        cartesian_limits: CartesianLimitsArg,
         arc_fit: Option<u32>,
         max_extrude_only_velocity: Option<f64>,
         max_extrude_only_accel: Option<f64>,
@@ -282,6 +360,7 @@ impl PyMotionEngine {
         )?;
         *self.planner_config.lock_ok() = cfg.clone();
 
+        let mcus: Vec<(u32, Vec<u8>, u8)> = mcus.into_iter().map(McuTopology::into_tuple).collect();
         let (ec_conns, mcu_configs) = self.resolve_mcu_topology(&mcus)?;
 
         let (ethercat_mcu_ids, host_ios, ring_depth_table) =

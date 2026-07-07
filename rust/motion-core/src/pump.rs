@@ -1,5 +1,6 @@
 pub use crate::types::AxisKey;
 
+mod diag;
 mod drip;
 mod junction;
 mod messages;
