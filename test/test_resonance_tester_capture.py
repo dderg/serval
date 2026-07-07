@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from klippy.extras import resonance_tester
@@ -31,7 +33,7 @@ class FakeGcode:
 class FakeAclient:
     def __init__(self):
         self.finished = False
-        self.written = []
+        self.samples = [(0.0, 1.0, 2.0, 3.0), (0.001, 4.0, 5.0, 6.0)]
 
     def finish_measurements(self):
         self.finished = True
@@ -39,8 +41,8 @@ class FakeAclient:
     def has_valid_samples(self):
         return True
 
-    def write_to_file(self, name):
-        self.written.append(name)
+    def get_samples(self):
+        return self.samples
 
 
 class FakeChip:
@@ -79,12 +81,25 @@ class FakeToolhead:
         self.dwells.append(t)
 
 
+class FakeReactor:
+    def monotonic(self):
+        return 0.0
+
+    def pause(self, waketime):
+        pass
+
+
 class FakePrinter:
     config_error = RuntimeError
+    command_error = RuntimeError
 
     def __init__(self):
         self._objs = {}
         self.event_handlers = {}
+        self._reactor = FakeReactor()
+
+    def get_reactor(self):
+        return self._reactor
 
     def lookup_object(self, name, default="__raise__"):
         if name in self._objs:
@@ -218,8 +233,13 @@ def test_run_test_writes_raw_data_when_named():
         raw_name_suffix="probe1",
     )
 
-    assert chip.clients[0].written
-    assert chip.clients[0].written[0].endswith("probe1.csv")
+    raw_name = "/tmp/raw_data_x_adxl345_probe1.csv"
+    with open(raw_name) as f:
+        lines = f.read().splitlines()
+    os.remove(raw_name)
+    assert lines[0] == "#time,accel_x,accel_y,accel_z"
+    assert len(lines) == 1 + len(chip.clients[0].samples)
+    assert any(r.startswith("Raw accelerometer data") for r in gcmd.responses)
 
 
 def test_run_test_moves_to_probe_point():
