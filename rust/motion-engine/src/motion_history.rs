@@ -121,18 +121,24 @@ struct HoldBeforeRing {
 
 /// f64 Clenshaw over the Chebyshev series at `cu ∈ [−1, 1]`.
 #[inline]
-pub fn eval_chebyshev(coeffs: &[f32], cu: f64) -> f64 {
-    let Some((&a0, rest)) = coeffs.split_first() else {
+fn clenshaw_f64<I: DoubleEndedIterator<Item = f64>>(coeffs: I, cu: f64) -> f64 {
+    let mut coeffs = coeffs;
+    let Some(a0) = coeffs.next() else {
         return 0.0;
     };
     let mut b1 = 0.0_f64;
     let mut b2 = 0.0_f64;
-    for &ak in rest.iter().rev() {
-        let b0 = f64::from(ak) + 2.0 * cu * b1 - b2;
+    for ak in coeffs.rev() {
+        let b0 = ak + 2.0 * cu * b1 - b2;
         b2 = b1;
         b1 = b0;
     }
-    f64::from(a0) + cu * b1 - b2
+    a0 + cu * b1 - b2
+}
+
+#[inline]
+pub fn eval_chebyshev(coeffs: &[f32], cu: f64) -> f64 {
+    clenshaw_f64(coeffs.iter().map(|&c| f64::from(c)), cu)
 }
 
 fn chebyshev_derivative(a: &[f64]) -> Vec<f64> {
@@ -159,20 +165,10 @@ fn eval_at_u(piece: &HistoryPiece, u: f64) -> AxisState {
         let du_dt = 2.0 / t;
         let dv = chebyshev_derivative(&a);
         let da = chebyshev_derivative(&dv);
-        let clenshaw64 = |c: &[f64]| {
-            let Some((&c0, rest)) = c.split_first() else {
-                return 0.0;
-            };
-            let mut b1 = 0.0_f64;
-            let mut b2 = 0.0_f64;
-            for &ck in rest.iter().rev() {
-                let b0 = ck + 2.0 * cu * b1 - b2;
-                b2 = b1;
-                b1 = b0;
-            }
-            c0 + cu * b1 - b2
-        };
-        (clenshaw64(&dv) * du_dt, clenshaw64(&da) * du_dt * du_dt)
+        (
+            clenshaw_f64(dv.iter().copied(), cu) * du_dt,
+            clenshaw_f64(da.iter().copied(), cu) * du_dt * du_dt,
+        )
     } else {
         (0.0, 0.0)
     };

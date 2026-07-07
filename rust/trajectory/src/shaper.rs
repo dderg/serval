@@ -1,6 +1,8 @@
 use nurbs::algebra::PiecewisePolynomialKernel;
+#[cfg(test)]
 use nurbs::ScalarNurbs;
 
+#[cfg(test)]
 fn eval_clamped(curve: &ScalarNurbs, t: f64) -> f64 {
     let knots = curve.knots();
     let lo = knots[0];
@@ -73,6 +75,7 @@ pub struct ShapedSignal<'a> {
 }
 
 impl<'a> ShapedSignal<'a> {
+    #[cfg(test)]
     pub fn new(padded: &'a ScalarNurbs, kernel: &'a PiecewisePolynomialKernel) -> Self {
         let mut breaks = padded.knots().to_vec();
         breaks.dedup_by(|a, b| (*a - *b).abs() <= CUT_DEDUP_EPS_S);

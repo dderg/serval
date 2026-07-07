@@ -3,6 +3,10 @@ use super::{
     PyValueError, Python, SPATIAL_AXES, classify, config, planner_err, pymethods, require_positive,
 };
 
+fn unsupported_curve(py: Python<'_>, message: &'static str) -> PyResult<()> {
+    py.detach(|| Err(PyRuntimeError::new_err(message)))
+}
+
 fn read_planner_config_sections(
     axes: Vec<(String, Vec<String>, Vec<String>, Vec<String>)>,
     limits: Vec<(String, Vec<String>, Option<f64>, Option<f64>, Option<f64>)>,
@@ -438,13 +442,12 @@ impl PyMotionEngine {
             feedrate,
             "engine.submit_bezier enter"
         );
-        py.detach(|| -> PyResult<()> {
-            Err(PyRuntimeError::new_err(
-                "submit_bezier (G5 cubic) is not yet supported by the new geometry pipeline \
-                 — V1 streams G0/G1 line moves (and reconstructs arcs from facets); curve \
-                 faceting is a follow-up. Slice without G5.",
-            ))
-        })
+        unsupported_curve(
+            py,
+            "submit_bezier (G5 cubic) is not yet supported by the new geometry pipeline \
+             — V1 streams G0/G1 line moves (and reconstructs arcs from facets); curve \
+             faceting is a follow-up. Slice without G5.",
+        )
     }
     #[pyo3(signature = (i, j, dx, dy, dz, de, feedrate))]
     fn submit_quadratic(
@@ -470,13 +473,12 @@ impl PyMotionEngine {
             feedrate,
             "engine.submit_quadratic enter"
         );
-        py.detach(|| -> PyResult<()> {
-            Err(PyRuntimeError::new_err(
-                "submit_quadratic (G2/G3 arc as quadratic) is not yet supported by the new \
-                 geometry pipeline — V1 streams G0/G1 line moves; curve faceting is a \
-                 follow-up. Decompose arcs into line segments upstream.",
-            ))
-        })
+        unsupported_curve(
+            py,
+            "submit_quadratic (G2/G3 arc as quadratic) is not yet supported by the new \
+             geometry pipeline — V1 streams G0/G1 line moves; curve faceting is a \
+             follow-up. Decompose arcs into line segments upstream.",
+        )
     }
     fn submit_dwell(&self, duration_s: f64) -> PyResult<()> {
         let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
