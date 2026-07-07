@@ -305,10 +305,10 @@ impl PyMotionEngine {
         }))
     }
     fn take_drive_fault(&self, mcu_handle: u32) -> PyResult<Option<u16>> {
-        Ok(self.latched_drive_fault.lock_ok().remove(&mcu_handle))
+        Ok(self.latched.drive.lock_ok().remove(&mcu_handle))
     }
     fn take_endpoint_death(&self, mcu_handle: u32) -> PyResult<Option<String>> {
-        Ok(self.latched_endpoint_death.lock_ok().remove(&mcu_handle))
+        Ok(self.latched.endpoint_death.lock_ok().remove(&mcu_handle))
     }
     fn sdo_read(&self, mcu_handle: u32, slot: u8, index: u16, subindex: u8) -> PyResult<(u8, u32)> {
         let conn = self.ethercat_conn(mcu_handle, "sdo_read")?;

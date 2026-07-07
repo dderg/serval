@@ -3,13 +3,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::{HomingRun, McuAxisConfig, McuConnection, PassthroughRouter};
+use super::{HomingRun, HomingState, McuAxisConfig, McuConnection, PassthroughRouter};
 
 #[derive(Clone)]
 pub(super) struct TripDeps {
-    pub(super) homing_run: Arc<Mutex<Option<HomingRun>>>,
-    pub(super) pending_trip: Arc<Mutex<Option<(u32, u8, u64)>>>,
-    pub(super) active_drip_cohort: Arc<Mutex<Option<u64>>>,
+    pub(super) homing: Arc<HomingState>,
     pub(super) pump_tx: Arc<Mutex<Option<crossbeam_channel::Sender<crate::pump::PumpMsg>>>>,
     pub(super) mcus: Arc<Mutex<HashMap<u32, McuConnection>>>,
     pub(super) router: Arc<Mutex<PassthroughRouter>>,
@@ -24,7 +22,7 @@ pub(super) fn dispatch_endstop_trip(
     trip_clock: u64,
 ) {
     let run_opt: Option<HomingRun> = {
-        let mut guard = deps.homing_run.lock_ok();
+        let mut guard = deps.homing.run.lock_ok();
         guard.take()
     };
     let run = match run_opt {
@@ -37,7 +35,7 @@ pub(super) fn dispatch_endstop_trip(
                 trip_clock,
                 "terminal report arrived before the homing run was registered — buffered"
             );
-            *deps.pending_trip.lock_ok() = Some((event_mcu, endstop_id, trip_clock));
+            *deps.homing.pending_trip.lock_ok() = Some((event_mcu, endstop_id, trip_clock));
             return;
         }
         Some(r) => r,
@@ -53,13 +51,13 @@ pub(super) fn dispatch_endstop_trip(
             trip_clock,
             "terminal report does not match the active homing run — ignored"
         );
-        let mut guard = deps.homing_run.lock_ok();
+        let mut guard = deps.homing.run.lock_ok();
         *guard = Some(run);
         return;
     }
 
     {
-        let mut cohort_guard = deps.active_drip_cohort.lock_ok();
+        let mut cohort_guard = deps.homing.active_drip_cohort.lock_ok();
         *cohort_guard = None;
     }
 

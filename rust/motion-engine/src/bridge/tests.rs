@@ -91,8 +91,8 @@ fn seed_pump_thread(engine: &PyMotionEngine) -> Arc<std::sync::atomic::AtomicBoo
             exited_thread.store(true, std::sync::atomic::Ordering::SeqCst);
         })
         .expect("spawn test pump thread");
-    *engine.pump_tx.lock_ok() = Some(tx);
-    *engine.pump_thread.lock_ok() = Some(handle);
+    *engine.pump.tx.lock_ok() = Some(tx);
+    *engine.pump.thread.lock_ok() = Some(handle);
     exited
 }
 
@@ -122,7 +122,7 @@ fn shutdown_releases_pty_and_joins_threads() {
         "pump thread must have received Shutdown and exited (joined, not leaked)"
     );
     assert!(
-        engine.pump_thread.lock_ok().is_none(),
+        engine.pump.thread.lock_ok().is_none(),
         "pump_thread handle must be taken (None) after join"
     );
     assert!(
@@ -370,8 +370,8 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
             drop(pump_rx);
         })
         .expect("spawn test pump thread");
-    *engine.pump_thread.lock_ok() = Some(pump_handle);
-    *engine.pump_tx.lock_ok() = Some(pump_tx_for_engine);
+    *engine.pump.thread.lock_ok() = Some(pump_handle);
+    *engine.pump.tx.lock_ok() = Some(pump_tx_for_engine);
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_sub = Arc::clone(&stop);
@@ -507,8 +507,8 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
     std::thread::sleep(Duration::from_millis(30));
 
     let engine = Arc::new(PyMotionEngine::new());
-    *engine.pump_tx.lock_ok() = Some(pump_tx);
-    *engine.pump_thread.lock_ok() = Some(pump_handle);
+    *engine.pump.tx.lock_ok() = Some(pump_tx);
+    *engine.pump.thread.lock_ok() = Some(pump_handle);
 
     let (dispatch, _counter) = counting_dispatch();
     let (sc, home) = stream_config_from(&relaxed_planner_config());
@@ -531,7 +531,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
          leaked the pts fd."
     );
     assert!(
-        engine.pump_thread.lock_ok().is_none(),
+        engine.pump.thread.lock_ok().is_none(),
         "pump thread handle must be taken (joined) by shutdown()"
     );
     assert!(

@@ -1,7 +1,7 @@
 use super::{
-    Arc, Duration, ETHERCAT_CLOCK_FREQ_HZ, HashMap, HashSet, HomingRun, Instant, McuAxisConfig,
-    McuCaps, McuConnection, McuHostIo, McuSerialConn, Mutex, PyMotionEngine, PyResult,
-    PyRuntimeError, PyValueError, STREAM_INTEGRATION_TOL, STREAM_MAX_BUFFER_MOVES,
+    Arc, Duration, ETHERCAT_CLOCK_FREQ_HZ, HashMap, HashSet, HomingRun, HomingState, Instant,
+    McuAxisConfig, McuCaps, McuConnection, McuHostIo, McuSerialConn, Mutex, PyMotionEngine,
+    PyResult, PyRuntimeError, PyValueError, STREAM_INTEGRATION_TOL, STREAM_MAX_BUFFER_MOVES,
     abort_after_tracing_appender_drains, arm_endpoint_death_watchdog, axis_ring_depth,
     build_mcu_configs, collect_motor_positions_inner, config, dispatch_endstop_trip,
     mcu_handle_from_raw, query_ethercat_runtime_caps, report_ethercat_endpoint_death,
@@ -229,7 +229,7 @@ impl PyMotionEngine {
         let router_for_pump = Arc::clone(&self.router);
         let drain_for_pump = self.drain.clone();
         let router_for_freq = Arc::clone(&self.router);
-        let endpoint_death_for_pump = Arc::clone(&self.latched_endpoint_death);
+        let endpoint_death_for_pump = Arc::clone(&self.latched.endpoint_death);
         crate::worker::PumpResources {
             sink: crate::pump::WireSink {
                 transports: wire_transports,
@@ -275,7 +275,7 @@ impl PyMotionEngine {
                 nominal_freqs: Arc::clone(&self.nominal_clock_freqs),
             },
             drain: drain_for_pump,
-            backlog: Arc::clone(&self.pump_backlog),
+            backlog: Arc::clone(&self.pump.backlog),
         }
     }
 
@@ -299,7 +299,7 @@ impl PyMotionEngine {
             anchor: anchor_mutex,
             mcu_configs: mcu_configs.to_vec(),
             counter: Arc::clone(&counter),
-            active_drip_cohort: Arc::clone(&self.active_drip_cohort),
+            active_drip_cohort: Arc::clone(&self.homing.active_drip_cohort),
             motion_history: Arc::clone(&self.motion_history),
         };
 
@@ -324,8 +324,8 @@ impl PyMotionEngine {
             pump_resources,
         );
         let pump_control = pipeline.pump_control.clone();
-        *self.pump_tx.lock_ok() = Some(pipeline.pump_control);
-        *self.pump_thread.lock_ok() = Some(pipeline.pump_thread);
+        *self.pump.tx.lock_ok() = Some(pipeline.pump_control);
+        *self.pump.thread.lock_ok() = Some(pipeline.pump_thread);
         *planner_guard = Some(pipeline.worker);
         drop(planner_guard);
 
@@ -335,8 +335,8 @@ impl PyMotionEngine {
     pub(super) fn spawn_live_position_poll_thread(&self) {
         let configs = Arc::clone(&self.mcu_axis_configs);
         let mcus = Arc::clone(&self.mcus);
-        let cache = Arc::clone(&self.live_position_cache);
-        let stop = Arc::clone(&self.position_poll_stop);
+        let cache = Arc::clone(&self.position_poll.cache);
+        let stop = Arc::clone(&self.position_poll.stop);
         let handle = std::thread::Builder::new()
             .name("live-position-poll".into())
             .spawn(move || {
@@ -403,7 +403,7 @@ impl PyMotionEngine {
                 }
             })
             .expect("spawn live-position-poll thread");
-        *self.position_poll_thread.lock_ok() = Some(handle);
+        *self.position_poll.thread.lock_ok() = Some(handle);
     }
 
     pub(super) fn wire_mcu_supervision(
@@ -444,9 +444,8 @@ impl PyMotionEngine {
             let supervisor = EthercatHeartbeatSupervisor {
                 mcu_id,
                 mcu_label: self.mcu_label(mcu_id),
-                homing_run: Arc::clone(&self.homing_run),
-                active_drip_cohort: Arc::clone(&self.active_drip_cohort),
-                latched_drive_fault: Arc::clone(&self.latched_drive_fault),
+                homing: Arc::clone(&self.homing),
+                latched_drive_fault: Arc::clone(&self.latched.drive),
                 pump_tx: pump_control.clone(),
             };
             conn.attach_heartbeat_callback(Arc::new(
@@ -462,7 +461,7 @@ impl PyMotionEngine {
                 mcu_id,
                 &conn,
                 Arc::clone(&self.mcus),
-                Arc::clone(&self.latched_endpoint_death),
+                Arc::clone(&self.latched.endpoint_death),
             );
         } else {
             let io = host_ios
@@ -499,8 +498,7 @@ fn forward_retired_heartbeat(
 struct EthercatHeartbeatSupervisor {
     mcu_id: u32,
     mcu_label: String,
-    homing_run: Arc<Mutex<Option<HomingRun>>>,
-    active_drip_cohort: Arc<Mutex<Option<u64>>>,
+    homing: Arc<HomingState>,
     latched_drive_fault: Arc<Mutex<HashMap<u32, u16>>>,
     pump_tx: crossbeam_channel::Sender<crate::pump::PumpMsg>,
 }
@@ -522,7 +520,7 @@ impl EthercatHeartbeatSupervisor {
     }
 
     fn take_homing_run_owning_fault(&self) -> Option<HomingRun> {
-        let mut guard = self.homing_run.lock_ok();
+        let mut guard = self.homing.run.lock_ok();
         match guard.as_ref().map(|r| r.axis_key.mcu_id) {
             Some(axis_mcu)
                 if crate::homing::route_drive_fault(self.mcu_id, Some(axis_mcu))
@@ -538,7 +536,7 @@ impl EthercatHeartbeatSupervisor {
         self.latched_drive_fault
             .lock_ok()
             .insert(self.mcu_id, fault_code);
-        *self.active_drip_cohort.lock_ok() = None;
+        *self.homing.active_drip_cohort.lock_ok() = None;
         let _ = self
             .pump_tx
             .send(crate::pump::PumpMsg::Flush(run.all_axis_keys.clone()));

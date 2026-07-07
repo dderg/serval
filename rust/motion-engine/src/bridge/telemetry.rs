@@ -70,14 +70,14 @@ impl PyMotionEngine {
     }
     fn wait_moves_start(&self) -> PyResult<u64> {
         let rx = self.flush_try_start_inner()?;
-        let mut pending = self.pending_flushes.lock_ok();
-        let id = self.next_flush_id.fetch_add(1, Ordering::Relaxed);
+        let mut pending = self.flush.pending.lock_ok();
+        let id = self.flush.next_id.fetch_add(1, Ordering::Relaxed);
         pending.insert(id, FlushWait { rx, deadline: None });
         Ok(id)
     }
     fn wait_moves_poll(&self, flush_id: u64) -> PyResult<bool> {
         let started_rx = {
-            let pending = self.pending_flushes.lock_ok();
+            let pending = self.flush.pending.lock_ok();
             let Some(wait) = pending.get(&flush_id) else {
                 return Err(PyRuntimeError::new_err(format!(
                     "wait_moves_poll: unknown flush id {flush_id}"
@@ -93,7 +93,7 @@ impl PyMotionEngine {
                 None => return Ok(false),
             }
         };
-        let mut pending = self.pending_flushes.lock_ok();
+        let mut pending = self.flush.pending.lock_ok();
         let Some(wait) = pending.get_mut(&flush_id) else {
             return Err(PyRuntimeError::new_err(format!(
                 "wait_moves_poll: unknown flush id {flush_id}"
@@ -131,7 +131,7 @@ impl PyMotionEngine {
     }
     fn motion_drain_poll(&self) -> PyResult<bool> {
         self.report_lagging_drain_wait();
-        let mut pending = self.pending_drain_flush.lock_ok();
+        let mut pending = self.flush.pending_drain.lock_ok();
         if pending.is_none() {
             match self.flush_try_start_inner()? {
                 Some(rx) => *pending = Some(rx),
@@ -146,7 +146,7 @@ impl PyMotionEngine {
                 *pending = None;
                 let drained = self.drain.drained();
                 if drained {
-                    *self.drain_wait_diag.lock_ok() = None;
+                    *self.flush.drain_wait_diag.lock_ok() = None;
                 }
                 Ok(drained)
             }
@@ -160,8 +160,8 @@ impl PyMotionEngine {
         }
     }
     fn motion_drain_finalize(&self) {
-        *self.pending_drain_flush.lock_ok() = None;
-        *self.drain_wait_diag.lock_ok() = None;
+        *self.flush.pending_drain.lock_ok() = None;
+        *self.flush.drain_wait_diag.lock_ok() = None;
     }
     fn pending_channel_moves(&self) -> u64 {
         self.planner
@@ -231,7 +231,7 @@ impl PyMotionEngine {
         (t0 + last_move_time - host_now).max(0.0)
     }
     fn pump_backlog(&self) -> u64 {
-        self.pump_backlog.load(Ordering::Acquire)
+        self.pump.backlog.load(Ordering::Acquire)
     }
     fn motion_lead_secs(&self) -> f64 {
         crate::anchor::DEFAULT_LEAD_SECS
@@ -253,7 +253,7 @@ impl PyMotionEngine {
             .map_err(PyRuntimeError::new_err)
     }
     fn live_motor_positions(&self) -> std::collections::HashMap<String, (f64, f64)> {
-        self.live_position_cache.lock_ok().0.clone()
+        self.position_poll.cache.lock_ok().0.clone()
     }
 }
 
@@ -308,7 +308,7 @@ impl PyMotionEngine {
     fn report_lagging_drain_wait(&self) {
         const DRAIN_WAIT_REPORT_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
         let now = std::time::Instant::now();
-        let mut diag = self.drain_wait_diag.lock_ok();
+        let mut diag = self.flush.drain_wait_diag.lock_ok();
         let (started, last_report) = diag.get_or_insert((now, None));
         if now.duration_since(*started) < DRAIN_WAIT_REPORT_AFTER {
             return;
