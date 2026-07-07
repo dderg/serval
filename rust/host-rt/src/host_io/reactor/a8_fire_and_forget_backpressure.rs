@@ -1,4 +1,5 @@
 use super::*;
+use crate::host_io::reactor::outbound::PendingOutboundKind;
 use crate::host_io::test_harness::ReactorHarness;
 use crate::host_io::window::MAX_PENDING_BLOCKS;
 use crate::host_io::wire::build_frame;

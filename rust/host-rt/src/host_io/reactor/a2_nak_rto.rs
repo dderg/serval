@@ -1,6 +1,7 @@
 use super::*;
 use crate::host_io::test_harness::ReactorHarness;
 use crate::host_io::wire::build_frame;
+use runtime::error::FaultCode;
 use std::sync::mpsc::sync_channel;
 use std::time::Duration;
 
