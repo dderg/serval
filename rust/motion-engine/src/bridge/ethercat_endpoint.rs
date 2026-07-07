@@ -121,44 +121,31 @@ pub(crate) fn message_for_claim_error(
 }
 
 fn push_drive_flags(args: &mut Vec<String>, d: &EthercatDrive) {
-    let (
-        _chain_index,
-        _axis,
-        counts_per_mm,
-        rotation_distance,
-        ferr,
-        max_torque,
-        velocity_ff,
-        ff_torque_clamp,
-        ff_lead_cycles,
-        invert_direction,
-        dynamics_profile,
-    ) = d;
     args.push("--counts-per-mm".into());
-    args.push(counts_per_mm.to_string());
+    args.push(d.counts_per_mm.to_string());
     args.push("--rotation-distance".into());
-    args.push(rotation_distance.to_string());
-    if let Some(ferr) = ferr {
+    args.push(d.rotation_distance.to_string());
+    if let Some(ferr) = d.following_error_counts {
         args.push("--following-error-counts".into());
         args.push(ferr.to_string());
     }
-    if let Some(tq) = max_torque {
+    if let Some(tq) = d.max_torque_tenth_pct {
         args.push("--max-torque-tenth-pct".into());
         args.push(tq.to_string());
     }
-    if *velocity_ff {
+    if d.velocity_ff {
         args.push("--velocity-ff".into());
     }
-    if *invert_direction {
+    if d.invert_direction {
         args.push("--invert".into());
     }
     args.push("--torque-clamp-pct".into());
-    args.push(ff_torque_clamp.to_string());
-    if *ff_lead_cycles > 0 {
+    args.push(d.ff_torque_clamp.to_string());
+    if d.ff_lead_cycles > 0 {
         args.push("--ff-lead-cycles".into());
-        args.push(ff_lead_cycles.to_string());
+        args.push(d.ff_lead_cycles.to_string());
     }
-    if let Some(profile) = dynamics_profile {
+    if let Some(profile) = &d.dynamics_profile {
         args.push("--slave-dynamics-profile".into());
         args.push(profile.to_string());
     }
@@ -191,11 +178,10 @@ pub(crate) fn endpoint_args(
         push_drive_flags(&mut args, &drives[0]);
     } else {
         for d in drives {
-            let (chain_index, axis, ..) = d;
             args.push("--slave".into());
-            args.push(chain_index.to_string());
+            args.push(d.chain_index.to_string());
             args.push("--axis".into());
-            args.push(axis.to_string());
+            args.push(d.axis.to_string());
             push_drive_flags(&mut args, d);
         }
     }

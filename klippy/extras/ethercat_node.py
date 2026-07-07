@@ -1,7 +1,28 @@
 import logging
 import os
+from collections import namedtuple
 
 from . import servo_axis
+
+# One drive slot passed to engine.claim_ethercat_node. The engine extracts each
+# field by attribute name (mirrored by a Rust named struct), so a reordered
+# field fails loud rather than silently swapping, say, axis and chain_index.
+EthercatDrive = namedtuple(
+    "EthercatDrive",
+    [
+        "chain_index",
+        "axis",
+        "counts_per_mm",
+        "rotation_distance",
+        "following_error_counts",
+        "max_torque_tenth_pct",
+        "velocity_ff",
+        "ff_torque_clamp",
+        "ff_lead_cycles",
+        "invert_direction",
+        "dynamics_profile",
+    ],
+)
 
 # Default endpoint binary: ethercat_node.py lives at
 # <repo>/klippy/extras/, so three os.path.dirname hops reach <repo>.
@@ -183,18 +204,18 @@ class EtherCatNode:
             )
             velocity_ff, ff_torque_clamp, ff_lead_cycles = rail.get_ff_config()
             drives.append(
-                (
-                    rail.get_chain_index(),
-                    global_axis,
-                    rail.get_counts_per_mm(),
-                    rail.get_rotation_distance(),
-                    following_error_counts,
-                    max_torque_tenth_pct,
-                    velocity_ff,
-                    ff_torque_clamp,
-                    ff_lead_cycles,
-                    rail.get_invert_direction(),
-                    rail.get_dynamics_profile(),
+                EthercatDrive(
+                    chain_index=rail.get_chain_index(),
+                    axis=global_axis,
+                    counts_per_mm=rail.get_counts_per_mm(),
+                    rotation_distance=rail.get_rotation_distance(),
+                    following_error_counts=following_error_counts,
+                    max_torque_tenth_pct=max_torque_tenth_pct,
+                    velocity_ff=velocity_ff,
+                    ff_torque_clamp=ff_torque_clamp,
+                    ff_lead_cycles=ff_lead_cycles,
+                    invert_direction=rail.get_invert_direction(),
+                    dynamics_profile=rail.get_dynamics_profile(),
                 )
             )
         self._counts_per_mm = rails[0][1].get_counts_per_mm()
