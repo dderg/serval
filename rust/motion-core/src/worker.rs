@@ -50,7 +50,6 @@ impl CommittedFrontier {
             d.saturating_duration_since(Instant::now()).as_secs_f64()
         })
     }
-
 }
 
 pub struct HomeDripParams {

@@ -317,6 +317,67 @@ fn eviction_does_not_stretch_the_pre_ring_hold() {
 }
 
 #[test]
+fn empty_ring_query_inside_dropped_motion_fails_loud() {
+    let mut store = HistoryStore::default();
+    // Moving piece over [0,1]s, 0->10. At host_t=0.5 the axis is mid-motion at
+    // 5.0 and has NOT reached the endpoint 10.0 — that time is dropped motion.
+    rec(&mut store, key(), linear(0, 1.0, 0.0, 10.0));
+    store.drop_pieces_on_reanchor();
+
+    let err = store.state_at_host(key(), 0.5, Some(2.0)).unwrap_err();
+    assert!(
+        matches!(err, HistoryError::BeforeRetainedWindow { .. }),
+        "empty-ring query inside dropped motion must fail loud, not return a \
+         position the axis never reached: {err:?}"
+    );
+
+    // A time at/after the endpoint host is a provable held rest and still answers.
+    let held = store.state_at_host(key(), 1.5, Some(2.0)).unwrap();
+    assert!(
+        (held.position - 10.0).abs() < 1e-9,
+        "held rest position {}",
+        held.position
+    );
+    assert_eq!(held.velocity, 0.0);
+    assert_eq!(held.acceleration, 0.0);
+}
+
+#[test]
+fn trailing_rest_run_extends_hold_coverage_before_endpoint() {
+    let mut store = HistoryStore::default();
+    // Move 0->10 over [0,1]s, then hold at 10 over [1,2]s (a rest piece).
+    // The endpoint host is 2.0, but the axis was provably at 10.0 from 1.0 on.
+    rec(&mut store, key(), linear(0, 1.0, 0.0, 10.0));
+    let rest_start = FREQ as u64; // 1.0s in clock ticks
+    rec(&mut store, key(), linear(rest_start, 1.0, 10.0, 10.0));
+
+    store.drop_pieces_on_reanchor();
+    rec(&mut store, key(), linear(4_000_000_000, 1.0, 10.0, 20.0));
+    assert_eq!(store.final_position(key()), Some(20.0));
+
+    // A time inside the old trailing rest run (1.0..2.0), before the endpoint
+    // host, answers the held rest even though the ring is now non-empty.
+    let in_rest = store
+        .state_at_host(key(), h(rest_start) + 0.5, Some(f64::INFINITY))
+        .unwrap();
+    assert!(
+        (in_rest.position - 10.0).abs() < 1e-6,
+        "rest-run position {}",
+        in_rest.position
+    );
+    assert_eq!(in_rest.velocity, 0.0);
+
+    // A time inside the earlier move stays unanswerable — it was real motion.
+    let err = store
+        .state_at_host(key(), 0.5, Some(f64::INFINITY))
+        .unwrap_err();
+    assert!(
+        matches!(err, HistoryError::BeforeRetainedWindow { .. }),
+        "moving span before the rest run must stay unanswerable: {err:?}"
+    );
+}
+
+#[test]
 fn rebase_to_earlier_clock_accepts_post_rewind_pieces() {
     let mut store = HistoryStore::default();
     rec(&mut store, key(), linear(3_000_000, 1.0, 0.0, 5.0));
