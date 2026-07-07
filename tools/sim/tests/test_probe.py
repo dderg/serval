@@ -127,7 +127,7 @@ def test_probe_multi_point_tools(sim_world):
 
     world.mark_log()
     world.gcode_ok(
-        "FORCE_MOVE STEPPER=stepper_z DISTANCE=0.5 VELOCITY=5", timeout=60
+        "FORCE_MOVE STEPPER=z DISTANCE=0.5 VELOCITY=5", timeout=60
     )
     world.gcode_ok("PROBE", timeout=90)
     shifted_z = _last_probe_z(world.expect_log(" is z="))
