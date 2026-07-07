@@ -51,9 +51,6 @@ impl CommittedFrontier {
         })
     }
 
-    pub fn is_active(&self) -> bool {
-        self.deadline.lock_ok().is_some()
-    }
 }
 
 pub struct HomeDripParams {

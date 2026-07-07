@@ -183,13 +183,11 @@ impl Ingress {
         if wait_s > 0.0 {
             return Some(Duration::from_secs_f64(wait_s));
         }
-        if !self.frontier.is_active() {
-            if let Some(since) = self.undrained_since {
-                let remaining =
-                    Duration::from_secs_f64(STARTUP_PRIME_S).saturating_sub(since.elapsed());
-                if !remaining.is_zero() {
-                    return Some(remaining);
-                }
+        if let Some(since) = self.undrained_since {
+            let remaining =
+                Duration::from_secs_f64(STARTUP_PRIME_S).saturating_sub(since.elapsed());
+            if !remaining.is_zero() {
+                return Some(remaining);
             }
         }
         tracing::debug!(
