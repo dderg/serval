@@ -1,6 +1,7 @@
 use super::*;
 use crate::pump::sched::MAX_MERGED_HOLD_SECS;
-use std::collections::VecDeque;
+use runtime::piece_ring::PieceEntry;
+use std::collections::{BTreeMap, VecDeque};
 
 fn q_with_host(ring_depth: u32, starts: &[(u64, f64)]) -> AxisQueue {
     let mut q = AxisQueue::new(ring_depth);

@@ -579,7 +579,7 @@ fn smooth_x_chains(frequency_hz: f64) -> AxisChainSet {
     AxisChainSet::spatial(
         trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
             "is",
-            &trajectory::post_processors::SmoothZv,
+            &trajectory::algos::SmoothZv,
             vec![frequency_hz],
         )])
         .expect("single post-processor always compiles"),

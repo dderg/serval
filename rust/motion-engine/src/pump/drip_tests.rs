@@ -1,5 +1,6 @@
 use super::*;
 use crossbeam_channel::unbounded;
+use runtime::piece_ring::PieceEntry;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

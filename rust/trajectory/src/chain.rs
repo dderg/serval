@@ -1,4 +1,4 @@
-use crate::post_processors::PostProcessorAlgo;
+use crate::algos::PostProcessorAlgo;
 use nurbs::algebra::PiecewisePolynomialKernel;
 
 #[derive(Debug, Clone)]
@@ -38,9 +38,9 @@ pub struct CompiledChain {
 
 #[derive(Debug, thiserror::Error)]
 pub enum PostProcessorError {
-    #[error("post_processor '{name}': unknown parameter '{key}'")]
+    #[error("chain '{name}': unknown parameter '{key}'")]
     UnknownParam { name: String, key: String },
-    #[error("post_processor '{name}': parameter '{key}' is out of range, got {value}")]
+    #[error("chain '{name}': parameter '{key}' is out of range, got {value}")]
     BadParam {
         name: String,
         key: String,
@@ -58,7 +58,7 @@ impl PostProcessorInstance {
         assert_eq!(
             values.len(),
             algo.params().len(),
-            "post_processor '{name}': {} expects {} param values, got {}",
+            "chain '{name}': {} expects {} param values, got {}",
             algo.type_name(),
             algo.params().len(),
             values.len()

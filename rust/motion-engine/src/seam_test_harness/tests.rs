@@ -83,12 +83,12 @@ fn extruder_pa_smooth_chain_set() -> trajectory::AxisChainSet {
 fn extruder_chain_set_with_k(k: f64) -> trajectory::AxisChainSet {
     let pa = trajectory::PostProcessorInstance::new(
         "pa",
-        &trajectory::post_processors::LinearPressureAdvance,
+        &trajectory::algos::LinearPressureAdvance,
         vec![k],
     );
     let st = trajectory::PostProcessorInstance::new(
         "st",
-        &trajectory::post_processors::SmoothTriangle,
+        &trajectory::algos::SmoothTriangle,
         vec![0.02],
     );
     let e_chain =
