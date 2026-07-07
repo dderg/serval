@@ -2,6 +2,7 @@ import logging
 import math
 import os
 import signal
+import time
 
 from . import motion_kinematics, motion_setup, structured_log
 from .extras import servo_axis
@@ -494,16 +495,37 @@ class Motion:
         )
         fired = False
         move_time = None
-        for owner in owners:
-            if not owner._active_callbacks:
-                continue
-            cbs = owner._active_callbacks
-            owner._active_callbacks = []
-            if move_time is None:
-                move_time = self.get_last_move_time()
-            for cb in cbs:
-                cb(move_time)
-            fired = True
+        deferred = []
+        try:
+            for owner in owners:
+                if not owner._active_callbacks:
+                    continue
+                cbs = owner._active_callbacks
+                owner._active_callbacks = []
+                if move_time is None:
+                    move_time = self.get_last_move_time()
+                for i, cb in enumerate(cbs):
+                    cb_t0 = time.monotonic()
+                    try:
+                        followup = cb(move_time)
+                    except Exception:
+                        owner._active_callbacks = (
+                            cbs[i:] + owner._active_callbacks
+                        )
+                        raise
+                    cb_dt = time.monotonic() - cb_t0
+                    if cb_dt > 0.020:
+                        logging.warning(
+                            "active callback for %s blocked %.1fms",
+                            owner.get_name(),
+                            cb_dt * 1000.0,
+                        )
+                    if followup is not None:
+                        deferred.append(followup)
+                fired = True
+        finally:
+            for followup in deferred:
+                followup()
         return fired
 
     def drip_move(self, newpos, speed, drip_completion):

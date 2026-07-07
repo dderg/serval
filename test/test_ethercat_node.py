@@ -127,6 +127,10 @@ class FakeEngine:
     def set_torque(self, handle, value, print_time):
         self.calls.append((handle, value, print_time))
 
+    def set_torque_deferred(self, handle, value, print_time):
+        self.calls.append((handle, value, print_time))
+        return lambda: None
+
 
 def _torque_node(engine):
     printer = types.SimpleNamespace(

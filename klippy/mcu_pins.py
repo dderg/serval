@@ -3,7 +3,9 @@
 # Copyright (C) 2016-2025  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
+import logging
 import math
+import time
 
 from . import pins
 
@@ -77,13 +79,14 @@ class MCU_digital_out:
             raise self._printer.command_error(
                 f"Cannot set pin on disconnected MCU '{self._mcu.get_name()}'"
             )
-        est = self._mcu.estimated_print_time(
-            self._printer.get_reactor().monotonic()
-        )
+        curtime = self._printer.get_reactor().monotonic()
+        est = self._mcu.estimated_print_time(curtime)
         if print_time < est + MIN_SCHEDULE_LEAD:
+            main_mcu = self._printer.lookup_object("mcu")
             raise self._printer.command_error(
                 "digital_out %s on mcu '%s' scheduled with stale print_time:"
                 " print_time=%.6f estimated_now=%.6f lead=%.1fms (< %.0fms)"
+                " main_mcu_estimated_now=%.6f clocksync: %s"
                 % (
                     self._pin,
                     self._mcu.get_name(),
@@ -91,14 +94,26 @@ class MCU_digital_out:
                     est,
                     (print_time - est) * 1000.0,
                     MIN_SCHEDULE_LEAD * 1000.0,
+                    main_mcu.estimated_print_time(curtime),
+                    self._mcu._clocksync.dump_debug(),
                 )
             )
         clock = self._mcu.print_time_to_clock(print_time)
+        send_t0 = time.monotonic()
         self._set_cmd.send(
             [self._oid, clock, (not not value) ^ self._invert],
             minclock=self._last_clock,
             reqclock=clock,
         )
+        send_dt = time.monotonic() - send_t0
+        if send_dt > 0.020:
+            logging.warning(
+                "digital_out %s on mcu '%s': queue_digital_out send"
+                " blocked %.1fms",
+                self._pin,
+                self._mcu.get_name(),
+                send_dt * 1000.0,
+            )
         self._last_clock = clock
 
 
