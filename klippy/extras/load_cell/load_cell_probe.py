@@ -255,7 +255,7 @@ class ContinuousTareFilter:
 
 # Combine ContinuousTareFilter and SosFilter into an easy-to-use class
 class ContinuousTareFilterHelper:
-    def __init__(self, config, sensor, cmd_queue):
+    def __init__(self, config, sensor):
         self._sensor = sensor
         self._sps = self._sensor.get_samples_per_second()
         max_filter_frequency = math.floor(self._sps / 2.0)
@@ -297,7 +297,7 @@ class ContinuousTareFilterHelper:
         # filter design currently inside the MCU
         self._active_design = self._config_design
         self._sos_filter = self._create_filter(
-            self._active_design.design_filter(config.error), cmd_queue
+            self._active_design.design_filter(config.error)
         )
 
     def _build_filter(self, gcmd=None):
@@ -318,10 +318,8 @@ class ContinuousTareFilterHelper:
             notch_quality,
         )
 
-    def _create_filter(self, fixed_filter, cmd_queue):
-        return sos_filter.SosFilter(
-            self._sensor.get_mcu(), cmd_queue, fixed_filter, 4
-        )
+    def _create_filter(self, fixed_filter):
+        return sos_filter.SosFilter(self._sensor.get_mcu(), fixed_filter, 4)
 
     def update_from_command(self, gcmd):
         gcmd_filter = self._build_filter(gcmd)
@@ -499,7 +497,6 @@ class McuLoadCellProbe:
         self._mcu: mcu.MCU = self._sensor.get_mcu()
         # configure MCU objects
         self._dispatch = trigger_dispatch
-        self._cmd_queue = self._dispatch.get_command_queue()
         self._oid = self._mcu.create_oid()
         self._config_commands()
         self._home_cmd = None
@@ -521,18 +518,15 @@ class McuLoadCellProbe:
             "load_cell_probe_state oid=%c is_homing_trigger=%c "
             "trigger_ticks=%u",
             oid=self._oid,
-            cq=self._cmd_queue,
         )
         self._set_range_cmd = self._mcu.lookup_command(
             "load_cell_probe_set_range"
             " oid=%c safety_counts_min=%i safety_counts_max=%i tare_counts=%i"
             " trigger_grams=%u grams_per_count=%i",
-            cq=self._cmd_queue,
         )
         self._home_cmd = self._mcu.lookup_command(
             "load_cell_probe_home oid=%c trsync_oid=%c trigger_reason=%c"
             " error_reason=%c clock=%u rest_ticks=%u timeout=%u",
-            cq=self._cmd_queue,
         )
 
     # the sensor data stream is connected on the MCU at the ready event
@@ -988,7 +982,7 @@ class LoadCellPrinterProbe:
         self._mcu = self._load_cell.get_sensor().get_mcu()
         trigger_dispatch = mcu.TriggerDispatch(self._mcu)
         continuous_tare_filter_helper = ContinuousTareFilterHelper(
-            config, sensor, trigger_dispatch.get_command_queue()
+            config, sensor
         )
         # Probe Interface
         self._mcu_load_cell_probe = McuLoadCellProbe(
