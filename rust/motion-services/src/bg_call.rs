@@ -7,7 +7,7 @@
 //! too close" as soon as one lands past its deadline. Callers start the call
 //! here and poll `done` from a reactor-friendly loop.
 
-use crate::lock_ext::LockExt;
+use motion_core::lock_ext::LockExt;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};

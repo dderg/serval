@@ -1,5 +1,4 @@
 use super::*;
-use crate::mcu_config::KINEMATICS_COREXY;
 use runtime::segment::KinematicTag;
 use runtime::stepping_state::MAX_AXES;
 
@@ -33,7 +32,7 @@ fn corexy_inverse_mix() {
     m[0] = Some(motor_a);
     m[1] = Some(motor_b);
     m[2] = Some(0.0);
-    let out = assemble_cartesian(&m, &v, KINEMATICS_COREXY).unwrap();
+    let out = assemble_cartesian(&m, &v, KinematicTag::CoreXy as u8).unwrap();
     assert!((out["x"].0 - expected_x).abs() < 1e-9);
     assert!((out["y"].0 - expected_y).abs() < 1e-9);
 }

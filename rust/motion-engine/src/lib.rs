@@ -4,9 +4,14 @@ pub mod viz;
 
 #[doc(hidden)]
 pub use motion_core::{
-    anchor, bg_call, classify, config, drain, enqueue, fence, homing, kinematics, lock_ext,
-    logging, mcu_config, mcu_log, motion_history, nudge, position_query, pump, remote_trigger,
-    servo_capture, servo_sdo, servo_torque, timing, types, worker,
+    anchor, classify, config, drain, enqueue, fence, homing, kinematics, lock_ext, mcu_config,
+    motion_history, nudge, pump, timing, types, worker,
+};
+
+#[doc(hidden)]
+pub use motion_services::{
+    bg_call, logging, mcu_log, position_query, remote_trigger, servo_capture, servo_sdo,
+    servo_torque,
 };
 
 #[cfg(feature = "test-support")]
