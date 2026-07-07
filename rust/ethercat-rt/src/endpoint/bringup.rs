@@ -1,6 +1,9 @@
+#![allow(unsafe_code)]
+
 use std::ffi::CString;
 use std::sync::atomic::Ordering;
 
+use super::drive::{DriveChain, FfiDriveChain};
 use super::{EndpointCtx, SIGTERM_RECEIVED};
 use crate::buzz::BuzzOsc;
 use crate::capture::{Capture, PendingStart, PendingStop};
@@ -264,6 +267,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
     } = args;
 
     let num_slaves = slaves.len();
+    let mut drive = FfiDriveChain;
     let columns = SlaveColumns::from(&slaves, cycle_us);
 
     let cycle_ns = cycle_us * 1000;
@@ -402,7 +406,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
                 event = "claim_handshake_timeout",
                 "bridge did not send ClaimHandshake within 5 s; aborting"
             );
-            super::shutdown_and_exit(num_slaves);
+            drive.shutdown_and_exit(num_slaves);
         }
     }
     tracing::info!(
@@ -451,6 +455,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
 
     EndpointCtx {
         server,
+        drive,
         num_slaves,
         counts_per_mm,
         invert,

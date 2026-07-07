@@ -1,12 +1,9 @@
-#![allow(unsafe_code)]
-
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::buzz::BuzzOsc;
 use crate::capture::{Capture, PendingStart, PendingStop};
 use crate::curves::AxisRing;
 use crate::dynamics::DynamicsModel;
-use crate::ffi;
 use crate::mailbox::MailboxWorker;
 use crate::scale::CountMap;
 use crate::sensorless::SensorlessBank;
@@ -18,13 +15,17 @@ use crate::wire::status_heartbeat_frame;
 mod bringup;
 mod commands;
 mod cycle;
+mod drive;
 
 pub use bringup::bringup;
+
+use drive::{DriveChain, FfiDriveChain};
 
 static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 pub struct EndpointCtx {
     server: FrameServer,
+    drive: FfiDriveChain,
 
     num_slaves: usize,
     counts_per_mm: Vec<f64>,
@@ -99,23 +100,9 @@ pub fn run(ctx: &mut EndpointCtx) {
         }
     }
 
-    disable_all(ctx.num_slaves);
-    unsafe { ffi::ec_rt_shutdown() };
+    ctx.drive.disable_all(ctx.num_slaves);
+    ctx.drive.shutdown();
     eprintln!("ec-rt: shutdown complete");
-}
-
-pub(super) fn disable_all(num_slaves: usize) {
-    unsafe {
-        for s in 0..num_slaves {
-            ffi::ec_rt_disable(s as std::os::raw::c_int);
-        }
-    }
-}
-
-pub(super) fn shutdown_and_exit(num_slaves: usize) -> ! {
-    disable_all(num_slaves);
-    unsafe { ffi::ec_rt_shutdown() };
-    std::process::exit(1);
 }
 
 pub(super) fn respond_fault_heartbeat(

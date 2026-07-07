@@ -1,13 +1,13 @@
 use std::ops::ControlFlow;
 
 use super::bringup::log_al_states;
-use super::{disable_all, discard_motion, respond_fault_heartbeat, shutdown_and_exit, EndpointCtx};
+use super::drive::DriveChain;
+use super::{discard_motion, respond_fault_heartbeat, EndpointCtx};
 use crate::capture::{CaptureRecord, DriveSample, FLAG_MOTION_ACTIVE, FLAG_TORQUE_ENABLED};
 use crate::claim::{eval_wkc, WkcDecision};
 use crate::clock::raw_from_monotonic_ns;
 use crate::curves::ENGINE_STATE_FAULT;
 use crate::dynamics::clamp_torque;
-use crate::ffi;
 use crate::scale::{mm_to_counts, CountMap};
 use crate::torque::{TickAction, TorqueState};
 use crate::wire::{endstop_trip_frame, status_heartbeat_frame};
@@ -39,7 +39,7 @@ macro_rules! log_slot_drive_telemetry {
 }
 
 pub(super) fn run_cycle(ctx: &mut EndpointCtx) -> ControlFlow<()> {
-    let next_flush_mono_ns = unsafe { ffi::ec_rt_cycle_time_ns() } + ctx.cycle_ns as u64;
+    let next_flush_mono_ns = ctx.drive.cycle_time_ns() + ctx.cycle_ns as u64;
     let apply_time = raw_from_monotonic_ns(next_flush_mono_ns);
 
     let all_rings_empty = ctx.rings.iter().all(|r| r.is_empty());
@@ -51,8 +51,7 @@ pub(super) fn run_cycle(ctx: &mut EndpointCtx) -> ControlFlow<()> {
 
     handle_ring_fault(ctx);
 
-    let mut toff = 0i64;
-    let wkc = unsafe { ffi::ec_rt_cycle(&mut toff) };
+    let (wkc, toff) = ctx.drive.cycle();
 
     handle_drive_fault(ctx);
 
@@ -74,7 +73,7 @@ fn apply_tick_action(ctx: &mut EndpointCtx, apply_time: u64, all_rings_empty: bo
         TickAction::None => {}
         TickAction::ExecuteDisable => {
             eprintln!("ec-rt: scheduled torque disable executing");
-            disable_all(ctx.num_slaves);
+            ctx.drive.disable_all(ctx.num_slaves);
             ctx.gate.disable_finished();
             for c in &mut ctx.cmaps {
                 *c = None;
@@ -85,7 +84,7 @@ fn apply_tick_action(ctx: &mut EndpointCtx, apply_time: u64, all_rings_empty: bo
                 "ec-rt: torque-gate fault code={code} — pieces present without torque, exiting"
             );
             respond_fault_heartbeat(ctx, ENGINE_STATE_FAULT, 0);
-            shutdown_and_exit(ctx.num_slaves);
+            ctx.drive.shutdown_and_exit(ctx.num_slaves);
         }
     }
 }
@@ -93,7 +92,7 @@ fn apply_tick_action(ctx: &mut EndpointCtx, apply_time: u64, all_rings_empty: bo
 fn poll_sensorless(ctx: &mut EndpointCtx, apply_time: u64) {
     let server = &mut ctx.server;
     let sensorless_tripped = ctx.sensorless.poll(
-        |slot| unsafe { ffi::ec_rt_get_torque_actual(slot as i32) },
+        |slot| ctx.drive.torque_actual(slot),
         |slot, endstop_id, torque| {
             eprintln!(
                 "ec-rt: sensorless endstop {endstop_id} tripped on slot {slot} \
@@ -161,8 +160,7 @@ fn sample_slot_targets(
             // position queries; the drive frame itself is never used.
             let cpm = ctx.cmd_counts_per_mm[s];
             let map = ctx.cmaps[s].get_or_insert_with(|| {
-                let actual = unsafe { ffi::ec_rt_get_position_actual(s as std::os::raw::c_int) };
-                CountMap::new(cpm, actual, f64::from(pos_mm))
+                CountMap::new(cpm, ctx.drive.position_actual(s), f64::from(pos_mm))
             });
             Some((map.target_counts(f64::from(pos_mm)), vel_mm_s, acc_mm_s2))
         } else {
@@ -203,7 +201,6 @@ fn emit_slot_commands(
         .map(|s| (drive_dir(s) * all_acc[s], drive_dir(s) * all_vel[s]))
         .unzip();
     for s in 0..num_slaves {
-        let slot = s as std::os::raw::c_int;
         if let Some(counts) = sp_counts[s] {
             let vel_offset = if ctx.velocity_ff[s] {
                 (f64::from(all_vel[s]) * ctx.cmd_counts_per_mm[s]).round() as i32
@@ -242,18 +239,14 @@ fn emit_slot_commands(
             }
             ctx.last_counts[s] = Some(counts);
             ctx.last_streamed_target[s] = Some(counts);
-            unsafe {
-                ffi::ec_rt_set_target_position(slot, counts);
-                ffi::ec_rt_set_velocity_offset(slot, vel_offset);
-                ffi::ec_rt_set_torque_offset(slot, torque_offset);
-            }
+            ctx.drive.set_target_position(s, counts);
+            ctx.drive.set_velocity_offset(s, vel_offset);
+            ctx.drive.set_torque_offset(s, torque_offset);
             motion_active = true;
         } else {
             ctx.last_counts[s] = None;
-            unsafe {
-                ffi::ec_rt_set_velocity_offset(slot, 0);
-                ffi::ec_rt_set_torque_offset(slot, 0);
-            }
+            ctx.drive.set_velocity_offset(s, 0);
+            ctx.drive.set_torque_offset(s, 0);
         }
     }
     motion_active
@@ -265,7 +258,7 @@ fn fault_non_finite_torque(ctx: &mut EndpointCtx, slot: usize, acc: f32, vel: f3
          (acc={acc} vel={vel}) — disabling"
     );
     respond_fault_heartbeat(ctx, ENGINE_STATE_FAULT, 0);
-    shutdown_and_exit(ctx.num_slaves);
+    ctx.drive.shutdown_and_exit(ctx.num_slaves);
 }
 
 fn handle_ring_fault(ctx: &mut EndpointCtx) {
@@ -294,7 +287,7 @@ fn handle_ring_fault(ctx: &mut EndpointCtx) {
         {
             let _ = retired;
             eprintln!("ec-rt: disabling drives (hw safety backstop)");
-            shutdown_and_exit(ctx.num_slaves);
+            ctx.drive.shutdown_and_exit(ctx.num_slaves);
         }
 
         #[cfg(not(feature = "hw"))]
@@ -308,7 +301,7 @@ fn handle_ring_fault(ctx: &mut EndpointCtx) {
 fn handle_drive_fault(ctx: &mut EndpointCtx) {
     let num_slaves = ctx.num_slaves;
     let drive_fault = (0..num_slaves).find_map(|s| {
-        let e = unsafe { ffi::ec_rt_get_error_code(s as std::os::raw::c_int) };
+        let e = ctx.drive.error_code(s);
         if e != 0 {
             Some((s, e))
         } else {
@@ -321,8 +314,7 @@ fn handle_drive_fault(ctx: &mut EndpointCtx) {
                 "ec-rt: DRIVE FAULT slot {slot} err=0x{err:04x} — parking, reporting via heartbeat"
             );
             for d in 0..num_slaves {
-                let mut t = ffi::EcTelemetry::default();
-                unsafe { ffi::ec_rt_get_telemetry(d as std::os::raw::c_int, &mut t) };
+                let t = ctx.drive.telemetry(d);
                 let last_cmd = ctx.last_counts[d].unwrap_or(t.target_position);
                 log_slot_drive_telemetry!(
                     error, "drive_fault", "drive fault — per-slot snapshot", ctx, d, t,
@@ -361,8 +353,7 @@ fn record_capture_sample(
         let mut record = CaptureRecord::new(ctx.cycle_index, flags);
         record.drive_count = ctx.capture_slots.len() as u8;
         for (i, &slot) in ctx.capture_slots.iter().enumerate() {
-            let mut t = ffi::EcTelemetry::default();
-            unsafe { ffi::ec_rt_get_telemetry(i32::from(slot), &mut t) };
+            let t = ctx.drive.telemetry(usize::from(slot));
             // The commanded kinematics are sampled in planner-stream frame;
             // flip them into the drive frame (as cmd_counts_per_mm's sign
             // does for the target) so they are sign-consistent with the
@@ -413,7 +404,7 @@ fn evaluate_wkc(ctx: &mut EndpointCtx, wkc: i32) -> ControlFlow<()> {
                 halt_threshold = crate::claim::WKC_CONSECUTIVE_LOSS_LIMIT,
                 "bus lost after consecutive bad cycles, halting"
             );
-            unsafe { ffi::ec_rt_dump_al_state() };
+            ctx.drive.dump_al_state();
             return ControlFlow::Break(());
         }
     }
@@ -449,8 +440,7 @@ fn emit_periodic_telemetry(ctx: &mut EndpointCtx, wkc: i32, toff: i64) {
         ctx.prdiv = 0;
         let all_empty_now = ctx.rings.iter().all(|r| r.is_empty());
         for s in 0..ctx.num_slaves {
-            let mut t = ffi::EcTelemetry::default();
-            unsafe { ffi::ec_rt_get_telemetry(s as std::os::raw::c_int, &mut t) };
+            let t = ctx.drive.telemetry(s);
             log_slot_drive_telemetry!(
                 info, "telemetry", "per-slot drive telemetry", ctx, s, t,
                 pre: {},
