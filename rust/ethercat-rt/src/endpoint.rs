@@ -184,6 +184,7 @@ pub struct EndpointCtx {
     slave_axes: Vec<u8>,
     velocity_ff: Vec<bool>,
     torque_clamp_tenths: Vec<i16>,
+    ff_lead_ns: Vec<u64>,
     jump_log_counts: Vec<i64>,
     cycle_ns: i64,
     telemetry_period: u64,
@@ -243,6 +244,10 @@ pub fn bringup(args: Args) -> EndpointCtx {
     let slave_axes: Vec<u8> = slaves.iter().map(|s| s.axis).collect();
     let velocity_ff: Vec<bool> = slaves.iter().map(|s| s.velocity_ff).collect();
     let torque_clamp_tenths: Vec<i16> = slaves.iter().map(|s| s.torque_clamp_tenths).collect();
+    let ff_lead_ns: Vec<u64> = slaves
+        .iter()
+        .map(|s| u64::from(s.ff_lead_cycles) * (cycle_us as u64) * 1000)
+        .collect();
 
     let cycle_ns = cycle_us * 1000;
     let telemetry_period = u64::try_from(cycle_us)
@@ -270,6 +275,14 @@ pub fn bringup(args: Args) -> EndpointCtx {
     let last_streamed_target: Vec<Option<i32>> = vec![None; num_slaves];
     let last_sent_retired: u32 = 0;
     let heartbeat_sent = false;
+
+    // The capture-io thread spawn and the first record-channel buffer are
+    // multi-millisecond stalls under mlockall(MCL_FUTURE); they must happen
+    // before ec_rt_bringup_preop, while no drive is DC-synced and no park
+    // cycle is being pumped on this thread (claim-time Capture::new stalled
+    // the park loop past the sync watchdog and halted the bus at every claim,
+    // bench 2026-07-06).
+    let capture = Capture::new();
 
     let mut server = FrameServer::bind(&socket).expect("bind socket");
     tracing::info!(
@@ -446,7 +459,6 @@ pub fn bringup(args: Args) -> EndpointCtx {
     );
 
     let gate = TorqueGate::new();
-    let capture = Capture::new();
     let cycle_index: u64 = 0;
     let mailbox = MailboxWorker::spawn(
         FfiSdoBus,
@@ -481,6 +493,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
         slave_axes,
         velocity_ff,
         torque_clamp_tenths,
+        ff_lead_ns,
         jump_log_counts,
         cycle_ns,
         telemetry_period,
@@ -1287,8 +1300,13 @@ fn compute_motion_targets(ctx: &mut EndpointCtx, apply_time: u64) -> (bool, Vec<
             };
             if let Some((counts, vel_mm_s, acc_mm_s2)) = sampled {
                 sp_counts[s] = Some(counts);
-                all_vel[s] = vel_mm_s;
-                all_acc[s] = acc_mm_s2;
+                let (ff_vel, ff_acc) = if ctx.ff_lead_ns[s] > 0 && !ctx.buzz.active() {
+                    ctx.rings[s].peek_vel_acc(apply_time + ctx.ff_lead_ns[s])
+                } else {
+                    (vel_mm_s, acc_mm_s2)
+                };
+                all_vel[s] = ff_vel;
+                all_acc[s] = ff_acc;
             }
         }
 
@@ -1542,7 +1560,7 @@ fn evaluate_wkc(ctx: &mut EndpointCtx, wkc: i32) -> ControlFlow<()> {
                 expected_wkc,
                 consecutive_bad = n,
                 halt_threshold = crate::claim::WKC_CONSECUTIVE_LOSS_LIMIT,
-                "working counter below expected; tolerating (USB-NIC frame loss)"
+                "working counter below expected; tolerating one bad cycle"
             );
         }
         WkcDecision::Halt => {

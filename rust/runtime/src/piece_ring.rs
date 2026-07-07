@@ -128,6 +128,17 @@ impl RingDescriptor {
         storage.get(self.ring_offset + self.tail)
     }
 
+    /// Storage index of the k-th unretired entry (0 = front), without
+    /// consuming anything — lookahead readers must not retire pieces the
+    /// realtime cursor has not passed yet.
+    #[inline]
+    pub fn slot_at(&self, k: usize) -> Option<usize> {
+        if k >= self.len() {
+            return None;
+        }
+        Some(self.ring_offset + (self.tail + k) % self.ring_depth)
+    }
+
     #[inline]
     pub fn advance_counter(&mut self) {
         if self.ring_depth == 0 || self.is_empty() {

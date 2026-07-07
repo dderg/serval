@@ -14,6 +14,10 @@ use trajectory::{ChainStage, CompiledChain, ShapedSegment};
 pub const MAX_PIECE_COEFFS: usize = 8;
 
 const MIN_PIECE_DURATION_S: f64 = 1e-9;
+/// Below this span the Bézier round trip corrupts a piece's acceleration
+/// (error ~ `ulp(pos)/h²` ≈ 1.4 mm/s² at 100 mm and 100 ns) and jerk; phases
+/// this short merge into a neighbor instead of lowering to their own piece.
+const MIN_PHASE_PIECE_S: f64 = 1e-7;
 const MAX_SUBDIVISION_DEPTH: u32 = 22;
 
 const MIN_FIT_PIECE_S: f64 = 1e-4;
@@ -708,21 +712,45 @@ fn lower_straight_from_phases(
         }
     };
 
-    // One shared cumulative-time bounds array, exactly as the grid path: every
+    // One shared cumulative-time span list, exactly as the grid path: every
     // axis reads the same breakpoint float, so consecutive pieces are bit-exactly
     // contiguous (`u_end == u_start`) and `t_start + total_t` is the final bound —
     // the contiguity the NURBS assembler asserts, within a move and across seams.
-    let mut bounds = Vec::with_capacity(vm.phases.len() + 1);
-    bounds.push(0.0);
+    //
+    // A phase shorter than the floor is merged into its neighbor's span rather
+    // than emitted: the Bézier round trip reconstructs a piece's monomials with
+    // error growing as `ulp(pos)/h²` in acceleration and `ulp(pos)/h³` in jerk,
+    // so a nanosecond piece — a jerk ramp across a micro-step between adjacent
+    // move ceilings — comes back with garbage derivatives orders of magnitude
+    // past the limits. Absorbing it instead concedes a velocity step of at most
+    // `accel · floor` at the joint, far below the seam gates.
+    let total_t: f64 = vm.phases.iter().map(|p| p.dt).sum();
+    let mut spans: Vec<(&geometry::StraightPhase, f64, f64)> = Vec::new();
+    let mut t_acc = 0.0;
+    let mut carry_start: Option<f64> = None;
     for p in &vm.phases {
-        bounds.push(bounds.last().unwrap() + p.dt);
+        let t0 = carry_start.take().unwrap_or(t_acc);
+        let t1 = t_acc + p.dt;
+        t_acc = t1;
+        if p.dt <= MIN_PHASE_PIECE_S {
+            match spans.last_mut() {
+                Some(last) => last.2 = t1,
+                None => carry_start = Some(t0),
+            }
+            continue;
+        }
+        spans.push((p, t0, t1));
     }
-    let total_t = *bounds.last().unwrap();
+    if spans.is_empty() {
+        if let Some(p) = vm.phases.first() {
+            spans.push((p, 0.0, total_t));
+        }
+    }
 
     let mut axes_pieces: Vec<Vec<BezierPiece<f64>>> = vec![Vec::new(); n_axes];
     for (axis, pieces) in axes_pieces.iter_mut().enumerate() {
         let (scale, base) = axis_scale_base(axis);
-        for (i, p) in vm.phases.iter().enumerate() {
+        for &(p, t0, t1) in &spans {
             let mut coeffs = vec![scale.mul_add(p.s0, base), scale * p.v0, scale * 0.5 * p.a0];
             if p.j != 0.0 {
                 coeffs.push(scale * p.j / 6.0);
@@ -731,8 +759,8 @@ fn lower_straight_from_phases(
                 apply_pressure_advance(&mut coeffs, chain);
             }
             pieces.push(BezierPiece {
-                u_start: t_start + bounds[i],
-                u_end: t_start + bounds[i + 1],
+                u_start: t_start + t0,
+                u_end: t_start + t1,
                 coeffs,
             });
         }

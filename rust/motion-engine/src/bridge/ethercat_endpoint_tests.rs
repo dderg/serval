@@ -33,6 +33,7 @@ fn endpoint_args_single_drive_uses_legacy_form() {
             Some(500),
             false,
             30.0,
+            0,
             false,
             None,
         )],
@@ -62,8 +63,8 @@ fn endpoint_args_per_drive_ff_flags() {
         None,
         None,
         &[
-            (0, 0, 1000.0, 50.0, None, None, true, 25.0, false, None),
-            (1, 2, 2000.0, 40.0, None, None, false, 60.0, true, None),
+            (0, 0, 1000.0, 50.0, None, None, true, 25.0, 2, false, None),
+            (1, 2, 2000.0, 40.0, None, None, false, 60.0, 0, true, None),
         ],
     );
     let clamps: Vec<&String> = args
@@ -88,7 +89,7 @@ fn endpoint_args_multi_drive_emits_slave_and_axis_groups() {
         None,
         None,
         &[
-            (0, 0, 1000.0, 50.0, None, None, false, 30.0, false, None),
+            (0, 0, 1000.0, 50.0, None, None, false, 30.0, 0, false, None),
             (
                 1,
                 2,
@@ -98,6 +99,7 @@ fn endpoint_args_multi_drive_emits_slave_and_axis_groups() {
                 None,
                 false,
                 30.0,
+                0,
                 false,
                 None,
             ),
@@ -137,6 +139,7 @@ fn endpoint_args_emits_per_slave_dynamics_profile() {
                 None,
                 false,
                 30.0,
+                0,
                 false,
                 Some("/cfg/x.toml".into()),
             ),
@@ -149,6 +152,7 @@ fn endpoint_args_emits_per_slave_dynamics_profile() {
                 None,
                 false,
                 30.0,
+                0,
                 false,
                 Some("/cfg/y.toml".into()),
             ),
@@ -388,4 +392,26 @@ fn handshake_connect_refused_is_not_immediately_fatal() {
             "handshake must retry past ConnectionRefused, not fail immediately; got: {msg}"
         );
     }
+}
+
+#[test]
+fn endpoint_args_emit_ff_lead_cycles_only_when_nonzero() {
+    let args = endpoint_args(
+        "eth0",
+        "/tmp/x.sock",
+        250,
+        None,
+        None,
+        &[
+            (0, 0, 1000.0, 50.0, None, None, true, 25.0, 2, false, None),
+            (1, 2, 2000.0, 40.0, None, None, false, 60.0, 0, true, None),
+        ],
+    );
+    let leads: Vec<&String> = args
+        .iter()
+        .enumerate()
+        .filter(|(i, a)| *a == "--ff-lead-cycles" && args.get(i + 1).is_some())
+        .map(|(i, _)| &args[i + 1])
+        .collect();
+    assert_eq!(leads, vec!["2"]);
 }
