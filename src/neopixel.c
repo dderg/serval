@@ -5,7 +5,6 @@
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
 #include <string.h> // memcpy
-#include "autoconf.h" // CONFIG_MACH_AVR
 #include "board/gpio.h" // gpio_out_write
 #include "board/irq.h" // irq_poll
 #include "board/misc.h" // timer_read_time
@@ -44,21 +43,6 @@ neopixel_check_elapsed(neopixel_time_t t1, neopixel_time_t t2
     return t2 - t1 >= ticks;
 }
 
-// The AVR micro-controllers require specialized timing
-#if CONFIG_MACH_AVR
-
-#include <avr/interrupt.h> // TCNT1
-
-static neopixel_time_t
-neopixel_get_time(void)
-{
-    return TCNT1;
-}
-
-#define neopixel_delay(start, ticks) (void)(ticks)
-
-#else
-
 static neopixel_time_t
 neopixel_get_time(void)
 {
@@ -71,8 +55,6 @@ neopixel_delay(neopixel_time_t start, neopixel_time_t ticks)
     while (!neopixel_check_elapsed(start, neopixel_get_time(), ticks))
         ;
 }
-
-#endif
 
 // Minimum amount of time for a '1 bit' to be reliably detected
 #define PULSE_LONG_TICKS  nsecs_to_ticks(800)

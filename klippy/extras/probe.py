@@ -208,9 +208,9 @@ class PrinterProbe:
                 gcmd.respond_info("Probe samples exceed tolerance. Retrying...")
                 retries += 1
                 measured = []
+            self._retract(toolhead, z + retract, lift_speed)
             if len(measured) >= sample_count:
                 break
-            self._retract(toolhead, z + retract, lift_speed)
         epos = list(toolhead.get_position()[:3])
         epos[Z_AXIS] = calc_probe_z_result(measured, method)
         return epos

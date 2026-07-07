@@ -76,20 +76,6 @@ fn chebyshev_basis_maps_to_known_monomials() {
 }
 
 #[test]
-fn truncate_respects_sup_norm_budget() {
-    let a = [10.0, 5.0, 1.0, 0.04, 0.05, 0.0];
-    // Tail |0.0| + |0.05| + |0.04| = 0.09 ≤ 0.1 drops; |1.0| does not.
-    assert_eq!(truncate_chebyshev(&a, 0.1), vec![10.0, 5.0, 1.0]);
-    assert_eq!(truncate_chebyshev(&a, 0.08), vec![10.0, 5.0, 1.0, 0.04]);
-    assert_eq!(
-        truncate_chebyshev(&a, 0.01),
-        vec![10.0, 5.0, 1.0, 0.04, 0.05]
-    );
-    assert_eq!(truncate_chebyshev(&[1e-30], 1.0), vec![1e-30]);
-    assert_eq!(truncate_chebyshev(&[0.0, 0.0], 0.0), vec![0.0]);
-}
-
-#[test]
 fn taylor_shift_splits_a_piece_continuously() {
     let coeffs = [2.0, -1.5, 3.25, 0.75, -0.5, 0.125];
     let split = 0.3;

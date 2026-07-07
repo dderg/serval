@@ -8,7 +8,7 @@ mod tests;
 pub struct NudgePiece {
     pub axis: u8,
     pub motor_mask: u8,
-    pub piece: BezierPiece<f64>,
+    pub piece: BezierPiece,
 }
 
 pub(crate) fn calc_move_time(dist: f64, speed: f64, accel: f64) -> (f64, f64, f64) {
@@ -25,7 +25,7 @@ pub(crate) fn calc_move_time(dist: f64, speed: f64, accel: f64) -> (f64, f64, f6
     (accel_t, cruise_t.max(0.0), cruise_v)
 }
 
-fn monomial_piece(t_start: f64, t_end: f64, c0: f64, c1: f64, c2: f64) -> BezierPiece<f64> {
+fn monomial_piece(t_start: f64, t_end: f64, c0: f64, c1: f64, c2: f64) -> BezierPiece {
     BezierPiece {
         u_start: t_start,
         u_end: t_end,
@@ -33,7 +33,7 @@ fn monomial_piece(t_start: f64, t_end: f64, c0: f64, c1: f64, c2: f64) -> Bezier
     }
 }
 
-fn push_phase(out: &mut Vec<NudgePiece>, axis: u8, motor_mask: u8, piece: BezierPiece<f64>) {
+fn push_phase(out: &mut Vec<NudgePiece>, axis: u8, motor_mask: u8, piece: BezierPiece) {
     if piece.u_end > piece.u_start {
         out.push(NudgePiece {
             axis,

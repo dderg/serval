@@ -6,7 +6,7 @@ fn construct_error_converts_to_nurbs_error() {
         actual: 25,
         max: 20,
     };
-    let n: NurbsError<f32> = e.into();
+    let n: NurbsError = e.into();
     assert!(matches!(
         n,
         NurbsError::Construct(ConstructError::DegreeExceeded { .. })
@@ -15,13 +15,13 @@ fn construct_error_converts_to_nurbs_error() {
 
 #[test]
 fn nurbs_error_implements_error_trait() {
-    let e: NurbsError<f32> = ConstructError::KnotsNotClamped.into();
+    let e: NurbsError = ConstructError::KnotsNotClamped.into();
     let _: &dyn core::error::Error = &e;
 }
 
 #[test]
 fn display_renders_messages() {
-    let e: NurbsError<f32> = ConstructError::DegreeExceeded {
+    let e: NurbsError = ConstructError::DegreeExceeded {
         actual: 30,
         max: 20,
     }
@@ -34,7 +34,7 @@ fn display_renders_messages() {
 #[test]
 fn knot_error_converts_to_nurbs_error() {
     let e = KnotError::BoundaryInsertion;
-    let n: NurbsError<f64> = e.into();
+    let n: NurbsError = e.into();
     assert!(matches!(n, NurbsError::Knot(KnotError::BoundaryInsertion)));
 }
 

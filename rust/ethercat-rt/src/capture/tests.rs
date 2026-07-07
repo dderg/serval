@@ -438,3 +438,46 @@ fn any_slot_out_of_range_flags_only_slots_at_or_above_count() {
     assert!(!any_slot_out_of_range(&[], 0));
     assert!(any_slot_out_of_range(&[0], 0));
 }
+
+#[test]
+fn start_consumes_a_prebuilt_record_channel_and_replenishes() {
+    let path1 = tmp_path("spare-a");
+    let path2 = tmp_path("spare-b");
+    let mut c = Capture::with_capacity(8);
+    assert_eq!(c.start(cfg(&path1)), 0);
+    c.push(record(1));
+    assert_eq!(c.stop().result, 0);
+    assert_eq!(c.start(cfg(&path2)), 0, "replenished channel must be ready");
+    c.push(record(2));
+    assert_eq!(c.stop().result, 0);
+    let _ = std::fs::remove_file(&path1);
+    let _ = std::fs::remove_file(&path2);
+}
+
+#[test]
+fn start_without_spare_channel_fails_loudly_not_allocating() {
+    let path = tmp_path("spare-drained");
+    let mut c = Capture::with_capacity(8);
+    let _drained = c.spare_channels.recv().expect("initial spare present");
+    assert_eq!(c.start(cfg(&path)), ERR_CAPTURE_CHANNEL_NOT_READY);
+    assert!(!c.is_active());
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn failed_validation_does_not_consume_the_spare_channel() {
+    let path = tmp_path("spare-kept");
+    let mut c = Capture::with_capacity(8);
+    assert_eq!(
+        c.start(cfg_drives(&path, vec![])),
+        ERR_CAPTURE_BAD_DRIVE_LIST
+    );
+    assert_eq!(
+        c.start(cfg(&path)),
+        0,
+        "spare must survive a rejected start"
+    );
+    c.push(record(1));
+    assert_eq!(c.stop().result, 0);
+    let _ = std::fs::remove_file(&path);
+}

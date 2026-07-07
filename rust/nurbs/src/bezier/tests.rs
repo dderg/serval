@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn evaluate_constant_polynomial_is_constant() {
-    let p = BezierPiece::<f64> {
+    let p = BezierPiece {
         u_start: 0.0,
         u_end: 1.0,
         coeffs: vec![3.5],
@@ -14,7 +14,7 @@ fn evaluate_constant_polynomial_is_constant() {
 
 #[test]
 fn evaluate_linear_polynomial() {
-    let p = BezierPiece::<f64> {
+    let p = BezierPiece {
         u_start: 0.0,
         u_end: 1.0,
         coeffs: vec![1.0, 2.0],
@@ -26,7 +26,7 @@ fn evaluate_linear_polynomial() {
 
 #[test]
 fn evaluate_uses_shifted_basis() {
-    let p = BezierPiece::<f64> {
+    let p = BezierPiece {
         u_start: 5.0,
         u_end: 7.0,
         coeffs: vec![1.0, 2.0],
@@ -37,16 +37,8 @@ fn evaluate_uses_shifted_basis() {
 }
 
 #[test]
-fn zero_creates_zero_polynomial_of_given_degree() {
-    let p = BezierPiece::<f64>::zero(0.0, 1.0, 3);
-    assert_eq!(p.coeffs, vec![0.0, 0.0, 0.0, 0.0]);
-    assert_eq!(p.degree(), 3);
-    assert_eq!(p.evaluate(0.5), 0.0);
-}
-
-#[test]
 fn bernstein_round_trip_preserves_polynomial() {
-    let monom = BezierPiece::<f64> {
+    let monom = BezierPiece {
         u_start: 0.0,
         u_end: 1.0,
         coeffs: vec![1.0, 2.0, 3.0],
@@ -63,7 +55,7 @@ fn bernstein_round_trip_preserves_polynomial() {
 
 #[test]
 fn cubic_bernstein_round_trip_on_shifted_support() {
-    let p = BezierPiece::<f64> {
+    let p = BezierPiece {
         u_start: 1.0,
         u_end: 3.0,
         coeffs: vec![1.0, -2.0, 3.0, -4.0],
@@ -86,12 +78,12 @@ fn from_bernstein_to_monomial_for_known_case() {
 
 #[test]
 fn add_two_pieces_same_support() {
-    let a = BezierPiece::<f64> {
+    let a = BezierPiece {
         u_start: 0.0,
         u_end: 1.0,
         coeffs: vec![1.0, 2.0],
     };
-    let b = BezierPiece::<f64> {
+    let b = BezierPiece {
         u_start: 0.0,
         u_end: 1.0,
         coeffs: vec![3.0, 4.0],
@@ -104,12 +96,12 @@ fn add_two_pieces_same_support() {
 
 #[test]
 fn add_two_pieces_mismatched_degrees_pads_with_zero() {
-    let a = BezierPiece::<f64> {
+    let a = BezierPiece {
         u_start: 0.0,
         u_end: 1.0,
         coeffs: vec![1.0, 2.0, 3.0],
     };
-    let b = BezierPiece::<f64> {
+    let b = BezierPiece {
         u_start: 0.0,
         u_end: 1.0,
         coeffs: vec![1.0],
@@ -120,12 +112,12 @@ fn add_two_pieces_mismatched_degrees_pads_with_zero() {
 
 #[test]
 fn add_two_pieces_mismatched_support_errors() {
-    let a = BezierPiece::<f64> {
+    let a = BezierPiece {
         u_start: 0.0,
         u_end: 1.0,
         coeffs: vec![1.0],
     };
-    let b = BezierPiece::<f64> {
+    let b = BezierPiece {
         u_start: 0.5,
         u_end: 1.0,
         coeffs: vec![1.0],
@@ -138,8 +130,7 @@ use crate::ScalarNurbs;
 #[test]
 fn extract_single_bezier_piece_from_clamped_curve() {
     let curve =
-        ScalarNurbs::<f64>::try_new(2, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], vec![0.0, 1.0, 4.0])
-            .unwrap();
+        ScalarNurbs::try_new(2, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], vec![0.0, 1.0, 4.0]).unwrap();
 
     let pieces = extract_bezier_pieces(&curve);
     assert_eq!(pieces.len(), 1);
@@ -156,7 +147,7 @@ fn extract_single_bezier_piece_from_clamped_curve() {
 
 #[test]
 fn extract_two_bezier_pieces_from_curve_with_interior_knot() {
-    let curve = ScalarNurbs::<f64>::try_new(
+    let curve = ScalarNurbs::try_new(
         2,
         vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0],
         vec![0.0, 1.0, 2.0, 3.0],
@@ -186,7 +177,7 @@ fn extract_two_bezier_pieces_from_curve_with_interior_knot() {
 
 #[test]
 fn split_piece_at_preserves_evaluation_on_each_side() {
-    let original = BezierPiece::<f64> {
+    let original = BezierPiece {
         u_start: 0.0,
         u_end: 1.0,
         coeffs: vec![1.0, 2.0],
@@ -212,7 +203,7 @@ fn split_piece_at_preserves_evaluation_on_each_side() {
 
 #[test]
 fn bezier_pieces_to_nurbs_round_trips_extraction() {
-    let original = ScalarNurbs::<f64>::try_new(
+    let original = ScalarNurbs::try_new(
         2,
         vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0],
         vec![0.0, 1.0, 2.0, 3.0],

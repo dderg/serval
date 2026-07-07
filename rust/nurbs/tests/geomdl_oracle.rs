@@ -1,5 +1,3 @@
-#![cfg(feature = "host")]
-
 use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
@@ -45,7 +43,7 @@ fn oracle_matches_for_corpus_curves() {
             continue;
         }
 
-        let curve = nurbs::VectorNurbs::<f64, 3>::try_new(degree, knots, cps_3d)
+        let curve = nurbs::VectorNurbs::<3>::try_new(degree, knots, cps_3d)
             .unwrap_or_else(|e| panic!("{name}: try_new failed: {e:?}"));
 
         for sample in curve_v["samples"].as_array().unwrap() {

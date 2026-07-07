@@ -16,7 +16,7 @@ fn g51_elevation_is_exact_against_the_quadratic() {
         [0usize, 1, 2].map(|k| mt * mt * q0[k] + 2.0 * mt * t * q1[k] + t * t * q2[k])
     };
 
-    let cubic_nurbs = nurbs::VectorNurbs::<f64, 3>::try_new(
+    let cubic_nurbs = nurbs::VectorNurbs::<3>::try_new(
         3,
         vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
         cubic.to_vec(),

@@ -298,3 +298,26 @@ fn slave_dynamics_profile_defaults_none() {
     let slaves = parse_slaves(&args(&["ethercat-rt", "eth0"])).expect("defaults");
     assert_eq!(slaves[0].dynamics_profile, None);
 }
+
+#[test]
+fn ff_lead_cycles_binds_per_slave_group_and_defaults_zero() {
+    let slaves = parse_slaves(&args(&[
+        "--slave",
+        "0",
+        "--ff-lead-cycles",
+        "3",
+        "--slave",
+        "1",
+    ]))
+    .unwrap();
+    assert_eq!(slaves[0].ff_lead_cycles, 3);
+    assert_eq!(slaves[1].ff_lead_cycles, 0);
+}
+
+#[test]
+fn ff_lead_cycles_legacy_form_and_range_check() {
+    let slaves = parse_slaves(&args(&["--ff-lead-cycles", "2"])).unwrap();
+    assert_eq!(slaves[0].ff_lead_cycles, 2);
+    assert!(parse_slaves(&args(&["--ff-lead-cycles", "41"])).is_err());
+    assert!(parse_slaves(&args(&["--ff-lead-cycles", "-1"])).is_err());
+}

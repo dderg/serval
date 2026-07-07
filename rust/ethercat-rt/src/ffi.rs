@@ -38,8 +38,6 @@ extern "C" {
 
     pub fn ec_rt_enable(slave: c_int) -> c_int;
 
-    pub fn ec_rt_run_homing(slave: c_int) -> c_int;
-
     pub fn ec_rt_dump_al_state();
 
     pub fn ec_rt_cycle(toff_ns: *mut i64) -> c_int;
@@ -56,11 +54,7 @@ extern "C" {
 
     pub fn ec_rt_get_velocity_actual(slave: c_int) -> i32;
 
-    pub fn ec_rt_get_statusword(slave: c_int) -> u16;
-
     pub fn ec_rt_get_error_code(slave: c_int) -> u16;
-
-    pub fn ec_rt_get_following_error(slave: c_int) -> i32;
 
     pub fn ec_rt_set_velocity_offset(slave: c_int, counts_per_s: i32);
 

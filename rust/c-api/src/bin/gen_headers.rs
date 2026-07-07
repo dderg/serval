@@ -81,44 +81,19 @@ fn write_canonical(bindings: cbindgen::Bindings, out_path: &str) {
 
 fn main() {
     let crate_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
-    let want_nurbs = cfg!(feature = "header-nurbs");
-    let want_runtime = cfg!(feature = "header-runtime");
-    if want_nurbs && want_runtime {
-        eprintln!(
-            "error: gen-headers must be invoked with EXACTLY ONE of \
-             --features header-nurbs / --features header-runtime so \
-             cbindgen sees only the symbols for that header. Pass \
-             --no-default-features to disable the crate-default that \
-             activates both."
-        );
+    if !cfg!(feature = "header-runtime") {
+        eprintln!("error: invoke with --features header-runtime");
         std::process::exit(1);
     }
-    if want_nurbs {
-        let cfg = cbindgen::Config::from_file(format!("{crate_dir}/cbindgen.toml"))
-            .expect("cbindgen.toml should be parseable");
-        let bindings = cbindgen::Builder::new()
-            .with_crate(&crate_dir)
-            .with_config(cfg)
-            .generate()
-            .expect("nurbs.h generation failed");
-        write_canonical(bindings, &format!("{crate_dir}/include/nurbs.h"));
-        println!("Generated nurbs.h");
-        return;
-    }
-    if want_runtime {
-        let cfg = cbindgen::Config::from_file(format!("{crate_dir}/cbindgen-runtime.toml"))
-            .expect("cbindgen-runtime.toml should be parseable");
-        let bindings = cbindgen::Builder::new()
-            .with_crate(&crate_dir)
-            .with_config(cfg)
-            .generate()
-            .expect("runtime.h generation failed");
-        write_canonical(bindings, &format!("{crate_dir}/include/runtime.h"));
-        println!("Generated runtime.h");
-        return;
-    }
-    eprintln!("error: invoke with --features header-nurbs OR --features header-runtime");
-    std::process::exit(1);
+    let cfg = cbindgen::Config::from_file(format!("{crate_dir}/cbindgen-runtime.toml"))
+        .expect("cbindgen-runtime.toml should be parseable");
+    let bindings = cbindgen::Builder::new()
+        .with_crate(&crate_dir)
+        .with_config(cfg)
+        .generate()
+        .expect("runtime.h generation failed");
+    write_canonical(bindings, &format!("{crate_dir}/include/runtime.h"));
+    println!("Generated runtime.h");
 }
 
 #[cfg(test)]

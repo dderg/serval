@@ -25,6 +25,12 @@ struct PlaygroundConfig {
     max_path_deviation: Option<f64>,
     #[serde(default)]
     max_accel_deviation: Option<f64>,
+    #[serde(default)]
+    pressure_advance: Option<f64>,
+    #[serde(default)]
+    smooth_zv_hz: Option<f64>,
+    #[serde(default)]
+    e_smooth_zv_hz: Option<f64>,
 }
 
 /// Plans the pasted gcode under the given config and returns the snapshot
@@ -55,6 +61,9 @@ pub fn plan(gcode_text: &str, config_json: &str) -> Result<String, JsValue> {
             max_extrude_only_accel: cfg.max_extrude_only_accel,
             max_path_deviation: cfg.max_path_deviation,
             max_accel_deviation: cfg.max_accel_deviation,
+            pressure_advance: cfg.pressure_advance,
+            smooth_zv_hz: cfg.smooth_zv_hz,
+            e_smooth_zv_hz: cfg.e_smooth_zv_hz,
         },
     )
     .map_err(|e| JsValue::from_str(&e.to_string()))?;

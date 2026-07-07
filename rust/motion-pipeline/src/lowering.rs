@@ -14,6 +14,10 @@ use trajectory::{ChainStage, CompiledChain, ShapedSegment};
 pub const MAX_PIECE_COEFFS: usize = 8;
 
 const MIN_PIECE_DURATION_S: f64 = 1e-9;
+/// Below this span the Bézier round trip corrupts a piece's acceleration
+/// (error ~ `ulp(pos)/h²` ≈ 1.4 mm/s² at 100 mm and 100 ns) and jerk; phases
+/// this short merge into a neighbor instead of lowering to their own piece.
+const MIN_PHASE_PIECE_S: f64 = 1e-7;
 const MAX_SUBDIVISION_DEPTH: u32 = 22;
 
 const MIN_FIT_PIECE_S: f64 = 1e-4;
@@ -194,6 +198,33 @@ impl std::fmt::Display for LoweringError {
 
 impl std::error::Error for LoweringError {}
 
+/// One sample window's duration: the trapezoid estimate `2·ds/(v0+v1)`,
+/// Newton-refined against the constant-jerk kinematics through the window's
+/// own endpoint states. The trapezoid value alone is off by O(ds³), and the
+/// quintic window pinned to six endpoint constraints swallows that duration
+/// error as interior wiggle whose acceleration amplitude grows as 1/h² — on
+/// short low-speed windows it exceeds the fit budget and the piece fit chases
+/// phantom jerk. The refined duration is consistent with the endpoint states,
+/// so the interior stays as smooth as the plan itself.
+fn window_duration(ds: f64, v0: f64, v1: f64, a0: f64, a1: f64) -> f64 {
+    let trapezoid = 2.0 * ds / (v0 + v1);
+    let mut dt = trapezoid;
+    for _ in 0..3 {
+        let j = (a1 - a0) / dt;
+        let residual = dt * (v0 + dt * (0.5 * a0 + dt * j / 6.0)) - ds;
+        let slope = v0 + dt * (a0 + dt * 0.5 * j);
+        let next = dt - residual / slope;
+        if !(next.is_finite() && next > 0.0) {
+            return trapezoid;
+        }
+        dt = next;
+    }
+    if (dt - trapezoid).abs() > 0.5 * trapezoid {
+        return trapezoid;
+    }
+    dt
+}
+
 /// Quintic Hermite piece for `s(t)` over one sample window, in local time `τ`. It
 /// matches `(s, v, a)` at both knots, so adjacent windows — which share those knot
 /// values — join C2, and the whole move's `s(t)` is C2 by construction.
@@ -287,7 +318,7 @@ fn build_profile(samples: &[VelSample]) -> Result<(ScalarProfile, f64), Lowering
         if !(ds.is_finite() && ds > 0.0 && v_sum > 0.0 && finite) {
             return Err(LoweringError::DegeneratePhase);
         }
-        let dt = 2.0 * ds / v_sum;
+        let dt = window_duration(ds, v0, v1, a0, a1);
         if !(dt.is_finite() && dt > 0.0) {
             return Err(LoweringError::DegeneratePhase);
         }
@@ -405,7 +436,7 @@ impl Sampler<'_> {
         ua: f64,
         ub: f64,
         tol: FitTol,
-    ) -> BezierPiece<f64> {
+    ) -> BezierPiece {
         let h = tb - ta;
         let mono_u = self
             .ladder_fit_axis(axis, ta, tb, tol, true)
@@ -428,7 +459,7 @@ pub(crate) fn truncated_piece(
     u_end: f64,
     h: f64,
     pos_budget_mm: f64,
-) -> BezierPiece<f64> {
+) -> BezierPiece {
     let cheb = truncate_chebyshev_c2_anchored(
         &monomial_u_to_chebyshev(mono_u),
         h,
@@ -447,7 +478,7 @@ pub(crate) fn truncated_piece(
 /// `bezier_pieces_to_nurbs` (uniform degree per curve) and `lane_curve`'s
 /// cross-axis addition for CoreXY mixing require it. Enqueue's Chebyshev
 /// truncation recovers each piece's true degree at the wire.
-fn pad_to_uniform_degree(axes_pieces: &mut [Vec<BezierPiece<f64>>]) {
+fn pad_to_uniform_degree(axes_pieces: &mut [Vec<BezierPiece>]) {
     let max_len = axes_pieces
         .iter()
         .flatten()
@@ -496,7 +527,7 @@ pub fn lower_move(
 ) -> Result<ShapedSegment, LoweringError> {
     let (axes_pieces, total_t) =
         lower_move_pieces(gm, vm, t_start, start_pos, fit_tol, axis_chains)?;
-    let axes: Vec<ScalarNurbs<f64>> = axes_pieces
+    let axes: Vec<ScalarNurbs> = axes_pieces
         .iter()
         .map(|p| bezier_pieces_to_nurbs(p))
         .collect();
@@ -521,7 +552,7 @@ pub fn lower_move_pieces(
     start_pos: &[f64],
     fit_tol: FitTol,
     axis_chains: &[CompiledChain],
-) -> Result<(Vec<Vec<BezierPiece<f64>>>, f64), LoweringError> {
+) -> Result<(Vec<Vec<BezierPiece>>, f64), LoweringError> {
     if gm.source != vm.source {
         return Err(LoweringError::SourceMismatch);
     }
@@ -534,6 +565,12 @@ pub fn lower_move_pieces(
         return lower_straight_from_phases(gm, vm, t_start, start_pos, axis_chains);
     }
     let (profile, total_t) = build_profile(&vm.samples)?;
+    // A jerk-regime change is a curvature kink in the arc-length profile: no
+    // polynomial spans it within the acceleration budget, so blind bisection
+    // cascades down to the floor around each one. Pinning a grid knot at every
+    // regime boundary lets both sides fit their full smooth spans instead.
+    let mut knots = regime_knot_times(&profile, fit_tol);
+    knots.retain(|&t| t > MIN_PIECE_DURATION_S && total_t - t > MIN_PIECE_DURATION_S);
     let spatial = gm.segment.spatial.as_ref();
 
     let n_axes = start_pos.len().max(3);
@@ -553,35 +590,70 @@ pub fn lower_move_pieces(
         s_len: gm.segment.s_len(),
         axis_chains,
     };
-    let mut driven: Vec<usize> = (0..3).collect();
-    driven.extend(gm.segment.followers.iter().map(|f| f.axis_index));
-
-    let mut coarse_fit_grid = vec![0.0];
-    refine_span(
-        &sampler,
-        &driven,
-        fit_tol,
-        0.0,
-        total_t,
-        0,
-        &mut coarse_fit_grid,
-    );
-    let bounds = coarse_fit_grid;
-
-    let mut axes_pieces: Vec<Vec<BezierPiece<f64>>> = vec![Vec::new(); n_axes];
-    for w in bounds.windows(2) {
-        let (ta, tb) = (w[0], w[1]);
-        if tb - ta <= MIN_PIECE_DURATION_S {
-            continue;
+    // Each axis refines its own grid: an axis only pays for the knots its own
+    // signal needs (a follower is blind to path curvature, z to planar motion),
+    // and the guarantee is unchanged — every piece of every axis is probed
+    // against the same tolerances.
+    let mut axes_pieces: Vec<Vec<BezierPiece>> = vec![Vec::new(); n_axes];
+    let no_knots: Vec<f64> = Vec::new();
+    for (axis, pieces) in axes_pieces.iter_mut().enumerate() {
+        let driven = [axis];
+        // A follower sees the profile's jerk edges scaled by its ratio, far
+        // below the acceleration budget — seeding them would only cut its
+        // near-linear track into spatial-sized pieces.
+        let axis_knots = if axis < 3 { &knots } else { &no_knots };
+        let mut bounds = vec![0.0];
+        let mut prev = 0.0;
+        for &k in axis_knots.iter().chain(std::iter::once(&total_t)) {
+            if k - prev > MIN_PIECE_DURATION_S {
+                refine_span(&sampler, &driven, fit_tol, prev, k, 0, &mut bounds);
+                prev = k;
+            }
         }
-        let (ua, ub) = (t_start + ta, t_start + tb);
-        for (axis, pieces) in axes_pieces.iter_mut().enumerate() {
+        for w in bounds.windows(2) {
+            let (ta, tb) = (w[0], w[1]);
+            if tb - ta <= MIN_PIECE_DURATION_S {
+                continue;
+            }
+            let (ua, ub) = (t_start + ta, t_start + tb);
             pieces.push(sampler.fitted_piece(axis, ta, tb, ua, ub, fit_tol));
         }
     }
     pad_to_uniform_degree(&mut axes_pieces);
 
     Ok((axes_pieces, total_t))
+}
+
+/// The span the knot placement is sized to keep fittable. A jerk step `Δj`
+/// inside a span of `h` leaves an acceleration residual no polynomial removes,
+/// on the order of `Δj·h/8`; steps that stay under the acceleration budget at
+/// this span are absorbed by the fit, bigger ones get a knot.
+const KNOT_TARGET_SPAN_S: f64 = 0.02;
+
+/// Window boundaries where the profile's leading jerk takes one isolated step
+/// larger than the budget — a jerk-phase edge in the plan, flanked by steady
+/// windows. The isolation requirement is what separates a regime edge from a
+/// numerically-ridden section whose jerk chatters at every boundary: chatter
+/// gets no knots and falls back to plain bisection, which the windowed
+/// reconstruction already smooths well enough to fit.
+fn regime_knot_times(profile: &ScalarProfile, tol: FitTol) -> Vec<f64> {
+    let threshold = 8.0 * tol.accel_mm_s2 / KNOT_TARGET_SPAN_S;
+    let jerks: Vec<f64> = profile.windows.iter().map(|w| 6.0 * w.coeffs[3]).collect();
+    let steps: Vec<f64> = jerks.windows(2).map(|j| (j[1] - j[0]).abs()).collect();
+    let mut out: Vec<f64> = Vec::new();
+    for (i, &step) in steps.iter().enumerate() {
+        let isolated = (i == 0 || steps[i - 1] < 0.25 * threshold)
+            && (i + 1 >= steps.len() || steps[i + 1] < 0.25 * threshold);
+        if step > threshold
+            && isolated
+            && out
+                .last()
+                .is_none_or(|&k| profile.knot_t[i + 1] - k > MIN_FIT_PIECE_S)
+        {
+            out.push(profile.knot_t[i + 1]);
+        }
+    }
+    out
 }
 
 /// Linear pressure advance is `pos += k * vel`, exact on a polynomial of any
@@ -612,7 +684,7 @@ fn lower_straight_from_phases(
     t_start: f64,
     start_pos: &[f64],
     axis_chains: &[CompiledChain],
-) -> Result<(Vec<Vec<BezierPiece<f64>>>, f64), LoweringError> {
+) -> Result<(Vec<Vec<BezierPiece>>, f64), LoweringError> {
     let n_axes = start_pos.len().max(3);
     for f in &gm.segment.followers {
         if f.axis_index >= n_axes {
@@ -640,21 +712,45 @@ fn lower_straight_from_phases(
         }
     };
 
-    // One shared cumulative-time bounds array, exactly as the grid path: every
+    // One shared cumulative-time span list, exactly as the grid path: every
     // axis reads the same breakpoint float, so consecutive pieces are bit-exactly
     // contiguous (`u_end == u_start`) and `t_start + total_t` is the final bound —
     // the contiguity the NURBS assembler asserts, within a move and across seams.
-    let mut bounds = Vec::with_capacity(vm.phases.len() + 1);
-    bounds.push(0.0);
+    //
+    // A phase shorter than the floor is merged into its neighbor's span rather
+    // than emitted: the Bézier round trip reconstructs a piece's monomials with
+    // error growing as `ulp(pos)/h²` in acceleration and `ulp(pos)/h³` in jerk,
+    // so a nanosecond piece — a jerk ramp across a micro-step between adjacent
+    // move ceilings — comes back with garbage derivatives orders of magnitude
+    // past the limits. Absorbing it instead concedes a velocity step of at most
+    // `accel · floor` at the joint, far below the seam gates.
+    let total_t: f64 = vm.phases.iter().map(|p| p.dt).sum();
+    let mut spans: Vec<(&geometry::StraightPhase, f64, f64)> = Vec::new();
+    let mut t_acc = 0.0;
+    let mut carry_start: Option<f64> = None;
     for p in &vm.phases {
-        bounds.push(bounds.last().unwrap() + p.dt);
+        let t0 = carry_start.take().unwrap_or(t_acc);
+        let t1 = t_acc + p.dt;
+        t_acc = t1;
+        if p.dt <= MIN_PHASE_PIECE_S {
+            match spans.last_mut() {
+                Some(last) => last.2 = t1,
+                None => carry_start = Some(t0),
+            }
+            continue;
+        }
+        spans.push((p, t0, t1));
     }
-    let total_t = *bounds.last().unwrap();
+    if spans.is_empty() {
+        if let Some(p) = vm.phases.first() {
+            spans.push((p, 0.0, total_t));
+        }
+    }
 
-    let mut axes_pieces: Vec<Vec<BezierPiece<f64>>> = vec![Vec::new(); n_axes];
+    let mut axes_pieces: Vec<Vec<BezierPiece>> = vec![Vec::new(); n_axes];
     for (axis, pieces) in axes_pieces.iter_mut().enumerate() {
         let (scale, base) = axis_scale_base(axis);
-        for (i, p) in vm.phases.iter().enumerate() {
+        for &(p, t0, t1) in &spans {
             let mut coeffs = vec![scale.mul_add(p.s0, base), scale * p.v0, scale * 0.5 * p.a0];
             if p.j != 0.0 {
                 coeffs.push(scale * p.j / 6.0);
@@ -663,8 +759,8 @@ fn lower_straight_from_phases(
                 apply_pressure_advance(&mut coeffs, chain);
             }
             pieces.push(BezierPiece {
-                u_start: t_start + bounds[i],
-                u_end: t_start + bounds[i + 1],
+                u_start: t_start + t0,
+                u_end: t_start + t1,
                 coeffs,
             });
         }

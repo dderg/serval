@@ -7,22 +7,21 @@ use crate::types::AxisKey;
 
 pub const HISTORY_CAPACITY: usize = 4096;
 
-/// Provisional alarm threshold for the host-keyed vs legacy MCU-clock-keyed
-/// position cross-check. Refine from the bench `history_shadow_divergence`
-/// distribution once real probe runs land.
-pub const SHADOW_DIVERGENCE_TOL_MM: f64 = 0.01;
-
 #[derive(Debug, thiserror::Error)]
 pub enum HistoryError {
     #[error(
         "query host time {queried:.6}s precedes retained motion history for axis \
-         {key:?} (window {window_start:.6}..{window_end:.6}s)"
+         {key:?} (window {window_start:.6}..{window_end:.6}s, {ring_len} pieces \
+         retained, {evicted} evicted, first piece {first_dur_s:.6}s)"
     )]
     BeforeRetainedWindow {
         key: AxisKey,
         queried: f64,
         window_start: f64,
         window_end: f64,
+        ring_len: usize,
+        evicted: u64,
+        first_dur_s: f64,
     },
 
     #[error(
@@ -194,20 +193,11 @@ fn eval_state(piece: &HistoryPiece, host_t: f64) -> AxisState {
     eval_at_u(piece, u)
 }
 
-fn eval_state_by_clock(piece: &HistoryPiece, clock: u64) -> AxisState {
-    let dur_ticks = piece.end_clock.saturating_sub(piece.start_clock) as f64;
-    let u = if dur_ticks > 0.0 {
-        (clock.saturating_sub(piece.start_clock) as f64 / dur_ticks).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    eval_at_u(piece, u)
-}
-
 #[derive(Debug, Default)]
 pub struct HistoryStore {
     rings: HashMap<AxisKey, VecDeque<HistoryPiece>>,
     endpoints: HashMap<AxisKey, AxisEndpoint>,
+    evicted: HashMap<AxisKey, u64>,
     holds_before_ring: HashMap<AxisKey, HoldBeforeRing>,
 }
 
@@ -279,6 +269,7 @@ impl HistoryStore {
         }
         if ring.len() == HISTORY_CAPACITY {
             ring.pop_front();
+            *self.evicted.entry(key).or_default() += 1;
         }
         self.endpoints.insert(key, piece.endpoint());
         ring.push_back(piece);
@@ -289,12 +280,28 @@ impl HistoryStore {
     /// its held position instead of `NoHistoryForAxis` — which the beacon probe
     /// position lookup depends on.
     pub fn drop_pieces_on_reanchor(&mut self) {
+        let dropped: usize = self.rings.values().map(VecDeque::len).sum();
+        tracing::info!(
+            subsystem = "motion",
+            event = "history_drop_on_reanchor",
+            dropped,
+            "[history] stream re-anchored — dropped retained pieces, endpoints held"
+        );
         for ring in self.rings.values_mut() {
             ring.clear();
         }
     }
 
     pub fn rebase_axis(&mut self, key: AxisKey, host: f64, position: f64) {
+        tracing::info!(
+            subsystem = "motion",
+            event = "history_rebase_axis",
+            mcu = key.mcu_id,
+            axis = key.axis,
+            host,
+            position,
+            "[history] axis rebased to an externally set position"
+        );
         self.rings.entry(key).or_default().clear();
         self.holds_before_ring.remove(&key);
         self.endpoints.insert(key, AxisEndpoint { host, position });
@@ -306,35 +313,6 @@ impl HistoryStore {
 
     pub fn final_position(&self, key: AxisKey) -> Option<f64> {
         self.endpoints.get(&key).map(|e| e.position)
-    }
-
-    /// Shadow lookup in the legacy per-axis MCU-clock domain, used only to
-    /// cross-check the host-keyed result. Returns `None` when the ring cannot
-    /// resolve the clock (no pieces, before window, or future) — those cases
-    /// carry no divergence signal and are skipped by the caller.
-    pub fn state_at_clock_legacy(
-        &self,
-        key: AxisKey,
-        clock: u64,
-        now_clock: u64,
-    ) -> Option<AxisState> {
-        let ring = self.rings.get(&key).filter(|r| !r.is_empty())?;
-        let idx = ring.partition_point(|p| p.start_clock <= clock);
-        if idx == 0 {
-            return None;
-        }
-        let piece = &ring[idx - 1];
-        if clock < piece.end_clock {
-            return Some(eval_state_by_clock(piece, clock));
-        }
-        if clock > now_clock {
-            return None;
-        }
-        Some(AxisState {
-            position: piece.end_position(),
-            velocity: 0.0,
-            acceleration: 0.0,
-        })
     }
 
     pub fn state_at_host(
@@ -366,6 +344,9 @@ impl HistoryStore {
                         queried: host_t,
                         window_start: ring.front().map_or(0.0, |p| p.start_host),
                         window_end: ring.back().map_or(0.0, |p| p.end_host()),
+                        ring_len: ring.len(),
+                        evicted: self.evicted.get(&key).copied().unwrap_or(0),
+                        first_dur_s: ring.front().map_or(0.0, |p| f64::from(p.duration_secs)),
                     });
                 }
                 let piece = &ring[idx - 1];
@@ -389,25 +370,6 @@ impl HistoryStore {
             }
         }
         Ok(hold.hold_state())
-    }
-}
-
-pub fn check_shadow_divergence(key: AxisKey, host_pos: f64, shadow: Option<AxisState>) {
-    let Some(shadow) = shadow else {
-        return;
-    };
-    let delta_mm = (host_pos - shadow.position).abs();
-    if delta_mm > SHADOW_DIVERGENCE_TOL_MM {
-        tracing::warn!(
-            subsystem = "motion",
-            event = "history_shadow_divergence",
-            mcu = key.mcu_id,
-            axis = key.axis,
-            host_pos,
-            shadow_pos = shadow.position,
-            delta_mm,
-            "[history-shadow] host-keyed vs stepper-clock-keyed position diverged"
-        );
     }
 }
 

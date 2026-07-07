@@ -1,7 +1,7 @@
 use super::*;
 use crate::ConstructError;
 
-fn linear_curve() -> ScalarNurbs<f64> {
+fn linear_curve() -> ScalarNurbs {
     ScalarNurbs::try_new(1, vec![0.0, 0.0, 1.0, 1.0], vec![0.0, 1.0]).unwrap()
 }
 
@@ -14,7 +14,7 @@ fn try_new_accepts_valid_linear() {
 
 #[test]
 fn try_new_rejects_degree_exceeded() {
-    let result = ScalarNurbs::<f64>::try_new(21, vec![0.0; 23], vec![0.0; 1]);
+    let result = ScalarNurbs::try_new(21, vec![0.0; 23], vec![0.0; 1]);
     assert!(matches!(
         result,
         Err(ConstructError::DegreeExceeded {
@@ -26,7 +26,7 @@ fn try_new_rejects_degree_exceeded() {
 
 #[test]
 fn try_new_rejects_knot_count_mismatch() {
-    let result = ScalarNurbs::<f64>::try_new(
+    let result = ScalarNurbs::try_new(
         1,
         vec![0.0, 0.0, 1.0], // 3 knots, but 2 cps + 1 + 1 = 4 expected
         vec![0.0, 1.0],
@@ -39,19 +39,19 @@ fn try_new_rejects_knot_count_mismatch() {
 
 #[test]
 fn try_new_rejects_unclamped_start() {
-    let result = ScalarNurbs::<f64>::try_new(1, vec![0.0, 0.5, 1.0, 1.0], vec![0.0, 1.0]);
+    let result = ScalarNurbs::try_new(1, vec![0.0, 0.5, 1.0, 1.0], vec![0.0, 1.0]);
     assert!(matches!(result, Err(ConstructError::KnotsNotClamped)));
 }
 
 #[test]
 fn try_new_rejects_unclamped_end() {
-    let result = ScalarNurbs::<f64>::try_new(1, vec![0.0, 0.0, 0.5, 1.0], vec![0.0, 1.0]);
+    let result = ScalarNurbs::try_new(1, vec![0.0, 0.0, 0.5, 1.0], vec![0.0, 1.0]);
     assert!(matches!(result, Err(ConstructError::KnotsNotClamped)));
 }
 
 #[test]
 fn try_new_rejects_non_monotone_knots() {
-    let result = ScalarNurbs::<f64>::try_new(
+    let result = ScalarNurbs::try_new(
         2,
         vec![0.0, 0.0, 0.0, 0.4, 0.3, 1.0, 1.0, 1.0], // 0.3 < 0.4
         vec![0.0, 0.5, 1.0, 1.5, 2.0],
@@ -61,7 +61,7 @@ fn try_new_rejects_non_monotone_knots() {
 
 #[test]
 fn try_new_rejects_degenerate_knot_range() {
-    let result = ScalarNurbs::<f64>::try_new(1, vec![0.0, 0.0, 0.0, 0.0], vec![0.0, 1.0]);
+    let result = ScalarNurbs::try_new(1, vec![0.0, 0.0, 0.0, 0.0], vec![0.0, 1.0]);
     assert!(matches!(result, Err(ConstructError::DegenerateKnotRange)));
 }
 

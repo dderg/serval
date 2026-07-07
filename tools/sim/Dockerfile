@@ -5,9 +5,19 @@
 # stage and everything after it re-executes on a rebuild.
 #
 #   toolchain   apt packages + Rust toolchain  (changes: never)
-#   rust-build  motion-engine cdylib           (cache-mounted target/+registry)
-#   firmware    C firmware ELFs + chelper      (cache-mounted per-MCU OUT)
+#   rust-build  motion-engine cdylib           (registry cache only)
+#   firmware    C firmware ELFs + chelper      (no compile caches)
 #   runtime     final image — no build tools   (changes: klippy/, tools/)
+#
+# Compile outputs (cargo target/, make OUT dirs) are deliberately NOT
+# cache-mounted: make and cargo decide freshness by mtime, and a persistent
+# artifact dir paired with COPY'd sources went stale in practice — up to and
+# including a firmware ELF speaking an older wire protocol than the host it
+# shipped with. Skipping unchanged work is the layer cache's job: it keys on
+# file CONTENT, so when sources really change the whole stage recompiles
+# from a clean slate, and when they don't the stage is skipped entirely.
+# Only the cargo registry/git caches remain — cargo addresses those by
+# content, so they cannot serve stale artifacts.
 
 # --------------------------------------------------------------------
 # Stage 1 — toolchain
@@ -47,22 +57,16 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 # --------------------------------------------------------------------
 # Stage 2 — rust-build
-# Builds the motion-engine cdylib. BuildKit cache mounts persist the cargo
-# registry and the compiled target/ across builds (in the BuildKit daemon,
-# not the image), so a rebuild after a source edit recompiles only the
-# crates that changed. The target cache is keyed by SIM_CACHE_KEY (branch)
-# so two branches building in parallel get independent caches.
+# Builds the motion-engine cdylib from a clean target dir every time the
+# rust/ content changes; the layer cache skips the stage when it doesn't.
 # --------------------------------------------------------------------
 FROM toolchain AS rust-build
-
-ARG SIM_CACHE_KEY=default
 
 WORKDIR /kalico/rust
 
 COPY rust/ /kalico/rust/
 
-RUN --mount=type=cache,target=/kalico/rust/target,id=rust-target-${SIM_CACHE_KEY},sharing=locked \
-    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     --mount=type=cache,target=/root/.cargo/git,sharing=shared \
     cargo build -p motion-engine --release && \
     mkdir -p /artifacts && \
@@ -75,8 +79,6 @@ RUN --mount=type=cache,target=/kalico/rust/target,id=rust-target-${SIM_CACHE_KEY
 # CONFIG_MCU_SIM (set in tools/sim/configs/*), not build-time patches.
 # --------------------------------------------------------------------
 FROM toolchain AS firmware
-
-ARG SIM_CACHE_KEY=default
 
 WORKDIR /kalico
 
@@ -102,22 +104,18 @@ COPY rust/ /kalico/rust/
 RUN mkdir -p /sim_elfs
 
 # Each MCU builds into its own OUT dir (out-h7/, out-f4/) so the two
-# configs never share object/descriptor state, and each MCU's objects
-# persist in a BuildKit cache mount for incremental rebuilds. Both MCUs
-# are MACH_LINUX sim builds with identical Rust features, so they share
-# one target-linux cache for the c-api staticlib.
-RUN --mount=type=cache,target=/kalico/out-h7,id=fw-h7-${SIM_CACHE_KEY},sharing=locked \
-    --mount=type=cache,target=/kalico/rust/target-linux,id=fw-rust-linux-${SIM_CACHE_KEY},sharing=locked \
-    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+# configs never share object/descriptor state. Both are always built from
+# clean OUT dirs — a fresh ELF whenever any input changed, never a stale
+# incremental one. Both MCUs are MACH_LINUX sim builds with identical Rust
+# features, so the second build reuses the first's target-linux staticlib.
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     set -e; \
     cp tools/sim/configs/h7-sim.config .config; \
     make olddefconfig OUT=out-h7/ 2>/dev/null || true; \
     make -j$(nproc) OUT=out-h7/; \
     cp out-h7/klipper.elf /sim_elfs/klipper-h7-sim.elf
 
-RUN --mount=type=cache,target=/kalico/out-f4,id=fw-f4-${SIM_CACHE_KEY},sharing=locked \
-    --mount=type=cache,target=/kalico/rust/target-linux,id=fw-rust-linux-${SIM_CACHE_KEY},sharing=locked \
-    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     set -e; \
     cp tools/sim/configs/f4-sim.config .config; \
     make olddefconfig OUT=out-f4/ 2>/dev/null || true; \

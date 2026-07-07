@@ -1,6 +1,7 @@
 // Linux-host stubs for the diag/fault-handler API declared in
-// src/generic/fault_handler.h. The real implementation in
-// src/generic/fault_handler.c is Cortex-M / STM32 specific (custom
+// src/generic/fault_handler.h. The real implementation, split across
+// src/generic/fault_capture.c, diag_counters.c, diag_ring.c,
+// diag_boot_report.c and diag_emit.c, is Cortex-M / STM32 specific (custom
 // link sections, SCB cache ops, exception handlers) and cannot be
 // compiled for the Linux MCU build. The host sim doesn't need the
 // wedge counters or fault-record persistence — provide no-ops so

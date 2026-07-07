@@ -15,10 +15,13 @@ const REPLAN_BATCH_MOVES: usize = 64;
 
 /// When the input runs momentarily dry the planner stops batching and commits
 /// what it can, so a rate-matched feed keeps the committed runway topped up
-/// instead of letting it sag for up to a whole batch. Requiring a few arrivals
-/// since the last plan bounds the re-plan rate when the feed trickles in one
-/// move per wakeup.
-const QUIET_PLAN_MIN_MOVES: usize = 4;
+/// instead of letting it sag for up to a whole batch. Requiring a batch of
+/// arrivals since the last plan bounds the re-plan rate when the feed
+/// trickles in one move per wakeup: each re-plan costs O(window), so a
+/// trickle-fed planner spends `window / QUIET_PLAN_MIN_MOVES` plan passes per
+/// move — at high move rates this quotient, not the per-plan cost, is what
+/// decides whether planning keeps up with the print.
+const QUIET_PLAN_MIN_MOVES: usize = 32;
 
 /// Second pipeline stage: plans jerk-limited S-curve velocity over the
 /// incoming geometry and emits `PlannedMove`s whose velocity bodies are final

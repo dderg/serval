@@ -48,21 +48,6 @@ command_runtime_seed_position(uint32_t *args)
 DECL_COMMAND(command_runtime_seed_position,
     "runtime_seed_position x_q16=%i y_q16=%i z_q16=%i");
 
-void
-command_runtime_stream_flush(uint32_t *args)
-{
-    (void)args;
-    if (!runtime_handle) {
-        sendf("kalico_stream_flush_response result=%i credit_epoch=%u", -7, 0);
-        return;
-    }
-    uint32_t credit_epoch = 0;
-    int32_t r = runtime_stream_flush(runtime_handle, &credit_epoch);
-    sendf("kalico_stream_flush_response result=%i credit_epoch=%u",
-          r, credit_epoch);
-}
-DECL_COMMAND(command_runtime_stream_flush, "runtime_stream_flush");
-
 extern uint32_t stats_send_time;
 extern uint32_t stats_send_time_high;
 void
