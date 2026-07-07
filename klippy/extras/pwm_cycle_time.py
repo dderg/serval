@@ -25,7 +25,6 @@ class MCU_pwm_cycle:
         return self._mcu
 
     def _build_config(self):
-        cmd_queue = self._mcu.alloc_command_queue()
         curtime = self._mcu.get_printer().get_reactor().monotonic()
         printtime = self._mcu.estimated_print_time(curtime)
         self._last_clock = self._mcu.print_time_to_clock(printtime + 0.200)
@@ -63,10 +62,10 @@ class MCU_pwm_cycle:
             is_init=True,
         )
         self._set_cmd = self._mcu.lookup_command(
-            "queue_digital_out oid=%c clock=%u on_ticks=%u", cq=cmd_queue
+            "queue_digital_out oid=%c clock=%u on_ticks=%u"
         )
         self._set_cycle_ticks = self._mcu.lookup_command(
-            "set_digital_out_pwm_cycle oid=%c cycle_ticks=%u", cq=cmd_queue
+            "set_digital_out_pwm_cycle oid=%c cycle_ticks=%u"
         )
 
     def set_pwm_cycle(self, print_time, value, cycle_time):

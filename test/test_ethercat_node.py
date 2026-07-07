@@ -14,7 +14,7 @@ class FakeRail:
         self,
         motor_name,
         chain_index,
-        ff_config=(False, 30.0),
+        ff_config=(False, 30.0, 0),
         dynamics_profile=None,
     ):
         self._motor_name = motor_name
@@ -65,8 +65,8 @@ def test_validate_chain_rejects_out_of_range_index():
 def test_validate_chain_accepts_per_motor_ff_differences():
     node, rails = _node(
         [
-            (0, FakeRail("x", 0, ff_config=(False, 30.0))),
-            (1, FakeRail("y", 1, ff_config=(True, 60.0))),
+            (0, FakeRail("x", 0, ff_config=(False, 30.0, 0))),
+            (1, FakeRail("y", 1, ff_config=(True, 60.0, 2))),
         ]
     )
     ethercat_node.EtherCatNode._validate_chain(node, rails)
@@ -127,6 +127,10 @@ class FakeEngine:
     def set_torque(self, handle, value, print_time):
         self.calls.append((handle, value, print_time))
 
+    def set_torque_deferred(self, handle, value, print_time):
+        self.calls.append((handle, value, print_time))
+        return lambda: None
+
 
 def _torque_node(engine):
     printer = types.SimpleNamespace(
@@ -162,3 +166,64 @@ def test_set_motor_torque_without_engine_handle_raises():
     node.engine_handle = None
     with pytest.raises(FakeConfigError):
         ethercat_node.EtherCatNode.set_motor_torque(node, "x", True, 1.0)
+
+
+def test_coupled_uniformity_rejects_mismatched_ff_lead():
+    node, rails = _dyn_node(
+        [
+            (0, FakeRail("x", 0, ff_config=(True, 30.0, 2))),
+            (1, FakeRail("y", 1, ff_config=(True, 30.0, 0))),
+        ],
+        node_profile="/cfg/node.toml",
+    )
+    with pytest.raises(FakeConfigError) as e:
+        ethercat_node.EtherCatNode._validate_coupled_uniformity(node, rails)
+    assert "ff_lead_cycles must be identical" in str(e.value)
+    assert "x=2" in str(e.value) and "y=0" in str(e.value)
+
+
+def test_coupled_uniformity_rejects_mismatched_velocity_ff():
+    node, rails = _dyn_node(
+        [
+            (0, FakeRail("x", 0, ff_config=(True, 30.0, 0))),
+            (1, FakeRail("y", 1, ff_config=(False, 30.0, 0))),
+        ],
+        node_profile="/cfg/node.toml",
+    )
+    with pytest.raises(FakeConfigError) as e:
+        ethercat_node.EtherCatNode._validate_coupled_uniformity(node, rails)
+    assert "velocity_ff must be identical" in str(e.value)
+
+
+def test_coupled_uniformity_rejects_mismatched_torque_clamp():
+    node, rails = _dyn_node(
+        [
+            (0, FakeRail("x", 0, ff_config=(True, 30.0, 0))),
+            (1, FakeRail("y", 1, ff_config=(True, 60.0, 0))),
+        ],
+        node_profile="/cfg/node.toml",
+    )
+    with pytest.raises(FakeConfigError) as e:
+        ethercat_node.EtherCatNode._validate_coupled_uniformity(node, rails)
+    assert "ff_torque_clamp must be identical" in str(e.value)
+
+
+def test_coupled_uniformity_allows_identical_ff_config():
+    node, rails = _dyn_node(
+        [
+            (0, FakeRail("x", 0, ff_config=(True, 30.0, 2))),
+            (1, FakeRail("y", 1, ff_config=(True, 30.0, 2))),
+        ],
+        node_profile="/cfg/node.toml",
+    )
+    ethercat_node.EtherCatNode._validate_coupled_uniformity(node, rails)
+
+
+def test_coupled_uniformity_allows_mismatch_on_independent_motors():
+    node, rails = _dyn_node(
+        [
+            (0, FakeRail("x", 0, ff_config=(True, 30.0, 3))),
+            (1, FakeRail("y", 1, ff_config=(False, 60.0, 0))),
+        ]
+    )
+    ethercat_node.EtherCatNode._validate_coupled_uniformity(node, rails)

@@ -32,11 +32,7 @@ class PrinterExtruder:
         self.max_extrude_only_accel = config.getfloat(
             "max_extrude_only_accel", None, above=0.0
         )
-        # Setup extruder trapq (trapezoidal motion queue). Engine mode:
-        # planner / kinematic state lives in Rust, the host stub is
-        # callable but never queues real moves.
         self.trapq = None
-        self.trapq_append = lambda *a: None
         self.trapq_finalize_moves = lambda *a: None
 
         for stepper_key in (
@@ -125,30 +121,6 @@ class PrinterExtruder:
                 "Extrude below minimum temp\n"
                 "See the 'min_extrude_temp' config option for details"
             )
-
-    def move(self, print_time, move):
-        axis_r = move.axes_r[3]
-        accel = move.accel * axis_r
-        start_v = move.start_v * axis_r
-        cruise_v = move.cruise_v * axis_r
-        # Queue movement (x is extruder movement, y is pressure advance flag)
-        self.trapq_append(
-            self.trapq,
-            print_time,
-            move.accel_t,
-            move.cruise_t,
-            move.decel_t,
-            move.start_pos[3],
-            0.0,
-            0.0,
-            1.0,
-            0.0,
-            0.0,
-            start_v,
-            cruise_v,
-            accel,
-        )
-        self.last_position = move.end_pos[3]
 
     def find_past_position(self, print_time):
         return 0.0

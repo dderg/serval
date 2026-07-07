@@ -18,6 +18,16 @@ EC_RT_MAX_SLAVES = 8
 
 CYCLE_US_QUANTUM = 250
 
+# Per-motor options that must be identical across a coupled node: a
+# node-level dynamics profile computes each motor's torque feedforward
+# from every motor's commanded kinematics, so asymmetry in the FF path
+# skews the coupled model instead of tuning one motor.
+COUPLED_UNIFORM_OPTIONS = (
+    ("velocity_ff", lambda rail: rail.get_ff_config()[0]),
+    ("ff_torque_clamp", lambda rail: rail.get_ff_config()[1]),
+    ("ff_lead_cycles", lambda rail: rail.get_ff_config()[2]),
+)
+
 
 class EtherCatNode:
     def __init__(self, config):
@@ -131,6 +141,30 @@ class EtherCatNode:
                 "or none — missing on: %s" % (self.name, ", ".join(missing))
             )
 
+    def _validate_coupled_uniformity(self, rails):
+        if self.dynamics_profile is None:
+            return
+        for option, read in COUPLED_UNIFORM_OPTIONS:
+            values = {
+                rail.get_motor_name(): read(rail)
+                for _global_axis, rail in rails
+            }
+            if len(set(values.values())) > 1:
+                raise self.printer.config_error(
+                    "ethercat_node %s: a coupled (node-level) "
+                    "dynamics_profile computes each motor's torque "
+                    "feedforward from every motor's commanded kinematics, "
+                    "so %s must be identical across the node — got %s"
+                    % (
+                        self.name,
+                        option,
+                        ", ".join(
+                            "%s=%s" % (name, value)
+                            for name, value in sorted(values.items())
+                        ),
+                    )
+                )
+
     def _claim(self):
         if self.engine_handle is not None:
             return
@@ -141,12 +175,13 @@ class EtherCatNode:
             for slot, (_global_axis, rail) in enumerate(rails)
         }
         self._validate_dynamics_profiles(rails)
+        self._validate_coupled_uniformity(rails)
         drives = []
         for global_axis, rail in rails:
             following_error_counts, max_torque_tenth_pct = (
                 rail.get_session_drive_limits()
             )
-            velocity_ff, ff_torque_clamp = rail.get_ff_config()
+            velocity_ff, ff_torque_clamp, ff_lead_cycles = rail.get_ff_config()
             drives.append(
                 (
                     rail.get_chain_index(),
@@ -157,6 +192,7 @@ class EtherCatNode:
                     max_torque_tenth_pct,
                     velocity_ff,
                     ff_torque_clamp,
+                    ff_lead_cycles,
                     rail.get_invert_direction(),
                     rail.get_dynamics_profile(),
                 )
@@ -274,11 +310,14 @@ class EtherCatNode:
             first = not self._torque_motors
             self._torque_motors.add(motor_name)
             if first:
-                engine.set_torque(self.engine_handle, True, print_time)
+                return engine.set_torque_deferred(
+                    self.engine_handle, True, print_time
+                )
         else:
             self._torque_motors.discard(motor_name)
             if not self._torque_motors:
                 engine.set_torque(self.engine_handle, False, print_time)
+        return None
 
 
 def load_config_prefix(config):

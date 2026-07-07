@@ -1,47 +1,22 @@
-#[doc(hidden)]
-pub mod anchor;
-pub mod bg_call;
 mod bridge;
-#[doc(hidden)]
-pub mod classify;
-#[doc(hidden)]
-pub mod config;
-pub mod drain;
-#[doc(hidden)]
-pub mod enqueue;
-pub mod fence;
-#[doc(hidden)]
-pub mod homing;
-#[doc(hidden)]
-pub mod kinematics;
-pub mod logging;
-#[doc(hidden)]
-pub mod mcu_config;
-pub mod mcu_log;
-pub mod motion_history;
-#[doc(hidden)]
-pub mod nudge;
-#[doc(hidden)]
-pub mod position_query;
-#[doc(hidden)]
-pub mod pump;
-pub mod remote_trigger;
-mod servo_call;
-#[doc(hidden)]
-pub mod servo_capture;
-#[doc(hidden)]
-pub mod servo_sdo;
-#[doc(hidden)]
-pub mod servo_torque;
-mod types;
+#[cfg(feature = "snapshot")]
 pub mod viz;
-pub mod worker;
 
-pub use motion_pipeline::timing;
+#[doc(hidden)]
+pub use motion_core::{
+    anchor, classify, config, drain, enqueue, fence, homing, kinematics, lock_ext, mcu_config,
+    motion_history, nudge, pump, timing, types, worker,
+};
 
-pub mod seam_test_harness;
+#[doc(hidden)]
+pub use motion_services::{
+    bg_call, logging, mcu_log, position_query, remote_trigger, servo_capture, servo_sdo,
+    servo_torque,
+};
 
-pub mod test_support;
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use motion_core::seam_test_harness;
 
 use pyo3::prelude::*;
 
@@ -50,6 +25,7 @@ use bridge::PyMotionEngine;
 #[pymodule]
 fn _motion_engine(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyMotionEngine>()?;
+    #[cfg(feature = "snapshot")]
     m.add_function(wrap_pyfunction!(viz::pipeline_snapshot, m)?)?;
     Ok(())
 }

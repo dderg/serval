@@ -11,6 +11,10 @@ REASON_ENDSTOP_HIT = 1
 REASON_COMMS_TIMEOUT = 4
 
 MAX_TRIP_TO_STOP_TRAVEL = 0.5
+# The trip and stop positions are reconstructed independently through the
+# motion-history interpolation, so the trip can land a few µm past the stop
+# from float noise alone; only a gross negative indicates a clock-domain bug.
+MIN_TRIP_TO_STOP_TRAVEL = -0.01
 
 
 def trip_to_stop_travel(axis, start_pos, trip_pos, final_pos):
@@ -115,7 +119,7 @@ class SimRemoteEndstop:
             final_pos[axis],
             travel,
         )
-        if not 0.0 <= travel < MAX_TRIP_TO_STOP_TRAVEL:
+        if not MIN_TRIP_TO_STOP_TRAVEL <= travel < MAX_TRIP_TO_STOP_TRAVEL:
             raise self.printer.command_error(
                 "sim_remote_endstop: reconstructed trip position %.4f is not"
                 " within %.2fmm before the stop position %.4f — cross-mcu"

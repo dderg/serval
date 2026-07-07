@@ -11,9 +11,8 @@
 
 
 class MCU_analog_mux:
-    def __init__(self, mcu, cmd_queue, select_pins_desc):
+    def __init__(self, mcu, select_pins_desc):
         self.mcu = mcu
-        self.cmd_queue = cmd_queue
         ppins = mcu.get_printer().lookup_object("pins")
         select_pin_params = [
             ppins.lookup_pin(spd, can_invert=True) for spd in select_pins_desc
@@ -31,7 +30,7 @@ class MCU_analog_mux:
 
     def build_config(self):
         self.update_pin_cmd = self.mcu.lookup_command(
-            "update_digital_out oid=%c value=%c", cq=self.cmd_queue
+            "update_digital_out oid=%c value=%c"
         )
 
     def get_instance_id(self, select_pins_desc):
@@ -96,12 +95,9 @@ class MCU_TMC_uart_bitbang:
         self.rx_pin = rx_pin_params["pin"]
         self.tx_pin = tx_pin_params["pin"]
         self.oid = self.mcu.create_oid()
-        self.cmd_queue = self.mcu.alloc_command_queue()
         self.analog_mux = None
         if select_pins_desc is not None:
-            self.analog_mux = MCU_analog_mux(
-                self.mcu, self.cmd_queue, select_pins_desc
-            )
+            self.analog_mux = MCU_analog_mux(self.mcu, select_pins_desc)
         self.instances = {}
         self.tmcuart_send_cmd = None
         self.mcu.register_config_callback(self.build_config)
@@ -120,8 +116,6 @@ class MCU_TMC_uart_bitbang:
             "tmcuart_send oid=%c write=%*s read=%c",
             "tmcuart_response oid=%c read=%*s",
             oid=self.oid,
-            cq=self.cmd_queue,
-            is_async=True,
         )
 
     def register_instance(

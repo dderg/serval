@@ -115,20 +115,20 @@ fn ctx(line_no: u32, feed: f64) -> MoveContext {
     }
 }
 
-fn eval_piece(p: &BezierPiece<f64>, t: f64) -> f64 {
+fn eval_piece(p: &BezierPiece, t: f64) -> f64 {
     let z = t - p.u_start;
     let c = |i: usize| p.coeffs.get(i).copied().unwrap_or(0.0);
     c(0) + c(1) * z + c(2) * z * z + c(3) * z * z * z
 }
 
-fn vel_piece(p: &BezierPiece<f64>, t: f64) -> f64 {
+fn vel_piece(p: &BezierPiece, t: f64) -> f64 {
     let z = t - p.u_start;
     let c = |i: usize| p.coeffs.get(i).copied().unwrap_or(0.0);
     c(1) + 2.0 * c(2) * z + 3.0 * c(3) * z * z
 }
 
-fn peak_accel(axes: &[Vec<BezierPiece<f64>>]) -> f64 {
-    let accel = |p: &BezierPiece<f64>, t: f64| {
+fn peak_accel(axes: &[Vec<BezierPiece>]) -> f64 {
+    let accel = |p: &BezierPiece, t: f64| {
         let z = t - p.u_start;
         2.0 * p.coeffs[2] + 6.0 * p.coeffs[3] * z
     };
@@ -464,7 +464,7 @@ fn pressure_advance_shifts_follower_and_leaves_xyz_byte_identical() {
     }
 }
 
-fn piece_accel_at(pieces: &[BezierPiece<f64>], t: f64) -> f64 {
+fn piece_accel_at(pieces: &[BezierPiece], t: f64) -> f64 {
     let p = pieces
         .iter()
         .find(|p| t >= p.u_start - 1e-12 && t <= p.u_end + 1e-12)
@@ -777,8 +777,9 @@ fn flat_transform(height: f64) -> geometry::SurfaceTransform {
     geometry::SurfaceTransform::new(mesh, geometry::Fade::new(1.0, 10.0, 0.05).unwrap())
 }
 
-fn eval_piece_any_degree(p: &BezierPiece<f64>, t: f64) -> f64 {
-    eval_mono(&p.coeffs, t - p.u_start)
+fn eval_piece_any_degree(p: &BezierPiece, t: f64) -> f64 {
+    let z = t - p.u_start;
+    p.coeffs.iter().rev().fold(0.0, |acc, &c| acc * z + c)
 }
 
 #[test]
@@ -807,7 +808,7 @@ fn surface_warped_move_tracks_the_mesh_along_the_path() {
         z_pieces.len() > planned[0].velocity.phases.len(),
         "a mesh-warped move must leave the closed-form phase path"
     );
-    let eval_axis = |pieces: &[BezierPiece<f64>], time: f64| -> f64 {
+    let eval_axis = |pieces: &[BezierPiece], time: f64| -> f64 {
         let p = pieces
             .iter()
             .find(|p| (p.u_start..=p.u_end).contains(&time))
@@ -853,7 +854,7 @@ fn surface_warped_single_axis_move_tracks_the_mesh() {
 
     let y_pieces = extract_bezier_pieces(&warped.axes[1]);
     let z_pieces = extract_bezier_pieces(&warped.axes[2]);
-    let eval_axis = |pieces: &[BezierPiece<f64>], time: f64| -> f64 {
+    let eval_axis = |pieces: &[BezierPiece], time: f64| -> f64 {
         let p = pieces
             .iter()
             .find(|p| (p.u_start..=p.u_end).contains(&time))

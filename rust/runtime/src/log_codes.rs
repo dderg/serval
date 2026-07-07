@@ -123,16 +123,17 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
             "runtime.mcu_reset",
             "mcu reset (cause bits={arg0}, iwdg_resets={arg1})",
         ),
-        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_HARD_FAULT) => {
-            ("runtime.hard_fault", "cpu hard fault pc={arg0} lr={arg1}")
-        }
+        (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_HARD_FAULT) => (
+            "runtime.hard_fault",
+            "cpu hard fault pc={arg0:hex} lr={arg1:hex}",
+        ),
         (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_FAULT_STATUS) => (
             "runtime.fault_status",
-            "fault status cfsr={arg0} hfsr={arg1}",
+            "fault status cfsr={arg0:hex} hfsr={arg1:hex}",
         ),
         (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_FG_FREEZE) => (
             "runtime.fg_freeze",
-            "foreground freeze pc={arg0} stall_ticks={arg1}",
+            "foreground freeze pc={arg0:hex} stall_ticks={arg1}",
         ),
         (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_RT_PROGRESS) => (
             "runtime.rt_progress",
@@ -140,7 +141,7 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         ),
         (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_LAST_DISPATCH) => (
             "runtime.last_dispatch",
-            "last dispatch func={arg0} addr={arg1}",
+            "last dispatch func={arg0:hex} addr={arg1:hex}",
         ),
         (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_ISR_PHASE) => {
             ("runtime.isr_phase", "isr phase={arg0} ring_overflow={arg1}")
@@ -167,7 +168,7 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         ),
         (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_FG_TASK) => (
             "runtime.fg_task",
-            "foreground worst task func={arg0} dur_cyc={arg1}",
+            "foreground worst task func={arg0:hex} dur_cyc={arg1}",
         ),
         (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_FG_MSG) => (
             "runtime.fg_msg",
@@ -183,7 +184,7 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         ),
         (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_TIMER_TOO_CLOSE) => (
             "runtime.timer_too_close",
-            "timer too close caller_pc={arg0} timer_func={arg1} count=code",
+            "timer too close caller_pc={arg0:hex} timer_func={arg1:hex} count=code",
         ),
         (SUBSYSTEM_RUNTIME, EVENT_RUNTIME_TIMER_TOO_CLOSE_LATE) => (
             "runtime.timer_too_close_late",
@@ -226,11 +227,11 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
         }
         (SUBSYSTEM_MOTION, EVENT_MOTION_AXIS_STALLED) => (
             "motion.axis_stalled",
-            "axis retirement stalled with pieces pending axis<<16|occupancy={arg0} stalled_ms={arg1}",
+            "axis retirement stalled with pieces pending axis={arg0:hi16} occupancy={arg0:lo16} stalled_ms={arg1}",
         ),
         (SUBSYSTEM_MOTION, EVENT_MOTION_AXIS_STALLED_HEAD) => (
             "motion.axis_stalled_head",
-            "stalled axis armed piece window vs now (signed ms) start-now={arg0} end-now={arg1}",
+            "stalled axis armed piece window vs now start-now={arg0:i32}ms end-now={arg1:i32}ms",
         ),
         (SUBSYSTEM_TICK, EVENT_TICK_INTERVAL_EXCEEDED) => (
             "tick.interval_exceeded",
@@ -269,6 +270,14 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
 
 /// Compose the `_msg` string from a template and two numeric args.
 ///
+/// Placeholders `{arg0}`/`{arg1}` render the raw `u32` as decimal. Typed
+/// forms reinterpret the same bits for display:
+/// - `{arg0:i32}` / `{arg1:i32}` — signed decimal (e.g. a negative ms delta)
+/// - `{arg0:hex}` / `{arg1:hex}` — `0x`-prefixed hex (program counters,
+///   addresses)
+/// - `{arg0:hi16}` / `{arg1:hi16}` — high 16 bits, decimal
+/// - `{arg0:lo16}` / `{arg1:lo16}` — low 16 bits, decimal
+///
 /// # Examples
 ///
 /// ```
@@ -279,10 +288,21 @@ pub fn event_info(subsystem: u8, event: u16) -> (&'static str, &'static str) {
 ///
 /// let msg2 = compose_msg("engine reset", 0, 0);
 /// assert_eq!(msg2, "engine reset");
+///
+/// let msg3 = compose_msg("pc={arg0:hex}", 0x0800_1234, 0);
+/// assert_eq!(msg3, "pc=0x8001234");
 /// ```
 #[cfg(feature = "host")]
 pub fn compose_msg(template: &str, arg0: u32, arg1: u32) -> String {
     template
+        .replace("{arg0:i32}", &format!("{}", arg0 as i32))
+        .replace("{arg1:i32}", &format!("{}", arg1 as i32))
+        .replace("{arg0:hex}", &format!("{arg0:#x}"))
+        .replace("{arg1:hex}", &format!("{arg1:#x}"))
+        .replace("{arg0:hi16}", &format!("{}", arg0 >> 16))
+        .replace("{arg1:hi16}", &format!("{}", arg1 >> 16))
+        .replace("{arg0:lo16}", &format!("{}", arg0 & 0xffff))
+        .replace("{arg1:lo16}", &format!("{}", arg1 & 0xffff))
         .replace("{arg0}", &format!("{arg0}"))
         .replace("{arg1}", &format!("{arg1}"))
 }

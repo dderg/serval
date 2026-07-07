@@ -1,5 +1,10 @@
 use servo_ident::fit::{fit, FitError, FitInput, FitOptions};
+use servo_ident::model::coulomb_cols;
 use servo_ident::model::Structure;
+
+fn cols(vel: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    vel.iter().map(|&v| coulomb_cols(v)).unzip()
+}
 
 fn triangle(a: f64, t1: f64, dt: f64, reps: usize) -> (Vec<f64>, Vec<f64>) {
     let mut acc = Vec::new();
@@ -25,7 +30,7 @@ fn noisy(x: f64, k: usize) -> f64 {
 
 #[test]
 fn recovers_scalar_truth() {
-    let (m, b, cf, cr) = (0.0123, 0.0045, 1.2, -1.1);
+    let (m, b, cf, cr) = (0.0123, 0.09, 1.2, -1.1);
     let (acc, vel) = triangle(2000.0, 0.08, 0.001, 6);
     let torque: Vec<f64> = acc
         .iter()
@@ -42,11 +47,15 @@ fn recovers_scalar_truth() {
             noisy(m * a + b * v + c, k).round()
         })
         .collect();
+    let (reg_cf, reg_cr) = cols(&vel);
     let input = FitInput {
         structure: Structure::CartesianScalar,
         acc: vec![acc],
         vel: vec![vel],
+        cf: vec![reg_cf],
+        cr: vec![reg_cr],
         torque: vec![torque],
+        extra: Vec::new(),
     };
     let r = fit(&input, &FitOptions::default()).unwrap();
     let p = &r.params;
@@ -98,11 +107,16 @@ fn recovers_corexy_coupling() {
     let torque_b: Vec<f64> = (0..acc_b.len())
         .map(|k| tq(acc_b[k], acc_a[k], vel_b[k], k + 7))
         .collect();
+    let (cf_a, cr_a) = cols(&vel_a);
+    let (cf_b, cr_b) = cols(&vel_b);
     let input = FitInput {
         structure: Structure::CoreXY,
         acc: vec![acc_a, acc_b],
         vel: vec![vel_a, vel_b],
+        cf: vec![cf_a, cf_b],
+        cr: vec![cr_a, cr_b],
         torque: vec![torque_a, torque_b],
+        extra: Vec::new(),
     };
     let r = fit(&input, &FitOptions::default()).unwrap();
     assert!((r.params.mass[0][0] - md).abs() < 0.1 * md);
@@ -116,7 +130,10 @@ fn refuses_insufficient_excitation() {
         structure: Structure::CartesianScalar,
         acc: vec![vec![0.0; n]],
         vel: vec![vec![100.0; n]],
+        cf: vec![vec![1.0; n]],
+        cr: vec![vec![0.0; n]],
         torque: vec![vec![1.0; n]],
+        extra: Vec::new(),
     };
     assert!(matches!(
         fit(&input, &FitOptions::default()),
@@ -132,11 +149,15 @@ fn refuses_saturated_torque() {
     for t in torque.iter_mut().take(n / 10) {
         *t = 3995.0;
     }
+    let (reg_cf, reg_cr) = cols(&vel);
     let input = FitInput {
         structure: Structure::CartesianScalar,
         acc: vec![acc],
         vel: vec![vel],
+        cf: vec![reg_cf],
+        cr: vec![reg_cr],
         torque: vec![torque],
+        extra: Vec::new(),
     };
     assert!(matches!(
         fit(&input, &FitOptions::default()),

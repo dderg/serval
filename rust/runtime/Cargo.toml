@@ -9,7 +9,6 @@ description = "Layer 4 MCU runtime — 40 kHz ISR with stub NURBS evaluator. Ste
 license.workspace = true
 
 [dependencies]
-nurbs = { path = "../nurbs", default-features = false }
 heapless = { workspace = true }
 # `portable-atomic` provides software 64-bit atomics on targets that lack
 # native u64 CAS (thumbv7em-none-eabi[hf]: Cortex-M7 only has 32-bit
@@ -18,12 +17,10 @@ heapless = { workspace = true }
 portable-atomic = { version = "1", default-features = false, features = ["fallback"] }
 # Software floating-point fallbacks for `no_std` MCU builds where `f64::sqrt`
 # / `f64::cbrt` (which live on the inherent impl in `std`) are unavailable.
-# Already in the dep tree transitively via `nurbs` MCU features; declaring it
-# here so the runtime crate can use it unconditionally regardless of which
-# `nurbs` feature is active.
 libm = { version = "0.2", default-features = false }
 
 [dev-dependencies]
+nurbs = { path = "../nurbs" }
 proptest = "1.5"
 static_assertions = "1.1"
 serde = { version = "1", features = ["derive"] }
@@ -38,10 +35,10 @@ loom = "0.7"
 
 [features]
 default = ["host", "motion-module-stepper"]
-host = ["nurbs/host"]
-mcu-h7 = ["nurbs/mcu-h7"]
-mcu-f4 = ["nurbs/mcu-f4"]
-mcu-g0 = ["nurbs/mcu-g0"]
+host = []
+mcu-h7 = []
+mcu-f4 = []
+mcu-g0 = []
 # Marker feature for real Linux-MCU firmware builds (MACH_LINUX without
 # CONFIG_MCU_SIM).  Implies `host` (f64 numeric profile) and additionally
 # signals that the build links the C step/SPI symbols from

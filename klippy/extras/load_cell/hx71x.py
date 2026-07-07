@@ -93,7 +93,6 @@ class HX71xBase(LoadCellSensor):
         self.ffreader.setup_query_command(
             "query_hx71x_status oid=%c",
             oid=self.oid,
-            cq=self.mcu.alloc_command_queue(),
         )
 
     def get_mcu(self) -> MCU:

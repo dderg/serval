@@ -35,6 +35,13 @@ def test_bad_probe_config_rejected_at_boot(sim_world, variant):
     assert "Printer is ready" not in world.klippy_log_text()
 
 
+def _last_probe_z(log_text):
+    probe_lines = [line for line in log_text.splitlines() if " is z=" in line]
+    m = re.search(r"is z=(-?\d+\.?\d*)", probe_lines[-1])
+    assert m, "no probe result line"
+    return float(m.group(1))
+
+
 def _assert_probe_flow(world, variant):
     world.mark_log()
     world.gcode_ok("QUERY_PROBE")
@@ -80,49 +87,50 @@ def _assert_probe_flow(world, variant):
     world.expect_log("probe: open")
 
 
-_TRIP_RESOLUTION_XFAIL = pytest.mark.xfail(
-    reason="G28 trip-time resolution fails under the virtual clock: the "
-    "vtime pacer ties virtual time to the (deprioritized) motion tick "
-    "thread, so under load the MCU clock crawls relative to real time "
-    "while klippy's clocksync still estimates ~50MHz — the trigger clock "
-    "then maps outside the retained motion-history window ('query host "
-    "time precedes retained motion history'). Deterministic repro; needs "
-    "a dedicated clocksync/vtime session.",
+@pytest.mark.parametrize(
+    "variant",
+    ["virtual", "safe-z", "gpio-z"],
 )
-
-
-@pytest.mark.parametrize("variant", ["virtual", "safe-z", "gpio-z"])
-@_TRIP_RESOLUTION_XFAIL
 def test_probe_homing_and_probing(sim_world, variant):
     world = sim_world(_cfg(variant), dual_mcu=False)
     _assert_probe_flow(world, variant)
     assert world.shutdown_line() is None
 
 
-@_TRIP_RESOLUTION_XFAIL
 def test_probe_multi_point_tools(sim_world):
     world = sim_world(_cfg("points"), dual_mcu=False)
     _assert_probe_flow(world, "points")
 
     world.mark_log()
-    world.gcode_ok("SCREWS_TILT_ADJUST", timeout=300)
-    out = world.expect_log("front left")
-    assert "back" in out
+    world.gcode_ok("SCREWS_TILT_CALCULATE", timeout=300)
+    out = world.expect_log("back")
+    assert "front left" in out
 
     world.mark_log()
-    world.gcode_ok("BED_MESH_CALIBRATE", timeout=600)
-    world.expect_log("Mesh Bed Leveling Complete")
-
-    world.mark_log()
-    resp = world.gcode("Z_TILT_ADJUST", timeout=300)
-    assert "per-motor Z adjustment is not yet implemented" in str(
-        resp.get("error", "")
+    resp = world.gcode("BED_MESH_CALIBRATE", timeout=600)
+    assert "activating a mesh is not supported" in str(resp.get("error", "")), (
+        "BED_MESH_CALIBRATE probing should reach mesh activation, which the planner rejects"
     )
-    world.expect_log("Z adjustments needed")
+
+    world.mark_log()
+    world.gcode_ok("FORCE_MOVE STEPPER=z DISTANCE=0.5 VELOCITY=5", timeout=60)
+    world.gcode_ok("PROBE", timeout=90)
+    shifted_z = _last_probe_z(world.expect_log(" is z="))
+    assert abs(shifted_z - 1.5) == pytest.approx(0.5, abs=0.1)
+
+    world.mark_log()
+    world.gcode_ok("Z_TILT_ADJUST", timeout=300)
+    world.expect_log("Making the following Z adjustments")
+
+    world.mark_log()
+    world.gcode_ok("PROBE", timeout=90)
+    rebased_z = _last_probe_z(world.expect_log(" is z="))
+    assert rebased_z == pytest.approx(1.5, abs=0.1), (
+        "probe height must be frame-consistent after the common-mode rebase"
+    )
     assert world.shutdown_line() is None
 
 
-@_TRIP_RESOLUTION_XFAIL
 def test_probe_remote_mcu_trsync(sim_world):
     """Endstop trsync on a different MCU than the steppers."""
     world = sim_world(_cfg("remote"), dual_mcu=True)
@@ -136,6 +144,6 @@ def test_probe_remote_mcu_trsync(sim_world):
     )
     m = re.search(r"trip_to_stop_travel=(-?\d+\.\d+)", out)
     assert m, "no trip_to_stop_travel in homing log"
-    assert 0.0 <= float(m.group(1)) < 0.5
+    assert -0.01 <= float(m.group(1)) < 0.5
     assert world.toolhead_z() == pytest.approx(8.25, abs=0.1)
     assert world.shutdown_line() is None

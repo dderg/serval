@@ -47,6 +47,8 @@ pub enum SnapshotError {
     InvalidMove { index: usize, detail: String },
     #[error("no spatial moves after filtering zero-displacement pairs")]
     NoSpatialMoves,
+    #[error("post-processor chain: {0}")]
+    InvalidChain(String),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -60,6 +62,9 @@ pub struct SnapshotParams {
     pub max_extrude_only_accel: Option<f64>,
     pub max_path_deviation: Option<f64>,
     pub max_accel_deviation: Option<f64>,
+    pub pressure_advance: Option<f64>,
+    pub smooth_zv_hz: Option<f64>,
+    pub e_smooth_zv_hz: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -144,7 +149,9 @@ pub fn pipeline_snapshot(
         max_buffer_moves: SNAPSHOT_MAX_BUFFER_MOVES,
         limits,
     };
-    let (fitted, shaped) = run_pipeline(&moves, config, AxisChainSet::default());
+    let axis_chains =
+        build_axis_chains(&params).map_err(|e| SnapshotError::InvalidChain(e.to_string()))?;
+    let (fitted, shaped) = run_pipeline(&moves, config, axis_chains);
 
     let fitted_segments = fitted
         .iter()
@@ -260,6 +267,56 @@ pub fn extract_raw_path(moves: &[geometry::Move]) -> Vec<(f64, f64)> {
     points
 }
 
+/// The snapshot's optional post-processor chains: smoothing on x/y, and on
+/// the extruder lane an optional smoother ahead of pressure advance — the
+/// same compiled stages the live config builds, so snapshot piece counts and
+/// seams reflect the real wire.
+fn build_axis_chains(
+    params: &SnapshotParams,
+) -> Result<AxisChainSet, trajectory::PostProcessorError> {
+    use trajectory::algos::{LinearPressureAdvance, SmoothZv};
+    use trajectory::chain::PostProcessorInstance;
+    use trajectory::{CompiledChain, PostProcessorError};
+
+    if params.pressure_advance.is_none()
+        && params.smooth_zv_hz.is_none()
+        && params.e_smooth_zv_hz.is_none()
+    {
+        return Ok(AxisChainSet::default());
+    }
+    let spatial_chain = |hz: Option<f64>| -> Result<CompiledChain, PostProcessorError> {
+        match hz {
+            Some(hz) => CompiledChain::compile(&[PostProcessorInstance::new(
+                "smooth_zv",
+                &SmoothZv,
+                vec![hz],
+            )]),
+            None => Ok(CompiledChain::default()),
+        }
+    };
+    let mut e_stages = Vec::new();
+    if let Some(hz) = params.e_smooth_zv_hz {
+        e_stages.push(PostProcessorInstance::new("smooth_zv", &SmoothZv, vec![hz]));
+    }
+    if let Some(k) = params.pressure_advance {
+        e_stages.push(PostProcessorInstance::new(
+            "pressure_advance",
+            &LinearPressureAdvance,
+            vec![k],
+        ));
+    }
+    let e_chain = CompiledChain::compile(&e_stages)?;
+    Ok(AxisChainSet {
+        chains: vec![
+            spatial_chain(params.smooth_zv_hz)?,
+            spatial_chain(params.smooth_zv_hz)?,
+            CompiledChain::default(),
+            e_chain,
+        ],
+        followers: Vec::new(),
+    })
+}
+
 pub fn run_pipeline(
     moves: &[geometry::Move],
     config: StreamConfig,
@@ -344,7 +401,7 @@ pub struct TrajectoryPieces {
 }
 
 pub fn collect_trajectory_pieces(shaped: &[ShapedSegment]) -> TrajectoryPieces {
-    fn collect(dst: &mut Vec<Vec<f64>>, axis: Option<&nurbs::ScalarNurbs<f64>>) {
+    fn collect(dst: &mut Vec<Vec<f64>>, axis: Option<&nurbs::ScalarNurbs>) {
         let Some(axis) = axis else { return };
         for p in extract_bezier_pieces(axis) {
             let scale = p.coeffs.iter().fold(0.0_f64, |m, c| m.max(c.abs()));

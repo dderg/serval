@@ -1,11 +1,8 @@
 #![cfg_attr(not(feature = "host"), no_std)]
 #![allow(unsafe_code)]
 
-mod nurbs_ffi;
 mod runtime_ffi;
 
-#[cfg(feature = "header-nurbs")]
-pub use nurbs_ffi::exports::*;
 #[cfg(feature = "header-runtime")]
 pub use runtime_ffi::exports::*;
 

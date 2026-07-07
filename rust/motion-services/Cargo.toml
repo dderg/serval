@@ -1,0 +1,29 @@
+[package]
+name = "motion-services"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "PyO3-free engine services: servo calls, background endpoint calls, structured logging, position queries, remote triggers."
+license.workspace = true
+
+[dependencies]
+motion-core = { path = "../motion-core" }
+host-rt = { path = "../host-rt" }
+mcu-protocol = { path = "../mcu-protocol" }
+runtime = { path = "../runtime" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "env-filter", "std", "fmt"] }
+tracing-appender = "0.2"
+tracing-log = "0.2"
+time = { version = "0.3", default-features = false, features = ["formatting", "macros", "std"] }
+serde_json = "1"
+arc-swap = "1"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+mcu-transport = { path = "../mcu-transport" }
+log = "0.4"
+
+[lints]
+workspace = true

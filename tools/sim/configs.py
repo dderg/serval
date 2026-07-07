@@ -29,6 +29,132 @@ def _tail(gcode_dir: str) -> str:
     return COMMON_TAIL.format(gcode_dir=gcode_dir)
 
 
+def neptune_print_config(h7_pty: str, gcode_dir: str) -> str:
+    """Neptune 3 Pro bench profile on sim pins: real print limits, arc_fit,
+    and an extruder follower with the bench's pressure-advance + smoothing
+    chain — the setup that reproduces motion-content bugs slicer prints hit."""
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[printer]
+max_velocity: 300
+max_accel: 4000
+max_jerk: 1000000
+max_z_velocity: 25
+max_z_accel: 200
+square_corner_velocity: 8
+
+[arc_fit]
+
+[kinematics]
+type: cartesian
+axis_x: x
+axis_y: y
+axis_z: z
+x_motors: x
+y_motors: y
+z_motors: z
+
+[axis x]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio10
+homing_speed: 10
+
+[axis y]
+position_min: 0
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio11
+homing_speed: 10
+
+[axis z]
+position_min: -5
+position_endstop: 0
+position_max: 280
+endstop_pin: ^gpiochip0/gpio12
+homing_speed: 5
+
+[axis e]
+follows: x, y, z
+motors: extruder
+post_processors: pa, st
+
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.03
+
+[post_processor st]
+type: smooth_triangle
+smooth_time: 0.04
+
+[limit gantry]
+axes: x, y
+max_velocity: 300
+max_accel: 4000
+
+[limit z]
+axes: z
+max_velocity: 25
+max_accel: 200
+
+[motor x]
+drive: stepper
+step_pin: gpiochip0/gpio0
+dir_pin: gpiochip0/gpio1
+enable_pin: !gpiochip0/gpio2
+microsteps: 16
+rotation_distance: 40
+
+[motor y]
+drive: stepper
+step_pin: gpiochip0/gpio3
+dir_pin: gpiochip0/gpio4
+enable_pin: !gpiochip0/gpio5
+microsteps: 16
+rotation_distance: 40
+
+[motor z]
+drive: stepper
+step_pin: gpiochip0/gpio6
+dir_pin: gpiochip0/gpio7
+enable_pin: !gpiochip0/gpio8
+microsteps: 16
+rotation_distance: 8
+
+[motor extruder]
+drive: stepper
+step_pin: gpiochip0/gpio20
+dir_pin: !gpiochip0/gpio21
+enable_pin: !gpiochip0/gpio22
+microsteps: 16
+rotation_distance: 7.73
+
+[extruder]
+axis: e
+nozzle_diameter: 0.400
+filament_diameter: 1.750
+heater_pin: gpiochip0/gpio30
+sensor_type: EPCOS 100K B57560G104F
+sensor_pin: analog0
+min_temp: 0
+max_temp: 250
+min_extrude_temp: 0
+control: pid
+pid_kp: 30.356
+pid_ki: 1.857
+pid_kd: 124.081
+
+[virtual_sdcard]
+path: {gcode_dir}
+
+[force_move]
+enable_force_move: True
+"""
+
+
 def minimal_config(h7_pty: str, gcode_dir: str) -> str:
     return f"""\
 [mcu]
@@ -399,6 +525,10 @@ home_xy_move_speed: 50
 home_method: proximity
 home_method_when_homed: proximity
 home_autocalibrate: never
+# The emulator fires the contact trigger within step/poll latency
+# (~0.01mm) of the true bed crossing, so the hardware-default touch
+# repeatability gate (0.008) is marginally flaky in the sim.
+autocal_tolerance: 0.02
 {bed_mesh_section}
 [post_processor is_xy]
 type: smooth_mzv
@@ -491,6 +621,7 @@ z_hop_speed: 15
 """
 
     remote_section = ""
+    z_min_home_dist = ""
     if variant == "remote":
         if f4_pty is None:
             raise ValueError(
@@ -498,6 +629,11 @@ z_hop_speed: 15
                 " the trsync lives on a different MCU than the steppers"
             )
         probe_section = ""
+        # The trigger is a wall-clock timer, not a position, so the trip
+        # point moves with each approach — the min_home_dist re-approach
+        # check would reject it. This variant exercises the cross-MCU
+        # trsync relay, not the early-trigger guard.
+        z_min_home_dist = "min_home_dist: 0"
         remote_section = f"""
 [mcu bottom]
 serial: {f4_pty}
@@ -592,6 +728,7 @@ post_processors: is_xy
 position_min: -5
 position_max: 250
 homing_speed: 5
+{z_min_home_dist}
 {z_endstop}
 
 [limit gantry]

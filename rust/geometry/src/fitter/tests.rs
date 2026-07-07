@@ -1,7 +1,7 @@
 use super::*;
 use crate::frontend::{MoveContext, line_move};
 use crate::path::lowering::PositionProfile;
-use crate::path::{Arc, Clothoid, CurvatureProfile};
+use crate::path::{Arc, Clothoid, CurvatureProfile, PathSegment, Segment};
 use crate::segment::SourceRange;
 use crate::vec3::dist;
 use std::f64::consts::{PI, SQRT_2};
@@ -421,9 +421,14 @@ fn run_whose_tail_spiral_overclaims_its_neighbor_still_touches_the_run_endpoints
     let tail = mk(5, [124.786, 105.022, 0.0], [125.053, 105.185, 0.0]);
 
     let corner = CornerFitConfig::default();
-    let mut fit = RunFit::fit(&facets, Some(&head), Some(&tail))
-        .unwrap()
-        .expect("run reconstructs");
+    let mut fit = RunFit::fit(
+        &facets,
+        Some(&head),
+        Some(&tail),
+        CornerFitConfig::default(),
+    )
+    .unwrap()
+    .expect("run reconstructs");
     let first = &facets[0];
     let last = facets.last().unwrap();
     let head_blend = fit.blend_head_with_line(&head, first, corner).unwrap();
@@ -481,9 +486,14 @@ fn displaced_spiral_keeps_extrusion_rate_continuous_and_conserves_e() {
     let tail = mk(6, [116.728, 120.147, 0.0], [115.574, 120.674, 0.0], 0.04268);
 
     let corner = CornerFitConfig::default();
-    let mut fit = RunFit::fit(&facets, Some(&head), Some(&tail))
-        .unwrap()
-        .expect("run reconstructs");
+    let mut fit = RunFit::fit(
+        &facets,
+        Some(&head),
+        Some(&tail),
+        CornerFitConfig::default(),
+    )
+    .unwrap()
+    .expect("run reconstructs");
     let first = &facets[0];
     let last = facets.last().unwrap();
     let head_blend = fit.blend_head_with_line(&head, first, corner).unwrap();
@@ -523,9 +533,9 @@ fn displaced_spiral_keeps_extrusion_rate_continuous_and_conserves_e() {
         let r_out = e_rate(&pair[1], 0.0);
         let step = (r_out - r_in).abs() / r_in.abs().max(r_out.abs());
         assert!(
-            step <= corner.extrusion_ramp_rel_tol,
-            "seam {i}: de/ds steps {r_in} -> {r_out} ({:.0}%), planner would rest-anchor",
-            step * 100.0
+            step <= 1e-9,
+            "seam {i}: de/ds steps {r_in} -> {r_out} — every seam of the eased \
+             construct must be exactly rate-continuous",
         );
     }
 
@@ -536,6 +546,87 @@ fn displaced_spiral_keeps_extrusion_rate_continuous_and_conserves_e() {
     assert!(
         (before - after).abs() <= 1e-9,
         "extrusion not conserved: before {before} after {after}"
+    );
+}
+
+#[test]
+fn corner_ramp_beyond_extruder_budget_leaves_the_junction_unblended() {
+    // A 17% extrusion-rate step blends under the default (infinite) gate; an
+    // extruder accel budget below the ramp's marginal `m·v²` demand rejects
+    // the very same ramp in closed form.
+    let a = seg(1, 3000.0, 5.0, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.5);
+    let b = seg(2, 3000.0, 5.0, [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], 0.6);
+
+    let open = CornerFitConfig::default();
+    assert!(matches!(
+        plan_junction_reduced(&a, &b, open, 0.0, 0.0).unwrap(),
+        JunctionPlan::Blend(_)
+    ));
+
+    let tight = CornerFitConfig {
+        ramp_accel_budget_mm_s2: 20.0,
+        ..CornerFitConfig::default()
+    };
+    assert!(matches!(
+        plan_junction_reduced(&a, &b, tight, 0.0, 0.0).unwrap(),
+        JunctionPlan::Unblended(UnblendReason::ExtrusionRampInfeasible)
+    ));
+}
+
+#[test]
+fn disabled_jerk_limiting_never_rejects_ramps_on_its_own() {
+    // `max_jerk = ∞` (jerk limiting off) with a finite extruder budget: the
+    // gate charges only the ramp's marginal `m·v²`, so nothing the G-code
+    // itself commands (like the unbounded `r·j` under PA) may poison it — a
+    // `0·∞ = NaN` there once rejected every ramp and left a no-jerk stream
+    // with no fits at all.
+    let no_jerk = |line_no: u32, start: [f64; 3], end: [f64; 3], e: f64| {
+        let ctx = MoveContext {
+            extruder_axis: E_AXIS,
+            feedrate_mm_s: 100.0,
+            limits: VelocityLimits::try_new(200.0, 3000.0, 5.0, f64::INFINITY).unwrap(),
+            source: SourceRange {
+                start_line: line_no,
+                end_line: line_no,
+            },
+        };
+        line_move(start, end, e, ctx).unwrap()
+    };
+    let a = no_jerk(1, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.5);
+    let b = no_jerk(2, [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], 0.5);
+
+    let config = CornerFitConfig {
+        ramp_accel_budget_mm_s2: 1000.0,
+        ..CornerFitConfig::default()
+    };
+    assert!(matches!(
+        plan_junction_reduced(&a, &b, config, 0.0, 0.0).unwrap(),
+        JunctionPlan::Blend(_)
+    ));
+}
+
+#[test]
+fn arc_ramp_beyond_extruder_budget_dissolves_the_run() {
+    let accel = 10_000.0;
+    let scv = 20.0;
+    let mk = |line_no: u32, a: [f64; 3], b: [f64; 3], e: f64| seg(line_no, accel, scv, a, b, e);
+    let head = mk(1, [120.191, 116.647, 0.0], [119.505, 117.714, 0.0], 0.04268);
+    let facets = vec![
+        mk(2, [119.505, 117.714, 0.0], [118.91, 118.433, 0.0], 0.03139),
+        mk(3, [118.91, 118.433, 0.0], [118.261, 119.065, 0.0], 0.0305),
+        mk(4, [118.261, 119.065, 0.0], [117.549, 119.627, 0.0], 0.0305),
+        mk(5, [117.549, 119.627, 0.0], [116.728, 120.147, 0.0], 0.03268),
+    ];
+    let tail = mk(6, [116.728, 120.147, 0.0], [115.574, 120.674, 0.0], 0.04268);
+
+    let tight = CornerFitConfig {
+        ramp_accel_budget_mm_s2: 0.01,
+        ..CornerFitConfig::default()
+    };
+    let fit = RunFit::fit(&facets, Some(&head), Some(&tail), tight).unwrap();
+    assert!(
+        fit.is_none(),
+        "an arc ramp the extruder cannot follow must dissolve the run"
     );
 }
 

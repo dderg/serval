@@ -1,4 +1,3 @@
-use crate::Float;
 use core::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,15 +30,15 @@ impl fmt::Display for ConstructError {
 impl core::error::Error for ConstructError {}
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum ArcLengthError<T: Float> {
+pub enum ArcLengthError {
     ToleranceNotMet {
-        achieved_residual: T,
+        achieved_residual: f64,
         samples_used: usize,
     },
     DegenerateCurve,
 }
 
-impl<T: Float> fmt::Display for ArcLengthError<T> {
+impl fmt::Display for ArcLengthError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ToleranceNotMet {
@@ -57,13 +56,12 @@ impl<T: Float> fmt::Display for ArcLengthError<T> {
     }
 }
 
-impl<T: Float> core::error::Error for ArcLengthError<T> {}
+impl core::error::Error for ArcLengthError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlgebraError {
     DegreeExceeded { result_degree: u8, max: u8 },
     KnotMismatch,
-    NotImplemented(&'static str),
     SupportMismatch,
 }
 
@@ -74,7 +72,6 @@ impl fmt::Display for AlgebraError {
                 write!(f, "result degree {result_degree} exceeds maximum {max}")
             }
             Self::KnotMismatch => write!(f, "operands have incompatible knot vectors"),
-            Self::NotImplemented(s) => write!(f, "algorithm not implemented: {s}"),
             Self::SupportMismatch => write!(f, "Bezier pieces have mismatched support"),
         }
     }
@@ -119,14 +116,14 @@ impl fmt::Display for KnotError {
 impl core::error::Error for KnotError {}
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum NurbsError<T: Float> {
+pub enum NurbsError {
     Construct(ConstructError),
-    ArcLength(ArcLengthError<T>),
+    ArcLength(ArcLengthError),
     Algebra(AlgebraError),
     Knot(KnotError),
 }
 
-impl<T: Float> fmt::Display for NurbsError<T> {
+impl fmt::Display for NurbsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Construct(e) => write!(f, "{e}"),
@@ -137,24 +134,24 @@ impl<T: Float> fmt::Display for NurbsError<T> {
     }
 }
 
-impl<T: Float> core::error::Error for NurbsError<T> {}
+impl core::error::Error for NurbsError {}
 
-impl<T: Float> From<ConstructError> for NurbsError<T> {
+impl From<ConstructError> for NurbsError {
     fn from(e: ConstructError) -> Self {
         Self::Construct(e)
     }
 }
-impl<T: Float> From<ArcLengthError<T>> for NurbsError<T> {
-    fn from(e: ArcLengthError<T>) -> Self {
+impl From<ArcLengthError> for NurbsError {
+    fn from(e: ArcLengthError) -> Self {
         Self::ArcLength(e)
     }
 }
-impl<T: Float> From<AlgebraError> for NurbsError<T> {
+impl From<AlgebraError> for NurbsError {
     fn from(e: AlgebraError) -> Self {
         Self::Algebra(e)
     }
 }
-impl<T: Float> From<KnotError> for NurbsError<T> {
+impl From<KnotError> for NurbsError {
     fn from(e: KnotError) -> Self {
         Self::Knot(e)
     }

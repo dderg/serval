@@ -77,6 +77,9 @@ class ZAdjustHelper:
                 continue
             force_move.manual_move(stepper, delta, speed, accel)
         toolhead.wait_moves()
+        curpos = toolhead.get_position()
+        curpos[2] -= reference
+        toolhead.set_position(curpos)
 
 
 class ZAdjustStatus:

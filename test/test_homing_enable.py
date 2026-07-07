@@ -6,8 +6,9 @@ class FakeEnableLine:
     def __init__(self):
         self.enabled_at = []
 
-    def motor_enable(self, print_time):
+    def energize(self, print_time):
         self.enabled_at.append(print_time)
+        return None
 
 
 class FakeToolhead:

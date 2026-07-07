@@ -28,9 +28,8 @@ class ControlPinHelper:
             " max_duration=%d"
             % (self._oid, self._pin, self._start_value, self._start_value, 0)
         )
-        cmd_queue = self._mcu.alloc_command_queue()
         self._set_cmd = self._mcu.lookup_command(
-            "queue_digital_out oid=%c clock=%u on_ticks=%u", cq=cmd_queue
+            "queue_digital_out oid=%c clock=%u on_ticks=%u"
         )
 
     def write_bits(self, start_time, bit_stream):

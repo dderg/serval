@@ -158,7 +158,6 @@ class ADS131MxBase(LoadCellSensor):
         self.query_ads131m0x_cmd = None
 
     def _build_config(self):
-        cq = self.spi.get_command_queue()
         self.mcu.add_config_cmd(
             f"config_ads131m0x oid={self.oid} spi_oid={self.spi.get_oid()} "
             f"data_ready_pin={self.data_ready_pin} "
@@ -169,13 +168,13 @@ class ADS131MxBase(LoadCellSensor):
             f"query_ads131m0x oid={self.oid} rest_ticks=0", on_restart=True
         )
         self.query_ads131m0x_cmd = self.mcu.lookup_command(
-            "query_ads131m0x oid=%c rest_ticks=%u", cq=cq
+            "query_ads131m0x oid=%c rest_ticks=%u"
         )
         self.attach_probe_cmd = self.mcu.lookup_command(
             "ads131m0x_attach_load_cell_probe oid=%c load_cell_probe_oid=%c"
         )
         self.ffreader.setup_query_command(
-            "query_ads131m0x_status oid=%c", oid=self.oid, cq=cq
+            "query_ads131m0x_status oid=%c", oid=self.oid
         )
 
     def _read_channels(self, config: ConfigWrapper):

@@ -124,6 +124,17 @@ host_tick_main(void *arg)
     struct timespec next;
     clock_gettime(CLOCK_MONOTONIC, &next);
 
+#if CONFIG_MCU_SIM
+    int (*real_cgt)(clockid_t, struct timespec *)
+        = dlsym(RTLD_NEXT, "clock_gettime");
+    struct timespec real_prev, vt_prev;
+    real_cgt(CLOCK_MONOTONIC, &real_prev);
+    clock_gettime(CLOCK_MONOTONIC, &vt_prev);
+    uint64_t ticks_done = 0, ticks_prev = 0;
+    uint64_t max_tick_gap_real_ns = 0;
+    struct timespec real_last_tick = real_prev;
+#endif
+
     while (1) {
         next.tv_nsec += HOST_TICK_NS;
         while (next.tv_nsec >= 1000000000L) {
@@ -142,6 +153,39 @@ host_tick_main(void *arg)
         clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
 #endif
 
+#if CONFIG_MCU_SIM
+        ticks_done++;
+        struct timespec real_now_ts;
+        real_cgt(CLOCK_MONOTONIC, &real_now_ts);
+        uint64_t gap = (uint64_t)(real_now_ts.tv_sec - real_last_tick.tv_sec)
+                           * 1000000000ULL
+                       + (uint64_t)(real_now_ts.tv_nsec
+                                    - real_last_tick.tv_nsec);
+        real_last_tick = real_now_ts;
+        if (gap > max_tick_gap_real_ns)
+            max_tick_gap_real_ns = gap;
+        if (ticks_done - ticks_prev >= HOST_TICK_HZ) {
+            struct timespec vt_now_ts;
+            clock_gettime(CLOCK_MONOTONIC, &vt_now_ts);
+            uint64_t real_el =
+                (uint64_t)(real_now_ts.tv_sec - real_prev.tv_sec) * 1000000000ULL
+                + (uint64_t)(real_now_ts.tv_nsec - real_prev.tv_nsec);
+            uint64_t vt_el =
+                (uint64_t)(vt_now_ts.tv_sec - vt_prev.tv_sec) * 1000000000ULL
+                + (uint64_t)(vt_now_ts.tv_nsec - vt_prev.tv_nsec);
+            fprintf(stderr,
+                    "[tick-rate] ticks=%llu vt_ms=%llu real_ms=%llu"
+                    " max_gap_real_us=%llu\n",
+                    (unsigned long long)(ticks_done - ticks_prev),
+                    (unsigned long long)(vt_el / 1000000),
+                    (unsigned long long)(real_el / 1000000),
+                    (unsigned long long)(max_tick_gap_real_ns / 1000));
+            ticks_prev = ticks_done;
+            real_prev = real_now_ts;
+            vt_prev = vt_now_ts;
+            max_tick_gap_real_ns = 0;
+        }
+#endif
         if (!atomic_load_explicit(&host_tick_enabled, memory_order_acquire))
             continue;
         if (!runtime_handle)

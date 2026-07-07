@@ -42,7 +42,7 @@ fn submit_then_nak_in_same_tick_keeps_state_consistent() {
     h.tick();
 
     assert_eq!(h.unacked_depth(), 2);
-    assert_eq!(h.reactor.last_ack_seq, 2);
+    assert_eq!(h.reactor.seq_window.last_ack_seq, 2);
 
     let frame_size = 5 + 1;
     let expected_delta = frame_size + (1 + 2 * frame_size);

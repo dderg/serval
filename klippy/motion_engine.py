@@ -223,9 +223,13 @@ class MotionEngineWrapper:
         )
 
     def set_torque(self, mcu_handle, value, print_time):
-        self._wait_endpoint_call(
-            self._engine.set_torque_start(mcu_handle, bool(value), print_time)
+        self.set_torque_deferred(mcu_handle, value, print_time)()
+
+    def set_torque_deferred(self, mcu_handle, value, print_time):
+        call_id = self._engine.set_torque_start(
+            mcu_handle, bool(value), print_time
         )
+        return lambda: self._wait_endpoint_call(call_id)
 
     def start_servo_capture(self, mcu_handle, path, started_utc, drives):
         return self._engine.start_servo_capture(

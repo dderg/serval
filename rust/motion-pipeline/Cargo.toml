@@ -14,7 +14,7 @@ name = "motion_pipeline"
 libm = { version = "0.2", default-features = false }
 geometry = { path = "../geometry" }
 trajectory = { path = "../trajectory" }
-nurbs = { path = "../nurbs", features = ["host"] }
+nurbs = { path = "../nurbs" }
 crossbeam-channel = "0.5"
 thiserror = { workspace = true }
 tracing = "0.1"

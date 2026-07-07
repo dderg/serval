@@ -4,32 +4,16 @@
 CROSS_PREFIX=arm-none-eabi-
 
 dirs-y += src/stm32 src/generic lib/fast-hash
-dirs-$(CONFIG_MACH_STM32F0) += lib/stm32f0
-dirs-$(CONFIG_MACH_STM32F1) += lib/stm32f1
-dirs-$(CONFIG_MACH_N32G45x) += lib/n32g45x
-dirs-$(CONFIG_MACH_STM32F2) += lib/stm32f2
 dirs-$(CONFIG_MACH_STM32F4) += lib/stm32f4
-dirs-$(CONFIG_MACH_STM32F7) += lib/stm32f7
 dirs-$(CONFIG_MACH_STM32G0) += lib/stm32g0
-dirs-$(CONFIG_MACH_STM32G4) += lib/stm32g4
 dirs-$(CONFIG_MACH_STM32H7) += lib/stm32h7
-dirs-$(CONFIG_MACH_STM32L4) += lib/stm32l4
 
 MCU := $(shell echo $(CONFIG_MCU))
 MCU_UPPER := $(shell echo $(CONFIG_MCU) | tr a-z A-Z | tr X x)
 
-CFLAGS-$(CONFIG_MACH_STM32F0) += -mcpu=cortex-m0 -Ilib/stm32f0/include
-CFLAGS-$(CONFIG_MACH_STM32F103) += -mcpu=cortex-m3
-CFLAGS-$(CONFIG_MACH_N32G45x) += -mcpu=cortex-m4 -Ilib/n32g45x/include
-CFLAGS-$(CONFIG_MACH_STM32F1) += -Ilib/stm32f1/include
-CFLAGS-$(CONFIG_MACH_STM32F2) += -mcpu=cortex-m3 -Ilib/stm32f2/include
 CFLAGS-$(CONFIG_MACH_STM32F4) += -mcpu=cortex-m4 -Ilib/stm32f4/include
-CFLAGS-$(CONFIG_MACH_STM32F7) += -mcpu=cortex-m7 -Ilib/stm32f7/include
 CFLAGS-$(CONFIG_MACH_STM32G0) += -mcpu=cortex-m0plus -Ilib/stm32g0/include
-CFLAGS-$(CONFIG_MACH_STM32G4) += -mcpu=cortex-m4 -Ilib/stm32g4/include
 CFLAGS-$(CONFIG_MACH_STM32H7) += -mcpu=cortex-m7 -Ilib/stm32h7/include
-CFLAGS-$(CONFIG_MACH_STM32L4) += -mcpu=cortex-m4 -Ilib/stm32l4/include
-CFLAGS-$(CONFIG_MACH_AT32F403) = -mcpu=cortex-m4 -Ilib/stm32f1/include
 CFLAGS += $(CFLAGS-y) -D$(MCU_UPPER) -mthumb -Ilib/cmsis-core -Ilib/fast-hash
 
 CFLAGS += -Irust/c-api/include
@@ -57,7 +41,8 @@ $(OUT)klipper.elf: $(MCU_RUST_LIB)
 src-y += stm32/watchdog.c stm32/clockline.c stm32/dfu_reboot.c
 src-y += generic/crc16_ccitt.c
 src-y += generic/armcm_boot.c generic/armcm_irq.c generic/armcm_reset.c
-src-y += generic/fault_handler.c
+src-y += generic/fault_capture.c generic/diag_counters.c generic/diag_ring.c \
+    generic/diag_boot_report.c generic/diag_emit.c
 src-y += generic/mpu_protect.c
 
 # Kalico runtime glue. Per-family motion-timer backend selected by
@@ -74,31 +59,19 @@ src-y += stm32/phase_stepping_spi.c
 # Sim-only: software CYCCNT under CONFIG_MCU_SIM. Per Step-6 spec §3.1.
 src-$(CONFIG_MCU_SIM) += stm32/mcu_sim_clock.c
 
-src-$(CONFIG_MACH_STM32F0) += stm32/stm32f0.c ../lib/stm32f0/system_stm32f0xx.c
-src-$(CONFIG_MACH_STM32F1) += stm32/stm32f1.c ../lib/stm32f1/system_stm32f1xx.c
-src-$(CONFIG_MACH_STM32F2) += stm32/stm32f4.c ../lib/stm32f2/system_stm32f2xx.c
 src-$(CONFIG_MACH_STM32F4) += stm32/stm32f4.c ../lib/stm32f4/system_stm32f4xx.c
-src-$(CONFIG_MACH_STM32F7) += stm32/stm32f7.c ../lib/stm32f7/system_stm32f7xx.c
 src-$(CONFIG_MACH_STM32G0) += stm32/stm32g0.c
-src-$(CONFIG_MACH_STM32G4) += stm32/stm32g4.c ../lib/stm32g4/system_stm32g4xx.c
 src-$(CONFIG_MACH_STM32H7) += stm32/stm32h7.c ../lib/stm32h7/system_stm32h7xx.c
-src-$(CONFIG_MACH_STM32L4) += stm32/stm32l4.c ../lib/stm32l4/system_stm32l4xx.c
 
 timer-src-y := generic/armcm_timer.c
-timer-src-$(CONFIG_MACH_STM32F0) := generic/timer_irq.c stm32/stm32f0_timer.c
 timer-src-$(CONFIG_MACH_STM32G0) := generic/timer_irq.c stm32/stm32f0_timer.c
 gpio-src-y := stm32/gpio.c stm32/gpioperiph.c
-gpio-src-$(CONFIG_MACH_STM32F1) := stm32/gpio.c
 gpio-src-$(CONFIG_MACH_STM32H7) := stm32/stm32h7_gpio.c stm32/gpioperiph.c
 src-y += $(timer-src-y) $(gpio-src-y)
 
 adc-src-y := stm32/adc.c
-adc-src-$(CONFIG_MACH_STM32F0) := stm32/stm32f0_adc.c
-adc-src-$(CONFIG_MACH_N32G45x) := ../lib/n32g45x/n32g45x_adc.c stm32/n32g45x_adc.c
 adc-src-$(CONFIG_MACH_STM32G0) := stm32/stm32f0_adc.c
-adc-src-$(CONFIG_MACH_STM32G4) := stm32/stm32h7_adc.c
 adc-src-$(CONFIG_MACH_STM32H7) := stm32/stm32h7_adc.c
-adc-src-$(CONFIG_MACH_STM32L4) := stm32/stm32h7_adc.c
 src-$(CONFIG_WANT_ADC) += $(adc-src-y)
 
 spi-src-y := stm32/spi.c
@@ -106,15 +79,11 @@ spi-src-$(CONFIG_MACH_STM32H7) := stm32/stm32h7_spi.c
 src-$(CONFIG_WANT_GPIO_SPI) += $(spi-src-y)
 
 i2c-src-y := stm32/stm32f0_i2c.c
-i2c-src-$(CONFIG_MACH_STM32F1) := stm32/i2c.c
-i2c-src-$(CONFIG_MACH_STM32F2) := stm32/i2c.c
 i2c-src-$(CONFIG_MACH_STM32F4) := stm32/i2c.c
 src-$(CONFIG_WANT_GPIO_I2C) += $(i2c-src-y)
 
 serial-src-y := stm32/serial.c
-serial-src-$(CONFIG_MACH_STM32F0) := stm32/stm32f0_serial.c
 serial-src-$(CONFIG_MACH_STM32G0) := stm32/stm32f0_serial.c
-serial-src-$(CONFIG_MACH_STM32G4) := stm32/stm32f0_serial.c
 serial-src-$(CONFIG_MACH_STM32H7) := stm32/stm32f0_serial.c
 src-$(CONFIG_SERIAL) += $(serial-src-y) generic/serial_irq.c
 

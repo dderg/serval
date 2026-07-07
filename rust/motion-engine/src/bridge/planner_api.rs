@@ -1,27 +1,25 @@
 use super::{
-    Arc, DRAIN_TIMEOUT, Duration, ETHERCAT_CLOCK_FREQ_HZ, FieldValue, HashMap, HashSet, Instant,
-    McuAxisConfig, McuCaps, McuHostIo, McuSerialConn, Ordering, PyMotionEngine, PyResult,
-    PyRuntimeError, PyValueError, Python, SPATIAL_AXES, STREAM_INTEGRATION_TOL,
-    STREAM_MAX_BUFFER_MOVES, abort_after_tracing_appender_drains, arm_endpoint_death_watchdog,
-    axis_ring_depth, build_mcu_configs, classify, collect_motor_positions_inner, config,
-    dispatch_endstop_trip, mcu_handle_from_raw, planner_err, pymethods,
-    query_ethercat_runtime_caps, report_ethercat_endpoint_death, require_positive,
-    resolve_motion_caps,
+    Arc, DRAIN_TIMEOUT, FieldValue, HashSet, Ordering, PyMotionEngine, PyResult, PyRuntimeError,
+    PyValueError, Python, SPATIAL_AXES, classify, config, planner_err, pymethods, require_positive,
 };
+use crate::lock_ext::LockExt;
 
-#[allow(clippy::too_many_arguments)]
-fn build_planner_config(
+fn unsupported_curve(py: Python<'_>, message: &'static str) -> PyResult<()> {
+    py.detach(|| Err(PyRuntimeError::new_err(message)))
+}
+
+fn read_planner_config_sections(
     axes: Vec<(String, Vec<String>, Vec<String>, Vec<String>)>,
     limits: Vec<(String, Vec<String>, Option<f64>, Option<f64>, Option<f64>)>,
     post_processors: Vec<(String, String, Vec<(String, f64)>)>,
     kinematics_axes: &[String],
     cartesian_limits: (f64, f64, f64, f64, f64, f64),
-    arc_fit: Option<u32>,
-    max_extrude_only_velocity: Option<f64>,
-    max_extrude_only_accel: Option<f64>,
-    fit_tolerance_mm: Option<f64>,
-    fit_tolerance_accel_mm_s2: Option<f64>,
-) -> PyResult<config::PlannerConfig> {
+) -> PyResult<(
+    config::AxisRegistry,
+    config::PostProcessorSet,
+    Vec<config::LimitSection>,
+    config::CartesianLimits,
+)> {
     let axis_registry = config::AxisRegistry::try_new(
         axes.into_iter()
             .map(
@@ -77,6 +75,15 @@ fn build_planner_config(
     };
     cartesian.validate().map_err(PyValueError::new_err)?;
 
+    Ok((axis_registry, post_processor_set, limit_sections, cartesian))
+}
+
+fn validate_extrude_and_fit_params(
+    max_extrude_only_velocity: Option<f64>,
+    max_extrude_only_accel: Option<f64>,
+    fit_tolerance_mm: Option<f64>,
+    fit_tolerance_accel_mm_s2: Option<f64>,
+) -> PyResult<()> {
     for (label, value) in [
         ("max_extrude_only_velocity", max_extrude_only_velocity),
         ("max_extrude_only_accel", max_extrude_only_accel),
@@ -106,20 +113,38 @@ fn build_planner_config(
         }
     }
 
+    Ok(())
+}
+
+struct PlannerTuning {
+    arc_fit: Option<u32>,
+    max_extrude_only_velocity: Option<f64>,
+    max_extrude_only_accel: Option<f64>,
+    fit_tolerance_mm: Option<f64>,
+    fit_tolerance_accel_mm_s2: Option<f64>,
+}
+
+fn apply_planner_config(
+    axis_registry: config::AxisRegistry,
+    limit_sections: Vec<config::LimitSection>,
+    cartesian: config::CartesianLimits,
+    post_processor_set: config::PostProcessorSet,
+    tuning: &PlannerTuning,
+) -> PyResult<config::PlannerConfig> {
     let mut cfg = config::PlannerConfig::default();
     cfg.axis_registry = axis_registry;
     cfg.limit_sections = limit_sections;
     cfg.cartesian = cartesian;
     cfg.post_processors = post_processor_set;
-    cfg.max_extrude_only_velocity = max_extrude_only_velocity;
-    cfg.max_extrude_only_accel = max_extrude_only_accel;
-    if let Some(v) = fit_tolerance_mm {
+    cfg.max_extrude_only_velocity = tuning.max_extrude_only_velocity;
+    cfg.max_extrude_only_accel = tuning.max_extrude_only_accel;
+    if let Some(v) = tuning.fit_tolerance_mm {
         cfg.fit_tolerance_mm = v;
     }
-    if let Some(v) = fit_tolerance_accel_mm_s2 {
+    if let Some(v) = tuning.fit_tolerance_accel_mm_s2 {
         cfg.fit_tolerance_accel_mm_s2 = v;
     }
-    cfg.chain = match arc_fit {
+    cfg.chain = match tuning.arc_fit {
         Some(min_run_facets) => {
             if min_run_facets < 3 {
                 return Err(PyValueError::new_err(
@@ -132,6 +157,39 @@ fn build_planner_config(
     };
 
     Ok(cfg)
+}
+
+fn build_planner_config(
+    axes: Vec<(String, Vec<String>, Vec<String>, Vec<String>)>,
+    limits: Vec<(String, Vec<String>, Option<f64>, Option<f64>, Option<f64>)>,
+    post_processors: Vec<(String, String, Vec<(String, f64)>)>,
+    kinematics_axes: &[String],
+    cartesian_limits: (f64, f64, f64, f64, f64, f64),
+    tuning: &PlannerTuning,
+) -> PyResult<config::PlannerConfig> {
+    let (axis_registry, post_processor_set, limit_sections, cartesian) =
+        read_planner_config_sections(
+            axes,
+            limits,
+            post_processors,
+            kinematics_axes,
+            cartesian_limits,
+        )?;
+
+    validate_extrude_and_fit_params(
+        tuning.max_extrude_only_velocity,
+        tuning.max_extrude_only_accel,
+        tuning.fit_tolerance_mm,
+        tuning.fit_tolerance_accel_mm_s2,
+    )?;
+
+    apply_planner_config(
+        axis_registry,
+        limit_sections,
+        cartesian,
+        post_processor_set,
+        tuning,
+    )
 }
 
 #[pymethods]
@@ -154,7 +212,7 @@ impl PyMotionEngine {
         }
         let (tx, rx) = crossbeam_channel::bounded(1);
         {
-            let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+            let guard = self.planner.lock_ok();
             let planner = guard.as_ref().ok_or_else(|| {
                 PyRuntimeError::new_err("planner not initialized — call init_planner first")
             })?;
@@ -204,12 +262,7 @@ impl PyMotionEngine {
         fit_tolerance_mm: Option<f64>,
         fit_tolerance_accel_mm_s2: Option<f64>,
     ) -> PyResult<()> {
-        if self
-            .planner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .is_some()
-        {
+        if self.planner.lock_ok().is_some() {
             return Err(PyRuntimeError::new_err("planner already initialized"));
         }
 
@@ -219,16 +272,15 @@ impl PyMotionEngine {
             post_processors,
             &kinematics_axes,
             cartesian_limits,
-            arc_fit,
-            max_extrude_only_velocity,
-            max_extrude_only_accel,
-            fit_tolerance_mm,
-            fit_tolerance_accel_mm_s2,
+            &PlannerTuning {
+                arc_fit,
+                max_extrude_only_velocity,
+                max_extrude_only_accel,
+                fit_tolerance_mm,
+                fit_tolerance_accel_mm_s2,
+            },
         )?;
-        *self
-            .planner_config
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = cfg.clone();
+        *self.planner_config.lock_ok() = cfg.clone();
 
         let (ec_conns, mcu_configs) = self.resolve_mcu_topology(&mcus)?;
 
@@ -267,7 +319,7 @@ impl PyMotionEngine {
         feedrate: f64,
     ) -> PyResult<bool> {
         py.detach(|| -> PyResult<bool> {
-            tracing::info!(
+            tracing::trace!(
                 subsystem = "motion",
                 event = "submit_move_enter",
                 dx,
@@ -287,12 +339,9 @@ impl PyMotionEngine {
                     ));
                 }
             };
-            let pos = *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
+            let pos = *self.commanded_pos.lock_ok();
             let (max_v, max_a, scv, jerk) = {
-                let cfg = self
-                    .planner_config
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
+                let cfg = self.planner_config.lock_ok();
                 let (mut v, mut a) = cfg.cartesian.for_move(dx, dy, dz);
                 if let Some(rv) = cfg.runtime_caps.velocity {
                     v = v.min(rv);
@@ -312,9 +361,7 @@ impl PyMotionEngine {
             let line_no = self.move_seq.fetch_add(1, Ordering::Relaxed) as u32;
             let m = classify::build_move(
                 pos,
-                dx,
-                dy,
-                dz,
+                [dx, dy, dz],
                 extruder_axis,
                 e_delta,
                 limits,
@@ -324,7 +371,7 @@ impl PyMotionEngine {
             .map_err(|e| PyRuntimeError::new_err(format!("{e:?}")))?;
 
             {
-                let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+                let guard = self.planner.lock_ok();
                 let planner = guard.as_ref().ok_or_else(|| {
                     PyRuntimeError::new_err("planner not initialized — call init_planner first")
                 })?;
@@ -333,7 +380,7 @@ impl PyMotionEngine {
                     Err(crate::worker::StreamWorkerError::ChannelFull) => return Ok(false),
                     Err(e) => return Err(planner_err(e)),
                 }
-                tracing::info!(
+                tracing::trace!(
                     subsystem = "motion",
                     event = "intake_submit",
                     line_no,
@@ -342,11 +389,11 @@ impl PyMotionEngine {
                 );
             }
 
-            let mut pos = self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
+            let mut pos = self.commanded_pos.lock_ok();
             pos[0] += dx;
             pos[1] += dy;
             pos[2] += dz;
-            *self.last_g5_pq.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            *self.last_g5_pq.lock_ok() = None;
             Ok(true)
         })
     }
@@ -379,13 +426,12 @@ impl PyMotionEngine {
             feedrate,
             "engine.submit_bezier enter"
         );
-        py.detach(|| -> PyResult<()> {
-            Err(PyRuntimeError::new_err(
-                "submit_bezier (G5 cubic) is not yet supported by the new geometry pipeline \
-                 — V1 streams G0/G1 line moves (and reconstructs arcs from facets); curve \
-                 faceting is a follow-up. Slice without G5.",
-            ))
-        })
+        unsupported_curve(
+            py,
+            "submit_bezier (G5 cubic) is not yet supported by the new geometry pipeline \
+             — V1 streams G0/G1 line moves (and reconstructs arcs from facets); curve \
+             faceting is a follow-up. Slice without G5.",
+        )
     }
     #[pyo3(signature = (i, j, dx, dy, dz, de, feedrate))]
     fn submit_quadratic(
@@ -411,31 +457,44 @@ impl PyMotionEngine {
             feedrate,
             "engine.submit_quadratic enter"
         );
-        py.detach(|| -> PyResult<()> {
-            Err(PyRuntimeError::new_err(
-                "submit_quadratic (G2/G3 arc as quadratic) is not yet supported by the new \
-                 geometry pipeline — V1 streams G0/G1 line moves; curve faceting is a \
-                 follow-up. Decompose arcs into line segments upstream.",
-            ))
-        })
+        unsupported_curve(
+            py,
+            "submit_quadratic (G2/G3 arc as quadratic) is not yet supported by the new \
+             geometry pipeline — V1 streams G0/G1 line moves; curve faceting is a \
+             follow-up. Decompose arcs into line segments upstream.",
+        )
     }
     fn submit_dwell(&self, duration_s: f64) -> PyResult<()> {
-        let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self.planner.lock_ok();
         let planner = guard.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("planner not initialized — call init_planner first")
         })?;
         planner.dwell(duration_s).map_err(planner_err)?;
-        *self.last_g5_pq.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.last_g5_pq.lock_ok() = None;
         Ok(())
     }
     #[pyo3(signature = (x, y, z, host_now))]
     fn set_position(&self, py: Python<'_>, x: f64, y: f64, z: f64, host_now: f64) -> PyResult<()> {
         {
-            let mut pos = self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
+            let mut pos = self.commanded_pos.lock_ok();
             *pos = [x, y, z];
         }
-        *self.last_g5_pq.lock().unwrap_or_else(|p| p.into_inner()) = None;
-        let planner_guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+        *self.last_g5_pq.lock_ok() = None;
+
+        self.reseed_mcus_after_position_set(py, x, y, z)?;
+        self.rebase_motion_history_after_position_set(host_now, x, y, z);
+
+        Ok(())
+    }
+
+    fn reseed_mcus_after_position_set(
+        &self,
+        py: Python<'_>,
+        x: f64,
+        y: f64,
+        z: f64,
+    ) -> PyResult<()> {
+        let planner_guard = self.planner.lock_ok();
         if let Some(planner) = planner_guard.as_ref() {
             py.detach(|| planner.flush()).map_err(planner_err)?;
             {
@@ -449,11 +508,8 @@ impl PyMotionEngine {
                 .map_err(planner_err)?;
 
             let sends = {
-                let configs = self
-                    .mcu_axis_configs
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-                let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+                let configs = self.mcu_axis_configs.lock_ok();
+                let mcus = self.mcus.lock_ok();
                 let ethercat_mcu_ids: HashSet<u32> = configs
                     .iter()
                     .filter(|c| {
@@ -464,7 +520,7 @@ impl PyMotionEngine {
                     .collect();
                 crate::mcu_config::build_serial_seed_sends(&configs, &ethercat_mcu_ids, x, y, z)
             };
-            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let mcus = self.mcus.lock_ok();
             for s in sends {
                 let conn = mcus.get(&s.mcu_id).unwrap_or_else(|| {
                     panic!(
@@ -496,86 +552,68 @@ impl PyMotionEngine {
                 })?;
             }
         }
-
-        {
-            let configs: Vec<crate::mcu_config::McuAxisConfig> = self
-                .mcu_axis_configs
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .clone();
-            let positions = [x, y, z];
-            let rebases: Vec<(crate::types::AxisKey, f64)> = configs
-                .iter()
-                .flat_map(|cfg| {
-                    cfg.axes
-                        .iter()
-                        .filter(|&&a| a < SPATIAL_AXES)
-                        .map(move |&axis| {
-                            (
-                                crate::types::AxisKey {
-                                    mcu_id: cfg.mcu_id,
-                                    axis: axis as u8,
-                                },
-                                positions[axis],
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-            let follower_keys: Vec<crate::types::AxisKey> = configs
-                .iter()
-                .flat_map(|cfg| {
-                    cfg.axes
-                        .iter()
-                        .filter(|&&a| a >= 3)
-                        .map(move |&axis| crate::types::AxisKey {
-                            mcu_id: cfg.mcu_id,
-                            axis: axis as u8,
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-            {
-                let mut store = self
-                    .motion_history
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-                for (key, pos) in rebases {
-                    store.rebase_axis(key, host_now, pos);
-                }
-                for key in follower_keys {
-                    let held_position = store.final_position(key).unwrap_or(0.0);
-                    store.rebase_axis(key, host_now, held_position);
-                }
-            }
-        }
-
         Ok(())
     }
+
+    fn rebase_motion_history_after_position_set(&self, host_now: f64, x: f64, y: f64, z: f64) {
+        let configs: Vec<crate::mcu_config::McuAxisConfig> =
+            self.mcu_axis_configs.lock_ok().clone();
+        let positions = [x, y, z];
+        let rebases: Vec<(crate::types::AxisKey, f64)> = configs
+            .iter()
+            .flat_map(|cfg| {
+                cfg.axes
+                    .iter()
+                    .filter(|&&a| a < SPATIAL_AXES)
+                    .map(move |&axis| {
+                        (
+                            crate::types::AxisKey {
+                                mcu_id: cfg.mcu_id,
+                                axis: axis as u8,
+                            },
+                            positions[axis],
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let follower_keys: Vec<crate::types::AxisKey> = configs
+            .iter()
+            .flat_map(|cfg| {
+                cfg.axes
+                    .iter()
+                    .filter(|&&a| a >= 3)
+                    .map(move |&axis| crate::types::AxisKey {
+                        mcu_id: cfg.mcu_id,
+                        axis: axis as u8,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        {
+            let mut store = self.motion_history.lock_ok();
+            for (key, pos) in rebases {
+                store.rebase_axis(key, host_now, pos);
+            }
+            for key in follower_keys {
+                let held_position = store.final_position(key).unwrap_or(0.0);
+                store.rebase_axis(key, host_now, held_position);
+            }
+        }
+    }
     fn effective_limits(&self) -> (f64, f64, f64) {
-        self.planner_config
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .effective_limits()
+        self.planner_config.lock_ok().effective_limits()
     }
     #[pyo3(signature = (velocity))]
     fn set_velocity_cap(&self, velocity: Option<f64>) -> PyResult<()> {
         require_positive(velocity, "velocity")?;
-        self.planner_config
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .runtime_caps
-            .velocity = velocity;
+        self.planner_config.lock_ok().runtime_caps.velocity = velocity;
         Ok(())
     }
     #[pyo3(signature = (accel))]
     fn set_accel_cap(&self, accel: Option<f64>) -> PyResult<()> {
         require_positive(accel, "accel")?;
-        self.planner_config
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .runtime_caps
-            .accel = accel;
+        self.planner_config.lock_ok().runtime_caps.accel = accel;
         Ok(())
     }
     #[pyo3(signature = (square_corner_velocity))]
@@ -587,20 +625,27 @@ impl PyMotionEngine {
                 ));
             }
         }
-        self.planner_config
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .runtime_square_corner_velocity = square_corner_velocity;
+        self.planner_config.lock_ok().runtime_square_corner_velocity = square_corner_velocity;
         Ok(())
     }
-    /// Activate a bed mesh: build the spline surface, normalize it to zero at
-    /// the reference point, run the activation-time gross-error gate against
-    /// the machine's Z limits, and swap it into the lowerer in stream order.
-    /// The gate is deliberately not a soundness proof (see
-    /// docs/rewrite/toolpath-surface-transforms.md): it refuses meshes whose
-    /// coupling alone exceeds the Z axis limits, and the accepted transient
-    /// exceedance envelope is logged.
-    #[pyo3(signature = (points, x_min, y_min, dx, dy, nx, ny, tension, fade, zero_ref_x, zero_ref_y))]
+    fn update_post_processor(&self, name: &str, key: &str, value: f64) -> PyResult<()> {
+        let axis_chains = {
+            let mut cfg = self.planner_config.lock_ok();
+            cfg.post_processors
+                .set_param(name, key, value)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            cfg.post_processors
+                .compile(&cfg.axis_registry)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?
+        };
+        if let Some(handle) = self.planner.lock_ok().as_ref() {
+            handle
+                .update_axis_chains(axis_chains)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn set_bed_mesh(
         &self,
@@ -646,10 +691,7 @@ impl PyMotionEngine {
             }
         }
         let (limits, z_velocity_budget, z_accel_budget) = {
-            let cfg = self
-                .planner_config
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let cfg = self.planner_config.lock_ok();
             let z_axis = cfg
                 .axis_registry
                 .axis_index("z")
@@ -703,41 +745,10 @@ impl PyMotionEngine {
     /// (x, y) — the single machine→gcode crossing, used by the host after
     /// homing and probing. Identity when no mesh is active.
     fn bed_mesh_gcode_z(&self, x: f64, y: f64, z_machine: f64) -> f64 {
-        match self
-            .bed_mesh
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-        {
+        match self.bed_mesh.lock_ok().as_ref() {
             Some(t) => t.gcode_z(x, y, z_machine),
             None => z_machine,
         }
-    }
-
-    fn update_post_processor(&self, name: &str, key: &str, value: f64) -> PyResult<()> {
-        let axis_chains = {
-            let mut cfg = self
-                .planner_config
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
-            cfg.post_processors
-                .set_param(name, key, value)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cfg.post_processors
-                .compile(&cfg.axis_registry)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?
-        };
-        if let Some(handle) = self
-            .planner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-        {
-            handle
-                .update_axis_chains(axis_chains)
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        }
-        Ok(())
     }
 }
 
@@ -748,8 +759,8 @@ impl PyMotionEngine {
     /// rides the token so every gcode-space odometer moves together. Returns
     /// the rebased gcode Z for the host's own position bookkeeping.
     fn swap_bed_mesh(&self, new: Option<Arc<geometry::SurfaceTransform>>) -> PyResult<f64> {
-        let pos = *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
-        let mut current = self.bed_mesh.lock().unwrap_or_else(|p| p.into_inner());
+        let pos = *self.commanded_pos.lock_ok();
+        let mut current = self.bed_mesh.lock_ok();
         let machine_z = pos[2]
             + current
                 .as_ref()
@@ -757,568 +768,27 @@ impl PyMotionEngine {
         let rebase = new
             .as_ref()
             .map_or(machine_z, |t| t.gcode_z(pos[0], pos[1], machine_z));
-        if let Some(handle) = self
-            .planner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-        {
+        if let Some(handle) = self.planner.lock_ok().as_ref() {
             handle
                 .update_mesh(new.clone(), rebase)
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         }
         *current = new;
         drop(current);
-        self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner())[2] = rebase;
+        self.commanded_pos.lock_ok()[2] = rebase;
         Ok(rebase)
     }
 
     pub(crate) fn machine_to_gcode(&self, pos: [f64; 3]) -> [f64; 3] {
-        match self
-            .bed_mesh
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-        {
+        match self.bed_mesh.lock_ok().as_ref() {
             Some(t) => [pos[0], pos[1], t.gcode_z(pos[0], pos[1], pos[2])],
             None => pos,
         }
     }
 
-    fn resolve_mcu_topology(
-        &self,
-        mcus: &[(u32, Vec<u8>, u8)],
-    ) -> PyResult<(HashMap<u32, Arc<McuSerialConn>>, Vec<McuAxisConfig>)> {
-        let ec_conns: HashMap<u32, Arc<McuSerialConn>> = {
-            let ethercat_handles: Vec<(u32, Arc<McuSerialConn>, String)> = {
-                let mcus_lock = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
-                mcus.iter()
-                    .filter_map(|(handle, _, _)| {
-                        let c = mcus_lock.get(handle)?;
-                        let socket = c.ethercat_socket.as_ref()?;
-                        let conn = c.endpoint_conn.as_ref()?.clone();
-                        Some((*handle, conn, socket.clone()))
-                    })
-                    .collect()
-            };
-
-            let mut out = HashMap::new();
-            for (mcu_id, conn, socket) in ethercat_handles {
-                let caps = query_ethercat_runtime_caps(&conn, std::time::Duration::from_secs(5))
-                    .map_err(|e| {
-                        PyRuntimeError::new_err(format!(
-                            "init_planner: QueryRuntimeCaps failed for ethercat mcu \
-                                 {mcu_id} ({socket}): {e} — endpoint must respond with \
-                                 RuntimeCapsResponse; is ethercat-rt running?"
-                        ))
-                    })?;
-                tracing::debug!(
-                    subsystem = "engine",
-                    event = "init_planner_ethercat_caps",
-                    mcu_id,
-                    total_piece_memory = caps.total_piece_memory,
-                    "[caps-trace] init_planner: ethercat mcu caps"
-                );
-                {
-                    let mut mcus_lock = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
-                    if let Some(c) = mcus_lock.get_mut(&mcu_id) {
-                        c.runtime_caps = Some(caps);
-                    }
-                }
-                out.insert(mcu_id, conn);
-            }
-            out
-        };
-
-        let caps_by_handle: std::collections::HashMap<u32, McuCaps> = {
-            let mcus_lock = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
-            mcus.iter()
-                .map(|(handle, _, _)| {
-                    let conn = mcus_lock.get(handle).ok_or_else(|| {
-                        PyRuntimeError::new_err(format!(
-                            "init_planner: unknown mcu_handle {handle}"
-                        ))
-                    })?;
-                    let caps = resolve_motion_caps(conn.runtime_caps, &conn.label, *handle)
-                        .map_err(PyRuntimeError::new_err)?;
-                    Ok((*handle, caps))
-                })
-                .collect::<PyResult<_>>()?
-        };
-        let mcu_configs = build_mcu_configs(mcus, &caps_by_handle)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        *self
-            .mcu_axis_configs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = mcu_configs.clone();
-
-        Ok((ec_conns, mcu_configs))
-    }
-
-    fn build_transport_maps(
-        &self,
-        mcu_configs: &[McuAxisConfig],
-    ) -> PyResult<(
-        HashSet<u32>,
-        HashMap<u32, Arc<McuHostIo>>,
-        HashMap<crate::types::AxisKey, u32>,
-    )> {
-        let ethercat_mcu_ids: HashSet<u32> = {
-            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
-            mcu_configs
-                .iter()
-                .filter(|c| {
-                    mcus.get(&c.mcu_id)
-                        .map_or(false, |conn| conn.ethercat_socket.is_some())
-                })
-                .map(|c| c.mcu_id)
-                .collect()
-        };
-
-        let host_ios: HashMap<u32, Arc<McuHostIo>> = {
-            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
-            let mut out = HashMap::new();
-            for cfg_mcu in mcu_configs {
-                if ethercat_mcu_ids.contains(&cfg_mcu.mcu_id) {
-                    continue;
-                }
-                let conn = mcus.get(&cfg_mcu.mcu_id).ok_or_else(|| {
-                    PyRuntimeError::new_err(format!(
-                        "init_planner: unknown mcu_handle {}",
-                        cfg_mcu.mcu_id
-                    ))
-                })?;
-                let io = conn.host_io.as_ref().ok_or_else(|| {
-                    PyRuntimeError::new_err(format!(
-                        "init_planner: attach_serial has not been called for MCU {}",
-                        cfg_mcu.mcu_id
-                    ))
-                })?;
-                out.insert(cfg_mcu.mcu_id, Arc::clone(io));
-            }
-            out
-        };
-
-        let ring_depth_table: HashMap<crate::types::AxisKey, u32> = {
-            let mut t = HashMap::new();
-            for cfg_mcu in mcu_configs {
-                let total = cfg_mcu.caps.total_pieces() as u32;
-                let n = cfg_mcu.axes.len() as u32;
-                let depth = axis_ring_depth(total, n);
-                for &axis in &cfg_mcu.axes {
-                    t.insert(
-                        crate::types::AxisKey {
-                            mcu_id: cfg_mcu.mcu_id,
-                            axis: axis as u8,
-                        },
-                        depth,
-                    );
-                }
-            }
-            t
-        };
-
-        Ok((ethercat_mcu_ids, host_ios, ring_depth_table))
-    }
-
-    fn seed_ethercat_clock_estimates(&self, ethercat_mcu_ids: &HashSet<u32>) {
-        let mut router = self.router.lock().unwrap_or_else(|p| p.into_inner());
-        let now_ns = crate::timing::monotonic_ns();
-        for &mcu_id in ethercat_mcu_ids {
-            let mcu_h = mcu_handle_from_raw(mcu_id);
-            let _ = router.set_clock_est_from_sample(
-                mcu_h,
-                f64::from(ETHERCAT_CLOCK_FREQ_HZ),
-                Instant::now(),
-                now_ns,
-            );
-        }
-    }
-
-    fn spawn_pipeline(
-        &self,
-        cfg: &config::PlannerConfig,
-        mcu_configs: &[McuAxisConfig],
-        host_ios: &HashMap<u32, Arc<McuHostIo>>,
-        ec_conns: &HashMap<u32, Arc<McuSerialConn>>,
-        ring_depth_table: HashMap<crate::types::AxisKey, u32>,
-    ) -> PyResult<crossbeam_channel::Sender<crate::pump::PumpMsg>> {
-        let counter = Arc::clone(&self.dispatched_segments);
-        let router_arc = Arc::clone(&self.router);
-
-        let wire_transports: HashMap<u32, crate::pump::McuTransport> = {
-            let mut t = HashMap::new();
-            for (&id, io) in host_ios {
-                t.insert(id, crate::pump::McuTransport::Serial(Arc::downgrade(io)));
-            }
-            for (&id, conn) in ec_conns {
-                t.insert(
-                    id,
-                    crate::pump::McuTransport::EtherCat(Arc::downgrade(conn)),
-                );
-            }
-            t
-        };
-
-        let ring_depth_table_for_pump = ring_depth_table;
-        let router_for_pump = Arc::clone(&self.router);
-        let drain_for_pump = self.drain.clone();
-        let router_for_freq = Arc::clone(&self.router);
-        let endpoint_death_for_pump = Arc::clone(&self.latched_endpoint_death);
-        let pump_resources = crate::worker::PumpResources {
-            sink: crate::pump::WireSink {
-                transports: wire_transports,
-                timeout: Duration::from_secs(5),
-                freq_of: Arc::new(move |mcu_id: u32| {
-                    let r = router_for_freq.lock().unwrap_or_else(|p| p.into_inner());
-                    r.ack_clock_and_freq(mcu_handle_from_raw(mcu_id))
-                        .map(|(_, f)| f)
-                }),
-            },
-            ring_depth_of: Box::new(move |k| {
-                ring_depth_table_for_pump
-                    .get(&k)
-                    .copied()
-                    .unwrap_or_else(|| {
-                        tracing::error!(
-                            subsystem = "engine",
-                            event = "pump_missing_ring_depth",
-                            axis_key = ?k,
-                            "pump: no ring_depth for axis — absent from init_planner config; using sentinel depth 1 (expect PieceStartInPast fault)"
-                        );
-                        1
-                    })
-            }),
-            mcu_clock_of: Box::new(move |mcu_id: u32| {
-                let r = router_for_pump.lock().unwrap_or_else(|p| p.into_inner());
-                r.ack_clock_and_freq(mcu_handle_from_raw(mcu_id))
-            }),
-            on_fatal_transport: Box::new(move |key: crate::types::AxisKey| {
-                if report_ethercat_endpoint_death(
-                    &endpoint_death_for_pump,
-                    key.mcu_id,
-                    "pump transport went fatal (broken pipe / endpoint gone) \
-                     — see the send_frame_fatal log for the exact transport error",
-                ) {
-                    arm_endpoint_death_watchdog(Arc::clone(&endpoint_death_for_pump), key.mcu_id);
-                }
-            }),
-            on_abandon: Box::new(move |key: crate::types::AxisKey, n: u32| {
-                tracing::debug!(
-                    subsystem = "motion",
-                    event = "pump_abandon_unpushed",
-                    mcu = key.mcu_id,
-                    axis = key.axis,
-                    dropped = n,
-                    "pump flush dropped pieces that never reached the wire"
-                );
-            }),
-            drain: drain_for_pump,
-            on_drip_stall: Box::new(|msg: String| {
-                tracing::error!(
-                    msg,
-                    "EXIT_ON_FAULT — drip cohort stalled; \
-                     aborting klippy so systemd restarts it"
-                );
-                abort_after_tracing_appender_drains();
-            }),
-            backlog: Arc::clone(&self.pump_backlog),
-        };
-
-        let anchor_mutex = Arc::clone(&self.dispatch_anchor);
-        *anchor_mutex.lock().unwrap_or_else(|p| p.into_inner()) = crate::anchor::Anchor::new();
-        let dispatch_resources = crate::worker::DispatchResources {
-            router: Arc::clone(&router_arc),
-            anchor: anchor_mutex,
-            mcu_configs: mcu_configs.to_vec(),
-            counter: Arc::clone(&counter),
-            active_drip_cohort: Arc::clone(&self.active_drip_cohort),
-            motion_history: Arc::clone(&self.motion_history),
-            nominal_freqs: Arc::clone(&self.nominal_clock_freqs),
-        };
-
-        let stream_cfg = {
-            let cart = cfg.cartesian;
-            motion_pipeline::StreamConfig {
-                chain: cfg.chain,
-                integration_tol: STREAM_INTEGRATION_TOL,
-                max_extrude_only_velocity_mm_s: cfg
-                    .max_extrude_only_velocity
-                    .unwrap_or(f64::INFINITY),
-                max_extrude_only_accel_mm_s2: cfg.max_extrude_only_accel.unwrap_or(f64::INFINITY),
-                fit_tol_mm: cfg.fit_tolerance_mm,
-                fit_tol_accel_mm_s2: cfg.fit_tolerance_accel_mm_s2,
-                max_buffer_moves: STREAM_MAX_BUFFER_MOVES,
-                limits: geometry::VelocityLimits::try_new(
-                    cart.max_velocity,
-                    cart.max_accel,
-                    cart.square_corner_velocity,
-                    cart.max_jerk,
-                )
-                .map_err(PyRuntimeError::new_err)?,
-            }
-        };
-        let axis_chains = cfg
-            .post_processors
-            .compile(&cfg.axis_registry)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let home = vec![0.0; cfg.axis_registry.n_axes()];
-
-        let mut planner_guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
-        if planner_guard.is_some() {
-            return Err(PyRuntimeError::new_err(
-                "planner already initialized (raced)",
-            ));
-        }
-        let pipeline = crate::worker::setup_pipeline(
-            stream_cfg,
-            axis_chains,
-            home,
-            dispatch_resources,
-            pump_resources,
-        );
-        let pump_control = pipeline.pump_control.clone();
-        *self.pump_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(pipeline.pump_control);
-        *self.pump_thread.lock().unwrap_or_else(|p| p.into_inner()) = Some(pipeline.pump_thread);
-        *planner_guard = Some(pipeline.worker);
-        let mesh = self
-            .bed_mesh
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone();
-        if mesh.is_some() {
-            let z = self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner())[2];
-            planner_guard
-                .as_ref()
-                .expect("planner installed above")
-                .update_mesh(mesh, z)
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        }
-        drop(planner_guard);
-
-        Ok(pump_control)
-    }
-
-    fn spawn_live_position_poll_thread(&self) {
-        let configs = Arc::clone(&self.mcu_axis_configs);
-        let mcus = Arc::clone(&self.mcus);
-        let cache = Arc::clone(&self.live_position_cache);
-        let stop = Arc::clone(&self.position_poll_stop);
-        let handle = std::thread::Builder::new()
-            .name("live-position-poll".into())
-            .spawn(move || {
-                use std::sync::atomic::Ordering;
-                let period = std::time::Duration::from_millis(200);
-                let timeout = std::time::Duration::from_millis(250);
-                while !stop.load(Ordering::Relaxed) {
-                    std::thread::sleep(period);
-                    if stop.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    match collect_motor_positions_inner(&configs, &mcus, timeout) {
-                        Ok(map) => {
-                            let mut c = cache.lock().unwrap_or_else(|p| p.into_inner());
-                            *c = (map, std::time::Instant::now());
-                        }
-                        Err(e) => {
-                            if !e.contains("no axes configured") {
-                                tracing::warn!(
-                                    error = %e,
-                                    "live-position poll failed; serving stale cache"
-                                );
-                            }
-                        }
-                    }
-                }
-            })
-            .expect("spawn live-position-poll thread");
-        *self
-            .position_poll_thread
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = Some(handle);
-    }
-
-    fn wire_mcu_supervision(
-        &self,
-        mcu_configs: &[McuAxisConfig],
-        ethercat_mcu_ids: &HashSet<u32>,
-        ec_conns: &HashMap<u32, Arc<McuSerialConn>>,
-        host_ios: &HashMap<u32, Arc<McuHostIo>>,
-        pump_control: crossbeam_channel::Sender<crate::pump::PumpMsg>,
-    ) {
-        for cfg_mcu in mcu_configs {
-            let mcu_id = cfg_mcu.mcu_id;
-            let pump_tx_hb = pump_control.clone();
-
-            if ethercat_mcu_ids.contains(&mcu_id) {
-                let conn = ec_conns
-                    .get(&mcu_id)
-                    .expect("ec_conns built from ethercat_mcu_ids")
-                    .clone();
-
-                let mcu_label = {
-                    let mcus_lock = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
-                    mcus_lock
-                        .get(&mcu_id)
-                        .map(|c| c.label.clone())
-                        .unwrap_or_else(|| format!("mcu-{mcu_id}"))
-                };
-
-                let homing_run_hb = Arc::clone(&self.homing_run);
-                let active_cohort_hb = Arc::clone(&self.active_drip_cohort);
-                let pump_tx_fault = pump_control.clone();
-                let latched_fault_hb = Arc::clone(&self.latched_drive_fault);
-                let mcu_label_hb = mcu_label.clone();
-                conn.attach_heartbeat_callback(Arc::new(
-                    move |hb: &mcu_protocol::messages::StatusHeartbeat| {
-                        if hb.fault_code != 0 {
-                            let run_opt = {
-                                let mut guard =
-                                    homing_run_hb.lock().unwrap_or_else(|p| p.into_inner());
-                                match guard.as_ref().map(|r| r.axis_key.mcu_id) {
-                                    Some(axis_mcu)
-                                        if crate::homing::route_drive_fault(
-                                            mcu_id,
-                                            Some(axis_mcu),
-                                        ) == crate::homing::DriveFaultRoute::HomingError =>
-                                    {
-                                        guard.take()
-                                    }
-                                    _ => None,
-                                }
-                            };
-                            match run_opt {
-                                Some(run) => {
-                                    latched_fault_hb
-                                        .lock()
-                                        .unwrap_or_else(|p| p.into_inner())
-                                        .insert(mcu_id, hb.fault_code);
-                                    *active_cohort_hb.lock().unwrap_or_else(|p| p.into_inner()) =
-                                        None;
-                                    let _ = pump_tx_fault.send(crate::pump::PumpMsg::Flush(
-                                        run.all_axis_keys.clone(),
-                                    ));
-                                    let _ = pump_tx_fault
-                                        .send(crate::pump::PumpMsg::DripDisarm(run.cohort));
-                                    let _ = run.notify.send(Err(format!(
-                                        "drive fault 0x{:04x} during homing — \
-                                     following-error/torque limit exceeded (endstop failure?)",
-                                        hb.fault_code
-                                    )));
-                                }
-                                None => {
-                                    let prev = latched_fault_hb
-                                        .lock()
-                                        .unwrap_or_else(|p| p.into_inner())
-                                        .insert(mcu_id, hb.fault_code);
-                                    if prev != Some(hb.fault_code) {
-                                        tracing::error!(
-                                            mcu_id,
-                                            mcu_label = %mcu_label_hb,
-                                            fault_code = hb.fault_code,
-                                            "ethercat drive fault — latched for klippy to report"
-                                        );
-                                    }
-                                }
-                            }
-                            return;
-                        }
-                        let _ = pump_tx_hb.send(crate::pump::PumpMsg::Heartbeat(
-                            crate::pump::HeartbeatMsg {
-                                mcu_id,
-                                retired_counts: hb.retired_counts.clone(),
-                            },
-                        ));
-                    },
-                ));
-
-                let trip_deps = self.trip_deps();
-                conn.attach_endstop_trip_callback(Arc::new(
-                    move |endstop_id: u8, trip_clock: u64| {
-                        dispatch_endstop_trip(&trip_deps, mcu_id, endstop_id, trip_clock);
-                    },
-                ));
-
-                let conn_for_poll = Arc::downgrade(&conn);
-                let mcus_for_supervision = Arc::clone(&self.mcus);
-                let endpoint_death_for_supervision = Arc::clone(&self.latched_endpoint_death);
-                let on_endpoint_death: Box<dyn Fn(&str) + Send + 'static> =
-                    Box::new(move |reason: &str| {
-                        if report_ethercat_endpoint_death(
-                            &endpoint_death_for_supervision,
-                            mcu_id,
-                            reason,
-                        ) {
-                            arm_endpoint_death_watchdog(
-                                Arc::clone(&endpoint_death_for_supervision),
-                                mcu_id,
-                            );
-                        }
-                    });
-
-                let _ = std::thread::Builder::new()
-                    .name(format!("ec-heartbeat-poll-{mcu_id}"))
-                    .spawn(move || {
-                        loop {
-                            let Some(conn) = conn_for_poll.upgrade() else {
-                                return;
-                            };
-
-                            let peer_eof = conn.peer_closed();
-                            drop(conn);
-
-                            let fault_reason = {
-                                let mut mcus = mcus_for_supervision
-                                    .lock()
-                                    .unwrap_or_else(|p| p.into_inner());
-                                let Some(c) = mcus.get_mut(&mcu_id) else {
-                                    return;
-                                };
-                                if peer_eof {
-                                    Some("conn EOF".to_string())
-                                } else if let Some(ref mut child) = c.endpoint_process {
-                                    match child.try_wait() {
-                                        Ok(Some(status)) => Some(format!("child exited: {status}")),
-                                        Ok(None) => None,
-                                        Err(e) => Some(format!("try_wait error: {e}")),
-                                    }
-                                } else {
-                                    None
-                                }
-                            };
-
-                            if let Some(reason) = fault_reason {
-                                on_endpoint_death(&reason);
-                                return;
-                            }
-
-                            std::thread::sleep(Duration::from_millis(1));
-                        }
-                    })
-                    .expect("spawn ec-heartbeat-poll thread");
-            } else {
-                let io = host_ios
-                    .get(&mcu_id)
-                    .expect("host_io map built from mcu_configs")
-                    .clone();
-                io.attach_heartbeat_callback(Arc::new(move |retired: &[u32]| {
-                    let _ = pump_tx_hb.send(crate::pump::PumpMsg::Heartbeat(
-                        crate::pump::HeartbeatMsg {
-                            mcu_id,
-                            retired_counts: retired.to_vec(),
-                        },
-                    ));
-                }));
-            }
-        }
-    }
-
     fn e_followers(&self, de: f64) -> PyResult<Vec<(usize, f64)>> {
         if de.abs() > 0.0 {
-            let cfg = self
-                .planner_config
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let cfg = self.planner_config.lock_ok();
             let axis_index = cfg.axis_registry.axis_index("e").map_err(|_| {
                 PyRuntimeError::new_err(
                     "E word on a move but no [axis e] is declared — declare the \

@@ -188,12 +188,10 @@ class SosFilter:
     def __init__(
         self,
         mcu: MCU,
-        cmd_queue,
         fixed_point_filter: FixedPointSosFilter,
         max_sections: Optional[int] = None,
     ):
         self._mcu = mcu
-        self._cmd_queue = cmd_queue
         self._oid: int = self._mcu.create_oid()
         self._filter: FixedPointSosFilter = fixed_point_filter
         self._max_sections = max_sections
@@ -222,7 +220,7 @@ class SosFilter:
             self._cmd_activate,
         ]
         for cmd in cmds:
-            cmd.append(self._mcu.lookup_command(cmd[1], cq=self._cmd_queue))
+            cmd.append(self._mcu.lookup_command(cmd[1]))
 
     def get_oid(self) -> int:
         return self._oid

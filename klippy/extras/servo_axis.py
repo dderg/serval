@@ -94,6 +94,9 @@ class ServoRail(BaseRail):
         self.ff_torque_clamp = motor_config.getfloat(
             "ff_torque_clamp", 30.0, above=0.0, maxval=400.0
         )
+        self.ff_lead_cycles = motor_config.getint(
+            "ff_lead_cycles", 0, minval=0, maxval=40
+        )
         self.invert_direction = motor_config.getboolean(
             "invert_direction", False
         )
@@ -188,7 +191,7 @@ class ServoRail(BaseRail):
         return self.rotation_distance
 
     def get_ff_config(self):
-        return (self.velocity_ff, self.ff_torque_clamp)
+        return (self.velocity_ff, self.ff_torque_clamp, self.ff_lead_cycles)
 
     def get_invert_direction(self):
         return self.invert_direction
@@ -277,7 +280,7 @@ class MotionTorqueLine:
 
     def set_digital(self, print_time, value):
         node = self._printer.lookup_object("ethercat_node " + self._node_name)
-        node.set_motor_torque(self._motor_name, bool(value), print_time)
+        return node.set_motor_torque(self._motor_name, bool(value), print_time)
 
 
 def register_torque_enable(printer, config, rail):

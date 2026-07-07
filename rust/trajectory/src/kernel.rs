@@ -2,7 +2,7 @@ use nurbs::algebra::PiecewisePolynomialKernel;
 use nurbs::bezier::BezierPiece;
 
 #[inline(never)]
-fn build_bell_kernel(t_sm: f64) -> PiecewisePolynomialKernel<f64> {
+fn build_bell_kernel(t_sm: f64) -> PiecewisePolynomialKernel {
     let h = t_sm / 2.0;
     let c = 15.0 / (16.0 * h.powi(5));
     let coeffs = vec![
@@ -15,15 +15,15 @@ fn build_bell_kernel(t_sm: f64) -> PiecewisePolynomialKernel<f64> {
     PiecewisePolynomialKernel::single_poly_from_absolute(coeffs, (-h, h))
 }
 
-pub fn build_smooth_zv_kernel(t_sm: f64) -> PiecewisePolynomialKernel<f64> {
+pub fn build_smooth_zv_kernel(t_sm: f64) -> PiecewisePolynomialKernel {
     build_bell_kernel(t_sm)
 }
 
-pub fn build_smooth_mzv_kernel(t_sm: f64) -> PiecewisePolynomialKernel<f64> {
+pub fn build_smooth_mzv_kernel(t_sm: f64) -> PiecewisePolynomialKernel {
     build_bell_kernel(t_sm)
 }
 
-pub fn build_smooth_triangle_kernel(smooth_time: f64) -> PiecewisePolynomialKernel<f64> {
+pub fn build_smooth_triangle_kernel(smooth_time: f64) -> PiecewisePolynomialKernel {
     assert!(
         smooth_time > 0.0,
         "build_smooth_triangle_kernel requires smooth_time > 0, got {smooth_time}"

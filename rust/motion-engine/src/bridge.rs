@@ -1,3 +1,4 @@
+use crate::lock_ext::LockExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -21,16 +22,20 @@ use crate::mcu_config::{McuAxisConfig, McuCaps, build_mcu_configs};
 use crate::types::mcu_handle_from_raw;
 use crate::worker::{StreamWorkerError, StreamWorkerHandle};
 
+mod attach;
+mod endstop;
 mod ethercat_endpoint;
 mod homing_api;
 mod motion_caps;
 mod passthrough;
+mod pipeline_setup;
 mod planner_api;
 mod runtime_caps;
 mod servo;
 mod state;
 mod telemetry;
 
+use endstop::{TripDeps, dispatch_endstop_trip};
 #[cfg(test)]
 use ethercat_endpoint::{EndpointClaimError, endpoint_args};
 use ethercat_endpoint::{
@@ -239,7 +244,7 @@ impl PyMotionEngine {
         crate::logging::init_logging(path).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("init_logging failed: {e}"))
         })?;
-        let mut guard = self.events_dir.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = self.events_dir.lock_ok();
         *guard = Some(path.to_path_buf());
         Ok(())
     }
@@ -252,10 +257,10 @@ impl PyMotionEngine {
     #[pyo3(signature = (label, serial_path, baud))]
     fn claim_mcu(&self, label: &str, serial_path: &str, baud: u32) -> PyResult<u32> {
         let _ = (serial_path, baud);
-        let mut router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+        let mut router = self.router.lock_ok();
         let handle = router.claim_mcu(label);
         let raw = handle.raw();
-        self.mcus.lock().unwrap_or_else(|p| p.into_inner()).insert(
+        self.mcus.lock_ok().insert(
             raw,
             McuConnection {
                 label: label.to_owned(),
@@ -302,11 +307,7 @@ impl PyMotionEngine {
             }
         }
 
-        let events_dir = self
-            .events_dir
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone();
+        let events_dir = self.events_dir.lock_ok().clone();
         let mut child = spawn_ethercat_endpoint(
             endpoint_binary,
             interface,
@@ -336,7 +337,7 @@ impl PyMotionEngine {
             PyRuntimeError::new_err(message_for_claim_error(label, interface, &e))
         })?;
 
-        let mut router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+        let mut router = self.router.lock_ok();
         let handle = router.claim_mcu(label);
         let raw = handle.raw();
         drop(router);
@@ -346,7 +347,7 @@ impl PyMotionEngine {
 
     fn release_mcu(&self, handle: u32) -> PyResult<()> {
         let Some(mut conn) = ({
-            let mut mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let mut mcus = self.mcus.lock_ok();
             mcus.remove(&handle)
         }) else {
             return Ok(());
@@ -387,7 +388,7 @@ impl PyMotionEngine {
 
         drop(conn);
 
-        let mut router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+        let mut router = self.router.lock_ok();
         router.release_mcu(mcu_handle_from_raw(handle));
         Ok(())
     }
@@ -402,28 +403,17 @@ impl PyMotionEngine {
             return;
         }
 
-        let planner = self
-            .planner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take();
+        let planner = self.planner.lock_ok().take();
         if let Some(mut p) = planner {
             p.shutdown();
         }
 
         let pump_join = {
-            let tx = self
-                .pump_tx
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .take();
+            let tx = self.pump_tx.lock_ok().take();
             if let Some(tx) = tx {
                 let _ = tx.send(crate::pump::PumpMsg::Shutdown);
             }
-            self.pump_thread
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .take()
+            self.pump_thread.lock_ok().take()
         };
         if let Some(h) = pump_join {
             if let Err(e) = h.join() {
@@ -438,19 +428,19 @@ impl PyMotionEngine {
 
         self.position_poll_stop
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(h) = self
-            .position_poll_thread
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take()
-        {
+        if let Some(h) = self.position_poll_thread.lock_ok().take() {
             if let Err(e) = h.join() {
-                log::error!("engine.shutdown(): live-position-poll join panicked: {e:?}");
+                tracing::error!(
+                    subsystem = "engine",
+                    event = "shutdown_position_poll_join_panicked",
+                    error = ?e,
+                    "engine.shutdown(): live-position-poll join panicked"
+                );
             }
         }
 
         let handles: Vec<u32> = {
-            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let mcus = self.mcus.lock_ok();
             mcus.keys().copied().collect()
         };
         for h in handles {
@@ -467,7 +457,7 @@ impl PyMotionEngine {
     }
 
     fn detach_serial(&self, mcu_handle: u32) -> PyResult<()> {
-        let mut mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+        let mut mcus = self.mcus.lock_ok();
         if let Some(conn) = mcus.get_mut(&mcu_handle) {
             conn.runtime_rx_priority = None;
             conn.runtime_rx_bulk = None;
@@ -545,10 +535,7 @@ impl PyMotionEngine {
     }
 
     fn ring_depth_for_axis(&self, mcu_handle: u32, axis: u8) -> PyResult<u16> {
-        let configs = self
-            .mcu_axis_configs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let configs = self.mcu_axis_configs.lock_ok();
         ring_depth_for_axis_inner(&configs, mcu_handle, axis).map_err(PyRuntimeError::new_err)
     }
 }
@@ -559,18 +546,6 @@ impl Drop for PyMotionEngine {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct TripDeps {
-    homing_run: Arc<Mutex<Option<HomingRun>>>,
-    pending_trip: Arc<Mutex<Option<(u32, u8, u64)>>>,
-    active_drip_cohort: Arc<Mutex<Option<u64>>>,
-    pump_tx: Arc<Mutex<Option<crossbeam_channel::Sender<crate::pump::PumpMsg>>>>,
-    mcus: Arc<Mutex<HashMap<u32, McuConnection>>>,
-    router: Arc<Mutex<PassthroughRouter>>,
-    motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
-    mcu_axis_configs: Arc<Mutex<Vec<McuAxisConfig>>>,
-}
-
 impl PyMotionEngine {
     fn with_mcu<R>(
         &self,
@@ -578,289 +553,15 @@ impl PyMotionEngine {
         unknown_mcu_err: impl FnOnce(u32) -> String,
         f: impl FnOnce(&mut McuConnection) -> PyResult<R>,
     ) -> PyResult<R> {
-        let mut mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+        let mut mcus = self.mcus.lock_ok();
         let mc = mcus
             .get_mut(&handle)
             .ok_or_else(|| PyRuntimeError::new_err(unknown_mcu_err(handle)))?;
         f(mc)
     }
 
-    fn try_reuse_existing_connection(
-        &self,
-        mcu_handle: u32,
-        serial_path: &str,
-        klippy_non_critical: bool,
-        expect_native: bool,
-    ) -> PyResult<bool> {
-        let existing_io: Option<Arc<McuHostIo>> = {
-            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
-            mcus.get(&mcu_handle)
-                .and_then(|conn| conn.host_io.as_ref().map(Arc::clone))
-        };
-        if let Some(io) = existing_io {
-            if io.is_alive() {
-                tracing::info!(
-                    subsystem = "mcu-comms",
-                    event = "attach_reuse_connection",
-                    serial_path,
-                    "attach_serial: reusing existing connection (reactor alive, skipping close/reopen)"
-                );
-
-                let (rx_priority, rx_bulk) = io.take_runtime_event_subscription().map_err(|e| {
-                    PyRuntimeError::new_err(format!(
-                        "attach_serial: runtime_event re-subscribe: {e:?}"
-                    ))
-                })?;
-
-                let (mcu_transport_supported, identify_caps) = if !expect_native {
-                    tracing::info!(
-                        subsystem = "mcu-comms",
-                        event = "attach_identify_skipped_reuse",
-                        serial_path,
-                        "attach_serial: kalico identify skipped on reuse (plugin-attached peripheral, not declared via an [mcu] section)"
-                    );
-                    (false, 0u64)
-                } else {
-                    match io.kalico_identify(std::time::Duration::from_secs(5)) {
-                        Ok(out) => {
-                            tracing::info!(
-                                subsystem = "mcu-comms",
-                                event = "attach_reidentified",
-                                serial_path,
-                                reset_epoch = out.reset_epoch,
-                                capabilities = out.capabilities,
-                                "attach_serial: kalico re-identified (reset_epoch/caps as hex)"
-                            );
-                            (true, out.capabilities)
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                subsystem = "mcu-comms",
-                                event = "attach_identify_timeout_reuse",
-                                serial_path,
-                                error = %e,
-                                "attach_serial: kalico_identify timed out on reuse; treating as Klipper-protocol-only"
-                            );
-                            (false, 0u64)
-                        }
-                    }
-                };
-
-                let runtime_caps = if mcu_transport_supported {
-                    match query_runtime_caps(&io, std::time::Duration::from_secs(2)) {
-                        Ok(caps) => {
-                            tracing::debug!(
-                                subsystem = "mcu-comms",
-                                event = "attach_runtime_caps_reuse",
-                                serial_path,
-                                total_piece_memory = caps.total_piece_memory,
-                                "[caps-trace] attach_serial reuse: runtime caps"
-                            );
-                            Some(caps)
-                        }
-                        Err(e) => {
-                            return Err(PyRuntimeError::new_err(format!(
-                                "attach_serial: QueryRuntimeCaps failed for {serial_path} \
-                                 ({e}) — a kalico-native MCU must report runtime caps; \
-                                 firmware is too old, mismatched, or not flashed. \
-                                 Refusing to attach with guessed caps."
-                            )));
-                        }
-                    }
-                } else {
-                    None
-                };
-
-                let critical = mcu_transport_supported && !klippy_non_critical;
-                io.set_critical(critical);
-                tracing::info!(
-                    subsystem = "mcu-comms",
-                    event = "attach_criticality_reuse",
-                    serial_path,
-                    critical,
-                    mcu_transport = mcu_transport_supported,
-                    klippy_non_critical,
-                    "attach_serial: reuse — criticality set"
-                );
-
-                self.with_mcu(
-                    mcu_handle,
-                    |h| format!("attach_serial: unknown mcu_handle {h}"),
-                    |conn| {
-                        conn.runtime_rx_priority = Some(rx_priority);
-                        conn.runtime_rx_bulk = Some(rx_bulk);
-                        conn.runtime_caps = runtime_caps;
-                        conn.identify_caps = identify_caps;
-                        conn.mcu_transport_supported = mcu_transport_supported;
-                        Ok(())
-                    },
-                )?;
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    fn register_freshly_attached_mcu(
-        &self,
-        mcu_handle: u32,
-        serial_path: &str,
-        mcu_label: &str,
-        klippy_non_critical: bool,
-        expect_native: bool,
-        host_io: McuHostIo,
-    ) -> PyResult<()> {
-        let (rx_priority, rx_bulk) = host_io.take_runtime_event_subscription().map_err(|e| {
-            PyRuntimeError::new_err(format!("attach_serial: runtime_event subscribe: {e:?}"))
-        })?;
-
-        let (mcu_transport_supported, identify_caps) = if !expect_native {
-            tracing::info!(
-                subsystem = "mcu-comms",
-                event = "attach_identify_skipped",
-                serial_path,
-                "attach_serial: kalico identify skipped (plugin-attached peripheral, not declared via an [mcu] section)"
-            );
-            (false, 0u64)
-        } else {
-            match host_io.kalico_identify(std::time::Duration::from_secs(5)) {
-                Ok(out) => {
-                    tracing::info!(
-                        subsystem = "mcu-comms",
-                        event = "attach_identified",
-                        serial_path,
-                        reset_epoch = out.reset_epoch,
-                        capabilities = out.capabilities,
-                        "attach_serial: kalico identified (reset_epoch/caps as hex)"
-                    );
-                    (true, out.capabilities)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        subsystem = "mcu-comms",
-                        event = "attach_identify_timeout",
-                        serial_path,
-                        error = %e,
-                        "attach_serial: kalico_identify timed out; continuing attach as a Klipper-protocol-only MCU"
-                    );
-                    (false, 0u64)
-                }
-            }
-        };
-
-        let runtime_caps = if mcu_transport_supported {
-            match query_runtime_caps(&host_io, std::time::Duration::from_secs(2)) {
-                Ok(caps) => {
-                    tracing::debug!(
-                        subsystem = "mcu-comms",
-                        event = "attach_runtime_caps",
-                        serial_path,
-                        total_piece_memory = caps.total_piece_memory,
-                        "[caps-trace] attach_serial: runtime caps"
-                    );
-                    Some(caps)
-                }
-                Err(e) => {
-                    return Err(PyRuntimeError::new_err(format!(
-                        "attach_serial: QueryRuntimeCaps failed for {serial_path} \
-                         ({e}) — a kalico-native MCU must report runtime caps; \
-                         firmware is too old, mismatched, or not flashed. \
-                         Refusing to attach with guessed caps."
-                    )));
-                }
-            }
-        } else {
-            None
-        };
-
-        let critical = mcu_transport_supported && !klippy_non_critical;
-        host_io.set_critical(critical);
-        tracing::info!(
-            subsystem = "mcu-comms",
-            event = "attach_criticality",
-            serial_path,
-            critical,
-            mcu_transport = mcu_transport_supported,
-            klippy_non_critical,
-            "attach_serial: criticality set"
-        );
-
-        let host_io_arc = Arc::new(host_io);
-
-        {
-            let events_dir_guard = self
-                .events_dir
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            require_events_dir_for_mcu_transport(
-                mcu_transport_supported,
-                events_dir_guard.as_deref(),
-                mcu_label,
-            )
-            .map_err(PyRuntimeError::new_err)?;
-        }
-
-        if mcu_transport_supported {
-            let events_dir_guard = self.events_dir.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(ref dir) = *events_dir_guard {
-                use crate::logging::writer::{
-                    DEFAULT_BACKUP_COUNT, DEFAULT_MAX_BYTES, FSYNC_INTERVAL, RotatingJsonlWriter,
-                };
-                let source = mcu_label.to_owned();
-                let jsonl_path = dir.join(format!("{source}.jsonl"));
-                match RotatingJsonlWriter::new(
-                    &jsonl_path,
-                    DEFAULT_MAX_BYTES,
-                    DEFAULT_BACKUP_COUNT,
-                    FSYNC_INTERVAL,
-                ) {
-                    Ok(writer) => {
-                        let arc_writer = Arc::new(Mutex::new(writer));
-                        let mcu_h = mcu_handle_from_raw(mcu_handle);
-                        let hook = crate::mcu_log::build_mcu_log_hook(
-                            Arc::clone(&self.router),
-                            mcu_h,
-                            arc_writer,
-                            source,
-                        );
-                        host_io_arc.set_mcu_log_hook(Box::new(hook));
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            subsystem = "mcu-comms",
-                            event = "attach_mcu_log_open_failed",
-                            jsonl_path = %jsonl_path.display(),
-                            error = %e,
-                            "attach_serial: mcu-log: failed to open jsonl writer"
-                        );
-                    }
-                }
-            } else {
-                unreachable!(
-                    "attach_serial: events_dir is None for a kalico-native MCU \
-                     — require_events_dir_for_mcu_transport should have \
-                     rejected this call before reaching hook wiring"
-                );
-            }
-        }
-
-        self.with_mcu(
-            mcu_handle,
-            |h| format!("attach_serial: unknown mcu_handle {h}"),
-            |conn| {
-                conn.host_io = Some(host_io_arc);
-                conn.runtime_rx_priority = Some(rx_priority);
-                conn.runtime_rx_bulk = Some(rx_bulk);
-                conn.runtime_caps = runtime_caps;
-                conn.identify_caps = identify_caps;
-                conn.mcu_transport_supported = mcu_transport_supported;
-                Ok(())
-            },
-        )
-    }
-
     fn ethercat_conn(&self, mcu_handle: u32, what: &str) -> PyResult<Arc<McuSerialConn>> {
-        let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+        let mcus = self.mcus.lock_ok();
         let mc = mcus.get(&mcu_handle).ok_or_else(|| {
             PyRuntimeError::new_err(format!("{what}: unknown mcu_handle {mcu_handle}"))
         })?;
@@ -873,7 +574,7 @@ impl PyMotionEngine {
     }
 
     fn host_io_for_mcu(&self, caller: &str, mcu: u32) -> PyResult<Arc<McuHostIo>> {
-        let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+        let mcus = self.mcus.lock_ok();
         let conn = mcus.get(&mcu).ok_or_else(|| {
             PyRuntimeError::new_err(format!("{caller}: unknown mcu_handle {mcu}"))
         })?;
@@ -889,184 +590,6 @@ impl PyMotionEngine {
     }
 }
 
-pub(crate) fn dispatch_endstop_trip(
-    deps: &TripDeps,
-    event_mcu: u32,
-    endstop_id: u8,
-    trip_clock: u64,
-) {
-    let run_opt: Option<HomingRun> = {
-        let mut guard = deps.homing_run.lock().unwrap_or_else(|p| p.into_inner());
-        guard.take()
-    };
-    let run = match run_opt {
-        None => {
-            tracing::warn!(
-                subsystem = "trip-relay",
-                event = "early_trip_buffered",
-                mcu = event_mcu,
-                endstop_id,
-                trip_clock,
-                "terminal report arrived before the homing run was registered — buffered"
-            );
-            *deps.pending_trip.lock().unwrap_or_else(|p| p.into_inner()) =
-                Some((event_mcu, endstop_id, trip_clock));
-            return;
-        }
-        Some(r) => r,
-    };
-    if run.endstop_id != endstop_id || run.endstop_mcu != event_mcu {
-        tracing::warn!(
-            subsystem = "trip-relay",
-            event = "trip_identity_mismatch",
-            mcu = event_mcu,
-            endstop_id,
-            expected_mcu = run.endstop_mcu,
-            expected_endstop_id = run.endstop_id,
-            trip_clock,
-            "terminal report does not match the active homing run — ignored"
-        );
-        let mut guard = deps.homing_run.lock().unwrap_or_else(|p| p.into_inner());
-        *guard = Some(run);
-        return;
-    }
-
-    {
-        let mut cohort_guard = deps
-            .active_drip_cohort
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        *cohort_guard = None;
-    }
-
-    let pump_tx_opt = deps
-        .pump_tx
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .clone();
-
-    let transports: HashMap<u32, Arc<dyn host_rt::mcu_call::McuCall>> = {
-        let mcus = deps.mcus.lock().unwrap_or_else(|p| p.into_inner());
-        mcus.iter()
-            .filter_map(|(&id, conn)| {
-                if let Some(io) = conn.host_io.as_ref() {
-                    Some((id, Arc::clone(io) as Arc<dyn host_rt::mcu_call::McuCall>))
-                } else {
-                    conn.endpoint_conn
-                        .as_ref()
-                        .map(|ec| (id, Arc::clone(ec) as Arc<dyn host_rt::mcu_call::McuCall>))
-                }
-            })
-            .collect()
-    };
-
-    let router_arc = Arc::clone(&deps.router);
-    let history_arc = Arc::clone(&deps.motion_history);
-    let configs: Vec<McuAxisConfig> = deps
-        .mcu_axis_configs
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .clone();
-
-    std::thread::Builder::new()
-        .name("homing-trip-handler".into())
-        .spawn(move || {
-            let stop_timeout = Duration::from_secs(3);
-
-            let stepper_mcu_ids: std::collections::HashSet<u32> =
-                run.all_axis_keys.iter().map(|k| k.mcu_id).collect();
-
-            if let Some(tx) = pump_tx_opt.as_ref() {
-                let _ = tx.send(crate::pump::PumpMsg::Flush(run.all_axis_keys.clone()));
-                let _ = tx.send(crate::pump::PumpMsg::DripDisarm(run.cohort));
-            }
-
-            use mcu_protocol::codec::Decode as _;
-            let stop_call = |mcu_id: u32| -> Result<mcu_protocol::messages::StopResponse, String> {
-                let transport = transports
-                    .get(&mcu_id)
-                    .ok_or_else(|| format!("Stop: no transport for mcu {mcu_id}"))?;
-                let (_kind, body) = transport
-                    .mcu_call(mcu_protocol::MessageKind::Stop, Vec::new(), stop_timeout)
-                    .map_err(|e| format!("Stop call failed for mcu {mcu_id}: {e:?}"))?;
-                mcu_protocol::messages::StopResponse::decode(&body)
-                    .map_err(|e| format!("Stop decode failed for mcu {mcu_id}: {e:?}"))
-            };
-
-            let discard_clock = match crate::homing::broadcast_stop(
-                &stepper_mcu_ids,
-                run.axis_key.mcu_id,
-                stop_call,
-            ) {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = run.notify.send(Err(e));
-                    return;
-                }
-            };
-
-            let axis_key = run.axis_key;
-            let reconstruct_cartesian = |source_mcu: u32, clock: u64| -> Result<[f64; 3], String> {
-                let cfg = configs
-                    .iter()
-                    .find(|c| c.mcu_id == axis_key.mcu_id)
-                    .ok_or_else(|| {
-                        format!("EndstopTrip: no axis config for mcu {}", axis_key.mcu_id)
-                    })?;
-                crate::homing::reconstruct_cartesian_position(
-                    source_mcu,
-                    clock,
-                    cfg,
-                    &router_arc,
-                    &history_arc,
-                    run.window_start_host,
-                )
-            };
-
-            let outcome = reconstruct_cartesian(run.endstop_mcu, trip_clock).and_then(|trip| {
-                reconstruct_cartesian(axis_key.mcu_id, discard_clock)
-                    .map(|final_pos| (trip, final_pos, trip_clock))
-            });
-
-            let outcome = outcome.and_then(|positions| {
-                if let Some(tx) = pump_tx_opt.as_ref() {
-                    let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
-                    let _ = tx.send(crate::pump::PumpMsg::Barrier(ack_tx));
-                    if ack_rx.recv_timeout(Duration::from_secs(1)).is_err() {
-                        return Err("EndstopTrip: pump did not acknowledge the flush barrier \
-                                 before stream resume"
-                            .into());
-                    }
-                }
-                for &mcu_id in &stepper_mcu_ids {
-                    let transport = transports
-                        .get(&mcu_id)
-                        .ok_or_else(|| format!("ResumeStream: no transport for mcu {mcu_id}"))?;
-                    let (_kind, body) = transport
-                        .mcu_call(
-                            mcu_protocol::MessageKind::ResumeStream,
-                            Vec::new(),
-                            stop_timeout,
-                        )
-                        .map_err(|e| format!("ResumeStream call failed for mcu {mcu_id}: {e:?}"))?;
-                    let resp = mcu_protocol::messages::ResumeStreamResponse::decode(&body)
-                        .map_err(|e| {
-                            format!("ResumeStream decode failed for mcu {mcu_id}: {e:?}")
-                        })?;
-                    if resp.result != 0 {
-                        return Err(format!(
-                            "ResumeStream rejected by mcu {mcu_id}: result={}",
-                            resp.result
-                        ));
-                    }
-                }
-                Ok(positions)
-            });
-            let _ = run.notify.send(outcome);
-        })
-        .expect("spawn homing-trip-handler");
-}
-
 impl PyMotionEngine {
     fn register_ethercat_mcu(
         &self,
@@ -1077,7 +600,7 @@ impl PyMotionEngine {
         conn: McuSerialConn,
         slot_axes: Vec<usize>,
     ) {
-        self.mcus.lock().unwrap_or_else(|p| p.into_inner()).insert(
+        self.mcus.lock_ok().insert(
             raw,
             McuConnection {
                 label: label.to_owned(),
@@ -1094,8 +617,7 @@ impl PyMotionEngine {
             },
         );
         self.nominal_clock_freqs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .lock_ok()
             .insert(raw, ETHERCAT_CLOCK_FREQ_HZ);
     }
 }

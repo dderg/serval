@@ -4,7 +4,7 @@ use crossbeam_channel::bounded;
 use trajectory::AxisChainSet;
 
 pub mod fit_stage;
-pub mod lowerer;
+pub mod lower_stage;
 pub mod lowering;
 pub mod planner;
 pub mod shaper;
@@ -12,14 +12,14 @@ pub mod timing;
 mod types;
 
 pub use fit_stage::FitStage;
-pub use lowerer::{advance_odometer, dist3, run_lowerer};
+pub use lower_stage::{advance_odometer, dist3, run_lowerer};
 pub use lowering::{FitTol, LoweringError, lower_move, lower_move_pieces};
 pub use planner::Planner;
 pub use shaper::Shaper;
 pub use types::{
-    BarrierAck, CONTIGUITY_EPS_MM, Control, LoweredItem, LoweredSegment, PipelineHandle,
-    PlannedItem, PlannedMove, PostProcessError, ShapedItem, StreamConfig, StreamError, StreamInput,
-    jerk_limited_brake_time,
+    BarrierAck, CONTIGUITY_EPS_MM, Control, LoweredItem, LoweredSegment, NudgePiece,
+    PipelineHandle, PlannedItem, PlannedMove, PostProcessError, ShapedItem, StreamConfig,
+    StreamError, StreamInput, jerk_limited_brake_time,
 };
 
 /// Wires the pure stream stages (fit stage → planner → lowerer → shaper) into
@@ -39,7 +39,9 @@ pub fn setup_stages(
     let (lowered_tx, lowered_rx) = bounded::<LoweredItem>(64);
     let (shaped_tx, shaped_rx) = bounded::<ShapedItem>(64);
 
-    let fit_stage = FitStage::new(config.chain);
+    let mut chain = config.chain;
+    chain.corner.ramp_accel_budget_mm_s2 = config.max_extrude_only_accel_mm_s2;
+    let fit_stage = FitStage::new(chain);
     spawn_stage("kalico-fit", move || fit_stage.run(raw_rx, fitted_tx));
 
     let planner = Planner::new(config);

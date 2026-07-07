@@ -30,12 +30,21 @@ class FakeToolhead:
     def __init__(self, max_accel=500.0):
         self._max_accel = max_accel
         self.wait_moves_called = 0
+        self.position = [150.0, 150.0, 30.0, 0.0]
+        self.set_position_calls = []
 
     def get_max_axis_accel(self, axis_idx):
         return self._max_accel
 
     def wait_moves(self):
         self.wait_moves_called += 1
+
+    def get_position(self):
+        return list(self.position)
+
+    def set_position(self, newpos):
+        self.position = list(newpos)
+        self.set_position_calls.append(list(newpos))
 
 
 class FakeConfig:
@@ -98,9 +107,19 @@ def test_z_tilt_adjust_steppers_calls_force_move_per_nonzero_delta():
 
 
 def test_z_tilt_adjust_steppers_skips_all_equal():
-    helper, fm, _ = make_z_tilt_helper(z_names=["z", "z1"])
+    helper, fm, toolhead = make_z_tilt_helper(z_names=["z", "z1"])
     helper.adjust_steppers([3.0, 3.0], speed=5.0)
     assert fm.calls == []
+    assert toolhead.set_position_calls == [[150.0, 150.0, 27.0, 0.0]]
+
+
+def test_z_tilt_adjust_steppers_rebases_z_by_negative_reference():
+    helper, fm, toolhead = make_z_tilt_helper(z_names=["z", "z1", "z2"])
+    helper.adjust_steppers([5.76, -7.80, 7.69], speed=5.0)
+    assert [c["name"] for c in fm.calls] == ["z", "z2"]
+    assert fm.calls[0]["dist"] == pytest.approx(5.76 - -7.80)
+    assert fm.calls[1]["dist"] == pytest.approx(7.69 - -7.80)
+    assert toolhead.set_position_calls == [[150.0, 150.0, 37.80, 0.0]]
 
 
 def test_z_tilt_adjust_steppers_wait_moves_called_once():
@@ -120,9 +139,17 @@ def test_z_tilt_ng_adjust_steppers_calls_force_move_per_nonzero_delta():
 
 
 def test_z_tilt_ng_adjust_steppers_skips_all_equal():
-    helper, fm, _ = make_z_tilt_ng_helper(z_names=["z", "z1"])
+    helper, fm, toolhead = make_z_tilt_ng_helper(z_names=["z", "z1"])
     helper.adjust_steppers([3.0, 3.0], speed=5.0)
     assert fm.calls == []
+    assert toolhead.set_position_calls == [[150.0, 150.0, 27.0, 0.0]]
+
+
+def test_z_tilt_ng_adjust_steppers_rebases_z_by_negative_reference():
+    helper, fm, toolhead = make_z_tilt_ng_helper(z_names=["z", "z1", "z2"])
+    helper.adjust_steppers([5.76, -7.80, 7.69], speed=5.0)
+    assert [c["name"] for c in fm.calls] == ["z", "z2"]
+    assert toolhead.set_position_calls == [[150.0, 150.0, 37.80, 0.0]]
 
 
 def test_z_tilt_ng_adjust_steppers_wait_moves_called_once():

@@ -33,5 +33,5 @@ pub struct FollowerWord {
 pub use surface::{Fade, MeshGrid, SurfaceBounds, SurfaceError, SurfaceSample, SurfaceTransform};
 pub use velocity::{
     BoundaryState, MoveVelocity, StraightPhase, VelSample, VelocityError, VelocityProfile,
-    VelocityReport, plan_velocity_stops, plan_velocity_warm_start,
+    VelocityReport, plan_velocity_stops,
 };

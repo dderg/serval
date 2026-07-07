@@ -15,10 +15,13 @@ const REPLAN_BATCH_MOVES: usize = 64;
 
 /// When the input runs momentarily dry the planner stops batching and commits
 /// what it can, so a rate-matched feed keeps the committed runway topped up
-/// instead of letting it sag for up to a whole batch. Requiring a few arrivals
-/// since the last plan bounds the re-plan rate when the feed trickles in one
-/// move per wakeup.
-const QUIET_PLAN_MIN_MOVES: usize = 4;
+/// instead of letting it sag for up to a whole batch. Requiring a batch of
+/// arrivals since the last plan bounds the re-plan rate when the feed
+/// trickles in one move per wakeup: each re-plan costs O(window), so a
+/// trickle-fed planner spends `window / QUIET_PLAN_MIN_MOVES` plan passes per
+/// move — at high move rates this quotient, not the per-plan cost, is what
+/// decides whether planning keeps up with the print.
+const QUIET_PLAN_MIN_MOVES: usize = 32;
 
 /// Second pipeline stage: plans jerk-limited S-curve velocity over the
 /// incoming geometry and emits `PlannedMove`s whose velocity bodies are final
@@ -116,6 +119,7 @@ impl Planner {
             Control::Dwell { .. }
             | Control::SetAxisChains(_)
             | Control::SetMesh { .. }
+            | Control::Nudge { .. }
             | Control::Barrier(_) => {
                 assert!(
                     self.moves.is_empty(),
@@ -169,7 +173,7 @@ impl Planner {
             self.entry,
         )
         .unwrap_or_else(|e| panic!("planner: velocity plan failed: {e:?}"));
-        tracing::info!(
+        tracing::debug!(
             subsystem = "motion",
             event = "pipe_plan",
             line_lo = self.moves.first().map_or(0, |m| m.source.start_line),

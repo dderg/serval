@@ -1,9 +1,7 @@
-use crate::Float;
-
-pub trait NurbsView<T: Float> {
+pub trait NurbsView {
     fn degree(&self) -> u8;
-    fn knots(&self) -> &[T];
-    fn control_points(&self) -> &[T];
+    fn knots(&self) -> &[f64];
+    fn control_points(&self) -> &[f64];
 
     #[inline]
     fn control_point_count(&self) -> usize {
@@ -11,10 +9,10 @@ pub trait NurbsView<T: Float> {
     }
 }
 
-pub trait VectorNurbsView<T: Float, const N: usize> {
+pub trait VectorNurbsView<const N: usize> {
     fn degree(&self) -> u8;
-    fn knots(&self) -> &[T];
-    fn control_points(&self) -> &[[T; N]];
+    fn knots(&self) -> &[f64];
+    fn control_points(&self) -> &[[f64; N]];
 
     #[inline]
     fn control_point_count(&self) -> usize {

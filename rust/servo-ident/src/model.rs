@@ -14,7 +14,7 @@ pub struct PhysicalParams {
     pub coulomb_rev: Vec<f64>,
 }
 
-fn coulomb_cols(v: f64) -> (f64, f64) {
+pub fn coulomb_cols(v: f64) -> (f64, f64) {
     if v > COULOMB_DEADBAND_MM_S {
         (1.0, 0.0)
     } else if v < -COULOMB_DEADBAND_MM_S {
@@ -41,41 +41,59 @@ impl Structure {
         }
     }
 
-    /// Regression row such that tau_motor = row(motor, acc, vel) · theta.
-    pub fn row(self, motor: usize, acc: &[f64], vel: &[f64]) -> Vec<f64> {
+    /// Regression row such that tau_motor = row(motor, acc, vel, cf, cr) · theta.
+    /// `cf`/`cr` are the per-motor coulomb regressor columns — computed from
+    /// raw velocity via `coulomb_cols`, then filtered identically to every
+    /// other channel so the regression stays consistent under band-limiting.
+    pub fn row(self, motor: usize, acc: &[f64], vel: &[f64], cf: &[f64], cr: &[f64]) -> Vec<f64> {
         match self {
             Structure::CartesianScalar => {
                 assert_eq!(motor, 0);
                 assert!(
-                    !acc.is_empty() && !vel.is_empty(),
-                    "scalar row needs 1 acc and 1 vel sample, got {} and {}",
-                    acc.len(),
-                    vel.len()
+                    !acc.is_empty() && !vel.is_empty() && !cf.is_empty() && !cr.is_empty(),
+                    "scalar row needs 1 sample of each channel"
                 );
-                let (cf, cr) = coulomb_cols(vel[0]);
-                vec![acc[0], vel[0], cf, cr]
+                vec![acc[0], vel[0], cf[0], cr[0]]
             }
             Structure::CoreXY => {
                 assert!(motor < 2);
                 assert!(
-                    acc.len() >= 2 && vel.len() >= 2,
-                    "corexy row needs 2 acc and 2 vel samples, got {} and {}",
-                    acc.len(),
-                    vel.len()
+                    acc.len() >= 2 && vel.len() >= 2 && cf.len() >= 2 && cr.len() >= 2,
+                    "corexy row needs 2 samples of each channel"
                 );
                 let other = 1 - motor;
-                let (cf, cr) = coulomb_cols(vel[motor]);
                 #[allow(clippy::indexing_slicing)]
                 let mut r = vec![acc[motor], acc[other], 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
                 let base = 2 + 3 * motor;
                 #[allow(clippy::indexing_slicing)]
                 {
                     r[base] = vel[motor];
-                    r[base + 1] = cf;
-                    r[base + 2] = cr;
+                    r[base + 1] = cf[motor];
+                    r[base + 2] = cr[motor];
                 }
                 r
             }
+        }
+    }
+
+    pub fn pack(self, p: &PhysicalParams) -> Vec<f64> {
+        match self {
+            Structure::CartesianScalar => vec![
+                p.mass[0][0],
+                p.viscous[0],
+                p.coulomb_fwd[0],
+                p.coulomb_rev[0],
+            ],
+            Structure::CoreXY => vec![
+                p.mass[0][0],
+                p.mass[0][1],
+                p.viscous[0],
+                p.coulomb_fwd[0],
+                p.coulomb_rev[0],
+                p.viscous[1],
+                p.coulomb_fwd[1],
+                p.coulomb_rev[1],
+            ],
         }
     }
 

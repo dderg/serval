@@ -269,10 +269,7 @@ class _LinearKinematics:
             return
         self._check_endstops(move)
         z_ratio = move.move_d / abs(move.axes_d[2])
-        move.limit_speed(
-            self._motion.max_z_velocity * z_ratio,
-            self._motion.max_z_accel * z_ratio,
-        )
+        move.limit_speed(self._motion.max_z_velocity * z_ratio)
 
     def set_position(self, newpos, homing_axes=()):
         self._motion.engine.set_position(newpos[0], newpos[1], newpos[2])

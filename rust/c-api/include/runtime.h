@@ -105,8 +105,6 @@ void runtime_handle_seed_widen(struct Runtime *rt, uint64_t baseline_widened_clo
 
 uint8_t runtime_handle_status(struct Runtime *rt);
 
-uint32_t runtime_handle_tick_blocker(struct Runtime *rt);
-
 uint32_t runtime_handle_tick_blocker_pc(struct Runtime *rt);
 
 uint32_t runtime_handle_tick_counter(struct Runtime *rt);
@@ -147,8 +145,6 @@ int32_t runtime_set_stepper_offset(struct Runtime *rt,
                                    uint8_t stepper_idx,
                                    int32_t delta_microsteps,
                                    uint16_t max_microsteps_per_sample);
-
-int32_t runtime_stream_flush(struct Runtime *rt, uint32_t *out_credit_epoch);
 
 void runtime_tick_sample(struct Runtime *rt);
 

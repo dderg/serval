@@ -58,15 +58,13 @@ class PrinterNeoPixel:
             " bit_max_ticks=%d reset_min_ticks=%d"
             % (self.oid, self.pin, len(self.color_data), bmt, rmt)
         )
-        cmd_queue = self.mcu.alloc_command_queue()
         self.neopixel_update_cmd = self.mcu.lookup_command(
-            "neopixel_update oid=%c pos=%hu data=%*s", cq=cmd_queue
+            "neopixel_update oid=%c pos=%hu data=%*s"
         )
         self.neopixel_send_cmd = self.mcu.lookup_query_command(
             "neopixel_send oid=%c",
             "neopixel_result oid=%c success=%c",
             oid=self.oid,
-            cq=cmd_queue,
         )
 
     def update_color_data(self, led_state):
