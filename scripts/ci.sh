@@ -55,7 +55,7 @@ job_rust_mcu_h7() {
     cd "$RUST"
     env "${MCU_ENV[@]}" \
         cargo build -p c-api --no-default-features \
-        --features mcu-h7,header-nurbs,header-runtime,motion-module-stepper \
+        --features mcu-h7,header-runtime,motion-module-stepper \
         --target thumbv7em-none-eabi
 }
 
@@ -63,7 +63,7 @@ job_rust_mcu_f4() {
     cd "$RUST"
     env "${MCU_ENV[@]}" \
         cargo build -p c-api --no-default-features \
-        --features mcu-f4,header-nurbs,header-runtime,motion-module-stepper \
+        --features mcu-f4,header-runtime,motion-module-stepper \
         --target thumbv7em-none-eabi
 }
 
@@ -71,7 +71,7 @@ job_rust_mcu_g0() {
     cd "$RUST"
     env "${MCU_ENV[@]}" \
         cargo build -p c-api --no-default-features \
-        --features mcu-g0,header-nurbs,header-runtime,motion-module-stepper \
+        --features mcu-g0,header-runtime,motion-module-stepper \
         --target thumbv6m-none-eabi
 }
 
@@ -89,9 +89,9 @@ job_cbindgen_drift() {
 job_c_smoke() {
     cd "$RUST"
     cargo build -p c-api --no-default-features \
-        --features host,header-nurbs,header-runtime --release
+        --features host,header-runtime --release
     cargo test -p c-api --no-default-features \
-        --features host,header-nurbs,header-runtime \
+        --features host,header-runtime \
         --test c_smoke_build
 }
 
@@ -133,7 +133,7 @@ job_panic_grep() {
     env "${MCU_ENV[@]}" \
         cargo rustc -p c-api --release \
         --no-default-features \
-        --features mcu-h7,header-nurbs,header-runtime,motion-module-stepper \
+        --features mcu-h7,header-runtime,motion-module-stepper \
         --target thumbv7em-none-eabi -- --emit=llvm-ir
     shopt -s nullglob
     local ll_files=(target/thumbv7em-none-eabi/release/deps/*.ll)
@@ -149,18 +149,6 @@ job_panic_grep() {
     awk '/^define/{fn=$0} /panic_bounds_check/{print fn}' "${ll_files[@]}" \
         | grep -oE 'kalico_[a-z0-9_]+' | sort | uniq -c | sed 's/^/    /' || true
 
-    local nurbs_panics
-    nurbs_panics=$(awk '
-        /^define/   { infn=1; fn=$0; hp=0 }
-        /panic_bounds_check/ { if (infn) hp=1 }
-        /^}/        { if (infn && hp && fn ~ /nurbs/) print fn; infn=0 }
-    ' "${ll_files[@]}")
-    if [ -n "$nurbs_panics" ]; then
-        echo "REGRESSION: panic path(s) in NURBS de Boor evaluator:"
-        echo "$nurbs_panics" | sed 's/^/    /'
-        return 1
-    fi
-    echo "NURBS de Boor evaluator is panic-free. OK."
 }
 
 job_watchdog_canary() {

@@ -1,7 +1,7 @@
 #![allow(unsafe_code)]
 
 use core::cell::UnsafeCell;
-use portable_atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU16, AtomicU32, AtomicU64};
+use portable_atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU16, AtomicU32};
 
 use crate::clock::WidenState;
 use crate::engine::Engine;
@@ -100,17 +100,6 @@ pub struct SharedState {
     pub widened_now_lo: AtomicU32,
     pub widened_now_hi: AtomicU32,
     pub widened_now_seq: AtomicU32,
-    pub sample_drop_pending: AtomicBool,
-    /// fault_detail 0xFB: low 32 bits of `now - seg.t_start` inside
-    /// `runtime_modulated_tick`. If stuck at 0, the clock is behind
-    /// `seg.t_start` and the `elapsed >= duration` retirement check can't fire.
-    pub last_modulated_elapsed_lo: AtomicU32,
-    /// fault_detail 0xFC: companion to `last_modulated_elapsed_lo`.
-    /// `0xFB >= 0xFC` means retirement should fire on the next tick.
-    pub last_modulated_duration_lo: AtomicU32,
-    pub modulated_retire_attempts: AtomicU32,
-    pub modulated_retire_successes: AtomicU32,
-    pub last_retire_consumers_after_clear: AtomicU32,
     /// §9.2: last latched fault's encoded `fault_detail` payload.
     /// Set in lockstep with `last_error`. `0` when no fault has latched.
     pub fault_detail: AtomicU32,
@@ -133,14 +122,6 @@ pub struct SharedState {
     /// `0` disables phase stepping on this MCU.
     pub phase_motor_count: AtomicU8,
 
-    pub producer_pending: AtomicBool,
-    pub producer_runs_total: AtomicU64,
-    pub consumer_pulses_total: [AtomicU64; 4],
-    pub consumer_underrun_total: [AtomicU64; 4],
-    pub ring_high_water: [AtomicU32; 4],
-    pub producer_steps_pushed_total: AtomicU64,
-    pub producer_motor_finished_curve_total: AtomicU64,
-    pub producer_segment_retired_total: AtomicU64,
     /// Per-stage running MAX cycle counts for `runtime::tick::isr_sample_tick`.
     /// Read via status_drain rotation as tags 0xE6/0xE7/0xE8.
     /// If any stage approaches the TIM5 period (~13000 cycles at 40 kHz on H7),
@@ -151,32 +132,9 @@ pub struct SharedState {
     /// Increments per ISR that exceeds 30000 cycles (~58 µs) of total body
     /// time — circuit-breaker signal.
     pub isr_overrun_count: AtomicU32,
-    pub isr_deq_some_count: AtomicU32,
-    pub isr_deq_none_count: AtomicU32,
-    pub isr_parked_count: AtomicU32,
-    pub isr_armed_count: AtomicU32,
-    /// Comparands at the most-recent park/arm decision. If
-    /// `isr_parked_count > 0`, `isr_last_t_start_lo > isr_last_widened_lo`
-    /// is the actual park reason.
     pub isr_last_t_start_lo: AtomicU32,
-    pub isr_last_widened_lo: AtomicU32,
-    /// High 32 bits of `seg.t_start` and `widened_now` at the most-recent
-    /// park/arm decision. Distinguishes wrong-epoch t_start from narrowed-to-u32-on-wire
-    /// t_start (`isr_last_t_start_hi == 0` while `isr_last_widened_hi != 0`).
-    pub isr_last_t_start_hi: AtomicU32,
-    pub isr_last_widened_hi: AtomicU32,
-    /// Low / high 32 bits of `now.saturating_sub(seg.t_start)` at the
-    /// same park/arm decision. If ≈ uptime×clock_freq, t_start was 0 or
-    /// in the wrong epoch.
-    pub isr_arm_delta_lo: AtomicU32,
-    pub isr_arm_delta_hi: AtomicU32,
     pub isr_last_p_end_bits: AtomicU32,
     pub isr_last_microstep_bits: AtomicU32,
-    pub isr_last_c0_bits: AtomicU32,
-    /// f32-bits of `t_local` (sec since piece start). If huge, the
-    /// time-domain mapping between seg.t_start (cycles) and widened_now
-    /// (cycles) is broken or duration is wrongly tiny.
-    pub isr_last_t_local_bits: AtomicU32,
     pub isr_step_push_count: AtomicU32,
     pub isr_last_signed_steps: AtomicU32,
     pub isr_pulse_call_count: AtomicU32,
@@ -186,59 +144,9 @@ pub struct SharedState {
     /// Packed `(axis_idx << 16) | raw_mode_byte` from the most recent
     /// `dispatch_axis` call.
     pub isr_last_axis_mode_packed: AtomicU32,
-    /// Raw packed `seg.x_handle` of the most recently armed segment.
-    /// `0xFFFE_FFFE` = UNUSED_SENTINEL.
-    pub isr_last_arm_x_handle: AtomicU32,
-    /// Outcome of arm for X axis: 0 = never armed, 1 = UNUSED handle,
-    /// 2 = `lookup_active` returned None (slot/gen mismatch),
-    /// 3 = curve loaded but `piece_count == 0`, 4 = OK.
-    pub isr_last_arm_x_outcome: AtomicU32,
-    pub isr_last_arm_x_piece_count: AtomicU32,
-    /// `participating_mask` snapshot at end of arm.
-    /// Bit 0 = A/X, 1 = B/Y, 2 = Z, 3 = E. If 0, no axes participated
-    /// → instant retire ("ghost retire" symptom).
-    pub isr_last_arm_participating: AtomicU32,
-    /// f32-bits of `pieces[0].duration` for the X curve at arm. If 0
-    /// (= 0.0 s), `arm_piece` computes `inv_scale = 2 / (duration ·
-    /// cycles_per_second)` as inf/NaN → signed_steps=0. Coefficients stay
-    /// Chebyshev on `u ∈ [-1, 1]`; this 2/duration derivative scale is the
-    /// only place duration enters the arm path.
-    pub isr_last_arm_x_piece0_duration_bits: AtomicU32,
-    /// Incremented in `producer_step` every time `producer_current.is_none()`
-    /// is entered. Cross-check with `producer_segment_dequeued_total`:
-    ///   `observed_none == dequeued` → ISR not clearing producer_current after retire.
-    ///   `observed_none >> dequeued` → `queue.dequeue()` returns None despite entries (SPSC bug).
-    pub producer_observed_none_total: AtomicU64,
-    pub producer_step_last_len_snapshot: AtomicU32,
-    pub producer_step_current_is_some_snapshot: AtomicU8,
-    pub producer_current_present: AtomicBool,
-    pub producer_fetch_attempts_total: AtomicU64,
-    pub producer_enqueue_success_total: AtomicU64,
-    pub last_push_segment_result: AtomicI32,
-    pub producer_primary_resolved_total: AtomicU64,
-    pub producer_primary_stale_total: AtomicU64,
-    pub producer_primary_unused_total: AtomicU64,
-    pub push_segment_all_unused_total: AtomicU64,
-    pub last_push_x_handle_packed: AtomicU32,
-    pub last_push_y_handle_packed: AtomicU32,
-    pub last_push_consumers_remaining: AtomicU32,
-    /// `cps[0]` (start CP, mm) of the last resolved primary X curve, raw f32 bits.
-    pub last_resolved_primary_cps_0: AtomicU32,
-    /// `cps[3]` (end CP, mm) of the last resolved primary X curve, raw f32
-    /// bits. Matching `cps_0` means zero displacement — indicates a planner-side bug.
-    pub last_resolved_primary_cps_3: AtomicU32,
-    /// CoreXY-combined `cps[0]` after `kine.combine` for motor A (A = X + Y),
-    /// f32 bits. Compare with `last_resolved_primary_cps_0` to detect kinematic-mixing bugs.
-    pub last_combined_motor_a_cps_0: AtomicU32,
-    pub last_combined_motor_a_cps_3: AtomicU32,
 
-    pub queue_high_water: [AtomicU32; 4],
     pub queue_overflow_count: [AtomicU32; 4],
-    pub spi_saturated_samples: AtomicU32,
-    pub sample_isr_peak_cycles: AtomicU32,
-    pub per_axis_consumer_peak_cycles: [AtomicU32; 4],
 
-    pub dispatcher_floor_cycles: AtomicU32,
     pub sample_period_cycles: AtomicU32,
 
     pub max_phase_offset_ramp_per_sample: AtomicU16,
@@ -255,12 +163,6 @@ impl SharedState {
             widened_now_lo: AtomicU32::new(0),
             widened_now_hi: AtomicU32::new(0),
             widened_now_seq: AtomicU32::new(0),
-            sample_drop_pending: AtomicBool::new(false),
-            last_modulated_elapsed_lo: AtomicU32::new(0),
-            last_modulated_duration_lo: AtomicU32::new(0),
-            modulated_retire_attempts: AtomicU32::new(0),
-            modulated_retire_successes: AtomicU32::new(0),
-            last_retire_consumers_after_clear: AtomicU32::new(0),
             fault_detail: AtomicU32::new(0),
             tick_blocker_func: AtomicU32::new(0),
             tick_blocker_pc: AtomicU32::new(0),
@@ -320,47 +222,13 @@ impl SharedState {
                 AtomicU8::new(0xFF),
             ],
             phase_motor_count: AtomicU8::new(0),
-            producer_pending: AtomicBool::new(false),
-            producer_runs_total: AtomicU64::new(0),
-            consumer_pulses_total: [
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-            ],
-            consumer_underrun_total: [
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-                AtomicU64::new(0),
-            ],
-            ring_high_water: [
-                AtomicU32::new(0),
-                AtomicU32::new(0),
-                AtomicU32::new(0),
-                AtomicU32::new(0),
-            ],
-            producer_steps_pushed_total: AtomicU64::new(0),
-            producer_motor_finished_curve_total: AtomicU64::new(0),
-            producer_segment_retired_total: AtomicU64::new(0),
             isr_widen_cycles_max: AtomicU32::new(0),
             isr_arm_cycles_max: AtomicU32::new(0),
             isr_eval_cycles_max: AtomicU32::new(0),
             isr_overrun_count: AtomicU32::new(0),
-            isr_deq_some_count: AtomicU32::new(0),
-            isr_deq_none_count: AtomicU32::new(0),
-            isr_parked_count: AtomicU32::new(0),
-            isr_armed_count: AtomicU32::new(0),
             isr_last_t_start_lo: AtomicU32::new(0),
-            isr_last_widened_lo: AtomicU32::new(0),
-            isr_last_t_start_hi: AtomicU32::new(0),
-            isr_last_widened_hi: AtomicU32::new(0),
-            isr_arm_delta_lo: AtomicU32::new(0),
-            isr_arm_delta_hi: AtomicU32::new(0),
             isr_last_p_end_bits: AtomicU32::new(0),
             isr_last_microstep_bits: AtomicU32::new(0),
-            isr_last_c0_bits: AtomicU32::new(0),
-            isr_last_t_local_bits: AtomicU32::new(0),
             isr_step_push_count: AtomicU32::new(0),
             isr_last_signed_steps: AtomicU32::new(0),
             isr_pulse_call_count: AtomicU32::new(0),
@@ -368,37 +236,9 @@ impl SharedState {
             isr_pulse_bad_mstep_count: AtomicU32::new(0),
             isr_phase_call_count: AtomicU32::new(0),
             isr_last_axis_mode_packed: AtomicU32::new(0),
-            isr_last_arm_x_handle: AtomicU32::new(0),
-            isr_last_arm_x_outcome: AtomicU32::new(0),
-            isr_last_arm_x_piece_count: AtomicU32::new(0),
-            isr_last_arm_participating: AtomicU32::new(0),
-            isr_last_arm_x_piece0_duration_bits: AtomicU32::new(0),
-            producer_observed_none_total: AtomicU64::new(0),
-            producer_step_last_len_snapshot: AtomicU32::new(0),
-            producer_step_current_is_some_snapshot: AtomicU8::new(0),
-            producer_current_present: AtomicBool::new(false),
-            producer_fetch_attempts_total: AtomicU64::new(0),
-            producer_enqueue_success_total: AtomicU64::new(0),
-            last_push_segment_result: AtomicI32::new(0),
-            producer_primary_resolved_total: AtomicU64::new(0),
-            producer_primary_stale_total: AtomicU64::new(0),
-            producer_primary_unused_total: AtomicU64::new(0),
-            push_segment_all_unused_total: AtomicU64::new(0),
-            last_push_x_handle_packed: AtomicU32::new(0),
-            last_push_y_handle_packed: AtomicU32::new(0),
-            last_push_consumers_remaining: AtomicU32::new(0),
-            last_resolved_primary_cps_0: AtomicU32::new(0),
-            last_resolved_primary_cps_3: AtomicU32::new(0),
-            last_combined_motor_a_cps_0: AtomicU32::new(0),
-            last_combined_motor_a_cps_3: AtomicU32::new(0),
 
-            queue_high_water: [const { AtomicU32::new(0) }; 4],
             queue_overflow_count: [const { AtomicU32::new(0) }; 4],
-            spi_saturated_samples: AtomicU32::new(0),
-            sample_isr_peak_cycles: AtomicU32::new(0),
-            per_axis_consumer_peak_cycles: [const { AtomicU32::new(0) }; 4],
 
-            dispatcher_floor_cycles: AtomicU32::new(0),
             sample_period_cycles: AtomicU32::new(0),
 
             max_phase_offset_ramp_per_sample: AtomicU16::new(0),
@@ -481,15 +321,9 @@ impl RuntimeContext {
             } else {
                 (freq + sample_rate_hz / 2) / sample_rate_hz
             };
-            #[allow(clippy::integer_division)]
-            let dispatcher_floor_cycles_init: u32 = freq / 1_000_000;
             let shared_ref: *const SharedState = core::ptr::addr_of!((*rt_ptr).shared);
             (*shared_ref).sample_period_cycles.store(
                 sample_period_cycles_init,
-                core::sync::atomic::Ordering::Release,
-            );
-            (*shared_ref).dispatcher_floor_cycles.store(
-                dispatcher_floor_cycles_init,
                 core::sync::atomic::Ordering::Release,
             );
 

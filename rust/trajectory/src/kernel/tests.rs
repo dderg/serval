@@ -126,7 +126,7 @@ fn smooth_mzv_support_width() {
     assert!((hi - lo - expected_t_sm).abs() < 1e-12);
 }
 
-fn eval_kernel(kernel: &PiecewisePolynomialKernel<f64>, t: f64) -> f64 {
+fn eval_kernel(kernel: &PiecewisePolynomialKernel, t: f64) -> f64 {
     for piece in &kernel.pieces {
         if t >= piece.u_start && t <= piece.u_end {
             return piece.evaluate(t);

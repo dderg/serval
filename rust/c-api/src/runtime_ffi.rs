@@ -164,16 +164,6 @@ pub mod exports {
     }
 
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_handle_tick_blocker(rt: *mut Runtime) -> u32 {
-        let ctx = guarded_ctx!(rt, 0);
-        // SAFETY: read-only SharedState atomics; no &mut.
-        unsafe {
-            let shared_ptr: *const SharedState = core::ptr::addr_of!((*ctx).shared);
-            (*shared_ptr).tick_blocker_func.load(Ordering::Acquire)
-        }
-    }
-
-    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn runtime_handle_tick_blocker_pc(rt: *mut Runtime) -> u32 {
         let ctx = guarded_ctx!(rt, 0);
         // SAFETY: read-only SharedState atomics; no &mut.
@@ -249,16 +239,6 @@ pub mod exports {
             (*isr_ptr).engine.seed_position([x, y, z]);
         }
         RUNTIME_OK
-    }
-
-    #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn runtime_stream_flush(
-        rt: *mut Runtime,
-        out_credit_epoch: *mut u32,
-    ) -> i32 {
-        let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
-        // SAFETY: rt non-null + INIT_DONE verified; flush() performs its own half-split projections.
-        unsafe { runtime::stream::flush(ctx, out_credit_epoch) }
     }
 
     #[unsafe(no_mangle)]

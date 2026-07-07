@@ -1,5 +1,3 @@
-#![cfg(feature = "host")]
-
 #[test]
 fn tiny_knot_range_evaluates_without_nan() {
     let curve = nurbs::ScalarNurbs::try_new(1, vec![0.0_f64, 0.0, 1e-8, 1e-8], vec![0.0, 1.0])
@@ -10,7 +8,7 @@ fn tiny_knot_range_evaluates_without_nan() {
 
 #[test]
 fn curvature_clamps_at_cusp_like_input() {
-    let curve = nurbs::VectorNurbs::<f64, 3>::try_new(
+    let curve = nurbs::VectorNurbs::<3>::try_new(
         2,
         vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
         vec![[0.0, 0.0, 0.0], [1e-10, 0.0, 0.0], [1.0, 0.0, 0.0]],
@@ -24,7 +22,7 @@ fn curvature_clamps_at_cusp_like_input() {
 
 #[test]
 fn arc_length_builder_rejects_truly_degenerate_curve() {
-    let curve = nurbs::VectorNurbs::<f64, 3>::try_new(
+    let curve = nurbs::VectorNurbs::<3>::try_new(
         1,
         vec![0.0, 0.0, 1.0, 1.0],
         vec![[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]],

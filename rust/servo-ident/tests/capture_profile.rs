@@ -1,6 +1,5 @@
 use servo_ident::capture::{
-    parse_capture_csv, restrict_to_steady_accel, restrict_to_tracking, Capture, PlateauOptions,
-    TrackingOptions,
+    parse_capture_csv, steady_accel_keep, tracking_keep, Capture, PlateauOptions, TrackingOptions,
 };
 use servo_ident::model::PhysicalParams;
 use servo_ident::profile_out::{c0006_recommendation, render_profile};
@@ -55,16 +54,16 @@ fn steady_accel_mask_keeps_plateau_drops_ramp() {
         vel_act: vec![vec![0.0; n]],
         torque: vec![vec![5.0; n]],
     };
-    let masked = restrict_to_steady_accel(&cap, &PlateauOptions::default());
-    assert!(!masked.t.is_empty());
+    let keep_mask = steady_accel_keep(&cap.t, &cap.acc, &PlateauOptions::default());
+    let kept: Vec<f64> = (0..cap.t.len())
+        .filter(|&k| keep_mask[k])
+        .map(|k| cap.acc[0][k])
+        .collect();
+    assert!(!kept.is_empty());
     // every kept cycle is on the flat plateau, none from the ramp.
-    assert!(masked.acc[0].iter().all(|&a| (a - 1000.0).abs() < 1.0));
+    assert!(kept.iter().all(|&a| (a - 1000.0).abs() < 1.0));
     // 60-wide plateau minus the 12-cycle settle window ≈ 48 kept.
-    assert!(
-        masked.acc[0].len() >= 40 && masked.acc[0].len() <= 60,
-        "kept {}",
-        masked.acc[0].len()
-    );
+    assert!(kept.len() >= 40 && kept.len() <= 60, "kept {}", kept.len());
 }
 
 #[test]
@@ -92,13 +91,14 @@ fn tracking_mask_drops_stiction_and_overshoot() {
     // tol = 0.2 * 300 = 60 mm/s: the first cycles of the stuck phase pass
     // (commanded velocity still small), the rest of the stick and the whole
     // overshoot are dropped, the lagging-but-tracking tail is kept.
-    let masked = restrict_to_tracking(&cap, &TrackingOptions::default());
-    assert_eq!(masked.t.len(), 21 + (n - 70));
+    let keep_mask = tracking_keep(&cap.vel, &cap.vel_act, &TrackingOptions::default());
+    let kept: Vec<f64> = (0..cap.t.len())
+        .filter(|&k| keep_mask[k])
+        .map(|k| cap.t[k])
+        .collect();
+    assert_eq!(kept.len(), 21 + (n - 70));
     assert!(
-        masked
-            .t
-            .iter()
-            .all(|&t| t <= 0.020 + 1e-9 || t >= 0.070 - 1e-9),
+        kept.iter().all(|&t| t <= 0.020 + 1e-9 || t >= 0.070 - 1e-9),
         "kept a stuck/overshoot sample"
     );
 }

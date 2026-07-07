@@ -44,17 +44,14 @@ pub mod per_axis_timer;
 pub mod phase_handover;
 pub mod phase_lut;
 pub mod piece_ring;
-pub mod spi_queue;
 pub mod state;
 pub use state::{SetStepModeError, StepMode, set_step_mode};
 pub mod step;
 pub mod step_queue;
 pub mod stepping_state;
-pub mod stream;
 pub mod sub_sample_timing;
 pub mod test_xdirect_capture;
 pub mod tick;
-pub mod wire;
 
 #[cfg(test)]
 mod tests;

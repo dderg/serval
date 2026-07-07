@@ -1,14 +1,14 @@
 use nurbs::algebra::PiecewisePolynomialKernel;
 use nurbs::ScalarNurbs;
 
-fn eval_clamped(curve: &ScalarNurbs<f64>, t: f64) -> f64 {
+fn eval_clamped(curve: &ScalarNurbs, t: f64) -> f64 {
     let knots = curve.knots();
     let lo = knots[0];
     let hi = knots[knots.len() - 1];
     nurbs::eval::eval(curve, t.clamp(lo, hi))
 }
 
-fn eval_kernel(kernel: &PiecewisePolynomialKernel<f64>, z: f64) -> f64 {
+fn eval_kernel(kernel: &PiecewisePolynomialKernel, z: f64) -> f64 {
     let (k_lo, k_hi) = kernel.support();
     if z < k_lo || z > k_hi {
         return 0.0;
@@ -59,28 +59,28 @@ pub struct ShapedSignal<'a> {
     /// segment boundaries, clamp edges). Between two consecutive cuts the
     /// integrand is one polynomial, which the Gauss rule integrates exactly.
     input_breaks: Vec<f64>,
-    kernel: &'a PiecewisePolynomialKernel<f64>,
+    kernel: &'a PiecewisePolynomialKernel,
     /// `k′` and `k″` as piecewise polynomials over the same support, plus the
     /// jump of `k′` at each internal piece boundary (a delta in `k″` — the
     /// triangle kernel has them, the bell kernel does not). With these,
     /// `(f∗k)′ = f∗k′` and `(f∗k)″ = f∗k″ + Σ Δk′·f(t−τ)` are as exact as
     /// `eval` itself — no finite-difference stencil, no stencil noise.
-    d_kernel: PiecewisePolynomialKernel<f64>,
-    dd_kernel: PiecewisePolynomialKernel<f64>,
+    d_kernel: PiecewisePolynomialKernel,
+    dd_kernel: PiecewisePolynomialKernel,
     d_kernel_jumps: Vec<(f64, f64)>,
     k_lo: f64,
     k_hi: f64,
 }
 
 impl<'a> ShapedSignal<'a> {
-    pub fn new(padded: &'a ScalarNurbs<f64>, kernel: &'a PiecewisePolynomialKernel<f64>) -> Self {
+    pub fn new(padded: &'a ScalarNurbs, kernel: &'a PiecewisePolynomialKernel) -> Self {
         let mut breaks = padded.knots().to_vec();
         breaks.dedup_by(|a, b| (*a - *b).abs() <= CUT_DEDUP_EPS_S);
         Self::new_from_evaluator(kernel, |t| eval_clamped(padded, t), breaks)
     }
 
     pub fn new_from_evaluator<F>(
-        kernel: &'a PiecewisePolynomialKernel<f64>,
+        kernel: &'a PiecewisePolynomialKernel,
         eval: F,
         mut input_breaks: Vec<f64>,
     ) -> Self
@@ -154,7 +154,7 @@ impl<'a> ShapedSignal<'a> {
         acc
     }
 
-    fn convolve(&self, t: f64, kernel: &PiecewisePolynomialKernel<f64>) -> f64 {
+    fn convolve(&self, t: f64, kernel: &PiecewisePolynomialKernel) -> f64 {
         let mut cuts: Vec<f64> = Vec::with_capacity(self.kernel.pieces.len() + 9);
         for p in &self.kernel.pieces {
             cuts.push(p.u_start);

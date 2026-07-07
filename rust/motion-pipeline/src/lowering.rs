@@ -436,7 +436,7 @@ impl Sampler<'_> {
         ua: f64,
         ub: f64,
         tol: FitTol,
-    ) -> BezierPiece<f64> {
+    ) -> BezierPiece {
         let h = tb - ta;
         let mono_u = self
             .ladder_fit_axis(axis, ta, tb, tol, true)
@@ -459,7 +459,7 @@ pub(crate) fn truncated_piece(
     u_end: f64,
     h: f64,
     pos_budget_mm: f64,
-) -> BezierPiece<f64> {
+) -> BezierPiece {
     let cheb = truncate_chebyshev_c2_anchored(
         &monomial_u_to_chebyshev(mono_u),
         h,
@@ -478,7 +478,7 @@ pub(crate) fn truncated_piece(
 /// `bezier_pieces_to_nurbs` (uniform degree per curve) and `lane_curve`'s
 /// cross-axis addition for CoreXY mixing require it. Enqueue's Chebyshev
 /// truncation recovers each piece's true degree at the wire.
-fn pad_to_uniform_degree(axes_pieces: &mut [Vec<BezierPiece<f64>>]) {
+fn pad_to_uniform_degree(axes_pieces: &mut [Vec<BezierPiece>]) {
     let max_len = axes_pieces
         .iter()
         .flatten()
@@ -527,7 +527,7 @@ pub fn lower_move(
 ) -> Result<ShapedSegment, LoweringError> {
     let (axes_pieces, total_t) =
         lower_move_pieces(gm, vm, t_start, start_pos, fit_tol, axis_chains)?;
-    let axes: Vec<ScalarNurbs<f64>> = axes_pieces
+    let axes: Vec<ScalarNurbs> = axes_pieces
         .iter()
         .map(|p| bezier_pieces_to_nurbs(p))
         .collect();
@@ -552,7 +552,7 @@ pub fn lower_move_pieces(
     start_pos: &[f64],
     fit_tol: FitTol,
     axis_chains: &[CompiledChain],
-) -> Result<(Vec<Vec<BezierPiece<f64>>>, f64), LoweringError> {
+) -> Result<(Vec<Vec<BezierPiece>>, f64), LoweringError> {
     if gm.source != vm.source {
         return Err(LoweringError::SourceMismatch);
     }
@@ -594,7 +594,7 @@ pub fn lower_move_pieces(
     // signal needs (a follower is blind to path curvature, z to planar motion),
     // and the guarantee is unchanged — every piece of every axis is probed
     // against the same tolerances.
-    let mut axes_pieces: Vec<Vec<BezierPiece<f64>>> = vec![Vec::new(); n_axes];
+    let mut axes_pieces: Vec<Vec<BezierPiece>> = vec![Vec::new(); n_axes];
     let no_knots: Vec<f64> = Vec::new();
     for (axis, pieces) in axes_pieces.iter_mut().enumerate() {
         let driven = [axis];
@@ -684,7 +684,7 @@ fn lower_straight_from_phases(
     t_start: f64,
     start_pos: &[f64],
     axis_chains: &[CompiledChain],
-) -> Result<(Vec<Vec<BezierPiece<f64>>>, f64), LoweringError> {
+) -> Result<(Vec<Vec<BezierPiece>>, f64), LoweringError> {
     let n_axes = start_pos.len().max(3);
     for f in &gm.segment.followers {
         if f.axis_index >= n_axes {
@@ -747,7 +747,7 @@ fn lower_straight_from_phases(
         }
     }
 
-    let mut axes_pieces: Vec<Vec<BezierPiece<f64>>> = vec![Vec::new(); n_axes];
+    let mut axes_pieces: Vec<Vec<BezierPiece>> = vec![Vec::new(); n_axes];
     for (axis, pieces) in axes_pieces.iter_mut().enumerate() {
         let (scale, base) = axis_scale_base(axis);
         for &(p, t0, t1) in &spans {

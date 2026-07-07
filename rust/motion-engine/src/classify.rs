@@ -178,8 +178,8 @@ pub(crate) fn classify_quadratic(
     )
 }
 
-fn build_cubic(cps: [[f64; 3]; 4]) -> Result<VectorNurbs<f64, 3>, ClassifyError> {
-    VectorNurbs::<f64, 3>::try_new(
+fn build_cubic(cps: [[f64; 3]; 4]) -> Result<VectorNurbs<3>, ClassifyError> {
+    VectorNurbs::<3>::try_new(
         3,
         vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
         cps.to_vec(),

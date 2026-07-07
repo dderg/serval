@@ -4,7 +4,6 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
-import os
 import threading
 
 import serial
@@ -44,9 +43,7 @@ class SerialReader:
         self.serialqueue = None
         self.default_cmd_queue = None
         self.stats_buf = None
-        # Threading
         self.lock = threading.Lock()
-        self.background_thread = None
         # Message handlers
         self.handlers = {}
         self.register_response(self._handle_unknown_init, "#unknown")
@@ -54,34 +51,6 @@ class SerialReader:
         # Sent message notification tracking
         self.last_notify_id = 0
         self.pending_notifications = {}
-
-    def _bg_thread(self):
-        response = self.ffi_main.new("struct pull_queue_message *")
-        while True:
-            self.ffi_lib.serialqueue_pull(self.serialqueue, response)
-            count = response.len
-            if count < 0:
-                break
-            if response.notify_id:
-                params = {
-                    "#sent_time": response.sent_time,
-                    "#receive_time": response.receive_time,
-                }
-                completion = self.pending_notifications.pop(response.notify_id)
-                self.reactor.async_complete(completion, params)
-                continue
-            params = self.msgparser.parse(response.msg[0:count])
-            params["#sent_time"] = response.sent_time
-            params["#receive_time"] = response.receive_time
-            hdl = (params["#name"], params.get("oid"))
-            try:
-                with self.lock:
-                    hdl = self.handlers.get(hdl, self.handle_default)
-                    hdl(params)
-            except:
-                logging.exception(
-                    "%sException in serial callback", self.warn_prefix
-                )
 
     def _engine_handle_status_event(self, ev):
         name = "kalico_status_v6"
@@ -226,188 +195,6 @@ class SerialReader:
 
     def _error(self, msg, *params):
         raise error(self.warn_prefix + (msg % params))
-
-    def _get_identify_data(self, eventtime):
-        # Query the "data dictionary" from the micro-controller
-        identify_data = b""
-        while True:
-            msg = "identify offset=%d count=%d" % (len(identify_data), 40)
-            try:
-                params = self.send_with_response(msg, "identify_response")
-            except error as e:
-                logging.exception(
-                    "%sWait for identify_response", self.warn_prefix
-                )
-                return None
-            if params["offset"] == len(identify_data):
-                msgdata = params["data"]
-                if not msgdata:
-                    # Done
-                    return identify_data
-                identify_data += msgdata
-
-    def _start_session(self, serial_dev, serial_fd_type=b"u", client_id=0):
-        self.serial_dev = serial_dev
-        self.serialqueue = self.ffi_main.gc(
-            self.ffi_lib.serialqueue_alloc(
-                serial_dev.fileno(), serial_fd_type, client_id
-            ),
-            self.ffi_lib.serialqueue_free,
-        )
-        self.background_thread = threading.Thread(target=self._bg_thread)
-        self.background_thread.start()
-        # Obtain and load the data dictionary from the firmware
-        completion = self.reactor.register_callback(self._get_identify_data)
-        identify_data = completion.wait(self.reactor.monotonic() + 5.0)
-        if identify_data is None:
-            logging.info("%sTimeout on connect", self.warn_prefix)
-            self.disconnect()
-            return False
-        msgparser = msgproto.MessageParser(warn_prefix=self.warn_prefix)
-        msgparser.process_identify(identify_data)
-        self.msgparser = msgparser
-        self.register_response(self.handle_unknown, "#unknown")
-        # Setup baud adjust
-        if serial_fd_type == b"c":
-            wire_freq = msgparser.get_constant_float("CANBUS_FREQUENCY", None)
-        else:
-            wire_freq = msgparser.get_constant_float("SERIAL_BAUD", None)
-        if wire_freq is not None:
-            self.ffi_lib.serialqueue_set_wire_frequency(
-                self.serialqueue, wire_freq
-            )
-        receive_window = msgparser.get_constant_int("RECEIVE_WINDOW", None)
-        if receive_window is not None:
-            self.ffi_lib.serialqueue_set_receive_window(
-                self.serialqueue, receive_window
-            )
-        return True
-
-    def check_canbus_connect(
-        self, canbus_uuid, canbus_nodeid, canbus_iface="can0"
-    ):
-        import can  # XXX
-
-        try:
-            uuid = int(canbus_uuid, 16)
-        except ValueError:
-            uuid = -1
-        if uuid < 0 or uuid > 0xFFFFFFFFFFFF:
-            self._error("Invalid CAN uuid")
-
-        CANBUS_ID_ADMIN = 0x3F0
-        CMD_QUERY_UNASSIGNED = 0x00
-        CMD_QUERY_UNASSIGNED_EXTENDED = 0x01
-        RESP_NEED_NODEID = 0x20
-        RESP_HAVE_NODEID = 0x21
-        filters = [
-            {
-                "can_id": CANBUS_ID_ADMIN + 1,
-                "can_mask": 0x7FF,
-                "extended": False,
-            }
-        ]
-
-        msg = can.Message(
-            arbitration_id=CANBUS_ID_ADMIN,
-            data=[CMD_QUERY_UNASSIGNED, CMD_QUERY_UNASSIGNED_EXTENDED],
-            is_extended_id=False,
-        )
-        try:
-            bus = can.interface.Bus(
-                channel=canbus_iface,
-                can_filters=filters,
-                bustype="socketcan",
-            )
-            bus.send(msg)
-        except (can.CanError, os.error) as e:
-            logging.warning("%scan issue: %s", self.warn_prefix, e)
-            return False
-
-        start_time = curtime = self.reactor.monotonic()
-        while True:
-            tdiff = start_time + 1.0 - curtime
-            if tdiff <= 0.0:
-                break
-            msg = bus.recv(tdiff)
-            curtime = self.reactor.monotonic()
-            if (
-                msg is None
-                or msg.arbitration_id != CANBUS_ID_ADMIN + 1
-                or msg.dlc < 7
-                or msg.data[0] not in (RESP_NEED_NODEID, RESP_HAVE_NODEID)
-            ):
-                continue
-            found_uuid = sum(
-                [v << ((5 - i) * 8) for i, v in enumerate(msg.data[1:7])]
-            )
-            # logging.info(f"found_uuid: {hex(found_uuid)[2:]}")
-            if found_uuid == uuid:
-                self.disconnect()
-                bus.close = bus.shutdown  # XXX
-                return True
-        bus.close = bus.shutdown  # XXX
-        # logging.info(f"couldn't find uuid: {hex(uuid)[2:]}")
-        return False
-
-    def connect_canbus(self, canbus_uuid, canbus_nodeid, canbus_iface="can0"):
-        import can  # XXX
-
-        txid = canbus_nodeid * 2 + 256
-        filters = [{"can_id": txid + 1, "can_mask": 0x7FF, "extended": False}]
-        # Prep for SET_NODEID command
-        try:
-            uuid = int(canbus_uuid, 16)
-        except ValueError:
-            uuid = -1
-        if uuid < 0 or uuid > 0xFFFFFFFFFFFF:
-            self._error("Invalid CAN uuid")
-        uuid = [(uuid >> (40 - i * 8)) & 0xFF for i in range(6)]
-        CANBUS_ID_ADMIN = 0x3F0
-        CMD_SET_NODEID = 0x01
-        set_id_cmd = [CMD_SET_NODEID] + uuid + [canbus_nodeid]
-        set_id_msg = can.Message(
-            arbitration_id=CANBUS_ID_ADMIN,
-            data=set_id_cmd,
-            is_extended_id=False,
-        )
-        # Start connection attempt
-        logging.info("%sStarting CAN connect", self.warn_prefix)
-        start_time = self.reactor.monotonic()
-        while True:
-            if self.reactor.monotonic() > start_time + 90.0:
-                self._error("Unable to connect")
-            try:
-                bus = can.interface.Bus(
-                    channel=canbus_iface,
-                    can_filters=filters,
-                    bustype="socketcan",
-                )
-                bus.send(set_id_msg)
-            except (can.CanError, os.error) as e:
-                logging.warning(
-                    "%sUnable to open CAN port: %s", self.warn_prefix, e
-                )
-                self.reactor.pause(self.reactor.monotonic() + 5.0)
-                continue
-            bus.close = bus.shutdown  # XXX
-            ret = self._start_session(bus, b"c", txid)
-            if not ret:
-                continue
-            # Verify correct canbus_nodeid to canbus_uuid mapping
-            try:
-                params = self.send_with_response("get_canbus_id", "canbus_id")
-                got_uuid = bytearray(params["canbus_uuid"])
-                if got_uuid == bytearray(uuid):
-                    break
-            except:
-                logging.exception(
-                    "%sError in canbus_uuid check", self.warn_prefix
-                )
-            logging.info(
-                "%sFailed to match canbus_uuid - retrying..", self.warn_prefix
-            )
-            self.disconnect()
 
     def connect_pipe(self, filename, baud=0):
         logging.info("%sStarting connect", self.warn_prefix)

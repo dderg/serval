@@ -83,10 +83,6 @@ impl Engine {
         }
     }
 
-    pub fn new_production(clock_freq: u32, sample_rate_hz: u32) -> Self {
-        Self::new(clock_freq, sample_rate_hz)
-    }
-
     #[inline]
     fn compute_sample_period(clock_freq: u32, sample_rate_hz: u32) -> (f32, u32) {
         if sample_rate_hz == 0 {
@@ -438,26 +434,6 @@ impl Engine {
         0
     }
 
-    pub fn configure_axis_legacy(
-        &mut self,
-        axis_idx: u8,
-        mode: StepMode,
-        microstep_distance: f32,
-        bindings: &[StepperBindingRust],
-        total_ring_pieces: usize,
-    ) -> i32 {
-        let remaining = total_ring_pieces.saturating_sub(self.ring_alloc_cursor);
-        let default_depth = remaining.min(64).max(1);
-        self.configure_axis(
-            axis_idx,
-            mode,
-            microstep_distance,
-            default_depth,
-            bindings,
-            total_ring_pieces,
-        )
-    }
-
     pub fn set_axis_mode(&mut self, axis_idx: u8, new_mode_byte: u8) -> i32 {
         if (axis_idx as usize) >= MAX_AXES {
             return -1;
@@ -736,29 +712,11 @@ impl Engine {
     }
 
     #[cfg(any(test, feature = "host"))]
-    pub fn test_set_sample_period(&mut self, sample_rate_hz: u32) {
-        let cycles = if sample_rate_hz == 0 || self.cycles_per_second == 0.0 {
-            0
-        } else {
-            (self.cycles_per_second / (sample_rate_hz as f32)).round() as u32
-        };
-        self.sample_period_cycles = cycles;
-    }
-
-    #[cfg(any(test, feature = "host"))]
     pub fn test_install_step_queues(
         &mut self,
         queues: [*mut crate::step_queue::StepQueue; MAX_AXES],
     ) {
         self.test_queue_ptrs = queues;
-    }
-
-    #[cfg(any(test, feature = "host"))]
-    pub fn test_queue_ptr(&self, axis_idx: usize) -> *mut crate::step_queue::StepQueue {
-        self.test_queue_ptrs
-            .get(axis_idx)
-            .copied()
-            .unwrap_or(core::ptr::null_mut())
     }
 }
 

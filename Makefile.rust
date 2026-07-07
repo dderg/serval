@@ -33,7 +33,7 @@ motion-engine:
 MOTION_ENGINE_FAST_SRC = rust/target/snapshot/lib_motion_engine.$(MOTION_ENGINE_EXT)
 
 motion-engine-fast:
-	cd rust && cargo build -p motion-engine --profile snapshot --features extension-module
+	cd rust && cargo build -p motion-engine --profile snapshot --features extension-module,snapshot
 	rm -f $(MOTION_ENGINE_DEST)
 	cp $(MOTION_ENGINE_FAST_SRC) $(MOTION_ENGINE_DEST)
 

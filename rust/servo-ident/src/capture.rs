@@ -91,21 +91,6 @@ pub fn parse_capture_csv(text: &str, axes: &[&str]) -> Result<Capture, CaptureEr
     })
 }
 
-fn select(cap: &Capture, keep: &[usize]) -> Capture {
-    let pick = |cols: &[Vec<f64>]| -> Vec<Vec<f64>> {
-        cols.iter()
-            .map(|c| keep.iter().map(|&k| c[k]).collect())
-            .collect()
-    };
-    Capture {
-        t: keep.iter().map(|&k| cap.t[k]).collect(),
-        acc: pick(&cap.acc),
-        vel: pick(&cap.vel),
-        vel_act: pick(&cap.vel_act),
-        torque: pick(&cap.torque),
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct TrackingOptions {
     /// Allowed |vel_act - vel_cmd| as a fraction of the capture's peak
@@ -126,19 +111,12 @@ impl Default for TrackingOptions {
     }
 }
 
-/// Keep only cycles where every motor's measured velocity tracks its
-/// commanded velocity. The fit regresses measured torque against COMMANDED
-/// kinematics, which is only valid where the drive actually executed them —
-/// an untuned or sticking drive produces torque for a motion unrelated to
-/// the command, and fitting through those samples yields negative inertia.
-pub fn restrict_to_tracking(cap: &Capture, opts: &TrackingOptions) -> Capture {
-    let keep_mask = tracking_keep(&cap.vel, &cap.vel_act, opts);
-    let keep: Vec<usize> = (0..cap.t.len()).filter(|&k| keep_mask[k]).collect();
-    select(cap, &keep)
-}
-
 /// Per-sample tracking mask: true where every motor's measured velocity
-/// follows its commanded velocity. See `restrict_to_tracking` for why.
+/// follows its commanded velocity. The fit regresses measured torque against
+/// COMMANDED kinematics, which is only valid where the drive actually
+/// executed them — an untuned or sticking drive produces torque for a motion
+/// unrelated to the command, and fitting through those samples yields
+/// negative inertia.
 pub fn tracking_keep(vel: &[Vec<f64>], vel_act: &[Vec<f64>], opts: &TrackingOptions) -> Vec<bool> {
     let peak = vel.iter().flatten().fold(0.0_f64, |m, &v| m.max(v.abs()));
     let tol = opts.tol_floor.max(opts.tol_frac * peak);
@@ -180,21 +158,12 @@ fn median(values: &[f64]) -> f64 {
     v[v.len() / 2]
 }
 
-/// Keep only cycles on steady constant-acceleration plateaus: every motor's
-/// commanded acceleration has held within tolerance over a contiguous settle
-/// window. There the actual motion has caught up to the command, so regressing
+/// Per-sample plateau mask: true on cycles where every motor's commanded
+/// acceleration has held within tolerance over a contiguous settle window —
+/// there the actual motion has caught up to the command, so regressing
 /// measured torque against the (exact) commanded acceleration is unbiased.
 /// The jerk transitions — where the closed loop lags and the soft-loop
 /// "negative inertia" artifact lives — are dropped.
-pub fn restrict_to_steady_accel(cap: &Capture, opts: &PlateauOptions) -> Capture {
-    let keep_mask = steady_accel_keep(&cap.t, &cap.acc, opts);
-    let keep: Vec<usize> = (0..cap.t.len()).filter(|&k| keep_mask[k]).collect();
-    select(cap, &keep)
-}
-
-/// Per-sample plateau mask: true on cycles where every motor's commanded
-/// acceleration has held within tolerance over a contiguous settle window.
-/// See `restrict_to_steady_accel` for why.
 pub fn steady_accel_keep(t: &[f64], acc: &[Vec<f64>], opts: &PlateauOptions) -> Vec<bool> {
     let n = t.len();
     let n_motors = acc.len();

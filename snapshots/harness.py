@@ -154,8 +154,14 @@ def _import_engine():
     except ModuleNotFoundError as exc:
         raise ImportError(
             "_motion_engine not built — build it with: "
-            "make -f Makefile.rust motion-engine"
+            "make -f Makefile.rust motion-engine-fast"
         ) from exc
+    if not hasattr(_motion_engine, "pipeline_snapshot"):
+        raise ImportError(
+            "_motion_engine was built without the `snapshot` cargo feature — "
+            "pipeline_snapshot is unavailable. Rebuild with: "
+            "make -f Makefile.rust motion-engine-fast"
+        )
     return _motion_engine
 
 
