@@ -267,8 +267,8 @@ impl PyMotionEngine {
             )));
         }
         let mut drives = drives;
-        drives.sort_by_key(|d| d.1);
-        let slot_axes: Vec<usize> = drives.iter().map(|d| d.1).collect();
+        drives.sort_by_key(|d| d.axis);
+        let slot_axes: Vec<usize> = drives.iter().map(|d| d.axis).collect();
 
         if let Err(e) = std::fs::remove_file(socket_path) {
             if e.kind() != std::io::ErrorKind::NotFound {

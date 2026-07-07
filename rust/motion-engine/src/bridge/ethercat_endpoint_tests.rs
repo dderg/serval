@@ -1,9 +1,27 @@
 use super::{
-    endpoint_args, handshake_ethercat_endpoint, poll_socket_ready, slot_for_axis,
+    EthercatDrive, endpoint_args, handshake_ethercat_endpoint, poll_socket_ready, slot_for_axis,
     spawn_ethercat_endpoint,
 };
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
+
+/// A drive with unremarkable defaults; each test overrides only the fields it
+/// exercises via struct-update syntax.
+fn drive() -> EthercatDrive {
+    EthercatDrive {
+        chain_index: 0,
+        axis: 0,
+        counts_per_mm: 1000.0,
+        rotation_distance: 40.0,
+        following_error_counts: None,
+        max_torque_tenth_pct: None,
+        velocity_ff: false,
+        ff_torque_clamp: 30.0,
+        ff_lead_cycles: 0,
+        invert_direction: false,
+        dynamics_profile: None,
+    }
+}
 
 #[test]
 fn slot_for_axis_maps_hits_and_misses() {
@@ -24,19 +42,13 @@ fn endpoint_args_single_drive_uses_legacy_form() {
         250,
         None,
         None,
-        &[(
-            1,
-            0,
-            3276.8,
-            40.0,
-            Some(8192),
-            Some(500),
-            false,
-            30.0,
-            0,
-            false,
-            None,
-        )],
+        &[EthercatDrive {
+            chain_index: 1,
+            counts_per_mm: 3276.8,
+            following_error_counts: Some(8192),
+            max_torque_tenth_pct: Some(500),
+            ..drive()
+        }],
     );
     assert!(!args.iter().any(|a| a == "--slave"));
     assert!(!args.iter().any(|a| a == "--axis"));
@@ -63,8 +75,21 @@ fn endpoint_args_per_drive_ff_flags() {
         None,
         None,
         &[
-            (0, 0, 1000.0, 50.0, None, None, true, 25.0, 2, false, None),
-            (1, 2, 2000.0, 40.0, None, None, false, 60.0, 0, true, None),
+            EthercatDrive {
+                rotation_distance: 50.0,
+                velocity_ff: true,
+                ff_torque_clamp: 25.0,
+                ff_lead_cycles: 2,
+                ..drive()
+            },
+            EthercatDrive {
+                chain_index: 1,
+                axis: 2,
+                counts_per_mm: 2000.0,
+                ff_torque_clamp: 60.0,
+                invert_direction: true,
+                ..drive()
+            },
         ],
     );
     let clamps: Vec<&String> = args
@@ -89,20 +114,17 @@ fn endpoint_args_multi_drive_emits_slave_and_axis_groups() {
         None,
         None,
         &[
-            (0, 0, 1000.0, 50.0, None, None, false, 30.0, 0, false, None),
-            (
-                1,
-                2,
-                2000.0,
-                40.0,
-                Some(4096),
-                None,
-                false,
-                30.0,
-                0,
-                false,
-                None,
-            ),
+            EthercatDrive {
+                rotation_distance: 50.0,
+                ..drive()
+            },
+            EthercatDrive {
+                chain_index: 1,
+                axis: 2,
+                counts_per_mm: 2000.0,
+                following_error_counts: Some(4096),
+                ..drive()
+            },
         ],
     );
     let slave_positions: Vec<&String> = args
@@ -130,32 +152,18 @@ fn endpoint_args_emits_per_slave_dynamics_profile() {
         None,
         None,
         &[
-            (
-                0,
-                0,
-                1000.0,
-                50.0,
-                None,
-                None,
-                false,
-                30.0,
-                0,
-                false,
-                Some("/cfg/x.toml".into()),
-            ),
-            (
-                1,
-                2,
-                2000.0,
-                40.0,
-                None,
-                None,
-                false,
-                30.0,
-                0,
-                false,
-                Some("/cfg/y.toml".into()),
-            ),
+            EthercatDrive {
+                rotation_distance: 50.0,
+                dynamics_profile: Some("/cfg/x.toml".into()),
+                ..drive()
+            },
+            EthercatDrive {
+                chain_index: 1,
+                axis: 2,
+                counts_per_mm: 2000.0,
+                dynamics_profile: Some("/cfg/y.toml".into()),
+                ..drive()
+            },
         ],
     );
     let profiles: Vec<&String> = args
@@ -403,8 +411,21 @@ fn endpoint_args_emit_ff_lead_cycles_only_when_nonzero() {
         None,
         None,
         &[
-            (0, 0, 1000.0, 50.0, None, None, true, 25.0, 2, false, None),
-            (1, 2, 2000.0, 40.0, None, None, false, 60.0, 0, true, None),
+            EthercatDrive {
+                rotation_distance: 50.0,
+                velocity_ff: true,
+                ff_torque_clamp: 25.0,
+                ff_lead_cycles: 2,
+                ..drive()
+            },
+            EthercatDrive {
+                chain_index: 1,
+                axis: 2,
+                counts_per_mm: 2000.0,
+                ff_torque_clamp: 60.0,
+                invert_direction: true,
+                ..drive()
+            },
         ],
     );
     let leads: Vec<&String> = args

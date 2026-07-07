@@ -116,19 +116,25 @@ pub(crate) struct McuConnection {
     pub(crate) ethercat_slot_axes: Vec<usize>,
 }
 
-pub(crate) type EthercatDrive = (
-    i32,
-    usize,
-    f64,
-    f64,
-    Option<u32>,
-    Option<u16>,
-    bool,
-    f64,
-    u32,
-    bool,
-    Option<String>,
-);
+/// One EtherCAT drive slot as `[ethercat_node]` declares it in klippy. The
+/// endpoint process is launched with one flag group per drive; every field
+/// here maps to a `--flag` in `endpoint_args`. Extracted by attribute from the
+/// Python `EthercatDrive` namedtuple, so a reordered field on either side
+/// fails loud instead of silently swapping, say, `axis` and `chain_index`.
+#[derive(Debug, Clone, pyo3::FromPyObject)]
+pub(crate) struct EthercatDrive {
+    pub(crate) chain_index: i32,
+    pub(crate) axis: usize,
+    pub(crate) counts_per_mm: f64,
+    pub(crate) rotation_distance: f64,
+    pub(crate) following_error_counts: Option<u32>,
+    pub(crate) max_torque_tenth_pct: Option<u16>,
+    pub(crate) velocity_ff: bool,
+    pub(crate) ff_torque_clamp: f64,
+    pub(crate) ff_lead_cycles: u32,
+    pub(crate) invert_direction: bool,
+    pub(crate) dynamics_profile: Option<String>,
+}
 
 #[derive(Debug, Clone)]
 
