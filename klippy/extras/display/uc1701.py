@@ -133,9 +133,7 @@ class SPI4wire:
     def __init__(self, config, data_pin_name):
         self.spi = bus.MCU_SPI_from_config(config, 0, default_speed=10000000)
         dc_pin = config.get(data_pin_name)
-        self.mcu_dc = bus.MCU_bus_digital_out(
-            self.spi.get_mcu(), dc_pin, self.spi.get_command_queue()
-        )
+        self.mcu_dc = bus.MCU_bus_digital_out(self.spi.get_mcu(), dc_pin)
 
     def send(self, cmds, is_data=False):
         self.mcu_dc.update_digital_out(
@@ -167,9 +165,7 @@ class ResetHelper:
         self.mcu_reset = None
         if pin_desc is None:
             return
-        self.mcu_reset = bus.MCU_bus_digital_out(
-            io_bus.get_mcu(), pin_desc, io_bus.get_command_queue()
-        )
+        self.mcu_reset = bus.MCU_bus_digital_out(io_bus.get_mcu(), pin_desc)
 
     def init(self):
         if self.mcu_reset is None:

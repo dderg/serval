@@ -110,18 +110,7 @@ pub fn encode_q16(mm: f64) -> i32 {
 }
 
 pub fn build_seed_sends(configs: &[McuAxisConfig], x: f64, y: f64, z: f64) -> Vec<SeedSend> {
-    configs
-        .iter()
-        .map(|cfg| {
-            let m = motor_frame(cfg, [x, y, z]);
-            SeedSend {
-                mcu_id: cfg.mcu_id,
-                x_q16: encode_q16(m[0]),
-                y_q16: encode_q16(m[1]),
-                z_q16: encode_q16(m[2]),
-            }
-        })
-        .collect()
+    build_serial_seed_sends(configs, &HashSet::new(), x, y, z)
 }
 
 pub fn build_serial_seed_sends<S: ::std::hash::BuildHasher>(

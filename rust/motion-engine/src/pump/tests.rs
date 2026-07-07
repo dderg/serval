@@ -1,9 +1,12 @@
+use super::pump_loop::Pump;
 use super::*;
 use crossbeam_channel::unbounded;
+use runtime::piece_ring::PieceEntry;
 use std::collections::BTreeMap;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -109,13 +112,9 @@ fn run_pump_delivers_piece_despite_retired_over_pushed_inversion() {
             control_rx,
             data_rx,
             sink_clone,
-            |_key| RING_DEPTH,
-            |_mcu| None,
-            |_| {},
-            |_, _| {},
+            PumpCallbacks::noop(RING_DEPTH),
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            |_| {},
             Arc::new(AtomicU64::new(0)),
         );
     });
@@ -175,13 +174,9 @@ fn history_records_pieces_at_send_time_not_enqueue_time() {
             control_rx,
             data_rx,
             sink_clone,
-            |_key| RING_DEPTH,
-            |_mcu| None,
-            |_| {},
-            |_, _| {},
+            PumpCallbacks::noop(RING_DEPTH),
             Some(history),
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            |_| {},
             Arc::new(AtomicU64::new(0)),
         );
     });
@@ -277,13 +272,9 @@ fn run_pump_sets_start_slot_from_cursor_and_advances_it() {
             control_rx,
             data_rx,
             sink_clone,
-            |_key| RING_DEPTH,
-            |_mcu| None,
-            |_| {},
-            |_, _| {},
+            PumpCallbacks::noop(RING_DEPTH),
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            |_| {},
             Arc::new(AtomicU64::new(0)),
         );
     });
@@ -382,13 +373,12 @@ fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
             control_rx,
             data_rx,
             sink_clone,
-            |_key| 8,
-            |_mcu| Some((0u64, 180_000_000.0)),
-            |_| {},
-            |_, _| {},
+            PumpCallbacks {
+                mcu_clock_of: Box::new(|_mcu| Some((0u64, 180_000_000.0))),
+                ..PumpCallbacks::noop(8)
+            },
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            |_| {},
             Arc::new(AtomicU64::new(0)),
         );
     });
@@ -484,13 +474,12 @@ fn flush_clears_queued_pieces_and_junctions() {
             control_rx,
             data_rx,
             sink_pump,
-            |_key| 64,
-            move |_mcu| *clock_pump.lock().unwrap(),
-            |_| {},
-            |_, _| {},
+            PumpCallbacks {
+                mcu_clock_of: Box::new(move |_mcu| *clock_pump.lock().unwrap()),
+                ..PumpCallbacks::noop(64)
+            },
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            |_| {},
             Arc::new(AtomicU64::new(0)),
         );
     });
@@ -587,15 +576,15 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
             control_rx,
             data_rx,
             sink_pump,
-            |_key| 64,
-            move |_mcu| *clock_pump.lock().unwrap(),
-            |_| {},
-            move |_k: AxisKey, n: u32| {
-                *abandoned_pump.lock().unwrap() += n;
+            PumpCallbacks {
+                mcu_clock_of: Box::new(move |_mcu| *clock_pump.lock().unwrap()),
+                on_abandon: Box::new(move |_k: AxisKey, n: u32| {
+                    *abandoned_pump.lock().unwrap() += n;
+                }),
+                ..PumpCallbacks::noop(64)
             },
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            |_| {},
             Arc::new(AtomicU64::new(0)),
         );
     });
@@ -673,13 +662,9 @@ fn flush_unknown_key_is_noop() {
             control_rx,
             data_rx,
             NullSink,
-            |_key| 64,
-            |_mcu| None,
-            |_| {},
-            |_, _| {},
+            PumpCallbacks::noop(64),
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            |_| {},
             Arc::new(AtomicU64::new(0)),
         );
     });
@@ -709,13 +694,9 @@ fn barrier_ack_means_flushed_axes_emit_nothing() {
             control_rx,
             data_rx,
             sink_clone,
-            |_| 0,
-            |_| None,
-            |_| {},
-            |_, _| {},
+            PumpCallbacks::noop(0),
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            |_| {},
             backlog_pump,
         );
     });
@@ -763,13 +744,9 @@ fn barrier_acks_on_idle_pump() {
             control_rx,
             data_rx,
             RecordingSink::new(),
-            |_| 8,
-            |_| None,
-            |_| {},
-            |_, _| {},
+            PumpCallbacks::noop(8),
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            |_| {},
             Arc::new(AtomicU64::new(0)),
         );
     });
@@ -801,13 +778,9 @@ fn pump_backlog_reflects_unpushed_pieces() {
             control_rx,
             data_rx,
             RecordingSink::new(),
-            |_key| 0,
-            |_mcu| None,
-            |_| {},
-            |_, _| {},
+            PumpCallbacks::noop(0),
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            |_| {},
             backlog_thread,
         );
     });
@@ -841,13 +814,9 @@ fn pump_backlog_drains_to_zero_when_pushed() {
             control_rx,
             data_rx,
             sink_clone,
-            |_key| 8,
-            |_mcu| None,
-            |_| {},
-            |_, _| {},
+            PumpCallbacks::noop(8),
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            |_| {},
             backlog_thread,
         );
     });
@@ -869,21 +838,11 @@ fn pump_backlog_drains_to_zero_when_pushed() {
     handle.join().unwrap();
 }
 
-fn stalled_queue_pump<D>(
+fn stalled_queue_pump(
     key: AxisKey,
     retirement_stall_fatal: Duration,
-    on_drip_stall: D,
-) -> Pump<
-    NullSink,
-    impl Fn(AxisKey) -> u32,
-    impl Fn(u32) -> Option<(u64, f64)>,
-    impl Fn(AxisKey) + Send + 'static,
-    impl Fn(AxisKey, u32),
-    D,
->
-where
-    D: Fn(String) + Send,
-{
+    on_drip_stall: impl Fn(String) + Send + 'static,
+) -> Pump<NullSink> {
     let mut queues = BTreeMap::new();
     let mut q = AxisQueue::new(1);
     q.pushed = 1;
@@ -895,11 +854,10 @@ where
         junctions: JunctionTracker::default(),
         cohort: None,
         sink: NullSink,
-        ring_depth_of: |_key: AxisKey| 1,
-        mcu_clock_of: |_mcu: u32| None,
-        on_fatal_transport: |_: AxisKey| {},
-        on_abandon: |_: AxisKey, _: u32| {},
-        on_drip_stall,
+        callbacks: PumpCallbacks {
+            on_drip_stall: Box::new(on_drip_stall),
+            ..PumpCallbacks::noop(1)
+        },
         history: None,
         ledger: Arc::new(crate::drain::DrainLedger::new()),
         pending_barrier_acks: Vec::new(),

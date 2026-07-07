@@ -1,5 +1,6 @@
 use super::*;
 use crossbeam_channel::unbounded;
+use runtime::piece_ring::PieceEntry;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -81,15 +82,14 @@ fn stall_detection_fires_when_floor_stuck() {
             control_rx,
             data_rx,
             NullSink,
-            |_| 64,
-            |_| None,
-            |_| {},
-            |_, _| {},
+            PumpCallbacks {
+                on_drip_stall: Box::new(move |msg: String| {
+                    stall_msgs_clone.lock().unwrap().push(msg);
+                }),
+                ..PumpCallbacks::noop(64)
+            },
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            move |msg: String| {
-                stall_msgs_clone.lock().unwrap().push(msg);
-            },
             Arc::new(AtomicU64::new(0)),
         );
     });
@@ -148,15 +148,15 @@ fn non_participant_enqueue_aborts_cohort_and_drops_pieces() {
             control_rx,
             data_rx,
             sink_clone,
-            |_| 64,
-            |_| Some((0u64, 1000.0)),
-            |_| {},
-            |_, _| {},
+            PumpCallbacks {
+                mcu_clock_of: Box::new(|_| Some((0u64, 1000.0))),
+                on_drip_stall: Box::new(move |msg: String| {
+                    stall_msgs_clone.lock().unwrap().push(msg);
+                }),
+                ..PumpCallbacks::noop(64)
+            },
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            move |msg: String| {
-                stall_msgs_clone.lock().unwrap().push(msg);
-            },
             Arc::new(AtomicU64::new(0)),
         );
     });
@@ -217,13 +217,12 @@ fn participant_release_tracks_mcu_clock_horizon() {
             control_rx,
             data_rx,
             sink_clone,
-            |_| 64,
-            move |_| Some((*clock_for_pump.lock().unwrap(), 1000.0)),
-            |_| {},
-            |_, _| {},
+            PumpCallbacks {
+                mcu_clock_of: Box::new(move |_| Some((*clock_for_pump.lock().unwrap(), 1000.0))),
+                ..PumpCallbacks::noop(64)
+            },
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            |_| {},
             Arc::new(AtomicU64::new(0)),
         );
     });
@@ -298,13 +297,9 @@ fn unsynced_clock_releases_nothing_for_participants() {
             control_rx,
             data_rx,
             sink_clone,
-            |_| 64,
-            |_| None,
-            |_| {},
-            |_, _| {},
+            PumpCallbacks::noop(64),
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            |_| {},
             Arc::new(AtomicU64::new(0)),
         );
     });
@@ -332,15 +327,14 @@ fn retired_regression_triggers_on_drip_stall() {
             control_rx,
             data_rx,
             NullSink,
-            |_| 64,
-            |_| None,
-            |_| {},
-            |_, _| {},
+            PumpCallbacks {
+                on_drip_stall: Box::new(move |msg: String| {
+                    stall_msgs_clone.lock().unwrap().push(msg);
+                }),
+                ..PumpCallbacks::noop(64)
+            },
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            move |msg: String| {
-                stall_msgs_clone.lock().unwrap().push(msg);
-            },
             Arc::new(AtomicU64::new(0)),
         );
     });
@@ -390,15 +384,14 @@ fn mcu_reboot_retired_to_zero_triggers_regression() {
             control_rx,
             data_rx,
             NullSink,
-            |_| 64,
-            |_| None,
-            |_| {},
-            |_, _| {},
+            PumpCallbacks {
+                on_drip_stall: Box::new(move |msg: String| {
+                    stall_msgs_clone.lock().unwrap().push(msg);
+                }),
+                ..PumpCallbacks::noop(64)
+            },
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            move |msg: String| {
-                stall_msgs_clone.lock().unwrap().push(msg);
-            },
             Arc::new(AtomicU64::new(0)),
         );
     });
@@ -458,15 +451,15 @@ fn drip_disarm_clears_cohort() {
             control_rx,
             data_rx,
             sink_clone,
-            |_| 64,
-            |_| Some((0u64, 1000.0)),
-            |_| {},
-            |_, _| {},
+            PumpCallbacks {
+                mcu_clock_of: Box::new(|_| Some((0u64, 1000.0))),
+                on_drip_stall: Box::new(move |msg: String| {
+                    stall_msgs_clone.lock().unwrap().push(msg);
+                }),
+                ..PumpCallbacks::noop(64)
+            },
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            move |msg: String| {
-                stall_msgs_clone.lock().unwrap().push(msg);
-            },
             Arc::new(AtomicU64::new(0)),
         );
     });
@@ -516,15 +509,14 @@ fn drip_disarm_wrong_cohort_id_is_noop() {
             control_rx,
             data_rx,
             NullSink,
-            |_| 64,
-            |_| None,
-            |_| {},
-            |_, _| {},
+            PumpCallbacks {
+                on_drip_stall: Box::new(move |msg: String| {
+                    stall_msgs_clone.lock().unwrap().push(msg);
+                }),
+                ..PumpCallbacks::noop(64)
+            },
             None,
             std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            move |msg: String| {
-                stall_msgs_clone.lock().unwrap().push(msg);
-            },
             Arc::new(AtomicU64::new(0)),
         );
     });

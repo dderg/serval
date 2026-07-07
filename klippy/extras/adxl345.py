@@ -308,12 +308,11 @@ class ADXL345:
         )
 
     def _build_config(self):
-        cmdqueue = self.spi.get_command_queue()
         self.query_adxl345_cmd = self.mcu.lookup_command(
-            "query_adxl345 oid=%c rest_ticks=%u", cq=cmdqueue
+            "query_adxl345 oid=%c rest_ticks=%u"
         )
         self.ffreader.setup_query_command(
-            "query_adxl345_status oid=%c", oid=self.oid, cq=cmdqueue
+            "query_adxl345_status oid=%c", oid=self.oid
         )
 
     def check_connected(self):

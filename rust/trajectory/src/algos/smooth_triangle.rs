@@ -1,6 +1,6 @@
 use super::{Bound, ParamSpec, PostProcessorAlgo};
+use crate::chain::ChainStage;
 use crate::kernel::build_smooth_triangle_kernel;
-use crate::post_processor::ChainStage;
 
 #[derive(Debug)]
 pub struct SmoothTriangle;

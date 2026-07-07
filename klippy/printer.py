@@ -319,9 +319,9 @@ class Printer:
         # Register subsystem components
         self._register_subsystem_components()
         # Instantiate the motion engine BEFORE MCU objects are constructed.
-        # Skip when the native Rust .so is unavailable (CI/test) — the
-        # engine-mode MCU code guards against None and the legacy chelper
-        # serial path handles debuginput mode.
+        # Skip when the native Rust .so is unavailable (CI/test) — boot and
+        # config-only tests run without it; any MCU send without the engine
+        # fails loudly in serialhdl.
         try:
             from . import motion_engine as motion_engine_mod
 

@@ -1,4 +1,7 @@
 use crate::host_io::reactor::RetransmitTrigger;
+use crate::host_io::reactor::{MAX_RETRY_COUNT, MCU_SILENCE_FOR_CLOSE, Reactor, ReactorState};
+use crate::transport::TransportError;
+use runtime::error::FaultCode;
 
 pub(crate) struct SeqWindow {
     pub(crate) send_seq: u64,
@@ -64,5 +67,87 @@ impl SeqWindow {
         }
         self.retransmit_seq = self.send_seq;
         self.rtt_sample_armed = false;
+    }
+}
+
+impl Reactor {
+    pub(super) fn update_receive_seq(&mut self, rseq: u64) -> Result<(), TransportError> {
+        if self.unacked_window.is_empty() {
+            self.seq_window.reset_to(rseq);
+            return Ok(());
+        }
+        let popped = self.unacked_window.pop_acked(rseq);
+        for entry in &popped {
+            if self.seq_window.rtt_sample_matches(entry.seq) {
+                let rtt = self.clock.now() - entry.sent_at;
+                self.rtt.update(rtt);
+                self.seq_window.disarm_rtt_sample();
+                break;
+            }
+        }
+        self.seq_window.receive_seq = rseq;
+        Ok(())
+    }
+
+    pub(crate) fn handle_ack_nak(&mut self, wire_seq_nibble: u8) -> Result<(), TransportError> {
+        let rseq =
+            crate::host_io::wire::decode_absolute(self.seq_window.receive_seq, wire_seq_nibble);
+
+        if rseq > self.seq_window.receive_seq {
+            self.update_receive_seq(rseq)?;
+        }
+
+        if self.seq_window.last_ack_seq < rseq {
+            self.seq_window.last_ack_seq = rseq;
+        } else if rseq > self.seq_window.ignore_nak_seq && !self.unacked_window.is_empty() {
+            self.write_retransmit(RetransmitTrigger::NakDriven)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn write_retransmit(
+        &mut self,
+        trigger: RetransmitTrigger,
+    ) -> Result<(), TransportError> {
+        let buf = {
+            let frames: Vec<&[u8]> = self
+                .unacked_window
+                .iter()
+                .map(|e| e.frame_bytes.as_slice())
+                .collect();
+            crate::host_io::wire::build_retransmit_buffer(frames)
+        };
+        self.write_frame(&buf)?;
+
+        self.seq_window.set_ignore_nak_for_retransmit(trigger);
+
+        let now = self.clock.now();
+        let silence = now.duration_since(self.last_recv_time);
+        for entry in self.unacked_window.iter_mut() {
+            entry.retry_count += 1;
+            if entry.retry_count >= MAX_RETRY_COUNT && silence >= MCU_SILENCE_FOR_CLOSE {
+                tracing::error!(
+                    subsystem = "mcu-comms",
+                    event = "retransmit_exhausted",
+                    retry_count = entry.retry_count,
+                    seq = entry.seq,
+                    silence_ms = silence.as_millis() as u64,
+                    "MCU silent through retransmit budget — closing transport"
+                );
+                self.state = ReactorState::Closed;
+                self.pending_host_fault = Some(crate::host_io::runtime_events::FaultEvent {
+                    fault_code: FaultCode::HostRetransmitExhausted.as_u16(),
+                    fault_detail: entry.retry_count,
+                    segment_id: 0,
+                    synthesized: false,
+                });
+                return Err(TransportError::Closed);
+            }
+        }
+
+        if matches!(trigger, RetransmitTrigger::TimeoutDriven) {
+            self.rtt.backoff();
+        }
+        Ok(())
     }
 }

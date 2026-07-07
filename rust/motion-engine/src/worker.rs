@@ -173,13 +173,9 @@ impl std::error::Error for StreamWorkerError {}
 /// from them.
 pub(crate) struct PumpResources {
     pub(crate) sink: crate::pump::WireSink,
-    pub(crate) ring_depth_of: Box<dyn Fn(AxisKey) -> u32 + Send>,
-    pub(crate) mcu_clock_of: Box<dyn Fn(u32) -> Option<(u64, f64)> + Send>,
-    pub(crate) on_fatal_transport: Box<dyn Fn(AxisKey) + Send + 'static>,
-    pub(crate) on_abandon: Box<dyn Fn(AxisKey, u32) + Send>,
+    pub(crate) callbacks: crate::pump::PumpCallbacks,
     pub(crate) history: crate::pump::HistoryRecorder,
     pub(crate) drain: Arc<crate::drain::DrainLedger>,
-    pub(crate) on_drip_stall: Box<dyn Fn(String) + Send>,
     pub(crate) backlog: Arc<AtomicU64>,
 }
 
@@ -225,13 +221,9 @@ pub(crate) fn setup_pipeline(
                 control_rx,
                 data_rx,
                 pump.sink,
-                pump.ring_depth_of,
-                pump.mcu_clock_of,
-                pump.on_fatal_transport,
-                pump.on_abandon,
+                pump.callbacks,
                 Some(pump.history),
                 pump.drain,
-                pump.on_drip_stall,
                 pump.backlog,
             );
         })

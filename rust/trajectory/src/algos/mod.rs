@@ -1,4 +1,4 @@
-use crate::post_processor::{ChainStage, PostProcessorError};
+use crate::chain::{ChainStage, PostProcessorError};
 
 mod linear_pressure_advance;
 mod smooth_mzv;

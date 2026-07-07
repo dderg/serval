@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use _motion_engine::drain::DrainLedger;
 use _motion_engine::pump::{
-    AxisKey, EnqueueMsg, HeartbeatMsg, PieceSink, PumpMsg, SendError, WireSink, run_pump,
+    AxisKey, EnqueueMsg, HeartbeatMsg, PieceSink, PumpCallbacks, PumpMsg, SendError, WireSink,
+    run_pump,
 };
 use runtime::piece_ring::PieceEntry;
 
@@ -91,13 +92,9 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
             control_rx,
             data_rx,
             sink,
-            |_k| 8u32,
-            |_| None,
-            |_| {},
-            |_, _| {},
+            PumpCallbacks::noop(8),
             None,
             std::sync::Arc::new(_motion_engine::drain::DrainLedger::new()),
-            |_| {},
             Arc::new(AtomicU64::new(0)),
         );
     });
@@ -161,13 +158,9 @@ fn heartbeat_retirement_drains_pump_ledger() {
             control_rx,
             data_rx,
             sink,
-            |_k| 8u32,
-            |_| None,
-            |_| {},
-            |_, _| {},
+            PumpCallbacks::noop(8),
             None,
             ledger_pump,
-            |_| {},
             Arc::new(AtomicU64::new(0)),
         );
     });

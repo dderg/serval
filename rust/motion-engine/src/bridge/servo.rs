@@ -148,12 +148,7 @@ impl PyMotionEngine {
                 following_error_counts,
                 max_torque_tenth_pct,
             )?;
-            if result != 0 {
-                return Err(format!(
-                    "set_drive_limits: SDO write failed: endpoint result {result}"
-                ));
-            }
-            Ok(())
+            require_endpoint_ok(result, "set_drive_limits: SDO write failed")
         }))
     }
     fn restore_drive_limits_start(&self, mcu_handle: u32, slot: u8) -> PyResult<u64> {
@@ -166,12 +161,7 @@ impl PyMotionEngine {
         );
         Ok(self.endpoint_calls.start("restore_drive_limits", move || {
             let result = crate::servo_torque::send_restore_drive_limits(&conn, slot)?;
-            if result != 0 {
-                return Err(format!(
-                    "restore_drive_limits: SDO write failed: endpoint result {result}"
-                ));
-            }
-            Ok(())
+            require_endpoint_ok(result, "restore_drive_limits: SDO write failed")
         }))
     }
     fn stop_node(&self, mcu_handle: u32) -> PyResult<()> {
@@ -308,12 +298,10 @@ impl PyMotionEngine {
             for (slot, home_q16) in seeds {
                 let result =
                     crate::servo_torque::send_seed_servo_home(&conn, slot, home_q16, timeout)?;
-                if result != 0 {
-                    return Err(format!(
-                        "finalize_homed_axis: method-35 home-set failed for slot {slot}: \
-                         endpoint result {result}"
-                    ));
-                }
+                require_endpoint_ok(
+                    result,
+                    &format!("finalize_homed_axis: method-35 home-set failed for slot {slot}"),
+                )?;
             }
             Ok(())
         }))
@@ -454,4 +442,11 @@ impl PyMotionEngine {
         }
         Ok(())
     }
+}
+
+fn require_endpoint_ok(result: i32, context: &str) -> Result<(), String> {
+    if result != 0 {
+        return Err(format!("{context}: endpoint result {result}"));
+    }
+    Ok(())
 }
