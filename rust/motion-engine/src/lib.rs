@@ -6,8 +6,12 @@ pub mod viz;
 pub use motion_core::{
     anchor, bg_call, classify, config, drain, enqueue, fence, homing, kinematics, lock_ext,
     logging, mcu_config, mcu_log, motion_history, nudge, position_query, pump, remote_trigger,
-    seam_test_harness, servo_capture, servo_sdo, servo_torque, timing, types, worker,
+    servo_capture, servo_sdo, servo_torque, timing, types, worker,
 };
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use motion_core::seam_test_harness;
 
 use pyo3::prelude::*;
 
