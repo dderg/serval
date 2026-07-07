@@ -2,7 +2,8 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use _motion_engine::pump::{
-    AxisFrame, AxisKey, DripArm, EnqueueMsg, HeartbeatMsg, PieceSink, PumpMsg, SendError, run_pump,
+    AxisFrame, AxisKey, DripArm, EnqueueMsg, HeartbeatMsg, PieceSink, PumpCallbacks, PumpMsg,
+    SendError, run_pump,
 };
 use crossbeam_channel::{Receiver, TrySendError, unbounded};
 use runtime::piece_ring::PieceEntry;
@@ -61,20 +62,15 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
     let rec = Arc::new(Mutex::new(Vec::new()));
     let (ctl, control_rx) = unbounded::<PumpMsg>();
     let (data, data_rx) = unbounded::<EnqueueMsg>();
-    let depth = |_k: AxisKey| 2u32;
     let sink = RecordingSink(rec.clone());
     let handle = std::thread::spawn(move || {
         run_pump(
             control_rx,
             data_rx,
             sink,
-            depth,
-            |_| None,
-            |_| {},
-            |_, _| {},
+            PumpCallbacks::noop(2),
             None,
             std::sync::Arc::new(_motion_engine::drain::DrainLedger::new()),
-            |_| {},
             Arc::new(AtomicU64::new(0)),
         )
     });
@@ -157,13 +153,12 @@ fn run_pump_with_clock(
             control_rx,
             data_rx,
             RecordingSink(rec),
-            |_k| 64u32,
-            |_mcu| Some((0u64, 1e6_f64)),
-            |_| {},
-            |_, _| {},
+            PumpCallbacks {
+                mcu_clock_of: Box::new(|_mcu| Some((0u64, 1e6_f64))),
+                ..PumpCallbacks::noop(64)
+            },
             None,
             std::sync::Arc::new(_motion_engine::drain::DrainLedger::new()),
-            |_| {},
             Arc::new(AtomicU64::new(0)),
         )
     })
@@ -269,20 +264,15 @@ fn bundles_same_mcu_axes_into_one_transaction() {
     let rec = Arc::new(Mutex::new(Vec::new()));
     let (ctl, control_rx) = unbounded::<PumpMsg>();
     let (data, data_rx) = unbounded::<EnqueueMsg>();
-    let depth = |_k: AxisKey| 8u32;
     let sink = BundleSink(rec.clone());
     let handle = std::thread::spawn(move || {
         run_pump(
             control_rx,
             data_rx,
             sink,
-            depth,
-            |_| None,
-            |_| {},
-            |_, _| {},
+            PumpCallbacks::noop(8),
             None,
             std::sync::Arc::new(_motion_engine::drain::DrainLedger::new()),
-            |_| {},
             Arc::new(AtomicU64::new(0)),
         )
     });
@@ -330,20 +320,15 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
     let rec = Arc::new(Mutex::new(Vec::new()));
     let (ctl, control_rx) = unbounded::<PumpMsg>();
     let (data, data_rx) = crossbeam_channel::bounded::<EnqueueMsg>(8);
-    let depth = |_k: AxisKey| 4u32;
     let sink = RecordingSink(rec.clone());
     let handle = std::thread::spawn(move || {
         run_pump(
             control_rx,
             data_rx,
             sink,
-            depth,
-            |_| None,
-            |_| {},
-            |_, _| {},
+            PumpCallbacks::noop(4),
             None,
             std::sync::Arc::new(_motion_engine::drain::DrainLedger::new()),
-            |_| {},
             Arc::new(AtomicU64::new(0)),
         )
     });
@@ -416,20 +401,18 @@ fn intake_feeds_a_second_axis_even_when_the_first_axis_ring_is_full() {
     let (data, data_rx) = unbounded::<EnqueueMsg>();
     let key_a = AxisKey { mcu_id: 1, axis: 0 };
     let key_b = AxisKey { mcu_id: 1, axis: 1 };
-    let depth = move |k: AxisKey| if k == key_a { 2u32 } else { 64u32 };
     let sink = RecordingSink(rec.clone());
     let handle = std::thread::spawn(move || {
         run_pump(
             control_rx,
             data_rx,
             sink,
-            depth,
-            |_| None,
-            |_| {},
-            |_, _| {},
+            PumpCallbacks {
+                ring_depth_of: Box::new(move |k| if k == key_a { 2 } else { 64 }),
+                ..PumpCallbacks::noop(0)
+            },
             None,
             std::sync::Arc::new(_motion_engine::drain::DrainLedger::new()),
-            |_| {},
             Arc::new(AtomicU64::new(0)),
         )
     });
@@ -485,20 +468,19 @@ fn drip_cohort_intake_bypasses_cap_and_feeds_all_participants() {
     let (data, data_rx) = unbounded::<EnqueueMsg>();
     let key_a = AxisKey { mcu_id: 1, axis: 0 };
     let key_b = AxisKey { mcu_id: 1, axis: 1 };
-    let depth = move |k: AxisKey| if k == key_a { 4u32 } else { 64u32 };
     let sink = RecordingSink(rec.clone());
     let handle = std::thread::spawn(move || {
         run_pump(
             control_rx,
             data_rx,
             sink,
-            depth,
-            |_mcu| Some((0u64, 1e6_f64)),
-            |_| {},
-            |_, _| {},
+            PumpCallbacks {
+                ring_depth_of: Box::new(move |k| if k == key_a { 4 } else { 64 }),
+                mcu_clock_of: Box::new(|_mcu| Some((0u64, 1e6_f64))),
+                ..PumpCallbacks::noop(0)
+            },
             None,
             std::sync::Arc::new(_motion_engine::drain::DrainLedger::new()),
-            |_| {},
             Arc::new(AtomicU64::new(0)),
         )
     });

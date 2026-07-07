@@ -1,11 +1,64 @@
 use core::sync::atomic::Ordering;
 
+use crate::buzz::AxisExcitation;
 use crate::state::SharedState;
-use crate::stepping_state::StepMode;
+use crate::stepping_state::{MAX_AXES, StepMode};
 
 use super::Engine;
 
 impl Engine {
+    fn validate_excitations_idle(
+        &self,
+        excitations: &heapless::Vec<AxisExcitation, MAX_AXES>,
+        shared: &SharedState,
+    ) -> Result<(), i32> {
+        for ex in excitations {
+            if ex.axis_idx >= crate::step_queue::N_AXIS_STEP_QUEUES {
+                crate::fault_helpers::raise_jog_parameters_invalid(shared);
+                return Err(-1);
+            }
+            let Some(axis) = self.stepping_axes.get(ex.axis_idx).and_then(|s| s.as_ref()) else {
+                continue;
+            };
+            let axis_idle = axis.armed.is_none() && axis.ring.is_empty();
+            if !axis_idle {
+                crate::fault_helpers::raise_buzz_axis_conflict(shared, ex.axis_idx);
+                return Err(-1);
+            }
+        }
+        Ok(())
+    }
+
+    fn arm_excitation_streams(
+        &self,
+        excitations: &heapless::Vec<AxisExcitation, MAX_AXES>,
+        now_cycle: u32,
+    ) {
+        let cps = f64::from(self.cycles_per_second);
+        for ex in excitations {
+            let Some(axis) = self.stepping_axes.get(ex.axis_idx).and_then(|s| s.as_ref()) else {
+                continue;
+            };
+            let params = ex.into_params(
+                f64::from(axis.p_prev),
+                f64::from(axis.microstep_distance),
+                cps,
+                now_cycle,
+            );
+            if axis.mode.load(Ordering::Acquire) == StepMode::Phase as u8 {
+                let cfg = crate::buzz_xdirect::XdirectConfig::new(
+                    axis.microstep_distance,
+                    crate::buzz_xdirect::DEFAULT_XDIRECT_UPDATE_HZ,
+                );
+                crate::buzz_stream::arm_axis_xdirect(ex.axis_idx, params, cfg);
+            } else if params.mu != 0.0 {
+                crate::buzz_stream::arm_axis_sweep(ex.axis_idx, params);
+            } else {
+                crate::buzz_stream::arm_axis(ex.axis_idx, params);
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn resonance_buzz(
         &mut self,
@@ -42,43 +95,10 @@ impl Engine {
             }
             return 0;
         }
-        for ex in &excitations {
-            if ex.axis_idx >= crate::step_queue::N_AXIS_STEP_QUEUES {
-                crate::fault_helpers::raise_jog_parameters_invalid(shared);
-                return -1;
-            }
-            let Some(axis) = self.stepping_axes.get(ex.axis_idx).and_then(|s| s.as_ref()) else {
-                continue;
-            };
-            let axis_idle = axis.armed.is_none() && axis.ring.is_empty();
-            if !axis_idle {
-                crate::fault_helpers::raise_buzz_axis_conflict(shared, ex.axis_idx);
-                return -1;
-            }
+        if let Err(rc) = self.validate_excitations_idle(&excitations, shared) {
+            return rc;
         }
-        let cps = f64::from(self.cycles_per_second);
-        for ex in &excitations {
-            let Some(axis) = self.stepping_axes.get(ex.axis_idx).and_then(|s| s.as_ref()) else {
-                continue;
-            };
-            let params = ex.into_params(
-                f64::from(axis.p_prev),
-                f64::from(axis.microstep_distance),
-                cps,
-                now_cycle,
-            );
-            if axis.mode.load(Ordering::Acquire) == StepMode::Phase as u8 {
-                let cfg = crate::buzz_xdirect::XdirectConfig::new(
-                    axis.microstep_distance,
-                    crate::buzz_xdirect::DEFAULT_XDIRECT_UPDATE_HZ,
-                );
-                crate::buzz_stream::arm_axis_xdirect(ex.axis_idx, params, cfg);
-            } else if params.mu != 0.0 {
-                crate::buzz_stream::arm_axis_sweep(ex.axis_idx, params);
-            } else {
-                crate::buzz_stream::arm_axis(ex.axis_idx, params);
-            }
-        }
+        self.arm_excitation_streams(&excitations, now_cycle);
         #[cfg(not(any(test, feature = "host")))]
         #[allow(unsafe_code)]
         unsafe {

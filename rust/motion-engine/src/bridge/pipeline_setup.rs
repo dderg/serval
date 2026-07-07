@@ -1,11 +1,40 @@
 use super::{
-    Arc, Duration, ETHERCAT_CLOCK_FREQ_HZ, HashMap, HashSet, Instant, McuAxisConfig, McuCaps,
-    McuHostIo, McuSerialConn, PyMotionEngine, PyResult, PyRuntimeError, PyValueError,
-    STREAM_INTEGRATION_TOL, STREAM_MAX_BUFFER_MOVES, abort_after_tracing_appender_drains,
-    arm_endpoint_death_watchdog, axis_ring_depth, build_mcu_configs, collect_motor_positions_inner,
-    config, dispatch_endstop_trip, mcu_handle_from_raw, query_ethercat_runtime_caps,
-    report_ethercat_endpoint_death, resolve_motion_caps,
+    Arc, Duration, ETHERCAT_CLOCK_FREQ_HZ, HashMap, HashSet, HomingRun, Instant, McuAxisConfig,
+    McuCaps, McuConnection, McuHostIo, McuSerialConn, Mutex, PyMotionEngine, PyResult,
+    PyRuntimeError, PyValueError, STREAM_INTEGRATION_TOL, STREAM_MAX_BUFFER_MOVES,
+    abort_after_tracing_appender_drains, arm_endpoint_death_watchdog, axis_ring_depth,
+    build_mcu_configs, collect_motor_positions_inner, config, dispatch_endstop_trip,
+    mcu_handle_from_raw, query_ethercat_runtime_caps, report_ethercat_endpoint_death,
+    resolve_motion_caps,
 };
+
+fn escalate_endpoint_death(latch: &Arc<Mutex<HashMap<u32, String>>>, mcu_id: u32, reason: &str) {
+    if report_ethercat_endpoint_death(latch, mcu_id, reason) {
+        arm_endpoint_death_watchdog(Arc::clone(latch), mcu_id);
+    }
+}
+
+fn log_abandoned_pieces(key: crate::types::AxisKey, dropped: u32) {
+    tracing::debug!(
+        subsystem = "motion",
+        event = "pump_abandon_unpushed",
+        mcu = key.mcu_id,
+        axis = key.axis,
+        dropped,
+        "pump flush dropped pieces that never reached the wire"
+    );
+}
+
+fn abort_on_drip_stall(msg: String) {
+    tracing::error!(
+        subsystem = "motion",
+        event = "drip_cohort_stalled",
+        msg,
+        "EXIT_ON_FAULT — drip cohort stalled; \
+         aborting klippy so systemd restarts it"
+    );
+    abort_after_tracing_appender_drains();
+}
 
 fn build_stream_config(cfg: &config::PlannerConfig) -> PyResult<motion_pipeline::StreamConfig> {
     let cart = cfg.cartesian;
@@ -213,59 +242,41 @@ impl PyMotionEngine {
                         .map(|(_, f)| f)
                 }),
             },
-            ring_depth_of: Box::new(move |k| {
-                ring_depth_table_for_pump
-                    .get(&k)
-                    .copied()
-                    .unwrap_or_else(|| {
-                        tracing::error!(
-                            subsystem = "engine",
-                            event = "pump_missing_ring_depth",
-                            axis_key = ?k,
-                            "pump: no ring_depth for axis — absent from init_planner config; using sentinel depth 1 (expect PieceStartInPast fault)"
-                        );
-                        1
-                    })
-            }),
-            mcu_clock_of: Box::new(move |mcu_id: u32| {
-                let r = router_for_pump.lock().unwrap_or_else(|p| p.into_inner());
-                r.ack_clock_and_freq(mcu_handle_from_raw(mcu_id))
-            }),
-            on_fatal_transport: Box::new(move |key: crate::types::AxisKey| {
-                if report_ethercat_endpoint_death(
-                    &endpoint_death_for_pump,
-                    key.mcu_id,
-                    "pump transport went fatal (broken pipe / endpoint gone) \
-                     — see the send_frame_fatal log for the exact transport error",
-                ) {
-                    arm_endpoint_death_watchdog(Arc::clone(&endpoint_death_for_pump), key.mcu_id);
-                }
-            }),
-            on_abandon: Box::new(move |key: crate::types::AxisKey, n: u32| {
-                tracing::debug!(
-                    subsystem = "motion",
-                    event = "pump_abandon_unpushed",
-                    mcu = key.mcu_id,
-                    axis = key.axis,
-                    dropped = n,
-                    "pump flush dropped pieces that never reached the wire"
-                );
-            }),
+            callbacks: crate::pump::PumpCallbacks {
+                ring_depth_of: Box::new(move |k| {
+                    ring_depth_table_for_pump
+                        .get(&k)
+                        .copied()
+                        .unwrap_or_else(|| {
+                            tracing::error!(
+                                subsystem = "engine",
+                                event = "pump_missing_ring_depth",
+                                axis_key = ?k,
+                                "pump: no ring_depth for axis — absent from init_planner config; using sentinel depth 1 (expect PieceStartInPast fault)"
+                            );
+                            1
+                        })
+                }),
+                mcu_clock_of: Box::new(move |mcu_id: u32| {
+                    let r = router_for_pump.lock().unwrap_or_else(|p| p.into_inner());
+                    r.ack_clock_and_freq(mcu_handle_from_raw(mcu_id))
+                }),
+                on_fatal_transport: Box::new(move |key: crate::types::AxisKey| {
+                    escalate_endpoint_death(
+                        &endpoint_death_for_pump,
+                        key.mcu_id,
+                        "pump transport went fatal (broken pipe / endpoint gone) \
+                         — see the send_frame_fatal log for the exact transport error",
+                    );
+                }),
+                on_abandon: Box::new(log_abandoned_pieces),
+                on_drip_stall: Box::new(abort_on_drip_stall),
+            },
             history: crate::pump::HistoryRecorder {
                 store: Arc::clone(&self.motion_history),
                 nominal_freqs: Arc::clone(&self.nominal_clock_freqs),
             },
             drain: drain_for_pump,
-            on_drip_stall: Box::new(|msg: String| {
-                tracing::error!(
-                    subsystem = "motion",
-                    event = "drip_cohort_stalled",
-                    msg,
-                    "EXIT_ON_FAULT — drip cohort stalled; \
-                     aborting klippy so systemd restarts it"
-                );
-                abort_after_tracing_appender_drains();
-            }),
             backlog: Arc::clone(&self.pump_backlog),
         }
     }
@@ -428,7 +439,6 @@ impl PyMotionEngine {
         pump_control: &crossbeam_channel::Sender<crate::pump::PumpMsg>,
     ) {
         let mcu_id = cfg_mcu.mcu_id;
-        let pump_tx_hb = pump_control.clone();
 
         if ethercat_mcu_ids.contains(&mcu_id) {
             let conn = ec_conns
@@ -436,76 +446,16 @@ impl PyMotionEngine {
                 .expect("ec_conns built from ethercat_mcu_ids")
                 .clone();
 
-            let mcu_label = {
-                let mcus_lock = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
-                mcus_lock
-                    .get(&mcu_id)
-                    .map(|c| c.label.clone())
-                    .unwrap_or_else(|| format!("mcu-{mcu_id}"))
+            let supervisor = EthercatHeartbeatSupervisor {
+                mcu_id,
+                mcu_label: self.mcu_label(mcu_id),
+                homing_run: Arc::clone(&self.homing_run),
+                active_drip_cohort: Arc::clone(&self.active_drip_cohort),
+                latched_drive_fault: Arc::clone(&self.latched_drive_fault),
+                pump_tx: pump_control.clone(),
             };
-
-            let homing_run_hb = Arc::clone(&self.homing_run);
-            let active_cohort_hb = Arc::clone(&self.active_drip_cohort);
-            let pump_tx_fault = pump_control.clone();
-            let latched_fault_hb = Arc::clone(&self.latched_drive_fault);
-            let mcu_label_hb = mcu_label.clone();
             conn.attach_heartbeat_callback(Arc::new(
-                move |hb: &mcu_protocol::messages::StatusHeartbeat| {
-                    if hb.fault_code != 0 {
-                        let run_opt = {
-                            let mut guard = homing_run_hb.lock().unwrap_or_else(|p| p.into_inner());
-                            match guard.as_ref().map(|r| r.axis_key.mcu_id) {
-                                Some(axis_mcu)
-                                    if crate::homing::route_drive_fault(mcu_id, Some(axis_mcu))
-                                        == crate::homing::DriveFaultRoute::HomingError =>
-                                {
-                                    guard.take()
-                                }
-                                _ => None,
-                            }
-                        };
-                        match run_opt {
-                            Some(run) => {
-                                latched_fault_hb
-                                    .lock()
-                                    .unwrap_or_else(|p| p.into_inner())
-                                    .insert(mcu_id, hb.fault_code);
-                                *active_cohort_hb.lock().unwrap_or_else(|p| p.into_inner()) = None;
-                                let _ = pump_tx_fault
-                                    .send(crate::pump::PumpMsg::Flush(run.all_axis_keys.clone()));
-                                let _ = pump_tx_fault
-                                    .send(crate::pump::PumpMsg::DripDisarm(run.cohort));
-                                let _ = run.notify.send(Err(format!(
-                                    "drive fault 0x{:04x} during homing — \
-                                     following-error/torque limit exceeded (endstop failure?)",
-                                    hb.fault_code
-                                )));
-                            }
-                            None => {
-                                let prev = latched_fault_hb
-                                    .lock()
-                                    .unwrap_or_else(|p| p.into_inner())
-                                    .insert(mcu_id, hb.fault_code);
-                                if prev != Some(hb.fault_code) {
-                                    tracing::error!(
-                                        event = "ethercat_drive_fault_latched",
-                                        mcu_id,
-                                        mcu_label = %mcu_label_hb,
-                                        fault_code = hb.fault_code,
-                                        "ethercat drive fault — latched for klippy to report"
-                                    );
-                                }
-                            }
-                        }
-                        return;
-                    }
-                    let _ = pump_tx_hb.send(crate::pump::PumpMsg::Heartbeat(
-                        crate::pump::HeartbeatMsg {
-                            mcu_id,
-                            retired_counts: hb.retired_counts.clone(),
-                        },
-                    ));
-                },
+                move |hb: &mcu_protocol::messages::StatusHeartbeat| supervisor.on_heartbeat(hb),
             ));
 
             let trip_deps = self.trip_deps();
@@ -513,75 +463,166 @@ impl PyMotionEngine {
                 dispatch_endstop_trip(&trip_deps, mcu_id, endstop_id, trip_clock);
             }));
 
-            let conn_for_poll = Arc::downgrade(&conn);
-            let mcus_for_supervision = Arc::clone(&self.mcus);
-            let endpoint_death_for_supervision = Arc::clone(&self.latched_endpoint_death);
-            let on_endpoint_death: Box<dyn Fn(&str) + Send + 'static> =
-                Box::new(move |reason: &str| {
-                    if report_ethercat_endpoint_death(
-                        &endpoint_death_for_supervision,
-                        mcu_id,
-                        reason,
-                    ) {
-                        arm_endpoint_death_watchdog(
-                            Arc::clone(&endpoint_death_for_supervision),
-                            mcu_id,
-                        );
-                    }
-                });
-
-            let _ = std::thread::Builder::new()
-                .name(format!("ec-heartbeat-poll-{mcu_id}"))
-                .spawn(move || {
-                    loop {
-                        let Some(conn) = conn_for_poll.upgrade() else {
-                            return;
-                        };
-
-                        let peer_eof = conn.peer_closed();
-                        drop(conn);
-
-                        let fault_reason = {
-                            let mut mcus = mcus_for_supervision
-                                .lock()
-                                .unwrap_or_else(|p| p.into_inner());
-                            let Some(c) = mcus.get_mut(&mcu_id) else {
-                                return;
-                            };
-                            if peer_eof {
-                                Some("conn EOF".to_string())
-                            } else if let Some(ref mut child) = c.endpoint_process {
-                                match child.try_wait() {
-                                    Ok(Some(status)) => Some(format!("child exited: {status}")),
-                                    Ok(None) => None,
-                                    Err(e) => Some(format!("try_wait error: {e}")),
-                                }
-                            } else {
-                                None
-                            }
-                        };
-
-                        if let Some(reason) = fault_reason {
-                            on_endpoint_death(&reason);
-                            return;
-                        }
-
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                })
-                .expect("spawn ec-heartbeat-poll thread");
+            spawn_endpoint_liveness_poll(
+                mcu_id,
+                &conn,
+                Arc::clone(&self.mcus),
+                Arc::clone(&self.latched_endpoint_death),
+            );
         } else {
             let io = host_ios
                 .get(&mcu_id)
                 .expect("host_io map built from mcu_configs")
                 .clone();
+            let pump_tx = pump_control.clone();
             io.attach_heartbeat_callback(Arc::new(move |retired: &[u32]| {
-                let _ =
-                    pump_tx_hb.send(crate::pump::PumpMsg::Heartbeat(crate::pump::HeartbeatMsg {
-                        mcu_id,
-                        retired_counts: retired.to_vec(),
-                    }));
+                forward_retired_heartbeat(&pump_tx, mcu_id, retired.to_vec());
             }));
         }
     }
+
+    fn mcu_label(&self, mcu_id: u32) -> String {
+        self.mcus
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&mcu_id)
+            .map(|c| c.label.clone())
+            .unwrap_or_else(|| format!("mcu-{mcu_id}"))
+    }
+}
+
+fn forward_retired_heartbeat(
+    pump_tx: &crossbeam_channel::Sender<crate::pump::PumpMsg>,
+    mcu_id: u32,
+    retired_counts: Vec<u32>,
+) {
+    let _ = pump_tx.send(crate::pump::PumpMsg::Heartbeat(crate::pump::HeartbeatMsg {
+        mcu_id,
+        retired_counts,
+    }));
+}
+
+struct EthercatHeartbeatSupervisor {
+    mcu_id: u32,
+    mcu_label: String,
+    homing_run: Arc<Mutex<Option<HomingRun>>>,
+    active_drip_cohort: Arc<Mutex<Option<u64>>>,
+    latched_drive_fault: Arc<Mutex<HashMap<u32, u16>>>,
+    pump_tx: crossbeam_channel::Sender<crate::pump::PumpMsg>,
+}
+
+impl EthercatHeartbeatSupervisor {
+    fn on_heartbeat(&self, hb: &mcu_protocol::messages::StatusHeartbeat) {
+        if hb.fault_code != 0 {
+            self.on_drive_fault(hb.fault_code);
+            return;
+        }
+        forward_retired_heartbeat(&self.pump_tx, self.mcu_id, hb.retired_counts.clone());
+    }
+
+    fn on_drive_fault(&self, fault_code: u16) {
+        match self.take_homing_run_owning_fault() {
+            Some(run) => self.fail_homing_run(run, fault_code),
+            None => self.latch_fault_for_klippy(fault_code),
+        }
+    }
+
+    fn take_homing_run_owning_fault(&self) -> Option<HomingRun> {
+        let mut guard = self.homing_run.lock().unwrap_or_else(|p| p.into_inner());
+        match guard.as_ref().map(|r| r.axis_key.mcu_id) {
+            Some(axis_mcu)
+                if crate::homing::route_drive_fault(self.mcu_id, Some(axis_mcu))
+                    == crate::homing::DriveFaultRoute::HomingError =>
+            {
+                guard.take()
+            }
+            _ => None,
+        }
+    }
+
+    fn fail_homing_run(&self, run: HomingRun, fault_code: u16) {
+        self.latched_drive_fault
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(self.mcu_id, fault_code);
+        *self
+            .active_drip_cohort
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
+        let _ = self
+            .pump_tx
+            .send(crate::pump::PumpMsg::Flush(run.all_axis_keys.clone()));
+        let _ = self
+            .pump_tx
+            .send(crate::pump::PumpMsg::DripDisarm(run.cohort));
+        let _ = run.notify.send(Err(format!(
+            "drive fault 0x{fault_code:04x} during homing — \
+             following-error/torque limit exceeded (endstop failure?)"
+        )));
+    }
+
+    fn latch_fault_for_klippy(&self, fault_code: u16) {
+        let prev = self
+            .latched_drive_fault
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(self.mcu_id, fault_code);
+        if prev != Some(fault_code) {
+            tracing::error!(
+                event = "ethercat_drive_fault_latched",
+                mcu_id = self.mcu_id,
+                mcu_label = %self.mcu_label,
+                fault_code,
+                "ethercat drive fault — latched for klippy to report"
+            );
+        }
+    }
+}
+
+fn endpoint_fault_reason(peer_eof: bool, conn: &mut McuConnection) -> Option<String> {
+    if peer_eof {
+        return Some("conn EOF".to_string());
+    }
+    let child = conn.endpoint_process.as_mut()?;
+    match child.try_wait() {
+        Ok(Some(status)) => Some(format!("child exited: {status}")),
+        Ok(None) => None,
+        Err(e) => Some(format!("try_wait error: {e}")),
+    }
+}
+
+fn spawn_endpoint_liveness_poll(
+    mcu_id: u32,
+    conn: &Arc<McuSerialConn>,
+    mcus: Arc<Mutex<HashMap<u32, McuConnection>>>,
+    endpoint_death_latch: Arc<Mutex<HashMap<u32, String>>>,
+) {
+    let conn_for_poll = Arc::downgrade(conn);
+    let _ = std::thread::Builder::new()
+        .name(format!("ec-heartbeat-poll-{mcu_id}"))
+        .spawn(move || {
+            loop {
+                let Some(conn) = conn_for_poll.upgrade() else {
+                    return;
+                };
+                let peer_eof = conn.peer_closed();
+                drop(conn);
+
+                let fault_reason = {
+                    let mut mcus = mcus.lock().unwrap_or_else(|p| p.into_inner());
+                    let Some(c) = mcus.get_mut(&mcu_id) else {
+                        return;
+                    };
+                    endpoint_fault_reason(peer_eof, c)
+                };
+
+                if let Some(reason) = fault_reason {
+                    escalate_endpoint_death(&endpoint_death_latch, mcu_id, &reason);
+                    return;
+                }
+
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        })
+        .expect("spawn ec-heartbeat-poll thread");
 }

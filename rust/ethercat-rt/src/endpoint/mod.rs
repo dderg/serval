@@ -1,29 +1,31 @@
-#![allow(unsafe_code)]
-
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::buzz::BuzzOsc;
 use crate::capture::{Capture, PendingStart, PendingStop};
 use crate::curves::AxisRing;
 use crate::dynamics::DynamicsModel;
-use crate::ffi;
 use crate::mailbox::MailboxWorker;
 use crate::scale::CountMap;
 use crate::sensorless::SensorlessBank;
 use crate::server::FrameServer;
 use crate::stream_halt::StreamHalt;
 use crate::torque::TorqueGate;
+use crate::wire::status_heartbeat_frame;
 
 mod bringup;
 mod commands;
 mod cycle;
+mod drive;
 
 pub use bringup::bringup;
+
+use drive::{DriveChain, FfiDriveChain};
 
 static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 pub struct EndpointCtx {
     server: FrameServer,
+    drive: FfiDriveChain,
 
     num_slaves: usize,
     counts_per_mm: Vec<f64>,
@@ -98,11 +100,31 @@ pub fn run(ctx: &mut EndpointCtx) {
         }
     }
 
-    unsafe {
-        for s in 0..ctx.num_slaves {
-            ffi::ec_rt_disable(s as std::os::raw::c_int);
-        }
-        ffi::ec_rt_shutdown();
-    }
+    ctx.drive.disable_all(ctx.num_slaves);
+    ctx.drive.shutdown();
     eprintln!("ec-rt: shutdown complete");
+}
+
+pub(super) fn respond_fault_heartbeat(
+    ctx: &mut EndpointCtx,
+    engine_state: u8,
+    error_code: u16,
+) -> Vec<u32> {
+    let retired: Vec<u32> = ctx.rings.iter().map(|r| r.retired_count()).collect();
+    ctx.server.respond(&status_heartbeat_frame(
+        engine_state,
+        error_code,
+        &retired,
+        ctx.ff_saturation,
+    ));
+    retired
+}
+
+pub(super) fn discard_motion(ctx: &mut EndpointCtx) {
+    for r in &mut ctx.rings {
+        r.reset();
+    }
+    for c in &mut ctx.cmaps {
+        *c = None;
+    }
 }

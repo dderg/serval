@@ -84,9 +84,8 @@ class pca9685_pwm:
                 self._mcu.seconds_to_clock(self._max_duration),
             )
         )
-        cmd_queue = self._mcu.alloc_command_queue()
         self._set_cmd = self._mcu.lookup_command(
-            "queue_pca9685_out oid=%c clock=%u value=%hu", cq=cmd_queue
+            "queue_pca9685_out oid=%c clock=%u value=%hu"
         )
 
     def set_pwm(self, print_time, value):
