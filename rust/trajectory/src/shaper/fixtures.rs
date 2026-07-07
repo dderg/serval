@@ -3,7 +3,7 @@ use nurbs::ScalarNurbs;
 
 #[derive(Debug, Clone)]
 pub struct FittedSegment {
-    pub axes: [ScalarNurbs<f64>; 3],
+    pub axes: [ScalarNurbs; 3],
     pub t_start: f64,
     pub t_end: f64,
 }
@@ -15,7 +15,7 @@ pub fn pad_segment_axis(
     t_sm_half: f64,
     batch_t_start: f64,
     batch_t_end: f64,
-) -> ScalarNurbs<f64> {
+) -> ScalarNurbs {
     pad_segment_axis_with_history(
         seg_idx,
         axis,
@@ -31,11 +31,11 @@ pub fn pad_segment_axis_with_history(
     seg_idx: usize,
     axis: usize,
     fitted: &[FittedSegment],
-    history: &[BezierPiece<f64>],
+    history: &[BezierPiece],
     t_sm_half: f64,
     batch_t_start: f64,
     batch_t_end: f64,
-) -> ScalarNurbs<f64> {
+) -> ScalarNurbs {
     let seg = &fitted[seg_idx];
     let seg_pieces = extract_bezier_pieces(&seg.axes[axis]);
     let target_degree = seg_pieces.iter().map(|p| p.degree()).max().unwrap_or(0);
@@ -69,14 +69,14 @@ fn collect_left_padding(
     seg_idx: usize,
     axis: usize,
     fitted: &[FittedSegment],
-    history: &[BezierPiece<f64>],
+    history: &[BezierPiece],
     t_sm_half: f64,
     batch_t_start: f64,
     target_degree: usize,
-) -> Vec<BezierPiece<f64>> {
+) -> Vec<BezierPiece> {
     let seg = &fitted[seg_idx];
     let pad_target = seg.t_start - t_sm_half;
-    let mut pieces: Vec<BezierPiece<f64>> = Vec::new();
+    let mut pieces: Vec<BezierPiece> = Vec::new();
     let mut cursor = seg.t_start;
 
     if seg_idx > 0 {
@@ -141,10 +141,10 @@ fn collect_right_padding(
     t_sm_half: f64,
     batch_t_end: f64,
     target_degree: usize,
-) -> Vec<BezierPiece<f64>> {
+) -> Vec<BezierPiece> {
     let seg = &fitted[seg_idx];
     let pad_target = seg.t_end + t_sm_half;
-    let mut pieces: Vec<BezierPiece<f64>> = Vec::new();
+    let mut pieces: Vec<BezierPiece> = Vec::new();
     let mut cursor = seg.t_end;
 
     for i in (seg_idx + 1)..fitted.len() {
@@ -177,7 +177,7 @@ fn collect_right_padding(
     pieces
 }
 
-fn constant_piece(value: f64, t_start: f64, t_end: f64, degree: usize) -> BezierPiece<f64> {
+fn constant_piece(value: f64, t_start: f64, t_end: f64, degree: usize) -> BezierPiece {
     let mut coeffs = vec![0.0; degree + 1];
     coeffs[0] = value;
     BezierPiece {
@@ -187,14 +187,14 @@ fn constant_piece(value: f64, t_start: f64, t_end: f64, degree: usize) -> Bezier
     }
 }
 
-fn degree_elevate_to(mut piece: BezierPiece<f64>, target_degree: usize) -> BezierPiece<f64> {
+fn degree_elevate_to(mut piece: BezierPiece, target_degree: usize) -> BezierPiece {
     while piece.degree() < target_degree {
         piece.coeffs.push(0.0);
     }
     piece
 }
 
-fn trim_piece(piece: &BezierPiece<f64>, t_lo: f64, t_hi: f64) -> BezierPiece<f64> {
+fn trim_piece(piece: &BezierPiece, t_lo: f64, t_hi: f64) -> BezierPiece {
     let mut p = piece.clone();
 
     if t_lo > p.u_start + 1e-15 && t_lo < p.u_end - 1e-15 {
@@ -229,7 +229,7 @@ fn linear_piece(
     t_start: f64,
     t_end: f64,
     degree: usize,
-) -> BezierPiece<f64> {
+) -> BezierPiece {
     let mut coeffs = vec![0.0; degree + 1];
     coeffs[0] = value_at_start;
     if degree >= 1 {

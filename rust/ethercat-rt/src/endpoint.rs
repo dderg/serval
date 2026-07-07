@@ -22,7 +22,6 @@ use crate::mailbox::{MailboxReply, MailboxRequest, MailboxWorker, WorkerScheduli
 use crate::push_plan::plan_bundle;
 use crate::scale::{mm_to_counts, CountMap};
 use crate::sdo::SdoBus;
-use crate::seed_home::ERR_SEED_HOME_STREAMING;
 use crate::sensorless::{SensorlessBank, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
 use crate::server::FrameServer;
 use crate::stream_halt::StreamHalt;
@@ -877,6 +876,8 @@ fn handle_restore_drive_limits(ctx: &mut EndpointCtx, correlation_id: u32, slot:
         }
     }
 }
+
+const ERR_SEED_HOME_STREAMING: i32 = -826;
 
 fn handle_seed_servo_home(ctx: &mut EndpointCtx, correlation_id: u32, slot: u8, home_q16: i32) {
     if slot as usize >= ctx.counts_per_mm.len() {

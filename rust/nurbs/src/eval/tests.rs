@@ -1,10 +1,10 @@
 use super::*;
 
-fn linear_curve_f64() -> crate::ScalarNurbs<f64> {
+fn linear_curve_f64() -> crate::ScalarNurbs {
     crate::ScalarNurbs::try_new(1, vec![0.0, 0.0, 1.0, 1.0], vec![0.0, 1.0]).unwrap()
 }
 
-fn quadratic_curve_f64() -> crate::ScalarNurbs<f64> {
+fn quadratic_curve_f64() -> crate::ScalarNurbs {
     crate::ScalarNurbs::try_new(2, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], vec![0.0, 0.5, 1.0]).unwrap()
 }
 
@@ -52,7 +52,7 @@ fn eval_quadratic_at_midpoint_matches_bernstein() {
     assert!((eval(&v, 0.5_f64) - 0.5).abs() < 1e-12);
 }
 
-fn linear_3d_curve_f64() -> crate::VectorNurbs<f64, 3> {
+fn linear_3d_curve_f64() -> crate::VectorNurbs<3> {
     crate::VectorNurbs::try_new(
         1,
         vec![0.0, 0.0, 1.0, 1.0],
@@ -94,7 +94,6 @@ fn vector_eval_matches_per_axis_scalar() {
     }
 }
 
-#[cfg(feature = "host")]
 #[test]
 fn derivative_of_linear_is_constant() {
     let curve = linear_curve_f64();
@@ -103,7 +102,6 @@ fn derivative_of_linear_is_constant() {
     assert!((eval(&d.as_view(), 0.5_f64) - 1.0).abs() < 1e-12);
 }
 
-#[cfg(feature = "host")]
 #[test]
 fn derivative_of_quadratic_at_midpoint_matches_central_difference() {
     let curve = quadratic_curve_f64();
@@ -171,7 +169,6 @@ fn eval_polynomial_with_derivative_matches_separate_calls_cubic() {
     }
 }
 
-#[cfg(feature = "host")]
 #[test]
 fn eval_derivative_matches_materialized_derivative_quadratic() {
     let curve = quadratic_curve_f64();
@@ -187,7 +184,6 @@ fn eval_derivative_matches_materialized_derivative_quadratic() {
     }
 }
 
-#[cfg(feature = "host")]
 #[test]
 fn eval_derivative_cubic_matches_materialized() {
     let curve = crate::ScalarNurbs::try_new(
@@ -208,7 +204,6 @@ fn eval_derivative_cubic_matches_materialized() {
     }
 }
 
-#[cfg(feature = "host")]
 #[test]
 fn vector_derivative_matches_per_axis_scalar() {
     let curve = linear_3d_curve_f64();
@@ -227,7 +222,6 @@ fn vector_derivative_matches_per_axis_scalar() {
     }
 }
 
-#[cfg(feature = "host")]
 #[test]
 fn curvature_of_straight_line_is_zero() {
     let parabolic = crate::VectorNurbs::try_new(
@@ -242,7 +236,6 @@ fn curvature_of_straight_line_is_zero() {
     assert!(k.abs() < 1e-10, "got {k}");
 }
 
-#[cfg(feature = "host")]
 #[test]
 fn curvature_of_arc_matches_known_value() {
     let arc = crate::VectorNurbs::try_new(

@@ -10,7 +10,7 @@ pub struct PostProcessorInstance {
 
 #[derive(Debug, Clone)]
 pub enum ChainStage {
-    SmoothKernel(PiecewisePolynomialKernel<f64>),
+    SmoothKernel(PiecewisePolynomialKernel),
     LinearPressureAdvance { k: f64 },
 }
 
@@ -167,7 +167,7 @@ impl AxisChainSet {
     }
 
     #[must_use]
-    pub fn spatial_from_kernels(kernels: &[Option<PiecewisePolynomialKernel<f64>>; 4]) -> Self {
+    pub fn spatial_from_kernels(kernels: &[Option<PiecewisePolynomialKernel>; 4]) -> Self {
         assert!(
             kernels[3].is_none(),
             "spatial_from_kernels: E-slot kernel must be None; follower chains \

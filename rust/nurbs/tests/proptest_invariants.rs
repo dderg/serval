@@ -1,5 +1,3 @@
-#![cfg(feature = "host")]
-
 use proptest::prelude::*;
 
 fn arb_degree() -> impl Strategy<Value = u8> {
@@ -11,7 +9,7 @@ fn arb_cp_count(degree: u8) -> impl Strategy<Value = usize> {
     min..=10
 }
 
-fn arb_curve() -> impl Strategy<Value = nurbs::ScalarNurbs<f64>> {
+fn arb_curve() -> impl Strategy<Value = nurbs::ScalarNurbs> {
     arb_degree().prop_flat_map(|p| {
         arb_cp_count(p).prop_flat_map(move |n| {
             let cps = prop::collection::vec(-10.0..10.0_f64, n);

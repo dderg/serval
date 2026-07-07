@@ -20,9 +20,9 @@ mcu-protocol = { path = "../mcu-protocol" }
 trajectory = { path = "../trajectory" }
 geometry = { path = "../geometry" }
 motion-pipeline = { path = "../motion-pipeline" }
-snapshot-core = { path = "../pipeline-snapshot", package = "pipeline-snapshot" }
+snapshot-core = { path = "../pipeline-snapshot", package = "pipeline-snapshot", optional = true }
 gcode = { path = "../gcode" }
-nurbs = { path = "../nurbs", features = ["host"] }
+nurbs = { path = "../nurbs" }
 runtime = { path = "../runtime" }
 crossbeam-channel = "0.5"
 libc = "0.2"
@@ -38,6 +38,7 @@ thiserror = { workspace = true }
 
 [features]
 test-support = []
+snapshot = ["dep:snapshot-core"]
 # extension-module leaves libpython symbols undefined (resolved by the host
 # process). Test binaries are standalone executables and MUST NOT enable it,
 # or the Linux link fails on PyErr_Print. The production cdylib enables it

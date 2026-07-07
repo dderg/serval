@@ -29,7 +29,7 @@ indexmap = { version = "2", features = ["serde"] }
 arc-swap = "1"
 time = { version = "0.3", default-features = false, features = ["std"] }
 runtime = { path = "../runtime" }
-nurbs = { path = "../nurbs", features = ["host"] }
+nurbs = { path = "../nurbs" }
 mcu-protocol = { path = "../mcu-protocol" }
 mcu-transport = { path = "../mcu-transport" }
 thiserror = { workspace = true }

@@ -114,20 +114,20 @@ fn ctx(line_no: u32, feed: f64) -> MoveContext {
     }
 }
 
-fn eval_piece(p: &BezierPiece<f64>, t: f64) -> f64 {
+fn eval_piece(p: &BezierPiece, t: f64) -> f64 {
     let z = t - p.u_start;
     let c = |i: usize| p.coeffs.get(i).copied().unwrap_or(0.0);
     c(0) + c(1) * z + c(2) * z * z + c(3) * z * z * z
 }
 
-fn vel_piece(p: &BezierPiece<f64>, t: f64) -> f64 {
+fn vel_piece(p: &BezierPiece, t: f64) -> f64 {
     let z = t - p.u_start;
     let c = |i: usize| p.coeffs.get(i).copied().unwrap_or(0.0);
     c(1) + 2.0 * c(2) * z + 3.0 * c(3) * z * z
 }
 
-fn peak_accel(axes: &[Vec<BezierPiece<f64>>]) -> f64 {
-    let accel = |p: &BezierPiece<f64>, t: f64| {
+fn peak_accel(axes: &[Vec<BezierPiece>]) -> f64 {
+    let accel = |p: &BezierPiece, t: f64| {
         let z = t - p.u_start;
         2.0 * p.coeffs[2] + 6.0 * p.coeffs[3] * z
     };
@@ -457,7 +457,7 @@ fn pressure_advance_shifts_follower_and_leaves_xyz_byte_identical() {
     }
 }
 
-fn piece_accel_at(pieces: &[BezierPiece<f64>], t: f64) -> f64 {
+fn piece_accel_at(pieces: &[BezierPiece], t: f64) -> f64 {
     let p = pieces
         .iter()
         .find(|p| t >= p.u_start - 1e-12 && t <= p.u_end + 1e-12)

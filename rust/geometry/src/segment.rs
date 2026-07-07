@@ -122,7 +122,7 @@ impl FollowerDemand {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CubicSegment {
-    pub xyz: VectorNurbs<f64, 3>,
+    pub xyz: VectorNurbs<3>,
     pub followers: Vec<FollowerDemand>,
     pub feedrate_mm_s: f64,
     pub source: SourceRange,
@@ -132,7 +132,7 @@ pub struct CubicSegment {
 
 impl CubicSegment {
     pub fn try_new(
-        xyz: VectorNurbs<f64, 3>,
+        xyz: VectorNurbs<3>,
         followers: Vec<FollowerDemand>,
         feedrate_mm_s: f64,
         source: SourceRange,
@@ -206,7 +206,7 @@ impl CubicSegment {
     }
 
     pub fn try_new_virtual(
-        xyz: VectorNurbs<f64, 3>,
+        xyz: VectorNurbs<3>,
         followers: Vec<FollowerDemand>,
         feedrate_mm_s: f64,
         source: SourceRange,
@@ -239,10 +239,7 @@ impl CubicSegment {
 }
 
 #[must_use]
-pub fn split_cubic_bezier(
-    xyz: &VectorNurbs<f64, 3>,
-    s: f64,
-) -> (VectorNurbs<f64, 3>, VectorNurbs<f64, 3>) {
+pub fn split_cubic_bezier(xyz: &VectorNurbs<3>, s: f64) -> (VectorNurbs<3>, VectorNurbs<3>) {
     assert_eq!(xyz.degree(), 3, "split_cubic_bezier: degree must be 3");
     let cps = xyz.control_points();
     assert_eq!(
@@ -281,9 +278,9 @@ pub fn split_cubic_bezier(
     let s0 = lerp(r0, r1, s);
 
     let knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
-    let left = VectorNurbs::<f64, 3>::try_new(3, knots.clone(), vec![p0, q0, r0, s0])
+    let left = VectorNurbs::<3>::try_new(3, knots.clone(), vec![p0, q0, r0, s0])
         .expect("split_cubic_bezier: left half is a valid single-piece cubic Bézier");
-    let right = VectorNurbs::<f64, 3>::try_new(3, knots, vec![s0, r1, q2, p3])
+    let right = VectorNurbs::<3>::try_new(3, knots, vec![s0, r1, q2, p3])
         .expect("split_cubic_bezier: right half is a valid single-piece cubic Bézier");
     (left, right)
 }

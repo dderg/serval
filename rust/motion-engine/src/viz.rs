@@ -4,7 +4,8 @@ use pyo3::types::{PyDict, PyList};
 use snapshot_core::{FittedSegment, SnapshotParams};
 
 #[pyfunction]
-#[pyo3(signature = (waypoints, max_velocity, max_accel, square_corner_velocity, max_jerk, arc_fit = None, max_extrude_only_velocity = None, max_extrude_only_accel = None, max_path_deviation = None, max_accel_deviation = None))]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (waypoints, max_velocity, max_accel, square_corner_velocity, max_jerk, arc_fit = None, max_extrude_only_velocity = None, max_extrude_only_accel = None, max_path_deviation = None, max_accel_deviation = None, pressure_advance = None, smooth_zv_hz = None, e_smooth_zv_hz = None))]
 pub fn pipeline_snapshot(
     py: Python<'_>,
     waypoints: Vec<(f64, f64, f64, f64, f64)>,
@@ -17,6 +18,9 @@ pub fn pipeline_snapshot(
     max_extrude_only_accel: Option<f64>,
     max_path_deviation: Option<f64>,
     max_accel_deviation: Option<f64>,
+    pressure_advance: Option<f64>,
+    smooth_zv_hz: Option<f64>,
+    e_smooth_zv_hz: Option<f64>,
 ) -> PyResult<Py<PyDict>> {
     let snap = snapshot_core::pipeline_snapshot(
         &waypoints,
@@ -30,6 +34,9 @@ pub fn pipeline_snapshot(
             max_extrude_only_accel,
             max_path_deviation,
             max_accel_deviation,
+            pressure_advance,
+            smooth_zv_hz,
+            e_smooth_zv_hz,
         },
     )
     .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;

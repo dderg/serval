@@ -1,8 +1,12 @@
+#[cfg(test)]
 use std::collections::HashSet;
 
 use crate::LENGTH_EPS_MM;
+#[cfg(test)]
 use crate::fitter::{FitOutcome, UnblendReason};
-use crate::path::{CurvatureProfile, Segment};
+use crate::path::CurvatureProfile;
+#[cfg(test)]
+use crate::path::Segment;
 use crate::segment::SourceRange;
 
 mod disk;
@@ -128,7 +132,8 @@ struct MoveCaps {
     kappa_peak: f64,
 }
 
-pub fn plan_velocity_warm_start(
+#[cfg(test)]
+pub(crate) fn plan_velocity_warm_start(
     outcome: &FitOutcome,
     integration_tol: f64,
     max_extrude_only_velocity_mm_s: f64,
