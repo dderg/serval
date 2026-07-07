@@ -4,10 +4,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Select, TryRecvError};
-use runtime::piece_ring::PieceEntry;
 
+use super::diag;
 use super::drip::DripCohort;
-use super::junction::{JunctionTracker, check_junction_position_continuity, junction_jumps};
+use super::junction::{JunctionTracker, check_junction_position_continuity};
 use super::messages::{
     EnqueueMsg, HeartbeatMsg, HistoryRecorder, PieceSink, PumpCallbacks, PumpMsg, SendError,
 };
@@ -81,35 +81,6 @@ fn pump_past_guard_secs() -> f64 {
             500e-6
         }
     })
-}
-
-fn log_piece_submit(
-    mcu_id: u32,
-    axis: u8,
-    freq: Option<f32>,
-    piece: &PieceEntry,
-    prev_end: Option<u64>,
-) -> Option<u64> {
-    let end_ticks: u64 = freq.map_or(0, |f| piece.end_time(f));
-    let gap_ticks_in_frame: i64 = prev_end.map_or(0, |pe| piece.start_time as i64 - pe as i64);
-    tracing::trace!(
-        subsystem = "motion",
-        event = "pump_piece_submit",
-        mcu = mcu_id,
-        axis = axis,
-        start_time = piece.start_time,
-        duration_s = piece.duration,
-        end_ticks,
-        gap_ticks_in_frame,
-        motor_mask = piece.motor_mask,
-        "[pump-submit] piece submitted to MCU \
-         (gap_ticks_in_frame: 0=contiguous, <0=overlap, >0=gap)"
-    );
-    if freq.is_some() {
-        Some(end_ticks)
-    } else {
-        prev_end
-    }
 }
 
 pub(super) struct Pump<S> {
@@ -234,68 +205,14 @@ impl<S: PieceSink> Pump<S> {
         }
         if self.cohort.is_some() && !pieces.is_empty() {
             if let Some((ack_now, freq)) = (self.callbacks.mcu_clock_of)(key.mcu_id) {
-                let first_start = pieces[0].0.start_time;
-                let produce_lead_us = (first_start as i64 - ack_now as i64) as f64 / freq * 1e6;
-                let durs: Vec<f32> = pieces.iter().map(|p| p.0.duration).collect();
-                let min_dur = durs.iter().copied().fold(f32::INFINITY, f32::min);
-                let max_dur = durs.iter().copied().fold(0.0_f32, f32::max);
-                let total: f32 = durs.iter().sum();
-                tracing::warn!(
-                    subsystem = "motion",
-                    event = "drip_enqueue_lead",
-                    mcu = key.mcu_id,
-                    axis = key.axis,
-                    n = pieces.len(),
-                    produce_lead_us,
-                    min_dur_us = min_dur * 1e6,
-                    max_dur_us = max_dur * 1e6,
-                    total_secs = total,
-                    "[drip-diag] pieces reached pump with this much lead before their start"
-                );
+                diag::log_drip_enqueue_lead(key, &pieces, ack_now, freq);
             }
         }
         if !pieces.is_empty() {
             if let Some((_ack_now, freq)) = (self.callbacks.mcu_clock_of)(key.mcu_id) {
                 if let Some(seam) = self.junctions.observe(key, &pieces, source_line, freq) {
                     check_junction_position_continuity(&seam);
-                    let (tick_jump_us, host_jump_us) = junction_jumps(
-                        seam.first_start_ticks,
-                        seam.next_start_host,
-                        seam.prev_end_ticks,
-                        seam.prev_end_host,
-                        freq,
-                    );
-                    let anomalous =
-                        tick_jump_us < -50.0 || (tick_jump_us - host_jump_us).abs() > 50.0;
-                    if fresh_stream || !anomalous {
-                        tracing::debug!(
-                            subsystem = "motion",
-                            event = "junction_jump",
-                            key = ?seam.key,
-                            tick_jump_us,
-                            host_jump_us,
-                            fresh = fresh_stream,
-                            "[junction] jump"
-                        );
-                    } else {
-                        let reason = if tick_jump_us < -50.0 {
-                            "overlap_risk"
-                        } else {
-                            "projection_divergence"
-                        };
-                        tracing::warn!(
-                            subsystem = "motion",
-                            event = "junction_jump_anomalous",
-                            key = ?seam.key,
-                            tick_jump_us,
-                            host_jump_us,
-                            fresh = fresh_stream,
-                            reason,
-                            prev_source_line = seam.prev_source_line,
-                            next_source_line = source_line,
-                            "[junction] anomalous jump"
-                        );
-                    }
+                    diag::log_junction_jump(&seam, source_line, fresh_stream, freq);
                 }
             }
         }
@@ -513,18 +430,7 @@ impl<S: PieceSink> Pump<S> {
     fn guard_pieces_not_in_past(&self, mcu_id: u32, bundle: &[AxisFrame]) {
         if let Some((mcu_now, freq)) = (self.callbacks.mcu_clock_of)(mcu_id) {
             if self.cohort.is_some() {
-                if let Some(front) = bundle.first().and_then(|af| af.pieces.first()) {
-                    tracing::warn!(
-                        subsystem = "motion",
-                        event = "pump_send_projection",
-                        mcu = mcu_id,
-                        projected_now = mcu_now,
-                        front_start = front.start_time,
-                        release_lead_us =
-                            ((front.start_time as i64 - mcu_now as i64) as f64 / freq * 1e6),
-                        "[drip-diag] projection at send"
-                    );
-                }
+                diag::log_send_projection(mcu_id, mcu_now, freq, bundle);
             }
             if freq > 0.0 {
                 let guard_ticks = (pump_past_guard_secs() * freq) as u64;
@@ -587,7 +493,7 @@ impl<S: PieceSink> Pump<S> {
             let freq = (self.callbacks.mcu_clock_of)(mcu_id).map(|(_, f)| f as f32);
             let mut prev_end: Option<u64> = None;
             for piece in &af.pieces {
-                prev_end = log_piece_submit(mcu_id, af.axis, freq, piece, prev_end);
+                prev_end = diag::log_piece_submit(mcu_id, af.axis, freq, piece, prev_end);
             }
             let n = af.pieces.len() as u32;
             let q = self.queues.get_mut(&key).expect("planned key exists");
