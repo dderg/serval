@@ -1,6 +1,6 @@
 use std::ops::ControlFlow;
 
-use super::EndpointCtx;
+use super::{discard_motion, shutdown_and_exit, EndpointCtx};
 use crate::capture::{
     any_slot_out_of_range, CaptureConfig, CaptureDriveConfig, ERR_CAPTURE_BAD_DRIVE_LIST,
 };
@@ -54,12 +54,7 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
             }
             Command::Stop { correlation_id } => {
                 let now_ns = monotonic_ns();
-                for r in &mut ctx.rings {
-                    r.reset();
-                }
-                for c in &mut ctx.cmaps {
-                    *c = None;
-                }
+                discard_motion(ctx);
                 ctx.stream_halt.halt();
                 eprintln!("ec-rt: Stop — rings discarded, stream halted, discard_clock={now_ns}");
                 ctx.server
@@ -77,12 +72,7 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
             }
             Command::ResumeStream { correlation_id } => match ctx.stream_halt.resume() {
                 Ok(()) => {
-                    for r in &mut ctx.rings {
-                        r.reset();
-                    }
-                    for c in &mut ctx.cmaps {
-                        *c = None;
-                    }
+                    discard_motion(ctx);
                     eprintln!("ec-rt: ResumeStream — stream reopened");
                     ctx.server
                         .respond(&resume_stream_response_frame(correlation_id, 0));
@@ -217,13 +207,7 @@ fn handle_set_torque(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetTorque)
                     correlation_id,
                     ERR_ENABLE_FAILED,
                 ));
-                unsafe {
-                    for s in 0..num_slaves {
-                        ffi::ec_rt_disable(s as std::os::raw::c_int);
-                    }
-                    ffi::ec_rt_shutdown();
-                }
-                std::process::exit(1);
+                shutdown_and_exit(num_slaves);
             }
         }
         CommandAction::ScheduleDisable => {
@@ -245,13 +229,7 @@ fn handle_set_torque(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetTorque)
             );
             ctx.server
                 .respond(&set_torque_response_frame(correlation_id, code));
-            unsafe {
-                for s in 0..num_slaves {
-                    ffi::ec_rt_disable(s as std::os::raw::c_int);
-                }
-                ffi::ec_rt_shutdown();
-            }
-            std::process::exit(1);
+            shutdown_and_exit(num_slaves);
         }
     }
 }

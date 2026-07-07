@@ -374,13 +374,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
                 event = "claim_handshake_timeout",
                 "bridge did not send ClaimHandshake within 5 s; aborting"
             );
-            unsafe {
-                for s in 0..num_slaves {
-                    ffi::ec_rt_disable(s as std::os::raw::c_int);
-                }
-                ffi::ec_rt_shutdown();
-            }
-            std::process::exit(1);
+            super::shutdown_and_exit(num_slaves);
         }
     }
     tracing::info!(

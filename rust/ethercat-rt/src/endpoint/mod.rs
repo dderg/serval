@@ -13,6 +13,7 @@ use crate::sensorless::SensorlessBank;
 use crate::server::FrameServer;
 use crate::stream_halt::StreamHalt;
 use crate::torque::TorqueGate;
+use crate::wire::status_heartbeat_frame;
 
 mod bringup;
 mod commands;
@@ -98,11 +99,45 @@ pub fn run(ctx: &mut EndpointCtx) {
         }
     }
 
+    disable_all(ctx.num_slaves);
+    unsafe { ffi::ec_rt_shutdown() };
+    eprintln!("ec-rt: shutdown complete");
+}
+
+pub(super) fn disable_all(num_slaves: usize) {
     unsafe {
-        for s in 0..ctx.num_slaves {
+        for s in 0..num_slaves {
             ffi::ec_rt_disable(s as std::os::raw::c_int);
         }
-        ffi::ec_rt_shutdown();
     }
-    eprintln!("ec-rt: shutdown complete");
+}
+
+pub(super) fn shutdown_and_exit(num_slaves: usize) -> ! {
+    disable_all(num_slaves);
+    unsafe { ffi::ec_rt_shutdown() };
+    std::process::exit(1);
+}
+
+pub(super) fn respond_fault_heartbeat(
+    ctx: &mut EndpointCtx,
+    engine_state: u8,
+    error_code: u16,
+) -> Vec<u32> {
+    let retired: Vec<u32> = ctx.rings.iter().map(|r| r.retired_count()).collect();
+    ctx.server.respond(&status_heartbeat_frame(
+        engine_state,
+        error_code,
+        &retired,
+        ctx.ff_saturation,
+    ));
+    retired
+}
+
+pub(super) fn discard_motion(ctx: &mut EndpointCtx) {
+    for r in &mut ctx.rings {
+        r.reset();
+    }
+    for c in &mut ctx.cmaps {
+        *c = None;
+    }
 }
