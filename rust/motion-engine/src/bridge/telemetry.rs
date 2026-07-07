@@ -14,45 +14,16 @@ impl PyMotionEngine {
         rate: u32,
         timeout_s: f64,
     ) -> PyResult<()> {
-        let io = {
-            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
-            let conn = mcus.get(&mcu_handle).ok_or_else(|| {
-                PyRuntimeError::new_err(format!(
-                    "register_phase_bus: unknown mcu_handle {mcu_handle}"
-                ))
-            })?;
-            if !conn.mcu_transport_supported {
-                return Ok(());
-            }
-            conn.host_io
-                .as_ref()
-                .ok_or_else(|| {
-                    PyRuntimeError::new_err(
-                        "register_phase_bus: attach_serial has not been called for this MCU",
-                    )
-                })?
-                .clone()
-        };
-        let timeout = std::time::Duration::from_secs_f64(timeout_s);
         let msg = format!("runtime_register_phase_bus bus_id={bus_id} rate={rate}");
-        let params = py.detach(|| -> PyResult<_> {
-            use host_rt::transport::Transport;
-            io.call(&msg, "kalico_register_phase_bus_response", timeout)
-                .map_err(|e| {
-                    PyRuntimeError::new_err(format!("register_phase_bus: transport error: {e:?}"))
-                })
-        })?;
-        let result = params.try_get_i32("result").ok_or_else(|| {
-            PyRuntimeError::new_err(
-                "register_phase_bus: response missing or non-integer result field",
-            )
-        })?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "register_phase_bus: MCU returned error {result} (bus_id={bus_id})"
-            )));
-        }
-        Ok(())
+        self.phase_register_call(
+            py,
+            "register_phase_bus",
+            mcu_handle,
+            &msg,
+            "kalico_register_phase_bus_response",
+            timeout_s,
+            &format!("(bus_id={bus_id})"),
+        )
     }
     #[pyo3(signature = (mcu_handle, motor_idx, bus_id, cs_pin_id, slot_idx, timeout_s = 5.0))]
     fn register_phase_motor(
@@ -65,49 +36,19 @@ impl PyMotionEngine {
         slot_idx: u8,
         timeout_s: f64,
     ) -> PyResult<()> {
-        let io = {
-            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
-            let conn = mcus.get(&mcu_handle).ok_or_else(|| {
-                PyRuntimeError::new_err(format!(
-                    "register_phase_motor: unknown mcu_handle {mcu_handle}"
-                ))
-            })?;
-            if !conn.mcu_transport_supported {
-                return Ok(());
-            }
-            conn.host_io
-                .as_ref()
-                .ok_or_else(|| {
-                    PyRuntimeError::new_err(
-                        "register_phase_motor: attach_serial has not been called for this MCU",
-                    )
-                })?
-                .clone()
-        };
-        let timeout = std::time::Duration::from_secs_f64(timeout_s);
         let msg = format!(
             "runtime_register_phase_motor motor_idx={motor_idx} \
              bus_id={bus_id} cs_pin_id={cs_pin_id} slot_idx={slot_idx}"
         );
-        let params = py.detach(|| -> PyResult<_> {
-            use host_rt::transport::Transport;
-            io.call(&msg, "kalico_register_phase_motor_response", timeout)
-                .map_err(|e| {
-                    PyRuntimeError::new_err(format!("register_phase_motor: transport error: {e:?}"))
-                })
-        })?;
-        let result = params.try_get_i32("result").ok_or_else(|| {
-            PyRuntimeError::new_err(
-                "register_phase_motor: response missing or non-integer result field",
-            )
-        })?;
-        if result != 0 {
-            return Err(PyRuntimeError::new_err(format!(
-                "register_phase_motor: MCU returned error {result} \
-                 (motor_idx={motor_idx} bus_id={bus_id} cs_pin_id={cs_pin_id})"
-            )));
-        }
-        Ok(())
+        self.phase_register_call(
+            py,
+            "register_phase_motor",
+            mcu_handle,
+            &msg,
+            "kalico_register_phase_motor_response",
+            timeout_s,
+            &format!("(motor_idx={motor_idx} bus_id={bus_id} cs_pin_id={cs_pin_id})"),
+        )
     }
     fn wait_moves(&self, py: Python<'_>) -> PyResult<()> {
         let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
@@ -363,6 +304,53 @@ impl PyMotionEngine {
 }
 
 impl PyMotionEngine {
+    #[allow(clippy::too_many_arguments)]
+    fn phase_register_call(
+        &self,
+        py: Python<'_>,
+        op: &str,
+        mcu_handle: u32,
+        request: &str,
+        response: &str,
+        timeout_s: f64,
+        err_ctx: &str,
+    ) -> PyResult<()> {
+        let io = {
+            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let conn = mcus.get(&mcu_handle).ok_or_else(|| {
+                PyRuntimeError::new_err(format!("{op}: unknown mcu_handle {mcu_handle}"))
+            })?;
+            if !conn.mcu_transport_supported {
+                return Ok(());
+            }
+            conn.host_io
+                .as_ref()
+                .ok_or_else(|| {
+                    PyRuntimeError::new_err(format!(
+                        "{op}: attach_serial has not been called for this MCU"
+                    ))
+                })?
+                .clone()
+        };
+        let timeout = std::time::Duration::from_secs_f64(timeout_s);
+        let params = py.detach(|| -> PyResult<_> {
+            use host_rt::transport::Transport;
+            io.call(request, response, timeout)
+                .map_err(|e| PyRuntimeError::new_err(format!("{op}: transport error: {e:?}")))
+        })?;
+        let result = params.try_get_i32("result").ok_or_else(|| {
+            PyRuntimeError::new_err(format!(
+                "{op}: response missing or non-integer result field"
+            ))
+        })?;
+        if result != 0 {
+            return Err(PyRuntimeError::new_err(format!(
+                "{op}: MCU returned error {result} {err_ctx}"
+            )));
+        }
+        Ok(())
+    }
+
     fn report_lagging_drain_wait(&self) {
         const DRAIN_WAIT_REPORT_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
         let now = std::time::Instant::now();

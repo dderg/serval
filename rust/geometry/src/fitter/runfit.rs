@@ -115,34 +115,27 @@ impl RunFit {
         else {
             return Ok(Vec::new());
         };
-        let (f_in, f_out) = blend_followers(
-            &SeamSide {
+        let Some(out) = general_blend(
+            &blend,
+            SeamSide {
                 followers: &neighbor.segment.followers,
                 seg_len: line.s_len(),
                 trim: blend.trim_in,
             },
-            &SeamSide {
+            SeamSide {
                 followers: &self.recon.followers,
                 seg_len: self.recon.arc.s_len(),
                 trim: blend.trim_out,
             },
-            blend.half1.s_len(),
-            blend.half2.s_len(),
-        );
-        if !general_blend_admitted(
-            &blend,
-            &f_in,
-            &f_out,
             neighbor,
             run_first,
-            corner.ramp_accel_budget_mm_s2,
-        ) {
+            corner,
+        )?
+        else {
             return Ok(Vec::new());
-        }
+        };
         self.head_line_extra = blend.trim_in;
         self.head_blend_trim = blend.trim_out;
-        let mut out = Vec::with_capacity(2);
-        causal::emit_general_blend(&mut out, &blend, f_in, f_out, neighbor, run_first)?;
         Ok(out)
     }
 
@@ -163,34 +156,27 @@ impl RunFit {
         else {
             return Ok(Vec::new());
         };
-        let (f_in, f_out) = blend_followers(
-            &SeamSide {
+        let Some(out) = general_blend(
+            &blend,
+            SeamSide {
                 followers: &self.recon.followers,
                 seg_len: self.recon.arc.s_len(),
                 trim: blend.trim_in,
             },
-            &SeamSide {
+            SeamSide {
                 followers: &neighbor.segment.followers,
                 seg_len: line.s_len(),
                 trim: blend.trim_out,
             },
-            blend.half1.s_len(),
-            blend.half2.s_len(),
-        );
-        if !general_blend_admitted(
-            &blend,
-            &f_in,
-            &f_out,
             run_last,
             neighbor,
-            corner.ramp_accel_budget_mm_s2,
-        ) {
+            corner,
+        )?
+        else {
             return Ok(Vec::new());
-        }
+        };
         self.tail_blend_trim = blend.trim_in;
         self.tail_line_extra = blend.trim_out;
-        let mut out = Vec::with_capacity(2);
-        causal::emit_general_blend(&mut out, &blend, f_in, f_out, run_last, neighbor)?;
         Ok(out)
     }
 
@@ -210,34 +196,27 @@ impl RunFit {
         else {
             return Ok(Vec::new());
         };
-        let (f_in, f_out) = blend_followers(
-            &SeamSide {
+        let Some(out) = general_blend(
+            &blend,
+            SeamSide {
                 followers: &self.recon.followers,
                 seg_len: self.recon.arc.s_len(),
                 trim: blend.trim_in,
             },
-            &SeamSide {
+            SeamSide {
                 followers: &next.recon.followers,
                 seg_len: next.recon.arc.s_len(),
                 trim: blend.trim_out,
             },
-            blend.half1.s_len(),
-            blend.half2.s_len(),
-        );
-        if !general_blend_admitted(
-            &blend,
-            &f_in,
-            &f_out,
             run_last,
             next_first,
-            corner.ramp_accel_budget_mm_s2,
-        ) {
+            corner,
+        )?
+        else {
             return Ok(Vec::new());
-        }
+        };
         self.tail_blend_trim = blend.trim_in;
         next.head_blend_trim = blend.trim_out;
-        let mut out = Vec::with_capacity(2);
-        causal::emit_general_blend(&mut out, &blend, f_in, f_out, run_last, next_first)?;
         Ok(out)
     }
 
@@ -256,6 +235,35 @@ impl RunFit {
         )?;
         Ok(out)
     }
+}
+
+fn general_blend(
+    blend: &super::biclothoid::GeneralBlend,
+    in_side: SeamSide,
+    out_side: SeamSide,
+    m_in: &Move,
+    m_out: &Move,
+    corner: CornerFitConfig,
+) -> Result<Option<Vec<Move>>, FitError> {
+    let (f_in, f_out) = blend_followers(
+        &in_side,
+        &out_side,
+        blend.half1.s_len(),
+        blend.half2.s_len(),
+    );
+    if !general_blend_admitted(
+        blend,
+        &f_in,
+        &f_out,
+        m_in,
+        m_out,
+        corner.ramp_accel_budget_mm_s2,
+    ) {
+        return Ok(None);
+    }
+    let mut out = Vec::with_capacity(2);
+    causal::emit_general_blend(&mut out, blend, f_in, f_out, m_in, m_out)?;
+    Ok(Some(out))
 }
 
 fn general_blend_admitted(

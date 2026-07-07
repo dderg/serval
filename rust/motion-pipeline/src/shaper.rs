@@ -31,14 +31,13 @@ pub struct Shaper {
 
 impl Shaper {
     pub fn new(chains: AxisChainSet) -> Self {
-        let (forward_support, back_support) = supports_of(&chains);
         Self {
+            forward_support: chains.forward_support(),
+            back_support: chains.back_support(),
             chains,
             history: VecDeque::new(),
             pending: VecDeque::new(),
             pending_rest: VecDeque::new(),
-            forward_support,
-            back_support,
             history_trimmed: false,
         }
     }
@@ -80,7 +79,8 @@ impl Shaper {
                                 return;
                             }
                             if let Control::SetAxisChains(chains) = &ctrl {
-                                let (new_forward, new_back) = supports_of(chains);
+                                let (new_forward, new_back) =
+                                    (chains.forward_support(), chains.back_support());
                                 // The signal eras agree at the rest point this swap
                                 // happens at, so kept history makes the resumed
                                 // track exactly continuous with what was committed
@@ -161,20 +161,6 @@ impl Shaper {
         }
         true
     }
-}
-
-fn supports_of(chains: &AxisChainSet) -> (f64, f64) {
-    let forward = chains
-        .chains
-        .iter()
-        .map(|chain| chain.max_half_support().1)
-        .fold(0.0, f64::max);
-    let back = chains
-        .chains
-        .iter()
-        .map(|chain| chain.max_half_support().0.abs())
-        .fold(0.0, f64::max);
-    (forward, back)
 }
 
 fn apply_axis_chains(
