@@ -86,6 +86,37 @@ def make_z_gantry(toolhead_kin_pins=3, failing_pin=None):
     return th, pins
 
 
+class FakeServoTorqueLine:
+    def __init__(self, toolhead):
+        self._toolhead = toolhead
+        self.wait_done = False
+
+    def set_digital(self, print_time, value):
+        def wait_for_drive_enable():
+            self._toolhead.clock += 2 * TMC_ENABLE_WORK_SECS
+            self.wait_done = True
+
+        return wait_for_drive_enable
+
+
+def test_servo_drive_enable_wait_does_not_erode_schedule_lead():
+    servo_rail = FakeStepper("servo_x")
+    z_stepper = FakeStepper("motor_z")
+    th = FakeToolhead(FakeKin([FakeRail([servo_rail]), FakeRail([z_stepper])]))
+    torque_line = FakeServoTorqueLine(th)
+    EnableTracking(servo_rail, StepperEnablePin(torque_line, 0))
+    z_pin = FakeMcuDigitalOut(th, "PF15")
+    EnableTracking(z_stepper, StepperEnablePin(z_pin, 0))
+    th._fire_active_callbacks((0.1, 0.0, 15.0, 0.0))
+    assert z_pin.set_at, (
+        "the stepper pin must be scheduled before the servo drive-enable"
+        " wait consumes the shared print_time's lead"
+    )
+    assert torque_line.wait_done, (
+        "motion must not proceed until the servo drive finished enabling"
+    )
+
+
 def test_slow_enable_callbacks_do_not_erode_schedule_lead():
     th, pins = make_z_gantry()
     th._fire_active_callbacks((0.0, 0.0, 15.0, 0.0))

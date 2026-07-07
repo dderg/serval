@@ -16,9 +16,11 @@ class StepperEnablePin:
         self.is_dedicated = True
 
     def set_enable(self, print_time):
+        wait = None
         if not self.enable_count:
-            self.mcu_enable.set_digital(print_time, 1)
+            wait = self.mcu_enable.set_digital(print_time, 1)
         self.enable_count += 1
+        return wait
 
     def set_disable(self, print_time):
         self.enable_count -= 1
@@ -62,10 +64,12 @@ class EnableTracking:
     def energize(self, print_time):
         if self.is_enabled:
             return None
-        self.enable.set_enable(print_time)
+        wait = self.enable.set_enable(print_time)
         self.is_enabled = True
 
         def notify_state_callbacks():
+            if wait is not None:
+                wait()
             for cb in self.callbacks:
                 cb(print_time, True)
 
