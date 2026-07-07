@@ -54,17 +54,27 @@ class EnableTracking:
         self.enable = enable
         self.callbacks = []
         self.is_enabled = False
-        self.stepper.add_active_callback(self.motor_enable)
+        self.stepper.add_active_callback(self.energize)
 
     def register_state_callback(self, callback):
         self.callbacks.append(callback)
 
-    def motor_enable(self, print_time):
-        if not self.is_enabled:
-            self.enable.set_enable(print_time)
-            self.is_enabled = True
+    def energize(self, print_time):
+        if self.is_enabled:
+            return None
+        self.enable.set_enable(print_time)
+        self.is_enabled = True
+
+        def notify_state_callbacks():
             for cb in self.callbacks:
                 cb(print_time, True)
+
+        return notify_state_callbacks
+
+    def motor_enable(self, print_time):
+        notify = self.energize(print_time)
+        if notify is not None:
+            notify()
 
     def motor_disable(self, print_time):
         if self.is_enabled:
@@ -73,7 +83,7 @@ class EnableTracking:
                 cb(print_time, False)
             self.enable.set_disable(print_time)
             self.is_enabled = False
-            self.stepper.add_active_callback(self.motor_enable)
+            self.stepper.add_active_callback(self.energize)
 
     def is_motor_enabled(self):
         return self.is_enabled
@@ -136,9 +146,14 @@ class PrinterStepperEnable:
         toolhead.dwell(DISABLE_STALL_TIME)
         toolhead.resync_parked_servos()
         shared_print_time = toolhead.get_last_move_time()
+        notifiers = []
         for name in stepper_names:
-            self.enable_lines[name].motor_enable(shared_print_time)
+            notify = self.enable_lines[name].energize(shared_print_time)
+            if notify is not None:
+                notifiers.append(notify)
             logging.info("%s enabled", name)
+        for notify in notifiers:
+            notify()
         toolhead.dwell(DISABLE_STALL_TIME)
 
     def get_status(self, eventtime):

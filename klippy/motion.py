@@ -519,16 +519,29 @@ class Motion:
         )
         fired = False
         move_time = None
-        for owner in owners:
-            if not owner._active_callbacks:
-                continue
-            cbs = owner._active_callbacks
-            owner._active_callbacks = []
-            if move_time is None:
-                move_time = self.get_last_move_time()
-            for cb in cbs:
-                cb(move_time)
-            fired = True
+        deferred = []
+        try:
+            for owner in owners:
+                if not owner._active_callbacks:
+                    continue
+                cbs = owner._active_callbacks
+                owner._active_callbacks = []
+                if move_time is None:
+                    move_time = self.get_last_move_time()
+                for i, cb in enumerate(cbs):
+                    try:
+                        followup = cb(move_time)
+                    except Exception:
+                        owner._active_callbacks = (
+                            cbs[i:] + owner._active_callbacks
+                        )
+                        raise
+                    if followup is not None:
+                        deferred.append(followup)
+                fired = True
+        finally:
+            for followup in deferred:
+                followup()
         return fired
 
     def drip_move(self, newpos, speed, drip_completion):
