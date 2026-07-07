@@ -1,7 +1,7 @@
 use super::*;
 use crate::frontend::{MoveContext, line_move};
 use crate::path::lowering::PositionProfile;
-use crate::path::{Arc, Clothoid, CurvatureProfile};
+use crate::path::{Arc, Clothoid, CurvatureProfile, PathSegment, Segment};
 use crate::segment::SourceRange;
 use crate::vec3::dist;
 use std::f64::consts::{PI, SQRT_2};

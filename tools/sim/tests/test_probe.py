@@ -87,21 +87,9 @@ def _assert_probe_flow(world, variant):
     world.expect_log("probe: open")
 
 
-_VTIME_CRAWL_XFAIL = pytest.mark.xfail(
-    strict=False,
-    reason="flaky: the vtime pacer ties virtual time to the deprioritized "
-    "MCU tick thread, so the MCU clock crawls behind klippy's ~50MHz "
-    "clocksync extrapolation during XY travel between probes — wait_moves "
-    "returns while the MCU still owes seconds of queued motion, so the "
-    "next move stalls ('Z endstop did not trigger' / probe left in "
-    "contact). See sim-vtime-crawl-handoff.md; needs the dedicated "
-    "clocksync/vtime session.",
-)
-
-
 @pytest.mark.parametrize(
     "variant",
-    ["virtual", pytest.param("safe-z", marks=_VTIME_CRAWL_XFAIL), "gpio-z"],
+    ["virtual", "safe-z", "gpio-z"],
 )
 def test_probe_homing_and_probing(sim_world, variant):
     world = sim_world(_cfg(variant), dual_mcu=False)
@@ -109,7 +97,6 @@ def test_probe_homing_and_probing(sim_world, variant):
     assert world.shutdown_line() is None
 
 
-@_VTIME_CRAWL_XFAIL
 def test_probe_multi_point_tools(sim_world):
     world = sim_world(_cfg("points"), dual_mcu=False)
     _assert_probe_flow(world, "points")
@@ -126,9 +113,7 @@ def test_probe_multi_point_tools(sim_world):
     )
 
     world.mark_log()
-    world.gcode_ok(
-        "FORCE_MOVE STEPPER=stepper_z DISTANCE=0.5 VELOCITY=5", timeout=60
-    )
+    world.gcode_ok("FORCE_MOVE STEPPER=z DISTANCE=0.5 VELOCITY=5", timeout=60)
     world.gcode_ok("PROBE", timeout=90)
     shifted_z = _last_probe_z(world.expect_log(" is z="))
     assert abs(shifted_z - 1.5) == pytest.approx(0.5, abs=0.1)

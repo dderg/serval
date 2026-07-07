@@ -31,6 +31,7 @@ impl StreamHalt {
         }
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn is_halted(&self) -> bool {
         self.halted

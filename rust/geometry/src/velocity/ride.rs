@@ -35,6 +35,12 @@ use state::{State, advance, march_step, step_within};
 pub(super) use chain::{chain_is_continuous, chain_states, clip_phases, reverse_chain};
 
 const SUBSTEP_TIME_FRACTION: f64 = 1.0 / 16.0;
+/// Ceiling on curved-cell substep resolution. The substep timescale is the
+/// jerk swing time `a/j`, but with an effectively-unlimited jerk that
+/// collapses to nanoseconds while the disk rail still only varies over the
+/// cell's curvature ramp — finer resolution buys nothing and starves
+/// `CELL_GUARD_STEPS`, whose stall fallback then pins the velocity.
+const SUBSTEPS_PER_CELL_MAX: f64 = 256.0;
 const EVENT_BISECT_ITERS: u32 = 48;
 /// Iterations for the peel-trigger and ride-departure bisections, where every
 /// probe is a full feasibility march. Trigger placement feeds the downstream
@@ -461,7 +467,11 @@ fn cap_state(g: &Grid, from: State, s: f64, cell: usize) -> State {
 
 fn substep_budget(g: &Grid, st: State, j_nominal: f64) -> f64 {
     let a_scale = g.lerp_node(g.t.accel, st.s);
-    (a_scale / j_nominal.max(1e-9)) * SUBSTEP_TIME_FRACTION
+    let jerk_dt = (a_scale / j_nominal.max(1e-9)) * SUBSTEP_TIME_FRACTION;
+    let c = g.cell(st.s);
+    let span = g.t.s[c + 1] - g.t.s[c];
+    let cell_dt = span / st.v.max(1e-9) / SUBSTEPS_PER_CELL_MAX;
+    jerk_dt.max(cell_dt)
 }
 
 /// Tangential jerk available after billing the normal share the rotating
@@ -508,6 +518,14 @@ fn flight_step(
     } else {
         track.j_max
     };
+    // A jerk swing smaller than one floor-duration step cannot be integrated:
+    // with an effectively-unlimited jerk the rail's hold band is far narrower
+    // than one step's `j·dt`, so the correction overshoots into a
+    // zero-progress limit cycle ping-ponging across the rail until the cell
+    // guard gives up. At this resolution the swing is instantaneous — snap.
+    if (st.a - rail).abs() <= j_up * 2e-12 {
+        st.a = rail;
+    }
     let (j_cmd, dt_event) = if st.a > rail + rel_eps(rail) {
         // Above the rail (a curved cell shrank it, or a cap slope leaked into
         // the state): jerk back down to it.

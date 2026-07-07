@@ -12,7 +12,7 @@ crossbeam-channel = "0.5"
 gcode = { path = "../gcode" }
 geometry = { path = "../geometry" }
 motion-pipeline = { path = "../motion-pipeline" }
-nurbs = { path = "../nurbs", features = ["host"] }
+nurbs = { path = "../nurbs" }
 serde = { version = "1", features = ["derive"] }
 thiserror = { workspace = true }
 trajectory = { path = "../trajectory" }

@@ -13,9 +13,13 @@ thiserror = { workspace = true }
 crossbeam-channel = "0.5"
 mcu-protocol = { path = "../mcu-protocol" }
 
+[features]
+test-util = []
+
 [dev-dependencies]
 libc = "0.2"
 env_logger = "0.11"
+mcu-transport = { path = ".", features = ["test-util"] }
 
 [[example]]
 name = "sim_handshake"

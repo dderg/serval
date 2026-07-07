@@ -22,34 +22,15 @@ static const uint8_t adc_pins[] = {
     GPIO('A', 0), GPIO('A', 1), GPIO('A', 2), GPIO('A', 3),
     GPIO('A', 4), GPIO('A', 5), GPIO('A', 6), GPIO('A', 7),
     GPIO('B', 0), GPIO('B', 1),
-#if CONFIG_MACH_STM32F0
-    GPIO('C', 0), GPIO('C', 1),
-    GPIO('C', 2), GPIO('C', 3), GPIO('C', 4), GPIO('C', 5),
-    ADC_TEMPERATURE_PIN
-#elif CONFIG_MACH_STM32G0
     GPIO('B', 2), GPIO('B', 10),
     ADC_TEMPERATURE_PIN, 0x00, 0x00,
     GPIO('B', 11), GPIO('B', 12), GPIO('C', 4), GPIO('C', 5),
-#endif
 };
-
-// Setup and calibrate ADC on stm32f0 chips
-static void
-stm32f0_adc_setup(void)
-{
-#if CONFIG_MACH_STM32F0
-    #define CR_FLAGS 0
-    ADC_TypeDef *adc = ADC1;
-    // 100: 41.5 ADC clock cycles
-    adc->SMPR = 4 << ADC_SMPR_SMP_Pos;
-#endif
-}
 
 // Setup and calibrate ADC on stm32g0 chips
 static void
 stm32g0_adc_setup(void)
 {
-#if CONFIG_MACH_STM32G0
     #define CR_FLAGS ADC_CR_ADVREGEN
     ADC_TypeDef *adc = ADC1;
     // 101: 39.5 ADC clock cycles
@@ -61,7 +42,6 @@ stm32g0_adc_setup(void)
     uint32_t end = timer_read_time() + timer_from_us(20);
     while (timer_is_before(timer_read_time(), end))
         ;
-#endif
 }
 
 struct gpio_adc
@@ -79,10 +59,7 @@ gpio_adc_setup(uint32_t pin)
     // Enable the ADC
     if (!is_enabled_pclock(ADC1_BASE)) {
         enable_pclock(ADC1_BASE);
-        if (CONFIG_MACH_STM32F0)
-            stm32f0_adc_setup();
-        else if (CONFIG_MACH_STM32G0)
-            stm32g0_adc_setup();
+        stm32g0_adc_setup();
 
         // Start calibration and wait for completion
         ADC_TypeDef *adc = ADC1;

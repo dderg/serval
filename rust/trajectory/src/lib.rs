@@ -1,16 +1,16 @@
+pub mod algos;
+pub mod chain;
+mod convolution;
 mod kernel;
-pub mod post_processor;
-pub mod post_processors;
-mod shaper;
 
-pub use post_processor::{
+pub use chain::{
     AxisChainSet, ChainStage, CompiledChain, PostProcessorError, PostProcessorInstance,
 };
-pub use shaper::ShapedSignal;
+pub use convolution::ShapedSignal;
 
 #[derive(Debug, Clone)]
 pub struct ShapedSegment {
-    pub axes: Vec<nurbs::ScalarNurbs<f64>>,
+    pub axes: Vec<nurbs::ScalarNurbs>,
     pub followers: Vec<geometry::segment::FollowerDemand>,
     pub t_start: f64,
     pub t_end: f64,

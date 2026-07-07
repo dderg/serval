@@ -280,7 +280,7 @@ class MotionTorqueLine:
 
     def set_digital(self, print_time, value):
         node = self._printer.lookup_object("ethercat_node " + self._node_name)
-        node.set_motor_torque(self._motor_name, bool(value), print_time)
+        return node.set_motor_torque(self._motor_name, bool(value), print_time)
 
 
 def register_torque_enable(printer, config, rail):

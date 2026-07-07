@@ -1,3 +1,4 @@
+use crate::lock_ext::LockExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -27,6 +28,7 @@ mod ethercat_endpoint;
 mod homing_api;
 mod motion_caps;
 mod passthrough;
+mod pipeline_setup;
 mod planner_api;
 mod runtime_caps;
 mod servo;
@@ -240,7 +242,7 @@ impl PyMotionEngine {
         crate::logging::init_logging(path).map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("init_logging failed: {e}"))
         })?;
-        let mut guard = self.events_dir.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = self.events_dir.lock_ok();
         *guard = Some(path.to_path_buf());
         Ok(())
     }
@@ -253,10 +255,10 @@ impl PyMotionEngine {
     #[pyo3(signature = (label, serial_path, baud))]
     fn claim_mcu(&self, label: &str, serial_path: &str, baud: u32) -> PyResult<u32> {
         let _ = (serial_path, baud);
-        let mut router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+        let mut router = self.router.lock_ok();
         let handle = router.claim_mcu(label);
         let raw = handle.raw();
-        self.mcus.lock().unwrap_or_else(|p| p.into_inner()).insert(
+        self.mcus.lock_ok().insert(
             raw,
             McuConnection {
                 label: label.to_owned(),
@@ -303,11 +305,7 @@ impl PyMotionEngine {
             }
         }
 
-        let events_dir = self
-            .events_dir
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone();
+        let events_dir = self.events_dir.lock_ok().clone();
         let mut child = spawn_ethercat_endpoint(
             endpoint_binary,
             interface,
@@ -337,7 +335,7 @@ impl PyMotionEngine {
             PyRuntimeError::new_err(message_for_claim_error(label, interface, &e))
         })?;
 
-        let mut router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+        let mut router = self.router.lock_ok();
         let handle = router.claim_mcu(label);
         let raw = handle.raw();
         drop(router);
@@ -347,7 +345,7 @@ impl PyMotionEngine {
 
     fn release_mcu(&self, handle: u32) -> PyResult<()> {
         let Some(mut conn) = ({
-            let mut mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let mut mcus = self.mcus.lock_ok();
             mcus.remove(&handle)
         }) else {
             return Ok(());
@@ -388,7 +386,7 @@ impl PyMotionEngine {
 
         drop(conn);
 
-        let mut router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+        let mut router = self.router.lock_ok();
         router.release_mcu(mcu_handle_from_raw(handle));
         Ok(())
     }
@@ -403,28 +401,17 @@ impl PyMotionEngine {
             return;
         }
 
-        let planner = self
-            .planner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take();
+        let planner = self.planner.lock_ok().take();
         if let Some(mut p) = planner {
             p.shutdown();
         }
 
         let pump_join = {
-            let tx = self
-                .pump_tx
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .take();
+            let tx = self.pump_tx.lock_ok().take();
             if let Some(tx) = tx {
                 let _ = tx.send(crate::pump::PumpMsg::Shutdown);
             }
-            self.pump_thread
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .take()
+            self.pump_thread.lock_ok().take()
         };
         if let Some(h) = pump_join {
             if let Err(e) = h.join() {
@@ -439,12 +426,7 @@ impl PyMotionEngine {
 
         self.position_poll_stop
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(h) = self
-            .position_poll_thread
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take()
-        {
+        if let Some(h) = self.position_poll_thread.lock_ok().take() {
             if let Err(e) = h.join() {
                 tracing::error!(
                     subsystem = "engine",
@@ -456,7 +438,7 @@ impl PyMotionEngine {
         }
 
         let handles: Vec<u32> = {
-            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let mcus = self.mcus.lock_ok();
             mcus.keys().copied().collect()
         };
         for h in handles {
@@ -473,7 +455,7 @@ impl PyMotionEngine {
     }
 
     fn detach_serial(&self, mcu_handle: u32) -> PyResult<()> {
-        let mut mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+        let mut mcus = self.mcus.lock_ok();
         if let Some(conn) = mcus.get_mut(&mcu_handle) {
             conn.runtime_rx_priority = None;
             conn.runtime_rx_bulk = None;
@@ -551,10 +533,7 @@ impl PyMotionEngine {
     }
 
     fn ring_depth_for_axis(&self, mcu_handle: u32, axis: u8) -> PyResult<u16> {
-        let configs = self
-            .mcu_axis_configs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let configs = self.mcu_axis_configs.lock_ok();
         ring_depth_for_axis_inner(&configs, mcu_handle, axis).map_err(PyRuntimeError::new_err)
     }
 }
@@ -572,7 +551,7 @@ impl PyMotionEngine {
         unknown_mcu_err: impl FnOnce(u32) -> String,
         f: impl FnOnce(&mut McuConnection) -> PyResult<R>,
     ) -> PyResult<R> {
-        let mut mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+        let mut mcus = self.mcus.lock_ok();
         let mc = mcus
             .get_mut(&handle)
             .ok_or_else(|| PyRuntimeError::new_err(unknown_mcu_err(handle)))?;
@@ -580,7 +559,7 @@ impl PyMotionEngine {
     }
 
     fn ethercat_conn(&self, mcu_handle: u32, what: &str) -> PyResult<Arc<McuSerialConn>> {
-        let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+        let mcus = self.mcus.lock_ok();
         let mc = mcus.get(&mcu_handle).ok_or_else(|| {
             PyRuntimeError::new_err(format!("{what}: unknown mcu_handle {mcu_handle}"))
         })?;
@@ -593,7 +572,7 @@ impl PyMotionEngine {
     }
 
     fn host_io_for_mcu(&self, caller: &str, mcu: u32) -> PyResult<Arc<McuHostIo>> {
-        let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+        let mcus = self.mcus.lock_ok();
         let conn = mcus.get(&mcu).ok_or_else(|| {
             PyRuntimeError::new_err(format!("{caller}: unknown mcu_handle {mcu}"))
         })?;
@@ -619,7 +598,7 @@ impl PyMotionEngine {
         conn: McuSerialConn,
         slot_axes: Vec<usize>,
     ) {
-        self.mcus.lock().unwrap_or_else(|p| p.into_inner()).insert(
+        self.mcus.lock_ok().insert(
             raw,
             McuConnection {
                 label: label.to_owned(),
@@ -636,8 +615,7 @@ impl PyMotionEngine {
             },
         );
         self.nominal_clock_freqs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .lock_ok()
             .insert(raw, ETHERCAT_CLOCK_FREQ_HZ);
     }
 }

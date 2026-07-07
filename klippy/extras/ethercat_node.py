@@ -310,11 +310,14 @@ class EtherCatNode:
             first = not self._torque_motors
             self._torque_motors.add(motor_name)
             if first:
-                engine.set_torque(self.engine_handle, True, print_time)
+                return engine.set_torque_deferred(
+                    self.engine_handle, True, print_time
+                )
         else:
             self._torque_motors.discard(motor_name)
             if not self._torque_motors:
                 engine.set_torque(self.engine_handle, False, print_time)
+        return None
 
 
 def load_config_prefix(config):

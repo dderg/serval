@@ -3,6 +3,10 @@
 # Copyright (C) 2021  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
+#
+# get_status() below is what feeds the front-end's live speed/flow readout
+# (e.g. Mainsail's toolhead speed/flow tiles) — not just an internal
+# diagnostic.
 from . import bulk_sensor
 
 

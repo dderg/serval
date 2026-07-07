@@ -264,6 +264,9 @@ fn snapshot_serializes_to_the_baseline_schema() {
             max_extrude_only_accel: None,
             max_path_deviation: None,
             max_accel_deviation: None,
+            pressure_advance: None,
+            smooth_zv_hz: None,
+            e_smooth_zv_hz: None,
         },
     )
     .unwrap();

@@ -1,8 +1,12 @@
+#[cfg(test)]
 use std::collections::HashSet;
 
 use crate::LENGTH_EPS_MM;
+#[cfg(test)]
 use crate::fitter::{FitOutcome, UnblendReason};
-use crate::path::{CurvatureProfile, Segment};
+use crate::path::CurvatureProfile;
+#[cfg(test)]
+use crate::path::Segment;
 use crate::segment::SourceRange;
 
 mod disk;
@@ -128,7 +132,8 @@ struct MoveCaps {
     kappa_peak: f64,
 }
 
-pub fn plan_velocity_warm_start(
+#[cfg(test)]
+pub(crate) fn plan_velocity_warm_start(
     outcome: &FitOutcome,
     integration_tol: f64,
     max_extrude_only_velocity_mm_s: f64,
@@ -173,15 +178,12 @@ pub fn plan_velocity_stops(
     entry: BoundaryState,
 ) -> Result<VelocityProfile, VelocityError> {
     let tol = integration_tol;
-    if !(tol.is_finite() && tol >= MIN_INTEGRATION_TOL) {
-        return Err(VelocityError::InvalidConfig);
-    }
-    if !(entry.v.is_finite() && entry.v >= 0.0 && entry.a.is_finite()) {
-        return Err(VelocityError::InvalidConfig);
-    }
-    if !(max_extrude_only_velocity_mm_s > 0.0 && max_extrude_only_accel_mm_s2 > 0.0) {
-        return Err(VelocityError::InvalidConfig);
-    }
+    validate_config(
+        tol,
+        entry,
+        max_extrude_only_velocity_mm_s,
+        max_extrude_only_accel_mm_s2,
+    )?;
 
     let n = moves.len();
     assert_eq!(stop_before.len(), n, "one stop flag per move");
@@ -196,7 +198,54 @@ pub fn plan_velocity_stops(
     }
 
     let mut report = VelocityReport::default();
-    let mut caps = Vec::with_capacity(n);
+    let caps = build_move_caps(
+        moves,
+        max_extrude_only_velocity_mm_s,
+        max_extrude_only_accel_mm_s2,
+        &mut report,
+    )?;
+    check_entry_ceiling(moves, &caps, entry, tol)?;
+    let mut plan = seed_seam_velocities(&caps, stop_before, entry, &mut report);
+    let geo = compute_run_geometry(&caps, &plan, entry.a);
+    forward_pass(moves, &caps, &geo, &mut plan.v, tol)?;
+    let (barrier, v_barrier) = reverse_brake_envelope(moves, &caps, &geo, &mut plan.v, tol)?;
+    check_entry_brake(moves, &caps, &geo, &plan.v, entry, tol)?;
+    let (out, boundaries) = reconstruct_runs(moves, &caps, &plan, &geo, entry, tol, &mut report)?;
+
+    Ok(VelocityProfile {
+        moves: out,
+        report,
+        barrier,
+        v_barrier,
+        boundaries,
+    })
+}
+
+fn validate_config(
+    tol: f64,
+    entry: BoundaryState,
+    max_extrude_only_velocity_mm_s: f64,
+    max_extrude_only_accel_mm_s2: f64,
+) -> Result<(), VelocityError> {
+    if !(tol.is_finite() && tol >= MIN_INTEGRATION_TOL) {
+        return Err(VelocityError::InvalidConfig);
+    }
+    if !(entry.v.is_finite() && entry.v >= 0.0 && entry.a.is_finite()) {
+        return Err(VelocityError::InvalidConfig);
+    }
+    if !(max_extrude_only_velocity_mm_s > 0.0 && max_extrude_only_accel_mm_s2 > 0.0) {
+        return Err(VelocityError::InvalidConfig);
+    }
+    Ok(())
+}
+
+fn build_move_caps(
+    moves: &[crate::Move],
+    max_extrude_only_velocity_mm_s: f64,
+    max_extrude_only_accel_mm_s2: f64,
+    report: &mut VelocityReport,
+) -> Result<Vec<MoveCaps>, VelocityError> {
+    let mut caps = Vec::with_capacity(moves.len());
     for m in moves {
         let line_no = m.source.start_line;
         let mut accel = m.limits.accel_mm_s2;
@@ -245,7 +294,15 @@ pub fn plan_velocity_stops(
             kappa_peak,
         });
     }
+    Ok(caps)
+}
 
+fn check_entry_ceiling(
+    moves: &[crate::Move],
+    caps: &[MoveCaps],
+    entry: BoundaryState,
+    tol: f64,
+) -> Result<(), VelocityError> {
     let entry_ceiling = {
         let kin0 = &caps[0].kin;
         kin0.flat_ceiling
@@ -256,7 +313,21 @@ pub fn plan_velocity_stops(
             line_no: moves[0].source.start_line,
         });
     }
+    Ok(())
+}
 
+struct SeamPlan {
+    v: Vec<f64>,
+    is_anchor: Vec<bool>,
+}
+
+fn seed_seam_velocities(
+    caps: &[MoveCaps],
+    stop_before: &[bool],
+    entry: BoundaryState,
+    report: &mut VelocityReport,
+) -> SeamPlan {
+    let n = caps.len();
     let mut v = vec![0.0_f64; n + 1];
     v[0] = entry.v;
     let mut is_anchor = vec![false; n + 1];
@@ -277,18 +348,29 @@ pub fn plan_velocity_stops(
             v[k] = ceiling.min(disk::notch_free_min(ceiling, boundary_vlim));
         }
     }
+    SeamPlan { v, is_anchor }
+}
 
+struct RunGeometry {
+    run_start_v: Vec<f64>,
+    run_start_a: Vec<f64>,
+    arc_from_run_start: Vec<f64>,
+    arc_to_run_end: Vec<f64>,
+}
+
+fn compute_run_geometry(caps: &[MoveCaps], plan: &SeamPlan, entry_a: f64) -> RunGeometry {
+    let n = caps.len();
     let mut run_start_v = vec![0.0_f64; n];
     let mut run_start_a = vec![0.0_f64; n];
     let mut arc_from_run_start = vec![0.0_f64; n];
     {
-        let mut anchor_v = v[0];
-        let mut anchor_a = entry.a;
+        let mut anchor_v = plan.v[0];
+        let mut anchor_a = entry_a;
         let mut cum = 0.0;
         for j in 0..n {
-            if is_anchor[j] {
-                anchor_v = v[j];
-                anchor_a = if j == 0 { entry.a } else { 0.0 };
+            if plan.is_anchor[j] {
+                anchor_v = plan.v[j];
+                anchor_a = if j == 0 { entry_a } else { 0.0 };
                 cum = 0.0;
             }
             run_start_v[j] = anchor_v;
@@ -301,14 +383,29 @@ pub fn plan_velocity_stops(
     {
         let mut cum = 0.0;
         for j in (0..n).rev() {
-            if is_anchor[j + 1] {
+            if plan.is_anchor[j + 1] {
                 cum = 0.0;
             }
             arc_to_run_end[j] = cum;
             cum += caps[j].kin.length;
         }
     }
+    RunGeometry {
+        run_start_v,
+        run_start_a,
+        arc_from_run_start,
+        arc_to_run_end,
+    }
+}
 
+fn forward_pass(
+    moves: &[crate::Move],
+    caps: &[MoveCaps],
+    geo: &RunGeometry,
+    v: &mut [f64],
+    tol: f64,
+) -> Result<(), VelocityError> {
+    let n = caps.len();
     for k in 1..=n {
         let j = k - 1;
         let line_no = moves[j].source.start_line;
@@ -316,9 +413,9 @@ pub fn plan_velocity_stops(
         let disk = disk::disk_reach_v(kin, v[j], kin.length, tol)
             .ok_or(VelocityError::Diverged { line_no })?;
         let jerk = scurve::reach_velocity_with_accel(
-            run_start_v[j],
-            run_start_a[j].clamp(-kin.accel, kin.accel),
-            arc_from_run_start[j] + kin.length,
+            geo.run_start_v[j],
+            geo.run_start_a[j].clamp(-kin.accel, kin.accel),
+            geo.arc_from_run_start[j] + kin.length,
             kin.accel,
             kin.jerk,
         )
@@ -326,14 +423,25 @@ pub fn plan_velocity_stops(
         .map_err(|_| VelocityError::Diverged { line_no })?;
         v[k] = v[k].min(disk).min(jerk);
     }
-    let v_forward_ceiling = v.clone();
+    Ok(())
+}
+
+fn reverse_brake_envelope(
+    moves: &[crate::Move],
+    caps: &[MoveCaps],
+    geo: &RunGeometry,
+    v: &mut [f64],
+    tol: f64,
+) -> Result<(usize, f64), VelocityError> {
+    let n = caps.len();
+    let v_forward_ceiling = v.to_vec();
     for k in (1..n).rev() {
         let j = k;
         let line_no = moves[j].source.start_line;
         let kin = &caps[j].kin;
         let disk = disk::disk_reach_v_rev(kin, v[k + 1], kin.length, tol)
             .ok_or(VelocityError::Diverged { line_no })?;
-        let jerk = scurve::reach_v(0.0, arc_to_run_end[j] + kin.length, kin.accel, kin.jerk)
+        let jerk = scurve::reach_v(0.0, geo.arc_to_run_end[j] + kin.length, kin.accel, kin.jerk)
             .ok_or(VelocityError::Diverged { line_no })?;
         v[k] = v[k].min(disk).min(jerk);
     }
@@ -344,6 +452,17 @@ pub fn plan_velocity_stops(
         }
     }
     let v_barrier = v[barrier];
+    Ok((barrier, v_barrier))
+}
+
+fn check_entry_brake(
+    moves: &[crate::Move],
+    caps: &[MoveCaps],
+    geo: &RunGeometry,
+    v: &[f64],
+    entry: BoundaryState,
+    tol: f64,
+) -> Result<(), VelocityError> {
     let entry_line_no = moves[0].source.start_line;
     let entry_brake = {
         let kin = &caps[0].kin;
@@ -351,7 +470,7 @@ pub fn plan_velocity_stops(
             disk::disk_reach_v_rev(kin, v[1], kin.length, tol).ok_or(VelocityError::Diverged {
                 line_no: entry_line_no,
             })?;
-        let jerk = scurve::reach_v(0.0, arc_to_run_end[0] + kin.length, kin.accel, kin.jerk)
+        let jerk = scurve::reach_v(0.0, geo.arc_to_run_end[0] + kin.length, kin.accel, kin.jerk)
             .ok_or(VelocityError::Diverged {
                 line_no: entry_line_no,
             })?;
@@ -362,7 +481,21 @@ pub fn plan_velocity_stops(
             line_no: entry_line_no,
         });
     }
+    Ok(())
+}
 
+fn reconstruct_runs(
+    moves: &[crate::Move],
+    caps: &[MoveCaps],
+    plan: &SeamPlan,
+    geo: &RunGeometry,
+    entry: BoundaryState,
+    tol: f64,
+    report: &mut VelocityReport,
+) -> Result<(Vec<MoveVelocity>, Vec<BoundaryState>), VelocityError> {
+    let n = caps.len();
+    let v = &plan.v;
+    let is_anchor = &plan.is_anchor;
     let mut out: Vec<MoveVelocity> = Vec::with_capacity(n);
     let mut boundaries: Vec<BoundaryState> = Vec::with_capacity(n + 1);
     boundaries.push(entry);
@@ -376,14 +509,14 @@ pub fn plan_velocity_stops(
             .map(|j| disk::RunMember {
                 kin: &caps[j].kin,
                 exit_v: v[j + 1],
-                fwd_s: arc_from_run_start[j],
+                fwd_s: geo.arc_from_run_start[j],
             })
             .collect();
         let run_start_line = moves[run_start].source.start_line;
         let (reconstructed, run_exit_states, reconstructed_phases) = disk::reconstruct_run(
             &members,
-            run_start_v[run_start],
-            run_start_a[run_start],
+            geo.run_start_v[run_start],
+            geo.run_start_a[run_start],
             tol,
         )
         .ok_or(VelocityError::Diverged {
@@ -461,13 +594,7 @@ pub fn plan_velocity_stops(
         run_start = run_end;
     }
 
-    Ok(VelocityProfile {
-        moves: out,
-        report,
-        barrier,
-        v_barrier,
-        boundaries,
-    })
+    Ok((out, boundaries))
 }
 
 fn first_negative_velocity(samples: &[VelSample]) -> Option<f64> {

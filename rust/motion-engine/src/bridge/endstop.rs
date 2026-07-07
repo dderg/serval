@@ -1,3 +1,4 @@
+use crate::lock_ext::LockExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -23,7 +24,7 @@ pub(super) fn dispatch_endstop_trip(
     trip_clock: u64,
 ) {
     let run_opt: Option<HomingRun> = {
-        let mut guard = deps.homing_run.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = deps.homing_run.lock_ok();
         guard.take()
     };
     let run = match run_opt {
@@ -36,8 +37,7 @@ pub(super) fn dispatch_endstop_trip(
                 trip_clock,
                 "terminal report arrived before the homing run was registered — buffered"
             );
-            *deps.pending_trip.lock().unwrap_or_else(|p| p.into_inner()) =
-                Some((event_mcu, endstop_id, trip_clock));
+            *deps.pending_trip.lock_ok() = Some((event_mcu, endstop_id, trip_clock));
             return;
         }
         Some(r) => r,
@@ -53,27 +53,20 @@ pub(super) fn dispatch_endstop_trip(
             trip_clock,
             "terminal report does not match the active homing run — ignored"
         );
-        let mut guard = deps.homing_run.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = deps.homing_run.lock_ok();
         *guard = Some(run);
         return;
     }
 
     {
-        let mut cohort_guard = deps
-            .active_drip_cohort
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let mut cohort_guard = deps.active_drip_cohort.lock_ok();
         *cohort_guard = None;
     }
 
-    let pump_tx_opt = deps
-        .pump_tx
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .clone();
+    let pump_tx_opt = deps.pump_tx.lock_ok().clone();
 
     let transports: HashMap<u32, Arc<dyn host_rt::mcu_call::McuCall>> = {
-        let mcus = deps.mcus.lock().unwrap_or_else(|p| p.into_inner());
+        let mcus = deps.mcus.lock_ok();
         mcus.iter()
             .filter_map(|(&id, conn)| {
                 if let Some(io) = conn.host_io.as_ref() {
@@ -89,11 +82,7 @@ pub(super) fn dispatch_endstop_trip(
 
     let router_arc = Arc::clone(&deps.router);
     let history_arc = Arc::clone(&deps.motion_history);
-    let configs: Vec<McuAxisConfig> = deps
-        .mcu_axis_configs
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .clone();
+    let configs: Vec<McuAxisConfig> = deps.mcu_axis_configs.lock_ok().clone();
 
     std::thread::Builder::new()
         .name("homing-trip-handler".into())

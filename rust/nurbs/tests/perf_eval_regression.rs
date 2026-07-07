@@ -1,7 +1,7 @@
 use nurbs::{ScalarNurbs, eval};
 use std::time::Instant;
 
-fn synthetic_postshape_curve() -> ScalarNurbs<f64> {
+fn synthetic_postshape_curve() -> ScalarNurbs {
     let degree = 5_u8;
     let n_cps = 30;
     let p = degree as usize;
@@ -24,7 +24,7 @@ fn synthetic_postshape_curve() -> ScalarNurbs<f64> {
     ScalarNurbs::try_new(degree, knots, cps).unwrap()
 }
 
-fn cubic_bezier_curve() -> ScalarNurbs<f64> {
+fn cubic_bezier_curve() -> ScalarNurbs {
     ScalarNurbs::try_new(
         3,
         vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
@@ -82,7 +82,7 @@ fn eval_polynomial_at_least_as_fast_as_eval_for_validated_curves() {
         let start = Instant::now();
         for i in 0..ITERATIONS {
             let u = (i as f64) / (ITERATIONS as f64);
-            let view = nurbs::ScalarNurbsRef::<f64>::try_new(
+            let view = nurbs::ScalarNurbsRef::try_new(
                 curve.degree(),
                 curve.knots(),
                 curve.control_points(),

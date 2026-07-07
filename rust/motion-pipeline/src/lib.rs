@@ -4,7 +4,7 @@ use crossbeam_channel::bounded;
 use trajectory::AxisChainSet;
 
 pub mod fit_stage;
-pub mod lowerer;
+pub mod lower_stage;
 pub mod lowering;
 pub mod planner;
 pub mod shaper;
@@ -12,14 +12,14 @@ pub mod timing;
 mod types;
 
 pub use fit_stage::FitStage;
-pub use lowerer::{advance_odometer, dist3, run_lowerer};
+pub use lower_stage::{advance_odometer, dist3, run_lowerer};
 pub use lowering::{FitTol, LoweringError, lower_move, lower_move_pieces};
 pub use planner::Planner;
 pub use shaper::Shaper;
 pub use types::{
-    BarrierAck, CONTIGUITY_EPS_MM, Control, LoweredItem, LoweredSegment, PipelineHandle,
-    PlannedItem, PlannedMove, PostProcessError, ShapedItem, StreamConfig, StreamError, StreamInput,
-    jerk_limited_brake_time,
+    BarrierAck, CONTIGUITY_EPS_MM, Control, LoweredItem, LoweredSegment, NudgePiece,
+    PipelineHandle, PlannedItem, PlannedMove, PostProcessError, ShapedItem, StreamConfig,
+    StreamError, StreamInput, jerk_limited_brake_time,
 };
 
 /// Wires the pure stream stages (fit stage → planner → lowerer → shaper) into

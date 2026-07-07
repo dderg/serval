@@ -1,8 +1,8 @@
 use geometry::{CubicSegment, FollowerDemand, GeometryError, SourceRange};
 use nurbs::VectorNurbs;
 
-fn valid_cubic_xyz() -> VectorNurbs<f64, 3> {
-    VectorNurbs::<f64, 3>::try_new(
+fn valid_cubic_xyz() -> VectorNurbs<3> {
+    VectorNurbs::<3>::try_new(
         3,
         vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
         vec![
@@ -24,7 +24,7 @@ fn dummy_source() -> SourceRange {
 
 #[test]
 fn try_new_rejects_non_cubic() {
-    let linear = VectorNurbs::<f64, 3>::try_new(
+    let linear = VectorNurbs::<3>::try_new(
         1,
         vec![0.0, 0.0, 1.0, 1.0],
         vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
@@ -90,7 +90,7 @@ fn try_new_rejects_duplicate_follower_axis() {
 
 #[test]
 fn try_new_rejects_non_finite_control_point() {
-    let xyz = VectorNurbs::<f64, 3>::try_new(
+    let xyz = VectorNurbs::<3>::try_new(
         3,
         vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
         vec![
@@ -119,7 +119,7 @@ fn try_new_rejects_non_finite_control_point() {
 
 #[test]
 fn try_new_rejects_non_finite_feedrate() {
-    let xyz = VectorNurbs::<f64, 3>::try_new(
+    let xyz = VectorNurbs::<3>::try_new(
         3,
         vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
         vec![
@@ -148,7 +148,7 @@ fn try_new_rejects_non_finite_feedrate() {
 
 #[test]
 fn try_new_rejects_non_finite_follower_ratio() {
-    let xyz = VectorNurbs::<f64, 3>::try_new(
+    let xyz = VectorNurbs::<3>::try_new(
         3,
         vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
         vec![

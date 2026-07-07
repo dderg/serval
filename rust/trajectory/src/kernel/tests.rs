@@ -97,7 +97,7 @@ fn smooth_zv_support_width() {
     let f = 150.0;
     let chain = crate::CompiledChain::compile(&[crate::PostProcessorInstance::new(
         "is",
-        &crate::post_processors::SmoothZv,
+        &crate::algos::SmoothZv,
         vec![f],
     )])
     .expect("single post-processor always compiles");
@@ -114,7 +114,7 @@ fn smooth_mzv_support_width() {
     let f = 120.0;
     let chain = crate::CompiledChain::compile(&[crate::PostProcessorInstance::new(
         "is",
-        &crate::post_processors::SmoothMzv,
+        &crate::algos::SmoothMzv,
         vec![f],
     )])
     .expect("single post-processor always compiles");
@@ -126,7 +126,7 @@ fn smooth_mzv_support_width() {
     assert!((hi - lo - expected_t_sm).abs() < 1e-12);
 }
 
-fn eval_kernel(kernel: &PiecewisePolynomialKernel<f64>, t: f64) -> f64 {
+fn eval_kernel(kernel: &PiecewisePolynomialKernel, t: f64) -> f64 {
     for piece in &kernel.pieces {
         if t >= piece.u_start && t <= piece.u_end {
             return piece.evaluate(t);
@@ -192,7 +192,7 @@ fn smooth_triangle_support_width() {
     let smooth_time = 0.04;
     let chain = crate::CompiledChain::compile(&[crate::PostProcessorInstance::new(
         "st",
-        &crate::post_processors::SmoothTriangle,
+        &crate::algos::SmoothTriangle,
         vec![smooth_time],
     )])
     .expect("single post-processor always compiles");

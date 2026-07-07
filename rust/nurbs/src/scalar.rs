@@ -1,19 +1,17 @@
-use crate::{ConstructError, Float, MAX_DEGREE, NurbsView};
+use crate::{ConstructError, MAX_DEGREE, NurbsView};
 
-#[cfg(feature = "host")]
 #[derive(Debug, Clone, PartialEq)]
-pub struct ScalarNurbs<T: Float> {
+pub struct ScalarNurbs {
     degree: u8,
-    knots: crate::knot::KnotVector<T>,
-    control_points: Vec<T>,
+    knots: crate::knot::KnotVector,
+    control_points: Vec<f64>,
 }
 
-#[cfg(feature = "host")]
-impl<T: Float> ScalarNurbs<T> {
+impl ScalarNurbs {
     pub fn try_new(
         degree: u8,
-        knots: Vec<T>,
-        control_points: Vec<T>,
+        knots: Vec<f64>,
+        control_points: Vec<f64>,
     ) -> Result<Self, ConstructError> {
         validate(degree, &knots, control_points.len())?;
         let knot_vector = crate::knot::KnotVector::try_new(knots)
@@ -30,17 +28,17 @@ impl<T: Float> ScalarNurbs<T> {
         self.degree
     }
     #[must_use]
-    pub fn knots(&self) -> &[T] {
+    pub fn knots(&self) -> &[f64] {
         self.knots.as_slice()
     }
     #[must_use]
-    pub fn control_points(&self) -> &[T] {
+    pub fn control_points(&self) -> &[f64] {
         &self.control_points
     }
 
     #[inline]
     #[must_use]
-    pub fn as_view(&self) -> ScalarNurbsRef<'_, T> {
+    pub fn as_view(&self) -> ScalarNurbsRef<'_> {
         ScalarNurbsRef {
             degree: self.degree,
             knots: self.knots.as_slice(),
@@ -49,34 +47,33 @@ impl<T: Float> ScalarNurbs<T> {
     }
 }
 
-#[cfg(feature = "host")]
-impl<T: Float> NurbsView<T> for ScalarNurbs<T> {
+impl NurbsView for ScalarNurbs {
     #[inline]
     fn degree(&self) -> u8 {
         self.degree
     }
     #[inline]
-    fn knots(&self) -> &[T] {
+    fn knots(&self) -> &[f64] {
         self.knots.as_slice()
     }
     #[inline]
-    fn control_points(&self) -> &[T] {
+    fn control_points(&self) -> &[f64] {
         &self.control_points
     }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct ScalarNurbsRef<'a, T: Float> {
+pub struct ScalarNurbsRef<'a> {
     pub(crate) degree: u8,
-    pub(crate) knots: &'a [T],
-    pub(crate) control_points: &'a [T],
+    pub(crate) knots: &'a [f64],
+    pub(crate) control_points: &'a [f64],
 }
 
-impl<'a, T: Float> ScalarNurbsRef<'a, T> {
+impl<'a> ScalarNurbsRef<'a> {
     pub fn try_new(
         degree: u8,
-        knots: &'a [T],
-        control_points: &'a [T],
+        knots: &'a [f64],
+        control_points: &'a [f64],
     ) -> Result<Self, ConstructError> {
         validate(degree, knots, control_points.len())?;
         Ok(Self {
@@ -91,33 +88,33 @@ impl<'a, T: Float> ScalarNurbsRef<'a, T> {
         self.degree
     }
     #[must_use]
-    pub fn knots(&self) -> &[T] {
+    pub fn knots(&self) -> &[f64] {
         self.knots
     }
     #[must_use]
-    pub fn control_points(&self) -> &[T] {
+    pub fn control_points(&self) -> &[f64] {
         self.control_points
     }
 }
 
-impl<T: Float> NurbsView<T> for ScalarNurbsRef<'_, T> {
+impl NurbsView for ScalarNurbsRef<'_> {
     #[inline]
     fn degree(&self) -> u8 {
         self.degree
     }
     #[inline]
-    fn knots(&self) -> &[T] {
+    fn knots(&self) -> &[f64] {
         self.knots
     }
     #[inline]
-    fn control_points(&self) -> &[T] {
+    fn control_points(&self) -> &[f64] {
         self.control_points
     }
 }
 
-pub(crate) fn validate<T: Float>(
+pub(crate) fn validate(
     degree: u8,
-    knots: &[T],
+    knots: &[f64],
     control_point_count: usize,
 ) -> Result<(), ConstructError> {
     if (degree as usize) > MAX_DEGREE {
@@ -168,5 +165,5 @@ pub(crate) fn validate<T: Float>(
     Ok(())
 }
 
-#[cfg(all(test, feature = "host"))]
+#[cfg(test)]
 mod tests;

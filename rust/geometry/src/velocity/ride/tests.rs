@@ -137,3 +137,73 @@ fn reverse_chain_maps_states_into_the_forward_frame() {
     assert!(fwd[0].t0.abs() < 1e-15);
     assert!((fwd[1].t0 - fwd[0].dt).abs() < 1e-12);
 }
+
+/// A biclothoid corner dip under an effectively-unlimited jerk: the flight
+/// out of the dip must return to full acceleration. Regression for the
+/// zero-progress limit cycle where a jerk swing narrower than one
+/// floor-duration step ping-ponged `a` across the rail until the cell guard
+/// stalled the pass, pinning the whole remaining line to the corner speed.
+#[test]
+fn flight_reaccelerates_after_dip_with_huge_jerk() {
+    let (l1, blen, sigma) = (9.9026_f64, 0.0819_f64, 234.47_f64);
+    let total = 2.0 * l1 + 2.0 * blen;
+    let kappa_of = |x: f64| -> f64 {
+        if x < l1 || x > l1 + 2.0 * blen {
+            0.0
+        } else if x < l1 + blen {
+            sigma * (x - l1)
+        } else {
+            sigma * (l1 + 2.0 * blen - x)
+        }
+    };
+    let mut s: Vec<f64> = Vec::new();
+    let mut x = 0.0;
+    while x < total {
+        s.push(x);
+        x += 0.01;
+    }
+    s.push(total);
+    let n = s.len();
+    let kappa: Vec<f64> = s.iter().map(|&x| kappa_of(x)).collect();
+    let cap_v: Vec<f64> = kappa
+        .iter()
+        .map(|&k| {
+            if k > 1e-12 {
+                (70000.0_f64 / k).sqrt().min(1000.0)
+            } else {
+                1000.0
+            }
+        })
+        .collect();
+    let cap_a: Vec<f64> = s
+        .windows(2)
+        .zip(cap_v.windows(2))
+        .map(|(sw, vw)| (vw[1] * vw[1] - vw[0] * vw[0]) / (2.0 * (sw[1] - sw[0])))
+        .collect();
+    let accel = vec![70000.0_f64; n];
+    let track = Track {
+        s: &s,
+        cap_v: &cap_v,
+        cap_a: &cap_a,
+        accel: &accel,
+        kappa: &kappa,
+        j_max: 1e11,
+    };
+    let pass = reach_pass(&track, 0.0, 0.0, None);
+    let at = |x: f64| pass.v[s.iter().position(|&q| q >= x).unwrap()];
+    let apex = at(l1 + blen);
+    assert!(
+        (55.0..70.0).contains(&apex),
+        "corner speed should sit at the curvature limit, got {apex}"
+    );
+    assert!(
+        at(15.0) > 800.0,
+        "flight must re-accelerate after the dip, got {} at s=15",
+        at(15.0)
+    );
+    assert!(
+        pass.v[n - 1] > 990.0,
+        "flight must regain the flat ceiling, got {}",
+        pass.v[n - 1]
+    );
+}

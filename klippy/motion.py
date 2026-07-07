@@ -2,6 +2,7 @@ import logging
 import math
 import os
 import signal
+import time
 
 from . import motion_kinematics, motion_setup, structured_log
 from .extras import servo_axis
@@ -32,9 +33,7 @@ def _open_sim_control():
 class Move:
     def __init__(self, toolhead, start_pos, end_pos, speed):
         self.toolhead = toolhead
-        self.start_pos = tuple(start_pos)
         self.end_pos = tuple(end_pos)
-        self.accel = toolhead.max_accel
         velocity = min(speed, toolhead.max_velocity)
         self.is_kinematic_move = True
         self.axes_d = axes_d = [end_pos[i] - start_pos[i] for i in (0, 1, 2, 3)]
@@ -48,24 +47,16 @@ class Move:
             )
             axes_d[0] = axes_d[1] = axes_d[2] = 0.0
             self.move_d = move_d = abs(axes_d[3])
-            inv_move_d = 0.0
-            if move_d:
-                inv_move_d = 1.0 / move_d
-            self.accel = 99999999.9
             velocity = speed
             self.is_kinematic_move = False
-        else:
-            inv_move_d = 1.0 / move_d
-        self.axes_r = [d * inv_move_d for d in axes_d]
         self.min_move_t = move_d / velocity
         self.max_cruise_v2 = velocity**2
 
-    def limit_speed(self, speed, accel):
+    def limit_speed(self, speed):
         speed2 = speed**2
         if speed2 < self.max_cruise_v2:
             self.max_cruise_v2 = speed2
             self.min_move_t = self.move_d / speed
-        self.accel = min(self.accel, accel)
 
     def move_error(self, msg="Move out of range"):
         ep = self.end_pos
@@ -247,6 +238,7 @@ class Motion:
 
         stepper_mask = axis_mask
         sent = False
+        servo_targets = {}
         if self.kin is not None:
             for lane_idx, _axis_name, _motors in self.kin.lanes():
                 rail = self.kin.rails[lane_idx]
@@ -265,17 +257,29 @@ class Motion:
                         "RESONANCE_BUZZ: servo axis %s has no live EtherCAT "
                         "engine handle" % rail.axis
                     )
-                self.engine.resonance_buzz(
-                    handle,
-                    1,
-                    1 if (sign_mask & rail_mask) else 0,
-                    freq_start_millihz,
-                    freq_end_millihz,
-                    amplitude_nm,
-                    duration_ms,
-                    ramp_ms,
-                )
-                sent = True
+                slot_bit = 1 << rail.chain_index
+                slot_masks = servo_targets.setdefault(handle, [0, 0])
+                if slot_masks[0] & slot_bit:
+                    raise self.printer.command_error(
+                        "RESONANCE_BUZZ: servo axis %s maps to EtherCAT slot "
+                        "%d which is already claimed by another buzzed axis "
+                        "on the same node" % (rail.axis, rail.chain_index)
+                    )
+                slot_masks[0] |= slot_bit
+                if sign_mask & rail_mask:
+                    slot_masks[1] |= slot_bit
+        for handle, (slot_mask, slot_sign_mask) in servo_targets.items():
+            self.engine.resonance_buzz(
+                handle,
+                slot_mask,
+                slot_sign_mask,
+                freq_start_millihz,
+                freq_end_millihz,
+                amplitude_nm,
+                duration_ms,
+                ramp_ms,
+            )
+            sent = True
         if stepper_mask:
             stepper_sent = False
             for mcu_obj in self._engine_mcus():
@@ -430,7 +434,7 @@ class Motion:
         feedrate = move.move_d / move.min_move_t
         if abs(dz) > 1e-9 and abs(dx) < 1e-9 and abs(dy) < 1e-9:
             feedrate = min(feedrate, self.max_z_velocity)
-        logging.info(
+        logging.debug(
             "[engine-trace] move: newpos=%s speed=%s dx=%.4f dy=%.4f "
             "dz=%.4f de=%.4f feedrate=%.4f",
             list(newpos),
@@ -492,16 +496,37 @@ class Motion:
         )
         fired = False
         move_time = None
-        for owner in owners:
-            if not owner._active_callbacks:
-                continue
-            cbs = owner._active_callbacks
-            owner._active_callbacks = []
-            if move_time is None:
-                move_time = self.get_last_move_time()
-            for cb in cbs:
-                cb(move_time)
-            fired = True
+        deferred = []
+        try:
+            for owner in owners:
+                if not owner._active_callbacks:
+                    continue
+                cbs = owner._active_callbacks
+                owner._active_callbacks = []
+                if move_time is None:
+                    move_time = self.get_last_move_time()
+                for i, cb in enumerate(cbs):
+                    cb_t0 = time.monotonic()
+                    try:
+                        followup = cb(move_time)
+                    except Exception:
+                        owner._active_callbacks = (
+                            cbs[i:] + owner._active_callbacks
+                        )
+                        raise
+                    cb_dt = time.monotonic() - cb_t0
+                    if cb_dt > 0.020:
+                        logging.warning(
+                            "active callback for %s blocked %.1fms",
+                            owner.get_name(),
+                            cb_dt * 1000.0,
+                        )
+                    if followup is not None:
+                        deferred.append(followup)
+                fired = True
+        finally:
+            for followup in deferred:
+                followup()
         return fired
 
     def drip_move(self, newpos, speed, drip_completion):

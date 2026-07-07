@@ -1,6 +1,7 @@
 use super::{
     PyMotionEngine, PyResult, PyRuntimeError, Python, mcu_handle_from_raw, pymethods, slot_for_axis,
 };
+use crate::lock_ext::LockExt;
 
 #[pymethods]
 impl PyMotionEngine {
@@ -13,7 +14,7 @@ impl PyMotionEngine {
     }
     fn set_torque_start(&self, mcu_handle: u32, value: bool, print_time: f64) -> PyResult<u64> {
         let reference_mcu = {
-            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let mcus = self.mcus.lock_ok();
             *mcus
                 .iter()
                 .find(|(_, mc)| mc.label == "mcu")
@@ -26,7 +27,7 @@ impl PyMotionEngine {
                 })?
         };
         let execute_at_ns = {
-            let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+            let router = self.router.lock_ok();
             let host_secs = router
                 .print_time_to_host_secs(mcu_handle_from_raw(reference_mcu), print_time)
                 .ok_or_else(|| {
@@ -148,12 +149,7 @@ impl PyMotionEngine {
                 following_error_counts,
                 max_torque_tenth_pct,
             )?;
-            if result != 0 {
-                return Err(format!(
-                    "set_drive_limits: SDO write failed: endpoint result {result}"
-                ));
-            }
-            Ok(())
+            require_endpoint_ok(result, "set_drive_limits: SDO write failed")
         }))
     }
     fn restore_drive_limits_start(&self, mcu_handle: u32, slot: u8) -> PyResult<u64> {
@@ -166,12 +162,7 @@ impl PyMotionEngine {
         );
         Ok(self.endpoint_calls.start("restore_drive_limits", move || {
             let result = crate::servo_torque::send_restore_drive_limits(&conn, slot)?;
-            if result != 0 {
-                return Err(format!(
-                    "restore_drive_limits: SDO write failed: endpoint result {result}"
-                ));
-            }
-            Ok(())
+            require_endpoint_ok(result, "restore_drive_limits: SDO write failed")
         }))
     }
     fn stop_node(&self, mcu_handle: u32) -> PyResult<()> {
@@ -242,10 +233,7 @@ impl PyMotionEngine {
         timeout_s: f64,
     ) -> PyResult<u64> {
         let cfg = {
-            let configs = self
-                .mcu_axis_configs
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let configs = self.mcu_axis_configs.lock_ok();
             configs
                 .iter()
                 .find(|c| c.mcu_id == mcu_handle)
@@ -264,7 +252,7 @@ impl PyMotionEngine {
                 &[axis]
             };
         let (conn, seeds) = {
-            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let mcus = self.mcus.lock_ok();
             let mc = mcus.get(&mcu_handle).ok_or_else(|| {
                 PyRuntimeError::new_err(format!(
                     "finalize_homed_axis: unknown mcu_handle {mcu_handle}"
@@ -308,29 +296,19 @@ impl PyMotionEngine {
             for (slot, home_q16) in seeds {
                 let result =
                     crate::servo_torque::send_seed_servo_home(&conn, slot, home_q16, timeout)?;
-                if result != 0 {
-                    return Err(format!(
-                        "finalize_homed_axis: method-35 home-set failed for slot {slot}: \
-                         endpoint result {result}"
-                    ));
-                }
+                require_endpoint_ok(
+                    result,
+                    &format!("finalize_homed_axis: method-35 home-set failed for slot {slot}"),
+                )?;
             }
             Ok(())
         }))
     }
     fn take_drive_fault(&self, mcu_handle: u32) -> PyResult<Option<u16>> {
-        Ok(self
-            .latched_drive_fault
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&mcu_handle))
+        Ok(self.latched_drive_fault.lock_ok().remove(&mcu_handle))
     }
     fn take_endpoint_death(&self, mcu_handle: u32) -> PyResult<Option<String>> {
-        Ok(self
-            .latched_endpoint_death
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&mcu_handle))
+        Ok(self.latched_endpoint_death.lock_ok().remove(&mcu_handle))
     }
     fn sdo_read(&self, mcu_handle: u32, slot: u8, index: u16, subindex: u8) -> PyResult<(u8, u32)> {
         let conn = self.ethercat_conn(mcu_handle, "sdo_read")?;
@@ -437,13 +415,15 @@ impl PyMotionEngine {
             .detach(|| {
                 crate::servo_torque::send_resonance_buzz(
                     &conn,
-                    axis_mask,
-                    sign_mask,
-                    freq_start_millihz,
-                    freq_end_millihz,
-                    amplitude_nm,
-                    duration_ms,
-                    ramp_ms,
+                    mcu_protocol::messages::ResonanceBuzz {
+                        axis_mask,
+                        sign_mask,
+                        freq_start_millihz,
+                        freq_end_millihz,
+                        amplitude_nm,
+                        duration_ms,
+                        ramp_ms,
+                    },
                 )
             })
             .map_err(PyRuntimeError::new_err)?;
@@ -454,4 +434,11 @@ impl PyMotionEngine {
         }
         Ok(())
     }
+}
+
+fn require_endpoint_ok(result: i32, context: &str) -> Result<(), String> {
+    if result != 0 {
+        return Err(format!("{context}: endpoint result {result}"));
+    }
+    Ok(())
 }

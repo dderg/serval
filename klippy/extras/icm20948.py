@@ -93,7 +93,6 @@ class ICM20948:
         )
 
     def _build_config(self):
-        cmdqueue = self.i2c.get_command_queue()
         self.mcu.add_config_cmd(
             "config_icm20948 oid=%d i2c_oid=%d" % (self.oid, self.i2c.get_oid())
         )
@@ -101,10 +100,10 @@ class ICM20948:
             "query_icm20948 oid=%d rest_ticks=0" % (self.oid,), on_restart=True
         )
         self.query_icm20948_cmd = self.mcu.lookup_command(
-            "query_icm20948 oid=%c rest_ticks=%u", cq=cmdqueue
+            "query_icm20948 oid=%c rest_ticks=%u"
         )
         self.ffreader.setup_query_command(
-            "query_icm20948_status oid=%c", oid=self.oid, cq=cmdqueue
+            "query_icm20948_status oid=%c", oid=self.oid
         )
 
     def read_reg(self, reg):

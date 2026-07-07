@@ -1,3 +1,4 @@
+use crate::lock_ext::LockExt;
 use std::os::unix::io::FromRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -68,19 +69,11 @@ fn serial_mcu_conn(label: &str, host_io: Arc<McuHostIo>) -> McuConnection {
 }
 
 fn insert_mcu(engine: &PyMotionEngine, handle: u32, conn: McuConnection) {
-    engine
-        .mcus
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .insert(handle, conn);
+    engine.mcus.lock_ok().insert(handle, conn);
 }
 
 fn mcus_is_empty(engine: &PyMotionEngine) -> bool {
-    engine
-        .mcus
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .is_empty()
+    engine.mcus.lock_ok().is_empty()
 }
 
 fn seed_pump_thread(engine: &PyMotionEngine) -> Arc<std::sync::atomic::AtomicBool> {
@@ -98,8 +91,8 @@ fn seed_pump_thread(engine: &PyMotionEngine) -> Arc<std::sync::atomic::AtomicBoo
             exited_thread.store(true, std::sync::atomic::Ordering::SeqCst);
         })
         .expect("spawn test pump thread");
-    *engine.pump_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(tx);
-    *engine.pump_thread.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
+    *engine.pump_tx.lock_ok() = Some(tx);
+    *engine.pump_thread.lock_ok() = Some(handle);
     exited
 }
 
@@ -129,11 +122,7 @@ fn shutdown_releases_pty_and_joins_threads() {
         "pump thread must have received Shutdown and exited (joined, not leaked)"
     );
     assert!(
-        engine
-            .pump_thread
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .is_none(),
+        engine.pump_thread.lock_ok().is_none(),
         "pump_thread handle must be taken (None) after join"
     );
     assert!(
@@ -240,23 +229,33 @@ fn double_shutdown_is_safe() {
     }
 }
 
-fn counting_dispatch() -> (
-    Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>,
-    Arc<AtomicUsize>,
-) {
-    let counter = Arc::new(AtomicUsize::new(0));
-    let c = Arc::clone(&counter);
-    let cb: Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync> =
-        Arc::new(move |_seg: &ShapedSegment| {
-            c.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        });
-    (cb, counter)
+/// Closure-backed [`SegmentSink`] for tests; nudges are accepted and dropped.
+struct FnSink<F>(F);
+
+impl<F> crate::worker::SegmentSink for FnSink<F>
+where
+    F: FnMut(&ShapedSegment) -> Result<(), DispatchError> + Send + 'static,
+{
+    fn dispatch(&mut self, seg: &ShapedSegment) -> Result<(), DispatchError> {
+        (self.0)(seg)
+    }
+    fn dispatch_nudge(
+        &mut self,
+        _mcu_id: u32,
+        _piece: &crate::nudge::NudgePiece,
+    ) -> Result<(), DispatchError> {
+        Ok(())
+    }
 }
 
-fn noop_nudge_dispatch()
--> Arc<dyn Fn(u32, &crate::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync> {
-    Arc::new(|_mcu_id: u32, _np: &crate::nudge::NudgePiece| Ok(()))
+fn counting_dispatch() -> (impl crate::worker::SegmentSink, Arc<AtomicUsize>) {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&counter);
+    let sink = FnSink(move |_seg: &ShapedSegment| {
+        c.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    });
+    (sink, counter)
 }
 
 fn relaxed_planner_config() -> PlannerConfig {
@@ -288,33 +287,24 @@ fn shutdown_takes_and_joins_planner() {
     let engine = PyMotionEngine::new();
     let (dispatch, _counter) = counting_dispatch();
     let (sc, home) = stream_config_from(&PlannerConfig::default());
-    *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(StreamWorkerHandle::spawn(
+    *engine.planner.lock_ok() = Some(StreamWorkerHandle::spawn(
         sc,
         trajectory::AxisChainSet::default(),
         home,
         dispatch,
-        noop_nudge_dispatch(),
         Arc::default(),
         None,
     ));
 
     assert!(
-        engine
-            .planner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .is_some(),
+        engine.planner.lock_ok().is_some(),
         "planner must be seeded pre-shutdown"
     );
 
     engine.shutdown();
 
     assert!(
-        engine
-            .planner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .is_none(),
+        engine.planner.lock_ok().is_none(),
         "shutdown() must take() the planner out of the Mutex and join it — a \
          surviving Some means the kalico-planner thread leaked across restart"
     );
@@ -331,18 +321,17 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
     let saw_pump_gone_cb = Arc::clone(&saw_pump_gone);
     let dispatch_count = Arc::new(AtomicUsize::new(0));
     let dispatch_count_cb = Arc::clone(&dispatch_count);
-    let dispatch: Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync> =
-        Arc::new(move |_seg: &ShapedSegment| {
-            dispatch_count_cb.fetch_add(1, Ordering::SeqCst);
-            let hb = crate::pump::PumpMsg::Heartbeat(crate::pump::HeartbeatMsg {
-                mcu_id: 0,
-                retired_counts: Vec::new(),
-            });
-            if pump_tx.send(hb).is_err() {
-                saw_pump_gone_cb.store(true, Ordering::SeqCst);
-            }
-            Ok(())
+    let dispatch = FnSink(move |_seg: &ShapedSegment| {
+        dispatch_count_cb.fetch_add(1, Ordering::SeqCst);
+        let hb = crate::pump::PumpMsg::Heartbeat(crate::pump::HeartbeatMsg {
+            mcu_id: 0,
+            retired_counts: Vec::new(),
         });
+        if pump_tx.send(hb).is_err() {
+            saw_pump_gone_cb.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    });
 
     let (sc, home) = stream_config_from(&relaxed_planner_config());
     let planner = StreamWorkerHandle::spawn(
@@ -350,18 +339,25 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
         trajectory::AxisChainSet::default(),
         home,
         dispatch,
-        noop_nudge_dispatch(),
         Arc::default(),
         None,
     );
     planner
         .submit_move(
-            crate::classify::build_move([0.0; 3], 50.0, 0.0, 0.0, 0, 0.0, test_limits(), 200.0, 0)
-                .unwrap(),
+            crate::classify::build_move(
+                [0.0; 3],
+                [50.0, 0.0, 0.0],
+                0,
+                0.0,
+                test_limits(),
+                200.0,
+                0,
+            )
+            .unwrap(),
         )
         .unwrap();
     let engine = Arc::new(engine);
-    *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(planner);
+    *engine.planner.lock_ok() = Some(planner);
 
     let pump_handle = std::thread::Builder::new()
         .name("push-pieces-pump".into())
@@ -374,8 +370,8 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
             drop(pump_rx);
         })
         .expect("spawn test pump thread");
-    *engine.pump_thread.lock().unwrap_or_else(|p| p.into_inner()) = Some(pump_handle);
-    *engine.pump_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(pump_tx_for_engine);
+    *engine.pump_thread.lock_ok() = Some(pump_handle);
+    *engine.pump_tx.lock_ok() = Some(pump_tx_for_engine);
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_sub = Arc::clone(&stop);
@@ -386,15 +382,13 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
             let mut start = [50.0, 0.0, 0.0];
             while !stop_sub.load(Ordering::SeqCst) {
                 {
-                    let guard = engine_sub.planner.lock().unwrap_or_else(|p| p.into_inner());
+                    let guard = engine_sub.planner.lock_ok();
                     let Some(p) = guard.as_ref() else {
                         break; // shutdown() took the planner; stop submitting.
                     };
                     let m = crate::classify::build_move(
                         start,
-                        50.0,
-                        0.0,
-                        0.0,
+                        [50.0, 0.0, 0.0],
                         0,
                         0.0,
                         test_limits(),
@@ -431,11 +425,7 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
          dropping the pump's Receiver"
     );
     assert!(
-        engine
-            .planner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .is_none(),
+        engine.planner.lock_ok().is_none(),
         "planner must be taken+joined by shutdown()"
     );
 }
@@ -446,7 +436,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    use crate::pump::{EnqueueMsg, McuTransport, PumpMsg, WireSink, run_pump};
+    use crate::pump::{EnqueueMsg, McuTransport, PumpCallbacks, PumpMsg, WireSink, run_pump};
     use crate::types::AxisKey;
 
     const EC_MCU_ID: u32 = 42;
@@ -479,15 +469,15 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
                 control_rx,
                 data_rx,
                 sink,
-                |_key| 256_u32,
-                mcu_clock_of,
-                move |_key: AxisKey| {
-                    fatal_flag.store(true, Ordering::SeqCst);
+                PumpCallbacks {
+                    mcu_clock_of: Box::new(mcu_clock_of),
+                    on_fatal_transport: Box::new(move |_key: AxisKey| {
+                        fatal_flag.store(true, Ordering::SeqCst);
+                    }),
+                    ..PumpCallbacks::noop(256)
                 },
-                |_key: AxisKey, _n: u32| {},
                 None,
                 std::sync::Arc::new(crate::drain::DrainLedger::new()),
-                |_msg: String| {},
                 Arc::new(AtomicU64::new(0)),
             );
         })
@@ -517,17 +507,16 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
     std::thread::sleep(Duration::from_millis(30));
 
     let engine = Arc::new(PyMotionEngine::new());
-    *engine.pump_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(pump_tx);
-    *engine.pump_thread.lock().unwrap_or_else(|p| p.into_inner()) = Some(pump_handle);
+    *engine.pump_tx.lock_ok() = Some(pump_tx);
+    *engine.pump_thread.lock_ok() = Some(pump_handle);
 
     let (dispatch, _counter) = counting_dispatch();
     let (sc, home) = stream_config_from(&relaxed_planner_config());
-    *engine.planner.lock().unwrap_or_else(|p| p.into_inner()) = Some(StreamWorkerHandle::spawn(
+    *engine.planner.lock_ok() = Some(StreamWorkerHandle::spawn(
         sc,
         trajectory::AxisChainSet::default(),
         home,
         dispatch,
-        noop_nudge_dispatch(),
         Arc::default(),
         None,
     ));
@@ -542,19 +531,11 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
          leaked the pts fd."
     );
     assert!(
-        engine
-            .pump_thread
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .is_none(),
+        engine.pump_thread.lock_ok().is_none(),
         "pump thread handle must be taken (joined) by shutdown()"
     );
     assert!(
-        engine
-            .planner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .is_none(),
+        engine.planner.lock_ok().is_none(),
         "planner must be taken+joined by shutdown()"
     );
 }
@@ -577,20 +558,11 @@ fn register_ethercat_mcu_seeds_nominal_clock_freq() {
     engine.register_ethercat_mcu(RAW, "servo", "/tmp/test.sock", child, conn, vec![0]);
 
     assert!(
-        engine
-            .mcus
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .contains_key(&RAW),
+        engine.mcus.lock_ok().contains_key(&RAW),
         "mcus must contain the raw handle after register_ethercat_mcu"
     );
     assert_eq!(
-        engine
-            .nominal_clock_freqs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(&RAW)
-            .copied(),
+        engine.nominal_clock_freqs.lock_ok().get(&RAW).copied(),
         Some(1_000_000_000_u32),
         "nominal_clock_freqs must contain 1 GHz for the ethercat raw handle; \
          removing the insert from register_ethercat_mcu must cause this to fail"
@@ -632,11 +604,7 @@ fn report_ethercat_endpoint_death_latches_203_and_first_cause_wins() {
         "the first call latches the cause and arms the backstop"
     );
     assert!(!second, "a later writer does not re-latch (returns false)");
-    let msg = latch
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .remove(&5)
-        .expect("a cause must be latched");
+    let msg = latch.lock_ok().remove(&5).expect("a cause must be latched");
     assert!(
         msg.contains("(fault -203)"),
         "must carry the -203 code: {msg}"

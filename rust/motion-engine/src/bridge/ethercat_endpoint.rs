@@ -1,3 +1,4 @@
+use crate::lock_ext::LockExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -26,7 +27,7 @@ pub(crate) fn report_ethercat_endpoint_death(
 ) -> bool {
     let code = runtime::error::FaultCode::EthercatEndpointDied.as_i32();
     let message = format!("EtherCAT endpoint died mid-session (fault {code}): {reason}");
-    let mut guard = latch.lock().unwrap_or_else(|p| p.into_inner());
+    let mut guard = latch.lock_ok();
     // First cause wins for BOTH the latched (operator-surfaced) message and the
     // log: a later writer (e.g. the supervisor after the pump already latched)
     // must not overwrite the original cause.
@@ -56,10 +57,7 @@ pub(crate) fn arm_endpoint_death_watchdog(latch: Arc<Mutex<HashMap<u32, String>>
         .name(format!("ec-death-watchdog-{mcu_id}"))
         .spawn(move || {
             std::thread::sleep(ENDPOINT_DEATH_SHUTDOWN_GRACE);
-            let unhandled = latch
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .contains_key(&mcu_id);
+            let unhandled = latch.lock_ok().contains_key(&mcu_id);
             if unhandled {
                 tracing::error!(
                     subsystem = "ethercat",

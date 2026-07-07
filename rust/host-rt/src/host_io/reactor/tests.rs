@@ -1,5 +1,7 @@
 use super::*;
+use crate::host_io::reactor::outbound::{PendingOutboundKind, PendingSubmission};
 use crate::host_io::wire;
+use runtime::error::FaultCode;
 use std::sync::{Arc, Mutex};
 
 struct MockPort {

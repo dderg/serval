@@ -11,18 +11,7 @@ pragma_once = true
 no_includes = false
 
 [export]
-# Symmetric to cbindgen.toml's exclusion of runtime symbols: cbindgen scans
-# both FFI modules in this crate regardless of cfg gating (and the cleaner
-# `parse.expand` route requires nightly `-Zunpretty=expanded`, which the
-# workspace pins out via stable toolchain). Filter at the export level so
-# this header carries only the runtime surface.
 exclude = [
-    "ScalarNurbsRef_f32",
-    "VectorNurbsRef_f32__3",
-    "ArcLengthTableRef_f32",
-    "nurbs_eval_f32",
-    "nurbs_vector_eval_3_f32",
-    "nurbs_param_from_arc_length_f32",
     # Engine<P, I> is a 2-param generic; cbindgen 0.29 panics on
     # monomorphization. Engine is never directly exposed in the C header.
     "Engine",
@@ -34,9 +23,3 @@ sort_by = "Name"
 [parse]
 parse_deps = true
 include = ["runtime", "c-api"]
-# NB: spec/plan called for `expand = ["c-api"]` here, but `cargo expand`
-# requires the nightly `-Zunpretty=expanded` flag and the workspace pins
-# stable. We instead filter the nurbs-side symbols out via `[export.exclude]`
-# above. Revisit once a stable `-Zunpretty=expanded` (or equivalent) ships,
-# or if the gen-headers binary moves to a per-crate cargo invocation that can
-# use nightly.

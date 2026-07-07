@@ -117,8 +117,8 @@ impl From<Move> for StreamInput {
 /// Ordered control tokens that flow through every stage with the geometry.
 /// The pipeline is set up once and lives forever; these replace the old
 /// teardown-and-rebuild lifecycle. Tokens that require the trajectory to be
-/// at rest (`Dwell`, `SetAxisChains`, `Barrier` after a flush) must be
-/// preceded by a `Drain`; the stages assert emptiness rather than draining
+/// at rest (`Dwell`, `SetAxisChains`, `Nudge`, `Barrier` after a flush) must
+/// be preceded by a `Drain`; the stages assert emptiness rather than draining
 /// implicitly, so a violated protocol fails loudly instead of hiding a
 /// velocity discontinuity.
 #[derive(Debug)]
@@ -131,10 +131,27 @@ pub enum Control {
     Reset { pos: Vec<f64> },
     /// Swap the post-processing chains (lowerer and shaper apply it).
     SetAxisChains(AxisChainSet),
+    /// A pre-lowered single-axis correction (endstop nudge) for the
+    /// dispatcher: it never touches the planned trajectory, so the stages
+    /// forward it untouched. The follow-up `Dwell` the sender emits advances
+    /// the stream clock over the nudge's duration.
+    Nudge {
+        mcu_id: u32,
+        pieces: Vec<NudgePiece>,
+    },
     /// Acknowledged by the dispatcher once everything ahead of it has been
     /// dispatched (or discarded): the pipeline-wide "everything before this
     /// point is done" fence.
     Barrier(Sender<BarrierAck>),
+}
+
+/// One phase of a nudge profile: a polynomial piece for a single axis,
+/// already in stream time.
+#[derive(Debug, Clone)]
+pub struct NudgePiece {
+    pub axis: u8,
+    pub motor_mask: u8,
+    pub piece: nurbs::bezier::BezierPiece,
 }
 
 /// The dispatcher's answer to a `Barrier`.

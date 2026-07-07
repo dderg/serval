@@ -1,3 +1,4 @@
+use crate::lock_ext::LockExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -108,10 +109,7 @@ pub(crate) fn collect_motor_positions_inner(
     use mcu_protocol::messages::MotorStateResponse;
     use runtime::stepping_state::MAX_AXES;
 
-    let configs = mcu_axis_configs
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .clone();
+    let configs = mcu_axis_configs.lock_ok().clone();
     if configs.is_empty() {
         return Err("query_motor_positions: no axes configured".into());
     }
@@ -126,7 +124,7 @@ pub(crate) fn collect_motor_positions_inner(
 
     for cfg in &configs {
         let q = {
-            let map = mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let map = mcus.lock_ok();
             let Some(conn) = map.get(&cfg.mcu_id) else {
                 continue;
             };
