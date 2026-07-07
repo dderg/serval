@@ -4,12 +4,7 @@ use nurbs::bezier::BezierPiece;
 #[cfg(test)]
 mod tests;
 
-#[derive(Debug, Clone)]
-pub struct NudgePiece {
-    pub axis: u8,
-    pub motor_mask: u8,
-    pub piece: BezierPiece,
-}
+pub use motion_pipeline::NudgePiece;
 
 pub fn calc_move_time(dist: f64, speed: f64, accel: f64) -> (f64, f64, f64) {
     let dist = dist.abs();

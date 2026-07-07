@@ -16,7 +16,7 @@
 //! a clock; time lives here and in the dispatcher.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use crossbeam_channel::Receiver;
@@ -26,7 +26,7 @@ use motion_pipeline::{
     advance_odometer, dist3,
 };
 
-use super::dispatch::{ConsumerShared, NudgeDispatchFn};
+use super::dispatch::WorkerLinks;
 use super::{CommittedFrontier, HomeDripParams, NudgeParams, StreamMsg, fatal};
 
 /// Runway kept in reserve when the pacer waits out a silent input instead of
@@ -47,17 +47,14 @@ pub(crate) fn lead_secs() -> f64 {
 
 pub(super) struct Ingress {
     pub(super) config: StreamConfig,
-    pub(super) nudge_dispatch: NudgeDispatchFn,
     /// Expected toolhead position after every move ingested so far; the
     /// ingress contiguity check anchors here.
     pub(super) odometer: Vec<f64>,
     /// Stream time the dispatched timeline has reached, mirrored from barrier
-    /// acks; nudges (which bypass the pipeline) plan from it.
+    /// acks; nudge profiles are planned from it.
     pub(super) t_next: f64,
     pub(super) input: crossbeam_channel::Sender<StreamInput>,
-    pub(super) discard: Arc<AtomicBool>,
-    pub(super) capture_errors: Arc<AtomicBool>,
-    pub(super) shared: ConsumerShared,
+    pub(super) links: Arc<WorkerLinks>,
     pub(super) frontier: Arc<CommittedFrontier>,
     /// The pipeline holds moves ingested since the last `Drain`; the pacer
     /// only schedules a drain while this is set.
@@ -123,7 +120,7 @@ impl Ingress {
         if let Some(t) = ack.dispatched_through {
             self.t_next = t;
         }
-        self.shared.fences.resolve_armed(ack.dispatched_through);
+        self.links.fences.resolve_armed(ack.dispatched_through);
         ack
     }
 
@@ -186,7 +183,7 @@ impl Ingress {
         );
         self.send(StreamInput::Drain);
         self.undrained = false;
-        if self.shared.fences.has_armed() {
+        if self.links.fences.has_armed() {
             self.barrier();
         }
         None
@@ -209,12 +206,12 @@ impl Ingress {
             StreamMsg::Fence { id, force } => {
                 if !self.undrained {
                     let ack = self.barrier();
-                    self.shared.fences.resolve(id, ack.dispatched_through);
+                    self.links.fences.resolve(id, ack.dispatched_through);
                 } else if force {
                     let ack = self.drain_and_fence();
-                    self.shared.fences.resolve(id, ack.dispatched_through);
+                    self.links.fences.resolve(id, ack.dispatched_through);
                 } else {
-                    self.shared.fences.arm(id, self.last_line);
+                    self.links.fences.arm(id, self.last_line);
                 }
             }
             StreamMsg::Dwell { duration_s, notify } => {
@@ -274,7 +271,7 @@ impl Ingress {
     /// `Reset` lifts it when it catches up, so nothing sent before this call
     /// reaches the pump and everything sent after does.
     fn reset_to(&mut self, pos: Vec<f64>) {
-        self.discard.store(true, Ordering::Release);
+        self.links.discard.store(true, Ordering::Release);
         self.frontier.clear();
         self.send(StreamInput::Control(Control::Reset { pos: pos.clone() }));
         self.undrained = false;
@@ -306,17 +303,21 @@ impl Ingress {
         .map_err(|e| format!("HomeDrip build_move: {e:?}"))?;
         advance_odometer(&mut self.odometer, &m);
 
-        self.capture_errors.store(true, Ordering::Release);
+        self.links.capture_errors.store(true, Ordering::Release);
         self.send(m.into());
         self.undrained = true;
         let ack = self.drain_and_fence();
-        self.capture_errors.store(false, Ordering::Release);
+        self.links.capture_errors.store(false, Ordering::Release);
         ack.result
     }
 
+    /// Plan a nudge profile from the current stream time and send it down the
+    /// (drained) pipeline as a control token; the dispatcher executes it and
+    /// the closing barrier carries back any dispatch error. The `Dwell`
+    /// advances the stream clock over the nudge's duration.
     fn run_nudge(&mut self, p: &NudgeParams) -> Result<(), String> {
         self.drain_and_fence();
-        let nudge_segs = crate::nudge::plan_nudge_profile(
+        let pieces = crate::nudge::plan_nudge_profile(
             p.axis,
             p.delta_mm,
             p.speed,
@@ -324,20 +325,15 @@ impl Ingress {
             p.motor_mask,
             self.t_next,
         )?;
-        let total_dur: f64 = nudge_segs
-            .iter()
-            .map(|s| s.piece.u_end - s.piece.u_start)
-            .sum();
-        for s in &nudge_segs {
-            (self.nudge_dispatch)(p.mcu_id, s).map_err(|e| format!("nudge dispatch: {e}"))?;
-        }
-        self.t_next += total_dur;
+        let total_dur: f64 = pieces.iter().map(|s| s.piece.u_end - s.piece.u_start).sum();
+        self.send(StreamInput::Control(Control::Nudge {
+            mcu_id: p.mcu_id,
+            pieces,
+        }));
         if total_dur > 0.0 {
             self.send(StreamInput::Control(Control::Dwell { secs: total_dur }));
         }
-        self.shared
-            .last_move_time_bits
-            .store(self.t_next.to_bits(), Ordering::Release);
-        Ok(())
+        self.t_next += total_dur;
+        self.barrier().result.map_err(|e| format!("nudge: {e}"))
     }
 }

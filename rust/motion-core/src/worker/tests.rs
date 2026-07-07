@@ -14,22 +14,26 @@ struct Capture {
     nudges: Arc<Mutex<usize>>,
 }
 
+impl SegmentSink for Capture {
+    fn dispatch(&mut self, seg: &ShapedSegment) -> Result<(), DispatchError> {
+        let x_end = eval(&seg.axes[0], seg.t_end);
+        self.segs
+            .lock()
+            .unwrap()
+            .push((seg.t_start, seg.t_end, x_end));
+        Ok(())
+    }
+    fn dispatch_nudge(
+        &mut self,
+        _mcu_id: u32,
+        _piece: &motion_pipeline::NudgePiece,
+    ) -> Result<(), DispatchError> {
+        *self.nudges.lock().unwrap() += 1;
+        Ok(())
+    }
+}
+
 impl Capture {
-    fn dispatch(&self) -> DispatchFn {
-        let segs = Arc::clone(&self.segs);
-        Arc::new(move |seg: &ShapedSegment| {
-            let x_end = eval(&seg.axes[0], seg.t_end);
-            segs.lock().unwrap().push((seg.t_start, seg.t_end, x_end));
-            Ok(())
-        })
-    }
-    fn nudge_dispatch(&self) -> NudgeDispatchFn {
-        let nudges = Arc::clone(&self.nudges);
-        Arc::new(move |_mcu_id, _piece| {
-            *nudges.lock().unwrap() += 1;
-            Ok(())
-        })
-    }
     fn snapshot(&self) -> Vec<(f64, f64, f64)> {
         self.segs.lock().unwrap().clone()
     }
@@ -112,8 +116,7 @@ fn nonstop_flood_of_real_perimeter_drains_without_crashing() {
         cfg(),
         AxisChainSet::default(),
         vec![99.158, 99.158, 0.2, 0.0],
-        cap.dispatch(),
-        cap.nudge_dispatch(),
+        cap.clone(),
         Arc::default(),
         None,
     );
@@ -175,8 +178,7 @@ fn streams_collinear_moves_to_a_contiguous_trajectory() {
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
-        cap.dispatch(),
-        cap.nudge_dispatch(),
+        cap.clone(),
         Arc::default(),
         None,
     );
@@ -214,8 +216,7 @@ fn dwell_inserts_a_time_gap_then_resumes() {
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
-        cap.dispatch(),
-        cap.nudge_dispatch(),
+        cap.clone(),
         Arc::default(),
         None,
     );
@@ -247,8 +248,7 @@ fn stream_open_restarts_the_timeline_at_zero() {
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
-        cap.dispatch(),
-        cap.nudge_dispatch(),
+        cap.clone(),
         Arc::default(),
         None,
     );
@@ -280,8 +280,7 @@ fn home_drip_moves_to_the_travel_endpoint_on_the_new_pipeline() {
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0, 0.0],
-        cap.dispatch(),
-        cap.nudge_dispatch(),
+        cap.clone(),
         Arc::default(),
         None,
     );
@@ -315,8 +314,7 @@ fn nudge_dispatches_pieces_and_advances_time() {
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0, 0.0],
-        cap.dispatch(),
-        cap.nudge_dispatch(),
+        cap.clone(),
         Arc::default(),
         None,
     );
@@ -376,8 +374,7 @@ fn continuous_blend_run_dispatches_continuously_without_flush() {
         cfg_cap(256),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
-        cap.dispatch(),
-        cap.nudge_dispatch(),
+        cap.clone(),
         Arc::default(),
         None,
     );
@@ -423,22 +420,29 @@ fn co_move(line_no: u32, start: [f64; 3], end: [f64; 3], e_delta: f64) -> geomet
 
 #[test]
 fn live_retune_pressure_advance_applies_to_plans_after_the_swap() {
+    struct ExtruderDeltaSink(Arc<Mutex<Vec<f64>>>);
+    impl SegmentSink for ExtruderDeltaSink {
+        fn dispatch(&mut self, seg: &ShapedSegment) -> Result<(), DispatchError> {
+            let t_mid = 0.5 * (seg.t_start + seg.t_end);
+            let de = eval(&seg.axes[3], t_mid) - eval(&seg.axes[3], seg.t_start);
+            self.0.lock().unwrap().push(de);
+            Ok(())
+        }
+        fn dispatch_nudge(
+            &mut self,
+            _mcu_id: u32,
+            _piece: &motion_pipeline::NudgePiece,
+        ) -> Result<(), DispatchError> {
+            Ok(())
+        }
+    }
     let deltas: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
-    let cap = Arc::clone(&deltas);
-    let dispatch: DispatchFn = Arc::new(move |seg: &ShapedSegment| {
-        let t_mid = 0.5 * (seg.t_start + seg.t_end);
-        let de = eval(&seg.axes[3], t_mid) - eval(&seg.axes[3], seg.t_start);
-        cap.lock().unwrap().push(de);
-        Ok(())
-    });
-    let noop_nudge: NudgeDispatchFn = Arc::new(|_, _| Ok(()));
 
     let mut h = StreamWorkerHandle::spawn(
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0, 0.0],
-        dispatch,
-        noop_nudge,
+        ExtruderDeltaSink(Arc::clone(&deltas)),
         Arc::default(),
         None,
     );
@@ -482,8 +486,7 @@ fn flush_returns_after_commit_without_sleeping_until_playout() {
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0, 0.0],
-        cap.dispatch(),
-        cap.nudge_dispatch(),
+        cap.clone(),
         Arc::default(),
         None,
     );
@@ -525,8 +528,7 @@ fn forcing_fence_resolves_to_the_end_of_submitted_motion() {
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
-        cap.dispatch(),
-        cap.nudge_dispatch(),
+        cap.clone(),
         Arc::default(),
         None,
     );
@@ -554,8 +556,7 @@ fn fence_on_an_idle_pipe_resolves_without_new_motion() {
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
-        cap.dispatch(),
-        cap.nudge_dispatch(),
+        cap.clone(),
         Arc::default(),
         None,
     );
@@ -581,8 +582,7 @@ fn passive_fence_resolves_as_the_stream_commits_past_it() {
         cfg(),
         AxisChainSet::default(),
         vec![0.0, 0.0, 0.0],
-        cap.dispatch(),
-        cap.nudge_dispatch(),
+        cap.clone(),
         Arc::default(),
         None,
     );

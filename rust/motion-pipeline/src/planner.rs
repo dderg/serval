@@ -116,7 +116,10 @@ impl Planner {
                 self.entry = BoundaryState::REST;
                 self.moves_since_plan = 0;
             }
-            Control::Dwell { .. } | Control::SetAxisChains(_) | Control::Barrier(_) => {
+            Control::Dwell { .. }
+            | Control::SetAxisChains(_)
+            | Control::Nudge { .. }
+            | Control::Barrier(_) => {
                 assert!(
                     self.moves.is_empty(),
                     "planner: control token arrived with {} undrained moves — a Drain must \

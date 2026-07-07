@@ -17,9 +17,9 @@ pub use lowering::{FitTol, LoweringError, lower_move, lower_move_pieces};
 pub use planner::Planner;
 pub use shaper::Shaper;
 pub use types::{
-    BarrierAck, CONTIGUITY_EPS_MM, Control, LoweredItem, LoweredSegment, PipelineHandle,
-    PlannedItem, PlannedMove, PostProcessError, ShapedItem, StreamConfig, StreamError, StreamInput,
-    jerk_limited_brake_time,
+    BarrierAck, CONTIGUITY_EPS_MM, Control, LoweredItem, LoweredSegment, NudgePiece,
+    PipelineHandle, PlannedItem, PlannedMove, PostProcessError, ShapedItem, StreamConfig,
+    StreamError, StreamInput, jerk_limited_brake_time,
 };
 
 /// Wires the pure stream stages (fit stage → planner → lowerer → shaper) into

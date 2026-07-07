@@ -69,7 +69,10 @@ impl Shaper {
                             self.history.clear();
                             self.history_trimmed = false;
                         }
-                        Control::Dwell { .. } | Control::SetAxisChains(_) | Control::Barrier(_) => {
+                        Control::Dwell { .. }
+                        | Control::SetAxisChains(_)
+                        | Control::Nudge { .. }
+                        | Control::Barrier(_) => {
                             assert!(
                                 self.pending.is_empty() || self.pending_rest.back() == Some(&true),
                                 "shaper: control token arrived while the trajectory is not at \
