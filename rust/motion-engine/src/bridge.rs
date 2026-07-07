@@ -27,6 +27,7 @@ mod ethercat_endpoint;
 mod homing_api;
 mod motion_caps;
 mod passthrough;
+mod pipeline_setup;
 mod planner_api;
 mod runtime_caps;
 mod servo;
