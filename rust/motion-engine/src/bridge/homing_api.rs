@@ -272,7 +272,6 @@ impl PyMotionEngine {
         clock: u64,
         host_now: f64,
     ) -> PyResult<std::collections::HashMap<String, (f64, f64, f64)>> {
-        const AXIS_NAMES: [&str; 4] = ["x", "y", "z", "e"];
         let configs: Vec<crate::mcu_config::McuAxisConfig> =
             self.mcu_axis_configs.lock_ok().clone();
         if configs.is_empty() {
@@ -289,6 +288,17 @@ impl PyMotionEngine {
             )
             .map_err(PyRuntimeError::new_err)?
         };
+        // The history ring is recorded in motor frame (the lowerer's output —
+        // e.g. CoreXY A/B, not cartesian X/Y), same as the live QueryMotorState
+        // path in runtime_caps.rs. Invert through the same kinematics tag so
+        // this answers cartesian, matching what `assemble_cartesian` does there.
+        let kin_tag = configs
+            .iter()
+            .find(|c| c.axes.contains(&0usize))
+            .map(|c| c.kinematics)
+            .unwrap_or(runtime::segment::KinematicTag::Cartesian as u8);
+        let kin = crate::kinematics::KinematicsModule::from_tag(kin_tag)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         let resolved: Vec<crate::types::AxisKey> = configs
             .iter()
             .flat_map(|cfg| {
@@ -299,22 +309,26 @@ impl PyMotionEngine {
             })
             .collect();
         let store = self.motion_history.lock_ok();
-        let mut out = std::collections::HashMap::new();
+        let mut motor_state: [Option<crate::motion_history::AxisState>; 4] = [None; 4];
         for key in resolved {
-            let st = match store.state_at_host(key, query_host, Some(host_now)) {
-                Ok(st) => st,
-                Err(crate::motion_history::HistoryError::NoHistoryForAxis(_)) => continue,
+            let axis = key.axis as usize;
+            if axis >= motor_state.len() {
+                return Err(PyRuntimeError::new_err(format!(
+                    "motion_state_at: unnamed axis {}",
+                    key.axis
+                )));
+            }
+            match store.state_at_host(key, query_host, Some(host_now)) {
+                Ok(st) => motor_state[axis] = Some(st),
+                Err(crate::motion_history::HistoryError::NoHistoryForAxis(_)) => {}
                 Err(e) => return Err(PyRuntimeError::new_err(e.to_string())),
-            };
-            let name = AXIS_NAMES.get(key.axis as usize).ok_or_else(|| {
-                PyRuntimeError::new_err(format!("motion_state_at: unnamed axis {}", key.axis))
-            })?;
-            out.insert(
-                (*name).to_string(),
-                (st.position, st.velocity, st.acceleration),
-            );
+            }
         }
-        Ok(out)
+        drop(store);
+        Ok(crate::motion_history::assemble_cartesian_state(
+            motor_state,
+            &kin,
+        ))
     }
 }
 

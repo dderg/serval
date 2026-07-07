@@ -3,9 +3,12 @@ use std::collections::{HashMap, VecDeque};
 use host_rt::passthrough_queue::{McuHandle, PassthroughRouter};
 use runtime::piece_ring::{MAX_PIECE_COEFFS, PieceEntry};
 
+use crate::kinematics::{KinematicsKind, KinematicsModule};
 use crate::types::AxisKey;
 
 pub const HISTORY_CAPACITY: usize = 4096;
+
+pub const AXIS_NAMES: [&str; 4] = ["x", "y", "z", "e"];
 
 /// Position-domain tolerance (mm) for treating a piece as a held rest: every
 /// Chebyshev coefficient above the constant term must fall within it.
@@ -102,6 +105,56 @@ pub struct AxisState {
     pub position: f64,
     pub velocity: f64,
     pub acceleration: f64,
+}
+
+/// `motor_state[i]` is the retained-history answer for motor axis `i`
+/// (0=first CoreXY/Cartesian motor, 1=second, 2=Z, 3=extruder) — the
+/// lowerer's output frame, e.g. CoreXY A/B, not cartesian X/Y. Inverts
+/// through `kin` to the cartesian axes named in `AXIS_NAMES`, mirroring
+/// `position_query::assemble_cartesian`'s live-query counterpart. Z and E
+/// pass straight through under every kinematics tag defined today (both
+/// `COREXY_MOTOR_TO_AXIS` and the cartesian identity have an identity Z
+/// row), independent of whether X/Y resolved. A coupled cartesian axis is
+/// omitted rather than computed from a missing motor as zero.
+pub fn assemble_cartesian_state(
+    motor_state: [Option<AxisState>; 4],
+    kin: &KinematicsModule,
+) -> HashMap<String, (f64, f64, f64)> {
+    let mut out = HashMap::new();
+    if let Some(e) = motor_state[3] {
+        out.insert(
+            AXIS_NAMES[3].to_string(),
+            (e.position, e.velocity, e.acceleration),
+        );
+    }
+    if let Some(z) = motor_state[2] {
+        out.insert(
+            AXIS_NAMES[2].to_string(),
+            (z.position, z.velocity, z.acceleration),
+        );
+    }
+    match kin.kind() {
+        KinematicsKind::Cartesian => {
+            for (axis, name) in AXIS_NAMES.iter().enumerate().take(2) {
+                if let Some(st) = motor_state[axis] {
+                    out.insert(
+                        (*name).to_string(),
+                        (st.position, st.velocity, st.acceleration),
+                    );
+                }
+            }
+        }
+        KinematicsKind::CoreXy => {
+            if let (Some(m0), Some(m1)) = (motor_state[0], motor_state[1]) {
+                let pos = kin.inverse([m0.position, m1.position, 0.0]);
+                let vel = kin.inverse([m0.velocity, m1.velocity, 0.0]);
+                let accel = kin.inverse([m0.acceleration, m1.acceleration, 0.0]);
+                out.insert(AXIS_NAMES[0].to_string(), (pos[0], vel[0], accel[0]));
+                out.insert(AXIS_NAMES[1].to_string(), (pos[1], vel[1], accel[1]));
+            }
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Copy)]

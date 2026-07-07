@@ -402,6 +402,180 @@ fn backward_host_supersedes_stale_tail() {
     assert!((held.position - 60.0).abs() < 1e-6);
 }
 
+fn axis_key(axis: u8) -> AxisKey {
+    AxisKey { mcu_id: 7, axis }
+}
+
+#[test]
+fn assemble_cartesian_state_corexy_inverts_motor_frame() {
+    use crate::kinematics::KinematicsModule;
+    use crate::motion_history::{AxisState, assemble_cartesian_state};
+    use runtime::segment::KinematicTag;
+
+    let expected_x = 10.0;
+    let expected_y = 4.0;
+    let motor_a = expected_x + expected_y;
+    let motor_b = expected_x - expected_y;
+    let motor_state = [
+        Some(AxisState {
+            position: motor_a,
+            velocity: 1.0,
+            acceleration: 0.0,
+        }),
+        Some(AxisState {
+            position: motor_b,
+            velocity: -1.0,
+            acceleration: 0.0,
+        }),
+        Some(AxisState {
+            position: 2.0,
+            velocity: 0.0,
+            acceleration: 0.0,
+        }),
+        None,
+    ];
+    let kin = KinematicsModule::from_tag(KinematicTag::CoreXy as u8).unwrap();
+    let out = assemble_cartesian_state(motor_state, &kin);
+    assert!(
+        (out["x"].0 - expected_x).abs() < 1e-9,
+        "x={:?}",
+        out.get("x")
+    );
+    assert!(
+        (out["y"].0 - expected_y).abs() < 1e-9,
+        "y={:?}",
+        out.get("y")
+    );
+    assert_eq!(out["z"], (2.0, 0.0, 0.0));
+    assert!(!out.contains_key("e"));
+}
+
+#[test]
+fn assemble_cartesian_state_cartesian_is_passthrough() {
+    use crate::kinematics::KinematicsModule;
+    use crate::motion_history::{AxisState, assemble_cartesian_state};
+    use runtime::segment::KinematicTag;
+
+    let motor_state = [
+        Some(AxisState {
+            position: 10.0,
+            velocity: 1.0,
+            acceleration: 0.1,
+        }),
+        Some(AxisState {
+            position: 20.0,
+            velocity: -1.0,
+            acceleration: 0.2,
+        }),
+        Some(AxisState {
+            position: 5.0,
+            velocity: 0.0,
+            acceleration: 0.0,
+        }),
+        Some(AxisState {
+            position: 2.0,
+            velocity: 3.0,
+            acceleration: 0.0,
+        }),
+    ];
+    let kin = KinematicsModule::from_tag(KinematicTag::Cartesian as u8).unwrap();
+    let out = assemble_cartesian_state(motor_state, &kin);
+    assert_eq!(out["x"], (10.0, 1.0, 0.1));
+    assert_eq!(out["y"], (20.0, -1.0, 0.2));
+    assert_eq!(out["z"], (5.0, 0.0, 0.0));
+    assert_eq!(out["e"], (2.0, 3.0, 0.0));
+}
+
+#[test]
+fn assemble_cartesian_state_corexy_omits_xy_when_one_motor_missing() {
+    use crate::kinematics::KinematicsModule;
+    use crate::motion_history::{AxisState, assemble_cartesian_state};
+    use runtime::segment::KinematicTag;
+
+    // Only motor0 resolved; motor1's history is unanswerable. Reporting x/y
+    // from a single motor would silently invent a position the axis never
+    // proved it held — omit both rather than guess. Z stays independent.
+    let motor_state = [
+        Some(AxisState {
+            position: 15.0,
+            velocity: 0.0,
+            acceleration: 0.0,
+        }),
+        None,
+        Some(AxisState {
+            position: 3.0,
+            velocity: 0.0,
+            acceleration: 0.0,
+        }),
+        None,
+    ];
+    let kin = KinematicsModule::from_tag(KinematicTag::CoreXy as u8).unwrap();
+    let out = assemble_cartesian_state(motor_state, &kin);
+    assert!(!out.contains_key("x"));
+    assert!(!out.contains_key("y"));
+    assert_eq!(out["z"], (3.0, 0.0, 0.0));
+}
+
+#[test]
+fn corexy_history_round_trip_reproduces_bench_symptom() {
+    // Reproduces the trident-bench beacon scan: motor0/motor1 pieces
+    // recorded through the ring (as commit_sent_bundle does) must invert to
+    // the commanded cartesian XY, not the raw CoreXY A/B sum/difference that
+    // motion_state_at_clock used to leak straight through.
+    use crate::kinematics::KinematicsModule;
+    use crate::motion_history::assemble_cartesian_state;
+    use runtime::segment::KinematicTag;
+
+    let cart_x0 = 25.0;
+    let cart_y0 = 25.0;
+    let cart_x1 = 275.0;
+    let cart_y1 = 25.0;
+    let mut store = HistoryStore::default();
+    rec(
+        &mut store,
+        axis_key(0),
+        linear(
+            0,
+            1.0,
+            (cart_x0 + cart_y0) as f32,
+            (cart_x1 + cart_y1) as f32,
+        ),
+    );
+    rec(
+        &mut store,
+        axis_key(1),
+        linear(
+            0,
+            1.0,
+            (cart_x0 - cart_y0) as f32,
+            (cart_x1 - cart_y1) as f32,
+        ),
+    );
+
+    let mid = h(FREQ as u64 / 2);
+    let mut motor_state = [None; 4];
+    for axis in 0..2u8 {
+        motor_state[axis as usize] = store
+            .state_at_host(axis_key(axis), mid, Some(f64::INFINITY))
+            .ok();
+    }
+    let kin = KinematicsModule::from_tag(KinematicTag::CoreXy as u8).unwrap();
+    let out = assemble_cartesian_state(motor_state, &kin);
+
+    let expected_x = (cart_x0 + cart_x1) / 2.0;
+    let expected_y = (cart_y0 + cart_y1) / 2.0;
+    assert!(
+        (out["x"].0 - expected_x).abs() < 1e-6,
+        "x={:?} want {expected_x}",
+        out.get("x")
+    );
+    assert!(
+        (out["y"].0 - expected_y).abs() < 1e-6,
+        "y={:?} want {expected_y}",
+        out.get("y")
+    );
+}
+
 #[test]
 fn host_clock_round_trip_is_identity() {
     let router = stub_router_two_mcus();
