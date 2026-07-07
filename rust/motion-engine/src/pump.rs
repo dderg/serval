@@ -240,16 +240,32 @@ fn log_piece_submit(
     }
 }
 
-struct Pump<S, F, C, A, O, D> {
+pub struct PumpCallbacks {
+    pub ring_depth_of: Box<dyn Fn(AxisKey) -> u32 + Send>,
+    pub mcu_clock_of: Box<dyn Fn(u32) -> Option<(u64, f64)> + Send>,
+    pub on_fatal_transport: Box<dyn Fn(AxisKey) + Send>,
+    pub on_abandon: Box<dyn Fn(AxisKey, u32) + Send>,
+    pub on_drip_stall: Box<dyn Fn(String) + Send>,
+}
+
+impl PumpCallbacks {
+    pub fn noop(ring_depth: u32) -> Self {
+        Self {
+            ring_depth_of: Box::new(move |_| ring_depth),
+            mcu_clock_of: Box::new(|_| None),
+            on_fatal_transport: Box::new(|_| {}),
+            on_abandon: Box::new(|_, _| {}),
+            on_drip_stall: Box::new(|_| {}),
+        }
+    }
+}
+
+struct Pump<S> {
     queues: BTreeMap<AxisKey, AxisQueue>,
     junctions: JunctionTracker,
     cohort: Option<DripCohort>,
     sink: S,
-    ring_depth_of: F,
-    mcu_clock_of: C,
-    on_fatal_transport: A,
-    on_abandon: O,
-    on_drip_stall: D,
+    callbacks: PumpCallbacks,
     history: Option<HistoryRecorder>,
     ledger: Arc<crate::drain::DrainLedger>,
     /// Barrier acks are held until the end of the loop iteration, after
@@ -264,15 +280,7 @@ struct Pump<S, F, C, A, O, D> {
     stall_full_since: Option<(AxisKey, u32, Instant)>,
 }
 
-impl<S, F, C, A, O, D> Pump<S, F, C, A, O, D>
-where
-    S: PieceSink,
-    F: Fn(AxisKey) -> u32,
-    C: Fn(u32) -> Option<(u64, f64)>,
-    A: Fn(AxisKey) + Send + 'static,
-    O: Fn(AxisKey, u32),
-    D: Fn(String) + Send,
-{
+impl<S: PieceSink> Pump<S> {
     fn handle_control_msg(&mut self, msg: PumpMsg) -> bool {
         match msg {
             PumpMsg::Shutdown => return false,
@@ -282,7 +290,7 @@ where
                         let dropped = q.pieces.len() as u32;
                         q.pieces.clear();
                         if dropped > 0 {
-                            (self.on_abandon)(key, dropped);
+                            (self.callbacks.on_abandon)(key, dropped);
                         }
                     }
                     self.junctions.forget(key);
@@ -304,7 +312,7 @@ where
                         if co.participants.contains(&key) {
                             let prev = co.last_retired.get(&key).copied().unwrap_or(0);
                             if c < prev {
-                                (self.on_drip_stall)(format!(
+                                (self.callbacks.on_drip_stall)(format!(
                                     "drip cohort {}: retired regression on mcu{} axis{}: \
                                      was {prev} now {c} — MCU retired counter must not decrease",
                                     co.id, mcu_id, axis
@@ -359,7 +367,7 @@ where
         if let Some(co) = self.cohort.as_ref() {
             if !co.participants.contains(&key) {
                 let id = co.id;
-                (self.on_drip_stall)(format!(
+                (self.callbacks.on_drip_stall)(format!(
                     "drip cohort {id}: enqueue for non-participant \
                      mcu{} axis{} during active cohort — homing must \
                      drip every axis",
@@ -373,7 +381,7 @@ where
             self.junctions.forget(key);
         }
         if self.cohort.is_some() && !pieces.is_empty() {
-            if let Some((ack_now, freq)) = (self.mcu_clock_of)(key.mcu_id) {
+            if let Some((ack_now, freq)) = (self.callbacks.mcu_clock_of)(key.mcu_id) {
                 let first_start = pieces[0].0.start_time;
                 let produce_lead_us = (first_start as i64 - ack_now as i64) as f64 / freq * 1e6;
                 let durs: Vec<f32> = pieces.iter().map(|p| p.0.duration).collect();
@@ -395,7 +403,7 @@ where
             }
         }
         if !pieces.is_empty() {
-            if let Some((_ack_now, freq)) = (self.mcu_clock_of)(key.mcu_id) {
+            if let Some((_ack_now, freq)) = (self.callbacks.mcu_clock_of)(key.mcu_id) {
                 if let Some(seam) = self.junctions.observe(key, &pieces, source_line, freq) {
                     check_junction_position_continuity(&seam);
                     let (tick_jump_us, host_jump_us) = junction_jumps(
@@ -439,12 +447,12 @@ where
                 }
             }
         }
-        let ring_depth = (self.ring_depth_of)(key);
+        let ring_depth = (self.callbacks.ring_depth_of)(key);
         // Hold merging is off during drip cohorts: their release floor is
         // piece-count-based and coalescing would starve it. Without a synced
         // clock there is no freq to prove seam contiguity, so append as-is.
         let hold_merge_freq = if self.cohort.is_none() {
-            (self.mcu_clock_of)(key.mcu_id).map(|(_, freq)| freq)
+            (self.callbacks.mcu_clock_of)(key.mcu_id).map(|(_, freq)| freq)
         } else {
             None
         };
@@ -460,7 +468,7 @@ where
     }
 
     fn horizon_of(&self, k: &AxisKey, q: &AxisQueue) -> Option<u64> {
-        match (self.mcu_clock_of)(k.mcu_id) {
+        match (self.callbacks.mcu_clock_of)(k.mcu_id) {
             Some((ack_now, freq)) =>
             {
                 #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
@@ -546,7 +554,7 @@ where
                     })
                     .collect();
                 let id = co.id;
-                (self.on_drip_stall)(format!(
+                (self.callbacks.on_drip_stall)(format!(
                     "drip cohort {id}: floor stalled at {floor} for {:?}; \
                      participants: [{}]",
                     co.timeout,
@@ -601,7 +609,7 @@ where
                          has not advanced while heartbeats kept arriving — the \
                          ring is permanently full and the pump would spin forever"
                     );
-                    (self.on_drip_stall)(format!(
+                    (self.callbacks.on_drip_stall)(format!(
                         "pump retirement stall: mcu{} axis{} retired stuck at {} \
                          for {stalled_secs:.1}s with pushed={} ring_depth={} \
                          pending={} — MCU stopped retiring pieces on this axis",
@@ -651,7 +659,7 @@ where
     // Mirrors the MCU's MAX_START_IN_PAST_SECS=200us threshold with a margin
     // above host-projection jitter so a healthy print never false-aborts.
     fn guard_pieces_not_in_past(&self, mcu_id: u32, bundle: &[AxisFrame]) {
-        if let Some((mcu_now, freq)) = (self.mcu_clock_of)(mcu_id) {
+        if let Some((mcu_now, freq)) = (self.callbacks.mcu_clock_of)(mcu_id) {
             if self.cohort.is_some() {
                 if let Some(front) = bundle.first().and_then(|af| af.pieces.first()) {
                     tracing::warn!(
@@ -724,7 +732,7 @@ where
                 mcu_id,
                 axis: af.axis,
             };
-            let freq = (self.mcu_clock_of)(mcu_id).map(|(_, f)| f as f32);
+            let freq = (self.callbacks.mcu_clock_of)(mcu_id).map(|(_, f)| f as f32);
             let mut prev_end: Option<u64> = None;
             for piece in &af.pieces {
                 prev_end = log_piece_submit(mcu_id, af.axis, freq, piece, prev_end);
@@ -794,7 +802,7 @@ where
                                 error = %e,
                                 "pump send_mcu_frames FATAL transport error — invoking fatal-transport action"
                             );
-                            (self.on_fatal_transport)(AxisKey {
+                            (self.callbacks.on_fatal_transport)(AxisKey {
                                 mcu_id,
                                 axis: bundle.first().map_or(0, |f| f.axis),
                             });
@@ -919,37 +927,21 @@ where
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn run_pump<S, F, C, A, O, D>(
+pub fn run_pump<S: PieceSink>(
     control_rx: Receiver<PumpMsg>,
     data_rx: Receiver<EnqueueMsg>,
     sink: S,
-    ring_depth_of: F,
-    mcu_clock_of: C,
-    on_fatal_transport: A,
-    on_abandon: O,
+    callbacks: PumpCallbacks,
     history: Option<HistoryRecorder>,
     ledger: Arc<crate::drain::DrainLedger>,
-    on_drip_stall: D,
     backlog: Arc<AtomicU64>,
-) where
-    S: PieceSink,
-    F: Fn(AxisKey) -> u32,
-    C: Fn(u32) -> Option<(u64, f64)>,
-    A: Fn(AxisKey) + Send + 'static,
-    O: Fn(AxisKey, u32),
-    D: Fn(String) + Send,
-{
+) {
     let mut pump = Pump {
         queues: BTreeMap::new(),
         junctions: JunctionTracker::default(),
         cohort: None,
         sink,
-        ring_depth_of,
-        mcu_clock_of,
-        on_fatal_transport,
-        on_abandon,
-        on_drip_stall,
+        callbacks,
         history,
         ledger,
         pending_barrier_acks: Vec::new(),
