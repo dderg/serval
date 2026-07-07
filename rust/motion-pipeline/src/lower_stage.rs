@@ -47,7 +47,7 @@ pub fn run_lowerer(
                         rest_hold_pending = false;
                     }
                     Control::SetAxisChains(chains) => axis_chains = chains.clone(),
-                    Control::Barrier(_) => {}
+                    Control::Nudge { .. } | Control::Barrier(_) => {}
                 }
                 if output.send(LoweredItem::Control(ctrl)).is_err() {
                     return;

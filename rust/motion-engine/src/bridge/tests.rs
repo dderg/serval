@@ -229,23 +229,33 @@ fn double_shutdown_is_safe() {
     }
 }
 
-fn counting_dispatch() -> (
-    Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync>,
-    Arc<AtomicUsize>,
-) {
-    let counter = Arc::new(AtomicUsize::new(0));
-    let c = Arc::clone(&counter);
-    let cb: Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync> =
-        Arc::new(move |_seg: &ShapedSegment| {
-            c.fetch_add(1, Ordering::Relaxed);
-            Ok(())
-        });
-    (cb, counter)
+/// Closure-backed [`SegmentSink`] for tests; nudges are accepted and dropped.
+struct FnSink<F>(F);
+
+impl<F> crate::worker::SegmentSink for FnSink<F>
+where
+    F: FnMut(&ShapedSegment) -> Result<(), DispatchError> + Send + 'static,
+{
+    fn dispatch(&mut self, seg: &ShapedSegment) -> Result<(), DispatchError> {
+        (self.0)(seg)
+    }
+    fn dispatch_nudge(
+        &mut self,
+        _mcu_id: u32,
+        _piece: &crate::nudge::NudgePiece,
+    ) -> Result<(), DispatchError> {
+        Ok(())
+    }
 }
 
-fn noop_nudge_dispatch()
--> Arc<dyn Fn(u32, &crate::nudge::NudgePiece) -> Result<(), DispatchError> + Send + Sync> {
-    Arc::new(|_mcu_id: u32, _np: &crate::nudge::NudgePiece| Ok(()))
+fn counting_dispatch() -> (impl crate::worker::SegmentSink, Arc<AtomicUsize>) {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&counter);
+    let sink = FnSink(move |_seg: &ShapedSegment| {
+        c.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    });
+    (sink, counter)
 }
 
 fn relaxed_planner_config() -> PlannerConfig {
@@ -282,7 +292,6 @@ fn shutdown_takes_and_joins_planner() {
         trajectory::AxisChainSet::default(),
         home,
         dispatch,
-        noop_nudge_dispatch(),
         Arc::default(),
         None,
     ));
@@ -312,18 +321,17 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
     let saw_pump_gone_cb = Arc::clone(&saw_pump_gone);
     let dispatch_count = Arc::new(AtomicUsize::new(0));
     let dispatch_count_cb = Arc::clone(&dispatch_count);
-    let dispatch: Arc<dyn Fn(&ShapedSegment) -> Result<(), DispatchError> + Send + Sync> =
-        Arc::new(move |_seg: &ShapedSegment| {
-            dispatch_count_cb.fetch_add(1, Ordering::SeqCst);
-            let hb = crate::pump::PumpMsg::Heartbeat(crate::pump::HeartbeatMsg {
-                mcu_id: 0,
-                retired_counts: Vec::new(),
-            });
-            if pump_tx.send(hb).is_err() {
-                saw_pump_gone_cb.store(true, Ordering::SeqCst);
-            }
-            Ok(())
+    let dispatch = FnSink(move |_seg: &ShapedSegment| {
+        dispatch_count_cb.fetch_add(1, Ordering::SeqCst);
+        let hb = crate::pump::PumpMsg::Heartbeat(crate::pump::HeartbeatMsg {
+            mcu_id: 0,
+            retired_counts: Vec::new(),
         });
+        if pump_tx.send(hb).is_err() {
+            saw_pump_gone_cb.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    });
 
     let (sc, home) = stream_config_from(&relaxed_planner_config());
     let planner = StreamWorkerHandle::spawn(
@@ -331,7 +339,6 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
         trajectory::AxisChainSet::default(),
         home,
         dispatch,
-        noop_nudge_dispatch(),
         Arc::default(),
         None,
     );
@@ -510,7 +517,6 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
         trajectory::AxisChainSet::default(),
         home,
         dispatch,
-        noop_nudge_dispatch(),
         Arc::default(),
         None,
     ));
