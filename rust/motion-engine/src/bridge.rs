@@ -2,7 +2,6 @@ use crate::lock_ext::LockExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -52,7 +51,10 @@ use runtime_caps::{
     collect_motor_positions_inner, query_ethercat_runtime_caps, query_runtime_caps,
     require_positive, slot_for_axis,
 };
-use state::{EthercatDrive, FlushWait, HomingRun, McuConnection};
+use state::{
+    EthercatDrive, FlushState, FlushWait, HomingRun, HomingState, LatchedFaults, McuConnection,
+    PositionPoll, PumpHandles,
+};
 
 fn abort_after_tracing_appender_drains() {
     let _ = std::io::Write::flush(&mut std::io::stderr());
@@ -144,31 +146,17 @@ pub struct PyMotionEngine {
     last_g5_pq: Mutex<Option<(f64, f64)>>,
     mcu_axis_configs: Arc<Mutex<Vec<McuAxisConfig>>>,
     dispatched_segments: Arc<AtomicU64>,
-    pump_backlog: Arc<AtomicU64>,
     dispatch_anchor: Arc<Mutex<crate::anchor::Anchor>>,
     fallback_clock_conversions: Arc<AtomicU64>,
     clock_freqs: Arc<Mutex<HashMap<u32, f64>>>,
     nominal_clock_freqs: Arc<Mutex<HashMap<u32, u32>>>,
     events_dir: Mutex<Option<std::path::PathBuf>>,
-    pump_tx: Arc<Mutex<Option<crossbeam_channel::Sender<crate::pump::PumpMsg>>>>,
-    pump_thread: Mutex<Option<JoinHandle<()>>>,
-    live_position_cache: Arc<
-        Mutex<(
-            std::collections::HashMap<String, (f64, f64)>,
-            std::time::Instant,
-        )>,
-    >,
-    position_poll_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
-    position_poll_stop: Arc<std::sync::atomic::AtomicBool>,
+    pump: PumpHandles,
+    position_poll: PositionPoll,
     drain: std::sync::Arc<crate::drain::DrainLedger>,
-    active_drip_cohort: Arc<Mutex<Option<u64>>>,
     motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
-    homing_run: Arc<Mutex<Option<HomingRun>>>,
-    pending_trip: Arc<Mutex<Option<(u32, u8, u64)>>>,
-    pending_flushes: Mutex<HashMap<u64, FlushWait>>,
-    pending_drain_flush: Mutex<Option<crossbeam_channel::Receiver<Option<std::time::Instant>>>>,
-    drain_wait_diag: Mutex<Option<(std::time::Instant, Option<std::time::Instant>)>>,
-    next_flush_id: std::sync::atomic::AtomicU64,
+    homing: Arc<HomingState>,
+    flush: FlushState,
     // Monotonic id stamped on every streamed move as its `source.start_line`.
     // The continuity-commit drains the look-ahead buffer by line number
     // (`front.start_line < keep_line`) and detects consumed blend heads by line
@@ -176,10 +164,7 @@ pub struct PyMotionEngine {
     // constant (0) makes the drain a no-op — the buffer never empties and every
     // commit re-dispatches the whole accumulated path from the start.
     move_seq: std::sync::atomic::AtomicU64,
-    homing_result:
-        Mutex<Option<crossbeam_channel::Receiver<Result<([f64; 3], [f64; 3], u64), String>>>>,
-    latched_drive_fault: Arc<Mutex<HashMap<u32, u16>>>,
-    latched_endpoint_death: Arc<Mutex<HashMap<u32, String>>>,
+    latched: LatchedFaults,
     remote_triggers: Mutex<HashMap<u8, (u32, host_rt::host_io::InterceptorId)>>,
     endpoint_calls: crate::bg_call::BgCalls,
     shut_down: AtomicBool,
@@ -200,33 +185,19 @@ impl PyMotionEngine {
             last_g5_pq: Mutex::new(None),
             mcu_axis_configs: Arc::new(Mutex::new(Vec::new())),
             dispatched_segments: Arc::new(AtomicU64::new(0)),
-            pump_backlog: Arc::new(AtomicU64::new(0)),
             dispatch_anchor: Arc::new(Mutex::new(crate::anchor::Anchor::new())),
             fallback_clock_conversions: Arc::new(AtomicU64::new(0)),
             clock_freqs: Arc::new(Mutex::new(HashMap::new())),
             nominal_clock_freqs: Arc::new(Mutex::new(HashMap::new())),
             events_dir: Mutex::new(None),
-            pump_tx: Arc::new(Mutex::new(None)),
-            pump_thread: Mutex::new(None),
-            live_position_cache: Arc::new(Mutex::new((
-                std::collections::HashMap::new(),
-                std::time::Instant::now(),
-            ))),
-            position_poll_thread: Mutex::new(None),
-            position_poll_stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pump: PumpHandles::default(),
+            position_poll: PositionPoll::default(),
             drain: std::sync::Arc::new(crate::drain::DrainLedger::new()),
-            active_drip_cohort: Arc::new(Mutex::new(None)),
             motion_history: Arc::new(Mutex::new(crate::motion_history::HistoryStore::default())),
-            homing_run: Arc::new(Mutex::new(None)),
-            pending_trip: Arc::new(Mutex::new(None)),
-            pending_flushes: Mutex::new(HashMap::new()),
-            pending_drain_flush: Mutex::new(None),
-            drain_wait_diag: Mutex::new(None),
-            next_flush_id: std::sync::atomic::AtomicU64::new(1),
+            homing: Arc::new(HomingState::default()),
+            flush: FlushState::default(),
             move_seq: std::sync::atomic::AtomicU64::new(0),
-            homing_result: Mutex::new(None),
-            latched_drive_fault: Arc::new(Mutex::new(HashMap::new())),
-            latched_endpoint_death: Arc::new(Mutex::new(HashMap::new())),
+            latched: LatchedFaults::default(),
             remote_triggers: Mutex::new(HashMap::new()),
             endpoint_calls: crate::bg_call::BgCalls::default(),
             shut_down: AtomicBool::new(false),
@@ -407,11 +378,11 @@ impl PyMotionEngine {
         }
 
         let pump_join = {
-            let tx = self.pump_tx.lock_ok().take();
+            let tx = self.pump.tx.lock_ok().take();
             if let Some(tx) = tx {
                 let _ = tx.send(crate::pump::PumpMsg::Shutdown);
             }
-            self.pump_thread.lock_ok().take()
+            self.pump.thread.lock_ok().take()
         };
         if let Some(h) = pump_join {
             if let Err(e) = h.join() {
@@ -424,9 +395,10 @@ impl PyMotionEngine {
             }
         }
 
-        self.position_poll_stop
+        self.position_poll
+            .stop
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(h) = self.position_poll_thread.lock_ok().take() {
+        if let Some(h) = self.position_poll.thread.lock_ok().take() {
             if let Err(e) = h.join() {
                 tracing::error!(
                     subsystem = "engine",
