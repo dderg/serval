@@ -2,6 +2,7 @@ import logging
 import math
 import os
 import signal
+import time
 
 from . import motion_kinematics, motion_setup, structured_log
 from .extras import servo_axis
@@ -514,6 +515,7 @@ class Motion:
                 if move_time is None:
                     move_time = self.get_last_move_time()
                 for i, cb in enumerate(cbs):
+                    cb_t0 = time.monotonic()
                     try:
                         followup = cb(move_time)
                     except Exception:
@@ -521,6 +523,13 @@ class Motion:
                             cbs[i:] + owner._active_callbacks
                         )
                         raise
+                    cb_dt = time.monotonic() - cb_t0
+                    if cb_dt > 0.020:
+                        logging.warning(
+                            "active callback for %s blocked %.1fms",
+                            owner.get_name(),
+                            cb_dt * 1000.0,
+                        )
                     if followup is not None:
                         deferred.append(followup)
                 fired = True

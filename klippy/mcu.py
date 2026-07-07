@@ -508,11 +508,21 @@ class MCU_digital_out:
                 )
             )
         clock = self._mcu.print_time_to_clock(print_time)
+        send_t0 = time.monotonic()
         self._set_cmd.send(
             [self._oid, clock, (not not value) ^ self._invert],
             minclock=self._last_clock,
             reqclock=clock,
         )
+        send_dt = time.monotonic() - send_t0
+        if send_dt > 0.020:
+            logging.warning(
+                "digital_out %s on mcu '%s': queue_digital_out send"
+                " blocked %.1fms",
+                self._pin,
+                self._mcu.get_name(),
+                send_dt * 1000.0,
+            )
         self._last_clock = clock
 
 
