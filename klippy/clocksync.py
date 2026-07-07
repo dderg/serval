@@ -16,7 +16,6 @@ class ClockSync:
         self.reactor = reactor
         self.serial = None
         self.get_clock_timer = reactor.register_timer(self._get_clock_event)
-        self.get_clock_cmd = self.cmd_queue = None
         self.queries_pending = 0
         self.mcu_freq = 1.0
         self.last_clock = 0
@@ -66,8 +65,6 @@ class ClockSync:
             self.last_prediction_time = -9999.0
             params = serial.send_with_response("get_clock", "clock")
             self._handle_clock(params)
-        self.get_clock_cmd = serial.get_msgparser().create_command("get_clock")
-        self.cmd_queue = serial.alloc_command_queue()
         serial.register_response(self._handle_clock, "clock")
         self.reactor.update_timer(self.get_clock_timer, self.reactor.NOW)
 
@@ -82,10 +79,7 @@ class ClockSync:
 
     # MCU clock querying (_handle_clock is invoked from background thread)
     def _get_clock_event(self, eventtime):
-        if hasattr(self.serial, "engine_get_clock_async"):
-            self.serial.engine_get_clock_async()
-        else:
-            self.serial.raw_send(self.get_clock_cmd, 0, 0, self.cmd_queue)
+        self.serial.engine_get_clock_async()
         self.queries_pending += 1
         # Use an unusual time for the next event so clock messages
         # don't resonate with other periodic events.

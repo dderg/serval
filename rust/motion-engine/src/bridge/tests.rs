@@ -446,7 +446,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    use crate::pump::{EnqueueMsg, McuTransport, PumpMsg, WireSink, run_pump};
+    use crate::pump::{EnqueueMsg, McuTransport, PumpCallbacks, PumpMsg, WireSink, run_pump};
     use crate::types::AxisKey;
 
     const EC_MCU_ID: u32 = 42;
@@ -479,15 +479,15 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
                 control_rx,
                 data_rx,
                 sink,
-                |_key| 256_u32,
-                mcu_clock_of,
-                move |_key: AxisKey| {
-                    fatal_flag.store(true, Ordering::SeqCst);
+                PumpCallbacks {
+                    mcu_clock_of: Box::new(mcu_clock_of),
+                    on_fatal_transport: Box::new(move |_key: AxisKey| {
+                        fatal_flag.store(true, Ordering::SeqCst);
+                    }),
+                    ..PumpCallbacks::noop(256)
                 },
-                |_key: AxisKey, _n: u32| {},
                 None,
                 std::sync::Arc::new(crate::drain::DrainLedger::new()),
-                |_msg: String| {},
                 Arc::new(AtomicU64::new(0)),
             );
         })

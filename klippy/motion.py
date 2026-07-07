@@ -32,9 +32,7 @@ def _open_sim_control():
 class Move:
     def __init__(self, toolhead, start_pos, end_pos, speed):
         self.toolhead = toolhead
-        self.start_pos = tuple(start_pos)
         self.end_pos = tuple(end_pos)
-        self.accel = toolhead.max_accel
         velocity = min(speed, toolhead.max_velocity)
         self.is_kinematic_move = True
         self.axes_d = axes_d = [end_pos[i] - start_pos[i] for i in (0, 1, 2, 3)]
@@ -48,24 +46,16 @@ class Move:
             )
             axes_d[0] = axes_d[1] = axes_d[2] = 0.0
             self.move_d = move_d = abs(axes_d[3])
-            inv_move_d = 0.0
-            if move_d:
-                inv_move_d = 1.0 / move_d
-            self.accel = 99999999.9
             velocity = speed
             self.is_kinematic_move = False
-        else:
-            inv_move_d = 1.0 / move_d
-        self.axes_r = [d * inv_move_d for d in axes_d]
         self.min_move_t = move_d / velocity
         self.max_cruise_v2 = velocity**2
 
-    def limit_speed(self, speed, accel):
+    def limit_speed(self, speed):
         speed2 = speed**2
         if speed2 < self.max_cruise_v2:
             self.max_cruise_v2 = speed2
             self.min_move_t = self.move_d / speed
-        self.accel = min(self.accel, accel)
 
     def move_error(self, msg="Move out of range"):
         ep = self.end_pos
@@ -442,7 +432,7 @@ class Motion:
         feedrate = move.move_d / move.min_move_t
         if abs(dz) > 1e-9 and abs(dx) < 1e-9 and abs(dy) < 1e-9:
             feedrate = min(feedrate, self.max_z_velocity)
-        logging.info(
+        logging.debug(
             "[engine-trace] move: newpos=%s speed=%s dx=%.4f dy=%.4f "
             "dz=%.4f de=%.4f feedrate=%.4f",
             list(newpos),

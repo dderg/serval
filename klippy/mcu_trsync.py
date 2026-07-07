@@ -25,7 +25,6 @@ class MCU_trsync:
         self._steppers = []
         self._trdispatch_mcu = None
         self._oid = mcu.create_oid()
-        self._cmd_queue = mcu.alloc_command_queue()
         self._trsync_start_cmd = self._trsync_set_timeout_cmd = None
         self._trsync_trigger_cmd = self._trsync_query_cmd = None
         self._stepper_stop_cmd = None
@@ -40,9 +39,6 @@ class MCU_trsync:
 
     def get_oid(self):
         return self._oid
-
-    def get_command_queue(self):
-        return self._cmd_queue
 
     def add_stepper(self, stepper):
         if stepper in self._steppers:
@@ -65,22 +61,20 @@ class MCU_trsync:
         self._trsync_start_cmd = mcu.lookup_command(
             "trsync_start oid=%c report_clock=%u report_ticks=%u"
             " expire_reason=%c",
-            cq=self._cmd_queue,
         )
         self._trsync_set_timeout_cmd = mcu.lookup_command(
-            "trsync_set_timeout oid=%c clock=%u", cq=self._cmd_queue
+            "trsync_set_timeout oid=%c clock=%u"
         )
         self._trsync_trigger_cmd = mcu.lookup_command(
-            "trsync_trigger oid=%c reason=%c", cq=self._cmd_queue
+            "trsync_trigger oid=%c reason=%c"
         )
         self._trsync_query_cmd = mcu.lookup_query_command(
             "trsync_trigger oid=%c reason=%c",
             "trsync_state oid=%c can_trigger=%c trigger_reason=%c clock=%u",
             oid=self._oid,
-            cq=self._cmd_queue,
         )
         self._stepper_stop_cmd = mcu.lookup_command(
-            "stepper_stop_on_trigger oid=%c trsync_oid=%c", cq=self._cmd_queue
+            "stepper_stop_on_trigger oid=%c trsync_oid=%c"
         )
         self._trdispatch_mcu = None
 
@@ -166,9 +160,6 @@ class TriggerDispatch:
 
     def get_oid(self):
         return self._trsyncs[0].get_oid()
-
-    def get_command_queue(self):
-        return self._trsyncs[0].get_command_queue()
 
     def add_stepper(self, stepper):
         trsyncs = {trsync.get_mcu(): trsync for trsync in self._trsyncs}

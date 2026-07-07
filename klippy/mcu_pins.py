@@ -68,9 +68,8 @@ class MCU_digital_out:
             % (self._oid, self._start_value),
             on_restart=True,
         )
-        cmd_queue = self._mcu.alloc_command_queue()
         self._set_cmd = self._mcu.lookup_command(
-            "queue_digital_out oid=%c clock=%u on_ticks=%u", cq=cmd_queue
+            "queue_digital_out oid=%c clock=%u on_ticks=%u"
         )
 
     def set_digital(self, print_time, value):
@@ -141,7 +140,6 @@ class MCU_pwm:
                 "Pin with max duration must have start"
                 " value equal to shutdown value"
             )
-        cmd_queue = self._mcu.alloc_command_queue()
         curtime = self._mcu.get_printer().get_reactor().monotonic()
         printtime = self._mcu.estimated_print_time(curtime)
         self._last_clock = self._mcu.print_time_to_clock(printtime + 0.200)
@@ -172,7 +170,7 @@ class MCU_pwm:
                 on_restart=True,
             )
             self._set_cmd = self._mcu.lookup_command(
-                "queue_pwm_out oid=%c clock=%u value=%hu", cq=cmd_queue
+                "queue_pwm_out oid=%c clock=%u value=%hu"
             )
             return
         # Software PWM
@@ -205,7 +203,7 @@ class MCU_pwm:
             is_init=True,
         )
         self._set_cmd = self._mcu.lookup_command(
-            "queue_digital_out oid=%c clock=%u on_ticks=%u", cq=cmd_queue
+            "queue_digital_out oid=%c clock=%u on_ticks=%u"
         )
 
     def set_pwm(self, print_time, value):

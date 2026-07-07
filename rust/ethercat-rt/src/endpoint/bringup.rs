@@ -1,11 +1,14 @@
+#![allow(unsafe_code)]
+
 use std::ffi::CString;
 use std::sync::atomic::Ordering;
 
+use super::drive::{DriveChain, FfiDriveChain};
 use super::{EndpointCtx, SIGTERM_RECEIVED};
 use crate::buzz::BuzzOsc;
 use crate::capture::{Capture, PendingStart, PendingStop};
 use crate::claim::{all_slaves_reply, single_slave_reply, wait_for_claim, wait_for_claim_pumping};
-use crate::cli::Args;
+use crate::cli::{Args, SlaveCfg};
 use crate::curves::AxisRing;
 use crate::ffi;
 use crate::mailbox::{MailboxWorker, WorkerScheduling};
@@ -145,6 +148,112 @@ fn bringup_fail(server: &mut FrameServer, rc: i32) -> ! {
     std::process::exit(1);
 }
 
+struct SlaveColumns {
+    counts_per_mm: Vec<f64>,
+    invert: Vec<bool>,
+    cmd_counts_per_mm: Vec<f64>,
+    rotation_distance: Vec<f64>,
+    positions: Vec<i32>,
+    axes: Vec<u8>,
+    velocity_ff: Vec<bool>,
+    torque_clamp_tenths: Vec<i16>,
+    ff_lead_ns: Vec<u64>,
+    jump_log_counts: Vec<i64>,
+}
+
+impl SlaveColumns {
+    fn from(slaves: &[SlaveCfg], cycle_us: i64) -> Self {
+        let cmd_counts_per_mm: Vec<f64> = slaves
+            .iter()
+            .map(|s| {
+                if s.invert {
+                    -s.counts_per_mm
+                } else {
+                    s.counts_per_mm
+                }
+            })
+            .collect();
+        let jump_log_mm = TARGET_JUMP_LOG_MM_S * cycle_us as f64 / 1_000_000.0;
+        let jump_log_counts: Vec<i64> = cmd_counts_per_mm
+            .iter()
+            .map(|c| (c.abs() * jump_log_mm).round() as i64)
+            .collect();
+        SlaveColumns {
+            counts_per_mm: slaves.iter().map(|s| s.counts_per_mm).collect(),
+            invert: slaves.iter().map(|s| s.invert).collect(),
+            cmd_counts_per_mm,
+            rotation_distance: slaves.iter().map(|s| s.rotation_distance).collect(),
+            positions: slaves.iter().map(|s| s.pos).collect(),
+            axes: slaves.iter().map(|s| s.axis).collect(),
+            velocity_ff: slaves.iter().map(|s| s.velocity_ff).collect(),
+            torque_clamp_tenths: slaves.iter().map(|s| s.torque_clamp_tenths).collect(),
+            ff_lead_ns: slaves
+                .iter()
+                .map(|s| u64::from(s.ff_lead_cycles) * (cycle_us as u64) * 1000)
+                .collect(),
+            jump_log_counts,
+        }
+    }
+}
+
+fn read_and_apply_limits(slaves: &[SlaveCfg]) -> Result<Vec<(u32, u16)>, i32> {
+    slaves
+        .iter()
+        .enumerate()
+        .map(|(s, cfg)| {
+            let slot = s as std::os::raw::c_int;
+            let mut ferr = 0u32;
+            let mut tmo = 0u16;
+            let mut tq = 0u16;
+            let rc = unsafe { ffi::ec_rt_read_limits(slot, &mut ferr, &mut tmo, &mut tq) };
+            if rc != 0 {
+                tracing::error!(
+                    subsystem = "ethercat",
+                    event = "drive_limits_read_fail",
+                    slot = s,
+                    rc,
+                    "SDO read of protection limits failed"
+                );
+                return Err(rc);
+            }
+            tracing::info!(
+                subsystem = "ethercat",
+                event = "drive_limits",
+                slot = s,
+                ferr_6065h = ferr,
+                timeout_6066h = tmo,
+                torque_6072h = tq,
+                "drive protection limits read at bringup"
+            );
+            let cli_ferr = cfg.following_error_counts;
+            let cli_tq = cfg.max_torque_tenth_pct;
+            let run = (cli_ferr.unwrap_or(ferr), cli_tq.unwrap_or(tq));
+            if cli_ferr.is_some() || cli_tq.is_some() {
+                let rc = unsafe { ffi::ec_rt_write_limits(slot, run.0, run.1) };
+                if rc != 0 {
+                    tracing::error!(
+                        subsystem = "ethercat",
+                        event = "drive_limits_write_fail",
+                        slot = s,
+                        rc,
+                        "SDO write of session limits failed"
+                    );
+                    return Err(rc);
+                }
+                tracing::info!(
+                    subsystem = "ethercat",
+                    event = "drive_limits_applied",
+                    slot = s,
+                    ferr_6065h = run.0,
+                    torque_6072h = run.1,
+                    "session protection limits applied"
+                );
+            }
+            Ok(run)
+        })
+        .collect()
+}
+
 pub fn bringup(args: Args) -> EndpointCtx {
     let Args {
         ifname,
@@ -158,27 +267,8 @@ pub fn bringup(args: Args) -> EndpointCtx {
     } = args;
 
     let num_slaves = slaves.len();
-    let counts_per_mm: Vec<f64> = slaves.iter().map(|s| s.counts_per_mm).collect();
-    let invert: Vec<bool> = slaves.iter().map(|s| s.invert).collect();
-    let cmd_counts_per_mm: Vec<f64> = slaves
-        .iter()
-        .map(|s| {
-            if s.invert {
-                -s.counts_per_mm
-            } else {
-                s.counts_per_mm
-            }
-        })
-        .collect();
-    let rotation_distance: Vec<f64> = slaves.iter().map(|s| s.rotation_distance).collect();
-    let slave_positions: Vec<i32> = slaves.iter().map(|s| s.pos).collect();
-    let slave_axes: Vec<u8> = slaves.iter().map(|s| s.axis).collect();
-    let velocity_ff: Vec<bool> = slaves.iter().map(|s| s.velocity_ff).collect();
-    let torque_clamp_tenths: Vec<i16> = slaves.iter().map(|s| s.torque_clamp_tenths).collect();
-    let ff_lead_ns: Vec<u64> = slaves
-        .iter()
-        .map(|s| u64::from(s.ff_lead_cycles) * (cycle_us as u64) * 1000)
-        .collect();
+    let mut drive = FfiDriveChain;
+    let columns = SlaveColumns::from(&slaves, cycle_us);
 
     let cycle_ns = cycle_us * 1000;
     let telemetry_period = u64::try_from(cycle_us)
@@ -189,11 +279,6 @@ pub fn bringup(args: Args) -> EndpointCtx {
     let buzz = BuzzOsc::new();
     let cmaps: Vec<Option<CountMap>> = (0..num_slaves).map(|_| None).collect();
     let last_counts: Vec<Option<i32>> = vec![None; num_slaves];
-    let jump_log_mm = TARGET_JUMP_LOG_MM_S * cycle_us as f64 / 1_000_000.0;
-    let jump_log_counts: Vec<i64> = cmd_counts_per_mm
-        .iter()
-        .map(|c| (c.abs() * jump_log_mm).round() as i64)
-        .collect();
     // Per-slot report frame: (counts, host mm) captured at the homing finalize.
     // Maps the drive's raw encoder counts into the host frame for
     // QueryMotorState — the drive's own coordinate frame is never touched,
@@ -221,10 +306,10 @@ pub fn bringup(args: Args) -> EndpointCtx {
         event = "bringup_start",
         num_slaves,
         cycle_us,
-        positions = format!("{slave_positions:?}"),
-        counts_per_mm = format!("{counts_per_mm:?}"),
-        invert = format!("{invert:?}"),
-        velocity_ff = format!("{velocity_ff:?}"),
+        positions = format!("{:?}", columns.positions),
+        counts_per_mm = format!("{:?}", columns.counts_per_mm),
+        invert = format!("{:?}", columns.invert),
+        velocity_ff = format!("{:?}", columns.velocity_ff),
         dynamics = dynamics.is_some(),
         "endpoint starting bringup"
     );
@@ -252,7 +337,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
                 cycle_ns,
                 rt_cpu,
                 rt_prio,
-                slave_positions.as_ptr(),
+                columns.positions.as_ptr(),
                 num_slaves as std::os::raw::c_int,
             )
         };
@@ -269,60 +354,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
             bringup_fail(&mut server, rc);
         }
 
-        let limits: Result<Vec<(u32, u16)>, i32> = (0..num_slaves)
-            .map(|s| {
-                let slot = s as std::os::raw::c_int;
-                let mut ferr = 0u32;
-                let mut tmo = 0u16;
-                let mut tq = 0u16;
-                let rc = unsafe { ffi::ec_rt_read_limits(slot, &mut ferr, &mut tmo, &mut tq) };
-                if rc != 0 {
-                    tracing::error!(
-                        subsystem = "ethercat",
-                        event = "drive_limits_read_fail",
-                        slot = s,
-                        rc,
-                        "SDO read of protection limits failed"
-                    );
-                    return Err(rc);
-                }
-                tracing::info!(
-                    subsystem = "ethercat",
-                    event = "drive_limits",
-                    slot = s,
-                    ferr_6065h = ferr,
-                    timeout_6066h = tmo,
-                    torque_6072h = tq,
-                    "drive protection limits read at bringup"
-                );
-                let cli_ferr = slaves[s].following_error_counts;
-                let cli_tq = slaves[s].max_torque_tenth_pct;
-                let run = (cli_ferr.unwrap_or(ferr), cli_tq.unwrap_or(tq));
-                if cli_ferr.is_some() || cli_tq.is_some() {
-                    let rc = unsafe { ffi::ec_rt_write_limits(slot, run.0, run.1) };
-                    if rc != 0 {
-                        tracing::error!(
-                            subsystem = "ethercat",
-                            event = "drive_limits_write_fail",
-                            slot = s,
-                            rc,
-                            "SDO write of session limits failed"
-                        );
-                        return Err(rc);
-                    }
-                    tracing::info!(
-                        subsystem = "ethercat",
-                        event = "drive_limits_applied",
-                        slot = s,
-                        ferr_6065h = run.0,
-                        torque_6072h = run.1,
-                        "session protection limits applied"
-                    );
-                }
-                Ok(run)
-            })
-            .collect();
-        let run_limits = match limits {
+        let run_limits = match read_and_apply_limits(&slaves) {
             Ok(limits) => limits,
             Err(rc) => {
                 unsafe { ffi::ec_rt_shutdown() };
@@ -374,13 +406,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
                 event = "claim_handshake_timeout",
                 "bridge did not send ClaimHandshake within 5 s; aborting"
             );
-            unsafe {
-                for s in 0..num_slaves {
-                    ffi::ec_rt_disable(s as std::os::raw::c_int);
-                }
-                ffi::ec_rt_shutdown();
-            }
-            std::process::exit(1);
+            drive.shutdown_and_exit(num_slaves);
         }
     }
     tracing::info!(
@@ -414,8 +440,22 @@ pub fn bringup(args: Args) -> EndpointCtx {
     let sensorless = SensorlessBank::new(num_slaves);
     let stream_halt = StreamHalt::default();
 
+    let SlaveColumns {
+        counts_per_mm,
+        invert,
+        cmd_counts_per_mm,
+        rotation_distance,
+        positions: _,
+        axes: slave_axes,
+        velocity_ff,
+        torque_clamp_tenths,
+        ff_lead_ns,
+        jump_log_counts,
+    } = columns;
+
     EndpointCtx {
         server,
+        drive,
         num_slaves,
         counts_per_mm,
         invert,

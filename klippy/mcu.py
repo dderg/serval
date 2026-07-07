@@ -10,12 +10,7 @@ import zlib
 
 from . import chelper, clocksync, msgproto, pins, serialhdl
 from .extras.danger_options import get_danger_options
-from .mcu_commands import (  # noqa: F401
-    CommandQueryWrapper,
-    CommandWrapper,
-    RetryAsyncCommand,
-    _format_engine_msg,
-)
+from .mcu_commands import CommandQueryWrapper, CommandWrapper
 from .mcu_pins import (  # noqa: F401
     MAX_SCHEDULE_TICKS,
     MIN_SCHEDULE_LEAD,
@@ -716,22 +711,15 @@ class MCU:
     def register_response(self, cb, msg, oid=None):
         self._serial.register_response(cb, msg, oid)
 
-    def alloc_command_queue(self):
-        return self._serial.alloc_command_queue()
+    def lookup_command(self, msgformat):
+        return CommandWrapper(self._serial, msgformat)
 
-    def lookup_command(self, msgformat, cq=None):
-        return CommandWrapper(self._serial, msgformat, cq)
-
-    def lookup_query_command(
-        self, msgformat, respformat, oid=None, cq=None, is_async=False
-    ):
+    def lookup_query_command(self, msgformat, respformat, oid=None):
         return CommandQueryWrapper(
             self._serial,
             msgformat,
             respformat,
             oid,
-            cq,
-            is_async,
             self._printer.command_error,
         )
 

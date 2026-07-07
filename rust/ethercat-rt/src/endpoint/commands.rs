@@ -1,12 +1,12 @@
 use std::ops::ControlFlow;
 
-use super::EndpointCtx;
+use super::drive::DriveChain;
+use super::{discard_motion, EndpointCtx};
 use crate::capture::{
     any_slot_out_of_range, CaptureConfig, CaptureDriveConfig, ERR_CAPTURE_BAD_DRIVE_LIST,
 };
 use crate::clock::monotonic_ns;
 use crate::curves::AXIS_RING_CAPACITY;
-use crate::ffi;
 use crate::mailbox::{MailboxReply, MailboxRequest};
 use crate::push_plan::plan_bundle;
 use crate::sensorless::ERR_ARM_SENSORLESS_BAD_THRESHOLD;
@@ -54,13 +54,7 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
             }
             Command::Stop { correlation_id } => {
                 let now_ns = monotonic_ns();
-                for r in &mut ctx.rings {
-                    r.reset();
-                }
-                for c in &mut ctx.cmaps {
-                    *c = None;
-                }
-                ctx.buzz.clear();
+                discard_motion(ctx);
                 ctx.stream_halt.halt();
                 eprintln!("ec-rt: Stop — rings discarded, stream halted, discard_clock={now_ns}");
                 ctx.server
@@ -78,12 +72,7 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
             }
             Command::ResumeStream { correlation_id } => match ctx.stream_halt.resume() {
                 Ok(()) => {
-                    for r in &mut ctx.rings {
-                        r.reset();
-                    }
-                    for c in &mut ctx.cmaps {
-                        *c = None;
-                    }
+                    discard_motion(ctx);
                     eprintln!("ec-rt: ResumeStream — stream reopened");
                     ctx.server
                         .respond(&resume_stream_response_frame(correlation_id, 0));
@@ -198,7 +187,7 @@ fn handle_set_torque(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetTorque)
         CommandAction::Enable => {
             let mut enable_rc = 0;
             for s in 0..num_slaves {
-                let rc = unsafe { ffi::ec_rt_enable(s as std::os::raw::c_int) };
+                let rc = ctx.drive.enable(s);
                 if rc != 0 {
                     eprintln!("ec-rt: slot {s} CiA402 enable failed rc={rc}");
                     enable_rc = rc;
@@ -218,13 +207,7 @@ fn handle_set_torque(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetTorque)
                     correlation_id,
                     ERR_ENABLE_FAILED,
                 ));
-                unsafe {
-                    for s in 0..num_slaves {
-                        ffi::ec_rt_disable(s as std::os::raw::c_int);
-                    }
-                    ffi::ec_rt_shutdown();
-                }
-                std::process::exit(1);
+                ctx.drive.shutdown_and_exit(num_slaves);
             }
         }
         CommandAction::ScheduleDisable => {
@@ -246,13 +229,7 @@ fn handle_set_torque(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetTorque)
             );
             ctx.server
                 .respond(&set_torque_response_frame(correlation_id, code));
-            unsafe {
-                for s in 0..num_slaves {
-                    ffi::ec_rt_disable(s as std::os::raw::c_int);
-                }
-                ffi::ec_rt_shutdown();
-            }
-            std::process::exit(1);
+            ctx.drive.shutdown_and_exit(num_slaves);
         }
     }
 }
@@ -355,7 +332,7 @@ fn handle_seed_servo_home(ctx: &mut EndpointCtx, correlation_id: u32, slot: u8, 
     } else {
         let anchor_mm = f64::from(home_q16) / 65536.0;
         let anchor_counts = ctx.last_streamed_target[slot as usize]
-            .unwrap_or_else(|| unsafe { ffi::ec_rt_get_position_actual(i32::from(slot)) });
+            .unwrap_or_else(|| ctx.drive.position_actual(usize::from(slot)));
         ctx.report_anchor[slot as usize] = Some((anchor_counts, anchor_mm));
         eprintln!(
             "ec-rt: SeedServoHome slot={slot} report anchor \
@@ -420,7 +397,7 @@ fn handle_resonance_buzz(ctx: &mut EndpointCtx, correlation_id: u32, msg: Resona
         let mut base_counts = [0i32; crate::buzz::MAX_BUZZ_SLOTS];
         for (slot, base) in base_counts.iter_mut().enumerate().take(ctx.num_slaves) {
             if msg.axis_mask & (1 << slot) != 0 {
-                *base = unsafe { ffi::ec_rt_get_position_actual(slot as std::os::raw::c_int) };
+                *base = ctx.drive.position_actual(slot);
             }
         }
         let rc = ctx.buzz.arm(
@@ -503,13 +480,8 @@ fn handle_query_motor_state(ctx: &mut EndpointCtx, correlation_id: u32) {
     let samples: Vec<(u8, f64, f64)> = (0..num_slaves)
         .filter_map(|s| {
             let (anchor_counts, anchor_mm) = ctx.report_anchor[s]?;
-            let slot = s as std::os::raw::c_int;
-            let (pos_counts, vel_counts_s) = unsafe {
-                (
-                    ffi::ec_rt_get_position_actual(slot),
-                    ffi::ec_rt_get_velocity_actual(slot),
-                )
-            };
+            let (pos_counts, vel_counts_s) =
+                (ctx.drive.position_actual(s), ctx.drive.velocity_actual(s));
             let delta_counts = i64::from(pos_counts) - i64::from(anchor_counts);
             let pos_mm = anchor_mm + delta_counts as f64 / ctx.cmd_counts_per_mm[s];
             let vel_mm_s = crate::scale::velocity_mm_s(vel_counts_s, ctx.cmd_counts_per_mm[s]);
