@@ -488,13 +488,14 @@ class MCU_digital_out:
             raise self._printer.command_error(
                 f"Cannot set pin on disconnected MCU '{self._mcu.get_name()}'"
             )
-        est = self._mcu.estimated_print_time(
-            self._printer.get_reactor().monotonic()
-        )
+        curtime = self._printer.get_reactor().monotonic()
+        est = self._mcu.estimated_print_time(curtime)
         if print_time < est + MIN_SCHEDULE_LEAD:
+            main_mcu = self._printer.lookup_object("mcu")
             raise self._printer.command_error(
                 "digital_out %s on mcu '%s' scheduled with stale print_time:"
                 " print_time=%.6f estimated_now=%.6f lead=%.1fms (< %.0fms)"
+                " main_mcu_estimated_now=%.6f clocksync: %s"
                 % (
                     self._pin,
                     self._mcu.get_name(),
@@ -502,6 +503,8 @@ class MCU_digital_out:
                     est,
                     (print_time - est) * 1000.0,
                     MIN_SCHEDULE_LEAD * 1000.0,
+                    main_mcu.estimated_print_time(curtime),
+                    self._mcu._clocksync.dump_debug(),
                 )
             )
         clock = self._mcu.print_time_to_clock(print_time)
