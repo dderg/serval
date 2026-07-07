@@ -15,6 +15,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 pyo3 = { version = "0.29", features = ["abi3-py39", "multiple-pymethods"] }
+motion-core = { path = "../motion-core" }
 host-rt = { path = "../host-rt" }
 mcu-protocol = { path = "../mcu-protocol" }
 trajectory = { path = "../trajectory" }
@@ -26,17 +27,13 @@ nurbs = { path = "../nurbs" }
 runtime = { path = "../runtime" }
 crossbeam-channel = "0.5"
 libc = "0.2"
-arc-swap = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "env-filter", "std", "fmt"] }
-tracing-appender = "0.2"
-tracing-log = "0.2"
 time = { version = "0.3", default-features = false, features = ["formatting", "macros", "std"] }
 serde_json = "1"
 thiserror = { workspace = true }
 
 [features]
-test-support = []
+test-support = ["motion-core/test-support"]
 snapshot = ["dep:snapshot-core"]
 # extension-module leaves libpython symbols undefined (resolved by the host
 # process). Test binaries are standalone executables and MUST NOT enable it,
@@ -45,15 +42,13 @@ snapshot = ["dep:snapshot-core"]
 extension-module = ["pyo3/extension-module"]
 
 [dev-dependencies]
-proptest = "1"
-log = "0.4"
 mcu-transport = { path = "../mcu-transport" }
 # Enables McuHostIo::from_port_skip_identify for the teardown tests
 # (engine/tests.rs). Cargo unions this with the normal-dep feature set when
 # building tests, so the production cdylib build is unaffected.
 host-rt = { path = "../host-rt", features = ["test-harness"] }
 motion-engine = { path = ".", features = ["test-support"] }
-ethercat-rt = { path = "../ethercat-rt" }
+motion-core = { path = "../motion-core", features = ["test-support"] }
 serialport = "4"
 
 [lints]

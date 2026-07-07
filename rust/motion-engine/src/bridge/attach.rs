@@ -2,6 +2,7 @@ use super::{
     Arc, McuHostIo, Mutex, PyMotionEngine, PyResult, PyRuntimeError, mcu_handle_from_raw,
     query_runtime_caps, require_events_dir_for_mcu_transport,
 };
+use crate::lock_ext::LockExt;
 
 impl PyMotionEngine {
     pub(super) fn try_reuse_existing_connection(
@@ -12,7 +13,7 @@ impl PyMotionEngine {
         expect_native: bool,
     ) -> PyResult<bool> {
         let existing_io: Option<Arc<McuHostIo>> = {
-            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let mcus = self.mcus.lock_ok();
             mcus.get(&mcu_handle)
                 .and_then(|conn| conn.host_io.as_ref().map(Arc::clone))
         };
@@ -171,10 +172,7 @@ impl PyMotionEngine {
         host_io_arc: &Arc<McuHostIo>,
     ) -> PyResult<()> {
         {
-            let events_dir_guard = self
-                .events_dir
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let events_dir_guard = self.events_dir.lock_ok();
             require_events_dir_for_mcu_transport(
                 mcu_transport_supported,
                 events_dir_guard.as_deref(),
@@ -184,7 +182,7 @@ impl PyMotionEngine {
         }
 
         if mcu_transport_supported {
-            let events_dir_guard = self.events_dir.lock().unwrap_or_else(|p| p.into_inner());
+            let events_dir_guard = self.events_dir.lock_ok();
             if let Some(ref dir) = *events_dir_guard {
                 use crate::logging::writer::{
                     DEFAULT_BACKUP_COUNT, DEFAULT_MAX_BYTES, FSYNC_INTERVAL, RotatingJsonlWriter,
