@@ -26,7 +26,6 @@ nurbs = { path = "../nurbs" }
 runtime = { path = "../runtime" }
 crossbeam-channel = "0.5"
 libc = "0.2"
-log = "0.4"
 arc-swap = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "env-filter", "std", "fmt"] }
@@ -47,6 +46,7 @@ extension-module = ["pyo3/extension-module"]
 
 [dev-dependencies]
 proptest = "1"
+log = "0.4"
 mcu-transport = { path = "../mcu-transport" }
 # Enables McuHostIo::from_port_skip_identify for the teardown tests
 # (engine/tests.rs). Cargo unions this with the normal-dep feature set when
