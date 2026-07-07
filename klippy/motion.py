@@ -210,6 +210,13 @@ class Motion:
         self.kin.set_position(newpos, homing_axes)
         self.printer.send_event("toolhead:set_position")
 
+    def rebase_gcode_z(self, z):
+        """Adopt the gcode Z the engine rebased to across a bed-mesh swap.
+        The physical position is unchanged (the engine kept machine Z
+        invariant); only the gcode-space name for it moved."""
+        self.commanded_pos[2] = z
+        self.printer.send_event("toolhead:set_position")
+
     def manual_move(self, coord, speed):
         curpos = list(self.commanded_pos)
         for i in range(len(coord)):

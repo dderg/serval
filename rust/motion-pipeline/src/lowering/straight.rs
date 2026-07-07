@@ -33,6 +33,7 @@ pub(super) fn lower_straight_from_phases(
     t_start: f64,
     start_pos: &[f64],
     axis_chains: &[CompiledChain],
+    z_offset: f64,
 ) -> Result<(Vec<Vec<BezierPiece>>, f64), LoweringError> {
     let n_axes = start_pos.len().max(3);
     for f in &gm.segment.followers {
@@ -48,11 +49,15 @@ pub(super) fn lower_straight_from_phases(
         .as_ref()
         .map(|seg| (seg.point_at(0.0), seg.heading_at(0.0)));
 
+    // The surface warp is one constant offset on this closed-form path (the
+    // sampled path handles a Z that varies with XY); it shifts the Z axis's
+    // base position without touching its velocity scale.
     let axis_scale_base = |axis: usize| -> (f64, f64) {
+        let warp = if axis == 2 { z_offset } else { 0.0 };
         if axis < 3 {
             match spatial {
-                Some((origin, heading)) => (heading[axis], origin[axis]),
-                None => (0.0, start_pos.get(axis).copied().unwrap_or(0.0)),
+                Some((origin, heading)) => (heading[axis], origin[axis] + warp),
+                None => (0.0, start_pos.get(axis).copied().unwrap_or(0.0) + warp),
             }
         } else if let Some(f) = gm.segment.followers.iter().find(|f| f.axis_index == axis) {
             (f.ratio, start_pos[axis])

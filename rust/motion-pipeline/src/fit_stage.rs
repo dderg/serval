@@ -124,6 +124,7 @@ impl FitStage {
             }
             Control::Dwell { .. }
             | Control::SetAxisChains(_)
+            | Control::SetMesh { .. }
             | Control::Nudge { .. }
             | Control::Barrier(_) => {
                 assert!(

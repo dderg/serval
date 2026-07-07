@@ -130,6 +130,11 @@ impl PyMotionEngine {
             Ok(result) => {
                 self.finish_homing();
                 let (trip_pos, final_pos, trip_clock) = result.map_err(PyRuntimeError::new_err)?;
+                // Trigger positions are measured in machine space; everything
+                // returned to Python and every gcode-space odometer gets the
+                // inverse-transformed value — the bridge is the only crossing.
+                let trip_pos = self.machine_to_gcode(trip_pos);
+                let final_pos = self.machine_to_gcode(final_pos);
                 *self.commanded_pos.lock_ok() = final_pos;
                 self.reanchor_after_trip(final_pos)?;
                 Ok(Some((trip_pos, final_pos, trip_clock)))

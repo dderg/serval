@@ -9,7 +9,7 @@ pub(crate) use ladder::{
     FIT_TRUNC_POS_FACTOR, LADDER_PROBES_U, ladder_fit, quintic_in_u, truncated_piece,
 };
 
-use geometry::{Move, MoveVelocity};
+use geometry::{Move, MoveVelocity, SurfaceTransform};
 use nurbs::ScalarNurbs;
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 #[cfg(test)]
@@ -19,7 +19,7 @@ use trajectory::ChainStage;
 use trajectory::{CompiledChain, ShapedSegment};
 
 use profile::build_profile;
-use sampled::{Sampler, refine_span, regime_knot_times};
+use sampled::{Sampler, ZWarp, refine_span, regime_knot_times, z_warp_mode};
 use straight::lower_straight_from_phases;
 
 /// Duplicated from `runtime::piece_ring::MAX_PIECE_COEFFS` (this crate must
@@ -105,9 +105,10 @@ pub fn lower_move(
     start_pos: &[f64],
     fit_tol: FitTol,
     axis_chains: &[CompiledChain],
+    mesh: Option<&SurfaceTransform>,
 ) -> Result<ShapedSegment, LoweringError> {
     let (axes_pieces, total_t) =
-        lower_move_pieces(gm, vm, t_start, start_pos, fit_tol, axis_chains)?;
+        lower_move_pieces(gm, vm, t_start, start_pos, fit_tol, axis_chains, mesh)?;
     let axes: Vec<ScalarNurbs> = axes_pieces
         .iter()
         .map(|p| bezier_pieces_to_nurbs(p))
@@ -133,17 +134,23 @@ pub fn lower_move_pieces(
     start_pos: &[f64],
     fit_tol: FitTol,
     axis_chains: &[CompiledChain],
+    mesh: Option<&SurfaceTransform>,
 ) -> Result<(Vec<Vec<BezierPiece>>, f64), LoweringError> {
     if gm.source != vm.source {
         return Err(LoweringError::SourceMismatch);
     }
+    let z_warp = z_warp_mode(mesh, gm, start_pos);
     // The closed-form phase path expresses each axis as one constant scale times
-    // the arc-length profile; a ramped follower's ratio varies along the move, so
-    // route those through the sampled fit instead. Constant followers (every
-    // straight slicer move) keep the exact phase path.
+    // the arc-length profile; a ramped follower's ratio varies along the move
+    // and a surface-warped Z varies with XY — so route those through the sampled
+    // exact phase path, as does a warp flat enough to be one constant offset.
     let ramped = gm.segment.followers.iter().any(|f| f.is_ramped());
-    if !vm.phases.is_empty() && !ramped {
-        return lower_straight_from_phases(gm, vm, t_start, start_pos, axis_chains);
+    if !vm.phases.is_empty() && !ramped && !matches!(z_warp, ZWarp::Surface(_)) {
+        let z_offset = match z_warp {
+            ZWarp::Constant(c) => c,
+            _ => 0.0,
+        };
+        return lower_straight_from_phases(gm, vm, t_start, start_pos, axis_chains, z_offset);
     }
     let (profile, total_t) = build_profile(&vm.samples)?;
     // A jerk-regime change is a curvature kink in the arc-length profile: no
@@ -170,6 +177,7 @@ pub fn lower_move_pieces(
         followers: &gm.segment.followers,
         s_len: gm.segment.s_len(),
         axis_chains,
+        z_warp,
     };
     // Each axis refines its own grid: an axis only pays for the knots its own
     // signal needs (a follower is blind to path curvature, z to planar motion),

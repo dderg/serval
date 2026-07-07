@@ -161,7 +161,7 @@ impl<S: SegmentSink> Dispatcher<S> {
                 }
             }
             Control::Nudge { mcu_id, pieces } => self.handle_nudge(mcu_id, &pieces),
-            Control::SetAxisChains(_) => {}
+            Control::SetAxisChains(_) | Control::SetMesh { .. } => {}
         }
     }
 
