@@ -14,6 +14,7 @@ pub const ERR_CAPTURE_FILE: i32 = -322;
 pub const ERR_CAPTURE_OVERFLOW: i32 = -323;
 pub const ERR_CAPTURE_BAD_ARG: i32 = -324;
 pub const ERR_CAPTURE_BAD_DRIVE_LIST: i32 = -325;
+pub const ERR_CAPTURE_CHANNEL_NOT_READY: i32 = -326;
 
 pub const CAPTURE_RING_CAPACITY: usize = 16384;
 
@@ -243,16 +244,22 @@ struct ActiveCapture {
     failure: Option<(u64, i32)>,
 }
 
+type RecordChannel = (SyncSender<CaptureRecord>, Receiver<CaptureRecord>);
+
 /// All file I/O runs on one persistent `capture-io` thread, spawned once.
 /// The DC thread's start/push/stop are channel operations only: file opens,
 /// writes, fsync, and rename stall for SD-card eternities (100+ ms), and a
 /// pause in cyclic frames beyond ~3 ms trips the drive's sync-error counter
 /// (ErC1.1 / AL 0x001a). Thread creation is banned on the DC thread for the
 /// same reason — under mlockall(MCL_FUTURE) a pthread spawn prefaults and
-/// locks the new stack, which is milliseconds by itself.
+/// locks the new stack, which is milliseconds by itself. The record channel
+/// obeys the same rule: its bounded buffer preallocates ~1 MB at construction
+/// (prefaulted and locked under MCL_FUTURE — 57 of 66 working-counter misses
+/// on the 2026-07-06 bench were capture starts), so the capture-io thread
+/// builds each channel and hands it over; start only try_recv()s a spare.
 pub struct Capture {
-    capacity: usize,
     control: Sender<IoMsg>,
+    spare_channels: Receiver<RecordChannel>,
     service: Option<JoinHandle<()>>,
     active: Option<ActiveCapture>,
 }
@@ -270,14 +277,18 @@ impl Capture {
 
     pub fn with_capacity(capacity: usize) -> Self {
         let (control, control_rx) = channel();
+        let (spare_tx, spare_channels) = channel();
+        spare_tx
+            .send(sync_channel(capacity))
+            .expect("spare receiver held by self");
         let service = std::thread::Builder::new()
             .name("capture-io".into())
             .stack_size(IO_THREAD_STACK)
-            .spawn(move || service_loop(control_rx))
+            .spawn(move || service_loop(control_rx, &spare_tx, capacity))
             .expect("spawn capture-io thread");
         Self {
-            capacity,
             control,
+            spare_channels,
             service: Some(service),
             active: None,
         }
@@ -347,7 +358,9 @@ impl Capture {
         if let Err(rc) = validate_drive_list(&cfg.drives) {
             return immediate(rc);
         }
-        let (tx, records) = sync_channel(self.capacity);
+        let Ok((tx, records)) = self.spare_channels.try_recv() else {
+            return immediate(ERR_CAPTURE_CHANNEL_NOT_READY);
+        };
         let (reply, reply_rx) = sync_channel(1);
         self.control
             .send(IoMsg::Open {
@@ -464,7 +477,7 @@ impl PendingStop {
     }
 }
 
-fn service_loop(control: Receiver<IoMsg>) {
+fn service_loop(control: Receiver<IoMsg>, spares: &Sender<RecordChannel>, capacity: usize) {
     demote_to_normal_scheduling();
     while let Ok(msg) = control.recv() {
         match msg {
@@ -481,6 +494,7 @@ fn service_loop(control: Receiver<IoMsg>) {
                 records,
                 reply,
             } => {
+                let _ = spares.send(sync_channel(capacity));
                 let path = PathBuf::from(&cfg.path);
                 let session = match open_session(&path) {
                     Ok(file) => {

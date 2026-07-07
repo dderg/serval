@@ -35,6 +35,13 @@ def test_bad_probe_config_rejected_at_boot(sim_world, variant):
     assert "Printer is ready" not in world.klippy_log_text()
 
 
+def _last_probe_z(log_text):
+    probe_lines = [line for line in log_text.splitlines() if " is z=" in line]
+    m = re.search(r"is z=(-?\d+\.?\d*)", probe_lines[-1])
+    assert m, "no probe result line"
+    return float(m.group(1))
+
+
 def _assert_probe_flow(world, variant):
     world.mark_log()
     world.gcode_ok("QUERY_PROBE")
@@ -119,11 +126,23 @@ def test_probe_multi_point_tools(sim_world):
     )
 
     world.mark_log()
-    resp = world.gcode("Z_TILT_ADJUST", timeout=300)
-    assert "per-motor Z adjustment is not yet implemented" in str(
-        resp.get("error", "")
+    world.gcode_ok(
+        "FORCE_MOVE STEPPER=stepper_z DISTANCE=0.5 VELOCITY=5", timeout=60
     )
-    world.expect_log("Z adjustments needed")
+    world.gcode_ok("PROBE", timeout=90)
+    shifted_z = _last_probe_z(world.expect_log(" is z="))
+    assert abs(shifted_z - 1.5) == pytest.approx(0.5, abs=0.1)
+
+    world.mark_log()
+    world.gcode_ok("Z_TILT_ADJUST", timeout=300)
+    world.expect_log("Making the following Z adjustments")
+
+    world.mark_log()
+    world.gcode_ok("PROBE", timeout=90)
+    rebased_z = _last_probe_z(world.expect_log(" is z="))
+    assert rebased_z == pytest.approx(1.5, abs=0.1), (
+        "probe height must be frame-consistent after the common-mode rebase"
+    )
     assert world.shutdown_line() is None
 
 
