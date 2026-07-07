@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::Receiver;
 
@@ -37,6 +37,9 @@ use super::{CommittedFrontier, HomeDripParams, NudgeParams, StreamMsg, fatal};
 /// 250 ms initial lead. Overrunning anyway is not fatal — the anchor
 /// re-anchors forward with a logged stutter.
 const RUNWAY_RESERVE_S: f64 = 0.1;
+
+// TODO: expose as a config knob if 250 ms turns out wrong for slower feeds.
+const STARTUP_PRIME_S: f64 = 0.250;
 
 const LEAD: f64 = crate::anchor::DEFAULT_LEAD_SECS;
 
@@ -59,6 +62,7 @@ pub(super) struct Ingress {
     /// The pipeline holds moves ingested since the last `Drain`; the pacer
     /// only schedules a drain while this is set.
     pub(super) undrained: bool,
+    pub(super) undrained_since: Option<Instant>,
     /// Source line of the last move forwarded into the pipeline; a fence
     /// arriving now sequences after it.
     pub(super) last_line: u32,
@@ -130,6 +134,7 @@ impl Ingress {
     fn drain_and_fence(&mut self) -> BarrierAck {
         self.send(StreamInput::Drain);
         self.undrained = false;
+        self.undrained_since = None;
         self.barrier()
     }
 
@@ -161,6 +166,9 @@ impl Ingress {
         advance_odometer(&mut self.odometer, &m);
         self.last_line = m.source.start_line;
         self.send(m.into());
+        if !self.undrained {
+            self.undrained_since = Some(Instant::now());
+        }
         self.undrained = true;
     }
 
@@ -175,6 +183,15 @@ impl Ingress {
         if wait_s > 0.0 {
             return Some(Duration::from_secs_f64(wait_s));
         }
+        if !self.frontier.is_active() {
+            if let Some(since) = self.undrained_since {
+                let remaining =
+                    Duration::from_secs_f64(STARTUP_PRIME_S).saturating_sub(since.elapsed());
+                if !remaining.is_zero() {
+                    return Some(remaining);
+                }
+            }
+        }
         tracing::debug!(
             subsystem = "motion",
             event = "pipe_drain",
@@ -183,6 +200,7 @@ impl Ingress {
         );
         self.send(StreamInput::Drain);
         self.undrained = false;
+        self.undrained_since = None;
         if self.links.fences.has_armed() {
             self.barrier();
         }
@@ -287,6 +305,7 @@ impl Ingress {
         self.frontier.clear();
         self.send(StreamInput::Control(Control::Reset { pos: pos.clone() }));
         self.undrained = false;
+        self.undrained_since = None;
         self.barrier();
         self.odometer = pos;
         self.t_next = 0.0;

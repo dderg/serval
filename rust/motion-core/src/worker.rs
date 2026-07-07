@@ -50,6 +50,10 @@ impl CommittedFrontier {
             d.saturating_duration_since(Instant::now()).as_secs_f64()
         })
     }
+
+    pub fn is_active(&self) -> bool {
+        self.deadline.lock_ok().is_some()
+    }
 }
 
 pub struct HomeDripParams {
@@ -286,6 +290,7 @@ impl StreamWorkerHandle {
             links: Arc::clone(&links),
             frontier,
             undrained: false,
+            undrained_since: None,
             last_line: 0,
             pump_control,
         };
