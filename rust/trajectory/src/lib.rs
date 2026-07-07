@@ -1,7 +1,7 @@
-mod kernel;
-pub mod chain;
 pub mod algos;
+pub mod chain;
 mod convolution;
+mod kernel;
 
 pub use chain::{
     AxisChainSet, ChainStage, CompiledChain, PostProcessorError, PostProcessorInstance,

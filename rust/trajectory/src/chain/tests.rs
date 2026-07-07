@@ -1,8 +1,6 @@
 use super::*;
+use crate::algos::{LinearPressureAdvance, SmoothTriangle, SmoothZv, SMOOTH_ZV_T_SM_PER_HZ};
 use crate::kernel::build_smooth_zv_kernel;
-use crate::algos::{
-    LinearPressureAdvance, SmoothTriangle, SmoothZv, SMOOTH_ZV_T_SM_PER_HZ,
-};
 
 fn pa(k: f64) -> PostProcessorInstance {
     PostProcessorInstance::new("pa", &LinearPressureAdvance, vec![k])

@@ -1,6 +1,6 @@
 use super::{Bound, ParamSpec, PostProcessorAlgo};
-use crate::kernel::build_smooth_mzv_kernel;
 use crate::chain::ChainStage;
+use crate::kernel::build_smooth_mzv_kernel;
 
 pub const SMOOTH_MZV_T_SM_PER_HZ: f64 = 0.95625;
 
