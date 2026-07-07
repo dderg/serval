@@ -8,7 +8,7 @@ import threading
 
 import serial
 
-from . import chelper, msgproto, structured_log, util
+from . import msgproto, structured_log, util
 from .extras.danger_options import get_danger_options
 
 
@@ -34,15 +34,9 @@ class SerialReader:
         self.reactor = reactor
         self.warn_prefix = warn_prefix
         self.mcu = mcu
-        # Serial port
-        self.serial_dev = None
         self._event_poller_timer = None
         self._engine_detached = False
         self.msgparser = msgproto.MessageParser(warn_prefix=warn_prefix)
-        self.ffi_main, self.ffi_lib = chelper.get_ffi()
-        self.serialqueue = None
-        self.default_cmd_queue = None
-        self.stats_buf = None
         self.lock = threading.Lock()
         # Message handlers
         self.handlers = {}
@@ -259,13 +253,11 @@ class SerialReader:
         return True
 
     def connect_file(self, debugoutput, dictionary, pace=False):
-        self.serial_dev = debugoutput
-        self.msgparser.process_identify(dictionary, decompress=False)
-        self.serialqueue = self.ffi_main.gc(
-            self.ffi_lib.serialqueue_alloc(self.serial_dev.fileno(), b"f", 0),
-            self.ffi_lib.serialqueue_free,
+        self._error(
+            "debugoutput mode is not supported: the legacy serialqueue"
+            " transport was removed and the motion engine has no"
+            " file-output transport"
         )
-        self.default_cmd_queue = self.alloc_command_queue()
 
     def set_clock_est(self, freq, conv_time, conv_clock, last_clock):
         if self.mcu._motion_engine is None:
@@ -286,8 +278,7 @@ class SerialReader:
         if self._event_poller_timer is not None:
             self.reactor.unregister_timer(self._event_poller_timer)
             self._event_poller_timer = None
-        # Post-disconnect sends are defined no-ops, mirroring mainline's
-        # `if self.serialqueue is None: return` contract — klippy components
+        # Post-disconnect sends are defined no-ops — klippy components
         # legitimately fire commands during the disconnect dispatch.
         self._engine_detached = True
         # Release the serial port through the engine so firmware_restart's
@@ -318,12 +309,6 @@ class SerialReader:
     def get_msgparser(self):
         return self.msgparser
 
-    def get_serialqueue(self):
-        return None
-
-    def get_default_command_queue(self):
-        return self.default_cmd_queue
-
     # Serial response callbacks
     def register_response(self, callback, name, oid=None):
         with self.lock:
@@ -331,10 +316,6 @@ class SerialReader:
                 del self.handlers[name, oid]
             else:
                 self.handlers[name, oid] = callback
-
-    def _check_noncritical_disconnected(self):
-        if self.mcu is not None and self.mcu.non_critical_disconnected:
-            self._error("non-critical MCU is disconnected")
 
     def _is_engine_transport_drop(self, exc):
         if "transport closed" not in str(exc):
@@ -345,88 +326,38 @@ class SerialReader:
     # Command sending
     def engine_get_clock_async(self):
         """Send a get_clock request through the engine with RAW timestamp
-        capture.  Used by clocksync._get_clock_event to replace the no-op
-        raw_send path.  The response arrives via take_runtime_event as a
-        PassthroughResponse with sent_time_raw/recv_time_raw filled in.
-
-        This no-arg form is the hasattr target in clocksync._get_clock_event
-        (``hasattr(self.serial, "engine_get_clock_async")``); it resolves the
-        MCU handle internally.  MotionEngineWrapper also exposes a
-        engine_get_clock_async(handle) method — passing a wrapper object where
-        a SerialReader is expected would TypeError at the hasattr call site
-        because the wrapper's method requires an explicit handle argument."""
-        engine = getattr(self.mcu, "_motion_engine", None)
+        capture.  The response arrives via take_runtime_event as a
+        PassthroughResponse with sent_time_raw/recv_time_raw filled in."""
+        engine = self.mcu._motion_engine
         if engine is None:
-            return
+            self._error(
+                "engine_get_clock_async() called without a motion engine"
+            )
         handle = self.mcu._engine_handle
         if handle is None:
-            return
+            self._error("engine_get_clock_async() called before claim_mcu")
         try:
             engine.engine_get_clock_async(handle)
         except RuntimeError as e:
             if not self._is_engine_transport_drop(e):
                 raise
 
-    def raw_send(self, cmd, minclock, reqclock, cmd_queue):
-        self._check_noncritical_disconnected()
-        if self.serialqueue is not None:
-            if cmd_queue is None:
-                cmd_queue = self.default_cmd_queue
-            if cmd_queue is not None:
-                self.ffi_lib.serialqueue_send(
-                    self.serialqueue,
-                    cmd_queue,
-                    cmd,
-                    len(cmd),
-                    minclock,
-                    reqclock,
-                    0,
-                )
-
-    def raw_send_wait_ack(self, cmd, minclock, reqclock, cmd_queue):
-        self._check_noncritical_disconnected()
-        if self.serialqueue is not None:
-            if cmd_queue is None:
-                cmd_queue = self.default_cmd_queue
-            if cmd_queue is not None:
-                self.ffi_lib.serialqueue_send(
-                    self.serialqueue,
-                    cmd_queue,
-                    cmd,
-                    len(cmd),
-                    minclock,
-                    reqclock,
-                    0,
-                )
-
     def send(self, msg, minclock=0, reqclock=0):
-        engine = getattr(self.mcu, "_motion_engine", None)
-        if engine is not None:
-            if self._engine_detached:
-                return
-            if reqclock and self._held_until_timer_horizon(
-                msg, minclock, reqclock
-            ):
-                return
-            if reqclock:
-                self._warn_if_deadline_margin_thin(msg, reqclock)
-            handle = self.mcu._engine_handle
-            try:
-                engine.engine_send(handle, msg)
-            except RuntimeError as e:
-                if not self._is_engine_transport_drop(e):
-                    raise
-        elif self.serialqueue is not None:
-            cmd = self.msgparser.create_command(msg)
-            self.ffi_lib.serialqueue_send(
-                self.serialqueue,
-                self.default_cmd_queue,
-                cmd,
-                len(cmd),
-                minclock,
-                reqclock,
-                0,
-            )
+        engine = self.mcu._motion_engine
+        if engine is None:
+            self._error("send() called without a motion engine")
+        if self._engine_detached:
+            return
+        if reqclock and self._held_until_timer_horizon(msg, minclock, reqclock):
+            return
+        if reqclock:
+            self._warn_if_deadline_margin_thin(msg, reqclock)
+        handle = self.mcu._engine_handle
+        try:
+            engine.engine_send(handle, msg)
+        except RuntimeError as e:
+            if not self._is_engine_transport_drop(e):
+                raise
 
     def _warn_if_deadline_margin_thin(self, msg, reqclock):
         clocksync = self.mcu._clocksync
@@ -456,47 +387,39 @@ class SerialReader:
         return True
 
     def send_with_response(self, msg, response):
-        engine = getattr(self.mcu, "_motion_engine", None)
-        if engine is not None:
-            if self._engine_detached:
-                raise error("serial connection closed")
-            try:
-                params = engine.engine_call(
-                    self.mcu._engine_handle,
-                    msg,
-                    response,
-                )
-            except RuntimeError as e:
-                if not self._is_engine_transport_drop(e):
-                    raise
-                raise error("serial connection closed")
-            # Use CLOCK_MONOTONIC_RAW timestamps if the Rust engine supplied them
-            # (non-zero means a real RTT was measured on the wire).  Fall back to
-            # reactor.monotonic() only when both sides stamp the same instant (the
-            # old behaviour, which gives half_rtt=0 and breaks min_half_rtt).
-            sent_raw = params.get("#sent_time_raw", 0.0)
-            recv_raw = params.get("#receive_time_raw", 0.0)
-            if sent_raw != 0.0 and recv_raw != 0.0:
-                params["#sent_time"] = sent_raw
-                params["#receive_time"] = recv_raw
-            else:
-                now = self.reactor.monotonic()
-                params["#sent_time"] = now
-                params["#receive_time"] = now
-            return params
-        raise error("send_with_response requires motion engine")
-
-    def alloc_command_queue(self):
-        if self.serialqueue is not None:
-            return self.ffi_main.gc(
-                self.ffi_lib.serialqueue_alloc_commandqueue(),
-                self.ffi_lib.serialqueue_free_commandqueue,
+        engine = self.mcu._motion_engine
+        if engine is None:
+            self._error("send_with_response() called without a motion engine")
+        if self._engine_detached:
+            raise error("serial connection closed")
+        try:
+            params = engine.engine_call(
+                self.mcu._engine_handle,
+                msg,
+                response,
             )
-        return None
+        except RuntimeError as e:
+            if not self._is_engine_transport_drop(e):
+                raise
+            raise error("serial connection closed")
+        # Use CLOCK_MONOTONIC_RAW timestamps if the Rust engine supplied them
+        # (non-zero means a real RTT was measured on the wire).  Fall back to
+        # reactor.monotonic() only when both sides stamp the same instant (the
+        # old behaviour, which gives half_rtt=0 and breaks min_half_rtt).
+        sent_raw = params.get("#sent_time_raw", 0.0)
+        recv_raw = params.get("#receive_time_raw", 0.0)
+        if sent_raw != 0.0 and recv_raw != 0.0:
+            params["#sent_time"] = sent_raw
+            params["#receive_time"] = recv_raw
+        else:
+            now = self.reactor.monotonic()
+            params["#sent_time"] = now
+            params["#receive_time"] = now
+        return params
 
     # Dumping debug lists
     def dump_debug(self):
-        return "SerialReader: engine mode (no C serialqueue)"
+        return "SerialReader: engine mode"
 
     # Default message handlers
     def _handle_unknown_init(self, params):
@@ -523,42 +446,6 @@ class SerialReader:
     def handle_default(self, params):
         if get_danger_options().log_serial_reader_warnings:
             logging.warning("%s got %s", self.warn_prefix, params)
-
-
-# Class to send a query command and return the received response
-class SerialRetryCommand:
-    def __init__(self, serial, name, oid=None):
-        self.serial = serial
-        self.name = name
-        self.oid = oid
-        self.last_params = None
-        self.serial.register_response(self.handle_callback, name, oid)
-
-    def handle_callback(self, params):
-        self.last_params = params
-
-    def get_response(self, cmds, cmd_queue, minclock=0, reqclock=0, retry=True):
-        retries = 5
-        retry_delay = 0.010
-        if not retry:
-            retries = 0
-        while 1:
-            for cmd in cmds[:-1]:
-                self.serial.raw_send(cmd, minclock, reqclock, cmd_queue)
-            self.serial.raw_send_wait_ack(
-                cmds[-1], minclock, reqclock, cmd_queue
-            )
-            params = self.last_params
-            if params is not None:
-                self.serial.register_response(None, self.name, self.oid)
-                return params
-            if retries <= 0:
-                self.serial.register_response(None, self.name, self.oid)
-                raise error("Unable to obtain '%s' response" % (self.name,))
-            reactor = self.serial.reactor
-            reactor.pause(reactor.monotonic() + retry_delay)
-            retries -= 1
-            retry_delay *= 2.0
 
 
 # Attempt to place an AVR stk500v2 style programmer into normal mode

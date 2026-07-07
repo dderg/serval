@@ -254,7 +254,7 @@ class FixedFreqReader:
         self.last_overflows = 0
         self.bulk_queue = self.oid = self.query_status_cmd = None
 
-    def setup_query_command(self, msgformat, oid, cq):
+    def setup_query_command(self, msgformat, oid):
         # Lookup sensor query command (that responds with sensor_bulk_status)
         self.oid = oid
         self.query_status_cmd = self.mcu.lookup_query_command(
@@ -262,7 +262,6 @@ class FixedFreqReader:
             "sensor_bulk_status oid=%c clock=%u query_ticks=%u"
             " next_sequence=%hu buffered=%u possible_overflows=%hu",
             oid=oid,
-            cq=cq,
         )
         # Read sensor_bulk_data messages and store in a queue
         self.bulk_queue = BulkDataQueue(self.mcu, oid=oid)

@@ -170,15 +170,14 @@ class ADS1220(LoadCellSensor):
         self.query_ads1220_cmd = None
 
     def _build_config(self):
-        cmdqueue = self.spi.get_command_queue()
         self.query_ads1220_cmd = self.mcu.lookup_command(
-            "query_ads1220 oid=%c rest_ticks=%u", cq=cmdqueue
+            "query_ads1220 oid=%c rest_ticks=%u"
         )
         self.attach_probe_cmd = self.mcu.lookup_command(
             "ads1220_attach_load_cell_probe oid=%c load_cell_probe_oid=%c"
         )
         self.ffreader.setup_query_command(
-            "query_ads1220_status oid=%c", oid=self.oid, cq=cmdqueue
+            "query_ads1220_status oid=%c", oid=self.oid
         )
 
     def get_mcu(self) -> MCU:

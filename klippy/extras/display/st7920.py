@@ -192,12 +192,11 @@ class ST7920(DisplayBase):
                 self.mcu.seconds_to_clock(ST7920_CMD_DELAY),
             )
         )
-        cmd_queue = self.mcu.alloc_command_queue()
         self.send_cmds_cmd = self.mcu.lookup_command(
-            "st7920_send_cmds oid=%c cmds=%*s", cq=cmd_queue
+            "st7920_send_cmds oid=%c cmds=%*s"
         )
         self.send_data_cmd = self.mcu.lookup_command(
-            "st7920_send_data oid=%c data=%*s", cq=cmd_queue
+            "st7920_send_data oid=%c data=%*s"
         )
 
     def send(self, cmds, is_data=False, is_extended=False):
@@ -217,9 +216,7 @@ class ST7920(DisplayBase):
 # Helper code for toggling the en pin on startup
 class EnableHelper:
     def __init__(self, pin_desc, spi):
-        self.en_pin = bus.MCU_bus_digital_out(
-            spi.get_mcu(), pin_desc, spi.get_command_queue()
-        )
+        self.en_pin = bus.MCU_bus_digital_out(spi.get_mcu(), pin_desc)
 
     def init(self):
         mcu = self.en_pin.get_mcu()
