@@ -18,8 +18,8 @@ def make_homing_configured_rail(cls):
     return r
 
 
-def test_printer_rail_homing_info_is_shared_type():
-    hi = make_homing_configured_rail(stepper.PrinterRail).get_homing_info()
+def test_axis_rail_homing_info_is_shared_type():
+    hi = make_homing_configured_rail(stepper.AxisRail).get_homing_info()
     assert isinstance(hi, rail.HomingInfo)
     assert hi.speed == 40.0
     assert hi.retract_dist == 3.0
@@ -35,7 +35,7 @@ def test_servo_rail_homing_info_is_shared_type():
 
 
 def test_get_range_is_shared():
-    for cls in (stepper.PrinterRail, servo_axis.ServoRail):
+    for cls in (stepper.AxisRail, servo_axis.ServoRail):
         r = make_homing_configured_rail(cls)
         assert r.get_range() == (-6.0, 235.0)
 

@@ -261,79 +261,6 @@ def parse_step_distance(config, units_in_radians=None, note_valid=False):
 ######################################################################
 
 
-class PrinterRail(BaseRail):
-    def __init__(
-        self,
-        config,
-        need_position_minmax=True,
-        default_position_endstop=None,
-        units_in_radians=False,
-    ):
-        super().__init__()
-        self.stepper_units_in_radians = units_in_radians
-        self.steppers = []
-        self.endstops = []
-        self.add_extra_stepper(config)
-        mcu_stepper = self.steppers[0]
-        self._tmc_current_helpers = None
-        self.get_name = mcu_stepper.get_name
-        self.get_commanded_position = mcu_stepper.get_commanded_position
-        self.calc_position_from_coord = mcu_stepper.calc_position_from_coord
-        if default_position_endstop is None:
-            self.position_endstop = config.getfloat(
-                "position_endstop", config.getfloat("position_min", 0.0)
-            )
-        else:
-            self.position_endstop = config.getfloat(
-                "position_endstop", default_position_endstop
-            )
-        endstop_pin = config.get("endstop_pin", None)
-        # check for ":virtual_endstop" to make sure we don't detect ":z_virtual_endstop"
-        endstop_is_virtual = (
-            endstop_pin is not None and ":virtual_endstop" in endstop_pin
-        )
-
-        if need_position_minmax:
-            self._parse_position_range(config)
-        else:
-            self.position_min = 0.0
-            self.position_max = self.position_endstop
-        self._finalize_homing(config, endstop_is_virtual)
-
-    def get_tmc_current_helpers(self):
-        if self._tmc_current_helpers is None:
-            self._tmc_current_helpers = [
-                s.get_tmc_current_helper() for s in self.steppers
-            ]
-        return self._tmc_current_helpers
-
-    def get_steppers(self):
-        return list(self.steppers)
-
-    def get_endstops(self):
-        return list(self.endstops)
-
-    def add_extra_stepper(self, config):
-        stepper = PrinterStepper(config, self.stepper_units_in_radians)
-        self.steppers.append(stepper)
-
-    def setup_itersolve(self, alloc_func, *params):
-        for stepper in self.steppers:
-            stepper.setup_itersolve(alloc_func, *params)
-
-    def generate_steps(self, flush_time):
-        for stepper in self.steppers:
-            stepper.generate_steps(flush_time)
-
-    def set_trapq(self, trapq):
-        for stepper in self.steppers:
-            stepper.set_trapq(trapq)
-
-    def set_position(self, coord):
-        for stepper in self.steppers:
-            stepper.set_position(coord)
-
-
 AXIS_HOMING_KEYS = (
     "position_min",
     "position_max",
@@ -417,19 +344,3 @@ class AxisRail(BaseRail):
     def set_position(self, coord):
         for stepper in self.steppers:
             stepper.set_position(coord)
-
-
-def LookupMultiRail(
-    config,
-    need_position_minmax=True,
-    default_position_endstop=None,
-    units_in_radians=False,
-):
-    rail = PrinterRail(
-        config, need_position_minmax, default_position_endstop, units_in_radians
-    )
-    for i in range(1, 99):
-        if not config.has_section(config.get_name() + str(i)):
-            break
-        rail.add_extra_stepper(config.getsection(config.get_name() + str(i)))
-    return rail
