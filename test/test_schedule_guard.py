@@ -14,12 +14,22 @@ class FakePrinter:
     def get_reactor(self):
         return FakeReactor()
 
+    def lookup_object(self, name):
+        assert name == "mcu"
+        return FakeMcu(est_print_time=100.0)
+
+
+class FakeClockSync:
+    def dump_debug(self):
+        return "fake clocksync"
+
 
 class FakeMcu:
     non_critical_disconnected = False
 
     def __init__(self, est_print_time):
         self._est = est_print_time
+        self._clocksync = FakeClockSync()
 
     def get_name(self):
         return "fake"
