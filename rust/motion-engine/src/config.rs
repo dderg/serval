@@ -1,5 +1,5 @@
 use thiserror::Error;
-use trajectory::{AxisChainSet, CompiledChain, PostProcessorInstance, post_processors};
+use trajectory::{AxisChainSet, CompiledChain, PostProcessorInstance, algos};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PostProcessorDecl {
@@ -122,11 +122,11 @@ impl PostProcessorSet {
 fn build_instance(
     d: &PostProcessorDecl,
 ) -> Result<PostProcessorInstance, PostProcessorConfigError> {
-    let algo = post_processors::lookup(&d.ty).ok_or_else(|| {
+    let algo = algos::lookup(&d.ty).ok_or_else(|| {
         PostProcessorConfigError::UnsupportedKind {
             name: d.name.clone(),
             kind: d.ty.clone(),
-            supported: post_processors::supported_type_names().join(", "),
+            supported: algos::supported_type_names().join(", "),
         }
     })?;
     for (key, _) in &d.params {

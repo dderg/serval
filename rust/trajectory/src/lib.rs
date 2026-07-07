@@ -1,12 +1,12 @@
 mod kernel;
-pub mod post_processor;
-pub mod post_processors;
-mod shaper;
+pub mod chain;
+pub mod algos;
+mod convolution;
 
-pub use post_processor::{
+pub use chain::{
     AxisChainSet, ChainStage, CompiledChain, PostProcessorError, PostProcessorInstance,
 };
-pub use shaper::ShapedSignal;
+pub use convolution::ShapedSignal;
 
 #[derive(Debug, Clone)]
 pub struct ShapedSegment {

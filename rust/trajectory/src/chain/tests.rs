@@ -1,6 +1,6 @@
 use super::*;
 use crate::kernel::build_smooth_zv_kernel;
-use crate::post_processors::{
+use crate::algos::{
     LinearPressureAdvance, SmoothTriangle, SmoothZv, SMOOTH_ZV_T_SM_PER_HZ,
 };
 

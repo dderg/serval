@@ -1,6 +1,6 @@
 use super::fixtures::{pad_segment_axis, FittedSegment};
 use crate::kernel::build_smooth_mzv_kernel;
-use crate::shaper::ShapedSignal;
+use crate::convolution::ShapedSignal;
 use nurbs::bezier::{bezier_pieces_to_nurbs, BezierPiece};
 
 fn constant_segment_69s(x_val: f64) -> FittedSegment {

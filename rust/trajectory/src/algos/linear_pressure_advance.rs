@@ -1,5 +1,5 @@
 use super::{Bound, ParamSpec, PostProcessorAlgo};
-use crate::post_processor::ChainStage;
+use crate::chain::ChainStage;
 
 #[derive(Debug)]
 pub struct LinearPressureAdvance;

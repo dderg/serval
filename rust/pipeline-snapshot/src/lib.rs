@@ -274,8 +274,8 @@ pub fn extract_raw_path(moves: &[geometry::Move]) -> Vec<(f64, f64)> {
 fn build_axis_chains(
     params: &SnapshotParams,
 ) -> Result<AxisChainSet, trajectory::PostProcessorError> {
-    use trajectory::post_processor::PostProcessorInstance;
-    use trajectory::post_processors::{LinearPressureAdvance, SmoothZv};
+    use trajectory::chain::PostProcessorInstance;
+    use trajectory::algos::{LinearPressureAdvance, SmoothZv};
     use trajectory::{CompiledChain, PostProcessorError};
 
     if params.pressure_advance.is_none()
