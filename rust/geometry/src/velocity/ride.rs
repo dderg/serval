@@ -29,19 +29,40 @@ mod phase_log;
 mod state;
 
 use grid::Grid;
-use phase_log::{Mode, PhaseLog};
-use state::{State, advance, time_to_cross};
+use phase_log::{LogMark, Mode, PhaseLog};
+use state::{State, advance, march_step, step_within};
 
 pub(super) use chain::{chain_is_continuous, chain_states, clip_phases, reverse_chain};
 
 const SUBSTEP_TIME_FRACTION: f64 = 1.0 / 16.0;
+/// Ceiling on curved-cell substep resolution. The substep timescale is the
+/// jerk swing time `a/j`, but with an effectively-unlimited jerk that
+/// collapses to nanoseconds while the disk rail still only varies over the
+/// cell's curvature ramp — finer resolution buys nothing and starves
+/// `CELL_GUARD_STEPS`, whose stall fallback then pins the velocity.
+const SUBSTEPS_PER_CELL_MAX: f64 = 256.0;
 const EVENT_BISECT_ITERS: u32 = 48;
+/// Iterations for the peel-trigger and ride-departure bisections, where every
+/// probe is a full feasibility march. Trigger placement feeds the downstream
+/// piece tiling: 20 iterations demonstrably shifts seams past the lowering's
+/// contiguity slop (seam_accel_feedforward), 24 does not; 32 keeps four
+/// doublings of margin while still cutting a third of the probes from the
+/// crossing solver's 48.
+const TRIGGER_BISECT_ITERS: u32 = 32;
 /// Near-contact snap band, relative: where the peel arc and the cap coincide
 /// (a triangle apex), the gap closes only asymptotically — a slope-matched
 /// state this close to the cap is on it.
 const CONTACT_SNAP_REL: f64 = 1e-5;
 const FEASIBILITY_GUARD_STEPS: u32 = 200_000;
 const CELL_GUARD_STEPS: u32 = 100_000;
+/// In Ride and Flight the trajectory is oracle-independent — `peel_feasible`
+/// only decides when the mode ends — so the pass verifies it once per stride
+/// and, on a flip or any unverified mode change, rolls back to the last
+/// verified checkpoint and re-marches the window with the per-step oracle.
+/// The verdict is monotone along a stretch (the in-step trigger bisection
+/// already relies on that), so the re-march finds the exact trigger the
+/// unstrided pass would and the stride is a pure cost cut.
+const ORACLE_STRIDE: u32 = 32;
 const POS_EPS_MM: f64 = 1e-12;
 
 fn rel_eps(x: f64) -> f64 {
@@ -110,41 +131,51 @@ fn peel_feasible(g: &Grid, st: State) -> bool {
         }
     }
     let mut st = st;
+    let mut cell = g.cell(st.s);
     let mut guard = 0;
     loop {
         guard += 1;
         if guard > FEASIBILITY_GUARD_STEPS {
             return false;
         }
-        let cap = g.cap_at(st.s);
+        let cap = g.cap_in(cell, st.s);
         if st.v > cap + rel_eps(cap) {
             return false;
         }
-        let rail = g.rail_at(st.s, st.v);
-        let slope = g.slope_at(st.s).max(-rail);
+        let rail = g.rail_in(cell, st.s, st.v);
+        let slope = g.t.cap_a[cell].max(-rail);
         if st.a <= slope + rel_eps(st.a.abs().max(slope.abs())) {
             return true;
         }
         if st.s >= g.end_s() - POS_EPS_MM {
             return true;
         }
-        let cell = g.cell(st.s);
-        let to_cell_end = g.t.s[cell + 1] - st.s;
+        let to_span_end = g.span_end_s(cell) - st.s;
         let dt_tan = if st.a > slope {
             (st.a - slope) / j
         } else {
             substep_budget(g, st, j)
         };
-        let dt = match time_to_cross(st, -j, to_cell_end) {
-            Some(t) => t.min(dt_tan).max(1e-12),
-            None => dt_tan.max(1e-12),
-        };
-        // Midpoint violation check within the step.
+        let dt = march_step(st, -j, dt_tan, to_span_end).max(1e-12);
+        // The arc's velocity peak is its critical point against the span's
+        // monotone cap chord; check it exactly, plus the midpoint.
+        if st.a > 0.0 {
+            let t_peak = st.a / j;
+            if t_peak < dt {
+                let peak = advance(st, -j, t_peak);
+                let c = g.cell_ahead(cell, peak.s);
+                if peak.v > g.cap_in(c, peak.s) + rel_eps(peak.v) {
+                    return false;
+                }
+            }
+        }
         let mid = advance(st, -j, 0.5 * dt);
-        if mid.v > g.cap_at(mid.s) + rel_eps(mid.v) {
+        let c_mid = g.cell_ahead(cell, mid.s);
+        if mid.v > g.cap_in(c_mid, mid.s) + rel_eps(mid.v) {
             return false;
         }
         st = advance(st, -j, dt);
+        cell = g.cell_ahead(cell, st.s);
     }
 }
 
@@ -202,6 +233,16 @@ pub(super) fn reach_pass(
         }
     }
 
+    struct StrideCkpt {
+        st: State,
+        i: usize,
+        mode: Mode,
+        mark: LogMark,
+    }
+    let mut ckpt: Option<StrideCkpt> = None;
+    let mut skip_left: u32 = 0;
+    let mut fine_left: u32 = 0;
+
     'nodes: while i < n {
         let mut guard = 0;
         while st.s < track.s[i] - POS_EPS_MM {
@@ -214,15 +255,65 @@ pub(super) fn reach_pass(
                 st.v = st.v.min(track.cap_v[i]);
                 break;
             }
+            // Rewind to the stride checkpoint and re-march the window with
+            // the per-step oracle; everything a skipped step may have touched
+            // (position in the node loop, phase log, per-node feasibility) is
+            // restored or rewritten by the re-march.
+            macro_rules! rollback {
+                ($c:expr) => {{
+                    let c = $c;
+                    for k in feasible.iter_mut().take(i.min(n - 1) + 1).skip(c.i) {
+                        *k = true;
+                    }
+                    st = c.st;
+                    i = c.i;
+                    mode = c.mode;
+                    log.rewind(c.mark);
+                    skip_left = 0;
+                    fine_left = 2 * ORACLE_STRIDE;
+                    continue 'nodes;
+                }};
+            }
             let was = mode;
+            let strided = matches!(mode, Mode::Ride | Mode::Flight);
+            if strided && fine_left == 0 && skip_left == 0 {
+                if peel_feasible(&g, st) {
+                    ckpt = Some(StrideCkpt {
+                        st,
+                        i,
+                        mode,
+                        mark: log.mark(),
+                    });
+                    skip_left = ORACLE_STRIDE;
+                } else if let Some(c) = ckpt.take() {
+                    rollback!(c);
+                }
+                // Oracle already false with nothing to rewind to: the checked
+                // step below finds the trigger itself.
+            }
+            let assume = strided && skip_left > 0;
+            if assume {
+                skip_left -= 1;
+            } else {
+                fine_left = fine_left.saturating_sub(1);
+            }
             match mode {
                 Mode::Ride => {
-                    if !ride_step(&g, &mut st, &mut log, &mut mode, i, &mut feasible) {
-                        continue;
-                    }
+                    ride_step(&g, &mut st, &mut log, &mut mode, i, &mut feasible, assume);
                 }
-                Mode::Flight => flight_step(&g, &mut st, &mut log, &mut mode, i),
+                Mode::Flight => flight_step(&g, &mut st, &mut log, &mut mode, i, assume),
                 Mode::Peel => peel_step(&g, &mut st, &mut log, &mut mode, i),
+            }
+            if mode != was {
+                if assume {
+                    // Unverified transition inside the stride window: rewind
+                    // and let the checked march decide.
+                    let c = ckpt.take().expect("strided step without a checkpoint");
+                    rollback!(c);
+                }
+                ckpt = None;
+                skip_left = 0;
+                fine_left = 0;
             }
             if mode == Mode::Ride && was != Mode::Ride {
                 if let Some((k, end)) = try_splice(st, brake, &g, &mut log, i) {
@@ -303,6 +394,7 @@ fn ride_step(
     mode: &mut Mode,
     i: usize,
     feasible: &mut [bool],
+    assume_feasible: bool,
 ) -> bool {
     let track = g.t;
     let cell = i - 1;
@@ -329,11 +421,11 @@ fn ride_step(
         feasible[i] = false;
     }
     // Kink lookahead: leaving from the next node must still be feasible.
-    if !peel_feasible(g, next_state) {
+    if !assume_feasible && !peel_feasible(g, next_state) {
         // Departure point within this cell: latest cap state that can still
         // peel tangentially under the kink.
         let (mut lo, mut hi) = (st.s, track.s[i]);
-        for _ in 0..EVENT_BISECT_ITERS {
+        for _ in 0..TRIGGER_BISECT_ITERS {
             let mid = 0.5 * (lo + hi);
             if peel_feasible(g, cap_state(g, *st, mid, cell)) {
                 lo = mid;
@@ -375,7 +467,11 @@ fn cap_state(g: &Grid, from: State, s: f64, cell: usize) -> State {
 
 fn substep_budget(g: &Grid, st: State, j_nominal: f64) -> f64 {
     let a_scale = g.lerp_node(g.t.accel, st.s);
-    (a_scale / j_nominal.max(1e-9)) * SUBSTEP_TIME_FRACTION
+    let jerk_dt = (a_scale / j_nominal.max(1e-9)) * SUBSTEP_TIME_FRACTION;
+    let c = g.cell(st.s);
+    let span = g.t.s[c + 1] - g.t.s[c];
+    let cell_dt = span / st.v.max(1e-9) / SUBSTEPS_PER_CELL_MAX;
+    jerk_dt.max(cell_dt)
 }
 
 /// Tangential jerk available after billing the normal share the rotating
@@ -400,7 +496,14 @@ fn effective_jerk(g: &Grid, st: State, dt: f64) -> f64 {
 /// trigger. The trigger is bisected inside the step so the emitted jerk stays
 /// bang-bang; on straight cells the step spans the whole cell and every
 /// event is exact.
-fn flight_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i: usize) {
+fn flight_step(
+    g: &Grid,
+    st: &mut State,
+    log: &mut PhaseLog,
+    mode: &mut Mode,
+    i: usize,
+    assume_feasible: bool,
+) {
     let track = g.t;
     let curved = g.curved_near(st.s);
     let rem = track.s[i] - st.s;
@@ -415,6 +518,14 @@ fn flight_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i:
     } else {
         track.j_max
     };
+    // A jerk swing smaller than one floor-duration step cannot be integrated:
+    // with an effectively-unlimited jerk the rail's hold band is far narrower
+    // than one step's `j·dt`, so the correction overshoots into a
+    // zero-progress limit cycle ping-ponging across the rail until the cell
+    // guard gives up. At this resolution the swing is instantaneous — snap.
+    if (st.a - rail).abs() <= j_up * 2e-12 {
+        st.a = rail;
+    }
     let (j_cmd, dt_event) = if st.a > rail + rel_eps(rail) {
         // Above the rail (a curved cell shrank it, or a cap slope leaked into
         // the state): jerk back down to it.
@@ -426,14 +537,13 @@ fn flight_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i:
     } else {
         (j_up, (rail - st.a) / j_up.max(1e-9))
     };
-    let dt_cross = time_to_cross(*st, j_cmd, rem).unwrap_or(f64::INFINITY);
-    let dt = dt_cross.min(dt_event).min(dt_budget).max(1e-12);
+    let dt = step_within(*st, j_cmd, dt_event.min(dt_budget), rem).max(1e-12);
     let mut next = advance(*st, j_cmd, dt);
     if curved {
         let r = g.rail_at(next.s, next.v);
         next.a = next.a.clamp(-r, r);
     }
-    if peel_feasible(g, next) {
+    if assume_feasible || peel_feasible(g, next) {
         log.set_jerk(*st, j_cmd);
         // Landed on the cap from below (tangential arrival)?
         if next.v >= g.cap_at(next.s) - rel_eps(next.v) {
@@ -447,7 +557,7 @@ fn flight_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i:
     }
     // The peel trigger fires inside this step: bisect it.
     let (mut lo, mut hi) = (0.0, dt);
-    for _ in 0..EVENT_BISECT_ITERS {
+    for _ in 0..TRIGGER_BISECT_ITERS {
         let mid = 0.5 * (lo + hi);
         if peel_feasible(g, advance(*st, j_cmd, mid)) {
             lo = mid;
@@ -491,8 +601,7 @@ fn peel_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i: u
     } else {
         substep_budget(g, *st, track.j_max)
     };
-    let dt_cross = time_to_cross(*st, j_cmd, rem).unwrap_or(f64::INFINITY);
-    let dt = dt_aim.min(dt_cross).min(dt_budget).max(1e-12);
+    let dt = step_within(*st, j_cmd, dt_aim.min(dt_budget), rem).max(1e-12);
     let next = advance(*st, j_cmd, dt);
     let cap_next = g.cap_at(next.s);
     if next.v >= cap_next - rel_eps(next.v) {
