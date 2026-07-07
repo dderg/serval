@@ -246,6 +246,7 @@ class Motion:
 
         stepper_mask = axis_mask
         sent = False
+        servo_targets = {}
         if self.kin is not None:
             for lane_idx, _axis_name, _motors in self.kin.lanes():
                 rail = self.kin.rails[lane_idx]
@@ -264,17 +265,29 @@ class Motion:
                         "RESONANCE_BUZZ: servo axis %s has no live EtherCAT "
                         "engine handle" % rail.axis
                     )
-                self.engine.resonance_buzz(
-                    handle,
-                    1,
-                    1 if (sign_mask & rail_mask) else 0,
-                    freq_start_millihz,
-                    freq_end_millihz,
-                    amplitude_nm,
-                    duration_ms,
-                    ramp_ms,
-                )
-                sent = True
+                slot_bit = 1 << rail.chain_index
+                slot_masks = servo_targets.setdefault(handle, [0, 0])
+                if slot_masks[0] & slot_bit:
+                    raise self.printer.command_error(
+                        "RESONANCE_BUZZ: servo axis %s maps to EtherCAT slot "
+                        "%d which is already claimed by another buzzed axis "
+                        "on the same node" % (rail.axis, rail.chain_index)
+                    )
+                slot_masks[0] |= slot_bit
+                if sign_mask & rail_mask:
+                    slot_masks[1] |= slot_bit
+        for handle, (slot_mask, slot_sign_mask) in servo_targets.items():
+            self.engine.resonance_buzz(
+                handle,
+                slot_mask,
+                slot_sign_mask,
+                freq_start_millihz,
+                freq_end_millihz,
+                amplitude_nm,
+                duration_ms,
+                ramp_ms,
+            )
+            sent = True
         if stepper_mask:
             stepper_sent = False
             for mcu_obj in self._engine_mcus():
