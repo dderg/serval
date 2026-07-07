@@ -577,6 +577,60 @@ fn corexy_history_round_trip_reproduces_bench_symptom() {
 }
 
 #[test]
+fn rebase_after_probe_trip_round_trips_through_cartesian_inversion() {
+    // Reproduces the z_tilt/beacon-probe incident: every proximity probe
+    // ends in toolhead.set_position(x, y, z), which rebases the retained
+    // history to the trip's stop position. Before spatial_rebase_targets
+    // existed, that rebase stored raw cartesian x/y under axis 0/1 — the
+    // same slots live CoreXY pieces store in motor frame — so querying
+    // through assemble_cartesian_state's kinematics inversion afterward
+    // double-transformed an already-correct position into garbage (the
+    // bench's "probe at 197.500,-47.500" from a real (150,245) point).
+    use crate::kinematics::KinematicsModule;
+    use crate::mcu_config::{McuAxisConfig, McuCaps, spatial_rebase_targets};
+    use crate::motion_history::assemble_cartesian_state;
+    use runtime::segment::KinematicTag;
+
+    let configs = vec![McuAxisConfig {
+        mcu_id: 1,
+        axes: vec![0, 1, 2],
+        kinematics: KinematicTag::CoreXy as u8,
+        caps: McuCaps {
+            total_piece_memory: 62 * 1024,
+        },
+    }];
+    let cart_x = 150.0;
+    let cart_y = 245.0;
+    let cart_z = 1.965;
+
+    let mut store = HistoryStore::default();
+    for (key, value) in spatial_rebase_targets(&configs, [cart_x, cart_y, cart_z]) {
+        store.rebase_axis(key, 0.0, value);
+    }
+
+    let mut motor_state = [None; 4];
+    for axis in 0..3u8 {
+        motor_state[axis as usize] = store
+            .state_at_host(AxisKey { mcu_id: 1, axis }, 0.0, Some(f64::INFINITY))
+            .ok();
+    }
+    let kin = KinematicsModule::from_tag(KinematicTag::CoreXy as u8).unwrap();
+    let out = assemble_cartesian_state(motor_state, &kin);
+
+    assert!(
+        (out["x"].0 - cart_x).abs() < 1e-9,
+        "x={:?} want {cart_x} — got the mangled (x+y)/2, (x-y)/2 pair if this fails",
+        out.get("x")
+    );
+    assert!(
+        (out["y"].0 - cart_y).abs() < 1e-9,
+        "y={:?} want {cart_y}",
+        out.get("y")
+    );
+    assert!((out["z"].0 - cart_z).abs() < 1e-9);
+}
+
+#[test]
 fn host_clock_round_trip_is_identity() {
     let router = stub_router_two_mcus();
     let h = crate::types::mcu_handle_from_raw(1);

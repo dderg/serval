@@ -1,6 +1,6 @@
 use super::{
     Arc, DRAIN_TIMEOUT, FieldValue, HashSet, Ordering, PyMotionEngine, PyResult, PyRuntimeError,
-    PyValueError, Python, SPATIAL_AXES, classify, config, planner_err, pymethods, require_positive,
+    PyValueError, Python, classify, config, planner_err, pymethods, require_positive,
 };
 use crate::lock_ext::LockExt;
 use pyo3::FromPyObject;
@@ -637,25 +637,7 @@ impl PyMotionEngine {
     fn rebase_motion_history_after_position_set(&self, host_now: f64, x: f64, y: f64, z: f64) {
         let configs: Vec<crate::mcu_config::McuAxisConfig> =
             self.mcu_axis_configs.lock_ok().clone();
-        let positions = [x, y, z];
-        let rebases: Vec<(crate::types::AxisKey, f64)> = configs
-            .iter()
-            .flat_map(|cfg| {
-                cfg.axes
-                    .iter()
-                    .filter(|&&a| a < SPATIAL_AXES)
-                    .map(move |&axis| {
-                        (
-                            crate::types::AxisKey {
-                                mcu_id: cfg.mcu_id,
-                                axis: axis as u8,
-                            },
-                            positions[axis],
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
+        let rebases = crate::mcu_config::spatial_rebase_targets(&configs, [x, y, z]);
         let follower_keys: Vec<crate::types::AxisKey> = configs
             .iter()
             .flat_map(|cfg| {
