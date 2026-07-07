@@ -257,12 +257,14 @@ impl Ingestor {
             let msgs = enqueue_segment(
                 seg,
                 &self.mcu_configs,
-                0.0,
-                fresh,
-                0.0,
-                MAX_LEAD_SECS,
-                |_mcu, hs| (hs * HARNESS_MCU_FREQ_HZ) as u64,
-                None,
+                &crate::enqueue::EnqueueCtx {
+                    t0: 0.0,
+                    fresh_stream: fresh,
+                    host_now: 0.0,
+                    lead_secs: MAX_LEAD_SECS,
+                    project: |_mcu, hs| (hs * HARNESS_MCU_FREQ_HZ) as u64,
+                    max_piece_secs: None,
+                },
             );
             for msg in msgs {
                 if msg.fresh_stream {

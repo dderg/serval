@@ -61,12 +61,14 @@ fn cartesian_x_axis_yields_pieces_with_projected_start_time() {
     let msgs = enqueue_segment(
         &seg_x_move(),
         &cfg,
-        100.0,
-        true,
-        0.0,
-        crate::pump::MAX_LEAD_SECS,
-        |_mcu, hs| (hs * 1_000.0) as u64,
-        None,
+        &crate::enqueue::EnqueueCtx {
+            t0: 100.0,
+            fresh_stream: true,
+            host_now: 0.0,
+            lead_secs: crate::pump::MAX_LEAD_SECS,
+            project: |_mcu, hs| (hs * 1_000.0) as u64,
+            max_piece_secs: None,
+        },
     );
 
     let x = msgs
@@ -121,12 +123,14 @@ fn corexy_x_slot_is_x_plus_y() {
     let msgs = enqueue_segment(
         &seg,
         &cfg,
-        0.0,
-        true,
-        0.0,
-        crate::pump::MAX_LEAD_SECS,
-        |_mcu, hs| (hs * 1_000.0) as u64,
-        None,
+        &crate::enqueue::EnqueueCtx {
+            t0: 0.0,
+            fresh_stream: true,
+            host_now: 0.0,
+            lead_secs: crate::pump::MAX_LEAD_SECS,
+            project: |_mcu, hs| (hs * 1_000.0) as u64,
+            max_piece_secs: None,
+        },
     );
 
     let a = msgs
@@ -229,12 +233,14 @@ fn flatten_axis_max_piece_secs_splits_long_piece() {
     let msgs = enqueue_segment(
         &seg,
         &cfg,
-        100.0,
-        true,
-        0.0,
-        crate::pump::MAX_LEAD_SECS,
-        |_mcu, hs| (hs * 1_000.0) as u64,
-        Some(0.025),
+        &crate::enqueue::EnqueueCtx {
+            t0: 100.0,
+            fresh_stream: true,
+            host_now: 0.0,
+            lead_secs: crate::pump::MAX_LEAD_SECS,
+            project: |_mcu, hs| (hs * 1_000.0) as u64,
+            max_piece_secs: Some(0.025),
+        },
     );
 
     let x = msgs
@@ -298,12 +304,14 @@ fn constant_follower_axis_merges_all_knots_to_one_piece() {
     let msgs = enqueue_segment(
         &seg,
         &axis_cfg_single(0),
-        0.0,
-        true,
-        0.0,
-        crate::pump::MAX_LEAD_SECS,
-        |_, hs| (hs * 1e9) as u64,
-        Some(0.025),
+        &crate::enqueue::EnqueueCtx {
+            t0: 0.0,
+            fresh_stream: true,
+            host_now: 0.0,
+            lead_secs: crate::pump::MAX_LEAD_SECS,
+            project: |_, hs| (hs * 1e9) as u64,
+            max_piece_secs: Some(0.025),
+        },
     );
 
     let axis = msgs
@@ -360,12 +368,14 @@ fn motion_constant_motion_merges_only_the_constant_run() {
     let msgs = enqueue_segment(
         &seg,
         &axis_cfg_single(0),
-        0.0,
-        true,
-        0.0,
-        crate::pump::MAX_LEAD_SECS,
-        |_, hs| (hs * 1e9) as u64,
-        None,
+        &crate::enqueue::EnqueueCtx {
+            t0: 0.0,
+            fresh_stream: true,
+            host_now: 0.0,
+            lead_secs: crate::pump::MAX_LEAD_SECS,
+            project: |_, hs| (hs * 1e9) as u64,
+            max_piece_secs: None,
+        },
     );
 
     let axis = msgs
@@ -430,12 +440,14 @@ fn constant_runs_at_different_values_do_not_merge_across_motion_boundary() {
     let msgs = enqueue_segment(
         &seg,
         &axis_cfg_single(0),
-        0.0,
-        true,
-        0.0,
-        crate::pump::MAX_LEAD_SECS,
-        |_, hs| (hs * 1e9) as u64,
-        None,
+        &crate::enqueue::EnqueueCtx {
+            t0: 0.0,
+            fresh_stream: true,
+            host_now: 0.0,
+            lead_secs: crate::pump::MAX_LEAD_SECS,
+            project: |_, hs| (hs * 1e9) as u64,
+            max_piece_secs: None,
+        },
     );
 
     let axis = msgs
@@ -508,12 +520,14 @@ fn constant_run_subdivides_under_max_piece_secs_after_merging() {
     let msgs = enqueue_segment(
         &seg,
         &axis_cfg_single(0),
-        0.0,
-        true,
-        0.0,
-        crate::pump::DRIP_WINDOW_SECS,
-        |_, hs| (hs * 1e9) as u64,
-        Some(max_piece),
+        &crate::enqueue::EnqueueCtx {
+            t0: 0.0,
+            fresh_stream: true,
+            host_now: 0.0,
+            lead_secs: crate::pump::DRIP_WINDOW_SECS,
+            project: |_, hs| (hs * 1e9) as u64,
+            max_piece_secs: Some(max_piece),
+        },
     );
 
     let axis = msgs
@@ -585,12 +599,14 @@ fn nonzero_curve_base_preserves_host_times() {
     let msgs = enqueue_segment(
         &seg,
         &axis_cfg_single(0),
-        t0,
-        true,
-        0.0,
-        crate::pump::MAX_LEAD_SECS,
-        |_, hs| (hs * 1e9) as u64,
-        None,
+        &crate::enqueue::EnqueueCtx {
+            t0,
+            fresh_stream: true,
+            host_now: 0.0,
+            lead_secs: crate::pump::MAX_LEAD_SECS,
+            project: |_, hs| (hs * 1e9) as u64,
+            max_piece_secs: None,
+        },
     );
     let axis = msgs
         .iter()
@@ -716,12 +732,14 @@ fn enqueue_stamps_motor_mask_onto_every_piece() {
     let msgs = enqueue_segment(
         &seg,
         &cfgs,
-        0.0,
-        true,
-        0.0,
-        0.25,
-        |_id, s| (s * 1e6) as u64,
-        None,
+        &crate::enqueue::EnqueueCtx {
+            t0: 0.0,
+            fresh_stream: true,
+            host_now: 0.0,
+            lead_secs: 0.25,
+            project: |_id, s| (s * 1e6) as u64,
+            max_piece_secs: None,
+        },
     );
     let all_pieces: Vec<_> = msgs.iter().flat_map(|m| m.pieces.iter()).collect();
     assert!(!all_pieces.is_empty());
@@ -750,12 +768,14 @@ fn overlay_pieces_are_relativized_to_start_at_zero() {
     let overlay_msgs = enqueue_segment(
         &make_seg(0b0000_0001),
         &cfg,
-        0.0,
-        true,
-        0.0,
-        crate::pump::MAX_LEAD_SECS,
-        |_, hs| (hs * 1e9) as u64,
-        None,
+        &crate::enqueue::EnqueueCtx {
+            t0: 0.0,
+            fresh_stream: true,
+            host_now: 0.0,
+            lead_secs: crate::pump::MAX_LEAD_SECS,
+            project: |_, hs| (hs * 1e9) as u64,
+            max_piece_secs: None,
+        },
     );
     let overlay_piece = &overlay_msgs[0].pieces[0].0;
     assert!(
@@ -773,12 +793,14 @@ fn overlay_pieces_are_relativized_to_start_at_zero() {
     let normal_msgs = enqueue_segment(
         &make_seg(0),
         &cfg,
-        0.0,
-        true,
-        0.0,
-        crate::pump::MAX_LEAD_SECS,
-        |_, hs| (hs * 1e9) as u64,
-        None,
+        &crate::enqueue::EnqueueCtx {
+            t0: 0.0,
+            fresh_stream: true,
+            host_now: 0.0,
+            lead_secs: crate::pump::MAX_LEAD_SECS,
+            project: |_, hs| (hs * 1e9) as u64,
+            max_piece_secs: None,
+        },
     );
     let normal_piece = &normal_msgs[0].pieces[0].0;
     assert!(
@@ -838,12 +860,14 @@ fn overlay_multi_piece_cumulative_positions_produce_individual_spans() {
     let msgs = enqueue_segment(
         &seg,
         &cfg,
-        0.0,
-        true,
-        0.0,
-        crate::pump::MAX_LEAD_SECS,
-        |_, hs| (hs * 1e9) as u64,
-        None,
+        &crate::enqueue::EnqueueCtx {
+            t0: 0.0,
+            fresh_stream: true,
+            host_now: 0.0,
+            lead_secs: crate::pump::MAX_LEAD_SECS,
+            project: |_, hs| (hs * 1e9) as u64,
+            max_piece_secs: None,
+        },
     );
     let all_pieces: Vec<_> = msgs.iter().flat_map(|m| m.pieces.iter()).collect();
     assert_eq!(all_pieces.len(), 3, "trapezoid must yield 3 pieces");

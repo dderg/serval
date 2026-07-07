@@ -36,7 +36,18 @@ fn corpus_pieces_per_axis() -> BTreeMap<u8, Vec<(PieceEntry, usize)>> {
     let mut per_axis: BTreeMap<u8, Vec<(PieceEntry, usize)>> = BTreeMap::new();
     let mut first = true;
     for (seg_idx, seg) in segs.iter().enumerate() {
-        for msg in enqueue_segment(seg, &mcu_configs, 0.0, first, 0.0, 2.0, project, None) {
+        for msg in enqueue_segment(
+            seg,
+            &mcu_configs,
+            &_motion_engine::enqueue::EnqueueCtx {
+                t0: 0.0,
+                fresh_stream: first,
+                host_now: 0.0,
+                lead_secs: 2.0,
+                project,
+                max_piece_secs: None,
+            },
+        ) {
             first = false;
             per_axis
                 .entry(msg.key.axis)

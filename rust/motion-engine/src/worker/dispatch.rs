@@ -118,12 +118,14 @@ pub(crate) fn dispatch_segment(
     let msgs = crate::enqueue::enqueue_segment(
         seg,
         &ctx.mcu_configs,
-        t0,
-        fresh,
-        host_now,
-        lead_secs,
-        project,
-        max_piece_secs,
+        &crate::enqueue::EnqueueCtx {
+            t0,
+            fresh_stream: fresh,
+            host_now,
+            lead_secs,
+            project,
+            max_piece_secs,
+        },
     );
 
     if fresh {
@@ -195,13 +197,15 @@ pub(crate) fn dispatch_nudge(
 
     let pieces = crate::enqueue::flatten_bezier_pieces(
         std::slice::from_ref(&np.piece),
-        t0,
-        mcu_id,
-        axis as usize,
-        host_now,
-        &project,
-        max_piece_secs,
-        np.motor_mask,
+        &crate::enqueue::FlattenCtx {
+            t0,
+            mcu_id,
+            axis_idx: axis as usize,
+            host_now,
+            project: &project,
+            max_piece_secs,
+            motor_mask: np.motor_mask,
+        },
     );
 
     if !pieces.is_empty() {

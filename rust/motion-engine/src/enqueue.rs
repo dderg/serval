@@ -40,15 +40,19 @@ pub(crate) fn lane_curve(
     acc.expect("kinematics lane with all-zero weights is a module construction bug")
 }
 
+pub struct EnqueueCtx<P> {
+    pub t0: f64,
+    pub fresh_stream: bool,
+    pub host_now: f64,
+    pub lead_secs: f64,
+    pub project: P,
+    pub max_piece_secs: Option<f64>,
+}
+
 pub fn enqueue_segment<P>(
     seg: &ShapedSegment,
     mcu_configs: &[McuAxisConfig],
-    t0: f64,
-    fresh_stream: bool,
-    host_now: f64,
-    lead_secs: f64,
-    project: P,
-    max_piece_secs: Option<f64>,
+    ctx: &EnqueueCtx<P>,
 ) -> Vec<EnqueueMsg>
 where
     P: Fn(u32, f64) -> u64,
@@ -84,20 +88,22 @@ where
 
             let pieces = flatten_axis(
                 &curve,
-                t0,
-                cfg.mcu_id,
-                axis_idx,
-                host_now,
-                &project,
-                max_piece_secs,
-                seg.motor_mask,
+                &FlattenCtx {
+                    t0: ctx.t0,
+                    mcu_id: cfg.mcu_id,
+                    axis_idx,
+                    host_now: ctx.host_now,
+                    project: &ctx.project,
+                    max_piece_secs: ctx.max_piece_secs,
+                    motor_mask: seg.motor_mask,
+                },
             );
             if !pieces.is_empty() {
                 out.push(EnqueueMsg {
                     key,
                     pieces,
-                    fresh_stream,
-                    lead_secs,
+                    fresh_stream: ctx.fresh_stream,
+                    lead_secs: ctx.lead_secs,
                     source_line: seg.source_line,
                 });
             }
@@ -139,42 +145,27 @@ struct MergedPiece {
     curve_u_start: f64,
 }
 
-fn flatten_axis<P>(
-    curve: &ScalarNurbs,
-    t0: f64,
-    mcu_id: u32,
-    axis_idx: usize,
-    host_now: f64,
-    project: &P,
-    max_piece_secs: Option<f64>,
-    motor_mask: u8,
-) -> Vec<(PieceEntry, f64)>
+pub(crate) struct FlattenCtx<'a, P> {
+    pub t0: f64,
+    pub mcu_id: u32,
+    pub axis_idx: usize,
+    pub host_now: f64,
+    pub project: &'a P,
+    pub max_piece_secs: Option<f64>,
+    pub motor_mask: u8,
+}
+
+fn flatten_axis<P>(curve: &ScalarNurbs, ctx: &FlattenCtx<'_, P>) -> Vec<(PieceEntry, f64)>
 where
     P: Fn(u32, f64) -> u64,
 {
     let bps = nurbs::bezier::extract_bezier_pieces(curve);
-    flatten_bezier_pieces(
-        &bps,
-        t0,
-        mcu_id,
-        axis_idx,
-        host_now,
-        project,
-        max_piece_secs,
-        motor_mask,
-    )
+    flatten_bezier_pieces(&bps, ctx)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn flatten_bezier_pieces<P>(
     bps: &[BezierPiece],
-    t0: f64,
-    mcu_id: u32,
-    axis_idx: usize,
-    host_now: f64,
-    project: &P,
-    max_piece_secs: Option<f64>,
-    motor_mask: u8,
+    ctx: &FlattenCtx<'_, P>,
 ) -> Vec<(PieceEntry, f64)>
 where
     P: Fn(u32, f64) -> u64,
@@ -203,15 +194,15 @@ where
     let mut out = Vec::with_capacity(merged.len() * 8);
 
     for (piece_idx, mp) in merged.iter().enumerate() {
-        let subs: Vec<(Vec<f64>, f64)> = match max_piece_secs {
+        let subs: Vec<(Vec<f64>, f64)> = match ctx.max_piece_secs {
             Some(m) => subdivide_monomial(&mp.coeffs, mp.duration, m),
             None => vec![(mp.coeffs.clone(), mp.duration)],
         };
 
         let mut sub_offset = 0.0_f64;
         for (sub_idx, (sub_coeffs, sub_dur)) in subs.iter().enumerate() {
-            let host_secs = t0 + mp.curve_u_start + sub_offset;
-            let start_time = project(mcu_id, host_secs);
+            let host_secs = ctx.t0 + mp.curve_u_start + sub_offset;
+            let start_time = (ctx.project)(ctx.mcu_id, host_secs);
 
             let cheb = nurbs::chebyshev::monomial_tau_to_chebyshev(sub_coeffs, *sub_dur);
             let cheb = nurbs::chebyshev::truncate_chebyshev_c2(
@@ -224,22 +215,22 @@ where
             let mut entry = PieceEntry::zeroed();
             entry.start_time = start_time;
             entry.duration = *sub_dur as f32;
-            entry.motor_mask = motor_mask;
+            entry.motor_mask = ctx.motor_mask;
             entry.coeff_count = cheb.len() as u8;
             for (dst, &c) in entry.coeffs.iter_mut().zip(&cheb) {
                 *dst = c as f32;
             }
-            if motor_mask != 0 {
+            if ctx.motor_mask != 0 {
                 entry.coeffs[0] -= entry.pos_start();
             }
 
-            let margin_us = (host_secs - host_now) * 1e6;
+            let margin_us = (host_secs - ctx.host_now) * 1e6;
             tracing::trace!(
-                mcu_id,
-                axis = axis_idx,
+                mcu_id = ctx.mcu_id,
+                axis = ctx.axis_idx,
                 piece_idx,
                 sub_idx,
-                u_start = host_secs - t0,
+                u_start = host_secs - ctx.t0,
                 margin_us,
                 start_ns = start_time,
                 "[dispatch-margin]"
