@@ -116,32 +116,35 @@ fn validate_extrude_and_fit_params(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+struct PlannerTuning {
+    arc_fit: Option<u32>,
+    max_extrude_only_velocity: Option<f64>,
+    max_extrude_only_accel: Option<f64>,
+    fit_tolerance_mm: Option<f64>,
+    fit_tolerance_accel_mm_s2: Option<f64>,
+}
+
 fn apply_planner_config(
     axis_registry: config::AxisRegistry,
     limit_sections: Vec<config::LimitSection>,
     cartesian: config::CartesianLimits,
     post_processor_set: config::PostProcessorSet,
-    max_extrude_only_velocity: Option<f64>,
-    max_extrude_only_accel: Option<f64>,
-    fit_tolerance_mm: Option<f64>,
-    fit_tolerance_accel_mm_s2: Option<f64>,
-    arc_fit: Option<u32>,
+    tuning: &PlannerTuning,
 ) -> PyResult<config::PlannerConfig> {
     let mut cfg = config::PlannerConfig::default();
     cfg.axis_registry = axis_registry;
     cfg.limit_sections = limit_sections;
     cfg.cartesian = cartesian;
     cfg.post_processors = post_processor_set;
-    cfg.max_extrude_only_velocity = max_extrude_only_velocity;
-    cfg.max_extrude_only_accel = max_extrude_only_accel;
-    if let Some(v) = fit_tolerance_mm {
+    cfg.max_extrude_only_velocity = tuning.max_extrude_only_velocity;
+    cfg.max_extrude_only_accel = tuning.max_extrude_only_accel;
+    if let Some(v) = tuning.fit_tolerance_mm {
         cfg.fit_tolerance_mm = v;
     }
-    if let Some(v) = fit_tolerance_accel_mm_s2 {
+    if let Some(v) = tuning.fit_tolerance_accel_mm_s2 {
         cfg.fit_tolerance_accel_mm_s2 = v;
     }
-    cfg.chain = match arc_fit {
+    cfg.chain = match tuning.arc_fit {
         Some(min_run_facets) => {
             if min_run_facets < 3 {
                 return Err(PyValueError::new_err(
@@ -156,18 +159,13 @@ fn apply_planner_config(
     Ok(cfg)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn build_planner_config(
     axes: Vec<(String, Vec<String>, Vec<String>, Vec<String>)>,
     limits: Vec<(String, Vec<String>, Option<f64>, Option<f64>, Option<f64>)>,
     post_processors: Vec<(String, String, Vec<(String, f64)>)>,
     kinematics_axes: &[String],
     cartesian_limits: (f64, f64, f64, f64, f64, f64),
-    arc_fit: Option<u32>,
-    max_extrude_only_velocity: Option<f64>,
-    max_extrude_only_accel: Option<f64>,
-    fit_tolerance_mm: Option<f64>,
-    fit_tolerance_accel_mm_s2: Option<f64>,
+    tuning: &PlannerTuning,
 ) -> PyResult<config::PlannerConfig> {
     let (axis_registry, post_processor_set, limit_sections, cartesian) =
         read_planner_config_sections(
@@ -179,10 +177,10 @@ fn build_planner_config(
         )?;
 
     validate_extrude_and_fit_params(
-        max_extrude_only_velocity,
-        max_extrude_only_accel,
-        fit_tolerance_mm,
-        fit_tolerance_accel_mm_s2,
+        tuning.max_extrude_only_velocity,
+        tuning.max_extrude_only_accel,
+        tuning.fit_tolerance_mm,
+        tuning.fit_tolerance_accel_mm_s2,
     )?;
 
     apply_planner_config(
@@ -190,11 +188,7 @@ fn build_planner_config(
         limit_sections,
         cartesian,
         post_processor_set,
-        max_extrude_only_velocity,
-        max_extrude_only_accel,
-        fit_tolerance_mm,
-        fit_tolerance_accel_mm_s2,
-        arc_fit,
+        tuning,
     )
 }
 
@@ -278,11 +272,13 @@ impl PyMotionEngine {
             post_processors,
             &kinematics_axes,
             cartesian_limits,
-            arc_fit,
-            max_extrude_only_velocity,
-            max_extrude_only_accel,
-            fit_tolerance_mm,
-            fit_tolerance_accel_mm_s2,
+            &PlannerTuning {
+                arc_fit,
+                max_extrude_only_velocity,
+                max_extrude_only_accel,
+                fit_tolerance_mm,
+                fit_tolerance_accel_mm_s2,
+            },
         )?;
         *self.planner_config.lock_ok() = cfg.clone();
 
@@ -365,9 +361,7 @@ impl PyMotionEngine {
             let line_no = self.move_seq.fetch_add(1, Ordering::Relaxed) as u32;
             let m = classify::build_move(
                 pos,
-                dx,
-                dy,
-                dz,
+                [dx, dy, dz],
                 extruder_axis,
                 e_delta,
                 limits,

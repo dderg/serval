@@ -121,7 +121,6 @@ impl PosTracker {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn apply(
         &mut self,
         x: Option<f64>,
@@ -196,9 +195,7 @@ pub fn parse_gcode_to_moves(source: &str, limits: VelocityLimits) -> Vec<Move> {
                 }
                 match build_move(
                     start,
-                    dx,
-                    dy,
-                    dz,
+                    [dx, dy, dz],
                     EXTRUDER_AXIS,
                     de,
                     limits,

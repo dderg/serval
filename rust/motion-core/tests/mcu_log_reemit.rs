@@ -3,13 +3,13 @@ use std::time::Instant;
 
 use time::OffsetDateTime;
 
-use _motion_engine::logging::context;
-use _motion_engine::logging::writer::RotatingJsonlWriter;
-use _motion_engine::logging::writer::{DEFAULT_BACKUP_COUNT, DEFAULT_MAX_BYTES, FSYNC_INTERVAL};
-use _motion_engine::mcu_log::build_mcu_log_hook;
 use host_rt::clock::RealClock;
 use host_rt::host_io::runtime_events::McuLogEvent;
 use host_rt::passthrough_queue::{McuHandle, PassthroughRouter};
+use motion_core::logging::context;
+use motion_core::logging::writer::RotatingJsonlWriter;
+use motion_core::logging::writer::{DEFAULT_BACKUP_COUNT, DEFAULT_MAX_BYTES, FSYNC_INTERVAL};
+use motion_core::mcu_log::build_mcu_log_hook;
 
 static GLOBAL_CONTEXT_SERIALISER: Mutex<()> = Mutex::new(());
 

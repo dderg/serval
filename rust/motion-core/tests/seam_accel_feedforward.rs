@@ -4,12 +4,12 @@
 //! truncation bounds the step by the truncation budgets. Sample across every
 //! piece seam of a real lowered corpus and hold that bound.
 
-use _motion_engine::enqueue::enqueue_segment;
-use _motion_engine::mcu_config::{McuAxisConfig, McuCaps};
-use _motion_engine::seam_test_harness::{
+use ethercat_rt::curves::AxisRing;
+use motion_core::enqueue::enqueue_segment;
+use motion_core::mcu_config::{McuAxisConfig, McuCaps};
+use motion_core::seam_test_harness::{
     collect_shaped_segments, default_stream_config, parse_gcode_to_moves,
 };
-use ethercat_rt::curves::AxisRing;
 use runtime::piece_ring::PieceEntry;
 use std::collections::BTreeMap;
 
@@ -39,7 +39,7 @@ fn corpus_pieces_per_axis() -> BTreeMap<u8, Vec<(PieceEntry, usize)>> {
         for msg in enqueue_segment(
             seg,
             &mcu_configs,
-            &_motion_engine::enqueue::EnqueueCtx {
+            &motion_core::enqueue::EnqueueCtx {
                 t0: 0.0,
                 fresh_stream: first,
                 host_now: 0.0,

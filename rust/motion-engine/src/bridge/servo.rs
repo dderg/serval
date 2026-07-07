@@ -415,13 +415,15 @@ impl PyMotionEngine {
             .detach(|| {
                 crate::servo_torque::send_resonance_buzz(
                     &conn,
-                    axis_mask,
-                    sign_mask,
-                    freq_start_millihz,
-                    freq_end_millihz,
-                    amplitude_nm,
-                    duration_ms,
-                    ramp_ms,
+                    mcu_protocol::messages::ResonanceBuzz {
+                        axis_mask,
+                        sign_mask,
+                        freq_start_millihz,
+                        freq_end_millihz,
+                        amplitude_nm,
+                        duration_ms,
+                        ramp_ms,
+                    },
                 )
             })
             .map_err(PyRuntimeError::new_err)?;

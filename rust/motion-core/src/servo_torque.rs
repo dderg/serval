@@ -134,27 +134,8 @@ pub fn send_stop(conn: &McuSerialConn) -> Result<i32, String> {
 
 const RESONANCE_BUZZ_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[allow(clippy::too_many_arguments)]
-pub fn send_resonance_buzz(
-    conn: &McuSerialConn,
-    axis_mask: u8,
-    sign_mask: u8,
-    freq_start_millihz: u32,
-    freq_end_millihz: u32,
-    amplitude_nm: u32,
-    duration_ms: u32,
-    ramp_ms: u32,
-) -> Result<i32, String> {
-    let body = ResonanceBuzz {
-        axis_mask,
-        sign_mask,
-        freq_start_millihz,
-        freq_end_millihz,
-        amplitude_nm,
-        duration_ms,
-        ramp_ms,
-    }
-    .encoded_to_vec();
+pub fn send_resonance_buzz(conn: &McuSerialConn, buzz: ResonanceBuzz) -> Result<i32, String> {
+    let body = buzz.encoded_to_vec();
     let r: ResonanceBuzzResponse = mcu_typed_call(
         conn,
         "ResonanceBuzz",

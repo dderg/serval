@@ -21,6 +21,16 @@ static TRANSIT_DIAG_FRAME_SEQ: AtomicU64 = AtomicU64::new(0);
 /// real-time advance (`arrival_clock` delta), and bracketing both with the
 /// wall-clock send gap and the blocking-call duration, tells late-arrival
 /// apart from host-pacing starvation, transport stall, and MCU clock burn.
+/// One axis' slice of a completed MCU round-trip: `front_start_time` is this
+/// axis' echo from the response; `arrival_clock` is the frame-global MCU
+/// clock; `send_started_at` / `send_elapsed_us` belong to the whole round-trip.
+struct TransitFrame {
+    send_started_at: Instant,
+    send_elapsed_us: f64,
+    front_start_time: u64,
+    arrival_clock: u64,
+}
+
 struct PrevTransitFrame {
     send_instant: Instant,
     front_start_time: u64,
@@ -222,21 +232,21 @@ impl WireSink {
     }
 
     /// Emit the per-axis transit diagnostic for one axis of a just-completed
-    /// frame. `front_start_time` is this axis' echo from the response;
-    /// `arrival_clock` is the frame-global MCU clock; `send_started_at` /
-    /// `send_elapsed_us` belong to the whole MCU round-trip.
-    #[allow(clippy::too_many_arguments)]
+    /// frame.
     fn emit_transit_diag(
         &self,
         key: AxisKey,
         host_front_start_time: u64,
         piece_count: usize,
         room: u32,
-        send_started_at: Instant,
-        send_elapsed_us: f64,
-        front_start_time: u64,
-        arrival_clock: u64,
+        frame: TransitFrame,
     ) {
+        let TransitFrame {
+            send_started_at,
+            send_elapsed_us,
+            front_start_time,
+            arrival_clock,
+        } = frame;
         let arrival_lead_ticks = front_start_time as i64 - arrival_clock as i64;
         let zero_st = host_front_start_time == 0;
         let past_arrival = arrival_lead_ticks < 0;
@@ -405,10 +415,12 @@ impl PieceSink for WireSink {
                 host_front_start_time,
                 f.pieces.len(),
                 f.room,
-                send_started_at,
-                send_elapsed_us,
-                diag.front_start_time,
-                resp.arrival_clock,
+                TransitFrame {
+                    send_started_at,
+                    send_elapsed_us,
+                    front_start_time: diag.front_start_time,
+                    arrival_clock: resp.arrival_clock,
+                },
             );
         }
 

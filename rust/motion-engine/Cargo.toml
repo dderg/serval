@@ -42,8 +42,6 @@ snapshot = ["dep:snapshot-core"]
 extension-module = ["pyo3/extension-module"]
 
 [dev-dependencies]
-proptest = "1"
-log = "0.4"
 mcu-transport = { path = "../mcu-transport" }
 # Enables McuHostIo::from_port_skip_identify for the teardown tests
 # (engine/tests.rs). Cargo unions this with the normal-dep feature set when
@@ -51,7 +49,6 @@ mcu-transport = { path = "../mcu-transport" }
 host-rt = { path = "../host-rt", features = ["test-harness"] }
 motion-engine = { path = ".", features = ["test-support"] }
 motion-core = { path = "../motion-core", features = ["test-support"] }
-ethercat-rt = { path = "../ethercat-rt" }
 serialport = "4"
 
 [lints]

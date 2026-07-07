@@ -216,8 +216,19 @@ fn resonance_buzz_round_trips_args_and_result() {
     let (client, server) = UnixStream::pair().unwrap();
     let rx = spawn_buzz_endpoint(server, 0);
     let conn = McuSerialConn::from_stream(client).expect("from_stream");
-    let result =
-        send_resonance_buzz(&conn, 0b001, 0b010, 5_000, 300_000, 4_200, 3_000, 300).expect("call");
+    let result = send_resonance_buzz(
+        &conn,
+        ResonanceBuzz {
+            axis_mask: 0b001,
+            sign_mask: 0b010,
+            freq_start_millihz: 5_000,
+            freq_end_millihz: 300_000,
+            amplitude_nm: 4_200,
+            duration_ms: 3_000,
+            ramp_ms: 300,
+        },
+    )
+    .expect("call");
     assert_eq!(result, 0);
     let seen = rx.recv().expect("endpoint saw the command");
     assert_eq!(seen.axis_mask, 0b001);
@@ -235,7 +246,19 @@ fn resonance_buzz_surfaces_nonzero_result() {
     let _rx = spawn_buzz_endpoint(server, -1);
     let conn = McuSerialConn::from_stream(client).expect("from_stream");
     assert_eq!(
-        send_resonance_buzz(&conn, 0b001, 0, 5_000, 5_000, 100, 1_000, 100).expect("call"),
+        send_resonance_buzz(
+            &conn,
+            ResonanceBuzz {
+                axis_mask: 0b001,
+                sign_mask: 0,
+                freq_start_millihz: 5_000,
+                freq_end_millihz: 5_000,
+                amplitude_nm: 100,
+                duration_ms: 1_000,
+                ramp_ms: 100,
+            },
+        )
+        .expect("call"),
         -1
     );
 }

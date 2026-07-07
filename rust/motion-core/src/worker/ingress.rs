@@ -296,9 +296,7 @@ impl Ingress {
         };
         let m = crate::classify::build_move(
             p.start,
-            dx,
-            dy,
-            dz,
+            [dx, dy, dz],
             0,
             0.0,
             self.config.limits,

@@ -7,7 +7,7 @@
 //   VORON_GCODE=/path/voron_cube.gcode cargo test -p _motion_engine \
 //       --release --test seam_voron_repro -- --ignored --nocapture
 
-use _motion_engine::seam_test_harness::{default_stream_config, parse_gcode_to_moves, run_moves};
+use motion_core::seam_test_harness::{default_stream_config, parse_gcode_to_moves, run_moves};
 
 #[test]
 #[ignore = "needs VORON_GCODE env pointing at the bench print file"]

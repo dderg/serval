@@ -1,4 +1,4 @@
-use _motion_engine::seam_test_harness::{SeamReport, default_stream_config, run_schedule};
+use motion_core::seam_test_harness::{SeamReport, default_stream_config, run_schedule};
 
 const NEPTUNE: &str = include_str!("gcode/neptune_crash_short.gcode");
 
@@ -31,7 +31,7 @@ fn pipeline_output_is_clean() {
 /// emission-boundary change that reopens it fails immediately.
 #[test]
 fn fuzz_minimal_window_is_c0() {
-    use _motion_engine::seam_test_harness::{parse_gcode_to_moves, run_moves};
+    use motion_core::seam_test_harness::{parse_gcode_to_moves, run_moves};
     let corpus = parse_gcode_to_moves(NEPTUNE, default_stream_config().limits);
     let window = &corpus[163..200.min(corpus.len())];
     let report = run_moves(window, default_stream_config());

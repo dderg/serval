@@ -84,19 +84,20 @@ pub fn classify_and_build(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn build_move(
     start: [f64; 3],
-    dx: f64,
-    dy: f64,
-    dz: f64,
+    delta: [f64; 3],
     extruder_axis: usize,
     e_delta: f64,
     limits: geometry::VelocityLimits,
     feedrate_mm_s: f64,
     line_no: u32,
 ) -> Result<geometry::Move, geometry::FrontendError> {
-    let end = [start[0] + dx, start[1] + dy, start[2] + dz];
+    let end = [
+        start[0] + delta[0],
+        start[1] + delta[1],
+        start[2] + delta[2],
+    ];
     let ctx = geometry::MoveContext {
         extruder_axis,
         feedrate_mm_s,

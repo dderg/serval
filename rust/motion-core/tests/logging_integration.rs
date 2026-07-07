@@ -6,8 +6,8 @@ fn end_to_end_jsonl_has_schema_and_context() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    _motion_engine::logging::init_logging(&dir).expect("init");
-    _motion_engine::logging::set_context(
+    motion_core::logging::init_logging(&dir).expect("init");
+    motion_core::logging::set_context(
         "k-1748700131-4412".to_string(),
         "print-1748700500".to_string(),
     );

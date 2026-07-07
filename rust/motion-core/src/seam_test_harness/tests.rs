@@ -192,9 +192,7 @@ fn extruder_track_is_continuous_across_a_pressure_advance_change() {
     let band = |x0: f64, line: u32| {
         build_move(
             [x0, 0.0, 0.0],
-            10.0,
-            0.0,
-            0.0,
+            [10.0, 0.0, 0.0],
             EXTRUDER_AXIS,
             0.5,
             config.limits,
@@ -259,9 +257,7 @@ fn extruder_kernel_track_is_continuous_across_a_drain() {
     let config = default_stream_config();
     let m1 = build_move(
         [0.0, 0.0, 0.0],
-        10.0,
-        0.0,
-        0.0,
+        [10.0, 0.0, 0.0],
         EXTRUDER_AXIS,
         0.5,
         config.limits,
@@ -271,9 +267,7 @@ fn extruder_kernel_track_is_continuous_across_a_drain() {
     .expect("printing move 1 builds");
     let m2 = build_move(
         [10.0, 0.0, 0.0],
-        0.1,
-        0.0,
-        0.0,
+        [0.1, 0.0, 0.0],
         EXTRUDER_AXIS,
         1.0,
         config.limits,

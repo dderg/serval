@@ -1,11 +1,11 @@
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
-use _motion_engine::pump::{
+use crossbeam_channel::{Receiver, TrySendError, unbounded};
+use motion_core::pump::{
     AxisFrame, AxisKey, DripArm, EnqueueMsg, HeartbeatMsg, PieceSink, PumpCallbacks, PumpMsg,
     SendError, run_pump,
 };
-use crossbeam_channel::{Receiver, TrySendError, unbounded};
 use runtime::piece_ring::PieceEntry;
 
 struct RecordingSink(Arc<Mutex<Vec<(AxisKey, usize)>>>);
@@ -70,7 +70,7 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
             sink,
             PumpCallbacks::noop(2),
             None,
-            std::sync::Arc::new(_motion_engine::drain::DrainLedger::new()),
+            std::sync::Arc::new(motion_core::drain::DrainLedger::new()),
             Arc::new(AtomicU64::new(0)),
         )
     });
@@ -79,7 +79,7 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
         key: AxisKey { mcu_id: 1, axis: 0 },
         pieces: vec![p(0), p(1)],
         fresh_stream: true,
-        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
     .unwrap();
@@ -87,7 +87,7 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
         key: AxisKey { mcu_id: 1, axis: 0 },
         pieces: vec![p(2)],
         fresh_stream: false,
-        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
     .unwrap();
@@ -158,7 +158,7 @@ fn run_pump_with_clock(
                 ..PumpCallbacks::noop(64)
             },
             None,
-            std::sync::Arc::new(_motion_engine::drain::DrainLedger::new()),
+            std::sync::Arc::new(motion_core::drain::DrainLedger::new()),
             Arc::new(AtomicU64::new(0)),
         )
     })
@@ -176,7 +176,7 @@ fn continuous_junction_position_passes() {
         key,
         pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
         fresh_stream: true,
-        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
     .unwrap();
@@ -184,7 +184,7 @@ fn continuous_junction_position_passes() {
         key,
         pieces: vec![piece_at(2000, 0.002, 12.5, 15.0)],
         fresh_stream: false,
-        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
     .unwrap();
@@ -208,7 +208,7 @@ fn junction_position_discontinuity_is_fatal() {
         key,
         pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
         fresh_stream: true,
-        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
     .unwrap();
@@ -216,7 +216,7 @@ fn junction_position_discontinuity_is_fatal() {
         key,
         pieces: vec![piece_at(2000, 0.002, 12.8, 15.0)],
         fresh_stream: false,
-        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
     .unwrap();
@@ -239,7 +239,7 @@ fn fresh_stream_resets_junction_position_baseline() {
         key,
         pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
         fresh_stream: true,
-        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
     .unwrap();
@@ -247,7 +247,7 @@ fn fresh_stream_resets_junction_position_baseline() {
         key,
         pieces: vec![piece_at(2000, 0.002, 50.0, 55.0)],
         fresh_stream: true,
-        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
     .unwrap();
@@ -272,7 +272,7 @@ fn bundles_same_mcu_axes_into_one_transaction() {
             sink,
             PumpCallbacks::noop(8),
             None,
-            std::sync::Arc::new(_motion_engine::drain::DrainLedger::new()),
+            std::sync::Arc::new(motion_core::drain::DrainLedger::new()),
             Arc::new(AtomicU64::new(0)),
         )
     });
@@ -284,7 +284,7 @@ fn bundles_same_mcu_axes_into_one_transaction() {
             key: AxisKey { mcu_id: 1, axis },
             pieces: vec![p(0)],
             fresh_stream: axis == 0,
-            lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+            lead_secs: motion_core::pump::MAX_LEAD_SECS,
             source_line: u32::MAX,
         })
         .unwrap();
@@ -328,7 +328,7 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
             sink,
             PumpCallbacks::noop(4),
             None,
-            std::sync::Arc::new(_motion_engine::drain::DrainLedger::new()),
+            std::sync::Arc::new(motion_core::drain::DrainLedger::new()),
             Arc::new(AtomicU64::new(0)),
         )
     });
@@ -342,7 +342,7 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
             key,
             pieces: vec![p(i)],
             fresh_stream: i == 0,
-            lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+            lead_secs: motion_core::pump::MAX_LEAD_SECS,
             source_line: u32::MAX,
         }) {
             Ok(()) => accepted += 1,
@@ -378,7 +378,7 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
             key,
             pieces: vec![p(9999)],
             fresh_stream: false,
-            lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+            lead_secs: motion_core::pump::MAX_LEAD_SECS,
             source_line: u32::MAX,
         })
         .is_ok(),
@@ -412,7 +412,7 @@ fn intake_feeds_a_second_axis_even_when_the_first_axis_ring_is_full() {
                 ..PumpCallbacks::noop(0)
             },
             None,
-            std::sync::Arc::new(_motion_engine::drain::DrainLedger::new()),
+            std::sync::Arc::new(motion_core::drain::DrainLedger::new()),
             Arc::new(AtomicU64::new(0)),
         )
     });
@@ -424,7 +424,7 @@ fn intake_feeds_a_second_axis_even_when_the_first_axis_ring_is_full() {
             key: key_a,
             pieces: vec![p(i)],
             fresh_stream: i == 0,
-            lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+            lead_secs: motion_core::pump::MAX_LEAD_SECS,
             source_line: u32::MAX,
         })
         .unwrap();
@@ -434,7 +434,7 @@ fn intake_feeds_a_second_axis_even_when_the_first_axis_ring_is_full() {
             key: key_b,
             pieces: vec![p(100 + i)],
             fresh_stream: i == 0,
-            lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+            lead_secs: motion_core::pump::MAX_LEAD_SECS,
             source_line: u32::MAX,
         })
         .unwrap();
@@ -480,7 +480,7 @@ fn drip_cohort_intake_bypasses_cap_and_feeds_all_participants() {
                 ..PumpCallbacks::noop(0)
             },
             None,
-            std::sync::Arc::new(_motion_engine::drain::DrainLedger::new()),
+            std::sync::Arc::new(motion_core::drain::DrainLedger::new()),
             Arc::new(AtomicU64::new(0)),
         )
     });
@@ -499,7 +499,7 @@ fn drip_cohort_intake_bypasses_cap_and_feeds_all_participants() {
             key: key_a,
             pieces: vec![piece_at(i, i as f64, 0.0, 0.0)],
             fresh_stream: i == 0,
-            lead_secs: _motion_engine::pump::DRIP_WINDOW_SECS,
+            lead_secs: motion_core::pump::DRIP_WINDOW_SECS,
             source_line: u32::MAX,
         })
         .unwrap();
@@ -509,7 +509,7 @@ fn drip_cohort_intake_bypasses_cap_and_feeds_all_participants() {
             key: key_b,
             pieces: vec![piece_at(i, i as f64, 0.0, 0.0)],
             fresh_stream: i == 0,
-            lead_secs: _motion_engine::pump::DRIP_WINDOW_SECS,
+            lead_secs: motion_core::pump::DRIP_WINDOW_SECS,
             source_line: u32::MAX,
         })
         .unwrap();

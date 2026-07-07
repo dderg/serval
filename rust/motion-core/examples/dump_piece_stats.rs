@@ -9,8 +9,8 @@ use std::env;
 use std::fs;
 use std::process;
 
-use _motion_engine::classify::build_move;
 use geometry::{ChainFitConfig, VelocityLimits};
+use motion_core::classify::build_move;
 use motion_pipeline::{StreamConfig, setup_stages};
 use trajectory::{AxisChainSet, ShapedSegment};
 
@@ -133,8 +133,15 @@ fn main() {
                 if dx.abs() < 1e-9 && dy.abs() < 1e-9 && dz.abs() < 1e-9 && de.abs() < 1e-9 {
                     continue;
                 }
-                let m = match build_move(start, dx, dy, dz, 3, de, limits, p.feed, submitted as u32)
-                {
+                let m = match build_move(
+                    start,
+                    [dx, dy, dz],
+                    3,
+                    de,
+                    limits,
+                    p.feed,
+                    submitted as u32,
+                ) {
                     Ok(m) => m,
                     Err(e) => {
                         eprintln!("build_move line {submitted}: {e:?}");

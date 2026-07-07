@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use _motion_engine::seam_test_harness::{
+use motion_core::seam_test_harness::{
     Move, default_stream_config, parse_gcode_to_moves, run_moves,
 };
 use proptest::prelude::*;

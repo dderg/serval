@@ -337,8 +337,16 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
     );
     planner
         .submit_move(
-            crate::classify::build_move([0.0; 3], 50.0, 0.0, 0.0, 0, 0.0, test_limits(), 200.0, 0)
-                .unwrap(),
+            crate::classify::build_move(
+                [0.0; 3],
+                [50.0, 0.0, 0.0],
+                0,
+                0.0,
+                test_limits(),
+                200.0,
+                0,
+            )
+            .unwrap(),
         )
         .unwrap();
     let engine = Arc::new(engine);
@@ -373,9 +381,7 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
                     };
                     let m = crate::classify::build_move(
                         start,
-                        50.0,
-                        0.0,
-                        0.0,
+                        [50.0, 0.0, 0.0],
                         0,
                         0.0,
                         test_limits(),

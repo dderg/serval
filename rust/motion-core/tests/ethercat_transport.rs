@@ -3,8 +3,8 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use _motion_engine::drain::DrainLedger;
-use _motion_engine::pump::{
+use motion_core::drain::DrainLedger;
+use motion_core::pump::{
     AxisKey, EnqueueMsg, HeartbeatMsg, PieceSink, PumpCallbacks, PumpMsg, SendError, WireSink,
     run_pump,
 };
@@ -94,7 +94,7 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
             sink,
             PumpCallbacks::noop(8),
             None,
-            std::sync::Arc::new(_motion_engine::drain::DrainLedger::new()),
+            std::sync::Arc::new(motion_core::drain::DrainLedger::new()),
             Arc::new(AtomicU64::new(0)),
         );
     });
@@ -103,7 +103,7 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
         key: AxisKey { mcu_id: 1, axis: 0 },
         pieces: vec![piece(0)],
         fresh_stream: false,
-        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
     .unwrap();
@@ -111,7 +111,7 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
         key: AxisKey { mcu_id: 2, axis: 0 },
         pieces: vec![piece(1)],
         fresh_stream: false,
-        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
     .unwrap();
@@ -182,7 +182,7 @@ fn heartbeat_retirement_drains_pump_ledger() {
         },
         pieces: vec![piece(0)],
         fresh_stream: true,
-        lead_secs: _motion_engine::pump::MAX_LEAD_SECS,
+        lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
     .unwrap();
