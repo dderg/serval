@@ -1,12 +1,12 @@
-use crate::{ConstructError, Float, KnotError, ScalarNurbs};
+use crate::{ConstructError, KnotError, ScalarNurbs};
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct KnotVector<T: Float> {
-    knots: Vec<T>,
+pub struct KnotVector {
+    knots: Vec<f64>,
 }
 
-impl<T: Float> KnotVector<T> {
-    pub fn try_new(knots: Vec<T>) -> Result<Self, ConstructError> {
+impl KnotVector {
+    pub fn try_new(knots: Vec<f64>) -> Result<Self, ConstructError> {
         if knots.len() < 2 {
             return Err(ConstructError::KnotCountMismatch {
                 expected: 2,
@@ -21,7 +21,7 @@ impl<T: Float> KnotVector<T> {
         Ok(Self { knots })
     }
 
-    pub fn as_slice(&self) -> &[T] {
+    pub fn as_slice(&self) -> &[f64] {
         &self.knots
     }
 
@@ -33,12 +33,12 @@ impl<T: Float> KnotVector<T> {
         self.knots.is_empty()
     }
 
-    pub fn into_inner(self) -> Vec<T> {
+    pub fn into_inner(self) -> Vec<f64> {
         self.knots
     }
 }
 
-pub fn find_knot_span<T: Float>(knots: &[T], p: usize, n: usize, u: T) -> usize {
+pub fn find_knot_span(knots: &[f64], p: usize, n: usize, u: f64) -> usize {
     debug_assert!(knots.len() == n + p + 1);
     if u >= knots[n] {
         return n - 1;
@@ -60,11 +60,11 @@ pub fn find_knot_span<T: Float>(knots: &[T], p: usize, n: usize, u: T) -> usize 
     mid
 }
 
-pub fn insert_knot<T: Float>(
-    curve: &ScalarNurbs<T>,
-    u: T,
+pub fn insert_knot(
+    curve: &ScalarNurbs,
+    u: f64,
     multiplicity: usize,
-) -> Result<ScalarNurbs<T>, KnotError> {
+) -> Result<ScalarNurbs, KnotError> {
     let p = curve.degree() as usize;
     let knots = curve.knots();
     let cps = curve.control_points();
@@ -100,22 +100,22 @@ pub fn insert_knot<T: Float>(
     ScalarNurbs::try_new(curve.degree(), new_knots, new_cps).map_err(|_| KnotError::Invalid)
 }
 
-fn boehm_insert_unweighted<T: Float>(
-    cps: &[T],
-    knots: &[T],
+fn boehm_insert_unweighted(
+    cps: &[f64],
+    knots: &[f64],
     p: usize,
     _k: usize,
-    u: T,
+    u: f64,
     existing: usize,
     r: usize,
-) -> Vec<T> {
+) -> Vec<f64> {
     debug_assert!(
         existing + r <= p,
         "Boehm: existing + r must not exceed degree"
     );
 
-    let mut current_cps: Vec<T> = cps.to_vec();
-    let mut current_knots: Vec<T> = knots.to_vec();
+    let mut current_cps: Vec<f64> = cps.to_vec();
+    let mut current_knots: Vec<f64> = knots.to_vec();
     let mut current_existing = existing;
 
     for _ in 0..r {
@@ -135,17 +135,17 @@ fn boehm_insert_unweighted<T: Float>(
     current_cps
 }
 
-fn boehm_insert_unweighted_single<T: Float>(
-    cps: &[T],
-    knots: &[T],
+fn boehm_insert_unweighted_single(
+    cps: &[f64],
+    knots: &[f64],
     p: usize,
     k: usize,
-    u: T,
+    u: f64,
     existing: usize,
-) -> Vec<T> {
+) -> Vec<f64> {
     let n = cps.len();
     let new_n = n + 1;
-    let mut new_cps = vec![T::ZERO; new_n];
+    let mut new_cps = vec![0.0; new_n];
 
     let lead = k - p + 1;
     new_cps[..lead].copy_from_slice(&cps[..lead]);
@@ -155,18 +155,18 @@ fn boehm_insert_unweighted_single<T: Float>(
     let l = k - p + 1;
     for i in 0..=p - 1 - existing {
         let denom = knots[l + i + p] - knots[l + i];
-        let alpha = if denom > T::ZERO {
+        let alpha = if denom > 0.0 {
             (u - knots[l + i]) / denom
         } else {
-            T::ZERO
+            0.0
         };
-        new_cps[l + i] = (T::ONE - alpha) * cps[k - p + i] + alpha * cps[k - p + i + 1];
+        new_cps[l + i] = (1.0 - alpha) * cps[k - p + i] + alpha * cps[k - p + i + 1];
     }
 
     new_cps
 }
 
-pub fn refined_to_full_multiplicity<T: Float>(curve: &ScalarNurbs<T>) -> ScalarNurbs<T> {
+pub fn refined_to_full_multiplicity(curve: &ScalarNurbs) -> ScalarNurbs {
     let p = curve.degree() as usize;
     let knots = curve.knots();
     let cps = curve.control_points();
@@ -182,14 +182,14 @@ pub fn refined_to_full_multiplicity<T: Float>(curve: &ScalarNurbs<T>) -> ScalarN
         .expect("refined_to_full_multiplicity: result invariants should hold")
 }
 
-fn build_refinement_vector<T: Float>(knots: &[T], p: usize) -> Vec<T> {
+fn build_refinement_vector(knots: &[f64], p: usize) -> Vec<f64> {
     let interior_start = p + 1;
     let interior_end = knots.len() - p - 1;
     if interior_end <= interior_start {
         return Vec::new();
     }
 
-    let mut x: Vec<T> = Vec::new();
+    let mut x: Vec<f64> = Vec::new();
     let mut i = interior_start;
     while i < interior_end {
         let u = knots[i];
@@ -206,7 +206,7 @@ fn build_refinement_vector<T: Float>(knots: &[T], p: usize) -> Vec<T> {
     x
 }
 
-fn refine_knot_vect_curve<T: Float>(knots: &[T], cps: &[T], p: usize, x: &[T]) -> (Vec<T>, Vec<T>) {
+fn refine_knot_vect_curve(knots: &[f64], cps: &[f64], p: usize, x: &[f64]) -> (Vec<f64>, Vec<f64>) {
     let n_pt = cps.len() - 1;
     let n_span = cps.len();
     let m = knots.len() - 1;
@@ -218,8 +218,8 @@ fn refine_knot_vect_curve<T: Float>(knots: &[T], cps: &[T], p: usize, x: &[T]) -
     let new_cp_count = cps.len() + x.len();
     let new_knot_count = knots.len() + x.len();
 
-    let mut new_cps = vec![T::ZERO; new_cp_count];
-    let mut new_knots = vec![T::ZERO; new_knot_count];
+    let mut new_cps = vec![0.0; new_cp_count];
+    let mut new_knots = vec![0.0; new_knot_count];
 
     for j in 0..=(a - p) {
         new_cps[j] = cps[j];
@@ -250,12 +250,12 @@ fn refine_knot_vect_curve<T: Float>(knots: &[T], cps: &[T], p: usize, x: &[T]) -
         for l in 1..=p {
             let ind = k - p + l;
             let alpha_num = new_knots[k + l] - x[xi];
-            if alpha_num == T::ZERO {
+            if alpha_num == 0.0 {
                 new_cps[ind - 1] = new_cps[ind];
             } else {
                 let denom = new_knots[k + l] - knots[i - p + l];
                 let alpha = alpha_num / denom;
-                new_cps[ind - 1] = alpha * new_cps[ind - 1] + (T::ONE - alpha) * new_cps[ind];
+                new_cps[ind - 1] = alpha * new_cps[ind - 1] + (1.0 - alpha) * new_cps[ind];
             }
         }
 
@@ -266,12 +266,7 @@ fn refine_knot_vect_curve<T: Float>(knots: &[T], cps: &[T], p: usize, x: &[T]) -
     (new_knots, new_cps)
 }
 
-pub fn remove_knot<T: Float>(
-    curve: &ScalarNurbs<T>,
-    u: T,
-    count: usize,
-    tol: T,
-) -> (ScalarNurbs<T>, usize) {
+pub fn remove_knot(curve: &ScalarNurbs, u: f64, count: usize, tol: f64) -> (ScalarNurbs, usize) {
     let p = curve.degree() as usize;
     let knots = curve.knots();
     let cps = curve.control_points();
@@ -293,7 +288,7 @@ pub fn remove_knot<T: Float>(
     let mut first = r - p;
     let mut last = r - s;
 
-    let mut temp: Vec<T> = vec![T::ZERO; 2 * p + 2 * num + 2];
+    let mut temp: Vec<f64> = vec![0.0; 2 * p + 2 * num + 2];
 
     let mut t: usize = 0;
     while t < num {
@@ -310,8 +305,8 @@ pub fn remove_knot<T: Float>(
             let alfi = (u - knots_ref[i]) / (knots_ref[i + ord + t] - knots_ref[i]);
             let alfj = (u - knots_ref[j - t]) / (knots_ref[j + ord] - knots_ref[j - t]);
 
-            temp[ii] = (pw[i] - (T::ONE - alfi) * temp[ii - 1]) / alfi;
-            temp[jj] = (pw[j] - alfj * temp[jj + 1]) / (T::ONE - alfj);
+            temp[ii] = (pw[i] - (1.0 - alfi) * temp[ii - 1]) / alfi;
+            temp[jj] = (pw[j] - alfj * temp[jj + 1]) / (1.0 - alfj);
 
             i += 1;
             ii += 1;
@@ -323,7 +318,7 @@ pub fn remove_knot<T: Float>(
             (temp[ii - 1] - temp[jj + 1]).abs() <= tol
         } else {
             let alfi = (u - knots_ref[i]) / (knots_ref[i + ord + t] - knots_ref[i]);
-            let blended = alfi * temp[ii + t + 1] + (T::ONE - alfi) * temp[ii - 1];
+            let blended = alfi * temp[ii + t + 1] + (1.0 - alfi) * temp[ii - 1];
             (pw[i] - blended).abs() <= tol
         };
 

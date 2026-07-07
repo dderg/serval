@@ -7,7 +7,7 @@ use nurbs::bezier::BezierPiece;
 use runtime::piece_ring::{MAX_PIECE_COEFFS, PieceEntry};
 use trajectory::ShapedSegment;
 
-fn scale_curve_exact(curve: &ScalarNurbs<f64>, weight: f64) -> ScalarNurbs<f64> {
+fn scale_curve_exact(curve: &ScalarNurbs, weight: f64) -> ScalarNurbs {
     if weight == 1.0 {
         curve.clone()
     } else {
@@ -17,14 +17,14 @@ fn scale_curve_exact(curve: &ScalarNurbs<f64>, weight: f64) -> ScalarNurbs<f64> 
 
 pub(crate) fn lane_curve(
     module: &KinematicsModule,
-    seg_axes: &[ScalarNurbs<f64>],
+    seg_axes: &[ScalarNurbs],
     lane: usize,
-) -> ScalarNurbs<f64> {
+) -> ScalarNurbs {
     if lane >= SPATIAL_AXES || module.lane_is_identity(lane) {
         return seg_axes[lane].clone();
     }
     let w = module.lane_weights(lane);
-    let mut acc: Option<ScalarNurbs<f64>> = None;
+    let mut acc: Option<ScalarNurbs> = None;
     for (axis, &weight) in w.iter().enumerate() {
         if weight == 0.0 {
             continue;
@@ -118,7 +118,7 @@ const WIRE_TRUNC_ACC_MM_S2: f64 = 0.1;
 
 /// Monomial-in-τ coefficients with the exactly-zero tail trimmed (exact zeros
 /// survive constant pieces and pre-carrier callers).
-fn trimmed_monomial(bp: &BezierPiece<f64>) -> Vec<f64> {
+fn trimmed_monomial(bp: &BezierPiece) -> Vec<f64> {
     let mut coeffs = bp.coeffs.clone();
     while coeffs.len() > 1 && coeffs.last().is_some_and(|c| *c == 0.0) {
         coeffs.pop();
@@ -140,7 +140,7 @@ struct MergedPiece {
 }
 
 fn flatten_axis<P>(
-    curve: &ScalarNurbs<f64>,
+    curve: &ScalarNurbs,
     t0: f64,
     mcu_id: u32,
     axis_idx: usize,
@@ -167,7 +167,7 @@ where
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn flatten_bezier_pieces<P>(
-    bps: &[BezierPiece<f64>],
+    bps: &[BezierPiece],
     t0: f64,
     mcu_id: u32,
     axis_idx: usize,

@@ -4,7 +4,7 @@
 //
 // This file may be distributed under the terms of the GNU GPLv3 license.
 
-#include "autoconf.h" // CONFIG_MACH_AVR
+#include "autoconf.h" // CONFIG_HAVE_STRICT_TIMING
 #include "basecmd.h" // oid_alloc
 #include "board/gpio.h" // gpio_out_write
 #include "board/irq.h" // irq_poll
@@ -31,9 +31,6 @@ nsecs_to_ticks(uint32_t ns)
 static void
 ndelay(uint32_t ticks)
 {
-    if (CONFIG_MACH_AVR)
-        // Slower MCUs don't require a delay
-        return;
     uint32_t end = timer_read_time() + ticks;
     while (timer_is_before(timer_read_time(), end))
         irq_poll();

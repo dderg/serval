@@ -1,29 +1,3 @@
-#![cfg_attr(not(feature = "host"), no_std)]
-
-#[cfg(any(
-    all(feature = "mcu-h7", feature = "mcu-f4"),
-    all(feature = "mcu-h7", feature = "mcu-g0"),
-    all(feature = "mcu-f4", feature = "mcu-g0"),
-))]
-compile_error!("features `mcu-h7`, `mcu-f4`, and `mcu-g0` are mutually exclusive");
-
-#[cfg(all(
-    feature = "host",
-    any(feature = "mcu-h7", feature = "mcu-f4", feature = "mcu-g0")
-))]
-compile_error!("feature `host` is incompatible with `mcu-*` features");
-
-#[cfg(not(any(
-    feature = "host",
-    feature = "mcu-h7",
-    feature = "mcu-f4",
-    feature = "mcu-g0"
-)))]
-compile_error!("must specify exactly one of: `host`, `mcu-h7`, `mcu-f4`, `mcu-g0`");
-
-mod float;
-pub use float::Float;
-
 pub mod error;
 pub use error::{AlgebraError, ArcLengthError, ConstructError, KnotError, NurbsError};
 
@@ -31,35 +5,23 @@ mod view;
 pub use view::{NurbsView, VectorNurbsView};
 
 mod scalar;
-#[cfg(feature = "host")]
-pub use scalar::ScalarNurbs;
-pub use scalar::ScalarNurbsRef;
+pub use scalar::{ScalarNurbs, ScalarNurbsRef};
 
 mod vector;
-#[cfg(feature = "host")]
-pub use vector::VectorNurbs;
-pub use vector::VectorNurbsRef;
+pub use vector::{VectorNurbs, VectorNurbsRef};
 
 pub mod eval;
 
 pub mod arc_length;
-#[cfg(feature = "host")]
-pub use arc_length::ArcLengthTable;
-pub use arc_length::ArcLengthTableRef;
+pub use arc_length::{ArcLengthTable, ArcLengthTableRef};
 
-#[cfg(feature = "host")]
 pub mod algebra;
 
-#[cfg(feature = "host")]
 pub mod knot;
-#[cfg(feature = "host")]
 pub use knot::KnotVector;
 
-#[cfg(feature = "host")]
 pub mod bezier;
-#[cfg(feature = "host")]
 pub mod chebyshev;
-#[cfg(feature = "host")]
 pub use bezier::BezierPiece;
 
 pub const MAX_DEGREE: usize = 20;

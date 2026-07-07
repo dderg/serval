@@ -3,7 +3,7 @@ use nurbs::VectorNurbs;
 
 #[test]
 fn cubic_variant_constructs() {
-    let xyz = VectorNurbs::<f64, 3>::try_new(
+    let xyz = VectorNurbs::<3>::try_new(
         3,
         vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
         vec![
@@ -33,7 +33,7 @@ fn cubic_variant_constructs() {
 fn split_cubic_bezier_preserves_position_at_split_and_along_curve() {
     use nurbs::eval::vector_eval;
 
-    let xyz = VectorNurbs::<f64, 3>::try_new(
+    let xyz = VectorNurbs::<3>::try_new(
         3,
         vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
         vec![
@@ -108,7 +108,7 @@ fn split_cubic_bezier_preserves_position_at_split_and_along_curve() {
 #[test]
 #[should_panic(expected = "strictly interior")]
 fn split_cubic_bezier_panics_on_boundary_s() {
-    let xyz = VectorNurbs::<f64, 3>::try_new(
+    let xyz = VectorNurbs::<3>::try_new(
         3,
         vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
         vec![

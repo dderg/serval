@@ -3,7 +3,7 @@ use nurbs::bezier::BezierPiece;
 
 #[test]
 fn differentiate_quadratic() {
-    let p = BezierPiece::<f64> {
+    let p = BezierPiece {
         u_start: 1.0,
         u_end: 3.0,
         coeffs: vec![3.0, 2.0, 5.0],
@@ -18,7 +18,7 @@ fn differentiate_quadratic() {
 
 #[test]
 fn differentiate_constant_is_zero() {
-    let p = BezierPiece::<f64> {
+    let p = BezierPiece {
         u_start: 0.0,
         u_end: 1.0,
         coeffs: vec![7.0],
@@ -30,7 +30,7 @@ fn differentiate_constant_is_zero() {
 
 #[test]
 fn differentiate_cubic_matches_finite_diff() {
-    let p = BezierPiece::<f64> {
+    let p = BezierPiece {
         u_start: 0.0,
         u_end: 1.0,
         coeffs: vec![1.0, -3.0, 2.0, 4.0],

@@ -3,14 +3,14 @@ use nurbs::ScalarNurbs;
 
 const INPUT_SAMPLES_PER_KERNEL_WIDTH: usize = 40;
 
-fn eval_clamped(curve: &ScalarNurbs<f64>, t: f64) -> f64 {
+fn eval_clamped(curve: &ScalarNurbs, t: f64) -> f64 {
     let knots = curve.knots();
     let lo = knots[0];
     let hi = knots[knots.len() - 1];
     nurbs::eval::eval(curve, t.clamp(lo, hi))
 }
 
-fn eval_kernel(kernel: &PiecewisePolynomialKernel<f64>, z: f64) -> f64 {
+fn eval_kernel(kernel: &PiecewisePolynomialKernel, z: f64) -> f64 {
     let (k_lo, k_hi) = kernel.support();
     if z < k_lo || z > k_hi {
         return 0.0;
@@ -28,15 +28,15 @@ pub struct ShapedSignal<'a> {
     input_lo: f64,
     dt_in: f64,
     n_input: usize,
-    kernel: &'a PiecewisePolynomialKernel<f64>,
+    kernel: &'a PiecewisePolynomialKernel,
     k_lo: f64,
     k_hi: f64,
 }
 
 impl<'a> ShapedSignal<'a> {
     pub fn new(
-        padded: &ScalarNurbs<f64>,
-        kernel: &'a PiecewisePolynomialKernel<f64>,
+        padded: &ScalarNurbs,
+        kernel: &'a PiecewisePolynomialKernel,
         t_start: f64,
         t_end: f64,
     ) -> Self {
@@ -44,7 +44,7 @@ impl<'a> ShapedSignal<'a> {
     }
 
     pub fn new_from_evaluator<F>(
-        kernel: &'a PiecewisePolynomialKernel<f64>,
+        kernel: &'a PiecewisePolynomialKernel,
         t_start: f64,
         t_end: f64,
         eval: F,

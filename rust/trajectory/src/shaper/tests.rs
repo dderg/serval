@@ -1,7 +1,6 @@
 use super::fixtures::{pad_segment_axis, FittedSegment};
 use super::*;
 use crate::kernel::build_smooth_zv_kernel;
-use nurbs::algebra::convolve;
 use nurbs::bezier::{bezier_pieces_to_nurbs, extract_bezier_pieces, BezierPiece};
 
 fn constant_segment(x: f64, y: f64, z: f64, t_start: f64, t_end: f64) -> FittedSegment {
@@ -67,62 +66,6 @@ fn shaped_signal_constant_is_constant() {
 }
 
 #[test]
-fn pad_trim_shaped_signal_matches_global_convolve() {
-    let freq = 10.0;
-    let t_sm = 0.8025 / freq;
-    let t_sm_half = t_sm / 2.0;
-    let kernel = build_smooth_zv_kernel(t_sm);
-
-    let fitted = vec![
-        linear_segment(0.0, 10.0, 0.0, 1.0),
-        linear_segment(10.0, 30.0, 1.0, 2.0),
-        linear_segment(30.0, 35.0, 2.0, 3.0),
-    ];
-    let batch_t_start = 0.0;
-    let batch_t_end = 3.0;
-
-    let mut global_pieces: Vec<BezierPiece<f64>> = Vec::new();
-
-    global_pieces.push(BezierPiece {
-        u_start: -t_sm_half,
-        u_end: 0.0,
-        coeffs: vec![0.0, 0.0],
-    });
-
-    for seg in &fitted {
-        global_pieces.extend(extract_bezier_pieces(&seg.axes[0]));
-    }
-
-    global_pieces.push(BezierPiece {
-        u_start: 3.0,
-        u_end: 3.0 + t_sm_half,
-        coeffs: vec![35.0, 0.0],
-    });
-
-    let global_nurbs = bezier_pieces_to_nurbs(&global_pieces);
-    let global_convolved = convolve(&global_nurbs, &kernel).unwrap();
-    let global_conv_pieces = extract_bezier_pieces(&global_convolved);
-
-    for seg_idx in 0..3 {
-        let seg = &fitted[seg_idx];
-        let padded = pad_segment_axis(seg_idx, 0, &fitted, t_sm_half, batch_t_start, batch_t_end);
-        let sig = ShapedSignal::new(&padded, &kernel, seg.t_start, seg.t_end);
-
-        let n_samples = 10;
-        for i in 1..n_samples {
-            let t = seg.t_start + (seg.t_end - seg.t_start) * (f64::from(i) / f64::from(n_samples));
-            let val_sig = sig.eval(t);
-            let val_global = eval_at(&global_conv_pieces, t);
-            assert!(
-                (val_sig - val_global).abs() < 1e-4,
-                "seg {seg_idx}, t={t}: sig={val_sig}, global={val_global}, diff={}",
-                (val_sig - val_global).abs()
-            );
-        }
-    }
-}
-
-#[test]
 fn shaped_signal_edge_boundary_approximately_correct() {
     let freq = 150.0;
     let t_sm = 0.8025 / freq;
@@ -167,13 +110,4 @@ fn shaped_signal_edge_boundary_approximately_correct() {
         );
         prev = val;
     }
-}
-
-fn eval_at(pieces: &[BezierPiece<f64>], t: f64) -> f64 {
-    for p in pieces {
-        if t >= p.u_start - 1e-15 && t <= p.u_end + 1e-15 {
-            return p.evaluate(t);
-        }
-    }
-    panic!("t={t} not in any piece");
 }

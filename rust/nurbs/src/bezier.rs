@@ -1,20 +1,20 @@
-use crate::{AlgebraError, Float, ScalarNurbs};
+use crate::{AlgebraError, ScalarNurbs};
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct BezierPiece<T: Float> {
-    pub u_start: T,
-    pub u_end: T,
-    pub coeffs: Vec<T>,
+pub struct BezierPiece {
+    pub u_start: f64,
+    pub u_end: f64,
+    pub coeffs: Vec<f64>,
 }
 
-impl<T: Float> BezierPiece<T> {
+impl BezierPiece {
     pub fn degree(&self) -> usize {
         self.coeffs.len().saturating_sub(1)
     }
 
-    pub fn evaluate(&self, u: T) -> T {
+    pub fn evaluate(&self, u: f64) -> f64 {
         let dx = u - self.u_start;
-        let mut acc = T::ZERO;
+        let mut acc = 0.0;
         for c in self.coeffs.iter().rev() {
             acc = acc * dx + *c;
         }
@@ -26,11 +26,11 @@ impl<T: Float> BezierPiece<T> {
             return Self {
                 u_start: self.u_start,
                 u_end: self.u_end,
-                coeffs: vec![T::ZERO],
+                coeffs: vec![0.0],
             };
         }
         let coeffs = (1..self.coeffs.len())
-            .map(|k| self.coeffs[k] * T::from_f64(k as f64))
+            .map(|k| self.coeffs[k] * (k as f64))
             .collect();
         Self {
             u_start: self.u_start,
@@ -39,57 +39,49 @@ impl<T: Float> BezierPiece<T> {
         }
     }
 
-    pub fn zero(u_start: T, u_end: T, degree: usize) -> Self {
-        Self {
-            u_start,
-            u_end,
-            coeffs: vec![T::ZERO; degree + 1],
-        }
-    }
-
-    pub fn to_bernstein(&self) -> Vec<T> {
+    pub fn to_bernstein(&self) -> Vec<f64> {
         let d = self.degree();
         let h = self.u_end - self.u_start;
-        let mut h_pow = T::ONE;
-        let normalized: Vec<T> = self
+        let mut h_pow = 1.0;
+        let normalized: Vec<f64> = self
             .coeffs
             .iter()
             .map(|c| {
                 let v = *c * h_pow;
-                h_pow = h_pow * h;
+                h_pow *= h;
                 v
             })
             .collect();
 
-        let mut bernstein = vec![T::ZERO; d + 1];
+        let mut bernstein = vec![0.0; d + 1];
         for k in 0..=d {
-            let mut acc = T::ZERO;
+            let mut acc = 0.0;
             for i in 0..=k {
-                let num = T::from_f64(binomial(k, i) as f64);
-                let den = T::from_f64(binomial(d, i) as f64);
-                acc = acc + (num / den) * normalized[i];
+                let num = binomial(k, i) as f64;
+                let den = binomial(d, i) as f64;
+                acc += (num / den) * normalized[i];
             }
             bernstein[k] = acc;
         }
         bernstein
     }
 
-    pub fn from_bernstein(bernstein: &[T], u_start: T, u_end: T) -> Self {
+    pub fn from_bernstein(bernstein: &[f64], u_start: f64, u_end: f64) -> Self {
         let d = bernstein.len() - 1;
         let h = u_end - u_start;
 
-        let mut h_pow = T::ONE;
-        let mut coeffs = vec![T::ZERO; d + 1];
+        let mut h_pow = 1.0;
+        let mut coeffs = vec![0.0; d + 1];
         for k in 0..=d {
-            let mut acc = T::ZERO;
+            let mut acc = 0.0;
             for i in 0..=k {
-                let sign = if (k - i) % 2 == 0 { T::ONE } else { -T::ONE };
-                let c_d_k = T::from_f64(binomial(d, k) as f64);
-                let c_k_i = T::from_f64(binomial(k, i) as f64);
-                acc = acc + sign * c_d_k * c_k_i * bernstein[i];
+                let sign = if (k - i) % 2 == 0 { 1.0 } else { -1.0 };
+                let c_d_k = binomial(d, k) as f64;
+                let c_k_i = binomial(k, i) as f64;
+                acc += sign * c_d_k * c_k_i * bernstein[i];
             }
             coeffs[k] = acc / h_pow;
-            h_pow = h_pow * h;
+            h_pow *= h;
         }
         Self {
             u_start,
@@ -99,19 +91,19 @@ impl<T: Float> BezierPiece<T> {
     }
 }
 
-impl<T: Float> std::ops::Add<&BezierPiece<T>> for &BezierPiece<T> {
-    type Output = Result<BezierPiece<T>, AlgebraError>;
-    fn add(self, rhs: &BezierPiece<T>) -> Self::Output {
+impl std::ops::Add<&BezierPiece> for &BezierPiece {
+    type Output = Result<BezierPiece, AlgebraError>;
+    fn add(self, rhs: &BezierPiece) -> Self::Output {
         if self.u_start != rhs.u_start || self.u_end != rhs.u_end {
             return Err(AlgebraError::SupportMismatch);
         }
         let max_len = self.coeffs.len().max(rhs.coeffs.len());
-        let mut coeffs = vec![T::ZERO; max_len];
+        let mut coeffs = vec![0.0; max_len];
         for (i, c) in self.coeffs.iter().enumerate() {
-            coeffs[i] = coeffs[i] + *c;
+            coeffs[i] += *c;
         }
         for (i, c) in rhs.coeffs.iter().enumerate() {
-            coeffs[i] = coeffs[i] + *c;
+            coeffs[i] += *c;
         }
         Ok(BezierPiece {
             u_start: self.u_start,
@@ -121,14 +113,14 @@ impl<T: Float> std::ops::Add<&BezierPiece<T>> for &BezierPiece<T> {
     }
 }
 
-pub fn extract_bezier_pieces<T: Float>(curve: &ScalarNurbs<T>) -> Vec<BezierPiece<T>> {
+pub fn extract_bezier_pieces(curve: &ScalarNurbs) -> Vec<BezierPiece> {
     let refined = crate::knot::refined_to_full_multiplicity(curve);
     let p = refined.degree() as usize;
     let knots = refined.knots();
     let cps = refined.control_points();
 
-    let mut breakpoints: Vec<T> = Vec::new();
-    let mut last: Option<T> = None;
+    let mut breakpoints: Vec<f64> = Vec::new();
+    let mut last: Option<f64> = None;
     for k in knots {
         if last.is_none_or(|l| *k != l) {
             breakpoints.push(*k);
@@ -141,7 +133,7 @@ pub fn extract_bezier_pieces<T: Float>(curve: &ScalarNurbs<T>) -> Vec<BezierPiec
     for window in breakpoints.windows(2) {
         let u_start = window[0];
         let u_end = window[1];
-        let bernstein: Vec<T> = cps[cp_idx..=(cp_idx + p)].to_vec();
+        let bernstein: Vec<f64> = cps[cp_idx..=(cp_idx + p)].to_vec();
         pieces.push(BezierPiece::from_bernstein(&bernstein, u_start, u_end));
         cp_idx += p;
     }
@@ -149,7 +141,7 @@ pub fn extract_bezier_pieces<T: Float>(curve: &ScalarNurbs<T>) -> Vec<BezierPiec
     pieces
 }
 
-pub fn bezier_pieces_to_nurbs<T: Float>(pieces: &[BezierPiece<T>]) -> ScalarNurbs<T> {
+pub fn bezier_pieces_to_nurbs(pieces: &[BezierPiece]) -> ScalarNurbs {
     assert!(!pieces.is_empty(), "bezier_pieces_to_nurbs: empty input");
     let p = pieces[0].degree();
     for w in pieces.windows(2) {
@@ -170,7 +162,7 @@ pub fn bezier_pieces_to_nurbs<T: Float>(pieces: &[BezierPiece<T>]) -> ScalarNurb
         knots.push(pieces[pieces.len() - 1].u_end);
     }
 
-    let mut cps: Vec<T> = Vec::with_capacity(pieces.len() * p + 1);
+    let mut cps: Vec<f64> = Vec::with_capacity(pieces.len() * p + 1);
     for (i, piece) in pieces.iter().enumerate() {
         let bernstein = piece.to_bernstein();
         if i == 0 {
@@ -184,10 +176,7 @@ pub fn bezier_pieces_to_nurbs<T: Float>(pieces: &[BezierPiece<T>]) -> ScalarNurb
         .expect("bezier_pieces_to_nurbs: invariants should hold")
 }
 
-pub fn split_piece_at<T: Float>(
-    piece: &BezierPiece<T>,
-    u_split: T,
-) -> (BezierPiece<T>, BezierPiece<T>) {
+pub fn split_piece_at(piece: &BezierPiece, u_split: f64) -> (BezierPiece, BezierPiece) {
     assert!(
         u_split > piece.u_start && u_split < piece.u_end,
         "u_split must be strictly interior"
@@ -201,17 +190,17 @@ pub fn split_piece_at<T: Float>(
     };
 
     let delta = u_split - piece.u_start;
-    let mut right_coeffs = vec![T::ZERO; d + 1];
-    let mut delta_pow = vec![T::ONE; d + 1];
+    let mut right_coeffs = vec![0.0; d + 1];
+    let mut delta_pow = vec![1.0; d + 1];
     for k in 1..=d {
         delta_pow[k] = delta_pow[k - 1] * delta;
     }
 
     for i in 0..=d {
-        let mut acc = T::ZERO;
+        let mut acc = 0.0;
         for k in i..=d {
-            let c_k_i = T::from_f64(binomial(k, i) as f64);
-            acc = acc + piece.coeffs[k] * c_k_i * delta_pow[k - i];
+            let c_k_i = binomial(k, i) as f64;
+            acc += piece.coeffs[k] * c_k_i * delta_pow[k - i];
         }
         right_coeffs[i] = acc;
     }

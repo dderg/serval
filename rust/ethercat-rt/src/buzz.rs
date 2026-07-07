@@ -85,6 +85,7 @@ impl BuzzOsc {
         self.base_counts
     }
 
+    #[cfg(test)]
     pub fn clear(&mut self) {
         self.active = false;
     }

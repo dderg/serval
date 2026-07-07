@@ -129,7 +129,6 @@ name = "c-api"
 version = "0.1.0"
 dependencies = [
  "cbindgen",
- "nurbs",
  "portable-atomic",
  "runtime",
 ]
@@ -659,6 +658,7 @@ dependencies = [
  "env_logger",
  "libc",
  "mcu-protocol",
+ "mcu-transport",
  "thiserror",
  "tracing",
 ]

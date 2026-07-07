@@ -487,7 +487,7 @@ fn decodes_query_motor_state_command() {
 fn motor_state_response_frame_round_trips() {
     let pos_mm: f64 = 12.5;
     let vel_mm_s: f64 = -400.0;
-    let frame = motor_state_response_frame(33, pos_mm, vel_mm_s);
+    let frame = motor_state_response_frame_multi(33, &[(0, pos_mm, vel_mm_s)]);
     let (chan, payload) = decode_frame(&frame).unwrap();
     assert_eq!(chan, CHANNEL_CONTROL);
     let (hdr, body) = decode_message_header(payload).unwrap();

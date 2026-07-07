@@ -372,9 +372,9 @@ fn eval_segment_axis(seg: &ShapedSegment, axis: usize, t: f64) -> f64 {
 
 fn fit_axis_from_signal(
     axis: usize,
-    template: &nurbs::ScalarNurbs<f64>,
+    template: &nurbs::ScalarNurbs,
     sig: &ShapedSignal<'_>,
-) -> Result<nurbs::ScalarNurbs<f64>, PostProcessError> {
+) -> Result<nurbs::ScalarNurbs, PostProcessError> {
     let template_pieces = extract_bezier_pieces(template);
     if template_pieces.is_empty() {
         return Err(PostProcessError::DegenerateAxisTrack { axis });
@@ -495,7 +495,7 @@ fn refine_shaped_span(
     domain_lo: f64,
     domain_hi: f64,
     depth: u32,
-    out: &mut Vec<BezierPiece<f64>>,
+    out: &mut Vec<BezierPiece>,
 ) -> Result<(), PostProcessError> {
     let (mono_u, fits) = shaped_ladder(axis, sig, t0, t1, domain_lo, domain_hi)?;
     if fits || depth >= SHAPED_FIT_MAX_DEPTH || (t1 - t0) <= 2.0 * SHAPED_FIT_MIN_SPAN_S {
@@ -568,8 +568,8 @@ fn finite_derivative(
 
 fn apply_trailing_zero_support(
     chain: &CompiledChain,
-    mut track: nurbs::ScalarNurbs<f64>,
-) -> nurbs::ScalarNurbs<f64> {
+    mut track: nurbs::ScalarNurbs,
+) -> nurbs::ScalarNurbs {
     let mut seen_kernel = false;
     for stage in &chain.stages {
         match stage {
@@ -583,12 +583,9 @@ fn apply_trailing_zero_support(
     track
 }
 
-fn apply_pressure_advance_to_track(
-    track: &nurbs::ScalarNurbs<f64>,
-    k: f64,
-) -> nurbs::ScalarNurbs<f64> {
+fn apply_pressure_advance_to_track(track: &nurbs::ScalarNurbs, k: f64) -> nurbs::ScalarNurbs {
     let pieces = extract_bezier_pieces(track);
-    let out_pieces: Vec<BezierPiece<f64>> = pieces
+    let out_pieces: Vec<BezierPiece> = pieces
         .iter()
         .map(|piece| {
             let derivative = piece.differentiate();
