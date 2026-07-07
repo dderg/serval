@@ -18,7 +18,9 @@ thiserror = { workspace = true }
 trajectory = { path = "../trajectory" }
 
 [dev-dependencies]
+libm = { version = "0.2", default-features = false }
 serde_json = "1"
+tracing = "0.1"
 
 [lints]
 workspace = true

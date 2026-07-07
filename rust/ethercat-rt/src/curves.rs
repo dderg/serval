@@ -1,7 +1,7 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use runtime::fault_sink::FaultSink;
-use runtime::motion_core::{get_position_and_velocity, ArmedPiece};
+use runtime::motion_core::{arm_piece, get_position_and_velocity, ArmedPiece};
 use runtime::piece_ring::{PieceEntry, RingDescriptor};
 
 pub const CLOCK_FREQ_HZ: f32 = 1_000_000_000.0;
@@ -43,6 +43,7 @@ pub struct AxisRing {
     storage: [PieceEntry; AXIS_RING_CAPACITY],
     desc: RingDescriptor,
     armed: Option<ArmedPiece>,
+    lookahead_armed: Option<ArmedPiece>,
     fault: AtomicU32,
     slot: usize,
 }
@@ -57,6 +58,7 @@ impl AxisRing {
             storage: [PieceEntry::zeroed(); AXIS_RING_CAPACITY],
             desc: RingDescriptor::new(0, AXIS_RING_CAPACITY),
             armed: None,
+            lookahead_armed: None,
             fault: AtomicU32::new(FAULT_REG_NONE),
             slot,
         }
@@ -131,6 +133,42 @@ impl AxisRing {
         Some((pos, vel, acc))
     }
 
+    /// Commanded (vel, acc) at a future instant, read-only: feedforward lead
+    /// samples ahead of the position cursor, so this must never retire ring
+    /// entries — it walks unretired pieces and caches its own armed copy.
+    /// A gap between pieces or a time past the stream end is a stationary
+    /// target: (0, 0).
+    pub fn peek_vel_acc(&mut self, t_ns: u64) -> (f32, f32) {
+        let covers = |p: &ArmedPiece| t_ns >= p.piece_start_cycles && t_ns < p.piece_end_cycles;
+        if !self.lookahead_armed.as_ref().is_some_and(covers) {
+            self.lookahead_armed = match &self.armed {
+                Some(p) if covers(p) => Some(*p),
+                _ => self.find_piece_covering(t_ns),
+            };
+        }
+        match &self.lookahead_armed {
+            Some(p) => (p.eval_pos_vel(t_ns).1, p.eval_accel(t_ns)),
+            None => (0.0, 0.0),
+        }
+    }
+
+    fn find_piece_covering(&self, t_ns: u64) -> Option<ArmedPiece> {
+        for k in 0..self.desc.len() {
+            let slot = self.desc.slot_at(k).expect("slot_at within len must exist");
+            let entry = self
+                .storage
+                .get(slot)
+                .expect("ring slot within storage bounds");
+            if t_ns < entry.start_time {
+                return None;
+            }
+            if t_ns < entry.end_time(CLOCK_FREQ_HZ) {
+                return Some(arm_piece(entry, CLOCK_FREQ_HZ));
+            }
+        }
+        None
+    }
+
     pub fn take_fault(&self) -> Option<u32> {
         let prev = self.fault.swap(FAULT_REG_NONE, Ordering::Acquire);
         if prev != FAULT_REG_NONE {
@@ -151,6 +189,7 @@ impl AxisRing {
     pub fn reset(&mut self) {
         self.desc.drain();
         self.armed = None;
+        self.lookahead_armed = None;
         self.fault.store(FAULT_REG_NONE, Ordering::Relaxed);
     }
 }

@@ -740,6 +740,10 @@ export class TrajectoryView {
   _runFrame() {
     this._frameId = 0;
     if (this._pendingFullRender) {
+      // Keep the request alive until data exists: a frame that fired between
+      // a ResizeObserver's canvas clear and the snapshot arriving must not
+      // swallow the repaint, or the cleared panels stay blank forever.
+      if (!this.data) return;
       this._pendingFullRender = false;
       this.renderAll();
     } else {
@@ -1117,6 +1121,11 @@ export class TrajectoryView {
     this.onChanged?.();
     this.lastBoundsKey = "";
     this.renderAll();
+    // Also queue a frame: layout may still be settling, and a ResizeObserver
+    // firing after the synchronous paint clears the canvas bitmaps. The
+    // queued render re-reads sizes after this task's layout flush, so the
+    // panels cannot end up sized-but-blank.
+    this.scheduleFull();
   }
 
   // Re-anchor the comparison snapshot without touching the current one — the
