@@ -4,6 +4,7 @@
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import logging
+import multiprocessing
 import os
 import time
 from collections import namedtuple
@@ -16,6 +17,29 @@ SweepParams = namedtuple(
     "SweepParams",
     "freq_start freq_end accel_per_hz duration ramp amplitude_mm",
 )
+
+
+def _write_samples_to_file(filename, samples):
+    with open(filename, "w") as f:
+        f.write("#time,accel_x,accel_y,accel_z\n")
+        for t, accel_x, accel_y, accel_z in samples:
+            f.write("%.6f,%.6f,%.6f,%.6f\n" % (t, accel_x, accel_y, accel_z))
+
+
+def write_raw_data_blocking(printer, aclient, filename):
+    samples = aclient.get_samples()
+    write_proc = multiprocessing.Process(
+        target=_write_samples_to_file, args=(filename, samples)
+    )
+    write_proc.start()
+    reactor = printer.get_reactor()
+    while write_proc.is_alive():
+        reactor.pause(reactor.monotonic() + 0.050)
+    if write_proc.exitcode != 0:
+        raise printer.command_error(
+            "Writing raw accelerometer data to %s failed (exit code %s)"
+            % (filename, write_proc.exitcode)
+        )
 
 
 class TestAxis:
@@ -236,9 +260,9 @@ class ResonanceTester:
                             point if len(test_points) > 1 else None,
                             chip_name,
                         )
-                        aclient.write_to_file(raw_name)
+                        write_raw_data_blocking(self.printer, aclient, raw_name)
                         gcmd.respond_info(
-                            "Writing raw accelerometer data to "
+                            "Raw accelerometer data written to "
                             "%s file" % (raw_name,)
                         )
                 if helper is None:
