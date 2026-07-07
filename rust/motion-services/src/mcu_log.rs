@@ -1,4 +1,4 @@
-use crate::lock_ext::LockExt;
+use motion_core::lock_ext::LockExt;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 

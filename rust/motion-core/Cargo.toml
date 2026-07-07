@@ -18,13 +18,7 @@ nurbs = { path = "../nurbs" }
 runtime = { path = "../runtime" }
 crossbeam-channel = "0.5"
 libc = "0.2"
-arc-swap = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "env-filter", "std", "fmt"] }
-tracing-appender = "0.2"
-tracing-log = "0.2"
-time = { version = "0.3", default-features = false, features = ["formatting", "macros", "std"] }
-serde_json = "1"
 thiserror = { workspace = true }
 
 [features]
@@ -32,8 +26,6 @@ test-support = []
 
 [dev-dependencies]
 proptest = "1"
-log = "0.4"
-mcu-transport = { path = "../mcu-transport" }
 host-rt = { path = "../host-rt", features = ["test-harness"] }
 motion-core = { path = ".", features = ["test-support"] }
 ethercat-rt = { path = "../ethercat-rt" }

@@ -1,4 +1,4 @@
-use crate::kinematics::KinematicsModule;
+use motion_core::kinematics::KinematicsModule;
 use runtime::stepping_state::MAX_AXES;
 use std::collections::HashMap;
 
