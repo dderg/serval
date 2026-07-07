@@ -2,6 +2,7 @@ use super::{
     DRAIN_TIMEOUT, FlushWait, HashMap, Ordering, PyMotionEngine, PyResult, PyRuntimeError, Python,
     collect_motor_positions_inner, planner_err, pymethods,
 };
+use crate::lock_ext::LockExt;
 
 #[pymethods]
 impl PyMotionEngine {
@@ -51,14 +52,14 @@ impl PyMotionEngine {
         )
     }
     fn wait_moves(&self, py: Python<'_>) -> PyResult<()> {
-        let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self.planner.lock_ok();
         let planner = guard.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("planner not initialized — call init_planner first")
         })?;
         py.detach(|| planner.flush()).map_err(planner_err)
     }
     fn drain_motion(&self, py: Python<'_>) -> PyResult<()> {
-        let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self.planner.lock_ok();
         let planner = guard.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("planner not initialized — call init_planner first")
         })?;
@@ -69,20 +70,14 @@ impl PyMotionEngine {
     }
     fn wait_moves_start(&self) -> PyResult<u64> {
         let rx = self.flush_try_start_inner()?;
-        let mut pending = self
-            .pending_flushes
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let mut pending = self.pending_flushes.lock_ok();
         let id = self.next_flush_id.fetch_add(1, Ordering::Relaxed);
         pending.insert(id, FlushWait { rx, deadline: None });
         Ok(id)
     }
     fn wait_moves_poll(&self, flush_id: u64) -> PyResult<bool> {
         let started_rx = {
-            let pending = self
-                .pending_flushes
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let pending = self.pending_flushes.lock_ok();
             let Some(wait) = pending.get(&flush_id) else {
                 return Err(PyRuntimeError::new_err(format!(
                     "wait_moves_poll: unknown flush id {flush_id}"
@@ -98,10 +93,7 @@ impl PyMotionEngine {
                 None => return Ok(false),
             }
         };
-        let mut pending = self
-            .pending_flushes
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let mut pending = self.pending_flushes.lock_ok();
         let Some(wait) = pending.get_mut(&flush_id) else {
             return Err(PyRuntimeError::new_err(format!(
                 "wait_moves_poll: unknown flush id {flush_id}"
@@ -139,10 +131,7 @@ impl PyMotionEngine {
     }
     fn motion_drain_poll(&self) -> PyResult<bool> {
         self.report_lagging_drain_wait();
-        let mut pending = self
-            .pending_drain_flush
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let mut pending = self.pending_drain_flush.lock_ok();
         if pending.is_none() {
             match self.flush_try_start_inner()? {
                 Some(rx) => *pending = Some(rx),
@@ -157,10 +146,7 @@ impl PyMotionEngine {
                 *pending = None;
                 let drained = self.drain.drained();
                 if drained {
-                    *self
-                        .drain_wait_diag
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner()) = None;
+                    *self.drain_wait_diag.lock_ok() = None;
                 }
                 Ok(drained)
             }
@@ -174,19 +160,12 @@ impl PyMotionEngine {
         }
     }
     fn motion_drain_finalize(&self) {
-        *self
-            .pending_drain_flush
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = None;
-        *self
-            .drain_wait_diag
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = None;
+        *self.pending_drain_flush.lock_ok() = None;
+        *self.drain_wait_diag.lock_ok() = None;
     }
     fn pending_channel_moves(&self) -> u64 {
         self.planner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .lock_ok()
             .as_ref()
             .map_or(0, |p| p.pending_channel_moves() as u64)
     }
@@ -196,7 +175,7 @@ impl PyMotionEngine {
     /// `None` when the move channel is full — the caller yields and retries;
     /// blocking here would stall the whole klippy reactor thread.
     fn fence_start(&self, force: bool) -> PyResult<Option<u64>> {
-        let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self.planner.lock_ok();
         let planner = guard.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("planner not initialized — call init_planner first")
         })?;
@@ -211,34 +190,21 @@ impl PyMotionEngine {
     /// Consumes the resolution.
     fn fence_poll(&self, id: u64) -> Option<f64> {
         let taken = {
-            let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+            let guard = self.planner.lock_ok();
             guard.as_ref()?.fence_take(id)
         }?;
         let Some(t_end) = taken else {
             return Some(0.0);
         };
-        let anchored = self
-            .dispatch_anchor
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .t0();
+        let anchored = self.dispatch_anchor.lock_ok().t0();
         let Some(t0) = anchored else {
             return Some(0.0);
         };
-        let host_now = self
-            .router
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .host_now_secs();
+        let host_now = self.router.lock_ok().host_now_secs();
         Some((t0 + t_end - host_now).max(0.0))
     }
     fn get_last_move_time(&self) -> f64 {
-        match self
-            .planner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-        {
+        match self.planner.lock_ok().as_ref() {
             Some(p) => p.last_move_time(),
             None => 0.0,
         }
@@ -251,25 +217,17 @@ impl PyMotionEngine {
     }
     pub(crate) fn committed_lead_secs(&self) -> f64 {
         let last_move_time = {
-            let planner = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+            let planner = self.planner.lock_ok();
             let Some(p) = planner.as_ref() else {
                 return 0.0;
             };
             p.last_move_time()
         };
-        let anchored = self
-            .dispatch_anchor
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .t0();
+        let anchored = self.dispatch_anchor.lock_ok().t0();
         let Some(t0) = anchored else {
             return 0.0;
         };
-        let host_now = self
-            .router
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .host_now_secs();
+        let host_now = self.router.lock_ok().host_now_secs();
         (t0 + last_move_time - host_now).max(0.0)
     }
     fn pump_backlog(&self) -> u64 {
@@ -295,11 +253,7 @@ impl PyMotionEngine {
             .map_err(PyRuntimeError::new_err)
     }
     fn live_motor_positions(&self) -> std::collections::HashMap<String, (f64, f64)> {
-        self.live_position_cache
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .0
-            .clone()
+        self.live_position_cache.lock_ok().0.clone()
     }
 }
 
@@ -316,7 +270,7 @@ impl PyMotionEngine {
         err_ctx: &str,
     ) -> PyResult<()> {
         let io = {
-            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let mcus = self.mcus.lock_ok();
             let conn = mcus.get(&mcu_handle).ok_or_else(|| {
                 PyRuntimeError::new_err(format!("{op}: unknown mcu_handle {mcu_handle}"))
             })?;
@@ -354,10 +308,7 @@ impl PyMotionEngine {
     fn report_lagging_drain_wait(&self) {
         const DRAIN_WAIT_REPORT_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
         let now = std::time::Instant::now();
-        let mut diag = self
-            .drain_wait_diag
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let mut diag = self.drain_wait_diag.lock_ok();
         let (started, last_report) = diag.get_or_insert((now, None));
         if now.duration_since(*started) < DRAIN_WAIT_REPORT_AFTER {
             return;
@@ -387,7 +338,7 @@ impl PyMotionEngine {
     fn flush_try_start_inner(
         &self,
     ) -> PyResult<Option<crossbeam_channel::Receiver<Option<std::time::Instant>>>> {
-        let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self.planner.lock_ok();
         let planner = guard.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("planner not initialized — call init_planner first")
         })?;

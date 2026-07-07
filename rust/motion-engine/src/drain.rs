@@ -11,6 +11,7 @@
 //! behind a `PumpMsg::Barrier`, whose ack the pump sends only after
 //! publishing — the pipeline `Flush` does exactly that.
 
+use crate::lock_ext::LockExt;
 use std::collections::BTreeMap;
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -45,19 +46,19 @@ impl DrainLedger {
 
     /// Pump-only: replace the snapshot and wake waiters.
     pub fn publish(&self, snapshot: BTreeMap<AxisKey, AxisDrainState>) {
-        let mut axes = self.axes.lock().unwrap_or_else(|p| p.into_inner());
+        let mut axes = self.axes.lock_ok();
         *axes = snapshot;
         drop(axes);
         self.cv.notify_all();
     }
 
     pub fn drained(&self) -> bool {
-        let axes = self.axes.lock().unwrap_or_else(|p| p.into_inner());
+        let axes = self.axes.lock_ok();
         axes.values().all(AxisDrainState::drained)
     }
 
     pub fn lagging_axes(&self) -> Vec<(u32, u8, AxisDrainState)> {
-        let axes = self.axes.lock().unwrap_or_else(|p| p.into_inner());
+        let axes = self.axes.lock_ok();
         axes.iter()
             .filter(|(_, s)| !s.drained())
             .map(|(&(mcu, axis), &s)| (mcu, axis, s))
@@ -66,7 +67,7 @@ impl DrainLedger {
 
     pub fn wait_drained(&self, timeout: Duration) -> Result<(), String> {
         let deadline = Instant::now() + timeout;
-        let mut axes = self.axes.lock().unwrap_or_else(|p| p.into_inner());
+        let mut axes = self.axes.lock_ok();
         while !axes.values().all(AxisDrainState::drained) {
             let now = Instant::now();
             if now >= deadline {

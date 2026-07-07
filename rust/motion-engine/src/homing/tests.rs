@@ -1,3 +1,4 @@
+use crate::lock_ext::LockExt;
 use std::sync::{Arc, Mutex};
 
 use runtime::piece_ring::PieceEntry;
@@ -53,8 +54,7 @@ fn shared(store: HistoryStore) -> Arc<Mutex<HistoryStore>> {
 
 fn host_of(router: &Arc<Mutex<PassthroughRouter>>, mcu_id: u32, clock: u64) -> f64 {
     router
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
+        .lock_ok()
         .clock_to_host_secs(crate::types::mcu_handle_from_raw(mcu_id), clock)
         .expect("test router must resolve clock_to_host_secs")
 }

@@ -7,6 +7,7 @@ use super::{
     mcu_handle_from_raw, query_ethercat_runtime_caps, report_ethercat_endpoint_death,
     resolve_motion_caps,
 };
+use crate::lock_ext::LockExt;
 
 fn escalate_endpoint_death(latch: &Arc<Mutex<HashMap<u32, String>>>, mcu_id: u32, reason: &str) {
     if report_ethercat_endpoint_death(latch, mcu_id, reason) {
@@ -63,7 +64,7 @@ impl PyMotionEngine {
     ) -> PyResult<(HashMap<u32, Arc<McuSerialConn>>, Vec<McuAxisConfig>)> {
         let ec_conns: HashMap<u32, Arc<McuSerialConn>> = {
             let ethercat_handles: Vec<(u32, Arc<McuSerialConn>, String)> = {
-                let mcus_lock = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+                let mcus_lock = self.mcus.lock_ok();
                 mcus.iter()
                     .filter_map(|(handle, _, _)| {
                         let c = mcus_lock.get(handle)?;
@@ -92,7 +93,7 @@ impl PyMotionEngine {
                     "[caps-trace] init_planner: ethercat mcu caps"
                 );
                 {
-                    let mut mcus_lock = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+                    let mut mcus_lock = self.mcus.lock_ok();
                     if let Some(c) = mcus_lock.get_mut(&mcu_id) {
                         c.runtime_caps = Some(caps);
                     }
@@ -103,7 +104,7 @@ impl PyMotionEngine {
         };
 
         let caps_by_handle: std::collections::HashMap<u32, McuCaps> = {
-            let mcus_lock = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let mcus_lock = self.mcus.lock_ok();
             mcus.iter()
                 .map(|(handle, _, _)| {
                     let conn = mcus_lock.get(handle).ok_or_else(|| {
@@ -119,10 +120,7 @@ impl PyMotionEngine {
         };
         let mcu_configs = build_mcu_configs(mcus, &caps_by_handle)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        *self
-            .mcu_axis_configs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = mcu_configs.clone();
+        *self.mcu_axis_configs.lock_ok() = mcu_configs.clone();
 
         Ok((ec_conns, mcu_configs))
     }
@@ -136,7 +134,7 @@ impl PyMotionEngine {
         HashMap<crate::types::AxisKey, u32>,
     )> {
         let ethercat_mcu_ids: HashSet<u32> = {
-            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let mcus = self.mcus.lock_ok();
             mcu_configs
                 .iter()
                 .filter(|c| {
@@ -148,7 +146,7 @@ impl PyMotionEngine {
         };
 
         let host_ios: HashMap<u32, Arc<McuHostIo>> = {
-            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let mcus = self.mcus.lock_ok();
             let mut out = HashMap::new();
             for cfg_mcu in mcu_configs {
                 if ethercat_mcu_ids.contains(&cfg_mcu.mcu_id) {
@@ -194,7 +192,7 @@ impl PyMotionEngine {
     }
 
     pub(super) fn seed_ethercat_clock_estimates(&self, ethercat_mcu_ids: &HashSet<u32>) {
-        let mut router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+        let mut router = self.router.lock_ok();
         let now_ns = crate::timing::monotonic_ns();
         for &mcu_id in ethercat_mcu_ids {
             let mcu_h = mcu_handle_from_raw(mcu_id);
@@ -237,7 +235,7 @@ impl PyMotionEngine {
                 transports: wire_transports,
                 timeout: Duration::from_secs(5),
                 freq_of: Arc::new(move |mcu_id: u32| {
-                    let r = router_for_freq.lock().unwrap_or_else(|p| p.into_inner());
+                    let r = router_for_freq.lock_ok();
                     r.ack_clock_and_freq(mcu_handle_from_raw(mcu_id))
                         .map(|(_, f)| f)
                 }),
@@ -258,7 +256,7 @@ impl PyMotionEngine {
                         })
                 }),
                 mcu_clock_of: Box::new(move |mcu_id: u32| {
-                    let r = router_for_pump.lock().unwrap_or_else(|p| p.into_inner());
+                    let r = router_for_pump.lock_ok();
                     r.ack_clock_and_freq(mcu_handle_from_raw(mcu_id))
                 }),
                 on_fatal_transport: Box::new(move |key: crate::types::AxisKey| {
@@ -295,7 +293,7 @@ impl PyMotionEngine {
         let pump_resources = self.build_pump_resources(host_ios, ec_conns, ring_depth_table);
 
         let anchor_mutex = Arc::clone(&self.dispatch_anchor);
-        *anchor_mutex.lock().unwrap_or_else(|p| p.into_inner()) = crate::anchor::Anchor::new();
+        *anchor_mutex.lock_ok() = crate::anchor::Anchor::new();
         let dispatch_resources = crate::worker::DispatchResources {
             router: Arc::clone(&router_arc),
             anchor: anchor_mutex,
@@ -312,7 +310,7 @@ impl PyMotionEngine {
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let home = vec![0.0; cfg.axis_registry.n_axes()];
 
-        let mut planner_guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut planner_guard = self.planner.lock_ok();
         if planner_guard.is_some() {
             return Err(PyRuntimeError::new_err(
                 "planner already initialized (raced)",
@@ -326,8 +324,8 @@ impl PyMotionEngine {
             pump_resources,
         );
         let pump_control = pipeline.pump_control.clone();
-        *self.pump_tx.lock().unwrap_or_else(|p| p.into_inner()) = Some(pipeline.pump_control);
-        *self.pump_thread.lock().unwrap_or_else(|p| p.into_inner()) = Some(pipeline.pump_thread);
+        *self.pump_tx.lock_ok() = Some(pipeline.pump_control);
+        *self.pump_thread.lock_ok() = Some(pipeline.pump_thread);
         *planner_guard = Some(pipeline.worker);
         drop(planner_guard);
 
@@ -356,7 +354,7 @@ impl PyMotionEngine {
                     }
                     match collect_motor_positions_inner(&configs, &mcus, timeout) {
                         Ok(map) => {
-                            let mut c = cache.lock().unwrap_or_else(|p| p.into_inner());
+                            let mut c = cache.lock_ok();
                             *c = (map, std::time::Instant::now());
                             if consecutive_failures > 0 {
                                 tracing::info!(
@@ -405,10 +403,7 @@ impl PyMotionEngine {
                 }
             })
             .expect("spawn live-position-poll thread");
-        *self
-            .position_poll_thread
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = Some(handle);
+        *self.position_poll_thread.lock_ok() = Some(handle);
     }
 
     pub(super) fn wire_mcu_supervision(
@@ -483,8 +478,7 @@ impl PyMotionEngine {
 
     fn mcu_label(&self, mcu_id: u32) -> String {
         self.mcus
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .lock_ok()
             .get(&mcu_id)
             .map(|c| c.label.clone())
             .unwrap_or_else(|| format!("mcu-{mcu_id}"))
@@ -528,7 +522,7 @@ impl EthercatHeartbeatSupervisor {
     }
 
     fn take_homing_run_owning_fault(&self) -> Option<HomingRun> {
-        let mut guard = self.homing_run.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = self.homing_run.lock_ok();
         match guard.as_ref().map(|r| r.axis_key.mcu_id) {
             Some(axis_mcu)
                 if crate::homing::route_drive_fault(self.mcu_id, Some(axis_mcu))
@@ -542,13 +536,9 @@ impl EthercatHeartbeatSupervisor {
 
     fn fail_homing_run(&self, run: HomingRun, fault_code: u16) {
         self.latched_drive_fault
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .lock_ok()
             .insert(self.mcu_id, fault_code);
-        *self
-            .active_drip_cohort
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = None;
+        *self.active_drip_cohort.lock_ok() = None;
         let _ = self
             .pump_tx
             .send(crate::pump::PumpMsg::Flush(run.all_axis_keys.clone()));
@@ -564,8 +554,7 @@ impl EthercatHeartbeatSupervisor {
     fn latch_fault_for_klippy(&self, fault_code: u16) {
         let prev = self
             .latched_drive_fault
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .lock_ok()
             .insert(self.mcu_id, fault_code);
         if prev != Some(fault_code) {
             tracing::error!(
@@ -609,7 +598,7 @@ fn spawn_endpoint_liveness_poll(
                 drop(conn);
 
                 let fault_reason = {
-                    let mut mcus = mcus.lock().unwrap_or_else(|p| p.into_inner());
+                    let mut mcus = mcus.lock_ok();
                     let Some(c) = mcus.get_mut(&mcu_id) else {
                         return;
                     };

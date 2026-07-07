@@ -2,6 +2,7 @@ use super::{
     Arc, DRAIN_TIMEOUT, Duration, HomingRun, Ordering, PyMotionEngine, PyResult, PyRuntimeError,
     Python, TripDeps, dispatch_endstop_trip, drip_cohort_participants, planner_err, pymethods,
 };
+use crate::lock_ext::LockExt;
 
 struct ResolvedHomingTarget {
     all_axis_keys: Vec<crate::types::AxisKey>,
@@ -34,7 +35,7 @@ impl PyMotionEngine {
         endstop_id: u8,
         endstop_mcu: u32,
     ) -> PyResult<()> {
-        let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self.planner.lock_ok();
         let planner = guard
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("home_axis: planner not initialized"))?;
@@ -44,24 +45,18 @@ impl PyMotionEngine {
             axis_key,
         } = self.resolve_homing_target(axis)?;
         let cohort = next_homing_cohort();
-        let start_pos = *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
+        let start_pos = *self.commanded_pos.lock_ok();
 
-        self.latched_drive_fault
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&axis_key.mcu_id);
+        self.latched_drive_fault.lock_ok().remove(&axis_key.mcu_id);
 
         self.quiesce_pump_and_drain(py)?;
 
         let window_start_host = {
-            let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+            let router = self.router.lock_ok();
             router.host_now_secs()
         };
 
-        *self
-            .active_drip_cohort
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = Some(cohort);
+        *self.active_drip_cohort.lock_ok() = Some(cohort);
 
         self.homing_pump_tx()?
             .send(crate::pump::PumpMsg::DripArm(crate::pump::DripArm {
@@ -74,7 +69,7 @@ impl PyMotionEngine {
         let (result_tx, result_rx) =
             crossbeam_channel::bounded::<Result<([f64; 3], [f64; 3], u64), String>>(1);
 
-        *self.homing_run.lock().unwrap_or_else(|p| p.into_inner()) = Some(HomingRun {
+        *self.homing_run.lock_ok() = Some(HomingRun {
             cohort,
             endstop_id,
             endstop_mcu,
@@ -104,7 +99,7 @@ impl PyMotionEngine {
             })?;
         self.await_homing_dispatch(py, &planner_done_rx)?;
 
-        *self.homing_result.lock().unwrap_or_else(|p| p.into_inner()) = Some(result_rx);
+        *self.homing_result.lock_ok() = Some(result_rx);
 
         self.consume_buffered_early_trip(endstop_mcu, endstop_id);
         Ok(())
@@ -114,7 +109,7 @@ impl PyMotionEngine {
     }
     fn home_axis_poll(&self) -> PyResult<Option<([f64; 3], [f64; 3], u64)>> {
         let rx = {
-            let guard = self.homing_result.lock().unwrap_or_else(|p| p.into_inner());
+            let guard = self.homing_result.lock_ok();
             match guard.as_ref() {
                 Some(rx) => rx.clone(),
                 None => {
@@ -135,7 +130,7 @@ impl PyMotionEngine {
             Ok(result) => {
                 self.finish_homing();
                 let (trip_pos, final_pos, trip_clock) = result.map_err(PyRuntimeError::new_err)?;
-                *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner()) = final_pos;
+                *self.commanded_pos.lock_ok() = final_pos;
                 self.reanchor_after_trip(final_pos)?;
                 Ok(Some((trip_pos, final_pos, trip_clock)))
             }
@@ -143,10 +138,7 @@ impl PyMotionEngine {
     }
     fn arm_remote_trigger(&self, mcu_handle: u32, trsync_oid: u32, endstop_id: u8) -> PyResult<()> {
         {
-            let armed = self
-                .remote_triggers
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let armed = self.remote_triggers.lock_ok();
             if armed.contains_key(&endstop_id) {
                 return Err(PyRuntimeError::new_err(format!(
                     "arm_remote_trigger: endstop_id {endstop_id} is already armed"
@@ -155,8 +147,7 @@ impl PyMotionEngine {
         }
         let host_io = self
             .mcus
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .lock_ok()
             .get(&mcu_handle)
             .and_then(|c| c.host_io.as_ref().map(Arc::clone))
             .ok_or_else(|| {
@@ -165,7 +156,7 @@ impl PyMotionEngine {
                 ))
             })?;
         let deps = self.trip_deps();
-        *self.pending_trip.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.pending_trip.lock_ok() = None;
         let router = Arc::clone(&self.router);
         let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let id = host_io
@@ -183,8 +174,7 @@ impl PyMotionEngine {
                     fired.store(true, Ordering::SeqCst);
                     let clock32 = params.try_get_u32("clock").unwrap_or(0);
                     let reference = router
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
+                        .lock_ok()
                         .compute_ack_clock(host_rt::passthrough_queue::McuHandle::from_raw(
                             mcu_handle,
                         ))
@@ -210,17 +200,12 @@ impl PyMotionEngine {
                 ))
             })?;
         self.remote_triggers
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .lock_ok()
             .insert(endstop_id, (mcu_handle, id));
         Ok(())
     }
     fn disarm_remote_trigger(&self, endstop_id: u8) -> PyResult<()> {
-        let entry = self
-            .remote_triggers
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&endstop_id);
+        let entry = self.remote_triggers.lock_ok().remove(&endstop_id);
         let Some((mcu_handle, id)) = entry else {
             return Err(PyRuntimeError::new_err(format!(
                 "disarm_remote_trigger: endstop_id {endstop_id} is not armed"
@@ -228,8 +213,7 @@ impl PyMotionEngine {
         };
         let host_io = self
             .mcus
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .lock_ok()
             .get(&mcu_handle)
             .and_then(|c| c.host_io.as_ref().map(Arc::clone));
         match host_io {
@@ -273,8 +257,8 @@ impl PyMotionEngine {
             return;
         }
 
-        *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner()) = cartesian;
-        *self.last_g5_pq.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.commanded_pos.lock_ok() = cartesian;
+        *self.last_g5_pq.lock_ok() = None;
     }
     #[pyo3(signature = (source_mcu, clock, host_now))]
     fn motion_state_at_clock(
@@ -284,18 +268,15 @@ impl PyMotionEngine {
         host_now: f64,
     ) -> PyResult<std::collections::HashMap<String, (f64, f64, f64)>> {
         const AXIS_NAMES: [&str; 4] = ["x", "y", "z", "e"];
-        let configs: Vec<crate::mcu_config::McuAxisConfig> = self
-            .mcu_axis_configs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone();
+        let configs: Vec<crate::mcu_config::McuAxisConfig> =
+            self.mcu_axis_configs.lock_ok().clone();
         if configs.is_empty() {
             return Err(PyRuntimeError::new_err(
                 "motion_state_at: no axes configured on the engine",
             ));
         }
         let query_host = {
-            let router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+            let router = self.router.lock_ok();
             crate::motion_history::clock_to_host(
                 &router,
                 crate::types::mcu_handle_from_raw(source_mcu),
@@ -312,10 +293,7 @@ impl PyMotionEngine {
                 })
             })
             .collect();
-        let store = self
-            .motion_history
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let store = self.motion_history.lock_ok();
         let mut out = std::collections::HashMap::new();
         for key in resolved {
             let st = match store.state_at_host(key, query_host, Some(host_now)) {
@@ -342,10 +320,7 @@ impl PyMotionEngine {
                 "home_axis: axis {axis} out of range (0=X, 1=Y, 2=Z)"
             )));
         }
-        let configs = self
-            .mcu_axis_configs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let configs = self.mcu_axis_configs.lock_ok();
         let all_axis_keys = drip_cohort_participants(&configs);
         let mcu_id = configs
             .iter()
@@ -365,8 +340,7 @@ impl PyMotionEngine {
 
     fn homing_pump_tx(&self) -> PyResult<crossbeam_channel::Sender<crate::pump::PumpMsg>> {
         self.pump_tx
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .lock_ok()
             .clone()
             .ok_or_else(|| PyRuntimeError::new_err("home_axis: pump not started"))
     }
@@ -406,11 +380,7 @@ impl PyMotionEngine {
     }
 
     fn consume_buffered_early_trip(&self, endstop_mcu: u32, endstop_id: u8) {
-        let pending = self
-            .pending_trip
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take();
+        let pending = self.pending_trip.lock_ok().take();
         if let Some((p_mcu, p_endstop, p_clock)) = pending {
             if p_mcu == endstop_mcu && p_endstop == endstop_id {
                 tracing::warn!(
@@ -427,7 +397,7 @@ impl PyMotionEngine {
     }
 
     fn abort_context(&self) -> Option<AbortContext> {
-        let guard = self.homing_run.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self.homing_run.lock_ok();
         guard.as_ref().map(|r| AbortContext {
             all_axis_keys: r.all_axis_keys.clone(),
             cohort: r.cohort,
@@ -441,12 +411,7 @@ impl PyMotionEngine {
         all_axis_keys: Vec<crate::types::AxisKey>,
         cohort: u64,
     ) -> bool {
-        let Some(tx) = self
-            .pump_tx
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
-        else {
+        let Some(tx) = self.pump_tx.lock_ok().clone() else {
             return true;
         };
         let _ = tx.send(crate::pump::PumpMsg::Flush(all_axis_keys));
@@ -467,10 +432,7 @@ impl PyMotionEngine {
 
     fn reconcile_aborted_position(&self, axis_key: crate::types::AxisKey) -> Result<[f64; 3], ()> {
         let final_cartesian = {
-            let configs = self
-                .mcu_axis_configs
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let configs = self.mcu_axis_configs.lock_ok();
             configs
                 .iter()
                 .find(|c| c.mcu_id == axis_key.mcu_id)
@@ -491,7 +453,7 @@ impl PyMotionEngine {
     }
 
     fn reopen_stream_at(&self, cartesian: [f64; 3]) -> bool {
-        let planner_guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+        let planner_guard = self.planner.lock_ok();
         let Some(planner) = planner_guard.as_ref() else {
             return true;
         };
@@ -509,13 +471,10 @@ impl PyMotionEngine {
     }
 
     fn finish_homing(&self) {
-        *self
-            .active_drip_cohort
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = None;
-        *self.homing_run.lock().unwrap_or_else(|p| p.into_inner()) = None;
-        *self.homing_result.lock().unwrap_or_else(|p| p.into_inner()) = None;
-        *self.pending_trip.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.active_drip_cohort.lock_ok() = None;
+        *self.homing_run.lock_ok() = None;
+        *self.homing_result.lock_ok() = None;
+        *self.pending_trip.lock_ok() = None;
     }
     pub(super) fn trip_deps(&self) -> TripDeps {
         TripDeps {
@@ -530,7 +489,7 @@ impl PyMotionEngine {
         }
     }
     fn reanchor_after_trip(&self, stop_pos: [f64; 3]) -> PyResult<()> {
-        let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self.planner.lock_ok();
         match guard.as_ref() {
             Some(planner) => planner
                 .reset(vec![stop_pos[0], stop_pos[1], stop_pos[2], 0.0])

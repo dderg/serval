@@ -2,6 +2,7 @@ use super::{
     Arc, DataDictionary, MsgProtoParser, Py, PyDict, PyMotionEngine, PyResult, PyRuntimeError,
     Python, mcu_handle_from_raw, pymethods, router_err,
 };
+use crate::lock_ext::LockExt;
 use pyo3::prelude::*;
 
 #[pymethods]
@@ -13,7 +14,7 @@ impl PyMotionEngine {
             .map_err(|e| PyRuntimeError::new_err(format!("dict json parse: {e}")))?;
         let parser = MsgProtoParser::from_dictionary(dict)
             .map_err(|e| PyRuntimeError::new_err(format!("parser build: {e:?}")))?;
-        *self.parser.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(parser));
+        *self.parser.lock_ok() = Some(Arc::new(parser));
         Ok(())
     }
     fn get_identify_data(&self, mcu_handle: u32) -> PyResult<Vec<u8>> {
@@ -68,7 +69,7 @@ impl PyMotionEngine {
         use host_rt::host_io::runtime_events::RuntimeEvent;
 
         let event = {
-            let mut mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let mut mcus = self.mcus.lock_ok();
             let conn = mcus.get_mut(&mcu_handle).ok_or_else(|| {
                 PyRuntimeError::new_err(format!(
                     "take_runtime_event: unknown mcu_handle {mcu_handle}"
@@ -183,10 +184,7 @@ impl PyMotionEngine {
         last_clock: u64,
         host_now_raw: f64,
     ) -> PyResult<()> {
-        self.clock_freqs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(mcu, freq);
+        self.clock_freqs.lock_ok().insert(mcu, freq);
 
         use std::sync::atomic::{AtomicUsize, Ordering as AOrd};
         static SET_CLOCK_EST_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -203,7 +201,7 @@ impl PyMotionEngine {
                 "[engine-trace] set_clock_est"
             );
         }
-        let mut router = self.router.lock().unwrap_or_else(|p| p.into_inner());
+        let mut router = self.router.lock_ok();
         router
             .set_clock_est_rebased(
                 mcu_handle_from_raw(mcu),
@@ -222,10 +220,7 @@ impl PyMotionEngine {
                 "set_nominal_clock_freq: freq_hz must be nonzero",
             ));
         }
-        self.nominal_clock_freqs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(mcu, freq_hz);
+        self.nominal_clock_freqs.lock_ok().insert(mcu, freq_hz);
         Ok(())
     }
 }

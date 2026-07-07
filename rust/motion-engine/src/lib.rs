@@ -14,6 +14,7 @@ pub mod fence;
 pub mod homing;
 #[doc(hidden)]
 pub mod kinematics;
+pub mod lock_ext;
 pub mod logging;
 #[doc(hidden)]
 pub mod mcu_config;

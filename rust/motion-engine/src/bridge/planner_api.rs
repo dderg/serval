@@ -2,6 +2,7 @@ use super::{
     DRAIN_TIMEOUT, FieldValue, HashSet, Ordering, PyMotionEngine, PyResult, PyRuntimeError,
     PyValueError, Python, SPATIAL_AXES, classify, config, planner_err, pymethods, require_positive,
 };
+use crate::lock_ext::LockExt;
 
 fn unsupported_curve(py: Python<'_>, message: &'static str) -> PyResult<()> {
     py.detach(|| Err(PyRuntimeError::new_err(message)))
@@ -217,7 +218,7 @@ impl PyMotionEngine {
         }
         let (tx, rx) = crossbeam_channel::bounded(1);
         {
-            let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+            let guard = self.planner.lock_ok();
             let planner = guard.as_ref().ok_or_else(|| {
                 PyRuntimeError::new_err("planner not initialized — call init_planner first")
             })?;
@@ -267,12 +268,7 @@ impl PyMotionEngine {
         fit_tolerance_mm: Option<f64>,
         fit_tolerance_accel_mm_s2: Option<f64>,
     ) -> PyResult<()> {
-        if self
-            .planner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .is_some()
-        {
+        if self.planner.lock_ok().is_some() {
             return Err(PyRuntimeError::new_err("planner already initialized"));
         }
 
@@ -288,10 +284,7 @@ impl PyMotionEngine {
             fit_tolerance_mm,
             fit_tolerance_accel_mm_s2,
         )?;
-        *self
-            .planner_config
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = cfg.clone();
+        *self.planner_config.lock_ok() = cfg.clone();
 
         let (ec_conns, mcu_configs) = self.resolve_mcu_topology(&mcus)?;
 
@@ -350,12 +343,9 @@ impl PyMotionEngine {
                     ));
                 }
             };
-            let pos = *self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
+            let pos = *self.commanded_pos.lock_ok();
             let (max_v, max_a, scv, jerk) = {
-                let cfg = self
-                    .planner_config
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
+                let cfg = self.planner_config.lock_ok();
                 let (mut v, mut a) = cfg.cartesian.for_move(dx, dy, dz);
                 if let Some(rv) = cfg.runtime_caps.velocity {
                     v = v.min(rv);
@@ -387,7 +377,7 @@ impl PyMotionEngine {
             .map_err(|e| PyRuntimeError::new_err(format!("{e:?}")))?;
 
             {
-                let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+                let guard = self.planner.lock_ok();
                 let planner = guard.as_ref().ok_or_else(|| {
                     PyRuntimeError::new_err("planner not initialized — call init_planner first")
                 })?;
@@ -405,11 +395,11 @@ impl PyMotionEngine {
                 );
             }
 
-            let mut pos = self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
+            let mut pos = self.commanded_pos.lock_ok();
             pos[0] += dx;
             pos[1] += dy;
             pos[2] += dz;
-            *self.last_g5_pq.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            *self.last_g5_pq.lock_ok() = None;
             Ok(true)
         })
     }
@@ -481,21 +471,21 @@ impl PyMotionEngine {
         )
     }
     fn submit_dwell(&self, duration_s: f64) -> PyResult<()> {
-        let guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = self.planner.lock_ok();
         let planner = guard.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("planner not initialized — call init_planner first")
         })?;
         planner.dwell(duration_s).map_err(planner_err)?;
-        *self.last_g5_pq.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.last_g5_pq.lock_ok() = None;
         Ok(())
     }
     #[pyo3(signature = (x, y, z, host_now))]
     fn set_position(&self, py: Python<'_>, x: f64, y: f64, z: f64, host_now: f64) -> PyResult<()> {
         {
-            let mut pos = self.commanded_pos.lock().unwrap_or_else(|p| p.into_inner());
+            let mut pos = self.commanded_pos.lock_ok();
             *pos = [x, y, z];
         }
-        *self.last_g5_pq.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.last_g5_pq.lock_ok() = None;
 
         self.reseed_mcus_after_position_set(py, x, y, z)?;
         self.rebase_motion_history_after_position_set(host_now, x, y, z);
@@ -510,7 +500,7 @@ impl PyMotionEngine {
         y: f64,
         z: f64,
     ) -> PyResult<()> {
-        let planner_guard = self.planner.lock().unwrap_or_else(|p| p.into_inner());
+        let planner_guard = self.planner.lock_ok();
         if let Some(planner) = planner_guard.as_ref() {
             py.detach(|| planner.flush()).map_err(planner_err)?;
             {
@@ -524,11 +514,8 @@ impl PyMotionEngine {
                 .map_err(planner_err)?;
 
             let sends = {
-                let configs = self
-                    .mcu_axis_configs
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner());
-                let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+                let configs = self.mcu_axis_configs.lock_ok();
+                let mcus = self.mcus.lock_ok();
                 let ethercat_mcu_ids: HashSet<u32> = configs
                     .iter()
                     .filter(|c| {
@@ -539,7 +526,7 @@ impl PyMotionEngine {
                     .collect();
                 crate::mcu_config::build_serial_seed_sends(&configs, &ethercat_mcu_ids, x, y, z)
             };
-            let mcus = self.mcus.lock().unwrap_or_else(|p| p.into_inner());
+            let mcus = self.mcus.lock_ok();
             for s in sends {
                 let conn = mcus.get(&s.mcu_id).unwrap_or_else(|| {
                     panic!(
@@ -575,11 +562,8 @@ impl PyMotionEngine {
     }
 
     fn rebase_motion_history_after_position_set(&self, host_now: f64, x: f64, y: f64, z: f64) {
-        let configs: Vec<crate::mcu_config::McuAxisConfig> = self
-            .mcu_axis_configs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone();
+        let configs: Vec<crate::mcu_config::McuAxisConfig> =
+            self.mcu_axis_configs.lock_ok().clone();
         let positions = [x, y, z];
         let rebases: Vec<(crate::types::AxisKey, f64)> = configs
             .iter()
@@ -613,10 +597,7 @@ impl PyMotionEngine {
             })
             .collect();
         {
-            let mut store = self
-                .motion_history
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let mut store = self.motion_history.lock_ok();
             for (key, pos) in rebases {
                 store.rebase_axis(key, host_now, pos);
             }
@@ -627,29 +608,18 @@ impl PyMotionEngine {
         }
     }
     fn effective_limits(&self) -> (f64, f64, f64) {
-        self.planner_config
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .effective_limits()
+        self.planner_config.lock_ok().effective_limits()
     }
     #[pyo3(signature = (velocity))]
     fn set_velocity_cap(&self, velocity: Option<f64>) -> PyResult<()> {
         require_positive(velocity, "velocity")?;
-        self.planner_config
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .runtime_caps
-            .velocity = velocity;
+        self.planner_config.lock_ok().runtime_caps.velocity = velocity;
         Ok(())
     }
     #[pyo3(signature = (accel))]
     fn set_accel_cap(&self, accel: Option<f64>) -> PyResult<()> {
         require_positive(accel, "accel")?;
-        self.planner_config
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .runtime_caps
-            .accel = accel;
+        self.planner_config.lock_ok().runtime_caps.accel = accel;
         Ok(())
     }
     #[pyo3(signature = (square_corner_velocity))]
@@ -661,18 +631,12 @@ impl PyMotionEngine {
                 ));
             }
         }
-        self.planner_config
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .runtime_square_corner_velocity = square_corner_velocity;
+        self.planner_config.lock_ok().runtime_square_corner_velocity = square_corner_velocity;
         Ok(())
     }
     fn update_post_processor(&self, name: &str, key: &str, value: f64) -> PyResult<()> {
         let axis_chains = {
-            let mut cfg = self
-                .planner_config
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let mut cfg = self.planner_config.lock_ok();
             cfg.post_processors
                 .set_param(name, key, value)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -680,12 +644,7 @@ impl PyMotionEngine {
                 .compile(&cfg.axis_registry)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?
         };
-        if let Some(handle) = self
-            .planner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .as_ref()
-        {
+        if let Some(handle) = self.planner.lock_ok().as_ref() {
             handle
                 .update_axis_chains(axis_chains)
                 .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -697,10 +656,7 @@ impl PyMotionEngine {
 impl PyMotionEngine {
     fn e_followers(&self, de: f64) -> PyResult<Vec<(usize, f64)>> {
         if de.abs() > 0.0 {
-            let cfg = self
-                .planner_config
-                .lock()
-                .unwrap_or_else(|p| p.into_inner());
+            let cfg = self.planner_config.lock_ok();
             let axis_index = cfg.axis_registry.axis_index("e").map_err(|_| {
                 PyRuntimeError::new_err(
                     "E word on a move but no [axis e] is declared — declare the \

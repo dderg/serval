@@ -15,6 +15,7 @@
 //! Progress resolution can be late by one fit-stage run (a run is labeled with
 //! its first move's line), never early.
 
+use crate::lock_ext::LockExt;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -52,28 +53,23 @@ impl FenceRegistry {
     }
 
     pub fn arm(&self, id: u64, after_line: u32) {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inner = self.inner.lock_ok();
         inner.armed.push(Armed { id, after_line });
     }
 
     pub fn has_armed(&self) -> bool {
-        !self
-            .inner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .armed
-            .is_empty()
+        !self.inner.lock_ok().armed.is_empty()
     }
 
     pub fn resolve(&self, id: u64, t: Option<f64>) {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inner = self.inner.lock_ok();
         inner.resolved.insert(id, t);
     }
 
     /// Dispatch-progress hook: a segment labeled `source_line` was dispatched
     /// and the committed timeline now reaches `t_end`.
     pub fn on_dispatch(&self, source_line: u32, t_end: f64) {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inner = self.inner.lock_ok();
         let resolve_at = inner.prev_t_end;
         inner.prev_t_end = t_end;
         if inner.armed.iter().all(|f| f.after_line >= source_line) {
@@ -90,14 +86,14 @@ impl FenceRegistry {
 
     /// The stream timeline restarted; the previous frontier is meaningless.
     pub fn on_reset(&self) {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inner = self.inner.lock_ok();
         inner.prev_t_end = 0.0;
     }
 
     /// Barrier hook: everything ahead of every armed fence has been
     /// dispatched (or discarded) through `t`.
     pub fn resolve_armed(&self, t: Option<f64>) {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inner = self.inner.lock_ok();
         let armed = std::mem::take(&mut inner.armed);
         for f in armed {
             inner.resolved.insert(f.id, t);
@@ -106,7 +102,7 @@ impl FenceRegistry {
 
     /// Removes and returns the resolution for `id`; `None` while pending.
     pub fn take(&self, id: u64) -> Option<Option<f64>> {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inner = self.inner.lock_ok();
         inner.resolved.remove(&id)
     }
 }

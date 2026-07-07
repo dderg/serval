@@ -1,3 +1,4 @@
+use crate::lock_ext::LockExt;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
@@ -30,9 +31,7 @@ pub fn build_mcu_log_hook(
 ) -> impl Fn(McuLogEvent) + Send + Sync + 'static {
     move |e: McuLogEvent| {
         let (time_str, time_estimated) = {
-            let guard = router
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let guard = router.lock_ok();
             if let Some((dt, estimated)) = guard.wall_time_at_mcu(mcu, e.mcu_tick) {
                 (format_time(dt), estimated)
             } else {
@@ -91,9 +90,7 @@ pub fn build_mcu_log_hook(
             .unwrap_or_else(|err| format!("{{\"_msg\":\"mcu-log serialize error: {err}\"}}"));
         line.push('\n');
 
-        let mut w = writer
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut w = writer.lock_ok();
         if let Err(err) = w.write_all(line.as_bytes()) {
             eprintln!("[mcu-log] JSONL write failed: {err}");
         }

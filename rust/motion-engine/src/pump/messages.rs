@@ -1,3 +1,4 @@
+use crate::lock_ext::LockExt;
 use std::sync::Arc;
 
 use runtime::piece_ring::PieceEntry;
@@ -28,8 +29,7 @@ impl HistoryRecorder {
     pub(super) fn record(&self, key: AxisKey, piece: &PieceEntry, host_t: f64) {
         let nominal_freq = *self
             .nominal_freqs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+            .lock_ok()
             .get(&key.mcu_id)
             .unwrap_or_else(|| {
                 panic!(
@@ -38,12 +38,9 @@ impl HistoryRecorder {
                     key.mcu_id
                 )
             });
-        self.store.lock().unwrap_or_else(|p| p.into_inner()).record(
-            key,
-            piece,
-            nominal_freq,
-            host_t,
-        );
+        self.store
+            .lock_ok()
+            .record(key, piece, nominal_freq, host_t);
     }
 }
 

@@ -1,3 +1,4 @@
+use crate::lock_ext::LockExt;
 use std::sync::{Arc, Mutex};
 
 use crate::kinematics::{KinematicsModule, SPATIAL_AXES};
@@ -30,7 +31,7 @@ pub fn reconstruct_axis_position(
     let axis_mcu = axis_key.mcu_id;
 
     let trip_host = {
-        let router_guard = router.lock().unwrap_or_else(|p| p.into_inner());
+        let router_guard = router.lock_ok();
         crate::motion_history::clock_to_host(
             &router_guard,
             crate::types::mcu_handle_from_raw(endstop_mcu),
@@ -56,7 +57,7 @@ pub fn reconstruct_axis_position(
         ));
     }
 
-    let store = history.lock().unwrap_or_else(|p| p.into_inner());
+    let store = history.lock_ok();
     let st = store
         .state_at_host(axis_key, trip_host, None)
         .map_err(|e| e.to_string())?;
@@ -67,7 +68,7 @@ pub fn trajectory_final_position(
     axis_key: AxisKey,
     history: &Arc<Mutex<crate::motion_history::HistoryStore>>,
 ) -> Result<f64, String> {
-    let store = history.lock().unwrap_or_else(|p| p.into_inner());
+    let store = history.lock_ok();
     store.final_position(axis_key).ok_or_else(|| {
         format!("trajectory_final_position: no recorded motion for axis {axis_key:?}")
     })

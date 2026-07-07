@@ -7,6 +7,7 @@
 //! too close" as soon as one lands past its deadline. Callers start the call
 //! here and poll `done` from a reactor-friendly loop.
 
+use crate::lock_ext::LockExt;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,17 +33,14 @@ impl BgCalls {
             })
             .unwrap_or_else(|e| panic!("failed to spawn bg-{what} thread: {e}"));
         let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        self.pending
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(id, rx);
+        self.pending.lock_ok().insert(id, rx);
         id
     }
 
     /// `Ok(false)` while the call is still running. `Ok(true)` once it
     /// finished successfully, `Err` once it failed — both consume the id.
     pub fn done(&self, id: u64) -> Result<bool, String> {
-        let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+        let mut pending = self.pending.lock_ok();
         let Some(rx) = pending.get(&id) else {
             return Err(format!("endpoint call {id}: unknown or already consumed"));
         };

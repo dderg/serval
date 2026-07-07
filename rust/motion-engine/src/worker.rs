@@ -1,3 +1,4 @@
+use crate::lock_ext::LockExt;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -37,21 +38,18 @@ pub struct CommittedFrontier {
 
 impl CommittedFrontier {
     pub fn advance_to(&self, deadline: Instant) {
-        let mut guard = self.deadline.lock().unwrap_or_else(|p| p.into_inner());
+        let mut guard = self.deadline.lock_ok();
         *guard = Some(guard.map_or(deadline, |d| d.max(deadline)));
     }
 
     pub fn clear(&self) {
-        *self.deadline.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self.deadline.lock_ok() = None;
     }
 
     pub fn runway_secs(&self) -> f64 {
-        self.deadline
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .map_or(0.0, |d| {
-                d.saturating_duration_since(Instant::now()).as_secs_f64()
-            })
+        self.deadline.lock_ok().map_or(0.0, |d| {
+            d.saturating_duration_since(Instant::now()).as_secs_f64()
+        })
     }
 }
 

@@ -1,3 +1,4 @@
+use crate::lock_ext::LockExt;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -72,14 +73,13 @@ pub(crate) fn dispatch_segment(
     );
 
     let host_now = {
-        let r = ctx.router.lock().unwrap_or_else(|p| p.into_inner());
+        let r = ctx.router.lock_ok();
         r.host_now_secs()
     };
 
     let (t0, fresh) = ctx
         .anchor
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
+        .lock_ok()
         .anchor_segment(seg.t_start, seg.t_end, host_now);
 
     let runway_s = t0 + seg.t_end - host_now;
@@ -89,7 +89,7 @@ pub(crate) fn dispatch_segment(
     }
 
     if fresh {
-        let r = ctx.router.lock().unwrap_or_else(|p| p.into_inner());
+        let r = ctx.router.lock_ok();
         for cfg in ctx.mcu_configs.iter() {
             let h = crate::types::mcu_handle_from_raw(cfg.mcu_id);
             r.log_seg0_lead(h, t0 + seg.t_start, t0);
@@ -97,15 +97,12 @@ pub(crate) fn dispatch_segment(
     }
 
     let project = |mcu_id: u32, host_secs: f64| -> u64 {
-        let r = ctx.router.lock().unwrap_or_else(|p| p.into_inner());
+        let r = ctx.router.lock_ok();
         r.host_time_to_mcu_clock(crate::types::mcu_handle_from_raw(mcu_id), host_secs)
             .unwrap_or(0)
     };
 
-    let active_cohort: Option<u64> = *ctx
-        .active_drip_cohort
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
+    let active_cohort: Option<u64> = *ctx.active_drip_cohort.lock_ok();
 
     let max_piece_secs = if active_cohort.is_some() {
         Some(0.025_f64)
@@ -130,10 +127,7 @@ pub(crate) fn dispatch_segment(
     );
 
     if fresh {
-        ctx.motion_history
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .drop_pieces_on_reanchor();
+        ctx.motion_history.lock_ok().drop_pieces_on_reanchor();
     }
     for m in msgs {
         ctx.pump_tx.send(m).map_err(|_| DispatchError::PumpGone)?;
@@ -164,14 +158,11 @@ pub(crate) fn dispatch_nudge(
     }
 
     let host_now = {
-        let r = ctx.router.lock().unwrap_or_else(|p| p.into_inner());
+        let r = ctx.router.lock_ok();
         r.host_now_secs()
     };
 
-    let active_cohort: Option<u64> = *ctx
-        .active_drip_cohort
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
+    let active_cohort: Option<u64> = *ctx.active_drip_cohort.lock_ok();
 
     let lead_secs = if active_cohort.is_some() {
         crate::pump::DRIP_WINDOW_SECS
@@ -179,20 +170,19 @@ pub(crate) fn dispatch_nudge(
         crate::pump::MAX_LEAD_SECS
     };
 
-    let (t0, fresh) = ctx
-        .anchor
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .anchor_segment(np.piece.u_start, np.piece.u_end, host_now);
+    let (t0, fresh) =
+        ctx.anchor
+            .lock_ok()
+            .anchor_segment(np.piece.u_start, np.piece.u_end, host_now);
 
     if fresh {
-        let r = ctx.router.lock().unwrap_or_else(|p| p.into_inner());
+        let r = ctx.router.lock_ok();
         let h = crate::types::mcu_handle_from_raw(mcu_id);
         r.log_seg0_lead(h, t0 + np.piece.u_start, t0);
     }
 
     let project = |proj_mcu_id: u32, host_secs: f64| -> u64 {
-        let r = ctx.router.lock().unwrap_or_else(|p| p.into_inner());
+        let r = ctx.router.lock_ok();
         r.host_time_to_mcu_clock(crate::types::mcu_handle_from_raw(proj_mcu_id), host_secs)
             .unwrap_or(0)
     };
@@ -269,7 +259,7 @@ impl ConsumerShared {
             "[pipe] dispatch"
         );
         (self.dispatch)(seg)?;
-        let mut sync = self.sync_instant.lock().unwrap_or_else(|p| p.into_inner());
+        let mut sync = self.sync_instant.lock_ok();
         if sync.is_none() {
             *sync = Some(Instant::now());
         }
@@ -319,11 +309,7 @@ impl Consumer {
                 ShapedItem::Control(Control::Barrier(tx)) => {
                     let ack = BarrierAck {
                         dispatched_through: self.dispatched_through,
-                        sync_instant: *self
-                            .shared
-                            .sync_instant
-                            .lock()
-                            .unwrap_or_else(|p| p.into_inner()),
+                        sync_instant: *self.shared.sync_instant.lock_ok(),
                         result: self.pending_error.take().map_or(Ok(()), Err),
                     };
                     let _ = tx.send(ack);
@@ -336,11 +322,7 @@ impl Consumer {
                     self.shared
                         .last_move_time_bits
                         .store(0.0_f64.to_bits(), Ordering::Release);
-                    *self
-                        .shared
-                        .sync_instant
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner()) = None;
+                    *self.shared.sync_instant.lock_ok() = None;
                 }
                 ShapedItem::Control(Control::Dwell { secs }) => {
                     if let Some(t) = &mut self.dispatched_through {
