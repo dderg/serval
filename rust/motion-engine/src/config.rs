@@ -122,12 +122,10 @@ impl PostProcessorSet {
 fn build_instance(
     d: &PostProcessorDecl,
 ) -> Result<PostProcessorInstance, PostProcessorConfigError> {
-    let algo = algos::lookup(&d.ty).ok_or_else(|| {
-        PostProcessorConfigError::UnsupportedKind {
-            name: d.name.clone(),
-            kind: d.ty.clone(),
-            supported: algos::supported_type_names().join(", "),
-        }
+    let algo = algos::lookup(&d.ty).ok_or_else(|| PostProcessorConfigError::UnsupportedKind {
+        name: d.name.clone(),
+        kind: d.ty.clone(),
+        supported: algos::supported_type_names().join(", "),
     })?;
     for (key, _) in &d.params {
         if !algo.params().iter().any(|spec| spec.key == key) {
