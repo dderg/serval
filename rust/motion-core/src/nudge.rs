@@ -11,7 +11,7 @@ pub struct NudgePiece {
     pub piece: BezierPiece,
 }
 
-pub(crate) fn calc_move_time(dist: f64, speed: f64, accel: f64) -> (f64, f64, f64) {
+pub fn calc_move_time(dist: f64, speed: f64, accel: f64) -> (f64, f64, f64) {
     let dist = dist.abs();
     if accel <= 0.0 || dist == 0.0 {
         let cruise_t = if speed > 0.0 { dist / speed } else { 0.0 };

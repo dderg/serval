@@ -678,7 +678,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "motion-engine"
+name = "motion-core"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
@@ -691,6 +691,36 @@ dependencies = [
  "log",
  "mcu-protocol",
  "mcu-transport",
+ "motion-core",
+ "motion-pipeline",
+ "nurbs",
+ "proptest",
+ "runtime",
+ "serde_json",
+ "serialport",
+ "thiserror",
+ "time",
+ "tracing",
+ "tracing-appender",
+ "tracing-log",
+ "tracing-subscriber",
+ "trajectory",
+]
+
+[[package]]
+name = "motion-engine"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "ethercat-rt",
+ "gcode",
+ "geometry",
+ "host-rt",
+ "libc",
+ "log",
+ "mcu-protocol",
+ "mcu-transport",
+ "motion-core",
  "motion-engine",
  "motion-pipeline",
  "nurbs",
@@ -703,9 +733,6 @@ dependencies = [
  "thiserror",
  "time",
  "tracing",
- "tracing-appender",
- "tracing-log",
- "tracing-subscriber",
  "trajectory",
 ]
 

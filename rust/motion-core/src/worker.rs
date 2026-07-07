@@ -169,32 +169,32 @@ impl std::error::Error for StreamWorkerError {}
 /// supervisor (ring depths, clock sync, endpoint-death and drip-stall
 /// escalation). The bridge assembles these; the pipeline owns the pump built
 /// from them.
-pub(crate) struct PumpResources {
-    pub(crate) sink: crate::pump::WireSink,
-    pub(crate) callbacks: crate::pump::PumpCallbacks,
-    pub(crate) history: crate::pump::HistoryRecorder,
-    pub(crate) drain: Arc<crate::drain::DrainLedger>,
-    pub(crate) backlog: Arc<AtomicU64>,
+pub struct PumpResources {
+    pub sink: crate::pump::WireSink,
+    pub callbacks: crate::pump::PumpCallbacks,
+    pub history: crate::pump::HistoryRecorder,
+    pub drain: Arc<crate::drain::DrainLedger>,
+    pub backlog: Arc<AtomicU64>,
 }
 
 /// Clock-domain and bookkeeping resources the dispatcher anchors segments
 /// against. The pump enqueue side is not here — it is created inside
 /// `setup_pipeline`, which owns both ends.
-pub(crate) struct DispatchResources {
-    pub(crate) router: Arc<Mutex<host_rt::passthrough_queue::PassthroughRouter>>,
-    pub(crate) anchor: Arc<Mutex<crate::anchor::Anchor>>,
-    pub(crate) mcu_configs: Vec<crate::mcu_config::McuAxisConfig>,
-    pub(crate) counter: Arc<AtomicU64>,
-    pub(crate) active_drip_cohort: Arc<Mutex<Option<u64>>>,
-    pub(crate) motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
+pub struct DispatchResources {
+    pub router: Arc<Mutex<host_rt::passthrough_queue::PassthroughRouter>>,
+    pub anchor: Arc<Mutex<crate::anchor::Anchor>>,
+    pub mcu_configs: Vec<crate::mcu_config::McuAxisConfig>,
+    pub counter: Arc<AtomicU64>,
+    pub active_drip_cohort: Arc<Mutex<Option<u64>>>,
+    pub motion_history: Arc<Mutex<crate::motion_history::HistoryStore>>,
 }
 
-pub(crate) struct MotionPipeline {
-    pub(crate) worker: StreamWorkerHandle,
+pub struct MotionPipeline {
+    pub worker: StreamWorkerHandle,
     /// Out-of-band pump control (drip arm/disarm, flush, heartbeats): the
     /// paths that must act while the in-band stream is gated or stalled.
-    pub(crate) pump_control: Sender<crate::pump::PumpMsg>,
-    pub(crate) pump_thread: JoinHandle<()>,
+    pub pump_control: Sender<crate::pump::PumpMsg>,
+    pub pump_thread: JoinHandle<()>,
 }
 
 /// Boot-time constructor of the entire motion pipeline:
@@ -202,7 +202,7 @@ pub(crate) struct MotionPipeline {
 /// never torn down. Everything downstream of the ingress — including the pump
 /// thread and the enqueue channel between dispatcher and pump — is owned
 /// here; the bridge only supplies the connection-layer resources.
-pub(crate) fn setup_pipeline(
+pub fn setup_pipeline(
     config: StreamConfig,
     axis_chains: AxisChainSet,
     home_pos: Vec<f64>,
@@ -280,7 +280,7 @@ impl StreamWorkerHandle {
     /// Test seam: `spawn_with_ctx` is the production entry; this variant
     /// injects the dispatchers directly so tests can capture output without
     /// a router or pump.
-    pub(crate) fn spawn(
+    pub fn spawn(
         config: StreamConfig,
         axis_chains: AxisChainSet,
         home_pos: Vec<f64>,

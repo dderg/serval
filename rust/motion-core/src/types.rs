@@ -6,6 +6,6 @@ pub struct AxisKey {
     pub axis: u8,
 }
 
-pub(crate) fn mcu_handle_from_raw(raw: u32) -> McuHandle {
+pub fn mcu_handle_from_raw(raw: u32) -> McuHandle {
     McuHandle::from_raw(raw)
 }
