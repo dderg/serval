@@ -60,6 +60,7 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
                 for c in &mut ctx.cmaps {
                     *c = None;
                 }
+                ctx.buzz.clear();
                 ctx.stream_halt.halt();
                 eprintln!("ec-rt: Stop — rings discarded, stream halted, discard_clock={now_ns}");
                 ctx.server
@@ -416,8 +417,14 @@ fn handle_resonance_buzz(ctx: &mut EndpointCtx, correlation_id: u32, msg: Resona
             crate::buzz::ERR_BUZZ_STREAMING
         }
     } else {
-        let base_counts = unsafe { ffi::ec_rt_get_position_actual(0) };
+        let mut base_counts = [0i32; crate::buzz::MAX_BUZZ_SLOTS];
+        for (slot, base) in base_counts.iter_mut().enumerate().take(ctx.num_slaves) {
+            if msg.axis_mask & (1 << slot) != 0 {
+                *base = unsafe { ffi::ec_rt_get_position_actual(slot as std::os::raw::c_int) };
+            }
+        }
         let rc = ctx.buzz.arm(
+            ctx.num_slaves as u8,
             msg.axis_mask,
             msg.sign_mask,
             msg.freq_start_millihz,
@@ -430,7 +437,7 @@ fn handle_resonance_buzz(ctx: &mut EndpointCtx, correlation_id: u32, msg: Resona
         eprintln!(
             "ec-rt: ResonanceBuzz axis_mask=0x{:02x} sign_mask=0x{:02x} \
              freq={}->{} mHz amplitude={} nm duration={} ms ramp={} ms \
-             base_counts={base_counts} rc={rc}",
+             base_counts={base_counts:?} rc={rc}",
             msg.axis_mask,
             msg.sign_mask,
             msg.freq_start_millihz,

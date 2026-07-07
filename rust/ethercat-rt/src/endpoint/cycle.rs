@@ -99,6 +99,7 @@ fn poll_sensorless(ctx: &mut EndpointCtx, apply_time: u64) {
         for c in &mut ctx.cmaps {
             *c = None;
         }
+        ctx.buzz.clear();
         ctx.stream_halt.halt();
     }
 }
@@ -111,26 +112,33 @@ fn compute_motion_targets(ctx: &mut EndpointCtx, apply_time: u64) -> (bool, Vec<
     // so they outlive the feedforward block to reach the capture record.
     let mut all_acc = vec![0f32; num_slaves];
     let mut all_vel = vec![0f32; num_slaves];
+    if ctx.gate.state() != TorqueState::Enabled && ctx.buzz.active() {
+        ctx.buzz.clear();
+        eprintln!("ec-rt: buzz cleared — torque gate left Enabled mid-buzz");
+    }
     if ctx.gate.state() == TorqueState::Enabled {
         // The coupled torque model needs every axis' accel/vel before any
         // one slot's feedforward can be computed, so sample all slots first.
         let mut sp_counts: Vec<Option<i32>> = vec![None; num_slaves];
+        let buzz_was_active = ctx.buzz.active();
+        let buzz_sample = if buzz_was_active {
+            ctx.buzz.eval(apply_time)
+        } else {
+            None
+        };
         for s in 0..num_slaves {
-            let sampled = if ctx.buzz.active() {
-                if s == 0 {
-                    let cmd_counts_per_mm0 = ctx.cmd_counts_per_mm[0];
-                    ctx.buzz
-                        .eval(apply_time)
-                        .map(|(rel_mm, vel_mm_s, acc_mm_s2)| {
-                            let counts = ctx
-                                .buzz
-                                .base_counts()
-                                .wrapping_add(mm_to_counts(f64::from(rel_mm), cmd_counts_per_mm0));
-                            (counts, vel_mm_s, acc_mm_s2)
-                        })
-                } else {
-                    None
-                }
+            let sampled = if buzz_was_active {
+                buzz_sample.and_then(|(rel_mm, vel_mm_s, acc_mm_s2)| {
+                    if !ctx.buzz.drives_slot(s) {
+                        return None;
+                    }
+                    let sign = ctx.buzz.slot_sign(s);
+                    let counts = ctx.buzz.base_counts(s).wrapping_add(mm_to_counts(
+                        f64::from(sign * rel_mm),
+                        ctx.cmd_counts_per_mm[s],
+                    ));
+                    Some((counts, sign * vel_mm_s, sign * acc_mm_s2))
+                })
             } else if let Some((pos_mm, vel_mm_s, acc_mm_s2)) = ctx.rings[s].sample(apply_time) {
                 // Streaming is always relative: each stream anchors the
                 // drive's actual position to the host's first commanded
@@ -145,14 +153,12 @@ fn compute_motion_targets(ctx: &mut EndpointCtx, apply_time: u64) -> (bool, Vec<
                 });
                 Some((map.target_counts(f64::from(pos_mm)), vel_mm_s, acc_mm_s2))
             } else {
-                if !ctx.buzz.active() {
-                    ctx.cmaps[s] = None;
-                }
+                ctx.cmaps[s] = None;
                 None
             };
             if let Some((counts, vel_mm_s, acc_mm_s2)) = sampled {
                 sp_counts[s] = Some(counts);
-                let (ff_vel, ff_acc) = if ctx.ff_lead_ns[s] > 0 && !ctx.buzz.active() {
+                let (ff_vel, ff_acc) = if ctx.ff_lead_ns[s] > 0 && !buzz_was_active {
                     ctx.rings[s].peek_vel_acc(apply_time + ctx.ff_lead_ns[s])
                 } else {
                     (vel_mm_s, acc_mm_s2)
