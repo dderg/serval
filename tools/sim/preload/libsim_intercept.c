@@ -580,12 +580,18 @@ static int gpio_handle_get_linehandle(int chip_fd, struct gpiohandle_request *re
 }
 
 static void auto_endstop_advance(int chip_id, int offset, long delta) {
+    static long last_log_pos[MAX_AUTO_ENDSTOPS];
     pthread_mutex_lock(&auto_endstop_mtx);
     for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
         struct auto_endstop *ae = &auto_endstops[i];
         if (!ae->active) continue;
         if (ae->step_chip != chip_id || ae->step_line != offset) continue;
         ae->pos += delta;
+        if (labs(ae->pos - last_log_pos[i]) >= 800) {
+            last_log_pos[i] = ae->pos;
+            fprintf(stderr, "[auto-endstop] line=%d pos=%ld (moving)\n",
+                    ae->endstop_line, ae->pos);
+        }
         if (labs(ae->pos) < ae->wall_steps)
             ae->latch_armed = 1;
         if (ae->toward_sign == 0 && ae->latch_armed
@@ -605,6 +611,9 @@ static void auto_endstop_advance(int chip_id, int offset, long delta) {
             pthread_mutex_lock(&gpio_state_mtx);
             gpio_lines[ae->endstop_chip][ae->endstop_line].value = trig;
             pthread_mutex_unlock(&gpio_state_mtx);
+            fprintf(stderr,
+                    "[auto-endstop] line=%d pos=%ld toward=%d trig=%d\n",
+                    ae->endstop_line, ae->pos, ae->toward_sign, trig);
         }
     }
     pthread_mutex_unlock(&auto_endstop_mtx);

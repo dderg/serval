@@ -372,6 +372,28 @@ where
         if fresh_stream {
             self.junctions.forget(key);
         }
+        if self.cohort.is_some() && !pieces.is_empty() {
+            if let Some((ack_now, freq)) = (self.mcu_clock_of)(key.mcu_id) {
+                let first_start = pieces[0].0.start_time;
+                let produce_lead_us = (first_start as i64 - ack_now as i64) as f64 / freq * 1e6;
+                let durs: Vec<f32> = pieces.iter().map(|p| p.0.duration).collect();
+                let min_dur = durs.iter().copied().fold(f32::INFINITY, f32::min);
+                let max_dur = durs.iter().copied().fold(0.0_f32, f32::max);
+                let total: f32 = durs.iter().sum();
+                tracing::warn!(
+                    subsystem = "motion",
+                    event = "drip_enqueue_lead",
+                    mcu = key.mcu_id,
+                    axis = key.axis,
+                    n = pieces.len(),
+                    produce_lead_us,
+                    min_dur_us = min_dur * 1e6,
+                    max_dur_us = max_dur * 1e6,
+                    total_secs = total,
+                    "[drip-diag] pieces reached pump with this much lead before their start"
+                );
+            }
+        }
         if !pieces.is_empty() {
             if let Some((_ack_now, freq)) = (self.mcu_clock_of)(key.mcu_id) {
                 if let Some(seam) = self.junctions.observe(key, &pieces, source_line, freq) {
@@ -630,6 +652,20 @@ where
     // above host-projection jitter so a healthy print never false-aborts.
     fn guard_pieces_not_in_past(&self, mcu_id: u32, bundle: &[AxisFrame]) {
         if let Some((mcu_now, freq)) = (self.mcu_clock_of)(mcu_id) {
+            if self.cohort.is_some() {
+                if let Some(front) = bundle.first().and_then(|af| af.pieces.first()) {
+                    tracing::warn!(
+                        subsystem = "motion",
+                        event = "pump_send_projection",
+                        mcu = mcu_id,
+                        projected_now = mcu_now,
+                        front_start = front.start_time,
+                        release_lead_us =
+                            ((front.start_time as i64 - mcu_now as i64) as f64 / freq * 1e6),
+                        "[drip-diag] projection at send"
+                    );
+                }
+            }
             if freq > 0.0 {
                 let guard_ticks = (pump_past_guard_secs() * freq) as u64;
                 for af in bundle {
