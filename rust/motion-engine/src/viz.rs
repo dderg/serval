@@ -3,9 +3,11 @@ use pyo3::types::{PyDict, PyList};
 
 use snapshot_core::{FittedSegment, SnapshotParams};
 
+use crate::bridge::{AxisSection, PostProcessor};
+
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (waypoints, max_velocity, max_accel, square_corner_velocity, max_jerk, arc_fit = None, max_extrude_only_velocity = None, max_extrude_only_accel = None, max_path_deviation = None, max_accel_deviation = None, pressure_advance = None, smooth_zv_hz = None, e_smooth_zv_hz = None))]
+#[pyo3(signature = (waypoints, max_velocity, max_accel, square_corner_velocity, max_jerk, arc_fit = None, max_extrude_only_velocity = None, max_extrude_only_accel = None, max_path_deviation = None, max_accel_deviation = None, axes = Vec::new(), post_processors = Vec::new()))]
 pub fn pipeline_snapshot(
     py: Python<'_>,
     waypoints: Vec<(f64, f64, f64, f64, f64)>,
@@ -18,9 +20,8 @@ pub fn pipeline_snapshot(
     max_extrude_only_accel: Option<f64>,
     max_path_deviation: Option<f64>,
     max_accel_deviation: Option<f64>,
-    pressure_advance: Option<f64>,
-    smooth_zv_hz: Option<f64>,
-    e_smooth_zv_hz: Option<f64>,
+    axes: Vec<AxisSection>,
+    post_processors: Vec<PostProcessor>,
 ) -> PyResult<Py<PyDict>> {
     let snap = snapshot_core::pipeline_snapshot(
         &waypoints,
@@ -34,9 +35,8 @@ pub fn pipeline_snapshot(
             max_extrude_only_accel,
             max_path_deviation,
             max_accel_deviation,
-            pressure_advance,
-            smooth_zv_hz,
-            e_smooth_zv_hz,
+            axis_decls: axes.into_iter().map(Into::into).collect(),
+            post_processor_decls: post_processors.into_iter().map(Into::into).collect(),
         },
     )
     .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
