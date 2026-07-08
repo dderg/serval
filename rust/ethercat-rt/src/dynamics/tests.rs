@@ -166,3 +166,30 @@ fn clamp_counts_saturation() {
     assert_eq!(clamp_torque(-450.7, 300, &mut sat), -300);
     assert_eq!(sat, 2);
 }
+
+const COREXY_AWD: &str = r#"
+version = 1
+axes = ["a", "a1", "b", "b1"]
+mass = [[0.015, 0.0, -0.0025, -0.0025], [0.0, 0.015, -0.0025, -0.0025], [-0.0025, -0.0025, 0.015, 0.0], [-0.0025, -0.0025, 0.0, 0.015]]
+viscous = [0.002, 0.002, 0.002, 0.002]
+coulomb_fwd = [1.0, 1.0, 1.0, 1.0]
+coulomb_rev = [-1.0, -1.0, -1.0, -1.0]
+coulomb_deadband_mm_s = 0.5
+fit_rms_residual = [0.5, 0.5, 0.5, 0.5]
+"#;
+
+#[test]
+fn corexy_awd_pair_split_profile_is_positive_definite_and_sums_cross_coupling() {
+    let m = DynamicsModel::from_toml_str(COREXY_AWD).unwrap();
+    assert_eq!(m.n, 4);
+    let acc = [1000.0, 1000.0, -400.0, -400.0];
+    let vel = [100.0, 100.0, -30.0, -30.0];
+    let tau0 = m.torque_ff(0, &acc, &vel);
+    let expect0 = 0.015 * 1000.0 + (-0.005) * -400.0 + 0.002 * 100.0 + 1.0;
+    assert!((tau0 - expect0).abs() < 1e-3, "{tau0} vs {expect0}");
+    let tau1 = m.torque_ff(1, &acc, &vel);
+    assert!((tau1 - tau0).abs() < 1e-6, "pair drives share the load");
+    let tau2 = m.torque_ff(2, &acc, &vel);
+    let expect2 = 0.015 * -400.0 + (-0.005) * 1000.0 + 0.002 * -30.0 + -1.0;
+    assert!((tau2 - expect2).abs() < 1e-3, "{tau2} vs {expect2}");
+}

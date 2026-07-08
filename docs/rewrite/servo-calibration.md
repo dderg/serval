@@ -103,17 +103,22 @@ Slow constant-speed sweeps for the torque-vs-position friction map. Params:
 #### SERVO_FIT_DYNAMICS
 Runs the `SERVO_MEASURE_INERTIA` grid, fits mass/viscous/coulomb, and writes a
 timestamped feedforward profile. Optional `TORQUE_NM` + `INERTIA_KGM2` also
-print the recommended C00.06. Params: as `SERVO_MEASURE_INERTIA` plus
-`TORQUE_NM` `INERTIA_KGM2` `NAME` (ident). Runs `servo_fit_dynamics.py`; the
+print the recommended C00.06. On a multi-drive (AWD) axis `DRIVE=` picks
+which drive the scalar fit describes — required there, since the capture
+records every drive. Params: as `SERVO_MEASURE_INERTIA` plus
+`TORQUE_NM` `INERTIA_KGM2` `NAME` (ident) `DRIVE`. Runs `servo_fit_dynamics.py`; the
 profile lands in `~/printer_data/config/servo_dynamics/` and a new fit never
 overwrites an existing profile.
 
 #### SERVO_FIT_DYNAMICS_COREXY
-As above for CoreXY: runs the two-drive X+Y grid (`SERVO_MEASURE_INERTIA_COREXY`)
-and fits the coupled mass matrix (`--structure corexy`). The resulting profile
-goes on `[ethercat_node] dynamics_profile` (node-level, coupled) rather than
-per-motor. Params: as `SERVO_MEASURE_INERTIA_COREXY` plus `TORQUE_NM`
-`INERTIA_KGM2` `NAME` (ident).
+As above for CoreXY: runs the X+Y grid over every belt drive
+(`SERVO_MEASURE_INERTIA_COREXY`) and fits the coupled mass matrix. The drive
+list and, on AWD, the belt pairing are derived from the kinematics motor
+lists (two drives per belt fit `--structure corexy-awd`: shared per-drive
+mass/coupling, per-drive friction; all four drives must sit on one node).
+The resulting profile goes on `[ethercat_node] dynamics_profile` (node-level,
+coupled) rather than per-motor. Params: as `SERVO_MEASURE_INERTIA_COREXY`
+plus `TORQUE_NM` `INERTIA_KGM2` `NAME` (ident).
 
 #### SERVO_CALIBRATE_INERTIA_RATIO
 Step 2 of tuning: identify the load inertia and print the recommended C00.06.
@@ -122,8 +127,9 @@ Step 2 of tuning: identify the load inertia and print the recommended C00.06.
 the printed number with `SERVO_SET_INERTIA_RATIO`.
 
 #### SERVO_CALIBRATE_INERTIA_RATIO_COREXY
-As above for CoreXY: runs the two-drive X+Y grid, fits the coupled mass matrix
-(`--structure corexy`), and prints C00.06 for both directions. The drive takes
+As above for CoreXY: runs the X+Y grid over every belt drive, fits the
+coupled mass matrix, and prints C00.06 for both directions (per drive on
+AWD). The drive takes
 one scalar, so start from the light-direction number and confirm with
 `SERVO_SWEEP_INERTIA`. `TORQUE_NM` and `INERTIA_KGM2` required; both motors must
 be the same model. Params: as `SERVO_MEASURE_INERTIA_COREXY` plus `TORQUE_NM`
@@ -201,7 +207,9 @@ above invoke them with the running klippy interpreter.
   samples.
 - **`servo_fit_dynamics.py`** — resolve the newest capture for `--name`, export
   the fitter CSV, run `servo-ident`, and write the profile TOML (`--structure
-  scalar|corexy`, `--rated-torque-nm`, `--rotor-inertia-kgm2`,
+  scalar|corexy`, `--drive` for scalar fits of a multi-drive capture,
+  `--pairs 'a0,a1;b0,b1'` for 4-drive AWD corexy captures — fitted as
+  `corexy-awd` — `--rated-torque-nm`, `--rotor-inertia-kgm2`,
   `--rotation-distance-mm`, `--out-dir`).
 - **`servo_gain_report.py`** — gain-sweep comparison PNG + metrics table +
   recommendation (`--tag`, `--steps`).
