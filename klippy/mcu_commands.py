@@ -3,9 +3,6 @@
 # Copyright (C) 2016-2025  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import logging
-import time
-
 from . import serialhdl
 
 
@@ -49,41 +46,10 @@ class CommandQueryWrapper:
 
     def _engine_send(self, data):
         msg = _format_engine_msg(self._cmd, data)
-        _t0 = time.monotonic()
-        logging.info(
-            "[py-trace] _engine_send enter cmd=%s response=%s",
-            getattr(self._cmd, "msgformat", "<unknown>"),
-            self._response,
-        )
         try:
-            r = self._serial.send_with_response(msg, self._response)
-            _dt_ms = (time.monotonic() - _t0) * 1000.0
-            if _dt_ms > 5.0:
-                logging.info(
-                    "[py-trace] _engine_send exit OK cmd=%s dt_ms=%.2f",
-                    getattr(self._cmd, "msgformat", "<unknown>"),
-                    _dt_ms,
-                )
-            return r
+            return self._serial.send_with_response(msg, self._response)
         except serialhdl.error as e:
-            _dt_ms = (time.monotonic() - _t0) * 1000.0
-            logging.info(
-                "[py-trace] _engine_send exit ERR cmd=%s dt_ms=%.2f err=%s",
-                getattr(self._cmd, "msgformat", "<unknown>"),
-                _dt_ms,
-                e,
-            )
             raise self._error(str(e))
-        except Exception as e:
-            _dt_ms = (time.monotonic() - _t0) * 1000.0
-            logging.info(
-                "[py-trace] _engine_send exit EXC cmd=%s dt_ms=%.2f exc=%s msg=%s",
-                getattr(self._cmd, "msgformat", "<unknown>"),
-                _dt_ms,
-                type(e).__name__,
-                e,
-            )
-            raise
 
     def send(self, data=(), minclock=0, reqclock=0, retry=True):
         return self._engine_send(data)

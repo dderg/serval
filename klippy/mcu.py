@@ -331,13 +331,9 @@ class MCU:
                     "Sending MCU '%s' printer configuration...", self._name
                 )
                 for c in local_config_cmds:
-                    logging.info("[config-send] mcu=%s cmd=%s", self._name, c)
                     self._serial.send(c)
             else:
                 for c in self._restart_cmds:
-                    logging.info(
-                        "[config-send-restart] mcu=%s cmd=%s", self._name, c
-                    )
                     self._serial.send(c)
             # Transmit init messages
             for c in self._init_cmds:
@@ -817,20 +813,6 @@ class MCU:
         chelper.run_hub_ctrl(1)
 
     def _firmware_restart(self, force=False):
-        logging.info(
-            "[firmware-restart-trace] mcu=%s force=%s _is_mcu_engine=%s "
-            "non_critical_disconnected=%s _restart_method=%s "
-            "_reset_cmd_present=%s clocksync_active=%s",
-            self._name,
-            force,
-            self._is_mcu_engine,
-            self.non_critical_disconnected,
-            self._restart_method,
-            self._reset_cmd is not None,
-            self._clocksync.is_active()
-            if self._clocksync is not None
-            else "no-clocksync",
-        )
         if (
             self._is_mcu_engine and not force
         ) or self.non_critical_disconnected:

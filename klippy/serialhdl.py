@@ -80,15 +80,6 @@ class EngineCommandChannel:
 
     def _engine_handle_response_event(self, ev, now):
         name = ev.get("name", "")
-        if name == "trsync_state":
-            logging.info(
-                "%s[engine-poller] trsync_state response: "
-                "oid=%s can_trigger=%s trigger_reason=%s",
-                self.warn_prefix,
-                ev.get("oid"),
-                ev.get("can_trigger"),
-                ev.get("trigger_reason"),
-            )
         ev["#name"] = name
         # Use CLOCK_MONOTONIC_RAW stamps when the Rust engine supplied
         # them (non-zero); this happens for "clock" responses dispatched
@@ -116,15 +107,6 @@ class EngineCommandChannel:
                 or self.handlers.get((name, None))
                 or self.handle_default
             )
-            if name == "trsync_state":
-                logging.info(
-                    "%s[engine-poller] trsync_state handler "
-                    "lookup: key=(%s,%s) found=%s",
-                    self.warn_prefix,
-                    name,
-                    oid,
-                    hdl is not self.handle_default,
-                )
         try:
             hdl(ev)
         except Exception:
