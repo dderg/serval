@@ -9,6 +9,7 @@ pub mod frontend;
 pub mod params;
 pub mod path;
 pub mod segment;
+pub mod space;
 pub mod surface;
 pub(crate) mod vec3;
 pub mod velocity;
@@ -30,6 +31,7 @@ pub struct FollowerWord {
     pub letter: u8,
     pub axis_index: usize,
 }
+pub use space::{GcodePos, MachinePos};
 pub use surface::{Fade, MeshGrid, SurfaceBounds, SurfaceError, SurfaceSample, SurfaceTransform};
 pub use velocity::{
     BoundaryState, MoveVelocity, StraightPhase, VelSample, VelocityError, VelocityProfile,

@@ -452,6 +452,44 @@ impl SurfaceTransform {
         );
         mid.clamp(start, end)
     }
+
+    /// Exact inverse of the lowerer's `warped_z` chain rule for one instant:
+    /// recover the gcode-space `(z, ż, z̈)` from the machine-space Z state
+    /// recorded in motion history, given the (warp-invariant) XY state at the
+    /// same instant. Machine forward is
+    /// `z_m = z_g + w(x, y, z_g)`,
+    /// `ż_m = ż_g·(1 + w_z) + w_x·ẋ + w_y·ẏ`,
+    /// `z̈_m = z̈_g·(1 + w_z) + 2·(w_xz·ẋ + w_yz·ẏ)·ż_g
+    ///        + w_xx·ẋ² + 2·w_xy·ẋẏ + w_yy·ẏ² + w_x·ẍ + w_y·ÿ`
+    /// (`w_zz ≡ 0`: the fade is piecewise linear). `1 + w_z > 0` is the
+    /// monotonicity the activation gate validates, so the division is safe;
+    /// assert it anyway rather than return a wrong state.
+    pub fn unwarp_z_state(
+        &self,
+        xy_pos: [f64; 2],
+        xy_vel: [f64; 2],
+        xy_accel: [f64; 2],
+        z_machine: (f64, f64, f64),
+    ) -> (f64, f64, f64) {
+        let (x, y) = (xy_pos[0], xy_pos[1]);
+        let z_g = self.gcode_z(x, y, z_machine.0);
+        let w = self.warp(x, y, z_g);
+        let denom = 1.0 + w.wz;
+        assert!(
+            denom > 0.0,
+            "surface unwarp is not monotonic at ({x}, {y}, {z_g}): 1 + wz = {denom} — \
+             activation validation must reject this"
+        );
+        let (vx, vy) = (xy_vel[0], xy_vel[1]);
+        let zg_vel = (z_machine.1 - w.wx * vx - w.wy * vy) / denom;
+        let zg_accel = (z_machine.2
+            - 2.0 * (w.wxz * vx + w.wyz * vy) * zg_vel
+            - (w.wxx * vx * vx + 2.0 * w.wxy * vx * vy + w.wyy * vy * vy)
+            - w.wx * xy_accel[0]
+            - w.wy * xy_accel[1])
+            / denom;
+        (z_g, zg_vel, zg_accel)
+    }
 }
 
 #[cfg(test)]

@@ -31,17 +31,31 @@ the two spaces convert.**
   by construction**: a trigger is a physical event, and it does not matter
   whether the approach move that got there was warped.
 - The bridge is the only layer that converts between the spaces, and it
-  does so at rest. Concretely there are two conversion sites, both at the
-  homing seam: the trigger position returned to Python
-  (`home_axis_poll` → `trip_pos`, `bridge/homing_api.rs`) and the resting
-  position that `reanchor_after_trip` feeds into `Control::Reset` — the
-  `Reset{pos}` payload seeds the ingress contiguity odometer, which is
-  gcode space, so the inverse is applied *before* the token is built.
-  (Today `reanchor_after_trip` passes the machine position straight
-  through, which is only valid while machine == gcode.) No code below the
-  bridge converts. A path that feeds gcode-space Z where machine-space is
-  expected (or vice versa) is a bug — assert and fail loudly, don't
-  compensate.
+  does so at rest. The crossing is enforced by types, not convention:
+  `geometry::GcodePos` / `geometry::MachinePos` (`rust/geometry/src/space.rs`)
+  wrap every cartesian position the bridge holds — `commanded_pos`, the
+  stream odometer inputs, and everything returned to Python are `GcodePos`;
+  trip/abort reconstructions from motion history, MCU step-counter seeds
+  (`build_serial_seed_sends`), and history rebase targets
+  (`spatial_rebase_targets`) are `MachinePos`. The only converters are
+  `gcode_from_machine` / `machine_from_gcode` on the bridge (backed by
+  `SurfaceTransform::gcode_z` and `correction_at`), so a forgotten crossing
+  is a compile error. Full kinematic states (`motion_state_at_clock`, the
+  live motor queries) cross via `SurfaceTransform::unwarp_z_state`, the
+  exact inverse of the lowerer's chain rule. No code below the bridge
+  converts. A path that feeds gcode-space Z where machine-space is expected
+  (or vice versa) is a bug — assert and fail loudly, don't compensate.
+- A mesh swap (`swap_bed_mesh`) blocks until the pipeline has drained and
+  adopted the token, holding the bridge's mesh handle locked across the
+  wait — no crossing can ever invert through a mesh the lowerer is not yet
+  warping with.
+- `set_position` renames the physical rest point in gcode space: the stream
+  odometer takes the gcode value, while the step-counter seeds and the
+  motion-history rebase take the forward-warped machine value. Skipping
+  that warp is the contact-probe ratchet: every touch re-seeds the machine
+  frame shifted by `correction_at(x, y)` and the sample spread grows until
+  the step dispatcher faults (`space/tests.rs::contact_touch_cycle_is_a_fixed_point`
+  encodes the loop).
 
 The payoff of this framing: there is **no suspend/restore mode**. Commanded
 motion is always warped, measurements are never contaminated by the warp,

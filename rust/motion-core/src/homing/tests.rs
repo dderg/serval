@@ -592,14 +592,14 @@ mod corexy_reconstruction_tests {
         .expect("corexy reconstruction must succeed");
 
         assert!(
-            (cart[0] - 50.0).abs() < 0.5,
+            (cart.0[0] - 50.0).abs() < 0.5,
             "x = (A+B)/2 midway must be ~50, got {:.4}",
-            cart[0]
+            cart.0[0]
         );
         assert!(
-            (cart[1] - 40.0).abs() < 0.5,
+            (cart.0[1] - 40.0).abs() < 0.5,
             "y = (A-B)/2 must stay ~40 through a pure-X move, got {:.4}",
-            cart[1]
+            cart.0[1]
         );
     }
 
@@ -652,7 +652,7 @@ mod corexy_reconstruction_tests {
         let cart = final_cartesian_position(&corexy_cfg(MCU_ID), &shared(store))
             .expect("final corexy position must succeed");
         assert!(
-            (cart[0] - 200.0).abs() < 1e-3 && (cart[1] - 100.0).abs() < 1e-3,
+            (cart.0[0] - 200.0).abs() < 1e-3 && (cart.0[1] - 100.0).abs() < 1e-3,
             "A=300 B=100 must invert to x=200 y=100, got {cart:?}"
         );
     }

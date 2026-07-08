@@ -100,7 +100,7 @@ pub fn reconstruct_cartesian_position(
     router: &Arc<Mutex<PassthroughRouter>>,
     history: &Arc<Mutex<crate::motion_history::HistoryStore>>,
     window_start_host: f64,
-) -> Result<[f64; SPATIAL_AXES], String> {
+) -> Result<geometry::MachinePos, String> {
     cartesian_from_motor_lanes(cfg, |key| {
         reconstruct_axis_position(
             endstop_mcu,
@@ -111,13 +111,15 @@ pub fn reconstruct_cartesian_position(
             window_start_host,
         )
     })
+    .map(geometry::MachinePos)
 }
 
 pub fn final_cartesian_position(
     cfg: &McuAxisConfig,
     history: &Arc<Mutex<crate::motion_history::HistoryStore>>,
-) -> Result<[f64; SPATIAL_AXES], String> {
+) -> Result<geometry::MachinePos, String> {
     cartesian_from_motor_lanes(cfg, |key| trajectory_final_position(key, history))
+        .map(geometry::MachinePos)
 }
 
 pub fn broadcast_stop<S, F>(

@@ -255,6 +255,7 @@ impl Ingress {
             StreamMsg::SetMesh {
                 mesh,
                 gcode_z_rebase,
+                notify,
             } => {
                 self.drain_and_fence();
                 self.odometer[2] = gcode_z_rebase;
@@ -263,6 +264,7 @@ impl Ingress {
                     gcode_z_rebase,
                 }));
                 self.barrier();
+                let _ = notify.send(());
             }
             StreamMsg::HomeDrip(p) => {
                 let result = self.run_home_drip(&p);

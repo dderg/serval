@@ -52,8 +52,9 @@ impl PyMotionEngine {
         self.quiesce_pump_and_drain(py)?;
 
         // home_drip resets the planner odometer to home_pos with extruder=0;
-        // the seed zeroes the MCU extruder counters to match.
-        self.send_serial_position_seeds(start_pos[0], start_pos[1], start_pos[2])?;
+        // the seed zeroes the MCU extruder counters to match. The counters
+        // are machine space, so the gcode rest point crosses the warp here.
+        self.send_serial_position_seeds(self.machine_from_gcode(start_pos))?;
 
         let window_start_host = {
             let router = self.router.lock_ok();
@@ -70,8 +71,9 @@ impl PyMotionEngine {
             }))
             .map_err(|_| PyRuntimeError::new_err("home_axis: pump channel closed"))?;
 
-        let (result_tx, result_rx) =
-            crossbeam_channel::bounded::<Result<([f64; 3], [f64; 3], u64), String>>(1);
+        let (result_tx, result_rx) = crossbeam_channel::bounded::<
+            Result<(geometry::MachinePos, geometry::MachinePos, u64), String>,
+        >(1);
 
         *self.homing.run.lock_ok() = Some(HomingRun {
             cohort,
@@ -87,8 +89,8 @@ impl PyMotionEngine {
             crossbeam_channel::bounded::<Result<(), String>>(1);
         planner
             .home_drip(crate::worker::HomeDripParams {
-                home_pos: [start_pos[0], start_pos[1], start_pos[2], 0.0],
-                start: start_pos,
+                home_pos: [start_pos.x(), start_pos.y(), start_pos.z(), 0.0],
+                start: start_pos.0,
                 axis,
                 direction,
                 speed_mm_s,
@@ -134,14 +136,11 @@ impl PyMotionEngine {
             Ok(result) => {
                 self.finish_homing();
                 let (trip_pos, final_pos, trip_clock) = result.map_err(PyRuntimeError::new_err)?;
-                // Trigger positions are measured in machine space; everything
-                // returned to Python and every gcode-space odometer gets the
-                // inverse-transformed value — the bridge is the only crossing.
-                let trip_pos = self.machine_to_gcode(trip_pos);
-                let final_pos = self.machine_to_gcode(final_pos);
+                let trip_pos = self.gcode_from_machine(trip_pos);
+                let final_pos = self.gcode_from_machine(final_pos);
                 *self.commanded_pos.lock_ok() = final_pos;
                 self.reanchor_after_trip(final_pos)?;
-                Ok(Some((trip_pos, final_pos, trip_clock)))
+                Ok(Some((trip_pos.0, final_pos.0, trip_clock)))
             }
         }
     }
@@ -245,7 +244,7 @@ impl PyMotionEngine {
 
         self.finish_homing();
 
-        let cartesian = match self.reconcile_aborted_position(ctx.axis_key) {
+        let machine = match self.reconcile_aborted_position(ctx.axis_key) {
             Ok(p) => p,
             Err(()) => return,
         };
@@ -262,11 +261,12 @@ impl PyMotionEngine {
             return;
         }
 
-        if !self.reopen_stream_at(cartesian) {
+        let gcode = self.gcode_from_machine(machine);
+        if !self.reopen_stream_at(gcode) {
             return;
         }
 
-        *self.commanded_pos.lock_ok() = cartesian;
+        *self.commanded_pos.lock_ok() = gcode;
         *self.last_g5_pq.lock_ok() = None;
     }
     #[pyo3(signature = (source_mcu, clock, host_now))]
@@ -329,10 +329,8 @@ impl PyMotionEngine {
             }
         }
         drop(store);
-        Ok(crate::motion_history::assemble_cartesian_state(
-            motor_state,
-            &kin,
-        ))
+        let machine = crate::motion_history::assemble_cartesian_state(motor_state, &kin);
+        self.cartesian_state_to_gcode(machine)
     }
 }
 
@@ -454,7 +452,10 @@ impl PyMotionEngine {
         true
     }
 
-    fn reconcile_aborted_position(&self, axis_key: crate::types::AxisKey) -> Result<[f64; 3], ()> {
+    fn reconcile_aborted_position(
+        &self,
+        axis_key: crate::types::AxisKey,
+    ) -> Result<geometry::MachinePos, ()> {
         let final_cartesian = {
             let configs = self.mcu_axis_configs.lock_ok();
             configs
@@ -476,12 +477,12 @@ impl PyMotionEngine {
         })
     }
 
-    fn reopen_stream_at(&self, cartesian: [f64; 3]) -> bool {
+    fn reopen_stream_at(&self, gcode: geometry::GcodePos) -> bool {
         let planner_guard = self.planner.lock_ok();
         let Some(planner) = planner_guard.as_ref() else {
             return true;
         };
-        let open_result = planner.stream_open(vec![cartesian[0], cartesian[1], cartesian[2], 0.0]);
+        let open_result = planner.stream_open(vec![gcode.x(), gcode.y(), gcode.z(), 0.0]);
         if let Err(e) = open_result {
             tracing::error!(
                 event = "home_abort_stream_open_failed",
@@ -497,6 +498,33 @@ impl PyMotionEngine {
     fn finish_homing(&self) {
         self.homing.finish();
     }
+    /// Motion history answers in machine space (the lowerer's output frame);
+    /// this is the bridge crossing for full kinematic states returned to
+    /// Python: the Z lane is unwarped through the active mesh with the exact
+    /// inverse of the lowerer's chain rule. XY (and follower axes) are
+    /// warp-invariant. Identity when no mesh is active.
+    fn cartesian_state_to_gcode(
+        &self,
+        mut state: std::collections::HashMap<String, (f64, f64, f64)>,
+    ) -> PyResult<std::collections::HashMap<String, (f64, f64, f64)>> {
+        let mesh = self.bed_mesh.lock_ok();
+        let Some(t) = mesh.as_deref() else {
+            return Ok(state);
+        };
+        let Some(&z_machine) = state.get("z") else {
+            return Ok(state);
+        };
+        let (Some(&x), Some(&y)) = (state.get("x"), state.get("y")) else {
+            return Err(PyRuntimeError::new_err(
+                "motion_state_at: a bed mesh is active but the queried instant has a Z \
+                 state without X/Y — cannot unwarp machine Z to gcode Z without the XY \
+                 the mesh was sampled at",
+            ));
+        };
+        let gcode_z = t.unwarp_z_state([x.0, y.0], [x.1, y.1], [x.2, y.2], z_machine);
+        state.insert("z".to_string(), gcode_z);
+        Ok(state)
+    }
     pub(super) fn trip_deps(&self) -> TripDeps {
         TripDeps {
             homing: Arc::clone(&self.homing),
@@ -507,11 +535,11 @@ impl PyMotionEngine {
             mcu_axis_configs: Arc::clone(&self.mcu_axis_configs),
         }
     }
-    fn reanchor_after_trip(&self, stop_pos: [f64; 3]) -> PyResult<()> {
+    fn reanchor_after_trip(&self, stop_pos: geometry::GcodePos) -> PyResult<()> {
         let guard = self.planner.lock_ok();
         match guard.as_ref() {
             Some(planner) => planner
-                .reset(vec![stop_pos[0], stop_pos[1], stop_pos[2], 0.0])
+                .reset(vec![stop_pos.x(), stop_pos.y(), stop_pos.z(), 0.0])
                 .map_err(planner_err),
             None => Ok(()),
         }
