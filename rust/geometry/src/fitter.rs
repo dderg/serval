@@ -284,13 +284,13 @@ fn classify_junction(
     };
 
     let vertex = line_in.point_at(line_in.s_len());
-    let budget_in = 0.5 * (line_in.s_len() - in_reduction);
-    let budget_out = 0.5 * (line_out.s_len() - out_reduction);
+    let in_len = line_in.s_len() - in_reduction;
+    let out_len = line_out.s_len() - out_reduction;
+    let budget = 0.5 * in_len.min(out_len);
     let line_no = m_out.source.start_line;
 
-    let Some(bi) =
-        biclothoid::solve_line_line(vertex, t_in, t_out, v, theta, delta, budget_in, budget_out)
-            .map_err(|source| FitError::Internal { line_no, source })?
+    let Some(bi) = biclothoid::solve_line_line(vertex, t_in, v, theta, delta, budget)
+        .map_err(|source| FitError::Internal { line_no, source })?
     else {
         return Ok(JunctionPlan::Unblended(UnblendReason::NoBudget));
     };
