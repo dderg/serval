@@ -103,6 +103,12 @@ def _virtual_endstop_params(pin="virtual_endstop", invert=0, pullup=0):
     }
 
 
+def _enabled_tracker(config):
+    tracker = tmc.TMCModeTracker(config.get_printer(), "stepper_x")
+    tracker.mode = tmc.TMCModeTracker.PULSE
+    return tracker
+
+
 def _helper_2209(sgthrs=75, tpwmthrs=120, en_spreadcycle=1, tcoolthrs=0):
     fields = tmc.FieldHelper(
         tmc2209.Fields, tmc2208.SignedFields, tmc2209.FieldFormatters
@@ -113,7 +119,8 @@ def _helper_2209(sgthrs=75, tpwmthrs=120, en_spreadcycle=1, tcoolthrs=0):
     fields.set_field("tcoolthrs", tcoolthrs)
     mcu_tmc = _FakeMcuTmc(fields)
     config = _FakeConfig("tmc2209 stepper_x", {"diag_pin": "^PA1"})
-    return tmc.TMCVirtualPinHelper(config, mcu_tmc), fields, mcu_tmc
+    helper = tmc.TMCVirtualPinHelper(config, mcu_tmc, _enabled_tracker(config))
+    return helper, fields, mcu_tmc
 
 
 def _helper_2130(options):
@@ -122,7 +129,8 @@ def _helper_2130(options):
     )
     mcu_tmc = _FakeMcuTmc(fields)
     config = _FakeConfig("tmc2130 stepper_x", options)
-    return tmc.TMCVirtualPinHelper(config, mcu_tmc), fields, mcu_tmc
+    helper = tmc.TMCVirtualPinHelper(config, mcu_tmc, _enabled_tracker(config))
+    return helper, fields, mcu_tmc
 
 
 def test_arm_writes_threshold_and_forces_stealthchop():

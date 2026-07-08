@@ -243,7 +243,7 @@ def build_group(rig):
 def test_group_enter_enters_every_member(rig):
     t1, t2 = build_group(rig)
     t1.enter_phase_mode()
-    assert t1._phase_mode_active and t2._phase_mode_active
+    assert t1._in_phase_mode() and t2._in_phase_mode()
     aligns = [e for e in rig.wire if e[:2] == ("cmd", "kalico_phase_align_to")]
     assert aligns == [
         ("cmd", "kalico_phase_align_to", (7, 300)),
@@ -268,7 +268,7 @@ def test_group_exit_jogs_all_motors_before_any_mode_flip(rig):
         "corexy A/B: both motors reach their handover phase while the group"
         " is still in phase mode; flipping one early loses steps"
     )
-    assert not t1._phase_mode_active and not t2._phase_mode_active
+    assert not t1._in_phase_mode() and not t2._in_phase_mode()
 
 
 def test_group_exit_flips_each_axis_once_in_sorted_order(rig):
