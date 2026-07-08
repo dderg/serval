@@ -23,17 +23,28 @@ fn ctx_with(line_no: u32, accel: f64, scv: f64) -> MoveContext {
     }
 }
 
-fn seg_with(line_no: u32, start: [f64; 3], end: [f64; 3], ratio: f64, accel: f64) -> Move {
+fn seg_with(
+    line_no: u32,
+    start: [f64; 3],
+    end: [f64; 3],
+    ratio: f64,
+    accel: f64,
+    scv: f64,
+) -> Move {
     let e = ratio * dist(start, end);
-    line_move(start, end, e, ctx_with(line_no, accel, SCV)).unwrap()
+    line_move(start, end, e, ctx_with(line_no, accel, scv)).unwrap()
 }
 
 fn seg(line_no: u32, start: [f64; 3], end: [f64; 3], ratio: f64) -> Move {
-    seg_with(line_no, start, end, ratio, ACCEL)
+    seg_with(line_no, start, end, ratio, ACCEL, SCV)
+}
+
+fn delta_at(accel: f64, scv: f64) -> f64 {
+    scv * scv * (SQRT_2 - 1.0) / accel
 }
 
 fn delta_of(accel: f64) -> f64 {
-    SCV * SCV * (SQRT_2 - 1.0) / accel
+    delta_at(accel, SCV)
 }
 
 fn as_clothoid(m: &Move) -> &Clothoid {
@@ -61,23 +72,24 @@ fn total_extrusion(moves: &[Move]) -> f64 {
 /// A 90° corner whose vertex is replaced by a 45°-45° chamfer facet of
 /// length `h`: in along +x, chamfer at 45°, out along +y.
 fn chamfered_corner(h: f64, r_in: f64, r_mid: f64, r_out: f64) -> (Move, Move, Move) {
-    chamfered_corner_at_accel(h, r_in, r_mid, r_out, ACCEL)
+    chamfered_corner_at(h, r_in, r_mid, r_out, ACCEL, SCV)
 }
 
-fn chamfered_corner_at_accel(
+fn chamfered_corner_at(
     h: f64,
     r_in: f64,
     r_mid: f64,
     r_out: f64,
     accel: f64,
+    scv: f64,
 ) -> (Move, Move, Move) {
     let d = h / SQRT_2;
     let v1 = [10.0, 0.0, 0.0];
     let v2 = [10.0 + d, d, 0.0];
     (
-        seg_with(1, [0.0, 0.0, 0.0], v1, r_in, accel),
-        seg_with(2, v1, v2, r_mid, accel),
-        seg_with(3, v2, [10.0 + d, 10.0 + d, 0.0], r_out, accel),
+        seg_with(1, [0.0, 0.0, 0.0], v1, r_in, accel, scv),
+        seg_with(2, v1, v2, r_mid, accel, scv),
+        seg_with(3, v2, [10.0 + d, 10.0 + d, 0.0], r_out, accel, scv),
     )
 }
 
@@ -211,47 +223,58 @@ fn squeezed_chamfer_is_consumed_within_tolerance() {
 }
 
 #[test]
-fn chamfer_beyond_one_pair_is_consumed_by_a_split_blend() {
-    // At this acceleration the junction deviation is ~2.1µm: the 50µm
-    // chamfer is far outside what a single curvature bump can hug (it
-    // strays roughly the chamfer depth from the tube), but the squeeze gate
-    // still holds — its corners' deviation-optimal trims dwarf the facet.
-    // The solver must split and hug the chamfer with two pairs.
-    let accel = 5000.0;
-    let (a, mid, b) = chamfered_corner_at_accel(0.05, 0.1, 0.1, 0.1, accel);
-    let fc = plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), 0.0)
+fn wide_cluster_is_consumed_by_a_split_blend() {
+    // Four 60µm facets rounding one 90° corner span ~0.24mm — far outside
+    // one curvature bump's reach at this ~11µm junction deviation, so the
+    // solver must split and hug the chain with two pairs. The split still
+    // corners more gently than the pairwise alternative (per-corner blends
+    // budget-crushed to 30µm trims), so the curvature gate admits it.
+    let (a, mids, b, vertices) = faceted_corner(4, 0.06, &[0.1; 4]);
+    let mid_refs: Vec<&Move> = mids.iter().collect();
+    let fc = plan_facet_consumption(&a, &mid_refs, &b, CornerFitConfig::default(), 0.0)
         .unwrap()
-        .expect("the split blend must rescue the wide chamfer");
+        .expect("the split blend must rescue the wide cluster");
 
-    let moves = consumption_moves(&fc, &a, &[&mid], &b).unwrap();
-    assert_eq!(moves.len(), 4, "two pairs hug the chamfer's two corners");
+    let moves = consumption_moves(&fc, &a, &mid_refs, &b).unwrap();
+    assert_eq!(moves.len(), 4, "two pairs hug the chain");
     let segments: Vec<&Clothoid> = moves.iter().map(as_clothoid).collect();
     assert_g2_chain(&segments);
 
-    let line_a = match &a.segment.spatial {
-        Some(Segment::Line(l)) => l,
-        _ => unreachable!(),
-    };
-    let line_b = match &b.segment.spatial {
-        Some(Segment::Line(l)) => l,
-        _ => unreachable!(),
-    };
-    let v1 = line_a.end;
-    let v2 = line_b.start;
-    let contact_a = [v1[0] - fc.trim_in(), v1[1], v1[2]];
-    let contact_b = [v2[0], v2[1] + fc.trim_out(), v2[2]];
-    let dev = max_dev_from_chain(&segments, &[contact_a, v1, v2, contact_b]);
+    let mut chain = Vec::with_capacity(vertices.len() + 2);
+    let first = vertices[0];
+    let last = *vertices.last().unwrap();
+    chain.push([first[0] - fc.trim_in(), first[1], first[2]]);
+    chain.extend_from_slice(&vertices);
+    chain.push([last[0], last[1] + fc.trim_out(), last[2]]);
+    let dev = max_dev_from_chain(&segments, &chain);
     assert!(
-        dev <= delta_of(accel) + 1e-9,
+        dev <= delta_of(ACCEL) + 1e-9,
         "deviation {dev} exceeds tolerance {}",
-        delta_of(accel)
+        delta_of(ACCEL)
     );
 
-    let expected_e = 0.1 * (fc.trim_in() + mid.segment.s_len() + fc.trim_out());
+    let consumed_len: f64 = mids.iter().map(|m| m.segment.s_len()).sum();
+    let expected_e = 0.1 * (fc.trim_in() + consumed_len + fc.trim_out());
     let got_e = total_extrusion(&moves);
     assert!(
         (got_e - expected_e).abs() < 1e-9,
         "blend must carry the replaced spans' extrusion: {got_e} vs {expected_e}"
+    );
+}
+
+#[test]
+fn consumption_that_corners_harder_than_pairwise_is_rejected() {
+    // A 25µm 45°-45° chamfer at ~2.1µm junction deviation: a split blend
+    // exists within the tube, but its reach is capped by the 90° total
+    // turn's deviation-optimal trim (~7µm) while the pairwise per-corner
+    // blends get 12.5µm trims — the pairwise pair corners more gently, so
+    // consumption must stand aside.
+    let (accel, scv) = (5000.0, 5.0);
+    let (a, mid, b) = chamfered_corner_at(0.025, 0.1, 0.1, 0.1, accel, scv);
+    let fc = plan_facet_consumption(&a, &[&mid], &b, CornerFitConfig::default(), 0.0).unwrap();
+    assert!(
+        fc.is_none(),
+        "a blend curvier than the pairwise alternative must not consume"
     );
 }
 

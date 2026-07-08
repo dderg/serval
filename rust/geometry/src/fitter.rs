@@ -294,8 +294,11 @@ pub fn facet_consumption_candidate(
 /// every corner turn is blendable and all turn the same way (each clothoid
 /// pair has one curvature bump, so S-jogs stay pairwise); every facet is
 /// squeezed below its corners' deviation-optimal trims (a roomy facet blends
-/// better on its own); every facet's extrusion fits the ramp the anchors
-/// span; and the blend's extrusion ramps pass the kinematic gate.
+/// better on its own); the solved blend corners no harder than the pairwise
+/// per-junction blends it replaces (near the squeeze limit, two blends with
+/// their own footprints traverse faster than one blend squeezed through the
+/// whole turn); every facet's extrusion fits the ramp the anchors span; and
+/// the blend's extrusion ramps pass the kinematic gate.
 pub fn plan_facet_consumption(
     m_in: &Move,
     mids: &[&Move],
@@ -390,6 +393,25 @@ pub fn plan_facet_consumption(
     let Some(blend) = biclothoid::solve_consume_chain(&vertices, t_in, t_out, delta, t_cap) else {
         return Ok(None);
     };
+
+    let kappa_consume = blend
+        .segments
+        .iter()
+        .map(|s| s.kappa_peak().1)
+        .fold(0.0, f64::max);
+    let mut span_lens = Vec::with_capacity(mids.len() + 2);
+    span_lens.push(line_in.s_len() - in_reduction);
+    span_lens.extend(facet_lines.iter().map(|l| l.s_len()));
+    span_lens.push(line_out.s_len());
+    let mut kappa_pairwise = 0.0_f64;
+    for (i, theta) in thetas.iter().enumerate() {
+        let trim = trims_at_delta[i].min(0.5 * span_lens[i].min(span_lens[i + 1]));
+        kappa_pairwise = kappa_pairwise
+            .max(biclothoid::symmetric_blend_kappa_peak(*theta, trim).map_err(internal_err)?);
+    }
+    if kappa_consume > kappa_pairwise {
+        return Ok(None);
+    }
 
     let followers = consumption_followers(&blend, m_in, mids, m_out, line_in, line_out);
     let feedrates = consumption_feedrates(&blend, m_in, mids, m_out);

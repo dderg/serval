@@ -73,6 +73,16 @@ pub(super) fn trim_at_delta(theta: f64, delta: f64) -> Result<f64, GeometryError
     Ok(trim_ref * delta / deviation_ref)
 }
 
+/// The peak curvature of the symmetric line-line blend that turns `theta`
+/// with `trim` consumed per side — what [`solve_line_line`] would build.
+pub(super) fn symmetric_blend_kappa_peak(theta: f64, trim: f64) -> Result<f64, GeometryError> {
+    if trim <= super::BUDGET_EPS_MM {
+        return Ok(f64::INFINITY);
+    }
+    let (trim_ref, _) = canonical(theta)?;
+    Ok((trim_ref * theta / trim).abs())
+}
+
 const CONSUME_COARSE_STEPS: usize = 8;
 const CONSUME_REFINE_ITERS: usize = 6;
 /// A split per level doubles the pair count: depth 2 allows up to four
@@ -92,14 +102,16 @@ pub(super) struct ChainBlend {
 /// `t` past its last vertex on the outbound line, tangent and curvature-free
 /// at both contacts and owing the facets themselves nothing — the whole curve
 /// only has to stay within `delta` of the polyline it replaces. A single pair
-/// has one curvature bump and cannot hug a chain much larger than the tube;
-/// when it strays, the span splits at a mid-chain anchor (on a facet, so the
-/// anchor state is exact: facet tangent, zero curvature) and each side solves
-/// recursively. Picks the largest feasible `t` up to `t_cap`; the deviation
-/// is not monotone in `t` (the blend first hugs the chain, then cuts deeper),
-/// so a coarse top-down scan finds the feasible band's upper edge before
-/// bisecting it. `vertices` runs from the inbound line's end to the outbound
-/// line's start.
+/// sweeps the whole turn in one curvature bump — the least curvature and the
+/// fastest traversal — so the scan runs single-pair first over all contact
+/// reaches, and only a chain no single pair can span at any reach falls back
+/// to split solves: the span divides at a mid-chain anchor (on a facet, so
+/// the anchor state is exact: facet tangent, zero curvature) and each side
+/// solves recursively. Each pass picks the largest feasible `t` up to
+/// `t_cap`; the deviation is not monotone in `t` (the blend first hugs the
+/// chain, then cuts deeper), so a coarse top-down scan finds the feasible
+/// band's upper edge before bisecting it. `vertices` runs from the inbound
+/// line's end to the outbound line's start.
 pub(super) fn solve_consume_chain(
     vertices: &[[f64; 3]],
     t_a: [f64; 3],
@@ -116,6 +128,20 @@ pub(super) fn solve_consume_chain(
     }
     let plane_n = normalize(cross(t_a, t_b));
 
+    [0, CONSUME_SPLIT_DEPTH]
+        .into_iter()
+        .find_map(|depth| scan_consume_reach(vertices, t_a, t_b, delta, t_cap, plane_n, depth))
+}
+
+fn scan_consume_reach(
+    vertices: &[[f64; 3]],
+    t_a: [f64; 3],
+    t_b: [f64; 3],
+    delta: f64,
+    t_cap: f64,
+    plane_n: [f64; 3],
+    depth: usize,
+) -> Option<ChainBlend> {
     let eval = |t: f64| -> Option<Vec<ClothoidPair>> {
         let a = madd(vertices[0], -t, t_a);
         let b = madd(vertices[vertices.len() - 1], t, t_b);
@@ -131,15 +157,7 @@ pub(super) fn solve_consume_chain(
             pos: b,
             tangent: t_b,
         };
-        consume_pairs(
-            &start,
-            &end,
-            vertices,
-            &tube,
-            delta,
-            plane_n,
-            CONSUME_SPLIT_DEPTH,
-        )
+        consume_pairs(&start, &end, vertices, &tube, delta, plane_n, depth)
     };
 
     let mut feasible: Option<(Vec<ClothoidPair>, f64)> = None;
