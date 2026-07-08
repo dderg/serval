@@ -841,6 +841,7 @@ dependencies = [
  "libm",
  "motion-pipeline",
  "nurbs",
+ "planner-config",
  "serde",
  "serde_json",
  "thiserror",

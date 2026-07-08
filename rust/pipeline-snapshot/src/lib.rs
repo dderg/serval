@@ -18,6 +18,8 @@ use motion_pipeline::fit_stage::FitStage;
 use motion_pipeline::planner::Planner;
 use motion_pipeline::{StreamConfig, run_lowerer};
 
+pub use planner_config::{AxisDecl, PostProcessorDecl};
+
 pub const SAMPLES_PER_MM: f64 = 2.0;
 /// The E lane rides as axis 3, past the three spatial axes — the same index the
 /// production bridge and the seam harness assign the extruder.
@@ -51,7 +53,7 @@ pub enum SnapshotError {
     InvalidChain(String),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SnapshotParams {
     pub max_velocity: f64,
     pub max_accel: f64,
@@ -62,9 +64,8 @@ pub struct SnapshotParams {
     pub max_extrude_only_accel: Option<f64>,
     pub max_path_deviation: Option<f64>,
     pub max_accel_deviation: Option<f64>,
-    pub pressure_advance: Option<f64>,
-    pub smooth_zv_hz: Option<f64>,
-    pub e_smooth_zv_hz: Option<f64>,
+    pub axis_decls: Vec<AxisDecl>,
+    pub post_processor_decls: Vec<PostProcessorDecl>,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,8 +150,7 @@ pub fn pipeline_snapshot(
         max_buffer_moves: SNAPSHOT_MAX_BUFFER_MOVES,
         limits,
     };
-    let axis_chains =
-        build_axis_chains(&params).map_err(|e| SnapshotError::InvalidChain(e.to_string()))?;
+    let axis_chains = build_axis_chains(&params).map_err(SnapshotError::InvalidChain)?;
     let (fitted, shaped) = run_pipeline(&moves, config, axis_chains);
 
     let fitted_segments = fitted
@@ -267,54 +267,80 @@ pub fn extract_raw_path(moves: &[geometry::Move]) -> Vec<(f64, f64)> {
     points
 }
 
-/// The snapshot's optional post-processor chains: smoothing on x/y, and on
-/// the extruder lane an optional smoother ahead of pressure advance — the
-/// same compiled stages the live config builds, so snapshot piece counts and
-/// seams reflect the real wire.
-fn build_axis_chains(
-    params: &SnapshotParams,
-) -> Result<AxisChainSet, trajectory::PostProcessorError> {
-    use trajectory::algos::{LinearPressureAdvance, SmoothZv};
-    use trajectory::chain::PostProcessorInstance;
-    use trajectory::{CompiledChain, PostProcessorError};
+fn default_axis_decls() -> Vec<AxisDecl> {
+    vec![
+        AxisDecl {
+            name: "x".into(),
+            follows: Vec::new(),
+            motors: Vec::new(),
+            post_processors: Vec::new(),
+        },
+        AxisDecl {
+            name: "y".into(),
+            follows: Vec::new(),
+            motors: Vec::new(),
+            post_processors: Vec::new(),
+        },
+        AxisDecl {
+            name: "z".into(),
+            follows: Vec::new(),
+            motors: Vec::new(),
+            post_processors: Vec::new(),
+        },
+        AxisDecl {
+            name: "e".into(),
+            follows: vec!["x".into(), "y".into(), "z".into()],
+            motors: Vec::new(),
+            post_processors: Vec::new(),
+        },
+    ]
+}
 
-    if params.pressure_advance.is_none()
-        && params.smooth_zv_hz.is_none()
-        && params.e_smooth_zv_hz.is_none()
-    {
-        return Ok(AxisChainSet::default());
-    }
-    let spatial_chain = |hz: Option<f64>| -> Result<CompiledChain, PostProcessorError> {
-        match hz {
-            Some(hz) => CompiledChain::compile(&[PostProcessorInstance::new(
-                "smooth_zv",
-                &SmoothZv,
-                vec![hz],
-            )]),
-            None => Ok(CompiledChain::default()),
+const KNOWN_AXES: [&str; 4] = ["x", "y", "z", "e"];
+
+/// Layers any explicitly-declared axes over the default x/y/z/e-follows-xyz
+/// topology, by name — `AxisRegistry::try_new` requires all of x/y/z to be
+/// present, so without this a caller declaring e.g. only `[axis e]` (to
+/// attach pressure advance) would hit `MissingSpatialAxis` for x. A caller
+/// only needs to declare the axis it's actually customizing; the rest fall
+/// back to their default (no post-processors). Any name outside x/y/z/e is
+/// rejected — this pipeline's topology is fixed, there's no data lane for a
+/// 5th axis.
+fn merge_axis_decls(explicit: &[AxisDecl]) -> Result<Vec<AxisDecl>, String> {
+    for d in explicit {
+        if !KNOWN_AXES.contains(&d.name.as_str()) {
+            return Err(format!(
+                "axis '{}': only x, y, z, e are supported here (this pipeline's topology is fixed)",
+                d.name
+            ));
         }
-    };
-    let mut e_stages = Vec::new();
-    if let Some(hz) = params.e_smooth_zv_hz {
-        e_stages.push(PostProcessorInstance::new("smooth_zv", &SmoothZv, vec![hz]));
     }
-    if let Some(k) = params.pressure_advance {
-        e_stages.push(PostProcessorInstance::new(
-            "pressure_advance",
-            &LinearPressureAdvance,
-            vec![k],
-        ));
-    }
-    let e_chain = CompiledChain::compile(&e_stages)?;
-    Ok(AxisChainSet {
-        chains: vec![
-            spatial_chain(params.smooth_zv_hz)?,
-            spatial_chain(params.smooth_zv_hz)?,
-            CompiledChain::default(),
-            e_chain,
-        ],
-        followers: Vec::new(),
-    })
+    Ok(default_axis_decls()
+        .into_iter()
+        .map(|default| {
+            explicit
+                .iter()
+                .find(|d| d.name == default.name)
+                .cloned()
+                .unwrap_or(default)
+        })
+        .collect())
+}
+
+/// The snapshot's post-processor chains, compiled through the exact same
+/// path the live engine uses (`planner_config::AxisRegistry` +
+/// `PostProcessorSet`) so a case's `[axis]`/`[post_processor]` sections
+/// behave identically here as on a real printer. No axes declared at all
+/// falls back to the default x/y/z/e-follows-xyz topology with no
+/// post-processors — the historical no-shaping-no-PA behavior every
+/// existing baseline was recorded with.
+fn build_axis_chains(params: &SnapshotParams) -> Result<AxisChainSet, String> {
+    let axis_decls = merge_axis_decls(&params.axis_decls)?;
+    let registry = planner_config::AxisRegistry::try_new(axis_decls).map_err(|e| e.to_string())?;
+    planner_config::PostProcessorSet::try_new(&registry, &params.post_processor_decls)
+        .map_err(|e| e.to_string())?
+        .compile(&registry)
+        .map_err(|e| e.to_string())
 }
 
 pub fn run_pipeline(
