@@ -441,12 +441,19 @@ impl PyMotionEngine {
                 .expect("ec_conns built from ethercat_mcu_ids")
                 .clone();
 
+            let slot_axes = self
+                .mcus
+                .lock_ok()
+                .get(&mcu_id)
+                .map(|c| c.ethercat_slot_axes.clone())
+                .unwrap_or_default();
             let supervisor = EthercatHeartbeatSupervisor {
                 mcu_id,
                 mcu_label: self.mcu_label(mcu_id),
                 homing: Arc::clone(&self.homing),
                 latched_drive_fault: Arc::clone(&self.latched.drive),
                 pump_tx: pump_control.clone(),
+                slot_axes,
             };
             conn.attach_heartbeat_callback(Arc::new(
                 move |hb: &mcu_protocol::messages::StatusHeartbeat| supervisor.on_heartbeat(hb),
@@ -484,6 +491,26 @@ impl PyMotionEngine {
     }
 }
 
+/// Re-index an EtherCAT endpoint's per-SLOT retired counters into the pump's
+/// per-AXIS view. With AWD several slots retire the same axis's pieces; the
+/// minimum is the axis's true progress — capacity accounting must wait for the
+/// laggard ring.
+fn retired_by_axis(slot_axes: &[usize], retired_slots: &[u32]) -> Vec<u32> {
+    let max_axis = slot_axes.iter().copied().max().unwrap_or(0);
+    let mut out = vec![0u32; max_axis + 1];
+    let mut seen = vec![false; max_axis + 1];
+    for (slot, &axis) in slot_axes.iter().enumerate() {
+        let Some(&retired) = retired_slots.get(slot) else {
+            continue;
+        };
+        if !seen[axis] || retired < out[axis] {
+            out[axis] = retired;
+            seen[axis] = true;
+        }
+    }
+    out
+}
+
 fn forward_retired_heartbeat(
     pump_tx: &crossbeam_channel::Sender<crate::pump::PumpMsg>,
     mcu_id: u32,
@@ -501,6 +528,7 @@ struct EthercatHeartbeatSupervisor {
     homing: Arc<HomingState>,
     latched_drive_fault: Arc<Mutex<HashMap<u32, u16>>>,
     pump_tx: crossbeam_channel::Sender<crate::pump::PumpMsg>,
+    slot_axes: Vec<usize>,
 }
 
 impl EthercatHeartbeatSupervisor {
@@ -509,7 +537,11 @@ impl EthercatHeartbeatSupervisor {
             self.on_drive_fault(hb.fault_code);
             return;
         }
-        forward_retired_heartbeat(&self.pump_tx, self.mcu_id, hb.retired_counts.clone());
+        forward_retired_heartbeat(
+            &self.pump_tx,
+            self.mcu_id,
+            retired_by_axis(&self.slot_axes, &hb.retired_counts),
+        );
     }
 
     fn on_drive_fault(&self, fault_code: u16) {
@@ -612,4 +644,29 @@ fn spawn_endpoint_liveness_poll(
             }
         })
         .expect("spawn ec-heartbeat-poll thread");
+}
+
+#[cfg(test)]
+mod retired_by_axis_tests {
+    use super::retired_by_axis;
+
+    #[test]
+    fn single_slave_places_retired_at_its_axis() {
+        assert_eq!(retired_by_axis(&[2], &[7]), vec![0, 0, 7]);
+    }
+
+    #[test]
+    fn distinct_axes_map_one_to_one() {
+        assert_eq!(retired_by_axis(&[0, 1], &[3, 9]), vec![3, 9]);
+    }
+
+    #[test]
+    fn awd_axis_reports_the_laggard_slot() {
+        assert_eq!(retired_by_axis(&[0, 0, 1, 1], &[5, 3, 8, 8]), vec![3, 8]);
+    }
+
+    #[test]
+    fn missing_slot_counter_is_skipped() {
+        assert_eq!(retired_by_axis(&[0, 1], &[4]), vec![4, 0]);
+    }
 }

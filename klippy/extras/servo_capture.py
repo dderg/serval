@@ -27,15 +27,12 @@ class ServoCapture:
         from . import servo_axis
 
         toolhead = self.printer.lookup_object("toolhead")
-        servo_rails = [
-            rail
-            for rail in getattr(toolhead.get_kinematics(), "rails", ())
-            if isinstance(rail, servo_axis.ServoRail)
-        ]
-        if not servo_rails:
+        kin = toolhead.get_kinematics()
+        servo_motors = list(servo_axis.iter_servo_motors(kin))
+        if not servo_motors:
             raise gcmd.error("SERVO_CAPTURE: no servo motors configured")
-        rails = self._select_rails(gcmd, servo_rails)
-        node_names = sorted({r.get_node_name() for r in rails})
+        motors = self._select_motors(gcmd, servo_motors)
+        node_names = sorted({m.get_node_name() for m in motors})
         if len(node_names) != 1:
             raise gcmd.error(
                 "SERVO_CAPTURE: selected servos span multiple EtherCAT "
@@ -44,66 +41,52 @@ class ServoCapture:
             )
         node = self.printer.lookup_object("ethercat_node " + node_names[0])
         drives = [
-            (node.get_slot_for_motor(r.get_motor_name()), r.get_motor_name())
-            for r in rails
+            (node.get_slot_for_motor(m.get_motor_name()), m.get_motor_name())
+            for m in motors
         ]
         return node, drives
 
-    def _select_rails(self, gcmd, servo_rails):
+    def _select_motors(self, gcmd, servo_motors):
         axis = gcmd.get("AXIS", None)
         servo = gcmd.get("SERVO", None)
         if axis is not None and servo is not None:
             raise gcmd.error("SERVO_CAPTURE: pass AXIS= or SERVO=, not both")
-        known = ", ".join(rail.get_motor_name() for rail in servo_rails)
+        known = ", ".join(m.get_motor_name() for _r, m in servo_motors)
         if axis is not None:
             on_axis = [
-                r for r in servo_rails if r.get_name(short=True) == axis.lower()
+                m
+                for rail, m in servo_motors
+                if rail.get_name(short=True) == axis.lower()
             ]
             if not on_axis:
-                axes = ", ".join(r.get_name(short=True) for r in servo_rails)
+                axes = ", ".join(
+                    sorted({r.get_name(short=True) for r, _m in servo_motors})
+                )
                 raise gcmd.error(
                     "SERVO_CAPTURE: no servo on axis %r (have: %s)"
                     % (axis, axes)
                 )
-            if len(on_axis) > 1:
-                raise gcmd.error(
-                    "SERVO_CAPTURE: axis %r drives multiple servos (%s); "
-                    "SERVO= is required" % (axis, known)
-                )
             return on_axis
         if servo is not None:
-            rails = []
+            from . import servo_axis
+
+            motors = []
             for token in (s.strip() for s in servo.split(",")):
-                rail = next(
-                    (
-                        r
-                        for r in servo_rails
-                        if token
-                        in (
-                            r.get_motor_name(),
-                            r.get_name(),
-                            r.get_name(short=True),
-                        )
-                    ),
-                    None,
+                _rail, motor = servo_axis.resolve_servo_motor(
+                    self.printer, token, "SERVO_CAPTURE"
                 )
-                if rail is None:
-                    raise gcmd.error(
-                        "SERVO_CAPTURE: no servo motor named %r (known: %s)"
-                        % (token, known)
-                    )
-                if rail in rails:
+                if motor in motors:
                     raise gcmd.error(
                         "SERVO_CAPTURE: servo %r listed twice" % (token,)
                     )
-                rails.append(rail)
-            return rails
-        if len(servo_rails) != 1:
+                motors.append(motor)
+            return motors
+        if len(servo_motors) != 1:
             raise gcmd.error(
                 "SERVO_CAPTURE: multiple servo motors configured (%s); "
                 "AXIS= or SERVO= is required" % (known,)
             )
-        return servo_rails
+        return [servo_motors[0][1]]
 
     cmd_SERVO_CAPTURE_START_help = (
         "Start a servo telemetry capture at the node's DC sync rate. Target "

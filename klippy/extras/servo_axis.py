@@ -64,17 +64,11 @@ def infer_positive_dir(
     )
 
 
-class ServoRail(BaseRail):
-    def __init__(self, axis_config, motor_config):
-        super().__init__()
-        self.printer = axis_config.get_printer()
-        self.name = axis_config.get_name()
-        self.axis = self.name.split()[-1]
-        if self.axis not in ("x", "y", "z"):
-            raise axis_config.error(
-                "[axis %s]: axis must be one of x/y/z (got %r)"
-                % (self.axis, self.axis)
-            )
+class ServoMotor:
+    """One EtherCAT drive of a servo rail: everything configured per
+    [motor ...] section, while the rail owns the axis-level options."""
+
+    def __init__(self, motor_config, has_endstop):
         protocol = motor_config.get("protocol")
         if protocol != "ethercat":
             raise motor_config.error(
@@ -100,39 +94,22 @@ class ServoRail(BaseRail):
         self.invert_direction = motor_config.getboolean(
             "invert_direction", False
         )
-        self._parse_position_range(axis_config)
-        self.endstop_pin = axis_config.get("endstop_pin", None)
-        if self.endstop_pin is None:
-            self.position_endstop = 0.0
-            self.homing_speed = 0.0
-            self.homing_retract_dist = 0.0
-            self.homing_retract_speed = 0.0
-            self.homing_positive_dir = False
-            self.homing_following_error = 0.0
-            self.homing_max_torque = 0.0
-        else:
-            self.position_endstop = axis_config.getfloat("position_endstop")
-            self._parse_homing_speeds(axis_config)
-            self.homing_positive_dir = infer_positive_dir(
-                axis_config,
-                self.axis,
-                self.position_endstop,
-                self.position_min,
-                self.position_max,
-            )
+        if has_endstop:
             self.homing_following_error = motor_config.getfloat(
                 "homing_following_error", 2.5, above=0.0
             )
             self.homing_max_torque = motor_config.getfloat(
                 "homing_max_torque", 50.0, above=0.0, maxval=400.0
             )
+        else:
+            self.homing_following_error = 0.0
+            self.homing_max_torque = 0.0
         self.following_error = motor_config.getfloat(
             "following_error", None, above=0.0
         )
         self.max_torque = motor_config.getfloat(
             "max_torque", None, above=0.0, maxval=400.0
         )
-        self._active_callbacks = []
         self.dynamics_profile = motor_config.get("dynamics_profile", None)
         try:
             self.sdo_params = servo_param.parse_params_block(
@@ -142,47 +119,15 @@ class ServoRail(BaseRail):
             raise motor_config.error(
                 "[%s] params: %s" % (motor_config.get_name(), e)
             )
-        self._virtual_endstop = None
-        if self.printer is not None:
-            ppins = self.printer.lookup_object("pins")
-            ppins.register_chip(self.motor_name, self)
 
-    def get_name(self, short=False):
-        if short:
-            return self.axis
-        return self.name
-
-    def get_steppers(self):
-        return []
-
-    def add_active_callback(self, cb):
-        self._active_callbacks.append(cb)
-
-    def get_endstops(self):
-        return []
-
-    def setup_itersolve(self, alloc_func, *params):
-        return
-
-    def add_extra_stepper(self, config):
-        raise config.error(
-            "servo_%s does not support extra steppers" % self.axis
-        )
-
-    def set_position(self, coord):
-        return
-
-    def get_commanded_position(self):
-        return 0.0
+    def get_motor_name(self):
+        return self.motor_name
 
     def get_node_name(self):
         return self.node_name
 
     def get_chain_index(self):
         return self.chain_index
-
-    def get_motor_name(self):
-        return self.motor_name
 
     def get_counts_per_mm(self):
         return self.encoder_counts_per_rev / self.rotation_distance
@@ -203,66 +148,14 @@ class ServoRail(BaseRail):
         return self.sdo_params
 
     def get_homing_drive_limits(self):
-        counts_per_mm = self.encoder_counts_per_rev / self.rotation_distance
+        counts_per_mm = self.get_counts_per_mm()
         return (
             int(round(self.homing_following_error * counts_per_mm)),
             int(round(self.homing_max_torque * 10.0)),
         )
 
-    def setup_motion_endstop(self, pin_params, axis):
-        if pin_params["pin"] != VIRTUAL_ENDSTOP_PIN:
-            raise pins.error(
-                "%s only provides the '%s' virtual pin, not '%s'"
-                % (self.motor_name, VIRTUAL_ENDSTOP_PIN, pin_params["pin"])
-            )
-        if axis != "xyz".index(self.axis):
-            raise pins.error(
-                "%s:%s is only usable as the %s endstop"
-                % (self.motor_name, VIRTUAL_ENDSTOP_PIN, self.axis.upper())
-            )
-        if pin_params["invert"] or pin_params["pullup"]:
-            raise pins.error("Can not pullup/invert the servo virtual endstop")
-        self._virtual_endstop = ServoVirtualEndstop(
-            self.printer, self.node_name, allocate_provider_id(self.printer)
-        )
-        return self._virtual_endstop
-
-    def _engine_handle(self):
-        return self._engine_node().get_engine_handle()
-
-    def _engine_node(self):
-        node = self.printer.lookup_object("ethercat_node " + self.node_name)
-        if node.get_engine_handle() is None:
-            raise self.printer.command_error(
-                "servo sensorless homing: ethercat_node %s has no engine handle"
-                % (self.node_name,)
-            )
-        return node
-
-    def _engine_slot(self):
-        return self._engine_node().get_slot_for_motor(self.motor_name)
-
-    def trip_move_begin(self, entry):
-        _, torque_trip_tenth_pct = self.get_homing_drive_limits()
-        engine = self.printer.lookup_object("motion_engine")
-        engine.arm_sensorless_endstop(
-            self._engine_handle(),
-            self._engine_slot(),
-            entry["endstop"].endstop_id,
-            torque_trip_tenth_pct,
-            True,
-        )
-
-    def trip_move_end(self, entry):
-        engine = self.printer.lookup_object("motion_engine")
-        engine.disarm_sensorless_endstop(
-            self._engine_handle(),
-            self._engine_slot(),
-            entry["endstop"].endstop_id,
-        )
-
     def get_session_drive_limits(self):
-        counts_per_mm = self.encoder_counts_per_rev / self.rotation_distance
+        counts_per_mm = self.get_counts_per_mm()
         counts = None
         if self.following_error is not None:
             counts = int(round(self.following_error * counts_per_mm))
@@ -270,6 +163,181 @@ class ServoRail(BaseRail):
         if self.max_torque is not None:
             tenth_pct = int(round(self.max_torque * 10.0))
         return counts, tenth_pct
+
+
+class ServoRail(BaseRail):
+    def __init__(self, axis_config, motor_configs):
+        super().__init__()
+        self.printer = axis_config.get_printer()
+        self.name = axis_config.get_name()
+        self.axis = self.name.split()[-1]
+        if self.axis not in ("x", "y", "z"):
+            raise axis_config.error(
+                "[axis %s]: axis must be one of x/y/z (got %r)"
+                % (self.axis, self.axis)
+            )
+        self._parse_position_range(axis_config)
+        self.endstop_pin = axis_config.get("endstop_pin", None)
+        if self.endstop_pin is None:
+            self.position_endstop = 0.0
+            self.homing_speed = 0.0
+            self.homing_retract_dist = 0.0
+            self.homing_retract_speed = 0.0
+            self.homing_positive_dir = False
+        else:
+            self.position_endstop = axis_config.getfloat("position_endstop")
+            self._parse_homing_speeds(axis_config)
+            self.homing_positive_dir = infer_positive_dir(
+                axis_config,
+                self.axis,
+                self.position_endstop,
+                self.position_min,
+                self.position_max,
+            )
+        self.motors = [
+            ServoMotor(mc, self.endstop_pin is not None) for mc in motor_configs
+        ]
+        nodes = {m.get_node_name() for m in self.motors}
+        if len(nodes) > 1:
+            raise axis_config.error(
+                "[axis %s]: servo motors %s span EtherCAT nodes %s — all "
+                "motors of one axis must share a node"
+                % (
+                    self.axis,
+                    ", ".join(m.get_motor_name() for m in self.motors),
+                    ", ".join(sorted(nodes)),
+                )
+            )
+        self._active_callbacks = []
+        self._virtual_endstop = None
+        if self.printer is not None:
+            ppins = self.printer.lookup_object("pins")
+            for motor in self.motors:
+                ppins.register_chip(motor.get_motor_name(), self)
+
+    def get_name(self, short=False):
+        if short:
+            return self.axis
+        return self.name
+
+    def get_steppers(self):
+        return []
+
+    def get_motors(self):
+        return self.motors
+
+    def add_active_callback(self, cb):
+        self._active_callbacks.append(cb)
+
+    def get_endstops(self):
+        return []
+
+    def setup_itersolve(self, alloc_func, *params):
+        return
+
+    def set_position(self, coord):
+        return
+
+    def get_commanded_position(self):
+        return 0.0
+
+    def get_node_name(self):
+        return self.motors[0].get_node_name()
+
+    def setup_motion_endstop(self, pin_params, axis):
+        if pin_params["pin"] != VIRTUAL_ENDSTOP_PIN:
+            raise pins.error(
+                "%s only provides the '%s' virtual pin, not '%s'"
+                % (
+                    self.motors[0].get_motor_name(),
+                    VIRTUAL_ENDSTOP_PIN,
+                    pin_params["pin"],
+                )
+            )
+        if axis != "xyz".index(self.axis):
+            raise pins.error(
+                "servo axis %s is only usable as the %s endstop"
+                % (self.axis, self.axis.upper())
+            )
+        if pin_params["invert"] or pin_params["pullup"]:
+            raise pins.error("Can not pullup/invert the servo virtual endstop")
+        self._virtual_endstop = ServoVirtualEndstop(
+            self.printer,
+            self.get_node_name(),
+            allocate_provider_id(self.printer),
+        )
+        return self._virtual_endstop
+
+    def _engine_node(self):
+        node = self.printer.lookup_object(
+            "ethercat_node " + self.get_node_name()
+        )
+        if node.get_engine_handle() is None:
+            raise self.printer.command_error(
+                "servo sensorless homing: ethercat_node %s has no engine handle"
+                % (self.get_node_name(),)
+            )
+        return node
+
+    def trip_move_begin(self, entry):
+        node = self._engine_node()
+        engine = self.printer.lookup_object("motion_engine")
+        for motor in self.motors:
+            _, torque_trip_tenth_pct = motor.get_homing_drive_limits()
+            engine.arm_sensorless_endstop(
+                node.get_engine_handle(),
+                node.get_slot_for_motor(motor.get_motor_name()),
+                entry["endstop"].endstop_id,
+                torque_trip_tenth_pct,
+                True,
+            )
+
+    def trip_move_end(self, entry):
+        node = self._engine_node()
+        engine = self.printer.lookup_object("motion_engine")
+        for motor in self.motors:
+            engine.disarm_sensorless_endstop(
+                node.get_engine_handle(),
+                node.get_slot_for_motor(motor.get_motor_name()),
+                entry["endstop"].endstop_id,
+            )
+
+
+def iter_servo_motors(kin):
+    for rail in getattr(kin, "rails", ()):
+        if isinstance(rail, ServoRail):
+            for motor in rail.get_motors():
+                yield rail, motor
+
+
+def resolve_servo_motor(printer, name, context):
+    """Resolve a SERVO= style name to one (rail, motor) pair. Motor names
+    match directly; an axis/rail name only resolves when the rail has a
+    single motor — with AWD the caller must name the drive."""
+    kin = printer.lookup_object("toolhead").get_kinematics()
+    pairs = list(iter_servo_motors(kin))
+    for rail, motor in pairs:
+        if name == motor.get_motor_name():
+            return rail, motor
+    for rail in {rail for rail, _motor in pairs}:
+        if name in (rail.get_name(), rail.get_name(short=True)):
+            motors = rail.get_motors()
+            if len(motors) == 1:
+                return rail, motors[0]
+            raise printer.command_error(
+                "%s: axis %s is driven by multiple servos (%s) — name the "
+                "motor"
+                % (
+                    context,
+                    rail.get_name(short=True),
+                    ", ".join(m.get_motor_name() for m in motors),
+                )
+            )
+    known = ", ".join(motor.get_motor_name() for _rail, motor in pairs)
+    raise printer.command_error(
+        "%s: no servo motor named %r (known: %s)"
+        % (context, name, known or "none")
+    )
 
 
 class MotionTorqueLine:

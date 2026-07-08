@@ -27,7 +27,7 @@ pub fn run_lowerer(
 ) {
     let mut odometer = home_pos;
     let mut t = t_start;
-    let mut rest_hold_pending = false;
+    let mut rest_hold_pending = true;
     let mut mesh: Option<Arc<SurfaceTransform>> = None;
 
     while let Ok(item) = input.recv() {
@@ -49,7 +49,7 @@ pub fn run_lowerer(
                     Control::Reset { pos } => {
                         odometer.clone_from(pos);
                         t = 0.0;
-                        rest_hold_pending = false;
+                        rest_hold_pending = true;
                     }
                     Control::SetAxisChains(chains) => axis_chains = chains.clone(),
                     Control::SetMesh {

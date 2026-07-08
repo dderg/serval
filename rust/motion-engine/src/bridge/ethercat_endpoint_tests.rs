@@ -1,5 +1,5 @@
 use super::{
-    EthercatDrive, endpoint_args, handshake_ethercat_endpoint, poll_socket_ready, slot_for_axis,
+    EthercatDrive, endpoint_args, handshake_ethercat_endpoint, poll_socket_ready, slots_for_axis,
     spawn_ethercat_endpoint,
 };
 use std::io::{Read, Write};
@@ -24,14 +24,20 @@ fn drive() -> EthercatDrive {
 }
 
 #[test]
-fn slot_for_axis_maps_hits_and_misses() {
+fn slots_for_axis_maps_hits_and_misses() {
     let slot_axes = [2usize, 5, 7];
-    assert_eq!(slot_for_axis(&slot_axes, 2), Some(0));
-    assert_eq!(slot_for_axis(&slot_axes, 5), Some(1));
-    assert_eq!(slot_for_axis(&slot_axes, 7), Some(2));
-    assert_eq!(slot_for_axis(&slot_axes, 0), None);
-    assert_eq!(slot_for_axis(&slot_axes, 3), None);
-    assert_eq!(slot_for_axis(&[], 0), None);
+    assert_eq!(slots_for_axis(&slot_axes, 2), vec![0]);
+    assert_eq!(slots_for_axis(&slot_axes, 5), vec![1]);
+    assert_eq!(slots_for_axis(&slot_axes, 7), vec![2]);
+    assert_eq!(slots_for_axis(&slot_axes, 0), Vec::<u8>::new());
+    assert_eq!(slots_for_axis(&[], 0), Vec::<u8>::new());
+}
+
+#[test]
+fn slots_for_axis_returns_every_awd_slot_in_order() {
+    let slot_axes = [0usize, 0, 1, 1];
+    assert_eq!(slots_for_axis(&slot_axes, 0), vec![0, 1]);
+    assert_eq!(slots_for_axis(&slot_axes, 1), vec![2, 3]);
 }
 
 #[test]

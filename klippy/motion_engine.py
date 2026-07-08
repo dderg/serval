@@ -138,6 +138,42 @@ class MotionEngineWrapper:
             "restore_drive_limits",
         )
 
+    def sync_servo_pair(
+        self,
+        mcu_handle,
+        axis,
+        torque_ok_tenth_pct,
+        settle_timeout_ms,
+        dither_amplitude_nm,
+        dither_freq_millihz,
+        dither_duration_ms,
+    ):
+        """Run a belt-pair sync on the endpoint and return the measurement
+        tuple even when the run failed — the phase torques are the
+        diagnosis. Raises only when no report exists (transport failure)."""
+        error = None
+        try:
+            self._wait_endpoint_call(
+                self._engine.sync_servo_pair_start(
+                    mcu_handle,
+                    axis,
+                    torque_ok_tenth_pct,
+                    settle_timeout_ms,
+                    dither_amplitude_nm,
+                    dither_freq_millihz,
+                    dither_duration_ms,
+                ),
+                "sync_servo_pair",
+            )
+        except Exception as e:
+            error = e
+        report = self._engine.take_sync_report(mcu_handle)
+        if report is None:
+            if error is not None:
+                raise error
+            raise RuntimeError("sync_servo_pair: endpoint returned no report")
+        return report
+
     def arm_sensorless_endstop(
         self, mcu_handle, slot, endstop_id, torque_trip_tenth_pct, enable
     ):

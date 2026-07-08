@@ -9,8 +9,10 @@ use crate::scale::CountMap;
 use crate::sensorless::SensorlessBank;
 use crate::server::FrameServer;
 use crate::stream_halt::StreamHalt;
+use crate::sync::PairSync;
 use crate::torque::TorqueGate;
-use crate::wire::status_heartbeat_frame;
+use crate::wire::{status_heartbeat_frame, sync_pair_response_frame};
+use mcu_protocol::messages::SyncPairResponse;
 
 mod bringup;
 mod commands;
@@ -63,6 +65,59 @@ pub struct EndpointCtx {
     latched_drive_err: u16,
     sensorless: SensorlessBank,
     stream_halt: StreamHalt,
+    sync: Option<SyncRun>,
+}
+
+/// An in-flight SyncPair command: the pure state machine plus the slot pair
+/// it operates on and the deferred response's correlation id.
+pub(super) struct SyncRun {
+    pub(super) correlation_id: u32,
+    pub(super) primary: usize,
+    pub(super) secondary: usize,
+    pub(super) secondary_disabled: bool,
+    pub(super) machine: PairSync,
+}
+
+pub(super) fn sync_response_with_code(code: i32) -> SyncPairResponse {
+    SyncPairResponse {
+        result: code,
+        primary_slot: 0,
+        secondary_slot: 0,
+        torque_baseline_primary: 0,
+        torque_baseline_secondary: 0,
+        torque_released: 0,
+        torque_dithered: 0,
+        torque_final_primary: 0,
+        torque_final_secondary: 0,
+        released_delta_counts: 0,
+    }
+}
+
+/// Abort an in-flight sync (host Stop, drive fault). A coasting secondary is
+/// re-enabled first — a belt drive must never be left torque-free behind the
+/// host's back; if that enable fails the endpoint parks and exits.
+pub(super) fn abort_sync(ctx: &mut EndpointCtx, code: i32) {
+    let Some(run) = ctx.sync.take() else {
+        return;
+    };
+    if run.secondary_disabled {
+        let rc = ctx.drive.enable(run.secondary);
+        if rc != 0 {
+            eprintln!(
+                "ec-rt: sync abort: re-enable of slot {} failed rc={rc} — parking",
+                run.secondary
+            );
+            ctx.drive.shutdown_and_exit(ctx.num_slaves);
+        }
+    }
+    eprintln!(
+        "ec-rt: SyncPair aborted code={code} (primary={} secondary={})",
+        run.primary, run.secondary
+    );
+    ctx.server.respond(&sync_pair_response_frame(
+        run.correlation_id,
+        &sync_response_with_code(code),
+    ));
 }
 
 pub fn run(ctx: &mut EndpointCtx) {
