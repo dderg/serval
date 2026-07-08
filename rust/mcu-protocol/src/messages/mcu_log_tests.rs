@@ -34,7 +34,12 @@ fn mcu_log_is_event_kind() {
         MessageKind::from_u16(0x0085),
         Some(MessageKind::EndstopTrip)
     );
-    assert_eq!(MessageKind::from_u16(0x0086), None);
+    assert_eq!(MessageKind::from_u16(0x0086), Some(MessageKind::SyncPair));
+    assert_eq!(
+        MessageKind::from_u16(0x0087),
+        Some(MessageKind::SyncPairResponse)
+    );
+    assert_eq!(MessageKind::from_u16(0x0088), None);
 }
 
 #[test]
