@@ -297,6 +297,7 @@ pub(super) fn reach_pass(
             } else {
                 fine_left = fine_left.saturating_sub(1);
             }
+            let s_before = st.s;
             match mode {
                 Mode::Ride => {
                     ride_step(&g, &mut st, &mut log, &mut mode, i, &mut feasible, assume);
@@ -304,6 +305,18 @@ pub(super) fn reach_pass(
                 Mode::Flight => flight_step(&g, &mut st, &mut log, &mut mode, i, assume),
                 Mode::Peel => peel_step(&g, &mut st, &mut log, &mut mode, i),
             }
+            // Arc-length is monotone for v >= 0; a state that walks backwards
+            // has integrated through a stall (advance clamps v at zero but
+            // keeps the raw position kinematics) and every cap/slope read
+            // after it is nonsense.
+            debug_assert!(
+                st.s >= s_before - rel_eps(s_before),
+                "ride pass moved backwards: s {} -> {} (v={}, a={}, mode={mode:?})",
+                s_before,
+                st.s,
+                st.v,
+                st.a
+            );
             if mode != was {
                 if assume {
                     // Unverified transition inside the stride window: rewind
