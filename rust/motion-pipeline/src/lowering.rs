@@ -116,6 +116,7 @@ pub fn lower_move(
     Ok(ShapedSegment {
         axes,
         followers: gm.segment.followers.clone(),
+        spatial_path: gm.segment.spatial.is_some(),
         t_start,
         t_end: t_start + total_t,
         motor_mask: 0,

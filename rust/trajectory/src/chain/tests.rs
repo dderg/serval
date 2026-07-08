@@ -198,3 +198,47 @@ fn compile_rejects_directly_constructed_bad_params() {
         assert!(matches!(err, PostProcessorError::BadParam { .. }));
     }
 }
+
+#[test]
+fn follower_supports_cascade_on_top_of_the_leaders() {
+    let leader = CompiledChain::compile(&[zv(50.0)]).unwrap();
+    let follower = CompiledChain::compile(&[pa(0.04), zv(25.0)]).unwrap();
+    let (lead_lo, lead_hi) = leader.max_half_support();
+    let (own_lo, own_hi) = follower.max_half_support();
+    let set = AxisChainSet {
+        chains: vec![
+            leader.clone(),
+            leader.clone(),
+            CompiledChain::default(),
+            follower,
+        ],
+        followers: vec![(3, vec![0, 1, 2])],
+    };
+    assert_eq!(set.axis_support(0), (lead_lo, lead_hi));
+    assert_eq!(set.axis_support(3), (own_lo + lead_lo, own_hi + lead_hi));
+    assert_eq!(set.forward_support(), own_hi + lead_hi);
+    assert_eq!(set.back_support(), (own_lo + lead_lo).abs());
+    assert_eq!(set.direct_forward_support(), lead_hi);
+    assert_eq!(set.max_follower_own_forward_support(), own_hi);
+    assert!(set.has_own_kernel(3));
+    assert!(!set.has_own_kernel(2));
+}
+
+#[test]
+fn kernel_free_followers_do_not_gate_the_shaper() {
+    let leader = CompiledChain::compile(&[zv(50.0)]).unwrap();
+    let follower = CompiledChain::compile(&[pa(0.04)]).unwrap();
+    let (lead_lo, lead_hi) = leader.max_half_support();
+    let set = AxisChainSet {
+        chains: vec![
+            leader.clone(),
+            leader.clone(),
+            CompiledChain::default(),
+            follower,
+        ],
+        followers: vec![(3, vec![0, 1, 2])],
+    };
+    assert_eq!(set.axis_support(3), (lead_lo, lead_hi));
+    assert_eq!(set.forward_support(), lead_hi);
+    assert_eq!(set.max_follower_own_forward_support(), 0.0);
+}

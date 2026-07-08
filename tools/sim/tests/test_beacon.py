@@ -85,6 +85,18 @@ def test_contact_probing(world):
     assert world.shutdown_line() is None
 
 
+def test_contact_probing_survives_latch_commit_delay(world):
+    """Field failure (trident 2026-07-08): if the firmware's triggered
+    latch commits after the trsync fires and beacon_contact_stop_home
+    discards uncommitted state, querying the detect clock after the stop
+    raised "Timeout getting contact time". The plugin must read the
+    detect clock before stopping contact homing."""
+    _home(world)
+    world.beacon.contact_latch_commit_delay = 0.3
+    world.gcode_ok("PROBE PROBE_METHOD=contact SAMPLES=1", timeout=120)
+    assert world.shutdown_line() is None
+
+
 def test_contact_auto_calibrate(world):
     world.gcode_ok("SET_KINEMATIC_POSITION X=150 Y=150 Z=10", timeout=10)
     world.gcode_ok("G4 P1000", timeout=15)
