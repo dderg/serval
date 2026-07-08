@@ -20,6 +20,7 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
 .config input:focus{outline:none;border-color:#4a9eff}
 .config input::placeholder{color:#4d5560;font-style:italic}
 .config .section{font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:#666;margin:10px 0 6px}
+.config textarea.pp-config{width:100%;min-height:100px;resize:vertical;margin-top:2px}
 .error{display:none;margin:8px 10px;padding:8px 10px;background:rgba(239,83,80,0.12);border:1px solid rgba(239,83,80,0.5);border-radius:4px;color:#ef9a9a;font-size:12px;font-family:'Courier Prime',monospace;white-space:pre-wrap;max-height:130px;overflow-y:auto}
 .error.on{display:block}
 .main{display:grid;grid-template-rows:auto auto 1fr;min-width:0;min-height:0}
@@ -86,6 +87,8 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
       <div class="section">[extruder]</div>
       <div class="row"><label for="cfg-max_extrude_only_velocity">max_extrude_only_velocity</label><input id="cfg-max_extrude_only_velocity" type="number" step="5" placeholder="∞"></div>
       <div class="row"><label for="cfg-max_extrude_only_accel">max_extrude_only_accel</label><input id="cfg-max_extrude_only_accel" type="number" step="100" placeholder="∞"></div>
+      <div class="section">[axis] / [post_processor]</div>
+      <textarea id="cfg-post_processor_config" class="pp-config" spellcheck="false" placeholder="[axis e]&#10;post_processors: pa&#10;&#10;[post_processor pa]&#10;type: linear_pressure_advance&#10;k: 0.03"></textarea>
     </div>
   </div>
   <div class="main">
