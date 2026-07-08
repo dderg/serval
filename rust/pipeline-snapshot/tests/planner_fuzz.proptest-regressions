@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 30d0f5b88f4a11e8c8e0aa9ce005e76ed14929cb19cc8ca1106d8c87f5c3f9cb # shrinks to limits = FuzzLimits { max_velocity: 20.0, max_accel: 500.0, square_corner_velocity: 0.0, max_jerk: 100000.0, arc_fit: None }, moves = [MoveSpec { turn: Continue, length_mm: 44.28879002270865, feed_mm_s: 130.77110762231382, extrude_ratio: 0.0, z_step_mm: 0.0 }, MoveSpec { turn: Continue, length_mm: 1.0, feed_mm_s: 1.0, extrude_ratio: 0.0, z_step_mm: 0.0 }]

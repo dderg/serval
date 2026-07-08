@@ -764,6 +764,7 @@ dependencies = [
  "motion-pipeline",
  "nurbs",
  "planner-config",
+ "proptest",
  "serde",
  "serde_json",
  "thiserror",
