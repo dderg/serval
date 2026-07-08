@@ -1343,7 +1343,7 @@ class MCUConnection:
         self.baud = baud
         # TODO: a change in baudrate will cause an issue, come up
         # with a method for handling it gracefully
-        self._serial = serialhdl.SerialReader(self.reactor)
+        self._serial = serialhdl.EngineCommandChannel(self.reactor)
         self.clocksync = clocksync.ClockSync(self.reactor)
         self.board_config = board_cfg
         self.fatfs = None

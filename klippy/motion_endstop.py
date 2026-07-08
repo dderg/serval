@@ -56,7 +56,7 @@ class MotionEndstop:
         return self.is_triggered()
 
     def engine_mcu_handle(self):
-        return getattr(self.mcu, "_engine_handle", None)
+        return self.mcu.get_engine_handle()
 
 
 class RemoteMotionEndstop:
@@ -73,7 +73,7 @@ class RemoteMotionEndstop:
         self.endstop_id = allocate_provider_id(printer)
 
     def engine_mcu_handle(self):
-        return getattr(self.mcu, "_engine_handle", None)
+        return self.mcu.get_engine_handle()
 
     def is_triggered(self):
         return False
