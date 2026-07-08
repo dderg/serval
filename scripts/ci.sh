@@ -123,8 +123,9 @@ job_miri() {
     MIRIFLAGS="-Zmiri-ignore-leaks" cargo +nightly miri test -p runtime --features host \
         --test fault_encoding \
         --test motion_core_accel \
-        --test phase_lut_anchors \
         --test seqlock_unit
+    MIRIFLAGS="-Zmiri-ignore-leaks" cargo +nightly miri test -p runtime --features host \
+        --lib phase_lut
 }
 
 job_panic_grep() {
