@@ -190,11 +190,12 @@ versus v/Kp ≈ 1.8 mm without FF.
 
 ### Offline / manual path
 
-The macros wrap pieces that also run standalone, host-side:
+The capture-conversion and fitting pieces also run standalone, host-side.
+Run the excitation on the printer first (`SERVO_MEASURE_INERTIA`, or the
+full `SERVO_FIT_DYNAMICS` from Step 1), which leaves a `.scap` capture
+behind; then:
 
 ```sh
-servo-excite --axis X --min 10 --max 210 \
-    --accels 1000,3000,6000 --speeds 100,200,300 --out excite_x.gcode
 python3 scripts/servo_capture.py run.scap --csv run.csv
 servo-ident \
     --capture run.csv \

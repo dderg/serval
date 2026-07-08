@@ -22,46 +22,19 @@ COMPILE_ARGS = (
 NATIVE_FLAGS = "-march=native -mtune=native"
 SOURCE_FILES = [
     "pyhelper.c",
-    "serialqueue.c",
-    "pollreactor.c",
-    "msgblock.c",
-    "trdispatch.c",
 ]
 DEST_LIB = "c_helper.%s-%s.so" % (platform.system(), platform.machine())
 OTHER_FILES = [
-    "list.h",
-    "serialqueue.h",
     "pyhelper.h",
-    "pollreactor.h",
-    "msgblock.h",
 ]
-
-defs_trdispatch = """
-    void trdispatch_start(struct trdispatch *td, uint32_t dispatch_reason);
-    void trdispatch_stop(struct trdispatch *td);
-    struct trdispatch *trdispatch_alloc(void);
-    struct trdispatch_mcu *trdispatch_mcu_alloc(struct trdispatch *td
-        , struct serialqueue *sq, struct command_queue *cq, uint32_t trsync_oid
-        , uint32_t set_timeout_msgtag, uint32_t trigger_msgtag
-        , uint32_t state_msgtag);
-    void trdispatch_mcu_setup(struct trdispatch_mcu *tdm
-        , uint64_t last_status_clock, uint64_t expire_clock
-        , uint64_t expire_ticks, uint64_t min_extend_ticks);
-"""
 
 defs_pyhelper = """
     void set_python_logging_callback(void (*func)(const char *));
     double get_monotonic(void);
 """
 
-defs_std = """
-    void free(void*);
-"""
-
 defs_all = [
     defs_pyhelper,
-    defs_std,
-    defs_trdispatch,
 ]
 
 

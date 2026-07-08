@@ -1,5 +1,4 @@
 pub mod clock;
-pub mod clock_sync;
 mod fault;
 pub mod host_io;
 pub mod mcu_call;

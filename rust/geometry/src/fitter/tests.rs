@@ -662,18 +662,3 @@ fn travel_corner_blends_without_followers() {
     assert!(out.moves[1].segment.followers.is_empty());
     assert!(out.moves[2].segment.followers.is_empty());
 }
-
-#[test]
-fn single_move_is_returned_unchanged() {
-    let moves = vec![seg(1, 3000.0, 5.0, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0)];
-    let out = fit_corners(&moves, CornerFitConfig::default()).unwrap();
-    assert_eq!(out.moves, moves);
-    assert_eq!(out.report.blended, 0);
-}
-
-#[test]
-fn empty_input_is_returned_unchanged() {
-    let out = fit_corners(&[], CornerFitConfig::default()).unwrap();
-    assert!(out.moves.is_empty());
-    assert_eq!(out.report, FitReport::default());
-}

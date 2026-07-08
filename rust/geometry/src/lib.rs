@@ -13,10 +13,7 @@ pub(crate) mod vec3;
 pub mod velocity;
 
 pub use error::{Fatal, GeometryError, InternalDetails, InternalKind, Recovery, SlotDegeneracy};
-pub use fitter::{
-    ArcFitConfig, ChainFitConfig, CornerFitConfig, FitError, FitOutcome, FitReport, UnblendReason,
-    UnblendedJunction, fit_corners,
-};
+pub use fitter::{ArcFitConfig, ChainFitConfig, CornerFitConfig, FitError, UnblendReason};
 pub use frontend::{FrontendError, Move, MoveContext, VelocityLimits, line_move};
 pub use segment::{CubicSegment, FollowerDemand, SourceRange};
 
