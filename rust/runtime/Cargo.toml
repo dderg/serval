@@ -55,7 +55,6 @@ motion-module-stepper = []
 # tick paths active in sim firmware (see tick.rs cfg gates). Never in
 # production firmware.
 mcu-sim = []
-loom = []  # gates loom-tests under cfg(loom)
 
 [lints]
 workspace = true

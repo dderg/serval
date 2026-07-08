@@ -18,7 +18,11 @@ from .mcu_pins import (  # noqa: F401
     MCU_digital_out,
     MCU_pwm,
 )
-from .mcu_trsync import MCU_trsync, TriggerDispatch, error  # noqa: F401
+
+
+class error(Exception):
+    pass
+
 
 # Minimum time host needs to get scheduled events queued into mcu
 MIN_SCHEDULE_TIME = 0.100

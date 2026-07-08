@@ -32,11 +32,7 @@ is also a useful resource for finding and sharing config files.
    filename should contain only characters `A-Z`, `a-z`, `0-9`, `-`,
    and `.`.
 4. Kalico must be able to start `printer`, `generic`, and `kit`
-   example config file without error. These config files should be
-   added to the
-   [test/klippy/printers.test](../test/klippy/printers.test)
-   regression test case. Add new config files to that test case in the
-   appropriate section and in alphabetical order within that section.
+   example config file without error.
 5. The example configuration should be for the "stock" configuration
    of the printer. (There are too many "customized" configurations to
    track in the main Kalico repository.) Similarly, we only add

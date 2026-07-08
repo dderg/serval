@@ -72,9 +72,8 @@ pythonpath = [".", "klippy", "scripts"]
 # suite runs via `tools/sim/run.sh test` (Docker).
 # scripts/ and snapshots/ are listed as explicit files, not whole
 # directories: scripts/ also holds scripts/test_klippy.py (a legacy
-# optparse-based CLI runner, not a pytest module) and
-# scripts/fitter_prototype/tests/ (an unrelated prototype tool's own
-# test suite), neither of which should be swept into this job.
+# optparse-based CLI runner, not a pytest module), which should not be
+# swept into this job.
 testpaths = [
   "test",
   "tests",

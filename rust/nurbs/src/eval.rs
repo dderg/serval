@@ -1,7 +1,8 @@
 #![allow(unsafe_code)]
 
 use crate::MIN_PARAMETRIC_SPEED;
-use crate::{MAX_DEGREE, NurbsView, VectorNurbsView, WORKSPACE_SIZE};
+use crate::view::{NurbsView, VectorNurbsView};
+use crate::{MAX_DEGREE, WORKSPACE_SIZE};
 
 pub(crate) use crate::knot::find_knot_span;
 

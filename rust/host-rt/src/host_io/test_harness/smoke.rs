@@ -36,12 +36,3 @@ fn reactor_first_engine_call_after_identify_succeeds_with_nonzero_initial_seq() 
     );
     assert_eq!(h.send_seq(), 6, "send_seq must increment after dispatch");
 }
-
-#[test]
-fn clock_advance_is_visible_to_reactor() {
-    let h = ReactorHarness::new();
-    let t0 = h.reactor.clock.now();
-    h.advance_clock(Duration::from_secs(1));
-    let t1 = h.reactor.clock.now();
-    assert_eq!(t1 - t0, Duration::from_secs(1));
-}

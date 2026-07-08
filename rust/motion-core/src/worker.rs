@@ -320,16 +320,6 @@ impl StreamWorkerHandle {
             .map_err(|_| StreamWorkerError::ChannelClosed)
     }
 
-    pub fn flush_start(
-        &self,
-    ) -> Result<crossbeam_channel::Receiver<Option<Instant>>, StreamWorkerError> {
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        self.sender
-            .send(StreamMsg::Flush { notify: tx })
-            .map_err(|_| StreamWorkerError::ChannelClosed)?;
-        Ok(rx)
-    }
-
     /// Non-blocking: `ChannelFull` means the caller must retry after
     /// yielding, exactly like `fence_start` — a blocking send here wedges
     /// the klippy reactor for as long as the backpressured pipe takes to

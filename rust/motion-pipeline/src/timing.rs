@@ -72,6 +72,3 @@ impl Stopwatch {
         0
     }
 }
-
-#[cfg(test)]
-mod tests;

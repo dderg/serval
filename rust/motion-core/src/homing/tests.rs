@@ -7,7 +7,7 @@ use host_rt::passthrough_queue::PassthroughRouter;
 
 use crate::homing::{reconstruct_axis_position, trajectory_final_position};
 use crate::mcu_config::{AXIS_X, AXIS_Z};
-use crate::motion_history::{HistoryStore, eval_chebyshev};
+use crate::motion_history::HistoryStore;
 use crate::types::AxisKey;
 
 const FREQ: u32 = 180_000_000;
@@ -68,43 +68,6 @@ fn record_synced(
 ) {
     let host = host_of(router, key.mcu_id, e.start_time);
     store.record(key, e, freq, host);
-}
-
-#[test]
-fn eval_chebyshev_linear_piece_endpoints() {
-    let coeffs = [0.5_f32, 0.5];
-    let at_start = eval_chebyshev(&coeffs, -1.0);
-    let at_end = eval_chebyshev(&coeffs, 1.0);
-    assert!(
-        at_start.abs() < 1e-6,
-        "cu=-1 should give pos_start=0, got {at_start}"
-    );
-    assert!(
-        (at_end - 1.0).abs() < 1e-6,
-        "cu=1 should give pos_end=1, got {at_end}"
-    );
-}
-
-#[test]
-fn eval_chebyshev_midpoint_linear() {
-    let coeffs = [50.0_f32, 50.0];
-    let at_mid = eval_chebyshev(&coeffs, 0.0);
-    assert!(
-        (at_mid - 50.0).abs() < 1e-4,
-        "midpoint of linear piece should be 50, got {at_mid}"
-    );
-}
-
-#[test]
-fn eval_chebyshev_constant_piece() {
-    let coeffs = [42.5_f32];
-    for cu in [-1.0, -0.5, 0.0, 0.5, 1.0] {
-        let v = eval_chebyshev(&coeffs, cu);
-        assert!(
-            (v - 42.5).abs() < 1e-5,
-            "constant piece: expected 42.5 at cu={cu}, got {v}"
-        );
-    }
 }
 
 #[test]

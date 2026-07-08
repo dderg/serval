@@ -82,7 +82,7 @@ fn eval_polynomial_at_least_as_fast_as_eval_for_validated_curves() {
         let start = Instant::now();
         for i in 0..ITERATIONS {
             let u = (i as f64) / (ITERATIONS as f64);
-            let view = nurbs::ScalarNurbsRef::try_new(
+            let view = nurbs::scalar::ScalarNurbsRef::try_new(
                 curve.degree(),
                 curve.knots(),
                 curve.control_points(),

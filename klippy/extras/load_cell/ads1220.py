@@ -173,9 +173,6 @@ class ADS1220(LoadCellSensor):
         self.query_ads1220_cmd = self.mcu.lookup_command(
             "query_ads1220 oid=%c rest_ticks=%u"
         )
-        self.attach_probe_cmd = self.mcu.lookup_command(
-            "ads1220_attach_load_cell_probe oid=%c load_cell_probe_oid=%c"
-        )
         self.ffreader.setup_query_command(
             "query_ads1220_status oid=%c", oid=self.oid
         )
@@ -197,9 +194,6 @@ class ADS1220(LoadCellSensor):
     # add_client interface, direct pass through to bulk_sensor API
     def add_client(self, callback: BulkAdcDataCallback):
         self.batch_bulk.add_client(callback)
-
-    def attach_load_cell_probe(self, load_cell_probe_oid: int):
-        self.attach_probe_cmd.send([self.oid, load_cell_probe_oid])
 
     # Measurement decoding
     def _convert_samples(self, samples):

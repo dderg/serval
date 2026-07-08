@@ -1,27 +1,7 @@
 use std::sync::mpsc::SyncSender;
 
 use crate::host_io::runtime_events::FaultEvent as RuntimeFaultEvent;
-use crate::transport::{MessageParams, SubscribeError};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FaultEvent {
-    pub fault_code: u16,
-    pub fault_detail: u32,
-    pub segment_id: u32,
-}
-
-pub fn parse_fault_event(params: &MessageParams) -> Option<FaultEvent> {
-    // %hu on the wire is widened to i32 by Klipper's parser; re-narrow to u16.
-    #[allow(clippy::cast_possible_truncation)]
-    let fault_code = (params.get_u32("fault_code") & 0xFFFF) as u16;
-    let fault_detail = params.get_u32("fault_detail");
-    let segment_id = params.get_u32("segment_id");
-    Some(FaultEvent {
-        fault_code,
-        fault_detail,
-        segment_id,
-    })
-}
+use crate::transport::SubscribeError;
 
 #[derive(Debug, Default)]
 pub struct FaultLatch {

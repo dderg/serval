@@ -19,18 +19,3 @@ fn curvature_clamps_at_cusp_like_input() {
     let k = nurbs::eval::curvature_from_derivs(&first, &second, 0.0_f64);
     assert!(k.is_finite(), "curvature must clamp, not blow up: got {k}");
 }
-
-#[test]
-fn arc_length_builder_rejects_truly_degenerate_curve() {
-    let curve = nurbs::VectorNurbs::<3>::try_new(
-        1,
-        vec![0.0, 0.0, 1.0, 1.0],
-        vec![[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]],
-    )
-    .unwrap();
-    let result = nurbs::arc_length::build_arc_length_table_vector(&curve, 1e-6, 64);
-    assert!(matches!(
-        result,
-        Err(nurbs::ArcLengthError::DegenerateCurve)
-    ));
-}

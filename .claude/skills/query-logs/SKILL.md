@@ -101,8 +101,7 @@ will backfill from Vector's checkpoint once it's healthy.
 
 `structured_log.event(...)` / Rust `tracing` → `events/{host-py,host-rust,...}.jsonl`
 (durable) → Vector tails + checkpoints → VL `/insert/jsonline` → `logq.py` queries
-`/select/logsql/query`. See `config/observability/vector.toml` and the design
-spec `docs/superpowers/specs/2026-05-31-observability-logging-pipeline-design.md`.
+`/select/logsql/query`. See `config/observability/vector.toml`.
 
 ## Not here: host-process coredumps
 

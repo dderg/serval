@@ -30,12 +30,10 @@ time = { version = "0.3", default-features = false, features = ["std"] }
 runtime = { path = "../runtime" }
 mcu-protocol = { path = "../mcu-protocol" }
 mcu-transport = { path = "../mcu-transport" }
-thiserror = { workspace = true }
 
 [features]
 default = []
 test-harness = []
-hardware-test = []
 
 [dev-dependencies]
 proptest = "1"

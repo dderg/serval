@@ -7,7 +7,7 @@ use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedS
 use crate::lowering::{
     FIT_TRUNC_POS_FACTOR, FitTol, LADDER_PROBES_U, ladder_fit, quintic_in_u, truncated_piece,
 };
-use crate::{Control, LoweredItem, PostProcessError, ShapedItem};
+use crate::types::{Control, LoweredItem, PostProcessError, ShapedItem};
 
 const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 

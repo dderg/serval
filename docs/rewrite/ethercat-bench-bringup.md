@@ -59,8 +59,7 @@ scheduler guard (`Rescheduled timer in the past`, `src/linux/timer.c` / `sched.c
 — NOT the runtime `-311`) because the soft timer jitters under load on a
 non-PREEMPT_RT kernel. Reliable sustained Linux-MCU stepping therefore needs a
 PREEMPT_RT kernel (or the parallel soft-MCU timing work); the EtherCAT servo
-path — the actual bench target — is unaffected and streams cleanly. See
-[`docs/superpowers/specs/2026-06-01-mach-linux-first-class-mcu-design.md`](../superpowers/specs/2026-06-01-mach-linux-first-class-mcu-design.md).
+path — the actual bench target — is unaffected and streams cleanly.
 
 **Building a real (non-sim) Linux MCU:** `make` with `CONFIG_MACH_LINUX=y` and
 `CONFIG_MCU_SIM` **unset** drives real `/dev/gpiochip` / `/dev/spidev`

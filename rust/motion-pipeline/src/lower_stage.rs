@@ -6,7 +6,7 @@ use geometry::{Move, SurfaceTransform};
 use trajectory::AxisChainSet;
 
 use crate::lowering::{FitTol, lower_move};
-use crate::{Control, LoweredItem, LoweredSegment, PlannedItem};
+use crate::types::{Control, LoweredItem, LoweredSegment, PlannedItem};
 
 const REST_EPS_MM_S: f64 = 1e-9;
 

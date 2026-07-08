@@ -1,9 +1,7 @@
 # Servo telemetry capture
 
 > User and format reference for the 1 kHz servo capture pipeline. Companion to
-> the design spec
-> ([`2026-06-10-servo-telemetry-capture-design.md`](../superpowers/specs/2026-06-10-servo-telemetry-capture-design.md))
-> and to [`ethercat-bench-bringup.md`](ethercat-bench-bringup.md) (getting the
+> [`ethercat-bench-bringup.md`](ethercat-bench-bringup.md) (getting the
 > drive up in the first place).
 
 ## What it is

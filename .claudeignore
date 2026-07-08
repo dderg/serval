@@ -13,10 +13,6 @@ docs/img/
 docs/prints/
 docs/resources/
 
-# G-code corpus files (large binary-ish slicer output)
-scripts/fitter_prototype/corpus/
-scripts/fitter_prototype/corpus_results/
-
 # IDE / OS
 .vscode/
 .idea/

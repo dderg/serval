@@ -1,6 +1,6 @@
 # Kalico Rust Workspace
 
-First-party Rust code for the kalico motion stack rewrite. See `docs/superpowers/specs/2026-04-26-nurbs-evaluation-library-design.md` for the design context.
+First-party Rust code for the kalico motion stack rewrite.
 
 ## Layout
 

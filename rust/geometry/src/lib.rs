@@ -6,7 +6,6 @@ pub mod curve;
 pub mod error;
 pub mod fitter;
 pub mod frontend;
-pub mod params;
 pub mod path;
 pub mod segment;
 pub mod surface;
@@ -14,16 +13,9 @@ pub(crate) mod vec3;
 pub mod velocity;
 
 pub use error::{Fatal, GeometryError, InternalDetails, InternalKind, Recovery, SlotDegeneracy};
-pub use fitter::{
-    ArcFitConfig, ChainFitConfig, CornerFitConfig, FitError, FitOutcome, FitReport, UnblendReason,
-    UnblendedJunction, fit_corners,
-};
+pub use fitter::{ArcFitConfig, ChainFitConfig, CornerFitConfig, FitError, UnblendReason};
 pub use frontend::{FrontendError, Move, MoveContext, VelocityLimits, line_move};
-pub use params::FitterParams;
-pub use segment::{
-    BlendFamily, CornerBlendSlot, CubicSegment, FollowerDemand, JunctionDeviation, Segment,
-    SourceRange, SplitInfo,
-};
+pub use segment::{CubicSegment, FollowerDemand, SourceRange};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FollowerWord {

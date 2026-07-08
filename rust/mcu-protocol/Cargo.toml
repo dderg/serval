@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 publish = false
-description = "Kalico-native transport schema (Layer 4): MessageKind discriminants, hand-written Encode/Decode, build-time SHA-256 schema_hash, and codegen of the C header consumed by the MCU dispatcher. See docs/superpowers/specs/2026-05-04-mcu-transport-design.md."
+description = "Kalico-native transport schema (Layer 4): MessageKind discriminants, hand-written Encode/Decode, build-time SHA-256 schema_hash, and codegen of the C header consumed by the MCU dispatcher."
 license.workspace = true
 
 [dependencies]
