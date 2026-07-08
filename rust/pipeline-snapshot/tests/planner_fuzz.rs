@@ -368,6 +368,19 @@ fn near_reversal_planar_corner_makes_velocity_plan_non_finite() {
 /// second move — vase-mode-like motion — drive lowering's quintic arc-length
 /// profile negative, escaping its `[0, s_len]` window `debug_assert`. Until
 /// fixed, the CI-tier generator fuzzes planar-only.
+///
+/// Diagnosed root cause: the ride pass crosses the cap's step-down wall at
+/// the seam as a single j=0 chord phase (`ride_step` only detaches when the
+/// chord exceeds the accel *rail*, not what *jerk* can follow), so the brake
+/// chain carries an instantaneous accel staircase (0 → -22147 → 0) and the
+/// seam sample pair `(v=1, a=-22147)` is kinematically impossible for the
+/// lowering quintic. A naive jerk-reachability detach is NOT the fix: it
+/// unmasks a zero-progress Peel storm against super-rail walls (the cap
+/// outruns the brake, so the contact bisection converges onto the current
+/// position) plus a state/index inconsistency in the stride rollback
+/// machinery (observed: `st` in cell 1223 while the node loop targeted node
+/// 1225). Fixing this needs a designed treatment of cap walls in
+/// `ride::reach_pass`.
 #[test]
 #[ignore = "known lowering bug: collinear decel with a z step escapes the quintic profile window"]
 fn feed_drop_with_z_step_escapes_profile_window() {
