@@ -723,7 +723,7 @@ impl PyMotionEngine {
         zero_ref_y: f64,
         z_velocity_limit: Option<f64>,
         z_accel_limit: Option<f64>,
-    ) -> PyResult<f64> {
+    ) -> PyResult<(f64, (f64, f64, f64, f64, f64))> {
         let mut mesh = geometry::MeshGrid::new(x_min, y_min, dx, dy, nx, ny, points, tension)
             .map_err(|e| PyValueError::new_err(format!("set_bed_mesh: {e}")))?;
         if !mesh.contains(zero_ref_x, zero_ref_y) {
@@ -783,15 +783,16 @@ impl PyMotionEngine {
         let coupled_a = bounds.max_gradient * limits.max_accel
             + bounds.max_curvature * limits.max_velocity * limits.max_velocity;
         if coupled_v > z_velocity_budget || coupled_a > z_accel_budget {
-            return Err(PyValueError::new_err(format!(
-                "set_bed_mesh: bed deviation needs {coupled_v:.2}mm/s / {coupled_a:.1}mm/s² \
-                 of Z at your XY limits; Z allows {z_velocity_budget:.2}mm/s / \
-                 {z_accel_budget:.1}mm/s² — the bed is warped or the Z budget is too \
-                 conservative; raise z_velocity_limit/z_accel_limit in [bed_mesh] to \
-                 budget mesh-following separately (mesh range {:.3}..{:.3}mm, max \
-                 slope {:.4})",
-                bounds.z_min, bounds.z_max, bounds.max_gradient
-            )));
+            tracing::warn!(
+                subsystem = "motion",
+                event = "bed_mesh_z_budget_exceeded",
+                coupled_v_mm_s = coupled_v,
+                coupled_a_mm_s2 = coupled_a,
+                z_velocity_budget,
+                z_accel_budget,
+                max_slope = bounds.max_gradient,
+                "mesh-following Z demand exceeds the Z budget; mesh activated anyway"
+            );
         }
         tracing::info!(
             subsystem = "motion",
@@ -803,7 +804,17 @@ impl PyMotionEngine {
             envelope_a_mm_s2 = z_accel_budget + coupled_a,
             "bed mesh activated; transient Z exceedance envelope logged"
         );
-        self.swap_bed_mesh(Some(Arc::new(transform)))
+        let rebase = self.swap_bed_mesh(Some(Arc::new(transform)))?;
+        Ok((
+            rebase,
+            (
+                coupled_v,
+                coupled_a,
+                z_velocity_budget,
+                z_accel_budget,
+                bounds.max_gradient,
+            ),
+        ))
     }
 
     fn clear_bed_mesh(&self) -> PyResult<f64> {

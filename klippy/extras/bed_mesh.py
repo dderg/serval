@@ -136,6 +136,7 @@ class BedMesh:
             "z_velocity_limit", None, above=0.0
         )
         self.z_accel_limit = config.getfloat("z_accel_limit", None, above=0.0)
+        self.z_budget_report = None
         self.fade_target = 0.0
         self.tool_offset = 0.0
         self.gcode = self.printer.lookup_object("gcode")
@@ -234,7 +235,27 @@ class BedMesh:
         self.toolhead.rebase_gcode_z(rebase)
         if safe_z is not None:
             self._travel_compensation(safe_z)
+        excess = self._z_budget_excess()
+        if excess is not None:
+            self.gcode.respond_raw("!! bed_mesh: %s" % (excess,))
         self.update_status()
+
+    def _z_budget_excess(self):
+        if self.z_budget_report is None:
+            return None
+        coupled_v, coupled_a, v_budget, a_budget, max_slope = (
+            self.z_budget_report
+        )
+        if coupled_v <= v_budget and coupled_a <= a_budget:
+            return None
+        return (
+            "mesh-following needs up to %.2fmm/s / %.1fmm/s² of Z at your "
+            "XY limits, but the Z budget allows %.2fmm/s / %.1fmm/s² "
+            "(max slope %.4f) — the bed is warped or the Z budget is too "
+            "conservative; re-tram the bed or raise z_velocity_limit/"
+            "z_accel_limit in [bed_mesh]"
+            % (coupled_v, coupled_a, v_budget, a_budget, max_slope)
+        )
 
     def _raise_to_safe_z(self):
         curtime = self.printer.get_reactor().monotonic()
@@ -260,6 +281,7 @@ class BedMesh:
                 "bed_mesh: motion engine unavailable, cannot apply a mesh"
             )
         if mesh is None:
+            self.z_budget_report = None
             return engine.clear_bed_mesh()
         zero_ref = self.bmc.zero_ref_pos
         if zero_ref is None:
@@ -281,7 +303,7 @@ class BedMesh:
         if self.fade_end != self.FADE_DISABLE:
             fade = (self.fade_start, self.fade_end, self.fade_target)
         try:
-            return engine.set_bed_mesh(
+            rebase, self.z_budget_report = engine.set_bed_mesh(
                 points,
                 x_min,
                 y_min,
@@ -296,6 +318,7 @@ class BedMesh:
                 self.z_velocity_limit,
                 self.z_accel_limit,
             )
+            return rebase
         except ValueError as e:
             self.fade_target = 0.0
             raise self.gcode.error(str(e))
@@ -469,11 +492,27 @@ class BedMesh:
                     f"allowed maximum ({max_slope:.6f} mm/mm)"
                 )
 
+        if gcmd.get_int("CHECK_Z_LIMITS", 0):
+            has_checks = True
+            if self.z_budget_report is None:
+                raise self.gcode.error("No mesh is active in the motion engine")
+            excess = self._z_budget_excess()
+            if excess is not None:
+                raise self.gcode.error(excess)
+            coupled_v, coupled_a, v_budget, a_budget, _ = self.z_budget_report
+            gcmd.respond_info(
+                "Mesh-following Z demand (%.2fmm/s / %.1fmm/s²) is within "
+                "the Z budget (%.2fmm/s / %.1fmm/s²)"
+                % (coupled_v, coupled_a, v_budget, a_budget)
+            )
+
         if not has_checks:
             gcmd.respond_info(
                 "No validation checks specified. Available checks:\n"
                 "MAX_DEVIATION - Validate maximum mesh height deviation\n"
-                "MAX_SLOPE - Validate maximum slope between adjacent points"
+                "MAX_SLOPE - Validate maximum slope between adjacent points\n"
+                "CHECK_Z_LIMITS - Validate mesh-following Z demand against "
+                "the Z budget"
             )
 
 
