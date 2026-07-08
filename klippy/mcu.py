@@ -8,7 +8,7 @@ import math
 import os
 import zlib
 
-from . import chelper, clocksync, msgproto, pins, serialhdl
+from . import chelper, clocksync, engine_mcu, msgproto, pins, serialhdl
 from .extras.danger_options import get_danger_options
 from .mcu_commands import CommandQueryWrapper, CommandWrapper
 from .mcu_pins import (  # noqa: F401
@@ -104,12 +104,11 @@ class MCU:
         self._expect_native = declared_via_mcu_section
         if self._name.startswith("mcu "):
             self._name = self._name[4:]
-        self._motion_engine = printer.lookup_object("motion_engine", None)
-        self._engine_handle = None
+        self.engine_mcu = engine_mcu.EngineMcu(printer, self._name)
 
     def _init_serial_port(self, config):
         wp = "mcu '%s': " % (self._name)
-        self._serial = serialhdl.SerialReader(
+        self._serial = serialhdl.EngineCommandChannel(
             self._reactor, warn_prefix=wp, mcu=self
         )
         self._baud = 0
@@ -388,13 +387,9 @@ class MCU:
                     "Sending MCU '%s' printer configuration...", self._name
                 )
                 for c in local_config_cmds:
-                    logging.info("[config-send] mcu=%s cmd=%s", self._name, c)
                     self._serial.send(c)
             else:
                 for c in self._restart_cmds:
-                    logging.info(
-                        "[config-send-restart] mcu=%s cmd=%s", self._name, c
-                    )
                     self._serial.send(c)
             # Transmit init messages
             for c in self._init_cmds:
@@ -656,42 +651,27 @@ class MCU:
     def _identify_setup_motion_engine(self):
         msgparser = self._serial.get_msgparser()
         raw_dict = msgparser.get_raw_data_dictionary()
-        if self._motion_engine is not None:
+        if self.engine_mcu.available():
             if raw_dict:
                 if isinstance(raw_dict, str):
                     raw_dict = raw_dict.encode("utf-8")
-                self._motion_engine.set_msgproto_dict(raw_dict)
-            if self._engine_handle is None:
-                self._engine_handle = self._motion_engine.claim_mcu(
-                    self._name,
-                    self._serialport or "",
-                    int(self._baud or 0),
-                )
-            engine = self._motion_engine
-            handle = self._engine_handle
+                self.engine_mcu.set_msgproto_dict(raw_dict)
+            self.engine_mcu.claim(self._serialport or "", int(self._baud or 0))
             if not self._mcu_freq:
                 raise error(
                     "MCU '%s': CLOCK_FREQ unknown at engine claim time"
                     % (self._name,)
                 )
-            self._motion_engine.set_nominal_clock_freq(
-                handle, int(self._mcu_freq)
-            )
+            self.engine_mcu.set_nominal_clock_freq(int(self._mcu_freq))
 
+            emcu = self.engine_mcu
             reactor = self._reactor
 
             def _engine_clock_est_cb(
-                freq, offset, last_clock, b=engine, h=handle, r=reactor
+                freq, offset, last_clock, e=emcu, r=reactor
             ):
-                host_now_raw = r.monotonic()
                 try:
-                    b.set_clock_est(
-                        h,
-                        float(freq),
-                        float(offset),
-                        int(last_clock),
-                        host_now_raw,
-                    )
+                    e.set_clock_est(freq, offset, last_clock, r.monotonic())
                 except Exception:
                     logging.exception("motion_engine: set_clock_est failed")
 
@@ -763,6 +743,9 @@ class MCU:
 
     def get_name(self):
         return self._name
+
+    def get_engine_handle(self):
+        return self.engine_mcu.handle()
 
     def get_non_critical_reconnect_event_name(self):
         return self._non_critical_reconnect_event_name
@@ -858,10 +841,8 @@ class MCU:
             )
             return
         try:
-            if self._motion_engine is not None:
-                self._motion_engine.engine_mark_expected_disconnect(
-                    self._engine_handle
-                )
+            if self.engine_mcu.available():
+                self.engine_mcu.mark_expected_disconnect()
         except Exception:
             logging.exception(
                 "MCU '%s' engine_mark_expected_disconnect failed"
@@ -890,20 +871,6 @@ class MCU:
         chelper.run_hub_ctrl(1)
 
     def _firmware_restart(self, force=False):
-        logging.info(
-            "[firmware-restart-trace] mcu=%s force=%s _is_mcu_engine=%s "
-            "non_critical_disconnected=%s _restart_method=%s "
-            "_reset_cmd_present=%s clocksync_active=%s",
-            self._name,
-            force,
-            self._is_mcu_engine,
-            self.non_critical_disconnected,
-            self._restart_method,
-            self._reset_cmd is not None,
-            self._clocksync.is_active()
-            if self._clocksync is not None
-            else "no-clocksync",
-        )
         if (
             self._is_mcu_engine and not force
         ) or self.non_critical_disconnected:

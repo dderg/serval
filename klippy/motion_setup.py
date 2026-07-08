@@ -235,7 +235,7 @@ def build_axis_to_handle(motion):
             steppers = rail.get_steppers()
             if not steppers:
                 continue
-            handle = getattr(steppers[0].get_mcu(), "_engine_handle", None)
+            handle = steppers[0].get_mcu().get_engine_handle()
             ceiling = min(motor_velocity_ceiling(s) for s in steppers)
         if handle is None:
             continue
@@ -250,7 +250,7 @@ def build_axis_to_handle(motion):
         if any(s is None for s in followers):
             continue
         primary = followers[0]
-        handle = getattr(primary.get_mcu(), "_engine_handle", None)
+        handle = primary.get_mcu().get_engine_handle()
         if handle is None:
             continue
         axis_to_handle[slot_idx] = handle
@@ -280,7 +280,7 @@ def derive_mcu_topology(motion, axis_to_handle):
 def init_planner(motion):
     engine_mcus = []
     for name, mcu in motion.printer.lookup_objects(module="mcu"):
-        handle = getattr(mcu, "_engine_handle", None)
+        handle = mcu.get_engine_handle()
         if handle is None:
             continue
         engine_mcus.append((name, mcu, handle))
