@@ -16,6 +16,7 @@ motion-pipeline = { path = "../motion-pipeline" }
 gcode = { path = "../gcode" }
 nurbs = { path = "../nurbs" }
 runtime = { path = "../runtime" }
+planner-config = { path = "../planner-config" }
 crossbeam-channel = "0.5"
 libc = "0.2"
 tracing = "0.1"
