@@ -5,7 +5,7 @@ use geometry::segment::SourceRange;
 use geometry::{ChainFitConfig, Move, MoveContext, VelocityLimits, line_move};
 
 use super::FitStage;
-use crate::StreamInput;
+use crate::{Control, StreamInput};
 
 fn moves_of(rx: crossbeam_channel::Receiver<StreamInput>) -> Vec<Move> {
     rx.into_iter()
@@ -189,4 +189,47 @@ fn drain_flushes_buffered_moves_without_close() {
     ));
     drop(tx);
     handle.join().unwrap();
+}
+
+#[test]
+fn set_mesh_rebases_the_travel_align_anchor() {
+    let (tx, rx) = bounded::<StreamInput>(64);
+    let (out_tx, out_rx) = bounded::<StreamInput>(64);
+    let fit_stage = FitStage::new(ChainFitConfig::default());
+    let handle = std::thread::spawn(move || fit_stage.run(rx, out_tx));
+
+    tx.send(line(1, [0.0, 0.0, 5.0], [10.0, 0.0, 5.0], 0.5).into())
+        .unwrap();
+    tx.send(StreamInput::Drain).unwrap();
+    tx.send(StreamInput::Control(Control::SetMesh {
+        mesh: None,
+        gcode_z_rebase: 4.9,
+    }))
+    .unwrap();
+    // The compensation travel: from the rebased resting Z back to the
+    // pre-swap gcode Z, then a printing move continuing from there. Without
+    // the anchor rebase the aligner snaps the travel's start to the stale
+    // z=5.0 name and collapses it to a zero-length line (bench crash:
+    // "travel align of line 3 failed: ZeroMotion").
+    tx.send(line(3, [10.0, 0.0, 4.9], [10.0, 0.0, 5.0], 0.0).into())
+        .unwrap();
+    tx.send(line(4, [10.0, 0.0, 5.0], [20.0, 0.0, 5.0], 0.5).into())
+        .unwrap();
+    drop(tx);
+    handle.join().unwrap();
+
+    let moves = moves_of(out_rx);
+    let travel = moves
+        .iter()
+        .find(|m| m.source.start_line == 3)
+        .expect("compensation travel emitted");
+    assert_eq!(
+        geometry::fitter::spatial_start(travel),
+        Some([10.0, 0.0, 4.9])
+    );
+    let end = geometry::fitter::spatial_end(travel).unwrap();
+    assert!(
+        end[2] > 4.95,
+        "travel should climb toward the pre-swap z (tail may be blend-trimmed), got {end:?}"
+    );
 }

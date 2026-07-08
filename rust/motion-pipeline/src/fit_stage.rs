@@ -133,6 +133,9 @@ impl FitStage {
                 );
             }
         }
+        if let Control::SetMesh { gcode_z_rebase, .. } = &ctrl {
+            out.rebase_gcode_z(*gcode_z_rebase);
+        }
         out.forward(StreamInput::Control(ctrl))
     }
 
@@ -560,6 +563,16 @@ impl TravelAligningSender {
     fn forward(&self, item: StreamInput) -> bool {
         debug_assert!(self.parked_travel.is_none() && self.parked_tail.is_empty());
         self.tx.send(item).is_ok()
+    }
+
+    /// A mesh swap renames the resting point's gcode Z (the machine position
+    /// is invariant); the emitted-geometry anchor must adopt the new name or
+    /// the next move looks discontinuous against a stale coordinate.
+    fn rebase_gcode_z(&mut self, z: f64) {
+        debug_assert!(self.parked_travel.is_none() && self.parked_tail.is_empty());
+        if let Some(end) = self.last_spatial_end.as_mut() {
+            end[2] = z;
+        }
     }
 
     fn reset(&mut self) {
