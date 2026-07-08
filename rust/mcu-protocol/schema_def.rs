@@ -451,6 +451,38 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
             SchemaField { name: "trip_clock", ty: "u64" },
         ],
     },
+    SchemaMessage {
+        type_tag: 0x0086,
+        name: "SyncPair",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "axis", ty: "u8" },
+            SchemaField { name: "torque_ok_tenth_pct", ty: "u16" },
+            SchemaField { name: "settle_timeout_ms", ty: "u16" },
+            SchemaField { name: "dither_amplitude_nm", ty: "u32" },
+            SchemaField { name: "dither_freq_millihz", ty: "u32" },
+            SchemaField { name: "dither_duration_ms", ty: "u16" },
+        ],
+    },
+    SchemaMessage {
+        type_tag: 0x0087,
+        name: "SyncPairResponse",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "result", ty: "i32" },
+            SchemaField { name: "primary_slot", ty: "u8" },
+            SchemaField { name: "secondary_slot", ty: "u8" },
+            SchemaField { name: "torque_baseline_primary", ty: "i32" },
+            SchemaField { name: "torque_baseline_secondary", ty: "i32" },
+            SchemaField { name: "torque_released", ty: "i32" },
+            SchemaField { name: "torque_dithered", ty: "i32" },
+            SchemaField { name: "torque_final_primary", ty: "i32" },
+            SchemaField { name: "torque_final_secondary", ty: "i32" },
+            SchemaField { name: "released_delta_counts", ty: "i32" },
+        ],
+    },
 ];
 
 /// Bootstrap type tags that the C header must define alongside the schema

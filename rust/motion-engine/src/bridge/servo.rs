@@ -1,5 +1,6 @@
 use super::{
-    PyMotionEngine, PyResult, PyRuntimeError, Python, mcu_handle_from_raw, pymethods, slot_for_axis,
+    PyMotionEngine, PyResult, PyRuntimeError, Python, mcu_handle_from_raw, pymethods,
+    slots_for_axis,
 };
 use crate::lock_ext::LockExt;
 
@@ -267,17 +268,21 @@ impl PyMotionEngine {
             let seeds = seed_lanes
                 .iter()
                 .map(|&lane| {
-                    slot_for_axis(&mc.ethercat_slot_axes, lane)
-                        .map(|slot| (slot, crate::mcu_config::encode_q16(motor[lane])))
-                        .ok_or_else(|| {
-                            PyRuntimeError::new_err(format!(
-                                "finalize_homed_axis: axis {lane} not driven by mcu \
-                                 {mcu_handle} (slot map {:?})",
-                                mc.ethercat_slot_axes
-                            ))
-                        })
+                    let slots = slots_for_axis(&mc.ethercat_slot_axes, lane);
+                    if slots.is_empty() {
+                        return Err(PyRuntimeError::new_err(format!(
+                            "finalize_homed_axis: axis {lane} not driven by mcu \
+                             {mcu_handle} (slot map {:?})",
+                            mc.ethercat_slot_axes
+                        )));
+                    }
+                    let home_q16 = crate::mcu_config::encode_q16(motor[lane]);
+                    Ok(slots.into_iter().map(move |slot| (slot, home_q16)))
                 })
-                .collect::<PyResult<Vec<(u8, i32)>>>()?;
+                .collect::<PyResult<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<(u8, i32)>>();
             (conn, seeds)
         };
         tracing::info!(
@@ -302,6 +307,76 @@ impl PyMotionEngine {
                 )?;
             }
             Ok(())
+        }))
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn sync_servo_pair_start(
+        &self,
+        mcu_handle: u32,
+        axis: u8,
+        torque_ok_tenth_pct: u16,
+        settle_timeout_ms: u16,
+        dither_amplitude_nm: u32,
+        dither_freq_millihz: u32,
+        dither_duration_ms: u16,
+    ) -> PyResult<u64> {
+        let conn = self.ethercat_conn(mcu_handle, "sync_servo_pair")?;
+        let reports = std::sync::Arc::clone(&self.sync_reports);
+        tracing::info!(
+            subsystem = "engine",
+            event = "servo_pair_sync_start",
+            mcu_handle,
+            axis,
+            torque_ok_tenth_pct,
+            settle_timeout_ms,
+            dither_amplitude_nm,
+            dither_freq_millihz,
+            dither_duration_ms,
+            "servo belt pair sync"
+        );
+        Ok(self.endpoint_calls.start("sync_servo_pair", move || {
+            let resp = crate::servo_torque::send_sync_pair(
+                &conn,
+                mcu_protocol::messages::SyncPair {
+                    axis,
+                    torque_ok_tenth_pct,
+                    settle_timeout_ms,
+                    dither_amplitude_nm,
+                    dither_freq_millihz,
+                    dither_duration_ms,
+                },
+            )?;
+            let result = resp.result;
+            reports.lock_ok().insert(mcu_handle, resp);
+            if result != 0 {
+                return Err(format!("sync_servo_pair: endpoint result {result}"));
+            }
+            Ok(())
+        }))
+    }
+    /// The measurements of the most recent pair sync on this node, as
+    /// (result, primary_slot, secondary_slot, torque_baseline_primary,
+    /// torque_baseline_secondary, torque_released, torque_dithered,
+    /// torque_final_primary, torque_final_secondary, released_delta_counts).
+    /// Available for failed runs too — the phase torques are the diagnosis.
+    #[allow(clippy::type_complexity)]
+    fn take_sync_report(
+        &self,
+        mcu_handle: u32,
+    ) -> PyResult<Option<(i32, u8, u8, i32, i32, i32, i32, i32, i32, i32)>> {
+        Ok(self.sync_reports.lock_ok().remove(&mcu_handle).map(|r| {
+            (
+                r.result,
+                r.primary_slot,
+                r.secondary_slot,
+                r.torque_baseline_primary,
+                r.torque_baseline_secondary,
+                r.torque_released,
+                r.torque_dithered,
+                r.torque_final_primary,
+                r.torque_final_secondary,
+                r.released_delta_counts,
+            )
         }))
     }
     fn take_drive_fault(&self, mcu_handle: u32) -> PyResult<Option<u16>> {

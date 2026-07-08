@@ -6,7 +6,7 @@ use mcu_protocol::messages::{
     ArmSensorlessEndstop, ArmSensorlessEndstopResponse, MessageKind, ResonanceBuzz,
     ResonanceBuzzResponse, RestoreDriveLimits, RestoreDriveLimitsResponse, SeedServoHome,
     SeedServoHomeResponse, SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse,
-    StopResponse,
+    StopResponse, SyncPair, SyncPairResponse,
 };
 
 use crate::servo_call::mcu_typed_call;
@@ -145,6 +145,22 @@ pub fn send_resonance_buzz(conn: &McuSerialConn, buzz: ResonanceBuzz) -> Result<
         RESONANCE_BUZZ_TIMEOUT,
     )?;
     Ok(r.result)
+}
+
+/// A pair sync runs baseline/coast/dither/final phases with per-phase settle
+/// windows; a couple of seconds is normal, so give the round-trip real room.
+const SYNC_PAIR_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub fn send_sync_pair(conn: &McuSerialConn, msg: SyncPair) -> Result<SyncPairResponse, String> {
+    let body = msg.encoded_to_vec();
+    mcu_typed_call(
+        conn,
+        "SyncPair",
+        MessageKind::SyncPair,
+        MessageKind::SyncPairResponse,
+        body,
+        SYNC_PAIR_TIMEOUT,
+    )
 }
 
 #[cfg(test)]

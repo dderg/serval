@@ -59,16 +59,24 @@ class FieldHelper:
             field_value -= 1 << field_value.bit_length()
         return field_value
 
-    def set_field(self, field_name, field_value, reg_value=None, reg_name=None):
-        # Returns register value with field bits filled with supplied value
-        if reg_name is None:
-            reg_name = self.field_to_register[field_name]
-        if reg_value is None:
-            reg_value = self.registers.get(reg_name, 0)
-        mask = self.all_fields[reg_name][field_name]
-        new_value = (reg_value & ~mask) | ((field_value << ffs(mask)) & mask)
+    def set_field(self, field_name, field_value):
+        # Update the desired configuration; returns the new register value
+        reg_name = self.field_to_register[field_name]
+        new_value = self.override_register(reg_name, {field_name: field_value})
         self.registers[reg_name] = new_value
         return new_value
+
+    def override_register(self, reg_name, field_overrides):
+        """Register value with transient field overrides applied on top
+        of the desired configuration. The desired configuration is not
+        touched, so a later full register replay restores it."""
+        reg_value = self.registers.get(reg_name, 0)
+        for field_name, field_value in field_overrides.items():
+            mask = self.all_fields[reg_name][field_name]
+            reg_value = (reg_value & ~mask) | (
+                (field_value << ffs(mask)) & mask
+            )
+        return reg_value
 
     def set_config_field(self, config, field_name, default):
         # Allow a field to be set from the config file
@@ -110,6 +118,43 @@ class FieldHelper:
             field_name: self.get_field(field_name, reg_value, reg_name)
             for field_name, mask in reg_fields.items()
         }
+
+
+######################################################################
+# Driver mode tracking
+######################################################################
+
+
+class TMCModeTracker:
+    """Single source of truth for the mode the driver silicon is in.
+
+    Every lifecycle actor (enable path, StallGuard arm/disarm, phase
+    stepping enter/exit) moves the driver between modes through
+    transition(), which fails loudly on a sequence the hardware cannot
+    honor instead of letting the actors clobber each other's state.
+    """
+
+    DISABLED = "disabled"
+    PULSE = "pulse"
+    PHASE_DIRECT = "phase_direct"
+    SG_HOMING = "sg_homing"
+
+    def __init__(self, printer, stepper_name):
+        self.printer = printer
+        self.stepper_name = stepper_name
+        self.mode = self.DISABLED
+
+    def transition(self, allowed, new_mode, what):
+        if self.mode not in allowed:
+            raise self.printer.command_error(
+                "TMC %s: %s is illegal while the driver is in %s mode"
+                % (self.stepper_name, what, self.mode)
+            )
+        previous, self.mode = self.mode, new_mode
+        return previous
+
+    def require(self, allowed, what):
+        self.transition(allowed, self.mode, what)
 
 
 ######################################################################
@@ -294,8 +339,8 @@ class TMCCommandHelper:
         self.fields = mcu_tmc.get_fields()
         self.read_registers = self.read_translate = None
         self.toff = None
-        self.mcu_phase_offset = None
         self.stepper = None
+        self.mode_tracker = TMCModeTracker(self.printer, self.stepper_name)
         self._post_enable_cb = None
         self.stepper_enable = self.printer.load_object(config, "stepper_enable")
         self.printer.register_event_handler(
@@ -343,6 +388,10 @@ class TMCCommandHelper:
 
     def cmd_INIT_TMC(self, gcmd):
         logging.info("INIT_TMC %s", self.name)
+        self.mode_tracker.require(
+            (TMCModeTracker.DISABLED, TMCModeTracker.PULSE),
+            "INIT_TMC register replay",
+        )
         print_time = self.printer.lookup_object("toolhead").get_last_move_time()
         self._init_registers(print_time)
 
@@ -431,23 +480,15 @@ class TMCCommandHelper:
         return (256 >> self.fields.get_field("mres")) * 4
 
     def get_phase_offset(self):
-        return self.mcu_phase_offset, self._get_phases()
+        return None, self._get_phases()
 
     # Stepper enable/disable tracking
-    def _do_enable(self, print_time):
-        try:
-            if self.toff is not None:
-                # Shared enable via comms handling
-                self.fields.set_field("toff", self.toff)
-            self._init_registers()
-            if self._post_enable_cb is not None:
-                self._post_enable_cb()
-            if self._post_enable_cb is None:
-                self.echeck_helper.start_checks()
-        except (self.printer.command_error, RuntimeError) as e:
-            self.printer.invoke_shutdown(
-                "TMC %s _do_enable failed: %s" % (self.stepper_name, e)
-            )
+    def _apply_driver_config(self, restore_toff, print_time=None):
+        if restore_toff and self.toff is not None:
+            self.fields.set_field("toff", self.toff)
+        self._init_registers(print_time)
+        if self._post_enable_cb is not None:
+            self._post_enable_cb()
 
     def _do_disable(self, print_time):
         try:
@@ -456,9 +497,19 @@ class TMCCommandHelper:
                 reg_name = self.fields.lookup_register("toff")
                 self.mcu_tmc.set_register(reg_name, val, print_time)
             self.echeck_helper.stop_checks()
+            self.mode_tracker.transition(
+                (
+                    TMCModeTracker.DISABLED,
+                    TMCModeTracker.PULSE,
+                    TMCModeTracker.PHASE_DIRECT,
+                    TMCModeTracker.SG_HOMING,
+                ),
+                TMCModeTracker.DISABLED,
+                "stepper disable",
+            )
         except (self.printer.command_error, RuntimeError) as e:
             self.printer.invoke_shutdown(
-                "TMC %s _do_disable failed: %s" % (self.stepper_name, e)
+                "TMC %s disable failed: %s" % (self.stepper_name, e)
             )
 
     def _handle_mcu_identify(self):
@@ -475,7 +526,7 @@ class TMCCommandHelper:
             # Inline, not deferred like disable below: the engine ships the
             # move right after this with no lookahead, so deferring to the
             # reactor loses the first move on a driver not yet ready.
-            self._do_enable_engine(print_time)
+            self._do_enable(print_time)
             return
 
         def cb(ev):
@@ -483,30 +534,29 @@ class TMCCommandHelper:
 
         self.printer.get_reactor().register_callback(cb)
 
-    def _do_enable_engine(self, print_time):
+    def _do_enable(self, print_time):
         try:
             if self._post_enable_cb is not None:
-                if self.toff is not None:
-                    self.fields.set_field("toff", self.toff)
-                self._init_registers()
-                self._post_enable_cb()
+                self._apply_driver_config(restore_toff=True)
                 return
             did_reset = self.echeck_helper.start_checks()
             reinit = (
                 did_reset or not self.echeck_helper.reset_detect_supported()
             )
-            if self.toff is not None:
+            if reinit:
+                self._apply_driver_config(restore_toff=True)
+            elif self.toff is not None:
                 val = self.fields.set_field("toff", self.toff)
-                if reinit:
-                    self._init_registers()
-                else:
-                    reg_name = self.fields.lookup_register("toff")
-                    self.mcu_tmc.set_register(reg_name, val, print_time)
-            elif reinit:
-                self._init_registers()
+                reg_name = self.fields.lookup_register("toff")
+                self.mcu_tmc.set_register(reg_name, val, print_time)
+            self.mode_tracker.transition(
+                (TMCModeTracker.DISABLED,),
+                TMCModeTracker.PULSE,
+                "stepper enable",
+            )
         except (self.printer.command_error, RuntimeError) as e:
             self.printer.invoke_shutdown(
-                "TMC %s _do_enable_engine failed: %s" % (self.stepper_name, e)
+                "TMC %s enable failed: %s" % (self.stepper_name, e)
             )
 
     def _handle_connect(self):
@@ -532,21 +582,16 @@ class TMCCommandHelper:
                     self.mcu_tmc.mcu.get_name(),
                 )
             else:
-                self._init_registers()
-                if self._post_enable_cb is not None:
-                    self._post_enable_cb()
+                self._apply_driver_config(restore_toff=False)
         except self.printer.command_error as e:
             logging.info("TMC %s failed to init: %s", self.name, str(e))
 
     # get_status information export
     def get_status(self, eventtime=None):
-        cpos = None
-        if self.stepper is not None and self.mcu_phase_offset is not None:
-            cpos = self.stepper.mcu_to_commanded_position(self.mcu_phase_offset)
         current = self.current_helper.get_current()
         res = {
-            "mcu_phase_offset": self.mcu_phase_offset,
-            "phase_offset_position": cpos,
+            "mcu_phase_offset": None,
+            "phase_offset_position": None,
             "run_current": current[0],
             "hold_current": current[1],
         }
@@ -604,10 +649,11 @@ class TMCCommandHelper:
 
 
 class TMCVirtualPinHelper:
-    def __init__(self, config, mcu_tmc):
+    def __init__(self, config, mcu_tmc, mode_tracker):
         self.printer = config.get_printer()
         self.mcu_tmc = mcu_tmc
         self.fields = mcu_tmc.get_fields()
+        self.mode_tracker = mode_tracker
         if self.fields.lookup_register("diag0_stall") is not None:
             if config.get("diag0_pin", None) is not None:
                 self.diag_pin = config.get("diag0_pin")
@@ -620,9 +666,7 @@ class TMCVirtualPinHelper:
             self.diag_pin_field = None
         self.mcu_endstop = None
         self.phase_mode_helper = None
-        self._phase_exited = False
-        self.en_pwm = False
-        self.pwmthrs = self.coolthrs = self.thigh = 0
+        self._reenter_phase = False
         name_parts = config.get_name().split()
         ppins = self.printer.lookup_object("pins")
         ppins.register_chip("%s_%s" % (name_parts[0], name_parts[-1]), self)
@@ -658,69 +702,75 @@ class TMCVirtualPinHelper:
     def trip_move_end(self, entry):
         self.disarm()
 
-    def arm(self):
+    def _exit_phase_mode_for_homing(self):
         pmh = self.phase_mode_helper
-        if pmh is not None and pmh.phase_stepping_active():
-            pmh.exit_phase_mode()
-            self._phase_exited = True
-            if pmh.phase_stepping_active():
-                raise self.printer.command_error(
-                    "phase stepping still active after exit_phase_mode; "
-                    "refusing to start a StallGuard homing move"
-                )
-        if self.fields.lookup_register("sgthrs", None) is not None:
-            sg_val = self.fields.set_field(
-                "sgthrs", self.fields.get_field("sgthrs")
+        if pmh is None or not pmh.phase_stepping_active():
+            return False
+        pmh.exit_phase_mode()
+        if pmh.phase_stepping_active():
+            raise self.printer.command_error(
+                "phase stepping still active after exit_phase_mode; "
+                "refusing to start a StallGuard homing move"
             )
-            self.mcu_tmc.set_register("SGTHRS", sg_val)
-        # Enable/disable stealthchop
-        self.pwmthrs = self.fields.get_field("tpwmthrs")
-        reg = self.fields.lookup_register("en_pwm_mode", None)
-        if reg is None:
-            # On "stallguard4" drivers, "stealthchop" must be enabled
-            self.en_pwm = not self.fields.get_field("en_spreadcycle")
-            tp_val = self.fields.set_field("tpwmthrs", 0)
-            self.mcu_tmc.set_register("TPWMTHRS", tp_val)
-            val = self.fields.set_field("en_spreadcycle", 0)
+        return True
+
+    def arm(self):
+        """Transiently override the driver configuration for a StallGuard
+        homing move; the desired configuration is untouched, so disarm
+        restores by replaying it."""
+        self._reenter_phase = self._exit_phase_mode_for_homing()
+        self.mode_tracker.transition(
+            (TMCModeTracker.PULSE,),
+            TMCModeTracker.SG_HOMING,
+            "StallGuard arm",
+        )
+        fields = self.fields
+        override = fields.override_register
+        if fields.lookup_register("sgthrs", None) is not None:
+            self.mcu_tmc.set_register(
+                "SGTHRS", fields.registers.get("SGTHRS", 0)
+            )
+        if fields.lookup_register("en_pwm_mode", None) is None:
+            # "stallguard4" drivers only stall-detect in stealthchop
+            self.mcu_tmc.set_register(
+                "TPWMTHRS", override("TPWMTHRS", {"tpwmthrs": 0})
+            )
+            gconf_val = override("GCONF", {"en_spreadcycle": 0})
         else:
-            # On earlier drivers, "stealthchop" must be disabled
-            self.en_pwm = self.fields.get_field("en_pwm_mode")
-            self.fields.set_field("en_pwm_mode", 0)
-            val = self.fields.set_field(self.diag_pin_field, 1)
-        self.mcu_tmc.set_register("GCONF", val)
-        # Enable tcoolthrs (if not already)
-        self.coolthrs = self.fields.get_field("tcoolthrs")
-        if self.coolthrs == 0:
-            tc_val = self.fields.set_field("tcoolthrs", 0xFFFFF)
-            self.mcu_tmc.set_register("TCOOLTHRS", tc_val)
-        # Disable thigh
-        reg = self.fields.lookup_register("thigh", None)
-        if reg is not None:
-            self.thigh = self.fields.get_field("thigh")
-            th_val = self.fields.set_field("thigh", 0)
-            self.mcu_tmc.set_register(reg, th_val)
+            # earlier drivers only stall-detect in spreadcycle
+            gconf_val = override(
+                "GCONF", {"en_pwm_mode": 0, self.diag_pin_field: 1}
+            )
+        self.mcu_tmc.set_register("GCONF", gconf_val)
+        if fields.get_field("tcoolthrs") == 0:
+            self.mcu_tmc.set_register(
+                "TCOOLTHRS", override("TCOOLTHRS", {"tcoolthrs": 0xFFFFF})
+            )
+        thigh_reg = fields.lookup_register("thigh", None)
+        if thigh_reg is not None:
+            self.mcu_tmc.set_register(
+                thigh_reg, override(thigh_reg, {"thigh": 0})
+            )
 
     def disarm(self):
-        # Restore stealthchop/spreadcycle
-        reg = self.fields.lookup_register("en_pwm_mode", None)
-        if reg is None:
-            tp_val = self.fields.set_field("tpwmthrs", self.pwmthrs)
-            self.mcu_tmc.set_register("TPWMTHRS", tp_val)
-            val = self.fields.set_field("en_spreadcycle", not self.en_pwm)
-        else:
-            self.fields.set_field("en_pwm_mode", self.en_pwm)
-            val = self.fields.set_field(self.diag_pin_field, 0)
-        self.mcu_tmc.set_register("GCONF", val)
-        # Restore tcoolthrs
-        tc_val = self.fields.set_field("tcoolthrs", self.coolthrs)
-        self.mcu_tmc.set_register("TCOOLTHRS", tc_val)
-        # Restore thigh
-        reg = self.fields.lookup_register("thigh", None)
-        if reg is not None:
-            th_val = self.fields.set_field("thigh", self.thigh)
-            self.mcu_tmc.set_register(reg, th_val)
-        if self._phase_exited:
-            self._phase_exited = False
+        self.mode_tracker.transition(
+            (TMCModeTracker.SG_HOMING,),
+            TMCModeTracker.PULSE,
+            "StallGuard disarm",
+        )
+        fields = self.fields
+        restore_regs = ["GCONF", "TCOOLTHRS"]
+        if fields.lookup_register("en_pwm_mode", None) is None:
+            restore_regs.insert(0, "TPWMTHRS")
+        thigh_reg = fields.lookup_register("thigh", None)
+        if thigh_reg is not None:
+            restore_regs.append(thigh_reg)
+        for reg_name in restore_regs:
+            self.mcu_tmc.set_register(
+                reg_name, fields.registers.get(reg_name, 0)
+            )
+        if self._reenter_phase:
+            self._reenter_phase = False
             self.phase_mode_helper.enter_phase_mode()
 
 
@@ -849,71 +899,31 @@ class BaseTMCCurrentHelper:
 
         self.max_current = max_current
 
-    def needs_home_current_change(self):
-        needs = self.actual_current != self.req_home_current
-        logging.info(f"tmc {self.name}: needs_home_current_change {needs}")
-        return needs
-
-    def needs_run_current_change(self):
-        needs = self.actual_current != self.req_run_current
-        logging.info(f"tmc {self.name}: needs_run_current_change {needs}")
-        return needs
-
-    def needs_hold_current_change(self, hold_current):
-        needs = hold_current != self.req_hold_current
-        logging.info(f"tmc {self.name}: needs_hold_current_change {needs}")
-        return needs
-
     def set_home_current(self, new_home_current):
         self.req_home_current = min(self.max_current, new_home_current)
 
     def set_run_current(self, new_run_current):
         self.req_run_current = min(self.max_current, new_run_current)
 
-    def set_hold_current(self, new_hold_current):
-        self.req_hold_current = new_hold_current
-
-    def set_actual_current(self, current):
-        self.actual_current = current
-        logging.info(
-            f"tmc {self.name}: set_actual_current() new actual_current: {self.actual_current}"
-        )
-
     def set_current_for_homing(self, print_time, pre_homing) -> float:
-        if pre_homing and self.needs_home_current_change():
-            self.set_current(
-                self.req_home_current,
-                self.req_hold_current,
-                print_time,
-            )
-            return self.current_change_dwell_time
-        elif not pre_homing and self.needs_run_current_change():
-            self.set_current(
-                self.req_run_current, self.req_hold_current, print_time
-            )
-            return self.current_change_dwell_time
-        return 0.0
-
-    def needs_current_changes(self, run_current, hold_current, force=False):
-        if (
-            run_current == self.actual_current
-            and hold_current == self.req_hold_current
-            and not force
-        ):
-            return False
-        return True
+        target = self.req_home_current if pre_homing else self.req_run_current
+        if target == self.actual_current:
+            return 0.0
+        self.set_current(target, self.req_hold_current, print_time)
+        return self.current_change_dwell_time
 
     def apply_current(self, print_time):
         pass
 
     def set_current(self, new_current, hold_current, print_time, force=False):
-        if not self.needs_current_changes(new_current, hold_current, force):
+        if (
+            new_current == self.actual_current
+            and hold_current == self.req_hold_current
+            and not force
+        ):
             return
-
-        if self.needs_hold_current_change(hold_current):
-            self.set_hold_current(hold_current)
-
-        self.set_actual_current(new_current)
+        self.req_hold_current = hold_current
+        self.actual_current = new_current
         self.apply_current(print_time)
 
 

@@ -61,6 +61,8 @@ pub enum MessageKind {
     StatusHeartbeat = 0x0083,
     McuLog = 0x0084,
     EndstopTrip = 0x0085,
+    SyncPair = 0x0086,
+    SyncPairResponse = 0x0087,
 }
 
 impl MessageKind {
@@ -106,6 +108,8 @@ impl MessageKind {
             0x0083 => Self::StatusHeartbeat,
             0x0084 => Self::McuLog,
             0x0085 => Self::EndstopTrip,
+            0x0086 => Self::SyncPair,
+            0x0087 => Self::SyncPairResponse,
             _ => return None,
         })
     }
@@ -811,6 +815,86 @@ impl Decode for EndstopTrip {
         Ok(Self {
             endstop_id: get_u8(c)?,
             trip_clock: get_u64(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncPair {
+    pub axis: u8,
+    pub torque_ok_tenth_pct: u16,
+    pub settle_timeout_ms: u16,
+    pub dither_amplitude_nm: u32,
+    pub dither_freq_millihz: u32,
+    pub dither_duration_ms: u16,
+}
+
+impl Encode for SyncPair {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_u8(out, self.axis);
+        put_u16(out, self.torque_ok_tenth_pct);
+        put_u16(out, self.settle_timeout_ms);
+        put_u32(out, self.dither_amplitude_nm);
+        put_u32(out, self.dither_freq_millihz);
+        put_u16(out, self.dither_duration_ms);
+    }
+}
+
+impl Decode for SyncPair {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            axis: get_u8(c)?,
+            torque_ok_tenth_pct: get_u16(c)?,
+            settle_timeout_ms: get_u16(c)?,
+            dither_amplitude_nm: get_u32(c)?,
+            dither_freq_millihz: get_u32(c)?,
+            dither_duration_ms: get_u16(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncPairResponse {
+    pub result: i32,
+    pub primary_slot: u8,
+    pub secondary_slot: u8,
+    pub torque_baseline_primary: i32,
+    pub torque_baseline_secondary: i32,
+    pub torque_released: i32,
+    pub torque_dithered: i32,
+    pub torque_final_primary: i32,
+    pub torque_final_secondary: i32,
+    pub released_delta_counts: i32,
+}
+
+impl Encode for SyncPairResponse {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_i32(out, self.result);
+        put_u8(out, self.primary_slot);
+        put_u8(out, self.secondary_slot);
+        put_i32(out, self.torque_baseline_primary);
+        put_i32(out, self.torque_baseline_secondary);
+        put_i32(out, self.torque_released);
+        put_i32(out, self.torque_dithered);
+        put_i32(out, self.torque_final_primary);
+        put_i32(out, self.torque_final_secondary);
+        put_i32(out, self.released_delta_counts);
+    }
+}
+
+impl Decode for SyncPairResponse {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            result: get_i32(c)?,
+            primary_slot: get_u8(c)?,
+            secondary_slot: get_u8(c)?,
+            torque_baseline_primary: get_i32(c)?,
+            torque_baseline_secondary: get_i32(c)?,
+            torque_released: get_i32(c)?,
+            torque_dithered: get_i32(c)?,
+            torque_final_primary: get_i32(c)?,
+            torque_final_secondary: get_i32(c)?,
+            released_delta_counts: get_i32(c)?,
         })
     }
 }

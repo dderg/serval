@@ -602,7 +602,14 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
         &moves,
     );
     let shaped = replay(cfg(), smooth_x_chains(18.0), &[0.0, 0.0, 0.0], 0.0, &moves);
-    assert_eq!(base.len(), shaped.len());
+    assert_eq!(
+        base.len() + 1,
+        shaped.len(),
+        "a kernel chain starting from rest pads a leading hold segment"
+    );
+    let pad = shaped[1].t_start - base[0].t_start;
+    assert!(pad > 0.0, "hold pad must shift the move start forward");
+    let shaped = &shaped[1..];
 
     let oracle_chains = smooth_x_chains(18.0);
     let trajectory::ChainStage::SmoothKernel(kernel) = &oracle_chains.chains[0].stages[0] else {
@@ -611,7 +618,7 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
     let first = base.first().unwrap().t_start;
     let last = base.last().unwrap().t_end;
 
-    for (base_seg, shaped_seg) in base.iter().zip(&shaped) {
+    for (base_seg, shaped_seg) in base.iter().zip(shaped) {
         let mut breaks: Vec<f64> = Vec::new();
         for seg in &base {
             breaks.push(seg.t_start);
@@ -633,7 +640,7 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
         );
         for frac in [0.1_f64, 0.3, 0.5, 0.7, 0.9] {
             let t = frac.mul_add(base_seg.t_end - base_seg.t_start, base_seg.t_start);
-            let got = eval(&shaped_seg.axes[0], t);
+            let got = eval(&shaped_seg.axes[0], t + pad);
             let want = sig.eval(t);
             assert!(
                 (got - want).abs() < 5e-2,

@@ -112,6 +112,7 @@ struct auto_endstop {
     int toward_sign;
     int latch_armed;
     int triggered;
+    long min_pos, max_pos;
 };
 static struct auto_endstop auto_endstops[MAX_AUTO_ENDSTOPS];
 static pthread_mutex_t auto_endstop_mtx = PTHREAD_MUTEX_INITIALIZER;
@@ -127,6 +128,10 @@ static void iio_init(void) {
     auto_endstops[1] = (struct auto_endstop){1, 0,7,  0,201, 50, 0, 0, 1, 0};
     auto_endstops[2] = (struct auto_endstop){1, 0,15, 0,202, 50, 0, 0, 1, 0};
     auto_endstops[3] = (struct auto_endstop){1, 0,15, 0,203, 50, 0, 0, 1, 0};
+    // Extruder step tracker (line 20): wall far enough that it never
+    // asserts an endstop; exists so get_steps can observe the E track.
+    auto_endstops[4] = (struct auto_endstop){1, 0,20, 0,210, 1000000000L,
+                                             0, 0, 1, 0};
 }
 
 static int alloc_fake_fd(enum sim_slot_kind kind) {
@@ -263,13 +268,15 @@ static void control_handle_line(int client_fd, char *line) {
             send_resp(client_fd, "error: parse error\n");
             return;
         }
-        long pos = 0;
+        long pos = 0, min_pos = 0, max_pos = 0;
         int hit = 0;
         pthread_mutex_lock(&auto_endstop_mtx);
         for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
             if (auto_endstops[i].active
                 && auto_endstops[i].step_line == (int)line_off) {
                 pos = auto_endstops[i].pos;
+                min_pos = auto_endstops[i].min_pos;
+                max_pos = auto_endstops[i].max_pos;
                 hit = 1;
                 break;
             }
@@ -279,8 +286,9 @@ static void control_handle_line(int client_fd, char *line) {
             send_resp(client_fd, "error: no step tracker for line\n");
             return;
         }
-        char buf[48];
-        snprintf(buf, sizeof(buf), "steps=%ld\n", pos);
+        char buf[96];
+        snprintf(buf, sizeof(buf), "steps=%ld min=%ld max=%ld\n",
+                 pos, min_pos, max_pos);
         send_resp(client_fd, buf);
         return;
     }
@@ -587,6 +595,8 @@ static void auto_endstop_advance(int chip_id, int offset, long delta) {
         if (!ae->active) continue;
         if (ae->step_chip != chip_id || ae->step_line != offset) continue;
         ae->pos += delta;
+        if (ae->pos < ae->min_pos) ae->min_pos = ae->pos;
+        if (ae->pos > ae->max_pos) ae->max_pos = ae->pos;
         if (labs(ae->pos - last_log_pos[i]) >= 800) {
             last_log_pos[i] = ae->pos;
             fprintf(stderr, "[auto-endstop] line=%d pos=%ld (moving)\n",

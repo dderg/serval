@@ -170,16 +170,11 @@ class _LinearKinematics:
         return rail
 
     def _build_servo_lane(self, config, lane, motor_sections):
-        lane_idx, axis_name, motor_names = lane
-        if len(motor_sections) != 1:
-            raise config.error(
-                "[kinematics] servo lane '%s' must reference exactly one "
-                "servo motor" % axis_name
-            )
+        _lane_idx, axis_name, _motor_names = lane
         from .extras import servo_axis
 
         axis_config = config.getsection("axis " + axis_name)
-        rail = servo_axis.ServoRail(axis_config, motor_sections[0])
+        rail = servo_axis.ServoRail(axis_config, motor_sections)
         servo_axis.register_torque_enable(self._printer, config, rail)
         return rail
 

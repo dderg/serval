@@ -135,27 +135,13 @@ class ServoParam:
     def _resolve_node(self, servo_name):
         from . import servo_axis
 
-        toolhead = self.printer.lookup_object("toolhead")
-        servo_rails = [
-            rail
-            for rail in getattr(toolhead.get_kinematics(), "rails", ())
-            if isinstance(rail, servo_axis.ServoRail)
-        ]
-        for rail in servo_rails:
-            if servo_name in (
-                rail.get_motor_name(),
-                rail.get_name(),
-                rail.get_name(short=True),
-            ):
-                node = self.printer.lookup_object(
-                    "ethercat_node " + rail.get_node_name()
-                )
-                return node, node.get_slot_for_motor(rail.get_motor_name())
-        known = ", ".join(rail.get_motor_name() for rail in servo_rails)
-        raise self.printer.command_error(
-            "SERVO_PARAM: no servo motor named %r (known: %s)"
-            % (servo_name, known or "none")
+        _rail, motor = servo_axis.resolve_servo_motor(
+            self.printer, servo_name, "SERVO_PARAM"
         )
+        node = self.printer.lookup_object(
+            "ethercat_node " + motor.get_node_name()
+        )
+        return node, node.get_slot_for_motor(motor.get_motor_name())
 
     def cmd_SERVO_PARAM(self, gcmd):
         node, slot = self._resolve_node(gcmd.get("SERVO"))

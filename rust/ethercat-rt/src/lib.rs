@@ -17,6 +17,7 @@ pub mod sdo;
 pub mod sensorless;
 pub mod server;
 pub mod stream_halt;
+pub mod sync;
 pub mod thread_prio;
 pub mod torque;
 pub mod wire;

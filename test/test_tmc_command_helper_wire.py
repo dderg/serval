@@ -7,6 +7,7 @@ print_time stamping) of the three driver lifecycle paths: connect-time
 init, stepper-enable, stepper-disable.
 """
 
+import pytest
 from tmc_wire_harness import (
     CommandError,
     FakeConfig,
@@ -22,7 +23,7 @@ from tmc_wire_harness import (
     writes,
 )
 
-from klippy.extras import tmc, tmc5160
+from klippy.extras import tmc, tmc2130, tmc5160
 
 # microsteps=16 (mres=4), interpolate, dedge, toff=3
 CHOPCONF_RUN = 0x34000003
@@ -169,7 +170,82 @@ def test_enable_failure_shuts_the_printer_down():
     rig.mcu_tmc.reads["GSTAT"] = CommandError("SPI transfer failed")
     rig.enable_line.state_callback(10.0, True)
     assert len(rig.printer.shutdowns) == 1
-    assert "_do_enable_engine failed" in rig.printer.shutdowns[0]
+    assert "enable failed" in rig.printer.shutdowns[0]
+
+
+def test_enable_without_reset_detection_always_replays_the_registers():
+    # TMC2130-generation drivers cannot clear GSTAT, so a prior driver
+    # reset is unprovable — every enable must assume one happened.
+    wire = []
+    printer = FakePrinter(wire)
+    enable_line = FakeEnableLine(dedicated=True)
+    printer.add_object("gcode", FakeGCode())
+    printer.add_object("stepper_enable", FakeStepperEnable(enable_line))
+    printer.add_object("force_move", FakeForceMove(FakeStepper()))
+    sections = {}
+    FakeConfig("motor stepper_y", {"microsteps": 16}, printer, sections)
+    config = FakeConfig("tmc2130 stepper_y", {}, printer, sections)
+    fields = tmc.FieldHelper(
+        tmc2130.Fields, tmc2130.SignedFields, tmc2130.FieldFormatters
+    )
+    mcu_tmc = FakeMcuTmc(fields, wire)
+    tmc.TMCCommandHelper(config, mcu_tmc, FakeCurrentHelper())
+    fields.set_field("toff", 4)
+    printer.fire_event("klippy:mcu_identify")
+    printer.fire_event("klippy:connect")
+    del wire[:]
+    enable_line.state_callback(10.0, True)
+    assert [w[1] for w in writes(wire)] == ["CHOPCONF"], (
+        "full unstamped cache replay despite no reset having been detected"
+    )
+    assert writes(wire)[0][3] is None
+    assert printer.shutdowns == []
+
+
+class FakeToolhead:
+    def get_last_move_time(self):
+        return 12.0
+
+
+def test_init_tmc_replays_the_desired_config_stamped_at_print_time():
+    rig = Rig()
+    rig.boot()
+    rig.printer.add_object("toolhead", FakeToolhead())
+    del rig.wire[:]
+    rig.helper.cmd_INIT_TMC(None)
+    assert writes(rig.wire) == [
+        ("write", "CHOPCONF", CHOPCONF_RUN, 12.0),
+        ("write", "GCONF", GCONF_MULTISTEP_FILT, 12.0),
+    ]
+
+
+def test_init_tmc_fails_loudly_outside_pulse_mode():
+    # A full register replay would overwrite the transient mode overrides
+    # (direct_mode, StallGuard thresholds) with the desired config,
+    # silently knocking the driver out of its mode.
+    rig = Rig()
+    rig.boot()
+    for mode in (
+        tmc.TMCModeTracker.PHASE_DIRECT,
+        tmc.TMCModeTracker.SG_HOMING,
+    ):
+        rig.helper.mode_tracker.mode = mode
+        del rig.wire[:]
+        with pytest.raises(CommandError, match="INIT_TMC"):
+            rig.helper.cmd_INIT_TMC(None)
+        assert writes(rig.wire) == []
+
+
+def test_mode_tracker_follows_the_enable_disable_lifecycle():
+    rig = Rig(dedicated_enable=False)
+    rig.boot()
+    tracker = rig.helper.mode_tracker
+    assert tracker.mode == tmc.TMCModeTracker.DISABLED
+    rig.enable_line.state_callback(10.0, True)
+    assert tracker.mode == tmc.TMCModeTracker.PULSE
+    rig.enable_line.state_callback(11.0, False)
+    rig.printer.get_reactor().run_callbacks()
+    assert tracker.mode == tmc.TMCModeTracker.DISABLED
 
 
 def test_phase_stepping_post_enable_callback_owns_the_checks():

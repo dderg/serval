@@ -72,7 +72,7 @@ runtime_host_widened_clock_now(void)
 }
 
 #if CONFIG_MCU_SIM
-static const int step_gpio_lines[N_AXIS_STEP_QUEUES] = { 18, 7, 15, -1 };
+static const int step_gpio_lines[N_AXIS_STEP_QUEUES] = { 18, 7, 15, 20 };
 
 static void (*sim_notify_step)(int chip, int line, int32_t n_steps);
 

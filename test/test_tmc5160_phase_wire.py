@@ -120,7 +120,10 @@ def test_enter_sets_direct_mode_and_forces_spreadcycle(rig):
     tmc_obj._enter_phase_mode_single()
     gconf_writes = [w for w in writes(rig.wire) if w[1] == "GCONF"]
     assert gconf_writes == [("write", "GCONF", GCONF_DIRECT_MODE, None)]
-    assert tmc_obj.fields.registers["GCONF"] == GCONF_DIRECT_MODE
+    assert tmc_obj.fields.registers["GCONF"] == GCONF_BASE, (
+        "direct_mode is a transient override; the desired config stays clean"
+        " so a full register replay cannot resurrect it out of phase mode"
+    )
 
 
 def test_enter_preloads_xdirect_with_phase_matched_coil_currents(rig):
@@ -243,7 +246,7 @@ def build_group(rig):
 def test_group_enter_enters_every_member(rig):
     t1, t2 = build_group(rig)
     t1.enter_phase_mode()
-    assert t1._phase_mode_active and t2._phase_mode_active
+    assert t1._in_phase_mode() and t2._in_phase_mode()
     aligns = [e for e in rig.wire if e[:2] == ("cmd", "kalico_phase_align_to")]
     assert aligns == [
         ("cmd", "kalico_phase_align_to", (7, 300)),
@@ -268,7 +271,7 @@ def test_group_exit_jogs_all_motors_before_any_mode_flip(rig):
         "corexy A/B: both motors reach their handover phase while the group"
         " is still in phase mode; flipping one early loses steps"
     )
-    assert not t1._phase_mode_active and not t2._phase_mode_active
+    assert not t1._in_phase_mode() and not t2._in_phase_mode()
 
 
 def test_group_exit_flips_each_axis_once_in_sorted_order(rig):
