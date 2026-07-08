@@ -75,69 +75,204 @@ pub(super) fn trim_at_delta(theta: f64, delta: f64) -> Result<f64, GeometryError
 
 const CONSUME_COARSE_STEPS: usize = 8;
 const CONSUME_REFINE_ITERS: usize = 6;
+/// A split per level doubles the pair count: depth 2 allows up to four
+/// clothoid pairs across one consumed chain.
+const CONSUME_SPLIT_DEPTH: usize = 2;
 
-/// Blend across a consumed facet: two clothoids from a contact `t` before the
-/// facet's first vertex on the inbound line to `t` past its last vertex on
-/// the outbound line, tangent and curvature-free at both contacts and owing
-/// the facet itself nothing — the whole curve only has to stay within
-/// `delta` of the polyline it replaces. Picks the largest feasible `t` up to
-/// `t_cap`; the deviation is not monotone in `t` (the blend first hugs the
-/// facet, then cuts deeper), so a coarse top-down scan finds the feasible
-/// band's upper edge before bisecting it.
-pub(super) fn solve_consume_facet(
-    v1: [f64; 3],
+/// The G2-continuous curve that replaces a consumed facet chain, plus the
+/// arclength it claims from each neighbor line.
+pub(super) struct ChainBlend {
+    pub segments: Vec<Clothoid>,
+    pub trim_in: f64,
+    pub trim_out: f64,
+}
+
+/// Blend across a consumed chain of facets: a G2 sequence of clothoid pairs
+/// from a contact `t` before the chain's first vertex on the inbound line to
+/// `t` past its last vertex on the outbound line, tangent and curvature-free
+/// at both contacts and owing the facets themselves nothing — the whole curve
+/// only has to stay within `delta` of the polyline it replaces. A single pair
+/// has one curvature bump and cannot hug a chain much larger than the tube;
+/// when it strays, the span splits at a mid-chain anchor (on a facet, so the
+/// anchor state is exact: facet tangent, zero curvature) and each side solves
+/// recursively. Picks the largest feasible `t` up to `t_cap`; the deviation
+/// is not monotone in `t` (the blend first hugs the chain, then cuts deeper),
+/// so a coarse top-down scan finds the feasible band's upper edge before
+/// bisecting it. `vertices` runs from the inbound line's end to the outbound
+/// line's start.
+pub(super) fn solve_consume_chain(
+    vertices: &[[f64; 3]],
     t_a: [f64; 3],
-    v2: [f64; 3],
     t_b: [f64; 3],
     delta: f64,
     t_cap: f64,
-) -> Option<GeneralBlend> {
+) -> Option<ChainBlend> {
+    assert!(
+        vertices.len() >= 2,
+        "a consumed chain spans at least one facet"
+    );
     if t_cap <= super::BUDGET_EPS_MM || delta <= 0.0 {
         return None;
     }
     let plane_n = normalize(cross(t_a, t_b));
 
-    let eval = |t: f64| -> Option<(ClothoidPair, f64)> {
-        let a = madd(v1, -t, t_a);
-        let b = madd(v2, t, t_b);
-        let pair = hermite_g2(a, t_a, 0.0, b, t_b, 0.0, plane_n)?;
-        let dev = max_dev_from_chain(&pair, &[a, v1, v2, b]);
-        Some((pair, dev))
+    let eval = |t: f64| -> Option<Vec<ClothoidPair>> {
+        let a = madd(vertices[0], -t, t_a);
+        let b = madd(vertices[vertices.len() - 1], t, t_b);
+        let mut tube = Vec::with_capacity(vertices.len() + 2);
+        tube.push(a);
+        tube.extend_from_slice(vertices);
+        tube.push(b);
+        let start = ChainState {
+            pos: a,
+            tangent: t_a,
+        };
+        let end = ChainState {
+            pos: b,
+            tangent: t_b,
+        };
+        consume_pairs(
+            &start,
+            &end,
+            vertices,
+            &tube,
+            delta,
+            plane_n,
+            CONSUME_SPLIT_DEPTH,
+        )
     };
 
-    let mut feasible: Option<(ClothoidPair, f64)> = None;
+    let mut feasible: Option<(Vec<ClothoidPair>, f64)> = None;
     let mut infeasible_above = None;
     for i in 0..CONSUME_COARSE_STEPS {
         let t = t_cap * 0.5_f64.powi(i as i32);
         match eval(t) {
-            Some((pair, dev)) if dev <= delta => {
-                feasible = Some((pair, t));
+            Some(pairs) => {
+                feasible = Some((pairs, t));
                 break;
             }
-            _ => infeasible_above = Some(t),
+            None => infeasible_above = Some(t),
         }
     }
-    let (mut pair, mut t) = feasible?;
+    let (mut pairs, mut t) = feasible?;
 
     if let Some(mut hi) = infeasible_above {
         for _ in 0..CONSUME_REFINE_ITERS {
             let mid = 0.5 * (t + hi);
             match eval(mid) {
-                Some((p, dev)) if dev <= delta => {
-                    pair = p;
+                Some(p) => {
+                    pairs = p;
                     t = mid;
                 }
-                _ => hi = mid,
+                None => hi = mid,
             }
         }
     }
 
-    Some(GeneralBlend {
-        half1: pair.half1,
-        half2: pair.half2,
+    let segments = pairs.into_iter().flat_map(|p| [p.half1, p.half2]).collect();
+    Some(ChainBlend {
+        segments,
         trim_in: t,
         trim_out: t,
     })
+}
+
+struct ChainState {
+    pos: [f64; 3],
+    tangent: [f64; 3],
+}
+
+/// Solve `start → end` (both curvature-free states) as one clothoid pair
+/// within `delta` of `tube`, or split at a mid-chain facet anchor and solve
+/// each side. `interior` is the polyline strictly between the two states.
+fn consume_pairs(
+    start: &ChainState,
+    end: &ChainState,
+    interior: &[[f64; 3]],
+    tube: &[[f64; 3]],
+    delta: f64,
+    plane_n: [f64; 3],
+    depth: usize,
+) -> Option<Vec<ClothoidPair>> {
+    if let Some(pair) = hermite_g2(
+        start.pos,
+        start.tangent,
+        0.0,
+        end.pos,
+        end.tangent,
+        0.0,
+        plane_n,
+    ) {
+        if max_dev_from_chain(&pair, tube) <= delta {
+            return Some(vec![pair]);
+        }
+    }
+    if depth == 0 || interior.len() < 2 {
+        return None;
+    }
+
+    let (facet_idx, anchor) = mid_facet_anchor(start, end, interior)?;
+    let mut left = consume_pairs(
+        start,
+        &anchor,
+        &interior[..=facet_idx],
+        tube,
+        delta,
+        plane_n,
+        depth - 1,
+    )?;
+    let right = consume_pairs(
+        &anchor,
+        end,
+        &interior[facet_idx + 1..],
+        tube,
+        delta,
+        plane_n,
+        depth - 1,
+    )?;
+    left.extend(right);
+    Some(left)
+}
+
+/// The split anchor: the midpoint of the facet nearest the chain's arclength
+/// middle, tangent along that facet — a state the polyline itself passes
+/// through, so anchoring there is always inside the tube. Returns the facet's
+/// leading vertex index in `interior`.
+fn mid_facet_anchor(
+    start: &ChainState,
+    end: &ChainState,
+    interior: &[[f64; 3]],
+) -> Option<(usize, ChainState)> {
+    let total: f64 = std::iter::once(start.pos)
+        .chain(interior.iter().copied())
+        .chain(std::iter::once(end.pos))
+        .collect::<Vec<_>>()
+        .windows(2)
+        .map(|w| dist(w[0], w[1]))
+        .sum();
+
+    let mut cum = dist(start.pos, interior[0]);
+    let mut best: Option<(usize, f64)> = None;
+    for i in 0..interior.len() - 1 {
+        let len = dist(interior[i], interior[i + 1]);
+        let mid_at = cum + 0.5 * len;
+        if len > DEGENERATE_EPS {
+            let off = (mid_at - 0.5 * total).abs();
+            if best.is_none_or(|(_, b)| off < b) {
+                best = Some((i, off));
+            }
+        }
+        cum += len;
+    }
+    let (i, _) = best?;
+    let dir = normalize(sub(interior[i + 1], interior[i]));
+    Some((
+        i,
+        ChainState {
+            pos: scale(add(interior[i], interior[i + 1]), 0.5),
+            tangent: dir,
+        },
+    ))
 }
 
 const DEV_SAMPLES_PER_HALF: usize = 16;

@@ -159,6 +159,36 @@ fn small_extrusion_drift_rides_one_arc_with_a_ramp() {
     );
 }
 
+fn total_e(ms: &[Move]) -> f64 {
+    ms.iter()
+        .flat_map(|m| {
+            let len = m.segment.s_len();
+            m.segment.followers.iter().map(move |f| f.delta_over(len))
+        })
+        .sum()
+}
+
+fn count_clothoids(ms: &[Move]) -> usize {
+    ms.iter()
+        .filter(|m| {
+            matches!(
+                m.segment.spatial,
+                Some(geometry::path::Segment::Clothoid(_))
+            )
+        })
+        .count()
+}
+
+fn assert_no_facet_lines(ms: &[Move], lines: std::ops::RangeInclusive<u32>) {
+    assert!(
+        ms.iter().all(
+            |m| !matches!(m.segment.spatial, Some(geometry::path::Segment::Line(_)))
+                || !lines.contains(&m.source.start_line)
+        ),
+        "consumed facets must not be emitted as lines"
+    );
+}
+
 #[test]
 fn squeezed_chamfer_facet_is_consumed_in_the_stream() {
     // A 90° corner whose vertex is a 5µm 45°-45° chamfer between two long
@@ -174,34 +204,76 @@ fn squeezed_chamfer_facet_is_consumed_in_the_stream() {
     ];
     let streamed = run_fit_stage(&moves, CornerFitConfig::default());
 
-    let clothoids = streamed
-        .iter()
-        .filter(|m| {
-            matches!(
-                m.segment.spatial,
-                Some(geometry::path::Segment::Clothoid(_))
-            )
-        })
-        .count();
-    assert_eq!(clothoids, 2, "one blend (two halves) spans the chamfer");
-    assert!(
-        streamed.iter().all(|m| !matches!(
-            m.segment.spatial,
-            Some(geometry::path::Segment::Line(_))
-        ) || m.source.start_line != 2),
-        "the consumed facet must not be emitted as a line"
+    assert_eq!(
+        count_clothoids(&streamed),
+        2,
+        "one blend (two halves) spans the chamfer"
     );
+    assert_no_facet_lines(&streamed, 2..=2);
+    let (e_in, e_out) = (total_e(&moves), total_e(&streamed));
+    assert!(
+        (e_in - e_out).abs() <= 1e-9,
+        "consumption must conserve E: in={e_in} out={e_out}"
+    );
+}
 
-    let total_e = |ms: &[Move]| -> f64 {
-        ms.iter()
-            .flat_map(|m| {
-                let len = m.segment.s_len();
-                m.segment.followers.iter().map(move |f| f.delta_over(len))
-            })
-            .sum()
-    };
-    let e_in = total_e(&moves);
-    let e_out = total_e(&streamed);
+#[test]
+fn wide_chamfer_facet_is_consumed_by_a_split_blend_in_the_stream() {
+    // A 25µm chamfer at this junction deviation (~2µm) is far beyond one
+    // curvature bump's reach — before the split solver this fell back to
+    // two pairwise corner blends and the facet's line survived between
+    // them. Now two pairs hug the chamfer and the facet is consumed.
+    let d = 0.025 / std::f64::consts::SQRT_2;
+    let moves = vec![
+        line(1, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 1.0),
+        line(2, [10.0, 0.0, 0.0], [10.0 + d, d, 0.0], 0.0025),
+        line(3, [10.0 + d, d, 0.0], [10.0 + d, 10.0 + d, 0.0], 1.0),
+    ];
+    let streamed = run_fit_stage(&moves, CornerFitConfig::default());
+
+    assert_eq!(
+        count_clothoids(&streamed),
+        4,
+        "two pairs hug the chamfer's two corners"
+    );
+    assert_no_facet_lines(&streamed, 2..=2);
+    let (e_in, e_out) = (total_e(&moves), total_e(&streamed));
+    assert!(
+        (e_in - e_out).abs() <= 1e-9,
+        "consumption must conserve E: in={e_in} out={e_out}"
+    );
+}
+
+#[test]
+fn facet_cluster_is_consumed_in_the_stream() {
+    // A 90° corner rounded by three 20µm facets between two long legs: the
+    // whole cluster is squeezed, so a single G2 blend replaces all three
+    // facets and both corner trims, conserving E.
+    let n = 3usize;
+    let h = 0.02;
+    let step = std::f64::consts::FRAC_PI_2 / (n as f64 + 1.0);
+    let mut moves = vec![line(1, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 1.0)];
+    let mut p = [10.0, 0.0, 0.0];
+    let mut heading = 0.0;
+    for i in 0..n {
+        heading += step;
+        let q = [
+            p[0] + h * libm::cos(heading),
+            p[1] + h * libm::sin(heading),
+            0.0,
+        ];
+        moves.push(line(2 + i as u32, p, q, 0.002));
+        p = q;
+    }
+    moves.push(line(2 + n as u32, p, [p[0], p[1] + 10.0, 0.0], 1.0));
+    let streamed = run_fit_stage(&moves, CornerFitConfig::default());
+
+    assert!(
+        count_clothoids(&streamed) >= 2,
+        "the cluster must be replaced by blend segments"
+    );
+    assert_no_facet_lines(&streamed, 2..=(1 + n as u32));
+    let (e_in, e_out) = (total_e(&moves), total_e(&streamed));
     assert!(
         (e_in - e_out).abs() <= 1e-9,
         "consumption must conserve E: in={e_in} out={e_out}"

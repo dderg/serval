@@ -16,16 +16,16 @@ pub fn blend_moves(
     Ok(out)
 }
 
-/// The two clothoid-half moves that replace the consumed `m_mid` together
-/// with `m_in`'s trimmed tail and `m_out`'s trimmed head.
+/// The G2 clothoid chain that replaces the consumed `mids` together with
+/// `m_in`'s trimmed tail and `m_out`'s trimmed head.
 pub fn consumption_moves(
     consumption: &FacetConsumption,
     m_in: &Move,
-    m_mid: &Move,
+    mids: &[&Move],
     m_out: &Move,
 ) -> Result<Vec<Move>, FitError> {
-    let mut out = Vec::with_capacity(2);
-    emit_consumption(&mut out, consumption, m_in, m_mid, m_out)?;
+    let mut out = Vec::new();
+    emit_consumption(&mut out, consumption, m_in, mids, m_out)?;
     Ok(out)
 }
 

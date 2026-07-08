@@ -95,39 +95,54 @@ pub(super) fn emit_blend(
     Ok(())
 }
 
-/// The two clothoid halves replacing a consumed facet and its neighbors'
-/// trimmed ends. Each half caps its feedrate at the consumed move's — the
-/// G-code asked for that speed over the region the blend now covers.
+/// The clothoid segments replacing a consumed facet chain and its neighbors'
+/// trimmed ends. Boundary segments carry the neighbor they seam into
+/// (source, limits, feedrate capped by it); interior segments carry the
+/// consumed span. Every segment's feedrate is capped at the consumed facets'
+/// minimum — the G-code asked for those speeds over the region the blend now
+/// covers.
 pub(super) fn emit_consumption(
     out: &mut Vec<Move>,
     bi: &super::FacetConsumption,
     m_in: &Move,
-    m_mid: &Move,
+    mids: &[&Move],
     m_out: &Move,
 ) -> Result<(), FitError> {
     let (line_in, line_out) = match (line_of(m_in), line_of(m_out)) {
         (Some(a), Some(b)) => (a, b),
         _ => unreachable!("consumption is only planned between lines"),
     };
-    let (f_in, f_out) = super::consumption_followers(&bi.0, m_in, m_mid, m_out, line_in, line_out);
+    let followers = super::consumption_followers(&bi.0, m_in, mids, m_out, line_in, line_out);
+    let feedrates = super::consumption_feedrates(&bi.0, m_in, mids, m_out);
+    let limits = super::consumption_limits(&bi.0, m_in, mids, m_out);
+    let interior_source = crate::segment::SourceRange {
+        start_line: mids[0].source.start_line,
+        end_line: mids[mids.len() - 1].source.end_line,
+    };
+    let last = bi.0.segments.len() - 1;
 
-    let seg_in = PathSegment::try_new(Segment::Clothoid(bi.0.half1.clone()), f_in)
-        .map_err(internal(m_in.source.start_line))?;
-    out.push(Move {
-        segment: seg_in,
-        feedrate_mm_s: m_in.feedrate_mm_s.min(m_mid.feedrate_mm_s),
-        limits: m_in.limits,
-        source: m_in.source,
-    });
-
-    let seg_out = PathSegment::try_new(Segment::Clothoid(bi.0.half2.clone()), f_out)
-        .map_err(internal(m_out.source.start_line))?;
-    out.push(Move {
-        segment: seg_out,
-        feedrate_mm_s: m_mid.feedrate_mm_s.min(m_out.feedrate_mm_s),
-        limits: m_out.limits,
-        source: m_out.source,
-    });
+    for (i, (((seg, f), feed), lims)) in
+        bi.0.segments
+            .iter()
+            .zip(followers)
+            .zip(feedrates)
+            .zip(limits)
+            .enumerate()
+    {
+        let source = match i {
+            0 => m_in.source,
+            i if i == last => m_out.source,
+            _ => interior_source,
+        };
+        let segment = PathSegment::try_new(Segment::Clothoid(seg.clone()), f)
+            .map_err(internal(source.start_line))?;
+        out.push(Move {
+            segment,
+            feedrate_mm_s: feed,
+            limits: lims,
+            source,
+        });
+    }
     Ok(())
 }
 
@@ -156,20 +171,20 @@ fn follower_axes(a: &[FollowerDemand], b: &[FollowerDemand]) -> Vec<usize> {
     axes
 }
 
-/// Whether a consumed move's demands fit inside the ramp its neighbors span:
-/// per axis, both of its ratio endpoints must lie within the band between the
-/// inbound side's exit ratio and the outbound side's entry ratio, widened by
-/// `rel_tol`. A travel facet (ratio 0) between two extruding neighbors falls
-/// outside the band and stays a sharp boundary, as does an extruding facet
-/// between travels.
+/// Whether every consumed move's demands fit inside the ramp the anchors
+/// span: per axis, each facet's ratio endpoints must lie within the band
+/// between the inbound side's exit ratio and the outbound side's entry
+/// ratio, widened by `rel_tol`. A travel facet (ratio 0) between two
+/// extruding anchors falls outside the band and stays a sharp boundary, as
+/// does an extruding facet between travels.
 pub(super) fn ratios_within_ramp_band(
     in_followers: &[FollowerDemand],
-    consumed: &[FollowerDemand],
+    consumed: &[&[FollowerDemand]],
     out_followers: &[FollowerDemand],
     rel_tol: f64,
 ) -> bool {
     let mut axes = follower_axes(in_followers, out_followers);
-    for f in consumed {
+    for f in consumed.iter().flat_map(|c| c.iter()) {
         if !axes.contains(&f.axis_index) {
             axes.push(f.axis_index);
         }
@@ -180,11 +195,13 @@ pub(super) fn ratios_within_ramp_band(
         let tol = rel_tol * r_in.abs().max(r_out.abs());
         let lo = r_in.min(r_out) - tol;
         let hi = r_in.max(r_out) + tol;
-        let (r0, r1) = consumed
-            .iter()
-            .find(|f| f.axis_index == axis)
-            .map_or((0.0, 0.0), |f| (f.ratio, f.ratio_end));
-        (lo..=hi).contains(&r0) && (lo..=hi).contains(&r1)
+        consumed.iter().all(|facet| {
+            let (r0, r1) = facet
+                .iter()
+                .find(|f| f.axis_index == axis)
+                .map_or((0.0, 0.0), |f| (f.ratio, f.ratio_end));
+            (lo..=hi).contains(&r0) && (lo..=hi).contains(&r1)
+        })
     })
 }
 
@@ -260,48 +277,77 @@ pub(super) fn blend_followers(
     len1: f64,
     len2: f64,
 ) -> (Vec<FollowerDemand>, Vec<FollowerDemand>) {
-    carrying_blend_followers(inbound, &[], 0.0, outbound, len1, len2)
+    let mut per_seg = chain_blend_followers(inbound, &[], outbound, &[len1, len2]);
+    let half2 = per_seg.pop().expect("two segments in");
+    let half1 = per_seg.pop().expect("two segments in");
+    (half1, half2)
 }
 
-/// [`blend_followers`] for a blend that also replaces whole moves between
-/// its two seams: the consumed demands' full E joins the conservation
-/// target, so the material the swallowed moves would have extruded still
-/// leaves the nozzle across the blend.
-pub(super) fn carrying_blend_followers(
+/// [`blend_followers`] over a chain of blend segments that may also replace
+/// whole moves between its two seams: the consumed demands' full E joins the
+/// conservation target, so the material the swallowed moves would have
+/// extruded still leaves the nozzle across the blend. The ratio profile over
+/// the chain is a tent — linear from the inbound anchor to a peak at the
+/// segment boundary nearest the chain's arclength middle, then linear to the
+/// outbound anchor — sliced at every segment boundary, so each segment
+/// carries a linear ramp and the whole is rate-continuous.
+pub(super) fn chain_blend_followers(
     inbound: &SeamSide,
-    consumed: &[FollowerDemand],
-    consumed_len: f64,
+    consumed: &[(&[FollowerDemand], f64)],
     outbound: &SeamSide,
-    len1: f64,
-    len2: f64,
-) -> (Vec<FollowerDemand>, Vec<FollowerDemand>) {
+    seg_lens: &[f64],
+) -> Vec<Vec<FollowerDemand>> {
+    let mut bounds = Vec::with_capacity(seg_lens.len() + 1);
+    bounds.push(0.0);
+    for len in seg_lens {
+        bounds.push(bounds.last().expect("non-empty") + len);
+    }
+    let total = *bounds.last().expect("non-empty");
+    let peak_idx = (1..seg_lens.len())
+        .min_by(|a, b| {
+            (bounds[*a] - 0.5 * total)
+                .abs()
+                .total_cmp(&(bounds[*b] - 0.5 * total).abs())
+        })
+        .expect("at least two segments");
+    let (len1, len2) = (bounds[peak_idx], total - bounds[peak_idx]);
+
     let mut axes = follower_axes(inbound.followers, outbound.followers);
-    for f in consumed {
+    for f in consumed.iter().flat_map(|(c, _)| c.iter()) {
         if !axes.contains(&f.axis_index) {
             axes.push(f.axis_index);
         }
     }
-    let mut half1 = Vec::with_capacity(axes.len());
-    let mut half2 = Vec::with_capacity(axes.len());
+
+    let mut out = vec![Vec::with_capacity(axes.len()); seg_lens.len()];
     for axis in axes {
         let (r_in, e_in) = inbound.exit_anchor(axis);
         let (r_out, e_out) = outbound.entry_anchor(axis);
-        let e_consumed = consumed
+        let e_consumed: f64 = consumed
             .iter()
-            .find(|f| f.axis_index == axis)
-            .map_or(0.0, |d| d.offset_at(consumed_len, consumed_len));
+            .filter_map(|(c, len)| {
+                c.iter()
+                    .find(|f| f.axis_index == axis)
+                    .map(|d| d.offset_at(*len, *len))
+            })
+            .sum();
         let e_target = e_in + e_consumed + e_out;
-        let r_mid = (2.0 * e_target - r_in * len1 - r_out * len2) / (len1 + len2);
-        let a = FollowerDemand::ramp(axis, r_in, r_mid);
-        let b = FollowerDemand::ramp(axis, r_mid, r_out);
-        if a.max_abs_ratio() > 0.0 {
-            half1.push(a);
-        }
-        if b.max_abs_ratio() > 0.0 {
-            half2.push(b);
+        let r_peak = (2.0 * e_target - r_in * len1 - r_out * len2) / (len1 + len2);
+        let ratio_at = |s: f64| {
+            if s <= bounds[peak_idx] {
+                r_in + (r_peak - r_in) * s / len1
+            } else {
+                r_peak + (r_out - r_peak) * (s - bounds[peak_idx]) / len2
+            }
+        };
+        for (i, demands) in out.iter_mut().enumerate() {
+            let d = FollowerDemand::ramp(axis, ratio_at(bounds[i]), ratio_at(bounds[i + 1]));
+            if d.max_abs_ratio() > 0.0 {
+                demands.push(d);
+            }
         }
     }
-    (half1, half2)
+    out
 }
 
 pub(super) fn internal(line_no: u32) -> impl Fn(GeometryError) -> FitError {

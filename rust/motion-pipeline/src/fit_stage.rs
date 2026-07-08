@@ -11,6 +11,21 @@ use crate::{CONTIGUITY_EPS_MM, Control, StreamInput, dist3};
 
 const ALIGN_EPS_MM: f64 = 1e-9;
 const MIN_RUN_FACETS: usize = 3;
+/// Longest facet chain one consuming blend may replace — bounds how far the
+/// stage buffers past the first squeezed facet before giving up on finding
+/// the far anchor.
+const MAX_CONSUMED_FACETS: usize = 8;
+
+enum ClusterScan {
+    /// The cluster's far anchor is not buffered yet and more input may come.
+    WaitForInput,
+    /// `decided[1..=n]` are consumable facets and `decided[n + 1]` is the far
+    /// anchor piece.
+    Anchor(usize),
+    /// The chain runs into a run, end-of-stream, or past the facet cap —
+    /// no consumption; the junctions resolve pairwise.
+    NoAnchor,
+}
 
 /// First pipeline stage: reads raw moves, fits them into G2-continuous
 /// geometry, and pushes the fitted pieces downstream.
@@ -345,12 +360,18 @@ impl FitStage {
                             self.corner,
                             self.seam_in_reduction,
                         ) {
-                            match self.decided.get(2) {
-                                None if !eof => return true,
-                                Some(Element::Piece(after)) => {
+                            match self.consumable_cluster(eof) {
+                                ClusterScan::WaitForInput => return true,
+                                ClusterScan::Anchor(n_mids) => {
+                                    let mids: Vec<&Move> = self.decided[1..=n_mids]
+                                        .iter()
+                                        .map(|e| piece_of(e).expect("scan matched pieces"))
+                                        .collect();
+                                    let after = piece_of(&self.decided[n_mids + 1])
+                                        .expect("scan matched the anchor piece");
                                     let plan = plan_facet_consumption(
                                         front,
-                                        mid,
+                                        &mids,
                                         after,
                                         self.corner,
                                         self.seam_in_reduction,
@@ -359,13 +380,13 @@ impl FitStage {
                                         panic!("fit_stage: facet consumption failed: {e:?}")
                                     });
                                     if let Some(fc) = plan {
-                                        if !self.emit_consumption(fc, out) {
+                                        if !self.emit_consumption(fc, n_mids, out) {
                                             return false;
                                         }
                                         continue;
                                     }
                                 }
-                                None | Some(Element::Run(_)) => {}
+                                ClusterScan::NoAnchor => {}
                             }
                         }
                         let out_reduction = match self.decided.get(2) {
@@ -439,22 +460,54 @@ impl FitStage {
         true
     }
 
-    /// Emit the consumption of the second piece: the front piece's body
-    /// trimmed at its tail, the two blend halves spanning the consumed facet,
-    /// and nothing of the facet itself — its geometry and extrusion live in
-    /// the blend. The trim the blend claims from the third piece's head is
-    /// carried to that piece's eventual emission.
+    /// How far the consumable chain behind the front piece extends: grow
+    /// while each next buffered piece is itself a squeezed facet off the one
+    /// before it, and report the first piece that isn't as the far anchor.
+    fn consumable_cluster(&self, eof: bool) -> ClusterScan {
+        let mut n = 1;
+        loop {
+            match self.decided.get(n + 1) {
+                None if !eof => return ClusterScan::WaitForInput,
+                None | Some(Element::Run(_)) => return ClusterScan::NoAnchor,
+                Some(Element::Piece(next)) => {
+                    let prev = piece_of(&self.decided[n]).expect("chain grew over pieces");
+                    if !facet_consumption_candidate(prev, next, self.corner, 0.0) {
+                        return ClusterScan::Anchor(n);
+                    }
+                    if n == MAX_CONSUMED_FACETS {
+                        return ClusterScan::NoAnchor;
+                    }
+                    n += 1;
+                }
+            }
+        }
+    }
+
+    /// Emit the consumption of the facet chain behind the front piece: the
+    /// front piece's body trimmed at its tail, the blend segments spanning
+    /// the consumed facets, and nothing of the facets themselves — their
+    /// geometry and extrusion live in the blend. The trim the blend claims
+    /// from the anchor piece's head is carried to its eventual emission.
     fn emit_consumption(
         &mut self,
         fc: geometry::fitter::FacetConsumption,
+        n_mids: usize,
         out: &mut TravelAligningSender,
     ) -> bool {
         let Element::Piece(front) = self.decided.remove(0) else {
             unreachable!("caller matched a front piece")
         };
-        let Element::Piece(mid) = self.decided.remove(0) else {
-            unreachable!("caller matched a consumable piece")
-        };
+        let mids: Vec<Move> = self
+            .decided
+            .drain(..n_mids)
+            .map(|e| {
+                let Element::Piece(m) = e else {
+                    unreachable!("caller matched consumable pieces")
+                };
+                m
+            })
+            .collect();
+        let mid_refs: Vec<&Move> = mids.iter().collect();
         let after = piece_of(&self.decided[0]).expect("caller matched the anchor piece");
         let body = trim_line_move(&front, self.seam_head_trim, fc.trim_in()).unwrap_or_else(|e| {
             panic!(
@@ -467,14 +520,14 @@ impl FitStage {
                 return false;
             }
         }
-        let halves = consumption_moves(&fc, &front, &mid, after).unwrap_or_else(|e| {
+        let segments = consumption_moves(&fc, &front, &mid_refs, after).unwrap_or_else(|e| {
             panic!(
                 "fit_stage: consumption of line {} failed: {e:?}",
-                mid.source.start_line
+                mids[0].source.start_line
             )
         });
-        for half in halves {
-            if !out.send(half) {
+        for seg in segments {
+            if !out.send(seg) {
                 return false;
             }
         }
