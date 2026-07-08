@@ -230,7 +230,7 @@ class BeaconMcuStub:
                         buf += chunk
                     resp, _, buf = buf.partition(b"\n")
                     if resp.startswith(b"steps="):
-                        readings[ln] = int(resp[6:])
+                        readings[ln] = int(resp[6:].split()[0])
                 if not self._z_line_locked:
                     for ln, val in readings.items():
                         if val != self._line_baselines.get(ln, val):

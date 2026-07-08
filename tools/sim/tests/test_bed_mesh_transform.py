@@ -49,7 +49,7 @@ def _settled_steps(world):
     for axis, line in STEP_LINES.items():
         resp = world.sim_control("h7").send(f"get_steps line={line}")
         assert resp.startswith("steps="), resp
-        out[axis] = int(resp.split("=", 1)[1])
+        out[axis] = int(resp.split()[0].split("=", 1)[1])
     return out
 
 
