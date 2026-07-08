@@ -16,6 +16,23 @@ class FakeReactor:
         self._time = waketime
 
 
+class FakeCommandError(Exception):
+    pass
+
+
+class FakePrinter:
+    command_error = FakeCommandError
+
+    def __init__(self, reactor):
+        self._reactor = reactor
+
+    def get_reactor(self):
+        return self._reactor
+
+    def is_shutdown(self):
+        return False
+
+
 class FakeNativeEngine:
     def __init__(self, polls_until_done=0, error=None):
         self.polls_until_done = polls_until_done
@@ -43,6 +60,7 @@ def _make_wrapper(native):
     wrapper = MotionEngineWrapper.__new__(MotionEngineWrapper)
     wrapper._engine = native
     wrapper._reactor = FakeReactor()
+    wrapper._printer = FakePrinter(wrapper._reactor)
     return wrapper
 
 
