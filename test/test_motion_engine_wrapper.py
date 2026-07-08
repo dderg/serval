@@ -1,5 +1,7 @@
+import pytest
+
 from klippy.motion_engine import (
-    _STUB_MOTION_METHODS,
+    _STUB_NOOP_METHODS,
     MotionEngineWrapper,
     _StubEngine,
 )
@@ -37,7 +39,7 @@ def make_wrapper(native_handle):
     return wrapper
 
 
-def test_submit_nudge_forwards_verbatim():
+def test_getattr_delegates_to_native_verbatim():
     handle = FakeNativeHandle(return_value=42)
     wrapper = make_wrapper(handle)
 
@@ -48,21 +50,16 @@ def test_submit_nudge_forwards_verbatim():
     assert handle.calls[0] == ("submit_nudge", 7, 1, 0b10, 0.3, 80.0, 5000.0)
 
 
-def test_dead_forwarders_removed():
-    assert not hasattr(MotionEngineWrapper, "adjust_motor")
-    assert not hasattr(MotionEngineWrapper, "submit_correction_sequence")
-
-
-def test_stub_motion_methods_updated():
-    assert "submit_nudge" in _STUB_MOTION_METHODS
-    assert "adjust_motor" not in _STUB_MOTION_METHODS
-    assert "submit_correction_sequence" not in _STUB_MOTION_METHODS
+def test_getattr_does_not_delegate_private_names():
+    wrapper = make_wrapper(FakeNativeHandle())
+    with pytest.raises(AttributeError):
+        wrapper._not_a_real_attribute
 
 
 def test_dispatched_lead_secs_forwards_and_coerces_none():
-    # The host feed pacing (motion._submit_paced) calls this on the wrapper.
-    # A missing forwarder raises AttributeError on real hardware — the wrapper
-    # only forwards native calls it explicitly defines (no __getattr__).
+    # The host feed pacing (motion._submit_paced) calls this on the wrapper;
+    # the explicit override coerces a native None to 0.0 for the watermark
+    # compare.
     handle = FakeNativeHandle(return_value=0.72)
     wrapper = make_wrapper(handle)
     assert wrapper.dispatched_lead_secs() == 0.72
@@ -72,9 +69,26 @@ def test_dispatched_lead_secs_forwards_and_coerces_none():
     assert make_wrapper(none_handle).dispatched_lead_secs() == 0.0
 
 
+def test_stub_engine_raises_on_motion_methods():
+    stub = _StubEngine()
+    with pytest.raises(RuntimeError, match="_motion_engine not built"):
+        stub.submit_move(1.0, 0.0, 0.0, 0.0, 100.0)
+    with pytest.raises(RuntimeError, match="_motion_engine not built"):
+        stub.init_planner()
+    with pytest.raises(RuntimeError, match="_motion_engine not built"):
+        stub.some_future_engine_method()
+
+
+def test_stub_engine_noops_lifecycle_helpers():
+    stub = _StubEngine()
+    for name in _STUB_NOOP_METHODS:
+        assert getattr(stub, name)() is None
+
+
 def test_stub_engine_answers_gate_accessors():
-    # The gate must not crash under the config-only stub: every accessor it reads
-    # returns a number, never None (which would TypeError the watermark compare).
+    # The gate must not crash under the config-only stub: every accessor it
+    # reads returns a number, never None (which would TypeError the watermark
+    # compare).
     stub = _StubEngine()
     assert stub.dispatched_lead_secs() == 0.0
     assert stub.queued_motion_secs() == 0.0

@@ -163,6 +163,17 @@ class _FixedReactor:
 
 
 class _NoopPrinter:
+    command_error = RuntimeError
+
+    def __init__(self, reactor):
+        self._reactor = reactor
+
+    def get_reactor(self):
+        return self._reactor
+
+    def is_shutdown(self):
+        return False
+
     def send_event(self, *args, **kwargs):
         return None
 
@@ -172,7 +183,7 @@ def _make_correction_toolhead(duration):
     th.mcu = FakeMcu()  # estimated_print_time(t) = t + 1.0
     th.reactor = _FixedReactor()
     th.engine = _RecordingEngine(duration)
-    th.printer = _NoopPrinter()
+    th.printer = _NoopPrinter(th.reactor)
     th.motion_lead = 0.25
     th._mcu_pending_end_time = 0.0
     return th

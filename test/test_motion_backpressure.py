@@ -10,8 +10,12 @@ class FakeCommandError(Exception):
 class FakePrinter:
     command_error = FakeCommandError
 
-    def __init__(self, shutdown=False):
+    def __init__(self, reactor, shutdown=False):
+        self._reactor = reactor
         self._shutdown = shutdown
+
+    def get_reactor(self):
+        return self._reactor
 
     def is_shutdown(self):
         return self._shutdown
@@ -87,7 +91,7 @@ class FakeMotion:
         shutdown=False,
     ):
         self.reactor = FakeReactor()
-        self.printer = FakePrinter(shutdown=shutdown)
+        self.printer = FakePrinter(self.reactor, shutdown=shutdown)
         self.mcu = FakeMcu() if mcu else None
         self.engine = FakeEngine(
             self.reactor,

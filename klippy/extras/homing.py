@@ -1,7 +1,7 @@
 import contextlib
 import logging
 
-from klippy import structured_log
+from klippy import engine_wait, structured_log
 from klippy.extras.danger_options import get_danger_options
 from klippy.motion_endstop import AXIS_ENDSTOP_IDS, MotionEndstop
 
@@ -539,15 +539,18 @@ class Homing:
             toolhead.dwell(dwell_time)
 
     def _drain_motion_before_arming_device(self, gcmd, engine, axis):
-        reactor = self.printer.get_reactor()
-        deadline = reactor.monotonic() + _DRAIN_PAUSE_TIMEOUT
-        while not engine.motion_drained():
-            if reactor.monotonic() > deadline:
-                raise gcmd.error(
-                    "%s trip move: motion did not drain within %.0fs before"
-                    " homing" % ("XYZ"[axis], _DRAIN_PAUSE_TIMEOUT)
-                )
-            reactor.pause(reactor.monotonic() + 0.005)
+        try:
+            engine_wait.wait_for(
+                self.printer,
+                lambda: engine.motion_drained() or None,
+                "%s homing motion drain" % ("XYZ"[axis],),
+                _DRAIN_PAUSE_TIMEOUT,
+            )
+        except engine_wait.EngineWaitTimeout:
+            raise gcmd.error(
+                "%s trip move: motion did not drain within %.0fs before"
+                " homing" % ("XYZ"[axis], _DRAIN_PAUSE_TIMEOUT)
+            )
 
     def trip_move(
         self, gcmd, toolhead, engine, axis, direction, speed, max_travel, entry
@@ -574,26 +577,22 @@ class Homing:
                 endstop.endstop_id,
                 endstop_mcu,
             )
-            reactor = self.printer.get_reactor()
-            deadline = (
-                reactor.monotonic() + max_travel / speed + TRIP_DEADLINE_MARGIN
-            )
-            while True:
-                try:
-                    result = engine.home_axis_poll()
-                except Exception as e:
-                    engine.home_abort()
-                    raise gcmd.error(
-                        "%s trip move failed: %s" % ("XYZ"[axis], e)
-                    )
-                if result is not None:
-                    break
-                if reactor.monotonic() > deadline:
-                    engine.home_abort()
-                    raise gcmd.error(
-                        _no_trigger_error_message(axis, endstop, max_travel)
-                    )
-                reactor.pause(reactor.monotonic() + 0.010)
+            try:
+                result = engine_wait.wait_for(
+                    self.printer,
+                    engine.home_axis_poll,
+                    "%s trip move" % ("XYZ"[axis],),
+                    max_travel / speed + TRIP_DEADLINE_MARGIN,
+                    interval_s=0.010,
+                )
+            except engine_wait.EngineWaitTimeout:
+                engine.home_abort()
+                raise gcmd.error(
+                    _no_trigger_error_message(axis, endstop, max_travel)
+                )
+            except Exception as e:
+                engine.home_abort()
+                raise gcmd.error("%s trip move failed: %s" % ("XYZ"[axis], e))
         finally:
             disarm = getattr(endstop, "disarm", None)
             if disarm is not None:

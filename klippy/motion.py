@@ -4,7 +4,7 @@ import os
 import signal
 import time
 
-from . import motion_kinematics, motion_setup, structured_log
+from . import engine_wait, motion_kinematics, motion_setup, structured_log
 from .extras import servo_axis
 from .kinematics import extruder
 from .motion_setup import (
@@ -558,12 +558,13 @@ class Motion:
         self._wait_mcu_drained()
 
     def _wait_mcu_drained(self):
-        while not self.engine.motion_drain_poll():
-            if self.printer.is_shutdown():
-                raise self.printer.command_error(
-                    "wait_moves: shutdown while waiting for motion drain"
-                )
-            self.reactor.pause(self.reactor.monotonic() + 0.010)
+        engine_wait.wait_for(
+            self.printer,
+            lambda: self.engine.motion_drain_poll() or None,
+            "wait_moves motion drain",
+            engine_wait.UNBOUNDED,
+            interval_s=0.010,
+        )
         self.engine.motion_drain_finalize()
         self._ground_pending_end_time_after_engine_drain()
 
@@ -608,14 +609,20 @@ class Motion:
         self.engine.wait_moves()
         if self._mcu_pending_end_time > 0.0:
             for mcu in self._engine_mcus():
-                while True:
+
+                def _mcu_caught_up(mcu=mcu):
                     est = mcu.estimated_print_time(self.reactor.monotonic())
-                    remaining = self._mcu_pending_end_time - est
-                    if remaining <= 0.0:
-                        break
-                    self.reactor.pause(
-                        self.reactor.monotonic() + remaining + 0.010
-                    )
+                    if self._mcu_pending_end_time - est <= 0.0:
+                        return True
+                    return None
+
+                engine_wait.wait_for(
+                    self.printer,
+                    _mcu_caught_up,
+                    "mcu execution drain",
+                    engine_wait.UNBOUNDED,
+                    interval_s=0.010,
+                )
         self._ground_pending_end_time_after_engine_drain()
 
     def get_last_move_time(self):
@@ -628,21 +635,22 @@ class Motion:
     def _fence_wait_blocking(self):
         if self.mcu is None:
             return 0.0
-        fence_id = None
-        while True:
-            if fence_id is None:
-                fence_id = self.engine.fence_start(True)
-            lead = None
-            if fence_id is not None:
-                lead = self.engine.fence_poll(fence_id)
-            if lead is not None:
-                return lead
-            if self.printer.is_shutdown():
-                raise self.printer.command_error(
-                    "get_last_move_time: shutdown while waiting for the "
-                    "motion fence"
-                )
-            self.reactor.pause(self.reactor.monotonic() + 0.002)
+        fence_id = [None]
+
+        def _fence_lead():
+            if fence_id[0] is None:
+                fence_id[0] = self.engine.fence_start(True)
+            if fence_id[0] is None:
+                return None
+            return self.engine.fence_poll(fence_id[0])
+
+        return engine_wait.wait_for(
+            self.printer,
+            _fence_lead,
+            "get_last_move_time motion fence",
+            engine_wait.UNBOUNDED,
+            interval_s=0.002,
+        )
 
     def register_lookahead_callback(self, callback):
         if self.mcu is None:
@@ -711,15 +719,13 @@ class Motion:
             dispatched_lead=round(self.engine.dispatched_lead_secs(), 4),
             engine_frontier=round(self.engine.get_last_move_time(), 4),
         )
-        while True:
-            if self.printer.is_shutdown():
-                raise self.printer.command_error(
-                    "motion pipe: shutdown while waiting for space"
-                )
-            self.reactor.pause(self.reactor.monotonic() + 0.005)
-            self._last_reactor_yield = self.reactor.monotonic()
-            if submit(*args):
-                break
+        engine_wait.wait_for(
+            self.printer,
+            lambda: submit(*args) or None,
+            "motion pipe space",
+            engine_wait.UNBOUNDED,
+        )
+        self._last_reactor_yield = self.reactor.monotonic()
         structured_log.event(
             "motion",
             "feed_throttle_exit",

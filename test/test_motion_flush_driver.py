@@ -285,6 +285,11 @@ def test_blocking_fence_wait_retries_start_and_yields():
     motion = _make_motion([mcu], reactor, queued_secs=3.0, full_starts=3)
 
     class NeverShutdownPrinter:
+        command_error = RuntimeError
+
+        def get_reactor(self):
+            return reactor
+
         def is_shutdown(self):
             return False
 
