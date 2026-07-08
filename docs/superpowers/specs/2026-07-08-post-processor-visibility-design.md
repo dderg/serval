@@ -21,10 +21,13 @@ invisible to both verification tools:
   `build_axis_chains()` only recognizes 2 of the 4 registered post-processor
   types (`smooth_zv`, `linear_pressure_advance`) by hardcoded name — `smooth_mzv`
   and `smooth_triangle` aren't reachable at all.
-- The playground's Path panel plots position purely from the fitter stage's
-  `fitted_segments`, never the actual post-shaper trajectory — so even once
-  post-processors are wired up, the one panel most likely to show their effect
-  wouldn't reflect it.
+- The playground's Path panel already plots the post-shaper trajectory
+  (`kin_x`/`kin_y` sample `traj_x/y_pieces`, the final lowered-and-shaped
+  output) — `fitted_segments` is used only to color-classify each sample as
+  line/arc/clothoid. So once post-processors are wired up, this panel will
+  show their effect automatically. What's missing is the *other* view: seeing
+  what the fitter alone produced, before lowering and shaping touch it —
+  there's currently no way to sample position from `fitted_segments` directly.
 
 Goal: build durable infrastructure to (a) visually investigate post-processor
 behavior in the playground, and (b) capture interesting configurations as
@@ -35,10 +38,26 @@ change the motion engine's runtime behavior.
 ## Architecture: one shared compile path
 
 The core fix is replacing `pipeline-snapshot`'s own hand-rolled
-`build_axis_chains()` with direct reuse of `motion-core`'s real config-compile
-path: `AxisRegistry` + `PostProcessorDecl` + `PostProcessorSet::try_new(...).compile(...)`
+`build_axis_chains()` with direct reuse of the real config-compile path:
+`AxisRegistry` + `PostProcessorDecl` + `PostProcessorSet::try_new(...).compile(...)`
 — the exact same code the live engine uses to turn declared config into an
-`AxisChainSet`.
+`AxisChainSet`. Today that path lives in `motion-core::config`.
+
+**Crate extraction required.** `motion-core` unconditionally depends on
+`host-rt`, `mcu-protocol`, `runtime`, and `libc` — needed by its other 14
+modules (pump, worker, enqueue, homing, etc.), none of which compile to
+`wasm32-unknown-unknown`. Cargo dependencies are per-crate, not per-module, so
+`pipeline-snapshot` depending on `motion-core` at all would drag those
+hardware-facing crates into the `motion-playground` WASM build and break it —
+defeating the entire point of sharing one compile path with the WASM
+playground. `config.rs`'s own code only touches `trajectory`, `geometry`, and
+`thiserror` (confirmed by reading the file in full), so it's extracted into a
+new, small crate — `rust/planner-config` — with just those three
+dependencies. `motion-core` re-exports it (`pub use planner_config as
+config;` in its `lib.rs`), so every existing reference to `config::AxisDecl`,
+`config::PostProcessorSet`, etc. across `motion-core` and
+`motion-engine`'s PyO3 bridge keeps compiling unchanged. `pipeline-snapshot`
+depends on `planner-config` directly and stays wasm-compatible.
 
 `SnapshotParams` drops its 3 dead flat fields in favor of:
 
@@ -76,8 +95,22 @@ changes to take advantage of it.
 
 ## Components
 
+### 0. `rust/planner-config` (new crate, extracted from `motion-core::config`)
+
+- New workspace member holding exactly what's in today's
+  `motion-core/src/config.rs`: `AxisDecl`, `AxisRegistry`, `PostProcessorDecl`,
+  `PostProcessorSet`, `PlannerConfig`, `LimitSection`, `CartesianLimits`,
+  `RuntimeCaps`, and their error enums — unchanged code, moved wholesale.
+  Dependencies: `trajectory`, `geometry`, `thiserror` only.
+- `motion-core` drops its own `config` module and instead depends on
+  `planner-config`, re-exporting it as `pub use planner_config as config;` —
+  zero changes required anywhere else in `motion-core` or in
+  `motion-engine/src/bridge/planner_api.rs`, which references `config::*`
+  throughout.
+
 ### 1. `rust/pipeline-snapshot` (shared core)
 
+- Takes a new dependency on `rust/planner-config`.
 - `SnapshotParams` takes `axis_decls`/`post_processor_decls` as described
   above.
 - `pipeline_snapshot()` builds an `AxisRegistry` from `axis_decls` and calls
@@ -138,20 +171,29 @@ changes to take advantage of it.
 
 ### 6. Path panel fitted/shaped toggle (`rust/snapshot-viewer`, `trajectory-view.js`)
 
-- Add position-sampling accessors to `TrajectoryData` that sample X/Y
-  directly from `traj_x/y_pieces` (the final, post-shaper trajectory) —
-  alongside the derivative accessors that already sample from the same
-  pieces.
+- Today's Path panel already shows the shaped (post-lowering, post-shaper)
+  trajectory: `kin_x`/`kin_y` on `TrajectoryData` sample `traj_x/y_pieces` via
+  `build_time_series` → `eval_lane` → `eval_piece`. `fitted_segments` is used
+  only by `parse_segments()` to color-classify each sample as line/arc/
+  clothoid — it is not an alternate position source today. No change needed
+  to make the Path panel reflect post-processors; it already will, the
+  moment they're wired up.
+- What's added: a "fitted" path drawn directly from each segment's own
+  recorded geometry (line endpoints; arc/clothoid pre-sampled point arrays)
+  — independent of `traj_x/y_pieces` entirely, i.e. before lowering or
+  shaping touch it. This reuses the `segment_count`/`segment_type`/
+  `segment_data` accessors `TrajectoryData` already exposes (today used only
+  to color-classify the shaped path); no new Rust/WASM surface is needed —
+  the new drawing logic lives entirely in `trajectory-view.js`.
 - Add a toolbar toggle (next to Pin baseline / reset zoom / toggle peaks) to
-  switch the Path panel between "fitted" (current behavior — segment-colored
-  line/arc/clothoid from `fitted_segments`) and "shaped" (new — from
-  `traj_x/y_pieces`) views.
+  switch the Path panel between "shaped" (current/default behavior, from
+  `kin_x`/`kin_y`) and "fitted" (new, from each segment's own points).
 - Not overlaid: fitted and shaped routinely differ even with no
   post-processors configured, because the lowering stage sits between them —
   overlaying by default would be visual noise rather than signal. A toggle
   lets you deliberately inspect either the fitter's output or the pipeline's
   actual output.
-- Default view: "fitted", matching current behavior — least disruptive for
+- Default view: "shaped", matching current behavior — least disruptive for
   existing playground/snapshot-review usage.
 - `trajectory-view.js` is shared unmodified between the playground and the
   snapshot-review viewer, so this toggle becomes available in both for free.
@@ -182,8 +224,12 @@ changes to take advantage of it.
   `motion_setup.py` directly rather than reimplementing parsing, these mainly
   confirm plumbing (decls reach `pipeline_snapshot` correctly), not parsing
   correctness (already covered by `motion_setup.py`'s own tests).
-- A unit test for the new shaped-position sampling accessors against known
-  trajectory pieces.
+- The fitted/shaped Path panel toggle is implemented entirely in JS, reusing
+  the already-tested `segment_count`/`segment_type`/`segment_data` WASM
+  accessors rather than adding new ones — no new Rust unit test needed for
+  it. It's verified manually in a browser instead, per this repo's usual
+  practice for `trajectory-view.js` changes (there's no JS test framework
+  for this file).
 
 ## Error handling
 
