@@ -281,6 +281,35 @@ fn facet_cluster_is_consumed_in_the_stream() {
 }
 
 #[test]
+fn cluster_gate_failure_still_consumes_the_first_facet_alone() {
+    // A squeezed facet followed by another short piece whose extrusion ratio
+    // breaks the cluster's ramp band: the two-facet cluster is rejected, but
+    // the first facet must still be consumed with the second piece as its
+    // anchor — exactly what happened before clusters existed. Greedy
+    // cluster growth must shrink and retry, not fall back to pairwise.
+    let d = 0.008;
+    let dir30 = [libm::cos(0.5), libm::sin(0.5), 0.0];
+    let p0 = [10.0, 0.0, 0.0];
+    let p1 = [10.0 + d * dir30[0], d * dir30[1], 0.0];
+    let dir60 = [libm::cos(1.0), libm::sin(1.0), 0.0];
+    let p2 = [p1[0] + d * dir60[0], p1[1] + d * dir60[1], 0.0];
+    let moves = vec![
+        line(1, [0.0, 0.0, 0.0], p0, 1.0),
+        line(2, p0, p1, 0.0008),
+        line(3, p1, p2, 0.008),
+        line(4, p2, [p2[0], p2[1] + 10.0, 0.0], 1.0),
+    ];
+    let streamed = run_fit_stage(&moves, CornerFitConfig::default());
+
+    assert_no_facet_lines(&streamed, 2..=2);
+    let (e_in, e_out) = (total_e(&moves), total_e(&streamed));
+    assert!(
+        (e_in - e_out).abs() <= 1e-9,
+        "consumption must conserve E: in={e_in} out={e_out}"
+    );
+}
+
+#[test]
 fn drain_flushes_buffered_moves_without_close() {
     let (tx, rx) = bounded::<StreamInput>(64);
     let (out_tx, out_rx) = bounded::<StreamInput>(64);

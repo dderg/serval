@@ -362,28 +362,11 @@ impl FitStage {
                         ) {
                             match self.consumable_cluster(eof) {
                                 ClusterScan::WaitForInput => return true,
-                                ClusterScan::Anchor(n_mids) => {
-                                    let mids: Vec<&Move> = self.decided[1..=n_mids]
-                                        .iter()
-                                        .map(|e| piece_of(e).expect("scan matched pieces"))
-                                        .collect();
-                                    let after = piece_of(&self.decided[n_mids + 1])
-                                        .expect("scan matched the anchor piece");
-                                    let plan = plan_facet_consumption(
-                                        front,
-                                        &mids,
-                                        after,
-                                        self.corner,
-                                        self.seam_in_reduction,
-                                    )
-                                    .unwrap_or_else(|e| {
-                                        panic!("fit_stage: facet consumption failed: {e:?}")
-                                    });
-                                    if let Some(fc) = plan {
-                                        if !self.emit_consumption(fc, n_mids, out) {
-                                            return false;
-                                        }
-                                        continue;
+                                ClusterScan::Anchor(max_mids) => {
+                                    match self.try_consumption(max_mids, out) {
+                                        Some(false) => return false,
+                                        Some(true) => continue,
+                                        None => {}
                                     }
                                 }
                                 ClusterScan::NoAnchor => {}
@@ -463,24 +446,55 @@ impl FitStage {
     /// How far the consumable chain behind the front piece extends: grow
     /// while each next buffered piece is itself a squeezed facet off the one
     /// before it, and report the first piece that isn't as the far anchor.
+    /// When the chain runs into a run or end-of-stream instead of an anchor
+    /// piece, the last facet itself can still anchor a shorter consumption.
     fn consumable_cluster(&self, eof: bool) -> ClusterScan {
         let mut n = 1;
         loop {
             match self.decided.get(n + 1) {
                 None if !eof => return ClusterScan::WaitForInput,
-                None | Some(Element::Run(_)) => return ClusterScan::NoAnchor,
+                None | Some(Element::Run(_)) => {
+                    return if n >= 2 {
+                        ClusterScan::Anchor(n - 1)
+                    } else {
+                        ClusterScan::NoAnchor
+                    };
+                }
                 Some(Element::Piece(next)) => {
                     let prev = piece_of(&self.decided[n]).expect("chain grew over pieces");
-                    if !facet_consumption_candidate(prev, next, self.corner, 0.0) {
+                    if n == MAX_CONSUMED_FACETS
+                        || !facet_consumption_candidate(prev, next, self.corner, 0.0)
+                    {
                         return ClusterScan::Anchor(n);
-                    }
-                    if n == MAX_CONSUMED_FACETS {
-                        return ClusterScan::NoAnchor;
                     }
                     n += 1;
                 }
             }
         }
+    }
+
+    /// Consume the longest prefix of the scanned facet chain that passes
+    /// every gate: try all `max_mids` facets against the piece after them,
+    /// then shrink — a shorter prefix anchors on the facet that follows it,
+    /// exactly as a lone squeezed facet anchors on any next piece. Returns
+    /// the send result, or `None` when no prefix is consumable.
+    fn try_consumption(&mut self, max_mids: usize, out: &mut TravelAligningSender) -> Option<bool> {
+        for n_mids in (1..=max_mids).rev() {
+            let front = piece_of(&self.decided[0]).expect("caller matched a front piece");
+            let mids: Vec<&Move> = self.decided[1..=n_mids]
+                .iter()
+                .map(|e| piece_of(e).expect("scan matched pieces"))
+                .collect();
+            let after =
+                piece_of(&self.decided[n_mids + 1]).expect("scan matched the anchor piece");
+            let plan =
+                plan_facet_consumption(front, &mids, after, self.corner, self.seam_in_reduction)
+                    .unwrap_or_else(|e| panic!("fit_stage: facet consumption failed: {e:?}"));
+            if let Some(fc) = plan {
+                return Some(self.emit_consumption(fc, n_mids, out));
+            }
+        }
+        None
     }
 
     /// Emit the consumption of the facet chain behind the front piece: the
