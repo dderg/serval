@@ -198,6 +198,121 @@ fn general_blend_handles_line_to_arc_corner() {
     assert!(dist(vertex, blend.half2.start_pose) <= delta + 1e-6);
 }
 
+fn corner_setup(theta: f64) -> ([f64; 3], [f64; 3], [f64; 3]) {
+    let t_in = X;
+    let t_out = rot_z(X, theta);
+    let v = crate::vec3::turn_normal(t_in, t_out).expect("corner turns");
+    (t_in, t_out, v)
+}
+
+fn assert_line_line_contract(
+    blend: &GeneralBlend,
+    vertex: [f64; 3],
+    t_in: [f64; 3],
+    t_out: [f64; 3],
+    delta: f64,
+) {
+    assert_blend_g2(blend, 0.0, 0.0);
+    let a = madd(vertex, -blend.trim_in, t_in);
+    assert!(
+        dist(blend.half1.start_pose, a) < 1e-9,
+        "blend must start on the inbound line at trim_in"
+    );
+    let b = madd(vertex, blend.trim_out, t_out);
+    let end = blend.half2.point_at(blend.half2.s_len());
+    assert!(
+        dist(end, b) < 1e-7,
+        "blend must end on the outbound line at trim_out: {end:?} vs {b:?}"
+    );
+    let dev = max_dev_from_corner(
+        &ClothoidPair {
+            half1: blend.half1.clone(),
+            half2: blend.half2.clone(),
+        },
+        a,
+        vertex,
+        b,
+    );
+    assert!(
+        dev <= delta + 1e-9,
+        "corner deviation {dev} exceeds delta {delta}"
+    );
+}
+
+#[test]
+fn line_line_blend_stays_symmetric_when_unclamped() {
+    let vertex = [3.0, -2.0, 0.0];
+    let (t_in, t_out, v) = corner_setup(1.0);
+    let delta = 0.02;
+    let blend = solve_line_line(vertex, t_in, t_out, v, 1.0, delta, 20.0, 20.0)
+        .expect("solver ok")
+        .expect("must blend");
+    assert!(
+        (blend.trim_in - blend.trim_out).abs() < 1e-12,
+        "roomy corner must keep the symmetric analytic blend"
+    );
+    assert_line_line_contract(&blend, vertex, t_in, t_out, delta);
+}
+
+#[test]
+fn clamped_corner_extends_into_the_longer_side() {
+    let vertex = [3.0, -2.0, 0.0];
+    let (t_in, t_out, v) = corner_setup(1.0);
+    let delta = 0.05;
+    let (budget_in, budget_out) = (0.25, 10.0);
+    let symmetric = solve_line_line(vertex, t_in, t_out, v, 1.0, delta, budget_in, budget_in)
+        .expect("solver ok")
+        .expect("must blend");
+    assert!(
+        symmetric.trim_in >= budget_in - 1e-9,
+        "setup must be budget-clamped, got trim {}",
+        symmetric.trim_in
+    );
+
+    let blend = solve_line_line(vertex, t_in, t_out, v, 1.0, delta, budget_in, budget_out)
+        .expect("solver ok")
+        .expect("must blend");
+    assert!(
+        blend.trim_in <= budget_in + 1e-9,
+        "short side must stay within its budget"
+    );
+    assert!(
+        blend.trim_out > 1.5 * budget_in,
+        "long side must extend past the symmetric trim, got {}",
+        blend.trim_out
+    );
+    assert!(blend.trim_out <= budget_out + 1e-9);
+    assert_line_line_contract(&blend, vertex, t_in, t_out, delta);
+
+    let sym_len = symmetric.half1.s_len() + symmetric.half2.s_len();
+    let asym_len = blend.half1.s_len() + blend.half2.s_len();
+    assert!(
+        asym_len > sym_len,
+        "extension must buy a longer blend: {asym_len} vs {sym_len}"
+    );
+    let (_, sym_peak) = symmetric.half1.kappa_peak();
+    let peak = blend.half1.kappa_peak().1.max(blend.half2.kappa_peak().1);
+    assert!(
+        peak < sym_peak,
+        "extension must lower peak curvature: {peak} vs {sym_peak}"
+    );
+}
+
+#[test]
+fn clamped_corner_with_even_budgets_keeps_symmetric_blend() {
+    let vertex = [0.0, 0.0, 0.0];
+    let (t_in, t_out, v) = corner_setup(0.8);
+    let delta = 0.05;
+    let blend = solve_line_line(vertex, t_in, t_out, v, 0.8, delta, 0.25, 0.3)
+        .expect("solver ok")
+        .expect("must blend");
+    assert!(
+        (blend.trim_in - blend.trim_out).abs() < 1e-12,
+        "near-even budgets must not trigger the asymmetric path"
+    );
+    assert_line_line_contract(&blend, vertex, t_in, t_out, delta);
+}
+
 #[test]
 fn general_blend_clamps_to_runway_budget() {
     let vertex = [0.0, 0.0, 0.0];

@@ -388,9 +388,9 @@ impl FitStage {
             out_reduction,
         )
         .unwrap_or_else(|e| panic!("fit_stage: junction plan failed: {e:?}"));
-        let (trim_end, blend) = match plan {
-            JunctionPlan::Blend(b) => (b.trim(), Some(b)),
-            JunctionPlan::Unblended(_) => (0.0, None),
+        let (trim_end, next_head_trim, blend) = match plan {
+            JunctionPlan::Blend(b) => (b.trim_in(), b.trim_out(), Some(b)),
+            JunctionPlan::Unblended(_) => (0.0, 0.0, None),
         };
         let Element::Piece(m) = self.decided.remove(0) else {
             unreachable!()
@@ -420,7 +420,7 @@ impl FitStage {
                 }
             }
         }
-        self.seam_head_trim = trim_end;
+        self.seam_head_trim = next_head_trim;
         self.seam_in_reduction = 0.0;
         true
     }

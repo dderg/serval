@@ -65,7 +65,7 @@ pub(super) fn emit_move(
 
 pub(super) fn emit_blend(
     out: &mut Vec<Move>,
-    bi: &biclothoid::Biclothoid,
+    bi: &biclothoid::GeneralBlend,
     m_in: &Move,
     m_out: &Move,
 ) -> Result<(), FitError> {

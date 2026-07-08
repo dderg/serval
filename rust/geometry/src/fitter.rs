@@ -127,14 +127,21 @@ pub enum FitError {
     },
 }
 
-/// A solved biclothoid corner blend, opaque outside the fitter. `trim` is the
-/// spatial length the blend consumes from each adjoining line's end/start.
-pub struct JunctionBlend(biclothoid::Biclothoid);
+/// A solved clothoid-pair corner blend, opaque outside the fitter. The trims
+/// are the spatial lengths the blend consumes from the inbound line's end and
+/// the outbound line's start — equal for a symmetric blend, unequal when the
+/// blend extended into the roomier side.
+pub struct JunctionBlend(biclothoid::GeneralBlend);
 
 impl JunctionBlend {
     #[must_use]
-    pub fn trim(&self) -> f64 {
-        self.0.trim
+    pub fn trim_in(&self) -> f64 {
+        self.0.trim_in
+    }
+
+    #[must_use]
+    pub fn trim_out(&self) -> f64 {
+        self.0.trim_out
     }
 }
 
@@ -199,12 +206,12 @@ pub fn fit_corners(moves: &[Move], config: CornerFitConfig) -> Result<FitOutcome
     let mut report = FitReport::default();
     for (i, m) in moves.iter().enumerate() {
         let trim_start = if i > 0 {
-            blend_trim(&plans[i - 1])
+            blend_trim(&plans[i - 1], JunctionBlend::trim_out)
         } else {
             0.0
         };
         let trim_end = if i < plans.len() {
-            blend_trim(&plans[i])
+            blend_trim(&plans[i], JunctionBlend::trim_in)
         } else {
             0.0
         };
@@ -277,13 +284,13 @@ fn classify_junction(
     };
 
     let vertex = line_in.point_at(line_in.s_len());
-    let in_len = line_in.s_len() - in_reduction;
-    let out_len = line_out.s_len() - out_reduction;
-    let budget = 0.5 * in_len.min(out_len);
+    let budget_in = 0.5 * (line_in.s_len() - in_reduction);
+    let budget_out = 0.5 * (line_out.s_len() - out_reduction);
     let line_no = m_out.source.start_line;
 
-    let Some(bi) = biclothoid::solve(vertex, t_in, v, theta, delta, budget)
-        .map_err(|source| FitError::Internal { line_no, source })?
+    let Some(bi) =
+        biclothoid::solve_line_line(vertex, t_in, t_out, v, theta, delta, budget_in, budget_out)
+            .map_err(|source| FitError::Internal { line_no, source })?
     else {
         return Ok(JunctionPlan::Unblended(UnblendReason::NoBudget));
     };
@@ -311,7 +318,7 @@ fn classify_junction(
 }
 
 fn biclothoid_followers(
-    bi: &biclothoid::Biclothoid,
+    bi: &biclothoid::GeneralBlend,
     m_in: &Move,
     m_out: &Move,
     line_in: &Line,
@@ -321,12 +328,12 @@ fn biclothoid_followers(
         &emit::SeamSide {
             followers: &m_in.segment.followers,
             seg_len: line_in.s_len(),
-            trim: bi.trim,
+            trim: bi.trim_in,
         },
         &emit::SeamSide {
             followers: &m_out.segment.followers,
             seg_len: line_out.s_len(),
-            trim: bi.trim,
+            trim: bi.trim_out,
         },
         bi.half1.s_len(),
         bi.half2.s_len(),
@@ -339,9 +346,9 @@ fn junction_deviation(limits: VelocityLimits) -> f64 {
 }
 
 #[cfg(test)]
-fn blend_trim(plan: &JunctionPlan) -> f64 {
+fn blend_trim(plan: &JunctionPlan, side: impl Fn(&JunctionBlend) -> f64) -> f64 {
     match plan {
-        JunctionPlan::Blend(bi) => bi.trim(),
+        JunctionPlan::Blend(bi) => side(bi),
         JunctionPlan::Unblended(_) => 0.0,
     }
 }

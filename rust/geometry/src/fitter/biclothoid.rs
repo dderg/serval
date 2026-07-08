@@ -6,12 +6,6 @@ use crate::path::lowering::PositionProfile;
 use super::linalg::solve3;
 use super::vec3::{add, cross, dist, dot, madd, normalize, scale, signed_angle, sub};
 
-pub(super) struct Biclothoid {
-    pub half1: Clothoid,
-    pub half2: Clothoid,
-    pub trim: f64,
-}
-
 pub(super) struct ClothoidPair {
     pub half1: Clothoid,
     pub half2: Clothoid,
@@ -24,14 +18,22 @@ const HERMITE_POS_TOL: f64 = 1e-12;
 const HERMITE_ANG_TOL_RAD: f64 = 1e-12;
 const HERMITE_MAX_ITERS: usize = 60;
 
-pub(super) fn solve(
+/// Blend a line-line corner at `vertex`. The symmetric analytic solve is the
+/// fast path; when the deviation-optimal trim is clamped by the shorter
+/// side's budget and the longer side has spare runway, the blend extends
+/// asymmetrically into the longer side — a bigger, flatter blend for the
+/// same corner-cut depth — via the general G2 Hermite solver.
+pub(super) fn solve_line_line(
     vertex: [f64; 3],
     t_in: [f64; 3],
+    t_out: [f64; 3],
     v: [f64; 3],
     theta: f64,
     delta: f64,
-    budget: f64,
-) -> Result<Option<Biclothoid>, GeometryError> {
+    budget_in: f64,
+    budget_out: f64,
+) -> Result<Option<GeneralBlend>, GeometryError> {
+    let budget = budget_in.min(budget_out);
     if budget <= super::BUDGET_EPS_MM || delta <= 0.0 {
         return Ok(None);
     }
@@ -47,6 +49,20 @@ pub(super) fn solve(
         return Ok(None);
     }
 
+    if trim_at_delta > budget {
+        if let Some(blend) = extend_clamped_blend(
+            vertex,
+            t_in,
+            t_out,
+            delta,
+            budget_in,
+            budget_out,
+            trim_at_delta,
+        ) {
+            return Ok(Some(blend));
+        }
+    }
+
     let kappa_peak = trim_ref * theta / trim;
     let length = theta / kappa_peak;
     let sigma = kappa_peak / length;
@@ -58,7 +74,124 @@ pub(super) fn solve(
     let v_apex = inplane_rot90(u_apex, t_in, v);
     let half2 = Clothoid::try_new(apex, u_apex, v_apex, kappa_peak, -sigma, length)?;
 
-    Ok(Some(Biclothoid { half1, half2, trim }))
+    Ok(Some(GeneralBlend {
+        half1,
+        half2,
+        trim_in: trim,
+        trim_out: trim,
+    }))
+}
+
+const ASYM_MIN_BUDGET_RATIO: f64 = 1.5;
+const ASYM_MIN_GAIN: f64 = 1.05;
+const ASYM_BISECT_ITERS: usize = 10;
+/// The deviation-optimal symmetric blend spans `2·trim_at_delta`; an
+/// asymmetric blend within the same tube never reaches far past that
+/// footprint, so the long-side search is capped at this multiple.
+const ASYM_REACH_FACTOR: f64 = 4.0;
+
+/// Largest asymmetric line-line blend within the corner tolerance tube: the
+/// shorter side's trim saturates its budget, the longer side's grows until
+/// the blend's deviation from the corner polyline reaches `delta` (or the
+/// long side's own budget). `None` when the budgets are nearly even or no
+/// worthwhile extension fits — the caller then keeps the symmetric solution.
+#[allow(clippy::too_many_arguments)]
+fn extend_clamped_blend(
+    vertex: [f64; 3],
+    t_in: [f64; 3],
+    t_out: [f64; 3],
+    delta: f64,
+    budget_in: f64,
+    budget_out: f64,
+    trim_at_delta: f64,
+) -> Option<GeneralBlend> {
+    let b_short = budget_in.min(budget_out);
+    let b_long = budget_in.max(budget_out);
+    if b_long < b_short * ASYM_MIN_BUDGET_RATIO {
+        return None;
+    }
+    let hi_cap = (ASYM_REACH_FACTOR * trim_at_delta).min(b_long);
+    if hi_cap <= b_short {
+        return None;
+    }
+    let in_is_short = budget_in <= budget_out;
+    let plane_n = normalize(cross(t_in, t_out));
+
+    let trims = |t_long: f64| {
+        if in_is_short {
+            (b_short, t_long)
+        } else {
+            (t_long, b_short)
+        }
+    };
+    let eval = |t_long: f64| -> Option<(ClothoidPair, f64)> {
+        let (trim_in, trim_out) = trims(t_long);
+        let a = madd(vertex, -trim_in, t_in);
+        let b = madd(vertex, trim_out, t_out);
+        let pair = hermite_g2(a, t_in, 0.0, b, t_out, 0.0, plane_n)?;
+        let dev = max_dev_from_corner(&pair, a, vertex, b);
+        Some((pair, dev))
+    };
+
+    let mut lo = b_short;
+    let mut hi = hi_cap;
+    let mut best: Option<(ClothoidPair, f64)> = None;
+    match eval(hi) {
+        Some((pair, dev)) if dev <= delta => best = Some((pair, hi)),
+        _ => {
+            for _ in 0..ASYM_BISECT_ITERS {
+                let mid = 0.5 * (lo + hi);
+                match eval(mid) {
+                    Some((pair, dev)) if dev <= delta => {
+                        best = Some((pair, mid));
+                        lo = mid;
+                    }
+                    _ => hi = mid,
+                }
+            }
+        }
+    }
+
+    let (pair, t_long) = best?;
+    if t_long <= b_short * ASYM_MIN_GAIN {
+        return None;
+    }
+    let (trim_in, trim_out) = trims(t_long);
+    Some(GeneralBlend {
+        half1: pair.half1,
+        half2: pair.half2,
+        trim_in,
+        trim_out,
+    })
+}
+
+const DEV_SAMPLES_PER_HALF: usize = 16;
+
+/// Sampled deviation of the blend from the corner it replaces: the largest
+/// distance from any curve sample to the two-segment polyline
+/// `a → vertex → b`. Sampling under-reads the true maximum by the sagitta
+/// between samples — negligible against junction deviations.
+fn max_dev_from_corner(pair: &ClothoidPair, a: [f64; 3], vertex: [f64; 3], b: [f64; 3]) -> f64 {
+    let mut worst = 0.0_f64;
+    for half in [&pair.half1, &pair.half2] {
+        for i in 0..=DEV_SAMPLES_PER_HALF {
+            let s = half.s_len() * (i as f64) / (DEV_SAMPLES_PER_HALF as f64);
+            let p = half.point_at(s);
+            let d = dist_to_segment(p, a, vertex).min(dist_to_segment(p, vertex, b));
+            worst = worst.max(d);
+        }
+    }
+    worst
+}
+
+fn dist_to_segment(p: [f64; 3], s0: [f64; 3], s1: [f64; 3]) -> f64 {
+    let d = sub(s1, s0);
+    let len_sq = dot(d, d);
+    if len_sq <= 0.0 {
+        return dist(p, s0);
+    }
+    let t = (dot(sub(p, s0), d) / len_sq).clamp(0.0, 1.0);
+    dist(p, madd(s0, t, d))
 }
 
 fn canonical(theta: f64) -> Result<(f64, f64), GeometryError> {
