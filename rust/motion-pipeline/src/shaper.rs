@@ -4,12 +4,36 @@ use crossbeam_channel::{Receiver, Sender};
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs, extract_bezier_pieces};
 use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedSignal};
 
+use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
     FIT_TRUNC_POS_FACTOR, FitTol, LADDER_PROBES_U, ladder_fit, quintic_in_u, truncated_piece,
 };
 use crate::types::{Control, LoweredItem, PostProcessError, ShapedItem};
 
-const SEGMENT_TIME_EPS_S: f64 = 1e-9;
+/// The evaluable (position, velocity, acceleration) signal the shaped-track
+/// fitter consumes: the kernel convolution for kerneled axes, the follower
+/// projection for follower axes.
+pub(crate) trait TrackSignal {
+    fn eval(&self, t: f64) -> f64;
+    fn deriv(&self, t: f64) -> f64;
+    fn second_deriv(&self, t: f64) -> f64;
+}
+
+impl TrackSignal for ShapedSignal<'_> {
+    fn eval(&self, t: f64) -> f64 {
+        ShapedSignal::eval(self, t)
+    }
+
+    fn deriv(&self, t: f64) -> f64 {
+        ShapedSignal::deriv(self, t)
+    }
+
+    fn second_deriv(&self, t: f64) -> f64 {
+        ShapedSignal::second_deriv(self, t)
+    }
+}
+
+pub(crate) const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 
 /// Final pipeline stage: streaming axis-chain post-processing. Buffers lowered
 /// segments until each one's convolution window is covered by lookahead, then
@@ -27,6 +51,7 @@ pub struct Shaper {
     forward_support: f64,
     back_support: f64,
     history_trimmed: bool,
+    follower_states: Vec<FollowerState>,
 }
 
 impl Shaper {
@@ -39,6 +64,7 @@ impl Shaper {
             pending: VecDeque::new(),
             pending_rest: VecDeque::new(),
             history_trimmed: false,
+            follower_states: Vec::new(),
         }
     }
 
@@ -68,6 +94,9 @@ impl Shaper {
                             self.pending_rest.clear();
                             self.history.clear();
                             self.history_trimmed = false;
+                            for state in &mut self.follower_states {
+                                state.reset_timeline();
+                            }
                         }
                         Control::Dwell { .. }
                         | Control::SetAxisChains(_)
@@ -94,6 +123,9 @@ impl Shaper {
                                 if new_back > self.back_support {
                                     self.history.clear();
                                     self.history_trimmed = false;
+                                    for state in &mut self.follower_states {
+                                        state.clear_projected_history();
+                                    }
                                 }
                                 (self.forward_support, self.back_support) = (new_forward, new_back);
                                 self.chains = chains.clone();
@@ -113,30 +145,75 @@ impl Shaper {
     }
 
     /// How many front segments have their forward convolution window covered
-    /// by the buffered lookahead.
+    /// by the buffered lookahead. A follower with its own kernel cascades:
+    /// its convolution reads the projection, which is only final through the
+    /// shaping frontier — the last pending segment whose directly-convolved
+    /// tracks have their own lookahead covered. The time-based bound already
+    /// includes the cascaded width, but segment granularity can leave a long
+    /// straddling segment unprojectable, so gate on the frontier explicitly.
     fn supported_count(&self) -> usize {
         let Some(last) = self.pending.back() else {
             return 0;
         };
         let latest_safe_t = last.t_end - self.forward_support;
-        self.pending
+        let plain = self
+            .pending
             .iter()
             .take_while(|seg| seg.t_end <= latest_safe_t + 1e-12)
-            .count()
+            .count();
+        let own_hi = self.chains.max_follower_own_forward_support();
+        if own_hi <= 0.0 {
+            return plain;
+        }
+        let Some(frontier_t) = self.shaping_frontier_t(last.t_end) else {
+            return 0;
+        };
+        let gated = self
+            .pending
+            .iter()
+            .take_while(|seg| seg.t_end + own_hi <= frontier_t + 1e-12)
+            .count();
+        plain.min(gated)
+    }
+
+    /// End time of the last pending segment whose direct convolution window is
+    /// covered by the buffered lookahead.
+    fn shaping_frontier_t(&self, last_t: f64) -> Option<f64> {
+        let direct_hi = self.chains.direct_forward_support();
+        self.pending
+            .iter()
+            .take_while(|seg| seg.t_end + direct_hi <= last_t + 1e-12)
+            .last()
+            .map(|seg| seg.t_end)
     }
 
     fn emit(&mut self, count: usize, force: bool, output: &Sender<ShapedItem>) -> bool {
         if count == 0 {
             return true;
         }
+        let frontier_count = if self.chains.max_follower_own_forward_support() <= 0.0 {
+            count
+        } else if force {
+            self.pending.len()
+        } else {
+            let last_t = self.pending.back().expect("count > 0").t_end;
+            let direct_hi = self.chains.direct_forward_support();
+            self.pending
+                .iter()
+                .take_while(|seg| seg.t_end + direct_hi <= last_t + 1e-12)
+                .count()
+                .max(count)
+        };
         let base = self.pending.make_contiguous();
         let shaped = apply_axis_chains(
             &self.history,
             base,
             count,
+            frontier_count,
             force,
             !self.history_trimmed,
-            &self.chains.chains,
+            &self.chains,
+            &mut self.follower_states,
         )
         .unwrap_or_else(|e| panic!("shaper: {e}"));
         for seg in shaped {
@@ -167,16 +244,26 @@ impl Shaper {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_axis_chains(
     history: &VecDeque<ShapedSegment>,
     base: &[ShapedSegment],
     commit_count: usize,
+    frontier_count: usize,
     force: bool,
     at_stream_boundary: bool,
-    chains: &[CompiledChain],
+    chains: &AxisChainSet,
+    follower_states: &mut Vec<FollowerState>,
 ) -> Result<Vec<ShapedSegment>, PostProcessError> {
-    let mut out: Vec<ShapedSegment> = base.iter().take(commit_count).cloned().collect();
-    if chains.iter().all(CompiledChain::is_empty) {
+    let mut out: Vec<ShapedSegment> = base
+        .iter()
+        .take(frontier_count.max(commit_count))
+        .cloned()
+        .collect();
+    if chains.chains.iter().all(CompiledChain::is_empty)
+        && follower_states.iter().all(|s| !s.is_active())
+    {
+        out.truncate(commit_count);
         return Ok(out);
     }
     let n_axes = out.iter().map(|seg| seg.axes.len()).max().unwrap_or(0);
@@ -195,7 +282,10 @@ fn apply_axis_chains(
     }
     let default_chain = CompiledChain::default();
     for axis in 0..n_axes {
-        let chain = chains.get(axis).unwrap_or(&default_chain);
+        if chains.is_projected_follower(axis) {
+            continue;
+        }
+        let chain = chains.chains.get(axis).unwrap_or(&default_chain);
         apply_axis_chain(
             history,
             base,
@@ -206,6 +296,8 @@ fn apply_axis_chains(
             chain,
         )?;
     }
+    project_followers(base, &mut out, commit_count, force, chains, follower_states)?;
+    out.truncate(commit_count);
     for seg in &mut out {
         pad_segment_axes_to_uniform_degree(seg);
     }
@@ -379,10 +471,10 @@ fn eval_segment_axis(seg: &ShapedSegment, axis: usize, t: f64) -> f64 {
     nurbs::eval::eval(&seg.axes[axis], t.clamp(seg.t_start, seg.t_end))
 }
 
-fn fit_axis_from_signal(
+pub(crate) fn fit_axis_from_signal<S: TrackSignal>(
     axis: usize,
     template: &nurbs::ScalarNurbs,
-    sig: &ShapedSignal<'_>,
+    sig: &S,
 ) -> Result<nurbs::ScalarNurbs, PostProcessError> {
     let template_pieces = extract_bezier_pieces(template);
     if template_pieces.is_empty() {
@@ -470,9 +562,9 @@ const LADDER_FIT_NODES_U: [f64; 3] = [0.0, 0.5, -0.5];
 /// shaper's own budgets. Returns the accepted monomial-in-u fit, or the
 /// quintic base with `fits = false` so the caller can bisect.
 #[allow(clippy::type_complexity)]
-fn shaped_ladder(
+fn shaped_ladder<S: TrackSignal>(
     axis: usize,
-    sig: &ShapedSignal<'_>,
+    sig: &S,
     t0: f64,
     t1: f64,
 ) -> Result<(Vec<f64>, bool), PostProcessError> {
@@ -509,9 +601,9 @@ fn shaped_ladder(
     }
 }
 
-fn refine_shaped_span(
+fn refine_shaped_span<S: TrackSignal>(
     axis: usize,
-    sig: &ShapedSignal<'_>,
+    sig: &S,
     t0: f64,
     t1: f64,
     depth: u32,
@@ -533,7 +625,7 @@ fn refine_shaped_span(
     refine_shaped_span(axis, sig, tm, t1, depth + 1, out)
 }
 
-fn finite_sample(axis: usize, sig: &ShapedSignal<'_>, t: f64) -> Result<f64, PostProcessError> {
+fn finite_sample<S: TrackSignal>(axis: usize, sig: &S, t: f64) -> Result<f64, PostProcessError> {
     exact_value(axis, sig.eval(t), t)
 }
 
@@ -545,7 +637,7 @@ fn exact_value(axis: usize, value: f64, t: f64) -> Result<f64, PostProcessError>
     }
 }
 
-fn apply_trailing_zero_support(
+pub(crate) fn apply_trailing_zero_support(
     chain: &CompiledChain,
     mut track: nurbs::ScalarNurbs,
 ) -> nurbs::ScalarNurbs {
@@ -562,7 +654,10 @@ fn apply_trailing_zero_support(
     track
 }
 
-fn apply_pressure_advance_to_track(track: &nurbs::ScalarNurbs, k: f64) -> nurbs::ScalarNurbs {
+pub(crate) fn apply_pressure_advance_to_track(
+    track: &nurbs::ScalarNurbs,
+    k: f64,
+) -> nurbs::ScalarNurbs {
     let pieces = extract_bezier_pieces(track);
     let out_pieces: Vec<BezierPiece> = pieces
         .iter()

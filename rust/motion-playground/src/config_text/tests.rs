@@ -39,11 +39,14 @@ fn comma_list_supports_multiple_post_processors_on_one_axis() {
 }
 
 #[test]
-fn follows_and_motors_lines_are_accepted_and_ignored() {
+fn follows_is_parsed_and_motors_is_ignored() {
     let (axes, _) =
         parse("[axis e]\nfollows: x, y, z\nmotors: extruder\npost_processors: pa\n").unwrap();
     assert_eq!(axes[0].name, "e");
-    assert!(axes[0].follows.is_empty());
+    assert_eq!(
+        axes[0].follows,
+        vec!["x".to_string(), "y".to_string(), "z".to_string()]
+    );
     assert!(axes[0].motors.is_empty());
     assert_eq!(axes[0].post_processors, vec!["pa".to_string()]);
 }
