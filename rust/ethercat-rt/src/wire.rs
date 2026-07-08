@@ -7,6 +7,7 @@ use mcu_protocol::messages::{
     RuntimeCapsResponse, SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse, SeedServoHome,
     SeedServoHomeResponse, SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse,
     StartCapture, StartCaptureResponse, StatusHeartbeat, StopCaptureResponse, StopResponse,
+    SyncPair, SyncPairResponse,
 };
 use mcu_protocol::MCU_CHANNEL_PIECES;
 use mcu_transport::frame::{encode_frame, CHANNEL_CONTROL, CHANNEL_EVENTS};
@@ -78,6 +79,10 @@ pub enum Command {
     SdoWrite {
         correlation_id: u32,
         msg: SdoWrite,
+    },
+    SyncPair {
+        correlation_id: u32,
+        msg: SyncPair,
     },
     Unknown {
         correlation_id: u32,
@@ -175,6 +180,13 @@ pub fn decode_command(channel: u8, payload: &[u8]) -> Result<Command, DecodeCmdE
         Some(MessageKind::ResonanceBuzz) => {
             let msg = ResonanceBuzz::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
             Ok(Command::ResonanceBuzz {
+                correlation_id: cid,
+                msg,
+            })
+        }
+        Some(MessageKind::SyncPair) => {
+            let msg = SyncPair::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
+            Ok(Command::SyncPair {
                 correlation_id: cid,
                 msg,
             })
@@ -316,6 +328,11 @@ pub fn seed_servo_home_response_frame(cid: u32, result: i32) -> Vec<u8> {
 pub fn arm_sensorless_endstop_response_frame(cid: u32, result: i32) -> Vec<u8> {
     let body = ArmSensorlessEndstopResponse { result }.encoded_to_vec();
     control_frame(MessageKind::ArmSensorlessEndstopResponse, cid, &body)
+}
+
+pub fn sync_pair_response_frame(cid: u32, resp: &SyncPairResponse) -> Vec<u8> {
+    let body = resp.encoded_to_vec();
+    control_frame(MessageKind::SyncPairResponse, cid, &body)
 }
 
 pub fn endstop_trip_frame(endstop_id: u8, trip_clock: u64) -> Vec<u8> {

@@ -164,3 +164,73 @@ fn refuses_saturated_torque() {
         Err(FitError::SaturatedTorque { .. })
     ));
 }
+
+#[test]
+fn recovers_corexy_awd_pair_split_truth() {
+    let (md, mo) = (0.015, -0.005);
+    let visc = [0.002, 0.0025, 0.003, 0.0035];
+    let (acc_x, vel_x) = triangle(1500.0, 0.06, 0.001, 4);
+    let (acc_y, vel_y) = triangle(1500.0, 0.06, 0.001, 4);
+    let acc_a: Vec<f64> = acc_x.iter().chain(&acc_y).copied().collect();
+    let vel_a: Vec<f64> = vel_x.iter().chain(&vel_y).copied().collect();
+    let acc_b: Vec<f64> = acc_x
+        .iter()
+        .copied()
+        .chain(acc_y.iter().map(|&v| -v))
+        .collect();
+    let vel_b: Vec<f64> = vel_x
+        .iter()
+        .copied()
+        .chain(vel_y.iter().map(|&v| -v))
+        .collect();
+    let tq = |m: usize, acc_self: f64, acc_other: f64, v: f64, k: usize| {
+        let c = if v > 0.5 {
+            1.0
+        } else if v < -0.5 {
+            -1.0
+        } else {
+            0.0
+        };
+        noisy(md * acc_self + mo * acc_other + visc[m] * v + c, k).round()
+    };
+    let n = acc_a.len();
+    let torque: Vec<Vec<f64>> = (0..4)
+        .map(|m| {
+            let (acc_self, acc_other, vel_self) = if m < 2 {
+                (&acc_a, &acc_b, &vel_a)
+            } else {
+                (&acc_b, &acc_a, &vel_b)
+            };
+            (0..n)
+                .map(|k| tq(m, acc_self[k], acc_other[k], vel_self[k], k + 7 * m))
+                .collect()
+        })
+        .collect();
+    let (cf_a, cr_a) = cols(&vel_a);
+    let (cf_b, cr_b) = cols(&vel_b);
+    let input = FitInput {
+        structure: Structure::CoreXYAwd,
+        acc: vec![acc_a.clone(), acc_a, acc_b.clone(), acc_b],
+        vel: vec![vel_a.clone(), vel_a, vel_b.clone(), vel_b],
+        cf: vec![cf_a.clone(), cf_a, cf_b.clone(), cf_b],
+        cr: vec![cr_a.clone(), cr_a, cr_b.clone(), cr_b],
+        torque,
+        extra: Vec::new(),
+    };
+    let r = fit(&input, &FitOptions::default()).unwrap();
+    assert!(
+        (r.params.mass[0][0] - md).abs() < 0.1 * md,
+        "{:?}",
+        r.params.mass
+    );
+    let m_off = r.params.mass[0][2] + r.params.mass[0][3];
+    assert!((m_off - mo).abs() < 0.1 * mo.abs(), "{:?}", r.params.mass);
+    assert_eq!(r.params.mass[0][1], 0.0);
+    for m in 0..4 {
+        assert!(
+            (r.params.coulomb_fwd[m] - 1.0).abs() < 0.5,
+            "coulomb_fwd[{m}] = {}",
+            r.params.coulomb_fwd[m]
+        );
+    }
+}

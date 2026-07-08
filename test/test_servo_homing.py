@@ -103,7 +103,7 @@ def make_servo_rail(extra=(), drop=()):
         motor_options.pop(key, None)
     return servo_axis.ServoRail(
         FakeRailConfig("axis z", axis_options),
-        FakeRailConfig("motor z_drive", motor_options),
+        [FakeRailConfig("motor z_drive", motor_options)],
     )
 
 
@@ -206,36 +206,36 @@ def test_homing_motor_names_uses_servo_rail_name_when_no_steppers():
     assert homing_mod._homing_motor_names(rail) == ["servo_x"]
 
 
-def make_homing_servo_rail():
-    rail = servo_axis.ServoRail.__new__(servo_axis.ServoRail)
-    rail.axis = "x"
-    rail.name = "servo_x"
-    rail.rotation_distance = 40.0
-    rail.encoder_counts_per_rev = 131072
-    rail.homing_following_error = 2.5
-    rail.homing_max_torque = 50.0
-    rail.following_error = None
-    rail.max_torque = None
-    return rail
+def make_homing_servo_motor():
+    motor = servo_axis.ServoMotor.__new__(servo_axis.ServoMotor)
+    motor.motor_name = "motor_x"
+    motor.node_name = "node_x"
+    motor.rotation_distance = 40.0
+    motor.encoder_counts_per_rev = 131072
+    motor.homing_following_error = 2.5
+    motor.homing_max_torque = 50.0
+    motor.following_error = None
+    motor.max_torque = None
+    return motor
 
 
 def test_homing_drive_limits_convert_units():
-    rail = make_homing_servo_rail()
-    counts, tenth_pct = rail.get_homing_drive_limits()
+    motor = make_homing_servo_motor()
+    counts, tenth_pct = motor.get_homing_drive_limits()
     assert counts == 8192
     assert tenth_pct == 500
 
 
 def test_session_drive_limits_none_when_unconfigured():
-    rail = make_homing_servo_rail()
-    assert rail.get_session_drive_limits() == (None, None)
+    motor = make_homing_servo_motor()
+    assert motor.get_session_drive_limits() == (None, None)
 
 
 def test_session_drive_limits_convert_units():
-    rail = make_homing_servo_rail()
-    rail.following_error = 5.0
-    rail.max_torque = 120.0
-    assert rail.get_session_drive_limits() == (16384, 1200)
+    motor = make_homing_servo_motor()
+    motor.following_error = 5.0
+    motor.max_torque = 120.0
+    assert motor.get_session_drive_limits() == (16384, 1200)
 
 
 class FakeLimitsEngine:
@@ -451,7 +451,7 @@ class FakeHomingPrinter:
         return self._objects[name]
 
 
-class FakeServoHomingRail(FakeHomingRail):
+class FakeServoHomingMotor:
     def get_node_name(self):
         return "xy_drives"
 
@@ -460,6 +460,14 @@ class FakeServoHomingRail(FakeHomingRail):
 
     def get_homing_drive_limits(self):
         return (8192, 500)
+
+
+class FakeServoHomingRail(FakeHomingRail):
+    def get_node_name(self):
+        return "xy_drives"
+
+    def get_motors(self):
+        return [FakeServoHomingMotor()]
 
 
 def run_home_axis(overshoot, retract_dist, positive_dir, servo=False):
@@ -700,7 +708,7 @@ def make_servo_rail_with_printer(printer, extra=()):
             motor_options[key] = value
     return servo_axis.ServoRail(
         FakeRailConfig("axis z", axis_options, printer=printer),
-        FakeRailConfig("motor z_drive", motor_options, printer=printer),
+        [FakeRailConfig("motor z_drive", motor_options, printer=printer)],
     )
 
 
@@ -766,3 +774,109 @@ def test_trip_move_begin_raises_when_no_engine_handle():
     es = rail.setup_motion_endstop(_virtual_pin_params(), 2)
     with pytest.raises(Exception):
         rail.trip_move_begin({"endstop": es})
+
+
+def make_awd_servo_rail_with_printer(printer):
+    axis_options = dict(AXIS_Z_OPTIONS)
+    axis_options["endstop_pin"] = "z_drive:" + servo_axis.VIRTUAL_ENDSTOP_PIN
+    motor_a = dict(MOTOR_Z_OPTIONS)
+    motor_b = dict(MOTOR_Z_OPTIONS)
+    motor_b["ethercat_chain_index"] = 2
+    motor_b["homing_max_torque"] = 30.0
+    return servo_axis.ServoRail(
+        FakeRailConfig("axis z", axis_options, printer=printer),
+        [
+            FakeRailConfig("motor z_drive", motor_a, printer=printer),
+            FakeRailConfig("motor z_drive1", motor_b, printer=printer),
+        ],
+    )
+
+
+class FakeAwdNode:
+    def __init__(self, handle, slots):
+        self._handle = handle
+        self._slots = slots
+
+    def get_engine_handle(self):
+        return self._handle
+
+    def get_slot_for_motor(self, motor_name):
+        return self._slots[motor_name]
+
+
+def make_awd_printer():
+    printer = FakeProviderPrinter(node_handle=7)
+    printer._objects["ethercat_node z_drive"] = FakeAwdNode(
+        7, {"z_drive": 1, "z_drive1": 2}
+    )
+    return printer
+
+
+def test_awd_rail_registers_a_chip_per_motor():
+    printer = make_awd_printer()
+    make_awd_servo_rail_with_printer(printer)
+    chips = printer.lookup_object("pins").chips
+    assert "z_drive" in chips and "z_drive1" in chips
+
+
+def test_awd_trip_move_begin_arms_every_motor_with_its_own_torque_cap():
+    printer = make_awd_printer()
+    rail = make_awd_servo_rail_with_printer(printer)
+    es = rail.setup_motion_endstop(_virtual_pin_params(), 2)
+    rail.trip_move_begin({"endstop": es})
+    engine = printer.lookup_object("motion_engine")
+    assert engine.armed == [
+        (7, 1, es.endstop_id, 500, True),
+        (7, 2, es.endstop_id, 300, True),
+    ]
+    rail.trip_move_end({"endstop": es})
+    assert engine.disarmed == [
+        (7, 1, es.endstop_id),
+        (7, 2, es.endstop_id),
+    ]
+
+
+def test_awd_rail_rejects_motors_on_different_nodes():
+    printer = make_awd_printer()
+    axis_options = dict(AXIS_Z_OPTIONS)
+    motor_a = dict(MOTOR_Z_OPTIONS)
+    motor_b = dict(MOTOR_Z_OPTIONS)
+    motor_b["node"] = "other_node"
+    motor_b["ethercat_chain_index"] = 2
+    axis_config = FakeRailConfig("axis z", axis_options, printer=printer)
+    axis_config.error = RuntimeError
+    with pytest.raises(RuntimeError, match="share a node"):
+        servo_axis.ServoRail(
+            axis_config,
+            [
+                FakeRailConfig("motor z_drive", motor_a, printer=printer),
+                FakeRailConfig("motor z_drive1", motor_b, printer=printer),
+            ],
+        )
+
+
+class FakeAwdActiveRail:
+    def __init__(self, motors):
+        self._motors = motors
+
+    def get_motors(self):
+        return self._motors
+
+    def get_name(self, short=False):
+        return "axis z"
+
+
+def test_active_servo_rails_expand_one_entry_per_motor():
+    homer = homing_mod.Homing.__new__(homing_mod.Homing)
+    motor_a = FakeServoHomingMotor()
+    motor_b = FakeServoHomingMotor()
+    rail = FakeAwdActiveRail([motor_a, motor_b])
+    homer.printer = FakeHomingPrinter(
+        FakeHomingStepperEnable(),
+        extra_objects={"ethercat_node xy_drives": FakeNode(9)},
+    )
+    entries = homer._active_servo_rails(FakeGcmd(), 2, [rail])
+    assert len(entries) == 2
+    assert all(e["rail"] is rail for e in entries)
+    assert all(e["handle"] == 9 for e in entries)
+    assert all(e["limits"] == (8192, 500) for e in entries)

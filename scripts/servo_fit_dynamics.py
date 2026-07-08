@@ -62,13 +62,60 @@ def resolve_rotation_distance(args, header, drive_indices):
     return distances.pop()
 
 
-def ident_cmd(binary, csv_path, axes, out_path, args):
+def parse_pairs(pairs_text):
+    pairs = [
+        [name.strip() for name in pair.split(",") if name.strip()]
+        for pair in pairs_text.split(";")
+        if pair.strip()
+    ]
+    if len(pairs) != 2 or any(len(pair) != 2 for pair in pairs):
+        raise SystemExit(
+            "--pairs must name two belt pairs of two drives each, e.g. "
+            "'motor_a,motor_a1;motor_b,motor_b1' (got %r)" % (pairs_text,)
+        )
+    return pairs
+
+
+def corexy_layout(drive_names, pairs_text):
+    """Resolve the axes order and servo-ident structure for a corexy fit.
+
+    2-drive captures use the classic coupled fit in capture order. 4-drive
+    (AWD) captures need --pairs to state which drives share each belt; the
+    profile rows must land in slot order, so the caller passes pairs in
+    slot order and the axes order is taken from them verbatim.
+    """
+    if len(drive_names) == 2:
+        if pairs_text is not None:
+            raise SystemExit("--pairs needs a 4-drive capture, this one has 2")
+        return list(drive_names), "corexy"
+    if len(drive_names) == 4:
+        if pairs_text is None:
+            raise SystemExit(
+                "4-drive corexy capture needs --pairs "
+                "'a0,a1;b0,b1' naming each belt's drives in slot order "
+                "(capture drives: %s)" % (", ".join(drive_names),)
+            )
+        pairs = parse_pairs(pairs_text)
+        axes = [name for pair in pairs for name in pair]
+        if sorted(axes) != sorted(drive_names):
+            raise SystemExit(
+                "--pairs drives (%s) do not match the capture drives (%s)"
+                % (", ".join(axes), ", ".join(drive_names))
+            )
+        return axes, "corexy-awd"
+    raise SystemExit(
+        "corexy fit needs a 2-drive or 4-drive (AWD, with --pairs) capture, "
+        "got drives: %s" % (", ".join(drive_names),)
+    )
+
+
+def ident_cmd(binary, csv_path, axes, out_path, args, structure=None):
     cmd = [
         binary,
         "--capture",
         csv_path,
         "--structure",
-        args.structure,
+        structure or args.structure,
         "--axes",
         ",".join(axes),
         "--out",
@@ -97,28 +144,38 @@ def main(argv=None):
     p.add_argument("--rotation-distance-mm", type=float)
     p.add_argument(
         "--drive",
-        help="drive name to fit in a multi-drive capture "
-        "(default: the first drive in the file)",
+        help="drive name to fit in a multi-drive capture",
+    )
+    p.add_argument(
+        "--pairs",
+        help="AWD corexy belt pairing in slot order, "
+        "e.g. 'motor_a,motor_a1;motor_b,motor_b1'",
     )
     args = p.parse_args(argv)
 
     capture_path = resolve_newest_capture(args.captures_dir, args.name)
+    structure = args.structure
     if args.structure == "corexy":
         if args.drive is not None:
             raise SystemExit("--drive conflicts with --structure corexy")
         header, _, _ = load_capture(capture_path)
         drive_names = [d["name"] for d in header["drives"]]
-        if len(drive_names) != 2:
-            raise SystemExit(
-                "corexy fit needs a 2-drive capture, got drives: %s"
-                % (", ".join(drive_names),)
-            )
+        axes, structure = corexy_layout(drive_names, args.pairs)
         drive_datas = [
-            (idx, load_capture(capture_path, name)[1])
-            for idx, name in enumerate(drive_names)
+            (drive_names.index(name), load_capture(capture_path, name)[1])
+            for name in axes
         ]
     else:
+        if args.pairs is not None:
+            raise SystemExit("--pairs needs --structure corexy")
         header, data, drive_idx = load_capture(capture_path, args.drive)
+        drive_names = [d["name"] for d in header["drives"]]
+        if args.drive is None and len(drive_names) > 1:
+            raise SystemExit(
+                "capture holds %d drives (%s); pass --drive to pick which "
+                "one the scalar fit describes"
+                % (len(drive_names), ", ".join(drive_names))
+            )
         drive_datas = [(drive_idx, data)]
     drive_indices = [idx for idx, _ in drive_datas]
     axes = [header["drives"][idx]["name"] for idx in drive_indices]
@@ -144,7 +201,7 @@ def main(argv=None):
     try:
         export_ident_csv(csv_path, header, drive_datas)
         proc = subprocess.run(
-            ident_cmd(binary, csv_path, axes, out_path, args),
+            ident_cmd(binary, csv_path, axes, out_path, args, structure),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -160,10 +217,16 @@ def main(argv=None):
         )
         return 0
     print("profile: %s" % (out_path,))
-    for axis in axes:
+    if structure == "scalar":
+        for axis in axes:
+            print(
+                "to use it: set dynamics_profile: %s under [motor %s] "
+                "and RESTART" % (out_path, axis)
+            )
+    else:
         print(
-            "to use it: set dynamics_profile: %s under [servo_%s] and RESTART"
-            % (out_path, axis.split("_")[-1])
+            "to use it: this is a coupled profile — set dynamics_profile: %s "
+            "under [ethercat_node] and RESTART" % (out_path,)
         )
     return 0
 

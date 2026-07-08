@@ -501,28 +501,27 @@ class Homing:
     def _active_servo_rails(self, gcmd, axis, active_rails):
         servo_rails = []
         for active_rail in active_rails:
-            if not hasattr(active_rail, "get_node_name"):
+            if not hasattr(active_rail, "get_motors"):
                 continue
-            limits = active_rail.get_homing_drive_limits()
-            if limits[1] <= 0:
-                raise gcmd.error(
-                    "%s homing: motor %s drives this axis but has no homing"
-                    " torque limit (its axis has no endstop_pin)"
-                    % ("XYZ"[axis], active_rail.get_motor_name())
+            for motor in active_rail.get_motors():
+                limits = motor.get_homing_drive_limits()
+                if limits[1] <= 0:
+                    raise gcmd.error(
+                        "%s homing: motor %s drives this axis but has no"
+                        " homing torque limit (its axis has no endstop_pin)"
+                        % ("XYZ"[axis], motor.get_motor_name())
+                    )
+                node = self.printer.lookup_object(
+                    "ethercat_node " + motor.get_node_name()
                 )
-            node = self.printer.lookup_object(
-                "ethercat_node " + active_rail.get_node_name()
-            )
-            servo_rails.append(
-                {
-                    "rail": active_rail,
-                    "handle": node.get_engine_handle(),
-                    "slot": node.get_slot_for_motor(
-                        active_rail.get_motor_name()
-                    ),
-                    "limits": limits,
-                }
-            )
+                servo_rails.append(
+                    {
+                        "rail": active_rail,
+                        "handle": node.get_engine_handle(),
+                        "slot": node.get_slot_for_motor(motor.get_motor_name()),
+                        "limits": limits,
+                    }
+                )
         return servo_rails
 
     def _set_homing_current(self, toolhead, rail, pre_homing):

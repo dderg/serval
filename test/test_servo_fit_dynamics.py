@@ -128,3 +128,59 @@ def test_ident_cmd_appends_physical_params():
         "--rotation-distance-mm",
         "40.0",
     ]
+
+
+def test_corexy_layout_two_drives_keeps_capture_order():
+    axes, structure = sfd.corexy_layout(["motor_b", "motor_a"], None)
+    assert axes == ["motor_b", "motor_a"]
+    assert structure == "corexy"
+
+
+def test_corexy_layout_two_drives_rejects_pairs():
+    with pytest.raises(SystemExit, match="4-drive"):
+        sfd.corexy_layout(["a", "b"], "a,b;c,d")
+
+
+def test_corexy_layout_awd_orders_axes_from_pairs():
+    axes, structure = sfd.corexy_layout(
+        ["motor_b1", "motor_a", "motor_b", "motor_a1"],
+        "motor_a,motor_a1;motor_b,motor_b1",
+    )
+    assert axes == ["motor_a", "motor_a1", "motor_b", "motor_b1"]
+    assert structure == "corexy-awd"
+
+
+def test_corexy_layout_awd_requires_pairs():
+    with pytest.raises(SystemExit, match="--pairs"):
+        sfd.corexy_layout(["a", "a1", "b", "b1"], None)
+
+
+def test_corexy_layout_awd_pairs_must_match_capture_drives():
+    with pytest.raises(SystemExit, match="do not match"):
+        sfd.corexy_layout(["a", "a1", "b", "b1"], "a,a1;b,b2")
+
+
+def test_corexy_layout_rejects_odd_drive_counts():
+    with pytest.raises(SystemExit, match="2-drive or 4-drive"):
+        sfd.corexy_layout(["a", "a1", "b"], None)
+
+
+def test_parse_pairs_rejects_malformed_spec():
+    with pytest.raises(SystemExit, match="two belt pairs"):
+        sfd.parse_pairs("a,a1,b,b1")
+    with pytest.raises(SystemExit, match="two belt pairs"):
+        sfd.parse_pairs("a;b")
+    assert sfd.parse_pairs("a, a1 ; b,b1") == [["a", "a1"], ["b", "b1"]]
+
+
+def test_ident_cmd_structure_override_wins():
+    cmd = sfd.ident_cmd(
+        "/bin/servo-ident",
+        "/tmp/c.csv",
+        ["a", "a1", "b", "b1"],
+        "/o.toml",
+        _args(structure="corexy"),
+        structure="corexy-awd",
+    )
+    assert cmd[cmd.index("--structure") + 1] == "corexy-awd"
+    assert cmd[cmd.index("--axes") + 1] == "a,a1,b,b1"
