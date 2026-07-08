@@ -129,6 +129,10 @@ class BedMesh:
         if self.fade_dist <= 0.0:
             self.fade_start = self.fade_end = self.FADE_DISABLE
         self.base_fade_target = config.getfloat("fade_target", None)
+        self.z_velocity_limit = config.getfloat(
+            "z_velocity_limit", None, above=0.0
+        )
+        self.z_accel_limit = config.getfloat("z_accel_limit", None, above=0.0)
         self.fade_target = 0.0
         self.tool_offset = 0.0
         self.gcode = self.printer.lookup_object("gcode")
@@ -266,6 +270,8 @@ class BedMesh:
                 fade,
                 zero_ref[0],
                 zero_ref[1],
+                self.z_velocity_limit,
+                self.z_accel_limit,
             )
         except ValueError as e:
             self.fade_target = 0.0

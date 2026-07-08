@@ -721,6 +721,8 @@ impl PyMotionEngine {
         fade: Option<(f64, f64, f64)>,
         zero_ref_x: f64,
         zero_ref_y: f64,
+        z_velocity_limit: Option<f64>,
+        z_accel_limit: Option<f64>,
     ) -> PyResult<f64> {
         let mut mesh = geometry::MeshGrid::new(x_min, y_min, dx, dy, nx, ny, points, tension)
             .map_err(|e| PyValueError::new_err(format!("set_bed_mesh: {e}")))?;
@@ -771,7 +773,11 @@ impl PyMotionEngine {
                     z_a = z_a.min(a);
                 }
             }
-            (cfg.cartesian, z_v, z_a)
+            (
+                cfg.cartesian,
+                z_velocity_limit.unwrap_or(z_v),
+                z_accel_limit.unwrap_or(z_a),
+            )
         };
         let coupled_v = bounds.max_gradient * limits.max_velocity;
         let coupled_a = bounds.max_gradient * limits.max_accel
@@ -780,8 +786,10 @@ impl PyMotionEngine {
             return Err(PyValueError::new_err(format!(
                 "set_bed_mesh: bed deviation needs {coupled_v:.2}mm/s / {coupled_a:.1}mm/s² \
                  of Z at your XY limits; Z allows {z_velocity_budget:.2}mm/s / \
-                 {z_accel_budget:.1}mm/s² — the bed is warped or the Z limits are too \
-                 conservative (mesh range {:.3}..{:.3}mm, max slope {:.4})",
+                 {z_accel_budget:.1}mm/s² — the bed is warped or the Z budget is too \
+                 conservative; raise z_velocity_limit/z_accel_limit in [bed_mesh] to \
+                 budget mesh-following separately (mesh range {:.3}..{:.3}mm, max \
+                 slope {:.4})",
                 bounds.z_min, bounds.z_max, bounds.max_gradient
             )));
         }
