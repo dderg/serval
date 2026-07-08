@@ -48,7 +48,7 @@ use motion_caps::{
 use runtime_caps::place_motor_response;
 use runtime_caps::{
     collect_motor_positions_inner, query_ethercat_runtime_caps, query_runtime_caps,
-    require_positive, slot_for_axis,
+    require_positive, slots_for_axis,
 };
 use state::{
     EthercatDrive, FlushState, FlushWait, HomingRun, HomingState, LatchedFaults, McuConnection,

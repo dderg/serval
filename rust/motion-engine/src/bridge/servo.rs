@@ -1,5 +1,6 @@
 use super::{
-    PyMotionEngine, PyResult, PyRuntimeError, Python, mcu_handle_from_raw, pymethods, slot_for_axis,
+    PyMotionEngine, PyResult, PyRuntimeError, Python, mcu_handle_from_raw, pymethods,
+    slots_for_axis,
 };
 use crate::lock_ext::LockExt;
 
@@ -267,17 +268,21 @@ impl PyMotionEngine {
             let seeds = seed_lanes
                 .iter()
                 .map(|&lane| {
-                    slot_for_axis(&mc.ethercat_slot_axes, lane)
-                        .map(|slot| (slot, crate::mcu_config::encode_q16(motor[lane])))
-                        .ok_or_else(|| {
-                            PyRuntimeError::new_err(format!(
-                                "finalize_homed_axis: axis {lane} not driven by mcu \
-                                 {mcu_handle} (slot map {:?})",
-                                mc.ethercat_slot_axes
-                            ))
-                        })
+                    let slots = slots_for_axis(&mc.ethercat_slot_axes, lane);
+                    if slots.is_empty() {
+                        return Err(PyRuntimeError::new_err(format!(
+                            "finalize_homed_axis: axis {lane} not driven by mcu \
+                             {mcu_handle} (slot map {:?})",
+                            mc.ethercat_slot_axes
+                        )));
+                    }
+                    let home_q16 = crate::mcu_config::encode_q16(motor[lane]);
+                    Ok(slots.into_iter().map(move |slot| (slot, home_q16)))
                 })
-                .collect::<PyResult<Vec<(u8, i32)>>>()?;
+                .collect::<PyResult<Vec<_>>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<(u8, i32)>>();
             (conn, seeds)
         };
         tracing::info!(

@@ -42,7 +42,14 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
                 handle_push_pieces(ctx, correlation_id, msg);
             }
             Command::QueryRuntimeCaps { correlation_id } => {
-                let total: u32 = (AXIS_RING_CAPACITY * ctx.num_slaves * 32) as u32;
+                // Capacity is per distinct axis, not per slave: an AWD axis
+                // fans its pieces out to every slot claiming it, so extra
+                // slots add no per-axis headroom. The host divides this by
+                // the axis count to size its per-axis window.
+                let mut distinct_axes: Vec<u8> = ctx.slave_axes.clone();
+                distinct_axes.sort_unstable();
+                distinct_axes.dedup();
+                let total: u32 = (AXIS_RING_CAPACITY * distinct_axes.len() * 32) as u32;
                 ctx.server
                     .respond(&runtime_caps_response_frame(correlation_id, total));
             }
@@ -165,8 +172,10 @@ fn handle_push_pieces(ctx: &mut EndpointCtx, correlation_id: u32, msg: PushPiece
     } else {
         match plan_bundle(&msg.axes, &ctx.slave_axes, |slot| ctx.rings[slot].free()) {
             Ok(slots) => {
-                for (axis, &slot) in msg.axes.iter().zip(slots.iter()) {
-                    ctx.rings[slot].push_from_bytes(axis.piece_count, &axis.pieces_bytes);
+                for (axis, axis_slots) in msg.axes.iter().zip(slots.iter()) {
+                    for &slot in axis_slots {
+                        ctx.rings[slot].push_from_bytes(axis.piece_count, &axis.pieces_bytes);
+                    }
                 }
                 0
             }

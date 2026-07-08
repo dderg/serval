@@ -1,4 +1,4 @@
-use super::{plan_bundle, resolve_slot};
+use super::{plan_bundle, resolve_slots};
 use mcu_protocol::messages::AxisPieces;
 use mcu_protocol::result_codes::RING_FULL;
 
@@ -29,24 +29,46 @@ fn axis(axis_idx: u8, piece_count: u8) -> AxisPieces {
 
 #[test]
 fn single_slave_routes_any_axis_to_slot_zero() {
-    assert_eq!(resolve_slot(7, &[3]), Some(0));
+    assert_eq!(resolve_slots(7, &[3]), vec![0]);
     let plan = plan_bundle(&[axis(7, 2)], &[3], |_| 10).unwrap();
-    assert_eq!(plan, vec![0]);
+    assert_eq!(plan, vec![vec![0]]);
 }
 
 #[test]
 fn multi_slave_routes_each_axis_to_its_configured_slot() {
     let slave_axes = [0u8, 1u8];
-    assert_eq!(resolve_slot(0, &slave_axes), Some(0));
-    assert_eq!(resolve_slot(1, &slave_axes), Some(1));
+    assert_eq!(resolve_slots(0, &slave_axes), vec![0]);
+    assert_eq!(resolve_slots(1, &slave_axes), vec![1]);
     let plan = plan_bundle(&[axis(1, 2), axis(0, 3)], &slave_axes, |_| 10).unwrap();
-    assert_eq!(plan, vec![1, 0]);
+    assert_eq!(plan, vec![vec![1], vec![0]]);
+}
+
+#[test]
+fn awd_axis_fans_out_to_every_slot_claiming_it() {
+    let slave_axes = [0u8, 0u8, 1u8, 1u8];
+    assert_eq!(resolve_slots(0, &slave_axes), vec![0, 1]);
+    assert_eq!(resolve_slots(1, &slave_axes), vec![2, 3]);
+    let plan = plan_bundle(&[axis(0, 2), axis(1, 3)], &slave_axes, |_| 10).unwrap();
+    assert_eq!(plan, vec![vec![0, 1], vec![2, 3]]);
+}
+
+#[test]
+fn awd_fan_out_rejects_when_any_target_slot_lacks_capacity() {
+    let slave_axes = [0u8, 0u8];
+    assert_eq!(
+        plan_bundle(&[axis(0, 5)], &slave_axes, |slot| if slot == 1 {
+            4
+        } else {
+            10
+        }),
+        Err(RING_FULL)
+    );
 }
 
 #[test]
 fn unmapped_axis_rejects_whole_bundle() {
     let slave_axes = [0u8, 1u8];
-    assert_eq!(resolve_slot(2, &slave_axes), None);
+    assert_eq!(resolve_slots(2, &slave_axes), Vec::<usize>::new());
     assert_eq!(
         plan_bundle(&[axis(0, 1), axis(2, 1)], &slave_axes, |_| 10),
         Err(RING_FULL)
@@ -77,7 +99,7 @@ fn capacity_accumulates_across_axes_targeting_one_slot() {
     );
     assert_eq!(
         plan_bundle(&[axis(5, 3), axis(5, 2)], &slave_axes, |_| 5).unwrap(),
-        vec![0, 0]
+        vec![vec![0, 1], vec![0, 1]]
     );
 }
 

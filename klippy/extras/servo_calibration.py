@@ -230,7 +230,11 @@ class ServoCalibration:
         return rails
 
     def _axis_servos(self, gcmd, axis):
-        return [r.get_motor_name() for r in self._axis_rails(gcmd, axis)]
+        return [
+            m.get_motor_name()
+            for r in self._axis_rails(gcmd, axis)
+            for m in r.get_motors()
+        ]
 
     def _strokes(self, axis, start, end, speed, accel, iterations, dwell):
         self._emit_strokes(
@@ -318,13 +322,14 @@ class ServoCalibration:
                 "start": start,
                 "end": end,
                 "th_per_unit": math.sqrt(2.0),
-                "servos": [rail.get_motor_name()],
-                "rails": [rail],
+                "servos": [m.get_motor_name() for m in rail.get_motors()],
+                "motors": list(rail.get_motors()),
                 "prep": ("X", "Y"),
                 "diagonal": True,
             }
         start, end = self._axis_bounds(gcmd, axis)
         rails = self._axis_rails(gcmd, axis)
+        motors = [m for r in rails for m in r.get_motors()]
 
         def coord(u):
             return "%s%.3f" % (axis, u)
@@ -334,8 +339,8 @@ class ServoCalibration:
             "start": start,
             "end": end,
             "th_per_unit": 1.0,
-            "servos": [r.get_motor_name() for r in rails],
-            "rails": rails,
+            "servos": [m.get_motor_name() for m in motors],
+            "motors": motors,
             "prep": (axis,),
             "diagonal": False,
         }
@@ -454,12 +459,12 @@ class ServoCalibration:
         self.gcode.run_script_from_command("SERVO_CAPTURE_STOP")
         self._restore()
         report_args = ["--name", name, "--png"]
-        rails = plan["rails"]
-        if not plan["diagonal"] and len(rails) == 2 and axis in ("X", "Y"):
+        motors = plan["motors"]
+        if not plan["diagonal"] and len(motors) == 2 and axis in ("X", "Y"):
             terms = ",".join(
                 "%s:%d"
-                % (r.get_motor_name(), -1 if r.get_invert_direction() else 1)
-                for r in rails
+                % (m.get_motor_name(), -1 if m.get_invert_direction() else 1)
+                for m in motors
             )
             report_args += ["--axis", axis, "--combine-corexy", terms]
         self._run(gcmd, "servo_capture.py", report_args, 120.0)
@@ -652,20 +657,13 @@ class ServoCalibration:
     def _resolve_node_slot(self, servo):
         from . import servo_axis
 
-        toolhead = self.printer.lookup_object("toolhead")
-        for rail in getattr(toolhead.get_kinematics(), "rails", ()):
-            if not isinstance(rail, servo_axis.ServoRail):
-                continue
-            if servo in (
-                rail.get_motor_name(),
-                rail.get_name(),
-                rail.get_name(short=True),
-            ):
-                node = self.printer.lookup_object(
-                    "ethercat_node " + rail.get_node_name()
-                )
-                return node, node.get_slot_for_motor(rail.get_motor_name())
-        raise self.printer.command_error("no servo motor named %r" % (servo,))
+        _rail, motor = servo_axis.resolve_servo_motor(
+            self.printer, servo, "SERVO_CALIBRATION"
+        )
+        node = self.printer.lookup_object(
+            "ethercat_node " + motor.get_node_name()
+        )
+        return node, node.get_slot_for_motor(motor.get_motor_name())
 
     def _read_param(self, servo, addr):
         from . import servo_param
