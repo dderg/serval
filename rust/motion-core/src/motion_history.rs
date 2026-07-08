@@ -3,9 +3,16 @@ use std::collections::{HashMap, VecDeque};
 use host_rt::passthrough_queue::{McuHandle, PassthroughRouter};
 use runtime::piece_ring::{MAX_PIECE_COEFFS, PieceEntry};
 
+use crate::kinematics::{KinematicsKind, KinematicsModule};
 use crate::types::AxisKey;
 
 pub const HISTORY_CAPACITY: usize = 4096;
+
+pub const AXIS_NAMES: [&str; 4] = ["x", "y", "z", "e"];
+
+/// Position-domain tolerance (mm) for treating a piece as a held rest: every
+/// Chebyshev coefficient above the constant term must fall within it.
+const REST_COEFF_EPS: f64 = 1e-6;
 
 #[derive(Debug, thiserror::Error)]
 pub enum HistoryError {
@@ -83,6 +90,14 @@ impl HistoryPiece {
             position: self.end_position(),
         }
     }
+
+    fn is_rest_at(&self, position: f64) -> bool {
+        let coeffs = self.live_coeffs();
+        let constant = coeffs[1..]
+            .iter()
+            .all(|&c| f64::from(c).abs() <= REST_COEFF_EPS);
+        constant && (self.end_position() - position).abs() <= REST_COEFF_EPS
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -90,6 +105,56 @@ pub struct AxisState {
     pub position: f64,
     pub velocity: f64,
     pub acceleration: f64,
+}
+
+/// `motor_state[i]` is the retained-history answer for motor axis `i`
+/// (0=first CoreXY/Cartesian motor, 1=second, 2=Z, 3=extruder) — the
+/// lowerer's output frame, e.g. CoreXY A/B, not cartesian X/Y. Inverts
+/// through `kin` to the cartesian axes named in `AXIS_NAMES`, mirroring
+/// `position_query::assemble_cartesian`'s live-query counterpart. Z and E
+/// pass straight through under every kinematics tag defined today (both
+/// `COREXY_MOTOR_TO_AXIS` and the cartesian identity have an identity Z
+/// row), independent of whether X/Y resolved. A coupled cartesian axis is
+/// omitted rather than computed from a missing motor as zero.
+pub fn assemble_cartesian_state(
+    motor_state: [Option<AxisState>; 4],
+    kin: &KinematicsModule,
+) -> HashMap<String, (f64, f64, f64)> {
+    let mut out = HashMap::new();
+    if let Some(e) = motor_state[3] {
+        out.insert(
+            AXIS_NAMES[3].to_string(),
+            (e.position, e.velocity, e.acceleration),
+        );
+    }
+    if let Some(z) = motor_state[2] {
+        out.insert(
+            AXIS_NAMES[2].to_string(),
+            (z.position, z.velocity, z.acceleration),
+        );
+    }
+    match kin.kind() {
+        KinematicsKind::Cartesian => {
+            for (axis, name) in AXIS_NAMES.iter().enumerate().take(2) {
+                if let Some(st) = motor_state[axis] {
+                    out.insert(
+                        (*name).to_string(),
+                        (st.position, st.velocity, st.acceleration),
+                    );
+                }
+            }
+        }
+        KinematicsKind::CoreXy => {
+            if let (Some(m0), Some(m1)) = (motor_state[0], motor_state[1]) {
+                let pos = kin.inverse([m0.position, m1.position, 0.0]);
+                let vel = kin.inverse([m0.velocity, m1.velocity, 0.0]);
+                let accel = kin.inverse([m0.acceleration, m1.acceleration, 0.0]);
+                out.insert(AXIS_NAMES[0].to_string(), (pos[0], vel[0], accel[0]));
+                out.insert(AXIS_NAMES[1].to_string(), (pos[1], vel[1], accel[1]));
+            }
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -108,14 +173,17 @@ impl AxisEndpoint {
     }
 }
 
-/// The rest an axis held between its last endpoint and the first piece
-/// recorded after the ring was (re)started — pieces are the only way an axis
-/// moves, so that whole span answers with the endpoint position. Kept
-/// separately from the ring because capacity eviction moves the ring's front
-/// past `until`, and queries in that evicted gap must still fail.
+/// The rest an axis provably held before a restarted ring: pieces are the only
+/// way an axis moves, so the span `[from, until]` answers with the endpoint
+/// position. `from` is the start of the trailing run of rest pieces preceding
+/// the drop — not the last piece's scheduled end — so a dwell that straddled
+/// the re-anchor stays answerable; anything earlier was real motion and must
+/// fail. Kept separate from the ring because capacity eviction moves the ring's
+/// front past `until`, and queries in that evicted gap must still fail.
 #[derive(Debug, Clone, Copy)]
 struct HoldBeforeRing {
     endpoint: AxisEndpoint,
+    from: f64,
     until: f64,
 }
 
@@ -189,6 +257,17 @@ fn eval_state(piece: &HistoryPiece, host_t: f64) -> AxisState {
     eval_at_u(piece, u)
 }
 
+fn trailing_rest_start(ring: &VecDeque<HistoryPiece>, endpoint: AxisEndpoint) -> f64 {
+    let mut start = endpoint.host;
+    for piece in ring.iter().rev() {
+        if !piece.is_rest_at(endpoint.position) {
+            break;
+        }
+        start = piece.start_host;
+    }
+    start
+}
+
 #[derive(Debug, Default)]
 pub struct HistoryStore {
     rings: HashMap<AxisKey, VecDeque<HistoryPiece>>,
@@ -219,12 +298,26 @@ impl HistoryStore {
         let piece = HistoryPiece::from_entry(entry, nominal_freq_hz, host_secs);
         let ring = self.rings.entry(key).or_default();
         if ring.is_empty() {
-            if let Some(endpoint) = self.endpoints.get(&key).copied() {
+            if let Some(hold) = self.holds_before_ring.get_mut(&key) {
+                if piece.start_host < hold.endpoint.host {
+                    tracing::warn!(
+                        subsystem = "motion",
+                        event = "history_hold_rewound",
+                        mcu = key.mcu_id,
+                        axis = key.axis,
+                        start_host = piece.start_host,
+                        endpoint_host = hold.endpoint.host,
+                        "[history] first piece after re-anchor precedes the held endpoint — clamping hold coverage"
+                    );
+                }
+                hold.until = piece.start_host;
+            } else if let Some(endpoint) = self.endpoints.get(&key).copied() {
                 if endpoint.host <= piece.start_host {
                     self.holds_before_ring.insert(
                         key,
                         HoldBeforeRing {
                             endpoint,
+                            from: endpoint.host,
                             until: piece.start_host,
                         },
                     );
@@ -283,7 +376,20 @@ impl HistoryStore {
             dropped,
             "[history] stream re-anchored — dropped retained pieces, endpoints held"
         );
-        for ring in self.rings.values_mut() {
+        for (key, ring) in self.rings.iter_mut() {
+            if ring.is_empty() {
+                continue;
+            }
+            if let Some(endpoint) = self.endpoints.get(key).copied() {
+                self.holds_before_ring.insert(
+                    *key,
+                    HoldBeforeRing {
+                        endpoint,
+                        from: trailing_rest_start(ring, endpoint),
+                        until: f64::INFINITY,
+                    },
+                );
+            }
             ring.clear();
         }
     }
@@ -331,7 +437,7 @@ impl HistoryStore {
                     let held_rest_before_ring = self
                         .holds_before_ring
                         .get(&key)
-                        .filter(|hold| hold.endpoint.host <= host_t && host_t <= hold.until);
+                        .filter(|hold| hold.from <= host_t && host_t <= hold.until);
                     if let Some(hold) = held_rest_before_ring {
                         return Ok(hold.endpoint.hold_state());
                     }
@@ -351,10 +457,26 @@ impl HistoryStore {
                 }
                 piece.endpoint()
             }
-            None => *self
-                .endpoints
-                .get(&key)
-                .ok_or(HistoryError::NoHistoryForAxis(key))?,
+            None => {
+                let endpoint = *self
+                    .endpoints
+                    .get(&key)
+                    .ok_or(HistoryError::NoHistoryForAxis(key))?;
+                if let Some(hold) = self.holds_before_ring.get(&key) {
+                    if host_t < hold.from {
+                        return Err(HistoryError::BeforeRetainedWindow {
+                            key,
+                            queried: host_t,
+                            window_start: hold.from,
+                            window_end: hold.endpoint.host,
+                            ring_len: 0,
+                            evicted: self.evicted.get(&key).copied().unwrap_or(0),
+                            first_dur_s: 0.0,
+                        });
+                    }
+                }
+                endpoint
+            }
         };
         if let Some(now_host) = now_host {
             if host_t > now_host {

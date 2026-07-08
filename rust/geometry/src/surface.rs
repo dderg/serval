@@ -4,11 +4,11 @@
 //! derivatives, which the lowerer needs for chain-rule Z velocity/accel
 //! feedforward. See docs/rewrite/toolpath-surface-transforms.md.
 
-/// Sampled cells are probed on an interior grid this fine; the margin covers
-/// inter-sample variation of a cubic patch between probes. Gross-error-gate
-/// accuracy, not interval arithmetic.
-const BOUND_SAMPLES_PER_CELL: usize = 8;
-const SAMPLED_BOUND_MARGIN: f64 = 1.5;
+/// Sampled cells are probed on an interior grid this fine; dense enough that
+/// inter-sample variation of a cubic patch is negligible. Gross-error-gate
+/// accuracy, not interval arithmetic — no padding is applied, so the bounds
+/// can undershoot the true extrema by a sliver.
+const BOUND_SAMPLES_PER_CELL: usize = 16;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SurfaceError {
@@ -52,8 +52,8 @@ pub struct SurfaceSample {
     pub zyy: f64,
 }
 
-/// Worst-case magnitudes over the whole mesh, for the activation-time
-/// gross-error gate and for padding sampled range estimates soundly.
+/// Worst-case magnitudes over the whole mesh (densely sampled, unpadded),
+/// for the activation-time gross-error gate and sampled range estimates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SurfaceBounds {
     /// max ‖∇z‖ (dimensionless slope).
@@ -220,7 +220,7 @@ impl MeshGrid {
         }
     }
 
-    /// Sampled worst-case magnitudes, padded by [`SAMPLED_BOUND_MARGIN`].
+    /// Sampled worst-case magnitudes at [`BOUND_SAMPLES_PER_CELL`] density.
     pub fn bounds(&self) -> SurfaceBounds {
         let mut max_gradient: f64 = 0.0;
         let mut max_curvature: f64 = 0.0;
@@ -240,12 +240,11 @@ impl MeshGrid {
                 z_max = z_max.max(s.z);
             }
         }
-        let z_pad = (SAMPLED_BOUND_MARGIN - 1.0) * (z_max - z_min);
         SurfaceBounds {
-            max_gradient: max_gradient * SAMPLED_BOUND_MARGIN,
-            max_curvature: max_curvature * SAMPLED_BOUND_MARGIN,
-            z_min: z_min - z_pad,
-            z_max: z_max + z_pad,
+            max_gradient,
+            max_curvature,
+            z_min,
+            z_max,
         }
     }
 

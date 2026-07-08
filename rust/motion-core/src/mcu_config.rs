@@ -1,4 +1,5 @@
 use crate::kinematics::SPATIAL_AXES;
+use crate::types::AxisKey;
 use runtime::segment::KinematicTag;
 use std::collections::{HashMap, HashSet};
 
@@ -94,6 +95,39 @@ pub fn motor_frame(cfg: &McuAxisConfig, axes: [f64; SPATIAL_AXES]) -> [f64; SPAT
     crate::kinematics::KinematicsModule::from_tag(cfg.kinematics)
         .expect("build_mcu_configs validated the kinematics tag")
         .forward(axes)
+}
+
+/// Motor-frame rebase targets for a cartesian stop position (a homing/probe
+/// trip's result, or any other `SET_KINEMATIC_POSITION`-style external set).
+/// The retained motion history is motor frame everywhere else — live pieces
+/// are the lowerer's output (e.g. CoreXY A/B) — so a rebase fed raw cartesian
+/// would leave axis 0/1 cartesian-valued until the next live piece overwrites
+/// them, while every other reader of that axis (including a kinematics
+/// inversion) assumes motor frame. Same per-cfg transform as
+/// `build_serial_seed_sends` uses to seed the MCUs for the same event.
+pub fn spatial_rebase_targets(
+    configs: &[McuAxisConfig],
+    cartesian: [f64; SPATIAL_AXES],
+) -> Vec<(AxisKey, f64)> {
+    configs
+        .iter()
+        .flat_map(|cfg| {
+            let motor = motor_frame(cfg, cartesian);
+            cfg.axes
+                .iter()
+                .filter(|&&a| a < SPATIAL_AXES)
+                .map(move |&axis| {
+                    (
+                        AxisKey {
+                            mcu_id: cfg.mcu_id,
+                            axis: axis as u8,
+                        },
+                        motor[axis],
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,6 +291,35 @@ mod seed_tests {
         assert_eq!(
             motor_frame(&cartesian_z_cfg(), [150.0, 150.0, 50.0]),
             [150.0, 150.0, 50.0]
+        );
+    }
+
+    #[test]
+    fn spatial_rebase_targets_are_motor_frame_not_cartesian() {
+        // A homing/probe trip's stop position (e.g. bed-mesh or z_tilt's
+        // per-point probe descend, both ending in toolhead.set_position) is
+        // cartesian. On CoreXY the rebased axis-0/1 values must be A/B motor
+        // positions — the same frame commit_sent_bundle records live pieces
+        // in — not the raw x/y, or a later cartesian-inverting reader (like
+        // motion_state_at_clock) double-transforms an already-correct value.
+        let configs = vec![corexy_cfg(), cartesian_z_cfg()];
+        let targets = spatial_rebase_targets(&configs, [270.0, 5.0, 12.5]);
+
+        let get = |mcu_id: u32, axis: u8| {
+            targets
+                .iter()
+                .find(|(k, _)| k.mcu_id == mcu_id && k.axis == axis)
+                .unwrap_or_else(|| panic!("no rebase target for mcu {mcu_id} axis {axis}"))
+                .1
+        };
+        assert!((get(1, 0) - 275.0).abs() < 1e-9, "motor0 (x+y)");
+        assert!((get(1, 1) - 265.0).abs() < 1e-9, "motor1 (x-y)");
+        assert!((get(2, 2) - 12.5).abs() < 1e-9, "z passes through");
+        assert!(
+            !targets
+                .iter()
+                .any(|(k, _)| k.mcu_id == 1 && k.axis as usize == FOLLOWER_E),
+            "the extruder is not a spatial axis and must not be rebased here"
         );
     }
 

@@ -602,3 +602,81 @@ fn passive_fence_resolves_as_the_stream_commits_past_it() {
     );
     h.shutdown();
 }
+
+#[test]
+fn startup_prime_defers_drain_until_pipeline_fills() {
+    let cap = Capture::default();
+    let mut h = StreamWorkerHandle::spawn(
+        cfg_cap(256),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0],
+        cap.clone(),
+        Arc::default(),
+        None,
+    );
+
+    let n: u32 = 80;
+    let mut prev = [0.0, 0.0, 0.0];
+    for i in 0..n {
+        let x = f64::from(i + 1) * 10.0;
+        let y = if i % 2 == 0 { 5.0 } else { 0.0 };
+        let end = [x, y, 0.0];
+        loop {
+            match h.submit_move(line(i + 1, prev, end)) {
+                Ok(()) => break,
+                Err(StreamWorkerError::ChannelFull) => std::thread::yield_now(),
+                Err(e) => panic!("submit failed: {e}"),
+            }
+        }
+        prev = end;
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while cap.snapshot().len() < 10 {
+        assert!(
+            Instant::now() < deadline,
+            "startup prime: pipeline did not dispatch a deep batch within the \
+             prime window (got {} segments)",
+            cap.snapshot().len()
+        );
+        std::thread::yield_now();
+    }
+
+    let segs = cap.snapshot();
+    for w in segs.windows(2) {
+        assert!(
+            (w[1].0 - w[0].1).abs() < 1e-6,
+            "time gap between dispatched segments"
+        );
+    }
+    h.shutdown();
+}
+
+#[test]
+fn startup_prime_drains_after_timeout_for_sparse_input() {
+    let cap = Capture::default();
+    let mut h = StreamWorkerHandle::spawn(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0],
+        cap.clone(),
+        Arc::default(),
+        None,
+    );
+
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while cap.snapshot().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "sparse input was never dispatched — the prime timeout did not fire"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let segs = cap.snapshot();
+    assert!(!segs.is_empty());
+    h.shutdown();
+}

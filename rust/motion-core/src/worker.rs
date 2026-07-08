@@ -286,6 +286,7 @@ impl StreamWorkerHandle {
             links: Arc::clone(&links),
             frontier,
             undrained: false,
+            undrained_since: None,
             last_line: 0,
             pump_control,
         };

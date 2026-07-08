@@ -16,7 +16,6 @@ use host_rt::passthrough_queue::PassthroughRouter;
 
 use crate::classify;
 use crate::config::{self, PlannerConfig};
-use crate::kinematics::SPATIAL_AXES;
 use crate::mcu_config::{McuAxisConfig, McuCaps, build_mcu_configs};
 use crate::types::mcu_handle_from_raw;
 use crate::worker::{StreamWorkerError, StreamWorkerHandle};
