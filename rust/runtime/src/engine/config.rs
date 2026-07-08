@@ -60,6 +60,23 @@ impl Engine {
         RUNTIME_OK
     }
 
+    pub fn set_axis_step_budget(&mut self, axis_idx: u8, max_steps_per_sample: u32) -> i32 {
+        if max_steps_per_sample == 0
+            || max_steps_per_sample > crate::sub_sample_timing::MAX_STEPS_PER_SAMPLE as u32
+        {
+            return RUNTIME_ERR_INVALID_ARG;
+        }
+        let Some(axis) = self
+            .stepping_axes
+            .get_mut(axis_idx as usize)
+            .and_then(|s| s.as_mut())
+        else {
+            return RUNTIME_ERR_INVALID_ARG;
+        };
+        axis.max_steps_per_sample = max_steps_per_sample;
+        RUNTIME_OK
+    }
+
     pub fn configure_kinematics(&mut self, k_xy: f32) -> i32 {
         if !k_xy.is_finite() || k_xy <= 0.0 {
             return -1;

@@ -504,6 +504,7 @@ mod corexy_reconstruction_tests {
             caps: McuCaps {
                 total_piece_memory: 4096,
             },
+            max_motor_velocity: Vec::new(),
         }
     }
 
@@ -515,6 +516,7 @@ mod corexy_reconstruction_tests {
             caps: McuCaps {
                 total_piece_memory: 4096,
             },
+            max_motor_velocity: Vec::new(),
         }
     }
 

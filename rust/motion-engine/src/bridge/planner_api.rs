@@ -96,11 +96,17 @@ struct McuTopology {
     mcu_id: u32,
     axes: Vec<u8>,
     kinematics: u8,
+    max_motor_velocity: Vec<f64>,
 }
 
 impl McuTopology {
-    fn into_tuple(self) -> (u32, Vec<u8>, u8) {
-        (self.mcu_id, self.axes, self.kinematics)
+    fn into_tuple(self) -> (u32, Vec<u8>, u8, Vec<f64>) {
+        (
+            self.mcu_id,
+            self.axes,
+            self.kinematics,
+            self.max_motor_velocity,
+        )
     }
 }
 
@@ -360,7 +366,8 @@ impl PyMotionEngine {
         )?;
         *self.planner_config.lock_ok() = cfg.clone();
 
-        let mcus: Vec<(u32, Vec<u8>, u8)> = mcus.into_iter().map(McuTopology::into_tuple).collect();
+        let mcus: Vec<(u32, Vec<u8>, u8, Vec<f64>)> =
+            mcus.into_iter().map(McuTopology::into_tuple).collect();
         let (ec_conns, mcu_configs) = self.resolve_mcu_topology(&mcus)?;
 
         let (ethercat_mcu_ids, host_ios, ring_depth_table) =

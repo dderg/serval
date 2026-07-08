@@ -57,6 +57,7 @@ fn cartesian_x_axis_yields_pieces_with_projected_start_time() {
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
         },
+        max_motor_velocity: Vec::new(),
     }];
 
     let msgs = enqueue_segment(
@@ -106,6 +107,7 @@ fn corexy_x_slot_is_x_plus_y() {
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
         },
+        max_motor_velocity: Vec::new(),
     }];
 
     let seg = ShapedSegment {
@@ -210,6 +212,7 @@ fn flatten_axis_max_piece_secs_splits_long_piece() {
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
         },
+        max_motor_velocity: Vec::new(),
     }];
 
     fn linear_axis_scaled(p0: f64, p1: f64, duration: f64) -> ScalarNurbs {
@@ -285,6 +288,7 @@ fn axis_cfg_single(axis: usize) -> Vec<McuAxisConfig> {
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
         },
+        max_motor_velocity: Vec::new(),
     }]
 }
 
@@ -705,6 +709,7 @@ fn test_mcu_configs_one_axis(axis: usize) -> Vec<McuAxisConfig> {
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
         },
+        max_motor_velocity: Vec::new(),
     }]
 }
 
@@ -900,4 +905,59 @@ fn overlay_multi_piece_cumulative_positions_produce_individual_spans() {
             "piece {i} must start at 0 (relativized), got b0={b0}"
         );
     }
+}
+
+#[test]
+fn step_rate_within_ceiling_enqueues() {
+    let cfg = vec![McuAxisConfig {
+        mcu_id: 7,
+        axes: vec![AXIS_X, AXIS_Y, 2],
+        kinematics: 1,
+        caps: McuCaps {
+            total_piece_memory: 62 * 1024,
+        },
+        max_motor_velocity: vec![50.0, 50.0, 50.0],
+    }];
+    // seg_x_move covers 10 mm in 1 s — 10 mm/s, comfortably under 50 mm/s.
+    let msgs = enqueue_segment(
+        &seg_x_move(),
+        &cfg,
+        &crate::enqueue::EnqueueCtx {
+            t0: 100.0,
+            epoch: crate::anchor::StreamEpoch::Reposition,
+            host_now: 0.0,
+            lead_secs: crate::pump::MAX_LEAD_SECS,
+            project: |_mcu, hs| (hs * 1_000.0) as u64,
+            max_piece_secs: None,
+        },
+    );
+    assert!(!msgs.is_empty());
+}
+
+#[test]
+#[should_panic(expected = "step rate exceeds MCU ceiling (-307)")]
+fn step_rate_over_ceiling_fails_loud() {
+    let cfg = vec![McuAxisConfig {
+        mcu_id: 7,
+        axes: vec![AXIS_X, AXIS_Y, 2],
+        kinematics: 1,
+        caps: McuCaps {
+            total_piece_memory: 62 * 1024,
+        },
+        max_motor_velocity: vec![5.0, 5.0, 5.0],
+    }];
+    // 10 mm/s demand against a 5 mm/s ceiling must abort before the MCU
+    // would latch -310.
+    let _ = enqueue_segment(
+        &seg_x_move(),
+        &cfg,
+        &crate::enqueue::EnqueueCtx {
+            t0: 100.0,
+            epoch: crate::anchor::StreamEpoch::Reposition,
+            host_now: 0.0,
+            lead_secs: crate::pump::MAX_LEAD_SECS,
+            project: |_mcu, hs| (hs * 1_000.0) as u64,
+            max_piece_secs: None,
+        },
+    );
 }

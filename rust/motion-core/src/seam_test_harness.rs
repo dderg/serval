@@ -44,6 +44,7 @@ fn harness_mcu_configs() -> Vec<McuAxisConfig> {
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
         },
+        max_motor_velocity: vec![f64::INFINITY; 3],
     }]
 }
 

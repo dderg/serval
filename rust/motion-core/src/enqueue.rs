@@ -98,6 +98,7 @@ where
                     motor_mask: seg.motor_mask,
                 },
             );
+            check_step_rate_ceiling(cfg, axis_idx, &pieces, seg.source_line);
             if !pieces.is_empty() {
                 out.push(EnqueueMsg {
                     key,
@@ -111,6 +112,35 @@ where
     }
 
     out
+}
+
+/// Host-side mirror of the MCU's per-sample step budget (-310) and the
+/// runtime's -307 StepRateExceedsMcuCeiling: a track demanding more motor
+/// velocity than the MCU can physically step fails loud here, with the axis,
+/// the demand and the gcode line, instead of latching a bare fault mid-print.
+fn check_step_rate_ceiling(
+    cfg: &McuAxisConfig,
+    axis_idx: usize,
+    pieces: &[(runtime::piece_ring::PieceEntry, f64)],
+    source_line: u32,
+) {
+    let ceiling = cfg.motor_velocity_ceiling(axis_idx);
+    if ceiling == f64::INFINITY {
+        return;
+    }
+    for (piece, _) in pieces {
+        let demand = f64::from(piece.vel_start().abs().max(piece.vel_end().abs()));
+        assert!(
+            demand <= ceiling,
+            "step rate exceeds MCU ceiling (-307) on mcu{} axis{axis_idx}: the shaped \
+             track demands {demand:.1} mm/s but the motor can only be stepped at \
+             {ceiling:.1} mm/s (gcode line {source_line}) — lower the velocity/accel \
+             demand on this axis (pressure advance and smoothing add to it) or raise \
+             the motor's step-rate ceiling (dedge, shorter step pulse, coarser \
+             microstepping)",
+            cfg.mcu_id,
+        );
+    }
 }
 
 /// The NURBS carrier's Bernstein round trip turns a lower-degree piece's zero
