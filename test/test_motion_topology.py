@@ -4,7 +4,10 @@ from klippy.motion_kinematics import _LinearKinematics
 
 class FakeMcu:
     def __init__(self, handle):
-        self._engine_handle = handle
+        self._handle = handle
+
+    def get_engine_handle(self):
+        return self._handle
 
 
 class FakeStepper:

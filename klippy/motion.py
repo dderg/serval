@@ -923,7 +923,7 @@ class Motion:
         oid = gcmd.get_int("OID", 0, minval=0)
         if self.mcu is None:
             raise gcmd.error("mcu not available")
-        handle = getattr(self.mcu, "_engine_handle", None)
+        handle = self.mcu.get_engine_handle()
         if handle is None:
             raise gcmd.error("engine handle not set")
         try:
@@ -945,7 +945,7 @@ class Motion:
         oid = gcmd.get_int("OID", 0, minval=0, maxval=3)
         if self.mcu is None:
             raise gcmd.error("mcu not available")
-        handle = getattr(self.mcu, "_engine_handle", None)
+        handle = self.mcu.get_engine_handle()
         if handle is None:
             raise gcmd.error("engine handle not set")
         try:
@@ -967,7 +967,7 @@ class Motion:
         oid = gcmd.get_int("OID", 0, minval=0, maxval=3)
         if self.mcu is None:
             raise gcmd.error("mcu not available")
-        handle = getattr(self.mcu, "_engine_handle", None)
+        handle = self.mcu.get_engine_handle()
         if handle is None:
             raise gcmd.error("engine handle not set")
         try:
@@ -1009,7 +1009,7 @@ class Motion:
                 raise gcmd.error("set_gpio_input failed: %s" % e)
         if self.mcu is None:
             raise gcmd.error("no MCU available for sim endstop set_pin")
-        handle = self.mcu._engine_handle
+        handle = self.mcu.get_engine_handle()
         try:
             self.engine.engine_send(
                 handle,

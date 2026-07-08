@@ -34,6 +34,7 @@ class SerialReader:
         self.reactor = reactor
         self.warn_prefix = warn_prefix
         self.mcu = mcu
+        self.engine_mcu = mcu.engine_mcu if mcu is not None else None
         self._event_poller_timer = None
         self._engine_detached = False
         self.msgparser = msgproto.MessageParser(warn_prefix=warn_prefix)
@@ -150,16 +151,12 @@ class SerialReader:
             )
 
     def _engine_event_poller(self, eventtime):
-        if self.mcu is None:
-            return self.reactor.NEVER
-        engine = self.mcu._motion_engine
-        handle = self.mcu._engine_handle
-        if handle is None:
+        if self.engine_mcu is None or not self.engine_mcu.is_claimed():
             return self.reactor.NEVER
         now = eventtime
         for _ in range(32):
             try:
-                ev = engine.take_runtime_event(handle)
+                ev = self.engine_mcu.take_runtime_event()
             except RuntimeError as e:
                 if not self._is_engine_transport_drop(e):
                     raise
@@ -192,18 +189,10 @@ class SerialReader:
 
     def connect_pipe(self, filename, baud=0):
         logging.info("%sStarting connect", self.warn_prefix)
-        engine = self.mcu._motion_engine
-        # claim_mcu may not have been called yet (it normally happens in
-        # _mcu_identify after connect_pipe returns). Allocate the handle
-        # here so attach_serial has something to bind to; the later guard
-        # in _mcu_identify will skip the second claim_mcu call.
-        if self.mcu._engine_handle is None:
-            self.mcu._engine_handle = engine.claim_mcu(
-                self.mcu._name,
-                filename,
-                baud,
-            )
-        handle = self.mcu._engine_handle
+        # claim() normally happens in _mcu_identify after connect_pipe
+        # returns; claiming here (idempotently) gives attach_serial a
+        # handle to bind to.
+        handle = self.engine_mcu.claim(filename, baud)
         klippy_non_critical = bool(getattr(self.mcu, "is_non_critical", False))
         expect_native = bool(getattr(self.mcu, "_expect_native", True))
         logging.info(
@@ -215,15 +204,14 @@ class SerialReader:
             klippy_non_critical,
             expect_native,
         )
-        engine.attach_serial(
-            handle,
+        self.engine_mcu.attach_serial(
             filename,
             baud,
             timeout_s=30.0,
             klippy_non_critical=klippy_non_critical,
             expect_native=expect_native,
         )
-        identify_data = engine.get_identify_data(handle)
+        identify_data = self.engine_mcu.get_identify_data()
         logging.info(
             "%sengine identify done (%d bytes)",
             self.warn_prefix,
@@ -260,15 +248,10 @@ class SerialReader:
         )
 
     def set_clock_est(self, freq, conv_time, conv_clock, last_clock):
-        if self.mcu._motion_engine is None:
+        if not self.engine_mcu.available():
             return
-        host_now_raw = self.reactor.monotonic()
-        self.mcu._motion_engine.set_clock_est(
-            self.mcu._engine_handle,
-            float(freq),
-            float(conv_time),
-            int(conv_clock),
-            host_now_raw,
+        self.engine_mcu.set_clock_est(
+            freq, conv_time, conv_clock, self.reactor.monotonic()
         )
 
     def disconnect(self):
@@ -284,15 +267,17 @@ class SerialReader:
         # Release the serial port through the engine so firmware_restart's
         # arduino_reset() can open it for the DTR toggle.  Mirrors
         # mainline's disconnect() which closes the FD before the reset.
-        engine = getattr(self.mcu, "_motion_engine", None)
-        handle = getattr(self.mcu, "_engine_handle", None)
-        if engine is not None and handle is not None:
+        if (
+            self.engine_mcu is not None
+            and self.engine_mcu.available()
+            and self.engine_mcu.is_claimed()
+        ):
             # Fail loud: a silently-swallowed detach failure masks exactly the
             # class of bug (leaked fd holding the pts in exclusive mode) that
             # causes the next process's attach_serial to spin on EBUSY. Log for
             # context, then re-raise so the failure surfaces.
             try:
-                engine.detach_serial(handle)
+                self.engine_mcu.detach_serial()
             except Exception:
                 logging.exception("engine detach_serial failed")
                 raise
@@ -328,23 +313,20 @@ class SerialReader:
         """Send a get_clock request through the engine with RAW timestamp
         capture.  The response arrives via take_runtime_event as a
         PassthroughResponse with sent_time_raw/recv_time_raw filled in."""
-        engine = self.mcu._motion_engine
-        if engine is None:
+        if not self.engine_mcu.available():
             self._error(
                 "engine_get_clock_async() called without a motion engine"
             )
-        handle = self.mcu._engine_handle
-        if handle is None:
+        if not self.engine_mcu.is_claimed():
             self._error("engine_get_clock_async() called before claim_mcu")
         try:
-            engine.engine_get_clock_async(handle)
+            self.engine_mcu.get_clock_async()
         except RuntimeError as e:
             if not self._is_engine_transport_drop(e):
                 raise
 
     def send(self, msg, minclock=0, reqclock=0):
-        engine = self.mcu._motion_engine
-        if engine is None:
+        if not self.engine_mcu.available():
             self._error("send() called without a motion engine")
         if self._engine_detached:
             return
@@ -352,9 +334,8 @@ class SerialReader:
             return
         if reqclock:
             self._warn_if_deadline_margin_thin(msg, reqclock)
-        handle = self.mcu._engine_handle
         try:
-            engine.engine_send(handle, msg)
+            self.engine_mcu.send(msg)
         except RuntimeError as e:
             if not self._is_engine_transport_drop(e):
                 raise
@@ -387,17 +368,12 @@ class SerialReader:
         return True
 
     def send_with_response(self, msg, response):
-        engine = self.mcu._motion_engine
-        if engine is None:
+        if not self.engine_mcu.available():
             self._error("send_with_response() called without a motion engine")
         if self._engine_detached:
             raise error("serial connection closed")
         try:
-            params = engine.engine_call(
-                self.mcu._engine_handle,
-                msg,
-                response,
-            )
+            params = self.engine_mcu.call(msg, response)
         except RuntimeError as e:
             if not self._is_engine_transport_drop(e):
                 raise

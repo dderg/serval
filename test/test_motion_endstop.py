@@ -166,7 +166,8 @@ class FakeEngine:
 
 
 class FakeRemoteMcu:
-    _engine_handle = 42
+    def get_engine_handle(self):
+        return 42
 
 
 def _remote_setup():
