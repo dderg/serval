@@ -247,6 +247,9 @@ class MotionEngineWrapper:
         return self._engine.pump_backlog() or 0
 
     def motion_state_at(self, mcu, clock=None, print_time=None):
+        """Per-axis (pos, vel, accel) at a clock, in GCODE space: the bridge
+        unwarps the machine-space motion history through the active bed mesh,
+        so results are directly comparable to toolhead positions."""
         if (clock is None) == (print_time is None):
             raise ValueError(
                 "motion_state_at: specify exactly one of clock= or print_time="

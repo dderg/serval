@@ -20,8 +20,13 @@ pub(crate) struct HomingState {
     pub(crate) run: Arc<Mutex<Option<HomingRun>>>,
     pub(crate) pending_trip: Arc<Mutex<Option<(u32, u8, u64)>>>,
     pub(crate) active_drip_cohort: Arc<Mutex<Option<u64>>>,
-    pub(crate) result:
-        Mutex<Option<crossbeam_channel::Receiver<Result<([f64; 3], [f64; 3], u64), String>>>>,
+    pub(crate) result: Mutex<
+        Option<
+            crossbeam_channel::Receiver<
+                Result<(geometry::MachinePos, geometry::MachinePos, u64), String>,
+            >,
+        >,
+    >,
 }
 
 impl HomingState {
@@ -98,7 +103,9 @@ pub(crate) struct HomingRun {
     pub(crate) axis_key: crate::types::AxisKey,
     pub(crate) all_axis_keys: Vec<crate::types::AxisKey>,
     pub(crate) window_start_host: f64,
-    pub(crate) notify: crossbeam_channel::Sender<Result<([f64; 3], [f64; 3], u64), String>>,
+    pub(crate) notify: crossbeam_channel::Sender<
+        Result<(geometry::MachinePos, geometry::MachinePos, u64), String>,
+    >,
 }
 
 pub(crate) struct McuConnection {

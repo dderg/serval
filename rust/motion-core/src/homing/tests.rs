@@ -491,7 +491,7 @@ mod broadcast_stop_tests {
 mod corexy_reconstruction_tests {
     use super::{FREQ, make_linear_piece, record_synced, router_with_clock, shared};
     use crate::homing::{final_cartesian_position, reconstruct_cartesian_position};
-    use crate::mcu_config::{AXIS_X, AXIS_Y, McuAxisConfig, McuCaps};
+    use crate::mcu_config::{AXIS_X, AXIS_Y, AXIS_Z, McuAxisConfig, McuCaps};
     use crate::motion_history::HistoryStore;
     use crate::types::AxisKey;
     use runtime::segment::KinematicTag;
@@ -500,6 +500,17 @@ mod corexy_reconstruction_tests {
         McuAxisConfig {
             mcu_id,
             axes: vec![AXIS_X, AXIS_Y],
+            kinematics: KinematicTag::CoreXy as u8,
+            caps: McuCaps {
+                total_piece_memory: 4096,
+            },
+        }
+    }
+
+    fn z_cfg(mcu_id: u32) -> McuAxisConfig {
+        McuAxisConfig {
+            mcu_id,
+            axes: vec![AXIS_Z],
             kinematics: KinematicTag::CoreXy as u8,
             caps: McuCaps {
                 total_piece_memory: 4096,
@@ -543,11 +554,20 @@ mod corexy_reconstruction_tests {
             FREQ,
         );
 
+        const Z_MCU: u32 = 120;
+        let z_host = super::host_of(&router, MCU_ID, piece_start);
+        store.record(
+            key(Z_MCU, AXIS_Z),
+            &make_linear_piece(piece_start, duration_secs, 5.0, 5.0),
+            FREQ,
+            z_host,
+        );
+
         let trip_clock = piece_start + duration_ticks / 2;
         let cart = reconstruct_cartesian_position(
             MCU_ID,
             trip_clock,
-            &corexy_cfg(MCU_ID),
+            &[corexy_cfg(MCU_ID), z_cfg(Z_MCU)],
             &router,
             &shared(store),
             f64::NEG_INFINITY,
@@ -555,14 +575,53 @@ mod corexy_reconstruction_tests {
         .expect("corexy reconstruction must succeed");
 
         assert!(
-            (cart[0] - 50.0).abs() < 0.5,
+            (cart.0[0] - 50.0).abs() < 0.5,
             "x = (A+B)/2 midway must be ~50, got {:.4}",
-            cart[0]
+            cart.0[0]
         );
         assert!(
-            (cart[1] - 40.0).abs() < 0.5,
+            (cart.0[1] - 40.0).abs() < 0.5,
             "y = (A-B)/2 must stay ~40 through a pure-X move, got {:.4}",
-            cart[1]
+            cart.0[1]
+        );
+        assert!(
+            (cart.0[2] - 5.0).abs() < 1e-6,
+            "z lane on the second mcu must be read, got {:.4}",
+            cart.0[2]
+        );
+    }
+
+    #[test]
+    fn trip_reconstruction_fails_when_xy_lanes_live_on_another_unlisted_mcu() {
+        // The Trident PRINT_START regression: Z homes on the bottom MCU whose
+        // config has no A/B lanes. Assembling a cartesian position from that
+        // one config silently returned x=y=0, so mesh-active probing unwarped
+        // at the wrong XY and ratcheted the frame every touch. A config list
+        // that cannot cover every spatial lane must be a loud error, never
+        // zeros.
+        const Z_MCU: u32 = 23;
+        let router = router_with_clock(Z_MCU, 180_000_000.0);
+        let mut store = HistoryStore::default();
+        record_synced(
+            &mut store,
+            &router,
+            key(Z_MCU, AXIS_Z),
+            &make_linear_piece(1_000_000, 0.025, 10.0, 0.0),
+            FREQ,
+        );
+
+        let err = reconstruct_cartesian_position(
+            Z_MCU,
+            2_000_000,
+            &[z_cfg(Z_MCU)],
+            &router,
+            &shared(store),
+            f64::NEG_INFINITY,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("not configured on any mcu"),
+            "xy lanes absent from the config list must fail loudly, got: {err}"
         );
     }
 
@@ -583,7 +642,7 @@ mod corexy_reconstruction_tests {
         let err = reconstruct_cartesian_position(
             MCU_ID,
             2_000_000,
-            &corexy_cfg(MCU_ID),
+            &[corexy_cfg(MCU_ID), z_cfg(121)],
             &router,
             &shared(store),
             f64::NEG_INFINITY,
@@ -612,10 +671,18 @@ mod corexy_reconstruction_tests {
             0.0,
         );
 
-        let cart = final_cartesian_position(&corexy_cfg(MCU_ID), &shared(store))
+        const Z_MCU: u32 = 122;
+        store.record(
+            key(Z_MCU, AXIS_Z),
+            &make_linear_piece(1_000_000, 0.025, 2.0, 2.0),
+            FREQ,
+            0.0,
+        );
+
+        let cart = final_cartesian_position(&[corexy_cfg(MCU_ID), z_cfg(Z_MCU)], &shared(store))
             .expect("final corexy position must succeed");
         assert!(
-            (cart[0] - 200.0).abs() < 1e-3 && (cart[1] - 100.0).abs() < 1e-3,
+            (cart.0[0] - 200.0).abs() < 1e-3 && (cart.0[1] - 100.0).abs() < 1e-3,
             "A=300 B=100 must invert to x=200 y=100, got {cart:?}"
         );
     }

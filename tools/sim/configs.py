@@ -538,12 +538,33 @@ serial: {f4_pty}
 """
     z_step_mcu = "bottom:" if f4_pty else ""
     bed_mesh_section = ""
+    saved_mesh_profiles = ""
     if bed_mesh:
         bed_mesh_section = """
 [bed_mesh]
 mesh_min: 20,20
 mesh_max: 280,280
 probe_count: 3,3
+zero_reference_position: 150, 150
+"""
+        saved_mesh_profiles = """\
+#*# [bed_mesh edge]
+#*# version = 1
+#*# points =
+#*#   -0.026, -0.010, 0.013
+#*#   -0.020, -0.005, 0.016
+#*#   -0.013, 0.002, 0.024
+#*# min_x = 120.0
+#*# max_x = 160.0
+#*# min_y = 120.0
+#*# max_y = 160.0
+#*# x_count = 3
+#*# y_count = 3
+#*# mesh_x_pps = 2
+#*# mesh_y_pps = 2
+#*# algo = lagrange
+#*# tension = 0.2
+#*#
 """
     return f"""\
 [mcu]
@@ -645,7 +666,7 @@ enable_force_move: True
 #*# <---------------------- SAVE_CONFIG ---------------------->
 #*# DO NOT EDIT THIS BLOCK OR BELOW. The contents are auto-generated.
 #*#
-#*# [beacon model default]
+{saved_mesh_profiles}#*# [beacon model default]
 #*# model_coef = 1.4366832587589902,
 #*#   1.7791425946955506,
 #*#   0.8114676630327906,

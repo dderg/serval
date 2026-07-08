@@ -249,15 +249,46 @@ impl PyMotionEngine {
         timeout_s: f64,
     ) -> PyResult<HashMap<String, (f64, f64)>> {
         let timeout = std::time::Duration::from_secs_f64(timeout_s.max(0.0));
-        py.detach(|| collect_motor_positions_inner(&self.mcu_axis_configs, &self.mcus, timeout))
-            .map_err(PyRuntimeError::new_err)
+        let machine = py
+            .detach(|| collect_motor_positions_inner(&self.mcu_axis_configs, &self.mcus, timeout))
+            .map_err(PyRuntimeError::new_err)?;
+        self.motor_map_to_gcode(machine)
     }
-    fn live_motor_positions(&self) -> std::collections::HashMap<String, (f64, f64)> {
-        self.position_poll.cache.lock_ok().0.clone()
+    fn live_motor_positions(&self) -> PyResult<std::collections::HashMap<String, (f64, f64)>> {
+        let machine = self.position_poll.cache.lock_ok().0.clone();
+        self.motor_map_to_gcode(machine)
     }
 }
 
 impl PyMotionEngine {
+    /// Live/queried motor states are machine space; every Python consumer
+    /// compares them against gcode-space toolhead positions, so the Z lane
+    /// crosses through the active mesh here (position via the exact inverse,
+    /// velocity via the chain rule with zero-accel XY). Identity without a
+    /// mesh.
+    fn motor_map_to_gcode(
+        &self,
+        mut map: std::collections::HashMap<String, (f64, f64)>,
+    ) -> PyResult<std::collections::HashMap<String, (f64, f64)>> {
+        let mesh = self.bed_mesh.lock_ok();
+        let Some(t) = mesh.as_deref() else {
+            return Ok(map);
+        };
+        let Some(&(zp, zv)) = map.get("z") else {
+            return Ok(map);
+        };
+        let (Some(&(xp, xv)), Some(&(yp, yv))) = (map.get("x"), map.get("y")) else {
+            return Err(PyRuntimeError::new_err(
+                "motor positions: a bed mesh is active but the response has a Z lane \
+                 without X/Y — cannot unwarp machine Z without the XY the mesh was \
+                 sampled at",
+            ));
+        };
+        let (gz, gzv, _) = t.unwarp_z_state([xp, yp], [xv, yv], [0.0, 0.0], (zp, zv, 0.0));
+        map.insert("z".to_string(), (gz, gzv));
+        Ok(map)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn phase_register_call(
         &self,
