@@ -398,14 +398,14 @@ fn feed_drop_with_z_step_escapes_profile_window() {
     assert!(report.hard_ok(), "{report}");
 }
 
-/// Found by `hard_invariants_hold`: the most minimal profile-window escape —
-/// purely planar, scv exactly 0, a 37 µm move at feed 451 mm/s decelerating
-/// into a 1 mm/s move under high accel and jerk limits. The quintic
-/// arc-length profile dips 2.5e-6 mm below its window start. Same family as
-/// `feed_drop_with_z_step_escapes_profile_window`: the quintic Hermite
-/// interpolant is not monotone over a window under aggressive decel.
+/// Found by `hard_invariants_hold`: purely planar, scv exactly 0, a 37 µm
+/// move at feed 451 mm/s decelerating into a 1 mm/s move under high accel
+/// and jerk limits made the quintic arc-length profile dip below its window.
+/// Root cause was the brake-chain splice rejecting on chord sag, leaving the
+/// ride as per-cell chord phases whose staircase acceleration produced
+/// kinematically impossible `(v, a)` sample pairs; fixed by deriving the
+/// splice joint tolerance from the chord geometry.
 #[test]
-#[ignore = "known lowering bug: micro-move decel escapes the quintic profile window"]
 fn planar_micro_move_decel_escapes_profile_window() {
     let limits = FuzzLimits {
         max_velocity: 20.0,
