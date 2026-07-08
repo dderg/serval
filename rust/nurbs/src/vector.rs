@@ -1,4 +1,5 @@
-use crate::{ConstructError, VectorNurbsView, scalar::validate};
+use crate::view::VectorNurbsView;
+use crate::{ConstructError, scalar::validate};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct VectorNurbs<const N: usize> {

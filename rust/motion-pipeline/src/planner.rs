@@ -3,7 +3,7 @@ use geometry::path::lowering::PositionProfile;
 use geometry::path::{CurvatureProfile, Segment};
 use geometry::{BoundaryState, Move, VelocityProfile, plan_velocity_stops};
 
-use crate::{
+use crate::types::{
     Control, PlannedItem, PlannedMove, StreamConfig, StreamInput, jerk_limited_brake_time,
 };
 

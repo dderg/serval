@@ -2,8 +2,7 @@
 
 `CONFIG_MOTION_SAMPLE_RATE_HZ` controls the rate at which the TIM5 ISR
 evaluates motion curves and emits step pulses on the MCU. It is consumed by
-the stepping-redesign engine
-(`docs/superpowers/specs/2026-05-19-stepping-redesign-design.md`).
+the stepping-redesign engine.
 
 ## Defaults
 

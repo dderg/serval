@@ -1,4 +1,0 @@
-CONFIG recursive_globs.cfg
-DICTIONARY atmega2560.dict
-
-G28

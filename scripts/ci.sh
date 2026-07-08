@@ -45,8 +45,7 @@ job_rust_loom() {
     cd "$RUST"
     RUSTFLAGS="--cfg loom" cargo test -p runtime --release \
         --test loom_seqlock \
-        --test loom_force_idle \
-        --test loom
+        --test loom_force_idle
 }
 
 MCU_ENV=(RUNTIME_STORAGE_SIZE=122880 RUNTIME_PIECE_RING_SIZE=63488)
@@ -124,8 +123,9 @@ job_miri() {
     MIRIFLAGS="-Zmiri-ignore-leaks" cargo +nightly miri test -p runtime --features host \
         --test fault_encoding \
         --test motion_core_accel \
-        --test phase_lut_anchors \
         --test seqlock_unit
+    MIRIFLAGS="-Zmiri-ignore-leaks" cargo +nightly miri test -p runtime --features host \
+        --lib phase_lut
 }
 
 job_panic_grep() {

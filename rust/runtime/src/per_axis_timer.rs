@@ -59,14 +59,6 @@ pub extern "C" fn kalico_stepout_late_get(
 }
 
 #[cfg(not(any(test, feature = "host")))]
-#[unsafe(no_mangle)]
-pub extern "C" fn kalico_stepout_late_reset() {
-    STEPOUT_MAX_LATE_CYCLES.store(0, Ordering::Relaxed);
-    STEPOUT_LATE_COUNT.store(0, Ordering::Relaxed);
-    STEPOUT_MAX_DRAINED.store(0, Ordering::Relaxed);
-}
-
-#[cfg(not(any(test, feature = "host")))]
 unsafe extern "C" {
     static runtime_clock_freq: u32;
     fn timer_read_time() -> u32;

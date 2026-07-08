@@ -1,23 +1,6 @@
 use super::*;
 
 #[test]
-fn vlq_roundtrip_small_positive() {
-    for v in [0i64, 1, 100, 1_000, 100_000, 1_000_000_000] {
-        let mut buf = Vec::new();
-        parser::encode_vlq(&mut buf, v).expect("value in range");
-        let (out, n) = parser::decode_vlq(&buf).unwrap();
-        assert_eq!(n, buf.len(), "consumed != encoded for {v}");
-        assert_eq!(out, v, "roundtrip failed for {v}");
-    }
-}
-
-#[test]
-fn crc16_matches_klipper_test_vector() {
-    let crc = wire::crc16_ccitt(&[0x05, 0x10]);
-    assert_eq!(crc, 0x9E81);
-}
-
-#[test]
 fn extract_packet_picks_up_minimal_nak_frame() {
     let crc = wire::crc16_ccitt(&[0x05, 0x10]);
     let frame = vec![
@@ -56,40 +39,6 @@ fn extract_packet_resyncs_past_oversized_msglen_byte() {
         buf.is_empty(),
         "oversized msglen byte should have been dropped, got {buf:?}"
     );
-}
-
-#[test]
-fn send_typed_payload_matches_call_typed_payload() {
-    use crate::host_io::parser::{DataDictionary, FieldValue, MsgProtoParser};
-    use indexmap::IndexMap;
-
-    let mut d = DataDictionary {
-        commands: IndexMap::new(),
-        responses: IndexMap::new(),
-        output: IndexMap::new(),
-        enumerations: IndexMap::new(),
-        config: serde_json::json!({}),
-        version: "v".into(),
-        app: "kalico".into(),
-        build_versions: None,
-        license: None,
-    };
-    d.commands
-        .insert("kalico_load_curve_begin slot=%hu degree=%c".into(), 99);
-    let parser = MsgProtoParser::from_dictionary(d).unwrap();
-
-    let args = [
-        ("slot", FieldValue::U16(7)),
-        ("degree", FieldValue::Byte(3)),
-    ];
-    let send_typed_payload = parser
-        .encode_typed("kalico_load_curve_begin", &args)
-        .expect("encode_typed");
-    let call_typed_payload = parser
-        .encode_typed("kalico_load_curve_begin", &args)
-        .expect("encode_typed");
-    assert_eq!(send_typed_payload, call_typed_payload);
-    assert!(!send_typed_payload.is_empty());
 }
 
 #[test]

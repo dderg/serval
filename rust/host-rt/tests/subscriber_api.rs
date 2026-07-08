@@ -1,1 +1,0 @@
-#![cfg(feature = "hardware-test")]

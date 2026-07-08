@@ -88,12 +88,14 @@ pub enum UnblendReason {
     ExtrusionRampInfeasible,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnblendedJunction {
     pub line_no: u32,
     pub reason: UnblendReason,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FitReport {
     pub blended: u32,
@@ -102,6 +104,7 @@ pub struct FitReport {
     pub chains: u32,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct FitOutcome {
     pub moves: Vec<Move>,
@@ -178,6 +181,7 @@ fn span_tolerance(moves: &[Move]) -> f64 {
         .fold(f64::INFINITY, f64::min)
 }
 
+#[cfg(test)]
 pub fn fit_corners(moves: &[Move], config: CornerFitConfig) -> Result<FitOutcome, FitError> {
     if moves.len() <= 1 {
         return Ok(FitOutcome {
@@ -334,6 +338,7 @@ fn junction_deviation(limits: VelocityLimits) -> f64 {
     scv * scv * (SQRT_2 - 1.0) / limits.accel_mm_s2
 }
 
+#[cfg(test)]
 fn blend_trim(plan: &JunctionPlan) -> f64 {
     match plan {
         JunctionPlan::Blend(bi) => bi.trim(),

@@ -170,9 +170,6 @@ class ADS131MxBase(LoadCellSensor):
         self.query_ads131m0x_cmd = self.mcu.lookup_command(
             "query_ads131m0x oid=%c rest_ticks=%u"
         )
-        self.attach_probe_cmd = self.mcu.lookup_command(
-            "ads131m0x_attach_load_cell_probe oid=%c load_cell_probe_oid=%c"
-        )
         self.ffreader.setup_query_command(
             "query_ads131m0x_status oid=%c", oid=self.oid
         )
@@ -211,9 +208,6 @@ class ADS131MxBase(LoadCellSensor):
 
     def add_client(self, callback: BulkAdcDataCallback):
         self.batch_bulk.add_client(callback)
-
-    def attach_load_cell_probe(self, load_cell_probe_oid: int):
-        self.attach_probe_cmd.send([self.oid, load_cell_probe_oid])
 
     # Measurement decoding
     def _convert_samples(self, samples):

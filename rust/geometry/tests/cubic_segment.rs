@@ -30,7 +30,7 @@ fn try_new_rejects_non_cubic() {
         vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
     )
     .expect("valid linear");
-    let result = CubicSegment::try_new(linear, vec![], 100.0, dummy_source(), None);
+    let result = CubicSegment::try_new(linear, vec![], 100.0, dummy_source());
     assert!(matches!(
         result,
         Err(GeometryError::NotSinglePieceCubic { .. })
@@ -39,7 +39,7 @@ fn try_new_rejects_non_cubic() {
 
 #[test]
 fn try_new_accepts_valid_travel() {
-    let result = CubicSegment::try_new(valid_cubic_xyz(), vec![], 100.0, dummy_source(), None);
+    let result = CubicSegment::try_new(valid_cubic_xyz(), vec![], 100.0, dummy_source());
     assert!(result.is_ok());
 }
 
@@ -50,7 +50,6 @@ fn try_new_accepts_follower_with_signed_ratio() {
         vec![FollowerDemand::constant(3, -0.05)],
         100.0,
         dummy_source(),
-        None,
     );
     assert!(result.is_ok());
 }
@@ -62,7 +61,6 @@ fn try_new_rejects_zero_follower_ratio() {
         vec![FollowerDemand::constant(3, 0.0)],
         100.0,
         dummy_source(),
-        None,
     );
     assert!(matches!(
         result,
@@ -80,7 +78,6 @@ fn try_new_rejects_duplicate_follower_axis() {
         ],
         100.0,
         dummy_source(),
-        None,
     );
     assert!(matches!(
         result,
@@ -109,7 +106,6 @@ fn try_new_rejects_non_finite_control_point() {
             start_line: 1,
             end_line: 1,
         },
-        None,
     );
     assert!(matches!(
         result,
@@ -138,7 +134,6 @@ fn try_new_rejects_non_finite_feedrate() {
             start_line: 1,
             end_line: 1,
         },
-        None,
     );
     assert!(matches!(
         result,
@@ -167,7 +162,6 @@ fn try_new_rejects_non_finite_follower_ratio() {
             start_line: 1,
             end_line: 1,
         },
-        None,
     );
     assert!(matches!(
         result,

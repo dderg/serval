@@ -11,7 +11,6 @@ beacon.py 3944 lines) and cartographer-klipper scanner.py where noted.
 `dderg/beacon_klipper`). Do not build a mainline-emulation layer.**
 
 Implemented: see
-`docs/superpowers/specs/2026-06-12-beacon-fork-seam-design.md` and
 `dderg/beacon_klipper@932f551` (branch `kalico-seam`). Bench-validated on
 the Trident: proximity G28, PROBE, PROBE_ACCURACY, contact PROBE,
 BEACON_POKE, BEACON_AUTO_CALIBRATE.

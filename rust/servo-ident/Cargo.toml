@@ -9,10 +9,6 @@ license.workspace = true
 name = "servo-ident"
 path = "src/bin/servo-ident.rs"
 
-[[bin]]
-name = "servo-excite"
-path = "src/bin/servo-excite.rs"
-
 [dependencies]
 libm = { version = "0.2", default-features = false }
 

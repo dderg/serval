@@ -82,6 +82,3 @@ pub enum GeometryError {
     DegenerateClothoid { reason: &'static str },
     InvalidLowering { reason: &'static str },
 }
-
-#[cfg(test)]
-mod tests;

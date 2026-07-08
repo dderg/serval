@@ -4,9 +4,6 @@ G-code lexer for the kalico motion planner. Pure text → typed tokens. No
 NURBS dependency; no motion semantics. Reusable outside the planner for
 offline analysis tools, replay tooling, or fuzz-target use.
 
-See `docs/superpowers/specs/2026-04-26-layer-1-rust-architecture-design.md`
-for the architecture.
-
 ## Public surface
 
 - `gcode::lex(&str)` returns `impl Iterator<Item = Result<Token, ParseError>>`.

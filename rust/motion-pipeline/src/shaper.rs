@@ -8,7 +8,7 @@ use crate::follower_projection::{FollowerState, project_followers};
 use crate::lowering::{
     FIT_TRUNC_POS_FACTOR, FitTol, LADDER_PROBES_U, ladder_fit, quintic_in_u, truncated_piece,
 };
-use crate::{Control, LoweredItem, PostProcessError, ShapedItem};
+use crate::types::{Control, LoweredItem, PostProcessError, ShapedItem};
 
 /// The evaluable (position, velocity, acceleration) signal the shaped-track
 /// fitter consumes: the kernel convolution for kerneled axes, the follower

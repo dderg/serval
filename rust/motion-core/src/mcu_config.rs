@@ -103,16 +103,18 @@ pub fn motor_frame(cfg: &McuAxisConfig, axes: [f64; SPATIAL_AXES]) -> [f64; SPAT
 /// are the lowerer's output (e.g. CoreXY A/B) — so a rebase fed raw cartesian
 /// would leave axis 0/1 cartesian-valued until the next live piece overwrites
 /// them, while every other reader of that axis (including a kinematics
-/// inversion) assumes motor frame. Same per-cfg transform as
+/// inversion) assumes motor frame. The input is [`geometry::MachinePos`]
+/// because the ring is post-surface-warp: a caller holding a gcode position
+/// must convert through the active mesh first. Same per-cfg transform as
 /// `build_serial_seed_sends` uses to seed the MCUs for the same event.
 pub fn spatial_rebase_targets(
     configs: &[McuAxisConfig],
-    cartesian: [f64; SPATIAL_AXES],
+    cartesian: geometry::MachinePos,
 ) -> Vec<(AxisKey, f64)> {
     configs
         .iter()
         .flat_map(|cfg| {
-            let motor = motor_frame(cfg, cartesian);
+            let motor = motor_frame(cfg, cartesian.0);
             cfg.axes
                 .iter()
                 .filter(|&&a| a < SPATIAL_AXES)
@@ -143,16 +145,18 @@ pub fn encode_q16(mm: f64) -> i32 {
     raw.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32
 }
 
-pub fn build_seed_sends(configs: &[McuAxisConfig], x: f64, y: f64, z: f64) -> Vec<SeedSend> {
-    build_serial_seed_sends(configs, &HashSet::new(), x, y, z)
+pub fn build_seed_sends(configs: &[McuAxisConfig], pos: geometry::MachinePos) -> Vec<SeedSend> {
+    build_serial_seed_sends(configs, &HashSet::new(), pos)
 }
 
+/// MCU step-counter seeds for an externally set position. The counters count
+/// physical steps, so the input is [`geometry::MachinePos`]: seeding them
+/// from a raw gcode position while a mesh is active shifts the machine frame
+/// by `correction_at(x, y)` on every reseed — the contact-probe ratchet.
 pub fn build_serial_seed_sends<S: ::std::hash::BuildHasher>(
     configs: &[McuAxisConfig],
     ethercat_mcu_ids: &HashSet<u32, S>,
-    x: f64,
-    y: f64,
-    z: f64,
+    pos: geometry::MachinePos,
 ) -> Vec<SeedSend> {
     let reachable_over_serial_transport =
         |cfg: &&McuAxisConfig| !ethercat_mcu_ids.contains(&cfg.mcu_id);
@@ -160,7 +164,7 @@ pub fn build_serial_seed_sends<S: ::std::hash::BuildHasher>(
         .iter()
         .filter(reachable_over_serial_transport)
         .map(|cfg| {
-            let m = motor_frame(cfg, [x, y, z]);
+            let m = motor_frame(cfg, pos.0);
             SeedSend {
                 mcu_id: cfg.mcu_id,
                 x_q16: encode_q16(m[0]),
@@ -303,7 +307,7 @@ mod seed_tests {
         // in — not the raw x/y, or a later cartesian-inverting reader (like
         // motion_state_at_clock) double-transforms an already-correct value.
         let configs = vec![corexy_cfg(), cartesian_z_cfg()];
-        let targets = spatial_rebase_targets(&configs, [270.0, 5.0, 12.5]);
+        let targets = spatial_rebase_targets(&configs, geometry::MachinePos([270.0, 5.0, 12.5]));
 
         let get = |mcu_id: u32, axis: u8| {
             targets
@@ -334,7 +338,7 @@ mod seed_tests {
     #[test]
     fn build_seed_sends_applies_per_mcu_transform() {
         let configs = vec![corexy_cfg(), cartesian_z_cfg()];
-        let sends = build_seed_sends(&configs, 150.0, 150.0, 50.0);
+        let sends = build_seed_sends(&configs, geometry::MachinePos([150.0, 150.0, 50.0]));
         assert_eq!(sends.len(), 2);
 
         let octo = sends.iter().find(|s| s.mcu_id == 1).expect("octopus seed");
@@ -369,7 +373,11 @@ mod seed_tests {
         let configs = vec![ec_cfg, serial_cfg];
         let ethercat_mcu_ids: HashSet<u32> = [1u32].into_iter().collect();
 
-        let sends = build_serial_seed_sends(&configs, &ethercat_mcu_ids, 100.0, 50.0, 10.0);
+        let sends = build_serial_seed_sends(
+            &configs,
+            &ethercat_mcu_ids,
+            geometry::MachinePos([100.0, 50.0, 10.0]),
+        );
 
         assert!(
             sends.iter().all(|s| s.mcu_id != 1),
@@ -391,8 +399,12 @@ mod seed_tests {
     fn build_serial_seed_sends_all_serial_matches_build_seed_sends() {
         let configs = vec![corexy_cfg(), cartesian_z_cfg()];
         let ethercat_mcu_ids: HashSet<u32> = HashSet::new();
-        let serial_sends = build_serial_seed_sends(&configs, &ethercat_mcu_ids, 150.0, 150.0, 50.0);
-        let full_sends = build_seed_sends(&configs, 150.0, 150.0, 50.0);
+        let serial_sends = build_serial_seed_sends(
+            &configs,
+            &ethercat_mcu_ids,
+            geometry::MachinePos([150.0, 150.0, 50.0]),
+        );
+        let full_sends = build_seed_sends(&configs, geometry::MachinePos([150.0, 150.0, 50.0]));
         assert_eq!(
             serial_sends, full_sends,
             "with no EtherCAT nodes, build_serial_seed_sends must match build_seed_sends"
@@ -419,7 +431,11 @@ mod seed_tests {
         };
         let configs = vec![ec_cfg_1, ec_cfg_2];
         let ethercat_mcu_ids: HashSet<u32> = [1u32, 3u32].into_iter().collect();
-        let sends = build_serial_seed_sends(&configs, &ethercat_mcu_ids, 100.0, 50.0, 10.0);
+        let sends = build_serial_seed_sends(
+            &configs,
+            &ethercat_mcu_ids,
+            geometry::MachinePos([100.0, 50.0, 10.0]),
+        );
         assert!(
             sends.is_empty(),
             "all-EtherCAT topology must produce zero serial seed sends; got {sends:?}"

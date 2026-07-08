@@ -7,7 +7,6 @@ members = [
     "trajectory",
     "runtime",
     "host-rt",
-    "compat",
     "planner-config",
     "motion-core",
     "motion-engine",
@@ -147,9 +146,8 @@ needless_borrows_for_generic_args = "allow"
 unnecessary_cast = "allow"
 
 [profile.release]
-# opt-level = 3 for host builds (Pi 5: SOCP solve on cubic@N=200 ~25% slower
-# under "z" per the Pi 5 throughput investigation:
-# docs/research/pi5-socp-throughput-investigation.md). Future MCU firmware
+# opt-level = 3 for host builds: measured on a Pi 5, the SOCP solve
+# (cubic @ N=200) runs ~25% slower under opt-level = "z". Future MCU firmware
 # build (build-order steps 5+, not yet wired up) should override via a
 # `[profile.release-mcu]` or per-package profile when it lands; size matters
 # on the H723/F4x targets.

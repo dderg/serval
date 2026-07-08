@@ -1,3 +1,4 @@
+use crate::types::*;
 use crate::*;
 use crossbeam_channel::unbounded;
 use geometry::segment::SourceRange;

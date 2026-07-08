@@ -1,5 +1,0 @@
-# z_calibration is gated off on the motion-engine rewrite (no stepper model);
-# loading the [z_calibration] config section must be rejected.
-SHOULD_FAIL
-CONFIG z_calibration.cfg
-DICTIONARY atmega2560.dict

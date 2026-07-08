@@ -604,7 +604,9 @@ fn rebase_after_probe_trip_round_trips_through_cartesian_inversion() {
     let cart_z = 1.965;
 
     let mut store = HistoryStore::default();
-    for (key, value) in spatial_rebase_targets(&configs, [cart_x, cart_y, cart_z]) {
+    for (key, value) in
+        spatial_rebase_targets(&configs, geometry::MachinePos([cart_x, cart_y, cart_z]))
+    {
         store.rebase_axis(key, 0.0, value);
     }
 

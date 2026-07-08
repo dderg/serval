@@ -176,7 +176,5 @@ Under heavy development on the `sota-motion` branch. The geometry pipeline is
 cubic-Bézier native (G5/G5.1 input) and the time-optimal solver is in place;
 the follower and post-processor constraint families are landing now, with the
 per-axis emission chain (including runtime tuning) planned and next. The
-design documents in
-[`docs/superpowers/specs/`](docs/superpowers/specs/) are the source of truth;
-start with
-[the follower-axes-and-limits design](docs/superpowers/specs/2026-06-12-follower-axes-and-limits-design.md).
+architecture documents in [`docs/rewrite/`](docs/rewrite/) describe the
+design.

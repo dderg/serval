@@ -18,7 +18,6 @@ nurbs = { path = "../nurbs" }
 runtime = { path = "../runtime" }
 planner-config = { path = "../planner-config" }
 crossbeam-channel = "0.5"
-libc = "0.2"
 tracing = "0.1"
 thiserror = { workspace = true }
 

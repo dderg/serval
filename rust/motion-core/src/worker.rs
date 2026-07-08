@@ -132,6 +132,7 @@ pub enum StreamMsg {
     SetMesh {
         mesh: Option<std::sync::Arc<geometry::SurfaceTransform>>,
         gcode_z_rebase: f64,
+        notify: crossbeam_channel::Sender<()>,
     },
     HomeDrip(HomeDripParams),
     Nudge(NudgeParams),
@@ -320,16 +321,6 @@ impl StreamWorkerHandle {
             .map_err(|_| StreamWorkerError::ChannelClosed)
     }
 
-    pub fn flush_start(
-        &self,
-    ) -> Result<crossbeam_channel::Receiver<Option<Instant>>, StreamWorkerError> {
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        self.sender
-            .send(StreamMsg::Flush { notify: tx })
-            .map_err(|_| StreamWorkerError::ChannelClosed)?;
-        Ok(rx)
-    }
-
     /// Non-blocking: `ChannelFull` means the caller must retry after
     /// yielding, exactly like `fence_start` — a blocking send here wedges
     /// the klippy reactor for as long as the backpressured pipe takes to
@@ -398,17 +389,23 @@ impl StreamWorkerHandle {
             .map_err(|_| StreamWorkerError::ChannelClosed)
     }
 
+    /// Blocks until the pipeline has drained and adopted the new transform:
+    /// the caller's own mesh copy (used for bridge-level space crossings)
+    /// must never run ahead of the mesh the lowerer is actually warping with.
     pub fn update_mesh(
         &self,
         mesh: Option<std::sync::Arc<geometry::SurfaceTransform>>,
         gcode_z_rebase: f64,
     ) -> Result<(), StreamWorkerError> {
+        let (tx, rx) = crossbeam_channel::bounded(1);
         self.sender
             .send(StreamMsg::SetMesh {
                 mesh,
                 gcode_z_rebase,
+                notify: tx,
             })
-            .map_err(|_| StreamWorkerError::ChannelClosed)
+            .map_err(|_| StreamWorkerError::ChannelClosed)?;
+        rx.recv().map_err(|_| StreamWorkerError::ChannelClosed)
     }
 
     pub fn home_drip(&self, p: HomeDripParams) -> Result<(), StreamWorkerError> {
