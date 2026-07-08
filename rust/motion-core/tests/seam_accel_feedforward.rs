@@ -41,7 +41,11 @@ fn corpus_pieces_per_axis() -> BTreeMap<u8, Vec<(PieceEntry, usize)>> {
             &mcu_configs,
             &motion_core::enqueue::EnqueueCtx {
                 t0: 0.0,
-                fresh_stream: first,
+                epoch: if first {
+                    motion_core::anchor::StreamEpoch::Reposition
+                } else {
+                    motion_core::anchor::StreamEpoch::Continuation
+                },
                 host_now: 0.0,
                 lead_secs: 2.0,
                 project,

@@ -10,7 +10,7 @@ use crate::types::AxisKey;
 pub struct EnqueueMsg {
     pub key: AxisKey,
     pub pieces: Vec<(PieceEntry, f64)>,
-    pub fresh_stream: bool,
+    pub epoch: crate::anchor::StreamEpoch,
     pub lead_secs: f64,
     pub source_line: u32,
 }

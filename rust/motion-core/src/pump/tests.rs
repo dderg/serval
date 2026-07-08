@@ -19,11 +19,15 @@ fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
     }
 }
 
-fn make_enqueue(key: AxisKey, pieces: Vec<(PieceEntry, f64)>, fresh_stream: bool) -> EnqueueMsg {
+fn make_enqueue(
+    key: AxisKey,
+    pieces: Vec<(PieceEntry, f64)>,
+    epoch: crate::anchor::StreamEpoch,
+) -> EnqueueMsg {
     EnqueueMsg {
         key,
         pieces,
-        fresh_stream,
+        epoch,
         lead_secs: MAX_LEAD_SECS,
         source_line: u32::MAX,
     }
@@ -119,8 +123,12 @@ fn run_pump_delivers_piece_despite_retired_over_pushed_inversion() {
         );
     });
 
-    data.send(make_enqueue(key, vec![make_piece(0)], false))
-        .unwrap();
+    data.send(make_enqueue(
+        key,
+        vec![make_piece(0)],
+        crate::anchor::StreamEpoch::Continuation,
+    ))
+    .unwrap();
     wait_until(
         || sink.recorded().len() == 1,
         "first piece delivered, creating the axis queue with pushed=1 (a heartbeat \
@@ -138,8 +146,12 @@ fn run_pump_delivers_piece_despite_retired_over_pushed_inversion() {
         .recv()
         .expect("barrier acks only after the retired=2 heartbeat ahead of it applies");
 
-    data.send(make_enqueue(key, vec![make_piece(1)], false))
-        .unwrap();
+    data.send(make_enqueue(
+        key,
+        vec![make_piece(1)],
+        crate::anchor::StreamEpoch::Continuation,
+    ))
+    .unwrap();
     wait_until(
         || sink.recorded().len() == 2,
         "second piece delivered despite retired(2) > pushed(1): buggy room() \
@@ -190,7 +202,12 @@ fn history_records_pieces_at_send_time_not_enqueue_time() {
         },
         host_t,
     );
-    data.send(make_enqueue(key, vec![piece], false)).unwrap();
+    data.send(make_enqueue(
+        key,
+        vec![piece],
+        crate::anchor::StreamEpoch::Continuation,
+    ))
+    .unwrap();
     wait_until(|| sink.recorded().len() == 1, "piece sent to the MCU");
     wait_until(
         || {
@@ -282,7 +299,7 @@ fn run_pump_sets_start_slot_from_cursor_and_advances_it() {
     data.send(make_enqueue(
         AxisKey { mcu_id: 1, axis: 0 },
         (0..N).map(|i| make_piece(i as u64)).collect(),
-        false,
+        crate::anchor::StreamEpoch::Continuation,
     ))
     .unwrap();
     {
@@ -299,7 +316,7 @@ fn run_pump_sets_start_slot_from_cursor_and_advances_it() {
     data.send(make_enqueue(
         AxisKey { mcu_id: 1, axis: 0 },
         (N..N * 2).map(|i| make_piece(i as u64)).collect(),
-        false,
+        crate::anchor::StreamEpoch::Continuation,
     ))
     .unwrap();
     {
@@ -387,7 +404,7 @@ fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
     data.send(make_enqueue(
         key,
         vec![make_piece_pos(0, 0, 0.0, 11.0)],
-        false,
+        crate::anchor::StreamEpoch::Continuation,
     ))
     .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -402,7 +419,7 @@ fn overlay_piece_after_move_is_exempt_from_junction_continuity() {
     data.send(make_enqueue(
         key,
         vec![make_piece_pos(10_000, 0b10, 0.0, 0.5)],
-        false,
+        crate::anchor::StreamEpoch::Continuation,
     ))
     .unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -499,7 +516,7 @@ fn flush_clears_queued_pieces_and_junctions() {
                 (p, (gated_tick + i) as f64)
             })
             .collect(),
-        fresh_stream: true,
+        epoch: crate::anchor::StreamEpoch::Reposition,
         lead_secs,
         source_line: u32::MAX,
     })
@@ -524,7 +541,7 @@ fn flush_clears_queued_pieces_and_junctions() {
             },
             (gated_tick + 1_000) as f64,
         )],
-        fresh_stream: false,
+        epoch: crate::anchor::StreamEpoch::Continuation,
         lead_secs,
         source_line: u32::MAX,
     })
@@ -604,7 +621,7 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
                 (p, (gated_tick + i) as f64)
             })
             .collect(),
-        fresh_stream: true,
+        epoch: crate::anchor::StreamEpoch::Reposition,
         lead_secs,
         source_line: u32::MAX,
     })
@@ -627,7 +644,7 @@ fn on_abandon_reports_flushed_not_pushed_pieces() {
             },
             (gated_tick + 1_000) as f64,
         )],
-        fresh_stream: false,
+        epoch: crate::anchor::StreamEpoch::Continuation,
         lead_secs,
         source_line: u32::MAX,
     })
@@ -704,7 +721,7 @@ fn barrier_ack_means_flushed_axes_emit_nothing() {
     data.send(make_enqueue(
         key,
         (0..3).map(|i| make_piece(i as u64)).collect(),
-        false,
+        crate::anchor::StreamEpoch::Continuation,
     ))
     .unwrap();
     poll_until(
@@ -788,7 +805,7 @@ fn pump_backlog_reflects_unpushed_pieces() {
     data.send(make_enqueue(
         AxisKey { mcu_id: 1, axis: 0 },
         (0..3).map(|i| make_piece(i as u64)).collect(),
-        false,
+        crate::anchor::StreamEpoch::Continuation,
     ))
     .unwrap();
 
@@ -824,7 +841,7 @@ fn pump_backlog_drains_to_zero_when_pushed() {
     data.send(make_enqueue(
         AxisKey { mcu_id: 1, axis: 0 },
         (0..3).map(|i| make_piece(i as u64)).collect(),
-        false,
+        crate::anchor::StreamEpoch::Continuation,
     ))
     .unwrap();
 

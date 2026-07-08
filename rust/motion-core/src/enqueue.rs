@@ -42,7 +42,7 @@ pub(crate) fn lane_curve(
 
 pub struct EnqueueCtx<P> {
     pub t0: f64,
-    pub fresh_stream: bool,
+    pub epoch: crate::anchor::StreamEpoch,
     pub host_now: f64,
     pub lead_secs: f64,
     pub project: P,
@@ -102,7 +102,7 @@ where
                 out.push(EnqueueMsg {
                     key,
                     pieces,
-                    fresh_stream: ctx.fresh_stream,
+                    epoch: ctx.epoch,
                     lead_secs: ctx.lead_secs,
                     source_line: seg.source_line,
                 });
