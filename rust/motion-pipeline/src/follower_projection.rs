@@ -2,11 +2,11 @@ use nurbs::ScalarNurbs;
 use nurbs::bezier::bezier_pieces_to_nurbs;
 use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedSignal};
 
-use crate::PostProcessError;
 use crate::shaper::{
     SEGMENT_TIME_EPS_S, TrackSignal, apply_pressure_advance_to_track, apply_trailing_zero_support,
     fit_axis_from_signal,
 };
+use crate::types::PostProcessError;
 
 const INTEGRAL_TOL_MM: f64 = 1e-10;
 const INTEGRAL_MAX_DEPTH: u32 = 24;
