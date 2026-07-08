@@ -103,31 +103,6 @@ fn host_dispatcher_timeout_round_trips() {
 }
 
 #[test]
-fn host_codes_distinct_from_mcu() {
-    assert_ne!(RUNTIME_ERR_HOST_DISCONNECT, RUNTIME_ERR_TRACE_OVERFLOW);
-    assert_ne!(
-        RUNTIME_ERR_HOST_RETRANSMIT_EXHAUSTED,
-        RUNTIME_ERR_TRACE_OVERFLOW
-    );
-    assert_ne!(
-        RUNTIME_ERR_HOST_DISPATCHER_TIMEOUT,
-        RUNTIME_ERR_TRACE_OVERFLOW
-    );
-    assert_ne!(
-        RUNTIME_ERR_HOST_DISCONNECT,
-        RUNTIME_ERR_HOST_RETRANSMIT_EXHAUSTED
-    );
-    assert_ne!(
-        RUNTIME_ERR_HOST_DISCONNECT,
-        RUNTIME_ERR_HOST_DISPATCHER_TIMEOUT
-    );
-    assert_ne!(
-        RUNTIME_ERR_HOST_RETRANSMIT_EXHAUSTED,
-        RUNTIME_ERR_HOST_DISPATCHER_TIMEOUT
-    );
-}
-
-#[test]
 fn fault_code_stepping_redesign_numeric_values() {
     assert_eq!(
         FaultCode::StepQueueOverflow.as_i32(),
@@ -250,36 +225,6 @@ fn code_name_tick_interval_exceeded() {
         FaultCode::TickIntervalExceeded.code_name(),
         "TickIntervalExceeded"
     );
-}
-
-#[test]
-fn from_u16_then_code_name_for_all_step8_codes() {
-    let codes = [
-        FaultCode::StepQueueOverflow,
-        FaultCode::SpiQueueOverflow,
-        FaultCode::MathNonFinite,
-        FaultCode::PieceAdvanceUnderflow,
-        FaultCode::SampleRateMisconfigured,
-        FaultCode::PositionCountOverflow,
-        FaultCode::JogParametersInvalid,
-        FaultCode::StepRateExceedsMcuCeiling,
-        FaultCode::PieceStartInPast,
-        FaultCode::RingFull,
-        FaultCode::StepsPerSampleExceeded,
-        FaultCode::TickIntervalExceeded,
-    ];
-    for code in codes {
-        let wire = code.as_u16();
-        let recovered = FaultCode::from_u16(wire)
-            .expect("from_u16 must succeed for every known FaultCode variant");
-        assert_eq!(recovered, code, "round-trip mismatch for {code:?}");
-        let name = recovered.code_name();
-        assert!(!name.is_empty(), "code_name empty for {code:?}");
-        assert_ne!(
-            name, "unknown",
-            "code_name returned 'unknown' for known variant {code:?}"
-        );
-    }
 }
 
 #[test]

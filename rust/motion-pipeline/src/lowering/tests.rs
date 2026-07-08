@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use super::*;
 use crate::StreamConfig;
 use crate::fit_stage::FitStage;

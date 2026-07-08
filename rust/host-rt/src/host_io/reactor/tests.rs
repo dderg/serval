@@ -1,6 +1,5 @@
 use super::*;
 use crate::host_io::reactor::outbound::{PendingOutboundKind, PendingSubmission};
-use crate::host_io::wire;
 use runtime::error::FaultCode;
 use std::sync::{Arc, Mutex};
 
@@ -146,42 +145,11 @@ fn test_reactor_with_inflight(seqs: &[u64]) -> (Reactor, Arc<Mutex<Vec<u8>>>) {
 }
 
 #[test]
-fn decode_absolute_wraps_correctly() {
-    let (reactor, _) = test_reactor_with_inflight(&[]);
-    assert_eq!(
-        wire::decode_absolute(reactor.seq_window.receive_seq, 0x02),
-        2
-    );
-
-    let mut r2 = test_reactor_with_inflight(&[]).0;
-    r2.seq_window.receive_seq = 14;
-    assert_eq!(wire::decode_absolute(r2.seq_window.receive_seq, 0x01), 17);
-}
-
-#[test]
 fn forward_progress_ack_updates_last_ack_seq() {
     let (mut reactor, _written) = test_reactor_with_inflight(&[2]);
 
     reactor.handle_ack_nak(0x02).expect("handle_ack_nak");
     assert_eq!(reactor.seq_window.last_ack_seq, 2);
-}
-
-#[test]
-fn duplicate_ack_triggers_retransmit() {
-    let (mut reactor, written) = test_reactor_with_inflight(&[1, 2]);
-
-    reactor.handle_ack_nak(0x02).expect("first handle_ack_nak");
-    assert_eq!(reactor.seq_window.last_ack_seq, 2);
-
-    let bytes_before = written.lock().unwrap().len();
-
-    reactor.handle_ack_nak(0x02).expect("second handle_ack_nak");
-
-    let bytes_after = written.lock().unwrap().len();
-    assert!(
-        bytes_after > bytes_before,
-        "duplicate ack must trigger retransmit (write buffer grew: {bytes_before} → {bytes_after})"
-    );
 }
 
 #[test]

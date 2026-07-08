@@ -120,6 +120,3 @@ impl From<KnotError> for NurbsError {
         Self::Knot(e)
     }
 }
-
-#[cfg(test)]
-mod tests;

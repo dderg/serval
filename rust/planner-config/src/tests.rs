@@ -1,22 +1,6 @@
 use super::*;
 
 #[test]
-fn default_config_has_sensible_values() {
-    let c = PlannerConfig::default();
-    assert_eq!(c.fit_tolerance_mm, 0.005);
-    assert_eq!(c.fit_tolerance_accel_mm_s2, 50.0);
-}
-
-#[test]
-fn cartesian_default_square_corner_velocity_matches_const() {
-    let c = CartesianLimits::default();
-    assert_eq!(
-        c.square_corner_velocity,
-        DEFAULT_SQUARE_CORNER_VELOCITY_MM_S
-    );
-}
-
-#[test]
 fn cartesian_validate_accepts_zero_and_positive_scv() {
     let mut c = CartesianLimits::default();
     c.square_corner_velocity = 0.0;

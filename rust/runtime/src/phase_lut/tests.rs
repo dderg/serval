@@ -4,6 +4,12 @@
 use super::{COIL_AMPLITUDE, PHASE_LUT, PHASE_LUT_SIZE};
 
 #[test]
+fn phase_lut_has_expected_size() {
+    assert_eq!(PHASE_LUT_SIZE, 1024);
+    assert_eq!(PHASE_LUT.len(), PHASE_LUT_SIZE);
+}
+
+#[test]
 fn anchors_match_expectation() {
     assert_eq!(PHASE_LUT[0], (COIL_AMPLITUDE, 0));
     assert_eq!(PHASE_LUT[PHASE_LUT_SIZE / 4], (0, COIL_AMPLITUDE));
