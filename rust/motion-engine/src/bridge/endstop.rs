@@ -122,16 +122,10 @@ pub(super) fn dispatch_endstop_trip(
             let axis_key = run.axis_key;
             let reconstruct_cartesian =
                 |source_mcu: u32, clock: u64| -> Result<geometry::MachinePos, String> {
-                    let cfg = configs
-                        .iter()
-                        .find(|c| c.mcu_id == axis_key.mcu_id)
-                        .ok_or_else(|| {
-                            format!("EndstopTrip: no axis config for mcu {}", axis_key.mcu_id)
-                        })?;
                     crate::homing::reconstruct_cartesian_position(
                         source_mcu,
                         clock,
-                        cfg,
+                        &configs,
                         &router_arc,
                         &history_arc,
                         run.window_start_host,

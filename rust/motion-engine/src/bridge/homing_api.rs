@@ -458,11 +458,7 @@ impl PyMotionEngine {
     ) -> Result<geometry::MachinePos, ()> {
         let final_cartesian = {
             let configs = self.mcu_axis_configs.lock_ok();
-            configs
-                .iter()
-                .find(|c| c.mcu_id == axis_key.mcu_id)
-                .ok_or_else(|| format!("no axis config for mcu {}", axis_key.mcu_id))
-                .and_then(|cfg| crate::homing::final_cartesian_position(cfg, &self.motion_history))
+            crate::homing::final_cartesian_position(&configs, &self.motion_history)
         };
         final_cartesian.map_err(|e| {
             tracing::error!(

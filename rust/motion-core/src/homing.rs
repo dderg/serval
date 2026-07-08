@@ -75,20 +75,42 @@ pub fn trajectory_final_position(
 }
 
 fn cartesian_from_motor_lanes(
-    cfg: &McuAxisConfig,
+    configs: &[McuAxisConfig],
     mut lane_position: impl FnMut(AxisKey) -> Result<f64, String>,
 ) -> Result<[f64; SPATIAL_AXES], String> {
     let mut motor_frame = [0.0_f64; SPATIAL_AXES];
-    for &lane in &cfg.axes {
-        if lane >= SPATIAL_AXES {
-            continue;
+    let mut lane_owner = [None::<u32>; SPATIAL_AXES];
+    for cfg in configs {
+        for &lane in &cfg.axes {
+            if lane >= SPATIAL_AXES {
+                continue;
+            }
+            if let Some(prior_mcu) = lane_owner[lane] {
+                return Err(format!(
+                    "cartesian_from_motor_lanes: spatial lane {lane} is configured \
+                     on both mcu {prior_mcu} and mcu {}",
+                    cfg.mcu_id
+                ));
+            }
+            lane_owner[lane] = Some(cfg.mcu_id);
+            motor_frame[lane] = lane_position(AxisKey {
+                mcu_id: cfg.mcu_id,
+                axis: lane as u8,
+            })?;
         }
-        motor_frame[lane] = lane_position(AxisKey {
-            mcu_id: cfg.mcu_id,
-            axis: lane as u8,
-        })?;
     }
-    Ok(KinematicsModule::from_tag(cfg.kinematics)
+    if let Some(missing) = lane_owner.iter().position(Option::is_none) {
+        return Err(format!(
+            "cartesian_from_motor_lanes: spatial lane {missing} is not configured \
+             on any mcu — cannot assemble a cartesian position"
+        ));
+    }
+    let kin_tag = configs
+        .iter()
+        .find(|c| c.axes.contains(&0usize))
+        .map(|c| c.kinematics)
+        .expect("lane 0 owner exists: checked above");
+    Ok(KinematicsModule::from_tag(kin_tag)
         .map_err(|e| e.to_string())?
         .inverse(motor_frame))
 }
@@ -96,12 +118,12 @@ fn cartesian_from_motor_lanes(
 pub fn reconstruct_cartesian_position(
     endstop_mcu: u32,
     trip_clock: u64,
-    cfg: &McuAxisConfig,
+    configs: &[McuAxisConfig],
     router: &Arc<Mutex<PassthroughRouter>>,
     history: &Arc<Mutex<crate::motion_history::HistoryStore>>,
     window_start_host: f64,
 ) -> Result<geometry::MachinePos, String> {
-    cartesian_from_motor_lanes(cfg, |key| {
+    cartesian_from_motor_lanes(configs, |key| {
         reconstruct_axis_position(
             endstop_mcu,
             trip_clock,
@@ -115,10 +137,10 @@ pub fn reconstruct_cartesian_position(
 }
 
 pub fn final_cartesian_position(
-    cfg: &McuAxisConfig,
+    configs: &[McuAxisConfig],
     history: &Arc<Mutex<crate::motion_history::HistoryStore>>,
 ) -> Result<geometry::MachinePos, String> {
-    cartesian_from_motor_lanes(cfg, |key| trajectory_final_position(key, history))
+    cartesian_from_motor_lanes(configs, |key| trajectory_final_position(key, history))
         .map(geometry::MachinePos)
 }
 
