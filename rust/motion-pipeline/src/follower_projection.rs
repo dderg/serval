@@ -1,9 +1,12 @@
 use nurbs::ScalarNurbs;
 use nurbs::bezier::bezier_pieces_to_nurbs;
-use trajectory::{AxisChainSet, ChainStage, ShapedSegment};
+use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedSignal};
 
 use crate::PostProcessError;
-use crate::shaper::{TrackSignal, apply_pressure_advance_to_track, fit_axis_from_signal};
+use crate::shaper::{
+    SEGMENT_TIME_EPS_S, TrackSignal, apply_pressure_advance_to_track, apply_trailing_zero_support,
+    fit_axis_from_signal,
+};
 
 const INTEGRAL_TOL_MM: f64 = 1e-10;
 const INTEGRAL_MAX_DEPTH: u32 = 24;
@@ -23,26 +26,33 @@ const SPAN_LOOKUP_SLACK_MM: f64 = 1e-6;
 /// and it makes the extruded amount track the shaped path's true distance —
 /// permanently short of the commanded total by exactly the corner-cut length.
 /// Extrude-only moves ride no spatial path; their raw track adds in directly.
-/// The follower's own chain (pressure advance) applies after the projection.
+///
+/// The follower's own chain applies on top of the projection in the stage
+/// order the leaders use: derivative-gain stages before the kernel act on the
+/// projected track, the kernel convolves that signal, and trailing stages act
+/// on the convolution. The convolution window reaches past the committed
+/// region, so projection runs permanently ahead through `out`'s full frontier
+/// (`out.len() >= commit_count` segments), caching one fitted pre-kernel
+/// track per raw segment; each is computed exactly once, which keeps every
+/// emit reading bit-identical convolution inputs.
 pub(crate) fn project_followers(
     base: &[ShapedSegment],
     out: &mut [ShapedSegment],
+    commit_count: usize,
+    force: bool,
     chains: &AxisChainSet,
     states: &mut Vec<FollowerState>,
 ) -> Result<(), PostProcessError> {
+    assert!(out.len() >= commit_count);
     if states.len() < chains.n_axes() {
         states.resize_with(chains.n_axes(), FollowerState::default);
     }
     for (axis, leaders) in chains.projected_followers() {
         let chain = &chains.chains[axis];
-        assert!(
-            !chain
-                .stages
-                .iter()
-                .any(|s| matches!(s, ChainStage::SmoothKernel(_))),
-            "follower axis {axis} declares a smoothing kernel; a follower is \
-             projected onto its leaders' shaped motion instead"
-        );
+        let kernel = chain.stages.iter().find_map(|stage| match stage {
+            ChainStage::SmoothKernel(kernel) => Some(kernel),
+            ChainStage::LinearPressureAdvance { .. } => None,
+        });
         let leaders_shaped = leaders.iter().any(|&l| !chains.chains[l].is_empty());
         let state = &mut states[axis];
         let projecting = leaders_shaped || state.active;
@@ -63,6 +73,20 @@ pub(crate) fn project_followers(
                     got: raw.axes.len(),
                 });
             }
+            if state
+                .projected_through_t
+                .is_some_and(|through| raw.t_end <= through + GRID_DEDUP_EPS_S)
+            {
+                continue;
+            }
+            if let Some(through) = state.projected_through_t {
+                assert!(
+                    raw.t_start >= through - GRID_DEDUP_EPS_S,
+                    "follower projection saw an out-of-order segment: t_start {} \
+                     before projected-through {through}",
+                    raw.t_start,
+                );
+            }
             let raw_track = &raw.axes[axis];
             let projected = if projecting {
                 let raw_start = nurbs::eval::eval(raw_track, raw.t_start);
@@ -79,25 +103,90 @@ pub(crate) fn project_followers(
             } else {
                 raw_track.clone()
             };
-            let mut track = projected;
-            for stage in &chain.stages {
-                if let ChainStage::LinearPressureAdvance { k } = stage {
-                    track = apply_pressure_advance_to_track(&track, *k);
-                }
-            }
+            let track = apply_leading_stages(chain, projected);
             if !track.control_points().iter().all(|v| v.is_finite()) {
                 return Err(PostProcessError::NonFiniteSample {
                     axis,
                     t: raw.t_start,
                 });
             }
-            out[i].axes[axis] = track;
+            state.projected_through_t = Some(raw.t_end);
+            state.projected.push(ProjSeg {
+                t_start: raw.t_start,
+                t_end: raw.t_end,
+                track,
+            });
+        }
+        for i in 0..commit_count {
+            let raw = &base[i];
+            let cached = state.cached_track(raw.t_start, raw.t_end);
+            out[i].axes[axis] = match kernel {
+                None => cached.clone(),
+                Some(kernel) => {
+                    let (k_lo, k_hi) = kernel.support();
+                    let first = state.projected.first().expect("cache covers commits");
+                    let last = state.projected.last().expect("cache covers commits");
+                    let (first_t, last_t) = (first.t_start, last.t_end);
+                    let need_lo = raw.t_start + k_lo;
+                    let need_hi = raw.t_end + k_hi;
+                    if need_lo < first_t && state.projected_trimmed {
+                        return Err(PostProcessError::MissingHistory { axis, t: need_lo });
+                    }
+                    if need_hi > last_t && !force {
+                        return Err(PostProcessError::MissingLookahead { axis, t: need_hi });
+                    }
+                    let at_boundary = !state.projected_trimmed;
+                    let sig = ShapedSignal::new_from_evaluator(
+                        kernel,
+                        |t| state.eval_projected(t, at_boundary, force),
+                        state.projected_breakpoints(),
+                    );
+                    let shaped = fit_axis_from_signal(axis, cached, &sig)?;
+                    let shaped = apply_trailing_zero_support(chain, shaped);
+                    if !shaped.control_points().iter().all(|v| v.is_finite()) {
+                        return Err(PostProcessError::NonFiniteSample {
+                            axis,
+                            t: raw.t_start,
+                        });
+                    }
+                    shaped
+                }
+            };
+        }
+        if commit_count > 0 {
+            let emitted_through = base[commit_count - 1].t_end;
+            let back = kernel.map_or(0.0, |k| k.support().0.abs());
+            state.trim_projected(emitted_through - back);
         }
         if projecting {
             state.prune_spans();
         }
     }
     Ok(())
+}
+
+/// The chain stages ahead of the follower's kernel (all of them when it has
+/// none), applied to the projected track — the convolution's input, matching
+/// the leader convention where pre-kernel stages bake into the raw track.
+fn apply_leading_stages(chain: &CompiledChain, mut track: ScalarNurbs) -> ScalarNurbs {
+    for stage in &chain.stages {
+        match stage {
+            ChainStage::SmoothKernel(_) => break,
+            ChainStage::LinearPressureAdvance { k } => {
+                track = apply_pressure_advance_to_track(&track, *k);
+            }
+        }
+    }
+    track
+}
+
+/// One raw segment's projected pre-kernel follower track, cached so the
+/// follower's own convolution windows read identical inputs on every emit.
+#[derive(Debug)]
+struct ProjSeg {
+    t_start: f64,
+    t_end: f64,
+    track: ScalarNurbs,
 }
 
 /// One raw segment's stretch of path: raw arc length `[s0, s1]` carrying a
@@ -139,6 +228,9 @@ pub(crate) struct FollowerState {
     s_shaped: f64,
     e_end: Option<f64>,
     carried_deficit: f64,
+    projected: Vec<ProjSeg>,
+    projected_through_t: Option<f64>,
+    projected_trimmed: bool,
 }
 
 impl FollowerState {
@@ -151,10 +243,94 @@ impl FollowerState {
         self.s_raw_end = 0.0;
         self.s_shaped = 0.0;
         self.e_end = None;
+        self.projected.clear();
+        self.projected_through_t = None;
+        self.projected_trimmed = false;
+    }
+
+    /// Drops the cached projected tracks without forgetting how far the
+    /// projection has advanced — used when the shaper drops its own raw
+    /// history at an era boundary (the stream is at rest there, so the
+    /// stream-boundary edge clamp is exact for the next windows).
+    pub(crate) fn clear_projected_history(&mut self) {
+        self.projected.clear();
+        self.projected_trimmed = false;
     }
 
     pub(crate) fn is_active(&self) -> bool {
         self.active
+    }
+
+    fn cached_track(&self, t_start: f64, t_end: f64) -> &ScalarNurbs {
+        let idx = self
+            .projected
+            .partition_point(|p| p.t_end <= t_start + GRID_DEDUP_EPS_S);
+        let p = self
+            .projected
+            .get(idx)
+            .unwrap_or_else(|| panic!("no cached projected track covering [{t_start}, {t_end}]"));
+        assert!(
+            (p.t_start - t_start).abs() <= SEGMENT_TIME_EPS_S
+                && (p.t_end - t_end).abs() <= SEGMENT_TIME_EPS_S,
+            "cached projected track [{}, {}] misaligned with segment [{t_start}, {t_end}]",
+            p.t_start,
+            p.t_end,
+        );
+        &p.track
+    }
+
+    /// The cached projected signal with the shaper's edge semantics: clamp
+    /// at the stream boundary and at a forced terminal flush, hold across
+    /// time gaps (dwells and rest holds), NaN where the window is uncovered.
+    fn eval_projected(&self, t: f64, at_boundary: bool, force: bool) -> f64 {
+        let segs = &self.projected;
+        let first = segs.first().expect("projected cache is non-empty");
+        let last = segs.last().expect("projected cache is non-empty");
+        if t < first.t_start {
+            if !at_boundary {
+                return f64::NAN;
+            }
+            return nurbs::eval::eval(&first.track, first.t_start);
+        }
+        if t > last.t_end {
+            if !force {
+                return f64::NAN;
+            }
+            return nurbs::eval::eval(&last.track, last.t_end);
+        }
+        let mut idx = segs.partition_point(|p| p.t_end + SEGMENT_TIME_EPS_S < t);
+        if idx >= segs.len() {
+            idx = segs.len() - 1;
+        }
+        let lo = idx.saturating_sub(1);
+        let hi = (idx + 2).min(segs.len());
+        for p in &segs[lo..hi] {
+            if t >= p.t_start - SEGMENT_TIME_EPS_S && t <= p.t_end + SEGMENT_TIME_EPS_S {
+                return nurbs::eval::eval(&p.track, t.clamp(p.t_start, p.t_end));
+            }
+        }
+        if idx > 0 && segs[idx].t_start > t {
+            return nurbs::eval::eval(&segs[idx - 1].track, segs[idx - 1].t_end);
+        }
+        f64::NAN
+    }
+
+    fn projected_breakpoints(&self) -> Vec<f64> {
+        let mut breaks = Vec::new();
+        for p in &self.projected {
+            breaks.push(p.t_start);
+            breaks.extend_from_slice(p.track.knots());
+            breaks.push(p.t_end);
+        }
+        breaks
+    }
+
+    fn trim_projected(&mut self, keep_after: f64) {
+        let drop = self.projected.partition_point(|p| p.t_end < keep_after);
+        if drop > 0 {
+            self.projected.drain(..drop);
+            self.projected_trimmed = true;
+        }
     }
 
     fn ingest(&mut self, seg: &ShapedSegment, axis: usize, leaders: &[usize]) {

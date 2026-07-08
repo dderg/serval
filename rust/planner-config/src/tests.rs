@@ -299,20 +299,25 @@ fn two_kernels_on_one_axis_rejected_with_v1_message() {
 }
 
 #[test]
-fn kernel_on_follower_axis_rejected() {
-    let registry = registry_with_e(&["is", "pa"]);
-    let err = PostProcessorSet::try_new(
+fn kernel_and_pa_on_follower_e_compiles() {
+    let registry = registry_with_e(&["pa", "st"]);
+    let set = PostProcessorSet::try_new(
         &registry,
         &[
-            pp("is", "smooth_zv", &[("frequency_hz", 50.0)]),
             pp("pa", "linear_pressure_advance", &[("k", 0.04)]),
+            pp("st", "smooth_zv", &[("frequency_hz", 50.0)]),
         ],
     )
-    .unwrap_err();
+    .unwrap();
+    let chains = set.compile(&registry).unwrap();
     assert!(
-        err.to_string().contains("follower axis"),
-        "expected the kernel-on-follower rejection, got: {err}"
+        matches!(chains.chains[3].stages[0], trajectory::ChainStage::LinearPressureAdvance { k } if k == 0.04)
     );
+    assert!(matches!(
+        chains.chains[3].stages[1],
+        trajectory::ChainStage::SmoothKernel(_)
+    ));
+    assert_eq!(chains.followers, vec![(3, vec![0, 1, 2])]);
 }
 
 #[test]

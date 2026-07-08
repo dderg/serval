@@ -33,7 +33,7 @@ impl TrackSignal for ShapedSignal<'_> {
     }
 }
 
-const SEGMENT_TIME_EPS_S: f64 = 1e-9;
+pub(crate) const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 
 /// Final pipeline stage: streaming axis-chain post-processing. Buffers lowered
 /// segments until each one's convolution window is covered by lookahead, then
@@ -123,6 +123,9 @@ impl Shaper {
                                 if new_back > self.back_support {
                                     self.history.clear();
                                     self.history_trimmed = false;
+                                    for state in &mut self.follower_states {
+                                        state.clear_projected_history();
+                                    }
                                 }
                                 (self.forward_support, self.back_support) = (new_forward, new_back);
                                 self.chains = chains.clone();
@@ -142,27 +145,71 @@ impl Shaper {
     }
 
     /// How many front segments have their forward convolution window covered
-    /// by the buffered lookahead.
+    /// by the buffered lookahead. A follower with its own kernel cascades:
+    /// its convolution reads the projection, which is only final through the
+    /// shaping frontier — the last pending segment whose directly-convolved
+    /// tracks have their own lookahead covered. The time-based bound already
+    /// includes the cascaded width, but segment granularity can leave a long
+    /// straddling segment unprojectable, so gate on the frontier explicitly.
     fn supported_count(&self) -> usize {
         let Some(last) = self.pending.back() else {
             return 0;
         };
         let latest_safe_t = last.t_end - self.forward_support;
-        self.pending
+        let plain = self
+            .pending
             .iter()
             .take_while(|seg| seg.t_end <= latest_safe_t + 1e-12)
-            .count()
+            .count();
+        let own_hi = self.chains.max_follower_own_forward_support();
+        if own_hi <= 0.0 {
+            return plain;
+        }
+        let Some(frontier_t) = self.shaping_frontier_t(last.t_end) else {
+            return 0;
+        };
+        let gated = self
+            .pending
+            .iter()
+            .take_while(|seg| seg.t_end + own_hi <= frontier_t + 1e-12)
+            .count();
+        plain.min(gated)
+    }
+
+    /// End time of the last pending segment whose direct convolution window is
+    /// covered by the buffered lookahead.
+    fn shaping_frontier_t(&self, last_t: f64) -> Option<f64> {
+        let direct_hi = self.chains.direct_forward_support();
+        self.pending
+            .iter()
+            .take_while(|seg| seg.t_end + direct_hi <= last_t + 1e-12)
+            .last()
+            .map(|seg| seg.t_end)
     }
 
     fn emit(&mut self, count: usize, force: bool, output: &Sender<ShapedItem>) -> bool {
         if count == 0 {
             return true;
         }
+        let frontier_count = if self.chains.max_follower_own_forward_support() <= 0.0 {
+            count
+        } else if force {
+            self.pending.len()
+        } else {
+            let last_t = self.pending.back().expect("count > 0").t_end;
+            let direct_hi = self.chains.direct_forward_support();
+            self.pending
+                .iter()
+                .take_while(|seg| seg.t_end + direct_hi <= last_t + 1e-12)
+                .count()
+                .max(count)
+        };
         let base = self.pending.make_contiguous();
         let shaped = apply_axis_chains(
             &self.history,
             base,
             count,
+            frontier_count,
             force,
             !self.history_trimmed,
             &self.chains,
@@ -202,15 +249,21 @@ fn apply_axis_chains(
     history: &VecDeque<ShapedSegment>,
     base: &[ShapedSegment],
     commit_count: usize,
+    frontier_count: usize,
     force: bool,
     at_stream_boundary: bool,
     chains: &AxisChainSet,
     follower_states: &mut Vec<FollowerState>,
 ) -> Result<Vec<ShapedSegment>, PostProcessError> {
-    let mut out: Vec<ShapedSegment> = base.iter().take(commit_count).cloned().collect();
+    let mut out: Vec<ShapedSegment> = base
+        .iter()
+        .take(frontier_count.max(commit_count))
+        .cloned()
+        .collect();
     if chains.chains.iter().all(CompiledChain::is_empty)
         && follower_states.iter().all(|s| !s.is_active())
     {
+        out.truncate(commit_count);
         return Ok(out);
     }
     let n_axes = out.iter().map(|seg| seg.axes.len()).max().unwrap_or(0);
@@ -243,7 +296,8 @@ fn apply_axis_chains(
             chain,
         )?;
     }
-    project_followers(base, &mut out, chains, follower_states)?;
+    project_followers(base, &mut out, commit_count, force, chains, follower_states)?;
+    out.truncate(commit_count);
     for seg in &mut out {
         pad_segment_axes_to_uniform_degree(seg);
     }
@@ -583,7 +637,7 @@ fn exact_value(axis: usize, value: f64, t: f64) -> Result<f64, PostProcessError>
     }
 }
 
-fn apply_trailing_zero_support(
+pub(crate) fn apply_trailing_zero_support(
     chain: &CompiledChain,
     mut track: nurbs::ScalarNurbs,
 ) -> nurbs::ScalarNurbs {

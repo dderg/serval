@@ -1,5 +1,5 @@
 use thiserror::Error;
-use trajectory::{AxisChainSet, ChainStage, CompiledChain, PostProcessorInstance, algos};
+use trajectory::{AxisChainSet, CompiledChain, PostProcessorInstance, algos};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PostProcessorDecl {
@@ -26,13 +26,6 @@ pub enum PostProcessorConfigError {
     UnknownInstance { name: String },
     #[error("axis '{axis}': post_processors references undeclared '{name}'")]
     UnknownAxisReference { axis: String, name: String },
-    #[error(
-        "axis '{axis}': a smoothing-kernel post-processor cannot be declared on a \
-         follower axis — a follower is projected onto its leaders' shaped motion, \
-         so it inherits their smoothing; declare only its own post-processors \
-         (e.g. pressure advance)"
-    )]
-    KernelOnFollowerAxis { axis: String },
 }
 
 #[derive(Debug, Clone)]
@@ -106,19 +99,10 @@ impl PostProcessorSet {
                 CompiledChain::compile(&chain).map_err(PostProcessorConfigError::Param)
             })
             .collect::<Result<_, _>>()?;
-        let followers = registry.follower_index_map();
-        for (axis, leaders) in &followers {
-            let has_kernel = chains[*axis]
-                .stages
-                .iter()
-                .any(|s| matches!(s, ChainStage::SmoothKernel(_)));
-            if !leaders.is_empty() && has_kernel {
-                return Err(PostProcessorConfigError::KernelOnFollowerAxis {
-                    axis: registry.axis_name(*axis).to_string(),
-                });
-            }
-        }
-        Ok(AxisChainSet { chains, followers })
+        Ok(AxisChainSet {
+            chains,
+            followers: registry.follower_index_map(),
+        })
     }
 
     pub fn set_param(
