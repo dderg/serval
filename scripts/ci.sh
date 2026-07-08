@@ -23,7 +23,11 @@ RUST="$ROOT/rust"
 docker_image() {
     local branch tag
     branch="$(cd "$ROOT" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo head)"
+    # Detached HEAD (e.g. GitHub Actions' PR checkout) yields the literal
+    # string "HEAD" rather than a branch name — fall back to the commit.
+    [ "$branch" = "HEAD" ] && branch="$(cd "$ROOT" && git rev-parse --short HEAD 2>/dev/null || echo head)"
     tag="klipper-build-${branch//\//-}"
+    tag="$(echo "$tag" | tr '[:upper:]' '[:lower:]')"
     docker build -f "$ROOT/scripts/Dockerfile-build" -t "$tag" "$ROOT" >&2
     echo "$tag"
 }
