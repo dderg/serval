@@ -3,7 +3,51 @@ use super::{
     Python, mcu_handle_from_raw, pymethods, router_err,
 };
 use crate::lock_ext::LockExt;
+use host_rt::host_io::parser::ArgValue;
+use host_rt::transport::MessageParams;
 use pyo3::prelude::*;
+
+/// Command argument as klippy passes it: int (covers bool), str (enum/pin
+/// names), or bytes/bytearray/list-of-int (buffer params).
+#[derive(FromPyObject)]
+pub(crate) enum PyArgValue {
+    Int(i64),
+    Str(String),
+    Bytes(Vec<u8>),
+}
+
+impl From<PyArgValue> for ArgValue {
+    fn from(v: PyArgValue) -> Self {
+        match v {
+            PyArgValue::Int(i) => ArgValue::Int(i),
+            PyArgValue::Str(s) => ArgValue::Str(s),
+            PyArgValue::Bytes(b) => ArgValue::Bytes(b),
+        }
+    }
+}
+
+fn owned_args(args: Vec<(String, PyArgValue)>) -> Vec<(String, ArgValue)> {
+    args.into_iter().map(|(k, v)| (k, v.into())).collect()
+}
+
+fn params_to_pydict(py: Python<'_>, params: &MessageParams) -> PyResult<Py<PyDict>> {
+    let d = PyDict::new(py);
+    for (k, v) in &params.fields {
+        use host_rt::transport::MessageValue;
+        match v {
+            MessageValue::U32(n) => d.set_item(k, n)?,
+            MessageValue::I32(n) => d.set_item(k, n)?,
+            MessageValue::U64(n) => d.set_item(k, n)?,
+            MessageValue::Bytes(b) => d.set_item(k, pyo3::types::PyBytes::new(py, b.as_slice()))?,
+            MessageValue::String(s) => d.set_item(k, s)?,
+        }
+    }
+    if params.sent_time_raw != 0.0 {
+        d.set_item("#sent_time_raw", params.sent_time_raw)?;
+        d.set_item("#receive_time_raw", params.recv_time_raw)?;
+    }
+    Ok(d.unbind())
+}
 
 #[pymethods]
 impl PyMotionEngine {
@@ -46,24 +90,46 @@ impl PyMotionEngine {
             .map_err(|e| PyRuntimeError::new_err(format!("engine_call: {e}")))
         })?;
 
-        let d = PyDict::new(py);
-        for (k, v) in &params.fields {
-            use host_rt::transport::MessageValue;
-            match v {
-                MessageValue::U32(n) => d.set_item(k, n)?,
-                MessageValue::I32(n) => d.set_item(k, n)?,
-                MessageValue::U64(n) => d.set_item(k, n)?,
-                MessageValue::Bytes(b) => {
-                    d.set_item(k, pyo3::types::PyBytes::new(py, b.as_slice()))?
-                }
-                MessageValue::String(s) => d.set_item(k, s)?,
-            }
-        }
-        if params.sent_time_raw != 0.0 {
-            d.set_item("#sent_time_raw", params.sent_time_raw)?;
-            d.set_item("#receive_time_raw", params.recv_time_raw)?;
-        }
-        Ok(d.unbind())
+        params_to_pydict(py, &params)
+    }
+    #[pyo3(signature = (mcu_handle, name, args, response, timeout_s = 5.0))]
+    fn engine_call_args(
+        &self,
+        py: Python<'_>,
+        mcu_handle: u32,
+        name: &str,
+        args: Vec<(String, PyArgValue)>,
+        response: &str,
+        timeout_s: f64,
+    ) -> PyResult<Py<PyDict>> {
+        use std::time::Duration;
+
+        let io = self.host_io_for_mcu("engine_call_args", mcu_handle)?;
+        let name_owned = name.to_owned();
+        let response_owned = response.to_owned();
+        let args = owned_args(args);
+        let params = py.detach(|| -> PyResult<_> {
+            io.call_args(
+                &name_owned,
+                &args,
+                &response_owned,
+                Duration::from_secs_f64(timeout_s),
+            )
+            .map_err(|e| PyRuntimeError::new_err(format!("engine_call_args: {e}")))
+        })?;
+
+        params_to_pydict(py, &params)
+    }
+    #[pyo3(signature = (mcu_handle, name, args))]
+    fn engine_send_args(
+        &self,
+        mcu_handle: u32,
+        name: &str,
+        args: Vec<(String, PyArgValue)>,
+    ) -> PyResult<()> {
+        let io = self.host_io_for_mcu("engine_send_args", mcu_handle)?;
+        io.send_args(name, &owned_args(args))
+            .map_err(|e| PyRuntimeError::new_err(format!("engine_send_args: {e}")))
     }
     fn take_runtime_event(&self, py: Python<'_>, mcu_handle: u32) -> PyResult<Option<Py<PyDict>>> {
         use host_rt::host_io::runtime_events::RuntimeEvent;
@@ -131,24 +197,10 @@ impl PyMotionEngine {
                 d.set_item("msg", msg)?;
             }
             RuntimeEvent::PassthroughResponse { name, params } => {
+                let fields = params_to_pydict(py, &params)?;
+                d.update(fields.bind(py).as_mapping())?;
                 d.set_item("type", "response")?;
                 d.set_item("name", name)?;
-                for (k, v) in &params.fields {
-                    use host_rt::transport::MessageValue;
-                    match v {
-                        MessageValue::U32(n) => d.set_item(k, *n)?,
-                        MessageValue::I32(n) => d.set_item(k, *n)?,
-                        MessageValue::U64(n) => d.set_item(k, *n)?,
-                        MessageValue::Bytes(b) => {
-                            d.set_item(k, pyo3::types::PyBytes::new(py, b.as_slice()))?
-                        }
-                        MessageValue::String(s) => d.set_item(k, s)?,
-                    }
-                }
-                if params.sent_time_raw != 0.0 {
-                    d.set_item("#sent_time_raw", params.sent_time_raw)?;
-                    d.set_item("#receive_time_raw", params.recv_time_raw)?;
-                }
             }
             RuntimeEvent::McuLog(_) => {
                 return Ok(None);

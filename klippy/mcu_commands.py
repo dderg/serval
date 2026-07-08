@@ -6,20 +6,8 @@
 from . import serialhdl
 
 
-def _format_engine_msg(cmd, data):
-    parts = [cmd.name]
-    for i, (name, _) in enumerate(cmd.param_names):
-        val = data[i]
-        if isinstance(val, (bytes, bytearray)):
-            val = val.hex()
-        elif (
-            isinstance(val, (list, tuple))
-            and val
-            and all(isinstance(x, int) for x in val)
-        ):
-            val = bytes(val).hex()
-        parts.append("%s=%s" % (name, val))
-    return " ".join(parts)
+def _command_args(cmd, data):
+    return [(name, data[i]) for i, (name, _) in enumerate(cmd.param_names)]
 
 
 ######################################################################
@@ -45,9 +33,10 @@ class CommandQueryWrapper:
         self._error = error
 
     def _engine_send(self, data):
-        msg = _format_engine_msg(self._cmd, data)
         try:
-            return self._serial.send_with_response(msg, self._response)
+            return self._serial.send_with_response_args(
+                self._cmd.name, _command_args(self._cmd, data), self._response
+            )
         except serialhdl.error as e:
             raise self._error(str(e))
 
@@ -76,14 +65,12 @@ class CommandWrapper:
         self._msgtag = msgparser.lookup_msgid(msgformat) & 0xFFFFFFFF
 
     def send(self, data=(), minclock=0, reqclock=0):
-        self._serial.send(
-            _format_engine_msg(self._cmd, data), minclock, reqclock
+        self._serial.send_args(
+            self._cmd.name, _command_args(self._cmd, data), minclock, reqclock
         )
 
     def send_wait_ack(self, data=(), minclock=0, reqclock=0):
-        self._serial.send(
-            _format_engine_msg(self._cmd, data), minclock, reqclock
-        )
+        self.send(data, minclock, reqclock)
 
     def get_command_tag(self):
         return self._msgtag

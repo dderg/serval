@@ -313,17 +313,40 @@ class EngineCommandChannel:
             self._error("send() called without a motion engine")
         if self._engine_detached:
             return
-        if reqclock and self._held_until_timer_horizon(msg, minclock, reqclock):
+        if reqclock and self._reqclock_holds_or_warns(
+            msg.split()[0], reqclock, lambda: self.send(msg, minclock, reqclock)
+        ):
             return
-        if reqclock:
-            self._warn_if_deadline_margin_thin(msg, reqclock)
         try:
             self.engine_mcu.send(msg)
         except RuntimeError as e:
             if not self._is_engine_transport_drop(e):
                 raise
 
-    def _warn_if_deadline_margin_thin(self, msg, reqclock):
+    def send_args(self, name, args, minclock=0, reqclock=0):
+        if not self.engine_mcu.available():
+            self._error("send_args() called without a motion engine")
+        if self._engine_detached:
+            return
+        if reqclock and self._reqclock_holds_or_warns(
+            name,
+            reqclock,
+            lambda: self.send_args(name, args, minclock, reqclock),
+        ):
+            return
+        try:
+            self.engine_mcu.send_args(name, args)
+        except RuntimeError as e:
+            if not self._is_engine_transport_drop(e):
+                raise
+
+    def _reqclock_holds_or_warns(self, command_name, reqclock, resend):
+        if self._held_until_timer_horizon(resend, reqclock):
+            return True
+        self._warn_if_deadline_margin_thin(command_name, reqclock)
+        return False
+
+    def _warn_if_deadline_margin_thin(self, command_name, reqclock):
         clocksync = self.mcu._clocksync
         est_clock = clocksync.get_clock(self.reactor.monotonic())
         margin = (reqclock - est_clock) / clocksync.mcu_freq
@@ -333,11 +356,11 @@ class EngineCommandChannel:
                 "thin_deadline_margin",
                 level=logging.WARNING,
                 msg="engine-path command sent with thin clock margin",
-                command=msg.split()[0],
+                command=command_name,
                 margin_s=margin,
             )
 
-    def _held_until_timer_horizon(self, msg, minclock, reqclock):
+    def _held_until_timer_horizon(self, resend, reqclock):
         clocksync = self.mcu._clocksync
         est_clock = clocksync.get_clock(self.reactor.monotonic())
         if reqclock - est_clock <= MCU_TIMER_HORIZON:
@@ -345,9 +368,7 @@ class EngineCommandChannel:
         release_systime = clocksync.estimate_clock_systime(
             reqclock - MCU_TIMER_HORIZON
         )
-        self.reactor.register_callback(
-            lambda et: self.send(msg, minclock, reqclock), release_systime
-        )
+        self.reactor.register_callback(lambda et: resend(), release_systime)
         return True
 
     def send_with_response(self, msg, response):
@@ -361,6 +382,24 @@ class EngineCommandChannel:
             if not self._is_engine_transport_drop(e):
                 raise
             raise error("serial connection closed")
+        return self._stamp_response_times(params)
+
+    def send_with_response_args(self, name, args, response):
+        if not self.engine_mcu.available():
+            self._error(
+                "send_with_response_args() called without a motion engine"
+            )
+        if self._engine_detached:
+            raise error("serial connection closed")
+        try:
+            params = self.engine_mcu.call_args(name, args, response)
+        except RuntimeError as e:
+            if not self._is_engine_transport_drop(e):
+                raise
+            raise error("serial connection closed")
+        return self._stamp_response_times(params)
+
+    def _stamp_response_times(self, params):
         # Use CLOCK_MONOTONIC_RAW timestamps if the Rust engine supplied them
         # (non-zero means a real RTT was measured on the wire).  Fall back to
         # reactor.monotonic() only when both sides stamp the same instant (the

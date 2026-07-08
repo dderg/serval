@@ -57,8 +57,14 @@ class EngineMcu:
     def send(self, msg):
         self._engine.engine_send(self._handle, msg)
 
+    def send_args(self, name, args):
+        self._engine.engine_send_args(self._handle, name, args)
+
     def call(self, msg, response):
         return self._engine.engine_call(self._handle, msg, response)
+
+    def call_args(self, name, args, response):
+        return self._engine.engine_call_args(self._handle, name, args, response)
 
     def set_clock_est(self, freq, offset, last_clock, host_now_raw):
         self._engine.set_clock_est(
