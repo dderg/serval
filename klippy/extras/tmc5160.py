@@ -577,8 +577,9 @@ class TMC5160:
         # bootstrap charge pump depends on the chopper switching, and
         # direct_mode with toff=0 drains the bootstrap caps (uv_cp).
         self.mcu_tmc.set_register("CHOPCONF", self.fields.registers["CHOPCONF"])
-        self.fields.set_field("en_pwm_mode", 0)
-        gconf_val = self.fields.set_field("direct_mode", 1)
+        gconf_val = self.fields.override_register(
+            "GCONF", {"en_pwm_mode": 0, "direct_mode": 1}
+        )
         self.mcu_tmc.set_register("GCONF", gconf_val)
         mscnt = self.mcu_tmc.get_register("MSCNT") & 0x3FF
         self._cached_mscnt = mscnt
@@ -676,8 +677,7 @@ class TMC5160:
                 reactor.pause(reactor.monotonic() + 0.005)
         disable_spi.send([])
         for t in active:
-            gconf_val = t.fields.set_field("direct_mode", 0)
-            t.mcu_tmc.set_register("GCONF", gconf_val)
+            t.mcu_tmc.set_register("GCONF", t.fields.registers.get("GCONF", 0))
         for axis_idx in sorted({t._phase_axis_idx for t in active}):
             set_axis_mode.send([axis_idx, 0])
         for t in active:

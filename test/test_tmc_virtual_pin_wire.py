@@ -88,21 +88,16 @@ def test_5160_disarm_restores_the_exact_prior_configuration():
     ]
 
 
-def test_5160_arm_disarm_round_trip_leaves_tcoolthrs_residue_in_cache():
+def test_arm_disarm_round_trip_never_touches_the_desired_config():
     wire, _printer, helper = build_5160()
     fields = helper.fields
     before = dict(fields.registers)
     helper.arm()
-    helper.disarm()
-    residue = {
-        reg: val
-        for reg, val in fields.registers.items()
-        if before.get(reg) != val
-    }
-    assert residue == {"TCOOLTHRS": 0}, (
-        "arm/disarm materializes TCOOLTHRS=0 in the register cache (same as"
-        " the implicit default, but a later full reinit now writes it too)"
+    assert dict(fields.registers) == before, (
+        "homing overrides are transient wire writes, not config changes"
     )
+    helper.disarm()
+    assert dict(fields.registers) == before
 
 
 def test_2209_arm_refreshes_sgthrs_and_forces_stealthchop():
