@@ -216,6 +216,12 @@ async function main() {
     view.setShowPeaks(!view.showPeaks);
   });
 
+  document.getElementById("toggle-fitted-path").addEventListener("click", (e) => {
+    view.setShowFittedPath(!view.showFittedPath);
+    e.target.textContent = view.showFittedPath ? "Fitted" : "Shaped";
+    e.target.classList.toggle("active", view.showFittedPath);
+  });
+
   document.addEventListener("keydown", (e) => {
     if (e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT") return;
     if (e.key === " " || e.key === "b" || e.key === "B") {
