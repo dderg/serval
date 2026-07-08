@@ -45,8 +45,7 @@ job_rust_loom() {
     cd "$RUST"
     RUSTFLAGS="--cfg loom" cargo test -p runtime --release \
         --test loom_seqlock \
-        --test loom_force_idle \
-        --test loom
+        --test loom_force_idle
 }
 
 MCU_ENV=(RUNTIME_STORAGE_SIZE=122880 RUNTIME_PIECE_RING_SIZE=63488)

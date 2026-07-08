@@ -177,16 +177,6 @@ pub fn raise_buzz_axis_conflict(shared: &SharedState, axis_idx: usize) {
 }
 
 #[inline]
-pub fn raise_buzz_in_phase_mode(shared: &SharedState, axis_idx: usize) {
-    let detail = (axis_idx as u32 & 0xFF) << 16;
-    shared.fault_detail.store(detail, Ordering::Release);
-    shared
-        .last_error
-        .store(FaultCode::BuzzInPhaseMode.as_i32(), Ordering::Release);
-    emit_fault_log(FaultCode::BuzzInPhaseMode, detail);
-}
-
-#[inline]
 pub fn raise_overlay_unsupported(shared: &SharedState, axis_idx: usize, mask: u8) {
     let detail = ((axis_idx as u32 & 0xFF) << 16) | u32::from(mask);
     shared.fault_detail.store(detail, Ordering::Release);

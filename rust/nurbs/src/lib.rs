@@ -1,24 +1,21 @@
 pub mod error;
-pub use error::{AlgebraError, ArcLengthError, ConstructError, KnotError, NurbsError};
+pub use error::{AlgebraError, ConstructError, KnotError, NurbsError};
 
-mod view;
-pub use view::{NurbsView, VectorNurbsView};
+pub mod view;
 
-mod scalar;
-pub use scalar::{ScalarNurbs, ScalarNurbsRef};
+pub mod scalar;
+pub use scalar::ScalarNurbs;
 
-mod vector;
-pub use vector::{VectorNurbs, VectorNurbsRef};
+pub mod vector;
+pub use vector::VectorNurbs;
 
 pub mod eval;
 
 pub mod arc_length;
-pub use arc_length::{ArcLengthTable, ArcLengthTableRef};
 
 pub mod algebra;
 
 pub mod knot;
-pub use knot::KnotVector;
 
 pub mod bezier;
 pub mod chebyshev;

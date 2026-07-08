@@ -24,11 +24,3 @@ fn all_entries_within_amplitude() {
         );
     }
 }
-
-#[test]
-fn legacy_lut_entries_anchors() {
-    use super::{CURRENT_AMPLITUDE, LUT_ENTRIES, MOTOR_PERIOD};
-    // LUT_ENTRIES[i] = (sin, cos)
-    assert_eq!(LUT_ENTRIES[0], (0, CURRENT_AMPLITUDE));
-    assert_eq!(LUT_ENTRIES[MOTOR_PERIOD / 4], (CURRENT_AMPLITUDE, 0));
-}

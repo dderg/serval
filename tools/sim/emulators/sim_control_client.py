@@ -1,8 +1,6 @@
 """Client for the LD_PRELOAD shim's control socket.
 
-Wire format: line-oriented text. See
-docs/superpowers/specs/2026-05-08-syscall-shim-design.md §"Control socket
-protocol" for the grammar.
+Wire format: line-oriented text.
 """
 
 import socket

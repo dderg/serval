@@ -1,4 +1,5 @@
-use crate::{ConstructError, MAX_DEGREE, NurbsView};
+use crate::view::NurbsView;
+use crate::{ConstructError, MAX_DEGREE};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScalarNurbs {

@@ -80,12 +80,6 @@ pub struct IsrState {
     pub last_tick_now: Option<u64>,
 }
 
-impl IsrState {
-    pub fn raw_ref_from_ctx(ctx: &RuntimeContext) -> *const Self {
-        core::cell::UnsafeCell::raw_get(core::ptr::addr_of!(ctx.isr))
-    }
-}
-
 #[derive(Debug)]
 #[repr(C)]
 pub struct SharedState {

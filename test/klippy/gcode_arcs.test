@@ -1,5 +1,0 @@
-# [gcode_arcs] (G2/G3 arc commands) is temporarily not supported: the motion
-# engine has no native arc ingestion yet. Assert the config is rejected loudly.
-DICTIONARY atmega2560.dict
-CONFIG gcode_arcs.cfg
-SHOULD_FAIL

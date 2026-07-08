@@ -1,8 +1,6 @@
 # Servo feedforward + identification
 
 > See also:
-> [`docs/superpowers/specs/2026-06-10-servo-feedforward-identification-design.md`](../superpowers/specs/2026-06-10-servo-feedforward-identification-design.md)
-> for the full rationale, PDO remap tables, and rollout plan, and
 > [`servo-calibration.md`](servo-calibration.md) for the full `SERVO_*` command
 > and script reference.
 

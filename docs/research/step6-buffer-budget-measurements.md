@@ -188,12 +188,10 @@ When the user runs M1 / M2 / M3 and lands actuals here:
      or `rust/runtime/src/spsc.rs::Q_N_MAX`
      diverges from what the measurement supports, update the constant
      in a separate commit and reference the M-number here.
-  3. Append a short summary entry to
-     `docs/superpowers/plan-changes-log.md` with the measured values
-     and the date the soak completed.
+  3. Append a short summary entry to this document with the measured
+     values and the date the soak completed.
   4. Status header above flips from PLACEHOLDER to MEASURED with the
      date and the firmware SHA the soaks ran against.
 
-The Step-6 plan-changes-log entry tracks "M1/M2/M3 measurement actuals
-(user-run, pending)" as an open follow-up; that line stays open until
+M1/M2/M3 measurement actuals (user-run) remain an open follow-up until
 this document is fully populated with actuals.

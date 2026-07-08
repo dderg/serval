@@ -9,7 +9,7 @@ sources:
   - Beudaert, X., Lavernhe, S., Tournier, C. "Feedrate interpolation with axis jerk constraints on 5-axis NURBS and G1 tool path." Int J Mach Tools Manuf, 57, 73-82 (2012)
   - Goldapp, M. "Approximation of circular arcs by cubic polynomials." CAGD, 8, 227-238 (1991)
   - Sonny Jeon, "Improving Grbl's Cornering Algorithm" (2011) — junction deviation
-  - OrcaSlicer 2.3.2 arc-fitted Voron cube corpus (scripts/fitter_prototype/corpus/voron_cube_arc_fitted.gcode)
+  - OrcaSlicer 2.3.2 arc-fitted Voron cube corpus (voron_cube_arc_fitted.gcode; the corpus has since been removed from the repo)
 ---
 
 # Step 13 Boundary Tangent Analysis

@@ -6,7 +6,6 @@ pub mod curve;
 pub mod error;
 pub mod fitter;
 pub mod frontend;
-pub mod params;
 pub mod path;
 pub mod segment;
 pub mod surface;
@@ -19,11 +18,7 @@ pub use fitter::{
     UnblendedJunction, fit_corners,
 };
 pub use frontend::{FrontendError, Move, MoveContext, VelocityLimits, line_move};
-pub use params::FitterParams;
-pub use segment::{
-    BlendFamily, CornerBlendSlot, CubicSegment, FollowerDemand, JunctionDeviation, Segment,
-    SourceRange, SplitInfo,
-};
+pub use segment::{CubicSegment, FollowerDemand, SourceRange};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FollowerWord {

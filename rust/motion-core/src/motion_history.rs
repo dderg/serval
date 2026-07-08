@@ -409,10 +409,6 @@ impl HistoryStore {
         self.endpoints.insert(key, AxisEndpoint { host, position });
     }
 
-    pub fn last_endpoint_host(&self, key: AxisKey) -> f64 {
-        self.endpoints.get(&key).map_or(0.0, |e| e.host)
-    }
-
     pub fn final_position(&self, key: AxisKey) -> Option<f64> {
         self.endpoints.get(&key).map(|e| e.position)
     }

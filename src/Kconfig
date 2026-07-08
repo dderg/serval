@@ -391,12 +391,9 @@ config MOTION_SAMPLE_RATE_HZ
       Rate at which the motion-engine ISR evaluates motion curves and emits
       step pulses. Higher rates give better velocity-extrapolation accuracy
       but cost more CPU. Defaults to 40 kHz on H7 (520 MHz) and 20 kHz
-      on F4 (180 MHz); see docs/superpowers/specs/2026-05-19-stepping-
-      redesign-design.md for the per-MCU step-rate ceilings these
-      enable. Defaults to 2 kHz on G0B1 (64 MHz Cortex-M0+, soft-float):
-      this is a low-rate bring-up target, not a throughput target —
-      see docs/superpowers/specs/2026-05-31-stm32g0-sb2209-target-design.md.
-      Defaults to 1 kHz on MACH_LINUX: the host tick
+      on F4 (180 MHz). Defaults to 2 kHz on G0B1 (64 MHz Cortex-M0+,
+      soft-float): this is a low-rate bring-up target, not a throughput
+      target. Defaults to 1 kHz on MACH_LINUX: the host tick
       (linux/runtime_tick_host.c) drives the ISR from a clock_nanosleep loop
       whose resolution floor on a stock (non-PREEMPT_RT) kernel is ~1 ms, and
       this rate MUST equal the tick rate or the runtime's TickIntervalExceeded
@@ -482,9 +479,7 @@ config MCU_SIM_TMCUART_BYPASS
       the one architectural exception to the otherwise-clean
       "production firmware knows nothing about sim" rule for MACH_LINUX
       builds — the bit-bang's timing fragility under Linux scheduler
-      jitter would make a shim-side decoder flake intermittently. See
-      docs/superpowers/specs/2026-05-08-syscall-shim-design.md
-      §"Chip emulator routing → tmcuart" for rationale.
+      jitter would make a shim-side decoder flake intermittently.
 
 menu "Motion dispatch modules"
     depends on MACH_STM32H7 || MACH_STM32F4 || MACH_STM32G0 || MACH_LINUX

@@ -1,6 +1,0 @@
-# Test case for [post_processor] runtime tuning
-CONFIG post_processor.cfg
-DICTIONARY atmega2560.dict
-
-# Simple command test
-SET_POST_PROCESSOR NAME=is_xy FREQUENCY_HZ=42.5

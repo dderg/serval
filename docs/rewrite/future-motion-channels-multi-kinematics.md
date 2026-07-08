@@ -9,7 +9,6 @@
 
 ## Where this builds from
 
-- Foundational model: `docs/superpowers/specs/2026-06-12-follower-axes-and-limits-design.md`.
 - Shipped schema it extends (branch `e-follows-xy`): `[motor <name>]` (drive
   mandatory, short-name identity), the single `[kinematics]` section with
   `type:` + role→axis + role→motor bindings, `[axis <name>]` (range/homing,

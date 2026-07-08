@@ -1,9 +1,10 @@
 #![allow(deprecated)]
 
 use super::*;
+use crate::StreamConfig;
 use crate::fit_stage::FitStage;
 use crate::planner::Planner;
-use crate::{PlannedMove, StreamConfig};
+use crate::types::PlannedMove;
 use crossbeam_channel::unbounded;
 use geometry::path::{Arc, PathSegment, Segment};
 use geometry::segment::SourceRange;

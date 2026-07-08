@@ -19,7 +19,7 @@ The Sonny-Jeon junction-deviation chord-error formula has two equivalent express
 
 ## Verified claim — 2026-04-27
 
-From `docs/superpowers/specs/2026-04-27-layer-2-multi-segment-design.md` §2.2 "Sharp-corner sub-case (G1↔G1)":
+From the Layer-2 multi-segment design spec (since removed from the repo), §2.2 "Sharp-corner sub-case (G1↔G1)":
 
 > `v_jd² = a_centripetal_max · δ_chord · cos(α/2) / (1 − cos(α/2))` where α = arccos(t_left · t_right) with both t_left, t_right forward unit tangents.
 

@@ -43,5 +43,8 @@ cbindgen = { version = "0.29", optional = true, package = "cbindgen" }
 # Version and features match runtime's dependency so cargo deduplicates.
 portable-atomic = { version = "1", default-features = false, features = ["fallback"] }
 
+[package.metadata.cargo-machete]
+ignored = ["portable-atomic"]
+
 [lints]
 workspace = true

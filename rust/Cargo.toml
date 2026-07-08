@@ -7,7 +7,6 @@ members = [
     "trajectory",
     "runtime",
     "host-rt",
-    "compat",
     "planner-config",
     "motion-core",
     "motion-engine",

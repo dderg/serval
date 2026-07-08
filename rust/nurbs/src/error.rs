@@ -29,35 +29,6 @@ impl fmt::Display for ConstructError {
 
 impl core::error::Error for ConstructError {}
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum ArcLengthError {
-    ToleranceNotMet {
-        achieved_residual: f64,
-        samples_used: usize,
-    },
-    DegenerateCurve,
-}
-
-impl fmt::Display for ArcLengthError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ToleranceNotMet {
-                achieved_residual,
-                samples_used,
-            } => write!(
-                f,
-                "arc-length builder hit cap of {samples_used} samples; achieved residual {achieved_residual:?}"
-            ),
-            Self::DegenerateCurve => write!(
-                f,
-                "arc-length integration produced a curve with total length below MIN_PARAMETRIC_SPEED"
-            ),
-        }
-    }
-}
-
-impl core::error::Error for ArcLengthError {}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlgebraError {
     DegreeExceeded { result_degree: u8, max: u8 },
@@ -118,7 +89,6 @@ impl core::error::Error for KnotError {}
 #[derive(Debug, Clone, PartialEq)]
 pub enum NurbsError {
     Construct(ConstructError),
-    ArcLength(ArcLengthError),
     Algebra(AlgebraError),
     Knot(KnotError),
 }
@@ -127,7 +97,6 @@ impl fmt::Display for NurbsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Construct(e) => write!(f, "{e}"),
-            Self::ArcLength(e) => write!(f, "{e}"),
             Self::Algebra(e) => write!(f, "{e}"),
             Self::Knot(e) => write!(f, "{e}"),
         }
@@ -139,11 +108,6 @@ impl core::error::Error for NurbsError {}
 impl From<ConstructError> for NurbsError {
     fn from(e: ConstructError) -> Self {
         Self::Construct(e)
-    }
-}
-impl From<ArcLengthError> for NurbsError {
-    fn from(e: ArcLengthError) -> Self {
-        Self::ArcLength(e)
     }
 }
 impl From<AlgebraError> for NurbsError {

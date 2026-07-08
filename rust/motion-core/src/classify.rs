@@ -58,7 +58,7 @@ pub fn classify_and_build(
                 FollowerDemand::constant(axis_index, delta / spatial_distance)
             })
             .collect();
-        let segment = CubicSegment::try_new(xyz, demands, feedrate_mm_s, source, None)
+        let segment = CubicSegment::try_new(xyz, demands, feedrate_mm_s, source)
             .map_err(|e| ClassifyError::SegmentConstruction(format!("{e:?}")))?;
         return Ok(ClassifiedMove {
             segment,
@@ -131,7 +131,7 @@ fn classify_curve(
         start_line: 0,
         end_line: 0,
     };
-    let segment = CubicSegment::try_new(xyz, demands, feedrate_mm_s, source, None)
+    let segment = CubicSegment::try_new(xyz, demands, feedrate_mm_s, source)
         .map_err(|e| ClassifyError::SegmentConstruction(format!("{e:?}")))?;
     Ok(ClassifiedMove {
         segment,
