@@ -586,50 +586,7 @@ impl PyMotionEngine {
                 .stream_open(vec![x, y, z, 0.0])
                 .map_err(planner_err)?;
 
-            let sends = {
-                let configs = self.mcu_axis_configs.lock_ok();
-                let mcus = self.mcus.lock_ok();
-                let ethercat_mcu_ids: HashSet<u32> = configs
-                    .iter()
-                    .filter(|c| {
-                        mcus.get(&c.mcu_id)
-                            .map_or(false, |conn| conn.ethercat_socket.is_some())
-                    })
-                    .map(|c| c.mcu_id)
-                    .collect();
-                crate::mcu_config::build_serial_seed_sends(&configs, &ethercat_mcu_ids, x, y, z)
-            };
-            let mcus = self.mcus.lock_ok();
-            for s in sends {
-                let conn = mcus.get(&s.mcu_id).unwrap_or_else(|| {
-                    panic!(
-                        "set_position seed: planner up but mcu_id {} absent \
-                         (broken invariant)",
-                        s.mcu_id
-                    )
-                });
-                let io = conn.host_io.as_ref().unwrap_or_else(|| {
-                    panic!(
-                        "set_position seed: serial mcu_id {} has no host_io \
-                         (broken invariant — attach_serial not called?)",
-                        s.mcu_id
-                    )
-                });
-                io.send_typed(
-                    "runtime_seed_position",
-                    &[
-                        ("x_q16", FieldValue::I32(s.x_q16)),
-                        ("y_q16", FieldValue::I32(s.y_q16)),
-                        ("z_q16", FieldValue::I32(s.z_q16)),
-                    ],
-                )
-                .map_err(|e| {
-                    PyRuntimeError::new_err(format!(
-                        "set_position seed send to mcu_id {} failed: {e:?}",
-                        s.mcu_id
-                    ))
-                })?;
-            }
+            self.send_serial_position_seeds(x, y, z)?;
         }
         Ok(())
     }
@@ -833,6 +790,58 @@ impl PyMotionEngine {
 }
 
 impl PyMotionEngine {
+    /// Re-anchor every serial MCU's step counters at (x, y, z). The MCU-side
+    /// `runtime_seed_position` also zeroes all non-spatial motor positions, so
+    /// this is the counterpart of any host-side reset that returns the
+    /// extruder odometer to 0. Requires a quiesced, drained pipeline.
+    pub(crate) fn send_serial_position_seeds(&self, x: f64, y: f64, z: f64) -> PyResult<()> {
+        let sends = {
+            let configs = self.mcu_axis_configs.lock_ok();
+            let mcus = self.mcus.lock_ok();
+            let ethercat_mcu_ids: HashSet<u32> = configs
+                .iter()
+                .filter(|c| {
+                    mcus.get(&c.mcu_id)
+                        .map_or(false, |conn| conn.ethercat_socket.is_some())
+                })
+                .map(|c| c.mcu_id)
+                .collect();
+            crate::mcu_config::build_serial_seed_sends(&configs, &ethercat_mcu_ids, x, y, z)
+        };
+        let mcus = self.mcus.lock_ok();
+        for s in sends {
+            let conn = mcus.get(&s.mcu_id).unwrap_or_else(|| {
+                panic!(
+                    "position seed: planner up but mcu_id {} absent \
+                     (broken invariant)",
+                    s.mcu_id
+                )
+            });
+            let io = conn.host_io.as_ref().unwrap_or_else(|| {
+                panic!(
+                    "position seed: serial mcu_id {} has no host_io \
+                     (broken invariant — attach_serial not called?)",
+                    s.mcu_id
+                )
+            });
+            io.send_typed(
+                "runtime_seed_position",
+                &[
+                    ("x_q16", FieldValue::I32(s.x_q16)),
+                    ("y_q16", FieldValue::I32(s.y_q16)),
+                    ("z_q16", FieldValue::I32(s.z_q16)),
+                ],
+            )
+            .map_err(|e| {
+                PyRuntimeError::new_err(format!(
+                    "position seed send to mcu_id {} failed: {e:?}",
+                    s.mcu_id
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
     /// Swap the active surface transform behind a pipeline drain, keeping the
     /// physical position invariant: the machine Z at the current rest point is
     /// re-expressed as a gcode Z through the *new* transform, and that rebase
