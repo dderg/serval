@@ -14,7 +14,19 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RUST="$ROOT/rust"
-DOCKER_IMAGE="dangerklippers/klipper-build:latest"
+
+# Built locally from the worktree's own scripts/Dockerfile-build, tagged per
+# branch so concurrent worktrees never test against a stale or mismatched
+# image (mirrors tools/sim/run.sh's kalico-sim-<branch> tagging). Docker's
+# content-addressed layer cache makes repeat calls near-instant when nothing
+# relevant changed.
+docker_image() {
+    local branch tag
+    branch="$(cd "$ROOT" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo head)"
+    tag="klipper-build-${branch//\//-}"
+    docker build -f "$ROOT/scripts/Dockerfile-build" -t "$tag" "$ROOT" >&2
+    echo "$tag"
+}
 
 # Linux-only: env RUSTFLAGS replaces (does not merge with) the per-target
 # rustflags in rust/.cargo/config.toml, so widening this past the host target
@@ -169,7 +181,7 @@ job_ruff() {
 job_py() {
     local ver="${1:-3.13}"
     if command -v docker >/dev/null 2>&1; then
-        docker run -v "$ROOT:/klipper" "$DOCKER_IMAGE" --python "$ver" py.test -n auto
+        docker run -v "$ROOT:/klipper" "$(docker_image)" --python "$ver" py.test -n auto
     else
         echo "docker unavailable — running py.test on the local interpreter only (CI runs 3.9-3.14)"
         cd "$ROOT" && python -m pytest -n auto
@@ -183,7 +195,7 @@ job_sim() {
         tools/test_motion_idle_timeout.py \
         tools/test_motion_static.py"
     if command -v docker >/dev/null 2>&1; then
-        docker run --rm -v "$ROOT:/klipper" -w /klipper --entrypoint bash "$DOCKER_IMAGE" -lc \
+        docker run --rm -v "$ROOT:/klipper" -w /klipper --entrypoint bash "$(docker_image)" -lc \
             "make -C tools/sim/preload >/dev/null && uv run py.test -n auto $paths -m '$sel'"
     else
         echo "docker unavailable — running sim unit tests on the local interpreter"
