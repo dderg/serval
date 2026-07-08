@@ -32,11 +32,13 @@ enum Section {
 
 /// Parses `[axis <name>]`/`[post_processor <name>]` sections in the same
 /// grammar `klippy/motion_setup.py` reads from `printer.cfg`:
-/// `post_processors: a, b` comma lists on `[axis]`, `type: <name>` plus one
-/// `key: value` float per parameter on `[post_processor]`. `follows:`/
-/// `motors:` lines are accepted (so a real printer.cfg's [axis] sections
-/// paste in unmodified) but ignored, since the playground's axis topology
-/// (x, y, z, e-follows-xyz) is fixed by `pipeline_snapshot`'s own default.
+/// `post_processors: a, b` and `follows: x, y, z` comma lists on `[axis]`,
+/// `type: <name>` plus one `key: value` float per parameter on
+/// `[post_processor]`. An explicit `[axis]` section replaces the default
+/// topology's declaration wholesale, so an `[axis e]` without `follows:`
+/// stops being a follower. `motors:` lines are accepted (so a real
+/// printer.cfg's [axis] sections paste in unmodified) but ignored — the
+/// playground has no motor lanes.
 pub fn parse(text: &str) -> Result<(Vec<AxisDecl>, Vec<PostProcessorDecl>), ConfigTextError> {
     let mut sections: Vec<Section> = Vec::new();
 
@@ -86,7 +88,10 @@ pub fn parse(text: &str) -> Result<(Vec<AxisDecl>, Vec<PostProcessorDecl>), Conf
                 "post_processors" => {
                     decl.post_processors = value.split(',').map(|s| s.trim().to_string()).collect();
                 }
-                "follows" | "motors" => {}
+                "follows" => {
+                    decl.follows = value.split(',').map(|s| s.trim().to_string()).collect();
+                }
+                "motors" => {}
                 _ => {
                     return Err(ConfigTextError::BadLine {
                         line: line_no,
