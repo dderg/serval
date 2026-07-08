@@ -5,11 +5,12 @@ use geometry::fitter::{
     spatial_end, spatial_start, trim_line_move,
 };
 use geometry::path::{Line, PathSegment, Segment};
-use geometry::{ChainFitConfig, Move};
+use geometry::{CornerFitConfig, Move};
 
 use crate::{CONTIGUITY_EPS_MM, Control, StreamInput, dist3};
 
 const ALIGN_EPS_MM: f64 = 1e-9;
+const MIN_RUN_FACETS: usize = 3;
 
 /// First pipeline stage: reads raw moves, fits them into G2-continuous
 /// geometry, and pushes the fitted pieces downstream.
@@ -34,8 +35,7 @@ const ALIGN_EPS_MM: f64 = 1e-9;
 /// reductions) exactly as the batch fit does — and length already paid out to
 /// an emitted blend or easing is applied only when a body is finally emitted.
 pub struct FitStage {
-    config: ChainFitConfig,
-    min_run: usize,
+    corner: CornerFitConfig,
     decided: Vec<Element>,
     tail: Vec<Move>,
     tail_checked: usize,
@@ -74,13 +74,9 @@ fn piece_of(e: &Element) -> Option<&Move> {
 }
 
 impl FitStage {
-    pub fn new(config: ChainFitConfig) -> Self {
-        let min_run = config
-            .arc_fit
-            .map_or(0, |arc| arc.min_run_facets.max(3) as usize);
+    pub fn new(corner: CornerFitConfig) -> Self {
         Self {
-            config,
-            min_run,
+            corner,
             decided: Vec::new(),
             tail: Vec::new(),
             tail_checked: 1,
@@ -163,14 +159,10 @@ impl FitStage {
     /// the front move to be a plain piece.
     fn decide_kinds(&mut self, eof: bool) {
         while !self.tail.is_empty() {
-            if self.min_run == 0 {
-                self.decided.push(Element::Piece(self.tail.remove(0)));
-                continue;
-            }
             let n = self.tail.len();
             let mut broke = false;
             while self.tail_checked < n {
-                if !arc_candidate_fits(&self.tail[..=self.tail_checked], self.config) {
+                if !arc_candidate_fits(&self.tail[..=self.tail_checked], self.corner) {
                     broke = true;
                     break;
                 }
@@ -179,7 +171,7 @@ impl FitStage {
             if !broke && !eof {
                 return;
             }
-            if self.tail_checked >= self.min_run {
+            if self.tail_checked >= MIN_RUN_FACETS {
                 let facets: Vec<Move> = self.tail.drain(..self.tail_checked).collect();
                 self.decided.push(RunElement::sealed(facets));
             } else {
@@ -210,7 +202,7 @@ impl FitStage {
             }
             let head = (idx > 0).then(|| &self.decided[idx - 1]).and_then(piece_of);
             let tail = self.decided.get(idx + 1).and_then(piece_of);
-            let fit = RunFit::fit(&re.facets, head, tail, self.config.corner)
+            let fit = RunFit::fit(&re.facets, head, tail, self.corner)
                 .unwrap_or_else(|e| panic!("fit_stage: run reconstruction failed: {e:?}"));
             let head = head.cloned();
             match fit {
@@ -220,7 +212,7 @@ impl FitStage {
                     };
                     re.head_blend = match &head {
                         Some(prev) => fit
-                            .blend_head_with_line(prev, &re.facets[0], self.config.corner)
+                            .blend_head_with_line(prev, &re.facets[0], self.corner)
                             .unwrap_or_else(|e| panic!("fit_stage: head blend failed: {e:?}")),
                         None => Vec::new(),
                     };
@@ -248,7 +240,7 @@ impl FitStage {
     }
 
     fn resolve_tail_blends(&mut self, eof: bool) {
-        let corner = self.config.corner;
+        let corner = self.corner;
         for idx in 0..self.decided.len() {
             let Element::Run(re) = &self.decided[idx] else {
                 continue;
@@ -350,7 +342,7 @@ impl FitStage {
                         if facet_consumption_candidate(
                             front,
                             mid,
-                            self.config.corner,
+                            self.corner,
                             self.seam_in_reduction,
                         ) {
                             match self.decided.get(2) {
@@ -360,7 +352,7 @@ impl FitStage {
                                         front,
                                         mid,
                                         after,
-                                        self.config.corner,
+                                        self.corner,
                                         self.seam_in_reduction,
                                     )
                                     .unwrap_or_else(|e| {
@@ -376,17 +368,13 @@ impl FitStage {
                                 None | Some(Element::Run(_)) => {}
                             }
                         }
-                        let out_reduction = if self.min_run == 0 {
-                            0.0
-                        } else {
-                            match self.decided.get(2) {
-                                None if !eof => return true,
-                                None | Some(Element::Piece(_)) => 0.0,
-                                Some(Element::Run(after)) => match &after.fit {
-                                    None => return true,
-                                    Some(fit) => fit.head_line_trim(),
-                                },
-                            }
+                        let out_reduction = match self.decided.get(2) {
+                            None if !eof => return true,
+                            None | Some(Element::Piece(_)) => 0.0,
+                            Some(Element::Run(after)) => match &after.fit {
+                                None => return true,
+                                Some(fit) => fit.head_line_trim(),
+                            },
                         };
                         if !self.emit_pairwise(out_reduction, out) {
                             return false;
@@ -411,14 +399,9 @@ impl FitStage {
         let (Some(m), Some(next)) = (piece_of(&self.decided[0]), piece_of(&self.decided[1])) else {
             unreachable!("caller matched two front pieces")
         };
-        let plan = plan_junction_reduced(
-            m,
-            next,
-            self.config.corner,
-            self.seam_in_reduction,
-            out_reduction,
-        )
-        .unwrap_or_else(|e| panic!("fit_stage: junction plan failed: {e:?}"));
+        let plan =
+            plan_junction_reduced(m, next, self.corner, self.seam_in_reduction, out_reduction)
+                .unwrap_or_else(|e| panic!("fit_stage: junction plan failed: {e:?}"));
         let (trim_end, next_head_trim, blend) = match plan {
             JunctionPlan::Blend(b) => (b.trim_in(), b.trim_out(), Some(b)),
             JunctionPlan::Unblended(_) => (0.0, 0.0, None),

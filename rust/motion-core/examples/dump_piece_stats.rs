@@ -9,7 +9,7 @@ use std::env;
 use std::fs;
 use std::process;
 
-use geometry::{ChainFitConfig, VelocityLimits};
+use geometry::{CornerFitConfig, VelocityLimits};
 use motion_core::classify::build_move;
 use motion_pipeline::{StreamConfig, setup_stages};
 use trajectory::{AxisChainSet, ShapedSegment};
@@ -75,7 +75,7 @@ fn main() {
     // Neptune bench printer.cfg limits.
     let limits = VelocityLimits::try_new(300.0, 4000.0, 8.0, 1_000_000.0).unwrap();
     let cfg = StreamConfig {
-        chain: ChainFitConfig::with_arc_fit(3),
+        corner: CornerFitConfig::default(),
         integration_tol: 1e-4,
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,

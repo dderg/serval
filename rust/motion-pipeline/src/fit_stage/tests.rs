@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crossbeam_channel::{bounded, unbounded};
 use geometry::segment::SourceRange;
-use geometry::{ChainFitConfig, Move, MoveContext, VelocityLimits, line_move};
+use geometry::{CornerFitConfig, Move, MoveContext, VelocityLimits, line_move};
 
 use super::FitStage;
 use crate::{Control, StreamInput};
@@ -35,7 +35,7 @@ fn line(line_no: u32, start: [f64; 3], end: [f64; 3], e: f64) -> Move {
 /// Pre-fills the input channel and closes it before the fit stage runs, so
 /// the fit stage never observes a transient-empty input: the output is the
 /// pure end-of-stream fit.
-fn run_fit_stage(moves: &[Move], config: ChainFitConfig) -> Vec<Move> {
+fn run_fit_stage(moves: &[Move], config: CornerFitConfig) -> Vec<Move> {
     let (tx, rx) = unbounded();
     let (out_tx, out_rx) = unbounded();
     for m in moves {
@@ -90,7 +90,7 @@ fn arc_mode_all_line_input_reconstructs_arc() {
         moves.push(line(405 + i, prev, end, 0.3));
         prev = end;
     }
-    let streamed = run_fit_stage(&moves, ChainFitConfig::with_arc_fit(3));
+    let streamed = run_fit_stage(&moves, CornerFitConfig::default());
     assert!(
         streamed
             .iter()
@@ -119,7 +119,7 @@ fn extrusion_ratio_step_splits_the_arc() {
     // absorb both extrusion ratios, so two runs (two Arc pieces) come out.
     let n = 400;
     let moves = circle_facets(n, |i| if i <= n / 2 { 0.3 } else { 0.6 });
-    let streamed = run_fit_stage(&moves, ChainFitConfig::with_arc_fit(3));
+    let streamed = run_fit_stage(&moves, CornerFitConfig::default());
     let arcs = streamed
         .iter()
         .filter(|m| matches!(m.segment.spatial, Some(geometry::path::Segment::Arc(_))))
@@ -133,7 +133,7 @@ fn small_extrusion_drift_rides_one_arc_with_a_ramp() {
     // window and carries a linear extrusion-rate ramp that conserves total E.
     let n = 400;
     let moves = circle_facets(n, |i| if i <= n / 2 { 0.30 } else { 0.33 });
-    let streamed = run_fit_stage(&moves, ChainFitConfig::with_arc_fit(3));
+    let streamed = run_fit_stage(&moves, CornerFitConfig::default());
     let arcs: Vec<&Move> = streamed
         .iter()
         .filter(|m| matches!(m.segment.spatial, Some(geometry::path::Segment::Arc(_))))
@@ -172,7 +172,7 @@ fn squeezed_chamfer_facet_is_consumed_in_the_stream() {
         line(2, [10.0, 0.0, 0.0], [10.0 + d, d, 0.0], 0.0005),
         line(3, [10.0 + d, d, 0.0], [10.0 + d, 10.0 + d, 0.0], 1.0),
     ];
-    let streamed = run_fit_stage(&moves, ChainFitConfig::default());
+    let streamed = run_fit_stage(&moves, CornerFitConfig::default());
 
     let clothoids = streamed
         .iter()
@@ -212,7 +212,7 @@ fn squeezed_chamfer_facet_is_consumed_in_the_stream() {
 fn drain_flushes_buffered_moves_without_close() {
     let (tx, rx) = bounded::<StreamInput>(64);
     let (out_tx, out_rx) = bounded::<StreamInput>(64);
-    let fit_stage = FitStage::new(ChainFitConfig::default());
+    let fit_stage = FitStage::new(CornerFitConfig::default());
     let handle = std::thread::spawn(move || fit_stage.run(rx, out_tx));
 
     tx.send(line(1, [0.0, 0.0, 0.0], [50.0, 0.0, 0.0], 0.5).into())
@@ -244,7 +244,7 @@ fn drain_flushes_buffered_moves_without_close() {
 fn set_mesh_rebases_the_travel_align_anchor() {
     let (tx, rx) = bounded::<StreamInput>(64);
     let (out_tx, out_rx) = bounded::<StreamInput>(64);
-    let fit_stage = FitStage::new(ChainFitConfig::default());
+    let fit_stage = FitStage::new(CornerFitConfig::default());
     let handle = std::thread::spawn(move || fit_stage.run(rx, out_tx));
 
     tx.send(line(1, [0.0, 0.0, 5.0], [10.0, 0.0, 5.0], 0.5).into())

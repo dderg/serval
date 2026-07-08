@@ -41,7 +41,7 @@ snapshots/snapshot-tests.sh --view       # read-only baseline gallery
 
 `web/static/playground.html` is an interactive spin-off of the review viewer:
 paste any G-code (G0/G1, G90/G91, G92, M82/M83), tweak the planner config
-(velocity/accel/scv/jerk limits, `[arc_fit]`, deviation tolerances) and watch
+(velocity/accel/scv/jerk limits, deviation tolerances) and watch
 the toolpath, velocity, acceleration and jerk panels re-plan live. It runs the
 **real pipeline** — the same `Fitter → Planner → run_lowerer → Shaper` stages —
 compiled to WASM (`rust/motion-playground`, sharing `rust/pipeline-snapshot`

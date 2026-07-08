@@ -270,7 +270,7 @@ fn test_limits() -> geometry::VelocityLimits {
 
 fn stream_config_from(cfg: &PlannerConfig) -> (motion_pipeline::StreamConfig, Vec<f64>) {
     let sc = motion_pipeline::StreamConfig {
-        chain: geometry::ChainFitConfig::default(),
+        corner: geometry::CornerFitConfig::default(),
         integration_tol: 1e-7,
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,

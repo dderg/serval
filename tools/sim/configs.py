@@ -30,8 +30,8 @@ def _tail(gcode_dir: str) -> str:
 
 
 def neptune_print_config(h7_pty: str, gcode_dir: str) -> str:
-    """Neptune 3 Pro bench profile on sim pins: real print limits, arc_fit,
-    and an extruder follower with the bench's pressure-advance + smoothing
+    """Neptune 3 Pro bench profile on sim pins: real print limits and an
+    extruder follower with the bench's pressure-advance + smoothing
     chain — the setup that reproduces motion-content bugs slicer prints hit."""
     return f"""\
 [mcu]
@@ -44,8 +44,6 @@ max_jerk: 1000000
 max_z_velocity: 25
 max_z_accel: 200
 square_corner_velocity: 8
-
-[arc_fit]
 
 [kinematics]
 type: cartesian
@@ -232,15 +230,11 @@ rotation_distance: 4
 {_tail(gcode_dir)}"""
 
 
-def corexy_fast_config(
-    h7_pty: str, gcode_dir: str, arc_fit: bool = False
-) -> str:
+def corexy_fast_config(h7_pty: str, gcode_dir: str) -> str:
     """CoreXY on the Trident bench's motion limits (max_velocity 2800,
     max_accel 100000, square_corner_velocity 100), single-MCU. Used to
     exercise the beacon rapid-scan path shape in the planner without the
-    beacon stream in the loop. `arc_fit` toggles the [arc_fit] section so
-    the fitter's arc-run detection can be compared on/off."""
-    arc_fit_section = "[arc_fit]\n" if arc_fit else ""
+    beacon stream in the loop."""
     return f"""\
 [mcu]
 serial: {h7_pty}
@@ -252,7 +246,7 @@ square_corner_velocity: 100
 max_z_velocity: 25
 max_z_accel: 100
 
-{arc_fit_section}[kinematics]
+[kinematics]
 type: corexy
 axis_x: x
 axis_y: y

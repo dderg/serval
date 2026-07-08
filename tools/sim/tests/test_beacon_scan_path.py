@@ -88,19 +88,14 @@ def _iter_json(text):
             continue
 
 
-@pytest.mark.parametrize(
-    "arc_fit", [False, True], ids=["arc_fit_off", "arc_fit_on"]
-)
-def test_beacon_scan_path_full(sim_world, arc_fit):
+def test_beacon_scan_path_full(sim_world):
     # pipe_lower is debug-level; raise the motion engine's filter so the
     # per-segment piece count (the arc-fit signal) is captured.
     import os
 
     os.environ["RUST_LOG"] = "debug"
     world = sim_world(
-        lambda w: configs.corexy_fast_config(
-            w.h7_pty, str(w.gcode_dir), arc_fit=arc_fit
-        ),
+        lambda w: configs.corexy_fast_config(w.h7_pty, str(w.gcode_dir)),
         dual_mcu=False,
     )
     gpath = world.gcode_dir / "beacon_scan_full.gcode"
@@ -108,7 +103,7 @@ def test_beacon_scan_path_full(sim_world, arc_fit):
     dur = world.print_file(gpath, timeout=300)
     m = _scan_metrics(world)
     print(
-        f"\n[scan arc_fit={arc_fit}] {n} input moves, "
+        f"\n[scan] {n} input moves, "
         f"print_duration={dur:.2f}s, underruns={m['underruns']}, "
         f"arc_run_dissolved={m['arc_run_dissolved']}, "
         f"lowered_segments={m['lowered_segments']}, "

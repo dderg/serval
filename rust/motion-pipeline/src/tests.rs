@@ -2,13 +2,13 @@ use crate::types::*;
 use crate::*;
 use crossbeam_channel::unbounded;
 use geometry::segment::SourceRange;
-use geometry::{ChainFitConfig, MoveContext, VelocityLimits, line_move};
+use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
 use nurbs::eval::eval;
 use trajectory::{AxisChainSet, PostProcessorInstance, ShapedSegment};
 
 fn cfg() -> StreamConfig {
     StreamConfig {
-        chain: ChainFitConfig::default(),
+        corner: CornerFitConfig::default(),
         integration_tol: 1e-7,
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
@@ -37,7 +37,7 @@ fn line(line_no: u32, start: [f64; 3], end: [f64; 3], e: f64) -> geometry::Move 
 
 fn cfg_bench() -> StreamConfig {
     StreamConfig {
-        chain: ChainFitConfig::default(),
+        corner: CornerFitConfig::default(),
         integration_tol: 1e-4,
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
@@ -80,7 +80,7 @@ fn replay(
     drop(raw_tx);
 
     let (fitted_tx, fitted_rx) = unbounded();
-    FitStage::new(config.chain).run(raw_rx, fitted_tx);
+    FitStage::new(config.corner).run(raw_rx, fitted_tx);
 
     let (planned_tx, planned_rx) = unbounded();
     Planner::new(config).run(fitted_rx, planned_tx);
@@ -755,7 +755,7 @@ fn arc_run_into_sharp_corner_stays_contiguous_at_high_scv() {
     // contiguity assert.
     let limits = VelocityLimits::try_new(100.0, 1000.0, 25.0, 1_000_000.0).unwrap();
     let config = StreamConfig {
-        chain: ChainFitConfig::with_arc_fit(3),
+        corner: CornerFitConfig::default(),
         integration_tol: 1e-4,
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
@@ -794,7 +794,7 @@ fn blends_consuming_a_full_arc_emit_no_degenerate_remainder() {
     // at or below its 1e-9 mm length epsilon.
     let limits = VelocityLimits::try_new(100.0, 1000.0, 25.0, 1_000_000.0).unwrap();
     let config = StreamConfig {
-        chain: ChainFitConfig::with_arc_fit(3),
+        corner: CornerFitConfig::default(),
         integration_tol: 1e-4,
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
@@ -846,7 +846,7 @@ fn replay_inputs(
     }
     drop(raw_tx);
     let (fitted_tx, fitted_rx) = unbounded();
-    FitStage::new(config.chain).run(raw_rx, fitted_tx);
+    FitStage::new(config.corner).run(raw_rx, fitted_tx);
     let (planned_tx, planned_rx) = unbounded();
     Planner::new(config).run(fitted_rx, planned_tx);
     let (lowered_tx, lowered_rx) = unbounded();

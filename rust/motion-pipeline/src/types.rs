@@ -2,14 +2,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crossbeam_channel::{Receiver, Sender};
-use geometry::{ChainFitConfig, Move, MoveVelocity, SurfaceTransform, VelocityLimits};
+use geometry::{CornerFitConfig, Move, MoveVelocity, SurfaceTransform, VelocityLimits};
 use trajectory::{AxisChainSet, ShapedSegment};
 
 pub const CONTIGUITY_EPS_MM: f64 = 1e-6;
 
 #[derive(Debug, Clone, Copy)]
 pub struct StreamConfig {
-    pub chain: ChainFitConfig,
+    pub corner: CornerFitConfig,
     pub integration_tol: f64,
     pub max_extrude_only_velocity_mm_s: f64,
     pub max_extrude_only_accel_mm_s2: f64,

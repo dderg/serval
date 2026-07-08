@@ -40,7 +40,7 @@ fn abort_on_drip_stall(msg: String) {
 fn build_stream_config(cfg: &config::PlannerConfig) -> PyResult<motion_pipeline::StreamConfig> {
     let cart = cfg.cartesian;
     Ok(motion_pipeline::StreamConfig {
-        chain: cfg.chain,
+        corner: cfg.corner,
         integration_tol: STREAM_INTEGRATION_TOL,
         max_extrude_only_velocity_mm_s: cfg.max_extrude_only_velocity.unwrap_or(f64::INFINITY),
         max_extrude_only_accel_mm_s2: cfg.max_extrude_only_accel.unwrap_or(f64::INFINITY),

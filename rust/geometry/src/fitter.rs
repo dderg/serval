@@ -18,7 +18,7 @@ use crate::path::{CurvatureProfile, Line};
 use crate::segment::FollowerDemand;
 use vec3::{dot, turn_normal};
 
-pub use config::{ArcFitConfig, ChainFitConfig, CornerFitConfig};
+pub use config::CornerFitConfig;
 pub use move_ops::{
     blend_moves, consumption_moves, is_travel, spatial_end, spatial_start, trim_line_move,
 };
@@ -158,12 +158,9 @@ pub enum JunctionPlan {
 /// the shared circle fit stays within tolerance. Failure is final under
 /// append: an arc through a longer prefix would also pass through this one.
 #[must_use]
-pub fn arc_candidate_fits(facets: &[Move], config: ChainFitConfig) -> bool {
-    if config.arc_fit.is_none() {
-        return false;
-    }
+pub fn arc_candidate_fits(facets: &[Move], config: CornerFitConfig) -> bool {
     let tol = span_tolerance(facets);
-    tol.is_finite() && kernels::arc_candidate(facets, config.corner, tol)
+    tol.is_finite() && kernels::arc_candidate(facets, config, tol)
 }
 
 /// Classify a line-line junction whose adjoining lengths are partly consumed

@@ -3,7 +3,6 @@ import struct
 from collections import defaultdict, namedtuple
 
 from . import motion_kinematics, stepper
-from .arc_fit_config import arc_fit_from_config
 from .extras import servo_axis
 
 # The engine's init_planner extracts each of these by attribute name (they are
@@ -147,10 +146,6 @@ def read_post_processors(motion, config):
                 )
 
 
-def read_arc_fit(motion, config):
-    motion.arc_fit = arc_fit_from_config(config)
-
-
 def read_limits(motion, config):
     for key in motion.UNSUPPORTED_LIMIT_KEYS:
         if config.get(key, None) is not None:
@@ -283,7 +278,6 @@ def init_planner(motion):
                 motion.max_z_accel,
                 motion._square_corner_velocity,
             ),
-            arc_fit=motion.arc_fit,
             max_extrude_only_velocity=max_extrude_only_velocity,
             max_extrude_only_accel=max_extrude_only_accel,
             fit_tolerance_mm=motion.max_path_deviation,
