@@ -103,6 +103,7 @@ function readConfig() {
     if (!Number.isFinite(v)) throw new Error(`${f.id}: not a number`);
     config[f.id] = f.integer ? Math.round(v) : v;
   }
+  config.post_processor_config = document.getElementById("cfg-post_processor_config").value;
   return config;
 }
 
@@ -162,6 +163,7 @@ function saveState(gcode) {
   for (const f of CONFIG_FIELDS) {
     config[f.id] = document.getElementById(`cfg-${f.id}`).value;
   }
+  config.post_processor_config = document.getElementById("cfg-post_processor_config").value;
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ gcode, config }));
   } catch (e) { /* quota / private mode — persistence is best-effort */ }
@@ -181,6 +183,9 @@ async function restoreState() {
     const saved = state?.config?.[f.id];
     el.value = saved != null ? saved : el.defaultValue;
   }
+  const ppEl = document.getElementById("cfg-post_processor_config");
+  const savedPp = state?.config?.post_processor_config;
+  ppEl.value = savedPp != null ? savedPp : ppEl.defaultValue;
 }
 
 // -- Init ------------------------------------------------------------------------
@@ -197,6 +202,7 @@ async function main() {
   for (const f of CONFIG_FIELDS) {
     document.getElementById(`cfg-${f.id}`).addEventListener("input", schedulePlan);
   }
+  document.getElementById("cfg-post_processor_config").addEventListener("input", schedulePlan);
 
   document.getElementById("reset-everything").addEventListener("click", () => {
     localStorage.clear();
@@ -208,6 +214,12 @@ async function main() {
   document.getElementById("toggle-peaks").addEventListener("click", (e) => {
     e.target.classList.toggle("active", !view.showPeaks);
     view.setShowPeaks(!view.showPeaks);
+  });
+
+  document.getElementById("toggle-fitted-path").addEventListener("click", (e) => {
+    view.setShowFittedPath(!view.showFittedPath);
+    e.target.textContent = view.showFittedPath ? "Fitted" : "Shaped";
+    e.target.classList.toggle("active", view.showFittedPath);
   });
 
   document.addEventListener("keydown", (e) => {
