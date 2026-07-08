@@ -160,6 +160,55 @@ fn small_extrusion_drift_rides_one_arc_with_a_ramp() {
 }
 
 #[test]
+fn squeezed_chamfer_facet_is_consumed_in_the_stream() {
+    // A 90° corner whose vertex is a 5µm 45°-45° chamfer between two long
+    // legs — well under the junction deviation, so the facet's own corner
+    // blends would be microscopic and one blend consumes it instead. The
+    // facet's line number must not survive, the stream stays contiguous
+    // (asserted inside the stage), and E is conserved.
+    let d = 0.005 / std::f64::consts::SQRT_2;
+    let moves = vec![
+        line(1, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0], 1.0),
+        line(2, [10.0, 0.0, 0.0], [10.0 + d, d, 0.0], 0.0005),
+        line(3, [10.0 + d, d, 0.0], [10.0 + d, 10.0 + d, 0.0], 1.0),
+    ];
+    let streamed = run_fit_stage(&moves, ChainFitConfig::default());
+
+    let clothoids = streamed
+        .iter()
+        .filter(|m| {
+            matches!(
+                m.segment.spatial,
+                Some(geometry::path::Segment::Clothoid(_))
+            )
+        })
+        .count();
+    assert_eq!(clothoids, 2, "one blend (two halves) spans the chamfer");
+    assert!(
+        streamed.iter().all(|m| !matches!(
+            m.segment.spatial,
+            Some(geometry::path::Segment::Line(_))
+        ) || m.source.start_line != 2),
+        "the consumed facet must not be emitted as a line"
+    );
+
+    let total_e = |ms: &[Move]| -> f64 {
+        ms.iter()
+            .flat_map(|m| {
+                let len = m.segment.s_len();
+                m.segment.followers.iter().map(move |f| f.delta_over(len))
+            })
+            .sum()
+    };
+    let e_in = total_e(&moves);
+    let e_out = total_e(&streamed);
+    assert!(
+        (e_in - e_out).abs() <= 1e-9,
+        "consumption must conserve E: in={e_in} out={e_out}"
+    );
+}
+
+#[test]
 fn drain_flushes_buffered_moves_without_close() {
     let (tx, rx) = bounded::<StreamInput>(64);
     let (out_tx, out_rx) = bounded::<StreamInput>(64);

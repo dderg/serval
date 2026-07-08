@@ -1,6 +1,7 @@
 use crossbeam_channel::{Receiver, Sender};
 use geometry::fitter::{
-    JunctionPlan, RunFit, arc_candidate_fits, blend_moves, is_travel, plan_junction_reduced,
+    JunctionPlan, RunFit, arc_candidate_fits, blend_moves, consumption_moves,
+    facet_consumption_candidate, is_travel, plan_facet_consumption, plan_junction_reduced,
     spatial_end, spatial_start, trim_line_move,
 };
 use geometry::path::{Line, PathSegment, Segment};
@@ -344,7 +345,37 @@ impl FitStage {
                         self.seam_head_trim = 0.0;
                         self.seam_in_reduction = 0.0;
                     }
-                    Some(Element::Piece(_)) => {
+                    Some(Element::Piece(mid)) => {
+                        let front = piece_of(&self.decided[0]).expect("front matched a piece");
+                        if facet_consumption_candidate(
+                            front,
+                            mid,
+                            self.config.corner,
+                            self.seam_in_reduction,
+                        ) {
+                            match self.decided.get(2) {
+                                None if !eof => return true,
+                                Some(Element::Piece(after)) => {
+                                    let plan = plan_facet_consumption(
+                                        front,
+                                        mid,
+                                        after,
+                                        self.config.corner,
+                                        self.seam_in_reduction,
+                                    )
+                                    .unwrap_or_else(|e| {
+                                        panic!("fit_stage: facet consumption failed: {e:?}")
+                                    });
+                                    if let Some(fc) = plan {
+                                        if !self.emit_consumption(fc, out) {
+                                            return false;
+                                        }
+                                        continue;
+                                    }
+                                }
+                                None | Some(Element::Run(_)) => {}
+                            }
+                        }
                         let out_reduction = if self.min_run == 0 {
                             0.0
                         } else {
@@ -421,6 +452,50 @@ impl FitStage {
             }
         }
         self.seam_head_trim = next_head_trim;
+        self.seam_in_reduction = 0.0;
+        true
+    }
+
+    /// Emit the consumption of the second piece: the front piece's body
+    /// trimmed at its tail, the two blend halves spanning the consumed facet,
+    /// and nothing of the facet itself — its geometry and extrusion live in
+    /// the blend. The trim the blend claims from the third piece's head is
+    /// carried to that piece's eventual emission.
+    fn emit_consumption(
+        &mut self,
+        fc: geometry::fitter::FacetConsumption,
+        out: &mut TravelAligningSender,
+    ) -> bool {
+        let Element::Piece(front) = self.decided.remove(0) else {
+            unreachable!("caller matched a front piece")
+        };
+        let Element::Piece(mid) = self.decided.remove(0) else {
+            unreachable!("caller matched a consumable piece")
+        };
+        let after = piece_of(&self.decided[0]).expect("caller matched the anchor piece");
+        let body = trim_line_move(&front, self.seam_head_trim, fc.trim_in()).unwrap_or_else(|e| {
+            panic!(
+                "fit_stage: trim of line {} failed: {e:?}",
+                front.source.start_line
+            )
+        });
+        if let Some(body) = body {
+            if !out.send(body) {
+                return false;
+            }
+        }
+        let halves = consumption_moves(&fc, &front, &mid, after).unwrap_or_else(|e| {
+            panic!(
+                "fit_stage: consumption of line {} failed: {e:?}",
+                mid.source.start_line
+            )
+        });
+        for half in halves {
+            if !out.send(half) {
+                return false;
+            }
+        }
+        self.seam_head_trim = fc.trim_out();
         self.seam_in_reduction = 0.0;
         true
     }

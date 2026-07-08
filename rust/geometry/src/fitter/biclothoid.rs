@@ -63,6 +63,115 @@ pub(super) fn solve_line_line(
     }))
 }
 
+/// The line-line trim at which a symmetric corner blend's deviation reaches
+/// `delta` — the deviation-optimal blend footprint per side, unclamped.
+pub(super) fn trim_at_delta(theta: f64, delta: f64) -> Result<f64, GeometryError> {
+    let (trim_ref, deviation_ref) = canonical(theta)?;
+    if trim_ref <= DEGENERATE_EPS || deviation_ref <= DEGENERATE_EPS {
+        return Ok(0.0);
+    }
+    Ok(trim_ref * delta / deviation_ref)
+}
+
+const CONSUME_COARSE_STEPS: usize = 8;
+const CONSUME_REFINE_ITERS: usize = 6;
+
+/// Blend across a consumed facet: two clothoids from a contact `t` before the
+/// facet's first vertex on the inbound line to `t` past its last vertex on
+/// the outbound line, tangent and curvature-free at both contacts and owing
+/// the facet itself nothing — the whole curve only has to stay within
+/// `delta` of the polyline it replaces. Picks the largest feasible `t` up to
+/// `t_cap`; the deviation is not monotone in `t` (the blend first hugs the
+/// facet, then cuts deeper), so a coarse top-down scan finds the feasible
+/// band's upper edge before bisecting it.
+pub(super) fn solve_consume_facet(
+    v1: [f64; 3],
+    t_a: [f64; 3],
+    v2: [f64; 3],
+    t_b: [f64; 3],
+    delta: f64,
+    t_cap: f64,
+) -> Option<GeneralBlend> {
+    if t_cap <= super::BUDGET_EPS_MM || delta <= 0.0 {
+        return None;
+    }
+    let plane_n = normalize(cross(t_a, t_b));
+
+    let eval = |t: f64| -> Option<(ClothoidPair, f64)> {
+        let a = madd(v1, -t, t_a);
+        let b = madd(v2, t, t_b);
+        let pair = hermite_g2(a, t_a, 0.0, b, t_b, 0.0, plane_n)?;
+        let dev = max_dev_from_chain(&pair, &[a, v1, v2, b]);
+        Some((pair, dev))
+    };
+
+    let mut feasible: Option<(ClothoidPair, f64)> = None;
+    let mut infeasible_above = None;
+    for i in 0..CONSUME_COARSE_STEPS {
+        let t = t_cap * 0.5_f64.powi(i as i32);
+        match eval(t) {
+            Some((pair, dev)) if dev <= delta => {
+                feasible = Some((pair, t));
+                break;
+            }
+            _ => infeasible_above = Some(t),
+        }
+    }
+    let (mut pair, mut t) = feasible?;
+
+    if let Some(mut hi) = infeasible_above {
+        for _ in 0..CONSUME_REFINE_ITERS {
+            let mid = 0.5 * (t + hi);
+            match eval(mid) {
+                Some((p, dev)) if dev <= delta => {
+                    pair = p;
+                    t = mid;
+                }
+                _ => hi = mid,
+            }
+        }
+    }
+
+    Some(GeneralBlend {
+        half1: pair.half1,
+        half2: pair.half2,
+        trim_in: t,
+        trim_out: t,
+    })
+}
+
+const DEV_SAMPLES_PER_HALF: usize = 16;
+
+/// Sampled deviation of the blend from the polyline it replaces: the largest
+/// distance from any curve sample to the chain's segments. Sampling
+/// under-reads the true maximum by the sagitta between samples — negligible
+/// against junction deviations.
+fn max_dev_from_chain(pair: &ClothoidPair, chain: &[[f64; 3]]) -> f64 {
+    let mut worst = 0.0_f64;
+    for half in [&pair.half1, &pair.half2] {
+        for i in 0..=DEV_SAMPLES_PER_HALF {
+            let s = half.s_len() * (i as f64) / (DEV_SAMPLES_PER_HALF as f64);
+            let p = half.point_at(s);
+            let d = chain
+                .windows(2)
+                .map(|seg| dist_to_segment(p, seg[0], seg[1]))
+                .fold(f64::INFINITY, f64::min);
+            worst = worst.max(d);
+        }
+    }
+    worst
+}
+
+fn dist_to_segment(p: [f64; 3], s0: [f64; 3], s1: [f64; 3]) -> f64 {
+    let d = sub(s1, s0);
+    let len_sq = dot(d, d);
+    if len_sq <= 0.0 {
+        return dist(p, s0);
+    }
+    let t = (dot(sub(p, s0), d) / len_sq).clamp(0.0, 1.0);
+    dist(p, madd(s0, t, d))
+}
+
 fn canonical(theta: f64) -> Result<(f64, f64), GeometryError> {
     let x = [1.0, 0.0, 0.0];
     let y = [0.0, 1.0, 0.0];

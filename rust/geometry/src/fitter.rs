@@ -19,7 +19,9 @@ use crate::segment::FollowerDemand;
 use vec3::{dot, turn_normal};
 
 pub use config::{ArcFitConfig, ChainFitConfig, CornerFitConfig};
-pub use move_ops::{blend_moves, is_travel, spatial_end, spatial_start, trim_line_move};
+pub use move_ops::{
+    blend_moves, consumption_moves, is_travel, spatial_end, spatial_start, trim_line_move,
+};
 pub use runfit::RunFit;
 
 use emit::{BUDGET_EPS_MM, internal};
@@ -236,6 +238,182 @@ pub fn fit_corners(moves: &[Move], config: CornerFitConfig) -> Result<FitOutcome
     Ok(FitOutcome { moves: out, report })
 }
 
+/// A solved blend that replaces a whole squeezed facet along with the tail
+/// and head of its neighbors, opaque outside the fitter. The blend owes the
+/// facet nothing — no contact, no tangency — it only stays within the
+/// junction deviation of the polyline it replaces and carries the facet's
+/// extrusion in its follower ramp.
+pub struct FacetConsumption(biclothoid::GeneralBlend);
+
+impl FacetConsumption {
+    #[must_use]
+    pub fn trim_in(&self) -> f64 {
+        self.0.trim_in
+    }
+
+    #[must_use]
+    pub fn trim_out(&self) -> f64 {
+        self.0.trim_out
+    }
+}
+
+/// Whether `m_mid` looks like a consumable facet from its entry side alone:
+/// a line so short that the corner into it is squeezed below the
+/// deviation-optimal blend. The stream stage uses this to decide whether the
+/// element after `m_mid` is worth waiting for; [`plan_facet_consumption`]
+/// re-checks everything with both anchors known.
+#[must_use]
+pub fn facet_consumption_candidate(
+    m_in: &Move,
+    m_mid: &Move,
+    config: CornerFitConfig,
+    in_reduction: f64,
+) -> bool {
+    let (Some(line_in), Some(line_mid)) = (line_of(m_in), line_of(m_mid)) else {
+        return false;
+    };
+    if 0.5 * (line_in.s_len() - in_reduction) <= BUDGET_EPS_MM {
+        return false;
+    }
+    let t_in = line_in.heading_at(line_in.s_len());
+    let t_mid = line_mid.heading_at(0.0);
+    let theta1 = libm::acos(dot(t_in, t_mid).clamp(-1.0, 1.0));
+    if theta1 <= config.theta_min_rad || theta1 >= config.theta_max_rad {
+        return false;
+    }
+    let delta = junction_deviation(m_in.limits).min(junction_deviation(m_mid.limits));
+    if !(delta.is_finite() && delta > 0.0) {
+        return false;
+    }
+    let Ok(t_ad1) = biclothoid::trim_at_delta(theta1, delta) else {
+        return false;
+    };
+    0.5 * line_mid.s_len() < t_ad1
+}
+
+/// Plan the consumption of `m_mid` by one blend from `m_in` to `m_out`.
+/// `Ok(None)` when any gate fails — the junctions then blend (or stay sharp)
+/// pairwise as usual. Gates: all three are lines; both corner turns are
+/// blendable and turn the same way (a clothoid pair cannot change curvature
+/// sign, so S-jogs stay pairwise); both corners are squeezed below their
+/// deviation-optimal trims (a roomy corner blends better on its own); the
+/// facet's extrusion fits the ramp its neighbors span; and the blend's
+/// extrusion ramps pass the kinematic gate.
+pub fn plan_facet_consumption(
+    m_in: &Move,
+    m_mid: &Move,
+    m_out: &Move,
+    config: CornerFitConfig,
+    in_reduction: f64,
+) -> Result<Option<FacetConsumption>, FitError> {
+    if !facet_consumption_candidate(m_in, m_mid, config, in_reduction) {
+        return Ok(None);
+    }
+    let (Some(line_in), Some(line_mid), Some(line_out)) =
+        (line_of(m_in), line_of(m_mid), line_of(m_out))
+    else {
+        return Ok(None);
+    };
+    let line_no = m_mid.source.start_line;
+    let internal_err = |source| FitError::Internal { line_no, source };
+
+    let t_in = line_in.heading_at(line_in.s_len());
+    let t_mid = line_mid.heading_at(0.0);
+    let t_out = line_out.heading_at(0.0);
+
+    let theta2 = libm::acos(dot(t_mid, t_out).clamp(-1.0, 1.0));
+    if theta2 <= config.theta_min_rad || theta2 >= config.theta_max_rad {
+        return Ok(None);
+    }
+    let theta_ab = libm::acos(dot(t_in, t_out).clamp(-1.0, 1.0));
+    if theta_ab <= config.theta_min_rad || theta_ab >= config.theta_max_rad {
+        return Ok(None);
+    }
+    let (Some(n1), Some(n2)) = (turn_normal(t_in, t_mid), turn_normal(t_mid, t_out)) else {
+        return Ok(None);
+    };
+    if dot(n1, n2) <= 0.0 {
+        return Ok(None);
+    }
+
+    if !emit::ratios_within_ramp_band(
+        &m_in.segment.followers,
+        &m_mid.segment.followers,
+        &m_out.segment.followers,
+        config.extrusion_ramp_rel_tol,
+    ) {
+        return Ok(None);
+    }
+
+    let delta = junction_deviation(m_in.limits)
+        .min(junction_deviation(m_mid.limits))
+        .min(junction_deviation(m_out.limits));
+    if !(delta.is_finite() && delta > 0.0) {
+        return Ok(None);
+    }
+    let theta1 = libm::acos(dot(t_in, t_mid).clamp(-1.0, 1.0));
+    let t_ad1 = biclothoid::trim_at_delta(theta1, delta).map_err(internal_err)?;
+    let t_ad2 = biclothoid::trim_at_delta(theta2, delta).map_err(internal_err)?;
+    if 0.5 * line_mid.s_len() >= t_ad1.min(t_ad2) {
+        return Ok(None);
+    }
+
+    let t_ad_ab = biclothoid::trim_at_delta(theta_ab, delta).map_err(internal_err)?;
+    let t_cap = (0.5 * (line_in.s_len() - in_reduction))
+        .min(0.5 * line_out.s_len())
+        .min(t_ad_ab);
+    let v1 = line_in.point_at(line_in.s_len());
+    let v2 = line_out.point_at(0.0);
+    let Some(blend) = biclothoid::solve_consume_facet(v1, t_in, v2, t_out, delta, t_cap) else {
+        return Ok(None);
+    };
+
+    let (f_in, f_out) = consumption_followers(&blend, m_in, m_mid, m_out, line_in, line_out);
+    let admitted = ramps_admitted(
+        config.ramp_accel_budget_mm_s2,
+        &f_in,
+        &blend.half1,
+        m_in.feedrate_mm_s.min(m_mid.feedrate_mm_s),
+        m_in.limits,
+    ) && ramps_admitted(
+        config.ramp_accel_budget_mm_s2,
+        &f_out,
+        &blend.half2,
+        m_mid.feedrate_mm_s.min(m_out.feedrate_mm_s),
+        m_out.limits,
+    );
+    if !admitted {
+        return Ok(None);
+    }
+    Ok(Some(FacetConsumption(blend)))
+}
+
+fn consumption_followers(
+    blend: &biclothoid::GeneralBlend,
+    m_in: &Move,
+    m_mid: &Move,
+    m_out: &Move,
+    line_in: &Line,
+    line_out: &Line,
+) -> (Vec<FollowerDemand>, Vec<FollowerDemand>) {
+    emit::carrying_blend_followers(
+        &emit::SeamSide {
+            followers: &m_in.segment.followers,
+            seg_len: line_in.s_len(),
+            trim: blend.trim_in,
+        },
+        &m_mid.segment.followers,
+        m_mid.segment.s_len(),
+        &emit::SeamSide {
+            followers: &m_out.segment.followers,
+            seg_len: line_out.s_len(),
+            trim: blend.trim_out,
+        },
+        blend.half1.s_len(),
+        blend.half2.s_len(),
+    )
+}
+
 fn classify_junction(
     m_in: &Move,
     m_out: &Move,
@@ -358,6 +536,8 @@ mod tests;
 
 #[cfg(test)]
 mod c2_continuity_tests;
+#[cfg(test)]
+mod consumption_tests;
 #[cfg(test)]
 mod cruise_onset_tests;
 #[cfg(test)]
