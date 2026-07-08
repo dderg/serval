@@ -6,7 +6,7 @@ sys.path.insert(
 )
 
 from klippy.engine_mcu import EngineMcu  # noqa: E402
-from klippy.serialhdl import SerialReader, error  # noqa: E402
+from klippy.serialhdl import EngineCommandChannel, error  # noqa: E402
 
 TRANSPORT_CLOSED = RuntimeError("engine_send: transport closed")
 
@@ -47,7 +47,7 @@ class FakePrinter:
 
 
 def _reader(engine):
-    sr = SerialReader.__new__(SerialReader)
+    sr = EngineCommandChannel.__new__(EngineCommandChannel)
     sr.mcu = None
     sr.engine_mcu = EngineMcu(FakePrinter(engine), "mcu")
     sr.engine_mcu.claim("", 0)

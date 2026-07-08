@@ -1,4 +1,5 @@
-# Serial port management for firmware communication
+# Per-MCU command/response channel through the motion engine (plus the
+# board reset helpers that still open the serial port directly)
 #
 # Copyright (C) 2016-2021  Kevin O'Connor <kevin@koconnor.net>
 #
@@ -29,7 +30,7 @@ MCU_TIMER_HORIZON = 1 << 30
 DEADLINE_MARGIN_WARN = 0.150
 
 
-class SerialReader:
+class EngineCommandChannel:
     def __init__(self, reactor, warn_prefix="", mcu=None):
         self.reactor = reactor
         self.warn_prefix = warn_prefix
@@ -395,7 +396,7 @@ class SerialReader:
 
     # Dumping debug lists
     def dump_debug(self):
-        return "SerialReader: engine mode"
+        return "EngineCommandChannel: engine mode"
 
     # Default message handlers
     def _handle_unknown_init(self, params):

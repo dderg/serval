@@ -65,7 +65,7 @@ class MCU:
 
     def _init_serial_port(self, config):
         wp = "mcu '%s': " % (self._name)
-        self._serial = serialhdl.SerialReader(
+        self._serial = serialhdl.EngineCommandChannel(
             self._reactor, warn_prefix=wp, mcu=self
         )
         self._baud = 0
