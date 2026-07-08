@@ -18,7 +18,9 @@ pub(super) struct ClothoidPair {
 }
 
 const DEGENERATE_EPS: f64 = 1e-12;
-const HERMITE_POS_TOL_MM: f64 = 1e-10;
+/// Position tolerance in canonical units (fractions of the chord): the
+/// Hermite solve is scale-normalized, so this is a relative tolerance.
+const HERMITE_POS_TOL: f64 = 1e-12;
 const HERMITE_ANG_TOL_RAD: f64 = 1e-12;
 const HERMITE_MAX_ITERS: usize = 60;
 
@@ -143,7 +145,7 @@ fn residual(
 }
 
 fn converged(r: [f64; 3]) -> bool {
-    (r[0] * r[0] + r[1] * r[1]).sqrt() < HERMITE_POS_TOL_MM && r[2].abs() < HERMITE_ANG_TOL_RAD
+    (r[0] * r[0] + r[1] * r[1]).sqrt() < HERMITE_POS_TOL && r[2].abs() < HERMITE_ANG_TOL_RAD
 }
 
 fn residual_norm(r: [f64; 3]) -> f64 {
@@ -158,13 +160,13 @@ fn newton_pair(
     e1: [f64; 3],
     e2: [f64; 3],
     mut x: [f64; 3],
-) -> Option<ClothoidPair> {
-    let mut pair = build_pair(start, kappa_b, plane_n, x[0], x[1], x[2])?;
+) -> Option<[f64; 3]> {
+    let pair = build_pair(start, kappa_b, plane_n, x[0], x[1], x[2])?;
     let mut r = residual(&pair, end, e1, e2, plane_n);
     let mut lambda = 1e-3;
     for _ in 0..HERMITE_MAX_ITERS {
         if converged(r) {
-            return Some(pair);
+            return Some(x);
         }
         let mut j = [[0.0; 3]; 3];
         for c in 0..3 {
@@ -203,7 +205,6 @@ fn newton_pair(
                     let rn = residual(&pn, end, e1, e2, plane_n);
                     if residual_norm(rn) < r0 {
                         x = xn;
-                        pair = pn;
                         r = rn;
                         lambda = (lambda * 0.5).max(1e-12);
                         stepped = true;
@@ -223,6 +224,10 @@ fn newton_pair(
     None
 }
 
+/// Solve in a scale-normalized frame — positions in chord units, curvatures
+/// in turns-per-chord — so tolerances are relative and the Newton iteration
+/// is equally conditioned for 0.01mm and 100mm blends. The converged
+/// unknowns rescale back to world units for the returned pair.
 pub(super) fn hermite_g2(
     p_a: [f64; 3],
     t_a: [f64; 3],
@@ -232,35 +237,54 @@ pub(super) fn hermite_g2(
     kappa_b: f64,
     plane_n: [f64; 3],
 ) -> Option<ClothoidPair> {
+    let chord = dist(p_a, p_b);
+    if chord <= DEGENERATE_EPS {
+        return None;
+    }
+    let inv = 1.0 / chord;
     let start = Endpoint {
-        pose: p_a,
+        pose: scale(p_a, inv),
         tangent: t_a,
-        kappa: kappa_a,
+        kappa: kappa_a * chord,
     };
     let end = Endpoint {
-        pose: p_b,
+        pose: scale(p_b, inv),
         tangent: t_b,
-        kappa: kappa_b,
+        kappa: kappa_b * chord,
     };
     let e1 = t_a;
     let e2 = normalize(cross(plane_n, e1));
 
     let theta = signed_angle(t_a, t_b, plane_n);
-    let chord = dist(p_a, p_b).max(1e-9);
-    let kp_turn = theta / chord - 0.5 * (kappa_a + kappa_b);
+    let (ka, kb) = (start.kappa, end.kappa);
+    let kp_turn = theta - 0.5 * (ka + kb);
 
     let seeds = [
-        [kp_turn, 0.5 * chord, 0.5 * chord],
-        [kp_turn, chord, chord],
-        [0.5 * (kappa_a + kappa_b), chord, chord],
-        [kappa_a, 0.5 * chord, 0.5 * chord],
-        [kappa_b, 0.5 * chord, 0.5 * chord],
-        [-(kappa_a + kappa_b), chord, chord],
-        [0.0, 2.0 * chord, 2.0 * chord],
+        [kp_turn, 0.5, 0.5],
+        [kp_turn, 1.0, 1.0],
+        [kp_turn, 0.3, 1.0],
+        [kp_turn, 1.0, 0.3],
+        [0.5 * (ka + kb), 1.0, 1.0],
+        [ka, 0.5, 0.5],
+        [kb, 0.5, 0.5],
+        [-(ka + kb), 1.0, 1.0],
+        [0.0, 2.0, 2.0],
     ];
     for seed in seeds {
-        if let Some(pair) = newton_pair(&start, &end, kappa_b, plane_n, e1, e2, seed) {
-            return Some(pair);
+        if let Some(x) = newton_pair(&start, &end, kb, plane_n, e1, e2, seed) {
+            let world_start = Endpoint {
+                pose: p_a,
+                tangent: t_a,
+                kappa: kappa_a,
+            };
+            return build_pair(
+                &world_start,
+                kappa_b,
+                plane_n,
+                x[0] * inv,
+                x[1] * chord,
+                x[2] * chord,
+            );
         }
     }
     None
@@ -362,5 +386,7 @@ pub(super) fn solve_general(
     })
 }
 
+#[cfg(test)]
+mod hermite_grid_tests;
 #[cfg(test)]
 mod tests;
