@@ -103,6 +103,12 @@ def _virtual_endstop_params(pin="virtual_endstop", invert=0, pullup=0):
     }
 
 
+def _enabled_tracker(config):
+    tracker = tmc.TMCModeTracker(config.get_printer(), "stepper_x")
+    tracker.mode = tmc.TMCModeTracker.PULSE
+    return tracker
+
+
 def _helper_2209(sgthrs=75, tpwmthrs=120, en_spreadcycle=1, tcoolthrs=0):
     fields = tmc.FieldHelper(
         tmc2209.Fields, tmc2208.SignedFields, tmc2209.FieldFormatters
@@ -113,7 +119,8 @@ def _helper_2209(sgthrs=75, tpwmthrs=120, en_spreadcycle=1, tcoolthrs=0):
     fields.set_field("tcoolthrs", tcoolthrs)
     mcu_tmc = _FakeMcuTmc(fields)
     config = _FakeConfig("tmc2209 stepper_x", {"diag_pin": "^PA1"})
-    return tmc.TMCVirtualPinHelper(config, mcu_tmc), fields, mcu_tmc
+    helper = tmc.TMCVirtualPinHelper(config, mcu_tmc, _enabled_tracker(config))
+    return helper, fields, mcu_tmc
 
 
 def _helper_2130(options):
@@ -122,19 +129,20 @@ def _helper_2130(options):
     )
     mcu_tmc = _FakeMcuTmc(fields)
     config = _FakeConfig("tmc2130 stepper_x", options)
-    return tmc.TMCVirtualPinHelper(config, mcu_tmc), fields, mcu_tmc
+    helper = tmc.TMCVirtualPinHelper(config, mcu_tmc, _enabled_tracker(config))
+    return helper, fields, mcu_tmc
 
 
 def test_arm_writes_threshold_and_forces_stealthchop():
     helper, fields, mcu_tmc = _helper_2209(sgthrs=75)
     helper.arm()
 
-    written = {reg for reg, _ in mcu_tmc.writes}
-    assert {"SGTHRS", "GCONF", "TPWMTHRS", "TCOOLTHRS"} <= written
-    assert fields.get_field("sgthrs") == 75
-    assert fields.get_field("en_spreadcycle") == 0
-    assert fields.get_field("tpwmthrs") == 0
-    assert fields.get_field("tcoolthrs") == 0xFFFFF
+    written = dict(mcu_tmc.writes)
+    assert {"SGTHRS", "GCONF", "TPWMTHRS", "TCOOLTHRS"} <= set(written)
+    assert fields.get_field("sgthrs", written["SGTHRS"]) == 75
+    assert fields.get_field("en_spreadcycle", written["GCONF"]) == 0
+    assert fields.get_field("tpwmthrs", written["TPWMTHRS"]) == 0
+    assert fields.get_field("tcoolthrs", written["TCOOLTHRS"]) == 0xFFFFF
 
 
 def test_disarm_restores_prior_state():
@@ -142,16 +150,19 @@ def test_disarm_restores_prior_state():
         tpwmthrs=120, en_spreadcycle=1, tcoolthrs=0
     )
     helper.arm()
+    del mcu_tmc.writes[:]
     helper.disarm()
 
-    assert fields.get_field("en_spreadcycle") == 1
-    assert fields.get_field("tpwmthrs") == 120
-    assert fields.get_field("tcoolthrs") == 0
+    written = dict(mcu_tmc.writes)
+    assert fields.get_field("en_spreadcycle", written["GCONF"]) == 1
+    assert fields.get_field("tpwmthrs", written["TPWMTHRS"]) == 120
+    assert fields.get_field("tcoolthrs", written["TCOOLTHRS"]) == 0
 
 
 def test_arm_leaves_nonzero_tcoolthrs_untouched():
     helper, fields, mcu_tmc = _helper_2209(tcoolthrs=0x1234)
     helper.arm()
+    assert "TCOOLTHRS" not in dict(mcu_tmc.writes)
     assert fields.get_field("tcoolthrs") == 0x1234
 
 
@@ -160,9 +171,10 @@ def test_arm_on_driver_without_sgthrs_register_skips_threshold_write():
 
     helper.arm()
 
-    assert "SGTHRS" not in {reg for reg, _ in mcu_tmc.writes}
-    assert fields.get_field("en_pwm_mode") == 0
-    assert fields.get_field("diag1_stall") == 1
+    written = dict(mcu_tmc.writes)
+    assert "SGTHRS" not in written
+    assert fields.get_field("en_pwm_mode", written["GCONF"]) == 0
+    assert fields.get_field("diag1_stall", written["GCONF"]) == 1
 
 
 def test_setup_motion_endstop_builds_endstop_from_diag_pin():
@@ -193,6 +205,10 @@ def test_trip_move_hooks_arm_and_disarm():
     helper, fields, mcu_tmc = _helper_2209()
 
     helper.trip_move_begin(entry=None)
-    assert fields.get_field("tcoolthrs") == 0xFFFFF
+    assert (
+        fields.get_field("tcoolthrs", dict(mcu_tmc.writes)["TCOOLTHRS"])
+        == 0xFFFFF
+    )
+    del mcu_tmc.writes[:]
     helper.trip_move_end(entry=None)
-    assert fields.get_field("tcoolthrs") == 0
+    assert fields.get_field("tcoolthrs", dict(mcu_tmc.writes)["TCOOLTHRS"]) == 0

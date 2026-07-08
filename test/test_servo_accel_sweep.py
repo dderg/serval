@@ -99,12 +99,14 @@ class FakeConfig:
 
 
 def _make_rail(motor, node_name, axis, invert=False):
+    m = servo_axis.ServoMotor.__new__(servo_axis.ServoMotor)
+    m.motor_name = motor
+    m.node_name = node_name
+    m.invert_direction = invert
     rail = servo_axis.ServoRail.__new__(servo_axis.ServoRail)
     rail.name = "servo " + motor
     rail.axis = axis
-    rail.node_name = node_name
-    rail.motor_name = motor
-    rail.invert_direction = invert
+    rail.motors = [m]
     return rail
 
 

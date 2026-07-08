@@ -65,11 +65,13 @@ impl MotorQuery {
     }
 }
 
-pub(crate) fn slot_for_axis(slot_axes: &[usize], axis: usize) -> Option<u8> {
+pub(crate) fn slots_for_axis(slot_axes: &[usize], axis: usize) -> Vec<u8> {
     slot_axes
         .iter()
-        .position(|&a| a == axis)
-        .and_then(|s| u8::try_from(s).ok())
+        .enumerate()
+        .filter(|&(_, &a)| a == axis)
+        .filter_map(|(s, _)| u8::try_from(s).ok())
+        .collect()
 }
 
 pub(crate) fn place_motor_response(
@@ -79,21 +81,31 @@ pub(crate) fn place_motor_response(
     motors: &mut [Option<f64>],
     vmotors: &mut [Option<f64>],
 ) {
-    let mut put = |slot: usize, m: &mcu_protocol::messages::MotorSample| {
+    fn put(
+        motors: &mut [Option<f64>],
+        vmotors: &mut [Option<f64>],
+        slot: usize,
+        m: &mcu_protocol::messages::MotorSample,
+    ) {
         if slot < motors.len() {
             motors[slot] = Some(f64::from(m.pos_q16) / 65536.0);
             vmotors[slot] = Some(f64::from(m.vel_q16) / 65536.0);
         }
-    };
+    }
     if is_ethercat {
+        // With AWD, several slots claim the same axis; the lowest slot is the
+        // axis's reporting drive so the answer is deterministic.
         for m in &resp.motors {
             if let Some(&axis) = cfg_axes.get(m.slot as usize) {
-                put(axis, m);
+                if motors.get(axis).is_some_and(Option::is_some) {
+                    continue;
+                }
+                put(motors, vmotors, axis, m);
             }
         }
     } else {
         for m in &resp.motors {
-            put(m.slot as usize, m);
+            put(motors, vmotors, m.slot as usize, m);
         }
     }
 }

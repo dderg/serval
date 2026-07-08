@@ -66,6 +66,7 @@ fn main() {
     let structure = match req(&args, "--structure").as_str() {
         "scalar" => Structure::CartesianScalar,
         "corexy" => Structure::CoreXY,
+        "corexy-awd" => Structure::CoreXYAwd,
         other => {
             eprintln!("servo-ident: unknown structure {other}");
             std::process::exit(1);
@@ -185,7 +186,7 @@ fn main() {
             .iter()
             .map(|s| (*s).to_string())
             .collect(),
-        Structure::CoreXY => {
+        Structure::CoreXY | Structure::CoreXYAwd => {
             let mut v = vec!["mass_diag".to_string(), "mass_off".to_string()];
             for a in &axes {
                 v.push(format!("viscous_{a}"));
@@ -219,12 +220,16 @@ fn main() {
         opt_f64(&args, "--rotation-distance-mm"),
     ) {
         let n = r.params.mass.len();
-        if n == 2 {
+        if n >= 2 {
             // The sign of the fitted off-diagonal follows the capture frame
             // (invert_direction flips it per drive), so the eigen-directions
             // are labeled by magnitude, not by which formula produced them.
-            let sum = r.params.mass[0][0] + r.params.mass[0][1];
-            let diff = r.params.mass[0][0] - r.params.mass[0][1];
+            // For AWD the cross-belt coupling is split across the pair's two
+            // columns; summing row 0's off-diagonal entries recovers the
+            // per-drive m_off in both layouts.
+            let m_off: f64 = r.params.mass[0][1..].iter().sum();
+            let sum = r.params.mass[0][0] + m_off;
+            let diff = r.params.mass[0][0] - m_off;
             let m_light = sum.min(diff);
             let m_heavy = sum.max(diff);
             eprintln!(

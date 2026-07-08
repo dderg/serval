@@ -227,3 +227,40 @@ def test_coupled_uniformity_allows_mismatch_on_independent_motors():
         ]
     )
     ethercat_node.EtherCatNode._validate_coupled_uniformity(node, rails)
+
+
+def _awd_kin_printer(node_name):
+    from klippy.extras import servo_axis
+
+    def motor(name, node):
+        m = servo_axis.ServoMotor.__new__(servo_axis.ServoMotor)
+        m.motor_name = name
+        m.node_name = node
+        return m
+
+    rail_a = servo_axis.ServoRail.__new__(servo_axis.ServoRail)
+    rail_a.motors = [motor("motor_a", node_name), motor("motor_a1", node_name)]
+    rail_b = servo_axis.ServoRail.__new__(servo_axis.ServoRail)
+    rail_b.motors = [motor("motor_b", node_name), motor("motor_b1", "other")]
+    kin = types.SimpleNamespace(
+        rails=[rail_a, rail_b],
+        lanes=lambda: [(0, "x", []), (1, "y", [])],
+    )
+    toolhead = types.SimpleNamespace(get_kinematics=lambda: kin)
+    printer = types.SimpleNamespace(
+        lookup_object=lambda name: {"toolhead": toolhead}[name],
+        config_error=FakeConfigError,
+    )
+    return printer
+
+
+def test_find_motors_returns_every_drive_on_this_node_with_its_lane():
+    node = types.SimpleNamespace(
+        name="node_x", printer=_awd_kin_printer("node_x")
+    )
+    found = ethercat_node.EtherCatNode._find_motors(node)
+    assert [(lane, m.get_motor_name()) for lane, m in found] == [
+        (0, "motor_a"),
+        (0, "motor_a1"),
+        (1, "motor_b"),
+    ]

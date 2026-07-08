@@ -230,7 +230,85 @@ class ServoCalibration:
         return rails
 
     def _axis_servos(self, gcmd, axis):
-        return [r.get_motor_name() for r in self._axis_rails(gcmd, axis)]
+        return [
+            m.get_motor_name()
+            for r in self._axis_rails(gcmd, axis)
+            for m in r.get_motors()
+        ]
+
+    def _rail_motors_in_slot_order(self, rail):
+        return sorted(rail.get_motors(), key=lambda m: m.get_chain_index())
+
+    def _corexy_fit_layout(self, gcmd):
+        kin = self.printer.lookup_object("toolhead").get_kinematics()
+        if not kin.coupled_xy():
+            raise gcmd.error(
+                "corexy fit commands need coupled_xy kinematics; use the "
+                "non-COREXY variant for cartesian axes"
+            )
+        rails = self._axis_rails(gcmd, "X")
+        pairs = [
+            [m.get_motor_name() for m in self._rail_motors_in_slot_order(r)]
+            for r in rails
+        ]
+        sizes = {len(p) for p in pairs}
+        servos = [name for pair in pairs for name in pair]
+        if sizes == {1}:
+            return {"servos": servos, "pairs": None}
+        if sizes == {2}:
+            nodes = {m.get_node_name() for r in rails for m in r.get_motors()}
+            if len(nodes) != 1:
+                raise gcmd.error(
+                    "AWD corexy fit needs all four drives on one ethercat "
+                    "node (a coupled dynamics profile is per node); got "
+                    "nodes: %s" % (", ".join(sorted(nodes)),)
+                )
+            return {
+                "servos": servos,
+                "pairs": ";".join(",".join(pair) for pair in pairs),
+            }
+        raise gcmd.error(
+            "corexy fit needs one or two drives per belt on both belts, "
+            "got %s"
+            % (
+                "; ".join(
+                    "%s: %s" % (r.get_name(short=True), ", ".join(p))
+                    for r, p in zip(rails, pairs)
+                ),
+            )
+        )
+
+    def _check_servos_override(self, gcmd, layout):
+        override = gcmd.get("SERVOS", None)
+        if override is None:
+            return
+        given = sorted(s.strip() for s in override.split(",") if s.strip())
+        if given != sorted(layout["servos"]):
+            raise gcmd.error(
+                "SERVOS=%s does not match the drives the kinematics says "
+                "power the belts (%s); the fit pairing is derived from the "
+                "kinematics, so drop SERVOS= or fix the config"
+                % (override, ", ".join(layout["servos"]))
+            )
+
+    def _scalar_fit_drive(self, gcmd):
+        axis = gcmd.get("AXIS", "X").upper()
+        servos = self._axis_servos(gcmd, axis)
+        drive = gcmd.get("DRIVE", None)
+        if drive is None:
+            if len(servos) > 1:
+                raise gcmd.error(
+                    "AXIS=%s records %d drives (%s); pass DRIVE= to pick "
+                    "which one the scalar fit describes"
+                    % (axis, len(servos), ", ".join(servos))
+                )
+            return None
+        if drive not in servos:
+            raise gcmd.error(
+                "DRIVE=%s is not among the drives of AXIS=%s (%s)"
+                % (drive, axis, ", ".join(servos))
+            )
+        return drive
 
     def _strokes(self, axis, start, end, speed, accel, iterations, dwell):
         self._emit_strokes(
@@ -318,13 +396,14 @@ class ServoCalibration:
                 "start": start,
                 "end": end,
                 "th_per_unit": math.sqrt(2.0),
-                "servos": [rail.get_motor_name()],
-                "rails": [rail],
+                "servos": [m.get_motor_name() for m in rail.get_motors()],
+                "motors": list(rail.get_motors()),
                 "prep": ("X", "Y"),
                 "diagonal": True,
             }
         start, end = self._axis_bounds(gcmd, axis)
         rails = self._axis_rails(gcmd, axis)
+        motors = [m for r in rails for m in r.get_motors()]
 
         def coord(u):
             return "%s%.3f" % (axis, u)
@@ -334,7 +413,8 @@ class ServoCalibration:
             "start": start,
             "end": end,
             "th_per_unit": 1.0,
-            "servos": [r.get_motor_name() for r in rails],
+            "servos": [m.get_motor_name() for m in motors],
+            "motors": motors,
             "rails": rails,
             "prep": (axis,),
             "diagonal": False,
@@ -454,12 +534,15 @@ class ServoCalibration:
         self.gcode.run_script_from_command("SERVO_CAPTURE_STOP")
         self._restore()
         report_args = ["--name", name, "--png"]
-        rails = plan["rails"]
+        rails = plan.get("rails", [])
         if not plan["diagonal"] and len(rails) == 2 and axis in ("X", "Y"):
+            # The combined view needs one drive per belt; on AWD each pair's
+            # slot-primary stands in for its belt.
+            primaries = [self._rail_motors_in_slot_order(r)[0] for r in rails]
             terms = ",".join(
                 "%s:%d"
-                % (r.get_motor_name(), -1 if r.get_invert_direction() else 1)
-                for r in rails
+                % (m.get_motor_name(), -1 if m.get_invert_direction() else 1)
+                for m in primaries
             )
             report_args += ["--axis", axis, "--combine-corexy", terms]
         self._run(gcmd, "servo_capture.py", report_args, 120.0)
@@ -495,8 +578,9 @@ class ServoCalibration:
     def cmd_SERVO_MEASURE_INERTIA_COREXY(self, gcmd):
         self._measure_inertia_corexy(gcmd, gcmd.get("NAME", "ident"))
 
-    def _measure_inertia_corexy(self, gcmd, name):
-        servos = gcmd.get("SERVOS", ",".join(self.servos))
+    def _measure_inertia_corexy(self, gcmd, name, servos=None):
+        if servos is None:
+            servos = gcmd.get("SERVOS", ",".join(self.servos))
         x_start, x_end, y_start, y_end = self._xy_bounds(gcmd)
         accels, speeds, iterations, dwell = self._grid(gcmd)
         x_center = (x_start + x_end) / 2.0
@@ -544,15 +628,19 @@ class ServoCalibration:
         "Identify axis dynamics for torque feedforward - runs the inertia "
         "excitation grid, fits mass/viscous/coulomb, and writes a timestamped "
         "profile. Optional TORQUE_NM + INERTIA_KGM2 add the C00.06 "
-        "recommendation. Params as SERVO_MEASURE_INERTIA plus TORQUE_NM "
-        "INERTIA_KGM2"
+        "recommendation. On a multi-drive axis DRIVE= picks which drive "
+        "the scalar fit describes. Params as SERVO_MEASURE_INERTIA plus "
+        "TORQUE_NM INERTIA_KGM2 DRIVE"
     )
 
     def cmd_SERVO_FIT_DYNAMICS(self, gcmd):
         name = gcmd.get("NAME", "ident")
         torque, inertia = self._motor(gcmd, required=False)
+        drive = self._scalar_fit_drive(gcmd)
         self._measure_inertia(gcmd, name)
         args = ["--name", name]
+        if drive is not None:
+            args += ["--drive", drive]
         if torque is not None:
             args += [
                 "--rated-torque-nm",
@@ -564,8 +652,9 @@ class ServoCalibration:
 
     cmd_SERVO_FIT_DYNAMICS_COREXY_help = (
         "Identify the coupled CoreXY dynamics for torque feedforward - runs "
-        "the two-drive X+Y excitation grid, fits the coupled mass matrix, "
-        "and writes a timestamped profile. Optional TORQUE_NM + INERTIA_KGM2 "
+        "the X+Y excitation grid over every belt drive (two, or four on "
+        "AWD), fits the coupled mass matrix, and writes a timestamped "
+        "node-level profile. Optional TORQUE_NM + INERTIA_KGM2 "
         "add the C00.06 recommendation. Params as "
         "SERVO_MEASURE_INERTIA_COREXY plus TORQUE_NM INERTIA_KGM2"
     )
@@ -573,8 +662,14 @@ class ServoCalibration:
     def cmd_SERVO_FIT_DYNAMICS_COREXY(self, gcmd):
         name = gcmd.get("NAME", "ident")
         torque, inertia = self._motor(gcmd, required=False)
-        self._measure_inertia_corexy(gcmd, name)
+        layout = self._corexy_fit_layout(gcmd)
+        self._check_servos_override(gcmd, layout)
+        self._measure_inertia_corexy(
+            gcmd, name, servos=",".join(layout["servos"])
+        )
         args = ["--name", name, "--structure", "corexy"]
+        if layout["pairs"] is not None:
+            args += ["--pairs", layout["pairs"]]
         if torque is not None:
             args += [
                 "--rated-torque-nm",
@@ -594,11 +689,14 @@ class ServoCalibration:
     def cmd_SERVO_CALIBRATE_INERTIA_RATIO(self, gcmd):
         name = gcmd.get("NAME", "inertia")
         torque, inertia = self._motor(gcmd, required=True)
+        drive = self._scalar_fit_drive(gcmd)
         self._measure_inertia(gcmd, name)
+        drive_args = [] if drive is None else ["--drive", drive]
         self._run(
             gcmd,
             "servo_fit_dynamics.py",
-            [
+            drive_args
+            + [
                 "--name",
                 name,
                 "--rated-torque-nm",
@@ -610,7 +708,7 @@ class ServoCalibration:
         )
 
     cmd_SERVO_CALIBRATE_INERTIA_RATIO_COREXY_help = (
-        "Step 2 of CoreXY servo tuning - runs the two-drive X+Y excitation "
+        "Step 2 of CoreXY servo tuning - runs the X+Y excitation "
         "grid, fits the coupled mass matrix, and prints C00.06 for both "
         "directions. TORQUE_NM and INERTIA_KGM2 required (config or param). "
         "Params as SERVO_MEASURE_INERTIA_COREXY plus TORQUE_NM INERTIA_KGM2"
@@ -619,11 +717,19 @@ class ServoCalibration:
     def cmd_SERVO_CALIBRATE_INERTIA_RATIO_COREXY(self, gcmd):
         name = gcmd.get("NAME", "inertia")
         torque, inertia = self._motor(gcmd, required=True)
-        self._measure_inertia_corexy(gcmd, name)
+        layout = self._corexy_fit_layout(gcmd)
+        self._check_servos_override(gcmd, layout)
+        self._measure_inertia_corexy(
+            gcmd, name, servos=",".join(layout["servos"])
+        )
+        pair_args = (
+            [] if layout["pairs"] is None else ["--pairs", layout["pairs"]]
+        )
         self._run(
             gcmd,
             "servo_fit_dynamics.py",
-            [
+            pair_args
+            + [
                 "--name",
                 name,
                 "--structure",
@@ -652,20 +758,13 @@ class ServoCalibration:
     def _resolve_node_slot(self, servo):
         from . import servo_axis
 
-        toolhead = self.printer.lookup_object("toolhead")
-        for rail in getattr(toolhead.get_kinematics(), "rails", ()):
-            if not isinstance(rail, servo_axis.ServoRail):
-                continue
-            if servo in (
-                rail.get_motor_name(),
-                rail.get_name(),
-                rail.get_name(short=True),
-            ):
-                node = self.printer.lookup_object(
-                    "ethercat_node " + rail.get_node_name()
-                )
-                return node, node.get_slot_for_motor(rail.get_motor_name())
-        raise self.printer.command_error("no servo motor named %r" % (servo,))
+        _rail, motor = servo_axis.resolve_servo_motor(
+            self.printer, servo, "SERVO_CALIBRATION"
+        )
+        node = self.printer.lookup_object(
+            "ethercat_node " + motor.get_node_name()
+        )
+        return node, node.get_slot_for_motor(motor.get_motor_name())
 
     def _read_param(self, servo, addr):
         from . import servo_param

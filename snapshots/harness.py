@@ -173,18 +173,8 @@ def run_case(case: Case) -> dict:
             f"case '{case.name}': missing config {case.config_path.name}"
         )
 
-    (
-        max_velocity,
-        max_accel,
-        scv,
-        max_jerk,
-        arc_fit,
-        extrude_only_velocity,
-        extrude_only_accel,
-        max_path_deviation,
-        max_accel_deviation,
-    ) = viz_pipeline.read_printer_config(case.config_path)
-    waypoints = viz_pipeline.parse_gcode(case.gcode_path, max_velocity)
+    cfg = viz_pipeline.read_printer_config(case.config_path)
+    waypoints = viz_pipeline.parse_gcode(case.gcode_path, cfg.max_velocity)
     if len(waypoints) < 2:
         raise ValueError(
             f"case '{case.name}': fewer than two spatial moves in "
@@ -194,15 +184,17 @@ def run_case(case: Case) -> dict:
     engine = _import_engine()
     return engine.pipeline_snapshot(
         waypoints,
-        max_velocity,
-        max_accel,
-        scv,
-        max_jerk,
-        arc_fit=arc_fit,
-        max_extrude_only_velocity=extrude_only_velocity,
-        max_extrude_only_accel=extrude_only_accel,
-        max_path_deviation=max_path_deviation,
-        max_accel_deviation=max_accel_deviation,
+        cfg.max_velocity,
+        cfg.max_accel,
+        cfg.square_corner_velocity,
+        cfg.max_jerk,
+        arc_fit=cfg.arc_fit,
+        max_extrude_only_velocity=cfg.max_extrude_only_velocity,
+        max_extrude_only_accel=cfg.max_extrude_only_accel,
+        max_path_deviation=cfg.max_path_deviation,
+        max_accel_deviation=cfg.max_accel_deviation,
+        axes=cfg.axis_sections,
+        post_processors=cfg.post_processor_sections,
     )
 
 

@@ -86,12 +86,18 @@ class FakeGcmd:
         self.responses.append(msg)
 
 
+def make_servo_motor(motor_name, node_name):
+    motor = servo_axis.ServoMotor.__new__(servo_axis.ServoMotor)
+    motor.motor_name = motor_name
+    motor.node_name = node_name
+    return motor
+
+
 def make_servo_rail(motor_name, node_name, slot=0, axis=None):
     rail = servo_axis.ServoRail.__new__(servo_axis.ServoRail)
     rail.name = "servo " + motor_name
     rail.axis = axis if axis is not None else motor_name
-    rail.node_name = node_name
-    rail.motor_name = motor_name
+    rail.motors = [make_servo_motor(motor_name, node_name)]
     return rail
 
 

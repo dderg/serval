@@ -2,15 +2,17 @@ use std::ops::ControlFlow;
 
 use super::bringup::log_al_states;
 use super::drive::DriveChain;
-use super::{discard_motion, respond_fault_heartbeat, EndpointCtx};
+use super::{abort_sync, discard_motion, respond_fault_heartbeat, EndpointCtx};
 use crate::capture::{CaptureRecord, DriveSample, FLAG_MOTION_ACTIVE, FLAG_TORQUE_ENABLED};
 use crate::claim::{eval_wkc, WkcDecision};
 use crate::clock::raw_from_monotonic_ns;
 use crate::curves::ENGINE_STATE_FAULT;
 use crate::dynamics::clamp_torque;
 use crate::scale::{mm_to_counts, CountMap};
+use crate::sync::{SyncStep, ERR_SYNC_ABORTED};
 use crate::torque::{TickAction, TorqueState};
-use crate::wire::{endstop_trip_frame, status_heartbeat_frame};
+use crate::wire::{endstop_trip_frame, status_heartbeat_frame, sync_pair_response_frame};
+use mcu_protocol::messages::SyncPairResponse;
 
 macro_rules! log_slot_drive_telemetry {
     ($level:ident, $event:literal, $msg:literal, $ctx:expr, $slot:expr, $t:expr,
@@ -48,6 +50,8 @@ pub(super) fn run_cycle(ctx: &mut EndpointCtx) -> ControlFlow<()> {
     poll_sensorless(ctx, apply_time);
 
     let (motion_active, all_acc, all_vel) = compute_motion_targets(ctx, apply_time);
+
+    poll_sync(ctx, apply_time);
 
     handle_ring_fault(ctx);
 
@@ -257,6 +261,112 @@ fn emit_slot_commands(
     motion_active
 }
 
+fn poll_sync(ctx: &mut EndpointCtx, apply_time: u64) {
+    let Some(mut run) = ctx.sync.take() else {
+        return;
+    };
+    let inputs = crate::sync::SyncInputs {
+        now_ns: apply_time,
+        torque_primary: ctx.drive.torque_actual(run.primary),
+        torque_secondary: ctx.drive.torque_actual(run.secondary),
+        velocity_secondary: ctx.drive.velocity_actual(run.secondary),
+        position_secondary: ctx.drive.position_actual(run.secondary),
+    };
+    match run.machine.poll(&inputs) {
+        SyncStep::Idle => ctx.sync = Some(run),
+        SyncStep::SetPrimaryTarget(counts) => {
+            ctx.drive.set_target_position(run.primary, counts);
+            ctx.sync = Some(run);
+        }
+        SyncStep::DisableSecondary => {
+            eprintln!(
+                "ec-rt: sync: coasting secondary slot {} (pos={})",
+                run.secondary, inputs.position_secondary
+            );
+            ctx.drive.disable(run.secondary);
+            run.secondary_disabled = true;
+            ctx.sync = Some(run);
+        }
+        SyncStep::EnableSecondary => {
+            let rc = ctx.drive.enable(run.secondary);
+            if rc != 0 {
+                eprintln!(
+                    "ec-rt: sync: re-enable of slot {} failed rc={rc} — parking",
+                    run.secondary
+                );
+                ctx.sync = Some(run);
+                abort_sync(ctx, ERR_SYNC_ABORTED);
+                ctx.drive.shutdown_and_exit(ctx.num_slaves);
+            }
+            run.secondary_disabled = false;
+            let settled = ctx.drive.position_actual(run.secondary);
+            eprintln!(
+                "ec-rt: sync: secondary slot {} re-enabled at {settled}",
+                run.secondary
+            );
+            run.machine.enable_finished(settled);
+            ctx.sync = Some(run);
+        }
+        SyncStep::Done(report) => finalize_sync(ctx, &run, &report),
+    }
+}
+
+fn finalize_sync(ctx: &mut EndpointCtx, run: &super::SyncRun, report: &crate::sync::SyncReport) {
+    if report.secondary_reseeded {
+        ctx.last_counts[run.secondary] = None;
+        ctx.last_streamed_target[run.secondary] = None;
+        // The rotor turned by the released delta while the axis stood still,
+        // so the same host-frame mm now maps to counts+delta.
+        if let Some((anchor_counts, anchor_mm)) = ctx.report_anchor[run.secondary] {
+            ctx.report_anchor[run.secondary] = Some((
+                anchor_counts.wrapping_add(report.released_delta_counts),
+                anchor_mm,
+            ));
+        }
+    }
+    tracing::info!(
+        subsystem = "ethercat",
+        event = "pair_sync_done",
+        result = report.result,
+        primary = run.primary,
+        secondary = run.secondary,
+        torque_baseline_primary = report.torque_baseline_primary,
+        torque_baseline_secondary = report.torque_baseline_secondary,
+        torque_released = report.torque_released,
+        torque_dithered = report.torque_dithered,
+        torque_final_primary = report.torque_final_primary,
+        torque_final_secondary = report.torque_final_secondary,
+        released_delta_counts = report.released_delta_counts,
+        "belt pair sync finished"
+    );
+    eprintln!(
+        "ec-rt: sync done result={} baseline=({}, {}) released={} dithered={} \
+         final=({}, {}) delta={} counts",
+        report.result,
+        report.torque_baseline_primary,
+        report.torque_baseline_secondary,
+        report.torque_released,
+        report.torque_dithered,
+        report.torque_final_primary,
+        report.torque_final_secondary,
+        report.released_delta_counts
+    );
+    let resp = SyncPairResponse {
+        result: report.result,
+        primary_slot: run.primary as u8,
+        secondary_slot: run.secondary as u8,
+        torque_baseline_primary: report.torque_baseline_primary,
+        torque_baseline_secondary: report.torque_baseline_secondary,
+        torque_released: report.torque_released,
+        torque_dithered: report.torque_dithered,
+        torque_final_primary: report.torque_final_primary,
+        torque_final_secondary: report.torque_final_secondary,
+        released_delta_counts: report.released_delta_counts,
+    };
+    ctx.server
+        .respond(&sync_pair_response_frame(run.correlation_id, &resp));
+}
+
 fn fault_non_finite_torque(ctx: &mut EndpointCtx, slot: usize, acc: f32, vel: f32) -> ! {
     eprintln!(
         "ec-rt: FAULT non-finite torque FF on slot {slot} \
@@ -315,6 +425,7 @@ fn handle_drive_fault(ctx: &mut EndpointCtx) {
     });
     if let Some((slot, err)) = drive_fault {
         if ctx.gate.state() != TorqueState::Faulted {
+            abort_sync(ctx, ERR_SYNC_ABORTED);
             eprintln!(
                 "ec-rt: DRIVE FAULT slot {slot} err=0x{err:04x} — parking, reporting via heartbeat"
             );

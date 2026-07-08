@@ -3,7 +3,7 @@ pub mod anchor;
 #[doc(hidden)]
 pub mod classify;
 #[doc(hidden)]
-pub mod config;
+pub use planner_config as config;
 pub mod drain;
 #[doc(hidden)]
 pub mod enqueue;

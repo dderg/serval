@@ -397,12 +397,12 @@ class TMC2240:
             self.mcu_tmc = tmc2130.MCU_TMC_SPI(
                 config, Registers, self.fields, TMC_FREQUENCY
             )
-        # Allow virtual pins to be created
-        tmc.TMCVirtualPinHelper(config, self.mcu_tmc)
         # Register commands
         current_helper = TMC2240CurrentHelper(config, self.mcu_tmc)
         cmdhelper = tmc.TMCCommandHelper(config, self.mcu_tmc, current_helper)
         cmdhelper.setup_register_dump(ReadRegisters)
+        # Allow virtual pins to be created
+        tmc.TMCVirtualPinHelper(config, self.mcu_tmc, cmdhelper.mode_tracker)
         self.get_phase_offset = cmdhelper.get_phase_offset
         self.get_status = cmdhelper.get_status
         # Setup basic register values

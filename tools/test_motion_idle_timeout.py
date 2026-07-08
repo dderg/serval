@@ -57,7 +57,10 @@ def test_check_busy_reports_idle_when_motion_has_drained():
     print_time, est_print_time, lookahead_empty = Motion.check_busy(
         stub, eventtime=123.0
     )
-    assert print_time == 70.0
+    assert print_time == 10.0, (
+        "drained frontier must stay at the pending end time, not get "
+        "clamped up to est (that clamp kept idle_timeout stuck busy)"
+    )
     assert est_print_time == 70.0
     assert lookahead_empty is True
 

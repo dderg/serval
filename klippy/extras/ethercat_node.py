@@ -44,9 +44,9 @@ CYCLE_US_QUANTUM = 250
 # from every motor's commanded kinematics, so asymmetry in the FF path
 # skews the coupled model instead of tuning one motor.
 COUPLED_UNIFORM_OPTIONS = (
-    ("velocity_ff", lambda rail: rail.get_ff_config()[0]),
-    ("ff_torque_clamp", lambda rail: rail.get_ff_config()[1]),
-    ("ff_lead_cycles", lambda rail: rail.get_ff_config()[2]),
+    ("velocity_ff", lambda motor: motor.get_ff_config()[0]),
+    ("ff_torque_clamp", lambda motor: motor.get_ff_config()[1]),
+    ("ff_lead_cycles", lambda motor: motor.get_ff_config()[2]),
 )
 
 
@@ -90,35 +90,35 @@ class EtherCatNode:
         self.printer.load_object(config, "servo_capture")
         self.printer.load_object(config, "servo_param")
 
-    def _find_rails(self):
+    def _find_motors(self):
         toolhead = self.printer.lookup_object("toolhead")
         kin = toolhead.get_kinematics()
         found = []
         for lane_idx, _axis_name, _motor_names in kin.lanes():
             rail = kin.rails[lane_idx]
-            if (
-                isinstance(rail, servo_axis.ServoRail)
-                and rail.get_node_name() == self.name
-            ):
-                found.append((lane_idx, rail))
+            if not isinstance(rail, servo_axis.ServoRail):
+                continue
+            for motor in rail.get_motors():
+                if motor.get_node_name() == self.name:
+                    found.append((lane_idx, motor))
         if not found:
             raise self.printer.config_error(
-                "ethercat_node %s: no [servo_*] section with node=%s — "
-                "cannot locate the servo rail" % (self.name, self.name)
+                "ethercat_node %s: no servo motor with node=%s — "
+                "cannot locate any drives" % (self.name, self.name)
             )
         return found
 
-    def _validate_chain(self, rails):
+    def _validate_chain(self, motors):
         by_index = {}
-        for _global_axis, rail in rails:
-            idx = rail.get_chain_index()
+        for _global_axis, motor in motors:
+            idx = motor.get_chain_index()
             if idx >= EC_RT_MAX_SLAVES:
                 raise self.printer.config_error(
                     "ethercat_node %s: motor %s ethercat_chain_index=%d "
                     "exceeds the %d-drive endpoint limit (valid 0..%d)"
                     % (
                         self.name,
-                        rail.get_motor_name(),
+                        motor.get_motor_name(),
                         idx,
                         EC_RT_MAX_SLAVES,
                         EC_RT_MAX_SLAVES - 1,
@@ -132,16 +132,16 @@ class EtherCatNode:
                     % (
                         self.name,
                         by_index[idx],
-                        rail.get_motor_name(),
+                        motor.get_motor_name(),
                         idx,
                     )
                 )
-            by_index[idx] = rail.get_motor_name()
+            by_index[idx] = motor.get_motor_name()
 
-    def _validate_dynamics_profiles(self, rails):
+    def _validate_dynamics_profiles(self, motors):
         per_servo = [
-            (rail.get_motor_name(), rail.get_dynamics_profile())
-            for _global_axis, rail in rails
+            (motor.get_motor_name(), motor.get_dynamics_profile())
+            for _global_axis, motor in motors
         ]
         configured = [
             name for name, profile in per_servo if profile is not None
@@ -162,13 +162,13 @@ class EtherCatNode:
                 "or none — missing on: %s" % (self.name, ", ".join(missing))
             )
 
-    def _validate_coupled_uniformity(self, rails):
+    def _validate_coupled_uniformity(self, motors):
         if self.dynamics_profile is None:
             return
         for option, read in COUPLED_UNIFORM_OPTIONS:
             values = {
-                rail.get_motor_name(): read(rail)
-                for _global_axis, rail in rails
+                motor.get_motor_name(): read(motor)
+                for _global_axis, motor in motors
             }
             if len(set(values.values())) > 1:
                 raise self.printer.config_error(
@@ -189,36 +189,39 @@ class EtherCatNode:
     def _claim(self):
         if self.engine_handle is not None:
             return
-        rails = sorted(self._find_rails(), key=lambda pair: pair[0])
-        self._validate_chain(rails)
+        motors = sorted(
+            self._find_motors(),
+            key=lambda pair: (pair[0], pair[1].get_chain_index()),
+        )
+        self._validate_chain(motors)
         self._slot_by_motor = {
-            rail.get_motor_name(): slot
-            for slot, (_global_axis, rail) in enumerate(rails)
+            motor.get_motor_name(): slot
+            for slot, (_global_axis, motor) in enumerate(motors)
         }
-        self._validate_dynamics_profiles(rails)
-        self._validate_coupled_uniformity(rails)
+        self._validate_dynamics_profiles(motors)
+        self._validate_coupled_uniformity(motors)
         drives = []
-        for global_axis, rail in rails:
+        for global_axis, motor in motors:
             following_error_counts, max_torque_tenth_pct = (
-                rail.get_session_drive_limits()
+                motor.get_session_drive_limits()
             )
-            velocity_ff, ff_torque_clamp, ff_lead_cycles = rail.get_ff_config()
+            velocity_ff, ff_torque_clamp, ff_lead_cycles = motor.get_ff_config()
             drives.append(
                 EthercatDrive(
-                    chain_index=rail.get_chain_index(),
+                    chain_index=motor.get_chain_index(),
                     axis=global_axis,
-                    counts_per_mm=rail.get_counts_per_mm(),
-                    rotation_distance=rail.get_rotation_distance(),
+                    counts_per_mm=motor.get_counts_per_mm(),
+                    rotation_distance=motor.get_rotation_distance(),
                     following_error_counts=following_error_counts,
                     max_torque_tenth_pct=max_torque_tenth_pct,
                     velocity_ff=velocity_ff,
                     ff_torque_clamp=ff_torque_clamp,
                     ff_lead_cycles=ff_lead_cycles,
-                    invert_direction=rail.get_invert_direction(),
-                    dynamics_profile=rail.get_dynamics_profile(),
+                    invert_direction=motor.get_invert_direction(),
+                    dynamics_profile=motor.get_dynamics_profile(),
                 )
             )
-        self._counts_per_mm = rails[0][1].get_counts_per_mm()
+        self._counts_per_mm = motors[0][1].get_counts_per_mm()
         engine = self.printer.lookup_object("motion_engine")
         try:
             self.engine_handle = engine.claim_ethercat_node(
@@ -243,8 +246,8 @@ class EtherCatNode:
             drives,
             self.dynamics_profile,
         )
-        for slot, (_global_axis, rail) in enumerate(rails):
-            self._push_drive_params(rail, slot)
+        for slot, (_global_axis, motor) in enumerate(motors):
+            self._push_drive_params(motor, slot)
         reactor = self.printer.get_reactor()
         reactor.register_timer(
             self._poll_drive_fault,
@@ -280,8 +283,8 @@ class EtherCatNode:
         )
         return self.printer.get_reactor().NEVER
 
-    def _push_drive_params(self, rail, slot):
-        params = rail.get_sdo_params()
+    def _push_drive_params(self, motor, slot):
+        params = motor.get_sdo_params()
         if not params:
             return
         engine = self.printer.lookup_object("motion_engine")

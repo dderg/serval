@@ -156,11 +156,13 @@ class FakePrinter:
 
 
 def make_servo_param(engine, node):
+    motor = servo_axis.ServoMotor.__new__(servo_axis.ServoMotor)
+    motor.motor_name = "motor_x"
+    motor.node_name = "node_x"
     rail = servo_axis.ServoRail.__new__(servo_axis.ServoRail)
     rail.name = "axis x"
     rail.axis = "x"
-    rail.node_name = "node_x"
-    rail.motor_name = "motor_x"
+    rail.motors = [motor]
     sp = servo_param.ServoParam.__new__(servo_param.ServoParam)
     sp.printer = FakePrinter(
         {
@@ -254,10 +256,14 @@ class FakeConfigError(Exception):
     pass
 
 
-def make_node_for_claim(engine, rail):
+def make_node_for_claim(engine, motor):
     node = ethercat_node.EtherCatNode.__new__(ethercat_node.EtherCatNode)
     node.name = "node_x"
     node.engine_handle = 5
+    rail = servo_axis.ServoRail.__new__(servo_axis.ServoRail)
+    rail.name = "axis x"
+    rail.axis = "x"
+    rail.motors = [motor]
     node.printer = FakePrinter(
         {
             "toolhead": FakeToolhead(FakeKin([rail])),
@@ -268,20 +274,19 @@ def make_node_for_claim(engine, rail):
     return node
 
 
-def make_rail_with_params(params):
-    rail = servo_axis.ServoRail.__new__(servo_axis.ServoRail)
-    rail.name = "servo_x"
-    rail.axis = "x"
-    rail.node_name = "node_x"
-    rail.sdo_params = params
-    return rail
+def make_motor_with_params(params):
+    motor = servo_axis.ServoMotor.__new__(servo_axis.ServoMotor)
+    motor.motor_name = "motor_x"
+    motor.node_name = "node_x"
+    motor.sdo_params = params
+    return motor
 
 
 def test_claim_push_writes_params_in_order():
     engine = FakeEngine()
-    rail = make_rail_with_params([(0x2002, 0, 0, 100), (0x2003, 0, 2, 250)])
-    node = make_node_for_claim(engine, rail)
-    node._push_drive_params(rail, 0)
+    motor = make_motor_with_params([(0x2002, 0, 0, 100), (0x2003, 0, 2, 250)])
+    node = make_node_for_claim(engine, motor)
+    node._push_drive_params(motor, 0)
     assert engine.writes == [
         (5, 0, 0x2002, 0, 0, 100),
         (5, 0, 0x2003, 0, 2, 250),
@@ -293,17 +298,17 @@ def test_claim_push_failure_is_config_error_with_address():
         def sdo_write(self, *args):
             raise RuntimeError("readback mismatch")
 
-    rail = make_rail_with_params([(0x2003, 0, 2, 600)])
-    node = make_node_for_claim(FailingEngine(), rail)
+    motor = make_motor_with_params([(0x2003, 0, 2, 600)])
+    node = make_node_for_claim(FailingEngine(), motor)
     with pytest.raises(FakeConfigError, match="0x2003.0"):
-        node._push_drive_params(rail, 0)
+        node._push_drive_params(motor, 0)
 
 
 def test_claim_push_no_params_is_noop():
     engine = FakeEngine()
-    rail = make_rail_with_params([])
-    node = make_node_for_claim(engine, rail)
-    node._push_drive_params(rail, 0)
+    motor = make_motor_with_params([])
+    node = make_node_for_claim(engine, motor)
+    node._push_drive_params(motor, 0)
     assert engine.writes == []
 
 

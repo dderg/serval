@@ -13,7 +13,7 @@ fn unsupported_curve(py: Python<'_>, message: &'static str) -> PyResult<()> {
 /// `AxisSection` namedtuple — a reordered field fails loud instead of, say,
 /// silently swapping `motors` and `follows`.
 #[derive(FromPyObject)]
-struct AxisSection {
+pub(crate) struct AxisSection {
     name: String,
     follows: Vec<String>,
     motors: Vec<String>,
@@ -45,7 +45,7 @@ struct LimitSection {
 /// One `[post_processor <name>]` section. `type` is a Rust keyword, so the
 /// field is `ty`, extracted from the namedtuple's `type` attribute.
 #[derive(FromPyObject)]
-struct PostProcessor {
+pub(crate) struct PostProcessor {
     name: String,
     #[pyo3(attribute("type"))]
     ty: String,
