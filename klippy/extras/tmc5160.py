@@ -148,7 +148,6 @@ Fields["DRV_STATUS"] = {
     "stst": 0x01 << 31,
 }
 Fields["FACTORY_CONF"] = {"factory_conf": 0x1F << 0}
-Fields["FACTORY_CONF"] = {"factory_conf": 0x1F << 0}
 Fields["GCONF"] = {
     "recalibrate": 0x01 << 0,
     "faststandstill": 0x01 << 1,
@@ -209,9 +208,6 @@ Fields["MSLUTSTART"] = {
     "start_sin": 0xFF << 0,
     "start_sin90": 0xFF << 16,
 }
-Fields["MSCNT"] = {"mscnt": 0x3FF << 0}
-Fields["MSCURACT"] = {"cur_a": 0x1FF << 0, "cur_b": 0x1FF << 16}
-Fields["LOST_STEPS"] = {"lost_steps": 0xFFFFF << 0}
 Fields["MSCNT"] = {"mscnt": 0x3FF << 0}
 Fields["MSCURACT"] = {"cur_a": 0x1FF << 0, "cur_b": 0x1FF << 16}
 Fields["OTP_READ"] = {
@@ -366,10 +362,7 @@ class TMC5160CurrentHelper(tmc.BaseTMCCurrentHelper):
 ######################################################################
 
 
-def _enable_direct_mode(config, stepper_section, fields):
-    # direct_mode is NOT set in the field cache here — it must be
-    # written AFTER CHOPCONF (toff>0) is on the chip, or the bootstrap
-    # charge pump starves. _xdirect_preload handles the sequencing.
+def _validate_phase_stepping_config(config, stepper_section):
     sct = config.getfloat("stealthchop_threshold", 0.0, minval=0.0)
     if sct > 0.0:
         raise config.error(
@@ -394,8 +387,6 @@ class TMC5160:
         self.mcu_tmc = tmc2130.MCU_TMC_SPI(
             config, Registers, self.fields, TMC_FREQUENCY
         )
-        # Allow virtual pins to be created
-        self._virtual_pin_helper = tmc.TMCVirtualPinHelper(config, self.mcu_tmc)
         stepper_name = " ".join(config.get_name().split()[1:])
         motor_section = "motor " + stepper_name
         if config.has_section(motor_section):
@@ -409,15 +400,13 @@ class TMC5160:
         self._phase_stepper_oid = None
         self._phase_axis_idx = None
         self._cached_mscnt = None
-        self._phase_mode_active = False
         self._phase_state_query = None
         self._phase_group = None
         if stepper_section is not None and stepper_section.getboolean(
             "phase_stepping", False
         ):
-            _enable_direct_mode(config, stepper_section, self.fields)
+            _validate_phase_stepping_config(config, stepper_section)
             self._phase_stepping = True
-            self._virtual_pin_helper.phase_mode_helper = self
         # Register commands
         current_helper = TMC5160CurrentHelper(
             config,
@@ -426,9 +415,16 @@ class TMC5160:
         )
         cmdhelper = tmc.TMCCommandHelper(config, self.mcu_tmc, current_helper)
         self._echeck_helper = cmdhelper.echeck_helper
+        self._mode_tracker = cmdhelper.mode_tracker
         if self._phase_stepping:
             cmdhelper.set_post_enable_callback(self._enter_phase_mode_single)
         cmdhelper.setup_register_dump(ReadRegisters)
+        # Allow virtual pins to be created
+        self._virtual_pin_helper = tmc.TMCVirtualPinHelper(
+            config, self.mcu_tmc, cmdhelper.mode_tracker
+        )
+        if self._phase_stepping:
+            self._virtual_pin_helper.phase_mode_helper = self
         self.get_phase_offset = cmdhelper.get_phase_offset
         self.get_status = cmdhelper.get_status
         # Setup basic register values
@@ -514,8 +510,11 @@ class TMC5160:
     def _phase_group_members(self):
         return self._phase_group or [self]
 
+    def _in_phase_mode(self):
+        return self._mode_tracker.mode == tmc.TMCModeTracker.PHASE_DIRECT
+
     def phase_stepping_active(self):
-        return any(t._phase_mode_active for t in self._phase_group_members())
+        return any(t._in_phase_mode() for t in self._phase_group_members())
 
     def _phase_mcu(self):
         return self.mcu_tmc.tmc_spi.spi.get_mcu()
@@ -555,31 +554,32 @@ class TMC5160:
 
     def enter_phase_mode(self):
         for t in self._phase_group_members():
-            if not t._phase_mode_active:
+            if not t._in_phase_mode():
                 t._enter_phase_mode_single()
 
     def _enter_phase_mode_single(self):
+        self._mode_tracker.transition(
+            (
+                tmc.TMCModeTracker.DISABLED,
+                tmc.TMCModeTracker.PULSE,
+                tmc.TMCModeTracker.PHASE_DIRECT,
+            ),
+            tmc.TMCModeTracker.PHASE_DIRECT,
+            "phase mode entry",
+        )
         enable_spi, disable_spi, set_axis_mode, _jog, align = (
             self._lookup_phase_commands()
         )
         # Suppress ISR XDIRECT writes during our foreground SPI traffic
         # (the disable command is idempotent; harmless if already disabled).
         disable_spi.send([])
-        # Write CHOPCONF (toff>0) first, then set GCONF.direct_mode=1.
-        # direct_mode is deliberately NOT in the field cache (removed from
-        # _enable_direct_mode) so _init_registers doesn't write it while
-        # the chip still has toff=0 from the virtual-enable disable phase.
-        # The bootstrap charge pump depends on the chopper switching —
-        # direct_mode with toff=0 drains the bootstrap caps and triggers
-        # uv_cp after a few moves.
-        chopconf_val = self.fields.registers.get("CHOPCONF")
-        if chopconf_val is not None:
-            self.mcu_tmc.set_register("CHOPCONF", chopconf_val)
-        gconf_val = self.fields.registers.get("GCONF", 0)
-        gconf_val |= 1 << 16  # direct_mode
-        gconf_val &= ~(1 << 2)  # SpreadCycle (clear en_pwm_mode)
+        # CHOPCONF (toff>0) must reach the chip before direct_mode: the
+        # bootstrap charge pump depends on the chopper switching, and
+        # direct_mode with toff=0 drains the bootstrap caps (uv_cp).
+        self.mcu_tmc.set_register("CHOPCONF", self.fields.registers["CHOPCONF"])
+        self.fields.set_field("en_pwm_mode", 0)
+        gconf_val = self.fields.set_field("direct_mode", 1)
         self.mcu_tmc.set_register("GCONF", gconf_val)
-        self.fields.registers["GCONF"] = gconf_val
         mscnt = self.mcu_tmc.get_register("MSCNT") & 0x3FF
         self._cached_mscnt = mscnt
         angle = mscnt * 2.0 * math.pi / 1024.0
@@ -601,15 +601,10 @@ class TMC5160:
         align.send([self._phase_stepper_oid, mscnt])
         enable_spi.send([])
         set_axis_mode.send([self._phase_axis_idx, 1])
-        # Stop the periodic DRV_STATUS/GSTAT checks while the ISR is
-        # writing XDIRECT. The ISR's inline SPI manipulates the SPI
-        # peripheral registers directly — foreground register reads
-        # during ISR activity return corrupted data (e.g., GSTAT reads
-        # as 0x010a0023 instead of a valid 3-bit value), triggering
-        # false drv_err/uv_cp shutdowns. DMA-based SPI (Phase 2) will
-        # fix the arbitration; until then, suppress the checks.
+        # The ISR's inline XDIRECT SPI writes corrupt concurrent foreground
+        # register reads (false drv_err/uv_cp shutdowns), so the periodic
+        # checks must stay off while phase mode is active.
         self._echeck_helper.stop_checks()
-        self._phase_mode_active = True
         structured_log.event(
             "phase_stepping",
             "enter",
@@ -620,9 +615,7 @@ class TMC5160:
         )
 
     def exit_phase_mode(self):
-        active = [
-            t for t in self._phase_group_members() if t._phase_mode_active
-        ]
+        active = [t for t in self._phase_group_members() if t._in_phase_mode()]
         if not active:
             raise self.printer.command_error(
                 "exit_phase_mode called but %s is not in phase mode"
@@ -683,15 +676,17 @@ class TMC5160:
                 reactor.pause(reactor.monotonic() + 0.005)
         disable_spi.send([])
         for t in active:
-            gconf_val = t.fields.registers.get("GCONF", 0)
-            gconf_val &= ~(1 << 16)  # clear direct_mode
+            gconf_val = t.fields.set_field("direct_mode", 0)
             t.mcu_tmc.set_register("GCONF", gconf_val)
-            t.fields.registers["GCONF"] = gconf_val
         for axis_idx in sorted({t._phase_axis_idx for t in active}):
             set_axis_mode.send([axis_idx, 0])
         for t in active:
             t._echeck_helper.start_checks()
-            t._phase_mode_active = False
+            t._mode_tracker.transition(
+                (tmc.TMCModeTracker.PHASE_DIRECT,),
+                tmc.TMCModeTracker.PULSE,
+                "phase mode exit",
+            )
             structured_log.event(
                 "phase_stepping",
                 "exit",

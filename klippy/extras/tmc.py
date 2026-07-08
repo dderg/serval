@@ -113,6 +113,40 @@ class FieldHelper:
 
 
 ######################################################################
+# Driver mode tracking
+######################################################################
+
+
+class TMCModeTracker:
+    """Single source of truth for the mode the driver silicon is in.
+
+    Every lifecycle actor (enable path, StallGuard arm/disarm, phase
+    stepping enter/exit) moves the driver between modes through
+    transition(), which fails loudly on a sequence the hardware cannot
+    honor instead of letting the actors clobber each other's state.
+    """
+
+    DISABLED = "disabled"
+    PULSE = "pulse"
+    PHASE_DIRECT = "phase_direct"
+    SG_HOMING = "sg_homing"
+
+    def __init__(self, printer, stepper_name):
+        self.printer = printer
+        self.stepper_name = stepper_name
+        self.mode = self.DISABLED
+
+    def transition(self, allowed, new_mode, what):
+        if self.mode not in allowed:
+            raise self.printer.command_error(
+                "TMC %s: %s is illegal while the driver is in %s mode"
+                % (self.stepper_name, what, self.mode)
+            )
+        previous, self.mode = self.mode, new_mode
+        return previous
+
+
+######################################################################
 # Periodic error checking
 ######################################################################
 
@@ -294,8 +328,8 @@ class TMCCommandHelper:
         self.fields = mcu_tmc.get_fields()
         self.read_registers = self.read_translate = None
         self.toff = None
-        self.mcu_phase_offset = None
         self.stepper = None
+        self.mode_tracker = TMCModeTracker(self.printer, self.stepper_name)
         self._post_enable_cb = None
         self.stepper_enable = self.printer.load_object(config, "stepper_enable")
         self.printer.register_event_handler(
@@ -431,23 +465,15 @@ class TMCCommandHelper:
         return (256 >> self.fields.get_field("mres")) * 4
 
     def get_phase_offset(self):
-        return self.mcu_phase_offset, self._get_phases()
+        return None, self._get_phases()
 
     # Stepper enable/disable tracking
-    def _do_enable(self, print_time):
-        try:
-            if self.toff is not None:
-                # Shared enable via comms handling
-                self.fields.set_field("toff", self.toff)
-            self._init_registers()
-            if self._post_enable_cb is not None:
-                self._post_enable_cb()
-            if self._post_enable_cb is None:
-                self.echeck_helper.start_checks()
-        except (self.printer.command_error, RuntimeError) as e:
-            self.printer.invoke_shutdown(
-                "TMC %s _do_enable failed: %s" % (self.stepper_name, e)
-            )
+    def _apply_driver_config(self, restore_toff, print_time=None):
+        if restore_toff and self.toff is not None:
+            self.fields.set_field("toff", self.toff)
+        self._init_registers(print_time)
+        if self._post_enable_cb is not None:
+            self._post_enable_cb()
 
     def _do_disable(self, print_time):
         try:
@@ -456,9 +482,19 @@ class TMCCommandHelper:
                 reg_name = self.fields.lookup_register("toff")
                 self.mcu_tmc.set_register(reg_name, val, print_time)
             self.echeck_helper.stop_checks()
+            self.mode_tracker.transition(
+                (
+                    TMCModeTracker.DISABLED,
+                    TMCModeTracker.PULSE,
+                    TMCModeTracker.PHASE_DIRECT,
+                    TMCModeTracker.SG_HOMING,
+                ),
+                TMCModeTracker.DISABLED,
+                "stepper disable",
+            )
         except (self.printer.command_error, RuntimeError) as e:
             self.printer.invoke_shutdown(
-                "TMC %s _do_disable failed: %s" % (self.stepper_name, e)
+                "TMC %s disable failed: %s" % (self.stepper_name, e)
             )
 
     def _handle_mcu_identify(self):
@@ -475,7 +511,7 @@ class TMCCommandHelper:
             # Inline, not deferred like disable below: the engine ships the
             # move right after this with no lookahead, so deferring to the
             # reactor loses the first move on a driver not yet ready.
-            self._do_enable_engine(print_time)
+            self._do_enable(print_time)
             return
 
         def cb(ev):
@@ -483,30 +519,29 @@ class TMCCommandHelper:
 
         self.printer.get_reactor().register_callback(cb)
 
-    def _do_enable_engine(self, print_time):
+    def _do_enable(self, print_time):
         try:
             if self._post_enable_cb is not None:
-                if self.toff is not None:
-                    self.fields.set_field("toff", self.toff)
-                self._init_registers()
-                self._post_enable_cb()
+                self._apply_driver_config(restore_toff=True)
                 return
             did_reset = self.echeck_helper.start_checks()
             reinit = (
                 did_reset or not self.echeck_helper.reset_detect_supported()
             )
-            if self.toff is not None:
+            if reinit:
+                self._apply_driver_config(restore_toff=True)
+            elif self.toff is not None:
                 val = self.fields.set_field("toff", self.toff)
-                if reinit:
-                    self._init_registers()
-                else:
-                    reg_name = self.fields.lookup_register("toff")
-                    self.mcu_tmc.set_register(reg_name, val, print_time)
-            elif reinit:
-                self._init_registers()
+                reg_name = self.fields.lookup_register("toff")
+                self.mcu_tmc.set_register(reg_name, val, print_time)
+            self.mode_tracker.transition(
+                (TMCModeTracker.DISABLED,),
+                TMCModeTracker.PULSE,
+                "stepper enable",
+            )
         except (self.printer.command_error, RuntimeError) as e:
             self.printer.invoke_shutdown(
-                "TMC %s _do_enable_engine failed: %s" % (self.stepper_name, e)
+                "TMC %s enable failed: %s" % (self.stepper_name, e)
             )
 
     def _handle_connect(self):
@@ -532,21 +567,16 @@ class TMCCommandHelper:
                     self.mcu_tmc.mcu.get_name(),
                 )
             else:
-                self._init_registers()
-                if self._post_enable_cb is not None:
-                    self._post_enable_cb()
+                self._apply_driver_config(restore_toff=False)
         except self.printer.command_error as e:
             logging.info("TMC %s failed to init: %s", self.name, str(e))
 
     # get_status information export
     def get_status(self, eventtime=None):
-        cpos = None
-        if self.stepper is not None and self.mcu_phase_offset is not None:
-            cpos = self.stepper.mcu_to_commanded_position(self.mcu_phase_offset)
         current = self.current_helper.get_current()
         res = {
-            "mcu_phase_offset": self.mcu_phase_offset,
-            "phase_offset_position": cpos,
+            "mcu_phase_offset": None,
+            "phase_offset_position": None,
             "run_current": current[0],
             "hold_current": current[1],
         }
@@ -604,10 +634,11 @@ class TMCCommandHelper:
 
 
 class TMCVirtualPinHelper:
-    def __init__(self, config, mcu_tmc):
+    def __init__(self, config, mcu_tmc, mode_tracker):
         self.printer = config.get_printer()
         self.mcu_tmc = mcu_tmc
         self.fields = mcu_tmc.get_fields()
+        self.mode_tracker = mode_tracker
         if self.fields.lookup_register("diag0_stall") is not None:
             if config.get("diag0_pin", None) is not None:
                 self.diag_pin = config.get("diag0_pin")
@@ -620,9 +651,8 @@ class TMCVirtualPinHelper:
             self.diag_pin_field = None
         self.mcu_endstop = None
         self.phase_mode_helper = None
-        self._phase_exited = False
-        self.en_pwm = False
-        self.pwmthrs = self.coolthrs = self.thigh = 0
+        self._reenter_phase = False
+        self._saved_fields = {}
         name_parts = config.get_name().split()
         ppins = self.printer.lookup_object("pins")
         ppins.register_chip("%s_%s" % (name_parts[0], name_parts[-1]), self)
@@ -658,69 +688,83 @@ class TMCVirtualPinHelper:
     def trip_move_end(self, entry):
         self.disarm()
 
-    def arm(self):
+    def _exit_phase_mode_for_homing(self):
         pmh = self.phase_mode_helper
-        if pmh is not None and pmh.phase_stepping_active():
-            pmh.exit_phase_mode()
-            self._phase_exited = True
-            if pmh.phase_stepping_active():
-                raise self.printer.command_error(
-                    "phase stepping still active after exit_phase_mode; "
-                    "refusing to start a StallGuard homing move"
-                )
-        if self.fields.lookup_register("sgthrs", None) is not None:
-            sg_val = self.fields.set_field(
-                "sgthrs", self.fields.get_field("sgthrs")
+        if pmh is None or not pmh.phase_stepping_active():
+            return False
+        pmh.exit_phase_mode()
+        if pmh.phase_stepping_active():
+            raise self.printer.command_error(
+                "phase stepping still active after exit_phase_mode; "
+                "refusing to start a StallGuard homing move"
             )
+        return True
+
+    def arm(self):
+        self._reenter_phase = self._exit_phase_mode_for_homing()
+        self.mode_tracker.transition(
+            (TMCModeTracker.PULSE,),
+            TMCModeTracker.SG_HOMING,
+            "StallGuard arm",
+        )
+        fields = self.fields
+        if fields.lookup_register("sgthrs", None) is not None:
+            sg_val = fields.set_field("sgthrs", fields.get_field("sgthrs"))
             self.mcu_tmc.set_register("SGTHRS", sg_val)
-        # Enable/disable stealthchop
-        self.pwmthrs = self.fields.get_field("tpwmthrs")
-        reg = self.fields.lookup_register("en_pwm_mode", None)
-        if reg is None:
-            # On "stallguard4" drivers, "stealthchop" must be enabled
-            self.en_pwm = not self.fields.get_field("en_spreadcycle")
-            tp_val = self.fields.set_field("tpwmthrs", 0)
+        saved = self._saved_fields = {}
+        if fields.lookup_register("en_pwm_mode", None) is None:
+            # "stallguard4" drivers only stall-detect in stealthchop
+            saved["tpwmthrs"] = fields.get_field("tpwmthrs")
+            tp_val = fields.set_field("tpwmthrs", 0)
             self.mcu_tmc.set_register("TPWMTHRS", tp_val)
-            val = self.fields.set_field("en_spreadcycle", 0)
+            saved["en_spreadcycle"] = fields.get_field("en_spreadcycle")
+            gconf_val = fields.set_field("en_spreadcycle", 0)
         else:
-            # On earlier drivers, "stealthchop" must be disabled
-            self.en_pwm = self.fields.get_field("en_pwm_mode")
-            self.fields.set_field("en_pwm_mode", 0)
-            val = self.fields.set_field(self.diag_pin_field, 1)
-        self.mcu_tmc.set_register("GCONF", val)
-        # Enable tcoolthrs (if not already)
-        self.coolthrs = self.fields.get_field("tcoolthrs")
-        if self.coolthrs == 0:
-            tc_val = self.fields.set_field("tcoolthrs", 0xFFFFF)
+            # earlier drivers only stall-detect in spreadcycle
+            saved["en_pwm_mode"] = fields.get_field("en_pwm_mode")
+            fields.set_field("en_pwm_mode", 0)
+            saved[self.diag_pin_field] = fields.get_field(self.diag_pin_field)
+            gconf_val = fields.set_field(self.diag_pin_field, 1)
+        self.mcu_tmc.set_register("GCONF", gconf_val)
+        saved["tcoolthrs"] = coolthrs = fields.get_field("tcoolthrs")
+        if coolthrs == 0:
+            tc_val = fields.set_field("tcoolthrs", 0xFFFFF)
             self.mcu_tmc.set_register("TCOOLTHRS", tc_val)
-        # Disable thigh
-        reg = self.fields.lookup_register("thigh", None)
-        if reg is not None:
-            self.thigh = self.fields.get_field("thigh")
-            th_val = self.fields.set_field("thigh", 0)
-            self.mcu_tmc.set_register(reg, th_val)
+        thigh_reg = fields.lookup_register("thigh", None)
+        if thigh_reg is not None:
+            saved["thigh"] = fields.get_field("thigh")
+            th_val = fields.set_field("thigh", 0)
+            self.mcu_tmc.set_register(thigh_reg, th_val)
 
     def disarm(self):
-        # Restore stealthchop/spreadcycle
-        reg = self.fields.lookup_register("en_pwm_mode", None)
-        if reg is None:
-            tp_val = self.fields.set_field("tpwmthrs", self.pwmthrs)
+        self.mode_tracker.transition(
+            (TMCModeTracker.SG_HOMING,),
+            TMCModeTracker.PULSE,
+            "StallGuard disarm",
+        )
+        fields = self.fields
+        saved = self._saved_fields
+        if "tpwmthrs" in saved:
+            tp_val = fields.set_field("tpwmthrs", saved["tpwmthrs"])
             self.mcu_tmc.set_register("TPWMTHRS", tp_val)
-            val = self.fields.set_field("en_spreadcycle", not self.en_pwm)
+        if "en_spreadcycle" in saved:
+            gconf_val = fields.set_field(
+                "en_spreadcycle", saved["en_spreadcycle"]
+            )
         else:
-            self.fields.set_field("en_pwm_mode", self.en_pwm)
-            val = self.fields.set_field(self.diag_pin_field, 0)
-        self.mcu_tmc.set_register("GCONF", val)
-        # Restore tcoolthrs
-        tc_val = self.fields.set_field("tcoolthrs", self.coolthrs)
+            fields.set_field("en_pwm_mode", saved["en_pwm_mode"])
+            gconf_val = fields.set_field(
+                self.diag_pin_field, saved[self.diag_pin_field]
+            )
+        self.mcu_tmc.set_register("GCONF", gconf_val)
+        tc_val = fields.set_field("tcoolthrs", saved["tcoolthrs"])
         self.mcu_tmc.set_register("TCOOLTHRS", tc_val)
-        # Restore thigh
-        reg = self.fields.lookup_register("thigh", None)
-        if reg is not None:
-            th_val = self.fields.set_field("thigh", self.thigh)
-            self.mcu_tmc.set_register(reg, th_val)
-        if self._phase_exited:
-            self._phase_exited = False
+        if "thigh" in saved:
+            th_val = fields.set_field("thigh", saved["thigh"])
+            self.mcu_tmc.set_register(fields.lookup_register("thigh"), th_val)
+        self._saved_fields = {}
+        if self._reenter_phase:
+            self._reenter_phase = False
             self.phase_mode_helper.enter_phase_mode()
 
 

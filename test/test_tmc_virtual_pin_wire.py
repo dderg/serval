@@ -26,6 +26,12 @@ TPWMTHRS_CONFIGURED = 0x555
 SGTHRS_CONFIGURED = 100
 
 
+def enabled_tracker(printer):
+    tracker = tmc.TMCModeTracker(printer, "stepper_x")
+    tracker.mode = tmc.TMCModeTracker.PULSE
+    return tracker
+
+
 def build_5160():
     wire = []
     printer = FakePrinter(wire)
@@ -37,7 +43,7 @@ def build_5160():
         tmc5160.Fields, tmc5160.SignedFields, tmc5160.FieldFormatters
     )
     mcu_tmc = FakeMcuTmc(fields, wire)
-    helper = tmc.TMCVirtualPinHelper(config, mcu_tmc)
+    helper = tmc.TMCVirtualPinHelper(config, mcu_tmc, enabled_tracker(printer))
     fields.set_field("en_pwm_mode", 1)
     fields.set_field("thigh", THIGH_CONFIGURED)
     return wire, printer, helper
@@ -54,7 +60,7 @@ def build_2209():
         tmc2209.Fields, tmc2208.SignedFields, tmc2209.FieldFormatters
     )
     mcu_tmc = FakeMcuTmc(fields, wire)
-    helper = tmc.TMCVirtualPinHelper(config, mcu_tmc)
+    helper = tmc.TMCVirtualPinHelper(config, mcu_tmc, enabled_tracker(printer))
     fields.set_field("sgthrs", SGTHRS_CONFIGURED)
     fields.set_field("tpwmthrs", TPWMTHRS_CONFIGURED)
     return wire, printer, helper
@@ -177,3 +183,34 @@ def test_arm_fails_loudly_if_phase_mode_refuses_to_exit():
     with pytest.raises(CommandError, match="still active"):
         helper.arm()
     assert writes(wire) == [], "no register writes on a failed mode exit"
+
+
+def test_arm_fails_loudly_while_the_driver_is_disabled():
+    wire, _printer, helper = build_5160()
+    helper.mode_tracker.mode = tmc.TMCModeTracker.DISABLED
+    with pytest.raises(CommandError, match="StallGuard arm.*disabled"):
+        helper.arm()
+    assert writes(wire) == []
+
+
+def test_double_arm_fails_loudly_instead_of_clobbering_saved_thresholds():
+    wire, _printer, helper = build_5160()
+    helper.arm()
+    del wire[:]
+    with pytest.raises(CommandError, match="StallGuard arm.*sg_homing"):
+        helper.arm()
+    assert writes(wire) == [], (
+        "a second arm must not overwrite the saved configuration with the"
+        " homing overrides"
+    )
+    helper.disarm()
+    assert writes(wire)[-1] == ("write", "THIGH", THIGH_CONFIGURED, None), (
+        "disarm still restores the original configuration"
+    )
+
+
+def test_disarm_without_arm_fails_loudly():
+    wire, _printer, helper = build_5160()
+    with pytest.raises(CommandError, match="StallGuard disarm"):
+        helper.disarm()
+    assert writes(wire) == []
