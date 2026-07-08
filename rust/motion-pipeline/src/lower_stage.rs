@@ -26,6 +26,7 @@ pub fn run_lowerer(
     t_start: f64,
 ) {
     let mut odometer = home_pos;
+    let mut lower_chains = lowering_chains(&axis_chains);
     let mut t = t_start;
     let mut rest_hold_pending = false;
     let mut mesh: Option<Arc<SurfaceTransform>> = None;
@@ -51,7 +52,10 @@ pub fn run_lowerer(
                         t = 0.0;
                         rest_hold_pending = false;
                     }
-                    Control::SetAxisChains(chains) => axis_chains = chains.clone(),
+                    Control::SetAxisChains(chains) => {
+                        axis_chains = chains.clone();
+                        lower_chains = lowering_chains(&axis_chains);
+                    }
                     Control::SetMesh {
                         mesh: m,
                         gcode_z_rebase,
@@ -82,7 +86,7 @@ pub fn run_lowerer(
             t + hold_pad,
             &odometer,
             fit_tol,
-            &axis_chains.chains,
+            &lower_chains,
             mesh.as_deref(),
         )
         .unwrap_or_else(|e| panic!("lowerer: line {}: {e}", planned.geometry.source.start_line));
@@ -134,6 +138,25 @@ pub fn run_lowerer(
     }
 }
 
+/// The chains the lowerer bakes into raw tracks. A projected follower's whole
+/// chain applies in the shaper after re-projection onto its leaders' shaped
+/// motion, so its slot is emptied here — baking it against the raw profile
+/// would double-apply it.
+fn lowering_chains(axis_chains: &AxisChainSet) -> Vec<trajectory::CompiledChain> {
+    axis_chains
+        .chains
+        .iter()
+        .enumerate()
+        .map(|(axis, chain)| {
+            if axis_chains.is_projected_follower(axis) {
+                trajectory::CompiledChain::default()
+            } else {
+                chain.clone()
+            }
+        })
+        .collect()
+}
+
 /// The gcode-space odometer is warped like any commanded position when a
 /// segment holds it as machine-space output.
 fn rest_z_warp(mesh: Option<&SurfaceTransform>, odometer: &[f64]) -> f64 {
@@ -172,6 +195,7 @@ fn rest_hold_segment(
     trajectory::ShapedSegment {
         axes,
         followers: Vec::new(),
+        spatial_path: false,
         t_start,
         t_end,
         motor_mask: 0,

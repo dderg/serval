@@ -299,24 +299,34 @@ fn two_kernels_on_one_axis_rejected_with_v1_message() {
 }
 
 #[test]
-fn happy_path_compiles_kernel_and_pa_on_e() {
+fn kernel_on_follower_axis_rejected() {
     let registry = registry_with_e(&["is", "pa"]);
-    let set = PostProcessorSet::try_new(
+    let err = PostProcessorSet::try_new(
         &registry,
         &[
             pp("is", "smooth_zv", &[("frequency_hz", 50.0)]),
             pp("pa", "linear_pressure_advance", &[("k", 0.04)]),
         ],
     )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("follower axis"),
+        "expected the kernel-on-follower rejection, got: {err}"
+    );
+}
+
+#[test]
+fn happy_path_compiles_pa_on_follower_e() {
+    let registry = registry_with_e(&["pa"]);
+    let set = PostProcessorSet::try_new(
+        &registry,
+        &[pp("pa", "linear_pressure_advance", &[("k", 0.04)])],
+    )
     .unwrap();
     let chains = set.compile(&registry).unwrap();
     assert_eq!(chains.n_axes(), 4);
-    assert!(matches!(
-        chains.chains[3].stages[0],
-        trajectory::ChainStage::SmoothKernel(_)
-    ));
     assert!(
-        matches!(chains.chains[3].stages[1], trajectory::ChainStage::LinearPressureAdvance { k } if k == 0.04)
+        matches!(chains.chains[3].stages[0], trajectory::ChainStage::LinearPressureAdvance { k } if k == 0.04)
     );
     assert_eq!(chains.followers, vec![(3, vec![0, 1, 2])]);
 }

@@ -189,6 +189,21 @@ impl AxisChainSet {
         self.chains.len()
     }
 
+    /// Follower axes that ride on at least one leader: their tracks are not
+    /// convolved with their own kernel but re-projected onto the leaders'
+    /// shaped motion by the shaper.
+    pub fn projected_followers(&self) -> impl Iterator<Item = (usize, &[usize])> {
+        self.followers
+            .iter()
+            .filter(|(_, leaders)| !leaders.is_empty())
+            .map(|(axis, leaders)| (*axis, leaders.as_slice()))
+    }
+
+    #[must_use]
+    pub fn is_projected_follower(&self, axis: usize) -> bool {
+        self.projected_followers().any(|(a, _)| a == axis)
+    }
+
     #[must_use]
     pub fn forward_support(&self) -> f64 {
         self.chains

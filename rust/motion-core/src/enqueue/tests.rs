@@ -40,6 +40,7 @@ fn seg_x_move() -> ShapedSegment {
             linear_axis(0.0, 0.0),
         ],
         followers: vec![],
+        spatial_path: false,
         t_start: 0.0,
         t_end: 1.0,
         motor_mask: 0,
@@ -114,6 +115,7 @@ fn corexy_x_slot_is_x_plus_y() {
             linear_axis(0.0, 0.0),
         ],
         followers: vec![],
+        spatial_path: false,
         t_start: 0.0,
         t_end: 1.0,
         motor_mask: 0,
@@ -224,6 +226,7 @@ fn flatten_axis_max_piece_secs_splits_long_piece() {
             linear_axis_scaled(0.0, 0.0, 0.2),
         ],
         followers: vec![],
+        spatial_path: false,
         t_start: 0.0,
         t_end: 0.2,
         motor_mask: 0,
@@ -295,6 +298,7 @@ fn constant_follower_axis_merges_all_knots_to_one_piece() {
     let seg = ShapedSegment {
         axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
         followers: vec![],
+        spatial_path: false,
         t_start: 0.0,
         t_end: total,
         motor_mask: 0,
@@ -359,6 +363,7 @@ fn motion_constant_motion_merges_only_the_constant_run() {
     let seg = ShapedSegment {
         axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
         followers: vec![],
+        spatial_path: false,
         t_start: 0.0,
         t_end: 5.0 * dur,
         motor_mask: 0,
@@ -431,6 +436,7 @@ fn constant_runs_at_different_values_do_not_merge_across_motion_boundary() {
     let seg = ShapedSegment {
         axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
         followers: vec![],
+        spatial_path: false,
         t_start: 0.0,
         t_end: 4.0 * dur,
         motor_mask: 0,
@@ -510,6 +516,7 @@ fn constant_run_subdivides_under_max_piece_secs_after_merging() {
     let seg = ShapedSegment {
         axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
         followers: vec![],
+        spatial_path: false,
         t_start: 0.0,
         t_end: total,
         motor_mask: 0,
@@ -589,6 +596,7 @@ fn nonzero_curve_base_preserves_host_times() {
     let seg = ShapedSegment {
         axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
         followers: vec![],
+        spatial_path: false,
         t_start: U_BASE,
         t_end: U_BASE + total,
         motor_mask: 0,
@@ -718,6 +726,7 @@ fn test_shaped_segment_single_axis(axis: usize, motor_mask: u8) -> ShapedSegment
     ShapedSegment {
         axes,
         followers: vec![],
+        spatial_path: false,
         t_start: 0.0,
         t_end: 1.0,
         motor_mask,
@@ -757,6 +766,7 @@ fn overlay_pieces_are_relativized_to_start_at_zero() {
     let make_seg = |motor_mask: u8| ShapedSegment {
         axes: vec![curve.clone(), linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
         followers: vec![],
+        spatial_path: false,
         t_start: 0.0,
         t_end: 0.5,
         motor_mask,
@@ -850,6 +860,7 @@ fn overlay_multi_piece_cumulative_positions_produce_individual_spans() {
     let seg = ShapedSegment {
         axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
         followers: vec![],
+        spatial_path: false,
         t_start: 0.0,
         t_end: 0.4,
         motor_mask: 0b0000_0001,

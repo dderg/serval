@@ -687,6 +687,7 @@ fn smooth_shaper_second_batch_window_before_stream_start_clamps() {
             })
             .collect(),
         followers: vec![],
+        spatial_path: false,
         t_start,
         t_end,
         motor_mask: 0,
@@ -921,5 +922,127 @@ fn mesh_warp_tracks_across_a_fenced_move_sequence() {
     assert!(
         (z_machine - expected).abs() < 5e-3,
         "final machine Z {z_machine} should be {expected}"
+    );
+}
+
+fn xy_shaper_follower_chains(frequency_hz: f64) -> AxisChainSet {
+    let zv = |name: &str| {
+        trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
+            name,
+            &trajectory::algos::SmoothZv,
+            vec![frequency_hz],
+        )])
+        .expect("single post-processor always compiles")
+    };
+    AxisChainSet {
+        chains: vec![
+            zv("is_x"),
+            zv("is_y"),
+            trajectory::CompiledChain::default(),
+            trajectory::CompiledChain::default(),
+        ],
+        followers: vec![(3, vec![0, 1, 2])],
+    }
+}
+
+fn follower_chains_without_kernels() -> AxisChainSet {
+    AxisChainSet {
+        chains: vec![trajectory::CompiledChain::default(); 4],
+        followers: vec![(3, vec![0, 1, 2])],
+    }
+}
+
+fn sampled_planar_path_length(segs: &[ShapedSegment]) -> f64 {
+    const SAMPLES_PER_SEG: usize = 2000;
+    let mut length = 0.0;
+    let mut prev: Option<(f64, f64)> = None;
+    for seg in segs {
+        for i in 0..=SAMPLES_PER_SEG {
+            let t = seg.t_start + (seg.t_end - seg.t_start) * i as f64 / SAMPLES_PER_SEG as f64;
+            let p = (eval(&seg.axes[0], t), eval(&seg.axes[1], t));
+            if let Some(q) = prev {
+                length += ((p.0 - q.0).powi(2) + (p.1 - q.1).powi(2)).sqrt();
+            }
+            prev = Some(p);
+        }
+    }
+    length
+}
+
+fn extruder_end(segs: &[ShapedSegment]) -> f64 {
+    let last = segs.last().expect("segments emitted");
+    eval(&last.axes[3], last.t_end)
+}
+
+fn assert_extruder_continuous_and_monotone(segs: &[ShapedSegment]) {
+    let mut prev_val: Option<f64> = None;
+    for seg in segs {
+        for i in 0..=200 {
+            let t = seg.t_start + (seg.t_end - seg.t_start) * i as f64 / 200.0;
+            let v = eval(&seg.axes[3], t);
+            if let Some(p) = prev_val {
+                assert!(
+                    v >= p - 1e-6,
+                    "extruder track regressed from {p} to {v} at t={t}"
+                );
+                assert!(
+                    v - p < 0.05,
+                    "extruder track jumped from {p} to {v} at t={t}"
+                );
+            }
+            prev_val = Some(v);
+        }
+    }
+}
+
+/// The follower rides the shaped path's true distance: through a smoothed
+/// corner it extrudes exactly ratio × the (shorter) shaped arc length, so it
+/// ends short of the commanded total by the corner-cut distance.
+#[test]
+fn follower_tracks_shaped_path_distance_through_a_corner() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0], 1.5),
+        line(2, [30.0, 0.0, 0.0], [30.0, 30.0, 0.0], 1.5),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+
+    let raw = replay(cfg(), follower_chains_without_kernels(), &home, 0.0, &moves);
+    assert!(
+        (extruder_end(&raw) - 3.0).abs() < 1e-9,
+        "without leader kernels the follower passes through: got {}",
+        extruder_end(&raw)
+    );
+
+    let shaped = replay(cfg(), xy_shaper_follower_chains(18.0), &home, 0.0, &moves);
+    assert_extruder_continuous_and_monotone(&shaped);
+    let e_end = extruder_end(&shaped);
+    let shaped_len = sampled_planar_path_length(&shaped);
+    assert!(
+        shaped_len < 60.0 + 1e-6,
+        "shaped path cannot be longer than commanded: {shaped_len}"
+    );
+    assert!(
+        (e_end - 0.05 * shaped_len).abs() < 2e-3,
+        "extruder must ride the shaped arc length: e_end {e_end} vs \
+         0.05 × {shaped_len} = {}",
+        0.05 * shaped_len
+    );
+}
+
+/// An extrude-only move rides no spatial path; its raw track passes through
+/// the projection and the totals add up on a straight (cut-free) path.
+#[test]
+fn extrude_only_move_passes_through_the_projection() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [20.0, 0.0, 0.0], 1.0),
+        line(2, [20.0, 0.0, 0.0], [20.0, 0.0, 0.0], -0.5),
+        line(3, [20.0, 0.0, 0.0], [40.0, 0.0, 0.0], 1.0),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let shaped = replay(cfg(), xy_shaper_follower_chains(18.0), &home, 0.0, &moves);
+    let e_end = extruder_end(&shaped);
+    assert!(
+        (e_end - 1.5).abs() < 1e-3,
+        "straight path with a retract must extrude the commanded total: {e_end}"
     );
 }

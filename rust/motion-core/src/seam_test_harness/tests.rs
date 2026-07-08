@@ -91,13 +91,15 @@ fn extruder_chain_set_with_k(k: f64) -> trajectory::AxisChainSet {
         &trajectory::algos::SmoothTriangle,
         vec![0.02],
     );
-    let e_chain =
-        trajectory::CompiledChain::compile(&[pa, st]).expect("pa + smooth_triangle composes");
+    let spatial_chain =
+        trajectory::CompiledChain::compile(std::slice::from_ref(&st)).expect("kernel compiles");
+    let e_chain = trajectory::CompiledChain::compile(std::slice::from_ref(&pa))
+        .expect("pressure advance compiles");
     trajectory::AxisChainSet {
         chains: vec![
-            trajectory::CompiledChain::default(),
-            trajectory::CompiledChain::default(),
-            trajectory::CompiledChain::default(),
+            spatial_chain.clone(),
+            spatial_chain.clone(),
+            spatial_chain,
             e_chain,
         ],
         followers: vec![(EXTRUDER_AXIS, vec![0, 1, 2])],

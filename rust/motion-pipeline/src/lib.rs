@@ -4,6 +4,7 @@ use crossbeam_channel::bounded;
 use trajectory::AxisChainSet;
 
 pub mod fit_stage;
+mod follower_projection;
 pub mod lower_stage;
 pub mod lowering;
 pub mod planner;
