@@ -325,7 +325,7 @@ class Printer:
         try:
             from . import motion_engine as motion_engine_mod
 
-            engine = motion_engine_mod.MotionEngineWrapper(self.reactor)
+            engine = motion_engine_mod.MotionEngineWrapper(self)
             self.add_object("motion_engine", engine)
             # Wire the Rust host structured-logging subscriber + push the
             # session context across the PyO3 seam, before any MCU
