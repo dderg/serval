@@ -123,6 +123,9 @@ class BedMesh:
         self.z_mesh = None
         self.toolhead = None
         self.horizontal_move_z = config.getfloat("horizontal_move_z", 5.0)
+        self.activation_speed = config.getfloat(
+            "activation_speed", 5.0, above=0.0
+        )
         self.fade_start = config.getfloat("fade_start", 1.0)
         self.fade_end = config.getfloat("fade_end", 0.0)
         self.fade_dist = self.fade_end - self.fade_start
@@ -222,13 +225,33 @@ class BedMesh:
         else:
             self.fade_target = 0.0
         self.tool_offset = 0.0
+        safe_z = self._raise_to_safe_z()
         rebase = self._apply_to_engine(mesh)
         self.z_mesh = mesh
         # The engine re-expressed the machine Z through the new mesh; adopt
         # the rebased gcode Z so the physical position is invariant across
         # the swap (this also refreshes gcode_move's cached position).
         self.toolhead.rebase_gcode_z(rebase)
+        if safe_z is not None:
+            self._travel_compensation(safe_z)
         self.update_status()
+
+    def _raise_to_safe_z(self):
+        curtime = self.printer.get_reactor().monotonic()
+        if "z" not in self.toolhead.get_status(curtime)["homed_axes"]:
+            return None
+        self.toolhead.wait_moves()
+        safe_z = max(self.toolhead.get_position()[2], self.horizontal_move_z)
+        self.toolhead.manual_move([None, None, safe_z], self.activation_speed)
+        self.toolhead.wait_moves()
+        return safe_z
+
+    def _travel_compensation(self, gcode_z):
+        # The rebase renamed the resting point in gcode space; commanding the
+        # pre-swap gcode Z back physically travels the mesh correction, so
+        # activation never leaves an untravelled Z offset behind.
+        self.toolhead.manual_move([None, None, gcode_z], self.activation_speed)
+        self.toolhead.wait_moves()
 
     def _apply_to_engine(self, mesh):
         engine = self.printer.lookup_object("motion_engine", None)
