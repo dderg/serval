@@ -13,6 +13,7 @@ gcode = { path = "../gcode" }
 geometry = { path = "../geometry" }
 motion-pipeline = { path = "../motion-pipeline" }
 nurbs = { path = "../nurbs" }
+planner-config = { path = "../planner-config" }
 serde = { version = "1", features = ["derive"] }
 thiserror = { workspace = true }
 trajectory = { path = "../trajectory" }

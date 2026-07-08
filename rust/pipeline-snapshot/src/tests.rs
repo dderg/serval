@@ -264,9 +264,8 @@ fn snapshot_serializes_to_the_baseline_schema() {
             max_extrude_only_accel: None,
             max_path_deviation: None,
             max_accel_deviation: None,
-            pressure_advance: None,
-            smooth_zv_hz: None,
-            e_smooth_zv_hz: None,
+            axis_decls: Vec::new(),
+            post_processor_decls: Vec::new(),
         },
     )
     .unwrap();
@@ -293,4 +292,108 @@ fn snapshot_serializes_to_the_baseline_schema() {
         .and_then(serde_json::Value::as_str)
         .expect("fitted segment carries a type tag");
     assert!(["line", "arc", "clothoid"].contains(&seg));
+}
+
+fn default_axis_snapshot_params() -> SnapshotParams {
+    SnapshotParams {
+        max_velocity: 300.0,
+        max_accel: 3000.0,
+        square_corner_velocity: 5.0,
+        max_jerk: 100_000.0,
+        arc_fit: None,
+        max_extrude_only_velocity: None,
+        max_extrude_only_accel: None,
+        max_path_deviation: None,
+        max_accel_deviation: None,
+        axis_decls: Vec::new(),
+        post_processor_decls: Vec::new(),
+    }
+}
+
+fn axis(name: &str, follows: &[&str]) -> planner_config::AxisDecl {
+    planner_config::AxisDecl {
+        name: name.into(),
+        follows: follows.iter().map(|s| s.to_string()).collect(),
+        motors: Vec::new(),
+        post_processors: Vec::new(),
+    }
+}
+
+fn pp(name: &str, ty: &str, params: &[(&str, f64)]) -> planner_config::PostProcessorDecl {
+    planner_config::PostProcessorDecl {
+        name: name.into(),
+        ty: ty.into(),
+        params: params.iter().map(|(k, v)| ((*k).to_string(), *v)).collect(),
+    }
+}
+
+#[test]
+fn empty_axis_decls_falls_back_to_the_default_four_axis_topology() {
+    let snap = pipeline_snapshot(&square_waypoints(), default_axis_snapshot_params()).unwrap();
+    assert!(!snap.traj_x_pieces.is_empty());
+    assert!(!snap.traj_e_pieces.is_empty());
+}
+
+#[test]
+fn declaring_only_the_e_axis_still_defaults_x_y_z() {
+    // A caller shouldn't have to boilerplate x/y/z just to attach a
+    // post-processor to e — merge_axis_decls fills in the other three from
+    // the default topology.
+    let mut params = default_axis_snapshot_params();
+    let mut e = axis("e", &["x", "y", "z"]);
+    e.post_processors = vec!["pa".to_string()];
+    params.axis_decls = vec![e];
+    params.post_processor_decls = vec![pp("pa", "linear_pressure_advance", &[("k", 0.04)])];
+    let snap = pipeline_snapshot(&square_waypoints(), params).unwrap();
+    assert!(!snap.traj_x_pieces.is_empty());
+}
+
+#[test]
+fn all_four_post_processor_types_are_reachable() {
+    for (ty, params) in [
+        ("smooth_zv", [("frequency_hz", 40.0)].as_slice()),
+        ("smooth_mzv", [("frequency_hz", 40.0)].as_slice()),
+        ("smooth_triangle", [("smooth_time", 0.02)].as_slice()),
+        ("linear_pressure_advance", [("k", 0.04)].as_slice()),
+    ] {
+        let mut params_snap = default_axis_snapshot_params();
+        let mut x = axis("x", &[]);
+        x.post_processors = vec!["pp".to_string()];
+        params_snap.axis_decls = vec![x];
+        params_snap.post_processor_decls = vec![pp("pp", ty, params)];
+        pipeline_snapshot(&square_waypoints(), params_snap)
+            .unwrap_or_else(|e| panic!("post-processor type '{ty}' should compile: {e}"));
+    }
+}
+
+#[test]
+fn composition_conflict_surfaces_as_an_error() {
+    let mut params = default_axis_snapshot_params();
+    let mut x = axis("x", &[]);
+    x.post_processors = vec!["a".to_string(), "b".to_string()];
+    params.axis_decls = vec![x];
+    params.post_processor_decls = vec![
+        pp("a", "smooth_zv", &[("frequency_hz", 40.0)]),
+        pp("b", "smooth_mzv", &[("frequency_hz", 40.0)]),
+    ];
+    let err = pipeline_snapshot(&square_waypoints(), params).unwrap_err();
+    assert!(matches!(err, SnapshotError::InvalidChain(_)));
+}
+
+#[test]
+fn undeclared_axis_reference_surfaces_as_an_error() {
+    let mut params = default_axis_snapshot_params();
+    let mut x = axis("x", &[]);
+    x.post_processors = vec!["nope".to_string()];
+    params.axis_decls = vec![x];
+    let err = pipeline_snapshot(&square_waypoints(), params).unwrap_err();
+    assert!(matches!(err, SnapshotError::InvalidChain(_)));
+}
+
+#[test]
+fn unknown_axis_name_is_rejected() {
+    let mut params = default_axis_snapshot_params();
+    params.axis_decls = vec![axis("a", &[])];
+    let err = pipeline_snapshot(&square_waypoints(), params).unwrap_err();
+    assert!(matches!(err, SnapshotError::InvalidChain(msg) if msg.contains("'a'")));
 }
