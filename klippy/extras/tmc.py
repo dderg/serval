@@ -59,16 +59,24 @@ class FieldHelper:
             field_value -= 1 << field_value.bit_length()
         return field_value
 
-    def set_field(self, field_name, field_value, reg_value=None, reg_name=None):
-        # Returns register value with field bits filled with supplied value
-        if reg_name is None:
-            reg_name = self.field_to_register[field_name]
-        if reg_value is None:
-            reg_value = self.registers.get(reg_name, 0)
-        mask = self.all_fields[reg_name][field_name]
-        new_value = (reg_value & ~mask) | ((field_value << ffs(mask)) & mask)
+    def set_field(self, field_name, field_value):
+        # Update the desired configuration; returns the new register value
+        reg_name = self.field_to_register[field_name]
+        new_value = self.override_register(reg_name, {field_name: field_value})
         self.registers[reg_name] = new_value
         return new_value
+
+    def override_register(self, reg_name, field_overrides):
+        """Register value with transient field overrides applied on top
+        of the desired configuration. The desired configuration is not
+        touched, so a later full register replay restores it."""
+        reg_value = self.registers.get(reg_name, 0)
+        for field_name, field_value in field_overrides.items():
+            mask = self.all_fields[reg_name][field_name]
+            reg_value = (reg_value & ~mask) | (
+                (field_value << ffs(mask)) & mask
+            )
+        return reg_value
 
     def set_config_field(self, config, field_name, default):
         # Allow a field to be set from the config file
@@ -144,6 +152,9 @@ class TMCModeTracker:
             )
         previous, self.mode = self.mode, new_mode
         return previous
+
+    def require(self, allowed, what):
+        self.transition(allowed, self.mode, what)
 
 
 ######################################################################
@@ -377,6 +388,10 @@ class TMCCommandHelper:
 
     def cmd_INIT_TMC(self, gcmd):
         logging.info("INIT_TMC %s", self.name)
+        self.mode_tracker.require(
+            (TMCModeTracker.DISABLED, TMCModeTracker.PULSE),
+            "INIT_TMC register replay",
+        )
         print_time = self.printer.lookup_object("toolhead").get_last_move_time()
         self._init_registers(print_time)
 
@@ -652,7 +667,6 @@ class TMCVirtualPinHelper:
         self.mcu_endstop = None
         self.phase_mode_helper = None
         self._reenter_phase = False
-        self._saved_fields = {}
         name_parts = config.get_name().split()
         ppins = self.printer.lookup_object("pins")
         ppins.register_chip("%s_%s" % (name_parts[0], name_parts[-1]), self)
@@ -701,6 +715,9 @@ class TMCVirtualPinHelper:
         return True
 
     def arm(self):
+        """Transiently override the driver configuration for a StallGuard
+        homing move; the desired configuration is untouched, so disarm
+        restores by replaying it."""
         self._reenter_phase = self._exit_phase_mode_for_homing()
         self.mode_tracker.transition(
             (TMCModeTracker.PULSE,),
@@ -708,33 +725,32 @@ class TMCVirtualPinHelper:
             "StallGuard arm",
         )
         fields = self.fields
+        override = fields.override_register
         if fields.lookup_register("sgthrs", None) is not None:
-            sg_val = fields.set_field("sgthrs", fields.get_field("sgthrs"))
-            self.mcu_tmc.set_register("SGTHRS", sg_val)
-        saved = self._saved_fields = {}
+            self.mcu_tmc.set_register(
+                "SGTHRS", fields.registers.get("SGTHRS", 0)
+            )
         if fields.lookup_register("en_pwm_mode", None) is None:
             # "stallguard4" drivers only stall-detect in stealthchop
-            saved["tpwmthrs"] = fields.get_field("tpwmthrs")
-            tp_val = fields.set_field("tpwmthrs", 0)
-            self.mcu_tmc.set_register("TPWMTHRS", tp_val)
-            saved["en_spreadcycle"] = fields.get_field("en_spreadcycle")
-            gconf_val = fields.set_field("en_spreadcycle", 0)
+            self.mcu_tmc.set_register(
+                "TPWMTHRS", override("TPWMTHRS", {"tpwmthrs": 0})
+            )
+            gconf_val = override("GCONF", {"en_spreadcycle": 0})
         else:
             # earlier drivers only stall-detect in spreadcycle
-            saved["en_pwm_mode"] = fields.get_field("en_pwm_mode")
-            fields.set_field("en_pwm_mode", 0)
-            saved[self.diag_pin_field] = fields.get_field(self.diag_pin_field)
-            gconf_val = fields.set_field(self.diag_pin_field, 1)
+            gconf_val = override(
+                "GCONF", {"en_pwm_mode": 0, self.diag_pin_field: 1}
+            )
         self.mcu_tmc.set_register("GCONF", gconf_val)
-        saved["tcoolthrs"] = coolthrs = fields.get_field("tcoolthrs")
-        if coolthrs == 0:
-            tc_val = fields.set_field("tcoolthrs", 0xFFFFF)
-            self.mcu_tmc.set_register("TCOOLTHRS", tc_val)
+        if fields.get_field("tcoolthrs") == 0:
+            self.mcu_tmc.set_register(
+                "TCOOLTHRS", override("TCOOLTHRS", {"tcoolthrs": 0xFFFFF})
+            )
         thigh_reg = fields.lookup_register("thigh", None)
         if thigh_reg is not None:
-            saved["thigh"] = fields.get_field("thigh")
-            th_val = fields.set_field("thigh", 0)
-            self.mcu_tmc.set_register(thigh_reg, th_val)
+            self.mcu_tmc.set_register(
+                thigh_reg, override(thigh_reg, {"thigh": 0})
+            )
 
     def disarm(self):
         self.mode_tracker.transition(
@@ -743,26 +759,16 @@ class TMCVirtualPinHelper:
             "StallGuard disarm",
         )
         fields = self.fields
-        saved = self._saved_fields
-        if "tpwmthrs" in saved:
-            tp_val = fields.set_field("tpwmthrs", saved["tpwmthrs"])
-            self.mcu_tmc.set_register("TPWMTHRS", tp_val)
-        if "en_spreadcycle" in saved:
-            gconf_val = fields.set_field(
-                "en_spreadcycle", saved["en_spreadcycle"]
+        restore_regs = ["GCONF", "TCOOLTHRS"]
+        if fields.lookup_register("en_pwm_mode", None) is None:
+            restore_regs.insert(0, "TPWMTHRS")
+        thigh_reg = fields.lookup_register("thigh", None)
+        if thigh_reg is not None:
+            restore_regs.append(thigh_reg)
+        for reg_name in restore_regs:
+            self.mcu_tmc.set_register(
+                reg_name, fields.registers.get(reg_name, 0)
             )
-        else:
-            fields.set_field("en_pwm_mode", saved["en_pwm_mode"])
-            gconf_val = fields.set_field(
-                self.diag_pin_field, saved[self.diag_pin_field]
-            )
-        self.mcu_tmc.set_register("GCONF", gconf_val)
-        tc_val = fields.set_field("tcoolthrs", saved["tcoolthrs"])
-        self.mcu_tmc.set_register("TCOOLTHRS", tc_val)
-        if "thigh" in saved:
-            th_val = fields.set_field("thigh", saved["thigh"])
-            self.mcu_tmc.set_register(fields.lookup_register("thigh"), th_val)
-        self._saved_fields = {}
         if self._reenter_phase:
             self._reenter_phase = False
             self.phase_mode_helper.enter_phase_mode()
@@ -893,71 +899,31 @@ class BaseTMCCurrentHelper:
 
         self.max_current = max_current
 
-    def needs_home_current_change(self):
-        needs = self.actual_current != self.req_home_current
-        logging.info(f"tmc {self.name}: needs_home_current_change {needs}")
-        return needs
-
-    def needs_run_current_change(self):
-        needs = self.actual_current != self.req_run_current
-        logging.info(f"tmc {self.name}: needs_run_current_change {needs}")
-        return needs
-
-    def needs_hold_current_change(self, hold_current):
-        needs = hold_current != self.req_hold_current
-        logging.info(f"tmc {self.name}: needs_hold_current_change {needs}")
-        return needs
-
     def set_home_current(self, new_home_current):
         self.req_home_current = min(self.max_current, new_home_current)
 
     def set_run_current(self, new_run_current):
         self.req_run_current = min(self.max_current, new_run_current)
 
-    def set_hold_current(self, new_hold_current):
-        self.req_hold_current = new_hold_current
-
-    def set_actual_current(self, current):
-        self.actual_current = current
-        logging.info(
-            f"tmc {self.name}: set_actual_current() new actual_current: {self.actual_current}"
-        )
-
     def set_current_for_homing(self, print_time, pre_homing) -> float:
-        if pre_homing and self.needs_home_current_change():
-            self.set_current(
-                self.req_home_current,
-                self.req_hold_current,
-                print_time,
-            )
-            return self.current_change_dwell_time
-        elif not pre_homing and self.needs_run_current_change():
-            self.set_current(
-                self.req_run_current, self.req_hold_current, print_time
-            )
-            return self.current_change_dwell_time
-        return 0.0
-
-    def needs_current_changes(self, run_current, hold_current, force=False):
-        if (
-            run_current == self.actual_current
-            and hold_current == self.req_hold_current
-            and not force
-        ):
-            return False
-        return True
+        target = self.req_home_current if pre_homing else self.req_run_current
+        if target == self.actual_current:
+            return 0.0
+        self.set_current(target, self.req_hold_current, print_time)
+        return self.current_change_dwell_time
 
     def apply_current(self, print_time):
         pass
 
     def set_current(self, new_current, hold_current, print_time, force=False):
-        if not self.needs_current_changes(new_current, hold_current, force):
+        if (
+            new_current == self.actual_current
+            and hold_current == self.req_hold_current
+            and not force
+        ):
             return
-
-        if self.needs_hold_current_change(hold_current):
-            self.set_hold_current(hold_current)
-
-        self.set_actual_current(new_current)
+        self.req_hold_current = hold_current
+        self.actual_current = new_current
         self.apply_current(print_time)
 
 

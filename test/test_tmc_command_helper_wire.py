@@ -7,6 +7,7 @@ print_time stamping) of the three driver lifecycle paths: connect-time
 init, stepper-enable, stepper-disable.
 """
 
+import pytest
 from tmc_wire_harness import (
     CommandError,
     FakeConfig,
@@ -199,6 +200,40 @@ def test_enable_without_reset_detection_always_replays_the_registers():
     )
     assert writes(wire)[0][3] is None
     assert printer.shutdowns == []
+
+
+class FakeToolhead:
+    def get_last_move_time(self):
+        return 12.0
+
+
+def test_init_tmc_replays_the_desired_config_stamped_at_print_time():
+    rig = Rig()
+    rig.boot()
+    rig.printer.add_object("toolhead", FakeToolhead())
+    del rig.wire[:]
+    rig.helper.cmd_INIT_TMC(None)
+    assert writes(rig.wire) == [
+        ("write", "CHOPCONF", CHOPCONF_RUN, 12.0),
+        ("write", "GCONF", GCONF_MULTISTEP_FILT, 12.0),
+    ]
+
+
+def test_init_tmc_fails_loudly_outside_pulse_mode():
+    # A full register replay would overwrite the transient mode overrides
+    # (direct_mode, StallGuard thresholds) with the desired config,
+    # silently knocking the driver out of its mode.
+    rig = Rig()
+    rig.boot()
+    for mode in (
+        tmc.TMCModeTracker.PHASE_DIRECT,
+        tmc.TMCModeTracker.SG_HOMING,
+    ):
+        rig.helper.mode_tracker.mode = mode
+        del rig.wire[:]
+        with pytest.raises(CommandError, match="INIT_TMC"):
+            rig.helper.cmd_INIT_TMC(None)
+        assert writes(rig.wire) == []
 
 
 def test_mode_tracker_follows_the_enable_disable_lifecycle():

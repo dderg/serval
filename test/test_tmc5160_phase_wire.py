@@ -120,7 +120,10 @@ def test_enter_sets_direct_mode_and_forces_spreadcycle(rig):
     tmc_obj._enter_phase_mode_single()
     gconf_writes = [w for w in writes(rig.wire) if w[1] == "GCONF"]
     assert gconf_writes == [("write", "GCONF", GCONF_DIRECT_MODE, None)]
-    assert tmc_obj.fields.registers["GCONF"] == GCONF_DIRECT_MODE
+    assert tmc_obj.fields.registers["GCONF"] == GCONF_BASE, (
+        "direct_mode is a transient override; the desired config stays clean"
+        " so a full register replay cannot resurrect it out of phase mode"
+    )
 
 
 def test_enter_preloads_xdirect_with_phase_matched_coil_currents(rig):
