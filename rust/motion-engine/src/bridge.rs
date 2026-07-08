@@ -29,7 +29,7 @@ mod motion_caps;
 mod passthrough;
 mod pipeline_setup;
 mod planner_api;
-#[allow(unused_imports)]
+#[cfg(feature = "snapshot")]
 pub(crate) use planner_api::{AxisSection, PostProcessor};
 mod runtime_caps;
 mod servo;
