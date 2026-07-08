@@ -317,6 +317,67 @@ fn eviction_does_not_stretch_the_pre_ring_hold() {
 }
 
 #[test]
+fn empty_ring_query_inside_dropped_motion_fails_loud() {
+    let mut store = HistoryStore::default();
+    // Moving piece over [0,1]s, 0->10. At host_t=0.5 the axis is mid-motion at
+    // 5.0 and has NOT reached the endpoint 10.0 — that time is dropped motion.
+    rec(&mut store, key(), linear(0, 1.0, 0.0, 10.0));
+    store.drop_pieces_on_reanchor();
+
+    let err = store.state_at_host(key(), 0.5, Some(2.0)).unwrap_err();
+    assert!(
+        matches!(err, HistoryError::BeforeRetainedWindow { .. }),
+        "empty-ring query inside dropped motion must fail loud, not return a \
+         position the axis never reached: {err:?}"
+    );
+
+    // A time at/after the endpoint host is a provable held rest and still answers.
+    let held = store.state_at_host(key(), 1.5, Some(2.0)).unwrap();
+    assert!(
+        (held.position - 10.0).abs() < 1e-9,
+        "held rest position {}",
+        held.position
+    );
+    assert_eq!(held.velocity, 0.0);
+    assert_eq!(held.acceleration, 0.0);
+}
+
+#[test]
+fn trailing_rest_run_extends_hold_coverage_before_endpoint() {
+    let mut store = HistoryStore::default();
+    // Move 0->10 over [0,1]s, then hold at 10 over [1,2]s (a rest piece).
+    // The endpoint host is 2.0, but the axis was provably at 10.0 from 1.0 on.
+    rec(&mut store, key(), linear(0, 1.0, 0.0, 10.0));
+    let rest_start = FREQ as u64; // 1.0s in clock ticks
+    rec(&mut store, key(), linear(rest_start, 1.0, 10.0, 10.0));
+
+    store.drop_pieces_on_reanchor();
+    rec(&mut store, key(), linear(4_000_000_000, 1.0, 10.0, 20.0));
+    assert_eq!(store.final_position(key()), Some(20.0));
+
+    // A time inside the old trailing rest run (1.0..2.0), before the endpoint
+    // host, answers the held rest even though the ring is now non-empty.
+    let in_rest = store
+        .state_at_host(key(), h(rest_start) + 0.5, Some(f64::INFINITY))
+        .unwrap();
+    assert!(
+        (in_rest.position - 10.0).abs() < 1e-6,
+        "rest-run position {}",
+        in_rest.position
+    );
+    assert_eq!(in_rest.velocity, 0.0);
+
+    // A time inside the earlier move stays unanswerable — it was real motion.
+    let err = store
+        .state_at_host(key(), 0.5, Some(f64::INFINITY))
+        .unwrap_err();
+    assert!(
+        matches!(err, HistoryError::BeforeRetainedWindow { .. }),
+        "moving span before the rest run must stay unanswerable: {err:?}"
+    );
+}
+
+#[test]
 fn rebase_to_earlier_clock_accepts_post_rewind_pieces() {
     let mut store = HistoryStore::default();
     rec(&mut store, key(), linear(3_000_000, 1.0, 0.0, 5.0));
@@ -339,6 +400,234 @@ fn backward_host_supersedes_stale_tail() {
         .state_at_host(key(), 1.2, Some(f64::INFINITY))
         .unwrap();
     assert!((held.position - 60.0).abs() < 1e-6);
+}
+
+fn axis_key(axis: u8) -> AxisKey {
+    AxisKey { mcu_id: 7, axis }
+}
+
+#[test]
+fn assemble_cartesian_state_corexy_inverts_motor_frame() {
+    use crate::kinematics::KinematicsModule;
+    use crate::motion_history::{AxisState, assemble_cartesian_state};
+    use runtime::segment::KinematicTag;
+
+    let expected_x = 10.0;
+    let expected_y = 4.0;
+    let motor_a = expected_x + expected_y;
+    let motor_b = expected_x - expected_y;
+    let motor_state = [
+        Some(AxisState {
+            position: motor_a,
+            velocity: 1.0,
+            acceleration: 0.0,
+        }),
+        Some(AxisState {
+            position: motor_b,
+            velocity: -1.0,
+            acceleration: 0.0,
+        }),
+        Some(AxisState {
+            position: 2.0,
+            velocity: 0.0,
+            acceleration: 0.0,
+        }),
+        None,
+    ];
+    let kin = KinematicsModule::from_tag(KinematicTag::CoreXy as u8).unwrap();
+    let out = assemble_cartesian_state(motor_state, &kin);
+    assert!(
+        (out["x"].0 - expected_x).abs() < 1e-9,
+        "x={:?}",
+        out.get("x")
+    );
+    assert!(
+        (out["y"].0 - expected_y).abs() < 1e-9,
+        "y={:?}",
+        out.get("y")
+    );
+    assert_eq!(out["z"], (2.0, 0.0, 0.0));
+    assert!(!out.contains_key("e"));
+}
+
+#[test]
+fn assemble_cartesian_state_cartesian_is_passthrough() {
+    use crate::kinematics::KinematicsModule;
+    use crate::motion_history::{AxisState, assemble_cartesian_state};
+    use runtime::segment::KinematicTag;
+
+    let motor_state = [
+        Some(AxisState {
+            position: 10.0,
+            velocity: 1.0,
+            acceleration: 0.1,
+        }),
+        Some(AxisState {
+            position: 20.0,
+            velocity: -1.0,
+            acceleration: 0.2,
+        }),
+        Some(AxisState {
+            position: 5.0,
+            velocity: 0.0,
+            acceleration: 0.0,
+        }),
+        Some(AxisState {
+            position: 2.0,
+            velocity: 3.0,
+            acceleration: 0.0,
+        }),
+    ];
+    let kin = KinematicsModule::from_tag(KinematicTag::Cartesian as u8).unwrap();
+    let out = assemble_cartesian_state(motor_state, &kin);
+    assert_eq!(out["x"], (10.0, 1.0, 0.1));
+    assert_eq!(out["y"], (20.0, -1.0, 0.2));
+    assert_eq!(out["z"], (5.0, 0.0, 0.0));
+    assert_eq!(out["e"], (2.0, 3.0, 0.0));
+}
+
+#[test]
+fn assemble_cartesian_state_corexy_omits_xy_when_one_motor_missing() {
+    use crate::kinematics::KinematicsModule;
+    use crate::motion_history::{AxisState, assemble_cartesian_state};
+    use runtime::segment::KinematicTag;
+
+    // Only motor0 resolved; motor1's history is unanswerable. Reporting x/y
+    // from a single motor would silently invent a position the axis never
+    // proved it held — omit both rather than guess. Z stays independent.
+    let motor_state = [
+        Some(AxisState {
+            position: 15.0,
+            velocity: 0.0,
+            acceleration: 0.0,
+        }),
+        None,
+        Some(AxisState {
+            position: 3.0,
+            velocity: 0.0,
+            acceleration: 0.0,
+        }),
+        None,
+    ];
+    let kin = KinematicsModule::from_tag(KinematicTag::CoreXy as u8).unwrap();
+    let out = assemble_cartesian_state(motor_state, &kin);
+    assert!(!out.contains_key("x"));
+    assert!(!out.contains_key("y"));
+    assert_eq!(out["z"], (3.0, 0.0, 0.0));
+}
+
+#[test]
+fn corexy_history_round_trip_reproduces_bench_symptom() {
+    // Reproduces the trident-bench beacon scan: motor0/motor1 pieces
+    // recorded through the ring (as commit_sent_bundle does) must invert to
+    // the commanded cartesian XY, not the raw CoreXY A/B sum/difference that
+    // motion_state_at_clock used to leak straight through.
+    use crate::kinematics::KinematicsModule;
+    use crate::motion_history::assemble_cartesian_state;
+    use runtime::segment::KinematicTag;
+
+    let cart_x0 = 25.0;
+    let cart_y0 = 25.0;
+    let cart_x1 = 275.0;
+    let cart_y1 = 25.0;
+    let mut store = HistoryStore::default();
+    rec(
+        &mut store,
+        axis_key(0),
+        linear(
+            0,
+            1.0,
+            (cart_x0 + cart_y0) as f32,
+            (cart_x1 + cart_y1) as f32,
+        ),
+    );
+    rec(
+        &mut store,
+        axis_key(1),
+        linear(
+            0,
+            1.0,
+            (cart_x0 - cart_y0) as f32,
+            (cart_x1 - cart_y1) as f32,
+        ),
+    );
+
+    let mid = h(FREQ as u64 / 2);
+    let mut motor_state = [None; 4];
+    for axis in 0..2u8 {
+        motor_state[axis as usize] = store
+            .state_at_host(axis_key(axis), mid, Some(f64::INFINITY))
+            .ok();
+    }
+    let kin = KinematicsModule::from_tag(KinematicTag::CoreXy as u8).unwrap();
+    let out = assemble_cartesian_state(motor_state, &kin);
+
+    let expected_x = (cart_x0 + cart_x1) / 2.0;
+    let expected_y = (cart_y0 + cart_y1) / 2.0;
+    assert!(
+        (out["x"].0 - expected_x).abs() < 1e-6,
+        "x={:?} want {expected_x}",
+        out.get("x")
+    );
+    assert!(
+        (out["y"].0 - expected_y).abs() < 1e-6,
+        "y={:?} want {expected_y}",
+        out.get("y")
+    );
+}
+
+#[test]
+fn rebase_after_probe_trip_round_trips_through_cartesian_inversion() {
+    // Reproduces the z_tilt/beacon-probe incident: every proximity probe
+    // ends in toolhead.set_position(x, y, z), which rebases the retained
+    // history to the trip's stop position. Before spatial_rebase_targets
+    // existed, that rebase stored raw cartesian x/y under axis 0/1 — the
+    // same slots live CoreXY pieces store in motor frame — so querying
+    // through assemble_cartesian_state's kinematics inversion afterward
+    // double-transformed an already-correct position into garbage (the
+    // bench's "probe at 197.500,-47.500" from a real (150,245) point).
+    use crate::kinematics::KinematicsModule;
+    use crate::mcu_config::{McuAxisConfig, McuCaps, spatial_rebase_targets};
+    use crate::motion_history::assemble_cartesian_state;
+    use runtime::segment::KinematicTag;
+
+    let configs = vec![McuAxisConfig {
+        mcu_id: 1,
+        axes: vec![0, 1, 2],
+        kinematics: KinematicTag::CoreXy as u8,
+        caps: McuCaps {
+            total_piece_memory: 62 * 1024,
+        },
+    }];
+    let cart_x = 150.0;
+    let cart_y = 245.0;
+    let cart_z = 1.965;
+
+    let mut store = HistoryStore::default();
+    for (key, value) in spatial_rebase_targets(&configs, [cart_x, cart_y, cart_z]) {
+        store.rebase_axis(key, 0.0, value);
+    }
+
+    let mut motor_state = [None; 4];
+    for axis in 0..3u8 {
+        motor_state[axis as usize] = store
+            .state_at_host(AxisKey { mcu_id: 1, axis }, 0.0, Some(f64::INFINITY))
+            .ok();
+    }
+    let kin = KinematicsModule::from_tag(KinematicTag::CoreXy as u8).unwrap();
+    let out = assemble_cartesian_state(motor_state, &kin);
+
+    assert!(
+        (out["x"].0 - cart_x).abs() < 1e-9,
+        "x={:?} want {cart_x} — got the mangled (x+y)/2, (x-y)/2 pair if this fails",
+        out.get("x")
+    );
+    assert!(
+        (out["y"].0 - cart_y).abs() < 1e-9,
+        "y={:?} want {cart_y}",
+        out.get("y")
+    );
+    assert!((out["z"].0 - cart_z).abs() < 1e-9);
 }
 
 #[test]

@@ -479,10 +479,35 @@ class MotionEngineWrapper:
         return self._engine.update_post_processor(name, key, value)
 
     def set_bed_mesh(
-        self, points, x_min, y_min, dx, dy, nx, ny, tension, fade, zx, zy
+        self,
+        points,
+        x_min,
+        y_min,
+        dx,
+        dy,
+        nx,
+        ny,
+        tension,
+        fade,
+        zx,
+        zy,
+        z_velocity_limit,
+        z_accel_limit,
     ):
         return self._engine.set_bed_mesh(
-            points, x_min, y_min, dx, dy, nx, ny, tension, fade, zx, zy
+            points,
+            x_min,
+            y_min,
+            dx,
+            dy,
+            nx,
+            ny,
+            tension,
+            fade,
+            zx,
+            zy,
+            z_velocity_limit,
+            z_accel_limit,
         )
 
     def clear_bed_mesh(self):

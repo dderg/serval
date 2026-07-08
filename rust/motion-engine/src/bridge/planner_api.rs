@@ -1,6 +1,6 @@
 use super::{
     Arc, DRAIN_TIMEOUT, FieldValue, HashSet, Ordering, PyMotionEngine, PyResult, PyRuntimeError,
-    PyValueError, Python, SPATIAL_AXES, classify, config, planner_err, pymethods, require_positive,
+    PyValueError, Python, classify, config, planner_err, pymethods, require_positive,
 };
 use crate::lock_ext::LockExt;
 use pyo3::FromPyObject;
@@ -637,25 +637,7 @@ impl PyMotionEngine {
     fn rebase_motion_history_after_position_set(&self, host_now: f64, x: f64, y: f64, z: f64) {
         let configs: Vec<crate::mcu_config::McuAxisConfig> =
             self.mcu_axis_configs.lock_ok().clone();
-        let positions = [x, y, z];
-        let rebases: Vec<(crate::types::AxisKey, f64)> = configs
-            .iter()
-            .flat_map(|cfg| {
-                cfg.axes
-                    .iter()
-                    .filter(|&&a| a < SPATIAL_AXES)
-                    .map(move |&axis| {
-                        (
-                            crate::types::AxisKey {
-                                mcu_id: cfg.mcu_id,
-                                axis: axis as u8,
-                            },
-                            positions[axis],
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
+        let rebases = crate::mcu_config::spatial_rebase_targets(&configs, [x, y, z]);
         let follower_keys: Vec<crate::types::AxisKey> = configs
             .iter()
             .flat_map(|cfg| {
@@ -739,7 +721,9 @@ impl PyMotionEngine {
         fade: Option<(f64, f64, f64)>,
         zero_ref_x: f64,
         zero_ref_y: f64,
-    ) -> PyResult<f64> {
+        z_velocity_limit: Option<f64>,
+        z_accel_limit: Option<f64>,
+    ) -> PyResult<(f64, (f64, f64, f64, f64, f64))> {
         let mut mesh = geometry::MeshGrid::new(x_min, y_min, dx, dy, nx, ny, points, tension)
             .map_err(|e| PyValueError::new_err(format!("set_bed_mesh: {e}")))?;
         if !mesh.contains(zero_ref_x, zero_ref_y) {
@@ -789,19 +773,26 @@ impl PyMotionEngine {
                     z_a = z_a.min(a);
                 }
             }
-            (cfg.cartesian, z_v, z_a)
+            (
+                cfg.cartesian,
+                z_velocity_limit.unwrap_or(z_v),
+                z_accel_limit.unwrap_or(z_a),
+            )
         };
         let coupled_v = bounds.max_gradient * limits.max_velocity;
         let coupled_a = bounds.max_gradient * limits.max_accel
             + bounds.max_curvature * limits.max_velocity * limits.max_velocity;
         if coupled_v > z_velocity_budget || coupled_a > z_accel_budget {
-            return Err(PyValueError::new_err(format!(
-                "set_bed_mesh: bed deviation needs {coupled_v:.2}mm/s / {coupled_a:.1}mm/s² \
-                 of Z at your XY limits; Z allows {z_velocity_budget:.2}mm/s / \
-                 {z_accel_budget:.1}mm/s² — the bed is warped or the Z limits are too \
-                 conservative (mesh range {:.3}..{:.3}mm, max slope {:.4})",
-                bounds.z_min, bounds.z_max, bounds.max_gradient
-            )));
+            tracing::warn!(
+                subsystem = "motion",
+                event = "bed_mesh_z_budget_exceeded",
+                coupled_v_mm_s = coupled_v,
+                coupled_a_mm_s2 = coupled_a,
+                z_velocity_budget,
+                z_accel_budget,
+                max_slope = bounds.max_gradient,
+                "mesh-following Z demand exceeds the Z budget; mesh activated anyway"
+            );
         }
         tracing::info!(
             subsystem = "motion",
@@ -813,7 +804,17 @@ impl PyMotionEngine {
             envelope_a_mm_s2 = z_accel_budget + coupled_a,
             "bed mesh activated; transient Z exceedance envelope logged"
         );
-        self.swap_bed_mesh(Some(Arc::new(transform)))
+        let rebase = self.swap_bed_mesh(Some(Arc::new(transform)))?;
+        Ok((
+            rebase,
+            (
+                coupled_v,
+                coupled_a,
+                z_velocity_budget,
+                z_accel_budget,
+                bounds.max_gradient,
+            ),
+        ))
     }
 
     fn clear_bed_mesh(&self) -> PyResult<f64> {

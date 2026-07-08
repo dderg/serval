@@ -147,12 +147,16 @@ from the spline control net: max |∇mesh| and max surface curvature. Compute
 - worst-case coupled Z velocity = max slope × machine max XY velocity
 - worst-case coupled Z accel ≈ max slope × max XY accel + max curvature × v²max
 
-and refuse activation if these alone exceed the Z axis limits, with a
-message that says so ("bed deviation needs X mm/s Z at your limits; Z
-allows Y"). Realistic meshes give coupling of a few mm/s against typical
-Z limits; a mesh that fails this gate means a genuinely warped bed or
-absurdly low Z limits — a hardware-setup problem, surfaced before the
-first move.
+and compare them against the Z budget (the Z axis limits, or the separate
+`z_velocity_limit`/`z_accel_limit` in `[bed_mesh]`). Exceeding the budget
+does not block activation: the mesh loads anyway with a prominent console
+warning and a `bed_mesh_z_budget_exceeded` warn event, so the mesh stays
+inspectable in the frontend. Enforcement is opt-in via
+`BED_MESH_CHECK CHECK_Z_LIMITS=1` (e.g. in `PRINT_START`), which raises
+the same message as a hard error. Realistic meshes give coupling of a few
+mm/s against typical Z limits; a mesh that trips this check means a
+genuinely warped bed or absurdly low Z limits — a hardware-setup problem,
+surfaced before the first move.
 
 **Documented exceedance envelope.** A move that is simultaneously
 Z-velocity-limited, crossing the steepest mesh cell, with slopes aligned,

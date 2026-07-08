@@ -232,6 +232,108 @@ rotation_distance: 4
 {_tail(gcode_dir)}"""
 
 
+def corexy_fast_config(
+    h7_pty: str, gcode_dir: str, arc_fit: bool = False
+) -> str:
+    """CoreXY on the Trident bench's motion limits (max_velocity 2800,
+    max_accel 100000, square_corner_velocity 100), single-MCU. Used to
+    exercise the beacon rapid-scan path shape in the planner without the
+    beacon stream in the loop. `arc_fit` toggles the [arc_fit] section so
+    the fitter's arc-run detection can be compared on/off."""
+    arc_fit_section = "[arc_fit]\n" if arc_fit else ""
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[printer]
+max_velocity: 2800
+max_accel: 100000
+square_corner_velocity: 100
+max_z_velocity: 25
+max_z_accel: 100
+
+{arc_fit_section}[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+
+[axis x]
+position_min: 0
+position_endstop: 0
+position_max: 300
+endstop_pin: ^gpiochip0/gpio10
+homing_speed: 10
+post_processors: shaper_x
+
+[axis y]
+position_min: 0
+position_endstop: 0
+position_max: 300
+endstop_pin: ^gpiochip0/gpio11
+homing_speed: 10
+post_processors: shaper_y
+
+[axis z]
+position_min: -5
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio12
+homing_speed: 5
+
+[limit gantry]
+axes: x, y
+max_velocity: 2800
+max_accel: 100000
+
+[limit z]
+axes: z
+max_velocity: 25
+max_accel: 100
+
+[motor a]
+drive: stepper
+step_pin: gpiochip0/gpio0
+dir_pin: gpiochip0/gpio1
+enable_pin: !gpiochip0/gpio2
+microsteps: 16
+rotation_distance: 40
+
+[motor b]
+drive: stepper
+step_pin: gpiochip0/gpio3
+dir_pin: gpiochip0/gpio4
+enable_pin: !gpiochip0/gpio5
+microsteps: 16
+rotation_distance: 40
+
+[motor z]
+drive: stepper
+step_pin: gpiochip0/gpio6
+dir_pin: gpiochip0/gpio7
+enable_pin: !gpiochip0/gpio8
+microsteps: 16
+rotation_distance: 4
+
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 50
+
+[post_processor shaper_y]
+type: smooth_zv
+frequency_hz: 44
+
+[virtual_sdcard]
+path: {gcode_dir}
+
+[force_move]
+enable_force_move: True
+"""
+
+
 def phase_stepping_config(h7_pty: str, gcode_dir: str) -> str:
     """TMC5160 phase stepping on X."""
     return f"""\
