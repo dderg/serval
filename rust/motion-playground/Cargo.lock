@@ -101,6 +101,7 @@ dependencies = [
  "pipeline-snapshot",
  "serde",
  "serde_json",
+ "thiserror",
  "wasm-bindgen",
 ]
 
@@ -129,7 +130,17 @@ dependencies = [
  "geometry",
  "motion-pipeline",
  "nurbs",
+ "planner-config",
  "serde",
+ "thiserror",
+ "trajectory",
+]
+
+[[package]]
+name = "planner-config"
+version = "0.1.0"
+dependencies = [
+ "geometry",
  "thiserror",
  "trajectory",
 ]

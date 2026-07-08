@@ -247,6 +247,12 @@ async function main() {
     view.setShowPeaks(!view.showPeaks);
   });
 
+  document.getElementById("toggle-fitted-path").addEventListener("click", (e) => {
+    view.setShowFittedPath(!view.showFittedPath);
+    e.target.textContent = view.showFittedPath ? "Fitted" : "Shaped";
+    e.target.classList.toggle("active", view.showFittedPath);
+  });
+
   document.getElementById("toggle-variant").addEventListener("click", () => view.toggleVariant());
   document.getElementById("open-png").addEventListener("click", openPng);
   document.getElementById("png-overlay").addEventListener("click", closePng);

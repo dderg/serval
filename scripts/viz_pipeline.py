@@ -12,10 +12,26 @@ import os
 import re
 import sys
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 KLIPPY_ENV = Path.home() / "klippy-env"
+
+
+@dataclass
+class PrinterConfigData:
+    max_velocity: float
+    max_accel: float
+    square_corner_velocity: float
+    max_jerk: float
+    arc_fit: object
+    max_extrude_only_velocity: float | None
+    max_extrude_only_accel: float | None
+    max_path_deviation: float
+    max_accel_deviation: float
+    axis_sections: list
+    post_processor_sections: list
 
 
 def _reexec_in_printer_env():
@@ -69,11 +85,12 @@ def _matplotlib_logging_silenced():
         log.setLevel(previous_level)
 
 
-def read_printer_config(cfg_path: Path):
+def read_printer_config(cfg_path: Path) -> PrinterConfigData:
     # Parse through klippy's own loader so includes resolve and the keys,
     # defaults, and the [arc_fit] knobs match the live printer exactly.
-    from klippy import configfile
+    from klippy import configfile, motion_setup
     from klippy.arc_fit_config import arc_fit_from_config
+    from klippy.motion import Motion
 
     loader = configfile.PrinterConfig.__new__(configfile.PrinterConfig)
     loader.printer = None
@@ -91,16 +108,35 @@ def read_printer_config(cfg_path: Path):
     else:
         extrude_only_velocity = extrude_only_accel = None
     max_jerk = printer.getfloat("max_jerk", max_accel * 2.0, minval=0.0)
-    return (
-        printer.getfloat("max_velocity", above=0.0),
-        max_accel,
-        printer.getfloat("square_corner_velocity", 5.0, minval=0.0),
-        max_jerk if max_jerk > 0.0 else float("inf"),
-        arc_fit_from_config(config),
-        extrude_only_velocity,
-        extrude_only_accel,
-        printer.getfloat("max_path_deviation", 0.005, above=0.0, maxval=1.0),
-        printer.getfloat("max_accel_deviation", 50.0, above=0.0),
+
+    # Same [axis]/[post_processor] parsing and validation a live printer goes
+    # through — motion_setup.read_axes/read_post_processors, not a
+    # reimplementation. They only need limit_sections preset (for a
+    # [limit]-references-undeclared-axis check this tool's cases never
+    # trigger, since cases don't declare [limit] sections).
+    stub = Motion.__new__(Motion)
+    stub.limit_sections = []
+    motion_setup.read_axes(stub, config)
+    motion_setup.read_post_processors(stub, config)
+
+    return PrinterConfigData(
+        max_velocity=printer.getfloat("max_velocity", above=0.0),
+        max_accel=max_accel,
+        square_corner_velocity=printer.getfloat(
+            "square_corner_velocity", 5.0, minval=0.0
+        ),
+        max_jerk=max_jerk if max_jerk > 0.0 else float("inf"),
+        arc_fit=arc_fit_from_config(config),
+        max_extrude_only_velocity=extrude_only_velocity,
+        max_extrude_only_accel=extrude_only_accel,
+        max_path_deviation=printer.getfloat(
+            "max_path_deviation", 0.005, above=0.0, maxval=1.0
+        ),
+        max_accel_deviation=printer.getfloat(
+            "max_accel_deviation", 50.0, above=0.0
+        ),
+        axis_sections=stub.axis_sections,
+        post_processor_sections=stub.post_processor_sections,
     )
 
 
@@ -645,17 +681,7 @@ def main():
     sys.path.insert(0, str(repo_root / "klippy"))
     sys.path.insert(0, str(repo_root))
 
-    (
-        max_velocity,
-        max_accel,
-        scv,
-        max_jerk,
-        arc_fit,
-        extrude_only_velocity,
-        extrude_only_accel,
-        max_path_deviation,
-        max_accel_deviation,
-    ) = read_printer_config(args.config)
+    cfg = read_printer_config(args.config)
 
     gcode_path = Path(args.gcode)
     if not gcode_path.exists():
@@ -664,7 +690,7 @@ def main():
         print(f"File not found: {args.gcode}", file=sys.stderr)
         sys.exit(1)
 
-    waypoints = parse_gcode(gcode_path, max_velocity)
+    waypoints = parse_gcode(gcode_path, cfg.max_velocity)
     if len(waypoints) < 2:
         print("No spatial moves found in G-code.", file=sys.stderr)
         sys.exit(1)
@@ -679,15 +705,17 @@ def main():
 
     snapshot = _motion_engine.pipeline_snapshot(
         waypoints,
-        max_velocity,
-        max_accel,
-        scv,
-        max_jerk,
-        arc_fit=arc_fit,
-        max_extrude_only_velocity=extrude_only_velocity,
-        max_extrude_only_accel=extrude_only_accel,
-        max_path_deviation=max_path_deviation,
-        max_accel_deviation=max_accel_deviation,
+        cfg.max_velocity,
+        cfg.max_accel,
+        cfg.square_corner_velocity,
+        cfg.max_jerk,
+        arc_fit=cfg.arc_fit,
+        max_extrude_only_velocity=cfg.max_extrude_only_velocity,
+        max_extrude_only_accel=cfg.max_extrude_only_accel,
+        max_path_deviation=cfg.max_path_deviation,
+        max_accel_deviation=cfg.max_accel_deviation,
+        axes=cfg.axis_sections,
+        post_processors=cfg.post_processor_sections,
     )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -696,7 +724,7 @@ def main():
 
     print(
         f"{out_file}\n"
-        f"  v={max_velocity} a={max_accel} scv={scv}  "
+        f"  v={cfg.max_velocity} a={cfg.max_accel} scv={cfg.square_corner_velocity}  "
         f"t={snapshot['traversal_time_s']:.3f}s"
     )
 

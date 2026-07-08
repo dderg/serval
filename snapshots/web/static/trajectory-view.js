@@ -307,49 +307,10 @@ class PanelRenderer {
     }
     bctx.stroke();
 
-    // The executed (post-lowered) toolhead path -- the same dense quintic samples the
-    // velocity/accel/jerk panels are derived from, so the path is the same stage as
-    // every graph beside it. The line/arc/clothoid label exists only in the fitted
-    // (pre-lowering) geometry; the executed samples are all cubics. Borrow each
-    // segment's label but place the color seam at the executed sample nearest that
-    // segment's geometric endpoint -- exact, not an arc-length-fraction guess.
-    const segCount = DATA.segment_count();
-    const kx = DATA.kin_x(), ky = DATA.kin_y();
-    if (kx.length > 1 && segCount > 0) {
-      // Search forward only, so a self-crossing path can't snap a later seam back.
-      const segEndIdx = new Array(segCount);
-      let from = 0;
-      for (let s = 0; s < segCount; s++) {
-        const d = DATA.segment_data(s);
-        const line = DATA.segment_type(s) === "line";
-        const ex = line ? d[2] : d[d.length - 2];
-        const ey = line ? d[3] : d[d.length - 1];
-        let best = from, bd = Infinity;
-        for (let i = from; i < kx.length; i++) {
-          const dx = kx[i] - ex, dy = ky[i] - ey;
-          const dd = dx * dx + dy * dy;
-          if (dd < bd) { bd = dd; best = i; }
-        }
-        segEndIdx[s] = best;
-        from = best;
-      }
-      segEndIdx[segCount - 1] = kx.length - 1;
-
-      let segIdx = 0, curColor = null;
-      bctx.lineWidth = 1.2;
-      for (let i = 1; i < kx.length; i++) {
-        while (segIdx < segCount - 1 && i > segEndIdx[segIdx]) segIdx++;
-        const color = COLORS[DATA.segment_type(segIdx)] || COLORS.line;
-        if (color !== curColor) {
-          if (curColor !== null) bctx.stroke();
-          bctx.beginPath();
-          bctx.strokeStyle = color;
-          bctx.moveTo(this.toPixelX(kx[i - 1], xMin, xMax), this.toPixelY(ky[i - 1], yMin, yMax));
-          curColor = color;
-        }
-        bctx.lineTo(this.toPixelX(kx[i], xMin, xMax), this.toPixelY(ky[i], yMin, yMax));
-      }
-      if (curColor !== null) bctx.stroke();
+    if (this.view.showFittedPath) {
+      this._strokeFittedSegments(bctx, DATA, xMin, xMax, yMin, yMax);
+    } else {
+      this._strokeShapedPath(bctx, DATA, xMin, xMax, yMin, yMax);
     }
 
     if (rawX.length > 0) {
@@ -363,6 +324,73 @@ class PanelRenderer {
       bctx.fill();
     }
     bctx.restore();
+  }
+
+  // The executed (post-lowered, post-shaper) toolhead path -- the same dense
+  // samples the velocity/accel/jerk panels are derived from, so this is the
+  // same stage as every graph beside it. The line/arc/clothoid label exists
+  // only in the fitted (pre-lowering) geometry; borrow each segment's label
+  // but place the color seam at the executed sample nearest that segment's
+  // geometric endpoint -- exact, not an arc-length-fraction guess.
+  _strokeShapedPath(bctx, DATA, xMin, xMax, yMin, yMax) {
+    const segCount = DATA.segment_count();
+    const kx = DATA.kin_x(), ky = DATA.kin_y();
+    if (kx.length <= 1 || segCount === 0) return;
+    // Search forward only, so a self-crossing path can't snap a later seam back.
+    const segEndIdx = new Array(segCount);
+    let from = 0;
+    for (let s = 0; s < segCount; s++) {
+      const d = DATA.segment_data(s);
+      const line = DATA.segment_type(s) === "line";
+      const ex = line ? d[2] : d[d.length - 2];
+      const ey = line ? d[3] : d[d.length - 1];
+      let best = from, bd = Infinity;
+      for (let i = from; i < kx.length; i++) {
+        const dx = kx[i] - ex, dy = ky[i] - ey;
+        const dd = dx * dx + dy * dy;
+        if (dd < bd) { bd = dd; best = i; }
+      }
+      segEndIdx[s] = best;
+      from = best;
+    }
+    segEndIdx[segCount - 1] = kx.length - 1;
+
+    let segIdx = 0, curColor = null;
+    bctx.lineWidth = 1.2;
+    for (let i = 1; i < kx.length; i++) {
+      while (segIdx < segCount - 1 && i > segEndIdx[segIdx]) segIdx++;
+      const color = COLORS[DATA.segment_type(segIdx)] || COLORS.line;
+      if (color !== curColor) {
+        if (curColor !== null) bctx.stroke();
+        bctx.beginPath();
+        bctx.strokeStyle = color;
+        bctx.moveTo(this.toPixelX(kx[i - 1], xMin, xMax), this.toPixelY(ky[i - 1], yMin, yMax));
+        curColor = color;
+      }
+      bctx.lineTo(this.toPixelX(kx[i], xMin, xMax), this.toPixelY(ky[i], yMin, yMax));
+    }
+    if (curColor !== null) bctx.stroke();
+  }
+
+  // The fitter's own spatial geometry, before lowering or shaping touch it --
+  // each segment's own recorded points (line endpoints; arc/clothoid
+  // pre-sampled point arrays), drawn directly. No matching against another
+  // sample grid needed, unlike the shaped view.
+  _strokeFittedSegments(bctx, DATA, xMin, xMax, yMin, yMax) {
+    const segCount = DATA.segment_count();
+    bctx.lineWidth = 1.2;
+    for (let s = 0; s < segCount; s++) {
+      const d = DATA.segment_data(s);
+      const color = COLORS[DATA.segment_type(s)] || COLORS.line;
+      bctx.beginPath();
+      bctx.strokeStyle = color;
+      for (let i = 0; i < d.length; i += 2) {
+        const px = this.toPixelX(d[i], xMin, xMax);
+        const py = this.toPixelY(d[i + 1], yMin, yMax);
+        i === 0 ? bctx.moveTo(px, py) : bctx.lineTo(px, py);
+      }
+      bctx.stroke();
+    }
   }
 
   _strokeSeries(bctx, t, valueAt, tMin, tMax, yMin, yMax) {
@@ -606,6 +634,7 @@ export class TrajectoryView {
     this.hoverMode = null; // "time" | "path" | null
     this.hoverXY = null; // { x, y } cursor position when hoverMode === "path"
     this.showPeaks = false;
+    this.showFittedPath = false;
     this.wheelTimer = null; // suppresses mousemove during trackpad gestures
     this.tooltipEl = document.getElementById("tooltip");
     this.readoutEl = document.getElementById("readout");
@@ -846,7 +875,7 @@ export class TrajectoryView {
       .map(([k, v]) => `${k}:${[...v].join("+")}`)
       .join(";");
     const key = `${tMin},${tMax},${xMin},${xMax},${yMin},${yMax},` +
-      `${vel.leftMax},${acc.leftMax},${jrk.leftMax},${hiddenKey},${this.variant}`;
+      `${vel.leftMax},${acc.leftMax},${jrk.leftMax},${hiddenKey},${this.variant},${this.showFittedPath}`;
     if (key !== this.lastBoundsKey) {
       this.lastBoundsKey = key;
 
@@ -1155,6 +1184,12 @@ export class TrajectoryView {
 
   setShowPeaks(on) {
     this.showPeaks = on;
+    this.lastBoundsKey = "";
+    this.renderAll();
+  }
+
+  setShowFittedPath(on) {
+    this.showFittedPath = on;
     this.lastBoundsKey = "";
     this.renderAll();
   }

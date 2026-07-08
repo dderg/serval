@@ -64,13 +64,24 @@ ignore = [
 ]
 
 [tool.pytest.ini_options]
-pythonpath = [".", "klippy"]
+pythonpath = [".", "klippy", "scripts"]
 # NOTE: tools/ is deliberately NOT in testpaths. The CI-able sim unit
 # subset is run via an explicit path + marker selection (see
 # `scripts/ci.sh sim`), so widening testpaths here would sweep in the
 # ELF/hardware tests that must not run in CI. The full-stack sim e2e
 # suite runs via `tools/sim/run.sh test` (Docker).
-testpaths = ["test", "tests"]
+# scripts/ and snapshots/ are listed as explicit files, not whole
+# directories: scripts/ also holds scripts/test_klippy.py (a legacy
+# optparse-based CLI runner, not a pytest module) and
+# scripts/fitter_prototype/tests/ (an unrelated prototype tool's own
+# test suite), neither of which should be swept into this job.
+testpaths = [
+  "test",
+  "tests",
+  "scripts/test_viz_pipeline.py",
+  "snapshots/test_harness.py",
+  "snapshots/test_viz_pipeline.py",
+]
 markers = [
   "sim_unit: in-process sim unit/contract test (CI-able, no ELF/hardware)",
   "needs_elf: requires the built MACH_LINUX sim ELFs (tools/sim)",
