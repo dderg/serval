@@ -51,6 +51,10 @@ impl PyMotionEngine {
 
         self.quiesce_pump_and_drain(py)?;
 
+        // home_drip resets the planner odometer to home_pos with extruder=0;
+        // the seed zeroes the MCU extruder counters to match.
+        self.send_serial_position_seeds(start_pos[0], start_pos[1], start_pos[2])?;
+
         let window_start_host = {
             let router = self.router.lock_ok();
             router.host_now_secs()
