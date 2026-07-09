@@ -39,6 +39,7 @@ const PANELS = [
   { canvasId: "canvas-vel", type: "vel" },
   { canvasId: "canvas-acc", type: "acc" },
   { canvasId: "canvas-jrk", type: "jrk" },
+  { canvasId: "canvas-kappa", type: "kappa" },
 ];
 
 // Tooltip wording for the derivative-discontinuity impulses drawn on the
@@ -458,7 +459,7 @@ class PanelRenderer {
       const scalar = scalarEntry.arr;
       bctx.strokeStyle = scalarEntry.color;
       bctx.lineWidth = 1.2;
-      this._strokeSeries(bctx, t, (i) => scalar[i], tMin, tMax, yMin, yMax);
+      this._strokeSeries(bctx, t, (i) => Math.abs(scalar[i]), tMin, tMax, yMin, yMax);
 
       if (drawPeaks) {
         const peaks = findPeaks(scalar);
@@ -727,6 +728,7 @@ export class TrajectoryView {
     const v = this.data.v_scalar()[idx];
     const a = this.data.a_scalar()[idx];
     const j = this.data.j_scalar()[idx];
+    const kappa = this.data.kappa()[idx];
     const aTang = this.data.a_tang()[idx];
     const aCent = this.data.a_cent()[idx];
     const vz = this.data.vz(), ve = this.data.ve();
@@ -744,7 +746,8 @@ export class TrajectoryView {
       `<span class="r">a=${formatNum(a)}</span>` +
       `<span class="g">a∥=${formatNum(aTang)}</span>` +
       `<span class="g">a⊥=${formatNum(aCent)}</span>` +
-      `<span class="g">j=${formatNum(j)}</span>`;
+      `<span class="g">j=${formatNum(j)}</span>` +
+      `<span class="g">κ=${formatNum(kappa)}</span>`;
   }
 
   // -- Synced hover ------------------------------------------------------------
@@ -875,26 +878,31 @@ export class TrajectoryView {
     const velSeries = this._panelSeries("vel", "vx", "vy", "vz", "ve", null, null, "v_scalar");
     const accSeries = this._panelSeries("acc", "ax", "ay", "az", "ae", "a_tang", "a_cent", "a_scalar");
     const jrkSeries = this._panelSeries("jrk", "jx", "jy", "jz", "je", "j_tang", "j_cent", "j_scalar");
+    const kappaSeries = [{ key: "kappa", color: COLORS.kappa, label: "κ", scalar: true, hidden: false }];
+    kappaSeries[0].arr = this.data.kappa();
     const vel = scaleSeries(velSeries);
     const acc = scaleSeries(accSeries);
     const jrk = scaleSeries(jrkSeries);
+    const kappa = scaleSeries(kappaSeries);
 
     const hiddenKey = Object.entries(this.hiddenSeries)
       .map(([k, v]) => `${k}:${[...v].join("+")}`)
       .join(";");
     const key = `${tMin},${tMax},${xMin},${xMax},${yMin},${yMax},` +
-      `${vel.leftMax},${acc.leftMax},${jrk.leftMax},${hiddenKey},${this.variant},${this.showFittedPath}`;
+      `${vel.leftMax},${acc.leftMax},${jrk.leftMax},${kappa.leftMax},${hiddenKey},${this.variant},${this.showFittedPath}`;
     if (key !== this.lastBoundsKey) {
       this.lastBoundsKey = key;
 
       this._updateLegend("vel", "Velocity", velSeries);
       this._updateLegend("acc", "Acceleration", accSeries);
       this._updateLegend("jrk", "Jerk", jrkSeries);
+      this._updateLegend("kappa", "Curvature", kappaSeries);
 
       this.renderers[0].renderPathBuffer(xMin, xMax, yMin, yMax);
       this.renderers[1].renderTimeBuffer(tMin, tMax, 0, vel.leftMax, vel.shown, this.showPeaks);
       this.renderers[2].renderTimeBuffer(tMin, tMax, 0, acc.leftMax, acc.shown, this.showPeaks);
       this.renderers[3].renderTimeBuffer(tMin, tMax, 0, jrk.leftMax, jrk.shown, this.showPeaks);
+      this.renderers[4].renderTimeBuffer(tMin, tMax, 0, kappa.leftMax, kappa.shown, this.showPeaks);
 
       const DATA = this.data;
       const drawImpulsesOn = (renderer, times, mags) => {
