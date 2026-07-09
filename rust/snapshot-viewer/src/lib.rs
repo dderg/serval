@@ -327,7 +327,14 @@ fn curvature_series(
         dkappa_ds[i] = dk_dt / speed;
     }
 
-    let mut window_class = vec![CurvatureClass::Zero; n];
+    // Classify per window first (one entry per window, NOT expanded to
+    // per-sample) so smooth_classes's neighbor comparison actually compares
+    // adjacent WINDOWS. Expanding to per-sample before smoothing would make
+    // every non-boundary sample its own "neighbor" by construction (they're
+    // all the same repeated value within a window), so the despike pass
+    // would never find anything to despike.
+    let mut window_starts: Vec<usize> = Vec::new();
+    let mut window_classes: Vec<CurvatureClass> = Vec::new();
     let mut i = 0;
     while i < n {
         let end = (i + CLASSIFY_WINDOW_SAMPLES).min(n);
@@ -339,13 +346,19 @@ fn curvature_series(
             let dk: Vec<f64> = idxs.iter().map(|&j| dkappa_ds[j]).collect();
             classify_window(&k, &dk)
         };
-        for slot in window_class.iter_mut().take(end).skip(i) {
-            *slot = cls;
-        }
+        window_starts.push(i);
+        window_classes.push(cls);
         i = end;
     }
-    let smoothed = smooth_classes(&window_class);
-    let classes = (0..n).map(|i| flag[i].unwrap_or(smoothed[i])).collect();
+    let smoothed_windows = smooth_classes(&window_classes);
+
+    let mut classes = vec![CurvatureClass::Zero; n];
+    for (w, &start) in window_starts.iter().enumerate() {
+        let end = window_starts.get(w + 1).copied().unwrap_or(n);
+        for j in start..end {
+            classes[j] = flag[j].unwrap_or(smoothed_windows[w]);
+        }
+    }
     (kappa, classes)
 }
 

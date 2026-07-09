@@ -306,3 +306,57 @@ fn curvature_series_flags_gap_samples_and_classifies_the_rest() {
     assert_eq!(classes[3], CurvatureClass::Zero); // t=2.0, in piece 1
     assert_eq!(classes[4], CurvatureClass::Zero); // t=2.5, in piece 1
 }
+
+#[test]
+fn curvature_series_handles_multiple_windows_all_zero() {
+    // 50 samples span 3 windows (24 + 24 + 2, since CLASSIFY_WINDOW_SAMPLES
+    // = 24): two full windows plus a trailing partial one. A single
+    // constant-velocity piece covering the whole domain is dead straight
+    // throughout, so every sample -- in every window -- must classify Zero.
+    // This is an end-to-end check that the per-window classify -> smooth ->
+    // per-sample expand restructuring doesn't corrupt indices or drop
+    // samples across a multi-window trajectory.
+    let dt = 0.02;
+    let t: Vec<f64> = (0..50).map(|i| i as f64 * dt).collect();
+    let xp = vec![vec![0.0, 1.0, 0.0, 2.5]];
+    let yp = vec![vec![0.0, 1.0, 0.0, 0.0]];
+    let (_, classes) = curvature_series(&t, &xp, &yp);
+    assert_eq!(classes.len(), 50);
+    assert!(classes.iter().all(|&c| c == CurvatureClass::Zero));
+}
+
+#[test]
+fn curvature_series_despikes_an_isolated_curved_window_across_multiple_windows() {
+    // Same 24+24+2 window layout as above, but the middle window (samples
+    // 24..48) carries real curvature: constant y-acceleration bends the
+    // heading for exactly one window's worth of samples, flanked by a
+    // straight run before and after. The middle window's kappa is well
+    // above KAPPA_ZERO_EPS throughout, so in isolation it would NOT
+    // classify as Zero -- but flanked by two Zero windows that agree with
+    // each other, smooth_classes must fold it back to Zero. Under the
+    // pre-fix bug (smoothing a per-sample-expanded array, where every
+    // sample in a 24-sample run is identical to its neighbor by
+    // construction) a run this wide could never be despiked at all.
+    let dt = 0.02;
+    let t: Vec<f64> = (0..50).map(|i| i as f64 * dt).collect();
+    let vx = 10.0;
+    let ay = 5.0;
+    let xp = vec![
+        vec![0.0, 0.48, 0.0, vx],
+        vec![0.48, 0.96, 0.48 * vx, vx],
+        vec![0.96, 1.0, 0.96 * vx, vx],
+    ];
+    let yp = vec![
+        vec![0.0, 0.48, 0.0, 0.0],
+        vec![0.48, 0.96, 0.0, 0.0, 0.5 * ay],
+        vec![0.96, 1.0, 0.5 * ay * 0.48 * 0.48, ay * 0.48],
+    ];
+    let (kappa, classes) = curvature_series(&t, &xp, &yp);
+
+    // Sanity: the middle window really does carry measurable curvature
+    // that smoothing would have to actively fold away.
+    assert!(kappa[24..48].iter().all(|k| k.abs() > KAPPA_ZERO_EPS));
+
+    assert_eq!(classes.len(), 50);
+    assert!(classes.iter().all(|&c| c == CurvatureClass::Zero));
+}
