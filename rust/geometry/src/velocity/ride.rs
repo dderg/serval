@@ -468,11 +468,16 @@ fn ride_step(
         *mode = Mode::Flight;
         return false;
     }
-    if track.cap_a[cell] < -(rail + rel_eps(rail)) {
+    // A cell whose chord descends faster than the rail is infeasible from
+    // everywhere within it — no departure point exists, so the kink lookahead
+    // below would only degenerate its bisect onto the current position. Cross
+    // it as the chord it is, marked infeasible.
+    let super_rail_descent = track.cap_a[cell] < -(rail + rel_eps(rail));
+    if super_rail_descent {
         feasible[i] = false;
     }
     // Kink lookahead: leaving from the next node must still be feasible.
-    if !assume_feasible && !peel_feasible(g, next_state) {
+    if !super_rail_descent && !assume_feasible && !peel_feasible(g, next_state) {
         // Departure point within this cell: latest cap state that can still
         // peel tangentially under the kink.
         let (mut lo, mut hi) = (st.s, track.s[i]);
