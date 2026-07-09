@@ -14,7 +14,11 @@ const GRID_DEDUP_EPS_S: f64 = 1e-12;
 const SPAN_MIN_LEN_MM: f64 = 1e-12;
 const SPAN_LOOKUP_SLACK_MM: f64 = 1e-6;
 
-/// Rebuild every projected-follower track from its leaders' *shaped* motion.
+/// Rebuild every projected-follower track from its leaders' *toolhead*
+/// motion: the kernel-convolved signal, before any trailing derivative-gain
+/// stage. Trailing gains shape the motor command (a mode-inverse
+/// counter-drive), which the physical toolhead — the thing the follower must
+/// track — does not perform; the shaper applies them only after projection.
 ///
 /// The raw move stream defines an extrusion-per-path-distance profile: each
 /// spatial segment contributes a span of raw arc length carrying its follower

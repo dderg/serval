@@ -1157,6 +1157,80 @@ fn extrude_only_move_passes_through_the_projection() {
     );
 }
 
+fn xy_follower_chains_with_optional_inverse(smooth_time: f64, with_inverse: bool) -> AxisChainSet {
+    let spatial = |name: &str| {
+        let mut instances = vec![PostProcessorInstance::new(
+            name,
+            &trajectory::algos::SmoothBell,
+            vec![smooth_time],
+        )];
+        if with_inverse {
+            instances.push(PostProcessorInstance::new(
+                "mi",
+                &trajectory::algos::ModeInverse,
+                vec![130.0, 0.1],
+            ));
+        }
+        trajectory::CompiledChain::compile(&instances).expect("bell + mode_inverse compiles")
+    };
+    AxisChainSet {
+        chains: vec![
+            spatial("is_x"),
+            spatial("is_y"),
+            trajectory::CompiledChain::default(),
+            e_chain(Some(0.03), 0.02),
+        ],
+        followers: vec![(3, vec![0, 1, 2])],
+    }
+}
+
+/// A trailing mode-inverse stage produces the motor command; the physical
+/// toolhead tracks the kernel output, and the follower must ride the
+/// toolhead. Adding the inverse to the leaders therefore must not change the
+/// extruder track at all — while visibly changing the leaders' own output.
+#[test]
+fn follower_projects_onto_toolhead_signal_not_motor_command() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [20.0, 0.0, 0.0], 1.0),
+        line(2, [20.0, 0.0, 0.0], [20.0, 20.0, 0.0], 2.0),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let plain = replay(
+        cfg(),
+        xy_follower_chains_with_optional_inverse(0.02, false),
+        &home,
+        0.0,
+        &moves,
+    );
+    let inverted = replay(
+        cfg(),
+        xy_follower_chains_with_optional_inverse(0.02, true),
+        &home,
+        0.0,
+        &moves,
+    );
+    assert_eq!(plain.len(), inverted.len());
+    let mut max_e_diff: f64 = 0.0;
+    let mut max_x_diff: f64 = 0.0;
+    for (p, q) in plain.iter().zip(&inverted) {
+        for i in 0..=100 {
+            let t = p.t_start + (p.t_end - p.t_start) * f64::from(i) / 100.0;
+            max_e_diff = max_e_diff.max((eval(&p.axes[3], t) - eval(&q.axes[3], t)).abs());
+            max_x_diff = max_x_diff.max((eval(&p.axes[0], t) - eval(&q.axes[0], t)).abs());
+        }
+    }
+    assert!(
+        max_e_diff < 1e-9,
+        "extruder must ride the toolhead signal, unchanged by the leader's \
+         motor-side inverse; diff = {max_e_diff}"
+    );
+    assert!(
+        max_x_diff > 1e-3,
+        "sanity: the inverse must visibly counter-drive the leader itself; \
+         diff = {max_x_diff}"
+    );
+}
+
 fn e_chain(k: Option<f64>, e_smooth_time: f64) -> trajectory::CompiledChain {
     let mut instances = Vec::new();
     if let Some(k) = k {

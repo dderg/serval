@@ -298,10 +298,31 @@ fn apply_axis_chains(
     }
     project_followers(base, &mut out, commit_count, force, chains, follower_states)?;
     out.truncate(commit_count);
+    apply_motor_side_stages(&mut out, chains, &default_chain);
     for seg in &mut out {
         pad_segment_axes_to_uniform_degree(seg);
     }
     Ok(out)
+}
+
+/// Trailing derivative-gain stages produce the motor command (e.g. a
+/// mode-inverse counter-drive), which the physical toolhead does not follow —
+/// that is their entire purpose. They are therefore applied only after the
+/// followers have projected onto the toolhead signal.
+fn apply_motor_side_stages(
+    out: &mut [ShapedSegment],
+    chains: &AxisChainSet,
+    default_chain: &CompiledChain,
+) {
+    for seg in out.iter_mut() {
+        for axis in 0..seg.axes.len() {
+            if chains.is_projected_follower(axis) {
+                continue;
+            }
+            let chain = chains.chains.get(axis).unwrap_or(default_chain);
+            seg.axes[axis] = apply_trailing_zero_support(chain, seg.axes[axis].clone());
+        }
+    }
 }
 
 /// Refit tracks can come out at different degrees per axis; the kinematics
@@ -374,8 +395,7 @@ fn apply_axis_chain(
             },
             input_breaks.clone(),
         );
-        let shaped = fit_axis_from_signal(axis, &seg.axes[axis], &sig)?;
-        seg.axes[axis] = apply_trailing_zero_support(chain, shaped);
+        seg.axes[axis] = fit_axis_from_signal(axis, &seg.axes[axis], &sig)?;
         if !seg.axes[axis]
             .control_points()
             .iter()
