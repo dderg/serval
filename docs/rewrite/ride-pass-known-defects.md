@@ -4,10 +4,8 @@ Status as of 2026-07-09, from the fuzz/audit investigation (see
 `rust/pipeline-snapshot/src/audit.rs` and the pinned `#[ignore]` regressions
 in `rust/pipeline-snapshot/tests/planner_fuzz.rs`). Shipped so far:
 chord-sag splice tolerance (commit 737d3e2bb), the stall fixes (defect 3),
-and the super-rail lookahead guard (defect 2). The rest below are diagnosed,
-reproducible, and deliberately not patched piecemeal — each attempted local
-fix destabilized another part of the integrator, so they need one designed
-treatment.
+the super-rail lookahead guard (defect 2), and the wall-aware ride pass
+(defect 1).
 
 ## Shipped
 
@@ -46,41 +44,72 @@ one snapshot changed (`neptune_cube/printer/discontinuity`) — a single wall
 crossing at t≈5.197 s re-tiles into one extra piece with seam metrics
 unchanged and a rigid ~0.27 µs downstream time shift.
 
+**Cap walls no longer ride as chords** (was defect 1). A *wall* is a cell
+whose chord brake slope is unreachable at the speeds the cap holds
+(`slope²/2j > cap_v` — the sampled shadow of a velocity step), within the
+accel rail (super-rail cells keep the defect-2 chord treatment). Walls now
+get anchored handling in `ride::reach_pass`:
+
+- **Descending walls** are taken by a bang-bang boundary-value brake
+  (jerk-down / hold / jerk-up, `brake_bvp`) that departs at the latest
+  feasible point (the trigger oracle *is* BVP solvability, so the feasible
+  region ends exactly where the anchored brake stops fitting) and arrives at
+  the wall run's end node with exactly its cap value and the following
+  chord's slope. Wall chords themselves constrain nothing; the profile owes
+  only the step's bottom at its node — the same "discretization error never
+  enters the emitted chain" idea as the disk integrator's anchored landings
+  (PR #225). Walls that don't bind (current speed already under the bottom)
+  are ignored; an unsolvable BVP (no room) falls back to the marching peel.
+- **Ascending walls** detach to Flight (`cap_a[cell] > st.a + j·dt`), and
+  Flight's direct cap landing now refuses to land where the local slope is
+  not jerk-reachable from the arc's own acceleration — landing at a wall
+  foot used to snap `a` onto the wall chord, recreating the staircase the
+  detach avoided.
+- **Super-rail chord crossings no longer poison the state**: the arrival
+  state after an infeasible chord resumes from the slope the cap ahead
+  commands instead of carrying the rail-clamped wall chord — the jerk
+  recovery from `a = −rail` used to shed more speed than the profile held,
+  collapsing it to near rest (the `v → 0.0077` dip that produced negative
+  lowering quintics).
+- **Splices now also fire when a binding stretch begins mid-ride** (the
+  previous stretch ending at an infeasible node left no mode transition to
+  hang the splice on), so brake-to-rest tails adopt the envelope's exact
+  chain instead of chord-riding it into an early stall.
+
+Effects: both defect-1 window-escape pins that were fixable this way pass
+(`feed_drop_with_z_step_escapes_profile_window` un-ignored;
+`planar_micro_move_decel` still green), the previously-failing wall shapes
+are pinned as regression tests in `ride/tests.rs`
+(`jerk_wall_is_taken_by_an_anchored_brake`,
+`mesa_step_up_then_drop_keeps_the_chain_complete`,
+`ascending_wall_detaches_to_flight`), the whole suite and a 5000-case
+`hard_invariants_hold` run are green, and 9 snapshots changed — the only
+material seam-metric delta is `neptune_cube/fast/discontinuity`, where
+`seam_max_da[1]` drops 3.19 → 0.38 (8× lower worst seam accel step).
+`z_step_then_micro_reversal_escapes_profile_window` still fails — it is the
+tiny-scv family (see "Not the ride pass"), not a wall case.
+
 ## Open defects
 
-### 1. Cap walls ride as chords (accel staircase, the z-step pins)
+### 1. ~~Cap walls ride as chords~~ — fixed, see Shipped
 
-`ride_step` detaches to Flight only when the cell's cap chord exceeds the
-accel *rail*. A cap step-up within the rail (e.g. the backward pass climbing
-a seam wall from cap 1 to 20.5: chord +22147 under rail 33143) rides as a
-single `j = 0` chord phase — an instantaneous accel staircase the jerk limit
-forbids, which poisons the brake chain, produces kinematically impossible
-`(v, a)` sample pairs at seams, and drives the lowering quintic out of its
-position window (`feed_drop_with_z_step_escapes_profile_window`,
-`z_step_then_micro_reversal_escapes_profile_window`).
-
-The naive fix — detach when `cap_a[cell] > st.a + j·dt` — is correct in
-direction but was blocked by defects 2 and 3, both now shipped. Re-tested
-with the naive detach scratch-applied on top of the defect-2 guard
-(2026-07-09): no storms or hangs anywhere anymore, and
-`feed_drop_with_z_step_escapes_profile_window` passes, but it is still not
-landable as-is — `z_step_then_micro_reversal_escapes_profile_window` keeps
-failing (window escape at a different point), two `reach_pass` wall shapes
-lose chain completeness (a step-up wall followed by a wall drop, and a
-curved wall under low jerk), and the seed-pinned `hard_invariants_hold`
-finds a fresh lowering failure (`quintic profile velocity below zero`,
-minimal input: two collinear planar moves, 0.0025 mm at feed 5.6 then 1 mm
-at feed 437.6, scv 0, accel 33778, jerk 832727).
+Kept for numbering continuity. Known residual gaps of the wall treatment,
+none currently failing a test: the oracle only checks the *first* binding
+wall ahead (two walls closer together than the second one's brake distance
+would fall back to the marching peel), and `brake_bvp` bounds its hold at
+the rail sampled at the departure and anchor states, so a strongly curved
+wall stretch could over-promise mid-maneuver.
 
 ### 2. ~~Peel against super-rail descents makes zero progress~~ — fixed, see Shipped
 
 ### 3. ~~Stalled states integrate backwards~~ — fixed, see Shipped
 
 Kept for numbering continuity. Note the rest-event path deliberately does
-not fail loudly: stalls under a real cap still occur when 1/2-style
-overbraking drives the profile to rest, and hard-failing there breaks
-currently-green cases. Once 1 is fixed, tighten the rest event into
-an assert.
+not fail loudly: stalls under a real cap can still occur (the BVP fallback
+to marching peel when a wall leaves no room, tiny-scv notches), and
+hard-failing there breaks currently-green cases. With 1 fixed, tightening
+the rest event into an assert is worth re-probing — run the fuzz tiers with
+a temporary panic there to census the remaining stall sources first.
 
 ### 4. Chord smear at splice joints (residual X/Y seam accel ≤ ~22 mm/s²)
 
@@ -91,11 +120,13 @@ envelope-bound cells from the brake chain itself (per-cell Hermite of
 O(ds⁴) through jerk swings, one Horner per lookup). Mathematically right,
 but it shifts peel/land/trigger placement enough to excite 2 and 3, and the
 integrator's tolerances (`TRIGGER_BISECT_ITERS`, snap bands, span merging)
-are tuned against the chord representation. Do this only together with 1–3.
+are tuned against the chord representation. 1–3 are now fixed, so this is
+unblocked — re-attempt on top of the wall-aware pass.
 
 ## Suggested order
 
-3 and 2 are done; next 1, then 4. Verify each against: `cargo nextest run -p pipeline-snapshot`
+1, 2 and 3 are done; next 4, then the defect-3 rest-event assert.
+Verify each against: `cargo nextest run -p pipeline-snapshot`
 (seed-pinned fuzz corpus), the `#[ignore]`d pins with `--run-ignored all`,
 large-`PROPTEST_CASES` runs of `target_budgets_hold`, and the snapshot
 suite's `seam_max_da`/`worst_seams` deltas.

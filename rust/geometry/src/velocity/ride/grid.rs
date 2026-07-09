@@ -7,6 +7,14 @@ const KAPPA_EPS: f64 = 1e-12;
 pub(super) struct Grid<'a> {
     pub(super) t: &'a Track<'a>,
     cap_range_min: Vec<f64>,
+    /// Per cell: the chord's brake slope is unreachable at the speeds the
+    /// cap holds (`slope²/2j` exceeds the cap), while staying within the
+    /// accel rail (super-rail descents keep their chord-crossing treatment).
+    /// No tangent landing exists on such a chord — the committed brake
+    /// anchors on the descent's end node instead.
+    wall_cont: Vec<bool>,
+    /// Per cell: first wall cell at or after it (`usize::MAX` if none).
+    next_wall_cell: Vec<usize>,
     /// Per cell: the last cell of its maximal uniform span — contiguous
     /// straight cells sharing one accel budget and one cap slope-accel (to
     /// integration noise). Flat cruise and constant-decel envelope stretches
@@ -38,11 +46,47 @@ impl<'a> Grid<'a> {
                 && t.accel[c + 1] == t.accel[c + 2];
             span_last[c] = if mergeable { span_last[c + 1] } else { c };
         }
+        let mut wall_cont = vec![false; cells];
+        let mut next_wall_cell = vec![usize::MAX; cells];
+        let mut nw = usize::MAX;
+        for c in (0..cells).rev() {
+            let rail_top = disk_rail_accel(t.accel[c], t.kappa[c], t.cap_v[c]);
+            let super_rail = t.cap_a[c] < -rail_top;
+            // Tangency on this chord needs the brake to reach the chord's
+            // slope, which sheds `slope²/2j` of speed getting there; a chord
+            // demanding more speed than the cap even holds is the sampled
+            // shadow of a velocity step — no tangent landing exists on it.
+            let unreachable_slope =
+                t.cap_a[c] < 0.0 && t.cap_a[c] * t.cap_a[c] > 2.0 * t.j_max * t.cap_v[c];
+            wall_cont[c] = !super_rail && unreachable_slope;
+            if wall_cont[c] {
+                nw = c;
+            }
+            next_wall_cell[c] = nw;
+        }
         Self {
             t,
             cap_range_min,
+            wall_cont,
+            next_wall_cell,
             span_last,
         }
+    }
+
+    /// First wall-run start at or after cell `c`.
+    pub(super) fn next_wall(&self, c: usize) -> Option<usize> {
+        let w = self.next_wall_cell[c.min(self.next_wall_cell.len() - 1)];
+        (w != usize::MAX).then_some(w)
+    }
+
+    /// First node past the contiguous unlandable descent starting at `w` —
+    /// the anchor node for the committed wall brake.
+    pub(super) fn wall_run_end(&self, w: usize) -> usize {
+        let mut k = w;
+        while k + 1 < self.wall_cont.len() && self.wall_cont[k + 1] {
+            k += 1;
+        }
+        k + 1
     }
 
     pub(super) fn n(&self) -> usize {
