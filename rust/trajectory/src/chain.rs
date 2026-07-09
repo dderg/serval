@@ -189,19 +189,87 @@ impl AxisChainSet {
         self.chains.len()
     }
 
+    /// Follower axes that ride on at least one leader: their tracks are not
+    /// convolved with their own kernel but re-projected onto the leaders'
+    /// shaped motion by the shaper.
+    pub fn projected_followers(&self) -> impl Iterator<Item = (usize, &[usize])> {
+        self.followers
+            .iter()
+            .filter(|(_, leaders)| !leaders.is_empty())
+            .map(|(axis, leaders)| (*axis, leaders.as_slice()))
+    }
+
+    #[must_use]
+    pub fn is_projected_follower(&self, axis: usize) -> bool {
+        self.projected_followers().any(|(a, _)| a == axis)
+    }
+
+    /// The half-support of everything this axis's emitted track depends on.
+    /// A projected follower rides its leaders' shaped signal and then applies
+    /// its own chain on top, so the supports cascade: they add.
+    #[must_use]
+    pub fn axis_support(&self, axis: usize) -> (f64, f64) {
+        let (own_lo, own_hi) = self.chains[axis].max_half_support();
+        let (lead_lo, lead_hi) = self.leaders_support(axis);
+        (own_lo + lead_lo, own_hi + lead_hi)
+    }
+
+    /// The envelope of the leaders' kernel supports for a projected follower;
+    /// `(0, 0)` for every other axis.
+    #[must_use]
+    pub fn leaders_support(&self, axis: usize) -> (f64, f64) {
+        self.projected_followers()
+            .find(|(a, _)| *a == axis)
+            .map_or((0.0, 0.0), |(_, leaders)| {
+                leaders.iter().fold((0.0, 0.0), |(lo, hi), &l| {
+                    let (l_lo, l_hi) = self.chains[l].max_half_support();
+                    (lo.min(l_lo), hi.max(l_hi))
+                })
+            })
+    }
+
+    #[must_use]
+    pub fn has_own_kernel(&self, axis: usize) -> bool {
+        self.chains[axis]
+            .stages
+            .iter()
+            .any(|s| matches!(s, ChainStage::SmoothKernel(_)))
+    }
+
     #[must_use]
     pub fn forward_support(&self) -> f64 {
-        self.chains
-            .iter()
-            .map(|chain| chain.max_half_support().1)
+        (0..self.n_axes())
+            .map(|axis| self.axis_support(axis).1)
             .fold(0.0, f64::max)
     }
 
     #[must_use]
     pub fn back_support(&self) -> f64 {
-        self.chains
-            .iter()
-            .map(|chain| chain.max_half_support().0.abs())
+        (0..self.n_axes())
+            .map(|axis| self.axis_support(axis).0.abs())
+            .fold(0.0, f64::max)
+    }
+
+    /// The widest forward support among directly-convolved (non-follower)
+    /// axes: how far past a segment's end the raw stream must extend before
+    /// every such axis's shaped track — and therefore a follower's projection
+    /// onto them — is final over that segment.
+    #[must_use]
+    pub fn direct_forward_support(&self) -> f64 {
+        (0..self.n_axes())
+            .filter(|&axis| !self.is_projected_follower(axis))
+            .map(|axis| self.chains[axis].max_half_support().1)
+            .fold(0.0, f64::max)
+    }
+
+    /// The widest forward support any projected follower's own kernel needs
+    /// on top of the projection frontier before its convolution over a
+    /// segment is final.
+    #[must_use]
+    pub fn max_follower_own_forward_support(&self) -> f64 {
+        self.projected_followers()
+            .filter(|(axis, _)| self.has_own_kernel(*axis))
+            .map(|(axis, _)| self.chains[axis].max_half_support().1)
             .fold(0.0, f64::max)
     }
 }

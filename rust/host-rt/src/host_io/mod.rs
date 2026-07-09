@@ -693,6 +693,61 @@ impl McuHostIo {
             .map_err(|_| TransportError::Closed)
     }
 
+    pub fn send_args(
+        &self,
+        name: &str,
+        args: &[(String, crate::host_io::parser::ArgValue)],
+    ) -> Result<(), TransportError> {
+        let payload = self
+            .parser
+            .encode_args(name, args)
+            .map_err(|e| TransportError::Parse(format!("{name}: {e:?}")))?;
+        self.submission_tx
+            .send(ReactorCommand::FireAndForgetTyped { payload })
+            .map_err(|_| TransportError::Closed)
+    }
+
+    pub fn call_args(
+        &self,
+        name: &str,
+        args: &[(String, crate::host_io::parser::ArgValue)],
+        expected_response_name: &str,
+        timeout: Duration,
+    ) -> Result<MessageParams, TransportError> {
+        let payload = self
+            .parser
+            .encode_args(name, args)
+            .map_err(|e| TransportError::Parse(format!("{name}: {e:?}")))?;
+
+        let call_id = self.next_call_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let deadline = self.clock.now() + timeout;
+
+        self.submission_tx
+            .send(ReactorCommand::SubmitTyped {
+                call_id,
+                payload,
+                expected_response_name: expected_response_name.to_string(),
+                completion: tx,
+                deadline,
+            })
+            .map_err(|_| TransportError::Closed)?;
+
+        let handle = crate::host_io::call_handle::CallHandle {
+            call_id,
+            submission_tx: self.submission_tx.clone(),
+        };
+
+        match rx.recv_timeout(timeout) {
+            Ok(r) => {
+                handle.defuse();
+                r
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(TransportError::Timeout),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(TransportError::Closed),
+        }
+    }
+
     pub fn kalico_identify(
         &self,
         timeout: Duration,

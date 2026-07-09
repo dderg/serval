@@ -86,7 +86,31 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
       <div class="row"><label for="cfg-max_extrude_only_velocity">max_extrude_only_velocity</label><input id="cfg-max_extrude_only_velocity" type="number" step="5" placeholder="∞"></div>
       <div class="row"><label for="cfg-max_extrude_only_accel">max_extrude_only_accel</label><input id="cfg-max_extrude_only_accel" type="number" step="100" placeholder="∞"></div>
       <div class="section">[axis] / [post_processor]</div>
-      <textarea id="cfg-post_processor_config" class="pp-config" spellcheck="false" placeholder="[axis e]&#10;post_processors: pa&#10;&#10;[post_processor pa]&#10;type: linear_pressure_advance&#10;k: 0.03"></textarea>
+      <textarea id="cfg-post_processor_config" class="pp-config" spellcheck="false">[axis x]
+post_processors: shaper_x
+
+[post_processor shaper_x]
+type: smooth_mzv
+frequency_hz: 185
+
+[axis y]
+post_processors: shaper_y
+
+[post_processor shaper_y]
+type: smooth_mzv
+frequency_hz: 120
+
+[axis e]
+follows: x, y, z
+post_processors: pa, st
+
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.03
+
+[post_processor st]
+type: smooth_triangle
+smooth_time: 0.02</textarea>
     </div>
   </div>
   <div class="main">

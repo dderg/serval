@@ -80,6 +80,16 @@ fn extruder_pa_smooth_chain_set() -> trajectory::AxisChainSet {
 }
 
 fn extruder_chain_set_with_k(k: f64) -> trajectory::AxisChainSet {
+    extruder_chain_set(k, None)
+}
+
+/// Smooth pressure advance: the follower's own kernel convolves its
+/// PA-boosted projection — the cascaded window the shaper must gate on.
+fn smooth_pa_on_extruder_chain_set() -> trajectory::AxisChainSet {
+    extruder_chain_set(0.03, Some(0.015))
+}
+
+fn extruder_chain_set(k: f64, e_smooth_time: Option<f64>) -> trajectory::AxisChainSet {
     let pa = trajectory::PostProcessorInstance::new(
         "pa",
         &trajectory::algos::LinearPressureAdvance,
@@ -90,13 +100,23 @@ fn extruder_chain_set_with_k(k: f64) -> trajectory::AxisChainSet {
         &trajectory::algos::SmoothTriangle,
         vec![0.02],
     );
+    let spatial_chain =
+        trajectory::CompiledChain::compile(std::slice::from_ref(&st)).expect("kernel compiles");
+    let mut e_instances = vec![pa];
+    if let Some(t_sm) = e_smooth_time {
+        e_instances.push(trajectory::PostProcessorInstance::new(
+            "st_e",
+            &trajectory::algos::SmoothTriangle,
+            vec![t_sm],
+        ));
+    }
     let e_chain =
-        trajectory::CompiledChain::compile(&[pa, st]).expect("pa + smooth_triangle composes");
+        trajectory::CompiledChain::compile(&e_instances).expect("extruder chain compiles");
     trajectory::AxisChainSet {
         chains: vec![
-            trajectory::CompiledChain::default(),
-            trajectory::CompiledChain::default(),
-            trajectory::CompiledChain::default(),
+            spatial_chain.clone(),
+            spatial_chain.clone(),
+            spatial_chain,
             e_chain,
         ],
         followers: vec![(EXTRUDER_AXIS, vec![0, 1, 2])],
@@ -129,6 +149,53 @@ fn voron_cube_with_extruder_kernel_survives_pacer_drains() {
     let handle = setup_stages(
         config,
         extruder_pa_smooth_chain_set(),
+        vec![0.0, 0.0, 0.0, 0.0],
+        0.0,
+    );
+    let output = handle.output;
+    let collector = std::thread::spawn(move || {
+        let mut segs: Vec<ShapedSegment> = Vec::new();
+        while let Ok(item) = output.recv() {
+            if let motion_pipeline::ShapedItem::Seg(seg) = item {
+                segs.push(seg);
+            }
+        }
+        segs
+    });
+    for (i, m) in moves.into_iter().enumerate() {
+        handle.input.send(m.into()).expect("pipeline accepts move");
+        if i % 40 == 39 {
+            handle
+                .input
+                .send(motion_pipeline::StreamInput::Drain)
+                .expect("pipeline accepts drain");
+        }
+    }
+    drop(handle.input);
+    let segs = collector.join().expect("collector thread");
+    assert!(
+        segs.len() > 100,
+        "expected a full print's worth of segments"
+    );
+    for axis in 0..4 {
+        let worst = worst_track_seam(&segs, axis);
+        assert!(
+            worst < 0.0125,
+            "axis {axis} track jumps {worst:.6} mm across a shaped-segment seam"
+        );
+    }
+}
+
+/// The cascaded case: the extruder's own kernel rides its projection while
+/// the pacer drains mid-stream. Every axis must stay continuous through the
+/// doubled (leader + follower) support windows.
+#[test]
+fn voron_cube_with_smooth_pa_on_extruder_survives_pacer_drains() {
+    let config = bench_config_arc_fit();
+    let moves = parse_gcode_to_moves(CRASH_VORON_CUBE, config.limits);
+    let handle = setup_stages(
+        config,
+        smooth_pa_on_extruder_chain_set(),
         vec![0.0, 0.0, 0.0, 0.0],
         0.0,
     );

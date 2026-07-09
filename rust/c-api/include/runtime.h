@@ -140,6 +140,10 @@ int32_t runtime_seed_position(struct Runtime *rt, int32_t x_q16, int32_t y_q16, 
 
 int32_t runtime_set_axis_mode(struct Runtime *rt, uint8_t axis_idx, uint8_t new_mode);
 
+int32_t runtime_set_axis_step_budget(struct Runtime *rt,
+                                     uint8_t axis_idx,
+                                     uint32_t max_steps_per_sample);
+
 int32_t runtime_set_stepper_offset(struct Runtime *rt,
                                    uint8_t stepper_idx,
                                    int32_t delta_microsteps,

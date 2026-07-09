@@ -40,6 +40,7 @@ fn seg_x_move() -> ShapedSegment {
             linear_axis(0.0, 0.0),
         ],
         followers: vec![],
+        spatial_path: false,
         t_start: 0.0,
         t_end: 1.0,
         motor_mask: 0,
@@ -56,6 +57,7 @@ fn cartesian_x_axis_yields_pieces_with_projected_start_time() {
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
         },
+        max_motor_velocity: Vec::new(),
     }];
 
     let msgs = enqueue_segment(
@@ -63,7 +65,7 @@ fn cartesian_x_axis_yields_pieces_with_projected_start_time() {
         &cfg,
         &crate::enqueue::EnqueueCtx {
             t0: 100.0,
-            fresh_stream: true,
+            epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
             lead_secs: crate::pump::MAX_LEAD_SECS,
             project: |_mcu, hs| (hs * 1_000.0) as u64,
@@ -105,6 +107,7 @@ fn corexy_x_slot_is_x_plus_y() {
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
         },
+        max_motor_velocity: Vec::new(),
     }];
 
     let seg = ShapedSegment {
@@ -114,6 +117,7 @@ fn corexy_x_slot_is_x_plus_y() {
             linear_axis(0.0, 0.0),
         ],
         followers: vec![],
+        spatial_path: false,
         t_start: 0.0,
         t_end: 1.0,
         motor_mask: 0,
@@ -125,7 +129,7 @@ fn corexy_x_slot_is_x_plus_y() {
         &cfg,
         &crate::enqueue::EnqueueCtx {
             t0: 0.0,
-            fresh_stream: true,
+            epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
             lead_secs: crate::pump::MAX_LEAD_SECS,
             project: |_mcu, hs| (hs * 1_000.0) as u64,
@@ -208,6 +212,7 @@ fn flatten_axis_max_piece_secs_splits_long_piece() {
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
         },
+        max_motor_velocity: Vec::new(),
     }];
 
     fn linear_axis_scaled(p0: f64, p1: f64, duration: f64) -> ScalarNurbs {
@@ -224,6 +229,7 @@ fn flatten_axis_max_piece_secs_splits_long_piece() {
             linear_axis_scaled(0.0, 0.0, 0.2),
         ],
         followers: vec![],
+        spatial_path: false,
         t_start: 0.0,
         t_end: 0.2,
         motor_mask: 0,
@@ -235,7 +241,7 @@ fn flatten_axis_max_piece_secs_splits_long_piece() {
         &cfg,
         &crate::enqueue::EnqueueCtx {
             t0: 100.0,
-            fresh_stream: true,
+            epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
             lead_secs: crate::pump::MAX_LEAD_SECS,
             project: |_mcu, hs| (hs * 1_000.0) as u64,
@@ -282,6 +288,7 @@ fn axis_cfg_single(axis: usize) -> Vec<McuAxisConfig> {
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
         },
+        max_motor_velocity: Vec::new(),
     }]
 }
 
@@ -295,6 +302,7 @@ fn constant_follower_axis_merges_all_knots_to_one_piece() {
     let seg = ShapedSegment {
         axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
         followers: vec![],
+        spatial_path: false,
         t_start: 0.0,
         t_end: total,
         motor_mask: 0,
@@ -306,7 +314,7 @@ fn constant_follower_axis_merges_all_knots_to_one_piece() {
         &axis_cfg_single(0),
         &crate::enqueue::EnqueueCtx {
             t0: 0.0,
-            fresh_stream: true,
+            epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
             lead_secs: crate::pump::MAX_LEAD_SECS,
             project: |_, hs| (hs * 1e9) as u64,
@@ -359,6 +367,7 @@ fn motion_constant_motion_merges_only_the_constant_run() {
     let seg = ShapedSegment {
         axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
         followers: vec![],
+        spatial_path: false,
         t_start: 0.0,
         t_end: 5.0 * dur,
         motor_mask: 0,
@@ -370,7 +379,7 @@ fn motion_constant_motion_merges_only_the_constant_run() {
         &axis_cfg_single(0),
         &crate::enqueue::EnqueueCtx {
             t0: 0.0,
-            fresh_stream: true,
+            epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
             lead_secs: crate::pump::MAX_LEAD_SECS,
             project: |_, hs| (hs * 1e9) as u64,
@@ -431,6 +440,7 @@ fn constant_runs_at_different_values_do_not_merge_across_motion_boundary() {
     let seg = ShapedSegment {
         axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
         followers: vec![],
+        spatial_path: false,
         t_start: 0.0,
         t_end: 4.0 * dur,
         motor_mask: 0,
@@ -442,7 +452,7 @@ fn constant_runs_at_different_values_do_not_merge_across_motion_boundary() {
         &axis_cfg_single(0),
         &crate::enqueue::EnqueueCtx {
             t0: 0.0,
-            fresh_stream: true,
+            epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
             lead_secs: crate::pump::MAX_LEAD_SECS,
             project: |_, hs| (hs * 1e9) as u64,
@@ -510,6 +520,7 @@ fn constant_run_subdivides_under_max_piece_secs_after_merging() {
     let seg = ShapedSegment {
         axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
         followers: vec![],
+        spatial_path: false,
         t_start: 0.0,
         t_end: total,
         motor_mask: 0,
@@ -522,7 +533,7 @@ fn constant_run_subdivides_under_max_piece_secs_after_merging() {
         &axis_cfg_single(0),
         &crate::enqueue::EnqueueCtx {
             t0: 0.0,
-            fresh_stream: true,
+            epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
             lead_secs: crate::pump::DRIP_WINDOW_SECS,
             project: |_, hs| (hs * 1e9) as u64,
@@ -589,6 +600,7 @@ fn nonzero_curve_base_preserves_host_times() {
     let seg = ShapedSegment {
         axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
         followers: vec![],
+        spatial_path: false,
         t_start: U_BASE,
         t_end: U_BASE + total,
         motor_mask: 0,
@@ -601,7 +613,7 @@ fn nonzero_curve_base_preserves_host_times() {
         &axis_cfg_single(0),
         &crate::enqueue::EnqueueCtx {
             t0,
-            fresh_stream: true,
+            epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
             lead_secs: crate::pump::MAX_LEAD_SECS,
             project: |_, hs| (hs * 1e9) as u64,
@@ -697,6 +709,7 @@ fn test_mcu_configs_one_axis(axis: usize) -> Vec<McuAxisConfig> {
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
         },
+        max_motor_velocity: Vec::new(),
     }]
 }
 
@@ -718,6 +731,7 @@ fn test_shaped_segment_single_axis(axis: usize, motor_mask: u8) -> ShapedSegment
     ShapedSegment {
         axes,
         followers: vec![],
+        spatial_path: false,
         t_start: 0.0,
         t_end: 1.0,
         motor_mask,
@@ -734,7 +748,7 @@ fn enqueue_stamps_motor_mask_onto_every_piece() {
         &cfgs,
         &crate::enqueue::EnqueueCtx {
             t0: 0.0,
-            fresh_stream: true,
+            epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
             lead_secs: 0.25,
             project: |_id, s| (s * 1e6) as u64,
@@ -757,6 +771,7 @@ fn overlay_pieces_are_relativized_to_start_at_zero() {
     let make_seg = |motor_mask: u8| ShapedSegment {
         axes: vec![curve.clone(), linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
         followers: vec![],
+        spatial_path: false,
         t_start: 0.0,
         t_end: 0.5,
         motor_mask,
@@ -770,7 +785,7 @@ fn overlay_pieces_are_relativized_to_start_at_zero() {
         &cfg,
         &crate::enqueue::EnqueueCtx {
             t0: 0.0,
-            fresh_stream: true,
+            epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
             lead_secs: crate::pump::MAX_LEAD_SECS,
             project: |_, hs| (hs * 1e9) as u64,
@@ -795,7 +810,7 @@ fn overlay_pieces_are_relativized_to_start_at_zero() {
         &cfg,
         &crate::enqueue::EnqueueCtx {
             t0: 0.0,
-            fresh_stream: true,
+            epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
             lead_secs: crate::pump::MAX_LEAD_SECS,
             project: |_, hs| (hs * 1e9) as u64,
@@ -850,6 +865,7 @@ fn overlay_multi_piece_cumulative_positions_produce_individual_spans() {
     let seg = ShapedSegment {
         axes: vec![curve, linear_axis(0.0, 0.0), linear_axis(0.0, 0.0)],
         followers: vec![],
+        spatial_path: false,
         t_start: 0.0,
         t_end: 0.4,
         motor_mask: 0b0000_0001,
@@ -862,7 +878,7 @@ fn overlay_multi_piece_cumulative_positions_produce_individual_spans() {
         &cfg,
         &crate::enqueue::EnqueueCtx {
             t0: 0.0,
-            fresh_stream: true,
+            epoch: crate::anchor::StreamEpoch::Reposition,
             host_now: 0.0,
             lead_secs: crate::pump::MAX_LEAD_SECS,
             project: |_, hs| (hs * 1e9) as u64,
@@ -889,4 +905,59 @@ fn overlay_multi_piece_cumulative_positions_produce_individual_spans() {
             "piece {i} must start at 0 (relativized), got b0={b0}"
         );
     }
+}
+
+#[test]
+fn step_rate_within_ceiling_enqueues() {
+    let cfg = vec![McuAxisConfig {
+        mcu_id: 7,
+        axes: vec![AXIS_X, AXIS_Y, 2],
+        kinematics: 1,
+        caps: McuCaps {
+            total_piece_memory: 62 * 1024,
+        },
+        max_motor_velocity: vec![50.0, 50.0, 50.0],
+    }];
+    // seg_x_move covers 10 mm in 1 s — 10 mm/s, comfortably under 50 mm/s.
+    let msgs = enqueue_segment(
+        &seg_x_move(),
+        &cfg,
+        &crate::enqueue::EnqueueCtx {
+            t0: 100.0,
+            epoch: crate::anchor::StreamEpoch::Reposition,
+            host_now: 0.0,
+            lead_secs: crate::pump::MAX_LEAD_SECS,
+            project: |_mcu, hs| (hs * 1_000.0) as u64,
+            max_piece_secs: None,
+        },
+    );
+    assert!(!msgs.is_empty());
+}
+
+#[test]
+#[should_panic(expected = "step rate exceeds MCU ceiling (-307)")]
+fn step_rate_over_ceiling_fails_loud() {
+    let cfg = vec![McuAxisConfig {
+        mcu_id: 7,
+        axes: vec![AXIS_X, AXIS_Y, 2],
+        kinematics: 1,
+        caps: McuCaps {
+            total_piece_memory: 62 * 1024,
+        },
+        max_motor_velocity: vec![5.0, 5.0, 5.0],
+    }];
+    // 10 mm/s demand against a 5 mm/s ceiling must abort before the MCU
+    // would latch -310.
+    let _ = enqueue_segment(
+        &seg_x_move(),
+        &cfg,
+        &crate::enqueue::EnqueueCtx {
+            t0: 100.0,
+            epoch: crate::anchor::StreamEpoch::Reposition,
+            host_now: 0.0,
+            lead_secs: crate::pump::MAX_LEAD_SECS,
+            project: |_mcu, hs| (hs * 1_000.0) as u64,
+            max_piece_secs: None,
+        },
+    );
 }

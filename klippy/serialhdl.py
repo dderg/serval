@@ -1,4 +1,5 @@
-# Serial port management for firmware communication
+# Per-MCU command/response channel through the motion engine (plus the
+# board reset helpers that still open the serial port directly)
 #
 # Copyright (C) 2016-2021  Kevin O'Connor <kevin@koconnor.net>
 #
@@ -29,11 +30,12 @@ MCU_TIMER_HORIZON = 1 << 30
 DEADLINE_MARGIN_WARN = 0.150
 
 
-class SerialReader:
+class EngineCommandChannel:
     def __init__(self, reactor, warn_prefix="", mcu=None):
         self.reactor = reactor
         self.warn_prefix = warn_prefix
         self.mcu = mcu
+        self.engine_mcu = mcu.engine_mcu if mcu is not None else None
         self._event_poller_timer = None
         self._engine_detached = False
         self.msgparser = msgproto.MessageParser(warn_prefix=warn_prefix)
@@ -78,15 +80,6 @@ class SerialReader:
 
     def _engine_handle_response_event(self, ev, now):
         name = ev.get("name", "")
-        if name == "trsync_state":
-            logging.info(
-                "%s[engine-poller] trsync_state response: "
-                "oid=%s can_trigger=%s trigger_reason=%s",
-                self.warn_prefix,
-                ev.get("oid"),
-                ev.get("can_trigger"),
-                ev.get("trigger_reason"),
-            )
         ev["#name"] = name
         # Use CLOCK_MONOTONIC_RAW stamps when the Rust engine supplied
         # them (non-zero); this happens for "clock" responses dispatched
@@ -114,15 +107,6 @@ class SerialReader:
                 or self.handlers.get((name, None))
                 or self.handle_default
             )
-            if name == "trsync_state":
-                logging.info(
-                    "%s[engine-poller] trsync_state handler "
-                    "lookup: key=(%s,%s) found=%s",
-                    self.warn_prefix,
-                    name,
-                    oid,
-                    hdl is not self.handle_default,
-                )
         try:
             hdl(ev)
         except Exception:
@@ -150,16 +134,12 @@ class SerialReader:
             )
 
     def _engine_event_poller(self, eventtime):
-        if self.mcu is None:
-            return self.reactor.NEVER
-        engine = self.mcu._motion_engine
-        handle = self.mcu._engine_handle
-        if handle is None:
+        if self.engine_mcu is None or not self.engine_mcu.is_claimed():
             return self.reactor.NEVER
         now = eventtime
         for _ in range(32):
             try:
-                ev = engine.take_runtime_event(handle)
+                ev = self.engine_mcu.take_runtime_event()
             except RuntimeError as e:
                 if not self._is_engine_transport_drop(e):
                     raise
@@ -192,18 +172,10 @@ class SerialReader:
 
     def connect_pipe(self, filename, baud=0):
         logging.info("%sStarting connect", self.warn_prefix)
-        engine = self.mcu._motion_engine
-        # claim_mcu may not have been called yet (it normally happens in
-        # _mcu_identify after connect_pipe returns). Allocate the handle
-        # here so attach_serial has something to bind to; the later guard
-        # in _mcu_identify will skip the second claim_mcu call.
-        if self.mcu._engine_handle is None:
-            self.mcu._engine_handle = engine.claim_mcu(
-                self.mcu._name,
-                filename,
-                baud,
-            )
-        handle = self.mcu._engine_handle
+        # claim() normally happens in _mcu_identify after connect_pipe
+        # returns; claiming here (idempotently) gives attach_serial a
+        # handle to bind to.
+        handle = self.engine_mcu.claim(filename, baud)
         klippy_non_critical = bool(getattr(self.mcu, "is_non_critical", False))
         expect_native = bool(getattr(self.mcu, "_expect_native", True))
         logging.info(
@@ -215,15 +187,14 @@ class SerialReader:
             klippy_non_critical,
             expect_native,
         )
-        engine.attach_serial(
-            handle,
+        self.engine_mcu.attach_serial(
             filename,
             baud,
             timeout_s=30.0,
             klippy_non_critical=klippy_non_critical,
             expect_native=expect_native,
         )
-        identify_data = engine.get_identify_data(handle)
+        identify_data = self.engine_mcu.get_identify_data()
         logging.info(
             "%sengine identify done (%d bytes)",
             self.warn_prefix,
@@ -260,15 +231,10 @@ class SerialReader:
         )
 
     def set_clock_est(self, freq, conv_time, conv_clock, last_clock):
-        if self.mcu._motion_engine is None:
+        if not self.engine_mcu.available():
             return
-        host_now_raw = self.reactor.monotonic()
-        self.mcu._motion_engine.set_clock_est(
-            self.mcu._engine_handle,
-            float(freq),
-            float(conv_time),
-            int(conv_clock),
-            host_now_raw,
+        self.engine_mcu.set_clock_est(
+            freq, conv_time, conv_clock, self.reactor.monotonic()
         )
 
     def disconnect(self):
@@ -284,15 +250,17 @@ class SerialReader:
         # Release the serial port through the engine so firmware_restart's
         # arduino_reset() can open it for the DTR toggle.  Mirrors
         # mainline's disconnect() which closes the FD before the reset.
-        engine = getattr(self.mcu, "_motion_engine", None)
-        handle = getattr(self.mcu, "_engine_handle", None)
-        if engine is not None and handle is not None:
+        if (
+            self.engine_mcu is not None
+            and self.engine_mcu.available()
+            and self.engine_mcu.is_claimed()
+        ):
             # Fail loud: a silently-swallowed detach failure masks exactly the
             # class of bug (leaked fd holding the pts in exclusive mode) that
             # causes the next process's attach_serial to spin on EBUSY. Log for
             # context, then re-raise so the failure surfaces.
             try:
-                engine.detach_serial(handle)
+                self.engine_mcu.detach_serial()
             except Exception:
                 logging.exception("engine detach_serial failed")
                 raise
@@ -328,38 +296,57 @@ class SerialReader:
         """Send a get_clock request through the engine with RAW timestamp
         capture.  The response arrives via take_runtime_event as a
         PassthroughResponse with sent_time_raw/recv_time_raw filled in."""
-        engine = self.mcu._motion_engine
-        if engine is None:
+        if not self.engine_mcu.available():
             self._error(
                 "engine_get_clock_async() called without a motion engine"
             )
-        handle = self.mcu._engine_handle
-        if handle is None:
+        if not self.engine_mcu.is_claimed():
             self._error("engine_get_clock_async() called before claim_mcu")
         try:
-            engine.engine_get_clock_async(handle)
+            self.engine_mcu.get_clock_async()
         except RuntimeError as e:
             if not self._is_engine_transport_drop(e):
                 raise
 
     def send(self, msg, minclock=0, reqclock=0):
-        engine = self.mcu._motion_engine
-        if engine is None:
+        if not self.engine_mcu.available():
             self._error("send() called without a motion engine")
         if self._engine_detached:
             return
-        if reqclock and self._held_until_timer_horizon(msg, minclock, reqclock):
+        if reqclock and self._reqclock_holds_or_warns(
+            msg.split()[0], reqclock, lambda: self.send(msg, minclock, reqclock)
+        ):
             return
-        if reqclock:
-            self._warn_if_deadline_margin_thin(msg, reqclock)
-        handle = self.mcu._engine_handle
         try:
-            engine.engine_send(handle, msg)
+            self.engine_mcu.send(msg)
         except RuntimeError as e:
             if not self._is_engine_transport_drop(e):
                 raise
 
-    def _warn_if_deadline_margin_thin(self, msg, reqclock):
+    def send_args(self, name, args, minclock=0, reqclock=0):
+        if not self.engine_mcu.available():
+            self._error("send_args() called without a motion engine")
+        if self._engine_detached:
+            return
+        if reqclock and self._reqclock_holds_or_warns(
+            name,
+            reqclock,
+            lambda: self.send_args(name, args, minclock, reqclock),
+        ):
+            return
+        try:
+            self.engine_mcu.send_args(name, args)
+        except RuntimeError as e:
+            if not self._is_engine_transport_drop(e):
+                raise
+
+    def _reqclock_holds_or_warns(self, command_name, reqclock, resend):
+        if self._held_until_timer_horizon(resend, reqclock):
+            return True
+        self._warn_if_deadline_margin_thin(command_name, reqclock)
+        return False
+
+    def _warn_if_deadline_margin_thin(self, command_name, reqclock):
         clocksync = self.mcu._clocksync
         est_clock = clocksync.get_clock(self.reactor.monotonic())
         margin = (reqclock - est_clock) / clocksync.mcu_freq
@@ -369,11 +356,11 @@ class SerialReader:
                 "thin_deadline_margin",
                 level=logging.WARNING,
                 msg="engine-path command sent with thin clock margin",
-                command=msg.split()[0],
+                command=command_name,
                 margin_s=margin,
             )
 
-    def _held_until_timer_horizon(self, msg, minclock, reqclock):
+    def _held_until_timer_horizon(self, resend, reqclock):
         clocksync = self.mcu._clocksync
         est_clock = clocksync.get_clock(self.reactor.monotonic())
         if reqclock - est_clock <= MCU_TIMER_HORIZON:
@@ -381,27 +368,38 @@ class SerialReader:
         release_systime = clocksync.estimate_clock_systime(
             reqclock - MCU_TIMER_HORIZON
         )
-        self.reactor.register_callback(
-            lambda et: self.send(msg, minclock, reqclock), release_systime
-        )
+        self.reactor.register_callback(lambda et: resend(), release_systime)
         return True
 
     def send_with_response(self, msg, response):
-        engine = self.mcu._motion_engine
-        if engine is None:
+        if not self.engine_mcu.available():
             self._error("send_with_response() called without a motion engine")
         if self._engine_detached:
             raise error("serial connection closed")
         try:
-            params = engine.engine_call(
-                self.mcu._engine_handle,
-                msg,
-                response,
-            )
+            params = self.engine_mcu.call(msg, response)
         except RuntimeError as e:
             if not self._is_engine_transport_drop(e):
                 raise
             raise error("serial connection closed")
+        return self._stamp_response_times(params)
+
+    def send_with_response_args(self, name, args, response):
+        if not self.engine_mcu.available():
+            self._error(
+                "send_with_response_args() called without a motion engine"
+            )
+        if self._engine_detached:
+            raise error("serial connection closed")
+        try:
+            params = self.engine_mcu.call_args(name, args, response)
+        except RuntimeError as e:
+            if not self._is_engine_transport_drop(e):
+                raise
+            raise error("serial connection closed")
+        return self._stamp_response_times(params)
+
+    def _stamp_response_times(self, params):
         # Use CLOCK_MONOTONIC_RAW timestamps if the Rust engine supplied them
         # (non-zero means a real RTT was measured on the wire).  Fall back to
         # reactor.monotonic() only when both sides stamp the same instant (the
@@ -419,7 +417,7 @@ class SerialReader:
 
     # Dumping debug lists
     def dump_debug(self):
-        return "SerialReader: engine mode"
+        return "EngineCommandChannel: engine mode"
 
     # Default message handlers
     def _handle_unknown_init(self, params):

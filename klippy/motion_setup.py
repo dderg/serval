@@ -4,6 +4,7 @@ from collections import defaultdict, namedtuple
 
 from . import motion_kinematics, stepper
 from .extras import servo_axis
+from .stepper import DEFAULT_STEP_PULSE_DURATION
 
 # The engine's init_planner extracts each of these by attribute name (they are
 # named tuples on the Rust side too), so a reordered field fails loud instead
@@ -27,7 +28,9 @@ CartesianLimits = namedtuple(
         "square_corner_velocity",
     ],
 )
-McuTopology = namedtuple("McuTopology", ["mcu_id", "axes", "kinematics"])
+McuTopology = namedtuple(
+    "McuTopology", ["mcu_id", "axes", "kinematics", "max_motor_velocity"]
+)
 
 _LEGACY_STEPPER_AXES = frozenset("xyzab")
 _LEGACY_SERVO_SECTIONS = ("servo_x", "servo_y", "servo_z")
@@ -191,8 +194,28 @@ def declared_axis_order(motion):
     return [name for name, _, _, _ in motion.axis_sections]
 
 
+STEP_EDGE_FLOOR_SECONDS = 0.000001
+STEP_ISR_BUDGET_FRACTION = 0.5
+
+
+def motor_velocity_ceiling(mcu_stepper):
+    """The fastest motor-frame velocity (mm/s) the MCU can physically step:
+    the ISR budget fraction of real time divided by the cost of one step —
+    the 1us edge floor, plus the pulse-width busy-wait when the driver only
+    steps on rising edges. Mirrors the MCU's per-sample step budget in
+    src/stepper.c command_kalico_configure_axis."""
+    pulse_duration, both_edge = mcu_stepper.get_pulse_duration()
+    if pulse_duration is None:
+        pulse_duration = DEFAULT_STEP_PULSE_DURATION
+    per_step_s = STEP_EDGE_FLOOR_SECONDS + (
+        0.0 if both_edge else pulse_duration
+    )
+    return STEP_ISR_BUDGET_FRACTION / per_step_s * mcu_stepper.get_step_dist()
+
+
 def build_axis_to_handle(motion):
     axis_to_handle = {}
+    motion._axis_velocity_ceiling = axis_ceiling = {}
     for lane_idx, _axis_name, _motor_names in motion.kin.lanes():
         rail = motion.kin.rails[lane_idx]
         if isinstance(rail, servo_axis.ServoRail):
@@ -202,26 +225,33 @@ def build_axis_to_handle(motion):
             if node is None:
                 continue
             handle = node.get_engine_handle()
+            ceiling = float("inf")
         else:
             steppers = rail.get_steppers()
             if not steppers:
                 continue
-            handle = getattr(steppers[0].get_mcu(), "_engine_handle", None)
+            handle = steppers[0].get_mcu().get_engine_handle()
+            ceiling = min(motor_velocity_ceiling(s) for s in steppers)
         if handle is None:
             continue
         axis_to_handle[lane_idx] = handle
+        axis_ceiling[lane_idx] = ceiling
 
     fm = motion.printer.lookup_object("force_move", None)
     for _name, motors, slot_idx in motion._follower_slots():
         if fm is None:
             continue
-        primary = fm.steppers.get(motors[0])
-        if primary is None:
+        followers = [fm.steppers.get(m) for m in motors]
+        if any(s is None for s in followers):
             continue
-        handle = getattr(primary.get_mcu(), "_engine_handle", None)
+        primary = followers[0]
+        handle = primary.get_mcu().get_engine_handle()
         if handle is None:
             continue
         axis_to_handle[slot_idx] = handle
+        axis_ceiling[slot_idx] = min(
+            motor_velocity_ceiling(s) for s in followers
+        )
     return axis_to_handle
 
 
@@ -229,17 +259,23 @@ def derive_mcu_topology(motion, axis_to_handle):
     by_handle = {}
     for axis_idx, handle in axis_to_handle.items():
         by_handle.setdefault(handle, []).append(axis_idx)
+    ceilings = getattr(motion, "_axis_velocity_ceiling", {})
     topo = []
     for handle in sorted(by_handle):
         axes = sorted(by_handle[handle])
-        topo.append(McuTopology(handle, axes, motion.kin.mcu_tag(axes)))
+        max_motor_velocity = [ceilings.get(a, float("inf")) for a in axes]
+        topo.append(
+            McuTopology(
+                handle, axes, motion.kin.mcu_tag(axes), max_motor_velocity
+            )
+        )
     return topo
 
 
 def init_planner(motion):
     engine_mcus = []
     for name, mcu in motion.printer.lookup_objects(module="mcu"):
-        handle = getattr(mcu, "_engine_handle", None)
+        handle = mcu.get_engine_handle()
         if handle is None:
             continue
         engine_mcus.append((name, mcu, handle))

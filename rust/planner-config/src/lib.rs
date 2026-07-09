@@ -99,8 +99,10 @@ impl PostProcessorSet {
                 CompiledChain::compile(&chain).map_err(PostProcessorConfigError::Param)
             })
             .collect::<Result<_, _>>()?;
-        let followers = registry.follower_index_map();
-        Ok(AxisChainSet { chains, followers })
+        Ok(AxisChainSet {
+            chains,
+            followers: registry.follower_index_map(),
+        })
     }
 
     pub fn set_param(

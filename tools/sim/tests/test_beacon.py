@@ -85,12 +85,58 @@ def test_contact_probing(world):
     assert world.shutdown_line() is None
 
 
+def test_contact_probing_survives_latch_commit_delay(world):
+    """Field failure (trident 2026-07-08): if the firmware's triggered
+    latch commits after the trsync fires and beacon_contact_stop_home
+    discards uncommitted state, querying the detect clock after the stop
+    raised "Timeout getting contact time". The plugin must read the
+    detect clock before stopping contact homing."""
+    _home(world)
+    world.beacon.contact_latch_commit_delay = 0.3
+    world.gcode_ok("PROBE PROBE_METHOD=contact SAMPLES=1", timeout=120)
+    assert world.shutdown_line() is None
+
+
 def test_contact_auto_calibrate(world):
     world.gcode_ok("SET_KINEMATIC_POSITION X=150 Y=150 Z=10", timeout=10)
     world.gcode_ok("G4 P1000", timeout=15)
     world.gcode_ok("BEACON_AUTO_CALIBRATE", timeout=300)
     assert "Collected" in world.klippy_log_text()
     assert world.shutdown_line() is None
+
+
+def _probe_samples(world):
+    return [
+        float(line.rsplit("z=", 1)[1])
+        for line in world.klippy_log_text().splitlines()
+        if line.startswith("probe at ")
+    ]
+
+
+def test_contact_auto_calibrate_with_mesh_active(sim_world):
+    world = sim_world(_cfg(bed_mesh=True), beacon=True)
+    world.gcode_ok("SET_KINEMATIC_POSITION X=150 Y=150 Z=10", timeout=10)
+    world.gcode_ok("G4 P1000", timeout=15)
+    world.gcode_ok("BEACON_AUTO_CALIBRATE", timeout=300)
+    world.gcode_ok("G1 Z3 F600", timeout=30)
+    world.gcode_ok(
+        "PROBE PROBE_METHOD=contact SAMPLES=6 SAMPLES_TOLERANCE=9", timeout=300
+    )
+    plain = _probe_samples(world)
+    world.gcode_ok("BED_MESH_PROFILE LOAD=edge", timeout=15)
+    world.gcode_ok(
+        "PROBE PROBE_METHOD=contact SAMPLES=6 SAMPLES_TOLERANCE=9", timeout=300
+    )
+    meshed = _probe_samples(world)[len(plain) :]
+    assert world.shutdown_line() is None
+
+    plain_spread = max(plain) - min(plain)
+    meshed_spread = max(meshed) - min(meshed)
+    assert meshed_spread < max(0.012, 2.0 * plain_spread), (
+        "mesh-active contact probing must be as repeatable as mesh-off: "
+        "plain=%r (spread %.4f) meshed=%r (spread %.4f)"
+        % (plain, plain_spread, meshed, meshed_spread)
+    )
 
 
 def test_poke(world):

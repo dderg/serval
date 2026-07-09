@@ -103,11 +103,11 @@ impl JunctionTracker {
         &mut self,
         key: AxisKey,
         pieces: &[(PieceEntry, f64)],
-        fresh_stream: bool,
+        epoch: crate::anchor::StreamEpoch,
         source_line: u32,
         freq: Option<f64>,
     ) -> Option<JunctionSeam> {
-        if fresh_stream {
+        if epoch.position_redefined() {
             self.forget(key);
         }
         self.observe(key, pieces, source_line, freq?)

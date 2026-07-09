@@ -96,11 +96,17 @@ struct McuTopology {
     mcu_id: u32,
     axes: Vec<u8>,
     kinematics: u8,
+    max_motor_velocity: Vec<f64>,
 }
 
 impl McuTopology {
-    fn into_tuple(self) -> (u32, Vec<u8>, u8) {
-        (self.mcu_id, self.axes, self.kinematics)
+    fn into_tuple(self) -> (u32, Vec<u8>, u8, Vec<f64>) {
+        (
+            self.mcu_id,
+            self.axes,
+            self.kinematics,
+            self.max_motor_velocity,
+        )
     }
 }
 
@@ -344,7 +350,8 @@ impl PyMotionEngine {
         )?;
         *self.planner_config.lock_ok() = cfg.clone();
 
-        let mcus: Vec<(u32, Vec<u8>, u8)> = mcus.into_iter().map(McuTopology::into_tuple).collect();
+        let mcus: Vec<(u32, Vec<u8>, u8, Vec<f64>)> =
+            mcus.into_iter().map(McuTopology::into_tuple).collect();
         let (ec_conns, mcu_configs) = self.resolve_mcu_topology(&mcus)?;
 
         let (ethercat_mcu_ids, host_ios, ring_depth_table) =
@@ -402,7 +409,7 @@ impl PyMotionEngine {
                     ));
                 }
             };
-            let pos = *self.commanded_pos.lock_ok();
+            let pos = self.commanded_pos.lock_ok().0;
             let (max_v, max_a, scv, jerk) = {
                 let cfg = self.planner_config.lock_ok();
                 let (mut v, mut a) = cfg.cartesian.for_move(dx, dy, dz);
@@ -453,9 +460,9 @@ impl PyMotionEngine {
             }
 
             let mut pos = self.commanded_pos.lock_ok();
-            pos[0] += dx;
-            pos[1] += dy;
-            pos[2] += dz;
+            pos.0[0] += dx;
+            pos.0[1] += dy;
+            pos.0[2] += dz;
             *self.last_g5_pq.lock_ok() = None;
             Ok(true)
         })
@@ -538,71 +545,24 @@ impl PyMotionEngine {
     }
     #[pyo3(signature = (x, y, z, host_now))]
     fn set_position(&self, py: Python<'_>, x: f64, y: f64, z: f64, host_now: f64) -> PyResult<()> {
+        let gcode = geometry::GcodePos([x, y, z]);
         {
             let mut pos = self.commanded_pos.lock_ok();
-            *pos = [x, y, z];
+            *pos = gcode;
         }
         *self.last_g5_pq.lock_ok() = None;
 
-        self.reseed_mcus_after_position_set(py, x, y, z)?;
-        self.rebase_motion_history_after_position_set(host_now, x, y, z);
+        // A set_position renames the physical rest point in gcode space; the
+        // physical point itself is machine space, so everything that tracks
+        // physical state (step counters, motion history) is seeded through
+        // the forward warp while the stream odometer takes the gcode value.
+        let machine = self.machine_from_gcode(gcode);
+        self.reseed_mcus_after_position_set(py, gcode, machine)?;
+        self.rebase_motion_history_after_position_set(host_now, machine);
 
         Ok(())
     }
 
-    fn reseed_mcus_after_position_set(
-        &self,
-        py: Python<'_>,
-        x: f64,
-        y: f64,
-        z: f64,
-    ) -> PyResult<()> {
-        let planner_guard = self.planner.lock_ok();
-        if let Some(planner) = planner_guard.as_ref() {
-            py.detach(|| planner.flush()).map_err(planner_err)?;
-            {
-                let drain = self.drain.clone();
-                py.detach(|| drain.wait_drained(DRAIN_TIMEOUT))
-                    .map_err(PyRuntimeError::new_err)?;
-            }
-
-            planner
-                .stream_open(vec![x, y, z, 0.0])
-                .map_err(planner_err)?;
-
-            self.send_serial_position_seeds(x, y, z)?;
-        }
-        Ok(())
-    }
-
-    fn rebase_motion_history_after_position_set(&self, host_now: f64, x: f64, y: f64, z: f64) {
-        let configs: Vec<crate::mcu_config::McuAxisConfig> =
-            self.mcu_axis_configs.lock_ok().clone();
-        let rebases = crate::mcu_config::spatial_rebase_targets(&configs, [x, y, z]);
-        let follower_keys: Vec<crate::types::AxisKey> = configs
-            .iter()
-            .flat_map(|cfg| {
-                cfg.axes
-                    .iter()
-                    .filter(|&&a| a >= 3)
-                    .map(move |&axis| crate::types::AxisKey {
-                        mcu_id: cfg.mcu_id,
-                        axis: axis as u8,
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        {
-            let mut store = self.motion_history.lock_ok();
-            for (key, pos) in rebases {
-                store.rebase_axis(key, host_now, pos);
-            }
-            for key in follower_keys {
-                let held_position = store.final_position(key).unwrap_or(0.0);
-                store.rebase_axis(key, host_now, held_position);
-            }
-        }
-    }
     fn effective_limits(&self) -> (f64, f64, f64) {
         self.planner_config.lock_ok().effective_limits()
     }
@@ -774,11 +734,13 @@ impl PyMotionEngine {
 }
 
 impl PyMotionEngine {
-    /// Re-anchor every serial MCU's step counters at (x, y, z). The MCU-side
-    /// `runtime_seed_position` also zeroes all non-spatial motor positions, so
-    /// this is the counterpart of any host-side reset that returns the
-    /// extruder odometer to 0. Requires a quiesced, drained pipeline.
-    pub(crate) fn send_serial_position_seeds(&self, x: f64, y: f64, z: f64) -> PyResult<()> {
+    /// Re-anchor every serial MCU's step counters at a machine-space rest
+    /// position. The MCU-side `runtime_seed_position` also zeroes all
+    /// non-spatial motor positions, so this is the counterpart of any
+    /// host-side reset that returns the extruder odometer to 0. Requires a
+    /// quiesced, drained pipeline. Counters count physical steps: callers
+    /// holding a gcode position convert with [`Self::machine_from_gcode`].
+    pub(crate) fn send_serial_position_seeds(&self, pos: geometry::MachinePos) -> PyResult<()> {
         let sends = {
             let configs = self.mcu_axis_configs.lock_ok();
             let mcus = self.mcus.lock_ok();
@@ -790,7 +752,7 @@ impl PyMotionEngine {
                 })
                 .map(|c| c.mcu_id)
                 .collect();
-            crate::mcu_config::build_serial_seed_sends(&configs, &ethercat_mcu_ids, x, y, z)
+            crate::mcu_config::build_serial_seed_sends(&configs, &ethercat_mcu_ids, pos)
         };
         let mcus = self.mcus.lock_ok();
         for s in sends {
@@ -834,13 +796,12 @@ impl PyMotionEngine {
     fn swap_bed_mesh(&self, new: Option<Arc<geometry::SurfaceTransform>>) -> PyResult<f64> {
         let pos = *self.commanded_pos.lock_ok();
         let mut current = self.bed_mesh.lock_ok();
-        let machine_z = pos[2]
-            + current
-                .as_ref()
-                .map_or(0.0, |t| t.correction_at(pos[0], pos[1], pos[2]));
-        let rebase = new
-            .as_ref()
-            .map_or(machine_z, |t| t.gcode_z(pos[0], pos[1], machine_z));
+        let machine = pos.to_machine(current.as_deref());
+        let rebase = machine.to_gcode(new.as_deref()).z();
+        // `update_mesh` blocks until the lowerer has adopted the new
+        // transform behind the pipeline drain; `current` stays locked across
+        // the wait so no bridge crossing can invert through a mesh the
+        // pipeline is not warping with yet.
         if let Some(handle) = self.planner.lock_ok().as_ref() {
             handle
                 .update_mesh(new.clone(), rebase)
@@ -848,15 +809,77 @@ impl PyMotionEngine {
         }
         *current = new;
         drop(current);
-        self.commanded_pos.lock_ok()[2] = rebase;
+        self.commanded_pos.lock_ok().0[2] = rebase;
         Ok(rebase)
     }
 
-    pub(crate) fn machine_to_gcode(&self, pos: [f64; 3]) -> [f64; 3] {
-        match self.bed_mesh.lock_ok().as_ref() {
-            Some(t) => [pos[0], pos[1], t.gcode_z(pos[0], pos[1], pos[2])],
-            None => pos,
+    fn reseed_mcus_after_position_set(
+        &self,
+        py: Python<'_>,
+        gcode: geometry::GcodePos,
+        machine: geometry::MachinePos,
+    ) -> PyResult<()> {
+        let planner_guard = self.planner.lock_ok();
+        if let Some(planner) = planner_guard.as_ref() {
+            py.detach(|| planner.flush()).map_err(planner_err)?;
+            {
+                let drain = self.drain.clone();
+                py.detach(|| drain.wait_drained(DRAIN_TIMEOUT))
+                    .map_err(PyRuntimeError::new_err)?;
+            }
+
+            planner
+                .stream_open(vec![gcode.x(), gcode.y(), gcode.z(), 0.0])
+                .map_err(planner_err)?;
+
+            self.send_serial_position_seeds(machine)?;
         }
+        Ok(())
+    }
+
+    fn rebase_motion_history_after_position_set(
+        &self,
+        host_now: f64,
+        machine: geometry::MachinePos,
+    ) {
+        let configs: Vec<crate::mcu_config::McuAxisConfig> =
+            self.mcu_axis_configs.lock_ok().clone();
+        let rebases = crate::mcu_config::spatial_rebase_targets(&configs, machine);
+        let follower_keys: Vec<crate::types::AxisKey> = configs
+            .iter()
+            .flat_map(|cfg| {
+                cfg.axes
+                    .iter()
+                    .filter(|&&a| a >= 3)
+                    .map(move |&axis| crate::types::AxisKey {
+                        mcu_id: cfg.mcu_id,
+                        axis: axis as u8,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        {
+            let mut store = self.motion_history.lock_ok();
+            for (key, pos) in rebases {
+                store.rebase_axis(key, host_now, pos);
+            }
+            for key in follower_keys {
+                let held_position = store.final_position(key).unwrap_or(0.0);
+                store.rebase_axis(key, host_now, held_position);
+            }
+        }
+    }
+    /// The machine→gcode crossing: the only place a measured (machine-space)
+    /// position becomes a gcode-space one.
+    pub(crate) fn gcode_from_machine(&self, pos: geometry::MachinePos) -> geometry::GcodePos {
+        pos.to_gcode(self.bed_mesh.lock_ok().as_deref())
+    }
+
+    /// The gcode→machine crossing: the only place a commanded (gcode-space)
+    /// position becomes the physical one that step counters and motion
+    /// history are seeded with.
+    pub(crate) fn machine_from_gcode(&self, pos: geometry::GcodePos) -> geometry::MachinePos {
+        pos.to_machine(self.bed_mesh.lock_ok().as_deref())
     }
 
     fn e_followers(&self, de: f64) -> PyResult<Vec<(usize, f64)>> {

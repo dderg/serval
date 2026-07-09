@@ -6,6 +6,7 @@ const FOLLOWER_E: usize = 3;
 
 fn cfg(mcu_id: u32, axes: Vec<usize>) -> McuAxisConfig {
     McuAxisConfig {
+        max_motor_velocity: Vec::new(),
         mcu_id,
         axes,
         caps: McuCaps {

@@ -183,7 +183,7 @@ impl<S: PieceSink> Pump<S> {
         let EnqueueMsg {
             key,
             pieces,
-            fresh_stream,
+            epoch,
             lead_secs,
             source_line,
         } = msg;
@@ -200,7 +200,7 @@ impl<S: PieceSink> Pump<S> {
                 return;
             }
         }
-        if fresh_stream {
+        if epoch.position_redefined() {
             self.junctions.forget(key);
         }
         if self.cohort.is_some() && !pieces.is_empty() {
@@ -212,7 +212,7 @@ impl<S: PieceSink> Pump<S> {
             if let Some((_ack_now, freq)) = (self.callbacks.mcu_clock_of)(key.mcu_id) {
                 if let Some(seam) = self.junctions.observe(key, &pieces, source_line, freq) {
                     check_junction_position_continuity(&seam);
-                    diag::log_junction_jump(&seam, source_line, fresh_stream, freq);
+                    diag::log_junction_jump(&seam, source_line, epoch.is_fresh(), freq);
                 }
             }
         }
@@ -231,7 +231,9 @@ impl<S: PieceSink> Pump<S> {
             .or_insert_with(|| AxisQueue::new(ring_depth));
         q.lead_secs = lead_secs;
         match hold_merge_freq {
-            Some(freq) => append_pieces_merging_holds(&mut q.pieces, pieces, freq, !fresh_stream),
+            Some(freq) => {
+                append_pieces_merging_holds(&mut q.pieces, pieces, freq, !epoch.is_fresh());
+            }
             None => q.pieces.extend(pieces),
         }
     }

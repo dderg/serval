@@ -15,9 +15,15 @@
 
 use heapless::Vec;
 
-/// Hard cap on the per-sample step count. Peak observed in benches is ~13
-/// at 40 kHz; 16 leaves headroom without growing the stack meaningfully.
-pub const MAX_STEPS_PER_SAMPLE: usize = 16;
+/// Storage ceiling on the per-sample step count: the inline capacity of the
+/// timestamp vectors below (4 bytes per slot on the ISR stack). The enforced
+/// limit is per-axis (`AxisState::max_steps_per_sample`), computed from the
+/// motor's real pulse timing and always ≤ this capacity.
+pub const MAX_STEPS_PER_SAMPLE: usize = 64;
+
+/// Per-axis enforced limit when the motor's pulse timing is unknown: the
+/// conservative single-edge budget (16 steps / 100 µs sample = 160 k steps/s).
+pub const DEFAULT_MAX_STEPS_PER_SAMPLE: u32 = 16;
 
 #[derive(Clone, Copy, Debug)]
 pub struct StepTimeInputs {
@@ -79,7 +85,7 @@ pub fn compute_step_times(inp: &StepTimeInputs) -> StepTimingResult {
     }
 
     for k in 0..n_steps {
-        // `n_steps` ≤ MAX_STEPS_PER_SAMPLE = 16; cast cannot wrap.
+        // `n_steps` ≤ MAX_STEPS_PER_SAMPLE; cast cannot wrap.
         #[allow(clippy::cast_possible_wrap)]
         let step_idx = inp.prev_step_count + ((k as i32) + 1) * sign;
         #[allow(clippy::cast_precision_loss)]

@@ -111,6 +111,8 @@ class BeaconMcuStub:
         self._contact_trigger_sample: int = 0
         self._contact_trigger_freq: int = 0
         self._contact_triggered: bool = False
+        self.contact_latch_commit_delay: float = 0.0
+        self._contact_latch_timer: Optional[threading.Timer] = None
 
         self._z_current: float = 10.0
         self._freq_base: int = 5_183_000
@@ -601,7 +603,14 @@ class BeaconMcuStub:
         if not self._contact_homing_active:
             return
         self._contact_homing_active = False
-        self._contact_triggered = True
+        if self.contact_latch_commit_delay <= 0.0:
+            self._contact_triggered = True
+        else:
+            self._contact_latch_timer = threading.Timer(
+                self.contact_latch_commit_delay, self._commit_contact_latch
+            )
+            self._contact_latch_timer.daemon = True
+            self._contact_latch_timer.start()
         self._contact_trigger_clock = self._now_clock()
         self._contact_trigger_sample = self._sample_index
         self._contact_trigger_freq = self._z_to_frequency(0.0)
@@ -628,11 +637,18 @@ class BeaconMcuStub:
             clock=self._contact_trigger_clock,
         )
 
+    def _commit_contact_latch(self) -> None:
+        self._contact_latch_timer = None
+        self._contact_triggered = True
+
     def _handle_beacon_contact_stop_home(self, params: dict) -> None:
         self._contact_homing_active = False
         if self._homing_trigger_timer is not None:
             self._homing_trigger_timer.cancel()
             self._homing_trigger_timer = None
+        if self._contact_latch_timer is not None:
+            self._contact_latch_timer.cancel()
+            self._contact_latch_timer = None
 
     def _handle_beacon_contact_query(self, params: dict) -> None:
         self._send_msg(
