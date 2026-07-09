@@ -228,11 +228,11 @@ fn reversal_with_z_step_makes_velocity_plan_non_finite() {
 
 /// Found by `hard_invariants_hold`: under a tiny square-corner velocity
 /// (0.0105 mm/s), a micro reversal (2 µm) directly after a z-carrying move
-/// trips lowering's own `ScalarProfile` window `debug_assert` — the quintic
-/// arc-length profile escapes its position window. Same tiny-positive-scv
-/// family as its neighbors.
+/// tripped lowering's `ScalarProfile` window `debug_assert` — the quintic
+/// arc-length profile escaped its position window. Fixed by the wall-aware
+/// ride pass: the tiny-scv corner notch's exit is an ascending wall, whose
+/// chord the pass no longer rides or lands on.
 #[test]
-#[ignore = "known lowering bug: tiny scv + micro reversal escapes the quintic profile window"]
 fn z_step_then_micro_reversal_escapes_profile_window() {
     let limits = FuzzLimits {
         max_velocity: 20.0,

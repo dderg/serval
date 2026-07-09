@@ -15,6 +15,10 @@ pub(super) struct Grid<'a> {
     wall_cont: Vec<bool>,
     /// Per cell: first wall cell at or after it (`usize::MAX` if none).
     next_wall_cell: Vec<usize>,
+    /// Per cell: the ascending mirror of `wall_cont` — swinging the slope up
+    /// from the previous chord's gains more speed than the cap allows, so no
+    /// ride can follow the chord and no flight landing can match its slope.
+    wall_up: Vec<bool>,
     /// Per cell: the last cell of its maximal uniform span — contiguous
     /// straight cells sharing one accel budget and one cap slope-accel (to
     /// integration noise). Flat cruise and constant-decel envelope stretches
@@ -47,6 +51,7 @@ impl<'a> Grid<'a> {
             span_last[c] = if mergeable { span_last[c + 1] } else { c };
         }
         let mut wall_cont = vec![false; cells];
+        let mut wall_up = vec![false; cells];
         let mut next_wall_cell = vec![usize::MAX; cells];
         let mut nw = usize::MAX;
         for c in (0..cells).rev() {
@@ -68,14 +73,23 @@ impl<'a> Grid<'a> {
                 nw = c;
             }
             next_wall_cell[c] = nw;
+            let prev_up = t.cap_a[c.saturating_sub(1)].clamp(0.0, rail_top);
+            let excess_gain = (t.cap_a[c] * t.cap_a[c] - prev_up * prev_up) / (2.0 * t.j_max);
+            wall_up[c] = t.cap_a[c] > prev_up && excess_gain > t.cap_v[c + 1];
         }
         Self {
             t,
             cap_range_min,
             wall_cont,
             next_wall_cell,
+            wall_up,
             span_last,
         }
+    }
+
+    /// Whether cell `c`'s chord ascends as an unfollowable wall.
+    pub(super) fn wall_up(&self, c: usize) -> bool {
+        self.wall_up[c.min(self.wall_up.len() - 1)]
     }
 
     /// First wall-run start at or after cell `c`.

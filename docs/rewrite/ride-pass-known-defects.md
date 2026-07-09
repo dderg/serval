@@ -62,11 +62,15 @@ now get anchored handling in `ride::reach_pass`:
   enters the emitted chain" idea as the disk integrator's anchored landings
   (PR #225). Walls that don't bind (current speed already under the bottom)
   are ignored; an unsolvable BVP (no room) falls back to the marching peel.
-- **Ascending walls** detach to Flight (`cap_a[cell] > st.a + j·dt`), and
-  Flight's direct cap landing now refuses to land where the local slope is
-  not jerk-reachable from the arc's own acceleration — landing at a wall
-  foot used to snap `a` onto the wall chord, recreating the staircase the
-  detach avoided.
+- **Ascending walls** — the mirror class, a chord whose slope gain from the
+  previous chord costs more speed (`(slope² − prev²)/2j`) than the cap
+  allows — detach to Flight, and Flight's direct cap landing refuses those
+  chords too (landing at a wall foot used to snap `a` onto the wall chord,
+  recreating the staircase the detach avoided). The class must be intrinsic
+  and step-based: a state-based reachability test (`cap_a > st.a + j·dt`)
+  sits exactly at the boundary the brake envelope's own jerk-swing cells
+  step by, and chattered ride/flight along every accel ramp — a visible
+  velocity ripple that E amplified via `r'·v²`.
 - **Super-rail chord crossings no longer poison the state**: when the
   rail-clamped chord slope is unrecoverable (its jerk swing back sheds more
   speed than the profile holds — the `v → 0.0077` collapse that produced
@@ -79,18 +83,18 @@ now get anchored handling in `ride::reach_pass`:
   hang the splice on), so brake-to-rest tails adopt the envelope's exact
   chain instead of chord-riding it into an early stall.
 
-Effects: both defect-1 window-escape pins that were fixable this way pass
-(`feed_drop_with_z_step_escapes_profile_window` un-ignored;
+Effects: all three defect-1 window-escape pins pass and are un-ignored
+(`feed_drop_with_z_step_escapes_profile_window`,
+`z_step_then_micro_reversal_escapes_profile_window`,
 `planar_micro_move_decel` still green), the previously-failing wall shapes
 are pinned as regression tests in `ride/tests.rs`
 (`jerk_wall_is_taken_by_an_anchored_brake`,
 `mesa_step_up_then_drop_keeps_the_chain_complete`,
 `ascending_wall_detaches_to_flight`), the whole suite and a 5000-case
-`hard_invariants_hold` run are green, and 9 snapshots changed — the only
-material seam-metric delta is `neptune_cube/fast/discontinuity`, where
-`seam_max_da[1]` drops 3.19 → 0.38 (8× lower worst seam accel step).
-`z_step_then_micro_reversal_escapes_profile_window` still fails — it is the
-tiny-scv family (see "Not the ride pass"), not a wall case.
+`hard_invariants_hold` run are green, and the snapshot suite is
+byte-identical to baseline — the wall treatment only changes inputs whose
+caps carry genuine sampled velocity steps, which the snapshot corpus's
+well-formed g-code never produces.
 
 ## Open defects
 

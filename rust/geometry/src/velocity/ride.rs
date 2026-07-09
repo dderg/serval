@@ -748,14 +748,14 @@ fn ride_step(
     let dt = 2.0 * ds / (st.v + v1).max(1e-9);
     let rail1 = g.rail_at(track.s[i], v1);
     // Detach: the cap accelerates away faster than the rail allows, or
-    // climbs faster than jerk can swing the acceleration across this cell —
-    // riding on would log a j = 0 chord whose entry kicks `a` by the whole
-    // climb, the instantaneous staircase the jerk limit forbids.
+    // climbs as an unfollowable wall — riding on would log a j = 0 chord
+    // whose entry kicks `a` by the whole climb, the instantaneous staircase
+    // the jerk limit forbids. Followable ascents (the brake envelope's own
+    // jerk-swing cells step their slope by about one swing per cell) stay
+    // ridden: a state-based reachability test there chatters between ride
+    // and flight, rippling the velocity.
     let rail = g.rail_at(st.s, st.v);
-    let jerk_reach = st.a + track.j_max * dt;
-    if track.cap_a[cell] > rail + rel_eps(rail)
-        || track.cap_a[cell] > jerk_reach + rel_eps(jerk_reach)
-    {
+    if track.cap_a[cell] > rail + rel_eps(rail) || g.wall_up(cell) {
         *mode = Mode::Flight;
         return false;
     }
@@ -920,19 +920,15 @@ fn flight_step(
     }
     if assume_feasible || peel_feasible(g, next) {
         log.set_jerk(*st, j_cmd);
-        // Landed on the cap from below (tangential arrival)? Only when the
-        // local slope is jerk-reachable from the arc's own acceleration —
-        // touching the foot of a cap wall that climbs away faster than jerk
-        // can follow must not snap `a` onto the wall chord; the arc keeps
-        // flying under the receding cap instead.
+        // Landed on the cap from below (tangential arrival)? Not on an
+        // ascending wall's chord — touching the foot of a cap wall that
+        // climbs away faster than jerk can follow must not snap `a` onto the
+        // wall chord; the arc keeps flying under the receding cap instead.
         if next.v >= g.cap_at(next.s) - rel_eps(next.v) {
-            let slope = g.slope_at(next.s);
             let c = g.cell(next.s);
-            let dt_cell = (track.s[c + 1] - track.s[c]) / next.v.max(1e-9);
-            let jerk_reach = next.a + j_up * dt_cell;
-            if slope <= jerk_reach + rel_eps(jerk_reach) {
+            if !g.wall_up(c) {
                 next.v = g.cap_at(next.s);
-                next.a = slope;
+                next.a = g.slope_at(next.s);
                 log.close(next);
                 *mode = Mode::Ride;
             }
