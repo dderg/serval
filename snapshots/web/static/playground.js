@@ -23,6 +23,9 @@ const CONFIG_FIELDS = [
   { id: "max_extrude_only_accel", required: false },
 ];
 
+const SIM_FIELDS = ["sim-x-freq", "sim-x-zeta", "sim-y-freq", "sim-y-zeta"];
+const SIM_DEFAULT_ZETA = 0.1;
+
 // A real print excerpt (Voron cube layer 5, from the snapshot cases), shipped
 // as a sibling asset so the static bundle stays gcode-free JS. The inline
 // fallback keeps the page usable if the fetch fails.
@@ -245,6 +248,25 @@ function toggleSlots() {
   switchSlot(otherSlot(activeSlot));
 }
 
+// -- Toolhead resonance simulation (view only, never triggers a re-plan) -------
+function readSimAxis(prefix) {
+  const freq = Number(document.getElementById(`${prefix}-freq`).value);
+  if (!Number.isFinite(freq) || freq <= 0) return null;
+  const zetaRaw = document.getElementById(`${prefix}-zeta`).value.trim();
+  const zeta = zetaRaw === "" ? SIM_DEFAULT_ZETA : Number(zetaRaw);
+  if (!Number.isFinite(zeta) || zeta < 0 || zeta > 1) return null;
+  return { freq, zeta };
+}
+
+function applySim() {
+  view.setSimParams({ x: readSimAxis("sim-x"), y: readSimAxis("sim-y") });
+}
+
+function onSimInput() {
+  applySim();
+  saveState();
+}
+
 // -- Persistence ---------------------------------------------------------------
 function captureState() {
   const config = {};
@@ -252,7 +274,11 @@ function captureState() {
     config[f.id] = document.getElementById(`cfg-${f.id}`).value;
   }
   config.post_processor_config = document.getElementById("cfg-post_processor_config").value;
-  return { gcode: document.getElementById("gcode").value, config };
+  const sim = {};
+  for (const id of SIM_FIELDS) {
+    sim[id] = document.getElementById(id).value;
+  }
+  return { gcode: document.getElementById("gcode").value, config, sim };
 }
 
 function applyState(state) {
@@ -268,6 +294,10 @@ function applyState(state) {
   const ppEl = document.getElementById("cfg-post_processor_config");
   const savedPp = state.config?.post_processor_config;
   ppEl.value = savedPp != null ? savedPp : ppEl.defaultValue;
+  for (const id of SIM_FIELDS) {
+    document.getElementById(id).value = state.sim?.[id] ?? "";
+  }
+  applySim();
 }
 
 function saveState() {
@@ -441,7 +471,9 @@ async function loadCaseIntoEditor(name) {
     return false;
   }
   const payload = await resp.json();
-  applyState({ gcode: payload.gcode, config: payload.config });
+  // A case brings gcode+config; the sim overlay is a view preference and
+  // survives the load.
+  applyState({ gcode: payload.gcode, config: payload.config, sim: captureState().sim });
   setActivePreset("");
   invalidateActiveSlotPlan();
   requestPlan();
@@ -482,6 +514,9 @@ async function main() {
     document.getElementById(`cfg-${f.id}`).addEventListener("input", schedulePlan);
   }
   document.getElementById("cfg-post_processor_config").addEventListener("input", schedulePlan);
+  for (const id of SIM_FIELDS) {
+    document.getElementById(id).addEventListener("input", onSimInput);
+  }
 
   document.getElementById("reset-everything").addEventListener("click", () => {
     localStorage.clear();

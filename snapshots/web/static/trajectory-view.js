@@ -35,11 +35,26 @@ export const COLORS = {
   toolhead: "#26a69a",
 };
 
-// Toolhead lanes (the kernel output the physical toolhead follows, as opposed
-// to the emitted motor command) mirror every motor XY series 1:1 via a th_
-// key prefix — present only when the snapshot carries a motor-side stage that
-// makes the two differ.
+// Toolhead lanes are a SIMULATED plant response: the motor command driven
+// through one damped resonant mode per axis (see simulateResonantMode),
+// enabled via setSimParams. They render teal and dotted under the "th" legend
+// group. Jerk lanes are deliberately not simulated — they would need
+// numerical differentiation of the accel lane, which is noise, not signal.
 const TOOLHEAD_DASH = [2, 3];
+const SIM_LANE_KEYS = {
+  vel: { x: "sim_vx", y: "sim_vy", scalar: "sim_v_scalar" },
+  acc: { x: "sim_ax", y: "sim_ay", scalar: "sim_a_scalar", tang: "sim_a_tang", cent: "sim_a_cent" },
+};
+const SIM_DATA_KEYS = [
+  "sim_vx", "sim_vy", "sim_ax", "sim_ay",
+  "sim_v_scalar", "sim_a_scalar", "sim_a_tang", "sim_a_cent", "sim_kappa",
+];
+
+// Same guards as the Rust motor-side math (frenet_components /
+// curvature_series): a stopped toolhead has no tangent frame, and kappa's
+// 1/speed³ blows up long before the Frenet floor does.
+const FRENET_SPEED_FLOOR = 1e-9;
+const KAPPA_CUSP_SPEED_FLOOR = 1e-3;
 
 // -- Panel configuration -----------------------------------------------------
 const PANELS = [
@@ -158,9 +173,6 @@ const ARRAY_KEYS = [
   "jx", "jy", "jz", "je", "j_scalar",
   "kappa", "curvature_class",
   "a_tang", "a_cent", "j_tang", "j_cent",
-  "th_x", "th_y", "th_vx", "th_vy", "th_ax", "th_ay", "th_jx", "th_jy",
-  "th_v_scalar", "th_a_scalar", "th_j_scalar",
-  "th_a_tang", "th_a_cent", "th_j_tang", "th_j_cent", "th_kappa",
   "jerk_impulse_t", "jerk_impulse_mag", "accel_impulse_t", "accel_impulse_mag",
 ];
 
@@ -177,12 +189,73 @@ export function memoizeTrajectory(td) {
   }
   wrap.traversal_time = () => td.traversal_time();
   wrap.point_count = () => td.point_count();
-  wrap.has_toolhead = () => td.has_toolhead();
   return wrap;
 }
 
 export function trajectoryFromSnapshot(snapshotObj) {
   return memoizeTrajectory(new TrajectoryData(JSON.stringify(snapshotObj)));
+}
+
+// -- Simulated plant mode ------------------------------------------------------
+// One damped resonant mode per axis, x'' + 2ζω x' + ω² x = ω² u (ω = 2πf),
+// driven by the motor-command position samples u on the (non-uniform) shared
+// time grid, from x = u(t0), v = 0. Each step is propagated EXACTLY: u is
+// piecewise-linear over the step, whose particular solution is
+// x_p = u − (2ζ/ω)·slope with v_p = slope, and the homogeneous deviation
+// advances by the analytic state-transition of the mode — the under-,
+// critically- and over-damped branches differ only in their (cos-like,
+// sin-like/rate) pair, so ζ = 0, ζ = 1 and ζ > 1 all work without clamping
+// and there is no step-size stability limit. Static gain is exactly 1 by
+// construction. The accel lane comes from the ODE itself:
+// a = ω²(u − x) − 2ζω v.
+export function simulateResonantMode(t, u, { freq, zeta }) {
+  if (!Number.isFinite(freq) || freq <= 0 || !Number.isFinite(zeta) || zeta < 0) {
+    throw new Error(`simulateResonantMode: invalid params freq=${freq} zeta=${zeta}`);
+  }
+  const n = t.length;
+  const pos = new Float64Array(n);
+  const vel = new Float64Array(n);
+  const acc = new Float64Array(n);
+  if (n === 0) return { pos, vel, acc };
+
+  const w = 2 * Math.PI * freq;
+  const w2 = w * w;
+  const mu = zeta * w;
+  const disc = 1 - zeta * zeta;
+  const transition = (h) => {
+    if (disc > 1e-12) {
+      const wd = w * Math.sqrt(disc);
+      return { c: Math.cos(wd * h), s: Math.sin(wd * h) / wd };
+    }
+    if (disc < -1e-12) {
+      const wo = w * Math.sqrt(-disc);
+      return { c: Math.cosh(wo * h), s: Math.sinh(wo * h) / wo };
+    }
+    return { c: 1, s: h };
+  };
+
+  let x = u[0];
+  let v = 0;
+  pos[0] = x;
+  for (let i = 1; i < n; i++) {
+    const h = t[i] - t[i - 1];
+    if (h > 0) {
+      const slope = (u[i] - u[i - 1]) / h;
+      const bias = 2 * zeta * slope / w;
+      const d0 = x - (u[i - 1] - bias);
+      const dv0 = v - slope;
+      const { c, s } = transition(h);
+      const e = Math.exp(-mu * h);
+      const d = e * (d0 * (c + mu * s) + dv0 * s);
+      const dv = e * (-d0 * w2 * s + dv0 * (c - mu * s));
+      x = d + (u[i] - bias);
+      v = dv + slope;
+    }
+    pos[i] = x;
+    vel[i] = v;
+    acc[i] = w2 * (u[i] - x) - 2 * mu * v;
+  }
+  return { pos, vel, acc };
 }
 
 // -- PanelRenderer -----------------------------------------------------------
@@ -354,7 +427,7 @@ class PanelRenderer {
     bctx.stroke();
 
     this._strokeCurvaturePath(bctx, DATA, xMin, xMax, yMin, yMax);
-    this._strokeToolheadPath(bctx, DATA, xMin, xMax, yMin, yMax);
+    this._strokeToolheadPath(bctx, xMin, xMax, yMin, yMax);
 
     if (rawX.length > 0) {
       bctx.beginPath();
@@ -406,12 +479,13 @@ class PanelRenderer {
     }
   }
 
-  // The toolhead path — where the physical toolhead goes while the motors run
-  // the (e.g. mode-inverse) counter-drive drawn by _strokeCurvaturePath.
-  _strokeToolheadPath(bctx, DATA, xMin, xMax, yMin, yMax) {
-    if (!DATA.has_toolhead()) return;
+  // The simulated toolhead path — where the physical plant goes while the
+  // motors run the command drawn by _strokeCurvaturePath.
+  _strokeToolheadPath(bctx, xMin, xMax, yMin, yMax) {
     if (this.view.hiddenSeries.path.has("toolhead")) return;
-    const tx = DATA.th_x(), ty = DATA.th_y();
+    const p = this.view.simPathXY();
+    if (!p) return;
+    const tx = p.x, ty = p.y;
     bctx.beginPath();
     bctx.strokeStyle = COLORS.toolhead;
     bctx.lineWidth = 1.0;
@@ -634,11 +708,6 @@ function computeDataBounds(data) {
     if (kx[i] < xMin) xMin = kx[i]; if (kx[i] > xMax) xMax = kx[i];
     if (ky[i] < yMin) yMin = ky[i]; if (ky[i] > yMax) yMax = ky[i];
   }
-  const tx = data.th_x(), ty = data.th_y();
-  for (let i = 0; i < tx.length; i++) {
-    if (tx[i] < xMin) xMin = tx[i]; if (tx[i] > xMax) xMax = tx[i];
-    if (ty[i] < yMin) yMin = ty[i]; if (ty[i] > yMax) yMax = ty[i];
-  }
   const padX = Math.max((xMax - xMin) * 0.08, 2);
   const padY = Math.max((yMax - yMin) * 0.08, 2);
   return { xMin: xMin - padX, xMax: xMax + padX, yMin: yMin - padY, yMax: yMax + padY };
@@ -678,6 +747,8 @@ export class TrajectoryView {
     this.data = null;
     this.dataAfter = null; // current trajectory
     this.dataBefore = null; // comparison trajectory, null when nothing to compare
+    this.simParams = null; // per-axis resonance params, owned by the page chrome
+    this._sim = null; // simulated plant series, derived from dataAfter only
     this.variant = "after"; // which of the two `data` currently points at
     this.lastBoundsKey = "";
     this.hoverIdx = null;
@@ -864,8 +935,10 @@ export class TrajectoryView {
   // Lanes for one derivative panel: X/Y always, Z/E only when the case moves
   // them, the tangent/normal projection of the XY vector (dashed), and the
   // |XY| magnitude last so it draws on top. E rides its own right-hand axis.
-  // When the snapshot carries a toolhead signal, every motor XY-derived lane
-  // gets a dotted toolhead twin (key/label prefixed th_/th, grouped "th").
+  // When a plant simulation is active (setSimParams), the simulated toolhead
+  // lanes join as the dotted teal "th" group — per-axis lanes for the
+  // simulated axes, plus |XY|/∥/⊥ derived from the effective toolhead motion
+  // (simulated axis, or the motor command where an axis is unsimulated).
   // Hidden state comes from the per-panel legend toggles.
   _panelSeries(type, xKey, yKey, zKey, eKey, tangKey, centKey, scalarKey) {
     const DATA = this.data;
@@ -879,22 +952,19 @@ export class TrajectoryView {
       series.push({ key: tangKey, color: COLORS.tang, dash: [5, 3], label: "∥" });
       series.push({ key: centKey, color: COLORS.cent, dash: [5, 3], label: "⊥", magnitude: true });
     }
-    const scalar = { key: scalarKey, color: COLORS.scalar, label: "|XY|", scalar: true, magnitude: true };
-    if (DATA.has_toolhead()) {
-      const mirrorable = series.filter(s => s.label !== "Z" && s.label !== "E").concat([scalar]);
-      for (const s of mirrorable) {
-        series.push({
-          ...s,
-          key: `th_${s.key}`,
-          label: `th${s.label}`,
-          dash: TOOLHEAD_DASH,
-          group: "th",
-          scalar: false,
-          peaks: s.scalar ? "th" : undefined,
-        });
+    const simKeys = SIM_LANE_KEYS[type];
+    if (simKeys && this._simActive()) {
+      const th = (key, label, extra = {}) =>
+        series.push({ key, label, color: COLORS.toolhead, dash: TOOLHEAD_DASH, group: "th", ...extra });
+      if (this._sim.x) th(simKeys.x, "thX");
+      if (this._sim.y) th(simKeys.y, "thY");
+      if (simKeys.tang) {
+        th(simKeys.tang, "th∥");
+        th(simKeys.cent, "th⊥", { magnitude: true });
       }
+      th(simKeys.scalar, "th|XY|", { magnitude: true, peaks: "th" });
     }
-    series.push(scalar);
+    series.push({ key: scalarKey, color: COLORS.scalar, label: "|XY|", scalar: true, magnitude: true });
     return this._attachSeriesState(type, series);
   }
 
@@ -935,6 +1005,8 @@ export class TrajectoryView {
     // Only visible series count, so hiding a dominant lane rescales the rest;
     // right-axis (E) series get their own independent scale.
     function visibleExtentOf(data, key, magnitude) {
+      // Sim keys live only on the after-data wrapper; the ghost has none.
+      if (typeof data[key] !== "function") return { lo: 0, hi: 0 };
       const dt = data.t();
       const arr = data[key]();
       let lo = 0, hi = 0;
@@ -975,8 +1047,8 @@ export class TrajectoryView {
     const accSeries = this._panelSeries("acc", "ax", "ay", "az", "ae", "a_tang", "a_cent", "a_scalar");
     const jrkSeries = this._panelSeries("jrk", "jx", "jy", "jz", "je", "j_tang", "j_cent", "j_scalar");
     const kappaSeries = [{ key: "kappa", color: COLORS.kappa, label: "κ", scalar: true }];
-    if (this.data.has_toolhead()) {
-      kappaSeries.push({ key: "th_kappa", color: COLORS.kappa, dash: TOOLHEAD_DASH, label: "thκ", group: "th", peaks: "th" });
+    if (this._simActive()) {
+      kappaSeries.push({ key: "sim_kappa", color: COLORS.toolhead, dash: TOOLHEAD_DASH, label: "thκ", group: "th", peaks: "th" });
     }
     this._attachSeriesState("kappa", kappaSeries);
     const vel = scaleSeries(velSeries);
@@ -998,7 +1070,7 @@ export class TrajectoryView {
         color: COLORS.zero,
         hidden: this.hiddenSeries.path.has("motor"),
       }];
-      if (this.data.has_toolhead()) {
+      if (this._simActive()) {
         pathSeries.push({
           label: "toolhead",
           color: COLORS.toolhead,
@@ -1269,6 +1341,7 @@ export class TrajectoryView {
       this.variant = "after";
     }
     this.data = this.variant === "before" ? this.dataBefore : this.dataAfter;
+    this._recomputeSim();
 
     const pb = computeDataBounds(this.data);
     Object.assign(this.defaultPathView, pb);
@@ -1305,6 +1378,96 @@ export class TrajectoryView {
     this.onChanged?.();
     this.lastBoundsKey = "";
     this.renderAll();
+  }
+
+  // -- Simulated plant ---------------------------------------------------------
+  // `params` is { x: {freq, zeta} | null, y: {freq, zeta} | null } or null; a
+  // null/absent axis means that axis's sim is off. Nothing is persisted here —
+  // the page chrome owns sim-param persistence. The sim is re-derived on every
+  // setData while params are set; the before-ghost is never simulated, so the
+  // toolhead lanes/chips only show on the "after" variant.
+  setSimParams(params) {
+    const axisOf = (p, axis) => {
+      if (p == null) return null;
+      if (!Number.isFinite(p.freq) || p.freq <= 0 || !Number.isFinite(p.zeta) || p.zeta < 0) {
+        throw new Error(`setSimParams: invalid ${axis} params freq=${p?.freq} zeta=${p?.zeta}`);
+      }
+      return { freq: p.freq, zeta: p.zeta };
+    };
+    const norm = params == null ? null : { x: axisOf(params.x, "x"), y: axisOf(params.y, "y") };
+    this.simParams = norm && (norm.x || norm.y) ? norm : null;
+    this._recomputeSim();
+    this.lastBoundsKey = "";
+    this.scheduleFull();
+  }
+
+  _simActive() {
+    return this.variant === "after" && this._sim != null;
+  }
+
+  simPathXY() {
+    if (!this._simActive()) return null;
+    return { x: this._sim.pathX, y: this._sim.pathY };
+  }
+
+  // One O(n) pass per active axis. The simulated series are attached to the
+  // after-data wrapper under sim_* keys so the panel/bounds machinery treats
+  // them exactly like the WASM-sourced arrays. The derived |XY|/∥/⊥/κ lanes
+  // use the EFFECTIVE toolhead motion: the simulated lane where an axis is
+  // active, the motor command (which the plant follows exactly) where it is
+  // not. ∥/⊥/κ use the same formulas and speed floors as the Rust motor side.
+  _recomputeSim() {
+    this._sim = null;
+    if (this.dataAfter) {
+      for (const k of SIM_DATA_KEYS) delete this.dataAfter[k];
+    }
+    if (!this.simParams || !this.dataAfter) return;
+
+    const d = this.dataAfter;
+    const t = d.t();
+    const simX = this.simParams.x ? simulateResonantMode(t, d.kin_x(), this.simParams.x) : null;
+    const simY = this.simParams.y ? simulateResonantMode(t, d.kin_y(), this.simParams.y) : null;
+    const vx = simX ? simX.vel : d.vx();
+    const vy = simY ? simY.vel : d.vy();
+    const ax = simX ? simX.acc : d.ax();
+    const ay = simY ? simY.acc : d.ay();
+
+    const n = t.length;
+    const vScalar = new Float64Array(n);
+    const aScalar = new Float64Array(n);
+    const aTang = new Float64Array(n);
+    const aCent = new Float64Array(n);
+    const kappa = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      const speed = Math.hypot(vx[i], vy[i]);
+      const cross = vx[i] * ay[i] - vy[i] * ax[i];
+      vScalar[i] = speed;
+      aScalar[i] = Math.hypot(ax[i], ay[i]);
+      if (speed > FRENET_SPEED_FLOOR) {
+        aTang[i] = (vx[i] * ax[i] + vy[i] * ay[i]) / speed;
+        aCent[i] = Math.abs(cross) / speed;
+      }
+      if (speed > KAPPA_CUSP_SPEED_FLOOR) {
+        kappa[i] = cross / (speed * speed * speed);
+      }
+    }
+
+    this._sim = {
+      x: simX,
+      y: simY,
+      pathX: simX ? simX.pos : d.kin_x(),
+      pathY: simY ? simY.pos : d.kin_y(),
+    };
+    const attach = {
+      sim_v_scalar: vScalar,
+      sim_a_scalar: aScalar,
+      sim_a_tang: aTang,
+      sim_a_cent: aCent,
+      sim_kappa: kappa,
+    };
+    if (simX) { attach.sim_vx = simX.vel; attach.sim_ax = simX.acc; }
+    if (simY) { attach.sim_vy = simY.vel; attach.sim_ay = simY.acc; }
+    for (const [k, arr] of Object.entries(attach)) d[k] = () => arr;
   }
 
   resetZoom() {

@@ -279,11 +279,26 @@ Known open items:
 ## Observing it
 
 Snapshots carry the motor-command trajectory (`traj_*_pieces`) and, whenever
-a chain has motor-side gains, the toolhead signal (`toolhead_*_pieces`,
-omitted otherwise so kernel-only baselines are unchanged). The snapshot
-viewer and the playground (`snapshots/web/`) plot both — motor lanes solid,
-toolhead lanes dotted, with per-series toggles — which is the fastest way to
-build intuition for everything above: watch a square at high accel with
-`mode_inverse` on, flip between the motor command and the toolhead signal,
-and the counter-drive, the damping feedforward, and the corner budget all
-become visible.
+a chain has motor-side gains, the commanded toolhead signal
+(`toolhead_*_pieces`, omitted otherwise so kernel-only baselines are
+unchanged).
+
+For visualization, the snapshot viewer and the playground
+(`snapshots/web/`) go one step further than the commanded signal: they
+**simulate the physical toolhead**. Given per-axis `(f, ζ)` fields, the
+motor command is run through the resonant mode
+`ẍ + 2ζω·ẋ + ω²·x = ω²·u` (exact per-step LTI propagation in
+`trajectory-view.js`), and the dotted teal toolhead lanes and path show the
+simulated response. That closes the loop on everything above:
+
+- with a plain smoother and the sim tuned to the machine's resonance you
+  see the residual vibration the kernel leaves behind;
+- switch the sim frequency away from the kernel's and you see what a
+  mistuned shaper does;
+- turn `mode_inverse` on at the sim's exact `(f, ζ)` and the simulated
+  toolhead collapses onto the kernel output — the counter-drive and damping
+  feedforward cancel the plant by construction.
+
+Watch a square at high accel while flipping `mode_inverse` on and off and
+the counter-drive, the feedforward, and the corner budget all become
+visible.

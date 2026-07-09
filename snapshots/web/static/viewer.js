@@ -209,6 +209,47 @@ async function acceptCurrent() {
   else syncCaseControls();
 }
 
+// -- Toolhead resonance simulation (view only) --------------------------------
+const SIM_KEY = "snapshotViewer.simParams";
+const SIM_FIELDS = ["sim-x-freq", "sim-x-zeta", "sim-y-freq", "sim-y-zeta"];
+const SIM_DEFAULT_ZETA = 0.1;
+
+function readSimAxis(prefix) {
+  const freq = Number(document.getElementById(`${prefix}-freq`).value);
+  if (!Number.isFinite(freq) || freq <= 0) return null;
+  const zetaRaw = document.getElementById(`${prefix}-zeta`).value.trim();
+  const zeta = zetaRaw === "" ? SIM_DEFAULT_ZETA : Number(zetaRaw);
+  if (!Number.isFinite(zeta) || zeta < 0 || zeta > 1) return null;
+  return { freq, zeta };
+}
+
+function applySim() {
+  view.setSimParams({ x: readSimAxis("sim-x"), y: readSimAxis("sim-y") });
+}
+
+function initSimControls() {
+  let saved = null;
+  try {
+    saved = JSON.parse(localStorage.getItem(SIM_KEY));
+  } catch (e) { /* corrupted — start clean */ }
+  for (const id of SIM_FIELDS) {
+    const el = document.getElementById(id);
+    el.value = saved?.[id] ?? "";
+    el.addEventListener("input", () => {
+      applySim();
+      try {
+        localStorage.setItem(
+          SIM_KEY,
+          JSON.stringify(Object.fromEntries(
+            SIM_FIELDS.map(f => [f, document.getElementById(f).value])
+          ))
+        );
+      } catch (e) { /* quota / private mode — persistence is best-effort */ }
+    });
+  }
+  applySim();
+}
+
 // -- Init --------------------------------------------------------------------
 async function main() {
   await initWasm();
@@ -219,6 +260,7 @@ async function main() {
     syncVariantControls();
   };
   setupSplitter("snapshotViewer.pathSplit");
+  initSimControls();
 
   document.getElementById("reset-zoom").addEventListener("click", () => view.resetZoom());
 
@@ -238,6 +280,7 @@ async function main() {
   document.getElementById("accept").addEventListener("click", acceptCurrent);
 
   document.addEventListener("keydown", (e) => {
+    if (["INPUT", "SELECT", "TEXTAREA"].includes(e.target.tagName)) return;
     if (e.key === "ArrowLeft") stepCase(-1);
     else if (e.key === "ArrowRight") stepCase(1);
     else if (e.key === " " || e.key === "b" || e.key === "B") {
