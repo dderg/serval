@@ -11,7 +11,6 @@ mod tests;
 struct Snapshot {
     raw_x: Vec<f64>,
     raw_y: Vec<f64>,
-    fitted_segments: Vec<serde_json::Value>,
     traversal_time_s: f64,
     // The lowered trajectory the firmware executes: per-axis pieces
     // [t0, t1, c0, c1, …] of position vs time (cubic = 6 floats). Variable-length
@@ -44,13 +43,6 @@ struct Snapshot {
     kin_s: Option<Vec<f64>>,
     kin_heading_x: Option<Vec<f64>>,
     kin_heading_y: Option<Vec<f64>>,
-}
-
-#[derive(Clone, Debug)]
-enum SegmentType {
-    Line { x0: f64, y0: f64, x1: f64, y1: f64 },
-    Arc { points: Vec<[f64; 2]> },
-    Clothoid { points: Vec<[f64; 2]> },
 }
 
 // -- Numerical gradient (matches numpy.gradient) ----------------------------
@@ -111,6 +103,15 @@ fn scalar_derivative(comp_x: &[f64], comp_y: &[f64]) -> Vec<f64> {
 // components read zero.
 const FRENET_SPEED_FLOOR: f64 = 1e-9;
 
+// FRENET_SPEED_FLOOR (above) is tuned for Frenet-projection's 1/speed
+// sensitivity; kappa's 1/speed^3 sensitivity blows up far sooner as speed
+// shrinks -- a speed that's a perfectly fine floor for tangential/normal
+// projection still produces an astronomically large, physically
+// meaningless kappa near a genuine full stop. First-pass, tune against
+// real cases if a genuinely slow (but not stopped) cornering move is ever
+// seen misclassified as Cusp.
+const CURVATURE_CUSP_SPEED_FLOOR: f64 = 1e-3;
+
 fn frenet_components(vx: &[f64], vy: &[f64], fx: &[f64], fy: &[f64]) -> (Vec<f64>, Vec<f64>) {
     let n = vx.len();
     let mut tang = Vec::with_capacity(n);
@@ -126,6 +127,237 @@ fn frenet_components(vx: &[f64], vy: &[f64], fx: &[f64], fy: &[f64]) -> (Vec<f64
         }
     }
     (tang, norm)
+}
+
+// -- Curvature -----------------------------------------------------------
+
+// Signed planar curvature kappa = (vx*ay - vy*ax) / speed^3 and its time
+// derivative, from one instant's velocity/accel/jerk. kappa is
+// parameterization-invariant -- its *value* at a point along the path
+// doesn't depend on how fast that point was reached -- so this is exactly
+// as valid whether vx/vy/ax/ay/jx/jy came from a fast or slow traversal of
+// the same geometric path. Precondition: speed > 0 (a zero-speed sample is
+// a cusp, handled by the caller before this is ever invoked).
+fn kappa_and_dkappa_dt(vx: f64, vy: f64, ax: f64, ay: f64, jx: f64, jy: f64) -> (f64, f64) {
+    let speed2 = vx * vx + vy * vy;
+    let speed = speed2.sqrt();
+    let n = vx * ay - vy * ax;
+    let kappa = n / (speed2 * speed);
+    let n_dot = vx * jy - vy * jx;
+    let dkappa_dt =
+        n_dot / (speed2 * speed) - 3.0 * n * (vx * ax + vy * ay) / (speed2 * speed2 * speed);
+    (kappa, dkappa_dt)
+}
+
+const PIECE_CONTIGUITY_TOL_S: f64 = 1e-9;
+
+// Spans where consecutive pieces are NOT contiguous: either a gap (piece[i]
+// ends before piece[i+1] starts -- no piece covers that span, so evaluating
+// a sample there would silently extrapolate whichever piece partition_point
+// picks) or an overlap (piece[i+1] starts before piece[i] ends -- two pieces
+// both claim the same instant). Either way this is a pipeline defect worth
+// surfacing, not bridging.
+fn domain_anomalies(pieces: &[Vec<f64>]) -> Vec<(f64, f64)> {
+    let mut spans = Vec::new();
+    for w in pieces.windows(2) {
+        let end = w[0][1];
+        let start = w[1][0];
+        if (start - end).abs() > PIECE_CONTIGUITY_TOL_S {
+            spans.push((end.min(start), end.max(start)));
+        }
+    }
+    spans
+}
+
+fn in_any_span(spans: &[(f64, f64)], t: f64, tol: f64) -> bool {
+    spans.iter().any(|&(lo, hi)| t >= lo - tol && t <= hi + tol)
+}
+
+// -- Curvature classification (Task 3) -----------------------------------------------
+
+const KAPPA_ZERO_EPS: f64 = 1e-4; // 1/mm -- radius > 10 m reads as straight
+
+// Known finding (not a threshold bug): `snapshots/cases/arc_fit/circle.gcode`
+// -- a case with no shaper, designed to be a constant-curvature circle --
+// classifies as majority "Other" against these thresholds. Investigated and
+// confirmed the fitter is exact (the geometry layer emits a genuine Arc
+// segment, mathematically constant curvature by construction); the ripple is
+// introduced entirely by the lowering stage's conversion of that exact arc
+// into the executed per-axis polynomial trajectory, which is a non-rational
+// spline (ScalarNurbs has no weights -- see rust/nurbs/src/scalar.rs) and
+// therefore cannot represent a circle's curvature exactly. Measured inside
+// one exact arc segment: kappa ripples ~5-7% around its true value, with a
+// windowed dkappa/ds spread ~16x DKAPPA_DS_SPREAD_EPS's current value. This
+// is a real, quantified property of the lowering stage -- nothing there
+// currently budgets for curvature/dkappa-ds consistency, only position
+// (fit_tol_mm) and acceleration (fit_tol_accel_mm_s2) deviation -- not a
+// classifier miscalibration, and deliberately NOT papered over here by
+// loosening these thresholds. Left as a known, documented finding for
+// whoever next investigates the fitter/lowerer's curvature budget.
+const DKAPPA_DS_ZERO_EPS: f64 = 1e-3; // 1/mm^2 -- first-pass, tune against real cases
+const DKAPPA_DS_SPREAD_EPS: f64 = 1e-3; // 1/mm^2 -- first-pass, tune against real cases
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CurvatureClass {
+    Zero,
+    Constant,
+    Linear,
+    Other,
+    Cusp,
+    Gap,
+}
+
+impl CurvatureClass {
+    fn code(self) -> f64 {
+        match self {
+            CurvatureClass::Zero => 0.0,
+            CurvatureClass::Constant => 1.0,
+            CurvatureClass::Linear => 2.0,
+            CurvatureClass::Other => 3.0,
+            CurvatureClass::Cusp => 4.0,
+            CurvatureClass::Gap => 5.0,
+        }
+    }
+}
+
+// ~10th-to-90th-percentile spread of a sorted slice: robust to a handful of
+// outliers (e.g. the one or two samples nearest a piece seam, where dkappa/ds
+// can legitimately jump even in a perfectly healthy trajectory) in a way a
+// raw max-min is not. Trims at least 1 sample off each end whenever there are
+// at least 3 -- plain `n / 10` truncates to 0 (i.e. no trim at all, degrading
+// to raw min-max) for any n under 10, which is exactly the small-window case
+// (a trailing partial window, or one shrunk by excluding Cusp/Gap samples)
+// this robustness exists to cover. At n=3 this trims to a single middle element,
+// so spread always reads as 0 regardless of the two outer samples — an accepted
+// tradeoff: a 3-sample window erring toward "not enough data to call it anomalous"
+// is safer than the alternative of no outlier protection at all.
+fn percentile_spread(sorted: &[f64]) -> f64 {
+    let n = sorted.len();
+    if n < 3 {
+        return sorted.last().copied().unwrap_or(0.0) - sorted.first().copied().unwrap_or(0.0);
+    }
+    let trim = (n / 10).max(1).min((n - 1) / 2);
+    let lo = sorted[trim];
+    let hi = sorted[n - 1 - trim];
+    hi - lo
+}
+
+// Classifies one window's worth of (kappa, dkappa/ds) samples -- both
+// already restricted by the caller to non-Cusp, non-Gap samples. Zero is
+// checked against kappa itself (not its rate) so a dead-straight stretch
+// reads as Zero rather than Constant; Constant vs. Linear both hinge on
+// whether dkappa/ds is steady across the window (a percentile spread, not
+// raw min-max), splitting on whether that steady rate is itself ~zero.
+fn classify_window(kappa: &[f64], dkappa_ds: &[f64]) -> CurvatureClass {
+    let max_abs_kappa = kappa.iter().fold(0.0_f64, |m, k| m.max(k.abs()));
+    if max_abs_kappa < KAPPA_ZERO_EPS {
+        return CurvatureClass::Zero;
+    }
+    let mut sorted: Vec<f64> = dkappa_ds.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let spread = percentile_spread(&sorted);
+    let median = sorted[sorted.len() / 2];
+    if spread >= DKAPPA_DS_SPREAD_EPS {
+        return CurvatureClass::Other;
+    }
+    if median.abs() < DKAPPA_DS_ZERO_EPS {
+        CurvatureClass::Constant
+    } else {
+        CurvatureClass::Linear
+    }
+}
+
+// Despikes a per-window class sequence: a window whose class differs from
+// BOTH neighbors, when those neighbors agree with each other, is overwritten
+// to match them. This is what turns "one seam artifact flips one window"
+// into a stable, contiguous stretch, while a class change that actually
+// persists across several windows -- a real pipeline anomaly -- survives
+// untouched.
+fn smooth_classes(raw: &[CurvatureClass]) -> Vec<CurvatureClass> {
+    if raw.len() < 3 {
+        return raw.to_vec();
+    }
+    let mut out = raw.to_vec();
+    for i in 1..raw.len() - 1 {
+        if raw[i] != raw[i - 1] && raw[i] != raw[i + 1] && raw[i - 1] == raw[i + 1] {
+            out[i] = raw[i - 1];
+        }
+    }
+    out
+}
+
+const CLASSIFY_WINDOW_SAMPLES: usize = 24; // first-pass; tune against real cases
+
+// One kappa value and one CurvatureClass per entry of `t` (same grid the
+// velocity/acceleration/jerk panels already use -- no new sampling). A
+// sample landing in a piece-domain gap/overlap is flagged Gap; a
+// near-zero-speed sample is flagged Cusp; everything else feeds a
+// fixed-size, piece-agnostic sliding window that gets classified as a unit
+// and then despiked against its neighbors.
+fn curvature_series(
+    t: &[f64],
+    xp: &[Vec<f64>],
+    yp: &[Vec<f64>],
+) -> (Vec<f64>, Vec<CurvatureClass>) {
+    let n = t.len();
+    let mut anomalies = domain_anomalies(xp);
+    anomalies.extend(domain_anomalies(yp));
+
+    let mut kappa = vec![0.0; n];
+    let mut dkappa_ds = vec![0.0; n];
+    let mut flag: Vec<Option<CurvatureClass>> = vec![None; n];
+
+    for i in 0..n {
+        let ti = t[i];
+        if in_any_span(&anomalies, ti, PIECE_CONTIGUITY_TOL_S) {
+            flag[i] = Some(CurvatureClass::Gap);
+            continue;
+        }
+        let (_, vx, ax, jx) = eval_lane(xp, ti);
+        let (_, vy, ay, jy) = eval_lane(yp, ti);
+        let speed = libm::hypot(vx, vy);
+        if speed < CURVATURE_CUSP_SPEED_FLOOR {
+            flag[i] = Some(CurvatureClass::Cusp);
+            continue;
+        }
+        let (k, dk_dt) = kappa_and_dkappa_dt(vx, vy, ax, ay, jx, jy);
+        kappa[i] = k;
+        dkappa_ds[i] = dk_dt / speed;
+    }
+
+    // Classify per window first (one entry per window, NOT expanded to
+    // per-sample) so smooth_classes's neighbor comparison actually compares
+    // adjacent WINDOWS. Expanding to per-sample before smoothing would make
+    // every non-boundary sample its own "neighbor" by construction (they're
+    // all the same repeated value within a window), so the despike pass
+    // would never find anything to despike.
+    let mut window_starts: Vec<usize> = Vec::new();
+    let mut window_classes: Vec<CurvatureClass> = Vec::new();
+    let mut i = 0;
+    while i < n {
+        let end = (i + CLASSIFY_WINDOW_SAMPLES).min(n);
+        let idxs: Vec<usize> = (i..end).filter(|&j| flag[j].is_none()).collect();
+        let cls = if idxs.is_empty() {
+            CurvatureClass::Other
+        } else {
+            let k: Vec<f64> = idxs.iter().map(|&j| kappa[j]).collect();
+            let dk: Vec<f64> = idxs.iter().map(|&j| dkappa_ds[j]).collect();
+            classify_window(&k, &dk)
+        };
+        window_starts.push(i);
+        window_classes.push(cls);
+        i = end;
+    }
+    let smoothed_windows = smooth_classes(&window_classes);
+
+    let mut classes = vec![CurvatureClass::Zero; n];
+    for (w, &start) in window_starts.iter().enumerate() {
+        let end = window_starts.get(w + 1).copied().unwrap_or(n);
+        for j in start..end {
+            classes[j] = flag[j].unwrap_or(smoothed_windows[w]);
+        }
+    }
+    (kappa, classes)
 }
 
 // -- Toolhead position (handles legacy format) ------------------------------
@@ -285,8 +517,9 @@ fn time_series_from_pieces(
     // milliseconds), a fixed per-interval count leaves millimeter-scale chords
     // that render a genuinely smooth trajectory as a polyline.
     const TARGET_SAMPLE_DT_S: f64 = 2.5e-4;
-    let per_interval_of =
-        |a: f64, b: f64| -> usize { (((b - a) / TARGET_SAMPLE_DT_S).ceil() as usize).clamp(4, 512) };
+    let per_interval_of = |a: f64, b: f64| -> usize {
+        (((b - a) / TARGET_SAMPLE_DT_S).ceil() as usize).clamp(4, 512)
+    };
     let cap: usize = bounds.windows(2).map(|w| per_interval_of(w[0], w[1])).sum();
 
     let new = || Vec::with_capacity(cap);
@@ -534,57 +767,6 @@ fn time_series_from_position(snap: &Snapshot) -> TimeSeries {
     }
 }
 
-// -- Fitted segment parsing -------------------------------------------------
-
-fn parse_segments(raw: &[serde_json::Value]) -> Vec<SegmentType> {
-    let mut segments = Vec::new();
-    for val in raw {
-        let Some(typ) = val.get("type").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        match typ {
-            "line" => {
-                let x0 = val
-                    .get("x0")
-                    .and_then(serde_json::Value::as_f64)
-                    .unwrap_or(0.0);
-                let y0 = val
-                    .get("y0")
-                    .and_then(serde_json::Value::as_f64)
-                    .unwrap_or(0.0);
-                let x1 = val
-                    .get("x1")
-                    .and_then(serde_json::Value::as_f64)
-                    .unwrap_or(0.0);
-                let y1 = val
-                    .get("y1")
-                    .and_then(serde_json::Value::as_f64)
-                    .unwrap_or(0.0);
-                segments.push(SegmentType::Line { x0, y0, x1, y1 });
-            }
-            "arc" | "clothoid" => {
-                let xs = val.get("x").and_then(serde_json::Value::as_array);
-                let ys = val.get("y").and_then(serde_json::Value::as_array);
-                let points = match (xs, ys) {
-                    (Some(xs), Some(ys)) => xs
-                        .iter()
-                        .zip(ys.iter())
-                        .map(|(x, y)| [x.as_f64().unwrap_or(0.0), y.as_f64().unwrap_or(0.0)])
-                        .collect(),
-                    _ => vec![],
-                };
-                if typ == "arc" {
-                    segments.push(SegmentType::Arc { points });
-                } else {
-                    segments.push(SegmentType::Clothoid { points });
-                }
-            }
-            _ => {}
-        }
-    }
-    segments
-}
-
 // -- WASM export -------------------------------------------------------------
 
 #[wasm_bindgen]
@@ -593,7 +775,8 @@ pub struct TrajectoryData {
     raw_y: Vec<f64>,
     kin_x: Vec<f64>,
     kin_y: Vec<f64>,
-    segments: Vec<SegmentType>,
+    kappa: Vec<f64>,
+    curvature_class: Vec<f64>,
     t: Vec<f64>,
     vx: Vec<f64>,
     vy: Vec<f64>,
@@ -633,7 +816,11 @@ impl TrajectoryData {
             serde_json::from_str(json).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         let ts = build_time_series(&snap);
-        let segments = parse_segments(&snap.fitted_segments);
+        let (kappa, classes) = match (&snap.traj_x_pieces, &snap.traj_y_pieces) {
+            (Some(xp), Some(yp)) => curvature_series(&ts.t, xp, yp),
+            _ => (vec![0.0; ts.t.len()], vec![CurvatureClass::Gap; ts.t.len()]),
+        };
+        let curvature_class: Vec<f64> = classes.iter().map(|c| c.code()).collect();
 
         let a_peak = ts.a_scalar.iter().copied().fold(0.0_f64, f64::max);
         let v_peak = ts.v_scalar.iter().copied().fold(0.0_f64, f64::max);
@@ -658,7 +845,8 @@ impl TrajectoryData {
             raw_y: snap.raw_y,
             kin_x: ts.kin_x,
             kin_y: ts.kin_y,
-            segments,
+            kappa,
+            curvature_class,
             t: ts.t,
             vx: ts.vx,
             vy: ts.vy,
@@ -817,29 +1005,15 @@ impl TrajectoryData {
         self.t.len()
     }
 
-    // Segment access
-    pub fn segment_count(&self) -> usize {
-        self.segments.len()
+    // Signed curvature per sample, same grid as t()/vx()/etc. -- the
+    // curvature-vs-time graph.
+    pub fn kappa(&self) -> Float64Array {
+        Float64Array::from(&self.kappa[..])
     }
 
-    pub fn segment_type(&self, i: usize) -> String {
-        match self.segments.get(i) {
-            Some(SegmentType::Line { .. }) => "line".to_string(),
-            Some(SegmentType::Arc { .. }) => "arc".to_string(),
-            Some(SegmentType::Clothoid { .. }) => "clothoid".to_string(),
-            None => "unknown".to_string(),
-        }
-    }
-
-    /// Returns flattened segment data: [x0,y0,x1,y1] for lines, [x0,y0,...,xN,yN] for arcs/clothoids
-    pub fn segment_data(&self, i: usize) -> Float64Array {
-        let flat: Vec<f64> = match self.segments.get(i) {
-            Some(SegmentType::Line { x0, y0, x1, y1 }) => vec![*x0, *y0, *x1, *y1],
-            Some(SegmentType::Arc { points }) | Some(SegmentType::Clothoid { points }) => {
-                points.iter().flat_map(|p| [p[0], p[1]]).collect()
-            }
-            None => vec![],
-        };
-        Float64Array::from(&flat[..])
+    // Curvature-behavior class per sample as an integer code: 0=Zero,
+    // 1=Constant, 2=Linear, 3=Other, 4=Cusp, 5=Gap. Same grid as kappa().
+    pub fn curvature_class(&self) -> Float64Array {
+        Float64Array::from(&self.curvature_class[..])
     }
 }

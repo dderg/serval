@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use snapshot_core::{FittedSegment, SnapshotParams};
+use snapshot_core::SnapshotParams;
 
 use crate::bridge::{AxisSection, PostProcessor};
 
@@ -43,12 +43,6 @@ pub(crate) fn pipeline_snapshot(
     dict.set_item("raw_x", snap.raw_x)?;
     dict.set_item("raw_y", snap.raw_y)?;
 
-    let seg_list = PyList::empty(py);
-    for seg in &snap.fitted_segments {
-        seg_list.append(segment_to_pydict(py, seg)?)?;
-    }
-    dict.set_item("fitted_segments", seg_list)?;
-
     dict.set_item("traj_x_pieces", snap.traj_x_pieces)?;
     dict.set_item("traj_y_pieces", snap.traj_y_pieces)?;
     dict.set_item("traj_z_pieces", snap.traj_z_pieces)?;
@@ -71,28 +65,4 @@ pub(crate) fn pipeline_snapshot(
     }
     dict.set_item("worst_seams", worst)?;
     Ok(dict.into())
-}
-
-fn segment_to_pydict<'py>(py: Python<'py>, seg: &FittedSegment) -> PyResult<Bound<'py, PyDict>> {
-    let d = PyDict::new(py);
-    match seg {
-        FittedSegment::Line { x0, y0, x1, y1 } => {
-            d.set_item("type", "line")?;
-            d.set_item("x0", x0)?;
-            d.set_item("y0", y0)?;
-            d.set_item("x1", x1)?;
-            d.set_item("y1", y1)?;
-        }
-        FittedSegment::Arc { x, y } => {
-            d.set_item("type", "arc")?;
-            d.set_item("x", x.clone())?;
-            d.set_item("y", y.clone())?;
-        }
-        FittedSegment::Clothoid { x, y } => {
-            d.set_item("type", "clothoid")?;
-            d.set_item("x", x.clone())?;
-            d.set_item("y", y.clone())?;
-        }
-    }
-    Ok(d)
 }
