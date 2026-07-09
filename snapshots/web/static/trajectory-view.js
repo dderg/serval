@@ -31,7 +31,13 @@ export const COLORS = {
   crosshair: "rgba(255,255,255,0.35)",
   marker: "#e0518a",
   impulse: "#ffd54a",
+  toolhead: "#26a69a",
 };
+
+// Per-panel toolhead lanes (the kernel output the physical toolhead follows,
+// as opposed to the emitted motor command) — present only when the snapshot
+// carries a motor-side stage that makes the two differ.
+const TOOLHEAD_KEYS = { vel: ["th_vx", "th_vy"], acc: ["th_ax", "th_ay"] };
 
 // -- Panel configuration -----------------------------------------------------
 const PANELS = [
@@ -135,6 +141,7 @@ const ARRAY_KEYS = [
   "jx", "jy", "jz", "je", "j_scalar",
   "kappa", "curvature_class",
   "a_tang", "a_cent", "j_tang", "j_cent",
+  "th_x", "th_y", "th_vx", "th_vy", "th_ax", "th_ay",
   "jerk_impulse_t", "jerk_impulse_mag", "accel_impulse_t", "accel_impulse_mag",
 ];
 
@@ -151,6 +158,7 @@ export function memoizeTrajectory(td) {
   }
   wrap.traversal_time = () => td.traversal_time();
   wrap.point_count = () => td.point_count();
+  wrap.has_toolhead = () => td.has_toolhead();
   return wrap;
 }
 
@@ -314,6 +322,7 @@ class PanelRenderer {
     bctx.stroke();
 
     this._strokeCurvaturePath(bctx, DATA, xMin, xMax, yMin, yMax);
+    this._strokeToolheadPath(bctx, DATA, xMin, xMax, yMin, yMax);
 
     if (rawX.length > 0) {
       bctx.beginPath();
@@ -362,6 +371,23 @@ class PanelRenderer {
       bctx.arc(this.toPixelX(kx[i], xMin, xMax), this.toPixelY(ky[i], yMin, yMax), 2.5, 0, Math.PI * 2);
       bctx.fill();
     }
+  }
+
+  // The toolhead path — where the physical toolhead goes while the motors run
+  // the (e.g. mode-inverse) counter-drive drawn by _strokeCurvaturePath.
+  _strokeToolheadPath(bctx, DATA, xMin, xMax, yMin, yMax) {
+    if (!DATA.has_toolhead()) return;
+    if (this.view.hiddenSeries.path.has("toolhead")) return;
+    const tx = DATA.th_x(), ty = DATA.th_y();
+    bctx.beginPath();
+    bctx.strokeStyle = COLORS.toolhead;
+    bctx.lineWidth = 1.0;
+    for (let i = 0; i < tx.length; i++) {
+      const px = this.toPixelX(tx[i], xMin, xMax);
+      const py = this.toPixelY(ty[i], yMin, yMax);
+      i === 0 ? bctx.moveTo(px, py) : bctx.lineTo(px, py);
+    }
+    bctx.stroke();
   }
 
   _strokeSeries(bctx, t, valueAt, tMin, tMax, yMin, yMax) {
@@ -558,6 +584,11 @@ function computeDataBounds(data) {
     if (kx[i] < xMin) xMin = kx[i]; if (kx[i] > xMax) xMax = kx[i];
     if (ky[i] < yMin) yMin = ky[i]; if (ky[i] > yMax) yMax = ky[i];
   }
+  const tx = data.th_x(), ty = data.th_y();
+  for (let i = 0; i < tx.length; i++) {
+    if (tx[i] < xMin) xMin = tx[i]; if (tx[i] > xMax) xMax = tx[i];
+    if (ty[i] < yMin) yMin = ty[i]; if (ty[i] > yMax) yMax = ty[i];
+  }
   const padX = Math.max((xMax - xMin) * 0.08, 2);
   const padY = Math.max((yMax - yMin) * 0.08, 2);
   return { xMin: xMin - padX, xMax: xMax + padX, yMin: yMin - padY, yMax: yMax + padY };
@@ -579,7 +610,7 @@ export class TrajectoryView {
     // a preferred view (e.g. XY-scalar-only) survives reloads and case
     // switches.
     this.hiddenSeriesKey = hiddenSeriesKey;
-    this.hiddenSeries = { vel: new Set(), acc: new Set(), jrk: new Set() };
+    this.hiddenSeries = { path: new Set(), vel: new Set(), acc: new Set(), jrk: new Set() };
     try {
       const saved = JSON.parse(localStorage.getItem(hiddenSeriesKey)) || {};
       for (const type of Object.keys(this.hiddenSeries)) {
@@ -778,6 +809,11 @@ export class TrajectoryView {
       { key: xKey, color: COLORS.vx, label: "|X|" },
       { key: yKey, color: COLORS.vy, label: "|Y|" },
     ];
+    const thKeys = TOOLHEAD_KEYS[type];
+    if (thKeys && DATA.has_toolhead()) {
+      series.push({ key: thKeys[0], color: COLORS.vx, dash: [2, 3], label: "th|X|" });
+      series.push({ key: thKeys[1], color: COLORS.vy, dash: [2, 3], label: "th|Y|" });
+    }
     if (anyNonZero(DATA[zKey]())) series.push({ key: zKey, color: COLORS.vz, label: "|Z|" });
     if (anyNonZero(DATA[eKey]())) series.push({ key: eKey, color: COLORS.ve, label: "|E|", axis: "right" });
     if (tangKey) {
@@ -856,6 +892,14 @@ export class TrajectoryView {
     if (key !== this.lastBoundsKey) {
       this.lastBoundsKey = key;
 
+      const pathSeries = this.data.has_toolhead()
+        ? [{
+            label: "toolhead",
+            color: COLORS.toolhead,
+            hidden: this.hiddenSeries.path.has("toolhead"),
+          }]
+        : [];
+      this._updateLegend("path", "Path", pathSeries);
       this._updateLegend("vel", "Velocity", velSeries);
       this._updateLegend("acc", "Acceleration", accSeries);
       this._updateLegend("jrk", "Jerk", jrkSeries);

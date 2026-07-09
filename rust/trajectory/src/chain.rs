@@ -182,6 +182,21 @@ impl CompiledChain {
         self.stages.is_empty()
     }
 
+    /// Whether this chain ends in derivative-gain stages after a smoothing
+    /// kernel — the motor-side stages whose output (the motor command)
+    /// intentionally departs from the toolhead signal.
+    #[must_use]
+    pub fn has_motor_side_gains(&self) -> bool {
+        let mut seen_kernel = false;
+        self.stages.iter().any(|stage| match stage {
+            ChainStage::SmoothKernel(_) => {
+                seen_kernel = true;
+                false
+            }
+            ChainStage::DerivativeGains { .. } => seen_kernel,
+        })
+    }
+
     #[must_use]
     pub fn kernel_variance_s2(&self) -> f64 {
         self.stages
@@ -283,6 +298,11 @@ impl AxisChainSet {
                     (lo.min(l_lo), hi.max(l_hi))
                 })
             })
+    }
+
+    #[must_use]
+    pub fn has_motor_side_stages(&self) -> bool {
+        self.chains.iter().any(CompiledChain::has_motor_side_gains)
     }
 
     #[must_use]
