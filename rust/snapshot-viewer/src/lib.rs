@@ -167,6 +167,24 @@ fn in_any_span(spans: &[(f64, f64)], t: f64, tol: f64) -> bool {
 // -- Curvature classification (Task 3) -----------------------------------------------
 
 const KAPPA_ZERO_EPS: f64 = 1e-4; // 1/mm -- radius > 10 m reads as straight
+
+// Known finding (not a threshold bug): `snapshots/cases/arc_fit/circle.gcode`
+// -- a case with no shaper, designed to be a constant-curvature circle --
+// classifies as majority "Other" against these thresholds. Investigated and
+// confirmed the fitter is exact (the geometry layer emits a genuine Arc
+// segment, mathematically constant curvature by construction); the ripple is
+// introduced entirely by the lowering stage's conversion of that exact arc
+// into the executed per-axis polynomial trajectory, which is a non-rational
+// spline (ScalarNurbs has no weights -- see rust/nurbs/src/scalar.rs) and
+// therefore cannot represent a circle's curvature exactly. Measured inside
+// one exact arc segment: kappa ripples ~5-7% around its true value, with a
+// windowed dkappa/ds spread ~16x DKAPPA_DS_SPREAD_EPS's current value. This
+// is a real, quantified property of the lowering stage -- nothing there
+// currently budgets for curvature/dkappa-ds consistency, only position
+// (fit_tol_mm) and acceleration (fit_tol_accel_mm_s2) deviation -- not a
+// classifier miscalibration, and deliberately NOT papered over here by
+// loosening these thresholds. Left as a known, documented finding for
+// whoever next investigates the fitter/lowerer's curvature budget.
 const DKAPPA_DS_ZERO_EPS: f64 = 1e-3; // 1/mm^2 -- first-pass, tune against real cases
 const DKAPPA_DS_SPREAD_EPS: f64 = 1e-3; // 1/mm^2 -- first-pass, tune against real cases
 
