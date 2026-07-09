@@ -14,12 +14,11 @@ explicit accept. UI-snapshot testing for trajectories.
 
 ## Run
 
-Needs the built `_motion_engine` cdylib (same `python3` you run with); the web
-review additionally needs matplotlib. Both run locally, e.g. on macOS:
+Needs the built `_motion_engine` cdylib (same `python3` you run with). Runs
+locally, e.g. on macOS:
 
 ```sh
 make -f Makefile.rust motion-engine      # build the engine for your python3
-python3 -m pip install matplotlib        # for the web review only
 
 snapshots/snapshot-tests.sh              # local
 snapshots/snapshot-tests.sh --ci         # CI: fail like a plain test, no server
@@ -49,6 +48,13 @@ with `_motion_engine.pipeline_snapshot`), so it needs no server or Python:
 everything plans client-side, in a worker. **Pin baseline** freezes the current
 plan so config changes can be A/B-flipped exactly like snapshot review.
 
+Both the review viewer and the playground color the path panel by *measured*
+curvature behavior on the executed (post-shaper) trajectory — Zero, Constant,
+Linear, or Other — plus Cusp/Gap markers for a near-zero-speed instant or a
+piece-domain mismatch, rather than by the fitter's own line/arc/clothoid
+labels. A dedicated Curvature panel plots κ(t) directly alongside velocity,
+acceleration, and jerk.
+
 Reach it at `http://127.0.0.1:8765/playground` while any review/`--view`
 server runs, or host `snapshots/web/static/` anywhere static (both WASM
 bundles live inside it; `snapshot-tests.sh` builds them when stale). The
@@ -75,7 +81,7 @@ make a new group folder with at least one `.cfg`. Then run the tests and accept
 the baselines.
 
 `run.py` and the cases are **not** pytest — they are this pillar. `test_harness.py`
-is a normal python-unit test (the `py` job collects it). The G-code parsing,
-config reading and panel rendering are reused directly from `scripts/viz_pipeline.py`
-(the same VISUALIZE tool), not duplicated; baselines are full raw trajectories so a
-richer diff view can be built later without re-recording them.
+is a normal python-unit test (the `py` job collects it), and also carries the
+G-code parsing and config reading `run_case` uses to actually drive a case.
+Baselines are full raw trajectories so a richer diff view can be built later
+without re-recording them.
