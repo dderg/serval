@@ -128,6 +128,26 @@ fn frenet_components(vx: &[f64], vy: &[f64], fx: &[f64], fy: &[f64]) -> (Vec<f64
     (tang, norm)
 }
 
+// -- Curvature -----------------------------------------------------------
+
+// Signed planar curvature kappa = (vx*ay - vy*ax) / speed^3 and its time
+// derivative, from one instant's velocity/accel/jerk. kappa is
+// parameterization-invariant -- its *value* at a point along the path
+// doesn't depend on how fast that point was reached -- so this is exactly
+// as valid whether vx/vy/ax/ay/jx/jy came from a fast or slow traversal of
+// the same geometric path. Precondition: speed > 0 (a zero-speed sample is
+// a cusp, handled by the caller before this is ever invoked).
+fn kappa_and_dkappa_dt(vx: f64, vy: f64, ax: f64, ay: f64, jx: f64, jy: f64) -> (f64, f64) {
+    let speed2 = vx * vx + vy * vy;
+    let speed = speed2.sqrt();
+    let n = vx * ay - vy * ax;
+    let kappa = n / (speed2 * speed);
+    let n_dot = vx * jy - vy * jx;
+    let dkappa_dt =
+        n_dot / (speed2 * speed) - 3.0 * n * (vx * ax + vy * ay) / (speed2 * speed2 * speed);
+    (kappa, dkappa_dt)
+}
+
 // -- Toolhead position (handles legacy format) ------------------------------
 
 fn toolhead_position(snap: &Snapshot) -> (Vec<f64>, Vec<f64>) {

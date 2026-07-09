@@ -104,3 +104,61 @@ fn eval_piece_length_tolerance_matches_explicit_zero_padding() {
         assert_eq!(eval_piece(&short, tau), eval_piece(&padded, tau));
     }
 }
+
+#[test]
+fn kappa_is_zero_on_a_straight_line() {
+    // Constant velocity, zero accel/jerk -- no curvature regardless of speed.
+    let (kappa, dkappa_dt) = kappa_and_dkappa_dt(5.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    assert_eq!(kappa, 0.0);
+    assert_eq!(dkappa_dt, 0.0);
+}
+
+#[test]
+fn kappa_constant_on_circle_with_nonconstant_speed() {
+    // Circle of radius R, parameterized by theta(t) = t^2 -- so theta' = 2t
+    // is NOT constant, i.e. the tangential speed along the circle varies
+    // with t. Curvature must still read as exactly 1/R at every t: kappa is
+    // a property of the path's shape, not of how fast it's traversed. If
+    // the formula secretly depended on ds/dt this test would fail at one of
+    // the two very different speeds checked below.
+    let r = 3.0_f64;
+    let kappa_at = |t: f64| -> f64 {
+        let theta = t * t;
+        let (s, c) = theta.sin_cos();
+        let vx = -2.0 * r * t * s;
+        let vy = 2.0 * r * t * c;
+        let ax = -2.0 * r * s - 4.0 * r * t * t * c;
+        let ay = 2.0 * r * c - 4.0 * r * t * t * s;
+        let jx = -12.0 * r * t * c + 8.0 * r * t.powi(3) * s;
+        let jy = -12.0 * r * t * s - 8.0 * r * t.powi(3) * c;
+        kappa_and_dkappa_dt(vx, vy, ax, ay, jx, jy).0
+    };
+    let k_slow = kappa_at(0.3); // speed = 2*r*0.3 = 1.8*r
+    let k_fast = kappa_at(0.9); // speed = 2*r*0.9 = 5.4*r -- 3x faster
+    assert!((k_slow - 1.0 / r).abs() < 1e-9);
+    assert!((k_fast - 1.0 / r).abs() < 1e-9);
+}
+
+#[test]
+fn dkappa_ds_constant_on_clothoid() {
+    // Euler spiral parameterized directly by arc length (dx/ds = cos(phi),
+    // dy/ds = sin(phi), phi = sigma*s^2/2) -- so speed == 1 identically and
+    // t IS s here, letting dkappa_dt stand in for dkappa_ds directly.
+    // kappa(s) = sigma*s by construction; dkappa/ds must read back as the
+    // constant sigma at every s, independent of s.
+    let sigma = 0.25_f64;
+    let dkappa_ds_at = |s: f64| -> f64 {
+        let phi = 0.5 * sigma * s * s;
+        let (sp, cp) = phi.sin_cos();
+        let vx = cp;
+        let vy = sp;
+        let ax = -sp * sigma * s;
+        let ay = cp * sigma * s;
+        let jx = -cp * sigma * sigma * s * s - sp * sigma;
+        let jy = -sp * sigma * sigma * s * s + cp * sigma;
+        kappa_and_dkappa_dt(vx, vy, ax, ay, jx, jy).1
+    };
+    assert!((dkappa_ds_at(0.5) - sigma).abs() < 1e-9);
+    assert!((dkappa_ds_at(2.0) - sigma).abs() < 1e-9);
+    assert!((dkappa_ds_at(4.0) - sigma).abs() < 1e-9);
+}
