@@ -27,6 +27,7 @@ export const COLORS = {
   cent: "#4dd0e1",
   scalar: "#ef5350",
   grid: "#22252b",
+  gridZero: "#454b54",
   axis: "#555",
   crosshair: "rgba(255,255,255,0.35)",
   marker: "#e0518a",
@@ -49,6 +50,8 @@ const IMPULSE_DESC = {
   acc: { label: "accel impulse", delta: "Δvel", unit: "mm/s", infOf: "∞ accel" },
   jrk: { label: "jerk impulse", delta: "Δaccel", unit: "mm/s²", infOf: "∞ jerk" },
 };
+
+const HIDDEN_LABEL_MIGRATION = { "|X|": "X", "|Y|": "Y", "|Z|": "Z", "|E|": "E" };
 
 export function initWasm() {
   return init();
@@ -267,6 +270,19 @@ class PanelRenderer {
     ctx.restore();
   }
 
+  _drawZeroLine(ctx, yMin, yMax) {
+    if (yMin > 0 || yMax < 0) return;
+    const py = this.toPixelY(0, yMin, yMax);
+    ctx.save();
+    ctx.strokeStyle = COLORS.gridZero;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(this.plotX0, py);
+    ctx.lineTo(this.plotX0 + this.plotW, py);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   // -- Render path panel to buffer -------------------------------------------
   // Equalize bounds so 1 data unit = same number of pixels in X and Y
   _equalizePathBounds(xMin, xMax, yMin, yMax) {
@@ -380,12 +396,13 @@ class PanelRenderer {
   }
 
   // -- Render time-series panel to buffer ------------------------------------
-  // `series` is a list of { arr, color, label, yMax, dash?, scalar?, axis? }
-  // lanes plotted as |value|, each against its own yMax. Entries with
-  // axis:"right" (the E lane, whose magnitudes dwarf or vanish next to XY)
-  // get a secondary right-hand axis; the `scalar` entry is the headline
-  // magnitude trace (wider, carries the peak markers). Hidden entries are
-  // filtered out by the caller.
+  // `series` is a list of { arr, color, label, yMin, yMax, dash?, scalar?,
+  // magnitude?, axis? }. Signed lanes plot their true value; entries flagged
+  // `magnitude` (the ⊥ projection and the |XY| scalar) plot |value|. Each lane
+  // draws against its own (yMin, yMax). Entries with axis:"right" (the E lane,
+  // whose magnitudes dwarf or vanish next to XY) get a secondary right-hand
+  // axis; the `scalar` entry is the headline trace (wider, carries the peak
+  // markers). Hidden entries are filtered out by the caller.
   renderTimeBuffer(tMin, tMax, yMin, yMax, series, drawPeaks) {
     const DATA = this.view.data;
     const right = series.find(s => s.axis === "right");
@@ -398,7 +415,8 @@ class PanelRenderer {
     const bctx = this.ctx;
     bctx.clearRect(0, 0, this.w, this.h);
     this._drawGrid(bctx, tMin, tMax, yMin, yMax);
-    if (right) this._drawRightAxis(bctx, 0, right.yMax, right.color);
+    this._drawZeroLine(bctx, yMin, yMax);
+    if (right) this._drawRightAxis(bctx, right.yMin, right.yMax, right.color);
 
     const t = DATA.t();
     bctx.save();
@@ -412,7 +430,8 @@ class PanelRenderer {
       bctx.strokeStyle = s.color;
       bctx.lineWidth = 1.0;
       bctx.setLineDash(s.dash || []);
-      this._strokeSeries(bctx, t, (i) => Math.abs(s.arr[i]), tMin, tMax, yMin, s.yMax);
+      const valueAt = s.magnitude ? (i) => Math.abs(s.arr[i]) : (i) => s.arr[i];
+      this._strokeSeries(bctx, t, valueAt, tMin, tMax, s.yMin, s.yMax);
     }
     bctx.setLineDash([]);
 
@@ -421,7 +440,8 @@ class PanelRenderer {
       const scalar = scalarEntry.arr;
       bctx.strokeStyle = scalarEntry.color;
       bctx.lineWidth = 1.2;
-      this._strokeSeries(bctx, t, (i) => Math.abs(scalar[i]), tMin, tMax, yMin, yMax);
+      const scalarAt = scalarEntry.magnitude ? (i) => Math.abs(scalar[i]) : (i) => scalar[i];
+      this._strokeSeries(bctx, t, scalarAt, tMin, tMax, yMin, yMax);
 
       if (drawPeaks) {
         const peaks = findPeaks(scalar);
@@ -472,7 +492,7 @@ class PanelRenderer {
   // accel) spike the analytic per-piece derivative can't plot. Draw each as a
   // stem whose height encodes |Δvalue| relative to the largest impulse on
   // this panel; the exact value shows on hover.
-  drawImpulses(times, mags, tMin, tMax, maxMag) {
+  drawImpulses(times, mags, tMin, tMax, maxMag, yMin, yMax) {
     this._impulses = [];
     const bctx = this.ctx;
     bctx.save();
@@ -482,13 +502,13 @@ class PanelRenderer {
     bctx.strokeStyle = COLORS.impulse;
     bctx.fillStyle = COLORS.impulse;
     bctx.lineWidth = 1.5;
-    const base = this.plotY0 + this.plotH;
+    const base = this.toPixelY(0, yMin, yMax);
     for (let i = 0; i < times.length; i++) {
       const tb = times[i];
       if (tb < tMin || tb > tMax) continue;
       const px = this.toPixelX(tb, tMin, tMax);
       const frac = maxMag > 0 ? Math.min(1, mags[i] / maxMag) : 1;
-      const top = this.plotY0 + this.plotH * (1 - 0.92 * frac);
+      const top = base - this.plotH * 0.92 * frac;
       bctx.beginPath();
       bctx.moveTo(px, base);
       bctx.lineTo(px, top);
@@ -583,7 +603,9 @@ export class TrajectoryView {
     try {
       const saved = JSON.parse(localStorage.getItem(hiddenSeriesKey)) || {};
       for (const type of Object.keys(this.hiddenSeries)) {
-        for (const label of saved[type] || []) this.hiddenSeries[type].add(label);
+        for (const label of saved[type] || []) {
+          this.hiddenSeries[type].add(HIDDEN_LABEL_MIGRATION[label] || label);
+        }
       }
     } catch (e) { /* corrupt storage — start with everything visible */ }
 
@@ -775,16 +797,16 @@ export class TrajectoryView {
   _panelSeries(type, xKey, yKey, zKey, eKey, tangKey, centKey, scalarKey) {
     const DATA = this.data;
     const series = [
-      { key: xKey, color: COLORS.vx, label: "|X|" },
-      { key: yKey, color: COLORS.vy, label: "|Y|" },
+      { key: xKey, color: COLORS.vx, label: "X" },
+      { key: yKey, color: COLORS.vy, label: "Y" },
     ];
-    if (anyNonZero(DATA[zKey]())) series.push({ key: zKey, color: COLORS.vz, label: "|Z|" });
-    if (anyNonZero(DATA[eKey]())) series.push({ key: eKey, color: COLORS.ve, label: "|E|", axis: "right" });
+    if (anyNonZero(DATA[zKey]())) series.push({ key: zKey, color: COLORS.vz, label: "Z" });
+    if (anyNonZero(DATA[eKey]())) series.push({ key: eKey, color: COLORS.ve, label: "E", axis: "right" });
     if (tangKey) {
       series.push({ key: tangKey, color: COLORS.tang, dash: [5, 3], label: "∥" });
-      series.push({ key: centKey, color: COLORS.cent, dash: [5, 3], label: "⊥" });
+      series.push({ key: centKey, color: COLORS.cent, dash: [5, 3], label: "⊥", magnitude: true });
     }
-    series.push({ key: scalarKey, color: COLORS.scalar, label: "|XY|", scalar: true });
+    series.push({ key: scalarKey, color: COLORS.scalar, label: "|XY|", scalar: true, magnitude: true });
     for (const s of series) {
       s.arr = DATA[s.key]();
       s.hidden = this.hiddenSeries[type].has(s.label);
@@ -811,31 +833,41 @@ export class TrajectoryView {
     // a peak that shrinks must visibly drop, not get renormalized to the top.
     // Only visible series count, so hiding a dominant lane rescales the rest;
     // right-axis (E) series get their own independent scale.
-    function visibleMaxOf(data, key) {
+    function visibleExtentOf(data, key, magnitude) {
       const dt = data.t();
       const arr = data[key]();
-      let m = 0;
+      let lo = 0, hi = 0;
       for (let i = 0; i < dt.length; i++) {
-        const a = Math.abs(arr[i]);
-        if (dt[i] >= tMin && dt[i] <= tMax && a > m) m = a;
+        if (dt[i] < tMin || dt[i] > tMax) continue;
+        const v = magnitude ? Math.abs(arr[i]) : arr[i];
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
       }
-      return m;
+      return { lo, hi };
     }
-    const visibleMax = (keys) => {
-      let m = 0;
-      for (const key of keys) {
-        m = Math.max(m, visibleMaxOf(this.dataAfter, key));
-        if (this.dataBefore) m = Math.max(m, visibleMaxOf(this.dataBefore, key));
+    const visibleRange = (entries) => {
+      let lo = 0, hi = 0;
+      for (const s of entries) {
+        for (const data of [this.dataAfter, this.dataBefore]) {
+          if (!data) continue;
+          const e = visibleExtentOf(data, s.key, s.magnitude);
+          if (e.lo < lo) lo = e.lo;
+          if (e.hi > hi) hi = e.hi;
+        }
       }
-      return m * 1.15 || 1;
+      let yMin = lo * 1.15, yMax = hi * 1.15;
+      if (yMin === 0 && yMax === 0) yMax = 1;
+      return { yMin, yMax };
     };
     function scaleSeries(series) {
       const shown = series.filter(s => !s.hidden);
-      const axisKeys = (axis) => shown.filter(s => s.axis === axis).map(s => s.key);
-      const leftMax = visibleMax(axisKeys(undefined));
-      const rightMax = visibleMax(axisKeys("right"));
-      for (const s of shown) s.yMax = s.axis === "right" ? rightMax : leftMax;
-      return { shown, leftMax };
+      const left = visibleRange(shown.filter(s => s.axis !== "right"));
+      const right = visibleRange(shown.filter(s => s.axis === "right"));
+      for (const s of shown) {
+        const r = s.axis === "right" ? right : left;
+        s.yMin = r.yMin; s.yMax = r.yMax;
+      }
+      return { shown, leftMin: left.yMin, leftMax: left.yMax };
     }
 
     const velSeries = this._panelSeries("vel", "vx", "vy", "vz", "ve", null, null, "v_scalar");
@@ -852,7 +884,8 @@ export class TrajectoryView {
       .map(([k, v]) => `${k}:${[...v].join("+")}`)
       .join(";");
     const key = `${tMin},${tMax},${xMin},${xMax},${yMin},${yMax},` +
-      `${vel.leftMax},${acc.leftMax},${jrk.leftMax},${kappa.leftMax},${hiddenKey},${this.variant}`;
+      `${vel.leftMin},${vel.leftMax},${acc.leftMin},${acc.leftMax},` +
+      `${jrk.leftMin},${jrk.leftMax},${kappa.leftMin},${kappa.leftMax},${hiddenKey},${this.variant}`;
     if (key !== this.lastBoundsKey) {
       this.lastBoundsKey = key;
 
@@ -862,19 +895,19 @@ export class TrajectoryView {
       this._updateLegend("kappa", "Curvature", kappaSeries);
 
       this.renderers[0].renderPathBuffer(xMin, xMax, yMin, yMax);
-      this.renderers[1].renderTimeBuffer(tMin, tMax, 0, vel.leftMax, vel.shown, this.showPeaks);
-      this.renderers[2].renderTimeBuffer(tMin, tMax, 0, acc.leftMax, acc.shown, this.showPeaks);
-      this.renderers[3].renderTimeBuffer(tMin, tMax, 0, jrk.leftMax, jrk.shown, this.showPeaks);
-      this.renderers[4].renderTimeBuffer(tMin, tMax, 0, kappa.leftMax, kappa.shown, this.showPeaks);
+      this.renderers[1].renderTimeBuffer(tMin, tMax, vel.leftMin, vel.leftMax, vel.shown, this.showPeaks);
+      this.renderers[2].renderTimeBuffer(tMin, tMax, acc.leftMin, acc.leftMax, acc.shown, this.showPeaks);
+      this.renderers[3].renderTimeBuffer(tMin, tMax, jrk.leftMin, jrk.leftMax, jrk.shown, this.showPeaks);
+      this.renderers[4].renderTimeBuffer(tMin, tMax, kappa.leftMin, kappa.leftMax, kappa.shown, this.showPeaks);
 
       const DATA = this.data;
-      const drawImpulsesOn = (renderer, times, mags) => {
+      const drawImpulsesOn = (renderer, times, mags, yMin, yMax) => {
         let max = 0;
         for (let i = 0; i < mags.length; i++) if (mags[i] > max) max = mags[i];
-        renderer.drawImpulses(times, mags, tMin, tMax, max);
+        renderer.drawImpulses(times, mags, tMin, tMax, max, yMin, yMax);
       };
-      drawImpulsesOn(this.renderers[2], DATA.accel_impulse_t(), DATA.accel_impulse_mag());
-      drawImpulsesOn(this.renderers[3], DATA.jerk_impulse_t(), DATA.jerk_impulse_mag());
+      drawImpulsesOn(this.renderers[2], DATA.accel_impulse_t(), DATA.accel_impulse_mag(), acc.leftMin, acc.leftMax);
+      drawImpulsesOn(this.renderers[3], DATA.jerk_impulse_t(), DATA.jerk_impulse_mag(), jrk.leftMin, jrk.leftMax);
     }
 
     // Composite all (always — cursor may have moved)
