@@ -341,17 +341,22 @@ impl CurvatureClass {
     }
 }
 
-// 10th-to-90th-percentile spread of a sorted slice: robust to a handful of
+// ~10th-to-90th-percentile spread of a sorted slice: robust to a handful of
 // outliers (e.g. the one or two samples nearest a piece seam, where dkappa/ds
 // can legitimately jump even in a perfectly healthy trajectory) in a way a
-// raw max-min is not.
+// raw max-min is not. Trims at least 1 sample off each end whenever there are
+// at least 3 -- plain `n / 10` truncates to 0 (i.e. no trim at all, degrading
+// to raw min-max) for any n under 10, which is exactly the small-window case
+// (a trailing partial window, or one shrunk by excluding Cusp/Gap samples)
+// this robustness exists to cover.
 fn percentile_spread(sorted: &[f64]) -> f64 {
     let n = sorted.len();
     if n < 3 {
         return sorted.last().copied().unwrap_or(0.0) - sorted.first().copied().unwrap_or(0.0);
     }
-    let lo = sorted[n / 10];
-    let hi = sorted[n - 1 - n / 10];
+    let trim = (n / 10).max(1).min((n - 1) / 2);
+    let lo = sorted[trim];
+    let hi = sorted[n - 1 - trim];
     hi - lo
 }
 
@@ -503,7 +508,14 @@ fn curvature_series(t: &[f64], xp: &[Vec<f64>], yp: &[Vec<f64>]) -> (Vec<f64>, V
         dkappa_ds[i] = dk_dt / speed;
     }
 
-    let mut window_class = vec![CurvatureClass::Zero; n];
+    // Classify per window first (one entry per window, NOT expanded to
+    // per-sample) so smooth_classes's neighbor comparison actually compares
+    // adjacent WINDOWS. Expanding to per-sample before smoothing would make
+    // every non-boundary sample its own "neighbor" by construction (they're
+    // all the same repeated value within a window), so the despike pass
+    // would never find anything to despike.
+    let mut window_starts: Vec<usize> = Vec::new();
+    let mut window_classes: Vec<CurvatureClass> = Vec::new();
     let mut i = 0;
     while i < n {
         let end = (i + CLASSIFY_WINDOW_SAMPLES).min(n);
@@ -515,13 +527,19 @@ fn curvature_series(t: &[f64], xp: &[Vec<f64>], yp: &[Vec<f64>]) -> (Vec<f64>, V
             let dk: Vec<f64> = idxs.iter().map(|&j| dkappa_ds[j]).collect();
             classify_window(&k, &dk)
         };
-        for j in i..end {
-            window_class[j] = cls;
-        }
+        window_starts.push(i);
+        window_classes.push(cls);
         i = end;
     }
-    let smoothed = smooth_classes(&window_class);
-    let classes = (0..n).map(|i| flag[i].unwrap_or(smoothed[i])).collect();
+    let smoothed_windows = smooth_classes(&window_classes);
+
+    let mut classes = vec![CurvatureClass::Zero; n];
+    for (w, &start) in window_starts.iter().enumerate() {
+        let end = window_starts.get(w + 1).copied().unwrap_or(n);
+        for j in start..end {
+            classes[j] = flag[j].unwrap_or(smoothed_windows[w]);
+        }
+    }
     (kappa, classes)
 }
 ```
@@ -712,6 +730,12 @@ Add a new panel block after the jrk panel's `</div>` (after line 99, `<canvas id
     </div>
 ```
 
+Every panel also has a cursor overlay div (`cursor-path`, `cursor-vel`, `cursor-acc`, `cursor-jrk`, each `<div class="cursor" id="cursor-X"><i class="cv"></i><i class="ch"></i><i class="cdot"></i></div>`) that `PanelRenderer`'s constructor resolves by id — omitting the new one crashes the whole dashboard on load with an element-not-found error the moment a 5th `PanelRenderer` is constructed. Add, right after the existing `cursor-jrk` div:
+
+```html
+      <div class="cursor" id="cursor-kappa"><i class="cv"></i><i class="ch"></i><i class="cdot"></i></div>
+```
+
 - [ ] **Step 2: Same edits in `playground.html`**
 
 Apply the identical four edits to `snapshots/web/static/playground.html` (its CSS/markup mirrors `viewer.html` exactly, at lines 47-53 and 128-148 respectively; the new panel div uses the same 6-space indentation as its neighboring `panel-jrk` block there).
@@ -779,7 +803,7 @@ to:
     const accSeries = this._panelSeries("acc", "ax", "ay", "az", "ae", "a_tang", "a_cent", "a_scalar");
     const jrkSeries = this._panelSeries("jrk", "jx", "jy", "jz", "je", "j_tang", "j_cent", "j_scalar");
     const kappaSeries = [{ key: "kappa", color: COLORS.kappa, label: "κ", scalar: true, hidden: false }];
-    kappaSeries[0].arr = DATA.kappa();
+    kappaSeries[0].arr = this.data.kappa();
     const vel = scaleSeries(velSeries);
     const acc = scaleSeries(accSeries);
     const jrk = scaleSeries(jrkSeries);
@@ -1697,27 +1721,61 @@ git commit -m "test(harness): move read_printer_config tests from scripts/test_v
 
 ---
 
-## Task 15: Delete `scripts/viz_pipeline.py`
+## Task 15: Delete `scripts/viz_pipeline.py` and its remaining test file
 
 **Files:**
 - Delete: `scripts/viz_pipeline.py`
+- Delete: `snapshots/test_viz_pipeline.py` (a second, separate test file discovered during Task 14 — not the already-deleted `scripts/test_viz_pipeline.py`. It unit-tests `viz_pipeline`'s internal math helpers directly — `_build_time_series`, `_frenet_components`, `_eval_pieces` — all of which duplicate what `rust/snapshot-viewer` now does analytically and have no surviving subject matter once `scripts/viz_pipeline.py` is gone.)
+- Modify: `pyproject.toml` (`testpaths`)
 
 **Interfaces:** none — Task 13 already moved everything `harness.py` needed; Task 16 removes `server.py`'s use of `viz_pipeline.render`.
 
-- [ ] **Step 1: Confirm nothing still imports it**
+- [ ] **Step 1: Confirm nothing still imports `viz_pipeline`, other than what's expected**
 
 Run: `grep -rln "viz_pipeline" --include="*.py" .`
-Expected: only `snapshots/web/server.py` (removed in Task 16 — do this task and Task 16 as a pair if your reviewer wants a single working-tree state at every commit; the deletion itself is safe to land now since `server.py`'s import will simply fail loudly at process start until Task 16 lands, exactly the kind of fail-loud-not-silent breakage this project prefers over a half-working intermediate state).
+Expected: `snapshots/web/server.py` (removed in Task 16 — do this task and Task 16 as a pair if your reviewer wants a single working-tree state at every commit; the deletion itself is safe to land now since `server.py`'s import will simply fail loudly at process start until Task 16 lands, exactly the kind of fail-loud-not-silent breakage this project prefers over a half-working intermediate state) and `snapshots/test_viz_pipeline.py` (deleted by this same task, Step 2 below).
 
-- [ ] **Step 2: Delete the file**
+- [ ] **Step 2: Delete both files**
 
-Run: `git rm scripts/viz_pipeline.py`
+Run: `git rm scripts/viz_pipeline.py snapshots/test_viz_pipeline.py`
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Drop both now-stale entries from `pyproject.toml`'s `testpaths`**
+
+`pyproject.toml`'s `testpaths` list still has `"scripts/test_viz_pipeline.py"` (already deleted in Task 14 — stale since that commit, harmless because pytest tolerates a missing testpaths entry, but should be cleaned up here since this task is the natural place) and `"snapshots/test_viz_pipeline.py"` (deleted in Step 2 above). Change:
+
+```toml
+testpaths = [
+  "test",
+  "tests",
+  "scripts/test_viz_pipeline.py",
+  "snapshots/test_harness.py",
+  "snapshots/test_viz_pipeline.py",
+]
+```
+
+to:
+
+```toml
+testpaths = [
+  "test",
+  "tests",
+  "snapshots/test_harness.py",
+]
+```
+
+- [ ] **Step 4: Run the collected test suite to confirm nothing is broken**
+
+Run: `python3 -m pytest --collect-only -q` from the repo root.
+Expected: collection succeeds with no errors or warnings about missing/orphaned test paths.
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git commit -m "chore: delete scripts/viz_pipeline.py, superseded by the WASM viewer"
+git add pyproject.toml
+git commit -m "chore: delete scripts/viz_pipeline.py and its test file, superseded by the WASM viewer"
 ```
+
+(The `git rm` from Step 2 stages both deletions; they're included in this commit alongside the `pyproject.toml` change.)
 
 ---
 
@@ -1787,16 +1845,19 @@ git commit -m "refactor(server): remove the dead PNG rendering subsystem"
 
 ---
 
-## Task 17: Remove the dead `png-overlay` markup/CSS from `viewer.html`
+## Task 17: Remove the PNG popup feature from `viewer.html`/`viewer.js`
 
 **Files:**
-- Modify: `snapshots/web/static/viewer.html:28-31,104`
+- Modify: `snapshots/web/static/viewer.html` (CSS, toolbar button, overlay markup)
+- Modify: `snapshots/web/static/viewer.js` (the `openPng`/`closePng`/`pngOpen` functions, their listeners, and the keydown handler's PNG-open branch)
 
 **Interfaces:** none.
 
+Correction from the original plan: this was written assuming the `png-overlay` markup was already fully dead (nothing in the frontend referenced it). Task 16 found that's false — `viewer.html` has a live "PNG" toolbar button, wired through `viewer.js`'s `openPng`/`closePng`/`pngOpen`, that opens the overlay and points an `<img>` at `/img/<case>/after.png` — the exact route Task 16 just removed server-side. With the server route gone, this button now points at nothing; this task removes the client-side feature that depended on it, not just the CSS.
+
 - [ ] **Step 1: Delete the CSS**
 
-Delete lines 28-31:
+In `snapshots/web/static/viewer.html`, delete:
 
 ```css
 .png-overlay{display:none;position:fixed;inset:0;z-index:200;background:rgba(0,0,0,0.92)}
@@ -1805,24 +1866,107 @@ Delete lines 28-31:
 .png-scroll img{display:block;width:100%;height:auto}
 ```
 
-- [ ] **Step 2: Delete the markup**
+- [ ] **Step 2: Delete the toolbar button**
 
-Delete line 104:
+In `snapshots/web/static/viewer.html`, delete:
+
+```html
+    <button id="open-png" title="Open the rendered PNG">PNG</button>
+```
+
+- [ ] **Step 3: Delete the overlay markup**
+
+In `snapshots/web/static/viewer.html`, delete:
 
 ```html
 <div class="png-overlay" id="png-overlay"><div class="png-scroll" id="png-scroll"></div></div>
 ```
 
-- [ ] **Step 3: Confirm nothing in JS references these ids**
+- [ ] **Step 4: Delete the PNG popup functions in `viewer.js`**
 
-Run: `grep -rn "png-overlay\|png-scroll" snapshots/web/static/`
+In `snapshots/web/static/viewer.js`, delete the whole section (comment header included):
+
+```js
+// -- PNG popup ---------------------------------------------------------------
+function openPng() {
+  if (!currentCase) return;
+  const scroll = document.getElementById("png-scroll");
+  scroll.innerHTML = "";
+  const img = new Image();
+  img.src = `/img/${encodeURIComponent(currentCase)}/after.png?t=${Date.now()}`;
+  scroll.appendChild(img);
+  scroll.scrollTop = 0;
+  document.getElementById("png-overlay").classList.add("open");
+}
+
+function closePng() {
+  document.getElementById("png-overlay").classList.remove("open");
+}
+
+function pngOpen() {
+  return document.getElementById("png-overlay").classList.contains("open");
+}
+```
+
+- [ ] **Step 5: Remove the two event listeners**
+
+In `snapshots/web/static/viewer.js`, delete:
+
+```js
+  document.getElementById("open-png").addEventListener("click", openPng);
+  document.getElementById("png-overlay").addEventListener("click", closePng);
+```
+
+(Leave the surrounding `toggle-variant` and `accept` listener lines in place — only these two go.)
+
+- [ ] **Step 6: Remove the keydown handler's PNG-open branch**
+
+In `snapshots/web/static/viewer.js`, the global keydown handler currently reads:
+
+```js
+  document.addEventListener("keydown", (e) => {
+    if (pngOpen()) {
+      if (e.key === "Escape") closePng();
+      return;
+    }
+    if (e.key === "ArrowLeft") stepCase(-1);
+    else if (e.key === "ArrowRight") stepCase(1);
+    else if (e.key === " " || e.key === "b" || e.key === "B") {
+      e.preventDefault();
+      view.toggleVariant();
+    }
+    else if (e.key === "a" || e.key === "A") acceptCurrent();
+  });
+```
+
+Change it to:
+
+```js
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowLeft") stepCase(-1);
+    else if (e.key === "ArrowRight") stepCase(1);
+    else if (e.key === " " || e.key === "b" || e.key === "B") {
+      e.preventDefault();
+      view.toggleVariant();
+    }
+    else if (e.key === "a" || e.key === "A") acceptCurrent();
+  });
+```
+
+- [ ] **Step 7: Confirm nothing else references any of this**
+
+Run: `grep -rn "png-overlay\|png-scroll\|open-png\|openPng\|closePng\|pngOpen" snapshots/web/static/`
 Expected: no matches.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 8: Manually verify**
+
+Run: `cd snapshots && ./snapshot-tests.sh --view`, open a case in the viewer. Expected: no "PNG" button in the toolbar, no console errors, arrow-key case stepping and the other keyboard shortcuts still work. If you cannot drive an actual browser, do the strongest static verification you can (syntax check, confirm no orphaned `document.getElementById` calls for removed ids elsewhere in the file) and say exactly what you could and couldn't verify.
+
+- [ ] **Step 9: Commit**
 
 ```bash
-git add snapshots/web/static/viewer.html
-git commit -m "chore: remove the dead png-overlay markup from viewer.html"
+git add snapshots/web/static/viewer.html snapshots/web/static/viewer.js
+git commit -m "chore: remove the PNG popup feature, its server route is gone"
 ```
 
 ---
@@ -1955,6 +2099,142 @@ Expected: because `fitted_segments` was removed from the schema (Tasks 10-12), *
 Baseline regeneration is the user's call, not an automated step of this plan (per this repo's convention: baselines are always generated by the user). Stop here and hand off: report that the schema change means every case will show CHANGED on the next run, and that re-baselining (via the review server's "Accept all", or `--ci` once accepted) is a decision for the user to make explicitly.
 
 No commit for this task — it's verification only. If Step 5 surfaces a tuning problem, fix it in Task 3/4's file and commit that fix separately before reporting completion.
+
+---
+
+## Task 20: Document the circle-case curvature-ripple finding (no behavior change)
+
+**Files:**
+- Modify: `rust/snapshot-viewer/src/lib.rs` (doc comment only, near `DKAPPA_DS_ZERO_EPS`/`DKAPPA_DS_SPREAD_EPS`)
+
+**Interfaces:** none — this is a comment-only change, no logic or threshold values change.
+
+**Context:** Task 19's verification found `snapshots/cases/arc_fit/circle.gcode` (a case designed to be a constant-curvature circle, no shaper configured) classifies 77% "Other" / 12% "Constant". A follow-up investigation confirmed the fitter itself is exact (90% of the path is a genuine `Arc` segment with mathematically constant curvature by construction — `rust/geometry/src/path/arc.rs`), and the deviation is introduced entirely by the lowering stage: converting that exact arc into the executed per-axis polynomial trajectory (`ScalarNurbs`, a non-rational/plain polynomial spline — see `rust/nurbs/src/scalar.rs`) cannot represent a circle's curvature exactly. Measured directly inside one exact arc segment: kappa ripples roughly ±5-7% around its true value, and the windowed dkappa/ds spread reaches ~16x `DKAPPA_DS_SPREAD_EPS`'s current value. This is a real, quantified property of the motion pipeline's lowering stage (nothing in the lowerer currently budgets for curvature/dkappa-ds consistency, only position and acceleration deviation), not a classifier bug — and it should NOT be hidden by loosening the classifier's epsilons in this branch. It's being left as a documented, known finding for whoever next investigates the fitter/lowerer's curvature-consistency budget.
+
+- [ ] **Step 1: Add the documentation comment**
+
+In `rust/snapshot-viewer/src/lib.rs`, immediately above the `DKAPPA_DS_ZERO_EPS`/`DKAPPA_DS_SPREAD_EPS` constant declarations, add:
+
+```rust
+// Known finding (not a threshold bug): `snapshots/cases/arc_fit/circle.gcode`
+// -- a case with no shaper, designed to be a constant-curvature circle --
+// classifies as majority "Other" against these thresholds. Investigated and
+// confirmed the fitter is exact (the geometry layer emits a genuine Arc
+// segment, mathematically constant curvature by construction); the ripple is
+// introduced entirely by the lowering stage's conversion of that exact arc
+// into the executed per-axis polynomial trajectory, which is a non-rational
+// spline (ScalarNurbs has no weights -- see rust/nurbs/src/scalar.rs) and
+// therefore cannot represent a circle's curvature exactly. Measured inside
+// one exact arc segment: kappa ripples ~5-7% around its true value, with a
+// windowed dkappa/ds spread ~16x DKAPPA_DS_SPREAD_EPS's current value. This
+// is a real, quantified property of the lowering stage -- nothing there
+// currently budgets for curvature/dkappa-ds consistency, only position
+// (fit_tol_mm) and acceleration (fit_tol_accel_mm_s2) deviation -- not a
+// classifier miscalibration, and deliberately NOT papered over here by
+// loosening these thresholds. Left as a known, documented finding for
+// whoever next investigates the fitter/lowerer's curvature budget.
+```
+
+- [ ] **Step 2: Confirm no behavior change**
+
+Run: `cd rust/snapshot-viewer && cargo nextest run && cargo clippy --all-targets -- -D warnings && cargo fmt --check`
+Expected: identical results to before this change (all PASS, clean) — this step only adds a comment.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add rust/snapshot-viewer/src/lib.rs
+git commit -m "docs(snapshot-viewer): document the arc_fit/circle curvature-ripple finding"
+```
+
+---
+
+## Task 21: A wider, curvature-specific Cusp speed floor
+
+**Files:**
+- Modify: `rust/snapshot-viewer/src/lib.rs`
+- Test: `rust/snapshot-viewer/src/tests.rs`
+
+**Interfaces:**
+- Produces: `const CURVATURE_CUSP_SPEED_FLOOR: f64` — used in place of `FRENET_SPEED_FLOOR` specifically in `curvature_series`'s cusp check.
+
+**Context:** Task 19's verification also found the playground's Curvature panel can autoscale to ~1.6e12 near a cusp-adjacent sample. The correct framing (confirmed): at a genuine full stop with a direction change, curvature is not "very high" -- it's mathematically undefined. kappa = (vx*ay - vy*ax)/speed^3 diverges as speed->0 near such a point even though the underlying trajectory is perfectly smooth (position/velocity/acceleration are all continuous through the stop) -- the numerator shrinks roughly linearly with speed near the stop while the denominator shrinks as speed cubed, so the ratio blows up. This is exactly what the existing Cusp classification exists to catch, but `FRENET_SPEED_FLOOR` (reused from the Frenet-projection code, which only divides by speed^1) is too small a margin for curvature's much steeper speed^3 sensitivity -- a sample just above that floor still produces an astronomically large, physically-meaningless kappa instead of being flagged Cusp. The fix is a separate, larger speed floor used only for curvature's own cusp check.
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `rust/snapshot-viewer/src/tests.rs`:
+
+```rust
+#[test]
+fn curvature_series_flags_cusp_at_a_speed_too_small_for_kappa_to_be_meaningful() {
+    // A speed of 1e-6 clears FRENET_SPEED_FLOOR (1e-9) by three orders of
+    // magnitude, but kappa's speed^3 denominator still makes it blow up to
+    // an astronomically large, physically meaningless value there -- this
+    // must still read as Cusp, not as a giant-but-"real" curvature number.
+    let xp = vec![vec![0.0, 1.0, 0.0, 1e-6, 1000.0, 0.0]];
+    let yp = vec![vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0]];
+    let t = vec![0.0];
+    let (_, classes) = curvature_series(&t, &xp, &yp);
+    assert_eq!(classes[0], CurvatureClass::Cusp);
+}
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `cd rust/snapshot-viewer && cargo nextest run -E 'test(curvature_series_flags_cusp_at_a_speed_too_small)'`
+Expected: FAIL — with today's `FRENET_SPEED_FLOOR = 1e-9` check, a speed of `1e-6` clears the floor and the sample gets a (huge, finite) kappa value classified as some non-Cusp class instead.
+
+- [ ] **Step 3: Add the new constant and use it in `curvature_series`**
+
+In `rust/snapshot-viewer/src/lib.rs`, add near `FRENET_SPEED_FLOOR`'s declaration:
+
+```rust
+// FRENET_SPEED_FLOOR (above) is tuned for Frenet-projection's 1/speed
+// sensitivity; kappa's 1/speed^3 sensitivity blows up far sooner as speed
+// shrinks -- a speed that's a perfectly fine floor for tangential/normal
+// projection still produces an astronomically large, physically
+// meaningless kappa near a genuine full stop. First-pass, tune against
+// real cases if a genuinely slow (but not stopped) cornering move is ever
+// seen misclassified as Cusp.
+const CURVATURE_CUSP_SPEED_FLOOR: f64 = 1e-3;
+```
+
+In `curvature_series`, change:
+
+```rust
+        let speed = libm::hypot(vx, vy);
+        if speed < FRENET_SPEED_FLOOR {
+            flag[i] = Some(CurvatureClass::Cusp);
+            continue;
+        }
+```
+
+to:
+
+```rust
+        let speed = libm::hypot(vx, vy);
+        if speed < CURVATURE_CUSP_SPEED_FLOOR {
+            flag[i] = Some(CurvatureClass::Cusp);
+            continue;
+        }
+```
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `cd rust/snapshot-viewer && cargo nextest run`
+Expected: all tests PASS, including the new one — and re-verify the two existing cusp-related tests (`curvature_series_flags_a_cusp_at_zero_speed`, and Task 4's synthetic-cusp coverage) still pass unchanged, since a true zero-speed sample is still well within the new, larger floor too.
+
+- [ ] **Step 5: Run clippy and fmt**
+
+Run: `cd rust/snapshot-viewer && cargo clippy --all-targets -- -D warnings && cargo fmt --check`
+Expected: both clean.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add rust/snapshot-viewer/src/lib.rs rust/snapshot-viewer/src/tests.rs
+git commit -m "fix(snapshot-viewer): widen the cusp speed floor used for curvature"
+```
 
 ---
 
