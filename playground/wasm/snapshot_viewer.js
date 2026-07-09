@@ -75,6 +75,13 @@ export class TrajectoryData {
         return ret;
     }
     /**
+     * @returns {Float64Array}
+     */
+    curvature_class() {
+        const ret = wasm.trajectorydata_curvature_class(this.__wbg_ptr);
+        return ret;
+    }
+    /**
      * @param {string} json
      */
     constructor(json) {
@@ -154,6 +161,13 @@ export class TrajectoryData {
     /**
      * @returns {Float64Array}
      */
+    kappa() {
+        const ret = wasm.trajectorydata_kappa(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {Float64Array}
+     */
     kin_x() {
         const ret = wasm.trajectorydata_kin_x(this.__wbg_ptr);
         return ret;
@@ -206,38 +220,6 @@ export class TrajectoryData {
     seam_max_dv() {
         const ret = wasm.trajectorydata_seam_max_dv(this.__wbg_ptr);
         return ret;
-    }
-    /**
-     * @returns {number}
-     */
-    segment_count() {
-        const ret = wasm.trajectorydata_segment_count(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
-     * Returns flattened segment data: [x0,y0,x1,y1] for lines, [x0,y0,...,xN,yN] for arcs/clothoids
-     * @param {number} i
-     * @returns {Float64Array}
-     */
-    segment_data(i) {
-        const ret = wasm.trajectorydata_segment_data(this.__wbg_ptr, i);
-        return ret;
-    }
-    /**
-     * @param {number} i
-     * @returns {string}
-     */
-    segment_type(i) {
-        let deferred1_0;
-        let deferred1_1;
-        try {
-            const ret = wasm.trajectorydata_segment_type(this.__wbg_ptr, i);
-            deferred1_0 = ret[0];
-            deferred1_1 = ret[1];
-            return getStringFromWasm0(ret[0], ret[1]);
-        } finally {
-            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
-        }
     }
     /**
      * @returns {Float64Array}

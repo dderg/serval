@@ -13,6 +13,7 @@ export class TrajectoryData {
     ax(): Float64Array;
     ay(): Float64Array;
     az(): Float64Array;
+    curvature_class(): Float64Array;
     constructor(json: string);
     j_cent(): Float64Array;
     j_scalar(): Float64Array;
@@ -23,6 +24,7 @@ export class TrajectoryData {
     jx(): Float64Array;
     jy(): Float64Array;
     jz(): Float64Array;
+    kappa(): Float64Array;
     kin_x(): Float64Array;
     kin_y(): Float64Array;
     point_count(): number;
@@ -31,12 +33,6 @@ export class TrajectoryData {
     seam_max_da(): Float64Array;
     seam_max_dp(): Float64Array;
     seam_max_dv(): Float64Array;
-    segment_count(): number;
-    /**
-     * Returns flattened segment data: [x0,y0,x1,y1] for lines, [x0,y0,...,xN,yN] for arcs/clothoids
-     */
-    segment_data(i: number): Float64Array;
-    segment_type(i: number): string;
     t(): Float64Array;
     traversal_time(): number;
     v_scalar(): Float64Array;
@@ -87,9 +83,8 @@ export interface InitOutput {
     readonly trajectorydata_worst_seams_json: (a: number) => [number, number];
     readonly trajectorydata_traversal_time: (a: number) => number;
     readonly trajectorydata_point_count: (a: number) => number;
-    readonly trajectorydata_segment_count: (a: number) => number;
-    readonly trajectorydata_segment_type: (a: number, b: number) => [number, number];
-    readonly trajectorydata_segment_data: (a: number, b: number) => any;
+    readonly trajectorydata_kappa: (a: number) => any;
+    readonly trajectorydata_curvature_class: (a: number) => any;
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
