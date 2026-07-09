@@ -284,6 +284,71 @@ fn smooth_classes(raw: &[CurvatureClass]) -> Vec<CurvatureClass> {
     out
 }
 
+#[allow(dead_code)]
+// Consumed in later task wiring curvature metrics into the export.
+const CLASSIFY_WINDOW_SAMPLES: usize = 24; // first-pass; tune against real cases
+
+// One kappa value and one CurvatureClass per entry of `t` (same grid the
+// velocity/acceleration/jerk panels already use -- no new sampling). A
+// sample landing in a piece-domain gap/overlap is flagged Gap; a
+// near-zero-speed sample is flagged Cusp; everything else feeds a
+// fixed-size, piece-agnostic sliding window that gets classified as a unit
+// and then despiked against its neighbors.
+#[allow(dead_code)]
+// Consumed in later task wiring curvature metrics into the export.
+fn curvature_series(
+    t: &[f64],
+    xp: &[Vec<f64>],
+    yp: &[Vec<f64>],
+) -> (Vec<f64>, Vec<CurvatureClass>) {
+    let n = t.len();
+    let mut anomalies = domain_anomalies(xp);
+    anomalies.extend(domain_anomalies(yp));
+
+    let mut kappa = vec![0.0; n];
+    let mut dkappa_ds = vec![0.0; n];
+    let mut flag: Vec<Option<CurvatureClass>> = vec![None; n];
+
+    for i in 0..n {
+        let ti = t[i];
+        if in_any_span(&anomalies, ti, PIECE_CONTIGUITY_TOL_S) {
+            flag[i] = Some(CurvatureClass::Gap);
+            continue;
+        }
+        let (_, vx, ax, jx) = eval_lane(xp, ti);
+        let (_, vy, ay, jy) = eval_lane(yp, ti);
+        let speed = libm::hypot(vx, vy);
+        if speed < FRENET_SPEED_FLOOR {
+            flag[i] = Some(CurvatureClass::Cusp);
+            continue;
+        }
+        let (k, dk_dt) = kappa_and_dkappa_dt(vx, vy, ax, ay, jx, jy);
+        kappa[i] = k;
+        dkappa_ds[i] = dk_dt / speed;
+    }
+
+    let mut window_class = vec![CurvatureClass::Zero; n];
+    let mut i = 0;
+    while i < n {
+        let end = (i + CLASSIFY_WINDOW_SAMPLES).min(n);
+        let idxs: Vec<usize> = (i..end).filter(|&j| flag[j].is_none()).collect();
+        let cls = if idxs.is_empty() {
+            CurvatureClass::Other
+        } else {
+            let k: Vec<f64> = idxs.iter().map(|&j| kappa[j]).collect();
+            let dk: Vec<f64> = idxs.iter().map(|&j| dkappa_ds[j]).collect();
+            classify_window(&k, &dk)
+        };
+        for slot in window_class.iter_mut().take(end).skip(i) {
+            *slot = cls;
+        }
+        i = end;
+    }
+    let smoothed = smooth_classes(&window_class);
+    let classes = (0..n).map(|i| flag[i].unwrap_or(smoothed[i])).collect();
+    (kappa, classes)
+}
+
 // -- Toolhead position (handles legacy format) ------------------------------
 
 fn toolhead_position(snap: &Snapshot) -> (Vec<f64>, Vec<f64>) {

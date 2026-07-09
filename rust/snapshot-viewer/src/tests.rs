@@ -278,3 +278,31 @@ fn percentile_spread_reads_zero_at_n_equals_three() {
     let sorted = vec![-100.0, 0.01, 100.0];
     assert_eq!(percentile_spread(&sorted), 0.0);
 }
+
+#[test]
+fn curvature_series_flags_a_cusp_at_zero_speed() {
+    // A single linear piece with a zero coefficient (pos = 0 for all t) has
+    // vx == vy == 0 everywhere -- every sample is a cusp.
+    let xp = vec![vec![0.0, 1.0, 0.0, 0.0]];
+    let yp = vec![vec![0.0, 1.0, 0.0, 0.0]];
+    let t = vec![0.0, 0.5, 1.0];
+    let (_, classes) = curvature_series(&t, &xp, &yp);
+    assert!(classes.iter().all(|&c| c == CurvatureClass::Cusp));
+}
+
+#[test]
+fn curvature_series_flags_gap_samples_and_classifies_the_rest() {
+    // x moves at constant velocity 1 mm/s in piece 0 ([0,1)) then, after a
+    // real domain gap, again at constant velocity in piece 1 ([1.5,3)); y is
+    // stationary throughout, so wherever there IS coverage the path is
+    // straight (kappa == 0, class Zero).
+    let xp = vec![vec![0.0, 1.0, 0.0, 1.0], vec![1.5, 3.0, 1.5, 1.0]];
+    let yp = vec![vec![0.0, 1.0, 0.0, 0.0], vec![1.5, 3.0, 0.0, 0.0]];
+    let t = vec![0.2, 0.8, 1.2, 2.0, 2.5];
+    let (_, classes) = curvature_series(&t, &xp, &yp);
+    assert_eq!(classes[0], CurvatureClass::Zero); // t=0.2, in piece 0
+    assert_eq!(classes[1], CurvatureClass::Zero); // t=0.8, in piece 0
+    assert_eq!(classes[2], CurvatureClass::Gap); // t=1.2, inside [1.0,1.5) gap
+    assert_eq!(classes[3], CurvatureClass::Zero); // t=2.0, in piece 1
+    assert_eq!(classes[4], CurvatureClass::Zero); // t=2.5, in piece 1
+}
