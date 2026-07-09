@@ -5,7 +5,7 @@ use crate::TrajectoryPieces;
 
 fn config(max_jerk: f64) -> StreamConfig {
     StreamConfig {
-        chain: geometry::ChainFitConfig::default(),
+        corner: geometry::CornerFitConfig::default(),
         integration_tol: 1e-7,
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,

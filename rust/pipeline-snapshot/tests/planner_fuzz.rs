@@ -29,7 +29,6 @@ struct FuzzLimits {
     max_accel: f64,
     square_corner_velocity: f64,
     max_jerk: f64,
-    arc_fit: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -48,36 +47,24 @@ struct MoveSpec {
     z_step_mm: f64,
 }
 
-/// `full` fuzzes the entire config space. The CI tier excludes the two
-/// known-broken families, each pinned as an `#[ignore]`d regression test
-/// below: `[arc_fit]` (discontinuous geometry on z steps) and tiny positive
-/// square-corner velocities (scv in roughly (0, 0.1) makes sharp corners NaN
-/// the velocity plan; exactly 0 and >= 0.5 are safe).
+/// `full` fuzzes the entire config space. The CI tier excludes the one
+/// known-broken family, pinned as `#[ignore]`d regression tests below: tiny
+/// positive square-corner velocities (scv in roughly (0, 0.1) makes sharp
+/// corners NaN the velocity plan; exactly 0 and >= 0.5 are safe).
 fn limits_strategy(full: bool) -> impl Strategy<Value = FuzzLimits> {
-    let arc_fit = if full {
-        prop_oneof![Just(None), (3u32..10).prop_map(Some)].boxed()
-    } else {
-        Just(None).boxed()
-    };
     let scv = if full {
         (0.0..20.0_f64).boxed()
     } else {
         prop_oneof![1 => Just(0.0), 9 => 0.5..20.0_f64].boxed()
     };
-    (
-        20.0..600.0_f64,
-        500.0..50_000.0_f64,
-        scv,
-        5.0..7.0_f64,
-        arc_fit,
-    )
-        .prop_map(|(v, a, scv, log_jerk, arc_fit)| FuzzLimits {
+    (20.0..600.0_f64, 500.0..50_000.0_f64, scv, 5.0..7.0_f64).prop_map(|(v, a, scv, log_jerk)| {
+        FuzzLimits {
             max_velocity: v,
             max_accel: a,
             square_corner_velocity: scv.min(v / 4.0),
             max_jerk: libm::pow(10.0, log_jerk),
-            arc_fit,
-        })
+        }
+    })
 }
 
 fn turn_strategy() -> impl Strategy<Value = Turn> {
@@ -139,7 +126,6 @@ fn run_case(limits: FuzzLimits, moves: &[MoveSpec]) -> (TrajectoryPieces, AuditR
         max_accel: limits.max_accel,
         square_corner_velocity: limits.square_corner_velocity,
         max_jerk: limits.max_jerk,
-        arc_fit: limits.arc_fit,
         max_extrude_only_velocity: None,
         max_extrude_only_accel: None,
         max_path_deviation: None,
@@ -156,7 +142,7 @@ fn run_case(limits: FuzzLimits, moves: &[MoveSpec]) -> (TrajectoryPieces, AuditR
         t_end: snapshot.traj_t_end,
     };
     let config = motion_pipeline::StreamConfig {
-        chain: geometry::ChainFitConfig::default(),
+        corner: geometry::CornerFitConfig::default(),
         integration_tol: VELOCITY_INTEGRATION_TOL,
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
@@ -206,56 +192,6 @@ proptest! {
     }
 }
 
-/// Found by `target_budgets_hold`: with `[arc_fit]` enabled, a z-step move
-/// after non-collinear planar moves makes the fit stage emit geometry with a
-/// ~0.1 mm position gap between consecutive pieces (the pipeline's own
-/// discontinuity assert fires). Un-ignore once the fit stage handles z motion
-/// across an arc-fit run; until then arc_fit stays out of the CI-tier fuzz
-/// generator.
-#[test]
-#[ignore = "known fit_stage bug: arc_fit + z step emits discontinuous geometry"]
-fn arc_fit_z_step_geometry_gap() {
-    let limits = FuzzLimits {
-        max_velocity: 141.59333582508148,
-        max_accel: 500.0,
-        square_corner_velocity: 18.6392192028089,
-        max_jerk: 100000.0,
-        arc_fit: Some(3),
-    };
-    let moves = [
-        MoveSpec {
-            turn: Turn::Absolute(0.0),
-            length_mm: 1.0,
-            feed_mm_s: 1.0,
-            extrude_ratio: 0.08359357499338309,
-            z_step_mm: 0.0,
-        },
-        MoveSpec {
-            turn: Turn::Absolute(0.8157158316710899),
-            length_mm: 1.0,
-            feed_mm_s: 1.0,
-            extrude_ratio: 0.07137066011546787,
-            z_step_mm: 0.0,
-        },
-        MoveSpec {
-            turn: Turn::Absolute(1.7402584494063602),
-            length_mm: 1.0,
-            feed_mm_s: 1.0,
-            extrude_ratio: 0.08662286409005142,
-            z_step_mm: 0.0,
-        },
-        MoveSpec {
-            turn: Turn::Continue,
-            length_mm: 1.0,
-            feed_mm_s: 1.0,
-            extrude_ratio: 0.04500947571304116,
-            z_step_mm: 0.20286646733390337,
-        },
-    ];
-    let (_, report) = run_case(limits, &moves);
-    assert!(report.hard_ok(), "{report}");
-}
-
 /// Found by `hard_invariants_hold`: under a tiny square-corner velocity
 /// (0.075 mm/s), an XY reversal with a simultaneous z step makes
 /// `plan_velocity_stops` fail with `NonFinite { line_no: 0 }`. Same
@@ -269,7 +205,6 @@ fn reversal_with_z_step_makes_velocity_plan_non_finite() {
         max_accel: 47789.160095826584,
         square_corner_velocity: 0.07502855438839308,
         max_jerk: 100000.0,
-        arc_fit: None,
     };
     let moves = [
         MoveSpec {
@@ -304,7 +239,6 @@ fn z_step_then_micro_reversal_escapes_profile_window() {
         max_accel: 7891.0876463579025,
         square_corner_velocity: 0.010488666819287094,
         max_jerk: 100000.0,
-        arc_fit: None,
     };
     let moves = [
         MoveSpec {
@@ -340,7 +274,6 @@ fn near_reversal_planar_corner_makes_velocity_plan_non_finite() {
         max_accel: 33192.99751381838,
         square_corner_velocity: 0.047081100007714954,
         max_jerk: 100000.0,
-        arc_fit: None,
     };
     let moves = [
         MoveSpec {
@@ -389,7 +322,6 @@ fn feed_drop_with_z_step_escapes_profile_window() {
         max_accel: 33143.074041397005,
         square_corner_velocity: 16.354159311305455,
         max_jerk: 100000.0,
-        arc_fit: None,
     };
     let moves = [
         MoveSpec {
@@ -425,7 +357,6 @@ fn planar_micro_move_decel_escapes_profile_window() {
         max_accel: 26083.903689944673,
         square_corner_velocity: 0.0,
         max_jerk: 9598005.419204166,
-        arc_fit: None,
     };
     let moves = [
         MoveSpec {
