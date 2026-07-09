@@ -145,8 +145,8 @@ melt zone. They are declared the same way and can be chained:
 
 ```
 [post_processor is]
-type: smooth_mzv
-frequency_hz: 53
+type: smooth_bell
+smooth_time: 0.018
 
 [post_processor pa]
 type: linear_pressure_advance
@@ -159,6 +159,16 @@ post_processors: is
 follows: x, y, z
 post_processors: pa
 ```
+
+The smoothing kernels come in two families, and each takes its honest
+parameter. `smooth_bell` and `smooth_triangle` are plain low-pass kernels —
+no frequency selectivity, just smoothing — so they take `smooth_time`: more
+time, more smoothing. `smooth_zv` and `smooth_mzv` are the bleeding_edge_v2
+input smoothers (Maxima-optimized polynomials whose lobe structure cancels
+a target resonance band), so they take `frequency_hz`: the kernel duration
+is derived (`0.8025 / f` and `0.95625 / f` respectively), and making it
+longer would move the notch off the resonance, not suppress it harder —
+mzv trades a wider window for a broader suppression band.
 
 Limits apply to the output of the chain — the signal the motor actually
 receives — rather than to the nominal command. The planner folds the chain

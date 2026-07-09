@@ -253,8 +253,8 @@ fn post_processor_duplicate_name_rejected() {
     let err = PostProcessorSet::try_new(
         &registry,
         &[
-            pp("is", "smooth_zv", &[("frequency_hz", 50.0)]),
-            pp("is", "smooth_mzv", &[("frequency_hz", 40.0)]),
+            pp("is", "smooth_bell", &[("smooth_time", 0.01605)]),
+            pp("is", "smooth_bell", &[("smooth_time", 0.02390625)]),
         ],
     )
     .unwrap_err();
@@ -274,8 +274,8 @@ fn two_kernels_on_one_axis_rejected_with_v1_message() {
     let err = PostProcessorSet::try_new(
         &registry,
         &[
-            pp("is_a", "smooth_zv", &[("frequency_hz", 50.0)]),
-            pp("is_b", "smooth_mzv", &[("frequency_hz", 40.0)]),
+            pp("is_a", "smooth_bell", &[("smooth_time", 0.01605)]),
+            pp("is_b", "smooth_bell", &[("smooth_time", 0.02390625)]),
         ],
     )
     .unwrap_err();
@@ -289,7 +289,7 @@ fn kernel_and_pa_on_follower_e_compiles() {
         &registry,
         &[
             pp("pa", "linear_pressure_advance", &[("k", 0.04)]),
-            pp("st", "smooth_zv", &[("frequency_hz", 50.0)]),
+            pp("st", "smooth_bell", &[("smooth_time", 0.01605)]),
         ],
     )
     .unwrap();
@@ -340,6 +340,6 @@ fn set_param_updates_named_instance_and_recompile_reflects_it() {
 #[test]
 fn post_processor_missing_required_param_rejected() {
     let registry = registry_with_e(&[]);
-    let err = PostProcessorSet::try_new(&registry, &[pp("is", "smooth_zv", &[])]).unwrap_err();
-    assert!(err.to_string().contains("frequency_hz"), "got: {err}");
+    let err = PostProcessorSet::try_new(&registry, &[pp("is", "smooth_bell", &[])]).unwrap_err();
+    assert!(err.to_string().contains("smooth_time"), "got: {err}");
 }

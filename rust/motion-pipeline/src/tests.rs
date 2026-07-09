@@ -576,12 +576,12 @@ fn drained_prefix_is_invariant_under_append() {
     assert!(compared > 0, "nothing inside the comparison horizon");
 }
 
-fn smooth_x_chains(frequency_hz: f64) -> AxisChainSet {
+fn smooth_x_chains(smooth_time: f64) -> AxisChainSet {
     AxisChainSet::spatial(
         trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
             "is",
-            &trajectory::algos::SmoothZv,
-            vec![frequency_hz],
+            &trajectory::algos::SmoothBell,
+            vec![smooth_time],
         )])
         .expect("single post-processor always compiles"),
         trajectory::CompiledChain::default(),
@@ -602,7 +602,13 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
         0.0,
         &moves,
     );
-    let shaped = replay(cfg(), smooth_x_chains(18.0), &[0.0, 0.0, 0.0], 0.0, &moves);
+    let shaped = replay(
+        cfg(),
+        smooth_x_chains(0.044583333333333336),
+        &[0.0, 0.0, 0.0],
+        0.0,
+        &moves,
+    );
     assert_eq!(
         base.len() + 1,
         shaped.len(),
@@ -612,7 +618,7 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
     assert!(pad > 0.0, "hold pad must shift the move start forward");
     let shaped = &shaped[1..];
 
-    let oracle_chains = smooth_x_chains(18.0);
+    let oracle_chains = smooth_x_chains(0.044583333333333336);
     let trajectory::ChainStage::SmoothKernel(kernel) = &oracle_chains.chains[0].stages[0] else {
         panic!("expected smooth kernel");
     };
@@ -659,14 +665,20 @@ fn smooth_shaper_with_wide_support_still_flushes_at_rest() {
         line(1, [0.0, 0.0, 0.0], [20.0, 0.0, 0.0], 0.0),
         line(2, [20.0, 0.0, 0.0], [40.0, 0.0, 0.0], 0.0),
     ];
-    let segs = replay(cfg(), smooth_x_chains(0.5), &[0.0, 0.0, 0.0], 0.0, &moves);
+    let segs = replay(cfg(), smooth_x_chains(1.605), &[0.0, 0.0, 0.0], 0.0, &moves);
     assert!(!segs.is_empty(), "rest flush must release held segments");
 }
 
 #[test]
 fn smooth_shaper_first_emission_after_nonzero_start_time_is_valid() {
     let moves = [line(1, [0.0, 0.0, 0.0], [20.0, 0.0, 0.0], 0.0)];
-    let segs = replay(cfg(), smooth_x_chains(18.0), &[0.0, 0.0, 0.0], 5.0, &moves);
+    let segs = replay(
+        cfg(),
+        smooth_x_chains(0.044583333333333336),
+        &[0.0, 0.0, 0.0],
+        5.0,
+        &moves,
+    );
     assert_eq!(segs[0].t_start, 5.0);
 }
 
@@ -678,7 +690,7 @@ fn smooth_shaper_first_emission_after_nonzero_start_time_is_valid() {
 /// `G4 P1000` panicked the shape thread at t = 1.0 - 1ulp.
 #[test]
 fn smooth_shaper_second_batch_window_before_stream_start_clamps() {
-    let chains = smooth_x_chains(18.0);
+    let chains = smooth_x_chains(0.044583333333333336);
     let (_, back) = chains.chains[0].max_half_support();
     let back = back.abs();
     let t0 = 1.0;
@@ -904,8 +916,8 @@ fn mesh_warp_tracks_across_a_fenced_move_sequence() {
 
     let xy_chain = trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
         "is_xy",
-        &trajectory::algos::SmoothMzv,
-        vec![50.0],
+        &trajectory::algos::SmoothBell,
+        vec![0.019125],
     )])
     .unwrap();
     let chains = AxisChainSet::spatial(
@@ -933,19 +945,19 @@ fn mesh_warp_tracks_across_a_fenced_move_sequence() {
     );
 }
 
-fn xy_shaper_follower_chains(frequency_hz: f64) -> AxisChainSet {
-    let zv = |name: &str| {
+fn xy_shaper_follower_chains(smooth_time: f64) -> AxisChainSet {
+    let bell = |name: &str| {
         trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
             name,
-            &trajectory::algos::SmoothZv,
-            vec![frequency_hz],
+            &trajectory::algos::SmoothBell,
+            vec![smooth_time],
         )])
         .expect("single post-processor always compiles")
     };
     AxisChainSet {
         chains: vec![
-            zv("is_x"),
-            zv("is_y"),
+            bell("is_x"),
+            bell("is_y"),
             trajectory::CompiledChain::default(),
             trajectory::CompiledChain::default(),
         ],
@@ -1021,7 +1033,13 @@ fn follower_tracks_shaped_path_distance_through_a_corner() {
         extruder_end(&raw)
     );
 
-    let shaped = replay(cfg(), xy_shaper_follower_chains(18.0), &home, 0.0, &moves);
+    let shaped = replay(
+        cfg(),
+        xy_shaper_follower_chains(0.044583333333333336),
+        &home,
+        0.0,
+        &moves,
+    );
     assert_extruder_continuous_and_monotone(&shaped);
     let e_end = extruder_end(&shaped);
     let shaped_len = sampled_planar_path_length(&shaped);
@@ -1047,7 +1065,13 @@ fn extrude_only_move_passes_through_the_projection() {
         line(3, [20.0, 0.0, 0.0], [40.0, 0.0, 0.0], 1.0),
     ];
     let home = [0.0, 0.0, 0.0, 0.0];
-    let shaped = replay(cfg(), xy_shaper_follower_chains(18.0), &home, 0.0, &moves);
+    let shaped = replay(
+        cfg(),
+        xy_shaper_follower_chains(0.044583333333333336),
+        &home,
+        0.0,
+        &moves,
+    );
     let e_end = extruder_end(&shaped);
     assert!(
         (e_end - 1.5).abs() < 1e-3,
@@ -1055,7 +1079,7 @@ fn extrude_only_move_passes_through_the_projection() {
     );
 }
 
-fn e_chain(k: Option<f64>, e_frequency_hz: f64) -> trajectory::CompiledChain {
+fn e_chain(k: Option<f64>, e_smooth_time: f64) -> trajectory::CompiledChain {
     let mut instances = Vec::new();
     if let Some(k) = k {
         instances.push(PostProcessorInstance::new(
@@ -1064,24 +1088,24 @@ fn e_chain(k: Option<f64>, e_frequency_hz: f64) -> trajectory::CompiledChain {
             vec![k],
         ));
     }
-    if e_frequency_hz > 0.0 {
+    if e_smooth_time > 0.0 {
         instances.push(PostProcessorInstance::new(
             "st",
-            &trajectory::algos::SmoothZv,
-            vec![e_frequency_hz],
+            &trajectory::algos::SmoothBell,
+            vec![e_smooth_time],
         ));
     }
     trajectory::CompiledChain::compile(&instances).expect("pa + kernel compiles")
 }
 
 fn follower_kernel_chains(
-    leader_frequency_hz: Option<f64>,
+    leader_smooth_time: Option<f64>,
     k: Option<f64>,
-    e_frequency_hz: f64,
+    e_smooth_time: f64,
 ) -> AxisChainSet {
     let mut chains =
-        leader_frequency_hz.map_or_else(follower_chains_without_kernels, xy_shaper_follower_chains);
-    chains.chains[3] = e_chain(k, e_frequency_hz);
+        leader_smooth_time.map_or_else(follower_chains_without_kernels, xy_shaper_follower_chains);
+    chains.chains[3] = e_chain(k, e_smooth_time);
     chains
 }
 
@@ -1124,7 +1148,7 @@ fn follower_kernel_with_unshaped_leaders_matches_direct_convolution() {
     ];
     let home = [0.0, 0.0, 0.0, 0.0];
     for (k, tol) in [(None, 1e-12), (Some(0.04), 2e-2)] {
-        let as_follower = follower_kernel_chains(None, k, 30.0);
+        let as_follower = follower_kernel_chains(None, k, 0.02675);
         let mut as_plain_axis = as_follower.clone();
         as_plain_axis.followers.clear();
 
@@ -1156,7 +1180,7 @@ fn follower_kernel_rides_the_projection_through_a_corner() {
     let home = [0.0, 0.0, 0.0, 0.0];
     let shaped = replay(
         cfg(),
-        follower_kernel_chains(Some(18.0), None, 30.0),
+        follower_kernel_chains(Some(0.044583333333333336), None, 0.02675),
         &home,
         0.0,
         &moves,
@@ -1186,7 +1210,7 @@ fn smooth_pressure_advance_on_follower_preserves_the_projected_total() {
     let home = [0.0, 0.0, 0.0, 0.0];
     let with_pa = replay(
         cfg(),
-        follower_kernel_chains(Some(18.0), Some(0.04), 30.0),
+        follower_kernel_chains(Some(0.044583333333333336), Some(0.04), 0.02675),
         &home,
         0.0,
         &moves,
@@ -1194,7 +1218,7 @@ fn smooth_pressure_advance_on_follower_preserves_the_projected_total() {
     assert_extruder_has_no_jumps(&with_pa);
     let without_pa = replay(
         cfg(),
-        follower_kernel_chains(Some(18.0), None, 30.0),
+        follower_kernel_chains(Some(0.044583333333333336), None, 0.02675),
         &home,
         0.0,
         &moves,

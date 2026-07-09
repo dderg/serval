@@ -1,19 +1,22 @@
 use crate::chain::{ChainStage, PostProcessorError};
 
 mod linear_pressure_advance;
+mod smooth_bell;
 mod smooth_mzv;
 mod smooth_triangle;
 mod smooth_zv;
 
 pub use linear_pressure_advance::LinearPressureAdvance;
-pub use smooth_mzv::{SmoothMzv, SMOOTH_MZV_T_SM_PER_HZ};
+pub use smooth_bell::SmoothBell;
+pub use smooth_mzv::SmoothMzv;
 pub use smooth_triangle::SmoothTriangle;
-pub use smooth_zv::{SmoothZv, SMOOTH_ZV_T_SM_PER_HZ};
+pub use smooth_zv::SmoothZv;
 
 pub static REGISTRY: &[&dyn PostProcessorAlgo] = &[
+    &SmoothBell,
+    &SmoothTriangle,
     &SmoothZv,
     &SmoothMzv,
-    &SmoothTriangle,
     &LinearPressureAdvance,
 ];
 

@@ -347,11 +347,12 @@ fn declaring_only_the_e_axis_still_defaults_x_y_z() {
 }
 
 #[test]
-fn all_four_post_processor_types_are_reachable() {
+fn all_post_processor_types_are_reachable() {
     for (ty, params) in [
+        ("smooth_bell", [("smooth_time", 0.0200625)].as_slice()),
+        ("smooth_triangle", [("smooth_time", 0.02)].as_slice()),
         ("smooth_zv", [("frequency_hz", 40.0)].as_slice()),
         ("smooth_mzv", [("frequency_hz", 40.0)].as_slice()),
-        ("smooth_triangle", [("smooth_time", 0.02)].as_slice()),
         ("linear_pressure_advance", [("k", 0.04)].as_slice()),
     ] {
         let mut params_snap = default_axis_snapshot_params();
@@ -371,8 +372,8 @@ fn composition_conflict_surfaces_as_an_error() {
     x.post_processors = vec!["a".to_string(), "b".to_string()];
     params.axis_decls = vec![x];
     params.post_processor_decls = vec![
-        pp("a", "smooth_zv", &[("frequency_hz", 40.0)]),
-        pp("b", "smooth_mzv", &[("frequency_hz", 40.0)]),
+        pp("a", "smooth_bell", &[("smooth_time", 0.0200625)]),
+        pp("b", "smooth_triangle", &[("smooth_time", 0.02)]),
     ];
     let err = pipeline_snapshot(&square_waypoints(), params).unwrap_err();
     assert!(matches!(err, SnapshotError::InvalidChain(_)));

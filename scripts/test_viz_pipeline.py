@@ -38,8 +38,8 @@ def test_axis_and_post_processor_sections_are_parsed(tmp_path):
         max_jerk: 100000
 
         [post_processor is_xy]
-        type: smooth_mzv
-        frequency_hz: 39.3
+        type: smooth_bell
+        smooth_time: 0.0243
 
         [axis x]
         post_processors: is_xy
@@ -54,8 +54,8 @@ def test_axis_and_post_processor_sections_are_parsed(tmp_path):
     assert len(data.post_processor_sections) == 1
     pp = data.post_processor_sections[0]
     assert pp.name == "is_xy"
-    assert pp.type == "smooth_mzv"
-    assert pp.params == [("frequency_hz", 39.3)]
+    assert pp.type == "smooth_bell"
+    assert pp.params == [("smooth_time", 0.0243)]
 
 
 def test_undeclared_post_processor_reference_fails_loudly(tmp_path):

@@ -152,7 +152,7 @@ def test_auto_discovers_single_pa_post_processor():
 
 
 def test_no_pa_post_processor_fails_loudly():
-    sections = [axis("x"), post_processor("is", type="smooth_mzv")]
+    sections = [axis("x"), post_processor("is", type="smooth_bell")]
     with pytest.raises(ConfigError, match="no"):
         make(sections)
 
