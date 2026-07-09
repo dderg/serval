@@ -193,3 +193,64 @@ fn domain_anomalies_tolerates_float_noise_at_a_seam() {
     let pieces = vec![vec![0.0, 1.0, 0.0], vec![1.0 + 1e-13, 2.0, 0.0]];
     assert!(domain_anomalies(&pieces).is_empty());
 }
+
+#[test]
+fn classify_window_zero_when_kappa_is_flat_zero() {
+    let kappa = vec![0.0, 1e-6, -1e-6, 2e-6];
+    let dkappa_ds = vec![0.0, 0.0, 0.0, 0.0];
+    assert_eq!(classify_window(&kappa, &dkappa_ds), CurvatureClass::Zero);
+}
+
+#[test]
+fn classify_window_constant_when_kappa_nonzero_but_steady() {
+    let kappa = vec![0.02, 0.021, 0.019, 0.02];
+    let dkappa_ds = vec![0.0, 1e-6, -1e-6, 0.0];
+    assert_eq!(
+        classify_window(&kappa, &dkappa_ds),
+        CurvatureClass::Constant
+    );
+}
+
+#[test]
+fn classify_window_linear_when_rate_is_steady_nonzero() {
+    let kappa = vec![0.0, 0.01, 0.02, 0.03];
+    let dkappa_ds = vec![0.01, 0.0102, 0.0099, 0.0101];
+    assert_eq!(classify_window(&kappa, &dkappa_ds), CurvatureClass::Linear);
+}
+
+#[test]
+fn classify_window_other_when_rate_is_unsteady() {
+    let kappa = vec![0.0, 0.05, -0.02, 0.08];
+    let dkappa_ds = vec![0.05, -0.07, 0.1, -0.09];
+    assert_eq!(classify_window(&kappa, &dkappa_ds), CurvatureClass::Other);
+}
+
+#[test]
+fn classify_window_ignores_a_handful_of_outliers() {
+    // 24 steady samples plus 2 seam-artifact outliers -- the percentile
+    // spread must not be blown out by them the way a raw max-min would be.
+    let mut dkappa_ds = vec![0.01; 24];
+    dkappa_ds[5] = 5.0;
+    dkappa_ds[19] = -5.0;
+    let kappa: Vec<f64> = (0..24).map(|i| 0.01 * i as f64).collect();
+    assert_eq!(classify_window(&kappa, &dkappa_ds), CurvatureClass::Linear);
+}
+
+#[test]
+fn smooth_classes_kills_an_isolated_single_window_flicker() {
+    use CurvatureClass::*;
+    let raw = vec![Constant, Constant, Other, Constant, Constant];
+    let smoothed = smooth_classes(&raw);
+    assert_eq!(
+        smoothed,
+        vec![Constant, Constant, Constant, Constant, Constant]
+    );
+}
+
+#[test]
+fn smooth_classes_keeps_a_sustained_change() {
+    use CurvatureClass::*;
+    let raw = vec![Constant, Constant, Other, Other, Other, Constant, Constant];
+    let smoothed = smooth_classes(&raw);
+    assert_eq!(smoothed, raw);
+}

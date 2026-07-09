@@ -180,6 +180,102 @@ fn in_any_span(spans: &[(f64, f64)], t: f64, tol: f64) -> bool {
     spans.iter().any(|&(lo, hi)| t >= lo - tol && t <= hi + tol)
 }
 
+// -- Curvature classification (Task 3) -----------------------------------------------
+
+#[allow(dead_code)]
+const KAPPA_ZERO_EPS: f64 = 1e-4; // 1/mm -- radius > 10 m reads as straight
+#[allow(dead_code)]
+const DKAPPA_DS_ZERO_EPS: f64 = 1e-3; // 1/mm^2 -- first-pass, tune against real cases
+#[allow(dead_code)]
+const DKAPPA_DS_SPREAD_EPS: f64 = 1e-3; // 1/mm^2 -- first-pass, tune against real cases
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum CurvatureClass {
+    Zero,
+    Constant,
+    Linear,
+    Other,
+    Cusp,
+    Gap,
+}
+
+impl CurvatureClass {
+    #[allow(dead_code)]
+    // Consumed in later task wiring curvature metrics into the export.
+    fn code(self) -> f64 {
+        match self {
+            CurvatureClass::Zero => 0.0,
+            CurvatureClass::Constant => 1.0,
+            CurvatureClass::Linear => 2.0,
+            CurvatureClass::Other => 3.0,
+            CurvatureClass::Cusp => 4.0,
+            CurvatureClass::Gap => 5.0,
+        }
+    }
+}
+
+// 10th-to-90th-percentile spread of a sorted slice: robust to a handful of
+// outliers (e.g. the one or two samples nearest a piece seam, where dkappa/ds
+// can legitimately jump even in a perfectly healthy trajectory) in a way a
+// raw max-min is not.
+#[allow(dead_code)]
+fn percentile_spread(sorted: &[f64]) -> f64 {
+    let n = sorted.len();
+    if n < 3 {
+        return sorted.last().copied().unwrap_or(0.0) - sorted.first().copied().unwrap_or(0.0);
+    }
+    let lo = sorted[n / 10];
+    let hi = sorted[n - 1 - n / 10];
+    hi - lo
+}
+
+// Classifies one window's worth of (kappa, dkappa/ds) samples -- both
+// already restricted by the caller to non-Cusp, non-Gap samples. Zero is
+// checked against kappa itself (not its rate) so a dead-straight stretch
+// reads as Zero rather than Constant; Constant vs. Linear both hinge on
+// whether dkappa/ds is steady across the window (a percentile spread, not
+// raw min-max), splitting on whether that steady rate is itself ~zero.
+#[allow(dead_code)]
+fn classify_window(kappa: &[f64], dkappa_ds: &[f64]) -> CurvatureClass {
+    let max_abs_kappa = kappa.iter().fold(0.0_f64, |m, k| m.max(k.abs()));
+    if max_abs_kappa < KAPPA_ZERO_EPS {
+        return CurvatureClass::Zero;
+    }
+    let mut sorted: Vec<f64> = dkappa_ds.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let spread = percentile_spread(&sorted);
+    let median = sorted[sorted.len() / 2];
+    if spread >= DKAPPA_DS_SPREAD_EPS {
+        return CurvatureClass::Other;
+    }
+    if median.abs() < DKAPPA_DS_ZERO_EPS {
+        CurvatureClass::Constant
+    } else {
+        CurvatureClass::Linear
+    }
+}
+
+// Despikes a per-window class sequence: a window whose class differs from
+// BOTH neighbors, when those neighbors agree with each other, is overwritten
+// to match them. This is what turns "one seam artifact flips one window"
+// into a stable, contiguous stretch, while a class change that actually
+// persists across several windows -- a real pipeline anomaly -- survives
+// untouched.
+#[allow(dead_code)]
+fn smooth_classes(raw: &[CurvatureClass]) -> Vec<CurvatureClass> {
+    if raw.len() < 3 {
+        return raw.to_vec();
+    }
+    let mut out = raw.to_vec();
+    for i in 1..raw.len() - 1 {
+        if raw[i] != raw[i - 1] && raw[i] != raw[i + 1] && raw[i - 1] == raw[i + 1] {
+            out[i] = raw[i - 1];
+        }
+    }
+    out
+}
+
 // -- Toolhead position (handles legacy format) ------------------------------
 
 fn toolhead_position(snap: &Snapshot) -> (Vec<f64>, Vec<f64>) {
