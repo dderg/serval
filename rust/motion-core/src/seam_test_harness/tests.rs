@@ -191,7 +191,7 @@ fn voron_cube_with_extruder_kernel_survives_pacer_drains() {
 /// doubled (leader + follower) support windows.
 #[test]
 fn voron_cube_with_smooth_pa_on_extruder_survives_pacer_drains() {
-    let config = bench_config_arc_fit();
+    let config = bench_config();
     let moves = parse_gcode_to_moves(CRASH_VORON_CUBE, config.limits);
     let handle = setup_stages(
         config,
