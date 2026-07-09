@@ -77,9 +77,7 @@ pythonpath = [".", "klippy", "scripts"]
 testpaths = [
   "test",
   "tests",
-  "scripts/test_viz_pipeline.py",
   "snapshots/test_harness.py",
-  "snapshots/test_viz_pipeline.py",
 ]
 markers = [
   "sim_unit: in-process sim unit/contract test (CI-able, no ELF/hardware)",

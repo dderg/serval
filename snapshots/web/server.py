@@ -4,8 +4,7 @@
 Serves a before/after comparison for every changed or pending case and an
 accept action that rewrites baselines. It can also serve the committed
 baselines as a read-only gallery. Stdlib only; run under an interpreter with
-the built `_motion_engine` and matplotlib for review mode, or just matplotlib
-for baseline mode:
+the built `_motion_engine` for review mode:
 
     python snapshots/web/server.py            # then visit the printed URL
 
@@ -34,14 +33,12 @@ for _p in (str(_SNAPSHOTS), str(_REPO_ROOT / "scripts")):
         sys.path.insert(0, _p)
 
 import harness  # noqa: E402
-import viz_pipeline  # noqa: E402
 
 _STATIC = Path(__file__).resolve().parent / "static"
-_RENDER_LOCK = threading.Lock()
 
 
 class ReviewState:
-    """Holds the latest scan and cached rendered PNG bytes."""
+    """Holds the latest scan of cases."""
 
     def __init__(self, mode: str, results_dir: Path | None = None):
         self._lock = threading.Lock()
@@ -69,7 +66,6 @@ class ReviewState:
                 "case": case,
                 "snapshot": snapshot,
                 "status": status,
-                "png": {},
             }
 
     def scan(self):
@@ -114,7 +110,6 @@ class ReviewState:
                         "case": case,
                         "snapshot": snapshot,
                         "status": "baseline",
-                        "png": {},
                     }
                 return
             try:
@@ -124,7 +119,6 @@ class ReviewState:
                         "case": case,
                         "snapshot": snapshot,
                         "status": status,
-                        "png": {},
                     }
             except (ImportError, ValueError) as exc:
                 self.error = str(exc)
@@ -173,26 +167,6 @@ class ReviewState:
                 "error": self.error,
             }
 
-    def png(self, name: str, which: str) -> bytes | None:
-        with self._lock:
-            entry = self.cases.get(name)
-            if entry is None or which not in ("before", "after"):
-                return None
-            cached = entry["png"].get(which)
-            if cached is not None:
-                return cached
-            if which == "before":
-                snapshot = harness.baseline_snapshot(entry["case"])
-                if snapshot is None:
-                    return None
-            else:
-                snapshot = entry["snapshot"]
-        data = _render_png(snapshot, name, which)
-        with self._lock:
-            if name in self.cases:
-                self.cases[name]["png"][which] = data
-        return data
-
     def accept(self, names: list[str]) -> list[str]:
         if self.mode == "baselines":
             raise RuntimeError("baseline viewer is read-only")
@@ -207,25 +181,7 @@ class ReviewState:
                 entry = self.cases[n]
                 harness.write_baseline(entry["case"], entry["snapshot"])
                 entry["status"] = harness.Status.EXACT
-                entry["png"] = {}
         return targets
-
-
-def _render_png(snapshot: dict, name: str, which: str) -> bytes:
-    # Flatten "group/stem" so it is a single filename, not a nested path.
-    stem = name.replace("/", "__")
-    with _RENDER_LOCK:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-
-        out = _RENDER_DIR / f"{stem}_{which}.png"
-        viz_pipeline.render(snapshot, _RENDER_DIR, stem, which)
-        data = out.read_bytes()
-        out.unlink(missing_ok=True)
-        plt.close("all")
-    return data
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -258,8 +214,6 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_static(path[len("/static/") :], None)
         elif path == "/api/cases":
             self._json(STATE.summary())
-        elif path.startswith("/img/"):
-            self._serve_img(path)
         elif path.startswith("/snapshot-data/"):
             self._serve_snapshot_data(path)
         else:
@@ -284,22 +238,6 @@ class Handler(BaseHTTPRequestHandler):
         # script can re-check and exit.
         if not summary["review"]:
             threading.Thread(target=self.server.shutdown, daemon=True).start()
-
-    def _serve_img(self, path):
-        parts = path.strip("/").split("/")
-        if len(parts) != 3:
-            self._json({"error": "bad image path"}, 404)
-            return
-        # The case name (parts[1]) is a single URL-encoded segment — a case
-        # name like "default/clean_arc" arrives as "default%2Fclean_arc".
-        _, name, leaf = parts
-        name = unquote(name)
-        which = leaf.removesuffix(".png")
-        data = STATE.png(name, which)
-        if data is None:
-            self._json({"error": "no image"}, 404)
-            return
-        self._send(200, data, "image/png")
 
     def _serve_snapshot_data(self, path):
         parts = path.strip("/").split("/")
@@ -367,26 +305,20 @@ def main():
     if args.results and args.mode == "baselines":
         parser.error("--results only applies to review mode")
 
-    global STATE, _RENDER_DIR
-    import tempfile
-
-    with tempfile.TemporaryDirectory(prefix="snapshot-review-") as tmp:
-        _RENDER_DIR = Path(tmp)
-        STATE = ReviewState(args.mode, results_dir=args.results)
-        if STATE.error:
-            print(f"warning: {STATE.error}", file=sys.stderr)
-        server = ThreadingHTTPServer((args.host, args.port), Handler)
-        url = f"http://{args.host}:{args.port}"
-        label = (
-            "snapshot baselines"
-            if args.mode == "baselines"
-            else "snapshot review"
-        )
-        print(f"{label} — visit {url}  (Ctrl-C to stop)")
-        try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            print("\nstopped")
+    global STATE
+    STATE = ReviewState(args.mode, results_dir=args.results)
+    if STATE.error:
+        print(f"warning: {STATE.error}", file=sys.stderr)
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    url = f"http://{args.host}:{args.port}"
+    label = (
+        "snapshot baselines" if args.mode == "baselines" else "snapshot review"
+    )
+    print(f"{label} — visit {url}  (Ctrl-C to stop)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopped")
 
 
 if __name__ == "__main__":

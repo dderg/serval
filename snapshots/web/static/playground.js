@@ -147,7 +147,7 @@ function updateMeta() {
   const planTime = lastPlanMs != null ? `  planned in ${lastPlanMs.toFixed(0)}ms` : "";
   document.getElementById("meta").textContent =
     `t=${view.data.traversal_time().toFixed(3)}s  ` +
-    `[${view.segmentSummary()}]  ` +
+    `[${view.curvatureSummary()}]  ` +
     `${view.data.point_count()} pts${planTime}`;
 }
 
@@ -213,12 +213,6 @@ async function main() {
   document.getElementById("toggle-peaks").addEventListener("click", (e) => {
     e.target.classList.toggle("active", !view.showPeaks);
     view.setShowPeaks(!view.showPeaks);
-  });
-
-  document.getElementById("toggle-fitted-path").addEventListener("click", (e) => {
-    view.setShowFittedPath(!view.showFittedPath);
-    e.target.textContent = view.showFittedPath ? "Fitted" : "Shaped";
-    e.target.classList.toggle("active", view.showFittedPath);
   });
 
   document.addEventListener("keydown", (e) => {
