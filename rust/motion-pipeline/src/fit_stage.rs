@@ -145,6 +145,9 @@ impl FitStage {
                 );
             }
         }
+        if let Control::SetAxisChains(chains) = &ctrl {
+            self.corner.kernel_variance_s2 = chains.max_spatial_kernel_variance_s2();
+        }
         if let Control::SetMesh { gcode_z_rebase, .. } = &ctrl {
             out.rebase_gcode_z(*gcode_z_rebase);
         }

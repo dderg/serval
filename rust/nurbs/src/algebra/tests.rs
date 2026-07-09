@@ -191,3 +191,31 @@ fn add_with_knot_union_rejects_degree_mismatch() {
         "expected KnotMismatch, got {result:?}",
     );
 }
+
+#[test]
+fn second_moment_integrates_a_single_polynomial_piece_exactly() {
+    let uniform = PiecewisePolynomialKernel::single_poly_from_absolute(vec![0.5], (-1.0, 1.0));
+    assert!((uniform.second_moment() - 1.0 / 3.0).abs() < 1e-12);
+
+    let parabola =
+        PiecewisePolynomialKernel::single_poly_from_absolute(vec![0.75, 0.0, -0.75], (-1.0, 1.0));
+    assert!((parabola.second_moment() - 0.2).abs() < 1e-12);
+}
+
+#[test]
+fn second_moment_sums_over_pieces() {
+    let split = PiecewisePolynomialKernel::from_pieces(vec![
+        crate::bezier::BezierPiece {
+            u_start: -1.0,
+            u_end: 0.25,
+            coeffs: vec![0.5],
+        },
+        crate::bezier::BezierPiece {
+            u_start: 0.25,
+            u_end: 1.0,
+            coeffs: vec![0.5],
+        },
+    ])
+    .unwrap();
+    assert!((split.second_moment() - 1.0 / 3.0).abs() < 1e-12);
+}
