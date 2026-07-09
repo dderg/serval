@@ -21,7 +21,6 @@ use motion_pipeline::{StreamConfig, run_lowerer};
 
 pub use planner_config::{AxisDecl, PostProcessorDecl};
 
-pub const SAMPLES_PER_MM: f64 = 2.0;
 /// The E lane rides as axis 3, past the three spatial axes — the same index the
 /// production bridge and the seam harness assign the extruder.
 pub const EXTRUDER_AXIS: usize = 3;
@@ -67,14 +66,6 @@ pub struct SnapshotParams {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum FittedSegment {
-    Line { x0: f64, y0: f64, x1: f64, y1: f64 },
-    Arc { x: Vec<f64>, y: Vec<f64> },
-    Clothoid { x: Vec<f64>, y: Vec<f64> },
-}
-
-#[derive(Debug, Serialize)]
 pub struct SeamMetric {
     pub t: f64,
     pub axis: usize,
@@ -83,17 +74,16 @@ pub struct SeamMetric {
     pub da: f64,
 }
 
-/// The full snapshot dict: raw input path, fitted spatial geometry, the
-/// lowered per-axis polynomial trajectory the firmware actually executes
-/// (each piece `[t0, t1, c0, c1, ..., cn]` — monomial coefficients in local
-/// time `tau = t - t0`, trailing near-zero coefficients trimmed), and the
-/// seam continuity metrics computed from those pieces. Serializes to the
-/// exact JSON schema the snapshot baselines and the web viewers consume.
+/// The full snapshot dict: raw input path, the lowered per-axis polynomial
+/// trajectory the firmware actually executes (each piece `[t0, t1, c0, c1,
+/// ..., cn]` — monomial coefficients in local time `tau = t - t0`, trailing
+/// near-zero coefficients trimmed), and the seam continuity metrics computed
+/// from those pieces. Serializes to the exact JSON schema the snapshot
+/// baselines and the web viewers consume.
 #[derive(Debug, Serialize)]
 pub struct Snapshot {
     pub raw_x: Vec<f64>,
     pub raw_y: Vec<f64>,
-    pub fitted_segments: Vec<FittedSegment>,
     pub traj_x_pieces: Vec<Vec<f64>>,
     pub traj_y_pieces: Vec<Vec<f64>>,
     pub traj_z_pieces: Vec<Vec<f64>>,
@@ -148,12 +138,7 @@ pub fn pipeline_snapshot(
         limits,
     };
     let axis_chains = build_axis_chains(&params).map_err(SnapshotError::InvalidChain)?;
-    let (fitted, shaped) = run_pipeline(&moves, config, axis_chains);
-
-    let fitted_segments = fitted
-        .iter()
-        .filter_map(|fm| fm.segment.spatial.as_ref().map(sample_segment))
-        .collect();
+    let (_fitted, shaped) = run_pipeline(&moves, config, axis_chains);
 
     let traj = collect_trajectory_pieces(&shaped);
     let seams = seam_metrics(&traj);
@@ -161,7 +146,6 @@ pub fn pipeline_snapshot(
     Ok(Snapshot {
         raw_x: raw_points.iter().map(|p| p.0).collect(),
         raw_y: raw_points.iter().map(|p| p.1).collect(),
-        fitted_segments,
         traj_x_pieces: traj.x,
         traj_y_pieces: traj.y,
         traj_z_pieces: traj.z,
@@ -173,33 +157,6 @@ pub fn pipeline_snapshot(
         seam_max_da: seams.max_da,
         worst_seams: seams.worst,
     })
-}
-
-fn sample_segment(spatial: &geometry::path::Segment) -> FittedSegment {
-    match spatial {
-        geometry::path::Segment::Line(line) => FittedSegment::Line {
-            x0: line.start[0],
-            y0: line.start[1],
-            x1: line.end[0],
-            y1: line.end[1],
-        },
-        geometry::path::Segment::Arc(_) | geometry::path::Segment::Clothoid(_) => {
-            let len = spatial.s_len();
-            let n = ((len * SAMPLES_PER_MM).ceil() as usize).max(20);
-            let mut xs = Vec::with_capacity(n);
-            let mut ys = Vec::with_capacity(n);
-            for k in 0..n {
-                let s = len * (k as f64) / ((n - 1) as f64);
-                let pt = spatial.point_at(s);
-                xs.push(pt[0]);
-                ys.push(pt[1]);
-            }
-            match spatial {
-                geometry::path::Segment::Arc(_) => FittedSegment::Arc { x: xs, y: ys },
-                _ => FittedSegment::Clothoid { x: xs, y: ys },
-            }
-        }
-    }
 }
 
 pub fn build_moves(
