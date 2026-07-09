@@ -1,5 +1,5 @@
 // Shared 4-panel trajectory viewer: path + velocity/acceleration/jerk canvases
-// with synced hover-scrub, zoom/pan, peak markers, impulse stems and a
+// with synced hover-scrub, zoom/pan, impulse stems and a
 // before/after variant flip. viewer.js (snapshot review) and playground.js
 // (interactive gcode playground) each wrap one TrajectoryView with their own
 // page chrome. Imports are module-relative so the same file works served by
@@ -30,7 +30,6 @@ export const COLORS = {
   gridZero: "#454b54",
   axis: "#555",
   crosshair: "rgba(255,255,255,0.35)",
-  marker: "#e0518a",
   impulse: "#ffd54a",
   toolhead: "#26a69a",
 };
@@ -127,37 +126,6 @@ function closestIndex(arr, val) {
     if (Math.abs(arr[lo - 1] - val) < Math.abs(arr[lo] - val)) lo--;
   }
   return lo;
-}
-
-function findPeaks(scalar) {
-  if (scalar.length < 3) return [];
-  let dataMax = 0;
-  for (let i = 0; i < scalar.length; i++) {
-    if (scalar[i] > dataMax) dataMax = scalar[i];
-  }
-  if (dataMax < 1e-9) return [];
-  const threshold = dataMax * 0.3;
-  const minGap = 10;
-  const minProminence = dataMax * 0.03;
-  const peaks = [];
-  let lastPeak = -minGap;
-  for (let i = 1; i < scalar.length - 1; i++) {
-    if (scalar[i] < threshold) continue;
-    if (i - lastPeak < minGap) continue;
-    // Must be a local maximum: higher than both immediate neighbors
-    if (scalar[i] <= scalar[i-1] || scalar[i] <= scalar[i+1]) continue;
-    // Prominence: how much higher than the lowest point in nearby neighborhood
-    const lo = Math.max(0, i - 3);
-    const hi = Math.min(scalar.length - 1, i + 3);
-    let surroundMin = scalar[i];
-    for (let j = lo; j <= hi; j++) {
-      if (scalar[j] < surroundMin) surroundMin = scalar[j];
-    }
-    if (scalar[i] - surroundMin < minProminence) continue;
-    peaks.push(i);
-    lastPeak = i;
-  }
-  return peaks;
 }
 
 // -- WASM array memoization --------------------------------------------------
@@ -273,7 +241,6 @@ class PanelRenderer {
     this.cdot = this.cursor.querySelector(".cdot");
     this.type = type;
     this.margin = { top: 22, right: 14, bottom: 26, left: 56 };
-    this._peaks = [];
     this._resize();
   }
 
@@ -518,10 +485,9 @@ class PanelRenderer {
   // `magnitude` (the ⊥ projection and the |XY| scalar) plot |value|. Each lane
   // draws against its own (yMin, yMax). Entries with axis:"right" (the E lane,
   // whose magnitudes dwarf or vanish next to XY) get a secondary right-hand
-  // axis; the `scalar` entry is the headline trace (wider, carries the motor
-  // peak markers) and entries flagged peaks:"th" carry the toolhead peak
-  // markers. Hidden entries are filtered out by the caller.
-  renderTimeBuffer(tMin, tMax, yMin, yMax, series, drawPeaks) {
+  // axis; the `scalar` entry is the headline trace (drawn wider, on top).
+  // Hidden entries are filtered out by the caller.
+  renderTimeBuffer(tMin, tMax, yMin, yMax, series) {
     const DATA = this.view.data;
     const right = series.find(s => s.axis === "right");
     const wantRight = right ? 46 : 14;
@@ -542,7 +508,6 @@ class PanelRenderer {
     bctx.rect(this.plotX0, this.plotY0, this.plotW, this.plotH);
     bctx.clip();
 
-    this._peaks = [];
     let scalarEntry = null;
     for (const s of series) {
       if (s.scalar) { scalarEntry = s; continue; }
@@ -551,7 +516,6 @@ class PanelRenderer {
       bctx.setLineDash(s.dash || []);
       const valueAt = s.magnitude ? (i) => Math.abs(s.arr[i]) : (i) => s.arr[i];
       this._strokeSeries(bctx, t, valueAt, tMin, tMax, s.yMin, s.yMax);
-      if (drawPeaks && s.peaks === "th") this._markPeaks(bctx, t, s, tMin, tMax, "th");
     }
     bctx.setLineDash([]);
 
@@ -561,34 +525,9 @@ class PanelRenderer {
       const scalar = scalarEntry.arr;
       const scalarAt = scalarEntry.magnitude ? (i) => Math.abs(scalar[i]) : (i) => scalar[i];
       this._strokeSeries(bctx, t, scalarAt, tMin, tMax, yMin, yMax);
-      if (drawPeaks) this._markPeaks(bctx, t, scalarEntry, tMin, tMax, null);
     }
 
     bctx.restore();
-  }
-
-  // Peak markers for one visible headline series. Motor peaks are the filled
-  // magenta dots; toolhead ("th") peaks mirror them as hollow teal rings.
-  // Peaks are drawn per series, so they vanish with their series when it is
-  // hidden via the legend.
-  _markPeaks(bctx, t, s, tMin, tMax, src) {
-    bctx.setLineDash([]);
-    for (const pi of findPeaks(s.arr)) {
-      if (t[pi] < tMin || t[pi] > tMax) continue;
-      const px = this.toPixelX(t[pi], tMin, tMax);
-      const py = this.toPixelY(s.arr[pi], s.yMin, s.yMax);
-      bctx.beginPath();
-      bctx.arc(px, py, 3, 0, Math.PI * 2);
-      if (src === "th") {
-        bctx.strokeStyle = COLORS.toolhead;
-        bctx.lineWidth = 1.5;
-        bctx.stroke();
-      } else {
-        bctx.fillStyle = COLORS.marker;
-        bctx.fill();
-      }
-      this._peaks.push({ px, py, tVal: t[pi], val: s.arr[pi], idx: pi, src });
-    }
   }
 
   _drawRightAxis(ctx, yMin, yMax, color) {
@@ -604,17 +543,6 @@ class PanelRenderer {
       ctx.fillText(formatNum(y), plotX0 + plotW + 4, py);
     }
     ctx.restore();
-  }
-
-  // -- Find nearest peak within pixel radius ---------------------------------
-  nearestPeak(mx, my, radius) {
-    let best = null, bestDist = radius * radius;
-    for (const p of this._peaks) {
-      const dx = p.px - mx, dy = p.py - my;
-      const d = dx * dx + dy * dy;
-      if (d < bestDist) { bestDist = d; best = p; }
-    }
-    return best;
   }
 
   // -- Derivative impulses (accel/velocity discontinuities) ------------------
@@ -758,7 +686,6 @@ export class TrajectoryView {
     // "path": the path owns it (fixed xy, the time it is reached re-derives).
     this.hoverMode = null; // "time" | "path" | null
     this.hoverXY = null; // { x, y } cursor position when hoverMode === "path"
-    this.showPeaks = false;
     this.wheelTimer = null; // suppresses mousemove during trackpad gestures
     this.tooltipEl = document.getElementById("tooltip");
     this.readoutEl = document.getElementById("readout");
@@ -962,7 +889,7 @@ export class TrajectoryView {
         th(simKeys.tang, "th∥");
         th(simKeys.cent, "th⊥", { magnitude: true });
       }
-      th(simKeys.scalar, "th|XY|", { magnitude: true, peaks: "th" });
+      th(simKeys.scalar, "th|XY|", { magnitude: true });
     }
     series.push({ key: scalarKey, color: COLORS.scalar, label: "|XY|", scalar: true, magnitude: true });
     return this._attachSeriesState(type, series);
@@ -1048,7 +975,7 @@ export class TrajectoryView {
     const jrkSeries = this._panelSeries("jrk", "jx", "jy", "jz", "je", "j_tang", "j_cent", "j_scalar");
     const kappaSeries = [{ key: "kappa", color: COLORS.kappa, label: "κ", scalar: true }];
     if (this._simActive()) {
-      kappaSeries.push({ key: "sim_kappa", color: COLORS.toolhead, dash: TOOLHEAD_DASH, label: "thκ", group: "th", peaks: "th" });
+      kappaSeries.push({ key: "sim_kappa", color: COLORS.toolhead, dash: TOOLHEAD_DASH, label: "thκ", group: "th" });
     }
     this._attachSeriesState("kappa", kappaSeries);
     const vel = scaleSeries(velSeries);
@@ -1084,10 +1011,10 @@ export class TrajectoryView {
       this._updateLegend("kappa", "Curvature", kappaSeries);
 
       this.renderers[0].renderPathBuffer(xMin, xMax, yMin, yMax);
-      this.renderers[1].renderTimeBuffer(tMin, tMax, vel.leftMin, vel.leftMax, vel.shown, this.showPeaks);
-      this.renderers[2].renderTimeBuffer(tMin, tMax, acc.leftMin, acc.leftMax, acc.shown, this.showPeaks);
-      this.renderers[3].renderTimeBuffer(tMin, tMax, jrk.leftMin, jrk.leftMax, jrk.shown, this.showPeaks);
-      this.renderers[4].renderTimeBuffer(tMin, tMax, kappa.leftMin, kappa.leftMax, kappa.shown, this.showPeaks);
+      this.renderers[1].renderTimeBuffer(tMin, tMax, vel.leftMin, vel.leftMax, vel.shown);
+      this.renderers[2].renderTimeBuffer(tMin, tMax, acc.leftMin, acc.leftMax, acc.shown);
+      this.renderers[3].renderTimeBuffer(tMin, tMax, jrk.leftMin, jrk.leftMax, jrk.shown);
+      this.renderers[4].renderTimeBuffer(tMin, tMax, kappa.leftMin, kappa.leftMax, kappa.shown);
 
       const DATA = this.data;
       // The impulse stems annotate the motor-command trajectory, so they
@@ -1121,7 +1048,6 @@ export class TrajectoryView {
       if (view.wheelTimer || !view.data) return;
       const rect = r.canvas.getBoundingClientRect();
       const mx = e.clientX - rect.left;
-      const my = e.clientY - rect.top;
 
       if (dragging) {
         const dx = e.clientX - dragStartX;
@@ -1138,10 +1064,7 @@ export class TrajectoryView {
         view.hoverIdx = closestIndex(view.data.t(), dataT);
         view.scheduleHover();
 
-        // A derivative impulse (accel/velocity discontinuity) takes precedence
-        // over a peak.
         const impulse = r.nearestImpulse(mx, 6);
-        const peak = r.nearestPeak(mx, my, 12);
         const tooltipEl = view.tooltipEl;
         if (impulse) {
           const desc = IMPULSE_DESC[r.type];
@@ -1151,12 +1074,6 @@ export class TrajectoryView {
           tooltipEl.textContent =
             `${desc.label} at t=${formatNum(impulse.tVal)}s\n` +
             `${desc.delta}=${formatNum(impulse.mag)} ${desc.unit} (${desc.infOf})`;
-        } else if (peak) {
-          tooltipEl.style.display = "block";
-          tooltipEl.style.left = (e.clientX + 14) + "px";
-          tooltipEl.style.top = (e.clientY - 10) + "px";
-          const peakName = peak.src === "th" ? "toolhead peak" : "peak";
-          tooltipEl.textContent = `${peakName} at t=${formatNum(peak.tVal)}s\nvalue=${formatNum(peak.val)}`;
         } else {
           tooltipEl.style.display = "none";
         }
@@ -1481,11 +1398,6 @@ export class TrajectoryView {
     this.renderAll();
   }
 
-  setShowPeaks(on) {
-    this.showPeaks = on;
-    this.lastBoundsKey = "";
-    this.renderAll();
-  }
 }
 
 // -- Resizable path/graphs split ---------------------------------------------

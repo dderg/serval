@@ -54,7 +54,12 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
 .readout .g{color:#888}
 .panels{display:grid;grid-template-columns:var(--path-w,60%) 6px 1fr;grid-template-rows:1fr;gap:1px;background:#2a2d35;overflow:hidden}
 .left-col{grid-column:1;grid-row:1;display:flex;flex-direction:column;gap:1px;background:#2a2d35;min-width:0;min-height:0}
-.settings{flex:0 1 auto;max-height:46%;display:grid;grid-template-columns:1fr 1fr;gap:1px;background:#2a2d35;min-height:0}
+.settings{position:relative;flex:0 1 auto;max-height:46%;display:grid;grid-template-columns:1fr 1fr;gap:1px;background:#2a2d35;min-height:0}
+#settings-collapse{position:absolute;top:6px;right:8px;z-index:2;background:#1d2026;border:1px solid #2a2d35;border-radius:4px;color:#888;cursor:pointer;font-size:12px;line-height:1;padding:3px 7px}
+#settings-collapse:hover{color:#e0e0e0;border-color:#4a9eff}
+.settings-collapsed .settings{display:block;flex:0 0 auto;max-height:none;background:#1d2026}
+.settings-collapsed .settings-fields,.settings-collapsed .settings-pp{display:none}
+.settings-collapsed #settings-collapse{position:static;display:block;width:100%;border:none;border-radius:0;padding:6px 0;letter-spacing:0.08em}
 .settings-fields{background:#1d2026;min-height:0}
 .settings-pp{background:#1d2026;display:flex;flex-direction:column;min-height:0;padding:10px 12px}
 .settings-pp .section{font-size:10px;text-transform:uppercase;letter-spacing:0.08em;color:#666;margin:0 0 6px}
@@ -77,6 +82,27 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
 .panel-label .lg:hover{text-decoration:underline}
 .panel-label .lg.off{opacity:0.35;text-decoration:line-through}
 .panel-label .lg.off:hover{text-decoration:line-through underline}
+.drawer{position:fixed;top:0;right:-320px;width:300px;height:100%;background:#1d2026;border-left:1px solid #2a2d35;box-shadow:-8px 0 24px rgba(0,0,0,0.35);transition:right 0.15s ease;z-index:70;display:flex;flex-direction:column}
+.drawer.open{right:0}
+.drawer-head{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid #2a2d35;font-size:13px;font-weight:600;color:#fff}
+.drawer-head button{background:none;border:none;color:#888;font-size:18px;line-height:1;cursor:pointer;padding:0 2px}
+.drawer-head button:hover{color:#e0e0e0}
+.drawer-new{display:flex;gap:6px;padding:10px 14px;border-bottom:1px solid #2a2d35}
+.drawer-new input{flex:1;min-width:0;background:#14161a;color:#e0e0e0;border:1px solid #2a2d35;border-radius:4px;padding:5px 8px;font-size:12px}
+.drawer-new input:focus{outline:none;border-color:#4a9eff}
+.drawer-new button{background:#2a2d35;color:#e0e0e0;border:1px solid #3a3d45;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:12px;white-space:nowrap}
+.drawer-new button:hover{background:#3a3d45}
+.drawer-new button:disabled{opacity:0.4;cursor:default}
+.drawer-list{flex:1;overflow-y:auto;padding:6px 0}
+.drawer-list .empty{padding:14px;font-size:12px;color:#666}
+.preset-row{display:flex;align-items:center;gap:6px;padding:6px 14px;font-size:12px}
+.preset-row:hover{background:#22252c}
+.preset-row.active{background:rgba(74,158,255,0.08);box-shadow:inset 2px 0 0 #4a9eff}
+.preset-row .pname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#d7dbe2}
+.preset-row .dirty{color:#f5a623}
+.preset-row button{background:none;border:1px solid #3a3d45;border-radius:4px;color:#9aa3b2;padding:2px 8px;cursor:pointer;font-size:11px}
+.preset-row button:hover{color:#e0e0e0;background:#2a2d35}
+.preset-row button.danger:hover{color:#ef9a9a;border-color:rgba(239,83,80,0.5)}
 .spin{position:absolute;top:50%;left:50%;width:28px;height:28px;margin:-14px 0 0 -14px;border:3px solid rgba(74,158,255,0.25);border-top-color:#4a9eff;border-radius:50%;z-index:3;opacity:0;pointer-events:none;animation:spin 0.8s linear infinite}
 .spin.on{opacity:1;transition:opacity 0.15s 0.2s}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -101,30 +127,26 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
       <span class="tb-group" id="case-group">
         <select id="case-select" title="Load a snapshot case"><option value="">Open case…</option></select>
       </span>
-      <span class="tb-group">
-        <select id="preset-select" title="Load a saved preset"><option value="">Presets…</option></select>
-        <button id="preset-save" title="Save the current state into the selected preset">Save</button>
-        <button id="preset-saveas" title="Save the current state as a new named preset">Save as…</button>
-        <button id="preset-delete" title="Delete the selected preset" disabled>Delete</button>
-      </span>
+      <button id="preset-toggle" title="Open the presets drawer">Presets</button>
       <span class="tb-sep"></span>
       <span class="tb-group">
         <button id="slot-a" class="slot">A</button>
         <button id="slot-b" class="slot">B</button>
       </span>
       <button id="reset-zoom">Reset Zoom</button>
-      <button id="toggle-peaks" class="active">Peaks</button>
       <button id="reset-everything" title="Discard saved gcode, config and view state — back to the stock demo">Reset everything</button>
     </div>
     <div class="readout" id="readout"><span class="g">hover a panel to scrub</span></div>
     <div class="panels">
       <div class="left-col">
         <div class="settings">
+          <button id="settings-collapse" title="Collapse the settings pane">⌃</button>
           <div class="settings-fields config">
             <div class="section">[printer]</div>
             <div class="row"><label for="cfg-max_velocity">max_velocity</label><input id="cfg-max_velocity" type="number" step="10" value="300"></div>
             <div class="row"><label for="cfg-max_accel">max_accel</label><input id="cfg-max_accel" type="number" step="100" value="3000"></div>
-            <div class="row"><label for="cfg-square_corner_velocity">square_corner_velocity</label><input id="cfg-square_corner_velocity" type="number" step="1" value="5"></div>
+            <div class="row"><label for="cfg-corner_deviation" title="Canonical corner budget in mm; square_corner_velocity is its legacy alias — set exactly one">corner_deviation</label><input id="cfg-corner_deviation" type="number" step="0.001" min="0" placeholder="from scv"></div>
+            <div class="row"><label for="cfg-square_corner_velocity" title="Legacy alias of corner_deviation — set exactly one">square_corner_velocity</label><input id="cfg-square_corner_velocity" type="number" step="1" value="5"></div>
             <div class="row"><label for="cfg-max_jerk">max_jerk (0 = off)</label><input id="cfg-max_jerk" type="number" step="10000" min="0" value="2000000"></div>
             <div class="row"><label for="cfg-max_path_deviation">max_path_deviation</label><input id="cfg-max_path_deviation" type="number" step="0.001" placeholder="0.005"></div>
             <div class="row"><label for="cfg-max_accel_deviation">max_accel_deviation</label><input id="cfg-max_accel_deviation" type="number" step="10" placeholder="50"></div>
@@ -200,6 +222,17 @@ smooth_time: 0.02</textarea>
   </div>
 </div>
 <div class="tooltip" id="tooltip"></div>
+<div class="drawer" id="preset-drawer">
+  <div class="drawer-head">
+    <span>Presets</span>
+    <button id="drawer-close" title="Close (esc)">×</button>
+  </div>
+  <div class="drawer-new">
+    <input id="preset-name" type="text" placeholder="preset name" spellcheck="false">
+    <button id="preset-create" disabled>Save</button>
+  </div>
+  <div class="drawer-list" id="preset-list"></div>
+</div>
 <script>
 // A failed module or wasm load otherwise leaves the page silently blank —
 // the most common cause is an unbuilt wasm bundle in a fresh checkout.

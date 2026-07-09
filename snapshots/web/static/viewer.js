@@ -264,11 +264,6 @@ async function main() {
 
   document.getElementById("reset-zoom").addEventListener("click", () => view.resetZoom());
 
-  document.getElementById("toggle-peaks").addEventListener("click", (e) => {
-    e.target.classList.toggle("active", !view.showPeaks);
-    view.setShowPeaks(!view.showPeaks);
-  });
-
   document.getElementById("toggle-variant").addEventListener("click", () => view.toggleVariant());
   document.getElementById("open-playground").addEventListener("click", () => {
     if (!currentCase) return;

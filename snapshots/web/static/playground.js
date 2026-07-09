@@ -10,12 +10,16 @@ const STORAGE_KEY = "motionPlayground.state";
 const PRESETS_KEY = "motionPlayground.presets";
 const ACTIVE_PRESET_KEY = "motionPlayground.activePreset";
 const GCODE_COLLAPSED_KEY = "motionPlayground.gcodeCollapsed";
+const SETTINGS_COLLAPSED_KEY = "motionPlayground.settingsCollapsed";
 const DEBOUNCE_MS = 250;
 
 const CONFIG_FIELDS = [
   { id: "max_velocity", required: true },
   { id: "max_accel", required: true },
-  { id: "square_corner_velocity", required: true },
+  // Exactly one of corner_deviation (canonical) / square_corner_velocity
+  // (legacy alias) must be set — the planner validates and reports it.
+  { id: "corner_deviation", required: false },
+  { id: "square_corner_velocity", required: false },
   { id: "max_jerk", required: true },
   { id: "max_path_deviation", required: false },
   { id: "max_accel_deviation", required: false },
@@ -308,7 +312,7 @@ function saveState() {
       slots: { A: slots.A.state, B: slots.B ? slots.B.state : null },
     }));
   } catch (e) { /* quota / private mode — persistence is best-effort */ }
-  syncPresetControls();
+  renderPresetDrawer();
 }
 
 async function restoreState() {
@@ -353,79 +357,99 @@ function setActivePreset(name) {
     if (name) localStorage.setItem(ACTIVE_PRESET_KEY, name);
     else localStorage.removeItem(ACTIVE_PRESET_KEY);
   } catch (e) { /* best-effort */ }
-  refreshPresetSelect(name);
+  renderPresetDrawer();
 }
 
-function refreshPresetSelect(selected) {
-  const sel = document.getElementById("preset-select");
-  const presets = loadPresets();
-  sel.replaceChildren(new Option("Presets…", ""));
-  for (const name of Object.keys(presets).sort()) {
-    sel.add(new Option(name, name));
-  }
-  sel.value = selected && presets[selected] ? selected : "";
-  syncPresetControls();
+function drawerOpen() {
+  return document.getElementById("preset-drawer").classList.contains("open");
 }
 
-// The Save button reflects where the current state stands against the active
-// preset: disabled when in sync, "Save ●" when the state has drifted.
-function syncPresetControls() {
-  const name = document.getElementById("preset-select").value;
-  const saveBtn = document.getElementById("preset-save");
-  document.getElementById("preset-delete").disabled = name === "";
-  if (name === "") {
-    saveBtn.disabled = true;
-    saveBtn.textContent = "Save";
-    return;
-  }
-  const dirty =
-    JSON.stringify(loadPresets()[name]) !== JSON.stringify(captureState());
-  saveBtn.disabled = !dirty;
-  saveBtn.textContent = dirty ? "Save ●" : "Save";
+function setDrawerOpen(on) {
+  document.getElementById("preset-drawer").classList.toggle("open", on);
+  document.getElementById("preset-toggle").classList.toggle("active", on);
+  if (on) renderPresetDrawer();
 }
 
-function savePreset() {
-  const name = document.getElementById("preset-select").value;
-  if (name === "") {
-    saveAsPreset();
-    return;
-  }
+function savePresetAs(name) {
   const presets = loadPresets();
   presets[name] = captureState();
   storePresets(presets);
   setActivePreset(name);
 }
 
-function saveAsPreset() {
-  const name = prompt("Preset name:", activePresetName());
-  if (name == null) return;
-  const trimmed = name.trim();
-  if (trimmed === "") return;
-  const presets = loadPresets();
-  presets[trimmed] = captureState();
-  storePresets(presets);
-  setActivePreset(trimmed);
+function presetRowButton(label, title, danger, onClick) {
+  const btn = document.createElement("button");
+  btn.textContent = label;
+  btn.title = title;
+  if (danger) btn.classList.add("danger");
+  btn.addEventListener("click", onClick);
+  return btn;
 }
 
-function deletePreset() {
-  const name = document.getElementById("preset-select").value;
-  if (name === "") return;
+function renderPresetDrawer() {
+  if (!drawerOpen()) return;
+  const list = document.getElementById("preset-list");
   const presets = loadPresets();
-  delete presets[name];
-  storePresets(presets);
-  setActivePreset("");
-}
-
-function onPresetSelected() {
-  const name = document.getElementById("preset-select").value;
-  setActivePreset(name);
-  if (name === "") return;
-  const preset = loadPresets()[name];
-  if (preset) {
-    applyState(preset);
-    invalidateActiveSlotPlan();
-    requestPlan();
+  const names = Object.keys(presets).sort();
+  const active = activePresetName();
+  const currentJson = JSON.stringify(captureState());
+  list.replaceChildren();
+  if (names.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "No presets yet — name the current state above and save it.";
+    list.appendChild(empty);
   }
+  for (const name of names) {
+    const row = document.createElement("div");
+    row.className = "preset-row";
+    if (name === active) row.classList.add("active");
+    const label = document.createElement("span");
+    label.className = "pname";
+    label.textContent = name;
+    label.title = name;
+    row.appendChild(label);
+    if (name === active && JSON.stringify(presets[name]) !== currentJson) {
+      const dirty = document.createElement("span");
+      dirty.className = "dirty";
+      dirty.title = "The current state has unsaved changes against this preset";
+      dirty.textContent = "●";
+      row.appendChild(dirty);
+    }
+    row.appendChild(presetRowButton("Load", "Replace the current state with this preset", false, () => {
+      applyState(presets[name]);
+      setActivePreset(name);
+      invalidateActiveSlotPlan();
+      requestPlan();
+    }));
+    row.appendChild(presetRowButton("Save", "Overwrite this preset with the current state", false, () => {
+      savePresetAs(name);
+    }));
+    row.appendChild(presetRowButton("Delete", "Delete this preset", true, () => {
+      const all = loadPresets();
+      delete all[name];
+      storePresets(all);
+      if (activePresetName() === name) setActivePreset("");
+      else renderPresetDrawer();
+    }));
+    list.appendChild(row);
+  }
+}
+
+function syncPresetCreate() {
+  const name = document.getElementById("preset-name").value.trim();
+  const btn = document.getElementById("preset-create");
+  btn.disabled = name === "";
+  btn.textContent = name !== "" && loadPresets()[name] ? "Overwrite" : "Save";
+}
+
+function createPresetFromInput() {
+  const input = document.getElementById("preset-name");
+  const name = input.value.trim();
+  if (name === "") return;
+  savePresetAs(name);
+  input.value = "";
+  syncPresetCreate();
 }
 
 // Loading a preset or case rewrites the active slot's state, so its cached
@@ -488,7 +512,7 @@ async function onCaseSelected() {
   await loadCaseIntoEditor(name);
 }
 
-// -- Gcode pane collapse ---------------------------------------------------------
+// -- Pane collapsing ---------------------------------------------------------
 function setGcodeCollapsed(on) {
   document.querySelector(".app").classList.toggle("gcode-collapsed", on);
   const btn = document.getElementById("gcode-collapse");
@@ -496,6 +520,16 @@ function setGcodeCollapsed(on) {
   btn.title = on ? "Expand the gcode pane" : "Collapse the gcode pane";
   try {
     localStorage.setItem(GCODE_COLLAPSED_KEY, on ? "1" : "0");
+  } catch (e) { /* best-effort */ }
+}
+
+function setSettingsCollapsed(on) {
+  document.querySelector(".left-col").classList.toggle("settings-collapsed", on);
+  const btn = document.getElementById("settings-collapse");
+  btn.textContent = on ? "⌄ settings" : "⌃";
+  btn.title = on ? "Expand the settings pane" : "Collapse the settings pane";
+  try {
+    localStorage.setItem(SETTINGS_COLLAPSED_KEY, on ? "1" : "0");
   } catch (e) { /* best-effort */ }
 }
 
@@ -522,27 +556,35 @@ async function main() {
     localStorage.clear();
     location.reload();
   });
-  refreshPresetSelect(activePresetName());
-  document.getElementById("preset-select").addEventListener("change", onPresetSelected);
-  document.getElementById("preset-save").addEventListener("click", savePreset);
-  document.getElementById("preset-saveas").addEventListener("click", saveAsPreset);
-  document.getElementById("preset-delete").addEventListener("click", deletePreset);
+  document.getElementById("preset-toggle").addEventListener("click", () => setDrawerOpen(!drawerOpen()));
+  document.getElementById("drawer-close").addEventListener("click", () => setDrawerOpen(false));
+  document.getElementById("preset-create").addEventListener("click", createPresetFromInput);
+  const presetName = document.getElementById("preset-name");
+  presetName.addEventListener("input", syncPresetCreate);
+  presetName.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") createPresetFromInput();
+    if (e.key === "Escape") setDrawerOpen(false);
+  });
   initCases();
 
   setGcodeCollapsed(localStorage.getItem(GCODE_COLLAPSED_KEY) === "1");
   document.getElementById("gcode-collapse").addEventListener("click", () => {
     setGcodeCollapsed(!document.querySelector(".app").classList.contains("gcode-collapsed"));
   });
+  setSettingsCollapsed(localStorage.getItem(SETTINGS_COLLAPSED_KEY) === "1");
+  document.getElementById("settings-collapse").addEventListener("click", () => {
+    setSettingsCollapsed(!document.querySelector(".left-col").classList.contains("settings-collapsed"));
+  });
 
   document.getElementById("slot-a").addEventListener("click", (e) => onSlotClick("A", e));
   document.getElementById("slot-b").addEventListener("click", (e) => onSlotClick("B", e));
   document.getElementById("reset-zoom").addEventListener("click", () => view.resetZoom());
-  document.getElementById("toggle-peaks").addEventListener("click", (e) => {
-    e.target.classList.toggle("active", !view.showPeaks);
-    view.setShowPeaks(!view.showPeaks);
-  });
 
   document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      setDrawerOpen(false);
+      return;
+    }
     if (e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT") return;
     if (e.key === " " || e.key === "b" || e.key === "B") {
       e.preventDefault();
