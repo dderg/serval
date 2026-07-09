@@ -237,6 +237,19 @@ fn classify_window_ignores_a_handful_of_outliers() {
 }
 
 #[test]
+fn classify_window_handles_small_windows_with_outliers() {
+    // 4-sample window (small, under n=10): 3 steady samples + 1 extreme outlier.
+    // Sorted dkappa_ds = [0.01, 0.01, 0.01, 5.0].
+    // With the fix: trim = (4/10).max(1).min(1) = 1, so lo=sorted[1]=0.01,
+    // hi=sorted[2]=0.01, spread=0.0 -> Constant or Linear, depending on median.
+    // Pre-fix: trim = 0 (raw min-max), so lo=sorted[0]=0.01, hi=sorted[3]=5.0,
+    // spread=4.99 -> Other. This test proves the fix actually closes the gap.
+    let dkappa_ds = vec![0.01, 0.01, 5.0, 0.01];
+    let kappa = vec![0.01, 0.02, 0.03, 0.04];
+    assert_eq!(classify_window(&kappa, &dkappa_ds), CurvatureClass::Linear);
+}
+
+#[test]
 fn smooth_classes_kills_an_isolated_single_window_flicker() {
     use CurvatureClass::*;
     let raw = vec![Constant, Constant, Other, Constant, Constant];

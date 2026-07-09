@@ -215,18 +215,23 @@ impl CurvatureClass {
     }
 }
 
-// 10th-to-90th-percentile spread of a sorted slice: robust to a handful of
+// ~10th-to-90th-percentile spread of a sorted slice: robust to a handful of
 // outliers (e.g. the one or two samples nearest a piece seam, where dkappa/ds
 // can legitimately jump even in a perfectly healthy trajectory) in a way a
-// raw max-min is not.
+// raw max-min is not. Trims at least 1 sample off each end whenever there are
+// at least 3 -- plain `n / 10` truncates to 0 (i.e. no trim at all, degrading
+// to raw min-max) for any n under 10, which is exactly the small-window case
+// (a trailing partial window, or one shrunk by excluding Cusp/Gap samples)
+// this robustness exists to cover.
 #[allow(dead_code)]
 fn percentile_spread(sorted: &[f64]) -> f64 {
     let n = sorted.len();
     if n < 3 {
         return sorted.last().copied().unwrap_or(0.0) - sorted.first().copied().unwrap_or(0.0);
     }
-    let lo = sorted[n / 10];
-    let hi = sorted[n - 1 - n / 10];
+    let trim = (n / 10).max(1).min((n - 1) / 2);
+    let lo = sorted[trim];
+    let hi = sorted[n - 1 - trim];
     hi - lo
 }
 
