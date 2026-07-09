@@ -1,14 +1,14 @@
 use super::EVENT_BISECT_ITERS;
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct State {
+pub(in crate::velocity) struct State {
     pub t: f64,
     pub s: f64,
     pub v: f64,
     pub a: f64,
 }
 
-pub(super) fn advance(st: State, j: f64, dt: f64) -> State {
+pub(in crate::velocity) fn advance(st: State, j: f64, dt: f64) -> State {
     State {
         t: st.t + dt,
         s: st.s + st.v * dt + 0.5 * st.a * dt * dt + j * dt * dt * dt / 6.0,
@@ -21,7 +21,7 @@ pub(super) fn advance(st: State, j: f64, dt: f64) -> State {
 /// it stalls (speed reaches zero) first. The bisection bracket is capped at
 /// the stall, where the position curve folds — a bracket extending past it
 /// would converge onto the fold instead of the crossing.
-pub(super) fn time_to_cross(st: State, j: f64, ds: f64) -> Option<f64> {
+pub(in crate::velocity) fn time_to_cross(st: State, j: f64, ds: f64) -> Option<f64> {
     if ds <= 0.0 {
         return Some(0.0);
     }

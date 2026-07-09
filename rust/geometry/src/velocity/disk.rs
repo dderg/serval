@@ -272,15 +272,58 @@ fn chord_slopes(s: &[f64], cap: &[f64]) -> Vec<f64> {
     out
 }
 
-/// Reconstruct under infinite jerk: the acceleration-disk boundary itself is
-/// the answer (nothing to ramp). Forward–backward disk passes over the
-/// velocity-limit curve give the grid velocities; between grid points the
-/// motion is constant-acceleration (`v²` linear in `s`), so the profile is
-/// exactly a chain of zero-jerk phases whose boundaries — the trapezoid
-/// corners — land on grid knots. Samples are re-derived from that chain, and
-/// straight members lower each phase to an exact quadratic instead of fitting
-/// cubics across an acceleration step.
+/// Reconstruct under infinite jerk. The optimum is a continuous curve with
+/// an exact definition — accelerate on the disk rail (`d(v²/2)/ds =
+/// √(A² − κ²v⁴)`, an ODE in arc-length), ride the velocity-limit curve
+/// where it binds, brake onto the backward envelope — so it is integrated as
+/// exactly that by [`integrate_disk`], not read off grid chords. Acceleration
+/// is continuous between regime switches because the physics is; it steps
+/// only at the switches, which are located by root-finding inside cells
+/// rather than snapped to grid knots. If the integrator rejects the run
+/// (interior rest, degenerate cell), the first-order staircase reconstruction
+/// is emitted instead.
 fn infinite_jerk_profile(
+    s: &[f64],
+    vlc: &[f64],
+    accel: &[f64],
+    kappa: &[f64],
+    entry_v: f64,
+    exit_v: f64,
+) -> (Vec<(f64, f64, f64)>, Vec<StraightPhase>) {
+    if let Some(chain) = disk_ride_chain(s, vlc, accel, kappa, entry_v, exit_v) {
+        let samples = pinned_samples(&chain, s, entry_v, exit_v);
+        return (samples, chain);
+    }
+    staircase_profile(s, vlc, accel, kappa, entry_v, exit_v)
+}
+
+fn pinned_samples(
+    chain: &[StraightPhase],
+    s: &[f64],
+    entry_v: f64,
+    exit_v: f64,
+) -> Vec<(f64, f64, f64)> {
+    let n = s.len();
+    let mut samples: Vec<(f64, f64, f64)> = ride::chain_states(chain, s)
+        .into_iter()
+        .zip(s)
+        .map(|((v, a), &x)| (x, v, a))
+        .collect();
+    samples[0].1 = entry_v;
+    samples[n - 1].1 = exit_v;
+    if entry_v <= VELOCITY_FLOOR {
+        samples[0].2 = 0.0;
+    }
+    if exit_v <= VELOCITY_FLOOR {
+        samples[n - 1].2 = 0.0;
+    }
+    samples
+}
+
+/// The pre-integrator reconstruction, kept as the bail-out: forward–backward
+/// `v²` sweeps give grid velocities, lowered as merged zero-jerk spans — a
+/// staircase in acceleration wherever the rail varies.
+fn staircase_profile(
     s: &[f64],
     vlc: &[f64],
     accel: &[f64],
@@ -307,44 +350,36 @@ fn infinite_jerk_profile(
     ceil[0] = entry_v;
     ceil[n - 1] = exit_v;
 
-    let entry_rest = entry_v <= VELOCITY_FLOOR;
-    let exit_rest = exit_v <= VELOCITY_FLOOR;
-    let chain = infinite_jerk_chain(s, &ceil);
-    let mut samples: Vec<(f64, f64, f64)> = if chain.is_empty() {
-        (0..n)
+    let chain = zero_jerk_chain(s, &ceil);
+    let samples = if chain.is_empty() {
+        let mut out: Vec<(f64, f64, f64)> = (0..n)
             .map(|i| {
                 let (lo, hi) = (i.saturating_sub(1), (i + 1).min(n - 1));
                 let dvds = (ceil[hi] - ceil[lo]) / (s[hi] - s[lo]).max(1e-12);
                 let rail = disk_rail_accel(accel[i], kappa[i], ceil[i]);
                 (s[i], ceil[i], (ceil[i] * dvds).clamp(-rail, rail))
             })
-            .collect()
+            .collect();
+        out[0].1 = entry_v;
+        out[n - 1].1 = exit_v;
+        if entry_v <= VELOCITY_FLOOR {
+            out[0].2 = 0.0;
+        }
+        if exit_v <= VELOCITY_FLOOR {
+            out[n - 1].2 = 0.0;
+        }
+        out
     } else {
-        ride::chain_states(&chain, s)
-            .into_iter()
-            .zip(s)
-            .map(|((v, a), &x)| (x, v, a))
-            .collect()
+        pinned_samples(&chain, s, entry_v, exit_v)
     };
-    samples[0].1 = entry_v;
-    samples[n - 1].1 = exit_v;
-    if entry_rest {
-        samples[0].2 = 0.0;
-    }
-    if exit_rest {
-        samples[n - 1].2 = 0.0;
-    }
     (samples, chain)
 }
 
-/// The disk profile's `v²` slope is constant within a grid cell and — on rail
-/// and cruise stretches — bit-identical across cells, so maximal equal-slope
-/// spans merge into single constant-acceleration phases. A trapezoid becomes
-/// rail / transition-cell / cruise / transition-cell / rail rather than one
-/// phase per 0.01mm grid cell.
+/// Merges maximal equal-`v²`-slope spans into single constant-acceleration
+/// phases; an interior rest leaves no chain.
 const INFINITE_JERK_SLOPE_MERGE_REL_TOL: f64 = 1e-6;
 
-fn infinite_jerk_chain(s: &[f64], v: &[f64]) -> Vec<StraightPhase> {
+fn zero_jerk_chain(s: &[f64], v: &[f64]) -> Vec<StraightPhase> {
     let n = s.len();
     let slope = |i: usize| (v[i + 1] * v[i + 1] - v[i] * v[i]) / (2.0 * (s[i + 1] - s[i]));
     let mut chain = Vec::new();
@@ -364,20 +399,516 @@ fn infinite_jerk_chain(s: &[f64], v: &[f64]) -> Vec<StraightPhase> {
             j += 1;
         }
         let ds = s[j] - s[i];
-        let a_span = (v[j] * v[j] - v[i] * v[i]) / (2.0 * ds);
-        let dt = 2.0 * ds / (v[i] + v[j]);
         chain.push(StraightPhase {
             t0,
-            dt,
+            dt: 2.0 * ds / (v[i] + v[j]),
             s0: s[i],
             v0: v[i],
-            a0: a_span,
+            a0: (v[j] * v[j] - v[i] * v[i]) / (2.0 * ds),
             j: 0.0,
         });
-        t0 += dt;
+        t0 += chain.last().unwrap().dt;
         i = j;
     }
     chain
+}
+
+/// Positive root of `c2·dt² + c1·dt − ds = 0` in the cancellation-stable
+/// form `2·ds / (c1 + √(c1² + 4·c2·ds))`, which is the unique positive root
+/// when `c2 ≥ 0` and the first (physical) arrival when `c2 < 0`.
+fn cell_duration(c2: f64, c1: f64, ds: f64) -> Option<f64> {
+    let disc = c1 * c1 + 4.0 * c2 * ds;
+    if disc < 0.0 {
+        return None;
+    }
+    let dt = 2.0 * ds / (c1 + disc.sqrt());
+    (dt.is_finite() && dt > 0.0).then_some(dt)
+}
+
+const DISK_RIDE_BISECT_ITERS: u32 = 60;
+const DISK_RIDE_DT_SANITY: f64 = 16.0;
+/// The brake envelope counts as binding only strictly below the limit curve,
+/// so a curve riding the same cap never chatters against it.
+const BRAKE_BIND_REL: f64 = 1e-6;
+/// Slack for anchoring a cell on a target velocity the law curve must already
+/// be near; a larger gap means the run is genuinely infeasible or the
+/// integration lost its constraint, and the run is rejected.
+const LAND_SLACK_REL: f64 = 1e-3;
+/// Cap-riding drifts off the limit curve by the per-cell consistency error;
+/// beyond this the integration lost the cap.
+const CAP_DRIFT_MAX_REL: f64 = 1e-3;
+/// Implied landing accelerations within this of the entry acceleration snap
+/// to it exactly, so constant-accel spans stay merge- and exact-lowerable.
+const ACCEL_SNAP_MM_S2: f64 = 1e-3;
+
+/// The infinite-jerk profile as an event-driven integration in run-local
+/// arc-length, with three laws: accelerate on the disk rail, track the
+/// velocity-limit curve, and brake on the rail toward the exit anchor. A
+/// backward rail sweep supplies the brake envelope — at each node the highest
+/// speed from which the exit and every downstream cap remain reachable. The
+/// envelope is used only to locate events (where the forward curve meets a
+/// braking constraint, found by bisection inside the cell); the braking
+/// trajectory itself is integrated forward by the brake law and lands exactly
+/// on the envelope\'s stretch-end node, so envelope discretization error
+/// never enters the emitted chain. Returns `None` when a cell solve
+/// degenerates or the track holds an interior rest; the caller falls back to
+/// the staircase reconstruction.
+fn disk_ride_chain(
+    s: &[f64],
+    vlc: &[f64],
+    accel: &[f64],
+    kappa: &[f64],
+    entry_v: f64,
+    exit_v: f64,
+) -> Option<Vec<StraightPhase>> {
+    let n = s.len();
+    if n < 2 || vlc.iter().any(|&c| c <= VELOCITY_FLOOR) {
+        return None;
+    }
+    let x: Vec<f64> = s.iter().map(|&v| v - s[0]).collect();
+    let track = DiskTrack::new(&x, vlc, accel, kappa);
+
+    let mut envelope = vlc.to_vec();
+    envelope[n - 1] = envelope[n - 1].min(exit_v);
+    for i in (0..n - 1).rev() {
+        let ds = x[i + 1] - x[i];
+        let budget = disk_rail_accel(accel[i + 1], kappa[i + 1], envelope[i + 1]);
+        let reach = (envelope[i + 1] * envelope[i + 1] + 2.0 * budget * ds).sqrt();
+        envelope[i] = envelope[i].min(reach);
+    }
+
+    let mut chain = integrate_disk(&track, &envelope, entry_v, exit_v)?;
+    for p in &mut chain {
+        p.s0 += s[0];
+    }
+    Some(chain)
+}
+
+struct DiskTrack<'a> {
+    x: &'a [f64],
+    vlc: &'a [f64],
+    accel: &'a [f64],
+    kappa: &'a [f64],
+    cap_a: Vec<f64>,
+}
+
+impl<'a> DiskTrack<'a> {
+    fn new(x: &'a [f64], vlc: &'a [f64], accel: &'a [f64], kappa: &'a [f64]) -> Self {
+        let n = x.len();
+        let cap_a = (0..n)
+            .map(|i| {
+                let (lo, hi) = (i.saturating_sub(1), (i + 1).min(n - 1));
+                let span = x[hi] - x[lo];
+                if span > 1e-12 {
+                    (vlc[hi] * vlc[hi] - vlc[lo] * vlc[lo]) / (2.0 * span)
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        DiskTrack {
+            x,
+            vlc,
+            accel,
+            kappa,
+            cap_a,
+        }
+    }
+
+    fn rail(&self, i: usize, v: f64) -> f64 {
+        disk_rail_accel(self.accel[i], self.kappa[i], v)
+    }
+
+    /// The cap slope of the cell ahead of node `k` (behind it at the track
+    /// end). Adopting the *centered* slope when landing on a node would read
+    /// half of whatever discontinuity sits behind the node — a feedrate step
+    /// between moves injects tens of thousands of mm/s² that the cap on the
+    /// far side never asked for.
+    fn cap_a_forward(&self, k: usize) -> f64 {
+        let n = self.x.len();
+        let (lo, hi) = if k + 1 < n { (k, k + 1) } else { (k - 1, k) };
+        let span = self.x[hi] - self.x[lo];
+        if span <= 1e-12 {
+            return 0.0;
+        }
+        (self.vlc[hi] * self.vlc[hi] - self.vlc[lo] * self.vlc[lo]) / (2.0 * span)
+    }
+
+    /// A nodal curve linearly interpolated inside cell `k`.
+    fn interp(&self, nodal: &[f64], k: usize, x: f64) -> f64 {
+        let span = self.x[k + 1] - self.x[k];
+        if span <= 1e-12 {
+            return nodal[k + 1];
+        }
+        let f = ((x - self.x[k]) / span).clamp(0.0, 1.0);
+        nodal[k] + f * (nodal[k + 1] - nodal[k])
+    }
+}
+
+/// `(v, a)` of the constant-jerk chain at arc `x`.
+fn chain_state_at(chain: &[StraightPhase], x: f64) -> Option<(f64, f64)> {
+    let idx = chain
+        .partition_point(|p| p.s0 <= x + POS_INTERIOR_EPS)
+        .saturating_sub(1);
+    let p = chain.get(idx)?;
+    let st = ride::state::State {
+        t: 0.0,
+        s: 0.0,
+        v: p.v0,
+        a: p.a0,
+    };
+    let tau = ride::state::time_to_cross(st, p.j, (x - p.s0).max(0.0))?.min(p.dt);
+    let e = ride::state::advance(st, p.j, tau);
+    Some((e.v, e.a))
+}
+
+const POS_INTERIOR_EPS: f64 = 1e-12;
+
+/// One constant-jerk cell of the integration: from `(v0, a0)` it reaches
+/// `ds` ahead with the end acceleration pinned at `a_end`; velocity follows.
+fn cell_toward_accel(v0: f64, a0: f64, a_end: f64, ds: f64) -> Option<(f64, f64)> {
+    let dt = cell_duration((2.0 * a0 + a_end) / 6.0, v0, ds)?;
+    Some((dt, v0 + 0.5 * dt * (a0 + a_end)))
+}
+
+/// One constant-jerk cell with the end *velocity* pinned instead: the exact
+/// landing used at anchors, where the implied end acceleration absorbs the
+/// residual.
+fn cell_toward_velocity(v0: f64, a0: f64, v_end: f64, ds: f64) -> Option<(f64, f64)> {
+    let dv = v_end - v0;
+    let dt = cell_duration(a0 / 6.0, v0 + dv / 3.0, ds)?;
+    Some((dt, 2.0 * dv / dt - a0))
+}
+
+#[derive(Clone, Copy)]
+enum Law {
+    Rail,
+    Cap,
+    Brake { until: usize },
+}
+
+fn integrate_disk(
+    track: &DiskTrack,
+    envelope: &[f64],
+    entry_v: f64,
+    exit_v: f64,
+) -> Option<Vec<StraightPhase>> {
+    let n = track.x.len();
+    let binding: Vec<bool> = (0..n)
+        .map(|i| envelope[i] < track.vlc[i] - BRAKE_BIND_REL * (1.0 + track.vlc[i]))
+        .collect();
+    let stretch_end = |from: usize| -> usize {
+        let mut m = from;
+        while m < n - 1 && binding[m] {
+            m += 1;
+        }
+        m
+    };
+
+    let mut chain: Vec<StraightPhase> = Vec::new();
+    let mut t = 0.0;
+    let mut x_cur = track.x[0];
+    let mut k = 0usize;
+    let mut v = entry_v.min(track.vlc[0]);
+    if v > envelope[0] + LAND_SLACK_REL * (1.0 + envelope[0]) {
+        return None;
+    }
+    let mut law = if binding[0] && v >= envelope[0] - LAND_SLACK_REL * (1.0 + envelope[0]) {
+        Law::Brake {
+            until: stretch_end(0),
+        }
+    } else if v >= track.vlc[0] * (1.0 - CAP_NOTCH_REL) {
+        Law::Cap
+    } else {
+        Law::Rail
+    };
+    let mut a = match law {
+        Law::Cap => track.cap_a[0],
+        Law::Rail => track.rail(0, v),
+        Law::Brake { .. } => -track.rail(0, v),
+    };
+
+    let push = |chain: &mut Vec<StraightPhase>, t: &mut f64, phase: StraightPhase| {
+        if phase.dt > 1e-12 {
+            *t += phase.dt;
+            chain.push(phase);
+        }
+    };
+    let law_reset = |track: &DiskTrack, law: Law, k: usize, v: f64| match law {
+        Law::Cap => track.cap_a_forward(k),
+        Law::Rail => track.rail(k, v),
+        Law::Brake { .. } => -track.rail(k, v),
+    };
+
+    let mut law_flips_in_cell = 0u32;
+    let mut iterations = 0u64;
+    while k < n - 1 {
+        iterations += 1;
+        if iterations > 20 * n as u64 {
+            debug_assert!(
+                false,
+                "disk_ride livelock: k={k} n={n} x_cur={x_cur} v={v} a={a}"
+            );
+            return None;
+        }
+        let ds = track.x[k + 1] - x_cur;
+        if ds <= GRID_DEDUP_MM {
+            k += 1;
+            law_flips_in_cell = 0;
+            continue;
+        }
+        if let Law::Cap = law {
+            if (v - track.interp(track.vlc, k, x_cur)).abs() > CAP_DRIFT_MAX_REL * (1.0 + v) {
+                return None;
+            }
+        }
+
+        // Anchored cells land their exact target velocity: a brake stretch on
+        // its end node (the cap value there — envelope discretization error
+        // does not enter), and the final cell on the exit anchor.
+        let last_cell = k + 1 == n - 1;
+        let brake_lands = matches!(law, Law::Brake { until } if until == k + 1);
+        if brake_lands || last_cell {
+            let v_land = if last_cell {
+                exit_v.min(track.vlc[n - 1])
+            } else {
+                envelope[k + 1].min(track.vlc[k + 1])
+            };
+            if !matches!(law, Law::Brake { .. })
+                && (v_land - v).abs()
+                    > LAND_SLACK_REL * (1.0 + v_land) + 2.0 * a.abs() * ds / v.max(VELOCITY_FLOOR)
+            {
+                return None;
+            }
+            let (dt, a_end) = cell_toward_velocity(v, a, v_land, ds)?;
+            // A physically-zero implied residual would still block the
+            // zero-jerk merge (and the exact closed-form straight lowering);
+            // snapping it moves the landed velocity by well under the seam
+            // continuity tolerance.
+            let a_end = if (a_end - a).abs() <= ACCEL_SNAP_MM_S2 {
+                a
+            } else {
+                a_end
+            };
+            let dt_est = 2.0 * ds / (v + v_land).max(VELOCITY_FLOOR);
+            if !(dt < DISK_RIDE_DT_SANITY * dt_est && dt * DISK_RIDE_DT_SANITY > dt_est) {
+                return None;
+            }
+            let landing = StraightPhase {
+                t0: t,
+                dt,
+                s0: x_cur,
+                v0: v,
+                a0: a,
+                j: (a_end - a) / dt,
+            };
+            push(&mut chain, &mut t, landing);
+            x_cur = track.x[k + 1];
+            k += 1;
+            law_flips_in_cell = 0;
+            v = v_land;
+            if !last_cell {
+                law = if v >= track.vlc[k] * (1.0 - CAP_NOTCH_REL) {
+                    Law::Cap
+                } else {
+                    Law::Rail
+                };
+                a = law_reset(track, law, k, v);
+            }
+            continue;
+        }
+
+        let cap_target = |v: f64, a: f64| {
+            let dt_est = 2.0 * ds / (v + track.vlc[k + 1]).max(VELOCITY_FLOOR);
+            let v_pred = v + 0.5 * dt_est * (a + track.cap_a[k + 1]);
+            track.cap_a[k + 1] + (track.vlc[k + 1] - v_pred) / dt_est
+        };
+        if matches!(law, Law::Cap) && cap_target(v, a) > track.rail(k + 1, track.vlc[k + 1]) {
+            // The cap (with its catch-up correction) outruns the disk: fall
+            // behind onto the rail rather than accumulate drift chasing it.
+            law = Law::Rail;
+            law_flips_in_cell += 1;
+            if law_flips_in_cell > 2 {
+                return None;
+            }
+            continue;
+        }
+        let a_tgt = match law {
+            // Track the cap slope with half-gain velocity feedback onto the
+            // node cap value: the open-loop trapezoid drifts off a strongly
+            // curved cap by O(v''·ds²) per cell, which compounds across a
+            // short blend; half the node error per cell keeps the drift
+            // bounded without the oscillation a full (reflecting) correction
+            // would ring with.
+            // A descending cap steeper than the rail is not followable —
+            // the envelope brake owns that stretch and its trigger fires a
+            // node later; clamping keeps the boundary cells on the disk
+            // instead of letting the stiff catch-up correction ring.
+            Law::Cap => cap_target(v, a).max(-track.rail(k + 1, v)),
+            Law::Rail => {
+                let v_pred = (v * v + 2.0 * a.max(0.0) * ds).max(0.0).sqrt();
+                track.rail(k + 1, v_pred)
+            }
+            Law::Brake { .. } => {
+                // Brake with half-gain velocity feedback onto the envelope:
+                // within a binding stretch the envelope is the rail-brake
+                // curve itself, and open-loop integration drifting a hair off
+                // it stalls a cell early when the stretch ends at rest.
+                let dt_est = 2.0 * ds / (v + envelope[k + 1]).max(VELOCITY_FLOOR);
+                let rail_a = {
+                    let v_pred = (v * v + 2.0 * a.min(0.0) * ds).max(0.0).sqrt();
+                    -track.rail(k + 1, v_pred)
+                };
+                let v_pred = v + 0.5 * dt_est * (a + rail_a);
+                rail_a + (envelope[k + 1] - v_pred) / dt_est
+            }
+        };
+        let a_tgt = if (a_tgt - a).abs() <= ACCEL_SNAP_MM_S2 {
+            a
+        } else {
+            a_tgt
+        };
+        let (dt, v1) = cell_toward_accel(v, a, a_tgt, ds)?;
+        let a_end = a_tgt;
+        let dt_est = 2.0 * ds / (v + v1.max(VELOCITY_FLOOR));
+        if !(dt < DISK_RIDE_DT_SANITY * dt_est && dt * DISK_RIDE_DT_SANITY > dt_est) {
+            return None;
+        }
+        let candidate = StraightPhase {
+            t0: t,
+            dt,
+            s0: x_cur,
+            v0: v,
+            a0: a,
+            j: (a_end - a) / dt,
+        };
+
+        if !matches!(law, Law::Brake { .. })
+            && binding[k + 1]
+            && v1 > envelope[k + 1] + VELOCITY_FLOOR
+        {
+            let until = stretch_end(k + 1);
+            // Inside the onset cell the envelope is the backward rail curve
+            // through the next node — the same form the sweep recursion uses.
+            // Bisecting against a linear chord instead would start the brake
+            // up to a chord-sag early and ring the feedback for cells after.
+            let env_curve = |xq: f64| {
+                let budget =
+                    disk_rail_accel(track.accel[k + 1], track.kappa[k + 1], envelope[k + 1]);
+                let w = envelope[k + 1] * envelope[k + 1] + 2.0 * budget * (track.x[k + 1] - xq);
+                Some(w.max(0.0).sqrt())
+            };
+            if v >= env_curve(x_cur)? {
+                law = Law::Brake { until };
+                a = -track.rail(k + 1, v);
+                law_flips_in_cell += 1;
+                if law_flips_in_cell > 2 {
+                    return None;
+                }
+                continue;
+            }
+            let (x_star, state) = bisect_crossing(&candidate, x_cur, track.x[k + 1], env_curve)?;
+            push(&mut chain, &mut t, truncate_phase(&candidate, x_star));
+            x_cur = x_star;
+            v = state.0;
+            a = -track.rail(k + 1, v);
+            law = Law::Brake { until };
+            law_flips_in_cell = 0;
+            continue;
+        }
+
+        if matches!(law, Law::Rail) && v1 > track.vlc[k + 1] && law_flips_in_cell == 0 {
+            if v >= track.interp(track.vlc, k, x_cur) {
+                law = Law::Cap;
+                a = track.cap_a_forward(k);
+                law_flips_in_cell += 1;
+                if law_flips_in_cell > 2 {
+                    return None;
+                }
+                continue;
+            }
+            let (x_star, state) = bisect_crossing(&candidate, x_cur, track.x[k + 1], |xq| {
+                Some(track.interp(track.vlc, k, xq))
+            })?;
+            push(&mut chain, &mut t, truncate_phase(&candidate, x_star));
+            x_cur = x_star;
+            v = state.0;
+            a = track.cap_a_forward(k);
+            law = Law::Cap;
+            law_flips_in_cell = 0;
+            continue;
+        }
+
+        push(&mut chain, &mut t, candidate);
+        x_cur = track.x[k + 1];
+        k += 1;
+        law_flips_in_cell = 0;
+        v = v1;
+        a = a_end;
+        if v <= VELOCITY_FLOOR && k < n - 1 {
+            return None;
+        }
+    }
+    if chain.is_empty() {
+        return None;
+    }
+    Some(merge_constant_accel(chain))
+}
+
+/// Arc (and `(v, a)` state) inside `[lo, hi]` where the candidate phase\'s
+/// velocity crosses the boundary curve `bound_v`, by bisection. The phase is
+/// below the boundary at `lo` and its end state is above at `hi`.
+fn bisect_crossing<F: Fn(f64) -> Option<f64>>(
+    phase: &StraightPhase,
+    lo: f64,
+    hi: f64,
+    bound_v: F,
+) -> Option<(f64, (f64, f64))> {
+    let eval = |xq: f64| -> Option<(f64, f64)> { chain_state_at(std::slice::from_ref(phase), xq) };
+    let mut lo = lo;
+    let mut hi = hi;
+    for _ in 0..DISK_RIDE_BISECT_ITERS {
+        let mid = 0.5 * (lo + hi);
+        let (v, _) = eval(mid)?;
+        if v >= bound_v(mid)? {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    let state = eval(hi)?;
+    Some((hi, state))
+}
+
+/// The candidate phase cut at arc `x_star`.
+fn truncate_phase(phase: &StraightPhase, x_star: f64) -> StraightPhase {
+    let st = ride::state::State {
+        t: 0.0,
+        s: 0.0,
+        v: phase.v0,
+        a: phase.a0,
+    };
+    let tau = ride::state::time_to_cross(st, phase.j, (x_star - phase.s0).max(0.0))
+        .map(|t| t.min(phase.dt))
+        .unwrap_or(phase.dt);
+    StraightPhase { dt: tau, ..*phase }
+}
+
+/// Adjacent zero-jerk phases with identical acceleration chain exactly — a
+/// straight rail or cruise integrates to them cell by cell — and merge into
+/// one phase, so straight moves keep lowering one exact piece per regime.
+fn merge_constant_accel(chain: Vec<StraightPhase>) -> Vec<StraightPhase> {
+    let mut out: Vec<StraightPhase> = Vec::with_capacity(chain.len());
+    for p in chain {
+        if let Some(last) = out.last_mut() {
+            if last.j == 0.0 && p.j == 0.0 && last.a0 == p.a0 {
+                last.dt += p.dt;
+                continue;
+            }
+        }
+        out.push(p);
+    }
+    out
 }
 
 /// Reconstruct the run's `(s, v, a)` profile and its phase chain.
@@ -499,8 +1030,12 @@ fn interp_flat(flat: &[(f64, f64, f64)], s: f64) -> Option<(f64, f64)> {
 /// `(v, a)` at each member's exit seam (what a streaming cut carries into the
 /// next window to continue this exact curve), and per-member closed-form jerk
 /// phases in move-local time/arc-length. Straight members get their clip of
-/// the run's chain — the exact-cubic lowering assumes each axis is a constant
-/// scale of arc-length, so curved members get none and lower by fitting.
+/// the run's chain for the exact-cubic lowering. Curved members get theirs
+/// only under unlimited jerk, where the chain is a handful of merged
+/// constant-acceleration spans: the lowering fits axis positions against that
+/// exact scalar profile instead of quintic windows over stepped samples. A
+/// finite-jerk curved chain is left out — its per-substep phases would say
+/// nothing the smooth samples don't already.
 #[allow(clippy::type_complexity)]
 pub(super) fn reconstruct_run(
     members: &[RunMember],
@@ -546,7 +1081,8 @@ pub(super) fn reconstruct_run(
         }
         per_member.push(local);
         exit_states.push(exit_state_at(&flat, s1));
-        per_member_phases.push(if chain.is_empty() || !m.kin.is_straight() {
+        let phases_apply = m.kin.is_straight() || !m.kin.jerk.is_finite();
+        per_member_phases.push(if chain.is_empty() || !phases_apply {
             Vec::new()
         } else {
             let clipped = ride::clip_phases(&chain, s0, s1);

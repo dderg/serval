@@ -477,7 +477,12 @@ fn piece_accel_at(pieces: &[BezierPiece], t: f64) -> f64 {
 }
 
 fn quarter_arc() -> geometry::Move {
-    let arc_ctx = ctx(3, 50.0);
+    quarter_arc_with_jerk(100_000.0)
+}
+
+fn quarter_arc_with_jerk(jerk: f64) -> geometry::Move {
+    let mut arc_ctx = ctx(3, 50.0);
+    arc_ctx.limits = VelocityLimits::try_new(300.0, 5000.0, 5.0, jerk).unwrap();
     let arc = Arc::try_new(
         [0.0, 20.0, 0.0],
         [1.0, 0.0, 0.0],
@@ -952,4 +957,84 @@ fn fully_faded_move_gets_exactly_the_fade_target_offset() {
         assert!((w.coeffs[0] - b.coeffs[0] - 0.07).abs() < 1e-12);
         assert_eq!(&w.coeffs[1..], &b.coeffs[1..]);
     }
+}
+
+/// The regression the unlimited-jerk regime used to hit: an arc's plan only
+/// existed as 0.01 mm grid samples with the acceleration stepping at every
+/// cell, and the quintic reconstruction amplified those steps into piece
+/// cascades and accel overshoot. With the phase-built profile the lowered
+/// acceleration honors the disk cap and the piece grid stays coarse.
+#[test]
+fn infinite_jerk_arc_lowers_from_phases_within_the_accel_cap() {
+    let gm = quarter_arc_with_jerk(f64::INFINITY);
+    let planned = fit_and_plan(std::slice::from_ref(&gm));
+    let vm = &planned[0].velocity;
+    assert!(
+        !vm.phases.is_empty(),
+        "unlimited-jerk arc must carry phases"
+    );
+
+    let (axes, total_t) =
+        lower_move_pieces(&planned[0].geometry, vm, 0.0, &[0.0; 4], FIT_TOL, &[], None).unwrap();
+
+    let phase_t: f64 = vm.phases.iter().map(|p| p.dt).sum();
+    assert!(
+        (total_t - phase_t).abs() < 1e-9,
+        "total time {total_t} is the phase sum {phase_t}"
+    );
+    let mut peak = 0.0_f64;
+    for k in 0..=4096 {
+        let t = total_t * f64::from(k) / 4096.0;
+        let ax = piece_accel_at(&axes[0], t);
+        let ay = piece_accel_at(&axes[1], t);
+        peak = peak.max(libm::hypot(ax, ay));
+    }
+    assert!(
+        peak <= 5000.0 + 4.0 * FIT_TOL.accel_mm_s2,
+        "peak |a| = {peak} exceeds the 5000 disk cap"
+    );
+    for axis in 0..2 {
+        assert!(
+            axes[axis].len() < 128,
+            "axis {axis}: {} pieces — phase-built profile should stay coarse",
+            axes[axis].len()
+        );
+    }
+}
+
+#[test]
+fn phase_profile_is_exact_and_reads_both_sides_of_an_accel_step() {
+    use super::profile::{KnotSide, profile_from_phases};
+    use geometry::StraightPhase;
+    let phases = vec![
+        StraightPhase {
+            t0: 0.0,
+            dt: 0.1,
+            s0: 0.0,
+            v0: 10.0,
+            a0: 100.0,
+            j: 0.0,
+        },
+        StraightPhase {
+            t0: 0.1,
+            dt: 0.2,
+            s0: 1.5,
+            v0: 20.0,
+            a0: 0.0,
+            j: 0.0,
+        },
+    ];
+    let (profile, total_t) = profile_from_phases(&phases).unwrap();
+    assert!((total_t - 0.3).abs() < 1e-12);
+
+    let (s, v, a) = profile.state_at(0.05);
+    assert!((s - (10.0 * 0.05 + 50.0 * 0.05 * 0.05)).abs() < 1e-12);
+    assert!((v - 15.0).abs() < 1e-12);
+    assert!((a - 100.0).abs() < 1e-12);
+
+    let begin = profile.state_at_side(0.1, KnotSide::Begin);
+    let end = profile.state_at_side(0.1, KnotSide::End);
+    assert!((begin.0 - end.0).abs() < 1e-12 && (begin.1 - end.1).abs() < 1e-12);
+    assert!((begin.2 - 0.0).abs() < 1e-12, "begin side reads the cruise");
+    assert!((end.2 - 100.0).abs() < 1e-12, "end side reads the ramp");
 }

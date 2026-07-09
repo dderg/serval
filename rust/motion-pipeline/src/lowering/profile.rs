@@ -1,7 +1,18 @@
-use geometry::VelSample;
+use geometry::{StraightPhase, VelSample};
 
 use super::LoweringError;
 use super::ladder::quintic_hermite_coeffs;
+
+/// Which window a query time on a shared knot resolves to. A phase-built
+/// profile steps its acceleration exactly at knots, so a fitted span must read
+/// its own side of the joint: the span beginning at the knot reads `Begin`
+/// (the right window's start state), the span ending there reads `End` (the
+/// left window's end state). Interior times resolve identically either way.
+#[derive(Clone, Copy)]
+pub(super) enum KnotSide {
+    Begin,
+    End,
+}
 
 const PROFILE_OVERSHOOT_EPS: f64 = 1e-6;
 const PROFILE_VELOCITY_FLOOR: f64 = 1e-9;
@@ -62,15 +73,23 @@ pub(super) struct ScalarProfile {
 }
 
 impl ScalarProfile {
-    fn locate(&self, t: f64) -> (usize, f64) {
-        let count = self.knot_t.partition_point(|&kt| kt <= t);
+    fn locate(&self, t: f64, side: KnotSide) -> (usize, f64) {
+        let count = match side {
+            KnotSide::Begin => self.knot_t.partition_point(|&kt| kt <= t),
+            KnotSide::End => self.knot_t.partition_point(|&kt| kt < t),
+        };
         let idx = count.saturating_sub(1).min(self.windows.len() - 1);
         let tau = (t - self.knot_t[idx]).clamp(0.0, self.windows[idx].dt);
         (idx, tau)
     }
 
+    #[cfg(test)]
     pub(super) fn state_at(&self, t: f64) -> (f64, f64, f64) {
-        let (idx, tau) = self.locate(t);
+        self.state_at_side(t, KnotSide::Begin)
+    }
+
+    pub(super) fn state_at_side(&self, t: f64, side: KnotSide) -> (f64, f64, f64) {
+        let (idx, tau) = self.locate(t, side);
         let w = &self.windows[idx];
         let (s, v, a) = w.state_at(tau);
         let margin = PROFILE_OVERSHOOT_EPS * (1.0 + (w.s1 - w.s0).abs());
@@ -86,6 +105,39 @@ impl ScalarProfile {
         );
         (s, v, a)
     }
+}
+
+/// Exact scalar profile from a move's closed-form phases: one polynomial
+/// window per phase, coefficients read straight off the constant-jerk
+/// kinematics. Unlike [`build_profile`] nothing is interpolated — the windows
+/// are the plan itself, so acceleration steps at phase joints stay exactly at
+/// knots instead of smearing into quintic interior wiggle.
+pub(super) fn profile_from_phases(
+    phases: &[StraightPhase],
+) -> Result<(ScalarProfile, f64), LoweringError> {
+    if phases.is_empty() {
+        return Err(LoweringError::EmptyProfile);
+    }
+    let mut windows = Vec::with_capacity(phases.len());
+    let mut knot_t = Vec::with_capacity(phases.len() + 1);
+    knot_t.push(0.0);
+    let mut t_acc = 0.0;
+    for p in phases {
+        let finite = p.dt.is_finite() && p.s0.is_finite() && p.v0.is_finite() && p.a0.is_finite();
+        if !(finite && p.j.is_finite() && p.dt > 0.0) {
+            return Err(LoweringError::DegeneratePhase);
+        }
+        let s1 = p.s0 + p.dt * (p.v0 + p.dt * (0.5 * p.a0 + p.dt * p.j / 6.0));
+        windows.push(QuinticWindow {
+            dt: p.dt,
+            coeffs: [p.s0, p.v0, 0.5 * p.a0, p.j / 6.0, 0.0, 0.0],
+            s0: p.s0,
+            s1,
+        });
+        t_acc += p.dt;
+        knot_t.push(t_acc);
+    }
+    Ok((ScalarProfile { windows, knot_t }, t_acc))
 }
 
 pub(super) fn build_profile(samples: &[VelSample]) -> Result<(ScalarProfile, f64), LoweringError> {
