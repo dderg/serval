@@ -604,7 +604,11 @@ pub(super) fn reach_pass(
         st.s = track.s[i];
         let rail = g.rail_at(track.s[i], st.v);
         if mode == Mode::Ride {
-            let arrival_cell = if feasible[i] { i - 1 } else { i.min(n - 2) };
+            let arrival_cell = if !feasible[i] && chord_state_unrecoverable(&g, i, st.v) {
+                i.min(n - 2)
+            } else {
+                i - 1
+            };
             st.v = track.cap_v[i];
             st.a = track.cap_a[arrival_cell].clamp(-rail, rail);
         }
@@ -766,11 +770,12 @@ fn ride_step(
     // Arrival state at the node: the slope of the cell just traversed. The
     // next cell's slope is lookahead only — assigning it to the state would
     // leak a kink's chord into the profile as an instantaneous accel step.
-    // An infeasible chord is the opposite case: it was a teleport, not
-    // dynamics, and carrying its rail-clamped slope into the feasible region
-    // would force a jerk recovery that sheds more speed than the profile
-    // holds — resume from the slope the cap ahead actually commands.
-    let arrival_cell = if super_rail_descent {
+    // One exception: an infeasible chord whose rail-clamped slope cannot be
+    // recovered from at all (the jerk swing back sheds more speed than the
+    // profile holds) — that chord was a teleport, not dynamics, and carrying
+    // its slope would collapse the profile toward rest; resume from the
+    // slope the cap ahead actually commands instead.
+    let arrival_cell = if super_rail_descent && chord_state_unrecoverable(g, i, v1) {
         (cell + 1).min(track.s.len() - 2)
     } else {
         cell
@@ -811,6 +816,15 @@ fn ride_step(
     );
     *st = next_state;
     true
+}
+
+/// Whether the rail-clamped slope of the infeasible chord entering node `i`
+/// is a state the profile cannot recover from: jerking the acceleration back
+/// to zero sheds more speed than the profile holds there.
+fn chord_state_unrecoverable(g: &Grid, i: usize, v: f64) -> bool {
+    let rail = g.rail_at(g.t.s[i], v);
+    let a = g.t.cap_a[i - 1].clamp(-rail, rail);
+    a * a / (2.0 * g.t.j_max) > v
 }
 
 /// The on-cap state at arc `s` within `cell`, timed from `from`.

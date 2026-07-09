@@ -52,13 +52,18 @@ impl<'a> Grid<'a> {
         for c in (0..cells).rev() {
             let rail_top = disk_rail_accel(t.accel[c], t.kappa[c], t.cap_v[c]);
             let super_rail = t.cap_a[c] < -rail_top;
-            // Tangency on this chord needs the brake to reach the chord's
-            // slope, which sheds `slope²/2j` of speed getting there; a chord
-            // demanding more speed than the cap even holds is the sampled
-            // shadow of a velocity step — no tangent landing exists on it.
-            let unreachable_slope =
-                t.cap_a[c] < 0.0 && t.cap_a[c] * t.cap_a[c] > 2.0 * t.j_max * t.cap_v[c];
-            wall_cont[c] = !super_rail && unreachable_slope;
+            // Riding onto this chord tangentially means swinging the brake
+            // slope down from the previous chord's, which sheds
+            // `(slope² − prev²)/2j` of speed on top of what the approach
+            // already carries; a chord demanding more of that excess than
+            // the cap even holds is the sampled shadow of a velocity step —
+            // no tangent landing exists on it. Measuring the *step* (not the
+            // slope from zero) keeps a continuous brake curve's own steep
+            // tail — where the profile arrives already carrying the slope —
+            // out of the wall class.
+            let prev = t.cap_a[c.saturating_sub(1)].clamp(-rail_top, 0.0);
+            let excess_shed = (t.cap_a[c] * t.cap_a[c] - prev * prev) / (2.0 * t.j_max);
+            wall_cont[c] = !super_rail && t.cap_a[c] < prev && excess_shed > t.cap_v[c];
             if wall_cont[c] {
                 nw = c;
             }
