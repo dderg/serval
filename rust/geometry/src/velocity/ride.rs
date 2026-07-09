@@ -64,6 +64,11 @@ const CELL_GUARD_STEPS: u32 = 100_000;
 /// unstrided pass would and the stride is a pure cost cut.
 const ORACLE_STRIDE: u32 = 32;
 const POS_EPS_MM: f64 = 1e-12;
+/// Speeds at or below this are rest. A stall short of a node commanding rest
+/// pins to that node; a stall under a real cap means the pass overbraked —
+/// it becomes an explicit rest event (chain goes opaque, pass resumes from
+/// `v = 0, a = 0`) instead of integrating through the position fold.
+const STALL_CAP_FLOOR: f64 = 1e-9;
 
 fn rel_eps(x: f64) -> f64 {
     1e-9 * (1.0 + x.abs())
@@ -175,6 +180,11 @@ fn peel_feasible(g: &Grid, st: State) -> bool {
             return false;
         }
         st = advance(st, -j, dt);
+        // Came to rest under the cap: a stalled arc can never cross the
+        // non-negative cap ahead.
+        if st.v <= STALL_CAP_FLOOR {
+            return true;
+        }
         cell = g.cell_ahead(cell, st.s);
     }
 }
@@ -305,10 +315,6 @@ pub(super) fn reach_pass(
                 Mode::Flight => flight_step(&g, &mut st, &mut log, &mut mode, i, assume),
                 Mode::Peel => peel_step(&g, &mut st, &mut log, &mut mode, i),
             }
-            // Arc-length is monotone for v >= 0; a state that walks backwards
-            // has integrated through a stall (advance clamps v at zero but
-            // keeps the raw position kinematics) and every cap/slope read
-            // after it is nonsense.
             debug_assert!(
                 st.s >= s_before - rel_eps(s_before),
                 "ride pass moved backwards: s {} -> {} (v={}, a={}, mode={mode:?})",
@@ -317,6 +323,26 @@ pub(super) fn reach_pass(
                 st.v,
                 st.a
             );
+            let stalled = st.v <= STALL_CAP_FLOOR && st.a < 0.0 && st.s <= s_before + POS_EPS_MM;
+            if stalled {
+                if assume {
+                    let c = ckpt.take().expect("strided step without a checkpoint");
+                    rollback!(c);
+                }
+                log.opaque(st);
+                if track.cap_v[i] <= STALL_CAP_FLOOR {
+                    st.s = track.s[i];
+                    st.v = 0.0;
+                    break;
+                }
+                st.v = 0.0;
+                st.a = 0.0;
+                mode = initial_mode(&g, st);
+                ckpt = None;
+                skip_left = 0;
+                fine_left = 0;
+                continue;
+            }
             if mode != was {
                 if assume {
                     // Unverified transition inside the stride window: rewind

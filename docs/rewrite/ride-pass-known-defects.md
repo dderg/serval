@@ -18,6 +18,18 @@ rejected and the pass chord-rode the envelope — a per-cell acceleration
 staircase ending decels at thousands of mm/s² at seam nodes. Snapshot effect:
 seam accel discontinuities down 25–60×, peak jerk 4–7×.
 
+**Stalled states no longer integrate backwards** (was defect 3).
+`state::advance` now truncates a step at the stall fold (`next_stall` was
+already computed for the crossing solvers), so `s` is monotone by
+construction; a `peel_feasible` march that reaches rest returns feasible
+immediately (a stalled arc cannot cross the non-negative cap ahead) instead
+of spinning its guard at the frozen state; and a pass step that ends at rest
+still decelerating is an explicit rest event — chain goes opaque, the pass
+resumes from `v = 0, a = 0` (or pins to the node when that node commands
+rest). No test in the workspace exercises the rest event today; the whole
+suite, the pinned `#[ignore]` failures, and a 5000-case
+`hard_invariants_hold` run are byte-identical in outcome to before.
+
 ## Open defects
 
 ### 1. Cap walls ride as chords (accel staircase, the z-step pins)
@@ -46,17 +58,13 @@ chord fast path only because the stride oracle happens to skip the lookahead
 Guarding the lookahead with `cap_a[cell] < -(rail)` (chord-cross instead of
 peel) is necessary but was not sufficient in testing — see 3.
 
-### 3. Stalled states integrate backwards
+### 3. ~~Stalled states integrate backwards~~ — fixed, see Shipped
 
-`state::advance` clamps `v` at zero but keeps integrating `s` from the raw
-kinematics, so a state that stalls while still carrying negative
-acceleration walks *backwards* through the grid (observed: `s = -1.56` on a
-0.5 mm run; also a state in cell 1223 while the node loop targeted node
-1225). Flight/Peel then bounce across cells with nonsense cap/slope reads.
-Any fix that changes when the pass brakes (1, 2, or a cap representation
-change) excites this. A stall with `a < 0` mid-track is a planner-invariant
-violation and should fail loudly or be handled as an explicit rest event,
-never integrated through.
+Kept for numbering continuity. Note the rest-event path deliberately does
+not fail loudly: stalls under a real cap still occur when 1/2-style
+overbraking drives the profile to rest, and hard-failing there breaks
+currently-green cases. Once 1 and 2 are fixed, tighten the rest event into
+an assert.
 
 ### 4. Chord smear at splice joints (residual X/Y seam accel ≤ ~22 mm/s²)
 
@@ -71,8 +79,7 @@ are tuned against the chord representation. Do this only together with 1–3.
 
 ## Suggested order
 
-Fix 3 first (it is the invariant everything else trips over), then 2, then 1,
-then 4. Verify each against: `cargo nextest run -p pipeline-snapshot`
+3 is done; next 2, then 1, then 4. Verify each against: `cargo nextest run -p pipeline-snapshot`
 (seed-pinned fuzz corpus), the `#[ignore]`d pins with `--run-ignored all`,
 large-`PROPTEST_CASES` runs of `target_budgets_hold`, and the snapshot
 suite's `seam_max_da`/`worst_seams` deltas.

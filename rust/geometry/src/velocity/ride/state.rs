@@ -8,13 +8,32 @@ pub(super) struct State {
     pub a: f64,
 }
 
+/// Constant-jerk step. A step that stalls (speed reaches zero while still
+/// decelerating) ends at the stall — the position cubic folds there, and
+/// integrating past the fold walks backwards through the grid.
 pub(super) fn advance(st: State, j: f64, dt: f64) -> State {
+    let dt = if speed_dips_to_zero(st, j, dt) {
+        next_stall(st, j).map_or(dt, |ts| ts.min(dt))
+    } else {
+        dt
+    };
     State {
         t: st.t + dt,
         s: st.s + st.v * dt + 0.5 * st.a * dt * dt + j * dt * dt * dt / 6.0,
         v: (st.v + st.a * dt + 0.5 * j * dt * dt).max(0.0),
         a: st.a + j * dt,
     }
+}
+
+fn speed_dips_to_zero(st: State, j: f64, dt: f64) -> bool {
+    let v_end = st.v + st.a * dt + 0.5 * j * dt * dt;
+    if v_end <= 0.0 {
+        return true;
+    }
+    if j <= 0.0 || st.a >= 0.0 {
+        return false;
+    }
+    -st.a / j < dt && st.v - st.a * st.a / (2.0 * j) <= 0.0
 }
 
 /// Time for the constant-jerk motion from `st` to advance `ds`, or `None` if
