@@ -96,21 +96,25 @@ impl PhaseLog {
     /// Adopt the brake chain over `[st.s, s_hi]`: append its clipped phases in
     /// place of integrating the stretch, returning the state at `s_hi` for the
     /// pass to resume from. `None` (no log mutation) if the chain does not
-    /// meet the pass's state at `st` — the pass then integrates the stretch
-    /// itself. Only the velocity is checked at the joint: the landing state
-    /// carries up to a cell of chord smear in `a`, which the chain absorbs.
+    /// meet the pass's state at `st` within `v_tol` — the pass then integrates
+    /// the stretch itself. Only the velocity is checked at the joint: the
+    /// landing state carries up to a cell of chord smear in `a`, which the
+    /// chain absorbs; the caller derives `v_tol` from that same chord
+    /// geometry, because the landing snapped onto the sampled cap chord while
+    /// the chain is the exact cubic under it.
     pub(super) fn splice(
         &mut self,
         st: State,
         chain: &[StraightPhase],
         s_hi: f64,
+        v_tol: f64,
     ) -> Option<State> {
         if !self.active {
             return None;
         }
         let tail = clip_chain_from(chain, st.s)?;
         let head = &tail[0];
-        if (head.v0 - st.v).abs() > 1e-5 * (1.0 + st.v) {
+        if (head.v0 - st.v).abs() > v_tol {
             return None;
         }
         self.close(st);

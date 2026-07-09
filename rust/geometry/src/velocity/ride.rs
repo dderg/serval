@@ -297,6 +297,7 @@ pub(super) fn reach_pass(
             } else {
                 fine_left = fine_left.saturating_sub(1);
             }
+            let s_before = st.s;
             match mode {
                 Mode::Ride => {
                     ride_step(&g, &mut st, &mut log, &mut mode, i, &mut feasible, assume);
@@ -304,6 +305,18 @@ pub(super) fn reach_pass(
                 Mode::Flight => flight_step(&g, &mut st, &mut log, &mut mode, i, assume),
                 Mode::Peel => peel_step(&g, &mut st, &mut log, &mut mode, i),
             }
+            // Arc-length is monotone for v >= 0; a state that walks backwards
+            // has integrated through a stall (advance clamps v at zero but
+            // keeps the raw position kinematics) and every cap/slope read
+            // after it is nonsense.
+            debug_assert!(
+                st.s >= s_before - rel_eps(s_before),
+                "ride pass moved backwards: s {} -> {} (v={}, a={}, mode={mode:?})",
+                s_before,
+                st.s,
+                st.v,
+                st.a
+            );
             if mode != was {
                 if assume {
                     // Unverified transition inside the stride window: rewind
@@ -381,8 +394,20 @@ fn try_splice(
     if k < i {
         return None;
     }
-    let end = log.splice(st, brake.phases, g.t.s[k])?;
+    let end = log.splice(st, brake.phases, g.t.s[k], splice_joint_v_tol(g, st, i))?;
     Some((k, end))
+}
+
+/// Joint tolerance for adopting the brake chain: the landing snapped onto the
+/// sampled cap's linear chord, but the chain is the exact constant-accel
+/// cubic under it, so the two disagree by up to the chord's sag —
+/// `|v''|·ds²/8` with `v'' = -a²/v³` along a constant-accel arc — over the
+/// contact cell. Doubled for the jerk swing the bound ignores.
+fn splice_joint_v_tol(g: &Grid, st: State, i: usize) -> f64 {
+    let ds_cell = g.t.s[i] - g.t.s[i - 1];
+    let v = st.v.max(1e-3);
+    let sag = st.a * st.a * ds_cell * ds_cell / (4.0 * v * v * v);
+    1e-5 * (1.0 + st.v) + sag
 }
 
 /// One cell of riding the cap. Returns `false` when the ride cannot continue

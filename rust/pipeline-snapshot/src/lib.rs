@@ -12,6 +12,7 @@ use nurbs::bezier::extract_bezier_pieces;
 use serde::Serialize;
 use trajectory::{AxisChainSet, ShapedSegment};
 
+pub mod audit;
 pub mod waypoints;
 
 use motion_pipeline::fit_stage::FitStage;
