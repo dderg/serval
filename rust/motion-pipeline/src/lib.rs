@@ -14,14 +14,15 @@ pub mod types;
 
 use fit_stage::FitStage;
 use planner::Planner;
-use types::{LoweredItem, PipelineHandle};
+use types::PipelineHandle;
 
-pub use lower_stage::{advance_odometer, dist3, run_lowerer};
+pub use fit_stage::FitDriver;
+pub use lower_stage::{Lowerer, advance_odometer, dist3, run_lowerer};
 pub use lowering::FitTol;
 pub use shaper::Shaper;
 pub use types::{
-    BarrierAck, CONTIGUITY_EPS_MM, Control, NudgePiece, PlannedItem, ShapedItem, StreamConfig,
-    StreamError, StreamInput,
+    BarrierAck, CONTIGUITY_EPS_MM, Control, LoweredItem, NudgePiece, PlannedItem, ShapedItem,
+    StreamConfig, StreamError, StreamInput,
 };
 
 /// Wires the pure stream stages (fit stage → planner → lowerer → shaper) into

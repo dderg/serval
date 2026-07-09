@@ -82,77 +82,89 @@ impl Shaper {
     pub fn run(mut self, input: Receiver<LoweredItem>, output: Sender<ShapedItem>) {
         loop {
             match input.recv() {
-                Ok(LoweredItem::Seg(item)) => {
-                    self.pending.push_back(item.seg);
-                    self.pending_rest.push_back(item.rest_at_end);
-                    if !self.emit(self.supported_count(), false, &output) {
-                        return;
-                    }
-                }
-                Ok(LoweredItem::Drain) => {
-                    assert!(
-                        self.pending.is_empty() || self.pending_rest.back() == Some(&true),
-                        "shaper: drain marker arrived while the trajectory is not at rest"
-                    );
-                    if !self.emit(self.pending.len(), true, &output) {
-                        return;
-                    }
-                }
-                Ok(LoweredItem::Control(ctrl)) => {
-                    match &ctrl {
-                        Control::Reset { .. } => {
-                            self.pending.clear();
-                            self.pending_rest.clear();
-                            self.history.clear();
-                            self.history_trimmed = false;
-                            for state in &mut self.follower_states {
-                                state.reset_timeline();
-                            }
-                        }
-                        Control::Dwell { .. }
-                        | Control::SetAxisChains(_)
-                        | Control::SetMesh { .. }
-                        | Control::Nudge { .. }
-                        | Control::Barrier(_) => {
-                            assert!(
-                                self.pending.is_empty() || self.pending_rest.back() == Some(&true),
-                                "shaper: control token arrived while the trajectory is not at \
-                                 rest — a Drain must precede it"
-                            );
-                            if !self.emit(self.pending.len(), true, &output) {
-                                return;
-                            }
-                            if let Control::SetAxisChains(chains) = &ctrl {
-                                let (new_forward, new_back) =
-                                    (chains.forward_support(), chains.back_support());
-                                // The signal eras agree at the rest point this swap
-                                // happens at, so kept history makes the resumed
-                                // track exactly continuous with what was committed
-                                // (a k-only change keeps the kernel bit-identical).
-                                // Only a grown back support invalidates retention —
-                                // fall back to the stream-boundary clamp then.
-                                if new_back > self.back_support {
-                                    self.history.clear();
-                                    self.history_trimmed = false;
-                                    for state in &mut self.follower_states {
-                                        state.clear_projected_history();
-                                    }
-                                }
-                                (self.forward_support, self.back_support) = (new_forward, new_back);
-                                self.chains = chains.clone();
-                            }
-                        }
-                    }
-                    if output.send(ShapedItem::Control(ctrl)).is_err() {
+                Ok(item) => {
+                    if !self.feed(item, &output) {
                         return;
                     }
                 }
                 Err(_) => {
-                    self.emit(self.pending.len(), true, &output);
+                    self.finish(&output);
                     return;
                 }
             }
         }
+    }
+
+    /// One iteration of [`Shaper::run`]'s loop, for single-threaded hosts
+    /// that drive the stage item by item.
+    pub fn feed(&mut self, item: LoweredItem, output: &Sender<ShapedItem>) -> bool {
+        match item {
+            LoweredItem::Seg(item) => {
+                self.pending.push_back(item.seg);
+                self.pending_rest.push_back(item.rest_at_end);
+                self.emit(self.supported_count(), false, output)
+            }
+            LoweredItem::Drain => {
+                assert!(
+                    self.pending.is_empty() || self.pending_rest.back() == Some(&true),
+                    "shaper: drain marker arrived while the trajectory is not at rest"
+                );
+                self.emit(self.pending.len(), true, output)
+            }
+            LoweredItem::Control(ctrl) => {
+                match &ctrl {
+                    Control::Reset { .. } => {
+                        self.pending.clear();
+                        self.pending_rest.clear();
+                        self.history.clear();
+                        self.history_trimmed = false;
+                        for state in &mut self.follower_states {
+                            state.reset_timeline();
+                        }
+                    }
+                    Control::Dwell { .. }
+                    | Control::SetAxisChains(_)
+                    | Control::SetMesh { .. }
+                    | Control::Nudge { .. }
+                    | Control::Barrier(_) => {
+                        assert!(
+                            self.pending.is_empty() || self.pending_rest.back() == Some(&true),
+                            "shaper: control token arrived while the trajectory is not at \
+                             rest — a Drain must precede it"
+                        );
+                        if !self.emit(self.pending.len(), true, output) {
+                            return false;
+                        }
+                        if let Control::SetAxisChains(chains) = &ctrl {
+                            let (new_forward, new_back) =
+                                (chains.forward_support(), chains.back_support());
+                            // The signal eras agree at the rest point this swap
+                            // happens at, so kept history makes the resumed
+                            // track exactly continuous with what was committed
+                            // (a k-only change keeps the kernel bit-identical).
+                            // Only a grown back support invalidates retention —
+                            // fall back to the stream-boundary clamp then.
+                            if new_back > self.back_support {
+                                self.history.clear();
+                                self.history_trimmed = false;
+                                for state in &mut self.follower_states {
+                                    state.clear_projected_history();
+                                }
+                            }
+                            (self.forward_support, self.back_support) = (new_forward, new_back);
+                            self.chains = chains.clone();
+                        }
+                    }
+                }
+                output.send(ShapedItem::Control(ctrl)).is_ok()
+            }
+        }
+    }
+
+    /// The input-closed path: flush the buffered tail with the window clamped
+    /// past the end of the signal.
+    pub fn finish(&mut self, output: &Sender<ShapedItem>) -> bool {
+        self.emit(self.pending.len(), true, output)
     }
 
     /// How many front segments have their forward convolution window covered

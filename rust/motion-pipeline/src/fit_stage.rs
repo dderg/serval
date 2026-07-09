@@ -100,25 +100,21 @@ impl FitStage {
         }
     }
 
-    pub fn run(mut self, input: Receiver<StreamInput>, output: Sender<StreamInput>) {
-        let mut out = TravelAligningSender::new(output);
+    pub fn run(self, input: Receiver<StreamInput>, output: Sender<StreamInput>) {
+        let mut driver = self.into_driver(output);
         while let Ok(item) = input.recv() {
-            let ok = match item {
-                StreamInput::Move(m) => {
-                    self.tail.push(m);
-                    self.resolve(false, &mut out)
-                }
-                StreamInput::Drain => {
-                    self.resolve(true, &mut out) && out.release(None) && out.forward_drain()
-                }
-                StreamInput::Control(ctrl) => self.forward_control(ctrl, &mut out),
-            };
-            if !ok {
+            if !driver.feed(item) {
                 return;
             }
         }
-        self.resolve(true, &mut out);
-        out.release(None);
+        driver.finish();
+    }
+
+    pub fn into_driver(self, output: Sender<StreamInput>) -> FitDriver {
+        FitDriver {
+            stage: self,
+            out: TravelAligningSender::new(output),
+        }
     }
 
     /// `Reset` drops all buffered fit state and forgets the emitted-geometry
@@ -609,6 +605,36 @@ impl FitStage {
         self.seam_head_trim = fit.tail_boundary_trim();
         self.seam_in_reduction = fit.tail_line_trim();
         true
+    }
+}
+
+/// Per-item drive of the fit stage for single-threaded hosts (the snapshot
+/// harness, wasm): `feed` is one iteration of [`FitStage::run`]'s loop,
+/// `finish` is its input-closed path — resolve and flush everything without
+/// forwarding a `Drain`.
+pub struct FitDriver {
+    stage: FitStage,
+    out: TravelAligningSender,
+}
+
+impl FitDriver {
+    pub fn feed(&mut self, item: StreamInput) -> bool {
+        match item {
+            StreamInput::Move(m) => {
+                self.stage.tail.push(m);
+                self.stage.resolve(false, &mut self.out)
+            }
+            StreamInput::Drain => {
+                self.stage.resolve(true, &mut self.out)
+                    && self.out.release(None)
+                    && self.out.forward_drain()
+            }
+            StreamInput::Control(ctrl) => self.stage.forward_control(ctrl, &mut self.out),
+        }
+    }
+
+    pub fn finish(&mut self) -> bool {
+        self.stage.resolve(true, &mut self.out) && self.out.release(None)
     }
 }
 
