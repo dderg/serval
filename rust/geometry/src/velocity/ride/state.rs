@@ -1,7 +1,7 @@
 use super::EVENT_BISECT_ITERS;
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct State {
+pub(in crate::velocity) struct State {
     pub t: f64,
     pub s: f64,
     pub v: f64,
@@ -11,7 +11,7 @@ pub(super) struct State {
 /// Constant-jerk step. A step that stalls (speed reaches zero while still
 /// decelerating) ends at the stall — the position cubic folds there, and
 /// integrating past the fold walks backwards through the grid.
-pub(super) fn advance(st: State, j: f64, dt: f64) -> State {
+pub(in crate::velocity) fn advance(st: State, j: f64, dt: f64) -> State {
     let dt = if speed_dips_to_zero(st, j, dt) {
         next_stall(st, j).map_or(dt, |ts| ts.min(dt))
     } else {
@@ -40,7 +40,7 @@ fn speed_dips_to_zero(st: State, j: f64, dt: f64) -> bool {
 /// it stalls (speed reaches zero) first. The bisection bracket is capped at
 /// the stall, where the position curve folds — a bracket extending past it
 /// would converge onto the fold instead of the crossing.
-pub(super) fn time_to_cross(st: State, j: f64, ds: f64) -> Option<f64> {
+pub(in crate::velocity) fn time_to_cross(st: State, j: f64, ds: f64) -> Option<f64> {
     if ds <= 0.0 {
         return Some(0.0);
     }

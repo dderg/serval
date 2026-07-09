@@ -26,7 +26,7 @@ use super::profile::StraightPhase;
 mod chain;
 mod grid;
 mod phase_log;
-mod state;
+pub(in crate::velocity) mod state;
 
 use grid::Grid;
 use phase_log::{LogMark, Mode, PhaseLog};
