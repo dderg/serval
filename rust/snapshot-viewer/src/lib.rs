@@ -150,6 +150,36 @@ fn kappa_and_dkappa_dt(vx: f64, vy: f64, ax: f64, ay: f64, jx: f64, jy: f64) -> 
     (kappa, dkappa_dt)
 }
 
+#[allow(dead_code)]
+// Consumed in later task wiring anomalies into export.
+const PIECE_CONTIGUITY_TOL_S: f64 = 1e-9;
+
+#[allow(dead_code)]
+// Spans where consecutive pieces are NOT contiguous: either a gap (piece[i]
+// ends before piece[i+1] starts -- no piece covers that span, so evaluating
+// a sample there would silently extrapolate whichever piece partition_point
+// picks) or an overlap (piece[i+1] starts before piece[i] ends -- two pieces
+// both claim the same instant). Either way this is a pipeline defect worth
+// surfacing, not bridging.
+// Consumed in later task wiring anomalies into export.
+fn domain_anomalies(pieces: &[Vec<f64>]) -> Vec<(f64, f64)> {
+    let mut spans = Vec::new();
+    for w in pieces.windows(2) {
+        let end = w[0][1];
+        let start = w[1][0];
+        if (start - end).abs() > PIECE_CONTIGUITY_TOL_S {
+            spans.push((end.min(start), end.max(start)));
+        }
+    }
+    spans
+}
+
+#[allow(dead_code)]
+// Consumed in later task wiring anomalies into export.
+fn in_any_span(spans: &[(f64, f64)], t: f64, tol: f64) -> bool {
+    spans.iter().any(|&(lo, hi)| t >= lo - tol && t <= hi + tol)
+}
+
 // -- Toolhead position (handles legacy format) ------------------------------
 
 fn toolhead_position(snap: &Snapshot) -> (Vec<f64>, Vec<f64>) {

@@ -162,3 +162,34 @@ fn dkappa_ds_constant_on_clothoid() {
     assert!((dkappa_ds_at(2.0) - sigma).abs() < 1e-9);
     assert!((dkappa_ds_at(4.0) - sigma).abs() < 1e-9);
 }
+
+#[test]
+fn domain_anomalies_empty_for_contiguous_pieces() {
+    let pieces = vec![vec![0.0, 1.0, 0.0], vec![1.0, 2.0, 0.0]];
+    assert!(domain_anomalies(&pieces).is_empty());
+}
+
+#[test]
+fn domain_anomalies_flags_a_gap() {
+    // piece[0] ends at 1.0, piece[1] doesn't start until 1.5: a real hole.
+    let pieces = vec![vec![0.0, 1.0, 0.0], vec![1.5, 2.0, 0.0]];
+    let gaps = domain_anomalies(&pieces);
+    assert_eq!(gaps, vec![(1.0, 1.5)]);
+    assert!(in_any_span(&gaps, 1.2, 1e-9));
+    assert!(!in_any_span(&gaps, 0.5, 1e-9));
+}
+
+#[test]
+fn domain_anomalies_flags_an_overlap() {
+    // piece[1] starts at 0.8, before piece[0] ends at 1.0: double-covered.
+    let pieces = vec![vec![0.0, 1.0, 0.0], vec![0.8, 2.0, 0.0]];
+    let overlaps = domain_anomalies(&pieces);
+    assert_eq!(overlaps, vec![(0.8, 1.0)]);
+    assert!(in_any_span(&overlaps, 0.9, 1e-9));
+}
+
+#[test]
+fn domain_anomalies_tolerates_float_noise_at_a_seam() {
+    let pieces = vec![vec![0.0, 1.0, 0.0], vec![1.0 + 1e-13, 2.0, 0.0]];
+    assert!(domain_anomalies(&pieces).is_empty());
+}
