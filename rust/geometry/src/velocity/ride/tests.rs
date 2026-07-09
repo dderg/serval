@@ -208,6 +208,30 @@ fn flight_reaccelerates_after_dip_with_huge_jerk() {
     );
 }
 
+/// A straight track over `cap_v` on a 0.01 mm grid; the pass starts on the
+/// cap at the first node.
+fn cap_pass(cap_v: Vec<f64>, accel_v: f64, j_max: f64) -> Pass {
+    let n = cap_v.len();
+    let s: Vec<f64> = (0..n).map(|i| i as f64 * 0.01).collect();
+    let mut cap_a: Vec<f64> = s
+        .windows(2)
+        .zip(cap_v.windows(2))
+        .map(|(sw, vw)| (vw[1] * vw[1] - vw[0] * vw[0]) / (2.0 * (sw[1] - sw[0])))
+        .collect();
+    cap_a.push(*cap_a.last().unwrap());
+    let accel = vec![accel_v; n];
+    let kappa = vec![0.0; n];
+    let track = Track {
+        s: &s,
+        cap_v: &cap_v,
+        cap_a: &cap_a,
+        accel: &accel,
+        kappa: &kappa,
+        j_max,
+    };
+    reach_pass(&track, cap_v[0], 0.0, None)
+}
+
 /// A straight track whose cap descends through `wall_caps` between flat
 /// stretches, with grid step 0.01 mm; the pass starts on the cap.
 fn wall_pass(wall_caps: &[f64], accel_v: f64, j_max: f64) -> Pass {
@@ -256,4 +280,62 @@ fn multi_cell_super_rail_wall_is_crossed_as_infeasible_chords() {
     assert_eq!(pass.v[6..11], [80.0, 60.0, 40.0, 20.0, 1.0]);
     assert!(pass.feasible[6..11].iter().all(|f| !f));
     assert!(pass.feasible[11]);
+}
+
+/// A feed-step wall within the accel rail but beyond what jerk can land on
+/// tangentially (its chord demands a brake slope that would shed more speed
+/// than the cap holds). The pass must brake early and anchor on the wall's
+/// end node — arriving at exactly the bottom value with a jerk-continuous
+/// chain — instead of overbraking toward rest against the chord slope.
+#[test]
+fn jerk_wall_is_taken_by_an_anchored_brake() {
+    let mut cap_v = vec![20.0_f64; 80];
+    cap_v.extend(std::iter::repeat(5.0).take(20));
+    let n = cap_v.len();
+    let pass = cap_pass(cap_v, 33777.0, 1e5);
+    assert!(pass.complete);
+    assert!(chain_is_continuous(&pass.phases, true));
+    assert!(pass.feasible.iter().all(|&f| f));
+    let min_v = pass.v.iter().copied().fold(f64::INFINITY, f64::min);
+    assert!(
+        min_v >= 5.0 - 1e-6,
+        "anchored brake must not dip below the wall bottom, got {min_v}"
+    );
+    assert!((pass.v[80] - 5.0).abs() < 1e-6, "wall node lands its value");
+    assert!((pass.v[n - 1] - 5.0).abs() < 1e-6);
+}
+
+/// The naive jerk-reachability detach lost chain completeness on a step-up
+/// wall followed by a wall drop; the wall-aware pass must cross the notch's
+/// inverse (a mesa) with a complete chain and no collapse toward rest.
+#[test]
+fn mesa_step_up_then_drop_keeps_the_chain_complete() {
+    let mut cap_v = vec![5.0_f64; 40];
+    cap_v.extend(std::iter::repeat(30.0).take(3));
+    cap_v.extend(std::iter::repeat(5.0).take(40));
+    let pass = cap_pass(cap_v, 33777.0, 1e5);
+    assert!(pass.complete);
+    let min_v = pass.v.iter().copied().fold(f64::INFINITY, f64::min);
+    assert!(
+        min_v >= 5.0 - 1e-6,
+        "profile must cruise through the mesa, got {min_v}"
+    );
+}
+
+/// An ascending wall (feed step up) detaches to flight instead of riding the
+/// chord as an instantaneous acceleration staircase: the emitted chain stays
+/// state-continuous through the wall foot.
+#[test]
+fn ascending_wall_detaches_to_flight() {
+    let mut cap_v = vec![1.0_f64; 40];
+    cap_v.extend(std::iter::repeat(20.0).take(60));
+    let n = cap_v.len();
+    let pass = cap_pass(cap_v, 33777.0, 1e5);
+    assert!(pass.complete);
+    assert!(chain_is_continuous(&pass.phases, true));
+    assert!(
+        pass.v[n - 1] > 10.0,
+        "flight must climb after the wall, got {}",
+        pass.v[n - 1]
+    );
 }
