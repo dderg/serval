@@ -505,3 +505,55 @@ fn unknown_axis_name_is_rejected() {
     let err = pipeline_snapshot(&square_waypoints(), params).unwrap_err();
     assert!(matches!(err, SnapshotError::InvalidChain(msg) if msg.contains("'a'")));
 }
+
+#[test]
+fn streaming_final_snapshot_serializes_byte_identical_to_full() {
+    let full = pipeline_snapshot(&square_waypoints(), default_axis_snapshot_params()).unwrap();
+    let mut partial_count = 0;
+    let streamed = pipeline_snapshot_streaming(
+        &square_waypoints(),
+        default_axis_snapshot_params(),
+        2,
+        |_| partial_count += 1,
+    )
+    .unwrap();
+    assert!(partial_count > 0);
+    assert_eq!(
+        serde_json::to_string(&full).unwrap(),
+        serde_json::to_string(&streamed).unwrap()
+    );
+}
+
+#[test]
+fn streaming_partials_are_growing_prefixes_with_the_full_raw_path() {
+    let mut partials: Vec<(Vec<f64>, Vec<Vec<f64>>)> = Vec::new();
+    let streamed = pipeline_snapshot_streaming(
+        &square_waypoints(),
+        default_axis_snapshot_params(),
+        2,
+        |snap| partials.push((snap.raw_x.clone(), snap.traj_x_pieces.clone())),
+    )
+    .unwrap();
+    assert!(!partials.is_empty());
+    let mut prev_len = 0;
+    for (raw_x, x_pieces) in &partials {
+        assert_eq!(*raw_x, streamed.raw_x);
+        assert!(x_pieces.len() >= prev_len);
+        assert!(x_pieces.len() <= streamed.traj_x_pieces.len());
+        assert_eq!(*x_pieces, streamed.traj_x_pieces[..x_pieces.len()]);
+        prev_len = x_pieces.len();
+    }
+}
+
+#[test]
+fn streaming_partials_carry_toolhead_lanes_when_the_chain_has_motor_side_stages() {
+    let mut saw_toolhead_partial = false;
+    let streamed =
+        pipeline_snapshot_streaming(&square_waypoints(), mode_inverse_on_x_params(), 2, |snap| {
+            assert!(snap.toolhead_x_pieces.is_some());
+            saw_toolhead_partial = true;
+        })
+        .unwrap();
+    assert!(saw_toolhead_partial);
+    assert!(streamed.toolhead_x_pieces.is_some());
+}

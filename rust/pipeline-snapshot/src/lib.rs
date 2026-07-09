@@ -108,6 +108,25 @@ pub fn pipeline_snapshot(
     waypoints: &[(f64, f64, f64, f64, f64)],
     params: SnapshotParams,
 ) -> Result<Snapshot, SnapshotError> {
+    pipeline_snapshot_streaming(waypoints, params, usize::MAX, |_| {})
+}
+
+/// Same computation as [`pipeline_snapshot`], but additionally invokes
+/// `on_partial` with a schema-complete snapshot after every
+/// `partial_batch_segments` shaped segments, covering the trajectory pieces
+/// (and seam metrics) of that prefix; the raw input path is always complete.
+/// The returned final snapshot is identical to what [`pipeline_snapshot`]
+/// produces for the same inputs.
+pub fn pipeline_snapshot_streaming(
+    waypoints: &[(f64, f64, f64, f64, f64)],
+    params: SnapshotParams,
+    partial_batch_segments: usize,
+    mut on_partial: impl FnMut(&Snapshot),
+) -> Result<Snapshot, SnapshotError> {
+    assert!(
+        partial_batch_segments > 0,
+        "partial_batch_segments must be positive"
+    );
     if let Some(v) = params.max_path_deviation {
         if !(v.is_finite() && v > 0.0) {
             return Err(SnapshotError::InvalidMaxPathDeviation(v));
@@ -152,11 +171,30 @@ pub fn pipeline_snapshot(
     };
     let (_fitted, shaped, toolhead) = run_pipeline(&moves, config, axis_chains);
 
-    let traj = collect_trajectory_pieces(&shaped);
-    let seams = seam_metrics(&traj);
-    let toolhead_traj = toolhead.map(|segs| collect_trajectory_pieces(&segs));
+    for end in (partial_batch_segments..shaped.len()).step_by(partial_batch_segments) {
+        on_partial(&snapshot_from_segments(
+            &raw_points,
+            &shaped[..end],
+            toolhead.as_deref().map(|t| &t[..end]),
+        ));
+    }
+    Ok(snapshot_from_segments(
+        &raw_points,
+        &shaped,
+        toolhead.as_deref(),
+    ))
+}
 
-    Ok(Snapshot {
+fn snapshot_from_segments(
+    raw_points: &[(f64, f64)],
+    shaped: &[ShapedSegment],
+    toolhead: Option<&[ShapedSegment]>,
+) -> Snapshot {
+    let traj = collect_trajectory_pieces(shaped);
+    let seams = seam_metrics(&traj);
+    let toolhead_traj = toolhead.map(collect_trajectory_pieces);
+
+    Snapshot {
         raw_x: raw_points.iter().map(|p| p.0).collect(),
         raw_y: raw_points.iter().map(|p| p.1).collect(),
         traj_x_pieces: traj.x,
@@ -173,7 +211,7 @@ pub fn pipeline_snapshot(
         seam_max_dv: seams.max_dv,
         seam_max_da: seams.max_da,
         worst_seams: seams.worst,
-    })
+    }
 }
 
 pub fn build_moves(
