@@ -103,6 +103,15 @@ fn scalar_derivative(comp_x: &[f64], comp_y: &[f64]) -> Vec<f64> {
 // components read zero.
 const FRENET_SPEED_FLOOR: f64 = 1e-9;
 
+// FRENET_SPEED_FLOOR (above) is tuned for Frenet-projection's 1/speed
+// sensitivity; kappa's 1/speed^3 sensitivity blows up far sooner as speed
+// shrinks -- a speed that's a perfectly fine floor for tangential/normal
+// projection still produces an astronomically large, physically
+// meaningless kappa near a genuine full stop. First-pass, tune against
+// real cases if a genuinely slow (but not stopped) cornering move is ever
+// seen misclassified as Cusp.
+const CURVATURE_CUSP_SPEED_FLOOR: f64 = 1e-3;
+
 fn frenet_components(vx: &[f64], vy: &[f64], fx: &[f64], fy: &[f64]) -> (Vec<f64>, Vec<f64>) {
     let n = vx.len();
     let mut tang = Vec::with_capacity(n);
@@ -307,7 +316,7 @@ fn curvature_series(
         let (_, vx, ax, jx) = eval_lane(xp, ti);
         let (_, vy, ay, jy) = eval_lane(yp, ti);
         let speed = libm::hypot(vx, vy);
-        if speed < FRENET_SPEED_FLOOR {
+        if speed < CURVATURE_CUSP_SPEED_FLOOR {
             flag[i] = Some(CurvatureClass::Cusp);
             continue;
         }
