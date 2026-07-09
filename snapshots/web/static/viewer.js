@@ -102,7 +102,7 @@ async function loadCaseList() {
 function updateMeta() {
   document.getElementById("meta").textContent =
     `t=${view.data.traversal_time().toFixed(3)}s  ` +
-    `[${view.segmentSummary()}]  ` +
+    `[${view.curvatureSummary()}]  ` +
     `${view.data.point_count()} pts`;
 }
 
@@ -148,26 +148,6 @@ async function loadCase(name) {
   // instead of collecting a 404 per case load.
   const before = readOnly ? null : await fetchSnapshot(name, "before");
   view.setData(after, before);
-}
-
-// -- PNG popup ---------------------------------------------------------------
-function openPng() {
-  if (!currentCase) return;
-  const scroll = document.getElementById("png-scroll");
-  scroll.innerHTML = "";
-  const img = new Image();
-  img.src = `/img/${encodeURIComponent(currentCase)}/after.png?t=${Date.now()}`;
-  scroll.appendChild(img);
-  scroll.scrollTop = 0;
-  document.getElementById("png-overlay").classList.add("open");
-}
-
-function closePng() {
-  document.getElementById("png-overlay").classList.remove("open");
-}
-
-function pngOpen() {
-  return document.getElementById("png-overlay").classList.contains("open");
 }
 
 // -- Accept ------------------------------------------------------------------
@@ -247,22 +227,10 @@ async function main() {
     view.setShowPeaks(!view.showPeaks);
   });
 
-  document.getElementById("toggle-fitted-path").addEventListener("click", (e) => {
-    view.setShowFittedPath(!view.showFittedPath);
-    e.target.textContent = view.showFittedPath ? "Fitted" : "Shaped";
-    e.target.classList.toggle("active", view.showFittedPath);
-  });
-
   document.getElementById("toggle-variant").addEventListener("click", () => view.toggleVariant());
-  document.getElementById("open-png").addEventListener("click", openPng);
-  document.getElementById("png-overlay").addEventListener("click", closePng);
   document.getElementById("accept").addEventListener("click", acceptCurrent);
 
   document.addEventListener("keydown", (e) => {
-    if (pngOpen()) {
-      if (e.key === "Escape") closePng();
-      return;
-    }
     if (e.key === "ArrowLeft") stepCase(-1);
     else if (e.key === "ArrowRight") stepCase(1);
     else if (e.key === " " || e.key === "b" || e.key === "B") {

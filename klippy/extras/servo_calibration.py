@@ -536,15 +536,18 @@ class ServoCalibration:
         report_args = ["--name", name, "--png"]
         rails = plan.get("rails", [])
         if not plan["diagonal"] and len(rails) == 2 and axis in ("X", "Y"):
-            # The combined view needs one drive per belt; on AWD each pair's
-            # slot-primary stands in for its belt.
-            primaries = [self._rail_motors_in_slot_order(r)[0] for r in rails]
-            terms = ",".join(
-                "%s:%d"
-                % (m.get_motor_name(), -1 if m.get_invert_direction() else 1)
-                for m in primaries
+            belts = ",".join(
+                "+".join(
+                    "%s:%d"
+                    % (
+                        m.get_motor_name(),
+                        -1 if m.get_invert_direction() else 1,
+                    )
+                    for m in self._rail_motors_in_slot_order(r)
+                )
+                for r in rails
             )
-            report_args += ["--axis", axis, "--combine-corexy", terms]
+            report_args += ["--axis", axis, "--combine-corexy", belts]
         self._run(gcmd, "servo_capture.py", report_args, 120.0)
 
     cmd_SERVO_MEASURE_INERTIA_help = (
@@ -558,10 +561,11 @@ class ServoCalibration:
     def _measure_inertia(self, gcmd, name):
         axis = gcmd.get("AXIS", "X").upper()
         start, end = self._axis_bounds(gcmd, axis)
+        servos = self._axis_servos(gcmd, axis)
         accels, speeds, iterations, dwell = self._grid(gcmd)
         self._prep(axis, dwell)
         self.gcode.run_script_from_command(
-            "SERVO_CAPTURE_START AXIS=%s NAME=%s" % (axis, name)
+            "SERVO_CAPTURE_START SERVO=%s NAME=%s" % (",".join(servos), name)
         )
         for accel in accels:
             for speed in speeds:
@@ -580,7 +584,9 @@ class ServoCalibration:
 
     def _measure_inertia_corexy(self, gcmd, name, servos=None):
         if servos is None:
-            servos = gcmd.get("SERVOS", ",".join(self.servos))
+            servos = gcmd.get("SERVOS", None)
+        if servos is None:
+            servos = ",".join(self._axis_servos(gcmd, "X"))
         x_start, x_end, y_start, y_end = self._xy_bounds(gcmd)
         accels, speeds, iterations, dwell = self._grid(gcmd)
         x_center = (x_start + x_end) / 2.0
@@ -616,9 +622,10 @@ class ServoCalibration:
         iterations = gcmd.get_int("ITERATIONS", 2, minval=1)
         dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
         name = gcmd.get("NAME", "friction")
+        servos = self._axis_servos(gcmd, axis)
         self._prep(axis, dwell)
         self.gcode.run_script_from_command(
-            "SERVO_CAPTURE_START AXIS=%s NAME=%s" % (axis, name)
+            "SERVO_CAPTURE_START SERVO=%s NAME=%s" % (",".join(servos), name)
         )
         self._strokes(axis, start, end, speed, accel, iterations, dwell)
         self.gcode.run_script_from_command("SERVO_CAPTURE_STOP")

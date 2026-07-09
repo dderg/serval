@@ -4,7 +4,8 @@
 Prints per-drive following-error, overshoot/settling, and torque-saturation
 metrics; --fft prints resonance peaks (notch-filter candidates); --plot opens a
 time-series dashboard and --png saves one; --combine-corexy A,B with --axis adds
-the CoreXY combined on-axis (A+B)/2 and cross-axis (A-B)/2 tracking traces.
+the CoreXY combined on-axis (A+B)/2 and cross-axis (A-B)/2 tracking traces
+(an AWD belt lists both of its motors joined by +, averaged into one trace).
 """
 
 import argparse
@@ -426,34 +427,58 @@ def _drive_view(drive_datas, name):
 
 
 def _parse_combine_spec(spec):
-    """Parse `name[:sign],name[:sign]`; sign is -1 for a motor whose servo
-    invert_direction flips its encoder counts out of the kinematic frame."""
-    terms = []
-    for tok in spec.split(","):
-        tok = tok.strip()
-        if not tok:
+    """Parse `belt,belt` where each belt is `name[:sign][+name[:sign]...]`;
+    sign is -1 for a motor whose servo invert_direction flips its encoder
+    counts out of the kinematic frame. An AWD belt lists both of its motors
+    joined by `+`; the belt signal is their mean."""
+    belts = []
+    for belt_tok in spec.split(","):
+        belt_tok = belt_tok.strip()
+        if not belt_tok:
             continue
-        name, _, sign = tok.partition(":")
-        terms.append((name.strip(), int(sign) if sign else 1))
-    return terms
+        terms = []
+        for tok in belt_tok.split("+"):
+            name, _, sign = tok.strip().partition(":")
+            terms.append((name.strip(), int(sign) if sign else 1))
+        belts.append(terms)
+    return belts
+
+
+def _belt_view(header, drive_datas, terms):
+    motors = []
+    for name, sign in terms:
+        idx, data = _drive_view(drive_datas, name)
+        motors.append((sign, header["drives"][idx]["counts_per_mm"], data))
+    return motors
+
+
+def _belt_mm(motors, field):
+    return np.mean(
+        [
+            sign * data[field].astype(np.float64) / cpm
+            for sign, cpm, data in motors
+        ],
+        axis=0,
+    )
 
 
 def compute_corexy_combine(header, drive_datas, spec, axis):
-    terms = _parse_combine_spec(spec)
-    if len(terms) != 2:
+    belts = _parse_combine_spec(spec)
+    if len(belts) != 2:
         raise SystemExit(
-            "--combine-corexy needs exactly two motor names (got %r)" % (spec,)
+            "--combine-corexy needs exactly two belts (got %r)" % (spec,)
         )
-    (name_a, sign_a), (name_b, sign_b) = terms
-    a_idx, a_data = _drive_view(drive_datas, name_a)
-    b_idx, b_data = _drive_view(drive_datas, name_b)
-    cpm_a = header["drives"][a_idx]["counts_per_mm"]
-    cpm_b = header["drives"][b_idx]["counts_per_mm"]
+    belt_a, belt_b = belts
+    motors_a = _belt_view(header, drive_datas, belt_a)
+    motors_b = _belt_view(header, drive_datas, belt_b)
+    label_a = "+".join(name for name, _ in belt_a)
+    label_b = "+".join(name for name, _ in belt_b)
+    a_data = motors_a[0][2]
 
     def axis_mm(field):
-        a = sign_a * a_data[field].astype(np.float64) / cpm_a
-        b = sign_b * b_data[field].astype(np.float64) / cpm_b
-        return combine_corexy(a, b)
+        return combine_corexy(
+            _belt_mm(motors_a, field), _belt_mm(motors_b, field)
+        )
 
     x_ferr, y_ferr = axis_mm("following_error")
     x_act, y_act = axis_mm("position_actual")
@@ -473,7 +498,7 @@ def compute_corexy_combine(header, drive_datas, spec, axis):
         "axis": axis,
         "on_label": on_label,
         "cross_label": cross_label,
-        "motors": (name_a, name_b),
+        "motors": (label_a, label_b),
         "on_ferr": on_ferr,
         "cross_ferr": cross_ferr,
         "on_actual": on_act,
@@ -572,7 +597,8 @@ def _figure_multi(plt, header, drive_datas, fs):
     return fig
 
 
-MOTOR_COLORS = ("tab:green", "tab:purple")
+def _motor_colors(plt, count):
+    return [plt.cm.tab10(i % 10) for i in range(count)]
 
 
 def _trip_colors(plt, count):
@@ -626,7 +652,8 @@ def _figure_combined(plt, header, drive_datas, fs, c):
     _trip_legend(plt, cross_ax, trip_colors)
 
     tq_ax = axes[1, 0]
-    for (_, name, data), col in zip(drive_datas, MOTOR_COLORS):
+    motor_colors = _motor_colors(plt, len(drive_datas))
+    for (_, name, data), col in zip(drive_datas, motor_colors):
         for ws, we in windows:
             tt = np.arange(we - ws) / fs
             tq_ax.plot(
@@ -638,7 +665,7 @@ def _figure_combined(plt, header, drive_datas, fs, c):
     tq_ax.legend(
         handles=[
             plt.Line2D([], [], color=col, label=name)
-            for (_, name, _), col in zip(drive_datas, MOTOR_COLORS)
+            for (_, name, _), col in zip(drive_datas, motor_colors)
         ],
         loc="upper right",
         fontsize=8,
@@ -792,8 +819,9 @@ def main(argv=None):
     p.add_argument(
         "--combine-corexy",
         metavar="A,B",
-        help="two motor names; adds CoreXY combined (A+B)/2 on-axis and "
-        "(A-B)/2 cross-axis traces",
+        help="two belts as name[:sign][+name[:sign]] each (AWD belts list "
+        "both motors joined by +, averaged); adds CoreXY combined (A+B)/2 "
+        "on-axis and (A-B)/2 cross-axis traces",
     )
     p.add_argument(
         "--axis",

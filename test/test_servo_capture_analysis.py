@@ -766,6 +766,101 @@ def test_combine_corexy_honors_per_motor_counts_per_mm(tmp_path):
     assert c["cross_ferr"][0] == pytest.approx(0.05)
 
 
+def synth_four_drive_ferr(tmp_path, ferrs, cpm=1000.0):
+    n = len(ferrs[0])
+    header = {
+        "version": 1,
+        "cycle_ns": 1_000_000,
+        "record_size": 9 + 4 * 28,
+        "started_utc": "2026-07-05T00:00:00Z",
+        "started_mono_ns": 0,
+        "drives": [
+            {"name": name, "counts_per_mm": cpm}
+            for name in ("a", "a1", "b", "b1")
+        ],
+        "channels": DRIVE_CHANNELS,
+    }
+    path = os.path.join(str(tmp_path), "combine4.scap")
+
+    def block(fe):
+        return struct.pack("<iiihHHihi", 0, 0, int(fe), 0, 0x0627, 0, 0, 0, 0)
+
+    flag = FLAG_TORQUE_ENABLED | FLAG_MOTION_ACTIVE
+    with open(path, "wb") as f:
+        f.write((json.dumps(header) + "\n").encode())
+        for i in range(n):
+            f.write(struct.pack("<QB", i, flag))
+            for ferr in ferrs:
+                f.write(block(ferr[i]))
+    return path
+
+
+def test_combine_corexy_awd_belt_averages_its_motors(tmp_path):
+    n = 10
+    path = synth_four_drive_ferr(
+        tmp_path,
+        [
+            np.full(n, 200.0),
+            np.full(n, 100.0),
+            np.full(n, 100.0),
+            np.full(n, 0.0),
+        ],
+    )
+    header, drive_datas = _drive_datas(path)
+    c = sc.compute_corexy_combine(header, drive_datas, "a:1+a1:1,b:1+b1:1", "X")
+    # belt A = mean(0.2, 0.1) = 0.15mm, belt B = mean(0.1, 0.0) = 0.05mm
+    assert c["on_ferr"][0] == pytest.approx(0.10)
+    assert c["cross_ferr"][0] == pytest.approx(0.05)
+    assert c["motors"] == ("a+a1", "b+b1")
+
+
+def test_combine_corexy_awd_honors_per_motor_sign(tmp_path):
+    n = 10
+    path = synth_four_drive_ferr(
+        tmp_path,
+        [
+            np.full(n, 200.0),
+            np.full(n, -200.0),
+            np.full(n, 100.0),
+            np.full(n, 100.0),
+        ],
+    )
+    header, drive_datas = _drive_datas(path)
+    c = sc.compute_corexy_combine(
+        header, drive_datas, "a:1+a1:-1,b:1+b1:1", "X"
+    )
+    # belt A = mean(0.2, -(-0.2)) = 0.2mm, belt B = 0.1mm
+    assert c["on_ferr"][0] == pytest.approx(0.15)
+    assert c["cross_ferr"][0] == pytest.approx(0.05)
+
+
+def test_png_combined_corexy_four_drives(tmp_path):
+    pytest.importorskip("matplotlib")
+    t = np.arange(500)
+    path = synth_four_drive_ferr(
+        tmp_path,
+        [
+            50.0 * np.sin(2 * np.pi * t / 50.0),
+            45.0 * np.sin(2 * np.pi * t / 50.0),
+            30.0 * np.sin(2 * np.pi * t / 40.0),
+            25.0 * np.sin(2 * np.pi * t / 40.0),
+        ],
+    )
+    out = tmp_path / "combined4.png"
+    rc = sc.main(
+        [
+            path,
+            "--plot-out",
+            str(out),
+            "--combine-corexy",
+            "a:1+a1:1,b:1+b1:1",
+            "--axis",
+            "X",
+        ]
+    )
+    assert rc == 0 and out.stat().st_size > 0
+
+
 def test_combine_corexy_missing_drive_raises(tmp_path):
     path = synth_two_drive_ferr(tmp_path, np.zeros(5), np.zeros(5))
     header, drive_datas = _drive_datas(path)

@@ -247,12 +247,69 @@ def test_fit_dynamics_passes_drive_to_script():
     assert args[args.index("--drive") + 1] == "motor_a"
 
 
-def test_tracking_combined_view_uses_one_primary_per_belt():
+def test_tracking_combined_view_lists_every_motor_per_belt():
     sc, gcode = make_calibration(awd_rails())
+    sc.cmd_SERVO_MEASURE_TRACKING(FakeGcmd(AXIS="X"))
+    starts = [
+        s for s in gcode.scripts if isinstance(s, str) and "CAPTURE_START" in s
+    ]
+    assert "SERVO=motor_a1,motor_a,motor_b,motor_b1" in starts[0]
+    runs = [s for s in gcode.scripts if isinstance(s, tuple) and s[0] == "RUN"]
+    args = runs[-1][2]
+    assert args[args.index("--combine-corexy") + 1] == (
+        "motor_a:1+motor_a1:1,motor_b:-1+motor_b1:1"
+    )
+
+
+def test_tracking_single_drive_belts_keep_plain_terms():
+    sc, gcode = make_calibration(single_drive_rails())
     sc.cmd_SERVO_MEASURE_TRACKING(FakeGcmd(AXIS="X"))
     runs = [s for s in gcode.scripts if isinstance(s, tuple) and s[0] == "RUN"]
     args = runs[-1][2]
-    assert args[args.index("--combine-corexy") + 1] == "motor_a:1,motor_b:-1"
+    assert args[args.index("--combine-corexy") + 1] == "motor_a:1,motor_b:1"
+
+
+def _capture_starts(gcode):
+    return [
+        s for s in gcode.scripts if isinstance(s, str) and "CAPTURE_START" in s
+    ]
+
+
+def test_measure_inertia_captures_every_motor_moving_the_axis():
+    sc, gcode = make_calibration(awd_rails())
+    sc.cmd_SERVO_MEASURE_INERTIA(FakeGcmd(AXIS="X"))
+    assert (
+        "SERVO=motor_a1,motor_a,motor_b,motor_b1" in _capture_starts(gcode)[0]
+    )
+
+
+def test_measure_friction_captures_every_motor_moving_the_axis():
+    sc, gcode = make_calibration(awd_rails())
+    sc.cmd_SERVO_MEASURE_FRICTION(FakeGcmd(AXIS="X"))
+    assert (
+        "SERVO=motor_a1,motor_a,motor_b,motor_b1" in _capture_starts(gcode)[0]
+    )
+
+
+def test_measure_inertia_cartesian_captures_only_its_rail():
+    rails = [
+        _rail(
+            "x",
+            [_motor("motor_x", "node", 0), _motor("motor_x1", "node", 1)],
+        ),
+        _rail("y", [_motor("motor_y", "node", 2)]),
+    ]
+    sc, gcode = make_calibration(rails, coupled=False)
+    sc.cmd_SERVO_MEASURE_INERTIA(FakeGcmd(AXIS="X"))
+    assert "SERVO=motor_x,motor_x1" in _capture_starts(gcode)[0]
+
+
+def test_measure_inertia_corexy_defaults_to_kinematics_servos():
+    sc, gcode = make_calibration(awd_rails())
+    sc.cmd_SERVO_MEASURE_INERTIA_COREXY(FakeGcmd())
+    assert (
+        "SERVO=motor_a1,motor_a,motor_b,motor_b1" in _capture_starts(gcode)[0]
+    )
 
 
 def test_tracking_single_rail_dual_motor_axis_gets_no_combine():

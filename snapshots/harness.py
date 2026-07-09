@@ -25,18 +25,17 @@ import gzip
 import json
 import math
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-# scripts/ for viz_pipeline (the VISUALIZE tool, reused as-is); repo root and
-# klippy/ for read_printer_config's `from klippy import ...` and _motion_engine.
-for _p in (_REPO_ROOT / "scripts", _REPO_ROOT / "klippy", _REPO_ROOT):
+# klippy/ for read_printer_config's `from klippy import ...`; repo root for
+# _motion_engine.
+for _p in (_REPO_ROOT / "klippy", _REPO_ROOT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
-
-import viz_pipeline  # noqa: E402
 
 CASES_DIR = Path(__file__).resolve().parent / "cases"
 BASELINES_DIR = Path(__file__).resolve().parent / "baselines"
@@ -57,6 +56,176 @@ BASELINE_SUFFIX = ".baseline.json.gz"
 # that close to zero.
 FLOAT_ATOL = 1e-6
 FLOAT_RTOL = 1e-7
+
+
+@dataclass
+class PrinterConfigData:
+    max_velocity: float
+    max_accel: float
+    square_corner_velocity: float
+    max_jerk: float
+    max_extrude_only_velocity: float | None
+    max_extrude_only_accel: float | None
+    max_path_deviation: float
+    max_accel_deviation: float
+    axis_sections: list
+    post_processor_sections: list
+
+
+def read_printer_config(cfg_path: Path) -> PrinterConfigData:
+    # Parse through klippy's own loader so includes resolve and the keys
+    # and defaults match the live printer exactly.
+    from klippy import configfile, motion_setup
+    from klippy.motion import Motion
+
+    loader = configfile.PrinterConfig.__new__(configfile.PrinterConfig)
+    loader.printer = None
+    config = loader.read_config(str(cfg_path))
+    printer = config.getsection("printer")
+    max_accel = printer.getfloat("max_accel", above=0.0)
+    if config.has_section("extruder"):
+        extruder = config.getsection("extruder")
+        extrude_only_velocity = extruder.getfloat(
+            "max_extrude_only_velocity", None, above=0.0
+        )
+        extrude_only_accel = extruder.getfloat(
+            "max_extrude_only_accel", None, above=0.0
+        )
+    else:
+        extrude_only_velocity = extrude_only_accel = None
+    max_jerk = printer.getfloat("max_jerk", max_accel * 2.0, minval=0.0)
+
+    # Same [axis]/[post_processor] parsing and validation a live printer goes
+    # through — motion_setup.read_axes/read_post_processors, not a
+    # reimplementation. They only need limit_sections preset (for a
+    # [limit]-references-undeclared-axis check this tool's cases never
+    # trigger, since cases don't declare [limit] sections).
+    stub = Motion.__new__(Motion)
+    stub.limit_sections = []
+    motion_setup.read_axes(stub, config)
+    motion_setup.read_post_processors(stub, config)
+
+    return PrinterConfigData(
+        max_velocity=printer.getfloat("max_velocity", above=0.0),
+        max_accel=max_accel,
+        square_corner_velocity=printer.getfloat(
+            "square_corner_velocity", 5.0, minval=0.0
+        ),
+        max_jerk=max_jerk if max_jerk > 0.0 else float("inf"),
+        max_extrude_only_velocity=extrude_only_velocity,
+        max_extrude_only_accel=extrude_only_accel,
+        max_path_deviation=printer.getfloat(
+            "max_path_deviation", 0.005, above=0.0, maxval=1.0
+        ),
+        max_accel_deviation=printer.getfloat(
+            "max_accel_deviation", 50.0, above=0.0
+        ),
+        axis_sections=stub.axis_sections,
+        post_processor_sections=stub.post_processor_sections,
+    )
+
+
+def parse_gcode(
+    path: Path, max_velocity: float
+) -> list[tuple[float, float, float, float, float]]:
+    # Waypoints carry absolute (x, y, z, e, feedrate). E rides as a fifth
+    # coordinate so retracts (E-only moves) and extruding moves flow through the
+    # pipeline as followers; the engine differences consecutive E to a per-move
+    # delta. Extruder mode is M82 (absolute) / M83 (relative), independent of the
+    # G90/G91 flag that governs X/Y/Z; under G91 an undeclared extruder rides
+    # along as relative, and an E word with no mode declared at all is refused
+    # rather than guessed. G92 resets any axis's position (commonly `G92 E0`)
+    # without emitting a move.
+    waypoints: list[tuple[float, float, float, float, float]] = []
+    x, y, z, e = 0.0, 0.0, 0.0, 0.0
+    feedrate = max_velocity
+    relative = False
+    e_relative: bool | None = None
+    motion_cmd = re.compile(r"^G0?([0-3])\b", re.IGNORECASE)
+    mode_cmd = re.compile(r"^G(90|91)\b", re.IGNORECASE)
+    set_pos_cmd = re.compile(r"^G92\b", re.IGNORECASE)
+    e_mode_cmd = re.compile(r"^M(82|83)\b", re.IGNORECASE)
+    coord = re.compile(r"([XYZEFIJ])([-+]?[0-9]*\.?[0-9]+)", re.IGNORECASE)
+
+    def params_of(line: str) -> dict[str, float]:
+        return {
+            c.group(1).upper(): float(c.group(2)) for c in coord.finditer(line)
+        }
+
+    for line in path.read_text().splitlines():
+        line = line.split(";", 1)[0].strip()
+
+        mm = mode_cmd.match(line)
+        if mm:
+            relative = mm.group(1) == "91"
+            continue
+
+        em = e_mode_cmd.match(line)
+        if em:
+            e_relative = em.group(1) == "83"
+            continue
+
+        if set_pos_cmd.match(line):
+            params = params_of(line)
+            x = params.get("X", x)
+            y = params.get("Y", y)
+            z = params.get("Z", z)
+            e = params.get("E", e)
+            continue
+
+        m = motion_cmd.match(line)
+        if not m:
+            continue
+        cmd = int(m.group(1))
+        params = params_of(line)
+        has_position = any(axis in params for axis in ("X", "Y", "Z"))
+        has_extrusion = "E" in params
+
+        if relative:
+            nx = x + params.get("X", 0.0)
+            ny = y + params.get("Y", 0.0)
+            nz = z + params.get("Z", 0.0)
+        else:
+            nx = params.get("X", x)
+            ny = params.get("Y", y)
+            nz = params.get("Z", z)
+
+        if has_extrusion:
+            if e_relative is None and not relative:
+                raise ValueError(
+                    f"{path.name}: E word before any M82/M83 (or G91) — the "
+                    "extruder mode is ambiguous, and guessing absolute turns "
+                    "relative-E slicer output into garbage extrusion ratios. "
+                    "Declare the mode (slicer excerpts printed with relative "
+                    "extrusion need an 'M83' line at the top)."
+                )
+            e_is_relative = True if e_relative is None else e_relative
+            ne = e + params["E"] if e_is_relative else params["E"]
+        else:
+            ne = e
+
+        if cmd in (2, 3):
+            raise ValueError(
+                f"G{cmd} arc command is not supported: the motion engine has no "
+                "native arc ingestion yet, and silently linearizing it here would "
+                "let a snapshot claim to exercise an arc while feeding the engine "
+                "straight segments"
+            )
+        if cmd == 1:
+            feedrate = params.get("F", feedrate * 60.0) / 60.0
+        if not (has_position or ne != e):
+            continue
+        x, y, z, e = nx, ny, nz, ne
+        if not waypoints and not has_position:
+            # A prime or retract before any positional command: there is no
+            # known toolhead position yet, so anchoring a waypoint would invent
+            # a move from the parser's arbitrary origin. Fold the E change into
+            # the state; the first positional waypoint carries it.
+            continue
+        move_feedrate = max_velocity if cmd == 0 else feedrate
+        waypoints.append((x, y, z, e, move_feedrate))
+
+    return waypoints
 
 
 class Status(enum.Enum):
@@ -173,8 +342,8 @@ def run_case(case: Case) -> dict:
             f"case '{case.name}': missing config {case.config_path.name}"
         )
 
-    cfg = viz_pipeline.read_printer_config(case.config_path)
-    waypoints = viz_pipeline.parse_gcode(case.gcode_path, cfg.max_velocity)
+    cfg = read_printer_config(case.config_path)
+    waypoints = parse_gcode(case.gcode_path, cfg.max_velocity)
     if len(waypoints) < 2:
         raise ValueError(
             f"case '{case.name}': fewer than two spatial moves in "

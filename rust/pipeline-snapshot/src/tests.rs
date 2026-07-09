@@ -278,7 +278,6 @@ fn snapshot_serializes_to_the_baseline_schema() {
     for key in [
         "raw_x",
         "raw_y",
-        "fitted_segments",
         "traj_x_pieces",
         "traj_y_pieces",
         "traj_z_pieces",
@@ -292,11 +291,6 @@ fn snapshot_serializes_to_the_baseline_schema() {
     ] {
         assert!(json.get(key).is_some(), "missing snapshot key {key}");
     }
-    let seg = json["fitted_segments"][0]
-        .get("type")
-        .and_then(serde_json::Value::as_str)
-        .expect("fitted segment carries a type tag");
-    assert!(["line", "arc", "clothoid"].contains(&seg));
 }
 
 fn default_axis_snapshot_params() -> SnapshotParams {

@@ -12,6 +12,13 @@ export const COLORS = {
   line: "#4a9eff",
   arc: "#4ecb71",
   clothoid: "#f5a623",
+  zero: "#4a9eff",
+  constant: "#4ecb71",
+  linear: "#f5a623",
+  other: "#ff5252",
+  cusp: "#e040fb",
+  gap: "#ffd54a",
+  kappa: "#4dd0e1",
   vx: "#4a9eff",
   vy: "#4ecb71",
   vz: "#ab7df8",
@@ -32,6 +39,7 @@ const PANELS = [
   { canvasId: "canvas-vel", type: "vel" },
   { canvasId: "canvas-acc", type: "acc" },
   { canvasId: "canvas-jrk", type: "jrk" },
+  { canvasId: "canvas-kappa", type: "kappa" },
 ];
 
 // Tooltip wording for the derivative-discontinuity impulses drawn on the
@@ -125,6 +133,7 @@ const ARRAY_KEYS = [
   "vx", "vy", "vz", "ve", "v_scalar",
   "ax", "ay", "az", "ae", "a_scalar",
   "jx", "jy", "jz", "je", "j_scalar",
+  "kappa", "curvature_class",
   "a_tang", "a_cent", "j_tang", "j_cent",
   "jerk_impulse_t", "jerk_impulse_mag", "accel_impulse_t", "accel_impulse_mag",
 ];
@@ -140,9 +149,6 @@ export function memoizeTrajectory(td) {
     const cached = td[k]();
     wrap[k] = () => cached;
   }
-  wrap.segment_count = () => td.segment_count();
-  wrap.segment_type = (i) => td.segment_type(i);
-  wrap.segment_data = (i) => td.segment_data(i);
   wrap.traversal_time = () => td.traversal_time();
   wrap.point_count = () => td.point_count();
   return wrap;
@@ -307,11 +313,7 @@ class PanelRenderer {
     }
     bctx.stroke();
 
-    if (this.view.showFittedPath) {
-      this._strokeFittedSegments(bctx, DATA, xMin, xMax, yMin, yMax);
-    } else {
-      this._strokeShapedPath(bctx, DATA, xMin, xMax, yMin, yMax);
-    }
+    this._strokeCurvaturePath(bctx, DATA, xMin, xMax, yMin, yMax);
 
     if (rawX.length > 0) {
       bctx.beginPath();
@@ -326,40 +328,24 @@ class PanelRenderer {
     bctx.restore();
   }
 
-  // The executed (post-lowered, post-shaper) toolhead path -- the same dense
-  // samples the velocity/accel/jerk panels are derived from, so this is the
-  // same stage as every graph beside it. The line/arc/clothoid label exists
-  // only in the fitted (pre-lowering) geometry; borrow each segment's label
-  // but place the color seam at the executed sample nearest that segment's
-  // geometric endpoint -- exact, not an arc-length-fraction guess.
-  _strokeShapedPath(bctx, DATA, xMin, xMax, yMin, yMax) {
-    const segCount = DATA.segment_count();
+  // The executed (post-lowered, post-shaper) toolhead path, colored by the
+  // measured curvature-behavior class at each sample -- the same dense grid
+  // driving every other panel, walked directly with no segment-boundary
+  // matching needed. Cusp/Gap are point anomalies (a near-zero-speed
+  // instant, a piece-domain mismatch), drawn as markers rather than folded
+  // into the stroke color.
+  _strokeCurvaturePath(bctx, DATA, xMin, xMax, yMin, yMax) {
     const kx = DATA.kin_x(), ky = DATA.kin_y();
-    if (kx.length <= 1 || segCount === 0) return;
-    // Search forward only, so a self-crossing path can't snap a later seam back.
-    const segEndIdx = new Array(segCount);
-    let from = 0;
-    for (let s = 0; s < segCount; s++) {
-      const d = DATA.segment_data(s);
-      const line = DATA.segment_type(s) === "line";
-      const ex = line ? d[2] : d[d.length - 2];
-      const ey = line ? d[3] : d[d.length - 1];
-      let best = from, bd = Infinity;
-      for (let i = from; i < kx.length; i++) {
-        const dx = kx[i] - ex, dy = ky[i] - ey;
-        const dd = dx * dx + dy * dy;
-        if (dd < bd) { bd = dd; best = i; }
-      }
-      segEndIdx[s] = best;
-      from = best;
-    }
-    segEndIdx[segCount - 1] = kx.length - 1;
-
-    let segIdx = 0, curColor = null;
+    const cls = DATA.curvature_class();
+    if (kx.length <= 1) return;
+    const CLASS_COLOR = [COLORS.zero, COLORS.constant, COLORS.linear, COLORS.other];
+    let curColor = null;
     bctx.lineWidth = 1.2;
+    const markers = [];
     for (let i = 1; i < kx.length; i++) {
-      while (segIdx < segCount - 1 && i > segEndIdx[segIdx]) segIdx++;
-      const color = COLORS[DATA.segment_type(segIdx)] || COLORS.line;
+      const c = cls[i];
+      if (c === 4 || c === 5) { markers.push(i); continue; }
+      const color = CLASS_COLOR[c] || COLORS.zero;
       if (color !== curColor) {
         if (curColor !== null) bctx.stroke();
         bctx.beginPath();
@@ -370,26 +356,11 @@ class PanelRenderer {
       bctx.lineTo(this.toPixelX(kx[i], xMin, xMax), this.toPixelY(ky[i], yMin, yMax));
     }
     if (curColor !== null) bctx.stroke();
-  }
-
-  // The fitter's own spatial geometry, before lowering or shaping touch it --
-  // each segment's own recorded points (line endpoints; arc/clothoid
-  // pre-sampled point arrays), drawn directly. No matching against another
-  // sample grid needed, unlike the shaped view.
-  _strokeFittedSegments(bctx, DATA, xMin, xMax, yMin, yMax) {
-    const segCount = DATA.segment_count();
-    bctx.lineWidth = 1.2;
-    for (let s = 0; s < segCount; s++) {
-      const d = DATA.segment_data(s);
-      const color = COLORS[DATA.segment_type(s)] || COLORS.line;
+    for (const i of markers) {
       bctx.beginPath();
-      bctx.strokeStyle = color;
-      for (let i = 0; i < d.length; i += 2) {
-        const px = this.toPixelX(d[i], xMin, xMax);
-        const py = this.toPixelY(d[i + 1], yMin, yMax);
-        i === 0 ? bctx.moveTo(px, py) : bctx.lineTo(px, py);
-      }
-      bctx.stroke();
+      bctx.fillStyle = cls[i] === 4 ? COLORS.cusp : COLORS.gap;
+      bctx.arc(this.toPixelX(kx[i], xMin, xMax), this.toPixelY(ky[i], yMin, yMax), 2.5, 0, Math.PI * 2);
+      bctx.fill();
     }
   }
 
@@ -450,7 +421,7 @@ class PanelRenderer {
       const scalar = scalarEntry.arr;
       bctx.strokeStyle = scalarEntry.color;
       bctx.lineWidth = 1.2;
-      this._strokeSeries(bctx, t, (i) => scalar[i], tMin, tMax, yMin, yMax);
+      this._strokeSeries(bctx, t, (i) => Math.abs(scalar[i]), tMin, tMax, yMin, yMax);
 
       if (drawPeaks) {
         const peaks = findPeaks(scalar);
@@ -634,7 +605,6 @@ export class TrajectoryView {
     this.hoverMode = null; // "time" | "path" | null
     this.hoverXY = null; // { x, y } cursor position when hoverMode === "path"
     this.showPeaks = false;
-    this.showFittedPath = false;
     this.wheelTimer = null; // suppresses mousemove during trackpad gestures
     this.tooltipEl = document.getElementById("tooltip");
     this.readoutEl = document.getElementById("readout");
@@ -694,13 +664,15 @@ export class TrajectoryView {
     return best;
   }
 
-  // Per-type fitted-segment counts, e.g. "3 arc, 5 line".
-  segmentSummary() {
+  // Per-class sample counts on the current path, e.g. "412 zero, 88
+  // constant, 40 linear, 6 other, 2 cusp".
+  curvatureSummary() {
+    const NAMES = ["zero", "constant", "linear", "other", "cusp", "gap"];
+    const cls = this.data.curvature_class();
     const counts = {};
-    const n = this.data.segment_count();
-    for (let i = 0; i < n; i++) {
-      const typ = this.data.segment_type(i);
-      counts[typ] = (counts[typ] || 0) + 1;
+    for (let i = 0; i < cls.length; i++) {
+      const name = NAMES[cls[i]] || "other";
+      counts[name] = (counts[name] || 0) + 1;
     }
     return Object.keys(counts).sort().map(k => `${counts[k]} ${k}`).join(", ");
   }
@@ -719,6 +691,7 @@ export class TrajectoryView {
     const v = this.data.v_scalar()[idx];
     const a = this.data.a_scalar()[idx];
     const j = this.data.j_scalar()[idx];
+    const kappa = this.data.kappa()[idx];
     const aTang = this.data.a_tang()[idx];
     const aCent = this.data.a_cent()[idx];
     const vz = this.data.vz(), ve = this.data.ve();
@@ -736,7 +709,8 @@ export class TrajectoryView {
       `<span class="r">a=${formatNum(a)}</span>` +
       `<span class="g">a∥=${formatNum(aTang)}</span>` +
       `<span class="g">a⊥=${formatNum(aCent)}</span>` +
-      `<span class="g">j=${formatNum(j)}</span>`;
+      `<span class="g">j=${formatNum(j)}</span>` +
+      `<span class="g">κ=${formatNum(kappa)}</span>`;
   }
 
   // -- Synced hover ------------------------------------------------------------
@@ -867,26 +841,31 @@ export class TrajectoryView {
     const velSeries = this._panelSeries("vel", "vx", "vy", "vz", "ve", null, null, "v_scalar");
     const accSeries = this._panelSeries("acc", "ax", "ay", "az", "ae", "a_tang", "a_cent", "a_scalar");
     const jrkSeries = this._panelSeries("jrk", "jx", "jy", "jz", "je", "j_tang", "j_cent", "j_scalar");
+    const kappaSeries = [{ key: "kappa", color: COLORS.kappa, label: "κ", scalar: true, hidden: false }];
+    kappaSeries[0].arr = this.data.kappa();
     const vel = scaleSeries(velSeries);
     const acc = scaleSeries(accSeries);
     const jrk = scaleSeries(jrkSeries);
+    const kappa = scaleSeries(kappaSeries);
 
     const hiddenKey = Object.entries(this.hiddenSeries)
       .map(([k, v]) => `${k}:${[...v].join("+")}`)
       .join(";");
     const key = `${tMin},${tMax},${xMin},${xMax},${yMin},${yMax},` +
-      `${vel.leftMax},${acc.leftMax},${jrk.leftMax},${hiddenKey},${this.variant},${this.showFittedPath}`;
+      `${vel.leftMax},${acc.leftMax},${jrk.leftMax},${kappa.leftMax},${hiddenKey},${this.variant}`;
     if (key !== this.lastBoundsKey) {
       this.lastBoundsKey = key;
 
       this._updateLegend("vel", "Velocity", velSeries);
       this._updateLegend("acc", "Acceleration", accSeries);
       this._updateLegend("jrk", "Jerk", jrkSeries);
+      this._updateLegend("kappa", "Curvature", kappaSeries);
 
       this.renderers[0].renderPathBuffer(xMin, xMax, yMin, yMax);
       this.renderers[1].renderTimeBuffer(tMin, tMax, 0, vel.leftMax, vel.shown, this.showPeaks);
       this.renderers[2].renderTimeBuffer(tMin, tMax, 0, acc.leftMax, acc.shown, this.showPeaks);
       this.renderers[3].renderTimeBuffer(tMin, tMax, 0, jrk.leftMax, jrk.shown, this.showPeaks);
+      this.renderers[4].renderTimeBuffer(tMin, tMax, 0, kappa.leftMax, kappa.shown, this.showPeaks);
 
       const DATA = this.data;
       const drawImpulsesOn = (renderer, times, mags) => {
@@ -1184,12 +1163,6 @@ export class TrajectoryView {
 
   setShowPeaks(on) {
     this.showPeaks = on;
-    this.lastBoundsKey = "";
-    this.renderAll();
-  }
-
-  setShowFittedPath(on) {
-    this.showFittedPath = on;
     this.lastBoundsKey = "";
     this.renderAll();
   }
