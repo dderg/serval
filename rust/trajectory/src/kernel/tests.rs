@@ -266,3 +266,55 @@ fn smooth_triangle_support_width() {
     assert!((hi - lo - smooth_time).abs() < 1e-12);
     assert!((lo + smooth_time / 2.0).abs() < 1e-12);
 }
+
+fn numeric_second_moment(kernel: &PiecewisePolynomialKernel) -> f64 {
+    let (lo, hi) = kernel.support();
+    let n = 200_000;
+    let dt = (hi - lo) / n as f64;
+    (0..n)
+        .map(|i| {
+            let t = lo + (i as f64 + 0.5) * dt;
+            t * t * eval_kernel(kernel, t) * dt
+        })
+        .sum()
+}
+
+#[test]
+fn bell_second_moment_matches_closed_form() {
+    let smooth_time = 0.04;
+    let kernel = build_smooth_bell_kernel(smooth_time);
+    let expected = smooth_time * smooth_time / 28.0;
+    assert!((kernel.second_moment() - expected).abs() < 1e-15);
+}
+
+#[test]
+fn triangle_second_moment_matches_closed_form() {
+    let smooth_time = 0.04;
+    let kernel = build_smooth_triangle_kernel(smooth_time);
+    let expected = smooth_time * smooth_time / 24.0;
+    assert!((kernel.second_moment() - expected).abs() < 1e-15);
+}
+
+#[test]
+fn smooth_zv_second_moment_matches_numeric_integration() {
+    let kernel = build_smooth_zv_kernel(40.0);
+    let analytic = kernel.second_moment();
+    let numeric = numeric_second_moment(&kernel);
+    assert!(
+        (analytic - numeric).abs() < 1e-9 * numeric.abs().max(1.0),
+        "analytic {analytic} vs numeric {numeric}"
+    );
+    assert!(analytic > 0.0);
+}
+
+#[test]
+fn smooth_mzv_second_moment_matches_numeric_integration() {
+    let kernel = build_smooth_mzv_kernel(40.0);
+    let analytic = kernel.second_moment();
+    let numeric = numeric_second_moment(&kernel);
+    assert!(
+        (analytic - numeric).abs() < 1e-9 * numeric.abs().max(1.0),
+        "analytic {analytic} vs numeric {numeric}"
+    );
+    assert!(analytic > 0.0);
+}

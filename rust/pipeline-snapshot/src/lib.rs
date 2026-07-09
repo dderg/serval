@@ -127,7 +127,7 @@ pub fn pipeline_snapshot(
     let limits = geometry::VelocityLimits::try_new(
         params.max_velocity,
         params.max_accel,
-        params.square_corner_velocity,
+        geometry::corner_deviation_from_scv(params.square_corner_velocity, params.max_accel),
         params.max_jerk,
     )
     .map_err(|e| SnapshotError::InvalidLimits(e.to_string()))?;
@@ -135,8 +135,13 @@ pub fn pipeline_snapshot(
     let moves = build_moves(waypoints, limits)?;
     let raw_points = extract_raw_path(&moves);
 
+    let axis_chains = build_axis_chains(&params).map_err(SnapshotError::InvalidChain)?;
+    let corner = geometry::CornerFitConfig {
+        kernel_variance_s2: axis_chains.max_spatial_kernel_variance_s2(),
+        ..geometry::CornerFitConfig::default()
+    };
     let config = StreamConfig {
-        corner: geometry::CornerFitConfig::default(),
+        corner,
         integration_tol: VELOCITY_INTEGRATION_TOL,
         max_extrude_only_velocity_mm_s: params.max_extrude_only_velocity.unwrap_or(f64::INFINITY),
         max_extrude_only_accel_mm_s2: params.max_extrude_only_accel.unwrap_or(f64::INFINITY),
@@ -147,7 +152,6 @@ pub fn pipeline_snapshot(
         max_buffer_moves: SNAPSHOT_MAX_BUFFER_MOVES,
         limits,
     };
-    let axis_chains = build_axis_chains(&params).map_err(SnapshotError::InvalidChain)?;
     let (fitted, shaped) = run_pipeline(&moves, config, axis_chains);
 
     let fitted_segments = fitted

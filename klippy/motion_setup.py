@@ -1,4 +1,5 @@
 import logging
+import math
 import struct
 from collections import defaultdict, namedtuple
 
@@ -25,9 +26,22 @@ CartesianLimits = namedtuple(
         "max_jerk",
         "max_z_velocity",
         "max_z_accel",
-        "square_corner_velocity",
+        "corner_deviation",
     ],
 )
+
+CORNER_DEVIATION_SCV_FACTOR = math.sqrt(2.0) - 1.0
+DEFAULT_SQUARE_CORNER_VELOCITY = 5.0
+
+
+def corner_deviation_from_scv(scv, max_accel):
+    return scv * scv * CORNER_DEVIATION_SCV_FACTOR / max_accel
+
+
+def scv_from_corner_deviation(corner_deviation, max_accel):
+    return math.sqrt(corner_deviation * max_accel / CORNER_DEVIATION_SCV_FACTOR)
+
+
 McuTopology = namedtuple(
     "McuTopology", ["mcu_id", "axes", "kinematics", "max_motor_velocity"]
 )
@@ -155,9 +169,19 @@ def read_limits(motion, config):
             raise config.error("[printer] %s is not supported" % key)
     motion._max_velocity = config.getfloat("max_velocity", above=0.0)
     motion._max_accel = config.getfloat("max_accel", above=0.0)
-    motion._square_corner_velocity = config.getfloat(
-        "square_corner_velocity", 5.0, minval=0.0
-    )
+    scv = config.getfloat("square_corner_velocity", None, minval=0.0)
+    corner_deviation = config.getfloat("corner_deviation", None, minval=0.0)
+    if scv is not None and corner_deviation is not None:
+        raise config.error(
+            "[printer] square_corner_velocity and corner_deviation are both "
+            "set — corner_deviation is the canonical corner budget and "
+            "square_corner_velocity is its legacy alias; set exactly one"
+        )
+    if corner_deviation is None:
+        if scv is None:
+            scv = DEFAULT_SQUARE_CORNER_VELOCITY
+        corner_deviation = corner_deviation_from_scv(scv, motion._max_accel)
+    motion._corner_deviation = corner_deviation
     max_jerk = config.getfloat("max_jerk", motion._max_accel * 2.0, minval=0.0)
     motion.max_jerk = max_jerk if max_jerk > 0.0 else float("inf")
     motion.max_z_velocity = config.getfloat(
@@ -312,7 +336,7 @@ def init_planner(motion):
                 motion.max_jerk,
                 motion.max_z_velocity,
                 motion.max_z_accel,
-                motion._square_corner_velocity,
+                motion._corner_deviation,
             ),
             max_extrude_only_velocity=max_extrude_only_velocity,
             max_extrude_only_accel=max_extrude_only_accel,

@@ -213,7 +213,7 @@ def test_init_planner_passes_claimed_axes():
     motion.max_jerk = 6000.0
     motion.max_z_velocity = 15.0
     motion.max_z_accel = 100.0
-    motion._square_corner_velocity = 8.0
+    motion._corner_deviation = 0.008836555997292696
     motion.max_path_deviation = 0.02
     motion.max_accel_deviation = 500.0
     motion._planner_ready = False
@@ -237,4 +237,11 @@ def test_init_planner_passes_claimed_axes():
         (11, [0, 1, 2, 3], 0, [FAKE_STEPPER_VELOCITY_CEILING] * 4)
     ]
     cartesian_limits = engine.init_planner_args["cartesian_limits"]
-    assert cartesian_limits == (300.0, 3000.0, 6000.0, 15.0, 100.0, 8.0)
+    assert cartesian_limits == (
+        300.0,
+        3000.0,
+        6000.0,
+        15.0,
+        100.0,
+        0.008836555997292696,
+    )

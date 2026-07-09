@@ -12,7 +12,13 @@ fn square_waypoints() -> Vec<(f64, f64, f64, f64, f64)> {
 }
 
 fn default_limits() -> geometry::VelocityLimits {
-    geometry::VelocityLimits::try_new(300.0, 3000.0, 5.0, 100_000.0).unwrap()
+    geometry::VelocityLimits::try_new(
+        300.0,
+        3000.0,
+        geometry::corner_deviation_from_scv(5.0, 3000.0),
+        100_000.0,
+    )
+    .unwrap()
 }
 
 fn default_config(limits: geometry::VelocityLimits) -> StreamConfig {

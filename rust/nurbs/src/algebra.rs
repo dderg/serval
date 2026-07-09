@@ -127,6 +127,28 @@ impl PiecewisePolynomialKernel {
         )
     }
 
+    #[must_use]
+    pub fn second_moment(&self) -> f64 {
+        self.pieces
+            .iter()
+            .map(|piece| {
+                let u0 = piece.u_start;
+                let h = piece.u_end - piece.u_start;
+                piece
+                    .coeffs
+                    .iter()
+                    .enumerate()
+                    .map(|(k, &c)| {
+                        let k = k as i32;
+                        c * (u0 * u0 * h.powi(k + 1) / f64::from(k + 1)
+                            + 2.0 * u0 * h.powi(k + 2) / f64::from(k + 2)
+                            + h.powi(k + 3) / f64::from(k + 3))
+                    })
+                    .sum::<f64>()
+            })
+            .sum()
+    }
+
     pub fn from_pieces(pieces: Vec<crate::bezier::BezierPiece>) -> Result<Self, AlgebraError> {
         if pieces.is_empty() {
             return Err(AlgebraError::SupportMismatch);

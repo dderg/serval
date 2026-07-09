@@ -7,11 +7,23 @@ const DISPLACEMENT_EPSILON: f64 = 1e-9;
 // TODO: a DerivativeGains chain stage with k2 != 0 demands extra motor
 // acceleration proportional to jerk; fold that demand into these planning
 // limits once the mode-inverse post-processor lands.
+pub const CORNER_DEVIATION_SCV_FACTOR: f64 = std::f64::consts::SQRT_2 - 1.0;
+
+#[must_use]
+pub fn corner_deviation_from_scv(scv_mm_s: f64, accel_mm_s2: f64) -> f64 {
+    scv_mm_s * scv_mm_s * CORNER_DEVIATION_SCV_FACTOR / accel_mm_s2
+}
+
+#[must_use]
+pub fn scv_from_corner_deviation(corner_deviation_mm: f64, accel_mm_s2: f64) -> f64 {
+    (corner_deviation_mm * accel_mm_s2 / CORNER_DEVIATION_SCV_FACTOR).sqrt()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VelocityLimits {
     pub max_velocity_mm_s: f64,
     pub accel_mm_s2: f64,
-    pub square_corner_velocity_mm_s: f64,
+    pub corner_deviation_mm: f64,
     pub max_jerk_mm_s3: f64,
 }
 
@@ -19,13 +31,13 @@ impl VelocityLimits {
     pub fn try_new(
         max_velocity_mm_s: f64,
         accel_mm_s2: f64,
-        square_corner_velocity_mm_s: f64,
+        corner_deviation_mm: f64,
         max_jerk_mm_s3: f64,
     ) -> Result<Self, &'static str> {
         let limits = Self {
             max_velocity_mm_s,
             accel_mm_s2,
-            square_corner_velocity_mm_s,
+            corner_deviation_mm,
             max_jerk_mm_s3,
         };
         limits.check()?;
@@ -39,10 +51,8 @@ impl VelocityLimits {
         if !(self.accel_mm_s2.is_finite() && self.accel_mm_s2 > 0.0) {
             return Err("accel must be finite and positive");
         }
-        if !(self.square_corner_velocity_mm_s.is_finite()
-            && self.square_corner_velocity_mm_s >= 0.0)
-        {
-            return Err("square_corner_velocity must be finite and non-negative");
+        if !(self.corner_deviation_mm.is_finite() && self.corner_deviation_mm >= 0.0) {
+            return Err("corner_deviation must be finite and non-negative");
         }
         if !(self.max_jerk_mm_s3 > 0.0) {
             return Err("max_jerk must be positive (infinity disables jerk limiting)");

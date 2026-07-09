@@ -50,7 +50,7 @@ fn build_stream_config(cfg: &config::PlannerConfig) -> PyResult<motion_pipeline:
         limits: geometry::VelocityLimits::try_new(
             cart.max_velocity,
             cart.max_accel,
-            cart.square_corner_velocity,
+            cart.corner_deviation,
             cart.max_jerk,
         )
         .map_err(PyRuntimeError::new_err)?,
@@ -308,6 +308,8 @@ impl PyMotionEngine {
             .post_processors
             .compile(&cfg.axis_registry)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cfg.validate_corner_budget(&axis_chains)
+            .map_err(PyValueError::new_err)?;
         let home = vec![0.0; cfg.axis_registry.n_axes()];
 
         let mut planner_guard = self.planner.lock_ok();

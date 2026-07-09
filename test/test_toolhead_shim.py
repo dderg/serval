@@ -17,6 +17,7 @@ EXPECTED_STATUS_KEYS = {
     "max_accel",
     "minimum_cruise_ratio",
     "square_corner_velocity",
+    "corner_deviation",
 }
 
 LEGACY_METHODS = [
@@ -99,7 +100,7 @@ def toolhead_fixture():
     toolhead._max_velocity = 300.0
     toolhead._max_accel = 3000.0
     toolhead.min_cruise_ratio = 0.0
-    toolhead._square_corner_velocity = 5.0
+    toolhead._corner_deviation = 0.0034517796864424596
     toolhead._planner_ready = False
 
     printer.add_object("toolhead", ToolheadShim(toolhead))

@@ -9,8 +9,6 @@ mod overlap;
 mod runfit;
 use crate::vec3;
 
-use std::f64::consts::SQRT_2;
-
 use crate::GeometryError;
 use crate::frontend::{Move, VelocityLimits};
 use crate::path::lowering::PositionProfile;
@@ -159,7 +157,7 @@ pub enum JunctionPlan {
 /// append: an arc through a longer prefix would also pass through this one.
 #[must_use]
 pub fn arc_candidate_fits(facets: &[Move], config: CornerFitConfig) -> bool {
-    let tol = span_tolerance(facets);
+    let tol = span_tolerance(facets, config);
     tol.is_finite() && kernels::arc_candidate(facets, config, tol)
 }
 
@@ -179,10 +177,10 @@ pub fn plan_junction_reduced(
 
 /// The cocircularity tolerance the run detector derives from the moves' corner
 /// limits: the smallest positive junction deviation in the window.
-fn span_tolerance(moves: &[Move]) -> f64 {
+fn span_tolerance(moves: &[Move], config: CornerFitConfig) -> f64 {
     moves
         .iter()
-        .map(|m| junction_deviation(m.limits))
+        .map(|m| junction_deviation(m.limits, config))
         .filter(|d| d.is_finite() && *d > 0.0)
         .fold(f64::INFINITY, f64::min)
 }
@@ -278,7 +276,8 @@ pub fn facet_consumption_candidate(
     if theta1 <= config.theta_min_rad || theta1 >= config.theta_max_rad {
         return false;
     }
-    let delta = junction_deviation(m_in.limits).min(junction_deviation(m_mid.limits));
+    let delta =
+        junction_deviation(m_in.limits, config).min(junction_deviation(m_mid.limits, config));
     if !(delta.is_finite() && delta > 0.0) {
         return false;
     }
@@ -368,7 +367,7 @@ pub fn plan_facet_consumption(
     let delta = std::iter::once(m_in)
         .chain(mids.iter().copied())
         .chain(std::iter::once(m_out))
-        .map(|m| junction_deviation(m.limits))
+        .map(|m| junction_deviation(m.limits, config))
         .fold(f64::INFINITY, f64::min);
     if !(delta.is_finite() && delta > 0.0) {
         return Ok(None);
@@ -497,9 +496,7 @@ fn consumption_limits(
         .reduce(|a, b| VelocityLimits {
             max_velocity_mm_s: a.max_velocity_mm_s.min(b.max_velocity_mm_s),
             accel_mm_s2: a.accel_mm_s2.min(b.accel_mm_s2),
-            square_corner_velocity_mm_s: a
-                .square_corner_velocity_mm_s
-                .min(b.square_corner_velocity_mm_s),
+            corner_deviation_mm: a.corner_deviation_mm.min(b.corner_deviation_mm),
             max_jerk_mm_s3: a.max_jerk_mm_s3.min(b.max_jerk_mm_s3),
         })
         .expect("mids is non-empty");
@@ -550,7 +547,8 @@ fn classify_junction(
         return Ok(JunctionPlan::Unblended(UnblendReason::NearReversal));
     }
 
-    let delta = junction_deviation(m_in.limits).min(junction_deviation(m_out.limits));
+    let delta =
+        junction_deviation(m_in.limits, config).min(junction_deviation(m_out.limits, config));
     if delta <= 0.0 {
         return Ok(JunctionPlan::Unblended(UnblendReason::ZeroDeviation));
     }
@@ -617,9 +615,14 @@ fn biclothoid_followers(
     )
 }
 
-fn junction_deviation(limits: VelocityLimits) -> f64 {
-    let scv = limits.square_corner_velocity_mm_s;
-    scv * scv * (SQRT_2 - 1.0) / limits.accel_mm_s2
+#[must_use]
+pub fn kernel_corner_deviation_mm(kernel_variance_s2: f64, accel_mm_s2: f64) -> f64 {
+    0.5 * kernel_variance_s2 * accel_mm_s2
+}
+
+fn junction_deviation(limits: VelocityLimits, config: CornerFitConfig) -> f64 {
+    limits.corner_deviation_mm
+        - kernel_corner_deviation_mm(config.kernel_variance_s2, limits.accel_mm_s2)
 }
 
 #[cfg(test)]

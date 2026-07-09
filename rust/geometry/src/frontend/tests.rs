@@ -6,7 +6,7 @@ fn limits() -> VelocityLimits {
     VelocityLimits {
         max_velocity_mm_s: 300.0,
         accel_mm_s2: 3000.0,
-        square_corner_velocity_mm_s: 5.0,
+        corner_deviation_mm: 5.0,
         max_jerk_mm_s3: 100_000.0,
     }
 }
@@ -117,7 +117,7 @@ fn invalid_limits_rejected() {
         bad.limits = VelocityLimits {
             max_velocity_mm_s: mv,
             accel_mm_s2: ac,
-            square_corner_velocity_mm_s: scv,
+            corner_deviation_mm: scv,
             max_jerk_mm_s3: jerk,
         };
         let err = line_move([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 0.0, bad).unwrap_err();

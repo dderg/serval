@@ -43,6 +43,7 @@ pub fn setup_stages(
 
     let mut corner = config.corner;
     corner.ramp_accel_budget_mm_s2 = config.max_extrude_only_accel_mm_s2;
+    corner.kernel_variance_s2 = axis_chains.max_spatial_kernel_variance_s2();
     let fit_stage = FitStage::new(corner);
     spawn_stage("kalico-fit", move || fit_stage.run(raw_rx, fitted_tx));
 
