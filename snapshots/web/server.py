@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import math
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -35,6 +36,69 @@ for _p in (str(_SNAPSHOTS), str(_REPO_ROOT / "scripts")):
 import harness  # noqa: E402
 
 _STATIC = Path(__file__).resolve().parent / "static"
+
+
+def _axis_and_post_processor_text(cfg_path: Path) -> str:
+    """The verbatim [axis]/[post_processor] sections of a case config, for the
+    playground's config textarea. Extracted as raw text (not re-serialized from
+    the parsed sections) so the operator sees exactly what the .cfg holds."""
+    blocks: list[list[str]] = []
+    current: list[str] | None = None
+    for line in cfg_path.read_text().splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            words = stripped[1:-1].split()
+            if words and words[0].lower() in ("axis", "post_processor"):
+                current = [line]
+                blocks.append(current)
+            else:
+                current = None
+            continue
+        if current is not None:
+            current.append(line)
+    return "\n\n".join("\n".join(block).rstrip() for block in blocks)
+
+
+def playground_cases() -> list[dict]:
+    return [
+        {
+            "name": case.name,
+            "group": case.name.split("/")[0],
+            "config": case.config_path.stem,
+            "gcode": case.gcode_path.stem,
+        }
+        for case in harness.discover_cases()
+    ]
+
+
+def playground_case(name: str) -> dict:
+    """Payload for one snapshot case in the playground's config shape. Raises
+    KeyError on an unknown case name so the handler answers a clear 404."""
+    case = {c.name: c for c in harness.discover_cases()}.get(name)
+    if case is None:
+        raise KeyError(name)
+    cfg = harness.read_printer_config(case.config_path)
+    config = {
+        "max_velocity": cfg.max_velocity,
+        "max_accel": cfg.max_accel,
+        "square_corner_velocity": cfg.square_corner_velocity,
+        "max_jerk": 0.0 if math.isinf(cfg.max_jerk) else cfg.max_jerk,
+        "max_path_deviation": cfg.max_path_deviation,
+        "max_accel_deviation": cfg.max_accel_deviation,
+        "post_processor_config": _axis_and_post_processor_text(
+            case.config_path
+        ),
+    }
+    if cfg.max_extrude_only_velocity is not None:
+        config["max_extrude_only_velocity"] = cfg.max_extrude_only_velocity
+    if cfg.max_extrude_only_accel is not None:
+        config["max_extrude_only_accel"] = cfg.max_extrude_only_accel
+    return {
+        "name": case.name,
+        "group": case.name.split("/")[0],
+        "gcode": case.gcode_path.read_text(),
+        "config": config,
+    }
 
 
 class ReviewState:
@@ -214,6 +278,10 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_static(path[len("/static/") :], None)
         elif path == "/api/cases":
             self._json(STATE.summary())
+        elif path == "/api/playground/cases":
+            self._json(playground_cases())
+        elif path.startswith("/api/playground/case/"):
+            self._serve_playground_case(path[len("/api/playground/case/") :])
         elif path.startswith("/snapshot-data/"):
             self._serve_snapshot_data(path)
         else:
@@ -238,6 +306,13 @@ class Handler(BaseHTTPRequestHandler):
         # script can re-check and exit.
         if not summary["review"]:
             threading.Thread(target=self.server.shutdown, daemon=True).start()
+
+    def _serve_playground_case(self, encoded):
+        name = unquote(encoded)
+        try:
+            self._json(playground_case(name))
+        except KeyError:
+            self._json({"error": f"unknown case '{name}'"}, 404)
 
     def _serve_snapshot_data(self, path):
         parts = path.strip("/").split("/")
@@ -304,6 +379,12 @@ def main():
     args = parser.parse_args()
     if args.results and args.mode == "baselines":
         parser.error("--results only applies to review mode")
+
+    # read_printer_config (the playground-case endpoint) imports klippy
+    # lazily, and klippy's import installs a SIGINT handler — which the stdlib
+    # rejects off the main thread. Warm the import here so the threaded request
+    # handler reuses the cached module instead of re-executing that install.
+    import klippy  # noqa: F401
 
     global STATE
     STATE = ReviewState(args.mode, results_dir=args.results)

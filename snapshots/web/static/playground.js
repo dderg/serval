@@ -6,6 +6,7 @@
 import { TrajectoryView, initWasm, setupSplitter } from "./trajectory-view.js";
 
 const STORAGE_KEY = "motionPlayground.state";
+const PRESETS_KEY = "motionPlayground.presets";
 const DEBOUNCE_MS = 250;
 
 const CONFIG_FIELDS = [
@@ -114,11 +115,10 @@ function requestPlan() {
     showError(e.message);
     return;
   }
-  const gcode = document.getElementById("gcode").value;
-  saveState(gcode);
+  saveState();
   seq += 1;
   setPlanning(true);
-  worker.postMessage({ seq, gcode, config });
+  worker.postMessage({ seq, gcode: document.getElementById("gcode").value, config });
 }
 
 function schedulePlan() {
@@ -157,14 +157,33 @@ function togglePin() {
 }
 
 // -- Persistence ---------------------------------------------------------------
-function saveState(gcode) {
+function captureState() {
   const config = {};
   for (const f of CONFIG_FIELDS) {
     config[f.id] = document.getElementById(`cfg-${f.id}`).value;
   }
   config.post_processor_config = document.getElementById("cfg-post_processor_config").value;
+  return { gcode: document.getElementById("gcode").value, config };
+}
+
+function applyState(state) {
+  document.getElementById("gcode").value = state.gcode || "";
+  // Always write every field: on reload the browser's form restoration
+  // repopulates typed inputs, which must lose to the incoming state — and to
+  // the HTML defaults after a reset or a case that omits an optional limit.
+  for (const f of CONFIG_FIELDS) {
+    const el = document.getElementById(`cfg-${f.id}`);
+    const value = state.config?.[f.id];
+    el.value = value != null ? value : f.required ? el.defaultValue : "";
+  }
+  const ppEl = document.getElementById("cfg-post_processor_config");
+  const savedPp = state.config?.post_processor_config;
+  ppEl.value = savedPp != null ? savedPp : ppEl.defaultValue;
+}
+
+function saveState() {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ gcode, config }));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(captureState()));
   } catch (e) { /* quota / private mode — persistence is best-effort */ }
 }
 
@@ -173,18 +192,103 @@ async function restoreState() {
   try {
     state = JSON.parse(localStorage.getItem(STORAGE_KEY));
   } catch (e) { /* corrupted — start fresh */ }
-  document.getElementById("gcode").value = state?.gcode || (await defaultGcode());
-  // Always write every field: on reload the browser's form restoration
-  // repopulates typed inputs, which must lose to the saved state — and to
-  // the HTML defaults after a reset.
-  for (const f of CONFIG_FIELDS) {
-    const el = document.getElementById(`cfg-${f.id}`);
-    const saved = state?.config?.[f.id];
-    el.value = saved != null ? saved : el.defaultValue;
+  applyState(state || { gcode: await defaultGcode() });
+}
+
+// -- Presets -------------------------------------------------------------------
+function loadPresets() {
+  try {
+    return JSON.parse(localStorage.getItem(PRESETS_KEY)) || {};
+  } catch (e) {
+    return {};
   }
-  const ppEl = document.getElementById("cfg-post_processor_config");
-  const savedPp = state?.config?.post_processor_config;
-  ppEl.value = savedPp != null ? savedPp : ppEl.defaultValue;
+}
+
+function storePresets(presets) {
+  try {
+    localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
+  } catch (e) { /* quota / private mode — persistence is best-effort */ }
+}
+
+function refreshPresetSelect(selected) {
+  const sel = document.getElementById("preset-select");
+  const presets = loadPresets();
+  sel.replaceChildren(new Option("Presets…", ""));
+  for (const name of Object.keys(presets).sort()) {
+    sel.add(new Option(name, name));
+  }
+  sel.value = selected && presets[selected] ? selected : "";
+  document.getElementById("preset-delete").disabled = sel.value === "";
+}
+
+function savePreset() {
+  const name = prompt("Preset name:");
+  if (name == null) return;
+  const trimmed = name.trim();
+  if (trimmed === "") return;
+  const presets = loadPresets();
+  presets[trimmed] = captureState();
+  storePresets(presets);
+  refreshPresetSelect(trimmed);
+}
+
+function deletePreset() {
+  const name = document.getElementById("preset-select").value;
+  if (name === "") return;
+  const presets = loadPresets();
+  delete presets[name];
+  storePresets(presets);
+  refreshPresetSelect("");
+}
+
+function onPresetSelected() {
+  const name = document.getElementById("preset-select").value;
+  document.getElementById("preset-delete").disabled = name === "";
+  if (name === "") return;
+  const preset = loadPresets()[name];
+  if (preset) {
+    applyState(preset);
+    requestPlan();
+  }
+}
+
+// -- Snapshot cases ------------------------------------------------------------
+async function initCases() {
+  const group = document.getElementById("case-group");
+  let cases;
+  try {
+    const resp = await fetch("/api/playground/cases");
+    if (!resp.ok) throw new Error(`cases: ${resp.status}`);
+    cases = await resp.json();
+  } catch (e) {
+    // Statically hosted (no server) — the control has nothing to load.
+    group.style.display = "none";
+    return;
+  }
+  const sel = document.getElementById("case-select");
+  for (const c of cases) {
+    sel.add(new Option(c.name, c.name));
+  }
+  sel.addEventListener("change", onCaseSelected);
+}
+
+async function onCaseSelected() {
+  const sel = document.getElementById("case-select");
+  const name = sel.value;
+  sel.value = "";
+  if (name === "") return;
+  const url =
+    "/api/playground/case/" +
+    name.split("/").map(encodeURIComponent).join("/");
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    showError(err.error || `failed to load case ${name}`);
+    return;
+  }
+  const payload = await resp.json();
+  applyState({ gcode: payload.gcode, config: payload.config });
+  requestPlan();
 }
 
 // -- Init ------------------------------------------------------------------------
@@ -207,6 +311,12 @@ async function main() {
     localStorage.clear();
     location.reload();
   });
+  refreshPresetSelect("");
+  document.getElementById("preset-select").addEventListener("change", onPresetSelected);
+  document.getElementById("preset-save").addEventListener("click", savePreset);
+  document.getElementById("preset-delete").addEventListener("click", deletePreset);
+  initCases();
+
   document.getElementById("pin").addEventListener("click", togglePin);
   document.getElementById("toggle-variant").addEventListener("click", () => view.toggleVariant());
   document.getElementById("reset-zoom").addEventListener("click", () => view.resetZoom());
