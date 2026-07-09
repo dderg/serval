@@ -40,7 +40,7 @@ fn abort_on_drip_stall(msg: String) {
 fn build_stream_config(cfg: &config::PlannerConfig) -> PyResult<motion_pipeline::StreamConfig> {
     let cart = cfg.cartesian;
     Ok(motion_pipeline::StreamConfig {
-        chain: cfg.chain,
+        corner: cfg.corner,
         integration_tol: STREAM_INTEGRATION_TOL,
         max_extrude_only_velocity_mm_s: cfg.max_extrude_only_velocity.unwrap_or(f64::INFINITY),
         max_extrude_only_accel_mm_s2: cfg.max_extrude_only_accel.unwrap_or(f64::INFINITY),
@@ -60,13 +60,13 @@ fn build_stream_config(cfg: &config::PlannerConfig) -> PyResult<motion_pipeline:
 impl PyMotionEngine {
     pub(super) fn resolve_mcu_topology(
         &self,
-        mcus: &[(u32, Vec<u8>, u8)],
+        mcus: &[(u32, Vec<u8>, u8, Vec<f64>)],
     ) -> PyResult<(HashMap<u32, Arc<McuSerialConn>>, Vec<McuAxisConfig>)> {
         let ec_conns: HashMap<u32, Arc<McuSerialConn>> = {
             let ethercat_handles: Vec<(u32, Arc<McuSerialConn>, String)> = {
                 let mcus_lock = self.mcus.lock_ok();
                 mcus.iter()
-                    .filter_map(|(handle, _, _)| {
+                    .filter_map(|(handle, _, _, _)| {
                         let c = mcus_lock.get(handle)?;
                         let socket = c.ethercat_socket.as_ref()?;
                         let conn = c.endpoint_conn.as_ref()?.clone();
@@ -106,7 +106,7 @@ impl PyMotionEngine {
         let caps_by_handle: std::collections::HashMap<u32, McuCaps> = {
             let mcus_lock = self.mcus.lock_ok();
             mcus.iter()
-                .map(|(handle, _, _)| {
+                .map(|(handle, _, _, _)| {
                     let conn = mcus_lock.get(handle).ok_or_else(|| {
                         PyRuntimeError::new_err(format!(
                             "init_planner: unknown mcu_handle {handle}"

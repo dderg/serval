@@ -56,9 +56,8 @@ fn pipeline_replay_is_seam_free() {
 
 const CRASH_VORON_CUBE: &str = include_str!("crash_voron_cube.gcode");
 
-fn bench_config_arc_fit() -> StreamConfig {
+fn bench_config() -> StreamConfig {
     let mut cfg = default_stream_config();
-    cfg.chain = ChainFitConfig::with_arc_fit(3);
     cfg.limits =
         VelocityLimits::try_new(500.0, 8000.0, 20.0, 100_000.0).expect("bench limits valid");
     cfg
@@ -66,7 +65,7 @@ fn bench_config_arc_fit() -> StreamConfig {
 
 #[test]
 fn arc_fit_voron_cube_perimeter_is_c0() {
-    let rep = run_schedule(CRASH_VORON_CUBE, bench_config_arc_fit());
+    let rep = run_schedule(CRASH_VORON_CUBE, bench_config());
     assert_eq!(
         rep.fatal(),
         0,
@@ -139,7 +138,7 @@ fn worst_track_seam(segs: &[ShapedSegment], axis: usize) -> f64 {
 /// runs dry. Every track on every axis must stay continuous through it.
 #[test]
 fn voron_cube_with_extruder_kernel_survives_pacer_drains() {
-    let config = bench_config_arc_fit();
+    let config = bench_config();
     let moves = parse_gcode_to_moves(CRASH_VORON_CUBE, config.limits);
     assert!(
         moves
@@ -192,7 +191,7 @@ fn voron_cube_with_extruder_kernel_survives_pacer_drains() {
 /// doubled (leader + follower) support windows.
 #[test]
 fn voron_cube_with_smooth_pa_on_extruder_survives_pacer_drains() {
-    let config = bench_config_arc_fit();
+    let config = bench_config();
     let moves = parse_gcode_to_moves(CRASH_VORON_CUBE, config.limits);
     let handle = setup_stages(
         config,
@@ -238,7 +237,7 @@ fn voron_cube_with_smooth_pa_on_extruder_survives_pacer_drains() {
 /// junction monitor and the MCU actually see.
 #[test]
 fn voron_cube_with_extruder_kernel_has_no_piece_seams() {
-    let config = bench_config_arc_fit();
+    let config = bench_config();
     let moves = parse_gcode_to_moves(CRASH_VORON_CUBE, config.limits);
     let rep = run_moves_with_chains(&moves, config, extruder_pa_smooth_chain_set(), Some(40));
     assert_eq!(

@@ -188,7 +188,6 @@ def run_case(case: Case) -> dict:
         cfg.max_accel,
         cfg.square_corner_velocity,
         cfg.max_jerk,
-        arc_fit=cfg.arc_fit,
         max_extrude_only_velocity=cfg.max_extrude_only_velocity,
         max_extrude_only_accel=cfg.max_extrude_only_accel,
         max_path_deviation=cfg.max_path_deviation,

@@ -270,7 +270,7 @@ fn test_limits() -> geometry::VelocityLimits {
 
 fn stream_config_from(cfg: &PlannerConfig) -> (motion_pipeline::StreamConfig, Vec<f64>) {
     let sc = motion_pipeline::StreamConfig {
-        chain: geometry::ChainFitConfig::default(),
+        corner: geometry::CornerFitConfig::default(),
         integration_tol: 1e-7,
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
@@ -498,7 +498,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
                 axis: 0,
             },
             pieces: pieces_to_enqueue,
-            fresh_stream: false,
+            epoch: motion_core::anchor::StreamEpoch::Continuation,
             lead_secs: 0.0,
             source_line: u32::MAX,
         })

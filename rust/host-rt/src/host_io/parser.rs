@@ -86,6 +86,7 @@ pub enum ParseError {
     UnknownEnumName(String),
     UnknownEnumValue { enum_name: String, value: String },
     MissingField(String),
+    ArgTypeMismatch { field: String, got: &'static str },
     OutOfRange { value: i64, range: &'static str },
     ShortFrame,
     Truncated,
@@ -506,6 +507,16 @@ pub fn parse_hex_buffer(s: &str) -> Result<Vec<u8>, ParseError> {
     Ok(out)
 }
 
+pub fn encode_field_num(out: &mut Vec<u8>, ty: FieldType, v: i64) -> Result<(), ParseError> {
+    range_check(ty, v)?;
+    let v_for_vlq = match ty {
+        FieldType::U32 => i64::from((v as u64 & 0xFFFF_FFFF) as u32),
+        FieldType::I32 => i64::from(v as i32),
+        _ => v,
+    };
+    encode_vlq(out, v_for_vlq)
+}
+
 pub fn encode_field_str<'a>(
     out: &mut Vec<u8>,
     wrapped: &WrappedField,
@@ -516,13 +527,7 @@ pub fn encode_field_str<'a>(
         WrappedField::Plain(ty) => match ty {
             FieldType::Byte | FieldType::U16 | FieldType::U32 | FieldType::I16 | FieldType::I32 => {
                 let v: i64 = value_str.parse().map_err(|_| ParseError::MalformedField)?;
-                range_check(*ty, v)?;
-                let v_for_vlq = match ty {
-                    FieldType::U32 => i64::from((v as u64 & 0xFFFF_FFFF) as u32),
-                    FieldType::I32 => i64::from(v as i32),
-                    _ => v,
-                };
-                encode_vlq(out, v_for_vlq)
+                encode_field_num(out, *ty, v)
             }
             FieldType::String => {
                 let bytes = value_str.as_bytes();
@@ -611,6 +616,80 @@ fn range_check(ty: FieldType, v: i64) -> Result<(), ParseError> {
     Ok(())
 }
 
+/// A caller-typed command argument. `encode_args` coerces each variant to
+/// the field's wire type with exactly the semantics of the text path
+/// (`encode`): same range checks, same 32-bit masking, same enum-by-name
+/// resolution. That equivalence is what lets `encode_args(name, args)` be
+/// verified byte-for-byte against `encode(render(name, args))`.
+#[derive(Debug, Clone)]
+pub enum ArgValue {
+    Int(i64),
+    Str(String),
+    Bytes(Vec<u8>),
+}
+
+impl ArgValue {
+    fn type_name(&self) -> &'static str {
+        match self {
+            ArgValue::Int(_) => "int",
+            ArgValue::Str(_) => "str",
+            ArgValue::Bytes(_) => "bytes",
+        }
+    }
+}
+
+fn encode_wrapped_field_arg(
+    out: &mut Vec<u8>,
+    field_name: &str,
+    wrapped: &WrappedField,
+    value: &ArgValue,
+    enums: &IndexMap<String, EnumTable>,
+) -> Result<(), ParseError> {
+    let mismatch = || ParseError::ArgTypeMismatch {
+        field: field_name.to_string(),
+        got: value.type_name(),
+    };
+    match wrapped {
+        WrappedField::Plain(ty) => match ty {
+            FieldType::Byte | FieldType::U16 | FieldType::U32 | FieldType::I16 | FieldType::I32 => {
+                match value {
+                    ArgValue::Int(v) => encode_field_num(out, *ty, *v),
+                    ArgValue::Str(s) => {
+                        let v: i64 = s.parse().map_err(|_| ParseError::MalformedField)?;
+                        encode_field_num(out, *ty, v)
+                    }
+                    ArgValue::Bytes(_) => Err(mismatch()),
+                }
+            }
+            FieldType::String => match value {
+                ArgValue::Str(s) => {
+                    encode_field_value(out, FieldType::String, &FieldValue::String(s))
+                }
+                ArgValue::Int(v) => {
+                    encode_field_value(out, FieldType::String, &FieldValue::String(&v.to_string()))
+                }
+                ArgValue::Bytes(_) => Err(mismatch()),
+            },
+            FieldType::Buffer | FieldType::ProgmemBuffer => match value {
+                ArgValue::Bytes(b) => encode_field_value(out, *ty, &FieldValue::Buffer(b)),
+                ArgValue::Str(s) => {
+                    let b = parse_hex_buffer(s)?;
+                    encode_field_value(out, *ty, &FieldValue::Buffer(&b))
+                }
+                ArgValue::Int(_) => Err(mismatch()),
+            },
+        },
+        WrappedField::Enumerated { .. } => {
+            let name = match value {
+                ArgValue::Str(s) => s.clone(),
+                ArgValue::Int(v) => v.to_string(),
+                ArgValue::Bytes(_) => return Err(mismatch()),
+            };
+            encode_field_str(out, wrapped, &name, enums)
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum FieldValue<'a> {
     U32(u32),
@@ -646,6 +725,31 @@ impl MsgProtoParser {
                 .get(field_name.as_str())
                 .ok_or_else(|| ParseError::MissingField(field_name.clone()))?;
             encode_field_str(&mut payload, wrapped, value_str, &self.enumerations)?;
+        }
+        Ok(payload)
+    }
+
+    /// Encode a command from caller-typed args, byte-identical to what
+    /// `encode` produces for the equivalent rendered text command.
+    pub fn encode_args(
+        &self,
+        name: &str,
+        args: &[(String, ArgValue)],
+    ) -> Result<Vec<u8>, ParseError> {
+        let spec = self
+            .by_command_name
+            .get(name)
+            .ok_or_else(|| ParseError::UnknownCommand(name.to_string()))?;
+        let provided: HashMap<&str, &ArgValue> =
+            args.iter().map(|(k, v)| (k.as_str(), v)).collect();
+
+        let mut payload = Vec::new();
+        encode_vlq(&mut payload, i64::from(spec.msgid))?;
+        for (field_name, wrapped) in &spec.fields {
+            let value = provided
+                .get(field_name.as_str())
+                .ok_or_else(|| ParseError::MissingField(field_name.clone()))?;
+            encode_wrapped_field_arg(&mut payload, field_name, wrapped, value, &self.enumerations)?;
         }
         Ok(payload)
     }

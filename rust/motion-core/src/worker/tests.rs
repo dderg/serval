@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use super::*;
 use geometry::segment::SourceRange;
-use geometry::{ChainFitConfig, MoveContext, VelocityLimits, line_move};
+use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
 use motion_pipeline::StreamConfig;
 use nurbs::eval::eval;
 use trajectory::ShapedSegment;
@@ -48,7 +48,7 @@ fn cfg() -> StreamConfig {
 
 fn cfg_cap(max_buffer_moves: usize) -> StreamConfig {
     StreamConfig {
-        chain: ChainFitConfig::default(),
+        corner: CornerFitConfig::default(),
         integration_tol: 1e-7,
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,

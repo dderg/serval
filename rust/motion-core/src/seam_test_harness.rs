@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 pub use geometry::Move;
 use geometry::path::lowering::PositionProfile;
-use geometry::{ChainFitConfig, VelocityLimits};
+use geometry::{CornerFitConfig, VelocityLimits};
 use runtime::piece_ring::PieceEntry;
 use trajectory::{AxisChainSet, ShapedSegment};
 
@@ -24,7 +24,7 @@ const EXTRUDER_AXIS: usize = 3;
 #[must_use]
 pub fn default_stream_config() -> StreamConfig {
     StreamConfig {
-        chain: ChainFitConfig::default(),
+        corner: CornerFitConfig::default(),
         integration_tol: 1e-4,
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
@@ -44,6 +44,7 @@ fn harness_mcu_configs() -> Vec<McuAxisConfig> {
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
         },
+        max_motor_velocity: vec![f64::INFINITY; 3],
     }]
 }
 
@@ -249,14 +250,18 @@ impl Ingestor {
     fn ingest(&mut self, segments: &[ShapedSegment], commit_index: usize) {
         for seg in segments {
             self.report.segments += 1;
-            let fresh = self.first_enqueue;
+            let epoch = if self.first_enqueue {
+                crate::anchor::StreamEpoch::Reposition
+            } else {
+                crate::anchor::StreamEpoch::Continuation
+            };
             self.first_enqueue = false;
             let msgs = enqueue_segment(
                 seg,
                 &self.mcu_configs,
                 &crate::enqueue::EnqueueCtx {
                     t0: 0.0,
-                    fresh_stream: fresh,
+                    epoch,
                     host_now: 0.0,
                     lead_secs: MAX_LEAD_SECS,
                     project: |_mcu, hs| (hs * HARNESS_MCU_FREQ_HZ) as u64,
@@ -264,13 +269,13 @@ impl Ingestor {
                 },
             );
             for msg in msgs {
-                if msg.fresh_stream {
+                if msg.epoch.position_redefined() {
                     self.prev_last.remove(&msg.key);
                 }
                 if let Some(seam) = self.tracker.observe_msg(
                     msg.key,
                     &msg.pieces,
-                    msg.fresh_stream,
+                    msg.epoch,
                     msg.source_line,
                     Some(HARNESS_MCU_FREQ_HZ),
                 ) {

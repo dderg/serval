@@ -2,8 +2,8 @@ use crate::frontend::Move;
 use crate::path::lowering::PositionProfile;
 use crate::path::{Line, Segment};
 
-use super::emit::{emit_blend, emit_move};
-use super::{FitError, JunctionBlend};
+use super::emit::{emit_blend, emit_consumption, emit_move};
+use super::{FacetConsumption, FitError, JunctionBlend};
 
 /// The two clothoid-half moves a blend contributes between `m_in` and `m_out`.
 pub fn blend_moves(
@@ -13,6 +13,19 @@ pub fn blend_moves(
 ) -> Result<Vec<Move>, FitError> {
     let mut out = Vec::with_capacity(2);
     emit_blend(&mut out, &blend.0, m_in, m_out)?;
+    Ok(out)
+}
+
+/// The G2 clothoid chain that replaces the consumed `mids` together with
+/// `m_in`'s trimmed tail and `m_out`'s trimmed head.
+pub fn consumption_moves(
+    consumption: &FacetConsumption,
+    m_in: &Move,
+    mids: &[&Move],
+    m_out: &Move,
+) -> Result<Vec<Move>, FitError> {
+    let mut out = Vec::new();
+    emit_consumption(&mut out, consumption, m_in, mids, m_out)?;
     Ok(out)
 }
 

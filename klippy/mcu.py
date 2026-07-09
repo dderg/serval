@@ -8,7 +8,7 @@ import math
 import os
 import zlib
 
-from . import chelper, clocksync, msgproto, pins, serialhdl
+from . import chelper, clocksync, engine_mcu, msgproto, pins, serialhdl
 from .extras.danger_options import get_danger_options
 from .mcu_commands import CommandQueryWrapper, CommandWrapper
 from .mcu_pins import (  # noqa: F401
@@ -29,6 +29,49 @@ MIN_SCHEDULE_TIME = 0.100
 # Maximum time all MCUs can internally schedule into the future.
 # Directly caused by the limitation of MAX_SCHEDULE_TICKS.
 MAX_NOMINAL_DURATION = 3.0
+
+# Wire-stable runtime fault codes; mirrors rust/runtime/src/error.rs FaultCode
+RUNTIME_FAULT_NAMES = {
+    -300: "StepQueueOverflow",
+    -301: "SpiQueueOverflow",
+    -302: "MathNonFinite",
+    -303: "PieceAdvanceUnderflow",
+    -304: "SampleRateMisconfigured",
+    -305: "PositionCountOverflow",
+    -306: "JogParametersInvalid",
+    -307: "StepRateExceedsMcuCeiling",
+    -308: "PieceStartInPast",
+    -309: "RingFull",
+    -310: "StepsPerSampleExceeded",
+    -311: "TickIntervalExceeded",
+    -312: "UnknownStepMode",
+    -313: "PhaseMotorUnmapped",
+    -314: "OverlayUnsupported",
+    -315: "BuzzAxisConflict",
+    -316: "BuzzInPhaseMode",
+}
+# Faults whose detail packs (axis << 16) | value
+RUNTIME_FAULT_AXIS_DETAIL = frozenset([-308, -310, -312, -313])
+
+
+def format_runtime_fault(fault_code, fault_detail, segment_id):
+    code = fault_code - 0x10000 if fault_code >= 0x8000 else fault_code
+    name = RUNTIME_FAULT_NAMES.get(code, "unknown fault")
+    axis = (fault_detail >> 16) & 0xFF
+    value = fault_detail & 0xFFFF
+    if code == -310:
+        at_least = "at least " if value == 0xFFFF else ""
+        info = (
+            "axis %d demanded %s%d steps in one sample, more than its "
+            "motor's per-sample step budget" % (axis, at_least, value)
+        )
+    elif code == -311:
+        info = "tick blocker pc=0x%08x" % (segment_id,)
+    elif code in RUNTIME_FAULT_AXIS_DETAIL:
+        info = "axis %d, detail %d" % (axis, value)
+    else:
+        info = "detail %d" % (fault_detail,)
+    return "%s (%d): %s" % (name, code, info)
 
 
 ######################################################################
@@ -61,12 +104,11 @@ class MCU:
         self._expect_native = declared_via_mcu_section
         if self._name.startswith("mcu "):
             self._name = self._name[4:]
-        self._motion_engine = printer.lookup_object("motion_engine", None)
-        self._engine_handle = None
+        self.engine_mcu = engine_mcu.EngineMcu(printer, self._name)
 
     def _init_serial_port(self, config):
         wp = "mcu '%s': " % (self._name)
-        self._serial = serialhdl.SerialReader(
+        self._serial = serialhdl.EngineCommandChannel(
             self._reactor, warn_prefix=wp, mcu=self
         )
         self._baud = 0
@@ -95,6 +137,7 @@ class MCU:
         self._is_shutdown = self._is_timeout = False
         self._shutdown_clock = 0
         self._shutdown_msg = ""
+        self._last_runtime_fault = None
 
     def _init_config_state(self):
         self._printer.lookup_object("pins").register_chip(self._name, self)
@@ -162,6 +205,15 @@ class MCU:
         self._mcu_tick_stddev = c * math.sqrt(max(0.0, diff))
         self._mcu_tick_awake = tick_sum / self._mcu_freq
 
+    def _handle_runtime_fault(self, params):
+        fault = format_runtime_fault(
+            params.get("fault_code", 0),
+            params.get("fault_detail", 0),
+            params.get("segment_id", 0),
+        )
+        self._last_runtime_fault = fault
+        logging.error("MCU '%s' runtime fault: %s", self._name, fault)
+
     def _handle_shutdown(self, params):
         if self._is_shutdown:
             return
@@ -169,7 +221,10 @@ class MCU:
         clock = params.get("clock")
         if clock is not None:
             self._shutdown_clock = self.clock32_to_clock64(clock)
-        self._shutdown_msg = msg = params["static_string_id"]
+        msg = params["static_string_id"]
+        if msg == "kalico runtime fault" and self._last_runtime_fault:
+            msg = "%s — %s" % (msg, self._last_runtime_fault)
+        self._shutdown_msg = msg
         if get_danger_options().log_shutdown_info:
             logging.info(
                 "MCU '%s' %s: %s\n%s\n%s\n%s",
@@ -332,13 +387,9 @@ class MCU:
                     "Sending MCU '%s' printer configuration...", self._name
                 )
                 for c in local_config_cmds:
-                    logging.info("[config-send] mcu=%s cmd=%s", self._name, c)
                     self._serial.send(c)
             else:
                 for c in self._restart_cmds:
-                    logging.info(
-                        "[config-send-restart] mcu=%s cmd=%s", self._name, c
-                    )
                     self._serial.send(c)
             # Transmit init messages
             for c in self._init_cmds:
@@ -373,6 +424,7 @@ class MCU:
         config_params = get_config_cmd.send()
         self._is_shutdown = False
         self._shutdown_msg = ""
+        self._last_runtime_fault = None
         return config_params
 
     def _send_get_config(self):
@@ -594,46 +646,32 @@ class MCU:
         self.register_response(self._handle_shutdown, "shutdown")
         self.register_response(self._handle_shutdown, "is_shutdown")
         self.register_response(self._handle_mcu_stats, "stats")
+        self.register_response(self._handle_runtime_fault, "runtime_fault")
 
     def _identify_setup_motion_engine(self):
         msgparser = self._serial.get_msgparser()
         raw_dict = msgparser.get_raw_data_dictionary()
-        if self._motion_engine is not None:
+        if self.engine_mcu.available():
             if raw_dict:
                 if isinstance(raw_dict, str):
                     raw_dict = raw_dict.encode("utf-8")
-                self._motion_engine.set_msgproto_dict(raw_dict)
-            if self._engine_handle is None:
-                self._engine_handle = self._motion_engine.claim_mcu(
-                    self._name,
-                    self._serialport or "",
-                    int(self._baud or 0),
-                )
-            engine = self._motion_engine
-            handle = self._engine_handle
+                self.engine_mcu.set_msgproto_dict(raw_dict)
+            self.engine_mcu.claim(self._serialport or "", int(self._baud or 0))
             if not self._mcu_freq:
                 raise error(
                     "MCU '%s': CLOCK_FREQ unknown at engine claim time"
                     % (self._name,)
                 )
-            self._motion_engine.set_nominal_clock_freq(
-                handle, int(self._mcu_freq)
-            )
+            self.engine_mcu.set_nominal_clock_freq(int(self._mcu_freq))
 
+            emcu = self.engine_mcu
             reactor = self._reactor
 
             def _engine_clock_est_cb(
-                freq, offset, last_clock, b=engine, h=handle, r=reactor
+                freq, offset, last_clock, e=emcu, r=reactor
             ):
-                host_now_raw = r.monotonic()
                 try:
-                    b.set_clock_est(
-                        h,
-                        float(freq),
-                        float(offset),
-                        int(last_clock),
-                        host_now_raw,
-                    )
+                    e.set_clock_est(freq, offset, last_clock, r.monotonic())
                 except Exception:
                     logging.exception("motion_engine: set_clock_est failed")
 
@@ -705,6 +743,9 @@ class MCU:
 
     def get_name(self):
         return self._name
+
+    def get_engine_handle(self):
+        return self.engine_mcu.handle()
 
     def get_non_critical_reconnect_event_name(self):
         return self._non_critical_reconnect_event_name
@@ -800,10 +841,8 @@ class MCU:
             )
             return
         try:
-            if self._motion_engine is not None:
-                self._motion_engine.engine_mark_expected_disconnect(
-                    self._engine_handle
-                )
+            if self.engine_mcu.available():
+                self.engine_mcu.mark_expected_disconnect()
         except Exception:
             logging.exception(
                 "MCU '%s' engine_mark_expected_disconnect failed"
@@ -832,20 +871,6 @@ class MCU:
         chelper.run_hub_ctrl(1)
 
     def _firmware_restart(self, force=False):
-        logging.info(
-            "[firmware-restart-trace] mcu=%s force=%s _is_mcu_engine=%s "
-            "non_critical_disconnected=%s _restart_method=%s "
-            "_reset_cmd_present=%s clocksync_active=%s",
-            self._name,
-            force,
-            self._is_mcu_engine,
-            self.non_critical_disconnected,
-            self._restart_method,
-            self._reset_cmd is not None,
-            self._clocksync.is_active()
-            if self._clocksync is not None
-            else "no-clocksync",
-        )
         if (
             self._is_mcu_engine and not force
         ) or self.non_critical_disconnected:

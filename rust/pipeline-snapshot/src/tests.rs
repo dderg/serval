@@ -17,7 +17,7 @@ fn default_limits() -> geometry::VelocityLimits {
 
 fn default_config(limits: geometry::VelocityLimits) -> StreamConfig {
     StreamConfig {
-        chain: geometry::ChainFitConfig::default(),
+        corner: geometry::CornerFitConfig::default(),
         integration_tol: VELOCITY_INTEGRATION_TOL,
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
@@ -259,7 +259,6 @@ fn snapshot_serializes_to_the_baseline_schema() {
             max_accel: 3000.0,
             square_corner_velocity: 5.0,
             max_jerk: 100_000.0,
-            arc_fit: None,
             max_extrude_only_velocity: None,
             max_extrude_only_accel: None,
             max_path_deviation: None,
@@ -300,7 +299,6 @@ fn default_axis_snapshot_params() -> SnapshotParams {
         max_accel: 3000.0,
         square_corner_velocity: 5.0,
         max_jerk: 100_000.0,
-        arc_fit: None,
         max_extrude_only_velocity: None,
         max_extrude_only_accel: None,
         max_path_deviation: None,

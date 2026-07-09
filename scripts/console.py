@@ -44,7 +44,7 @@ class KeyboardReader:
         self.baud = baud
         self.canbus_iface = canbus_iface
         self.canbus_nodeid = canbus_nodeid
-        self.ser = serialhdl.SerialReader(reactor)
+        self.ser = serialhdl.EngineCommandChannel(reactor)
         self.reactor = reactor
         self.start_time = reactor.monotonic()
         self.clocksync = clocksync.ClockSync(self.reactor)

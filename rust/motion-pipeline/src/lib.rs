@@ -41,9 +41,9 @@ pub fn setup_stages(
     let (lowered_tx, lowered_rx) = bounded::<LoweredItem>(64);
     let (shaped_tx, shaped_rx) = bounded::<ShapedItem>(64);
 
-    let mut chain = config.chain;
-    chain.corner.ramp_accel_budget_mm_s2 = config.max_extrude_only_accel_mm_s2;
-    let fit_stage = FitStage::new(chain);
+    let mut corner = config.corner;
+    corner.ramp_accel_budget_mm_s2 = config.max_extrude_only_accel_mm_s2;
+    let fit_stage = FitStage::new(corner);
     spawn_stage("kalico-fit", move || fit_stage.run(raw_rx, fitted_tx));
 
     let planner = Planner::new(config);

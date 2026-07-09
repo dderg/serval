@@ -4,7 +4,10 @@ from klippy.motion_kinematics import _LinearKinematics
 
 class FakeMcu:
     def __init__(self, handle):
-        self._engine_handle = handle
+        self._handle = handle
+
+    def get_engine_handle(self):
+        return self._handle
 
 
 class FakeStepper:
@@ -17,6 +20,15 @@ class FakeStepper:
 
     def get_mcu(self):
         return self._mcu
+
+    def get_pulse_duration(self):
+        return 0.000002, False
+
+    def get_step_dist(self):
+        return 0.0125
+
+
+FAKE_STEPPER_VELOCITY_CEILING = 0.5 / (0.000001 + 0.000002) * 0.0125
 
 
 class FakeRail:
@@ -84,7 +96,9 @@ def test_one_mcu_corexy_topology():
     motion = make_motion("corexy", SPATIAL_AXES, follower=("e", "extruder", 11))
     a2h = motion._build_axis_to_handle()
     assert a2h == {0: 11, 1: 11, 2: 11, 3: 11}
-    assert motion._derive_mcu_topology(a2h) == [(11, [0, 1, 2, 3], 0)]
+    assert motion._derive_mcu_topology(a2h) == [
+        (11, [0, 1, 2, 3], 0, [FAKE_STEPPER_VELOCITY_CEILING] * 4)
+    ]
 
 
 def test_two_mcu_corexy_topology():
@@ -93,8 +107,8 @@ def test_two_mcu_corexy_topology():
     a2h = motion._build_axis_to_handle()
     assert a2h == {0: 100, 1: 100, 2: 200, 3: 200}
     assert motion._derive_mcu_topology(a2h) == [
-        (100, [0, 1], 0),
-        (200, [2, 3], 1),
+        (100, [0, 1], 0, [FAKE_STEPPER_VELOCITY_CEILING] * 2),
+        (200, [2, 3], 1, [FAKE_STEPPER_VELOCITY_CEILING] * 2),
     ]
 
 
@@ -103,7 +117,9 @@ def test_cartesian_topology_tag_is_cartesian():
         "cartesian", SPATIAL_AXES, follower=("e", "extruder", 11)
     )
     a2h = motion._build_axis_to_handle()
-    assert motion._derive_mcu_topology(a2h) == [(11, [0, 1, 2, 3], 1)]
+    assert motion._derive_mcu_topology(a2h) == [
+        (11, [0, 1, 2, 3], 1, [FAKE_STEPPER_VELOCITY_CEILING] * 4)
+    ]
 
 
 def test_follower_slot_sourced_from_force_move_extruder():
@@ -172,7 +188,6 @@ class CaptureEngine:
         topology,
         kin_axes,
         cartesian_limits,
-        arc_fit=None,
         max_extrude_only_velocity=None,
         max_extrude_only_accel=None,
         fit_tolerance_mm=None,
@@ -182,7 +197,6 @@ class CaptureEngine:
             "topology": topology,
             "kinematics_axes": kin_axes,
             "cartesian_limits": cartesian_limits,
-            "arc_fit": arc_fit,
             "max_extrude_only_velocity": max_extrude_only_velocity,
             "max_extrude_only_accel": max_extrude_only_accel,
             "fit_tolerance_mm": fit_tolerance_mm,
@@ -200,7 +214,6 @@ def test_init_planner_passes_claimed_axes():
     motion.max_z_velocity = 15.0
     motion.max_z_accel = 100.0
     motion._square_corner_velocity = 8.0
-    motion.arc_fit = None
     motion.max_path_deviation = 0.02
     motion.max_accel_deviation = 500.0
     motion._planner_ready = False
@@ -220,7 +233,8 @@ def test_init_planner_passes_claimed_axes():
 
     motion._init_planner()
     assert engine.init_planner_args["kinematics_axes"] == ["x", "y", "z"]
-    assert engine.init_planner_args["topology"] == [(11, [0, 1, 2, 3], 0)]
+    assert engine.init_planner_args["topology"] == [
+        (11, [0, 1, 2, 3], 0, [FAKE_STEPPER_VELOCITY_CEILING] * 4)
+    ]
     cartesian_limits = engine.init_planner_args["cartesian_limits"]
     assert cartesian_limits == (300.0, 3000.0, 6000.0, 15.0, 100.0, 8.0)
-    assert engine.init_planner_args["arc_fit"] is None

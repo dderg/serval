@@ -257,5 +257,5 @@ class MotionEngineWrapper:
         if print_time is not None:
             clock = mcu.print_time_to_clock(print_time)
         return self._engine.motion_state_at_clock(
-            mcu._engine_handle, int(clock), self._reactor.monotonic()
+            mcu.get_engine_handle(), int(clock), self._reactor.monotonic()
         )

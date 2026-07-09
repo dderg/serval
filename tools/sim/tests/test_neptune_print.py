@@ -1,4 +1,4 @@
-"""Neptune-bench print profile on real firmware: arc_fit + extruder follower
+"""Neptune-bench print profile on real firmware: an extruder follower
 with the bench's pressure-advance/smoothing chain, replaying the first layers
 of the Voron cube slice that aborted the bench pump (pump_piece_in_past)."""
 

@@ -44,8 +44,6 @@ pub enum SnapshotError {
     TooFewWaypoints,
     #[error("{0}")]
     InvalidLimits(String),
-    #[error("[arc_fit] min_run_facets must be at least 3")]
-    ArcFitTooFewFacets,
     #[error("move {index}: {detail}")]
     InvalidMove { index: usize, detail: String },
     #[error("no spatial moves after filtering zero-displacement pairs")]
@@ -60,7 +58,6 @@ pub struct SnapshotParams {
     pub max_accel: f64,
     pub square_corner_velocity: f64,
     pub max_jerk: f64,
-    pub arc_fit: Option<u32>,
     pub max_extrude_only_velocity: Option<f64>,
     pub max_extrude_only_accel: Option<f64>,
     pub max_path_deviation: Option<f64>,
@@ -134,13 +131,12 @@ pub fn pipeline_snapshot(
         params.max_jerk,
     )
     .map_err(|e| SnapshotError::InvalidLimits(e.to_string()))?;
-    let chain_cfg = arc_fit_config(params.arc_fit)?;
 
     let moves = build_moves(waypoints, limits)?;
     let raw_points = extract_raw_path(&moves);
 
     let config = StreamConfig {
-        chain: chain_cfg,
+        corner: geometry::CornerFitConfig::default(),
         integration_tol: VELOCITY_INTEGRATION_TOL,
         max_extrude_only_velocity_mm_s: params.max_extrude_only_velocity.unwrap_or(f64::INFINITY),
         max_extrude_only_accel_mm_s2: params.max_extrude_only_accel.unwrap_or(f64::INFINITY),
@@ -204,16 +200,6 @@ fn sample_segment(spatial: &geometry::path::Segment) -> FittedSegment {
             }
         }
     }
-}
-
-fn arc_fit_config(arc_fit: Option<u32>) -> Result<geometry::ChainFitConfig, SnapshotError> {
-    let Some(min_run_facets) = arc_fit else {
-        return Ok(geometry::ChainFitConfig::default());
-    };
-    if min_run_facets < 3 {
-        return Err(SnapshotError::ArcFitTooFewFacets);
-    }
-    Ok(geometry::ChainFitConfig::with_arc_fit(min_run_facets))
 }
 
 pub fn build_moves(
@@ -364,7 +350,7 @@ pub fn run_pipeline(
     drop(raw_tx);
 
     let (fitted_tx, fitted_rx) = unbounded();
-    FitStage::new(config.chain).run(raw_rx, fitted_tx);
+    FitStage::new(config.corner).run(raw_rx, fitted_tx);
     let fitted: Vec<geometry::Move> = fitted_rx
         .into_iter()
         .filter_map(|item| match item {

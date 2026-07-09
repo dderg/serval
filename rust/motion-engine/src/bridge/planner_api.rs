@@ -96,11 +96,17 @@ struct McuTopology {
     mcu_id: u32,
     axes: Vec<u8>,
     kinematics: u8,
+    max_motor_velocity: Vec<f64>,
 }
 
 impl McuTopology {
-    fn into_tuple(self) -> (u32, Vec<u8>, u8) {
-        (self.mcu_id, self.axes, self.kinematics)
+    fn into_tuple(self) -> (u32, Vec<u8>, u8, Vec<f64>) {
+        (
+            self.mcu_id,
+            self.axes,
+            self.kinematics,
+            self.max_motor_velocity,
+        )
     }
 }
 
@@ -195,7 +201,6 @@ fn validate_extrude_and_fit_params(
 }
 
 struct PlannerTuning {
-    arc_fit: Option<u32>,
     max_extrude_only_velocity: Option<f64>,
     max_extrude_only_accel: Option<f64>,
     fit_tolerance_mm: Option<f64>,
@@ -222,18 +227,6 @@ fn apply_planner_config(
     if let Some(v) = tuning.fit_tolerance_accel_mm_s2 {
         cfg.fit_tolerance_accel_mm_s2 = v;
     }
-    cfg.chain = match tuning.arc_fit {
-        Some(min_run_facets) => {
-            if min_run_facets < 3 {
-                return Err(PyValueError::new_err(
-                    "[arc_fit] min_run_facets must be at least 3",
-                ));
-            }
-            geometry::ChainFitConfig::with_arc_fit(min_run_facets)
-        }
-        None => geometry::ChainFitConfig::default(),
-    };
-
     Ok(cfg)
 }
 
@@ -319,7 +312,6 @@ impl PyMotionEngine {
         mcus,
         kinematics_axes,
         cartesian_limits,
-        arc_fit = None,
         max_extrude_only_velocity = None,
         max_extrude_only_accel = None,
         fit_tolerance_mm = None,
@@ -334,7 +326,6 @@ impl PyMotionEngine {
         mcus: Vec<McuTopology>,
         kinematics_axes: Vec<String>,
         cartesian_limits: CartesianLimitsArg,
-        arc_fit: Option<u32>,
         max_extrude_only_velocity: Option<f64>,
         max_extrude_only_accel: Option<f64>,
         fit_tolerance_mm: Option<f64>,
@@ -351,7 +342,6 @@ impl PyMotionEngine {
             &kinematics_axes,
             cartesian_limits,
             &PlannerTuning {
-                arc_fit,
                 max_extrude_only_velocity,
                 max_extrude_only_accel,
                 fit_tolerance_mm,
@@ -360,7 +350,8 @@ impl PyMotionEngine {
         )?;
         *self.planner_config.lock_ok() = cfg.clone();
 
-        let mcus: Vec<(u32, Vec<u8>, u8)> = mcus.into_iter().map(McuTopology::into_tuple).collect();
+        let mcus: Vec<(u32, Vec<u8>, u8, Vec<f64>)> =
+            mcus.into_iter().map(McuTopology::into_tuple).collect();
         let (ec_conns, mcu_configs) = self.resolve_mcu_topology(&mcus)?;
 
         let (ethercat_mcu_ids, host_ios, ring_depth_table) =

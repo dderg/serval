@@ -21,6 +21,23 @@ pub struct McuAxisConfig {
     pub axes: Vec<usize>,
     pub kinematics: u8,
     pub caps: McuCaps,
+    /// Motor-frame velocity ceiling (mm/s) per entry of `axes`: the fastest
+    /// this axis's MCU can physically emit steps. Tracks are validated
+    /// against it at enqueue so an overspeed track fails loud on the host
+    /// instead of latching -310 on the MCU.
+    pub max_motor_velocity: Vec<f64>,
+}
+
+impl McuAxisConfig {
+    #[must_use]
+    pub fn motor_velocity_ceiling(&self, axis_idx: usize) -> f64 {
+        self.axes
+            .iter()
+            .position(|&a| a == axis_idx)
+            .and_then(|i| self.max_motor_velocity.get(i))
+            .copied()
+            .unwrap_or(f64::INFINITY)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,11 +76,11 @@ pub enum KinematicsConfigError {
 }
 
 pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
-    mcus: &[(u32, Vec<u8>, u8)],
+    mcus: &[(u32, Vec<u8>, u8, Vec<f64>)],
     caps_by_handle: &HashMap<u32, McuCaps, S>,
 ) -> Result<Vec<McuAxisConfig>, KinematicsConfigError> {
     mcus.iter()
-        .map(|(handle, axes, tag)| {
+        .map(|(handle, axes, tag, max_motor_velocity)| {
             crate::kinematics::KinematicsModule::from_tag(*tag).map_err(|_| {
                 KinematicsConfigError::UnknownTag {
                     handle: *handle,
@@ -77,6 +94,13 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                     axes,
                 });
             }
+            assert!(
+                max_motor_velocity.len() == axes.len(),
+                "mcu handle {handle}: {} motor velocity ceilings for {} axes — the \
+                 topology tuples must align them",
+                max_motor_velocity.len(),
+                axes.len(),
+            );
             let caps = caps_by_handle
                 .get(handle)
                 .copied()
@@ -86,6 +110,7 @@ pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
                 axes,
                 kinematics: *tag,
                 caps,
+                max_motor_velocity: max_motor_velocity.clone(),
             })
         })
         .collect()
@@ -202,8 +227,9 @@ mod topology_tests {
                 7u32,
                 vec![AXIS_X as u8, AXIS_Y as u8, FOLLOWER_E as u8],
                 0u8,
+                vec![f64::INFINITY; 3],
             ),
-            (9u32, vec![AXIS_Z as u8], 1u8),
+            (9u32, vec![AXIS_Z as u8], 1u8, vec![f64::INFINITY]),
         ];
         let cfgs = build_mcu_configs(&mcus, &caps).unwrap();
         assert_eq!(cfgs.len(), 2);
@@ -224,7 +250,12 @@ mod topology_tests {
     #[test]
     fn build_mcu_configs_missing_caps_is_an_error() {
         let caps: HashMap<u32, McuCaps> = HashMap::new();
-        let mcus = vec![(7u32, vec![AXIS_X as u8, AXIS_Y as u8], 0u8)];
+        let mcus = vec![(
+            7u32,
+            vec![AXIS_X as u8, AXIS_Y as u8],
+            0u8,
+            vec![f64::INFINITY; 2],
+        )];
         let err = build_mcu_configs(&mcus, &caps).unwrap_err();
         assert!(matches!(
             err,
@@ -235,7 +266,7 @@ mod topology_tests {
     #[test]
     fn build_mcu_configs_unknown_tag_is_loud() {
         let caps: HashMap<u32, McuCaps> = HashMap::new();
-        let mcus = vec![(7u32, vec![AXIS_X as u8], 9u8)];
+        let mcus = vec![(7u32, vec![AXIS_X as u8], 9u8, vec![f64::INFINITY])];
         let err = build_mcu_configs(&mcus, &caps).unwrap_err();
         assert!(matches!(
             err,
@@ -246,7 +277,12 @@ mod topology_tests {
     #[test]
     fn build_mcu_configs_corexy_without_xy_is_loud() {
         let caps: HashMap<u32, McuCaps> = HashMap::new();
-        let mcus = vec![(7u32, vec![AXIS_X as u8, FOLLOWER_E as u8], 0u8)];
+        let mcus = vec![(
+            7u32,
+            vec![AXIS_X as u8, FOLLOWER_E as u8],
+            0u8,
+            vec![f64::INFINITY; 2],
+        )];
         let err = build_mcu_configs(&mcus, &caps).unwrap_err();
         assert!(matches!(
             err,
@@ -269,6 +305,7 @@ mod seed_tests {
             caps: McuCaps {
                 total_piece_memory: 62 * 1024,
             },
+            max_motor_velocity: Vec::new(),
         }
     }
     fn cartesian_z_cfg() -> McuAxisConfig {
@@ -279,6 +316,7 @@ mod seed_tests {
             caps: McuCaps {
                 total_piece_memory: 62 * 1024,
             },
+            max_motor_velocity: Vec::new(),
         }
     }
 
@@ -361,6 +399,7 @@ mod seed_tests {
             caps: McuCaps {
                 total_piece_memory: 32 * 1024,
             },
+            max_motor_velocity: Vec::new(),
         };
         let serial_cfg = McuAxisConfig {
             mcu_id: 2,
@@ -369,6 +408,7 @@ mod seed_tests {
             caps: McuCaps {
                 total_piece_memory: 62 * 1024,
             },
+            max_motor_velocity: Vec::new(),
         };
         let configs = vec![ec_cfg, serial_cfg];
         let ethercat_mcu_ids: HashSet<u32> = [1u32].into_iter().collect();
@@ -420,6 +460,7 @@ mod seed_tests {
             caps: McuCaps {
                 total_piece_memory: 32 * 1024,
             },
+            max_motor_velocity: Vec::new(),
         };
         let ec_cfg_2 = McuAxisConfig {
             mcu_id: 3,
@@ -428,6 +469,7 @@ mod seed_tests {
             caps: McuCaps {
                 total_piece_memory: 32 * 1024,
             },
+            max_motor_velocity: Vec::new(),
         };
         let configs = vec![ec_cfg_1, ec_cfg_2];
         let ethercat_mcu_ids: HashSet<u32> = [1u32, 3u32].into_iter().collect();

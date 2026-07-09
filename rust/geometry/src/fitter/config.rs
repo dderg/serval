@@ -33,32 +33,3 @@ impl Default for CornerFitConfig {
         }
     }
 }
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ArcFitConfig {
-    pub min_run_facets: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ChainFitConfig {
-    pub corner: CornerFitConfig,
-    pub arc_fit: Option<ArcFitConfig>,
-}
-
-impl Default for ChainFitConfig {
-    fn default() -> Self {
-        Self {
-            corner: CornerFitConfig::default(),
-            arc_fit: None,
-        }
-    }
-}
-
-impl ChainFitConfig {
-    pub fn with_arc_fit(min_run_facets: u32) -> Self {
-        Self {
-            arc_fit: Some(ArcFitConfig { min_run_facets }),
-            ..Self::default()
-        }
-    }
-}

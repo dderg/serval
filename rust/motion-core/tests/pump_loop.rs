@@ -78,7 +78,7 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
     data.send(EnqueueMsg {
         key: AxisKey { mcu_id: 1, axis: 0 },
         pieces: vec![p(0), p(1)],
-        fresh_stream: true,
+        epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
@@ -86,7 +86,7 @@ fn pump_stalls_on_ring_full_resumes_on_heartbeat() {
     data.send(EnqueueMsg {
         key: AxisKey { mcu_id: 1, axis: 0 },
         pieces: vec![p(2)],
-        fresh_stream: false,
+        epoch: motion_core::anchor::StreamEpoch::Continuation,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
@@ -175,7 +175,7 @@ fn continuous_junction_position_passes() {
     data.send(EnqueueMsg {
         key,
         pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
-        fresh_stream: true,
+        epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
@@ -183,7 +183,7 @@ fn continuous_junction_position_passes() {
     data.send(EnqueueMsg {
         key,
         pieces: vec![piece_at(2000, 0.002, 12.5, 15.0)],
-        fresh_stream: false,
+        epoch: motion_core::anchor::StreamEpoch::Continuation,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
@@ -207,7 +207,7 @@ fn junction_position_discontinuity_is_fatal() {
     data.send(EnqueueMsg {
         key,
         pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
-        fresh_stream: true,
+        epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
@@ -215,7 +215,7 @@ fn junction_position_discontinuity_is_fatal() {
     data.send(EnqueueMsg {
         key,
         pieces: vec![piece_at(2000, 0.002, 12.8, 15.0)],
-        fresh_stream: false,
+        epoch: motion_core::anchor::StreamEpoch::Continuation,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
@@ -225,6 +225,71 @@ fn junction_position_discontinuity_is_fatal() {
         handle.join().is_err(),
         "0.3mm junction position jump must panic the pump"
     );
+}
+
+#[test]
+fn underrun_reanchor_keeps_junction_continuity_guard_armed() {
+    let rec = Arc::new(Mutex::new(Vec::new()));
+    let (_ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let handle = run_pump_with_clock(control_rx, data_rx, rec.clone());
+
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    data.send(EnqueueMsg {
+        key,
+        pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
+        epoch: motion_core::anchor::StreamEpoch::Reposition,
+        lead_secs: motion_core::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
+    })
+    .unwrap();
+    data.send(EnqueueMsg {
+        key,
+        pieces: vec![piece_at(2000, 0.002, 12.8, 15.0)],
+        epoch: motion_core::anchor::StreamEpoch::Reanchor,
+        lead_secs: motion_core::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
+    })
+    .unwrap();
+
+    assert!(
+        handle.join().is_err(),
+        "an underrun re-anchor replays the same continuous track, so a 0.3mm \
+         position jump across it must panic the pump instead of reaching the \
+         MCU as a -310 step burst"
+    );
+}
+
+#[test]
+fn underrun_reanchor_with_continuous_position_passes() {
+    let rec = Arc::new(Mutex::new(Vec::new()));
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let handle = run_pump_with_clock(control_rx, data_rx, rec.clone());
+
+    let key = AxisKey { mcu_id: 1, axis: 0 };
+    data.send(EnqueueMsg {
+        key,
+        pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
+        epoch: motion_core::anchor::StreamEpoch::Reposition,
+        lead_secs: motion_core::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
+    })
+    .unwrap();
+    data.send(EnqueueMsg {
+        key,
+        pieces: vec![piece_at(2000, 0.002, 12.5, 15.0)],
+        epoch: motion_core::anchor::StreamEpoch::Reanchor,
+        lead_secs: motion_core::pump::MAX_LEAD_SECS,
+        source_line: u32::MAX,
+    })
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let sent_pieces: usize = rec.lock().unwrap().iter().map(|(_, n)| n).sum();
+    assert_eq!(sent_pieces, 2);
+
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
 }
 
 #[test]
@@ -238,7 +303,7 @@ fn fresh_stream_resets_junction_position_baseline() {
     data.send(EnqueueMsg {
         key,
         pieces: vec![piece_at(0, 0.0, 10.0, 12.5)],
-        fresh_stream: true,
+        epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
@@ -246,7 +311,7 @@ fn fresh_stream_resets_junction_position_baseline() {
     data.send(EnqueueMsg {
         key,
         pieces: vec![piece_at(2000, 0.002, 50.0, 55.0)],
-        fresh_stream: true,
+        epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
@@ -283,7 +348,11 @@ fn bundles_same_mcu_axes_into_one_transaction() {
         data.send(EnqueueMsg {
             key: AxisKey { mcu_id: 1, axis },
             pieces: vec![p(0)],
-            fresh_stream: axis == 0,
+            epoch: if axis == 0 {
+                motion_core::anchor::StreamEpoch::Reposition
+            } else {
+                motion_core::anchor::StreamEpoch::Continuation
+            },
             lead_secs: motion_core::pump::MAX_LEAD_SECS,
             source_line: u32::MAX,
         })
@@ -341,7 +410,11 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
         match data.try_send(EnqueueMsg {
             key,
             pieces: vec![p(i)],
-            fresh_stream: i == 0,
+            epoch: if i == 0 {
+                motion_core::anchor::StreamEpoch::Reposition
+            } else {
+                motion_core::anchor::StreamEpoch::Continuation
+            },
             lead_secs: motion_core::pump::MAX_LEAD_SECS,
             source_line: u32::MAX,
         }) {
@@ -377,7 +450,7 @@ fn intake_backpressures_at_backlog_cap_and_resumes_on_retirement() {
         data.try_send(EnqueueMsg {
             key,
             pieces: vec![p(9999)],
-            fresh_stream: false,
+            epoch: motion_core::anchor::StreamEpoch::Continuation,
             lead_secs: motion_core::pump::MAX_LEAD_SECS,
             source_line: u32::MAX,
         })
@@ -423,7 +496,11 @@ fn intake_feeds_a_second_axis_even_when_the_first_axis_ring_is_full() {
         data.send(EnqueueMsg {
             key: key_a,
             pieces: vec![p(i)],
-            fresh_stream: i == 0,
+            epoch: if i == 0 {
+                motion_core::anchor::StreamEpoch::Reposition
+            } else {
+                motion_core::anchor::StreamEpoch::Continuation
+            },
             lead_secs: motion_core::pump::MAX_LEAD_SECS,
             source_line: u32::MAX,
         })
@@ -433,7 +510,11 @@ fn intake_feeds_a_second_axis_even_when_the_first_axis_ring_is_full() {
         data.send(EnqueueMsg {
             key: key_b,
             pieces: vec![p(100 + i)],
-            fresh_stream: i == 0,
+            epoch: if i == 0 {
+                motion_core::anchor::StreamEpoch::Reposition
+            } else {
+                motion_core::anchor::StreamEpoch::Continuation
+            },
             lead_secs: motion_core::pump::MAX_LEAD_SECS,
             source_line: u32::MAX,
         })
@@ -498,7 +579,11 @@ fn drip_cohort_intake_bypasses_cap_and_feeds_all_participants() {
         data.send(EnqueueMsg {
             key: key_a,
             pieces: vec![piece_at(i, i as f64, 0.0, 0.0)],
-            fresh_stream: i == 0,
+            epoch: if i == 0 {
+                motion_core::anchor::StreamEpoch::Reposition
+            } else {
+                motion_core::anchor::StreamEpoch::Continuation
+            },
             lead_secs: motion_core::pump::DRIP_WINDOW_SECS,
             source_line: u32::MAX,
         })
@@ -508,7 +593,11 @@ fn drip_cohort_intake_bypasses_cap_and_feeds_all_participants() {
         data.send(EnqueueMsg {
             key: key_b,
             pieces: vec![piece_at(i, i as f64, 0.0, 0.0)],
-            fresh_stream: i == 0,
+            epoch: if i == 0 {
+                motion_core::anchor::StreamEpoch::Reposition
+            } else {
+                motion_core::anchor::StreamEpoch::Continuation
+            },
             lead_secs: motion_core::pump::DRIP_WINDOW_SECS,
             source_line: u32::MAX,
         })

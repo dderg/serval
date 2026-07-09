@@ -23,6 +23,14 @@ struct stepper {
     struct trsync_signal stop_signal;
 };
 
+// Minimum spacing between successive step edges enforced by
+// runtime_emit_step_pulses (~1 us), in CONFIG_CLOCK_FREQ ticks.
+#define STEP_MIN_EDGE_DWT ((CONFIG_CLOCK_FREQ) / 1000000u)
+
+// Mirrors runtime::sub_sample_timing::MAX_STEPS_PER_SAMPLE (the inline
+// timestamp capacity); runtime_set_axis_step_budget rejects anything larger.
+#define RUNTIME_MAX_STEPS_PER_SAMPLE 64
+
 volatile uint32_t config_stepper_oids_seen
     __attribute__((used, externally_visible));
 
@@ -240,6 +248,21 @@ command_kalico_configure_axis(uint32_t *args)
     runtime_motor_last_dir[axis_idx] = -1;
     (void)extrusion_bits;
 
+    // The per-sample step budget this motor can physically emit: half the
+    // sample window (the step ISR is shared across axes) divided by the cost
+    // of one step — the 1us edge floor, plus the pulse-width busy-wait when
+    // the driver only steps on rising edges (no dedge).
+    uint32_t sample_ticks = CONFIG_CLOCK_FREQ / CONFIG_MOTION_SAMPLE_RATE_HZ;
+    uint32_t per_step_ticks = STEP_MIN_EDGE_DWT
+        + (motor_both_edge ? 0 : motor_pulse_ticks);
+    uint32_t step_budget = (sample_ticks / 2) / per_step_ticks;
+    if (step_budget < 1)
+        shutdown("configure_axis step pulse wider than the sample budget");
+    if (step_budget > RUNTIME_MAX_STEPS_PER_SAMPLE)
+        step_budget = RUNTIME_MAX_STEPS_PER_SAMPLE;
+    if (runtime_set_axis_step_budget(runtime_handle, axis_idx, step_budget))
+        shutdown("configure_axis step budget rejected by runtime");
+
     extern void arm_per_axis_step_timer(uint8_t axis_idx);
     arm_per_axis_step_timer(axis_idx);
 
@@ -408,8 +431,6 @@ command_kalico_get_phase_state(uint32_t *args)
 }
 DECL_COMMAND(command_kalico_get_phase_state,
              "kalico_get_phase_state oid=%c");
-
-#define STEP_MIN_EDGE_DWT ((CONFIG_CLOCK_FREQ) / 1000000u)
 
 static uint32_t step_last_edge_dwt[RUNTIME_MOTOR_COUNT];
 

@@ -93,7 +93,6 @@ class Motion:
         self._read_limits(config)
         self._read_axes(config)
         self._read_post_processors(config)
-        self._read_arc_fit(config)
         self.print_stall = 0
         _deprecated_buffer_time_high = config.getfloat(
             "buffer_time_high", 2.0, above=0.0
@@ -441,17 +440,6 @@ class Motion:
         feedrate = move.move_d / move.min_move_t
         if abs(dz) > 1e-9 and abs(dx) < 1e-9 and abs(dy) < 1e-9:
             feedrate = min(feedrate, self.max_z_velocity)
-        logging.debug(
-            "[engine-trace] move: newpos=%s speed=%s dx=%.4f dy=%.4f "
-            "dz=%.4f de=%.4f feedrate=%.4f",
-            list(newpos),
-            speed,
-            dx,
-            dy,
-            dz,
-            de,
-            feedrate,
-        )
         self._fire_active_callbacks(move.axes_d)
         self._submit_paced(self.engine.submit_move, dx, dy, dz, de, feedrate)
         self._bump_pending_end_time(move.min_move_t)
@@ -757,9 +745,6 @@ class Motion:
     def _read_post_processors(self, config):
         return motion_setup.read_post_processors(self, config)
 
-    def _read_arc_fit(self, config):
-        return motion_setup.read_arc_fit(self, config)
-
     def _read_limits(self, config):
         return motion_setup.read_limits(self, config)
 
@@ -923,7 +908,7 @@ class Motion:
         oid = gcmd.get_int("OID", 0, minval=0)
         if self.mcu is None:
             raise gcmd.error("mcu not available")
-        handle = getattr(self.mcu, "_engine_handle", None)
+        handle = self.mcu.get_engine_handle()
         if handle is None:
             raise gcmd.error("engine handle not set")
         try:
@@ -945,7 +930,7 @@ class Motion:
         oid = gcmd.get_int("OID", 0, minval=0, maxval=3)
         if self.mcu is None:
             raise gcmd.error("mcu not available")
-        handle = getattr(self.mcu, "_engine_handle", None)
+        handle = self.mcu.get_engine_handle()
         if handle is None:
             raise gcmd.error("engine handle not set")
         try:
@@ -967,7 +952,7 @@ class Motion:
         oid = gcmd.get_int("OID", 0, minval=0, maxval=3)
         if self.mcu is None:
             raise gcmd.error("mcu not available")
-        handle = getattr(self.mcu, "_engine_handle", None)
+        handle = self.mcu.get_engine_handle()
         if handle is None:
             raise gcmd.error("engine handle not set")
         try:
@@ -1009,7 +994,7 @@ class Motion:
                 raise gcmd.error("set_gpio_input failed: %s" % e)
         if self.mcu is None:
             raise gcmd.error("no MCU available for sim endstop set_pin")
-        handle = self.mcu._engine_handle
+        handle = self.mcu.get_engine_handle()
         try:
             self.engine.engine_send(
                 handle,

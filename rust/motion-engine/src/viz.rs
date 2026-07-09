@@ -7,7 +7,7 @@ use crate::bridge::{AxisSection, PostProcessor};
 
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (waypoints, max_velocity, max_accel, square_corner_velocity, max_jerk, arc_fit = None, max_extrude_only_velocity = None, max_extrude_only_accel = None, max_path_deviation = None, max_accel_deviation = None, axes = Vec::new(), post_processors = Vec::new()))]
+#[pyo3(signature = (waypoints, max_velocity, max_accel, square_corner_velocity, max_jerk, max_extrude_only_velocity = None, max_extrude_only_accel = None, max_path_deviation = None, max_accel_deviation = None, axes = Vec::new(), post_processors = Vec::new()))]
 pub(crate) fn pipeline_snapshot(
     py: Python<'_>,
     waypoints: Vec<(f64, f64, f64, f64, f64)>,
@@ -15,7 +15,6 @@ pub(crate) fn pipeline_snapshot(
     max_accel: f64,
     square_corner_velocity: f64,
     max_jerk: f64,
-    arc_fit: Option<u32>,
     max_extrude_only_velocity: Option<f64>,
     max_extrude_only_accel: Option<f64>,
     max_path_deviation: Option<f64>,
@@ -30,7 +29,6 @@ pub(crate) fn pipeline_snapshot(
             max_accel,
             square_corner_velocity,
             max_jerk,
-            arc_fit,
             max_extrude_only_velocity,
             max_extrude_only_accel,
             max_path_deviation,

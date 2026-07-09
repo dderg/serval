@@ -131,7 +131,7 @@ fn stream_config(jerk: f64) -> StreamConfig {
     let limits = geometry::VelocityLimits::try_new(MAX_VELOCITY, MAX_ACCEL, SCV, jerk)
         .expect("valid limits");
     StreamConfig {
-        chain: geometry::ChainFitConfig::default(),
+        corner: geometry::CornerFitConfig::default(),
         integration_tol: PRODUCTION_INTEGRATION_TOL,
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
@@ -149,7 +149,7 @@ fn run_fitter(moves: &[geometry::Move], config: &StreamConfig) -> Vec<StreamInpu
     }
     drop(raw_tx);
     let (fitted_tx, fitted_rx) = unbounded();
-    FitStage::new(config.chain).run(raw_rx, fitted_tx);
+    FitStage::new(config.corner).run(raw_rx, fitted_tx);
     fitted_rx.into_iter().collect()
 }
 
