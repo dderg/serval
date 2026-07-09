@@ -592,6 +592,7 @@ fn rebase_after_probe_trip_round_trips_through_cartesian_inversion() {
     use runtime::segment::KinematicTag;
 
     let configs = vec![McuAxisConfig {
+        max_motor_velocity: Vec::new(),
         mcu_id: 1,
         axes: vec![0, 1, 2],
         kinematics: KinematicTag::CoreXy as u8,

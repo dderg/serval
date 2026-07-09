@@ -498,7 +498,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
                 axis: 0,
             },
             pieces: pieces_to_enqueue,
-            fresh_stream: false,
+            epoch: motion_core::anchor::StreamEpoch::Continuation,
             lead_secs: 0.0,
             source_line: u32::MAX,
         })

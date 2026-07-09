@@ -30,6 +30,49 @@ MIN_SCHEDULE_TIME = 0.100
 # Directly caused by the limitation of MAX_SCHEDULE_TICKS.
 MAX_NOMINAL_DURATION = 3.0
 
+# Wire-stable runtime fault codes; mirrors rust/runtime/src/error.rs FaultCode
+RUNTIME_FAULT_NAMES = {
+    -300: "StepQueueOverflow",
+    -301: "SpiQueueOverflow",
+    -302: "MathNonFinite",
+    -303: "PieceAdvanceUnderflow",
+    -304: "SampleRateMisconfigured",
+    -305: "PositionCountOverflow",
+    -306: "JogParametersInvalid",
+    -307: "StepRateExceedsMcuCeiling",
+    -308: "PieceStartInPast",
+    -309: "RingFull",
+    -310: "StepsPerSampleExceeded",
+    -311: "TickIntervalExceeded",
+    -312: "UnknownStepMode",
+    -313: "PhaseMotorUnmapped",
+    -314: "OverlayUnsupported",
+    -315: "BuzzAxisConflict",
+    -316: "BuzzInPhaseMode",
+}
+# Faults whose detail packs (axis << 16) | value
+RUNTIME_FAULT_AXIS_DETAIL = frozenset([-308, -310, -312, -313])
+
+
+def format_runtime_fault(fault_code, fault_detail, segment_id):
+    code = fault_code - 0x10000 if fault_code >= 0x8000 else fault_code
+    name = RUNTIME_FAULT_NAMES.get(code, "unknown fault")
+    axis = (fault_detail >> 16) & 0xFF
+    value = fault_detail & 0xFFFF
+    if code == -310:
+        at_least = "at least " if value == 0xFFFF else ""
+        info = (
+            "axis %d demanded %s%d steps in one sample, more than its "
+            "motor's per-sample step budget" % (axis, at_least, value)
+        )
+    elif code == -311:
+        info = "tick blocker pc=0x%08x" % (segment_id,)
+    elif code in RUNTIME_FAULT_AXIS_DETAIL:
+        info = "axis %d, detail %d" % (axis, value)
+    else:
+        info = "detail %d" % (fault_detail,)
+    return "%s (%d): %s" % (name, code, info)
+
 
 ######################################################################
 # Main MCU class
@@ -94,6 +137,7 @@ class MCU:
         self._is_shutdown = self._is_timeout = False
         self._shutdown_clock = 0
         self._shutdown_msg = ""
+        self._last_runtime_fault = None
 
     def _init_config_state(self):
         self._printer.lookup_object("pins").register_chip(self._name, self)
@@ -161,6 +205,15 @@ class MCU:
         self._mcu_tick_stddev = c * math.sqrt(max(0.0, diff))
         self._mcu_tick_awake = tick_sum / self._mcu_freq
 
+    def _handle_runtime_fault(self, params):
+        fault = format_runtime_fault(
+            params.get("fault_code", 0),
+            params.get("fault_detail", 0),
+            params.get("segment_id", 0),
+        )
+        self._last_runtime_fault = fault
+        logging.error("MCU '%s' runtime fault: %s", self._name, fault)
+
     def _handle_shutdown(self, params):
         if self._is_shutdown:
             return
@@ -168,7 +221,10 @@ class MCU:
         clock = params.get("clock")
         if clock is not None:
             self._shutdown_clock = self.clock32_to_clock64(clock)
-        self._shutdown_msg = msg = params["static_string_id"]
+        msg = params["static_string_id"]
+        if msg == "kalico runtime fault" and self._last_runtime_fault:
+            msg = "%s — %s" % (msg, self._last_runtime_fault)
+        self._shutdown_msg = msg
         if get_danger_options().log_shutdown_info:
             logging.info(
                 "MCU '%s' %s: %s\n%s\n%s\n%s",
@@ -368,6 +424,7 @@ class MCU:
         config_params = get_config_cmd.send()
         self._is_shutdown = False
         self._shutdown_msg = ""
+        self._last_runtime_fault = None
         return config_params
 
     def _send_get_config(self):
@@ -589,6 +646,7 @@ class MCU:
         self.register_response(self._handle_shutdown, "shutdown")
         self.register_response(self._handle_shutdown, "is_shutdown")
         self.register_response(self._handle_mcu_stats, "stats")
+        self.register_response(self._handle_runtime_fault, "runtime_fault")
 
     def _identify_setup_motion_engine(self):
         msgparser = self._serial.get_msgparser()

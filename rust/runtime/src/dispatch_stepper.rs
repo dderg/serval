@@ -268,12 +268,14 @@ fn dispatch_pulse(
             core::sync::atomic::Ordering::Relaxed,
         );
     }
+    let axis_step_cap = axis.max_steps_per_sample;
     // mcu-sim: a virtual-clock stall packs many periods of steps into one
     // sample. Emit up to the cap and carry the remainder into subsequent
     // samples (steps conserved) instead of faulting on sim jitter.
     #[cfg(feature = "mcu-sim")]
     let (target_step_count, signed_steps) = {
-        let cap = crate::sub_sample_timing::MAX_STEPS_PER_SAMPLE as i32;
+        #[allow(clippy::cast_possible_wrap)]
+        let cap = axis_step_cap as i32;
         if signed_steps.abs() > cap {
             let clamped_steps = signed_steps.signum() * cap;
             let clamped_target = prev_step_count.wrapping_add(clamped_steps);
@@ -284,7 +286,7 @@ fn dispatch_pulse(
         }
     };
     let abs_steps = signed_steps.unsigned_abs();
-    if abs_steps > crate::sub_sample_timing::MAX_STEPS_PER_SAMPLE as u32 {
+    if abs_steps > axis_step_cap {
         shared
             .isr_last_t_start_lo
             .store(abs_steps, core::sync::atomic::Ordering::Relaxed);

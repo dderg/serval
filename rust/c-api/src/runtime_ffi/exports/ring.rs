@@ -192,6 +192,22 @@ pub unsafe extern "C" fn runtime_set_axis_mode(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn runtime_set_axis_step_budget(
+    rt: *mut Runtime,
+    axis_idx: u8,
+    max_steps_per_sample: u32,
+) -> i32 {
+    let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
+    // SAFETY: foreground-only; §11.2 raw-pointer projection.
+    unsafe {
+        let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
+        (*isr_ptr)
+            .engine
+            .set_axis_step_budget(axis_idx, max_steps_per_sample)
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn runtime_set_stepper_offset(
     rt: *mut Runtime,
     stepper_idx: u8,

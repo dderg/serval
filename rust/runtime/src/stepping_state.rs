@@ -76,6 +76,10 @@ pub struct AxisState {
     pub p_prev: f32,
     pub v_prev: f32,
     pub overlay_last_p: f32,
+    /// Steps this axis may emit in one sample before -310 latches. Computed
+    /// from the motor's pulse timing (edge mode + pulse width) at configure
+    /// time; conservative default until then.
+    pub max_steps_per_sample: u32,
 }
 
 impl AxisState {
@@ -90,6 +94,7 @@ impl AxisState {
             p_prev: 0.0,
             v_prev: 0.0,
             overlay_last_p: 0.0,
+            max_steps_per_sample: crate::sub_sample_timing::DEFAULT_MAX_STEPS_PER_SAMPLE,
         }
     }
 

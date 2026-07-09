@@ -32,7 +32,7 @@ pub(crate) struct PumpSink {
 /// clock projection, and the drip-mode piece/lead limits.
 struct AnchorPoint {
     t0: f64,
-    fresh: bool,
+    epoch: crate::anchor::StreamEpoch,
     host_now: f64,
     max_piece_secs: Option<f64>,
     lead_secs: f64,
@@ -52,14 +52,14 @@ impl PumpSink {
 
     fn anchor(&self, t_start: f64, t_end: f64) -> AnchorPoint {
         let host_now = self.host_now();
-        let (t0, fresh) = self
+        let (t0, epoch) = self
             .anchor
             .lock_ok()
             .anchor_segment(t_start, t_end, host_now);
         let drip_active = self.active_drip_cohort.lock_ok().is_some();
         AnchorPoint {
             t0,
-            fresh,
+            epoch,
             host_now,
             max_piece_secs: drip_active.then_some(0.025_f64),
             lead_secs: if drip_active {
@@ -97,7 +97,7 @@ impl SegmentSink for PumpSink {
                 .advance_to(Instant::now() + Duration::from_secs_f64(runway_s));
         }
 
-        if at.fresh {
+        if at.epoch.is_fresh() {
             self.log_seg0_lead(
                 self.mcu_configs.iter().map(|cfg| cfg.mcu_id),
                 at.t0 + seg.t_start,
@@ -110,7 +110,7 @@ impl SegmentSink for PumpSink {
             &self.mcu_configs,
             &crate::enqueue::EnqueueCtx {
                 t0: at.t0,
-                fresh_stream: at.fresh,
+                epoch: at.epoch,
                 host_now: at.host_now,
                 lead_secs: at.lead_secs,
                 project: |mcu_id, host_secs| self.project(mcu_id, host_secs),
@@ -118,7 +118,7 @@ impl SegmentSink for PumpSink {
             },
         );
 
-        if at.fresh {
+        if at.epoch.is_fresh() {
             self.motion_history.lock_ok().drop_pieces_on_reanchor();
         }
         for m in msgs {
@@ -146,7 +146,7 @@ impl SegmentSink for PumpSink {
 
         let at = self.anchor(np.piece.u_start, np.piece.u_end);
 
-        if at.fresh {
+        if at.epoch.is_fresh() {
             self.log_seg0_lead(std::iter::once(mcu_id), at.t0 + np.piece.u_start, at.t0);
         }
 
@@ -170,7 +170,7 @@ impl SegmentSink for PumpSink {
                 .send(crate::pump::EnqueueMsg {
                     key,
                     pieces,
-                    fresh_stream: at.fresh,
+                    epoch: at.epoch,
                     lead_secs: at.lead_secs,
                     source_line: u32::MAX,
                 })

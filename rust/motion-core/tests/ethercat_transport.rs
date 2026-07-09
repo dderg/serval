@@ -102,7 +102,7 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
     data.send(EnqueueMsg {
         key: AxisKey { mcu_id: 1, axis: 0 },
         pieces: vec![piece(0)],
-        fresh_stream: false,
+        epoch: motion_core::anchor::StreamEpoch::Continuation,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
@@ -110,7 +110,7 @@ fn pump_routes_both_serial_and_ethercat_mcu_ids() {
     data.send(EnqueueMsg {
         key: AxisKey { mcu_id: 2, axis: 0 },
         pieces: vec![piece(1)],
-        fresh_stream: false,
+        epoch: motion_core::anchor::StreamEpoch::Continuation,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
@@ -181,7 +181,7 @@ fn heartbeat_retirement_drains_pump_ledger() {
             axis: 0,
         },
         pieces: vec![piece(0)],
-        fresh_stream: true,
+        epoch: motion_core::anchor::StreamEpoch::Reposition,
         lead_secs: motion_core::pump::MAX_LEAD_SECS,
         source_line: u32::MAX,
     })
