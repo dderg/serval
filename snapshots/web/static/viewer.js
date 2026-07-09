@@ -228,6 +228,13 @@ async function main() {
   });
 
   document.getElementById("toggle-variant").addEventListener("click", () => view.toggleVariant());
+  document.getElementById("open-playground").addEventListener("click", () => {
+    if (!currentCase) return;
+    window.open(
+      "/static/playground.html?case=" + encodeURIComponent(currentCase),
+      "_blank"
+    );
+  });
   document.getElementById("accept").addEventListener("click", acceptCurrent);
 
   document.addEventListener("keydown", (e) => {

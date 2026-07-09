@@ -1,12 +1,15 @@
 // Interactive playground: paste gcode, tweak the planner config, watch the
 // real pipeline re-plan live. Planning runs in a worker (playground-worker.js
 // wrapping the motion-playground WASM); rendering is the shared
-// TrajectoryView. "Pin baseline" freezes the current plan as the before
-// variant so config changes can be A/B-flipped exactly like snapshot review.
+// TrajectoryView. Two slots (A/B) each hold a full gcode+config state:
+// spacebar flips between them Lightroom-style, with the inactive slot's plan
+// drawn as the ghost for comparison.
 import { TrajectoryView, initWasm, setupSplitter } from "./trajectory-view.js";
 
 const STORAGE_KEY = "motionPlayground.state";
 const PRESETS_KEY = "motionPlayground.presets";
+const ACTIVE_PRESET_KEY = "motionPlayground.activePreset";
+const GCODE_COLLAPSED_KEY = "motionPlayground.gcodeCollapsed";
 const DEBOUNCE_MS = 250;
 
 const CONFIG_FIELDS = [
@@ -44,32 +47,71 @@ let worker = null;
 let seq = 0;
 let lastAppliedSeq = 0;
 let debounceTimer = null;
-let currentSnapshot = null; // last good plan, as raw JSON — what Pin freezes
-let pinnedSnapshot = null;
+let currentSnapshot = null; // last good plan of the active slot, as raw JSON
 let lastPlanMs = null;
 let firstPlan = true;
 
+// Slot = { state: {gcode, config}, snapshot: json|null }. B starts unset;
+// clicking its button copies the current state in.
+const slots = { A: { state: null, snapshot: null }, B: null };
+let activeSlot = "A";
+const seqSlot = new Map(); // plan seq -> slot it was requested for
+
+function otherSlot(name) {
+  return name === "A" ? "B" : "A";
+}
+
+function ghostSnapshot() {
+  const other = slots[otherSlot(activeSlot)];
+  return other ? other.snapshot : null;
+}
+
+function newWorker() {
+  return new Worker(new URL("./playground-worker.js", import.meta.url), { type: "module" });
+}
+
+// A standby worker is always kept warm (its wasm init starts at creation), so
+// cancelling a slow in-flight plan swaps workers instead of paying a cold
+// module load before the replacement plan can start.
+let standbyWorker = null;
+
 function spawnWorker() {
   worker?.terminate();
-  worker = new Worker(new URL("./playground-worker.js", import.meta.url), { type: "module" });
-  worker.onmessage = (e) => {
-    const { seq: s, snapshot, planMs, error } = e.data;
-    if (s < lastAppliedSeq) return;
-    lastAppliedSeq = s;
-    if (s === seq) setPlanning(false);
-    if (error) {
-      // A wasm panic poisons the instance; a fresh worker keeps later edits
-      // planning instead of failing on a dead module.
-      if (/unreachable|RuntimeError/i.test(error)) spawnWorker();
-      showError(error);
-      return;
-    }
-    clearError();
-    lastPlanMs = planMs;
-    currentSnapshot = snapshot;
-    view.setData(snapshot, pinnedSnapshot, { keepView: !firstPlan });
-    firstPlan = false;
-  };
+  worker = standbyWorker ?? newWorker();
+  standbyWorker = newWorker();
+  worker.onmessage = onWorkerMessage;
+}
+
+function onWorkerMessage(e) {
+  const { seq: s, snapshot, planMs, partial, error } = e.data;
+  if (partial) {
+    if (s !== seq || seqSlot.get(s) !== activeSlot) return;
+    setPathSpinner(false);
+    view.setData(snapshot, ghostSnapshot(), { keepView: !firstPlan });
+    return;
+  }
+  const forSlot = seqSlot.get(s);
+  for (const k of seqSlot.keys()) if (k <= s) seqSlot.delete(k);
+  if (s < lastAppliedSeq) return;
+  lastAppliedSeq = s;
+  if (s === seq) {
+    setPlanning(false);
+    setPathSpinner(false);
+  }
+  if (error) {
+    // A wasm panic poisons the instance; a fresh worker keeps later edits
+    // planning instead of failing on a dead module.
+    if (/unreachable|RuntimeError/i.test(error)) spawnWorker();
+    showError(error);
+    return;
+  }
+  clearError();
+  if (forSlot && slots[forSlot]) slots[forSlot].snapshot = snapshot;
+  if (forSlot !== activeSlot) return;
+  lastPlanMs = planMs;
+  currentSnapshot = snapshot;
+  view.setData(snapshot, ghostSnapshot(), { keepView: !firstPlan });
+  firstPlan = false;
 }
 
 // Dense polygon gcode can take seconds to plan (clothoid fitting is the
@@ -79,6 +121,13 @@ function setPlanning(on) {
   const el = document.getElementById("meta");
   el.classList.toggle("planning", on);
   if (on && !el.textContent) el.textContent = "planning…";
+}
+
+// The spinner covers only the gap between requesting a plan and the first
+// streamed partial — once pieces start arriving, watching the path grow is
+// the progress indicator.
+function setPathSpinner(on) {
+  document.getElementById("path-spinner").classList.toggle("on", on);
 }
 
 function showError(message) {
@@ -116,8 +165,13 @@ function requestPlan() {
     return;
   }
   saveState();
+  // The wasm plan blocks the worker thread, so a stale in-flight plan can only
+  // be cancelled by replacing the worker — the warm standby makes that cheap.
+  if (seq > lastAppliedSeq) spawnWorker();
   seq += 1;
+  seqSlot.set(seq, activeSlot);
   setPlanning(true);
+  setPathSpinner(true);
   worker.postMessage({ seq, gcode: document.getElementById("gcode").value, config });
 }
 
@@ -126,34 +180,69 @@ function schedulePlan() {
   debounceTimer = setTimeout(requestPlan, DEBOUNCE_MS);
 }
 
-// -- Pin / variant chrome ------------------------------------------------------
+// -- A/B slots -------------------------------------------------------------------
 function syncControls() {
-  const pinBtn = document.getElementById("pin");
-  pinBtn.classList.toggle("pinned", pinnedSnapshot != null);
-  pinBtn.textContent = pinnedSnapshot != null ? "Unpin" : "Pin baseline";
-
-  const btn = document.getElementById("toggle-variant");
-  const hasPin = view.hasBefore();
-  btn.disabled = !hasPin;
-  btn.classList.toggle("after", hasPin && view.variant === "after");
-  btn.classList.toggle("before", hasPin && view.variant === "before");
-  btn.textContent = !hasPin ? "Current" : view.variant === "before" ? "Pinned" : "Current";
-
+  for (const name of ["A", "B"]) {
+    const btn = document.getElementById(`slot-${name.toLowerCase()}`);
+    btn.classList.toggle("on", activeSlot === name);
+    btn.classList.toggle("empty", slots[name] == null);
+    btn.title = slots[name] == null
+      ? `Copy the current state into slot ${name} and switch to it`
+      : activeSlot === name
+        ? `Slot ${name} — active (shift-click the other slot to clear it)`
+        : `Switch to slot ${name} (space)`;
+  }
   updateMeta();
 }
 
 function updateMeta() {
   if (!view.data) return;
   const planTime = lastPlanMs != null ? `  planned in ${lastPlanMs.toFixed(0)}ms` : "";
+  const slotTag = slots.B != null ? `[${activeSlot}]  ` : "";
   document.getElementById("meta").textContent =
+    slotTag +
     `t=${view.data.traversal_time().toFixed(3)}s  ` +
     `[${view.curvatureSummary()}]  ` +
     `${view.data.point_count()} pts${planTime}`;
 }
 
-function togglePin() {
-  pinnedSnapshot = pinnedSnapshot == null ? currentSnapshot : null;
-  view.setBaseline(pinnedSnapshot);
+function switchSlot(target) {
+  if (target === activeSlot) return;
+  if (slots[target] == null) {
+    slots[target] = { state: captureState(), snapshot: currentSnapshot };
+  }
+  slots[activeSlot].state = captureState();
+  activeSlot = target;
+  applyState(slots[target].state);
+  syncControls();
+  // A slot's state only changes while it is active, so a snapshot cached at
+  // switch-away time is still the plan of exactly this state.
+  if (slots[target].snapshot) {
+    currentSnapshot = slots[target].snapshot;
+    lastPlanMs = null;
+    view.setData(currentSnapshot, ghostSnapshot(), { keepView: true });
+    saveState();
+  } else {
+    requestPlan();
+  }
+}
+
+function clearSlot(name) {
+  if (name === activeSlot || slots[name] == null) return;
+  slots[name] = null;
+  if (currentSnapshot) view.setData(currentSnapshot, null, { keepView: true });
+  syncControls();
+  saveState();
+}
+
+function onSlotClick(name, event) {
+  if (event.shiftKey) clearSlot(name);
+  else switchSlot(name);
+}
+
+function toggleSlots() {
+  if (slots.B == null) return;
+  switchSlot(otherSlot(activeSlot));
 }
 
 // -- Persistence ---------------------------------------------------------------
@@ -182,17 +271,32 @@ function applyState(state) {
 }
 
 function saveState() {
+  slots[activeSlot].state = captureState();
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(captureState()));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      active: activeSlot,
+      slots: { A: slots.A.state, B: slots.B ? slots.B.state : null },
+    }));
   } catch (e) { /* quota / private mode — persistence is best-effort */ }
+  syncPresetControls();
 }
 
 async function restoreState() {
-  let state = null;
+  let saved = null;
   try {
-    state = JSON.parse(localStorage.getItem(STORAGE_KEY));
+    saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
   } catch (e) { /* corrupted — start fresh */ }
-  applyState(state || { gcode: await defaultGcode() });
+  if (saved && saved.slots) {
+    slots.A = { state: saved.slots.A, snapshot: null };
+    slots.B = saved.slots.B ? { state: saved.slots.B, snapshot: null } : null;
+    activeSlot = saved.active === "B" && slots.B != null ? "B" : "A";
+    applyState(slots[activeSlot].state || { gcode: await defaultGcode() });
+  } else if (saved && (saved.gcode !== undefined || saved.config)) {
+    applyState(saved); // pre-slots shape — migrate into slot A
+  } else {
+    applyState({ gcode: await defaultGcode() });
+  }
+  slots[activeSlot].state = captureState();
 }
 
 // -- Presets -------------------------------------------------------------------
@@ -210,6 +314,18 @@ function storePresets(presets) {
   } catch (e) { /* quota / private mode — persistence is best-effort */ }
 }
 
+function activePresetName() {
+  return localStorage.getItem(ACTIVE_PRESET_KEY) || "";
+}
+
+function setActivePreset(name) {
+  try {
+    if (name) localStorage.setItem(ACTIVE_PRESET_KEY, name);
+    else localStorage.removeItem(ACTIVE_PRESET_KEY);
+  } catch (e) { /* best-effort */ }
+  refreshPresetSelect(name);
+}
+
 function refreshPresetSelect(selected) {
   const sel = document.getElementById("preset-select");
   const presets = loadPresets();
@@ -218,18 +334,47 @@ function refreshPresetSelect(selected) {
     sel.add(new Option(name, name));
   }
   sel.value = selected && presets[selected] ? selected : "";
-  document.getElementById("preset-delete").disabled = sel.value === "";
+  syncPresetControls();
+}
+
+// The Save button reflects where the current state stands against the active
+// preset: disabled when in sync, "Save ●" when the state has drifted.
+function syncPresetControls() {
+  const name = document.getElementById("preset-select").value;
+  const saveBtn = document.getElementById("preset-save");
+  document.getElementById("preset-delete").disabled = name === "";
+  if (name === "") {
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Save";
+    return;
+  }
+  const dirty =
+    JSON.stringify(loadPresets()[name]) !== JSON.stringify(captureState());
+  saveBtn.disabled = !dirty;
+  saveBtn.textContent = dirty ? "Save ●" : "Save";
 }
 
 function savePreset() {
-  const name = prompt("Preset name:");
+  const name = document.getElementById("preset-select").value;
+  if (name === "") {
+    saveAsPreset();
+    return;
+  }
+  const presets = loadPresets();
+  presets[name] = captureState();
+  storePresets(presets);
+  setActivePreset(name);
+}
+
+function saveAsPreset() {
+  const name = prompt("Preset name:", activePresetName());
   if (name == null) return;
   const trimmed = name.trim();
   if (trimmed === "") return;
   const presets = loadPresets();
   presets[trimmed] = captureState();
   storePresets(presets);
-  refreshPresetSelect(trimmed);
+  setActivePreset(trimmed);
 }
 
 function deletePreset() {
@@ -238,18 +383,25 @@ function deletePreset() {
   const presets = loadPresets();
   delete presets[name];
   storePresets(presets);
-  refreshPresetSelect("");
+  setActivePreset("");
 }
 
 function onPresetSelected() {
   const name = document.getElementById("preset-select").value;
-  document.getElementById("preset-delete").disabled = name === "";
+  setActivePreset(name);
   if (name === "") return;
   const preset = loadPresets()[name];
   if (preset) {
     applyState(preset);
+    invalidateActiveSlotPlan();
     requestPlan();
   }
+}
+
+// Loading a preset or case rewrites the active slot's state, so its cached
+// snapshot no longer matches until the re-plan lands.
+function invalidateActiveSlotPlan() {
+  slots[activeSlot].snapshot = null;
 }
 
 // -- Snapshot cases ------------------------------------------------------------
@@ -272,23 +424,47 @@ async function initCases() {
   sel.addEventListener("change", onCaseSelected);
 }
 
+async function loadCaseIntoEditor(name) {
+  const url =
+    "/api/playground/case/" +
+    name.split("/").map(encodeURIComponent).join("/");
+  let resp;
+  try {
+    resp = await fetch(url);
+  } catch (e) {
+    showError(`failed to load case ${name}: ${e.message}`);
+    return false;
+  }
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    showError(err.error || `failed to load case ${name}`);
+    return false;
+  }
+  const payload = await resp.json();
+  applyState({ gcode: payload.gcode, config: payload.config });
+  setActivePreset("");
+  invalidateActiveSlotPlan();
+  requestPlan();
+  return true;
+}
+
 async function onCaseSelected() {
   const sel = document.getElementById("case-select");
   const name = sel.value;
   sel.value = "";
   if (name === "") return;
-  const url =
-    "/api/playground/case/" +
-    name.split("/").map(encodeURIComponent).join("/");
-  const resp = await fetch(url);
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}));
-    showError(err.error || `failed to load case ${name}`);
-    return;
-  }
-  const payload = await resp.json();
-  applyState({ gcode: payload.gcode, config: payload.config });
-  requestPlan();
+  await loadCaseIntoEditor(name);
+}
+
+// -- Gcode pane collapse ---------------------------------------------------------
+function setGcodeCollapsed(on) {
+  document.querySelector(".app").classList.toggle("gcode-collapsed", on);
+  const btn = document.getElementById("gcode-collapse");
+  btn.textContent = on ? "⟩ gcode" : "⟨";
+  btn.title = on ? "Expand the gcode pane" : "Collapse the gcode pane";
+  try {
+    localStorage.setItem(GCODE_COLLAPSED_KEY, on ? "1" : "0");
+  } catch (e) { /* best-effort */ }
 }
 
 // -- Init ------------------------------------------------------------------------
@@ -311,14 +487,20 @@ async function main() {
     localStorage.clear();
     location.reload();
   });
-  refreshPresetSelect("");
+  refreshPresetSelect(activePresetName());
   document.getElementById("preset-select").addEventListener("change", onPresetSelected);
   document.getElementById("preset-save").addEventListener("click", savePreset);
+  document.getElementById("preset-saveas").addEventListener("click", saveAsPreset);
   document.getElementById("preset-delete").addEventListener("click", deletePreset);
   initCases();
 
-  document.getElementById("pin").addEventListener("click", togglePin);
-  document.getElementById("toggle-variant").addEventListener("click", () => view.toggleVariant());
+  setGcodeCollapsed(localStorage.getItem(GCODE_COLLAPSED_KEY) === "1");
+  document.getElementById("gcode-collapse").addEventListener("click", () => {
+    setGcodeCollapsed(!document.querySelector(".app").classList.contains("gcode-collapsed"));
+  });
+
+  document.getElementById("slot-a").addEventListener("click", (e) => onSlotClick("A", e));
+  document.getElementById("slot-b").addEventListener("click", (e) => onSlotClick("B", e));
   document.getElementById("reset-zoom").addEventListener("click", () => view.resetZoom());
   document.getElementById("toggle-peaks").addEventListener("click", (e) => {
     e.target.classList.toggle("active", !view.showPeaks);
@@ -329,10 +511,19 @@ async function main() {
     if (e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT") return;
     if (e.key === " " || e.key === "b" || e.key === "B") {
       e.preventDefault();
-      view.toggleVariant();
+      toggleSlots();
     }
   });
 
+  syncControls();
+
+  // ?case=<name> deep-links from the snapshot viewer's "Playground" button.
+  // The param is consumed once — after that the page follows saved state.
+  const caseParam = new URLSearchParams(window.location.search).get("case");
+  if (caseParam) {
+    history.replaceState(null, "", window.location.pathname);
+    if (await loadCaseIntoEditor(caseParam)) return;
+  }
   requestPlan();
 }
 
