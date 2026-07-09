@@ -125,6 +125,7 @@ fn run_case(limits: FuzzLimits, moves: &[MoveSpec]) -> (TrajectoryPieces, AuditR
         max_velocity: limits.max_velocity,
         max_accel: limits.max_accel,
         square_corner_velocity: limits.square_corner_velocity,
+        corner_deviation: None,
         max_jerk: limits.max_jerk,
         max_extrude_only_velocity: None,
         max_extrude_only_accel: None,

@@ -11,7 +11,10 @@ pub const PARTIAL_BATCH_SEGMENTS: usize = 64;
 struct PlaygroundConfig {
     max_velocity: f64,
     max_accel: f64,
-    square_corner_velocity: f64,
+    #[serde(default)]
+    square_corner_velocity: Option<f64>,
+    #[serde(default)]
+    corner_deviation: Option<f64>,
     max_jerk: f64,
     #[serde(default)]
     max_extrude_only_velocity: Option<f64>,
@@ -40,6 +43,17 @@ fn parse_inputs(
     } else {
         cfg.max_jerk
     };
+    if cfg.square_corner_velocity.is_some() && cfg.corner_deviation.is_some() {
+        return Err(
+            "square_corner_velocity and corner_deviation are both set — corner_deviation \
+             is the canonical corner budget and square_corner_velocity is its legacy \
+             alias; set exactly one"
+                .to_string(),
+        );
+    }
+    if cfg.square_corner_velocity.is_none() && cfg.corner_deviation.is_none() {
+        return Err("one of square_corner_velocity or corner_deviation is required".to_string());
+    }
     let waypoints = parse_gcode(gcode_text, cfg.max_velocity).map_err(|e| e.to_string())?;
     let (axis_decls, post_processor_decls) =
         config_text::parse(&cfg.post_processor_config).map_err(|e| e.to_string())?;
@@ -48,7 +62,8 @@ fn parse_inputs(
         SnapshotParams {
             max_velocity: cfg.max_velocity,
             max_accel: cfg.max_accel,
-            square_corner_velocity: cfg.square_corner_velocity,
+            square_corner_velocity: cfg.square_corner_velocity.unwrap_or(0.0),
+            corner_deviation: cfg.corner_deviation,
             max_jerk,
             max_extrude_only_velocity: cfg.max_extrude_only_velocity,
             max_extrude_only_accel: cfg.max_extrude_only_accel,

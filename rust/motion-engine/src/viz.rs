@@ -28,6 +28,7 @@ pub(crate) fn pipeline_snapshot(
             max_velocity,
             max_accel,
             square_corner_velocity,
+            corner_deviation: None,
             max_jerk,
             max_extrude_only_velocity,
             max_extrude_only_accel,
