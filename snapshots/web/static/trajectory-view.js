@@ -35,10 +35,11 @@ export const COLORS = {
   toolhead: "#26a69a",
 };
 
-// Per-panel toolhead lanes (the kernel output the physical toolhead follows,
-// as opposed to the emitted motor command) — present only when the snapshot
-// carries a motor-side stage that makes the two differ.
-const TOOLHEAD_KEYS = { vel: ["th_vx", "th_vy"], acc: ["th_ax", "th_ay"] };
+// Toolhead lanes (the kernel output the physical toolhead follows, as opposed
+// to the emitted motor command) mirror every motor XY series 1:1 via a th_
+// key prefix — present only when the snapshot carries a motor-side stage that
+// makes the two differ.
+const TOOLHEAD_DASH = [2, 3];
 
 // -- Panel configuration -----------------------------------------------------
 const PANELS = [
@@ -58,6 +59,19 @@ const IMPULSE_DESC = {
 };
 
 const HIDDEN_LABEL_MIGRATION = { "|X|": "X", "|Y|": "Y", "|Z|": "Z", "|E|": "E" };
+
+// Legend-group styling lives here (not in the host pages' HTML) so both the
+// viewer and the playground pick it up from the shared module.
+const LEGEND_GROUP_CSS =
+  ".panel-label .lg-divider{display:inline-block;width:1px;height:9px;" +
+  "background:#454b54;margin:0 5px 0 3px;vertical-align:-1px}" +
+  ".panel-label .lg-group{cursor:pointer;pointer-events:auto;padding:0 2px;color:#7c8591}" +
+  ".panel-label .lg-group:hover{text-decoration:underline}" +
+  ".panel-label .lg-group.off{opacity:0.35;text-decoration:line-through}";
+
+const legendStyle = document.createElement("style");
+legendStyle.textContent = LEGEND_GROUP_CSS;
+document.head.appendChild(legendStyle);
 
 export function initWasm() {
   return init();
@@ -144,7 +158,9 @@ const ARRAY_KEYS = [
   "jx", "jy", "jz", "je", "j_scalar",
   "kappa", "curvature_class",
   "a_tang", "a_cent", "j_tang", "j_cent",
-  "th_x", "th_y", "th_vx", "th_vy", "th_ax", "th_ay",
+  "th_x", "th_y", "th_vx", "th_vy", "th_ax", "th_ay", "th_jx", "th_jy",
+  "th_v_scalar", "th_a_scalar", "th_j_scalar",
+  "th_a_tang", "th_a_cent", "th_j_tang", "th_j_cent", "th_kappa",
   "jerk_impulse_t", "jerk_impulse_mag", "accel_impulse_t", "accel_impulse_mag",
 ];
 
@@ -360,6 +376,7 @@ class PanelRenderer {
   // instant, a piece-domain mismatch), drawn as markers rather than folded
   // into the stroke color.
   _strokeCurvaturePath(bctx, DATA, xMin, xMax, yMin, yMax) {
+    if (this.view.hiddenSeries.path.has("motor")) return;
     const kx = DATA.kin_x(), ky = DATA.kin_y();
     const cls = DATA.curvature_class();
     if (kx.length <= 1) return;
@@ -630,7 +647,7 @@ export class TrajectoryView {
     // a preferred view (e.g. XY-scalar-only) survives reloads and case
     // switches.
     this.hiddenSeriesKey = hiddenSeriesKey;
-    this.hiddenSeries = { path: new Set(), vel: new Set(), acc: new Set(), jrk: new Set() };
+    this.hiddenSeries = { path: new Set(), vel: new Set(), acc: new Set(), jrk: new Set(), kappa: new Set() };
     try {
       const saved = JSON.parse(localStorage.getItem(hiddenSeriesKey)) || {};
       for (const type of Object.keys(this.hiddenSeries)) {
@@ -688,11 +705,21 @@ export class TrajectoryView {
     for (const type of Object.keys(this.hiddenSeries)) {
       const el = document.querySelector(`#panel-${type} .panel-label`);
       el.addEventListener("click", (e) => {
-        const label = e.target.dataset && e.target.dataset.series;
-        if (!label) return;
         const set = this.hiddenSeries[type];
-        if (set.has(label)) set.delete(label);
-        else set.add(label);
+        if (e.target.classList.contains("lg-group")) {
+          const labels = [...el.querySelectorAll(".lg-group ~ .lg")].map(c => c.dataset.series);
+          const allOff = labels.every(l => set.has(l));
+          for (const label of labels) {
+            if (allOff) set.delete(label);
+            else set.add(label);
+          }
+        } else if (e.target.dataset && e.target.dataset.series) {
+          const label = e.target.dataset.series;
+          if (set.has(label)) set.delete(label);
+          else set.add(label);
+        } else {
+          return;
+        }
         this._saveHiddenSeries();
         this.lastBoundsKey = "";
         this.scheduleFull();
@@ -824,6 +851,8 @@ export class TrajectoryView {
   // Lanes for one derivative panel: X/Y always, Z/E only when the case moves
   // them, the tangent/normal projection of the XY vector (dashed), and the
   // |XY| magnitude last so it draws on top. E rides its own right-hand axis.
+  // When the snapshot carries a toolhead signal, every motor XY-derived lane
+  // gets a dotted toolhead twin (key/label prefixed th_/th, grouped "th").
   // Hidden state comes from the per-panel legend toggles.
   _panelSeries(type, xKey, yKey, zKey, eKey, tangKey, centKey, scalarKey) {
     const DATA = this.data;
@@ -831,20 +860,33 @@ export class TrajectoryView {
       { key: xKey, color: COLORS.vx, label: "X" },
       { key: yKey, color: COLORS.vy, label: "Y" },
     ];
-    const thKeys = TOOLHEAD_KEYS[type];
-    if (thKeys && DATA.has_toolhead()) {
-      series.push({ key: thKeys[0], color: COLORS.vx, dash: [2, 3], label: "thX" });
-      series.push({ key: thKeys[1], color: COLORS.vy, dash: [2, 3], label: "thY" });
-    }
     if (anyNonZero(DATA[zKey]())) series.push({ key: zKey, color: COLORS.vz, label: "Z" });
     if (anyNonZero(DATA[eKey]())) series.push({ key: eKey, color: COLORS.ve, label: "E", axis: "right" });
     if (tangKey) {
       series.push({ key: tangKey, color: COLORS.tang, dash: [5, 3], label: "∥" });
       series.push({ key: centKey, color: COLORS.cent, dash: [5, 3], label: "⊥", magnitude: true });
     }
-    series.push({ key: scalarKey, color: COLORS.scalar, label: "|XY|", scalar: true, magnitude: true });
+    const scalar = { key: scalarKey, color: COLORS.scalar, label: "|XY|", scalar: true, magnitude: true };
+    if (DATA.has_toolhead()) {
+      const mirrorable = series.filter(s => s.label !== "Z" && s.label !== "E").concat([scalar]);
+      for (const s of mirrorable) {
+        series.push({
+          ...s,
+          key: `th_${s.key}`,
+          label: `th${s.label}`,
+          dash: TOOLHEAD_DASH,
+          group: "th",
+          scalar: false,
+        });
+      }
+    }
+    series.push(scalar);
+    return this._attachSeriesState(type, series);
+  }
+
+  _attachSeriesState(type, series) {
     for (const s of series) {
-      s.arr = DATA[s.key]();
+      s.arr = this.data[s.key]();
       s.hidden = this.hiddenSeries[type].has(s.label);
     }
     return series;
@@ -852,11 +894,20 @@ export class TrajectoryView {
 
   _updateLegend(type, title, series) {
     const el = document.querySelector(`#panel-${type} .panel-label`);
-    const entries = series.map(s =>
+    const chip = s =>
       `<span class="lg${s.hidden ? " off" : ""}" data-series="${s.label}"` +
-      ` style="color:${s.color}">${s.label}</span>`
-    );
-    el.innerHTML = `${title}&ensp;${entries.join(" ")}`;
+      ` style="color:${s.color}">${s.label}</span>`;
+    const motor = series.filter(s => !s.group);
+    const th = series.filter(s => s.group === "th");
+    let html = `${title}&ensp;${motor.map(chip).join(" ")}`;
+    if (th.length > 0) {
+      const allOff = th.every(s => s.hidden);
+      html +=
+        `<span class="lg-divider"></span>` +
+        `<span class="lg-group${allOff ? " off" : ""}">th:</span> ` +
+        th.map(chip).join(" ");
+    }
+    el.innerHTML = html;
   }
 
   // -- Render all buffers (only when bounds change) ----------------------------
@@ -909,8 +960,11 @@ export class TrajectoryView {
     const velSeries = this._panelSeries("vel", "vx", "vy", "vz", "ve", null, null, "v_scalar");
     const accSeries = this._panelSeries("acc", "ax", "ay", "az", "ae", "a_tang", "a_cent", "a_scalar");
     const jrkSeries = this._panelSeries("jrk", "jx", "jy", "jz", "je", "j_tang", "j_cent", "j_scalar");
-    const kappaSeries = [{ key: "kappa", color: COLORS.kappa, label: "κ", scalar: true, hidden: false }];
-    kappaSeries[0].arr = this.data.kappa();
+    const kappaSeries = [{ key: "kappa", color: COLORS.kappa, label: "κ", scalar: true }];
+    if (this.data.has_toolhead()) {
+      kappaSeries.push({ key: "th_kappa", color: COLORS.kappa, dash: TOOLHEAD_DASH, label: "thκ", group: "th" });
+    }
+    this._attachSeriesState("kappa", kappaSeries);
     const vel = scaleSeries(velSeries);
     const acc = scaleSeries(accSeries);
     const jrk = scaleSeries(jrkSeries);
@@ -925,13 +979,18 @@ export class TrajectoryView {
     if (key !== this.lastBoundsKey) {
       this.lastBoundsKey = key;
 
-      const pathSeries = this.data.has_toolhead()
-        ? [{
-            label: "toolhead",
-            color: COLORS.toolhead,
-            hidden: this.hiddenSeries.path.has("toolhead"),
-          }]
-        : [];
+      const pathSeries = [{
+        label: "motor",
+        color: COLORS.zero,
+        hidden: this.hiddenSeries.path.has("motor"),
+      }];
+      if (this.data.has_toolhead()) {
+        pathSeries.push({
+          label: "toolhead",
+          color: COLORS.toolhead,
+          hidden: this.hiddenSeries.path.has("toolhead"),
+        });
+      }
       this._updateLegend("path", "Path", pathSeries);
       this._updateLegend("vel", "Velocity", velSeries);
       this._updateLegend("acc", "Acceleration", accSeries);
