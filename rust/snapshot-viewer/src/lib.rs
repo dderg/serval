@@ -11,7 +11,6 @@ mod tests;
 struct Snapshot {
     raw_x: Vec<f64>,
     raw_y: Vec<f64>,
-    fitted_segments: Vec<serde_json::Value>,
     traversal_time_s: f64,
     // The lowered trajectory the firmware executes: per-axis pieces
     // [t0, t1, c0, c1, …] of position vs time (cubic = 6 floats). Variable-length
@@ -44,13 +43,6 @@ struct Snapshot {
     kin_s: Option<Vec<f64>>,
     kin_heading_x: Option<Vec<f64>>,
     kin_heading_y: Option<Vec<f64>>,
-}
-
-#[derive(Clone, Debug)]
-enum SegmentType {
-    Line { x0: f64, y0: f64, x1: f64, y1: f64 },
-    Arc { points: Vec<[f64; 2]> },
-    Clothoid { points: Vec<[f64; 2]> },
 }
 
 // -- Numerical gradient (matches numpy.gradient) ----------------------------
@@ -748,57 +740,6 @@ fn time_series_from_position(snap: &Snapshot) -> TimeSeries {
     }
 }
 
-// -- Fitted segment parsing -------------------------------------------------
-
-fn parse_segments(raw: &[serde_json::Value]) -> Vec<SegmentType> {
-    let mut segments = Vec::new();
-    for val in raw {
-        let Some(typ) = val.get("type").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        match typ {
-            "line" => {
-                let x0 = val
-                    .get("x0")
-                    .and_then(serde_json::Value::as_f64)
-                    .unwrap_or(0.0);
-                let y0 = val
-                    .get("y0")
-                    .and_then(serde_json::Value::as_f64)
-                    .unwrap_or(0.0);
-                let x1 = val
-                    .get("x1")
-                    .and_then(serde_json::Value::as_f64)
-                    .unwrap_or(0.0);
-                let y1 = val
-                    .get("y1")
-                    .and_then(serde_json::Value::as_f64)
-                    .unwrap_or(0.0);
-                segments.push(SegmentType::Line { x0, y0, x1, y1 });
-            }
-            "arc" | "clothoid" => {
-                let xs = val.get("x").and_then(serde_json::Value::as_array);
-                let ys = val.get("y").and_then(serde_json::Value::as_array);
-                let points = match (xs, ys) {
-                    (Some(xs), Some(ys)) => xs
-                        .iter()
-                        .zip(ys.iter())
-                        .map(|(x, y)| [x.as_f64().unwrap_or(0.0), y.as_f64().unwrap_or(0.0)])
-                        .collect(),
-                    _ => vec![],
-                };
-                if typ == "arc" {
-                    segments.push(SegmentType::Arc { points });
-                } else {
-                    segments.push(SegmentType::Clothoid { points });
-                }
-            }
-            _ => {}
-        }
-    }
-    segments
-}
-
 // -- WASM export -------------------------------------------------------------
 
 #[wasm_bindgen]
@@ -807,7 +748,6 @@ pub struct TrajectoryData {
     raw_y: Vec<f64>,
     kin_x: Vec<f64>,
     kin_y: Vec<f64>,
-    segments: Vec<SegmentType>,
     kappa: Vec<f64>,
     curvature_class: Vec<f64>,
     t: Vec<f64>,
@@ -849,7 +789,6 @@ impl TrajectoryData {
             serde_json::from_str(json).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         let ts = build_time_series(&snap);
-        let segments = parse_segments(&snap.fitted_segments);
         let (kappa, classes) = match (&snap.traj_x_pieces, &snap.traj_y_pieces) {
             (Some(xp), Some(yp)) => curvature_series(&ts.t, xp, yp),
             _ => (vec![0.0; ts.t.len()], vec![CurvatureClass::Gap; ts.t.len()]),
@@ -879,7 +818,6 @@ impl TrajectoryData {
             raw_y: snap.raw_y,
             kin_x: ts.kin_x,
             kin_y: ts.kin_y,
-            segments,
             kappa,
             curvature_class,
             t: ts.t,
@@ -1038,32 +976,6 @@ impl TrajectoryData {
     }
     pub fn point_count(&self) -> usize {
         self.t.len()
-    }
-
-    // Segment access
-    pub fn segment_count(&self) -> usize {
-        self.segments.len()
-    }
-
-    pub fn segment_type(&self, i: usize) -> String {
-        match self.segments.get(i) {
-            Some(SegmentType::Line { .. }) => "line".to_string(),
-            Some(SegmentType::Arc { .. }) => "arc".to_string(),
-            Some(SegmentType::Clothoid { .. }) => "clothoid".to_string(),
-            None => "unknown".to_string(),
-        }
-    }
-
-    /// Returns flattened segment data: [x0,y0,x1,y1] for lines, [x0,y0,...,xN,yN] for arcs/clothoids
-    pub fn segment_data(&self, i: usize) -> Float64Array {
-        let flat: Vec<f64> = match self.segments.get(i) {
-            Some(SegmentType::Line { x0, y0, x1, y1 }) => vec![*x0, *y0, *x1, *y1],
-            Some(SegmentType::Arc { points }) | Some(SegmentType::Clothoid { points }) => {
-                points.iter().flat_map(|p| [p[0], p[1]]).collect()
-            }
-            None => vec![],
-        };
-        Float64Array::from(&flat[..])
     }
 
     // Signed curvature per sample, same grid as t()/vx()/etc. -- the

@@ -149,9 +149,6 @@ export function memoizeTrajectory(td) {
     const cached = td[k]();
     wrap[k] = () => cached;
   }
-  wrap.segment_count = () => td.segment_count();
-  wrap.segment_type = (i) => td.segment_type(i);
-  wrap.segment_data = (i) => td.segment_data(i);
   wrap.traversal_time = () => td.traversal_time();
   wrap.point_count = () => td.point_count();
   return wrap;
