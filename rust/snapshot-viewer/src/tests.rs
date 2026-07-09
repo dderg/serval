@@ -124,7 +124,7 @@ fn kappa_constant_on_circle_with_nonconstant_speed() {
     let r = 3.0_f64;
     let kappa_at = |t: f64| -> f64 {
         let theta = t * t;
-        let (s, c) = theta.sin_cos();
+        let (s, c) = libm::sincos(theta);
         let vx = -2.0 * r * t * s;
         let vy = 2.0 * r * t * c;
         let ax = -2.0 * r * s - 4.0 * r * t * t * c;
@@ -149,7 +149,7 @@ fn dkappa_ds_constant_on_clothoid() {
     let sigma = 0.25_f64;
     let dkappa_ds_at = |s: f64| -> f64 {
         let phi = 0.5 * sigma * s * s;
-        let (sp, cp) = phi.sin_cos();
+        let (sp, cp) = libm::sincos(phi);
         let vx = cp;
         let vy = sp;
         let ax = -sp * sigma * s;

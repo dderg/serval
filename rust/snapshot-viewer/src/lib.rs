@@ -137,6 +137,8 @@ fn frenet_components(vx: &[f64], vy: &[f64], fx: &[f64], fy: &[f64]) -> (Vec<f64
 // as valid whether vx/vy/ax/ay/jx/jy came from a fast or slow traversal of
 // the same geometric path. Precondition: speed > 0 (a zero-speed sample is
 // a cusp, handled by the caller before this is ever invoked).
+#[allow(dead_code)]
+// Consumed in later task wiring curvature metrics into the export.
 fn kappa_and_dkappa_dt(vx: f64, vy: f64, ax: f64, ay: f64, jx: f64, jy: f64) -> (f64, f64) {
     let speed2 = vx * vx + vy * vy;
     let speed = speed2.sqrt();
@@ -305,8 +307,9 @@ fn time_series_from_pieces(
     // milliseconds), a fixed per-interval count leaves millimeter-scale chords
     // that render a genuinely smooth trajectory as a polyline.
     const TARGET_SAMPLE_DT_S: f64 = 2.5e-4;
-    let per_interval_of =
-        |a: f64, b: f64| -> usize { (((b - a) / TARGET_SAMPLE_DT_S).ceil() as usize).clamp(4, 512) };
+    let per_interval_of = |a: f64, b: f64| -> usize {
+        (((b - a) / TARGET_SAMPLE_DT_S).ceil() as usize).clamp(4, 512)
+    };
     let cap: usize = bounds.windows(2).map(|w| per_interval_of(w[0], w[1])).sum();
 
     let new = || Vec::with_capacity(cap);
