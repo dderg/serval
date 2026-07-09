@@ -1,9 +1,10 @@
 # Ride pass: known defects and redesign notes
 
-Status as of 2026-07-08, from the fuzz/audit investigation (see
+Status as of 2026-07-09, from the fuzz/audit investigation (see
 `rust/pipeline-snapshot/src/audit.rs` and the pinned `#[ignore]` regressions
-in `rust/pipeline-snapshot/tests/planner_fuzz.rs`). One fix shipped
-(chord-sag splice tolerance, commit 737d3e2bb); the rest below are diagnosed,
+in `rust/pipeline-snapshot/tests/planner_fuzz.rs`). Shipped so far:
+chord-sag splice tolerance (commit 737d3e2bb), the stall fixes (defect 3),
+and the super-rail lookahead guard (defect 2). The rest below are diagnosed,
 reproducible, and deliberately not patched piecemeal — each attempted local
 fix destabilized another part of the integrator, so they need one designed
 treatment.
@@ -30,6 +31,21 @@ rest). No test in the workspace exercises the rest event today; the whole
 suite, the pinned `#[ignore]` failures, and a 5000-case
 `hard_invariants_hold` run are byte-identical in outcome to before.
 
+**Super-rail descents skip the kink lookahead** (was defect 2). A cell whose
+cap chord drops faster than the accel rail is infeasible from everywhere
+within it — no departure point exists — so `ride_step` no longer runs the
+kink lookahead there: the cell is crossed as the cap chord it is, marked
+infeasible (the same marking that already gated `binding`). The zero-progress
+Peel storm itself was no longer reproducible standalone once defect 3
+shipped (the storm's grind ran through the stall/rest machinery); direct
+`reach_pass` probes with single- and multi-cell super-rail walls, straight
+and curved, all crossed in bounded steps before the guard, and are pinned as
+regression tests in `ride/tests.rs`. Effects of the guard: whole suite,
+pinned `#[ignore]` failures, and 5000-case `hard_invariants_hold` identical;
+one snapshot changed (`neptune_cube/printer/discontinuity`) — a single wall
+crossing at t≈5.197 s re-tiles into one extra piece with seam metrics
+unchanged and a rigid ~0.27 µs downstream time shift.
+
 ## Open defects
 
 ### 1. Cap walls ride as chords (accel staircase, the z-step pins)
@@ -44,26 +60,26 @@ position window (`feed_drop_with_z_step_escapes_profile_window`,
 `z_step_then_micro_reversal_escapes_profile_window`).
 
 The naive fix — detach when `cap_a[cell] > st.a + j·dt` — is correct in
-direction but unmasks defects 2 and 3.
+direction but was blocked by defects 2 and 3, both now shipped. Re-tested
+with the naive detach scratch-applied on top of the defect-2 guard
+(2026-07-09): no storms or hangs anywhere anymore, and
+`feed_drop_with_z_step_escapes_profile_window` passes, but it is still not
+landable as-is — `z_step_then_micro_reversal_escapes_profile_window` keeps
+failing (window escape at a different point), two `reach_pass` wall shapes
+lose chain completeness (a step-up wall followed by a wall drop, and a
+curved wall under low jerk), and the seed-pinned `hard_invariants_hold`
+finds a fresh lowering failure (`quintic profile velocity below zero`,
+minimal input: two collinear planar moves, 0.0025 mm at feed 5.6 then 1 mm
+at feed 437.6, scv 0, accel 33778, jerk 832727).
 
-### 2. Peel against super-rail descents makes zero progress
-
-A raw-vlc wall dropping faster than the rail is infeasible from anywhere in
-its cell. If checked-mode ride enters the kink lookahead there, the departure
-bisect degenerates to the current position and Peel grinds contact-sized
-steps (~16 nm) forever: the cap outruns the brake, so the contact bisection
-converges onto `touch = 0`. Today such walls are usually crossed by the
-chord fast path only because the stride oracle happens to skip the lookahead
-(`assume`); any upstream mode churn forces the checked path and the storm.
-Guarding the lookahead with `cap_a[cell] < -(rail)` (chord-cross instead of
-peel) is necessary but was not sufficient in testing — see 3.
+### 2. ~~Peel against super-rail descents makes zero progress~~ — fixed, see Shipped
 
 ### 3. ~~Stalled states integrate backwards~~ — fixed, see Shipped
 
 Kept for numbering continuity. Note the rest-event path deliberately does
 not fail loudly: stalls under a real cap still occur when 1/2-style
 overbraking drives the profile to rest, and hard-failing there breaks
-currently-green cases. Once 1 and 2 are fixed, tighten the rest event into
+currently-green cases. Once 1 is fixed, tighten the rest event into
 an assert.
 
 ### 4. Chord smear at splice joints (residual X/Y seam accel ≤ ~22 mm/s²)
@@ -79,7 +95,7 @@ are tuned against the chord representation. Do this only together with 1–3.
 
 ## Suggested order
 
-3 is done; next 2, then 1, then 4. Verify each against: `cargo nextest run -p pipeline-snapshot`
+3 and 2 are done; next 1, then 4. Verify each against: `cargo nextest run -p pipeline-snapshot`
 (seed-pinned fuzz corpus), the `#[ignore]`d pins with `--run-ignored all`,
 large-`PROPTEST_CASES` runs of `target_budgets_hold`, and the snapshot
 suite's `seam_max_da`/`worst_seams` deltas.
