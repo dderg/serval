@@ -207,3 +207,53 @@ fn flight_reaccelerates_after_dip_with_huge_jerk() {
         pass.v[n - 1]
     );
 }
+
+/// A straight track whose cap descends through `wall_caps` between flat
+/// stretches, with grid step 0.01 mm; the pass starts on the cap.
+fn wall_pass(wall_caps: &[f64], accel_v: f64, j_max: f64) -> Pass {
+    let mut cap_v: Vec<f64> = vec![100.0; 6];
+    cap_v.extend_from_slice(wall_caps);
+    cap_v.extend(std::iter::repeat(*wall_caps.last().unwrap()).take(6));
+    let n = cap_v.len();
+    let s: Vec<f64> = (0..n).map(|i| i as f64 * 0.01).collect();
+    let mut cap_a: Vec<f64> = s
+        .windows(2)
+        .zip(cap_v.windows(2))
+        .map(|(sw, vw)| (vw[1] * vw[1] - vw[0] * vw[0]) / (2.0 * (sw[1] - sw[0])))
+        .collect();
+    cap_a.push(*cap_a.last().unwrap());
+    let accel = vec![accel_v; n];
+    let kappa = vec![0.0; n];
+    let track = Track {
+        s: &s,
+        cap_v: &cap_v,
+        cap_a: &cap_a,
+        accel: &accel,
+        kappa: &kappa,
+        j_max,
+    };
+    reach_pass(&track, cap_v[0], 0.0, None)
+}
+
+/// A raw-vlc wall dropping faster than the accel rail is infeasible from
+/// everywhere within its cells: the pass must cross it as cap chords, marked
+/// infeasible, with a complete phase chain — not peel against it (the peel
+/// storm of ride-pass defect 2: the departure bisect degenerates onto the
+/// current position and the contact bisection converges onto touch = 0).
+#[test]
+fn super_rail_wall_is_crossed_as_infeasible_chords() {
+    let pass = wall_pass(&[30.0, 1.0], 3000.0, 1e6);
+    assert!(pass.complete);
+    assert_eq!(pass.v[5..9], [100.0, 30.0, 1.0, 1.0]);
+    assert_eq!(pass.feasible[5..9], [true, false, false, true]);
+}
+
+/// Same treatment cell by cell down a multi-cell super-rail descent.
+#[test]
+fn multi_cell_super_rail_wall_is_crossed_as_infeasible_chords() {
+    let pass = wall_pass(&[80.0, 60.0, 40.0, 20.0, 1.0], 3000.0, 1e6);
+    assert!(pass.complete);
+    assert_eq!(pass.v[6..11], [80.0, 60.0, 40.0, 20.0, 1.0]);
+    assert!(pass.feasible[6..11].iter().all(|f| !f));
+    assert!(pass.feasible[11]);
+}
