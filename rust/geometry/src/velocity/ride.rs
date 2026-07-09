@@ -78,6 +78,10 @@ const POS_EPS_MM: f64 = 1e-12;
 /// it becomes an explicit rest event (chain goes opaque, pass resumes from
 /// `v = 0, a = 0`) instead of integrating through the position fold.
 const STALL_CAP_FLOOR: f64 = 1e-9;
+/// How many closed phases the splice-joint anchoring may walk back and
+/// re-solve when the open landing arc alone leaves no room for the
+/// correcting jerk swing.
+const ANCHOR_TAIL_PHASES_MAX: usize = 4;
 
 fn rel_eps(x: f64) -> f64 {
     1e-9 * (1.0 + x.abs())
@@ -297,9 +301,10 @@ struct BrakeManeuver {
 
 impl BrakeManeuver {
     fn phases(&self, st: State, j: f64) -> (Vec<StraightPhase>, State) {
+        let j1 = if self.am <= st.a { -j } else { j };
         let mut phases = Vec::with_capacity(3);
         let mut cur = st;
-        for (jp, dt) in [(-j, self.t1), (0.0, self.t2), (j, self.t3)] {
+        for (jp, dt) in [(j1, self.t1), (0.0, self.t2), (-j1, self.t3)] {
             if dt <= 0.0 {
                 continue;
             }
@@ -396,6 +401,77 @@ fn brake_bvp(
     let (t1, t2, t3, d) = eval(hi)?;
     let d_tol = 1e-9 * (1.0 + dist);
     ((d - dist).abs() <= d_tol).then_some(BrakeManeuver { t1, t2, t3, am: hi })
+}
+
+/// The mirror of [`brake_bvp`]: jerk *up* to a hold acceleration `am ≥
+/// max(a0, a1)`, hold, jerk back down to `a1`. Under time reversal this is a
+/// brake maneuver, so covered distance is monotone again — decreasing as the
+/// hold rises. Together the two topologies cover both signs of the joint
+/// correction the anchored splice needs.
+fn boost_bvp(
+    v0: f64,
+    a0: f64,
+    v1: f64,
+    a1: f64,
+    dist: f64,
+    j: f64,
+    a_ceil: f64,
+) -> Option<BrakeManeuver> {
+    if !(j > 0.0) || a_ceil <= 0.0 {
+        return None;
+    }
+    let am_lo = a0.max(a1).max(1e-9);
+    if am_lo > a_ceil {
+        return None;
+    }
+    let eval = |am: f64| -> Option<(f64, f64, f64, f64)> {
+        let t1 = (am - a0) / j;
+        let t3 = (am - a1) / j;
+        let dv = v1 - v0;
+        let t2 = (dv - (2.0 * am * am - a0 * a0 - a1 * a1) / (2.0 * j)) / am;
+        if t2 < 0.0 {
+            return None;
+        }
+        let v_a = v0 + (am * am - a0 * a0) / (2.0 * j);
+        let v_b = v_a + am * t2;
+        // The arc must not stall: the interior minimum sits inside the
+        // opening jerk-up while the acceleration is still negative.
+        let v_min1 = if a0 < 0.0 {
+            v0 - a0 * a0 / (2.0 * j)
+        } else {
+            v0
+        };
+        if v_min1 <= 0.0 || v_a <= 0.0 || v_b <= 0.0 {
+            return None;
+        }
+        let s1 = v0 * t1 + 0.5 * a0 * t1 * t1 + j * t1 * t1 * t1 / 6.0;
+        let s2 = v_a * t2 + 0.5 * am * t2 * t2;
+        let s3 = v_b * t3 + 0.5 * am * t3 * t3 - j * t3 * t3 * t3 / 6.0;
+        Some((t1, t2, t3, s1 + s2 + s3))
+    };
+    let (mut lo, mut hi) = (am_lo, a_ceil);
+    let d_lo = eval(lo).map(|e| e.3);
+    let d_hi = eval(hi).map(|e| e.3);
+    match (d_lo, d_hi) {
+        (Some(dl), _) if dist > dl + POS_EPS_MM => return None,
+        (_, Some(dh)) if dist < dh - POS_EPS_MM => return None,
+        (None, _) => return None,
+        _ => {}
+    }
+    for _ in 0..BVP_BISECT_ITERS {
+        let mid = 0.5 * (lo + hi);
+        if mid <= lo || mid >= hi {
+            break;
+        }
+        match eval(mid) {
+            Some((_, _, _, d)) if d >= dist => lo = mid,
+            // Unevaluable holds are the too-high end of the range.
+            _ => hi = mid,
+        }
+    }
+    let (t1, t2, t3, d) = eval(lo)?;
+    let d_tol = 1e-9 * (1.0 + dist);
+    ((d - dist).abs() <= d_tol).then_some(BrakeManeuver { t1, t2, t3, am: lo })
 }
 
 /// Integrate the fastest feasible profile under the track's cap from
@@ -664,8 +740,226 @@ fn try_splice(
     if k < i {
         return None;
     }
+    // Land the joint on the chain's exact state, so the adopted chain
+    // continues the pass's own phases C1: bend the landing tail onto it, or
+    // — when the joint sits inside the chain's own full-jerk swing — merge
+    // onto the chain ahead. Either failing, the plain splice absorbs the
+    // residual kick as before.
+    let joint = chain_states(brake.phases, &[st.s])[0];
+    let target = State {
+        v: joint.0,
+        a: joint.1,
+        ..st
+    };
+    let st = if joint_matches(st, target) {
+        st
+    } else {
+        anchor_tail(g, log, target, ANCHOR_TAIL_PHASES_MAX)
+            .or_else(|| merge_onto_chain(g, st, brake.phases, g.t.s[k], log))
+            .unwrap_or(st)
+    };
     let end = log.splice(st, brake.phases, g.t.s[k], splice_joint_v_tol(g, st, i))?;
     Some((k, end))
+}
+
+/// Two-phase equal-duration maneuver with solved (graded) jerks: the gentle
+/// correction for joints a full-jerk swing overshoots — a chord-ride tail
+/// bent onto the chain state must shed *less* speed than any bang-bang
+/// swing does. The two phases' total distance reduces to
+/// `(2v0 + dv)·h − (da/3)·h²`, giving the half-duration `h` in closed form;
+/// the velocity and acceleration constraints then fix both jerks. `None`
+/// when no positive root exists, a solved jerk exceeds the limit, or the
+/// interior dips to rest.
+fn graded_bvp(v0: f64, a0: f64, v1: f64, a1: f64, dist: f64, j: f64) -> Option<(f64, f64, f64)> {
+    let (dv, da) = (v1 - v0, a1 - a0);
+    let (c2, c1) = (-da / 3.0, 2.0 * v0 + dv);
+    let disc = c1 * c1 + 4.0 * c2 * dist;
+    if disc < 0.0 || c1 + disc.sqrt() <= 0.0 {
+        return None;
+    }
+    let h = 2.0 * dist / (c1 + disc.sqrt());
+    if !(h.is_finite() && h > 0.0) {
+        return None;
+    }
+    let j1 = (dv - 2.0 * a0 * h - 0.5 * da * h) / (h * h);
+    let j2 = da / h - j1;
+    if j1.abs() > j || j2.abs() > j {
+        return None;
+    }
+    let v_mid = v0 + a0 * h + 0.5 * j1 * h * h;
+    if v_mid <= 0.0 {
+        return None;
+    }
+    Some((j1, j2, h))
+}
+
+/// The two [`graded_bvp`] phases as chain entries departing from `p0`.
+fn graded_phases(p0: State, j1: f64, j2: f64, h: f64) -> (Vec<StraightPhase>, State) {
+    let mut phases = Vec::with_capacity(2);
+    let mut cur = p0;
+    for jp in [j1, j2] {
+        phases.push(StraightPhase {
+            t0: cur.t,
+            dt: h,
+            s0: cur.s,
+            v0: cur.v,
+            a0: cur.a,
+            j: jp,
+        });
+        cur = advance(cur, jp, h);
+    }
+    (phases, cur)
+}
+
+/// Whether a landing kick from `from` onto `to` is small enough to leave in
+/// the chain: within the continuity tolerances the lowering's exact-cubic
+/// gate applies.
+fn joint_matches(from: State, to: State) -> bool {
+    (to.v - from.v).abs() <= 1e-9 * (1.0 + from.v)
+        && (to.a - from.a).abs() <= 1e-5 * (1.0 + from.a.abs())
+}
+
+/// Solve one joint maneuver from `p0` onto `target`: the graded two-phase
+/// solve first (gentle corrections), the bang-bang hold families when the
+/// correction saturates the jerk. Rejects maneuvers that cross the cap at a
+/// node — with the contact band's tolerance, because a chain's own states
+/// sit up to a snap-band above the sampled cap (its node values are the
+/// snapped shadow of the same curve).
+fn solve_joint(g: &Grid, p0: State, target: State) -> Option<(Vec<StraightPhase>, State)> {
+    let dist = target.s - p0.s;
+    if dist <= POS_EPS_MM {
+        return None;
+    }
+    // The target accel can sit a float-hair outside the sampled rail (a
+    // chain integrated against its own grid); the bracket must still admit
+    // it, so the rail bound yields to the endpoint accels.
+    let a_lim = g
+        .rail_at(p0.s, p0.v)
+        .min(g.rail_at(target.s, target.v))
+        .max(target.a.abs())
+        .max(p0.a.abs())
+        * (1.0 + 1e-6);
+    let j = g.t.j_max;
+    let (phases, end) = graded_bvp(p0.v, p0.a, target.v, target.a, dist, j)
+        .map(|(j1, j2, h)| graded_phases(p0, j1, j2, h))
+        .or_else(|| {
+            brake_bvp(p0.v, p0.a, target.v, target.a, dist, j, -a_lim)
+                .or_else(|| boost_bvp(p0.v, p0.a, target.v, target.a, dist, j, a_lim))
+                .map(|m| m.phases(p0, j))
+        })?;
+    // Constant-jerk accel is linear in time, so the maneuver's accel peak
+    // sits at a phase joint; every interior joint must respect the rail at
+    // its own position (the endpoint states are given) — the graded solve in
+    // particular constrains its jerks, not the interior accel excursion they
+    // produce, and on a curvature ramp the local rail can sit well under the
+    // endpoint-sampled bound.
+    let interior_joints_on_rail = phases
+        .iter()
+        .skip(1)
+        .all(|p| p.a0.abs() <= g.rail_at(p.s0, p.v0) * (1.0 + 1e-6));
+    if !interior_joints_on_rail {
+        return None;
+    }
+    // The solvers reason on ideal cubics; `advance` truncates at a stall
+    // fold, so a maneuver that dips to rest integrates to somewhere else
+    // entirely. Trust only a solution whose integrated end state is the
+    // target, and whose duration is a plausible traversal of `dist`.
+    if (end.s - target.s).abs() > 1e-9 * (1.0 + target.s.abs())
+        || (end.v - target.v).abs() > 1e-8 * (1.0 + target.v)
+        || (end.a - target.a).abs() > 1e-4 * (1.0 + target.a.abs())
+    {
+        return None;
+    }
+    let dt_total = end.t - p0.t;
+    let dt_est = 2.0 * dist / (p0.v + target.v).max(1e-9);
+    if !(dt_total > dt_est / 16.0 && dt_total < dt_est * 16.0) {
+        return None;
+    }
+    let (c0, cj) = (g.cell(p0.s), g.cell(target.s));
+    // Between the endpoints the rail can shrink (curvature ramps), so the
+    // maneuver must also respect it at every node it crosses, not just the
+    // endpoint-sampled `a_lim`.
+    let feasible_at_nodes = ((c0 + 1)..=cj).all(|node| {
+        let (v, a) = chain_states(&phases, &g.t.s[node..=node])[0];
+        v <= g.t.cap_v[node] + CONTACT_SNAP_REL * (1.0 + g.t.cap_v[node])
+            && a.abs() <= g.rail_at(g.t.s[node], v) * (1.0 + 1e-6)
+    });
+    if !feasible_at_nodes {
+        return None;
+    }
+    let end = State { t: end.t, ..target };
+    Some((phases, end))
+}
+
+/// Bend the tail of the log onto `target` exactly, re-solving from the start
+/// of the open phase (or, walking back, of the last closed phases): the
+/// discretization error a snapped landing carries then never enters the
+/// emitted chain — the same anchoring as the wall brake and the disk
+/// integrator's landings. Returns the state at `target` with the maneuver's
+/// arrival time; `None` (the tail keeps its snap kick, as before) when no
+/// depth admits a maneuver.
+fn anchor_tail(g: &Grid, log: &mut PhaseLog, target: State, depth_max: usize) -> Option<State> {
+    for depth in 0..=depth_max {
+        let p0 = log.tail_start(depth)?;
+        let Some((phases, end)) = solve_joint(g, p0, target) else {
+            continue;
+        };
+        log.adopt_landing(depth, &phases);
+        return Some(end);
+    }
+    None
+}
+
+/// How many chain phase boundaries ahead [`merge_onto_chain`] may probe for
+/// an entry point.
+const MERGE_BOUNDARIES_MAX: usize = 6;
+
+/// Merge onto the chain *ahead* of the joint. A joint inside the chain's own
+/// full-jerk swing is unreachable from behind — the ride's chord shadow lags
+/// the swing's acceleration by half a cell, and catching a curve already at
+/// full jerk needs jerk beyond the limit — so instead of bending the past,
+/// aim for the chain's next phase boundaries, where its jerk relents, and
+/// solve the approach onto one. Returns the on-chain state at the merge
+/// point; the caller splices from there with an exact head.
+fn merge_onto_chain(
+    g: &Grid,
+    st: State,
+    chain: &[StraightPhase],
+    s_hi: f64,
+    log: &mut PhaseLog,
+) -> Option<State> {
+    let first = chain
+        .iter()
+        .position(|p| chain::phase_end_s(p) > st.s + POS_EPS_MM)?;
+    for p in chain.iter().skip(first + 1).take(MERGE_BOUNDARIES_MAX) {
+        if p.s0 >= s_hi - POS_EPS_MM {
+            return None;
+        }
+        let target = State {
+            t: st.t,
+            s: p.s0,
+            v: p.v0,
+            a: p.a0,
+        };
+        let Some((phases, end)) = solve_joint(g, st, target) else {
+            continue;
+        };
+        log.close(st);
+        log.adopt_landing(0, &phases);
+        return Some(end);
+    }
+    None
+}
+
+/// Anchor a cap landing: the tangent landing snapped `(v, a)` onto the
+/// sampled cap, kicking the state off the committed arc's cubic by up to the
+/// chord sag; re-solve the landing arc to arrive at the snapped state
+/// exactly. Falls back to the kicked landing when no maneuver fits.
+fn anchor_landing(g: &Grid, log: &mut PhaseLog, pre_snap: State, landed: State) -> State {
+    if joint_matches(pre_snap, landed) {
+        return landed;
+    }
+    anchor_tail(g, log, landed, 0).unwrap_or(landed)
 }
 
 /// Execute the anchored wall brake from a fresh Peel commitment: emit the
@@ -927,8 +1221,10 @@ fn flight_step(
         if next.v >= g.cap_at(next.s) - rel_eps(next.v) {
             let c = g.cell(next.s);
             if !g.wall_up(c) {
-                next.v = g.cap_at(next.s);
-                next.a = g.slope_at(next.s);
+                let mut landed = next;
+                landed.v = g.cap_at(next.s);
+                landed.a = g.slope_at(next.s);
+                next = anchor_landing(g, log, next, landed);
                 log.close(next);
                 *mode = Mode::Ride;
             }
@@ -1023,11 +1319,12 @@ fn peel_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i: u
                 }
             }
         }
-        let mut landed = advance(*st, j_cmd, touch);
+        let pre_snap = advance(*st, j_cmd, touch);
+        let mut landed = pre_snap;
         landed.v = g.cap_at(landed.s);
         let rail_land = g.rail_at(landed.s, landed.v);
         landed.a = g.slope_at(landed.s).clamp(-rail_land, rail_land);
-        *st = landed;
+        *st = anchor_landing(g, log, pre_snap, landed);
         *mode = Mode::Ride;
         return;
     }
@@ -1041,7 +1338,7 @@ fn peel_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i: u
         let mut landed = next;
         landed.v = cap_next;
         landed.a = slope_next;
-        *st = landed;
+        *st = anchor_landing(g, log, next, landed);
         *mode = Mode::Ride;
         return;
     }

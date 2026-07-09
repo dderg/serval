@@ -371,3 +371,69 @@ fn planar_micro_move_decel_escapes_profile_window() {
     let (_, report) = run_case(limits, &moves);
     assert!(report.hard_ok(), "{report}");
 }
+
+/// The corner-shoulder accel cliff (was defect 4's open residual in
+/// ride-pass-known-defects.md): 90-degree corners at printer-scale limits
+/// stepped the X/Y acceleration at the blend-boundary seams (~1-3 mm/s2
+/// against the 0.5 mm/s2 audit budget) and the final brake to rest by ~11,
+/// scaling linearly with feed. Root cause was the straight lowering's
+/// micro-phase merge: absorbing a leading nanosecond phase extended the
+/// host span without rebasing the host's coefficients, time-shifting it by
+/// the merged duration; the resulting `v * lead` position gap at the next
+/// joint was then welded shut by the NURBS packing, which converts a C0 gap
+/// into a `6 * gap / h^2` acceleration corruption of the short jerk-swing
+/// piece that follows. Fixed by Taylor-shifting the host coefficients to
+/// the span start.
+#[test]
+fn perpendicular_corners_step_seam_accel() {
+    let limits = FuzzLimits {
+        max_velocity: 100.0,
+        max_accel: 1000.0,
+        square_corner_velocity: 8.0,
+        max_jerk: 1e6,
+    };
+    let corner = std::f64::consts::FRAC_PI_2;
+    let moves = [
+        MoveSpec {
+            turn: Turn::Continue,
+            length_mm: 15.0,
+            feed_mm_s: 100.0,
+            extrude_ratio: 0.04,
+            z_step_mm: 0.0,
+        },
+        MoveSpec {
+            turn: Turn::Absolute(corner),
+            length_mm: 2.0,
+            feed_mm_s: 100.0,
+            extrude_ratio: 0.04,
+            z_step_mm: 0.0,
+        },
+        MoveSpec {
+            turn: Turn::Absolute(0.0),
+            length_mm: 2.0,
+            feed_mm_s: 100.0,
+            extrude_ratio: 0.04,
+            z_step_mm: 0.0,
+        },
+        MoveSpec {
+            turn: Turn::Absolute(corner),
+            length_mm: 15.0,
+            feed_mm_s: 100.0,
+            extrude_ratio: 0.04,
+            z_step_mm: 0.0,
+        },
+    ];
+    let (_, report) = run_case(limits, &moves);
+    assert!(report.hard_ok(), "{report}");
+    let xy_seam_accel: Vec<_> = report
+        .target
+        .iter()
+        .filter(|v| {
+            matches!(v.kind, pipeline_snapshot::audit::ViolationKind::SeamAccel) && v.axis < 2
+        })
+        .collect();
+    assert!(
+        xy_seam_accel.is_empty(),
+        "X/Y seam accel steps past budget: {xy_seam_accel:?}"
+    );
+}
