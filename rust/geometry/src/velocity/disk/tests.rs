@@ -369,3 +369,45 @@ fn descending_ceiling_kink_is_dipped_under_tangentially() {
         .unwrap();
     assert!(at_seam.1 <= 40.0 + 1e-6, "seam speed {}", at_seam.1);
 }
+
+#[test]
+fn infinite_jerk_curved_member_carries_smooth_phases() {
+    let k = kin(0.0, 0.05, 4.0, 1000.0, f64::INFINITY, 300.0);
+    let members = run_members(&[&k], 70.0);
+    let (_, _, phases) = reconstruct_run(&members, 100.0, 0.0, 1e-8).unwrap();
+    assert!(
+        !phases[0].is_empty(),
+        "unlimited-jerk curved member must carry its chain"
+    );
+    assert!(phases[0][0].s0.abs() < 1e-9);
+    let last = phases[0].last().unwrap();
+    let end_s = last.s0 + last.dt * (last.v0 + last.dt * (0.5 * last.a0 + last.dt * last.j / 6.0));
+    assert!(
+        (end_s - k.length).abs() < 1e-6,
+        "phases cover the member: end {end_s} vs length {}",
+        k.length
+    );
+    // The varying-curvature rail must not dispatch as a per-cell staircase:
+    // acceleration steps only at genuine regime corners, a handful per run,
+    // not at every 0.01mm grid joint.
+    let steps = phases[0]
+        .windows(2)
+        .filter(|w| {
+            let end_a = w[0].a0 + w[0].j * w[0].dt;
+            (end_a - w[1].a0).abs() > 1.0
+        })
+        .count();
+    assert!(
+        steps <= 4,
+        "{steps} accel steps across {} phases — chord staircase leaked through",
+        phases[0].len()
+    );
+}
+
+#[test]
+fn finite_jerk_curved_member_still_carries_no_phases() {
+    let k = kin(0.0, 0.05, 4.0, 1000.0, 1e5, 300.0);
+    let members = run_members(&[&k], 70.0);
+    let (_, _, phases) = reconstruct_run(&members, 100.0, 0.0, 1e-8).unwrap();
+    assert!(phases[0].is_empty());
+}

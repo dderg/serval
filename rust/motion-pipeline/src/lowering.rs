@@ -18,8 +18,8 @@ pub(crate) use straight::apply_pressure_advance;
 use trajectory::ChainStage;
 use trajectory::{CompiledChain, ShapedSegment};
 
-use profile::build_profile;
-use sampled::{Sampler, ZWarp, refine_span, regime_knot_times, z_warp_mode};
+use profile::{build_profile, profile_from_phases};
+use sampled::{Sampler, ZWarp, phase_knot_times, refine_span, regime_knot_times, z_warp_mode};
 use straight::lower_straight_from_phases;
 
 /// Duplicated from `runtime::piece_ring::MAX_PIECE_COEFFS` (this crate must
@@ -35,6 +35,11 @@ const MIN_PHASE_PIECE_S: f64 = 1e-7;
 const MAX_SUBDIVISION_DEPTH: u32 = 22;
 
 const MIN_FIT_PIECE_S: f64 = 1e-4;
+
+/// Mirrors the planner's straightness epsilon on member curvature: a move at
+/// or under it planned as straight, so its phases scale to every axis and the
+/// closed-form path applies.
+const STRAIGHT_KAPPA_EPS: f64 = 1e-9;
 
 /// Fit acceptance budgets for one lowered piece, probed at the interior
 /// Chebyshev nodes (endpoints are matched exactly by construction).
@@ -146,19 +151,34 @@ pub fn lower_move_pieces(
     // and a surface-warped Z varies with XY — so route those through the sampled
     // exact phase path, as does a warp flat enough to be one constant offset.
     let ramped = gm.segment.followers.iter().any(|f| f.is_ramped());
-    if !vm.phases.is_empty() && !ramped && !matches!(z_warp, ZWarp::Surface(_)) {
+    let straight = gm.segment.spatial.as_ref().is_none_or(|seg| {
+        use geometry::path::CurvatureProfile;
+        seg.kappa_peak().1.abs() <= STRAIGHT_KAPPA_EPS
+    });
+    if !vm.phases.is_empty() && straight && !ramped && !matches!(z_warp, ZWarp::Surface(_)) {
         let z_offset = match z_warp {
             ZWarp::Constant(c) => c,
             _ => 0.0,
         };
         return lower_straight_from_phases(gm, vm, t_start, start_pos, axis_chains, z_offset);
     }
-    let (profile, total_t) = build_profile(&vm.samples)?;
+    // With phases present the scalar profile is the plan's own closed-form
+    // windows; the sampled quintic reconstruction is the fallback for moves
+    // whose plan only exists as `(s, v, a)` grid samples.
+    let (profile, total_t) = if vm.phases.is_empty() {
+        build_profile(&vm.samples)?
+    } else {
+        profile_from_phases(&vm.phases)?
+    };
     // A jerk-regime change is a curvature kink in the arc-length profile: no
     // polynomial spans it within the acceleration budget, so blind bisection
     // cascades down to the floor around each one. Pinning a grid knot at every
     // regime boundary lets both sides fit their full smooth spans instead.
-    let mut knots = regime_knot_times(&profile, fit_tol);
+    let mut knots = if vm.phases.is_empty() {
+        regime_knot_times(&profile, fit_tol)
+    } else {
+        phase_knot_times(&profile, fit_tol)
+    };
     knots.retain(|&t| t > MIN_PIECE_DURATION_S && total_t - t > MIN_PIECE_DURATION_S);
     let spatial = gm.segment.spatial.as_ref();
 

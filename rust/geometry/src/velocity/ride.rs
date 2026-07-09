@@ -12,6 +12,15 @@
 //! envelope crossing a cruise ceiling) is approached by dipping below it
 //! tangentially instead of inheriting the kink as an acceleration step.
 //!
+//! A cap *wall* — a velocity step sampled onto the grid, whose chord no
+//! tangent landing can reach — gets an anchored treatment instead: a
+//! descending wall is taken by a bang-bang boundary-value brake
+//! (jerk-down / hold / jerk-up) arriving at the wall's end node with exactly
+//! its cap value and the following slope, and an ascending wall detaches to
+//! flight, which relands only where the local slope is jerk-reachable. The
+//! wall chords themselves constrain nothing; the profile owes only the
+//! step's bottom at its node.
+//!
 //! The same pass runs backward (on reversed arrays) to build the brake
 //! envelope, and forward against `min(vlc, brake)`. Integration is in time,
 //! so rest is an ordinary state, not the arc-length singularity the previous
@@ -26,7 +35,7 @@ use super::profile::StraightPhase;
 mod chain;
 mod grid;
 mod phase_log;
-mod state;
+pub(in crate::velocity) mod state;
 
 use grid::Grid;
 use phase_log::{LogMark, Mode, PhaseLog};
@@ -64,6 +73,11 @@ const CELL_GUARD_STEPS: u32 = 100_000;
 /// unstrided pass would and the stride is a pure cost cut.
 const ORACLE_STRIDE: u32 = 32;
 const POS_EPS_MM: f64 = 1e-12;
+/// Speeds at or below this are rest. A stall short of a node commanding rest
+/// pins to that node; a stall under a real cap means the pass overbraked —
+/// it becomes an explicit rest event (chain goes opaque, pass resumes from
+/// `v = 0, a = 0`) instead of integrating through the position fold.
+const STALL_CAP_FLOOR: f64 = 1e-9;
 
 fn rel_eps(x: f64) -> f64 {
     1e-9 * (1.0 + x.abs())
@@ -108,17 +122,65 @@ pub(super) struct Pass {
     pub complete: bool,
 }
 
-/// Whether a committed jerk-down from `st` lands tangent on the cap (value
-/// and slope both met) without ever crossing it. Marches the analytic arc,
+/// Whether commitment from `st` still has a feasible future: the committed
+/// jerk-down lands tangent on the cap (value and slope both met) without
+/// crossing it, or — with an unlandable wall descent ahead — the anchored
+/// wall brake is still solvable, from the tangent landing when the arc lands
+/// first, else from `st` itself.
+fn peel_feasible(g: &Grid, st: State) -> bool {
+    match binding_wall(g, g.cell(st.s), st.v) {
+        None => matches!(
+            committed_march(g, st, f64::INFINITY),
+            March::Tangent(_) | March::Clear
+        ),
+        Some(w) => match committed_march(g, st, g.t.s[w]) {
+            March::Tangent(land) => match binding_wall(g, g.cell(land.s), land.v) {
+                None => true,
+                Some(wl) => wall_brake(g, land, wl).is_some(),
+            },
+            March::Clear => true,
+            March::Crossed | March::Reached => wall_brake(g, st, w).is_some(),
+        },
+    }
+}
+
+/// The first wall run ahead whose bottom value actually binds a profile
+/// currently at `v` — walls the profile already passes under constrain
+/// nothing.
+fn binding_wall(g: &Grid, cell: usize, v: f64) -> Option<usize> {
+    let mut c = cell;
+    loop {
+        let w = g.next_wall(c)?;
+        let node = g.wall_run_end(w);
+        if g.t.cap_v[node] < v - rel_eps(v) {
+            return Some(w);
+        }
+        c = node.min(g.t.s.len() - 2);
+    }
+}
+
+enum March {
+    /// Landed tangent on the cap at the carried state.
+    Tangent(State),
+    /// Rested under the cap or ran off the track end without crossing.
+    Clear,
+    /// Crossed the cap: commitment from the start state is too late.
+    Crossed,
+    /// Ran into `s_stop` (a wall start) without landing or crossing.
+    Reached,
+}
+
+/// March the committed jerk-down arc from `st` against the sampled cap,
 /// clamping the tangency target to the disk rail so an unreachable plunge in
 /// the cap reads as "brake at the rail", which the cap (via the brake
-/// envelope half of `min`) can always catch.
-fn peel_feasible(g: &Grid, st: State) -> bool {
+/// envelope half of `min`) can always catch. Stops at `s_stop` — wall cells
+/// past it have no chord a tangent landing could be judged against.
+fn committed_march(g: &Grid, st: State, s_stop: f64) -> March {
     let j = g.t.j_max;
     // Quick accept: already tangent-or-under, diverging below.
     let slope0 = g.slope_at(st.s);
     if st.v <= g.cap_at(st.s) + rel_eps(st.v) && st.a <= slope0 + rel_eps(st.a.abs()) {
-        return true;
+        return March::Tangent(st);
     }
     // Quick accept: the whole swing to full brake stays under every cap ahead.
     {
@@ -127,7 +189,7 @@ fn peel_feasible(g: &Grid, st: State) -> bool {
         let swing_t = (st.a + rail).max(0.0) / j;
         let reach = v_peak * swing_t;
         if v_peak < g.cap_min_over(st.s, reach) {
-            return true;
+            return March::Clear;
         }
     }
     let mut st = st;
@@ -136,21 +198,24 @@ fn peel_feasible(g: &Grid, st: State) -> bool {
     loop {
         guard += 1;
         if guard > FEASIBILITY_GUARD_STEPS {
-            return false;
+            return March::Crossed;
+        }
+        if st.s >= s_stop - POS_EPS_MM {
+            return March::Reached;
         }
         let cap = g.cap_in(cell, st.s);
         if st.v > cap + rel_eps(cap) {
-            return false;
+            return March::Crossed;
         }
         let rail = g.rail_in(cell, st.s, st.v);
         let slope = g.t.cap_a[cell].max(-rail);
         if st.a <= slope + rel_eps(st.a.abs().max(slope.abs())) {
-            return true;
+            return March::Tangent(st);
         }
         if st.s >= g.end_s() - POS_EPS_MM {
-            return true;
+            return March::Clear;
         }
-        let to_span_end = g.span_end_s(cell) - st.s;
+        let to_span_end = (g.span_end_s(cell).min(s_stop) - st.s).max(0.0);
         let dt_tan = if st.a > slope {
             (st.a - slope) / j
         } else {
@@ -165,18 +230,172 @@ fn peel_feasible(g: &Grid, st: State) -> bool {
                 let peak = advance(st, -j, t_peak);
                 let c = g.cell_ahead(cell, peak.s);
                 if peak.v > g.cap_in(c, peak.s) + rel_eps(peak.v) {
-                    return false;
+                    return March::Crossed;
                 }
             }
         }
         let mid = advance(st, -j, 0.5 * dt);
         let c_mid = g.cell_ahead(cell, mid.s);
         if mid.v > g.cap_in(c_mid, mid.s) + rel_eps(mid.v) {
-            return false;
+            return March::Crossed;
         }
         st = advance(st, -j, dt);
+        // Came to rest under the cap: a stalled arc can never cross the
+        // non-negative cap ahead.
+        if st.v <= STALL_CAP_FLOOR {
+            return March::Clear;
+        }
         cell = g.cell_ahead(cell, st.s);
     }
+}
+
+/// The committed brake maneuver anchored on the next wall's end node: a
+/// bang-bang jerk-down / hold / jerk-up arc from `st` arriving at the node
+/// with exactly the node's cap value and the following chord's slope. The
+/// wall chords themselves constrain nothing — they are the sampled shadow of
+/// a velocity step, and the profile only owes the step's *bottom* at its
+/// node. Returns the anchor node, the maneuver's phases, and the arrival
+/// state; `None` when no wall is ahead, the boundary-value solve has no
+/// bang-bang solution (committed too late — or too early from a deep brake),
+/// or the arc would cross the cap at an intermediate node.
+fn wall_brake(g: &Grid, st: State, w: usize) -> Option<(usize, Vec<StraightPhase>, State)> {
+    let cell = g.cell(st.s);
+    let node = g.wall_run_end(w);
+    let s1 = g.t.s[node];
+    let dist = s1 - st.s;
+    if dist <= POS_EPS_MM {
+        return None;
+    }
+    let v1 = g.t.cap_v[node];
+    let rail1 = g.rail_at(s1, v1);
+    let cells = g.t.s.len() - 1;
+    let a1 = g.t.cap_a[node.min(cells - 1)].clamp(-rail1, rail1);
+    let a_floor = -g.rail_at(st.s, st.v).min(rail1);
+    let m = brake_bvp(st.v, st.a, v1, a1, dist, g.t.j_max, a_floor)?;
+    let (phases, end) = m.phases(st, g.t.j_max);
+    for k in (cell + 1)..node {
+        let (v, _) = chain_states(&phases, &g.t.s[k..=k])[0];
+        if v > g.t.cap_v[k] + rel_eps(v) {
+            return None;
+        }
+    }
+    let end = State {
+        s: s1,
+        v: v1,
+        a: a1,
+        ..end
+    };
+    Some((node, phases, end))
+}
+
+struct BrakeManeuver {
+    t1: f64,
+    t2: f64,
+    t3: f64,
+    am: f64,
+}
+
+impl BrakeManeuver {
+    fn phases(&self, st: State, j: f64) -> (Vec<StraightPhase>, State) {
+        let mut phases = Vec::with_capacity(3);
+        let mut cur = st;
+        for (jp, dt) in [(-j, self.t1), (0.0, self.t2), (j, self.t3)] {
+            if dt <= 0.0 {
+                continue;
+            }
+            phases.push(StraightPhase {
+                t0: cur.t,
+                dt,
+                s0: cur.s,
+                v0: cur.v,
+                a0: if jp == 0.0 { self.am } else { cur.a },
+                j: jp,
+            });
+            cur = advance(cur, jp, dt);
+        }
+        (phases, cur)
+    }
+}
+
+/// The solved distance feeds the arrival position directly — the emitted
+/// chain's joint at the anchor node is exact only to this residual — so the
+/// solve runs to float saturation, not a loose engineering tolerance.
+const BVP_BISECT_ITERS: u32 = 128;
+
+/// Bang-bang boundary-value brake: from `(v0, a0)`, jerk down to a hold
+/// acceleration `am`, hold, jerk back up to `a1`, covering exactly `dist`
+/// and arriving at exactly `v1`. `am` is the one free parameter — covered
+/// distance grows monotonically as the hold shallows — solved by bisection
+/// within `[a_floor, min(a0, a1))`. `None` when no such `am` exists: the
+/// commitment is too late (even the full-rail brake overshoots the anchor)
+/// or too early (even the shallowest hold undershoots it).
+fn brake_bvp(
+    v0: f64,
+    a0: f64,
+    v1: f64,
+    a1: f64,
+    dist: f64,
+    j: f64,
+    a_floor: f64,
+) -> Option<BrakeManeuver> {
+    if !(j > 0.0) || a_floor >= 0.0 {
+        return None;
+    }
+    let am_hi = a0.min(a1).min(-1e-9);
+    if a_floor > am_hi {
+        return None;
+    }
+    let eval = |am: f64| -> Option<(f64, f64, f64, f64)> {
+        let t1 = (a0 - am) / j;
+        let t3 = (a1 - am) / j;
+        let dv = v1 - v0;
+        let t2 = (dv - (a0 * a0 + a1 * a1 - 2.0 * am * am) / (2.0 * j)) / am;
+        if t2 < 0.0 {
+            return None;
+        }
+        let v_a = v0 + (a0 * a0 - am * am) / (2.0 * j);
+        let v_b = v_a + am * t2;
+        // The arc must not stall: the interior minimum sits inside the final
+        // jerk-up when it recrosses zero acceleration.
+        let v_min3 = if a1 > 0.0 {
+            v_b - am * am / (2.0 * j)
+        } else {
+            v1
+        };
+        if v_a <= 0.0 || v_b <= 0.0 || v_min3 <= 0.0 {
+            return None;
+        }
+        let s1 = v0 * t1 + 0.5 * a0 * t1 * t1 - j * t1 * t1 * t1 / 6.0;
+        let s2 = v_a * t2 + 0.5 * am * t2 * t2;
+        let s3 = v_b * t3 + 0.5 * am * t3 * t3 + j * t3 * t3 * t3 / 6.0;
+        Some((t1, t2, t3, s1 + s2 + s3))
+    };
+    // Deeper holds shed the velocity sooner and cover less arc; a hold too
+    // shallow (or too deep) has no non-negative hold time. Establish the
+    // bracket on the evaluable range first.
+    let (mut lo, mut hi) = (a_floor, am_hi);
+    let d_hi = eval(hi).map(|e| e.3);
+    let d_lo = eval(lo).map(|e| e.3);
+    match (d_lo, d_hi) {
+        (Some(dl), _) if dist < dl - POS_EPS_MM => return None,
+        (_, Some(dh)) if dist > dh + POS_EPS_MM => return None,
+        (None, None) => return None,
+        _ => {}
+    }
+    for _ in 0..BVP_BISECT_ITERS {
+        let mid = 0.5 * (lo + hi);
+        if mid <= lo || mid >= hi {
+            break;
+        }
+        match eval(mid) {
+            Some((_, _, _, d)) if d >= dist => hi = mid,
+            // Unevaluable holds are the too-deep end of the range.
+            _ => lo = mid,
+        }
+    }
+    let (t1, t2, t3, d) = eval(hi)?;
+    let d_tol = 1e-9 * (1.0 + dist);
+    ((d - dist).abs() <= d_tol).then_some(BrakeManeuver { t1, t2, t3, am: hi })
 }
 
 /// Integrate the fastest feasible profile under the track's cap from
@@ -232,6 +451,13 @@ pub(super) fn reach_pass(
             i = k + 1;
         }
     }
+    if mode == Mode::Peel {
+        if let Some((k, end)) = try_wall_jump(&g, st, &mut log, i, &mut v_out, &mut a_out) {
+            st = end;
+            mode = initial_mode(&g, st);
+            i = k + 1;
+        }
+    }
 
     struct StrideCkpt {
         st: State,
@@ -243,7 +469,22 @@ pub(super) fn reach_pass(
     let mut skip_left: u32 = 0;
     let mut fine_left: u32 = 0;
 
+    let stretch_starts = |k: usize| {
+        brake.is_some_and(|b| {
+            b.binding.get(k).copied().unwrap_or(false) && (k == 0 || !b.binding[k - 1])
+        })
+    };
     'nodes: while i < n {
+        // A binding stretch can begin mid-ride with no mode transition to
+        // hang the splice on (the previous stretch ended at an infeasible
+        // node); adopt the envelope's exact chain here too.
+        if mode == Mode::Ride && stretch_starts(i - 1) && st.s <= track.s[i - 1] + POS_EPS_MM {
+            if let Some((k, end)) = try_splice(st, brake, &g, &mut log, i) {
+                fast_forward(&mut st, &mut mode, i, k, end, &mut v_out, &mut a_out);
+                i = k + 1;
+                continue 'nodes;
+            }
+        }
         let mut guard = 0;
         while st.s < track.s[i] - POS_EPS_MM {
             guard += 1;
@@ -305,10 +546,6 @@ pub(super) fn reach_pass(
                 Mode::Flight => flight_step(&g, &mut st, &mut log, &mut mode, i, assume),
                 Mode::Peel => peel_step(&g, &mut st, &mut log, &mut mode, i),
             }
-            // Arc-length is monotone for v >= 0; a state that walks backwards
-            // has integrated through a stall (advance clamps v at zero but
-            // keeps the raw position kinematics) and every cap/slope read
-            // after it is nonsense.
             debug_assert!(
                 st.s >= s_before - rel_eps(s_before),
                 "ride pass moved backwards: s {} -> {} (v={}, a={}, mode={mode:?})",
@@ -317,6 +554,26 @@ pub(super) fn reach_pass(
                 st.v,
                 st.a
             );
+            let stalled = st.v <= STALL_CAP_FLOOR && st.a < 0.0 && st.s <= s_before + POS_EPS_MM;
+            if stalled {
+                if assume {
+                    let c = ckpt.take().expect("strided step without a checkpoint");
+                    rollback!(c);
+                }
+                log.opaque(st);
+                if track.cap_v[i] <= STALL_CAP_FLOOR {
+                    st.s = track.s[i];
+                    st.v = 0.0;
+                    break;
+                }
+                st.v = 0.0;
+                st.a = 0.0;
+                mode = initial_mode(&g, st);
+                ckpt = None;
+                skip_left = 0;
+                fine_left = 0;
+                continue;
+            }
             if mode != was {
                 if assume {
                     // Unverified transition inside the stride window: rewind
@@ -335,12 +592,25 @@ pub(super) fn reach_pass(
                     continue 'nodes;
                 }
             }
+            if mode == Mode::Peel && was != Mode::Peel {
+                if let Some((k, end)) = try_wall_jump(&g, st, &mut log, i, &mut v_out, &mut a_out) {
+                    st = end;
+                    mode = initial_mode(&g, st);
+                    i = k + 1;
+                    continue 'nodes;
+                }
+            }
         }
         st.s = track.s[i];
         let rail = g.rail_at(track.s[i], st.v);
         if mode == Mode::Ride {
+            let arrival_cell = if !feasible[i] && chord_state_unrecoverable(&g, i, st.v) {
+                i.min(n - 2)
+            } else {
+                i - 1
+            };
             st.v = track.cap_v[i];
-            st.a = track.cap_a[i - 1].clamp(-rail, rail);
+            st.a = track.cap_a[arrival_cell].clamp(-rail, rail);
         }
         v_out[i] = st.v;
         a_out[i] = st.a.clamp(-rail, rail);
@@ -398,6 +668,56 @@ fn try_splice(
     Some((k, end))
 }
 
+/// Execute the anchored wall brake from a fresh Peel commitment: emit the
+/// bang-bang maneuver's phases, fill the nodes it crosses from that chain,
+/// and land the pass at the wall's end node. `None` when there is no wall
+/// ahead, the ordinary committed jerk-down lands tangent before it (the
+/// normal peel handles that), or the boundary-value solve has no solution —
+/// the pass then falls back to marching Peel.
+fn try_wall_jump(
+    g: &Grid,
+    st: State,
+    log: &mut PhaseLog,
+    i: usize,
+    v_out: &mut [f64],
+    a_out: &mut [f64],
+) -> Option<(usize, State)> {
+    let w = binding_wall(g, g.cell(st.s), st.v)?;
+    match committed_march(g, st, g.t.s[w]) {
+        March::Clear => return None,
+        // A tangent landing only sidesteps the wall when it no longer binds
+        // from the landed state; the ordinary peel handles that. A landing
+        // still facing the wall means the trigger fired for the wall itself.
+        March::Tangent(land) if binding_wall(g, g.cell(land.s), land.v).is_none() => return None,
+        _ => {}
+    }
+    let (node, phases, end) = wall_brake(g, st, w)?;
+    if node < i || phases.is_empty() {
+        return None;
+    }
+    for p in &phases {
+        log.set_jerk(
+            State {
+                t: p.t0,
+                s: p.s0,
+                v: p.v0,
+                a: p.a0,
+            },
+            p.j,
+        );
+    }
+    for (off, (v, a)) in chain_states(&phases, &g.t.s[i..=node])
+        .into_iter()
+        .enumerate()
+    {
+        v_out[i + off] = v;
+        a_out[i + off] = a;
+    }
+    v_out[node] = end.v;
+    a_out[node] = end.a;
+    Some((node, end))
+}
+
 /// Joint tolerance for adopting the brake chain: the landing snapped onto the
 /// sampled cap's linear chord, but the chain is the exact constant-accel
 /// cubic under it, so the two disagree by up to the chord's sag —
@@ -427,26 +747,47 @@ fn ride_step(
     let v1 = track.cap_v[i];
     let dt = 2.0 * ds / (st.v + v1).max(1e-9);
     let rail1 = g.rail_at(track.s[i], v1);
+    // Detach: the cap accelerates away faster than the rail allows, or
+    // climbs as an unfollowable wall — riding on would log a j = 0 chord
+    // whose entry kicks `a` by the whole climb, the instantaneous staircase
+    // the jerk limit forbids. Followable ascents (the brake envelope's own
+    // jerk-swing cells step their slope by about one swing per cell) stay
+    // ridden: a state-based reachability test there chatters between ride
+    // and flight, rippling the velocity.
+    let rail = g.rail_at(st.s, st.v);
+    if track.cap_a[cell] > rail + rel_eps(rail) || g.wall_up(cell) {
+        *mode = Mode::Flight;
+        return false;
+    }
+    // A cell whose chord descends faster than the rail is infeasible from
+    // everywhere within it — no departure point exists, so the kink lookahead
+    // below would only degenerate its bisect onto the current position. Cross
+    // it as the chord it is, marked infeasible.
+    let super_rail_descent = track.cap_a[cell] < -(rail + rel_eps(rail));
+    if super_rail_descent {
+        feasible[i] = false;
+    }
     // Arrival state at the node: the slope of the cell just traversed. The
     // next cell's slope is lookahead only — assigning it to the state would
     // leak a kink's chord into the profile as an instantaneous accel step.
+    // One exception: an infeasible chord whose rail-clamped slope cannot be
+    // recovered from at all (the jerk swing back sheds more speed than the
+    // profile holds) — that chord was a teleport, not dynamics, and carrying
+    // its slope would collapse the profile toward rest; resume from the
+    // slope the cap ahead actually commands instead.
+    let arrival_cell = if super_rail_descent && chord_state_unrecoverable(g, i, v1) {
+        (cell + 1).min(track.s.len() - 2)
+    } else {
+        cell
+    };
     let next_state = State {
         t: st.t + dt,
         s: track.s[i],
         v: v1,
-        a: track.cap_a[cell].clamp(-rail1, rail1),
+        a: track.cap_a[arrival_cell].clamp(-rail1, rail1),
     };
-    // Detach: the cap accelerates away faster than the rail allows.
-    let rail = g.rail_at(st.s, st.v);
-    if track.cap_a[cell] > rail + rel_eps(rail) {
-        *mode = Mode::Flight;
-        return false;
-    }
-    if track.cap_a[cell] < -(rail + rel_eps(rail)) {
-        feasible[i] = false;
-    }
     // Kink lookahead: leaving from the next node must still be feasible.
-    if !assume_feasible && !peel_feasible(g, next_state) {
+    if !super_rail_descent && !assume_feasible && !peel_feasible(g, next_state) {
         // Departure point within this cell: latest cap state that can still
         // peel tangentially under the kink.
         let (mut lo, mut hi) = (st.s, track.s[i]);
@@ -475,6 +816,15 @@ fn ride_step(
     );
     *st = next_state;
     true
+}
+
+/// Whether the rail-clamped slope of the infeasible chord entering node `i`
+/// is a state the profile cannot recover from: jerking the acceleration back
+/// to zero sheds more speed than the profile holds there.
+fn chord_state_unrecoverable(g: &Grid, i: usize, v: f64) -> bool {
+    let rail = g.rail_at(g.t.s[i], v);
+    let a = g.t.cap_a[i - 1].clamp(-rail, rail);
+    a * a / (2.0 * g.t.j_max) > v
 }
 
 /// The on-cap state at arc `s` within `cell`, timed from `from`.
@@ -570,12 +920,18 @@ fn flight_step(
     }
     if assume_feasible || peel_feasible(g, next) {
         log.set_jerk(*st, j_cmd);
-        // Landed on the cap from below (tangential arrival)?
+        // Landed on the cap from below (tangential arrival)? Not on an
+        // ascending wall's chord — touching the foot of a cap wall that
+        // climbs away faster than jerk can follow must not snap `a` onto the
+        // wall chord; the arc keeps flying under the receding cap instead.
         if next.v >= g.cap_at(next.s) - rel_eps(next.v) {
-            next.v = g.cap_at(next.s);
-            next.a = g.slope_at(next.s);
-            log.close(next);
-            *mode = Mode::Ride;
+            let c = g.cell(next.s);
+            if !g.wall_up(c) {
+                next.v = g.cap_at(next.s);
+                next.a = g.slope_at(next.s);
+                log.close(next);
+                *mode = Mode::Ride;
+            }
         }
         *st = next;
         return;

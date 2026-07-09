@@ -4,7 +4,7 @@ use nurbs::bezier::BezierPiece;
 use trajectory::{ChainStage, CompiledChain};
 
 use super::ladder::{FIT_TRUNC_POS_FACTOR, ladder_fit, quintic_in_u, truncated_piece};
-use super::profile::ScalarProfile;
+use super::profile::{KnotSide, ScalarProfile};
 use super::{FitTol, MAX_SUBDIVISION_DEPTH, MIN_FIT_PIECE_S};
 
 /// How the bed surface transform applies to this move's Z axis. `Constant`
@@ -125,8 +125,8 @@ impl Sampler<'_> {
         }
     }
 
-    fn axis_base_state(&self, axis: usize, t: f64) -> (f64, f64, f64) {
-        let (s, v, a_t) = self.profile.state_at(t);
+    fn axis_base_state(&self, axis: usize, t: f64, side: KnotSide) -> (f64, f64, f64) {
+        let (s, v, a_t) = self.profile.state_at_side(t, side);
         if axis < 3 {
             match self.spatial {
                 Some(seg) => {
@@ -172,7 +172,17 @@ impl Sampler<'_> {
         t: f64,
         apply_zero_support: bool,
     ) -> (f64, f64, f64) {
-        let (mut pos, mut vel, mut accel) = self.axis_base_state(axis, t);
+        self.axis_state_side(axis, t, apply_zero_support, KnotSide::Begin)
+    }
+
+    fn axis_state_side(
+        &self,
+        axis: usize,
+        t: f64,
+        apply_zero_support: bool,
+        side: KnotSide,
+    ) -> (f64, f64, f64) {
+        let (mut pos, mut vel, mut accel) = self.axis_base_state(axis, t, side);
         if apply_zero_support {
             if let Some(chain) = self.axis_chains.get(axis) {
                 for stage in &chain.stages {
@@ -214,8 +224,8 @@ impl Sampler<'_> {
         apply_zero_support: bool,
     ) -> Option<Vec<f64>> {
         let h = tb - ta;
-        let sa = self.axis_state_full(axis, ta, apply_zero_support);
-        let sb = self.axis_state_full(axis, tb, apply_zero_support);
+        let sa = self.axis_state_side(axis, ta, apply_zero_support, KnotSide::Begin);
+        let sb = self.axis_state_side(axis, tb, apply_zero_support, KnotSide::End);
         let base = quintic_in_u(sa, sb, h);
         let t_of = |u: f64| (0.5 * (u + 1.0)).mul_add(h, ta);
         let truth_p = |u: f64| self.axis_state(axis, t_of(u), apply_zero_support).0;
@@ -242,8 +252,8 @@ impl Sampler<'_> {
         let mono_u = self
             .ladder_fit_axis(axis, ta, tb, tol, true)
             .unwrap_or_else(|| {
-                let sa = self.axis_state_full(axis, ta, true);
-                let sb = self.axis_state_full(axis, tb, true);
+                let sa = self.axis_state_side(axis, ta, true, KnotSide::Begin);
+                let sb = self.axis_state_side(axis, tb, true, KnotSide::End);
                 quintic_in_u(sa, sb, h)
             });
         truncated_piece(&mono_u, ua, ub, h, FIT_TRUNC_POS_FACTOR * tol.pos_mm)
@@ -277,6 +287,35 @@ pub(super) fn refine_span(
 /// on the order of `Δj·h/8`; steps that stay under the acceleration budget at
 /// this span are absorbed by the fit, bigger ones get a knot.
 const KNOT_TARGET_SPAN_S: f64 = 0.02;
+
+/// Knots for a phase-built profile: every interior window joint whose
+/// acceleration or jerk steps past the fit budget. Phase windows are the plan
+/// itself, so a step at a joint is a genuine regime corner — under unlimited
+/// jerk the merged chain steps its acceleration at each one — and a span must
+/// never straddle it: the quintic base would smear the step into interior
+/// wiggle no ladder degree removes. Joints that land inside a still-tiny gap
+/// merge into the previous knot, exactly as the closed-form straight path
+/// merges sub-floor phases.
+pub(super) fn phase_knot_times(profile: &ScalarProfile, tol: FitTol) -> Vec<f64> {
+    let jerk_threshold = 8.0 * tol.accel_mm_s2 / KNOT_TARGET_SPAN_S;
+    let mut out: Vec<f64> = Vec::new();
+    for (i, pair) in profile.windows.windows(2).enumerate() {
+        let (w, next) = (&pair[0], &pair[1]);
+        let a_end = 2.0 * w.coeffs[2] + 6.0 * w.coeffs[3] * w.dt;
+        let a_next = 2.0 * next.coeffs[2];
+        let j_step = 6.0 * (next.coeffs[3] - w.coeffs[3]).abs();
+        let discontinuous =
+            (a_next - a_end).abs() > 0.5 * tol.accel_mm_s2 || j_step > jerk_threshold;
+        if discontinuous
+            && out
+                .last()
+                .is_none_or(|&k| profile.knot_t[i + 1] - k > MIN_FIT_PIECE_S)
+        {
+            out.push(profile.knot_t[i + 1]);
+        }
+    }
+    out
+}
 
 /// Window boundaries where the profile's leading jerk takes one isolated step
 /// larger than the budget — a jerk-phase edge in the plan, flanked by steady

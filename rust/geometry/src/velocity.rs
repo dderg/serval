@@ -36,9 +36,11 @@ pub struct MoveVelocity {
     pub exit_v: f64,
     pub peak_v: f64,
     pub samples: Vec<VelSample>,
-    /// Closed-form jerk phases for a straight constant-ceiling move, in move-local
-    /// time/arc-length. Empty for curved moves; when present the lowering emits
-    /// one exact cubic per phase instead of fitting cubics to `samples`.
+    /// Closed-form jerk phases in move-local time/arc-length. Present for
+    /// straight moves (the lowering emits one exact cubic per phase) and for
+    /// curved moves planned without a jerk limit (the lowering fits axis
+    /// positions against the phases' exact scalar profile instead of quintic
+    /// windows over `samples`). Empty for finite-jerk curved moves.
     pub phases: Vec<StraightPhase>,
     pub accel: f64,
     pub jerk: f64,
