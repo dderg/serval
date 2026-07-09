@@ -141,24 +141,6 @@ async function renderPathPreview(canvas, name) {
     const toX = (v) => ((v - xMin) / (xMax - xMin)) * W;
     const toY = (v) => H - ((v - yMin) / (yMax - yMin)) * H;
 
-    // Draw fitted segments
-    const colors = { line: "#4a9eff", arc: "#4ecb71", clothoid: "#f5a623" };
-    for (const seg of (snap.fitted_segments || [])) {
-      ctx.beginPath();
-      ctx.strokeStyle = colors[seg.type] || "#4a9eff";
-      ctx.lineWidth = 1.2;
-      if (seg.type === "line") {
-        ctx.moveTo(toX(seg.x0), toY(seg.y0));
-        ctx.lineTo(toX(seg.x1), toY(seg.y1));
-      } else if (seg.x && seg.y) {
-        for (let j = 0; j < seg.x.length; j++) {
-          j === 0 ? ctx.moveTo(toX(seg.x[j]), toY(seg.y[j]))
-                   : ctx.lineTo(toX(seg.x[j]), toY(seg.y[j]));
-        }
-      }
-      ctx.stroke();
-    }
-
     // Draw raw path (thin gray)
     const rx = snap.raw_x, ry = snap.raw_y;
     if (rx && ry) {
