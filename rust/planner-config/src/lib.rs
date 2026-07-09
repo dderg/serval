@@ -26,6 +26,14 @@ pub enum PostProcessorConfigError {
     UnknownInstance { name: String },
     #[error("axis '{axis}': post_processors references undeclared '{name}'")]
     UnknownAxisReference { axis: String, name: String },
+    #[error(
+        "axis '{axis}' leads follower axes, and post_processor '{name}' is a \
+         derivative-gain stage placed before the axis kernel. That is ambiguous \
+         for followers: pre-kernel stages count as toolhead motion the followers \
+         track, but derivative gains model the motor side, which followers must \
+         ignore. Move '{name}' after the kernel in the axis post_processors list"
+    )]
+    LeaderGainBeforeKernel { axis: String, name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -99,10 +107,46 @@ impl PostProcessorSet {
                 CompiledChain::compile(&chain).map_err(PostProcessorConfigError::Param)
             })
             .collect::<Result<_, _>>()?;
-        Ok(AxisChainSet {
-            chains,
-            followers: registry.follower_index_map(),
-        })
+        let followers = registry.follower_index_map();
+        self.reject_pre_kernel_gains_on_leaders(registry, &followers)?;
+        Ok(AxisChainSet { chains, followers })
+    }
+
+    fn reject_pre_kernel_gains_on_leaders(
+        &self,
+        registry: &AxisRegistry,
+        followers: &[(usize, Vec<usize>)],
+    ) -> Result<(), PostProcessorConfigError> {
+        let mut is_leader = vec![false; self.per_axis.len()];
+        for (_, leaders) in followers {
+            for &l in leaders {
+                is_leader[l] = true;
+            }
+        }
+        for (axis, names) in self.per_axis.iter().enumerate() {
+            if !is_leader[axis] {
+                continue;
+            }
+            let mut seen_kernel = false;
+            for name in names {
+                let inst = self
+                    .instances
+                    .iter()
+                    .find(|i| i.name() == *name)
+                    .expect("validated in try_new");
+                match inst.compile_stage() {
+                    Some(trajectory::ChainStage::SmoothKernel(_)) => seen_kernel = true,
+                    Some(trajectory::ChainStage::DerivativeGains { .. }) if !seen_kernel => {
+                        return Err(PostProcessorConfigError::LeaderGainBeforeKernel {
+                            axis: registry.axis_name(axis).to_string(),
+                            name: name.clone(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
     }
 
     #[must_use]

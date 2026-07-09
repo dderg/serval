@@ -301,6 +301,79 @@ fn kernel_and_pa_on_follower_e_compiles() {
     assert_eq!(chains.followers, vec![(3, vec![0, 1, 2])]);
 }
 
+fn registry_with_x_pps_and_e(x_post_processors: &[&str]) -> AxisRegistry {
+    let mut x = decl("x", &[]);
+    x.post_processors = x_post_processors.iter().map(|s| (*s).to_string()).collect();
+    AxisRegistry::try_new(vec![
+        x,
+        decl("y", &[]),
+        decl("z", &[]),
+        decl("e", &["x", "y", "z"]),
+    ])
+    .unwrap()
+}
+
+#[test]
+fn gain_before_kernel_on_leader_axis_rejected() {
+    let registry = registry_with_x_pps_and_e(&["pa", "is"]);
+    let err = PostProcessorSet::try_new(
+        &registry,
+        &[
+            pp("pa", "linear_pressure_advance", &[("k", 0.002)]),
+            pp("is", "smooth_bell", &[("smooth_time", 0.01605)]),
+        ],
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("axis 'x'") && msg.contains("'pa'"),
+        "got: {msg}"
+    );
+}
+
+#[test]
+fn gain_after_kernel_on_leader_axis_compiles() {
+    let registry = registry_with_x_pps_and_e(&["is", "pa"]);
+    assert!(
+        PostProcessorSet::try_new(
+            &registry,
+            &[
+                pp("is", "smooth_bell", &[("smooth_time", 0.01605)]),
+                pp("pa", "linear_pressure_advance", &[("k", 0.002)]),
+            ],
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn gain_before_disabled_kernel_on_leader_axis_rejected() {
+    let registry = registry_with_x_pps_and_e(&["pa", "is"]);
+    let err = PostProcessorSet::try_new(
+        &registry,
+        &[
+            pp("pa", "linear_pressure_advance", &[("k", 0.002)]),
+            pp("is", "smooth_bell", &[("smooth_time", 0.0)]),
+        ],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("'pa'"), "got: {err}");
+}
+
+#[test]
+fn gain_without_kernel_on_axis_leading_nobody_compiles() {
+    let mut x = decl("x", &[]);
+    x.post_processors = vec!["pa".to_string()];
+    let registry = AxisRegistry::try_new(vec![x, decl("y", &[]), decl("z", &[])]).unwrap();
+    assert!(
+        PostProcessorSet::try_new(
+            &registry,
+            &[pp("pa", "linear_pressure_advance", &[("k", 0.002)])],
+        )
+        .is_ok()
+    );
+}
+
 #[test]
 fn happy_path_compiles_pa_on_follower_e() {
     let registry = registry_with_e(&["pa"]);

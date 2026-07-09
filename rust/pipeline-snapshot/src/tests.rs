@@ -354,17 +354,23 @@ fn declaring_only_the_e_axis_still_defaults_x_y_z() {
 
 #[test]
 fn all_post_processor_types_are_reachable() {
-    for (ty, params) in [
-        ("smooth_bell", [("smooth_time", 0.0200625)].as_slice()),
-        ("smooth_triangle", [("smooth_time", 0.02)].as_slice()),
-        ("smooth_zv", [("frequency_hz", 40.0)].as_slice()),
-        ("smooth_mzv", [("frequency_hz", 40.0)].as_slice()),
-        ("linear_pressure_advance", [("k", 0.04)].as_slice()),
+    // Kernels attach to a spatial axis; a bare derivative-gain stage is only
+    // legal off the leader axes (pre-kernel gains on leaders are rejected),
+    // so linear_pressure_advance rides the e follower, its natural home.
+    for (ty, params, axis_name) in [
+        ("smooth_bell", [("smooth_time", 0.0200625)].as_slice(), "x"),
+        ("smooth_triangle", [("smooth_time", 0.02)].as_slice(), "x"),
+        ("smooth_zv", [("frequency_hz", 40.0)].as_slice(), "x"),
+        ("smooth_mzv", [("frequency_hz", 40.0)].as_slice(), "x"),
+        ("linear_pressure_advance", [("k", 0.04)].as_slice(), "e"),
     ] {
         let mut params_snap = default_axis_snapshot_params();
-        let mut x = axis("x", &[]);
-        x.post_processors = vec!["pp".to_string()];
-        params_snap.axis_decls = vec![x];
+        let mut carrier = match axis_name {
+            "x" => axis("x", &[]),
+            _ => axis("e", &["x", "y", "z"]),
+        };
+        carrier.post_processors = vec!["pp".to_string()];
+        params_snap.axis_decls = vec![carrier];
         params_snap.post_processor_decls = vec![pp("pp", ty, params)];
         pipeline_snapshot(&square_waypoints(), params_snap)
             .unwrap_or_else(|e| panic!("post-processor type '{ty}' should compile: {e}"));

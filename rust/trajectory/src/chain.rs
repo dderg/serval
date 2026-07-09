@@ -120,6 +120,11 @@ impl PostProcessorInstance {
             .try_for_each(|(spec, value)| spec.check(&self.name, *value))
     }
 
+    #[must_use]
+    pub fn compile_stage(&self) -> Option<ChainStage> {
+        self.algo.compile(&self.values)
+    }
+
     pub fn set_param(&mut self, key: &str, value: f64) -> Result<(), PostProcessorError> {
         let idx = self
             .algo
