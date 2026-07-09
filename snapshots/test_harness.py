@@ -20,7 +20,6 @@ _SNAPSHOT = {
     "kin_v": [0.0, 50.0, 0.0],
     "kin_kappa": [0.0, 0.1, 0.0],
     "traversal_time_s": 0.123456789,
-    "fitted_segments": [{"type": "line", "x0": 0.0, "y0": 0.0}],
 }
 
 
@@ -188,12 +187,12 @@ def test_compare_flags_velocity_field_change(tmp_path):
 
 
 def test_snapshots_match_flags_structural_change():
-    a = {"fitted_segments": [{"type": "line"}, {"type": "arc"}]}
-    b = {"fitted_segments": [{"type": "line"}]}
+    a = {"segments": [{"type": "line"}, {"type": "arc"}]}
+    b = {"segments": [{"type": "line"}]}
     assert not harness.snapshots_match(a, b)
     assert not harness.snapshots_match(
-        {"fitted_segments": [{"type": "line"}]},
-        {"fitted_segments": [{"type": "arc"}]},
+        {"segments": [{"type": "line"}]},
+        {"segments": [{"type": "arc"}]},
     )
 
 
