@@ -49,7 +49,7 @@ fn compile_smooth_triangle_plus_gain() {
         c.stages[1],
         ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.04
     ));
-    let (lo, hi) = c.max_half_support();
+    let (lo, hi) = c.max_input_window();
     assert!((hi - 0.02).abs() < 1e-12 && (lo + 0.02).abs() < 1e-12);
 }
 
@@ -85,7 +85,7 @@ fn compile_zero_smooth_time_is_passthrough() {
         c.stages.is_empty(),
         "smooth_time=0 must contribute no stage"
     );
-    assert_eq!(c.max_half_support(), (0.0, 0.0));
+    assert_eq!(c.max_input_window(), (0.0, 0.0));
 }
 
 #[test]
@@ -306,8 +306,8 @@ fn compile_rejects_directly_constructed_bad_mode_inverse_params() {
 fn follower_supports_cascade_on_top_of_the_leaders() {
     let leader = CompiledChain::compile(&[bell(0.01605)]).unwrap();
     let follower = CompiledChain::compile(&[pa(0.04), bell(0.0321)]).unwrap();
-    let (lead_lo, lead_hi) = leader.max_half_support();
-    let (own_lo, own_hi) = follower.max_half_support();
+    let (lead_lo, lead_hi) = leader.max_input_window();
+    let (own_lo, own_hi) = follower.max_input_window();
     let set = AxisChainSet {
         chains: vec![
             leader.clone(),
@@ -331,7 +331,7 @@ fn follower_supports_cascade_on_top_of_the_leaders() {
 fn kernel_free_followers_do_not_gate_the_shaper() {
     let leader = CompiledChain::compile(&[bell(0.01605)]).unwrap();
     let follower = CompiledChain::compile(&[pa(0.04)]).unwrap();
-    let (lead_lo, lead_hi) = leader.max_half_support();
+    let (lead_lo, lead_hi) = leader.max_input_window();
     let set = AxisChainSet {
         chains: vec![
             leader.clone(),

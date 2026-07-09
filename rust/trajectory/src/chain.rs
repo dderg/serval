@@ -16,10 +16,17 @@ pub enum ChainStage {
 }
 
 impl ChainStage {
+    /// The input time window this stage's output at `t` depends on, relative
+    /// to `t`. A convolution `(f ∗ k)(t)` reads `f` over `[t - k_hi, t - k_lo]`,
+    /// so the kernel's support enters reflected; the two coincide only for
+    /// symmetric kernels.
     #[must_use]
-    pub fn half_support(&self) -> (f64, f64) {
+    pub fn input_window(&self) -> (f64, f64) {
         match self {
-            Self::SmoothKernel(kernel) => kernel.support(),
+            Self::SmoothKernel(kernel) => {
+                let (k_lo, k_hi) = kernel.support();
+                (-k_hi, -k_lo)
+            }
             Self::DerivativeGains { .. } => (0.0, 0.0),
         }
     }
@@ -179,9 +186,9 @@ impl CompiledChain {
     }
 
     #[must_use]
-    pub fn max_half_support(&self) -> (f64, f64) {
+    pub fn max_input_window(&self) -> (f64, f64) {
         self.stages.iter().fold((0.0, 0.0), |(lo, hi), stage| {
-            let (stage_lo, stage_hi) = stage.half_support();
+            let (stage_lo, stage_hi) = stage.input_window();
             (lo.min(stage_lo), hi.max(stage_hi))
         })
     }
@@ -254,7 +261,7 @@ impl AxisChainSet {
     /// its own chain on top, so the supports cascade: they add.
     #[must_use]
     pub fn axis_support(&self, axis: usize) -> (f64, f64) {
-        let (own_lo, own_hi) = self.chains[axis].max_half_support();
+        let (own_lo, own_hi) = self.chains[axis].max_input_window();
         let (lead_lo, lead_hi) = self.leaders_support(axis);
         (own_lo + lead_lo, own_hi + lead_hi)
     }
@@ -267,7 +274,7 @@ impl AxisChainSet {
             .find(|(a, _)| *a == axis)
             .map_or((0.0, 0.0), |(_, leaders)| {
                 leaders.iter().fold((0.0, 0.0), |(lo, hi), &l| {
-                    let (l_lo, l_hi) = self.chains[l].max_half_support();
+                    let (l_lo, l_hi) = self.chains[l].max_input_window();
                     (lo.min(l_lo), hi.max(l_hi))
                 })
             })
@@ -303,7 +310,7 @@ impl AxisChainSet {
     pub fn direct_forward_support(&self) -> f64 {
         (0..self.n_axes())
             .filter(|&axis| !self.is_projected_follower(axis))
-            .map(|axis| self.chains[axis].max_half_support().1)
+            .map(|axis| self.chains[axis].max_input_window().1)
             .fold(0.0, f64::max)
     }
 
@@ -314,7 +321,7 @@ impl AxisChainSet {
     pub fn max_follower_own_forward_support(&self) -> f64 {
         self.projected_followers()
             .filter(|(axis, _)| self.has_own_kernel(*axis))
-            .map(|(axis, _)| self.chains[axis].max_half_support().1)
+            .map(|(axis, _)| self.chains[axis].max_input_window().1)
             .fold(0.0, f64::max)
     }
 }

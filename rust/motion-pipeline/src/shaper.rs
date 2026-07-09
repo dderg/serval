@@ -351,8 +351,8 @@ fn apply_axis_chain(
     let signal_segments: Vec<&ShapedSegment> = history.iter().chain(base.iter()).collect();
     let input_breaks = signal_breakpoints(&signal_segments, axis);
     for seg in out.iter_mut() {
-        let need_lo = seg.t_start + k_lo;
-        let need_hi = seg.t_end + k_hi;
+        let need_lo = seg.t_start - k_hi;
+        let need_hi = seg.t_end - k_lo;
         if need_lo < first_t && !at_stream_boundary {
             return Err(PostProcessError::MissingHistory { axis, t: need_lo });
         }

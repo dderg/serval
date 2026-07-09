@@ -600,6 +600,48 @@ fn drained_prefix_is_invariant_under_append() {
     assert!(compared > 0, "nothing inside the comparison horizon");
 }
 
+/// The smooth_zv kernel is mean-centered, so its support is asymmetric
+/// (`[-T/2 - mu, T/2 - mu]`, mu < 0): the convolution needs more history than
+/// lookahead. Streaming many segments through the shaper forces history
+/// trimming; a window/retention computation that assumes symmetric support
+/// dies here with a non-finite sample. Regression for the reflected
+/// input-window fix.
+#[test]
+fn asymmetric_kernel_survives_history_trimming_across_many_segments() {
+    let chain = trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
+        "is",
+        &trajectory::algos::SmoothZv,
+        vec![130.0],
+    )])
+    .expect("single post-processor always compiles");
+    let chains = AxisChainSet::spatial(
+        chain,
+        trajectory::CompiledChain::default(),
+        trajectory::CompiledChain::default(),
+    );
+    let moves: Vec<geometry::Move> = (0..40)
+        .map(|i| {
+            let a = f64::from(i) * 2.0;
+            line(i + 1, [a, 0.0, 0.0], [a + 2.0, 0.0, 0.0], 0.0)
+        })
+        .collect();
+    let segs = replay(cfg(), chains, &[0.0, 0.0, 0.0], 0.0, &moves);
+    assert!(!segs.is_empty());
+    for seg in &segs {
+        for curve in &seg.axes {
+            assert!(curve.control_points().iter().all(|v| v.is_finite()));
+        }
+    }
+    let last = segs.last().expect("non-empty");
+    let final_x = eval(&last.axes[0], last.t_end);
+    let shaped_fit_budget = 1e-3;
+    assert!(
+        (final_x - 80.0).abs() < shaped_fit_budget,
+        "final x = {final_x}, t_end = {}",
+        last.t_end
+    );
+}
+
 fn smooth_x_chains(smooth_time: f64) -> AxisChainSet {
     AxisChainSet::spatial(
         trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
@@ -715,7 +757,7 @@ fn smooth_shaper_first_emission_after_nonzero_start_time_is_valid() {
 #[test]
 fn smooth_shaper_second_batch_window_before_stream_start_clamps() {
     let chains = smooth_x_chains(0.044583333333333336);
-    let (_, back) = chains.chains[0].max_half_support();
+    let (_, back) = chains.chains[0].max_input_window();
     let back = back.abs();
     let t0 = 1.0;
     let step = 0.4 * back;

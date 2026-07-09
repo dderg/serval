@@ -127,8 +127,8 @@ pub(crate) fn project_followers(
                     let first = state.projected.first().expect("cache covers commits");
                     let last = state.projected.last().expect("cache covers commits");
                     let (first_t, last_t) = (first.t_start, last.t_end);
-                    let need_lo = raw.t_start + k_lo;
-                    let need_hi = raw.t_end + k_hi;
+                    let need_lo = raw.t_start - k_hi;
+                    let need_hi = raw.t_end - k_lo;
                     if need_lo < first_t && state.projected_trimmed {
                         return Err(PostProcessError::MissingHistory { axis, t: need_lo });
                     }
@@ -155,7 +155,7 @@ pub(crate) fn project_followers(
         }
         if commit_count > 0 {
             let emitted_through = base[commit_count - 1].t_end;
-            let back = kernel.map_or(0.0, |k| k.support().0.abs());
+            let back = kernel.map_or(0.0, |k| k.support().1.max(0.0));
             state.trim_projected(emitted_through - back);
         }
         if projecting {
