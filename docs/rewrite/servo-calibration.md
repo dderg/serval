@@ -34,7 +34,7 @@ they are configured or passed.
 
 | Option | Default | Used by |
 |---|---|---|
-| `servos` | `stepper_x, stepper_y` | the CoreXY measure/calibrate commands (`SERVOS=`) |
+| `servos` | `stepper_x, stepper_y` | single-drive default for `SERVO=`/`AXIS=`-less commands; the CoreXY measure/calibrate commands derive their drives from the kinematics (`SERVOS=` overrides) |
 | `rated_torque_nm` | — | inertia-ratio commands (`TORQUE_NM=`) |
 | `rotor_inertia_kgm2` | — | inertia-ratio commands (`INERTIA_KGM2=`) |
 | `x_start` / `x_end` | `20` / `200` | X strokes (`START`/`END`, `X_START`/`X_END`) |
@@ -80,11 +80,15 @@ Params: `AXIS` (X) `START` `END` `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (3)
 
 #### SERVO_MEASURE_INERTIA
 Records the excitation grid for the inertia/friction fit (no report — it is the
-capture building block behind the fit commands). Params: `AXIS` (X) `START`
-`END` `ACCELS` `SPEEDS` `ITERATIONS` `DWELL_MS` `NAME` (ident).
+capture building block behind the fit commands). Captures every motor that
+moves the axis (both lanes on CoreXY, every drive of an AWD rail). Params:
+`AXIS` (X) `START` `END` `ACCELS` `SPEEDS` `ITERATIONS` `DWELL_MS` `NAME`
+(ident).
 
 #### SERVO_MEASURE_INERTIA_COREXY
-One capture of **both** drives with X and Y strokes at every grid point, so the
+One capture of **every** belt drive with X and Y strokes at every grid point
+(`SERVOS=` overrides; the default is every motor the kinematics says drives
+the belts), so the
 coupled fit can separate the diagonal and off-diagonal inertia (X strokes
 excite `m_diag+m_off`, Y strokes `m_diag−m_off`). Before each stroke set the
 toolhead moves (at `travel_speed`) to the active axis' start with the idle axis
@@ -94,7 +98,8 @@ measurement. Params: `SERVOS` `X_START`
 (ident).
 
 #### SERVO_MEASURE_FRICTION
-Slow constant-speed sweeps for the torque-vs-position friction map. Params:
+Slow constant-speed sweeps for the torque-vs-position friction map; captures
+every motor that moves the axis. Params:
 `AXIS` (X) `START` `END` `SPEED` (20) `ACCEL` (300) `ITERATIONS` (2) `DWELL_MS`
 `NAME` (friction).
 
@@ -202,7 +207,10 @@ above invoke them with the running klippy interpreter.
   `--axis` renders the CoreXY dashboard — on-axis and cross-axis tracking error
   with each stroke overlaid, per-motor torque, and moving-vs-stationary axis
   position; the optional per-motor sign `:-1` un-inverts a servo whose
-  `invert_direction` flips its encoder counts out of the kinematic frame,
+  `invert_direction` flips its encoder counts out of the kinematic frame; an
+  AWD belt lists both of its motors joined by `+`
+  (`motor_a:1+motor_a1:1,motor_b:-1+motor_b1:1`) and their mean forms the
+  belt trace,
   `--drive` restricts to one drive in a multi-drive capture, `--csv` exports
   samples.
 - **`servo_fit_dynamics.py`** — resolve the newest capture for `--name`, export
