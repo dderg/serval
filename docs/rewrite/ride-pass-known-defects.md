@@ -45,10 +45,12 @@ crossing at t≈5.197 s re-tiles into one extra piece with seam metrics
 unchanged and a rigid ~0.27 µs downstream time shift.
 
 **Cap walls no longer ride as chords** (was defect 1). A *wall* is a cell
-whose chord brake slope is unreachable at the speeds the cap holds
-(`slope²/2j > cap_v` — the sampled shadow of a velocity step), within the
-accel rail (super-rail cells keep the defect-2 chord treatment). Walls now
-get anchored handling in `ride::reach_pass`:
+whose chord demands more excess brake-slope shed than the cap holds —
+`(slope² − prev²)/2j > cap_v`, measuring the *step* from the previous
+chord's slope so a continuous brake curve's own steep tail (where the
+profile arrives already carrying the slope) stays out of the class — within
+the accel rail (super-rail cells keep the defect-2 chord treatment). Walls
+now get anchored handling in `ride::reach_pass`:
 
 - **Descending walls** are taken by a bang-bang boundary-value brake
   (jerk-down / hold / jerk-up, `brake_bvp`) that departs at the latest
@@ -65,12 +67,13 @@ get anchored handling in `ride::reach_pass`:
   not jerk-reachable from the arc's own acceleration — landing at a wall
   foot used to snap `a` onto the wall chord, recreating the staircase the
   detach avoided.
-- **Super-rail chord crossings no longer poison the state**: the arrival
-  state after an infeasible chord resumes from the slope the cap ahead
-  commands instead of carrying the rail-clamped wall chord — the jerk
-  recovery from `a = −rail` used to shed more speed than the profile held,
-  collapsing it to near rest (the `v → 0.0077` dip that produced negative
-  lowering quintics).
+- **Super-rail chord crossings no longer poison the state**: when the
+  rail-clamped chord slope is unrecoverable (its jerk swing back sheds more
+  speed than the profile holds — the `v → 0.0077` collapse that produced
+  negative lowering quintics), the arrival state resumes from the slope the
+  cap ahead commands instead. Recoverable crossings keep the chord slope, so
+  ordinary arc-corner descents are untouched (a blanket resume measurably
+  slowed them).
 - **Splices now also fire when a binding stretch begins mid-ride** (the
   previous stretch ending at an infeasible node left no mode transition to
   hang the splice on), so brake-to-rest tails adopt the envelope's exact
