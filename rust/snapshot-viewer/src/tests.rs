@@ -267,3 +267,14 @@ fn smooth_classes_keeps_a_sustained_change() {
     let smoothed = smooth_classes(&raw);
     assert_eq!(smoothed, raw);
 }
+
+#[test]
+fn percentile_spread_reads_zero_at_n_equals_three() {
+    // At n=3, trim = (3/10).max(1).min((3-1)/2) = 1, so lo and hi both index
+    // the middle element (the median), forcing spread to always be 0.0 regardless
+    // of how extreme the two outer samples are. This is the documented, accepted
+    // tradeoff: a 3-sample window errs toward "not enough data to call it anomalous"
+    // rather than risking a false positive on extreme outer values.
+    let sorted = vec![-100.0, 0.01, 100.0];
+    assert_eq!(percentile_spread(&sorted), 0.0);
+}

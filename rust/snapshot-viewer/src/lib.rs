@@ -222,7 +222,10 @@ impl CurvatureClass {
 // at least 3 -- plain `n / 10` truncates to 0 (i.e. no trim at all, degrading
 // to raw min-max) for any n under 10, which is exactly the small-window case
 // (a trailing partial window, or one shrunk by excluding Cusp/Gap samples)
-// this robustness exists to cover.
+// this robustness exists to cover. At n=3 this trims to a single middle element,
+// so spread always reads as 0 regardless of the two outer samples — an accepted
+// tradeoff: a 3-sample window erring toward "not enough data to call it anomalous"
+// is safer than the alternative of no outlier protection at all.
 #[allow(dead_code)]
 fn percentile_spread(sorted: &[f64]) -> f64 {
     let n = sorted.len();
