@@ -374,3 +374,24 @@ fn curvature_series_flags_cusp_at_a_speed_too_small_for_kappa_to_be_meaningful()
     let (_, classes) = curvature_series(&t, &xp, &yp);
     assert_eq!(classes[0], CurvatureClass::Cusp);
 }
+
+#[test]
+fn toolhead_series_samples_on_the_shared_grid() {
+    // x = 2*tau (linear), y = 1 + 3*tau^2 (quadratic), both on [0, 1].
+    let xp = vec![vec![0.0, 1.0, 0.0, 2.0]];
+    let yp = vec![vec![0.0, 1.0, 1.0, 0.0, 3.0]];
+    let t = vec![0.0, 0.5, 1.0];
+    let s = toolhead_series(&t, &xp, &yp);
+    assert_eq!(s.x, vec![0.0, 1.0, 2.0]);
+    assert_eq!(s.vx, vec![2.0, 2.0, 2.0]);
+    assert_eq!(s.ax, vec![0.0, 0.0, 0.0]);
+    assert_eq!(s.y, vec![1.0, 1.75, 4.0]);
+    assert_eq!(s.vy, vec![0.0, 3.0, 6.0]);
+    assert_eq!(s.ay, vec![6.0, 6.0, 6.0]);
+}
+
+#[test]
+fn toolhead_series_is_empty_for_empty_lanes() {
+    let s = toolhead_series(&[], &[], &[]);
+    assert!(s.x.is_empty() && s.y.is_empty());
+}

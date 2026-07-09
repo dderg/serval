@@ -88,6 +88,14 @@ pub struct Snapshot {
     pub traj_y_pieces: Vec<Vec<f64>>,
     pub traj_z_pieces: Vec<Vec<f64>>,
     pub traj_e_pieces: Vec<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toolhead_x_pieces: Option<Vec<Vec<f64>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toolhead_y_pieces: Option<Vec<Vec<f64>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toolhead_z_pieces: Option<Vec<Vec<f64>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toolhead_e_pieces: Option<Vec<Vec<f64>>>,
     pub traj_t_end: f64,
     pub traversal_time_s: f64,
     pub seam_max_dp: [f64; 4],
@@ -142,10 +150,11 @@ pub fn pipeline_snapshot(
         max_buffer_moves: SNAPSHOT_MAX_BUFFER_MOVES,
         limits,
     };
-    let (_fitted, shaped) = run_pipeline(&moves, config, axis_chains);
+    let (_fitted, shaped, toolhead) = run_pipeline(&moves, config, axis_chains);
 
     let traj = collect_trajectory_pieces(&shaped);
     let seams = seam_metrics(&traj);
+    let toolhead_traj = toolhead.map(|segs| collect_trajectory_pieces(&segs));
 
     Ok(Snapshot {
         raw_x: raw_points.iter().map(|p| p.0).collect(),
@@ -154,6 +163,10 @@ pub fn pipeline_snapshot(
         traj_y_pieces: traj.y,
         traj_z_pieces: traj.z,
         traj_e_pieces: traj.e,
+        toolhead_x_pieces: toolhead_traj.as_ref().map(|t| t.x.clone()),
+        toolhead_y_pieces: toolhead_traj.as_ref().map(|t| t.y.clone()),
+        toolhead_z_pieces: toolhead_traj.as_ref().map(|t| t.z.clone()),
+        toolhead_e_pieces: toolhead_traj.map(|t| t.e),
         traj_t_end: traj.t_end,
         traversal_time_s: traj.t_end,
         seam_max_dp: seams.max_dp,
@@ -291,11 +304,18 @@ fn build_axis_chains(params: &SnapshotParams) -> Result<AxisChainSet, String> {
         .map_err(|e| e.to_string())
 }
 
+/// The third element is the toolhead signal — the shaped segments before the
+/// motor-side derivative-gain stages — present exactly when some chain makes
+/// the motor command depart from it.
 pub fn run_pipeline(
     moves: &[geometry::Move],
     config: StreamConfig,
     axis_chains: AxisChainSet,
-) -> (Vec<geometry::Move>, Vec<ShapedSegment>) {
+) -> (
+    Vec<geometry::Move>,
+    Vec<ShapedSegment>,
+    Option<Vec<ShapedSegment>>,
+) {
     let spatial_home = moves
         .iter()
         .find_map(|m| m.segment.spatial.as_ref())
@@ -345,7 +365,16 @@ pub fn run_pipeline(
     );
 
     let (shaped_tx, shaped_rx) = unbounded();
-    motion_pipeline::Shaper::new(axis_chains).run(lowered_rx, shaped_tx);
+    let capture_toolhead = axis_chains.has_motor_side_stages();
+    let mut shaper = motion_pipeline::Shaper::new(axis_chains);
+    let toolhead_rx = if capture_toolhead {
+        let (toolhead_tx, toolhead_rx) = unbounded();
+        shaper = shaper.with_toolhead_tap(toolhead_tx);
+        Some(toolhead_rx)
+    } else {
+        None
+    };
+    shaper.run(lowered_rx, shaped_tx);
     let shaped: Vec<ShapedSegment> = shaped_rx
         .into_iter()
         .filter_map(|item| match item {
@@ -353,8 +382,17 @@ pub fn run_pipeline(
             motion_pipeline::ShapedItem::Control(_) => None,
         })
         .collect();
+    let toolhead = toolhead_rx.map(|rx| {
+        let segs: Vec<ShapedSegment> = rx.into_iter().collect();
+        assert_eq!(
+            segs.len(),
+            shaped.len(),
+            "toolhead tap must mirror every emitted segment"
+        );
+        segs
+    });
 
-    (fitted, shaped)
+    (fitted, shaped, toolhead)
 }
 
 /// The trajectory the firmware actually executes: the host lowering's own

@@ -3,8 +3,7 @@ use nurbs::bezier::bezier_pieces_to_nurbs;
 use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedSignal};
 
 use crate::shaper::{
-    SEGMENT_TIME_EPS_S, TrackSignal, apply_derivative_gains_to_track, apply_trailing_zero_support,
-    fit_axis_from_signal,
+    SEGMENT_TIME_EPS_S, TrackSignal, apply_derivative_gains_to_track, fit_axis_from_signal,
 };
 use crate::types::PostProcessError;
 
@@ -146,7 +145,6 @@ pub(crate) fn project_followers(
                         state.projected_breakpoints(),
                     );
                     let shaped = fit_axis_from_signal(axis, cached, &sig)?;
-                    let shaped = apply_trailing_zero_support(chain, shaped);
                     if !shaped.control_points().iter().all(|v| v.is_finite()) {
                         return Err(PostProcessError::NonFiniteSample {
                             axis,

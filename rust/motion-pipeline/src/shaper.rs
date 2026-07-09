@@ -52,6 +52,7 @@ pub struct Shaper {
     back_support: f64,
     history_trimmed: bool,
     follower_states: Vec<FollowerState>,
+    toolhead_tap: Option<Sender<ShapedSegment>>,
 }
 
 impl Shaper {
@@ -65,7 +66,17 @@ impl Shaper {
             pending_rest: VecDeque::new(),
             history_trimmed: false,
             follower_states: Vec::new(),
+            toolhead_tap: None,
         }
+    }
+
+    /// Mirrors every emitted segment as it stands before the motor-side
+    /// derivative-gain stages — the toolhead signal, where the emitted
+    /// segments are the motor command.
+    #[must_use]
+    pub fn with_toolhead_tap(mut self, tap: Sender<ShapedSegment>) -> Self {
+        self.toolhead_tap = Some(tap);
+        self
     }
 
     pub fn run(mut self, input: Receiver<LoweredItem>, output: Sender<ShapedItem>) {
@@ -214,6 +225,7 @@ impl Shaper {
             !self.history_trimmed,
             &self.chains,
             &mut self.follower_states,
+            self.toolhead_tap.as_ref(),
         )
         .unwrap_or_else(|e| panic!("shaper: {e}"));
         for seg in shaped {
@@ -254,6 +266,7 @@ fn apply_axis_chains(
     at_stream_boundary: bool,
     chains: &AxisChainSet,
     follower_states: &mut Vec<FollowerState>,
+    toolhead_tap: Option<&Sender<ShapedSegment>>,
 ) -> Result<Vec<ShapedSegment>, PostProcessError> {
     let mut out: Vec<ShapedSegment> = base
         .iter()
@@ -264,6 +277,7 @@ fn apply_axis_chains(
         && follower_states.iter().all(|s| !s.is_active())
     {
         out.truncate(commit_count);
+        send_toolhead(toolhead_tap, &out);
         return Ok(out);
     }
     let n_axes = out.iter().map(|seg| seg.axes.len()).max().unwrap_or(0);
@@ -298,28 +312,35 @@ fn apply_axis_chains(
     }
     project_followers(base, &mut out, commit_count, force, chains, follower_states)?;
     out.truncate(commit_count);
-    apply_motor_side_stages(&mut out, chains, &default_chain);
+    send_toolhead(toolhead_tap, &out);
+    apply_motor_side_stages(&mut out, chains);
     for seg in &mut out {
         pad_segment_axes_to_uniform_degree(seg);
     }
     Ok(out)
 }
 
+fn send_toolhead(tap: Option<&Sender<ShapedSegment>>, out: &[ShapedSegment]) {
+    let Some(tap) = tap else { return };
+    for seg in out {
+        tap.send(seg.clone())
+            .expect("shaper: toolhead tap receiver dropped");
+    }
+}
+
 /// Trailing derivative-gain stages produce the motor command (e.g. a
 /// mode-inverse counter-drive), which the physical toolhead does not follow —
 /// that is their entire purpose. They are therefore applied only after the
 /// followers have projected onto the toolhead signal.
-fn apply_motor_side_stages(
-    out: &mut [ShapedSegment],
-    chains: &AxisChainSet,
-    default_chain: &CompiledChain,
-) {
+fn apply_motor_side_stages(out: &mut [ShapedSegment], chains: &AxisChainSet) {
     for seg in out.iter_mut() {
         for axis in 0..seg.axes.len() {
-            if chains.is_projected_follower(axis) {
+            let Some(chain) = chains.chains.get(axis) else {
+                continue;
+            };
+            if !chain.has_motor_side_gains() {
                 continue;
             }
-            let chain = chains.chains.get(axis).unwrap_or(default_chain);
             seg.axes[axis] = apply_trailing_zero_support(chain, seg.axes[axis].clone());
         }
     }
