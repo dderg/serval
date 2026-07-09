@@ -64,14 +64,6 @@ int32_t runtime_configure_axis(struct Runtime *rt,
                                const struct StepperBindingRust *bindings_ptr,
                                uint8_t stepper_count);
 
-// Mirrors runtime::sub_sample_timing::MAX_STEPS_PER_SAMPLE (the inline
-// timestamp capacity); runtime_set_axis_step_budget rejects anything larger.
-#define RUNTIME_MAX_STEPS_PER_SAMPLE 64
-
-int32_t runtime_set_axis_step_budget(struct Runtime *rt,
-                                     uint8_t axis_idx,
-                                     uint32_t max_steps_per_sample);
-
 extern uint32_t runtime_cyccnt_read(void);
 
 /**
@@ -147,6 +139,10 @@ int32_t runtime_resonance_buzz(struct Runtime *rt,
 int32_t runtime_seed_position(struct Runtime *rt, int32_t x_q16, int32_t y_q16, int32_t z_q16);
 
 int32_t runtime_set_axis_mode(struct Runtime *rt, uint8_t axis_idx, uint8_t new_mode);
+
+int32_t runtime_set_axis_step_budget(struct Runtime *rt,
+                                     uint8_t axis_idx,
+                                     uint32_t max_steps_per_sample);
 
 int32_t runtime_set_stepper_offset(struct Runtime *rt,
                                    uint8_t stepper_idx,

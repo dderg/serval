@@ -27,6 +27,10 @@ struct stepper {
 // runtime_emit_step_pulses (~1 us), in CONFIG_CLOCK_FREQ ticks.
 #define STEP_MIN_EDGE_DWT ((CONFIG_CLOCK_FREQ) / 1000000u)
 
+// Mirrors runtime::sub_sample_timing::MAX_STEPS_PER_SAMPLE (the inline
+// timestamp capacity); runtime_set_axis_step_budget rejects anything larger.
+#define RUNTIME_MAX_STEPS_PER_SAMPLE 64
+
 volatile uint32_t config_stepper_oids_seen
     __attribute__((used, externally_visible));
 
