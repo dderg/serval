@@ -150,26 +150,6 @@ async function loadCase(name) {
   view.setData(after, before);
 }
 
-// -- PNG popup ---------------------------------------------------------------
-function openPng() {
-  if (!currentCase) return;
-  const scroll = document.getElementById("png-scroll");
-  scroll.innerHTML = "";
-  const img = new Image();
-  img.src = `/img/${encodeURIComponent(currentCase)}/after.png?t=${Date.now()}`;
-  scroll.appendChild(img);
-  scroll.scrollTop = 0;
-  document.getElementById("png-overlay").classList.add("open");
-}
-
-function closePng() {
-  document.getElementById("png-overlay").classList.remove("open");
-}
-
-function pngOpen() {
-  return document.getElementById("png-overlay").classList.contains("open");
-}
-
 // -- Accept ------------------------------------------------------------------
 function showAcceptDone() {
   document.body.innerHTML =
@@ -248,15 +228,9 @@ async function main() {
   });
 
   document.getElementById("toggle-variant").addEventListener("click", () => view.toggleVariant());
-  document.getElementById("open-png").addEventListener("click", openPng);
-  document.getElementById("png-overlay").addEventListener("click", closePng);
   document.getElementById("accept").addEventListener("click", acceptCurrent);
 
   document.addEventListener("keydown", (e) => {
-    if (pngOpen()) {
-      if (e.key === "Escape") closePng();
-      return;
-    }
     if (e.key === "ArrowLeft") stepCase(-1);
     else if (e.key === "ArrowRight") stepCase(1);
     else if (e.key === " " || e.key === "b" || e.key === "B") {
