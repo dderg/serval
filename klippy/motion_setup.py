@@ -3,7 +3,6 @@ import struct
 from collections import defaultdict, namedtuple
 
 from . import motion_kinematics, stepper
-from .arc_fit_config import arc_fit_from_config
 from .extras import servo_axis
 from .stepper import DEFAULT_STEP_PULSE_DURATION
 
@@ -148,10 +147,6 @@ def read_post_processors(motion, config):
                     "[axis %s] references undeclared post_processor "
                     "'%s' (declare [post_processor %s])" % (axis_name, ref, ref)
                 )
-
-
-def read_arc_fit(motion, config):
-    motion.arc_fit = arc_fit_from_config(config)
 
 
 def read_limits(motion, config):
@@ -319,7 +314,6 @@ def init_planner(motion):
                 motion.max_z_accel,
                 motion._square_corner_velocity,
             ),
-            arc_fit=motion.arc_fit,
             max_extrude_only_velocity=max_extrude_only_velocity,
             max_extrude_only_accel=max_extrude_only_accel,
             fit_tolerance_mm=motion.max_path_deviation,

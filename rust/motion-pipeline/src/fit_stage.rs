@@ -1,14 +1,31 @@
 use crossbeam_channel::{Receiver, Sender};
 use geometry::fitter::{
-    JunctionPlan, RunFit, arc_candidate_fits, blend_moves, is_travel, plan_junction_reduced,
+    JunctionPlan, RunFit, arc_candidate_fits, blend_moves, consumption_moves,
+    facet_consumption_candidate, is_travel, plan_facet_consumption, plan_junction_reduced,
     spatial_end, spatial_start, trim_line_move,
 };
 use geometry::path::{Line, PathSegment, Segment};
-use geometry::{ChainFitConfig, Move};
+use geometry::{CornerFitConfig, Move};
 
 use crate::{CONTIGUITY_EPS_MM, Control, StreamInput, dist3};
 
 const ALIGN_EPS_MM: f64 = 1e-9;
+const MIN_RUN_FACETS: usize = 3;
+/// Longest facet chain one consuming blend may replace — bounds how far the
+/// stage buffers past the first squeezed facet before giving up on finding
+/// the far anchor.
+const MAX_CONSUMED_FACETS: usize = 8;
+
+enum ClusterScan {
+    /// The cluster's far anchor is not buffered yet and more input may come.
+    WaitForInput,
+    /// `decided[1..=n]` are consumable facets and `decided[n + 1]` is the far
+    /// anchor piece.
+    Anchor(usize),
+    /// The chain runs into a run, end-of-stream, or past the facet cap —
+    /// no consumption; the junctions resolve pairwise.
+    NoAnchor,
+}
 
 /// First pipeline stage: reads raw moves, fits them into G2-continuous
 /// geometry, and pushes the fitted pieces downstream.
@@ -33,8 +50,7 @@ const ALIGN_EPS_MM: f64 = 1e-9;
 /// reductions) exactly as the batch fit does — and length already paid out to
 /// an emitted blend or easing is applied only when a body is finally emitted.
 pub struct FitStage {
-    config: ChainFitConfig,
-    min_run: usize,
+    corner: CornerFitConfig,
     decided: Vec<Element>,
     tail: Vec<Move>,
     tail_checked: usize,
@@ -73,13 +89,9 @@ fn piece_of(e: &Element) -> Option<&Move> {
 }
 
 impl FitStage {
-    pub fn new(config: ChainFitConfig) -> Self {
-        let min_run = config
-            .arc_fit
-            .map_or(0, |arc| arc.min_run_facets.max(3) as usize);
+    pub fn new(corner: CornerFitConfig) -> Self {
         Self {
-            config,
-            min_run,
+            corner,
             decided: Vec::new(),
             tail: Vec::new(),
             tail_checked: 1,
@@ -162,14 +174,10 @@ impl FitStage {
     /// the front move to be a plain piece.
     fn decide_kinds(&mut self, eof: bool) {
         while !self.tail.is_empty() {
-            if self.min_run == 0 {
-                self.decided.push(Element::Piece(self.tail.remove(0)));
-                continue;
-            }
             let n = self.tail.len();
             let mut broke = false;
             while self.tail_checked < n {
-                if !arc_candidate_fits(&self.tail[..=self.tail_checked], self.config) {
+                if !arc_candidate_fits(&self.tail[..=self.tail_checked], self.corner) {
                     broke = true;
                     break;
                 }
@@ -178,7 +186,7 @@ impl FitStage {
             if !broke && !eof {
                 return;
             }
-            if self.tail_checked >= self.min_run {
+            if self.tail_checked >= MIN_RUN_FACETS {
                 let facets: Vec<Move> = self.tail.drain(..self.tail_checked).collect();
                 self.decided.push(RunElement::sealed(facets));
             } else {
@@ -209,7 +217,7 @@ impl FitStage {
             }
             let head = (idx > 0).then(|| &self.decided[idx - 1]).and_then(piece_of);
             let tail = self.decided.get(idx + 1).and_then(piece_of);
-            let fit = RunFit::fit(&re.facets, head, tail, self.config.corner)
+            let fit = RunFit::fit(&re.facets, head, tail, self.corner)
                 .unwrap_or_else(|e| panic!("fit_stage: run reconstruction failed: {e:?}"));
             let head = head.cloned();
             match fit {
@@ -219,7 +227,7 @@ impl FitStage {
                     };
                     re.head_blend = match &head {
                         Some(prev) => fit
-                            .blend_head_with_line(prev, &re.facets[0], self.config.corner)
+                            .blend_head_with_line(prev, &re.facets[0], self.corner)
                             .unwrap_or_else(|e| panic!("fit_stage: head blend failed: {e:?}")),
                         None => Vec::new(),
                     };
@@ -247,7 +255,7 @@ impl FitStage {
     }
 
     fn resolve_tail_blends(&mut self, eof: bool) {
-        let corner = self.config.corner;
+        let corner = self.corner;
         for idx in 0..self.decided.len() {
             let Element::Run(re) = &self.decided[idx] else {
                 continue;
@@ -344,18 +352,33 @@ impl FitStage {
                         self.seam_head_trim = 0.0;
                         self.seam_in_reduction = 0.0;
                     }
-                    Some(Element::Piece(_)) => {
-                        let out_reduction = if self.min_run == 0 {
-                            0.0
-                        } else {
-                            match self.decided.get(2) {
-                                None if !eof => return true,
-                                None | Some(Element::Piece(_)) => 0.0,
-                                Some(Element::Run(after)) => match &after.fit {
-                                    None => return true,
-                                    Some(fit) => fit.head_line_trim(),
-                                },
+                    Some(Element::Piece(mid)) => {
+                        let front = piece_of(&self.decided[0]).expect("front matched a piece");
+                        if facet_consumption_candidate(
+                            front,
+                            mid,
+                            self.corner,
+                            self.seam_in_reduction,
+                        ) {
+                            match self.consumable_cluster(eof) {
+                                ClusterScan::WaitForInput => return true,
+                                ClusterScan::Anchor(max_mids) => {
+                                    match self.try_consumption(max_mids, out) {
+                                        Some(false) => return false,
+                                        Some(true) => continue,
+                                        None => {}
+                                    }
+                                }
+                                ClusterScan::NoAnchor => {}
                             }
+                        }
+                        let out_reduction = match self.decided.get(2) {
+                            None if !eof => return true,
+                            None | Some(Element::Piece(_)) => 0.0,
+                            Some(Element::Run(after)) => match &after.fit {
+                                None => return true,
+                                Some(fit) => fit.head_line_trim(),
+                            },
                         };
                         if !self.emit_pairwise(out_reduction, out) {
                             return false;
@@ -380,17 +403,12 @@ impl FitStage {
         let (Some(m), Some(next)) = (piece_of(&self.decided[0]), piece_of(&self.decided[1])) else {
             unreachable!("caller matched two front pieces")
         };
-        let plan = plan_junction_reduced(
-            m,
-            next,
-            self.config.corner,
-            self.seam_in_reduction,
-            out_reduction,
-        )
-        .unwrap_or_else(|e| panic!("fit_stage: junction plan failed: {e:?}"));
-        let (trim_end, blend) = match plan {
-            JunctionPlan::Blend(b) => (b.trim(), Some(b)),
-            JunctionPlan::Unblended(_) => (0.0, None),
+        let plan =
+            plan_junction_reduced(m, next, self.corner, self.seam_in_reduction, out_reduction)
+                .unwrap_or_else(|e| panic!("fit_stage: junction plan failed: {e:?}"));
+        let (trim_end, next_head_trim, blend) = match plan {
+            JunctionPlan::Blend(b) => (b.trim_in(), b.trim_out(), Some(b)),
+            JunctionPlan::Unblended(_) => (0.0, 0.0, None),
         };
         let Element::Piece(m) = self.decided.remove(0) else {
             unreachable!()
@@ -420,7 +438,113 @@ impl FitStage {
                 }
             }
         }
-        self.seam_head_trim = trim_end;
+        self.seam_head_trim = next_head_trim;
+        self.seam_in_reduction = 0.0;
+        true
+    }
+
+    /// How far the consumable chain behind the front piece extends: grow
+    /// while each next buffered piece is itself a squeezed facet off the one
+    /// before it, and report the first piece that isn't as the far anchor.
+    /// When the chain runs into a run or end-of-stream instead of an anchor
+    /// piece, the last facet itself can still anchor a shorter consumption.
+    fn consumable_cluster(&self, eof: bool) -> ClusterScan {
+        let mut n = 1;
+        loop {
+            match self.decided.get(n + 1) {
+                None if !eof => return ClusterScan::WaitForInput,
+                None | Some(Element::Run(_)) => {
+                    return if n >= 2 {
+                        ClusterScan::Anchor(n - 1)
+                    } else {
+                        ClusterScan::NoAnchor
+                    };
+                }
+                Some(Element::Piece(next)) => {
+                    let prev = piece_of(&self.decided[n]).expect("chain grew over pieces");
+                    if n == MAX_CONSUMED_FACETS
+                        || !facet_consumption_candidate(prev, next, self.corner, 0.0)
+                    {
+                        return ClusterScan::Anchor(n);
+                    }
+                    n += 1;
+                }
+            }
+        }
+    }
+
+    /// Consume the longest prefix of the scanned facet chain that passes
+    /// every gate: try all `max_mids` facets against the piece after them,
+    /// then shrink — a shorter prefix anchors on the facet that follows it,
+    /// exactly as a lone squeezed facet anchors on any next piece. Returns
+    /// the send result, or `None` when no prefix is consumable.
+    fn try_consumption(&mut self, max_mids: usize, out: &mut TravelAligningSender) -> Option<bool> {
+        for n_mids in (1..=max_mids).rev() {
+            let front = piece_of(&self.decided[0]).expect("caller matched a front piece");
+            let mids: Vec<&Move> = self.decided[1..=n_mids]
+                .iter()
+                .map(|e| piece_of(e).expect("scan matched pieces"))
+                .collect();
+            let after = piece_of(&self.decided[n_mids + 1]).expect("scan matched the anchor piece");
+            let plan =
+                plan_facet_consumption(front, &mids, after, self.corner, self.seam_in_reduction)
+                    .unwrap_or_else(|e| panic!("fit_stage: facet consumption failed: {e:?}"));
+            if let Some(fc) = plan {
+                return Some(self.emit_consumption(fc, n_mids, out));
+            }
+        }
+        None
+    }
+
+    /// Emit the consumption of the facet chain behind the front piece: the
+    /// front piece's body trimmed at its tail, the blend segments spanning
+    /// the consumed facets, and nothing of the facets themselves — their
+    /// geometry and extrusion live in the blend. The trim the blend claims
+    /// from the anchor piece's head is carried to its eventual emission.
+    fn emit_consumption(
+        &mut self,
+        fc: geometry::fitter::FacetConsumption,
+        n_mids: usize,
+        out: &mut TravelAligningSender,
+    ) -> bool {
+        let Element::Piece(front) = self.decided.remove(0) else {
+            unreachable!("caller matched a front piece")
+        };
+        let mids: Vec<Move> = self
+            .decided
+            .drain(..n_mids)
+            .map(|e| {
+                let Element::Piece(m) = e else {
+                    unreachable!("caller matched consumable pieces")
+                };
+                m
+            })
+            .collect();
+        let mid_refs: Vec<&Move> = mids.iter().collect();
+        let after = piece_of(&self.decided[0]).expect("caller matched the anchor piece");
+        let body = trim_line_move(&front, self.seam_head_trim, fc.trim_in()).unwrap_or_else(|e| {
+            panic!(
+                "fit_stage: trim of line {} failed: {e:?}",
+                front.source.start_line
+            )
+        });
+        if let Some(body) = body {
+            if !out.send(body) {
+                return false;
+            }
+        }
+        let segments = consumption_moves(&fc, &front, &mid_refs, after).unwrap_or_else(|e| {
+            panic!(
+                "fit_stage: consumption of line {} failed: {e:?}",
+                mids[0].source.start_line
+            )
+        });
+        for seg in segments {
+            if !out.send(seg) {
+                return false;
+            }
+        }
+        self.seam_head_trim = fc.trim_out();
         self.seam_in_reduction = 0.0;
         true
     }

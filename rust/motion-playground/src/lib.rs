@@ -18,8 +18,6 @@ struct PlaygroundConfig {
     square_corner_velocity: f64,
     max_jerk: f64,
     #[serde(default)]
-    arc_fit: Option<u32>,
-    #[serde(default)]
     max_extrude_only_velocity: Option<f64>,
     #[serde(default)]
     max_extrude_only_accel: Option<f64>,
@@ -56,7 +54,6 @@ pub fn plan(gcode_text: &str, config_json: &str) -> Result<String, JsValue> {
             max_accel: cfg.max_accel,
             square_corner_velocity: cfg.square_corner_velocity,
             max_jerk,
-            arc_fit: cfg.arc_fit,
             max_extrude_only_velocity: cfg.max_extrude_only_velocity,
             max_extrude_only_accel: cfg.max_extrude_only_accel,
             max_path_deviation: cfg.max_path_deviation,

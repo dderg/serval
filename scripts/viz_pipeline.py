@@ -25,7 +25,6 @@ class PrinterConfigData:
     max_accel: float
     square_corner_velocity: float
     max_jerk: float
-    arc_fit: object
     max_extrude_only_velocity: float | None
     max_extrude_only_accel: float | None
     max_path_deviation: float
@@ -86,10 +85,9 @@ def _matplotlib_logging_silenced():
 
 
 def read_printer_config(cfg_path: Path) -> PrinterConfigData:
-    # Parse through klippy's own loader so includes resolve and the keys,
-    # defaults, and the [arc_fit] knobs match the live printer exactly.
+    # Parse through klippy's own loader so includes resolve and the keys
+    # and defaults match the live printer exactly.
     from klippy import configfile, motion_setup
-    from klippy.arc_fit_config import arc_fit_from_config
     from klippy.motion import Motion
 
     loader = configfile.PrinterConfig.__new__(configfile.PrinterConfig)
@@ -126,7 +124,6 @@ def read_printer_config(cfg_path: Path) -> PrinterConfigData:
             "square_corner_velocity", 5.0, minval=0.0
         ),
         max_jerk=max_jerk if max_jerk > 0.0 else float("inf"),
-        arc_fit=arc_fit_from_config(config),
         max_extrude_only_velocity=extrude_only_velocity,
         max_extrude_only_accel=extrude_only_accel,
         max_path_deviation=printer.getfloat(
@@ -709,7 +706,6 @@ def main():
         cfg.max_accel,
         cfg.square_corner_velocity,
         cfg.max_jerk,
-        arc_fit=cfg.arc_fit,
         max_extrude_only_velocity=cfg.max_extrude_only_velocity,
         max_extrude_only_accel=cfg.max_extrude_only_accel,
         max_path_deviation=cfg.max_path_deviation,

@@ -198,6 +198,81 @@ fn general_blend_handles_line_to_arc_corner() {
     assert!(dist(vertex, blend.half2.start_pose) <= delta + 1e-6);
 }
 
+fn corner_setup(theta: f64) -> ([f64; 3], [f64; 3], [f64; 3]) {
+    let t_in = X;
+    let t_out = rot_z(X, theta);
+    let v = crate::vec3::turn_normal(t_in, t_out).expect("corner turns");
+    (t_in, t_out, v)
+}
+
+fn assert_line_line_contract(
+    blend: &GeneralBlend,
+    vertex: [f64; 3],
+    t_in: [f64; 3],
+    t_out: [f64; 3],
+    delta: f64,
+) {
+    assert_blend_g2(blend, 0.0, 0.0);
+    assert!(
+        (blend.trim_in - blend.trim_out).abs() < 1e-12,
+        "line-line blends are symmetric"
+    );
+    let a = madd(vertex, -blend.trim_in, t_in);
+    assert!(
+        dist(blend.half1.start_pose, a) < 1e-9,
+        "blend must start on the inbound line at trim_in"
+    );
+    let b = madd(vertex, blend.trim_out, t_out);
+    let end = blend.half2.point_at(blend.half2.s_len());
+    assert!(
+        dist(end, b) < 1e-7,
+        "blend must end on the outbound line at trim_out: {end:?} vs {b:?}"
+    );
+    let dev = dist(vertex, blend.half2.start_pose);
+    assert!(
+        dev <= delta + 1e-9,
+        "corner deviation {dev} exceeds delta {delta}"
+    );
+}
+
+#[test]
+fn line_line_blend_uses_full_deviation_when_unclamped() {
+    let vertex = [3.0, -2.0, 0.0];
+    let (t_in, t_out, v) = corner_setup(1.0);
+    let delta = 0.02;
+    let blend = solve_line_line(vertex, t_in, v, 1.0, delta, 20.0)
+        .expect("solver ok")
+        .expect("must blend");
+    assert_line_line_contract(&blend, vertex, t_in, t_out, delta);
+    let dev = dist(vertex, blend.half2.start_pose);
+    assert!(
+        dev > 0.9 * delta,
+        "unclamped blend should use most of the deviation budget, got {dev}"
+    );
+}
+
+#[test]
+fn budget_clamped_corner_keeps_its_shallow_cut() {
+    let vertex = [3.0, -2.0, 0.0];
+    let (t_in, t_out, v) = corner_setup(1.0);
+    let delta = 0.05;
+    let budget = 0.25;
+    let blend = solve_line_line(vertex, t_in, v, 1.0, delta, budget)
+        .expect("solver ok")
+        .expect("must blend");
+    assert!(
+        blend.trim_in >= budget - 1e-9 && blend.trim_in <= budget + 1e-9,
+        "setup must be budget-clamped, got trim {}",
+        blend.trim_in
+    );
+    assert_line_line_contract(&blend, vertex, t_in, t_out, delta);
+    let dev = dist(vertex, blend.half2.start_pose);
+    assert!(
+        dev < 0.9 * delta,
+        "a clamped blend must not round the corner out to the full tolerance, got {dev}"
+    );
+}
+
 #[test]
 fn general_blend_clamps_to_runway_budget() {
     let vertex = [0.0, 0.0, 0.0];

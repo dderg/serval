@@ -93,7 +93,6 @@ class Motion:
         self._read_limits(config)
         self._read_axes(config)
         self._read_post_processors(config)
-        self._read_arc_fit(config)
         self.print_stall = 0
         _deprecated_buffer_time_high = config.getfloat(
             "buffer_time_high", 2.0, above=0.0
@@ -745,9 +744,6 @@ class Motion:
 
     def _read_post_processors(self, config):
         return motion_setup.read_post_processors(self, config)
-
-    def _read_arc_fit(self, config):
-        return motion_setup.read_arc_fit(self, config)
 
     def _read_limits(self, config):
         return motion_setup.read_limits(self, config)

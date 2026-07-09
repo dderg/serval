@@ -15,7 +15,6 @@ const CONFIG_FIELDS = [
   { id: "max_jerk", required: true },
   { id: "max_path_deviation", required: false },
   { id: "max_accel_deviation", required: false },
-  { id: "arc_fit", required: false, integer: true },
   { id: "max_extrude_only_velocity", required: false },
   { id: "max_extrude_only_accel", required: false },
 ];

@@ -6,13 +6,13 @@ use crate::types::PlannedMove;
 use crossbeam_channel::unbounded;
 use geometry::path::{Arc, PathSegment, Segment};
 use geometry::segment::SourceRange;
-use geometry::{ChainFitConfig, MoveContext, VelocityLimits, line_move};
+use geometry::{CornerFitConfig, MoveContext, VelocityLimits, line_move};
 use nurbs::bezier::extract_bezier_pieces;
 use nurbs::eval::eval;
 
 fn stream_config() -> StreamConfig {
     StreamConfig {
-        chain: ChainFitConfig::default(),
+        corner: CornerFitConfig::default(),
         integration_tol: 1e-7,
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
@@ -36,7 +36,7 @@ fn fit_and_plan(moves: &[geometry::Move]) -> Vec<PlannedMove> {
     drop(raw_tx);
 
     let (fitted_tx, fitted_rx) = unbounded();
-    FitStage::new(ChainFitConfig::default()).run(raw_rx, fitted_tx);
+    FitStage::new(CornerFitConfig::default()).run(raw_rx, fitted_tx);
 
     let (planned_tx, planned_rx) = unbounded();
     Planner::new(stream_config()).run(fitted_rx, planned_tx);

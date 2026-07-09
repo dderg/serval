@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 pub use geometry::Move;
 use geometry::path::lowering::PositionProfile;
-use geometry::{ChainFitConfig, VelocityLimits};
+use geometry::{CornerFitConfig, VelocityLimits};
 use runtime::piece_ring::PieceEntry;
 use trajectory::{AxisChainSet, ShapedSegment};
 
@@ -24,7 +24,7 @@ const EXTRUDER_AXIS: usize = 3;
 #[must_use]
 pub fn default_stream_config() -> StreamConfig {
     StreamConfig {
-        chain: ChainFitConfig::default(),
+        corner: CornerFitConfig::default(),
         integration_tol: 1e-4,
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,
