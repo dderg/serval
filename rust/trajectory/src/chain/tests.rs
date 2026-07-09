@@ -1,9 +1,12 @@
 use super::*;
-use crate::algos::{LinearPressureAdvance, SmoothBell, SmoothTriangle};
+use crate::algos::{LinearPressureAdvance, ModeInverse, SmoothBell, SmoothTriangle};
 use crate::kernel::build_smooth_bell_kernel;
 
 fn pa(k: f64) -> PostProcessorInstance {
     PostProcessorInstance::new("pa", &LinearPressureAdvance, vec![k])
+}
+fn mi(frequency_hz: f64, damping_ratio: f64) -> PostProcessorInstance {
+    PostProcessorInstance::new("belt", &ModeInverse, vec![frequency_hz, damping_ratio])
 }
 fn bell(smooth_time: f64) -> PostProcessorInstance {
     PostProcessorInstance::new("is", &SmoothBell, vec![smooth_time])
@@ -186,6 +189,115 @@ fn compile_rejects_directly_constructed_bad_params() {
     }
     for bad in [-0.01, f64::NAN, f64::INFINITY] {
         let err = CompiledChain::compile(&[pa(bad)]).unwrap_err();
+        assert!(matches!(err, PostProcessorError::BadParam { .. }));
+    }
+}
+
+#[test]
+fn compile_mode_inverse_after_kernel_produces_the_inversion_gains() {
+    let c = CompiledChain::compile(&[bell(0.0015), mi(131.0, 0.05)]).unwrap();
+    let omega = 2.0 * std::f64::consts::PI * 131.0;
+    assert!(matches!(c.stages[0], ChainStage::SmoothKernel(_)));
+    assert!(matches!(
+        c.stages[1],
+        ChainStage::DerivativeGains { k1, k2 }
+            if k1 == 2.0 * 0.05 / omega && k2 == 1.0 / (omega * omega)
+    ));
+}
+
+#[test]
+fn compile_mode_inverse_without_kernel_rejected() {
+    let err = CompiledChain::compile(&[mi(131.0, 0.05)]).unwrap_err();
+    assert!(matches!(
+        err,
+        PostProcessorError::AccelGainNeedsPrecedingKernel { .. }
+    ));
+    assert!(err.to_string().contains("smoothing kernel"), "got: {err}");
+}
+
+#[test]
+fn compile_mode_inverse_before_kernel_rejected() {
+    let err = CompiledChain::compile(&[mi(131.0, 0.05), bell(0.0015)]).unwrap_err();
+    assert!(matches!(
+        err,
+        PostProcessorError::AccelGainNeedsPrecedingKernel { .. }
+    ));
+}
+
+#[test]
+fn compile_mode_inverse_after_a_disabled_kernel_rejected() {
+    let err = CompiledChain::compile(&[st(0.0), mi(131.0, 0.05)]).unwrap_err();
+    assert!(matches!(
+        err,
+        PostProcessorError::AccelGainNeedsPrecedingKernel { .. }
+    ));
+}
+
+#[test]
+fn compile_mode_inverse_with_zero_damping_keeps_only_the_accel_gain() {
+    let c = CompiledChain::compile(&[bell(0.0015), mi(40.0, 0.0)]).unwrap();
+    let omega = 2.0 * std::f64::consts::PI * 40.0;
+    assert!(matches!(
+        c.stages[1],
+        ChainStage::DerivativeGains { k1: 0.0, k2 } if k2 == 1.0 / (omega * omega)
+    ));
+}
+
+#[test]
+fn mode_inverse_set_param_updates_both_keys() {
+    let mut inst = mi(131.0, 0.05);
+    inst.set_param("frequency_hz", 128.5).unwrap();
+    inst.set_param("damping_ratio", 0.1).unwrap();
+    let c = CompiledChain::compile(&[bell(0.0015), inst]).unwrap();
+    let omega = 2.0 * std::f64::consts::PI * 128.5;
+    assert!(matches!(
+        c.stages[1],
+        ChainStage::DerivativeGains { k1, k2 }
+            if k1 == 2.0 * 0.1 / omega && k2 == 1.0 / (omega * omega)
+    ));
+}
+
+#[test]
+fn mode_inverse_set_param_rejects_out_of_bound_values() {
+    let mut inst = mi(131.0, 0.05);
+    for bad in [0.0, -40.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            matches!(
+                inst.set_param("frequency_hz", bad),
+                Err(PostProcessorError::BadParam { .. })
+            ),
+            "frequency_hz={bad} should be rejected"
+        );
+    }
+    for bad in [-0.01, 1.0, 1.5, f64::NAN, f64::INFINITY] {
+        assert!(
+            matches!(
+                inst.set_param("damping_ratio", bad),
+                Err(PostProcessorError::BadParam { .. })
+            ),
+            "damping_ratio={bad} should be rejected"
+        );
+    }
+    let c = CompiledChain::compile(&[bell(0.0015), inst]).unwrap();
+    let omega = 2.0 * std::f64::consts::PI * 131.0;
+    assert!(
+        matches!(
+            c.stages[1],
+            ChainStage::DerivativeGains { k1, k2 }
+                if k1 == 2.0 * 0.05 / omega && k2 == 1.0 / (omega * omega)
+        ),
+        "rejected updates must not mutate the gains"
+    );
+}
+
+#[test]
+fn compile_rejects_directly_constructed_bad_mode_inverse_params() {
+    for bad in [0.0, -40.0, f64::NAN, f64::INFINITY] {
+        let err = CompiledChain::compile(&[bell(0.0015), mi(bad, 0.05)]).unwrap_err();
+        assert!(matches!(err, PostProcessorError::BadParam { .. }));
+    }
+    for bad in [-0.01, 1.0, f64::NAN, f64::INFINITY] {
+        let err = CompiledChain::compile(&[bell(0.0015), mi(40.0, bad)]).unwrap_err();
         assert!(matches!(err, PostProcessorError::BadParam { .. }));
     }
 }

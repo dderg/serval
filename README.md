@@ -170,6 +170,17 @@ is derived (`0.8025 / f` and `0.95625 / f` respectively), and making it
 longer would move the notch off the resonance, not suppress it harder —
 mzv trades a wider window for a broader suppression band.
 
+`mode_inverse` is the third kind of linear operator: kernels smooth, pressure
+advance sharpens, and this one inverts. Given an identified belt-compliance
+resonance (`frequency_hz`, `damping_ratio`), it commands the motor through the
+inverse of that second-order model — `x + (2ζ/ω)·ẋ + (1/ω²)·ẍ` — so the
+toolhead follows the nominal path with zero added deviation and zero delay;
+residual ringing scales with the model error rather than the excitation. The
+ẍ term amplifies high frequencies, so it must be paired with a short smoothing
+kernel that bandlimits its input (e.g. `smooth_bell` with `smooth_time:
+0.0015`) listed before it in the chain — the config compiler enforces that
+ordering.
+
 Limits apply to the output of the chain — the signal the motor actually
 receives — rather than to the nominal command. The planner folds the chain
 into its constraints: pressure advance spikes extruder velocity during

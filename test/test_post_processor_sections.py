@@ -114,6 +114,28 @@ def test_happy_path_parses_sections_for_init_planner():
     )
 
 
+def test_mode_inverse_section_parses_both_params():
+    th = make_toolhead()
+    cfg = StubConfig(
+        SPATIAL
+        + [
+            axis("x", post_processors="slew,belt"),
+            post_processor("slew", type="smooth_bell", smooth_time="0.0015"),
+            post_processor(
+                "belt",
+                type="mode_inverse",
+                frequency_hz="131.0",
+                damping_ratio="0.05",
+            ),
+        ]
+    )
+    th._read_axes(cfg)
+    th._read_post_processors(cfg)
+    belt = next(s for s in th.post_processor_sections if s[0] == "belt")
+    assert belt[1] == "mode_inverse"
+    assert sorted(belt[2]) == [("damping_ratio", 0.05), ("frequency_hz", 131.0)]
+
+
 class CommandError(Exception):
     pass
 

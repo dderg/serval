@@ -338,6 +338,81 @@ fn set_param_updates_named_instance_and_recompile_reflects_it() {
 }
 
 #[test]
+fn mode_inverse_after_kernel_compiles_into_the_axis_chain() {
+    let registry = registry_with_e(&["slew", "belt"]);
+    let set = PostProcessorSet::try_new(
+        &registry,
+        &[
+            pp("slew", "smooth_bell", &[("smooth_time", 0.0015)]),
+            pp(
+                "belt",
+                "mode_inverse",
+                &[("frequency_hz", 131.0), ("damping_ratio", 0.05)],
+            ),
+        ],
+    )
+    .unwrap();
+    let chains = set.compile(&registry).unwrap();
+    let omega = 2.0 * std::f64::consts::PI * 131.0;
+    assert!(matches!(
+        chains.chains[3].stages[0],
+        trajectory::ChainStage::SmoothKernel(_)
+    ));
+    assert!(matches!(
+        chains.chains[3].stages[1],
+        trajectory::ChainStage::DerivativeGains { k1, k2 }
+            if k1 == 2.0 * 0.05 / omega && k2 == 1.0 / (omega * omega)
+    ));
+}
+
+#[test]
+fn mode_inverse_without_a_kernel_rejected_at_config_compile() {
+    let registry = registry_with_e(&["belt"]);
+    let err = PostProcessorSet::try_new(
+        &registry,
+        &[pp(
+            "belt",
+            "mode_inverse",
+            &[("frequency_hz", 131.0), ("damping_ratio", 0.05)],
+        )],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("smoothing kernel"), "got: {err}");
+}
+
+#[test]
+fn mode_inverse_missing_params_rejected_by_key_name() {
+    let registry = registry_with_e(&[]);
+    let err = PostProcessorSet::try_new(
+        &registry,
+        &[pp("belt", "mode_inverse", &[("damping_ratio", 0.05)])],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("frequency_hz"), "got: {err}");
+    let err = PostProcessorSet::try_new(
+        &registry,
+        &[pp("belt", "mode_inverse", &[("frequency_hz", 131.0)])],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("damping_ratio"), "got: {err}");
+}
+
+#[test]
+fn mode_inverse_overdamped_ratio_rejected() {
+    let registry = registry_with_e(&[]);
+    let err = PostProcessorSet::try_new(
+        &registry,
+        &[pp(
+            "belt",
+            "mode_inverse",
+            &[("frequency_hz", 131.0), ("damping_ratio", 1.0)],
+        )],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("damping_ratio"), "got: {err}");
+}
+
+#[test]
 fn post_processor_missing_required_param_rejected() {
     let registry = registry_with_e(&[]);
     let err = PostProcessorSet::try_new(&registry, &[pp("is", "smooth_bell", &[])]).unwrap_err();

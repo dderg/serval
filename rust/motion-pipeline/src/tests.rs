@@ -1365,3 +1365,131 @@ fn derivative_gains_commute_with_kernel_on_a_direct_follower() {
 fn derivative_gains_commute_with_kernel_on_a_projected_follower() {
     assert_gain_kernel_orders_commute(Some(0.044583333333333336));
 }
+
+fn x_kernel_chains(smooth_time: f64, mode: Option<(f64, f64)>) -> AxisChainSet {
+    let mut instances = vec![PostProcessorInstance::new(
+        "slew",
+        &trajectory::algos::SmoothBell,
+        vec![smooth_time],
+    )];
+    if let Some((frequency_hz, damping_ratio)) = mode {
+        instances.push(PostProcessorInstance::new(
+            "belt",
+            &trajectory::algos::ModeInverse,
+            vec![frequency_hz, damping_ratio],
+        ));
+    }
+    let x = trajectory::CompiledChain::compile(&instances).expect("kernel + mode_inverse compiles");
+    AxisChainSet {
+        chains: vec![
+            x,
+            trajectory::CompiledChain::default(),
+            trajectory::CompiledChain::default(),
+            trajectory::CompiledChain::default(),
+        ],
+        followers: vec![(3, vec![0, 1, 2])],
+    }
+}
+
+/// Semi-analytic plant simulation: the commanded track drives the 2nd-order
+/// mode `z̈ + 2ζω·ż + ω²·z = ω²·x_cmd(t)` (toolhead z behind belt compliance),
+/// integrated with RK4 at fine dt over the emitted trajectory.
+fn integrate_mode_response(
+    cmd: &[ShapedSegment],
+    frequency_hz: f64,
+    damping_ratio: f64,
+    t0: f64,
+    t1: f64,
+) -> impl Fn(f64) -> f64 {
+    let omega = 2.0 * std::f64::consts::PI * frequency_hz;
+    let dt = 1e-5;
+    let steps = ((t1 - t0) / dt).ceil() as usize;
+    let x_cmd = |t: f64| eval_axis_at(cmd, 0, t.clamp(t0, t1));
+    let deriv = |t: f64, z: f64, zd: f64| {
+        (
+            zd,
+            omega * omega * (x_cmd(t) - z) - 2.0 * damping_ratio * omega * zd,
+        )
+    };
+    let mut z = x_cmd(t0);
+    let mut zd = 0.0;
+    let mut trace = Vec::with_capacity(steps + 1);
+    trace.push(z);
+    for i in 0..steps {
+        let t = t0 + i as f64 * dt;
+        let (k1z, k1v) = deriv(t, z, zd);
+        let (k2z, k2v) = deriv(t + 0.5 * dt, z + 0.5 * dt * k1z, zd + 0.5 * dt * k1v);
+        let (k3z, k3v) = deriv(t + 0.5 * dt, z + 0.5 * dt * k2z, zd + 0.5 * dt * k2v);
+        let (k4z, k4v) = deriv(t + dt, z + dt * k3z, zd + dt * k3v);
+        z += dt / 6.0 * (k1z + 2.0 * k2z + 2.0 * k3z + k4z);
+        zd += dt / 6.0 * (k1v + 2.0 * k2v + 2.0 * k3v + k4v);
+        trace.push(z);
+    }
+    move |t: f64| {
+        let idx = ((t - t0) / dt).round() as usize;
+        trace[idx.min(steps)]
+    }
+}
+
+/// The plan-inversion contract: driving the belt-compliance mode with the
+/// mode_inverse command `x + (2ζ/ω)ẋ + (1/ω²)ẍ` makes the toolhead follow the
+/// nominal (kernel-only) path, while driving it with the nominal path directly
+/// leaves the resonance ringing.
+#[test]
+fn mode_inverse_makes_the_oscillator_track_the_nominal_path() {
+    let (frequency_hz, damping_ratio) = (30.0, 0.05);
+    let smooth_time = 0.0015;
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 0.0),
+        line(2, [40.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let nominal = replay(
+        cfg(),
+        x_kernel_chains(smooth_time, None),
+        &home,
+        0.0,
+        &moves,
+    );
+    let inverted = replay(
+        cfg(),
+        x_kernel_chains(smooth_time, Some((frequency_hz, damping_ratio))),
+        &home,
+        0.0,
+        &moves,
+    );
+    let t0 = nominal[0].t_start.max(inverted[0].t_start);
+    let t1 = nominal
+        .last()
+        .unwrap()
+        .t_end
+        .min(inverted.last().unwrap().t_end);
+    assert!(t1 - t0 > 0.3, "trajectory too short to ring: {}", t1 - t0);
+
+    let tracked = integrate_mode_response(&inverted, frequency_hz, damping_ratio, t0, t1);
+    let ringing = integrate_mode_response(&nominal, frequency_hz, damping_ratio, t0, t1);
+
+    let mut max_tracked: f64 = 0.0;
+    let mut max_ringing: f64 = 0.0;
+    let n = 4000;
+    for i in 0..=n {
+        let t = t0 + (t1 - t0) * i as f64 / n as f64;
+        let x_nom = eval_axis_at(&nominal, 0, t);
+        max_tracked = max_tracked.max((tracked(t) - x_nom).abs());
+        max_ringing = max_ringing.max((ringing(t) - x_nom).abs());
+    }
+    assert!(
+        max_tracked < 5e-3,
+        "inverted command must make the mode track the nominal path: \
+         max residual {max_tracked}"
+    );
+    assert!(
+        max_ringing > 0.05,
+        "without inversion the mode must ring visibly: max residual {max_ringing}"
+    );
+    assert!(
+        max_ringing > 20.0 * max_tracked,
+        "inversion must suppress the residual by over an order of magnitude: \
+         {max_ringing} vs {max_tracked}"
+    );
+}

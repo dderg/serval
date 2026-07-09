@@ -366,6 +366,42 @@ fn all_post_processor_types_are_reachable() {
 }
 
 #[test]
+fn mode_inverse_is_reachable_after_a_kernel() {
+    let mut params = default_axis_snapshot_params();
+    let mut x = axis("x", &[]);
+    x.post_processors = vec!["slew".to_string(), "belt".to_string()];
+    params.axis_decls = vec![x];
+    params.post_processor_decls = vec![
+        pp("slew", "smooth_bell", &[("smooth_time", 0.0015)]),
+        pp(
+            "belt",
+            "mode_inverse",
+            &[("frequency_hz", 40.0), ("damping_ratio", 0.1)],
+        ),
+    ];
+    pipeline_snapshot(&square_waypoints(), params)
+        .unwrap_or_else(|e| panic!("mode_inverse after a kernel should compile: {e}"));
+}
+
+#[test]
+fn mode_inverse_without_a_kernel_surfaces_as_an_error() {
+    let mut params = default_axis_snapshot_params();
+    let mut x = axis("x", &[]);
+    x.post_processors = vec!["belt".to_string()];
+    params.axis_decls = vec![x];
+    params.post_processor_decls = vec![pp(
+        "belt",
+        "mode_inverse",
+        &[("frequency_hz", 40.0), ("damping_ratio", 0.1)],
+    )];
+    let err = pipeline_snapshot(&square_waypoints(), params).unwrap_err();
+    assert!(
+        matches!(&err, SnapshotError::InvalidChain(msg) if msg.contains("smoothing kernel")),
+        "got: {err}"
+    );
+}
+
+#[test]
 fn composition_conflict_surfaces_as_an_error() {
     let mut params = default_axis_snapshot_params();
     let mut x = axis("x", &[]);

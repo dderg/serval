@@ -52,6 +52,13 @@ pub enum PostProcessorError {
          derivative-gain post-processor per axis"
     )]
     UnsupportedComposition { detail: String },
+    #[error(
+        "post-processor '{name}' carries an acceleration gain (k2 = {k2}) and \
+         must come after a smoothing kernel in post_processors: applied before \
+         the kernel it runs in the lowerer, whose curved-path sampler carries \
+         no jerk and so cannot form the transformed velocity"
+    )]
+    AccelGainNeedsPrecedingKernel { name: String, k2: f64 },
 }
 
 impl PostProcessorInstance {
@@ -123,6 +130,18 @@ impl CompiledChain {
             let Some(stage) = inst.algo.compile(&inst.values) else {
                 continue;
             };
+            if let ChainStage::DerivativeGains { k2, .. } = stage {
+                let after_kernel = compiled
+                    .stages
+                    .iter()
+                    .any(|s| matches!(s, ChainStage::SmoothKernel(_)));
+                if k2 != 0.0 && !after_kernel {
+                    return Err(PostProcessorError::AccelGainNeedsPrecedingKernel {
+                        name: inst.name().to_string(),
+                        k2,
+                    });
+                }
+            }
             let (slot, kind) = stage.composition_slot();
             if let Some(prev) = slot_sources[slot] {
                 return Err(PostProcessorError::UnsupportedComposition {
