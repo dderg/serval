@@ -137,8 +137,6 @@ fn frenet_components(vx: &[f64], vy: &[f64], fx: &[f64], fy: &[f64]) -> (Vec<f64
 // as valid whether vx/vy/ax/ay/jx/jy came from a fast or slow traversal of
 // the same geometric path. Precondition: speed > 0 (a zero-speed sample is
 // a cusp, handled by the caller before this is ever invoked).
-#[allow(dead_code)]
-// Consumed in later task wiring curvature metrics into the export.
 fn kappa_and_dkappa_dt(vx: f64, vy: f64, ax: f64, ay: f64, jx: f64, jy: f64) -> (f64, f64) {
     let speed2 = vx * vx + vy * vy;
     let speed = speed2.sqrt();
@@ -150,18 +148,14 @@ fn kappa_and_dkappa_dt(vx: f64, vy: f64, ax: f64, ay: f64, jx: f64, jy: f64) -> 
     (kappa, dkappa_dt)
 }
 
-#[allow(dead_code)]
-// Consumed in later task wiring anomalies into export.
 const PIECE_CONTIGUITY_TOL_S: f64 = 1e-9;
 
-#[allow(dead_code)]
 // Spans where consecutive pieces are NOT contiguous: either a gap (piece[i]
 // ends before piece[i+1] starts -- no piece covers that span, so evaluating
 // a sample there would silently extrapolate whichever piece partition_point
 // picks) or an overlap (piece[i+1] starts before piece[i] ends -- two pieces
 // both claim the same instant). Either way this is a pipeline defect worth
 // surfacing, not bridging.
-// Consumed in later task wiring anomalies into export.
 fn domain_anomalies(pieces: &[Vec<f64>]) -> Vec<(f64, f64)> {
     let mut spans = Vec::new();
     for w in pieces.windows(2) {
@@ -174,23 +168,17 @@ fn domain_anomalies(pieces: &[Vec<f64>]) -> Vec<(f64, f64)> {
     spans
 }
 
-#[allow(dead_code)]
-// Consumed in later task wiring anomalies into export.
 fn in_any_span(spans: &[(f64, f64)], t: f64, tol: f64) -> bool {
     spans.iter().any(|&(lo, hi)| t >= lo - tol && t <= hi + tol)
 }
 
 // -- Curvature classification (Task 3) -----------------------------------------------
 
-#[allow(dead_code)]
 const KAPPA_ZERO_EPS: f64 = 1e-4; // 1/mm -- radius > 10 m reads as straight
-#[allow(dead_code)]
 const DKAPPA_DS_ZERO_EPS: f64 = 1e-3; // 1/mm^2 -- first-pass, tune against real cases
-#[allow(dead_code)]
 const DKAPPA_DS_SPREAD_EPS: f64 = 1e-3; // 1/mm^2 -- first-pass, tune against real cases
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum CurvatureClass {
     Zero,
     Constant,
@@ -201,8 +189,6 @@ pub(crate) enum CurvatureClass {
 }
 
 impl CurvatureClass {
-    #[allow(dead_code)]
-    // Consumed in later task wiring curvature metrics into the export.
     fn code(self) -> f64 {
         match self {
             CurvatureClass::Zero => 0.0,
@@ -226,7 +212,6 @@ impl CurvatureClass {
 // so spread always reads as 0 regardless of the two outer samples — an accepted
 // tradeoff: a 3-sample window erring toward "not enough data to call it anomalous"
 // is safer than the alternative of no outlier protection at all.
-#[allow(dead_code)]
 fn percentile_spread(sorted: &[f64]) -> f64 {
     let n = sorted.len();
     if n < 3 {
@@ -244,7 +229,6 @@ fn percentile_spread(sorted: &[f64]) -> f64 {
 // reads as Zero rather than Constant; Constant vs. Linear both hinge on
 // whether dkappa/ds is steady across the window (a percentile spread, not
 // raw min-max), splitting on whether that steady rate is itself ~zero.
-#[allow(dead_code)]
 fn classify_window(kappa: &[f64], dkappa_ds: &[f64]) -> CurvatureClass {
     let max_abs_kappa = kappa.iter().fold(0.0_f64, |m, k| m.max(k.abs()));
     if max_abs_kappa < KAPPA_ZERO_EPS {
@@ -270,7 +254,6 @@ fn classify_window(kappa: &[f64], dkappa_ds: &[f64]) -> CurvatureClass {
 // into a stable, contiguous stretch, while a class change that actually
 // persists across several windows -- a real pipeline anomaly -- survives
 // untouched.
-#[allow(dead_code)]
 fn smooth_classes(raw: &[CurvatureClass]) -> Vec<CurvatureClass> {
     if raw.len() < 3 {
         return raw.to_vec();
@@ -284,8 +267,6 @@ fn smooth_classes(raw: &[CurvatureClass]) -> Vec<CurvatureClass> {
     out
 }
 
-#[allow(dead_code)]
-// Consumed in later task wiring curvature metrics into the export.
 const CLASSIFY_WINDOW_SAMPLES: usize = 24; // first-pass; tune against real cases
 
 // One kappa value and one CurvatureClass per entry of `t` (same grid the
@@ -294,8 +275,6 @@ const CLASSIFY_WINDOW_SAMPLES: usize = 24; // first-pass; tune against real case
 // near-zero-speed sample is flagged Cusp; everything else feeds a
 // fixed-size, piece-agnostic sliding window that gets classified as a unit
 // and then despiked against its neighbors.
-#[allow(dead_code)]
-// Consumed in later task wiring curvature metrics into the export.
 fn curvature_series(
     t: &[f64],
     xp: &[Vec<f64>],
@@ -829,6 +808,8 @@ pub struct TrajectoryData {
     kin_x: Vec<f64>,
     kin_y: Vec<f64>,
     segments: Vec<SegmentType>,
+    kappa: Vec<f64>,
+    curvature_class: Vec<f64>,
     t: Vec<f64>,
     vx: Vec<f64>,
     vy: Vec<f64>,
@@ -869,6 +850,11 @@ impl TrajectoryData {
 
         let ts = build_time_series(&snap);
         let segments = parse_segments(&snap.fitted_segments);
+        let (kappa, classes) = match (&snap.traj_x_pieces, &snap.traj_y_pieces) {
+            (Some(xp), Some(yp)) => curvature_series(&ts.t, xp, yp),
+            _ => (vec![0.0; ts.t.len()], vec![CurvatureClass::Gap; ts.t.len()]),
+        };
+        let curvature_class: Vec<f64> = classes.iter().map(|c| c.code()).collect();
 
         let a_peak = ts.a_scalar.iter().copied().fold(0.0_f64, f64::max);
         let v_peak = ts.v_scalar.iter().copied().fold(0.0_f64, f64::max);
@@ -894,6 +880,8 @@ impl TrajectoryData {
             kin_x: ts.kin_x,
             kin_y: ts.kin_y,
             segments,
+            kappa,
+            curvature_class,
             t: ts.t,
             vx: ts.vx,
             vy: ts.vy,
@@ -1076,5 +1064,17 @@ impl TrajectoryData {
             None => vec![],
         };
         Float64Array::from(&flat[..])
+    }
+
+    // Signed curvature per sample, same grid as t()/vx()/etc. -- the
+    // curvature-vs-time graph.
+    pub fn kappa(&self) -> Float64Array {
+        Float64Array::from(&self.kappa[..])
+    }
+
+    // Curvature-behavior class per sample as an integer code: 0=Zero,
+    // 1=Constant, 2=Linear, 3=Other, 4=Cusp, 5=Gap. Same grid as kappa().
+    pub fn curvature_class(&self) -> Float64Array {
+        Float64Array::from(&self.curvature_class[..])
     }
 }
