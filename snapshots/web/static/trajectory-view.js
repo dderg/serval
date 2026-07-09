@@ -444,8 +444,9 @@ class PanelRenderer {
   // `magnitude` (the ⊥ projection and the |XY| scalar) plot |value|. Each lane
   // draws against its own (yMin, yMax). Entries with axis:"right" (the E lane,
   // whose magnitudes dwarf or vanish next to XY) get a secondary right-hand
-  // axis; the `scalar` entry is the headline trace (wider, carries the peak
-  // markers). Hidden entries are filtered out by the caller.
+  // axis; the `scalar` entry is the headline trace (wider, carries the motor
+  // peak markers) and entries flagged peaks:"th" carry the toolhead peak
+  // markers. Hidden entries are filtered out by the caller.
   renderTimeBuffer(tMin, tMax, yMin, yMax, series, drawPeaks) {
     const DATA = this.view.data;
     const right = series.find(s => s.axis === "right");
@@ -467,6 +468,7 @@ class PanelRenderer {
     bctx.rect(this.plotX0, this.plotY0, this.plotW, this.plotH);
     bctx.clip();
 
+    this._peaks = [];
     let scalarEntry = null;
     for (const s of series) {
       if (s.scalar) { scalarEntry = s; continue; }
@@ -475,33 +477,44 @@ class PanelRenderer {
       bctx.setLineDash(s.dash || []);
       const valueAt = s.magnitude ? (i) => Math.abs(s.arr[i]) : (i) => s.arr[i];
       this._strokeSeries(bctx, t, valueAt, tMin, tMax, s.yMin, s.yMax);
+      if (drawPeaks && s.peaks === "th") this._markPeaks(bctx, t, s, tMin, tMax, "th");
     }
     bctx.setLineDash([]);
 
-    this._peaks = [];
     if (scalarEntry) {
-      const scalar = scalarEntry.arr;
       bctx.strokeStyle = scalarEntry.color;
       bctx.lineWidth = 1.2;
+      const scalar = scalarEntry.arr;
       const scalarAt = scalarEntry.magnitude ? (i) => Math.abs(scalar[i]) : (i) => scalar[i];
       this._strokeSeries(bctx, t, scalarAt, tMin, tMax, yMin, yMax);
-
-      if (drawPeaks) {
-        const peaks = findPeaks(scalar);
-        for (const pi of peaks) {
-          if (t[pi] < tMin || t[pi] > tMax) continue;
-          const px = this.toPixelX(t[pi], tMin, tMax);
-          const py = this.toPixelY(scalar[pi], yMin, yMax);
-          bctx.beginPath();
-          bctx.fillStyle = COLORS.marker;
-          bctx.arc(px, py, 3, 0, Math.PI * 2);
-          bctx.fill();
-          this._peaks.push({ px, py, tVal: t[pi], val: scalar[pi], idx: pi });
-        }
-      }
+      if (drawPeaks) this._markPeaks(bctx, t, scalarEntry, tMin, tMax, null);
     }
 
     bctx.restore();
+  }
+
+  // Peak markers for one visible headline series. Motor peaks are the filled
+  // magenta dots; toolhead ("th") peaks mirror them as hollow teal rings.
+  // Peaks are drawn per series, so they vanish with their series when it is
+  // hidden via the legend.
+  _markPeaks(bctx, t, s, tMin, tMax, src) {
+    bctx.setLineDash([]);
+    for (const pi of findPeaks(s.arr)) {
+      if (t[pi] < tMin || t[pi] > tMax) continue;
+      const px = this.toPixelX(t[pi], tMin, tMax);
+      const py = this.toPixelY(s.arr[pi], s.yMin, s.yMax);
+      bctx.beginPath();
+      bctx.arc(px, py, 3, 0, Math.PI * 2);
+      if (src === "th") {
+        bctx.strokeStyle = COLORS.toolhead;
+        bctx.lineWidth = 1.5;
+        bctx.stroke();
+      } else {
+        bctx.fillStyle = COLORS.marker;
+        bctx.fill();
+      }
+      this._peaks.push({ px, py, tVal: t[pi], val: s.arr[pi], idx: pi, src });
+    }
   }
 
   _drawRightAxis(ctx, yMin, yMax, color) {
@@ -877,6 +890,7 @@ export class TrajectoryView {
           dash: TOOLHEAD_DASH,
           group: "th",
           scalar: false,
+          peaks: s.scalar ? "th" : undefined,
         });
       }
     }
@@ -962,7 +976,7 @@ export class TrajectoryView {
     const jrkSeries = this._panelSeries("jrk", "jx", "jy", "jz", "je", "j_tang", "j_cent", "j_scalar");
     const kappaSeries = [{ key: "kappa", color: COLORS.kappa, label: "κ", scalar: true }];
     if (this.data.has_toolhead()) {
-      kappaSeries.push({ key: "th_kappa", color: COLORS.kappa, dash: TOOLHEAD_DASH, label: "thκ", group: "th" });
+      kappaSeries.push({ key: "th_kappa", color: COLORS.kappa, dash: TOOLHEAD_DASH, label: "thκ", group: "th", peaks: "th" });
     }
     this._attachSeriesState("kappa", kappaSeries);
     const vel = scaleSeries(velSeries);
@@ -1004,13 +1018,19 @@ export class TrajectoryView {
       this.renderers[4].renderTimeBuffer(tMin, tMax, kappa.leftMin, kappa.leftMax, kappa.shown, this.showPeaks);
 
       const DATA = this.data;
-      const drawImpulsesOn = (renderer, times, mags, yMin, yMax) => {
+      // The impulse stems annotate the motor-command trajectory, so they
+      // follow the panel's motor headline (|XY|) visibility.
+      const drawImpulsesOn = (renderer, series, times, mags, yMin, yMax) => {
+        if (!series.some(s => s.scalar && !s.hidden)) {
+          renderer.drawImpulses([], [], tMin, tMax, 0, yMin, yMax);
+          return;
+        }
         let max = 0;
         for (let i = 0; i < mags.length; i++) if (mags[i] > max) max = mags[i];
         renderer.drawImpulses(times, mags, tMin, tMax, max, yMin, yMax);
       };
-      drawImpulsesOn(this.renderers[2], DATA.accel_impulse_t(), DATA.accel_impulse_mag(), acc.leftMin, acc.leftMax);
-      drawImpulsesOn(this.renderers[3], DATA.jerk_impulse_t(), DATA.jerk_impulse_mag(), jrk.leftMin, jrk.leftMax);
+      drawImpulsesOn(this.renderers[2], accSeries, DATA.accel_impulse_t(), DATA.accel_impulse_mag(), acc.leftMin, acc.leftMax);
+      drawImpulsesOn(this.renderers[3], jrkSeries, DATA.jerk_impulse_t(), DATA.jerk_impulse_mag(), jrk.leftMin, jrk.leftMax);
     }
 
     // Composite all (always — cursor may have moved)
@@ -1063,7 +1083,8 @@ export class TrajectoryView {
           tooltipEl.style.display = "block";
           tooltipEl.style.left = (e.clientX + 14) + "px";
           tooltipEl.style.top = (e.clientY - 10) + "px";
-          tooltipEl.textContent = `peak at t=${formatNum(peak.tVal)}s\nvalue=${formatNum(peak.val)}`;
+          const peakName = peak.src === "th" ? "toolhead peak" : "peak";
+          tooltipEl.textContent = `${peakName} at t=${formatNum(peak.tVal)}s\nvalue=${formatNum(peak.val)}`;
         } else {
           tooltipEl.style.display = "none";
         }
