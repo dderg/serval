@@ -365,10 +365,11 @@ fn curvature_series_despikes_an_isolated_curved_window_across_multiple_windows()
 fn curvature_series_flags_cusp_at_a_speed_too_small_for_kappa_to_be_meaningful() {
     // A speed of 1e-6 clears FRENET_SPEED_FLOOR (1e-9) by three orders of
     // magnitude, but kappa's speed^3 denominator still makes it blow up to
-    // an astronomically large, physically meaningless value there -- this
-    // must still read as Cusp, not as a giant-but-"real" curvature number.
+    // an astronomically large value here (~2e12, the same order of
+    // magnitude actually observed near a real cusp) -- this must still read
+    // as Cusp, not as a giant-but-"real" curvature number.
     let xp = vec![vec![0.0, 1.0, 0.0, 1e-6, 1000.0, 0.0]];
-    let yp = vec![vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0]];
+    let yp = vec![vec![0.0, 1.0, 0.0, 0.0, 1.0, 0.0]];
     let t = vec![0.0];
     let (_, classes) = curvature_series(&t, &xp, &yp);
     assert_eq!(classes[0], CurvatureClass::Cusp);
