@@ -70,6 +70,40 @@ impl PhaseLog {
         self.open = Some((st, j));
     }
 
+    /// Start state of the landing tail `depth` phases back: depth 0 is the
+    /// open phase, depth `k` the start of the `k`-th closed phase from the
+    /// end. `None` when the log is not recording or the tail is shorter.
+    pub(super) fn tail_start(&self, depth: usize) -> Option<State> {
+        if !self.active {
+            return None;
+        }
+        if depth == 0 {
+            return self.open.map(|(p0, _)| p0);
+        }
+        let idx = self.phases.len().checked_sub(depth)?;
+        let p = &self.phases[idx];
+        Some(State {
+            t: p.t0,
+            s: p.s0,
+            v: p.v0,
+            a: p.a0,
+        })
+    }
+
+    /// Replace the landing tail with an anchored maneuver: the open arc and
+    /// the last `drop` closed phases are discarded and `phases` — already in
+    /// run frame, departing from the corresponding [`Self::tail_start`] — are
+    /// appended closed.
+    pub(super) fn adopt_landing(&mut self, drop: usize, phases: &[StraightPhase]) {
+        if !self.active {
+            return;
+        }
+        self.open = None;
+        let keep = self.phases.len() - drop;
+        self.phases.truncate(keep);
+        self.phases.extend_from_slice(phases);
+    }
+
     pub(super) fn close(&mut self, st: State) {
         if let Some((p0, j)) = self.open.take() {
             let dt = st.t - p0.t;

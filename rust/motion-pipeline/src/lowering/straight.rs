@@ -76,14 +76,21 @@ pub(super) fn lower_straight_from_phases(
     // error growing as `ulp(pos)/h²` in acceleration and `ulp(pos)/h³` in jerk,
     // so a nanosecond piece — a jerk ramp across a micro-step between adjacent
     // move ceilings — comes back with garbage derivatives orders of magnitude
-    // past the limits. Absorbing it instead concedes a velocity step of at most
-    // `accel · floor` at the joint, far below the seam gates.
+    // past the limits. Absorbing forward (extending the host's span past the
+    // micro phase) only extrapolates the host's own cubic — an error of the
+    // jerk difference over the micro duration cubed. Absorbing backward must
+    // rebase the host's coefficients to the earlier span start (`lead`):
+    // keeping them as-is time-shifts the whole host early, which puts a
+    // `v · lead` position gap at the *next* joint — and the NURBS packing
+    // welds joints by control point, turning that gap into a `6·gap/h²`
+    // acceleration corruption of whatever short piece follows.
     let total_t: f64 = vm.phases.iter().map(|p| p.dt).sum();
-    let mut spans: Vec<(&geometry::StraightPhase, f64, f64)> = Vec::new();
+    let mut spans: Vec<(&geometry::StraightPhase, f64, f64, f64)> = Vec::new();
     let mut t_acc = 0.0;
     let mut carry_start: Option<f64> = None;
     for p in &vm.phases {
         let t0 = carry_start.take().unwrap_or(t_acc);
+        let lead = t_acc - t0;
         let t1 = t_acc + p.dt;
         t_acc = t1;
         if p.dt <= MIN_PHASE_PIECE_S {
@@ -93,19 +100,29 @@ pub(super) fn lower_straight_from_phases(
             }
             continue;
         }
-        spans.push((p, t0, t1));
+        spans.push((p, t0, t1, lead));
     }
     if spans.is_empty() {
         if let Some(p) = vm.phases.first() {
-            spans.push((p, 0.0, total_t));
+            spans.push((p, 0.0, total_t, 0.0));
         }
     }
 
     let mut axes_pieces: Vec<Vec<BezierPiece>> = vec![Vec::new(); n_axes];
     for (axis, pieces) in axes_pieces.iter_mut().enumerate() {
         let (scale, base) = axis_scale_base(axis);
-        for &(p, t0, t1) in &spans {
-            let mut coeffs = vec![scale.mul_add(p.s0, base), scale * p.v0, scale * 0.5 * p.a0];
+        for &(p, t0, t1, lead) in &spans {
+            let (s0, v0, a0) = if lead > 0.0 {
+                let b = -lead;
+                (
+                    p.s0 + b * (p.v0 + b * (0.5 * p.a0 + b * p.j / 6.0)),
+                    p.v0 + b * (p.a0 + b * 0.5 * p.j),
+                    p.a0 + b * p.j,
+                )
+            } else {
+                (p.s0, p.v0, p.a0)
+            };
+            let mut coeffs = vec![scale.mul_add(s0, base), scale * v0, scale * 0.5 * a0];
             if p.j != 0.0 {
                 coeffs.push(scale * p.j / 6.0);
             }
