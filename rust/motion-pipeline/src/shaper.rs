@@ -338,7 +338,7 @@ fn apply_axis_chain(
 ) -> Result<(), PostProcessError> {
     let Some(kernel) = chain.stages.iter().find_map(|stage| match stage {
         ChainStage::SmoothKernel(kernel) => Some(kernel),
-        ChainStage::LinearPressureAdvance { .. } => None,
+        ChainStage::DerivativeGains { .. } => None,
     }) else {
         return Ok(());
     };
@@ -645,29 +645,37 @@ pub(crate) fn apply_trailing_zero_support(
     for stage in &chain.stages {
         match stage {
             ChainStage::SmoothKernel(_) => seen_kernel = true,
-            ChainStage::LinearPressureAdvance { k } if seen_kernel => {
-                track = apply_pressure_advance_to_track(&track, *k);
+            ChainStage::DerivativeGains { k1, k2 } if seen_kernel => {
+                track = apply_derivative_gains_to_track(&track, *k1, *k2);
             }
-            ChainStage::LinearPressureAdvance { .. } => {}
+            ChainStage::DerivativeGains { .. } => {}
         }
     }
     track
 }
 
-pub(crate) fn apply_pressure_advance_to_track(
+pub(crate) fn apply_derivative_gains_to_track(
     track: &nurbs::ScalarNurbs,
-    k: f64,
+    k1: f64,
+    k2: f64,
 ) -> nurbs::ScalarNurbs {
     let pieces = extract_bezier_pieces(track);
     let out_pieces: Vec<BezierPiece> = pieces
         .iter()
         .map(|piece| {
             let derivative = piece.differentiate();
+            let second = (k2 != 0.0).then(|| derivative.differentiate());
             let coeffs: Vec<f64> = piece
                 .coeffs
                 .iter()
                 .enumerate()
-                .map(|(i, c)| c + k * derivative.coeffs.get(i).copied().unwrap_or(0.0))
+                .map(|(i, c)| {
+                    let with_k1 = c + k1 * derivative.coeffs.get(i).copied().unwrap_or(0.0);
+                    match &second {
+                        Some(dd) => with_k1 + k2 * dd.coeffs.get(i).copied().unwrap_or(0.0),
+                        None => with_k1,
+                    }
+                })
                 .collect();
             BezierPiece {
                 u_start: piece.u_start,

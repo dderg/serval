@@ -295,7 +295,7 @@ fn kernel_and_pa_on_follower_e_compiles() {
     .unwrap();
     let chains = set.compile(&registry).unwrap();
     assert!(
-        matches!(chains.chains[3].stages[0], trajectory::ChainStage::LinearPressureAdvance { k } if k == 0.04)
+        matches!(chains.chains[3].stages[0], trajectory::ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.04)
     );
     assert!(matches!(
         chains.chains[3].stages[1],
@@ -315,7 +315,7 @@ fn happy_path_compiles_pa_on_follower_e() {
     let chains = set.compile(&registry).unwrap();
     assert_eq!(chains.n_axes(), 4);
     assert!(
-        matches!(chains.chains[3].stages[0], trajectory::ChainStage::LinearPressureAdvance { k } if k == 0.04)
+        matches!(chains.chains[3].stages[0], trajectory::ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.04)
     );
     assert_eq!(chains.followers, vec![(3, vec![0, 1, 2])]);
 }
@@ -331,7 +331,7 @@ fn set_param_updates_named_instance_and_recompile_reflects_it() {
     set.set_param("pa", "k", 0.07).unwrap();
     let chains = set.compile(&registry).unwrap();
     assert!(
-        matches!(chains.chains[3].stages[0], trajectory::ChainStage::LinearPressureAdvance { k } if k == 0.07)
+        matches!(chains.chains[3].stages[0], trajectory::ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.07)
     );
     assert!(set.set_param("nope", "k", 1.0).is_err());
     assert!(set.set_param("pa", "frequency_hz", 1.0).is_err());

@@ -3,7 +3,7 @@ use nurbs::bezier::bezier_pieces_to_nurbs;
 use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedSignal};
 
 use crate::shaper::{
-    SEGMENT_TIME_EPS_S, TrackSignal, apply_pressure_advance_to_track, apply_trailing_zero_support,
+    SEGMENT_TIME_EPS_S, TrackSignal, apply_derivative_gains_to_track, apply_trailing_zero_support,
     fit_axis_from_signal,
 };
 use crate::types::PostProcessError;
@@ -51,7 +51,7 @@ pub(crate) fn project_followers(
         let chain = &chains.chains[axis];
         let kernel = chain.stages.iter().find_map(|stage| match stage {
             ChainStage::SmoothKernel(kernel) => Some(kernel),
-            ChainStage::LinearPressureAdvance { .. } => None,
+            ChainStage::DerivativeGains { .. } => None,
         });
         let leaders_shaped = leaders.iter().any(|&l| !chains.chains[l].is_empty());
         let state = &mut states[axis];
@@ -172,8 +172,8 @@ fn apply_leading_stages(chain: &CompiledChain, mut track: ScalarNurbs) -> Scalar
     for stage in &chain.stages {
         match stage {
             ChainStage::SmoothKernel(_) => break,
-            ChainStage::LinearPressureAdvance { k } => {
-                track = apply_pressure_advance_to_track(&track, *k);
+            ChainStage::DerivativeGains { k1, k2 } => {
+                track = apply_derivative_gains_to_track(&track, *k1, *k2);
             }
         }
     }

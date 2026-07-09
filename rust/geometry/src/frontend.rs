@@ -4,6 +4,9 @@ use crate::segment::{FollowerDemand, SourceRange};
 
 const DISPLACEMENT_EPSILON: f64 = 1e-9;
 
+// TODO: a DerivativeGains chain stage with k2 != 0 demands extra motor
+// acceleration proportional to jerk; fold that demand into these planning
+// limits once the mode-inverse post-processor lands.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VelocityLimits {
     pub max_velocity_mm_s: f64,

@@ -8,10 +8,11 @@ pub struct PostProcessorInstance {
     values: Vec<f64>,
 }
 
+/// `DerivativeGains` is the operator `y = x + k1·ẋ + k2·ẍ`.
 #[derive(Debug, Clone)]
 pub enum ChainStage {
     SmoothKernel(PiecewisePolynomialKernel),
-    LinearPressureAdvance { k: f64 },
+    DerivativeGains { k1: f64, k2: f64 },
 }
 
 impl ChainStage {
@@ -19,14 +20,14 @@ impl ChainStage {
     pub fn half_support(&self) -> (f64, f64) {
         match self {
             Self::SmoothKernel(kernel) => kernel.support(),
-            Self::LinearPressureAdvance { .. } => (0.0, 0.0),
+            Self::DerivativeGains { .. } => (0.0, 0.0),
         }
     }
 
     fn composition_slot(&self) -> (usize, &'static str) {
         match self {
             Self::SmoothKernel(_) => (0, "kernel"),
-            Self::LinearPressureAdvance { .. } => (1, "derivative-gain"),
+            Self::DerivativeGains { .. } => (1, "derivative-gain"),
         }
     }
 }

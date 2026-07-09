@@ -1229,3 +1229,139 @@ fn smooth_pressure_advance_on_follower_preserves_the_projected_total() {
         "PA must not change the settled extruded total: {e_pa} vs {e_plain}"
     );
 }
+
+#[test]
+fn derivative_gains_track_transform_matches_analytic_second_derivative() {
+    let piece = nurbs::bezier::BezierPiece {
+        u_start: 0.0,
+        u_end: 0.1,
+        coeffs: vec![1.0, 2.0, 3.0, 4.0],
+    };
+    let track = nurbs::bezier::bezier_pieces_to_nurbs(&[piece]);
+    let (k1, k2) = (0.0, 0.002);
+    let out = crate::shaper::apply_derivative_gains_to_track(&track, k1, k2);
+    for i in 0..=20 {
+        let t = 0.1 * i as f64 / 20.0;
+        let pos = 1.0 + 2.0 * t + 3.0 * t * t + 4.0 * t * t * t;
+        let accel = 6.0 + 24.0 * t;
+        let expected = pos + k2 * accel;
+        assert!(
+            (eval(&out, t) - expected).abs() < 1e-12,
+            "track transform must equal x + k2*x'' at t={t}"
+        );
+    }
+}
+
+#[test]
+fn derivative_gains_track_transform_combines_both_gains() {
+    let piece = nurbs::bezier::BezierPiece {
+        u_start: 0.0,
+        u_end: 0.1,
+        coeffs: vec![1.0, 2.0, 3.0, 4.0],
+    };
+    let track = nurbs::bezier::bezier_pieces_to_nurbs(&[piece]);
+    let (k1, k2) = (0.05, 0.002);
+    let out = crate::shaper::apply_derivative_gains_to_track(&track, k1, k2);
+    for i in 0..=20 {
+        let t = 0.1 * i as f64 / 20.0;
+        let pos = 1.0 + 2.0 * t + 3.0 * t * t + 4.0 * t * t * t;
+        let vel = 2.0 + 6.0 * t + 12.0 * t * t;
+        let accel = 6.0 + 24.0 * t;
+        let expected = pos + k1 * vel + k2 * accel;
+        assert!(
+            (eval(&out, t) - expected).abs() < 1e-12,
+            "track transform must equal x + k1*x' + k2*x'' at t={t}"
+        );
+    }
+}
+
+fn eval_axis_at(segs: &[ShapedSegment], axis: usize, t: f64) -> f64 {
+    let seg = segs
+        .iter()
+        .find(|seg| t >= seg.t_start && t <= seg.t_end)
+        .expect("t inside emitted trajectory");
+    eval(&seg.axes[axis], t)
+}
+
+fn extruder_gain_kernel_chains(
+    leader_smooth_time: Option<f64>,
+    gain_first: bool,
+    k1: f64,
+    k2: f64,
+    e_smooth_time: f64,
+) -> AxisChainSet {
+    let kernel = e_chain(None, e_smooth_time).stages[0].clone();
+    let gain = trajectory::ChainStage::DerivativeGains { k1, k2 };
+    let stages = if gain_first {
+        vec![gain, kernel]
+    } else {
+        vec![kernel, gain]
+    };
+    let mut chains =
+        leader_smooth_time.map_or_else(follower_chains_without_kernels, xy_shaper_follower_chains);
+    chains.chains[3] = trajectory::CompiledChain { stages };
+    chains
+}
+
+fn assert_gain_kernel_orders_commute(leader_smooth_time: Option<f64>) {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [20.0, 0.0, 0.0], 1.0),
+        line(2, [20.0, 0.0, 0.0], [40.0, 0.0, 0.0], 1.0),
+        line(3, [40.0, 0.0, 0.0], [60.0, 0.0, 0.0], 1.0),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let (k1, k2) = (0.03, 2e-4);
+    let smooth = 0.02675;
+    let pre = replay(
+        cfg(),
+        extruder_gain_kernel_chains(leader_smooth_time, true, k1, k2, smooth),
+        &home,
+        0.0,
+        &moves,
+    );
+    let post = replay(
+        cfg(),
+        extruder_gain_kernel_chains(leader_smooth_time, false, k1, k2, smooth),
+        &home,
+        0.0,
+        &moves,
+    );
+    let plain = replay(
+        cfg(),
+        extruder_gain_kernel_chains(leader_smooth_time, false, k1, 0.0, smooth),
+        &home,
+        0.0,
+        &moves,
+    );
+    let t0 = pre
+        .first()
+        .unwrap()
+        .t_start
+        .max(post.first().unwrap().t_start);
+    let t1 = pre.last().unwrap().t_end.min(post.last().unwrap().t_end);
+    let mut max_k2_effect: f64 = 0.0;
+    for i in 0..=400 {
+        let t = t0 + (t1 - t0) * i as f64 / 400.0;
+        let a = eval_axis_at(&pre, 3, t);
+        let b = eval_axis_at(&post, 3, t);
+        assert!(
+            (a - b).abs() < 2e-3,
+            "gain-then-kernel and kernel-then-gain must agree (LTI): {a} vs {b} at t={t}"
+        );
+        max_k2_effect = max_k2_effect.max((b - eval_axis_at(&plain, 3, t)).abs());
+    }
+    assert!(
+        max_k2_effect > 1e-2,
+        "k2 term must visibly move the track, got max effect {max_k2_effect}"
+    );
+}
+
+#[test]
+fn derivative_gains_commute_with_kernel_on_a_direct_follower() {
+    assert_gain_kernel_orders_commute(None);
+}
+
+#[test]
+fn derivative_gains_commute_with_kernel_on_a_projected_follower() {
+    assert_gain_kernel_orders_commute(Some(0.044583333333333336));
+}

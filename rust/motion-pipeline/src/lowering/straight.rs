@@ -5,16 +5,20 @@ use trajectory::{ChainStage, CompiledChain};
 
 use super::{LoweringError, MIN_PHASE_PIECE_S, pad_to_uniform_degree};
 
-/// Linear pressure advance is `pos += k * vel`, exact on a polynomial of any
-/// degree: `c′_i = c_i + k·(i+1)·c_{i+1}` (`SmoothKernel` is a downstream
-/// convolution, so it stops the per-piece transform exactly as the sampled path
-/// does). Mirrors the `ChainStage` semantics in the sampled `axis_state`.
-pub(crate) fn apply_pressure_advance(coeffs: &mut [f64], chain: &CompiledChain) {
+/// Derivative gains are `pos += k1·vel + k2·accel`, exact on a polynomial of
+/// any degree: `c′_i = c_i + k1·(i+1)·c_{i+1} + k2·(i+1)·(i+2)·c_{i+2}`
+/// (`SmoothKernel` is a downstream convolution, so it stops the per-piece
+/// transform exactly as the sampled path does). Mirrors the `ChainStage`
+/// semantics in the sampled `axis_state`.
+pub(crate) fn apply_derivative_gains(coeffs: &mut [f64], chain: &CompiledChain) {
     for stage in &chain.stages {
         match stage {
-            ChainStage::LinearPressureAdvance { k } => {
+            ChainStage::DerivativeGains { k1, k2 } => {
                 for i in 0..coeffs.len().saturating_sub(1) {
-                    coeffs[i] = k.mul_add((i + 1) as f64 * coeffs[i + 1], coeffs[i]);
+                    coeffs[i] = k1.mul_add((i + 1) as f64 * coeffs[i + 1], coeffs[i]);
+                    if let Some(&c2) = coeffs.get(i + 2) {
+                        coeffs[i] = k2.mul_add(((i + 1) * (i + 2)) as f64 * c2, coeffs[i]);
+                    }
                 }
             }
             ChainStage::SmoothKernel(_) => break,
@@ -110,7 +114,7 @@ pub(super) fn lower_straight_from_phases(
                 coeffs.push(scale * p.j / 6.0);
             }
             if let Some(chain) = axis_chains.get(axis) {
-                apply_pressure_advance(&mut coeffs, chain);
+                apply_derivative_gains(&mut coeffs, chain);
             }
             pieces.push(BezierPiece {
                 u_start: t_start + t0,

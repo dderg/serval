@@ -24,7 +24,7 @@ fn compile_kernel_plus_gain() {
     assert!(matches!(c.stages[0], ChainStage::SmoothKernel(_)));
     assert!(matches!(
         c.stages[1],
-        ChainStage::LinearPressureAdvance { k } if k == 0.04
+        ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.04
     ));
 }
 
@@ -33,14 +33,8 @@ fn compile_preserves_declaration_order() {
     let a = CompiledChain::compile(&[bell(0.01605), pa(0.04)]).unwrap();
     let b = CompiledChain::compile(&[pa(0.04), bell(0.01605)]).unwrap();
     assert!(matches!(a.stages[0], ChainStage::SmoothKernel(_)));
-    assert!(matches!(
-        a.stages[1],
-        ChainStage::LinearPressureAdvance { .. }
-    ));
-    assert!(matches!(
-        b.stages[0],
-        ChainStage::LinearPressureAdvance { .. }
-    ));
+    assert!(matches!(a.stages[1], ChainStage::DerivativeGains { .. }));
+    assert!(matches!(b.stages[0], ChainStage::DerivativeGains { .. }));
     assert!(matches!(b.stages[1], ChainStage::SmoothKernel(_)));
 }
 
@@ -50,7 +44,7 @@ fn compile_smooth_triangle_plus_gain() {
     assert!(matches!(c.stages[0], ChainStage::SmoothKernel(_)));
     assert!(matches!(
         c.stages[1],
-        ChainStage::LinearPressureAdvance { k } if k == 0.04
+        ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.04
     ));
     let (lo, hi) = c.max_half_support();
     assert!((hi - 0.02).abs() < 1e-12 && (lo + 0.02).abs() < 1e-12);
@@ -59,10 +53,7 @@ fn compile_smooth_triangle_plus_gain() {
 #[test]
 fn compile_gain_before_smooth_triangle_preserves_order() {
     let c = CompiledChain::compile(&[pa(0.04), st(0.04)]).unwrap();
-    assert!(matches!(
-        c.stages[0],
-        ChainStage::LinearPressureAdvance { .. }
-    ));
+    assert!(matches!(c.stages[0], ChainStage::DerivativeGains { .. }));
     assert!(matches!(c.stages[1], ChainStage::SmoothKernel(_)));
 }
 
@@ -100,7 +91,7 @@ fn compile_zero_smooth_time_leaves_only_the_gain() {
     assert_eq!(c.stages.len(), 1);
     assert!(matches!(
         c.stages[0],
-        ChainStage::LinearPressureAdvance { k } if k == 0.04
+        ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.04
     ));
 }
 
@@ -136,7 +127,7 @@ fn set_param_updates_gain() {
     let mut inst = pa(0.04);
     inst.set_param("k", 0.06).unwrap();
     let c = CompiledChain::compile(std::slice::from_ref(&inst)).unwrap();
-    assert!(matches!(c.stages[0], ChainStage::LinearPressureAdvance { k } if k == 0.06));
+    assert!(matches!(c.stages[0], ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.06));
 }
 
 #[test]
@@ -159,7 +150,7 @@ fn set_param_rejects_negative_and_non_finite_gain() {
     }
     let c = CompiledChain::compile(std::slice::from_ref(&inst)).unwrap();
     assert!(
-        matches!(c.stages[0], ChainStage::LinearPressureAdvance { k } if k == 0.04),
+        matches!(c.stages[0], ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.04),
         "rejected updates must not mutate the gain"
     );
     inst.set_param("k", 0.0).expect("k=0 is a valid no-op gain");
