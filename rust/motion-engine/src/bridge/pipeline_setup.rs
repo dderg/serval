@@ -50,7 +50,7 @@ fn build_stream_config(cfg: &config::PlannerConfig) -> PyResult<motion_pipeline:
         limits: geometry::VelocityLimits::try_new(
             cart.max_velocity,
             cart.max_accel,
-            cart.square_corner_velocity,
+            cart.corner_deviation,
             cart.max_jerk,
         )
         .map_err(PyRuntimeError::new_err)?,

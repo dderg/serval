@@ -15,7 +15,13 @@ fn cfg() -> StreamConfig {
         fit_tol_mm: 1e-3,
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 64,
-        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
+        limits: VelocityLimits::try_new(
+            300.0,
+            5000.0,
+            geometry::corner_deviation_from_scv(5.0, 5000.0),
+            100_000.0,
+        )
+        .unwrap(),
     }
 }
 
@@ -23,7 +29,13 @@ fn ctx(line_no: u32, feed: f64) -> MoveContext {
     MoveContext {
         extruder_axis: 3,
         feedrate_mm_s: feed,
-        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
+        limits: VelocityLimits::try_new(
+            300.0,
+            5000.0,
+            geometry::corner_deviation_from_scv(5.0, 5000.0),
+            100_000.0,
+        )
+        .unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -44,7 +56,13 @@ fn cfg_bench() -> StreamConfig {
         fit_tol_mm: 0.005,
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 512,
-        limits: VelocityLimits::try_new(100.0, 1000.0, 5.0, 1_000_000.0).unwrap(),
+        limits: VelocityLimits::try_new(
+            100.0,
+            1000.0,
+            geometry::corner_deviation_from_scv(5.0, 1000.0),
+            1_000_000.0,
+        )
+        .unwrap(),
     }
 }
 
@@ -52,7 +70,13 @@ fn line_bench(line_no: u32, start: [f64; 3], end: [f64; 3]) -> geometry::Move {
     let ctx = MoveContext {
         extruder_axis: 3,
         feedrate_mm_s: 60.0,
-        limits: VelocityLimits::try_new(100.0, 1000.0, 5.0, 1_000_000.0).unwrap(),
+        limits: VelocityLimits::try_new(
+            100.0,
+            1000.0,
+            geometry::corner_deviation_from_scv(5.0, 1000.0),
+            1_000_000.0,
+        )
+        .unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -766,7 +790,13 @@ fn arc_run_into_sharp_corner_stays_contiguous_at_high_scv() {
     // fit stage emitted a 0.27mm gap between the corner blend leaving the fitted
     // run and the following long line, tripping the TravelAligningSender
     // contiguity assert.
-    let limits = VelocityLimits::try_new(100.0, 1000.0, 25.0, 1_000_000.0).unwrap();
+    let limits = VelocityLimits::try_new(
+        100.0,
+        1000.0,
+        geometry::corner_deviation_from_scv(25.0, 1000.0),
+        1_000_000.0,
+    )
+    .unwrap();
     let config = StreamConfig {
         corner: CornerFitConfig::default(),
         integration_tol: 1e-4,
@@ -805,7 +835,13 @@ fn blends_consuming_a_full_arc_emit_no_degenerate_remainder() {
     // ends of a short fitted arc consume its entire length. The remainder
     // (2e-16 mm) must be skipped, not emitted — the planner rejects segments
     // at or below its 1e-9 mm length epsilon.
-    let limits = VelocityLimits::try_new(100.0, 1000.0, 25.0, 1_000_000.0).unwrap();
+    let limits = VelocityLimits::try_new(
+        100.0,
+        1000.0,
+        geometry::corner_deviation_from_scv(25.0, 1000.0),
+        1_000_000.0,
+    )
+    .unwrap();
     let config = StreamConfig {
         corner: CornerFitConfig::default(),
         integration_tol: 1e-4,

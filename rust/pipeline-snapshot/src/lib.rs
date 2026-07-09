@@ -127,7 +127,7 @@ pub fn pipeline_snapshot(
     let limits = geometry::VelocityLimits::try_new(
         params.max_velocity,
         params.max_accel,
-        params.square_corner_velocity,
+        geometry::corner_deviation_from_scv(params.square_corner_velocity, params.max_accel),
         params.max_jerk,
     )
     .map_err(|e| SnapshotError::InvalidLimits(e.to_string()))?;

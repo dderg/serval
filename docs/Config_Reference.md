@@ -229,18 +229,27 @@ max_accel:
 #   cruising distance enforced between acceleration and deceleration).
 #   The value specified here may be changed at runtime using the
 #   SET_VELOCITY_LIMIT command. The default is 0.5.
+#corner_deviation:
+#   The total distance (in mm) the printed path may deviate from the
+#   commanded geometry at a corner. This budget covers both the corner
+#   blend the planner fits and the deviation any smoothing
+#   (post-processor kernel) adds, so the printed corner never strays
+#   further than this from the G-code path. Corner speed is derived
+#   from this budget and the acceleration limit: at a fixed deviation,
+#   higher acceleration yields higher cornering speed. Set to zero to
+#   decelerate to a stop at every corner. The value may be changed at
+#   runtime using the SET_VELOCITY_LIMIT command. Mutually exclusive
+#   with square_corner_velocity. The default is the conversion of the
+#   default square_corner_velocity (5 mm/s) at max_accel.
 #square_corner_velocity: 5.0
-#   The maximum velocity (in mm/s) that the toolhead may travel a 90
-#   degree corner at. A non-zero value can reduce changes in extruder
-#   flow rates by enabling instantaneous velocity changes of the
-#   toolhead during cornering. This value configures the internal
-#   centripetal velocity cornering algorithm; corners with angles
-#   larger than 90 degrees will have a higher cornering velocity while
-#   corners with angles less than 90 degrees will have a lower
-#   cornering velocity. If this is set to zero then the toolhead will
-#   decelerate to zero at each corner. The value specified here may be
-#   changed at runtime using the SET_VELOCITY_LIMIT command. The
-#   default is 5mm/s.
+#   Legacy alias for corner_deviation: the velocity (in mm/s) the
+#   toolhead may travel a 90 degree corner at, converted once at
+#   startup into a corner_deviation of
+#   square_corner_velocity^2 * (sqrt(2)-1) / max_accel. Unlike older
+#   planners the resulting deviation budget is then constant: moves
+#   with a lower acceleration limit corner at proportionally lower
+#   speed instead of a smaller deviation. Mutually exclusive with
+#   corner_deviation. The default is 5mm/s.
 #max_path_deviation: 0.005
 #   Maximum distance (in mm) the executed motion may deviate from the
 #   commanded path. The planner represents each move as a series of

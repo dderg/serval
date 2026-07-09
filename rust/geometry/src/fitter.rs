@@ -9,8 +9,6 @@ mod overlap;
 mod runfit;
 use crate::vec3;
 
-use std::f64::consts::SQRT_2;
-
 use crate::GeometryError;
 use crate::frontend::{Move, VelocityLimits};
 use crate::path::lowering::PositionProfile;
@@ -497,9 +495,7 @@ fn consumption_limits(
         .reduce(|a, b| VelocityLimits {
             max_velocity_mm_s: a.max_velocity_mm_s.min(b.max_velocity_mm_s),
             accel_mm_s2: a.accel_mm_s2.min(b.accel_mm_s2),
-            square_corner_velocity_mm_s: a
-                .square_corner_velocity_mm_s
-                .min(b.square_corner_velocity_mm_s),
+            corner_deviation_mm: a.corner_deviation_mm.min(b.corner_deviation_mm),
             max_jerk_mm_s3: a.max_jerk_mm_s3.min(b.max_jerk_mm_s3),
         })
         .expect("mids is non-empty");
@@ -618,8 +614,7 @@ fn biclothoid_followers(
 }
 
 fn junction_deviation(limits: VelocityLimits) -> f64 {
-    let scv = limits.square_corner_velocity_mm_s;
-    scv * scv * (SQRT_2 - 1.0) / limits.accel_mm_s2
+    limits.corner_deviation_mm
 }
 
 #[cfg(test)]

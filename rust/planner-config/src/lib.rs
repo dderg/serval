@@ -354,7 +354,7 @@ pub struct PlannerConfig {
     pub limit_sections: Vec<LimitSection>,
     pub cartesian: CartesianLimits,
     pub runtime_caps: RuntimeCaps,
-    pub runtime_square_corner_velocity: Option<f64>,
+    pub runtime_corner_deviation: Option<f64>,
     pub corner: geometry::CornerFitConfig,
     pub post_processors: PostProcessorSet,
     pub max_extrude_only_velocity: Option<f64>,
@@ -385,7 +385,7 @@ pub struct CartesianLimits {
     pub max_jerk: f64,
     pub max_z_velocity: f64,
     pub max_z_accel: f64,
-    pub square_corner_velocity: f64,
+    pub corner_deviation: f64,
 }
 
 impl Default for CartesianLimits {
@@ -396,7 +396,10 @@ impl Default for CartesianLimits {
             max_jerk: 100_000.0,
             max_z_velocity: 15.0,
             max_z_accel: 100.0,
-            square_corner_velocity: DEFAULT_SQUARE_CORNER_VELOCITY_MM_S,
+            corner_deviation: geometry::corner_deviation_from_scv(
+                DEFAULT_SQUARE_CORNER_VELOCITY_MM_S,
+                3000.0,
+            ),
         }
     }
 }
@@ -414,8 +417,8 @@ impl CartesianLimits {
         if !(self.max_jerk > 0.0) {
             return Err("[printer] max_jerk must be positive (infinity disables jerk limiting)");
         }
-        if !(self.square_corner_velocity.is_finite() && self.square_corner_velocity >= 0.0) {
-            return Err("[printer] square_corner_velocity must be finite and non-negative");
+        if !(self.corner_deviation.is_finite() && self.corner_deviation >= 0.0) {
+            return Err("[printer] corner_deviation must be finite and non-negative");
         }
         Ok(())
     }
@@ -438,9 +441,9 @@ pub const DEFAULT_SQUARE_CORNER_VELOCITY_MM_S: f64 = 5.0;
 
 impl PlannerConfig {
     #[must_use]
-    pub fn square_corner_velocity(&self) -> f64 {
-        self.runtime_square_corner_velocity
-            .unwrap_or(self.cartesian.square_corner_velocity)
+    pub fn corner_deviation(&self) -> f64 {
+        self.runtime_corner_deviation
+            .unwrap_or(self.cartesian.corner_deviation)
     }
 
     #[must_use]
@@ -449,7 +452,7 @@ impl PlannerConfig {
         (
             clamp(self.runtime_caps.velocity, self.cartesian.max_velocity),
             clamp(self.runtime_caps.accel, self.cartesian.max_accel),
-            self.square_corner_velocity(),
+            self.corner_deviation(),
         )
     }
 }
@@ -479,7 +482,7 @@ impl Default for PlannerConfig {
             ],
             cartesian: CartesianLimits::default(),
             runtime_caps: RuntimeCaps::default(),
-            runtime_square_corner_velocity: None,
+            runtime_corner_deviation: None,
             corner: geometry::CornerFitConfig::default(),
             post_processors,
             max_extrude_only_velocity: None,
