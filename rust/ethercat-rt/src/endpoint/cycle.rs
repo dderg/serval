@@ -1,7 +1,7 @@
 use std::ops::ControlFlow;
 
+#[cfg(feature = "hw")]
 use super::bringup::log_al_states;
-use super::drive::DriveChain;
 use super::{abort_sync, discard_motion, respond_fault_heartbeat, EndpointCtx};
 use crate::capture::{CaptureRecord, DriveSample, FLAG_MOTION_ACTIVE, FLAG_TORQUE_ENABLED};
 use crate::claim::{eval_wkc, WkcDecision};
@@ -111,7 +111,10 @@ fn poll_sensorless(ctx: &mut EndpointCtx, apply_time: u64) {
     }
 }
 
-fn compute_motion_targets(ctx: &mut EndpointCtx, apply_time: u64) -> (bool, Vec<f32>, Vec<f32>) {
+pub(super) fn compute_motion_targets(
+    ctx: &mut EndpointCtx,
+    apply_time: u64,
+) -> (bool, Vec<f32>, Vec<f32>) {
     let num_slaves = ctx.num_slaves;
     let mut motion_active = false;
     // The commanded analytic accel/vel the feedforward path samples are the
@@ -164,18 +167,24 @@ fn sample_slot_targets(
                 Some((counts, sign * vel_mm_s, sign * acc_mm_s2))
             })
         } else if let Some((pos_mm, vel_mm_s, acc_mm_s2)) = ctx.rings[s].sample(apply_time) {
-            // Streaming is always relative: each stream anchors the
-            // drive's actual position to the host's first commanded
-            // value, so a homing set_position (host frame shift) can
-            // never yank a drive. The report_anchor covers absolute
-            // position queries; the drive frame itself is never used.
+            // Streaming is always relative: the stream anchors the drive's
+            // actual position to the host's first commanded value, so a
+            // homing set_position (host frame shift) can never yank a
+            // drive. The report_anchor covers absolute position queries;
+            // the drive frame itself is never used. The anchor lives for
+            // the whole stream — it must survive mid-stream ring gaps
+            // (dwells, host scheduling stalls), because re-anchoring at a
+            // gap converts the drive's standing following error into a
+            // one-cycle commanded step and lets paired drives drift apart.
+            // It drops only where the frame is genuinely redefined:
+            // discard_motion (Stop/ResumeStream), torque disable, and a
+            // sync re-seed.
             let cpm = ctx.cmd_counts_per_mm[s];
             let map = ctx.cmaps[s].get_or_insert_with(|| {
                 CountMap::new(cpm, ctx.drive.position_actual(s), f64::from(pos_mm))
             });
             Some((map.target_counts(f64::from(pos_mm)), vel_mm_s, acc_mm_s2))
         } else {
-            ctx.cmaps[s] = None;
             None
         };
         if let Some((counts, vel_mm_s, acc_mm_s2)) = sampled {
@@ -253,7 +262,6 @@ fn emit_slot_commands(
             ctx.drive.set_torque_offset(s, torque_offset);
             motion_active = true;
         } else {
-            ctx.last_counts[s] = None;
             ctx.drive.set_velocity_offset(s, 0);
             ctx.drive.set_torque_offset(s, 0);
         }
@@ -315,6 +323,7 @@ fn finalize_sync(ctx: &mut EndpointCtx, run: &super::SyncRun, report: &crate::sy
     if report.secondary_reseeded {
         ctx.last_counts[run.secondary] = None;
         ctx.last_streamed_target[run.secondary] = None;
+        ctx.cmaps[run.secondary] = None;
         // The rotor turned by the released delta while the axis stood still,
         // so the same host-frame mm now maps to counts+delta.
         if let Some((anchor_counts, anchor_mm)) = ctx.report_anchor[run.secondary] {
@@ -510,6 +519,7 @@ fn evaluate_wkc(ctx: &mut EndpointCtx, wkc: i32) -> ControlFlow<()> {
             );
         }
         WkcDecision::Halt => {
+            #[cfg(feature = "hw")]
             log_al_states(ctx.num_slaves, "bus_lost");
             tracing::error!(
                 subsystem = "ethercat",
