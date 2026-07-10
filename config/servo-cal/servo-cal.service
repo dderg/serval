@@ -1,21 +1,18 @@
 # servo-cal dashboard — serves the calibration task pages off the captures
-# root. Deploy on the printer host next to klippy; the same binary klippy
-# invokes for `servo-cal analyze` serves the dashboard, so one build feeds
-# both.
+# root. Deploy on the printer host next to klippy.
 #
-# Build on the printer host (same toolchain the flash script already uses
-# for the motion engine):
-#   cd ~/klipper/rust && cargo build --release -p servo-ident
+# The service runs servo-cal-launcher.sh (kept OUTSIDE the repo, in
+# ~/servo-cal/, because the repo checkout is branch-switched): it idles on
+# branches without rust/servo-ident, and on branches that have it builds
+# the release binary and serves. Restart=always makes the launcher's exit
+# on a HEAD change (flash script pull / checkout) an automatic
+# rebuild-and-restart — the unit follows whatever is checked out.
 #
 # Install (printer-style, sudoers only passwordless-allows systemctl —
-# same pattern as ~/observability): keep this unit in ~/servo-cal/ and
+# same pattern as ~/observability): put this unit and the launcher in
+# ~/servo-cal/, `chmod +x servo-cal-launcher.sh`, then
 #   sudo systemctl enable --now /home/<user>/servo-cal/servo-cal.service
-# or the standard way:
-#   sudo cp servo-cal.service /etc/systemd/system/
-#   sudo systemctl daemon-reload && sudo systemctl enable --now servo-cal
-#
-# Adapt User= and the /home/pi paths to the host. After pulling a new
-# branch build, rebuild and `sudo systemctl restart servo-cal`.
+# Adapt User= and the /home/pi paths to the host.
 #
 # Browser access needs the dashboard's origin in moonraker.conf so the
 # pages can POST G-code:
@@ -28,11 +25,10 @@ After=network.target
 [Service]
 Type=simple
 User=pi
-ExecStart=/home/pi/klipper/rust/target/release/servo-cal serve \
-    --dir /home/pi/printer_data/logs/servo_captures \
-    --port 8085
-Restart=on-failure
-RestartSec=5
+ExecStart=/home/pi/servo-cal/servo-cal-launcher.sh
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=0
 
 [Install]
 WantedBy=multi-user.target

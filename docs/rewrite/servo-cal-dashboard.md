@@ -26,16 +26,26 @@ cd rust && cargo build --release -p servo-ident
 rust/target/release/servo-cal serve --dir ~/printer_data/logs/servo_captures --port 8085
 ```
 
-Permanent: install
-[`config/servo-cal/servo-cal.service`](../../config/servo-cal/servo-cal.service)
-(header carries the two install variants — the printer-style
-`systemctl enable --now /home/<user>/servo-cal/servo-cal.service` symlink
-that fits the benches' systemctl-only sudoers, and the standard
-`/etc/systemd/system` copy). The service runs the same binary klippy
-resolves for `servo-cal analyze`
-(`~/klipper/rust/target/release/servo-cal`), so one `cargo build --release
--p servo-ident` on the host feeds both; after pulling a new branch build,
-rebuild and `sudo systemctl restart servo-cal`.
+Permanent: from the dev machine,
+
+```sh
+scripts/install-servo-cal.sh dderg@trident.local
+```
+
+which copies
+[`config/servo-cal/`](../../config/servo-cal/servo-cal.service)'s unit +
+launcher into `~/servo-cal/` on the host (outside the repo, so they
+survive branch switches), rewrites `User=`/paths for the remote user, and
+enables the unit via the symlink form the benches' systemctl-only sudoers
+allows. Re-running the script updates and restarts.
+
+The service is branch-aware: the launcher idles (rechecking every 60 s)
+when the checked-out `~/klipper` has no `rust/servo-ident`, builds and
+serves when it does, and exits whenever HEAD moves — `Restart=always`
+turns a flash-script pull or branch switch into an automatic
+rebuild-and-restart. The binary it builds is the same one klippy resolves
+for `servo-cal analyze` (`~/klipper/rust/target/release/servo-cal`), so
+one build feeds both.
 
 Open `http://<bench-host>:8085/` in a browser. The run strips poll
 `/api/runs` every 5 s, so a sweep's `results.json` landing on disk shows up
