@@ -311,3 +311,52 @@ fn analyze_on_demand_regenerates_stale_results() {
 fn mtime(path: &Path) -> std::time::SystemTime {
     std::fs::metadata(path).unwrap().modified().unwrap()
 }
+
+/// `servo-cal demo` writes `drive_state.json` straight into the captures
+/// root it's given, so `GET /api/drive_state` must serve it back with the
+/// full `PANEL_PARAMS`/motors/config_pins shape plus a freshly computed
+/// `age_s` (never cached — the file was just written by `build_demo`, so
+/// its age must read close to zero, not stale from an earlier request).
+#[test]
+fn drive_state_endpoint_serves_shape_and_a_fresh_age() {
+    let (root, _run_dirs) = demo_root("drive_state");
+    let port = spawn_server(root.clone());
+
+    let resp = request(port, "GET", "/api/drive_state");
+    assert_eq!(resp.status, 200);
+    let parsed: Value = serde_json::from_str(&resp.body).expect("drive_state is json");
+    assert_eq!(parsed["version"], Value::from(1));
+    assert_eq!(parsed["params"].as_array().unwrap().len(), 10);
+    assert_eq!(parsed["motors"].as_object().unwrap().len(), 4);
+    assert_eq!(parsed["config_pins"].as_object().unwrap().len(), 4);
+    let age_s = parsed["age_s"].as_f64().expect("age_s must be a number");
+    assert!(
+        age_s >= 0.0 && age_s < 30.0,
+        "age_s {age_s} should be near zero right after build_demo"
+    );
+
+    std::thread::sleep(Duration::from_secs(1));
+    let resp2 = request(port, "GET", "/api/drive_state");
+    let parsed2: Value = serde_json::from_str(&resp2.body).unwrap();
+    let age_s2 = parsed2["age_s"].as_f64().unwrap();
+    assert!(
+        age_s2 > age_s,
+        "age_s must grow between requests, not be cached: {age_s} then {age_s2}"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn drive_state_endpoint_404s_with_reason_when_absent() {
+    let root = temp_dir("drive_state_missing");
+    let port = spawn_server(root.clone());
+
+    let resp = request(port, "GET", "/api/drive_state");
+    assert_eq!(resp.status, 404);
+    let parsed: Value = serde_json::from_str(&resp.body).expect("404 body is json");
+    let reason = parsed["error"].as_str().unwrap();
+    assert!(reason.contains("drive_state.json"), "{reason}");
+
+    std::fs::remove_dir_all(&root).ok();
+}

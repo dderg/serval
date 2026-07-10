@@ -36,6 +36,204 @@ const SAFE_ACCEL: &str = "cal_p880_s550_i2273_accel_20260710_151519.csv.gz";
 const TARGET_SCAP: &str = "cal_p1120_s700_i1786_20260710_151521.scap.gz";
 const TARGET_ACCEL: &str = "cal_p1120_s700_i1786_accel_20260710_151524.csv.gz";
 
+/// One entry of `servo_tuning.PANEL_PARAMS`, mirrored by hand — see
+/// `docs/rewrite/servo-tuning-profiles.md`'s `PANEL_PARAMS` table, the
+/// source of truth `klippy/extras/servo_tuning.py` derives its `addr` from
+/// via `c_code_to_addr`. Kept here only so the demo dashboard has a
+/// plausible `drive_state.json` to render; a mismatch against the Python
+/// map is a documentation problem, not a wire contract this crate enforces.
+struct DemoPanelParam {
+    name: &'static str,
+    c_code: &'static str,
+    addr: &'static str,
+    unit: &'static str,
+    scale: f64,
+    group: &'static str,
+    description: &'static str,
+    autofill: Option<&'static str>,
+}
+
+const DEMO_PANEL_PARAMS: [DemoPanelParam; 10] = [
+    DemoPanelParam {
+        name: "position_gain",
+        c_code: "C01.00",
+        addr: "0x2001.0x01",
+        unit: "0.1 rad/s",
+        scale: 10.0,
+        group: "gains",
+        description: "C01.00 position loop gain; autofilled from speed_gain as round(speed_gain * 1.6)",
+        autofill: Some("gain_position_from_speed"),
+    },
+    DemoPanelParam {
+        name: "speed_gain",
+        c_code: "C01.01",
+        addr: "0x2001.0x02",
+        unit: "0.1 Hz",
+        scale: 10.0,
+        group: "gains",
+        description: "C01.01 speed loop gain; the autofill source for position_gain and integral_time",
+        autofill: None,
+    },
+    DemoPanelParam {
+        name: "integral_time",
+        c_code: "C01.02",
+        addr: "0x2001.0x03",
+        unit: "0.01 ms",
+        scale: 100.0,
+        group: "gains",
+        description: "C01.02 speed integral time; autofilled from speed_gain as round(1250000 / speed_gain)",
+        autofill: Some("gain_integral_from_speed"),
+    },
+    DemoPanelParam {
+        name: "freq_cutoff",
+        c_code: "C01.03",
+        addr: "0x2001.0x04",
+        unit: "Hz",
+        scale: 1.0,
+        group: "filters",
+        description: "C01.03 speed loop filter cutoff frequency; bench rule-of-thumb \u{2248} speed_gain/10 \u{d7} 0.4, drive default 200",
+        autofill: None,
+    },
+    DemoPanelParam {
+        name: "adaptive_notch_mode",
+        c_code: "C01.30",
+        addr: "0x2001.0x31",
+        unit: "",
+        scale: 1.0,
+        group: "notch",
+        description: "C01.30 adaptive notch tuning mode: 0=locked, 1=retune after every restart, 2=auto, 3=restart adaptive tuning now",
+        autofill: None,
+    },
+    DemoPanelParam {
+        name: "gain_mode",
+        c_code: "C00.04",
+        addr: "0x2000.0x05",
+        unit: "",
+        scale: 1.0,
+        group: "load",
+        description: "C00.04 auto-tuning mode: 0=manual, 1=standard/stiffness table",
+        autofill: None,
+    },
+    DemoPanelParam {
+        name: "inertia_ratio",
+        c_code: "C00.06",
+        addr: "0x2000.0x07",
+        unit: "%",
+        scale: 1.0,
+        group: "load",
+        description: "C00.06 load inertia ratio",
+        autofill: None,
+    },
+    DemoPanelParam {
+        name: "c02_60",
+        c_code: "C02.60",
+        addr: "0x2002.0x61",
+        unit: "",
+        scale: 1.0,
+        group: "experimental",
+        description: "name unknown - bench-noted value 2000; identify in the vendor manual",
+        autofill: None,
+    },
+    DemoPanelParam {
+        name: "c02_62",
+        c_code: "C02.62",
+        addr: "0x2002.0x63",
+        unit: "",
+        scale: 1.0,
+        group: "experimental",
+        description: "name unknown - bench-noted value 30; identify in the vendor manual",
+        autofill: None,
+    },
+    DemoPanelParam {
+        name: "c02_63",
+        c_code: "C02.63",
+        addr: "0x2002.0x64",
+        unit: "",
+        scale: 1.0,
+        group: "experimental",
+        description: "name unknown - bench-noted value 150; identify in the vendor manual",
+        autofill: None,
+    },
+];
+
+const DEMO_MOTORS: [&str; 4] = ["motor_a", "motor_a1", "motor_b", "motor_b1"];
+
+/// c_code -> current raw reading, shared by every `DEMO_MOTORS` entry — the
+/// demo has no per-motor drift to show, only the panel's shape.
+fn demo_readings() -> [(&'static str, i64); 10] {
+    [
+        ("C01.00", 880),
+        ("C01.01", 550),
+        ("C01.02", 2273),
+        ("C01.03", 220),
+        ("C01.30", 0),
+        ("C00.04", 0),
+        ("C00.06", 150),
+        ("C02.60", 2000),
+        ("C02.62", 30),
+        ("C02.63", 150),
+    ]
+}
+
+/// `gain_mode` (C00.04) and `inertia_ratio` (C00.06) are pinned in every
+/// demo motor's `[motor] params:` block — the panel's cue that editing them
+/// live won't survive a restart until the config is updated too.
+const DEMO_PINNED_C_CODES: [&str; 2] = ["C00.04", "C00.06"];
+
+/// Write `<out_dir>/drive_state.json` in the shape `SERVO_DUMP_TUNING`
+/// produces (`docs/rewrite/servo-tuning-profiles.md`), so the tuning panel
+/// has something plausible to render without a bench.
+fn write_demo_drive_state(out_dir: &Path) -> Result<(), String> {
+    let readings: std::collections::BTreeMap<&str, i64> = demo_readings().into_iter().collect();
+    let params: Vec<serde_json::Value> = DEMO_PANEL_PARAMS
+        .iter()
+        .map(|p| {
+            json!({
+                "name": p.name,
+                "c_code": p.c_code,
+                "addr": p.addr,
+                "type": "u16",
+                "unit": p.unit,
+                "scale": p.scale,
+                "group": p.group,
+                "description": p.description,
+                "autofill": p.autofill,
+            })
+        })
+        .collect();
+    let motor_readings = json!(readings);
+    let motors: serde_json::Value = DEMO_MOTORS
+        .iter()
+        .map(|m| (m.to_string(), motor_readings.clone()))
+        .collect::<serde_json::Map<_, _>>()
+        .into();
+    let pinned: serde_json::Value = DEMO_PINNED_C_CODES
+        .iter()
+        .map(|c| (c.to_string(), json!(readings[c])))
+        .collect::<serde_json::Map<_, _>>()
+        .into();
+    let config_pins: serde_json::Value = DEMO_MOTORS
+        .iter()
+        .map(|m| (m.to_string(), pinned.clone()))
+        .collect::<serde_json::Map<_, _>>()
+        .into();
+    let payload = json!({
+        "version": 1,
+        "created_utc": iso8601_utc(SystemTime::now()),
+        "params": params,
+        "motors": motors,
+        "config_pins": config_pins,
+    });
+    let path = out_dir.join("drive_state.json");
+    let tmp = out_dir.join("drive_state.json.tmp");
+    std::fs::write(
+        &tmp,
+        serde_json::to_string_pretty(&payload).map_err(|e| format!("{e}"))?,
+    )
+    .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("rename to {}: {e}", path.display()))
+}
+
 pub struct DemoAttempt {
     pub suffix: &'static str,
     pub notch: i64,
@@ -255,5 +453,6 @@ pub fn build_demo(out_dir: &Path, fixtures_dir: &Path) -> Result<Vec<PathBuf>, S
         run_dirs.push(run_dir);
         std::thread::sleep(Duration::from_millis(15));
     }
+    write_demo_drive_state(out_dir)?;
     Ok(run_dirs)
 }

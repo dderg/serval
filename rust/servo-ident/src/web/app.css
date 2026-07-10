@@ -16,6 +16,12 @@
   box-sizing: border-box;
 }
 
+html,
+body {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
 body {
   margin: 0;
   padding: 1rem 1.25rem 3rem;
@@ -23,6 +29,11 @@ body {
   color: var(--text);
   font-size: 13px;
   line-height: 1.4;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  max-width: 100%;
 }
 
 h1 {
@@ -105,10 +116,18 @@ tr:hover td {
 
 .diff {
   color: var(--warn);
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .diff.empty {
   color: var(--dim);
+}
+
+td.steps {
+  white-space: normal;
 }
 
 .step-name {
@@ -210,6 +229,12 @@ textarea {
   font-size: 0.75rem;
 }
 
+.hint,
+.unit {
+  color: var(--dim);
+  font-size: 0.72rem;
+}
+
 .status-line {
   font-size: 0.75rem;
   margin-top: 0.3rem;
@@ -224,13 +249,101 @@ textarea {
   color: var(--bad);
 }
 
-.param-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  margin-bottom: 0.5rem;
+.banner {
+  margin-bottom: 0.6rem;
 }
 
-.param-rows .row input {
-  width: 8rem;
+.param-group {
+  margin-bottom: 0.9rem;
+}
+
+.param-group h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.param-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.2rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.param-label {
+  min-width: 11rem;
+}
+
+.param-body {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.param-body input {
+  width: 7rem;
+}
+
+.per-motor {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+.per-motor label {
+  color: var(--dim);
+  min-width: 5rem;
+}
+
+.badge.pin {
+  color: var(--warn);
+}
+
+.badge.mixed {
+  color: var(--accent);
+  cursor: pointer;
+  border-style: dashed;
+}
+
+a.rederive,
+a.collapse-mixed {
+  color: var(--accent);
+  font-size: 0.7rem;
+}
+
+.sweep-row input {
+  flex: 1;
+  min-width: 20rem;
+}
+
+.sent-log {
+  max-height: 12rem;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  margin-top: 0.4rem;
+  padding: 0.3rem 0.5rem;
+}
+
+.sent-entry {
+  padding: 0.25rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.75rem;
+}
+
+.sent-entry:last-child {
+  border-bottom: none;
+}
+
+.sent-head {
+  color: var(--dim);
+}
+
+.sent-line {
+  color: var(--text);
+  white-space: pre-wrap;
 }

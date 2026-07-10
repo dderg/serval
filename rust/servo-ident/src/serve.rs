@@ -1,8 +1,10 @@
 //! `servo-cal serve`: run-directory listing, raw manifest/results/plot_series
-//! serving, analyze-on-demand, and the embedded SPA — the HTTP routes bound
-//! to `docs/rewrite/servo-cal-contracts.md`'s `serve` section. The transport
-//! is `crate::http`; this module only ever answers pure functions of the
-//! filesystem under `captures_root`.
+//! serving, `drive_state.json` passthrough for the tuning panel,
+//! analyze-on-demand, and the embedded SPA — the HTTP routes bound to
+//! `docs/rewrite/servo-cal-contracts.md`'s `serve` section and
+//! `docs/rewrite/servo-tuning-profiles.md`'s tuning panel backend. The
+//! transport is `crate::http`; this module only ever answers pure functions
+//! of the filesystem under `captures_root`.
 
 use std::path::Path;
 use std::time::SystemTime;
@@ -156,6 +158,61 @@ fn handle_list(captures_root: &Path) -> Response {
     }
 }
 
+/// Age of `mtime` relative to now, in seconds. `SystemTime` arithmetic can
+/// only fail when `mtime` is in the future (clock skew between writer and
+/// server); that reads as zero age rather than a negative one.
+fn age_seconds(mtime: SystemTime) -> f64 {
+    SystemTime::now()
+        .duration_since(mtime)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// `GET /api/drive_state`: the tuning panel's only data source. Serves
+/// `<captures_root>/drive_state.json` verbatim except for one added
+/// top-level field, `age_s` — seconds since the file's mtime, computed
+/// fresh on every request (never cached) so the dashboard's staleness
+/// banner reflects reality even when the file itself hasn't changed since
+/// the last SERVO_DUMP_TUNING. 404 with a reason when the file is absent —
+/// SERVO_DUMP_TUNING has never run against this captures_root.
+fn handle_drive_state(captures_root: &Path) -> Response {
+    let path = captures_root.join("drive_state.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => {
+            return Response::not_found(&format!(
+                "{}: {e} (run SERVO_DUMP_TUNING first)",
+                path.display()
+            ))
+        }
+    };
+    let file_mtime = match mtime(&path) {
+        Ok(m) => m,
+        Err(e) => return Response::text(500, "text/plain", e),
+    };
+    let mut value: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            return Response::text(500, "text/plain", format!("{}: parse: {e}", path.display()))
+        }
+    };
+    let Some(obj) = value.as_object_mut() else {
+        return Response::text(
+            500,
+            "text/plain",
+            format!(
+                "{}: expected a JSON object at the top level",
+                path.display()
+            ),
+        );
+    };
+    obj.insert(
+        "age_s".to_string(),
+        serde_json::json!(age_seconds(file_mtime)),
+    );
+    Response::json(200, value.to_string())
+}
+
 fn handle_analyze(captures_root: &Path, name: &str) -> Response {
     if !valid_run_name(name) {
         return Response::not_found(&format!("invalid run name {name:?}"));
@@ -201,6 +258,7 @@ pub fn handle(captures_root: &Path, req: &Request) -> Response {
         }
         ("GET", ["app.css"]) => Response::text(200, "text/css", assets::APP_CSS.to_string()),
         ("GET", ["api", "runs"]) => handle_list(captures_root),
+        ("GET", ["api", "drive_state"]) => handle_drive_state(captures_root),
         ("GET", ["api", "runs", name, "manifest"]) => {
             read_run_file(captures_root, name, "manifest.json")
         }

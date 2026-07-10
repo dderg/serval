@@ -10,6 +10,7 @@
 
 <h1>servo-cal — attempt journal</h1>
 
+<div class="table-wrap">
 <table>
   <thead>
     <tr>
@@ -24,6 +25,7 @@
   </thead>
   <tbody id="journal-body"></tbody>
 </table>
+</div>
 
 <h2>overlay drill-down (<span id="overlay-count">0</span> selected)</h2>
 <div class="row">
@@ -42,7 +44,7 @@
   <p class="note">tick runs in the journal, then Overlay</p>
 </div>
 
-<h2>re-run: <span id="form-run-name">(load a run above)</span></h2>
+<h2>drive tuning panel</h2>
 <div class="panel">
   <div class="row">
     <label>moonraker url</label>
@@ -52,12 +54,31 @@
     requires a <code>cors_domains</code> line in the bench's moonraker.conf
     naming this dashboard's origin.
   </p>
-  <div id="param-rows" class="param-rows"></div>
+  <div id="drive-state-banner" class="banner"></div>
+  <div id="drive-groups"></div>
+  <div class="row">
+    <button id="drive-apply-btn" disabled>apply changed params</button>
+    <span class="note" id="drive-changed-count"></span>
+  </div>
+  <div class="row sweep-row">
+    <label>sweep re-run: <span id="form-run-name">(load a run above)</span></label>
+    <input type="text" id="sweep-command" size="60" placeholder="load a run above to prefill">
+    <button id="run-sweep-btn">run sweep</button>
+  </div>
+</div>
+
+<h2>manual g-code / session log</h2>
+<div class="panel">
+  <p class="note">
+    manual escape hatch — edit and send arbitrary G-code lines; every batch
+    sent from here, Apply, or Run sweep is appended to the log below.
+  </p>
   <textarea id="gcode-textarea" spellcheck="false"></textarea>
   <div class="row">
     <button id="run-gcode">run</button>
   </div>
   <div id="run-status" class="status-line"></div>
+  <div id="sent-log" class="sent-log"></div>
 </div>
 
 <script src="/app.js"></script>

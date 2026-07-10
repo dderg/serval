@@ -186,6 +186,94 @@ fn attempt1_resonance_injection_flips_the_verdict_to_the_safe_step() {
     std::fs::remove_dir_all(&out_dir).ok();
 }
 
+/// The tuning panel (`docs/rewrite/servo-tuning-profiles.md`'s
+/// `SERVO_DUMP_TUNING` shape) has nothing to render without a bench unless
+/// `servo-cal demo` also ships a plausible `<out_dir>/drive_state.json` —
+/// this asserts the file mirrors the shipped `PANEL_PARAMS` map (10 params,
+/// 4 AWD corexy motors) and pins `gain_mode`/`inertia_ratio` the way a
+/// `[motor] params:` block would.
+#[test]
+fn demo_writes_a_drive_state_the_panel_can_render() {
+    let out_dir = temp_dir("drive_state");
+    build_demo(&out_dir, &fixture_dir()).unwrap();
+
+    let path = out_dir.join("drive_state.json");
+    assert!(path.is_file(), "servo-cal demo must write drive_state.json");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let drive_state: Value = serde_json::from_str(&text).expect("drive_state.json must parse");
+
+    assert_eq!(drive_state["version"], Value::from(1));
+    assert!(drive_state["created_utc"].as_str().is_some());
+
+    let params = drive_state["params"].as_array().unwrap();
+    assert_eq!(params.len(), 10, "must mirror all 10 shipped PANEL_PARAMS");
+    let names: Vec<&str> = params.iter().map(|p| p["name"].as_str().unwrap()).collect();
+    for expected in [
+        "position_gain",
+        "speed_gain",
+        "integral_time",
+        "freq_cutoff",
+        "adaptive_notch_mode",
+        "gain_mode",
+        "inertia_ratio",
+        "c02_60",
+        "c02_62",
+        "c02_63",
+    ] {
+        assert!(names.contains(&expected), "missing panel param {expected}");
+    }
+    let position_gain = params
+        .iter()
+        .find(|p| p["name"] == "position_gain")
+        .unwrap();
+    assert_eq!(position_gain["c_code"], Value::from("C01.00"));
+    assert_eq!(position_gain["addr"], Value::from("0x2001.0x01"));
+    assert_eq!(position_gain["scale"], Value::from(10.0));
+    assert_eq!(position_gain["group"], Value::from("gains"));
+    assert_eq!(
+        position_gain["autofill"],
+        Value::from("gain_position_from_speed")
+    );
+    let speed_gain = params.iter().find(|p| p["name"] == "speed_gain").unwrap();
+    assert!(
+        speed_gain["autofill"].is_null(),
+        "autofill source carries no autofill marker"
+    );
+
+    let motors = drive_state["motors"].as_object().unwrap();
+    assert_eq!(motors.len(), 4);
+    for name in ["motor_a", "motor_a1", "motor_b", "motor_b1"] {
+        let readings = motors
+            .get(name)
+            .unwrap_or_else(|| panic!("missing motor {name}"));
+        assert_eq!(readings["C01.00"], Value::from(880));
+        assert_eq!(readings["C01.01"], Value::from(550));
+        assert_eq!(readings["C01.02"], Value::from(2273));
+        assert_eq!(readings["C01.03"], Value::from(220));
+        assert_eq!(readings["C01.30"], Value::from(0));
+        assert_eq!(readings["C00.04"], Value::from(0));
+        assert_eq!(readings["C00.06"], Value::from(150));
+        assert_eq!(readings["C02.60"], Value::from(2000));
+        assert_eq!(readings["C02.62"], Value::from(30));
+        assert_eq!(readings["C02.63"], Value::from(150));
+    }
+
+    let config_pins = drive_state["config_pins"].as_object().unwrap();
+    assert_eq!(config_pins.len(), 4);
+    for name in ["motor_a", "motor_a1", "motor_b", "motor_b1"] {
+        let pins = config_pins.get(name).unwrap();
+        assert_eq!(
+            pins.as_object().unwrap().len(),
+            2,
+            "only gain_mode and inertia_ratio are pinned"
+        );
+        assert_eq!(pins["C00.04"], Value::from(0));
+        assert_eq!(pins["C00.06"], Value::from(150));
+    }
+
+    std::fs::remove_dir_all(&out_dir).ok();
+}
+
 #[test]
 fn demo_missing_fixtures_dir_fails_loud() {
     let out_dir = temp_dir("missing");

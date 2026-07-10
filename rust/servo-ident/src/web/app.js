@@ -12,6 +12,14 @@ const state = {
   formRun: null,
   psdStep: null,
   psdContext: null, // {names, plots} from the last overlay draw, reused by the step selector
+  drive: {
+    data: null, // last /api/drive_state response (params, motors, config_pins, age_s)
+    fetchedAtMs: null, // Date.now() when data was fetched, for a client-ticking age display
+    pending: {}, // param name -> raw number (all motors) or {motor: raw} (touched motors only)
+    dirty: new Set(), // autofill-target param names the user has edited directly this session
+    expanded: new Set(), // mixed param names toggled open to per-motor inputs
+  },
+  sentLog: [], // {time, label, lines, results} — every G-code batch sent this session
 };
 
 async function api(path, opts) {
@@ -152,9 +160,11 @@ function renderTable() {
     const diffTd = document.createElement("td");
     diffTd.className = diff ? "diff" : "diff empty";
     diffTd.textContent = diff || "—";
+    if (diff) diffTd.title = diff;
     tr.appendChild(diffTd);
 
     const stepsTd = document.createElement("td");
+    stepsTd.className = "steps";
     if (results) {
       const rec = results.verdict.recommended_step;
       stepsTd.innerHTML = results.steps.map((s) => stepCellHtml(s, rec)).join("");
@@ -504,6 +514,351 @@ function drawPsdSection(names, plots, stepNames) {
   renderPsdChart(names, plots, wanted);
 }
 
+// --- drive tuning panel -----------------------------------------------------
+//
+// Renders purely from GET /api/drive_state (servo_tuning.PANEL_PARAMS shape,
+// docs/rewrite/servo-tuning-profiles.md). Pure helpers first — display/raw
+// unit conversion, autofill derivation, changed-param diffing — the logic a
+// Rust test asserts is present and exercisable without a browser; DOM
+// rendering and event wiring follow.
+
+const GROUP_ORDER = ["gains", "filters", "notch", "load", "experimental"];
+const OTHER_GROUP = "other";
+const AUTOFILL_SOURCE_PARAM = "speed_gain";
+const DRIVE_REFRESH_POLL_MS = 1000;
+const DRIVE_REFRESH_TIMEOUT_MS = 15000;
+
+function rawToDisplay(raw, scale) {
+  return raw / scale;
+}
+
+function displayToRaw(display, scale) {
+  return Math.round(display * scale);
+}
+
+function deriveGainPositionFromSpeed(speedGainRaw) {
+  return Math.round(speedGainRaw * 1.6);
+}
+
+function deriveGainIntegralFromSpeed(speedGainRaw) {
+  return Math.round(1250000 / speedGainRaw);
+}
+
+const AUTOFILL_FORMULAS = {
+  gain_position_from_speed: deriveGainPositionFromSpeed,
+  gain_integral_from_speed: deriveGainIntegralFromSpeed,
+};
+
+function paramGroupSection(param) {
+  return GROUP_ORDER.includes(param.group) ? param.group : OTHER_GROUP;
+}
+
+function groupParams(params) {
+  const sections = new Map([...GROUP_ORDER, OTHER_GROUP].map((g) => [g, []]));
+  for (const p of params) sections.get(paramGroupSection(p)).push(p);
+  return sections;
+}
+
+function motorRawValues(motors, cCode) {
+  return Object.keys(motors)
+    .sort()
+    .map((m) => motors[m][cCode]);
+}
+
+function valuesAgree(values) {
+  return values.length > 0 && values.every((v) => v === values[0]);
+}
+
+function pinnedEntries(configPins, cCode) {
+  const out = {};
+  for (const motor of Object.keys(configPins || {}).sort()) {
+    const pins = configPins[motor] || {};
+    if (Object.prototype.hasOwnProperty.call(pins, cCode)) out[motor] = pins[cCode];
+  }
+  return out;
+}
+
+/// Which mapped params differ from the drive_state's original per-motor
+/// readings, given this session's pending edits. `pending[name]` is either a
+/// raw number (the row applies the same value to every motor) or a
+/// `{motor: raw}` map (the row was expanded and only some motors were
+/// touched) — the shape `buildServoTuneCommands` expands into gcode.
+function diffChangedParams(params, motors, pending) {
+  const changed = [];
+  for (const p of params) {
+    const pend = pending[p.name];
+    if (pend === undefined) continue;
+    const cCode = p.c_code;
+    if (typeof pend === "object") {
+      const perMotor = [];
+      for (const motor of Object.keys(pend).sort()) {
+        const orig = motors[motor] ? motors[motor][cCode] : undefined;
+        if (orig !== pend[motor]) perMotor.push({ motor, value: pend[motor] });
+      }
+      if (perMotor.length) changed.push({ name: p.name, perMotor });
+    } else {
+      const values = motorRawValues(motors, cCode);
+      const orig = valuesAgree(values) ? values[0] : undefined;
+      if (orig !== pend) changed.push({ name: p.name, value: pend });
+    }
+  }
+  return changed;
+}
+
+function buildServoTuneCommands(changed) {
+  const lines = [];
+  for (const c of changed) {
+    if (c.perMotor) {
+      for (const { motor, value } of c.perMotor) {
+        lines.push(`SERVO_TUNE PARAM=${c.name} VALUE=${value} MOTORS=${motor}`);
+      }
+    } else {
+      lines.push(`SERVO_TUNE PARAM=${c.name} VALUE=${c.value}`);
+    }
+  }
+  return lines;
+}
+
+function paramByName(name) {
+  return state.drive.data.params.find((p) => p.name === name);
+}
+
+function currentSpeedGainRaw() {
+  const pending = state.drive.pending[AUTOFILL_SOURCE_PARAM];
+  if (pending !== undefined) return pending;
+  const speedParam = paramByName(AUTOFILL_SOURCE_PARAM);
+  const values = motorRawValues(state.drive.data.motors, speedParam.c_code);
+  if (valuesAgree(values)) return values[0];
+  const motorNames = Object.keys(state.drive.data.motors).sort();
+  return Object.fromEntries(motorNames.map((m, i) => [m, values[i]]));
+}
+
+function applyFormula(formula, speedRawOrMap) {
+  return typeof speedRawOrMap === "object"
+    ? Object.fromEntries(Object.entries(speedRawOrMap).map(([m, v]) => [m, formula(v)]))
+    : formula(speedRawOrMap);
+}
+
+/// speed_gain changed: push a derived value into every autofill target that
+/// the user hasn't dirtied (edited directly) this session.
+function propagateAutofill(speedRawOrMap) {
+  for (const param of state.drive.data.params) {
+    const formula = AUTOFILL_FORMULAS[param.autofill];
+    if (!formula || state.drive.dirty.has(param.name)) continue;
+    state.drive.pending[param.name] = applyFormula(formula, speedRawOrMap);
+  }
+}
+
+function rederiveAutofillTarget(name) {
+  const formula = AUTOFILL_FORMULAS[paramByName(name).autofill];
+  if (!formula) return;
+  state.drive.pending[name] = applyFormula(formula, currentSpeedGainRaw());
+}
+
+function formatAge(ageS) {
+  if (ageS < 60) return `${ageS.toFixed(0)}s`;
+  const m = Math.floor(ageS / 60);
+  const s = Math.round(ageS % 60);
+  return `${m}m${s}s`;
+}
+
+function currentDriveAgeS() {
+  if (!state.drive.data) return null;
+  return state.drive.data.age_s + (Date.now() - state.drive.fetchedAtMs) / 1000;
+}
+
+function renderDriveBanner() {
+  const el = document.getElementById("drive-state-banner");
+  const data = state.drive.data;
+  if (!data) {
+    el.innerHTML = '<span class="note">loading drive state…</span>';
+    return;
+  }
+  el.innerHTML =
+    `<span class="note">drive state ${formatAge(currentDriveAgeS())} old ` +
+    `(dumped ${data.created_utc})</span> ` +
+    `<button id="drive-refresh-btn">refresh</button>` +
+    `<span id="drive-refresh-status" class="note"></span>`;
+  document.getElementById("drive-refresh-btn").addEventListener("click", refreshDriveState);
+}
+
+function renderDriveRow(param, section, motors, configPins) {
+  const cCode = param.c_code;
+  const motorNames = Object.keys(motors).sort();
+  const rawValues = motorRawValues(motors, cCode);
+  const agree = valuesAgree(rawValues);
+  const pins = pinnedEntries(configPins, cCode);
+  const pinnedNames = Object.keys(pins);
+  const pinBadge = pinnedNames.length
+    ? `<span class="badge pin" title="restart re-applies this">pin ${[...new Set(pinnedNames.map((m) => pins[m]))].join("/")}</span>`
+    : "";
+  const groupHint = section === OTHER_GROUP ? `<span class="hint">(${param.group})</span>` : "";
+  const rederiveLink = state.drive.dirty.has(param.name)
+    ? ` <a href="#" class="rederive" data-param="${param.name}" title="restore the autofill link">re-derive</a>`
+    : "";
+
+  let body;
+  if (agree) {
+    const pending = state.drive.pending[param.name];
+    const raw = typeof pending === "number" ? pending : rawValues[0];
+    body =
+      `<input type="number" step="any" class="drive-input" data-param="${param.name}" data-mode="all" value="${rawToDisplay(raw, param.scale)}">` +
+      `<span class="hint">raw ${raw}</span>`;
+  } else if (!state.drive.expanded.has(param.name)) {
+    body = `<span class="badge mixed" data-param="${param.name}" data-role="expand">mixed — click to edit per motor</span>`;
+  } else {
+    const pendObj = typeof state.drive.pending[param.name] === "object" ? state.drive.pending[param.name] : {};
+    body =
+      motorNames
+        .map((m) => {
+          const raw = pendObj[m] !== undefined ? pendObj[m] : motors[m][cCode];
+          return (
+            `<div class="per-motor"><label>${m}</label>` +
+            `<input type="number" step="any" class="drive-input" data-param="${param.name}" data-mode="motor" data-motor="${m}" value="${rawToDisplay(raw, param.scale)}">` +
+            `<span class="hint">raw ${raw}</span></div>`
+          );
+        })
+        .join("") + `<a href="#" class="collapse-mixed" data-param="${param.name}">collapse</a>`;
+  }
+
+  return (
+    `<div class="param-row" data-param="${param.name}">` +
+    `<div class="param-label">${param.name}${param.unit ? ` <span class="unit">${param.unit}</span>` : ""}${pinBadge}${groupHint}${rederiveLink}</div>` +
+    `<div class="param-body">${body}</div>` +
+    `</div>`
+  );
+}
+
+function updateApplyState() {
+  const btn = document.getElementById("drive-apply-btn");
+  const label = document.getElementById("drive-changed-count");
+  const changed = diffChangedParams(state.drive.data.params, state.drive.data.motors, state.drive.pending);
+  btn.disabled = changed.length === 0;
+  label.textContent = changed.length ? `${changed.length} param(s) changed` : "no changes pending";
+}
+
+function bindDriveRowEvents() {
+  const container = document.getElementById("drive-groups");
+  container.querySelectorAll("input.drive-input").forEach((input) => {
+    input.addEventListener("change", onDriveInputChange);
+  });
+  container.querySelectorAll('.badge.mixed[data-role="expand"]').forEach((el) => {
+    el.addEventListener("click", () => {
+      state.drive.expanded.add(el.dataset.param);
+      renderDriveGroups();
+    });
+  });
+  container.querySelectorAll("a.collapse-mixed").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      e.preventDefault();
+      state.drive.expanded.delete(el.dataset.param);
+      renderDriveGroups();
+    });
+  });
+  container.querySelectorAll("a.rederive").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      e.preventDefault();
+      state.drive.dirty.delete(el.dataset.param);
+      rederiveAutofillTarget(el.dataset.param);
+      renderDriveGroups();
+    });
+  });
+}
+
+function onDriveInputChange(e) {
+  const input = e.target;
+  const name = input.dataset.param;
+  const param = paramByName(name);
+  const display = parseFloat(input.value);
+  if (Number.isNaN(display)) return;
+  const raw = displayToRaw(display, param.scale);
+  if (input.dataset.mode === "motor") {
+    const existing = typeof state.drive.pending[name] === "object" ? { ...state.drive.pending[name] } : {};
+    existing[input.dataset.motor] = raw;
+    state.drive.pending[name] = existing;
+  } else {
+    state.drive.pending[name] = raw;
+  }
+  if (name === AUTOFILL_SOURCE_PARAM) {
+    propagateAutofill(state.drive.pending[name]);
+  } else {
+    state.drive.dirty.add(name);
+  }
+  renderDriveGroups();
+}
+
+function renderDriveGroups() {
+  const container = document.getElementById("drive-groups");
+  const data = state.drive.data;
+  if (!data) {
+    container.innerHTML = '<p class="note">loading drive state…</p>';
+    document.getElementById("drive-apply-btn").disabled = true;
+    document.getElementById("drive-changed-count").textContent = "";
+    return;
+  }
+  const sections = groupParams(data.params);
+  const parts = [];
+  for (const [group, params] of sections) {
+    if (!params.length) continue;
+    const rows = params.map((p) => renderDriveRow(p, group, data.motors, data.config_pins)).join("");
+    parts.push(`<div class="param-group"><h3>${group}</h3>${rows}</div>`);
+  }
+  container.innerHTML = parts.join("");
+  bindDriveRowEvents();
+  updateApplyState();
+}
+
+async function loadDriveState() {
+  try {
+    const data = await api("/api/drive_state");
+    state.drive.data = data;
+    state.drive.fetchedAtMs = Date.now();
+  } catch (e) {
+    state.drive.data = null;
+    console.error(e);
+  }
+  state.drive.pending = {};
+  state.drive.dirty = new Set();
+  state.drive.expanded = new Set();
+  renderDriveBanner();
+  renderDriveGroups();
+}
+
+async function refreshDriveState() {
+  const statusEl = document.getElementById("drive-refresh-status");
+  const priorAge = state.drive.data ? currentDriveAgeS() : Infinity;
+  statusEl.textContent = " dumping…";
+  await runGcode(["SERVO_DUMP_TUNING"], "refresh");
+  const deadline = Date.now() + DRIVE_REFRESH_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, DRIVE_REFRESH_POLL_MS));
+    let data;
+    try {
+      data = await api("/api/drive_state");
+    } catch (e) {
+      continue;
+    }
+    if (data.age_s < priorAge) {
+      state.drive.data = data;
+      state.drive.fetchedAtMs = Date.now();
+      state.drive.pending = {};
+      state.drive.dirty = new Set();
+      state.drive.expanded = new Set();
+      renderDriveBanner();
+      renderDriveGroups();
+      return;
+    }
+  }
+  statusEl.textContent = " refresh timed out — drive_state.json never got newer";
+}
+
+async function applyDriveChanges() {
+  const changed = diffChangedParams(state.drive.data.params, state.drive.data.motors, state.drive.pending);
+  if (!changed.length) return;
+  await runGcode(buildServoTuneCommands(changed), "apply");
+  await loadDriveState();
+}
+
 // --- re-run form -----------------------------------------------------------
 
 function reconstructCommand(manifest) {
@@ -536,65 +891,12 @@ function reconstructCommand(manifest) {
   }
 }
 
-function paramLines(manifest) {
-  const journal = journalParams(manifest);
-  const lines = [];
-  for (const motor of Object.keys(journal).sort()) {
-    for (const addr of Object.keys(journal[motor]).sort()) {
-      lines.push({ motor, addr, value: journal[motor][addr] });
-    }
-  }
-  return lines;
-}
-
-function renderParamRows(rows) {
-  const container = document.getElementById("param-rows");
-  container.innerHTML = "";
-  rows.forEach((r, i) => {
-    const row = document.createElement("div");
-    row.className = "row";
-    row.innerHTML =
-      `<label>${r.motor}</label>` +
-      `<input type="text" data-role="addr" data-i="${i}" value="${r.addr}">` +
-      `<input type="number" data-role="value" data-i="${i}" value="${r.value}">`;
-    container.appendChild(row);
-  });
-}
-
-function currentParamRows(manifest) {
-  const rows = paramLines(manifest);
-  return rows.map((r, i) => {
-    const addrInput = document.querySelector(`#param-rows input[data-role="addr"][data-i="${i}"]`);
-    const valueInput = document.querySelector(`#param-rows input[data-role="value"][data-i="${i}"]`);
-    return {
-      motor: r.motor,
-      addr: addrInput ? addrInput.value : r.addr,
-      value: valueInput ? valueInput.value : r.value,
-    };
-  });
-}
-
-function rebuildTextarea(manifest) {
-  const rows = currentParamRows(manifest);
-  const paramCmds = rows.map(
-    (r) => `SERVO_PARAM SERVO=${r.motor} SET=${r.addr} VALUE=${r.value} TYPE=u16`
-  );
-  const sweep = reconstructCommand(manifest);
-  document.getElementById("gcode-textarea").value = [...paramCmds, "", sweep].join("\n");
-}
-
 function loadRerunForm(name) {
   const detail = state.details.get(name);
   if (!detail || !detail.manifest) return;
   state.formRun = name;
   document.getElementById("form-run-name").textContent = name;
-  renderParamRows(paramLines(detail.manifest));
-  rebuildTextarea(detail.manifest);
-  document.getElementById("param-rows").addEventListener(
-    "input",
-    () => rebuildTextarea(detail.manifest),
-    { once: false }
-  );
+  document.getElementById("sweep-command").value = reconstructCommand(detail.manifest);
 }
 
 function moonrakerUrl() {
@@ -602,35 +904,78 @@ function moonrakerUrl() {
   return input.value.replace(/\/+$/, "");
 }
 
-async function runGcode() {
-  const lines = document
-    .getElementById("gcode-textarea")
-    .value.split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l.length && !l.startsWith(";"));
+function appendSentLog(entry) {
+  state.sentLog.push(entry);
+  const container = document.getElementById("sent-log");
+  const ok = entry.results.length > 0 && entry.results.every((r) => r.ok);
+  const div = document.createElement("div");
+  div.className = "sent-entry";
+  div.innerHTML =
+    `<div class="sent-head">${entry.time} — ${entry.label} — ${entry.lines.length} line(s) — ` +
+    `<span class="${ok ? "status-ok" : "status-err"}">${ok ? "ok" : "error"}</span></div>` +
+    entry.lines
+      .map((l, i) => {
+        const r = entry.results[i];
+        const suffix = r ? ` <span class="hint">HTTP ${r.status}</span>` : "";
+        return `<div class="sent-line">${l}${suffix}</div>`;
+      })
+      .join("");
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+/// Sends `lines` (already-built gcode) through the existing Moonraker
+/// plumbing — used by the drive panel's Apply, the sweep row's Run, and the
+/// manual textarea's Run alike, so every batch lands in the same session
+/// log regardless of where it came from. Also mirrors `lines` into the
+/// textarea first: it stays the single place to see (and, for the manual
+/// path, edit) exactly what is about to be sent.
+async function runGcode(lines, label) {
+  document.getElementById("gcode-textarea").value = lines.join("\n");
   const base = moonrakerUrl();
   const statusEl = document.getElementById("run-status");
   statusEl.textContent = "";
+  const entry = { time: new Date().toISOString(), label, lines: [], results: [] };
   for (const line of lines) {
     const url = `${base}/printer/gcode/script?script=${encodeURIComponent(line)}`;
+    entry.lines.push(line);
     try {
       const resp = await fetch(url, { method: "POST" });
       const text = await resp.text();
       const cls = resp.ok ? "status-ok" : "status-err";
       statusEl.innerHTML += `<div class="${cls}">${line} -> HTTP ${resp.status} ${text.slice(0, 200)}</div>`;
+      entry.results.push({ ok: resp.ok, status: resp.status });
       if (!resp.ok) break;
     } catch (e) {
       statusEl.innerHTML += `<div class="status-err">${line} -> ${e}</div>`;
+      entry.results.push({ ok: false, status: 0 });
       break;
     }
   }
+  appendSentLog(entry);
+}
+
+function manualGcodeLines() {
+  return document
+    .getElementById("gcode-textarea")
+    .value.split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length && !l.startsWith(";"));
+}
+
+async function runSweep() {
+  const line = document.getElementById("sweep-command").value.trim();
+  if (!line || line.startsWith(";")) return;
+  await runGcode([line], "sweep");
 }
 
 function initForm() {
   const input = document.getElementById("moonraker-url");
   input.value = localStorage.getItem(MOONRAKER_KEY) || `http://${location.hostname}:7125`;
   input.addEventListener("change", () => localStorage.setItem(MOONRAKER_KEY, input.value));
-  document.getElementById("run-gcode").addEventListener("click", runGcode);
+  document.getElementById("run-gcode").addEventListener("click", () => runGcode(manualGcodeLines(), "manual"));
+  document.getElementById("drive-apply-btn").addEventListener("click", applyDriveChanges);
+  document.getElementById("run-sweep-btn").addEventListener("click", runSweep);
   document.getElementById("overlay-btn").addEventListener("click", drawOverlay);
   document.getElementById("psd-step-select").addEventListener("change", (e) => {
     state.psdStep = e.target.value;
@@ -644,8 +989,11 @@ async function tick() {
   } catch (e) {
     console.error(e);
   }
+  renderDriveBanner();
 }
 
 initForm();
 tick();
+loadDriveState();
 setInterval(tick, REFRESH_MS);
+setInterval(renderDriveBanner, 1000);

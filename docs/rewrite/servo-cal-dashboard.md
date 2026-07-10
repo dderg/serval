@@ -24,9 +24,14 @@ Open `http://<bench-host>:8085/` in a browser. The journal polls
 `/api/runs` every 5 s, so a sweep's `results.json` landing on disk shows up
 without a manual refresh.
 
-The re-run form issues G-code through Moonraker
-(`POST /printer/gcode/script`), not through `servo-cal` — add the
-dashboard's origin to the bench's `moonraker.conf`:
+The drive tuning panel reads `<captures_root>/drive_state.json` — written by
+`SERVO_DUMP_TUNING` (see
+[servo-tuning-profiles.md](servo-tuning-profiles.md#tuning-panel-backend)) —
+and writes back through `SERVO_TUNE`, one register at a time, applied to
+every motor unless the panel had to expand a mixed row per motor. Both the
+panel's Apply and the sweep row's Run, like the re-run form, issue G-code
+through Moonraker, not through `servo-cal` — add the dashboard's origin to
+the bench's `moonraker.conf`:
 
 ```ini
 [authorization]
@@ -56,6 +61,16 @@ reading the notch value change between consecutive rows. Tick two rows and
 click "overlay selected" to see their `s550`/`s700` following-error traces
 drawn together.
 
+`servo-cal demo` also writes a `drive_state.json` for four AWD corexy
+motors (`motor_a`/`motor_a1`/`motor_b`/`motor_b1`) mirroring the shipped
+`PANEL_PARAMS` (gains 880/550/2273, `freq_cutoff` 220, `gain_mode`/
+`inertia_ratio` 0/150 pinned as if set by `[motor] params:`, three
+unidentified experimental registers), so the drive tuning panel has
+something plausible to render and Apply against without a bench — Apply
+still tries to reach Moonraker, so on a bench-less demo it will report a
+connection error in the panel's status line and session log, which is
+expected.
+
 `servo-cal demo` resolves the fixtures directory relative to the running
 binary (`<repo>/rust/target/<profile>/servo-cal` -> `<repo>/test/fixtures`);
 pass `--fixtures <dir>` if the binary has been copied elsewhere.
@@ -70,9 +85,50 @@ pass `--fixtures <dir>` if the binary has been copied elsewhere.
 | GET    | `/api/runs/<name>/results`        | raw `results.json`; 404 if missing                                        |
 | GET    | `/api/runs/<name>/plot_series`    | raw `plot_series.json`; 404 if missing                                    |
 | POST   | `/api/runs/<name>/analyze`        | re-analyzes if `results.json` is missing or older than any capture/manifest file in the run dir, then returns the (possibly freshly written) `results.json` |
+| GET    | `/api/drive_state`                | raw `<captures_root>/drive_state.json` (`SERVO_DUMP_TUNING`'s output, [servo-tuning-profiles.md](servo-tuning-profiles.md#tuning-panel-backend)) with one field added, `age_s` — seconds since the file's mtime, recomputed fresh on every request, never cached; 404 with a JSON `{"error": ...}` reason if the file doesn't exist yet (`SERVO_DUMP_TUNING` hasn't run against this `captures_root`) |
 
 `<name>` is validated against `[A-Za-z0-9_-]+`; anything else is rejected
 before it ever reaches the filesystem.
+
+## Drive tuning panel
+
+Renders purely from `/api/drive_state`, grouped into the sections
+`PANEL_PARAMS` assigns (`gains`, `filters`, `notch`, `load`,
+`experimental`), plus an `other` section for any `extra_params:` group the
+panel doesn't otherwise recognize — nothing from the dump is ever dropped.
+
+- **One field per param.** When every motor reads the same raw value the
+  row is a single input, pre-filled with the display value (`raw / scale`)
+  and a small "raw `<n>`" hint; when motors disagree the row shows a
+  "mixed" badge that expands to one input per motor on click.
+- **Config-pinned params** (present in a motor's `[motor] params:` block or
+  `tuning_profile`, per `drive_state.json`'s `config_pins`) get a pin badge
+  showing the pinned value, titled "restart re-applies this" — editing the
+  live value here does not survive a restart until the config is updated
+  too.
+- **Autofill.** Editing `speed_gain` live-derives `position_gain`
+  (`round(raw * 1.6)`) and `integral_time` (`round(1250000 / raw)`) unless
+  the operator has edited that field directly this session (dirty-tracked
+  per field); a "re-derive" link restores the linkage.
+- **Staleness banner.** Shows the drive state's age (ticking client-side
+  between fetches) and a Refresh button that sends `SERVO_DUMP_TUNING`
+  through Moonraker, then polls `/api/drive_state` until `age_s` drops,
+  then re-renders — the operator's cue that an out-of-band edit (e.g. a
+  hand-typed `SERVO_TUNE` on the console) is now reflected in the panel.
+- **Apply** builds the minimal `SERVO_TUNE` command list — only params that
+  actually changed, one call per param when every motor gets the same
+  value, one call per touched motor (`MOTORS=<name>`) when a row was
+  expanded — previews the exact lines in the session's G-code textarea,
+  sends them through the existing Moonraker plumbing, appends the batch to
+  a scrollable, timestamped "sent this session" log, then refreshes the
+  drive state.
+- **Sweep row.** Sits under the panel: the reconstructed sweep command
+  (same `manifest.json`-derived reconstruction the old re-run form used)
+  with its own Run button, so the loop reads tweak panel -> apply -> run
+  sweep -> journal updates.
+- The G-code textarea stays as the manual escape hatch for arbitrary lines
+  and doubles as the last-sent preview; every batch sent from Apply, Run
+  sweep, or the textarea's own Run button lands in the same session log.
 
 ## Implementation notes
 
@@ -87,7 +143,15 @@ before it ever reaches the filesystem.
   no framework, no build step.
 - The overlay drill-down never re-runs a sweep; it only draws
   `plot_series.json` already on disk for the ticked rows.
-- The re-run form reconstructs the sweep's G-code from
-  `manifest.json`'s `experiment`/`steps`/`stroke_plan` — a best-effort
-  rendering the operator can edit before sending, not a guarantee of exact
-  parameter fidelity.
+- The sweep row reconstructs its G-code from `manifest.json`'s
+  `experiment`/`steps`/`stroke_plan` — a best-effort rendering the operator
+  can edit before sending, not a guarantee of exact parameter fidelity.
+- The drive panel's pure logic (display/raw unit conversion, autofill
+  derivation, changed-param diffing) is a handful of plain functions in
+  `app.js` (`rawToDisplay`, `displayToRaw`, `deriveGainPositionFromSpeed`,
+  `deriveGainIntegralFromSpeed`, `groupParams`, `motorRawValues`,
+  `valuesAgree`, `pinnedEntries`, `diffChangedParams`,
+  `buildServoTuneCommands`) rather than behind a Node toolchain this crate
+  doesn't otherwise need; `rust/servo-ident/tests/drive_panel_spa.rs` is
+  the substitute test rig, asserting the served `app.js` still defines them
+  and that the demo's `drive_state.json` matches what they assume.
