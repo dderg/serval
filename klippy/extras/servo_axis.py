@@ -119,6 +119,34 @@ class ServoMotor:
             raise motor_config.error(
                 "[%s] params: %s" % (motor_config.get_name(), e)
             )
+        self.tuning_profile_name = motor_config.get("tuning_profile", None)
+        if self.tuning_profile_name is not None:
+            try:
+                profile_params, profile_path = servo_param.load_tuning_profile(
+                    self.tuning_profile_name
+                )
+            except ValueError as e:
+                raise motor_config.error(
+                    "[%s] tuning_profile: %s" % (motor_config.get_name(), e)
+                )
+            overlap = sorted(
+                {(i, s) for i, s, _sz, _v in profile_params}
+                & {(i, s) for i, s, _sz, _v in self.sdo_params}
+            )
+            if overlap:
+                index, subindex = overlap[0]
+                raise motor_config.error(
+                    "[%s]: 0x%04x.%d is set by both tuning_profile %s (%s) "
+                    "and the params: block — remove it from one"
+                    % (
+                        motor_config.get_name(),
+                        index,
+                        subindex,
+                        self.tuning_profile_name,
+                        profile_path,
+                    )
+                )
+            self.sdo_params = profile_params + self.sdo_params
 
     def get_motor_name(self):
         return self.motor_name

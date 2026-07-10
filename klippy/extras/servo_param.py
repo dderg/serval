@@ -1,3 +1,5 @@
+import os
+
 TYPE_TOKENS = {
     "u8": (1, 0, 0xFF),
     "u16": (2, 0, 0xFFFF),
@@ -85,10 +87,39 @@ def parse_params_block(text):
     entries = []
     for line in text.splitlines():
         line = line.strip()
-        if not line:
+        if not line or line.startswith("#"):
             continue
         entries.append(parse_param_entry(line))
     return entries
+
+
+TUNING_PROFILE_DIR = "~/printer_data/config/servo_tuning"
+
+
+def tuning_profile_path(name):
+    return os.path.join(
+        os.path.expanduser(TUNING_PROFILE_DIR), name + ".params"
+    )
+
+
+def load_tuning_profile(name):
+    """Parse a [motor] tuning_profile: file, same syntax as params:."""
+    path = tuning_profile_path(name)
+    if not os.path.isfile(path):
+        raise ValueError(
+            "tuning_profile %r not found (expected %s)" % (name, path)
+        )
+    with open(path) as f:
+        text = f.read()
+    return parse_params_block(text), path
+
+
+def decode_typed(raw, size, type_token):
+    bits = 8 * size
+    unsigned = raw & ((1 << bits) - 1)
+    if type_token.startswith("i"):
+        return unsigned - (1 << bits) if unsigned >> (bits - 1) else unsigned
+    return unsigned
 
 
 def format_value(index, subindex, size, raw, type_token):
@@ -118,6 +149,18 @@ def format_value(index, subindex, size, raw, type_token):
     )
 
 
+def read_param(printer, node, slot, index, subindex):
+    """Resolve node's engine handle and read one SDO object. Shared by
+    cmd_SERVO_PARAM and any other extra that needs a drive readback."""
+    handle = node.get_engine_handle()
+    if handle is None:
+        raise RuntimeError(
+            "ethercat_node %s has no engine handle" % (node.name,)
+        )
+    engine = printer.lookup_object("motion_engine")
+    return engine.sdo_read(handle, slot, index, subindex)
+
+
 class ServoParam:
     cmd_SERVO_PARAM_help = (
         "Read/write a raw CoE SDO object on an EtherCAT servo drive"
@@ -145,13 +188,6 @@ class ServoParam:
 
     def cmd_SERVO_PARAM(self, gcmd):
         node, slot = self._resolve_node(gcmd.get("SERVO"))
-        handle = node.get_engine_handle()
-        if handle is None:
-            raise gcmd.error(
-                "SERVO_PARAM: ethercat_node %s has no engine handle"
-                % (node.name,)
-            )
-        engine = self.printer.lookup_object("motion_engine")
         get_addr = gcmd.get("GET", None)
         set_addr = gcmd.get("SET", None)
         if (get_addr is None) == (set_addr is None):
@@ -165,11 +201,19 @@ class ServoParam:
         try:
             if get_addr is not None:
                 index, subindex = parse_address(get_addr)
-                size, raw = engine.sdo_read(handle, slot, index, subindex)
+                size, raw = read_param(
+                    self.printer, node, slot, index, subindex
+                )
                 gcmd.respond_info(
                     format_value(index, subindex, size, raw, type_token)
                 )
             else:
+                handle = node.get_engine_handle()
+                if handle is None:
+                    raise RuntimeError(
+                        "ethercat_node %s has no engine handle" % (node.name,)
+                    )
+                engine = self.printer.lookup_object("motion_engine")
                 index, subindex = parse_address(set_addr)
                 value = _parse_int(gcmd.get("VALUE"))
                 size = check_value(value, type_token)
