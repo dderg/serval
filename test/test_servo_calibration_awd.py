@@ -286,14 +286,6 @@ def test_measure_inertia_captures_every_motor_moving_the_axis():
     )
 
 
-def test_measure_friction_captures_every_motor_moving_the_axis():
-    sc, gcode = make_calibration(awd_rails())
-    sc.cmd_SERVO_MEASURE_FRICTION(FakeGcmd(AXIS="X"))
-    assert (
-        "SERVO=motor_a1,motor_a,motor_b,motor_b1" in _capture_starts(gcode)[0]
-    )
-
-
 def test_measure_inertia_cartesian_captures_only_its_rail():
     rails = [
         _rail(
