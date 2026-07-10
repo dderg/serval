@@ -18,7 +18,8 @@ use vec3::{dot, turn_normal};
 
 pub use config::CornerFitConfig;
 pub use move_ops::{
-    blend_moves, consumption_moves, is_travel, spatial_end, spatial_start, trim_line_move,
+    blend_moves, consumption_moves, is_travel, merge_collinear_lines, spatial_end, spatial_start,
+    trim_line_move,
 };
 pub use runfit::RunFit;
 

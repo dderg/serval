@@ -1456,10 +1456,13 @@ fn extruder_gain_kernel_chains(
 }
 
 fn assert_gain_kernel_orders_commute(leader_smooth_time: Option<f64>) {
+    // The feedrate step between the collinear moves keeps the fit stage
+    // from merging them — the test's tolerances are calibrated to three
+    // separate emit windows.
     let moves = [
-        line(1, [0.0, 0.0, 0.0], [20.0, 0.0, 0.0], 1.0),
-        line(2, [20.0, 0.0, 0.0], [40.0, 0.0, 0.0], 1.0),
-        line(3, [40.0, 0.0, 0.0], [60.0, 0.0, 0.0], 1.0),
+        line_move([0.0, 0.0, 0.0], [20.0, 0.0, 0.0], 1.0, ctx(1, 80.0)).unwrap(),
+        line_move([20.0, 0.0, 0.0], [40.0, 0.0, 0.0], 1.0, ctx(2, 95.0)).unwrap(),
+        line_move([40.0, 0.0, 0.0], [60.0, 0.0, 0.0], 1.0, ctx(3, 80.0)).unwrap(),
     ];
     let home = [0.0, 0.0, 0.0, 0.0];
     let (k1, k2) = (0.03, 2e-4);

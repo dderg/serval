@@ -1,8 +1,8 @@
 use crossbeam_channel::{Receiver, Sender};
 use geometry::fitter::{
     JunctionPlan, RunFit, arc_candidate_fits, blend_moves, consumption_moves,
-    facet_consumption_candidate, is_travel, plan_facet_consumption, plan_junction_reduced,
-    spatial_end, spatial_start, trim_line_move,
+    facet_consumption_candidate, is_travel, merge_collinear_lines, plan_facet_consumption,
+    plan_junction_reduced, spatial_end, spatial_start, trim_line_move,
 };
 use geometry::path::{Line, PathSegment, Segment};
 use geometry::{CornerFitConfig, Move};
@@ -57,6 +57,7 @@ pub struct FitStage {
     seam_head_trim: f64,
     seam_in_reduction: f64,
     consume_scan_start: usize,
+    merge_absorbed: Vec<[f64; 3]>,
 }
 
 enum Element {
@@ -99,7 +100,29 @@ impl FitStage {
             seam_head_trim: 0.0,
             seam_in_reduction: 0.0,
             consume_scan_start: MAX_CONSUMED_FACETS,
+            merge_absorbed: Vec::new(),
         }
+    }
+
+    /// Append a raw move to the undecided tail, merging it into the previous
+    /// move when the junction between them is a sub-degree turn within the
+    /// corner-deviation budget — see [`merge_collinear_lines`]. Slicers break
+    /// gentle transitions into sub-degree facets; kept separate, the blends
+    /// at those junctions squeeze the facet bodies into micrometre slivers
+    /// whose lowered acceleration rings far past the machine limits.
+    fn ingest(&mut self, m: Move) {
+        if let Some(last) = self.tail.last_mut() {
+            if let Some(merged) = merge_collinear_lines(last, &m, &self.merge_absorbed, self.corner)
+            {
+                let junction = spatial_end(last).expect("merged moves are spatial lines");
+                self.merge_absorbed.push(junction);
+                *last = merged;
+                self.tail_checked = self.tail_checked.min(self.tail.len() - 1).max(1);
+                return;
+            }
+        }
+        self.merge_absorbed.clear();
+        self.tail.push(m);
     }
 
     pub fn run(self, input: Receiver<StreamInput>, output: Sender<StreamInput>) {
@@ -127,6 +150,7 @@ impl FitStage {
             Control::Reset { .. } => {
                 self.decided.clear();
                 self.tail.clear();
+                self.merge_absorbed.clear();
                 self.tail_checked = 1;
                 self.seam_head_trim = 0.0;
                 self.seam_in_reduction = 0.0;
@@ -633,7 +657,7 @@ impl FitDriver {
     pub fn feed(&mut self, item: StreamInput) -> bool {
         match item {
             StreamInput::Move(m) => {
-                self.stage.tail.push(m);
+                self.stage.ingest(m);
                 self.stage.resolve(false, &mut self.out)
             }
             StreamInput::Drain => {

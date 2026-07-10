@@ -714,3 +714,145 @@ fn kernel_variance_exhausting_the_budget_leaves_the_corner_sharp() {
     assert_eq!(out.report.blended, 0);
     assert_eq!(out.report.unblended[0].reason, UnblendReason::ZeroDeviation);
 }
+
+fn merge_pair(prev: &Move, next: &Move) -> Option<Move> {
+    merge_collinear_lines(prev, next, &[], CornerFitConfig::default())
+}
+
+fn sub_degree_pair() -> (Move, Move) {
+    // ~0.25° turn at the shared vertex, 0.2 mm facets — the slicer's
+    // width-transition shape that motivates merging.
+    let a = seg(1, 10_000.0, 20.0, [0.0, 0.0, 0.0], [0.2, 0.0, 0.0], 0.01);
+    let b = seg(
+        2,
+        10_000.0,
+        20.0,
+        [0.2, 0.0, 0.0],
+        [0.4, 0.0009, 0.0],
+        0.011,
+    );
+    (a, b)
+}
+
+#[test]
+fn merge_joins_sub_degree_extruding_facets() {
+    let (a, b) = sub_degree_pair();
+    let m = merge_pair(&a, &b).expect("sub-degree facets merge");
+    let line = as_line(&m);
+    assert!(approx3(line.start, [0.0, 0.0, 0.0], 1e-12));
+    assert!(approx3(line.end, [0.4, 0.0009, 0.0], 1e-12));
+    let merged_e = m.segment.followers[0].ratio * m.segment.s_len();
+    assert!(
+        (merged_e - 0.021).abs() < 1e-9,
+        "extrusion preserved: {merged_e}"
+    );
+    assert_eq!(m.source.start_line, 1);
+    assert_eq!(m.source.end_line, 2);
+}
+
+#[test]
+fn merge_refuses_a_real_corner() {
+    let a = seg(1, 10_000.0, 20.0, [0.0, 0.0, 0.0], [5.0, 0.0, 0.0], 0.1);
+    let b = seg(2, 10_000.0, 20.0, [5.0, 0.0, 0.0], [5.0, 5.0, 0.0], 0.1);
+    assert!(merge_pair(&a, &b).is_none());
+}
+
+#[test]
+fn merge_refuses_a_shallow_turn_between_long_lines() {
+    // 0.5° is under the turn cap, but the vertex of two 20 mm legs sits far
+    // outside the corner-deviation budget.
+    let theta = 0.5 * PI / 180.0;
+    let a = seg(1, 10_000.0, 20.0, [0.0, 0.0, 0.0], [20.0, 0.0, 0.0], 0.1);
+    let end = [20.0 + 20.0 * libm::cos(theta), 20.0 * libm::sin(theta), 0.0];
+    let b = seg(2, 10_000.0, 20.0, [20.0, 0.0, 0.0], end, 0.1);
+    assert!(merge_pair(&a, &b).is_none());
+}
+
+#[test]
+fn merge_refuses_a_feedrate_step_outside_the_band() {
+    let (a, mut b) = sub_degree_pair();
+    b.feedrate_mm_s = a.feedrate_mm_s * 1.5;
+    assert!(merge_pair(&a, &b).is_none());
+}
+
+#[test]
+fn merge_takes_the_slower_feedrate() {
+    let (a, mut b) = sub_degree_pair();
+    b.feedrate_mm_s = a.feedrate_mm_s * 0.95;
+    let m = merge_pair(&a, &b).expect("within the feedrate band");
+    assert_eq!(m.feedrate_mm_s, b.feedrate_mm_s);
+}
+
+#[test]
+fn merge_refuses_an_extrusion_ratio_step() {
+    let a = seg(1, 10_000.0, 20.0, [0.0, 0.0, 0.0], [0.2, 0.0, 0.0], 0.01);
+    let b = seg(2, 10_000.0, 20.0, [0.2, 0.0, 0.0], [0.4, 0.0, 0.0], 0.02);
+    assert!(merge_pair(&a, &b).is_none());
+}
+
+#[test]
+fn merge_refuses_mixing_extrusion_with_travel() {
+    let a = seg(1, 10_000.0, 20.0, [0.0, 0.0, 0.0], [0.2, 0.0, 0.0], 0.01);
+    let b = seg(2, 10_000.0, 20.0, [0.2, 0.0, 0.0], [0.4, 0.0, 0.0], 0.0);
+    assert!(merge_pair(&a, &b).is_none());
+}
+
+#[test]
+fn merge_joins_travels() {
+    let a = seg(1, 10_000.0, 20.0, [0.0, 0.0, 0.0], [0.2, 0.0, 0.0], 0.0);
+    let b = seg(2, 10_000.0, 20.0, [0.2, 0.0, 0.0], [0.4, 0.0, 0.0], 0.0);
+    let m = merge_pair(&a, &b).expect("collinear travels merge");
+    assert!(m.segment.followers.is_empty());
+}
+
+#[test]
+fn merge_deviation_budget_covers_absorbed_vertices() {
+    // A gentle arc of sub-degree facets: each junction merges until the
+    // absorbed vertices' sagitta exceeds the corner-deviation budget, so a
+    // curve cannot silently flatten into one chord.
+    let accel = 10_000.0;
+    let scv = 20.0;
+    let budget = delta_of(accel, scv);
+    let r = 50.0_f64;
+    let facet = 0.4;
+    let dtheta = facet / r;
+    let vertex = |i: usize| {
+        let th = dtheta * i as f64;
+        [r * libm::sin(th), r * (1.0 - libm::cos(th)), 0.0]
+    };
+    let mut merged = seg(1, accel, scv, vertex(0), vertex(1), 0.01);
+    let mut absorbed: Vec<[f64; 3]> = Vec::new();
+    let mut joined = 1;
+    for i in 1..40 {
+        let next = seg(i as u32 + 1, accel, scv, vertex(i), vertex(i + 1), 0.01);
+        match merge_collinear_lines(&merged, &next, &absorbed, CornerFitConfig::default()) {
+            Some(m) => {
+                absorbed.push(vertex(i));
+                merged = m;
+                joined += 1;
+            }
+            None => break,
+        }
+    }
+    assert!(joined > 1, "gentle facets must merge at all");
+    let line = as_line(&merged);
+    let worst = absorbed
+        .iter()
+        .map(|v| {
+            let t = ((v[0] - line.start[0]) * (line.end[0] - line.start[0])
+                + (v[1] - line.start[1]) * (line.end[1] - line.start[1]))
+                / (line.s_len() * line.s_len());
+            let p = [
+                line.start[0] + t * (line.end[0] - line.start[0]),
+                line.start[1] + t * (line.end[1] - line.start[1]),
+                0.0,
+            ];
+            dist(*v, p)
+        })
+        .fold(0.0_f64, f64::max);
+    assert!(
+        worst <= budget,
+        "absorbed vertices stay within the corner budget: {worst} vs {budget}"
+    );
+    assert!(joined < 40, "the budget must stop a curve from flattening");
+}
