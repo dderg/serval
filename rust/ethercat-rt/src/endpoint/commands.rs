@@ -282,6 +282,7 @@ fn handle_start_capture(ctx: &mut EndpointCtx, correlation_id: u32, msg: StartCa
                 name: d.name.clone(),
                 counts_per_mm: ctx.counts_per_mm[d.slot as usize],
                 rotation_distance: ctx.rotation_distance[d.slot as usize],
+                invert: ctx.invert[d.slot as usize],
             })
             .collect();
         let pending = ctx.capture.start_async(CaptureConfig {
