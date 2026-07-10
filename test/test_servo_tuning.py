@@ -787,7 +787,7 @@ def test_extra_params_parsed_and_appended(tmp_path):
     )
     config = FakeTuningConfig(
         printer,
-        values={"extra_params": "notch_freq2 C01.31 u16 Hz 1.0 notch\n"},
+        values={"extra_params": "notch_freq2 C01.31 u16 Hz notch\n"},
     )
     st = servo_tuning.ServoTuning(config)
     extra = st._by_name["notch_freq2"]
@@ -814,21 +814,9 @@ def test_extra_params_bad_type_is_config_error():
     )
     config = FakeTuningConfig(
         printer,
-        values={"extra_params": "bad C01.31 q16 Hz 1.0 notch\n"},
+        values={"extra_params": "bad C01.31 q16 Hz notch\n"},
     )
     with pytest.raises(FakeConfigError, match="unknown type"):
-        servo_tuning.ServoTuning(config)
-
-
-def test_extra_params_bad_scale_is_config_error():
-    printer = FakePrinter(
-        {"gcode": FakeGCode(), "toolhead": FakeToolhead(FakeKin([]))}
-    )
-    config = FakeTuningConfig(
-        printer,
-        values={"extra_params": "bad C01.31 u16 Hz notascale notch\n"},
-    )
-    with pytest.raises(FakeConfigError, match="bad scale"):
         servo_tuning.ServoTuning(config)
 
 
@@ -838,7 +826,7 @@ def test_extra_params_duplicate_name_is_config_error():
     )
     config = FakeTuningConfig(
         printer,
-        values={"extra_params": "speed_gain C01.31 u16 Hz 1.0 notch\n"},
+        values={"extra_params": "speed_gain C01.31 u16 Hz notch\n"},
     )
     with pytest.raises(FakeConfigError, match="duplicate param name"):
         servo_tuning.ServoTuning(config)

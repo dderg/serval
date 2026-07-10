@@ -571,10 +571,21 @@ function pickSeries(step) {
   return { y: firstDrive ? firstDrive.ferr_counts : [], label: "ferr (counts)" };
 }
 
+/// Renders at the device pixel ratio so lines stay vector-crisp on hidpi
+/// displays: the backing store is sized to the CSS box × dpr and the
+/// context scaled back, while all layout math stays in CSS pixels.
 function drawChart(canvas, traces, yLabel, fixedY) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || canvas.width;
+  const h = canvas.clientHeight || canvas.height;
+  const backingW = Math.round(w * dpr);
+  const backingH = Math.round(h * dpr);
+  if (canvas.width !== backingW || canvas.height !== backingH) {
+    canvas.width = backingW;
+    canvas.height = backingH;
+  }
   const ctx = canvas.getContext("2d");
-  const w = canvas.width;
-  const h = canvas.height;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = "#0d1117";
   ctx.fillRect(0, 0, w, h);
@@ -699,30 +710,19 @@ function defaultPsdStep(names, plots, stepNames) {
   return stepNames[stepNames.length - 1];
 }
 
-function psdTraces(names, plots, stepName) {
+function psdFerrTraces(names, plots, stepName) {
   const traces = [];
   plots.forEach((p, i) => {
     const step = p.steps.find((s) => s.name === stepName);
     if (!step || !step.psd) return;
-    const color = PALETTE[i % PALETTE.length];
     const driveNames = Object.keys(step.psd.per_drive);
     if (driveNames.length) {
       traces.push({
         freq: step.psd.freq_hz,
         y: step.psd.per_drive[driveNames[0]],
-        color,
+        color: PALETTE[i % PALETTE.length],
         dashed: false,
         label: `${names[i]} (${driveNames[0]})`,
-        run: names[i],
-      });
-    }
-    if (step.psd.accel) {
-      traces.push({
-        freq: step.psd.accel.freq_hz,
-        y: step.psd.accel.psd,
-        color,
-        dashed: true,
-        label: `${names[i]} (accel)`,
         run: names[i],
       });
     }
@@ -730,10 +730,35 @@ function psdTraces(names, plots, stepName) {
   return traces;
 }
 
-function drawPsdChart(canvas, traces, band) {
+function psdAccelTraces(names, plots, stepName) {
+  const traces = [];
+  plots.forEach((p, i) => {
+    const step = p.steps.find((s) => s.name === stepName);
+    if (!step || !step.psd || !step.psd.accel) return;
+    traces.push({
+      freq: step.psd.accel.freq_hz,
+      y: step.psd.accel.psd,
+      color: PALETTE[i % PALETTE.length],
+      dashed: false,
+      label: `${names[i]} (accel)`,
+      run: names[i],
+    });
+  });
+  return traces;
+}
+
+function drawPsdChart(canvas, traces, band, yTitle, hover) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || canvas.width;
+  const h = canvas.clientHeight || canvas.height;
+  const backingW = Math.round(w * dpr);
+  const backingH = Math.round(h * dpr);
+  if (canvas.width !== backingW || canvas.height !== backingH) {
+    canvas.width = backingW;
+    canvas.height = backingH;
+  }
   const ctx = canvas.getContext("2d");
-  const w = canvas.width;
-  const h = canvas.height;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = "#0d1117";
   ctx.fillRect(0, 0, w, h);
@@ -821,7 +846,75 @@ function drawPsdChart(canvas, traces, band) {
   }
 
   ctx.fillStyle = "#8a97a3";
-  ctx.fillText("log10 psd (counts²/Hz)", pad.l, 10);
+  ctx.fillText(yTitle, pad.l, 10);
+
+  if (hover) {
+    let best = null;
+    for (const tr of traces) {
+      for (let i = 0; i < tr.freq.length; i++) {
+        const dx = x(tr.freq[i]) - hover.mx;
+        const dy = y(tr.y[i]) - hover.my;
+        const d = dx * dx + dy * dy;
+        if (!best || d < best.d) best = { d, tr, i };
+      }
+    }
+    if (best) {
+      const px = x(best.tr.freq[best.i]);
+      const py = y(best.tr.y[best.i]);
+      ctx.strokeStyle = "#4a5560";
+      ctx.beginPath();
+      ctx.moveTo(px, pad.t);
+      ctx.lineTo(px, h - pad.b);
+      ctx.stroke();
+      ctx.fillStyle = best.tr.color;
+      ctx.beginPath();
+      ctx.arc(px, py, 3, 0, Math.PI * 2);
+      ctx.fill();
+      const text = `${best.tr.freq[best.i].toFixed(1)} Hz  ${best.tr.y[best.i].toExponential(2)}  ${best.tr.label}`;
+      const tw = ctx.measureText(text).width;
+      const tx = Math.min(Math.max(px + 8, pad.l), w - pad.r - tw - 8);
+      const ty = Math.max(py - 10, pad.t + 12);
+      ctx.fillStyle = "#0d1117";
+      ctx.fillRect(tx - 4, ty - 10, tw + 8, 14);
+      ctx.strokeStyle = "#4a5560";
+      ctx.strokeRect(tx - 4, ty - 10, tw + 8, 14);
+      ctx.fillStyle = "#e6edf3";
+      ctx.fillText(text, tx, ty);
+    }
+  }
+}
+
+/// Redraws with the cursor position on every move — the readout follows
+/// the nearest sample, so exact peak frequencies are readable instead of
+/// eyeballed off the axis.
+function attachPsdHover(canvas, traces, band, yTitle) {
+  canvas.addEventListener("mousemove", (e) => {
+    drawPsdChart(canvas, traces, band, yTitle, { mx: e.offsetX, my: e.offsetY });
+  });
+  canvas.addEventListener("mouseleave", () => drawPsdChart(canvas, traces, band, yTitle));
+}
+
+function psdBox(title, traces, band, yTitle, names) {
+  const box = document.createElement("div");
+  box.className = "chart-box";
+  const head = document.createElement("h3");
+  head.textContent = title;
+  box.appendChild(head);
+  const canvas = document.createElement("canvas");
+  canvas.width = 860;
+  canvas.height = 280;
+  box.appendChild(canvas);
+  drawPsdChart(canvas, traces, band, yTitle);
+  attachPsdHover(canvas, traces, band, yTitle);
+  const legend = document.createElement("div");
+  legend.className = "legend";
+  names.forEach((n, i) => {
+    const item = document.createElement("span");
+    item.innerHTML = `<span class="swatch" style="background:${PALETTE[i % PALETTE.length]}"></span>${n}`;
+    legend.appendChild(item);
+  });
+  box.appendChild(legend);
+  return box;
 }
 
 function renderPsdChart(names, plots, stepName) {
@@ -832,22 +925,16 @@ function renderPsdChart(names, plots, stepName) {
     container.innerHTML = '<p class="note">select runs above</p>';
     return;
   }
-  const box = document.createElement("div");
-  box.className = "chart-box";
-  const canvas = document.createElement("canvas");
-  canvas.width = 860;
-  canvas.height = 280;
-  box.appendChild(canvas);
-  const legend = document.createElement("div");
-  legend.className = "legend";
-  names.forEach((n, i) => {
-    const item = document.createElement("span");
-    item.innerHTML = `<span class="swatch" style="background:${PALETTE[i % PALETTE.length]}"></span>${n}`;
-    legend.appendChild(item);
-  });
-  drawPsdChart(canvas, psdTraces(names, plots, stepName), RESONANCE_BAND_HZ);
-  box.appendChild(legend);
-  container.appendChild(box);
+  const ferr = psdFerrTraces(names, plots, stepName);
+  container.appendChild(
+    psdBox("following error", ferr, RESONANCE_BAND_HZ, "log10 psd (counts²/Hz)", names)
+  );
+  const accel = psdAccelTraces(names, plots, stepName);
+  if (accel.length) {
+    container.appendChild(
+      psdBox("accelerometer", accel, RESONANCE_BAND_HZ, "log10 psd (accel²/Hz)", names)
+    );
+  }
 }
 
 function renderPsdChips(stepNames) {
@@ -1209,25 +1296,19 @@ function stopLivePolling() {
 // docs/rewrite/servo-tuning-profiles.md) as a param × motor grid: one column
 // per motor plus an "all" setter, so a 4-motor bench never needs the same
 // value typed four times and every edit's motor scope is visible. Each page
-// shows only its own param groups. Pure helpers first — display/raw unit
-// conversion, autofill derivation, changed-cell diffing, SERVO_TUNE line
-// building (always with an explicit MOTORS= list) — the logic a Rust test
-// asserts is present and exercisable without a browser; DOM rendering and
-// event wiring follow.
+// shows only its own param groups. Every cell shows and takes the RAW
+// register value exactly as stored on the drive — the unit label names the
+// LSB (e.g. "0.1 Hz") instead of the UI converting, so what you type is
+// what SERVO_TUNE writes. Pure helpers first — autofill derivation,
+// changed-cell diffing, SERVO_TUNE line building (always with an explicit
+// MOTORS= list) — the logic a Rust test asserts is present and exercisable
+// without a browser; DOM rendering and event wiring follow.
 
 const GROUP_ORDER = ["gains", "filters", "notch", "speed_observer", "disturbance_observer", "load"];
 const OTHER_GROUP = "other";
 const AUTOFILL_SOURCE_PARAM = "speed_gain";
 const DRIVE_REFRESH_POLL_MS = 1000;
 const DRIVE_REFRESH_TIMEOUT_MS = 15000;
-
-function rawToDisplay(raw, scale) {
-  return raw / scale;
-}
-
-function displayToRaw(display, scale) {
-  return Math.round(display * scale);
-}
 
 function deriveGainPositionFromSpeed(speedGainRaw) {
   return Math.round(speedGainRaw * 1.6);
@@ -1406,7 +1487,7 @@ function cellInputHtml(param, motor) {
       .join("");
     return `<select class="${cls.join(" ")}" data-param="${param.name}" data-motor="${motor}" title="${titleText}">${opts}</select>`;
   }
-  return `<input type="number" step="any" class="${cls.join(" ")}" data-param="${param.name}" data-motor="${motor}" value="${rawToDisplay(raw, param.scale)}" title="${titleText}">`;
+  return `<input type="number" step="1" class="${cls.join(" ")}" data-param="${param.name}" data-motor="${motor}" value="${raw}" title="${titleText}">`;
 }
 
 function allInputHtml(param) {
@@ -1423,8 +1504,8 @@ function allInputHtml(param) {
         .join("");
     return `<select class="cell-input all" data-param="${param.name}" data-motor="*" title="set all motors">${opts}</select>`;
   }
-  const display = agree ? rawToDisplay(values[0], param.scale) : "";
-  return `<input type="number" step="any" class="cell-input all" data-param="${param.name}" data-motor="*" value="${display}" placeholder="${agree ? "" : "mixed"}" title="set all motors">`;
+  const display = agree ? values[0] : "";
+  return `<input type="number" step="1" class="cell-input all" data-param="${param.name}" data-motor="*" value="${display}" placeholder="${agree ? "" : "mixed"}" title="set all motors">`;
 }
 
 function paramLabelHtml(param, section) {
@@ -1535,9 +1616,7 @@ function onDriveCellChange(e) {
   const input = e.target;
   const name = input.dataset.param;
   const param = paramByName(name);
-  const raw = param.options
-    ? parseInt(input.value, 10)
-    : displayToRaw(parseFloat(input.value), param.scale);
+  const raw = parseInt(input.value, 10);
   if (Number.isNaN(raw)) return;
   const targets =
     input.dataset.motor === "*" ? motorNames(state.drive.data.motors) : [input.dataset.motor];
@@ -1627,17 +1706,29 @@ async function applyDriveChanges() {
 
 // --- sweep re-run ---------------------------------------------------------
 
+/// The stroke's SPEED/ACCEL must ride along on a re-run: they shape the
+/// excitation, so a "same sweep" at the command defaults is not the same
+/// sweep and its results are not comparable to the original.
+function strokeSuffix(manifest, includeAccel) {
+  const plan = manifest.stroke_plan || {};
+  let suffix = "";
+  if (plan.speed != null) suffix += ` SPEED=${plan.speed}`;
+  if (includeAccel && plan.accel != null) suffix += ` ACCEL=${plan.accel}`;
+  return suffix;
+}
+
 function reconstructCommand(manifest) {
   const tag = manifest.tag || "cal";
   const axis = manifest.axis || "X";
   const iterations = (manifest.stroke_plan && manifest.stroke_plan.iterations) || 1;
   const sweptKeys = (manifest.steps || []).map((s) => Object.keys(s.swept || {}));
   const commonKeys = sweptKeys.reduce((a, b) => a.filter((k) => b.includes(k)), sweptKeys[0] || []);
+  const common = `AXIS=${axis} ITERATIONS=${iterations} TAG=${tag}`;
 
   switch (manifest.experiment) {
     case "gain_sweep": {
       const values = manifest.steps.map((s) => s.swept.speed).join(",");
-      return `SERVO_CALIBRATE_GAINS SPEED_GAINS=${values} AXIS=${axis} ITERATIONS=${iterations} TAG=${tag}`;
+      return `SERVO_CALIBRATE_GAINS SPEED_GAINS=${values} ${common}${strokeSuffix(manifest, true)}`;
     }
     case "gain_ladder": {
       const speeds = manifest.steps.map((s) => s.swept.speed);
@@ -1645,20 +1736,20 @@ function reconstructCommand(manifest) {
       const start = speeds.length > 1 ? speeds[1] : safe;
       const step = speeds.length > 2 ? speeds[2] - speeds[1] : 50;
       const max = speeds[speeds.length - 1];
-      return `SERVO_GAIN_LADDER SAFE=${safe} START=${start} STEP=${step} MAX=${max} AXIS=${axis} ITERATIONS=${iterations} TAG=${tag}`;
+      return `SERVO_GAIN_LADDER SAFE=${safe} START=${start} STEP=${step} MAX=${max} ${common}${strokeSuffix(manifest, true)}`;
     }
     case "refine_sweep": {
       const param = commonKeys.length === 1 ? commonKeys[0] : "speed";
       const values = manifest.steps.map((s) => s.swept[param]).join(",");
-      return `SERVO_REFINE_GAIN PARAM=${param} VALUES=${values} AXIS=${axis} ITERATIONS=${iterations} TAG=${tag}`;
+      return `SERVO_REFINE_GAIN PARAM=${param} VALUES=${values} ${common}${strokeSuffix(manifest, true)}`;
     }
     case "inertia_sweep": {
       const values = manifest.steps.map((s) => s.swept.ratio ?? Object.values(s.swept)[0]).join(",");
-      return `SERVO_SWEEP_INERTIA RATIOS=${values} AXIS=${axis} ITERATIONS=${iterations} TAG=${tag}`;
+      return `SERVO_SWEEP_INERTIA RATIOS=${values} ${common}${strokeSuffix(manifest, true)}`;
     }
     case "accel_sweep": {
       const values = manifest.steps.map((s) => s.swept.accel ?? Object.values(s.swept)[0]).join(",");
-      return `SERVO_SWEEP_ACCEL ACCELS=${values} AXIS=${axis} ITERATIONS=${iterations} TAG=${tag}`;
+      return `SERVO_SWEEP_ACCEL ACCELS=${values} ${common}${strokeSuffix(manifest, false)}`;
     }
     default:
       return `; ${manifest.experiment} has no known reconstruction — edit by hand`;

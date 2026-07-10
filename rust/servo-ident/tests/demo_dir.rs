@@ -246,7 +246,6 @@ fn demo_writes_a_drive_state_the_panel_can_render() {
         .unwrap();
     assert_eq!(position_gain["c_code"], Value::from("C01.00"));
     assert_eq!(position_gain["addr"], Value::from("0x2001.0x01"));
-    assert_eq!(position_gain["scale"], Value::from(10.0));
     assert_eq!(position_gain["group"], Value::from("gains"));
     assert_eq!(
         position_gain["autofill"],

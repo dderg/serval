@@ -30,6 +30,11 @@
 //! (dropped records, or a `since_cycle` older than the ring — never an
 //! error) as the next response's `first_cycle` jumping past
 //! `since_cycle + 1`.
+//!
+//! `ferr`/`torque` are served in the host (kinematic) frame: the header's
+//! per-drive `invert` flag negates both, unlike the drive-frame per-drive
+//! series everywhere else — this feed exists to compare motors doing the
+//! same physical move, and mirrored pairs must look alike.
 
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Read};
@@ -75,6 +80,7 @@ enum Session {
 struct Stream {
     cycle_ns: u64,
     drive_names: Vec<String>,
+    sign: Vec<i64>,
     ring: Ring,
 }
 
@@ -189,8 +195,15 @@ fn samples_payload(stream: &Stream, since: u64) -> serde_json::Value {
         .collect();
     let mut drives = serde_json::Map::new();
     for (d, name) in stream.drive_names.iter().enumerate() {
-        let ferr: Vec<i32> = kept.iter().map(|&i| ring.ferr[d][i]).collect();
-        let torque: Vec<i16> = kept.iter().map(|&i| ring.torque[d][i]).collect();
+        let sign = stream.sign[d];
+        let ferr: Vec<i64> = kept
+            .iter()
+            .map(|&i| sign * i64::from(ring.ferr[d][i]))
+            .collect();
+        let torque: Vec<i64> = kept
+            .iter()
+            .map(|&i| sign * i64::from(ring.torque[d][i]))
+            .collect();
         drives.insert(name.clone(), json!({ "ferr": ferr, "torque": torque }));
     }
     json!({
@@ -256,6 +269,11 @@ fn run_session(shared: &Shared) -> Result<SessionEnd, String> {
         inner.session = Session::Streaming(Stream {
             cycle_ns: header.cycle_ns,
             drive_names: header.drives.iter().map(|d| d.name.clone()).collect(),
+            sign: header
+                .drives
+                .iter()
+                .map(|d| if d.invert { -1 } else { 1 })
+                .collect(),
             ring: Ring::new(&header),
         });
     }

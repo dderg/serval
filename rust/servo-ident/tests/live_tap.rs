@@ -141,15 +141,21 @@ fn attach_now_returns_cursor_without_samples_then_polls_stream_new_records() {
     assert_eq!(batch["stride"].as_u64(), Some(1));
     assert!(batch.get("gaps").is_none(), "{batch}");
     for (idx, name) in fx.cap.drive_names().iter().enumerate() {
+        let sign = if fx.cap.header.drives[idx].invert {
+            -1
+        } else {
+            1
+        };
+        let host_frame = |v: &[i64]| -> Vec<i64> { v.iter().map(|&x| sign * x).collect() };
         assert_eq!(
             i64s(&batch["drives"][name.as_str()]["ferr"]),
-            fx.cap.read_i64(idx, "following_error").unwrap()[500..700].to_vec(),
-            "ferr for {name}"
+            host_frame(&fx.cap.read_i64(idx, "following_error").unwrap()[500..700]),
+            "ferr for {name} must be host-frame (invert applied)"
         );
         assert_eq!(
             i64s(&batch["drives"][name.as_str()]["torque"]),
-            fx.cap.read_i64(idx, "torque_actual").unwrap()[500..700].to_vec(),
-            "torque for {name}"
+            host_frame(&fx.cap.read_i64(idx, "torque_actual").unwrap()[500..700]),
+            "torque for {name} must be host-frame (invert applied)"
         );
     }
     let expected_moving: Vec<bool> = fx.cap.read_i64(0, "flags").unwrap()[500..700]

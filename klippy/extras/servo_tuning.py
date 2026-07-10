@@ -53,7 +53,6 @@ class PanelParam:
     group: str
     description: str
     type_token: str = "u16"
-    scale: float = 1.0
     autofill: AutofillKind | None = None
     options: dict[int, str] | None = None
     addr: str = field(init=False, default="")
@@ -68,7 +67,6 @@ class PanelParam:
             "addr": self.addr,
             "type": self.type_token,
             "unit": self.unit,
-            "scale": self.scale,
             "group": self.group,
             "description": self.description,
             "autofill": self.autofill,
@@ -85,7 +83,6 @@ PANEL_PARAMS: tuple[PanelParam, ...] = (
         name="position_gain",
         c_code="C01.00",
         unit="0.1 rad/s",
-        scale=10.0,
         group="gains",
         description=(
             "C01.00 position loop gain; autofilled from speed_gain as "
@@ -97,7 +94,6 @@ PANEL_PARAMS: tuple[PanelParam, ...] = (
         name="speed_gain",
         c_code="C01.01",
         unit="0.1 Hz",
-        scale=10.0,
         group="gains",
         description=(
             "C01.01 speed loop gain; the autofill source for "
@@ -108,7 +104,6 @@ PANEL_PARAMS: tuple[PanelParam, ...] = (
         name="integral_time",
         c_code="C01.02",
         unit="0.01 ms",
-        scale=100.0,
         group="gains",
         description=(
             "C01.02 speed integral time; autofilled from speed_gain as "
@@ -191,7 +186,6 @@ PANEL_PARAMS: tuple[PanelParam, ...] = (
         name="speed_observer_gain",
         c_code="C02.30",
         unit="0.1 Hz",
-        scale=10.0,
         group="speed_observer",
         description=(
             "C02.30 speed observer gain; higher observes faster, too "
@@ -202,7 +196,6 @@ PANEL_PARAMS: tuple[PanelParam, ...] = (
         name="speed_observer_inertia",
         c_code="C02.31",
         unit="0.1%",
-        scale=10.0,
         group="speed_observer",
         description=(
             "C02.31 speed observer inertia correction; corrects for an "
@@ -223,7 +216,6 @@ PANEL_PARAMS: tuple[PanelParam, ...] = (
         name="disturbance_gain",
         c_code="C02.60",
         unit="0.1 Hz",
-        scale=10.0,
         group="disturbance_observer",
         description=(
             "C02.60 disturbance observer gain; higher responds to "
@@ -234,7 +226,6 @@ PANEL_PARAMS: tuple[PanelParam, ...] = (
         name="disturbance_inertia",
         c_code="C02.61",
         unit="0.1%",
-        scale=10.0,
         group="disturbance_observer",
         description=(
             "C02.61 disturbance observer inertia correction coefficient "
@@ -255,7 +246,6 @@ PANEL_PARAMS: tuple[PanelParam, ...] = (
         name="disturbance_comp_torque",
         c_code="C02.63",
         unit="0.1%",
-        scale=10.0,
         group="disturbance_observer",
         description=(
             "C02.63 disturbance observer compensation torque percentage "
@@ -326,23 +316,16 @@ def _parse_extra_params(config: Any) -> list[PanelParam]:
         if not line or line.startswith("#"):
             continue
         fields = line.split()
-        if len(fields) != 6:
+        if len(fields) != 5:
             raise config.error(
                 "[servo_tuning] extra_params line %d: expected 'name "
-                "C-code type unit scale group', got %r" % (lineno, line)
+                "C-code type unit group', got %r" % (lineno, line)
             )
-        name, c_code, type_token, unit, scale_text, group = fields
+        name, c_code, type_token, unit, group = fields
         if type_token not in servo_param.TYPE_TOKENS:
             raise config.error(
                 "[servo_tuning] extra_params line %d: unknown type %r "
                 "(use u8/u16/u32/i8/i16/i32)" % (lineno, type_token)
-            )
-        try:
-            scale = float(scale_text)
-        except ValueError:
-            raise config.error(
-                "[servo_tuning] extra_params line %d: bad scale %r"
-                % (lineno, scale_text)
             )
         try:
             entries.append(
@@ -353,7 +336,6 @@ def _parse_extra_params(config: Any) -> list[PanelParam]:
                     group=group,
                     description="",
                     type_token=type_token,
-                    scale=scale,
                 )
             )
         except ValueError as e:

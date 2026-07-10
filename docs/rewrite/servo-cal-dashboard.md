@@ -166,7 +166,9 @@ column per motor plus an **all** setter — filtered to the current page's
 groups (`gains`, `filters`, `notch`, `speed_observer`,
 `disturbance_observer`, `load`; any unrecognized `extra_params:` group
 lands in an `other` section on every grid page — nothing from the dump is
-ever dropped).
+ever dropped). Cells show the raw register value with no display
+conversion; the unit label names the register's LSB (e.g. "0.1 Hz"), the
+same convention as the vendor manual and the drive's front panel.
 
 - **Per-motor cells, explicit scope.** Every motor's value is always
   visible; the "all" column writes every motor at once (showing "mixed"
@@ -218,9 +220,9 @@ ever dropped).
 - The sweep row reconstructs its G-code from `manifest.json`'s
   `experiment`/`steps`/`stroke_plan` — a best-effort rendering the operator
   can edit before sending, not a guarantee of exact parameter fidelity.
-- The drive panel's pure logic (display/raw unit conversion, autofill
-  derivation, changed-param diffing) is a handful of plain functions in
-  `app.js` (`rawToDisplay`, `displayToRaw`, `deriveGainPositionFromSpeed`,
+- The drive panel's pure logic (autofill derivation, changed-param
+  diffing) is a handful of plain functions in
+  `app.js` (`deriveGainPositionFromSpeed`,
   `deriveGainIntegralFromSpeed`, `groupParams`, `motorRawValues`,
   `valuesAgree`, `pinnedEntries`, `diffChangedParams`,
   `buildServoTuneCommands`) rather than behind a Node toolchain this crate

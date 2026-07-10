@@ -1,5 +1,5 @@
-//! The drive tuning panel's pure logic (display/raw unit conversion,
-//! autofill derivation, changed-param diffing) lives in `web/app.js` as
+//! The drive tuning panel's pure logic (autofill derivation,
+//! changed-param diffing) lives in `web/app.js` as
 //! plain functions rather than behind a Node toolchain this crate doesn't
 //! otherwise need. This file is the substitute test rig: it asserts the
 //! functions the panel is built from are actually present in the served
@@ -42,8 +42,6 @@ fn temp_dir(label: &str) -> std::path::PathBuf {
 #[test]
 fn app_js_defines_the_pure_drive_panel_functions() {
     let required = [
-        "function rawToDisplay(",
-        "function displayToRaw(",
         "function deriveGainPositionFromSpeed(",
         "function deriveGainIntegralFromSpeed(",
         "function paramGroupSection(",
