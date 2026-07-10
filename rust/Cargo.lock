@@ -1112,7 +1112,10 @@ dependencies = [
 name = "servo-ident"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "libm",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

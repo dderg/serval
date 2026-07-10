@@ -1,0 +1,495 @@
+//! The `servo-cal analyze` pipeline: per-drive metrics + PSD peaks +
+//! resonance, optional CoreXY combine and accelerometer PSD, a typed verdict,
+//! and the `results.json` / `plot_series.json` writers plus the stdout table.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use crate::combine::{compute_corexy_combine, peak_abs, rms};
+use crate::metrics::{
+    compute_metrics, drive_series, motion_segments, DriveSeries, DEFAULT_SETTLE_BAND_COUNTS,
+    DEFAULT_TORQUE_LIMIT_PER_MILLE,
+};
+use crate::psd::{moving_psd, top_peaks, welch_psd};
+use crate::resonance::{detect_resonance, recommend_accel};
+use crate::results::{
+    AccelResult, Combined, DriveResult, Manifest, PlotAccel, PlotCombined, PlotDrive, PlotSeries,
+    PlotStep, Results, Step, StepResult, Verdict,
+};
+use crate::scap::Scap;
+
+const MAX_SERIES_POINTS: usize = 2000;
+const PSD_PEAK_COUNT: usize = 5;
+
+fn stride_for(n: usize) -> usize {
+    if n <= MAX_SERIES_POINTS {
+        1
+    } else {
+        n.div_ceil(MAX_SERIES_POINTS)
+    }
+}
+
+fn read_accel_csv(path: &Path) -> Result<(Vec<f64>, Vec<f64>), String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut t = Vec::new();
+    let mut mag = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let f: Vec<f64> = line
+            .split(',')
+            .map(|s| s.trim().parse::<f64>())
+            .collect::<Result<_, _>>()
+            .map_err(|_| format!("{}: non-numeric accel row {line:?}", path.display()))?;
+        if f.len() < 4 {
+            return Err(format!(
+                "{}: expected time,accel_x,accel_y,accel_z rows",
+                path.display()
+            ));
+        }
+        t.push(f[0]);
+        mag.push((f[1] * f[1] + f[2] * f[2] + f[3] * f[3]).sqrt());
+    }
+    if t.len() < 2 {
+        return Err(format!("{}: too few accel samples", path.display()));
+    }
+    Ok((t, mag))
+}
+
+struct DriveAnalysis {
+    series: DriveSeries,
+    result: DriveResult,
+}
+
+fn analyze_drive(
+    cap: &Scap,
+    idx: usize,
+    settle_band: i64,
+    torque_limit: i64,
+    fs: f64,
+) -> Result<DriveAnalysis, String> {
+    let series = drive_series(cap, idx)?;
+    let metrics = compute_metrics(&series, settle_band, torque_limit, fs)?;
+    let segs = motion_segments(&series.flags);
+    let (freqs, psd) = moving_psd(&series, &segs, fs)?;
+    let psd_peaks = top_peaks(&freqs, &psd, PSD_PEAK_COUNT);
+    let resonance = detect_resonance(&freqs, &psd);
+    Ok(DriveAnalysis {
+        series,
+        result: DriveResult {
+            metrics,
+            psd_peaks,
+            resonance,
+        },
+    })
+}
+
+fn step_flags(drives: &BTreeMap<String, DriveResult>) -> Vec<String> {
+    let mut flags = Vec::new();
+    if drives.values().any(|d| d.resonance.detected) {
+        flags.push("resonance_detected".to_string());
+    }
+    if drives.values().any(|d| d.metrics.torque.rail_detected) {
+        flags.push("torque_saturated".to_string());
+    }
+    if drives
+        .values()
+        .any(|d| d.metrics.moves.iter().any(|m| m.settle_window_truncated))
+    {
+        flags.push("settle_window_truncated".to_string());
+    }
+    flags
+}
+
+/// Analyze one capture into a `StepResult` and a `PlotStep`.
+pub fn analyze_capture(
+    cap: &Scap,
+    name: &str,
+    settle_band: i64,
+    torque_limit: i64,
+    belts: Option<&str>,
+    axis: Option<&str>,
+    accel_path: Option<&Path>,
+) -> Result<(StepResult, PlotStep), String> {
+    let fs = cap.fs();
+    let n = cap.n_records;
+    let mut analyses: Vec<(String, DriveAnalysis)> = Vec::new();
+    for (idx, dname) in cap.drive_names().into_iter().enumerate() {
+        analyses.push((
+            dname,
+            analyze_drive(cap, idx, settle_band, torque_limit, fs)?,
+        ));
+    }
+
+    let combine = match belts {
+        Some(spec) => Some(compute_corexy_combine(cap, spec, axis)?),
+        None => None,
+    };
+    let combined = combine.as_ref().map(|c| {
+        let on: Vec<f64> = (0..c.on_ferr.len())
+            .filter(|&k| c.moving[k])
+            .map(|k| c.on_ferr[k])
+            .collect();
+        let cross: Vec<f64> = (0..c.cross_ferr.len())
+            .filter(|&k| c.moving[k])
+            .map(|k| c.cross_ferr[k])
+            .collect();
+        Combined {
+            on_ferr_peak_mm: peak_abs(&on),
+            on_ferr_rms_mm: rms(&on),
+            cross_ferr_peak_mm: peak_abs(&cross),
+        }
+    });
+
+    let accel = match accel_path {
+        Some(path) => {
+            let (t, mag) = read_accel_csv(path)?;
+            let afs = t.len() as f64 / (t[t.len() - 1] - t[0]);
+            let (freqs, psd) = welch_psd(&mag, afs)?;
+            Some((
+                AccelResult {
+                    present: true,
+                    psd_peaks: top_peaks(&freqs, &psd, PSD_PEAK_COUNT),
+                },
+                t,
+                mag,
+            ))
+        }
+        None => None,
+    };
+
+    let mut drives = BTreeMap::new();
+    let mut series_by_name: BTreeMap<String, DriveSeries> = BTreeMap::new();
+    for (dname, a) in analyses {
+        drives.insert(dname.clone(), a.result);
+        series_by_name.insert(dname, a.series);
+    }
+    let flags = step_flags(&drives);
+
+    let stride = stride_for(n);
+    let idxs: Vec<usize> = (0..n).step_by(stride).collect();
+    let t_s: Vec<f64> = idxs.iter().map(|&k| k as f64 / fs).collect();
+    let first_flags = &series_by_name.values().next().unwrap().flags;
+    let moving: Vec<(f64, f64)> = motion_segments(first_flags)
+        .into_iter()
+        .map(|(s, e)| (s as f64 / fs, e as f64 / fs))
+        .collect();
+    let mut plot_drives = BTreeMap::new();
+    for (dname, s) in &series_by_name {
+        plot_drives.insert(
+            dname.clone(),
+            PlotDrive {
+                ferr_counts: idxs.iter().map(|&k| s.following_error[k]).collect(),
+                torque_per_mille: idxs.iter().map(|&k| s.torque[k] as f64).collect(),
+            },
+        );
+    }
+    let plot_combined = combine.as_ref().map(|c| PlotCombined {
+        on_ferr_mm: idxs.iter().map(|&k| c.on_ferr[k]).collect(),
+        cross_ferr_mm: idxs.iter().map(|&k| c.cross_ferr[k]).collect(),
+    });
+    let plot_accel = accel.as_ref().map(|(_, t, mag)| {
+        let astride = stride_for(t.len());
+        let ai: Vec<usize> = (0..t.len()).step_by(astride).collect();
+        PlotAccel {
+            t_s: ai.iter().map(|&k| t[k] - t[0]).collect(),
+            magnitude: ai.iter().map(|&k| mag[k]).collect(),
+        }
+    });
+
+    let step_result = StepResult {
+        name: name.to_string(),
+        drives,
+        combined,
+        accel: accel.map(|(a, _, _)| a),
+        flags,
+    };
+    let plot_step = PlotStep {
+        name: name.to_string(),
+        fs_hz: fs,
+        stride,
+        t_s,
+        moving,
+        drives: plot_drives,
+        combined: plot_combined,
+        accel: plot_accel,
+    };
+    Ok((step_result, plot_step))
+}
+
+pub fn compute_verdict(
+    experiment: &str,
+    steps: &[StepResult],
+    manifest: &[Step],
+) -> Result<Verdict, String> {
+    let has_flag = |sr: &StepResult, f: &str| sr.flags.iter().any(|x| x == f);
+    let clean =
+        |sr: &StepResult| !has_flag(sr, "resonance_detected") && !has_flag(sr, "torque_saturated");
+    let find_step = |name: &str| manifest.iter().find(|m| m.name == name);
+
+    match experiment {
+        "gain_sweep" | "refine_sweep" => {
+            let key = |m: &Step| -> Option<f64> {
+                if experiment == "gain_sweep" {
+                    m.swept_value("speed")
+                } else {
+                    m.swept_max()
+                }
+            };
+            let mut best: Option<(&StepResult, f64)> = None;
+            for sr in steps {
+                if !clean(sr) {
+                    continue;
+                }
+                let mstep = find_step(&sr.name)
+                    .ok_or_else(|| format!("step {:?} missing from manifest", sr.name))?;
+                let Some(k) = key(mstep) else { continue };
+                if best.map_or(true, |(_, bk)| k > bk) {
+                    best = Some((sr, k));
+                }
+            }
+            match best {
+                Some((sr, _)) => {
+                    let mstep = find_step(&sr.name).unwrap();
+                    Ok(Verdict {
+                        recommended_step: Some(sr.name.clone()),
+                        reason: "highest gain step without resonance or torque rail".to_string(),
+                        flags: Vec::new(),
+                        apply: Some(mstep.applied.clone()),
+                    })
+                }
+                None => Ok(Verdict {
+                    recommended_step: None,
+                    reason: "every step flags resonance or a torque rail".to_string(),
+                    flags: Vec::new(),
+                    apply: None,
+                }),
+            }
+        }
+        "accel_sweep" => {
+            let mut accel_steps: Vec<(f64, bool)> = Vec::new();
+            for sr in steps {
+                let mstep = find_step(&sr.name)
+                    .ok_or_else(|| format!("step {:?} missing from manifest", sr.name))?;
+                let a = mstep
+                    .swept_value("accel")
+                    .or_else(|| mstep.swept_max())
+                    .ok_or_else(|| format!("accel_sweep step {:?} has no swept accel", sr.name))?;
+                accel_steps.push((a, has_flag(sr, "torque_saturated")));
+            }
+            let (chosen, note) = recommend_accel(&accel_steps);
+            match chosen {
+                Some(a) => {
+                    let name = steps
+                        .iter()
+                        .zip(&accel_steps)
+                        .find(|(_, (av, _))| *av == a)
+                        .map(|(sr, _)| sr.name.clone());
+                    let apply = name
+                        .as_ref()
+                        .and_then(|n| find_step(n))
+                        .map(|m| m.applied.clone());
+                    Ok(Verdict {
+                        recommended_step: name,
+                        reason: note,
+                        flags: Vec::new(),
+                        apply,
+                    })
+                }
+                None => Ok(Verdict {
+                    recommended_step: None,
+                    reason: note,
+                    flags: Vec::new(),
+                    apply: None,
+                }),
+            }
+        }
+        "inertia_sweep" => Ok(Verdict {
+            recommended_step: None,
+            reason: "no automatic pick — read the overshoot trend across steps manually"
+                .to_string(),
+            flags: Vec::new(),
+            apply: None,
+        }),
+        "tracking" | "inertia_grid" => Ok(Verdict {
+            recommended_step: None,
+            reason: "not a sweep".to_string(),
+            flags: Vec::new(),
+            apply: None,
+        }),
+        other => Err(format!("unknown experiment {other:?}")),
+    }
+}
+
+pub fn build_run(dir: &Path) -> Result<(Results, PlotSeries), String> {
+    let manifest_path = dir.join("manifest.json");
+    let text = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    let manifest: Manifest =
+        serde_json::from_str(&text).map_err(|e| format!("manifest parse: {e}"))?;
+    if manifest.steps.is_empty() {
+        return Err("manifest lists no steps".to_string());
+    }
+    let settle_band = DEFAULT_SETTLE_BAND_COUNTS;
+    let torque_limit = DEFAULT_TORQUE_LIMIT_PER_MILLE;
+    let mut step_results = Vec::new();
+    let mut plot_steps = Vec::new();
+    let mut fs_hz = 0.0;
+    for step in &manifest.steps {
+        let cap = Scap::load(dir.join(&step.capture).to_str().unwrap())?;
+        fs_hz = cap.fs();
+        let accel_path = step.accel.as_ref().map(|a| dir.join(a));
+        let (sr, ps) = analyze_capture(
+            &cap,
+            &step.name,
+            settle_band,
+            torque_limit,
+            manifest.belts.as_deref(),
+            manifest.axis.as_deref(),
+            accel_path.as_deref(),
+        )?;
+        step_results.push(sr);
+        plot_steps.push(ps);
+    }
+    let verdict = compute_verdict(&manifest.experiment, &step_results, &manifest.steps)?;
+    let results = Results {
+        version: 1,
+        fs_hz,
+        settle_band_counts: settle_band,
+        torque_limit_per_mille: torque_limit,
+        steps: step_results,
+        verdict,
+    };
+    let plot = PlotSeries {
+        version: 1,
+        steps: plot_steps,
+    };
+    Ok((results, plot))
+}
+
+pub fn analyze_run(dir: &Path) -> Result<(), String> {
+    let (results, plot) = build_run(dir)?;
+    let results_json =
+        serde_json::to_string_pretty(&results).map_err(|e| format!("serialize results: {e}"))?;
+    let plot_json =
+        serde_json::to_string(&plot).map_err(|e| format!("serialize plot_series: {e}"))?;
+    std::fs::write(dir.join("results.json"), results_json)
+        .map_err(|e| format!("write results.json: {e}"))?;
+    std::fs::write(dir.join("plot_series.json"), plot_json)
+        .map_err(|e| format!("write plot_series.json: {e}"))?;
+    print_results(&results);
+    Ok(())
+}
+
+fn print_step_drive(name: &str, dr: &DriveResult) {
+    let m = &dr.metrics;
+    println!("  {name}: {} samples, {} move(s)", m.samples, m.moves.len());
+    let tq = &m.torque;
+    if tq.rail_detected {
+        println!(
+            "    torque: peak {} per-mille ({:.0}% rated); rail {:.1}% of moving ({} samples, {:.0} ms; longest burst {:.0} ms)",
+            tq.peak, tq.peak_pct_rated, tq.rail_pct_moving, tq.rail_samples, tq.rail_ms, tq.longest_burst_ms
+        );
+    } else {
+        println!(
+            "    torque: no rail (peak {} per-mille, {:.0}% rated)",
+            tq.peak, tq.peak_pct_rated
+        );
+    }
+    for mv in &m.moves {
+        let settle = match mv.settle_ms {
+            Some(s) => format!("{s:.1} ms"),
+            None if mv.settle_window_truncated => "unknown (capture ended)".to_string(),
+            None => "NEVER".to_string(),
+        };
+        println!(
+            "    move {} [{:.1}..{:.1} ms]: ferr peak {:.0}, rms {:.1}, overshoot {:.0}, settle {settle}",
+            mv.index, mv.start_ms, mv.end_ms, mv.ferr_peak, mv.ferr_rms, mv.overshoot
+        );
+    }
+    println!(
+        "    resonance: {} (ratio {:.1}, peak {:.1} Hz); psd peaks: {}",
+        if dr.resonance.detected {
+            "DETECTED"
+        } else {
+            "clear"
+        },
+        dr.resonance.ratio,
+        dr.resonance.peak_hz,
+        dr.psd_peaks
+            .iter()
+            .map(|(f, p)| format!("{f:.1}Hz={p:.2e}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+}
+
+pub fn print_step(sr: &StepResult) {
+    println!("step: {}  flags: [{}]", sr.name, sr.flags.join(", "));
+    for (name, dr) in &sr.drives {
+        print_step_drive(name, dr);
+    }
+    if let Some(c) = &sr.combined {
+        println!(
+            "  combined: on-axis ferr peak {:.4} mm rms {:.4} mm, cross-axis peak {:.4} mm",
+            c.on_ferr_peak_mm, c.on_ferr_rms_mm, c.cross_ferr_peak_mm
+        );
+    }
+    if let Some(a) = &sr.accel {
+        println!(
+            "  accel psd peaks: {}",
+            a.psd_peaks
+                .iter()
+                .map(|(f, p)| format!("{f:.1}Hz={p:.2e}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+}
+
+pub fn print_results(results: &Results) {
+    println!(
+        "fs {:.0} Hz, settle band {} counts, torque limit {} per-mille",
+        results.fs_hz, results.settle_band_counts, results.torque_limit_per_mille
+    );
+    for sr in &results.steps {
+        print_step(sr);
+    }
+    let v = &results.verdict;
+    match &v.recommended_step {
+        Some(name) => println!("verdict: recommend {name} — {}", v.reason),
+        None => println!("verdict: no pick — {}", v.reason),
+    }
+}
+
+pub fn dump_csv(cap: &Scap, out: &Path) -> Result<(), String> {
+    let n = cap.n_records;
+    let fs = cap.fs();
+    let names = cap.drive_names();
+    let mut series = Vec::new();
+    for (idx, _) in names.iter().enumerate() {
+        series.push(drive_series(cap, idx)?);
+    }
+    let mut text = String::from("t_s");
+    for name in &names {
+        text.push_str(&format!(
+            ",following_error_{name},torque_{name},target_{name},actual_{name}"
+        ));
+    }
+    text.push('\n');
+    for k in 0..n {
+        text.push_str(&format!("{:.6}", k as f64 / fs));
+        for s in &series {
+            text.push_str(&format!(
+                ",{},{},{},{}",
+                s.following_error_i[k], s.torque[k], s.target[k], s.position_actual[k]
+            ));
+        }
+        text.push('\n');
+    }
+    std::fs::write(out, text).map_err(|e| format!("write {}: {e}", out.display()))?;
+    Ok(())
+}

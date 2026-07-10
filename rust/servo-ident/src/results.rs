@@ -1,0 +1,146 @@
+//! Wire structs for `manifest.json` (read) and `results.json` /
+//! `plot_series.json` (written), matching `docs/rewrite/servo-cal-contracts.md`.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::metrics::Metrics;
+use crate::resonance::Resonance;
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Applied {
+    pub servo: String,
+    pub addr: String,
+    #[serde(rename = "type")]
+    pub ty: String,
+    pub value: Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Step {
+    pub name: String,
+    #[serde(default)]
+    pub swept: Value,
+    #[serde(default)]
+    pub applied: Vec<Applied>,
+    pub capture: String,
+    #[serde(default)]
+    pub accel: Option<String>,
+}
+
+impl Step {
+    pub fn swept_value(&self, key: &str) -> Option<f64> {
+        self.swept.get(key).and_then(Value::as_f64)
+    }
+
+    pub fn swept_max(&self) -> Option<f64> {
+        match &self.swept {
+            Value::Object(m) => m
+                .values()
+                .filter_map(Value::as_f64)
+                .fold(None, |acc, v| Some(acc.map_or(v, |a: f64| a.max(v)))),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Manifest {
+    #[serde(default)]
+    pub version: i64,
+    pub experiment: String,
+    #[serde(default)]
+    pub tag: String,
+    #[serde(default)]
+    pub axis: Option<String>,
+    #[serde(default)]
+    pub kinematics: Option<String>,
+    #[serde(default)]
+    pub belts: Option<String>,
+    pub steps: Vec<Step>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DriveResult {
+    pub metrics: Metrics,
+    pub psd_peaks: Vec<(f64, f64)>,
+    pub resonance: Resonance,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Combined {
+    pub on_ferr_peak_mm: f64,
+    pub on_ferr_rms_mm: f64,
+    pub cross_ferr_peak_mm: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AccelResult {
+    pub present: bool,
+    pub psd_peaks: Vec<(f64, f64)>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StepResult {
+    pub name: String,
+    pub drives: BTreeMap<String, DriveResult>,
+    pub combined: Option<Combined>,
+    pub accel: Option<AccelResult>,
+    pub flags: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Verdict {
+    pub recommended_step: Option<String>,
+    pub reason: String,
+    pub flags: Vec<String>,
+    pub apply: Option<Vec<Applied>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Results {
+    pub version: i64,
+    pub fs_hz: f64,
+    pub settle_band_counts: i64,
+    pub torque_limit_per_mille: i64,
+    pub steps: Vec<StepResult>,
+    pub verdict: Verdict,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlotDrive {
+    pub ferr_counts: Vec<f64>,
+    pub torque_per_mille: Vec<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlotCombined {
+    pub on_ferr_mm: Vec<f64>,
+    pub cross_ferr_mm: Vec<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlotAccel {
+    pub t_s: Vec<f64>,
+    pub magnitude: Vec<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlotStep {
+    pub name: String,
+    pub fs_hz: f64,
+    pub stride: usize,
+    pub t_s: Vec<f64>,
+    pub moving: Vec<(f64, f64)>,
+    pub drives: BTreeMap<String, PlotDrive>,
+    pub combined: Option<PlotCombined>,
+    pub accel: Option<PlotAccel>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlotSeries {
+    pub version: i64,
+    pub steps: Vec<PlotStep>,
+}

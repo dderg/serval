@@ -1,0 +1,291 @@
+//! servo-cal: the Rust analysis core for servo `.scap` captures.
+//!
+//! Subcommands:
+//!   analyze <run-dir>              write results.json + plot_series.json, print table
+//!   analyze --scap <file.scap>     single capture, per-drive table to stdout
+//!       [--json <path>]            also write a results-shaped step object
+//!       [--dump-csv <path>]        write per-drive raw series CSV
+//!       [--combine <spec> --axis X] add the CoreXY belt combine
+//!   fit --capture <file.scap> --structure scalar|corexy|corexy-awd --axes a[,b]
+//!       --out profile.toml [--rated-torque-nm T --rotor-inertia-kgm2 J
+//!       --rotation-distance-mm D --cutoff-hz C --blank-ms B --max-delay-ms M
+//!       --ripple-period-mm P]
+#![allow(clippy::exit)]
+
+use std::path::Path;
+
+use servo_ident::analyze::{analyze_capture, analyze_run, dump_csv, print_step};
+use servo_ident::capture::{steady_accel_keep, tracking_keep, PlateauOptions, TrackingOptions};
+use servo_ident::fit::residual_by_motor;
+use servo_ident::fit::{fit, FitInput, FitOptions};
+use servo_ident::fit_driver::scap_to_capture;
+use servo_ident::metrics::{DEFAULT_SETTLE_BAND_COUNTS, DEFAULT_TORQUE_LIMIT_PER_MILLE};
+use servo_ident::model::Structure;
+use servo_ident::prep::{band_limited_rms, prep, PrepOptions};
+use servo_ident::profile_out::{c0006_recommendation, render_profile};
+use servo_ident::scap::Scap;
+
+fn arg(args: &[String], key: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == key)
+        .and_then(|i| args.get(i + 1).cloned())
+}
+
+fn opt_f64(args: &[String], key: &str) -> Option<f64> {
+    arg(args, key).map(|v| {
+        v.parse().unwrap_or_else(|_| {
+            eprintln!("servo-cal: bad {key} {v:?}");
+            std::process::exit(1);
+        })
+    })
+}
+
+fn req(args: &[String], key: &str) -> String {
+    arg(args, key).unwrap_or_else(|| {
+        eprintln!("servo-cal: missing required {key}");
+        std::process::exit(1);
+    })
+}
+
+fn die(msg: &str) -> ! {
+    eprintln!("servo-cal: {msg}");
+    std::process::exit(1);
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let sub = args.get(1).map(String::as_str).unwrap_or_else(|| {
+        die("usage: servo-cal <analyze|fit> ...");
+    });
+    match sub {
+        "analyze" => cmd_analyze(&args),
+        "fit" => cmd_fit(&args),
+        other => die(&format!("unknown subcommand {other:?} (want analyze|fit)")),
+    }
+}
+
+fn cmd_analyze(args: &[String]) {
+    if let Some(scap_path) = arg(args, "--scap") {
+        let cap = Scap::load(&scap_path).unwrap_or_else(|e| die(&e));
+        if let Some(csv) = arg(args, "--dump-csv") {
+            dump_csv(&cap, Path::new(&csv)).unwrap_or_else(|e| die(&e));
+            eprintln!("wrote per-drive series to {csv}");
+        }
+        let combine = arg(args, "--combine");
+        let axis = arg(args, "--axis");
+        let name = Path::new(&scap_path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("capture")
+            .to_string();
+        let (step, _plot) = analyze_capture(
+            &cap,
+            &name,
+            DEFAULT_SETTLE_BAND_COUNTS,
+            DEFAULT_TORQUE_LIMIT_PER_MILLE,
+            combine.as_deref(),
+            axis.as_deref(),
+            None,
+        )
+        .unwrap_or_else(|e| die(&e));
+        println!("file: {scap_path}");
+        print_step(&step);
+        if let Some(json_path) = arg(args, "--json") {
+            let text = serde_json::to_string_pretty(&step).unwrap_or_else(|e| die(&format!("{e}")));
+            std::fs::write(&json_path, text)
+                .unwrap_or_else(|e| die(&format!("write {json_path}: {e}")));
+            eprintln!("wrote {json_path}");
+        }
+        return;
+    }
+    let dir = args
+        .get(2)
+        .filter(|a| !a.starts_with("--"))
+        .unwrap_or_else(|| die("analyze needs a run directory or --scap <file>"));
+    if arg(args, "--dump-csv").is_some() {
+        die("--dump-csv works with --scap <file>, not a run directory");
+    }
+    analyze_run(Path::new(dir)).unwrap_or_else(|e| die(&e));
+}
+
+const FIT_KEYS: [&str; 12] = [
+    "--capture",
+    "--structure",
+    "--axes",
+    "--out",
+    "--rated-torque-nm",
+    "--rotor-inertia-kgm2",
+    "--rotation-distance-mm",
+    "--cutoff-hz",
+    "--blank-ms",
+    "--max-delay-ms",
+    "--ripple-period-mm",
+    "--drive",
+];
+
+fn reject_unknown_fit_flags(args: &[String]) {
+    let mut i = 2;
+    while i < args.len() {
+        let a = &args[i];
+        if !FIT_KEYS.contains(&a.as_str()) {
+            die(&format!("unknown fit argument {a:?}"));
+        }
+        i += 2;
+    }
+}
+
+fn cmd_fit(args: &[String]) {
+    reject_unknown_fit_flags(args);
+    let structure = match req(args, "--structure").as_str() {
+        "scalar" => Structure::CartesianScalar,
+        "corexy" => Structure::CoreXY,
+        "corexy-awd" => Structure::CoreXYAwd,
+        other => die(&format!("unknown structure {other}")),
+    };
+    let axes_arg = req(args, "--axes");
+    let axes: Vec<&str> = axes_arg.split(',').map(str::trim).collect();
+    if axes.len() != structure.axis_count() {
+        die(&format!(
+            "{} axes given, structure needs {}",
+            axes.len(),
+            structure.axis_count()
+        ));
+    }
+    let capture_path = req(args, "--capture");
+    let cap = Scap::load(&capture_path).unwrap_or_else(|e| die(&e));
+    let fit_cap = scap_to_capture(&cap, &axes).unwrap_or_else(|e| die(&e));
+    let total = fit_cap.t.len();
+
+    let mut prep_opts = PrepOptions::default();
+    if let Some(v) = opt_f64(args, "--cutoff-hz") {
+        prep_opts.cutoff_hz = v;
+    }
+    if let Some(v) = opt_f64(args, "--blank-ms") {
+        prep_opts.blank_reversal_s = v / 1000.0;
+    }
+    if let Some(v) = opt_f64(args, "--max-delay-ms") {
+        prep_opts.max_delay_s = v / 1000.0;
+    }
+    prep_opts.ripple_period_mm =
+        opt_f64(args, "--ripple-period-mm").or_else(|| opt_f64(args, "--rotation-distance-mm"));
+    let pp = prep(&fit_cap, &prep_opts);
+    eprintln!(
+        "prep: {} segments, accel->torque delay {:.2} ms removed",
+        pp.segments,
+        pp.delay_s * 1000.0
+    );
+    let track = tracking_keep(&fit_cap.vel, &fit_cap.vel_act, &TrackingOptions::default());
+    let plateau = steady_accel_keep(&fit_cap.t, &fit_cap.acc, &PlateauOptions::default());
+    let keep: Vec<usize> = (0..total)
+        .filter(|&k| pp.valid[k] && track[k] && plateau[k])
+        .collect();
+    let tracked = (0..total).filter(|&k| pp.valid[k] && track[k]).count();
+    eprintln!(
+        "masks: prep+tracking kept {tracked}/{total}, +steady-accel plateaus kept {}/{total}",
+        keep.len()
+    );
+    if tracked == 0 {
+        eprintln!(
+            "servo-cal: the drive never tracked the commanded trajectory — \
+             stiction breakaway or an untuned/lagging loop; enable velocity \
+             feedforward and check the mechanics, then re-capture"
+        );
+        std::process::exit(2);
+    }
+    if keep.is_empty() {
+        eprintln!(
+            "servo-cal: no steady-accel plateaus in capture — strokes too short \
+             or jerk-limited accel never holds; lengthen strokes or lower accel"
+        );
+        std::process::exit(2);
+    }
+    let pick = |cols: &[Vec<f64>]| -> Vec<Vec<f64>> {
+        cols.iter()
+            .map(|c| keep.iter().map(|&k| c[k]).collect())
+            .collect()
+    };
+    let input = FitInput {
+        structure,
+        acc: pick(&pp.acc),
+        vel: pick(&pp.vel),
+        cf: pick(&pp.cf),
+        cr: pick(&pp.cr),
+        torque: pick(&pp.torque),
+        extra: pp.extra.iter().map(|cols| pick(cols)).collect(),
+    };
+    let r = fit(&input, &FitOptions::default()).unwrap_or_else(|e| {
+        eprintln!("servo-cal: refusing to emit a profile: {e:?}");
+        std::process::exit(2);
+    });
+    eprintln!(
+        "fit: {} samples/motor, rms residual {:.2} (0.1% rated), condition {:.1e}",
+        r.samples, r.rms_residual, r.condition
+    );
+    if prep_opts.cutoff_hz > 0.0 {
+        let full = FitInput {
+            structure,
+            acc: pp.acc.clone(),
+            vel: pp.vel.clone(),
+            cf: pp.cf.clone(),
+            cr: pp.cr.clone(),
+            torque: pp.torque.clone(),
+            extra: pp.extra.clone(),
+        };
+        let res = residual_by_motor(&full, &r.params, &r.extra_params);
+        let keep_mask: Vec<bool> = (0..total)
+            .map(|k| pp.valid[k] && track[k] && plateau[k])
+            .collect();
+        let inband = band_limited_rms(&res, &pp.t, &keep_mask, prep_opts.cutoff_hz);
+        eprintln!(
+            "in-band (<= {:.0} Hz) rms residual: {:.2} (0.1% rated)",
+            prep_opts.cutoff_hz, inband
+        );
+    }
+    let min_diag = (0..r.params.mass.len())
+        .map(|i| r.params.mass[i][i])
+        .fold(f64::INFINITY, f64::min);
+    let physical = min_diag > 0.0;
+
+    if let (Some(t), Some(j), Some(d)) = (
+        opt_f64(args, "--rated-torque-nm"),
+        opt_f64(args, "--rotor-inertia-kgm2"),
+        opt_f64(args, "--rotation-distance-mm"),
+    ) {
+        let n = r.params.mass.len();
+        if n >= 2 {
+            let m_off: f64 = r.params.mass[0][1..].iter().sum();
+            let sum = r.params.mass[0][0] + m_off;
+            let diff = r.params.mass[0][0] - m_off;
+            let m_light = sum.min(diff);
+            let m_heavy = sum.max(diff);
+            eprintln!(
+                "recommended C00.06 (light direction): {:.0}%",
+                c0006_recommendation(m_light, t, d, j)
+            );
+            eprintln!(
+                "heavy-direction equivalent (reference only): {:.0}%",
+                c0006_recommendation(m_heavy, t, d, j)
+            );
+        } else {
+            eprintln!(
+                "recommended C00.06 (light direction): {:.0}%",
+                c0006_recommendation(r.params.mass[0][0], t, d, j)
+            );
+        }
+    }
+
+    if !physical {
+        eprintln!(
+            "servo-cal: fitted diagonal mass {min_diag:.5} <= 0 is physically \
+             impossible — a torque-polarity / invert_direction sign mismatch, \
+             not a real inertia. No profile written."
+        );
+        return;
+    }
+
+    let rms = vec![r.rms_residual; axes.len()];
+    let profile = render_profile(&r.params, &axes, &rms);
+    let out = req(args, "--out");
+    std::fs::write(&out, profile).unwrap_or_else(|e| die(&format!("write {out}: {e}")));
+    eprintln!("profile written to {out}");
+}

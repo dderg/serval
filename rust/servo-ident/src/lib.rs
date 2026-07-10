@@ -1,6 +1,14 @@
+pub mod analyze;
 pub mod capture;
+pub mod combine;
 pub mod fit;
+pub mod fit_driver;
 pub mod linalg;
+pub mod metrics;
 pub mod model;
 pub mod prep;
 pub mod profile_out;
+pub mod psd;
+pub mod resonance;
+pub mod results;
+pub mod scap;
