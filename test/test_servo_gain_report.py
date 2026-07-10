@@ -115,6 +115,48 @@ def _write_cruise_capture(tmp_path, filename, invert):
     return path
 
 
+def test_accel_file_resolves_newest_recording_for_the_step(tmp_path):
+    d = str(tmp_path)
+    scap = _touch(d, "cal_p2000_s1250_i1000_20260611_220000.scap")
+    _touch(d, "cal_p2000_s1250_i1000_accel_20260611_215000.csv")
+    newest = _touch(d, "cal_p2000_s1250_i1000_accel_20260611_220100.csv")
+    assert sgr.find_accel_file(scap) == newest
+
+
+def test_accel_file_ignores_other_steps_recordings(tmp_path):
+    d = str(tmp_path)
+    scap = _touch(d, "cal_p2000_s1250_i1000_20260611_220000.scap")
+    _touch(d, "cal_p2400_s1500_i833_accel_20260611_220100.csv")
+    assert sgr.find_accel_file(scap) is None
+
+
+def _write_accel_csv(tmp_path, filename, freq_hz):
+    fs = 3200.0
+    t = np.arange(int(4.0 * fs)) / fs
+    x = 1000.0 * np.sin(2 * np.pi * freq_hz * t)
+    path = os.path.join(str(tmp_path), filename)
+    with open(path, "w") as f:
+        f.write("#time,accel_x,accel_y,accel_z\n")
+        for row in zip(t, x, np.zeros_like(t), np.zeros_like(t)):
+            f.write("%.6f,%.6f,%.6f,%.6f\n" % row)
+    return path
+
+
+def test_accel_freq_response_peaks_at_the_vibration_frequency(tmp_path):
+    data = sgr.load_accel(_write_accel_csv(tmp_path, "a.csv", 80.0))
+    cal = sgr.accel_freq_response(data)
+    peak_hz = cal.freq_bins[np.argmax(cal.psd_sum)]
+    assert peak_hz == pytest.approx(80.0, abs=2.0)
+
+
+def test_load_accel_rejects_non_accelerometer_csv(tmp_path):
+    path = os.path.join(str(tmp_path), "bad.csv")
+    with open(path, "w") as f:
+        f.write("1.0,2.0\n3.0,4.0\n")
+    with pytest.raises(SystemExit, match="accel"):
+        sgr.load_accel(path)
+
+
 def test_inverted_drive_metrics_flip_into_kinematic_frame(tmp_path):
     normal = sgr.drive_metrics(
         _write_cruise_capture(tmp_path, "normal.scap", invert=False), "x"

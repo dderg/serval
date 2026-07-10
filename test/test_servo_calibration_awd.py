@@ -80,6 +80,9 @@ class FakeConfig:
     def get_printer(self):
         return self._printer
 
+    def get(self, name, default=None):
+        return default
+
     def getlist(self, name, default=None):
         return default
 

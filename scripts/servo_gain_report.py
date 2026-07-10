@@ -12,6 +12,11 @@ so the report covers only that run. Without --steps the script falls back to
 every step name matching the tag, which mixes in steps left over from older
 runs that used different gain lists.
 
+When the sweep also recorded an accelerometer (<step>_accel_<ts>.csv next to
+the .scap), the report grows a bottom row: vibration frequency response per
+step plus a stacked spectrogram, shaper-calibrate style. --require-accel
+makes a step without accelerometer data an error.
+
 Usage:
   servo_gain_report.py --tag cal --steps cal_p2000_s1250_i1000,cal_p2400_s1500_i833
   servo_gain_report.py --captures-dir ~/printer_data/logs/servo_captures \
@@ -29,12 +34,17 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from servo_capture import load_capture  # noqa: E402
 
+from klippy.extras import shaper_calibrate  # noqa: E402
+
 STEP_RE = re.compile(r"_p(\d+)_s(\d+)_i(\d+)_\d{8}_\d{6}\.scap$")
+CAPTURE_TS_RE = re.compile(r"_\d{8}_\d{6}\.scap$")
 RESONANCE_BAND_HZ = (20.0, 450.0)
 LOW_BAND_HZ = (1.0, 4.0)
 RESONANCE_RATIO_LIMIT = 8.0
+ACCEL_MAX_FREQ_HZ = 450.0
 
 
 def find_sweep_files(captures_dir, tag):
@@ -72,6 +82,50 @@ def gains_from_name(path):
     if not m:
         return None
     return tuple(int(g) for g in m.groups())
+
+
+def find_accel_file(scap_path):
+    step = CAPTURE_TS_RE.sub("", os.path.basename(scap_path))
+    matches = glob.glob(
+        os.path.join(os.path.dirname(scap_path), step + "_accel_*.csv")
+    )
+    return max(matches) if matches else None
+
+
+def load_accel(path):
+    data = np.loadtxt(path, comments="#", delimiter=",")
+    if data.ndim != 2 or data.shape[1] < 4:
+        raise SystemExit("%s: not a time,accel_x,accel_y,accel_z csv" % (path,))
+    return data
+
+
+def accel_freq_response(data):
+    helper = shaper_calibrate.ShaperCalibrate(printer=None)
+    calibration_data = helper.process_accelerometer_data(data)
+    calibration_data.normalize_to_frequencies()
+    return calibration_data
+
+
+def accel_specgram(data):
+    import matplotlib.mlab
+
+    fs = data.shape[0] / (data[-1, 0] - data[0, 0])
+    nfft = 1 << int(0.5 * fs - 1).bit_length()
+    window = np.kaiser(nfft, 6.0)
+    pdata = None
+    for col in (1, 2, 3):
+        p, bins, t = matplotlib.mlab.specgram(
+            data[:, col],
+            Fs=fs,
+            NFFT=nfft,
+            noverlap=nfft // 2,
+            window=window,
+            mode="psd",
+            detrend="mean",
+            scale_by_freq=False,
+        )
+        pdata = p if pdata is None else pdata + p
+    return pdata, bins, t
 
 
 def cruise_mask(target_mm, t, fs):
@@ -254,13 +308,75 @@ def resonance_zoom_panel(ax, steps, colors, linestyles):
     ax.grid(alpha=0.3)
 
 
+def accel_panels(psd_ax, spec_ax, steps, colors):
+    import matplotlib.colors
+
+    responses = []
+    specgrams = []
+    for (gains, met), color in zip(steps, colors):
+        if met["accel"] is None:
+            continue
+        label = "speed %.0f Hz" % (gains[1] / 10.0,)
+        responses.append((label, color, accel_freq_response(met["accel"])))
+        specgrams.append((label, accel_specgram(met["accel"])))
+
+    for label, color, cal in responses:
+        band = cal.freq_bins <= ACCEL_MAX_FREQ_HZ
+        psd_ax.plot(
+            cal.freq_bins[band],
+            cal.psd_sum[band],
+            color=color,
+            lw=1.0,
+            label=label,
+        )
+    psd_ax.set_xlim([0.0, ACCEL_MAX_FREQ_HZ])
+    psd_ax.set_xlabel("Hz")
+    psd_ax.set_ylabel("Power spectral density")
+    psd_ax.ticklabel_format(axis="y", style="scientific", scilimits=(0, 0))
+    psd_ax.set_title("Accelerometer frequency response (X+Y+Z)")
+    psd_ax.legend(fontsize=8)
+    psd_ax.grid(alpha=0.3)
+
+    vmax = max(pdata.max() for _, (pdata, _, _) in specgrams)
+    norm = matplotlib.colors.LogNorm(vmin=vmax * 1e-7, vmax=vmax)
+    offset = 0.0
+    for label, (pdata, bins, t) in specgrams:
+        spec_ax.pcolormesh(
+            bins,
+            t + offset,
+            pdata.T,
+            norm=norm,
+            cmap="inferno",
+            shading="auto",
+        )
+        spec_ax.text(
+            ACCEL_MAX_FREQ_HZ * 0.99,
+            offset + float(t[-1]) / 2.0,
+            label,
+            ha="right",
+            va="center",
+            color="white",
+            fontsize=8,
+        )
+        offset += float(t[-1])
+        spec_ax.axhline(offset, color="white", lw=0.8)
+    spec_ax.set_xlim([0.0, ACCEL_MAX_FREQ_HZ])
+    spec_ax.set_ylim([0.0, offset])
+    spec_ax.set_xlabel("Hz")
+    spec_ax.set_ylabel("Time, s (steps stacked)")
+    spec_ax.set_title("Accelerometer spectrogram per gain step")
+
+
 def render(steps, out_path):
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+    have_accel = any(met["accel"] is not None for _, met in steps)
+    fig, axes = plt.subplots(
+        3 if have_accel else 2, 2, figsize=(13, 13.5 if have_accel else 9)
+    )
     colors = plt.cm.viridis(np.linspace(0.0, 0.85, len(steps)))
 
     spec_ax, time_ax = axes[0]
@@ -325,6 +441,9 @@ def render(steps, out_path):
 
     resonance_zoom_panel(zoom_ax, steps, colors, linestyles)
 
+    if have_accel:
+        accel_panels(axes[2][0], axes[2][1], steps, colors)
+
     fig.tight_layout()
     fig.savefig(out_path, dpi=110)
 
@@ -386,6 +505,12 @@ def main(argv=None):
         help="axis the sweep ran on; included in the recommended "
         "SERVO_APPLY_GAINS command so it targets all drives on that axis",
     )
+    p.add_argument(
+        "--require-accel",
+        action="store_true",
+        help="fail when a step lacks its <step>_accel_*.csv accelerometer "
+        "recording (the sweep macro passes this when accel_chip is set)",
+    )
     args = p.parse_args(argv)
 
     if args.captures and args.steps:
@@ -409,6 +534,14 @@ def main(argv=None):
         raise SystemExit("no sweep captures found (tag %r)" % (args.tag,))
 
     steps = [(gains, step_metrics(path, args.drive)) for gains, path in files]
+    for _, met in steps:
+        accel_path = find_accel_file(met["path"])
+        if accel_path is None and args.require_accel:
+            raise SystemExit(
+                "%s has no matching <step>_accel_*.csv accelerometer "
+                "recording" % (met["path"],)
+            )
+        met["accel"] = None if accel_path is None else load_accel(accel_path)
 
     if args.out:
         out_path = os.path.expanduser(args.out)
