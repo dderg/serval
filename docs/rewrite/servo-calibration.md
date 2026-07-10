@@ -44,6 +44,7 @@ they are configured or passed.
 | `iterations` | `3` | strokes per grid point (`ITERATIONS=`) |
 | `dwell_ms` | `700` | settle between strokes (`DWELL_MS=`) |
 | `travel_speed` | `100` | CoreXY centering moves between grid points |
+| `accel_chip` | — | accelerometer section name (e.g. `adxl345`); when set, `SERVO_CALIBRATE_GAINS` also records vibration per step (`ACCEL_CHIP=`) |
 
 Prerequisites: the EtherCAT servo stack (`[servo_param]`, `[servo_capture]`)
 must be configured, and the fitter must be built once on the host with
@@ -164,9 +165,13 @@ Gain sweep, shaper-calibrate style: for each `SPEED_GAINS` entry (0.1 Hz units)
 it derives the position gain (`×1.6`) and integral (`1250000 ÷ gain`), records
 one capture per step, and renders a comparison PNG with a recommendation into
 `~/printer_data/config/servo_calibrate_results/`. Reverts to the lowest gains
-afterwards. Params: `SPEED_GAINS` (500,650,800,1000) `AXIS` (X) `START` `END`
-`SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2) `DWELL_MS` `TAG` (cal) `SERVO`.
-Runs `servo_gain_report.py`.
+afterwards. With an accelerometer (`accel_chip` config option or `ACCEL_CHIP=`)
+each step also records vibration data (`<step>_accel_<stamp>.csv` next to the
+`.scap`) and the report gains a bottom row, shaper-calibrate style: vibration
+frequency response per step plus a stacked per-step spectrogram. Params:
+`SPEED_GAINS` (500,650,800,1000) `AXIS` (X) `START` `END`
+`SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2) `DWELL_MS` `TAG` (cal)
+`ACCEL_CHIP` `SERVO`. Runs `servo_gain_report.py`.
 
 #### SERVO_SWEEP_INERTIA
 Empirical inertia sweep: apply the tuned gains first, then this writes each
@@ -193,7 +198,8 @@ Vendor-table tuning path: standard mode (C00.04=1) + C00.05 stiffness level
 | `SERVO_MEASURE_INERTIA[_COREXY]`, `SERVO_MEASURE_FRICTION` | — | `.scap` capture only |
 
 All captures land in `~/printer_data/logs/servo_captures/` as
-`<name>_<YYYYmmdd_HHMMSS>.scap`.
+`<name>_<YYYYmmdd_HHMMSS>.scap`; per-step accelerometer recordings land next
+to them as `<name>_accel_<YYYYmmdd_HHMMSS>.csv`.
 
 ## Host scripts
 
@@ -220,7 +226,10 @@ above invoke them with the running klippy interpreter.
   `corexy-awd` — `--rated-torque-nm`, `--rotor-inertia-kgm2`,
   `--rotation-distance-mm`, `--out-dir`).
 - **`servo_gain_report.py`** — gain-sweep comparison PNG + metrics table +
-  recommendation (`--tag`, `--steps`).
+  recommendation (`--tag`, `--steps`); picks up `<step>_accel_*.csv`
+  accelerometer recordings next to each `.scap` and adds a frequency-response
+  + spectrogram row when present (`--require-accel` makes a missing recording
+  an error).
 - **`servo_inertia_report.py`** — inertia-ratio sweep comparison PNG + metrics
   table, no automated recommendation (`--tag`, `--steps`).
 - **`servo_fit_compare.py`** — diagnostic (not driven by a command): fits the
