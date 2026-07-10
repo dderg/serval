@@ -83,7 +83,9 @@ in-place update. The `servo_tuning/` directory is created if missing. A
 readback failure (no engine handle, SDO error, or a drive object whose size
 doesn't match the assumed type) aborts the whole write with no partial file.
 
-Loaded via a `[servo_tuning]` config section:
+Loaded automatically by `[servo_calibration]` (the dashboard assumes both
+halves of the toolchain, so one section brings the whole thing), or
+standalone via a `[servo_tuning]` config section:
 
 ```
 [servo_tuning]

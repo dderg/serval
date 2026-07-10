@@ -2379,4 +2379,5 @@ class ServoCalibration:
 
 
 def load_config(config: Any) -> ServoCalibration:
+    config.get_printer().load_object(config, "servo_tuning")
     return ServoCalibration(config)

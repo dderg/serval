@@ -688,3 +688,26 @@ def test_ladder_rejects_max_below_start():
         sc.cmd_SERVO_GAIN_LADDER(
             FakeGcmd(AXIS="X", SAFE=300, START=800, STEP=100, MAX=500)
         )
+
+
+def test_load_config_pulls_in_servo_tuning():
+    rails = [_rail("x", [_motor("motor_a", "n", 0)])]
+    objs = {
+        "gcode": FakeGcode(),
+        "toolhead": FakeToolhead(FakeKin(rails)),
+        "servo_capture": FakeServoCapture(),
+        "motion_engine": FakeEngine(),
+        "ethercat_node n": FakeNode("ethercat_node n", 1, {"motor_a": 0}),
+    }
+
+    class RecordingPrinter(FakePrinter):
+        def __init__(self, inner_objs):
+            super().__init__(inner_objs)
+            self.loaded = []
+
+        def load_object(self, config, section):
+            self.loaded.append(section)
+
+    printer = RecordingPrinter(objs)
+    servo_calibration.load_config(FakeConfig(printer))
+    assert printer.loaded == ["servo_tuning"]
