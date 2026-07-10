@@ -6,9 +6,10 @@
 //! `position_actual`, baking each drive's standing following error into the
 //! command and letting paired drives drift apart. These tests drive
 //! `compute_motion_targets` with a fake drive that tracks with a constant
-//! following error and assert the commanded target is continuous across a
-//! gap — and that explicit frame redefinitions (discard_motion) still
-//! re-anchor.
+//! following error and assert the commanded-counts frame is continuous
+//! across ring gaps AND across discard_motion (homing trips) — falling back
+//! to position_actual only where the rotor genuinely moved uncommanded
+//! (torque cycle, drive fault, sync coast).
 
 use runtime::piece_ring::PieceEntry;
 
@@ -208,11 +209,14 @@ fn target_counts_hold_across_a_mid_stream_ring_gap() {
     );
 }
 
-/// Stop/ResumeStream redefine the host frame: after discard_motion the next
-/// stream must re-anchor at the drive's actual position (never yank), and
-/// the target-jump guard baseline must reset with it.
+/// Stop/ResumeStream redefine the host mm frame (homing set_position), but
+/// the commanded-counts frame must stay continuous: at an endstop trip both
+/// drives of a belt pair hold unequal elastic following errors, and
+/// re-anchoring each at its own strained actual would freeze that
+/// differential in as permanent belt tension. The new mm frame grafts onto
+/// the last commanded counts instead.
 #[test]
-fn discard_motion_reanchors_the_next_stream() {
+fn discard_motion_keeps_commanded_counts_continuous() {
     let mut ctx = test_ctx("discard");
 
     push_all(&mut ctx, piece(1_000_000, 0.01, &[2.5, 2.5]));
@@ -228,17 +232,86 @@ fn discard_motion_reanchors_the_next_stream() {
         );
     }
 
-    // New stream restarts the host frame at 0 mm; the drive must not be
-    // yanked — the first target re-anchors at its actual position.
+    // New stream restarts the host frame at 0 mm at the same physical spot:
+    // the commanded counts must not move, or the pair's standing following
+    // errors ({FOLLOWING_ERROR:?}) become a trapped differential.
     push_all(&mut ctx, piece(20_000_000, 0.01, &[0.0]));
     run_cycles(&mut ctx, 20_000_000, 20_500_000);
+
+    let after = targets(&ctx);
+    assert_eq!(
+        after, before,
+        "post-discard stream must anchor at the last commanded counts, \
+         not position_actual"
+    );
+}
+
+/// After a torque disable the rotor can move uncommanded (gravity, a hand,
+/// belt relaxation), so the commanded frame is void: the first stream after
+/// re-enable must anchor at the drive's actual position.
+#[test]
+fn torque_disable_voids_the_commanded_anchor() {
+    let mut ctx = test_ctx("torque-off");
+
+    push_all(&mut ctx, piece(1_000_000, 0.01, &[2.5, 2.5]));
+    run_cycles(&mut ctx, 1_000_000, 11_000_000);
+    let before = targets(&ctx);
+
+    let _ = ctx.gate.on_set_torque(false, 15_000_000);
+    super::cycle::apply_tick_action(&mut ctx, 15_000_000, true);
+    for s in 0..NUM_SLAVES {
+        assert!(
+            ctx.last_streamed_target[s].is_none(),
+            "slot {s}: torque disable must void the commanded anchor"
+        );
+        assert!(
+            ctx.cmaps[s].is_none(),
+            "slot {s}: torque disable drops the anchor"
+        );
+    }
+
+    let _ = ctx.gate.on_set_torque(true, 0);
+    ctx.gate.enable_finished(true);
+
+    push_all(&mut ctx, piece(30_000_000, 0.01, &[0.0]));
+    run_cycles(&mut ctx, 30_000_000, 30_500_000);
 
     let after = targets(&ctx);
     for s in 0..NUM_SLAVES {
         assert_eq!(
             after[s],
             before[s] - FOLLOWING_ERROR[s],
-            "slot {s}: post-discard stream anchors at position_actual"
+            "slot {s}: the first stream after a torque cycle anchors at \
+             position_actual"
         );
     }
+}
+
+/// The full homing-trip shape: a pair is wound into the endstop with unequal
+/// following errors, the trip discards motion, and the retract stream must
+/// command both drives back through the SAME count deltas — releasing the
+/// elastic differential instead of blessing it as the new zero.
+#[test]
+fn homing_trip_retract_releases_pair_wind_up() {
+    let mut ctx = test_ctx("trip-retract");
+
+    // Approach: 0 mm -> 5 mm, trip mid-stroke.
+    push_all(&mut ctx, piece(1_000_000, 0.01, &[2.5, 2.5]));
+    run_cycles(&mut ctx, 1_000_000, 6_000_000);
+    let at_trip = targets(&ctx);
+    let pair_offset_at_trip = i64::from(at_trip[0]) - i64::from(at_trip[1]);
+
+    // Trip: Stop discards motion; the host rebases its mm frame (the homing
+    // set_position) and streams the retract in the new frame.
+    discard_motion(&mut ctx);
+    push_all(&mut ctx, piece(10_000_000, 0.01, &[17.5, -2.5]));
+    run_cycles(&mut ctx, 10_000_000, 20_000_000);
+
+    let after_retract = targets(&ctx);
+    let pair_offset_after = i64::from(after_retract[0]) - i64::from(after_retract[1]);
+    assert_eq!(
+        pair_offset_after, pair_offset_at_trip,
+        "the pair's commanded offset must ride through the trip unchanged; \
+         a change means one drive absorbed the other's following error"
+    );
 }

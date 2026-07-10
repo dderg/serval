@@ -198,6 +198,11 @@ impl PyMotionEngine {
         enable: bool,
     ) -> PyResult<u64> {
         let conn = self.ethercat_conn(mcu_handle, "arm_sensorless_endstop")?;
+        if enable {
+            *self.homing.pending_trip.lock_ok() = None;
+            let host_now = self.router.lock_ok().host_now_secs();
+            *self.homing.last_arm.lock_ok() = Some((mcu_handle, endstop_id, host_now));
+        }
         tracing::info!(
             subsystem = "engine",
             event = "sensorless_endstop_arm",

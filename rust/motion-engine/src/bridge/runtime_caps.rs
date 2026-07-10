@@ -56,12 +56,12 @@ pub(crate) fn query_runtime_caps(
 
 enum MotorQuery {
     Serial(Arc<McuHostIo>),
-    EtherCat(Arc<McuSerialConn>),
+    EtherCat(Arc<McuSerialConn>, Vec<usize>),
 }
 
 impl MotorQuery {
     fn is_ethercat(&self) -> bool {
-        matches!(self, MotorQuery::EtherCat(_))
+        matches!(self, MotorQuery::EtherCat(..))
     }
 }
 
@@ -76,7 +76,7 @@ pub(crate) fn slots_for_axis(slot_axes: &[usize], axis: usize) -> Vec<u8> {
 
 pub(crate) fn place_motor_response(
     resp: &mcu_protocol::messages::MotorStateResponse,
-    cfg_axes: &[usize],
+    slot_to_axis: &[usize],
     is_ethercat: bool,
     motors: &mut [Option<f64>],
     vmotors: &mut [Option<f64>],
@@ -95,8 +95,10 @@ pub(crate) fn place_motor_response(
     if is_ethercat {
         // With AWD, several slots claim the same axis; the lowest slot is the
         // axis's reporting drive so the answer is deterministic.
-        for m in &resp.motors {
-            if let Some(&axis) = cfg_axes.get(m.slot as usize) {
+        let mut samples: Vec<&mcu_protocol::messages::MotorSample> = resp.motors.iter().collect();
+        samples.sort_by_key(|m| m.slot);
+        for m in samples {
+            if let Some(&axis) = slot_to_axis.get(m.slot as usize) {
                 if motors.get(axis).is_some_and(Option::is_some) {
                     continue;
                 }
@@ -142,7 +144,16 @@ pub(crate) fn collect_motor_positions_inner(
             };
             if conn.ethercat_socket.is_some() {
                 match conn.endpoint_conn.as_ref() {
-                    Some(ep) => MotorQuery::EtherCat(Arc::clone(ep)),
+                    Some(ep) => {
+                        if conn.ethercat_slot_axes.is_empty() {
+                            return Err(format!(
+                                "query_motor_positions: EtherCAT mcu {} has an empty \
+                                 slot->axis map — cannot attribute drive positions",
+                                cfg.mcu_id
+                            ));
+                        }
+                        MotorQuery::EtherCat(Arc::clone(ep), conn.ethercat_slot_axes.clone())
+                    }
                     None => continue,
                 }
             } else {
@@ -156,7 +167,7 @@ pub(crate) fn collect_motor_positions_inner(
             MotorQuery::Serial(io) => {
                 io.mcu_call(MessageKind::QueryMotorState, Vec::new(), timeout)
             }
-            MotorQuery::EtherCat(ep) => {
+            MotorQuery::EtherCat(ep, _) => {
                 ep.mcu_call(MessageKind::QueryMotorState, Vec::new(), timeout)
             }
         }
@@ -170,7 +181,17 @@ pub(crate) fn collect_motor_positions_inner(
         let mut c = Cursor::new(&body);
         let resp = MotorStateResponse::decode_from(&mut c)
             .map_err(|e| format!("query mcu {}: decode {e:?}", cfg.mcu_id))?;
-        place_motor_response(&resp, &cfg.axes, q.is_ethercat(), &mut motors, &mut vmotors);
+        let slot_to_axis = match &q {
+            MotorQuery::EtherCat(_, slot_axes) => slot_axes.as_slice(),
+            MotorQuery::Serial(_) => &cfg.axes,
+        };
+        place_motor_response(
+            &resp,
+            slot_to_axis,
+            q.is_ethercat(),
+            &mut motors,
+            &mut vmotors,
+        );
     }
     crate::position_query::assemble_cartesian(&motors, &vmotors, kin_tag)
 }

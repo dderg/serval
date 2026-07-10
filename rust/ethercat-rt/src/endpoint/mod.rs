@@ -114,6 +114,11 @@ pub(super) fn abort_sync(ctx: &mut EndpointCtx, code: i32) {
             ctx.drive.shutdown_and_exit(ctx.num_slaves);
         }
     }
+    // The secondary may have coasted (rotor moved uncommanded), so its
+    // commanded frame is void: the next stream must anchor at its actual.
+    ctx.cmaps[run.secondary] = None;
+    ctx.last_counts[run.secondary] = None;
+    ctx.last_streamed_target[run.secondary] = None;
     eprintln!(
         "ec-rt: SyncPair aborted code={code} (primary={} secondary={})",
         run.primary, run.secondary
