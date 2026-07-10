@@ -10,16 +10,27 @@ export function init(): void;
  */
 export function plan(gcode_text: string, config_json: string): string;
 
+/**
+ * Like [`plan`] (byte-identical final JSON), but invokes `on_partial` with
+ * the JSON string of a schema-complete partial snapshot — the trajectory
+ * pieces produced so far — every [`plan_core::PARTIAL_BATCH_SEGMENTS`]
+ * shaped segments, so the UI can draw the trajectory as it grows.
+ */
+export function plan_streaming(gcode_text: string, config_json: string, on_partial: Function): string;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
-    readonly init: () => void;
     readonly plan: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly plan_streaming: (a: number, b: number, c: number, d: number, e: any) => [number, number, number, number];
+    readonly init: () => void;
+    readonly __wbindgen_exn_store: (a: number) => void;
+    readonly __externref_table_alloc: () => number;
+    readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
-    readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_start: () => void;
 }

@@ -96,6 +96,13 @@ export class TrajectoryData {
         return this;
     }
     /**
+     * @returns {boolean}
+     */
+    has_toolhead() {
+        const ret = wasm.trajectorydata_has_toolhead(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
      * @returns {Float64Array}
      */
     j_cent() {
@@ -226,6 +233,118 @@ export class TrajectoryData {
      */
     t() {
         const ret = wasm.trajectorydata_t(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    th_a_cent() {
+        const ret = wasm.trajectorydata_th_a_cent(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    th_a_scalar() {
+        const ret = wasm.trajectorydata_th_a_scalar(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    th_a_tang() {
+        const ret = wasm.trajectorydata_th_a_tang(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    th_ax() {
+        const ret = wasm.trajectorydata_th_ax(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    th_ay() {
+        const ret = wasm.trajectorydata_th_ay(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    th_j_cent() {
+        const ret = wasm.trajectorydata_th_j_cent(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    th_j_scalar() {
+        const ret = wasm.trajectorydata_th_j_scalar(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    th_j_tang() {
+        const ret = wasm.trajectorydata_th_j_tang(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    th_jx() {
+        const ret = wasm.trajectorydata_th_jx(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    th_jy() {
+        const ret = wasm.trajectorydata_th_jy(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    th_kappa() {
+        const ret = wasm.trajectorydata_th_kappa(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    th_v_scalar() {
+        const ret = wasm.trajectorydata_th_v_scalar(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    th_vx() {
+        const ret = wasm.trajectorydata_th_vx(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    th_vy() {
+        const ret = wasm.trajectorydata_th_vy(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    th_x() {
+        const ret = wasm.trajectorydata_th_x(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * @returns {Float64Array}
+     */
+    th_y() {
+        const ret = wasm.trajectorydata_th_y(this.__wbg_ptr);
         return ret;
     }
     /**
