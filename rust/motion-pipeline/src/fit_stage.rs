@@ -56,6 +56,7 @@ pub struct FitStage {
     tail_checked: usize,
     seam_head_trim: f64,
     seam_in_reduction: f64,
+    consume_scan_start: usize,
 }
 
 enum Element {
@@ -97,6 +98,7 @@ impl FitStage {
             tail_checked: 1,
             seam_head_trim: 0.0,
             seam_in_reduction: 0.0,
+            consume_scan_start: MAX_CONSUMED_FACETS,
         }
     }
 
@@ -473,12 +475,20 @@ impl FitStage {
     }
 
     /// Consume the longest prefix of the scanned facet chain that passes
-    /// every gate: try all `max_mids` facets against the piece after them,
-    /// then shrink — a shorter prefix anchors on the facet that follows it,
-    /// exactly as a lone squeezed facet anchors on any next piece. Returns
-    /// the send result, or `None` when no prefix is consumable.
+    /// every gate: shrink from the longest candidate — a shorter prefix
+    /// anchors on the facet that follows it, exactly as a lone squeezed
+    /// facet anchors on any next piece. Each failed prefix costs a full
+    /// chain-blend scan, and on uniform curves (circle facets) the feasible
+    /// length is the same junction after junction, so the descent starts one
+    /// above the last consumption's length instead of at `max_mids`: it
+    /// re-earns longer prefixes one junction at a time and never re-pays for
+    /// lengths that just failed. Returns the send result, or `None` when no
+    /// prefix is consumable.
     fn try_consumption(&mut self, max_mids: usize, out: &mut TravelAligningSender) -> Option<bool> {
-        for n_mids in (1..=max_mids).rev() {
+        let start_mids = max_mids
+            .min(self.consume_scan_start.saturating_add(1))
+            .max(1);
+        for n_mids in (1..=start_mids).rev() {
             let front = piece_of(&self.decided[0]).expect("caller matched a front piece");
             let mids: Vec<&Move> = self.decided[1..=n_mids]
                 .iter()
@@ -489,9 +499,11 @@ impl FitStage {
                 plan_facet_consumption(front, &mids, after, self.corner, self.seam_in_reduction)
                     .unwrap_or_else(|e| panic!("fit_stage: facet consumption failed: {e:?}"));
             if let Some(fc) = plan {
+                self.consume_scan_start = n_mids;
                 return Some(self.emit_consumption(fc, n_mids, out));
             }
         }
+        self.consume_scan_start = 0;
         None
     }
 
