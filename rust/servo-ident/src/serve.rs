@@ -15,6 +15,7 @@ use crate::analyze::{build_run, write_run_outputs};
 use crate::assets;
 use crate::http::{Request, Response};
 use crate::live;
+use crate::live_stream::LiveTap;
 use crate::results::Manifest;
 use crate::time_fmt::iso8601_utc;
 
@@ -304,6 +305,31 @@ fn handle_live_tail(captures_root: &Path, name: &str, raw_path: &str) -> Respons
         Ok(payload) => Response::json(200, payload.to_string()),
         Err(e) => Response::text(500, "text/plain", e),
     }
+}
+
+fn handle_live_tap(tap: &LiveTap, raw_path: &str) -> Response {
+    let since_cycle = match query_param(raw_path, "since_cycle") {
+        None => None,
+        Some(text) => match text.parse::<u64>() {
+            Ok(v) => Some(v),
+            Err(_) => {
+                return Response::text(400, "text/plain", format!("bad since_cycle {text:?}"))
+            }
+        },
+    };
+    Response::json(200, tap.poll(since_cycle).to_string())
+}
+
+/// Route one HTTP request, additionally answering `GET /api/live_tap` from
+/// the shared [`LiveTap`] state the server main loop owns; every other
+/// route delegates to [`handle`] unchanged.
+pub fn handle_with_live_tap(captures_root: &Path, tap: &LiveTap, req: &Request) -> Response {
+    let path = req.path.split('?').next().unwrap_or("");
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if req.method == "GET" && segments == ["api", "live_tap"] {
+        return handle_live_tap(tap, &req.path);
+    }
+    handle(captures_root, req)
 }
 
 /// Route one HTTP request against `captures_root`. Pure given the

@@ -123,37 +123,21 @@ pub struct Header {
     pub record_size: usize,
     pub drives: Vec<Drive>,
     pub channels: Vec<Channel>,
-}
-
-#[derive(Debug)]
-pub struct Scap {
-    pub header: Header,
-    pub n_records: usize,
     block_size: usize,
-    body: Vec<u8>,
 }
 
-impl Scap {
-    pub fn load(path: &str) -> Result<Scap, String> {
-        if path.ends_with(".failed.scap") {
-            return Err(format!(
-                "{path} is a FAILED capture (ring overflow or writer error); its \
-                 gaps would poison every metric. Re-run the capture."
-            ));
-        }
-        let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
-        Scap::from_bytes(&bytes).map_err(|e| format!("{path}: {e}"))
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Scap, String> {
-        let nl = bytes
-            .iter()
-            .position(|&b| b == b'\n')
-            .ok_or("capture has no header line")?;
+impl Header {
+    /// Parse and validate one scap v2 JSON header line (without its
+    /// trailing newline) — the first line of a `.scap` file and the greeting
+    /// of the live tap socket alike.
+    pub fn parse_line(line: &[u8]) -> Result<Header, String> {
         let raw: HeaderRaw =
-            serde_json::from_slice(&bytes[..nl]).map_err(|e| format!("header parse: {e}"))?;
+            serde_json::from_slice(line).map_err(|e| format!("header parse: {e}"))?;
         if !SUPPORTED_VERSIONS.contains(&raw.version) {
             return Err(format!("unsupported capture version {}", raw.version));
+        }
+        if raw.cycle_ns == 0 {
+            return Err("header cycle_ns is 0".to_string());
         }
         let n_drives = raw.drives.len();
         if n_drives == 0 {
@@ -190,18 +174,63 @@ impl Scap {
                 offset: c.offset,
             });
         }
-        let body = bytes[nl + 1..].to_vec();
-        let n_records = body.len() / record_size;
-        Ok(Scap {
-            header: Header {
-                version: raw.version,
-                cycle_ns: raw.cycle_ns,
-                record_size,
-                drives: raw.drives,
-                channels,
-            },
-            n_records,
+        Ok(Header {
+            version: raw.version,
+            cycle_ns: raw.cycle_ns,
+            record_size,
+            drives: raw.drives,
+            channels,
             block_size,
+        })
+    }
+
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    pub fn channel(&self, name: &str) -> Option<&Channel> {
+        self.channels.iter().find(|c| c.name == name)
+    }
+
+    pub fn eff_offset(&self, ch: &Channel, drive_idx: usize) -> usize {
+        if ch.offset >= RECORD_PREFIX_SIZE {
+            ch.offset + drive_idx * self.block_size
+        } else {
+            ch.offset
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Scap {
+    pub header: Header,
+    pub n_records: usize,
+    body: Vec<u8>,
+}
+
+impl Scap {
+    pub fn load(path: &str) -> Result<Scap, String> {
+        if path.ends_with(".failed.scap") {
+            return Err(format!(
+                "{path} is a FAILED capture (ring overflow or writer error); its \
+                 gaps would poison every metric. Re-run the capture."
+            ));
+        }
+        let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+        Scap::from_bytes(&bytes).map_err(|e| format!("{path}: {e}"))
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Scap, String> {
+        let nl = bytes
+            .iter()
+            .position(|&b| b == b'\n')
+            .ok_or("capture has no header line")?;
+        let header = Header::parse_line(&bytes[..nl])?;
+        let body = bytes[nl + 1..].to_vec();
+        let n_records = body.len() / header.record_size;
+        Ok(Scap {
+            header,
+            n_records,
             body,
         })
     }
@@ -219,26 +248,18 @@ impl Scap {
     }
 
     pub fn channel(&self, name: &str) -> Option<&Channel> {
-        self.header.channels.iter().find(|c| c.name == name)
+        self.header.channel(name)
     }
 
     pub fn has_channel(&self, name: &str) -> bool {
         self.channel(name).is_some()
     }
 
-    fn eff_offset(&self, ch: &Channel, drive_idx: usize) -> usize {
-        if ch.offset >= RECORD_PREFIX_SIZE {
-            ch.offset + drive_idx * self.block_size
-        } else {
-            ch.offset
-        }
-    }
-
     pub fn read_i64(&self, drive_idx: usize, name: &str) -> Result<Vec<i64>, String> {
         let ch = self
             .channel(name)
             .ok_or_else(|| format!("capture has no channel {name:?}"))?;
-        let off = self.eff_offset(ch, drive_idx);
+        let off = self.header.eff_offset(ch, drive_idx);
         let rs = self.header.record_size;
         let mut out = Vec::with_capacity(self.n_records);
         for r in 0..self.n_records {
@@ -251,7 +272,7 @@ impl Scap {
         let ch = self
             .channel(name)
             .ok_or_else(|| format!("capture has no channel {name:?}"))?;
-        let off = self.eff_offset(ch, drive_idx);
+        let off = self.header.eff_offset(ch, drive_idx);
         let rs = self.header.record_size;
         let mut out = Vec::with_capacity(self.n_records);
         for r in 0..self.n_records {

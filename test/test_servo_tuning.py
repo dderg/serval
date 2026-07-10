@@ -149,14 +149,15 @@ class FakeReadEngine:
 class FakeNode:
     name = "node_x"
 
-    def __init__(self, handle=7):
+    def __init__(self, handle=7, slots=None):
         self._h = handle
+        self._slots = slots or {}
 
     def get_engine_handle(self):
         return self._h
 
     def get_slot_for_motor(self, motor_name):
-        return 0
+        return self._slots.get(motor_name, 0)
 
 
 class FakeKin:
@@ -600,6 +601,7 @@ def test_dump_tuning_writes_expected_json(tmp_path):
     engine = FakeReadEngine(_full_readback())
     objs, motor_a, motor_b = _two_motor_printer(
         engine,
+        node=FakeNode(7, slots={"motor_a": 0, "motor_b": 1}),
         sdo_params_by_motor={
             "motor_a": [(0x2000, 7, 2, 870)],
             "motor_b": [(0x2001, 1, 2, 700), (0x2000, 5, 2, 1)],
@@ -629,6 +631,7 @@ def test_dump_tuning_writes_expected_json(tmp_path):
         "C01.00": 700,
         "C00.04": 0,
     }
+    assert payload["slots"] == {"motor_a": 0, "motor_b": 1}
     assert any(str(path) in r for r in gcmd.responses)
     assert any("2" in r and "motors" in r for r in gcmd.responses)
 
@@ -661,6 +664,7 @@ def test_dump_tuning_motors_filter(tmp_path):
     st.cmd_SERVO_DUMP_TUNING(gcmd)
     payload = json.loads((tmp_path / "drive_state.json").read_text())
     assert set(payload["motors"]) == {"motor_a"}
+    assert set(payload["slots"]) == {"motor_a"}
 
 
 def test_dump_tuning_readback_failure_names_motor_and_param(tmp_path):

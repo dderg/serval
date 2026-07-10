@@ -295,6 +295,19 @@ fn demo_writes_a_drive_state_the_panel_can_render() {
         assert_eq!(pins["C00.06"], Value::from(150));
     }
 
+    let slots = drive_state["slots"].as_object().unwrap();
+    assert_eq!(slots.len(), 4);
+    for (slot, name) in ["motor_a", "motor_a1", "motor_b", "motor_b1"]
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(
+            slots[*name],
+            Value::from(slot),
+            "slots must number the motors 0..N in sorted order"
+        );
+    }
+
     std::fs::remove_dir_all(&out_dir).ok();
 }
 

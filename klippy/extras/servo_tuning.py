@@ -589,9 +589,11 @@ class ServoTuning:
         targets = self._resolve_motors(gcmd, gcmd.get("MOTORS", None))
         motors_out: dict[str, dict[str, int]] = {}
         config_pins_out: dict[str, dict[str, int]] = {}
+        slots_out: dict[str, int] = {}
         for _rail, motor in targets:
             node, slot = self._node_slot_for_motor(motor)
             motor_name = motor.get_motor_name()
+            slots_out[motor_name] = slot
             readings: dict[str, int] = {}
             for p in self.params:
                 index, subindex = _addr_key(p.addr)
@@ -633,6 +635,7 @@ class ServoTuning:
             "params": [p.as_dict() for p in self.params],
             "motors": motors_out,
             "config_pins": config_pins_out,
+            "slots": slots_out,
         }
         os.makedirs(self.captures_root, exist_ok=True)
         path = os.path.join(self.captures_root, "drive_state.json")

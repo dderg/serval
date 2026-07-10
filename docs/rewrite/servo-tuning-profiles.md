@@ -218,6 +218,9 @@ atomically (write to `.tmp`, then `os.replace`). `captures_root` is
   },
   "config_pins": {
     "motor_a": { "C00.06": 150 }
+  },
+  "slots": {
+    "motor_a": 0
   }
 }
 ```
@@ -227,7 +230,10 @@ live readback, keyed by `c_code`. `config_pins` is the same shape but
 filtered down to the addresses that appear in that motor's own
 `[motor] params:` block and/or `tuning_profile` (`motor.get_sdo_params()`)
 — the panel's cue for "this one is pinned in `printer.cfg`, editing it here
-won't survive a restart until you update the config too." A readback
+won't survive a restart until you update the config too." `slots` keys
+every dumped motor to its EtherCAT slot index (the same
+`node.get_slot_for_motor` resolution the readback uses) — the dashboard
+uses it to map live-telemetry slot numbers to motor names. A readback
 failure (no engine handle, SDO error, or a size mismatch against the
 mapped type) aborts the whole command naming the motor and the parameter;
 no partial file is written. One `respond_info` line reports the path,

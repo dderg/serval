@@ -379,12 +379,19 @@ fn write_demo_drive_state(out_dir: &Path) -> Result<(), String> {
         .map(|m| (m.to_string(), pinned.clone()))
         .collect::<serde_json::Map<_, _>>()
         .into();
+    let slots: serde_json::Value = DEMO_MOTORS
+        .iter()
+        .enumerate()
+        .map(|(slot, m)| (m.to_string(), json!(slot)))
+        .collect::<serde_json::Map<_, _>>()
+        .into();
     let payload = json!({
         "version": 1,
         "created_utc": iso8601_utc(SystemTime::now()),
         "params": params,
         "motors": motors,
         "config_pins": config_pins,
+        "slots": slots,
     });
     let path = out_dir.join("drive_state.json");
     let tmp = out_dir.join("drive_state.json.tmp");

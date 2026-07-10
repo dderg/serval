@@ -71,7 +71,6 @@ const PAGE_DEFS = {
 const DEFAULT_PAGE = "gains";
 const LIVE_STATUS_POLL_MS = 1000;
 const LIVE_TAIL_POLL_MS = 400;
-const LIVE_WINDOW_S = 10;
 const MOONRAKER_HEALTH_POLL_MS = 5000;
 
 const state = {
@@ -90,11 +89,13 @@ const state = {
     dirty: new Set(), // autofill-target param names the user has edited directly this session
   },
   live: {
-    name: null, // capture file currently streamed
-    nextOffset: null, // null = attach at EOF (offset=end); numeric afterwards
+    cursor: null, // last next_cycle from /api/live_tap; null = attach now
     fsHz: null,
+    cycle0: null, // first streamed cycle_index — the chart's t=0
+    lastCycle: null, // cycle_index of the last kept sample, for gap breaks
     t: [], // seconds since stream start, one per kept point
-    perDrive: {}, // drive -> ferr values, same length as t
+    perDrive: {}, // tap drive name -> ferr values (null = gap break)
+    windowS: 10, // seconds kept and drawn, set by the slider
     timers: [], // interval ids cleared on page switch
     polling: false,
   },
@@ -326,22 +327,26 @@ function liveShellHtml() {
     `<main class="analysis">` +
     `<section class="live-section">` +
     `<div class="section-head"><h2>live following error — per motor</h2>` +
-    `<span class="note" id="live-status">no capture yet</span></div>` +
+    `<label class="live-window">window ` +
+    `<input type="range" id="live-window" min="2" max="30" step="1" value="${state.live.windowS}">` +
+    `<span id="live-window-value">${state.live.windowS} s</span></label>` +
+    `<span class="note" id="live-status">connecting to the telemetry tap…</span></div>` +
     `<div class="charts" id="live-charts">` +
-    `<p class="note">charts appear when a running capture writes new samples — ` +
-    `old capture files are never replayed</p>` +
+    `<p class="note">streams straight from the drives the moment the tap answers — ` +
+    `no capture, no file</p>` +
     `</div>` +
     `</section>` +
     `</main>` +
     `<aside class="controls">` +
     `<section class="sweep">` +
-    `<div class="section-head"><h2>capture</h2></div>` +
+    `<div class="section-head"><h2>record to file</h2>` +
+    `<span class="note" id="live-file-status"></span></div>` +
     `<div class="row"><input type="text" id="live-start-command" ` +
     `value="SERVO_CAPTURE_START NAME=live AXIS=X">` +
-    `<button id="live-start-btn">start</button>` +
+    `<button id="live-start-btn">record</button>` +
     `<button id="live-stop-btn">stop</button></div>` +
-    `<p class="note">start begins an open-ended capture; the chart tails the ` +
-    `growing file. stop leaves a normal analyzable .scap in the captures root.</p>` +
+    `<p class="note">viewing needs no recording. record when you want an ` +
+    `analyzable .scap in the captures root; stop finalizes it.</p>` +
     `</section>` +
     `<section class="session">` +
     `<details class="gcode-details"><summary>manual g-code</summary>` +
@@ -577,6 +582,7 @@ function drawChart(canvas, traces, yLabel, fixedY) {
   let tMin = Infinity, tMax = -Infinity, yMin = Infinity, yMax = -Infinity;
   for (const tr of traces) {
     for (let i = 0; i < tr.t.length; i++) {
+      if (tr.y[i] === null) continue;
       tMin = Math.min(tMin, tr.t[i]);
       tMax = Math.max(tMax, tr.t[i]);
       yMin = Math.min(yMin, tr.y[i]);
@@ -614,11 +620,17 @@ function drawChart(canvas, traces, yLabel, fixedY) {
     ctx.strokeStyle = tr.color;
     ctx.lineWidth = 1.25;
     ctx.beginPath();
+    let penDown = false;
     for (let i = 0; i < tr.t.length; i++) {
+      if (tr.y[i] === null) {
+        penDown = false;
+        continue;
+      }
       const px = x(tr.t[i]);
       const py = y(tr.y[i]);
-      if (i === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
+      if (penDown) ctx.lineTo(px, py);
+      else ctx.moveTo(px, py);
+      penDown = true;
     }
     ctx.stroke();
   }
@@ -982,16 +994,17 @@ async function redrawCharts() {
   if (def.charts && def.charts.includes("time")) drawTimeDomain(okNames, plots);
 }
 
-// --- live tail ----------------------------------------------------------------
+// --- live tap ------------------------------------------------------------------
 //
-// Polls /api/live for the newest flat capture, then streams
-// /api/live/<name>?offset=<next_offset> — the offset handshake is the
-// server's contract (always record-aligned). Attaching uses `offset=end`,
-// so the charts only ever show samples written after the stream started:
-// an idle old capture draws nothing instead of masquerading as live data.
-// A new capture name resets the stream; each motor gets its own stacked
-// chart over the last LIVE_WINDOW_S seconds, all on a shared y-scale so
-// the noisy motor stands out.
+// Streams from GET /api/live_tap the moment the page opens — the server
+// relays the ethercat-rt telemetry tap, so viewing needs no capture, no
+// file, and no G-code. The cursor handshake mirrors the run-file tail:
+// the first poll attaches "now" and returns only a cursor, every later
+// poll sends it back and gets just the new samples. A cycle_index jump
+// (drops under backpressure, tap reconnect) becomes a null break in the
+// series — the chart shows a gap, never stale data drawn as live. Each
+// motor gets its own stacked chart over the slider's window, all on a
+// shared y-scale so the noisy motor stands out.
 
 function bindLiveEvents() {
   el("live-start-btn").addEventListener("click", () => {
@@ -999,85 +1012,116 @@ function bindLiveEvents() {
     if (line) runGcode([line], "live");
   });
   el("live-stop-btn").addEventListener("click", () => runGcode(["SERVO_CAPTURE_STOP"], "live"));
+  const slider = el("live-window");
+  slider.addEventListener("input", () => {
+    state.live.windowS = Number(slider.value);
+    el("live-window-value").textContent = `${state.live.windowS} s`;
+    trimLiveWindow();
+    drawLiveCharts();
+  });
 }
 
-function resetLiveStream(name) {
-  state.live.name = name;
-  state.live.nextOffset = null;
-  state.live.fsHz = null;
-  state.live.t = [];
-  state.live.perDrive = {};
-  const container = el("live-charts");
-  if (container) {
-    container.innerHTML =
-      '<p class="note">charts appear when a running capture writes new samples — ' +
-      "old capture files are never replayed</p>";
-  }
-}
-
-async function pollLiveStatus() {
+async function pollLiveFileStatus() {
+  const label = el("live-file-status");
+  if (!label) return;
   let status;
   try {
     status = await api("/api/live");
   } catch (e) {
-    const label = el("live-status");
-    if (label) label.textContent = String(e);
+    label.textContent = String(e);
     return;
   }
-  const label = el("live-status");
   if (!status.capture) {
-    if (label) label.textContent = "no capture in the captures root yet — press start";
+    label.textContent = "nothing recorded yet";
     return;
   }
   const cap = status.capture;
-  if (cap.name !== state.live.name) resetLiveStream(cap.name);
-  if (label) {
-    const kb = (cap.size_bytes / 1024).toFixed(0);
-    const growing = cap.age_s !== null && cap.age_s < 3;
-    label.textContent = growing
-      ? `recording ${cap.name} — ${kb} KiB`
-      : `${cap.name} idle ${formatAge(cap.age_s)} — not recording, press start`;
-  }
+  const growing = cap.age_s !== null && cap.age_s < 3;
+  label.textContent = growing
+    ? `recording ${cap.name} — ${(cap.size_bytes / 1024).toFixed(0)} KiB`
+    : `last: ${cap.name} (${formatAge(cap.age_s)} ago)`;
 }
 
-async function pollLiveTail() {
-  if (state.live.polling || !state.live.name) return;
+async function pollLiveTap() {
+  if (state.live.polling) return;
   state.live.polling = true;
   try {
-    const offset = state.live.nextOffset === null ? "end" : state.live.nextOffset;
-    const payload = await api(
-      `/api/live/${encodeURIComponent(state.live.name)}?offset=${offset}`
-    );
-    appendLiveSamples(payload);
+    const query = state.live.cursor === null ? "" : `?since_cycle=${state.live.cursor}`;
+    const payload = await api(`/api/live_tap${query}`);
+    const label = el("live-status");
+    if (payload.status !== "streaming") {
+      if (label) {
+        label.textContent =
+          payload.status === "unreachable"
+            ? `telemetry tap unreachable — ${payload.reason}`
+            : "connecting to the telemetry tap…";
+      }
+      return;
+    }
+    if (label) label.textContent = `streaming at ${(payload.fs_hz / 1000).toFixed(1)} kHz`;
+    appendTapSamples(payload);
     drawLiveCharts();
   } catch (e) {
-    console.error(e);
+    const label = el("live-status");
+    if (label) label.textContent = String(e);
   } finally {
     state.live.polling = false;
   }
 }
 
-function appendLiveSamples(payload) {
-  state.live.nextOffset = payload.next_offset;
+function appendTapSamples(payload) {
+  state.live.cursor = payload.next_cycle;
   state.live.fsHz = payload.fs_hz;
-  const n = payload.moving.length;
+  const drives = Object.keys(payload.drives || {});
+  const n = drives.length ? payload.drives[drives[0]].ferr.length : 0;
   if (!n) return;
-  const dt = payload.stride / payload.fs_hz;
-  const t0 = payload.first_record / payload.fs_hz;
-  for (let i = 0; i < n; i++) state.live.t.push(t0 + i * dt);
-  for (const [drive, series] of Object.entries(payload.drives)) {
+  if (state.live.cycle0 === null) state.live.cycle0 = payload.first_cycle;
+  for (const drive of drives) {
     if (!state.live.perDrive[drive]) {
-      state.live.perDrive[drive] = new Array(state.live.t.length - n).fill(0);
+      state.live.perDrive[drive] = new Array(state.live.t.length).fill(null);
     }
-    state.live.perDrive[drive].push(...series.ferr);
   }
-  const cutoff = state.live.t[state.live.t.length - 1] - LIVE_WINDOW_S;
+  const stride = payload.stride;
+  const gapThreshold = stride * 3;
+  for (let i = 0; i < n; i++) {
+    const cycle = payload.first_cycle + i * stride;
+    if (state.live.lastCycle !== null && cycle - state.live.lastCycle > gapThreshold) {
+      state.live.t.push((state.live.lastCycle + stride - state.live.cycle0) / payload.fs_hz);
+      for (const drive of drives) state.live.perDrive[drive].push(null);
+    }
+    state.live.t.push((cycle - state.live.cycle0) / payload.fs_hz);
+    for (const drive of drives) {
+      state.live.perDrive[drive].push(payload.drives[drive].ferr[i]);
+    }
+    state.live.lastCycle = cycle;
+  }
+  trimLiveWindow();
+}
+
+function trimLiveWindow() {
+  if (!state.live.t.length) return;
+  const cutoff = state.live.t[state.live.t.length - 1] - state.live.windowS;
   let drop = 0;
   while (drop < state.live.t.length && state.live.t[drop] < cutoff) drop++;
   if (drop > 0) {
     state.live.t.splice(0, drop);
     for (const series of Object.values(state.live.perDrive)) series.splice(0, drop);
   }
+}
+
+/// slot0..slotN are the tap's honest names (the RT process never sees
+/// klippy's motor names); drive_state.json's slots map recovers the
+/// motor name when a dump has run.
+function liveDriveLabel(tapName) {
+  const slots = state.drive.data && state.drive.data.slots;
+  if (!slots) return tapName;
+  const match = /^slot(\d+)$/.exec(tapName);
+  if (!match) return tapName;
+  const slot = Number(match[1]);
+  for (const [motor, s] of Object.entries(slots)) {
+    if (s === slot) return motor;
+  }
+  return tapName;
 }
 
 function liveChartId(drive) {
@@ -1095,7 +1139,8 @@ function ensureLiveChartBoxes(drives) {
         (d, i) =>
           `<div class="chart-box">` +
           `<h3><span class="swatch" style="background:${PALETTE[i % PALETTE.length]}"></span>` +
-          `${d} <span class="note" id="live-peak-${d}"></span></h3>` +
+          `<span id="live-name-${d}">${liveDriveLabel(d)}</span> ` +
+          `<span class="note" id="live-peak-${d}"></span></h3>` +
           `<canvas id="${liveChartId(d)}" width="860" height="130"></canvas>` +
           `</div>`
       )
@@ -1114,6 +1159,7 @@ function drawLiveCharts() {
   for (const d of drives) {
     let peak = 0;
     for (const v of state.live.perDrive[d]) {
+      if (v === null) continue;
       if (v < yMin) yMin = v;
       if (v > yMax) yMax = v;
       const mag = Math.abs(v);
@@ -1121,6 +1167,7 @@ function drawLiveCharts() {
     }
     peaks[d] = peak;
   }
+  if (!isFinite(yMin)) return;
   drives.forEach((d, i) => {
     const canvas = el(liveChartId(d));
     if (!canvas) return;
@@ -1130,16 +1177,24 @@ function drawLiveCharts() {
       "ferr (counts)",
       { yMin, yMax }
     );
+    const name = el(`live-name-${d}`);
+    if (name) name.textContent = liveDriveLabel(d);
     const label = el(`live-peak-${d}`);
     if (label) label.textContent = `peak |ferr| ${peaks[d]}`;
   });
 }
 
 function startLivePolling() {
-  pollLiveStatus();
+  state.live.cursor = null;
+  state.live.cycle0 = null;
+  state.live.lastCycle = null;
+  state.live.t = [];
+  state.live.perDrive = {};
+  pollLiveFileStatus();
+  pollLiveTap();
   state.live.timers = [
-    setInterval(pollLiveStatus, LIVE_STATUS_POLL_MS),
-    setInterval(pollLiveTail, LIVE_TAIL_POLL_MS),
+    setInterval(pollLiveFileStatus, LIVE_STATUS_POLL_MS),
+    setInterval(pollLiveTap, LIVE_TAIL_POLL_MS),
   ];
 }
 

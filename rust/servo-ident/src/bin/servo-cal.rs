@@ -11,6 +11,7 @@
 //!       --rotation-distance-mm D --cutoff-hz C --blank-ms B --max-delay-ms M
 //!       --ripple-period-mm P]
 //!   serve --dir <captures_root> [--port 8085] [--host 127.0.0.1]
+//!       [--live-sock /tmp/kalico-ethercat.sock.live]
 //!   demo <out-dir> [--fixtures <dir>]
 #![allow(clippy::exit)]
 
@@ -23,6 +24,7 @@ use servo_ident::fit::residual_by_motor;
 use servo_ident::fit::{fit, FitInput, FitOptions};
 use servo_ident::fit_driver::scap_to_capture;
 use servo_ident::http;
+use servo_ident::live_stream::{LiveTap, DEFAULT_IDLE_TIMEOUT, DEFAULT_TAP_SOCKET};
 use servo_ident::metrics::{DEFAULT_SETTLE_BAND_COUNTS, DEFAULT_TORQUE_LIMIT_PER_MILLE};
 use servo_ident::model::Structure;
 use servo_ident::prep::{band_limited_rms, prep, PrepOptions};
@@ -86,9 +88,13 @@ fn cmd_serve(args: &[String]) {
                 .unwrap_or_else(|_| die(&format!("bad --port {p:?}")))
         })
         .unwrap_or(8085);
+    let live_sock = arg(args, "--live-sock").unwrap_or_else(|| DEFAULT_TAP_SOCKET.to_string());
+    let tap = LiveTap::new(PathBuf::from(&live_sock), DEFAULT_IDLE_TIMEOUT);
     let listener = http::bind(&host, port).unwrap_or_else(|e| die(&e));
-    println!("servo-cal serve: {dir} on http://{host}:{port}");
-    http::run(listener, move |req| serve::handle(&captures_root, req));
+    println!("servo-cal serve: {dir} on http://{host}:{port} (live tap: {live_sock})");
+    http::run(listener, move |req| {
+        serve::handle_with_live_tap(&captures_root, &tap, req)
+    });
 }
 
 fn cmd_demo(args: &[String]) {

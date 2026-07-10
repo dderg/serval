@@ -117,7 +117,8 @@ pass `--fixtures <dir>` if the binary has been copied elsewhere.
 | POST   | `/api/runs/<name>/analyze`        | re-analyzes if `results.json` is missing or older than any capture/manifest file in the run dir, then returns the (possibly freshly written) `results.json` |
 | GET    | `/api/drive_state`                | raw `<captures_root>/drive_state.json` (`SERVO_DUMP_TUNING`'s output, [servo-tuning-profiles.md](servo-tuning-profiles.md#tuning-panel-backend)) with one field added, `age_s` — seconds since the file's mtime, recomputed fresh on every request, never cached; 404 with a JSON `{"error": ...}` reason if the file doesn't exist yet (`SERVO_DUMP_TUNING` hasn't run against this `captures_root`) |
 | GET    | `/api/live`                       | newest top-level `.scap` in `--dir` (flat captures only — run-dir and `.failed.scap` files are never candidates): `{capture: {name, size_bytes, age_s}}`, or `{capture: null}` |
-| GET    | `/api/live/<file>?offset=<bytes>` | incremental decode of a (possibly growing) capture from a record-aligned byte offset: per-drive `ferr`/`torque`, `moving`, `stride` (thinned to ≤2000 points), `fs_hz`, `first_record`, and the `next_offset` to poll from; `offset=0` means "from the first record", `offset=end` attaches at the last complete record boundary (new samples only — what the live page uses), any other offset must be a prior response's `next_offset` (misaligned fails loud), at most 5 s of backlog per response |
+| GET    | `/api/live/<file>?offset=<bytes>` | incremental decode of a (possibly growing) capture from a record-aligned byte offset: per-drive `ferr`/`torque`, `moving`, `stride` (thinned to ≤2000 points), `fs_hz`, `first_record`, and the `next_offset` to poll from; `offset=0` means "from the first record", `offset=end` attaches at the last complete record boundary (new samples only), any other offset must be a prior response's `next_offset` (misaligned fails loud), at most 5 s of backlog per response |
+| GET    | `/api/live_tap?since_cycle=<u64>` | the file-less live stream (what the live page draws): relays the ethercat-rt tap at `--live-sock`, holding the last ~30 s in memory while polls keep coming (the reader hangs up ~10 s after the last poll, which turns the RT-side tap off). Always 200 with `status` `connecting` / `unreachable` (+`reason`) / `streaming`; without `since_cycle` returns just the `next_cycle` cursor ("attach now"); with it, samples strictly after the cursor — `drives:{name:{ferr,torque}}`, `moving`, `first_cycle`, `stride` (≤2000 points) — where sample `i` sits exactly at cycle `first_cycle + i*stride`: a response never spans a `cycle_index` hole, so a drop shows up as the next response's `first_cycle` jumping past the cursor and the page draws a gap |
 
 `<name>` is validated against `[A-Za-z0-9_-]+`; anything else is rejected
 before it ever reaches the filesystem.
@@ -143,17 +144,19 @@ plus sweep box and session log in a sticky right rail.
   time-domain signal).
 - **dynamics** — `SERVO_FIT_DYNAMICS` runner and the `load` grid
   (gain_mode / stiffness_level / inertia_ratio).
-- **live** — the vendor's USB scope without the USB: start an open-ended
-  capture (`SERVO_CAPTURE_START NAME=live AXIS=X`, editable before
-  sending), and the page tails the growing `.scap` through `/api/live`,
-  scrolling the last 10 s of following error as one stacked chart per
-  motor on a shared y-scale (the noisy motor stands out); stop leaves a
-  normal analyzable capture. The stream attaches at `offset=end`, so only
-  samples written after the page opened are drawn — an idle old capture
-  shows empty charts and an "idle — press start" status instead of
-  replaying history as if it were live. Works because the endpoint writer
-  (`ethercat-rt/src/capture.rs`) writes each record unbuffered as it
-  drains the ring — a same-host reader sees data at record granularity.
+- **live** — the vendor's USB scope without the USB: opening the page
+  streams following error straight from the drives, one stacked chart
+  per motor on a shared y-scale (the noisy motor stands out), over a
+  2–30 s slider-set window. No capture, no file, no G-code: the server
+  relays the ethercat-rt live tap (`<control-socket>.live`,
+  `ethercat-rt/src/live_tap.rs`) through `/api/live_tap`, and the tap
+  only builds records while someone is watching. Drops under
+  backpressure and tap reconnects arrive as `cycle_index` jumps and draw
+  as gaps — never stale data pretending to be live. Chart titles map the
+  tap's `slot<N>` names to motor names via `drive_state.json`'s `slots`
+  object once a dump has run. A separate "record to file" box wraps
+  `SERVO_CAPTURE_START`/`STOP` for when the session should leave an
+  analyzable `.scap` behind.
 - **journal** — every run across experiments, full width.
 
 ## Drive tuning grid

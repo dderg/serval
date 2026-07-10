@@ -153,5 +153,19 @@ fn demo_drive_state_matches_panel_rendering_assumptions() {
         "speed_gain is the autofill source, not an autofill target"
     );
 
+    let slots = drive_state["slots"].as_object().unwrap();
+    assert_eq!(
+        slots.keys().collect::<Vec<_>>(),
+        motors.keys().collect::<Vec<_>>(),
+        "slots must key exactly the dumped motors — the panel maps live-telemetry \
+         slot numbers back to motor names through it"
+    );
+    let slot_indices: BTreeSet<u64> = slots.values().map(|v| v.as_u64().unwrap()).collect();
+    assert_eq!(
+        slot_indices.len(),
+        slots.len(),
+        "slot indices must be distinct"
+    );
+
     std::fs::remove_dir_all(&out_dir).ok();
 }

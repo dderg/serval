@@ -135,6 +135,7 @@ servo-cal analyze --scap <file.scap>   # single capture, table to stdout
 servo-cal analyze ... --dump-csv PATH  # raw per-drive series as CSV
 servo-cal fit ...                      # servo-ident fit, --capture takes .scap
 servo-cal serve --dir <captures_root> [--port 8085]
+                [--live-sock /tmp/kalico-ethercat.sock.live]
 ```
 
 Exit non-zero with a one-line reason on any malformed input (fail loud, no
@@ -147,6 +148,24 @@ summary), `GET /api/runs/<name>/manifest|results|plot_series`,
 `POST /api/runs/<name>/analyze` (run analyze if results.json missing or
 stale), `GET /` static SPA. G-code submission goes browser → Moonraker
 (`POST /printer/gcode/script`), not through servo-cal.
+
+## Live telemetry tap (ethercat-rt ↔ servo-cal)
+
+The ethercat-rt endpoint binds a second unix socket at
+`<control-socket>.live` (default `/tmp/kalico-ethercat.sock.live`,
+mode 0666). Per connection it writes one scap-v2 header line — exactly
+`capture::header_json`, drives named `slot0..slotN` since motor names
+live in klippy config — then streams fixed-size capture records while
+the client stays connected. One client at a time; `servo-cal serve` is
+that client (`--live-sock`), and fans the data out to browsers over
+`/api/live_tap`.
+
+The DC thread pushes records only while a client is connected, through
+a bounded preallocated channel; overflow drops records rather than
+stalling the cycle or failing the session, and every drop is visible to
+the consumer as a `cycle_index` jump (records carry the absolute DC
+cycle counter). A reconnect gets a fresh header; `cycle_index` continues
+from the same running counter. Consumers must render jumps as gaps.
 
 ## Tuning profile
 
