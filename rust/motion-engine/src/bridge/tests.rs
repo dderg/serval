@@ -311,7 +311,7 @@ fn shutdown_takes_and_joins_planner() {
 }
 
 #[test]
-fn shutdown_joins_planner_before_dropping_pump_receiver() {
+fn shutdown_stops_new_dispatch_before_closing_pump() {
     let engine = PyMotionEngine::new();
 
     let (pump_tx, pump_rx) = crossbeam_channel::unbounded::<crate::pump::PumpMsg>();
@@ -420,14 +420,79 @@ fn shutdown_joins_planner_before_dropping_pump_receiver() {
 
     assert!(
         !saw_pump_gone.load(Ordering::SeqCst),
-        "planner observed a dropped pump during teardown — this is the abort() \
-         path that leaks the pts fd; shutdown() must join the planner BEFORE \
-         dropping the pump's Receiver"
+        "planner dispatched new work after shutdown closed the pump"
     );
     assert!(
         engine.planner.lock_ok().is_none(),
         "planner must be taken+joined by shutdown()"
     );
+}
+
+#[test]
+fn shutdown_unblocks_dispatch_waiting_on_full_pump_data_channel() {
+    let engine = Arc::new(PyMotionEngine::new());
+    let (pump_tx, pump_rx) = crossbeam_channel::unbounded::<crate::pump::PumpMsg>();
+    let (data_tx, data_rx) = crossbeam_channel::bounded::<()>(1);
+    data_tx.send(()).unwrap();
+
+    let (dispatch_entered_tx, dispatch_entered_rx) = crossbeam_channel::bounded(1);
+    let blocked_data_tx = data_tx.clone();
+    let dispatch = FnSink(move |_seg: &ShapedSegment| {
+        let _ = dispatch_entered_tx.try_send(());
+        blocked_data_tx
+            .send(())
+            .map_err(|_| DispatchError::PumpGone)
+    });
+    let (sc, home) = stream_config_from(&relaxed_planner_config());
+    let planner = StreamWorkerHandle::spawn(
+        sc,
+        trajectory::AxisChainSet::default(),
+        home,
+        dispatch,
+        Arc::default(),
+        None,
+    );
+    planner
+        .submit_move(
+            crate::classify::build_move(
+                [0.0; 3],
+                [50.0, 0.0, 0.0],
+                0,
+                0.0,
+                test_limits(),
+                200.0,
+                0,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    *engine.planner.lock_ok() = Some(planner);
+
+    let pump_handle = std::thread::spawn(move || {
+        while let Ok(msg) = pump_rx.recv() {
+            if matches!(msg, crate::pump::PumpMsg::Shutdown) {
+                break;
+            }
+        }
+        drop(data_rx);
+    });
+    *engine.pump.tx.lock_ok() = Some(pump_tx);
+    *engine.pump.thread.lock_ok() = Some(pump_handle);
+
+    dispatch_entered_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("dispatcher never blocked on the full pump data channel");
+
+    let shutdown_engine = Arc::clone(&engine);
+    let (shutdown_done_tx, shutdown_done_rx) = crossbeam_channel::bounded(1);
+    let shutdown_thread = std::thread::spawn(move || {
+        shutdown_engine.shutdown();
+        let _ = shutdown_done_tx.send(());
+    });
+    shutdown_done_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("shutdown stayed blocked behind the full pump data channel");
+    shutdown_thread.join().unwrap();
 }
 
 #[test]

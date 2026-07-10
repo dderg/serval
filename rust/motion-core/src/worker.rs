@@ -75,6 +75,8 @@ pub struct NudgeParams {
 }
 
 pub const INPUT_CHANNEL_CAP: usize = 64;
+const SHUTDOWN_SEND_TIMEOUT: Duration = Duration::from_secs(1);
+const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub enum StreamMsg {
@@ -422,13 +424,21 @@ impl StreamWorkerHandle {
     }
 
     pub fn shutdown(&mut self) {
-        let _ = self.sender.send(StreamMsg::Shutdown);
+        self.prepare_shutdown();
+        let _ = self
+            .sender
+            .send_timeout(StreamMsg::Shutdown, SHUTDOWN_SEND_TIMEOUT);
+        let deadline = Instant::now() + SHUTDOWN_JOIN_TIMEOUT;
         if let Some(h) = self.join_handle.take() {
-            h.join().expect("stream worker thread panicked");
+            join_worker_thread(h, deadline);
         }
         for handle in self.downstream_handles.drain(..) {
-            handle.join().expect("motion pipeline thread panicked");
+            join_worker_thread(handle, deadline);
         }
+    }
+
+    pub fn prepare_shutdown(&self) {
+        self.links.shutting_down.store(true, Ordering::Release);
     }
 }
 
@@ -437,6 +447,32 @@ impl Drop for StreamWorkerHandle {
         if self.join_handle.is_some() {
             self.shutdown();
         }
+    }
+}
+
+fn join_worker_thread(handle: JoinHandle<()>, deadline: Instant) {
+    let name = handle.thread().name().unwrap_or("unnamed").to_owned();
+    while !handle.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !handle.is_finished() {
+        tracing::error!(
+            subsystem = "motion",
+            event = "shutdown_motion_thread_join_timeout",
+            thread = name,
+            timeout_ms = SHUTDOWN_JOIN_TIMEOUT.as_millis() as u64,
+            "motion thread did not exit before the shutdown deadline; detaching it"
+        );
+        return;
+    }
+    if let Err(error) = handle.join() {
+        tracing::error!(
+            subsystem = "motion",
+            event = "shutdown_motion_thread_join_panicked",
+            thread = name,
+            error = ?error,
+            "motion thread had already panicked during shutdown"
+        );
     }
 }
 

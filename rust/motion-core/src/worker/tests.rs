@@ -678,3 +678,19 @@ fn startup_prime_drains_after_timeout_for_sparse_input() {
     assert!(!segs.is_empty());
     h.shutdown();
 }
+
+#[test]
+fn worker_join_reports_an_existing_thread_panic_without_repanicking() {
+    let handle = std::thread::spawn(|| panic!("expected worker panic"));
+    join_worker_thread(handle, Instant::now() + Duration::from_secs(1));
+}
+
+#[test]
+fn worker_join_deadline_detaches_a_stuck_thread() {
+    let (release, wait) = crossbeam_channel::bounded::<()>(1);
+    let handle = std::thread::spawn(move || {
+        let _ = wait.recv();
+    });
+    join_worker_thread(handle, Instant::now());
+    release.send(()).unwrap();
+}

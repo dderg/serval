@@ -65,6 +65,7 @@ pub(crate) struct WorkerLinks {
     /// While set (homing paths), a dispatch error is captured and reported at
     /// the next `Barrier` instead of aborting the process.
     pub(crate) capture_errors: AtomicBool,
+    pub(crate) shutting_down: AtomicBool,
     pub(crate) last_move_time_bits: AtomicU64,
     pub(crate) commit_fire_count: AtomicU32,
     pub(crate) fences: crate::fence::FenceRegistry,
@@ -108,7 +109,10 @@ impl<S: SegmentSink> Dispatcher<S> {
     }
 
     fn handle_segment(&mut self, seg: &ShapedSegment) {
-        if self.links.discard.load(Ordering::Acquire) || self.pending_error.is_some() {
+        if self.links.discard.load(Ordering::Acquire)
+            || self.links.shutting_down.load(Ordering::Acquire)
+            || self.pending_error.is_some()
+        {
             return;
         }
         log_dispatch(seg);
@@ -117,6 +121,14 @@ impl<S: SegmentSink> Dispatcher<S> {
                 self.dispatched_through = Some(seg.t_end);
                 self.publish_progress(seg.t_end);
                 self.links.fences.on_dispatch(seg.source_line, seg.t_end);
+            }
+            Err(e) if self.links.shutting_down.load(Ordering::Acquire) => {
+                tracing::debug!(
+                    subsystem = "motion",
+                    event = "dispatch_interrupted_by_shutdown",
+                    error = %e,
+                    "dispatch stopped after shutdown closed the pump"
+                );
             }
             Err(e) if self.links.capture_errors.load(Ordering::Acquire) => {
                 self.pending_error = Some(format!("dispatch failed: {e}"));

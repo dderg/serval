@@ -379,9 +379,9 @@ impl PyMotionEngine {
             return;
         }
 
-        let planner = self.planner.lock_ok().take();
-        if let Some(mut p) = planner {
-            p.shutdown();
+        let mut planner = self.planner.lock_ok().take();
+        if let Some(p) = planner.as_ref() {
+            p.prepare_shutdown();
         }
 
         let pump_join = {
@@ -400,6 +400,10 @@ impl PyMotionEngine {
                     "engine.shutdown(): push-pieces-pump join panicked"
                 );
             }
+        }
+
+        if let Some(mut p) = planner.take() {
+            p.shutdown();
         }
 
         self.position_poll
