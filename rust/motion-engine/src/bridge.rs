@@ -16,7 +16,7 @@ use host_rt::passthrough_queue::PassthroughRouter;
 
 use crate::classify;
 use crate::config::{self, PlannerConfig};
-use crate::mcu_config::{McuAxisConfig, McuCaps, build_mcu_configs};
+use crate::mcu_config::{McuAxisConfig, McuCaps, McuTopologyInput, build_mcu_configs};
 use crate::types::mcu_handle_from_raw;
 use crate::worker::{StreamWorkerError, StreamWorkerHandle};
 
@@ -27,6 +27,8 @@ mod homing_api;
 mod motion_caps;
 mod passthrough;
 mod pipeline_setup;
+#[cfg(test)]
+mod pipeline_setup_tests;
 mod planner_api;
 #[cfg(feature = "snapshot")]
 pub(crate) use planner_api::{AxisSection, PostProcessor};

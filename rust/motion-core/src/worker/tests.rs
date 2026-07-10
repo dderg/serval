@@ -284,19 +284,18 @@ fn home_drip_moves_to_the_travel_endpoint_on_the_new_pipeline() {
         Arc::default(),
         None,
     );
-    let (tx, rx) = crossbeam_channel::bounded(1);
-    h.home_drip(HomeDripParams {
-        home_pos: [0.0, 0.0, 0.0, 0.0],
-        start: [0.0, 0.0, 0.0],
-        axis: 0,
-        direction: 1.0,
-        speed_mm_s: 50.0,
-        max_travel_mm: 20.0,
-        cohort: 0,
-        participants: Vec::new(),
-        notify: tx,
-    })
-    .unwrap();
+    let rx = h
+        .home_drip(HomeDripParams {
+            home_pos: [0.0, 0.0, 0.0, 0.0],
+            start: [0.0, 0.0, 0.0],
+            axis: 0,
+            direction: 1.0,
+            speed_mm_s: 50.0,
+            max_travel_mm: 20.0,
+            cohort: 0,
+            participants: Vec::new(),
+        })
+        .unwrap();
     assert!(rx.recv().unwrap().is_ok());
     let segs = cap.snapshot();
     assert!(!segs.is_empty(), "homing dispatched nothing");
@@ -318,17 +317,16 @@ fn nudge_dispatches_pieces_and_advances_time() {
         Arc::default(),
         None,
     );
-    let (tx, rx) = crossbeam_channel::bounded(1);
-    h.submit_nudge(NudgeParams {
-        mcu_id: 0,
-        axis: 0,
-        motor_mask: 0,
-        delta_mm: 1.0,
-        speed: 10.0,
-        accel: 100.0,
-        notify: tx,
-    })
-    .unwrap();
+    let rx = h
+        .submit_nudge(NudgeParams {
+            mcu_id: 0,
+            axis: 0,
+            motor_mask: 0,
+            delta_mm: 1.0,
+            speed: 10.0,
+            accel: 100.0,
+        })
+        .unwrap();
     assert!(rx.recv().unwrap().is_ok());
     assert!(cap.nudge_count() > 0, "no nudge pieces dispatched");
     assert!(

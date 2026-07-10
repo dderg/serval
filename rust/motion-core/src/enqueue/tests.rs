@@ -57,7 +57,7 @@ fn cartesian_x_axis_yields_pieces_with_projected_start_time() {
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
         },
-        max_motor_velocity: Vec::new(),
+        max_motor_velocity: vec![f64::INFINITY; 3],
     }];
 
     let msgs = enqueue_segment(
@@ -107,7 +107,7 @@ fn corexy_x_slot_is_x_plus_y() {
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
         },
-        max_motor_velocity: Vec::new(),
+        max_motor_velocity: vec![f64::INFINITY; 2],
     }];
 
     let seg = ShapedSegment {
@@ -212,7 +212,7 @@ fn flatten_axis_max_piece_secs_splits_long_piece() {
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
         },
-        max_motor_velocity: Vec::new(),
+        max_motor_velocity: vec![f64::INFINITY],
     }];
 
     fn linear_axis_scaled(p0: f64, p1: f64, duration: f64) -> ScalarNurbs {
@@ -288,7 +288,7 @@ fn axis_cfg_single(axis: usize) -> Vec<McuAxisConfig> {
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
         },
-        max_motor_velocity: Vec::new(),
+        max_motor_velocity: vec![f64::INFINITY],
     }]
 }
 
@@ -709,7 +709,7 @@ fn test_mcu_configs_one_axis(axis: usize) -> Vec<McuAxisConfig> {
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
         },
-        max_motor_velocity: Vec::new(),
+        max_motor_velocity: vec![f64::INFINITY],
     }]
 }
 

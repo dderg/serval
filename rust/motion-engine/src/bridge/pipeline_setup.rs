@@ -1,11 +1,11 @@
 use super::{
     Arc, Duration, ETHERCAT_CLOCK_FREQ_HZ, HashMap, HashSet, HomingRun, HomingState, Instant,
-    McuAxisConfig, McuCaps, McuConnection, McuHostIo, McuSerialConn, Mutex, PyMotionEngine,
-    PyResult, PyRuntimeError, PyValueError, STREAM_INTEGRATION_TOL, STREAM_MAX_BUFFER_MOVES,
-    abort_after_tracing_appender_drains, arm_endpoint_death_watchdog, axis_ring_depth,
-    build_mcu_configs, collect_motor_positions_inner, config, dispatch_endstop_trip,
-    mcu_handle_from_raw, query_ethercat_runtime_caps, report_ethercat_endpoint_death,
-    resolve_motion_caps,
+    McuAxisConfig, McuCaps, McuConnection, McuHostIo, McuSerialConn, McuTopologyInput, Mutex,
+    PyMotionEngine, PyResult, PyRuntimeError, PyValueError, STREAM_INTEGRATION_TOL,
+    STREAM_MAX_BUFFER_MOVES, abort_after_tracing_appender_drains, arm_endpoint_death_watchdog,
+    axis_ring_depth, build_mcu_configs, collect_motor_positions_inner, config,
+    dispatch_endstop_trip, mcu_handle_from_raw, query_ethercat_runtime_caps,
+    report_ethercat_endpoint_death, resolve_motion_caps,
 };
 use crate::lock_ext::LockExt;
 
@@ -60,17 +60,17 @@ fn build_stream_config(cfg: &config::PlannerConfig) -> PyResult<motion_pipeline:
 impl PyMotionEngine {
     pub(super) fn resolve_mcu_topology(
         &self,
-        mcus: &[(u32, Vec<u8>, u8, Vec<f64>)],
+        mcus: &[McuTopologyInput],
     ) -> PyResult<(HashMap<u32, Arc<McuSerialConn>>, Vec<McuAxisConfig>)> {
         let ec_conns: HashMap<u32, Arc<McuSerialConn>> = {
             let ethercat_handles: Vec<(u32, Arc<McuSerialConn>, String)> = {
                 let mcus_lock = self.mcus.lock_ok();
                 mcus.iter()
-                    .filter_map(|(handle, _, _, _)| {
-                        let c = mcus_lock.get(handle)?;
+                    .filter_map(|topology| {
+                        let c = mcus_lock.get(&topology.mcu_id)?;
                         let socket = c.ethercat_socket.as_ref()?;
                         let conn = c.endpoint_conn.as_ref()?.clone();
-                        Some((*handle, conn, socket.clone()))
+                        Some((topology.mcu_id, conn, socket.clone()))
                     })
                     .collect()
             };
@@ -106,15 +106,16 @@ impl PyMotionEngine {
         let caps_by_handle: std::collections::HashMap<u32, McuCaps> = {
             let mcus_lock = self.mcus.lock_ok();
             mcus.iter()
-                .map(|(handle, _, _, _)| {
-                    let conn = mcus_lock.get(handle).ok_or_else(|| {
+                .map(|topology| {
+                    let conn = mcus_lock.get(&topology.mcu_id).ok_or_else(|| {
                         PyRuntimeError::new_err(format!(
-                            "init_planner: unknown mcu_handle {handle}"
+                            "init_planner: unknown mcu_handle {}",
+                            topology.mcu_id
                         ))
                     })?;
-                    let caps = resolve_motion_caps(conn.runtime_caps, &conn.label, *handle)
+                    let caps = resolve_motion_caps(conn.runtime_caps, &conn.label, topology.mcu_id)
                         .map_err(PyRuntimeError::new_err)?;
-                    Ok((*handle, caps))
+                    Ok((topology.mcu_id, caps))
                 })
                 .collect::<PyResult<_>>()?
         };
@@ -242,18 +243,9 @@ impl PyMotionEngine {
             },
             callbacks: crate::pump::PumpCallbacks {
                 ring_depth_of: Box::new(move |k| {
-                    ring_depth_table_for_pump
+                    *ring_depth_table_for_pump
                         .get(&k)
-                        .copied()
-                        .unwrap_or_else(|| {
-                            tracing::error!(
-                                subsystem = "engine",
-                                event = "pump_missing_ring_depth",
-                                axis_key = ?k,
-                                "pump: no ring_depth for axis — absent from init_planner config; using sentinel depth 1 (expect PieceStartInPast fault)"
-                            );
-                            1
-                        })
+                        .unwrap_or_else(|| panic!("pump axis {k:?} has no validated ring depth"))
                 }),
                 mcu_clock_of: Box::new(move |mcu_id: u32| {
                     let r = router_for_pump.lock_ok();
@@ -495,7 +487,7 @@ impl PyMotionEngine {
 /// per-AXIS view. With AWD several slots retire the same axis's pieces; the
 /// minimum is the axis's true progress — capacity accounting must wait for the
 /// laggard ring.
-fn retired_by_axis(slot_axes: &[usize], retired_slots: &[u32]) -> Vec<u32> {
+pub(super) fn retired_by_axis(slot_axes: &[usize], retired_slots: &[u32]) -> Vec<u32> {
     let max_axis = slot_axes.iter().copied().max().unwrap_or(0);
     let mut out = vec![0u32; max_axis + 1];
     let mut seen = vec![false; max_axis + 1];
@@ -644,29 +636,4 @@ fn spawn_endpoint_liveness_poll(
             }
         })
         .expect("spawn ec-heartbeat-poll thread");
-}
-
-#[cfg(test)]
-mod retired_by_axis_tests {
-    use super::retired_by_axis;
-
-    #[test]
-    fn single_slave_places_retired_at_its_axis() {
-        assert_eq!(retired_by_axis(&[2], &[7]), vec![0, 0, 7]);
-    }
-
-    #[test]
-    fn distinct_axes_map_one_to_one() {
-        assert_eq!(retired_by_axis(&[0, 1], &[3, 9]), vec![3, 9]);
-    }
-
-    #[test]
-    fn awd_axis_reports_the_laggard_slot() {
-        assert_eq!(retired_by_axis(&[0, 0, 1, 1], &[5, 3, 8, 8]), vec![3, 8]);
-    }
-
-    #[test]
-    fn missing_slot_counter_is_skipped() {
-        assert_eq!(retired_by_axis(&[0, 1], &[4]), vec![4, 0]);
-    }
 }
