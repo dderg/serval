@@ -467,6 +467,7 @@ fn main() {
                             name: d.name.clone(),
                             counts_per_mm: STUB_COUNTS_PER_MM,
                             rotation_distance: STUB_ROTATION_DISTANCE,
+                            invert: false,
                         })
                         .collect();
                     let drive_count = drives.len();

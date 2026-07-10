@@ -155,13 +155,15 @@ def step_metrics(path, drive=None):
 
 def drive_metrics(path, drive):
     header, data, drive_idx = load_capture(path, drive)
-    cpm = header["drives"][drive_idx]["counts_per_mm"]
+    drive_info = header["drives"][drive_idx]
+    cpm = drive_info["counts_per_mm"]
+    sign = -1.0 if drive_info.get("invert") else 1.0
     n = len(data)
     fs = 1e9 / header["cycle_ns"]
     t = np.arange(n) / fs
-    target = data["target_counts"].astype(np.float64) / cpm
-    actual = data["position_actual"].astype(np.float64) / cpm
-    ferr = data["following_error"].astype(np.float64) / cpm
+    target = sign * data["target_counts"].astype(np.float64) / cpm
+    actual = sign * data["position_actual"].astype(np.float64) / cpm
+    ferr = sign * data["following_error"].astype(np.float64) / cpm
 
     m, vnom, vt = cruise_mask(target, t, fs)
     if m.sum() < 1024:

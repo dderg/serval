@@ -117,7 +117,7 @@ Header fields:
 | `record_size` | bytes per record (9-byte prefix + 36 per drive; 45 for one drive) |
 | `started_utc` | wall-clock start, supplied by the host |
 | `started_mono_ns` | endpoint monotonic clock at start |
-| `drives` | `[{name, counts_per_mm, rotation_distance}]` — one entry per captured drive |
+| `drives` | `[{name, counts_per_mm, rotation_distance, invert}]` — one entry per captured drive; `invert` mirrors the servo's `invert_direction`, so readers can flip counts back into the kinematic frame |
 | `channels` | `[{name, dtype, offset}]` — the full record layout |
 
 Each record is a 9-byte prefix followed by one 36-byte block per captured drive,
