@@ -262,6 +262,47 @@ default — not a leap.
 - The dynamics-profile step never edits `printer.cfg` — it writes the profile
   and prints the `dynamics_profile` line to paste, exactly as today.
 
+## Amendments — first demo review (2026-07-10)
+
+The real tuning loop is an interleave (gains ⇄ notches ⇄ fit dynamics ⇄
+observers ⇄ gains again), not `SERVO_AUTOTUNE`'s staircase — the autotune
+stays as a packaged sequence but the human-driven loop is the product.
+`SERVO_SWEEP_INERTIA` is unused in practice (deletion candidate, pending
+confirmation). Changes driven by that review:
+
+1. **PSD overlay is the primary comparison.** Time-domain tracking overlays
+   answer little for gain sweeps; the decision signal is the
+   following-error PSD (and accel spectrum) per step, overlaid across runs
+   on a log scale with the 20–450 Hz band marked. Full PSD curves move into
+   `plot_series.json`; the demo injects a synthetic ring into one attempt so
+   the comparison is visible without a bench.
+2. **Drive tuning panel** replaces the raw per-motor addr/value form. A
+   curated parameter map in `servo_tuning.py` (C-code → address rule
+   `C01.30 → 0x2001.0x31`; gains with the ×1.6 / 1250000÷speed autofill,
+   freq cutoff C01.03, adaptive notch mode C01.30, gain mode C00.04,
+   inertia C00.06, bench-noted C02.60/62/63; `extra_params:` for the rest —
+   notch banks and observer registers pending their C-codes).
+   `SERVO_DUMP_TUNING` writes `drive_state.json` (current values per motor +
+   config-pinned values) into the captures root for the panel to render;
+   `SERVO_TUNE PARAM= VALUE=` applies one register to all motors,
+   readback-verified and journaled. One field per parameter; per-motor
+   expansion only when drives disagree; config-pin badges warn where a
+   restart re-applies a different value.
+3. **Journal layout**: the run table must not overflow the viewport
+   (horizontal scroll containment / column pruning).
+
+## Later stage — live tracking view
+
+The vendor's USB scope, in the dashboard, without new transport: telemetry
+already streams at the DC cycle into a growing `.scap` during any capture.
+A "live" mode starts an open-ended capture through Moonraker; `servo-cal
+serve` tails the file by byte offset and feeds downsampled deltas to the
+browser (polling or SSE); a scrolling canvas draws ferr/torque per drive.
+Stopping the capture leaves a normal analyzable `.scap`. Risk to check
+first: the endpoint capture writer's flush cadence — chunky buffering needs
+a flush-interval knob (file-writer change only, nowhere near the control
+loop).
+
 ## Testing
 
 - `.scap` fixtures + Python-recorded goldens drive the Part 1 parity tests
