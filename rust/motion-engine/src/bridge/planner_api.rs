@@ -1,6 +1,7 @@
 use super::{
-    Arc, DRAIN_TIMEOUT, FieldValue, HashSet, Ordering, PyMotionEngine, PyResult, PyRuntimeError,
-    PyValueError, Python, classify, config, planner_err, pymethods, require_positive,
+    Arc, DRAIN_TIMEOUT, FieldValue, HashSet, McuTopologyInput, Ordering, PyMotionEngine, PyResult,
+    PyRuntimeError, PyValueError, Python, classify, config, planner_err, pymethods,
+    require_positive,
 };
 use crate::lock_ext::LockExt;
 use pyo3::FromPyObject;
@@ -87,10 +88,6 @@ impl From<CartesianLimitsArg> for config::CartesianLimits {
     }
 }
 
-/// One MCU's axis assignment: which engine handle owns which global axis
-/// indices, under which kinematics tag. `build_mcu_configs` (in motion-core)
-/// still speaks the `(handle, axes, tag)` tuple, so this converts back to it
-/// at the boundary.
 #[derive(FromPyObject)]
 struct McuTopology {
     mcu_id: u32,
@@ -100,13 +97,13 @@ struct McuTopology {
 }
 
 impl McuTopology {
-    fn into_tuple(self) -> (u32, Vec<u8>, u8, Vec<f64>) {
-        (
-            self.mcu_id,
-            self.axes,
-            self.kinematics,
-            self.max_motor_velocity,
-        )
+    fn into_core(self) -> McuTopologyInput {
+        McuTopologyInput {
+            mcu_id: self.mcu_id,
+            axes: self.axes,
+            kinematics: self.kinematics,
+            max_motor_velocity: self.max_motor_velocity,
+        }
     }
 }
 
@@ -281,8 +278,7 @@ impl PyMotionEngine {
                 "submit_nudge: multi-bit motor_mask {motor_mask:#010b} not supported"
             )));
         }
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        {
+        let rx = {
             let guard = self.planner.lock_ok();
             let planner = guard.as_ref().ok_or_else(|| {
                 PyRuntimeError::new_err("planner not initialized — call init_planner first")
@@ -295,10 +291,9 @@ impl PyMotionEngine {
                     delta_mm,
                     speed,
                     accel,
-                    notify: tx,
                 })
-                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        }
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+        };
         rx.recv()
             .map_err(|_| PyRuntimeError::new_err("nudge notify dropped"))?
             .map_err(PyRuntimeError::new_err)?;
@@ -350,8 +345,7 @@ impl PyMotionEngine {
         )?;
         *self.planner_config.lock_ok() = cfg.clone();
 
-        let mcus: Vec<(u32, Vec<u8>, u8, Vec<f64>)> =
-            mcus.into_iter().map(McuTopology::into_tuple).collect();
+        let mcus: Vec<McuTopologyInput> = mcus.into_iter().map(McuTopology::into_core).collect();
         let (ec_conns, mcu_configs) = self.resolve_mcu_topology(&mcus)?;
 
         let (ethercat_mcu_ids, host_ios, ring_depth_table) =

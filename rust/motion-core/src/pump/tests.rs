@@ -881,9 +881,7 @@ fn stalled_queue_pump(
         backlog: Arc::new(AtomicU64::new(0)),
         holding_ahead: false,
         data_open: true,
-        last_stallfull_log: None,
-        retirement_stall_fatal,
-        stall_full_since: None,
+        retirement_stall: super::stall::RetirementStallWatch::new(retirement_stall_fatal),
     }
 }
 
@@ -933,7 +931,10 @@ fn retirement_stall_resets_when_heartbeat_advances_retired() {
     pump.queues.get_mut(&key).unwrap().pushed = 2;
 
     pump.send_ready().unwrap();
-    let (_, retired_at_onset, _) = pump.stall_full_since.expect("first observation tracked");
+    let (_, retired_at_onset, _) = pump
+        .retirement_stall
+        .started()
+        .expect("first observation tracked");
     assert_eq!(retired_at_onset, 0);
 
     std::thread::sleep(threshold / 2);
@@ -953,7 +954,8 @@ fn retirement_stall_resets_when_heartbeat_advances_retired() {
         "no escalation once retired progressed"
     );
     let (tracked_key, tracked_retired, _) = pump
-        .stall_full_since
+        .retirement_stall
+        .started()
         .expect("still stalled on a full ring, just with a fresh timer");
     assert_eq!(tracked_key, key);
     assert_eq!(
@@ -981,7 +983,7 @@ fn non_stallfull_outcome_between_stalls_resets_the_timer() {
     });
 
     pump.send_ready().unwrap();
-    assert!(pump.stall_full_since.is_some());
+    assert!(pump.retirement_stall.started().is_some());
 
     std::thread::sleep(threshold * 2);
 
@@ -989,7 +991,7 @@ fn non_stallfull_outcome_between_stalls_resets_the_timer() {
     let result = pump.send_ready();
     assert!(result.is_ok());
     assert!(
-        pump.stall_full_since.is_none(),
+        pump.retirement_stall.started().is_none(),
         "an Idle outcome must clear the stall tracking even though the old \
          stall was already past the threshold"
     );
@@ -1006,7 +1008,7 @@ fn non_stallfull_outcome_between_stalls_resets_the_timer() {
          StallFull observation is not immediately fatal"
     );
     assert!(escalated.lock().unwrap().is_empty());
-    assert!(pump.stall_full_since.is_some());
+    assert!(pump.retirement_stall.started().is_some());
 }
 
 mod pushpieces_retransmit_tests {

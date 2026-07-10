@@ -52,6 +52,7 @@ impl CommittedFrontier {
     }
 }
 
+#[derive(Debug)]
 pub struct HomeDripParams {
     pub home_pos: [f64; 4],
     pub start: [f64; 3],
@@ -61,9 +62,9 @@ pub struct HomeDripParams {
     pub max_travel_mm: f64,
     pub cohort: u64,
     pub participants: Vec<AxisKey>,
-    pub notify: crossbeam_channel::Sender<Result<(), String>>,
 }
 
+#[derive(Debug)]
 pub struct NudgeParams {
     pub mcu_id: u32,
     pub axis: u8,
@@ -71,38 +72,11 @@ pub struct NudgeParams {
     pub delta_mm: f64,
     pub speed: f64,
     pub accel: f64,
-    pub notify: crossbeam_channel::Sender<Result<(), String>>,
-}
-
-impl std::fmt::Debug for NudgeParams {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NudgeParams")
-            .field("mcu_id", &self.mcu_id)
-            .field("axis", &self.axis)
-            .field("motor_mask", &self.motor_mask)
-            .field("delta_mm", &self.delta_mm)
-            .field("speed", &self.speed)
-            .field("accel", &self.accel)
-            .finish_non_exhaustive()
-    }
-}
-
-impl std::fmt::Debug for HomeDripParams {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HomeDripParams")
-            .field("home_pos", &self.home_pos)
-            .field("start", &self.start)
-            .field("axis", &self.axis)
-            .field("direction", &self.direction)
-            .field("speed_mm_s", &self.speed_mm_s)
-            .field("max_travel_mm", &self.max_travel_mm)
-            .field("cohort", &self.cohort)
-            .field("participants", &self.participants)
-            .finish_non_exhaustive()
-    }
 }
 
 pub const INPUT_CHANNEL_CAP: usize = 64;
+const SHUTDOWN_SEND_TIMEOUT: Duration = Duration::from_secs(1);
+const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub enum StreamMsg {
@@ -134,8 +108,14 @@ pub enum StreamMsg {
         gcode_z_rebase: f64,
         notify: crossbeam_channel::Sender<()>,
     },
-    HomeDrip(HomeDripParams),
-    Nudge(NudgeParams),
+    HomeDrip {
+        params: HomeDripParams,
+        notify: Sender<Result<(), String>>,
+    },
+    Nudge {
+        params: NudgeParams,
+        notify: Sender<Result<(), String>>,
+    },
     Shutdown,
 }
 
@@ -143,6 +123,7 @@ pub enum StreamMsg {
 pub struct StreamWorkerHandle {
     sender: Sender<StreamMsg>,
     join_handle: Option<JoinHandle<()>>,
+    downstream_handles: Vec<JoinHandle<()>>,
     links: Arc<WorkerLinks>,
 }
 
@@ -271,13 +252,15 @@ impl StreamWorkerHandle {
         let links = Arc::new(WorkerLinks::default());
 
         let pipeline = setup_stages(config, axis_chains, home_pos.clone(), 0.0);
+        let mut downstream_handles = pipeline.threads;
 
         let dispatcher = Dispatcher::new(sink, Arc::clone(&links), Arc::clone(&frontier));
         let output = pipeline.output;
-        thread::Builder::new()
+        let dispatcher_handle = thread::Builder::new()
             .name("kalico-dispatch".to_string())
             .spawn(move || dispatcher.run(&output))
             .expect("spawn pipeline dispatcher thread");
+        downstream_handles.push(dispatcher_handle);
 
         let ingress = ingress::Ingress {
             config,
@@ -286,8 +269,7 @@ impl StreamWorkerHandle {
             input: pipeline.input,
             links: Arc::clone(&links),
             frontier,
-            undrained: false,
-            undrained_since: None,
+            intake: ingress::IntakeState::default(),
             last_line: 0,
             pump_control,
         };
@@ -299,6 +281,7 @@ impl StreamWorkerHandle {
         Self {
             sender: tx,
             join_handle: Some(join),
+            downstream_handles,
             links,
         }
     }
@@ -408,16 +391,26 @@ impl StreamWorkerHandle {
         rx.recv().map_err(|_| StreamWorkerError::ChannelClosed)
     }
 
-    pub fn home_drip(&self, p: HomeDripParams) -> Result<(), StreamWorkerError> {
+    pub fn home_drip(
+        &self,
+        params: HomeDripParams,
+    ) -> Result<crossbeam_channel::Receiver<Result<(), String>>, StreamWorkerError> {
+        let (notify, result) = crossbeam_channel::bounded(1);
         self.sender
-            .send(StreamMsg::HomeDrip(p))
-            .map_err(|_| StreamWorkerError::ChannelClosed)
+            .send(StreamMsg::HomeDrip { params, notify })
+            .map_err(|_| StreamWorkerError::ChannelClosed)?;
+        Ok(result)
     }
 
-    pub fn submit_nudge(&self, p: NudgeParams) -> Result<(), StreamWorkerError> {
+    pub fn submit_nudge(
+        &self,
+        params: NudgeParams,
+    ) -> Result<crossbeam_channel::Receiver<Result<(), String>>, StreamWorkerError> {
+        let (notify, result) = crossbeam_channel::bounded(1);
         self.sender
-            .send(StreamMsg::Nudge(p))
-            .map_err(|_| StreamWorkerError::ChannelClosed)
+            .send(StreamMsg::Nudge { params, notify })
+            .map_err(|_| StreamWorkerError::ChannelClosed)?;
+        Ok(result)
     }
 
     #[must_use]
@@ -431,10 +424,21 @@ impl StreamWorkerHandle {
     }
 
     pub fn shutdown(&mut self) {
-        let _ = self.sender.send(StreamMsg::Shutdown);
+        self.prepare_shutdown();
+        let _ = self
+            .sender
+            .send_timeout(StreamMsg::Shutdown, SHUTDOWN_SEND_TIMEOUT);
+        let deadline = Instant::now() + SHUTDOWN_JOIN_TIMEOUT;
         if let Some(h) = self.join_handle.take() {
-            let _ = h.join();
+            join_worker_thread(h, deadline);
         }
+        for handle in self.downstream_handles.drain(..) {
+            join_worker_thread(handle, deadline);
+        }
+    }
+
+    pub fn prepare_shutdown(&self) {
+        self.links.shutting_down.store(true, Ordering::Release);
     }
 }
 
@@ -443,6 +447,32 @@ impl Drop for StreamWorkerHandle {
         if self.join_handle.is_some() {
             self.shutdown();
         }
+    }
+}
+
+fn join_worker_thread(handle: JoinHandle<()>, deadline: Instant) {
+    let name = handle.thread().name().unwrap_or("unnamed").to_owned();
+    while !handle.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !handle.is_finished() {
+        tracing::error!(
+            subsystem = "motion",
+            event = "shutdown_motion_thread_join_timeout",
+            thread = name,
+            timeout_ms = SHUTDOWN_JOIN_TIMEOUT.as_millis() as u64,
+            "motion thread did not exit before the shutdown deadline; detaching it"
+        );
+        return;
+    }
+    if let Err(error) = handle.join() {
+        tracing::error!(
+            subsystem = "motion",
+            event = "shutdown_motion_thread_join_panicked",
+            thread = name,
+            error = ?error,
+            "motion thread had already panicked during shutdown"
+        );
     }
 }
 

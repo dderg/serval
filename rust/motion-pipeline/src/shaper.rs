@@ -35,6 +35,55 @@ impl TrackSignal for ShapedSignal<'_> {
 
 pub(crate) const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 
+#[derive(Default)]
+struct PendingSegments {
+    segments: VecDeque<ShapedSegment>,
+    rests: VecDeque<bool>,
+}
+
+impl PendingSegments {
+    fn push(&mut self, segment: ShapedSegment, rest_at_end: bool) {
+        self.segments.push_back(segment);
+        self.rests.push_back(rest_at_end);
+    }
+
+    fn clear(&mut self) {
+        self.segments.clear();
+        self.rests.clear();
+    }
+
+    fn len(&self) -> usize {
+        self.segments.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.segments.is_empty()
+    }
+
+    fn ends_at_rest(&self) -> bool {
+        self.rests.back() == Some(&true)
+    }
+
+    fn back(&self) -> Option<&ShapedSegment> {
+        self.segments.back()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &ShapedSegment> {
+        self.segments.iter()
+    }
+
+    fn make_contiguous(&mut self) -> &mut [ShapedSegment] {
+        self.segments.make_contiguous()
+    }
+
+    fn pop_front(&mut self) -> Option<ShapedSegment> {
+        let segment = self.segments.pop_front();
+        let rest = self.rests.pop_front();
+        assert_eq!(segment.is_some(), rest.is_some());
+        segment
+    }
+}
+
 /// Final pipeline stage: streaming axis-chain post-processing. Buffers lowered
 /// segments until each one's convolution window is covered by lookahead, then
 /// emits the shaped segment; keeps just-emitted raw segments as the history the
@@ -46,8 +95,7 @@ pub(crate) const SEGMENT_TIME_EPS_S: f64 = 1e-9;
 pub struct Shaper {
     chains: AxisChainSet,
     history: VecDeque<ShapedSegment>,
-    pending: VecDeque<ShapedSegment>,
-    pending_rest: VecDeque<bool>,
+    pending: PendingSegments,
     forward_support: f64,
     back_support: f64,
     history_trimmed: bool,
@@ -62,8 +110,7 @@ impl Shaper {
             back_support: chains.back_support(),
             chains,
             history: VecDeque::new(),
-            pending: VecDeque::new(),
-            pending_rest: VecDeque::new(),
+            pending: PendingSegments::default(),
             history_trimmed: false,
             follower_states: Vec::new(),
             toolhead_tap: None,
@@ -100,13 +147,12 @@ impl Shaper {
     pub fn feed(&mut self, item: LoweredItem, output: &Sender<ShapedItem>) -> bool {
         match item {
             LoweredItem::Seg(item) => {
-                self.pending.push_back(item.seg);
-                self.pending_rest.push_back(item.rest_at_end);
+                self.pending.push(item.seg, item.rest_at_end);
                 self.emit(self.supported_count(), false, output)
             }
             LoweredItem::Drain => {
                 assert!(
-                    self.pending.is_empty() || self.pending_rest.back() == Some(&true),
+                    self.pending.is_empty() || self.pending.ends_at_rest(),
                     "shaper: drain marker arrived while the trajectory is not at rest"
                 );
                 self.emit(self.pending.len(), true, output)
@@ -115,7 +161,6 @@ impl Shaper {
                 match &ctrl {
                     Control::Reset { .. } => {
                         self.pending.clear();
-                        self.pending_rest.clear();
                         self.history.clear();
                         self.history_trimmed = false;
                         for state in &mut self.follower_states {
@@ -128,7 +173,7 @@ impl Shaper {
                     | Control::Nudge { .. }
                     | Control::Barrier(_) => {
                         assert!(
-                            self.pending.is_empty() || self.pending_rest.back() == Some(&true),
+                            self.pending.is_empty() || self.pending.ends_at_rest(),
                             "shaper: control token arrived while the trajectory is not at \
                              rest — a Drain must precede it"
                         );
@@ -247,7 +292,6 @@ impl Shaper {
         }
         for _ in 0..count {
             let raw = self.pending.pop_front().expect("count <= pending");
-            self.pending_rest.pop_front();
             self.history.push_back(raw);
         }
         let emitted_through = self

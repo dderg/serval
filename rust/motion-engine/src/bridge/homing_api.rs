@@ -85,9 +85,7 @@ impl PyMotionEngine {
             notify: result_tx,
         });
 
-        let (planner_done_tx, planner_done_rx) =
-            crossbeam_channel::bounded::<Result<(), String>>(1);
-        planner
+        let planner_done_rx = planner
             .home_drip(crate::worker::HomeDripParams {
                 home_pos: [start_pos.x(), start_pos.y(), start_pos.z(), 0.0],
                 start: start_pos.0,
@@ -97,7 +95,6 @@ impl PyMotionEngine {
                 max_travel_mm,
                 cohort,
                 participants: all_axis_keys,
-                notify: planner_done_tx,
             })
             .map_err(|e| {
                 self.finish_homing();

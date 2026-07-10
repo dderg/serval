@@ -6,6 +6,7 @@ mod junction;
 mod messages;
 mod pump_loop;
 mod sched;
+mod stall;
 mod wire_sink;
 
 pub use drip::{DRIP_WINDOW_SECS, DripArm};

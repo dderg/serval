@@ -30,7 +30,7 @@ fn corpus_pieces_per_axis() -> BTreeMap<u8, Vec<(PieceEntry, usize)>> {
         caps: McuCaps {
             total_piece_memory: 62 * 1024,
         },
-        max_motor_velocity: Vec::new(),
+        max_motor_velocity: vec![f64::INFINITY; 3],
     }];
     let project = |_mcu: u32, host_secs: f64| -> u64 { (host_secs * 1.0e9) as u64 };
 

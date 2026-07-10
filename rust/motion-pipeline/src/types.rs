@@ -93,6 +93,7 @@ pub struct LoweredSegment {
 pub struct PipelineHandle {
     pub input: Sender<StreamInput>,
     pub output: Receiver<ShapedItem>,
+    pub threads: Vec<std::thread::JoinHandle<()>>,
 }
 
 /// What flows into the fit stage and planner: geometry, the command to stop

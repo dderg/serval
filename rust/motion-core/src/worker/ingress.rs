@@ -43,6 +43,40 @@ const STARTUP_PRIME_S: f64 = 0.250;
 
 const LEAD: f64 = crate::anchor::DEFAULT_LEAD_SECS;
 
+#[derive(Debug, Default)]
+pub(super) enum IntakeState {
+    #[default]
+    Drained,
+    Undrained {
+        since: Instant,
+    },
+}
+
+impl IntakeState {
+    fn has_moves(&self) -> bool {
+        matches!(self, Self::Undrained { .. })
+    }
+
+    fn record_move(&mut self) {
+        if matches!(self, Self::Drained) {
+            *self = Self::Undrained {
+                since: Instant::now(),
+            };
+        }
+    }
+
+    fn mark_drained(&mut self) {
+        *self = Self::Drained;
+    }
+
+    fn since(&self) -> Option<Instant> {
+        match self {
+            Self::Drained => None,
+            Self::Undrained { since } => Some(*since),
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn lead_secs() -> f64 {
     LEAD
@@ -59,10 +93,7 @@ pub(super) struct Ingress {
     pub(super) input: crossbeam_channel::Sender<StreamInput>,
     pub(super) links: Arc<WorkerLinks>,
     pub(super) frontier: Arc<CommittedFrontier>,
-    /// The pipeline holds moves ingested since the last `Drain`; the pacer
-    /// only schedules a drain while this is set.
-    pub(super) undrained: bool,
-    pub(super) undrained_since: Option<Instant>,
+    pub(super) intake: IntakeState,
     /// Source line of the last move forwarded into the pipeline; a fence
     /// arriving now sequences after it.
     pub(super) last_line: u32,
@@ -76,7 +107,7 @@ pub(super) struct Ingress {
 impl Ingress {
     pub(super) fn run(mut self, rx: Receiver<StreamMsg>) {
         loop {
-            let received = if self.undrained {
+            let received = if self.intake.has_moves() {
                 match rx.try_recv() {
                     Ok(msg) => Some(msg),
                     Err(crossbeam_channel::TryRecvError::Empty) => match self.drain_or_runway() {
@@ -133,8 +164,7 @@ impl Ingress {
     /// intake remains uncommitted.
     fn drain_and_fence(&mut self) -> BarrierAck {
         self.send(StreamInput::Drain);
-        self.undrained = false;
-        self.undrained_since = None;
+        self.intake.mark_drained();
         self.barrier()
     }
 
@@ -166,10 +196,7 @@ impl Ingress {
         advance_odometer(&mut self.odometer, &m);
         self.last_line = m.source.start_line;
         self.send(m.into());
-        if !self.undrained {
-            self.undrained_since = Some(Instant::now());
-        }
-        self.undrained = true;
+        self.intake.record_move();
     }
 
     /// The pacer's one decision. Called when the inbox is silent while the
@@ -183,7 +210,7 @@ impl Ingress {
         if wait_s > 0.0 {
             return Some(Duration::from_secs_f64(wait_s));
         }
-        if let Some(since) = self.undrained_since {
+        if let Some(since) = self.intake.since() {
             let remaining =
                 Duration::from_secs_f64(STARTUP_PRIME_S).saturating_sub(since.elapsed());
             if !remaining.is_zero() {
@@ -197,8 +224,7 @@ impl Ingress {
             "[pipe] runway exhausted — draining pipeline to rest"
         );
         self.send(StreamInput::Drain);
-        self.undrained = false;
-        self.undrained_since = None;
+        self.intake.mark_drained();
         if self.links.fences.has_armed() {
             self.barrier();
         }
@@ -220,7 +246,7 @@ impl Ingress {
                 let _ = notify.send(finish);
             }
             StreamMsg::Fence { id, force } => {
-                if !self.undrained {
+                if !self.intake.has_moves() {
                     let ack = self.barrier();
                     self.links.fences.resolve(id, ack.dispatched_through);
                 } else if force {
@@ -266,13 +292,13 @@ impl Ingress {
                 self.barrier();
                 let _ = notify.send(());
             }
-            StreamMsg::HomeDrip(p) => {
-                let result = self.run_home_drip(&p);
-                let _ = p.notify.send(result);
+            StreamMsg::HomeDrip { params, notify } => {
+                let result = self.run_home_drip(&params);
+                let _ = notify.send(result);
             }
-            StreamMsg::Nudge(p) => {
-                let result = self.run_nudge(&p);
-                let _ = p.notify.send(result);
+            StreamMsg::Nudge { params, notify } => {
+                let result = self.run_nudge(&params);
+                let _ = notify.send(result);
             }
             StreamMsg::Shutdown => {
                 self.drain_and_fence();
@@ -304,8 +330,7 @@ impl Ingress {
         self.links.discard.store(true, Ordering::Release);
         self.frontier.clear();
         self.send(StreamInput::Control(Control::Reset { pos: pos.clone() }));
-        self.undrained = false;
-        self.undrained_since = None;
+        self.intake.mark_drained();
         self.barrier();
         self.odometer = pos;
         self.t_next = 0.0;
@@ -336,7 +361,7 @@ impl Ingress {
 
         self.links.capture_errors.store(true, Ordering::Release);
         self.send(m.into());
-        self.undrained = true;
+        self.intake.record_move();
         let ack = self.drain_and_fence();
         self.links.capture_errors.store(false, Ordering::Release);
         ack.result

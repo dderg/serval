@@ -14,6 +14,7 @@ use super::messages::{
 use super::sched::{
     AxisFrame, AxisQueue, FramePlan, Schedule, append_pieces_merging_holds, schedule,
 };
+use super::stall::RetirementStallWatch;
 use crate::types::AxisKey;
 
 // How far ahead of the MCU playhead the pump pushes pieces — the depth of the
@@ -98,9 +99,7 @@ pub(super) struct Pump<S> {
     pub(super) backlog: Arc<AtomicU64>,
     pub(super) holding_ahead: bool,
     pub(super) data_open: bool,
-    pub(super) last_stallfull_log: Option<Instant>,
-    pub(super) retirement_stall_fatal: Duration,
-    pub(super) stall_full_since: Option<(AxisKey, u32, Instant)>,
+    pub(super) retirement_stall: RetirementStallWatch,
 }
 
 impl<S: PieceSink> Pump<S> {
@@ -338,15 +337,14 @@ impl<S: PieceSink> Pump<S> {
 
     fn handle_stall_full(&mut self, stall_key: AxisKey) -> Result<(), ()> {
         let now = std::time::Instant::now();
-        let due = self
-            .last_stallfull_log
-            .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(1));
         let Some(q) = self.queues.get(&stall_key) else {
             return Ok(());
         };
         let current_retired = q.retired;
-        if due {
-            self.last_stallfull_log = Some(now);
+        let observation = self
+            .retirement_stall
+            .observe(stall_key, current_retired, now);
+        if observation.log_due {
             let in_flight = q.pushed.wrapping_sub(q.retired);
             tracing::debug!(
                 subsystem = "motion",
@@ -362,41 +360,33 @@ impl<S: PieceSink> Pump<S> {
                 "pump StallFull (room==0): ring full, awaiting MCU retirement"
             );
         }
-        match self.stall_full_since {
-            Some((k, r, t)) if k == stall_key && r == current_retired => {
-                if now.duration_since(t) >= self.retirement_stall_fatal {
-                    let stalled_secs = now.duration_since(t).as_secs_f64();
-                    tracing::error!(
-                        subsystem = "motion",
-                        event = "pump_retirement_stall_fatal",
-                        mcu = stall_key.mcu_id,
-                        axis = stall_key.axis,
-                        pushed = q.pushed,
-                        retired = q.retired,
-                        ring_depth = q.ring_depth,
-                        pending = q.pieces.len(),
-                        stalled_secs,
-                        "MCU stopped retiring pieces on this axis: retired count \
-                         has not advanced while heartbeats kept arriving — the \
-                         ring is permanently full and the pump would spin forever"
-                    );
-                    (self.callbacks.on_drip_stall)(format!(
-                        "pump retirement stall: mcu{} axis{} retired stuck at {} \
-                         for {stalled_secs:.1}s with pushed={} ring_depth={} \
-                         pending={} — MCU stopped retiring pieces on this axis",
-                        stall_key.mcu_id,
-                        stall_key.axis,
-                        current_retired,
-                        q.pushed,
-                        q.ring_depth,
-                        q.pieces.len(),
-                    ));
-                    return Err(());
-                }
-            }
-            _ => {
-                self.stall_full_since = Some((stall_key, current_retired, now));
-            }
+        if let Some(stalled_secs) = observation.stalled_secs {
+            tracing::error!(
+                subsystem = "motion",
+                event = "pump_retirement_stall_fatal",
+                mcu = stall_key.mcu_id,
+                axis = stall_key.axis,
+                pushed = q.pushed,
+                retired = q.retired,
+                ring_depth = q.ring_depth,
+                pending = q.pieces.len(),
+                stalled_secs,
+                "MCU stopped retiring pieces on this axis: retired count \
+                 has not advanced while heartbeats kept arriving — the \
+                 ring is permanently full and the pump would spin forever"
+            );
+            (self.callbacks.on_drip_stall)(format!(
+                "pump retirement stall: mcu{} axis{} retired stuck at {} \
+                 for {stalled_secs:.1}s with pushed={} ring_depth={} \
+                 pending={} — MCU stopped retiring pieces on this axis",
+                stall_key.mcu_id,
+                stall_key.axis,
+                current_retired,
+                q.pushed,
+                q.ring_depth,
+                q.pieces.len(),
+            ));
+            return Err(());
         }
         Ok(())
     }
@@ -528,7 +518,7 @@ impl<S: PieceSink> Pump<S> {
             };
             match sched {
                 Schedule::Idle => {
-                    self.stall_full_since = None;
+                    self.retirement_stall.reset();
                     break;
                 }
                 Schedule::StallFull(stall_key) => {
@@ -536,12 +526,12 @@ impl<S: PieceSink> Pump<S> {
                     break;
                 }
                 Schedule::StallAhead(_stall_key) => {
-                    self.stall_full_since = None;
+                    self.retirement_stall.reset();
                     self.holding_ahead = true;
                     break;
                 }
                 Schedule::Send(frames) => {
-                    self.stall_full_since = None;
+                    self.retirement_stall.reset();
                     if frames.is_empty() {
                         break;
                     }
@@ -708,9 +698,7 @@ pub fn run_pump<S: PieceSink>(
         backlog,
         holding_ahead: false,
         data_open: true,
-        last_stallfull_log: None,
-        retirement_stall_fatal: RETIREMENT_STALL_FATAL,
-        stall_full_since: None,
+        retirement_stall: RetirementStallWatch::new(RETIREMENT_STALL_FATAL),
     };
     pump.run(control_rx, data_rx);
 }

@@ -15,6 +15,14 @@ pub const AXIS_X: usize = 0;
 pub const AXIS_Y: usize = 1;
 pub const AXIS_Z: usize = 2;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct McuTopologyInput {
+    pub mcu_id: u32,
+    pub axes: Vec<u8>,
+    pub kinematics: u8,
+    pub max_motor_velocity: Vec<f64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct McuAxisConfig {
     pub mcu_id: u32,
@@ -31,12 +39,25 @@ pub struct McuAxisConfig {
 impl McuAxisConfig {
     #[must_use]
     pub fn motor_velocity_ceiling(&self, axis_idx: usize) -> f64 {
-        self.axes
+        let configured_index = self
+            .axes
             .iter()
             .position(|&a| a == axis_idx)
-            .and_then(|i| self.max_motor_velocity.get(i))
-            .copied()
-            .unwrap_or(f64::INFINITY)
+            .unwrap_or_else(|| {
+                panic!(
+                    "mcu{} axis{axis_idx} has no motor velocity configuration",
+                    self.mcu_id
+                )
+            });
+        *self
+            .max_motor_velocity
+            .get(configured_index)
+            .unwrap_or_else(|| {
+                panic!(
+                    "mcu{} axis{axis_idx} is missing its validated motor velocity ceiling",
+                    self.mcu_id
+                )
+            })
     }
 }
 
@@ -73,44 +94,56 @@ pub enum KinematicsConfigError {
          refusing to size piece rings by guess"
     )]
     CapsMissing { handle: u32 },
+    #[error(
+        "mcu handle {handle}: {ceiling_count} motor velocity ceilings for {axis_count} axes; \
+         every configured axis requires exactly one ceiling"
+    )]
+    VelocityCeilingCount {
+        handle: u32,
+        axis_count: usize,
+        ceiling_count: usize,
+    },
 }
 
 pub fn build_mcu_configs<S: ::std::hash::BuildHasher>(
-    mcus: &[(u32, Vec<u8>, u8, Vec<f64>)],
+    mcus: &[McuTopologyInput],
     caps_by_handle: &HashMap<u32, McuCaps, S>,
 ) -> Result<Vec<McuAxisConfig>, KinematicsConfigError> {
     mcus.iter()
-        .map(|(handle, axes, tag, max_motor_velocity)| {
-            crate::kinematics::KinematicsModule::from_tag(*tag).map_err(|_| {
+        .map(|topology| {
+            crate::kinematics::KinematicsModule::from_tag(topology.kinematics).map_err(|_| {
                 KinematicsConfigError::UnknownTag {
-                    handle: *handle,
-                    tag: *tag,
+                    handle: topology.mcu_id,
+                    tag: topology.kinematics,
                 }
             })?;
-            let axes: Vec<usize> = axes.iter().map(|&a| a as usize).collect();
-            if *tag == KINEMATICS_COREXY && !(axes.contains(&AXIS_X) && axes.contains(&AXIS_Y)) {
+            let axes: Vec<usize> = topology.axes.iter().map(|&a| a as usize).collect();
+            if topology.kinematics == KINEMATICS_COREXY
+                && !(axes.contains(&AXIS_X) && axes.contains(&AXIS_Y))
+            {
                 return Err(KinematicsConfigError::CorexyMissingXy {
-                    handle: *handle,
+                    handle: topology.mcu_id,
                     axes,
                 });
             }
-            assert!(
-                max_motor_velocity.len() == axes.len(),
-                "mcu handle {handle}: {} motor velocity ceilings for {} axes — the \
-                 topology tuples must align them",
-                max_motor_velocity.len(),
-                axes.len(),
-            );
-            let caps = caps_by_handle
-                .get(handle)
-                .copied()
-                .ok_or(KinematicsConfigError::CapsMissing { handle: *handle })?;
+            if topology.max_motor_velocity.len() != axes.len() {
+                return Err(KinematicsConfigError::VelocityCeilingCount {
+                    handle: topology.mcu_id,
+                    axis_count: axes.len(),
+                    ceiling_count: topology.max_motor_velocity.len(),
+                });
+            }
+            let caps = caps_by_handle.get(&topology.mcu_id).copied().ok_or(
+                KinematicsConfigError::CapsMissing {
+                    handle: topology.mcu_id,
+                },
+            )?;
             Ok(McuAxisConfig {
-                mcu_id: *handle,
+                mcu_id: topology.mcu_id,
                 axes,
-                kinematics: *tag,
+                kinematics: topology.kinematics,
                 caps,
-                max_motor_velocity: max_motor_velocity.clone(),
+                max_motor_velocity: topology.max_motor_velocity.clone(),
             })
         })
         .collect()
@@ -223,13 +256,18 @@ mod topology_tests {
             },
         );
         let mcus = vec![
-            (
-                7u32,
-                vec![AXIS_X as u8, AXIS_Y as u8, FOLLOWER_E as u8],
-                0u8,
-                vec![f64::INFINITY; 3],
-            ),
-            (9u32, vec![AXIS_Z as u8], 1u8, vec![f64::INFINITY]),
+            McuTopologyInput {
+                mcu_id: 7,
+                axes: vec![AXIS_X as u8, AXIS_Y as u8, FOLLOWER_E as u8],
+                kinematics: 0,
+                max_motor_velocity: vec![f64::INFINITY; 3],
+            },
+            McuTopologyInput {
+                mcu_id: 9,
+                axes: vec![AXIS_Z as u8],
+                kinematics: 1,
+                max_motor_velocity: vec![f64::INFINITY],
+            },
         ];
         let cfgs = build_mcu_configs(&mcus, &caps).unwrap();
         assert_eq!(cfgs.len(), 2);
@@ -250,12 +288,12 @@ mod topology_tests {
     #[test]
     fn build_mcu_configs_missing_caps_is_an_error() {
         let caps: HashMap<u32, McuCaps> = HashMap::new();
-        let mcus = vec![(
-            7u32,
-            vec![AXIS_X as u8, AXIS_Y as u8],
-            0u8,
-            vec![f64::INFINITY; 2],
-        )];
+        let mcus = vec![McuTopologyInput {
+            mcu_id: 7,
+            axes: vec![AXIS_X as u8, AXIS_Y as u8],
+            kinematics: 0,
+            max_motor_velocity: vec![f64::INFINITY; 2],
+        }];
         let err = build_mcu_configs(&mcus, &caps).unwrap_err();
         assert!(matches!(
             err,
@@ -266,7 +304,12 @@ mod topology_tests {
     #[test]
     fn build_mcu_configs_unknown_tag_is_loud() {
         let caps: HashMap<u32, McuCaps> = HashMap::new();
-        let mcus = vec![(7u32, vec![AXIS_X as u8], 9u8, vec![f64::INFINITY])];
+        let mcus = vec![McuTopologyInput {
+            mcu_id: 7,
+            axes: vec![AXIS_X as u8],
+            kinematics: 9,
+            max_motor_velocity: vec![f64::INFINITY],
+        }];
         let err = build_mcu_configs(&mcus, &caps).unwrap_err();
         assert!(matches!(
             err,
@@ -277,16 +320,41 @@ mod topology_tests {
     #[test]
     fn build_mcu_configs_corexy_without_xy_is_loud() {
         let caps: HashMap<u32, McuCaps> = HashMap::new();
-        let mcus = vec![(
-            7u32,
-            vec![AXIS_X as u8, FOLLOWER_E as u8],
-            0u8,
-            vec![f64::INFINITY; 2],
-        )];
+        let mcus = vec![McuTopologyInput {
+            mcu_id: 7,
+            axes: vec![AXIS_X as u8, FOLLOWER_E as u8],
+            kinematics: 0,
+            max_motor_velocity: vec![f64::INFINITY; 2],
+        }];
         let err = build_mcu_configs(&mcus, &caps).unwrap_err();
         assert!(matches!(
             err,
             KinematicsConfigError::CorexyMissingXy { handle: 7, .. }
+        ));
+    }
+
+    #[test]
+    fn build_mcu_configs_requires_one_velocity_ceiling_per_axis() {
+        let caps = HashMap::from([(
+            7,
+            McuCaps {
+                total_piece_memory: 62 * 1024,
+            },
+        )]);
+        let mcus = vec![McuTopologyInput {
+            mcu_id: 7,
+            axes: vec![AXIS_X as u8, AXIS_Y as u8],
+            kinematics: KINEMATICS_COREXY,
+            max_motor_velocity: vec![100.0],
+        }];
+        let err = build_mcu_configs(&mcus, &caps).unwrap_err();
+        assert!(matches!(
+            err,
+            KinematicsConfigError::VelocityCeilingCount {
+                handle: 7,
+                axis_count: 2,
+                ceiling_count: 1,
+            }
         ));
     }
 }

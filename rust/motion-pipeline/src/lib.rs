@@ -46,17 +46,17 @@ pub fn setup_stages(
     corner.ramp_accel_budget_mm_s2 = config.max_extrude_only_accel_mm_s2;
     corner.kernel_variance_s2 = axis_chains.max_spatial_kernel_variance_s2();
     let fit_stage = FitStage::new(corner);
-    spawn_stage("kalico-fit", move || fit_stage.run(raw_rx, fitted_tx));
+    let fit_thread = spawn_stage("kalico-fit", move || fit_stage.run(raw_rx, fitted_tx));
 
     let planner = Planner::new(config);
-    spawn_stage("kalico-plan", move || planner.run(fitted_rx, planned_tx));
+    let planner_thread = spawn_stage("kalico-plan", move || planner.run(fitted_rx, planned_tx));
 
     let fit_tol = FitTol {
         pos_mm: config.fit_tol_mm,
         accel_mm_s2: config.fit_tol_accel_mm_s2,
     };
     let lower_chains = axis_chains.clone();
-    spawn_stage("kalico-lower", move || {
+    let lower_thread = spawn_stage("kalico-lower", move || {
         run_lowerer(
             planned_rx,
             lowered_tx,
@@ -68,19 +68,20 @@ pub fn setup_stages(
     });
 
     let shaper = Shaper::new(axis_chains);
-    spawn_stage("kalico-shape", move || shaper.run(lowered_rx, shaped_tx));
+    let shaper_thread = spawn_stage("kalico-shape", move || shaper.run(lowered_rx, shaped_tx));
 
     PipelineHandle {
         input: raw_tx,
         output: shaped_rx,
+        threads: vec![fit_thread, planner_thread, lower_thread, shaper_thread],
     }
 }
 
-fn spawn_stage(name: &str, f: impl FnOnce() + Send + 'static) {
+fn spawn_stage(name: &str, f: impl FnOnce() + Send + 'static) -> thread::JoinHandle<()> {
     thread::Builder::new()
         .name(name.to_string())
         .spawn(f)
-        .unwrap_or_else(|e| panic!("spawn {name}: {e}"));
+        .unwrap_or_else(|e| panic!("spawn {name}: {e}"))
 }
 
 #[cfg(test)]
