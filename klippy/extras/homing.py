@@ -494,6 +494,7 @@ class Homing:
                 logging.exception(
                     "homing: current restore failed during error unwind"
                 )
+            kin.clear_homing_state([axis])
             raise
         else:
             self._set_homing_current(toolhead, rail, pre_homing=False)

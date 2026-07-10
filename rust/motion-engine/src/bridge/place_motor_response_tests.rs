@@ -22,11 +22,11 @@ fn serial_uses_response_slot_index() {
 
     assert_eq!(motors[2], Some(3.0));
     assert_eq!(vmotors[2], Some(5.0));
-    assert_eq!(motors[7], None, "serial ignores cfg.axes");
+    assert_eq!(motors[7], None, "serial ignores the slot map");
 }
 
 #[test]
-fn ethercat_maps_reply_onto_cfg_axes_ignoring_local_slot() {
+fn ethercat_maps_slot_through_slot_axis_map() {
     let resp = MotorStateResponse {
         motors: vec![sample(0, 4 * 65536, 6 * 65536)],
     };
@@ -35,9 +35,32 @@ fn ethercat_maps_reply_onto_cfg_axes_ignoring_local_slot() {
 
     place_motor_response(&resp, &[1], true, &mut motors, &mut vmotors);
 
-    assert_eq!(motors[1], Some(4.0), "first motor -> first cfg axis");
+    assert_eq!(motors[1], Some(4.0), "slot 0 -> its mapped axis");
     assert_eq!(vmotors[1], Some(6.0));
-    assert_eq!(motors[0], None, "endpoint slot:0 placeholder ignored");
+    assert_eq!(motors[0], None, "no slot maps to axis 0");
+}
+
+#[test]
+fn ethercat_awd_corexy_takes_lowest_slot_per_axis() {
+    // AWD corexy: two drives per belt, slot map [0, 0, 1, 1]. Mapping the
+    // slot through the distinct-axis list instead of the slot map reported
+    // the second A drive as motor B — cartesian X became x+y and Y the
+    // near-zero disagreement between the two A encoders.
+    let resp = MotorStateResponse {
+        motors: vec![
+            sample(3, 246 * 65536, 0),
+            sample(0, 286 * 65536, 0),
+            sample(1, 287 * 65536, 0),
+            sample(2, 245 * 65536, 0),
+        ],
+    };
+    let mut motors = [None; MAX_AXES];
+    let mut vmotors = [None; MAX_AXES];
+
+    place_motor_response(&resp, &[0, 0, 1, 1], true, &mut motors, &mut vmotors);
+
+    assert_eq!(motors[0], Some(286.0), "axis 0 reports drive slot 0, not 1");
+    assert_eq!(motors[1], Some(245.0), "axis 1 reports drive slot 2, not 3");
 }
 
 #[test]
