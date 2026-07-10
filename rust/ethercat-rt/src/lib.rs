@@ -5,9 +5,7 @@ pub mod cli;
 pub mod clock;
 pub mod curves;
 pub mod dynamics;
-#[cfg(feature = "hw")]
 pub mod endpoint;
-#[cfg(feature = "hw")]
 pub mod ffi;
 pub mod mailbox;
 pub mod obs;

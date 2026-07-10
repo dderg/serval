@@ -3,6 +3,7 @@
 //! anything that touches process data (cycle, targets, offsets, telemetry).
 #![allow(unsafe_code)]
 
+#[cfg(feature = "hw")]
 use std::os::raw::{c_char, c_int};
 
 #[repr(C)]
@@ -24,6 +25,7 @@ const _: () = assert!(
     "EcTelemetry layout must match ec_telemetry_t in csrc/libecrt.h"
 );
 
+#[cfg(feature = "hw")]
 extern "C" {
     pub fn ec_rt_bringup_preop(
         ifname: *const c_char,

@@ -267,7 +267,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
     } = args;
 
     let num_slaves = slaves.len();
-    let mut drive = FfiDriveChain;
+    let mut drive: Box<dyn DriveChain> = Box::new(FfiDriveChain);
     let columns = SlaveColumns::from(&slaves, cycle_us);
 
     let cycle_ns = cycle_us * 1000;

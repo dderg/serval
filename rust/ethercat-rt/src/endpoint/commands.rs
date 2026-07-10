@@ -1,6 +1,5 @@
 use std::ops::ControlFlow;
 
-use super::drive::DriveChain;
 use super::{abort_sync, discard_motion, sync_response_with_code, EndpointCtx, SyncRun};
 use crate::capture::{
     any_slot_out_of_range, CaptureConfig, CaptureDriveConfig, ERR_CAPTURE_BAD_DRIVE_LIST,
