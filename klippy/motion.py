@@ -358,7 +358,7 @@ class Motion:
         return (
             self._max_velocity,
             self._max_accel,
-            self._square_corner_velocity,
+            self._corner_deviation,
         )
 
     @property
@@ -370,11 +370,16 @@ class Motion:
         return self._effective_limits()[1]
 
     @property
-    def square_corner_velocity(self):
+    def corner_deviation(self):
         return self._effective_limits()[2]
 
+    @property
+    def square_corner_velocity(self):
+        _velocity, accel, corner_deviation = self._effective_limits()
+        return motion_setup.scv_from_corner_deviation(corner_deviation, accel)
+
     def get_max_velocity(self):
-        velocity, accel, _scv = self._effective_limits()
+        velocity, accel, _corner_deviation = self._effective_limits()
         return velocity, accel
 
     def get_status(self, eventtime):
@@ -382,7 +387,7 @@ class Motion:
         # like mainline's toolhead.print_time — not a constant.
         print_time = self._mcu_pending_end_time
         estimated_print_time = self.mcu.estimated_print_time(eventtime)
-        velocity, accel, scv = self._effective_limits()
+        velocity, accel, corner_deviation = self._effective_limits()
         res = dict(self.kin.get_status(eventtime))
         res.update(
             {
@@ -394,7 +399,10 @@ class Motion:
                 "max_velocity": velocity,
                 "max_accel": accel,
                 "minimum_cruise_ratio": self.min_cruise_ratio,
-                "square_corner_velocity": scv,
+                "square_corner_velocity": motion_setup.scv_from_corner_deviation(
+                    corner_deviation, accel
+                ),
+                "corner_deviation": corner_deviation,
             }
         )
         return res
@@ -779,11 +787,24 @@ class Motion:
         v = gcmd.get_float("VELOCITY", None, above=0.0)
         a = gcmd.get_float("ACCEL", None, above=0.0)
         scv = gcmd.get_float("SQUARE_CORNER_VELOCITY", None, minval=0.0)
-        if v is None and a is None and scv is None:
-            velocity, accel, corner = self._effective_limits()
+        corner_deviation = gcmd.get_float("CORNER_DEVIATION", None, minval=0.0)
+        if scv is not None and corner_deviation is not None:
+            raise gcmd.error(
+                "SET_VELOCITY_LIMIT: SQUARE_CORNER_VELOCITY and "
+                "CORNER_DEVIATION are aliases for the same corner budget; "
+                "set exactly one"
+            )
+        if v is None and a is None and scv is None and corner_deviation is None:
+            velocity, accel, deviation = self._effective_limits()
             gcmd.respond_info(
-                "velocity=%s accel=%s square_corner_velocity=%s"
-                % (velocity, accel, corner)
+                "velocity=%s accel=%s corner_deviation=%s"
+                " square_corner_velocity=%s"
+                % (
+                    velocity,
+                    accel,
+                    deviation,
+                    motion_setup.scv_from_corner_deviation(deviation, accel),
+                )
             )
             return
         if v is not None:
@@ -791,7 +812,11 @@ class Motion:
         if a is not None:
             self.engine.set_accel_cap(a)
         if scv is not None:
-            self.engine.set_square_corner_velocity(scv)
+            corner_deviation = motion_setup.corner_deviation_from_scv(
+                scv, self._max_accel
+            )
+        if corner_deviation is not None:
+            self.engine.set_corner_deviation(corner_deviation)
 
     cmd_SET_POST_PROCESSOR_help = (
         "Update a [post_processor] parameter; applies from the next replan"
@@ -822,7 +847,7 @@ class Motion:
     def cmd_RESET_VELOCITY_LIMIT(self, gcmd):
         self.engine.set_velocity_cap(None)
         self.engine.set_accel_cap(None)
-        self.engine.set_square_corner_velocity(None)
+        self.engine.set_corner_deviation(None)
 
     def stats(self, eventtime):
         max_queue_time = self._mcu_pending_end_time

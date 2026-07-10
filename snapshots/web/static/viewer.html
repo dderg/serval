@@ -25,6 +25,10 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
 .toolbar .nav button{padding:4px 8px;font-size:14px;line-height:1}
 .toolbar select{background:#2a2d35;color:#e0e0e0;border:1px solid #3a3d45;border-radius:4px;padding:4px 8px;font-size:12px;font-family:'Courier Prime',monospace;max-width:340px}
 .toolbar .case-path{color:#9aa3b2;font-family:'Courier Prime',monospace;font-size:12px;white-space:nowrap}
+.toolbar .sim-group{display:flex;align-items:center;gap:4px;font-size:11px;color:#26a69a;font-family:'Courier Prime',monospace;white-space:nowrap}
+.sim-group input{width:52px;background:#14161a;color:#e0e0e0;border:1px solid #2a2d35;border-radius:4px;padding:3px 5px;font-size:11px;font-family:'Courier Prime',monospace;text-align:right}
+.sim-group input:focus{outline:none;border-color:#26a69a}
+.sim-group input::placeholder{color:#4d5560;font-style:italic}
 .readout{font-family:'Courier Prime',monospace;font-size:12px;color:#9aa3b2;padding:4px 16px;background:#1d2026;border-bottom:1px solid #2a2d35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:22px;display:flex;align-items:center;gap:14px}
 .readout .v{color:#4a9eff}
 .readout .p{color:#4ecb71}
@@ -67,7 +71,14 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
     <span class="meta" id="meta"></span>
     <button id="toggle-variant" title="Compare before/after (space)">After</button>
     <button id="reset-zoom">Reset Zoom</button>
-    <button id="toggle-peaks" class="active">Peaks</button>
+    <span class="sim-group" title="Simulated toolhead: damped resonant mode driven by the motor command — view only">
+      <span>th sim</span>
+      <label for="sim-x-freq">fx</label><input id="sim-x-freq" type="number" min="0" step="5" placeholder="off">
+      <label for="sim-x-zeta">ζx</label><input id="sim-x-zeta" type="number" min="0" max="1" step="0.01" placeholder="0.1">
+      <label for="sim-y-freq">fy</label><input id="sim-y-freq" type="number" min="0" step="5" placeholder="off">
+      <label for="sim-y-zeta">ζy</label><input id="sim-y-zeta" type="number" min="0" max="1" step="0.01" placeholder="0.1">
+    </span>
+    <button id="open-playground" title="Open this case's gcode and config in the playground">Playground</button>
     <button id="accept" title="Accept this snapshot as the new baseline (a)">Accept</button>
   </div>
   <div class="readout" id="readout"><span class="g">hover a panel to scrub</span></div>

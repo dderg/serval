@@ -8,7 +8,9 @@ class LimitSection:
             )
         self.max_velocity = config.getfloat("max_velocity", None, above=0.0)
         self.max_accel = config.getfloat("max_accel", None, above=0.0)
-        self.max_jerk = config.getfloat("max_jerk", None, above=0.0)
+        self.max_jerk = config.getfloat("max_jerk", None, minval=0.0)
+        if self.max_jerk == 0.0:
+            self.max_jerk = float("inf")
         if (
             self.max_velocity is None
             and self.max_accel is None

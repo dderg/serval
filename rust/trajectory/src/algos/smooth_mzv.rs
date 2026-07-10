@@ -2,8 +2,6 @@ use super::{Bound, ParamSpec, PostProcessorAlgo};
 use crate::chain::ChainStage;
 use crate::kernel::build_smooth_mzv_kernel;
 
-pub const SMOOTH_MZV_T_SM_PER_HZ: f64 = 0.95625;
-
 #[derive(Debug)]
 pub struct SmoothMzv;
 
@@ -24,7 +22,7 @@ impl PostProcessorAlgo for SmoothMzv {
             panic!("smooth_mzv expects exactly one param value");
         };
         Some(ChainStage::SmoothKernel(build_smooth_mzv_kernel(
-            SMOOTH_MZV_T_SM_PER_HZ / frequency_hz,
+            *frequency_hz,
         )))
     }
 }

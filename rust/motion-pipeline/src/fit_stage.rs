@@ -1,8 +1,8 @@
 use crossbeam_channel::{Receiver, Sender};
 use geometry::fitter::{
     JunctionPlan, RunFit, arc_candidate_fits, blend_moves, consumption_moves,
-    facet_consumption_candidate, is_travel, plan_facet_consumption, plan_junction_reduced,
-    spatial_end, spatial_start, trim_line_move,
+    facet_consumption_candidate, is_travel, merge_collinear_lines, plan_facet_consumption,
+    plan_junction_reduced, spatial_end, spatial_start, trim_line_move,
 };
 use geometry::path::{Line, PathSegment, Segment};
 use geometry::{CornerFitConfig, Move};
@@ -56,6 +56,8 @@ pub struct FitStage {
     tail_checked: usize,
     seam_head_trim: f64,
     seam_in_reduction: f64,
+    consume_scan_start: usize,
+    merge_absorbed: Vec<[f64; 3]>,
 }
 
 enum Element {
@@ -97,28 +99,47 @@ impl FitStage {
             tail_checked: 1,
             seam_head_trim: 0.0,
             seam_in_reduction: 0.0,
+            consume_scan_start: MAX_CONSUMED_FACETS,
+            merge_absorbed: Vec::new(),
         }
     }
 
-    pub fn run(mut self, input: Receiver<StreamInput>, output: Sender<StreamInput>) {
-        let mut out = TravelAligningSender::new(output);
-        while let Ok(item) = input.recv() {
-            let ok = match item {
-                StreamInput::Move(m) => {
-                    self.tail.push(m);
-                    self.resolve(false, &mut out)
-                }
-                StreamInput::Drain => {
-                    self.resolve(true, &mut out) && out.release(None) && out.forward_drain()
-                }
-                StreamInput::Control(ctrl) => self.forward_control(ctrl, &mut out),
-            };
-            if !ok {
+    /// Append a raw move to the undecided tail, merging it into the previous
+    /// move when the junction between them is a sub-degree turn within the
+    /// corner-deviation budget — see [`merge_collinear_lines`]. Slicers break
+    /// gentle transitions into sub-degree facets; kept separate, the blends
+    /// at those junctions squeeze the facet bodies into micrometre slivers
+    /// whose lowered acceleration rings far past the machine limits.
+    fn ingest(&mut self, m: Move) {
+        if let Some(last) = self.tail.last_mut() {
+            if let Some(merged) = merge_collinear_lines(last, &m, &self.merge_absorbed, self.corner)
+            {
+                let junction = spatial_end(last).expect("merged moves are spatial lines");
+                self.merge_absorbed.push(junction);
+                *last = merged;
+                self.tail_checked = self.tail_checked.min(self.tail.len() - 1).max(1);
                 return;
             }
         }
-        self.resolve(true, &mut out);
-        out.release(None);
+        self.merge_absorbed.clear();
+        self.tail.push(m);
+    }
+
+    pub fn run(self, input: Receiver<StreamInput>, output: Sender<StreamInput>) {
+        let mut driver = self.into_driver(output);
+        while let Ok(item) = input.recv() {
+            if !driver.feed(item) {
+                return;
+            }
+        }
+        driver.finish();
+    }
+
+    pub fn into_driver(self, output: Sender<StreamInput>) -> FitDriver {
+        FitDriver {
+            stage: self,
+            out: TravelAligningSender::new(output),
+        }
     }
 
     /// `Reset` drops all buffered fit state and forgets the emitted-geometry
@@ -129,6 +150,7 @@ impl FitStage {
             Control::Reset { .. } => {
                 self.decided.clear();
                 self.tail.clear();
+                self.merge_absorbed.clear();
                 self.tail_checked = 1;
                 self.seam_head_trim = 0.0;
                 self.seam_in_reduction = 0.0;
@@ -144,6 +166,9 @@ impl FitStage {
                     "fit_stage: control token arrived with undrained moves — a Drain must precede it"
                 );
             }
+        }
+        if let Control::SetAxisChains(chains) = &ctrl {
+            self.corner.kernel_variance_s2 = chains.max_spatial_kernel_variance_s2();
         }
         if let Control::SetMesh { gcode_z_rebase, .. } = &ctrl {
             out.rebase_gcode_z(*gcode_z_rebase);
@@ -474,12 +499,20 @@ impl FitStage {
     }
 
     /// Consume the longest prefix of the scanned facet chain that passes
-    /// every gate: try all `max_mids` facets against the piece after them,
-    /// then shrink — a shorter prefix anchors on the facet that follows it,
-    /// exactly as a lone squeezed facet anchors on any next piece. Returns
-    /// the send result, or `None` when no prefix is consumable.
+    /// every gate: shrink from the longest candidate — a shorter prefix
+    /// anchors on the facet that follows it, exactly as a lone squeezed
+    /// facet anchors on any next piece. Each failed prefix costs a full
+    /// chain-blend scan, and on uniform curves (circle facets) the feasible
+    /// length is the same junction after junction, so the descent starts one
+    /// above the last consumption's length instead of at `max_mids`: it
+    /// re-earns longer prefixes one junction at a time and never re-pays for
+    /// lengths that just failed. Returns the send result, or `None` when no
+    /// prefix is consumable.
     fn try_consumption(&mut self, max_mids: usize, out: &mut TravelAligningSender) -> Option<bool> {
-        for n_mids in (1..=max_mids).rev() {
+        let start_mids = max_mids
+            .min(self.consume_scan_start.saturating_add(1))
+            .max(1);
+        for n_mids in (1..=start_mids).rev() {
             let front = piece_of(&self.decided[0]).expect("caller matched a front piece");
             let mids: Vec<&Move> = self.decided[1..=n_mids]
                 .iter()
@@ -490,9 +523,11 @@ impl FitStage {
                 plan_facet_consumption(front, &mids, after, self.corner, self.seam_in_reduction)
                     .unwrap_or_else(|e| panic!("fit_stage: facet consumption failed: {e:?}"));
             if let Some(fc) = plan {
+                self.consume_scan_start = n_mids;
                 return Some(self.emit_consumption(fc, n_mids, out));
             }
         }
+        self.consume_scan_start = 0;
         None
     }
 
@@ -606,6 +641,36 @@ impl FitStage {
         self.seam_head_trim = fit.tail_boundary_trim();
         self.seam_in_reduction = fit.tail_line_trim();
         true
+    }
+}
+
+/// Per-item drive of the fit stage for single-threaded hosts (the snapshot
+/// harness, wasm): `feed` is one iteration of [`FitStage::run`]'s loop,
+/// `finish` is its input-closed path — resolve and flush everything without
+/// forwarding a `Drain`.
+pub struct FitDriver {
+    stage: FitStage,
+    out: TravelAligningSender,
+}
+
+impl FitDriver {
+    pub fn feed(&mut self, item: StreamInput) -> bool {
+        match item {
+            StreamInput::Move(m) => {
+                self.stage.ingest(m);
+                self.stage.resolve(false, &mut self.out)
+            }
+            StreamInput::Drain => {
+                self.stage.resolve(true, &mut self.out)
+                    && self.out.release(None)
+                    && self.out.forward_drain()
+            }
+            StreamInput::Control(ctrl) => self.stage.forward_control(ctrl, &mut self.out),
+        }
+    }
+
+    pub fn finish(&mut self) -> bool {
+        self.stage.resolve(true, &mut self.out) && self.out.release(None)
     }
 }
 

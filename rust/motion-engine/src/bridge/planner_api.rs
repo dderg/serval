@@ -71,7 +71,7 @@ struct CartesianLimitsArg {
     max_jerk: f64,
     max_z_velocity: f64,
     max_z_accel: f64,
-    square_corner_velocity: f64,
+    corner_deviation: f64,
 }
 
 impl From<CartesianLimitsArg> for config::CartesianLimits {
@@ -82,7 +82,7 @@ impl From<CartesianLimitsArg> for config::CartesianLimits {
             max_jerk: c.max_jerk,
             max_z_velocity: c.max_z_velocity,
             max_z_accel: c.max_z_accel,
-            square_corner_velocity: c.square_corner_velocity,
+            corner_deviation: c.corner_deviation,
         }
     }
 }
@@ -410,7 +410,7 @@ impl PyMotionEngine {
                 }
             };
             let pos = self.commanded_pos.lock_ok().0;
-            let (max_v, max_a, scv, jerk) = {
+            let (max_v, max_a, corner_deviation, jerk) = {
                 let cfg = self.planner_config.lock_ok();
                 let (mut v, mut a) = cfg.cartesian.for_move(dx, dy, dz);
                 if let Some(rv) = cfg.runtime_caps.velocity {
@@ -424,9 +424,9 @@ impl PyMotionEngine {
                 // `cfg.runtime_caps.jerk` would `.min()` in here exactly like
                 // velocity/accel above.
                 let j = cfg.cartesian.max_jerk;
-                (v, a, cfg.square_corner_velocity(), j)
+                (v, a, cfg.corner_deviation(), j)
             };
-            let limits = geometry::VelocityLimits::try_new(max_v, max_a, scv, jerk)
+            let limits = geometry::VelocityLimits::try_new(max_v, max_a, corner_deviation, jerk)
                 .map_err(PyRuntimeError::new_err)?;
             let line_no = self.move_seq.fetch_add(1, Ordering::Relaxed) as u32;
             let m = classify::build_move(
@@ -578,27 +578,47 @@ impl PyMotionEngine {
         self.planner_config.lock_ok().runtime_caps.accel = accel;
         Ok(())
     }
-    #[pyo3(signature = (square_corner_velocity))]
-    fn set_square_corner_velocity(&self, square_corner_velocity: Option<f64>) -> PyResult<()> {
-        if let Some(scv) = square_corner_velocity {
-            if !(scv.is_finite() && scv >= 0.0) {
+    #[pyo3(signature = (corner_deviation))]
+    fn set_corner_deviation(&self, corner_deviation: Option<f64>) -> PyResult<()> {
+        if let Some(deviation) = corner_deviation {
+            if !(deviation.is_finite() && deviation >= 0.0) {
                 return Err(PyValueError::new_err(
-                    "square_corner_velocity must be finite and non-negative",
+                    "corner_deviation must be finite and non-negative",
                 ));
             }
         }
-        self.planner_config.lock_ok().runtime_square_corner_velocity = square_corner_velocity;
+        let mut cfg = self.planner_config.lock_ok();
+        let previous = cfg.runtime_corner_deviation;
+        cfg.runtime_corner_deviation = corner_deviation;
+        let axis_chains = cfg
+            .post_processors
+            .compile(&cfg.axis_registry)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        if let Err(e) = cfg.validate_corner_budget(&axis_chains) {
+            cfg.runtime_corner_deviation = previous;
+            return Err(PyValueError::new_err(e));
+        }
         Ok(())
     }
     fn update_post_processor(&self, name: &str, key: &str, value: f64) -> PyResult<()> {
         let axis_chains = {
             let mut cfg = self.planner_config.lock_ok();
+            let previous = cfg.post_processors.param(name, key);
             cfg.post_processors
                 .set_param(name, key, value)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            cfg.post_processors
+            let axis_chains = cfg
+                .post_processors
                 .compile(&cfg.axis_registry)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            if let Err(e) = cfg.validate_corner_budget(&axis_chains) {
+                let previous = previous.expect("set_param succeeded, so the param exists");
+                cfg.post_processors
+                    .set_param(name, key, previous)
+                    .expect("restoring a previously accepted param value");
+                return Err(PyValueError::new_err(e));
+            }
+            axis_chains
         };
         if let Some(handle) = self.planner.lock_ok().as_ref() {
             handle

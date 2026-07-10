@@ -15,7 +15,13 @@ fn cfg() -> StreamConfig {
         fit_tol_mm: 1e-3,
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 64,
-        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
+        limits: VelocityLimits::try_new(
+            300.0,
+            5000.0,
+            geometry::corner_deviation_from_scv(5.0, 5000.0),
+            100_000.0,
+        )
+        .unwrap(),
     }
 }
 
@@ -23,7 +29,13 @@ fn ctx(line_no: u32, feed: f64) -> MoveContext {
     MoveContext {
         extruder_axis: 3,
         feedrate_mm_s: feed,
-        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
+        limits: VelocityLimits::try_new(
+            300.0,
+            5000.0,
+            geometry::corner_deviation_from_scv(5.0, 5000.0),
+            100_000.0,
+        )
+        .unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -44,7 +56,13 @@ fn cfg_bench() -> StreamConfig {
         fit_tol_mm: 0.005,
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 512,
-        limits: VelocityLimits::try_new(100.0, 1000.0, 5.0, 1_000_000.0).unwrap(),
+        limits: VelocityLimits::try_new(
+            100.0,
+            1000.0,
+            geometry::corner_deviation_from_scv(5.0, 1000.0),
+            1_000_000.0,
+        )
+        .unwrap(),
     }
 }
 
@@ -52,7 +70,13 @@ fn line_bench(line_no: u32, start: [f64; 3], end: [f64; 3]) -> geometry::Move {
     let ctx = MoveContext {
         extruder_axis: 3,
         feedrate_mm_s: 60.0,
-        limits: VelocityLimits::try_new(100.0, 1000.0, 5.0, 1_000_000.0).unwrap(),
+        limits: VelocityLimits::try_new(
+            100.0,
+            1000.0,
+            geometry::corner_deviation_from_scv(5.0, 1000.0),
+            1_000_000.0,
+        )
+        .unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -576,12 +600,54 @@ fn drained_prefix_is_invariant_under_append() {
     assert!(compared > 0, "nothing inside the comparison horizon");
 }
 
-fn smooth_x_chains(frequency_hz: f64) -> AxisChainSet {
+/// The smooth_zv kernel is mean-centered, so its support is asymmetric
+/// (`[-T/2 - mu, T/2 - mu]`, mu < 0): the convolution needs more history than
+/// lookahead. Streaming many segments through the shaper forces history
+/// trimming; a window/retention computation that assumes symmetric support
+/// dies here with a non-finite sample. Regression for the reflected
+/// input-window fix.
+#[test]
+fn asymmetric_kernel_survives_history_trimming_across_many_segments() {
+    let chain = trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
+        "is",
+        &trajectory::algos::SmoothZv,
+        vec![130.0],
+    )])
+    .expect("single post-processor always compiles");
+    let chains = AxisChainSet::spatial(
+        chain,
+        trajectory::CompiledChain::default(),
+        trajectory::CompiledChain::default(),
+    );
+    let moves: Vec<geometry::Move> = (0..40)
+        .map(|i| {
+            let a = f64::from(i) * 2.0;
+            line(i + 1, [a, 0.0, 0.0], [a + 2.0, 0.0, 0.0], 0.0)
+        })
+        .collect();
+    let segs = replay(cfg(), chains, &[0.0, 0.0, 0.0], 0.0, &moves);
+    assert!(!segs.is_empty());
+    for seg in &segs {
+        for curve in &seg.axes {
+            assert!(curve.control_points().iter().all(|v| v.is_finite()));
+        }
+    }
+    let last = segs.last().expect("non-empty");
+    let final_x = eval(&last.axes[0], last.t_end);
+    let shaped_fit_budget = 1e-3;
+    assert!(
+        (final_x - 80.0).abs() < shaped_fit_budget,
+        "final x = {final_x}, t_end = {}",
+        last.t_end
+    );
+}
+
+fn smooth_x_chains(smooth_time: f64) -> AxisChainSet {
     AxisChainSet::spatial(
         trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
             "is",
-            &trajectory::algos::SmoothZv,
-            vec![frequency_hz],
+            &trajectory::algos::SmoothBell,
+            vec![smooth_time],
         )])
         .expect("single post-processor always compiles"),
         trajectory::CompiledChain::default(),
@@ -602,7 +668,13 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
         0.0,
         &moves,
     );
-    let shaped = replay(cfg(), smooth_x_chains(18.0), &[0.0, 0.0, 0.0], 0.0, &moves);
+    let shaped = replay(
+        cfg(),
+        smooth_x_chains(0.044583333333333336),
+        &[0.0, 0.0, 0.0],
+        0.0,
+        &moves,
+    );
     assert_eq!(
         base.len() + 1,
         shaped.len(),
@@ -612,7 +684,7 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
     assert!(pad > 0.0, "hold pad must shift the move start forward");
     let shaped = &shaped[1..];
 
-    let oracle_chains = smooth_x_chains(18.0);
+    let oracle_chains = smooth_x_chains(0.044583333333333336);
     let trajectory::ChainStage::SmoothKernel(kernel) = &oracle_chains.chains[0].stages[0] else {
         panic!("expected smooth kernel");
     };
@@ -659,14 +731,20 @@ fn smooth_shaper_with_wide_support_still_flushes_at_rest() {
         line(1, [0.0, 0.0, 0.0], [20.0, 0.0, 0.0], 0.0),
         line(2, [20.0, 0.0, 0.0], [40.0, 0.0, 0.0], 0.0),
     ];
-    let segs = replay(cfg(), smooth_x_chains(0.5), &[0.0, 0.0, 0.0], 0.0, &moves);
+    let segs = replay(cfg(), smooth_x_chains(1.605), &[0.0, 0.0, 0.0], 0.0, &moves);
     assert!(!segs.is_empty(), "rest flush must release held segments");
 }
 
 #[test]
 fn smooth_shaper_first_emission_after_nonzero_start_time_is_valid() {
     let moves = [line(1, [0.0, 0.0, 0.0], [20.0, 0.0, 0.0], 0.0)];
-    let segs = replay(cfg(), smooth_x_chains(18.0), &[0.0, 0.0, 0.0], 5.0, &moves);
+    let segs = replay(
+        cfg(),
+        smooth_x_chains(0.044583333333333336),
+        &[0.0, 0.0, 0.0],
+        5.0,
+        &moves,
+    );
     assert_eq!(segs[0].t_start, 5.0);
 }
 
@@ -678,8 +756,8 @@ fn smooth_shaper_first_emission_after_nonzero_start_time_is_valid() {
 /// `G4 P1000` panicked the shape thread at t = 1.0 - 1ulp.
 #[test]
 fn smooth_shaper_second_batch_window_before_stream_start_clamps() {
-    let chains = smooth_x_chains(18.0);
-    let (_, back) = chains.chains[0].max_half_support();
+    let chains = smooth_x_chains(0.044583333333333336);
+    let (_, back) = chains.chains[0].max_input_window();
     let back = back.abs();
     let t0 = 1.0;
     let step = 0.4 * back;
@@ -754,7 +832,13 @@ fn arc_run_into_sharp_corner_stays_contiguous_at_high_scv() {
     // fit stage emitted a 0.27mm gap between the corner blend leaving the fitted
     // run and the following long line, tripping the TravelAligningSender
     // contiguity assert.
-    let limits = VelocityLimits::try_new(100.0, 1000.0, 25.0, 1_000_000.0).unwrap();
+    let limits = VelocityLimits::try_new(
+        100.0,
+        1000.0,
+        geometry::corner_deviation_from_scv(25.0, 1000.0),
+        1_000_000.0,
+    )
+    .unwrap();
     let config = StreamConfig {
         corner: CornerFitConfig::default(),
         integration_tol: 1e-4,
@@ -793,7 +877,13 @@ fn blends_consuming_a_full_arc_emit_no_degenerate_remainder() {
     // ends of a short fitted arc consume its entire length. The remainder
     // (2e-16 mm) must be skipped, not emitted — the planner rejects segments
     // at or below its 1e-9 mm length epsilon.
-    let limits = VelocityLimits::try_new(100.0, 1000.0, 25.0, 1_000_000.0).unwrap();
+    let limits = VelocityLimits::try_new(
+        100.0,
+        1000.0,
+        geometry::corner_deviation_from_scv(25.0, 1000.0),
+        1_000_000.0,
+    )
+    .unwrap();
     let config = StreamConfig {
         corner: CornerFitConfig::default(),
         integration_tol: 1e-4,
@@ -904,8 +994,8 @@ fn mesh_warp_tracks_across_a_fenced_move_sequence() {
 
     let xy_chain = trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
         "is_xy",
-        &trajectory::algos::SmoothMzv,
-        vec![50.0],
+        &trajectory::algos::SmoothBell,
+        vec![0.019125],
     )])
     .unwrap();
     let chains = AxisChainSet::spatial(
@@ -933,19 +1023,19 @@ fn mesh_warp_tracks_across_a_fenced_move_sequence() {
     );
 }
 
-fn xy_shaper_follower_chains(frequency_hz: f64) -> AxisChainSet {
-    let zv = |name: &str| {
+fn xy_shaper_follower_chains(smooth_time: f64) -> AxisChainSet {
+    let bell = |name: &str| {
         trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
             name,
-            &trajectory::algos::SmoothZv,
-            vec![frequency_hz],
+            &trajectory::algos::SmoothBell,
+            vec![smooth_time],
         )])
         .expect("single post-processor always compiles")
     };
     AxisChainSet {
         chains: vec![
-            zv("is_x"),
-            zv("is_y"),
+            bell("is_x"),
+            bell("is_y"),
             trajectory::CompiledChain::default(),
             trajectory::CompiledChain::default(),
         ],
@@ -1021,7 +1111,13 @@ fn follower_tracks_shaped_path_distance_through_a_corner() {
         extruder_end(&raw)
     );
 
-    let shaped = replay(cfg(), xy_shaper_follower_chains(18.0), &home, 0.0, &moves);
+    let shaped = replay(
+        cfg(),
+        xy_shaper_follower_chains(0.044583333333333336),
+        &home,
+        0.0,
+        &moves,
+    );
     assert_extruder_continuous_and_monotone(&shaped);
     let e_end = extruder_end(&shaped);
     let shaped_len = sampled_planar_path_length(&shaped);
@@ -1047,7 +1143,13 @@ fn extrude_only_move_passes_through_the_projection() {
         line(3, [20.0, 0.0, 0.0], [40.0, 0.0, 0.0], 1.0),
     ];
     let home = [0.0, 0.0, 0.0, 0.0];
-    let shaped = replay(cfg(), xy_shaper_follower_chains(18.0), &home, 0.0, &moves);
+    let shaped = replay(
+        cfg(),
+        xy_shaper_follower_chains(0.044583333333333336),
+        &home,
+        0.0,
+        &moves,
+    );
     let e_end = extruder_end(&shaped);
     assert!(
         (e_end - 1.5).abs() < 1e-3,
@@ -1055,7 +1157,81 @@ fn extrude_only_move_passes_through_the_projection() {
     );
 }
 
-fn e_chain(k: Option<f64>, e_frequency_hz: f64) -> trajectory::CompiledChain {
+fn xy_follower_chains_with_optional_inverse(smooth_time: f64, with_inverse: bool) -> AxisChainSet {
+    let spatial = |name: &str| {
+        let mut instances = vec![PostProcessorInstance::new(
+            name,
+            &trajectory::algos::SmoothBell,
+            vec![smooth_time],
+        )];
+        if with_inverse {
+            instances.push(PostProcessorInstance::new(
+                "mi",
+                &trajectory::algos::ModeInverse,
+                vec![130.0, 0.1],
+            ));
+        }
+        trajectory::CompiledChain::compile(&instances).expect("bell + mode_inverse compiles")
+    };
+    AxisChainSet {
+        chains: vec![
+            spatial("is_x"),
+            spatial("is_y"),
+            trajectory::CompiledChain::default(),
+            e_chain(Some(0.03), 0.02),
+        ],
+        followers: vec![(3, vec![0, 1, 2])],
+    }
+}
+
+/// A trailing mode-inverse stage produces the motor command; the physical
+/// toolhead tracks the kernel output, and the follower must ride the
+/// toolhead. Adding the inverse to the leaders therefore must not change the
+/// extruder track at all — while visibly changing the leaders' own output.
+#[test]
+fn follower_projects_onto_toolhead_signal_not_motor_command() {
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [20.0, 0.0, 0.0], 1.0),
+        line(2, [20.0, 0.0, 0.0], [20.0, 20.0, 0.0], 2.0),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let plain = replay(
+        cfg(),
+        xy_follower_chains_with_optional_inverse(0.02, false),
+        &home,
+        0.0,
+        &moves,
+    );
+    let inverted = replay(
+        cfg(),
+        xy_follower_chains_with_optional_inverse(0.02, true),
+        &home,
+        0.0,
+        &moves,
+    );
+    assert_eq!(plain.len(), inverted.len());
+    let mut max_e_diff: f64 = 0.0;
+    let mut max_x_diff: f64 = 0.0;
+    for (p, q) in plain.iter().zip(&inverted) {
+        for i in 0..=100 {
+            let t = p.t_start + (p.t_end - p.t_start) * f64::from(i) / 100.0;
+            max_e_diff = max_e_diff.max((eval(&p.axes[3], t) - eval(&q.axes[3], t)).abs());
+            max_x_diff = max_x_diff.max((eval(&p.axes[0], t) - eval(&q.axes[0], t)).abs());
+        }
+    }
+    assert!(
+        max_e_diff < 1e-9,
+        "extruder must ride the toolhead signal, unchanged by the leader's \
+         motor-side inverse; diff = {max_e_diff}"
+    );
+    assert!(
+        max_x_diff > 1e-3,
+        "sanity: the inverse must visibly counter-drive the leader itself; \
+         diff = {max_x_diff}"
+    );
+}
+
+fn e_chain(k: Option<f64>, e_smooth_time: f64) -> trajectory::CompiledChain {
     let mut instances = Vec::new();
     if let Some(k) = k {
         instances.push(PostProcessorInstance::new(
@@ -1064,24 +1240,24 @@ fn e_chain(k: Option<f64>, e_frequency_hz: f64) -> trajectory::CompiledChain {
             vec![k],
         ));
     }
-    if e_frequency_hz > 0.0 {
+    if e_smooth_time > 0.0 {
         instances.push(PostProcessorInstance::new(
             "st",
-            &trajectory::algos::SmoothZv,
-            vec![e_frequency_hz],
+            &trajectory::algos::SmoothBell,
+            vec![e_smooth_time],
         ));
     }
     trajectory::CompiledChain::compile(&instances).expect("pa + kernel compiles")
 }
 
 fn follower_kernel_chains(
-    leader_frequency_hz: Option<f64>,
+    leader_smooth_time: Option<f64>,
     k: Option<f64>,
-    e_frequency_hz: f64,
+    e_smooth_time: f64,
 ) -> AxisChainSet {
     let mut chains =
-        leader_frequency_hz.map_or_else(follower_chains_without_kernels, xy_shaper_follower_chains);
-    chains.chains[3] = e_chain(k, e_frequency_hz);
+        leader_smooth_time.map_or_else(follower_chains_without_kernels, xy_shaper_follower_chains);
+    chains.chains[3] = e_chain(k, e_smooth_time);
     chains
 }
 
@@ -1124,7 +1300,7 @@ fn follower_kernel_with_unshaped_leaders_matches_direct_convolution() {
     ];
     let home = [0.0, 0.0, 0.0, 0.0];
     for (k, tol) in [(None, 1e-12), (Some(0.04), 2e-2)] {
-        let as_follower = follower_kernel_chains(None, k, 30.0);
+        let as_follower = follower_kernel_chains(None, k, 0.02675);
         let mut as_plain_axis = as_follower.clone();
         as_plain_axis.followers.clear();
 
@@ -1156,7 +1332,7 @@ fn follower_kernel_rides_the_projection_through_a_corner() {
     let home = [0.0, 0.0, 0.0, 0.0];
     let shaped = replay(
         cfg(),
-        follower_kernel_chains(Some(18.0), None, 30.0),
+        follower_kernel_chains(Some(0.044583333333333336), None, 0.02675),
         &home,
         0.0,
         &moves,
@@ -1186,7 +1362,7 @@ fn smooth_pressure_advance_on_follower_preserves_the_projected_total() {
     let home = [0.0, 0.0, 0.0, 0.0];
     let with_pa = replay(
         cfg(),
-        follower_kernel_chains(Some(18.0), Some(0.04), 30.0),
+        follower_kernel_chains(Some(0.044583333333333336), Some(0.04), 0.02675),
         &home,
         0.0,
         &moves,
@@ -1194,7 +1370,7 @@ fn smooth_pressure_advance_on_follower_preserves_the_projected_total() {
     assert_extruder_has_no_jumps(&with_pa);
     let without_pa = replay(
         cfg(),
-        follower_kernel_chains(Some(18.0), None, 30.0),
+        follower_kernel_chains(Some(0.044583333333333336), None, 0.02675),
         &home,
         0.0,
         &moves,
@@ -1203,5 +1379,272 @@ fn smooth_pressure_advance_on_follower_preserves_the_projected_total() {
     assert!(
         (e_pa - e_plain).abs() < 1e-4,
         "PA must not change the settled extruded total: {e_pa} vs {e_plain}"
+    );
+}
+
+#[test]
+fn derivative_gains_track_transform_matches_analytic_second_derivative() {
+    let piece = nurbs::bezier::BezierPiece {
+        u_start: 0.0,
+        u_end: 0.1,
+        coeffs: vec![1.0, 2.0, 3.0, 4.0],
+    };
+    let track = nurbs::bezier::bezier_pieces_to_nurbs(&[piece]);
+    let (k1, k2) = (0.0, 0.002);
+    let out = crate::shaper::apply_derivative_gains_to_track(&track, k1, k2);
+    for i in 0..=20 {
+        let t = 0.1 * i as f64 / 20.0;
+        let pos = 1.0 + 2.0 * t + 3.0 * t * t + 4.0 * t * t * t;
+        let accel = 6.0 + 24.0 * t;
+        let expected = pos + k2 * accel;
+        assert!(
+            (eval(&out, t) - expected).abs() < 1e-12,
+            "track transform must equal x + k2*x'' at t={t}"
+        );
+    }
+}
+
+#[test]
+fn derivative_gains_track_transform_combines_both_gains() {
+    let piece = nurbs::bezier::BezierPiece {
+        u_start: 0.0,
+        u_end: 0.1,
+        coeffs: vec![1.0, 2.0, 3.0, 4.0],
+    };
+    let track = nurbs::bezier::bezier_pieces_to_nurbs(&[piece]);
+    let (k1, k2) = (0.05, 0.002);
+    let out = crate::shaper::apply_derivative_gains_to_track(&track, k1, k2);
+    for i in 0..=20 {
+        let t = 0.1 * i as f64 / 20.0;
+        let pos = 1.0 + 2.0 * t + 3.0 * t * t + 4.0 * t * t * t;
+        let vel = 2.0 + 6.0 * t + 12.0 * t * t;
+        let accel = 6.0 + 24.0 * t;
+        let expected = pos + k1 * vel + k2 * accel;
+        assert!(
+            (eval(&out, t) - expected).abs() < 1e-12,
+            "track transform must equal x + k1*x' + k2*x'' at t={t}"
+        );
+    }
+}
+
+fn eval_axis_at(segs: &[ShapedSegment], axis: usize, t: f64) -> f64 {
+    let seg = segs
+        .iter()
+        .find(|seg| t >= seg.t_start && t <= seg.t_end)
+        .expect("t inside emitted trajectory");
+    eval(&seg.axes[axis], t)
+}
+
+fn extruder_gain_kernel_chains(
+    leader_smooth_time: Option<f64>,
+    gain_first: bool,
+    k1: f64,
+    k2: f64,
+    e_smooth_time: f64,
+) -> AxisChainSet {
+    let kernel = e_chain(None, e_smooth_time).stages[0].clone();
+    let gain = trajectory::ChainStage::DerivativeGains { k1, k2 };
+    let stages = if gain_first {
+        vec![gain, kernel]
+    } else {
+        vec![kernel, gain]
+    };
+    let mut chains =
+        leader_smooth_time.map_or_else(follower_chains_without_kernels, xy_shaper_follower_chains);
+    chains.chains[3] = trajectory::CompiledChain { stages };
+    chains
+}
+
+fn assert_gain_kernel_orders_commute(leader_smooth_time: Option<f64>) {
+    // The feedrate step between the collinear moves keeps the fit stage
+    // from merging them — the test's tolerances are calibrated to three
+    // separate emit windows.
+    let moves = [
+        line_move([0.0, 0.0, 0.0], [20.0, 0.0, 0.0], 1.0, ctx(1, 80.0)).unwrap(),
+        line_move([20.0, 0.0, 0.0], [40.0, 0.0, 0.0], 1.0, ctx(2, 95.0)).unwrap(),
+        line_move([40.0, 0.0, 0.0], [60.0, 0.0, 0.0], 1.0, ctx(3, 80.0)).unwrap(),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let (k1, k2) = (0.03, 2e-4);
+    let smooth = 0.02675;
+    let pre = replay(
+        cfg(),
+        extruder_gain_kernel_chains(leader_smooth_time, true, k1, k2, smooth),
+        &home,
+        0.0,
+        &moves,
+    );
+    let post = replay(
+        cfg(),
+        extruder_gain_kernel_chains(leader_smooth_time, false, k1, k2, smooth),
+        &home,
+        0.0,
+        &moves,
+    );
+    let plain = replay(
+        cfg(),
+        extruder_gain_kernel_chains(leader_smooth_time, false, k1, 0.0, smooth),
+        &home,
+        0.0,
+        &moves,
+    );
+    let t0 = pre
+        .first()
+        .unwrap()
+        .t_start
+        .max(post.first().unwrap().t_start);
+    let t1 = pre.last().unwrap().t_end.min(post.last().unwrap().t_end);
+    let mut max_k2_effect: f64 = 0.0;
+    for i in 0..=400 {
+        let t = t0 + (t1 - t0) * i as f64 / 400.0;
+        let a = eval_axis_at(&pre, 3, t);
+        let b = eval_axis_at(&post, 3, t);
+        assert!(
+            (a - b).abs() < 2e-3,
+            "gain-then-kernel and kernel-then-gain must agree (LTI): {a} vs {b} at t={t}"
+        );
+        max_k2_effect = max_k2_effect.max((b - eval_axis_at(&plain, 3, t)).abs());
+    }
+    assert!(
+        max_k2_effect > 1e-2,
+        "k2 term must visibly move the track, got max effect {max_k2_effect}"
+    );
+}
+
+#[test]
+fn derivative_gains_commute_with_kernel_on_a_direct_follower() {
+    assert_gain_kernel_orders_commute(None);
+}
+
+#[test]
+fn derivative_gains_commute_with_kernel_on_a_projected_follower() {
+    assert_gain_kernel_orders_commute(Some(0.044583333333333336));
+}
+
+fn x_kernel_chains(smooth_time: f64, mode: Option<(f64, f64)>) -> AxisChainSet {
+    let mut instances = vec![PostProcessorInstance::new(
+        "slew",
+        &trajectory::algos::SmoothBell,
+        vec![smooth_time],
+    )];
+    if let Some((frequency_hz, damping_ratio)) = mode {
+        instances.push(PostProcessorInstance::new(
+            "belt",
+            &trajectory::algos::ModeInverse,
+            vec![frequency_hz, damping_ratio],
+        ));
+    }
+    let x = trajectory::CompiledChain::compile(&instances).expect("kernel + mode_inverse compiles");
+    AxisChainSet {
+        chains: vec![
+            x,
+            trajectory::CompiledChain::default(),
+            trajectory::CompiledChain::default(),
+            trajectory::CompiledChain::default(),
+        ],
+        followers: vec![(3, vec![0, 1, 2])],
+    }
+}
+
+/// Semi-analytic plant simulation: the commanded track drives the 2nd-order
+/// mode `z̈ + 2ζω·ż + ω²·z = ω²·x_cmd(t)` (toolhead z behind belt compliance),
+/// integrated with RK4 at fine dt over the emitted trajectory.
+fn integrate_mode_response(
+    cmd: &[ShapedSegment],
+    frequency_hz: f64,
+    damping_ratio: f64,
+    t0: f64,
+    t1: f64,
+) -> impl Fn(f64) -> f64 {
+    let omega = 2.0 * std::f64::consts::PI * frequency_hz;
+    let dt = 1e-5;
+    let steps = ((t1 - t0) / dt).ceil() as usize;
+    let x_cmd = |t: f64| eval_axis_at(cmd, 0, t.clamp(t0, t1));
+    let deriv = |t: f64, z: f64, zd: f64| {
+        (
+            zd,
+            omega * omega * (x_cmd(t) - z) - 2.0 * damping_ratio * omega * zd,
+        )
+    };
+    let mut z = x_cmd(t0);
+    let mut zd = 0.0;
+    let mut trace = Vec::with_capacity(steps + 1);
+    trace.push(z);
+    for i in 0..steps {
+        let t = t0 + i as f64 * dt;
+        let (k1z, k1v) = deriv(t, z, zd);
+        let (k2z, k2v) = deriv(t + 0.5 * dt, z + 0.5 * dt * k1z, zd + 0.5 * dt * k1v);
+        let (k3z, k3v) = deriv(t + 0.5 * dt, z + 0.5 * dt * k2z, zd + 0.5 * dt * k2v);
+        let (k4z, k4v) = deriv(t + dt, z + dt * k3z, zd + dt * k3v);
+        z += dt / 6.0 * (k1z + 2.0 * k2z + 2.0 * k3z + k4z);
+        zd += dt / 6.0 * (k1v + 2.0 * k2v + 2.0 * k3v + k4v);
+        trace.push(z);
+    }
+    move |t: f64| {
+        let idx = ((t - t0) / dt).round() as usize;
+        trace[idx.min(steps)]
+    }
+}
+
+/// The plan-inversion contract: driving the belt-compliance mode with the
+/// mode_inverse command `x + (2ζ/ω)ẋ + (1/ω²)ẍ` makes the toolhead follow the
+/// nominal (kernel-only) path, while driving it with the nominal path directly
+/// leaves the resonance ringing.
+#[test]
+fn mode_inverse_makes_the_oscillator_track_the_nominal_path() {
+    let (frequency_hz, damping_ratio) = (30.0, 0.05);
+    let smooth_time = 0.0015;
+    let moves = [
+        line(1, [0.0, 0.0, 0.0], [40.0, 0.0, 0.0], 0.0),
+        line(2, [40.0, 0.0, 0.0], [10.0, 0.0, 0.0], 0.0),
+    ];
+    let home = [0.0, 0.0, 0.0, 0.0];
+    let nominal = replay(
+        cfg(),
+        x_kernel_chains(smooth_time, None),
+        &home,
+        0.0,
+        &moves,
+    );
+    let inverted = replay(
+        cfg(),
+        x_kernel_chains(smooth_time, Some((frequency_hz, damping_ratio))),
+        &home,
+        0.0,
+        &moves,
+    );
+    let t0 = nominal[0].t_start.max(inverted[0].t_start);
+    let t1 = nominal
+        .last()
+        .unwrap()
+        .t_end
+        .min(inverted.last().unwrap().t_end);
+    assert!(t1 - t0 > 0.3, "trajectory too short to ring: {}", t1 - t0);
+
+    let tracked = integrate_mode_response(&inverted, frequency_hz, damping_ratio, t0, t1);
+    let ringing = integrate_mode_response(&nominal, frequency_hz, damping_ratio, t0, t1);
+
+    let mut max_tracked: f64 = 0.0;
+    let mut max_ringing: f64 = 0.0;
+    let n = 4000;
+    for i in 0..=n {
+        let t = t0 + (t1 - t0) * i as f64 / n as f64;
+        let x_nom = eval_axis_at(&nominal, 0, t);
+        max_tracked = max_tracked.max((tracked(t) - x_nom).abs());
+        max_ringing = max_ringing.max((ringing(t) - x_nom).abs());
+    }
+    assert!(
+        max_tracked < 5e-3,
+        "inverted command must make the mode track the nominal path: \
+         max residual {max_tracked}"
+    );
+    assert!(
+        max_ringing > 0.05,
+        "without inversion the mode must ring visibly: max residual {max_ringing}"
+    );
+    assert!(
+        max_ringing > 20.0 * max_tracked,
+        "inversion must suppress the residual by over an order of magnitude: \
+         {max_ringing} vs {max_tracked}"
     );
 }

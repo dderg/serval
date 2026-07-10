@@ -1,30 +1,30 @@
 use super::*;
 
 #[test]
-fn cartesian_validate_accepts_zero_and_positive_scv() {
+fn cartesian_validate_accepts_zero_and_positive_corner_deviation() {
     let mut c = CartesianLimits::default();
-    c.square_corner_velocity = 0.0;
+    c.corner_deviation = 0.0;
     assert!(c.validate().is_ok());
-    c.square_corner_velocity = 8.0;
+    c.corner_deviation = 8.0;
     assert!(c.validate().is_ok());
 }
 
 #[test]
-fn cartesian_validate_rejects_negative_or_nan_scv() {
+fn cartesian_validate_rejects_negative_or_nan_corner_deviation() {
     let mut c = CartesianLimits::default();
-    c.square_corner_velocity = -1.0;
+    c.corner_deviation = -1.0;
     assert!(c.validate().is_err());
-    c.square_corner_velocity = f64::NAN;
+    c.corner_deviation = f64::NAN;
     assert!(c.validate().is_err());
 }
 
 #[test]
 fn effective_limits_without_overrides_are_the_config_base() {
     let cfg = PlannerConfig::default();
-    let (v, a, scv) = cfg.effective_limits();
+    let (v, a, corner_deviation) = cfg.effective_limits();
     assert_eq!(v, cfg.cartesian.max_velocity);
     assert_eq!(a, cfg.cartesian.max_accel);
-    assert_eq!(scv, cfg.cartesian.square_corner_velocity);
+    assert_eq!(corner_deviation, cfg.cartesian.corner_deviation);
 }
 
 #[test]
@@ -40,15 +40,12 @@ fn effective_limits_runtime_caps_clamp_but_never_raise() {
 }
 
 #[test]
-fn effective_limits_runtime_scv_replaces_the_base() {
+fn effective_limits_runtime_corner_deviation_replaces_the_base() {
     let mut cfg = PlannerConfig::default();
-    cfg.runtime_square_corner_velocity = Some(1.0);
-    assert_eq!(cfg.effective_limits().2, 1.0);
-    cfg.runtime_square_corner_velocity = None;
-    assert_eq!(
-        cfg.effective_limits().2,
-        cfg.cartesian.square_corner_velocity
-    );
+    cfg.runtime_corner_deviation = Some(0.01);
+    assert_eq!(cfg.effective_limits().2, 0.01);
+    cfg.runtime_corner_deviation = None;
+    assert_eq!(cfg.effective_limits().2, cfg.cartesian.corner_deviation);
 }
 
 #[test]
@@ -253,8 +250,8 @@ fn post_processor_duplicate_name_rejected() {
     let err = PostProcessorSet::try_new(
         &registry,
         &[
-            pp("is", "smooth_zv", &[("frequency_hz", 50.0)]),
-            pp("is", "smooth_mzv", &[("frequency_hz", 40.0)]),
+            pp("is", "smooth_bell", &[("smooth_time", 0.01605)]),
+            pp("is", "smooth_bell", &[("smooth_time", 0.02390625)]),
         ],
     )
     .unwrap_err();
@@ -274,8 +271,8 @@ fn two_kernels_on_one_axis_rejected_with_v1_message() {
     let err = PostProcessorSet::try_new(
         &registry,
         &[
-            pp("is_a", "smooth_zv", &[("frequency_hz", 50.0)]),
-            pp("is_b", "smooth_mzv", &[("frequency_hz", 40.0)]),
+            pp("is_a", "smooth_bell", &[("smooth_time", 0.01605)]),
+            pp("is_b", "smooth_bell", &[("smooth_time", 0.02390625)]),
         ],
     )
     .unwrap_err();
@@ -289,19 +286,92 @@ fn kernel_and_pa_on_follower_e_compiles() {
         &registry,
         &[
             pp("pa", "linear_pressure_advance", &[("k", 0.04)]),
-            pp("st", "smooth_zv", &[("frequency_hz", 50.0)]),
+            pp("st", "smooth_bell", &[("smooth_time", 0.01605)]),
         ],
     )
     .unwrap();
     let chains = set.compile(&registry).unwrap();
     assert!(
-        matches!(chains.chains[3].stages[0], trajectory::ChainStage::LinearPressureAdvance { k } if k == 0.04)
+        matches!(chains.chains[3].stages[0], trajectory::ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.04)
     );
     assert!(matches!(
         chains.chains[3].stages[1],
         trajectory::ChainStage::SmoothKernel(_)
     ));
     assert_eq!(chains.followers, vec![(3, vec![0, 1, 2])]);
+}
+
+fn registry_with_x_pps_and_e(x_post_processors: &[&str]) -> AxisRegistry {
+    let mut x = decl("x", &[]);
+    x.post_processors = x_post_processors.iter().map(|s| (*s).to_string()).collect();
+    AxisRegistry::try_new(vec![
+        x,
+        decl("y", &[]),
+        decl("z", &[]),
+        decl("e", &["x", "y", "z"]),
+    ])
+    .unwrap()
+}
+
+#[test]
+fn gain_before_kernel_on_leader_axis_rejected() {
+    let registry = registry_with_x_pps_and_e(&["pa", "is"]);
+    let err = PostProcessorSet::try_new(
+        &registry,
+        &[
+            pp("pa", "linear_pressure_advance", &[("k", 0.002)]),
+            pp("is", "smooth_bell", &[("smooth_time", 0.01605)]),
+        ],
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("axis 'x'") && msg.contains("'pa'"),
+        "got: {msg}"
+    );
+}
+
+#[test]
+fn gain_after_kernel_on_leader_axis_compiles() {
+    let registry = registry_with_x_pps_and_e(&["is", "pa"]);
+    assert!(
+        PostProcessorSet::try_new(
+            &registry,
+            &[
+                pp("is", "smooth_bell", &[("smooth_time", 0.01605)]),
+                pp("pa", "linear_pressure_advance", &[("k", 0.002)]),
+            ],
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn gain_before_disabled_kernel_on_leader_axis_rejected() {
+    let registry = registry_with_x_pps_and_e(&["pa", "is"]);
+    let err = PostProcessorSet::try_new(
+        &registry,
+        &[
+            pp("pa", "linear_pressure_advance", &[("k", 0.002)]),
+            pp("is", "smooth_bell", &[("smooth_time", 0.0)]),
+        ],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("'pa'"), "got: {err}");
+}
+
+#[test]
+fn gain_without_kernel_on_axis_leading_nobody_compiles() {
+    let mut x = decl("x", &[]);
+    x.post_processors = vec!["pa".to_string()];
+    let registry = AxisRegistry::try_new(vec![x, decl("y", &[]), decl("z", &[])]).unwrap();
+    assert!(
+        PostProcessorSet::try_new(
+            &registry,
+            &[pp("pa", "linear_pressure_advance", &[("k", 0.002)])],
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -315,7 +385,7 @@ fn happy_path_compiles_pa_on_follower_e() {
     let chains = set.compile(&registry).unwrap();
     assert_eq!(chains.n_axes(), 4);
     assert!(
-        matches!(chains.chains[3].stages[0], trajectory::ChainStage::LinearPressureAdvance { k } if k == 0.04)
+        matches!(chains.chains[3].stages[0], trajectory::ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.04)
     );
     assert_eq!(chains.followers, vec![(3, vec![0, 1, 2])]);
 }
@@ -331,15 +401,141 @@ fn set_param_updates_named_instance_and_recompile_reflects_it() {
     set.set_param("pa", "k", 0.07).unwrap();
     let chains = set.compile(&registry).unwrap();
     assert!(
-        matches!(chains.chains[3].stages[0], trajectory::ChainStage::LinearPressureAdvance { k } if k == 0.07)
+        matches!(chains.chains[3].stages[0], trajectory::ChainStage::DerivativeGains { k1, k2: 0.0 } if k1 == 0.07)
     );
     assert!(set.set_param("nope", "k", 1.0).is_err());
     assert!(set.set_param("pa", "frequency_hz", 1.0).is_err());
 }
 
 #[test]
+fn mode_inverse_after_kernel_compiles_into_the_axis_chain() {
+    let registry = registry_with_e(&["slew", "belt"]);
+    let set = PostProcessorSet::try_new(
+        &registry,
+        &[
+            pp("slew", "smooth_bell", &[("smooth_time", 0.0015)]),
+            pp(
+                "belt",
+                "mode_inverse",
+                &[("frequency_hz", 131.0), ("damping_ratio", 0.05)],
+            ),
+        ],
+    )
+    .unwrap();
+    let chains = set.compile(&registry).unwrap();
+    let omega = 2.0 * std::f64::consts::PI * 131.0;
+    assert!(matches!(
+        chains.chains[3].stages[0],
+        trajectory::ChainStage::SmoothKernel(_)
+    ));
+    assert!(matches!(
+        chains.chains[3].stages[1],
+        trajectory::ChainStage::DerivativeGains { k1, k2 }
+            if k1 == 2.0 * 0.05 / omega && k2 == 1.0 / (omega * omega)
+    ));
+}
+
+#[test]
+fn mode_inverse_without_a_kernel_rejected_at_config_compile() {
+    let registry = registry_with_e(&["belt"]);
+    let err = PostProcessorSet::try_new(
+        &registry,
+        &[pp(
+            "belt",
+            "mode_inverse",
+            &[("frequency_hz", 131.0), ("damping_ratio", 0.05)],
+        )],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("smoothing kernel"), "got: {err}");
+}
+
+#[test]
+fn mode_inverse_missing_params_rejected_by_key_name() {
+    let registry = registry_with_e(&[]);
+    let err = PostProcessorSet::try_new(
+        &registry,
+        &[pp("belt", "mode_inverse", &[("damping_ratio", 0.05)])],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("frequency_hz"), "got: {err}");
+    let err = PostProcessorSet::try_new(
+        &registry,
+        &[pp("belt", "mode_inverse", &[("frequency_hz", 131.0)])],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("damping_ratio"), "got: {err}");
+}
+
+#[test]
+fn mode_inverse_overdamped_ratio_rejected() {
+    let registry = registry_with_e(&[]);
+    let err = PostProcessorSet::try_new(
+        &registry,
+        &[pp(
+            "belt",
+            "mode_inverse",
+            &[("frequency_hz", 131.0), ("damping_ratio", 1.0)],
+        )],
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("damping_ratio"), "got: {err}");
+}
+
+#[test]
 fn post_processor_missing_required_param_rejected() {
     let registry = registry_with_e(&[]);
-    let err = PostProcessorSet::try_new(&registry, &[pp("is", "smooth_zv", &[])]).unwrap_err();
-    assert!(err.to_string().contains("frequency_hz"), "got: {err}");
+    let err = PostProcessorSet::try_new(&registry, &[pp("is", "smooth_bell", &[])]).unwrap_err();
+    assert!(err.to_string().contains("smooth_time"), "got: {err}");
+}
+
+fn registry_with_kernel_on_x() -> (AxisRegistry, PostProcessorSet) {
+    let mut decls: Vec<AxisDecl> = ["x", "y", "z"]
+        .iter()
+        .map(|name| AxisDecl {
+            name: (*name).to_string(),
+            follows: vec![],
+            motors: vec![],
+            post_processors: vec![],
+        })
+        .collect();
+    decls[0].post_processors = vec!["shaper".into()];
+    let registry = AxisRegistry::try_new(decls).unwrap();
+    let set = PostProcessorSet::try_new(
+        &registry,
+        &[PostProcessorDecl {
+            name: "shaper".into(),
+            ty: "smooth_bell".into(),
+            params: vec![("smooth_time".into(), 0.02)],
+        }],
+    )
+    .unwrap();
+    (registry, set)
+}
+
+#[test]
+fn corner_budget_validation_passes_when_the_kernel_share_fits() {
+    let (registry, set) = registry_with_kernel_on_x();
+    let chains = set.compile(&registry).unwrap();
+    let kernel_share = geometry::kernel_corner_deviation_mm(0.02 * 0.02 / 28.0, 3000.0);
+    assert!(validate_corner_budget(kernel_share * 2.0, 3000.0, &chains).is_ok());
+    assert!(validate_corner_budget(0.0, 3000.0, &chains).is_ok());
+}
+
+#[test]
+fn corner_budget_validation_fails_loudly_when_the_kernel_exhausts_it() {
+    let (registry, set) = registry_with_kernel_on_x();
+    let chains = set.compile(&registry).unwrap();
+    let kernel_share = geometry::kernel_corner_deviation_mm(0.02 * 0.02 / 28.0, 3000.0);
+    let err = validate_corner_budget(kernel_share * 0.5, 3000.0, &chains).unwrap_err();
+    assert!(err.contains("axis x"), "{err}");
+    assert!(err.contains("corner_deviation"), "{err}");
+    assert!(err.contains("3000"), "{err}");
+}
+
+#[test]
+fn planner_config_validates_its_own_corner_budget() {
+    let cfg = PlannerConfig::default();
+    let chains = cfg.post_processors.compile(&cfg.axis_registry).unwrap();
+    assert!(cfg.validate_corner_budget(&chains).is_ok());
 }

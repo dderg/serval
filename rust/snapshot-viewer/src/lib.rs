@@ -25,6 +25,13 @@ struct Snapshot {
     traj_z_pieces: Option<Vec<Vec<f64>>>,
     #[serde(default)]
     traj_e_pieces: Option<Vec<Vec<f64>>>,
+    // The toolhead signal: the same tracks before the motor-side
+    // derivative-gain stages turned them into the motor command. Emitted only
+    // for cases where the two differ (e.g. a mode_inverse chain).
+    #[serde(default)]
+    toolhead_x_pieces: Option<Vec<Vec<f64>>>,
+    #[serde(default)]
+    toolhead_y_pieces: Option<Vec<Vec<f64>>>,
     traj_t_end: Option<f64>,
     // Per-axis (x, y, z, e) worst continuity jumps across piece seams, plus the
     // top offending seams. Optional so pre-seam-metric baselines still load.
@@ -484,6 +491,55 @@ fn eval_lane(pieces: &[Vec<f64>], ti: f64) -> (f64, f64, f64, f64) {
     eval_piece(&pieces[piece_at(pieces, ti)], ti)
 }
 
+#[derive(Default)]
+struct ToolheadSeries {
+    x: Vec<f64>,
+    y: Vec<f64>,
+    vx: Vec<f64>,
+    vy: Vec<f64>,
+    ax: Vec<f64>,
+    ay: Vec<f64>,
+    jx: Vec<f64>,
+    jy: Vec<f64>,
+    v_scalar: Vec<f64>,
+    a_scalar: Vec<f64>,
+    j_scalar: Vec<f64>,
+    a_tang: Vec<f64>,
+    a_cent: Vec<f64>,
+    j_tang: Vec<f64>,
+    j_cent: Vec<f64>,
+    kappa: Vec<f64>,
+}
+
+// The toolhead signal sampled on the exact grid the motor-command series use,
+// so the panels can overlay both without any resampling. Every derived motor
+// series (|XY| scalars, Frenet ∥/⊥ projections, kappa) is mirrored with the
+// identical formulas so the two signal families are directly comparable.
+fn toolhead_series(t: &[f64], xp: &[Vec<f64>], yp: &[Vec<f64>]) -> ToolheadSeries {
+    let mut s = ToolheadSeries::default();
+    for &ti in t {
+        let (x, vx, ax, jx) = eval_lane(xp, ti);
+        let (y, vy, ay, jy) = eval_lane(yp, ti);
+        s.x.push(x);
+        s.y.push(y);
+        s.vx.push(vx);
+        s.vy.push(vy);
+        s.ax.push(ax);
+        s.ay.push(ay);
+        s.jx.push(jx);
+        s.jy.push(jy);
+    }
+    s.v_scalar = scalar_derivative(&s.vx, &s.vy);
+    s.a_scalar = scalar_derivative(&s.ax, &s.ay);
+    s.j_scalar = scalar_derivative(&s.jx, &s.jy);
+    (s.a_tang, s.a_cent) = frenet_components(&s.vx, &s.vy, &s.ax, &s.ay);
+    (s.j_tang, s.j_cent) = frenet_components(&s.vx, &s.vy, &s.jx, &s.jy);
+    if !xp.is_empty() && !yp.is_empty() {
+        (s.kappa, _) = curvature_series(t, xp, yp);
+    }
+    s
+}
+
 fn time_series_from_pieces(
     xp: &[Vec<f64>],
     yp: &[Vec<f64>],
@@ -797,6 +853,7 @@ pub struct TrajectoryData {
     a_cent: Vec<f64>,
     j_tang: Vec<f64>,
     j_cent: Vec<f64>,
+    toolhead: ToolheadSeries,
     jerk_impulse_t: Vec<f64>,
     jerk_impulse_mag: Vec<f64>,
     accel_impulse_t: Vec<f64>,
@@ -835,6 +892,16 @@ impl TrajectoryData {
                 _ => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
             };
 
+        let toolhead = match (&snap.toolhead_x_pieces, &snap.toolhead_y_pieces) {
+            (Some(xp), Some(yp)) => toolhead_series(&ts.t, xp, yp),
+            (None, None) => ToolheadSeries::default(),
+            _ => {
+                return Err(JsValue::from_str(
+                    "snapshot carries only one of toolhead_x_pieces/toolhead_y_pieces",
+                ));
+            }
+        };
+
         let seam_axis = |v: &Option<Vec<f64>>| v.clone().unwrap_or_default();
 
         let (a_tang, a_cent) = frenet_components(&ts.vx, &ts.vy, &ts.ax, &ts.ay);
@@ -867,6 +934,7 @@ impl TrajectoryData {
             a_cent,
             j_tang,
             j_cent,
+            toolhead,
             jerk_impulse_t,
             jerk_impulse_mag,
             accel_impulse_t,
@@ -978,6 +1046,61 @@ impl TrajectoryData {
     }
     pub fn j_cent(&self) -> Float64Array {
         Float64Array::from(&self.j_cent[..])
+    }
+
+    // The toolhead signal on the same grid as t(). All empty — and
+    // has_toolhead() false — when the snapshot's motor command IS the
+    // toolhead signal (no motor-side derivative-gain stage).
+    pub fn has_toolhead(&self) -> bool {
+        !self.toolhead.x.is_empty()
+    }
+    pub fn th_x(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.x[..])
+    }
+    pub fn th_y(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.y[..])
+    }
+    pub fn th_vx(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.vx[..])
+    }
+    pub fn th_vy(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.vy[..])
+    }
+    pub fn th_ax(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.ax[..])
+    }
+    pub fn th_ay(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.ay[..])
+    }
+    pub fn th_jx(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.jx[..])
+    }
+    pub fn th_jy(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.jy[..])
+    }
+    pub fn th_v_scalar(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.v_scalar[..])
+    }
+    pub fn th_a_scalar(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.a_scalar[..])
+    }
+    pub fn th_j_scalar(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.j_scalar[..])
+    }
+    pub fn th_a_tang(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.a_tang[..])
+    }
+    pub fn th_a_cent(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.a_cent[..])
+    }
+    pub fn th_j_tang(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.j_tang[..])
+    }
+    pub fn th_j_cent(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.j_cent[..])
+    }
+    pub fn th_kappa(&self) -> Float64Array {
+        Float64Array::from(&self.toolhead.kappa[..])
     }
 
     // Per-axis (x, y, z, e) worst seam continuity jumps. Empty on baselines

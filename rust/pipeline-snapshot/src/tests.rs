@@ -12,7 +12,13 @@ fn square_waypoints() -> Vec<(f64, f64, f64, f64, f64)> {
 }
 
 fn default_limits() -> geometry::VelocityLimits {
-    geometry::VelocityLimits::try_new(300.0, 3000.0, 5.0, 100_000.0).unwrap()
+    geometry::VelocityLimits::try_new(
+        300.0,
+        3000.0,
+        geometry::corner_deviation_from_scv(5.0, 3000.0),
+        100_000.0,
+    )
+    .unwrap()
 }
 
 fn default_config(limits: geometry::VelocityLimits) -> StreamConfig {
@@ -53,7 +59,7 @@ fn raw_path_starts_at_origin() {
 fn fitted_outcome_has_spatial_segments() {
     let limits = default_limits();
     let moves = build_moves(&square_waypoints(), limits).unwrap();
-    let (fitted, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
+    let (fitted, _, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
     let spatial_count = fitted
         .iter()
         .filter(|fm| fm.segment.spatial.is_some())
@@ -70,7 +76,7 @@ fn eval_piece(p: &[f64], t: f64) -> f64 {
 fn trajectory_lowers_to_contiguous_finite_cubics() {
     let limits = default_limits();
     let moves = build_moves(&square_waypoints(), limits).unwrap();
-    let (_, shaped) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
+    let (_, shaped, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
     let traj = collect_trajectory_pieces(&shaped);
     assert!(!traj.x.is_empty());
     assert_eq!(traj.x.len(), traj.y.len());
@@ -91,7 +97,7 @@ fn trajectory_lowers_to_contiguous_finite_cubics() {
 fn cubic_pieces_are_position_continuous_at_joins() {
     let limits = default_limits();
     let moves = build_moves(&square_waypoints(), limits).unwrap();
-    let (_, shaped) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
+    let (_, shaped, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
     let traj = collect_trajectory_pieces(&shaped);
     // Hermite lowering matches position at every join, on both axes.
     for axis in [&traj.x, &traj.y] {
@@ -111,7 +117,7 @@ fn single_move_skips_fitting() {
     let limits = default_limits();
     let waypoints = vec![(0.0, 0.0, 0.0, 0.0, 100.0), (10.0, 0.0, 0.0, 0.0, 100.0)];
     let moves = build_moves(&waypoints, limits).unwrap();
-    let (fitted, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
+    let (fitted, _, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
     assert_eq!(fitted.len(), 1, "single move must pass through unchanged");
 }
 
@@ -196,7 +202,7 @@ fn extrusion_lowers_to_a_moving_e_track() {
         (10.0, 10.0, 0.0, 2.0, 100.0),
     ];
     let moves = build_moves(&waypoints, limits).unwrap();
-    let (_, shaped) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
+    let (_, shaped, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
     let traj = collect_trajectory_pieces(&shaped);
     assert!(!traj.e.is_empty(), "E lane must lower to cubic pieces");
     assert_eq!(
@@ -240,7 +246,7 @@ fn seam_metrics_flag_a_known_discontinuity() {
 fn continuous_pieces_report_no_seam_jumps() {
     let limits = default_limits();
     let moves = build_moves(&square_waypoints(), limits).unwrap();
-    let (_, shaped) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
+    let (_, shaped, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
     let traj = collect_trajectory_pieces(&shaped);
     let m = seam_metrics(&traj);
     // C1 Hermite lowering matches position and velocity at every join.
@@ -258,6 +264,7 @@ fn snapshot_serializes_to_the_baseline_schema() {
             max_velocity: 300.0,
             max_accel: 3000.0,
             square_corner_velocity: 5.0,
+            corner_deviation: None,
             max_jerk: 100_000.0,
             max_extrude_only_velocity: None,
             max_extrude_only_accel: None,
@@ -292,6 +299,7 @@ fn default_axis_snapshot_params() -> SnapshotParams {
         max_velocity: 300.0,
         max_accel: 3000.0,
         square_corner_velocity: 5.0,
+        corner_deviation: None,
         max_jerk: 100_000.0,
         max_extrude_only_velocity: None,
         max_extrude_only_accel: None,
@@ -341,21 +349,131 @@ fn declaring_only_the_e_axis_still_defaults_x_y_z() {
 }
 
 #[test]
-fn all_four_post_processor_types_are_reachable() {
-    for (ty, params) in [
-        ("smooth_zv", [("frequency_hz", 40.0)].as_slice()),
-        ("smooth_mzv", [("frequency_hz", 40.0)].as_slice()),
-        ("smooth_triangle", [("smooth_time", 0.02)].as_slice()),
-        ("linear_pressure_advance", [("k", 0.04)].as_slice()),
+fn all_post_processor_types_are_reachable() {
+    // Kernels attach to a spatial axis; a bare derivative-gain stage is only
+    // legal off the leader axes (pre-kernel gains on leaders are rejected),
+    // so linear_pressure_advance rides the e follower, its natural home.
+    for (ty, params, axis_name) in [
+        ("smooth_bell", [("smooth_time", 0.0200625)].as_slice(), "x"),
+        ("smooth_triangle", [("smooth_time", 0.02)].as_slice(), "x"),
+        ("smooth_zv", [("frequency_hz", 40.0)].as_slice(), "x"),
+        ("smooth_mzv", [("frequency_hz", 40.0)].as_slice(), "x"),
+        ("linear_pressure_advance", [("k", 0.04)].as_slice(), "e"),
     ] {
         let mut params_snap = default_axis_snapshot_params();
-        let mut x = axis("x", &[]);
-        x.post_processors = vec!["pp".to_string()];
-        params_snap.axis_decls = vec![x];
+        let mut carrier = match axis_name {
+            "x" => axis("x", &[]),
+            _ => axis("e", &["x", "y", "z"]),
+        };
+        carrier.post_processors = vec!["pp".to_string()];
+        params_snap.axis_decls = vec![carrier];
         params_snap.post_processor_decls = vec![pp("pp", ty, params)];
         pipeline_snapshot(&square_waypoints(), params_snap)
             .unwrap_or_else(|e| panic!("post-processor type '{ty}' should compile: {e}"));
     }
+}
+
+#[test]
+fn mode_inverse_is_reachable_after_a_kernel() {
+    pipeline_snapshot(&square_waypoints(), mode_inverse_on_x_params())
+        .unwrap_or_else(|e| panic!("mode_inverse after a kernel should compile: {e}"));
+}
+
+fn mode_inverse_on_x_params() -> SnapshotParams {
+    let mut params = default_axis_snapshot_params();
+    let mut x = axis("x", &[]);
+    x.post_processors = vec!["slew".to_string(), "belt".to_string()];
+    params.axis_decls = vec![x];
+    params.post_processor_decls = vec![
+        pp("slew", "smooth_bell", &[("smooth_time", 0.0015)]),
+        pp(
+            "belt",
+            "mode_inverse",
+            &[("frequency_hz", 40.0), ("damping_ratio", 0.1)],
+        ),
+    ];
+    params
+}
+
+fn eval_lane(pieces: &[Vec<f64>], t: f64) -> f64 {
+    let idx = pieces
+        .partition_point(|p| p[0] <= t)
+        .saturating_sub(1)
+        .min(pieces.len() - 1);
+    eval_piece(&pieces[idx], t.clamp(pieces[idx][0], pieces[idx][1]))
+}
+
+fn max_lane_difference(a: &[Vec<f64>], b: &[Vec<f64>], t_end: f64) -> f64 {
+    (0..=1000)
+        .map(|i| t_end * i as f64 / 1000.0)
+        .map(|t| (eval_lane(a, t) - eval_lane(b, t)).abs())
+        .fold(0.0, f64::max)
+}
+
+#[test]
+fn mode_inverse_emits_a_toolhead_signal_distinct_from_the_motor_command() {
+    let snap = pipeline_snapshot(&square_waypoints(), mode_inverse_on_x_params()).unwrap();
+    let toolhead_x = snap.toolhead_x_pieces.as_ref().expect("toolhead x lane");
+    let toolhead_y = snap.toolhead_y_pieces.as_ref().expect("toolhead y lane");
+    assert!(!toolhead_x.is_empty());
+    assert!(
+        max_lane_difference(toolhead_x, &snap.traj_x_pieces, snap.traj_t_end) > 1e-2,
+        "x carries motor-side gains, so its motor command must depart from the toolhead signal"
+    );
+    assert!(
+        max_lane_difference(toolhead_y, &snap.traj_y_pieces, snap.traj_t_end) < 1e-6,
+        "y has no motor-side stage, so both signals coincide"
+    );
+    let json: serde_json::Value = serde_json::to_value(&snap).unwrap();
+    for key in [
+        "toolhead_x_pieces",
+        "toolhead_y_pieces",
+        "toolhead_z_pieces",
+        "toolhead_e_pieces",
+    ] {
+        assert!(json.get(key).is_some(), "missing snapshot key {key}");
+    }
+}
+
+#[test]
+fn kernel_only_chain_serializes_without_toolhead_lanes() {
+    let mut params = default_axis_snapshot_params();
+    let mut x = axis("x", &[]);
+    x.post_processors = vec!["slew".to_string()];
+    params.axis_decls = vec![x];
+    params.post_processor_decls = vec![pp("slew", "smooth_bell", &[("smooth_time", 0.0015)])];
+    let snap = pipeline_snapshot(&square_waypoints(), params).unwrap();
+    assert!(snap.toolhead_x_pieces.is_none());
+    let json: serde_json::Value = serde_json::to_value(&snap).unwrap();
+    for key in [
+        "toolhead_x_pieces",
+        "toolhead_y_pieces",
+        "toolhead_z_pieces",
+        "toolhead_e_pieces",
+    ] {
+        assert!(
+            json.get(key).is_none(),
+            "kernel-only snapshot must serialize without {key}"
+        );
+    }
+}
+
+#[test]
+fn mode_inverse_without_a_kernel_surfaces_as_an_error() {
+    let mut params = default_axis_snapshot_params();
+    let mut x = axis("x", &[]);
+    x.post_processors = vec!["belt".to_string()];
+    params.axis_decls = vec![x];
+    params.post_processor_decls = vec![pp(
+        "belt",
+        "mode_inverse",
+        &[("frequency_hz", 40.0), ("damping_ratio", 0.1)],
+    )];
+    let err = pipeline_snapshot(&square_waypoints(), params).unwrap_err();
+    assert!(
+        matches!(&err, SnapshotError::InvalidChain(msg) if msg.contains("smoothing kernel")),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -365,8 +483,8 @@ fn composition_conflict_surfaces_as_an_error() {
     x.post_processors = vec!["a".to_string(), "b".to_string()];
     params.axis_decls = vec![x];
     params.post_processor_decls = vec![
-        pp("a", "smooth_zv", &[("frequency_hz", 40.0)]),
-        pp("b", "smooth_mzv", &[("frequency_hz", 40.0)]),
+        pp("a", "smooth_bell", &[("smooth_time", 0.0200625)]),
+        pp("b", "smooth_triangle", &[("smooth_time", 0.02)]),
     ];
     let err = pipeline_snapshot(&square_waypoints(), params).unwrap_err();
     assert!(matches!(err, SnapshotError::InvalidChain(_)));
@@ -388,4 +506,56 @@ fn unknown_axis_name_is_rejected() {
     params.axis_decls = vec![axis("a", &[])];
     let err = pipeline_snapshot(&square_waypoints(), params).unwrap_err();
     assert!(matches!(err, SnapshotError::InvalidChain(msg) if msg.contains("'a'")));
+}
+
+#[test]
+fn streaming_final_snapshot_serializes_byte_identical_to_full() {
+    let full = pipeline_snapshot(&square_waypoints(), default_axis_snapshot_params()).unwrap();
+    let mut partial_count = 0;
+    let streamed = pipeline_snapshot_streaming(
+        &square_waypoints(),
+        default_axis_snapshot_params(),
+        2,
+        |_| partial_count += 1,
+    )
+    .unwrap();
+    assert!(partial_count > 0);
+    assert_eq!(
+        serde_json::to_string(&full).unwrap(),
+        serde_json::to_string(&streamed).unwrap()
+    );
+}
+
+#[test]
+fn streaming_partials_are_growing_prefixes_with_the_full_raw_path() {
+    let mut partials: Vec<(Vec<f64>, Vec<Vec<f64>>)> = Vec::new();
+    let streamed = pipeline_snapshot_streaming(
+        &square_waypoints(),
+        default_axis_snapshot_params(),
+        2,
+        |snap| partials.push((snap.raw_x.clone(), snap.traj_x_pieces.clone())),
+    )
+    .unwrap();
+    assert!(!partials.is_empty());
+    let mut prev_len = 0;
+    for (raw_x, x_pieces) in &partials {
+        assert_eq!(*raw_x, streamed.raw_x);
+        assert!(x_pieces.len() >= prev_len);
+        assert!(x_pieces.len() <= streamed.traj_x_pieces.len());
+        assert_eq!(*x_pieces, streamed.traj_x_pieces[..x_pieces.len()]);
+        prev_len = x_pieces.len();
+    }
+}
+
+#[test]
+fn streaming_partials_carry_toolhead_lanes_when_the_chain_has_motor_side_stages() {
+    let mut saw_toolhead_partial = false;
+    let streamed =
+        pipeline_snapshot_streaming(&square_waypoints(), mode_inverse_on_x_params(), 2, |snap| {
+            assert!(snap.toolhead_x_pieces.is_some());
+            saw_toolhead_partial = true;
+        })
+        .unwrap();
+    assert!(saw_toolhead_partial);
+    assert!(streamed.toolhead_x_pieces.is_some());
 }

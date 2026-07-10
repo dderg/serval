@@ -21,81 +21,107 @@ pub fn run_lowerer(
     input: Receiver<PlannedItem>,
     output: Sender<LoweredItem>,
     fit_tol: FitTol,
-    mut axis_chains: AxisChainSet,
+    axis_chains: AxisChainSet,
     home_pos: Vec<f64>,
     t_start: f64,
 ) {
-    let mut odometer = home_pos;
-    let mut lower_chains = lowering_chains(&axis_chains);
-    let mut t = t_start;
-    let mut rest_hold_pending = true;
-    let mut mesh: Option<Arc<SurfaceTransform>> = None;
-
+    let mut lowerer = Lowerer::new(fit_tol, axis_chains, home_pos, t_start);
     while let Ok(item) = input.recv() {
+        if !lowerer.feed(item, &output) {
+            return;
+        }
+    }
+}
+
+/// The lowering stage's persistent state, driveable item by item by
+/// single-threaded hosts; [`run_lowerer`] is the channel loop over it.
+pub struct Lowerer {
+    fit_tol: FitTol,
+    axis_chains: AxisChainSet,
+    lower_chains: Vec<trajectory::CompiledChain>,
+    odometer: Vec<f64>,
+    t: f64,
+    rest_hold_pending: bool,
+    mesh: Option<Arc<SurfaceTransform>>,
+}
+
+impl Lowerer {
+    pub fn new(
+        fit_tol: FitTol,
+        axis_chains: AxisChainSet,
+        home_pos: Vec<f64>,
+        t_start: f64,
+    ) -> Self {
+        Self {
+            fit_tol,
+            lower_chains: lowering_chains(&axis_chains),
+            axis_chains,
+            odometer: home_pos,
+            t: t_start,
+            rest_hold_pending: true,
+            mesh: None,
+        }
+    }
+
+    pub fn feed(&mut self, item: PlannedItem, output: &Sender<LoweredItem>) -> bool {
         let planned = match item {
             PlannedItem::Move(planned) => planned,
             PlannedItem::Drain => {
-                rest_hold_pending = true;
-                if output.send(LoweredItem::Drain).is_err() {
-                    return;
-                }
-                continue;
+                self.rest_hold_pending = true;
+                return output.send(LoweredItem::Drain).is_ok();
             }
             PlannedItem::Control(ctrl) => {
                 match &ctrl {
                     Control::Dwell { secs } => {
                         assert!(*secs >= 0.0, "lowerer: negative dwell {secs}");
-                        t += secs;
+                        self.t += secs;
                     }
                     Control::Reset { pos } => {
-                        odometer.clone_from(pos);
-                        t = 0.0;
-                        rest_hold_pending = true;
+                        self.odometer.clone_from(pos);
+                        self.t = 0.0;
+                        self.rest_hold_pending = true;
                     }
                     Control::SetAxisChains(chains) => {
-                        axis_chains = chains.clone();
-                        lower_chains = lowering_chains(&axis_chains);
+                        self.axis_chains = chains.clone();
+                        self.lower_chains = lowering_chains(&self.axis_chains);
                     }
                     Control::SetMesh {
                         mesh: m,
                         gcode_z_rebase,
                     } => {
-                        mesh = m.clone();
-                        if let Some(z) = odometer.get_mut(2) {
+                        self.mesh = m.clone();
+                        if let Some(z) = self.odometer.get_mut(2) {
                             *z = *gcode_z_rebase;
                         }
                     }
                     Control::Nudge { .. } | Control::Barrier(_) => {}
                 }
-                if output.send(LoweredItem::Control(ctrl)).is_err() {
-                    return;
-                }
-                continue;
+                return output.send(LoweredItem::Control(ctrl)).is_ok();
             }
         };
-        let hold_pad = if rest_hold_pending {
-            axis_chains.forward_support()
+        let hold_pad = if self.rest_hold_pending {
+            self.axis_chains.forward_support()
         } else {
             0.0
         };
-        rest_hold_pending = false;
+        self.rest_hold_pending = false;
         let clock = crate::timing::stopwatch();
         let mut seg = lower_move(
             &planned.geometry,
             &planned.velocity,
-            t + hold_pad,
-            &odometer,
-            fit_tol,
-            &lower_chains,
-            mesh.as_deref(),
+            self.t + hold_pad,
+            &self.odometer,
+            self.fit_tol,
+            &self.lower_chains,
+            self.mesh.as_deref(),
         )
         .unwrap_or_else(|e| panic!("lowerer: line {}: {e}", planned.geometry.source.start_line));
         seg.source_line = planned.geometry.source.start_line;
         if hold_pad > 0.0 {
             let hold = rest_hold_segment(
-                &odometer,
-                rest_z_warp(mesh.as_deref(), &odometer),
-                t,
+                &self.odometer,
+                rest_z_warp(self.mesh.as_deref(), &self.odometer),
+                self.t,
                 seg.t_start,
                 seg.axes.len(),
                 seg.source_line,
@@ -107,12 +133,12 @@ pub fn run_lowerer(
                 }))
                 .is_err()
             {
-                return;
+                return false;
             }
         }
 
-        t = seg.t_end;
-        advance_odometer(&mut odometer, &planned.geometry);
+        self.t = seg.t_end;
+        advance_odometer(&mut self.odometer, &planned.geometry);
         tracing::debug!(
             subsystem = "motion",
             event = "pipe_lower",
@@ -129,12 +155,9 @@ pub fn run_lowerer(
         );
 
         let rest_at_end = planned.velocity.exit_v <= REST_EPS_MM_S;
-        if output
+        output
             .send(LoweredItem::Seg(LoweredSegment { seg, rest_at_end }))
-            .is_err()
-        {
-            return;
-        }
+            .is_ok()
     }
 }
 

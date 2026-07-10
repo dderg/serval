@@ -14,8 +14,8 @@ from typing import Optional
 
 COMMON_TAIL = """
 [post_processor is_xy]
-type: smooth_mzv
-frequency_hz: 50
+type: smooth_bell
+smooth_time: 0.019125
 
 [virtual_sdcard]
 path: {gcode_dir}
@@ -313,12 +313,12 @@ microsteps: 16
 rotation_distance: 4
 
 [post_processor shaper_x]
-type: smooth_mzv
-frequency_hz: 50
+type: smooth_bell
+smooth_time: 0.019125
 
 [post_processor shaper_y]
-type: smooth_zv
-frequency_hz: 44
+type: smooth_bell
+smooth_time: 0.018238636363636363
 
 [virtual_sdcard]
 path: {gcode_dir}
@@ -747,8 +747,8 @@ home_autocalibrate: never
 autocal_tolerance: 0.02
 {bed_mesh_section}
 [post_processor is_xy]
-type: smooth_mzv
-frequency_hz: 50
+type: smooth_bell
+smooth_time: 0.019125
 
 [virtual_sdcard]
 path: {gcode_dir}

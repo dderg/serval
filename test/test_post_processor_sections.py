@@ -99,19 +99,41 @@ def test_happy_path_parses_sections_for_init_planner():
         SPATIAL
         + [
             axis("e", follows="x,y,z", post_processors="is,pa"),
-            post_processor("is", type="smooth_mzv", frequency_hz="52.5"),
+            post_processor("is", type="smooth_bell", smooth_time="0.0182"),
             post_processor("pa", type="linear_pressure_advance", k="0.04"),
         ]
     )
     th._read_axes(cfg)
     th._read_post_processors(cfg)
     assert ("e", ["x", "y", "z"], [], ["is", "pa"]) in th.axis_sections
-    assert ("is", "smooth_mzv", [("frequency_hz", 52.5)]) in (
+    assert ("is", "smooth_bell", [("smooth_time", 0.0182)]) in (
         th.post_processor_sections
     )
     assert ("pa", "linear_pressure_advance", [("k", 0.04)]) in (
         th.post_processor_sections
     )
+
+
+def test_mode_inverse_section_parses_both_params():
+    th = make_toolhead()
+    cfg = StubConfig(
+        SPATIAL
+        + [
+            axis("x", post_processors="slew,belt"),
+            post_processor("slew", type="smooth_bell", smooth_time="0.0015"),
+            post_processor(
+                "belt",
+                type="mode_inverse",
+                frequency_hz="131.0",
+                damping_ratio="0.05",
+            ),
+        ]
+    )
+    th._read_axes(cfg)
+    th._read_post_processors(cfg)
+    belt = next(s for s in th.post_processor_sections if s[0] == "belt")
+    assert belt[1] == "mode_inverse"
+    assert sorted(belt[2]) == [("damping_ratio", 0.05), ("frequency_hz", 131.0)]
 
 
 class CommandError(Exception):

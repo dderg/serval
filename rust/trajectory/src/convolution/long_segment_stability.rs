@@ -1,6 +1,6 @@
 use super::fixtures::{pad_segment_axis, FittedSegment};
 use crate::convolution::ShapedSignal;
-use crate::kernel::build_smooth_mzv_kernel;
+use crate::kernel::build_smooth_bell_kernel;
 use nurbs::bezier::{bezier_pieces_to_nurbs, BezierPiece};
 
 fn constant_segment_69s(x_val: f64) -> FittedSegment {
@@ -29,10 +29,9 @@ fn constant_segment_69s(x_val: f64) -> FittedSegment {
 
 #[test]
 fn constant_69s_near_zero_deviation() {
-    let freq = 186.0;
-    let t_sm = 0.95625 / freq;
+    let t_sm = 0.005141129032258065;
     let t_sm_half = t_sm / 2.0;
-    let kernel = build_smooth_mzv_kernel(t_sm);
+    let kernel = build_smooth_bell_kernel(t_sm);
 
     let x_val = 150.0;
     let fitted = vec![constant_segment_69s(x_val)];
@@ -55,10 +54,9 @@ fn constant_69s_near_zero_deviation() {
 
 #[test]
 fn stable_where_nurbs_convolve_fails() {
-    let freq = 186.0;
-    let t_sm = 0.95625 / freq;
+    let t_sm = 0.005141129032258065;
     let t_sm_half = t_sm / 2.0;
-    let kernel = build_smooth_mzv_kernel(t_sm);
+    let kernel = build_smooth_bell_kernel(t_sm);
 
     let x_val = 150.0;
     let fitted = vec![constant_segment_69s(x_val)];

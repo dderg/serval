@@ -1,20 +1,26 @@
 use crate::chain::{ChainStage, PostProcessorError};
 
 mod linear_pressure_advance;
+mod mode_inverse;
+mod smooth_bell;
 mod smooth_mzv;
 mod smooth_triangle;
 mod smooth_zv;
 
 pub use linear_pressure_advance::LinearPressureAdvance;
-pub use smooth_mzv::{SmoothMzv, SMOOTH_MZV_T_SM_PER_HZ};
+pub use mode_inverse::ModeInverse;
+pub use smooth_bell::SmoothBell;
+pub use smooth_mzv::SmoothMzv;
 pub use smooth_triangle::SmoothTriangle;
-pub use smooth_zv::{SmoothZv, SMOOTH_ZV_T_SM_PER_HZ};
+pub use smooth_zv::SmoothZv;
 
 pub static REGISTRY: &[&dyn PostProcessorAlgo] = &[
+    &SmoothBell,
+    &SmoothTriangle,
     &SmoothZv,
     &SmoothMzv,
-    &SmoothTriangle,
     &LinearPressureAdvance,
+    &ModeInverse,
 ];
 
 pub fn lookup(type_name: &str) -> Option<&'static dyn PostProcessorAlgo> {
@@ -40,6 +46,7 @@ pub trait PostProcessorAlgo: std::fmt::Debug + Send + Sync {
 pub enum Bound {
     Positive,
     NonNegative,
+    UnitInterval,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -53,6 +60,7 @@ impl ParamSpec {
         let ok = match self.bound {
             Bound::Positive => value.is_finite() && value > 0.0,
             Bound::NonNegative => value.is_finite() && value >= 0.0,
+            Bound::UnitInterval => value.is_finite() && (0.0..1.0).contains(&value),
         };
         if ok {
             Ok(())
