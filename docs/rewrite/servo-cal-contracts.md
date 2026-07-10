@@ -25,7 +25,7 @@ One experiment (one command invocation) = one directory:
 ```json
 {
   "version": 1,
-  "experiment": "gain_sweep|refine_sweep|inertia_sweep|accel_sweep|tracking|inertia_grid",
+  "experiment": "gain_sweep|gain_ladder|refine_sweep|inertia_sweep|accel_sweep|tracking|inertia_grid",
   "tag": "cal",
   "created_utc": "2026-07-10T15:15:16Z",
   "axis": "X",

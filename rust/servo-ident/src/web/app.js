@@ -16,17 +16,32 @@ const PAGE_DEFS = {
   gains: {
     label: "gains",
     groups: ["gains"],
-    experiments: ["gain_sweep", "refine_sweep"],
+    experiments: ["gain_sweep", "refine_sweep", "gain_ladder"],
     charts: ["psd"],
     intro: "find the highest speed gain without resonance or torque rail",
+    templates: [
+      {
+        label: "ladder…",
+        command: "SERVO_GAIN_LADDER SAFE=550 START=700 STEP=50 MAX=900 AXIS=X ITERATIONS=1",
+        title: "climb from START by STEP until a rung flags, then revert to SAFE",
+      },
+    ],
   },
   notches: {
     label: "notches",
     groups: ["notch"],
-    experiments: ["gain_sweep", "refine_sweep"],
+    experiments: ["gain_sweep", "refine_sweep", "gain_ladder"],
     charts: ["psd"],
     peaks: true,
     intro: "kill the resonances the PSD shows so gains can go higher",
+    templates: [
+      {
+        label: "harvest…",
+        command: "SERVO_HARVEST_NOTCHES AXIS=X MODE=2",
+        title:
+          "hand notches 1-2 to the drive's adaptive tuning, stroke, read back what it chose, lock",
+      },
+    ],
   },
   observers: {
     label: "observers",
@@ -236,12 +251,18 @@ function controlsSectionsHtml(def) {
         `</section>`
     );
   } else {
+    const templates = (def.templates || [])
+      .map(
+        (t, i) =>
+          `<button class="template-btn" data-template="${i}" title="${t.title}">${t.label}</button>`
+      )
+      .join("");
     parts.push(
       `<section class="sweep">` +
         `<div class="section-head"><h2>sweep</h2><span class="note" id="form-run-name"></span></div>` +
         `<div class="row"><input type="text" id="sweep-command" ` +
         `placeholder="select a run to prefill, or type a command">` +
-        `<button id="run-sweep-btn">run</button></div>` +
+        `<button id="run-sweep-btn">run</button>${templates}</div>` +
         `</section>`
     );
   }
@@ -396,6 +417,18 @@ function bindPageEvents() {
   if (applyBtn) applyBtn.addEventListener("click", applyDriveChanges);
   const sweepBtn = el("run-sweep-btn");
   if (sweepBtn) sweepBtn.addEventListener("click", runSweep);
+  const def = currentPageDef();
+  document.querySelectorAll("button.template-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const t = def.templates[Number(btn.dataset.template)];
+      const sweep = el("sweep-command");
+      if (t && sweep) {
+        sweep.value = t.command;
+        const label = el("form-run-name");
+        if (label) label.textContent = "template — edit values before running";
+      }
+    });
+  });
 }
 
 // --- runs table ---------------------------------------------------------------
@@ -1491,6 +1524,14 @@ function reconstructCommand(manifest) {
     case "gain_sweep": {
       const values = manifest.steps.map((s) => s.swept.speed).join(",");
       return `SERVO_CALIBRATE_GAINS SPEED_GAINS=${values} AXIS=${axis} ITERATIONS=${iterations} TAG=${tag}`;
+    }
+    case "gain_ladder": {
+      const speeds = manifest.steps.map((s) => s.swept.speed);
+      const safe = speeds[0];
+      const start = speeds.length > 1 ? speeds[1] : safe;
+      const step = speeds.length > 2 ? speeds[2] - speeds[1] : 50;
+      const max = speeds[speeds.length - 1];
+      return `SERVO_GAIN_LADDER SAFE=${safe} START=${start} STEP=${step} MAX=${max} AXIS=${axis} ITERATIONS=${iterations} TAG=${tag}`;
     }
     case "refine_sweep": {
       const param = commonKeys.length === 1 ? commonKeys[0] : "speed";

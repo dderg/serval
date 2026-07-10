@@ -261,6 +261,7 @@ select.cell-input { text-align: left; }
 
 .sweep .row { margin-top: 0; }
 #sweep-command { flex: 1; min-width: 0; }
+.template-btn { font-size: 11px; color: var(--dim); }
 
 .gcode-details textarea {
   width: 100%;

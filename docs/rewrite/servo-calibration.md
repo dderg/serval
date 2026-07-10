@@ -186,6 +186,44 @@ command error naming the reason instead of writing anything. Params:
 `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2) `DWELL_MS` `TAG` (cal)
 `ACCEL_CHIP` `APPLY` `SERVO`.
 
+#### SERVO_GAIN_LADDER
+Speed-gain sweep that climbs until analysis flags trouble, instead of a fixed
+`SPEED_GAINS` list. Runs the ladder `[SAFE, START, START+STEP, … ≤ MAX]` with
+the same `SERVO_CALIBRATE_GAINS` machinery (position gain `×1.6`, integral
+`1250000 ÷ gain`). After **each** rung at or above `START` completes its
+capture, `servo-cal analyze` runs on the run so far and that rung's step flags
+are inspected; the first rung whose step carries `resonance_detected`,
+`torque_saturated` or `settle_window_truncated` **stops the climb** — higher
+rungs are never executed. The `SAFE` baseline (always the first rung) never
+counts as a stop reason and is applied to every drive at the end via the gain
+write path, so the axis is left at a known-good gain regardless of where the
+climb stopped. Output is the usual verdict one-liner (recommended step, reason,
+run dir) plus, on an early stop, one line naming the rung and the flags that
+stopped it. `START` names the first climb gain, not a stroke bound — the stroke
+window comes from the configured axis bounds. A mid-ladder analysis failure
+(binary non-zero, unreadable `results.json`) aborts loudly; the run directory
+keeps everything captured so far. Params: `SAFE` `START` `STEP` (50, must be
+> 0) `MAX` (≥ `START`) `AXIS` (X) `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2)
+`DWELL_MS` `TAG` (ladder) `SERVO`.
+
+#### SERVO_HARVEST_NOTCHES
+Automates the "let the drive's adaptive notch tuning find the resonances during
+motion, then lock and read back what it chose" recipe (manual 7.10). Writes
+C01.30 `adaptive_notch_mode` = `MODE` (1 = 1st notch adaptive, 2 = 1st+2nd
+adaptive; anything else is a command error) to every servo driving `AXIS`,
+strokes the axis so the adaptive tuner sees motion (while the mode is 1 or 2 the
+drive rewrites notch 1–2 parameters itself), settles, then reads back per drive
+notch 1 and notch 2 center frequency / width / depth (C01.40–45), and finally
+writes C01.30 = 0 to **lock** the tuning. The `MODE` writes and the lock are
+journaled deliberately (`record_param_write`) — this command keeps no run
+directory, the write journal is its audit trail. Any SDO read/write failure
+aborts naming the motor and address, before the lock, so a failed readback
+never leaves the drive locked on half-harvested values. Output is one line per
+drive with the harvested notch 1 and notch 2 (freq Hz, width, depth) and a
+closing note that the values are now locked (mode 0). Params: `AXIS` (X) `MODE`
+(2) `START` `END` `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2) `DWELL_MS`
+`SERVO`.
+
 #### SERVO_SWEEP_INERTIA
 Empirical inertia sweep: apply the tuned gains first, then this writes each
 C00.06 ratio in `RATIOS`, records one capture per step, and runs
@@ -253,6 +291,8 @@ Schemas: [servo-cal-contracts.md](servo-cal-contracts.md).
 |---|---|---|
 | `SERVO_MEASURE_TRACKING` | `servo-cal analyze` | run dir + `results.json` (per-motor + combined tracking metrics; records every motor driving the axis — both lanes on CoreXY) |
 | `SERVO_CALIBRATE_GAINS` | `servo-cal analyze` | run dir + `results.json` verdict (highest clean gain step); `APPLY=1` also writes + verifies |
+| `SERVO_GAIN_LADDER` | `servo-cal analyze` (per rung + final) | run dir + `results.json` verdict; climbs until a rung flags trouble, then applies `SAFE` |
+| `SERVO_HARVEST_NOTCHES` | — | no run dir; writes C01.30, strokes, reads back notch 1–2, locks (C01.30=0); journaled param writes |
 | `SERVO_REFINE_GAIN` | `servo-cal analyze` | run dir + `results.json` verdict; `APPLY=1` also writes + verifies |
 | `SERVO_SWEEP_INERTIA` | `servo-cal analyze` | run dir + `results.json` (no automated pick, so `APPLY=1` always errors) |
 | `SERVO_SWEEP_ACCEL` | `servo-cal analyze` | run dir + `results.json` verdict (max non-railing accel); `APPLY=1` verifies at the recommended accel (no SDO write) |

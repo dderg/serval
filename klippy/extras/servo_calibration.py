@@ -86,6 +86,15 @@ GAIN_PARAMS = {
 
 INERTIA_RATIO_ADDR = "0x2000.0x07"
 
+NOTCH_MODE_ADDR = "0x2001.0x31"
+NOTCH_READBACK: tuple[tuple[str, tuple[str, str, str]], ...] = (
+    ("notch1", ("0x2001.0x41", "0x2001.0x42", "0x2001.0x43")),
+    ("notch2", ("0x2001.0x44", "0x2001.0x45", "0x2001.0x46")),
+)
+LADDER_STOP_FLAGS = frozenset(
+    {"resonance_detected", "torque_saturated", "settle_window_truncated"}
+)
+
 
 def refine_values(
     current: float,
@@ -418,6 +427,43 @@ class SweepEngine:
     def __init__(self, calibration: "ServoCalibration"):
         self._cal = calibration
 
+    def run_one(
+        self,
+        adapter: Any,
+        i: int,
+        value: Any,
+        total: int,
+        servos: list[str],
+        run_step: Callable[[Any], None],
+        gcmd: Any,
+        accel_chip: Any = None,
+        accel_chip_name: str | None = None,
+    ) -> SweepStep:
+        name = adapter.step_name(value)
+        swept, applied = adapter.apply(value)
+        gcmd.respond_info(adapter.describe(i, value, total, servos))
+        self._cal._start_capture(name, servos)
+        aclient = (
+            None if accel_chip is None else accel_chip.start_internal_client()
+        )
+        try:
+            run_step(value)
+            self._cal._stop_capture()
+        finally:
+            if aclient is not None:
+                aclient.finish_measurements()
+        step = SweepStep(name, swept, applied)
+        if aclient is not None:
+            assert accel_chip_name is not None, (
+                "accel client exists without a chip name"
+            )
+            accel_path = self._cal._write_accel_csv(
+                gcmd, aclient, accel_chip_name, name
+            )
+            step.accel = os.path.basename(accel_path)
+        self._cal._on_step_complete(step)
+        return step
+
     def run(
         self,
         adapter: Any,
@@ -428,35 +474,20 @@ class SweepEngine:
         accel_chip: Any = None,
         accel_chip_name: str | None = None,
     ) -> list[SweepStep]:
-        steps = []
-        for i, value in enumerate(values):
-            name = adapter.step_name(value)
-            swept, applied = adapter.apply(value)
-            gcmd.respond_info(adapter.describe(i, value, len(values), servos))
-            self._cal._start_capture(name, servos)
-            aclient = (
-                None
-                if accel_chip is None
-                else accel_chip.start_internal_client()
+        return [
+            self.run_one(
+                adapter,
+                i,
+                value,
+                len(values),
+                servos,
+                run_step,
+                gcmd,
+                accel_chip,
+                accel_chip_name,
             )
-            try:
-                run_step(value)
-                self._cal._stop_capture()
-            finally:
-                if aclient is not None:
-                    aclient.finish_measurements()
-            step = SweepStep(name, swept, applied)
-            if aclient is not None:
-                assert accel_chip_name is not None, (
-                    "accel client exists without a chip name"
-                )
-                accel_path = self._cal._write_accel_csv(
-                    gcmd, aclient, accel_chip_name, name
-                )
-                step.accel = os.path.basename(accel_path)
-            self._cal._on_step_complete(step)
-            steps.append(step)
-        return steps
+            for i, value in enumerate(values)
+        ]
 
 
 COARSE_GAINS = {"position": 400, "speed": 250, "integral": 3184}
@@ -742,7 +773,9 @@ class ServoCalibration:
             "SERVO_SET_INERTIA_RATIO",
             "SERVO_APPLY_GAINS",
             "SERVO_CALIBRATE_GAINS",
+            "SERVO_GAIN_LADDER",
             "SERVO_REFINE_GAIN",
+            "SERVO_HARVEST_NOTCHES",
             "SERVO_SWEEP_INERTIA",
             "SERVO_SWEEP_ACCEL",
             "SERVO_SET_STIFFNESS",
@@ -911,12 +944,15 @@ class ServoCalibration:
                 "failed to read results.json from %s: %s" % (run_dir, e)
             )
 
+    def _run_analyze(self, gcmd: Any, run: ExperimentRun) -> dict[str, Any]:
+        binary = self._servo_cal(gcmd)
+        self._run(gcmd, [binary, "analyze", run.run_dir], 120.0)
+        return self._read_results(gcmd, run.run_dir)
+
     def _analyze_and_report(
         self, gcmd: Any, run: ExperimentRun
     ) -> dict[str, Any]:
-        binary = self._servo_cal(gcmd)
-        self._run(gcmd, [binary, "analyze", run.run_dir], 120.0)
-        results = self._read_results(gcmd, run.run_dir)
+        results = self._run_analyze(gcmd, run)
         verdict = results.get("verdict") or {}
         step = verdict.get("recommended_step")
         reason = verdict.get("reason") or "no reason given"
@@ -1810,6 +1846,194 @@ class ServoCalibration:
                 self._apply_verdict(gcmd, run, results, axis)
         finally:
             self._active_run = None
+        return steps
+
+    def _stroke_motion(self, gcmd: Any) -> tuple[float, float, int, int]:
+        speed = gcmd.get_float("SPEED", 100.0, above=0.0)
+        accel = gcmd.get_float("ACCEL", 3000.0, above=0.0)
+        iterations = gcmd.get_int("ITERATIONS", 2, minval=1)
+        dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
+        return speed, accel, iterations, dwell
+
+    def _config_bounds(self, gcmd: Any, axis: str) -> tuple[float, float]:
+        lo, hi = self.bounds.get(axis, (None, None))
+        if lo is None or hi is None:
+            raise gcmd.error(
+                "no stroke bounds configured for axis %s" % (axis,)
+            )
+        return lo, hi
+
+    cmd_SERVO_HARVEST_NOTCHES_help = (
+        "Let the drive's adaptive notch tuning find the axis resonances "
+        "during motion, then lock and read back what it chose (manual 7.10). "
+        "Writes C01.30 adaptive_notch_mode = MODE (1 = 1st notch adaptive, "
+        "2 = 1st+2nd adaptive) to every servo driving AXIS, strokes so the "
+        "tuner sees motion, reads back notch 1 and notch 2 center frequency / "
+        "width / depth, then writes C01.30 = 0 to lock. The mode writes and "
+        "the lock are journaled (no run directory). Any SDO read/write "
+        "failure aborts naming the motor and address, before the lock. "
+        "Params AXIS (X) MODE (2) START END SPEED ACCEL ITERATIONS DWELL_MS"
+    )
+
+    def _write_notch_mode(self, servos: list[str], mode: int) -> None:
+        self.gcode.run_script_from_command(
+            "\n".join(
+                "SERVO_PARAM SERVO=%s SET=%s VALUE=%d TYPE=u16"
+                % (servo, NOTCH_MODE_ADDR, mode)
+                for servo in servos
+            )
+        )
+
+    def _read_notches(
+        self, gcmd: Any, servo: str
+    ) -> list[tuple[int, int, int]]:
+        notches: list[tuple[int, int, int]] = []
+        for _label, addrs in NOTCH_READBACK:
+            triple: list[int] = []
+            for addr in addrs:
+                try:
+                    triple.append(self._read_param(servo, addr))
+                except (RuntimeError, ValueError) as e:
+                    raise gcmd.error(
+                        "SERVO_HARVEST_NOTCHES: notch readback failed for "
+                        "%s %s: %s" % (servo, addr, e)
+                    )
+            notches.append((triple[0], triple[1], triple[2]))
+        return notches
+
+    def cmd_SERVO_HARVEST_NOTCHES(self, gcmd: Any) -> None:
+        axis = gcmd.get("AXIS", "X").upper()
+        mode = gcmd.get_int("MODE", 2)
+        if mode not in (1, 2):
+            raise gcmd.error(
+                "MODE must be 1 (1st notch adaptive) or 2 (1st+2nd "
+                "adaptive), got %d" % (mode,)
+            )
+        servos = self._servos(gcmd, axis)
+        start, end = servo_strokes.axis_bounds(gcmd, self.bounds, axis)
+        speed, accel, iterations, dwell = self._stroke_motion(gcmd)
+        self._prep(axis, dwell)
+        self._write_notch_mode(servos, mode)
+        self._strokes(axis, start, end, speed, accel, iterations, dwell)
+        self.gcode.run_script_from_command("M400")
+        harvested = {servo: self._read_notches(gcmd, servo) for servo in servos}
+        self._write_notch_mode(servos, 0)
+        self._restore()
+        for servo in servos:
+            n1, n2 = harvested[servo]
+            gcmd.respond_info(
+                "%s notch1 %d Hz w%d d%d | notch2 %d Hz w%d d%d"
+                % (servo, n1[0], n1[1], n1[2], n2[0], n2[1], n2[2])
+            )
+        gcmd.respond_info(
+            "adaptive notch tuning locked (C01.30 = 0) on %s"
+            % (", ".join(servos),)
+        )
+
+    cmd_SERVO_GAIN_LADDER_help = (
+        "Speed-gain sweep that climbs until analysis flags trouble instead of "
+        "a fixed list. Runs [SAFE, START, START+STEP, ... <= MAX] with the "
+        "SERVO_CALIBRATE_GAINS machinery (position/integral derived from the "
+        "speed gain). After every rung at or above START, servo-cal analyzes "
+        "the run so far; the first rung whose step carries a resonance, "
+        "torque-rail or truncated-settle flag stops the climb (higher rungs "
+        "are never executed). The SAFE baseline never stops the climb and is "
+        "applied at the end. Prints the verdict one-liner and, on an early "
+        "stop, the rung and flags that stopped it. START names the first "
+        "climb gain, not a stroke bound - the stroke window comes from the "
+        "configured axis bounds. Params SAFE START STEP (50) MAX AXIS (X) "
+        "SPEED ACCEL ITERATIONS DWELL_MS TAG (ladder) SERVO"
+    )
+
+    def _ladder_values(self, gcmd: Any) -> tuple[int, list[int]]:
+        safe_g = gcmd.get_int("SAFE")
+        start_g = gcmd.get_int("START")
+        step_g = gcmd.get_int("STEP", 50)
+        max_g = gcmd.get_int("MAX")
+        if step_g <= 0:
+            raise gcmd.error("STEP must be > 0 (got %d)" % (step_g,))
+        if max_g < start_g:
+            raise gcmd.error(
+                "MAX (%d) must be >= START (%d)" % (max_g, start_g)
+            )
+        values = [safe_g] + list(range(start_g, max_g + 1, step_g))
+        for sg in values:
+            if not 100 <= sg <= 3000:
+                raise gcmd.error(
+                    "speed gain %d outside 100..3000 (0.1 Hz units)" % (sg,)
+                )
+        return start_g, values
+
+    def cmd_SERVO_GAIN_LADDER(self, gcmd: Any) -> list[SweepStep]:
+        axis = gcmd.get("AXIS", "X").upper()
+        servos = self._servos(gcmd, axis)
+        start_g, values = self._ladder_values(gcmd)
+        safe_g = values[0]
+        start, end = self._config_bounds(gcmd, axis)
+        speed, accel, iterations, dwell = self._stroke_motion(gcmd)
+        tag = gcmd.get("TAG", "ladder")
+        stroke_plan = {
+            "start": start,
+            "end": end,
+            "speed": speed,
+            "accel": accel,
+            "iterations": iterations,
+            "dwell_ms": dwell,
+        }
+        run = self._begin_run(
+            gcmd,
+            "gain_ladder",
+            tag,
+            axis,
+            servos,
+            stroke_plan,
+            self._corexy_rails(gcmd, axis),
+        )
+        adapter = GainSetAdapter(self, servos, tag)
+        stopped: tuple[int, str, list[str]] | None = None
+        steps: list[SweepStep] = []
+        try:
+            self._prep(axis, dwell)
+            self._set_manual_tuning(servos)
+            for i, value in enumerate(values):
+                step = self._engine.run_one(
+                    adapter,
+                    i,
+                    value,
+                    len(values),
+                    servos,
+                    lambda _v: self._strokes(
+                        axis, start, end, speed, accel, iterations, dwell
+                    ),
+                    gcmd,
+                )
+                steps.append(step)
+                if value < start_g:
+                    continue
+                results = self._run_analyze(gcmd, run)
+                flags = sorted(
+                    set(self._step_flags(results, step.name))
+                    & LADDER_STOP_FLAGS
+                )
+                if flags:
+                    stopped = (value, step.name, flags)
+                    break
+            pos_gain, integral = GainSetAdapter.derive(safe_g)
+            self._write_gains(servos, pos_gain, safe_g, integral)
+            gcmd.respond_info(
+                "ladder done - SAFE speed gain %d applied on %s"
+                % (safe_g, ", ".join(servos))
+            )
+            self._restore()
+            results = self._analyze_and_report(gcmd, run)
+            self._last_sweep_run, self._last_sweep_results = run, results
+        finally:
+            self._active_run = None
+        if stopped is not None:
+            gcmd.respond_info(
+                "climb stopped at speed gain %d (step %s): flags %s"
+                % (stopped[0], stopped[1], stopped[2])
+            )
         return steps
 
     cmd_SERVO_REFINE_GAIN_help = (

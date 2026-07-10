@@ -503,3 +503,188 @@ def test_apply_default_off_does_not_apply():
     assert not any(
         isinstance(r, str) and "APPLY verified" in r for r in gcmd.responses
     )
+
+
+NOTCH_VALUES = {
+    (0x2001, 0x41): 111,
+    (0x2001, 0x42): 1,
+    (0x2001, 0x43): 2,
+    (0x2001, 0x44): 222,
+    (0x2001, 0x45): 3,
+    (0x2001, 0x46): 4,
+}
+
+
+def _str_scripts(gcode):
+    return [s for s in gcode.scripts if isinstance(s, str)]
+
+
+def _g1_x_present(scripts):
+    return any(ln.startswith("G1 X") for s in scripts for ln in s.splitlines())
+
+
+def test_harvest_writes_mode_reads_back_and_locks():
+    servo_param.drain_param_writes()
+    sc, gcode = make_sc(engine_values=dict(NOTCH_VALUES))
+    gcmd = FakeGcmd(AXIS="X", MODE=2)
+    sc.cmd_SERVO_HARVEST_NOTCHES(gcmd)
+    scripts = _str_scripts(gcode)
+    for motor in ("motor_a", "motor_b"):
+        assert any(
+            "SERVO_PARAM SERVO=%s SET=0x2001.0x31 VALUE=2 TYPE=u16" % (motor,)
+            in s
+            for s in scripts
+        )
+    mode_idx = [
+        i for i, s in enumerate(scripts) if "SET=0x2001.0x31 VALUE=2" in s
+    ]
+    lock_idx = [
+        i for i, s in enumerate(scripts) if "SET=0x2001.0x31 VALUE=0" in s
+    ]
+    assert mode_idx and lock_idx
+    assert min(lock_idx) > max(mode_idx)
+    assert _g1_x_present(scripts)
+    for motor in ("motor_a", "motor_b"):
+        assert (
+            "%s notch1 111 Hz w1 d2 | notch2 222 Hz w3 d4" % (motor,)
+            in gcmd.responses
+        )
+    assert any("locked (C01.30 = 0)" in r for r in gcmd.responses)
+
+
+def test_harvest_readback_failure_aborts_before_lock():
+    servo_param.drain_param_writes()
+    sc, gcode = make_sc(handle=None)
+    gcmd = FakeGcmd(AXIS="X", MODE=2)
+    with pytest.raises(RuntimeError, match="notch readback failed"):
+        sc.cmd_SERVO_HARVEST_NOTCHES(gcmd)
+    scripts = _str_scripts(gcode)
+    assert any("SET=0x2001.0x31 VALUE=2" in s for s in scripts)
+    assert not any("SET=0x2001.0x31 VALUE=0" in s for s in scripts)
+
+
+def test_harvest_rejects_mode_3():
+    sc, _ = make_sc()
+    with pytest.raises(RuntimeError, match="MODE must be 1"):
+        sc.cmd_SERVO_HARVEST_NOTCHES(FakeGcmd(AXIS="X", MODE=3))
+
+
+def make_sc_ladder(flagged_speed=None, flag="torque_saturated"):
+    """Like make_sc, but the analyze stub writes a results.json with a per-step
+    flags list (built from the manifest), flagging the step whose speed gain
+    is `flagged_speed` so the ladder's incremental analysis stops the climb."""
+    gcode = FakeGcode()
+    rails = [
+        _rail("x", [_motor("motor_a", "n", 0)]),
+        _rail("y", [_motor("motor_b", "n", 1, invert=True)]),
+    ]
+    node = FakeNode("ethercat_node n", 1, {"motor_a": 0, "motor_b": 1})
+    objs = {
+        "gcode": gcode,
+        "toolhead": FakeToolhead(FakeKin(rails)),
+        "servo_capture": FakeServoCapture(),
+        "motion_engine": FakeEngine(),
+        "ethercat_node n": node,
+    }
+    sc = servo_calibration.ServoCalibration(FakeConfig(FakePrinter(objs)))
+    sc.captures_root = tempfile.mkdtemp()
+    sc.servo_cal_binary = sys.executable
+    sc._prep = lambda *a, **k: None
+    sc._restore = lambda *a, **k: None
+
+    flagged_step = None
+    if flagged_speed is not None:
+        pos, integral = servo_calibration.GainSetAdapter.derive(flagged_speed)
+        flagged_step = "ladder_p%d_s%d_i%d" % (pos, flagged_speed, integral)
+
+    def fake_run(gcmd, argv, timeout):
+        gcode.scripts.append(("RUN", argv, timeout))
+        if argv[1] != "analyze":
+            return
+        run_dir = argv[2]
+        with open(os.path.join(run_dir, "manifest.json")) as f:
+            manifest = json.load(f)
+        recorded = manifest["steps"]
+        steps = [
+            {
+                "name": s["name"],
+                "flags": [flag] if s["name"] == flagged_step else [],
+            }
+            for s in recorded
+        ]
+        verdict = {
+            "recommended_step": recorded[-1]["name"] if recorded else None,
+            "reason": "highest clean gain",
+            "flags": [],
+        }
+        with open(os.path.join(run_dir, "results.json"), "w") as f:
+            json.dump({"verdict": verdict, "steps": steps}, f)
+
+    sc._run = fake_run
+    return sc, gcode
+
+
+def _step_scap(sg):
+    pos, integral = servo_calibration.GainSetAdapter.derive(sg)
+    return "step_ladder_p%d_s%d_i%d.scap" % (pos, sg, integral)
+
+
+def _capture_names(sc):
+    return [
+        os.path.basename(p)
+        for p, _s in sc.printer.lookup_object("servo_capture").captures
+    ]
+
+
+def test_ladder_stops_climbing_after_flagged_rung():
+    servo_param.drain_param_writes()
+    # values = [SAFE=300, 500, 600, 700, 800]; flag the third rung (700).
+    sc, gcode = make_sc_ladder(flagged_speed=700)
+    gcmd = FakeGcmd(AXIS="X", SAFE=300, START=500, STEP=100, MAX=800)
+    sc.cmd_SERVO_GAIN_LADDER(gcmd)
+    names = _capture_names(sc)
+    assert _step_scap(300) in names  # SAFE baseline
+    assert _step_scap(700) in names  # flagged rung ran
+    assert _step_scap(800) not in names  # fourth rung never executed
+    assert any(
+        "climb stopped at speed gain 700" in r and "torque_saturated" in r
+        for r in gcmd.responses
+    )
+    assert any(r.startswith("verdict:") for r in gcmd.responses)
+
+
+def test_ladder_applies_safe_at_end():
+    servo_param.drain_param_writes()
+    sc, gcode = make_sc_ladder()  # no flag -> climbs the whole ladder
+    gcmd = FakeGcmd(AXIS="X", SAFE=300, START=500, STEP=100, MAX=700)
+    sc.cmd_SERVO_GAIN_LADDER(gcmd)
+    scripts = _str_scripts(gcode)
+    # SAFE integral = round(1250000/300) = 4167, unique to the SAFE rung; a
+    # climbing rung (500) has integral 2500. The final SAFE application must
+    # land after every climbing write.
+    safe_idx = [
+        i for i, s in enumerate(scripts) if "SET=0x2001.0x03 VALUE=4167" in s
+    ]
+    climb_idx = [
+        i for i, s in enumerate(scripts) if "SET=0x2001.0x03 VALUE=2500" in s
+    ]
+    assert safe_idx and climb_idx
+    assert max(safe_idx) > max(climb_idx)
+    assert any("SAFE speed gain 300 applied" in r for r in gcmd.responses)
+    assert any(r.startswith("verdict:") for r in gcmd.responses)
+
+
+def test_ladder_rejects_nonpositive_step():
+    sc, _ = make_sc_ladder()
+    with pytest.raises(RuntimeError, match="STEP must be > 0"):
+        sc.cmd_SERVO_GAIN_LADDER(
+            FakeGcmd(AXIS="X", SAFE=300, START=500, STEP=0, MAX=800)
+        )
+
+
+def test_ladder_rejects_max_below_start():
+    sc, _ = make_sc_ladder()
+    with pytest.raises(RuntimeError, match="must be >= START"):
+        sc.cmd_SERVO_GAIN_LADDER(
+            FakeGcmd(AXIS="X", SAFE=300, START=800, STEP=100, MAX=500)
+        )
