@@ -4,6 +4,7 @@ use crate::buzz::BuzzOsc;
 use crate::capture::{Capture, PendingStart, PendingStop};
 use crate::curves::AxisRing;
 use crate::dynamics::DynamicsModel;
+use crate::live_tap::LiveTap;
 use crate::mailbox::MailboxWorker;
 use crate::scale::CountMap;
 use crate::sensorless::SensorlessBank;
@@ -58,6 +59,8 @@ pub struct EndpointCtx {
     heartbeat_sent: bool,
     gate: TorqueGate,
     capture: Capture,
+    live_tap: LiveTap,
+    tap_slots: Vec<u8>,
     cycle_index: u64,
     mailbox: MailboxWorker,
     pending_starts: Vec<(u32, String, PendingStart)>,

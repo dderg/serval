@@ -483,24 +483,39 @@ fn record_capture_sample(
     all_acc: &[f32],
     all_vel: &[f32],
 ) {
-    if ctx.capture.is_active() {
-        let mut flags = 0u8;
-        if ctx.gate.state() == TorqueState::Enabled {
-            flags |= FLAG_TORQUE_ENABLED;
-        }
-        if motion_active {
-            flags |= FLAG_MOTION_ACTIVE;
-        }
-        let mut record = CaptureRecord::new(ctx.cycle_index, flags);
-        record.drive_count = ctx.capture_slots.len() as u8;
-        for (i, &slot) in ctx.capture_slots.iter().enumerate() {
-            let t = ctx.drive.telemetry(usize::from(slot));
+    let want_file = ctx.capture.is_active();
+    let want_tap = ctx.live_tap.has_subscriber();
+    if !want_file && !want_tap {
+        return;
+    }
+    let mut flags = 0u8;
+    if ctx.gate.state() == TorqueState::Enabled {
+        flags |= FLAG_TORQUE_ENABLED;
+    }
+    if motion_active {
+        flags |= FLAG_MOTION_ACTIVE;
+    }
+    let EndpointCtx {
+        drive,
+        cmd_counts_per_mm,
+        capture_slots,
+        tap_slots,
+        capture,
+        live_tap,
+        cycle_index,
+        ..
+    } = ctx;
+    let build = |slots: &[u8]| {
+        let mut record = CaptureRecord::new(*cycle_index, flags);
+        record.drive_count = slots.len() as u8;
+        for (i, &slot) in slots.iter().enumerate() {
+            let t = drive.telemetry(usize::from(slot));
             // The commanded kinematics are sampled in planner-stream frame;
             // flip them into the drive frame (as cmd_counts_per_mm's sign
             // does for the target) so they are sign-consistent with the
             // drive-frame position/velocity/torque channels — otherwise an
             // inverted axis fits negative inertia.
-            let dir = ctx.cmd_counts_per_mm[usize::from(slot)].signum() as f32;
+            let dir = cmd_counts_per_mm[usize::from(slot)].signum() as f32;
             record.drives[i] = DriveSample {
                 target_counts: t.target_position,
                 position_actual: t.position_actual,
@@ -515,7 +530,15 @@ fn record_capture_sample(
                 vel_cmd: dir * all_vel[usize::from(slot)],
             };
         }
-        ctx.capture.push(record);
+        record
+    };
+    if want_file {
+        let record = build(capture_slots);
+        capture.push(record);
+    }
+    if want_tap {
+        let record = build(tap_slots);
+        live_tap.push(record);
     }
 }
 
