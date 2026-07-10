@@ -118,7 +118,6 @@ class ServoCalibration:
             "SERVO_MEASURE_TRACKING",
             "SERVO_MEASURE_INERTIA",
             "SERVO_MEASURE_INERTIA_COREXY",
-            "SERVO_MEASURE_FRICTION",
             "SERVO_FIT_DYNAMICS",
             "SERVO_FIT_DYNAMICS_COREXY",
             "SERVO_CALIBRATE_INERTIA_RATIO",
@@ -636,28 +635,6 @@ class ServoCalibration:
                 self._strokes(
                     "Y", y_start, y_end, speed, accel, iterations, dwell
                 )
-        self.gcode.run_script_from_command("SERVO_CAPTURE_STOP")
-        self._restore()
-
-    cmd_SERVO_MEASURE_FRICTION_help = (
-        "Slow constant-speed sweeps for the torque-vs-position friction map. "
-        "Params AXIS START END SPEED ACCEL ITERATIONS DWELL_MS NAME"
-    )
-
-    def cmd_SERVO_MEASURE_FRICTION(self, gcmd):
-        axis = gcmd.get("AXIS", "X").upper()
-        start, end = self._axis_bounds(gcmd, axis)
-        speed = gcmd.get_float("SPEED", 20.0, above=0.0)
-        accel = gcmd.get_float("ACCEL", 300.0, above=0.0)
-        iterations = gcmd.get_int("ITERATIONS", 2, minval=1)
-        dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
-        name = gcmd.get("NAME", "friction")
-        servos = self._axis_servos(gcmd, axis)
-        self._prep(axis, dwell)
-        self.gcode.run_script_from_command(
-            "SERVO_CAPTURE_START SERVO=%s NAME=%s" % (",".join(servos), name)
-        )
-        self._strokes(axis, start, end, speed, accel, iterations, dwell)
         self.gcode.run_script_from_command("SERVO_CAPTURE_STOP")
         self._restore()
 

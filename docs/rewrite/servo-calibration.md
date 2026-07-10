@@ -98,12 +98,6 @@ measurement. Params: `SERVOS` `X_START`
 `X_END` `Y_START` `Y_END` `ACCELS` `SPEEDS` `ITERATIONS` `DWELL_MS` `NAME`
 (ident).
 
-#### SERVO_MEASURE_FRICTION
-Slow constant-speed sweeps for the torque-vs-position friction map; captures
-every motor that moves the axis. Params:
-`AXIS` (X) `START` `END` `SPEED` (20) `ACCEL` (300) `ITERATIONS` (2) `DWELL_MS`
-`NAME` (friction).
-
 ## Fit / inertia-ratio commands
 
 #### SERVO_FIT_DYNAMICS
@@ -195,7 +189,7 @@ Vendor-table tuning path: standard mode (C00.04=1) + C00.05 stiffness level
 | `SERVO_FIT_DYNAMICS[_COREXY]`, `SERVO_CALIBRATE_INERTIA_RATIO[_COREXY]` | `servo_fit_dynamics.py` | `~/printer_data/config/servo_dynamics/dynamics_<name>_<stamp>.toml` + C00.06 |
 | `SERVO_CALIBRATE_GAINS` | `servo_gain_report.py` | comparison PNG in `~/printer_data/config/servo_calibrate_results/` |
 | `SERVO_SWEEP_INERTIA` | `servo_inertia_report.py` | comparison PNG in `~/printer_data/config/servo_calibrate_results/` |
-| `SERVO_MEASURE_INERTIA[_COREXY]`, `SERVO_MEASURE_FRICTION` | — | `.scap` capture only |
+| `SERVO_MEASURE_INERTIA[_COREXY]` | — | `.scap` capture only |
 
 All captures land in `~/printer_data/logs/servo_captures/` as
 `<name>_<YYYYmmdd_HHMMSS>.scap`; per-step accelerometer recordings land next
@@ -232,7 +226,3 @@ above invoke them with the running klippy interpreter.
   an error).
 - **`servo_inertia_report.py`** — inertia-ratio sweep comparison PNG + metrics
   table, no automated recommendation (`--tag`, `--steps`).
-- **`servo_fit_compare.py`** — diagnostic (not driven by a command): fits the
-  scalar inertia three ways from one `.scap` (commanded accel, velocity
-  derivative, position second-derivative) and compares, to check the fit is
-  stable across C00.06 settings.
