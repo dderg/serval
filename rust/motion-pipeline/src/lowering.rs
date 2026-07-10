@@ -13,7 +13,7 @@ use geometry::{Move, MoveVelocity, SurfaceTransform};
 use nurbs::ScalarNurbs;
 use nurbs::bezier::{BezierPiece, bezier_pieces_to_nurbs};
 #[cfg(test)]
-pub(crate) use straight::apply_pressure_advance;
+pub(crate) use straight::apply_derivative_gains;
 #[cfg(test)]
 use trajectory::ChainStage;
 use trajectory::{CompiledChain, ShapedSegment};

@@ -14,20 +14,24 @@ use crate::torque::TorqueGate;
 use crate::wire::{status_heartbeat_frame, sync_pair_response_frame};
 use mcu_protocol::messages::SyncPairResponse;
 
+#[cfg(feature = "hw")]
 mod bringup;
 mod commands;
 mod cycle;
 mod drive;
+#[cfg(test)]
+mod tests;
 
+#[cfg(feature = "hw")]
 pub use bringup::bringup;
 
-use drive::{DriveChain, FfiDriveChain};
+use drive::DriveChain;
 
 static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 pub struct EndpointCtx {
     server: FrameServer,
-    drive: FfiDriveChain,
+    drive: Box<dyn DriveChain>,
 
     num_slaves: usize,
     counts_per_mm: Vec<f64>,
@@ -181,6 +185,9 @@ pub(super) fn discard_motion(ctx: &mut EndpointCtx) {
     }
     for c in &mut ctx.cmaps {
         *c = None;
+    }
+    for lc in &mut ctx.last_counts {
+        *lc = None;
     }
     ctx.buzz.clear();
 }

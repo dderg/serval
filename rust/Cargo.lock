@@ -1426,6 +1426,7 @@ name = "trajectory"
 version = "0.1.0"
 dependencies = [
  "geometry",
+ "libm",
  "nurbs",
  "thiserror",
 ]

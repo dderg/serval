@@ -1791,7 +1791,8 @@ The toolhead module is automatically loaded.
 
 #### SET_VELOCITY_LIMIT
 `SET_VELOCITY_LIMIT [VELOCITY=<value>] [ACCEL=<value>]
-[MINIMUM_CRUISE_RATIO=<value>] [SQUARE_CORNER_VELOCITY=<value>]
+[MINIMUM_CRUISE_RATIO=<value>] [CORNER_DEVIATION=<value>]
+[SQUARE_CORNER_VELOCITY=<value>]
 [X_VELOCITY=<value>] [X_ACCEL=<value>] [Y_VELOCITY=<value>] [Y_ACCEL=<value>]
 [Z_VELOCITY=<value>] [Z_ACCEL=<value>]`: This
 command can alter the velocity limits that were specified in the

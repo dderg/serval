@@ -374,3 +374,66 @@ fn curvature_series_flags_cusp_at_a_speed_too_small_for_kappa_to_be_meaningful()
     let (_, classes) = curvature_series(&t, &xp, &yp);
     assert_eq!(classes[0], CurvatureClass::Cusp);
 }
+
+#[test]
+fn toolhead_series_samples_on_the_shared_grid() {
+    // x = 2*tau (linear), y = 1 + 3*tau^2 (quadratic), both on [0, 1].
+    let xp = vec![vec![0.0, 1.0, 0.0, 2.0]];
+    let yp = vec![vec![0.0, 1.0, 1.0, 0.0, 3.0]];
+    let t = vec![0.0, 0.5, 1.0];
+    let s = toolhead_series(&t, &xp, &yp);
+    assert_eq!(s.x, vec![0.0, 1.0, 2.0]);
+    assert_eq!(s.vx, vec![2.0, 2.0, 2.0]);
+    assert_eq!(s.ax, vec![0.0, 0.0, 0.0]);
+    assert_eq!(s.y, vec![1.0, 1.75, 4.0]);
+    assert_eq!(s.vy, vec![0.0, 3.0, 6.0]);
+    assert_eq!(s.ay, vec![6.0, 6.0, 6.0]);
+}
+
+#[test]
+fn toolhead_series_mirrors_motor_derived_series() {
+    // x = 2*tau + tau^3, y = 1 + 3*tau^2, both on [0, 1] -- cubic in x so the
+    // jerk lane is nonzero, quadratic in y so it isn't trivially symmetric.
+    let xp = vec![vec![0.0, 1.0, 0.0, 2.0, 0.0, 1.0]];
+    let yp = vec![vec![0.0, 1.0, 1.0, 0.0, 3.0]];
+    let t = vec![0.0, 0.5, 1.0];
+    let s = toolhead_series(&t, &xp, &yp);
+
+    assert_eq!(s.jx, vec![6.0, 6.0, 6.0]);
+    assert_eq!(s.jy, vec![0.0, 0.0, 0.0]);
+
+    let expected_v = scalar_derivative(&s.vx, &s.vy);
+    let expected_a = scalar_derivative(&s.ax, &s.ay);
+    let expected_j = scalar_derivative(&s.jx, &s.jy);
+    assert_eq!(s.v_scalar, expected_v);
+    assert_eq!(s.a_scalar, expected_a);
+    assert_eq!(s.j_scalar, expected_j);
+
+    let (a_tang, a_cent) = frenet_components(&s.vx, &s.vy, &s.ax, &s.ay);
+    let (j_tang, j_cent) = frenet_components(&s.vx, &s.vy, &s.jx, &s.jy);
+    assert_eq!(s.a_tang, a_tang);
+    assert_eq!(s.a_cent, a_cent);
+    assert_eq!(s.j_tang, j_tang);
+    assert_eq!(s.j_cent, j_cent);
+
+    let (expected_kappa, _) = curvature_series(&t, &xp, &yp);
+    assert_eq!(s.kappa, expected_kappa);
+    assert_eq!(s.kappa.len(), t.len());
+}
+
+#[test]
+fn toolhead_series_kappa_matches_analytic_curvature() {
+    // At t=0: v = (2, 0), a = (0, 6) -- kappa = (vx*ay - vy*ax)/speed^3 = 12/8.
+    let xp = vec![vec![0.0, 1.0, 0.0, 2.0]];
+    let yp = vec![vec![0.0, 1.0, 1.0, 0.0, 3.0]];
+    let s = toolhead_series(&[0.0], &xp, &yp);
+    assert!((s.kappa[0] - 1.5).abs() < 1e-12);
+}
+
+#[test]
+fn toolhead_series_is_empty_for_empty_lanes() {
+    let s = toolhead_series(&[], &[], &[]);
+    assert!(s.x.is_empty() && s.y.is_empty());
+    assert!(s.jx.is_empty() && s.j_scalar.is_empty());
+    assert!(s.a_tang.is_empty() && s.kappa.is_empty());
+}

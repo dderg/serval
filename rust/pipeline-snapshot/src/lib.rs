@@ -5,7 +5,7 @@
 //! its intermediate fitted-stage output (pre-axis-split spatial geometry)
 //! tapped alongside the final shaped output.
 
-use crossbeam_channel::unbounded;
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use geometry::path::CurvatureProfile;
 use geometry::path::lowering::PositionProfile;
 use nurbs::bezier::extract_bezier_pieces;
@@ -15,9 +15,11 @@ use trajectory::{AxisChainSet, ShapedSegment};
 pub mod audit;
 pub mod waypoints;
 
-use motion_pipeline::fit_stage::FitStage;
+use motion_pipeline::fit_stage::{FitDriver, FitStage};
 use motion_pipeline::planner::Planner;
-use motion_pipeline::{StreamConfig, run_lowerer};
+use motion_pipeline::{
+    FitTol, LoweredItem, Lowerer, PlannedItem, ShapedItem, Shaper, StreamConfig, StreamInput,
+};
 
 pub use planner_config::{AxisDecl, PostProcessorDecl};
 
@@ -39,6 +41,8 @@ pub enum SnapshotError {
     InvalidMaxPathDeviation(f64),
     #[error("max_accel_deviation must be positive, got {0}")]
     InvalidMaxAccelDeviation(f64),
+    #[error("corner_deviation must be finite and non-negative, got {0}")]
+    InvalidCornerDeviation(f64),
     #[error("need at least 2 waypoints")]
     TooFewWaypoints,
     #[error("{0}")]
@@ -56,6 +60,9 @@ pub struct SnapshotParams {
     pub max_velocity: f64,
     pub max_accel: f64,
     pub square_corner_velocity: f64,
+    /// Direct corner budget in mm — the canonical form; when set,
+    /// `square_corner_velocity` is ignored (it is the legacy alias).
+    pub corner_deviation: Option<f64>,
     pub max_jerk: f64,
     pub max_extrude_only_velocity: Option<f64>,
     pub max_extrude_only_accel: Option<f64>,
@@ -88,6 +95,14 @@ pub struct Snapshot {
     pub traj_y_pieces: Vec<Vec<f64>>,
     pub traj_z_pieces: Vec<Vec<f64>>,
     pub traj_e_pieces: Vec<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toolhead_x_pieces: Option<Vec<Vec<f64>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toolhead_y_pieces: Option<Vec<Vec<f64>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toolhead_z_pieces: Option<Vec<Vec<f64>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toolhead_e_pieces: Option<Vec<Vec<f64>>>,
     pub traj_t_end: f64,
     pub traversal_time_s: f64,
     pub seam_max_dp: [f64; 4],
@@ -100,6 +115,28 @@ pub fn pipeline_snapshot(
     waypoints: &[(f64, f64, f64, f64, f64)],
     params: SnapshotParams,
 ) -> Result<Snapshot, SnapshotError> {
+    pipeline_snapshot_streaming(waypoints, params, usize::MAX, |_| {})
+}
+
+/// Same computation as [`pipeline_snapshot`], but additionally invokes
+/// `on_partial` with schema-complete prefix snapshots *while the pipeline
+/// runs* — the stages are driven cooperatively move by move, so each partial
+/// covers the shaped segments emitted so far (the raw input path is always
+/// complete). A partial fires once at least `partial_batch_segments` new
+/// segments accumulated since the last one, backing off proportionally to the
+/// prefix length so rebuilding ever-longer prefixes stays a bounded fraction
+/// of the total work. The returned final snapshot is identical to what
+/// [`pipeline_snapshot`] produces for the same inputs.
+pub fn pipeline_snapshot_streaming(
+    waypoints: &[(f64, f64, f64, f64, f64)],
+    params: SnapshotParams,
+    partial_batch_segments: usize,
+    mut on_partial: impl FnMut(&Snapshot),
+) -> Result<Snapshot, SnapshotError> {
+    assert!(
+        partial_batch_segments > 0,
+        "partial_batch_segments must be positive"
+    );
     if let Some(v) = params.max_path_deviation {
         if !(v.is_finite() && v > 0.0) {
             return Err(SnapshotError::InvalidMaxPathDeviation(v));
@@ -114,10 +151,18 @@ pub fn pipeline_snapshot(
         return Err(SnapshotError::TooFewWaypoints);
     }
 
+    if let Some(v) = params.corner_deviation {
+        if !(v.is_finite() && v >= 0.0) {
+            return Err(SnapshotError::InvalidCornerDeviation(v));
+        }
+    }
+    let corner_deviation_mm = params.corner_deviation.unwrap_or_else(|| {
+        geometry::corner_deviation_from_scv(params.square_corner_velocity, params.max_accel)
+    });
     let limits = geometry::VelocityLimits::try_new(
         params.max_velocity,
         params.max_accel,
-        params.square_corner_velocity,
+        corner_deviation_mm,
         params.max_jerk,
     )
     .map_err(|e| SnapshotError::InvalidLimits(e.to_string()))?;
@@ -125,8 +170,13 @@ pub fn pipeline_snapshot(
     let moves = build_moves(waypoints, limits)?;
     let raw_points = extract_raw_path(&moves);
 
+    let axis_chains = build_axis_chains(&params).map_err(SnapshotError::InvalidChain)?;
+    let corner = geometry::CornerFitConfig {
+        kernel_variance_s2: axis_chains.max_spatial_kernel_variance_s2(),
+        ..geometry::CornerFitConfig::default()
+    };
     let config = StreamConfig {
-        corner: geometry::CornerFitConfig::default(),
+        corner,
         integration_tol: VELOCITY_INTEGRATION_TOL,
         max_extrude_only_velocity_mm_s: params.max_extrude_only_velocity.unwrap_or(f64::INFINITY),
         max_extrude_only_accel_mm_s2: params.max_extrude_only_accel.unwrap_or(f64::INFINITY),
@@ -137,26 +187,51 @@ pub fn pipeline_snapshot(
         max_buffer_moves: SNAPSHOT_MAX_BUFFER_MOVES,
         limits,
     };
-    let axis_chains = build_axis_chains(&params).map_err(SnapshotError::InvalidChain)?;
-    let (_fitted, shaped) = run_pipeline(&moves, config, axis_chains);
+    let mut next_partial_at = partial_batch_segments;
+    let (_fitted, shaped, toolhead) =
+        run_pipeline_streaming(&moves, config, axis_chains, |shaped, toolhead| {
+            if shaped.len() < next_partial_at {
+                return;
+            }
+            on_partial(&snapshot_from_segments(&raw_points, shaped, toolhead));
+            next_partial_at = shaped
+                .len()
+                .saturating_add(partial_batch_segments.max(shaped.len() / 8));
+        });
+    Ok(snapshot_from_segments(
+        &raw_points,
+        &shaped,
+        toolhead.as_deref(),
+    ))
+}
 
-    let traj = collect_trajectory_pieces(&shaped);
+fn snapshot_from_segments(
+    raw_points: &[(f64, f64)],
+    shaped: &[ShapedSegment],
+    toolhead: Option<&[ShapedSegment]>,
+) -> Snapshot {
+    let traj = collect_trajectory_pieces(shaped);
     let seams = seam_metrics(&traj);
+    let toolhead_traj = toolhead.map(collect_trajectory_pieces);
 
-    Ok(Snapshot {
+    Snapshot {
         raw_x: raw_points.iter().map(|p| p.0).collect(),
         raw_y: raw_points.iter().map(|p| p.1).collect(),
         traj_x_pieces: traj.x,
         traj_y_pieces: traj.y,
         traj_z_pieces: traj.z,
         traj_e_pieces: traj.e,
+        toolhead_x_pieces: toolhead_traj.as_ref().map(|t| t.x.clone()),
+        toolhead_y_pieces: toolhead_traj.as_ref().map(|t| t.y.clone()),
+        toolhead_z_pieces: toolhead_traj.as_ref().map(|t| t.z.clone()),
+        toolhead_e_pieces: toolhead_traj.map(|t| t.e),
         traj_t_end: traj.t_end,
         traversal_time_s: traj.t_end,
         seam_max_dp: seams.max_dp,
         seam_max_dv: seams.max_dv,
         seam_max_da: seams.max_da,
         worst_seams: seams.worst,
-    })
+    }
 }
 
 pub fn build_moves(
@@ -287,70 +362,176 @@ fn build_axis_chains(params: &SnapshotParams) -> Result<AxisChainSet, String> {
         .map_err(|e| e.to_string())
 }
 
+/// The third element is the toolhead signal — the shaped segments before the
+/// motor-side derivative-gain stages — present exactly when some chain makes
+/// the motor command depart from it.
 pub fn run_pipeline(
     moves: &[geometry::Move],
     config: StreamConfig,
     axis_chains: AxisChainSet,
-) -> (Vec<geometry::Move>, Vec<ShapedSegment>) {
+) -> (
+    Vec<geometry::Move>,
+    Vec<ShapedSegment>,
+    Option<Vec<ShapedSegment>>,
+) {
+    run_pipeline_streaming(moves, config, axis_chains, |_, _| {})
+}
+
+/// Same computation as [`run_pipeline`] — the stages see the identical item
+/// sequence, so the output is bit-identical — but the four stages are driven
+/// cooperatively on the calling thread, one input move at a time, and
+/// `on_progress(shaped_so_far, toolhead_so_far)` runs after each move's
+/// effects have propagated all the way through the shaper. That is what lets
+/// a single-threaded host (wasm) observe the trajectory growing while
+/// planning is still under way.
+pub fn run_pipeline_streaming(
+    moves: &[geometry::Move],
+    config: StreamConfig,
+    axis_chains: AxisChainSet,
+    mut on_progress: impl FnMut(&[ShapedSegment], Option<&[ShapedSegment]>),
+) -> (
+    Vec<geometry::Move>,
+    Vec<ShapedSegment>,
+    Option<Vec<ShapedSegment>>,
+) {
     let spatial_home = moves
         .iter()
         .find_map(|m| m.segment.spatial.as_ref())
         .map_or([0.0, 0.0, 0.0], |seg| seg.point_at(0.0));
     let home_pos = vec![spatial_home[0], spatial_home[1], spatial_home[2], 0.0];
 
-    let (raw_tx, raw_rx) = unbounded();
-    for m in moves.iter().cloned() {
-        raw_tx
-            .send(m.into())
-            .expect("unbounded channel never blocks");
-    }
-    drop(raw_tx);
-
     let (fitted_tx, fitted_rx) = unbounded();
-    FitStage::new(config.corner).run(raw_rx, fitted_tx);
-    let fitted: Vec<geometry::Move> = fitted_rx
-        .into_iter()
-        .filter_map(|item| match item {
-            motion_pipeline::StreamInput::Move(m) => Some(m),
-            motion_pipeline::StreamInput::Drain | motion_pipeline::StreamInput::Control(_) => None,
-        })
-        .collect();
-
-    let (planner_tx, planner_rx) = unbounded();
-    for fm in fitted.iter().cloned() {
-        planner_tx
-            .send(fm.into())
-            .expect("unbounded channel never blocks");
-    }
-    drop(planner_tx);
-
     let (planned_tx, planned_rx) = unbounded();
-    Planner::new(config).run(planner_rx, planned_tx);
-
     let (lowered_tx, lowered_rx) = unbounded();
-    run_lowerer(
+    let (shaped_tx, shaped_rx) = unbounded();
+    let capture_toolhead = axis_chains.has_motor_side_stages();
+    let mut shaper = Shaper::new(axis_chains.clone());
+    let toolhead_rx = if capture_toolhead {
+        let (toolhead_tx, toolhead_rx) = unbounded();
+        shaper = shaper.with_toolhead_tap(toolhead_tx);
+        Some(toolhead_rx)
+    } else {
+        None
+    };
+
+    let mut drive = PipelineDrive {
+        fit: FitStage::new(config.corner).into_driver(fitted_tx),
+        fitted_rx,
+        planner: Planner::new(config),
+        planned_tx,
         planned_rx,
+        lowerer: Lowerer::new(
+            FitTol {
+                pos_mm: config.fit_tol_mm,
+                accel_mm_s2: config.fit_tol_accel_mm_s2,
+            },
+            axis_chains,
+            home_pos,
+            0.0,
+        ),
         lowered_tx,
-        motion_pipeline::FitTol {
-            pos_mm: config.fit_tol_mm,
-            accel_mm_s2: config.fit_tol_accel_mm_s2,
-        },
-        axis_chains.clone(),
-        home_pos,
-        0.0,
+        lowered_rx,
+        shaper,
+        shaped_tx,
+        shaped_rx,
+        toolhead_rx,
+        fitted: Vec::new(),
+        shaped: Vec::new(),
+        toolhead: Vec::new(),
+    };
+
+    for m in moves.iter().cloned() {
+        assert!(drive.fit.feed(m.into()), "fit stage output channel closed");
+        drive.pump();
+        on_progress(
+            &drive.shaped,
+            capture_toolhead.then_some(drive.toolhead.as_slice()),
+        );
+    }
+    assert!(drive.fit.finish(), "fit stage output channel closed");
+    drive.pump();
+    assert!(
+        drive.planner.finish(&drive.planned_tx),
+        "planner output channel closed"
+    );
+    drive.pump();
+    assert!(
+        drive.shaper.finish(&drive.shaped_tx),
+        "shaper output channel closed"
+    );
+    drive.pump();
+    on_progress(
+        &drive.shaped,
+        capture_toolhead.then_some(drive.toolhead.as_slice()),
     );
 
-    let (shaped_tx, shaped_rx) = unbounded();
-    motion_pipeline::Shaper::new(axis_chains).run(lowered_rx, shaped_tx);
-    let shaped: Vec<ShapedSegment> = shaped_rx
-        .into_iter()
-        .filter_map(|item| match item {
-            motion_pipeline::ShapedItem::Seg(seg) => Some(seg),
-            motion_pipeline::ShapedItem::Control(_) => None,
-        })
-        .collect();
+    let toolhead = capture_toolhead.then(|| {
+        assert_eq!(
+            drive.toolhead.len(),
+            drive.shaped.len(),
+            "toolhead tap must mirror every emitted segment"
+        );
+        drive.toolhead
+    });
+    (drive.fitted, drive.shaped, toolhead)
+}
 
-    (fitted, shaped)
+/// The cooperative single-thread wiring of the four stages: unbounded
+/// channels carry each stage's output, and `pump` walks them in pipeline
+/// order, so one pass moves everything a fed move produced all the way to the
+/// shaped output.
+struct PipelineDrive {
+    fit: FitDriver,
+    fitted_rx: Receiver<StreamInput>,
+    planner: Planner,
+    planned_tx: Sender<PlannedItem>,
+    planned_rx: Receiver<PlannedItem>,
+    lowerer: Lowerer,
+    lowered_tx: Sender<LoweredItem>,
+    lowered_rx: Receiver<LoweredItem>,
+    shaper: Shaper,
+    shaped_tx: Sender<ShapedItem>,
+    shaped_rx: Receiver<ShapedItem>,
+    toolhead_rx: Option<Receiver<ShapedSegment>>,
+    fitted: Vec<geometry::Move>,
+    shaped: Vec<ShapedSegment>,
+    toolhead: Vec<ShapedSegment>,
+}
+
+impl PipelineDrive {
+    fn pump(&mut self) {
+        while let Ok(item) = self.fitted_rx.try_recv() {
+            if let StreamInput::Move(m) = &item {
+                self.fitted.push(m.clone());
+            }
+            assert!(
+                self.planner.feed(item, &self.planned_tx),
+                "planner output channel closed"
+            );
+        }
+        while let Ok(item) = self.planned_rx.try_recv() {
+            assert!(
+                self.lowerer.feed(item, &self.lowered_tx),
+                "lowerer output channel closed"
+            );
+        }
+        while let Ok(item) = self.lowered_rx.try_recv() {
+            assert!(
+                self.shaper.feed(item, &self.shaped_tx),
+                "shaper output channel closed"
+            );
+        }
+        while let Ok(item) = self.shaped_rx.try_recv() {
+            if let ShapedItem::Seg(seg) = item {
+                self.shaped.push(seg);
+            }
+        }
+        if let Some(rx) = &self.toolhead_rx {
+            while let Ok(seg) = rx.try_recv() {
+                self.toolhead.push(seg);
+            }
+        }
+    }
 }
 
 /// The trajectory the firmware actually executes: the host lowering's own

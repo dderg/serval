@@ -14,14 +14,15 @@ pub mod types;
 
 use fit_stage::FitStage;
 use planner::Planner;
-use types::{LoweredItem, PipelineHandle};
+use types::PipelineHandle;
 
-pub use lower_stage::{advance_odometer, dist3, run_lowerer};
+pub use fit_stage::FitDriver;
+pub use lower_stage::{Lowerer, advance_odometer, dist3, run_lowerer};
 pub use lowering::FitTol;
 pub use shaper::Shaper;
 pub use types::{
-    BarrierAck, CONTIGUITY_EPS_MM, Control, NudgePiece, PlannedItem, ShapedItem, StreamConfig,
-    StreamError, StreamInput,
+    BarrierAck, CONTIGUITY_EPS_MM, Control, LoweredItem, NudgePiece, PlannedItem, ShapedItem,
+    StreamConfig, StreamError, StreamInput,
 };
 
 /// Wires the pure stream stages (fit stage → planner → lowerer → shaper) into
@@ -43,6 +44,7 @@ pub fn setup_stages(
 
     let mut corner = config.corner;
     corner.ramp_accel_budget_mm_s2 = config.max_extrude_only_accel_mm_s2;
+    corner.kernel_variance_s2 = axis_chains.max_spatial_kernel_variance_s2();
     let fit_stage = FitStage::new(corner);
     let fit_thread = spawn_stage("kalico-fit", move || fit_stage.run(raw_rx, fitted_tx));
 

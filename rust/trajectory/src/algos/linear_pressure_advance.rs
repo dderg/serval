@@ -20,6 +20,6 @@ impl PostProcessorAlgo for LinearPressureAdvance {
         let [k] = values else {
             panic!("linear_pressure_advance expects exactly one param value");
         };
-        Some(ChainStage::LinearPressureAdvance { k: *k })
+        Some(ChainStage::DerivativeGains { k1: *k, k2: 0.0 })
     }
 }

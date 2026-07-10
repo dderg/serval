@@ -100,6 +100,7 @@ pub struct Shaper {
     back_support: f64,
     history_trimmed: bool,
     follower_states: Vec<FollowerState>,
+    toolhead_tap: Option<Sender<ShapedSegment>>,
 }
 
 impl Shaper {
@@ -112,81 +113,103 @@ impl Shaper {
             pending: PendingSegments::default(),
             history_trimmed: false,
             follower_states: Vec::new(),
+            toolhead_tap: None,
         }
+    }
+
+    /// Mirrors every emitted segment as it stands before the motor-side
+    /// derivative-gain stages — the toolhead signal, where the emitted
+    /// segments are the motor command.
+    #[must_use]
+    pub fn with_toolhead_tap(mut self, tap: Sender<ShapedSegment>) -> Self {
+        self.toolhead_tap = Some(tap);
+        self
     }
 
     pub fn run(mut self, input: Receiver<LoweredItem>, output: Sender<ShapedItem>) {
         loop {
             match input.recv() {
-                Ok(LoweredItem::Seg(item)) => {
-                    self.pending.push(item.seg, item.rest_at_end);
-                    if !self.emit(self.supported_count(), false, &output) {
-                        return;
-                    }
-                }
-                Ok(LoweredItem::Drain) => {
-                    assert!(
-                        self.pending.is_empty() || self.pending.ends_at_rest(),
-                        "shaper: drain marker arrived while the trajectory is not at rest"
-                    );
-                    if !self.emit(self.pending.len(), true, &output) {
-                        return;
-                    }
-                }
-                Ok(LoweredItem::Control(ctrl)) => {
-                    match &ctrl {
-                        Control::Reset { .. } => {
-                            self.pending.clear();
-                            self.history.clear();
-                            self.history_trimmed = false;
-                            for state in &mut self.follower_states {
-                                state.reset_timeline();
-                            }
-                        }
-                        Control::Dwell { .. }
-                        | Control::SetAxisChains(_)
-                        | Control::SetMesh { .. }
-                        | Control::Nudge { .. }
-                        | Control::Barrier(_) => {
-                            assert!(
-                                self.pending.is_empty() || self.pending.ends_at_rest(),
-                                "shaper: control token arrived while the trajectory is not at \
-                                 rest — a Drain must precede it"
-                            );
-                            if !self.emit(self.pending.len(), true, &output) {
-                                return;
-                            }
-                            if let Control::SetAxisChains(chains) = &ctrl {
-                                let (new_forward, new_back) =
-                                    (chains.forward_support(), chains.back_support());
-                                // The signal eras agree at the rest point this swap
-                                // happens at, so kept history makes the resumed
-                                // track exactly continuous with what was committed
-                                // (a k-only change keeps the kernel bit-identical).
-                                // Only a grown back support invalidates retention —
-                                // fall back to the stream-boundary clamp then.
-                                if new_back > self.back_support {
-                                    self.history.clear();
-                                    self.history_trimmed = false;
-                                    for state in &mut self.follower_states {
-                                        state.clear_projected_history();
-                                    }
-                                }
-                                (self.forward_support, self.back_support) = (new_forward, new_back);
-                                self.chains = chains.clone();
-                            }
-                        }
-                    }
-                    if output.send(ShapedItem::Control(ctrl)).is_err() {
+                Ok(item) => {
+                    if !self.feed(item, &output) {
                         return;
                     }
                 }
                 Err(_) => {
-                    self.emit(self.pending.len(), true, &output);
+                    self.finish(&output);
                     return;
                 }
             }
         }
+    }
+
+    /// One iteration of [`Shaper::run`]'s loop, for single-threaded hosts
+    /// that drive the stage item by item.
+    pub fn feed(&mut self, item: LoweredItem, output: &Sender<ShapedItem>) -> bool {
+        match item {
+            LoweredItem::Seg(item) => {
+                self.pending.push(item.seg, item.rest_at_end);
+                self.emit(self.supported_count(), false, output)
+            }
+            LoweredItem::Drain => {
+                assert!(
+                    self.pending.is_empty() || self.pending.ends_at_rest(),
+                    "shaper: drain marker arrived while the trajectory is not at rest"
+                );
+                self.emit(self.pending.len(), true, output)
+            }
+            LoweredItem::Control(ctrl) => {
+                match &ctrl {
+                    Control::Reset { .. } => {
+                        self.pending.clear();
+                        self.history.clear();
+                        self.history_trimmed = false;
+                        for state in &mut self.follower_states {
+                            state.reset_timeline();
+                        }
+                    }
+                    Control::Dwell { .. }
+                    | Control::SetAxisChains(_)
+                    | Control::SetMesh { .. }
+                    | Control::Nudge { .. }
+                    | Control::Barrier(_) => {
+                        assert!(
+                            self.pending.is_empty() || self.pending.ends_at_rest(),
+                            "shaper: control token arrived while the trajectory is not at \
+                             rest — a Drain must precede it"
+                        );
+                        if !self.emit(self.pending.len(), true, output) {
+                            return false;
+                        }
+                        if let Control::SetAxisChains(chains) = &ctrl {
+                            let (new_forward, new_back) =
+                                (chains.forward_support(), chains.back_support());
+                            // The signal eras agree at the rest point this swap
+                            // happens at, so kept history makes the resumed
+                            // track exactly continuous with what was committed
+                            // (a k-only change keeps the kernel bit-identical).
+                            // Only a grown back support invalidates retention —
+                            // fall back to the stream-boundary clamp then.
+                            if new_back > self.back_support {
+                                self.history.clear();
+                                self.history_trimmed = false;
+                                for state in &mut self.follower_states {
+                                    state.clear_projected_history();
+                                }
+                            }
+                            (self.forward_support, self.back_support) = (new_forward, new_back);
+                            self.chains = chains.clone();
+                        }
+                    }
+                }
+                output.send(ShapedItem::Control(ctrl)).is_ok()
+            }
+        }
+    }
+
+    /// The input-closed path: flush the buffered tail with the window clamped
+    /// past the end of the signal.
+    pub fn finish(&mut self, output: &Sender<ShapedItem>) -> bool {
+        self.emit(self.pending.len(), true, output)
     }
 
     /// How many front segments have their forward convolution window covered
@@ -259,6 +282,7 @@ impl Shaper {
             !self.history_trimmed,
             &self.chains,
             &mut self.follower_states,
+            self.toolhead_tap.as_ref(),
         )
         .unwrap_or_else(|e| panic!("shaper: {e}"));
         for seg in shaped {
@@ -298,6 +322,7 @@ fn apply_axis_chains(
     at_stream_boundary: bool,
     chains: &AxisChainSet,
     follower_states: &mut Vec<FollowerState>,
+    toolhead_tap: Option<&Sender<ShapedSegment>>,
 ) -> Result<Vec<ShapedSegment>, PostProcessError> {
     let mut out: Vec<ShapedSegment> = base
         .iter()
@@ -308,6 +333,7 @@ fn apply_axis_chains(
         && follower_states.iter().all(|s| !s.is_active())
     {
         out.truncate(commit_count);
+        send_toolhead(toolhead_tap, &out);
         return Ok(out);
     }
     let n_axes = out.iter().map(|seg| seg.axes.len()).max().unwrap_or(0);
@@ -342,10 +368,38 @@ fn apply_axis_chains(
     }
     project_followers(base, &mut out, commit_count, force, chains, follower_states)?;
     out.truncate(commit_count);
+    send_toolhead(toolhead_tap, &out);
+    apply_motor_side_stages(&mut out, chains);
     for seg in &mut out {
         pad_segment_axes_to_uniform_degree(seg);
     }
     Ok(out)
+}
+
+fn send_toolhead(tap: Option<&Sender<ShapedSegment>>, out: &[ShapedSegment]) {
+    let Some(tap) = tap else { return };
+    for seg in out {
+        tap.send(seg.clone())
+            .expect("shaper: toolhead tap receiver dropped");
+    }
+}
+
+/// Trailing derivative-gain stages produce the motor command (e.g. a
+/// mode-inverse counter-drive), which the physical toolhead does not follow —
+/// that is their entire purpose. They are therefore applied only after the
+/// followers have projected onto the toolhead signal.
+fn apply_motor_side_stages(out: &mut [ShapedSegment], chains: &AxisChainSet) {
+    for seg in out.iter_mut() {
+        for axis in 0..seg.axes.len() {
+            let Some(chain) = chains.chains.get(axis) else {
+                continue;
+            };
+            if !chain.has_motor_side_gains() {
+                continue;
+            }
+            seg.axes[axis] = apply_trailing_zero_support(chain, seg.axes[axis].clone());
+        }
+    }
 }
 
 /// Refit tracks can come out at different degrees per axis; the kinematics
@@ -382,7 +436,7 @@ fn apply_axis_chain(
 ) -> Result<(), PostProcessError> {
     let Some(kernel) = chain.stages.iter().find_map(|stage| match stage {
         ChainStage::SmoothKernel(kernel) => Some(kernel),
-        ChainStage::LinearPressureAdvance { .. } => None,
+        ChainStage::DerivativeGains { .. } => None,
     }) else {
         return Ok(());
     };
@@ -394,32 +448,25 @@ fn apply_axis_chain(
     let last_t = base.last().map_or(first_t, |seg| seg.t_end);
     let signal_segments: Vec<&ShapedSegment> = history.iter().chain(base.iter()).collect();
     let input_breaks = signal_breakpoints(&signal_segments, axis);
+    let table = AxisSignalTable::build(
+        &signal_segments,
+        axis,
+        first_t,
+        last_t,
+        at_stream_boundary,
+        force,
+    );
+    let sig = ShapedSignal::new_from_evaluator(kernel, |t| table.eval(t), input_breaks);
     for seg in out.iter_mut() {
-        let need_lo = seg.t_start + k_lo;
-        let need_hi = seg.t_end + k_hi;
+        let need_lo = seg.t_start - k_hi;
+        let need_hi = seg.t_end - k_lo;
         if need_lo < first_t && !at_stream_boundary {
             return Err(PostProcessError::MissingHistory { axis, t: need_lo });
         }
         if need_hi > last_t && !force {
             return Err(PostProcessError::MissingLookahead { axis, t: need_hi });
         }
-        let sig = ShapedSignal::new_from_evaluator(
-            kernel,
-            |t| {
-                eval_axis_with_edges(
-                    &signal_segments,
-                    axis,
-                    t,
-                    first_t,
-                    last_t,
-                    at_stream_boundary,
-                    force,
-                )
-            },
-            input_breaks.clone(),
-        );
-        let shaped = fit_axis_from_signal(axis, &seg.axes[axis], &sig)?;
-        seg.axes[axis] = apply_trailing_zero_support(chain, shaped);
+        seg.axes[axis] = fit_axis_from_signal(axis, &seg.axes[axis], &sig)?;
         if !seg.axes[axis]
             .control_points()
             .iter()
@@ -448,46 +495,101 @@ fn signal_breakpoints(segments: &[&ShapedSegment], axis: usize) -> Vec<f64> {
     breaks
 }
 
-fn eval_axis_with_edges(
-    segments: &[&ShapedSegment],
-    axis: usize,
-    t: f64,
+/// One axis of the emit window, flattened to time-sorted monomial pieces so
+/// the convolution's Gauss sampling evaluates by binary search plus Horner
+/// instead of a de Boor pass per sample. Semantics match the NURBS window it
+/// is built from: before `first_t` the signal clamps at a stream boundary
+/// and is otherwise missing (NaN, surfaced as `MissingHistory`); past
+/// `last_t` it clamps under a drain flush and is otherwise missing; a time
+/// gap between segments holds the value the preceding piece ends at.
+pub(crate) struct AxisSignalTable {
+    starts: Vec<f64>,
+    ends: Vec<f64>,
+    coeffs: Vec<Vec<f64>>,
     first_t: f64,
     last_t: f64,
     at_stream_boundary: bool,
     force: bool,
-) -> f64 {
-    if t < first_t {
-        if !at_stream_boundary {
-            return f64::NAN;
-        }
-        return eval_segment_axis(segments.first().expect("non-empty base"), axis, first_t);
-    }
-    if t > last_t {
-        if !force {
-            return f64::NAN;
-        }
-        return eval_segment_axis(segments.last().expect("non-empty base"), axis, last_t);
+}
+
+impl AxisSignalTable {
+    fn build(
+        segments: &[&ShapedSegment],
+        axis: usize,
+        first_t: f64,
+        last_t: f64,
+        at_stream_boundary: bool,
+        force: bool,
+    ) -> Self {
+        Self::from_tracks(
+            segments.iter().map(|seg| &seg.axes[axis]),
+            first_t,
+            last_t,
+            at_stream_boundary,
+            force,
+        )
     }
 
-    let mut idx = segments.partition_point(|seg| seg.t_end + SEGMENT_TIME_EPS_S < t);
-    if idx >= segments.len() {
-        idx = segments.len().saturating_sub(1);
-    }
-    let start = idx.saturating_sub(1);
-    let end = (idx + 2).min(segments.len());
-    for seg in &segments[start..end] {
-        if t >= seg.t_start - SEGMENT_TIME_EPS_S && t <= seg.t_end + SEGMENT_TIME_EPS_S {
-            return eval_segment_axis(seg, axis, t);
+    pub(crate) fn from_tracks<'a>(
+        tracks: impl IntoIterator<Item = &'a nurbs::ScalarNurbs>,
+        first_t: f64,
+        last_t: f64,
+        at_stream_boundary: bool,
+        force: bool,
+    ) -> Self {
+        let mut table = Self {
+            starts: Vec::new(),
+            ends: Vec::new(),
+            coeffs: Vec::new(),
+            first_t,
+            last_t,
+            at_stream_boundary,
+            force,
+        };
+        for track in tracks {
+            for p in extract_bezier_pieces(track) {
+                table.starts.push(p.u_start);
+                table.ends.push(p.u_end);
+                table.coeffs.push(p.coeffs);
+            }
         }
+        assert!(!table.coeffs.is_empty(), "empty signal window");
+        table
     }
-    if idx > 0 && segments[idx].t_start > t {
-        return eval_segment_axis(segments[idx - 1], axis, segments[idx - 1].t_end);
+
+    fn piece_at(&self, i: usize, t: f64) -> f64 {
+        let tau = (t - self.starts[i]).clamp(0.0, self.ends[i] - self.starts[i]);
+        self.coeffs[i]
+            .iter()
+            .rev()
+            .fold(0.0_f64, |acc, &c| nurbs::fmadd(acc, tau, c))
     }
-    if force && (t - last_t).abs() <= SEGMENT_TIME_EPS_S {
-        return eval_segment_axis(segments.last().expect("non-empty base"), axis, last_t);
+
+    pub(crate) fn eval(&self, t: f64) -> f64 {
+        if t < self.first_t {
+            if !self.at_stream_boundary {
+                return f64::NAN;
+            }
+            return self.piece_at(0, self.first_t);
+        }
+        if t > self.last_t {
+            if !self.force {
+                return f64::NAN;
+            }
+            return self.piece_at(self.coeffs.len() - 1, self.last_t);
+        }
+        let i = self
+            .ends
+            .partition_point(|&e| e + SEGMENT_TIME_EPS_S < t)
+            .min(self.coeffs.len() - 1);
+        if t >= self.starts[i] - SEGMENT_TIME_EPS_S {
+            return self.piece_at(i, t);
+        }
+        if i > 0 {
+            return self.piece_at(i - 1, self.ends[i - 1]);
+        }
+        f64::NAN
     }
-    f64::NAN
 }
 
 /// A time gap in the signal is evaluated as the position held at the
@@ -613,7 +715,7 @@ fn shaped_ladder<S: TrackSignal>(
     t1: f64,
 ) -> Result<(Vec<f64>, bool), PostProcessError> {
     let h = t1 - t0;
-    let t_of = |u: f64| (0.5 * (u + 1.0)).mul_add(h, t0);
+    let t_of = |u: f64| nurbs::fmadd(0.5 * (u + 1.0), h, t0);
     let p0 = finite_sample(axis, sig, t0)?;
     let p1 = finite_sample(axis, sig, t1)?;
     let v0 = exact_value(axis, sig.deriv(t0), t0)?;
@@ -689,29 +791,37 @@ pub(crate) fn apply_trailing_zero_support(
     for stage in &chain.stages {
         match stage {
             ChainStage::SmoothKernel(_) => seen_kernel = true,
-            ChainStage::LinearPressureAdvance { k } if seen_kernel => {
-                track = apply_pressure_advance_to_track(&track, *k);
+            ChainStage::DerivativeGains { k1, k2 } if seen_kernel => {
+                track = apply_derivative_gains_to_track(&track, *k1, *k2);
             }
-            ChainStage::LinearPressureAdvance { .. } => {}
+            ChainStage::DerivativeGains { .. } => {}
         }
     }
     track
 }
 
-pub(crate) fn apply_pressure_advance_to_track(
+pub(crate) fn apply_derivative_gains_to_track(
     track: &nurbs::ScalarNurbs,
-    k: f64,
+    k1: f64,
+    k2: f64,
 ) -> nurbs::ScalarNurbs {
     let pieces = extract_bezier_pieces(track);
     let out_pieces: Vec<BezierPiece> = pieces
         .iter()
         .map(|piece| {
             let derivative = piece.differentiate();
+            let second = (k2 != 0.0).then(|| derivative.differentiate());
             let coeffs: Vec<f64> = piece
                 .coeffs
                 .iter()
                 .enumerate()
-                .map(|(i, c)| c + k * derivative.coeffs.get(i).copied().unwrap_or(0.0))
+                .map(|(i, c)| {
+                    let with_k1 = c + k1 * derivative.coeffs.get(i).copied().unwrap_or(0.0);
+                    match &second {
+                        Some(dd) => with_k1 + k2 * dd.coeffs.get(i).copied().unwrap_or(0.0),
+                        None => with_k1,
+                    }
+                })
                 .collect();
             BezierPiece {
                 u_start: piece.u_start,

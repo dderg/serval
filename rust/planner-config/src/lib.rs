@@ -26,6 +26,14 @@ pub enum PostProcessorConfigError {
     UnknownInstance { name: String },
     #[error("axis '{axis}': post_processors references undeclared '{name}'")]
     UnknownAxisReference { axis: String, name: String },
+    #[error(
+        "axis '{axis}' leads follower axes, and post_processor '{name}' is a \
+         derivative-gain stage placed before the axis kernel. That is ambiguous \
+         for followers: pre-kernel stages count as toolhead motion the followers \
+         track, but derivative gains model the motor side, which followers must \
+         ignore. Move '{name}' after the kernel in the axis post_processors list"
+    )]
+    LeaderGainBeforeKernel { axis: String, name: String },
 }
 
 #[derive(Debug, Clone)]
@@ -99,10 +107,54 @@ impl PostProcessorSet {
                 CompiledChain::compile(&chain).map_err(PostProcessorConfigError::Param)
             })
             .collect::<Result<_, _>>()?;
-        Ok(AxisChainSet {
-            chains,
-            followers: registry.follower_index_map(),
-        })
+        let followers = registry.follower_index_map();
+        self.reject_pre_kernel_gains_on_leaders(registry, &followers)?;
+        Ok(AxisChainSet { chains, followers })
+    }
+
+    fn reject_pre_kernel_gains_on_leaders(
+        &self,
+        registry: &AxisRegistry,
+        followers: &[(usize, Vec<usize>)],
+    ) -> Result<(), PostProcessorConfigError> {
+        let mut is_leader = vec![false; self.per_axis.len()];
+        for (_, leaders) in followers {
+            for &l in leaders {
+                is_leader[l] = true;
+            }
+        }
+        for (axis, names) in self.per_axis.iter().enumerate() {
+            if !is_leader[axis] {
+                continue;
+            }
+            let mut seen_kernel = false;
+            for name in names {
+                let inst = self
+                    .instances
+                    .iter()
+                    .find(|i| i.name() == *name)
+                    .expect("validated in try_new");
+                match inst.compile_stage() {
+                    Some(trajectory::ChainStage::SmoothKernel(_)) => seen_kernel = true,
+                    Some(trajectory::ChainStage::DerivativeGains { .. }) if !seen_kernel => {
+                        return Err(PostProcessorConfigError::LeaderGainBeforeKernel {
+                            axis: registry.axis_name(axis).to_string(),
+                            name: name.clone(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn param(&self, name: &str, key: &str) -> Option<f64> {
+        self.instances
+            .iter()
+            .find(|i| i.name() == name)
+            .and_then(|i| i.param(key))
     }
 
     pub fn set_param(
@@ -354,7 +406,7 @@ pub struct PlannerConfig {
     pub limit_sections: Vec<LimitSection>,
     pub cartesian: CartesianLimits,
     pub runtime_caps: RuntimeCaps,
-    pub runtime_square_corner_velocity: Option<f64>,
+    pub runtime_corner_deviation: Option<f64>,
     pub corner: geometry::CornerFitConfig,
     pub post_processors: PostProcessorSet,
     pub max_extrude_only_velocity: Option<f64>,
@@ -385,7 +437,7 @@ pub struct CartesianLimits {
     pub max_jerk: f64,
     pub max_z_velocity: f64,
     pub max_z_accel: f64,
-    pub square_corner_velocity: f64,
+    pub corner_deviation: f64,
 }
 
 impl Default for CartesianLimits {
@@ -396,7 +448,10 @@ impl Default for CartesianLimits {
             max_jerk: 100_000.0,
             max_z_velocity: 15.0,
             max_z_accel: 100.0,
-            square_corner_velocity: DEFAULT_SQUARE_CORNER_VELOCITY_MM_S,
+            corner_deviation: geometry::corner_deviation_from_scv(
+                DEFAULT_SQUARE_CORNER_VELOCITY_MM_S,
+                3000.0,
+            ),
         }
     }
 }
@@ -414,8 +469,8 @@ impl CartesianLimits {
         if !(self.max_jerk > 0.0) {
             return Err("[printer] max_jerk must be positive (infinity disables jerk limiting)");
         }
-        if !(self.square_corner_velocity.is_finite() && self.square_corner_velocity >= 0.0) {
-            return Err("[printer] square_corner_velocity must be finite and non-negative");
+        if !(self.corner_deviation.is_finite() && self.corner_deviation >= 0.0) {
+            return Err("[printer] corner_deviation must be finite and non-negative");
         }
         Ok(())
     }
@@ -436,11 +491,38 @@ impl CartesianLimits {
 
 pub const DEFAULT_SQUARE_CORNER_VELOCITY_MM_S: f64 = 5.0;
 
+pub fn validate_corner_budget(
+    corner_deviation_mm: f64,
+    max_accel_mm_s2: f64,
+    chains: &AxisChainSet,
+) -> Result<(), String> {
+    if !(corner_deviation_mm > 0.0) {
+        return Ok(());
+    }
+    for (axis, chain) in SPATIAL.iter().zip(&chains.chains) {
+        let kernel_deviation_mm =
+            geometry::kernel_corner_deviation_mm(chain.kernel_variance_s2(), max_accel_mm_s2);
+        if kernel_deviation_mm >= corner_deviation_mm {
+            return Err(format!(
+                "smoothing kernel on axis {axis} already deviates \
+                 {kernel_deviation_mm:.4} mm at accel {max_accel_mm_s2} mm/s^2, \
+                 which exhausts corner_deviation = {corner_deviation_mm:.4} mm \
+                 — increase corner_deviation or shorten the kernel"
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl PlannerConfig {
     #[must_use]
-    pub fn square_corner_velocity(&self) -> f64 {
-        self.runtime_square_corner_velocity
-            .unwrap_or(self.cartesian.square_corner_velocity)
+    pub fn corner_deviation(&self) -> f64 {
+        self.runtime_corner_deviation
+            .unwrap_or(self.cartesian.corner_deviation)
+    }
+
+    pub fn validate_corner_budget(&self, chains: &AxisChainSet) -> Result<(), String> {
+        validate_corner_budget(self.corner_deviation(), self.cartesian.max_accel, chains)
     }
 
     #[must_use]
@@ -449,7 +531,7 @@ impl PlannerConfig {
         (
             clamp(self.runtime_caps.velocity, self.cartesian.max_velocity),
             clamp(self.runtime_caps.accel, self.cartesian.max_accel),
-            self.square_corner_velocity(),
+            self.corner_deviation(),
         )
     }
 }
@@ -479,7 +561,7 @@ impl Default for PlannerConfig {
             ],
             cartesian: CartesianLimits::default(),
             runtime_caps: RuntimeCaps::default(),
-            runtime_square_corner_velocity: None,
+            runtime_corner_deviation: None,
             corner: geometry::CornerFitConfig::default(),
             post_processors,
             max_extrude_only_velocity: None,

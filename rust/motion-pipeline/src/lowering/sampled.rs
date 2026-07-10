@@ -187,9 +187,17 @@ impl Sampler<'_> {
             if let Some(chain) = self.axis_chains.get(axis) {
                 for stage in &chain.stages {
                     match stage {
-                        ChainStage::LinearPressureAdvance { k } => {
-                            pos = k.mul_add(vel, pos);
-                            vel = k.mul_add(accel, vel);
+                        ChainStage::DerivativeGains { k1, k2 } => {
+                            assert!(
+                                *k2 == 0.0,
+                                "DerivativeGains k2={k2} reached the sampled lowering path: \
+                                 the sampler carries (pos, vel, accel) only, so the transformed \
+                                 velocity `vel + k1*accel + k2*jerk` cannot be computed here; \
+                                 propagate jerk through axis_base_state before using k2 != 0 \
+                                 on a sampled axis"
+                            );
+                            pos = k1.mul_add(vel, pos);
+                            vel = k1.mul_add(accel, vel);
                             accel = 0.0;
                         }
                         ChainStage::SmoothKernel(_) => break,

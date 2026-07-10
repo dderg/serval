@@ -31,8 +31,13 @@ pub fn default_stream_config() -> StreamConfig {
         fit_tol_mm: 1e-3,
         fit_tol_accel_mm_s2: 50.0,
         max_buffer_moves: 512,
-        limits: VelocityLimits::try_new(100.0, 1000.0, 5.0, 100_000.0)
-            .expect("bench limits (max_v=100 accel=1000 scv=5 jerk=100000) are valid"),
+        limits: VelocityLimits::try_new(
+            100.0,
+            1000.0,
+            geometry::corner_deviation_from_scv(5.0, 1000.0),
+            100_000.0,
+        )
+        .expect("bench limits (max_v=100 accel=1000 scv=5 jerk=100000) are valid"),
     }
 }
 
@@ -353,9 +358,30 @@ pub fn collect_shaped_segments_scripted(
     chains: AxisChainSet,
     drain_every: Option<usize>,
 ) -> Vec<ShapedSegment> {
-    let spatial_home = moves
+    let mut script: Vec<motion_pipeline::StreamInput> = Vec::new();
+    for (i, m) in moves.iter().cloned().enumerate() {
+        script.push(m.into());
+        if drain_every.is_some_and(|n| i % n == n - 1) {
+            script.push(motion_pipeline::StreamInput::Drain);
+        }
+    }
+    collect_shaped_segments_from_script(script, config, chains)
+}
+
+/// Feed an explicit input script (moves interleaved with `Drain`/`Control`
+/// tokens — the shapes the ingress produces for M400 / G4 boundaries) through
+/// the full streaming pipeline and return the shaped segments it emits.
+pub fn collect_shaped_segments_from_script(
+    script: Vec<motion_pipeline::StreamInput>,
+    config: StreamConfig,
+    chains: AxisChainSet,
+) -> Vec<ShapedSegment> {
+    let spatial_home = script
         .iter()
-        .find_map(|m| m.segment.spatial.as_ref())
+        .find_map(|item| match item {
+            motion_pipeline::StreamInput::Move(m) => m.segment.spatial.as_ref(),
+            _ => None,
+        })
         .map_or([0.0, 0.0, 0.0], |seg| seg.point_at(0.0));
     let mut home = spatial_home.to_vec();
     home.push(0.0);
@@ -370,17 +396,11 @@ pub fn collect_shaped_segments_scripted(
         }
         segs
     });
-    for (i, m) in moves.iter().cloned().enumerate() {
+    for item in script {
         handle
             .input
-            .send(m.into())
+            .send(item)
             .expect("pipeline input closed while feeding — a stage died");
-        if drain_every.is_some_and(|n| i % n == n - 1) {
-            handle
-                .input
-                .send(motion_pipeline::StreamInput::Drain)
-                .expect("pipeline input closed at drain — a stage died");
-        }
     }
     drop(handle.input);
     collector.join().expect("pipeline collector panicked")

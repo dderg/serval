@@ -1,6 +1,8 @@
 #![allow(unsafe_code)]
 
-use crate::ffi::{self, EcTelemetry};
+#[cfg(feature = "hw")]
+use crate::ffi;
+use crate::ffi::EcTelemetry;
 
 pub(super) trait DriveChain {
     fn cycle_time_ns(&self) -> u64;
@@ -31,12 +33,15 @@ pub(super) trait DriveChain {
     }
 }
 
+#[cfg(feature = "hw")]
 pub(super) struct FfiDriveChain;
 
+#[cfg(feature = "hw")]
 fn c_slot(slot: usize) -> std::os::raw::c_int {
     std::os::raw::c_int::try_from(slot).expect("slave slot index exceeds c_int")
 }
 
+#[cfg(feature = "hw")]
 impl DriveChain for FfiDriveChain {
     fn cycle_time_ns(&self) -> u64 {
         unsafe { ffi::ec_rt_cycle_time_ns() }

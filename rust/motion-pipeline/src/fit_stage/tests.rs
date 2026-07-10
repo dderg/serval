@@ -20,7 +20,13 @@ fn ctx(line_no: u32, feed: f64) -> MoveContext {
     MoveContext {
         extruder_axis: 3,
         feedrate_mm_s: feed,
-        limits: VelocityLimits::try_new(300.0, 5000.0, 5.0, 100_000.0).unwrap(),
+        limits: VelocityLimits::try_new(
+            300.0,
+            5000.0,
+            geometry::corner_deviation_from_scv(5.0, 5000.0),
+            100_000.0,
+        )
+        .unwrap(),
         source: SourceRange {
             start_line: line_no,
             end_line: line_no,
@@ -36,7 +42,13 @@ fn line(line_no: u32, start: [f64; 3], end: [f64; 3], e: f64) -> Move {
 /// ~11µm) where facet consumption has room to act.
 fn loose_line(line_no: u32, start: [f64; 3], end: [f64; 3], e: f64) -> Move {
     let mut c = ctx(line_no, 80.0);
-    c.limits = VelocityLimits::try_new(300.0, 3000.0, 9.0, 100_000.0).unwrap();
+    c.limits = VelocityLimits::try_new(
+        300.0,
+        3000.0,
+        geometry::corner_deviation_from_scv(9.0, 3000.0),
+        100_000.0,
+    )
+    .unwrap();
     line_move(start, end, e, c).unwrap()
 }
 

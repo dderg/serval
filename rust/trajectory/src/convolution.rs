@@ -61,6 +61,9 @@ pub struct ShapedSignal<'a> {
     /// segment boundaries, clamp edges). Between two consecutive cuts the
     /// integrand is one polynomial, which the Gauss rule integrates exactly.
     input_breaks: Vec<f64>,
+    /// Reusable cut buffer for `convolve` — the merge of kernel-piece
+    /// boundaries and in-window input breaks, rebuilt on every call.
+    cuts: std::cell::RefCell<Vec<f64>>,
     kernel: &'a PiecewisePolynomialKernel,
     /// `k′` and `k″` as piecewise polynomials over the same support, plus the
     /// jump of `k′` at each internal piece boundary (a delta in `k″` — the
@@ -128,6 +131,7 @@ impl<'a> ShapedSignal<'a> {
         Self {
             eval_input: Box::new(eval),
             input_breaks,
+            cuts: std::cell::RefCell::new(Vec::new()),
             kernel,
             d_kernel,
             dd_kernel,
@@ -157,24 +161,46 @@ impl<'a> ShapedSignal<'a> {
         acc
     }
 
-    fn convolve(&self, t: f64, kernel: &PiecewisePolynomialKernel) -> f64 {
-        let mut cuts: Vec<f64> = Vec::with_capacity(self.kernel.pieces.len() + 9);
-        for p in &self.kernel.pieces {
-            cuts.push(p.u_start);
-        }
-        cuts.push(self.k_hi);
+    /// Merge the kernel-piece boundaries (ascending by construction) with the
+    /// in-window input breaks (`t - b` is ascending over `input_breaks`
+    /// iterated in reverse), deduplicating on the fly — no per-call sort.
+    fn merge_cuts(&self, t: f64, cuts: &mut Vec<f64>) {
+        cuts.clear();
         let b_lo = self
             .input_breaks
             .partition_point(|&b| b <= t - self.k_hi + CUT_DEDUP_EPS_S);
         let b_hi = self
             .input_breaks
             .partition_point(|&b| b < t - self.k_lo - CUT_DEDUP_EPS_S);
-        for &b in &self.input_breaks[b_lo..b_hi] {
-            cuts.push(t - b);
+        let mut breaks = self.input_breaks[b_lo..b_hi].iter().rev().peekable();
+        let push = |v: f64, cuts: &mut Vec<f64>| {
+            if cuts.last().is_none_or(|&last| v - last > CUT_DEDUP_EPS_S) {
+                cuts.push(v);
+            }
+        };
+        for boundary in self
+            .kernel
+            .pieces
+            .iter()
+            .map(|p| p.u_start)
+            .chain(std::iter::once(self.k_hi))
+        {
+            while let Some(&&b) = breaks.peek() {
+                if t - b >= boundary {
+                    break;
+                }
+                push(t - b, cuts);
+                breaks.next();
+            }
+            push(boundary, cuts);
         }
-        cuts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        cuts.dedup_by(|a, b| (*a - *b).abs() <= CUT_DEDUP_EPS_S);
+    }
 
+    fn convolve(&self, t: f64, kernel: &PiecewisePolynomialKernel) -> f64 {
+        let mut cuts = self.cuts.borrow_mut();
+        self.merge_cuts(t, &mut cuts);
+
+        let mut kernel_idx = 0usize;
         let mut acc = 0.0_f64;
         for w in cuts.windows(2) {
             let (lo, hi) = (w[0], w[1]);
@@ -183,10 +209,17 @@ impl<'a> ShapedSignal<'a> {
                 continue;
             }
             let mid = 0.5 * (lo + hi);
+            // Every interval lies inside one kernel piece: the merge kept all
+            // piece boundaries, so advancing past pieces ending at or before
+            // `mid` lands on the covering piece without a per-node scan.
+            while kernel_idx + 1 < kernel.pieces.len() && kernel.pieces[kernel_idx].u_end <= mid {
+                kernel_idx += 1;
+            }
+            let piece = &kernel.pieces[kernel_idx];
             let mut sub = 0.0_f64;
             for (node, weight) in GAUSS_NODES.iter().zip(&GAUSS_WEIGHTS) {
-                let tau = node.mul_add(half, mid);
-                sub += weight * (self.eval_input)(t - tau) * eval_kernel(kernel, tau);
+                let tau = nurbs::fmadd(*node, half, mid);
+                sub += weight * (self.eval_input)(t - tau) * piece.evaluate(tau);
             }
             acc += sub * half;
         }

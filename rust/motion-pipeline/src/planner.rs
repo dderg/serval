@@ -81,20 +81,29 @@ impl Planner {
                     }
                 }
             };
-            let ok = match item {
-                StreamInput::Move(m) => self.absorb(m, &output),
-                StreamInput::Drain => {
-                    self.drain_to_rest(&output) && output.send(PlannedItem::Drain).is_ok()
-                }
-                StreamInput::Control(ctrl) => self.forward_control(ctrl, &output),
-            };
-            if !ok {
+            if !self.feed(item, &output) {
                 return;
             }
         }
-        if self.drain_to_rest(&output) {
-            let _ = output.send(PlannedItem::Drain);
+        self.finish(&output);
+    }
+
+    /// One iteration of [`Planner::run`]'s loop, for single-threaded hosts
+    /// that drive the stage item by item.
+    pub fn feed(&mut self, item: StreamInput, output: &Sender<PlannedItem>) -> bool {
+        match item {
+            StreamInput::Move(m) => self.absorb(m, output),
+            StreamInput::Drain => {
+                self.drain_to_rest(output) && output.send(PlannedItem::Drain).is_ok()
+            }
+            StreamInput::Control(ctrl) => self.forward_control(ctrl, output),
         }
+    }
+
+    /// The input-closed path: brake the window to rest, emit it, and forward
+    /// the `Drain`.
+    pub fn finish(&mut self, output: &Sender<PlannedItem>) -> bool {
+        self.drain_to_rest(output) && output.send(PlannedItem::Drain).is_ok()
     }
 
     fn plan_on_quiet_input(&mut self, output: &Sender<PlannedItem>) -> bool {

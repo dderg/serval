@@ -14,8 +14,8 @@ from typing import Optional
 
 COMMON_TAIL = """
 [post_processor is_xy]
-type: smooth_mzv
-frequency_hz: 50
+type: smooth_bell
+smooth_time: 0.019125
 
 [virtual_sdcard]
 path: {gcode_dir}
@@ -309,6 +309,105 @@ drive: stepper
 step_pin: gpiochip0/gpio6
 dir_pin: gpiochip0/gpio7
 enable_pin: !gpiochip0/gpio8
+microsteps: 16
+rotation_distance: 4
+
+[post_processor shaper_x]
+type: smooth_bell
+smooth_time: 0.019125
+
+[post_processor shaper_y]
+type: smooth_bell
+smooth_time: 0.018238636363636363
+
+[virtual_sdcard]
+path: {gcode_dir}
+
+[force_move]
+enable_force_move: True
+"""
+
+
+def corexy_tracked_config(h7_pty: str, gcode_dir: str) -> str:
+    """CoreXY with the A/B motor step queues on the shim's tracked lines
+    (a→gpio18, b→gpio7) so get_steps can observe the executed motor tracks.
+    Trident-bench motion limits from its printer.cfg (max_velocity 1000,
+    max_accel 10000, scv 30); used to replay the servo-ident stroke/dwell
+    pattern and audit commanded-position continuity at stroke boundaries."""
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[printer]
+max_velocity: 1000
+max_accel: 10000
+square_corner_velocity: 30
+max_z_velocity: 25
+max_z_accel: 100
+
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+
+[axis x]
+position_min: 0
+position_endstop: 0
+position_max: 300
+endstop_pin: ^gpiochip0/gpio10
+homing_speed: 10
+post_processors: shaper_x
+
+[axis y]
+position_min: 0
+position_endstop: 0
+position_max: 300
+endstop_pin: ^gpiochip0/gpio11
+homing_speed: 10
+post_processors: shaper_y
+
+[axis z]
+position_min: -5
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio12
+homing_speed: 5
+
+[limit gantry]
+axes: x, y
+max_velocity: 1000
+max_accel: 10000
+
+[limit z]
+axes: z
+max_velocity: 25
+max_accel: 100
+
+[motor a]
+drive: stepper
+step_pin: gpiochip0/gpio18
+dir_pin: gpiochip0/gpio1
+enable_pin: !gpiochip0/gpio2
+microsteps: 16
+rotation_distance: 40
+
+[motor b]
+drive: stepper
+step_pin: gpiochip0/gpio7
+dir_pin: gpiochip0/gpio4
+enable_pin: !gpiochip0/gpio5
+microsteps: 16
+rotation_distance: 40
+
+[motor z]
+drive: stepper
+step_pin: gpiochip0/gpio6
+dir_pin: gpiochip0/gpio8
+enable_pin: !gpiochip0/gpio9
 microsteps: 16
 rotation_distance: 4
 
@@ -648,8 +747,8 @@ home_autocalibrate: never
 autocal_tolerance: 0.02
 {bed_mesh_section}
 [post_processor is_xy]
-type: smooth_mzv
-frequency_hz: 50
+type: smooth_bell
+smooth_time: 0.019125
 
 [virtual_sdcard]
 path: {gcode_dir}

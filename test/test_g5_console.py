@@ -25,7 +25,7 @@ def make_motion():
     m.commanded_pos = [0.0, 0.0, 0.0, 0.0]
     m._max_velocity = 300.0
     m._max_accel = 3000.0
-    m._square_corner_velocity = 5.0
+    m._corner_deviation = 0.0034517796864424596
     m._planner_ready = False
     m.kin = FakeKin()
     m.extruder = types.SimpleNamespace(check_move=lambda mv: None)

@@ -242,16 +242,33 @@ fn linear_pressure_advance_is_exact_cubic_transform() {
     // pos = 1 + 2t + 3t^2 + 4t^3,  vel = 2 + 6t + 12t^2
     let mut coeffs = [1.0, 2.0, 3.0, 4.0];
     let k = 0.05;
-    apply_pressure_advance(
+    apply_derivative_gains(
         &mut coeffs,
         &CompiledChain {
-            stages: vec![ChainStage::LinearPressureAdvance { k }],
+            stages: vec![ChainStage::DerivativeGains { k1: k, k2: 0.0 }],
         },
     );
     // smoothed = pos + k*vel -> c0+=k*2, c1+=k*6, c2+=k*12, c3 unchanged
     assert!((coeffs[0] - (1.0 + k * 2.0)).abs() < 1e-12);
     assert!((coeffs[1] - (2.0 + k * 6.0)).abs() < 1e-12);
     assert!((coeffs[2] - (3.0 + k * 12.0)).abs() < 1e-12);
+    assert!((coeffs[3] - 4.0).abs() < 1e-12);
+}
+
+#[test]
+fn derivative_gains_second_order_is_exact_cubic_transform() {
+    // pos = 1 + 2t + 3t^2 + 4t^3,  vel = 2 + 6t + 12t^2,  accel = 6 + 24t
+    let mut coeffs = [1.0, 2.0, 3.0, 4.0];
+    let (k1, k2) = (0.05, 0.002);
+    apply_derivative_gains(
+        &mut coeffs,
+        &CompiledChain {
+            stages: vec![ChainStage::DerivativeGains { k1, k2 }],
+        },
+    );
+    assert!((coeffs[0] - (1.0 + k1 * 2.0 + k2 * 6.0)).abs() < 1e-12);
+    assert!((coeffs[1] - (2.0 + k1 * 6.0 + k2 * 24.0)).abs() < 1e-12);
+    assert!((coeffs[2] - (3.0 + k1 * 12.0)).abs() < 1e-12);
     assert!((coeffs[3] - 4.0).abs() < 1e-12);
 }
 
@@ -393,7 +410,7 @@ fn linear_pa_chains(extruder_axis: usize, k: f64) -> Vec<CompiledChain> {
     let mut chains = vec![CompiledChain::default(); extruder_axis + 1];
     chains[extruder_axis] = CompiledChain {
         stages: (k != 0.0)
-            .then_some(trajectory::ChainStage::LinearPressureAdvance { k })
+            .then_some(trajectory::ChainStage::DerivativeGains { k1: k, k2: 0.0 })
             .into_iter()
             .collect(),
     };

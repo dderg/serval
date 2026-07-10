@@ -8,10 +8,11 @@ description = "WASM binding for the interactive playground: pasted gcode + confi
 license = "MIT OR Apache-2.0"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 console_error_panic_hook = "0.1"
+js-sys = "0.3"
 pipeline-snapshot = { path = "../pipeline-snapshot" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

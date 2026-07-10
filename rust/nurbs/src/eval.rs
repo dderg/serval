@@ -33,7 +33,7 @@ pub(crate) fn de_boor_inner(cps: &[f64], knots: &[f64], degree: u8, u: f64) -> f
             };
             let dj = unsafe { *d.get_unchecked(j) };
             let djm1 = unsafe { *d.get_unchecked(j - 1) };
-            unsafe { *d.get_unchecked_mut(j) = (dj - djm1).mul_add(alpha, djm1) };
+            unsafe { *d.get_unchecked_mut(j) = crate::fmadd(dj - djm1, alpha, djm1) };
         }
     }
 
@@ -80,7 +80,9 @@ pub fn vector_eval<V: VectorNurbsView<N>, const N: usize>(curve: &V, u: f64) -> 
             for axis in 0..N {
                 let dj = unsafe { *d_axes[axis].get_unchecked(j) };
                 let djm1 = unsafe { *d_axes[axis].get_unchecked(j - 1) };
-                unsafe { *d_axes[axis].get_unchecked_mut(j) = (dj - djm1).mul_add(alpha, djm1) };
+                unsafe {
+                    *d_axes[axis].get_unchecked_mut(j) = crate::fmadd(dj - djm1, alpha, djm1)
+                };
             }
         }
     }
@@ -140,7 +142,7 @@ pub fn eval_polynomial_with_derivative(
                     *dd.get_unchecked_mut(j) = one_minus_alpha * old_dd_jm1
                         + alpha * old_dd_j
                         + (old_d_j - old_d_jm1) * inv_denom;
-                    *d.get_unchecked_mut(j) = (old_d_j - old_d_jm1).mul_add(alpha, old_d_jm1);
+                    *d.get_unchecked_mut(j) = crate::fmadd(old_d_j - old_d_jm1, alpha, old_d_jm1);
                 }
             } else {
                 unsafe {
@@ -209,7 +211,7 @@ pub fn eval_derivative(cps: &[f64], knots: &[f64], degree: u8, u: f64) -> f64 {
             };
             let dj = unsafe { *d.get_unchecked(j) };
             let djm1 = unsafe { *d.get_unchecked(j - 1) };
-            unsafe { *d.get_unchecked_mut(j) = (dj - djm1).mul_add(alpha, djm1) };
+            unsafe { *d.get_unchecked_mut(j) = crate::fmadd(dj - djm1, alpha, djm1) };
         }
     }
 

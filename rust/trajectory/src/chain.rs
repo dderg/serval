@@ -8,25 +8,41 @@ pub struct PostProcessorInstance {
     values: Vec<f64>,
 }
 
+/// `DerivativeGains` is the operator `y = x + k1·ẋ + k2·ẍ`.
 #[derive(Debug, Clone)]
 pub enum ChainStage {
     SmoothKernel(PiecewisePolynomialKernel),
-    LinearPressureAdvance { k: f64 },
+    DerivativeGains { k1: f64, k2: f64 },
 }
 
 impl ChainStage {
+    /// The input time window this stage's output at `t` depends on, relative
+    /// to `t`. A convolution `(f ∗ k)(t)` reads `f` over `[t - k_hi, t - k_lo]`,
+    /// so the kernel's support enters reflected; the two coincide only for
+    /// symmetric kernels.
     #[must_use]
-    pub fn half_support(&self) -> (f64, f64) {
+    pub fn input_window(&self) -> (f64, f64) {
         match self {
-            Self::SmoothKernel(kernel) => kernel.support(),
-            Self::LinearPressureAdvance { .. } => (0.0, 0.0),
+            Self::SmoothKernel(kernel) => {
+                let (k_lo, k_hi) = kernel.support();
+                (-k_hi, -k_lo)
+            }
+            Self::DerivativeGains { .. } => (0.0, 0.0),
+        }
+    }
+
+    #[must_use]
+    pub fn kernel_variance_s2(&self) -> f64 {
+        match self {
+            Self::SmoothKernel(kernel) => kernel.second_moment(),
+            Self::DerivativeGains { .. } => 0.0,
         }
     }
 
     fn composition_slot(&self) -> (usize, &'static str) {
         match self {
             Self::SmoothKernel(_) => (0, "kernel"),
-            Self::LinearPressureAdvance { .. } => (1, "derivative-gain"),
+            Self::DerivativeGains { .. } => (1, "derivative-gain"),
         }
     }
 }
@@ -51,6 +67,13 @@ pub enum PostProcessorError {
          derivative-gain post-processor per axis"
     )]
     UnsupportedComposition { detail: String },
+    #[error(
+        "post-processor '{name}' carries an acceleration gain (k2 = {k2}) and \
+         must come after a smoothing kernel in post_processors: applied before \
+         the kernel it runs in the lowerer, whose curved-path sampler carries \
+         no jerk and so cannot form the transformed velocity"
+    )]
+    AccelGainNeedsPrecedingKernel { name: String, k2: f64 },
 }
 
 impl PostProcessorInstance {
@@ -97,6 +120,11 @@ impl PostProcessorInstance {
             .try_for_each(|(spec, value)| spec.check(&self.name, *value))
     }
 
+    #[must_use]
+    pub fn compile_stage(&self) -> Option<ChainStage> {
+        self.algo.compile(&self.values)
+    }
+
     pub fn set_param(&mut self, key: &str, value: f64) -> Result<(), PostProcessorError> {
         let idx = self
             .algo
@@ -122,6 +150,18 @@ impl CompiledChain {
             let Some(stage) = inst.algo.compile(&inst.values) else {
                 continue;
             };
+            if let ChainStage::DerivativeGains { k2, .. } = stage {
+                let after_kernel = compiled
+                    .stages
+                    .iter()
+                    .any(|s| matches!(s, ChainStage::SmoothKernel(_)));
+                if k2 != 0.0 && !after_kernel {
+                    return Err(PostProcessorError::AccelGainNeedsPrecedingKernel {
+                        name: inst.name().to_string(),
+                        k2,
+                    });
+                }
+            }
             let (slot, kind) = stage.composition_slot();
             if let Some(prev) = slot_sources[slot] {
                 return Err(PostProcessorError::UnsupportedComposition {
@@ -142,10 +182,33 @@ impl CompiledChain {
         self.stages.is_empty()
     }
 
+    /// Whether this chain ends in derivative-gain stages after a smoothing
+    /// kernel — the motor-side stages whose output (the motor command)
+    /// intentionally departs from the toolhead signal.
     #[must_use]
-    pub fn max_half_support(&self) -> (f64, f64) {
+    pub fn has_motor_side_gains(&self) -> bool {
+        let mut seen_kernel = false;
+        self.stages.iter().any(|stage| match stage {
+            ChainStage::SmoothKernel(_) => {
+                seen_kernel = true;
+                false
+            }
+            ChainStage::DerivativeGains { .. } => seen_kernel,
+        })
+    }
+
+    #[must_use]
+    pub fn kernel_variance_s2(&self) -> f64 {
+        self.stages
+            .iter()
+            .map(ChainStage::kernel_variance_s2)
+            .fold(0.0, f64::max)
+    }
+
+    #[must_use]
+    pub fn max_input_window(&self) -> (f64, f64) {
         self.stages.iter().fold((0.0, 0.0), |(lo, hi), stage| {
-            let (stage_lo, stage_hi) = stage.half_support();
+            let (stage_lo, stage_hi) = stage.input_window();
             (lo.min(stage_lo), hi.max(stage_hi))
         })
     }
@@ -189,6 +252,15 @@ impl AxisChainSet {
         self.chains.len()
     }
 
+    #[must_use]
+    pub fn max_spatial_kernel_variance_s2(&self) -> f64 {
+        self.chains
+            .iter()
+            .take(3)
+            .map(CompiledChain::kernel_variance_s2)
+            .fold(0.0, f64::max)
+    }
+
     /// Follower axes that ride on at least one leader: their tracks are not
     /// convolved with their own kernel but re-projected onto the leaders'
     /// shaped motion by the shaper.
@@ -209,7 +281,7 @@ impl AxisChainSet {
     /// its own chain on top, so the supports cascade: they add.
     #[must_use]
     pub fn axis_support(&self, axis: usize) -> (f64, f64) {
-        let (own_lo, own_hi) = self.chains[axis].max_half_support();
+        let (own_lo, own_hi) = self.chains[axis].max_input_window();
         let (lead_lo, lead_hi) = self.leaders_support(axis);
         (own_lo + lead_lo, own_hi + lead_hi)
     }
@@ -222,10 +294,15 @@ impl AxisChainSet {
             .find(|(a, _)| *a == axis)
             .map_or((0.0, 0.0), |(_, leaders)| {
                 leaders.iter().fold((0.0, 0.0), |(lo, hi), &l| {
-                    let (l_lo, l_hi) = self.chains[l].max_half_support();
+                    let (l_lo, l_hi) = self.chains[l].max_input_window();
                     (lo.min(l_lo), hi.max(l_hi))
                 })
             })
+    }
+
+    #[must_use]
+    pub fn has_motor_side_stages(&self) -> bool {
+        self.chains.iter().any(CompiledChain::has_motor_side_gains)
     }
 
     #[must_use]
@@ -258,7 +335,7 @@ impl AxisChainSet {
     pub fn direct_forward_support(&self) -> f64 {
         (0..self.n_axes())
             .filter(|&axis| !self.is_projected_follower(axis))
-            .map(|axis| self.chains[axis].max_half_support().1)
+            .map(|axis| self.chains[axis].max_input_window().1)
             .fold(0.0, f64::max)
     }
 
@@ -269,7 +346,7 @@ impl AxisChainSet {
     pub fn max_follower_own_forward_support(&self) -> f64 {
         self.projected_followers()
             .filter(|(axis, _)| self.has_own_kernel(*axis))
-            .map(|(axis, _)| self.chains[axis].max_half_support().1)
+            .map(|(axis, _)| self.chains[axis].max_input_window().1)
             .fold(0.0, f64::max)
     }
 }
