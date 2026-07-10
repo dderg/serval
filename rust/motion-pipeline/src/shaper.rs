@@ -518,7 +518,7 @@ impl AxisSignalTable {
         self.coeffs[i]
             .iter()
             .rev()
-            .fold(0.0_f64, |acc, &c| acc.mul_add(tau, c))
+            .fold(0.0_f64, |acc, &c| nurbs::fmadd(acc, tau, c))
     }
 
     pub(crate) fn eval(&self, t: f64) -> f64 {
@@ -671,7 +671,7 @@ fn shaped_ladder<S: TrackSignal>(
     t1: f64,
 ) -> Result<(Vec<f64>, bool), PostProcessError> {
     let h = t1 - t0;
-    let t_of = |u: f64| (0.5 * (u + 1.0)).mul_add(h, t0);
+    let t_of = |u: f64| nurbs::fmadd(0.5 * (u + 1.0), h, t0);
     let p0 = finite_sample(axis, sig, t0)?;
     let p1 = finite_sample(axis, sig, t1)?;
     let v0 = exact_value(axis, sig.deriv(t0), t0)?;

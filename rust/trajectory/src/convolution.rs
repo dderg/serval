@@ -218,7 +218,7 @@ impl<'a> ShapedSignal<'a> {
             let piece = &kernel.pieces[kernel_idx];
             let mut sub = 0.0_f64;
             for (node, weight) in GAUSS_NODES.iter().zip(&GAUSS_WEIGHTS) {
-                let tau = node.mul_add(half, mid);
+                let tau = nurbs::fmadd(*node, half, mid);
                 sub += weight * (self.eval_input)(t - tau) * piece.evaluate(tau);
             }
             acc += sub * half;

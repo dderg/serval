@@ -32,7 +32,7 @@ pub(crate) fn integrate_arc_length<F: Fn(f64) -> f64>(
         let node = GAUSS_LEGENDRE_5_NODES[i];
         let weight = GAUSS_LEGENDRE_5_WEIGHTS[i];
         let u = midpoint + half_range * node;
-        sum = integrand(u).mul_add(weight, sum);
+        sum = crate::fmadd(integrand(u), weight, sum);
     }
 
     sum * half_range
