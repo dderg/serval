@@ -126,23 +126,40 @@ C02.60 -> 0x2002.0x61
 An ordered list of `PanelParam` entries — `name`, `c_code` (its resolved
 `addr` is derived, not stored separately), `type_token` (SDO type, default
 `u16`), `unit`, `scale` (display divisor, default `1.0`), `group`,
-`description`, and `autofill` (`None`, `"gain_position_from_speed"`, or
+`description`, `autofill` (`None`, `"gain_position_from_speed"`, or
 `"gain_integral_from_speed"` — a UI hint only; the backend never computes
-an autofilled value itself). Shipped entries, all verified against the
-EtherCAT bench config and `servo_calibration.GAIN_PARAMS`:
+an autofilled value itself), and `options` (`None`, or a `{value: label}`
+enum map the UI renders as a labeled select instead of a number field;
+serialized with string keys since JSON objects cannot key on ints).
+Shipped entries, verified against the A6-EC vendor manual (chapter 7 —
+gain tuning) and `servo_calibration.GAIN_PARAMS`. The bench's
+`servos_xy.cfg` register notes record SDO *subindexes* (C-code + 1), which
+is why its `# 41` annotation on notch 1's frequency corresponds to C01.40
+here. Notches 1–2 double as the adaptive pair: while
+`adaptive_notch_mode` is 1 or 2 the drive rewrites their parameters
+itself. `C01.10` (`speed_feedback_filter`) only accepts writes at stop.
 
-| name | c_code | unit | scale | group | autofill |
+| name | c_code | unit | scale | group | autofill / options |
 | --- | --- | --- | --- | --- | --- |
 | `position_gain` | C01.00 | 0.1 rad/s | 10 | gains | `gain_position_from_speed` (`round(speed_gain * 1.6)`) |
 | `speed_gain` | C01.01 | 0.1 Hz | 10 | gains | — (the autofill source) |
 | `integral_time` | C01.02 | 0.01 ms | 100 | gains | `gain_integral_from_speed` (`round(1250000 / speed_gain)`) |
-| `freq_cutoff` | C01.03 | Hz | 1 | filters | — (bench rule-of-thumb ≈ speed_gain/10 × 0.4, drive default 200) |
-| `adaptive_notch_mode` | C01.30 | — | 1 | notch | — (0=locked, 1=retune after every restart, 2=auto, 3=restart adaptive tuning now) |
-| `gain_mode` | C00.04 | — | 1 | load | — (0=manual, 1=standard/stiffness table) |
+| `torque_filter_cutoff` | C01.03 | Hz | 1 | filters | — (1st torque reference filter, manual 7.3; drive default 200) |
+| `notch_<n>_freq` (n=1..5) | C01.40+3(n−1) | Hz | 1 | notch | — (manual 7.10; default 8000 = parked) |
+| `notch_<n>_width` (n=1..5) | C01.41+3(n−1) | 0.1% | 1 | notch | — (manual 7.10; default 0) |
+| `notch_<n>_depth` (n=1..5) | C01.42+3(n−1) | 0.1% | 1 | notch | — (manual 7.10; default 1000) |
+| `adaptive_notch_mode` | C01.30 | — | 1 | notch | options: 0=disabled, 1=1 adaptive notch, 2=2 adaptive notches, 3=reset notch params, 4=test resonance only |
+| `speed_feedback_filter` | C01.10 | — | 1 | speed_observer | options: 0=internal, 1=low-pass, 2=overlapping average, 3=speed observer, 4=no filter |
+| `speed_observer_gain` | C02.30 | 0.1 Hz | 10 | speed_observer | — |
+| `speed_observer_inertia` | C02.31 | 0.1% | 10 | speed_observer | — (default 1000 = 100%) |
+| `speed_observer_cutoff` | C02.32 | Hz | 1 | speed_observer | — |
+| `disturbance_gain` | C02.60 | 0.1 Hz | 10 | disturbance_observer | — |
+| `disturbance_inertia` | C02.61 | 0.1% | 10 | disturbance_observer | — (default 1000 = 100%) |
+| `disturbance_cutoff` | C02.62 | Hz | 1 | disturbance_observer | — |
+| `disturbance_comp_torque` | C02.63 | 0.1% | 10 | disturbance_observer | — |
+| `gain_mode` | C00.04 | — | 1 | load | options: 0=manual, 1=stiffness table |
+| `stiffness_level` | C00.05 | — | 1 | load | — (1..31, used when gain_mode=1) |
 | `inertia_ratio` | C00.06 | % | 1 | load | — |
-| `c02_60` | C02.60 | — | 1 | experimental | — (name unknown; bench-noted value 2000, identify in the vendor manual) |
-| `c02_62` | C02.62 | — | 1 | experimental | — (name unknown; bench-noted value 30, identify in the vendor manual) |
-| `c02_63` | C02.63 | — | 1 | experimental | — (name unknown; bench-noted value 150, identify in the vendor manual) |
 
 Names, resolved addresses, and type tokens are all validated for
 uniqueness/validity at import time and again once `extra_params:` is

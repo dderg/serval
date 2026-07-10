@@ -291,6 +291,54 @@ confirmation). Changes driven by that review:
 3. **Journal layout**: the run table must not overflow the viewport
    (horizontal scroll containment / column pruning).
 
+## Amendments — second demo review (2026-07-10, evening)
+
+Two corrections and one redesign.
+
+**Register map is now manual-verified.** The A6-EC vendor manual (chapter
+7) replaced guesswork: the bench config's `# 41`-style notes record SDO
+subindexes, not C-codes, so the notch bank is C01.40–C01.4E — five
+notches × (freq, width 0.1%, depth 0.1%), notches 1–2 doubling as the
+adaptive pair that `adaptive_notch_mode` (C01.30: 0=disabled, 1/2=adaptive
+count, 3=param reset, 4=test-only) hands to the drive. C01.03 is the
+*torque reference filter* cutoff (was mislabeled "speed loop filter").
+Speed observer = C01.10 (`speed_feedback_filter`, =3 enables, write at
+stop only) + C02.30/31/32; disturbance observer = C02.60–63 (the formerly
+"unknown" bench-noted registers). `PanelParam` grew an `options` enum map
+(labeled selects in the UI) and `c_code_to_addr` accepts hex code digits.
+
+**The dashboard is a set of task pages, not one page.** Each page serves
+one calibration activity with only the tools that activity needs; the
+interleaved loop is navigation between pages, not scrolling within one.
+Shared shell: page tabs, moonraker URL, drive-state freshness + refresh,
+session command log, and a per-motor parameter grid component (one row
+per param, one column per motor plus an "all" setter — never four
+identical entries; every write is a `SERVO_TUNE ... MOTORS=<explicit>`
+line, previewed before sending; pending edits and inter-motor drift are
+highlighted; enum params render as labeled selects).
+
+- **Gains** — sweep launcher (`SPEED_GAINS=<safe>,<target>` prefilled from
+  the last gain run), recent gain runs with ambient diffs, PSD overlay
+  with per-step chips, verdict, the 3-gain grid with autofill.
+  Automation: existing verdict. Human input: target choice, apply.
+- **Notches** — PSD of selected runs plus a detected-peak list (top peaks
+  in the 20–450 Hz band); "→ notch n" pushes a peak's frequency into a
+  chosen manual slot's pending edits (width/depth stay human — manual
+  defaults 0/1000 are parked values); notch bank grid; adaptive-mode
+  quick actions (reset → lock recipe); re-run sweep to validate.
+- **Observers** — speed-observer and disturbance-observer grids plus
+  torque filter; time-domain ferr/torque overlay (disturbance rejection
+  is a time-domain signal, not a PSD one); sweep re-run.
+- **Dynamics** — `SERVO_FIT_DYNAMICS` runner and its recommendations
+  (inertia ratio, FF profile), apply into `load` params.
+- **Journal** — the full run history across experiments (ambient diffs,
+  verdicts, analyze), the audit spine the task pages' strips filter.
+
+Future automation this structure is built to accept: adaptive-notch
+harvest (enable adaptive → strokes → read back what the drive chose into
+the journal → lock → optionally copy into manual slots) and a gain ladder
+(raise target until flags trip, human approves each apply).
+
 ## Later stage — live tracking view
 
 The vendor's USB scope, in the dashboard, without new transport: telemetry

@@ -186,10 +186,10 @@ fn attempt1_resonance_injection_flips_the_verdict_to_the_safe_step() {
     std::fs::remove_dir_all(&out_dir).ok();
 }
 
-/// The tuning panel (`docs/rewrite/servo-tuning-profiles.md`'s
+/// The tuning grid (`docs/rewrite/servo-tuning-profiles.md`'s
 /// `SERVO_DUMP_TUNING` shape) has nothing to render without a bench unless
 /// `servo-cal demo` also ships a plausible `<out_dir>/drive_state.json` —
-/// this asserts the file mirrors the shipped `PANEL_PARAMS` map (10 params,
+/// this asserts the file mirrors the shipped `PANEL_PARAMS` map (31 params,
 /// 4 AWD corexy motors) and pins `gain_mode`/`inertia_ratio` the way a
 /// `[motor] params:` block would.
 #[test]
@@ -206,22 +206,40 @@ fn demo_writes_a_drive_state_the_panel_can_render() {
     assert!(drive_state["created_utc"].as_str().is_some());
 
     let params = drive_state["params"].as_array().unwrap();
-    assert_eq!(params.len(), 10, "must mirror all 10 shipped PANEL_PARAMS");
+    assert_eq!(params.len(), 31, "must mirror all 31 shipped PANEL_PARAMS");
     let names: Vec<&str> = params.iter().map(|p| p["name"].as_str().unwrap()).collect();
     for expected in [
         "position_gain",
         "speed_gain",
         "integral_time",
-        "freq_cutoff",
+        "torque_filter_cutoff",
+        "notch_1_freq",
+        "notch_3_depth",
+        "notch_5_width",
         "adaptive_notch_mode",
+        "speed_feedback_filter",
+        "speed_observer_gain",
+        "speed_observer_inertia",
+        "speed_observer_cutoff",
+        "disturbance_gain",
+        "disturbance_inertia",
+        "disturbance_cutoff",
+        "disturbance_comp_torque",
         "gain_mode",
+        "stiffness_level",
         "inertia_ratio",
-        "c02_60",
-        "c02_62",
-        "c02_63",
     ] {
         assert!(names.contains(&expected), "missing panel param {expected}");
     }
+    let notch_5_depth = params
+        .iter()
+        .find(|p| p["name"] == "notch_5_depth")
+        .unwrap();
+    assert_eq!(
+        notch_5_depth["addr"],
+        Value::from("0x2001.0x4f"),
+        "A6-EC manual 7.10: notch 5 depth is C01.4E, +1 for the SDO subindex"
+    );
     let position_gain = params
         .iter()
         .find(|p| p["name"] == "position_gain")
@@ -256,6 +274,12 @@ fn demo_writes_a_drive_state_the_panel_can_render() {
         assert_eq!(readings["C02.60"], Value::from(2000));
         assert_eq!(readings["C02.62"], Value::from(30));
         assert_eq!(readings["C02.63"], Value::from(150));
+        let notch_1_freq_expected = if name == "motor_b" { 400 } else { 345 };
+        assert_eq!(
+            readings["C01.40"],
+            Value::from(notch_1_freq_expected),
+            "notch 1 frequency carries the deliberate motor_b drift"
+        );
     }
 
     let config_pins = drive_state["config_pins"].as_object().unwrap();

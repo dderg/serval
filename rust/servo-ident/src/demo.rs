@@ -36,144 +36,288 @@ const SAFE_ACCEL: &str = "cal_p880_s550_i2273_accel_20260710_151519.csv.gz";
 const TARGET_SCAP: &str = "cal_p1120_s700_i1786_20260710_151521.scap.gz";
 const TARGET_ACCEL: &str = "cal_p1120_s700_i1786_accel_20260710_151524.csv.gz";
 
-/// One entry of `servo_tuning.PANEL_PARAMS`, mirrored by hand — see
+/// One entry of `servo_tuning.PANEL_PARAMS`, mirrored — see
 /// `docs/rewrite/servo-tuning-profiles.md`'s `PANEL_PARAMS` table, the
 /// source of truth `klippy/extras/servo_tuning.py` derives its `addr` from
 /// via `c_code_to_addr`. Kept here only so the demo dashboard has a
 /// plausible `drive_state.json` to render; a mismatch against the Python
 /// map is a documentation problem, not a wire contract this crate enforces.
 struct DemoPanelParam {
-    name: &'static str,
-    c_code: &'static str,
-    addr: &'static str,
+    name: String,
+    c_code: String,
+    addr: String,
     unit: &'static str,
     scale: f64,
     group: &'static str,
-    description: &'static str,
+    description: String,
     autofill: Option<&'static str>,
+    options: Option<&'static [(&'static str, &'static str)]>,
+    reading: i64,
 }
 
-const DEMO_PANEL_PARAMS: [DemoPanelParam; 10] = [
+#[allow(clippy::too_many_arguments)]
+fn plain_param(
+    name: &str,
+    c_code: &str,
+    addr: &str,
+    unit: &'static str,
+    scale: f64,
+    group: &'static str,
+    description: &str,
+    reading: i64,
+) -> DemoPanelParam {
     DemoPanelParam {
-        name: "position_gain",
-        c_code: "C01.00",
-        addr: "0x2001.0x01",
-        unit: "0.1 rad/s",
-        scale: 10.0,
-        group: "gains",
-        description: "C01.00 position loop gain; autofilled from speed_gain as round(speed_gain * 1.6)",
-        autofill: Some("gain_position_from_speed"),
-    },
-    DemoPanelParam {
-        name: "speed_gain",
-        c_code: "C01.01",
-        addr: "0x2001.0x02",
-        unit: "0.1 Hz",
-        scale: 10.0,
-        group: "gains",
-        description: "C01.01 speed loop gain; the autofill source for position_gain and integral_time",
+        name: name.into(),
+        c_code: c_code.into(),
+        addr: addr.into(),
+        unit,
+        scale,
+        group,
+        description: description.into(),
         autofill: None,
-    },
-    DemoPanelParam {
-        name: "integral_time",
-        c_code: "C01.02",
-        addr: "0x2001.0x03",
-        unit: "0.01 ms",
-        scale: 100.0,
-        group: "gains",
-        description: "C01.02 speed integral time; autofilled from speed_gain as round(1250000 / speed_gain)",
-        autofill: Some("gain_integral_from_speed"),
-    },
-    DemoPanelParam {
-        name: "freq_cutoff",
-        c_code: "C01.03",
-        addr: "0x2001.0x04",
-        unit: "Hz",
-        scale: 1.0,
-        group: "filters",
-        description: "C01.03 speed loop filter cutoff frequency; bench rule-of-thumb \u{2248} speed_gain/10 \u{d7} 0.4, drive default 200",
-        autofill: None,
-    },
-    DemoPanelParam {
-        name: "adaptive_notch_mode",
-        c_code: "C01.30",
-        addr: "0x2001.0x31",
-        unit: "",
-        scale: 1.0,
-        group: "notch",
-        description: "C01.30 adaptive notch tuning mode: 0=locked, 1=retune after every restart, 2=auto, 3=restart adaptive tuning now",
-        autofill: None,
-    },
-    DemoPanelParam {
-        name: "gain_mode",
-        c_code: "C00.04",
-        addr: "0x2000.0x05",
-        unit: "",
-        scale: 1.0,
-        group: "load",
-        description: "C00.04 auto-tuning mode: 0=manual, 1=standard/stiffness table",
-        autofill: None,
-    },
-    DemoPanelParam {
-        name: "inertia_ratio",
-        c_code: "C00.06",
-        addr: "0x2000.0x07",
-        unit: "%",
-        scale: 1.0,
-        group: "load",
-        description: "C00.06 load inertia ratio",
-        autofill: None,
-    },
-    DemoPanelParam {
-        name: "c02_60",
-        c_code: "C02.60",
-        addr: "0x2002.0x61",
-        unit: "",
-        scale: 1.0,
-        group: "experimental",
-        description: "name unknown - bench-noted value 2000; identify in the vendor manual",
-        autofill: None,
-    },
-    DemoPanelParam {
-        name: "c02_62",
-        c_code: "C02.62",
-        addr: "0x2002.0x63",
-        unit: "",
-        scale: 1.0,
-        group: "experimental",
-        description: "name unknown - bench-noted value 30; identify in the vendor manual",
-        autofill: None,
-    },
-    DemoPanelParam {
-        name: "c02_63",
-        c_code: "C02.63",
-        addr: "0x2002.0x64",
-        unit: "",
-        scale: 1.0,
-        group: "experimental",
-        description: "name unknown - bench-noted value 150; identify in the vendor manual",
-        autofill: None,
-    },
+        options: None,
+        reading,
+    }
+}
+
+const ADAPTIVE_NOTCH_OPTIONS: &[(&str, &str)] = &[
+    ("0", "disabled"),
+    ("1", "1 adaptive notch"),
+    ("2", "2 adaptive notches"),
+    ("3", "reset notch params"),
+    ("4", "test resonance only"),
 ];
+const SPEED_FEEDBACK_FILTER_OPTIONS: &[(&str, &str)] = &[
+    ("0", "internal setting"),
+    ("1", "low-pass filter"),
+    ("2", "overlapping average"),
+    ("3", "speed observer"),
+    ("4", "no filter"),
+];
+const GAIN_MODE_OPTIONS: &[(&str, &str)] = &[("0", "manual"), ("1", "stiffness table")];
+
+/// A6-EC manual 7.10: notch n occupies C01.40+3(n-1) .. +2. Slots 1-3
+/// carry the bench-noted values, 4-5 sit at the drive's parked defaults.
+const NOTCH_READINGS: [[i64; 3]; 5] = [
+    [345, 160, 200],
+    [225, 200, 120],
+    [140, 100, 350],
+    [8000, 0, 1000],
+    [8000, 0, 1000],
+];
+
+fn demo_panel_params() -> Vec<DemoPanelParam> {
+    let mut params = vec![
+        DemoPanelParam {
+            autofill: Some("gain_position_from_speed"),
+            ..plain_param(
+                "position_gain",
+                "C01.00",
+                "0x2001.0x01",
+                "0.1 rad/s",
+                10.0,
+                "gains",
+                "C01.00 position loop gain; autofilled from speed_gain as round(speed_gain * 1.6)",
+                880,
+            )
+        },
+        plain_param(
+            "speed_gain",
+            "C01.01",
+            "0x2001.0x02",
+            "0.1 Hz",
+            10.0,
+            "gains",
+            "C01.01 speed loop gain; the autofill source for position_gain and integral_time",
+            550,
+        ),
+        DemoPanelParam {
+            autofill: Some("gain_integral_from_speed"),
+            ..plain_param(
+                "integral_time",
+                "C01.02",
+                "0x2001.0x03",
+                "0.01 ms",
+                100.0,
+                "gains",
+                "C01.02 speed integral time; autofilled from speed_gain as round(1250000 / speed_gain)",
+                2273,
+            )
+        },
+        plain_param(
+            "torque_filter_cutoff",
+            "C01.03",
+            "0x2001.0x04",
+            "Hz",
+            1.0,
+            "filters",
+            "C01.03 1st torque reference filter cutoff frequency (manual 7.3)",
+            220,
+        ),
+    ];
+    let notch_kinds: [(&str, &str, &'static str); 3] = [
+        ("freq", "center frequency", "Hz"),
+        ("width", "width level", "0.1%"),
+        ("depth", "depth level", "0.1%"),
+    ];
+    for n in 1usize..=5 {
+        for (k, (kind, kind_desc, unit)) in notch_kinds.iter().enumerate() {
+            let code = 0x40 + (n - 1) * 3 + k;
+            params.push(plain_param(
+                &format!("notch_{n}_{kind}"),
+                &format!("C01.{code:02X}"),
+                &format!("0x2001.0x{:02x}", code + 1),
+                unit,
+                1.0,
+                "notch",
+                &format!("C01.{code:02X} {kind_desc} of the notch {n} (manual 7.10)"),
+                NOTCH_READINGS[n - 1][k],
+            ));
+        }
+    }
+    params.push(DemoPanelParam {
+        options: Some(ADAPTIVE_NOTCH_OPTIONS),
+        ..plain_param(
+            "adaptive_notch_mode",
+            "C01.30",
+            "0x2001.0x31",
+            "",
+            1.0,
+            "notch",
+            "C01.30 adaptive notch mode (manual 7.10)",
+            0,
+        )
+    });
+    params.push(DemoPanelParam {
+        options: Some(SPEED_FEEDBACK_FILTER_OPTIONS),
+        ..plain_param(
+            "speed_feedback_filter",
+            "C01.10",
+            "0x2001.0x11",
+            "",
+            1.0,
+            "speed_observer",
+            "C01.10 speed feedback filter; 3 enables the speed observer (manual 7.11)",
+            3,
+        )
+    });
+    params.extend([
+        plain_param(
+            "speed_observer_gain",
+            "C02.30",
+            "0x2002.0x31",
+            "0.1 Hz",
+            10.0,
+            "speed_observer",
+            "C02.30 speed observer gain (manual 7.11)",
+            8000,
+        ),
+        plain_param(
+            "speed_observer_inertia",
+            "C02.31",
+            "0x2002.0x32",
+            "0.1%",
+            10.0,
+            "speed_observer",
+            "C02.31 speed observer inertia correction (manual 7.11)",
+            1000,
+        ),
+        plain_param(
+            "speed_observer_cutoff",
+            "C02.32",
+            "0x2002.0x33",
+            "Hz",
+            1.0,
+            "speed_observer",
+            "C02.32 speed observer feedback low-pass cutoff (manual 7.11)",
+            0,
+        ),
+        plain_param(
+            "disturbance_gain",
+            "C02.60",
+            "0x2002.0x61",
+            "0.1 Hz",
+            10.0,
+            "disturbance_observer",
+            "C02.60 disturbance observer gain (manual 7.12)",
+            2000,
+        ),
+        plain_param(
+            "disturbance_inertia",
+            "C02.61",
+            "0x2002.0x62",
+            "0.1%",
+            10.0,
+            "disturbance_observer",
+            "C02.61 disturbance observer inertia correction coefficient (manual 7.12)",
+            1000,
+        ),
+        plain_param(
+            "disturbance_cutoff",
+            "C02.62",
+            "0x2002.0x63",
+            "Hz",
+            1.0,
+            "disturbance_observer",
+            "C02.62 disturbance observer low-pass cutoff frequency (manual 7.12)",
+            30,
+        ),
+        plain_param(
+            "disturbance_comp_torque",
+            "C02.63",
+            "0x2002.0x64",
+            "0.1%",
+            10.0,
+            "disturbance_observer",
+            "C02.63 disturbance observer compensation torque percentage (manual 7.12)",
+            150,
+        ),
+    ]);
+    params.push(DemoPanelParam {
+        options: Some(GAIN_MODE_OPTIONS),
+        ..plain_param(
+            "gain_mode",
+            "C00.04",
+            "0x2000.0x05",
+            "",
+            1.0,
+            "load",
+            "C00.04 auto-tuning mode: 0=manual, 1=standard/stiffness table",
+            0,
+        )
+    });
+    params.extend([
+        plain_param(
+            "stiffness_level",
+            "C00.05",
+            "0x2000.0x06",
+            "",
+            1.0,
+            "load",
+            "C00.05 stiffness level 1-31, used when gain_mode is the stiffness table",
+            12,
+        ),
+        plain_param(
+            "inertia_ratio",
+            "C00.06",
+            "0x2000.0x07",
+            "%",
+            1.0,
+            "load",
+            "C00.06 load inertia ratio",
+            150,
+        ),
+    ]);
+    params
+}
 
 const DEMO_MOTORS: [&str; 4] = ["motor_a", "motor_a1", "motor_b", "motor_b1"];
 
-/// c_code -> current raw reading, shared by every `DEMO_MOTORS` entry — the
-/// demo has no per-motor drift to show, only the panel's shape.
-fn demo_readings() -> [(&'static str, i64); 10] {
-    [
-        ("C01.00", 880),
-        ("C01.01", 550),
-        ("C01.02", 2273),
-        ("C01.03", 220),
-        ("C01.30", 0),
-        ("C00.04", 0),
-        ("C00.06", 150),
-        ("C02.60", 2000),
-        ("C02.62", 30),
-        ("C02.63", 150),
-    ]
-}
+/// `notch_1_freq` deliberately disagrees on one motor so the demo exercises
+/// the panel's per-motor grid highlight for drifted values.
+const DEMO_DISAGREEING_C_CODE: &str = "C01.40";
+const DEMO_DISAGREEING_MOTOR: &str = "motor_b";
+const DEMO_DISAGREEING_VALUE: i64 = 400;
 
 /// `gain_mode` (C00.04) and `inertia_ratio` (C00.06) are pinned in every
 /// demo motor's `[motor] params:` block — the panel's cue that editing them
@@ -184,10 +328,22 @@ const DEMO_PINNED_C_CODES: [&str; 2] = ["C00.04", "C00.06"];
 /// produces (`docs/rewrite/servo-tuning-profiles.md`), so the tuning panel
 /// has something plausible to render without a bench.
 fn write_demo_drive_state(out_dir: &Path) -> Result<(), String> {
-    let readings: std::collections::BTreeMap<&str, i64> = demo_readings().into_iter().collect();
-    let params: Vec<serde_json::Value> = DEMO_PANEL_PARAMS
+    let panel = demo_panel_params();
+    let readings: std::collections::BTreeMap<String, i64> = panel
+        .iter()
+        .map(|p| (p.c_code.clone(), p.reading))
+        .collect();
+    let params: Vec<serde_json::Value> = panel
         .iter()
         .map(|p| {
+            let options: serde_json::Value = match p.options {
+                None => serde_json::Value::Null,
+                Some(pairs) => pairs
+                    .iter()
+                    .map(|(v, label)| (v.to_string(), json!(label)))
+                    .collect::<serde_json::Map<_, _>>()
+                    .into(),
+            };
             json!({
                 "name": p.name,
                 "c_code": p.c_code,
@@ -198,18 +354,24 @@ fn write_demo_drive_state(out_dir: &Path) -> Result<(), String> {
                 "group": p.group,
                 "description": p.description,
                 "autofill": p.autofill,
+                "options": options,
             })
         })
         .collect();
-    let motor_readings = json!(readings);
     let motors: serde_json::Value = DEMO_MOTORS
         .iter()
-        .map(|m| (m.to_string(), motor_readings.clone()))
+        .map(|m| {
+            let mut motor_readings = readings.clone();
+            if *m == DEMO_DISAGREEING_MOTOR {
+                motor_readings.insert(DEMO_DISAGREEING_C_CODE.to_string(), DEMO_DISAGREEING_VALUE);
+            }
+            (m.to_string(), json!(motor_readings))
+        })
         .collect::<serde_json::Map<_, _>>()
         .into();
     let pinned: serde_json::Value = DEMO_PINNED_C_CODES
         .iter()
-        .map(|c| (c.to_string(), json!(readings[c])))
+        .map(|c| (c.to_string(), json!(readings[*c])))
         .collect::<serde_json::Map<_, _>>()
         .into();
     let config_pins: serde_json::Value = DEMO_MOTORS

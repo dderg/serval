@@ -18,13 +18,15 @@ INERTIA_RATIO_ADDR = "0x2000.0x07"
 GAIN_NAMES = ("position", "speed", "integral")
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
-_CCODE_RE = re.compile(r"^[Cc](\d{2})\.(\d{2})$")
+_CCODE_RE = re.compile(r"^[Cc](\d{2})\.([0-9A-Fa-f]{2})$")
 
 
 def c_code_to_addr(c_code: str) -> str:
     """Drive datasheet CGG.NN -> "0xINDEX.SUB": index is 0x2000 + the group
     number, subindex is the code digits read as hex, plus one (the drive's
-    SDO objects are 1-based where the datasheet code is 0-based)."""
+    SDO objects are 1-based where the datasheet code is 0-based). NN is a
+    hex byte in the A6-EC manual (the notch bank runs C01.49, C01.4A,
+    C01.4B, ...)."""
     m = _CCODE_RE.match(c_code.strip())
     if not m:
         raise ValueError("C-code %r: expected CGG.NN (e.g. C01.30)" % (c_code,))
@@ -53,6 +55,7 @@ class PanelParam:
     type_token: str = "u16"
     scale: float = 1.0
     autofill: AutofillKind | None = None
+    options: dict[int, str] | None = None
     addr: str = field(init=False, default="")
 
     def __post_init__(self) -> None:
@@ -69,6 +72,11 @@ class PanelParam:
             "group": self.group,
             "description": self.description,
             "autofill": self.autofill,
+            "options": (
+                None
+                if self.options is None
+                else {str(k): v for k, v in self.options.items()}
+            ),
         }
 
 
@@ -109,15 +117,40 @@ PANEL_PARAMS: tuple[PanelParam, ...] = (
         autofill="gain_integral_from_speed",
     ),
     PanelParam(
-        name="freq_cutoff",
+        name="torque_filter_cutoff",
         c_code="C01.03",
         unit="Hz",
         group="filters",
         description=(
-            "C01.03 speed loop filter cutoff frequency; bench "
-            "rule-of-thumb ≈ speed_gain/10 × 0.4, drive "
-            "default 200"
+            "C01.03 1st torque reference filter cutoff frequency; lower "
+            "filters more but adds delay (manual 7.3, range 5-16000, "
+            "drive default 200)"
         ),
+    ),
+    *(
+        PanelParam(
+            name="notch_%d_%s" % (n, kind),
+            c_code="C01.%02X" % (0x40 + (n - 1) * 3 + kind_offset),
+            unit="Hz" if kind == "freq" else "0.1%",
+            group="notch",
+            description=(
+                "C01.%02X %s of the %d%s notch (manual 7.10; notches 1-2 "
+                "are overwritten by the drive while adaptive_notch_mode "
+                "is 1 or 2)"
+                % (
+                    0x40 + (n - 1) * 3 + kind_offset,
+                    {
+                        "freq": "center frequency",
+                        "width": "width level",
+                        "depth": "depth level",
+                    }[kind],
+                    n,
+                    {1: "st", 2: "nd", 3: "rd"}.get(n, "th"),
+                )
+            ),
+        )
+        for n in range(1, 6)
+        for kind_offset, kind in enumerate(("freq", "width", "depth"))
     ),
     PanelParam(
         name="adaptive_notch_mode",
@@ -125,8 +158,108 @@ PANEL_PARAMS: tuple[PanelParam, ...] = (
         unit="",
         group="notch",
         description=(
-            "C01.30 adaptive notch tuning mode: 0=locked, 1=retune after "
-            "every restart, 2=auto, 3=restart adaptive tuning now"
+            "C01.30 adaptive notch mode (manual 7.10): 0=disabled, "
+            "1=1st notch adaptive, 2=1st+2nd notches adaptive, "
+            "3=reset notch parameters, 4=test resonance frequency only"
+        ),
+        options={
+            0: "disabled",
+            1: "1 adaptive notch",
+            2: "2 adaptive notches",
+            3: "reset notch params",
+            4: "test resonance only",
+        },
+    ),
+    PanelParam(
+        name="speed_feedback_filter",
+        c_code="C01.10",
+        unit="",
+        group="speed_observer",
+        description=(
+            "C01.10 speed feedback filter (manual 7.11); 3 enables the "
+            "speed observer; the drive only accepts changes at stop"
+        ),
+        options={
+            0: "internal setting",
+            1: "low-pass filter",
+            2: "overlapping average",
+            3: "speed observer",
+            4: "no filter",
+        },
+    ),
+    PanelParam(
+        name="speed_observer_gain",
+        c_code="C02.30",
+        unit="0.1 Hz",
+        scale=10.0,
+        group="speed_observer",
+        description=(
+            "C02.30 speed observer gain; higher observes faster, too "
+            "high oscillates (manual 7.11)"
+        ),
+    ),
+    PanelParam(
+        name="speed_observer_inertia",
+        c_code="C02.31",
+        unit="0.1%",
+        scale=10.0,
+        group="speed_observer",
+        description=(
+            "C02.31 speed observer inertia correction; corrects for an "
+            "inaccurate inertia_ratio (manual 7.11, default 1000 = 100%)"
+        ),
+    ),
+    PanelParam(
+        name="speed_observer_cutoff",
+        c_code="C02.32",
+        unit="Hz",
+        group="speed_observer",
+        description=(
+            "C02.32 speed observer speed feedback low-pass cutoff "
+            "frequency (manual 7.11)"
+        ),
+    ),
+    PanelParam(
+        name="disturbance_gain",
+        c_code="C02.60",
+        unit="0.1 Hz",
+        scale=10.0,
+        group="disturbance_observer",
+        description=(
+            "C02.60 disturbance observer gain; higher responds to "
+            "disturbances faster, too high vibrates (manual 7.12)"
+        ),
+    ),
+    PanelParam(
+        name="disturbance_inertia",
+        c_code="C02.61",
+        unit="0.1%",
+        scale=10.0,
+        group="disturbance_observer",
+        description=(
+            "C02.61 disturbance observer inertia correction coefficient "
+            "(manual 7.12, default 1000 = 100%)"
+        ),
+    ),
+    PanelParam(
+        name="disturbance_cutoff",
+        c_code="C02.62",
+        unit="Hz",
+        group="disturbance_observer",
+        description=(
+            "C02.62 disturbance observer low-pass cutoff frequency "
+            "(manual 7.12)"
+        ),
+    ),
+    PanelParam(
+        name="disturbance_comp_torque",
+        c_code="C02.63",
+        unit="0.1%",
+        scale=10.0,
+        group="disturbance_observer",
+        description=(
+            "C02.63 disturbance observer compensation torque percentage "
+            "(manual 7.12)"
         ),
     ),
     PanelParam(
@@ -137,6 +270,17 @@ PANEL_PARAMS: tuple[PanelParam, ...] = (
         description=(
             "C00.04 auto-tuning mode: 0=manual, 1=standard/stiffness table"
         ),
+        options={0: "manual", 1: "stiffness table"},
+    ),
+    PanelParam(
+        name="stiffness_level",
+        c_code="C00.05",
+        unit="",
+        group="load",
+        description=(
+            "C00.05 stiffness level 1-31, used when gain_mode is the "
+            "stiffness table (manual 7.2, default 12)"
+        ),
     ),
     PanelParam(
         name="inertia_ratio",
@@ -144,35 +288,6 @@ PANEL_PARAMS: tuple[PanelParam, ...] = (
         unit="%",
         group="load",
         description="C00.06 load inertia ratio",
-    ),
-    PanelParam(
-        name="c02_60",
-        c_code="C02.60",
-        unit="",
-        group="experimental",
-        description=(
-            "name unknown - bench-noted value 2000; identify in the "
-            "vendor manual"
-        ),
-    ),
-    PanelParam(
-        name="c02_62",
-        c_code="C02.62",
-        unit="",
-        group="experimental",
-        description=(
-            "name unknown - bench-noted value 30; identify in the vendor manual"
-        ),
-    ),
-    PanelParam(
-        name="c02_63",
-        c_code="C02.63",
-        unit="",
-        group="experimental",
-        description=(
-            "name unknown - bench-noted value 150; identify in the "
-            "vendor manual"
-        ),
     ),
 )
 

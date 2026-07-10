@@ -345,6 +345,70 @@ def test_panel_params_types_are_valid():
         assert p.type_token in servo_param.TYPE_TOKENS
 
 
+NOTCH_BANK_ADDR_PAIRS = [
+    ("notch_1_freq", "0x2001.0x41"),
+    ("notch_1_width", "0x2001.0x42"),
+    ("notch_1_depth", "0x2001.0x43"),
+    ("notch_2_freq", "0x2001.0x44"),
+    ("notch_3_freq", "0x2001.0x47"),
+    ("notch_4_freq", "0x2001.0x4a"),
+    ("notch_4_width", "0x2001.0x4b"),
+    ("notch_5_freq", "0x2001.0x4d"),
+    ("notch_5_depth", "0x2001.0x4f"),
+]
+
+
+@pytest.mark.parametrize("name,addr", NOTCH_BANK_ADDR_PAIRS)
+def test_manual_notch_bank_addresses(name, addr):
+    """A6-EC manual 7.10: notch n occupies C01.40+3(n-1) .. +2. The bench
+    config's own notes record SDO subindexes (C-code + 1), so notch 1's
+    frequency C01.40 lands at 0x2001.0x41."""
+    by_name = {p.name: p for p in servo_tuning.PANEL_PARAMS}
+    assert by_name[name].addr == addr
+    assert by_name[name].group == "notch"
+
+
+def test_c_code_to_addr_accepts_hex_codes():
+    assert servo_tuning.c_code_to_addr("C01.4A") == "0x2001.0x4b"
+    assert servo_tuning.c_code_to_addr("C01.4e") == "0x2001.0x4f"
+
+
+OBSERVER_ADDR_PAIRS = [
+    ("speed_feedback_filter", "0x2001.0x11", "speed_observer"),
+    ("speed_observer_gain", "0x2002.0x31", "speed_observer"),
+    ("speed_observer_inertia", "0x2002.0x32", "speed_observer"),
+    ("speed_observer_cutoff", "0x2002.0x33", "speed_observer"),
+    ("disturbance_gain", "0x2002.0x61", "disturbance_observer"),
+    ("disturbance_inertia", "0x2002.0x62", "disturbance_observer"),
+    ("disturbance_cutoff", "0x2002.0x63", "disturbance_observer"),
+    ("disturbance_comp_torque", "0x2002.0x64", "disturbance_observer"),
+]
+
+
+@pytest.mark.parametrize("name,addr,group", OBSERVER_ADDR_PAIRS)
+def test_observer_addresses(name, addr, group):
+    by_name = {p.name: p for p in servo_tuning.PANEL_PARAMS}
+    assert by_name[name].addr == addr
+    assert by_name[name].group == group
+
+
+def test_options_serialize_with_string_keys():
+    by_name = {p.name: p for p in servo_tuning.PANEL_PARAMS}
+    d = by_name["adaptive_notch_mode"].as_dict()
+    assert d["options"] == {
+        "0": "disabled",
+        "1": "1 adaptive notch",
+        "2": "2 adaptive notches",
+        "3": "reset notch params",
+        "4": "test resonance only",
+    }
+    assert by_name["gain_mode"].as_dict()["options"] == {
+        "0": "manual",
+        "1": "stiffness table",
+    }
+    assert by_name["speed_gain"].as_dict()["options"] is None
+
+
 def test_validate_param_map_rejects_duplicate_name():
     params = [
         servo_tuning.PanelParam(
@@ -464,11 +528,24 @@ def _full_readback(overrides=None):
         _c_code_key("C01.02"): (2, 2273),
         _c_code_key("C01.03"): (2, 220),
         _c_code_key("C01.30"): (2, 2),
-        _c_code_key("C00.04"): (2, 0),
-        _c_code_key("C00.06"): (2, 150),
+        _c_code_key("C01.10"): (2, 3),
+        _c_code_key("C02.30"): (2, 8000),
+        _c_code_key("C02.31"): (2, 1000),
+        _c_code_key("C02.32"): (2, 0),
         _c_code_key("C02.60"): (2, 2000),
+        _c_code_key("C02.61"): (2, 1000),
         _c_code_key("C02.62"): (2, 30),
         _c_code_key("C02.63"): (2, 150),
+        _c_code_key("C00.04"): (2, 0),
+        _c_code_key("C00.05"): (2, 12),
+        _c_code_key("C00.06"): (2, 150),
+        **{
+            _c_code_key("C01.%02X" % (0x40 + i)): (2, v)
+            for i, v in enumerate(
+                [345, 160, 200, 225, 200, 120, 140, 100, 350]
+                + [8000, 0, 1000] * 2
+            )
+        },
     }
     if overrides:
         values.update(overrides)

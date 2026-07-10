@@ -8,10 +8,14 @@ the how-to-run companion.
 
 A run directory (`manifest.json` + `results.json` + `plot_series.json`,
 [schema](servo-cal-contracts.md)) is a self-contained record of one
-calibration attempt. `servo-cal serve` turns a folder of them into a
-journal: every attempt as a row, the ambient SDO parameters that changed
-since the previous attempt, headline metrics per step, and a form to fire
-the next attempt without leaving the page.
+calibration attempt. `servo-cal serve` turns a folder of them into a set
+of task pages — **gains**, **notches**, **observers**, **dynamics**,
+**journal** — each serving one calibration activity with only the tools
+that activity needs (the page design lives in the plan's second demo
+review amendment). Every page shares the same spine: a strip of that
+page's runs with the ambient SDO diffs between consecutive attempts, the
+relevant slice of the drive tuning grid, a sweep/re-run box, and the
+session command log.
 
 ## Run it on the bench
 
@@ -24,14 +28,13 @@ Open `http://<bench-host>:8085/` in a browser. The journal polls
 `/api/runs` every 5 s, so a sweep's `results.json` landing on disk shows up
 without a manual refresh.
 
-The drive tuning panel reads `<captures_root>/drive_state.json` — written by
+The drive tuning grid reads `<captures_root>/drive_state.json` — written by
 `SERVO_DUMP_TUNING` (see
 [servo-tuning-profiles.md](servo-tuning-profiles.md#tuning-panel-backend)) —
-and writes back through `SERVO_TUNE`, one register at a time, applied to
-every motor unless the panel had to expand a mixed row per motor. Both the
-panel's Apply and the sweep row's Run, like the re-run form, issue G-code
-through Moonraker, not through `servo-cal` — add the dashboard's origin to
-the bench's `moonraker.conf`:
+and writes back through `SERVO_TUNE`, always with an explicit `MOTORS=`
+list. The grid's Apply, the notch quick actions, and the sweep box all
+issue G-code through Moonraker, not through `servo-cal` — add the
+dashboard's origin to the bench's `moonraker.conf`:
 
 ```ini
 [authorization]
@@ -55,21 +58,21 @@ rust/target/release/servo-cal demo /tmp/servo-cal-demo
 rust/target/release/servo-cal serve --dir /tmp/servo-cal-demo --port 8085
 ```
 
-Open `http://127.0.0.1:8085/` — the journal shows three rows, newest first,
-each an `s700`-recommended clean gain sweep, with the ambient diff column
-reading the notch value change between consecutive rows. Tick two rows and
-click "overlay selected" to see their `s550`/`s700` following-error traces
-drawn together.
+Open `http://127.0.0.1:8085/` — the gains page preselects the newest
+analyzed runs, so the PSD overlay (with attempt 1's injected 230 Hz ring
+separating from the clean attempts) and the prefilled sweep command are
+populated before any clicking; the ambient diff column reads the notch
+value change between consecutive rows.
 
 `servo-cal demo` also writes a `drive_state.json` for four AWD corexy
 motors (`motor_a`/`motor_a1`/`motor_b`/`motor_b1`) mirroring the shipped
-`PANEL_PARAMS` (gains 880/550/2273, `freq_cutoff` 220, `gain_mode`/
-`inertia_ratio` 0/150 pinned as if set by `[motor] params:`, three
-unidentified experimental registers), so the drive tuning panel has
-something plausible to render and Apply against without a bench — Apply
-still tries to reach Moonraker, so on a bench-less demo it will report a
-connection error in the panel's status line and session log, which is
-expected.
+31-entry `PANEL_PARAMS` (gains 880/550/2273, the full notch bank with
+slots 1–3 on bench-noted values and `notch_1_freq` deliberately drifted on
+`motor_b` to show the grid's drift highlight, both observers, `gain_mode`/
+`inertia_ratio` pinned as if set by `[motor] params:`), so every page's
+grid has something plausible to render and Apply against without a
+bench — Apply still tries to reach Moonraker, so on a bench-less demo it
+will report a connection error in the session log, which is expected.
 
 `servo-cal demo` resolves the fixtures directory relative to the running
 binary (`<repo>/rust/target/<profile>/servo-cal` -> `<repo>/test/fixtures`);
@@ -79,7 +82,7 @@ pass `--fixtures <dir>` if the binary has been copied elsewhere.
 
 | Method | Path                              | Behavior                                                                 |
 |--------|-----------------------------------|---------------------------------------------------------------------------|
-| GET    | `/`, `/app.js`, `/app.css`        | the embedded single-page dashboard (no build step, no CDN)                 |
+| GET    | `/`, `/app.js`, `/app.css`        | the embedded dashboard (hash-routed task pages; no build step, no CDN)     |
 | GET    | `/api/runs`                       | run directories under `--dir` holding a `manifest.json`, newest mtime first: name, `mtime_utc`, experiment, tag, axis, `has_results`, and a verdict summary (`recommended_step`, `reason`, `flags`) when `results.json` exists, else `null` |
 | GET    | `/api/runs/<name>/manifest`       | raw `manifest.json`; 404 with a JSON `{"error": ...}` body if missing      |
 | GET    | `/api/runs/<name>/results`        | raw `results.json`; 404 if missing                                        |
@@ -90,45 +93,70 @@ pass `--fixtures <dir>` if the binary has been copied elsewhere.
 `<name>` is validated against `[A-Za-z0-9_-]+`; anything else is rejected
 before it ever reaches the filesystem.
 
-## Drive tuning panel
+## Task pages
 
-Renders purely from `/api/drive_state`, grouped into the sections
-`PANEL_PARAMS` assigns (`gains`, `filters`, `notch`, `load`,
-`experimental`), plus an `other` section for any `extra_params:` group the
-panel doesn't otherwise recognize — nothing from the dump is ever dropped.
+Hash-routed (`#/gains`, `#/notches`, `#/observers`, `#/dynamics`,
+`#/journal`); the tuning loop is navigation between pages, not scrolling
+within one. Non-journal pages are a two-column workspace: charts and the
+page's run strip on the left, the page's slice of the drive tuning grid
+plus sweep box and session log in a sticky right rail.
 
-- **One field per param.** When every motor reads the same raw value the
-  row is a single input, pre-filled with the display value (`raw / scale`)
-  and a small "raw `<n>`" hint; when motors disagree the row shows a
-  "mixed" badge that expands to one input per motor on click.
+- **gains** — gain-sweep/refine runs, following-error PSD overlay (step
+  chips, 20–450 Hz band marked, per-trace peak annotations), the `gains`
+  grid with autofill.
+- **notches** — same PSD plus a detected-peak list (top spaced peaks in
+  the band, newest selected run); "→ notch n" pushes a peak's frequency
+  into that slot's pending edits for all motors (width/depth stay
+  operator-chosen); the full 5-slot notch bank grid and adaptive-mode
+  quick actions (reset params / 1 adaptive / 2 adaptive / disable).
+- **observers** — torque filter, speed observer, disturbance observer
+  grids; time-domain following-error overlay (disturbance rejection is a
+  time-domain signal).
+- **dynamics** — `SERVO_FIT_DYNAMICS` runner and the `load` grid
+  (gain_mode / stiffness_level / inertia_ratio).
+- **journal** — every run across experiments, full width.
+
+## Drive tuning grid
+
+Renders purely from `/api/drive_state` as a param × motor table — one
+column per motor plus an **all** setter — filtered to the current page's
+groups (`gains`, `filters`, `notch`, `speed_observer`,
+`disturbance_observer`, `load`; any unrecognized `extra_params:` group
+lands in an `other` section on every grid page — nothing from the dump is
+ever dropped).
+
+- **Per-motor cells, explicit scope.** Every motor's value is always
+  visible; the "all" column writes every motor at once (showing "mixed"
+  when they disagree); a cell that differs from its siblings gets a drift
+  highlight, a cell with an unapplied edit a pending highlight. Params
+  with an `options` enum render as labeled selects.
 - **Config-pinned params** (present in a motor's `[motor] params:` block or
   `tuning_profile`, per `drive_state.json`'s `config_pins`) get a pin badge
-  showing the pinned value, titled "restart re-applies this" — editing the
-  live value here does not survive a restart until the config is updated
-  too.
+  showing the pinned value — editing the live value here does not survive
+  a restart until the config is updated too.
 - **Autofill.** Editing `speed_gain` live-derives `position_gain`
-  (`round(raw * 1.6)`) and `integral_time` (`round(1250000 / raw)`) unless
-  the operator has edited that field directly this session (dirty-tracked
-  per field); a "re-derive" link restores the linkage.
-- **Staleness banner.** Shows the drive state's age (ticking client-side
-  between fetches) and a Refresh button that sends `SERVO_DUMP_TUNING`
-  through Moonraker, then polls `/api/drive_state` until `age_s` drops,
-  then re-renders — the operator's cue that an out-of-band edit (e.g. a
-  hand-typed `SERVO_TUNE` on the console) is now reflected in the panel.
-- **Apply** builds the minimal `SERVO_TUNE` command list — only params that
-  actually changed, one call per param when every motor gets the same
-  value, one call per touched motor (`MOTORS=<name>`) when a row was
-  expanded — previews the exact lines in the session's G-code textarea,
-  sends them through the existing Moonraker plumbing, appends the batch to
-  a scrollable, timestamped "sent this session" log, then refreshes the
-  drive state.
-- **Sweep row.** Sits under the panel: the reconstructed sweep command
-  (same `manifest.json`-derived reconstruction the old re-run form used)
-  with its own Run button, so the loop reads tweak panel -> apply -> run
-  sweep -> journal updates.
-- The G-code textarea stays as the manual escape hatch for arbitrary lines
-  and doubles as the last-sent preview; every batch sent from Apply, Run
-  sweep, or the textarea's own Run button lands in the same session log.
+  (`round(raw * 1.6)`) and `integral_time` (`round(1250000 / raw)`)
+  per-motor unless the operator has edited that field directly this
+  session (dirty-tracked per field); a "re-derive" link restores the
+  linkage.
+- **Staleness banner** (topbar, all pages). Shows the drive state's age
+  (ticking client-side between fetches) and a Refresh button that sends
+  `SERVO_DUMP_TUNING` through Moonraker, then polls `/api/drive_state`
+  until `age_s` drops, then re-renders — the operator's cue that an
+  out-of-band edit (e.g. a hand-typed `SERVO_TUNE` on the console) is now
+  reflected in the grid.
+- **Apply** previews the exact pending `SERVO_TUNE PARAM=... VALUE=...
+  MOTORS=<explicit list>` lines above the button (motors grouped per
+  value), sends them through Moonraker, appends the batch to the
+  timestamped session log, then re-dumps the drives — `SERVO_TUNE`
+  readback-verifies each write but does not rewrite `drive_state.json`,
+  so without the re-dump the grid would snap back to stale values.
+- **Sweep box.** Prefilled from the newest run of the page's experiment
+  (or any run's "→ sweep" button), so the loop reads tweak grid -> apply
+  -> run sweep -> run strip updates.
+- The G-code textarea (collapsed by default) stays as the manual escape
+  hatch; every batch from Apply, quick actions, sweep, or manual Run lands
+  in the same session log, which survives page switches.
 
 ## Implementation notes
 
@@ -141,8 +169,9 @@ panel doesn't otherwise recognize — nothing from the dump is ever dropped.
 - The dashboard (`rust/servo-ident/src/web/{index.html,app.js,app.css}`) is
   embedded into the binary via `include_str!` — vanilla DOM + `<canvas>`,
   no framework, no build step.
-- The overlay drill-down never re-runs a sweep; it only draws
-  `plot_series.json` already on disk for the ticked rows.
+- Charts never re-run a sweep; they only draw `plot_series.json` already
+  on disk for the selected rows (cached per run mtime, so reselecting is
+  free).
 - The sweep row reconstructs its G-code from `manifest.json`'s
   `experiment`/`steps`/`stroke_plan` — a best-effort rendering the operator
   can edit before sending, not a guarantee of exact parameter fidelity.
