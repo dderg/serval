@@ -339,17 +339,19 @@ harvest (enable adaptive → strokes → read back what the drive chose into
 the journal → lock → optionally copy into manual slots) and a gain ladder
 (raise target until flags trip, human approves each apply).
 
-## Later stage — live tracking view
+## Live tracking view (built)
 
 The vendor's USB scope, in the dashboard, without new transport: telemetry
 already streams at the DC cycle into a growing `.scap` during any capture.
-A "live" mode starts an open-ended capture through Moonraker; `servo-cal
-serve` tails the file by byte offset and feeds downsampled deltas to the
-browser (polling or SSE); a scrolling canvas draws ferr/torque per drive.
-Stopping the capture leaves a normal analyzable `.scap`. Risk to check
-first: the endpoint capture writer's flush cadence — chunky buffering needs
-a flush-interval knob (file-writer change only, nowhere near the control
-loop).
+The **live** page starts an open-ended capture through Moonraker
+(`SERVO_CAPTURE_START NAME=live AXIS=X` — the command already existed);
+`servo-cal serve` tails the file by record-aligned byte offset
+(`/api/live`, `/api/live/<file>?offset=`) and the page scrolls the last
+10 s of per-drive following error. Stopping leaves a normal analyzable
+`.scap`. The flagged flush-cadence risk dissolved on inspection: the
+endpoint writer (`ethercat-rt/src/capture.rs`) writes each record
+unbuffered as it drains the ring (fsync is periodic, but a same-host
+reader sees the page cache), so no writer changes were needed.
 
 ## Testing
 

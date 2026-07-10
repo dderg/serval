@@ -7,6 +7,7 @@ pub mod fit;
 pub mod fit_driver;
 pub mod http;
 pub mod linalg;
+pub mod live;
 pub mod metrics;
 pub mod model;
 pub mod prep;

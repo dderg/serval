@@ -43,12 +43,20 @@ const PAGE_DEFS = {
     fitRunner: true,
     intro: "identify the load, then let feedforward carry it",
   },
+  live: {
+    label: "live",
+    live: true,
+    intro: "following error streamed off the growing capture file",
+  },
   journal: {
     label: "journal",
     journal: true,
   },
 };
 const DEFAULT_PAGE = "gains";
+const LIVE_STATUS_POLL_MS = 1000;
+const LIVE_TAIL_POLL_MS = 400;
+const LIVE_WINDOW_S = 10;
 
 const state = {
   page: DEFAULT_PAGE,
@@ -64,6 +72,15 @@ const state = {
     fetchedAtMs: null, // Date.now() when data was fetched, for a client-ticking age display
     pending: {}, // param name -> {motor: raw} — edits not yet applied
     dirty: new Set(), // autofill-target param names the user has edited directly this session
+  },
+  live: {
+    name: null, // capture file currently streamed
+    nextOffset: 0,
+    fsHz: null,
+    t: [], // seconds since stream start, one per kept point
+    perDrive: {}, // drive -> ferr values, same length as t
+    timers: [], // interval ids cleared on page switch
+    polling: false,
   },
   sentLog: [], // {time, label, lines, results} — every G-code batch sent this session
 };
@@ -281,10 +298,56 @@ function analysisSectionsHtml(def) {
   return parts.join("");
 }
 
+function liveShellHtml() {
+  return (
+    `<div class="workspace">` +
+    `<main class="analysis">` +
+    `<section class="live-section">` +
+    `<div class="section-head"><h2>live following error</h2>` +
+    `<span class="note" id="live-status">no capture yet</span></div>` +
+    `<div class="charts"><div class="chart-box">` +
+    `<canvas id="live-canvas" width="860" height="280"></canvas>` +
+    `<div class="legend" id="live-legend"></div>` +
+    `</div></div>` +
+    `</section>` +
+    `</main>` +
+    `<aside class="controls">` +
+    `<section class="sweep">` +
+    `<div class="section-head"><h2>capture</h2></div>` +
+    `<div class="row"><input type="text" id="live-start-command" ` +
+    `value="SERVO_CAPTURE_START NAME=live AXIS=X">` +
+    `<button id="live-start-btn">start</button>` +
+    `<button id="live-stop-btn">stop</button></div>` +
+    `<p class="note">start begins an open-ended capture; the chart tails the ` +
+    `growing file. stop leaves a normal analyzable .scap in the captures root.</p>` +
+    `</section>` +
+    `<section class="session">` +
+    `<details class="gcode-details"><summary>manual g-code</summary>` +
+    `<textarea id="gcode-textarea" spellcheck="false"></textarea>` +
+    `<div class="row"><button id="run-gcode">run</button></div>` +
+    `</details>` +
+    `<div id="run-status" class="status-line"></div>` +
+    `<div class="section-head"><h2>session log</h2></div>` +
+    `<div id="sent-log" class="sent-log"></div>` +
+    `</section>` +
+    `</aside>` +
+    `</div>`
+  );
+}
+
 function renderPage() {
   renderTabs();
   const def = currentPageDef();
   const root = el("page-root");
+  stopLivePolling();
+  if (def.live) {
+    root.innerHTML = liveShellHtml();
+    bindPageEvents();
+    bindLiveEvents();
+    renderSentLog();
+    startLivePolling();
+    return;
+  }
   if (def.journal) {
     root.innerHTML =
       `<div class="workspace single">` +
@@ -879,6 +942,125 @@ async function redrawCharts() {
   }
   if (def.peaks) renderPeakList(okNames, plots);
   if (def.charts && def.charts.includes("time")) drawTimeDomain(okNames, plots);
+}
+
+// --- live tail ----------------------------------------------------------------
+//
+// Polls /api/live for the newest flat capture, then streams
+// /api/live/<name>?offset=<next_offset> — the offset handshake is the
+// server's contract (always record-aligned). A new capture name resets the
+// stream; the chart keeps the last LIVE_WINDOW_S seconds.
+
+function bindLiveEvents() {
+  el("live-start-btn").addEventListener("click", () => {
+    const line = el("live-start-command").value.trim();
+    if (line) runGcode([line], "live");
+  });
+  el("live-stop-btn").addEventListener("click", () => runGcode(["SERVO_CAPTURE_STOP"], "live"));
+}
+
+function resetLiveStream(name) {
+  state.live.name = name;
+  state.live.nextOffset = 0;
+  state.live.fsHz = null;
+  state.live.t = [];
+  state.live.perDrive = {};
+}
+
+async function pollLiveStatus() {
+  let status;
+  try {
+    status = await api("/api/live");
+  } catch (e) {
+    const label = el("live-status");
+    if (label) label.textContent = String(e);
+    return;
+  }
+  const label = el("live-status");
+  if (!status.capture) {
+    if (label) label.textContent = "no capture in the captures root yet — press start";
+    return;
+  }
+  const cap = status.capture;
+  if (cap.name !== state.live.name) resetLiveStream(cap.name);
+  if (label) {
+    const kb = (cap.size_bytes / 1024).toFixed(0);
+    const growing = cap.age_s !== null && cap.age_s < 3;
+    label.textContent = `${cap.name} — ${kb} KiB — ${growing ? "growing" : `idle ${formatAge(cap.age_s)}`}`;
+  }
+}
+
+async function pollLiveTail() {
+  if (state.live.polling || !state.live.name) return;
+  state.live.polling = true;
+  try {
+    const payload = await api(
+      `/api/live/${encodeURIComponent(state.live.name)}?offset=${state.live.nextOffset}`
+    );
+    appendLiveSamples(payload);
+    drawLiveChart();
+  } catch (e) {
+    console.error(e);
+  } finally {
+    state.live.polling = false;
+  }
+}
+
+function appendLiveSamples(payload) {
+  state.live.nextOffset = payload.next_offset;
+  state.live.fsHz = payload.fs_hz;
+  const n = payload.moving.length;
+  if (!n) return;
+  const dt = payload.stride / payload.fs_hz;
+  const t0 = payload.first_record / payload.fs_hz;
+  for (let i = 0; i < n; i++) state.live.t.push(t0 + i * dt);
+  for (const [drive, series] of Object.entries(payload.drives)) {
+    if (!state.live.perDrive[drive]) {
+      state.live.perDrive[drive] = new Array(state.live.t.length - n).fill(0);
+    }
+    state.live.perDrive[drive].push(...series.ferr);
+  }
+  const cutoff = state.live.t[state.live.t.length - 1] - LIVE_WINDOW_S;
+  let drop = 0;
+  while (drop < state.live.t.length && state.live.t[drop] < cutoff) drop++;
+  if (drop > 0) {
+    state.live.t.splice(0, drop);
+    for (const series of Object.values(state.live.perDrive)) series.splice(0, drop);
+  }
+}
+
+function drawLiveChart() {
+  const canvas = el("live-canvas");
+  if (!canvas || !state.live.t.length) return;
+  const drives = Object.keys(state.live.perDrive).sort();
+  const traces = drives.map((d, i) => ({
+    t: state.live.t,
+    y: state.live.perDrive[d],
+    color: PALETTE[i % PALETTE.length],
+  }));
+  drawChart(canvas, traces, "ferr (counts)");
+  const legend = el("live-legend");
+  if (legend && legend.childElementCount !== drives.length) {
+    legend.innerHTML = drives
+      .map(
+        (d, i) =>
+          `<span><span class="swatch" style="background:${PALETTE[i % PALETTE.length]}"></span>${d}</span>`
+      )
+      .join("");
+  }
+}
+
+function startLivePolling() {
+  pollLiveStatus();
+  state.live.timers = [
+    setInterval(pollLiveStatus, LIVE_STATUS_POLL_MS),
+    setInterval(pollLiveTail, LIVE_TAIL_POLL_MS),
+  ];
+}
+
+function stopLivePolling() {
+  for (const id of state.live.timers) clearInterval(id);
+  state.live.timers = [];
 }
 
 // --- drive tuning grid --------------------------------------------------------

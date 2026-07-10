@@ -19,12 +19,25 @@ session command log.
 
 ## Run it on the bench
 
+One-off (SSH session):
+
 ```sh
 cd rust && cargo build --release -p servo-ident
 rust/target/release/servo-cal serve --dir ~/printer_data/logs/servo_captures --port 8085
 ```
 
-Open `http://<bench-host>:8085/` in a browser. The journal polls
+Permanent: install
+[`config/servo-cal/servo-cal.service`](../../config/servo-cal/servo-cal.service)
+(header carries the two install variants — the printer-style
+`systemctl enable --now /home/<user>/servo-cal/servo-cal.service` symlink
+that fits the benches' systemctl-only sudoers, and the standard
+`/etc/systemd/system` copy). The service runs the same binary klippy
+resolves for `servo-cal analyze`
+(`~/klipper/rust/target/release/servo-cal`), so one `cargo build --release
+-p servo-ident` on the host feeds both; after pulling a new branch build,
+rebuild and `sudo systemctl restart servo-cal`.
+
+Open `http://<bench-host>:8085/` in a browser. The run strips poll
 `/api/runs` every 5 s, so a sweep's `results.json` landing on disk shows up
 without a manual refresh.
 
@@ -89,6 +102,8 @@ pass `--fixtures <dir>` if the binary has been copied elsewhere.
 | GET    | `/api/runs/<name>/plot_series`    | raw `plot_series.json`; 404 if missing                                    |
 | POST   | `/api/runs/<name>/analyze`        | re-analyzes if `results.json` is missing or older than any capture/manifest file in the run dir, then returns the (possibly freshly written) `results.json` |
 | GET    | `/api/drive_state`                | raw `<captures_root>/drive_state.json` (`SERVO_DUMP_TUNING`'s output, [servo-tuning-profiles.md](servo-tuning-profiles.md#tuning-panel-backend)) with one field added, `age_s` — seconds since the file's mtime, recomputed fresh on every request, never cached; 404 with a JSON `{"error": ...}` reason if the file doesn't exist yet (`SERVO_DUMP_TUNING` hasn't run against this `captures_root`) |
+| GET    | `/api/live`                       | newest top-level `.scap` in `--dir` (flat captures only — run-dir and `.failed.scap` files are never candidates): `{capture: {name, size_bytes, age_s}}`, or `{capture: null}` |
+| GET    | `/api/live/<file>?offset=<bytes>` | incremental decode of a (possibly growing) capture from a record-aligned byte offset: per-drive `ferr`/`torque`, `moving`, `stride` (thinned to ≤2000 points), `fs_hz`, `first_record`, and the `next_offset` to poll from; `offset=0` means "from the first record", any other offset must be a prior response's `next_offset` (misaligned fails loud), at most 5 s of backlog per response |
 
 `<name>` is validated against `[A-Za-z0-9_-]+`; anything else is rejected
 before it ever reaches the filesystem.
@@ -114,6 +129,13 @@ plus sweep box and session log in a sticky right rail.
   time-domain signal).
 - **dynamics** — `SERVO_FIT_DYNAMICS` runner and the `load` grid
   (gain_mode / stiffness_level / inertia_ratio).
+- **live** — the vendor's USB scope without the USB: start an open-ended
+  capture (`SERVO_CAPTURE_START NAME=live AXIS=X`, editable before
+  sending), and the page tails the growing `.scap` through `/api/live`,
+  scrolling the last 10 s of per-drive following error; stop leaves a
+  normal analyzable capture. Works because the endpoint writer
+  (`ethercat-rt/src/capture.rs`) writes each record unbuffered as it
+  drains the ring — a same-host reader sees data at record granularity.
 - **journal** — every run across experiments, full width.
 
 ## Drive tuning grid

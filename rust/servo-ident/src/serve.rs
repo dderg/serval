@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::analyze::{build_run, write_run_outputs};
 use crate::assets;
 use crate::http::{Request, Response};
+use crate::live;
 use crate::results::Manifest;
 use crate::time_fmt::iso8601_utc;
 
@@ -241,6 +242,66 @@ fn handle_analyze(captures_root: &Path, name: &str) -> Response {
     )
 }
 
+/// Newest flat capture in the root, with its current size and age — the
+/// live page polls this to notice a capture starting or growing.
+fn handle_live_status(captures_root: &Path) -> Response {
+    let newest = match live::newest_flat_scap(captures_root) {
+        Ok(n) => n,
+        Err(e) => return Response::text(500, "text/plain", e),
+    };
+    let Some(path) = newest else {
+        return Response::json(200, serde_json::json!({ "capture": null }).to_string());
+    };
+    let meta = match path.metadata() {
+        Ok(m) => m,
+        Err(e) => return Response::text(500, "text/plain", format!("{}: {e}", path.display())),
+    };
+    let mtime = meta.modified().ok();
+    Response::json(
+        200,
+        serde_json::json!({
+            "capture": {
+                "name": path.file_name().and_then(|n| n.to_str()),
+                "size_bytes": meta.len(),
+                "age_s": mtime.map(age_seconds),
+            }
+        })
+        .to_string(),
+    )
+}
+
+fn query_param(raw_path: &str, key: &str) -> Option<String> {
+    let query = raw_path.split_once('?')?.1;
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find(|(k, _)| *k == key)
+        .map(|(_, v)| v.to_string())
+}
+
+fn handle_live_tail(captures_root: &Path, name: &str, raw_path: &str) -> Response {
+    if !live::valid_capture_name(name) {
+        return Response::not_found(&format!("invalid capture name {name:?}"));
+    }
+    let path = captures_root.join(name);
+    if !path.is_file() {
+        return Response::not_found(&format!("no such capture {name:?}"));
+    }
+    let offset: u64 = match query_param(raw_path, "offset").as_deref() {
+        None => 0,
+        Some(text) => match text.parse() {
+            Ok(v) => v,
+            Err(_) => {
+                return Response::text(400, "text/plain", format!("bad offset {text:?}"));
+            }
+        },
+    };
+    match live::tail_scap(&path, offset) {
+        Ok(payload) => Response::json(200, payload.to_string()),
+        Err(e) => Response::text(500, "text/plain", e),
+    }
+}
+
 /// Route one HTTP request against `captures_root`. Pure given the
 /// filesystem state — no globals, easy to drive from tests without a
 /// socket.
@@ -259,6 +320,8 @@ pub fn handle(captures_root: &Path, req: &Request) -> Response {
         ("GET", ["app.css"]) => Response::text(200, "text/css", assets::APP_CSS.to_string()),
         ("GET", ["api", "runs"]) => handle_list(captures_root),
         ("GET", ["api", "drive_state"]) => handle_drive_state(captures_root),
+        ("GET", ["api", "live"]) => handle_live_status(captures_root),
+        ("GET", ["api", "live", name]) => handle_live_tail(captures_root, name, &req.path),
         ("GET", ["api", "runs", name, "manifest"]) => {
             read_run_file(captures_root, name, "manifest.json")
         }
