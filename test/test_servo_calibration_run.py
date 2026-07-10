@@ -328,3 +328,178 @@ def test_missing_binary_is_command_error():
         RuntimeError, match="cargo build --release -p servo-ident"
     ):
         sc.cmd_SERVO_MEASURE_TRACKING(FakeGcmd(AXIS="X"))
+
+
+def _synth_results(run_dir, verdict, ferr_peak, overshoot, flags=()):
+    with open(os.path.join(run_dir, "manifest.json")) as f:
+        manifest = json.load(f)
+    motors = [m["name"] for m in manifest["motors"]]
+    steps = [
+        {
+            "name": s["name"],
+            "drives": {
+                m: {
+                    "metrics": {
+                        "moves": [
+                            {"ferr_peak": ferr_peak, "overshoot": overshoot}
+                        ]
+                    }
+                }
+                for m in motors
+            },
+            "flags": list(flags)
+            if s["name"] == verdict.get("recommended_step")
+            else [],
+        }
+        for s in manifest["steps"]
+    ]
+    return {"verdict": verdict, "steps": steps}
+
+
+def _applied(servo, addr, value):
+    return {"servo": servo, "addr": addr, "type": "u16", "value": value}
+
+
+def make_sc_apply(engine_values=None, verdict=None, verdict_flags=()):
+    """Like make_sc, but the analyze stub writes a full results.json (steps
+    with per-drive move metrics) so APPLY=1's before/after headline and
+    readback verification have something real to read."""
+    gcode = FakeGcode()
+    rails = [
+        _rail("x", [_motor("motor_a", "n", 0)]),
+        _rail("y", [_motor("motor_b", "n", 1, invert=True)]),
+    ]
+    node = FakeNode("ethercat_node n", 1, {"motor_a": 0, "motor_b": 1})
+    objs = {
+        "gcode": gcode,
+        "toolhead": FakeToolhead(FakeKin(rails)),
+        "servo_capture": FakeServoCapture(),
+        "motion_engine": FakeEngine(engine_values),
+        "ethercat_node n": node,
+    }
+    sc = servo_calibration.ServoCalibration(FakeConfig(FakePrinter(objs)))
+    sc.captures_root = tempfile.mkdtemp()
+    sc.servo_cal_binary = sys.executable
+    sc._prep = lambda *a, **k: None
+    sc._restore = lambda *a, **k: None
+
+    def fake_run(gcmd, argv, timeout):
+        gcode.scripts.append(("RUN", argv, timeout))
+        if argv[1] != "analyze":
+            return
+        run_dir = argv[2]
+        is_verify = "verify_" in os.path.basename(run_dir)
+        if is_verify:
+            v = {"recommended_step": None, "reason": "not a sweep", "flags": []}
+            results = _synth_results(run_dir, v, 40.0, 5.0)
+        else:
+            results = _synth_results(
+                run_dir, verdict, 100.0, 10.0, flags=verdict_flags
+            )
+        with open(os.path.join(run_dir, "results.json"), "w") as f:
+            json.dump(results, f)
+
+    sc._run = fake_run
+    return sc, gcode
+
+
+def _script_indices(gcode, marker):
+    return [
+        i
+        for i, s in enumerate(gcode.scripts)
+        if isinstance(s, str) and marker in s
+    ]
+
+
+def test_apply_writes_after_revert_and_verifies():
+    servo_param.drain_param_writes()
+    apply_writes = [
+        _applied(servo, addr, value)
+        for servo in ("motor_a", "motor_b")
+        for addr, value in (
+            ("0x2001.0x01", 1040),
+            ("0x2001.0x02", 650),
+            ("0x2001.0x03", 1923),
+        )
+    ]
+    sc, gcode = make_sc_apply(
+        engine_values={
+            (0x2001, 0x01): 1040,
+            (0x2001, 0x02): 650,
+            (0x2001, 0x03): 1923,
+        },
+        verdict={
+            "recommended_step": "cal_p1040_s650_i1923",
+            "reason": "highest clean gain",
+            "flags": [],
+            "apply": apply_writes,
+        },
+    )
+    gcmd = FakeGcmd(AXIS="X", SPEED_GAINS="500,650", APPLY=1)
+    sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
+
+    # sg=500 reverts to pos=800/speed=500/integral=2500 - the revert write
+    # is the only place VALUE=2500 (integral) is ever written.
+    revert_idx = _script_indices(gcode, "VALUE=2500")
+    # sg=650 -> integral=1923 is written once mid-sweep and again by APPLY;
+    # ordering only holds if APPLY runs after the revert, so it must be the
+    # *last* occurrence that matters.
+    win_idx = _script_indices(gcode, "VALUE=1923")
+    assert revert_idx and win_idx
+    assert max(win_idx) > max(revert_idx)
+    assert any("APPLY verified" in r for r in gcmd.responses)
+
+
+def test_apply_readback_mismatch_is_command_error():
+    servo_param.drain_param_writes()
+    apply_writes = [
+        _applied("motor_a", "0x2001.0x02", 650),
+        _applied("motor_b", "0x2001.0x02", 650),
+    ]
+    sc, gcode = make_sc_apply(
+        engine_values={(0x2001, 0x02): 999},
+        verdict={
+            "recommended_step": "cal_p1040_s650_i1923",
+            "reason": "highest clean gain",
+            "flags": [],
+            "apply": apply_writes,
+        },
+    )
+    gcmd = FakeGcmd(AXIS="X", SPEED_GAINS="500,650", APPLY=1)
+    with pytest.raises(RuntimeError, match="APPLY readback mismatch"):
+        sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
+
+
+def test_apply_null_verdict_is_command_error_and_applies_nothing():
+    servo_param.drain_param_writes()
+    sc, gcode = make_sc_apply(
+        verdict={
+            "recommended_step": None,
+            "reason": "every step flags resonance or a torque rail",
+            "flags": [],
+            "apply": None,
+        }
+    )
+    gcmd = FakeGcmd(AXIS="X", SPEED_GAINS="500,650", APPLY=1)
+    with pytest.raises(RuntimeError, match="nothing to apply"):
+        sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
+    assert not any(
+        isinstance(s, str) and "APPLY verified" in s for s in gcmd.responses
+    )
+
+
+def test_apply_default_off_does_not_apply():
+    servo_param.drain_param_writes()
+    sc, gcode = make_sc_apply(
+        verdict={
+            "recommended_step": "cal_p1040_s650_i1923",
+            "reason": "highest clean gain",
+            "flags": [],
+            "apply": [_applied("motor_a", "0x2001.0x02", 650)],
+        }
+    )
+    gcmd = FakeGcmd(AXIS="X", SPEED_GAINS="500,650")
+    sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
+    assert not any(
+        isinstance(r, str) and "APPLY verified" in r for r in gcmd.responses
+    )

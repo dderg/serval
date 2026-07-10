@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Sequence, overload
 
 from . import servo_axis
 
@@ -30,6 +30,10 @@ class StrokePlan:
     rails: list[servo_axis.ServoRail] = field(default_factory=list)
 
 
+@overload
+def parse_floats(text: str) -> list[float]: ...
+@overload
+def parse_floats(text: None) -> None: ...
 def parse_floats(text: str | None) -> list[float] | None:
     if text is None:
         return None

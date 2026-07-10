@@ -75,6 +75,10 @@ with `cargo build --release -p servo-ident` (from `rust/`).
    point `dynamics_profile` at it to enable torque feedforward.
 
 **`SERVO_MEASURE_TRACKING`** is the before/after check for any single change.
+**`SERVO_AUTOTUNE`** packages this exact order into one command — see
+[SERVO_AUTOTUNE](#servo_autotune) below — for a bench that has already built
+trust in the verdicts; the manual sequence above remains the way to run any
+one step in isolation or to diagnose a step SERVO_AUTOTUNE aborted on.
 
 Every stroke is paced `M400 / G4 / M400` so it replans from idle, and the
 stroke engine refuses any `(speed, accel)` pair whose `v²/a` exceeds the stroke
@@ -172,24 +176,68 @@ one capture per step into the run directory, then `servo-cal analyze` writes
 `results.json` whose verdict names the highest gain step without resonance or a
 torque rail. Reverts to the lowest gains afterwards. With an accelerometer
 (`accel_chip` config option or `ACCEL_CHIP=`) each step also records vibration
-data (`step_<name>_accel.csv` next to the `.scap`). Params:
+data (`step_<name>_accel.csv` next to the `.scap`). `APPLY=1` (default 0,
+report-only) writes the verdict's recommended gains *after* the revert,
+reads them back (a mismatch is a command error, nothing left half-applied),
+and runs one `SERVO_MEASURE_TRACKING` to report before/after following-error
+peak and overshoot; a null verdict (every step flagged) makes `APPLY=1` a
+command error naming the reason instead of writing anything. Params:
 `SPEED_GAINS` (500,650,800,1000) `AXIS` (X) `START` `END`
 `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2) `DWELL_MS` `TAG` (cal)
-`ACCEL_CHIP` `SERVO`.
+`ACCEL_CHIP` `APPLY` `SERVO`.
 
 #### SERVO_SWEEP_INERTIA
 Empirical inertia sweep: apply the tuned gains first, then this writes each
 C00.06 ratio in `RATIOS`, records one capture per step, and runs
 `servo-cal analyze` (`results.json` reports per-step metrics; no automated pick
 — read the overshoot trend to choose the ratio). Reverts to the lowest ratio
-afterwards. Params: `RATIOS`
+afterwards. Because there is no automated pick, `APPLY=1` always errors here
+(nothing to apply) — choose a ratio from the report and write it with
+`SERVO_SET_INERTIA_RATIO`. Params: `RATIOS`
 (40,70,100,130) `AXIS` (X) `START` `END` `SPEED` (100) `ACCEL` (3000)
-`ITERATIONS` (2) `DWELL_MS` `TAG` (inertia) `SERVO`.
+`ITERATIONS` (2) `DWELL_MS` `TAG` (inertia) `APPLY` `SERVO`.
 
 #### SERVO_SET_STIFFNESS
 Vendor-table tuning path: standard mode (C00.04=1) + C00.05 stiffness level
 1..31 (factory 12); the drive derives gain set 1 from the level. Params:
 `LEVEL` `SERVO`.
+
+#### SERVO_AUTOTUNE
+Packaged tuning sequence, the manual order above run as one state machine:
+baseline `SERVO_MEASURE_TRACKING` → `SERVO_CALIBRATE_INERTIA_RATIO` (identify
+only) → apply the recommended C00.06 (`SERVO_SET_INERTIA_RATIO`-equivalent) →
+coarse gains (`SERVO_APPLY_GAINS` factory defaults) → `SERVO_CALIBRATE_GAINS`
+sweep (apply the winner) → `SERVO_REFINE_GAIN` on the speed gain (apply the
+winner) → `SERVO_FIT_DYNAMICS` → a final `SERVO_MEASURE_TRACKING` against the
+baseline. Each stage transition is logged
+(`calibration.autotune_stage`: `stage`, `run_dir`, `outcome`) so the dashboard
+can show the sequence as it runs.
+
+`APPLY` defaults to 0: a dry run that still measures the baseline and
+identifies the inertia ratio (both read-only), then walks every remaining
+stage reporting what it *would* write instead of touching the drive.
+`APPLY=1` performs every stage for real and aborts loudly — naming the stage
+and run directory — on any of:
+
+- a `torque_saturated` or `resonance_detected` flag on the chosen step of any
+  sweep stage (checked whether or not that stage's write ends up gated by
+  `APPLY`, since continuing past a flagged step is unsafe regardless);
+- a null recommendation (no clean step) on a stage that needs to promote one;
+- the final verification's following-error peak regressing more than 20%
+  against the baseline.
+
+`APPLY=1` requires `rated_torque_nm`/`rotor_inertia_kgm2` (config or
+`TORQUE_NM=`/`INERTIA_KGM2=`) up front — it errors before the first stroke
+rather than mid-sequence. The C00.06 recommendation is recovered from the
+`servo-cal fit` console output (the same "recommended C00.06 (light
+direction): N%" line `SERVO_CALIBRATE_INERTIA_RATIO` already prints) — there
+is no separate machine-readable field for it, since `fit` writes a profile
+TOML, not a `results.json`. `SERVO_FIT_DYNAMICS` never edits `printer.cfg`;
+it prints the `dynamics_profile` line to paste, exactly as it does standalone.
+A successful `APPLY=1` run never persists anything to a tuning profile by
+itself — run `SERVO_SAVE_TUNING SERVO=... NAME=...` afterwards to keep it.
+Params: `AXIS` (X) `APPLY` (0) `TORQUE_NM` `INERTIA_KGM2` `SPEED_GAINS`
+`DWELL_MS`.
 
 ## Command → output
 
@@ -204,12 +252,13 @@ Schemas: [servo-cal-contracts.md](servo-cal-contracts.md).
 | Command | Invokes | Output |
 |---|---|---|
 | `SERVO_MEASURE_TRACKING` | `servo-cal analyze` | run dir + `results.json` (per-motor + combined tracking metrics; records every motor driving the axis — both lanes on CoreXY) |
-| `SERVO_CALIBRATE_GAINS` | `servo-cal analyze` | run dir + `results.json` verdict (highest clean gain step) |
-| `SERVO_REFINE_GAIN` | `servo-cal analyze` | run dir + `results.json` verdict |
-| `SERVO_SWEEP_INERTIA` | `servo-cal analyze` | run dir + `results.json` (no automated pick) |
-| `SERVO_SWEEP_ACCEL` | `servo-cal analyze` | run dir + `results.json` verdict (max non-railing accel) |
+| `SERVO_CALIBRATE_GAINS` | `servo-cal analyze` | run dir + `results.json` verdict (highest clean gain step); `APPLY=1` also writes + verifies |
+| `SERVO_REFINE_GAIN` | `servo-cal analyze` | run dir + `results.json` verdict; `APPLY=1` also writes + verifies |
+| `SERVO_SWEEP_INERTIA` | `servo-cal analyze` | run dir + `results.json` (no automated pick, so `APPLY=1` always errors) |
+| `SERVO_SWEEP_ACCEL` | `servo-cal analyze` | run dir + `results.json` verdict (max non-railing accel); `APPLY=1` verifies at the recommended accel (no SDO write) |
 | `SERVO_FIT_DYNAMICS`, `SERVO_CALIBRATE_INERTIA_RATIO` | `servo-cal fit` | run dir + `~/printer_data/config/servo_dynamics/dynamics_<name>_<stamp>.toml` + C00.06 |
 | `SERVO_MEASURE_INERTIA` | — | run dir + `.scap` capture only (the building block behind the fit commands) |
+| `SERVO_AUTOTUNE` | all of the above, in sequence | one run dir per stage; `APPLY=0` (default) is a dry rehearsal, `APPLY=1` runs and applies for real |
 
 ## The manual capture analyzer
 
