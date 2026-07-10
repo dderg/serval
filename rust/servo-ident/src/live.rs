@@ -5,9 +5,11 @@
 //! sees data at record granularity — no flush knob needed.
 //!
 //! The tail request/response contract is byte offsets, not record indexes:
-//! the first request passes `offset=0`, every response carries
-//! `next_offset` (always record-aligned), and the client echoes it back.
-//! A misaligned offset is a client bug and fails loud.
+//! a client attaches either at `offset=0` (replay from the first record) or
+//! at [`aligned_eof`] (`offset=end`, new samples only — what the live page
+//! uses), every response carries `next_offset` (always record-aligned), and
+//! the client echoes it back. A misaligned offset is a client bug and fails
+//! loud.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -58,6 +60,22 @@ pub fn valid_capture_name(name: &str) -> bool {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     })
+}
+
+/// Record-aligned offset of the last complete record boundary — where a
+/// client attaches with `offset=end` so the live chart streams only samples
+/// written after the page opened, never replaying an old capture as if it
+/// were happening now.
+pub fn aligned_eof(path: &Path) -> Result<u64, String> {
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let header = read_header_slice(&mut file, path)?;
+    let file_len = file
+        .metadata()
+        .map_err(|e| format!("stat {}: {e}", path.display()))?
+        .len();
+    let complete_records = file_len.saturating_sub(header.data_start) / header.record_size;
+    Ok(header.data_start + complete_records * header.record_size)
 }
 
 struct HeaderSlice {

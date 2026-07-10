@@ -289,6 +289,10 @@ fn handle_live_tail(captures_root: &Path, name: &str, raw_path: &str) -> Respons
     }
     let offset: u64 = match query_param(raw_path, "offset").as_deref() {
         None => 0,
+        Some("end") => match live::aligned_eof(&path) {
+            Ok(v) => v,
+            Err(e) => return Response::text(500, "text/plain", e),
+        },
         Some(text) => match text.parse() {
             Ok(v) => v,
             Err(_) => {

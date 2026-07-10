@@ -67,6 +67,9 @@ input, select, textarea {
   z-index: 10;
 }
 .topbar .moonraker { display: flex; align-items: center; gap: 6px; color: var(--dim); font-size: 12px; }
+.mr-health { font-size: 12px; max-width: 280px; }
+.mr-health.ok { color: var(--good); }
+.mr-health.err { color: var(--bad); }
 .banner { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 
 .tabs { display: flex; gap: 2px; }

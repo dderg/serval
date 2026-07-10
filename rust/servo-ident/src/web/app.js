@@ -72,6 +72,7 @@ const DEFAULT_PAGE = "gains";
 const LIVE_STATUS_POLL_MS = 1000;
 const LIVE_TAIL_POLL_MS = 400;
 const LIVE_WINDOW_S = 10;
+const MOONRAKER_HEALTH_POLL_MS = 5000;
 
 const state = {
   page: DEFAULT_PAGE,
@@ -90,7 +91,7 @@ const state = {
   },
   live: {
     name: null, // capture file currently streamed
-    nextOffset: 0,
+    nextOffset: null, // null = attach at EOF (offset=end); numeric afterwards
     fsHz: null,
     t: [], // seconds since stream start, one per kept point
     perDrive: {}, // drive -> ferr values, same length as t
@@ -324,12 +325,12 @@ function liveShellHtml() {
     `<div class="workspace">` +
     `<main class="analysis">` +
     `<section class="live-section">` +
-    `<div class="section-head"><h2>live following error</h2>` +
+    `<div class="section-head"><h2>live following error — per motor</h2>` +
     `<span class="note" id="live-status">no capture yet</span></div>` +
-    `<div class="charts"><div class="chart-box">` +
-    `<canvas id="live-canvas" width="860" height="280"></canvas>` +
-    `<div class="legend" id="live-legend"></div>` +
-    `</div></div>` +
+    `<div class="charts" id="live-charts">` +
+    `<p class="note">charts appear when a running capture writes new samples — ` +
+    `old capture files are never replayed</p>` +
+    `</div>` +
     `</section>` +
     `</main>` +
     `<aside class="controls">` +
@@ -565,7 +566,7 @@ function pickSeries(step) {
   return { y: firstDrive ? firstDrive.ferr_counts : [], label: "ferr (counts)" };
 }
 
-function drawChart(canvas, traces, yLabel) {
+function drawChart(canvas, traces, yLabel, fixedY) {
   const ctx = canvas.getContext("2d");
   const w = canvas.width;
   const h = canvas.height;
@@ -581,6 +582,10 @@ function drawChart(canvas, traces, yLabel) {
       yMin = Math.min(yMin, tr.y[i]);
       yMax = Math.max(yMax, tr.y[i]);
     }
+  }
+  if (fixedY) {
+    yMin = fixedY.yMin;
+    yMax = fixedY.yMax;
   }
   if (!isFinite(tMin) || !isFinite(yMin)) return;
   if (yMin === yMax) { yMin -= 1; yMax += 1; }
@@ -981,8 +986,12 @@ async function redrawCharts() {
 //
 // Polls /api/live for the newest flat capture, then streams
 // /api/live/<name>?offset=<next_offset> — the offset handshake is the
-// server's contract (always record-aligned). A new capture name resets the
-// stream; the chart keeps the last LIVE_WINDOW_S seconds.
+// server's contract (always record-aligned). Attaching uses `offset=end`,
+// so the charts only ever show samples written after the stream started:
+// an idle old capture draws nothing instead of masquerading as live data.
+// A new capture name resets the stream; each motor gets its own stacked
+// chart over the last LIVE_WINDOW_S seconds, all on a shared y-scale so
+// the noisy motor stands out.
 
 function bindLiveEvents() {
   el("live-start-btn").addEventListener("click", () => {
@@ -994,10 +1003,16 @@ function bindLiveEvents() {
 
 function resetLiveStream(name) {
   state.live.name = name;
-  state.live.nextOffset = 0;
+  state.live.nextOffset = null;
   state.live.fsHz = null;
   state.live.t = [];
   state.live.perDrive = {};
+  const container = el("live-charts");
+  if (container) {
+    container.innerHTML =
+      '<p class="note">charts appear when a running capture writes new samples — ' +
+      "old capture files are never replayed</p>";
+  }
 }
 
 async function pollLiveStatus() {
@@ -1019,7 +1034,9 @@ async function pollLiveStatus() {
   if (label) {
     const kb = (cap.size_bytes / 1024).toFixed(0);
     const growing = cap.age_s !== null && cap.age_s < 3;
-    label.textContent = `${cap.name} — ${kb} KiB — ${growing ? "growing" : `idle ${formatAge(cap.age_s)}`}`;
+    label.textContent = growing
+      ? `recording ${cap.name} — ${kb} KiB`
+      : `${cap.name} idle ${formatAge(cap.age_s)} — not recording, press start`;
   }
 }
 
@@ -1027,11 +1044,12 @@ async function pollLiveTail() {
   if (state.live.polling || !state.live.name) return;
   state.live.polling = true;
   try {
+    const offset = state.live.nextOffset === null ? "end" : state.live.nextOffset;
     const payload = await api(
-      `/api/live/${encodeURIComponent(state.live.name)}?offset=${state.live.nextOffset}`
+      `/api/live/${encodeURIComponent(state.live.name)}?offset=${offset}`
     );
     appendLiveSamples(payload);
-    drawLiveChart();
+    drawLiveCharts();
   } catch (e) {
     console.error(e);
   } finally {
@@ -1062,25 +1080,59 @@ function appendLiveSamples(payload) {
   }
 }
 
-function drawLiveChart() {
-  const canvas = el("live-canvas");
-  if (!canvas || !state.live.t.length) return;
-  const drives = Object.keys(state.live.perDrive).sort();
-  const traces = drives.map((d, i) => ({
-    t: state.live.t,
-    y: state.live.perDrive[d],
-    color: PALETTE[i % PALETTE.length],
-  }));
-  drawChart(canvas, traces, "ferr (counts)");
-  const legend = el("live-legend");
-  if (legend && legend.childElementCount !== drives.length) {
-    legend.innerHTML = drives
+function liveChartId(drive) {
+  return `live-canvas-${drive}`;
+}
+
+function ensureLiveChartBoxes(drives) {
+  const container = el("live-charts");
+  if (!container) return false;
+  const have = [...container.querySelectorAll("canvas")].map((c) => c.id).join();
+  const want = drives.map(liveChartId).join();
+  if (have !== want) {
+    container.innerHTML = drives
       .map(
         (d, i) =>
-          `<span><span class="swatch" style="background:${PALETTE[i % PALETTE.length]}"></span>${d}</span>`
+          `<div class="chart-box">` +
+          `<h3><span class="swatch" style="background:${PALETTE[i % PALETTE.length]}"></span>` +
+          `${d} <span class="note" id="live-peak-${d}"></span></h3>` +
+          `<canvas id="${liveChartId(d)}" width="860" height="130"></canvas>` +
+          `</div>`
       )
       .join("");
   }
+  return true;
+}
+
+function drawLiveCharts() {
+  if (!state.live.t.length) return;
+  const drives = Object.keys(state.live.perDrive).sort();
+  if (!drives.length || !ensureLiveChartBoxes(drives)) return;
+  let yMin = Infinity;
+  let yMax = -Infinity;
+  const peaks = {};
+  for (const d of drives) {
+    let peak = 0;
+    for (const v of state.live.perDrive[d]) {
+      if (v < yMin) yMin = v;
+      if (v > yMax) yMax = v;
+      const mag = Math.abs(v);
+      if (mag > peak) peak = mag;
+    }
+    peaks[d] = peak;
+  }
+  drives.forEach((d, i) => {
+    const canvas = el(liveChartId(d));
+    if (!canvas) return;
+    drawChart(
+      canvas,
+      [{ t: state.live.t, y: state.live.perDrive[d], color: PALETTE[i % PALETTE.length] }],
+      "ferr (counts)",
+      { yMin, yMax }
+    );
+    const label = el(`live-peak-${d}`);
+    if (label) label.textContent = `peak |ferr| ${peaks[d]}`;
+  });
 }
 
 function startLivePolling() {
@@ -1566,6 +1618,24 @@ function moonrakerUrl() {
   return el("moonraker-url").value.replace(/\/+$/, "");
 }
 
+/// Every button on every page posts G-code through Moonraker, so a broken
+/// URL or missing cors_domains entry silently kills the whole dashboard.
+/// This badge in the topbar turns that failure mode into words.
+async function pollMoonrakerHealth() {
+  const badge = el("moonraker-health");
+  if (!badge) return;
+  try {
+    const resp = await fetch(`${moonrakerUrl()}/server/info`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const info = (await resp.json()).result;
+    badge.className = "mr-health ok";
+    badge.textContent = `klippy ${info.klippy_state || "unknown"}`;
+  } catch (e) {
+    badge.className = "mr-health err";
+    badge.textContent = "moonraker unreachable — bad URL, moonraker down, or origin missing from cors_domains";
+  }
+}
+
 function sentEntryHtml(entry) {
   const ok = entry.results.length > 0 && entry.results.every((r) => r.ok);
   return (
@@ -1644,7 +1714,12 @@ async function runSweep() {
 function initShell() {
   const input = el("moonraker-url");
   input.value = localStorage.getItem(MOONRAKER_KEY) || `http://${location.hostname}:7125`;
-  input.addEventListener("change", () => localStorage.setItem(MOONRAKER_KEY, input.value));
+  input.addEventListener("change", () => {
+    localStorage.setItem(MOONRAKER_KEY, input.value);
+    pollMoonrakerHealth();
+  });
+  pollMoonrakerHealth();
+  setInterval(pollMoonrakerHealth, MOONRAKER_HEALTH_POLL_MS);
   window.addEventListener("hashchange", () => {
     state.page = pageFromHash();
     renderPage();

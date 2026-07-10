@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use flate2::read::GzDecoder;
 
-use servo_ident::live::{newest_flat_scap, tail_scap, valid_capture_name};
+use servo_ident::live::{aligned_eof, newest_flat_scap, tail_scap, valid_capture_name};
 use servo_ident::scap::Scap;
 
 const FIXTURE: &str = "cal_p880_s550_i2273_20260710_151516.scap.gz";
@@ -92,6 +92,44 @@ fn chunked_tail_decodes_the_same_samples_as_a_full_load() {
 
     let drained = tail_scap(&path, cut2 as u64).unwrap();
     assert_eq!(drained["n_records"], 0, "no new bytes -> no records");
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn attaching_at_eof_streams_only_samples_written_afterwards() {
+    let bytes = fixture_bytes();
+    let dir = temp_dir("attach_eof");
+    let path = dir.join("live_test.scap");
+
+    let full = Scap::from_bytes(&bytes).unwrap();
+    let drive = full.drive_names()[0].clone();
+    let record_size = full.header.record_size;
+    let data_start = bytes.iter().position(|&b| b == b'\n').unwrap() + 1;
+    let existing_records = 1500usize;
+    let appended_records = 400usize;
+    let cut = data_start + existing_records * record_size;
+
+    std::fs::write(&path, &bytes[..cut + record_size / 2]).unwrap();
+    let attach = aligned_eof(&path).unwrap();
+    assert_eq!(
+        attach, cut as u64,
+        "attach offset lands on the last complete record boundary"
+    );
+
+    let empty = tail_scap(&path, attach).unwrap();
+    assert_eq!(empty["n_records"], 0, "attaching replays nothing");
+    assert_eq!(empty["next_offset"].as_u64().unwrap(), attach);
+
+    let cut2 = cut + appended_records * record_size;
+    std::fs::write(&path, &bytes[..cut2]).unwrap();
+    let fresh = tail_scap(&path, attach).unwrap();
+    assert_eq!(fresh["n_records"], appended_records);
+    assert_eq!(fresh["first_record"], existing_records);
+    let expected: Vec<i64> = full.read_i64(0, "following_error").unwrap()
+        [existing_records..existing_records + appended_records]
+        .to_vec();
+    assert_eq!(ferr_of(&fresh, &drive), expected);
 
     std::fs::remove_dir_all(&dir).ok();
 }

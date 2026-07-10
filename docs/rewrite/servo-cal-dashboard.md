@@ -66,6 +66,10 @@ cors_domains: http://<bench-host>:8085
 
 The dashboard's Moonraker URL field defaults to
 `http://<page-hostname>:7125` and persists per-browser in `localStorage`.
+A health badge next to the field polls `GET /server/info` every few
+seconds: green shows the klippy state, red says the URL is wrong,
+Moonraker is down, or the origin is missing from `cors_domains` — the
+three ways every button on every page silently stops working.
 
 ## Demo it without a bench
 
@@ -113,7 +117,7 @@ pass `--fixtures <dir>` if the binary has been copied elsewhere.
 | POST   | `/api/runs/<name>/analyze`        | re-analyzes if `results.json` is missing or older than any capture/manifest file in the run dir, then returns the (possibly freshly written) `results.json` |
 | GET    | `/api/drive_state`                | raw `<captures_root>/drive_state.json` (`SERVO_DUMP_TUNING`'s output, [servo-tuning-profiles.md](servo-tuning-profiles.md#tuning-panel-backend)) with one field added, `age_s` — seconds since the file's mtime, recomputed fresh on every request, never cached; 404 with a JSON `{"error": ...}` reason if the file doesn't exist yet (`SERVO_DUMP_TUNING` hasn't run against this `captures_root`) |
 | GET    | `/api/live`                       | newest top-level `.scap` in `--dir` (flat captures only — run-dir and `.failed.scap` files are never candidates): `{capture: {name, size_bytes, age_s}}`, or `{capture: null}` |
-| GET    | `/api/live/<file>?offset=<bytes>` | incremental decode of a (possibly growing) capture from a record-aligned byte offset: per-drive `ferr`/`torque`, `moving`, `stride` (thinned to ≤2000 points), `fs_hz`, `first_record`, and the `next_offset` to poll from; `offset=0` means "from the first record", any other offset must be a prior response's `next_offset` (misaligned fails loud), at most 5 s of backlog per response |
+| GET    | `/api/live/<file>?offset=<bytes>` | incremental decode of a (possibly growing) capture from a record-aligned byte offset: per-drive `ferr`/`torque`, `moving`, `stride` (thinned to ≤2000 points), `fs_hz`, `first_record`, and the `next_offset` to poll from; `offset=0` means "from the first record", `offset=end` attaches at the last complete record boundary (new samples only — what the live page uses), any other offset must be a prior response's `next_offset` (misaligned fails loud), at most 5 s of backlog per response |
 
 `<name>` is validated against `[A-Za-z0-9_-]+`; anything else is rejected
 before it ever reaches the filesystem.
@@ -142,8 +146,12 @@ plus sweep box and session log in a sticky right rail.
 - **live** — the vendor's USB scope without the USB: start an open-ended
   capture (`SERVO_CAPTURE_START NAME=live AXIS=X`, editable before
   sending), and the page tails the growing `.scap` through `/api/live`,
-  scrolling the last 10 s of per-drive following error; stop leaves a
-  normal analyzable capture. Works because the endpoint writer
+  scrolling the last 10 s of following error as one stacked chart per
+  motor on a shared y-scale (the noisy motor stands out); stop leaves a
+  normal analyzable capture. The stream attaches at `offset=end`, so only
+  samples written after the page opened are drawn — an idle old capture
+  shows empty charts and an "idle — press start" status instead of
+  replaying history as if it were live. Works because the endpoint writer
   (`ethercat-rt/src/capture.rs`) writes each record unbuffered as it
   drains the ring — a same-host reader sees data at record granularity.
 - **journal** — every run across experiments, full width.
