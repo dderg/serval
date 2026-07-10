@@ -34,7 +34,7 @@ they are configured or passed.
 
 | Option | Default | Used by |
 |---|---|---|
-| `servos` | `stepper_x, stepper_y` | single-drive default for `SERVO=`/`AXIS=`-less commands; the CoreXY measure/calibrate commands derive their drives from the kinematics (`SERVOS=` overrides) |
+| `servos` | `stepper_x, stepper_y` | single-drive default for `SERVO=`/`AXIS=`-less commands; on `coupled_xy` kinematics the measure/fit commands derive their drives from the kinematics instead (`SERVOS=` overrides) |
 | `rated_torque_nm` | — | inertia-ratio commands (`TORQUE_NM=`) |
 | `rotor_inertia_kgm2` | — | inertia-ratio commands (`INERTIA_KGM2=`) |
 | `x_start` / `x_end` | `20` / `200` | X strokes (`START`/`END`, `X_START`/`X_END`) |
@@ -55,14 +55,15 @@ must be configured, and the fitter must be built once on the host with
 1. **Enable feedforward** — set `velocity_ff: True` on each `[motor]` so the
    tuning runs measure the loop as it will actually be driven (see
    [servo-feedforward.md](servo-feedforward.md)).
-2. **`SERVO_CALIBRATE_INERTIA_RATIO[_COREXY]`** — identify the load inertia and
-   set the base C00.06, before touching the loop gains.
+2. **`SERVO_CALIBRATE_INERTIA_RATIO`** — identify the load inertia and
+   set the base C00.06, before touching the loop gains. On `coupled_xy`
+   kinematics this runs the coupled X+Y grid and fits both belt directions;
    `SERVO_SWEEP_INERTIA` empirically verifies / refines C00.06 later, at the
    tuned gains.
 3. **`SERVO_APPLY_GAINS`** then **`SERVO_CALIBRATE_GAINS`** — find the loop
    gains.
-4. **`SERVO_FIT_DYNAMICS[_COREXY]`** — fit the dynamic profile at the final
-   gains and point `dynamics_profile` at it to enable torque feedforward.
+4. **`SERVO_FIT_DYNAMICS`** — fit the dynamic profile at the final gains and
+   point `dynamics_profile` at it to enable torque feedforward.
 
 **`SERVO_MEASURE_TRACKING`** is the before/after check for any single change.
 
@@ -81,59 +82,59 @@ Params: `AXIS` (X) `START` `END` `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (3)
 
 #### SERVO_MEASURE_INERTIA
 Records the excitation grid for the inertia/friction fit (no report — it is the
-capture building block behind the fit commands). Captures every motor that
-moves the axis (both lanes on CoreXY, every drive of an AWD rail). Params:
-`AXIS` (X) `START` `END` `ACCELS` `SPEEDS` `ITERATIONS` `DWELL_MS` `NAME`
-(ident).
+capture building block behind the fit commands). The active kinematics decides
+the shape of the grid:
 
-#### SERVO_MEASURE_INERTIA_COREXY
-One capture of **every** belt drive with X and Y strokes at every grid point
-(`SERVOS=` overrides; the default is every motor the kinematics says drives
-the belts), so the
-coupled fit can separate the diagonal and off-diagonal inertia (X strokes
-excite `m_diag+m_off`, Y strokes `m_diag−m_off`). Before each stroke set the
-toolhead moves (at `travel_speed`) to the active axis' start with the idle axis
-centered in its range, so both belt runs are near-equal length during the
-measurement. Params: `SERVOS` `X_START`
-`X_END` `Y_START` `Y_END` `ACCELS` `SPEEDS` `ITERATIONS` `DWELL_MS` `NAME`
-(ident).
+- **`coupled_xy` kinematics** (CoreXY): one capture of **every** belt drive
+  with X and Y strokes at every grid point (`SERVOS=` overrides; the default
+  is every motor the kinematics says drives the belts), so the coupled fit
+  can separate the diagonal and off-diagonal inertia (X strokes excite
+  `m_diag+m_off`, Y strokes `m_diag−m_off`). Before each stroke set the
+  toolhead moves (at `travel_speed`) to the active axis' start with the idle
+  axis centered in its range, so both belt runs are near-equal length during
+  the measurement. Bounds come from `X_START`/`X_END`/`Y_START`/`Y_END`.
+- **cartesian kinematics**: captures every motor that moves `AXIS` (every
+  drive of an AWD rail), bounded by `START`/`END`. `SERVOS`, `X_START`,
+  `X_END`, `Y_START`, `Y_END` only apply to `coupled_xy` kinematics and are
+  rejected with an error otherwise.
+
+Params: `AXIS` (X) `START` `END` `X_START` `X_END` `Y_START` `Y_END` `ACCELS`
+`SPEEDS` `ITERATIONS` `DWELL_MS` `NAME` (ident) `SERVOS`.
 
 ## Fit / inertia-ratio commands
 
 #### SERVO_FIT_DYNAMICS
 Runs the `SERVO_MEASURE_INERTIA` grid, fits mass/viscous/coulomb, and writes a
 timestamped feedforward profile. Optional `TORQUE_NM` + `INERTIA_KGM2` also
-print the recommended C00.06. On a multi-drive (AWD) axis `DRIVE=` picks
-which drive the scalar fit describes — required there, since the capture
-records every drive. Params: as `SERVO_MEASURE_INERTIA` plus
-`TORQUE_NM` `INERTIA_KGM2` `NAME` (ident) `DRIVE`. Runs `servo_fit_dynamics.py`; the
-profile lands in `~/printer_data/config/servo_dynamics/` and a new fit never
-overwrites an existing profile.
+print the recommended C00.06. The active kinematics decides the fit
+structure:
 
-#### SERVO_FIT_DYNAMICS_COREXY
-As above for CoreXY: runs the X+Y grid over every belt drive
-(`SERVO_MEASURE_INERTIA_COREXY`) and fits the coupled mass matrix. The drive
-list and, on AWD, the belt pairing are derived from the kinematics motor
-lists (two drives per belt fit `--structure corexy-awd`: shared per-drive
-mass/coupling, per-drive friction; all four drives must sit on one node).
-The resulting profile goes on `[ethercat_node] dynamics_profile` (node-level,
-coupled) rather than per-motor. Params: as `SERVO_MEASURE_INERTIA_COREXY`
-plus `TORQUE_NM` `INERTIA_KGM2` `NAME` (ident).
+- **`coupled_xy` kinematics**: runs the X+Y grid over every belt drive and
+  fits the coupled mass matrix. The drive list and, on AWD, the belt pairing
+  are derived from the kinematics motor lists (two drives per belt fit
+  `--structure corexy-awd`: shared per-drive mass/coupling, per-drive
+  friction; all four drives must sit on one node). The resulting profile
+  goes on `[ethercat_node] dynamics_profile` (node-level, coupled) rather
+  than per-motor.
+- **cartesian kinematics**: fits a single axis. On a multi-drive (AWD) axis
+  `DRIVE=` picks which drive the scalar fit describes — required there,
+  since the capture records every drive.
+
+Params: as `SERVO_MEASURE_INERTIA` plus `TORQUE_NM` `INERTIA_KGM2` `NAME`
+(ident) `DRIVE`. Runs `servo_fit_dynamics.py`; the profile lands in
+`~/printer_data/config/servo_dynamics/` and a new fit never overwrites an
+existing profile.
 
 #### SERVO_CALIBRATE_INERTIA_RATIO
 Step 2 of tuning: identify the load inertia and print the recommended C00.06.
-`TORQUE_NM` and `INERTIA_KGM2` are **required** (config or param). Params: as
-`SERVO_MEASURE_INERTIA` plus `TORQUE_NM` `INERTIA_KGM2` `NAME` (inertia). Apply
-the printed number with `SERVO_SET_INERTIA_RATIO`.
-
-#### SERVO_CALIBRATE_INERTIA_RATIO_COREXY
-As above for CoreXY: runs the X+Y grid over every belt drive, fits the
-coupled mass matrix, and prints C00.06 for both directions (per drive on
-AWD). The drive takes
-one scalar, so start from the light-direction number and confirm with
-`SERVO_SWEEP_INERTIA`. `TORQUE_NM` and `INERTIA_KGM2` required; both motors must
-be the same model. Params: as `SERVO_MEASURE_INERTIA_COREXY` plus `TORQUE_NM`
-`INERTIA_KGM2` `NAME` (inertia).
+`TORQUE_NM` and `INERTIA_KGM2` are **required** (config or param). On
+`coupled_xy` kinematics this runs the X+Y grid over every belt drive, fits the
+coupled mass matrix, and prints C00.06 for both directions (per drive on AWD);
+the drive takes one scalar, so start from the light-direction number and
+confirm with `SERVO_SWEEP_INERTIA` (both motors must be the same model). On
+cartesian kinematics it fits the single axis named by `AXIS`. Params: as
+`SERVO_MEASURE_INERTIA` plus `TORQUE_NM` `INERTIA_KGM2` `NAME` (inertia).
+Apply the printed number with `SERVO_SET_INERTIA_RATIO`.
 
 ## Drive-parameter / gain commands
 
@@ -186,10 +187,10 @@ Vendor-table tuning path: standard mode (C00.04=1) + C00.05 stiffness level
 | Command | Script | Output |
 |---|---|---|
 | `SERVO_MEASURE_TRACKING` | `servo_capture.py` | tracking metrics to console + per-motor & combined PNG in `~/printer_data/config/servo_calibrate_results/` (records every motor driving the axis — both lanes on CoreXY) |
-| `SERVO_FIT_DYNAMICS[_COREXY]`, `SERVO_CALIBRATE_INERTIA_RATIO[_COREXY]` | `servo_fit_dynamics.py` | `~/printer_data/config/servo_dynamics/dynamics_<name>_<stamp>.toml` + C00.06 |
+| `SERVO_FIT_DYNAMICS`, `SERVO_CALIBRATE_INERTIA_RATIO` | `servo_fit_dynamics.py` | `~/printer_data/config/servo_dynamics/dynamics_<name>_<stamp>.toml` + C00.06 |
 | `SERVO_CALIBRATE_GAINS` | `servo_gain_report.py` | comparison PNG in `~/printer_data/config/servo_calibrate_results/` |
 | `SERVO_SWEEP_INERTIA` | `servo_inertia_report.py` | comparison PNG in `~/printer_data/config/servo_calibrate_results/` |
-| `SERVO_MEASURE_INERTIA[_COREXY]` | — | `.scap` capture only |
+| `SERVO_MEASURE_INERTIA` | — | `.scap` capture only |
 
 All captures land in `~/printer_data/logs/servo_captures/` as
 `<name>_<YYYYmmdd_HHMMSS>.scap`; per-step accelerometer recordings land next
