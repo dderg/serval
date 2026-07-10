@@ -5,16 +5,31 @@
 //! only in the `0x2001.0x31` ambient notch value their manifests record —
 //! the invisible-independent-variable case the dashboard's ambient-diff
 //! column exists to surface.
+//!
+//! `attempt1`'s `s700` capture also gets a synthetic resonance stamped onto
+//! its following-error channel (see `inject_decaying_resonance`) so the demo
+//! can show the PSD overlay and the resonance-driven verdict fallback to
+//! `s550` — `attempt2`/`attempt3` stay on the untouched fixture bytes.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use core::f64::consts::PI;
+
 use flate2::read::GzDecoder;
 use serde_json::json;
 
 use crate::analyze::{build_run, write_run_outputs};
+use crate::metrics::target_motion_segments;
+use crate::scap::{Channel, Scap, RECORD_PREFIX_SIZE};
 use crate::time_fmt::{iso8601_utc, stamp_utc};
+
+const RESONANCE_ATTEMPT_SUFFIX: &str = "attempt1";
+const RESONANCE_FREQ_HZ: f64 = 230.0;
+const RESONANCE_AMPLITUDE_COUNTS: f64 = 12_000.0;
+const RESONANCE_DECAY_TAU_S: f64 = 0.1;
+const RESONANCE_DECAY_WINDOW_S: f64 = 0.5;
 
 const SAFE_SCAP: &str = "cal_p880_s550_i2273_20260710_151516.scap.gz";
 const SAFE_ACCEL: &str = "cal_p880_s550_i2273_accel_20260710_151519.csv.gz";
@@ -66,6 +81,87 @@ fn gunzip(src: &Path, dst: &Path) -> Result<(), String> {
         .read_to_end(&mut out)
         .map_err(|e| format!("gunzip {}: {e}", src.display()))?;
     std::fs::write(dst, out).map_err(|e| format!("write {}: {e}", dst.display()))
+}
+
+fn eff_offset(ch: &Channel, drive_idx: usize, block_size: usize) -> usize {
+    if ch.offset >= RECORD_PREFIX_SIZE {
+        ch.offset + drive_idx * block_size
+    } else {
+        ch.offset
+    }
+}
+
+fn find_channel<'a>(cap: &'a Scap, name: &str) -> Result<&'a Channel, String> {
+    cap.channel(name)
+        .ok_or_else(|| format!("capture has no channel {name:?} to patch"))
+}
+
+/// Stamp a decaying `RESONANCE_FREQ_HZ` sinusoid onto every drive's
+/// following-error channel for `RESONANCE_DECAY_WINDOW_S` after each of its
+/// motion segments ends, keeping `position_actual = target_counts -
+/// following_error` exact so `ferr_crosscheck_max` stays zero. Operates on
+/// already-gunzipped record bytes; the on-disk fixture is never touched.
+fn inject_decaying_resonance(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let cap = Scap::from_bytes(bytes)?;
+    let nl = bytes
+        .iter()
+        .position(|&b| b == b'\n')
+        .ok_or("capture has no header line")?;
+    let body_start = nl + 1;
+    let record_size = cap.header.record_size;
+    let n_drives = cap.header.drives.len();
+    let block_size = (record_size - RECORD_PREFIX_SIZE) / n_drives;
+    let fs = cap.fs();
+    let decay_samples = (RESONANCE_DECAY_WINDOW_S * fs).round() as usize;
+
+    let ferr_ch = find_channel(&cap, "following_error")?;
+    let target_ch = find_channel(&cap, "target_counts")?;
+    let pos_ch = find_channel(&cap, "position_actual")?;
+    let (ferr_size, target_size, pos_size) = (
+        ferr_ch.dtype.itemsize(),
+        target_ch.dtype.itemsize(),
+        pos_ch.dtype.itemsize(),
+    );
+
+    let mut out = bytes.to_vec();
+    for idx in 0..n_drives {
+        let target = cap.read_i64(idx, "target_counts")?;
+        let segs = target_motion_segments(&target, fs);
+        let ferr_eff = eff_offset(ferr_ch, idx, block_size);
+        let target_eff = eff_offset(target_ch, idx, block_size);
+        let pos_eff = eff_offset(pos_ch, idx, block_size);
+        for (_, move_end) in segs {
+            for k in 0..decay_samples {
+                let r = move_end + k;
+                if r >= cap.n_records {
+                    break;
+                }
+                let t = k as f64 / fs;
+                let signal = RESONANCE_AMPLITUDE_COUNTS
+                    * libm::exp(-t / RESONANCE_DECAY_TAU_S)
+                    * libm::sin(2.0 * PI * RESONANCE_FREQ_HZ * t);
+
+                let rec_off = body_start + r * record_size;
+                let ferr_off = rec_off + ferr_eff;
+                let old_ferr = ferr_ch.dtype.read_i64(&out[ferr_off..ferr_off + ferr_size]);
+                let new_ferr = old_ferr.saturating_add(signal.round() as i64);
+                ferr_ch
+                    .dtype
+                    .write_i64_saturating(&mut out[ferr_off..ferr_off + ferr_size], new_ferr)?;
+
+                let target_off = rec_off + target_eff;
+                let target_val = target_ch
+                    .dtype
+                    .read_i64(&out[target_off..target_off + target_size]);
+                let new_pos = target_val - new_ferr;
+                let pos_off = rec_off + pos_eff;
+                pos_ch
+                    .dtype
+                    .write_i64_saturating(&mut out[pos_off..pos_off + pos_size], new_pos)?;
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn manifest_json(attempt: &DemoAttempt, created: SystemTime) -> serde_json::Value {
@@ -132,10 +228,15 @@ pub fn build_demo(out_dir: &Path, fixtures_dir: &Path) -> Result<Vec<PathBuf>, S
             &fixtures_dir.join(SAFE_ACCEL),
             &run_dir.join("step_s550_accel.csv"),
         )?;
-        gunzip(
-            &fixtures_dir.join(TARGET_SCAP),
-            &run_dir.join("step_s700.scap"),
-        )?;
+        let target_scap_path = run_dir.join("step_s700.scap");
+        gunzip(&fixtures_dir.join(TARGET_SCAP), &target_scap_path)?;
+        if attempt.suffix == RESONANCE_ATTEMPT_SUFFIX {
+            let bytes = std::fs::read(&target_scap_path)
+                .map_err(|e| format!("read {}: {e}", target_scap_path.display()))?;
+            let injected = inject_decaying_resonance(&bytes)?;
+            std::fs::write(&target_scap_path, injected)
+                .map_err(|e| format!("write {}: {e}", target_scap_path.display()))?;
+        }
         gunzip(
             &fixtures_dir.join(TARGET_ACCEL),
             &run_dir.join("step_s700_accel.csv"),

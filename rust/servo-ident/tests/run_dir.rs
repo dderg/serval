@@ -104,6 +104,21 @@ fn gain_sweep_run_dir_analyzes_and_picks_a_step() {
             assert!(c.on_ferr_mm.len() <= 2000);
             assert!(c.cross_ferr_mm.len() <= 2000);
         }
+        assert!(
+            ps.psd.freq_hz.len() <= 2000,
+            "psd freq_hz must be <= 2000 bins"
+        );
+        for (name, series) in &ps.psd.per_drive {
+            assert_eq!(
+                series.len(),
+                ps.psd.freq_hz.len(),
+                "drive {name} psd length must match freq_hz"
+            );
+        }
+        assert!(
+            !ps.psd.per_drive.is_empty(),
+            "every step must carry at least one drive's psd"
+        );
     }
 
     analyze_run(&dir).unwrap();

@@ -13,8 +13,8 @@ use crate::metrics::{
 use crate::psd::{moving_psd, top_peaks, welch_psd};
 use crate::resonance::{detect_resonance, recommend_accel};
 use crate::results::{
-    AccelResult, Combined, DriveResult, Manifest, PlotAccel, PlotCombined, PlotDrive, PlotSeries,
-    PlotStep, Results, Step, StepResult, Verdict,
+    AccelResult, Combined, DriveResult, Manifest, PlotAccel, PlotCombined, PlotDrive, PlotPsd,
+    PlotPsdAccel, PlotSeries, PlotStep, Results, Step, StepResult, Verdict,
 };
 use crate::scap::Scap;
 
@@ -62,6 +62,8 @@ fn read_accel_csv(path: &Path) -> Result<(Vec<f64>, Vec<f64>), String> {
 struct DriveAnalysis {
     series: DriveSeries,
     result: DriveResult,
+    freq_hz: Vec<f64>,
+    psd: Vec<f64>,
 }
 
 fn analyze_drive(
@@ -74,9 +76,9 @@ fn analyze_drive(
     let series = drive_series(cap, idx)?;
     let metrics = compute_metrics(&series, settle_band, torque_limit, fs)?;
     let segs = motion_segments(&series.flags);
-    let (freqs, psd) = moving_psd(&series, &segs, fs)?;
-    let psd_peaks = top_peaks(&freqs, &psd, PSD_PEAK_COUNT);
-    let resonance = detect_resonance(&freqs, &psd);
+    let (freq_hz, psd) = moving_psd(&series, &segs, fs)?;
+    let psd_peaks = top_peaks(&freq_hz, &psd, PSD_PEAK_COUNT);
+    let resonance = detect_resonance(&freq_hz, &psd);
     Ok(DriveAnalysis {
         series,
         result: DriveResult {
@@ -84,7 +86,17 @@ fn analyze_drive(
             psd_peaks,
             resonance,
         },
+        freq_hz,
+        psd,
     })
+}
+
+struct AccelAnalysis {
+    result: AccelResult,
+    t: Vec<f64>,
+    mag: Vec<f64>,
+    freq_hz: Vec<f64>,
+    psd: Vec<f64>,
 }
 
 fn step_flags(drives: &BTreeMap<String, DriveResult>) -> Vec<String> {
@@ -148,18 +160,51 @@ pub fn analyze_capture(
         Some(path) => {
             let (t, mag) = read_accel_csv(path)?;
             let afs = t.len() as f64 / (t[t.len() - 1] - t[0]);
-            let (freqs, psd) = welch_psd(&mag, afs)?;
-            Some((
-                AccelResult {
+            let (freq_hz, psd) = welch_psd(&mag, afs)?;
+            if freq_hz.len() > MAX_SERIES_POINTS {
+                return Err(format!(
+                    "step {name:?}: accel psd has {} bins, over the {MAX_SERIES_POINTS} cap",
+                    freq_hz.len()
+                ));
+            }
+            Some(AccelAnalysis {
+                result: AccelResult {
                     present: true,
-                    psd_peaks: top_peaks(&freqs, &psd, PSD_PEAK_COUNT),
+                    psd_peaks: top_peaks(&freq_hz, &psd, PSD_PEAK_COUNT),
                 },
                 t,
                 mag,
-            ))
+                freq_hz,
+                psd,
+            })
         }
         None => None,
     };
+
+    let mut psd_freq_hz: Option<Vec<f64>> = None;
+    let mut per_drive_psd: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    for (dname, a) in &analyses {
+        match &psd_freq_hz {
+            Some(existing) if existing.len() != a.freq_hz.len() => {
+                return Err(format!(
+                    "step {name:?}: drive {dname:?} psd grid has {} bins, expected {} \
+                     (drives must share the Welch grid)",
+                    a.freq_hz.len(),
+                    existing.len()
+                ));
+            }
+            Some(_) => {}
+            None => psd_freq_hz = Some(a.freq_hz.clone()),
+        }
+        per_drive_psd.insert(dname.clone(), a.psd.clone());
+    }
+    let psd_freq_hz = psd_freq_hz.ok_or_else(|| format!("step {name:?} has no drives"))?;
+    if psd_freq_hz.len() > MAX_SERIES_POINTS {
+        return Err(format!(
+            "step {name:?}: following-error psd has {} bins, over the {MAX_SERIES_POINTS} cap",
+            psd_freq_hz.len()
+        ));
+    }
 
     let mut drives = BTreeMap::new();
     let mut series_by_name: BTreeMap<String, DriveSeries> = BTreeMap::new();
@@ -191,20 +236,24 @@ pub fn analyze_capture(
         on_ferr_mm: idxs.iter().map(|&k| c.on_ferr[k]).collect(),
         cross_ferr_mm: idxs.iter().map(|&k| c.cross_ferr[k]).collect(),
     });
-    let plot_accel = accel.as_ref().map(|(_, t, mag)| {
-        let astride = stride_for(t.len());
-        let ai: Vec<usize> = (0..t.len()).step_by(astride).collect();
+    let plot_accel = accel.as_ref().map(|a| {
+        let astride = stride_for(a.t.len());
+        let ai: Vec<usize> = (0..a.t.len()).step_by(astride).collect();
         PlotAccel {
-            t_s: ai.iter().map(|&k| t[k] - t[0]).collect(),
-            magnitude: ai.iter().map(|&k| mag[k]).collect(),
+            t_s: ai.iter().map(|&k| a.t[k] - a.t[0]).collect(),
+            magnitude: ai.iter().map(|&k| a.mag[k]).collect(),
         }
+    });
+    let plot_psd_accel = accel.as_ref().map(|a| PlotPsdAccel {
+        freq_hz: a.freq_hz.clone(),
+        psd: a.psd.clone(),
     });
 
     let step_result = StepResult {
         name: name.to_string(),
         drives,
         combined,
-        accel: accel.map(|(a, _, _)| a),
+        accel: accel.map(|a| a.result),
         flags,
     };
     let plot_step = PlotStep {
@@ -216,6 +265,11 @@ pub fn analyze_capture(
         drives: plot_drives,
         combined: plot_combined,
         accel: plot_accel,
+        psd: PlotPsd {
+            freq_hz: psd_freq_hz,
+            per_drive: per_drive_psd,
+            accel: plot_psd_accel,
+        },
     };
     Ok((step_result, plot_step))
 }

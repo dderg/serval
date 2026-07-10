@@ -147,7 +147,20 @@ fn runs_list_is_newest_first_with_verdict_summary() {
         assert_eq!(run["has_results"], Value::Bool(true));
         let verdict = &run["verdict"];
         assert!(!verdict.is_null(), "demo runs are analyzed up front");
-        assert_eq!(verdict["recommended_step"], Value::from("s700"));
+        // attempt1's s700 carries a synthetic resonance (see
+        // servo_ident::demo), so its verdict falls back to s550; attempt2
+        // and attempt3 stay on the untouched fixture and still pick s700.
+        let name = run["name"].as_str().unwrap();
+        let expected_step = if name.contains("attempt1") {
+            "s550"
+        } else {
+            "s700"
+        };
+        assert_eq!(
+            verdict["recommended_step"],
+            Value::from(expected_step),
+            "{name}"
+        );
         assert!(!verdict["reason"].as_str().unwrap().is_empty());
         assert_eq!(run["experiment"], Value::from("gain_sweep"));
     }
@@ -170,6 +183,30 @@ fn manifest_results_plot_series_serve_raw_json() {
         assert_eq!(resp.status, 200, "{file} endpoint");
         let parsed: Value = serde_json::from_str(&resp.body).expect("valid json body");
         assert_eq!(parsed["version"], Value::from(1));
+        if file == "plot_series" {
+            for step in parsed["steps"].as_array().unwrap() {
+                let psd = &step["psd"];
+                let freq_hz = psd["freq_hz"].as_array().expect("psd.freq_hz array");
+                assert!(freq_hz.len() <= 2000, "psd.freq_hz must be <= 2000 bins");
+                let per_drive = psd["per_drive"].as_object().expect("psd.per_drive object");
+                assert!(!per_drive.is_empty());
+                for (drive, series) in per_drive {
+                    assert_eq!(
+                        series.as_array().unwrap().len(),
+                        freq_hz.len(),
+                        "drive {drive} psd length must match freq_hz"
+                    );
+                }
+                let accel = &psd["accel"];
+                assert!(
+                    !accel.is_null(),
+                    "demo steps carry an accel capture, psd.accel must not be null"
+                );
+                let accel_freq = accel["freq_hz"].as_array().unwrap();
+                let accel_psd = accel["psd"].as_array().unwrap();
+                assert_eq!(accel_freq.len(), accel_psd.len());
+            }
+        }
     }
 
     std::fs::remove_dir_all(&root).ok();
@@ -236,7 +273,9 @@ fn analyze_on_demand_regenerates_stale_results() {
     let resp = request(port, "POST", &format!("/api/runs/{name}/analyze"));
     assert_eq!(resp.status, 200);
     let results: Value = serde_json::from_str(&resp.body).unwrap();
-    assert_eq!(results["verdict"]["recommended_step"], Value::from("s700"));
+    // run_dirs[0] is attempt1 (build_demo returns oldest first), whose
+    // injected s700 resonance falls the verdict back to s550.
+    assert_eq!(results["verdict"]["recommended_step"], Value::from("s550"));
     assert!(run_dir.join("results.json").is_file());
     assert!(run_dir.join("plot_series.json").is_file());
 

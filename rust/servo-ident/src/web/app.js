@@ -3,12 +3,15 @@
 const REFRESH_MS = 5000;
 const MOONRAKER_KEY = "servoCalMoonrakerUrl";
 const PALETTE = ["#4fb3ff", "#e05a4f", "#4caf50", "#d9a441", "#b388ff", "#4fd8c4"];
+const RESONANCE_BAND_HZ = [20, 450];
 
 const state = {
   runs: [],
   details: new Map(), // name -> {mtime_utc, has_results, manifest, results}
   overlaySelected: new Set(),
   formRun: null,
+  psdStep: null,
+  psdContext: null, // {names, plots} from the last overlay draw, reused by the step selector
 };
 
 async function api(path, opts) {
@@ -270,6 +273,8 @@ async function drawOverlay() {
   container.innerHTML = "";
   if (names.length === 0) {
     container.innerHTML = '<p class="note">tick runs in the journal, then Overlay</p>';
+    state.psdContext = null;
+    drawPsdSection([], [], []);
     return;
   }
   const plots = await Promise.all(
@@ -307,6 +312,196 @@ async function drawOverlay() {
     box.appendChild(legend);
     container.appendChild(box);
   }
+
+  state.psdContext = { names, plots };
+  drawPsdSection(names, plots, stepNames);
+}
+
+// --- following-error PSD overlay ------------------------------------------
+
+function newestSelectedRunName(names) {
+  const selected = new Set(names);
+  const found = state.runs.find((r) => selected.has(r.name));
+  return found ? found.name : names[0];
+}
+
+function defaultPsdStep(names, plots, stepNames) {
+  const plotByName = new Map(names.map((n, i) => [n, plots[i]]));
+  const newest = newestSelectedRunName(names);
+  const newestPlot = plotByName.get(newest);
+  const newestSteps = newestPlot ? newestPlot.steps.map((s) => s.name) : stepNames;
+  const detail = state.details.get(newest);
+  const recommended = detail && detail.results && detail.results.verdict.recommended_step;
+  if (recommended && newestSteps.includes(recommended)) return recommended;
+  if (newestSteps.length) return newestSteps[newestSteps.length - 1];
+  return stepNames[stepNames.length - 1];
+}
+
+function psdTraces(names, plots, stepName) {
+  const traces = [];
+  plots.forEach((p, i) => {
+    const step = p.steps.find((s) => s.name === stepName);
+    if (!step || !step.psd) return;
+    const color = PALETTE[i % PALETTE.length];
+    const driveNames = Object.keys(step.psd.per_drive);
+    if (driveNames.length) {
+      traces.push({
+        freq: step.psd.freq_hz,
+        y: step.psd.per_drive[driveNames[0]],
+        color,
+        dashed: false,
+        label: `${names[i]} (${driveNames[0]})`,
+      });
+    }
+    if (step.psd.accel) {
+      traces.push({
+        freq: step.psd.accel.freq_hz,
+        y: step.psd.accel.psd,
+        color,
+        dashed: true,
+        label: `${names[i]} (accel)`,
+      });
+    }
+  });
+  return traces;
+}
+
+function drawPsdChart(canvas, traces, band) {
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#0d1117";
+  ctx.fillRect(0, 0, w, h);
+  const pad = { l: 46, r: 8, t: 8, b: 22 };
+  const EPS = 1e-6;
+  let fMin = Infinity, fMax = -Infinity, logMin = Infinity, logMax = -Infinity;
+  for (const tr of traces) {
+    for (let i = 0; i < tr.freq.length; i++) {
+      const f = tr.freq[i];
+      const lv = Math.log10(Math.max(tr.y[i], EPS));
+      fMin = Math.min(fMin, f);
+      fMax = Math.max(fMax, f);
+      logMin = Math.min(logMin, lv);
+      logMax = Math.max(logMax, lv);
+    }
+  }
+  if (!isFinite(fMin) || !isFinite(logMin)) return;
+  if (logMin === logMax) { logMin -= 1; logMax += 1; }
+  const x = (f) => pad.l + ((f - fMin) / (fMax - fMin || 1)) * (w - pad.l - pad.r);
+  const yOfLog = (lv) => h - pad.b - ((lv - logMin) / (logMax - logMin || 1)) * (h - pad.t - pad.b);
+  const y = (v) => yOfLog(Math.log10(Math.max(v, EPS)));
+
+  if (band) {
+    const [blo, bhi] = band;
+    const bandLo = Math.max(blo, fMin);
+    const bandHi = Math.min(bhi, fMax);
+    if (bandHi > bandLo) {
+      ctx.fillStyle = "rgba(217, 164, 65, 0.10)";
+      ctx.fillRect(x(bandLo), pad.t, x(bandHi) - x(bandLo), h - pad.t - pad.b);
+    }
+  }
+
+  ctx.strokeStyle = "#29313a";
+  ctx.fillStyle = "#8a97a3";
+  ctx.font = "10px monospace";
+  ctx.beginPath();
+  for (let i = 0; i <= 4; i++) {
+    const lv = logMin + ((logMax - logMin) * i) / 4;
+    const py = yOfLog(lv);
+    ctx.moveTo(pad.l, py);
+    ctx.lineTo(w - pad.r, py);
+    ctx.fillText(`1e${lv.toFixed(1)}`, 2, py + 3);
+  }
+  for (let i = 0; i <= 4; i++) {
+    const f = fMin + ((fMax - fMin) * i) / 4;
+    const px = x(f);
+    ctx.fillText(f.toFixed(0) + "Hz", px, h - 6);
+  }
+  ctx.stroke();
+
+  for (const tr of traces) {
+    ctx.strokeStyle = tr.color;
+    ctx.lineWidth = 1.25;
+    ctx.setLineDash(tr.dashed ? [4, 3] : []);
+    ctx.beginPath();
+    for (let i = 0; i < tr.freq.length; i++) {
+      const px = x(tr.freq[i]);
+      const py = y(tr.y[i]);
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  if (band) {
+    const [blo, bhi] = band;
+    traces.forEach((tr, idx) => {
+      let bestI = -1, bestV = -Infinity;
+      for (let i = 0; i < tr.freq.length; i++) {
+        if (tr.freq[i] >= blo && tr.freq[i] < bhi && tr.y[i] > bestV) {
+          bestV = tr.y[i];
+          bestI = i;
+        }
+      }
+      if (bestI < 0) return;
+      const px = x(tr.freq[bestI]);
+      const py = y(tr.y[bestI]);
+      ctx.fillStyle = tr.color;
+      ctx.beginPath();
+      ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillText(`${tr.freq[bestI].toFixed(0)}Hz`, px + 4, py - 4 - (idx % 3) * 10);
+    });
+  }
+
+  ctx.fillStyle = "#8a97a3";
+  ctx.fillText("log10 psd (counts²/Hz)", pad.l, 10);
+}
+
+function renderPsdChart(names, plots, stepName) {
+  const container = document.getElementById("psd-charts");
+  container.innerHTML = "";
+  if (!stepName) {
+    container.innerHTML = '<p class="note">tick runs in the journal, then Overlay</p>';
+    return;
+  }
+  const box = document.createElement("div");
+  box.className = "chart-box";
+  const title = document.createElement("h3");
+  title.textContent = `following-error PSD — ${stepName}`;
+  box.appendChild(title);
+  const canvas = document.createElement("canvas");
+  canvas.width = 640;
+  canvas.height = 220;
+  box.appendChild(canvas);
+  const legend = document.createElement("div");
+  legend.className = "legend";
+  names.forEach((n, i) => {
+    const item = document.createElement("span");
+    item.innerHTML = `<span class="swatch" style="background:${PALETTE[i % PALETTE.length]}"></span>${n}`;
+    legend.appendChild(item);
+  });
+  drawPsdChart(canvas, psdTraces(names, plots, stepName), RESONANCE_BAND_HZ);
+  box.appendChild(legend);
+  container.appendChild(box);
+}
+
+function drawPsdSection(names, plots, stepNames) {
+  const select = document.getElementById("psd-step-select");
+  if (names.length === 0 || stepNames.length === 0) {
+    select.innerHTML = "";
+    renderPsdChart(names, plots, null);
+    return;
+  }
+  select.innerHTML = stepNames.map((s) => `<option value="${s}">${s}</option>`).join("");
+  const wanted = state.psdStep && stepNames.includes(state.psdStep)
+    ? state.psdStep
+    : defaultPsdStep(names, plots, stepNames);
+  select.value = wanted;
+  state.psdStep = wanted;
+  renderPsdChart(names, plots, wanted);
 }
 
 // --- re-run form -----------------------------------------------------------
@@ -437,6 +632,10 @@ function initForm() {
   input.addEventListener("change", () => localStorage.setItem(MOONRAKER_KEY, input.value));
   document.getElementById("run-gcode").addEventListener("click", runGcode);
   document.getElementById("overlay-btn").addEventListener("click", drawOverlay);
+  document.getElementById("psd-step-select").addEventListener("change", (e) => {
+    state.psdStep = e.target.value;
+    if (state.psdContext) renderPsdChart(state.psdContext.names, state.psdContext.plots, state.psdStep);
+  });
 }
 
 async function tick() {

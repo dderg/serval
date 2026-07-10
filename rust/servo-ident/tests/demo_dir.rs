@@ -35,6 +35,65 @@ fn notch_value(run_dir: &Path) -> i64 {
         .expect("journal_params.motor_a.0x2001.0x31 must be present")
 }
 
+fn step<'a>(results: &'a Value, name: &str) -> &'a Value {
+    results["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"].as_str() == Some(name))
+        .unwrap_or_else(|| panic!("results.json has no step {name:?}"))
+}
+
+fn step_flags(results: &Value, name: &str) -> Vec<String> {
+    step(results, name)["flags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f.as_str().unwrap().to_string())
+        .collect()
+}
+
+fn assert_psd_shape(plot: &Value) {
+    for step in plot["steps"].as_array().unwrap() {
+        let psd = &step["psd"];
+        let freq_hz = psd["freq_hz"].as_array().unwrap();
+        assert!(
+            freq_hz.len() <= 2000,
+            "step {}: psd freq_hz must be <= 2000 bins",
+            step["name"]
+        );
+        let per_drive = psd["per_drive"].as_object().unwrap();
+        assert!(
+            !per_drive.is_empty(),
+            "step {}: psd.per_drive must not be empty",
+            step["name"]
+        );
+        for (drive, series) in per_drive {
+            assert_eq!(
+                series.as_array().unwrap().len(),
+                freq_hz.len(),
+                "step {}: drive {drive} psd length must match freq_hz",
+                step["name"]
+            );
+        }
+        let accel = &psd["accel"];
+        assert!(
+            !accel.is_null(),
+            "step {}: demo steps all carry an accel capture, psd.accel must not be null",
+            step["name"]
+        );
+        let accel_freq = accel["freq_hz"].as_array().unwrap();
+        let accel_psd = accel["psd"].as_array().unwrap();
+        assert_eq!(
+            accel_freq.len(),
+            accel_psd.len(),
+            "step {}: accel psd.freq_hz and psd.psd must have equal length",
+            step["name"]
+        );
+        assert!(accel_freq.len() <= 2000);
+    }
+}
+
 #[test]
 fn demo_runs_parse_and_ambient_notch_differs() {
     let out_dir = temp_dir("out");
@@ -61,6 +120,9 @@ fn demo_runs_parse_and_ambient_notch_differs() {
         assert_eq!(results["steps"].as_array().unwrap().len(), 2);
 
         assert!(run_dir.join("plot_series.json").is_file());
+        let plot_text = std::fs::read_to_string(run_dir.join("plot_series.json")).unwrap();
+        let plot: Value = serde_json::from_str(&plot_text).unwrap();
+        assert_psd_shape(&plot);
 
         notches.push(notch_value(run_dir));
     }
@@ -70,6 +132,56 @@ fn demo_runs_parse_and_ambient_notch_differs() {
         vec![3, 1, 0],
         "ambient notch must walk 3 -> 1 -> 0 across attempts"
     );
+
+    std::fs::remove_dir_all(&out_dir).ok();
+}
+
+/// The whole point of the injected fixture: `attempt1`'s `s700` capture gets
+/// a synthetic resonance stamped onto it (see `servo_ident::demo`'s record
+/// patcher), so its step must flag `resonance_detected` and the gain_sweep
+/// verdict must fall back to the clean `s550` step. `attempt2`/`attempt3`
+/// never touch the injected bytes and must stay on the untouched `s700` pick.
+#[test]
+fn attempt1_resonance_injection_flips_the_verdict_to_the_safe_step() {
+    let out_dir = temp_dir("resonance");
+    let run_dirs = build_demo(&out_dir, &fixture_dir()).unwrap();
+    assert_eq!(
+        run_dirs.len(),
+        3,
+        "oldest first: attempt1, attempt2, attempt3"
+    );
+
+    let results_of = |run_dir: &Path| -> Value {
+        let text = std::fs::read_to_string(run_dir.join("results.json")).unwrap();
+        serde_json::from_str(&text).unwrap()
+    };
+
+    let attempt1 = results_of(&run_dirs[0]);
+    assert!(
+        step_flags(&attempt1, "s700").contains(&"resonance_detected".to_string()),
+        "attempt1's injected s700 must flag resonance_detected: {:?}",
+        step_flags(&attempt1, "s700")
+    );
+    assert_eq!(
+        attempt1["verdict"]["recommended_step"],
+        Value::from("s550"),
+        "attempt1's verdict must fall back to the clean s550 step"
+    );
+
+    for run_dir in &run_dirs[1..] {
+        let results = results_of(run_dir);
+        assert!(
+            !step_flags(&results, "s700").contains(&"resonance_detected".to_string()),
+            "{}: s700 must stay clean (only attempt1's copy is injected)",
+            run_dir.display()
+        );
+        assert_eq!(
+            results["verdict"]["recommended_step"],
+            Value::from("s700"),
+            "{}: verdict must still pick the highest clean speed",
+            run_dir.display()
+        );
+    }
 
     std::fs::remove_dir_all(&out_dir).ok();
 }

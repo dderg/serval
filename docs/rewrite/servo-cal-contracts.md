@@ -112,10 +112,19 @@ Downsampled for drawing, ≤ 2000 points per series (stride, no averaging).
     "moving": [[0.035, 1.119]],
     "drives": {"motor_a": {"ferr_counts": [..], "torque_per_mille": [..]}},
     "combined": {"on_ferr_mm": [..], "cross_ferr_mm": [..]},
-    "accel": {"t_s": [..], "magnitude": [..]}
+    "accel": {"t_s": [..], "magnitude": [..]},
+    "psd": {"freq_hz": [..], "per_drive": {"motor_a": [..]},
+            "accel": {"freq_hz": [..], "psd": [..]} }
   }]
 }
 ```
+
+`psd` is the full moving-segment following-error Welch PSD per drive — the
+same `(freqs, psd)` arrays `resonance` in `results.json` is computed from, not
+recomputed or downsampled (`≤ 2000` bins, same cap as the other series but
+never stride-thinned since Welch already caps bins around 513). `freq_hz` is
+shared by every drive. `psd.accel` is null without an accelerometer
+recording, otherwise the accel-magnitude PSD on its own frequency grid.
 
 ## servo-cal CLI
 

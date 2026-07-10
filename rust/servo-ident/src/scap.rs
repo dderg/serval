@@ -35,7 +35,7 @@ impl Dtype {
         }
     }
 
-    fn itemsize(self) -> usize {
+    pub(crate) fn itemsize(self) -> usize {
         match self {
             Dtype::U8 => 1,
             Dtype::U16 | Dtype::I16 => 2,
@@ -44,7 +44,7 @@ impl Dtype {
         }
     }
 
-    fn read_i64(self, b: &[u8]) -> i64 {
+    pub(crate) fn read_i64(self, b: &[u8]) -> i64 {
         match self {
             Dtype::U8 => b[0] as i64,
             Dtype::U16 => u16::from_le_bytes([b[0], b[1]]) as i64,
@@ -54,6 +54,24 @@ impl Dtype {
                 u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as i64
             }
             Dtype::F32 => f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as i64,
+        }
+    }
+
+    /// Write `v` into a signed-integer channel's bytes, saturating to the
+    /// dtype's range. Used by `demo`'s record patcher, never by the reader.
+    pub(crate) fn write_i64_saturating(self, b: &mut [u8], v: i64) -> Result<(), String> {
+        match self {
+            Dtype::I16 => {
+                let clamped = v.clamp(i16::MIN as i64, i16::MAX as i64) as i16;
+                b[..2].copy_from_slice(&clamped.to_le_bytes());
+                Ok(())
+            }
+            Dtype::I32 => {
+                let clamped = v.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+                b[..4].copy_from_slice(&clamped.to_le_bytes());
+                Ok(())
+            }
+            other => Err(format!("write_i64_saturating: unsupported dtype {other:?}")),
         }
     }
 

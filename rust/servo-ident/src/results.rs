@@ -128,6 +128,19 @@ pub struct PlotAccel {
 }
 
 #[derive(Debug, Serialize)]
+pub struct PlotPsdAccel {
+    pub freq_hz: Vec<f64>,
+    pub psd: Vec<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlotPsd {
+    pub freq_hz: Vec<f64>,
+    pub per_drive: BTreeMap<String, Vec<f64>>,
+    pub accel: Option<PlotPsdAccel>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct PlotStep {
     pub name: String,
     pub fs_hz: f64,
@@ -137,6 +150,7 @@ pub struct PlotStep {
     pub drives: BTreeMap<String, PlotDrive>,
     pub combined: Option<PlotCombined>,
     pub accel: Option<PlotAccel>,
+    pub psd: PlotPsd,
 }
 
 #[derive(Debug, Serialize)]
