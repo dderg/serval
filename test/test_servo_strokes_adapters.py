@@ -1,3 +1,5 @@
+import tempfile
+
 import pytest
 
 from klippy.extras import servo_calibration
@@ -14,6 +16,17 @@ class FakeGcode:
 
     def run_script_from_command(self, script):
         self.scripts.append(script)
+
+
+class FakeServoCapture:
+    def __init__(self):
+        self.captures = []
+
+    def start_capture_to(self, path, servos):
+        self.captures.append((path, list(servos)))
+
+    def stop_capture(self):
+        return self.captures[-1][0], 1000, 250
 
 
 class FakeGcmd:
@@ -63,9 +76,18 @@ class FakeConfig:
 
 def make_calibration():
     gcode = FakeGcode()
-    printer = FakePrinter({"gcode": gcode})
+    printer = FakePrinter({"gcode": gcode, "servo_capture": FakeServoCapture()})
     sc = servo_calibration.ServoCalibration(FakeConfig(printer))
+    sc.captures_root = tempfile.mkdtemp()
     return sc, gcode
+
+
+def with_active_run(sc):
+    run = servo_calibration.ExperimentRun(
+        tempfile.mkdtemp(), "20260710_000000", {"steps": []}
+    )
+    sc._active_run = run
+    return run
 
 
 def _writes(gcode, addr):
@@ -211,6 +233,8 @@ def test_motion_accel_adapter_writes_nothing():
 
 def test_sweep_engine_runs_apply_capture_strokes_in_order():
     sc, gcode = make_calibration()
+    run = with_active_run(sc)
+    cap = sc.printer.lookup_object("servo_capture")
     adapter = servo_calibration.MotionAccelAdapter("accel")
     order = []
     steps = sc._engine.run(
@@ -222,13 +246,19 @@ def test_sweep_engine_runs_apply_capture_strokes_in_order():
     )
     assert [s.name for s in steps] == ["accel_a1000", "accel_a2000"]
     assert [s.swept for s in steps] == [{"accel": 1000}, {"accel": 2000}]
-    starts = [s for s in gcode.scripts if "CAPTURE_START" in s]
-    stops = [s for s in gcode.scripts if s == "SERVO_CAPTURE_STOP"]
-    assert len(starts) == 2 and len(stops) == 2
+    assert [servos for _p, servos in cap.captures] == [
+        ["motor_a"],
+        ["motor_a"],
+    ]
+    assert [c["name"] for c in run.manifest["steps"]] == [
+        "accel_a1000",
+        "accel_a2000",
+    ]
 
 
 def test_sweep_engine_propagates_stroke_failures():
     sc, _ = make_calibration()
+    with_active_run(sc)
     adapter = servo_calibration.MotionAccelAdapter("accel")
 
     def boom(v):
@@ -240,6 +270,7 @@ def test_sweep_engine_propagates_stroke_failures():
 
 def test_run_sweep_with_revert_reverts_even_on_failure():
     sc, gcode = make_calibration()
+    with_active_run(sc)
     adapter = servo_calibration.InertiaRatioAdapter(
         sc, ["motor_a"], "inertia", 100
     )

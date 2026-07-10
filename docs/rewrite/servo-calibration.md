@@ -1,11 +1,17 @@
 # Servo calibration reference
 
-Command and script reference for tuning an A6-EC servo axis (EtherCAT). The
-`[servo_calibration]` extension registers the `SERVO_*` console commands; they
-drive the host scripts under `scripts/` and the drive-parameter access provided
-by `[servo_param]`/`[servo_capture]`. For the theory behind the inertia/
-feedforward fit see [servo-feedforward.md](servo-feedforward.md); for the
-capture format see [servo-telemetry-capture.md](servo-telemetry-capture.md).
+Command reference for tuning an A6-EC servo axis (EtherCAT). The
+`[servo_calibration]` extension registers the `SERVO_*` console commands. Each
+experiment command writes a run directory under `captures_root` (a
+`manifest.json`, one `step_<name>.scap` per step, optional accelerometer CSVs)
+and then invokes the `servo-cal` Rust binary — `analyze` writes `results.json`
+with a typed verdict, `fit` writes a dynamics profile. Drive-parameter access
+comes from `[servo_param]`/`[servo_capture]`. For the run-directory and
+`results.json` schemas see
+[servo-cal-contracts.md](servo-cal-contracts.md); for the theory behind the
+inertia/feedforward fit see [servo-feedforward.md](servo-feedforward.md); for
+the capture format see
+[servo-telemetry-capture.md](servo-telemetry-capture.md).
 
 ## Enabling
 
@@ -45,10 +51,13 @@ they are configured or passed.
 | `dwell_ms` | `700` | settle between strokes (`DWELL_MS=`) |
 | `travel_speed` | `100` | CoreXY centering moves between grid points |
 | `accel_chip` | — | accelerometer section name (e.g. `adxl345`); when set, `SERVO_CALIBRATE_GAINS` also records vibration per step (`ACCEL_CHIP=`) |
+| `captures_root` | `~/printer_data/logs/servo_captures` | parent directory for experiment run directories |
+| `journal_params` | — | comma list of drive SDO addresses (`addr[:type]`, e.g. `0x2001.0x31:u16`) read back from every captured drive at run start and recorded under `ambient.journal_params` in the manifest — the campaign's varied registers (notch mode, etc.) |
+| `servo_cal_binary` | `rust/target/release/servo-cal` | path to the `servo-cal` analysis binary |
 
 Prerequisites: the EtherCAT servo stack (`[servo_param]`, `[servo_capture]`)
-must be configured, and the fitter must be built once on the host with
-`cargo build --release -p servo-ident` (from `rust/`).
+must be configured, and the `servo-cal` binary must be built once on the host
+with `cargo build --release -p servo-ident` (from `rust/`).
 
 ## Tuning order
 
@@ -78,7 +87,7 @@ produce the intended excitation.
 Single accel/speed stroke run with capture, then prints per-move following
 error, overshoot and settling — the before/after check for any tuning change.
 Params: `AXIS` (X) `START` `END` `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (3)
-`DWELL_MS` `NAME` (track). Runs `servo_capture.py`.
+`DWELL_MS` `NAME` (track). Writes a run directory and runs `servo-cal analyze`.
 
 #### SERVO_MEASURE_INERTIA
 Records the excitation grid for the inertia/friction fit (no report — it is the
@@ -121,9 +130,10 @@ structure:
   since the capture records every drive.
 
 Params: as `SERVO_MEASURE_INERTIA` plus `TORQUE_NM` `INERTIA_KGM2` `NAME`
-(ident) `DRIVE`. Runs `servo_fit_dynamics.py`; the profile lands in
-`~/printer_data/config/servo_dynamics/` and a new fit never overwrites an
-existing profile.
+(ident) `DRIVE`. Captures the grid into a run directory and runs
+`servo-cal fit --capture <step>.scap`; the profile lands in
+`~/printer_data/config/servo_dynamics/dynamics_<name>_<stamp>.toml` and a new
+fit never overwrites an existing profile.
 
 #### SERVO_CALIBRATE_INERTIA_RATIO
 Step 2 of tuning: identify the load inertia and print the recommended C00.06.
@@ -158,72 +168,57 @@ defaults are the factory Low preset. Params: `POS_GAIN` (400) `SPEED_GAIN`
 #### SERVO_CALIBRATE_GAINS
 Gain sweep, shaper-calibrate style: for each `SPEED_GAINS` entry (0.1 Hz units)
 it derives the position gain (`×1.6`) and integral (`1250000 ÷ gain`), records
-one capture per step, and renders a comparison PNG with a recommendation into
-`~/printer_data/config/servo_calibrate_results/`. Reverts to the lowest gains
-afterwards. With an accelerometer (`accel_chip` config option or `ACCEL_CHIP=`)
-each step also records vibration data (`<step>_accel_<stamp>.csv` next to the
-`.scap`) and the report gains a bottom row, shaper-calibrate style: vibration
-frequency response per step plus a stacked per-step spectrogram. Params:
+one capture per step into the run directory, then `servo-cal analyze` writes
+`results.json` whose verdict names the highest gain step without resonance or a
+torque rail. Reverts to the lowest gains afterwards. With an accelerometer
+(`accel_chip` config option or `ACCEL_CHIP=`) each step also records vibration
+data (`step_<name>_accel.csv` next to the `.scap`). Params:
 `SPEED_GAINS` (500,650,800,1000) `AXIS` (X) `START` `END`
 `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2) `DWELL_MS` `TAG` (cal)
-`ACCEL_CHIP` `SERVO`. Runs `servo_gain_report.py`.
+`ACCEL_CHIP` `SERVO`.
 
 #### SERVO_SWEEP_INERTIA
 Empirical inertia sweep: apply the tuned gains first, then this writes each
-C00.06 ratio in `RATIOS`, records one capture per step, and renders a
-comparison PNG (read the start/end overshoot to pick the ratio; no automated
-recommendation). Reverts to the lowest ratio afterwards. Params: `RATIOS`
+C00.06 ratio in `RATIOS`, records one capture per step, and runs
+`servo-cal analyze` (`results.json` reports per-step metrics; no automated pick
+— read the overshoot trend to choose the ratio). Reverts to the lowest ratio
+afterwards. Params: `RATIOS`
 (40,70,100,130) `AXIS` (X) `START` `END` `SPEED` (100) `ACCEL` (3000)
-`ITERATIONS` (2) `DWELL_MS` `TAG` (inertia) `SERVO`. Runs
-`servo_inertia_report.py`.
+`ITERATIONS` (2) `DWELL_MS` `TAG` (inertia) `SERVO`.
 
 #### SERVO_SET_STIFFNESS
 Vendor-table tuning path: standard mode (C00.04=1) + C00.05 stiffness level
 1..31 (factory 12); the drive derives gain set 1 from the level. Params:
 `LEVEL` `SERVO`.
 
-## Command → script → output
+## Command → output
 
-| Command | Script | Output |
+Every experiment command writes a run directory
+`<captures_root>/<tag>_<YYYYmmdd_HHMMSS>/` holding `manifest.json`, one
+`step_<name>.scap` per step, optional `step_<name>_accel.csv` recordings, and
+(for the analyze commands) `results.json` + `plot_series.json`. The command
+prints a one-line verdict plus the run-directory path; the metrics table
+streams from `servo-cal` in the interim before the dashboard (Part 3) lands.
+Schemas: [servo-cal-contracts.md](servo-cal-contracts.md).
+
+| Command | Invokes | Output |
 |---|---|---|
-| `SERVO_MEASURE_TRACKING` | `servo_capture.py` | tracking metrics to console + per-motor & combined PNG in `~/printer_data/config/servo_calibrate_results/` (records every motor driving the axis — both lanes on CoreXY) |
-| `SERVO_FIT_DYNAMICS`, `SERVO_CALIBRATE_INERTIA_RATIO` | `servo_fit_dynamics.py` | `~/printer_data/config/servo_dynamics/dynamics_<name>_<stamp>.toml` + C00.06 |
-| `SERVO_CALIBRATE_GAINS` | `servo_gain_report.py` | comparison PNG in `~/printer_data/config/servo_calibrate_results/` |
-| `SERVO_SWEEP_INERTIA` | `servo_inertia_report.py` | comparison PNG in `~/printer_data/config/servo_calibrate_results/` |
-| `SERVO_MEASURE_INERTIA` | — | `.scap` capture only |
+| `SERVO_MEASURE_TRACKING` | `servo-cal analyze` | run dir + `results.json` (per-motor + combined tracking metrics; records every motor driving the axis — both lanes on CoreXY) |
+| `SERVO_CALIBRATE_GAINS` | `servo-cal analyze` | run dir + `results.json` verdict (highest clean gain step) |
+| `SERVO_REFINE_GAIN` | `servo-cal analyze` | run dir + `results.json` verdict |
+| `SERVO_SWEEP_INERTIA` | `servo-cal analyze` | run dir + `results.json` (no automated pick) |
+| `SERVO_SWEEP_ACCEL` | `servo-cal analyze` | run dir + `results.json` verdict (max non-railing accel) |
+| `SERVO_FIT_DYNAMICS`, `SERVO_CALIBRATE_INERTIA_RATIO` | `servo-cal fit` | run dir + `~/printer_data/config/servo_dynamics/dynamics_<name>_<stamp>.toml` + C00.06 |
+| `SERVO_MEASURE_INERTIA` | — | run dir + `.scap` capture only (the building block behind the fit commands) |
 
-All captures land in `~/printer_data/logs/servo_captures/` as
-`<name>_<YYYYmmdd_HHMMSS>.scap`; per-step accelerometer recordings land next
-to them as `<name>_accel_<YYYYmmdd_HHMMSS>.csv`.
+## The manual capture analyzer
 
-## Host scripts
-
-Each script runs standalone (`--help` for the full option list); the commands
-above invoke them with the running klippy interpreter.
-
-- **`servo_capture.py`** — analyze a `.scap`: following-error, overshoot/
-  settling, torque-saturation metrics per drive; `--fft` prints resonance peaks,
-  `--plot` opens a time-series dashboard, `--png` saves one headless (into
-  `--plot-dir`, or `--plot-out PATH`), `--combine-corexy A[:s],B[:s]` with
-  `--axis` renders the CoreXY dashboard — on-axis and cross-axis tracking error
-  with each stroke overlaid, per-motor torque, and moving-vs-stationary axis
-  position; the optional per-motor sign `:-1` un-inverts a servo whose
-  `invert_direction` flips its encoder counts out of the kinematic frame; an
-  AWD belt lists both of its motors joined by `+`
-  (`motor_a:1+motor_a1:1,motor_b:-1+motor_b1:1`) and their mean forms the
-  belt trace,
-  `--drive` restricts to one drive in a multi-drive capture, `--csv` exports
-  samples.
-- **`servo_fit_dynamics.py`** — resolve the newest capture for `--name`, export
-  the fitter CSV, run `servo-ident`, and write the profile TOML (`--structure
-  scalar|corexy`, `--drive` for scalar fits of a multi-drive capture,
-  `--pairs 'a0,a1;b0,b1'` for 4-drive AWD corexy captures — fitted as
-  `corexy-awd` — `--rated-torque-nm`, `--rotor-inertia-kgm2`,
-  `--rotation-distance-mm`, `--out-dir`).
-- **`servo_gain_report.py`** — gain-sweep comparison PNG + metrics table +
-  recommendation (`--tag`, `--steps`); picks up `<step>_accel_*.csv`
-  accelerometer recordings next to each `.scap` and adds a frequency-response
-  + spectrogram row when present (`--require-accel` makes a missing recording
-  an error).
-- **`servo_inertia_report.py`** — inertia-ratio sweep comparison PNG + metrics
-  table, no automated recommendation (`--tag`, `--steps`).
+`scripts/servo_capture.py` remains the standalone single-file `.scap` analyzer
+for ad-hoc inspection (`--help` for the full option list): following-error,
+overshoot/settling, torque-saturation metrics per drive; `--fft` prints
+resonance peaks, `--plot` opens a time-series dashboard, `--png` saves one
+headless, `--combine-corexy A[:s],B[:s]` with `--axis` renders the CoreXY
+dashboard; `--drive` restricts to one drive in a multi-drive capture, `--csv`
+exports samples. The four gain/inertia/refine/accel sweep-report scripts and
+the fit-dynamics wrapper script were deleted — their metrics and verdict logic
+moved into `servo-cal`.

@@ -10,24 +10,49 @@ docs/rewrite/servo-calibration.md.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
-import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from . import servo_strokes
+from .. import structured_log
+from . import servo_param, servo_strokes
 
 ApplyResult = tuple[dict[str, float], list[dict[str, Any]]]
 
-SCRIPTS_DIR = os.path.join(
-    os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    ),
-    "scripts",
+REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
+DEFAULT_CAPTURES_ROOT = "~/printer_data/logs/servo_captures"
+DEFAULT_DYNAMICS_DIR = "~/printer_data/config/servo_dynamics"
+
+_git_rev_cache: str | None = None
+
+
+def _git_rev() -> str:
+    global _git_rev_cache
+    if _git_rev_cache is None:
+        try:
+            _git_rev_cache = (
+                subprocess.check_output(
+                    ["git", "rev-parse", "--short", "HEAD"],
+                    cwd=REPO_ROOT,
+                    stderr=subprocess.DEVNULL,
+                )
+                .decode()
+                .strip()
+            )
+        except Exception:
+            _git_rev_cache = "unknown"
+    return _git_rev_cache
+
+
+def _utc_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
 
 GAIN_PARAMS = {
     "position": (
@@ -114,6 +139,46 @@ class SweepStep:
     name: str
     swept: dict[str, float]
     applied: list[dict[str, Any]]
+    accel: str | None = None
+
+
+@dataclass
+class ExperimentRun:
+    """One experiment's run directory and its manifest, rewritten as steps
+    complete so a crashed run keeps partial truth on disk."""
+
+    run_dir: str
+    stamp: str
+    manifest: dict[str, Any]
+    started_s: float = field(default_factory=time.time)
+
+    @property
+    def manifest_path(self) -> str:
+        return os.path.join(self.run_dir, "manifest.json")
+
+    def step_scap(self, name: str) -> str:
+        return os.path.join(self.run_dir, "step_%s.scap" % (name,))
+
+    def step_accel_csv(self, name: str) -> str:
+        return os.path.join(self.run_dir, "step_%s_accel.csv" % (name,))
+
+    def write(self) -> None:
+        tmp = self.manifest_path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(self.manifest, f, indent=2)
+        os.replace(tmp, self.manifest_path)
+
+    def record_step(self, step: SweepStep) -> None:
+        self.manifest["steps"].append(
+            {
+                "name": step.name,
+                "swept": step.swept,
+                "applied": step.applied,
+                "capture": os.path.basename(self.step_scap(step.name)),
+                "accel": step.accel,
+            }
+        )
+        self.write()
 
 
 class GainSetAdapter:
@@ -260,13 +325,14 @@ class InertiaRatioAdapter:
         )
 
     def _write(self, value: int) -> None:
-        self._cal.gcode.run_script_from_command(
-            "\n".join(
-                "SERVO_PARAM SERVO=%s SET=%s VALUE=%d TYPE=u16"
-                % (servo, self.ADDR, value)
-                for servo in self.servos
+        with servo_param.suppress_write_log():
+            self._cal.gcode.run_script_from_command(
+                "\n".join(
+                    "SERVO_PARAM SERVO=%s SET=%s VALUE=%d TYPE=u16"
+                    % (servo, self.ADDR, value)
+                    for servo in self.servos
+                )
             )
-        )
 
     def apply(self, value: int) -> ApplyResult:
         self._write(value)
@@ -337,9 +403,14 @@ class SweepEngine:
             finally:
                 if aclient is not None:
                     aclient.finish_measurements()
+            step = SweepStep(name, swept, applied)
             if aclient is not None:
-                self._cal._write_accel_csv(gcmd, aclient, accel_chip_name, name)
-            steps.append(SweepStep(name, swept, applied))
+                accel_path = self._cal._write_accel_csv(
+                    gcmd, aclient, accel_chip_name, name
+                )
+                step.accel = os.path.basename(accel_path)
+            self._cal._on_step_complete(step)
+            steps.append(step)
         return steps
 
 
@@ -370,6 +441,14 @@ class ServoCalibration:
         self.accel_chip_name = config.get("accel_chip", None)
         self.dwell_ms = config.getint("dwell_ms", 700, minval=0)
         self.travel_speed = config.getfloat("travel_speed", 100.0, above=0.0)
+        self.captures_root = config.get("captures_root", DEFAULT_CAPTURES_ROOT)
+        self.dynamics_dir = os.path.expanduser(DEFAULT_DYNAMICS_DIR)
+        self.servo_cal_binary = config.get(
+            "servo_cal_binary",
+            os.path.join(REPO_ROOT, "rust", "target", "release", "servo-cal"),
+        )
+        self.journal_params = self._parse_journal_params(config)
+        self._active_run: ExperimentRun | None = None
         self._engine = SweepEngine(self)
         for name in (
             "SERVO_MEASURE_TRACKING",
@@ -393,6 +472,182 @@ class ServoCalibration:
 
     def _kin(self) -> Any:
         return self.printer.lookup_object("toolhead").get_kinematics()
+
+    def _parse_journal_params(
+        self, config: Any
+    ) -> list[tuple[str, str | None]]:
+        entries: list[tuple[str, str | None]] = []
+        for raw in config.getlist("journal_params", []):
+            addr, _sep, type_token = raw.partition(":")
+            addr = addr.strip()
+            type_token = type_token.strip() or None
+            if (
+                type_token is not None
+                and type_token not in servo_param.TYPE_TOKENS
+            ):
+                raise config.error(
+                    "[servo_calibration] journal_params: unknown type %r "
+                    "(use u8/u16/u32/i8/i16/i32)" % (type_token,)
+                )
+            entries.append((addr, type_token))
+        return entries
+
+    def _servo_capture(self) -> Any:
+        return self.printer.lookup_object("servo_capture")
+
+    def _run_dir(self, tag: str) -> tuple[str, str]:
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        root = os.path.expanduser(self.captures_root)
+        run_dir = os.path.join(root, "%s_%s" % (tag, stamp))
+        os.makedirs(run_dir, exist_ok=True)
+        return run_dir, stamp
+
+    def _resolve_motor(self, servo: str) -> Any:
+        from . import servo_axis
+
+        _rail, motor = servo_axis.resolve_servo_motor(
+            self.printer, servo, "SERVO_CALIBRATION"
+        )
+        return motor
+
+    def _motor_manifest(self, motor: Any) -> dict[str, Any]:
+        return {
+            "name": motor.get_motor_name(),
+            "invert": motor.get_invert_direction(),
+            "rotation_distance": motor.get_rotation_distance(),
+            "counts_per_mm": motor.get_counts_per_mm(),
+        }
+
+    def _belts(self, rails: list[Any] | None) -> str | None:
+        if not rails:
+            return None
+        return ",".join(
+            "+".join(
+                "%s:%d"
+                % (
+                    m.get_motor_name(),
+                    -1 if m.get_invert_direction() else 1,
+                )
+                for m in servo_strokes.rail_motors_in_slot_order(r)
+            )
+            for r in rails
+        )
+
+    def _read_journal(
+        self, servo: str, addr: str, type_token: str | None
+    ) -> int:
+        node, slot = self._resolve_node_slot(servo)
+        index, subindex = servo_param.parse_address(addr)
+        size, raw = servo_param.read_param(
+            self.printer, node, slot, index, subindex
+        )
+        if type_token is not None:
+            return servo_param.decode_typed(raw, size, type_token)
+        return raw
+
+    def _ambient(self, gcmd: Any, servos: list[str]) -> dict[str, Any]:
+        journal: dict[str, dict[str, int]] = {}
+        for servo in servos:
+            readings: dict[str, int] = {}
+            for addr, type_token in self.journal_params:
+                try:
+                    readings[addr] = self._read_journal(servo, addr, type_token)
+                except (RuntimeError, ValueError) as e:
+                    raise gcmd.error(
+                        "journal_params readback failed for %s %s: %s"
+                        % (servo, addr, e)
+                    )
+            journal[servo] = readings
+        return {
+            "journal_params": journal,
+            "param_writes_since_last_run": servo_param.drain_param_writes(),
+        }
+
+    def _begin_run(
+        self,
+        gcmd: Any,
+        experiment: str,
+        tag: str,
+        axis: str,
+        servos: list[str],
+        stroke_plan: dict[str, Any],
+        belts_rails: list[Any] | None = None,
+    ) -> ExperimentRun:
+        run_dir, stamp = self._run_dir(tag)
+        kin = self._kin()
+        motors = [self._resolve_motor(s) for s in servos]
+        manifest = {
+            "version": 1,
+            "experiment": experiment,
+            "tag": tag,
+            "created_utc": _utc_now(),
+            "axis": axis,
+            "kinematics": getattr(kin, "kind", None),
+            "git_rev": _git_rev(),
+            "session_id": structured_log.get_session(),
+            "stroke_plan": stroke_plan,
+            "motors": [self._motor_manifest(m) for m in motors],
+            "belts": self._belts(belts_rails),
+            "steps": [],
+            "ambient": self._ambient(gcmd, servos),
+        }
+        run = ExperimentRun(run_dir, stamp, manifest)
+        run.write()
+        structured_log.event(
+            "calibration",
+            "run_start",
+            run_dir=run_dir,
+            experiment=experiment,
+            tag=tag,
+            axis=axis,
+        )
+        self._active_run = run
+        return run
+
+    def _on_step_complete(self, step: SweepStep) -> None:
+        if self._active_run is not None:
+            self._active_run.record_step(step)
+
+    def _servo_cal(self, gcmd: Any) -> str:
+        if not os.path.exists(self.servo_cal_binary):
+            raise gcmd.error(
+                "servo-cal binary not found at %s - build it with: "
+                "cargo build --release -p servo-ident"
+                % (self.servo_cal_binary,)
+            )
+        return self.servo_cal_binary
+
+    def _read_results(self, gcmd: Any, run_dir: str) -> dict[str, Any]:
+        path = os.path.join(run_dir, "results.json")
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (OSError, ValueError) as e:
+            raise gcmd.error(
+                "failed to read results.json from %s: %s" % (run_dir, e)
+            )
+
+    def _analyze_and_report(self, gcmd: Any, run: ExperimentRun) -> None:
+        binary = self._servo_cal(gcmd)
+        self._run(gcmd, [binary, "analyze", run.run_dir], 120.0)
+        results = self._read_results(gcmd, run.run_dir)
+        verdict = results.get("verdict") or {}
+        step = verdict.get("recommended_step")
+        reason = verdict.get("reason") or "no reason given"
+        flags = verdict.get("flags") or []
+        duration_s = round(time.time() - run.started_s, 3)
+        gcmd.respond_info(
+            "verdict: %s (%s) | run %s"
+            % (step if step else "no step", reason, run.run_dir)
+        )
+        structured_log.event(
+            "calibration",
+            "run_done",
+            run_dir=run.run_dir,
+            recommended_step=step,
+            flags=flags,
+            duration_s=duration_s,
+        )
 
     def _floats(self, text: str | None) -> list[float] | None:
         return servo_strokes.parse_floats(text)
@@ -486,12 +741,16 @@ class ServoCalibration:
         self.gcode.run_script_from_command("RESET_VELOCITY_LIMIT")
 
     def _start_capture(self, name: str, servos: list[str]) -> None:
-        self.gcode.run_script_from_command(
-            "SERVO_CAPTURE_START SERVO=%s NAME=%s" % (",".join(servos), name)
+        if self._active_run is None:
+            raise self.printer.command_error(
+                "servo capture requested without an active experiment run"
+            )
+        self._servo_capture().start_capture_to(
+            self._active_run.step_scap(name), servos
         )
 
     def _stop_capture(self) -> None:
-        self.gcode.run_script_from_command("SERVO_CAPTURE_STOP")
+        self._servo_capture().stop_capture()
 
     def _accel_chip(self, gcmd: Any) -> tuple[Any, str | None]:
         chip_name = gcmd.get("ACCEL_CHIP", self.accel_chip_name)
@@ -501,20 +760,13 @@ class ServoCalibration:
 
     def _write_accel_csv(
         self, gcmd: Any, aclient: Any, chip_name: str, step_name: str
-    ) -> None:
+    ) -> str:
         if not aclient.has_valid_samples():
             raise gcmd.error(
                 "accelerometer %r measured no data for step %s"
                 % (chip_name, step_name)
             )
-        from . import servo_capture
-
-        capture_dir = os.path.expanduser(servo_capture.CAPTURE_DIR)
-        os.makedirs(capture_dir, exist_ok=True)
-        path = os.path.join(
-            capture_dir,
-            "%s_accel_%s.csv" % (step_name, time.strftime("%Y%m%d_%H%M%S")),
-        )
+        path = self._active_run.step_accel_csv(step_name)
         with open(path, "w") as f:
             f.write("#time,accel_x,accel_y,accel_z\n")
             for t, accel_x, accel_y, accel_z in aclient.get_samples():
@@ -522,19 +774,18 @@ class ServoCalibration:
                     "%.6f,%.6f,%.6f,%.6f\n" % (t, accel_x, accel_y, accel_z)
                 )
         gcmd.respond_info("Accelerometer data written to %s" % (path,))
+        return path
 
-    def _run(
-        self, gcmd: Any, script: str, args: list[str], timeout: float
-    ) -> None:
+    def _run(self, gcmd: Any, argv: list[str], timeout: float) -> None:
         reactor = self.printer.get_reactor()
-        argv = [sys.executable, os.path.join(SCRIPTS_DIR, script)] + args
+        label = os.path.basename(argv[0])
         try:
             proc = subprocess.Popen(
                 argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
             )
         except Exception:
-            logging.exception("servo_calibration: failed to launch %s", script)
-            raise gcmd.error("Error launching %s" % (script,))
+            logging.exception("servo_calibration: failed to launch %s", label)
+            raise gcmd.error("Error launching %s" % (label,))
         fd = proc.stdout.fileno()
         buf = [""]
 
@@ -551,7 +802,7 @@ class ServoCalibration:
                 pass
 
         hdl = reactor.register_fd(fd, on_readable)
-        gcmd.respond_info("Running %s ..." % (script,))
+        gcmd.respond_info("Running %s ..." % (label,))
         eventtime = reactor.monotonic()
         endtime = eventtime + timeout
         complete = False
@@ -563,7 +814,7 @@ class ServoCalibration:
         reactor.unregister_fd(hdl)
         if not complete:
             proc.terminate()
-            raise gcmd.error("%s timed out after %.0fs" % (script, timeout))
+            raise gcmd.error("%s timed out after %.0fs" % (label, timeout))
         while True:
             data = os.read(fd, 4096).decode()
             if not data:
@@ -573,13 +824,14 @@ class ServoCalibration:
             gcmd.respond_info(buf[0])
         if proc.returncode:
             raise gcmd.error(
-                "%s exited with code %d" % (script, proc.returncode)
+                "%s exited with code %d" % (label, proc.returncode)
             )
 
     cmd_SERVO_MEASURE_TRACKING_help = (
         "Single accel/speed stroke run with capture - the before/after check "
         "for any tuning change. AXIS=X/Y records every motor driving the axis "
-        "(both lanes on CoreXY) and saves a per-motor + combined tracking PNG. "
+        "(both lanes on CoreXY) into a run directory that servo-cal analyzes "
+        "into results.json (per-motor + combined tracking metrics). "
         "AXIS=A/B run a CoreXY 45-degree diagonal that exercises one motor "
         "alone (A=+45 x&y up, motor A; B=-45 x up y down, motor B); SPEED is "
         "the toolhead feedrate, so belt speed is sqrt(2)x SPEED on a diagonal. "
@@ -595,38 +847,44 @@ class ServoCalibration:
         dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
         name = gcmd.get("NAME", "track")
         servos = plan.servos
-        for prep_axis in plan.prep:
-            self._prep(prep_axis, dwell)
-        self._start_capture(name, servos)
-        servo_strokes.emit_strokes(
-            self.gcode,
-            plan.coord,
-            plan.start,
-            plan.end,
-            plan.th_per_unit,
-            speed,
-            accel,
-            iterations,
-            dwell,
-        )
-        self._stop_capture()
-        self._restore()
-        report_args = ["--name", name, "--png"]
         rails = plan.rails
-        if not plan.diagonal and len(rails) == 2 and axis in ("X", "Y"):
-            belts = ",".join(
-                "+".join(
-                    "%s:%d"
-                    % (
-                        m.get_motor_name(),
-                        -1 if m.get_invert_direction() else 1,
-                    )
-                    for m in servo_strokes.rail_motors_in_slot_order(r)
-                )
-                for r in rails
+        belts_rails = (
+            rails
+            if not plan.diagonal and len(rails) == 2 and axis in ("X", "Y")
+            else None
+        )
+        stroke_plan = {
+            "start": plan.start,
+            "end": plan.end,
+            "speed": speed,
+            "accel": accel,
+            "iterations": iterations,
+            "dwell_ms": dwell,
+        }
+        run = self._begin_run(
+            gcmd, "tracking", name, axis, servos, stroke_plan, belts_rails
+        )
+        try:
+            for prep_axis in plan.prep:
+                self._prep(prep_axis, dwell)
+            self._start_capture(name, servos)
+            servo_strokes.emit_strokes(
+                self.gcode,
+                plan.coord,
+                plan.start,
+                plan.end,
+                plan.th_per_unit,
+                speed,
+                accel,
+                iterations,
+                dwell,
             )
-            report_args += ["--axis", axis, "--combine-corexy", belts]
-        self._run(gcmd, "servo_capture.py", report_args, 120.0)
+            self._stop_capture()
+            self._restore()
+            run.record_step(SweepStep(name, {}, []))
+            self._analyze_and_report(gcmd, run)
+        finally:
+            self._active_run = None
 
     cmd_SERVO_MEASURE_INERTIA_help = (
         "Excitation grid for the inertia/friction fit (servo-ident). "
@@ -637,8 +895,49 @@ class ServoCalibration:
         "Y_START Y_END ACCELS SPEEDS ITERATIONS DWELL_MS NAME SERVOS"
     )
 
+    def _grid_stroke_plan(self, gcmd: Any) -> dict[str, Any]:
+        accels, speeds, iterations, dwell = servo_strokes.grid(
+            gcmd, self.accels, self.speeds, self.iterations, self.dwell_ms
+        )
+        return {
+            "speeds": speeds,
+            "accels": accels,
+            "iterations": iterations,
+            "dwell_ms": dwell,
+        }
+
+    def _grid_servos(
+        self, gcmd: Any, kin: Any
+    ) -> tuple[list[str], list[Any] | None, str]:
+        if kin.coupled_xy():
+            override = gcmd.get("SERVOS", None)
+            if override is None:
+                servos = servo_strokes.axis_servos(gcmd, kin, "X")
+            else:
+                servos = [s.strip() for s in override.split(",") if s.strip()]
+            return servos, servo_strokes.axis_rails(gcmd, kin, "X"), "X"
+        self._reject_corexy_only_params(gcmd)
+        axis = gcmd.get("AXIS", "X").upper()
+        return servo_strokes.axis_servos(gcmd, kin, axis), None, axis
+
     def cmd_SERVO_MEASURE_INERTIA(self, gcmd: Any) -> None:
-        self._measure_inertia(gcmd, gcmd.get("NAME", "ident"))
+        name = gcmd.get("NAME", "ident")
+        kin = self._kin()
+        servos, belts_rails, axis = self._grid_servos(gcmd, kin)
+        self._begin_run(
+            gcmd,
+            "inertia_grid",
+            name,
+            axis,
+            servos,
+            self._grid_stroke_plan(gcmd),
+            belts_rails,
+        )
+        try:
+            self._measure_inertia(gcmd, name)
+            self._active_run.record_step(SweepStep(name, {}, []))
+        finally:
+            self._active_run = None
 
     def _measure_inertia(self, gcmd: Any, name: str) -> None:
         kin = self._kin()
@@ -706,36 +1005,112 @@ class ServoCalibration:
         "Params as SERVO_MEASURE_INERTIA plus TORQUE_NM INERTIA_KGM2 DRIVE"
     )
 
-    def _fit_dynamics_args(self, gcmd: Any, name: str) -> list[str]:
+    def _fit_plan(self, gcmd: Any) -> dict[str, Any]:
         kin = self._kin()
         if kin.coupled_xy():
             layout = servo_strokes.corexy_fit_layout(gcmd, kin)
             servo_strokes.check_servos_override(gcmd, layout)
-            self._measure_inertia_corexy(gcmd, name, servos=layout["servos"])
-            args = ["--name", name, "--structure", "corexy"]
-            if layout["pairs"] is not None:
-                args += ["--pairs", layout["pairs"]]
-            return args
+            return {
+                "corexy": True,
+                "servos": layout["servos"],
+                "axes": layout["servos"],
+                "structure": "corexy-awd" if layout["pairs"] else "corexy",
+                "axis": "X",
+                "rails": servo_strokes.axis_rails(gcmd, kin, "X"),
+            }
         self._reject_corexy_only_params(gcmd)
+        axis = gcmd.get("AXIS", "X").upper()
         drive = servo_strokes.scalar_fit_drive(gcmd, kin)
-        self._measure_inertia(gcmd, name)
-        args = ["--name", name]
-        if drive is not None:
-            args += ["--drive", drive]
-        return args
+        servos = servo_strokes.axis_servos(gcmd, kin, axis)
+        return {
+            "corexy": False,
+            "servos": servos,
+            "axes": [drive if drive is not None else servos[0]],
+            "structure": "scalar",
+            "axis": axis,
+            "rails": None,
+        }
+
+    def _rotation_distance(self, gcmd: Any, servos: list[str]) -> float:
+        distances = {
+            self._resolve_motor(s).get_rotation_distance() for s in servos
+        }
+        if len(distances) != 1:
+            raise gcmd.error(
+                "drives disagree on rotation_distance (%s); cannot fit"
+                % (sorted(distances),)
+            )
+        return distances.pop()
+
+    def _dynamics_out_path(
+        self, gcmd: Any, run: ExperimentRun, name: str
+    ) -> str:
+        os.makedirs(self.dynamics_dir, exist_ok=True)
+        path = os.path.join(
+            self.dynamics_dir, "dynamics_%s_%s.toml" % (name, run.stamp)
+        )
+        if os.path.exists(path):
+            raise gcmd.error(
+                "dynamics profile %s already exists (never overwritten)"
+                % (path,)
+            )
+        return path
+
+    def _run_fit(
+        self,
+        gcmd: Any,
+        name: str,
+        torque: float | None,
+        inertia: float | None,
+    ) -> None:
+        plan = self._fit_plan(gcmd)
+        run = self._begin_run(
+            gcmd,
+            "inertia_grid",
+            name,
+            plan["axis"],
+            plan["servos"],
+            self._grid_stroke_plan(gcmd),
+            plan["rails"],
+        )
+        try:
+            if plan["corexy"]:
+                self._measure_inertia_corexy(gcmd, name, servos=plan["servos"])
+            else:
+                self._measure_inertia(gcmd, name)
+            run.record_step(SweepStep(name, {}, []))
+            out_path = self._dynamics_out_path(gcmd, run, name)
+            argv = [
+                self._servo_cal(gcmd),
+                "fit",
+                "--capture",
+                run.step_scap(name),
+                "--structure",
+                plan["structure"],
+                "--axes",
+                ",".join(plan["axes"]),
+                "--out",
+                out_path,
+                "--rotation-distance-mm",
+                "%g" % (self._rotation_distance(gcmd, plan["servos"]),),
+            ]
+            if torque is not None:
+                argv += [
+                    "--rated-torque-nm",
+                    "%g" % (torque,),
+                    "--rotor-inertia-kgm2",
+                    "%g" % (inertia,),
+                ]
+            self._run(gcmd, argv, 120.0)
+            gcmd.respond_info(
+                "dynamics profile: %s | run %s" % (out_path, run.run_dir)
+            )
+        finally:
+            self._active_run = None
 
     def cmd_SERVO_FIT_DYNAMICS(self, gcmd: Any) -> None:
-        name = gcmd.get("NAME", "ident")
         torque, inertia = self._motor(gcmd, required=False)
-        args = self._fit_dynamics_args(gcmd, name)
-        if torque is not None:
-            args += [
-                "--rated-torque-nm",
-                "%g" % (torque,),
-                "--rotor-inertia-kgm2",
-                "%g" % (inertia,),
-            ]
-        self._run(gcmd, "servo_fit_dynamics.py", args, 120.0)
+        self._run_fit(gcmd, gcmd.get("NAME", "ident"), torque, inertia)
 
     cmd_SERVO_CALIBRATE_INERTIA_RATIO_help = (
         "Step 2 of servo tuning - identify the load inertia and print the "
@@ -748,16 +1123,8 @@ class ServoCalibration:
     )
 
     def cmd_SERVO_CALIBRATE_INERTIA_RATIO(self, gcmd: Any) -> None:
-        name = gcmd.get("NAME", "inertia")
         torque, inertia = self._motor(gcmd, required=True)
-        args = self._fit_dynamics_args(gcmd, name)
-        args += [
-            "--rated-torque-nm",
-            "%g" % (torque,),
-            "--rotor-inertia-kgm2",
-            "%g" % (inertia,),
-        ]
-        self._run(gcmd, "servo_fit_dynamics.py", args, 120.0)
+        self._run_fit(gcmd, gcmd.get("NAME", "inertia"), torque, inertia)
 
     def _write_gains(
         self, servos: list[str], pos_gain: int, speed_gain: int, integral: int
@@ -772,7 +1139,8 @@ class ServoCalibration:
                 "SERVO_PARAM SERVO=%s SET=0x2001.0x03 VALUE=%d TYPE=u16"
                 % (servo, integral),
             ]
-        self.gcode.run_script_from_command("\n".join(lines))
+        with servo_param.suppress_write_log():
+            self.gcode.run_script_from_command("\n".join(lines))
 
     def _gain_write_records(
         self, servos: list[str], pos_gain: int, speed_gain: int, integral: int
@@ -895,6 +1263,12 @@ class ServoCalibration:
         for servo in servos:
             self._show_tuning(servo)
 
+    def _corexy_rails(self, gcmd: Any, axis: str) -> list[Any] | None:
+        kin = self._kin()
+        if kin.coupled_xy() and axis in ("X", "Y"):
+            return servo_strokes.axis_rails(gcmd, kin, axis)
+        return None
+
     def _run_sweep_with_revert(
         self,
         adapter: Any,
@@ -916,11 +1290,12 @@ class ServoCalibration:
         "Gain sweep, shaper-calibrate style. Resolves every servo driving "
         "AXIS (both drives on CoreXY), writes each SPEED_GAINS entry (0.1 Hz "
         "units, comma list) to all of them, one capture per step of all "
-        "drives, renders a comparison PNG and prints a recommendation. "
+        "drives into a run directory, then servo-cal analyzes it into "
+        "results.json with a typed verdict (the recommended step). "
         "With an accelerometer (accel_chip config option or ACCEL_CHIP=) "
-        "each step also records vibration data and the report gains a "
-        "frequency-response + spectrogram row. Reverts to the lowest gains "
-        "afterwards. Params SPEED_GAINS AXIS START END SPEED ACCEL "
+        "each step also records vibration data next to its capture. Reverts "
+        "to the lowest gains afterwards. Params SPEED_GAINS AXIS START END "
+        "SPEED ACCEL "
         "ITERATIONS DWELL_MS TAG ACCEL_CHIP SERVO (comma list override)"
     )
 
@@ -941,38 +1316,47 @@ class ServoCalibration:
                 )
         sgains = [int(sg) for sg in sgains]
         chip, chip_name = self._accel_chip(gcmd)
-        self._prep(axis, dwell)
-        self._set_manual_tuning(servos)
-        adapter = GainSetAdapter(self, servos, tag)
-        steps = self._engine.run(
-            adapter,
-            sgains,
-            servos,
-            lambda sg: self._strokes(
-                axis, start, end, speed, accel, iterations, dwell
-            ),
+        stroke_plan = {
+            "start": start,
+            "end": end,
+            "speed": speed,
+            "accel": accel,
+            "iterations": iterations,
+            "dwell_ms": dwell,
+        }
+        run = self._begin_run(
             gcmd,
-            accel_chip=chip,
-            accel_chip_name=chip_name,
-        )
-        sg0 = sgains[0]
-        gcmd.respond_info(
-            "sweep done - reverting to first step (%.1f Hz) until you apply "
-            "the recommendation" % (sg0 / 10.0,)
-        )
-        adapter.revert(sgains)
-        self._restore()
-        report_args = [
-            "--tag",
+            "gain_sweep",
             tag,
-            "--steps",
-            ",".join(s.name for s in steps),
-            "--axis",
             axis,
-        ]
-        if chip is not None:
-            report_args.append("--require-accel")
-        self._run(gcmd, "servo_gain_report.py", report_args, 120.0)
+            servos,
+            stroke_plan,
+            self._corexy_rails(gcmd, axis),
+        )
+        adapter = GainSetAdapter(self, servos, tag)
+        try:
+            self._prep(axis, dwell)
+            self._set_manual_tuning(servos)
+            steps = self._engine.run(
+                adapter,
+                sgains,
+                servos,
+                lambda sg: self._strokes(
+                    axis, start, end, speed, accel, iterations, dwell
+                ),
+                gcmd,
+                accel_chip=chip,
+                accel_chip_name=chip_name,
+            )
+            gcmd.respond_info(
+                "sweep done - reverting to first step (%.1f Hz) until you "
+                "apply the recommendation" % (sgains[0] / 10.0,)
+            )
+            adapter.revert(sgains)
+            self._restore()
+            self._analyze_and_report(gcmd, run)
+        finally:
+            self._active_run = None
         return steps
 
     cmd_SERVO_REFINE_GAIN_help = (
@@ -983,7 +1367,8 @@ class ServoCalibration:
         "(default +-30%% in 5 steps, always including the current value). "
         "Writes each step to EVERY drive on AXIS (both CoreXY lanes), one "
         "capture per step, restores the original gains afterwards (also on "
-        "failure), then renders the comparison. Params PARAM AXIS VALUES SPAN "
+        "failure), then servo-cal analyzes the run into results.json. Params "
+        "PARAM AXIS VALUES SPAN "
         "STEPS CURRENT START END SPEED ACCEL ITERATIONS DWELL_MS TAG SERVO "
         "(comma list override)"
     )
@@ -1013,8 +1398,23 @@ class ServoCalibration:
             validate_gain_values(values, param)
         except ValueError as e:
             raise gcmd.error("SERVO_REFINE_GAIN: %s" % (e,))
-        self._prep(axis, dwell)
-        self._set_manual_tuning(servos)
+        stroke_plan = {
+            "start": start,
+            "end": end,
+            "speed": speed,
+            "accel": accel,
+            "iterations": iterations,
+            "dwell_ms": dwell,
+        }
+        run = self._begin_run(
+            gcmd,
+            "refine_sweep",
+            tag,
+            axis,
+            servos,
+            stroke_plan,
+            self._corexy_rails(gcmd, axis),
+        )
         adapter = SingleGainAdapter(self, servos, param, tag, gains, current)
 
         def on_revert() -> None:
@@ -1028,38 +1428,30 @@ class ServoCalibration:
                 )
             )
 
-        steps = self._run_sweep_with_revert(
-            adapter,
-            values,
-            servos,
-            lambda v: self._strokes(
-                axis, start, end, speed, accel, iterations, dwell
-            ),
-            gcmd,
-            on_revert,
-        )
-        self._run(
-            gcmd,
-            "servo_refine_report.py",
-            [
-                "--param",
-                param,
-                "--tag",
-                tag,
-                "--steps",
-                ",".join(s.name for s in steps),
-                "--reference",
-                "%d" % (current,),
-            ],
-            120.0,
-        )
+        try:
+            self._prep(axis, dwell)
+            self._set_manual_tuning(servos)
+            steps = self._run_sweep_with_revert(
+                adapter,
+                values,
+                servos,
+                lambda v: self._strokes(
+                    axis, start, end, speed, accel, iterations, dwell
+                ),
+                gcmd,
+                on_revert,
+            )
+            self._analyze_and_report(gcmd, run)
+        finally:
+            self._active_run = None
         return steps
 
     cmd_SERVO_SWEEP_INERTIA_help = (
         "Empirical inertia sweep, gain-sweep style. Resolves every servo "
         "driving AXIS (both drives on CoreXY), writes each C00.06 ratio in "
         "RATIOS (percent, comma list) identically to all of them, one capture "
-        "per step of all drives, renders a comparison PNG. Restores the "
+        "per step of all drives into a run directory, then servo-cal analyzes "
+        "it into results.json. Restores the "
         "original ratio afterwards (also on failure). Params RATIOS AXIS "
         "START END SPEED ACCEL ITERATIONS DWELL_MS TAG SERVO (comma list "
         "override)"
@@ -1085,7 +1477,23 @@ class ServoCalibration:
                 ratios.append(rv)
         ratios.sort()
         original = self._read_param(servos[0], INERTIA_RATIO_ADDR)
-        self._prep(axis, dwell)
+        stroke_plan = {
+            "start": start,
+            "end": end,
+            "speed": speed,
+            "accel": accel,
+            "iterations": iterations,
+            "dwell_ms": dwell,
+        }
+        run = self._begin_run(
+            gcmd,
+            "inertia_sweep",
+            tag,
+            axis,
+            servos,
+            stroke_plan,
+            self._corexy_rails(gcmd, axis),
+        )
         adapter = InertiaRatioAdapter(self, servos, tag, original)
 
         def on_revert() -> None:
@@ -1094,35 +1502,33 @@ class ServoCalibration:
                 % (original, ", ".join(servos))
             )
 
-        steps = self._run_sweep_with_revert(
-            adapter,
-            ratios,
-            servos,
-            lambda rv: self._strokes(
-                axis, start, end, speed, accel, iterations, dwell
-            ),
-            gcmd,
-            on_revert,
-        )
-        self._run(
-            gcmd,
-            "servo_inertia_report.py",
-            ["--tag", tag, "--steps", ",".join(s.name for s in steps)],
-            120.0,
-        )
+        try:
+            self._prep(axis, dwell)
+            steps = self._run_sweep_with_revert(
+                adapter,
+                ratios,
+                servos,
+                lambda rv: self._strokes(
+                    axis, start, end, speed, accel, iterations, dwell
+                ),
+                gcmd,
+                on_revert,
+            )
+            self._analyze_and_report(gcmd, run)
+        finally:
+            self._active_run = None
         return steps
 
     cmd_SERVO_SWEEP_ACCEL_help = (
         "Accel sweep to find the max non-saturating acceleration. Runs one "
         "capture of strokes per ACCELS entry (mm/s^2, comma list, toolhead "
-        "frame) named <TAG>_a<ACCEL>, then renders a torque-saturation report. "
+        "frame) named step_<TAG>_a<ACCEL>, then servo-cal analyzes the run "
+        "into results.json (verdict: the highest non-railing accel). "
         "AXIS=X/Y strokes a single axis; AXIS=A/B strokes a CoreXY diagonal so "
         "one motor carries the whole load (belt accel is sqrt(2)x on a "
         "diagonal). Restores the velocity limit afterwards (also on failure). "
-        "TORQUE_LIMIT is the drive's available-torque ceiling in per-mille "
-        "of rated (default 1400); samples at/above it count as railed. "
-        "Params ACCELS AXIS SPEED START END ITERATIONS DWELL_MS TAG "
-        "TORQUE_LIMIT"
+        "servo-cal flags samples at/above its 1400 per-mille torque ceiling "
+        "as railed. Params ACCELS AXIS SPEED START END ITERATIONS DWELL_MS TAG"
     )
 
     def cmd_SERVO_SWEEP_ACCEL(self, gcmd: Any) -> list[SweepStep]:
@@ -1144,8 +1550,23 @@ class ServoCalibration:
                 accels.append(av)
         accels.sort()
         servos = plan.servos
-        for prep_axis in plan.prep:
-            self._prep(prep_axis, dwell)
+        stroke_plan = {
+            "start": plan.start,
+            "end": plan.end,
+            "speed": speed,
+            "accel": None,
+            "iterations": iterations,
+            "dwell_ms": dwell,
+        }
+        run = self._begin_run(
+            gcmd,
+            "accel_sweep",
+            tag,
+            axis,
+            servos,
+            stroke_plan,
+            self._corexy_rails(gcmd, axis),
+        )
         adapter = MotionAccelAdapter(tag)
 
         def run_step(av: int) -> None:
@@ -1162,23 +1583,17 @@ class ServoCalibration:
             )
 
         try:
-            steps = self._engine.run(adapter, accels, servos, run_step, gcmd)
+            for prep_axis in plan.prep:
+                self._prep(prep_axis, dwell)
+            try:
+                steps = self._engine.run(
+                    adapter, accels, servos, run_step, gcmd
+                )
+            finally:
+                self._restore()
+            self._analyze_and_report(gcmd, run)
         finally:
-            self._restore()
-        torque_limit = gcmd.get_int("TORQUE_LIMIT", 1400, minval=1)
-        self._run(
-            gcmd,
-            "servo_accel_report.py",
-            [
-                "--tag",
-                tag,
-                "--steps",
-                ",".join(s.name for s in steps),
-                "--torque-limit",
-                "%d" % (torque_limit,),
-            ],
-            120.0,
-        )
+            self._active_run = None
         return steps
 
     cmd_SERVO_SET_STIFFNESS_help = (

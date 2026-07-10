@@ -1,4 +1,6 @@
+import contextlib
 import os
+import time
 
 TYPE_TOKENS = {
     "u8": (1, 0, 0xFF),
@@ -149,6 +151,44 @@ def format_value(index, subindex, size, raw, type_token):
     )
 
 
+_PARAM_WRITES = []
+_WRITE_LOG_SUPPRESSED = 0
+
+
+@contextlib.contextmanager
+def suppress_write_log():
+    """Machinery-issued SERVO_PARAM writes (sweep adapters applying their own
+    step values) are part of the run that issues them, not a change the user
+    made between runs — keep them out of the between-runs journal."""
+    global _WRITE_LOG_SUPPRESSED
+    _WRITE_LOG_SUPPRESSED += 1
+    try:
+        yield
+    finally:
+        _WRITE_LOG_SUPPRESSED -= 1
+
+
+def record_param_write(servo, addr, value):
+    """Log a successful SERVO_PARAM SET so the next calibration run can record
+    what changed since it last ran (session-scoped, drained at run start)."""
+    if _WRITE_LOG_SUPPRESSED:
+        return
+    _PARAM_WRITES.append(
+        {
+            "servo": servo,
+            "addr": addr,
+            "value": value,
+            "time_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+    )
+
+
+def drain_param_writes():
+    writes = list(_PARAM_WRITES)
+    _PARAM_WRITES.clear()
+    return writes
+
+
 def read_param(printer, node, slot, index, subindex):
     """Resolve node's engine handle and read one SDO object. Shared by
     cmd_SERVO_PARAM and any other extra that needs a drive readback."""
@@ -187,7 +227,8 @@ class ServoParam:
         return node, node.get_slot_for_motor(motor.get_motor_name())
 
     def cmd_SERVO_PARAM(self, gcmd):
-        node, slot = self._resolve_node(gcmd.get("SERVO"))
+        servo_name = gcmd.get("SERVO")
+        node, slot = self._resolve_node(servo_name)
         get_addr = gcmd.get("GET", None)
         set_addr = gcmd.get("SET", None)
         if (get_addr is None) == (set_addr is None):
@@ -223,6 +264,7 @@ class ServoParam:
                 settled = format_value(
                     index, subindex, rb_size, rb_raw, type_token
                 )
+                record_param_write(servo_name, set_addr, value)
                 gcmd.respond_info("set " + settled)
         except ValueError as e:
             raise gcmd.error("SERVO_PARAM: %s" % (e,))

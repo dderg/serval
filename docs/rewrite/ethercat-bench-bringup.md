@@ -264,15 +264,15 @@ N drives time-aligned on the shared 1 kHz DC cycle (a future CoreXY axis expands
 to multiple slots with no format change). A single-drive capture is byte-identical
 to the pre-multi-drive layout.
 
-The analysis tools select a drive by name with `--drive <motor>` (defaulting to
-the first drive in the file): `scripts/servo_capture.py --drive <motor>`,
-`servo_gain_report.py --drive <motor>`, and `servo_fit_dynamics.py --drive
-<motor>`. `SERVO_FIT_DYNAMICS AXIS=<axis>` works unchanged on a multi-drive node.
+The analysis tools select a drive by name (defaulting to the first drive in the
+file): `scripts/servo_capture.py --drive <motor>` for a single manual capture,
+and `servo-cal fit --axes <motor>` for the dynamics fit. `SERVO_FIT_DYNAMICS
+AXIS=<axis>` works unchanged on a multi-drive node.
 
 Each `.scap` header drive entry records the drive's `counts_per_mm` and
-`rotation_distance`, so `servo_fit_dynamics` derives the rotation distance the
-C00.06 recommendation needs from the capture itself — no `ROT_DIST` to pass
-(a wrong/default one silently scales the inertia-ratio recommendation).
+`rotation_distance`; `SERVO_FIT_DYNAMICS` resolves the rotation distance the
+C00.06 recommendation needs from the `[motor]` config and passes it to
+`servo-cal fit` as `--rotation-distance-mm`.
 
 ## Real-time scheduling — mandatory (the ErC1.1 / "ErC11" trap)
 
