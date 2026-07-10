@@ -9,6 +9,7 @@ import math
 import os
 import subprocess
 import sys
+import time
 
 SCRIPTS_DIR = os.path.join(
     os.path.dirname(
@@ -110,6 +111,7 @@ class ServoCalibration:
         self.accels = config.getfloatlist("accels", [5000.0, 10000.0, 20000.0])
         self.speeds = config.getfloatlist("speeds", [100.0, 400.0])
         self.iterations = config.getint("iterations", 3, minval=1)
+        self.accel_chip_name = config.get("accel_chip", None)
         self.dwell_ms = config.getint("dwell_ms", 700, minval=0)
         self.travel_speed = config.getfloat("travel_speed", 100.0, above=0.0)
         for name in (
@@ -445,6 +447,34 @@ class ServoCalibration:
 
     def _restore(self):
         self.gcode.run_script_from_command("RESET_VELOCITY_LIMIT")
+
+    def _accel_chip(self, gcmd):
+        chip_name = gcmd.get("ACCEL_CHIP", self.accel_chip_name)
+        if chip_name is None:
+            return None, None
+        return self.printer.lookup_object(chip_name.strip()), chip_name
+
+    def _write_accel_csv(self, gcmd, aclient, chip_name, step_name):
+        if not aclient.has_valid_samples():
+            raise gcmd.error(
+                "accelerometer %r measured no data for step %s"
+                % (chip_name, step_name)
+            )
+        from . import servo_capture
+
+        capture_dir = os.path.expanduser(servo_capture.CAPTURE_DIR)
+        os.makedirs(capture_dir, exist_ok=True)
+        path = os.path.join(
+            capture_dir,
+            "%s_accel_%s.csv" % (step_name, time.strftime("%Y%m%d_%H%M%S")),
+        )
+        with open(path, "w") as f:
+            f.write("#time,accel_x,accel_y,accel_z\n")
+            for t, accel_x, accel_y, accel_z in aclient.get_samples():
+                f.write(
+                    "%.6f,%.6f,%.6f,%.6f\n" % (t, accel_x, accel_y, accel_z)
+                )
+        gcmd.respond_info("Accelerometer data written to %s" % (path,))
 
     def _run(self, gcmd, script, args, timeout):
         reactor = self.printer.get_reactor()
@@ -874,9 +904,11 @@ class ServoCalibration:
         "AXIS (both drives on CoreXY), writes each SPEED_GAINS entry (0.1 Hz "
         "units, comma list) to all of them, one capture per step of all "
         "drives, renders a comparison PNG and prints a recommendation. "
-        "Reverts to the lowest gains afterwards. Params SPEED_GAINS AXIS "
-        "START END SPEED ACCEL ITERATIONS DWELL_MS TAG SERVO (comma list "
-        "override)"
+        "With an accelerometer (accel_chip config option or ACCEL_CHIP=) "
+        "each step also records vibration data and the report gains a "
+        "frequency-response + spectrogram row. Reverts to the lowest gains "
+        "afterwards. Params SPEED_GAINS AXIS START END SPEED ACCEL "
+        "ITERATIONS DWELL_MS TAG ACCEL_CHIP SERVO (comma list override)"
     )
 
     def cmd_SERVO_CALIBRATE_GAINS(self, gcmd):
@@ -895,6 +927,7 @@ class ServoCalibration:
                     "SPEED_GAIN %d outside 100..3000 (0.1 Hz units)" % (sg,)
                 )
         sgains = [int(sg) for sg in sgains]
+        chip, chip_name = self._accel_chip(gcmd)
         self._prep(axis, dwell)
         self._set_manual_tuning(servos)
         step_names = []
@@ -919,8 +952,15 @@ class ServoCalibration:
                 "SERVO_CAPTURE_START SERVO=%s NAME=%s"
                 % (",".join(servos), step_names[-1])
             )
-            self._strokes(axis, start, end, speed, accel, iterations, dwell)
-            self.gcode.run_script_from_command("SERVO_CAPTURE_STOP")
+            aclient = None if chip is None else chip.start_internal_client()
+            try:
+                self._strokes(axis, start, end, speed, accel, iterations, dwell)
+                self.gcode.run_script_from_command("SERVO_CAPTURE_STOP")
+            finally:
+                if aclient is not None:
+                    aclient.finish_measurements()
+            if aclient is not None:
+                self._write_accel_csv(gcmd, aclient, chip_name, step_names[-1])
         sg0 = sgains[0]
         gcmd.respond_info(
             "sweep done - reverting to first step (%.1f Hz) until you apply "
@@ -928,19 +968,17 @@ class ServoCalibration:
         )
         self._write_gains(servos, round(sg0 * 1.6), sg0, round(1250000 / sg0))
         self._restore()
-        self._run(
-            gcmd,
-            "servo_gain_report.py",
-            [
-                "--tag",
-                tag,
-                "--steps",
-                ",".join(step_names),
-                "--axis",
-                axis,
-            ],
-            120.0,
-        )
+        report_args = [
+            "--tag",
+            tag,
+            "--steps",
+            ",".join(step_names),
+            "--axis",
+            axis,
+        ]
+        if chip is not None:
+            report_args.append("--require-accel")
+        self._run(gcmd, "servo_gain_report.py", report_args, 120.0)
 
     cmd_SERVO_REFINE_GAIN_help = (
         "1-D sensitivity sweep of a single drive gain around the current "
