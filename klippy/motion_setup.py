@@ -208,7 +208,9 @@ def read_limits(motion, config):
         axes = [a.strip().lower() for a in sc.getlist("axes")]
         v = sc.getfloat("max_velocity", None, above=0.0)
         a = sc.getfloat("max_accel", None, above=0.0)
-        j = sc.getfloat("max_jerk", None, above=0.0)
+        j = sc.getfloat("max_jerk", None, minval=0.0)
+        if j == 0.0:
+            j = float("inf")
         motion.limit_sections.append(LimitSection(name, axes, v, a, j))
     motion.min_cruise_ratio = 0.0
     motion.orig_cfg = {}

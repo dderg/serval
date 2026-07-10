@@ -404,6 +404,15 @@ fn apply_axis_chain(
     let last_t = base.last().map_or(first_t, |seg| seg.t_end);
     let signal_segments: Vec<&ShapedSegment> = history.iter().chain(base.iter()).collect();
     let input_breaks = signal_breakpoints(&signal_segments, axis);
+    let table = AxisSignalTable::build(
+        &signal_segments,
+        axis,
+        first_t,
+        last_t,
+        at_stream_boundary,
+        force,
+    );
+    let sig = ShapedSignal::new_from_evaluator(kernel, |t| table.eval(t), input_breaks);
     for seg in out.iter_mut() {
         let need_lo = seg.t_start - k_hi;
         let need_hi = seg.t_end - k_lo;
@@ -413,21 +422,6 @@ fn apply_axis_chain(
         if need_hi > last_t && !force {
             return Err(PostProcessError::MissingLookahead { axis, t: need_hi });
         }
-        let sig = ShapedSignal::new_from_evaluator(
-            kernel,
-            |t| {
-                eval_axis_with_edges(
-                    &signal_segments,
-                    axis,
-                    t,
-                    first_t,
-                    last_t,
-                    at_stream_boundary,
-                    force,
-                )
-            },
-            input_breaks.clone(),
-        );
         seg.axes[axis] = fit_axis_from_signal(axis, &seg.axes[axis], &sig)?;
         if !seg.axes[axis]
             .control_points()
@@ -457,46 +451,101 @@ fn signal_breakpoints(segments: &[&ShapedSegment], axis: usize) -> Vec<f64> {
     breaks
 }
 
-fn eval_axis_with_edges(
-    segments: &[&ShapedSegment],
-    axis: usize,
-    t: f64,
+/// One axis of the emit window, flattened to time-sorted monomial pieces so
+/// the convolution's Gauss sampling evaluates by binary search plus Horner
+/// instead of a de Boor pass per sample. Semantics match the NURBS window it
+/// is built from: before `first_t` the signal clamps at a stream boundary
+/// and is otherwise missing (NaN, surfaced as `MissingHistory`); past
+/// `last_t` it clamps under a drain flush and is otherwise missing; a time
+/// gap between segments holds the value the preceding piece ends at.
+pub(crate) struct AxisSignalTable {
+    starts: Vec<f64>,
+    ends: Vec<f64>,
+    coeffs: Vec<Vec<f64>>,
     first_t: f64,
     last_t: f64,
     at_stream_boundary: bool,
     force: bool,
-) -> f64 {
-    if t < first_t {
-        if !at_stream_boundary {
-            return f64::NAN;
-        }
-        return eval_segment_axis(segments.first().expect("non-empty base"), axis, first_t);
-    }
-    if t > last_t {
-        if !force {
-            return f64::NAN;
-        }
-        return eval_segment_axis(segments.last().expect("non-empty base"), axis, last_t);
+}
+
+impl AxisSignalTable {
+    fn build(
+        segments: &[&ShapedSegment],
+        axis: usize,
+        first_t: f64,
+        last_t: f64,
+        at_stream_boundary: bool,
+        force: bool,
+    ) -> Self {
+        Self::from_tracks(
+            segments.iter().map(|seg| &seg.axes[axis]),
+            first_t,
+            last_t,
+            at_stream_boundary,
+            force,
+        )
     }
 
-    let mut idx = segments.partition_point(|seg| seg.t_end + SEGMENT_TIME_EPS_S < t);
-    if idx >= segments.len() {
-        idx = segments.len().saturating_sub(1);
-    }
-    let start = idx.saturating_sub(1);
-    let end = (idx + 2).min(segments.len());
-    for seg in &segments[start..end] {
-        if t >= seg.t_start - SEGMENT_TIME_EPS_S && t <= seg.t_end + SEGMENT_TIME_EPS_S {
-            return eval_segment_axis(seg, axis, t);
+    pub(crate) fn from_tracks<'a>(
+        tracks: impl IntoIterator<Item = &'a nurbs::ScalarNurbs>,
+        first_t: f64,
+        last_t: f64,
+        at_stream_boundary: bool,
+        force: bool,
+    ) -> Self {
+        let mut table = Self {
+            starts: Vec::new(),
+            ends: Vec::new(),
+            coeffs: Vec::new(),
+            first_t,
+            last_t,
+            at_stream_boundary,
+            force,
+        };
+        for track in tracks {
+            for p in extract_bezier_pieces(track) {
+                table.starts.push(p.u_start);
+                table.ends.push(p.u_end);
+                table.coeffs.push(p.coeffs);
+            }
         }
+        assert!(!table.coeffs.is_empty(), "empty signal window");
+        table
     }
-    if idx > 0 && segments[idx].t_start > t {
-        return eval_segment_axis(segments[idx - 1], axis, segments[idx - 1].t_end);
+
+    fn piece_at(&self, i: usize, t: f64) -> f64 {
+        let tau = (t - self.starts[i]).clamp(0.0, self.ends[i] - self.starts[i]);
+        self.coeffs[i]
+            .iter()
+            .rev()
+            .fold(0.0_f64, |acc, &c| acc.mul_add(tau, c))
     }
-    if force && (t - last_t).abs() <= SEGMENT_TIME_EPS_S {
-        return eval_segment_axis(segments.last().expect("non-empty base"), axis, last_t);
+
+    pub(crate) fn eval(&self, t: f64) -> f64 {
+        if t < self.first_t {
+            if !self.at_stream_boundary {
+                return f64::NAN;
+            }
+            return self.piece_at(0, self.first_t);
+        }
+        if t > self.last_t {
+            if !self.force {
+                return f64::NAN;
+            }
+            return self.piece_at(self.coeffs.len() - 1, self.last_t);
+        }
+        let i = self
+            .ends
+            .partition_point(|&e| e + SEGMENT_TIME_EPS_S < t)
+            .min(self.coeffs.len() - 1);
+        if t >= self.starts[i] - SEGMENT_TIME_EPS_S {
+            return self.piece_at(i, t);
+        }
+        if i > 0 {
+            return self.piece_at(i - 1, self.ends[i - 1]);
+        }
+        f64::NAN
     }
-    f64::NAN
 }
 
 /// A time gap in the signal is evaluated as the position held at the

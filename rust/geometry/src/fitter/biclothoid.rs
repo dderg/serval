@@ -17,6 +17,9 @@ const DEGENERATE_EPS: f64 = 1e-12;
 const HERMITE_POS_TOL: f64 = 1e-12;
 const HERMITE_ANG_TOL_RAD: f64 = 1e-12;
 const HERMITE_MAX_ITERS: usize = 60;
+/// Consecutive accepted Newton steps that fail to at least halve the squared
+/// residual before the seed is abandoned as non-convergent.
+const WEAK_STREAK_LIMIT: u32 = 12;
 
 /// Blend a line-line corner at `vertex` with the symmetric analytic solve:
 /// the deviation-optimal trim, clamped by the shared runway budget, consumed
@@ -128,11 +131,18 @@ pub(super) fn solve_consume_chain(
     }
     let plane_n = normalize(cross(t_a, t_b));
 
-    [0, CONSUME_SPLIT_DEPTH]
-        .into_iter()
-        .find_map(|depth| scan_consume_reach(vertices, t_a, t_b, delta, t_cap, plane_n, depth))
+    // Every probe below solves near-identical geometry: the converged
+    // solution in the chord-normalized frame (which barely moves with the
+    // contact reach) seeds the next probe's Newton — including probes whose
+    // blend converged but failed the deviation check, and the split-depth
+    // rescan, which revisits the same reaches.
+    let mut hint = None;
+    [0, CONSUME_SPLIT_DEPTH].into_iter().find_map(|depth| {
+        scan_consume_reach(vertices, t_a, t_b, delta, t_cap, plane_n, depth, &mut hint)
+    })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scan_consume_reach(
     vertices: &[[f64; 3]],
     t_a: [f64; 3],
@@ -141,8 +151,9 @@ fn scan_consume_reach(
     t_cap: f64,
     plane_n: [f64; 3],
     depth: usize,
+    hint: &mut Option<[f64; 3]>,
 ) -> Option<ChainBlend> {
-    let eval = |t: f64| -> Option<Vec<ClothoidPair>> {
+    let mut eval = |t: f64| -> Option<Vec<ClothoidPair>> {
         let a = madd(vertices[0], -t, t_a);
         let b = madd(vertices[vertices.len() - 1], t, t_b);
         let mut tube = Vec::with_capacity(vertices.len() + 2);
@@ -157,10 +168,13 @@ fn scan_consume_reach(
             pos: b,
             tangent: t_b,
         };
-        consume_pairs(&start, &end, vertices, &tube, delta, plane_n, depth)
+        let (pairs, solved) =
+            consume_pairs(&start, &end, vertices, &tube, delta, plane_n, depth, *hint);
+        *hint = solved.or(*hint);
+        pairs
     };
 
-    let mut feasible: Option<(Vec<ClothoidPair>, f64)> = None;
+    let mut feasible = None;
     let mut infeasible_above = None;
     for i in 0..CONSUME_COARSE_STEPS {
         let t = t_cap * 0.5_f64.powi(i as i32);
@@ -203,6 +217,10 @@ struct ChainState {
 /// Solve `start → end` (both curvature-free states) as one clothoid pair
 /// within `delta` of `tube`, or split at a mid-chain facet anchor and solve
 /// each side. `interior` is the polyline strictly between the two states.
+/// The second element is this level's converged chord-normalized Newton
+/// solution whether or not the blend passed the deviation check — the
+/// caller's warm-start for the next near-identical probe.
+#[allow(clippy::too_many_arguments)]
 fn consume_pairs(
     start: &ChainState,
     end: &ChainState,
@@ -211,8 +229,9 @@ fn consume_pairs(
     delta: f64,
     plane_n: [f64; 3],
     depth: usize,
-) -> Option<Vec<ClothoidPair>> {
-    if let Some(pair) = hermite_g2(
+    hint: Option<[f64; 3]>,
+) -> (Option<Vec<ClothoidPair>>, Option<[f64; 3]>) {
+    let solved = hermite_g2_hinted(
         start.pos,
         start.tangent,
         0.0,
@@ -220,17 +239,22 @@ fn consume_pairs(
         end.tangent,
         0.0,
         plane_n,
-    ) {
+        hint,
+    );
+    let top_hint = solved.as_ref().map(|(_, x)| *x);
+    if let Some((pair, _)) = solved {
         if max_dev_from_chain(&pair, tube) <= delta {
-            return Some(vec![pair]);
+            return (Some(vec![pair]), top_hint);
         }
     }
     if depth == 0 || interior.len() < 2 {
-        return None;
+        return (None, top_hint);
     }
 
-    let (facet_idx, anchor) = mid_facet_anchor(start, end, interior)?;
-    let mut left = consume_pairs(
+    let Some((facet_idx, anchor)) = mid_facet_anchor(start, end, interior) else {
+        return (None, top_hint);
+    };
+    let (left, _) = consume_pairs(
         start,
         &anchor,
         &interior[..=facet_idx],
@@ -238,8 +262,12 @@ fn consume_pairs(
         delta,
         plane_n,
         depth - 1,
-    )?;
-    let right = consume_pairs(
+        None,
+    );
+    let Some(mut left) = left else {
+        return (None, top_hint);
+    };
+    let (right, _) = consume_pairs(
         &anchor,
         end,
         &interior[facet_idx + 1..],
@@ -247,9 +275,13 @@ fn consume_pairs(
         delta,
         plane_n,
         depth - 1,
-    )?;
+        None,
+    );
+    let Some(right) = right else {
+        return (None, top_hint);
+    };
     left.extend(right);
-    Some(left)
+    (Some(left), top_hint)
 }
 
 /// The split anchor: the midpoint of the facet nearest the chain's arclength
@@ -428,6 +460,7 @@ fn newton_pair(
     let pair = build_pair(start, kappa_b, plane_n, x[0], x[1], x[2])?;
     let mut r = residual(&pair, end, e1, e2, plane_n);
     let mut lambda = 1e-3;
+    let mut weak_streak = 0u32;
     for _ in 0..HERMITE_MAX_ITERS {
         if converged(r) {
             return Some(x);
@@ -484,6 +517,18 @@ fn newton_pair(
         if !stepped {
             return None;
         }
+        // A convergent solve contracts the residual rapidly once inside its
+        // basin; a long run of accepted-but-barely-improving steps is an
+        // infeasible or ill-conditioned seed grinding toward the iteration
+        // cap — give up early, the caller has more seeds.
+        if residual_norm(r) > 0.5 * r0 {
+            weak_streak += 1;
+            if weak_streak >= WEAK_STREAK_LIMIT {
+                return None;
+            }
+        } else {
+            weak_streak = 0;
+        }
     }
     None
 }
@@ -492,7 +537,8 @@ fn newton_pair(
 /// in turns-per-chord — so tolerances are relative and the Newton iteration
 /// is equally conditioned for 0.01mm and 100mm blends. The converged
 /// unknowns rescale back to world units for the returned pair.
-pub(super) fn hermite_g2(
+#[allow(clippy::too_many_arguments)]
+fn hermite_g2_hinted(
     p_a: [f64; 3],
     t_a: [f64; 3],
     kappa_a: f64,
@@ -500,7 +546,8 @@ pub(super) fn hermite_g2(
     t_b: [f64; 3],
     kappa_b: f64,
     plane_n: [f64; 3],
-) -> Option<ClothoidPair> {
+    hint: Option<[f64; 3]>,
+) -> Option<(ClothoidPair, [f64; 3])> {
     let chord = dist(p_a, p_b);
     if chord <= DEGENERATE_EPS {
         return None;
@@ -534,24 +581,37 @@ pub(super) fn hermite_g2(
         [-(ka + kb), 1.0, 1.0],
         [0.0, 2.0, 2.0],
     ];
-    for seed in seeds {
+    for seed in hint.into_iter().chain(seeds) {
         if let Some(x) = newton_pair(&start, &end, kb, plane_n, e1, e2, seed) {
             let world_start = Endpoint {
                 pose: p_a,
                 tangent: t_a,
                 kappa: kappa_a,
             };
-            return build_pair(
+            let pair = build_pair(
                 &world_start,
                 kappa_b,
                 plane_n,
                 x[0] * inv,
                 x[1] * chord,
                 x[2] * chord,
-            );
+            )?;
+            return Some((pair, x));
         }
     }
     None
+}
+
+pub(super) fn hermite_g2(
+    p_a: [f64; 3],
+    t_a: [f64; 3],
+    kappa_a: f64,
+    p_b: [f64; 3],
+    t_b: [f64; 3],
+    kappa_b: f64,
+    plane_n: [f64; 3],
+) -> Option<ClothoidPair> {
+    hermite_g2_hinted(p_a, t_a, kappa_a, p_b, t_b, kappa_b, plane_n, None).map(|(pair, _)| pair)
 }
 
 pub(super) struct GeneralBlend {

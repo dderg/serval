@@ -3,7 +3,8 @@ use nurbs::bezier::bezier_pieces_to_nurbs;
 use trajectory::{AxisChainSet, ChainStage, CompiledChain, ShapedSegment, ShapedSignal};
 
 use crate::shaper::{
-    SEGMENT_TIME_EPS_S, TrackSignal, apply_derivative_gains_to_track, fit_axis_from_signal,
+    AxisSignalTable, SEGMENT_TIME_EPS_S, TrackSignal, apply_derivative_gains_to_track,
+    fit_axis_from_signal,
 };
 use crate::types::PostProcessError;
 
@@ -120,31 +121,43 @@ pub(crate) fn project_followers(
                 track,
             });
         }
+        let kernel_sig = match kernel {
+            Some(kernel) if commit_count > 0 => {
+                let first = state.projected.first().expect("cache covers commits");
+                let last = state.projected.last().expect("cache covers commits");
+                let (first_t, last_t) = (first.t_start, last.t_end);
+                let table = AxisSignalTable::from_tracks(
+                    state.projected.iter().map(|p| &p.track),
+                    first_t,
+                    last_t,
+                    !state.projected_trimmed,
+                    force,
+                );
+                let sig = ShapedSignal::new_from_evaluator(
+                    kernel,
+                    move |t| table.eval(t),
+                    state.projected_breakpoints(),
+                );
+                Some((kernel, first_t, last_t, sig))
+            }
+            _ => None,
+        };
         for i in 0..commit_count {
             let raw = &base[i];
             let cached = state.cached_track(raw.t_start, raw.t_end);
-            out[i].axes[axis] = match kernel {
+            out[i].axes[axis] = match &kernel_sig {
                 None => cached.clone(),
-                Some(kernel) => {
+                Some((kernel, first_t, last_t, sig)) => {
                     let (k_lo, k_hi) = kernel.support();
-                    let first = state.projected.first().expect("cache covers commits");
-                    let last = state.projected.last().expect("cache covers commits");
-                    let (first_t, last_t) = (first.t_start, last.t_end);
                     let need_lo = raw.t_start - k_hi;
                     let need_hi = raw.t_end - k_lo;
-                    if need_lo < first_t && state.projected_trimmed {
+                    if need_lo < *first_t && state.projected_trimmed {
                         return Err(PostProcessError::MissingHistory { axis, t: need_lo });
                     }
-                    if need_hi > last_t && !force {
+                    if need_hi > *last_t && !force {
                         return Err(PostProcessError::MissingLookahead { axis, t: need_hi });
                     }
-                    let at_boundary = !state.projected_trimmed;
-                    let sig = ShapedSignal::new_from_evaluator(
-                        kernel,
-                        |t| state.eval_projected(t, at_boundary, force),
-                        state.projected_breakpoints(),
-                    );
-                    let shaped = fit_axis_from_signal(axis, cached, &sig)?;
+                    let shaped = fit_axis_from_signal(axis, cached, sig)?;
                     if !shaped.control_points().iter().all(|v| v.is_finite()) {
                         return Err(PostProcessError::NonFiniteSample {
                             axis,
@@ -155,6 +168,7 @@ pub(crate) fn project_followers(
                 }
             };
         }
+        drop(kernel_sig);
         if commit_count > 0 {
             let emitted_through = base[commit_count - 1].t_end;
             let back = kernel.map_or(0.0, |k| k.support().1.max(0.0));
@@ -279,42 +293,6 @@ impl FollowerState {
             p.t_end,
         );
         &p.track
-    }
-
-    /// The cached projected signal with the shaper's edge semantics: clamp
-    /// at the stream boundary and at a forced terminal flush, hold across
-    /// time gaps (dwells and rest holds), NaN where the window is uncovered.
-    fn eval_projected(&self, t: f64, at_boundary: bool, force: bool) -> f64 {
-        let segs = &self.projected;
-        let first = segs.first().expect("projected cache is non-empty");
-        let last = segs.last().expect("projected cache is non-empty");
-        if t < first.t_start {
-            if !at_boundary {
-                return f64::NAN;
-            }
-            return nurbs::eval::eval(&first.track, first.t_start);
-        }
-        if t > last.t_end {
-            if !force {
-                return f64::NAN;
-            }
-            return nurbs::eval::eval(&last.track, last.t_end);
-        }
-        let mut idx = segs.partition_point(|p| p.t_end + SEGMENT_TIME_EPS_S < t);
-        if idx >= segs.len() {
-            idx = segs.len() - 1;
-        }
-        let lo = idx.saturating_sub(1);
-        let hi = (idx + 2).min(segs.len());
-        for p in &segs[lo..hi] {
-            if t >= p.t_start - SEGMENT_TIME_EPS_S && t <= p.t_end + SEGMENT_TIME_EPS_S {
-                return nurbs::eval::eval(&p.track, t.clamp(p.t_start, p.t_end));
-            }
-        }
-        if idx > 0 && segs[idx].t_start > t {
-            return nurbs::eval::eval(&segs[idx - 1].track, segs[idx - 1].t_end);
-        }
-        f64::NAN
     }
 
     fn projected_breakpoints(&self) -> Vec<f64> {
