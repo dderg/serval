@@ -1309,18 +1309,23 @@ function currentDriveAgeS() {
   return state.drive.data.age_s + (Date.now() - state.drive.fetchedAtMs) / 1000;
 }
 
+/// The refresh button must render even with no drive state at all —
+/// SERVO_DUMP_TUNING is what creates drive_state.json in the first place,
+/// so hiding the button behind loaded data would deadlock a fresh bench.
+/// Rebuilt only once so the 1 s age ticker doesn't wipe the refresh
+/// status text mid-dump.
 function renderDriveBanner() {
   const banner = el("drive-state-banner");
-  const data = state.drive.data;
-  if (!data) {
-    banner.innerHTML = '<span class="note">loading drive state…</span>';
-    return;
+  if (!el("drive-refresh-btn")) {
+    banner.innerHTML =
+      `<span class="note" id="drive-age"></span> ` +
+      `<button id="drive-refresh-btn" title="SERVO_DUMP_TUNING and re-read">refresh</button>` +
+      `<span id="drive-refresh-status" class="note"></span>`;
+    el("drive-refresh-btn").addEventListener("click", refreshDriveState);
   }
-  banner.innerHTML =
-    `<span class="note">drive state ${formatAge(currentDriveAgeS())} old</span> ` +
-    `<button id="drive-refresh-btn" title="SERVO_DUMP_TUNING and re-read">refresh</button>` +
-    `<span id="drive-refresh-status" class="note"></span>`;
-  el("drive-refresh-btn").addEventListener("click", refreshDriveState);
+  el("drive-age").textContent = state.drive.data
+    ? `drive state ${formatAge(currentDriveAgeS())} old`
+    : "no drive state yet — press refresh to read the drives";
 }
 
 function shortMotorLabel(motor) {
@@ -1408,7 +1413,9 @@ function renderDriveGroups() {
   const def = currentPageDef();
   const data = state.drive.data;
   if (!data) {
-    container.innerHTML = '<p class="note">loading drive state…</p>';
+    container.innerHTML =
+      '<p class="note">no drive state yet — press refresh in the top bar ' +
+      "to read every mapped parameter off the drives (SERVO_DUMP_TUNING)</p>";
     updateApplyState();
     return;
   }
