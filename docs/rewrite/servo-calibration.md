@@ -79,6 +79,20 @@ error, overshoot and settling — the before/after check for any tuning change.
 Params: `AXIS` (X) `START` `END` `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (3)
 `DWELL_MS` `NAME` (track). Runs `servo_capture.py`.
 
+#### SERVO_MEASURE_DIFFERENTIAL
+Anti-phase position chirp on one AWD belt pair via the engine-resident buzz
+generator: the two drives of the belt are commanded in opposite directions,
+so the carriage holds (nominally) still while the drives strain the belt
+against each other. The capture therefore isolates the differential
+(rotor-vs-rotor) dynamics — the modes excited when paired drives fight —
+and the report prints each detected mode's frequency, closed-loop peak gain,
+half-power damping ratio and coherence, and renders an FRF PNG (magnitude,
+phase, coherence, differential-torque spectrum). Belt strain between the
+pair is **twice** `AMPLITUDE`; the command caps `AMPLITUDE` at 0.5 mm.
+Needs two drives per belt. Params: `BELT` (A) `FREQ_START` (20)
+`FREQ_END` (250) `HZ_PER_SEC` (5) `DURATION` (band/`HZ_PER_SEC`) `AMPLITUDE`
+(0.05 mm) `RAMP` `DWELL_MS` `NAME` (diff). Runs `servo_diff_report.py`.
+
 #### SERVO_MEASURE_INERTIA
 Records the excitation grid for the inertia/friction fit (no report — it is the
 capture building block behind the fit commands). Captures every motor that
@@ -192,6 +206,7 @@ Vendor-table tuning path: standard mode (C00.04=1) + C00.05 stiffness level
 | Command | Script | Output |
 |---|---|---|
 | `SERVO_MEASURE_TRACKING` | `servo_capture.py` | tracking metrics to console + per-motor & combined PNG in `~/printer_data/config/servo_calibrate_results/` (records every motor driving the axis — both lanes on CoreXY) |
+| `SERVO_MEASURE_DIFFERENTIAL` | `servo_diff_report.py` | differential mode table to console + FRF PNG in `~/printer_data/config/servo_calibrate_results/` |
 | `SERVO_FIT_DYNAMICS[_COREXY]`, `SERVO_CALIBRATE_INERTIA_RATIO[_COREXY]` | `servo_fit_dynamics.py` | `~/printer_data/config/servo_dynamics/dynamics_<name>_<stamp>.toml` + C00.06 |
 | `SERVO_CALIBRATE_GAINS` | `servo_gain_report.py` | comparison PNG in `~/printer_data/config/servo_calibrate_results/` |
 | `SERVO_SWEEP_INERTIA` | `servo_inertia_report.py` | comparison PNG in `~/printer_data/config/servo_calibrate_results/` |
