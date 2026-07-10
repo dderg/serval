@@ -10,20 +10,25 @@
 //!       --out profile.toml [--rated-torque-nm T --rotor-inertia-kgm2 J
 //!       --rotation-distance-mm D --cutoff-hz C --blank-ms B --max-delay-ms M
 //!       --ripple-period-mm P]
+//!   serve --dir <captures_root> [--port 8085] [--host 127.0.0.1]
+//!   demo <out-dir> [--fixtures <dir>]
 #![allow(clippy::exit)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use servo_ident::analyze::{analyze_capture, analyze_run, dump_csv, print_step};
 use servo_ident::capture::{steady_accel_keep, tracking_keep, PlateauOptions, TrackingOptions};
+use servo_ident::demo::{build_demo, default_fixtures_dir};
 use servo_ident::fit::residual_by_motor;
 use servo_ident::fit::{fit, FitInput, FitOptions};
 use servo_ident::fit_driver::scap_to_capture;
+use servo_ident::http;
 use servo_ident::metrics::{DEFAULT_SETTLE_BAND_COUNTS, DEFAULT_TORQUE_LIMIT_PER_MILLE};
 use servo_ident::model::Structure;
 use servo_ident::prep::{band_limited_rms, prep, PrepOptions};
 use servo_ident::profile_out::{c0006_recommendation, render_profile};
 use servo_ident::scap::Scap;
+use servo_ident::serve;
 
 fn arg(args: &[String], key: &str) -> Option<String> {
     args.iter()
@@ -55,13 +60,57 @@ fn die(msg: &str) -> ! {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let sub = args.get(1).map(String::as_str).unwrap_or_else(|| {
-        die("usage: servo-cal <analyze|fit> ...");
+        die("usage: servo-cal <analyze|fit|serve|demo> ...");
     });
     match sub {
         "analyze" => cmd_analyze(&args),
         "fit" => cmd_fit(&args),
-        other => die(&format!("unknown subcommand {other:?} (want analyze|fit)")),
+        "serve" => cmd_serve(&args),
+        "demo" => cmd_demo(&args),
+        other => die(&format!(
+            "unknown subcommand {other:?} (want analyze|fit|serve|demo)"
+        )),
     }
+}
+
+fn cmd_serve(args: &[String]) {
+    let dir = arg(args, "--dir").unwrap_or_else(|| die("serve needs --dir <captures_root>"));
+    let captures_root = PathBuf::from(&dir);
+    if !captures_root.is_dir() {
+        die(&format!("{dir} is not a directory"));
+    }
+    let host = arg(args, "--host").unwrap_or_else(|| "127.0.0.1".to_string());
+    let port: u16 = arg(args, "--port")
+        .map(|p| {
+            p.parse()
+                .unwrap_or_else(|_| die(&format!("bad --port {p:?}")))
+        })
+        .unwrap_or(8085);
+    let listener = http::bind(&host, port).unwrap_or_else(|e| die(&e));
+    println!("servo-cal serve: {dir} on http://{host}:{port}");
+    http::run(listener, move |req| serve::handle(&captures_root, req));
+}
+
+fn cmd_demo(args: &[String]) {
+    let out_dir = args
+        .get(2)
+        .filter(|a| !a.starts_with("--"))
+        .unwrap_or_else(|| die("demo needs an <out-dir>"));
+    let fixtures_dir = match arg(args, "--fixtures") {
+        Some(f) => PathBuf::from(f),
+        None => default_fixtures_dir().unwrap_or_else(|e| die(&e)),
+    };
+    if !fixtures_dir.is_dir() {
+        die(&format!(
+            "fixtures dir {} not found — pass --fixtures <path>",
+            fixtures_dir.display()
+        ));
+    }
+    let run_dirs = build_demo(Path::new(out_dir), &fixtures_dir).unwrap_or_else(|e| die(&e));
+    for dir in &run_dirs {
+        println!("wrote {}", dir.display());
+    }
+    println!("\nnext: servo-cal serve --dir {out_dir} --port 8085");
 }
 
 fn cmd_analyze(args: &[String]) {

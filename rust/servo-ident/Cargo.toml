@@ -14,12 +14,10 @@ name = "servo-cal"
 path = "src/bin/servo-cal.rs"
 
 [dependencies]
+flate2 = "1"
 libm = { version = "0.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
-[dev-dependencies]
-flate2 = "1"
 
 [lints]
 workspace = true

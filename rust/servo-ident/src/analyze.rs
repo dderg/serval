@@ -370,16 +370,24 @@ pub fn build_run(dir: &Path) -> Result<(Results, PlotSeries), String> {
     Ok((results, plot))
 }
 
-pub fn analyze_run(dir: &Path) -> Result<(), String> {
-    let (results, plot) = build_run(dir)?;
+/// Write `results.json` and `plot_series.json` for a run directory. Shared
+/// by `analyze_run` (which also prints the table) and `serve`'s
+/// analyze-on-demand endpoint (which stays quiet — the response body is the
+/// reading surface there).
+pub fn write_run_outputs(dir: &Path, results: &Results, plot: &PlotSeries) -> Result<(), String> {
     let results_json =
-        serde_json::to_string_pretty(&results).map_err(|e| format!("serialize results: {e}"))?;
+        serde_json::to_string_pretty(results).map_err(|e| format!("serialize results: {e}"))?;
     let plot_json =
-        serde_json::to_string(&plot).map_err(|e| format!("serialize plot_series: {e}"))?;
+        serde_json::to_string(plot).map_err(|e| format!("serialize plot_series: {e}"))?;
     std::fs::write(dir.join("results.json"), results_json)
         .map_err(|e| format!("write results.json: {e}"))?;
     std::fs::write(dir.join("plot_series.json"), plot_json)
-        .map_err(|e| format!("write plot_series.json: {e}"))?;
+        .map_err(|e| format!("write plot_series.json: {e}"))
+}
+
+pub fn analyze_run(dir: &Path) -> Result<(), String> {
+    let (results, plot) = build_run(dir)?;
+    write_run_outputs(dir, &results, &plot)?;
     print_results(&results);
     Ok(())
 }

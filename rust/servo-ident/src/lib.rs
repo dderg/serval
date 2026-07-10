@@ -1,8 +1,11 @@
 pub mod analyze;
+pub mod assets;
 pub mod capture;
 pub mod combine;
+pub mod demo;
 pub mod fit;
 pub mod fit_driver;
+pub mod http;
 pub mod linalg;
 pub mod metrics;
 pub mod model;
@@ -12,3 +15,5 @@ pub mod psd;
 pub mod resonance;
 pub mod results;
 pub mod scap;
+pub mod serve;
+pub mod time_fmt;
