@@ -10,6 +10,7 @@ use crate::capture::{Capture, PendingStart, PendingStop};
 use crate::claim::{all_slaves_reply, single_slave_reply, wait_for_claim, wait_for_claim_pumping};
 use crate::cli::{Args, SlaveCfg};
 use crate::curves::AxisRing;
+use crate::damper::DiffDamperBank;
 use crate::ffi;
 use crate::mailbox::{MailboxWorker, WorkerScheduling};
 use crate::scale::CountMap;
@@ -277,6 +278,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
 
     let rings: Vec<AxisRing> = (0..num_slaves).map(AxisRing::with_slot).collect();
     let buzz = BuzzOsc::new();
+    let damper = DiffDamperBank::new(cycle_ns);
     let cmaps: Vec<Option<CountMap>> = (0..num_slaves).map(|_| None).collect();
     let last_counts: Vec<Option<i32>> = vec![None; num_slaves];
     // Per-slot report frame: (counts, host mm) captured at the homing finalize.
@@ -472,6 +474,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
         run_limits,
         rings,
         buzz,
+        damper,
         cmaps,
         last_counts,
         report_anchor,

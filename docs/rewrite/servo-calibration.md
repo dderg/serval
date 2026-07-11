@@ -93,6 +93,25 @@ Needs two drives per belt. Params: `BELT` (A) `FREQ_START` (20)
 `FREQ_END` (250) `HZ_PER_SEC` (5) `DURATION` (band/`HZ_PER_SEC`) `AMPLITUDE`
 (0.05 mm) `RAMP` `DWELL_MS` `NAME` (diff). Runs `servo_diff_report.py`.
 
+#### SERVO_DIFF_DAMPER
+Arms (or disarms) the engine-resident differential belt-pair damper on an
+AWD machine. Every EtherCAT cycle the endpoint reads both drives' measured
+velocities, low-passes the difference and streams an **antisymmetric**
+torque offset (60B2h) to the pair — a virtual dashpot connected between the
+two rotors. Because the torques are equal and opposite through the belt,
+the carriage sees no net force, and on synchronized motion the differential
+velocity is zero, so the damper costs no torque during printing. Unlike a
+notch filter it is frequency-agnostic: it damps the inter-motor belt mode
+wherever toolhead position has moved it. `GAIN` is in units of 0.1% rated
+torque per mm/s of differential velocity; `GAIN=0` disarms the belt's
+damper. The injected torque is clamped to `CLAMP` (0.1% rated torque,
+command ceiling 300) and the velocity difference is low-passed at `LPF_HZ`
+to keep the feedback's cycle latency from turning into anti-damping at high
+frequency. State lives in the running endpoint — re-arm after a firmware
+restart. Verify with an A/B `SERVO_MEASURE_DIFFERENTIAL` sweep: the pair
+mode's damping ratio should rise with the damper on. Params: `BELT`
+(AB) `GAIN` (required) `CLAMP` (50) `LPF_HZ` (300).
+
 #### SERVO_MEASURE_INERTIA
 Records the excitation grid for the inertia/friction fit (no report — it is the
 capture building block behind the fit commands). Captures every motor that
@@ -211,6 +230,7 @@ Vendor-table tuning path: standard mode (C00.04=1) + C00.05 stiffness level
 | `SERVO_CALIBRATE_GAINS` | `servo_gain_report.py` | comparison PNG in `~/printer_data/config/servo_calibrate_results/` |
 | `SERVO_SWEEP_INERTIA` | `servo_inertia_report.py` | comparison PNG in `~/printer_data/config/servo_calibrate_results/` |
 | `SERVO_MEASURE_INERTIA[_COREXY]`, `SERVO_MEASURE_FRICTION` | — | `.scap` capture only |
+| `SERVO_DIFF_DAMPER` | — | reconfigures the running endpoint (no files) |
 
 All captures land in `~/printer_data/logs/servo_captures/` as
 `<name>_<YYYYmmdd_HHMMSS>.scap`; per-step accelerometer recordings land next

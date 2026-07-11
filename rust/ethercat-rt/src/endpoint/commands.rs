@@ -19,13 +19,14 @@ use crate::wire::{
     motor_state_response_frame_multi, push_pieces_response_frame_multi,
     resonance_buzz_response_frame, restore_drive_limits_response_frame,
     resume_stream_response_frame, runtime_caps_response_frame, sdo_read_response_frame,
-    sdo_write_response_frame, seed_servo_home_response_frame, set_drive_limits_response_frame,
-    set_torque_response_frame, start_capture_response_frame, stop_capture_response_frame,
-    stop_response_frame, sync_pair_response_frame, Command,
+    sdo_write_response_frame, seed_servo_home_response_frame, set_diff_damper_response_frame,
+    set_drive_limits_response_frame, set_torque_response_frame, start_capture_response_frame,
+    stop_capture_response_frame, stop_response_frame, sync_pair_response_frame, Command,
 };
 use mcu_protocol::messages::{
     ArmSensorlessEndstop, PushPieces, ResonanceBuzz, SdoRead, SdoReadResponse, SdoWrite,
-    SdoWriteResponse, SetDriveLimits, SetTorque, StartCapture, StopCaptureResponse, SyncPair,
+    SdoWriteResponse, SetDiffDamper, SetDriveLimits, SetTorque, StartCapture, StopCaptureResponse,
+    SyncPair,
 };
 
 pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
@@ -137,6 +138,12 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
                 msg,
             } => {
                 handle_sync_pair(ctx, correlation_id, msg);
+            }
+            Command::SetDiffDamper {
+                correlation_id,
+                msg,
+            } => {
+                handle_set_diff_damper(ctx, correlation_id, msg);
             }
             Command::SdoRead {
                 correlation_id,
@@ -467,6 +474,40 @@ fn handle_resonance_buzz(ctx: &mut EndpointCtx, correlation_id: u32, msg: Resona
     };
     ctx.server
         .respond(&resonance_buzz_response_frame(correlation_id, rc));
+}
+
+fn handle_set_diff_damper(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDiffDamper) {
+    let rc = if ctx.sync.is_some() {
+        eprintln!("ec-rt: SetDiffDamper rejected — pair sync in progress");
+        ERR_SYNC_BUSY
+    } else {
+        ctx.damper.set(
+            ctx.num_slaves,
+            msg.slot_a,
+            msg.slot_b,
+            msg.gain_milli,
+            msg.clamp_tenths,
+            msg.lpf_millihz,
+        )
+    };
+    eprintln!(
+        "ec-rt: SetDiffDamper slots=({},{}) gain_milli={} clamp={} 0.1% \
+         lpf={} mHz rc={rc}",
+        msg.slot_a, msg.slot_b, msg.gain_milli, msg.clamp_tenths, msg.lpf_millihz,
+    );
+    tracing::info!(
+        subsystem = "ethercat",
+        event = "set_diff_damper",
+        slot_a = msg.slot_a,
+        slot_b = msg.slot_b,
+        gain_milli = msg.gain_milli,
+        clamp_tenths = msg.clamp_tenths,
+        lpf_millihz = msg.lpf_millihz,
+        rc,
+        "differential damper reconfigured"
+    );
+    ctx.server
+        .respond(&set_diff_damper_response_frame(correlation_id, rc));
 }
 
 fn handle_sdo_read(ctx: &mut EndpointCtx, correlation_id: u32, msg: SdoRead) {

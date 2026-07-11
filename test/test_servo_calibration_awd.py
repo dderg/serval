@@ -132,9 +132,13 @@ class FakeNode:
 class FakeEngine:
     def __init__(self):
         self.buzzes = []
+        self.dampers = []
 
     def resonance_buzz(self, *args):
         self.buzzes.append(args)
+
+    def set_diff_damper(self, *args):
+        self.dampers.append(args)
 
 
 class FakeReactor:
@@ -424,6 +428,50 @@ def test_differential_stops_capture_when_buzz_fails():
     with pytest.raises(RuntimeError, match="endpoint rejected"):
         sc.cmd_SERVO_MEASURE_DIFFERENTIAL(FakeGcmd(BELT="A"))
     assert "SERVO_CAPTURE_STOP" in gcode.scripts
+
+
+def test_diff_damper_arms_both_belts_by_default():
+    sc, _gcode, engine = make_differential_calibration()
+    sc.cmd_SERVO_DIFF_DAMPER(FakeGcmd(GAIN="2.5"))
+    assert engine.dampers == [
+        (7, 0, 1, 2500, 50, 300000),
+        (7, 2, 3, 2500, 50, 300000),
+    ]
+
+
+def test_diff_damper_single_belt_with_explicit_knobs():
+    sc, _gcode, engine = make_differential_calibration()
+    sc.cmd_SERVO_DIFF_DAMPER(
+        FakeGcmd(BELT="B", GAIN="0.5", CLAMP="120", LPF_HZ="250")
+    )
+    assert engine.dampers == [(7, 2, 3, 500, 120, 250000)]
+
+
+def test_diff_damper_zero_gain_disarms():
+    sc, _gcode, engine = make_differential_calibration()
+    sc.cmd_SERVO_DIFF_DAMPER(FakeGcmd(BELT="A", GAIN="0"))
+    assert engine.dampers == [(7, 0, 1, 0, 50, 300000)]
+
+
+def test_diff_damper_rejects_oversized_clamp():
+    sc, _gcode, engine = make_differential_calibration()
+    with pytest.raises(RuntimeError, match="ceiling"):
+        sc.cmd_SERVO_DIFF_DAMPER(FakeGcmd(GAIN="1", CLAMP="400"))
+    assert not engine.dampers
+
+
+def test_diff_damper_rejects_single_drive_belts():
+    sc, _gcode, engine = make_differential_calibration()
+    sc.printer = FakePrinter(
+        {
+            "gcode": sc.gcode,
+            "toolhead": FakeToolhead(FakeKin(single_drive_rails())),
+            "motion_engine": engine,
+        }
+    )
+    with pytest.raises(RuntimeError, match="two drives per belt"):
+        sc.cmd_SERVO_DIFF_DAMPER(FakeGcmd(GAIN="1"))
+    assert not engine.dampers
 
 
 def test_tracking_single_rail_dual_motor_axis_gets_no_combine():

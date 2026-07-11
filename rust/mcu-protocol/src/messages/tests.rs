@@ -90,6 +90,22 @@ fn resonance_buzz_kind_is_not_event() {
 }
 
 #[test]
+fn set_diff_damper_roundtrip() {
+    let v = SetDiffDamper {
+        slot_a: 0,
+        slot_b: 1,
+        gain_milli: 2_500,
+        clamp_tenths: 50,
+        lpf_millihz: 300_000,
+    };
+    assert_eq!(roundtrip(&v), v);
+    assert_eq!(v.encoded_to_vec().len(), 12);
+    let r = SetDiffDamperResponse { result: -831 };
+    assert_eq!(roundtrip(&r), r);
+    assert_eq!(r.encoded_to_vec().len(), 4);
+}
+
+#[test]
 fn arm_sensorless_endstop_roundtrip() {
     let v = ArmSensorlessEndstop {
         slot: 1,

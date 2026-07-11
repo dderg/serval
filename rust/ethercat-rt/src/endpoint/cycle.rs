@@ -8,7 +8,7 @@ use crate::claim::{eval_wkc, WkcDecision};
 use crate::clock::raw_from_monotonic_ns;
 use crate::curves::ENGINE_STATE_FAULT;
 use crate::dynamics::clamp_torque;
-use crate::scale::{mm_to_counts, CountMap};
+use crate::scale::{mm_to_counts, velocity_mm_s, CountMap};
 use crate::sync::{SyncStep, ERR_SYNC_ABORTED};
 use crate::torque::{TickAction, TorqueState};
 use crate::wire::{endstop_trip_frame, status_heartbeat_frame, sync_pair_response_frame};
@@ -136,6 +136,7 @@ pub(super) fn compute_motion_targets(
         let sp_counts = sample_slot_targets(ctx, apply_time, &mut all_acc, &mut all_vel);
         motion_active = emit_slot_commands(ctx, &sp_counts, &all_acc, &all_vel);
     } else {
+        ctx.damper.reset_filters();
         for lc in &mut ctx.last_counts {
             *lc = None;
         }
@@ -214,6 +215,29 @@ fn sample_slot_targets(
     sp_counts
 }
 
+// The damper is feedback, not feedforward: it reads the pair's measured
+// velocities from the previous exchange's input image, so its torque arrives
+// 2-3 cycles late — the low-pass in the bank keeps the loop from turning
+// that lag into anti-damping at high frequency.
+fn damper_torque_tenths(ctx: &mut EndpointCtx) -> Vec<f32> {
+    let mut host_frame = vec![0f32; ctx.num_slaves];
+    if !ctx.damper.active() {
+        return host_frame;
+    }
+    if ctx.sync.is_some() {
+        ctx.damper.reset_filters();
+        return host_frame;
+    }
+    let vel_mm_s: Vec<f64> = (0..ctx.num_slaves)
+        .map(|s| velocity_mm_s(ctx.drive.velocity_actual(s), ctx.cmd_counts_per_mm[s]))
+        .collect();
+    ctx.damper.accumulate(&vel_mm_s, &mut host_frame);
+    for (s, torque) in host_frame.iter_mut().enumerate() {
+        *torque *= ctx.cmd_counts_per_mm[s].signum() as f32;
+    }
+    host_frame
+}
+
 fn emit_slot_commands(
     ctx: &mut EndpointCtx,
     sp_counts: &[Option<i32>],
@@ -222,6 +246,7 @@ fn emit_slot_commands(
 ) -> bool {
     let num_slaves = ctx.num_slaves;
     let mut motion_active = false;
+    let damper_tenths = damper_torque_tenths(ctx);
     // The dynamics profile is fitted in the drive frame (the capture
     // flips each drive's commanded kinematics by its direction sign),
     // so the model must be evaluated on drive-frame vectors — flipping
@@ -247,9 +272,13 @@ fn emit_slot_commands(
                     if !raw.is_finite() {
                         fault_non_finite_torque(ctx, s, all_acc[s], all_vel[s]);
                     }
-                    clamp_torque(raw, ctx.torque_clamp_tenths[s], &mut ctx.ff_saturation)
+                    clamp_torque(
+                        raw + damper_tenths[s],
+                        ctx.torque_clamp_tenths[s],
+                        &mut ctx.ff_saturation,
+                    )
                 }
-                None => 0,
+                None => damper_tenths[s].round() as i16,
             };
             if let Some(prev) = ctx.last_counts[s] {
                 let increment = i64::from(counts) - i64::from(prev);
@@ -276,7 +305,8 @@ fn emit_slot_commands(
             motion_active = true;
         } else {
             ctx.drive.set_velocity_offset(s, 0);
-            ctx.drive.set_torque_offset(s, 0);
+            ctx.drive
+                .set_torque_offset(s, damper_tenths[s].round() as i16);
         }
     }
     motion_active

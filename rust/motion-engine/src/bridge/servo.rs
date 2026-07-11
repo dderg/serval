@@ -514,6 +514,49 @@ impl PyMotionEngine {
         }
         Ok(())
     }
+    fn set_diff_damper(
+        &self,
+        py: Python<'_>,
+        mcu_handle: u32,
+        slot_a: u8,
+        slot_b: u8,
+        gain_milli: u32,
+        clamp_tenths: u16,
+        lpf_millihz: u32,
+    ) -> PyResult<()> {
+        let conn = self.ethercat_conn(mcu_handle, "set_diff_damper")?;
+        tracing::info!(
+            subsystem = "engine",
+            event = "servo_set_diff_damper",
+            mcu_handle,
+            slot_a,
+            slot_b,
+            gain_milli,
+            clamp_tenths,
+            lpf_millihz,
+            "servo differential damper"
+        );
+        let result = py
+            .detach(|| {
+                crate::servo_torque::send_set_diff_damper(
+                    &conn,
+                    mcu_protocol::messages::SetDiffDamper {
+                        slot_a,
+                        slot_b,
+                        gain_milli,
+                        clamp_tenths,
+                        lpf_millihz,
+                    },
+                )
+            })
+            .map_err(PyRuntimeError::new_err)?;
+        if result != 0 {
+            return Err(PyRuntimeError::new_err(format!(
+                "set_diff_damper: endpoint rejected (result {result})"
+            )));
+        }
+        Ok(())
+    }
 }
 
 fn require_endpoint_ok(result: i32, context: &str) -> Result<(), String> {

@@ -5,8 +5,8 @@ use mcu_protocol::codec::Encode as _;
 use mcu_protocol::messages::{
     ArmSensorlessEndstop, ArmSensorlessEndstopResponse, MessageKind, ResonanceBuzz,
     ResonanceBuzzResponse, RestoreDriveLimits, RestoreDriveLimitsResponse, SeedServoHome,
-    SeedServoHomeResponse, SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse,
-    StopResponse, SyncPair, SyncPairResponse,
+    SeedServoHomeResponse, SetDiffDamper, SetDiffDamperResponse, SetDriveLimits,
+    SetDriveLimitsResponse, SetTorque, SetTorqueResponse, StopResponse, SyncPair, SyncPairResponse,
 };
 
 use crate::servo_call::mcu_typed_call;
@@ -143,6 +143,21 @@ pub fn send_resonance_buzz(conn: &McuSerialConn, buzz: ResonanceBuzz) -> Result<
         MessageKind::ResonanceBuzzResponse,
         body,
         RESONANCE_BUZZ_TIMEOUT,
+    )?;
+    Ok(r.result)
+}
+
+const SET_DIFF_DAMPER_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub fn send_set_diff_damper(conn: &McuSerialConn, damper: SetDiffDamper) -> Result<i32, String> {
+    let body = damper.encoded_to_vec();
+    let r: SetDiffDamperResponse = mcu_typed_call(
+        conn,
+        "SetDiffDamper",
+        MessageKind::SetDiffDamper,
+        MessageKind::SetDiffDamperResponse,
+        body,
+        SET_DIFF_DAMPER_TIMEOUT,
     )?;
     Ok(r.result)
 }

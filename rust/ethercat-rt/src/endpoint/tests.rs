@@ -19,6 +19,7 @@ use super::{discard_motion, EndpointCtx};
 use crate::buzz::BuzzOsc;
 use crate::capture::Capture;
 use crate::curves::AxisRing;
+use crate::damper::DiffDamperBank;
 use crate::ffi::EcTelemetry;
 use crate::mailbox::{MailboxWorker, WorkerScheduling};
 use crate::sdo::SdoBus;
@@ -34,6 +35,22 @@ const CYCLE_NS: u64 = 250_000;
 
 struct TrackingLagDrive {
     targets: Vec<i32>,
+    velocities: Vec<i32>,
+    torque_offsets: Vec<i16>,
+}
+
+impl TrackingLagDrive {
+    fn at_rest() -> Self {
+        Self::with_velocities(vec![0; NUM_SLAVES])
+    }
+
+    fn with_velocities(velocities: Vec<i32>) -> Self {
+        Self {
+            targets: vec![0; NUM_SLAVES],
+            velocities,
+            torque_offsets: vec![0; NUM_SLAVES],
+        }
+    }
 }
 
 impl DriveChain for TrackingLagDrive {
@@ -52,12 +69,14 @@ impl DriveChain for TrackingLagDrive {
         self.targets[slot] = counts;
     }
     fn set_velocity_offset(&mut self, _slot: usize, _counts_per_s: i32) {}
-    fn set_torque_offset(&mut self, _slot: usize, _tenths_pct: i16) {}
+    fn set_torque_offset(&mut self, slot: usize, tenths_pct: i16) {
+        self.torque_offsets[slot] = tenths_pct;
+    }
     fn position_actual(&self, slot: usize) -> i32 {
         self.targets[slot] - FOLLOWING_ERROR[slot]
     }
-    fn velocity_actual(&self, _slot: usize) -> i32 {
-        0
+    fn velocity_actual(&self, slot: usize) -> i32 {
+        self.velocities[slot]
     }
     fn torque_actual(&self, _slot: usize) -> i16 {
         0
@@ -69,6 +88,7 @@ impl DriveChain for TrackingLagDrive {
         EcTelemetry {
             target_position: self.targets[slot],
             position_actual: self.position_actual(slot),
+            torque_offset: self.torque_offsets[slot],
             ..EcTelemetry::default()
         }
     }
@@ -87,6 +107,10 @@ impl SdoBus for NoSdo {
 }
 
 fn test_ctx(name: &str) -> EndpointCtx {
+    test_ctx_with_drive(name, TrackingLagDrive::at_rest())
+}
+
+fn test_ctx_with_drive(name: &str, drive: TrackingLagDrive) -> EndpointCtx {
     let sock = std::env::temp_dir().join(format!("ec-rt-test-{}-{name}.sock", std::process::id()));
     let mut gate = TorqueGate::new();
     let _ = gate.on_set_torque(true, 0);
@@ -94,9 +118,7 @@ fn test_ctx(name: &str) -> EndpointCtx {
     EndpointCtx {
         server: FrameServer::bind(sock.to_str().expect("utf8 socket path"))
             .expect("bind test socket"),
-        drive: Box::new(TrackingLagDrive {
-            targets: vec![0; NUM_SLAVES],
-        }),
+        drive: Box::new(drive),
         num_slaves: NUM_SLAVES,
         counts_per_mm: vec![COUNTS_PER_MM; NUM_SLAVES],
         invert: vec![false; NUM_SLAVES],
@@ -113,6 +135,7 @@ fn test_ctx(name: &str) -> EndpointCtx {
         run_limits: Vec::new(),
         rings: (0..NUM_SLAVES).map(AxisRing::with_slot).collect(),
         buzz: BuzzOsc::new(),
+        damper: DiffDamperBank::new(CYCLE_NS as i64),
         cmaps: vec![None; NUM_SLAVES],
         last_counts: vec![None; NUM_SLAVES],
         report_anchor: vec![None; NUM_SLAVES],
@@ -314,4 +337,50 @@ fn homing_trip_retract_releases_pair_wind_up() {
         "the pair's commanded offset must ride through the trip unchanged; \
          a change means one drive absorbed the other's following error"
     );
+}
+
+/// Slot 1 mounted mirrored (negative cmd counts/mm): equal-and-opposite
+/// HOST-frame velocities mean both drives report the same counts/s, and the
+/// antisymmetric mechanical damping torque lands as the same drive-frame
+/// offset on both. Getting either frame conversion wrong flips a sign here.
+#[test]
+fn damper_writes_antisymmetric_torque_in_the_drive_frame() {
+    let host_diff_mm_s = 10.0;
+    let counts_per_s = (0.5 * host_diff_mm_s * COUNTS_PER_MM) as i32;
+    let mut ctx = test_ctx_with_drive(
+        "damper",
+        TrackingLagDrive::with_velocities(vec![counts_per_s, counts_per_s]),
+    );
+    ctx.cmd_counts_per_mm[1] = -COUNTS_PER_MM;
+    let gain_tenths_per_mm_s = 2.0;
+    assert_eq!(ctx.damper.set(NUM_SLAVES, 0, 1, 2_000, 100, 300_000), 0);
+
+    run_cycles(&mut ctx, 0, 100 * CYCLE_NS);
+
+    let expected_mech = -gain_tenths_per_mm_s * host_diff_mm_s;
+    let offsets: Vec<i16> = (0..NUM_SLAVES)
+        .map(|s| ctx.drive.telemetry(s).torque_offset)
+        .collect();
+    assert_eq!(offsets[0], expected_mech as i16);
+    assert_eq!(
+        offsets[1], offsets[0],
+        "mirrored slot must get the mechanically opposite torque, which in \
+         its inverted drive frame is the same number"
+    );
+}
+
+#[test]
+fn damper_stays_quiet_on_common_mode_velocity() {
+    let counts_per_s = (25.0 * COUNTS_PER_MM) as i32;
+    let mut ctx = test_ctx_with_drive(
+        "damper-cm",
+        TrackingLagDrive::with_velocities(vec![counts_per_s, counts_per_s]),
+    );
+    assert_eq!(ctx.damper.set(NUM_SLAVES, 0, 1, 2_000, 100, 300_000), 0);
+
+    run_cycles(&mut ctx, 0, 100 * CYCLE_NS);
+
+    for s in 0..NUM_SLAVES {
+        assert_eq!(ctx.drive.telemetry(s).torque_offset, 0);
+    }
 }

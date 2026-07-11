@@ -117,6 +117,7 @@ class ServoCalibration:
         for name in (
             "SERVO_MEASURE_TRACKING",
             "SERVO_MEASURE_DIFFERENTIAL",
+            "SERVO_DIFF_DAMPER",
             "SERVO_MEASURE_INERTIA",
             "SERVO_MEASURE_INERTIA_COREXY",
             "SERVO_MEASURE_FRICTION",
@@ -595,23 +596,18 @@ class ServoCalibration:
         "DURATION AMPLITUDE RAMP DWELL_MS NAME"
     )
 
-    def cmd_SERVO_MEASURE_DIFFERENTIAL(self, gcmd):
+    def _belt_pair(self, gcmd, belt, cmd_name):
         from . import servo_axis
 
-        belt = gcmd.get("BELT", "A").upper()
-        if belt not in ("A", "B"):
-            raise gcmd.error("BELT must be A or B (got %r)" % (belt,))
         layout = self._corexy_fit_layout(gcmd)
         if layout["pairs"] is None:
             raise gcmd.error(
-                "SERVO_MEASURE_DIFFERENTIAL needs two drives per belt "
-                "(AWD); this printer has one drive per belt"
+                "%s needs two drives per belt "
+                "(AWD); this printer has one drive per belt" % (cmd_name,)
             )
         pair_names = layout["pairs"].split(";")["AB".index(belt)].split(",")
         motors = [
-            servo_axis.resolve_servo_motor(
-                self.printer, name, "SERVO_MEASURE_DIFFERENTIAL"
-            )[1]
+            servo_axis.resolve_servo_motor(self.printer, name, cmd_name)[1]
             for name in pair_names
         ]
         node = self.printer.lookup_object(
@@ -624,6 +620,15 @@ class ServoCalibration:
                 "(node not claimed)" % (belt,)
             )
         slots = [node.get_slot_for_motor(m.get_motor_name()) for m in motors]
+        return pair_names, motors, handle, slots
+
+    def cmd_SERVO_MEASURE_DIFFERENTIAL(self, gcmd):
+        belt = gcmd.get("BELT", "A").upper()
+        if belt not in ("A", "B"):
+            raise gcmd.error("BELT must be A or B (got %r)" % (belt,))
+        pair_names, motors, handle, slots = self._belt_pair(
+            gcmd, belt, "SERVO_MEASURE_DIFFERENTIAL"
+        )
         freq_start = gcmd.get_float("FREQ_START", 20.0, above=0.0)
         freq_end = gcmd.get_float("FREQ_END", 250.0, above=0.0)
         if max(freq_start, freq_end) > self.MAX_BUZZ_FREQ_HZ:
@@ -711,6 +716,60 @@ class ServoCalibration:
             ],
             120.0,
         )
+
+    MAX_DAMPER_CLAMP_TENTHS = 300.0
+
+    cmd_SERVO_DIFF_DAMPER_help = (
+        "Arm or disarm the differential belt-pair damper: the engine adds "
+        "an antisymmetric torque offset (60B2h) proportional to the "
+        "low-passed velocity difference between the two drives of a belt "
+        "- a virtual dashpot between the rotors that damps the inter-motor "
+        "belt mode at whatever frequency it sits. Zero on synchronized "
+        "motion, so it costs no torque during printing. GAIN is in 0.1% "
+        "rated torque per mm/s of differential velocity; GAIN=0 disarms. "
+        "Params BELT=A|B|AB GAIN CLAMP LPF_HZ"
+    )
+
+    def cmd_SERVO_DIFF_DAMPER(self, gcmd):
+        belts = gcmd.get("BELT", "AB").upper()
+        if belts not in ("A", "B", "AB"):
+            raise gcmd.error("BELT must be A, B or AB (got %r)" % (belts,))
+        gain = gcmd.get_float("GAIN", minval=0.0)
+        clamp = gcmd.get_float("CLAMP", 50.0, above=0.0)
+        if clamp > self.MAX_DAMPER_CLAMP_TENTHS:
+            raise gcmd.error(
+                "CLAMP %.0f exceeds the %.0f x0.1%%-rated-torque ceiling"
+                % (clamp, self.MAX_DAMPER_CLAMP_TENTHS)
+            )
+        lpf_hz = gcmd.get_float("LPF_HZ", 300.0, above=0.0)
+        engine = self.printer.lookup_object("motion_engine")
+        for belt in belts:
+            pair_names, _motors, handle, slots = self._belt_pair(
+                gcmd, belt, "SERVO_DIFF_DAMPER"
+            )
+            engine.set_diff_damper(
+                handle,
+                slots[0],
+                slots[1],
+                int(round(gain * 1000.0)),
+                int(round(clamp)),
+                int(round(lpf_hz * 1000.0)),
+            )
+            if gain > 0.0:
+                gcmd.respond_info(
+                    "belt %s damper armed (%s vs %s): gain %.3f "
+                    "x0.1%%/(mm/s), clamp %.0f x0.1%%, lpf %.0f Hz"
+                    % (
+                        belt,
+                        pair_names[0],
+                        pair_names[1],
+                        gain,
+                        clamp,
+                        lpf_hz,
+                    )
+                )
+            else:
+                gcmd.respond_info("belt %s damper disarmed" % (belt,))
 
     cmd_SERVO_MEASURE_INERTIA_help = (
         "Excitation grid for the inertia/friction fit (servo-ident). Params "

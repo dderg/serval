@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::buzz::BuzzOsc;
 use crate::capture::{Capture, PendingStart, PendingStop};
 use crate::curves::AxisRing;
+use crate::damper::DiffDamperBank;
 use crate::dynamics::DynamicsModel;
 use crate::mailbox::MailboxWorker;
 use crate::scale::CountMap;
@@ -50,6 +51,7 @@ pub struct EndpointCtx {
 
     rings: Vec<AxisRing>,
     buzz: BuzzOsc,
+    damper: DiffDamperBank,
     cmaps: Vec<Option<CountMap>>,
     last_counts: Vec<Option<i32>>,
     report_anchor: Vec<Option<(i32, f64)>>,

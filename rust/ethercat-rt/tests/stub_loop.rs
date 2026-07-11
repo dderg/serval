@@ -170,7 +170,9 @@ fn push_pieces_and_heartbeat_closes_the_loop() {
                     Command::SetDriveLimits { .. } | Command::RestoreDriveLimits { .. } => {}
                     Command::SeedServoHome { .. } => {}
                     Command::ArmSensorlessEndstop { .. } => {}
-                    Command::ResonanceBuzz { .. } | Command::SyncPair { .. } => {}
+                    Command::ResonanceBuzz { .. }
+                    | Command::SyncPair { .. }
+                    | Command::SetDiffDamper { .. } => {}
                     Command::SdoRead { .. } | Command::SdoWrite { .. } => {
                         todo!("wired in the endpoint task")
                     }
@@ -205,6 +207,7 @@ fn push_pieces_and_heartbeat_closes_the_loop() {
                     | Command::SdoRead { .. }
                     | Command::SdoWrite { .. }
                     | Command::SyncPair { .. }
+                    | Command::SetDiffDamper { .. }
                     | Command::PushPieces { .. } => {}
                 }
             }

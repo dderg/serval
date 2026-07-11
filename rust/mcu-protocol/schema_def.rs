@@ -483,6 +483,28 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
             SchemaField { name: "released_delta_counts", ty: "i32" },
         ],
     },
+    SchemaMessage {
+        type_tag: 0x0088,
+        name: "SetDiffDamper",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "slot_a", ty: "u8" },
+            SchemaField { name: "slot_b", ty: "u8" },
+            SchemaField { name: "gain_milli", ty: "u32" },
+            SchemaField { name: "clamp_tenths", ty: "u16" },
+            SchemaField { name: "lpf_millihz", ty: "u32" },
+        ],
+    },
+    SchemaMessage {
+        type_tag: 0x0089,
+        name: "SetDiffDamperResponse",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "result", ty: "i32" },
+        ],
+    },
 ];
 
 /// Bootstrap type tags that the C header must define alongside the schema
