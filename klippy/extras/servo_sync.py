@@ -37,10 +37,12 @@ class SyncableAxis:
 class ServoSync:
     cmd_SERVO_SYNC_help = (
         "Release the strain between the paired servo drives of each belt "
-        "axis: coast the secondary, dither the primary through stiction, "
-        "re-seed the secondary at its settled position. Standstill torque "
-        "is verified at every phase. AXIS=X|Y limits to one axis; "
-        "TORQUE_OK/AMPLITUDE/FREQ/DURATION override the config tuning."
+        "axis: coast one drive, dither the other through stiction, re-seed "
+        "the coasting drive at its settled position — then swap roles so "
+        "both rotors get released (BOTH=0 keeps the single-pass behavior). "
+        "Standstill torque is verified at every phase. AXIS=X|Y limits to "
+        "one axis; TORQUE_OK/AMPLITUDE/FREQ/DURATION override the config "
+        "tuning."
     )
 
     def __init__(self, config):
@@ -52,13 +54,13 @@ class ServoSync:
             "settle_timeout", 2.0, above=0.0, maxval=60.0
         )
         self.dither_amplitude = config.getfloat(
-            "dither_amplitude", 0.1, above=0.0, maxval=1.0
+            "dither_amplitude", 0.25, above=0.0, maxval=1.0
         )
         self.dither_frequency = config.getfloat(
             "dither_frequency", 4.0, above=0.0, maxval=50.0
         )
         self.dither_duration = config.getfloat(
-            "dither_duration", 0.5, above=0.0, maxval=5.0
+            "dither_duration", 1.5, above=0.0, maxval=5.0
         )
         self.max_rounds = config.getint("max_rounds", 2, minval=1, maxval=5)
         gcode = self.printer.lookup_object("gcode")
@@ -118,7 +120,7 @@ class ServoSync:
                 % MOTION_DRAIN_TIMEOUT
             )
 
-    def _run_pair(self, gcmd, engine, entry, tuning):
+    def _run_pair(self, gcmd, engine, entry, tuning, swap_roles):
         handle = entry.node.get_engine_handle()
         if handle is None:
             raise gcmd.error(
@@ -133,6 +135,7 @@ class ServoSync:
             tuning["dither_amplitude_nm"],
             tuning["dither_freq_millihz"],
             tuning["dither_duration_ms"],
+            swap_roles,
         )
 
     def _describe(self, entry, report):
@@ -176,6 +179,52 @@ class ServoSync:
             )
         return text
 
+    def default_tuning(self):
+        return {
+            "torque_ok_tenth_pct": int(round(self.torque_ok_pct * 10.0)),
+            "settle_timeout_ms": int(round(self.settle_timeout * 1000.0)),
+            "dither_amplitude_nm": int(
+                round(self.dither_amplitude * 1_000_000.0)
+            ),
+            "dither_freq_millihz": int(round(self.dither_frequency * 1000.0)),
+            "dither_duration_ms": int(round(self.dither_duration * 1000.0)),
+        }
+
+    def run(self, gcmd, axis_filter=None, tuning=None, both_rotors=True):
+        if tuning is None:
+            tuning = self.default_tuning()
+        axes = self._syncable_axes(gcmd, axis_filter)
+        toolhead = self.printer.lookup_object("toolhead")
+        engine = self.printer.lookup_object("motion_engine")
+        toolhead.wait_moves()
+        self._drain_motion(gcmd, engine)
+        passes = [False, True] if both_rotors else [False]
+        for round_idx in range(self.max_rounds):
+            reports = [
+                (entry, self._run_pair(gcmd, engine, entry, tuning, swap))
+                for entry in axes
+                for swap in passes
+            ]
+            for entry, report in reports:
+                gcmd.respond_info(self._describe(entry, report))
+            results = [report[0] for _entry, report in reports]
+            if all(r == 0 for r in results):
+                return
+            # A later pass's dither can push a small residual into an
+            # earlier pair; only that cross-coupling failure mode earns
+            # another round. Anything else is a hard error now.
+            if any(r != -846 for r in results if r != 0):
+                raise gcmd.error("SERVO_SYNC failed — see measurements above")
+            if round_idx + 1 >= self.max_rounds:
+                raise gcmd.error(
+                    "SERVO_SYNC: pairs still fighting after %d rounds"
+                    % self.max_rounds
+                )
+            gcmd.respond_info(
+                "SERVO_SYNC: residual fight after round %d, running another"
+                " round" % (round_idx + 1)
+            )
+
     def cmd_SERVO_SYNC(self, gcmd):
         axis_filter = gcmd.get("AXIS", None)
         if axis_filter is not None:
@@ -198,35 +247,8 @@ class ServoSync:
                 round(gcmd.get_float("DURATION", self.dither_duration) * 1000.0)
             ),
         }
-        axes = self._syncable_axes(gcmd, axis_filter)
-        toolhead = self.printer.lookup_object("toolhead")
-        engine = self.printer.lookup_object("motion_engine")
-        toolhead.wait_moves()
-        self._drain_motion(gcmd, engine)
-        for round_idx in range(self.max_rounds):
-            reports = [
-                (entry, self._run_pair(gcmd, engine, entry, tuning))
-                for entry in axes
-            ]
-            for entry, report in reports:
-                gcmd.respond_info(self._describe(entry, report))
-            results = [report[0] for _entry, report in reports]
-            if all(r == 0 for r in results):
-                return
-            # A later pair's dither can push a small residual into an
-            # earlier pair; only that cross-coupling failure mode earns
-            # another round. Anything else is a hard error now.
-            if any(r != -846 for r in results if r != 0):
-                raise gcmd.error("SERVO_SYNC failed — see measurements above")
-            if round_idx + 1 >= self.max_rounds:
-                raise gcmd.error(
-                    "SERVO_SYNC: pairs still fighting after %d rounds"
-                    % self.max_rounds
-                )
-            gcmd.respond_info(
-                "SERVO_SYNC: residual fight after round %d, running another"
-                " round" % (round_idx + 1)
-            )
+        both_rotors = gcmd.get_int("BOTH", 1, minval=0, maxval=1) == 1
+        self.run(gcmd, axis_filter, tuning, both_rotors)
 
 
 def load_config(config):

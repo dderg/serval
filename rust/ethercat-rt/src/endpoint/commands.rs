@@ -680,6 +680,11 @@ fn handle_sync_pair(ctx: &mut EndpointCtx, correlation_id: u32, msg: SyncPair) {
         );
         return reject(ctx, ERR_SYNC_BAD_AXIS);
     };
+    let (primary, secondary) = if msg.swap_roles != 0 {
+        (secondary, primary)
+    } else {
+        (primary, secondary)
+    };
     let cycles_per_ms = (1_000_000 / ctx.cycle_ns.max(1)) as u64;
     let params = SyncParams {
         torque_ok_tenth_pct: msg.torque_ok_tenth_pct,

@@ -1617,9 +1617,11 @@ class ServoCalibration:
         "runout (periodic in travel) and geometry (smooth) when the run is "
         "analyzed. Serpentine X sweeps stepped along Y by LINE_SPACING, "
         "then Y sweeps stepped along X; every line strokes forward and "
-        "back so friction asymmetry averages out. CoreXY only. Params "
-        "SPEED (50) ACCEL (1000) LINE_SPACING (10) X_START X_END Y_START "
-        "Y_END DWELL_MS TAG"
+        "back so friction asymmetry averages out. Before rastering the "
+        "carriage parks at the region center and SERVO_SYNC releases the "
+        "trapped preload, so every map shares the same zero (SYNC=0 "
+        "skips). CoreXY only. Params SPEED (50) ACCEL (1000) LINE_SPACING "
+        "(10) X_START X_END Y_START Y_END DWELL_MS TAG SYNC"
     )
 
     @staticmethod
@@ -1644,6 +1646,7 @@ class ServoCalibration:
         )
         dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
         tag = gcmd.get("TAG", "strain")
+        zero_sync = gcmd.get_int("SYNC", 1, minval=0, maxval=1) == 1
         servos = servo_strokes.axis_servos(gcmd, kin, "X")
         stroke_plan = {
             "x_start": x_start,
@@ -1654,7 +1657,23 @@ class ServoCalibration:
             "accel": accel,
             "line_spacing": spacing,
             "dwell_ms": dwell,
+            "zero_sync": zero_sync,
         }
+        if zero_sync:
+            sync = self.printer.lookup_object("servo_sync", None)
+            if sync is None:
+                raise gcmd.error(
+                    "SERVO_MEASURE_STRAIN_MAP: [servo_sync] is not "
+                    "configured - add it so every map shares a preload "
+                    "zero, or pass SYNC=0 to raster without one"
+                )
+            self._goto_xy(
+                (x_start + x_end) / 2.0, (y_start + y_end) / 2.0, dwell
+            )
+            gcmd.respond_info(
+                "strain map zero point: SERVO_SYNC at region center"
+            )
+            sync.run(gcmd)
         run = self._begin_run(
             gcmd,
             "strain_map",

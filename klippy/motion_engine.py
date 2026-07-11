@@ -147,6 +147,7 @@ class MotionEngineWrapper:
         dither_amplitude_nm,
         dither_freq_millihz,
         dither_duration_ms,
+        swap_roles=False,
     ):
         """Run a belt-pair sync on the endpoint and return the measurement
         tuple even when the run failed — the phase torques are the
@@ -162,6 +163,7 @@ class MotionEngineWrapper:
                     dither_amplitude_nm,
                     dither_freq_millihz,
                     dither_duration_ms,
+                    swap_roles,
                 ),
                 "sync_servo_pair",
             )

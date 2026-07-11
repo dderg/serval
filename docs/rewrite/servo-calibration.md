@@ -167,10 +167,14 @@ material for separating trapped preload (DC), pulley/idler runout
 (periodic in travel at each element's circumference — 40 mm motor
 pulleys) and geometry/squareness (smooth 2D) — and eventually for the
 feedforward strain-compensation map. `LINE_SPACING` must stay under half
-the shortest period of interest (10 mm covers the 40 mm and ~20 mm
-elements). No analysis verdict yet — the run directory is analyzed
-offline. Params: `SPEED` (50) `ACCEL` (1000) `LINE_SPACING` (10)
-`X_START` `X_END` `Y_START` `Y_END` `DWELL_MS` `TAG` (strain).
+the shortest period of interest (10 mm covers the 40 mm and ~13 mm
+elements). Before rastering the carriage parks at the region center and
+`SERVO_SYNC` releases the trapped preload, so the DC of every map is
+measured from the same zero (`SYNC=0` skips, and the manifest records
+`zero_sync`); without `[servo_sync]` configured the command errors. The
+run directory is charted by the dashboard's strain tab. Params: `SPEED`
+(50) `ACCEL` (1000) `LINE_SPACING` (10) `X_START` `X_END` `Y_START`
+`Y_END` `DWELL_MS` `TAG` (strain) `SYNC` (1).
 
 #### SERVO_MEASURE_INERTIA
 Records the excitation grid for the inertia/friction fit (no report — it is the
@@ -377,7 +381,7 @@ Schemas: [servo-cal-contracts.md](servo-cal-contracts.md).
 | `SERVO_MEASURE_DIFFERENTIAL` | `servo-cal analyze` | run dir + `results.json` (differential FRF modes: frequency, peak gain, damping, coherence; dashboard renders the FRF) |
 | `SERVO_DIFF_DAMPER` | — | no run dir; reconfigures the running endpoint |
 | `SERVO_DIFF_TRIM` | — | no run dir; reconfigures the running endpoint |
-| `SERVO_MEASURE_STRAIN_MAP` | — (offline for now) | run dir with one capture per raster line |
+| `SERVO_MEASURE_STRAIN_MAP` | dashboard `/api/runs/<name>/strain` | run dir with one capture per raster line; charted by the dashboard's strain tab |
 | `SERVO_CALIBRATE_GAINS` | `servo-cal analyze` | run dir + `results.json` verdict (highest clean gain step); `APPLY=1` also writes + verifies |
 | `SERVO_GAIN_LADDER` | `servo-cal analyze` (per rung + final) | run dir + `results.json` verdict; climbs until a rung flags trouble, then applies `SAFE` |
 | `SERVO_HARVEST_NOTCHES` | — | no run dir; writes C01.30, strokes, reads back notch 1–2, locks (C01.30=0); journaled param writes |

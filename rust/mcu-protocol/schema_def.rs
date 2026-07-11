@@ -454,7 +454,7 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
     SchemaMessage {
         type_tag: 0x0086,
         name: "SyncPair",
-        version: 1,
+        version: 2,
         channel: "control",
         fields: &[
             SchemaField { name: "axis", ty: "u8" },
@@ -463,6 +463,7 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
             SchemaField { name: "dither_amplitude_nm", ty: "u32" },
             SchemaField { name: "dither_freq_millihz", ty: "u32" },
             SchemaField { name: "dither_duration_ms", ty: "u16" },
+            SchemaField { name: "swap_roles", ty: "u8" },
         ],
     },
     SchemaMessage {

@@ -103,12 +103,17 @@ class FakeEngine:
 
 class FakePrinter:
     command_error = RuntimeError
+    _sentinel = object()
 
     def __init__(self, objs):
         self._objs = objs
 
-    def lookup_object(self, name):
-        return self._objs[name]
+    def lookup_object(self, name, default=_sentinel):
+        if name in self._objs:
+            return self._objs[name]
+        if default is not self._sentinel:
+            return default
+        raise KeyError(name)
 
 
 class FakeConfig:
@@ -554,12 +559,23 @@ def test_base_speed_gain_without_servo_subset_errors():
         sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
 
 
+class FakeServoSync:
+    def __init__(self):
+        self.runs = []
+
+    def run(self, gcmd, axis_filter=None, tuning=None, both_rotors=True):
+        self.runs.append((axis_filter, both_rotors))
+
+
 def test_strain_map_raster_records_one_capture_per_line():
     servo_param.drain_param_writes()
     sc, gcode = make_sc()
+    sync = FakeServoSync()
+    sc.printer._objs["servo_sync"] = sync
     sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
     gcmd = FakeGcmd(LINE_SPACING="120", SPEED="50", ACCEL="1000")
     sc.cmd_SERVO_MEASURE_STRAIN_MAP(gcmd)
+    assert sync.runs == [(None, True)]
     caps = sc.printer.lookup_object("servo_capture").captures
     names = [os.path.basename(path) for path, _servos in caps]
     assert names == [
@@ -584,6 +600,25 @@ def test_strain_map_raster_records_one_capture_per_line():
     ]
     strokes = [line for line in g1 if "F3000" in line]
     assert len(strokes) == 12, "6 lines, each forward and back"
+    m2 = _manifest(sc)
+    assert m2["stroke_plan"]["zero_sync"] is True
+
+
+def test_strain_map_without_servo_sync_errors_loudly():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
+    with pytest.raises(RuntimeError, match="servo_sync"):
+        sc.cmd_SERVO_MEASURE_STRAIN_MAP(FakeGcmd(LINE_SPACING="120"))
+
+
+def test_strain_map_sync_zero_skips_the_zero_point():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
+    gcmd = FakeGcmd(LINE_SPACING="120", SYNC="0")
+    sc.cmd_SERVO_MEASURE_STRAIN_MAP(gcmd)
+    assert _manifest(sc)["stroke_plan"]["zero_sync"] is False
 
 
 def test_strain_map_rejects_cartesian_kinematics():

@@ -61,6 +61,12 @@ const PAGE_DEFS = {
       },
     ],
   },
+  strain: {
+    label: "strain",
+    strain: true,
+    experiments: ["strain_map"],
+    intro: "map differential belt torque across the bed — elastic strain and friction",
+  },
   live: {
     label: "live",
     live: true,
@@ -111,6 +117,10 @@ const state = {
     windowS: 10, // seconds kept and drawn, set by the slider
     timers: [], // interval ids cleared on page switch
     polling: false,
+  },
+  strain: {
+    selected: null, // run name shown on the strain page; auto-picks the newest
+    cache: new Map(), // name -> {mtime_utc, data} from /api/runs/<name>/strain
   },
   sentLog: [], // {time, label, lines, results} — every G-code batch sent this session
 };
@@ -379,6 +389,13 @@ function renderPage() {
     startLivePolling();
     return;
   }
+  if (def.strain) {
+    root.innerHTML = strainShellHtml(def);
+    bindPageEvents();
+    renderSentLog();
+    redrawStrain();
+    return;
+  }
   if (def.journal) {
     root.innerHTML =
       `<div class="workspace single">` +
@@ -628,7 +645,7 @@ function pickSeries(step) {
 /// Renders at the device pixel ratio so lines stay vector-crisp on hidpi
 /// displays: the backing store is sized to the CSS box × dpr and the
 /// context scaled back, while all layout math stays in CSS pixels.
-function drawChart(canvas, traces, yLabel, fixedY) {
+function drawChart(canvas, traces, yLabel, fixedY, xUnit) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth || canvas.width;
   const h = canvas.clientHeight || canvas.height;
@@ -677,7 +694,7 @@ function drawChart(canvas, traces, yLabel, fixedY) {
   for (let i = 0; i <= 4; i++) {
     const t = tMin + ((tMax - tMin) * i) / 4;
     const px = x(t);
-    ctx.fillText(t.toFixed(2) + "s", px, h - 6);
+    ctx.fillText(t.toFixed(2) + (xUnit || "s"), px, h - 6);
   }
   ctx.stroke();
 
@@ -1277,6 +1294,370 @@ function renderFrfCharts(names, plots) {
   meta.textContent = metaParts.join(" · ");
 }
 
+// --- strain map (strain page) -------------------------------------------------
+//
+// Renders GET /api/runs/<name>/strain: per raster line, the elastic
+// (direction-symmetric) differential belt torque binned along the sweep.
+// Four heatmaps (belt × sweep orientation) share one symmetric diverging
+// scale, so a tensioner asymmetry or a trapped preload reads as a color
+// field over the bed rather than 26 separate charts.
+
+const STRAIN_NEUTRAL = "#1f2630";
+const STRAIN_NEG = "#4fb3ff";
+const STRAIN_POS = "#e05a4f";
+const STRAIN_HEAT_ROW_PX = 14;
+const STRAIN_HEAT_PAD = { l: 46, r: 8, t: 4, b: 18 };
+
+function strainShellHtml(def) {
+  return (
+    `<div class="workspace">` +
+    `<main class="analysis">` +
+    `<section class="runs-section">` +
+    `<div class="section-head"><h2>strain runs</h2>` +
+    `<span class="note">strain_map — click a row to render its map</span></div>` +
+    `<div class="table-wrap runs-wrap"><table><thead><tr>` +
+    `<th>time</th><th>tag</th>` +
+    `</tr></thead><tbody id="strain-run-body"></tbody></table></div>` +
+    `</section>` +
+    `<section>` +
+    `<div class="section-head"><h2>elastic strain map</h2>` +
+    `<span class="note" id="strain-summary"></span></div>` +
+    `<div id="strain-heatmaps" class="strain-grid"></div>` +
+    `<div id="strain-scale"></div>` +
+    `</section>` +
+    `<section>` +
+    `<div class="section-head"><h2>per-line elastic profiles</h2>` +
+    `<span class="note">one polyline per raster line, along the sweep</span></div>` +
+    `<div class="charts" id="strain-profiles"></div>` +
+    `</section>` +
+    `<section>` +
+    `<div class="section-head"><h2>per-line DC offset — mean elastic</h2>` +
+    `<span class="note">a line-to-line offset is trapped preload, not local strain</span></div>` +
+    `<div class="charts" id="strain-dc"></div>` +
+    `</section>` +
+    `</main>` +
+    `<aside class="controls">${controlsSectionsHtml(def)}</aside>` +
+    `</div>`
+  );
+}
+
+async function ensureStrain(name) {
+  const run = state.runs.find((r) => r.name === name);
+  const cached = state.strain.cache.get(name);
+  if (cached && run && cached.mtime_utc === run.mtime_utc) return cached.data;
+  const data = await api(`/api/runs/${encodeURIComponent(name)}/strain`);
+  state.strain.cache.set(name, { mtime_utc: run ? run.mtime_utc : null, data });
+  return data;
+}
+
+function renderStrainRuns() {
+  const tbody = el("strain-run-body");
+  if (!tbody) return;
+  const runs = pageRuns(currentPageDef());
+  if (!runs.some((r) => r.name === state.strain.selected)) {
+    state.strain.selected = runs.length ? runs[0].name : null;
+  }
+  tbody.innerHTML = "";
+  for (const run of runs) {
+    const tr = document.createElement("tr");
+    tr.classList.add("selectable");
+    if (run.name === state.strain.selected) tr.classList.add("selected");
+    tr.addEventListener("click", () => {
+      state.strain.selected = run.name;
+      redrawStrain();
+    });
+    const timeTd = document.createElement("td");
+    timeTd.textContent = shortTime(run.mtime_utc);
+    timeTd.title = `${run.name} — ${run.mtime_utc}`;
+    tr.appendChild(timeTd);
+    const tagTd = document.createElement("td");
+    tagTd.textContent = `${run.tag}${run.axis ? " " + run.axis : ""}`;
+    tr.appendChild(tagTd);
+    tbody.appendChild(tr);
+  }
+}
+
+function strainColor(t) {
+  const clamped = Math.max(-1, Math.min(1, t));
+  return clamped < 0
+    ? mixColor(STRAIN_NEUTRAL, STRAIN_NEG, -clamped)
+    : mixColor(STRAIN_NEUTRAL, STRAIN_POS, clamped);
+}
+
+function sweptEntry(line) {
+  const entries = Object.entries(line.swept || {});
+  return entries.length ? entries[0] : ["?", 0];
+}
+
+function strainLineLabel(line) {
+  const [key, value] = sweptEntry(line);
+  return `${key}=${Number(value).toFixed(0)}`;
+}
+
+/// Raster lines grouped by sweep orientation and ordered by the swept
+/// coordinate, so heatmap rows lay out like the bed does.
+function strainGroups(data) {
+  const bySwept = (a, b) => sweptEntry(a)[1] - sweptEntry(b)[1];
+  return [
+    { title: "X sweep", lines: data.lines.filter((l) => l.name.startsWith("xline")).sort(bySwept) },
+    { title: "Y sweep", lines: data.lines.filter((l) => l.name.startsWith("yline")).sort(bySwept) },
+  ].filter((g) => g.lines.length);
+}
+
+function strainStats(data) {
+  let maxElastic = 0;
+  let fricSum = 0;
+  let fricN = 0;
+  for (const line of data.lines) {
+    for (const belt of line.belts) {
+      for (const v of belt.elastic) {
+        if (v !== null) maxElastic = Math.max(maxElastic, Math.abs(v));
+      }
+      for (const v of belt.friction) {
+        if (v !== null) {
+          fricSum += Math.abs(v);
+          fricN++;
+        }
+      }
+    }
+  }
+  return { maxElastic, meanFriction: fricN ? fricSum / fricN : 0 };
+}
+
+function lineBinWidth(line) {
+  const c = line.bin_centers;
+  return c.length > 1 ? c[1] - c[0] : 2 * c[0];
+}
+
+function drawStrainHeatmap(canvas, lines, beltIdx, vmax) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || canvas.width;
+  const h = canvas.clientHeight || canvas.height;
+  const backingW = Math.round(w * dpr);
+  const backingH = Math.round(h * dpr);
+  if (canvas.width !== backingW || canvas.height !== backingH) {
+    canvas.width = backingW;
+    canvas.height = backingH;
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = "#0d1117";
+  ctx.fillRect(0, 0, w, h);
+  const pad = STRAIN_HEAT_PAD;
+  const mmMax = Math.max(
+    ...lines.map((l) => l.bin_centers[l.bin_centers.length - 1] + lineBinWidth(l) / 2)
+  );
+  const rowH = (h - pad.t - pad.b) / lines.length;
+  const x = (mm) => pad.l + (mm / mmMax) * (w - pad.l - pad.r);
+
+  ctx.font = "10px monospace";
+  lines.forEach((line, r) => {
+    const y0 = pad.t + r * rowH;
+    const half = lineBinWidth(line) / 2;
+    line.bin_centers.forEach((center, b) => {
+      const v = line.belts[beltIdx].elastic[b];
+      if (v === null) return;
+      const x0 = x(center - half);
+      ctx.fillStyle = strainColor(v / vmax);
+      ctx.fillRect(x0, y0 + 0.5, x(center + half) - x0, rowH - 1);
+    });
+    ctx.fillStyle = "#8a97a3";
+    ctx.fillText(strainLineLabel(line), 2, y0 + rowH / 2 + 3.5);
+  });
+
+  ctx.fillStyle = "#8a97a3";
+  for (let i = 0; i <= 4; i++) {
+    const mm = (mmMax * i) / 4;
+    ctx.fillText(`${mm.toFixed(0)}mm`, x(mm), h - 5);
+  }
+}
+
+function strainHeatmapBox(title, lines, beltIdx, vmax) {
+  const box = document.createElement("div");
+  box.className = "chart-box";
+  const head = document.createElement("h3");
+  head.textContent = title;
+  box.appendChild(head);
+  const canvas = document.createElement("canvas");
+  canvas.width = 430;
+  canvas.height = STRAIN_HEAT_PAD.t + STRAIN_HEAT_PAD.b + lines.length * STRAIN_HEAT_ROW_PX;
+  canvas.style.height = `${canvas.height}px`;
+  box.appendChild(canvas);
+  drawStrainHeatmap(canvas, lines, beltIdx, vmax);
+  return box;
+}
+
+function strainScaleHtml(vmax) {
+  const stops = [];
+  for (let i = 0; i <= 8; i++) stops.push(strainColor(i / 4 - 1));
+  return (
+    `<div class="strain-scale"><span>−${vmax.toFixed(1)}%</span>` +
+    `<span class="bar" style="background:linear-gradient(90deg,${stops.join(",")})"></span>` +
+    `<span>+${vmax.toFixed(1)}%</span>` +
+    `<span class="hint">elastic differential torque, % rated — null bins stay dark</span></div>`
+  );
+}
+
+function strainProfileBox(pair, beltIdx, lines, vmax) {
+  const box = document.createElement("div");
+  box.className = "chart-box";
+  const head = document.createElement("h3");
+  head.textContent = pair;
+  box.appendChild(head);
+  const canvas = document.createElement("canvas");
+  canvas.width = 860;
+  canvas.height = 200;
+  box.appendChild(canvas);
+  const ramp = (i) =>
+    mixColor(PALETTE[beltIdx % PALETTE.length], "#ffffff", lines.length > 1 ? (0.65 * i) / (lines.length - 1) : 0);
+  const traces = lines.map((line, i) => ({
+    t: line.bin_centers,
+    y: line.belts[beltIdx].elastic,
+    color: ramp(i),
+  }));
+  drawChart(canvas, traces, "elastic (%)", { yMin: -vmax, yMax: vmax }, "mm");
+  const legend = document.createElement("div");
+  legend.className = "legend";
+  lines.forEach((line, i) => {
+    const item = document.createElement("span");
+    item.innerHTML = `<span class="swatch" style="background:${ramp(i)}"></span>${line.name}`;
+    legend.appendChild(item);
+  });
+  box.appendChild(legend);
+  return box;
+}
+
+function meanElastic(line, beltIdx) {
+  const kept = line.belts[beltIdx].elastic.filter((v) => v !== null);
+  if (!kept.length) return null;
+  return kept.reduce((a, b) => a + b, 0) / kept.length;
+}
+
+function drawStrainDcBars(canvas, labels, values) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || canvas.width;
+  const h = canvas.clientHeight || canvas.height;
+  const backingW = Math.round(w * dpr);
+  const backingH = Math.round(h * dpr);
+  if (canvas.width !== backingW || canvas.height !== backingH) {
+    canvas.width = backingW;
+    canvas.height = backingH;
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = "#0d1117";
+  ctx.fillRect(0, 0, w, h);
+  const pad = { l: 46, r: 8, t: 8, b: 40 };
+  const vmax = Math.max(1e-6, ...values.filter((v) => v !== null).map(Math.abs));
+  const y = (v) => pad.t + ((vmax - v) / (2 * vmax)) * (h - pad.t - pad.b);
+  const slot = (w - pad.l - pad.r) / labels.length;
+
+  ctx.font = "10px monospace";
+  ctx.fillStyle = "#8a97a3";
+  for (const v of [-vmax, 0, vmax]) {
+    ctx.fillText(v.toFixed(1), 2, y(v) + 3);
+  }
+  ctx.strokeStyle = "#29313a";
+  ctx.beginPath();
+  ctx.moveTo(pad.l, y(0));
+  ctx.lineTo(w - pad.r, y(0));
+  ctx.stroke();
+
+  values.forEach((v, i) => {
+    const cx = pad.l + (i + 0.5) * slot;
+    if (v !== null) {
+      ctx.fillStyle = strainColor(v / vmax);
+      const top = Math.min(y(0), y(v));
+      ctx.fillRect(cx - slot * 0.35, top, slot * 0.7, Math.max(1, Math.abs(y(v) - y(0))));
+    }
+    ctx.save();
+    ctx.translate(cx + 3, h - pad.b + 10);
+    ctx.rotate(-Math.PI / 4);
+    ctx.fillStyle = "#8a97a3";
+    ctx.textAlign = "right";
+    ctx.fillText(labels[i], 0, 0);
+    ctx.restore();
+  });
+  ctx.fillStyle = "#8a97a3";
+  ctx.textAlign = "left";
+  ctx.fillText("mean elastic (%)", pad.l, 10);
+}
+
+function strainDcBox(pair, beltIdx, lines) {
+  const box = document.createElement("div");
+  box.className = "chart-box";
+  const head = document.createElement("h3");
+  head.textContent = pair;
+  box.appendChild(head);
+  const canvas = document.createElement("canvas");
+  canvas.width = 860;
+  canvas.height = 150;
+  box.appendChild(canvas);
+  drawStrainDcBars(
+    canvas,
+    lines.map(strainLineLabel),
+    lines.map((line) => meanElastic(line, beltIdx))
+  );
+  return box;
+}
+
+function renderStrainCharts(data) {
+  const heatmaps = el("strain-heatmaps");
+  const profiles = el("strain-profiles");
+  const dc = el("strain-dc");
+  const summary = el("strain-summary");
+  heatmaps.innerHTML = "";
+  profiles.innerHTML = "";
+  dc.innerHTML = "";
+  if (!data.lines.length) {
+    summary.textContent = "run has no lines";
+    el("strain-scale").innerHTML = "";
+    return;
+  }
+  const stats = strainStats(data);
+  const vmax = Math.max(1e-6, stats.maxElastic);
+  summary.textContent =
+    `max |elastic| ${stats.maxElastic.toFixed(1)}% · ` +
+    `mean |friction| ${stats.meanFriction.toFixed(1)}%`;
+  el("strain-scale").innerHTML = strainScaleHtml(vmax);
+  const groups = strainGroups(data);
+  const pairs = data.lines[0].belts.map((b) => b.pair);
+  pairs.forEach((pair, beltIdx) => {
+    for (const group of groups) {
+      heatmaps.appendChild(
+        strainHeatmapBox(`${pair} — ${group.title}`, group.lines, beltIdx, vmax)
+      );
+    }
+    const ordered = groups.flatMap((g) => g.lines);
+    profiles.appendChild(strainProfileBox(pair, beltIdx, ordered, vmax));
+    dc.appendChild(strainDcBox(pair, beltIdx, ordered));
+  });
+}
+
+async function redrawStrain() {
+  renderStrainRuns();
+  if (!el("strain-heatmaps")) return;
+  const summary = el("strain-summary");
+  const name = state.strain.selected;
+  if (!name) {
+    summary.textContent = "no strain_map runs yet — run SERVO_STRAIN_MAP first";
+    el("strain-heatmaps").innerHTML = "";
+    el("strain-scale").innerHTML = "";
+    el("strain-profiles").innerHTML = "";
+    el("strain-dc").innerHTML = "";
+    return;
+  }
+  let data;
+  try {
+    data = await ensureStrain(name);
+  } catch (e) {
+    summary.textContent = String(e);
+    return;
+  }
+  if (state.strain.selected !== name || !el("strain-heatmaps")) return;
+  renderStrainCharts(data);
+}
+
 // --- PSD peak list (notches page) -------------------------------------------
 
 /// Greedy spaced peak-picking inside the resonance band: repeatedly take
@@ -1382,6 +1763,10 @@ function renderPeakList(names, plots, steps) {
 async function redrawCharts() {
   const def = currentPageDef();
   if (def.journal) return;
+  if (def.strain) {
+    await redrawStrain();
+    return;
+  }
   const names = selectedRunNames();
   const plots = [];
   const okNames = [];

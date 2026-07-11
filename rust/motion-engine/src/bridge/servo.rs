@@ -324,6 +324,7 @@ impl PyMotionEngine {
         dither_amplitude_nm: u32,
         dither_freq_millihz: u32,
         dither_duration_ms: u16,
+        swap_roles: bool,
     ) -> PyResult<u64> {
         let conn = self.ethercat_conn(mcu_handle, "sync_servo_pair")?;
         let reports = std::sync::Arc::clone(&self.sync_reports);
@@ -337,6 +338,7 @@ impl PyMotionEngine {
             dither_amplitude_nm,
             dither_freq_millihz,
             dither_duration_ms,
+            swap_roles,
             "servo belt pair sync"
         );
         Ok(self.endpoint_calls.start("sync_servo_pair", move || {
@@ -349,6 +351,7 @@ impl PyMotionEngine {
                     dither_amplitude_nm,
                     dither_freq_millihz,
                     dither_duration_ms,
+                    swap_roles: u8::from(swap_roles),
                 },
             )?;
             let result = resp.result;

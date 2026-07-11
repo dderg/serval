@@ -835,6 +835,7 @@ pub struct SyncPair {
     pub dither_amplitude_nm: u32,
     pub dither_freq_millihz: u32,
     pub dither_duration_ms: u16,
+    pub swap_roles: u8,
 }
 
 impl Encode for SyncPair {
@@ -845,6 +846,7 @@ impl Encode for SyncPair {
         put_u32(out, self.dither_amplitude_nm);
         put_u32(out, self.dither_freq_millihz);
         put_u16(out, self.dither_duration_ms);
+        put_u8(out, self.swap_roles);
     }
 }
 
@@ -857,6 +859,7 @@ impl Decode for SyncPair {
             dither_amplitude_nm: get_u32(c)?,
             dither_freq_millihz: get_u32(c)?,
             dither_duration_ms: get_u16(c)?,
+            swap_roles: get_u8(c)?,
         })
     }
 }
