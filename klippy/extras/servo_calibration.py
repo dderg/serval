@@ -116,6 +116,7 @@ class ServoCalibration:
         self.travel_speed = config.getfloat("travel_speed", 100.0, above=0.0)
         for name in (
             "SERVO_MEASURE_TRACKING",
+            "SERVO_MEASURE_DIFFERENTIAL",
             "SERVO_MEASURE_INERTIA",
             "SERVO_MEASURE_INERTIA_COREXY",
             "SERVO_MEASURE_FRICTION",
@@ -579,6 +580,137 @@ class ServoCalibration:
             )
             report_args += ["--axis", axis, "--combine-corexy", belts]
         self._run(gcmd, "servo_capture.py", report_args, 120.0)
+
+    MAX_DIFFERENTIAL_AMPLITUDE_MM = 0.5
+    MAX_BUZZ_FREQ_HZ = 2000.0
+    MAX_BUZZ_DURATION_S = 300.0
+
+    cmd_SERVO_MEASURE_DIFFERENTIAL_help = (
+        "Anti-phase chirp on one AWD belt pair via the engine buzz "
+        "generator - the carriage holds still while the two drives strain "
+        "the belt against each other, so the capture isolates the "
+        "rotor-vs-rotor (differential) modes. Renders a differential FRF "
+        "PNG with mode frequency, damping and coherence. Belt strain is "
+        "twice AMPLITUDE. Params BELT=A|B FREQ_START FREQ_END HZ_PER_SEC "
+        "DURATION AMPLITUDE RAMP DWELL_MS NAME"
+    )
+
+    def cmd_SERVO_MEASURE_DIFFERENTIAL(self, gcmd):
+        from . import servo_axis
+
+        belt = gcmd.get("BELT", "A").upper()
+        if belt not in ("A", "B"):
+            raise gcmd.error("BELT must be A or B (got %r)" % (belt,))
+        layout = self._corexy_fit_layout(gcmd)
+        if layout["pairs"] is None:
+            raise gcmd.error(
+                "SERVO_MEASURE_DIFFERENTIAL needs two drives per belt "
+                "(AWD); this printer has one drive per belt"
+            )
+        pair_names = layout["pairs"].split(";")["AB".index(belt)].split(",")
+        motors = [
+            servo_axis.resolve_servo_motor(
+                self.printer, name, "SERVO_MEASURE_DIFFERENTIAL"
+            )[1]
+            for name in pair_names
+        ]
+        node = self.printer.lookup_object(
+            "ethercat_node " + motors[0].get_node_name()
+        )
+        handle = node.get_engine_handle()
+        if handle is None:
+            raise gcmd.error(
+                "belt %s drives have no live EtherCAT engine handle "
+                "(node not claimed)" % (belt,)
+            )
+        slots = [node.get_slot_for_motor(m.get_motor_name()) for m in motors]
+        freq_start = gcmd.get_float("FREQ_START", 20.0, above=0.0)
+        freq_end = gcmd.get_float("FREQ_END", 250.0, above=0.0)
+        if max(freq_start, freq_end) > self.MAX_BUZZ_FREQ_HZ:
+            raise gcmd.error(
+                "buzz frequencies must stay at or below %.0f Hz"
+                % (self.MAX_BUZZ_FREQ_HZ,)
+            )
+        amplitude = gcmd.get_float("AMPLITUDE", 0.05, above=0.0)
+        if amplitude > self.MAX_DIFFERENTIAL_AMPLITUDE_MM:
+            raise gcmd.error(
+                "AMPLITUDE %.3f mm exceeds the %.1f mm differential ceiling "
+                "(belt strain between the pair is twice the amplitude)"
+                % (amplitude, self.MAX_DIFFERENTIAL_AMPLITUDE_MM)
+            )
+        hz_per_sec = gcmd.get_float("HZ_PER_SEC", 5.0, above=0.0)
+        duration = gcmd.get_float("DURATION", 0.0, minval=0.0)
+        if duration <= 0.0:
+            duration = max(abs(freq_end - freq_start) / hz_per_sec, 0.5)
+        if duration > self.MAX_BUZZ_DURATION_S:
+            raise gcmd.error(
+                "sweep duration %.0f s exceeds the %.0f s buzz ceiling; "
+                "raise HZ_PER_SEC or narrow the frequency band"
+                % (duration, self.MAX_BUZZ_DURATION_S)
+            )
+        ramp = gcmd.get_float(
+            "RAMP",
+            min(0.1 * duration, 3.0 / min(freq_start, freq_end)),
+            above=0.0,
+        )
+        dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
+        name = gcmd.get("NAME", "diff")
+        self._prep("X", dwell)
+        self._prep("Y", dwell)
+        engine = self.printer.lookup_object("motion_engine")
+        gcmd.respond_info(
+            "differential sweep on belt %s (%s anti-phase %s): "
+            "%.1f->%.1f Hz over %.1f s, amplitude %.3f mm"
+            % (
+                belt,
+                pair_names[0],
+                pair_names[1],
+                freq_start,
+                freq_end,
+                duration,
+                amplitude,
+            )
+        )
+        self.gcode.run_script_from_command(
+            "SERVO_CAPTURE_START SERVO=%s NAME=%s"
+            % (",".join(pair_names), name)
+        )
+        try:
+            engine.resonance_buzz(
+                handle,
+                (1 << slots[0]) | (1 << slots[1]),
+                1 << slots[1],
+                int(round(freq_start * 1000.0)),
+                int(round(freq_end * 1000.0)),
+                int(round(amplitude * 1e6)),
+                int(round(duration * 1000.0)),
+                int(round(ramp * 1000.0)),
+            )
+            reactor = self.printer.get_reactor()
+            reactor.pause(reactor.monotonic() + duration + 0.2)
+        finally:
+            self.gcode.run_script_from_command("SERVO_CAPTURE_STOP")
+        pair_spec = "+".join(
+            "%s:%d"
+            % (m.get_motor_name(), -1 if m.get_invert_direction() else 1)
+            for m in motors
+        )
+        self._run(
+            gcmd,
+            "servo_diff_report.py",
+            [
+                "--name",
+                name,
+                "--pair",
+                pair_spec,
+                "--freq-start",
+                "%g" % (freq_start,),
+                "--freq-end",
+                "%g" % (freq_end,),
+                "--png",
+            ],
+            120.0,
+        )
 
     cmd_SERVO_MEASURE_INERTIA_help = (
         "Excitation grid for the inertia/friction fit (servo-ident). Params "
