@@ -40,11 +40,27 @@ fn poll_never_trips_if_torque_starts_at_or_above_threshold() {
     assert_eq!(arm.poll(450), Some(9));
 }
 
+const TRIP_CLOCK: u64 = 1_000_000;
+
 fn drain(bank: &mut SensorlessBank, torque: &[i16]) -> Vec<(usize, u8, i16)> {
+    drain_at(bank, TRIP_CLOCK, torque, &[0, 0])
+        .into_iter()
+        .map(|(slot, endstop_id, t, _contact)| (slot, endstop_id, t))
+        .collect()
+}
+
+fn drain_at(
+    bank: &mut SensorlessBank,
+    trip_clock: u64,
+    torque: &[i16],
+    positions: &[i32],
+) -> Vec<(usize, u8, i16, u64)> {
     let mut fired = Vec::new();
     bank.poll(
+        trip_clock,
         |slot| torque[slot],
-        |slot, endstop_id, t| fired.push((slot, endstop_id, t)),
+        |slot| positions[slot],
+        |slot, endstop_id, t, contact| fired.push((slot, endstop_id, t, contact)),
     );
     fired
 }
@@ -128,4 +144,90 @@ fn unpaired_slot_still_trips_on_its_own_reading() {
     bank.arm(0, 4, 300, None);
     assert!(drain(&mut bank, &[0, 0]).is_empty());
     assert_eq!(drain(&mut bank, &[2000, -2000]), vec![(0, 4, 2000)]);
+}
+
+fn armed_bank_with_ramp(commanded: &[(u64, i32)]) -> SensorlessBank {
+    let mut bank = SensorlessBank::new(1);
+    bank.arm(0, 4, 300, None);
+    assert!(drain_at(&mut bank, 0, &[0], &[0]).is_empty());
+    for &(clock, counts) in commanded {
+        bank.record_commanded(clock, |_slot| Some(counts));
+    }
+    bank
+}
+
+#[test]
+fn contact_clock_is_when_commanded_first_crossed_trip_actual() {
+    // Commanded ramps 100 counts/cycle; the rotor stalled at 450 while the
+    // command wound on to 800 before the torque threshold fired.
+    let ramp: Vec<(u64, i32)> = (0..=8).map(|i| (1000 + i, 100 * i as i32)).collect();
+    let mut bank = armed_bank_with_ramp(&ramp);
+    let fired = drain_at(&mut bank, 2000, &[400], &[450]);
+    assert_eq!(fired, vec![(0, 4, 400, 1005)]);
+}
+
+#[test]
+fn contact_clock_handles_negative_direction_homing() {
+    let ramp: Vec<(u64, i32)> = (0..=8).map(|i| (1000 + i, -100 * i as i32)).collect();
+    let mut bank = armed_bank_with_ramp(&ramp);
+    let fired = drain_at(&mut bank, 2000, &[-400], &[-450]);
+    assert_eq!(fired, vec![(0, 4, -400, 1005)]);
+}
+
+#[test]
+fn contact_clock_falls_back_to_trip_clock_without_history() {
+    let mut bank = SensorlessBank::new(1);
+    bank.arm(0, 4, 300, None);
+    assert!(drain_at(&mut bank, 0, &[0], &[0]).is_empty());
+    let fired = drain_at(&mut bank, 2000, &[400], &[450]);
+    assert_eq!(fired, vec![(0, 4, 400, 2000)]);
+}
+
+#[test]
+fn contact_clock_falls_back_to_trip_clock_with_stationary_history() {
+    let mut bank = armed_bank_with_ramp(&[(1000, 500), (1001, 500), (1002, 500)]);
+    let fired = drain_at(&mut bank, 2000, &[400], &[450]);
+    assert_eq!(fired, vec![(0, 4, 400, 2000)]);
+}
+
+#[test]
+fn contact_clock_clamps_to_oldest_sample_when_history_is_exhausted() {
+    // The whole retained window is already past the trip-time actual: the
+    // best available answer is the oldest retained clock (errs toward
+    // recording the wall short of its true position, never past it).
+    let ramp: Vec<(u64, i32)> = (5..=8).map(|i| (1000 + i, 100 * i as i32)).collect();
+    let mut bank = armed_bank_with_ramp(&ramp);
+    let fired = drain_at(&mut bank, 2000, &[400], &[450]);
+    assert_eq!(fired, vec![(0, 4, 400, 1005)]);
+}
+
+#[test]
+fn contact_clock_falls_back_when_commanded_never_reached_actual() {
+    let ramp: Vec<(u64, i32)> = (0..=8).map(|i| (1000 + i, 100 * i as i32)).collect();
+    let mut bank = armed_bank_with_ramp(&ramp);
+    let fired = drain_at(&mut bank, 2000, &[400], &[900]);
+    assert_eq!(fired, vec![(0, 4, 400, 2000)]);
+}
+
+#[test]
+fn commanded_history_evicts_oldest_beyond_capacity() {
+    let mut bank = SensorlessBank::new(1);
+    bank.arm(0, 4, 300, None);
+    assert!(drain_at(&mut bank, 0, &[0], &[0]).is_empty());
+    for i in 0..(COMMANDED_HISTORY_LEN as u64 + 100) {
+        bank.record_commanded(i, |_slot| Some(i as i32));
+    }
+    // Sample 50 was evicted; the oldest retained sample is 100.
+    let fired = drain_at(&mut bank, 10_000, &[400], &[50]);
+    assert_eq!(fired, vec![(0, 4, 400, 100)]);
+}
+
+#[test]
+fn record_commanded_skips_slots_without_a_commanded_frame() {
+    let mut bank = SensorlessBank::new(1);
+    bank.arm(0, 4, 300, None);
+    assert!(drain_at(&mut bank, 0, &[0], &[0]).is_empty());
+    bank.record_commanded(1000, |_slot| None);
+    let fired = drain_at(&mut bank, 2000, &[400], &[450]);
+    assert_eq!(fired, vec![(0, 4, 400, 2000)]);
 }

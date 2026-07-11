@@ -212,8 +212,12 @@ class ServoRail(BaseRail):
             self.homing_retract_dist = 0.0
             self.homing_retract_speed = 0.0
             self.homing_positive_dir = False
+            self.sensorless_home_offset = 0.0
         else:
             self.position_endstop = axis_config.getfloat("position_endstop")
+            self.sensorless_home_offset = axis_config.getfloat(
+                "sensorless_home_offset", 0.0, minval=0.0
+            )
             self._parse_homing_speeds(axis_config)
             self.homing_positive_dir = infer_positive_dir(
                 axis_config,
@@ -319,6 +323,20 @@ class ServoRail(BaseRail):
                 torque_trip_tenth_pct,
                 True,
             )
+
+    def measured_trip_position(self, axis, trip_pos, final_pos):
+        """The trip clock the endpoint reports is the commanded stream's
+        crossing of the rotor's stall position, so trip_pos lands on the
+        physical crash point (plus belt stretch and torque-threshold lag).
+        sensorless_home_offset places the recorded endstop that far inside
+        the crash point so full-range moves stop short of the hard stop."""
+        direction = 1.0 if self.homing_positive_dir else -1.0
+        overshoot = final_pos[axis] - trip_pos[axis]
+        return (
+            self.position_endstop
+            + direction * self.sensorless_home_offset
+            + overshoot
+        )
 
     def trip_move_end(self, entry):
         node = self._engine_node()
