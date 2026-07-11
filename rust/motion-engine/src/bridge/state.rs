@@ -19,6 +19,12 @@ use crate::lock_ext::LockExt;
 pub(crate) struct HomingState {
     pub(crate) run: Arc<Mutex<Option<HomingRun>>>,
     pub(crate) pending_trip: Arc<Mutex<Option<(u32, u8, u64)>>>,
+    /// (endstop_mcu, endstop_id, host_secs) of the most recent endstop arm.
+    /// `home_axis_start` consumes it as the staleness window's start: a trip
+    /// is genuine from the moment the endstop is armed, which happens before
+    /// the run is registered — an endstop already loaded past its threshold
+    /// (e.g. pair strain against a hard stop) trips in that gap.
+    pub(crate) last_arm: Arc<Mutex<Option<(u32, u8, f64)>>>,
     pub(crate) active_drip_cohort: Arc<Mutex<Option<u64>>>,
     pub(crate) result: Mutex<
         Option<

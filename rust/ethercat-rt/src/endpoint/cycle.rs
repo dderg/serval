@@ -72,7 +72,7 @@ pub(super) fn run_cycle(ctx: &mut EndpointCtx) -> ControlFlow<()> {
     ControlFlow::Continue(())
 }
 
-fn apply_tick_action(ctx: &mut EndpointCtx, apply_time: u64, all_rings_empty: bool) {
+pub(super) fn apply_tick_action(ctx: &mut EndpointCtx, apply_time: u64, all_rings_empty: bool) {
     match ctx.gate.on_tick(apply_time, all_rings_empty) {
         TickAction::None => {}
         TickAction::ExecuteDisable => {
@@ -81,6 +81,12 @@ fn apply_tick_action(ctx: &mut EndpointCtx, apply_time: u64, all_rings_empty: bo
             ctx.gate.disable_finished();
             for c in &mut ctx.cmaps {
                 *c = None;
+            }
+            for t in &mut ctx.last_streamed_target {
+                *t = None;
+            }
+            for lc in &mut ctx.last_counts {
+                *lc = None;
             }
         }
         TickAction::Fault { code } => {
@@ -167,21 +173,28 @@ fn sample_slot_targets(
                 Some((counts, sign * vel_mm_s, sign * acc_mm_s2))
             })
         } else if let Some((pos_mm, vel_mm_s, acc_mm_s2)) = ctx.rings[s].sample(apply_time) {
-            // Streaming is always relative: the stream anchors the drive's
-            // actual position to the host's first commanded value, so a
-            // homing set_position (host frame shift) can never yank a
-            // drive. The report_anchor covers absolute position queries;
-            // the drive frame itself is never used. The anchor lives for
-            // the whole stream — it must survive mid-stream ring gaps
-            // (dwells, host scheduling stalls), because re-anchoring at a
-            // gap converts the drive's standing following error into a
-            // one-cycle commanded step and lets paired drives drift apart.
-            // It drops only where the frame is genuinely redefined:
-            // discard_motion (Stop/ResumeStream), torque disable, and a
-            // sync re-seed.
+            // Streaming is always relative: the stream anchors the host's
+            // first commanded mm value onto the drive's commanded-counts
+            // frame, so a homing set_position (host frame shift) can never
+            // yank a drive. The report_anchor covers absolute position
+            // queries; the drive frame itself is never used. The counts
+            // side of the anchor is the last COMMANDED target, not
+            // position_actual: at a homing trip both drives of a belt pair
+            // are elastically wound forward by their (unequal) following
+            // errors, and anchoring each at its own strained actual bakes
+            // that differential in as a permanent commanded offset — the
+            // pair then holds belt tension forever. Anchoring on commanded
+            // counts keeps the frame continuous across Stop/ResumeStream,
+            // so the retract releases the wind-up instead of freezing it.
+            // position_actual is the fallback only where no commanded frame
+            // exists: the first stream after torque enable, a drive fault,
+            // or a sync coast — the rotor genuinely moved uncommanded there.
             let cpm = ctx.cmd_counts_per_mm[s];
+            let commanded_anchor = ctx.last_streamed_target[s];
             let map = ctx.cmaps[s].get_or_insert_with(|| {
-                CountMap::new(cpm, ctx.drive.position_actual(s), f64::from(pos_mm))
+                let anchor_counts =
+                    commanded_anchor.unwrap_or_else(|| ctx.drive.position_actual(s));
+                CountMap::new(cpm, anchor_counts, f64::from(pos_mm))
             });
             Some((map.target_counts(f64::from(pos_mm)), vel_mm_s, acc_mm_s2))
         } else {
@@ -453,6 +466,9 @@ fn handle_drive_fault(ctx: &mut EndpointCtx) {
             }
             ctx.gate.on_drive_fault();
             discard_motion(ctx);
+            for t in &mut ctx.last_streamed_target {
+                *t = None;
+            }
             ctx.latched_drive_err = err;
             let retired = respond_fault_heartbeat(ctx, 0, err);
             ctx.last_sent_retired = retired.iter().sum();

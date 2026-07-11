@@ -429,6 +429,14 @@ class Motion:
         if not dirty:
             return
         measured = self.engine.query_motor_positions()
+        missing = [a for a in dirty if "xyz"[a] not in measured]
+        if missing:
+            raise self.printer.command_error(
+                "Cannot resync parked servo axis %s: the live motor query"
+                " returned no position for it (EtherCAT endpoint down or"
+                " drive faulted?) — home the axis again"
+                % ", ".join("XYZ"[a] for a in missing)
+            )
         newpos = list(self.commanded_pos)
         for axis in dirty:
             newpos[axis] = measured["xyz"[axis]][0]

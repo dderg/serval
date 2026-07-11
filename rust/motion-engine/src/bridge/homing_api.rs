@@ -56,9 +56,11 @@ impl PyMotionEngine {
         // are machine space, so the gcode rest point crosses the warp here.
         self.send_serial_position_seeds(self.machine_from_gcode(start_pos))?;
 
-        let window_start_host = {
-            let router = self.router.lock_ok();
-            router.host_now_secs()
+        let window_start_host = match self.homing.last_arm.lock_ok().take() {
+            Some((arm_mcu, arm_id, arm_host)) if arm_mcu == endstop_mcu && arm_id == endstop_id => {
+                arm_host
+            }
+            _ => self.router.lock_ok().host_now_secs(),
         };
 
         *self.homing.active_drip_cohort.lock_ok() = Some(cohort);
@@ -162,6 +164,10 @@ impl PyMotionEngine {
             })?;
         let deps = self.trip_deps();
         *self.homing.pending_trip.lock_ok() = None;
+        {
+            let host_now = self.router.lock_ok().host_now_secs();
+            *self.homing.last_arm.lock_ok() = Some((mcu_handle, endstop_id, host_now));
+        }
         let router = Arc::clone(&self.router);
         let fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let id = host_io
