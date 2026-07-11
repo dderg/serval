@@ -173,6 +173,20 @@ td.diff.empty { color: #4d5761; }
 td.verdict { max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
 td.actions button { padding: 1px 7px; font-size: 11px; }
 
+button.pin-toggle {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+  opacity: 0;
+  filter: grayscale(1) brightness(0.8);
+  vertical-align: -1px;
+}
+tr:hover button.pin-toggle { opacity: 0.55; }
+button.pin-toggle.pinned, tr:hover button.pin-toggle.pinned { opacity: 1; filter: none; }
+button.pin-toggle:hover { background: none; opacity: 1; }
+
 .swatch {
   display: inline-block;
   width: 10px;
