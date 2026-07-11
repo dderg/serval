@@ -1156,7 +1156,9 @@ M400
 """
 
 
-def heaters_config(h7_pty: str, gcode_dir: str, control: str = "pid") -> str:
+def heaters_config(
+    h7_pty: str, gcode_dir: str, control: str = "pid", heated_fan: bool = False
+) -> str:
     """Cartesian world carrying the heater/fan/pwm zoo the legacy batch
     suite (test/klippy) covered: extruder heater (pid or mpc), chamber
     heater with saved PID profiles, plain/scaled/generic/temperature/heated
@@ -1179,12 +1181,18 @@ fan_ambient_transfer: 0.155082, 0.20156, 0.216441
 """
         mpc_sensors = """
 [temperature_sensor test_mpc_block]
-sensor_type: temperature_mpc_block
-extruder: extruder
+sensor_type: mpc_block_temperature
+heater_name: extruder
+min_temp: 0
+max_temp: 325
+ignore_limits: True
 
 [temperature_sensor test_mpc_ambient]
-sensor_type: temperature_mpc_ambient
-extruder: extruder
+sensor_type: mpc_ambient_temperature
+heater_name: extruder
+min_temp: 0
+max_temp: 100
+ignore_limits: True
 """
     else:
         extruder_control = """\
@@ -1194,6 +1202,32 @@ pid_ki: 1.080
 pid_kd: 114.000
 """
         mpc_sensors = ""
+    if heated_fan:
+        # heated_fan registers itself as THE fan and refuses to coexist
+        # with a [fan] section, exactly like the legacy world split.
+        fan_section = """\
+[heated_fan]
+heater_pin: gpiochip0/gpio34
+sensor_type: Generic 3950
+sensor_pin: analog2
+min_temp: 0
+max_temp: 130
+control: pid
+pid_kp: 63.350
+pid_ki: 4.100
+pid_kd: 244.691
+pin: gpiochip0/gpio35
+heater_temp: 50
+min_speed: 0.5
+idle_timeout: 5
+"""
+    else:
+        fan_section = """\
+[fan]
+pin: gpiochip0/gpio31
+min_power: 0.1
+max_power: 1
+"""
     return f"""\
 [mcu]
 serial: {h7_pty}
@@ -1217,21 +1251,21 @@ z_motors: z
 position_min: 0
 position_endstop: 0
 position_max: 200
-endstop_pin: ^gpiochip0/gpio10
+endstop_pin: ^gpiochip0/gpio200
 homing_speed: 10
 
 [axis y]
 position_min: 0
 position_endstop: 0
 position_max: 200
-endstop_pin: ^gpiochip0/gpio11
+endstop_pin: ^gpiochip0/gpio201
 homing_speed: 10
 
 [axis z]
 position_min: -5
 position_endstop: 0
 position_max: 200
-endstop_pin: ^gpiochip0/gpio12
+endstop_pin: ^gpiochip0/gpio202
 homing_speed: 5
 
 [axis e]
@@ -1304,11 +1338,7 @@ pid_kp: 22.200
 pid_ki: 1.080
 pid_kd: 114.000
 
-[fan]
-pin: gpiochip0/gpio31
-min_power: 0.1
-max_power: 1
-
+{fan_section}
 [fan_generic xxx]
 pin: gpiochip0/gpio32
 min_power: 0.1
@@ -1327,21 +1357,6 @@ pid_Kd: 114
 min_temp: 0
 max_temp: 210
 
-[heated_fan]
-heater_pin: gpiochip0/gpio34
-sensor_type: Generic 3950
-sensor_pin: analog2
-min_temp: 0
-max_temp: 130
-control: pid
-pid_kp: 63.350
-pid_ki: 4.100
-pid_kd: 244.691
-pin: gpiochip0/gpio35
-heater_temp: 50
-min_speed: 0.5
-idle_timeout: 5
-
 [output_pin soft_pwm_pin]
 pin: gpiochip0/gpio37
 pwm: True
@@ -1351,12 +1366,6 @@ cycle_time: 0.01
 
 [pwm_cycle_time cycle_pwm_pin]
 pin: gpiochip0/gpio38
-value: 0
-shutdown_value: 0
-cycle_time: 0.01
-
-[pwm_tool test_pwm_tool]
-pin: gpiochip0/gpio39
 value: 0
 shutdown_value: 0
 cycle_time: 0.01
@@ -1374,11 +1383,14 @@ control: watermark
 min_temp: 0
 max_temp: 210
 
+# Calibrated around the sim shim's resting ADC (3900/4095 at 5V, ~4.76V):
+# the linear fit reads ~34C there. PT1000/resistance calibrations are
+# omitted — the fixed ADC ratio puts them kilo-degrees out of range.
 [adc_temperature my_custom_adc]
-temperature1: 50
-voltage1: 0.5
-temperature2: 100
-voltage2: 1.5
+temperature1: 20
+voltage1: 4.9
+temperature2: 60
+voltage2: 4.5
 
 [temperature_sensor test_custom_adc]
 sensor_type: my_custom_adc
@@ -1386,15 +1398,15 @@ sensor_pin: analog5
 min_temp: 0
 max_temp: 210
 
-[temperature_sensor test_PT1000]
-sensor_type: PT1000
+[temperature_sensor test_epcos]
+sensor_type: EPCOS 100K B57560G104F
 sensor_pin: analog6
 min_temp: 0
 max_temp: 210
 
 [temperature_sensor test_combined]
 sensor_type: temperature_combined
-sensor_list: temperature_sensor test_custom_adc, temperature_sensor test_PT1000
+sensor_list: temperature_sensor test_custom_adc, temperature_sensor test_epcos
 combination_method: max
 maximum_deviation: 999
 {mpc_sensors}

@@ -40,8 +40,8 @@ def _extrude_preamble(world):
 
 def test_pwm_pins(sim_world):
     world = sim_world(_cfg, dual_mcu=False)
-    for value in ("0", "0.5", "0.5", "0.25", "1"):
-        world.gcode_ok(f"SET_PIN PIN=test_pwm_tool VALUE={value}")
+    # [pwm_tool] does not exist on this fork; soft PWM and cycle-time
+    # pins carry the coverage.
     for value in ("0", "0.5", "1"):
         world.gcode_ok(f"SET_PIN PIN=soft_pwm_pin VALUE={value}")
     for value, cycle in (
@@ -65,7 +65,13 @@ def test_pwm_pins(sim_world):
     assert world.shutdown_line() is None
 
 
-def test_fans_and_heated_fan(sim_world):
+def _cfg_heated_fan(world):
+    return configs.heaters_config(
+        world.h7_pty, str(world.gcode_dir), heated_fan=True
+    )
+
+
+def test_fans(sim_world):
     world = sim_world(_cfg, dual_mcu=False)
     _extrude_preamble(world)
     # fan_pwm_scaling: [fan] min_power/max_power scaling.
@@ -73,7 +79,12 @@ def test_fans_and_heated_fan(sim_world):
     world.gcode_ok("M107")
     world.gcode_ok("SET_FAN_SPEED FAN=xxx SPEED=0.5")
     world.gcode_ok("SET_FAN_SPEED FAN=xxx SPEED=0")
-    # heated_fan: target drives its heater; fan commands coexist.
+    assert world.shutdown_line() is None
+
+
+def test_heated_fan(sim_world):
+    world = sim_world(_cfg_heated_fan, dual_mcu=False)
+    _extrude_preamble(world)
     world.gcode_ok("SET_HEATED_FAN_TARGET TARGET=60")
     world.gcode_ok("M106 S255")
     world.gcode_ok("M107")
