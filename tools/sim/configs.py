@@ -427,6 +427,94 @@ enable_force_move: True
 """
 
 
+AWD_TMC_RUN_CURRENT = 0.8
+AWD_TMC_SENSE_RESISTOR = 0.075
+AWD_TMC_HOME_CURRENTS = {"a": 0.45, "a1": 0.50, "b": 0.55, "b1": 0.60}
+AWD_TMC_CS_LINES = {"a": 5, "a1": 4, "b": 6, "b1": 3}
+
+
+def awd_corexy_tmc_config(h7_pty: str, gcode_dir: str) -> str:
+    """AWD CoreXY: two motors per belt lane, each with its own TMC5160
+    at a distinct home_current. Exercises homing-current switching across
+    kinematically coupled lanes."""
+    motor_sections = ""
+    for i, name in enumerate(("a", "a1", "b", "b1")):
+        motor_sections += f"""
+[motor {name}]
+drive: stepper
+step_pin: gpiochip0/gpio{30 + 3 * i}
+dir_pin: gpiochip0/gpio{31 + 3 * i}
+enable_pin: !gpiochip0/gpio{32 + 3 * i}
+microsteps: 16
+rotation_distance: 40
+
+[tmc5160 {name}]
+spi_bus: spidev0.0
+cs_pin: gpiochip0/gpio{AWD_TMC_CS_LINES[name]}
+run_current: {AWD_TMC_RUN_CURRENT}
+home_current: {AWD_TMC_HOME_CURRENTS[name]}
+sense_resistor: {AWD_TMC_SENSE_RESISTOR}
+"""
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[printer]
+max_velocity: 100
+max_accel: 1000
+
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a, a1
+b_motors: b, b1
+z_motors: z
+
+[axis x]
+position_min: 0
+position_endstop: 0
+position_max: 300
+endstop_pin: ^gpiochip0/gpio10
+homing_speed: 10
+post_processors: is_xy
+
+[axis y]
+position_min: 0
+position_endstop: 0
+position_max: 300
+endstop_pin: ^gpiochip0/gpio11
+homing_speed: 10
+post_processors: is_xy
+
+[axis z]
+position_min: -5
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio12
+homing_speed: 5
+
+[limit gantry]
+axes: x, y
+max_velocity: 100
+max_accel: 1000
+
+[limit z]
+axes: z
+max_velocity: 10
+max_accel: 30
+{motor_sections}
+[motor z]
+drive: stepper
+step_pin: gpiochip0/gpio50
+dir_pin: gpiochip0/gpio51
+enable_pin: !gpiochip0/gpio52
+microsteps: 16
+rotation_distance: 4
+{_tail(gcode_dir)}"""
+
+
 def phase_stepping_config(h7_pty: str, gcode_dir: str) -> str:
     """TMC5160 phase stepping on X."""
     return f"""\

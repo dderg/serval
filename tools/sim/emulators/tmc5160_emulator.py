@@ -68,6 +68,10 @@ class TMC5160Emulator:
         self._sg_result: int = 0
         self._diag_callback: Optional[Callable[[bool], None]] = None
         self._diag_high: bool = False
+        self.write_log: list[tuple[int, int]] = []
+
+    def writes_to(self, addr: int) -> list[int]:
+        return [value for a, value in self.write_log if a == addr]
 
     def set_load(self, sg_result: int) -> None:
         """Inject a synthetic StallGuard result (0–1023) for the next DRV_STATUS read."""
@@ -151,6 +155,7 @@ class TMC5160Emulator:
         elif addr == CHOPCONF:
             value &= ~(0x7 << 17)  # bits 17-19 are reserved; force to 0
         self._registers[addr] = value
+        self.write_log.append((addr, value))
 
     def _do_read(self, addr: int) -> int:
         """Return register value, applying any read-time side-effects."""
