@@ -95,6 +95,19 @@ fn section_header_trailing_junk_ignored() {
 }
 
 #[test]
+fn option_less_section_exists() {
+    // Enable-only sections ([exclude_object], [respond]) activate modules
+    // by presence; configparser materializes them at the header line.
+    let doc = parse("[exclude_object]\n[a]\nx: 1\n");
+    assert!(doc.has_section("exclude_object"));
+    assert_eq!(doc.options("exclude_object").unwrap(), Vec::<String>::new());
+    assert_eq!(
+        doc.section_names().collect::<Vec<_>>(),
+        vec!["exclude_object", "a"]
+    );
+}
+
+#[test]
 fn empty_value_allowed() {
     let doc = parse("[a]\nk:\n");
     assert_eq!(get(&doc, "a", "k"), "");

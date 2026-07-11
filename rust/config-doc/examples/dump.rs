@@ -18,6 +18,7 @@ fn main() {
         }
     };
     for section in doc.section_names() {
+        println!("SECTION\x1f{section}");
         for option in doc.section(section).expect("iterating").option_names() {
             match doc.get(section, option) {
                 Ok((value, _refs)) => {

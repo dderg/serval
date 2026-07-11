@@ -227,6 +227,9 @@ impl ChunkState {
                     "the [DEFAULT] section is not supported",
                 ));
             }
+            // Materialize at the header like configparser: an option-less
+            // section still exists (enable-only sections activate modules).
+            doc.section_mut_or_insert(header);
             self.cursect = Some(header.to_owned());
             return Ok(());
         }
