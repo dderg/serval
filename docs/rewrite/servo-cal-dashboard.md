@@ -14,8 +14,8 @@ of task pages — **gains**, **notches**, **observers**, **dynamics**,
 that activity needs (the page design lives in the plan's second demo
 review amendment). Every page shares the same spine: a strip of that
 page's runs with the ambient SDO diffs between consecutive attempts, the
-relevant slice of the drive tuning grid, a sweep/re-run box, and the
-session command log.
+relevant slice of the drive tuning grid, and the G-code console with its
+session log.
 
 ## Run it on the bench
 
@@ -55,8 +55,8 @@ The drive tuning grid reads `<captures_root>/drive_state.json` — written by
 `SERVO_DUMP_TUNING` (see
 [servo-tuning-profiles.md](servo-tuning-profiles.md#tuning-panel-backend)) —
 and writes back through `SERVO_TUNE`, always with an explicit `MOTORS=`
-list. The grid's Apply, the notch quick actions, and the sweep box all
-issue G-code through Moonraker, not through `servo-cal` — add the
+list. The grid's Apply and the console both issue G-code through
+Moonraker, not through `servo-cal` — add the
 dashboard's origin to the bench's `moonraker.conf`:
 
 ```ini
@@ -70,6 +70,12 @@ A health badge next to the field polls `GET /server/info` every few
 seconds: green shows the klippy state, red says the URL is wrong,
 Moonraker is down, or the origin is missing from `cors_domains` — the
 three ways every button on every page silently stops working.
+
+The topbar's STOP button fires `POST /printer/emergency_stop` on the
+first click — no confirmation, since an accidental stop costs a
+`FIRMWARE_RESTART` while a dialog in a real emergency costs the machine.
+The click lands in the session log and the health badge flips to
+klippy's shutdown state.
 
 ## Demo it without a bench
 
@@ -86,10 +92,10 @@ rust/target/release/servo-cal serve --dir /tmp/servo-cal-demo --port 8085
 ```
 
 Open `http://127.0.0.1:8085/` — the gains page preselects the newest
-analyzed runs, so the PSD overlay (with attempt 1's injected 230 Hz ring
-separating from the clean attempts) and the prefilled sweep command are
-populated before any clicking; the ambient diff column reads the notch
-value change between consecutive rows.
+analyzed run, so the PSD overlay (every gain step in its own color) and
+the prefilled console command are populated before any clicking; the
+ambient diff column reads the notch value change between consecutive
+rows.
 
 `servo-cal demo` also writes a `drive_state.json` for four AWD corexy
 motors (`motor_a`/`motor_a1`/`motor_b`/`motor_b1`) mirroring the shipped
@@ -129,16 +135,32 @@ Hash-routed (`#/gains`, `#/notches`, `#/observers`, `#/dynamics`,
 `#/journal`); the tuning loop is navigation between pages, not scrolling
 within one. Non-journal pages are a two-column workspace: charts and the
 page's run strip on the left, the page's slice of the drive tuning grid
-plus sweep box and session log in a sticky right rail.
+plus the console in a sticky right rail.
+
+Run rows select exclusively on click (click the sole selected row again to
+clear); shift+click adds/removes a run from the overlay. Step chips use the
+same grammar with an **all** chip as the default: every step draws at once,
+click a chip to isolate that step, shift+click to add/remove one. Trace
+colors carry the disambiguation: with one run selected each step gets its
+own palette color (the all-gains-of-this-sweep view); with several runs
+each keeps its table-swatch hue and its steps ramp toward white, so the
+chips are the clutter valve when overlaying sweeps.
 
 - **gains** — gain-sweep/refine runs, following-error PSD overlay (step
   chips, 20–450 Hz band marked, per-trace peak annotations), the `gains`
-  grid with autofill.
+  grid with autofill. The spectrum charts (here and the accelerometer box)
+  draw linear amplitude from a zero floor, clipped to 0–500 Hz — the old
+  report's resonance-zoom view, where a peak is a spike, not a bump on a
+  log floor. Following error converts to µm via the manifest's
+  `counts_per_mm`; both convert the analyzer's Welch PSD to tone amplitude
+  as `sqrt(2 · psd · ENBW)` (Hann ENBW = 1.5·Δf).
 - **notches** — same PSD plus a detected-peak list (top spaced peaks in
-  the band, newest selected run); "→ notch n" pushes a peak's frequency
+  the band, from the newest selected run's recommended step when visible,
+  else its last visible step); "→ notch n" pushes a peak's frequency
   into that slot's pending edits for all motors (width/depth stay
-  operator-chosen); the full 5-slot notch bank grid and adaptive-mode
-  quick actions (reset params / 1 adaptive / 2 adaptive / disable).
+  operator-chosen); the compact notch grid and the folded adaptive-mode
+  recipes (reset params / 1 adaptive / 2 adaptive / disable), which only
+  stage `adaptive_notch_mode` — nothing is written until Apply.
 - **observers** — torque filter, speed observer, disturbance observer
   grids; time-domain following-error overlay (disturbance rejection is a
   time-domain signal).
@@ -154,8 +176,8 @@ plus sweep box and session log in a sticky right rail.
   didn't converge), and a compact mode table (freq / |H| dB / damping /
   coherence) sits under the charts with the drive pair and Welch segment
   count from `results.json`. Multiple selected runs overlay on the same
-  boxes; markers, threshold, and table follow the newest one. The sweep
-  box reconstructs `SERVO_MEASURE_DIFFERENTIAL BELT=... FREQ_START=...
+  boxes; markers, threshold, and table follow the newest one. The console
+  prefill reconstructs `SERVO_MEASURE_DIFFERENTIAL BELT=... FREQ_START=...
   FREQ_END=... AMPLITUDE=... DURATION=... RAMP=... DWELL_MS=...
   NAME=<tag>` from the manifest's `stroke_plan` (no SPEED/ACCEL — the
   carriage never moves).
@@ -190,6 +212,12 @@ same convention as the vendor manual and the drive's front panel.
   when they disagree); a cell that differs from its siblings gets a drift
   highlight, a cell with an unapplied edit a pending highlight. Params
   with an `options` enum render as labeled selects.
+- **The notch group is transposed by default** — one column per notch,
+  freq/width/depth rows, one input per cell that stages the value for
+  every motor: notches are per-axis physics, so on corexy a per-motor
+  notch table is noise. A "per-motor view" toggle restores the param ×
+  motor rows for drives that genuinely disagree (a mixed cell names the
+  per-motor values in its tooltip either way).
 - **Config-pinned params** (present in a motor's `[motor] params:` block or
   `tuning_profile`, per `drive_state.json`'s `config_pins`) get a pin badge
   showing the pinned value — editing the live value here does not survive
@@ -211,12 +239,18 @@ same convention as the vendor manual and the drive's front panel.
   timestamped session log, then re-dumps the drives — `SERVO_TUNE`
   readback-verifies each write but does not rewrite `drive_state.json`,
   so without the re-dump the grid would snap back to stale values.
-- **Sweep box.** Prefilled from the newest run of the page's experiment
-  (or any run's "→ sweep" button), so the loop reads tweak grid -> apply
-  -> run sweep -> run strip updates.
-- The G-code textarea (collapsed by default) stays as the manual escape
-  hatch; every batch from Apply, quick actions, sweep, or manual Run lands
-  in the same session log, which survives page switches.
+- **Console.** One terminal-style G-code line under the session log on
+  every page — sweeps, manual commands, and multi-line pastes all go
+  through it. Enter runs (shift+enter for a newline, `;` lines are
+  skipped), ↑/↓ or ctrl+p/ctrl+n walk the history, ctrl+r
+  reverse-searches it, ctrl+c clears the line; history persists in
+  `localStorage` (500 entries, consecutive duplicates collapsed). It
+  prefills from the newest run of the page's experiment (or any run's
+  "→ console" button) and from the page's template buttons, so the loop
+  reads tweak grid -> apply -> run sweep -> run strip updates. Every
+  batch from Apply or the console lands in the same session log, which
+  survives page switches; clicking any logged line inserts it back into
+  the console.
 
 ## Implementation notes
 
@@ -232,7 +266,7 @@ same convention as the vendor manual and the drive's front panel.
 - Charts never re-run a sweep; they only draw `plot_series.json` already
   on disk for the selected rows (cached per run mtime, so reselecting is
   free).
-- The sweep row reconstructs its G-code from `manifest.json`'s
+- The console prefill reconstructs its G-code from `manifest.json`'s
   `experiment`/`steps`/`stroke_plan` — a best-effort rendering the operator
   can edit before sending, not a guarantee of exact parameter fidelity.
 - The drive panel's pure logic (autofill derivation, changed-param

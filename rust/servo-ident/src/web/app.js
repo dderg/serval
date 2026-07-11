@@ -2,9 +2,12 @@
 
 const REFRESH_MS = 5000;
 const MOONRAKER_KEY = "servoCalMoonrakerUrl";
+const CONSOLE_HISTORY_KEY = "servoCalConsoleHistory";
+const CONSOLE_HISTORY_MAX = 500;
 const PALETTE = ["#4fb3ff", "#e05a4f", "#4caf50", "#d9a441", "#b388ff", "#4fd8c4"];
 const RESONANCE_BAND_HZ = [20, 450];
-const INITIAL_SELECTED_RUNS = 3;
+const PSD_MAX_FREQ_HZ = 500;
+const INITIAL_SELECTED_RUNS = 1;
 const PEAK_MIN_SEPARATION_HZ = 15;
 const PEAK_LIST_SIZE = 3;
 
@@ -34,14 +37,6 @@ const PAGE_DEFS = {
     charts: ["psd"],
     peaks: true,
     intro: "kill the resonances the PSD shows so gains can go higher",
-    templates: [
-      {
-        label: "harvest…",
-        command: "SERVO_HARVEST_NOTCHES AXIS=X MODE=2",
-        title:
-          "hand notches 1-2 to the drive's adaptive tuning, stroke, read back what it chose, lock",
-      },
-    ],
   },
   observers: {
     label: "observers",
@@ -55,8 +50,16 @@ const PAGE_DEFS = {
     groups: ["load"],
     experiments: ["tracking", "inertia_grid", "differential"],
     charts: ["frf"],
-    fitRunner: true,
     intro: "identify the load, then let feedforward carry it",
+    templates: [
+      {
+        label: "fit…",
+        command: "SERVO_FIT_DYNAMICS AXIS=X",
+        title:
+          "strokes the axis, fits inertia/friction per drive, prints the recommended " +
+          "inertia ratio and writes the feedforward profile",
+      },
+    ],
   },
   live: {
     label: "live",
@@ -80,13 +83,21 @@ const state = {
   plotSeries: new Map(), // name -> {mtime_utc, data}
   selected: new Set(),
   autoSelected: false,
-  psdStep: null,
-  gcodeText: "",
+  stepFilter: null, // null = every step; otherwise a Set of visible step names
+  console: {
+    text: "", // current input line, survives page switches
+    history: loadConsoleHistory(),
+    cursor: null, // history index while navigating; null = editing a fresh line
+    draft: "", // the fresh line stashed when history navigation starts
+    search: null, // {query, pos, saved, failed} while ctrl+r reverse search is live
+  },
   drive: {
     data: null, // last /api/drive_state response (params, motors, config_pins, age_s)
     fetchedAtMs: null, // Date.now() when data was fetched, for a client-ticking age display
     pending: {}, // param name -> {motor: raw} — edits not yet applied
     dirty: new Set(), // autofill-target param names the user has edited directly this session
+    notchPerMotor: false, // compact one-value-per-notch grid unless toggled
+    adaptiveOpen: false, // the adaptive-recipes fold survives re-renders
   },
   live: {
     cursor: null, // last next_cycle from /api/live_tap; null = attach now
@@ -242,44 +253,29 @@ function controlsSectionsHtml(def) {
         `</section>`
     );
   }
-  if (def.fitRunner) {
-    parts.push(
-      `<section class="sweep">` +
-        `<div class="section-head"><h2>fit dynamics</h2></div>` +
-        `<div class="row"><input type="text" id="sweep-command" value="SERVO_FIT_DYNAMICS AXIS=X">` +
-        `<button id="run-sweep-btn">run</button></div>` +
-        `<p class="note">strokes the axis, fits inertia/friction per drive, prints the ` +
-        `recommended inertia ratio and writes the feedforward profile.</p>` +
-        `</section>`
-    );
-  } else {
-    const templates = (def.templates || [])
-      .map(
-        (t, i) =>
-          `<button class="template-btn" data-template="${i}" title="${t.title}">${t.label}</button>`
-      )
-      .join("");
-    parts.push(
-      `<section class="sweep">` +
-        `<div class="section-head"><h2>sweep</h2><span class="note" id="form-run-name"></span></div>` +
-        `<div class="row"><input type="text" id="sweep-command" ` +
-        `placeholder="select a run to prefill, or type a command">` +
-        `<button id="run-sweep-btn">run</button>${templates}</div>` +
-        `</section>`
-    );
-  }
-  parts.push(
-    `<section class="session">` +
-      `<details class="gcode-details"><summary>manual g-code</summary>` +
-      `<textarea id="gcode-textarea" spellcheck="false"></textarea>` +
-      `<div class="row"><button id="run-gcode">run</button></div>` +
-      `</details>` +
-      `<div id="run-status" class="status-line"></div>` +
-      `<div class="section-head"><h2>session log</h2></div>` +
-      `<div id="sent-log" class="sent-log"></div>` +
-      `</section>`
-  );
+  parts.push(consoleSectionHtml(def));
   return parts.join("");
+}
+
+function consoleSectionHtml(def) {
+  const templates = (def.templates || [])
+    .map(
+      (t, i) =>
+        `<button class="template-btn" data-template="${i}" title="${t.title}">${t.label}</button>`
+    )
+    .join("");
+  return (
+    `<section class="session">` +
+    `<div class="section-head"><h2>console</h2>` +
+    `<span class="note" id="form-run-name"></span>${templates}</div>` +
+    `<div id="sent-log" class="sent-log"></div>` +
+    `<div id="run-status" class="status-line"></div>` +
+    `<div class="console-line"><span class="console-prompt">›</span>` +
+    `<textarea id="console-input" rows="1" spellcheck="false" ` +
+    `placeholder="g-code — enter runs, shift+enter multiline, ↑/↓ history, ctrl+r search"></textarea></div>` +
+    `<div id="console-search" class="console-search"></div>` +
+    `</section>`
+  );
 }
 
 function analysisSectionsHtml(def) {
@@ -358,15 +354,7 @@ function liveShellHtml() {
     `<p class="note">viewing needs no recording. record when you want an ` +
     `analyzable .scap in the captures root; stop finalizes it.</p>` +
     `</section>` +
-    `<section class="session">` +
-    `<details class="gcode-details"><summary>manual g-code</summary>` +
-    `<textarea id="gcode-textarea" spellcheck="false"></textarea>` +
-    `<div class="row"><button id="run-gcode">run</button></div>` +
-    `</details>` +
-    `<div id="run-status" class="status-line"></div>` +
-    `<div class="section-head"><h2>session log</h2></div>` +
-    `<div id="sent-log" class="sent-log"></div>` +
-    `</section>` +
+    consoleSectionHtml({}) +
     `</aside>` +
     `</div>`
   );
@@ -395,15 +383,7 @@ function renderPage() {
       `<th></th><th>time</th><th>experiment/tag</th><th>ambient diff vs previous</th><th>verdict</th><th></th>` +
       `</tr></thead><tbody id="journal-body"></tbody></table></div>` +
       `</section>` +
-      `<section class="session">` +
-      `<details class="gcode-details"><summary>manual g-code</summary>` +
-      `<textarea id="gcode-textarea" spellcheck="false"></textarea>` +
-      `<div class="row"><button id="run-gcode">run</button></div>` +
-      `</details>` +
-      `<div id="run-status" class="status-line"></div>` +
-      `<div class="section-head"><h2>session log</h2></div>` +
-      `<div id="sent-log" class="sent-log"></div>` +
-      `</section>` +
+      consoleSectionHtml({}) +
       `</main></div>`;
   } else {
     root.innerHTML =
@@ -420,26 +400,15 @@ function renderPage() {
 }
 
 function bindPageEvents() {
-  const gcode = el("gcode-textarea");
-  if (gcode) {
-    gcode.value = state.gcodeText;
-    gcode.addEventListener("input", () => {
-      state.gcodeText = gcode.value;
-    });
-  }
-  const runBtn = el("run-gcode");
-  if (runBtn) runBtn.addEventListener("click", () => runGcode(manualGcodeLines(), "manual"));
+  bindConsole();
   const applyBtn = el("drive-apply-btn");
   if (applyBtn) applyBtn.addEventListener("click", applyDriveChanges);
-  const sweepBtn = el("run-sweep-btn");
-  if (sweepBtn) sweepBtn.addEventListener("click", runSweep);
   const def = currentPageDef();
   document.querySelectorAll("button.template-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const t = def.templates[Number(btn.dataset.template)];
-      const sweep = el("sweep-command");
-      if (t && sweep) {
-        sweep.value = t.command;
+      if (t) {
+        setConsoleValue(t.command, true);
         const label = el("form-run-name");
         if (label) label.textContent = "template — edit values before running";
       }
@@ -469,10 +438,16 @@ function renderRuns() {
     const tr = document.createElement("tr");
     if (state.selected.has(run.name)) tr.classList.add("selected");
     if (run.has_results) tr.classList.add("selectable");
-    tr.addEventListener("click", () => {
+    tr.addEventListener("click", (ev) => {
       if (!run.has_results) return;
-      if (state.selected.has(run.name)) state.selected.delete(run.name);
-      else state.selected.add(run.name);
+      if (ev.shiftKey) {
+        if (state.selected.has(run.name)) state.selected.delete(run.name);
+        else state.selected.add(run.name);
+      } else if (state.selected.has(run.name) && state.selected.size === 1) {
+        state.selected.delete(run.name);
+      } else {
+        state.selected = new Set([run.name]);
+      }
       renderRuns();
       redrawCharts();
     });
@@ -511,8 +486,8 @@ function renderRuns() {
     const actionTd = document.createElement("td");
     actionTd.className = "actions";
     const prefillBtn = document.createElement("button");
-    prefillBtn.textContent = "→ sweep";
-    prefillBtn.title = "prefill the sweep command from this run";
+    prefillBtn.textContent = "→ console";
+    prefillBtn.title = "prefill the console with this run's command";
     prefillBtn.disabled = !manifest;
     prefillBtn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -554,8 +529,7 @@ function autoSelectInitialRuns() {
   for (const run of withResults.slice(0, INITIAL_SELECTED_RUNS)) {
     state.selected.add(run.name);
   }
-  const sweep = el("sweep-command");
-  if (sweep && !sweep.value) loadRerunForm(withResults[0].name);
+  if (!state.console.text) loadRerunForm(withResults[0].name);
 }
 
 async function refresh() {
@@ -659,7 +633,7 @@ function drawChart(canvas, traces, yLabel, fixedY) {
   ctx.fillText(yLabel, pad.l, 10);
 }
 
-function drawTimeDomain(names, plots) {
+function drawTimeDomain(names, plots, steps) {
   const container = el("charts");
   if (!container) return;
   container.innerHTML = "";
@@ -667,8 +641,7 @@ function drawTimeDomain(names, plots) {
     container.innerHTML = '<p class="note">select runs above</p>';
     return;
   }
-  const stepNames = [...new Set(plots.flatMap((p) => p.steps.map((s) => s.name)))];
-  for (const stepName of stepNames) {
+  for (const stepName of steps) {
     const box = document.createElement("div");
     box.className = "chart-box";
     const title = document.createElement("h3");
@@ -708,53 +681,128 @@ function newestSelectedRunName(names) {
   return found ? found.name : names[0];
 }
 
-function defaultPsdStep(names, plots, stepNames) {
-  const plotByName = new Map(names.map((n, i) => [n, plots[i]]));
+/// The peak list needs one step to harvest from: the newest selected run's
+/// recommended step when it is visible, else its last visible step.
+function peakStep(names, plots, steps) {
   const newest = newestSelectedRunName(names);
-  const newestPlot = plotByName.get(newest);
-  const newestSteps = newestPlot ? newestPlot.steps.map((s) => s.name) : stepNames;
+  const plot = plots[names.indexOf(newest)];
+  const present = plot
+    ? steps.filter((s) => plot.steps.some((x) => x.name === s))
+    : [];
   const detail = state.details.get(newest);
   const recommended = detail && detail.results && detail.results.verdict.recommended_step;
-  if (recommended && newestSteps.includes(recommended)) return recommended;
-  if (newestSteps.length) return newestSteps[newestSteps.length - 1];
-  return stepNames[stepNames.length - 1];
+  const step =
+    recommended && present.includes(recommended)
+      ? recommended
+      : present.length
+        ? present[present.length - 1]
+        : null;
+  return { newest, step };
 }
 
-function psdFerrTraces(names, plots, stepName) {
+function mixColor(hex, targetHex, t) {
+  const c = parseInt(hex.slice(1), 16);
+  const g = parseInt(targetHex.slice(1), 16);
+  const mix = (shift) => {
+    const a = (c >> shift) & 0xff;
+    const b = (g >> shift) & 0xff;
+    return Math.round(a + (b - a) * t);
+  };
+  return `#${((mix(16) << 16) | (mix(8) << 8) | mix(0)).toString(16).padStart(6, "0")}`;
+}
+
+/// One run selected: each step gets its own palette color. Several runs:
+/// each run keeps its table-swatch hue and its steps ramp toward white, so
+/// runs stay distinguishable and the step chips are the clutter valve.
+function traceStyle(names, steps, runIdx, stepIdx) {
+  if (names.length === 1) {
+    return { color: PALETTE[stepIdx % PALETTE.length], name: steps[stepIdx] };
+  }
+  const base = PALETTE[runIdx % PALETTE.length];
+  const ramp = steps.length > 1 ? (0.55 * stepIdx) / (steps.length - 1) : 0;
+  const name =
+    steps.length === 1 ? names[runIdx] : `${names[runIdx]} · ${steps[stepIdx]}`;
+  return { color: mixColor(base, "#ffffff", ramp), name };
+}
+
+/// The interesting servo/mechanical modes all live below 500 Hz; drawing the
+/// full Nyquist span squished them into the left quarter of the chart.
+function clipToPsdBand(freq, y) {
+  let end = freq.length;
+  while (end > 0 && freq[end - 1] > PSD_MAX_FREQ_HZ) end--;
+  return { freq: freq.slice(0, end), y: y.slice(0, end) };
+}
+
+/// Welch PSD -> single-sided tone amplitude: a sinusoid of amplitude A puts
+/// A²/2 of power into its bin's equivalent noise bandwidth, so
+/// A = sqrt(2 · psd · ENBW) with ENBW = 1.5·Δf for the analyzer's Hann window.
+const WELCH_HANN_ENBW_BINS = 1.5;
+
+function psdToAmplitude(freq, psd) {
+  if (freq.length < 2) throw new Error("psd grid too short for a bin width");
+  const factor = Math.sqrt(2 * WELCH_HANN_ENBW_BINS * (freq[1] - freq[0]));
+  return psd.map((p) => Math.sqrt(p) * factor);
+}
+
+function countsPerMm(runName, driveName) {
+  const detail = state.details.get(runName);
+  const motors = detail && detail.manifest ? detail.manifest.motors : [];
+  const motor = motors.find((m) => m.name === driveName);
+  if (!motor || !motor.counts_per_mm) {
+    throw new Error(`${runName}: manifest has no counts_per_mm for ${driveName}`);
+  }
+  return motor.counts_per_mm;
+}
+
+function psdFerrTraces(names, plots, steps) {
   const traces = [];
   plots.forEach((p, i) => {
-    const step = p.steps.find((s) => s.name === stepName);
-    if (!step || !step.psd) return;
-    const driveNames = Object.keys(step.psd.per_drive);
-    if (driveNames.length) {
+    steps.forEach((stepName, j) => {
+      const step = p.steps.find((s) => s.name === stepName);
+      if (!step || !step.psd) return;
+      const driveNames = Object.keys(step.psd.per_drive);
+      if (!driveNames.length) return;
+      const style = traceStyle(names, steps, i, j);
+      const clipped = clipToPsdBand(step.psd.freq_hz, step.psd.per_drive[driveNames[0]]);
+      const umPerCount = 1000 / countsPerMm(names[i], driveNames[0]);
       traces.push({
-        freq: step.psd.freq_hz,
-        y: step.psd.per_drive[driveNames[0]],
-        color: PALETTE[i % PALETTE.length],
+        freq: clipped.freq,
+        y: psdToAmplitude(clipped.freq, clipped.y).map((a) => a * umPerCount),
+        color: style.color,
         dashed: false,
-        label: `${names[i]} (${driveNames[0]})`,
+        label: `${style.name} (${driveNames[0]})`,
         run: names[i],
       });
-    }
-  });
-  return traces;
-}
-
-function psdAccelTraces(names, plots, stepName) {
-  const traces = [];
-  plots.forEach((p, i) => {
-    const step = p.steps.find((s) => s.name === stepName);
-    if (!step || !step.psd || !step.psd.accel) return;
-    traces.push({
-      freq: step.psd.accel.freq_hz,
-      y: step.psd.accel.psd,
-      color: PALETTE[i % PALETTE.length],
-      dashed: false,
-      label: `${names[i]} (accel)`,
-      run: names[i],
     });
   });
   return traces;
+}
+
+function psdAccelTraces(names, plots, steps) {
+  const traces = [];
+  plots.forEach((p, i) => {
+    steps.forEach((stepName, j) => {
+      const step = p.steps.find((s) => s.name === stepName);
+      if (!step || !step.psd || !step.psd.accel) return;
+      const style = traceStyle(names, steps, i, j);
+      const clipped = clipToPsdBand(step.psd.accel.freq_hz, step.psd.accel.psd);
+      traces.push({
+        freq: clipped.freq,
+        y: psdToAmplitude(clipped.freq, clipped.y),
+        color: style.color,
+        dashed: false,
+        label: `${style.name} (accel)`,
+        run: names[i],
+      });
+    });
+  });
+  return traces;
+}
+
+function fmtLinear(v) {
+  if (v === 0) return "0";
+  const a = Math.abs(v);
+  return a >= 1000 || a < 0.01 ? v.toExponential(1) : v.toPrecision(3);
 }
 
 function drawPsdChart(canvas, traces, band, yTitle, hover, opts) {
@@ -787,6 +835,7 @@ function drawPsdChart(canvas, traces, band, yTitle, hover, opts) {
       vMax = Math.max(vMax, v);
     }
   }
+  if (opts.zeroFloor) vMin = 0;
   if (opts.fixedY) {
     vMin = opts.fixedY.yMin;
     vMax = opts.fixedY.yMax;
@@ -816,7 +865,7 @@ function drawPsdChart(canvas, traces, band, yTitle, hover, opts) {
     const py = yOfV(v);
     ctx.moveTo(pad.l, py);
     ctx.lineTo(w - pad.r, py);
-    ctx.fillText(opts.linear ? v.toFixed(2) : `1e${v.toFixed(1)}`, 2, py + 3);
+    ctx.fillText(opts.linear ? fmtLinear(v) : `1e${v.toFixed(1)}`, 2, py + 3);
   }
   for (let i = 0; i <= 4; i++) {
     const f = fMin + ((fMax - fMin) * i) / 4;
@@ -913,7 +962,9 @@ function drawPsdChart(canvas, traces, band, yTitle, hover, opts) {
       ctx.beginPath();
       ctx.arc(px, py, 3, 0, Math.PI * 2);
       ctx.fill();
-      const value = opts.linear ? best.tr.y[best.i].toFixed(2) : best.tr.y[best.i].toExponential(2);
+      const value = opts.linear
+        ? fmtLinear(best.tr.y[best.i])
+        : best.tr.y[best.i].toExponential(2);
       const text = `${best.tr.freq[best.i].toFixed(1)} Hz  ${value}  ${best.tr.label}`;
       const tw = ctx.measureText(text).width;
       const tx = Math.min(Math.max(px + 8, pad.l), w - pad.r - tw - 8);
@@ -938,7 +989,7 @@ function attachPsdHover(canvas, traces, band, yTitle, opts) {
   canvas.addEventListener("mouseleave", () => drawPsdChart(canvas, traces, band, yTitle, null, opts));
 }
 
-function psdBox(title, traces, band, yTitle, names, opts) {
+function psdBox(title, traces, band, yTitle, opts) {
   const box = document.createElement("div");
   box.className = "chart-box";
   const head = document.createElement("h3");
@@ -952,45 +1003,72 @@ function psdBox(title, traces, band, yTitle, names, opts) {
   attachPsdHover(canvas, traces, band, yTitle, opts);
   const legend = document.createElement("div");
   legend.className = "legend";
-  names.forEach((n, i) => {
+  traces.forEach((tr) => {
     const item = document.createElement("span");
-    item.innerHTML = `<span class="swatch" style="background:${PALETTE[i % PALETTE.length]}"></span>${n}`;
+    item.innerHTML = `<span class="swatch" style="background:${tr.color}"></span>${tr.label}`;
     legend.appendChild(item);
   });
   box.appendChild(legend);
   return box;
 }
 
-function renderPsdChart(names, plots, stepName) {
+function renderPsdChart(names, plots, steps) {
   const container = el("psd-charts");
   if (!container) return;
   container.innerHTML = "";
-  if (!stepName) {
+  if (!names.length || !steps.length) {
     container.innerHTML = '<p class="note">select runs above</p>';
     return;
   }
-  const ferr = psdFerrTraces(names, plots, stepName);
+  const psdOpts = { linear: true, zeroFloor: true };
+  const ferr = psdFerrTraces(names, plots, steps);
   container.appendChild(
-    psdBox("following error", ferr, RESONANCE_BAND_HZ, "log10 psd (counts²/Hz)", names)
+    psdBox("following error", ferr, RESONANCE_BAND_HZ, "ferr amplitude (µm)", psdOpts)
   );
-  const accel = psdAccelTraces(names, plots, stepName);
+  const accel = psdAccelTraces(names, plots, steps);
   if (accel.length) {
     container.appendChild(
-      psdBox("accelerometer", accel, RESONANCE_BAND_HZ, "log10 psd (accel²/Hz)", names)
+      psdBox("accelerometer", accel, RESONANCE_BAND_HZ, "accel amplitude", psdOpts)
     );
   }
+}
+
+function visibleStepNames(stepNames) {
+  if (!state.stepFilter) return stepNames;
+  const kept = stepNames.filter((s) => state.stepFilter.has(s));
+  return kept.length ? kept : stepNames;
 }
 
 function renderPsdChips(stepNames) {
   const container = el("psd-step-chips");
   if (!container) return;
   container.innerHTML = "";
+  const all = document.createElement("button");
+  all.className = "chip" + (state.stepFilter ? "" : " active");
+  all.textContent = "all";
+  all.title = "show every step";
+  all.addEventListener("click", () => {
+    state.stepFilter = null;
+    redrawCharts();
+  });
+  container.appendChild(all);
   for (const stepName of stepNames) {
     const chip = document.createElement("button");
-    chip.className = "chip" + (stepName === state.psdStep ? " active" : "");
+    const inFilter = state.stepFilter && state.stepFilter.has(stepName);
+    chip.className = "chip" + (inFilter ? " active" : "");
     chip.textContent = stepName;
-    chip.addEventListener("click", () => {
-      state.psdStep = stepName;
+    chip.title = "click: only this step — shift+click: add/remove it";
+    chip.addEventListener("click", (ev) => {
+      if (ev.shiftKey) {
+        const next = new Set(state.stepFilter || stepNames);
+        if (next.has(stepName)) next.delete(stepName);
+        else next.add(stepName);
+        state.stepFilter = next.size === 0 || next.size === stepNames.length ? null : next;
+      } else if (inFilter && state.stepFilter.size === 1) {
+        state.stepFilter = null;
+      } else {
+        state.stepFilter = new Set([stepName]);
+      }
       redrawCharts();
     });
     container.appendChild(chip);
@@ -1115,7 +1193,6 @@ function renderFrfCharts(names, plots) {
           frfTraces(names, plots, stepName, spec.key),
           null,
           spec.yTitle,
-          names,
           opts
         )
       );
@@ -1175,24 +1252,24 @@ function proposePeakIntoSlot(slot, peakFreq) {
   renderDriveGroups();
 }
 
-function renderPeakList(names, plots) {
+function renderPeakList(names, plots, steps) {
   const container = el("peak-list");
   if (!container) return;
   const runLabel = el("peaks-run");
-  if (!names.length || !state.psdStep) {
+  if (!names.length || !steps.length) {
     container.innerHTML = '<p class="note">select runs above</p>';
     if (runLabel) runLabel.textContent = "";
     return;
   }
-  const newest = newestSelectedRunName(names);
-  const plot = plots[names.indexOf(newest)];
-  const step = plot && plot.steps.find((s) => s.name === state.psdStep);
+  const picked = peakStep(names, plots, steps);
+  const plot = plots[names.indexOf(picked.newest)];
+  const step = plot && picked.step && plot.steps.find((s) => s.name === picked.step);
   if (!step || !step.psd) {
     container.innerHTML = '<p class="note">no PSD for this step</p>';
     if (runLabel) runLabel.textContent = "";
     return;
   }
-  if (runLabel) runLabel.textContent = `${newest} / ${state.psdStep}`;
+  if (runLabel) runLabel.textContent = `${picked.newest} / ${picked.step}`;
   const driveNames = Object.keys(step.psd.per_drive);
   const peaks = findPsdPeaks(
     step.psd.freq_hz,
@@ -1247,16 +1324,17 @@ async function redrawCharts() {
     }
   }
   const stepNames = [...new Set(plots.flatMap((p) => p.steps.map((s) => s.name)))];
-  if (!state.psdStep || !stepNames.includes(state.psdStep)) {
-    state.psdStep = stepNames.length ? defaultPsdStep(okNames, plots, stepNames) : null;
+  if (state.stepFilter && !stepNames.some((s) => state.stepFilter.has(s))) {
+    state.stepFilter = null;
   }
+  const steps = visibleStepNames(stepNames);
   if (def.charts && def.charts.includes("frf")) renderFrfCharts(okNames, plots);
   if (def.charts && def.charts.includes("psd")) {
     renderPsdChips(stepNames);
-    renderPsdChart(okNames, plots, state.psdStep);
+    renderPsdChart(okNames, plots, steps);
   }
-  if (def.peaks) renderPeakList(okNames, plots);
-  if (def.charts && def.charts.includes("time")) drawTimeDomain(okNames, plots);
+  if (def.peaks) renderPeakList(okNames, plots, steps);
+  if (def.charts && def.charts.includes("time")) drawTimeDomain(okNames, plots, steps);
 }
 
 // --- live tap ------------------------------------------------------------------
@@ -1669,8 +1747,16 @@ function cellInputHtml(param, motor) {
 }
 
 function allInputHtml(param) {
-  const values = motorNames(state.drive.data.motors).map((m) => cellRaw(param, m));
+  const motors = motorNames(state.drive.data.motors);
+  const values = motors.map((m) => cellRaw(param, m));
   const agree = valuesAgree(values);
+  const cls = ["cell-input", "all"];
+  if (motors.some((m) => cellRaw(param, m) !== state.drive.data.motors[m][param.c_code])) {
+    cls.push("pending");
+  }
+  const title = agree
+    ? "set all motors"
+    : `set all motors — currently ${motors.map((m, i) => `${shortMotorLabel(m)}=${values[i]}`).join(" ")}`;
   if (param.options) {
     const opts =
       `<option value=""${agree ? "" : " selected"} disabled>${agree ? "" : "mixed"}</option>` +
@@ -1680,10 +1766,10 @@ function allInputHtml(param) {
             `<option value="${v}"${agree && Number(v) === values[0] ? " selected" : ""}>${v}: ${label}</option>`
         )
         .join("");
-    return `<select class="cell-input all" data-param="${param.name}" data-motor="*" title="set all motors">${opts}</select>`;
+    return `<select class="${cls.join(" ")}" data-param="${param.name}" data-motor="*" title="${title}">${opts}</select>`;
   }
   const display = agree ? values[0] : "";
-  return `<input type="number" step="1" class="cell-input all" data-param="${param.name}" data-motor="*" value="${display}" placeholder="${agree ? "" : "mixed"}" title="set all motors">`;
+  return `<input type="number" step="1" class="${cls.join(" ")}" data-param="${param.name}" data-motor="*" value="${display}" placeholder="${agree ? "" : "mixed"}" title="${title}">`;
 }
 
 function paramLabelHtml(param, section) {
@@ -1700,9 +1786,10 @@ function paramLabelHtml(param, section) {
   return `<span title="${param.description} (${param.c_code})">${param.name}</span>${unit}${pinBadge}${groupHint}${rederiveLink}`;
 }
 
-/// Adaptive-notch recipe as one-click actions (A6-EC manual 7.10 + the
-/// bench's own macros): reset the notch parameters, hand notches 1-2 to the
-/// drive, or take them back (0 keeps whatever the drive last wrote).
+/// Adaptive-notch recipe (A6-EC manual 7.10): reset the notch parameters,
+/// hand notches 1-2 to the drive, or take them back (0 keeps whatever the
+/// drive last wrote). Each button only STAGES adaptive_notch_mode for all
+/// motors — the write happens through the apply button like any grid edit.
 const NOTCH_QUICK_ACTIONS = [
   { label: "reset notch params", value: 3 },
   { label: "1 adaptive", value: 1 },
@@ -1712,13 +1799,60 @@ const NOTCH_QUICK_ACTIONS = [
 
 function notchQuickActionsHtml() {
   return (
+    `<details class="adaptive-actions"${state.drive.adaptiveOpen ? " open" : ""}>` +
+    "<summary>adaptive notch recipes</summary>" +
     '<div class="quick-actions">' +
     NOTCH_QUICK_ACTIONS.map(
       (a) =>
-        `<button class="quick-action" data-value="${a.value}" title="SERVO_TUNE PARAM=adaptive_notch_mode VALUE=${a.value} MOTORS=&lt;all&gt;">${a.label}</button>`
+        `<button class="quick-action" data-value="${a.value}" title="stages adaptive_notch_mode=${a.value} for all motors — nothing is written until apply">${a.label}</button>`
     ).join("") +
-    "</div>"
+    '</div><p class="hint">stages adaptive_notch_mode — review in the pending list, then apply</p>' +
+    "</details>"
   );
+}
+
+const NOTCH_ROW_KINDS = ["freq", "width", "depth"];
+
+function notchMatrix(params) {
+  const byKey = new Map();
+  const nums = new Set();
+  const leftover = [];
+  for (const p of params) {
+    const m = /^notch_(\d+)_(freq|width|depth)$/.exec(p.name);
+    if (m) {
+      nums.add(Number(m[1]));
+      byKey.set(`${m[1]}:${m[2]}`, p);
+    } else {
+      leftover.push(p);
+    }
+  }
+  return { nums: [...nums].sort((a, b) => a - b), byKey, leftover };
+}
+
+/// The compact notch view: one column per notch, freq/width/depth rows, one
+/// input per cell that stages the value for every motor (notches are
+/// per-axis physics — on corexy every motor sees the same belt, so
+/// per-motor notch tables are noise; the per-motor toggle remains for
+/// drives that genuinely disagree).
+function notchCompactHtml(params) {
+  const { nums, byKey, leftover } = notchMatrix(params);
+  const head =
+    `<th class="param-col"></th>` + nums.map((n) => `<th>notch ${n}</th>`).join("");
+  const rows = NOTCH_ROW_KINDS.map((kind) => {
+    const first = byKey.get(`${nums[0]}:${kind}`);
+    const unit = first && first.unit ? ` <span class="unit">${first.unit}</span>` : "";
+    const cells = nums
+      .map((n) => {
+        const p = byKey.get(`${n}:${kind}`);
+        return `<td>${p ? allInputHtml(p) : ""}</td>`;
+      })
+      .join("");
+    return `<tr><td class="param-col">${kind}${unit}</td>${cells}</tr>`;
+  }).join("");
+  return {
+    table: `<table class="param-grid notch-grid"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`,
+    leftover,
+  };
 }
 
 function renderDriveGroups() {
@@ -1739,11 +1873,8 @@ function renderDriveGroups() {
     motors.map((m) => `<th title="${m}">${shortMotorLabel(m)}</th>`).join("") +
     `<th class="all-col">all</th>`;
   const sections = groupParams(data.params);
-  const parts = [];
-  for (const [group, params] of sections) {
-    if (!params.length) continue;
-    if (def.groups && group !== OTHER_GROUP && !def.groups.includes(group)) continue;
-    const rows = params
+  const perMotorRows = (params, group) =>
+    params
       .map((p) => {
         const cells = motors.map((m) => `<td>${cellInputHtml(p, m)}</td>`).join("");
         return (
@@ -1755,10 +1886,35 @@ function renderDriveGroups() {
         );
       })
       .join("");
+  const perMotorTable = (params, group) =>
+    `<table class="param-grid"><thead><tr>${headerCells}</tr></thead>` +
+    `<tbody>${perMotorRows(params, group)}</tbody></table>`;
+  const parts = [];
+  for (const [group, params] of sections) {
+    if (!params.length) continue;
+    if (def.groups && group !== OTHER_GROUP && !def.groups.includes(group)) continue;
+    if (group === "notch" && !state.drive.notchPerMotor) {
+      const compact = notchCompactHtml(params);
+      parts.push(
+        `<div class="param-group"><h3>notch ` +
+          `<a href="#" class="notch-view-toggle hint">per-motor view</a></h3>` +
+          compact.table +
+          (compact.leftover.length ? perMotorTable(compact.leftover, group) : "") +
+          notchQuickActionsHtml() +
+          `</div>`
+      );
+      continue;
+    }
+    const toggle =
+      group === "notch"
+        ? ` <a href="#" class="notch-view-toggle hint">compact view</a>`
+        : "";
     const extras = group === "notch" ? notchQuickActionsHtml() : "";
     parts.push(
-      `<div class="param-group"><h3>${group.replace(/_/g, " ")}</h3>${extras}` +
-        `<table class="param-grid"><thead><tr>${headerCells}</tr></thead><tbody>${rows}</tbody></table></div>`
+      `<div class="param-group"><h3>${group.replace(/_/g, " ")}${toggle}</h3>` +
+        perMotorTable(params, group) +
+        extras +
+        `</div>`
     );
   }
   container.innerHTML = parts.join("");
@@ -1779,13 +1935,26 @@ function bindDriveGridEvents() {
       renderDriveGroups();
     });
   });
+  container.querySelectorAll("details.adaptive-actions").forEach((d) => {
+    d.addEventListener("toggle", () => {
+      state.drive.adaptiveOpen = d.open;
+    });
+  });
+  container.querySelectorAll("a.notch-view-toggle").forEach((elink) => {
+    elink.addEventListener("click", (e) => {
+      e.preventDefault();
+      state.drive.notchPerMotor = !state.drive.notchPerMotor;
+      renderDriveGroups();
+    });
+  });
   container.querySelectorAll("button.quick-action").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const motors = motorNames(state.drive.data.motors).join(",");
-      runGcode(
-        [`SERVO_TUNE PARAM=adaptive_notch_mode VALUE=${btn.dataset.value} MOTORS=${motors}`],
-        "notch"
-      ).then(refreshDriveState);
+      const staged = { ...(state.drive.pending.adaptive_notch_mode || {}) };
+      for (const m of motorNames(state.drive.data.motors)) {
+        staged[m] = Number(btn.dataset.value);
+      }
+      state.drive.pending.adaptive_notch_mode = staged;
+      renderDriveGroups();
     });
   });
 }
@@ -1947,8 +2116,7 @@ function loadRerunForm(name) {
   if (!detail || !detail.manifest) return;
   const label = el("form-run-name");
   if (label) label.textContent = `from ${name}`;
-  const sweep = el("sweep-command");
-  if (sweep) sweep.value = reconstructCommand(detail.manifest);
+  setConsoleValue(reconstructCommand(detail.manifest), false);
 }
 
 // --- moonraker plumbing + session log ---------------------------------------
@@ -1975,6 +2143,29 @@ async function pollMoonrakerHealth() {
   }
 }
 
+/// One click, no confirmation: an accidental stop costs a FIRMWARE_RESTART,
+/// a confirm dialog in a real emergency costs the machine.
+async function emergencyStop() {
+  const entry = { time: new Date().toISOString(), label: "e-stop", lines: ["emergency_stop"], results: [] };
+  try {
+    const resp = await fetch(`${moonrakerUrl()}/printer/emergency_stop`, { method: "POST" });
+    entry.results.push({ ok: resp.ok, status: resp.status });
+  } catch (e) {
+    entry.results.push({ ok: false, status: 0 });
+  }
+  state.sentLog.push(entry);
+  renderSentLog();
+  pollMoonrakerHealth();
+}
+
+function escapeHtml(s) {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 function sentEntryHtml(entry) {
   const ok = entry.results.length > 0 && entry.results.every((r) => r.ok);
   return (
@@ -1985,7 +2176,10 @@ function sentEntryHtml(entry) {
       .map((l, i) => {
         const r = entry.results[i];
         const suffix = r && !r.ok ? ` <span class="status-err">HTTP ${r.status}</span>` : "";
-        return `<div class="sent-line">${l}${suffix}</div>`;
+        return (
+          `<div class="sent-line" data-line="${escapeHtml(l)}" ` +
+          `title="click to insert into the console">${escapeHtml(l)}${suffix}</div>`
+        );
       })
       .join("") +
     `</div>`
@@ -1998,13 +2192,16 @@ function renderSentLog() {
   container.innerHTML = state.sentLog.length
     ? state.sentLog.map(sentEntryHtml).join("")
     : '<p class="note">nothing sent yet</p>';
+  container.onclick = (ev) => {
+    const line = ev.target.closest(".sent-line");
+    if (line) setConsoleValue(line.dataset.line, true);
+  };
   container.scrollTop = container.scrollHeight;
 }
 
 /// Sends `lines` (already-built gcode) through the shared Moonraker
-/// plumbing — the grid's Apply, the notch quick actions, the sweep row and
-/// the manual textarea all land in the same session log, which survives
-/// page switches.
+/// plumbing — the grid's Apply and the console land in the same session
+/// log, which survives page switches.
 async function runGcode(lines, label) {
   const base = moonrakerUrl();
   const statusEl = el("run-status");
@@ -2031,26 +2228,203 @@ async function runGcode(lines, label) {
   renderSentLog();
 }
 
-function manualGcodeLines() {
-  const gcode = el("gcode-textarea");
-  if (!gcode) return [];
-  return gcode.value
+// --- console ------------------------------------------------------------------
+
+/// The catch only forgives corrupt localStorage JSON — anything else (a
+/// mistyped key, a TDZ const) must surface, not quietly reset the history.
+function loadConsoleHistory() {
+  const raw = localStorage.getItem(CONSOLE_HISTORY_KEY) || "[]";
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    return [];
+  }
+  return Array.isArray(parsed) ? parsed.filter((l) => typeof l === "string") : [];
+}
+
+function pushConsoleHistory(entry) {
+  const hist = state.console.history;
+  if (hist[hist.length - 1] !== entry) hist.push(entry);
+  if (hist.length > CONSOLE_HISTORY_MAX) hist.splice(0, hist.length - CONSOLE_HISTORY_MAX);
+  localStorage.setItem(CONSOLE_HISTORY_KEY, JSON.stringify(hist));
+}
+
+function bindConsole() {
+  const input = el("console-input");
+  if (!input) return;
+  input.value = state.console.text;
+  autosizeConsole(input);
+  input.addEventListener("input", () => {
+    state.console.text = input.value;
+    autosizeConsole(input);
+  });
+  input.addEventListener("keydown", consoleKeydown);
+  input.addEventListener("blur", () => exitConsoleSearch(true));
+}
+
+function autosizeConsole(input) {
+  input.style.height = "auto";
+  input.style.height = `${input.scrollHeight}px`;
+}
+
+function setConsoleValue(text, focus) {
+  state.console.text = text;
+  const input = el("console-input");
+  if (!input) return;
+  input.value = text;
+  input.selectionStart = input.selectionEnd = text.length;
+  autosizeConsole(input);
+  if (focus) input.focus();
+}
+
+function caretOnFirstLine(input) {
+  return input.value.lastIndexOf("\n", input.selectionStart - 1) === -1;
+}
+
+function caretOnLastLine(input) {
+  return input.value.indexOf("\n", input.selectionEnd) === -1;
+}
+
+function consoleKeydown(ev) {
+  const input = ev.target;
+  const c = state.console;
+  if (c.search) {
+    consoleSearchKeydown(ev, input);
+    return;
+  }
+  if (ev.key === "Enter" && !ev.shiftKey) {
+    ev.preventDefault();
+    submitConsole();
+    return;
+  }
+  if (ev.ctrlKey && ev.key === "r") {
+    ev.preventDefault();
+    c.search = { query: "", pos: c.history.length - 1, saved: input.value, failed: false };
+    renderConsoleSearch();
+    return;
+  }
+  const back = (ev.ctrlKey && ev.key === "p") || (ev.key === "ArrowUp" && caretOnFirstLine(input));
+  const fwd = (ev.ctrlKey && ev.key === "n") || (ev.key === "ArrowDown" && caretOnLastLine(input));
+  if (back || fwd) {
+    ev.preventDefault();
+    historyStep(back ? -1 : 1);
+    return;
+  }
+  if (ev.ctrlKey && ev.key === "c" && input.selectionStart === input.selectionEnd) {
+    ev.preventDefault();
+    c.cursor = null;
+    setConsoleValue("", true);
+  }
+}
+
+function historyStep(dir) {
+  const c = state.console;
+  if (!c.history.length) return;
+  if (c.cursor === null) {
+    if (dir > 0) return;
+    c.draft = c.text;
+    c.cursor = c.history.length;
+  }
+  const next = c.cursor + dir;
+  if (next < 0) return;
+  if (next >= c.history.length) {
+    c.cursor = null;
+    setConsoleValue(c.draft, true);
+    return;
+  }
+  c.cursor = next;
+  setConsoleValue(c.history[next], true);
+}
+
+function consoleSearchKeydown(ev, input) {
+  const s = state.console.search;
+  if (ev.ctrlKey && ev.key === "r") {
+    ev.preventDefault();
+    searchHistory(s.pos - 1);
+    return;
+  }
+  if (ev.key === "Escape" || (ev.ctrlKey && ev.key === "g")) {
+    ev.preventDefault();
+    exitConsoleSearch(false);
+    return;
+  }
+  if (ev.key === "Enter" && !ev.shiftKey) {
+    ev.preventDefault();
+    exitConsoleSearch(true);
+    submitConsole();
+    return;
+  }
+  if (ev.key === "Backspace") {
+    ev.preventDefault();
+    s.query = s.query.slice(0, -1);
+    searchHistory(state.console.history.length - 1);
+    return;
+  }
+  if (ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+    ev.preventDefault();
+    s.query += ev.key;
+    searchHistory(s.pos);
+    return;
+  }
+  if (ev.key !== "Shift" && ev.key !== "CapsLock") exitConsoleSearch(true);
+}
+
+function searchHistory(fromIdx) {
+  const s = state.console.search;
+  const hist = state.console.history;
+  if (!s.query) {
+    s.pos = hist.length - 1;
+    s.failed = false;
+    renderConsoleSearch();
+    return;
+  }
+  let idx = Math.min(fromIdx, hist.length - 1);
+  while (idx >= 0 && !hist[idx].includes(s.query)) idx--;
+  s.failed = idx < 0;
+  if (idx >= 0) {
+    s.pos = idx;
+    setConsoleValue(hist[idx], true);
+  }
+  renderConsoleSearch();
+}
+
+function exitConsoleSearch(keep) {
+  const c = state.console;
+  if (!c.search) return;
+  const saved = c.search.saved;
+  c.search = null;
+  if (!keep) setConsoleValue(saved, true);
+  renderConsoleSearch();
+}
+
+function renderConsoleSearch() {
+  const box = el("console-search");
+  if (!box) return;
+  const s = state.console.search;
+  box.textContent = s
+    ? `(reverse-i-search) '${s.query}'${s.failed ? " — no match" : ""}`
+    : "";
+}
+
+async function submitConsole() {
+  const raw = state.console.text.trim();
+  const lines = raw
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l.length && !l.startsWith(";"));
-}
-
-async function runSweep() {
-  const sweep = el("sweep-command");
-  if (!sweep) return;
-  const line = sweep.value.trim();
-  if (!line || line.startsWith(";")) return;
-  await runGcode([line], "sweep");
+  if (!lines.length) return;
+  pushConsoleHistory(raw);
+  state.console.cursor = null;
+  state.console.draft = "";
+  setConsoleValue("", true);
+  await runGcode(lines, "console");
 }
 
 // --- boot -------------------------------------------------------------------
 
 function initShell() {
+  el("estop-btn").addEventListener("click", emergencyStop);
   const input = el("moonraker-url");
   input.value = localStorage.getItem(MOONRAKER_KEY) || `http://${location.hostname}:7125`;
   input.addEventListener("change", () => {
