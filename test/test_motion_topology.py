@@ -180,42 +180,19 @@ class CaptureEngine:
     def __init__(self):
         self.init_planner_args = None
 
-    def init_planner(
-        self,
-        axis_sections,
-        limit_sections,
-        pp_sections,
-        topology,
-        kin_axes,
-        cartesian_limits,
-        max_extrude_only_velocity=None,
-        max_extrude_only_accel=None,
-        fit_tolerance_mm=None,
-        fit_tolerance_accel_mm_s2=None,
-    ):
+    def init_planner(self, config_text, topology, kin_axes):
         self.init_planner_args = {
+            "config_text": config_text,
             "topology": topology,
             "kinematics_axes": kin_axes,
-            "cartesian_limits": cartesian_limits,
-            "max_extrude_only_velocity": max_extrude_only_velocity,
-            "max_extrude_only_accel": max_extrude_only_accel,
-            "fit_tolerance_mm": fit_tolerance_mm,
-            "fit_tolerance_accel_mm_s2": fit_tolerance_accel_mm_s2,
         }
 
 
 def test_init_planner_passes_claimed_axes():
     motion = make_motion("corexy", SPATIAL_AXES, follower=("e", "extruder", 11))
-    motion.limit_sections = []
-    motion.post_processor_sections = []
-    motion._max_velocity = 300.0
-    motion._max_accel = 3000.0
-    motion.max_jerk = 6000.0
-    motion.max_z_velocity = 15.0
-    motion.max_z_accel = 100.0
-    motion._corner_deviation = 0.008836555997292696
-    motion.max_path_deviation = 0.02
-    motion.max_accel_deviation = 500.0
+    motion._motion_config_text = (
+        "[printer]\nmax_velocity: 300\nmax_accel: 3000\n"
+    )
     motion._planner_ready = False
     engine = CaptureEngine()
     motion.engine = engine
@@ -236,12 +213,3 @@ def test_init_planner_passes_claimed_axes():
     assert engine.init_planner_args["topology"] == [
         (11, [0, 1, 2, 3], 0, [FAKE_STEPPER_VELOCITY_CEILING] * 4)
     ]
-    cartesian_limits = engine.init_planner_args["cartesian_limits"]
-    assert cartesian_limits == (
-        300.0,
-        3000.0,
-        6000.0,
-        15.0,
-        100.0,
-        0.008836555997292696,
-    )

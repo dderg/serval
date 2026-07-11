@@ -4,12 +4,15 @@ import os
 import signal
 import time
 
-from . import engine_wait, motion_kinematics, motion_setup, structured_log
+from . import (
+    configfile,
+    engine_wait,
+    motion_kinematics,
+    motion_setup,
+    structured_log,
+)
 from .extras import servo_axis
 from .kinematics import extruder
-from .motion_setup import (
-    reject_legacy_role_sections as reject_legacy_role_sections,
-)
 
 REACTOR_YIELD_INTERVAL = 0.020
 
@@ -90,9 +93,7 @@ class Motion:
         )
         self.commanded_pos = [0.0, 0.0, 0.0, 0.0]
         self._planner_ready = False
-        self._read_limits(config)
-        self._read_axes(config)
-        self._read_post_processors(config)
+        self._load_motion_config(config)
         self.print_stall = 0
         _deprecated_buffer_time_high = config.getfloat(
             "buffer_time_high", 2.0, above=0.0
@@ -346,9 +347,9 @@ class Motion:
     def get_max_axis_accel(self, axis_idx):
         axis_name = self._declared_axis_order()[axis_idx]
         accels = [
-            a
-            for _name, axes, _v, a, _j in self.limit_sections
-            if a is not None and axis_name in axes
+            max_accel
+            for _name, axes, _v, max_accel, _j in self._limit_sections
+            if max_accel is not None and axis_name in axes
         ]
         return min(accels) if accels else self.max_accel
 
@@ -747,22 +748,34 @@ class Motion:
         lookahead_empty = print_time <= est_print_time
         return print_time, est_print_time, lookahead_empty
 
-    UNSUPPORTED_LIMIT_KEYS = (
-        "max_accel_to_decel",
-        "minimum_cruise_ratio",
-    )
-
-    def _read_axes(self, config):
-        return motion_setup.read_axes(self, config)
+    def _load_motion_config(self, config):
+        """Parse and validate the motion-owned sections ([printer] limits,
+        [axis], [limit], [post_processor], [extruder] caps) with the native
+        reader — the same one the engine re-runs at init_planner — and
+        record every option it consumed for the unused-option accounting."""
+        self._motion_config_text = config.fileconfig.write_string()
+        (
+            (
+                self._max_velocity,
+                self._max_accel,
+                self.max_jerk,
+                self.max_z_velocity,
+                self.max_z_accel,
+                self._corner_deviation,
+            ),
+            self.axis_sections,
+            self._limit_sections,
+            consumed,
+        ) = configfile._config_doc.read_motion_settings(
+            self._motion_config_text
+        )
+        for section, option, value in consumed:
+            config.access_tracking[(section.lower(), option.lower())] = value
+        self.min_cruise_ratio = 0.0
+        self.orig_cfg = {}
 
     def _build_follower_steppers(self, config):
         return motion_setup.build_follower_steppers(self, config)
-
-    def _read_post_processors(self, config):
-        return motion_setup.read_post_processors(self, config)
-
-    def _read_limits(self, config):
-        return motion_setup.read_limits(self, config)
 
     def _sync_print_time(self):
         if self.mcu is None:

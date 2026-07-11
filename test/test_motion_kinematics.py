@@ -1,6 +1,6 @@
 import pytest
 
-from klippy import motion, motion_kinematics
+from klippy import motion_kinematics
 from klippy.extras import servo_axis
 
 
@@ -389,11 +389,19 @@ def test_note_z_not_homed_clears_only_z():
 
 
 def reject_legacy(extra_sections):
-    sections = cartesian_sections()
-    sections.update(extra_sections)
-    printer = FakePrinter()
-    config = FakeConfig(printer, sections)
-    motion.reject_legacy_role_sections(config)
+    """Legacy role-section rejection lives in the native motion-config
+    reader; feed it the sections as config text and surface its error like
+    Motion._load_motion_config does."""
+    from klippy import configfile
+
+    lines = ["[printer]", "max_velocity: 300", "max_accel: 3000"]
+    for name, options in extra_sections.items():
+        lines.append("[%s]" % name)
+        lines.extend("%s: %s" % (k, v) for k, v in options.items())
+    try:
+        configfile._config_doc.read_motion_settings("\n".join(lines) + "\n")
+    except configfile.error as e:
+        raise FakeError(str(e))
 
 
 def test_stepper_x_section_rejected():

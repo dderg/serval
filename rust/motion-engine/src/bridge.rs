@@ -30,8 +30,6 @@ mod pipeline_setup;
 #[cfg(test)]
 mod pipeline_setup_tests;
 mod planner_api;
-#[cfg(feature = "snapshot")]
-pub(crate) use planner_api::{AxisSection, PostProcessor};
 mod runtime_caps;
 mod servo;
 mod state;

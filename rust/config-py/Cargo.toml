@@ -16,6 +16,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 pyo3 = { version = "0.29", features = ["abi3-py39"] }
 config-doc = { path = "../config-doc" }
+planner-config = { path = "../planner-config", features = ["doc"] }
 
 [features]
 # extension-module leaves libpython symbols undefined (resolved by the host

@@ -17,7 +17,7 @@ import time
 from . import mathutil
 from .extras.danger_options import get_danger_options
 
-_NATIVE_API_VERSION = 1
+_NATIVE_API_VERSION = 2
 
 
 def _load_config_doc():

@@ -7,27 +7,8 @@ from . import motion_kinematics, stepper
 from .extras import servo_axis
 from .stepper import DEFAULT_STEP_PULSE_DURATION
 
-# The engine's init_planner extracts each of these by attribute name (they are
-# named tuples on the Rust side too), so a reordered field fails loud instead
-# of silently misconfiguring the planner. namedtuples stay tuple-compatible,
-# so existing positional unpacking of these sections keeps working.
-AxisSection = namedtuple(
-    "AxisSection", ["name", "follows", "motors", "post_processors"]
-)
-LimitSection = namedtuple(
-    "LimitSection", ["name", "axes", "max_velocity", "max_accel", "max_jerk"]
-)
-PostProcessor = namedtuple("PostProcessor", ["name", "type", "params"])
-CartesianLimits = namedtuple(
-    "CartesianLimits",
-    [
-        "max_velocity",
-        "max_accel",
-        "max_jerk",
-        "max_z_velocity",
-        "max_z_accel",
-        "corner_deviation",
-    ],
+McuTopology = namedtuple(
+    "McuTopology", ["mcu_id", "axes", "kinematics", "max_motor_velocity"]
 )
 
 CORNER_DEVIATION_SCV_FACTOR = math.sqrt(2.0) - 1.0
@@ -42,13 +23,6 @@ def scv_from_corner_deviation(corner_deviation, max_accel):
     return math.sqrt(corner_deviation * max_accel / CORNER_DEVIATION_SCV_FACTOR)
 
 
-McuTopology = namedtuple(
-    "McuTopology", ["mcu_id", "axes", "kinematics", "max_motor_velocity"]
-)
-
-_LEGACY_STEPPER_AXES = frozenset("xyzab")
-_LEGACY_SERVO_SECTIONS = ("servo_x", "servo_y", "servo_z")
-
 STEP_MODE_MODULATED = 0
 STEP_MODE_STEP_TIME = 1
 PHASE_STEPPING_CAPABILITY_BIT = 0x1
@@ -60,62 +34,8 @@ FLAGS_DEFAULT = 0
 UNUSED_EXTRUSION_PER_XY_BITS = 0
 
 
-def _is_legacy_stepper_role_section(name):
-    if not name.startswith("stepper_"):
-        return False
-    suffix = name[len("stepper_") :]
-    if not suffix or suffix[0] not in _LEGACY_STEPPER_AXES:
-        return False
-    return suffix[1:] == "" or suffix[1:].isdigit()
-
-
-def reject_legacy_role_sections(config):
-    for sc in config.get_prefix_sections("stepper_"):
-        if _is_legacy_stepper_role_section(sc.get_name()):
-            raise config.error(
-                "role-encoding motor sections are not supported: name the "
-                "motor freely (e.g. [motor a]) and assign it in [kinematics] "
-                "role lists / [axis <name>] motors:"
-            )
-    for name in _LEGACY_SERVO_SECTIONS:
-        if config.has_section(name):
-            raise config.error(
-                "role-encoding servo sections are not supported: declare a "
-                "[<motor>] section with 'drive: servo' and assign it in "
-                "[kinematics]"
-            )
-
-
-def read_axes(motion, config):
-    reject_legacy_role_sections(config)
-    if config.has_section("firmware_retraction"):
-        raise config.error(
-            "[firmware_retraction] is not supported: it presupposes an "
-            "extruder concept the motion system does not have"
-        )
-    if config.has_section("input_shaper"):
-        raise config.error(
-            "[input_shaper] is not supported: declare [post_processor "
-            "<name>] sections and reference them from [axis] "
-            "post_processors"
-        )
-    motion.axis_sections = []
-    for sc in config.get_prefix_sections("axis "):
-        name = sc.get_name().split(None, 1)[1]
-        follows = [a.strip().lower() for a in sc.getlist("follows", [])]
-        motors = [m.strip() for m in sc.getlist("motors", [])]
-        post_processors = [p.strip() for p in sc.getlist("post_processors", [])]
-        motion.axis_sections.append(
-            AxisSection(name, follows, motors, post_processors)
-        )
-    declared = {name for name, _, _, _ in motion.axis_sections}
-    for _, axes, _, _, _ in motion.limit_sections:
-        for a in axes:
-            if a not in declared:
-                raise config.error(
-                    "[limit] references undeclared axis '%s' "
-                    "(declare [axis %s])" % (a, a)
-                )
+def declared_axis_order(motion):
+    return [name for name, _, _, _ in motion.axis_sections]
 
 
 def build_follower_steppers(motion, config):
@@ -140,84 +60,6 @@ def build_follower_steppers(motion, config):
                     name=motion_kinematics.motor_short_name(motor_section),
                 )
             )
-
-
-def read_post_processors(motion, config):
-    motion.post_processor_sections = []
-    for sc in config.get_prefix_sections("post_processor "):
-        name = sc.get_name().split(None, 1)[1]
-        ty = sc.get("type")
-        params = [
-            (opt, sc.getfloat(opt))
-            for opt in sc.get_prefix_options("")
-            if opt != "type"
-        ]
-        motion.post_processor_sections.append(PostProcessor(name, ty, params))
-    declared = {name for name, _, _ in motion.post_processor_sections}
-    for axis_name, _, _, post_processors in motion.axis_sections:
-        for ref in post_processors:
-            if ref not in declared:
-                raise config.error(
-                    "[axis %s] references undeclared post_processor "
-                    "'%s' (declare [post_processor %s])" % (axis_name, ref, ref)
-                )
-
-
-def read_limits(motion, config):
-    for key in motion.UNSUPPORTED_LIMIT_KEYS:
-        if config.get(key, None) is not None:
-            raise config.error("[printer] %s is not supported" % key)
-    motion._max_velocity = config.getfloat("max_velocity", above=0.0)
-    motion._max_accel = config.getfloat("max_accel", above=0.0)
-    scv = config.getfloat("square_corner_velocity", None, minval=0.0)
-    corner_deviation = config.getfloat("corner_deviation", None, minval=0.0)
-    if scv is not None and corner_deviation is not None:
-        raise config.error(
-            "[printer] square_corner_velocity and corner_deviation are both "
-            "set — corner_deviation is the canonical corner budget and "
-            "square_corner_velocity is its legacy alias; set exactly one"
-        )
-    if corner_deviation is None:
-        if scv is None:
-            scv = DEFAULT_SQUARE_CORNER_VELOCITY
-        corner_deviation = corner_deviation_from_scv(scv, motion._max_accel)
-    motion._corner_deviation = corner_deviation
-    max_jerk = config.getfloat("max_jerk", motion._max_accel * 2.0, minval=0.0)
-    motion.max_jerk = max_jerk if max_jerk > 0.0 else float("inf")
-    motion.max_z_velocity = config.getfloat(
-        "max_z_velocity",
-        motion._max_velocity,
-        above=0.0,
-        maxval=motion._max_velocity,
-    )
-    motion.max_z_accel = config.getfloat(
-        "max_z_accel",
-        motion._max_accel,
-        above=0.0,
-        maxval=motion._max_accel,
-    )
-    motion.max_path_deviation = config.getfloat(
-        "max_path_deviation", 0.005, above=0.0, maxval=1.0
-    )
-    motion.max_accel_deviation = config.getfloat(
-        "max_accel_deviation", 50.0, above=0.0
-    )
-    motion.limit_sections = []
-    for sc in config.get_prefix_sections("limit "):
-        name = sc.get_name().split(None, 1)[1]
-        axes = [a.strip().lower() for a in sc.getlist("axes")]
-        v = sc.getfloat("max_velocity", None, above=0.0)
-        a = sc.getfloat("max_accel", None, above=0.0)
-        j = sc.getfloat("max_jerk", None, minval=0.0)
-        if j == 0.0:
-            j = float("inf")
-        motion.limit_sections.append(LimitSection(name, axes, v, a, j))
-    motion.min_cruise_ratio = 0.0
-    motion.orig_cfg = {}
-
-
-def declared_axis_order(motion):
-    return [name for name, _, _, _ in motion.axis_sections]
 
 
 STEP_EDGE_FLOOR_SECONDS = 0.000001
@@ -319,31 +161,9 @@ def init_planner(motion):
         )
         return
 
-    extruder = motion.printer.lookup_object("extruder", None)
-    max_extrude_only_velocity = getattr(
-        extruder, "max_extrude_only_velocity", None
-    )
-    max_extrude_only_accel = getattr(extruder, "max_extrude_only_accel", None)
-
     try:
         motion.engine.init_planner(
-            list(motion.axis_sections),
-            list(motion.limit_sections),
-            list(motion.post_processor_sections),
-            topology,
-            motion.kin.claimed_axes(),
-            CartesianLimits(
-                motion._max_velocity,
-                motion._max_accel,
-                motion.max_jerk,
-                motion.max_z_velocity,
-                motion.max_z_accel,
-                motion._corner_deviation,
-            ),
-            max_extrude_only_velocity=max_extrude_only_velocity,
-            max_extrude_only_accel=max_extrude_only_accel,
-            fit_tolerance_mm=motion.max_path_deviation,
-            fit_tolerance_accel_mm_s2=motion.max_accel_deviation,
+            motion._motion_config_text, topology, motion.kin.claimed_axes()
         )
         motion._configure_axes_per_mcu(engine_mcus)
         motion._planner_ready = True

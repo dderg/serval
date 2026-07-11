@@ -215,6 +215,7 @@ name = "config-py"
 version = "0.1.0"
 dependencies = [
  "config-doc",
+ "planner-config",
  "pyo3",
 ]
 
@@ -653,6 +654,7 @@ dependencies = [
 name = "motion-engine"
 version = "0.1.0"
 dependencies = [
+ "config-doc",
  "crossbeam-channel",
  "geometry",
  "host-rt",
@@ -664,6 +666,7 @@ dependencies = [
  "motion-pipeline",
  "motion-services",
  "pipeline-snapshot",
+ "planner-config",
  "pyo3",
  "runtime",
  "serde_json",
@@ -806,6 +809,7 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 name = "planner-config"
 version = "0.1.0"
 dependencies = [
+ "config-doc",
  "geometry",
  "thiserror",
  "trajectory",

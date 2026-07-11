@@ -24,6 +24,8 @@ geometry = { path = "../geometry" }
 motion-pipeline = { path = "../motion-pipeline" }
 snapshot-core = { path = "../pipeline-snapshot", package = "pipeline-snapshot", optional = true }
 runtime = { path = "../runtime" }
+config-doc = { path = "../config-doc" }
+planner-config = { path = "../planner-config", features = ["doc"] }
 crossbeam-channel = "0.5"
 libc = "0.2"
 tracing = "0.1"

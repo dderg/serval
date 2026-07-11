@@ -25,7 +25,65 @@ type RefTuple = (String, String, String);
 /// Bumped on any change to the Python-visible surface; klippy's loader
 /// refuses a module whose API_VERSION does not match, so a stale build
 /// fails loud instead of running with skewed semantics.
-const API_VERSION: u32 = 1;
+const API_VERSION: u32 = 2;
+
+/// Parse the motion-owned config sections ([printer] limits, [axis],
+/// [limit], [post_processor], [extruder] extrude-only caps) with the same
+/// reader the engine's init_planner uses. Returns:
+///   ((max_velocity, max_accel, max_jerk, max_z_velocity, max_z_accel,
+///     corner_deviation),
+///    [(axis, follows, motors, post_processors)],
+///    [(limit, axes, max_velocity, max_accel, max_jerk)],
+///    [(section, option, value)])   — every option consumed, for klippy's
+///                                    access tracking.
+#[pyfunction]
+#[allow(clippy::type_complexity)]
+fn read_motion_settings(
+    py: Python<'_>,
+    config_text: &str,
+) -> PyResult<(
+    (f64, f64, f64, f64, f64, f64),
+    Vec<(String, Vec<String>, Vec<String>, Vec<String>)>,
+    Vec<(String, Vec<String>, Option<f64>, Option<f64>, Option<f64>)>,
+    Vec<(String, String, Py<PyAny>)>,
+)> {
+    use planner_config::from_doc::ConsumedValue;
+    use pyo3::IntoPyObjectExt;
+
+    let doc = config_doc::Document::parse(config_text, "<config>").map_err(config_err)?;
+    let (settings, consumed) =
+        planner_config::from_doc::read_motion_settings(&doc).map_err(ConfigError::new_err)?;
+    let c = settings.cartesian;
+    let cartesian = (
+        c.max_velocity,
+        c.max_accel,
+        c.max_jerk,
+        c.max_z_velocity,
+        c.max_z_accel,
+        c.corner_deviation,
+    );
+    let axes = settings
+        .axes
+        .into_iter()
+        .map(|a| (a.name, a.follows, a.motors, a.post_processors))
+        .collect();
+    let limits = settings
+        .limits
+        .into_iter()
+        .map(|l| (l.name, l.axes, l.max_velocity, l.max_accel, l.max_jerk))
+        .collect();
+    let consumed = consumed
+        .into_iter()
+        .map(|entry| {
+            let value = match entry.value {
+                ConsumedValue::Float(v) => v.into_py_any(py)?,
+                ConsumedValue::Text(v) => v.into_py_any(py)?,
+            };
+            Ok((entry.section, entry.option, value))
+        })
+        .collect::<PyResult<_>>()?;
+    Ok((cartesian, axes, limits, consumed))
+}
 
 #[pyclass(name = "ConfigDocument")]
 struct PyConfigDocument {
@@ -92,6 +150,7 @@ impl PyConfigDocument {
 #[pymodule]
 fn _config_doc(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyConfigDocument>()?;
+    m.add_function(wrap_pyfunction!(read_motion_settings, m)?)?;
     m.add("ConfigError", py.get_type::<ConfigError>())?;
     m.add("API_VERSION", API_VERSION)?;
     Ok(())
