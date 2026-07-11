@@ -505,6 +505,55 @@ def test_apply_default_off_does_not_apply():
     )
 
 
+def test_base_speed_gain_pins_non_swept_servos():
+    servo_param.drain_param_writes()
+    sc, gcode = make_sc_apply(
+        verdict={
+            "recommended_step": "cal_p1040_s650_i1923",
+            "reason": "highest clean gain",
+            "flags": [],
+            "apply": [_applied("motor_a", "0x2001.0x02", 650)],
+        }
+    )
+    gcmd = FakeGcmd(
+        AXIS="X", SERVO="motor_a", SPEED_GAINS="500,650", BASE_SPEED_GAIN="400"
+    )
+    sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
+
+    base_writes = [
+        s
+        for s in gcode.scripts
+        if isinstance(s, str) and "SERVO=motor_b" in s and "0x2001" in s
+    ]
+    assert any("VALUE=640" in s for s in base_writes)
+    assert any("VALUE=400" in s for s in base_writes)
+    assert any("VALUE=3125" in s for s in base_writes)
+    for s in gcode.scripts:
+        if isinstance(s, str) and ("VALUE=650" in s or "VALUE=500" in s):
+            assert "motor_b" not in s, "sweep must not touch the pinned servo"
+    assert _manifest(sc)["base_gains"] == {
+        "servos": ["motor_b"],
+        "position": 640,
+        "speed": 400,
+        "integral": 3125,
+    }
+
+
+def test_base_speed_gain_without_servo_subset_errors():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc_apply(
+        verdict={
+            "recommended_step": "cal_p1040_s650_i1923",
+            "reason": "highest clean gain",
+            "flags": [],
+            "apply": None,
+        }
+    )
+    gcmd = FakeGcmd(AXIS="X", SPEED_GAINS="500,650", BASE_SPEED_GAIN="400")
+    with pytest.raises(RuntimeError, match="subset"):
+        sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
+
+
 NOTCH_VALUES = {
     (0x2001, 0x41): 111,
     (0x2001, 0x42): 1,

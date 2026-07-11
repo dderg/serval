@@ -221,10 +221,15 @@ report-only) writes the verdict's recommended gains *after* the revert,
 reads them back (a mismatch is a command error, nothing left half-applied),
 and runs one `SERVO_MEASURE_TRACKING` to report before/after following-error
 peak and overshoot; a null verdict (every step flagged) makes `APPLY=1` a
-command error naming the reason instead of writing anything. Params:
+command error naming the reason instead of writing anything. `SERVO=` (comma
+list) restricts the sweep to a subset of the axis servos; adding
+`BASE_SPEED_GAIN=` then pins every non-swept axis servo at that gain (same
+`×1.6`/`Ti` derivation, recorded as `base_gains` in the manifest) for the whole
+sweep — the asymmetric-gain experiment: hold one belt pair soft while sweeping
+the other pair higher. Params:
 `SPEED_GAINS` (500,650,800,1000) `AXIS` (X) `START` `END`
 `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2) `DWELL_MS` `TAG` (cal)
-`ACCEL_CHIP` `APPLY` `SERVO`.
+`ACCEL_CHIP` `APPLY` `SERVO` `BASE_SPEED_GAIN`.
 
 #### SERVO_GAIN_LADDER
 Speed-gain sweep that climbs until analysis flags trouble, instead of a fixed

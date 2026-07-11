@@ -1968,10 +1968,12 @@ class ServoCalibration:
         "to the lowest gains afterwards. APPLY=1 writes the verdict's "
         "recommended gains after the revert, reads them back, and runs one "
         "SERVO_MEASURE_TRACKING to report before/after tracking metrics "
-        "(default APPLY=0, report-only). Params SPEED_GAINS AXIS START END "
-        "SPEED ACCEL "
-        "ITERATIONS DWELL_MS TAG ACCEL_CHIP APPLY SERVO (comma list "
-        "override)"
+        "(default APPLY=0, report-only). SERVO= (comma list) restricts the "
+        "sweep to a subset of the axis servos; BASE_SPEED_GAIN then pins "
+        "every non-swept axis servo at that gain (same 1.6x/Ti derivation) "
+        "for an asymmetric-gain experiment. Params SPEED_GAINS AXIS START "
+        "END SPEED ACCEL ITERATIONS DWELL_MS TAG ACCEL_CHIP APPLY SERVO "
+        "BASE_SPEED_GAIN"
     )
 
     def cmd_SERVO_CALIBRATE_GAINS(self, gcmd: Any) -> list[SweepStep]:
@@ -1990,6 +1992,23 @@ class ServoCalibration:
                     "SPEED_GAIN %d outside 100..3000 (0.1 Hz units)" % (sg,)
                 )
         sgains = [int(sg) for sg in sgains]
+        base_sg = gcmd.get("BASE_SPEED_GAIN", None)
+        base_servos: list[str] = []
+        if base_sg is not None:
+            base_sg = int(base_sg)
+            if not 100 <= base_sg <= 3000:
+                raise gcmd.error(
+                    "BASE_SPEED_GAIN %d outside 100..3000 (0.1 Hz units)"
+                    % (base_sg,)
+                )
+            axis_servos = servo_strokes.axis_servos(gcmd, self._kin(), axis)
+            base_servos = [s for s in axis_servos if s not in servos]
+            if not base_servos:
+                raise gcmd.error(
+                    "BASE_SPEED_GAIN needs SERVO= to name a subset of the "
+                    "axis servos - every servo on axis %s is already in the "
+                    "sweep" % (axis,)
+                )
         apply = gcmd.get_int("APPLY", 0)
         chip, chip_name = self._accel_chip(gcmd)
         stroke_plan = {
@@ -2013,6 +2032,27 @@ class ServoCalibration:
         try:
             self._prep(axis, dwell)
             self._set_manual_tuning(servos)
+            if base_servos:
+                base_pos, base_integral = GainSetAdapter.derive(base_sg)
+                self._set_manual_tuning(base_servos)
+                self._write_gains(base_servos, base_pos, base_sg, base_integral)
+                run.manifest["base_gains"] = {
+                    "servos": base_servos,
+                    "position": base_pos,
+                    "speed": base_sg,
+                    "integral": base_integral,
+                }
+                run.write()
+                gcmd.respond_info(
+                    "base gains on %s: pos %.1f rad/s, speed %.1f Hz, "
+                    "Ti %.2f ms (held for the whole sweep)"
+                    % (
+                        ", ".join(base_servos),
+                        base_pos / 10.0,
+                        base_sg / 10.0,
+                        base_integral / 100.0,
+                    )
+                )
             steps = self._engine.run(
                 adapter,
                 sgains,
