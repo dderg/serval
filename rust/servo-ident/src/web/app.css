@@ -324,4 +324,6 @@ details.adaptive-actions .hint { margin: 4px 0 0; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
 }
+.sent-line:hover { color: var(--text); background: #161d26; }

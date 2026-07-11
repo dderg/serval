@@ -2,6 +2,8 @@
 
 const REFRESH_MS = 5000;
 const MOONRAKER_KEY = "servoCalMoonrakerUrl";
+const CONSOLE_HISTORY_KEY = "servoCalConsoleHistory";
+const CONSOLE_HISTORY_MAX = 500;
 const PALETTE = ["#4fb3ff", "#e05a4f", "#4caf50", "#d9a441", "#b388ff", "#4fd8c4"];
 const RESONANCE_BAND_HZ = [20, 450];
 const PSD_MAX_FREQ_HZ = 500;
@@ -2156,6 +2158,14 @@ async function emergencyStop() {
   pollMoonrakerHealth();
 }
 
+function escapeHtml(s) {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 function sentEntryHtml(entry) {
   const ok = entry.results.length > 0 && entry.results.every((r) => r.ok);
   return (
@@ -2166,7 +2176,10 @@ function sentEntryHtml(entry) {
       .map((l, i) => {
         const r = entry.results[i];
         const suffix = r && !r.ok ? ` <span class="status-err">HTTP ${r.status}</span>` : "";
-        return `<div class="sent-line">${l}${suffix}</div>`;
+        return (
+          `<div class="sent-line" data-line="${escapeHtml(l)}" ` +
+          `title="click to insert into the console">${escapeHtml(l)}${suffix}</div>`
+        );
       })
       .join("") +
     `</div>`
@@ -2179,6 +2192,10 @@ function renderSentLog() {
   container.innerHTML = state.sentLog.length
     ? state.sentLog.map(sentEntryHtml).join("")
     : '<p class="note">nothing sent yet</p>';
+  container.onclick = (ev) => {
+    const line = ev.target.closest(".sent-line");
+    if (line) setConsoleValue(line.dataset.line, true);
+  };
   container.scrollTop = container.scrollHeight;
 }
 
@@ -2213,16 +2230,17 @@ async function runGcode(lines, label) {
 
 // --- console ------------------------------------------------------------------
 
-const CONSOLE_HISTORY_KEY = "servoCalConsoleHistory";
-const CONSOLE_HISTORY_MAX = 500;
-
+/// The catch only forgives corrupt localStorage JSON — anything else (a
+/// mistyped key, a TDZ const) must surface, not quietly reset the history.
 function loadConsoleHistory() {
+  const raw = localStorage.getItem(CONSOLE_HISTORY_KEY) || "[]";
+  let parsed;
   try {
-    const parsed = JSON.parse(localStorage.getItem(CONSOLE_HISTORY_KEY) || "[]");
-    return Array.isArray(parsed) ? parsed.filter((l) => typeof l === "string") : [];
+    parsed = JSON.parse(raw);
   } catch (e) {
     return [];
   }
+  return Array.isArray(parsed) ? parsed.filter((l) => typeof l === "string") : [];
 }
 
 function pushConsoleHistory(entry) {

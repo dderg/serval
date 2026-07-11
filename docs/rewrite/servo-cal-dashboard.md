@@ -249,7 +249,8 @@ same convention as the vendor manual and the drive's front panel.
   "→ console" button) and from the page's template buttons, so the loop
   reads tweak grid -> apply -> run sweep -> run strip updates. Every
   batch from Apply or the console lands in the same session log, which
-  survives page switches.
+  survives page switches; clicking any logged line inserts it back into
+  the console.
 
 ## Implementation notes
 
