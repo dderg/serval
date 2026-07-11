@@ -12,6 +12,7 @@ klippy/chelper/*.dylib
 klippy/chelper/c_helper.so.dSYM/
 klippy/_motion_engine*.so
 klippy/motion_engine*.dylib
+klippy/_config_doc*.so
 
 .git/
 *.pyc

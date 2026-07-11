@@ -3,20 +3,65 @@
 # Copyright (C) 2016-2021  Kevin O'Connor <kevin@koconnor.net>
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
-import configparser
+#
+# Parsing lives in the native module (rust/config-doc); this file keeps the
+# typed accessor API, access tracking, and SAVE_CONFIG text handling.
 import glob
-import io
+import importlib.util
 import logging
 import os
 import pathlib
 import re
-import sys
 import time
 
 from . import mathutil
 from .extras.danger_options import get_danger_options
 
-error = configparser.Error
+_NATIVE_API_VERSION = 1
+
+
+def _load_config_doc():
+    """Load _config_doc.so by explicit path so sys.path contents (stale or
+    foreign-platform builds in a bind-mounted tree, pytest's pythonpath
+    entries) can never decide which binary klippy runs. Candidates: next to
+    this file, then $KALICO_NATIVE_DIR (the CI image installs there since
+    the test container bind-mounts the checkout over the image's tree)."""
+    candidates = [pathlib.Path(__file__).with_name("_config_doc.so")]
+    native_dir = os.environ.get("KALICO_NATIVE_DIR")
+    if native_dir:
+        candidates.append(pathlib.Path(native_dir) / "_config_doc.so")
+    attempts = []
+    for path in candidates:
+        if not path.is_file():
+            attempts.append("%s: not found" % path)
+            continue
+        try:
+            # For extension modules the shared library is dlopen'd at module
+            # CREATION, so a foreign-platform binary raises here already.
+            spec = importlib.util.spec_from_file_location("_config_doc", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except ImportError as e:
+            attempts.append("%s: %s" % (path, e))
+            continue
+        version = getattr(module, "API_VERSION", None)
+        if version != _NATIVE_API_VERSION:
+            attempts.append(
+                "%s: API_VERSION %s, this klippy needs %s"
+                % (path, version, _NATIVE_API_VERSION)
+            )
+            continue
+        return module
+    raise ImportError(
+        "klippy requires the native _config_doc module for config parsing;"
+        " build it with 'make -f Makefile.rust config-doc'. Tried: "
+        + "; ".join(attempts)
+    )
+
+
+_config_doc = _load_config_doc()
+
+error = _config_doc.ConfigError
 
 
 class sentinel:
@@ -26,50 +71,27 @@ class sentinel:
 PYTHON_SCRIPT_PREFIX = "!"
 _INCLUDERE = re.compile(r"!!include (?P<file>.*)")
 
+_BOOLEAN_STATES = {
+    "1": True,
+    "yes": True,
+    "true": True,
+    "on": True,
+    "0": False,
+    "no": False,
+    "false": False,
+    "off": False,
+}
 
-def _fix_include_path(source_file: str, match: re.Match) -> pathlib.Path:
-    new_path = pathlib.Path(source_file).parent.absolute() / match.group("file")
-    if not new_path.is_file():
-        raise error(f"Attempted to include non-existent file {new_path}")
-    return f"!!include {new_path}"
 
-
-class SectionInterpolation(configparser.Interpolation):
-    """
-    variable interpolation replacing ${[section.]option}
-    """
-
-    _KEYCRE = re.compile(
-        r"(?<!\\)?\$\{(?:(?P<section>[^.:${}]+)[.:])?(?P<option>[^${}]+)\}"
-    )
-
-    def __init__(self, access_tracking):
-        self.access_tracking = access_tracking
-
-    def before_get(self, parser, section, option, value, defaults):
-        if not isinstance(value, str):
-            return value
-        depth = configparser.MAX_INTERPOLATION_DEPTH
-        while depth:
-            depth -= 1
-
-            match = self._KEYCRE.search(value)
-            if not match:
-                break
-
-            sect = match.group("section") or section
-            opt = match.group("option")
-
-            const = parser.get(sect, opt)
-            self.access_tracking.setdefault((sect, opt), const)
-
-            value = value[: match.start()] + const + value[match.end() :]
-
-        return value.replace("\\${", "${")
+def _parse_boolean(value):
+    try:
+        return _BOOLEAN_STATES[value.lower()]
+    except KeyError:
+        raise ValueError("Not a boolean: %s" % value)
 
 
 class ConfigWrapper:
-    error = configparser.Error
+    error = error
 
     def __init__(self, printer, fileconfig, access_tracking, section):
         self.printer = printer
@@ -83,9 +105,17 @@ class ConfigWrapper:
     def get_name(self):
         return self.section
 
+    def _fetch(self, option):
+        value, refs = self.fileconfig.get_with_refs(self.section, option)
+        for ref_section, ref_option, ref_value in refs:
+            self.access_tracking.setdefault(
+                (ref_section, ref_option), ref_value
+            )
+        return value
+
     def _get_wrapper(
         self,
-        parser,
+        coerce,
         option,
         default,
         minval=None,
@@ -104,11 +134,10 @@ class ConfigWrapper:
                 "Option '%s' in section '%s' must be specified"
                 % (option, self.section)
             )
-        if parser is float:
-            parser = mathutil.safe_float
+        raw = self._fetch(option)
         try:
-            v = parser(self.section, option)
-        except self.error as e:
+            v = coerce(raw)
+        except error:
             raise
         except:
             raise error(
@@ -141,7 +170,7 @@ class ConfigWrapper:
 
     def get(self, option, default=sentinel, note_valid=True):
         return self._get_wrapper(
-            self.fileconfig.get, option, default, note_valid=note_valid
+            lambda v: v, option, default, note_valid=note_valid
         )
 
     def getscript(self, option, default=sentinel, note_valid=True):
@@ -175,7 +204,7 @@ class ConfigWrapper:
         note_valid=True,
     ):
         return self._get_wrapper(
-            self.fileconfig.getint,
+            int,
             option,
             default,
             minval,
@@ -194,7 +223,7 @@ class ConfigWrapper:
         note_valid=True,
     ):
         return self._get_wrapper(
-            self.fileconfig.getfloat,
+            mathutil.safe_float,
             option,
             default,
             minval,
@@ -206,7 +235,7 @@ class ConfigWrapper:
 
     def getboolean(self, option, default=sentinel, note_valid=True):
         return self._get_wrapper(
-            self.fileconfig.getboolean, option, default, note_valid=note_valid
+            _parse_boolean, option, default, note_valid=note_valid
         )
 
     def getchoice(self, option, choices, default=sentinel, note_valid=True):
@@ -249,11 +278,11 @@ class ConfigWrapper:
                 )
             return tuple(res)
 
-        def fcparser(section, option):
-            return lparser(self.fileconfig.get(section, option), len(seps) - 1)
-
         return self._get_wrapper(
-            fcparser, option, default, note_valid=note_valid
+            lambda v: lparser(v, len(seps) - 1),
+            option,
+            default,
+            note_valid=note_valid,
         )
 
     def getlist(
@@ -425,92 +454,19 @@ class PrinterConfig:
                 section = pruned_line[1:-1].strip()
                 continue
             field = self.value_r.sub("", pruned_line)
-            if config.fileconfig.has_option(section, field):
+            if section is not None and config.fileconfig.has_option(
+                section, field
+            ):
                 is_dup_field = True
                 lines[lineno] = "#" + lines[lineno]
         return "\n".join(lines)
 
-    def _parse_config_buffer(self, buffer, filename, fileconfig):
-        if not buffer:
-            return
-        data = "\n".join(buffer)
-        del buffer[:]
-        sbuffer = io.StringIO(data)
-        if sys.version_info.major >= 3:
-            fileconfig.read_file(sbuffer, filename)
-        else:
-            fileconfig.readfp(sbuffer, filename)
-
-    def _resolve_include(
-        self, source_filename, include_spec, fileconfig, visited
-    ):
-        dirname = os.path.dirname(source_filename)
-        include_spec = include_spec.strip()
-        include_glob = os.path.join(dirname, include_spec)
-        if sys.version_info >= (3, 5):
-            include_filenames = glob.glob(include_glob, recursive=True)
-        else:
-            include_filenames = glob.glob(include_glob)
-        if not include_filenames and not glob.has_magic(include_glob):
-            # Empty set is OK if wildcard but not for direct file reference
-            raise error("Include file '%s' does not exist" % (include_glob,))
-        include_filenames.sort()
-        for include_filename in include_filenames:
-            include_data = self._read_config_file(include_filename)
-            self._parse_config(
-                include_data, include_filename, fileconfig, visited
-            )
-        return include_filenames
-
-    def _parse_config(self, data, filename, fileconfig, visited):
-        path = os.path.abspath(filename)
-        if path in visited:
-            raise error("Recursive include of config file '%s'" % (filename))
-        visited.add(path)
-        lines = data.split("\n")
-        # Buffer lines between includes and parse as a unit so that overrides
-        # in includes apply linearly as they do within a single file
-        buffer = []
-        for line in lines:
-            # Strip trailing comment
-            pos = line.find("#")
-            if pos >= 0:
-                line = line[:pos]
-            # Process include or buffer line
-            mo = configparser.RawConfigParser.SECTCRE.match(line)
-            header = mo and mo.group("header")
-            if header and header.startswith("include "):
-                self._parse_config_buffer(buffer, filename, fileconfig)
-                include_spec = header[8:].strip()
-                self._resolve_include(
-                    filename, include_spec, fileconfig, visited
-                )
-            else:
-                line = _INCLUDERE.sub(
-                    lambda match: _fix_include_path(filename, match),
-                    line,
-                )
-                buffer.append(line)
-        self._parse_config_buffer(buffer, filename, fileconfig)
-        visited.remove(path)
-
     def _build_config_wrapper(self, data, filename):
-        access_tracking = {}
-        fileconfig = configparser.RawConfigParser(
-            strict=False,
-            inline_comment_prefixes=(";", "#"),
-            interpolation=SectionInterpolation(access_tracking),
-        )
-
-        self._parse_config(data, filename, fileconfig, set())
-        return ConfigWrapper(
-            self.printer, fileconfig, access_tracking, "printer"
-        )
+        fileconfig = _config_doc.ConfigDocument.parse(data, filename)
+        return ConfigWrapper(self.printer, fileconfig, {}, "printer")
 
     def _build_config_string(self, config):
-        sfile = io.StringIO()
-        config.fileconfig.write(sfile)
-        return sfile.getvalue().strip()
+        return config.fileconfig.write_string().strip()
 
     def read_config(self, filename):
         return self._build_config_wrapper(
@@ -741,8 +697,7 @@ class PrinterConfig:
             if pos >= 0:
                 line = line[:pos]
 
-            mo = configparser.RawConfigParser.SECTCRE.match(line)
-            header = mo and mo.group("header")
+            header = _section_header(line)
             if header and header.startswith("include "):
                 include_spec = header[8:].strip()
                 include_glob = os.path.join(dirname, include_spec)
@@ -815,3 +770,14 @@ class PrinterConfig:
             # flag config updated to false since config saved with no restart
             self.save_config_pending = False
             gcode.respond_info("Config update without restart successful")
+
+
+def _section_header(line):
+    """Match a `[header]` at column 0 (configparser SECTCRE semantics:
+    anything after the closing bracket is ignored)."""
+    if not line.startswith("["):
+        return None
+    end = line.find("]")
+    if end <= 1:
+        return None
+    return line[1:end]

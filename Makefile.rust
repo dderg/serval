@@ -23,16 +23,33 @@ MOTION_ENGINE_DEST = klippy/_motion_engine.so
 # dylib's ad-hoc code signature on macOS and the kernel SIGKILLs every
 # process that imports it; a fresh inode keeps the linker's signature valid.
 motion-engine:
-	cd rust && cargo build -p motion-engine --release --features extension-module
-	rm -f $(MOTION_ENGINE_DEST)
+	cd rust && cargo build -p motion-engine -p config-py --release \
+		--features motion-engine/extension-module,config-py/extension-module
+	rm -f $(MOTION_ENGINE_DEST) $(CONFIG_DOC_DEST)
 	cp $(MOTION_ENGINE_SRC) $(MOTION_ENGINE_DEST)
+	cp $(CONFIG_DOC_SRC) $(CONFIG_DOC_DEST)
+
+# Config parser module — klippy/configfile.py refuses to start without it.
+# Small dependency graph (pyo3 + config-doc only), so python-only
+# environments build just this target.
+CONFIG_DOC_SRC  = rust/target/release/lib_config_doc.$(MOTION_ENGINE_EXT)
+CONFIG_DOC_DEST = klippy/_config_doc.so
+
+config-doc:
+	cd rust && cargo build -p config-py --release --features extension-module
+	rm -f $(CONFIG_DOC_DEST)
+	cp $(CONFIG_DOC_SRC) $(CONFIG_DOC_DEST)
+
+clean-config-doc:
+	rm -f $(CONFIG_DOC_DEST)
+	cd rust && cargo clean -p config-py
 
 # Same module under the `snapshot` cargo profile: float-identical output,
 # much faster edit-rebuild cycle (no fat LTO, parallel codegen, incremental).
 # The snapshot test loop uses this target.
 MOTION_ENGINE_FAST_SRC = rust/target/snapshot/lib_motion_engine.$(MOTION_ENGINE_EXT)
 
-motion-engine-fast:
+motion-engine-fast: config-doc
 	cd rust && cargo build -p motion-engine --profile snapshot --features extension-module,snapshot
 	rm -f $(MOTION_ENGINE_DEST)
 	cp $(MOTION_ENGINE_FAST_SRC) $(MOTION_ENGINE_DEST)
@@ -66,4 +83,5 @@ servo-ident:
 	cd rust && cargo build -p servo-ident --release
 
 .PHONY: motion-engine motion-engine-fast clean-motion-engine \
+	config-doc clean-config-doc \
 	ethercat-endpoint-hw setcap-ethercat ethercat-stub servo-ident

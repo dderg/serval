@@ -202,6 +202,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
+name = "config-doc"
+version = "0.1.0"
+dependencies = [
+ "glob",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "config-py"
+version = "0.1.0"
+dependencies = [
+ "config-doc",
+ "pyo3",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -397,6 +414,12 @@ dependencies = [
  "r-efi",
  "wasip2",
 ]
+
+[[package]]
+name = "glob"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "hash32"

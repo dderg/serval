@@ -68,9 +68,10 @@ COPY rust/ /kalico/rust/
 
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     --mount=type=cache,target=/root/.cargo/git,sharing=shared \
-    cargo build -p motion-engine --release && \
+    cargo build -p motion-engine -p config-py --release && \
     mkdir -p /artifacts && \
-    cp /kalico/rust/target/release/lib_motion_engine.so /artifacts/
+    cp /kalico/rust/target/release/lib_motion_engine.so /artifacts/ && \
+    cp /kalico/rust/target/release/lib_config_doc.so /artifacts/
 
 # --------------------------------------------------------------------
 # Stage 3 — firmware
@@ -176,10 +177,13 @@ COPY --from=firmware \
     /kalico/tools/sim/preload/libsim_intercept.so \
     /kalico/tools/sim/preload/
 
-# Overlay _motion_engine.so on top of the Python source copy.
+# Overlay the native modules on top of the Python source copy.
 COPY --from=rust-build \
     /artifacts/lib_motion_engine.so \
     /kalico/klippy/_motion_engine.so
+COPY --from=rust-build \
+    /artifacts/lib_config_doc.so \
+    /kalico/klippy/_config_doc.so
 
 # Third-party plugins fetched during the firmware stage.
 COPY --from=firmware /kalico/tools/sim/third_party_repos/ \
