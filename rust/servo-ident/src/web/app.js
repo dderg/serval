@@ -82,6 +82,8 @@ const state = {
   details: new Map(), // name -> {mtime_utc, has_results, manifest, results}
   plotSeries: new Map(), // name -> {mtime_utc, data}
   selected: new Set(),
+  pinned: new Set(), // runs that stay selected when a plain click switches runs
+  runColors: new Map(), // run name -> palette color, kept while the run stays selected
   autoSelected: false,
   stepFilter: null, // null = every step; otherwise a Set of visible step names
   console: {
@@ -441,23 +443,59 @@ function renderRuns() {
     tr.addEventListener("click", (ev) => {
       if (!run.has_results) return;
       if (ev.shiftKey) {
-        if (state.selected.has(run.name)) state.selected.delete(run.name);
-        else state.selected.add(run.name);
-      } else if (state.selected.has(run.name) && state.selected.size === 1) {
-        state.selected.delete(run.name);
+        if (state.selected.has(run.name)) {
+          state.selected.delete(run.name);
+          state.pinned.delete(run.name);
+        } else {
+          state.selected.add(run.name);
+        }
       } else {
-        state.selected = new Set([run.name]);
+        const unpinnedOthers = [...state.selected].filter(
+          (n) => n !== run.name && !state.pinned.has(n)
+        );
+        if (
+          state.selected.has(run.name) &&
+          !state.pinned.has(run.name) &&
+          unpinnedOthers.length === 0
+        ) {
+          state.selected.delete(run.name);
+        } else {
+          state.selected = new Set([...state.pinned, run.name]);
+        }
       }
+      syncRunColors();
       renderRuns();
       redrawCharts();
     });
 
     const dotTd = document.createElement("td");
-    const colorIdx = selectedRunNames().indexOf(run.name);
-    dotTd.innerHTML =
-      colorIdx >= 0
-        ? `<span class="swatch" style="background:${PALETTE[colorIdx % PALETTE.length]}"></span>`
-        : "";
+    if (state.runColors.has(run.name)) {
+      const swatch = document.createElement("span");
+      swatch.className = "swatch";
+      swatch.style.background = runColor(run.name);
+      dotTd.appendChild(swatch);
+    }
+    if (run.has_results) {
+      const pinBtn = document.createElement("button");
+      pinBtn.className = state.pinned.has(run.name) ? "pin-toggle pinned" : "pin-toggle";
+      pinBtn.textContent = "📌";
+      pinBtn.title = state.pinned.has(run.name)
+        ? "unpin — plain clicks will deselect this run again"
+        : "pin — keep this run selected while plain clicks switch other runs";
+      pinBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (state.pinned.has(run.name)) {
+          state.pinned.delete(run.name);
+        } else {
+          state.pinned.add(run.name);
+          state.selected.add(run.name);
+        }
+        syncRunColors();
+        renderRuns();
+        redrawCharts();
+      });
+      dotTd.appendChild(pinBtn);
+    }
     tr.appendChild(dotTd);
 
     const timeTd = document.createElement("td");
@@ -518,6 +556,30 @@ function selectedRunNames() {
   return state.runs.filter((r) => state.selected.has(r.name)).map((r) => r.name);
 }
 
+/// Colors stick to runs for as long as they stay selected: deselecting one
+/// frees its color without touching anyone else's, and a newly selected run
+/// takes the least-used palette color instead of everything reshuffling.
+function syncRunColors() {
+  for (const name of [...state.runColors.keys()]) {
+    if (!state.selected.has(name)) state.runColors.delete(name);
+  }
+  for (const name of selectedRunNames()) {
+    if (!state.runColors.has(name)) state.runColors.set(name, leastUsedColor());
+  }
+}
+
+function leastUsedColor() {
+  const counts = new Map(PALETTE.map((c) => [c, 0]));
+  for (const c of state.runColors.values()) counts.set(c, counts.get(c) + 1);
+  return PALETTE.reduce((best, c) => (counts.get(c) < counts.get(best) ? c : best));
+}
+
+function runColor(name) {
+  const color = state.runColors.get(name);
+  if (!color) throw new Error(`${name}: no color assigned — run is not selected`);
+  return color;
+}
+
 /// First data load: preselect the newest few analyzed runs and prefill the
 /// sweep command from the newest one, so the charts and the re-run box are
 /// populated before any clicking.
@@ -540,7 +602,11 @@ async function refresh() {
   for (const name of [...state.selected]) {
     if (!known.has(name)) state.selected.delete(name);
   }
+  for (const name of [...state.pinned]) {
+    if (!known.has(name)) state.pinned.delete(name);
+  }
   autoSelectInitialRuns();
+  syncRunColors();
   renderRuns();
   await redrawCharts();
 }
@@ -661,7 +727,7 @@ function drawTimeDomain(names, plots, steps) {
       if (!step) return;
       const { y: series, label } = pickSeries(step);
       yLabel = label;
-      const color = PALETTE[i % PALETTE.length];
+      const color = runColor(names[i]);
       traces.push({ t: step.t_s, y: series, color });
       const item = document.createElement("span");
       item.innerHTML = `<span class="swatch" style="background:${color}"></span>${names[i]}`;
@@ -718,7 +784,7 @@ function traceStyle(names, steps, runIdx, stepIdx) {
   if (names.length === 1) {
     return { color: PALETTE[stepIdx % PALETTE.length], name: steps[stepIdx] };
   }
-  const base = PALETTE[runIdx % PALETTE.length];
+  const base = runColor(names[runIdx]);
   const ramp = steps.length > 1 ? (0.55 * stepIdx) / (steps.length - 1) : 0;
   const name =
     steps.length === 1 ? names[runIdx] : `${names[runIdx]} · ${steps[stepIdx]}`;
@@ -1108,7 +1174,7 @@ function frfTraces(names, plots, stepName, key) {
     traces.push({
       freq: d.freq_hz,
       y: d[key],
-      color: PALETTE[i % PALETTE.length],
+      color: runColor(names[i]),
       dashed: false,
       label: names[i],
       run: names[i],

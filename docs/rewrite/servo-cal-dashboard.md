@@ -138,13 +138,19 @@ page's run strip on the left, the page's slice of the drive tuning grid
 plus the console in a sticky right rail.
 
 Run rows select exclusively on click (click the sole selected row again to
-clear); shift+click adds/removes a run from the overlay. Step chips use the
-same grammar with an **all** chip as the default: every step draws at once,
-click a chip to isolate that step, shift+click to add/remove one. Trace
-colors carry the disambiguation: with one run selected each step gets its
-own palette color (the all-gains-of-this-sweep view); with several runs
-each keeps its table-swatch hue and its steps ramp toward white, so the
-chips are the clutter valve when overlaying sweeps.
+clear); shift+click adds/removes a run from the overlay. The 📌 toggle on a
+row (visible on hover) pins it: pinned runs survive plain clicks, so a
+reference run stays in the overlay while single clicks switch the run being
+compared against it; shift+click-deselecting a pinned run unpins it. Step
+chips use the same grammar with an **all** chip as the default: every step
+draws at once, click a chip to isolate that step, shift+click to add/remove
+one. Trace colors carry the disambiguation: with one run selected each step
+gets its own palette color (the all-gains-of-this-sweep view); with several
+runs each keeps its table-swatch hue and its steps ramp toward white, so
+the chips are the clutter valve when overlaying sweeps. A run's color is
+assigned when it is selected and held until it is deselected — changing the
+rest of the selection never reshuffles the colors of runs already on the
+chart.
 
 - **gains** — gain-sweep/refine runs, following-error PSD overlay (step
   chips, 20–450 Hz band marked, per-trace peak annotations), the `gains`
