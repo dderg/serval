@@ -1298,15 +1298,18 @@ function renderFrfCharts(names, plots) {
 //
 // Renders GET /api/runs/<name>/strain: per raster line, the elastic
 // (direction-symmetric) differential belt torque binned along the sweep.
-// Four heatmaps (belt × sweep orientation) share one symmetric diverging
-// scale, so a tensioner asymmetry or a trapped preload reads as a color
-// field over the bed rather than 26 separate charts.
+// All four heatmaps (belt × sweep orientation) draw in BED coordinates —
+// horizontal = bed x, vertical = bed y increasing upward, square aspect —
+// on one symmetric diverging scale, so a feature at some bed position
+// lines up across every panel. X-sweep lines are horizontal bands at
+// their swept y; Y-sweep lines are vertical bands at their swept x.
 
 const STRAIN_NEUTRAL = "#1f2630";
 const STRAIN_NEG = "#4fb3ff";
 const STRAIN_POS = "#e05a4f";
-const STRAIN_HEAT_ROW_PX = 14;
-const STRAIN_HEAT_PAD = { l: 46, r: 8, t: 4, b: 18 };
+const STRAIN_HEAT_PAD = { l: 40, r: 8, t: 16, b: 26 };
+const STRAIN_HEAT_CANVAS_W = 430;
+const STRAIN_LINE_SPACING_FALLBACK_MM = 20;
 
 function strainShellHtml(def) {
   return (
@@ -1327,13 +1330,13 @@ function strainShellHtml(def) {
     `</section>` +
     `<section>` +
     `<div class="section-head"><h2>per-line elastic profiles</h2>` +
-    `<span class="note">one polyline per raster line, along the sweep</span></div>` +
+    `<span class="note">one polyline per raster line, in bed coordinates</span></div>` +
     `<div class="charts" id="strain-profiles"></div>` +
     `</section>` +
     `<section>` +
     `<div class="section-head"><h2>per-line DC offset — mean elastic</h2>` +
     `<span class="note">a line-to-line offset is trapped preload, not local strain</span></div>` +
-    `<div class="charts" id="strain-dc"></div>` +
+    `<div class="strain-grid" id="strain-dc"></div>` +
     `</section>` +
     `</main>` +
     `<aside class="controls">${controlsSectionsHtml(def)}</aside>` +
@@ -1395,13 +1398,71 @@ function strainLineLabel(line) {
 }
 
 /// Raster lines grouped by sweep orientation and ordered by the swept
-/// coordinate, so heatmap rows lay out like the bed does.
+/// coordinate, so heatmap bands lay out like the bed does.
 function strainGroups(data) {
   const bySwept = (a, b) => sweptEntry(a)[1] - sweptEntry(b)[1];
-  return [
-    { title: "X sweep", lines: data.lines.filter((l) => l.name.startsWith("xline")).sort(bySwept) },
-    { title: "Y sweep", lines: data.lines.filter((l) => l.name.startsWith("yline")).sort(bySwept) },
-  ].filter((g) => g.lines.length);
+  const group = (orientation, prefix, title) => ({
+    orientation,
+    title,
+    lines: data.lines.filter((l) => l.name.startsWith(prefix)).sort(bySwept),
+  });
+  return [group("x", "xline", "X sweep"), group("y", "yline", "Y sweep")].filter(
+    (g) => g.lines.length
+  );
+}
+
+/// Bed-frame geometry: the sweep coordinate is shifted to start at 0, so
+/// its bed origin is the manifest's stroke_plan start; when the plan is
+/// unavailable it is recovered from the run itself — each orientation's
+/// sweep starts where the OTHER orientation's raster lines sit, so their
+/// minimum swept value is the origin. Band thickness is the raster pitch.
+function strainBedGeometry(groups, plan) {
+  const sweptOf = (orientation) => {
+    const g = groups.find((x) => x.orientation === orientation);
+    return g ? g.lines.map((l) => sweptEntry(l)[1]) : [];
+  };
+  const minGap = (vals) => {
+    const s = [...vals].sort((a, b) => a - b);
+    let gap = Infinity;
+    for (let i = 1; i < s.length; i++) gap = Math.min(gap, s[i] - s[i - 1]);
+    return isFinite(gap) && gap > 0 ? gap : STRAIN_LINE_SPACING_FALLBACK_MM;
+  };
+  const xBands = sweptOf("y");
+  const yBands = sweptOf("x");
+  const spacing = plan.line_spacing || Math.min(minGap(xBands), minGap(yBands));
+  const bandHalf = spacing / 2;
+  const x0 = plan.x_start != null ? plan.x_start : xBands.length ? Math.min(...xBands) : 0;
+  const y0 = plan.y_start != null ? plan.y_start : yBands.length ? Math.min(...yBands) : 0;
+  const xs = [];
+  const ys = [];
+  for (const g of groups) {
+    for (const line of g.lines) {
+      const half = lineBinWidth(line) / 2;
+      const c = line.bin_centers;
+      const swept = sweptEntry(line)[1];
+      const sweepOrigin = g.orientation === "x" ? x0 : y0;
+      const along = [sweepOrigin + c[0] - half, sweepOrigin + c[c.length - 1] + half];
+      const across = [swept - bandHalf, swept + bandHalf];
+      if (g.orientation === "x") {
+        xs.push(...along);
+        ys.push(...across);
+      } else {
+        ys.push(...along);
+        xs.push(...across);
+      }
+    }
+  }
+  const xlo = Math.min(...xs);
+  const ylo = Math.min(...ys);
+  return {
+    x0,
+    y0,
+    bandHalf,
+    xlo,
+    xhi: Math.max(Math.max(...xs), xlo + 1),
+    ylo,
+    yhi: Math.max(Math.max(...ys), ylo + 1),
+  };
 }
 
 function strainStats(data) {
@@ -1429,7 +1490,7 @@ function lineBinWidth(line) {
   return c.length > 1 ? c[1] - c[0] : 2 * c[0];
 }
 
-function drawStrainHeatmap(canvas, lines, beltIdx, vmax) {
+function drawStrainHeatmap(canvas, group, beltIdx, vmax, geo) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth || canvas.width;
   const h = canvas.clientHeight || canvas.height;
@@ -1444,46 +1505,55 @@ function drawStrainHeatmap(canvas, lines, beltIdx, vmax) {
   ctx.fillStyle = "#0d1117";
   ctx.fillRect(0, 0, w, h);
   const pad = STRAIN_HEAT_PAD;
-  const mmMax = Math.max(
-    ...lines.map((l) => l.bin_centers[l.bin_centers.length - 1] + lineBinWidth(l) / 2)
-  );
-  const rowH = (h - pad.t - pad.b) / lines.length;
-  const x = (mm) => pad.l + (mm / mmMax) * (w - pad.l - pad.r);
+  const px = (mm) => pad.l + ((mm - geo.xlo) / (geo.xhi - geo.xlo)) * (w - pad.l - pad.r);
+  const py = (mm) => h - pad.b - ((mm - geo.ylo) / (geo.yhi - geo.ylo)) * (h - pad.t - pad.b);
 
   ctx.font = "10px monospace";
-  lines.forEach((line, r) => {
-    const y0 = pad.t + r * rowH;
+  for (const line of group.lines) {
+    const swept = sweptEntry(line)[1];
     const half = lineBinWidth(line) / 2;
+    const sweepOrigin = group.orientation === "x" ? geo.x0 : geo.y0;
     line.bin_centers.forEach((center, b) => {
       const v = line.belts[beltIdx].elastic[b];
       if (v === null) return;
-      const x0 = x(center - half);
       ctx.fillStyle = strainColor(v / vmax);
-      ctx.fillRect(x0, y0 + 0.5, x(center + half) - x0, rowH - 1);
+      const lo = sweepOrigin + center - half;
+      const hi = sweepOrigin + center + half;
+      if (group.orientation === "x") {
+        const top = py(swept + geo.bandHalf);
+        ctx.fillRect(px(lo), top + 0.5, px(hi) - px(lo), py(swept - geo.bandHalf) - top - 1);
+      } else {
+        const left = px(swept - geo.bandHalf);
+        ctx.fillRect(left + 0.5, py(hi), px(swept + geo.bandHalf) - left - 1, py(lo) - py(hi));
+      }
     });
-    ctx.fillStyle = "#8a97a3";
-    ctx.fillText(strainLineLabel(line), 2, y0 + rowH / 2 + 3.5);
-  });
+  }
 
   ctx.fillStyle = "#8a97a3";
   for (let i = 0; i <= 4; i++) {
-    const mm = (mmMax * i) / 4;
-    ctx.fillText(`${mm.toFixed(0)}mm`, x(mm), h - 5);
+    const xmm = geo.xlo + ((geo.xhi - geo.xlo) * i) / 4;
+    ctx.fillText(xmm.toFixed(0), Math.min(px(xmm) - 6, w - 20), h - pad.b + 12);
+    const ymm = geo.ylo + ((geo.yhi - geo.ylo) * i) / 4;
+    ctx.fillText(ymm.toFixed(0), 2, Math.max(py(ymm) + 3, pad.t + 8));
   }
+  ctx.fillText("bed x (mm)", pad.l + (w - pad.l - pad.r) / 2 - 30, h - 4);
+  ctx.fillText("bed y (mm)", pad.l, 11);
 }
 
-function strainHeatmapBox(title, lines, beltIdx, vmax) {
+function strainHeatmapBox(title, group, beltIdx, vmax, geo) {
   const box = document.createElement("div");
   box.className = "chart-box";
   const head = document.createElement("h3");
   head.textContent = title;
   box.appendChild(head);
   const canvas = document.createElement("canvas");
-  canvas.width = 430;
-  canvas.height = STRAIN_HEAT_PAD.t + STRAIN_HEAT_PAD.b + lines.length * STRAIN_HEAT_ROW_PX;
-  canvas.style.height = `${canvas.height}px`;
+  const pad = STRAIN_HEAT_PAD;
+  const plotW = STRAIN_HEAT_CANVAS_W - pad.l - pad.r;
+  const plotH = plotW * ((geo.yhi - geo.ylo) / (geo.xhi - geo.xlo));
+  canvas.width = STRAIN_HEAT_CANVAS_W;
+  canvas.height = Math.round(pad.t + pad.b + plotH);
   box.appendChild(canvas);
-  drawStrainHeatmap(canvas, lines, beltIdx, vmax);
+  drawStrainHeatmap(canvas, group, beltIdx, vmax, geo);
   return box;
 }
 
@@ -1498,24 +1568,30 @@ function strainScaleHtml(vmax) {
   );
 }
 
-function strainProfileBox(pair, beltIdx, lines, vmax) {
+function strainProfileBox(title, beltIdx, group, vmax, geo) {
   const box = document.createElement("div");
   box.className = "chart-box";
   const head = document.createElement("h3");
-  head.textContent = pair;
+  head.textContent = title;
   box.appendChild(head);
   const canvas = document.createElement("canvas");
   canvas.width = 860;
-  canvas.height = 200;
+  canvas.height = 300;
   box.appendChild(canvas);
+  const lines = group.lines;
+  const sweepOrigin = group.orientation === "x" ? geo.x0 : geo.y0;
   const ramp = (i) =>
-    mixColor(PALETTE[beltIdx % PALETTE.length], "#ffffff", lines.length > 1 ? (0.65 * i) / (lines.length - 1) : 0);
+    mixColor(
+      PALETTE[beltIdx % PALETTE.length],
+      "#ffffff",
+      lines.length > 1 ? (0.65 * i) / (lines.length - 1) : 0
+    );
   const traces = lines.map((line, i) => ({
-    t: line.bin_centers,
+    t: line.bin_centers.map((c) => sweepOrigin + c),
     y: line.belts[beltIdx].elastic,
     color: ramp(i),
   }));
-  drawChart(canvas, traces, "elastic (%)", { yMin: -vmax, yMax: vmax }, "mm");
+  drawChart(canvas, traces, `elastic (%) vs bed ${group.orientation}`, { yMin: -vmax, yMax: vmax }, "mm");
   const legend = document.createElement("div");
   legend.className = "legend";
   lines.forEach((line, i) => {
@@ -1583,15 +1659,15 @@ function drawStrainDcBars(canvas, labels, values) {
   ctx.fillText("mean elastic (%)", pad.l, 10);
 }
 
-function strainDcBox(pair, beltIdx, lines) {
+function strainDcBox(title, beltIdx, lines) {
   const box = document.createElement("div");
   box.className = "chart-box";
   const head = document.createElement("h3");
-  head.textContent = pair;
+  head.textContent = title;
   box.appendChild(head);
   const canvas = document.createElement("canvas");
-  canvas.width = 860;
-  canvas.height = 150;
+  canvas.width = 430;
+  canvas.height = 210;
   box.appendChild(canvas);
   drawStrainDcBars(
     canvas,
@@ -1621,16 +1697,17 @@ function renderStrainCharts(data) {
     `mean |friction| ${stats.meanFriction.toFixed(1)}%`;
   el("strain-scale").innerHTML = strainScaleHtml(vmax);
   const groups = strainGroups(data);
+  const detail = state.details.get(state.strain.selected);
+  const plan = (detail && detail.manifest && detail.manifest.stroke_plan) || {};
+  const geo = strainBedGeometry(groups, plan);
   const pairs = data.lines[0].belts.map((b) => b.pair);
   pairs.forEach((pair, beltIdx) => {
     for (const group of groups) {
-      heatmaps.appendChild(
-        strainHeatmapBox(`${pair} — ${group.title}`, group.lines, beltIdx, vmax)
-      );
+      const title = `${pair} — ${group.title}`;
+      heatmaps.appendChild(strainHeatmapBox(title, group, beltIdx, vmax, geo));
+      profiles.appendChild(strainProfileBox(title, beltIdx, group, vmax, geo));
+      dc.appendChild(strainDcBox(title, beltIdx, group.lines));
     }
-    const ordered = groups.flatMap((g) => g.lines);
-    profiles.appendChild(strainProfileBox(pair, beltIdx, ordered, vmax));
-    dc.appendChild(strainDcBox(pair, beltIdx, ordered));
   });
 }
 
