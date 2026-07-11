@@ -554,6 +554,47 @@ def test_base_speed_gain_without_servo_subset_errors():
         sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
 
 
+def test_strain_map_raster_records_one_capture_per_line():
+    servo_param.drain_param_writes()
+    sc, gcode = make_sc()
+    sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
+    gcmd = FakeGcmd(LINE_SPACING="120", SPEED="50", ACCEL="1000")
+    sc.cmd_SERVO_MEASURE_STRAIN_MAP(gcmd)
+    caps = sc.printer.lookup_object("servo_capture").captures
+    names = [os.path.basename(path) for path, _servos in caps]
+    assert names == [
+        "step_xline_y030.scap",
+        "step_xline_y150.scap",
+        "step_xline_y270.scap",
+        "step_yline_x030.scap",
+        "step_yline_x150.scap",
+        "step_yline_x270.scap",
+    ]
+    m = _manifest(sc)
+    assert m["experiment"] == "strain_map"
+    assert [s["name"] for s in m["steps"]] == [n[5:-5] for n in names]
+    assert m["steps"][0]["swept"] == {"y": 30.0}
+    assert m["stroke_plan"]["line_spacing"] == 120.0
+    g1 = [
+        line
+        for script in gcode.scripts
+        if isinstance(script, str)
+        for line in script.split("\n")
+        if line.startswith("G1 ")
+    ]
+    strokes = [line for line in g1 if "F3000" in line]
+    assert len(strokes) == 12, "6 lines, each forward and back"
+
+
+def test_strain_map_rejects_cartesian_kinematics():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
+    sc.printer.lookup_object("toolhead").kin.coupled_xy = lambda: False
+    with pytest.raises(RuntimeError, match="coupled XY"):
+        sc.cmd_SERVO_MEASURE_STRAIN_MAP(FakeGcmd())
+
+
 NOTCH_VALUES = {
     (0x2001, 0x41): 111,
     (0x2001, 0x42): 1,

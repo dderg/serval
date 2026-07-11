@@ -769,6 +769,7 @@ class ServoCalibration:
             "SERVO_MEASURE_DIFFERENTIAL",
             "SERVO_DIFF_DAMPER",
             "SERVO_DIFF_TRIM",
+            "SERVO_MEASURE_STRAIN_MAP",
             "SERVO_MEASURE_INERTIA",
             "SERVO_FIT_DYNAMICS",
             "SERVO_CALIBRATE_INERTIA_RATIO",
@@ -1606,6 +1607,98 @@ class ServoCalibration:
                 )
             else:
                 gcmd.respond_info("belt %s trim disarmed" % (belt,))
+
+    STRAIN_MAP_MIN_LINE_SPACING_MM = 2.0
+
+    cmd_SERVO_MEASURE_STRAIN_MAP_help = (
+        "Raster the bed with slow constant-speed strokes, one capture per "
+        "line - the measurement half of the belt strain map. Differential "
+        "pair torque vs (x, y) separates trapped preload, pulley/idler "
+        "runout (periodic in travel) and geometry (smooth) when the run is "
+        "analyzed. Serpentine X sweeps stepped along Y by LINE_SPACING, "
+        "then Y sweeps stepped along X; every line strokes forward and "
+        "back so friction asymmetry averages out. CoreXY only. Params "
+        "SPEED (50) ACCEL (1000) LINE_SPACING (10) X_START X_END Y_START "
+        "Y_END DWELL_MS TAG"
+    )
+
+    @staticmethod
+    def _raster_levels(start: float, end: float, spacing: float) -> list[float]:
+        n = max(1, int(round((end - start) / spacing)))
+        return [start + (end - start) * i / n for i in range(n + 1)]
+
+    def cmd_SERVO_MEASURE_STRAIN_MAP(self, gcmd: Any) -> None:
+        kin = self._kin()
+        if not kin.coupled_xy():
+            raise gcmd.error(
+                "SERVO_MEASURE_STRAIN_MAP requires coupled XY (CoreXY) "
+                "kinematics - the strain map is a belt-pair measurement"
+            )
+        x_start, x_end, y_start, y_end = servo_strokes.xy_bounds(
+            gcmd, self.bounds
+        )
+        speed = gcmd.get_float("SPEED", 50.0, above=0.0)
+        accel = gcmd.get_float("ACCEL", 1000.0, above=0.0)
+        spacing = gcmd.get_float(
+            "LINE_SPACING", 10.0, minval=self.STRAIN_MAP_MIN_LINE_SPACING_MM
+        )
+        dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
+        tag = gcmd.get("TAG", "strain")
+        servos = servo_strokes.axis_servos(gcmd, kin, "X")
+        stroke_plan = {
+            "x_start": x_start,
+            "x_end": x_end,
+            "y_start": y_start,
+            "y_end": y_end,
+            "speed": speed,
+            "accel": accel,
+            "line_spacing": spacing,
+            "dwell_ms": dwell,
+        }
+        run = self._begin_run(
+            gcmd,
+            "strain_map",
+            tag,
+            "XY",
+            servos,
+            stroke_plan,
+            self._corexy_rails(gcmd, "X"),
+        )
+        lines = [
+            ("X", x_start, x_end, "y", level)
+            for level in self._raster_levels(y_start, y_end, spacing)
+        ] + [
+            ("Y", y_start, y_end, "x", level)
+            for level in self._raster_levels(x_start, x_end, spacing)
+        ]
+        try:
+            self._prep("X", dwell)
+            self._prep("Y", dwell)
+            for i, (axis, start, end, fixed_axis, level) in enumerate(lines):
+                if axis == "X":
+                    self._goto_xy(start, level, dwell)
+                else:
+                    self._goto_xy(level, start, dwell)
+                name = "%sline_%s%03d" % (
+                    axis.lower(),
+                    fixed_axis,
+                    int(round(level)),
+                )
+                gcmd.respond_info(
+                    "strain map line %d/%d: %s sweep at %s=%.1f"
+                    % (i + 1, len(lines), axis, fixed_axis.upper(), level)
+                )
+                self._start_capture(name, servos)
+                self._strokes(axis, start, end, speed, accel, 1, dwell)
+                self._stop_capture()
+                run.record_step(SweepStep(name, {fixed_axis: level}, []))
+            self._restore()
+            gcmd.respond_info(
+                "strain map raster complete: %d lines in %s"
+                % (len(lines), run.run_dir)
+            )
+        finally:
+            self._active_run = None
 
     cmd_SERVO_MEASURE_INERTIA_help = (
         "Excitation grid for the inertia/friction fit (servo-ident). "
