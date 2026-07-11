@@ -299,12 +299,14 @@ impl Shaper {
             .back()
             .expect("just pushed emitted segments")
             .t_end;
+        // Retention is by COVERAGE, not by a segment's own end time: a dwell
+        // leaves a gap-hold between segments, and that hold is anchored by
+        // the segment before the gap. Drop the front only while the next
+        // segment (plus its gap-hold back to the front's end) still covers
+        // the back-support window, or the window's start falls into a gap
+        // whose anchoring segment was just discarded.
         let keep_after = emitted_through - self.back_support;
-        while self
-            .history
-            .front()
-            .is_some_and(|seg| seg.t_end < keep_after)
-        {
+        while self.history.len() >= 2 && self.history[1].t_start <= keep_after {
             self.history.pop_front();
             self.history_trimmed = true;
         }

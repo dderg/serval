@@ -1648,3 +1648,233 @@ fn mode_inverse_makes_the_oscillator_track_the_nominal_path() {
          {max_ringing} vs {max_tracked}"
     );
 }
+
+/// Replay with explicit stream items (moves, drains, dwells) — the live
+/// ingress's shape for M400/G4 sequences, which `replay` cannot express.
+fn replay_items(
+    config: StreamConfig,
+    chains: AxisChainSet,
+    home: &[f64],
+    items: Vec<StreamInput>,
+) -> Vec<ShapedSegment> {
+    let (raw_tx, raw_rx) = unbounded();
+    for item in items {
+        raw_tx.send(item).unwrap();
+    }
+    drop(raw_tx);
+
+    let (fitted_tx, fitted_rx) = unbounded();
+    FitStage::new(config.corner).run(raw_rx, fitted_tx);
+
+    let (planned_tx, planned_rx) = unbounded();
+    Planner::new(config).run(fitted_rx, planned_tx);
+
+    let (lowered_tx, lowered_rx) = unbounded();
+    run_lowerer(
+        planned_rx,
+        lowered_tx,
+        FitTol {
+            pos_mm: config.fit_tol_mm,
+            accel_mm_s2: config.fit_tol_accel_mm_s2,
+        },
+        chains.clone(),
+        home.to_vec(),
+        0.0,
+    );
+
+    let (shaped_tx, shaped_rx) = unbounded();
+    Shaper::new(chains).run(lowered_rx, shaped_tx);
+
+    shaped_rx
+        .into_iter()
+        .filter_map(|item| match item {
+            ShapedItem::Seg(seg) => Some(seg),
+            ShapedItem::Control(_) => None,
+        })
+        .collect()
+}
+
+/// The servo-ident stroke/dwell pattern on the Trident bench chains
+/// (smooth_mzv 50Hz on X, smooth_zv 44Hz on Y): full-speed strokes with
+/// drains and 1.2s dwells between them. Regression for the shaper dying
+/// with "shaping window needs unavailable history" at the second stroke.
+#[test]
+fn stroke_dwell_stroke_keeps_shaper_history() {
+    let chains = AxisChainSet::spatial(
+        trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
+            "sx",
+            &trajectory::algos::SmoothMzv,
+            vec![50.0],
+        )])
+        .expect("compiles"),
+        trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
+            "sy",
+            &trajectory::algos::SmoothZv,
+            vec![44.0],
+        )])
+        .expect("compiles"),
+        trajectory::CompiledChain::default(),
+    );
+    let limits = VelocityLimits::try_new(1000.0, 10000.0, 0.21, 20000.0).unwrap();
+    let config = StreamConfig {
+        corner: CornerFitConfig::default(),
+        integration_tol: 1e-4,
+        max_extrude_only_velocity_mm_s: f64::INFINITY,
+        max_extrude_only_accel_mm_s2: f64::INFINITY,
+        fit_tol_mm: 0.005,
+        fit_tol_accel_mm_s2: 50.0,
+        max_buffer_moves: 128,
+        limits,
+    };
+    let stroke_ctx = |line_no: u32| MoveContext {
+        extruder_axis: 3,
+        feedrate_mm_s: 500.0,
+        limits,
+        source: SourceRange {
+            start_line: line_no,
+            end_line: line_no,
+        },
+    };
+
+    let mut items = Vec::new();
+    let mut x = 100.0;
+    for stroke in 0..4u32 {
+        let dir = if stroke % 2 == 0 { 1.0 } else { -1.0 };
+        let x_end = x + dir * 60.0;
+        items.push(StreamInput::Move(
+            line_move(
+                [x, 100.0, 10.0],
+                [x_end, 100.0, 10.0],
+                0.0,
+                stroke_ctx(stroke + 1),
+            )
+            .unwrap(),
+        ));
+        x = x_end;
+        items.push(StreamInput::Drain);
+        items.push(StreamInput::Control(Control::Dwell { secs: 1.2 }));
+    }
+
+    let segs = replay_items(config, chains, &[100.0, 100.0, 10.0], items);
+    assert!(!segs.is_empty());
+    // Dwells are legitimate time gaps; across each one the trajectory must
+    // hold position exactly.
+    for w in segs.windows(2) {
+        if (w[1].t_start - w[0].t_end).abs() < 1e-9 {
+            continue;
+        }
+        for axis in 0..w[0].axes.len() {
+            let a = eval(&w[0].axes[axis], w[0].t_end);
+            let b = eval(&w[1].axes[axis], w[1].t_start);
+            // The force-flushed kernel tail may sit a sub-micron shy of
+            // rest; anything beyond the fit budget is a real weld.
+            assert!(
+                (a - b).abs() < 1e-3,
+                "axis {axis} moved across the dwell gap at t={}: {a} vs {b}",
+                w[0].t_end
+            );
+        }
+    }
+    for seg in &segs {
+        for curve in &seg.axes {
+            assert!(curve.control_points().iter().all(|v| v.is_finite()));
+        }
+    }
+}
+
+/// The beacon rapid-scan path on the corexy_fast world limits (2800 mm/s,
+/// 100k accel, bell shapers, corner_deviation covering the kernel share):
+/// long passes joined by ~1mm arc-chord turnarounds at 800 mm/s. Regression
+/// for the shaped track spiking to ~2e6 mm/s (step-ceiling abort on the
+/// bench-shaped worlds).
+#[test]
+fn beacon_scan_path_shaped_velocity_stays_bounded() {
+    let chains = AxisChainSet::spatial(
+        trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
+            "sx",
+            &trajectory::algos::SmoothBell,
+            vec![0.019125],
+        )])
+        .expect("compiles"),
+        trajectory::CompiledChain::compile(&[PostProcessorInstance::new(
+            "sy",
+            &trajectory::algos::SmoothBell,
+            vec![0.018238636363636363],
+        )])
+        .expect("compiles"),
+        trajectory::CompiledChain::default(),
+    );
+    let limits = VelocityLimits::try_new(2800.0, 100000.0, 0.695, 1000000.0).unwrap();
+    let config = StreamConfig {
+        corner: CornerFitConfig {
+            kernel_variance_s2: chains.max_spatial_kernel_variance_s2(),
+            ..CornerFitConfig::default()
+        },
+        integration_tol: 1e-4,
+        max_extrude_only_velocity_mm_s: f64::INFINITY,
+        max_extrude_only_accel_mm_s2: f64::INFINITY,
+        fit_tol_mm: 0.005,
+        fit_tol_accel_mm_s2: 50.0,
+        max_buffer_moves: 128,
+        limits,
+    };
+    let pts: Vec<(f64, f64)> = include_str!("../beacon_scan_pts.txt")
+        .lines()
+        .map(|l| {
+            let (x, y) = l.split_once(' ').expect("two floats");
+            (x.parse().unwrap(), y.parse().unwrap())
+        })
+        .collect();
+    let mut moves = Vec::new();
+    let mut prev = [pts[0].0, pts[0].1, 2.0];
+    for (i, &(x, y)) in pts.iter().enumerate().skip(1) {
+        let end = [x, y, 2.0];
+        let ctx = MoveContext {
+            extruder_axis: 3,
+            feedrate_mm_s: 800.0,
+            limits,
+            source: SourceRange {
+                start_line: i as u32,
+                end_line: i as u32,
+            },
+        };
+        // klippy's Motion.move drops zero-distance moves before submit.
+        if let Ok(m) = line_move(prev, end, 0.0, ctx) {
+            moves.push(m);
+        }
+        prev = end;
+    }
+    // The pacer drains whenever the feed runs dry; inject that cadence so
+    // the windowed (streaming) planner shape is exercised, not just the
+    // full-lookahead one.
+    let mut items = Vec::new();
+    for (i, m) in moves.iter().cloned().enumerate() {
+        items.push(StreamInput::Move(m));
+        if i % 8 == 7 {
+            items.push(StreamInput::Drain);
+        }
+    }
+    let segs = replay_items(config, chains, &[pts[0].0, pts[0].1, 2.0], items);
+    assert!(!segs.is_empty());
+    let mut worst: (f64, f64, usize) = (0.0, 0.0, 0);
+    for seg in &segs {
+        for axis in 0..2 {
+            let h = 1e-5;
+            let mut t = seg.t_start;
+            while t < seg.t_end - h {
+                let v = (eval(&seg.axes[axis], t + h) - eval(&seg.axes[axis], t)) / h;
+                if v.abs() > worst.0.abs() {
+                    worst = (v, t, axis);
+                }
+                t += (seg.t_end - seg.t_start) / 64.0;
+            }
+        }
+    }
+    assert!(
+        worst.0.abs() < 4000.0,
+        "shaped velocity spiked to {} mm/s on axis {} at t={}",
+        worst.0,
+        worst.2,
+        worst.1
+    );
+}
