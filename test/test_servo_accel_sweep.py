@@ -1,6 +1,22 @@
+import json
+import os
+import sys
+import tempfile
+
 import pytest
 
 from klippy.extras import servo_axis, servo_calibration
+
+
+class FakeServoCapture:
+    def __init__(self):
+        self.captures = []
+
+    def start_capture_to(self, path, servos):
+        self.captures.append((path, list(servos)))
+
+    def stop_capture(self):
+        return self.captures[-1][0], 1000, 250
 
 
 class FakeGcode:
@@ -106,6 +122,9 @@ def _make_rail(motor, node_name, axis, invert=False):
     m.motor_name = motor
     m.node_name = node_name
     m.invert_direction = invert
+    m.chain_index = 0
+    m.rotation_distance = 40.0
+    m.encoder_counts_per_rev = 131072
     rail = servo_axis.ServoRail.__new__(servo_axis.ServoRail)
     rail.name = "servo " + motor
     rail.axis = axis
@@ -122,12 +141,51 @@ def make_calibration(coupled=True):
     objs = {
         "gcode": gcode,
         "toolhead": FakeToolhead(FakeKin(rails, coupled)),
+        "servo_capture": FakeServoCapture(),
     }
     sc = servo_calibration.ServoCalibration(FakeConfig(FakePrinter(objs)))
+    sc.captures_root = tempfile.mkdtemp()
+    sc.dynamics_dir = tempfile.mkdtemp()
+    sc.servo_cal_binary = sys.executable
     sc._prep = lambda *a, **k: None
     sc._restore = lambda *a, **k: None
-    sc._run = lambda *a, **k: gcode.scripts.append(("RUN",) + tuple(a[1:]))
+
+    def fake_run(gcmd, argv, timeout):
+        gcode.scripts.append(("RUN", argv, timeout))
+        if len(argv) >= 3 and argv[1] == "analyze":
+            with open(os.path.join(argv[2], "results.json"), "w") as f:
+                json.dump(
+                    {
+                        "verdict": {
+                            "recommended_step": "s1",
+                            "reason": "ok",
+                            "flags": [],
+                        }
+                    },
+                    f,
+                )
+
+    sc._run = fake_run
     return sc, gcode
+
+
+def _cap(sc):
+    return sc.printer.lookup_object("servo_capture")
+
+
+def _manifest_for(sc):
+    run_dir = os.path.dirname(_cap(sc).captures[0][0])
+    with open(os.path.join(run_dir, "manifest.json")) as f:
+        return json.load(f)
+
+
+def _analyze_argv(gcode):
+    for tag, argv, _t in reversed(
+        [s for s in gcode.scripts if isinstance(s, tuple) and s[0] == "RUN"]
+    ):
+        if argv[1] == "analyze":
+            return argv
+    raise AssertionError("no analyze invocation recorded")
 
 
 def _g1_lines(scripts):
@@ -175,31 +233,22 @@ def test_diagonal_b_moves_x_up_y_down():
 def test_diagonal_a_captures_motor_a_only():
     sc, gcode = make_calibration()
     sc.cmd_SERVO_MEASURE_TRACKING(FakeGcmd(AXIS="A"))
-    starts = [
-        s for s in gcode.scripts if isinstance(s, str) and "CAPTURE_START" in s
-    ]
-    assert len(starts) == 1
-    assert "SERVO=motor_a" in starts[0]
-    assert "motor_b" not in starts[0]
+    captures = _cap(sc).captures
+    assert len(captures) == 1
+    assert captures[0][1] == ["motor_a"]
 
 
 def test_diagonal_b_captures_motor_b_only():
     sc, gcode = make_calibration()
     sc.cmd_SERVO_MEASURE_TRACKING(FakeGcmd(AXIS="B"))
-    starts = [
-        s for s in gcode.scripts if isinstance(s, str) and "CAPTURE_START" in s
-    ]
-    assert "SERVO=motor_b" in starts[0]
-    assert "motor_a" not in starts[0]
+    assert _cap(sc).captures[0][1] == ["motor_b"]
 
 
 def test_diagonal_report_has_no_combine_corexy():
     sc, gcode = make_calibration()
     sc.cmd_SERVO_MEASURE_TRACKING(FakeGcmd(AXIS="A"))
-    runs = [s for s in gcode.scripts if isinstance(s, tuple) and s[0] == "RUN"]
-    assert runs
-    args = runs[-1][2]
-    assert "--combine-corexy" not in args
+    assert _manifest_for(sc)["belts"] is None
+    assert _analyze_argv(gcode)[1] == "analyze"
 
 
 def test_diagonal_requires_corexy():
@@ -219,17 +268,18 @@ def test_diagonal_reach_validation_uses_toolhead_length():
 def test_sweep_accel_step_naming_and_report_invocation():
     sc, gcode = make_calibration()
     sc.cmd_SERVO_SWEEP_ACCEL(FakeGcmd(AXIS="A", ACCELS="20000,10000,10000"))
-    starts = [
-        s for s in gcode.scripts if isinstance(s, str) and "CAPTURE_START" in s
-    ]
-    names = [s.split("NAME=")[1].split()[0] for s in starts]
+    names = [os.path.basename(p) for p, _s in _cap(sc).captures]
     # dedup + sorted ascending
-    assert names == ["accel_a10000", "accel_a20000"]
-    runs = [s for s in gcode.scripts if isinstance(s, tuple) and s[0] == "RUN"]
-    _tag, script, args, _timeout = runs[-1]
-    assert script == "servo_accel_report.py"
-    assert "--steps" in args
-    assert args[args.index("--steps") + 1] == "accel_a10000,accel_a20000"
+    assert names == ["step_accel_a10000.scap", "step_accel_a20000.scap"]
+    manifest = _manifest_for(sc)
+    assert manifest["experiment"] == "accel_sweep"
+    assert [s["name"] for s in manifest["steps"]] == [
+        "accel_a10000",
+        "accel_a20000",
+    ]
+    argv = _analyze_argv(gcode)
+    assert argv[1] == "analyze"
+    assert argv[2] == os.path.dirname(_cap(sc).captures[0][0])
 
 
 def test_sweep_accel_requires_accels():
@@ -241,11 +291,9 @@ def test_sweep_accel_requires_accels():
 def test_sweep_accel_single_axis_x():
     sc, gcode = make_calibration()
     sc.cmd_SERVO_SWEEP_ACCEL(FakeGcmd(AXIS="X", ACCELS="5000"))
-    starts = [
-        s for s in gcode.scripts if isinstance(s, str) and "CAPTURE_START" in s
-    ]
+    servos = _cap(sc).captures[0][1]
     # X lane is CoreXY-coupled: both motors drive it
-    assert "motor_a" in starts[0] and "motor_b" in starts[0]
+    assert "motor_a" in servos and "motor_b" in servos
     lines = [
         ln
         for s in gcode.scripts

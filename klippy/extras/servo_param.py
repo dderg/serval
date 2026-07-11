@@ -1,3 +1,7 @@
+import contextlib
+import os
+import time
+
 TYPE_TOKENS = {
     "u8": (1, 0, 0xFF),
     "u16": (2, 0, 0xFFFF),
@@ -85,10 +89,39 @@ def parse_params_block(text):
     entries = []
     for line in text.splitlines():
         line = line.strip()
-        if not line:
+        if not line or line.startswith("#"):
             continue
         entries.append(parse_param_entry(line))
     return entries
+
+
+TUNING_PROFILE_DIR = "~/printer_data/config/servo_tuning"
+
+
+def tuning_profile_path(name):
+    return os.path.join(
+        os.path.expanduser(TUNING_PROFILE_DIR), name + ".params"
+    )
+
+
+def load_tuning_profile(name):
+    """Parse a [motor] tuning_profile: file, same syntax as params:."""
+    path = tuning_profile_path(name)
+    if not os.path.isfile(path):
+        raise ValueError(
+            "tuning_profile %r not found (expected %s)" % (name, path)
+        )
+    with open(path) as f:
+        text = f.read()
+    return parse_params_block(text), path
+
+
+def decode_typed(raw, size, type_token):
+    bits = 8 * size
+    unsigned = raw & ((1 << bits) - 1)
+    if type_token.startswith("i"):
+        return unsigned - (1 << bits) if unsigned >> (bits - 1) else unsigned
+    return unsigned
 
 
 def format_value(index, subindex, size, raw, type_token):
@@ -118,6 +151,56 @@ def format_value(index, subindex, size, raw, type_token):
     )
 
 
+_PARAM_WRITES = []
+_WRITE_LOG_SUPPRESSED = 0
+
+
+@contextlib.contextmanager
+def suppress_write_log():
+    """Machinery-issued SERVO_PARAM writes (sweep adapters applying their own
+    step values) are part of the run that issues them, not a change the user
+    made between runs — keep them out of the between-runs journal."""
+    global _WRITE_LOG_SUPPRESSED
+    _WRITE_LOG_SUPPRESSED += 1
+    try:
+        yield
+    finally:
+        _WRITE_LOG_SUPPRESSED -= 1
+
+
+def record_param_write(servo, addr, value):
+    """Log a successful SERVO_PARAM SET so the next calibration run can record
+    what changed since it last ran (session-scoped, drained at run start)."""
+    if _WRITE_LOG_SUPPRESSED:
+        return
+    _PARAM_WRITES.append(
+        {
+            "servo": servo,
+            "addr": addr,
+            "value": value,
+            "time_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+    )
+
+
+def drain_param_writes():
+    writes = list(_PARAM_WRITES)
+    _PARAM_WRITES.clear()
+    return writes
+
+
+def read_param(printer, node, slot, index, subindex):
+    """Resolve node's engine handle and read one SDO object. Shared by
+    cmd_SERVO_PARAM and any other extra that needs a drive readback."""
+    handle = node.get_engine_handle()
+    if handle is None:
+        raise RuntimeError(
+            "ethercat_node %s has no engine handle" % (node.name,)
+        )
+    engine = printer.lookup_object("motion_engine")
+    return engine.sdo_read(handle, slot, index, subindex)
+
+
 class ServoParam:
     cmd_SERVO_PARAM_help = (
         "Read/write a raw CoE SDO object on an EtherCAT servo drive"
@@ -144,14 +227,8 @@ class ServoParam:
         return node, node.get_slot_for_motor(motor.get_motor_name())
 
     def cmd_SERVO_PARAM(self, gcmd):
-        node, slot = self._resolve_node(gcmd.get("SERVO"))
-        handle = node.get_engine_handle()
-        if handle is None:
-            raise gcmd.error(
-                "SERVO_PARAM: ethercat_node %s has no engine handle"
-                % (node.name,)
-            )
-        engine = self.printer.lookup_object("motion_engine")
+        servo_name = gcmd.get("SERVO")
+        node, slot = self._resolve_node(servo_name)
         get_addr = gcmd.get("GET", None)
         set_addr = gcmd.get("SET", None)
         if (get_addr is None) == (set_addr is None):
@@ -165,11 +242,19 @@ class ServoParam:
         try:
             if get_addr is not None:
                 index, subindex = parse_address(get_addr)
-                size, raw = engine.sdo_read(handle, slot, index, subindex)
+                size, raw = read_param(
+                    self.printer, node, slot, index, subindex
+                )
                 gcmd.respond_info(
                     format_value(index, subindex, size, raw, type_token)
                 )
             else:
+                handle = node.get_engine_handle()
+                if handle is None:
+                    raise RuntimeError(
+                        "ethercat_node %s has no engine handle" % (node.name,)
+                    )
+                engine = self.printer.lookup_object("motion_engine")
                 index, subindex = parse_address(set_addr)
                 value = _parse_int(gcmd.get("VALUE"))
                 size = check_value(value, type_token)
@@ -179,6 +264,7 @@ class ServoParam:
                 settled = format_value(
                     index, subindex, rb_size, rb_raw, type_token
                 )
+                record_param_write(servo_name, set_addr, value)
                 gcmd.respond_info("set " + settled)
         except ValueError as e:
             raise gcmd.error("SERVO_PARAM: %s" % (e,))

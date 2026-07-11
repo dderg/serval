@@ -7,6 +7,7 @@ pub mod curves;
 pub mod dynamics;
 pub mod endpoint;
 pub mod ffi;
+pub mod live_tap;
 pub mod mailbox;
 pub mod obs;
 pub mod push_plan;

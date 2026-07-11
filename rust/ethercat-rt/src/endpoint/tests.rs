@@ -17,9 +17,10 @@ use super::cycle::compute_motion_targets;
 use super::drive::DriveChain;
 use super::{discard_motion, EndpointCtx};
 use crate::buzz::BuzzOsc;
-use crate::capture::Capture;
+use crate::capture::{Capture, CaptureDriveConfig};
 use crate::curves::AxisRing;
 use crate::ffi::EcTelemetry;
+use crate::live_tap::LiveTap;
 use crate::mailbox::{MailboxWorker, WorkerScheduling};
 use crate::sdo::SdoBus;
 use crate::sensorless::SensorlessBank;
@@ -121,6 +122,19 @@ fn test_ctx(name: &str) -> EndpointCtx {
         heartbeat_sent: false,
         gate,
         capture: Capture::new(),
+        live_tap: LiveTap::spawn(
+            sock.with_extension("live").to_str().expect("utf8 tap path"),
+            vec![CaptureDriveConfig {
+                slot: 0,
+                name: "slot0".into(),
+                counts_per_mm: COUNTS_PER_MM,
+                rotation_distance: 40.0,
+                invert: false,
+            }],
+            CYCLE_NS as i64,
+        )
+        .expect("bind test tap socket"),
+        tap_slots: (0..NUM_SLAVES as u8).collect(),
         cycle_index: 0,
         mailbox: MailboxWorker::spawn(NoSdo, |_, _, _| 0, WorkerScheduling::Normal),
         pending_starts: Vec::new(),

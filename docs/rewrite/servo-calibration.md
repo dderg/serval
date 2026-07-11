@@ -1,11 +1,17 @@
 # Servo calibration reference
 
-Command and script reference for tuning an A6-EC servo axis (EtherCAT). The
-`[servo_calibration]` extension registers the `SERVO_*` console commands; they
-drive the host scripts under `scripts/` and the drive-parameter access provided
-by `[servo_param]`/`[servo_capture]`. For the theory behind the inertia/
-feedforward fit see [servo-feedforward.md](servo-feedforward.md); for the
-capture format see [servo-telemetry-capture.md](servo-telemetry-capture.md).
+Command reference for tuning an A6-EC servo axis (EtherCAT). The
+`[servo_calibration]` extension registers the `SERVO_*` console commands. Each
+experiment command writes a run directory under `captures_root` (a
+`manifest.json`, one `step_<name>.scap` per step, optional accelerometer CSVs)
+and then invokes the `servo-cal` Rust binary — `analyze` writes `results.json`
+with a typed verdict, `fit` writes a dynamics profile. Drive-parameter access
+comes from `[servo_param]`/`[servo_capture]`. For the run-directory and
+`results.json` schemas see
+[servo-cal-contracts.md](servo-cal-contracts.md); for the theory behind the
+inertia/feedforward fit see [servo-feedforward.md](servo-feedforward.md); for
+the capture format see
+[servo-telemetry-capture.md](servo-telemetry-capture.md).
 
 ## Enabling
 
@@ -34,7 +40,7 @@ they are configured or passed.
 
 | Option | Default | Used by |
 |---|---|---|
-| `servos` | `stepper_x, stepper_y` | single-drive default for `SERVO=`/`AXIS=`-less commands; the CoreXY measure/calibrate commands derive their drives from the kinematics (`SERVOS=` overrides) |
+| `servos` | `stepper_x, stepper_y` | single-drive default for `SERVO=`/`AXIS=`-less commands; on `coupled_xy` kinematics the measure/fit commands derive their drives from the kinematics instead (`SERVOS=` overrides) |
 | `rated_torque_nm` | — | inertia-ratio commands (`TORQUE_NM=`) |
 | `rotor_inertia_kgm2` | — | inertia-ratio commands (`INERTIA_KGM2=`) |
 | `x_start` / `x_end` | `20` / `200` | X strokes (`START`/`END`, `X_START`/`X_END`) |
@@ -45,26 +51,34 @@ they are configured or passed.
 | `dwell_ms` | `700` | settle between strokes (`DWELL_MS=`) |
 | `travel_speed` | `100` | CoreXY centering moves between grid points |
 | `accel_chip` | — | accelerometer section name (e.g. `adxl345`); when set, `SERVO_CALIBRATE_GAINS` also records vibration per step (`ACCEL_CHIP=`) |
+| `captures_root` | `~/printer_data/logs/servo_captures` | parent directory for experiment run directories |
+| `journal_params` | — | comma list of drive SDO addresses (`addr[:type]`, e.g. `0x2001.0x31:u16`) read back from every captured drive at run start and recorded under `ambient.journal_params` in the manifest — the campaign's varied registers (notch mode, etc.) |
+| `servo_cal_binary` | `rust/target/release/servo-cal` | path to the `servo-cal` analysis binary |
 
 Prerequisites: the EtherCAT servo stack (`[servo_param]`, `[servo_capture]`)
-must be configured, and the fitter must be built once on the host with
-`cargo build --release -p servo-ident` (from `rust/`).
+must be configured, and the `servo-cal` binary must be built once on the host
+with `cargo build --release -p servo-ident` (from `rust/`).
 
 ## Tuning order
 
 1. **Enable feedforward** — set `velocity_ff: True` on each `[motor]` so the
    tuning runs measure the loop as it will actually be driven (see
    [servo-feedforward.md](servo-feedforward.md)).
-2. **`SERVO_CALIBRATE_INERTIA_RATIO[_COREXY]`** — identify the load inertia and
-   set the base C00.06, before touching the loop gains.
+2. **`SERVO_CALIBRATE_INERTIA_RATIO`** — identify the load inertia and
+   set the base C00.06, before touching the loop gains. On `coupled_xy`
+   kinematics this runs the coupled X+Y grid and fits both belt directions;
    `SERVO_SWEEP_INERTIA` empirically verifies / refines C00.06 later, at the
    tuned gains.
 3. **`SERVO_APPLY_GAINS`** then **`SERVO_CALIBRATE_GAINS`** — find the loop
    gains.
-4. **`SERVO_FIT_DYNAMICS[_COREXY]`** — fit the dynamic profile at the final
-   gains and point `dynamics_profile` at it to enable torque feedforward.
+4. **`SERVO_FIT_DYNAMICS`** — fit the dynamic profile at the final gains and
+   point `dynamics_profile` at it to enable torque feedforward.
 
 **`SERVO_MEASURE_TRACKING`** is the before/after check for any single change.
+**`SERVO_AUTOTUNE`** packages this exact order into one command — see
+[SERVO_AUTOTUNE](#servo_autotune) below — for a bench that has already built
+trust in the verdicts; the manual sequence above remains the way to run any
+one step in isolation or to diagnose a step SERVO_AUTOTUNE aborted on.
 
 Every stroke is paced `M400 / G4 / M400` so it replans from idle, and the
 stroke engine refuses any `(speed, accel)` pair whose `v²/a` exceeds the stroke
@@ -77,7 +91,7 @@ produce the intended excitation.
 Single accel/speed stroke run with capture, then prints per-move following
 error, overshoot and settling — the before/after check for any tuning change.
 Params: `AXIS` (X) `START` `END` `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (3)
-`DWELL_MS` `NAME` (track). Runs `servo_capture.py`.
+`DWELL_MS` `NAME` (track). Writes a run directory and runs `servo-cal analyze`.
 
 #### SERVO_MEASURE_DIFFERENTIAL
 Anti-phase position chirp on one AWD belt pair via the engine-resident buzz
@@ -85,75 +99,71 @@ generator: the two drives of the belt are commanded in opposite directions,
 so the carriage holds (nominally) still while the drives strain the belt
 against each other. The capture therefore isolates the differential
 (rotor-vs-rotor) dynamics — the modes excited when paired drives fight —
-and the report prints each detected mode's frequency, closed-loop peak gain,
-half-power damping ratio and coherence, and renders an FRF PNG (magnitude,
-phase, coherence, differential-torque spectrum). Belt strain between the
-pair is **twice** `AMPLITUDE`; the command caps `AMPLITUDE` at 0.5 mm.
-Needs two drives per belt. Params: `BELT` (A) `FREQ_START` (20)
-`FREQ_END` (250) `HZ_PER_SEC` (5) `DURATION` (band/`HZ_PER_SEC`) `AMPLITUDE`
-(0.05 mm) `RAMP` `DWELL_MS` `NAME` (diff). Runs `servo_diff_report.py`.
+and the analysis reports each detected mode's frequency, closed-loop peak
+gain, half-power damping ratio and coherence, plus a differential FRF
+(magnitude, phase, coherence, differential-torque spectrum) the dashboard
+renders. Belt strain between the pair is **twice** `AMPLITUDE`; the command
+caps `AMPLITUDE` at 0.5 mm. Needs two drives per belt. Params: `BELT` (A)
+`FREQ_START` (20) `FREQ_END` (250) `HZ_PER_SEC` (5) `DURATION`
+(band/`HZ_PER_SEC`) `AMPLITUDE` (0.05 mm) `RAMP` `DWELL_MS` `NAME` (diff).
+Writes a run directory and runs `servo-cal analyze`.
 
 #### SERVO_MEASURE_INERTIA
 Records the excitation grid for the inertia/friction fit (no report — it is the
-capture building block behind the fit commands). Captures every motor that
-moves the axis (both lanes on CoreXY, every drive of an AWD rail). Params:
-`AXIS` (X) `START` `END` `ACCELS` `SPEEDS` `ITERATIONS` `DWELL_MS` `NAME`
-(ident).
+capture building block behind the fit commands). The active kinematics decides
+the shape of the grid:
 
-#### SERVO_MEASURE_INERTIA_COREXY
-One capture of **every** belt drive with X and Y strokes at every grid point
-(`SERVOS=` overrides; the default is every motor the kinematics says drives
-the belts), so the
-coupled fit can separate the diagonal and off-diagonal inertia (X strokes
-excite `m_diag+m_off`, Y strokes `m_diag−m_off`). Before each stroke set the
-toolhead moves (at `travel_speed`) to the active axis' start with the idle axis
-centered in its range, so both belt runs are near-equal length during the
-measurement. Params: `SERVOS` `X_START`
-`X_END` `Y_START` `Y_END` `ACCELS` `SPEEDS` `ITERATIONS` `DWELL_MS` `NAME`
-(ident).
+- **`coupled_xy` kinematics** (CoreXY): one capture of **every** belt drive
+  with X and Y strokes at every grid point (`SERVOS=` overrides; the default
+  is every motor the kinematics says drives the belts), so the coupled fit
+  can separate the diagonal and off-diagonal inertia (X strokes excite
+  `m_diag+m_off`, Y strokes `m_diag−m_off`). Before each stroke set the
+  toolhead moves (at `travel_speed`) to the active axis' start with the idle
+  axis centered in its range, so both belt runs are near-equal length during
+  the measurement. Bounds come from `X_START`/`X_END`/`Y_START`/`Y_END`.
+- **cartesian kinematics**: captures every motor that moves `AXIS` (every
+  drive of an AWD rail), bounded by `START`/`END`. `SERVOS`, `X_START`,
+  `X_END`, `Y_START`, `Y_END` only apply to `coupled_xy` kinematics and are
+  rejected with an error otherwise.
 
-#### SERVO_MEASURE_FRICTION
-Slow constant-speed sweeps for the torque-vs-position friction map; captures
-every motor that moves the axis. Params:
-`AXIS` (X) `START` `END` `SPEED` (20) `ACCEL` (300) `ITERATIONS` (2) `DWELL_MS`
-`NAME` (friction).
+Params: `AXIS` (X) `START` `END` `X_START` `X_END` `Y_START` `Y_END` `ACCELS`
+`SPEEDS` `ITERATIONS` `DWELL_MS` `NAME` (ident) `SERVOS`.
 
 ## Fit / inertia-ratio commands
 
 #### SERVO_FIT_DYNAMICS
 Runs the `SERVO_MEASURE_INERTIA` grid, fits mass/viscous/coulomb, and writes a
 timestamped feedforward profile. Optional `TORQUE_NM` + `INERTIA_KGM2` also
-print the recommended C00.06. On a multi-drive (AWD) axis `DRIVE=` picks
-which drive the scalar fit describes — required there, since the capture
-records every drive. Params: as `SERVO_MEASURE_INERTIA` plus
-`TORQUE_NM` `INERTIA_KGM2` `NAME` (ident) `DRIVE`. Runs `servo_fit_dynamics.py`; the
-profile lands in `~/printer_data/config/servo_dynamics/` and a new fit never
-overwrites an existing profile.
+print the recommended C00.06. The active kinematics decides the fit
+structure:
 
-#### SERVO_FIT_DYNAMICS_COREXY
-As above for CoreXY: runs the X+Y grid over every belt drive
-(`SERVO_MEASURE_INERTIA_COREXY`) and fits the coupled mass matrix. The drive
-list and, on AWD, the belt pairing are derived from the kinematics motor
-lists (two drives per belt fit `--structure corexy-awd`: shared per-drive
-mass/coupling, per-drive friction; all four drives must sit on one node).
-The resulting profile goes on `[ethercat_node] dynamics_profile` (node-level,
-coupled) rather than per-motor. Params: as `SERVO_MEASURE_INERTIA_COREXY`
-plus `TORQUE_NM` `INERTIA_KGM2` `NAME` (ident).
+- **`coupled_xy` kinematics**: runs the X+Y grid over every belt drive and
+  fits the coupled mass matrix. The drive list and, on AWD, the belt pairing
+  are derived from the kinematics motor lists (two drives per belt fit
+  `--structure corexy-awd`: shared per-drive mass/coupling, per-drive
+  friction; all four drives must sit on one node). The resulting profile
+  goes on `[ethercat_node] dynamics_profile` (node-level, coupled) rather
+  than per-motor.
+- **cartesian kinematics**: fits a single axis. On a multi-drive (AWD) axis
+  `DRIVE=` picks which drive the scalar fit describes — required there,
+  since the capture records every drive.
+
+Params: as `SERVO_MEASURE_INERTIA` plus `TORQUE_NM` `INERTIA_KGM2` `NAME`
+(ident) `DRIVE`. Captures the grid into a run directory and runs
+`servo-cal fit --capture <step>.scap`; the profile lands in
+`~/printer_data/config/servo_dynamics/dynamics_<name>_<stamp>.toml` and a new
+fit never overwrites an existing profile.
 
 #### SERVO_CALIBRATE_INERTIA_RATIO
 Step 2 of tuning: identify the load inertia and print the recommended C00.06.
-`TORQUE_NM` and `INERTIA_KGM2` are **required** (config or param). Params: as
-`SERVO_MEASURE_INERTIA` plus `TORQUE_NM` `INERTIA_KGM2` `NAME` (inertia). Apply
-the printed number with `SERVO_SET_INERTIA_RATIO`.
-
-#### SERVO_CALIBRATE_INERTIA_RATIO_COREXY
-As above for CoreXY: runs the X+Y grid over every belt drive, fits the
-coupled mass matrix, and prints C00.06 for both directions (per drive on
-AWD). The drive takes
-one scalar, so start from the light-direction number and confirm with
-`SERVO_SWEEP_INERTIA`. `TORQUE_NM` and `INERTIA_KGM2` required; both motors must
-be the same model. Params: as `SERVO_MEASURE_INERTIA_COREXY` plus `TORQUE_NM`
-`INERTIA_KGM2` `NAME` (inertia).
+`TORQUE_NM` and `INERTIA_KGM2` are **required** (config or param). On
+`coupled_xy` kinematics this runs the X+Y grid over every belt drive, fits the
+coupled mass matrix, and prints C00.06 for both directions (per drive on AWD);
+the drive takes one scalar, so start from the light-direction number and
+confirm with `SERVO_SWEEP_INERTIA` (both motors must be the same model). On
+cartesian kinematics it fits the single axis named by `AXIS`. Params: as
+`SERVO_MEASURE_INERTIA` plus `TORQUE_NM` `INERTIA_KGM2` `NAME` (inertia).
+Apply the printed number with `SERVO_SET_INERTIA_RATIO`.
 
 ## Drive-parameter / gain commands
 
@@ -177,77 +187,143 @@ defaults are the factory Low preset. Params: `POS_GAIN` (400) `SPEED_GAIN`
 #### SERVO_CALIBRATE_GAINS
 Gain sweep, shaper-calibrate style: for each `SPEED_GAINS` entry (0.1 Hz units)
 it derives the position gain (`×1.6`) and integral (`1250000 ÷ gain`), records
-one capture per step, and renders a comparison PNG with a recommendation into
-`~/printer_data/config/servo_calibrate_results/`. Reverts to the lowest gains
-afterwards. With an accelerometer (`accel_chip` config option or `ACCEL_CHIP=`)
-each step also records vibration data (`<step>_accel_<stamp>.csv` next to the
-`.scap`) and the report gains a bottom row, shaper-calibrate style: vibration
-frequency response per step plus a stacked per-step spectrogram. Params:
+one capture per step into the run directory, then `servo-cal analyze` writes
+`results.json` whose verdict names the highest gain step without resonance or a
+torque rail. Reverts to the lowest gains afterwards. With an accelerometer
+(`accel_chip` config option or `ACCEL_CHIP=`) each step also records vibration
+data (`step_<name>_accel.csv` next to the `.scap`). `APPLY=1` (default 0,
+report-only) writes the verdict's recommended gains *after* the revert,
+reads them back (a mismatch is a command error, nothing left half-applied),
+and runs one `SERVO_MEASURE_TRACKING` to report before/after following-error
+peak and overshoot; a null verdict (every step flagged) makes `APPLY=1` a
+command error naming the reason instead of writing anything. Params:
 `SPEED_GAINS` (500,650,800,1000) `AXIS` (X) `START` `END`
 `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2) `DWELL_MS` `TAG` (cal)
-`ACCEL_CHIP` `SERVO`. Runs `servo_gain_report.py`.
+`ACCEL_CHIP` `APPLY` `SERVO`.
+
+#### SERVO_GAIN_LADDER
+Speed-gain sweep that climbs until analysis flags trouble, instead of a fixed
+`SPEED_GAINS` list. Runs the ladder `[SAFE, START, START+STEP, … ≤ MAX]` with
+the same `SERVO_CALIBRATE_GAINS` machinery (position gain `×1.6`, integral
+`1250000 ÷ gain`). After **each** rung at or above `START` completes its
+capture, `servo-cal analyze` runs on the run so far and that rung's step flags
+are inspected; the first rung whose step carries `resonance_detected`,
+`torque_saturated` or `settle_window_truncated` **stops the climb** — higher
+rungs are never executed. The `SAFE` baseline (always the first rung) never
+counts as a stop reason and is applied to every drive at the end via the gain
+write path, so the axis is left at a known-good gain regardless of where the
+climb stopped. Output is the usual verdict one-liner (recommended step, reason,
+run dir) plus, on an early stop, one line naming the rung and the flags that
+stopped it. `START` names the first climb gain, not a stroke bound — the stroke
+window comes from the configured axis bounds. A mid-ladder analysis failure
+(binary non-zero, unreadable `results.json`) aborts loudly; the run directory
+keeps everything captured so far. Params: `SAFE` `START` `STEP` (50, must be
+> 0) `MAX` (≥ `START`) `AXIS` (X) `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2)
+`DWELL_MS` `TAG` (ladder) `SERVO`.
+
+#### SERVO_HARVEST_NOTCHES
+Automates the "let the drive's adaptive notch tuning find the resonances during
+motion, then lock and read back what it chose" recipe (manual 7.10). Writes
+C01.30 `adaptive_notch_mode` = `MODE` (1 = 1st notch adaptive, 2 = 1st+2nd
+adaptive; anything else is a command error) to every servo driving `AXIS`,
+strokes the axis so the adaptive tuner sees motion (while the mode is 1 or 2 the
+drive rewrites notch 1–2 parameters itself), settles, then reads back per drive
+notch 1 and notch 2 center frequency / width / depth (C01.40–45), and finally
+writes C01.30 = 0 to **lock** the tuning. The `MODE` writes and the lock are
+journaled deliberately (`record_param_write`) — this command keeps no run
+directory, the write journal is its audit trail. Any SDO read/write failure
+aborts naming the motor and address, before the lock, so a failed readback
+never leaves the drive locked on half-harvested values. Output is one line per
+drive with the harvested notch 1 and notch 2 (freq Hz, width, depth) and a
+closing note that the values are now locked (mode 0). Params: `AXIS` (X) `MODE`
+(2) `START` `END` `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2) `DWELL_MS`
+`SERVO`.
 
 #### SERVO_SWEEP_INERTIA
 Empirical inertia sweep: apply the tuned gains first, then this writes each
-C00.06 ratio in `RATIOS`, records one capture per step, and renders a
-comparison PNG (read the start/end overshoot to pick the ratio; no automated
-recommendation). Reverts to the lowest ratio afterwards. Params: `RATIOS`
+C00.06 ratio in `RATIOS`, records one capture per step, and runs
+`servo-cal analyze` (`results.json` reports per-step metrics; no automated pick
+— read the overshoot trend to choose the ratio). Reverts to the lowest ratio
+afterwards. Because there is no automated pick, `APPLY=1` always errors here
+(nothing to apply) — choose a ratio from the report and write it with
+`SERVO_SET_INERTIA_RATIO`. Params: `RATIOS`
 (40,70,100,130) `AXIS` (X) `START` `END` `SPEED` (100) `ACCEL` (3000)
-`ITERATIONS` (2) `DWELL_MS` `TAG` (inertia) `SERVO`. Runs
-`servo_inertia_report.py`.
+`ITERATIONS` (2) `DWELL_MS` `TAG` (inertia) `APPLY` `SERVO`.
 
 #### SERVO_SET_STIFFNESS
 Vendor-table tuning path: standard mode (C00.04=1) + C00.05 stiffness level
 1..31 (factory 12); the drive derives gain set 1 from the level. Params:
 `LEVEL` `SERVO`.
 
-## Command → script → output
+#### SERVO_AUTOTUNE
+Packaged tuning sequence, the manual order above run as one state machine:
+baseline `SERVO_MEASURE_TRACKING` → `SERVO_CALIBRATE_INERTIA_RATIO` (identify
+only) → apply the recommended C00.06 (`SERVO_SET_INERTIA_RATIO`-equivalent) →
+coarse gains (`SERVO_APPLY_GAINS` factory defaults) → `SERVO_CALIBRATE_GAINS`
+sweep (apply the winner) → `SERVO_REFINE_GAIN` on the speed gain (apply the
+winner) → `SERVO_FIT_DYNAMICS` → a final `SERVO_MEASURE_TRACKING` against the
+baseline. Each stage transition is logged
+(`calibration.autotune_stage`: `stage`, `run_dir`, `outcome`) so the dashboard
+can show the sequence as it runs.
 
-| Command | Script | Output |
+`APPLY` defaults to 0: a dry run that still measures the baseline and
+identifies the inertia ratio (both read-only), then walks every remaining
+stage reporting what it *would* write instead of touching the drive.
+`APPLY=1` performs every stage for real and aborts loudly — naming the stage
+and run directory — on any of:
+
+- a `torque_saturated` or `resonance_detected` flag on the chosen step of any
+  sweep stage (checked whether or not that stage's write ends up gated by
+  `APPLY`, since continuing past a flagged step is unsafe regardless);
+- a null recommendation (no clean step) on a stage that needs to promote one;
+- the final verification's following-error peak regressing more than 20%
+  against the baseline.
+
+`APPLY=1` requires `rated_torque_nm`/`rotor_inertia_kgm2` (config or
+`TORQUE_NM=`/`INERTIA_KGM2=`) up front — it errors before the first stroke
+rather than mid-sequence. The C00.06 recommendation is recovered from the
+`servo-cal fit` console output (the same "recommended C00.06 (light
+direction): N%" line `SERVO_CALIBRATE_INERTIA_RATIO` already prints) — there
+is no separate machine-readable field for it, since `fit` writes a profile
+TOML, not a `results.json`. `SERVO_FIT_DYNAMICS` never edits `printer.cfg`;
+it prints the `dynamics_profile` line to paste, exactly as it does standalone.
+A successful `APPLY=1` run never persists anything to a tuning profile by
+itself — run `SERVO_SAVE_TUNING SERVO=... NAME=...` afterwards to keep it.
+Params: `AXIS` (X) `APPLY` (0) `TORQUE_NM` `INERTIA_KGM2` `SPEED_GAINS`
+`DWELL_MS`.
+
+## Command → output
+
+Every experiment command writes a run directory
+`<captures_root>/<tag>_<YYYYmmdd_HHMMSS>/` holding `manifest.json`, one
+`step_<name>.scap` per step, optional `step_<name>_accel.csv` recordings, and
+(for the analyze commands) `results.json` + `plot_series.json`. The command
+prints a one-line verdict plus the run-directory path; the metrics table
+streams from `servo-cal` in the interim before the dashboard (Part 3) lands.
+Schemas: [servo-cal-contracts.md](servo-cal-contracts.md).
+
+| Command | Invokes | Output |
 |---|---|---|
-| `SERVO_MEASURE_TRACKING` | `servo_capture.py` | tracking metrics to console + per-motor & combined PNG in `~/printer_data/config/servo_calibrate_results/` (records every motor driving the axis — both lanes on CoreXY) |
-| `SERVO_MEASURE_DIFFERENTIAL` | `servo_diff_report.py` | differential mode table to console + FRF PNG in `~/printer_data/config/servo_calibrate_results/` |
-| `SERVO_FIT_DYNAMICS[_COREXY]`, `SERVO_CALIBRATE_INERTIA_RATIO[_COREXY]` | `servo_fit_dynamics.py` | `~/printer_data/config/servo_dynamics/dynamics_<name>_<stamp>.toml` + C00.06 |
-| `SERVO_CALIBRATE_GAINS` | `servo_gain_report.py` | comparison PNG in `~/printer_data/config/servo_calibrate_results/` |
-| `SERVO_SWEEP_INERTIA` | `servo_inertia_report.py` | comparison PNG in `~/printer_data/config/servo_calibrate_results/` |
-| `SERVO_MEASURE_INERTIA[_COREXY]`, `SERVO_MEASURE_FRICTION` | — | `.scap` capture only |
+| `SERVO_MEASURE_TRACKING` | `servo-cal analyze` | run dir + `results.json` (per-motor + combined tracking metrics; records every motor driving the axis — both lanes on CoreXY) |
+| `SERVO_MEASURE_DIFFERENTIAL` | `servo-cal analyze` | run dir + `results.json` (differential FRF modes: frequency, peak gain, damping, coherence; dashboard renders the FRF) |
+| `SERVO_CALIBRATE_GAINS` | `servo-cal analyze` | run dir + `results.json` verdict (highest clean gain step); `APPLY=1` also writes + verifies |
+| `SERVO_GAIN_LADDER` | `servo-cal analyze` (per rung + final) | run dir + `results.json` verdict; climbs until a rung flags trouble, then applies `SAFE` |
+| `SERVO_HARVEST_NOTCHES` | — | no run dir; writes C01.30, strokes, reads back notch 1–2, locks (C01.30=0); journaled param writes |
+| `SERVO_REFINE_GAIN` | `servo-cal analyze` | run dir + `results.json` verdict; `APPLY=1` also writes + verifies |
+| `SERVO_SWEEP_INERTIA` | `servo-cal analyze` | run dir + `results.json` (no automated pick, so `APPLY=1` always errors) |
+| `SERVO_SWEEP_ACCEL` | `servo-cal analyze` | run dir + `results.json` verdict (max non-railing accel); `APPLY=1` verifies at the recommended accel (no SDO write) |
+| `SERVO_FIT_DYNAMICS`, `SERVO_CALIBRATE_INERTIA_RATIO` | `servo-cal fit` | run dir + `~/printer_data/config/servo_dynamics/dynamics_<name>_<stamp>.toml` + C00.06 |
+| `SERVO_MEASURE_INERTIA` | — | run dir + `.scap` capture only (the building block behind the fit commands) |
+| `SERVO_AUTOTUNE` | all of the above, in sequence | one run dir per stage; `APPLY=0` (default) is a dry rehearsal, `APPLY=1` runs and applies for real |
 
-All captures land in `~/printer_data/logs/servo_captures/` as
-`<name>_<YYYYmmdd_HHMMSS>.scap`; per-step accelerometer recordings land next
-to them as `<name>_accel_<YYYYmmdd_HHMMSS>.csv`.
+## The manual capture analyzer
 
-## Host scripts
-
-Each script runs standalone (`--help` for the full option list); the commands
-above invoke them with the running klippy interpreter.
-
-- **`servo_capture.py`** — analyze a `.scap`: following-error, overshoot/
-  settling, torque-saturation metrics per drive; `--fft` prints resonance peaks,
-  `--plot` opens a time-series dashboard, `--png` saves one headless (into
-  `--plot-dir`, or `--plot-out PATH`), `--combine-corexy A[:s],B[:s]` with
-  `--axis` renders the CoreXY dashboard — on-axis and cross-axis tracking error
-  with each stroke overlaid, per-motor torque, and moving-vs-stationary axis
-  position; the optional per-motor sign `:-1` un-inverts a servo whose
-  `invert_direction` flips its encoder counts out of the kinematic frame; an
-  AWD belt lists both of its motors joined by `+`
-  (`motor_a:1+motor_a1:1,motor_b:-1+motor_b1:1`) and their mean forms the
-  belt trace,
-  `--drive` restricts to one drive in a multi-drive capture, `--csv` exports
-  samples.
-- **`servo_fit_dynamics.py`** — resolve the newest capture for `--name`, export
-  the fitter CSV, run `servo-ident`, and write the profile TOML (`--structure
-  scalar|corexy`, `--drive` for scalar fits of a multi-drive capture,
-  `--pairs 'a0,a1;b0,b1'` for 4-drive AWD corexy captures — fitted as
-  `corexy-awd` — `--rated-torque-nm`, `--rotor-inertia-kgm2`,
-  `--rotation-distance-mm`, `--out-dir`).
-- **`servo_gain_report.py`** — gain-sweep comparison PNG + metrics table +
-  recommendation (`--tag`, `--steps`); picks up `<step>_accel_*.csv`
-  accelerometer recordings next to each `.scap` and adds a frequency-response
-  + spectrogram row when present (`--require-accel` makes a missing recording
-  an error).
-- **`servo_inertia_report.py`** — inertia-ratio sweep comparison PNG + metrics
-  table, no automated recommendation (`--tag`, `--steps`).
-- **`servo_fit_compare.py`** — diagnostic (not driven by a command): fits the
-  scalar inertia three ways from one `.scap` (commanded accel, velocity
-  derivative, position second-derivative) and compares, to check the fit is
-  stable across C00.06 settings.
+`scripts/servo_capture.py` remains the standalone single-file `.scap` analyzer
+for ad-hoc inspection (`--help` for the full option list): following-error,
+overshoot/settling, torque-saturation metrics per drive; `--fft` prints
+resonance peaks, `--plot` opens a time-series dashboard, `--png` saves one
+headless, `--combine-corexy A[:s],B[:s]` with `--axis` renders the CoreXY
+dashboard; `--drive` restricts to one drive in a multi-drive capture, `--csv`
+exports samples. The four gain/inertia/refine/accel sweep-report scripts and
+the fit-dynamics wrapper script were deleted — their metrics and verdict logic
+moved into `servo-cal`.
