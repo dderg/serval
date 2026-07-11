@@ -251,7 +251,9 @@ impl PairSync {
 
     /// Called by the caller after performing `EnableSecondary`; a failed
     /// enable is terminal for the caller (drive without torque on a belt),
-    /// so the machine only handles success here.
+    /// so the machine only handles success here. The final torques are
+    /// measured even on a failed sync so the report shows the true end
+    /// state instead of blank zeros.
     pub fn enable_finished(&mut self, position_secondary: i32) {
         self.report.secondary_reseeded = true;
         self.report.released_delta_counts =
@@ -259,12 +261,8 @@ impl PairSync {
         let Phase::AwaitEnable { fail_result } = self.phase else {
             panic!("enable_finished outside AwaitEnable phase");
         };
-        if fail_result != 0 {
-            self.report.result = fail_result;
-            self.phase = Phase::Finished;
-        } else {
-            self.phase = Phase::MeasureFinal;
-        }
+        self.report.result = fail_result;
+        self.phase = Phase::MeasureFinal;
     }
 
     pub fn poll(&mut self, inputs: &SyncInputs) -> SyncStep {
@@ -389,12 +387,21 @@ impl PairSync {
                     .push(inputs.torque_primary, inputs.torque_secondary);
                 if let Some((p, _s)) = self.measure_done() {
                     self.report.torque_dithered = p;
-                    let fail_result =
-                        if p.unsigned_abs() > u32::from(self.params.torque_ok_tenth_pct) {
-                            ERR_SYNC_TORQUE_RESIDUAL
-                        } else {
-                            0
-                        };
+                    // With the secondary coasting, the primary alone holds
+                    // the whole axis (CoreXY coupling, friction), and the
+                    // dither parks it at a random spot in its stiction band
+                    // — a high torque here is only "mechanical binding" if
+                    // the coasting rotor ALSO never released any strain.
+                    let released = inputs
+                        .position_secondary
+                        .wrapping_sub(self.position_at_disable);
+                    let torque_high = p.unsigned_abs() > u32::from(self.params.torque_ok_tenth_pct);
+                    let nothing_drained = released.abs() <= self.quiet_counts();
+                    let fail_result = if torque_high && nothing_drained {
+                        ERR_SYNC_TORQUE_RESIDUAL
+                    } else {
+                        0
+                    };
                     self.phase = Phase::AwaitEnable { fail_result };
                     return SyncStep::EnableSecondary;
                 }
@@ -410,7 +417,7 @@ impl PairSync {
                     self.report.torque_final_primary = p;
                     self.report.torque_final_secondary = s;
                     let ok = u32::from(self.params.torque_ok_tenth_pct);
-                    if p.unsigned_abs() > ok || s.unsigned_abs() > ok {
+                    if self.report.result == 0 && (p.unsigned_abs() > ok || s.unsigned_abs() > ok) {
                         self.report.result = ERR_SYNC_FINAL_TORQUE;
                     }
                     self.phase = Phase::Finished;

@@ -193,14 +193,15 @@ fn creep_inside_the_quiet_band_settles() {
 }
 
 #[test]
-fn residual_torque_after_dither_reenables_and_fails() {
+fn residual_torque_with_no_released_motion_is_binding() {
     let mut b = Bench::new(0);
     b.torque_primary = 90;
     let step = b.run_until_step();
     b.do_disable(step);
 
-    // Quiet immediately, but the primary torque never collapses — mechanical
-    // binding the dither could not shake loose.
+    // Quiet immediately, the coasting rotor never moves, and the primary
+    // torque never collapses — mechanical binding the dither could not
+    // shake loose. The final torques are still measured on the way out.
     let step = b.run_until_step();
     b.do_enable(step);
 
@@ -209,7 +210,63 @@ fn residual_torque_after_dither_reenables_and_fails() {
     };
     assert_eq!(report.result, ERR_SYNC_TORQUE_RESIDUAL);
     assert_eq!(report.torque_dithered, 90);
+    assert_eq!(report.torque_final_primary, 90);
     assert!(report.secondary_reseeded);
+}
+
+#[test]
+fn stiction_parked_primary_after_real_release_is_not_binding() {
+    // The bench case: strain drains through the coasting rotor, the dither
+    // then parks the primary against stiction (torque above the OK band),
+    // but the re-enabled pair ends clean — that is a successful sync, not
+    // mechanical binding.
+    let mut b = Bench::new(0);
+    b.torque_primary = 19;
+    b.torque_secondary = -53;
+    b.position_secondary = 10_000;
+    let step = b.run_until_step();
+    b.do_disable(step);
+
+    for _ in 0..3 {
+        b.now_ns += CYCLE_NS;
+        b.position_secondary += 40;
+        assert_eq!(
+            b.sync.poll(&SyncInputs {
+                now_ns: b.now_ns,
+                torque_primary: b.torque_primary,
+                torque_secondary: 0,
+                position_secondary: b.position_secondary,
+            }),
+            SyncStep::Idle
+        );
+    }
+    b.torque_primary = 22;
+
+    let step = loop {
+        b.now_ns += CYCLE_NS;
+        let step = b.sync.poll(&SyncInputs {
+            now_ns: b.now_ns,
+            torque_primary: b.torque_primary,
+            torque_secondary: 0,
+            position_secondary: b.position_secondary,
+        });
+        match step {
+            SyncStep::Idle => {}
+            SyncStep::SetPrimaryTarget(_) => b.torque_primary = 67,
+            other => break other,
+        }
+    };
+    b.do_enable(step);
+    b.torque_primary = 0;
+    b.torque_secondary = 0;
+
+    let SyncStep::Done(report) = b.run_until_step() else {
+        panic!("expected Done");
+    };
+    assert_eq!(report.result, 0);
+    assert_eq!(report.torque_dithered, 67);
+    assert_eq!(report.released_delta_counts, 120);
+    assert_eq!(report.torque_final_primary, 0);
 }
 
 #[test]

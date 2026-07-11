@@ -9,7 +9,8 @@ SYNC_ERROR_TEXT = {
     -842: "motion ring is not empty",
     -843: "axis is not driven by exactly two servos on one node",
     -844: "coasting drive never settled (settle timeout)",
-    -845: "primary torque stayed high after dither — mechanical binding?",
+    -845: "torque stayed high and the coasting rotor never released any "
+    "strain — mechanical binding?",
     -846: "pair still fighting after re-enable",
     -847: "motion arrived during sync",
     -848: "dither parameters rejected",
