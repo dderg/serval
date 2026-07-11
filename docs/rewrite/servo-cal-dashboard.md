@@ -86,10 +86,10 @@ rust/target/release/servo-cal serve --dir /tmp/servo-cal-demo --port 8085
 ```
 
 Open `http://127.0.0.1:8085/` — the gains page preselects the newest
-analyzed runs, so the PSD overlay (with attempt 1's injected 230 Hz ring
-separating from the clean attempts) and the prefilled sweep command are
-populated before any clicking; the ambient diff column reads the notch
-value change between consecutive rows.
+analyzed run, so the PSD overlay (every gain step in its own color) and
+the prefilled sweep command are populated before any clicking; the
+ambient diff column reads the notch value change between consecutive
+rows.
 
 `servo-cal demo` also writes a `drive_state.json` for four AWD corexy
 motors (`motor_a`/`motor_a1`/`motor_b`/`motor_b1`) mirroring the shipped
@@ -131,14 +131,25 @@ within one. Non-journal pages are a two-column workspace: charts and the
 page's run strip on the left, the page's slice of the drive tuning grid
 plus sweep box and session log in a sticky right rail.
 
+Run rows select exclusively on click (click the sole selected row again to
+clear); shift+click adds/removes a run from the overlay. Step chips use the
+same grammar with an **all** chip as the default: every step draws at once,
+click a chip to isolate that step, shift+click to add/remove one. Trace
+colors carry the disambiguation: with one run selected each step gets its
+own palette color (the all-gains-of-this-sweep view); with several runs
+each keeps its table-swatch hue and its steps ramp toward white, so the
+chips are the clutter valve when overlaying sweeps.
+
 - **gains** — gain-sweep/refine runs, following-error PSD overlay (step
   chips, 20–450 Hz band marked, per-trace peak annotations), the `gains`
   grid with autofill.
 - **notches** — same PSD plus a detected-peak list (top spaced peaks in
-  the band, newest selected run); "→ notch n" pushes a peak's frequency
+  the band, from the newest selected run's recommended step when visible,
+  else its last visible step); "→ notch n" pushes a peak's frequency
   into that slot's pending edits for all motors (width/depth stay
-  operator-chosen); the full 5-slot notch bank grid and adaptive-mode
-  quick actions (reset params / 1 adaptive / 2 adaptive / disable).
+  operator-chosen); the compact notch grid and the folded adaptive-mode
+  recipes (reset params / 1 adaptive / 2 adaptive / disable), which only
+  stage `adaptive_notch_mode` — nothing is written until Apply.
 - **observers** — torque filter, speed observer, disturbance observer
   grids; time-domain following-error overlay (disturbance rejection is a
   time-domain signal).
@@ -190,6 +201,12 @@ same convention as the vendor manual and the drive's front panel.
   when they disagree); a cell that differs from its siblings gets a drift
   highlight, a cell with an unapplied edit a pending highlight. Params
   with an `options` enum render as labeled selects.
+- **The notch group is transposed by default** — one column per notch,
+  freq/width/depth rows, one input per cell that stages the value for
+  every motor: notches are per-axis physics, so on corexy a per-motor
+  notch table is noise. A "per-motor view" toggle restores the param ×
+  motor rows for drives that genuinely disagree (a mixed cell names the
+  per-motor values in its tooltip either way).
 - **Config-pinned params** (present in a motor's `[motor] params:` block or
   `tuning_profile`, per `drive_state.json`'s `config_pins`) get a pin badge
   showing the pinned value — editing the live value here does not survive
@@ -215,8 +232,8 @@ same convention as the vendor manual and the drive's front panel.
   (or any run's "→ sweep" button), so the loop reads tweak grid -> apply
   -> run sweep -> run strip updates.
 - The G-code textarea (collapsed by default) stays as the manual escape
-  hatch; every batch from Apply, quick actions, sweep, or manual Run lands
-  in the same session log, which survives page switches.
+  hatch; every batch from Apply, sweep, or manual Run lands in the same
+  session log, which survives page switches.
 
 ## Implementation notes
 

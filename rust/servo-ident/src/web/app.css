@@ -149,7 +149,7 @@ th, td {
 }
 th { color: var(--dim); position: sticky; top: 0; background: var(--panel); z-index: 1; }
 
-tr.selectable { cursor: pointer; }
+tr.selectable { cursor: pointer; user-select: none; }
 tr.selectable:hover td { background: #161d26; }
 tr.selected td { background: #14202e; }
 
@@ -261,6 +261,20 @@ table.mode-table th, table.mode-table td { padding: 2px 16px 2px 0; }
 
 .quick-actions { display: flex; gap: 6px; margin-bottom: 6px; }
 .quick-action { font-size: 11px; padding: 1px 8px; }
+
+table.notch-grid th { text-align: center; }
+table.notch-grid td.param-col, table.notch-grid th.param-col { width: 70px; }
+.notch-view-toggle { font-size: 11px; text-transform: none; letter-spacing: 0; margin-left: 8px; color: #6e7a86; }
+.notch-view-toggle:hover { color: var(--text); }
+
+details.adaptive-actions { margin-top: 8px; }
+details.adaptive-actions > summary {
+  cursor: pointer;
+  color: #6e7a86;
+  font-size: 11px;
+}
+details.adaptive-actions[open] > summary { margin-bottom: 6px; }
+details.adaptive-actions .hint { margin: 4px 0 0; }
 
 .pending-preview { margin-top: 8px; }
 .pending-line {

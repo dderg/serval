@@ -4,7 +4,7 @@ const REFRESH_MS = 5000;
 const MOONRAKER_KEY = "servoCalMoonrakerUrl";
 const PALETTE = ["#4fb3ff", "#e05a4f", "#4caf50", "#d9a441", "#b388ff", "#4fd8c4"];
 const RESONANCE_BAND_HZ = [20, 450];
-const INITIAL_SELECTED_RUNS = 3;
+const INITIAL_SELECTED_RUNS = 1;
 const PEAK_MIN_SEPARATION_HZ = 15;
 const PEAK_LIST_SIZE = 3;
 
@@ -80,13 +80,15 @@ const state = {
   plotSeries: new Map(), // name -> {mtime_utc, data}
   selected: new Set(),
   autoSelected: false,
-  psdStep: null,
+  stepFilter: null, // null = every step; otherwise a Set of visible step names
   gcodeText: "",
   drive: {
     data: null, // last /api/drive_state response (params, motors, config_pins, age_s)
     fetchedAtMs: null, // Date.now() when data was fetched, for a client-ticking age display
     pending: {}, // param name -> {motor: raw} — edits not yet applied
     dirty: new Set(), // autofill-target param names the user has edited directly this session
+    notchPerMotor: false, // compact one-value-per-notch grid unless toggled
+    adaptiveOpen: false, // the adaptive-recipes fold survives re-renders
   },
   live: {
     cursor: null, // last next_cycle from /api/live_tap; null = attach now
@@ -469,10 +471,16 @@ function renderRuns() {
     const tr = document.createElement("tr");
     if (state.selected.has(run.name)) tr.classList.add("selected");
     if (run.has_results) tr.classList.add("selectable");
-    tr.addEventListener("click", () => {
+    tr.addEventListener("click", (ev) => {
       if (!run.has_results) return;
-      if (state.selected.has(run.name)) state.selected.delete(run.name);
-      else state.selected.add(run.name);
+      if (ev.shiftKey) {
+        if (state.selected.has(run.name)) state.selected.delete(run.name);
+        else state.selected.add(run.name);
+      } else if (state.selected.has(run.name) && state.selected.size === 1) {
+        state.selected.delete(run.name);
+      } else {
+        state.selected = new Set([run.name]);
+      }
       renderRuns();
       redrawCharts();
     });
@@ -659,7 +667,7 @@ function drawChart(canvas, traces, yLabel, fixedY) {
   ctx.fillText(yLabel, pad.l, 10);
 }
 
-function drawTimeDomain(names, plots) {
+function drawTimeDomain(names, plots, steps) {
   const container = el("charts");
   if (!container) return;
   container.innerHTML = "";
@@ -667,8 +675,7 @@ function drawTimeDomain(names, plots) {
     container.innerHTML = '<p class="note">select runs above</p>';
     return;
   }
-  const stepNames = [...new Set(plots.flatMap((p) => p.steps.map((s) => s.name)))];
-  for (const stepName of stepNames) {
+  for (const stepName of steps) {
     const box = document.createElement("div");
     box.className = "chart-box";
     const title = document.createElement("h3");
@@ -708,50 +715,87 @@ function newestSelectedRunName(names) {
   return found ? found.name : names[0];
 }
 
-function defaultPsdStep(names, plots, stepNames) {
-  const plotByName = new Map(names.map((n, i) => [n, plots[i]]));
+/// The peak list needs one step to harvest from: the newest selected run's
+/// recommended step when it is visible, else its last visible step.
+function peakStep(names, plots, steps) {
   const newest = newestSelectedRunName(names);
-  const newestPlot = plotByName.get(newest);
-  const newestSteps = newestPlot ? newestPlot.steps.map((s) => s.name) : stepNames;
+  const plot = plots[names.indexOf(newest)];
+  const present = plot
+    ? steps.filter((s) => plot.steps.some((x) => x.name === s))
+    : [];
   const detail = state.details.get(newest);
   const recommended = detail && detail.results && detail.results.verdict.recommended_step;
-  if (recommended && newestSteps.includes(recommended)) return recommended;
-  if (newestSteps.length) return newestSteps[newestSteps.length - 1];
-  return stepNames[stepNames.length - 1];
+  const step =
+    recommended && present.includes(recommended)
+      ? recommended
+      : present.length
+        ? present[present.length - 1]
+        : null;
+  return { newest, step };
 }
 
-function psdFerrTraces(names, plots, stepName) {
+function mixColor(hex, targetHex, t) {
+  const c = parseInt(hex.slice(1), 16);
+  const g = parseInt(targetHex.slice(1), 16);
+  const mix = (shift) => {
+    const a = (c >> shift) & 0xff;
+    const b = (g >> shift) & 0xff;
+    return Math.round(a + (b - a) * t);
+  };
+  return `#${((mix(16) << 16) | (mix(8) << 8) | mix(0)).toString(16).padStart(6, "0")}`;
+}
+
+/// One run selected: each step gets its own palette color. Several runs:
+/// each run keeps its table-swatch hue and its steps ramp toward white, so
+/// runs stay distinguishable and the step chips are the clutter valve.
+function traceStyle(names, steps, runIdx, stepIdx) {
+  if (names.length === 1) {
+    return { color: PALETTE[stepIdx % PALETTE.length], name: steps[stepIdx] };
+  }
+  const base = PALETTE[runIdx % PALETTE.length];
+  const ramp = steps.length > 1 ? (0.55 * stepIdx) / (steps.length - 1) : 0;
+  const name =
+    steps.length === 1 ? names[runIdx] : `${names[runIdx]} · ${steps[stepIdx]}`;
+  return { color: mixColor(base, "#ffffff", ramp), name };
+}
+
+function psdFerrTraces(names, plots, steps) {
   const traces = [];
   plots.forEach((p, i) => {
-    const step = p.steps.find((s) => s.name === stepName);
-    if (!step || !step.psd) return;
-    const driveNames = Object.keys(step.psd.per_drive);
-    if (driveNames.length) {
+    steps.forEach((stepName, j) => {
+      const step = p.steps.find((s) => s.name === stepName);
+      if (!step || !step.psd) return;
+      const driveNames = Object.keys(step.psd.per_drive);
+      if (!driveNames.length) return;
+      const style = traceStyle(names, steps, i, j);
       traces.push({
         freq: step.psd.freq_hz,
         y: step.psd.per_drive[driveNames[0]],
-        color: PALETTE[i % PALETTE.length],
+        color: style.color,
         dashed: false,
-        label: `${names[i]} (${driveNames[0]})`,
+        label: `${style.name} (${driveNames[0]})`,
         run: names[i],
       });
-    }
+    });
   });
   return traces;
 }
 
-function psdAccelTraces(names, plots, stepName) {
+function psdAccelTraces(names, plots, steps) {
   const traces = [];
   plots.forEach((p, i) => {
-    const step = p.steps.find((s) => s.name === stepName);
-    if (!step || !step.psd || !step.psd.accel) return;
-    traces.push({
-      freq: step.psd.accel.freq_hz,
-      y: step.psd.accel.psd,
-      color: PALETTE[i % PALETTE.length],
-      dashed: false,
-      label: `${names[i]} (accel)`,
-      run: names[i],
+    steps.forEach((stepName, j) => {
+      const step = p.steps.find((s) => s.name === stepName);
+      if (!step || !step.psd || !step.psd.accel) return;
+      const style = traceStyle(names, steps, i, j);
+      traces.push({
+        freq: step.psd.accel.freq_hz,
+        y: step.psd.accel.psd,
+        color: style.color,
+        dashed: false,
+        label: `${style.name} (accel)`,
+        run: names[i],
+      });
     });
   });
   return traces;
@@ -938,7 +982,7 @@ function attachPsdHover(canvas, traces, band, yTitle, opts) {
   canvas.addEventListener("mouseleave", () => drawPsdChart(canvas, traces, band, yTitle, null, opts));
 }
 
-function psdBox(title, traces, band, yTitle, names, opts) {
+function psdBox(title, traces, band, yTitle, opts) {
   const box = document.createElement("div");
   box.className = "chart-box";
   const head = document.createElement("h3");
@@ -952,45 +996,71 @@ function psdBox(title, traces, band, yTitle, names, opts) {
   attachPsdHover(canvas, traces, band, yTitle, opts);
   const legend = document.createElement("div");
   legend.className = "legend";
-  names.forEach((n, i) => {
+  traces.forEach((tr) => {
     const item = document.createElement("span");
-    item.innerHTML = `<span class="swatch" style="background:${PALETTE[i % PALETTE.length]}"></span>${n}`;
+    item.innerHTML = `<span class="swatch" style="background:${tr.color}"></span>${tr.label}`;
     legend.appendChild(item);
   });
   box.appendChild(legend);
   return box;
 }
 
-function renderPsdChart(names, plots, stepName) {
+function renderPsdChart(names, plots, steps) {
   const container = el("psd-charts");
   if (!container) return;
   container.innerHTML = "";
-  if (!stepName) {
+  if (!names.length || !steps.length) {
     container.innerHTML = '<p class="note">select runs above</p>';
     return;
   }
-  const ferr = psdFerrTraces(names, plots, stepName);
+  const ferr = psdFerrTraces(names, plots, steps);
   container.appendChild(
-    psdBox("following error", ferr, RESONANCE_BAND_HZ, "log10 psd (counts²/Hz)", names)
+    psdBox("following error", ferr, RESONANCE_BAND_HZ, "log10 psd (counts²/Hz)")
   );
-  const accel = psdAccelTraces(names, plots, stepName);
+  const accel = psdAccelTraces(names, plots, steps);
   if (accel.length) {
     container.appendChild(
-      psdBox("accelerometer", accel, RESONANCE_BAND_HZ, "log10 psd (accel²/Hz)", names)
+      psdBox("accelerometer", accel, RESONANCE_BAND_HZ, "log10 psd (accel²/Hz)")
     );
   }
+}
+
+function visibleStepNames(stepNames) {
+  if (!state.stepFilter) return stepNames;
+  const kept = stepNames.filter((s) => state.stepFilter.has(s));
+  return kept.length ? kept : stepNames;
 }
 
 function renderPsdChips(stepNames) {
   const container = el("psd-step-chips");
   if (!container) return;
   container.innerHTML = "";
+  const all = document.createElement("button");
+  all.className = "chip" + (state.stepFilter ? "" : " active");
+  all.textContent = "all";
+  all.title = "show every step";
+  all.addEventListener("click", () => {
+    state.stepFilter = null;
+    redrawCharts();
+  });
+  container.appendChild(all);
   for (const stepName of stepNames) {
     const chip = document.createElement("button");
-    chip.className = "chip" + (stepName === state.psdStep ? " active" : "");
+    const inFilter = state.stepFilter && state.stepFilter.has(stepName);
+    chip.className = "chip" + (inFilter ? " active" : "");
     chip.textContent = stepName;
-    chip.addEventListener("click", () => {
-      state.psdStep = stepName;
+    chip.title = "click: only this step — shift+click: add/remove it";
+    chip.addEventListener("click", (ev) => {
+      if (ev.shiftKey) {
+        const next = new Set(state.stepFilter || stepNames);
+        if (next.has(stepName)) next.delete(stepName);
+        else next.add(stepName);
+        state.stepFilter = next.size === 0 || next.size === stepNames.length ? null : next;
+      } else if (inFilter && state.stepFilter.size === 1) {
+        state.stepFilter = null;
+      } else {
+        state.stepFilter = new Set([stepName]);
+      }
       redrawCharts();
     });
     container.appendChild(chip);
@@ -1115,7 +1185,6 @@ function renderFrfCharts(names, plots) {
           frfTraces(names, plots, stepName, spec.key),
           null,
           spec.yTitle,
-          names,
           opts
         )
       );
@@ -1175,24 +1244,24 @@ function proposePeakIntoSlot(slot, peakFreq) {
   renderDriveGroups();
 }
 
-function renderPeakList(names, plots) {
+function renderPeakList(names, plots, steps) {
   const container = el("peak-list");
   if (!container) return;
   const runLabel = el("peaks-run");
-  if (!names.length || !state.psdStep) {
+  if (!names.length || !steps.length) {
     container.innerHTML = '<p class="note">select runs above</p>';
     if (runLabel) runLabel.textContent = "";
     return;
   }
-  const newest = newestSelectedRunName(names);
-  const plot = plots[names.indexOf(newest)];
-  const step = plot && plot.steps.find((s) => s.name === state.psdStep);
+  const picked = peakStep(names, plots, steps);
+  const plot = plots[names.indexOf(picked.newest)];
+  const step = plot && picked.step && plot.steps.find((s) => s.name === picked.step);
   if (!step || !step.psd) {
     container.innerHTML = '<p class="note">no PSD for this step</p>';
     if (runLabel) runLabel.textContent = "";
     return;
   }
-  if (runLabel) runLabel.textContent = `${newest} / ${state.psdStep}`;
+  if (runLabel) runLabel.textContent = `${picked.newest} / ${picked.step}`;
   const driveNames = Object.keys(step.psd.per_drive);
   const peaks = findPsdPeaks(
     step.psd.freq_hz,
@@ -1247,16 +1316,17 @@ async function redrawCharts() {
     }
   }
   const stepNames = [...new Set(plots.flatMap((p) => p.steps.map((s) => s.name)))];
-  if (!state.psdStep || !stepNames.includes(state.psdStep)) {
-    state.psdStep = stepNames.length ? defaultPsdStep(okNames, plots, stepNames) : null;
+  if (state.stepFilter && !stepNames.some((s) => state.stepFilter.has(s))) {
+    state.stepFilter = null;
   }
+  const steps = visibleStepNames(stepNames);
   if (def.charts && def.charts.includes("frf")) renderFrfCharts(okNames, plots);
   if (def.charts && def.charts.includes("psd")) {
     renderPsdChips(stepNames);
-    renderPsdChart(okNames, plots, state.psdStep);
+    renderPsdChart(okNames, plots, steps);
   }
-  if (def.peaks) renderPeakList(okNames, plots);
-  if (def.charts && def.charts.includes("time")) drawTimeDomain(okNames, plots);
+  if (def.peaks) renderPeakList(okNames, plots, steps);
+  if (def.charts && def.charts.includes("time")) drawTimeDomain(okNames, plots, steps);
 }
 
 // --- live tap ------------------------------------------------------------------
@@ -1669,8 +1739,16 @@ function cellInputHtml(param, motor) {
 }
 
 function allInputHtml(param) {
-  const values = motorNames(state.drive.data.motors).map((m) => cellRaw(param, m));
+  const motors = motorNames(state.drive.data.motors);
+  const values = motors.map((m) => cellRaw(param, m));
   const agree = valuesAgree(values);
+  const cls = ["cell-input", "all"];
+  if (motors.some((m) => cellRaw(param, m) !== state.drive.data.motors[m][param.c_code])) {
+    cls.push("pending");
+  }
+  const title = agree
+    ? "set all motors"
+    : `set all motors — currently ${motors.map((m, i) => `${shortMotorLabel(m)}=${values[i]}`).join(" ")}`;
   if (param.options) {
     const opts =
       `<option value=""${agree ? "" : " selected"} disabled>${agree ? "" : "mixed"}</option>` +
@@ -1680,10 +1758,10 @@ function allInputHtml(param) {
             `<option value="${v}"${agree && Number(v) === values[0] ? " selected" : ""}>${v}: ${label}</option>`
         )
         .join("");
-    return `<select class="cell-input all" data-param="${param.name}" data-motor="*" title="set all motors">${opts}</select>`;
+    return `<select class="${cls.join(" ")}" data-param="${param.name}" data-motor="*" title="${title}">${opts}</select>`;
   }
   const display = agree ? values[0] : "";
-  return `<input type="number" step="1" class="cell-input all" data-param="${param.name}" data-motor="*" value="${display}" placeholder="${agree ? "" : "mixed"}" title="set all motors">`;
+  return `<input type="number" step="1" class="${cls.join(" ")}" data-param="${param.name}" data-motor="*" value="${display}" placeholder="${agree ? "" : "mixed"}" title="${title}">`;
 }
 
 function paramLabelHtml(param, section) {
@@ -1700,9 +1778,10 @@ function paramLabelHtml(param, section) {
   return `<span title="${param.description} (${param.c_code})">${param.name}</span>${unit}${pinBadge}${groupHint}${rederiveLink}`;
 }
 
-/// Adaptive-notch recipe as one-click actions (A6-EC manual 7.10 + the
-/// bench's own macros): reset the notch parameters, hand notches 1-2 to the
-/// drive, or take them back (0 keeps whatever the drive last wrote).
+/// Adaptive-notch recipe (A6-EC manual 7.10): reset the notch parameters,
+/// hand notches 1-2 to the drive, or take them back (0 keeps whatever the
+/// drive last wrote). Each button only STAGES adaptive_notch_mode for all
+/// motors — the write happens through the apply button like any grid edit.
 const NOTCH_QUICK_ACTIONS = [
   { label: "reset notch params", value: 3 },
   { label: "1 adaptive", value: 1 },
@@ -1712,13 +1791,60 @@ const NOTCH_QUICK_ACTIONS = [
 
 function notchQuickActionsHtml() {
   return (
+    `<details class="adaptive-actions"${state.drive.adaptiveOpen ? " open" : ""}>` +
+    "<summary>adaptive notch recipes</summary>" +
     '<div class="quick-actions">' +
     NOTCH_QUICK_ACTIONS.map(
       (a) =>
-        `<button class="quick-action" data-value="${a.value}" title="SERVO_TUNE PARAM=adaptive_notch_mode VALUE=${a.value} MOTORS=&lt;all&gt;">${a.label}</button>`
+        `<button class="quick-action" data-value="${a.value}" title="stages adaptive_notch_mode=${a.value} for all motors — nothing is written until apply">${a.label}</button>`
     ).join("") +
-    "</div>"
+    '</div><p class="hint">stages adaptive_notch_mode — review in the pending list, then apply</p>' +
+    "</details>"
   );
+}
+
+const NOTCH_ROW_KINDS = ["freq", "width", "depth"];
+
+function notchMatrix(params) {
+  const byKey = new Map();
+  const nums = new Set();
+  const leftover = [];
+  for (const p of params) {
+    const m = /^notch_(\d+)_(freq|width|depth)$/.exec(p.name);
+    if (m) {
+      nums.add(Number(m[1]));
+      byKey.set(`${m[1]}:${m[2]}`, p);
+    } else {
+      leftover.push(p);
+    }
+  }
+  return { nums: [...nums].sort((a, b) => a - b), byKey, leftover };
+}
+
+/// The compact notch view: one column per notch, freq/width/depth rows, one
+/// input per cell that stages the value for every motor (notches are
+/// per-axis physics — on corexy every motor sees the same belt, so
+/// per-motor notch tables are noise; the per-motor toggle remains for
+/// drives that genuinely disagree).
+function notchCompactHtml(params) {
+  const { nums, byKey, leftover } = notchMatrix(params);
+  const head =
+    `<th class="param-col"></th>` + nums.map((n) => `<th>notch ${n}</th>`).join("");
+  const rows = NOTCH_ROW_KINDS.map((kind) => {
+    const first = byKey.get(`${nums[0]}:${kind}`);
+    const unit = first && first.unit ? ` <span class="unit">${first.unit}</span>` : "";
+    const cells = nums
+      .map((n) => {
+        const p = byKey.get(`${n}:${kind}`);
+        return `<td>${p ? allInputHtml(p) : ""}</td>`;
+      })
+      .join("");
+    return `<tr><td class="param-col">${kind}${unit}</td>${cells}</tr>`;
+  }).join("");
+  return {
+    table: `<table class="param-grid notch-grid"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`,
+    leftover,
+  };
 }
 
 function renderDriveGroups() {
@@ -1739,11 +1865,8 @@ function renderDriveGroups() {
     motors.map((m) => `<th title="${m}">${shortMotorLabel(m)}</th>`).join("") +
     `<th class="all-col">all</th>`;
   const sections = groupParams(data.params);
-  const parts = [];
-  for (const [group, params] of sections) {
-    if (!params.length) continue;
-    if (def.groups && group !== OTHER_GROUP && !def.groups.includes(group)) continue;
-    const rows = params
+  const perMotorRows = (params, group) =>
+    params
       .map((p) => {
         const cells = motors.map((m) => `<td>${cellInputHtml(p, m)}</td>`).join("");
         return (
@@ -1755,10 +1878,35 @@ function renderDriveGroups() {
         );
       })
       .join("");
+  const perMotorTable = (params, group) =>
+    `<table class="param-grid"><thead><tr>${headerCells}</tr></thead>` +
+    `<tbody>${perMotorRows(params, group)}</tbody></table>`;
+  const parts = [];
+  for (const [group, params] of sections) {
+    if (!params.length) continue;
+    if (def.groups && group !== OTHER_GROUP && !def.groups.includes(group)) continue;
+    if (group === "notch" && !state.drive.notchPerMotor) {
+      const compact = notchCompactHtml(params);
+      parts.push(
+        `<div class="param-group"><h3>notch ` +
+          `<a href="#" class="notch-view-toggle hint">per-motor view</a></h3>` +
+          compact.table +
+          (compact.leftover.length ? perMotorTable(compact.leftover, group) : "") +
+          notchQuickActionsHtml() +
+          `</div>`
+      );
+      continue;
+    }
+    const toggle =
+      group === "notch"
+        ? ` <a href="#" class="notch-view-toggle hint">compact view</a>`
+        : "";
     const extras = group === "notch" ? notchQuickActionsHtml() : "";
     parts.push(
-      `<div class="param-group"><h3>${group.replace(/_/g, " ")}</h3>${extras}` +
-        `<table class="param-grid"><thead><tr>${headerCells}</tr></thead><tbody>${rows}</tbody></table></div>`
+      `<div class="param-group"><h3>${group.replace(/_/g, " ")}${toggle}</h3>` +
+        perMotorTable(params, group) +
+        extras +
+        `</div>`
     );
   }
   container.innerHTML = parts.join("");
@@ -1779,13 +1927,26 @@ function bindDriveGridEvents() {
       renderDriveGroups();
     });
   });
+  container.querySelectorAll("details.adaptive-actions").forEach((d) => {
+    d.addEventListener("toggle", () => {
+      state.drive.adaptiveOpen = d.open;
+    });
+  });
+  container.querySelectorAll("a.notch-view-toggle").forEach((elink) => {
+    elink.addEventListener("click", (e) => {
+      e.preventDefault();
+      state.drive.notchPerMotor = !state.drive.notchPerMotor;
+      renderDriveGroups();
+    });
+  });
   container.querySelectorAll("button.quick-action").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const motors = motorNames(state.drive.data.motors).join(",");
-      runGcode(
-        [`SERVO_TUNE PARAM=adaptive_notch_mode VALUE=${btn.dataset.value} MOTORS=${motors}`],
-        "notch"
-      ).then(refreshDriveState);
+      const staged = { ...(state.drive.pending.adaptive_notch_mode || {}) };
+      for (const m of motorNames(state.drive.data.motors)) {
+        staged[m] = Number(btn.dataset.value);
+      }
+      state.drive.pending.adaptive_notch_mode = staged;
+      renderDriveGroups();
     });
   });
 }
