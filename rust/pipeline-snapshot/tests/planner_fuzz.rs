@@ -121,6 +121,13 @@ fn waypoints(moves: &[MoveSpec]) -> Vec<(f64, f64, f64, f64, f64)> {
 }
 
 fn run_case(limits: FuzzLimits, moves: &[MoveSpec]) -> (TrajectoryPieces, AuditReport) {
+    run_waypoints(limits, &waypoints(moves))
+}
+
+fn run_waypoints(
+    limits: FuzzLimits,
+    waypoints: &[(f64, f64, f64, f64, f64)],
+) -> (TrajectoryPieces, AuditReport) {
     let params = SnapshotParams {
         max_velocity: limits.max_velocity,
         max_accel: limits.max_accel,
@@ -134,7 +141,7 @@ fn run_case(limits: FuzzLimits, moves: &[MoveSpec]) -> (TrajectoryPieces, AuditR
         axis_decls: Vec::new(),
         post_processor_decls: Vec::new(),
     };
-    let snapshot = pipeline_snapshot(&waypoints(moves), params).expect("valid fuzz input");
+    let snapshot = pipeline_snapshot(waypoints, params).expect("valid fuzz input");
     let traj = TrajectoryPieces {
         x: snapshot.traj_x_pieces,
         y: snapshot.traj_y_pieces,
@@ -436,5 +443,51 @@ fn perpendicular_corners_step_seam_accel() {
     assert!(
         xy_seam_accel.is_empty(),
         "X/Y seam accel steps past budget: {xy_seam_accel:?}"
+    );
+}
+
+/// A slow sharp corner whose blend exits with acceleration a fraction of a
+/// mm/s² below the rail: the following straight move closes that gap with a
+/// jerk-limited ramp lasting well under a microsecond (here ~130 ns for a
+/// 0.13 mm/s² step). Lowered as its own Bézier piece, the NURBS pack/extract
+/// round trip reconstructed that piece from Bernstein control points that
+/// carry the absolute ~120 mm position, so ulp-level rounding divided by h³
+/// came back as ~1e8 mm/s³ of phantom jerk — 100× the configured limit —
+/// and ±10 mm/s² acceleration steps at both seams. Fixed by merging phases
+/// below the Bernstein corruption floor (`MIN_PHASE_PIECE_S`) into a
+/// neighbor. The waypoints are lifted verbatim from the neptune_cube layer_5
+/// snapshot case; the epsilon-under-the-rail blend exit only occurs for
+/// specific corner geometry, so the coordinates are load-bearing.
+#[test]
+fn slow_corner_rail_ramp_survives_nurbs_round_trip() {
+    let limits = FuzzLimits {
+        max_velocity: 100.0,
+        max_accel: 1000.0,
+        square_corner_velocity: 8.0,
+        max_jerk: 1e6,
+    };
+    let feed = 5932.264 / 60.0;
+    let waypoints = [
+        (121.401, 114.125, 0.0, 0.0, feed),
+        (121.527, 113.034, 0.0, 0.03696, feed),
+        (126.102, 117.608, 0.0, 0.25458, feed),
+    ];
+    let (_, report) = run_waypoints(limits, &waypoints);
+    assert!(report.hard_ok(), "{report}");
+    let xy_spikes: Vec<_> = report
+        .target
+        .iter()
+        .filter(|v| {
+            v.axis < 2
+                && matches!(
+                    v.kind,
+                    pipeline_snapshot::audit::ViolationKind::Jerk
+                        | pipeline_snapshot::audit::ViolationKind::SeamAccel
+                )
+        })
+        .collect();
+    assert!(
+        xy_spikes.is_empty(),
+        "X/Y jerk or seam-accel past budget: {xy_spikes:?}\n{report}"
     );
 }

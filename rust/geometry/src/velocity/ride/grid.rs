@@ -192,9 +192,19 @@ impl<'a> Grid<'a> {
         self.lerp_node(self.t.kappa, s)
     }
 
-    pub(super) fn curved_near(&self, s: f64) -> bool {
-        let c = self.cell(s);
+    pub(super) fn curved_in(&self, c: usize) -> bool {
         self.t.kappa[c].abs() > KAPPA_EPS || self.t.kappa[c + 1].abs() > KAPPA_EPS
+    }
+
+    pub(super) fn curved_near(&self, s: f64) -> bool {
+        self.curved_in(self.cell(s))
+    }
+
+    /// Whether any node over `[s, s + dist]` carries curvature.
+    pub(super) fn curved_over(&self, s: f64, dist: f64) -> bool {
+        let lo = self.cell(s);
+        let hi = (self.cell(s + dist) + 1).min(self.t.kappa.len() - 1);
+        self.t.kappa[lo..=hi].iter().any(|&k| k.abs() > KAPPA_EPS)
     }
 
     /// Lower bound of the cap over `[s, s + dist]`.

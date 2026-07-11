@@ -1128,3 +1128,148 @@ fn infinite_jerk_disables_jerk_limiting_and_still_plans_to_rest() {
         "leading move accelerates at the rail: {trapezoid_accels:?}"
     );
 }
+
+/// The neptune_cube "discontinuity" corner (source line 308): a constant-
+/// curvature arc entered near its curvature ceiling with the exit seam pinned
+/// far below it. The backward brake-envelope pass used to integrate the
+/// approach to the ceiling with `a` past the disk rail (the rail collapses
+/// toward zero at the cap faster than the jerk budget — starved by the
+/// rotating normal component — can shed `a`), touching the cap ~0.05 mm
+/// before even the zero-jerk disk bound allows. The forward pass then rode
+/// the cap into that infeasible envelope, and emission rail-clamped each
+/// sample's `a` while `v` kept the envelope's super-disk descent — adjacent
+/// samples disagreeing about the profile by 3x, which the lowering turned
+/// into 2x executed acceleration spikes. Every adjacent sample window must be
+/// kinematically consistent: chord acceleration within the accel budget,
+/// total (chord + centripetal) acceleration within the budget, and the chord
+/// within the window's endpoint `a` range.
+#[test]
+fn arc_brake_from_curvature_ceiling_emits_consistent_samples() {
+    let (len, kappa) = (0.524_480_983_717_975_f64, 1.913_785_577_602_848_f64);
+    let accel = 10_000.0;
+    let feed = 98.871_216_666_666_67;
+    let out = outcome(
+        with_jerk(
+            vec![
+                arc_move(1.0 / kappa, len * kappa, feed, 1000.0, accel, 1),
+                line_move(5.0, 18.365, 1000.0, accel, 2),
+            ],
+            2_000_000.0,
+        ),
+        Vec::new(),
+    );
+    let plan = plan_warm(&out, 65.663).unwrap();
+    let arc = &plan.moves[0];
+    assert!((arc.exit_v - 18.365).abs() < 0.5, "exit_v={}", arc.exit_v);
+    let tol = 0.05 * accel;
+    for w in arc.samples.windows(2) {
+        let (p, q) = (&w[0], &w[1]);
+        let ds = q.s - p.s;
+        if ds <= 1e-9 {
+            continue;
+        }
+        let chord = (q.v * q.v - p.v * p.v) / (2.0 * ds);
+        assert!(
+            chord.abs() <= accel + tol,
+            "chord accel {chord:.0} exceeds budget at s={:.6}",
+            p.s
+        );
+        let v_mid = 0.5 * (p.v + q.v);
+        let a_n = kappa * v_mid * v_mid;
+        let total = (chord * chord + a_n * a_n).sqrt();
+        assert!(
+            total <= accel + tol,
+            "total accel {total:.0} exceeds budget at s={:.6} (chord={chord:.0}, a_n={a_n:.0})",
+            p.s
+        );
+        let (lo, hi) = (p.a.min(q.a), p.a.max(q.a));
+        assert!(
+            chord >= lo - tol && chord <= hi + tol,
+            "window mean accel {chord:.0} outside endpoint range [{lo:.0}, {hi:.0}] at s={:.6}",
+            p.s
+        );
+    }
+}
+
+fn window_consistency(m: &MoveVelocity, kappa0: f64, sigma: f64, accel: f64) {
+    let tol = 0.05 * accel;
+    for w in m.samples.windows(2) {
+        let (p, q) = (&w[0], &w[1]);
+        let ds = q.s - p.s;
+        if ds <= 1e-9 {
+            continue;
+        }
+        let chord = (q.v * q.v - p.v * p.v) / (2.0 * ds);
+        let kappa = (kappa0 + sigma * 0.5 * (p.s + q.s)).abs();
+        let v_mid = 0.5 * (p.v + q.v);
+        let total = (chord * chord + (kappa * v_mid * v_mid).powi(2)).sqrt();
+        assert!(
+            total <= accel + tol,
+            "total accel {total:.0} exceeds budget at s={:.6} (chord={chord:.0})",
+            p.s
+        );
+    }
+}
+
+/// The corner at waypoints 249-254 of neptune_cube/discontinuity under
+/// printer limits (v=100, a=1000, j=1e6): straight, clothoid up to kappa
+/// 1.6056, constant-curvature arc, clothoid down, straight. The arc pins the
+/// profile exactly on the curvature ceiling (rail = 0), and the flight
+/// landing that reattaches the backward envelope to the ascending ceiling
+/// coming off that pinch used to adopt the cap chord's slope unclamped —
+/// teleporting the envelope one super-disk velocity step up, which the
+/// binding-envelope gate then rejected, failing the whole plan on ordinary
+/// sliced gcode. The plan must succeed and every corner move's samples must
+/// stay within the acceleration disk.
+#[test]
+fn curvature_pinch_corner_plans_with_disk_consistent_samples() {
+    let (accel, jerk) = (1000.0, 1_000_000.0);
+    let feed = 98.871_216_666_666_67;
+    let (clo_len, clo_k1) = (0.326_111_947_928_510_2_f64, 1.605_579_859_690_027_5_f64);
+    let sigma = clo_k1 / clo_len;
+    let arc_len = 0.651_922_925_578_820_3_f64;
+    let up = Clothoid::try_new(
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        0.0,
+        sigma,
+        clo_len,
+    )
+    .unwrap();
+    let down = Clothoid::try_new(
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        clo_k1,
+        -sigma,
+        clo_len,
+    )
+    .unwrap();
+    let arc = Arc::try_new(
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        1.0 / clo_k1,
+        0.0,
+        arc_len * clo_k1,
+    )
+    .unwrap();
+    let out = outcome(
+        with_jerk(
+            vec![
+                line_move(9.934_551_366_509_675, feed, 100.0, accel, 1),
+                spatial_move(Segment::Clothoid(up), feed, 100.0, accel, 2),
+                spatial_move(Segment::Arc(arc), feed, 100.0, accel, 2),
+                spatial_move(Segment::Clothoid(down), feed, 100.0, accel, 3),
+                line_move(9.934_551_366_509_675, feed, 100.0, accel, 4),
+            ],
+            jerk,
+        ),
+        Vec::new(),
+    );
+    let plan = plan(&out).expect("ordinary sliced corner must plan");
+    window_consistency(&plan.moves[1], 0.0, sigma, accel);
+    window_consistency(&plan.moves[2], clo_k1, 0.0, accel);
+    window_consistency(&plan.moves[3], clo_k1, -sigma, accel);
+}

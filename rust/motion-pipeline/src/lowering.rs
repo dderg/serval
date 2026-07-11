@@ -28,10 +28,16 @@ use straight::lower_straight_from_phases;
 pub const MAX_PIECE_COEFFS: usize = 8;
 
 const MIN_PIECE_DURATION_S: f64 = 1e-9;
-/// Below this span the Bézier round trip corrupts a piece's acceleration
-/// (error ~ `ulp(pos)/h²` ≈ 1.4 mm/s² at 100 mm and 100 ns) and jerk; phases
-/// this short merge into a neighbor instead of lowering to their own piece.
-const MIN_PHASE_PIECE_S: f64 = 1e-7;
+/// Below this span the Bézier round trip corrupts a piece's derivatives:
+/// Bernstein control points carry the absolute position, so pack + extract
+/// rounds each one to `ulp(|pos|)` and reconstructs acceleration with error
+/// ~`ulp(|pos|)/h²` and jerk with ~`ulp(|pos|)/h³`. At 250 mm a 150 ns piece
+/// comes back with ~1e8 mm/s³ of phantom jerk (100× a 1e6 limit); at 1 µs the
+/// same rounding stays under ~0.2 mm/s² and ~2e5 mm/s³. Phases this short
+/// merge into a neighbor instead of lowering to their own piece — the
+/// absorbed content is at most `j·dt` of acceleration and `j·dt³/6`
+/// (~1e-13 mm) of position.
+const MIN_PHASE_PIECE_S: f64 = 1e-6;
 const MAX_SUBDIVISION_DEPTH: u32 = 22;
 
 const MIN_FIT_PIECE_S: f64 = 1e-4;
@@ -179,7 +185,7 @@ pub fn lower_move_pieces(
     } else {
         phase_knot_times(&profile, fit_tol)
     };
-    knots.retain(|&t| t > MIN_PIECE_DURATION_S && total_t - t > MIN_PIECE_DURATION_S);
+    knots.retain(|&t| t > MIN_PHASE_PIECE_S && total_t - t > MIN_PHASE_PIECE_S);
     let spatial = gm.segment.spatial.as_ref();
 
     let n_axes = start_pos.len().max(3);
