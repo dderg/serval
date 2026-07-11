@@ -4,6 +4,7 @@ pub mod claim;
 pub mod cli;
 pub mod clock;
 pub mod curves;
+pub mod damper;
 pub mod dynamics;
 pub mod endpoint;
 pub mod ffi;

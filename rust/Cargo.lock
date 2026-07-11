@@ -302,6 +302,7 @@ dependencies = [
  "cc",
  "host-rt",
  "libc",
+ "libm",
  "mcu-protocol",
  "mcu-transport",
  "runtime",
