@@ -325,7 +325,6 @@ fn poll_sync(ctx: &mut EndpointCtx, apply_time: u64) {
         now_ns: apply_time,
         torque_primary: ctx.drive.torque_actual(run.primary),
         torque_secondary: ctx.drive.torque_actual(run.secondary),
-        velocity_secondary: ctx.drive.velocity_actual(run.secondary),
         position_secondary: ctx.drive.position_actual(run.secondary),
     };
     match run.machine.poll(&inputs) {

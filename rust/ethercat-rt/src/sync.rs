@@ -24,8 +24,12 @@ pub const ERR_PIECES_DURING_SYNC: i32 = -847;
 pub const ERR_SYNC_BAD_DITHER: i32 = -848;
 pub const ERR_SYNC_ABORTED: i32 = -849;
 
-/// Secondary rotor is "settled" below this speed, held for `quiet_cycles`.
-const VELOCITY_QUIET_MM_S: f64 = 0.05;
+/// Secondary rotor is "settled" once its encoder stays within this band of a
+/// quiet anchor for `quiet_cycles`. Judged on 606Ch position, NOT 606Ch
+/// velocity: the A6-EC velocity estimate carries hundreds to thousands of
+/// counts/s of standstill noise, so no velocity threshold tight enough to
+/// mean "settled" is ever met, while encoder position noise is a few counts.
+const POSITION_QUIET_MM: f64 = 0.01;
 
 #[derive(Debug, Clone, Copy)]
 pub struct SyncParams {
@@ -44,7 +48,6 @@ pub struct SyncInputs {
     pub now_ns: u64,
     pub torque_primary: i16,
     pub torque_secondary: i16,
-    pub velocity_secondary: i32,
     pub position_secondary: i32,
 }
 
@@ -132,12 +135,22 @@ impl Meas {
 enum Phase {
     MeasureBaseline,
     AwaitDisable,
-    CoastSettle { waited: u64, quiet: u64 },
+    CoastSettle {
+        waited: u64,
+        quiet: u64,
+        anchor: i32,
+    },
     MeasureReleased,
     Dither,
-    PostDitherSettle { waited: u64, quiet: u64 },
+    PostDitherSettle {
+        waited: u64,
+        quiet: u64,
+        anchor: i32,
+    },
     MeasureDithered,
-    AwaitEnable { fail_result: i32 },
+    AwaitEnable {
+        fail_result: i32,
+    },
     MeasureFinal,
     Finished,
 }
@@ -195,6 +208,12 @@ impl PairSync {
         })
     }
 
+    fn quiet_counts(&self) -> i32 {
+        (POSITION_QUIET_MM * self.counts_per_mm_secondary.abs())
+            .ceil()
+            .max(1.0) as i32
+    }
+
     fn measure_done(&mut self) -> Option<(i32, i32)> {
         if self.meas.cycles >= self.params.measure_cycles {
             let avg = self.meas.avg();
@@ -208,16 +227,18 @@ impl PairSync {
     fn settle_step(
         waited: &mut u64,
         quiet: &mut u64,
-        inputs: &SyncInputs,
-        quiet_velocity: i32,
+        anchor: &mut i32,
+        position: i32,
+        quiet_counts: i32,
         quiet_cycles: u64,
         timeout: u64,
     ) -> Result<bool, i32> {
         *waited += 1;
-        if inputs.velocity_secondary.unsigned_abs() <= quiet_velocity.unsigned_abs() {
+        if position.wrapping_sub(*anchor).abs() <= quiet_counts {
             *quiet += 1;
         } else {
             *quiet = 0;
+            *anchor = position;
         }
         if *quiet >= quiet_cycles {
             return Ok(true);
@@ -264,20 +285,21 @@ impl PairSync {
                 self.phase = Phase::CoastSettle {
                     waited: 0,
                     quiet: 0,
+                    anchor: inputs.position_secondary,
                 };
                 SyncStep::Idle
             }
             Phase::CoastSettle {
                 mut waited,
                 mut quiet,
+                mut anchor,
             } => {
-                let quiet_velocity =
-                    (VELOCITY_QUIET_MM_S * self.counts_per_mm_secondary.abs()).ceil() as i32;
                 match Self::settle_step(
                     &mut waited,
                     &mut quiet,
-                    inputs,
-                    quiet_velocity,
+                    &mut anchor,
+                    inputs.position_secondary,
+                    self.quiet_counts(),
                     self.params.quiet_cycles,
                     self.params.settle_timeout_cycles,
                 ) {
@@ -286,7 +308,11 @@ impl PairSync {
                         SyncStep::Idle
                     }
                     Ok(false) => {
-                        self.phase = Phase::CoastSettle { waited, quiet };
+                        self.phase = Phase::CoastSettle {
+                            waited,
+                            quiet,
+                            anchor,
+                        };
                         SyncStep::Idle
                     }
                     Err(code) => {
@@ -317,6 +343,7 @@ impl PairSync {
                         self.phase = Phase::PostDitherSettle {
                             waited: 0,
                             quiet: 0,
+                            anchor: inputs.position_secondary,
                         };
                         SyncStep::Idle
                     } else {
@@ -328,14 +355,14 @@ impl PairSync {
             Phase::PostDitherSettle {
                 mut waited,
                 mut quiet,
+                mut anchor,
             } => {
-                let quiet_velocity =
-                    (VELOCITY_QUIET_MM_S * self.counts_per_mm_secondary.abs()).ceil() as i32;
                 match Self::settle_step(
                     &mut waited,
                     &mut quiet,
-                    inputs,
-                    quiet_velocity,
+                    &mut anchor,
+                    inputs.position_secondary,
+                    self.quiet_counts(),
                     self.params.quiet_cycles,
                     self.params.settle_timeout_cycles,
                 ) {
@@ -344,7 +371,11 @@ impl PairSync {
                         SyncStep::Idle
                     }
                     Ok(false) => {
-                        self.phase = Phase::PostDitherSettle { waited, quiet };
+                        self.phase = Phase::PostDitherSettle {
+                            waited,
+                            quiet,
+                            anchor,
+                        };
                         SyncStep::Idle
                     }
                     Err(code) => {

@@ -23,7 +23,7 @@ struct Bench {
     now_ns: u64,
     torque_primary: i16,
     torque_secondary: i16,
-    velocity_secondary: i32,
+    drift_counts_per_cycle: i32,
     position_secondary: i32,
     primary_targets: Vec<i32>,
     secondary_enabled: bool,
@@ -36,7 +36,7 @@ impl Bench {
             now_ns: 1_000_000_000,
             torque_primary: 0,
             torque_secondary: 0,
-            velocity_secondary: 0,
+            drift_counts_per_cycle: 0,
             position_secondary: 0,
             primary_targets: Vec::new(),
             secondary_enabled: true,
@@ -48,11 +48,13 @@ impl Bench {
     fn run_until_step(&mut self) -> SyncStep {
         for _ in 0..2_000_000 {
             self.now_ns += CYCLE_NS;
+            self.position_secondary = self
+                .position_secondary
+                .wrapping_add(self.drift_counts_per_cycle);
             let step = self.sync.poll(&SyncInputs {
                 now_ns: self.now_ns,
                 torque_primary: self.torque_primary,
                 torque_secondary: self.torque_secondary,
-                velocity_secondary: self.velocity_secondary,
                 position_secondary: self.position_secondary,
             });
             match step {
@@ -86,23 +88,21 @@ fn happy_path_reports_all_phases_and_released_delta() {
     let step = b.run_until_step();
     b.do_disable(step);
 
-    // Coast: rotor unwinds 500 counts, then goes quiet; primary keeps a
-    // stiction residual.
-    b.velocity_secondary = 900;
+    // Coast: rotor unwinds 400 counts over a few cycles, then goes quiet;
+    // primary keeps a stiction residual.
     for _ in 0..3 {
         b.now_ns += CYCLE_NS;
+        b.position_secondary += 133;
         assert_eq!(
             b.sync.poll(&SyncInputs {
                 now_ns: b.now_ns,
                 torque_primary: b.torque_primary,
                 torque_secondary: 0,
-                velocity_secondary: b.velocity_secondary,
                 position_secondary: b.position_secondary,
             }),
             SyncStep::Idle
         );
     }
-    b.velocity_secondary = 0;
     b.position_secondary = 20_400;
     b.torque_primary = 45;
     b.torque_secondary = 0;
@@ -114,7 +114,6 @@ fn happy_path_reports_all_phases_and_released_delta() {
             now_ns: b.now_ns,
             torque_primary: b.torque_primary,
             torque_secondary: b.torque_secondary,
-            velocity_secondary: b.velocity_secondary,
             position_secondary: b.position_secondary,
         });
         match step {
@@ -162,8 +161,8 @@ fn coast_settle_timeout_reenables_and_fails() {
     let step = b.run_until_step();
     b.do_disable(step);
 
-    // Never goes quiet.
-    b.velocity_secondary = 5_000;
+    // Never goes quiet: keeps creeping more than the quiet band each cycle.
+    b.drift_counts_per_cycle = 100;
     let step = b.run_until_step();
     b.do_enable(step);
 
@@ -175,6 +174,25 @@ fn coast_settle_timeout_reenables_and_fails() {
 }
 
 #[test]
+fn creep_inside_the_quiet_band_settles() {
+    let mut b = Bench::new(0);
+    let step = b.run_until_step();
+    b.do_disable(step);
+
+    // 8 counts/cycle stays within the 33-count quiet band across the 4-cycle
+    // quiet window — encoder-noise-scale motion must not block settling.
+    b.drift_counts_per_cycle = 8;
+    let step = b.run_until_step();
+    b.drift_counts_per_cycle = 0;
+    b.do_enable(step);
+
+    let SyncStep::Done(report) = b.run_until_step() else {
+        panic!("expected Done");
+    };
+    assert_eq!(report.result, 0);
+}
+
+#[test]
 fn residual_torque_after_dither_reenables_and_fails() {
     let mut b = Bench::new(0);
     b.torque_primary = 90;
@@ -183,7 +201,6 @@ fn residual_torque_after_dither_reenables_and_fails() {
 
     // Quiet immediately, but the primary torque never collapses — mechanical
     // binding the dither could not shake loose.
-    b.velocity_secondary = 0;
     let step = b.run_until_step();
     b.do_enable(step);
 
@@ -201,7 +218,6 @@ fn final_torque_above_threshold_fails_but_reseeds() {
     let step = b.run_until_step();
     b.do_disable(step);
 
-    b.velocity_secondary = 0;
     b.torque_primary = 0;
     let step = b.run_until_step();
     b.do_enable(step);
@@ -223,7 +239,6 @@ fn dither_amplitude_reaches_commanded_scale() {
     let mut b = Bench::new(10_000);
     let step = b.run_until_step();
     b.do_disable(step);
-    b.velocity_secondary = 0;
     let step = b.run_until_step();
     b.do_enable(step);
     let max_excursion = b
