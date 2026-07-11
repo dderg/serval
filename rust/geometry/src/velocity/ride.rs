@@ -186,13 +186,16 @@ fn committed_march(g: &Grid, st: State, s_stop: f64) -> March {
     if st.v <= g.cap_at(st.s) + rel_eps(st.v) && st.a <= slope0 + rel_eps(st.a.abs()) {
         return March::Tangent(st);
     }
-    // Quick accept: the whole swing to full brake stays under every cap ahead.
+    // Quick accept: the whole swing to full brake stays under every cap
+    // ahead. Only valid over straight cells — on curved ones the effective
+    // jerk shrinks, so the swing peaks higher and reaches farther than the
+    // nominal-jerk estimate.
     {
         let rail = g.rail_at(st.s, st.v);
         let v_peak = st.v + st.a.max(0.0) * st.a.max(0.0) / (2.0 * j);
         let swing_t = (st.a + rail).max(0.0) / j;
         let reach = v_peak * swing_t;
-        if v_peak < g.cap_min_over(st.s, reach) {
+        if !g.curved_over(st.s, reach) && v_peak < g.cap_min_over(st.s, reach) {
             return March::Clear;
         }
     }
@@ -219,37 +222,52 @@ fn committed_march(g: &Grid, st: State, s_stop: f64) -> March {
         if st.s >= g.end_s() - POS_EPS_MM {
             return March::Clear;
         }
+        // Mirror the integrator's curved-cell dynamics exactly — effective
+        // jerk after billing the normal share, substep budget, and the disk
+        // rail as a hard clamp on `a` — so the verdict describes the arc the
+        // peel will actually fly, not an idealized full-jerk one.
+        let curved = g.curved_in(cell);
+        let (j_dn, dt_budget) = if curved {
+            let budget = substep_budget(g, st, j);
+            (effective_jerk(g, st, budget.max(1e-9), true), budget)
+        } else {
+            (j, f64::INFINITY)
+        };
         let to_span_end = (g.span_end_s(cell).min(s_stop) - st.s).max(0.0);
         let dt_tan = if st.a > slope {
-            (st.a - slope) / j
+            (st.a - slope) / j_dn.max(1e-9)
         } else {
             substep_budget(g, st, j)
         };
-        let dt = march_step(st, -j, dt_tan, to_span_end).max(1e-12);
+        let dt = march_step(st, -j_dn, dt_tan.min(dt_budget), to_span_end).max(1e-12);
         // The arc's velocity peak is its critical point against the span's
         // monotone cap chord; check it exactly, plus the midpoint.
         if st.a > 0.0 {
-            let t_peak = st.a / j;
+            let t_peak = st.a / j_dn.max(1e-9);
             if t_peak < dt {
-                let peak = advance(st, -j, t_peak);
+                let peak = advance(st, -j_dn, t_peak);
                 let c = g.cell_ahead(cell, peak.s);
                 if peak.v > g.cap_in(c, peak.s) + rel_eps(peak.v) {
                     return March::Crossed;
                 }
             }
         }
-        let mid = advance(st, -j, 0.5 * dt);
+        let mid = advance(st, -j_dn, 0.5 * dt);
         let c_mid = g.cell_ahead(cell, mid.s);
         if mid.v > g.cap_in(c_mid, mid.s) + rel_eps(mid.v) {
             return March::Crossed;
         }
-        st = advance(st, -j, dt);
+        st = advance(st, -j_dn, dt);
         // Came to rest under the cap: a stalled arc can never cross the
         // non-negative cap ahead.
         if st.v <= STALL_CAP_FLOOR {
             return March::Clear;
         }
         cell = g.cell_ahead(cell, st.s);
+        if curved {
+            let r = g.rail_in(cell, st.s, st.v);
+            st.a = st.a.clamp(-r, r);
+        }
     }
 }
 
@@ -1134,6 +1152,42 @@ fn cap_state(g: &Grid, from: State, s: f64, cell: usize) -> State {
     }
 }
 
+/// Largest fraction of the accel budget a curved-cell rail clamp may trim off
+/// the state in one step. The clamp is the disk acting as a hard constraint
+/// where the jerk budget is starved by the rotating normal component; a trim
+/// bigger than this means the step out-ran the collapsing rail and integrated
+/// a velocity gain the disk forbids, so the step is retried shorter instead.
+const RAIL_TRIM_MAX_FRAC: f64 = 1e-3;
+const RAIL_TRIM_HALVINGS: u32 = 40;
+
+/// Constant-jerk step whose end state respects the disk rail: on curved cells
+/// the step is halved until the clamp trims only a sliver, then clamped.
+/// Returns the end state and the step duration actually taken. A state
+/// already past the rail at the step start cannot be trimmed shorter — the
+/// halving stops making progress and the full step is clamped as before.
+fn advance_on_disk(g: &Grid, st: State, j_cmd: f64, dt: f64, curved: bool) -> (State, f64) {
+    let mut dt = dt;
+    let mut next = advance(st, j_cmd, dt);
+    if !curved {
+        return (next, dt);
+    }
+    let trim_max = RAIL_TRIM_MAX_FRAC * g.lerp_node(g.t.accel, st.s);
+    let stuck = st.a.abs() - g.rail_at(st.s, st.v) > trim_max;
+    if !stuck {
+        for _ in 0..RAIL_TRIM_HALVINGS {
+            let r = g.rail_at(next.s, next.v);
+            if next.a.abs() - r <= trim_max || dt <= 1e-12 {
+                break;
+            }
+            dt *= 0.5;
+            next = advance(st, j_cmd, dt);
+        }
+    }
+    let r = g.rail_at(next.s, next.v);
+    next.a = next.a.clamp(-r, r);
+    (next, dt)
+}
+
 fn substep_budget(g: &Grid, st: State, j_nominal: f64) -> f64 {
     let a_scale = g.lerp_node(g.t.accel, st.s);
     let jerk_dt = (a_scale / j_nominal.max(1e-9)) * SUBSTEP_TIME_FRACTION;
@@ -1144,8 +1198,17 @@ fn substep_budget(g: &Grid, st: State, j_nominal: f64) -> f64 {
 }
 
 /// Tangential jerk available after billing the normal share the rotating
-/// acceleration vector demands over `dt` (the increment disk).
-fn effective_jerk(g: &Grid, st: State, dt: f64) -> f64 {
+/// acceleration vector demands over `dt` (the increment disk). `lowering`
+/// says which way the caller will steer `a`: when the normal share alone
+/// blows the vector budget — the geometry at this speed is jerk-infeasible
+/// no matter what the tangential component does — the *lowering* direction
+/// keeps full authority (freezing `a` there restores nothing; it only
+/// strands the state off every acceleration constraint ahead, turning a
+/// bounded jerk overrun into an acceleration one), while the raising
+/// direction stays frozen (building acceleration through already-infeasible
+/// geometry only deepens the overrun and arrives at the next cap with more
+/// to shed than any landing can absorb).
+fn effective_jerk(g: &Grid, st: State, dt: f64, lowering: bool) -> f64 {
     if !g.curved_near(st.s) {
         return g.t.j_max;
     }
@@ -1158,7 +1221,10 @@ fn effective_jerk(g: &Grid, st: State, dt: f64) -> f64 {
     let dtheta = k1 * ds;
     let j_norm = (a_n1 - a_n0) + st.a * dtheta;
     let budget = (g.t.j_max * dt) * (g.t.j_max * dt) - j_norm * j_norm;
-    budget.max(0.0).sqrt() / dt.max(1e-12)
+    if budget <= 0.0 {
+        return if lowering { g.t.j_max } else { 0.0 };
+    }
+    budget.sqrt() / dt.max(1e-12)
 }
 
 /// One flight step: accelerate toward the rail, watching for the peel
@@ -1176,42 +1242,41 @@ fn flight_step(
     let track = g.t;
     let curved = g.curved_near(st.s);
     let rem = track.s[i] - st.s;
-    let rail = g.rail_at(st.s, st.v);
     let dt_budget = if curved {
         substep_budget(g, *st, track.j_max)
     } else {
         f64::INFINITY
     };
-    let j_up = if curved {
-        effective_jerk(g, *st, dt_budget.max(1e-9))
+    let rail = g.rail_at(st.s, st.v);
+    let (j_shed, j_raise) = if curved {
+        (
+            effective_jerk(g, *st, dt_budget.max(1e-9), true),
+            effective_jerk(g, *st, dt_budget.max(1e-9), false),
+        )
     } else {
-        track.j_max
+        (track.j_max, track.j_max)
     };
     // A jerk swing smaller than one floor-duration step cannot be integrated:
     // with an effectively-unlimited jerk the rail's hold band is far narrower
     // than one step's `j·dt`, so the correction overshoots into a
     // zero-progress limit cycle ping-ponging across the rail until the cell
     // guard gives up. At this resolution the swing is instantaneous — snap.
-    if (st.a - rail).abs() <= j_up * 2e-12 {
+    if (st.a - rail).abs() <= j_shed * 2e-12 {
         st.a = rail;
     }
     let (j_cmd, dt_event) = if st.a > rail + rel_eps(rail) {
         // Above the rail (a curved cell shrank it, or a cap slope leaked into
         // the state): jerk back down to it.
-        (-j_up, (st.a - rail) / j_up.max(1e-9))
+        (-j_shed, (st.a - rail) / j_shed.max(1e-9))
     } else if st.a >= rail - rel_eps(rail) {
         // Hold the rail. On straight cells the rail is a constant, so the
         // hold is exact; on curved cells the substep re-clamps below.
         (0.0, f64::INFINITY)
     } else {
-        (j_up, (rail - st.a) / j_up.max(1e-9))
+        (j_raise, (rail - st.a) / j_raise.max(1e-9))
     };
     let dt = step_within(*st, j_cmd, dt_event.min(dt_budget), rem).max(1e-12);
-    let mut next = advance(*st, j_cmd, dt);
-    if curved {
-        let r = g.rail_at(next.s, next.v);
-        next.a = next.a.clamp(-r, r);
-    }
+    let (mut next, dt) = advance_on_disk(g, *st, j_cmd, dt, curved);
     if assume_feasible || peel_feasible(g, next) {
         log.set_jerk(*st, j_cmd);
         // Landed on the cap from below (tangential arrival)? Not on an
@@ -1223,7 +1288,12 @@ fn flight_step(
             if !g.wall_up(c) {
                 let mut landed = next;
                 landed.v = g.cap_at(next.s);
-                landed.a = g.slope_at(next.s);
+                // The landing slope obeys the disk like every other state:
+                // unclamped, a cap ascending off a curvature pinch (rail ~ 0)
+                // would hand the state the chord's slope wholesale, and the
+                // next substep integrates a velocity gain the disk forbids.
+                let rail_land = g.rail_at(landed.s, landed.v);
+                landed.a = g.slope_at(next.s).clamp(-rail_land, rail_land);
                 next = anchor_landing(g, log, next, landed);
                 log.close(next);
                 *mode = Mode::Ride;
@@ -1261,7 +1331,7 @@ fn peel_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i: u
         f64::INFINITY
     };
     let j_dn = if curved {
-        effective_jerk(g, *st, dt_budget.max(1e-9))
+        effective_jerk(g, *st, dt_budget.max(1e-9), true)
     } else {
         track.j_max
     };
@@ -1279,7 +1349,14 @@ fn peel_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i: u
         substep_budget(g, *st, track.j_max)
     };
     let dt = step_within(*st, j_cmd, dt_aim.min(dt_budget), rem).max(1e-12);
-    let next = advance(*st, j_cmd, dt);
+    // The disk is a hard state constraint: on curved cells the rail can
+    // collapse faster than any jerk swing sheds `a` (near a curvature cap the
+    // whole jerk budget goes to the rotating normal component), so an
+    // unclamped committed peel would carry `a > rail` while `v` climbs and
+    // integrate a velocity gain the disk forbids — the brake envelope built
+    // from such a pass touches the cap earlier than even the zero-jerk disk
+    // bound allows.
+    let (next, dt) = advance_on_disk(g, *st, j_cmd, dt, curved);
     let cap_next = g.cap_at(next.s);
     if next.v >= cap_next - rel_eps(next.v) {
         // Contact. Bisect the touch point if we overshot past the cap.
