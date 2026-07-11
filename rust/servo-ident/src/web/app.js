@@ -105,7 +105,7 @@ const state = {
     cycle0: null, // first streamed cycle_index — the chart's t=0
     lastCycle: null, // cycle_index of the last kept sample, for gap breaks
     t: [], // seconds since stream start, one per kept point
-    perDrive: {}, // tap drive name -> ferr values (null = gap break)
+    perDrive: {}, // tap drive name -> {ferr, torque} arrays (null = gap break)
     windowS: 10, // seconds kept and drawn, set by the slider
     timers: [], // interval ids cleared on page switch
     polling: false,
@@ -341,6 +341,10 @@ function liveShellHtml() {
     `<p class="note">streams straight from the drives the moment the tap answers — ` +
     `no capture, no file</p>` +
     `</div>` +
+    `</section>` +
+    `<section class="live-section">` +
+    `<div class="section-head"><h2>live actual torque — per motor</h2></div>` +
+    `<div class="charts" id="live-torque-charts"></div>` +
     `</section>` +
     `</main>` +
     `<aside class="controls">` +
@@ -1421,7 +1425,10 @@ function appendTapSamples(payload) {
   if (state.live.cycle0 === null) state.live.cycle0 = payload.first_cycle;
   for (const drive of drives) {
     if (!state.live.perDrive[drive]) {
-      state.live.perDrive[drive] = new Array(state.live.t.length).fill(null);
+      state.live.perDrive[drive] = {
+        ferr: new Array(state.live.t.length).fill(null),
+        torque: new Array(state.live.t.length).fill(null),
+      };
     }
   }
   const stride = payload.stride;
@@ -1430,11 +1437,15 @@ function appendTapSamples(payload) {
     const cycle = payload.first_cycle + i * stride;
     if (state.live.lastCycle !== null && cycle - state.live.lastCycle > gapThreshold) {
       state.live.t.push((state.live.lastCycle + stride - state.live.cycle0) / payload.fs_hz);
-      for (const drive of drives) state.live.perDrive[drive].push(null);
+      for (const drive of drives) {
+        state.live.perDrive[drive].ferr.push(null);
+        state.live.perDrive[drive].torque.push(null);
+      }
     }
     state.live.t.push((cycle - state.live.cycle0) / payload.fs_hz);
     for (const drive of drives) {
-      state.live.perDrive[drive].push(payload.drives[drive].ferr[i]);
+      state.live.perDrive[drive].ferr.push(payload.drives[drive].ferr[i]);
+      state.live.perDrive[drive].torque.push(payload.drives[drive].torque[i] / 10);
     }
     state.live.lastCycle = cycle;
   }
@@ -1448,7 +1459,10 @@ function trimLiveWindow() {
   while (drop < state.live.t.length && state.live.t[drop] < cutoff) drop++;
   if (drop > 0) {
     state.live.t.splice(0, drop);
-    for (const series of Object.values(state.live.perDrive)) series.splice(0, drop);
+    for (const series of Object.values(state.live.perDrive)) {
+      series.ferr.splice(0, drop);
+      series.torque.splice(0, drop);
+    }
   }
 }
 
@@ -1467,24 +1481,20 @@ function liveDriveLabel(tapName) {
   return tapName;
 }
 
-function liveChartId(drive) {
-  return `live-canvas-${drive}`;
-}
-
-function ensureLiveChartBoxes(drives) {
-  const container = el("live-charts");
+function ensureLiveChartBoxes(containerId, idPrefix, drives) {
+  const container = el(containerId);
   if (!container) return false;
   const have = [...container.querySelectorAll("canvas")].map((c) => c.id).join();
-  const want = drives.map(liveChartId).join();
+  const want = drives.map((d) => `${idPrefix}-canvas-${d}`).join();
   if (have !== want) {
     container.innerHTML = drives
       .map(
         (d, i) =>
           `<div class="chart-box">` +
           `<h3><span class="swatch" style="background:${PALETTE[i % PALETTE.length]}"></span>` +
-          `<span id="live-name-${d}">${liveDriveLabel(d)}</span> ` +
-          `<span class="note" id="live-peak-${d}"></span></h3>` +
-          `<canvas id="${liveChartId(d)}" width="860" height="130"></canvas>` +
+          `<span id="${idPrefix}-name-${d}">${liveDriveLabel(d)}</span> ` +
+          `<span class="note" id="${idPrefix}-peak-${d}"></span></h3>` +
+          `<canvas id="${idPrefix}-canvas-${d}" width="860" height="130"></canvas>` +
           `</div>`
       )
       .join("");
@@ -1492,16 +1502,14 @@ function ensureLiveChartBoxes(drives) {
   return true;
 }
 
-function drawLiveCharts() {
-  if (!state.live.t.length) return;
-  const drives = Object.keys(state.live.perDrive).sort();
-  if (!drives.length || !ensureLiveChartBoxes(drives)) return;
+function drawLiveChartGroup(containerId, idPrefix, drives, channel, yLabel, peakFmt) {
+  if (!ensureLiveChartBoxes(containerId, idPrefix, drives)) return;
   let yMin = Infinity;
   let yMax = -Infinity;
   const peaks = {};
   for (const d of drives) {
     let peak = 0;
-    for (const v of state.live.perDrive[d]) {
+    for (const v of state.live.perDrive[d][channel]) {
       if (v === null) continue;
       if (v < yMin) yMin = v;
       if (v > yMax) yMax = v;
@@ -1512,19 +1520,47 @@ function drawLiveCharts() {
   }
   if (!isFinite(yMin)) return;
   drives.forEach((d, i) => {
-    const canvas = el(liveChartId(d));
+    const canvas = el(`${idPrefix}-canvas-${d}`);
     if (!canvas) return;
     drawChart(
       canvas,
-      [{ t: state.live.t, y: state.live.perDrive[d], color: PALETTE[i % PALETTE.length] }],
-      "ferr (counts)",
+      [
+        {
+          t: state.live.t,
+          y: state.live.perDrive[d][channel],
+          color: PALETTE[i % PALETTE.length],
+        },
+      ],
+      yLabel,
       { yMin, yMax }
     );
-    const name = el(`live-name-${d}`);
+    const name = el(`${idPrefix}-name-${d}`);
     if (name) name.textContent = liveDriveLabel(d);
-    const label = el(`live-peak-${d}`);
-    if (label) label.textContent = `peak |ferr| ${peaks[d]}`;
+    const label = el(`${idPrefix}-peak-${d}`);
+    if (label) label.textContent = peakFmt(peaks[d]);
   });
+}
+
+function drawLiveCharts() {
+  if (!state.live.t.length) return;
+  const drives = Object.keys(state.live.perDrive).sort();
+  if (!drives.length) return;
+  drawLiveChartGroup(
+    "live-charts",
+    "live",
+    drives,
+    "ferr",
+    "ferr (counts)",
+    (p) => `peak |ferr| ${p}`
+  );
+  drawLiveChartGroup(
+    "live-torque-charts",
+    "live-torque",
+    drives,
+    "torque",
+    "torque (% rated)",
+    (p) => `peak |torque| ${p.toFixed(1)}%`
+  );
 }
 
 function startLivePolling() {
