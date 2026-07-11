@@ -58,7 +58,8 @@ input, select, textarea {
 .topbar {
   display: flex;
   align-items: center;
-  gap: 16px;
+  flex-wrap: wrap;
+  gap: 4px 16px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   position: sticky;
@@ -66,15 +67,23 @@ input, select, textarea {
   background: var(--bg);
   z-index: 10;
 }
-.topbar .moonraker { display: flex; align-items: center; gap: 6px; color: var(--dim); font-size: 12px; }
-.mr-health { font-size: 12px; max-width: 280px; }
+.topbar .moonraker { display: flex; align-items: center; gap: 6px; color: var(--dim); font-size: 12px; min-width: 0; }
+.topbar .moonraker input { min-width: 0; flex: 1; }
+.mr-health { font-size: 12px; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .live-window { display: flex; align-items: center; gap: 6px; color: var(--dim); font-size: 12px; }
 .live-window input[type="range"] { width: 140px; }
 .mr-health.ok { color: var(--good); }
 .mr-health.err { color: var(--bad); }
 .banner { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 
+@media (max-width: 1100px) {
+  .topbar { gap: 4px 10px; }
+  .topbar .moonraker input { width: 110px; }
+  .mr-health { max-width: 150px; }
+}
+
 button.estop {
+  flex-shrink: 0;
   background: #7a1f1a;
   border-color: #b0453d;
   color: #ffd9d5;
