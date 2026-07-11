@@ -142,7 +142,12 @@ chips are the clutter valve when overlaying sweeps.
 
 - **gains** — gain-sweep/refine runs, following-error PSD overlay (step
   chips, 20–450 Hz band marked, per-trace peak annotations), the `gains`
-  grid with autofill.
+  grid with autofill. The spectrum charts (here and the accelerometer box)
+  draw linear amplitude from a zero floor, clipped to 0–500 Hz — the old
+  report's resonance-zoom view, where a peak is a spike, not a bump on a
+  log floor. Following error converts to µm via the manifest's
+  `counts_per_mm`; both convert the analyzer's Welch PSD to tone amplitude
+  as `sqrt(2 · psd · ENBW)` (Hann ENBW = 1.5·Δf).
 - **notches** — same PSD plus a detected-peak list (top spaced peaks in
   the band, from the newest selected run's recommended step when visible,
   else its last visible step); "→ notch n" pushes a peak's frequency

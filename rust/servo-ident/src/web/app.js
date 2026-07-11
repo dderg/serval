@@ -4,6 +4,7 @@ const REFRESH_MS = 5000;
 const MOONRAKER_KEY = "servoCalMoonrakerUrl";
 const PALETTE = ["#4fb3ff", "#e05a4f", "#4caf50", "#d9a441", "#b388ff", "#4fd8c4"];
 const RESONANCE_BAND_HZ = [20, 450];
+const PSD_MAX_FREQ_HZ = 500;
 const INITIAL_SELECTED_RUNS = 1;
 const PEAK_MIN_SEPARATION_HZ = 15;
 const PEAK_LIST_SIZE = 3;
@@ -722,6 +723,35 @@ function traceStyle(names, steps, runIdx, stepIdx) {
   return { color: mixColor(base, "#ffffff", ramp), name };
 }
 
+/// The interesting servo/mechanical modes all live below 500 Hz; drawing the
+/// full Nyquist span squished them into the left quarter of the chart.
+function clipToPsdBand(freq, y) {
+  let end = freq.length;
+  while (end > 0 && freq[end - 1] > PSD_MAX_FREQ_HZ) end--;
+  return { freq: freq.slice(0, end), y: y.slice(0, end) };
+}
+
+/// Welch PSD -> single-sided tone amplitude: a sinusoid of amplitude A puts
+/// A²/2 of power into its bin's equivalent noise bandwidth, so
+/// A = sqrt(2 · psd · ENBW) with ENBW = 1.5·Δf for the analyzer's Hann window.
+const WELCH_HANN_ENBW_BINS = 1.5;
+
+function psdToAmplitude(freq, psd) {
+  if (freq.length < 2) throw new Error("psd grid too short for a bin width");
+  const factor = Math.sqrt(2 * WELCH_HANN_ENBW_BINS * (freq[1] - freq[0]));
+  return psd.map((p) => Math.sqrt(p) * factor);
+}
+
+function countsPerMm(runName, driveName) {
+  const detail = state.details.get(runName);
+  const motors = detail && detail.manifest ? detail.manifest.motors : [];
+  const motor = motors.find((m) => m.name === driveName);
+  if (!motor || !motor.counts_per_mm) {
+    throw new Error(`${runName}: manifest has no counts_per_mm for ${driveName}`);
+  }
+  return motor.counts_per_mm;
+}
+
 function psdFerrTraces(names, plots, steps) {
   const traces = [];
   plots.forEach((p, i) => {
@@ -731,9 +761,11 @@ function psdFerrTraces(names, plots, steps) {
       const driveNames = Object.keys(step.psd.per_drive);
       if (!driveNames.length) return;
       const style = traceStyle(names, steps, i, j);
+      const clipped = clipToPsdBand(step.psd.freq_hz, step.psd.per_drive[driveNames[0]]);
+      const umPerCount = 1000 / countsPerMm(names[i], driveNames[0]);
       traces.push({
-        freq: step.psd.freq_hz,
-        y: step.psd.per_drive[driveNames[0]],
+        freq: clipped.freq,
+        y: psdToAmplitude(clipped.freq, clipped.y).map((a) => a * umPerCount),
         color: style.color,
         dashed: false,
         label: `${style.name} (${driveNames[0]})`,
@@ -751,9 +783,10 @@ function psdAccelTraces(names, plots, steps) {
       const step = p.steps.find((s) => s.name === stepName);
       if (!step || !step.psd || !step.psd.accel) return;
       const style = traceStyle(names, steps, i, j);
+      const clipped = clipToPsdBand(step.psd.accel.freq_hz, step.psd.accel.psd);
       traces.push({
-        freq: step.psd.accel.freq_hz,
-        y: step.psd.accel.psd,
+        freq: clipped.freq,
+        y: psdToAmplitude(clipped.freq, clipped.y),
         color: style.color,
         dashed: false,
         label: `${style.name} (accel)`,
@@ -762,6 +795,12 @@ function psdAccelTraces(names, plots, steps) {
     });
   });
   return traces;
+}
+
+function fmtLinear(v) {
+  if (v === 0) return "0";
+  const a = Math.abs(v);
+  return a >= 1000 || a < 0.01 ? v.toExponential(1) : v.toPrecision(3);
 }
 
 function drawPsdChart(canvas, traces, band, yTitle, hover, opts) {
@@ -794,6 +833,7 @@ function drawPsdChart(canvas, traces, band, yTitle, hover, opts) {
       vMax = Math.max(vMax, v);
     }
   }
+  if (opts.zeroFloor) vMin = 0;
   if (opts.fixedY) {
     vMin = opts.fixedY.yMin;
     vMax = opts.fixedY.yMax;
@@ -823,7 +863,7 @@ function drawPsdChart(canvas, traces, band, yTitle, hover, opts) {
     const py = yOfV(v);
     ctx.moveTo(pad.l, py);
     ctx.lineTo(w - pad.r, py);
-    ctx.fillText(opts.linear ? v.toFixed(2) : `1e${v.toFixed(1)}`, 2, py + 3);
+    ctx.fillText(opts.linear ? fmtLinear(v) : `1e${v.toFixed(1)}`, 2, py + 3);
   }
   for (let i = 0; i <= 4; i++) {
     const f = fMin + ((fMax - fMin) * i) / 4;
@@ -920,7 +960,9 @@ function drawPsdChart(canvas, traces, band, yTitle, hover, opts) {
       ctx.beginPath();
       ctx.arc(px, py, 3, 0, Math.PI * 2);
       ctx.fill();
-      const value = opts.linear ? best.tr.y[best.i].toFixed(2) : best.tr.y[best.i].toExponential(2);
+      const value = opts.linear
+        ? fmtLinear(best.tr.y[best.i])
+        : best.tr.y[best.i].toExponential(2);
       const text = `${best.tr.freq[best.i].toFixed(1)} Hz  ${value}  ${best.tr.label}`;
       const tw = ctx.measureText(text).width;
       const tx = Math.min(Math.max(px + 8, pad.l), w - pad.r - tw - 8);
@@ -976,14 +1018,15 @@ function renderPsdChart(names, plots, steps) {
     container.innerHTML = '<p class="note">select runs above</p>';
     return;
   }
+  const psdOpts = { linear: true, zeroFloor: true };
   const ferr = psdFerrTraces(names, plots, steps);
   container.appendChild(
-    psdBox("following error", ferr, RESONANCE_BAND_HZ, "log10 psd (counts²/Hz)")
+    psdBox("following error", ferr, RESONANCE_BAND_HZ, "ferr amplitude (µm)", psdOpts)
   );
   const accel = psdAccelTraces(names, plots, steps);
   if (accel.length) {
     container.appendChild(
-      psdBox("accelerometer", accel, RESONANCE_BAND_HZ, "log10 psd (accel²/Hz)")
+      psdBox("accelerometer", accel, RESONANCE_BAND_HZ, "accel amplitude", psdOpts)
     );
   }
 }
