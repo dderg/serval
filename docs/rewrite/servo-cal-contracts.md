@@ -25,7 +25,7 @@ One experiment (one command invocation) = one directory:
 ```json
 {
   "version": 1,
-  "experiment": "gain_sweep|gain_ladder|refine_sweep|inertia_sweep|accel_sweep|tracking|inertia_grid",
+  "experiment": "gain_sweep|gain_ladder|refine_sweep|inertia_sweep|accel_sweep|tracking|inertia_grid|differential",
   "tag": "cal",
   "created_utc": "2026-07-10T15:15:16Z",
   "axis": "X",
@@ -53,6 +53,11 @@ One experiment (one command invocation) = one directory:
 ```
 
 `belts` is null off corexy. `accel` is null when no accelerometer recorded.
+A `differential` run's `stroke_plan` instead holds the chirp:
+`{"belt": "A", "freq_start": 20.0, "freq_end": 250.0, "hz_per_sec": 5.0,
+"duration": 46.0, "ramp": 1.5, "amplitude": 0.05, "dwell_ms": 500}`; `axis`
+is the belt letter, `motors` lists the pair in slot order and `belts` is
+null.
 `ambient.journal_params` holds the readback of every
 `[servo_calibration] journal_params:` address per captured drive, taken at
 run start. Missing readback is a hard error, not an omitted key.
@@ -96,6 +101,27 @@ run start. Missing readback is a hard error, not an omitted key.
 `reason` then says why. Resonance: moving-segment following-error PSD, power
 ratio of the 20–450 Hz band peak to the 1–4 Hz band mean, detected at ratio
 ≥ 8.0 (ports `scripts/servo_gain_report.py` before its deletion).
+
+A `differential` step instead carries an empty `drives` map and a
+`differential` block — the anti-phase belt-pair FRF (H1 Welch estimate,
+differential commanded position → differential encoder position, drive
+signs from the capture header's `invert`):
+
+```json
+{"differential": {"pair": ["motor_a", "motor_a1"], "segments": 12,
+  "modes": [{"freq_hz": 42.1, "gain": 3.2, "gain_db": 10.1,
+             "damping": 0.031, "coherence": 0.94}]}}
+```
+
+Modes are strict local maxima of |FRF| inside the commanded band with
+coherence ≥ 0.5, deduped within max(3 Hz, 5%), at most 5, sorted by
+frequency; `damping` is the half-power ratio (null when a half-power
+crossing leaves the estimate). The verdict recommends nothing and lists the
+modes in `reason`. Its plot step adds a `differential` block (band-restricted
+arrays): `{"freq_hz": [..], "mag_db": [..], "phase_deg": [..],
+"coherence": [..], "torque_db": [..], "coherence_min": 0.5,
+"band": [20.0, 250.0], "modes": [..]}` — the per-drive `psd`/time series are
+computed over the chirp's active span rather than motion-flag segments.
 
 ## plot_series.json (version 1, servo-cal writes)
 

@@ -82,11 +82,15 @@ class FakeToolhead:
 class FakePrinter:
     command_error = RuntimeError
 
-    def __init__(self, objs):
+    def __init__(self, objs, reactor=None):
         self._objs = objs
+        self._reactor = reactor
 
     def lookup_object(self, name):
         return self._objs[name]
+
+    def get_reactor(self):
+        return self._reactor
 
 
 class FakeConfig:
@@ -131,14 +135,45 @@ def _rail(axis, motors):
     return rail
 
 
-def make_calibration(rails, coupled=True):
+class FakeNode:
+    def __init__(self, slots, handle=7):
+        self._slots = slots
+        self._handle = handle
+
+    def get_engine_handle(self):
+        return self._handle
+
+    def get_slot_for_motor(self, motor_name):
+        return self._slots[motor_name]
+
+
+class FakeEngine:
+    def __init__(self):
+        self.buzzes = []
+
+    def resonance_buzz(self, *args):
+        self.buzzes.append(args)
+
+
+class FakeReactor:
+    def monotonic(self):
+        return 0.0
+
+    def pause(self, waketime):
+        pass
+
+
+def make_calibration(rails, coupled=True, extra_objs=None, reactor=None):
     gcode = FakeGcode()
     objs = {
         "gcode": gcode,
         "toolhead": FakeToolhead(FakeKin(rails, coupled)),
         "servo_capture": FakeServoCapture(),
     }
-    sc = servo_calibration.ServoCalibration(FakeConfig(FakePrinter(objs)))
+    objs.update(extra_objs or {})
+    sc = servo_calibration.ServoCalibration(
+        FakeConfig(FakePrinter(objs, reactor))
+    )
     sc.captures_root = tempfile.mkdtemp()
     sc.dynamics_dir = tempfile.mkdtemp()
     sc.servo_cal_binary = sys.executable
@@ -396,6 +431,102 @@ def test_measure_inertia_corexy_servos_override():
     sc, gcode = make_calibration(awd_rails())
     sc.cmd_SERVO_MEASURE_INERTIA(FakeGcmd(SERVOS="motor_a,motor_b"))
     assert _capture_servos(sc)[0] == ["motor_a", "motor_b"]
+
+
+def make_differential_calibration():
+    slots = {"motor_a": 0, "motor_a1": 1, "motor_b": 2, "motor_b1": 3}
+    engine = FakeEngine()
+    node = FakeNode(slots)
+    sc, gcode = make_calibration(
+        awd_rails(),
+        extra_objs={
+            "ethercat_node xy_drives": node,
+            "motion_engine": engine,
+        },
+        reactor=FakeReactor(),
+    )
+    return sc, gcode, engine
+
+
+def test_differential_buzzes_belt_pair_anti_phase():
+    sc, gcode, engine = make_differential_calibration()
+    sc.cmd_SERVO_MEASURE_DIFFERENTIAL(FakeGcmd(BELT="A"))
+    assert _capture_servos(sc) == [["motor_a", "motor_a1"]]
+    assert len(engine.buzzes) == 1
+    handle, slot_mask, sign_mask, fs, fe, amp, dur, _ramp = engine.buzzes[0]
+    assert handle == 7
+    assert slot_mask == 0b0011
+    assert sign_mask == 0b0010
+    assert (fs, fe) == (20000, 250000)
+    assert amp == 50000
+    assert dur == int(round((250.0 - 20.0) / 5.0 * 1000.0))
+    manifest = _manifest_for(sc)
+    assert manifest["experiment"] == "differential"
+    assert manifest["axis"] == "A"
+    assert manifest["stroke_plan"]["belt"] == "A"
+    assert manifest["stroke_plan"]["freq_start"] == 20.0
+    assert manifest["stroke_plan"]["freq_end"] == 250.0
+    assert manifest["stroke_plan"]["amplitude"] == 0.05
+    assert [m["name"] for m in manifest["motors"]] == [
+        "motor_a",
+        "motor_a1",
+    ]
+    assert manifest["steps"][0]["name"] == "diff"
+    assert sc._active_run is None
+
+
+def test_differential_belt_b_records_inverts_and_analyzes_run_dir():
+    sc, gcode, engine = make_differential_calibration()
+    sc.cmd_SERVO_MEASURE_DIFFERENTIAL(FakeGcmd(BELT="B", NAME="dtest"))
+    assert _capture_servos(sc) == [["motor_b", "motor_b1"]]
+    _handle, slot_mask, sign_mask = engine.buzzes[0][:3]
+    assert slot_mask == 0b1100
+    assert sign_mask == 0b1000
+    manifest = _manifest_for(sc)
+    assert manifest["tag"] == "dtest"
+    assert [(m["name"], m["invert"]) for m in manifest["motors"]] == [
+        ("motor_b", True),
+        ("motor_b1", False),
+    ]
+    runs = [s for s in gcode.scripts if isinstance(s, tuple) and s[0] == "RUN"]
+    argv = runs[-1][1]
+    assert argv[1] == "analyze"
+    assert argv[2] == os.path.dirname(_cap(sc).captures[0][0])
+
+
+def test_differential_rejects_single_drive_belts():
+    sc, _gcode, engine = make_differential_calibration()
+    sc.printer = FakePrinter(
+        {
+            "gcode": sc.gcode,
+            "toolhead": FakeToolhead(FakeKin(single_drive_rails())),
+        }
+    )
+    with pytest.raises(RuntimeError, match="two drives per belt"):
+        sc.cmd_SERVO_MEASURE_DIFFERENTIAL(FakeGcmd(BELT="A"))
+    assert not engine.buzzes
+
+
+def test_differential_rejects_oversized_amplitude():
+    sc, _gcode, engine = make_differential_calibration()
+    with pytest.raises(RuntimeError, match="differential ceiling"):
+        sc.cmd_SERVO_MEASURE_DIFFERENTIAL(FakeGcmd(BELT="A", AMPLITUDE="0.6"))
+    assert not engine.buzzes
+
+
+def test_differential_stops_capture_when_buzz_fails():
+    sc, _gcode, engine = make_differential_calibration()
+    stopped = []
+    sc._stop_capture = lambda: stopped.append(True)
+
+    def explode(*args):
+        raise RuntimeError("endpoint rejected")
+
+    engine.resonance_buzz = explode
+    with pytest.raises(RuntimeError, match="endpoint rejected"):
+        sc.cmd_SERVO_MEASURE_DIFFERENTIAL(FakeGcmd(BELT="A"))
+    assert stopped == [True]
+    assert sc._active_run is None
 
 
 def test_tracking_single_rail_dual_motor_axis_gets_no_combine():
