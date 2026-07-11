@@ -910,6 +910,7 @@ pub struct SetDiffDamper {
     pub gain_milli: u32,
     pub clamp_tenths: u16,
     pub lpf_millihz: u32,
+    pub lead_us: u16,
 }
 
 impl Encode for SetDiffDamper {
@@ -919,6 +920,7 @@ impl Encode for SetDiffDamper {
         put_u32(out, self.gain_milli);
         put_u16(out, self.clamp_tenths);
         put_u32(out, self.lpf_millihz);
+        put_u16(out, self.lead_us);
     }
 }
 
@@ -930,6 +932,7 @@ impl Decode for SetDiffDamper {
             gain_milli: get_u32(c)?,
             clamp_tenths: get_u16(c)?,
             lpf_millihz: get_u32(c)?,
+            lead_us: get_u16(c)?,
         })
     }
 }

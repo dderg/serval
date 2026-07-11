@@ -110,22 +110,28 @@ Writes a run directory and runs `servo-cal analyze`.
 
 #### SERVO_DIFF_DAMPER
 Arms (or disarms) the engine-resident differential belt-pair damper on an
-AWD machine. Every EtherCAT cycle the endpoint reads both drives' measured
-velocities, low-passes the difference and streams an **antisymmetric**
-torque offset (60B2h) to the pair — a virtual dashpot connected between the
-two rotors. Because the torques are equal and opposite through the belt,
-the carriage sees no net force, and on synchronized motion the differential
-velocity is zero, so the damper costs no torque during printing. Unlike a
-notch filter it is frequency-agnostic: it damps the inter-motor belt mode
-wherever toolhead position has moved it. `GAIN` is in units of 0.1% rated
-torque per mm/s of differential velocity; `GAIN=0` disarms the belt's
-damper. The injected torque is clamped to `CLAMP` (0.1% rated torque,
-command ceiling 300) and the velocity difference is low-passed at `LPF_HZ`
-to keep the feedback's cycle latency from turning into anti-damping at high
-frequency. State lives in the running endpoint — re-arm after a firmware
-restart. Verify with an A/B `SERVO_MEASURE_DIFFERENTIAL` sweep: the pair
-mode's damping ratio should rise with the damper on. Params: `BELT`
-(AB) `GAIN` (required) `CLAMP` (50) `LPF_HZ` (300).
+AWD machine. Every EtherCAT cycle the endpoint differentiates the pair's
+raw encoder positions, low-passes the differential velocity and streams an
+**antisymmetric** torque offset (60B2h) to the pair — a virtual dashpot
+connected between the two rotors. Because the torques are equal and
+opposite through the belt, the carriage sees no net force, and on
+synchronized motion the differential velocity is zero, so the damper costs
+no torque during printing. Unlike a notch filter it is frequency-agnostic:
+it damps the inter-motor belt mode wherever toolhead position has moved it.
+`GAIN` is in units of 0.1% rated torque per mm/s of differential velocity;
+`GAIN=0` disarms the belt's damper. The injected torque is clamped to
+`CLAMP` (0.1% rated torque, command ceiling 300) and the velocity is
+low-passed at `LPF_HZ`. Velocity comes from host-side position
+differencing, NOT the drive's 606Ch estimate — the drive's estimator lag
+pushes delayed velocity feedback past 90° in the very band being damped,
+which pumps the mode instead; `LEAD_US` (first-order lead, microseconds)
+compensates the remaining EtherCAT transport and drive torque-path lag and
+is tuned empirically: if the A/B sweep shows the peak *sharpening* above
+some frequency, add lead until the whole band damps. State lives in the
+running endpoint — re-arm after a firmware restart. Verify with an A/B
+`SERVO_MEASURE_DIFFERENTIAL` sweep: the pair mode's damping ratio should
+rise with the damper on. Params: `BELT` (AB) `GAIN` (required) `CLAMP`
+(50) `LPF_HZ` (300) `LEAD_US` (0).
 
 #### SERVO_MEASURE_INERTIA
 Records the excitation grid for the inertia/friction fit (no report — it is the

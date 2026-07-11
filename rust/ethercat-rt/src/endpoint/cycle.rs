@@ -8,7 +8,7 @@ use crate::claim::{eval_wkc, WkcDecision};
 use crate::clock::raw_from_monotonic_ns;
 use crate::curves::ENGINE_STATE_FAULT;
 use crate::dynamics::clamp_torque;
-use crate::scale::{mm_to_counts, velocity_mm_s, CountMap};
+use crate::scale::{mm_to_counts, CountMap};
 use crate::sync::{SyncStep, ERR_SYNC_ABORTED};
 use crate::torque::{TickAction, TorqueState};
 use crate::wire::{endstop_trip_frame, status_heartbeat_frame, sync_pair_response_frame};
@@ -218,10 +218,12 @@ fn sample_slot_targets(
     sp_counts
 }
 
-// The damper is feedback, not feedforward: it reads the pair's measured
-// velocities from the previous exchange's input image, so its torque arrives
-// 2-3 cycles late — the low-pass in the bank keeps the loop from turning
-// that lag into anti-damping at high frequency.
+// The damper is feedback, not feedforward: it differentiates the pair's raw
+// encoder positions from the previous exchange's input image. It must NOT
+// read 606Ch — the drive's velocity estimate carries an estimator lag that
+// pushes the feedback past 90 degrees inside the very band the damper
+// targets, turning it into a pump; the bank's lead term compensates the
+// remaining transport and torque-path lag instead.
 fn damper_torque_tenths(ctx: &mut EndpointCtx) -> Vec<f32> {
     let mut host_frame = vec![0f32; ctx.num_slaves];
     if !ctx.damper.active() {
@@ -231,10 +233,10 @@ fn damper_torque_tenths(ctx: &mut EndpointCtx) -> Vec<f32> {
         ctx.damper.reset_filters();
         return host_frame;
     }
-    let vel_mm_s: Vec<f64> = (0..ctx.num_slaves)
-        .map(|s| velocity_mm_s(ctx.drive.velocity_actual(s), ctx.cmd_counts_per_mm[s]))
+    let pos_mm: Vec<f64> = (0..ctx.num_slaves)
+        .map(|s| f64::from(ctx.drive.position_actual(s)) / ctx.cmd_counts_per_mm[s])
         .collect();
-    ctx.damper.accumulate(&vel_mm_s, &mut host_frame);
+    ctx.damper.accumulate(&pos_mm, &mut host_frame);
     for (s, torque) in host_frame.iter_mut().enumerate() {
         *torque *= ctx.cmd_counts_per_mm[s].signum() as f32;
     }

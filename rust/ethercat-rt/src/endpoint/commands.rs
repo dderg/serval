@@ -517,12 +517,13 @@ fn handle_set_diff_damper(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDi
             msg.gain_milli,
             msg.clamp_tenths,
             msg.lpf_millihz,
+            msg.lead_us,
         )
     };
     eprintln!(
         "ec-rt: SetDiffDamper slots=({},{}) gain_milli={} clamp={} 0.1% \
-         lpf={} mHz rc={rc}",
-        msg.slot_a, msg.slot_b, msg.gain_milli, msg.clamp_tenths, msg.lpf_millihz,
+         lpf={} mHz lead={} us rc={rc}",
+        msg.slot_a, msg.slot_b, msg.gain_milli, msg.clamp_tenths, msg.lpf_millihz, msg.lead_us,
     );
     tracing::info!(
         subsystem = "ethercat",
@@ -532,6 +533,7 @@ fn handle_set_diff_damper(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDi
         gain_milli = msg.gain_milli,
         clamp_tenths = msg.clamp_tenths,
         lpf_millihz = msg.lpf_millihz,
+        lead_us = msg.lead_us,
         rc,
         "differential damper reconfigured"
     );

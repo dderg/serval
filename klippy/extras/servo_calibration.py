@@ -1492,6 +1492,7 @@ class ServoCalibration:
             self._active_run = None
 
     MAX_DAMPER_CLAMP_TENTHS = 300.0
+    MAX_DAMPER_LEAD_US = 5000.0
 
     cmd_SERVO_DIFF_DAMPER_help = (
         "Arm or disarm the differential belt-pair damper: the engine adds "
@@ -1501,7 +1502,9 @@ class ServoCalibration:
         "belt mode at whatever frequency it sits. Zero on synchronized "
         "motion, so it costs no torque during printing. GAIN is in 0.1% "
         "rated torque per mm/s of differential velocity; GAIN=0 disarms. "
-        "Params BELT=A|B|AB GAIN CLAMP LPF_HZ"
+        "LEAD_US adds first-order phase lead to compensate the loop's "
+        "transport and torque-path lag. Params BELT=A|B|AB GAIN CLAMP "
+        "LPF_HZ LEAD_US"
     )
 
     def cmd_SERVO_DIFF_DAMPER(self, gcmd):
@@ -1516,6 +1519,9 @@ class ServoCalibration:
                 % (clamp, self.MAX_DAMPER_CLAMP_TENTHS)
             )
         lpf_hz = gcmd.get_float("LPF_HZ", 300.0, above=0.0)
+        lead_us = gcmd.get_float(
+            "LEAD_US", 0.0, minval=0.0, maxval=self.MAX_DAMPER_LEAD_US
+        )
         engine = self.printer.lookup_object("motion_engine")
         for belt in belts:
             pair_names, _motors, handle, slots = self._belt_pair(
@@ -1528,11 +1534,13 @@ class ServoCalibration:
                 int(round(gain * 1000.0)),
                 int(round(clamp)),
                 int(round(lpf_hz * 1000.0)),
+                int(round(lead_us)),
             )
             if gain > 0.0:
                 gcmd.respond_info(
                     "belt %s damper armed (%s vs %s): gain %.3f "
-                    "x0.1%%/(mm/s), clamp %.0f x0.1%%, lpf %.0f Hz"
+                    "x0.1%%/(mm/s), clamp %.0f x0.1%%, lpf %.0f Hz, "
+                    "lead %.0f us"
                     % (
                         belt,
                         pair_names[0],
@@ -1540,6 +1548,7 @@ class ServoCalibration:
                         gain,
                         clamp,
                         lpf_hz,
+                        lead_us,
                     )
                 )
             else:

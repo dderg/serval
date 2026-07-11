@@ -537,23 +537,23 @@ def test_diff_damper_arms_both_belts_by_default():
     sc, _gcode, engine = make_differential_calibration()
     sc.cmd_SERVO_DIFF_DAMPER(FakeGcmd(GAIN="2.5"))
     assert engine.dampers == [
-        (7, 0, 1, 2500, 50, 300000),
-        (7, 2, 3, 2500, 50, 300000),
+        (7, 0, 1, 2500, 50, 300000, 0),
+        (7, 2, 3, 2500, 50, 300000, 0),
     ]
 
 
 def test_diff_damper_single_belt_with_explicit_knobs():
     sc, _gcode, engine = make_differential_calibration()
     sc.cmd_SERVO_DIFF_DAMPER(
-        FakeGcmd(BELT="B", GAIN="0.5", CLAMP="120", LPF_HZ="250")
+        FakeGcmd(BELT="B", GAIN="0.5", CLAMP="120", LPF_HZ="250", LEAD_US="900")
     )
-    assert engine.dampers == [(7, 2, 3, 500, 120, 250000)]
+    assert engine.dampers == [(7, 2, 3, 500, 120, 250000, 900)]
 
 
 def test_diff_damper_zero_gain_disarms():
     sc, _gcode, engine = make_differential_calibration()
     sc.cmd_SERVO_DIFF_DAMPER(FakeGcmd(BELT="A", GAIN="0"))
-    assert engine.dampers == [(7, 0, 1, 0, 50, 300000)]
+    assert engine.dampers == [(7, 0, 1, 0, 50, 300000, 0)]
 
 
 def test_diff_damper_rejects_oversized_clamp():

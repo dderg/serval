@@ -97,9 +97,10 @@ fn set_diff_damper_roundtrip() {
         gain_milli: 2_500,
         clamp_tenths: 50,
         lpf_millihz: 300_000,
+        lead_us: 900,
     };
     assert_eq!(roundtrip(&v), v);
-    assert_eq!(v.encoded_to_vec().len(), 12);
+    assert_eq!(v.encoded_to_vec().len(), 14);
     let r = SetDiffDamperResponse { result: -831 };
     assert_eq!(roundtrip(&r), r);
     assert_eq!(r.encoded_to_vec().len(), 4);

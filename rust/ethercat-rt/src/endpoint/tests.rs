@@ -36,19 +36,23 @@ const CYCLE_NS: u64 = 250_000;
 
 struct TrackingLagDrive {
     targets: Vec<i32>,
-    velocities: Vec<i32>,
+    drift_counts_per_cycle: Vec<f64>,
+    drifted_counts: Vec<f64>,
     torque_offsets: Vec<i16>,
 }
 
 impl TrackingLagDrive {
     fn at_rest() -> Self {
-        Self::with_velocities(vec![0; NUM_SLAVES])
+        Self::with_drift(vec![0.0; NUM_SLAVES])
     }
 
-    fn with_velocities(velocities: Vec<i32>) -> Self {
+    /// A rotor sliding uncommanded at a constant counts-per-cycle rate on top
+    /// of its tracking lag — the raw-encoder motion the damper differentiates.
+    fn with_drift(drift_counts_per_cycle: Vec<f64>) -> Self {
         Self {
             targets: vec![0; NUM_SLAVES],
-            velocities,
+            drift_counts_per_cycle,
+            drifted_counts: vec![0.0; NUM_SLAVES],
             torque_offsets: vec![0; NUM_SLAVES],
         }
     }
@@ -59,6 +63,13 @@ impl DriveChain for TrackingLagDrive {
         0
     }
     fn cycle(&mut self) -> (i32, i64) {
+        for (pos, drift) in self
+            .drifted_counts
+            .iter_mut()
+            .zip(&self.drift_counts_per_cycle)
+        {
+            *pos += drift;
+        }
         (0, 0)
     }
     fn enable(&mut self, _slot: usize) -> i32 {
@@ -74,10 +85,10 @@ impl DriveChain for TrackingLagDrive {
         self.torque_offsets[slot] = tenths_pct;
     }
     fn position_actual(&self, slot: usize) -> i32 {
-        self.targets[slot] - FOLLOWING_ERROR[slot]
+        self.targets[slot] - FOLLOWING_ERROR[slot] + self.drifted_counts[slot].round() as i32
     }
-    fn velocity_actual(&self, slot: usize) -> i32 {
-        self.velocities[slot]
+    fn velocity_actual(&self, _slot: usize) -> i32 {
+        0
     }
     fn torque_actual(&self, _slot: usize) -> i16 {
         0
@@ -194,6 +205,7 @@ fn run_cycles(ctx: &mut EndpointCtx, from_ns: u64, to_ns: u64) {
     let mut t = from_ns;
     while t <= to_ns {
         compute_motion_targets(ctx, t);
+        ctx.drive.cycle();
         t += CYCLE_NS;
     }
 }
@@ -353,46 +365,49 @@ fn homing_trip_retract_releases_pair_wind_up() {
     );
 }
 
+const CYCLES_PER_S: f64 = 1e9 / CYCLE_NS as f64;
+
 /// Slot 1 mounted mirrored (negative cmd counts/mm): equal-and-opposite
-/// HOST-frame velocities mean both drives report the same counts/s, and the
+/// HOST-frame drift means both encoders count up at the same rate, and the
 /// antisymmetric mechanical damping torque lands as the same drive-frame
 /// offset on both. Getting either frame conversion wrong flips a sign here.
 #[test]
 fn damper_writes_antisymmetric_torque_in_the_drive_frame() {
     let host_diff_mm_s = 10.0;
-    let counts_per_s = (0.5 * host_diff_mm_s * COUNTS_PER_MM) as i32;
-    let mut ctx = test_ctx_with_drive(
-        "damper",
-        TrackingLagDrive::with_velocities(vec![counts_per_s, counts_per_s]),
-    );
+    let drift = 0.5 * host_diff_mm_s * COUNTS_PER_MM / CYCLES_PER_S;
+    let mut ctx = test_ctx_with_drive("damper", TrackingLagDrive::with_drift(vec![drift, drift]));
     ctx.cmd_counts_per_mm[1] = -COUNTS_PER_MM;
     let gain_tenths_per_mm_s = 2.0;
-    assert_eq!(ctx.damper.set(NUM_SLAVES, 0, 1, 2_000, 100, 300_000), 0);
+    assert_eq!(ctx.damper.set(NUM_SLAVES, 0, 1, 2_000, 100, 300_000, 0), 0);
 
-    run_cycles(&mut ctx, 0, 100 * CYCLE_NS);
+    run_cycles(&mut ctx, 0, 200 * CYCLE_NS);
 
     let expected_mech = -gain_tenths_per_mm_s * host_diff_mm_s;
     let offsets: Vec<i16> = (0..NUM_SLAVES)
         .map(|s| ctx.drive.telemetry(s).torque_offset)
         .collect();
-    assert_eq!(offsets[0], expected_mech as i16);
-    assert_eq!(
-        offsets[1], offsets[0],
+    assert!(
+        (f64::from(offsets[0]) - expected_mech).abs() <= 2.0,
+        "expected ~{expected_mech}, got {offsets:?} (encoder quantization \
+         allows a small ripple)"
+    );
+    assert!(
+        (i32::from(offsets[1]) - i32::from(offsets[0])).abs() <= 1,
         "mirrored slot must get the mechanically opposite torque, which in \
-         its inverted drive frame is the same number"
+         its inverted drive frame is the same number: {offsets:?}"
     );
 }
 
 #[test]
 fn damper_stays_quiet_on_common_mode_velocity() {
-    let counts_per_s = (25.0 * COUNTS_PER_MM) as i32;
+    let drift = 25.0 * COUNTS_PER_MM / CYCLES_PER_S;
     let mut ctx = test_ctx_with_drive(
         "damper-cm",
-        TrackingLagDrive::with_velocities(vec![counts_per_s, counts_per_s]),
+        TrackingLagDrive::with_drift(vec![drift, drift]),
     );
-    assert_eq!(ctx.damper.set(NUM_SLAVES, 0, 1, 2_000, 100, 300_000), 0);
+    assert_eq!(ctx.damper.set(NUM_SLAVES, 0, 1, 2_000, 100, 300_000, 0), 0);
 
-    run_cycles(&mut ctx, 0, 100 * CYCLE_NS);
+    run_cycles(&mut ctx, 0, 200 * CYCLE_NS);
 
     for s in 0..NUM_SLAVES {
         assert_eq!(ctx.drive.telemetry(s).torque_offset, 0);

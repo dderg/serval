@@ -514,6 +514,7 @@ impl PyMotionEngine {
         }
         Ok(())
     }
+    #[allow(clippy::too_many_arguments)]
     fn set_diff_damper(
         &self,
         py: Python<'_>,
@@ -523,6 +524,7 @@ impl PyMotionEngine {
         gain_milli: u32,
         clamp_tenths: u16,
         lpf_millihz: u32,
+        lead_us: u16,
     ) -> PyResult<()> {
         let conn = self.ethercat_conn(mcu_handle, "set_diff_damper")?;
         tracing::info!(
@@ -534,6 +536,7 @@ impl PyMotionEngine {
             gain_milli,
             clamp_tenths,
             lpf_millihz,
+            lead_us,
             "servo differential damper"
         );
         let result = py
@@ -546,6 +549,7 @@ impl PyMotionEngine {
                         gain_milli,
                         clamp_tenths,
                         lpf_millihz,
+                        lead_us,
                     },
                 )
             })

@@ -486,7 +486,7 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
     SchemaMessage {
         type_tag: 0x0088,
         name: "SetDiffDamper",
-        version: 1,
+        version: 2,
         channel: "control",
         fields: &[
             SchemaField { name: "slot_a", ty: "u8" },
@@ -494,6 +494,7 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
             SchemaField { name: "gain_milli", ty: "u32" },
             SchemaField { name: "clamp_tenths", ty: "u16" },
             SchemaField { name: "lpf_millihz", ty: "u32" },
+            SchemaField { name: "lead_us", ty: "u16" },
         ],
     },
     SchemaMessage {
