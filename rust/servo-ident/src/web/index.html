@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>servo-cal</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <h1>servo-cal</h1>
+  <nav class="tabs" id="page-tabs"></nav>
+  <label class="moonraker">moonraker
+    <input type="text" id="moonraker-url" size="24">
+  </label>
+  <span id="moonraker-health" class="mr-health" title="checked every few seconds via GET /server/info"></span>
+  <div id="drive-state-banner" class="banner"></div>
+</header>
+
+<div id="page-root"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

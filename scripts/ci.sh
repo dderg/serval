@@ -182,6 +182,10 @@ job_ruff() {
     fi
 }
 
+job_py_typecheck() {
+    cd "$ROOT" && uv run basedpyright
+}
+
 job_py() {
     local ver="${1:-3.13}"
     if command -v docker >/dev/null 2>&1; then
@@ -260,6 +264,7 @@ run_all() {
         run_check "deny"            job_deny
         run_check "docs"            job_docs
         run_check "py"              job_py
+        run_check "py-typecheck"    job_py_typecheck
         run_check "sim"             job_sim
         run_check "snapshot"        job_snapshot
     fi
@@ -307,6 +312,7 @@ case "${1:-all}" in
     watchdog-canary)  job_watchdog_canary ;;
     ruff)             job_ruff ;;
     py)               shift; job_py "${1:-3.13}" ;;
+    py-typecheck)     job_py_typecheck ;;
     docs)             job_docs ;;
     sim)              job_sim ;;
     snapshot)         job_snapshot ;;

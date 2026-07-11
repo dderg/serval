@@ -12,6 +12,7 @@ use crate::cli::{Args, SlaveCfg};
 use crate::curves::AxisRing;
 use crate::damper::DiffDamperBank;
 use crate::ffi;
+use crate::live_tap::{self, LiveTap};
 use crate::mailbox::{MailboxWorker, WorkerScheduling};
 use crate::scale::CountMap;
 use crate::sdo::SdoBus;
@@ -294,13 +295,24 @@ pub fn bringup(args: Args) -> EndpointCtx {
     let last_sent_retired: u32 = 0;
     let heartbeat_sent = false;
 
-    // The capture-io thread spawn and the first record-channel buffer are
-    // multi-millisecond stalls under mlockall(MCL_FUTURE); they must happen
-    // before ec_rt_bringup_preop, while no drive is DC-synced and no park
-    // cycle is being pumped on this thread (claim-time Capture::new stalled
-    // the park loop past the sync watchdog and halted the bus at every claim,
-    // bench 2026-07-06).
+    // The capture-io and live-tap thread spawns and their record-channel
+    // buffers are multi-millisecond stalls under mlockall(MCL_FUTURE); they
+    // must happen before ec_rt_bringup_preop, while no drive is DC-synced
+    // and no park cycle is being pumped on this thread (claim-time
+    // Capture::new stalled the park loop past the sync watchdog and halted
+    // the bus at every claim, bench 2026-07-06).
     let capture = Capture::new();
+    let live_tap = LiveTap::spawn(
+        &format!("{socket}.live"),
+        live_tap::slot_configs(
+            &columns.counts_per_mm,
+            &columns.rotation_distance,
+            &columns.invert,
+        ),
+        cycle_ns,
+    )
+    .expect("bind live tap socket");
+    let tap_slots: Vec<u8> = (0..num_slaves as u8).collect();
 
     let mut server = FrameServer::bind(&socket).expect("bind socket");
     tracing::info!(
@@ -483,6 +495,8 @@ pub fn bringup(args: Args) -> EndpointCtx {
         heartbeat_sent,
         gate,
         capture,
+        live_tap,
+        tap_slots,
         cycle_index,
         mailbox,
         pending_starts,

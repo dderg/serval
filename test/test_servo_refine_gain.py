@@ -1,6 +1,22 @@
+import json
+import os
+import sys
+import tempfile
+
 import pytest
 
 from klippy.extras import servo_axis, servo_calibration
+
+
+class FakeServoCapture:
+    def __init__(self):
+        self.captures = []
+
+    def start_capture_to(self, path, servos):
+        self.captures.append((path, list(servos)))
+
+    def stop_capture(self):
+        return self.captures[-1][0], 1000, 250
 
 
 def test_refine_values_default_span_includes_current():
@@ -180,10 +196,14 @@ class FakeConfig:
         return default
 
 
-def _make_rail(motor, node_name, axis):
+def _make_rail(motor, node_name, axis, invert=False):
     m = servo_axis.ServoMotor.__new__(servo_axis.ServoMotor)
     m.motor_name = motor
     m.node_name = node_name
+    m.invert_direction = invert
+    m.chain_index = 0
+    m.rotation_distance = 40.0
+    m.encoder_counts_per_rev = 131072
     rail = servo_axis.ServoRail.__new__(servo_axis.ServoRail)
     rail.name = "servo " + motor
     rail.axis = axis
@@ -202,14 +222,24 @@ def make_calibration(reads):
         "gcode": gcode,
         "toolhead": FakeToolhead(FakeKin(rails)),
         "motion_engine": engine,
+        "servo_capture": FakeServoCapture(),
         "ethercat_node drive_a": FakeNode("drive_a", 1, {"motor_a": 0}),
         "ethercat_node drive_b": FakeNode("drive_b", 2, {"motor_b": 0}),
     }
     sc = servo_calibration.ServoCalibration(FakeConfig(FakePrinter(objs)))
+    sc.captures_root = tempfile.mkdtemp()
+    sc.servo_cal_binary = sys.executable
     sc._prep = lambda *a, **k: None
     sc._strokes = lambda *a, **k: None
     sc._restore = lambda *a, **k: None
-    sc._run = lambda *a, **k: gcode.scripts.append(("RUN",) + tuple(a[1:]))
+
+    def fake_run(gcmd, argv, timeout):
+        gcode.scripts.append(("RUN", argv, timeout))
+        if argv[1] == "analyze":
+            with open(os.path.join(argv[2], "results.json"), "w") as f:
+                json.dump({"verdict": {"reason": "ok", "flags": []}}, f)
+
+    sc._run = fake_run
     return sc, gcode
 
 

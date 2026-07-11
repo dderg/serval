@@ -1,6 +1,22 @@
+import json
+import os
+import sys
+import tempfile
+
 import pytest
 
-from klippy.extras import servo_axis, servo_calibration
+from klippy.extras import servo_axis, servo_calibration, servo_strokes
+
+
+class FakeServoCapture:
+    def __init__(self):
+        self.captures = []
+
+    def start_capture_to(self, path, servos):
+        self.captures.append((path, list(servos)))
+
+    def stop_capture(self):
+        return self.captures[-1][0], 1000, 250
 
 
 class FakeGcode:
@@ -106,6 +122,8 @@ def _motor(name, node_name, chain_index, invert=False):
     m.node_name = node_name
     m.chain_index = chain_index
     m.invert_direction = invert
+    m.rotation_distance = 40.0
+    m.encoder_counts_per_rev = 131072
     return m
 
 
@@ -154,16 +172,63 @@ def make_calibration(rails, coupled=True, extra_objs=None, reactor=None):
     objs = {
         "gcode": gcode,
         "toolhead": FakeToolhead(FakeKin(rails, coupled)),
+        "servo_capture": FakeServoCapture(),
     }
     objs.update(extra_objs or {})
     sc = servo_calibration.ServoCalibration(
         FakeConfig(FakePrinter(objs, reactor))
     )
+    sc.captures_root = tempfile.mkdtemp()
+    sc.dynamics_dir = tempfile.mkdtemp()
+    sc.servo_cal_binary = sys.executable
     sc._prep = lambda *a, **k: None
     sc._goto_xy = lambda *a, **k: None
     sc._restore = lambda *a, **k: None
-    sc._run = lambda *a, **k: gcode.scripts.append(("RUN",) + tuple(a[1:]))
+
+    def fake_run(gcmd, argv, timeout):
+        gcode.scripts.append(("RUN", argv, timeout))
+        if len(argv) >= 3 and argv[1] == "analyze":
+            with open(os.path.join(argv[2], "results.json"), "w") as f:
+                json.dump(
+                    {
+                        "verdict": {
+                            "recommended_step": "s1",
+                            "reason": "ok",
+                            "flags": [],
+                        }
+                    },
+                    f,
+                )
+
+    sc._run = fake_run
     return sc, gcode
+
+
+def _cap(sc):
+    return sc.printer.lookup_object("servo_capture")
+
+
+def _capture_servos(sc):
+    return [servos for _p, servos in _cap(sc).captures]
+
+
+def _manifest_for(sc):
+    run_dir = os.path.dirname(_cap(sc).captures[0][0])
+    with open(os.path.join(run_dir, "manifest.json")) as f:
+        return json.load(f)
+
+
+def _fit_argv(gcode):
+    for _tag, argv, _t in reversed(
+        [s for s in gcode.scripts if isinstance(s, tuple) and s[0] == "RUN"]
+    ):
+        if argv[1] == "fit":
+            return argv
+    raise AssertionError("no fit invocation recorded")
+
+
+def _flag(argv, key):
+    return argv[argv.index(key) + 1]
 
 
 def awd_rails(node="xy_drives", node_b=None):
@@ -192,15 +257,28 @@ def single_drive_rails():
     ]
 
 
+def cartesian_awd_rails():
+    return [
+        _rail(
+            "x",
+            [
+                _motor("motor_a", "xy_drives", 0),
+                _motor("motor_a1", "xy_drives", 1),
+            ],
+        ),
+        _rail("y", [_motor("motor_b", "xy_drives", 2)]),
+    ]
+
+
 def test_layout_single_drive_pairs_is_none():
     sc, _ = make_calibration(single_drive_rails())
-    layout = sc._corexy_fit_layout(FakeGcmd())
+    layout = servo_strokes.corexy_fit_layout(FakeGcmd(), sc._kin())
     assert layout == {"servos": ["motor_a", "motor_b"], "pairs": None}
 
 
 def test_layout_awd_orders_pairs_by_chain_index():
     sc, _ = make_calibration(awd_rails())
-    layout = sc._corexy_fit_layout(FakeGcmd())
+    layout = servo_strokes.corexy_fit_layout(FakeGcmd(), sc._kin())
     assert layout["servos"] == [
         "motor_a",
         "motor_a1",
@@ -213,92 +291,86 @@ def test_layout_awd_orders_pairs_by_chain_index():
 def test_layout_awd_rejects_split_nodes():
     sc, _ = make_calibration(awd_rails(node_b="other_node"))
     with pytest.raises(RuntimeError, match="one ethercat node"):
-        sc._corexy_fit_layout(FakeGcmd())
+        servo_strokes.corexy_fit_layout(FakeGcmd(), sc._kin())
 
 
 def test_layout_rejects_mixed_drive_counts():
-    rails = [
-        _rail(
-            "x",
-            [
-                _motor("motor_a", "xy_drives", 0),
-                _motor("motor_a1", "xy_drives", 1),
-            ],
-        ),
-        _rail("y", [_motor("motor_b", "xy_drives", 2)]),
-    ]
-    sc, _ = make_calibration(rails)
+    sc, _ = make_calibration(cartesian_awd_rails())
     with pytest.raises(RuntimeError, match="one or two drives per belt"):
-        sc._corexy_fit_layout(FakeGcmd())
+        servo_strokes.corexy_fit_layout(FakeGcmd(), sc._kin())
 
 
 def test_layout_requires_coupled_xy():
     sc, _ = make_calibration(single_drive_rails(), coupled=False)
     with pytest.raises(RuntimeError, match="coupled_xy"):
-        sc._corexy_fit_layout(FakeGcmd())
+        servo_strokes.corexy_fit_layout(FakeGcmd(), sc._kin())
 
 
 def test_servos_override_must_match_kinematics():
     sc, _ = make_calibration(awd_rails())
-    layout = sc._corexy_fit_layout(FakeGcmd())
+    layout = servo_strokes.corexy_fit_layout(FakeGcmd(), sc._kin())
     with pytest.raises(RuntimeError, match="does not match"):
-        sc._check_servos_override(FakeGcmd(SERVOS="motor_a,motor_b"), layout)
-    sc._check_servos_override(
+        servo_strokes.check_servos_override(
+            FakeGcmd(SERVOS="motor_a,motor_b"), layout
+        )
+    servo_strokes.check_servos_override(
         FakeGcmd(SERVOS="motor_b1, motor_a, motor_b, motor_a1"), layout
     )
 
 
-def test_fit_dynamics_corexy_captures_all_four_and_passes_pairs():
+def test_fit_dynamics_corexy_captures_all_four_and_passes_axes():
     sc, gcode = make_calibration(awd_rails())
-    sc.cmd_SERVO_FIT_DYNAMICS_COREXY(FakeGcmd())
-    starts = [
-        s for s in gcode.scripts if isinstance(s, str) and "CAPTURE_START" in s
+    sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd())
+    assert _capture_servos(sc)[0] == [
+        "motor_a",
+        "motor_a1",
+        "motor_b",
+        "motor_b1",
     ]
-    assert "SERVO=motor_a,motor_a1,motor_b,motor_b1" in starts[0]
-    runs = [s for s in gcode.scripts if isinstance(s, tuple) and s[0] == "RUN"]
-    _tag, script, args, _timeout = runs[-1]
-    assert script == "servo_fit_dynamics.py"
-    assert args[args.index("--pairs") + 1] == (
-        "motor_a,motor_a1;motor_b,motor_b1"
-    )
+    argv = _fit_argv(gcode)
+    assert _flag(argv, "--structure") == "corexy-awd"
+    assert _flag(argv, "--axes") == "motor_a,motor_a1,motor_b,motor_b1"
 
 
-def test_fit_dynamics_corexy_two_drives_has_no_pairs():
+def test_fit_dynamics_corexy_two_drives_is_plain_corexy():
     sc, gcode = make_calibration(single_drive_rails())
-    sc.cmd_SERVO_FIT_DYNAMICS_COREXY(FakeGcmd())
-    runs = [s for s in gcode.scripts if isinstance(s, tuple) and s[0] == "RUN"]
-    assert "--pairs" not in runs[-1][2]
+    sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd())
+    argv = _fit_argv(gcode)
+    assert "--pairs" not in argv
+    assert _flag(argv, "--structure") == "corexy"
+    assert _flag(argv, "--axes") == "motor_a,motor_b"
 
 
 def test_scalar_fit_requires_drive_on_multi_drive_axis():
-    sc, _ = make_calibration(awd_rails())
+    sc, _ = make_calibration(cartesian_awd_rails(), coupled=False)
+    kin = sc._kin()
     with pytest.raises(RuntimeError, match="pass DRIVE="):
-        sc._scalar_fit_drive(FakeGcmd(AXIS="X"))
-    assert sc._scalar_fit_drive(FakeGcmd(AXIS="X", DRIVE="motor_a1")) == (
-        "motor_a1"
-    )
+        servo_strokes.scalar_fit_drive(FakeGcmd(AXIS="X"), kin)
+    assert servo_strokes.scalar_fit_drive(
+        FakeGcmd(AXIS="X", DRIVE="motor_a1"), kin
+    ) == ("motor_a1")
     with pytest.raises(RuntimeError, match="not among"):
-        sc._scalar_fit_drive(FakeGcmd(AXIS="X", DRIVE="motor_z"))
+        servo_strokes.scalar_fit_drive(FakeGcmd(AXIS="X", DRIVE="motor_z"), kin)
 
 
-def test_fit_dynamics_passes_drive_to_script():
-    sc, gcode = make_calibration(awd_rails())
+def test_fit_dynamics_scalar_fit_selects_drive_via_axes():
+    sc, gcode = make_calibration(cartesian_awd_rails(), coupled=False)
     sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd(AXIS="X", DRIVE="motor_a"))
-    runs = [s for s in gcode.scripts if isinstance(s, tuple) and s[0] == "RUN"]
-    args = runs[-1][2]
-    assert args[args.index("--drive") + 1] == "motor_a"
+    argv = _fit_argv(gcode)
+    assert _flag(argv, "--structure") == "scalar"
+    assert _flag(argv, "--axes") == "motor_a"
 
 
 def test_tracking_combined_view_lists_every_motor_per_belt():
     sc, gcode = make_calibration(awd_rails())
     sc.cmd_SERVO_MEASURE_TRACKING(FakeGcmd(AXIS="X"))
-    starts = [
-        s for s in gcode.scripts if isinstance(s, str) and "CAPTURE_START" in s
+    assert _capture_servos(sc)[0] == [
+        "motor_a1",
+        "motor_a",
+        "motor_b",
+        "motor_b1",
     ]
-    assert "SERVO=motor_a1,motor_a,motor_b,motor_b1" in starts[0]
-    runs = [s for s in gcode.scripts if isinstance(s, tuple) and s[0] == "RUN"]
-    args = runs[-1][2]
-    assert args[args.index("--combine-corexy") + 1] == (
+    assert _manifest_for(sc)["belts"] == (
         "motor_a:1+motor_a1:1,motor_b:-1+motor_b1:1"
     )
 
@@ -306,31 +378,18 @@ def test_tracking_combined_view_lists_every_motor_per_belt():
 def test_tracking_single_drive_belts_keep_plain_terms():
     sc, gcode = make_calibration(single_drive_rails())
     sc.cmd_SERVO_MEASURE_TRACKING(FakeGcmd(AXIS="X"))
-    runs = [s for s in gcode.scripts if isinstance(s, tuple) and s[0] == "RUN"]
-    args = runs[-1][2]
-    assert args[args.index("--combine-corexy") + 1] == "motor_a:1,motor_b:1"
-
-
-def _capture_starts(gcode):
-    return [
-        s for s in gcode.scripts if isinstance(s, str) and "CAPTURE_START" in s
-    ]
+    assert _manifest_for(sc)["belts"] == "motor_a:1,motor_b:1"
 
 
 def test_measure_inertia_captures_every_motor_moving_the_axis():
     sc, gcode = make_calibration(awd_rails())
     sc.cmd_SERVO_MEASURE_INERTIA(FakeGcmd(AXIS="X"))
-    assert (
-        "SERVO=motor_a1,motor_a,motor_b,motor_b1" in _capture_starts(gcode)[0]
-    )
-
-
-def test_measure_friction_captures_every_motor_moving_the_axis():
-    sc, gcode = make_calibration(awd_rails())
-    sc.cmd_SERVO_MEASURE_FRICTION(FakeGcmd(AXIS="X"))
-    assert (
-        "SERVO=motor_a1,motor_a,motor_b,motor_b1" in _capture_starts(gcode)[0]
-    )
+    assert _capture_servos(sc)[0] == [
+        "motor_a1",
+        "motor_a",
+        "motor_b",
+        "motor_b1",
+    ]
 
 
 def test_measure_inertia_cartesian_captures_only_its_rail():
@@ -343,15 +402,39 @@ def test_measure_inertia_cartesian_captures_only_its_rail():
     ]
     sc, gcode = make_calibration(rails, coupled=False)
     sc.cmd_SERVO_MEASURE_INERTIA(FakeGcmd(AXIS="X"))
-    assert "SERVO=motor_x,motor_x1" in _capture_starts(gcode)[0]
+    assert _capture_servos(sc)[0] == ["motor_x", "motor_x1"]
 
 
-def test_measure_inertia_corexy_defaults_to_kinematics_servos():
+def test_measure_inertia_cartesian_rejects_corexy_only_params():
+    rails = [
+        _rail(
+            "x",
+            [_motor("motor_x", "node", 0), _motor("motor_x1", "node", 1)],
+        ),
+        _rail("y", [_motor("motor_y", "node", 2)]),
+    ]
+    sc, _ = make_calibration(rails, coupled=False)
+    with pytest.raises(RuntimeError, match="coupled_xy kinematics"):
+        sc.cmd_SERVO_MEASURE_INERTIA(FakeGcmd(AXIS="X", SERVOS="motor_x"))
+    with pytest.raises(RuntimeError, match="coupled_xy kinematics"):
+        sc.cmd_SERVO_MEASURE_INERTIA(FakeGcmd(AXIS="X", X_START="10"))
+
+
+def test_measure_inertia_defaults_to_kinematics_servos_when_corexy():
     sc, gcode = make_calibration(awd_rails())
-    sc.cmd_SERVO_MEASURE_INERTIA_COREXY(FakeGcmd())
-    assert (
-        "SERVO=motor_a1,motor_a,motor_b,motor_b1" in _capture_starts(gcode)[0]
-    )
+    sc.cmd_SERVO_MEASURE_INERTIA(FakeGcmd())
+    assert _capture_servos(sc)[0] == [
+        "motor_a1",
+        "motor_a",
+        "motor_b",
+        "motor_b1",
+    ]
+
+
+def test_measure_inertia_corexy_servos_override():
+    sc, gcode = make_calibration(awd_rails())
+    sc.cmd_SERVO_MEASURE_INERTIA(FakeGcmd(SERVOS="motor_a,motor_b"))
+    assert _capture_servos(sc)[0] == ["motor_a", "motor_b"]
 
 
 def make_differential_calibration():
@@ -372,7 +455,7 @@ def make_differential_calibration():
 def test_differential_buzzes_belt_pair_anti_phase():
     sc, gcode, engine = make_differential_calibration()
     sc.cmd_SERVO_MEASURE_DIFFERENTIAL(FakeGcmd(BELT="A"))
-    assert "SERVO=motor_a,motor_a1" in _capture_starts(gcode)[0]
+    assert _capture_servos(sc) == [["motor_a", "motor_a1"]]
     assert len(engine.buzzes) == 1
     handle, slot_mask, sign_mask, fs, fe, amp, dur, _ramp = engine.buzzes[0]
     assert handle == 7
@@ -381,21 +464,38 @@ def test_differential_buzzes_belt_pair_anti_phase():
     assert (fs, fe) == (20000, 250000)
     assert amp == 50000
     assert dur == int(round((250.0 - 20.0) / 5.0 * 1000.0))
-    assert "SERVO_CAPTURE_STOP" in gcode.scripts
+    manifest = _manifest_for(sc)
+    assert manifest["experiment"] == "differential"
+    assert manifest["axis"] == "A"
+    assert manifest["stroke_plan"]["belt"] == "A"
+    assert manifest["stroke_plan"]["freq_start"] == 20.0
+    assert manifest["stroke_plan"]["freq_end"] == 250.0
+    assert manifest["stroke_plan"]["amplitude"] == 0.05
+    assert [m["name"] for m in manifest["motors"]] == [
+        "motor_a",
+        "motor_a1",
+    ]
+    assert manifest["steps"][0]["name"] == "diff"
+    assert sc._active_run is None
 
 
-def test_differential_belt_b_carries_invert_sign_in_pair_spec():
+def test_differential_belt_b_records_inverts_and_analyzes_run_dir():
     sc, gcode, engine = make_differential_calibration()
     sc.cmd_SERVO_MEASURE_DIFFERENTIAL(FakeGcmd(BELT="B", NAME="dtest"))
-    assert "SERVO=motor_b,motor_b1" in _capture_starts(gcode)[0]
+    assert _capture_servos(sc) == [["motor_b", "motor_b1"]]
     _handle, slot_mask, sign_mask = engine.buzzes[0][:3]
     assert slot_mask == 0b1100
     assert sign_mask == 0b1000
+    manifest = _manifest_for(sc)
+    assert manifest["tag"] == "dtest"
+    assert [(m["name"], m["invert"]) for m in manifest["motors"]] == [
+        ("motor_b", True),
+        ("motor_b1", False),
+    ]
     runs = [s for s in gcode.scripts if isinstance(s, tuple) and s[0] == "RUN"]
-    _tag, script, args, _timeout = runs[-1]
-    assert script == "servo_diff_report.py"
-    assert args[args.index("--pair") + 1] == "motor_b:-1+motor_b1:1"
-    assert args[args.index("--name") + 1] == "dtest"
+    argv = runs[-1][1]
+    assert argv[1] == "analyze"
+    assert argv[2] == os.path.dirname(_cap(sc).captures[0][0])
 
 
 def test_differential_rejects_single_drive_belts():
@@ -419,7 +519,9 @@ def test_differential_rejects_oversized_amplitude():
 
 
 def test_differential_stops_capture_when_buzz_fails():
-    sc, gcode, engine = make_differential_calibration()
+    sc, _gcode, engine = make_differential_calibration()
+    stopped = []
+    sc._stop_capture = lambda: stopped.append(True)
 
     def explode(*args):
         raise RuntimeError("endpoint rejected")
@@ -427,7 +529,8 @@ def test_differential_stops_capture_when_buzz_fails():
     engine.resonance_buzz = explode
     with pytest.raises(RuntimeError, match="endpoint rejected"):
         sc.cmd_SERVO_MEASURE_DIFFERENTIAL(FakeGcmd(BELT="A"))
-    assert "SERVO_CAPTURE_STOP" in gcode.scripts
+    assert stopped == [True]
+    assert sc._active_run is None
 
 
 def test_diff_damper_arms_both_belts_by_default():
@@ -483,5 +586,28 @@ def test_tracking_single_rail_dual_motor_axis_gets_no_combine():
     ]
     sc, gcode = make_calibration(rails, coupled=False)
     sc.cmd_SERVO_MEASURE_TRACKING(FakeGcmd(AXIS="X"))
-    runs = [s for s in gcode.scripts if isinstance(s, tuple) and s[0] == "RUN"]
-    assert "--combine-corexy" not in runs[-1][2]
+    assert _manifest_for(sc)["belts"] is None
+
+
+def test_calibrate_inertia_ratio_corexy_uses_coupled_grid():
+    sc, gcode = make_calibration(awd_rails())
+    sc.cmd_SERVO_CALIBRATE_INERTIA_RATIO(
+        FakeGcmd(TORQUE_NM=0.3, INERTIA_KGM2=1e-5)
+    )
+    assert _capture_servos(sc)[0] == [
+        "motor_a",
+        "motor_a1",
+        "motor_b",
+        "motor_b1",
+    ]
+    argv = _fit_argv(gcode)
+    assert _flag(argv, "--structure") == "corexy-awd"
+    assert _flag(argv, "--rated-torque-nm") == "0.3"
+
+
+def test_calibrate_inertia_ratio_cartesian_rejects_corexy_only_params():
+    sc, _ = make_calibration(single_drive_rails(), coupled=False)
+    with pytest.raises(RuntimeError, match="coupled_xy kinematics"):
+        sc.cmd_SERVO_CALIBRATE_INERTIA_RATIO(
+            FakeGcmd(TORQUE_NM=0.3, INERTIA_KGM2=1e-5, Y_START="10")
+        )

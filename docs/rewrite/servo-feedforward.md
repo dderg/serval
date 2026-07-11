@@ -153,9 +153,9 @@ SERVO_FIT_DYNAMICS TORQUE_NM=1.27 INERTIA_KGM2=0.000057 ROT_DIST=40
 
 This homes, runs the `SERVO_MEASURE_INERTIA` excitation grid (defaults:
 ACCELS `5000,10000,20000` × SPEEDS `100,400`, 3 iterations each, constant-
-acceleration triangle strokes), captures per-DC-cycle PDO data, and hands the
-capture to `scripts/servo_fit_dynamics.py`, which exports the fitter CSV and
-runs `servo-ident`. The profile is written to
+acceleration triangle strokes), captures per-DC-cycle PDO data into the run
+directory, and hands the capture to `servo-cal fit`, which reads the `.scap`
+directly. The profile is written to
 `~/printer_data/config/servo_dynamics/dynamics_<name>_<timestamp>.toml` — a
 new fit never replaces an existing profile; switching is an explicit config
 edit. `TORQUE_NM`/`INERTIA_KGM2`/`ROT_DIST` are optional; when given, the fit
