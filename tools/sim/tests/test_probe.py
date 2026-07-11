@@ -108,8 +108,9 @@ def test_probe_multi_point_tools(sim_world):
 
     world.mark_log()
     resp = world.gcode("BED_MESH_CALIBRATE", timeout=600)
-    assert "activating a mesh is not supported" in str(resp.get("error", "")), (
-        "BED_MESH_CALIBRATE probing should reach mesh activation, which the planner rejects"
+    assert "zero_reference_position is required" in str(resp), (
+        "BED_MESH_CALIBRATE probing should reach mesh activation, which the "
+        "planner refuses without a Z datum"
     )
 
     world.mark_log()
