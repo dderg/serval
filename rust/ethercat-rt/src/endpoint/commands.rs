@@ -8,7 +8,7 @@ use crate::clock::monotonic_ns;
 use crate::curves::AXIS_RING_CAPACITY;
 use crate::mailbox::{MailboxReply, MailboxRequest};
 use crate::push_plan::plan_bundle;
-use crate::sensorless::ERR_ARM_SENSORLESS_BAD_THRESHOLD;
+use crate::sensorless::{ERR_ARM_SENSORLESS_AMBIGUOUS_PAIR, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
 use crate::sync::{
     PairSync, SyncParams, ERR_PIECES_DURING_SYNC, ERR_SYNC_ABORTED, ERR_SYNC_BAD_AXIS,
     ERR_SYNC_BUSY, ERR_SYNC_NOT_ENABLED, ERR_SYNC_STREAMING,
@@ -404,13 +404,42 @@ fn handle_arm_sensorless_endstop(
             eprintln!("ec-rt: ArmSensorlessEndstop rejected — zero torque trip threshold");
             ERR_ARM_SENSORLESS_BAD_THRESHOLD
         } else {
-            ctx.sensorless
-                .arm(msg.slot as usize, msg.endstop_id, msg.torque_trip_tenth_pct);
-            eprintln!(
-                "ec-rt: sensorless endstop {} armed on slot {} (torque_trip={} 0.1%)",
-                msg.endstop_id, msg.slot, msg.torque_trip_tenth_pct
-            );
-            0
+            // A belt-pair slot trips on the pair's common-mode torque: the
+            // crash pushes both rotors the same mechanical way while the
+            // pair's standing fight (and the differential damper's
+            // injection) is antisymmetric and cancels out of the average.
+            let slot = msg.slot as usize;
+            let partners: Vec<usize> = ctx
+                .slave_axes
+                .iter()
+                .enumerate()
+                .filter(|&(s, &axis)| s != slot && axis == ctx.slave_axes[slot])
+                .map(|(s, _)| s)
+                .collect();
+            match partners[..] {
+                [] | [_] => {
+                    let partner = partners.first().copied();
+                    ctx.sensorless
+                        .arm(slot, msg.endstop_id, msg.torque_trip_tenth_pct, partner);
+                    eprintln!(
+                        "ec-rt: sensorless endstop {} armed on slot {} \
+                         (torque_trip={} 0.1% partner={partner:?})",
+                        msg.endstop_id, msg.slot, msg.torque_trip_tenth_pct
+                    );
+                    0
+                }
+                _ => {
+                    eprintln!(
+                        "ec-rt: ArmSensorlessEndstop rejected — slot {slot} shares \
+                         axis {} with {} other slots, need at most one partner \
+                         (slave_axes={:?})",
+                        ctx.slave_axes[slot],
+                        partners.len(),
+                        ctx.slave_axes
+                    );
+                    ERR_ARM_SENSORLESS_AMBIGUOUS_PAIR
+                }
+            }
         }
     } else {
         ctx.sensorless.disarm(msg.slot as usize);

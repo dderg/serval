@@ -102,7 +102,10 @@ pub(super) fn apply_tick_action(ctx: &mut EndpointCtx, apply_time: u64, all_ring
 fn poll_sensorless(ctx: &mut EndpointCtx, apply_time: u64) {
     let server = &mut ctx.server;
     let sensorless_tripped = ctx.sensorless.poll(
-        |slot| ctx.drive.torque_actual(slot),
+        |slot| {
+            let dir = ctx.cmd_counts_per_mm[slot].signum() as i32;
+            (dir * i32::from(ctx.drive.torque_actual(slot))) as i16
+        },
         |slot, endstop_id, torque| {
             eprintln!(
                 "ec-rt: sensorless endstop {endstop_id} tripped on slot {slot} \

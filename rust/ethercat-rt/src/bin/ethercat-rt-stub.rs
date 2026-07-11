@@ -356,7 +356,7 @@ fn main() {
                         if msg.torque_trip_tenth_pct == 0 {
                             ERR_ARM_SENSORLESS_BAD_THRESHOLD
                         } else {
-                            sensorless.arm(0, msg.endstop_id, msg.torque_trip_tenth_pct);
+                            sensorless.arm(0, msg.endstop_id, msg.torque_trip_tenth_pct, None);
                             eprintln!(
                                 "ec-rt-stub: sensorless endstop {} armed (torque_trip={} 0.1%)",
                                 msg.endstop_id, msg.torque_trip_tenth_pct
