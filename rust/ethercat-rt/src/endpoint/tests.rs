@@ -439,6 +439,46 @@ fn trim_applies_antisymmetric_target_offsets_during_streaming() {
     );
 }
 
+/// Slot 1 mounted mirrored (negative cmd counts/mm). A mechanical fight
+/// (+10%, -10% in the host frame) reads (+100, +100) raw off the drives, and
+/// the antisymmetric host-frame offset must land as the SAME drive-frame
+/// count delta on both slots. Getting either torque- or position-frame
+/// conversion wrong flips a sign here.
+#[test]
+fn trim_handles_a_mirrored_pair_in_both_frames() {
+    let mut trimmed = test_ctx_with_drive(
+        "trim-mirror-on",
+        TrackingLagDrive::with_torques(vec![100, 100]),
+    );
+    let mut plain = test_ctx_with_drive(
+        "trim-mirror-off",
+        TrackingLagDrive::with_torques(vec![100, 100]),
+    );
+    for ctx in [&mut trimmed, &mut plain] {
+        ctx.cmd_counts_per_mm[1] = -COUNTS_PER_MM;
+    }
+    assert_eq!(trimmed.trim.set(NUM_SLAVES, 0, 1, 200_000, 500, 25_000), 0);
+
+    for ctx in [&mut trimmed, &mut plain] {
+        push_all(ctx, piece(1_000_000, 0.05, &[2.5, 2.5]));
+        run_cycles(ctx, 1_000_000, 41_000_000);
+    }
+
+    let with = targets(&trimmed);
+    let without = targets(&plain);
+    let offset0 = i64::from(with[0]) - i64::from(without[0]);
+    let offset1 = i64::from(with[1]) - i64::from(without[1]);
+    assert_eq!(
+        offset0, offset1,
+        "mirrored slot gets the mechanically opposite offset, which in its \
+         inverted drive frame is the same count delta"
+    );
+    assert!(
+        offset0 < -100,
+        "fight must pull the pair together: {offset0}"
+    );
+}
+
 #[test]
 fn trim_freezes_while_the_ring_is_dry() {
     let mut ctx = test_ctx_with_drive(
