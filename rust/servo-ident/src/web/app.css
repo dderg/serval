@@ -74,6 +74,16 @@ input, select, textarea {
 .mr-health.err { color: var(--bad); }
 .banner { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 
+button.estop {
+  background: #7a1f1a;
+  border-color: #b0453d;
+  color: #ffd9d5;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 4px 14px;
+}
+button.estop:hover:not(:disabled) { background: #a02a22; }
+
 .tabs { display: flex; gap: 2px; }
 .tab {
   color: var(--dim);

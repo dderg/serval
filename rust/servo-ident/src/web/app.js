@@ -2141,6 +2141,21 @@ async function pollMoonrakerHealth() {
   }
 }
 
+/// One click, no confirmation: an accidental stop costs a FIRMWARE_RESTART,
+/// a confirm dialog in a real emergency costs the machine.
+async function emergencyStop() {
+  const entry = { time: new Date().toISOString(), label: "e-stop", lines: ["emergency_stop"], results: [] };
+  try {
+    const resp = await fetch(`${moonrakerUrl()}/printer/emergency_stop`, { method: "POST" });
+    entry.results.push({ ok: resp.ok, status: resp.status });
+  } catch (e) {
+    entry.results.push({ ok: false, status: 0 });
+  }
+  state.sentLog.push(entry);
+  renderSentLog();
+  pollMoonrakerHealth();
+}
+
 function sentEntryHtml(entry) {
   const ok = entry.results.length > 0 && entry.results.every((r) => r.ok);
   return (
@@ -2391,6 +2406,7 @@ async function submitConsole() {
 // --- boot -------------------------------------------------------------------
 
 function initShell() {
+  el("estop-btn").addEventListener("click", emergencyStop);
   const input = el("moonraker-url");
   input.value = localStorage.getItem(MOONRAKER_KEY) || `http://${location.hostname}:7125`;
   input.addEventListener("change", () => {

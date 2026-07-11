@@ -71,6 +71,12 @@ seconds: green shows the klippy state, red says the URL is wrong,
 Moonraker is down, or the origin is missing from `cors_domains` — the
 three ways every button on every page silently stops working.
 
+The topbar's STOP button fires `POST /printer/emergency_stop` on the
+first click — no confirmation, since an accidental stop costs a
+`FIRMWARE_RESTART` while a dialog in a real emergency costs the machine.
+The click lands in the session log and the health badge flips to
+klippy's shutdown state.
+
 ## Demo it without a bench
 
 `servo-cal demo` builds three run directories from the committed fixtures
