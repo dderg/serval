@@ -440,6 +440,15 @@ const CAP_DRIFT_MAX_REL: f64 = 1e-3;
 /// Implied landing accelerations within this of the entry acceleration snap
 /// to it exactly, so constant-accel spans stay merge- and exact-lowerable.
 const ACCEL_SNAP_MM_S2: f64 = 1e-3;
+/// A binding brake envelope may descend past the disk rail by at most this
+/// fraction of the accel budget per cell (chord-vs-node discretization of a
+/// rail-riding curve). Where the envelope binds it *is* the profile — the
+/// forward pass adopts its chain and the lowering consumes its samples as
+/// exact states — so a super-disk descent there is not a chord-shadow
+/// artifact but an infeasible plan, and rail-clamping its samples would hand
+/// the lowering mutually inconsistent `(v, a)` knots (the executed
+/// acceleration spikes). Reject the run loudly instead.
+const ENVELOPE_BRAKE_SLACK_FRAC: f64 = 2e-2;
 
 /// The infinite-jerk profile as an event-driven integration in run-local
 /// arc-length, with three laws: accelerate on the disk rail, track the
@@ -649,7 +658,6 @@ fn integrate_disk(
                 false,
                 "disk_ride livelock: k={k} n={n} x_cur={x_cur} v={v} a={a}"
             );
-            return None;
         }
         let ds = track.x[k + 1] - x_cur;
         if ds <= GRID_DEDUP_MM {
@@ -926,7 +934,7 @@ fn reconstruct_flat(
     members: &[RunMember],
     run_start_v: f64,
     run_start_a: f64,
-) -> (Vec<(f64, f64, f64)>, Vec<StraightPhase>) {
+) -> Option<(Vec<(f64, f64, f64)>, Vec<StraightPhase>)> {
     let entry_v = run_start_v;
     let exit_v = members[members.len() - 1].exit_v;
     let s = integration_grid(members, entry_v <= VELOCITY_FLOOR, exit_v <= VELOCITY_FLOOR);
@@ -938,7 +946,9 @@ fn reconstruct_flat(
         .map(|m| m.kin.jerk)
         .fold(f64::INFINITY, f64::min);
     if !jerk.is_finite() {
-        return infinite_jerk_profile(&s, &vlc, &accel, &kappa, entry_v, exit_v);
+        return Some(infinite_jerk_profile(
+            &s, &vlc, &accel, &kappa, entry_v, exit_v,
+        ));
     }
     let (bwd_v, brake_chain, bwd_feasible) = {
         let s_rev: Vec<f64> = (0..n).map(|k| s[n - 1] - s[n - 1 - k]).collect();
@@ -967,6 +977,24 @@ fn reconstruct_flat(
     let binding: Vec<bool> = (0..n)
         .map(|i| bwd_v[i] <= vlc[i] && bwd_feasible[i])
         .collect();
+    for i in 0..n - 1 {
+        if !(binding[i] && binding[i + 1]) {
+            continue;
+        }
+        let ds = s[i + 1] - s[i];
+        if ds <= GRID_DEDUP_MM {
+            continue;
+        }
+        let descent = (bwd_v[i] * bwd_v[i] - bwd_v[i + 1] * bwd_v[i + 1]) / (2.0 * ds);
+        let rail = disk_rail_accel(accel[i], kappa[i], bwd_v[i]).max(disk_rail_accel(
+            accel[i + 1],
+            kappa[i + 1],
+            bwd_v[i + 1],
+        ));
+        if descent > rail + ENVELOPE_BRAKE_SLACK_FRAC * accel[i] {
+            return None;
+        }
+    }
     let cap_a = chord_slopes(&s, &cap_v);
     let track = ride::Track {
         s: &s,
@@ -1004,7 +1032,7 @@ fn reconstruct_flat(
     } else {
         Vec::new()
     };
-    (samples, phases)
+    Some((samples, phases))
 }
 
 /// Linearly interpolate the reconstructed flat profile at run-arc `s`. Member
@@ -1047,7 +1075,7 @@ pub(super) fn reconstruct_run(
     Vec<(f64, f64)>,
     Vec<Vec<StraightPhase>>,
 )> {
-    let (flat, chain) = reconstruct_flat(members, run_start_v, run_start_a);
+    let (flat, chain) = reconstruct_flat(members, run_start_v, run_start_a)?;
 
     let mut per_member: Vec<Vec<(f64, f64, f64)>> = Vec::with_capacity(members.len());
     let mut exit_states: Vec<(f64, f64)> = Vec::with_capacity(members.len());
