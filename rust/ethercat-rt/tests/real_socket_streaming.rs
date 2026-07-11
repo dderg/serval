@@ -96,7 +96,8 @@ fn run_endpoint(socket_path: String, faulted: Arc<AtomicBool>) {
                 }
                 Command::Unknown { .. }
                 | Command::SyncPair { .. }
-                | Command::SetDiffDamper { .. } => {}
+                | Command::SetDiffDamper { .. }
+                | Command::SetDiffTrim { .. } => {}
             }
         }
 

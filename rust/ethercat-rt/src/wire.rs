@@ -5,9 +5,10 @@ use mcu_protocol::messages::{
     MessageKind, MotorSample, MotorStateResponse, PushPieces, PushPiecesResponse, ResonanceBuzz,
     ResonanceBuzzResponse, RestoreDriveLimits, RestoreDriveLimitsResponse, ResumeStreamResponse,
     RuntimeCapsResponse, SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse, SeedServoHome,
-    SeedServoHomeResponse, SetDiffDamper, SetDiffDamperResponse, SetDriveLimits,
-    SetDriveLimitsResponse, SetTorque, SetTorqueResponse, StartCapture, StartCaptureResponse,
-    StatusHeartbeat, StopCaptureResponse, StopResponse, SyncPair, SyncPairResponse,
+    SeedServoHomeResponse, SetDiffDamper, SetDiffDamperResponse, SetDiffTrim, SetDiffTrimResponse,
+    SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse, StartCapture,
+    StartCaptureResponse, StatusHeartbeat, StopCaptureResponse, StopResponse, SyncPair,
+    SyncPairResponse,
 };
 use mcu_protocol::MCU_CHANNEL_PIECES;
 use mcu_transport::frame::{encode_frame, CHANNEL_CONTROL, CHANNEL_EVENTS};
@@ -87,6 +88,10 @@ pub enum Command {
     SetDiffDamper {
         correlation_id: u32,
         msg: SetDiffDamper,
+    },
+    SetDiffTrim {
+        correlation_id: u32,
+        msg: SetDiffTrim,
     },
     Unknown {
         correlation_id: u32,
@@ -212,6 +217,13 @@ pub fn decode_command(channel: u8, payload: &[u8]) -> Result<Command, DecodeCmdE
         Some(MessageKind::SetDiffDamper) => {
             let msg = SetDiffDamper::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
             Ok(Command::SetDiffDamper {
+                correlation_id: cid,
+                msg,
+            })
+        }
+        Some(MessageKind::SetDiffTrim) => {
+            let msg = SetDiffTrim::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
+            Ok(Command::SetDiffTrim {
                 correlation_id: cid,
                 msg,
             })
@@ -366,6 +378,11 @@ pub fn resonance_buzz_response_frame(cid: u32, result: i32) -> Vec<u8> {
 pub fn set_diff_damper_response_frame(cid: u32, result: i32) -> Vec<u8> {
     let body = SetDiffDamperResponse { result }.encoded_to_vec();
     control_frame(MessageKind::SetDiffDamperResponse, cid, &body)
+}
+
+pub fn set_diff_trim_response_frame(cid: u32, result: i32) -> Vec<u8> {
+    let body = SetDiffTrimResponse { result }.encoded_to_vec();
+    control_frame(MessageKind::SetDiffTrimResponse, cid, &body)
 }
 
 pub fn status_heartbeat_frame(

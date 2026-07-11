@@ -506,6 +506,28 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
             SchemaField { name: "result", ty: "i32" },
         ],
     },
+    SchemaMessage {
+        type_tag: 0x008A,
+        name: "SetDiffTrim",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "slot_a", ty: "u8" },
+            SchemaField { name: "slot_b", ty: "u8" },
+            SchemaField { name: "gain_micro", ty: "u32" },
+            SchemaField { name: "clamp_um", ty: "u16" },
+            SchemaField { name: "lpf_millihz", ty: "u32" },
+        ],
+    },
+    SchemaMessage {
+        type_tag: 0x008B,
+        name: "SetDiffTrimResponse",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "result", ty: "i32" },
+        ],
+    },
 ];
 
 /// Bootstrap type tags that the C header must define alongside the schema

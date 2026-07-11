@@ -133,6 +133,29 @@ running endpoint — re-arm after a firmware restart. Verify with an A/B
 rise with the damper on. Params: `BELT` (AB) `GAIN` (required) `CLAMP`
 (50) `LPF_HZ` (300) `LEAD_US` (0).
 
+#### SERVO_DIFF_TRIM
+Arms (or disarms) the engine-resident differential belt-pair **trim** — the
+always-on, in-motion counterpart of `SERVO_SYNC`. Every EtherCAT cycle the
+endpoint low-passes the pair's mechanical-frame differential torque (the
+fight) and integrates it into a small **antisymmetric position offset** on
+top of the streamed targets: the pair unwinds against itself while the
+carriage never moves. Where the damper (torque feedback at the 90–200 Hz
+belt modes) is phase-limited by the ~ms loop lag, the trim's crossover sits
+at a few Hz — gain × pair stiffness — where that lag is a harmless few
+degrees, so it safely nulls homing preload, thermal drift and the 1–3 Hz
+toolhead-position dependence of residual strain at full traverse speed,
+and leaves the resonant band alone. Integration freezes whenever the pair
+is not streaming targets (the held offset keeps drive targets continuous
+across stream gaps) and resets on a pair sync or torque-gate drop. `GAIN`
+is mm/s of offset slew per 1% differential torque (0.05 ⇒ ~2–5 Hz
+crossover on a typical belt pair); `GAIN=0` disarms. The offset is clamped
+to `CLAMP_UM` (µm, ceiling 500); hitting the clamp logs a
+`diff_trim_clamped` warning — residual fight beyond the trim's authority.
+Torque LPF at `LPF_HZ`. State lives in the running endpoint — re-arm after
+a firmware restart. Verify with `SERVO_SYNC` afterwards: its baseline
+fight should read near zero while the trim is armed. Params: `BELT` (AB)
+`GAIN` (required) `CLAMP_UM` (150) `LPF_HZ` (25).
+
 #### SERVO_MEASURE_INERTIA
 Records the excitation grid for the inertia/friction fit (no report — it is the
 capture building block behind the fit commands). The active kinematics decides
@@ -337,6 +360,7 @@ Schemas: [servo-cal-contracts.md](servo-cal-contracts.md).
 | `SERVO_MEASURE_TRACKING` | `servo-cal analyze` | run dir + `results.json` (per-motor + combined tracking metrics; records every motor driving the axis — both lanes on CoreXY) |
 | `SERVO_MEASURE_DIFFERENTIAL` | `servo-cal analyze` | run dir + `results.json` (differential FRF modes: frequency, peak gain, damping, coherence; dashboard renders the FRF) |
 | `SERVO_DIFF_DAMPER` | — | no run dir; reconfigures the running endpoint |
+| `SERVO_DIFF_TRIM` | — | no run dir; reconfigures the running endpoint |
 | `SERVO_CALIBRATE_GAINS` | `servo-cal analyze` | run dir + `results.json` verdict (highest clean gain step); `APPLY=1` also writes + verifies |
 | `SERVO_GAIN_LADDER` | `servo-cal analyze` (per rung + final) | run dir + `results.json` verdict; climbs until a rung flags trouble, then applies `SAFE` |
 | `SERVO_HARVEST_NOTCHES` | — | no run dir; writes C01.30, strokes, reads back notch 1–2, locks (C01.30=0); journaled param writes |

@@ -5,8 +5,9 @@ use mcu_protocol::codec::Encode as _;
 use mcu_protocol::messages::{
     ArmSensorlessEndstop, ArmSensorlessEndstopResponse, MessageKind, ResonanceBuzz,
     ResonanceBuzzResponse, RestoreDriveLimits, RestoreDriveLimitsResponse, SeedServoHome,
-    SeedServoHomeResponse, SetDiffDamper, SetDiffDamperResponse, SetDriveLimits,
-    SetDriveLimitsResponse, SetTorque, SetTorqueResponse, StopResponse, SyncPair, SyncPairResponse,
+    SeedServoHomeResponse, SetDiffDamper, SetDiffDamperResponse, SetDiffTrim, SetDiffTrimResponse,
+    SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse, StopResponse, SyncPair,
+    SyncPairResponse,
 };
 
 use crate::servo_call::mcu_typed_call;
@@ -158,6 +159,21 @@ pub fn send_set_diff_damper(conn: &McuSerialConn, damper: SetDiffDamper) -> Resu
         MessageKind::SetDiffDamperResponse,
         body,
         SET_DIFF_DAMPER_TIMEOUT,
+    )?;
+    Ok(r.result)
+}
+
+const SET_DIFF_TRIM_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub fn send_set_diff_trim(conn: &McuSerialConn, trim: SetDiffTrim) -> Result<i32, String> {
+    let body = trim.encoded_to_vec();
+    let r: SetDiffTrimResponse = mcu_typed_call(
+        conn,
+        "SetDiffTrim",
+        MessageKind::SetDiffTrim,
+        MessageKind::SetDiffTrimResponse,
+        body,
+        SET_DIFF_TRIM_TIMEOUT,
     )?;
     Ok(r.result)
 }

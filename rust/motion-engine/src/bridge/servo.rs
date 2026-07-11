@@ -561,6 +561,49 @@ impl PyMotionEngine {
         }
         Ok(())
     }
+    fn set_diff_trim(
+        &self,
+        py: Python<'_>,
+        mcu_handle: u32,
+        slot_a: u8,
+        slot_b: u8,
+        gain_micro: u32,
+        clamp_um: u16,
+        lpf_millihz: u32,
+    ) -> PyResult<()> {
+        let conn = self.ethercat_conn(mcu_handle, "set_diff_trim")?;
+        tracing::info!(
+            subsystem = "engine",
+            event = "servo_set_diff_trim",
+            mcu_handle,
+            slot_a,
+            slot_b,
+            gain_micro,
+            clamp_um,
+            lpf_millihz,
+            "servo differential trim"
+        );
+        let result = py
+            .detach(|| {
+                crate::servo_torque::send_set_diff_trim(
+                    &conn,
+                    mcu_protocol::messages::SetDiffTrim {
+                        slot_a,
+                        slot_b,
+                        gain_micro,
+                        clamp_um,
+                        lpf_millihz,
+                    },
+                )
+            })
+            .map_err(PyRuntimeError::new_err)?;
+        if result != 0 {
+            return Err(PyRuntimeError::new_err(format!(
+                "set_diff_trim: endpoint rejected (result {result})"
+            )));
+        }
+        Ok(())
+    }
 }
 
 fn require_endpoint_ok(result: i32, context: &str) -> Result<(), String> {

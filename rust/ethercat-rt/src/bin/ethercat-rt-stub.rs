@@ -25,9 +25,9 @@ use ethercat_rt::wire::{
     identify_response_frame, push_pieces_response_frame, resonance_buzz_response_frame,
     restore_drive_limits_response_frame, resume_stream_response_frame, runtime_caps_response_frame,
     sdo_read_response_frame, sdo_write_response_frame, seed_servo_home_response_frame,
-    set_diff_damper_response_frame, set_drive_limits_response_frame, set_torque_response_frame,
-    start_capture_response_frame, status_heartbeat_frame, stop_capture_response_frame,
-    stop_response_frame, Command,
+    set_diff_damper_response_frame, set_diff_trim_response_frame, set_drive_limits_response_frame,
+    set_torque_response_frame, start_capture_response_frame, status_heartbeat_frame,
+    stop_capture_response_frame, stop_response_frame, Command,
 };
 use mcu_protocol::messages::{SdoReadResponse, SlaveState, StopCaptureResponse, SyncPairResponse};
 
@@ -508,6 +508,16 @@ fn main() {
                         msg.slot_a, msg.slot_b, msg.gain_milli
                     );
                     server.respond(&set_diff_damper_response_frame(correlation_id, 0));
+                }
+                Command::SetDiffTrim {
+                    correlation_id,
+                    msg,
+                } => {
+                    eprintln!(
+                        "ec-rt-stub: SetDiffTrim slots=({},{}) gain_micro={}",
+                        msg.slot_a, msg.slot_b, msg.gain_micro
+                    );
+                    server.respond(&set_diff_trim_response_frame(correlation_id, 0));
                 }
                 Command::Unknown { kind_raw, .. } => {
                     eprintln!("ec-rt-stub: ignoring kind 0x{kind_raw:04x}");

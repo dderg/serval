@@ -65,6 +65,8 @@ pub enum MessageKind {
     SyncPairResponse = 0x0087,
     SetDiffDamper = 0x0088,
     SetDiffDamperResponse = 0x0089,
+    SetDiffTrim = 0x008A,
+    SetDiffTrimResponse = 0x008B,
 }
 
 impl MessageKind {
@@ -114,6 +116,8 @@ impl MessageKind {
             0x0087 => Self::SyncPairResponse,
             0x0088 => Self::SetDiffDamper,
             0x0089 => Self::SetDiffDamperResponse,
+            0x008A => Self::SetDiffTrim,
+            0x008B => Self::SetDiffTrimResponse,
             _ => return None,
         })
     }
@@ -949,6 +953,56 @@ impl Encode for SetDiffDamperResponse {
 }
 
 impl Decode for SetDiffDamperResponse {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            result: get_i32(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetDiffTrim {
+    pub slot_a: u8,
+    pub slot_b: u8,
+    pub gain_micro: u32,
+    pub clamp_um: u16,
+    pub lpf_millihz: u32,
+}
+
+impl Encode for SetDiffTrim {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_u8(out, self.slot_a);
+        put_u8(out, self.slot_b);
+        put_u32(out, self.gain_micro);
+        put_u16(out, self.clamp_um);
+        put_u32(out, self.lpf_millihz);
+    }
+}
+
+impl Decode for SetDiffTrim {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            slot_a: get_u8(c)?,
+            slot_b: get_u8(c)?,
+            gain_micro: get_u32(c)?,
+            clamp_um: get_u16(c)?,
+            lpf_millihz: get_u32(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetDiffTrimResponse {
+    pub result: i32,
+}
+
+impl Encode for SetDiffTrimResponse {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_i32(out, self.result);
+    }
+}
+
+impl Decode for SetDiffTrimResponse {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         Ok(Self {
             result: get_i32(c)?,

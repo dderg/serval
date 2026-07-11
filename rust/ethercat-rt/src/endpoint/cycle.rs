@@ -140,6 +140,7 @@ pub(super) fn compute_motion_targets(
         motion_active = emit_slot_commands(ctx, &sp_counts, &all_acc, &all_vel);
     } else {
         ctx.damper.reset_filters();
+        ctx.trim.reset();
         for lc in &mut ctx.last_counts {
             *lc = None;
         }
@@ -243,6 +244,43 @@ fn damper_torque_tenths(ctx: &mut EndpointCtx) -> Vec<f32> {
     host_frame
 }
 
+// The trim integrates the pair's mechanical-frame differential torque into
+// an antisymmetric target offset. The offset deliberately stays OUT of
+// last_counts / last_streamed_target: command anchors live in the raw
+// stream frame, so a sync or re-anchor never bakes a live trim offset in,
+// and freezing integration while a pair is not streaming (targets are not
+// being rewritten) keeps the held drive targets continuous across gaps.
+fn trim_offset_counts(ctx: &mut EndpointCtx, sp_counts: &[Option<i32>]) -> Vec<i32> {
+    let mut counts = vec![0i32; ctx.num_slaves];
+    if !ctx.trim.active() {
+        return counts;
+    }
+    if ctx.sync.is_some() {
+        ctx.trim.reset();
+        return counts;
+    }
+    let torque_mech: Vec<f64> = (0..ctx.num_slaves)
+        .map(|s| f64::from(ctx.drive.torque_actual(s)) * ctx.cmd_counts_per_mm[s].signum())
+        .collect();
+    let streaming: Vec<bool> = sp_counts.iter().map(Option::is_some).collect();
+    let mut offset_mm = vec![0f64; ctx.num_slaves];
+    ctx.trim.update(&torque_mech, &streaming, &mut offset_mm);
+    if let Some((slot_a, slot_b)) = ctx.trim.drain_clamp_warning() {
+        tracing::warn!(
+            subsystem = "ethercat",
+            event = "diff_trim_clamped",
+            slot_a,
+            slot_b,
+            "differential trim offset hit its clamp — residual pair fight \
+             exceeds the trim's authority"
+        );
+    }
+    for s in 0..ctx.num_slaves {
+        counts[s] = (offset_mm[s] * ctx.cmd_counts_per_mm[s]).round() as i32;
+    }
+    counts
+}
+
 fn emit_slot_commands(
     ctx: &mut EndpointCtx,
     sp_counts: &[Option<i32>],
@@ -252,6 +290,7 @@ fn emit_slot_commands(
     let num_slaves = ctx.num_slaves;
     let mut motion_active = false;
     let damper_tenths = damper_torque_tenths(ctx);
+    let trim_counts = trim_offset_counts(ctx, sp_counts);
     // The dynamics profile is fitted in the drive frame (the capture
     // flips each drive's commanded kinematics by its direction sign),
     // so the model must be evaluated on drive-frame vectors — flipping
@@ -304,7 +343,8 @@ fn emit_slot_commands(
             }
             ctx.last_counts[s] = Some(counts);
             ctx.last_streamed_target[s] = Some(counts);
-            ctx.drive.set_target_position(s, counts);
+            ctx.drive
+                .set_target_position(s, counts.wrapping_add(trim_counts[s]));
             ctx.drive.set_velocity_offset(s, vel_offset);
             ctx.drive.set_torque_offset(s, torque_offset);
             motion_active = true;

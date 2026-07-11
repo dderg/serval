@@ -768,6 +768,7 @@ class ServoCalibration:
             "SERVO_MEASURE_TRACKING",
             "SERVO_MEASURE_DIFFERENTIAL",
             "SERVO_DIFF_DAMPER",
+            "SERVO_DIFF_TRIM",
             "SERVO_MEASURE_INERTIA",
             "SERVO_FIT_DYNAMICS",
             "SERVO_CALIBRATE_INERTIA_RATIO",
@@ -1553,6 +1554,58 @@ class ServoCalibration:
                 )
             else:
                 gcmd.respond_info("belt %s damper disarmed" % (belt,))
+
+    MAX_TRIM_GAIN = 2.0
+    MAX_TRIM_CLAMP_UM = 500.0
+    cmd_SERVO_DIFF_TRIM_help = (
+        "Arm or disarm the differential belt-pair trim: the engine "
+        "integrates each pair's low-passed differential torque into a "
+        "small antisymmetric position offset, continuously nulling the "
+        "static fight (homing preload, thermal drift) during motion - the "
+        "always-on version of SERVO_SYNC. Loop bandwidth is a few Hz, far "
+        "below the belt resonances. GAIN is in mm/s of offset slew per 1% "
+        "differential torque; GAIN=0 disarms. CLAMP_UM bounds the offset "
+        "(hitting it logs a warning). Params BELT=A|B|AB GAIN CLAMP_UM "
+        "LPF_HZ"
+    )
+
+    def cmd_SERVO_DIFF_TRIM(self, gcmd):
+        belts = gcmd.get("BELT", "AB").upper()
+        if belts not in ("A", "B", "AB"):
+            raise gcmd.error("BELT must be A, B or AB (got %r)" % (belts,))
+        gain = gcmd.get_float("GAIN", minval=0.0, maxval=self.MAX_TRIM_GAIN)
+        clamp_um = gcmd.get_float(
+            "CLAMP_UM", 150.0, above=0.0, maxval=self.MAX_TRIM_CLAMP_UM
+        )
+        lpf_hz = gcmd.get_float("LPF_HZ", 25.0, minval=1.0, maxval=100.0)
+        engine = self.printer.lookup_object("motion_engine")
+        for belt in belts:
+            pair_names, _motors, handle, slots = self._belt_pair(
+                gcmd, belt, "SERVO_DIFF_TRIM"
+            )
+            engine.set_diff_trim(
+                handle,
+                slots[0],
+                slots[1],
+                int(round(gain * 1e6)),
+                int(round(clamp_um)),
+                int(round(lpf_hz * 1000.0)),
+            )
+            if gain > 0.0:
+                gcmd.respond_info(
+                    "belt %s trim armed (%s vs %s): gain %.3f (mm/s)/%%, "
+                    "clamp %.0f um, lpf %.1f Hz"
+                    % (
+                        belt,
+                        pair_names[0],
+                        pair_names[1],
+                        gain,
+                        clamp_um,
+                        lpf_hz,
+                    )
+                )
+            else:
+                gcmd.respond_info("belt %s trim disarmed" % (belt,))
 
     cmd_SERVO_MEASURE_INERTIA_help = (
         "Excitation grid for the inertia/friction fit (servo-ident). "

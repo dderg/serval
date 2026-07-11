@@ -20,13 +20,14 @@ use crate::wire::{
     resonance_buzz_response_frame, restore_drive_limits_response_frame,
     resume_stream_response_frame, runtime_caps_response_frame, sdo_read_response_frame,
     sdo_write_response_frame, seed_servo_home_response_frame, set_diff_damper_response_frame,
-    set_drive_limits_response_frame, set_torque_response_frame, start_capture_response_frame,
-    stop_capture_response_frame, stop_response_frame, sync_pair_response_frame, Command,
+    set_diff_trim_response_frame, set_drive_limits_response_frame, set_torque_response_frame,
+    start_capture_response_frame, stop_capture_response_frame, stop_response_frame,
+    sync_pair_response_frame, Command,
 };
 use mcu_protocol::messages::{
     ArmSensorlessEndstop, PushPieces, ResonanceBuzz, SdoRead, SdoReadResponse, SdoWrite,
-    SdoWriteResponse, SetDiffDamper, SetDriveLimits, SetTorque, StartCapture, StopCaptureResponse,
-    SyncPair,
+    SdoWriteResponse, SetDiffDamper, SetDiffTrim, SetDriveLimits, SetTorque, StartCapture,
+    StopCaptureResponse, SyncPair,
 };
 
 pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
@@ -144,6 +145,12 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
                 msg,
             } => {
                 handle_set_diff_damper(ctx, correlation_id, msg);
+            }
+            Command::SetDiffTrim {
+                correlation_id,
+                msg,
+            } => {
+                handle_set_diff_trim(ctx, correlation_id, msg);
             }
             Command::SdoRead {
                 correlation_id,
@@ -539,6 +546,39 @@ fn handle_set_diff_damper(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDi
     );
     ctx.server
         .respond(&set_diff_damper_response_frame(correlation_id, rc));
+}
+
+fn handle_set_diff_trim(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDiffTrim) {
+    let rc = if ctx.sync.is_some() {
+        eprintln!("ec-rt: SetDiffTrim rejected — pair sync in progress");
+        ERR_SYNC_BUSY
+    } else {
+        ctx.trim.set(
+            ctx.num_slaves,
+            msg.slot_a,
+            msg.slot_b,
+            msg.gain_micro,
+            msg.clamp_um,
+            msg.lpf_millihz,
+        )
+    };
+    eprintln!(
+        "ec-rt: SetDiffTrim slots=({},{}) gain_micro={} clamp={} um lpf={} mHz rc={rc}",
+        msg.slot_a, msg.slot_b, msg.gain_micro, msg.clamp_um, msg.lpf_millihz,
+    );
+    tracing::info!(
+        subsystem = "ethercat",
+        event = "set_diff_trim",
+        slot_a = msg.slot_a,
+        slot_b = msg.slot_b,
+        gain_micro = msg.gain_micro,
+        clamp_um = msg.clamp_um,
+        lpf_millihz = msg.lpf_millihz,
+        rc,
+        "differential trim reconfigured"
+    );
+    ctx.server
+        .respond(&set_diff_trim_response_frame(correlation_id, rc));
 }
 
 fn handle_sdo_read(ctx: &mut EndpointCtx, correlation_id: u32, msg: SdoRead) {

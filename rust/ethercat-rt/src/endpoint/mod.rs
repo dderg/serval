@@ -13,6 +13,7 @@ use crate::server::FrameServer;
 use crate::stream_halt::StreamHalt;
 use crate::sync::PairSync;
 use crate::torque::TorqueGate;
+use crate::trim::DiffTrimBank;
 use crate::wire::{status_heartbeat_frame, sync_pair_response_frame};
 use mcu_protocol::messages::SyncPairResponse;
 
@@ -53,6 +54,7 @@ pub struct EndpointCtx {
     rings: Vec<AxisRing>,
     buzz: BuzzOsc,
     damper: DiffDamperBank,
+    trim: DiffTrimBank,
     cmaps: Vec<Option<CountMap>>,
     last_counts: Vec<Option<i32>>,
     report_anchor: Vec<Option<(i32, f64)>>,

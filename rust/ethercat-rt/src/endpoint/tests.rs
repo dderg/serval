@@ -28,6 +28,7 @@ use crate::sensorless::SensorlessBank;
 use crate::server::FrameServer;
 use crate::stream_halt::StreamHalt;
 use crate::torque::TorqueGate;
+use crate::trim::DiffTrimBank;
 
 const NUM_SLAVES: usize = 2;
 const COUNTS_PER_MM: f64 = 3276.8;
@@ -148,6 +149,7 @@ fn test_ctx_with_drive(name: &str, drive: TrackingLagDrive) -> EndpointCtx {
         rings: (0..NUM_SLAVES).map(AxisRing::with_slot).collect(),
         buzz: BuzzOsc::new(),
         damper: DiffDamperBank::new(CYCLE_NS as i64),
+        trim: DiffTrimBank::new(CYCLE_NS as i64),
         cmaps: vec![None; NUM_SLAVES],
         last_counts: vec![None; NUM_SLAVES],
         report_anchor: vec![None; NUM_SLAVES],

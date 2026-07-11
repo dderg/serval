@@ -20,4 +20,5 @@ pub mod stream_halt;
 pub mod sync;
 pub mod thread_prio;
 pub mod torque;
+pub mod trim;
 pub mod wire;
