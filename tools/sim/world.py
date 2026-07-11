@@ -186,6 +186,7 @@ class SimWorld:
         self.mcus: list[McuProcess] = []
         self.klippy_proc: Optional[subprocess.Popen] = None
         self.chip_servers: list = []
+        self.tmc5160_by_cs: dict = {}
         self.beacon = None
         self._log_offset = 0
         self._started = False
@@ -321,9 +322,11 @@ class SimWorld:
         h7_sock = self.mcus[0].sock_dir
         # SPI chip-select wiring matches the sim configs' cs_pin lines.
         for cs_line in (5, 4, 6, 3):
+            chip = TMC5160Emulator()
+            self.tmc5160_by_cs[cs_line] = chip
             srv = ChipSocketServer(
                 str(h7_sock / f"spi_cs_0_{cs_line}"),
-                TMC5160Emulator().transfer,
+                chip.transfer,
                 framed=False,
             )
             srv.start()
