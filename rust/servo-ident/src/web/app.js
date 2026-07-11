@@ -34,14 +34,6 @@ const PAGE_DEFS = {
     charts: ["psd"],
     peaks: true,
     intro: "kill the resonances the PSD shows so gains can go higher",
-    templates: [
-      {
-        label: "harvest…",
-        command: "SERVO_HARVEST_NOTCHES AXIS=X MODE=2",
-        title:
-          "hand notches 1-2 to the drive's adaptive tuning, stroke, read back what it chose, lock",
-      },
-    ],
   },
   observers: {
     label: "observers",
@@ -55,8 +47,16 @@ const PAGE_DEFS = {
     groups: ["load"],
     experiments: ["tracking", "inertia_grid", "differential"],
     charts: ["frf"],
-    fitRunner: true,
     intro: "identify the load, then let feedforward carry it",
+    templates: [
+      {
+        label: "fit…",
+        command: "SERVO_FIT_DYNAMICS AXIS=X",
+        title:
+          "strokes the axis, fits inertia/friction per drive, prints the recommended " +
+          "inertia ratio and writes the feedforward profile",
+      },
+    ],
   },
   live: {
     label: "live",
@@ -81,7 +81,13 @@ const state = {
   selected: new Set(),
   autoSelected: false,
   stepFilter: null, // null = every step; otherwise a Set of visible step names
-  gcodeText: "",
+  console: {
+    text: "", // current input line, survives page switches
+    history: loadConsoleHistory(),
+    cursor: null, // history index while navigating; null = editing a fresh line
+    draft: "", // the fresh line stashed when history navigation starts
+    search: null, // {query, pos, saved, failed} while ctrl+r reverse search is live
+  },
   drive: {
     data: null, // last /api/drive_state response (params, motors, config_pins, age_s)
     fetchedAtMs: null, // Date.now() when data was fetched, for a client-ticking age display
@@ -244,44 +250,29 @@ function controlsSectionsHtml(def) {
         `</section>`
     );
   }
-  if (def.fitRunner) {
-    parts.push(
-      `<section class="sweep">` +
-        `<div class="section-head"><h2>fit dynamics</h2></div>` +
-        `<div class="row"><input type="text" id="sweep-command" value="SERVO_FIT_DYNAMICS AXIS=X">` +
-        `<button id="run-sweep-btn">run</button></div>` +
-        `<p class="note">strokes the axis, fits inertia/friction per drive, prints the ` +
-        `recommended inertia ratio and writes the feedforward profile.</p>` +
-        `</section>`
-    );
-  } else {
-    const templates = (def.templates || [])
-      .map(
-        (t, i) =>
-          `<button class="template-btn" data-template="${i}" title="${t.title}">${t.label}</button>`
-      )
-      .join("");
-    parts.push(
-      `<section class="sweep">` +
-        `<div class="section-head"><h2>sweep</h2><span class="note" id="form-run-name"></span></div>` +
-        `<div class="row"><input type="text" id="sweep-command" ` +
-        `placeholder="select a run to prefill, or type a command">` +
-        `<button id="run-sweep-btn">run</button>${templates}</div>` +
-        `</section>`
-    );
-  }
-  parts.push(
-    `<section class="session">` +
-      `<details class="gcode-details"><summary>manual g-code</summary>` +
-      `<textarea id="gcode-textarea" spellcheck="false"></textarea>` +
-      `<div class="row"><button id="run-gcode">run</button></div>` +
-      `</details>` +
-      `<div id="run-status" class="status-line"></div>` +
-      `<div class="section-head"><h2>session log</h2></div>` +
-      `<div id="sent-log" class="sent-log"></div>` +
-      `</section>`
-  );
+  parts.push(consoleSectionHtml(def));
   return parts.join("");
+}
+
+function consoleSectionHtml(def) {
+  const templates = (def.templates || [])
+    .map(
+      (t, i) =>
+        `<button class="template-btn" data-template="${i}" title="${t.title}">${t.label}</button>`
+    )
+    .join("");
+  return (
+    `<section class="session">` +
+    `<div class="section-head"><h2>console</h2>` +
+    `<span class="note" id="form-run-name"></span>${templates}</div>` +
+    `<div id="sent-log" class="sent-log"></div>` +
+    `<div id="run-status" class="status-line"></div>` +
+    `<div class="console-line"><span class="console-prompt">›</span>` +
+    `<textarea id="console-input" rows="1" spellcheck="false" ` +
+    `placeholder="g-code — enter runs, shift+enter multiline, ↑/↓ history, ctrl+r search"></textarea></div>` +
+    `<div id="console-search" class="console-search"></div>` +
+    `</section>`
+  );
 }
 
 function analysisSectionsHtml(def) {
@@ -360,15 +351,7 @@ function liveShellHtml() {
     `<p class="note">viewing needs no recording. record when you want an ` +
     `analyzable .scap in the captures root; stop finalizes it.</p>` +
     `</section>` +
-    `<section class="session">` +
-    `<details class="gcode-details"><summary>manual g-code</summary>` +
-    `<textarea id="gcode-textarea" spellcheck="false"></textarea>` +
-    `<div class="row"><button id="run-gcode">run</button></div>` +
-    `</details>` +
-    `<div id="run-status" class="status-line"></div>` +
-    `<div class="section-head"><h2>session log</h2></div>` +
-    `<div id="sent-log" class="sent-log"></div>` +
-    `</section>` +
+    consoleSectionHtml({}) +
     `</aside>` +
     `</div>`
   );
@@ -397,15 +380,7 @@ function renderPage() {
       `<th></th><th>time</th><th>experiment/tag</th><th>ambient diff vs previous</th><th>verdict</th><th></th>` +
       `</tr></thead><tbody id="journal-body"></tbody></table></div>` +
       `</section>` +
-      `<section class="session">` +
-      `<details class="gcode-details"><summary>manual g-code</summary>` +
-      `<textarea id="gcode-textarea" spellcheck="false"></textarea>` +
-      `<div class="row"><button id="run-gcode">run</button></div>` +
-      `</details>` +
-      `<div id="run-status" class="status-line"></div>` +
-      `<div class="section-head"><h2>session log</h2></div>` +
-      `<div id="sent-log" class="sent-log"></div>` +
-      `</section>` +
+      consoleSectionHtml({}) +
       `</main></div>`;
   } else {
     root.innerHTML =
@@ -422,26 +397,15 @@ function renderPage() {
 }
 
 function bindPageEvents() {
-  const gcode = el("gcode-textarea");
-  if (gcode) {
-    gcode.value = state.gcodeText;
-    gcode.addEventListener("input", () => {
-      state.gcodeText = gcode.value;
-    });
-  }
-  const runBtn = el("run-gcode");
-  if (runBtn) runBtn.addEventListener("click", () => runGcode(manualGcodeLines(), "manual"));
+  bindConsole();
   const applyBtn = el("drive-apply-btn");
   if (applyBtn) applyBtn.addEventListener("click", applyDriveChanges);
-  const sweepBtn = el("run-sweep-btn");
-  if (sweepBtn) sweepBtn.addEventListener("click", runSweep);
   const def = currentPageDef();
   document.querySelectorAll("button.template-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       const t = def.templates[Number(btn.dataset.template)];
-      const sweep = el("sweep-command");
-      if (t && sweep) {
-        sweep.value = t.command;
+      if (t) {
+        setConsoleValue(t.command, true);
         const label = el("form-run-name");
         if (label) label.textContent = "template — edit values before running";
       }
@@ -519,8 +483,8 @@ function renderRuns() {
     const actionTd = document.createElement("td");
     actionTd.className = "actions";
     const prefillBtn = document.createElement("button");
-    prefillBtn.textContent = "→ sweep";
-    prefillBtn.title = "prefill the sweep command from this run";
+    prefillBtn.textContent = "→ console";
+    prefillBtn.title = "prefill the console with this run's command";
     prefillBtn.disabled = !manifest;
     prefillBtn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -562,8 +526,7 @@ function autoSelectInitialRuns() {
   for (const run of withResults.slice(0, INITIAL_SELECTED_RUNS)) {
     state.selected.add(run.name);
   }
-  const sweep = el("sweep-command");
-  if (sweep && !sweep.value) loadRerunForm(withResults[0].name);
+  if (!state.console.text) loadRerunForm(withResults[0].name);
 }
 
 async function refresh() {
@@ -2108,8 +2071,7 @@ function loadRerunForm(name) {
   if (!detail || !detail.manifest) return;
   const label = el("form-run-name");
   if (label) label.textContent = `from ${name}`;
-  const sweep = el("sweep-command");
-  if (sweep) sweep.value = reconstructCommand(detail.manifest);
+  setConsoleValue(reconstructCommand(detail.manifest), false);
 }
 
 // --- moonraker plumbing + session log ---------------------------------------
@@ -2163,9 +2125,8 @@ function renderSentLog() {
 }
 
 /// Sends `lines` (already-built gcode) through the shared Moonraker
-/// plumbing — the grid's Apply, the notch quick actions, the sweep row and
-/// the manual textarea all land in the same session log, which survives
-/// page switches.
+/// plumbing — the grid's Apply and the console land in the same session
+/// log, which survives page switches.
 async function runGcode(lines, label) {
   const base = moonrakerUrl();
   const statusEl = el("run-status");
@@ -2192,21 +2153,196 @@ async function runGcode(lines, label) {
   renderSentLog();
 }
 
-function manualGcodeLines() {
-  const gcode = el("gcode-textarea");
-  if (!gcode) return [];
-  return gcode.value
+// --- console ------------------------------------------------------------------
+
+const CONSOLE_HISTORY_KEY = "servoCalConsoleHistory";
+const CONSOLE_HISTORY_MAX = 500;
+
+function loadConsoleHistory() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CONSOLE_HISTORY_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed.filter((l) => typeof l === "string") : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function pushConsoleHistory(entry) {
+  const hist = state.console.history;
+  if (hist[hist.length - 1] !== entry) hist.push(entry);
+  if (hist.length > CONSOLE_HISTORY_MAX) hist.splice(0, hist.length - CONSOLE_HISTORY_MAX);
+  localStorage.setItem(CONSOLE_HISTORY_KEY, JSON.stringify(hist));
+}
+
+function bindConsole() {
+  const input = el("console-input");
+  if (!input) return;
+  input.value = state.console.text;
+  autosizeConsole(input);
+  input.addEventListener("input", () => {
+    state.console.text = input.value;
+    autosizeConsole(input);
+  });
+  input.addEventListener("keydown", consoleKeydown);
+  input.addEventListener("blur", () => exitConsoleSearch(true));
+}
+
+function autosizeConsole(input) {
+  input.style.height = "auto";
+  input.style.height = `${input.scrollHeight}px`;
+}
+
+function setConsoleValue(text, focus) {
+  state.console.text = text;
+  const input = el("console-input");
+  if (!input) return;
+  input.value = text;
+  input.selectionStart = input.selectionEnd = text.length;
+  autosizeConsole(input);
+  if (focus) input.focus();
+}
+
+function caretOnFirstLine(input) {
+  return input.value.lastIndexOf("\n", input.selectionStart - 1) === -1;
+}
+
+function caretOnLastLine(input) {
+  return input.value.indexOf("\n", input.selectionEnd) === -1;
+}
+
+function consoleKeydown(ev) {
+  const input = ev.target;
+  const c = state.console;
+  if (c.search) {
+    consoleSearchKeydown(ev, input);
+    return;
+  }
+  if (ev.key === "Enter" && !ev.shiftKey) {
+    ev.preventDefault();
+    submitConsole();
+    return;
+  }
+  if (ev.ctrlKey && ev.key === "r") {
+    ev.preventDefault();
+    c.search = { query: "", pos: c.history.length - 1, saved: input.value, failed: false };
+    renderConsoleSearch();
+    return;
+  }
+  const back = (ev.ctrlKey && ev.key === "p") || (ev.key === "ArrowUp" && caretOnFirstLine(input));
+  const fwd = (ev.ctrlKey && ev.key === "n") || (ev.key === "ArrowDown" && caretOnLastLine(input));
+  if (back || fwd) {
+    ev.preventDefault();
+    historyStep(back ? -1 : 1);
+    return;
+  }
+  if (ev.ctrlKey && ev.key === "c" && input.selectionStart === input.selectionEnd) {
+    ev.preventDefault();
+    c.cursor = null;
+    setConsoleValue("", true);
+  }
+}
+
+function historyStep(dir) {
+  const c = state.console;
+  if (!c.history.length) return;
+  if (c.cursor === null) {
+    if (dir > 0) return;
+    c.draft = c.text;
+    c.cursor = c.history.length;
+  }
+  const next = c.cursor + dir;
+  if (next < 0) return;
+  if (next >= c.history.length) {
+    c.cursor = null;
+    setConsoleValue(c.draft, true);
+    return;
+  }
+  c.cursor = next;
+  setConsoleValue(c.history[next], true);
+}
+
+function consoleSearchKeydown(ev, input) {
+  const s = state.console.search;
+  if (ev.ctrlKey && ev.key === "r") {
+    ev.preventDefault();
+    searchHistory(s.pos - 1);
+    return;
+  }
+  if (ev.key === "Escape" || (ev.ctrlKey && ev.key === "g")) {
+    ev.preventDefault();
+    exitConsoleSearch(false);
+    return;
+  }
+  if (ev.key === "Enter" && !ev.shiftKey) {
+    ev.preventDefault();
+    exitConsoleSearch(true);
+    submitConsole();
+    return;
+  }
+  if (ev.key === "Backspace") {
+    ev.preventDefault();
+    s.query = s.query.slice(0, -1);
+    searchHistory(state.console.history.length - 1);
+    return;
+  }
+  if (ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+    ev.preventDefault();
+    s.query += ev.key;
+    searchHistory(s.pos);
+    return;
+  }
+  if (ev.key !== "Shift" && ev.key !== "CapsLock") exitConsoleSearch(true);
+}
+
+function searchHistory(fromIdx) {
+  const s = state.console.search;
+  const hist = state.console.history;
+  if (!s.query) {
+    s.pos = hist.length - 1;
+    s.failed = false;
+    renderConsoleSearch();
+    return;
+  }
+  let idx = Math.min(fromIdx, hist.length - 1);
+  while (idx >= 0 && !hist[idx].includes(s.query)) idx--;
+  s.failed = idx < 0;
+  if (idx >= 0) {
+    s.pos = idx;
+    setConsoleValue(hist[idx], true);
+  }
+  renderConsoleSearch();
+}
+
+function exitConsoleSearch(keep) {
+  const c = state.console;
+  if (!c.search) return;
+  const saved = c.search.saved;
+  c.search = null;
+  if (!keep) setConsoleValue(saved, true);
+  renderConsoleSearch();
+}
+
+function renderConsoleSearch() {
+  const box = el("console-search");
+  if (!box) return;
+  const s = state.console.search;
+  box.textContent = s
+    ? `(reverse-i-search) '${s.query}'${s.failed ? " — no match" : ""}`
+    : "";
+}
+
+async function submitConsole() {
+  const raw = state.console.text.trim();
+  const lines = raw
     .split("\n")
     .map((l) => l.trim())
     .filter((l) => l.length && !l.startsWith(";"));
-}
-
-async function runSweep() {
-  const sweep = el("sweep-command");
-  if (!sweep) return;
-  const line = sweep.value.trim();
-  if (!line || line.startsWith(";")) return;
-  await runGcode([line], "sweep");
+  if (!lines.length) return;
+  pushConsoleHistory(raw);
+  state.console.cursor = null;
+  state.console.draft = "";
+  setConsoleValue("", true);
+  await runGcode(lines, "console");
 }
 
 // --- boot -------------------------------------------------------------------

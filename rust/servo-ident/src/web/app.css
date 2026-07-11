@@ -199,8 +199,7 @@ input[type="number"]::-webkit-inner-spin-button,
 input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 4px; font-size: 11px; }
 
-details.timedomain > summary,
-details.gcode-details > summary {
+details.timedomain > summary {
   cursor: pointer;
   color: var(--dim);
   font-size: 12px;
@@ -285,18 +284,23 @@ details.adaptive-actions .hint { margin: 4px 0 0; }
   white-space: nowrap;
 }
 
-/* --- sweep + session --------------------------------------------------- */
+/* --- console + session -------------------------------------------------- */
 
 .sweep .row { margin-top: 0; }
-#sweep-command { flex: 1; min-width: 0; }
+#live-start-command { flex: 1; min-width: 0; }
 .template-btn { font-size: 11px; color: var(--dim); }
 
-.gcode-details textarea {
-  width: 100%;
-  min-height: 70px;
-  margin-top: 6px;
-  resize: vertical;
+.console-line { display: flex; align-items: flex-start; gap: 7px; margin-top: 8px; }
+.console-prompt { color: var(--accent); padding-top: 3px; user-select: none; }
+#console-input {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  overflow: hidden;
+  line-height: 1.45;
 }
+#console-input:focus { border-color: #2d5a8a; outline: none; }
+.console-search { font-size: 11px; color: var(--dim); min-height: 15px; margin-top: 3px; }
 
 .status-line { font-size: 11px; margin: 6px 0; }
 .status-ok { color: var(--good); }
