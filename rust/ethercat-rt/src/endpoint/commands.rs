@@ -8,7 +8,7 @@ use crate::clock::monotonic_ns;
 use crate::curves::AXIS_RING_CAPACITY;
 use crate::mailbox::{MailboxReply, MailboxRequest};
 use crate::push_plan::plan_bundle;
-use crate::sensorless::ERR_ARM_SENSORLESS_BAD_THRESHOLD;
+use crate::sensorless::{ERR_ARM_SENSORLESS_AMBIGUOUS_PAIR, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
 use crate::sync::{
     PairSync, SyncParams, ERR_PIECES_DURING_SYNC, ERR_SYNC_ABORTED, ERR_SYNC_BAD_AXIS,
     ERR_SYNC_BUSY, ERR_SYNC_NOT_ENABLED, ERR_SYNC_STREAMING,
@@ -19,13 +19,14 @@ use crate::wire::{
     motor_state_response_frame_multi, push_pieces_response_frame_multi,
     resonance_buzz_response_frame, restore_drive_limits_response_frame,
     resume_stream_response_frame, runtime_caps_response_frame, sdo_read_response_frame,
-    sdo_write_response_frame, seed_servo_home_response_frame, set_drive_limits_response_frame,
-    set_torque_response_frame, start_capture_response_frame, stop_capture_response_frame,
-    stop_response_frame, sync_pair_response_frame, Command,
+    sdo_write_response_frame, seed_servo_home_response_frame, set_diff_damper_response_frame,
+    set_drive_limits_response_frame, set_torque_response_frame, start_capture_response_frame,
+    stop_capture_response_frame, stop_response_frame, sync_pair_response_frame, Command,
 };
 use mcu_protocol::messages::{
     ArmSensorlessEndstop, PushPieces, ResonanceBuzz, SdoRead, SdoReadResponse, SdoWrite,
-    SdoWriteResponse, SetDriveLimits, SetTorque, StartCapture, StopCaptureResponse, SyncPair,
+    SdoWriteResponse, SetDiffDamper, SetDriveLimits, SetTorque, StartCapture, StopCaptureResponse,
+    SyncPair,
 };
 
 pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
@@ -137,6 +138,12 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
                 msg,
             } => {
                 handle_sync_pair(ctx, correlation_id, msg);
+            }
+            Command::SetDiffDamper {
+                correlation_id,
+                msg,
+            } => {
+                handle_set_diff_damper(ctx, correlation_id, msg);
             }
             Command::SdoRead {
                 correlation_id,
@@ -397,13 +404,42 @@ fn handle_arm_sensorless_endstop(
             eprintln!("ec-rt: ArmSensorlessEndstop rejected — zero torque trip threshold");
             ERR_ARM_SENSORLESS_BAD_THRESHOLD
         } else {
-            ctx.sensorless
-                .arm(msg.slot as usize, msg.endstop_id, msg.torque_trip_tenth_pct);
-            eprintln!(
-                "ec-rt: sensorless endstop {} armed on slot {} (torque_trip={} 0.1%)",
-                msg.endstop_id, msg.slot, msg.torque_trip_tenth_pct
-            );
-            0
+            // A belt-pair slot trips on the pair's common-mode torque: the
+            // crash pushes both rotors the same mechanical way while the
+            // pair's standing fight (and the differential damper's
+            // injection) is antisymmetric and cancels out of the average.
+            let slot = msg.slot as usize;
+            let partners: Vec<usize> = ctx
+                .slave_axes
+                .iter()
+                .enumerate()
+                .filter(|&(s, &axis)| s != slot && axis == ctx.slave_axes[slot])
+                .map(|(s, _)| s)
+                .collect();
+            match partners[..] {
+                [] | [_] => {
+                    let partner = partners.first().copied();
+                    ctx.sensorless
+                        .arm(slot, msg.endstop_id, msg.torque_trip_tenth_pct, partner);
+                    eprintln!(
+                        "ec-rt: sensorless endstop {} armed on slot {} \
+                         (torque_trip={} 0.1% partner={partner:?})",
+                        msg.endstop_id, msg.slot, msg.torque_trip_tenth_pct
+                    );
+                    0
+                }
+                _ => {
+                    eprintln!(
+                        "ec-rt: ArmSensorlessEndstop rejected — slot {slot} shares \
+                         axis {} with {} other slots, need at most one partner \
+                         (slave_axes={:?})",
+                        ctx.slave_axes[slot],
+                        partners.len(),
+                        ctx.slave_axes
+                    );
+                    ERR_ARM_SENSORLESS_AMBIGUOUS_PAIR
+                }
+            }
         }
     } else {
         ctx.sensorless.disarm(msg.slot as usize);
@@ -467,6 +503,42 @@ fn handle_resonance_buzz(ctx: &mut EndpointCtx, correlation_id: u32, msg: Resona
     };
     ctx.server
         .respond(&resonance_buzz_response_frame(correlation_id, rc));
+}
+
+fn handle_set_diff_damper(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDiffDamper) {
+    let rc = if ctx.sync.is_some() {
+        eprintln!("ec-rt: SetDiffDamper rejected — pair sync in progress");
+        ERR_SYNC_BUSY
+    } else {
+        ctx.damper.set(
+            ctx.num_slaves,
+            msg.slot_a,
+            msg.slot_b,
+            msg.gain_milli,
+            msg.clamp_tenths,
+            msg.lpf_millihz,
+            msg.lead_us,
+        )
+    };
+    eprintln!(
+        "ec-rt: SetDiffDamper slots=({},{}) gain_milli={} clamp={} 0.1% \
+         lpf={} mHz lead={} us rc={rc}",
+        msg.slot_a, msg.slot_b, msg.gain_milli, msg.clamp_tenths, msg.lpf_millihz, msg.lead_us,
+    );
+    tracing::info!(
+        subsystem = "ethercat",
+        event = "set_diff_damper",
+        slot_a = msg.slot_a,
+        slot_b = msg.slot_b,
+        gain_milli = msg.gain_milli,
+        clamp_tenths = msg.clamp_tenths,
+        lpf_millihz = msg.lpf_millihz,
+        lead_us = msg.lead_us,
+        rc,
+        "differential damper reconfigured"
+    );
+    ctx.server
+        .respond(&set_diff_damper_response_frame(correlation_id, rc));
 }
 
 fn handle_sdo_read(ctx: &mut EndpointCtx, correlation_id: u32, msg: SdoRead) {

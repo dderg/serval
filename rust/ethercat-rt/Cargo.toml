@@ -52,6 +52,7 @@ cc = "1"                                            # compiles csrc/libecrt_igh.
 
 [dev-dependencies]
 host-rt = { path = "../host-rt" }
+libm = { version = "0.2", default-features = false }
 servo-ident = { path = "../servo-ident" }
 
 [lints]

@@ -94,7 +94,9 @@ fn run_endpoint(socket_path: String, faulted: Arc<AtomicBool>) {
                 Command::SdoRead { .. } | Command::SdoWrite { .. } => {
                     todo!("wired in the endpoint task")
                 }
-                Command::Unknown { .. } | Command::SyncPair { .. } => {}
+                Command::Unknown { .. }
+                | Command::SyncPair { .. }
+                | Command::SetDiffDamper { .. } => {}
             }
         }
 
