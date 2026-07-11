@@ -3,7 +3,7 @@ import math
 import struct
 from collections import defaultdict, namedtuple
 
-from . import motion_kinematics, stepper
+from . import stepper
 from .extras import servo_axis
 from .stepper import DEFAULT_STEP_PULSE_DURATION
 
@@ -39,27 +39,16 @@ def declared_axis_order(motion):
 
 
 def build_follower_steppers(motion, config):
-    motion.follower_steppers = []
-    claimed = set(motion_kinematics.read_claimed_axes(config))
-    for name, _follows, motors, _pp in motion.axis_sections:
-        if name in claimed or not motors:
-            continue
-        for motor_name in motors:
-            motor_section, drive = motion_kinematics.resolve_motor_section(
-                config, motor_name, "[axis %s] motors" % name
-            )
-            if drive != "stepper":
-                raise config.error(
-                    "[axis %s] motors references '%s' with drive: %s — "
-                    "follower axes support stepper motors only"
-                    % (name, motor_name, drive)
-                )
-            motion.follower_steppers.append(
-                stepper.PrinterStepper(
-                    motor_section,
-                    name=motion_kinematics.motor_short_name(motor_section),
-                )
-            )
+    if motion.kinematics_decl is None:
+        raise config.error("[kinematics] section is required")
+    _kind, _lanes, followers = motion.kinematics_decl
+    motion.follower_steppers = [
+        stepper.PrinterStepper(
+            config.getsection("motor " + motor_name), name=motor_name
+        )
+        for _axis, motors, _slot in followers
+        for motor_name in motors
+    ]
 
 
 STEP_EDGE_FLOOR_SECONDS = 0.000001
@@ -162,9 +151,7 @@ def init_planner(motion):
         return
 
     try:
-        motion.engine.init_planner(
-            motion._motion_config_text, topology, motion.kin.claimed_axes()
-        )
+        motion.engine.init_planner(motion._motion_config_text, topology)
         motion._configure_axes_per_mcu(engine_mcus)
         motion._planner_ready = True
 
@@ -174,25 +161,8 @@ def init_planner(motion):
 
 
 def follower_slots(motion):
-    claimed = set(motion.kin.claimed_axes())
-    lane_slots = {
-        lane_idx for lane_idx, _axis_name, _motor_names in motion.kin.lanes()
-    }
-    free_slots = [i for i in range(4) if i not in lane_slots]
-    followers = [
-        (name, motors)
-        for name, _follows, motors, _pp in motion.axis_sections
-        if name not in claimed and motors
-    ]
-    if len(followers) > len(free_slots):
-        raise motion.printer.command_error(
-            "%d follower axes declared but only %d motion slot(s) free of "
-            "kinematics lanes" % (len(followers), len(free_slots))
-        )
-    return [
-        (name, motors, slot)
-        for (name, motors), slot in zip(followers, free_slots)
-    ]
+    _kind, _lanes, followers = motion.kinematics_decl
+    return list(followers)
 
 
 def build_slot_steppers(motion):

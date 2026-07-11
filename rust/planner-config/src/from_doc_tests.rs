@@ -194,3 +194,207 @@ fn interpolation_refs_are_consumed() {
             .any(|c| c.section == "vars" && c.option == "speed")
     );
 }
+
+const COREXY_TOPOLOGY: &str = "\
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z0, z1
+
+[axis x]
+[axis y]
+[axis z]
+
+[motor a]
+drive: stepper
+[motor b]
+drive: stepper
+[motor z0]
+drive: stepper
+[motor z1]
+drive: stepper
+";
+
+fn corexy(extra: &str) -> String {
+    format!("{MINIMAL}{COREXY_TOPOLOGY}{extra}")
+}
+
+#[test]
+fn kinematics_absent_reads_as_none() {
+    assert!(settings(MINIMAL).kinematics.is_none());
+}
+
+#[test]
+fn corexy_topology_parses_lanes_and_claimed_axes() {
+    use crate::from_doc::Drive;
+    let kin = settings(&corexy("")).kinematics.expect("declared");
+    assert_eq!(kin.kind, "corexy");
+    assert_eq!(kin.claimed_axes(), ["x", "y", "z"]);
+    assert_eq!(kin.lanes.len(), 3);
+    assert_eq!(kin.lanes[0].lane_idx, 0);
+    assert_eq!(kin.lanes[0].axis, "x");
+    assert_eq!(kin.lanes[0].motors, ["a"]);
+    assert_eq!(kin.lanes[0].drive, Drive::Stepper);
+    assert_eq!(kin.lanes[2].motors, ["z0", "z1"]);
+    assert!(kin.followers.is_empty());
+}
+
+#[test]
+fn printer_kinematics_key_rejected() {
+    let err = read_err(&format!(
+        "[printer]\nmax_velocity: 300\nmax_accel: 3000\nkinematics: corexy\n{COREXY_TOPOLOGY}"
+    ));
+    assert!(err.contains("declare a [kinematics] section"), "{err}");
+}
+
+#[test]
+fn unknown_kinematics_type_lists_supported() {
+    let err = read_err(&corexy("").replace("type: corexy", "type: hybrid_corexy"));
+    assert_eq!(
+        err,
+        "[kinematics] type 'hybrid_corexy' is not supported (supported: cartesian, corexy)"
+    );
+}
+
+#[test]
+fn role_bound_to_undeclared_axis_rejected() {
+    let err = read_err(&corexy("").replace("axis_x: x", "axis_x: w"));
+    assert_eq!(
+        err,
+        "[kinematics] axis_x binds to axis 'w' but no [axis w] section exists"
+    );
+}
+
+#[test]
+fn lane_without_motors_rejected() {
+    let err = read_err(&corexy("").replace("a_motors: a", "a_motors:"));
+    assert_eq!(
+        err,
+        "[kinematics] a_motors declares no motors (lane 0 needs at least one motor)"
+    );
+}
+
+#[test]
+fn missing_motor_section_names_the_referencer() {
+    let mut cfg = corexy("");
+    cfg = cfg.replace("[motor a]\ndrive: stepper\n", "");
+    let err = read_err(&cfg);
+    assert_eq!(
+        err,
+        "[kinematics] a_motors references motor 'a' but no [motor a] section exists"
+    );
+}
+
+#[test]
+fn missing_drive_uses_klippy_wording() {
+    let err = read_err(&corexy("").replace("[motor a]\ndrive: stepper", "[motor a]"));
+    assert_eq!(err, "Option 'drive' in section 'motor a' must be specified");
+}
+
+#[test]
+fn invalid_drive_uses_klippy_choice_wording() {
+    let err =
+        read_err(&corexy("").replace("[motor a]\ndrive: stepper", "[motor a]\ndrive: brushless"));
+    assert_eq!(
+        err,
+        "Choice 'brushless' for option 'drive' in section 'motor a' is not a valid choice"
+    );
+}
+
+#[test]
+fn mixed_drive_lane_rejected() {
+    let err =
+        read_err(&corexy("").replace("[motor z1]\ndrive: stepper", "[motor z1]\ndrive: servo"));
+    assert_eq!(
+        err,
+        "[kinematics] z_motors mixes stepper and servo motors in one lane; a lane must \
+         be all-stepper or all-servo"
+    );
+}
+
+#[test]
+fn orphan_motors_rejected_sorted() {
+    let err = read_err(&corexy(
+        "[motor spare_b]\ndrive: stepper\n[motor spare_a]\ndrive: stepper\n",
+    ));
+    assert_eq!(
+        err,
+        "motor(s) [motor spare_a], [motor spare_b] declared but not assigned to any \
+         axis (reference them from a [kinematics] role list or [axis <name>] motors:)"
+    );
+}
+
+#[test]
+fn follower_takes_the_free_slot() {
+    let kin = settings(&corexy(
+        "[axis e]\nfollows: x\nmotors: extruder\n[motor extruder]\ndrive: stepper\n",
+    ))
+    .kinematics
+    .expect("declared");
+    assert_eq!(kin.followers.len(), 1);
+    assert_eq!(kin.followers[0].axis, "e");
+    assert_eq!(kin.followers[0].motors, ["extruder"]);
+    assert_eq!(kin.followers[0].slot, 3);
+}
+
+#[test]
+fn follower_declared_before_spatial_axes_still_gets_the_free_slot() {
+    // A follower [axis e] parsed first (e.g. via an [include] processed
+    // early) must not shadow a kinematics lane slot.
+    let cfg = format!(
+        "{MINIMAL}[axis e]\nfollows: x\nmotors: extruder\n[motor extruder]\ndrive: stepper\n{COREXY_TOPOLOGY}"
+    );
+    let kin = settings(&cfg).kinematics.expect("declared");
+    assert_eq!(kin.followers[0].slot, 3);
+}
+
+#[test]
+fn servo_follower_rejected() {
+    let err = read_err(&corexy(
+        "[axis e]\nfollows: x\nmotors: extruder\n[motor extruder]\ndrive: servo\n",
+    ));
+    assert_eq!(
+        err,
+        "[axis e] motors references 'extruder' with drive: servo — follower axes \
+         support stepper motors only"
+    );
+}
+
+#[test]
+fn follower_overflow_rejected() {
+    let extra = "[axis e]\nfollows: x\nmotors: m_e\n[motor m_e]\ndrive: stepper\n\
+                 [axis f]\nfollows: x\nmotors: m_f\n[motor m_f]\ndrive: stepper\n";
+    let err = read_err(&corexy(extra));
+    assert_eq!(
+        err,
+        "2 follower axes declared but only 1 motion slot(s) free of kinematics lanes"
+    );
+}
+
+#[test]
+fn kinematics_options_reported_as_consumed() {
+    let doc = Document::parse(&corexy(""), "test.cfg").expect("parse ok");
+    let (_, consumed) = read_motion_settings(&doc).expect("read ok");
+    let text = |section: &str, option: &str| {
+        consumed
+            .iter()
+            .find(|c| c.section == section && c.option == option)
+            .map(|c| c.value.clone())
+    };
+    assert_eq!(
+        text("kinematics", "type"),
+        Some(ConsumedValue::Text("corexy".to_owned()))
+    );
+    assert_eq!(
+        text("kinematics", "z_motors"),
+        Some(ConsumedValue::Text("z0, z1".to_owned()))
+    );
+    assert_eq!(
+        text("motor z1", "drive"),
+        Some(ConsumedValue::Text("stepper".to_owned()))
+    );
+}

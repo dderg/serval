@@ -750,9 +750,10 @@ class Motion:
 
     def _load_motion_config(self, config):
         """Parse and validate the motion-owned sections ([printer] limits,
-        [axis], [limit], [post_processor], [extruder] caps) with the native
-        reader — the same one the engine re-runs at init_planner — and
-        record every option it consumed for the unused-option accounting."""
+        [kinematics] + [motor] topology, [axis], [limit], [post_processor],
+        [extruder] caps) with the native reader — the same one the engine
+        re-runs at init_planner — and record every option it consumed for
+        the unused-option accounting."""
         self._motion_config_text = config.fileconfig.write_string()
         (
             (
@@ -765,6 +766,7 @@ class Motion:
             ),
             self.axis_sections,
             self._limit_sections,
+            self.kinematics_decl,
             consumed,
         ) = configfile._config_doc.read_motion_settings(
             self._motion_config_text

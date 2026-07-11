@@ -25,15 +25,18 @@ type RefTuple = (String, String, String);
 /// Bumped on any change to the Python-visible surface; klippy's loader
 /// refuses a module whose API_VERSION does not match, so a stale build
 /// fails loud instead of running with skewed semantics.
-const API_VERSION: u32 = 2;
+const API_VERSION: u32 = 3;
 
-/// Parse the motion-owned config sections ([printer] limits, [axis],
-/// [limit], [post_processor], [extruder] extrude-only caps) with the same
-/// reader the engine's init_planner uses. Returns:
+/// Parse the motion-owned config sections ([printer] limits, [kinematics]
+/// + [motor] topology, [axis], [limit], [post_processor], [extruder]
+/// extrude-only caps) with the same reader the engine's init_planner uses.
+/// Returns:
 ///   ((max_velocity, max_accel, max_jerk, max_z_velocity, max_z_accel,
 ///     corner_deviation),
 ///    [(axis, follows, motors, post_processors)],
 ///    [(limit, axes, max_velocity, max_accel, max_jerk)],
+///    (kind, [(lane_idx, axis, motors, drive)], [(axis, motors, slot)])
+///        or None when the config has no [kinematics] section,
 ///    [(section, option, value)])   — every option consumed, for klippy's
 ///                                    access tracking.
 #[pyfunction]
@@ -45,6 +48,11 @@ fn read_motion_settings(
     (f64, f64, f64, f64, f64, f64),
     Vec<(String, Vec<String>, Vec<String>, Vec<String>)>,
     Vec<(String, Vec<String>, Option<f64>, Option<f64>, Option<f64>)>,
+    Option<(
+        String,
+        Vec<(usize, String, Vec<String>, &'static str)>,
+        Vec<(String, Vec<String>, usize)>,
+    )>,
     Vec<(String, String, Py<PyAny>)>,
 )> {
     use planner_config::from_doc::ConsumedValue;
@@ -72,6 +80,19 @@ fn read_motion_settings(
         .into_iter()
         .map(|l| (l.name, l.axes, l.max_velocity, l.max_accel, l.max_jerk))
         .collect();
+    let kinematics = settings.kinematics.map(|k| {
+        (
+            k.kind,
+            k.lanes
+                .into_iter()
+                .map(|l| (l.lane_idx, l.axis, l.motors, l.drive.as_str()))
+                .collect(),
+            k.followers
+                .into_iter()
+                .map(|f| (f.axis, f.motors, f.slot))
+                .collect(),
+        )
+    });
     let consumed = consumed
         .into_iter()
         .map(|entry| {
@@ -82,7 +103,7 @@ fn read_motion_settings(
             Ok((entry.section, entry.option, value))
         })
         .collect::<PyResult<_>>()?;
-    Ok((cartesian, axes, limits, consumed))
+    Ok((cartesian, axes, limits, kinematics, consumed))
 }
 
 #[pyclass(name = "ConfigDocument")]

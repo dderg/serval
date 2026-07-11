@@ -30,15 +30,16 @@ impl McuTopology {
     }
 }
 
-fn planner_config_from_settings(
-    settings: &MotionSettings,
-    kinematics_axes: &[String],
-) -> PyResult<config::PlannerConfig> {
+fn planner_config_from_settings(settings: &MotionSettings) -> PyResult<config::PlannerConfig> {
+    let kinematics = settings
+        .kinematics
+        .as_ref()
+        .ok_or_else(|| PyValueError::new_err("[kinematics] section is required"))?;
     let axis_registry = config::AxisRegistry::try_new(settings.axes.clone())
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     axis_registry
-        .validate_motor_mapping(kinematics_axes)
+        .validate_motor_mapping(&kinematics.claimed_axes())
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let post_processor_set =
@@ -126,12 +127,7 @@ impl PyMotionEngine {
     /// sections are re-read here with the same reader
     /// (`_config_doc.read_motion_settings`) klippy used at config time, so
     /// the planner cannot drift from what the host validated and reported.
-    fn init_planner(
-        &self,
-        config_text: &str,
-        mcus: Vec<McuTopology>,
-        kinematics_axes: Vec<String>,
-    ) -> PyResult<()> {
+    fn init_planner(&self, config_text: &str, mcus: Vec<McuTopology>) -> PyResult<()> {
         if self.planner.lock_ok().is_some() {
             return Err(PyRuntimeError::new_err("planner already initialized"));
         }
@@ -139,7 +135,7 @@ impl PyMotionEngine {
         let doc = config_doc::Document::parse(config_text, "<config>")
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (settings, _consumed) = read_motion_settings(&doc).map_err(PyValueError::new_err)?;
-        let cfg = planner_config_from_settings(&settings, &kinematics_axes)?;
+        let cfg = planner_config_from_settings(&settings)?;
         *self.planner_config.lock_ok() = cfg.clone();
 
         let mcus: Vec<McuTopologyInput> = mcus.into_iter().map(McuTopology::into_core).collect();
