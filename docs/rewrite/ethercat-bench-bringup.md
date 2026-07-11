@@ -104,6 +104,9 @@ position_max: 300
 #homing_speed: 50
 #homing_retract_dist: 5        # back-off after endstop contact (default 5, 0 disables)
 #homing_retract_speed: 50      # back-off speed (default: homing_speed)
+#sensorless_home_offset: 0     # mm the recorded endstop sits inside the sensorless
+                               # crash point — margin for encoder noise and belt
+                               # stretch so full-range moves stop short of the wall
 # Drive protection (homing-scoped: written to 6065h/6072h around each G28,
 # restored after; a trip de-energizes the drive and fails the G28 loudly):
 #homing_following_error: 2.5   # mm of commanded-vs-actual deviation (default 2.5)

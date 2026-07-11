@@ -51,6 +51,9 @@ pub(super) fn run_cycle(ctx: &mut EndpointCtx) -> ControlFlow<()> {
 
     let (motion_active, all_acc, all_vel) = compute_motion_targets(ctx, apply_time);
 
+    ctx.sensorless
+        .record_commanded(apply_time, |slot| ctx.last_counts[slot]);
+
     poll_sync(ctx, apply_time);
 
     handle_ring_fault(ctx);
@@ -101,17 +104,34 @@ pub(super) fn apply_tick_action(ctx: &mut EndpointCtx, apply_time: u64, all_ring
 
 fn poll_sensorless(ctx: &mut EndpointCtx, apply_time: u64) {
     let server = &mut ctx.server;
+    let drive = &ctx.drive;
+    let cmd_counts_per_mm = &ctx.cmd_counts_per_mm;
     let sensorless_tripped = ctx.sensorless.poll(
+        apply_time,
         |slot| {
-            let dir = ctx.cmd_counts_per_mm[slot].signum() as i32;
-            (dir * i32::from(ctx.drive.torque_actual(slot))) as i16
+            let dir = cmd_counts_per_mm[slot].signum() as i32;
+            (dir * i32::from(drive.torque_actual(slot))) as i16
         },
-        |slot, endstop_id, torque| {
+        |slot| drive.position_actual(slot),
+        |slot, endstop_id, torque, contact_clock| {
+            let windup_ns = apply_time.saturating_sub(contact_clock);
             eprintln!(
                 "ec-rt: sensorless endstop {endstop_id} tripped on slot {slot} \
-                 torque={torque} — local stop, stream halted, trip_clock={apply_time}"
+                 torque={torque} — local stop, stream halted, \
+                 contact_clock={contact_clock} ({windup_ns} ns before the trip)"
             );
-            server.respond(&endstop_trip_frame(endstop_id, apply_time));
+            tracing::info!(
+                subsystem = "ethercat",
+                event = "sensorless_trip",
+                slot,
+                endstop_id,
+                torque,
+                trip_clock = apply_time,
+                contact_clock,
+                windup_ns,
+                "sensorless endstop tripped — reporting commanded-crossing clock"
+            );
+            server.respond(&endstop_trip_frame(endstop_id, contact_clock));
         },
     );
     if sensorless_tripped {
