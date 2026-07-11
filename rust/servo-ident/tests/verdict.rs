@@ -11,6 +11,7 @@ fn step_result(name: &str, flags: &[&str]) -> StepResult {
         drives: BTreeMap::new(),
         combined: None,
         accel: None,
+        differential: None,
         flags: flags.iter().map(|s| s.to_string()).collect(),
     }
 }

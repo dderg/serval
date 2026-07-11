@@ -239,6 +239,12 @@ select.cell-input { text-align: left; }
 
 .rederive { color: #7db8f0; font-size: 11px; }
 
+/* --- differential belt FRF (dynamics page) ----------------------------- */
+
+#frf-modes h3 { margin-top: 10px; }
+table.mode-table { width: auto; }
+table.mode-table th, table.mode-table td { padding: 2px 16px 2px 0; }
+
 /* --- PSD peak list (notches page) ------------------------------------- */
 
 .peak-row {

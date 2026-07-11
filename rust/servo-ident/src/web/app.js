@@ -53,8 +53,8 @@ const PAGE_DEFS = {
   dynamics: {
     label: "dynamics",
     groups: ["load"],
-    experiments: ["tracking", "inertia_grid"],
-    charts: [],
+    experiments: ["tracking", "inertia_grid", "differential"],
+    charts: ["frf"],
     fitRunner: true,
     intro: "identify the load, then let feedforward carry it",
   },
@@ -293,6 +293,16 @@ function analysisSectionsHtml(def) {
       `</tr></thead><tbody id="journal-body"></tbody></table></div>` +
       `</section>`
   );
+  if (def.charts && def.charts.includes("frf")) {
+    parts.push(
+      `<section class="frf-section" id="frf-section" hidden>` +
+        `<div class="section-head"><h2>differential belt FRF</h2>` +
+        `<span class="note" id="frf-meta"></span></div>` +
+        `<div class="charts" id="frf-charts"></div>` +
+        `<div id="frf-modes"></div>` +
+        `</section>`
+    );
+  }
   if (def.charts && def.charts.includes("psd")) {
     parts.push(
       `<section class="psd-section">` +
@@ -747,7 +757,8 @@ function psdAccelTraces(names, plots, stepName) {
   return traces;
 }
 
-function drawPsdChart(canvas, traces, band, yTitle, hover) {
+function drawPsdChart(canvas, traces, band, yTitle, hover, opts) {
+  opts = opts || {};
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth || canvas.width;
   const h = canvas.clientHeight || canvas.height;
@@ -764,22 +775,27 @@ function drawPsdChart(canvas, traces, band, yTitle, hover) {
   ctx.fillRect(0, 0, w, h);
   const pad = { l: 46, r: 8, t: 8, b: 22 };
   const EPS = 1e-6;
-  let fMin = Infinity, fMax = -Infinity, logMin = Infinity, logMax = -Infinity;
+  const toV = (raw) => (opts.linear ? raw : Math.log10(Math.max(raw, EPS)));
+  let fMin = Infinity, fMax = -Infinity, vMin = Infinity, vMax = -Infinity;
   for (const tr of traces) {
     for (let i = 0; i < tr.freq.length; i++) {
       const f = tr.freq[i];
-      const lv = Math.log10(Math.max(tr.y[i], EPS));
+      const v = toV(tr.y[i]);
       fMin = Math.min(fMin, f);
       fMax = Math.max(fMax, f);
-      logMin = Math.min(logMin, lv);
-      logMax = Math.max(logMax, lv);
+      vMin = Math.min(vMin, v);
+      vMax = Math.max(vMax, v);
     }
   }
-  if (!isFinite(fMin) || !isFinite(logMin)) return;
-  if (logMin === logMax) { logMin -= 1; logMax += 1; }
+  if (opts.fixedY) {
+    vMin = opts.fixedY.yMin;
+    vMax = opts.fixedY.yMax;
+  }
+  if (!isFinite(fMin) || !isFinite(vMin)) return;
+  if (vMin === vMax) { vMin -= 1; vMax += 1; }
   const x = (f) => pad.l + ((f - fMin) / (fMax - fMin || 1)) * (w - pad.l - pad.r);
-  const yOfLog = (lv) => h - pad.b - ((lv - logMin) / (logMax - logMin || 1)) * (h - pad.t - pad.b);
-  const y = (v) => yOfLog(Math.log10(Math.max(v, EPS)));
+  const yOfV = (v) => h - pad.b - ((v - vMin) / (vMax - vMin || 1)) * (h - pad.t - pad.b);
+  const y = (raw) => yOfV(toV(raw));
 
   if (band) {
     const [blo, bhi] = band;
@@ -796,11 +812,11 @@ function drawPsdChart(canvas, traces, band, yTitle, hover) {
   ctx.font = "10px monospace";
   ctx.beginPath();
   for (let i = 0; i <= 4; i++) {
-    const lv = logMin + ((logMax - logMin) * i) / 4;
-    const py = yOfLog(lv);
+    const v = vMin + ((vMax - vMin) * i) / 4;
+    const py = yOfV(v);
     ctx.moveTo(pad.l, py);
     ctx.lineTo(w - pad.r, py);
-    ctx.fillText(`1e${lv.toFixed(1)}`, 2, py + 3);
+    ctx.fillText(opts.linear ? v.toFixed(2) : `1e${v.toFixed(1)}`, 2, py + 3);
   }
   for (let i = 0; i <= 4; i++) {
     const f = fMin + ((fMax - fMin) * i) / 4;
@@ -808,6 +824,17 @@ function drawPsdChart(canvas, traces, band, yTitle, hover) {
     ctx.fillText(f.toFixed(0) + "Hz", px, h - 6);
   }
   ctx.stroke();
+
+  if (opts.threshold != null) {
+    ctx.strokeStyle = "#d9a441";
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    const py = y(opts.threshold);
+    ctx.moveTo(pad.l, py);
+    ctx.lineTo(w - pad.r, py);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
 
   for (const tr of traces) {
     ctx.strokeStyle = tr.color;
@@ -823,6 +850,22 @@ function drawPsdChart(canvas, traces, band, yTitle, hover) {
     ctx.stroke();
   }
   ctx.setLineDash([]);
+
+  if (opts.markers) {
+    ctx.setLineDash([3, 3]);
+    opts.markers.forEach((m, idx) => {
+      if (m.freq < fMin || m.freq > fMax) return;
+      const px = x(m.freq);
+      ctx.strokeStyle = "#b388ff";
+      ctx.beginPath();
+      ctx.moveTo(px, pad.t);
+      ctx.lineTo(px, h - pad.b);
+      ctx.stroke();
+      ctx.fillStyle = "#b388ff";
+      ctx.fillText(m.label, px + 4, pad.t + 12 + (idx % 3) * 10);
+    });
+    ctx.setLineDash([]);
+  }
 
   if (band) {
     const [blo, bhi] = band;
@@ -870,7 +913,8 @@ function drawPsdChart(canvas, traces, band, yTitle, hover) {
       ctx.beginPath();
       ctx.arc(px, py, 3, 0, Math.PI * 2);
       ctx.fill();
-      const text = `${best.tr.freq[best.i].toFixed(1)} Hz  ${best.tr.y[best.i].toExponential(2)}  ${best.tr.label}`;
+      const value = opts.linear ? best.tr.y[best.i].toFixed(2) : best.tr.y[best.i].toExponential(2);
+      const text = `${best.tr.freq[best.i].toFixed(1)} Hz  ${value}  ${best.tr.label}`;
       const tw = ctx.measureText(text).width;
       const tx = Math.min(Math.max(px + 8, pad.l), w - pad.r - tw - 8);
       const ty = Math.max(py - 10, pad.t + 12);
@@ -887,14 +931,14 @@ function drawPsdChart(canvas, traces, band, yTitle, hover) {
 /// Redraws with the cursor position on every move — the readout follows
 /// the nearest sample, so exact peak frequencies are readable instead of
 /// eyeballed off the axis.
-function attachPsdHover(canvas, traces, band, yTitle) {
+function attachPsdHover(canvas, traces, band, yTitle, opts) {
   canvas.addEventListener("mousemove", (e) => {
-    drawPsdChart(canvas, traces, band, yTitle, { mx: e.offsetX, my: e.offsetY });
+    drawPsdChart(canvas, traces, band, yTitle, { mx: e.offsetX, my: e.offsetY }, opts);
   });
-  canvas.addEventListener("mouseleave", () => drawPsdChart(canvas, traces, band, yTitle));
+  canvas.addEventListener("mouseleave", () => drawPsdChart(canvas, traces, band, yTitle, null, opts));
 }
 
-function psdBox(title, traces, band, yTitle, names) {
+function psdBox(title, traces, band, yTitle, names, opts) {
   const box = document.createElement("div");
   box.className = "chart-box";
   const head = document.createElement("h3");
@@ -904,8 +948,8 @@ function psdBox(title, traces, band, yTitle, names) {
   canvas.width = 860;
   canvas.height = 280;
   box.appendChild(canvas);
-  drawPsdChart(canvas, traces, band, yTitle);
-  attachPsdHover(canvas, traces, band, yTitle);
+  drawPsdChart(canvas, traces, band, yTitle, null, opts);
+  attachPsdHover(canvas, traces, band, yTitle, opts);
   const legend = document.createElement("div");
   legend.className = "legend";
   names.forEach((n, i) => {
@@ -951,6 +995,139 @@ function renderPsdChips(stepNames) {
     });
     container.appendChild(chip);
   }
+}
+
+// --- differential belt FRF (dynamics page) -----------------------------------
+
+const FRF_BOXES = [
+  { key: "mag_db", title: "magnitude", yTitle: "|H| (dB)" },
+  { key: "phase_deg", title: "phase", yTitle: "phase (deg)" },
+  { key: "coherence", title: "coherence", yTitle: "coherence" },
+  { key: "torque_db", title: "torque FRF", yTitle: "torque (dB)" },
+];
+
+function differentialSeries(step) {
+  const d = step.differential;
+  if (!d) return null;
+  const n = d.freq_hz.length;
+  for (const spec of FRF_BOXES) {
+    const arr = d[spec.key];
+    if (!Array.isArray(arr) || arr.length !== n) {
+      throw new Error(
+        `${step.name}: differential.${spec.key} length ${Array.isArray(arr) ? arr.length : "missing"} != freq_hz length ${n}`
+      );
+    }
+  }
+  return d;
+}
+
+function frfTraces(names, plots, stepName, key) {
+  const traces = [];
+  plots.forEach((p, i) => {
+    const step = p.steps.find((s) => s.name === stepName);
+    const d = step && differentialSeries(step);
+    if (!d) return;
+    traces.push({
+      freq: d.freq_hz,
+      y: d[key],
+      color: PALETTE[i % PALETTE.length],
+      dashed: false,
+      label: names[i],
+      run: names[i],
+    });
+  });
+  return traces;
+}
+
+function frfModeMarkers(modes) {
+  return modes.map((m) => ({
+    freq: m.freq_hz,
+    label: `${m.freq_hz.toFixed(1)} Hz${m.damping == null ? "" : ` ζ=${m.damping.toFixed(3)}`}`,
+  }));
+}
+
+function frfModeTableHtml(modes) {
+  if (!modes.length) return '<p class="note">no modes detected</p>';
+  const rows = modes
+    .map(
+      (m) =>
+        `<tr><td>${m.freq_hz.toFixed(1)} Hz</td><td>${m.gain_db.toFixed(1)} dB</td>` +
+        `<td>${m.damping == null ? "—" : m.damping.toFixed(3)}</td><td>${m.coherence.toFixed(2)}</td></tr>`
+    )
+    .join("");
+  return (
+    `<table class="mode-table"><thead><tr>` +
+    `<th>freq</th><th>|H|</th><th>damping</th><th>coherence</th>` +
+    `</tr></thead><tbody>${rows}</tbody></table>`
+  );
+}
+
+function differentialResultStep(runName, stepName) {
+  const detail = state.details.get(runName);
+  const step =
+    detail && detail.results && detail.results.steps.find((s) => s.name === stepName);
+  return (step && step.differential) || null;
+}
+
+/// The newest selected run with a differential step drives the mode markers,
+/// the coherence threshold, and the mode table; every selected run's traces
+/// overlay on the four shared-x boxes.
+function renderFrfCharts(names, plots) {
+  const section = el("frf-section");
+  if (!section) return;
+  const container = el("frf-charts");
+  const modesEl = el("frf-modes");
+  const meta = el("frf-meta");
+  container.innerHTML = "";
+  modesEl.innerHTML = "";
+  meta.textContent = "";
+  const stepNames = [
+    ...new Set(plots.flatMap((p) => p.steps.filter((s) => s.differential).map((s) => s.name))),
+  ];
+  if (!stepNames.length) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  const metaParts = [];
+  for (const stepName of stepNames) {
+    let ref = null;
+    let refName = null;
+    for (let i = 0; i < plots.length; i++) {
+      const step = plots[i].steps.find((s) => s.name === stepName);
+      const d = step && differentialSeries(step);
+      if (d) {
+        ref = d;
+        refName = names[i];
+        break;
+      }
+    }
+    for (const spec of FRF_BOXES) {
+      const opts = { linear: true };
+      if (spec.key === "mag_db") opts.markers = frfModeMarkers(ref.modes);
+      if (spec.key === "coherence") {
+        opts.fixedY = { yMin: 0, yMax: 1.05 };
+        opts.threshold = ref.coherence_min;
+      }
+      container.appendChild(
+        psdBox(
+          `${stepName} — ${spec.title}`,
+          frfTraces(names, plots, stepName, spec.key),
+          null,
+          spec.yTitle,
+          names,
+          opts
+        )
+      );
+    }
+    const result = differentialResultStep(refName, stepName);
+    const label = result
+      ? `${result.pair.join(" vs ")} — ${result.segments} Welch segments`
+      : refName;
+    modesEl.innerHTML += `<h3>${stepName} modes — ${label}</h3>${frfModeTableHtml(ref.modes)}`;
+    metaParts.push(label);
+  }
+  meta.textContent = metaParts.join(" · ");
 }
 
 // --- PSD peak list (notches page) -------------------------------------------
@@ -1073,6 +1250,7 @@ async function redrawCharts() {
   if (!state.psdStep || !stepNames.includes(state.psdStep)) {
     state.psdStep = stepNames.length ? defaultPsdStep(okNames, plots, stepNames) : null;
   }
+  if (def.charts && def.charts.includes("frf")) renderFrfCharts(okNames, plots);
   if (def.charts && def.charts.includes("psd")) {
     renderPsdChips(stepNames);
     renderPsdChart(okNames, plots, state.psdStep);
@@ -1750,6 +1928,14 @@ function reconstructCommand(manifest) {
     case "accel_sweep": {
       const values = manifest.steps.map((s) => s.swept.accel ?? Object.values(s.swept)[0]).join(",");
       return `SERVO_SWEEP_ACCEL ACCELS=${values} ${common}${strokeSuffix(manifest, false)}`;
+    }
+    case "differential": {
+      const plan = manifest.stroke_plan;
+      return (
+        `SERVO_MEASURE_DIFFERENTIAL BELT=${plan.belt} FREQ_START=${plan.freq_start} ` +
+        `FREQ_END=${plan.freq_end} AMPLITUDE=${plan.amplitude} DURATION=${plan.duration} ` +
+        `RAMP=${plan.ramp} DWELL_MS=${plan.dwell_ms} NAME=${tag}`
+      );
     }
     default:
       return `; ${manifest.experiment} has no known reconstruction — edit by hand`;

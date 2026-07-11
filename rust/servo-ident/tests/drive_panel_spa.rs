@@ -60,6 +60,27 @@ fn app_js_defines_the_pure_drive_panel_functions() {
     }
 }
 
+/// Same contract for the differential FRF section: the series validation,
+/// trace building, and mode-marker formatting stay grep-able function
+/// declarations in the served asset.
+#[test]
+fn app_js_defines_the_differential_frf_functions() {
+    let required = [
+        "function differentialSeries(",
+        "function frfTraces(",
+        "function frfModeMarkers(",
+        "function frfModeTableHtml(",
+        "function renderFrfCharts(",
+        "case \"differential\"",
+    ];
+    for needle in required {
+        assert!(
+            APP_JS.contains(needle),
+            "app.js must define {needle} — the differential FRF rendering"
+        );
+    }
+}
+
 /// `GET /api/drive_state` and the SPA are both driven by the same
 /// `drive_state.json`; this asserts the demo's copy satisfies what the
 /// panel's grouping/autofill/drift logic assumes, so the demo actually

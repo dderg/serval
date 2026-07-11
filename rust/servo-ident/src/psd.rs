@@ -15,7 +15,7 @@ fn largest_pow2_le(n: usize) -> usize {
     p
 }
 
-fn hanning(n: usize) -> Vec<f64> {
+pub(crate) fn hanning(n: usize) -> Vec<f64> {
     if n == 1 {
         return vec![1.0];
     }
@@ -24,7 +24,7 @@ fn hanning(n: usize) -> Vec<f64> {
         .collect()
 }
 
-fn fft_pow2(re: &mut [f64], im: &mut [f64]) {
+pub(crate) fn fft_pow2(re: &mut [f64], im: &mut [f64]) {
     let n = re.len();
     let mut j = 0usize;
     for i in 1..n {

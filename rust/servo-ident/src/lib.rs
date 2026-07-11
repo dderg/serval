@@ -5,6 +5,7 @@ pub mod combine;
 pub mod demo;
 pub mod fit;
 pub mod fit_driver;
+pub mod frf;
 pub mod http;
 pub mod linalg;
 pub mod live;

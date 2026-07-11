@@ -143,7 +143,22 @@ plus sweep box and session log in a sticky right rail.
   grids; time-domain following-error overlay (disturbance rejection is a
   time-domain signal).
 - **dynamics** — `SERVO_FIT_DYNAMICS` runner and the `load` grid
-  (gain_mode / stiffness_level / inertia_ratio).
+  (gain_mode / stiffness_level / inertia_ratio). Differential belt runs
+  (`experiment: "differential"`, the anti-phase chirp on one AWD belt
+  pair) land here too: selecting one adds a four-box FRF stack over the
+  sweep band — magnitude (dB), phase (deg), coherence (0–1.05 with a
+  dashed line at the analyzer's `coherence_min`), torque FRF (dB) — all
+  sharing the PSD charts' hover readout (nearest sample's exact frequency,
+  value, run). Dashed vertical markers on the magnitude chart flag each
+  fitted mode, labeled `<freq> Hz ζ=<damping>` (ζ omitted when the fit
+  didn't converge), and a compact mode table (freq / |H| dB / damping /
+  coherence) sits under the charts with the drive pair and Welch segment
+  count from `results.json`. Multiple selected runs overlay on the same
+  boxes; markers, threshold, and table follow the newest one. The sweep
+  box reconstructs `SERVO_MEASURE_DIFFERENTIAL BELT=... FREQ_START=...
+  FREQ_END=... AMPLITUDE=... DURATION=... RAMP=... DWELL_MS=...
+  NAME=<tag>` from the manifest's `stroke_plan` (no SPEED/ACCEL — the
+  carriage never moves).
 - **live** — the vendor's USB scope without the USB: opening the page
   streams following error straight from the drives, one stacked chart
   per motor on a shared y-scale (the noisy motor stands out), over a

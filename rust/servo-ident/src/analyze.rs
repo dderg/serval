@@ -5,7 +5,12 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use serde_json::Value;
+
 use crate::combine::{compute_corexy_combine, peak_abs, rms};
+use crate::frf::{
+    active_slice, differential_series, find_modes, welch_frf, COHERENCE_MIN, DEFAULT_NPERSEG,
+};
 use crate::metrics::{
     compute_metrics, drive_series, motion_segments, DriveSeries, DEFAULT_SETTLE_BAND_COUNTS,
     DEFAULT_TORQUE_LIMIT_PER_MILLE,
@@ -13,8 +18,9 @@ use crate::metrics::{
 use crate::psd::{moving_psd, top_peaks, welch_psd};
 use crate::resonance::{detect_resonance, recommend_accel};
 use crate::results::{
-    AccelResult, Combined, DriveResult, Manifest, PlotAccel, PlotCombined, PlotDrive, PlotPsd,
-    PlotPsdAccel, PlotSeries, PlotStep, Results, Step, StepResult, Verdict,
+    AccelResult, Combined, DifferentialResult, DriveResult, Manifest, PlotAccel, PlotCombined,
+    PlotDifferential, PlotDrive, PlotPsd, PlotPsdAccel, PlotSeries, PlotStep, Results, Step,
+    StepResult, Verdict,
 };
 use crate::scap::Scap;
 
@@ -254,6 +260,7 @@ pub fn analyze_capture(
         drives,
         combined,
         accel: accel.map(|a| a.result),
+        differential: None,
         flags,
     };
     let plot_step = PlotStep {
@@ -265,10 +272,123 @@ pub fn analyze_capture(
         drives: plot_drives,
         combined: plot_combined,
         accel: plot_accel,
+        differential: None,
         psd: PlotPsd {
             freq_hz: psd_freq_hz,
             per_drive: per_drive_psd,
             accel: plot_psd_accel,
+        },
+    };
+    Ok((step_result, plot_step))
+}
+
+pub fn analyze_differential_capture(
+    cap: &Scap,
+    name: &str,
+    freq_start: f64,
+    freq_end: f64,
+) -> Result<(StepResult, PlotStep), String> {
+    let fs = cap.fs();
+    let n = cap.n_records;
+    let diff = differential_series(cap)?;
+    let span = active_slice(&diff.cmd_mm)?;
+    let cmd = &diff.cmd_mm[span.clone()];
+    let frf = welch_frf(cmd, &diff.act_mm[span.clone()], fs, DEFAULT_NPERSEG)?;
+    let torque_frf = welch_frf(cmd, &diff.torque[span.clone()], fs, DEFAULT_NPERSEG)?;
+    let modes = find_modes(&frf, freq_start, freq_end)?;
+
+    let display_lo = (freq_start * 0.5).max(frf.freqs[1]);
+    let display_hi = freq_end * 1.2;
+    let band: Vec<usize> = (0..frf.freqs.len())
+        .filter(|&i| frf.freqs[i] >= display_lo && frf.freqs[i] <= display_hi)
+        .collect();
+    let bidx: Vec<usize> = band
+        .iter()
+        .copied()
+        .step_by(stride_for(band.len()))
+        .collect();
+    let mag = frf.magnitude();
+    let torque_mag = torque_frf.magnitude();
+    let db = |v: f64| 20.0 * libm::log10(v.max(1e-12));
+    let plot_differential = PlotDifferential {
+        freq_hz: bidx.iter().map(|&i| frf.freqs[i]).collect(),
+        mag_db: bidx.iter().map(|&i| db(mag[i])).collect(),
+        phase_deg: bidx
+            .iter()
+            .map(|&i| libm::atan2(frf.im[i], frf.re[i]).to_degrees())
+            .collect(),
+        coherence: bidx.iter().map(|&i| frf.coherence[i]).collect(),
+        torque_db: bidx.iter().map(|&i| db(torque_mag[i])).collect(),
+        coherence_min: COHERENCE_MIN,
+        band: (freq_start, freq_end),
+        modes: modes.clone(),
+    };
+
+    let stride = stride_for(n);
+    let idxs: Vec<usize> = (0..n).step_by(stride).collect();
+    let t_s: Vec<f64> = idxs.iter().map(|&k| k as f64 / fs).collect();
+    let moving = vec![(span.start as f64 / fs, span.end as f64 / fs)];
+    let mut plot_drives = BTreeMap::new();
+    let mut psd_freq_hz: Option<Vec<f64>> = None;
+    let mut per_drive_psd: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    for (idx, dname) in cap.drive_names().into_iter().enumerate() {
+        let s = drive_series(cap, idx)?;
+        let (freq_hz, psd) = welch_psd(&s.following_error[span.clone()], fs)?;
+        match &psd_freq_hz {
+            Some(existing) if existing.len() != freq_hz.len() => {
+                return Err(format!(
+                    "step {name:?}: drive {dname:?} psd grid has {} bins, expected {} \
+                     (drives must share the Welch grid)",
+                    freq_hz.len(),
+                    existing.len()
+                ));
+            }
+            Some(_) => {}
+            None => psd_freq_hz = Some(freq_hz),
+        }
+        per_drive_psd.insert(dname.clone(), psd);
+        plot_drives.insert(
+            dname,
+            PlotDrive {
+                ferr_counts: idxs.iter().map(|&k| s.following_error[k]).collect(),
+                torque_per_mille: idxs.iter().map(|&k| s.torque[k] as f64).collect(),
+            },
+        );
+    }
+    let psd_freq_hz = psd_freq_hz.ok_or_else(|| format!("step {name:?} has no drives"))?;
+    if psd_freq_hz.len() > MAX_SERIES_POINTS {
+        return Err(format!(
+            "step {name:?}: following-error psd has {} bins, over the {MAX_SERIES_POINTS} cap",
+            psd_freq_hz.len()
+        ));
+    }
+
+    let step_result = StepResult {
+        name: name.to_string(),
+        drives: BTreeMap::new(),
+        combined: None,
+        accel: None,
+        differential: Some(DifferentialResult {
+            pair: diff.pair,
+            segments: frf.segments,
+            modes,
+        }),
+        flags: Vec::new(),
+    };
+    let plot_step = PlotStep {
+        name: name.to_string(),
+        fs_hz: fs,
+        stride,
+        t_s,
+        moving,
+        drives: plot_drives,
+        combined: None,
+        accel: None,
+        differential: Some(plot_differential),
+        psd: PlotPsd {
+            freq_hz: psd_freq_hz,
+            per_drive: per_drive_psd,
+            accel: None,
         },
     };
     Ok((step_result, plot_step))
@@ -368,6 +488,37 @@ pub fn compute_verdict(
             flags: Vec::new(),
             apply: None,
         }),
+        "differential" => {
+            let first = steps
+                .first()
+                .ok_or_else(|| "differential run has no steps".to_string())?;
+            let d = first.differential.as_ref().ok_or_else(|| {
+                format!(
+                    "differential step {:?} carries no differential result",
+                    first.name
+                )
+            })?;
+            let mode_lines: Vec<String> = d
+                .modes
+                .iter()
+                .map(|m| {
+                    let damping = m
+                        .damping
+                        .map(|z| format!("{z:.3}"))
+                        .unwrap_or_else(|| "-".to_string());
+                    format!(
+                        "{:.1} Hz |H| {:.1} dB ζ {damping} coh {:.2}",
+                        m.freq_hz, m.gain_db, m.coherence
+                    )
+                })
+                .collect();
+            Ok(Verdict {
+                recommended_step: None,
+                reason: format!("modes: {}", mode_lines.join("; ")),
+                flags: Vec::new(),
+                apply: None,
+            })
+        }
         "tracking" | "inertia_grid" => Ok(Verdict {
             recommended_step: None,
             reason: "not a sweep".to_string(),
@@ -389,22 +540,41 @@ pub fn build_run(dir: &Path) -> Result<(Results, PlotSeries), String> {
     }
     let settle_band = DEFAULT_SETTLE_BAND_COUNTS;
     let torque_limit = DEFAULT_TORQUE_LIMIT_PER_MILLE;
+    let differential_band = if manifest.experiment == "differential" {
+        let plan_freq = |key: &str| {
+            manifest
+                .stroke_plan
+                .get(key)
+                .and_then(Value::as_f64)
+                .ok_or_else(|| format!("differential manifest is missing stroke_plan.{key}"))
+        };
+        Some((plan_freq("freq_start")?, plan_freq("freq_end")?))
+    } else {
+        None
+    };
     let mut step_results = Vec::new();
     let mut plot_steps = Vec::new();
     let mut fs_hz = 0.0;
     for step in &manifest.steps {
         let cap = Scap::load(dir.join(&step.capture).to_str().unwrap())?;
         fs_hz = cap.fs();
-        let accel_path = step.accel.as_ref().map(|a| dir.join(a));
-        let (sr, ps) = analyze_capture(
-            &cap,
-            &step.name,
-            settle_band,
-            torque_limit,
-            manifest.belts.as_deref(),
-            manifest.axis.as_deref(),
-            accel_path.as_deref(),
-        )?;
+        let (sr, ps) = match differential_band {
+            Some((freq_start, freq_end)) => {
+                analyze_differential_capture(&cap, &step.name, freq_start, freq_end)?
+            }
+            None => {
+                let accel_path = step.accel.as_ref().map(|a| dir.join(a));
+                analyze_capture(
+                    &cap,
+                    &step.name,
+                    settle_band,
+                    torque_limit,
+                    manifest.belts.as_deref(),
+                    manifest.axis.as_deref(),
+                    accel_path.as_deref(),
+                )?
+            }
+        };
         step_results.push(sr);
         plot_steps.push(ps);
     }
@@ -509,6 +679,24 @@ pub fn print_step(sr: &StepResult) {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+    }
+    if let Some(d) = &sr.differential {
+        println!(
+            "  differential modes ({}, {} Welch segments):",
+            d.pair.join(" vs "),
+            d.segments
+        );
+        println!("    freq      |H| peak      damping    coherence");
+        for m in &d.modes {
+            let damping = m
+                .damping
+                .map(|z| format!("{z:.4}"))
+                .unwrap_or_else(|| "-".to_string());
+            println!(
+                "    {:7.1} Hz  {:6.2} dB     {:>8}     {:.2}",
+                m.freq_hz, m.gain_db, damping, m.coherence
+            );
+        }
     }
 }
 

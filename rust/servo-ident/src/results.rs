@@ -59,6 +59,8 @@ pub struct Manifest {
     pub kinematics: Option<String>,
     #[serde(default)]
     pub belts: Option<String>,
+    #[serde(default)]
+    pub stroke_plan: Value,
     pub steps: Vec<Step>,
 }
 
@@ -82,12 +84,29 @@ pub struct AccelResult {
     pub psd_peaks: Vec<(f64, f64)>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DifferentialMode {
+    pub freq_hz: f64,
+    pub gain: f64,
+    pub gain_db: f64,
+    pub damping: Option<f64>,
+    pub coherence: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DifferentialResult {
+    pub pair: Vec<String>,
+    pub segments: usize,
+    pub modes: Vec<DifferentialMode>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct StepResult {
     pub name: String,
     pub drives: BTreeMap<String, DriveResult>,
     pub combined: Option<Combined>,
     pub accel: Option<AccelResult>,
+    pub differential: Option<DifferentialResult>,
     pub flags: Vec<String>,
 }
 
@@ -141,6 +160,18 @@ pub struct PlotPsd {
 }
 
 #[derive(Debug, Serialize)]
+pub struct PlotDifferential {
+    pub freq_hz: Vec<f64>,
+    pub mag_db: Vec<f64>,
+    pub phase_deg: Vec<f64>,
+    pub coherence: Vec<f64>,
+    pub torque_db: Vec<f64>,
+    pub coherence_min: f64,
+    pub band: (f64, f64),
+    pub modes: Vec<DifferentialMode>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct PlotStep {
     pub name: String,
     pub fs_hz: f64,
@@ -150,6 +181,7 @@ pub struct PlotStep {
     pub drives: BTreeMap<String, PlotDrive>,
     pub combined: Option<PlotCombined>,
     pub accel: Option<PlotAccel>,
+    pub differential: Option<PlotDifferential>,
     pub psd: PlotPsd,
 }
 
