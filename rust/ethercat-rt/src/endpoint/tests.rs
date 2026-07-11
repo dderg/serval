@@ -40,6 +40,7 @@ struct TrackingLagDrive {
     drift_counts_per_cycle: Vec<f64>,
     drifted_counts: Vec<f64>,
     torque_offsets: Vec<i16>,
+    torques: Vec<i16>,
 }
 
 impl TrackingLagDrive {
@@ -55,6 +56,15 @@ impl TrackingLagDrive {
             drift_counts_per_cycle,
             drifted_counts: vec![0.0; NUM_SLAVES],
             torque_offsets: vec![0; NUM_SLAVES],
+            torques: vec![0; NUM_SLAVES],
+        }
+    }
+
+    /// A pair standing in a constant fight, for the trim tests.
+    fn with_torques(torques: Vec<i16>) -> Self {
+        Self {
+            torques,
+            ..Self::at_rest()
         }
     }
 }
@@ -91,8 +101,8 @@ impl DriveChain for TrackingLagDrive {
     fn velocity_actual(&self, _slot: usize) -> i32 {
         0
     }
-    fn torque_actual(&self, _slot: usize) -> i16 {
-        0
+    fn torque_actual(&self, slot: usize) -> i16 {
+        self.torques[slot]
     }
     fn error_code(&self, _slot: usize) -> u16 {
         0
@@ -397,6 +407,50 @@ fn damper_writes_antisymmetric_torque_in_the_drive_frame() {
         (i32::from(offsets[1]) - i32::from(offsets[0])).abs() <= 1,
         "mirrored slot must get the mechanically opposite torque, which in \
          its inverted drive frame is the same number: {offsets:?}"
+    );
+}
+
+/// The trim must land on the wire: a standing fight (+10%, -10%) integrates
+/// into an antisymmetric target offset that shrinks the pair's commanded
+/// separation, while the pair's target midpoint stays exactly where the
+/// stream put it (carriage-neutral).
+#[test]
+fn trim_applies_antisymmetric_target_offsets_during_streaming() {
+    let mut trimmed =
+        test_ctx_with_drive("trim-on", TrackingLagDrive::with_torques(vec![100, -100]));
+    let mut plain =
+        test_ctx_with_drive("trim-off", TrackingLagDrive::with_torques(vec![100, -100]));
+    assert_eq!(trimmed.trim.set(NUM_SLAVES, 0, 1, 200_000, 500, 25_000), 0);
+
+    for ctx in [&mut trimmed, &mut plain] {
+        push_all(ctx, piece(1_000_000, 0.05, &[2.5, 2.5]));
+        run_cycles(ctx, 1_000_000, 41_000_000);
+    }
+
+    let with = targets(&trimmed);
+    let without = targets(&plain);
+    let offset0 = i64::from(with[0]) - i64::from(without[0]);
+    let offset1 = i64::from(with[1]) - i64::from(without[1]);
+    assert_eq!(offset0, -offset1, "trim must be carriage-neutral");
+    assert!(
+        offset0 < -100,
+        "positive differential fight must pull slot 0 back \
+         (offsets {offset0}/{offset1})"
+    );
+}
+
+#[test]
+fn trim_freezes_while_the_ring_is_dry() {
+    let mut ctx = test_ctx_with_drive(
+        "trim-freeze",
+        TrackingLagDrive::with_torques(vec![100, -100]),
+    );
+    assert_eq!(ctx.trim.set(NUM_SLAVES, 0, 1, 200_000, 500, 25_000), 0);
+    run_cycles(&mut ctx, 0, 40_000_000);
+    assert_eq!(
+        targets(&ctx),
+        vec![0, 0],
+        "no stream, no target writes, no trim motion"
     );
 }
 

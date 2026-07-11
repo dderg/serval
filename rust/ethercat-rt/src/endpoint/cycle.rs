@@ -250,6 +250,8 @@ fn damper_torque_tenths(ctx: &mut EndpointCtx) -> Vec<f32> {
 // stream frame, so a sync or re-anchor never bakes a live trim offset in,
 // and freezing integration while a pair is not streaming (targets are not
 // being rewritten) keeps the held drive targets continuous across gaps.
+const TRIM_STATE_LOG_CYCLES: u64 = 4000;
+
 fn trim_offset_counts(ctx: &mut EndpointCtx, sp_counts: &[Option<i32>]) -> Vec<i32> {
     let mut counts = vec![0i32; ctx.num_slaves];
     if !ctx.trim.active() {
@@ -274,6 +276,21 @@ fn trim_offset_counts(ctx: &mut EndpointCtx, sp_counts: &[Option<i32>]) -> Vec<i
             "differential trim offset hit its clamp — residual pair fight \
              exceeds the trim's authority"
         );
+    }
+    if ctx.cycle_index % TRIM_STATE_LOG_CYCLES == 0 {
+        for (slot_a, slot_b, offset_mm, filt_tenths) in ctx.trim.snapshot() {
+            tracing::info!(
+                subsystem = "ethercat",
+                event = "diff_trim_state",
+                slot_a,
+                slot_b,
+                offset_um = (offset_mm * 1e3).round() as i64,
+                diff_torque_tenths = filt_tenths.round() as i64,
+                streaming_a = streaming[slot_a],
+                streaming_b = streaming[slot_b],
+                "differential trim state"
+            );
+        }
     }
     for s in 0..ctx.num_slaves {
         counts[s] = (offset_mm[s] * ctx.cmd_counts_per_mm[s]).round() as i32;

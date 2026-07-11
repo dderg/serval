@@ -155,6 +155,15 @@ impl DiffTrimBank {
         }
     }
 
+    /// Live internal state per pair, for periodic telemetry:
+    /// (slot_a, slot_b, offset_mm, filtered differential torque in 0.1%).
+    pub fn snapshot(&self) -> Vec<(usize, usize, f64, f64)> {
+        self.trims
+            .iter()
+            .map(|t| (t.slot_a, t.slot_b, t.offset_mm, t.filtered_diff_tenths))
+            .collect()
+    }
+
     /// One-shot clamp notification per arm/reset: the pair that just hit its
     /// offset clamp, for the caller to log. Hitting the clamp means residual
     /// fight remains beyond the trim's authority (or the feedback sign is
