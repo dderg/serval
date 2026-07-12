@@ -40,6 +40,11 @@ class FakeGcmd:
         self._params = params
         self.responses = []
 
+    def get_commandline(self):
+        return "FAKE_CMD " + " ".join(
+            "%s=%s" % kv for kv in self._params.items()
+        )
+
     def get(self, name, default=None):
         return self._params.get(name, default)
 
@@ -213,6 +218,7 @@ def test_manifest_records_experiment_motors_belts_and_step():
     m = _manifest(sc)
     assert m["version"] == 1
     assert m["experiment"] == "tracking"
+    assert m["command"] == "FAKE_CMD AXIS=X"
     assert m["axis"] == "X"
     assert m["kinematics"] == "corexy"
     assert m["git_rev"]

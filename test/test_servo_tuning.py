@@ -122,6 +122,11 @@ class FakeGcmd:
         self._params = params
         self.responses = []
 
+    def get_commandline(self):
+        return "FAKE_CMD " + " ".join(
+            "%s=%s" % kv for kv in self._params.items()
+        )
+
     def get(self, name, default=None):
         return self._params.get(name, default)
 

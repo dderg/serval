@@ -2714,7 +2714,10 @@ function strokeSuffix(manifest, includeAccel) {
   return suffix;
 }
 
+/// Old manifests predate the recorded `command` field; rebuilding from the
+/// manifest is a lossy fallback that only knows the parameters listed here.
 function reconstructCommand(manifest) {
+  if (manifest.command) return manifest.command;
   const tag = manifest.tag || "cal";
   const axis = manifest.axis || "X";
   const iterations = (manifest.stroke_plan && manifest.stroke_plan.iterations) || 1;
