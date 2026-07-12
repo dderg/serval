@@ -559,6 +559,43 @@ def test_base_speed_gain_without_servo_subset_errors():
         sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
 
 
+def test_revert_gain_reverts_to_the_named_gain():
+    servo_param.drain_param_writes()
+    sc, gcode = make_sc()
+    gcmd = FakeGcmd(AXIS="Y", SPEED_GAINS="450", REVERT_GAIN="300")
+    sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
+    # derive(450) writes integral 2778 mid-sweep; derive(300) writes
+    # pos 480 / speed 300 / integral 4167 - only the revert writes those.
+    sweep_idx = _script_indices(gcode, "VALUE=2778")
+    revert_idx = _script_indices(gcode, "VALUE=4167")
+    assert sweep_idx and revert_idx
+    assert min(revert_idx) > max(sweep_idx)
+    assert any("VALUE=480" in s for s in _str_scripts(gcode))
+    assert any("reverting to speed gain 30.0 Hz" in r for r in gcmd.responses)
+
+
+def test_revert_gain_defaults_to_lowest_sweep_entry():
+    servo_param.drain_param_writes()
+    sc, gcode = make_sc()
+    gcmd = FakeGcmd(AXIS="Y", SPEED_GAINS="500,650")
+    sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
+    # sg=500's integral 2500 is written at step one and again by the revert,
+    # after sg=650's 1923.
+    revert_idx = _script_indices(gcode, "VALUE=2500")
+    high_idx = _script_indices(gcode, "VALUE=1923")
+    assert revert_idx and high_idx
+    assert max(revert_idx) > max(high_idx)
+    assert any("reverting to speed gain 50.0 Hz" in r for r in gcmd.responses)
+
+
+def test_revert_gain_out_of_range_is_command_error():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    gcmd = FakeGcmd(AXIS="Y", SPEED_GAINS="450", REVERT_GAIN="50")
+    with pytest.raises(RuntimeError, match="REVERT_GAIN 50 outside"):
+        sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
+
+
 class FakeServoSync:
     def __init__(self):
         self.runs = []
@@ -693,6 +730,26 @@ def test_harvest_rejects_mode_3():
     sc, _ = make_sc()
     with pytest.raises(RuntimeError, match="MODE must be 1"):
         sc.cmd_SERVO_HARVEST_NOTCHES(FakeGcmd(AXIS="X", MODE=3))
+
+
+def test_ambient_records_notch_state_per_drive():
+    servo_param.drain_param_writes()
+    sc, _ = make_sc(engine_values={**NOTCH_VALUES, (0x2001, 0x31): 1})
+    sc.cmd_SERVO_MEASURE_TRACKING(FakeGcmd(AXIS="X"))
+    notches = _manifest(sc)["ambient"]["notches"]
+    for motor in ("motor_a", "motor_b"):
+        assert notches[motor] == {
+            "mode": 1,
+            "notch1": {"freq_hz": 111, "width": 1, "depth": 2},
+            "notch2": {"freq_hz": 222, "width": 3, "depth": 4},
+        }
+
+
+def test_ambient_notch_readback_failure_is_command_error():
+    servo_param.drain_param_writes()
+    sc, _ = make_sc(handle=None)
+    with pytest.raises(RuntimeError, match="notch readback failed"):
+        sc.cmd_SERVO_MEASURE_TRACKING(FakeGcmd(AXIS="X"))
 
 
 def make_sc_ladder(flagged_speed=None, flag="torque_saturated"):

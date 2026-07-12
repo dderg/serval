@@ -153,6 +153,9 @@ class FakeEngine:
         self.dampers = []
         self.trims = []
 
+    def sdo_read(self, handle, slot, index, subindex):
+        return 2, 7
+
     def resonance_buzz(self, *args):
         self.buzzes.append(args)
 
@@ -177,7 +180,14 @@ def make_calibration(rails, coupled=True, extra_objs=None, reactor=None):
         "gcode": gcode,
         "toolhead": FakeToolhead(FakeKin(rails, coupled)),
         "servo_capture": FakeServoCapture(),
+        "motion_engine": FakeEngine(),
     }
+    node_slots = {}
+    for rail in rails:
+        for m in rail.motors:
+            node_slots.setdefault(m.node_name, {})[m.motor_name] = m.chain_index
+    for node_name, slots in node_slots.items():
+        objs["ethercat_node " + node_name] = FakeNode(slots)
     objs.update(extra_objs or {})
     sc = servo_calibration.ServoCalibration(
         FakeConfig(FakePrinter(objs, reactor))

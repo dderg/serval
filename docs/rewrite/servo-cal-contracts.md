@@ -45,6 +45,10 @@ One experiment (one command invocation) = one directory:
              "accel": "step_p880_s550_i2273_accel.csv"}],
   "ambient": {
     "journal_params": {"motor_a": {"0x2001.0x31": 2}},
+    "notches": {"motor_a": {
+      "mode": 0,
+      "notch1": {"freq_hz": 1187, "width": 6, "depth": 8},
+      "notch2": {"freq_hz": 4000, "width": 2, "depth": 0}}},
     "param_writes_since_last_run": [
       {"servo": "motor_a", "addr": "0x2001.0x31", "value": 1,
        "time_utc": "2026-07-10T15:14:02Z"}]
@@ -60,7 +64,11 @@ is the belt letter, `motors` lists the pair in slot order and `belts` is
 null.
 `ambient.journal_params` holds the readback of every
 `[servo_calibration] journal_params:` address per captured drive, taken at
-run start. Missing readback is a hard error, not an omitted key.
+run start. `ambient.notches` is always recorded per captured drive, also at
+run start: the adaptive-notch mode (C01.30) and both notch filters' center
+frequency / width / depth (C01.40–45), read back from the drive so a run can
+later answer "what notches were active". Missing readback is a hard error,
+not an omitted key.
 
 ## results.json (version 1, servo-cal writes)
 

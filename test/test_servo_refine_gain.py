@@ -160,7 +160,7 @@ class FakeEngine:
         self.reads = reads
 
     def sdo_read(self, handle, slot, index, subindex):
-        return 2, self.reads[(index, subindex)]
+        return 2, self.reads.get((index, subindex), 7)
 
 
 class FakePrinter:

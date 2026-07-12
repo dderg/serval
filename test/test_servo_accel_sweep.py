@@ -84,6 +84,23 @@ class FakeToolhead:
         return self.kin
 
 
+class FakeNode:
+    def __init__(self, name, slots):
+        self.name = name
+        self._slots = slots
+
+    def get_engine_handle(self):
+        return 1
+
+    def get_slot_for_motor(self, motor_name):
+        return self._slots[motor_name]
+
+
+class FakeEngine:
+    def sdo_read(self, handle, slot, index, subindex):
+        return 2, 7
+
+
 class FakePrinter:
     command_error = RuntimeError
 
@@ -142,6 +159,13 @@ def make_calibration(coupled=True):
         "gcode": gcode,
         "toolhead": FakeToolhead(FakeKin(rails, coupled)),
         "servo_capture": FakeServoCapture(),
+        "motion_engine": FakeEngine(),
+        "ethercat_node drive_a": FakeNode(
+            "ethercat_node drive_a", {"motor_a": 0}
+        ),
+        "ethercat_node drive_b": FakeNode(
+            "ethercat_node drive_b", {"motor_b": 0}
+        ),
     }
     sc = servo_calibration.ServoCalibration(FakeConfig(FakePrinter(objs)))
     sc.captures_root = tempfile.mkdtemp()

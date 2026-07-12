@@ -288,7 +288,10 @@ Gain sweep, shaper-calibrate style: for each `SPEED_GAINS` entry (0.1 Hz units)
 it derives the position gain (`×1.6`) and integral (`1250000 ÷ gain`), records
 one capture per step into the run directory, then `servo-cal analyze` writes
 `results.json` whose verdict names the highest gain step without resonance or a
-torque rail. Reverts to the lowest gains afterwards. With an accelerometer
+torque rail. Reverts to `REVERT_GAIN` afterwards (0.1 Hz units, default the
+lowest `SPEED_GAINS` entry) — the single-gain iteration loop is
+`SPEED_GAINS=<gain under test> REVERT_GAIN=<known safe gain>`, so the sweep
+tests one gain and always lands somewhere safe. With an accelerometer
 (`accel_chip` config option or `ACCEL_CHIP=`) each step also records vibration
 data (`step_<name>_accel.csv` next to the `.scap`). `APPLY=1` (default 0,
 report-only) writes the verdict's recommended gains *after* the revert,
@@ -303,7 +306,7 @@ sweep — the asymmetric-gain experiment: hold one belt pair soft while sweeping
 the other pair higher. Params:
 `SPEED_GAINS` (500,650,800,1000) `AXIS` (X) `START` `END`
 `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2) `DWELL_MS` `TAG` (cal)
-`ACCEL_CHIP` `APPLY` `SERVO` `BASE_SPEED_GAIN`.
+`ACCEL_CHIP` `APPLY` `SERVO` `BASE_SPEED_GAIN` `REVERT_GAIN`.
 
 #### SERVO_GAIN_LADDER
 Speed-gain sweep that climbs until analysis flags trouble, instead of a fixed
