@@ -391,3 +391,40 @@ def test_excessive_offsets_error_instead_of_clamping(tmp_path):
     gcmd = FakeGcmd(RUN=str(run_dir), STIFFNESS_A="5", STIFFNESS_B="5")
     with pytest.raises(RuntimeError, match="implausibly low"):
         sc.cmd_SERVO_STRAIN_COMP_BUILD(gcmd)
+
+
+def test_merge_adds_the_residual_on_top_of_the_existing_map(tmp_path):
+    run_dir = tmp_path / "strainrun"
+    write_run(run_dir)
+    sc, _ = make_comp(tmp_path)
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(
+        FakeGcmd(RUN=str(run_dir), STIFFNESS_A="200", STIFFNESS_B="200")
+    )
+    first = json.loads((tmp_path / "strain_comp.json").read_text())
+    # The same field measured again as a "residual" and merged: offsets
+    # must double (both passes correct the same thing), zero point kept.
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(
+        FakeGcmd(
+            RUN=str(run_dir), STIFFNESS_A="200", STIFFNESS_B="200", MERGE="1"
+        )
+    )
+    merged = json.loads((tmp_path / "strain_comp.json").read_text())
+    for pair_first, pair_merged in zip(first["pairs"], merged["pairs"]):
+        assert pair_merged["zero_xy"] == pair_first["zero_xy"]
+        for a, b in zip(pair_first["offsets_um"], pair_merged["offsets_um"]):
+            assert abs(b - 2 * a) <= 2, (a, b)
+
+
+def test_merge_without_an_existing_map_errors_loudly(tmp_path):
+    run_dir = tmp_path / "strainrun"
+    write_run(run_dir)
+    sc, _ = make_comp(tmp_path)
+    with pytest.raises(RuntimeError, match="MERGE=1 needs an existing map"):
+        sc.cmd_SERVO_STRAIN_COMP_BUILD(
+            FakeGcmd(
+                RUN=str(run_dir),
+                STIFFNESS_A="200",
+                STIFFNESS_B="200",
+                MERGE="1",
+            )
+        )

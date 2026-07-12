@@ -64,7 +64,9 @@ class ServoStrainComp:
         "stiffness, write the map file. RUN=<run dir> is required; "
         "stiffness comes from SERVO_MEASURE_PAIR_STIFFNESS or "
         "STIFFNESS_A/STIFFNESS_B (%/mm); SPACING overrides the grid pitch "
-        "(defaults to the run's line spacing)."
+        "(defaults to the run's line spacing). MERGE=1 treats the run as a "
+        "residual measured WITH the current map enabled and adds the "
+        "correction on top — the second-order iteration."
     )
     cmd_SERVO_STRAIN_COMP_help = (
         "ENABLE=1 uploads the map file to the endpoint (offsets ramp in at "
@@ -301,6 +303,17 @@ class ServoStrainComp:
                 "%s is a %r run, need a strain_map run"
                 % (run_dir, manifest.get("experiment"))
             )
+        merge = gcmd.get_int("MERGE", 0, minval=0, maxval=1) == 1
+        base_pairs = {}
+        if merge:
+            if not os.path.exists(self.map_file):
+                raise gcmd.error(
+                    "MERGE=1 needs an existing map at %s" % self.map_file
+                )
+            with open(self.map_file) as fh:
+                base_pairs = {
+                    tuple(p["motors"]): p for p in json.load(fh)["pairs"]
+                }
         plan = manifest["stroke_plan"]
         spacing = gcmd.get_float(
             "SPACING", plan["line_spacing"], above=2.0, maxval=100.0
@@ -317,7 +330,18 @@ class ServoStrainComp:
                 gcmd, belt_idx, motor_names, overrides[belt_idx]
             )
             grid = _build_grid(gcmd, plan, spacing, samples[belt_idx])
+            base = base_pairs.get(tuple(motor_names))
+            if merge:
+                if base is None:
+                    raise gcmd.error(
+                        "existing map has no entry for belt %s (%s)"
+                        % ("AB"[belt_idx], "/".join(motor_names))
+                    )
+                _rezero_grid_at(grid, base["zero_xy"])
+                grid["zero_xy"] = list(base["zero_xy"])
             offsets = _offsets_from_grid(gcmd, grid, stiffness)
+            if merge:
+                offsets = _merge_offsets(gcmd, grid, offsets, base)
             pairs_out.append(
                 {
                     "motors": motor_names,
@@ -662,6 +686,38 @@ def _build_grid(gcmd, plan, spacing, belt_lines):
     zero_value = _grid_value_at(grid, zero_xy[0], zero_xy[1])
     grid["values_pct"] = [v - zero_value for v in values]
     return grid
+
+
+def _rezero_grid_at(grid, zero_xy):
+    """A delta map measured WITH the base map active carries its own run's
+    DC anchor; shift it so zero sits at the base map's zero point — the two
+    anchors must coincide for the sum to stay sync-consistent."""
+    zero_value = _grid_value_at(grid, zero_xy[0], zero_xy[1])
+    grid["values_pct"] = [v - zero_value for v in grid["values_pct"]]
+
+
+def _merge_offsets(gcmd, grid, delta_offsets, base):
+    base_grid = {
+        "nx": base["nx"],
+        "ny": base["ny"],
+        "x0": base["x0"],
+        "y0": base["y0"],
+        "dx": base["dx"],
+        "dy": base["dy"],
+        "values_pct": [float(v) for v in base["offsets_um"]],
+    }
+    merged = []
+    for i, delta in enumerate(delta_offsets):
+        x = grid["x0"] + (i % grid["nx"]) * grid["dx"]
+        y = grid["y0"] + (i // grid["nx"]) * grid["dy"]
+        merged.append(int(round(_grid_value_at(base_grid, x, y))) + delta)
+    worst = max(abs(o) for o in merged)
+    if worst > MAX_OFFSET_UM:
+        raise gcmd.error(
+            "merged compensation would need %d um (max %d) — the maps are "
+            "fighting each other, rebuild from scratch" % (worst, MAX_OFFSET_UM)
+        )
+    return merged
 
 
 def _grid_value_at(grid, x, y):
