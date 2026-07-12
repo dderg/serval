@@ -48,6 +48,9 @@ class _FakeToolhead:
     def get_last_move_time(self):
         return 0.0
 
+    def wait_moves(self):
+        pass
+
     def get_position(self):
         return list(self.position)
 

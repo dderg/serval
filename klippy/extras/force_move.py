@@ -82,7 +82,7 @@ class ForceMove:
 
     def cmd_SET_KINEMATIC_POSITION(self, gcmd):
         toolhead = self.printer.lookup_object("toolhead")
-        toolhead.get_last_move_time()
+        toolhead.wait_moves()
         curpos = toolhead.get_position()
         x = gcmd.get_float("X", curpos[0])
         y = gcmd.get_float("Y", curpos[1])

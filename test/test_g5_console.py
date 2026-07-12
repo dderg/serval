@@ -35,7 +35,6 @@ def make_motion():
         submit_bezier=lambda *a: m.engine.calls.append(("bezier", a)),
     )
     m.mcu = None
-    m._mcu_pending_end_time = 0.0
     m._fire_active_callbacks = lambda axes_d: None
     m._sync_print_time = lambda: None
     m._axis_limit = lambda axis, kind: 100.0
