@@ -66,12 +66,14 @@ class FakeNode:
 
 
 class FakeEngine:
-    """set_strain_comp records uploads; sdo_read simulates a pair whose
-    differential torque responds linearly to the applied constant offset
-    with the given stiffness (%/mm)."""
+    """set_strain_comp records uploads; sdo_read simulates belt pairs whose
+    differential torque responds linearly to the applied constant offset —
+    directly on the offset pair (stiffness) and through the gantry on the
+    other pair (cross, %/mm)."""
 
-    def __init__(self, stiffness_pct_per_mm=200.0):
+    def __init__(self, stiffness_pct_per_mm=200.0, cross_pct_per_mm=0.0):
         self.stiffness = stiffness_pct_per_mm
+        self.cross = cross_pct_per_mm
         self.uploads = []
         self.applied_um = {}
 
@@ -88,14 +90,14 @@ class FakeEngine:
             self.applied_um[(slot_a, slot_b)] = values[0]
 
     def sdo_read(self, handle, slot, index, subindex):
+        mine = (0, 1) if slot in (0, 1) else (2, 3)
+        sign = 1.0 if slot == mine[0] else -1.0
         diff_pct = 0.0
-        for (slot_a, slot_b), um in self.applied_um.items():
-            if slot in (slot_a, slot_b):
-                diff_pct = self.stiffness * um / 1000.0
-                sign = 1.0 if slot == slot_a else -1.0
-                raw = int(round(sign * diff_pct * 10.0)) & 0xFFFF
-                return (2, raw)
-        return (2, 0)
+        for pair, um in self.applied_um.items():
+            gain = self.stiffness if pair == mine else self.cross
+            diff_pct += gain * um / 1000.0
+        raw = int(round(sign * diff_pct * 10.0)) & 0xFFFF
+        return (2, raw)
 
 
 class FakePrinter:
@@ -252,11 +254,26 @@ def write_run(run_dir):
             "y_start": 0.0,
             "y_end": 100.0,
             "line_spacing": 50.0,
+            "zero_xy": [50.0, 50.0],
         },
         "belts": "m_a:1+m_a1:1,m_b:1+m_b1:1",
         "steps": steps,
     }
     (run_dir / "manifest.json").write_text(json.dumps(manifest))
+
+
+def test_stiffness_probe_reports_the_gantry_cross_coupling(tmp_path):
+    sc, engine = make_comp(
+        tmp_path, FakeEngine(stiffness_pct_per_mm=200.0, cross_pct_per_mm=24.0)
+    )
+    gcmd = FakeGcmd()
+    sc.cmd_SERVO_MEASURE_PAIR_STIFFNESS(gcmd)
+    cross_lines = [r for r in gcmd.responses if "cross-coupling" in r]
+    assert len(cross_lines) == 2
+    assert (
+        "cross-coupling into belt y: +24.0 %/mm (12% of direct)"
+        in (cross_lines[0])
+    )
 
 
 def test_stiffness_measurement_recovers_the_simulated_slope(tmp_path):
@@ -292,6 +309,29 @@ def test_build_produces_offsets_that_cancel_the_field(tmp_path):
         assert grid[iy * 3 + 2] == pytest.approx(-25, abs=3)
     belt_b = payload["pairs"][1]
     assert all(abs(v) <= 3 for v in belt_b["offsets_um"])
+    assert payload["zero_xy"] == [50.0, 50.0]
+
+
+def test_build_zeroes_the_map_at_the_recorded_zero_point(tmp_path):
+    run_dir = tmp_path / "strainrun"
+    write_run(run_dir)
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    # Zero recorded off-center: the map must be zero THERE, not at the
+    # region center, so applying it after a sync at that spot lines up.
+    manifest["stroke_plan"]["zero_xy"] = [100.0, 50.0]
+    (run_dir / "manifest.json").write_text(json.dumps(manifest))
+    sc, _ = make_comp(tmp_path)
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(
+        FakeGcmd(RUN=str(run_dir), STIFFNESS_A="200", STIFFNESS_B="200")
+    )
+    payload = json.loads((tmp_path / "strain_comp.json").read_text())
+    belt_a = payload["pairs"][0]
+    # elastic at x=100 is +5%; zeroing there shifts the whole map by -5%
+    # -> offsets 0 at x=100 and +50 um at x=0.
+    grid = belt_a["offsets_um"]
+    for iy in range(3):
+        assert grid[iy * 3 + 2] == pytest.approx(0, abs=3)
+        assert grid[iy * 3 + 0] == pytest.approx(50, abs=4)
 
 
 def test_build_without_stiffness_errors_loudly(tmp_path):

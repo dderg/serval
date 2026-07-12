@@ -1648,6 +1648,11 @@ class ServoCalibration:
         tag = gcmd.get("TAG", "strain")
         zero_sync = gcmd.get_int("SYNC", 1, minval=0, maxval=1) == 1
         servos = servo_strokes.axis_servos(gcmd, kin, "X")
+        # The zero point must be reproducible when the map is APPLIED, not
+        # just when it is measured: always the center of the configured
+        # calibration area, never the (run-specific) raster region.
+        zero_x = (self.bounds["X"][0] + self.bounds["X"][1]) / 2.0
+        zero_y = (self.bounds["Y"][0] + self.bounds["Y"][1]) / 2.0
         stroke_plan = {
             "x_start": x_start,
             "x_end": x_end,
@@ -1658,6 +1663,7 @@ class ServoCalibration:
             "line_spacing": spacing,
             "dwell_ms": dwell,
             "zero_sync": zero_sync,
+            "zero_xy": [zero_x, zero_y],
         }
         if zero_sync:
             sync = self.printer.lookup_object("servo_sync", None)
@@ -1667,11 +1673,11 @@ class ServoCalibration:
                     "configured - add it so every map shares a preload "
                     "zero, or pass SYNC=0 to raster without one"
                 )
-            self._goto_xy(
-                (x_start + x_end) / 2.0, (y_start + y_end) / 2.0, dwell
-            )
+            self._goto_xy(zero_x, zero_y, dwell)
             gcmd.respond_info(
-                "strain map zero point: SERVO_SYNC at region center"
+                "strain map zero point: SERVO_SYNC at (%.1f, %.1f) — the "
+                "calibration area center; repeat there when applying the "
+                "map" % (zero_x, zero_y)
             )
             sync.run(gcmd)
         run = self._begin_run(

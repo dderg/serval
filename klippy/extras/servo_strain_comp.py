@@ -206,6 +206,7 @@ class ServoStrainComp:
         step_um = gcmd.get_float("STEP_UM", 50.0, above=0.0, maxval=200.0)
         settle = gcmd.get_float("SETTLE", 0.8, above=0.0, maxval=5.0)
         pairs = self._belt_pairs(gcmd, axis_filter)
+        all_pairs = self._belt_pairs(gcmd, None)
         toolhead = self.printer.lookup_object("toolhead")
         engine = self.printer.lookup_object("motion_engine")
         reactor = self.printer.get_reactor()
@@ -214,30 +215,27 @@ class ServoStrainComp:
         for pair in pairs:
             handle = self._node_handle(gcmd, pair.node)
             steps_um = [0.0, step_um, -step_um, 2.0 * step_um, -2.0 * step_um]
-            points = []
+            # An offset on one pair racks the gantry a little, so the other
+            # belt sees it too — read every pair at every step and report
+            # the cross-coupling next to the direct stiffness.
+            points = {obs.axis_name(): [] for obs in all_pairs}
             try:
                 for value_um in steps_um:
                     self._upload_constant(engine, handle, pair, value_um)
                     slew_s = abs(value_um) / 1000.0 / COMP_SLEW_MM_S
                     reactor.pause(reactor.monotonic() + settle + slew_s)
-                    diff = self._read_diff_pct(engine, handle, pair)
-                    points.append((value_um / 1000.0, diff))
+                    for obs in all_pairs:
+                        obs_handle = self._node_handle(gcmd, obs.node)
+                        diff = self._read_diff_pct(engine, obs_handle, obs)
+                        points[obs.axis_name()].append(
+                            (value_um / 1000.0, diff)
+                        )
             finally:
                 self._clear_pair(engine, handle, pair)
             ramp_out_s = 2.0 * step_um / 1000.0 / COMP_SLEW_MM_S
             reactor.pause(reactor.monotonic() + settle + ramp_out_s)
             restored = self._read_diff_pct(engine, handle, pair)
-            n = len(points)
-            mean_x = sum(p[0] for p in points) / n
-            mean_y = sum(p[1] for p in points) / n
-            var = sum((p[0] - mean_x) ** 2 for p in points)
-            cov = sum((p[0] - mean_x) * (p[1] - mean_y) for p in points)
-            slope = cov / var
-            resid = sum(
-                (p[1] - mean_y - slope * (p[0] - mean_x)) ** 2 for p in points
-            )
-            total = sum((p[1] - mean_y) ** 2 for p in points)
-            r2 = 1.0 - resid / total if total > 0.0 else 0.0
+            slope, r2 = _fit_slope(points[pair.axis_name()])
             names = pair.motor_names()
             self.measured_stiffness[tuple(names)] = slope
             gcmd.respond_info(
@@ -250,11 +248,25 @@ class ServoStrainComp:
                     slope,
                     r2,
                     " ".join(
-                        "%+.0fum:%+.2f%%" % (x * 1000, y) for x, y in points
+                        "%+.0fum:%+.2f%%" % (x * 1000, y)
+                        for x, y in points[pair.axis_name()]
                     ),
                     restored,
                 )
             )
+            for obs in all_pairs:
+                if obs.axis_name() == pair.axis_name():
+                    continue
+                cross, _cross_r2 = _fit_slope(points[obs.axis_name()])
+                gcmd.respond_info(
+                    "  cross-coupling into belt %s: %+.1f %%/mm "
+                    "(%.0f%% of direct)"
+                    % (
+                        obs.axis_name(),
+                        cross,
+                        abs(cross / slope) * 100.0 if slope else 0.0,
+                    )
+                )
             if abs(slope) < 1e-6 or r2 < 0.9:
                 raise gcmd.error(
                     "stiffness fit for belt %s is not credible "
@@ -317,6 +329,7 @@ class ServoStrainComp:
                     "dx": grid["dx"],
                     "dy": grid["dy"],
                     "offsets_um": offsets,
+                    "zero_xy": grid["zero_xy"],
                 }
             )
             gcmd.respond_info(
@@ -335,6 +348,7 @@ class ServoStrainComp:
         payload = {
             "version": 1,
             "run": run_dir,
+            "zero_xy": pairs_out[0]["zero_xy"],
             "pairs": pairs_out,
         }
         tmp_path = self.map_file + ".tmp"
@@ -401,11 +415,31 @@ class ServoStrainComp:
                     max(entry["offsets_um"]),
                 )
             )
+        zero_xy = payload.get("zero_xy")
+        if zero_xy:
+            gcmd.respond_info(
+                "map zero point is (%.1f, %.1f) — for a clean DC, "
+                "SERVO_SYNC there with the compensation enabled"
+                % (zero_xy[0], zero_xy[1])
+            )
         if by_motors:
             raise gcmd.error(
                 "map file entries %s match no belt pair on this printer"
                 % ", ".join("/".join(k) for k in by_motors)
             )
+
+
+def _fit_slope(points):
+    n = len(points)
+    mean_x = sum(p[0] for p in points) / n
+    mean_y = sum(p[1] for p in points) / n
+    var = sum((p[0] - mean_x) ** 2 for p in points)
+    cov = sum((p[0] - mean_x) * (p[1] - mean_y) for p in points)
+    slope = cov / var
+    resid = sum((p[1] - mean_y - slope * (p[0] - mean_x)) ** 2 for p in points)
+    total = sum((p[1] - mean_y) ** 2 for p in points)
+    r2 = 1.0 - resid / total if total > 0.0 else 0.0
+    return slope, r2
 
 
 def _belt_motor_names(manifest):
@@ -614,9 +648,8 @@ def _build_grid(gcmd, plan, spacing, belt_lines):
         raise gcmd.error(
             "grid has unfillable holes — the run does not cover the region"
         )
-    center = values[(ny // 2) * nx + nx // 2]
-    values = [v - center for v in values]
-    return {
+    zero_xy = plan.get("zero_xy", [(x0 + x1) / 2.0, (y0 + y1) / 2.0])
+    grid = {
         "nx": nx,
         "ny": ny,
         "x0": x0,
@@ -624,7 +657,29 @@ def _build_grid(gcmd, plan, spacing, belt_lines):
         "dx": dx,
         "dy": dy,
         "values_pct": values,
+        "zero_xy": list(zero_xy),
     }
+    zero_value = _grid_value_at(grid, zero_xy[0], zero_xy[1])
+    grid["values_pct"] = [v - zero_value for v in values]
+    return grid
+
+
+def _grid_value_at(grid, x, y):
+    nx, ny = grid["nx"], grid["ny"]
+    fx = min(max((x - grid["x0"]) / grid["dx"], 0.0), nx - 1)
+    fy = min(max((y - grid["y0"]) / grid["dy"], 0.0), ny - 1)
+    ix = min(int(fx), nx - 2) if nx > 1 else 0
+    iy = min(int(fy), ny - 2) if ny > 1 else 0
+    tx = fx - ix if nx > 1 else 0.0
+    ty = fy - iy if ny > 1 else 0.0
+    values = grid["values_pct"]
+
+    def at(gx, gy):
+        return values[min(gy, ny - 1) * nx + min(gx, nx - 1)]
+
+    top = at(ix, iy) * (1.0 - tx) + at(ix + 1, iy) * tx
+    bottom = at(ix, iy + 1) * (1.0 - tx) + at(ix + 1, iy + 1) * tx
+    return top * (1.0 - ty) + bottom * ty
 
 
 def _offsets_from_grid(gcmd, grid, stiffness_pct_per_mm):

@@ -602,6 +602,7 @@ def test_strain_map_raster_records_one_capture_per_line():
     assert len(strokes) == 12, "6 lines, each forward and back"
     m2 = _manifest(sc)
     assert m2["stroke_plan"]["zero_sync"] is True
+    assert m2["stroke_plan"]["zero_xy"] == [150.0, 150.0]
 
 
 def test_strain_map_without_servo_sync_errors_loudly():
