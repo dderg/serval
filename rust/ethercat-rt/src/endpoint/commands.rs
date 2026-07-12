@@ -1,6 +1,6 @@
 use std::ops::ControlFlow;
 
-use super::{abort_sync, discard_motion, sync_response_with_code, EndpointCtx, SyncRun};
+use super::{discard_motion, EndpointCtx};
 use crate::capture::{
     any_slot_out_of_range, CaptureConfig, CaptureDriveConfig, ERR_CAPTURE_BAD_DRIVE_LIST,
 };
@@ -9,10 +9,6 @@ use crate::curves::AXIS_RING_CAPACITY;
 use crate::mailbox::{MailboxReply, MailboxRequest};
 use crate::push_plan::plan_bundle;
 use crate::sensorless::{ERR_ARM_SENSORLESS_AMBIGUOUS_PAIR, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
-use crate::sync::{
-    SyncParams, SyncRelease as ReleaseMachine, ERR_PIECES_DURING_SYNC, ERR_SYNC_ABORTED,
-    ERR_SYNC_BAD_MASK, ERR_SYNC_BUSY, ERR_SYNC_NOT_ENABLED, ERR_SYNC_STREAMING, MAX_RELEASE_SLOTS,
-};
 use crate::torque::{CommandAction, TorqueState, ERR_ENABLE_FAILED, ERR_PIECES_WHILE_FAULTED};
 use crate::wire::{
     arm_sensorless_endstop_response_frame, identify_response_frame, motor_state_empty_frame,
@@ -21,13 +17,12 @@ use crate::wire::{
     resume_stream_response_frame, runtime_caps_response_frame, sdo_read_response_frame,
     sdo_write_response_frame, seed_servo_home_response_frame, set_diff_damper_response_frame,
     set_diff_trim_response_frame, set_drive_limits_response_frame, set_torque_response_frame,
-    start_capture_response_frame, stop_capture_response_frame, stop_response_frame,
-    sync_release_response_frame, Command,
+    start_capture_response_frame, stop_capture_response_frame, stop_response_frame, Command,
 };
 use mcu_protocol::messages::{
     ArmSensorlessEndstop, PushPieces, ResonanceBuzz, SdoRead, SdoReadResponse, SdoWrite,
     SdoWriteResponse, SetDiffDamper, SetDiffTrim, SetDriveLimits, SetTorque, StartCapture,
-    StopCaptureResponse, SyncRelease,
+    StopCaptureResponse,
 };
 
 pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
@@ -66,7 +61,6 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
             }
             Command::Stop { correlation_id } => {
                 let now_ns = monotonic_ns();
-                abort_sync(ctx, ERR_SYNC_ABORTED);
                 discard_motion(ctx);
                 ctx.stream_halt.halt();
                 eprintln!("ec-rt: Stop — rings discarded, stream halted, discard_clock={now_ns}");
@@ -134,12 +128,6 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
             } => {
                 handle_resonance_buzz(ctx, correlation_id, msg);
             }
-            Command::SyncRelease {
-                correlation_id,
-                msg,
-            } => {
-                handle_sync_release(ctx, correlation_id, msg);
-            }
             Command::SetDiffDamper {
                 correlation_id,
                 msg,
@@ -191,8 +179,6 @@ fn handle_push_pieces(ctx: &mut EndpointCtx, correlation_id: u32, msg: PushPiece
         .collect();
     let result = if ctx.gate.state() == TorqueState::Faulted {
         ERR_PIECES_WHILE_FAULTED
-    } else if ctx.sync.is_some() {
-        ERR_PIECES_DURING_SYNC
     } else if let Err(code) = ctx.stream_halt.check_push_allowed() {
         code
     } else {
@@ -217,12 +203,6 @@ fn handle_push_pieces(ctx: &mut EndpointCtx, correlation_id: u32, msg: PushPiece
 }
 
 fn handle_set_torque(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetTorque) {
-    if ctx.sync.is_some() {
-        eprintln!("ec-rt: SetTorque rejected — pair sync in progress");
-        ctx.server
-            .respond(&set_torque_response_frame(correlation_id, ERR_SYNC_BUSY));
-        return;
-    }
     let num_slaves = ctx.num_slaves;
     match ctx.gate.on_set_torque(msg.value != 0, msg.execute_at_ns) {
         CommandAction::Enable => {
@@ -358,13 +338,7 @@ fn handle_restore_drive_limits(ctx: &mut EndpointCtx, correlation_id: u32, slot:
 const ERR_SEED_HOME_STREAMING: i32 = -826;
 
 fn handle_seed_servo_home(ctx: &mut EndpointCtx, correlation_id: u32, slot: u8, home_q16: i32) {
-    if ctx.sync.is_some() {
-        eprintln!("ec-rt: SeedServoHome rejected — pair sync in progress");
-        ctx.server.respond(&seed_servo_home_response_frame(
-            correlation_id,
-            ERR_SYNC_BUSY,
-        ));
-    } else if slot as usize >= ctx.counts_per_mm.len() {
+    if slot as usize >= ctx.counts_per_mm.len() {
         eprintln!(
             "ec-rt: SeedServoHome for slot {slot} but only {} slave(s)",
             ctx.counts_per_mm.len()
@@ -397,10 +371,7 @@ fn handle_arm_sensorless_endstop(
     msg: ArmSensorlessEndstop,
 ) {
     let num_slaves = ctx.num_slaves;
-    let result = if ctx.sync.is_some() {
-        eprintln!("ec-rt: ArmSensorlessEndstop rejected — pair sync in progress");
-        ERR_SYNC_BUSY
-    } else if msg.slot as usize >= num_slaves {
+    let result = if msg.slot as usize >= num_slaves {
         eprintln!(
             "ec-rt: ArmSensorlessEndstop for slot {} but only {num_slaves} slave(s)",
             msg.slot
@@ -463,10 +434,7 @@ fn handle_arm_sensorless_endstop(
 }
 
 fn handle_resonance_buzz(ctx: &mut EndpointCtx, correlation_id: u32, msg: ResonanceBuzz) {
-    let rc = if ctx.sync.is_some() {
-        eprintln!("ec-rt: ResonanceBuzz rejected — pair sync in progress");
-        ERR_SYNC_BUSY
-    } else if ctx.gate.state() != TorqueState::Enabled {
+    let rc = if ctx.gate.state() != TorqueState::Enabled {
         eprintln!("ec-rt: ResonanceBuzz rejected — drive not operation-enabled");
         crate::buzz::ERR_BUZZ_NOT_ENABLED
     } else if ctx.rings.iter().any(|r| !r.is_empty()) || ctx.buzz.active() {
@@ -513,10 +481,7 @@ fn handle_resonance_buzz(ctx: &mut EndpointCtx, correlation_id: u32, msg: Resona
 }
 
 fn handle_set_diff_damper(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDiffDamper) {
-    let rc = if ctx.sync.is_some() {
-        eprintln!("ec-rt: SetDiffDamper rejected — pair sync in progress");
-        ERR_SYNC_BUSY
-    } else {
+    let rc = {
         ctx.damper.set(
             ctx.num_slaves,
             msg.slot_a,
@@ -549,10 +514,7 @@ fn handle_set_diff_damper(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDi
 }
 
 fn handle_set_diff_trim(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDiffTrim) {
-    let rc = if ctx.sync.is_some() {
-        eprintln!("ec-rt: SetDiffTrim rejected — pair sync in progress");
-        ERR_SYNC_BUSY
-    } else {
+    let rc = {
         ctx.trim.set(
             ctx.num_slaves,
             msg.slot_a,
@@ -646,60 +608,6 @@ fn handle_query_motor_state(ctx: &mut EndpointCtx, correlation_id: u32) {
         ctx.server
             .respond(&motor_state_response_frame_multi(correlation_id, &samples));
     }
-}
-
-fn handle_sync_release(ctx: &mut EndpointCtx, correlation_id: u32, msg: SyncRelease) {
-    let reject = |ctx: &mut EndpointCtx, code: i32| {
-        eprintln!(
-            "ec-rt: SyncRelease slot_mask=0x{:02x} rejected code={code}",
-            msg.slot_mask
-        );
-        ctx.server.respond(&sync_release_response_frame(
-            correlation_id,
-            &sync_response_with_code(code),
-        ));
-    };
-    if ctx.sync.is_some() {
-        return reject(ctx, ERR_SYNC_BUSY);
-    }
-    if ctx.gate.state() != TorqueState::Enabled {
-        return reject(ctx, ERR_SYNC_NOT_ENABLED);
-    }
-    if ctx.rings.iter().any(|r| !r.is_empty()) || ctx.buzz.active() {
-        return reject(ctx, ERR_SYNC_STREAMING);
-    }
-    if usize::from(msg.slot_mask) >> ctx.num_slaves.min(MAX_RELEASE_SLOTS) != 0 {
-        eprintln!(
-            "ec-rt: SyncRelease slot_mask=0x{:02x} selects slots beyond the \
-             {} present (max {MAX_RELEASE_SLOTS})",
-            msg.slot_mask, ctx.num_slaves
-        );
-        return reject(ctx, ERR_SYNC_BAD_MASK);
-    }
-    let cycles_per_ms = (1_000_000 / ctx.cycle_ns.max(1)) as u64;
-    let params = SyncParams {
-        torque_ok_tenth_pct: msg.torque_ok_tenth_pct,
-        settle_timeout_cycles: u64::from(msg.settle_timeout_ms) * cycles_per_ms,
-        measure_cycles: 100 * cycles_per_ms,
-        quiet_cycles: 50 * cycles_per_ms,
-    };
-    let mut counts_per_mm = [0f64; MAX_RELEASE_SLOTS];
-    for (slot, cpm) in counts_per_mm.iter_mut().enumerate().take(ctx.num_slaves) {
-        *cpm = ctx.counts_per_mm[slot];
-    }
-    let machine = match ReleaseMachine::begin(params, msg.slot_mask, counts_per_mm) {
-        Ok(m) => m,
-        Err(code) => return reject(ctx, code),
-    };
-    eprintln!(
-        "ec-rt: SyncRelease started slot_mask=0x{:02x} torque_ok={} settle_timeout={}ms",
-        msg.slot_mask, msg.torque_ok_tenth_pct, msg.settle_timeout_ms
-    );
-    ctx.sync = Some(SyncRun {
-        correlation_id,
-        disabled: false,
-        machine,
-    });
 }
 
 pub(super) fn drain_pending_starts(ctx: &mut EndpointCtx) {

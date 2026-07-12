@@ -7,7 +7,6 @@ use mcu_protocol::messages::{
     ResonanceBuzzResponse, RestoreDriveLimits, RestoreDriveLimitsResponse, SeedServoHome,
     SeedServoHomeResponse, SetDiffDamper, SetDiffDamperResponse, SetDiffTrim, SetDiffTrimResponse,
     SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse, StopResponse,
-    SyncRelease, SyncReleaseResponse,
 };
 
 use crate::servo_call::mcu_typed_call;
@@ -176,25 +175,6 @@ pub fn send_set_diff_trim(conn: &McuSerialConn, trim: SetDiffTrim) -> Result<i32
         SET_DIFF_TRIM_TIMEOUT,
     )?;
     Ok(r.result)
-}
-
-/// A release runs baseline/coast/final phases around one settle window; a
-/// couple of seconds is normal, so give the round-trip real room.
-const SYNC_RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
-
-pub fn send_sync_release(
-    conn: &McuSerialConn,
-    msg: SyncRelease,
-) -> Result<SyncReleaseResponse, String> {
-    let body = msg.encoded_to_vec();
-    mcu_typed_call(
-        conn,
-        "SyncRelease",
-        MessageKind::SyncRelease,
-        MessageKind::SyncReleaseResponse,
-        body,
-        SYNC_RELEASE_TIMEOUT,
-    )
 }
 
 #[cfg(test)]

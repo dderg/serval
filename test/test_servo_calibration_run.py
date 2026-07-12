@@ -563,7 +563,7 @@ class FakeServoSync:
     def __init__(self):
         self.runs = []
 
-    def run(self, gcmd, axis_filter=None, tuning=None):
+    def run(self, gcmd, axis_filter=None, torque_ok_pct=None, settle=None):
         self.runs.append(axis_filter)
 
 

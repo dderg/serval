@@ -190,6 +190,11 @@ class _LinearKinematics:
 
         return isinstance(self.rails[axis], servo_axis.ServoRail)
 
+    def mark_servo_parked(self, axes):
+        for i in axes:
+            if self._is_servo(i) and self.limits[i][0] <= self.limits[i][1]:
+                self._parked_dirty[i] = True
+
     def parked_dirty_axes(self):
         return [i for i in (0, 1, 2) if self._parked_dirty[i]]
 

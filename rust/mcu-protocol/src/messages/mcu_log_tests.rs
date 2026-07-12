@@ -35,14 +35,6 @@ fn mcu_log_is_event_kind() {
         Some(MessageKind::EndstopTrip)
     );
     assert_eq!(
-        MessageKind::from_u16(0x0086),
-        Some(MessageKind::SyncRelease)
-    );
-    assert_eq!(
-        MessageKind::from_u16(0x0087),
-        Some(MessageKind::SyncReleaseResponse)
-    );
-    assert_eq!(
         MessageKind::from_u16(0x0088),
         Some(MessageKind::SetDiffDamper)
     );

@@ -2,17 +2,15 @@ use std::ops::ControlFlow;
 
 #[cfg(feature = "hw")]
 use super::bringup::log_al_states;
-use super::{abort_sync, discard_motion, respond_fault_heartbeat, EndpointCtx};
+use super::{discard_motion, respond_fault_heartbeat, EndpointCtx};
 use crate::capture::{CaptureRecord, DriveSample, FLAG_MOTION_ACTIVE, FLAG_TORQUE_ENABLED};
 use crate::claim::{eval_wkc, WkcDecision};
 use crate::clock::raw_from_monotonic_ns;
 use crate::curves::ENGINE_STATE_FAULT;
 use crate::dynamics::clamp_torque;
 use crate::scale::{mm_to_counts, CountMap};
-use crate::sync::{SyncStep, ERR_SYNC_ABORTED, MAX_RELEASE_SLOTS};
 use crate::torque::{TickAction, TorqueState};
-use crate::wire::{endstop_trip_frame, status_heartbeat_frame, sync_release_response_frame};
-use mcu_protocol::messages::SyncReleaseResponse;
+use crate::wire::{endstop_trip_frame, status_heartbeat_frame};
 
 macro_rules! log_slot_drive_telemetry {
     ($level:ident, $event:literal, $msg:literal, $ctx:expr, $slot:expr, $t:expr,
@@ -50,8 +48,6 @@ pub(super) fn run_cycle(ctx: &mut EndpointCtx) -> ControlFlow<()> {
     poll_sensorless(ctx, apply_time);
 
     let (motion_active, all_acc, all_vel) = compute_motion_targets(ctx, apply_time);
-
-    poll_sync(ctx);
 
     handle_ring_fault(ctx);
 
@@ -230,10 +226,6 @@ fn damper_torque_tenths(ctx: &mut EndpointCtx) -> Vec<f32> {
     if !ctx.damper.active() {
         return host_frame;
     }
-    if ctx.sync.is_some() {
-        ctx.damper.reset_filters();
-        return host_frame;
-    }
     let pos_mm: Vec<f64> = (0..ctx.num_slaves)
         .map(|s| f64::from(ctx.drive.position_actual(s)) / ctx.cmd_counts_per_mm[s])
         .collect();
@@ -255,10 +247,6 @@ const TRIM_STATE_LOG_CYCLES: u64 = 4000;
 fn trim_offset_counts(ctx: &mut EndpointCtx, sp_counts: &[Option<i32>]) -> Vec<i32> {
     let mut counts = vec![0i32; ctx.num_slaves];
     if !ctx.trim.active() {
-        return counts;
-    }
-    if ctx.sync.is_some() {
-        ctx.trim.reset();
         return counts;
     }
     let torque_mech: Vec<f64> = (0..ctx.num_slaves)
@@ -374,99 +362,6 @@ fn emit_slot_commands(
     motion_active
 }
 
-fn poll_sync(ctx: &mut EndpointCtx) {
-    let Some(mut run) = ctx.sync.take() else {
-        return;
-    };
-    let mut inputs = crate::sync::SyncInputs {
-        torque: [0; MAX_RELEASE_SLOTS],
-        position: [0; MAX_RELEASE_SLOTS],
-    };
-    for slot in run.machine.masked_slots() {
-        inputs.torque[slot] = ctx.drive.torque_actual(slot);
-        inputs.position[slot] = ctx.drive.position_actual(slot);
-    }
-    match run.machine.poll(&inputs) {
-        SyncStep::Idle => ctx.sync = Some(run),
-        SyncStep::DisableAll => {
-            for slot in run.machine.masked_slots() {
-                eprintln!(
-                    "ec-rt: sync: coasting slot {slot} (pos={})",
-                    inputs.position[slot]
-                );
-                ctx.drive.disable(slot);
-            }
-            run.disabled = true;
-            ctx.sync = Some(run);
-        }
-        SyncStep::EnableAll => {
-            let slots: Vec<usize> = run.machine.masked_slots().collect();
-            for &slot in &slots {
-                let rc = ctx.drive.enable(slot);
-                if rc != 0 {
-                    eprintln!("ec-rt: sync: re-enable of slot {slot} failed rc={rc} — parking");
-                    ctx.sync = Some(run);
-                    abort_sync(ctx, ERR_SYNC_ABORTED);
-                    ctx.drive.shutdown_and_exit(ctx.num_slaves);
-                }
-            }
-            run.disabled = false;
-            let mut settled = [0i32; MAX_RELEASE_SLOTS];
-            for &slot in &slots {
-                settled[slot] = ctx.drive.position_actual(slot);
-                eprintln!("ec-rt: sync: slot {slot} re-enabled at {}", settled[slot]);
-            }
-            run.machine.enable_finished(&settled);
-            ctx.sync = Some(run);
-        }
-        SyncStep::Done(report) => finalize_sync(ctx, &run, &report),
-    }
-}
-
-fn finalize_sync(ctx: &mut EndpointCtx, run: &super::SyncRun, report: &crate::sync::SyncReport) {
-    let slots: Vec<usize> = run.machine.masked_slots().collect();
-    if report.reseeded {
-        for &slot in &slots {
-            ctx.last_counts[slot] = None;
-            ctx.last_streamed_target[slot] = None;
-            ctx.cmaps[slot] = None;
-            // The rotor turned by the released delta while the axis stood
-            // still, so the same host-frame mm now maps to counts+delta.
-            if let Some((anchor_counts, anchor_mm)) = ctx.report_anchor[slot] {
-                ctx.report_anchor[slot] = Some((
-                    anchor_counts.wrapping_add(report.released_delta_counts[slot]),
-                    anchor_mm,
-                ));
-            }
-        }
-    }
-    let slot_mask = slots.iter().fold(0u8, |mask, &slot| mask | (1 << slot));
-    tracing::info!(
-        subsystem = "ethercat",
-        event = "sync_release_done",
-        result = report.result,
-        slot_mask,
-        torque_baseline = format!("{:?}", report.torque_baseline),
-        torque_final = format!("{:?}", report.torque_final),
-        released_delta_counts = format!("{:?}", report.released_delta_counts),
-        "belt strain release finished"
-    );
-    eprintln!(
-        "ec-rt: sync done result={} slot_mask=0x{slot_mask:02x} baseline={:?} \
-         final={:?} released={:?} counts",
-        report.result, report.torque_baseline, report.torque_final, report.released_delta_counts
-    );
-    let resp = SyncReleaseResponse {
-        result: report.result,
-        slot_mask,
-        torque_baseline: report.torque_baseline,
-        torque_final: report.torque_final,
-        released_delta_counts: report.released_delta_counts,
-    };
-    ctx.server
-        .respond(&sync_release_response_frame(run.correlation_id, &resp));
-}
-
 fn fault_non_finite_torque(ctx: &mut EndpointCtx, slot: usize, acc: f32, vel: f32) -> ! {
     eprintln!(
         "ec-rt: FAULT non-finite torque FF on slot {slot} \
@@ -525,7 +420,6 @@ fn handle_drive_fault(ctx: &mut EndpointCtx) {
     });
     if let Some((slot, err)) = drive_fault {
         if ctx.gate.state() != TorqueState::Faulted {
-            abort_sync(ctx, ERR_SYNC_ABORTED);
             eprintln!(
                 "ec-rt: DRIVE FAULT slot {slot} err=0x{err:04x} — parking, reporting via heartbeat"
             );

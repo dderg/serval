@@ -452,30 +452,6 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
         ],
     },
     SchemaMessage {
-        type_tag: 0x0086,
-        name: "SyncRelease",
-        version: 3,
-        channel: "control",
-        fields: &[
-            SchemaField { name: "slot_mask", ty: "u8" },
-            SchemaField { name: "torque_ok_tenth_pct", ty: "u16" },
-            SchemaField { name: "settle_timeout_ms", ty: "u16" },
-        ],
-    },
-    SchemaMessage {
-        type_tag: 0x0087,
-        name: "SyncReleaseResponse",
-        version: 2,
-        channel: "control",
-        fields: &[
-            SchemaField { name: "result", ty: "i32" },
-            SchemaField { name: "slot_mask", ty: "u8" },
-            SchemaField { name: "torque_baseline", ty: "i32[4]" },
-            SchemaField { name: "torque_final", ty: "i32[4]" },
-            SchemaField { name: "released_delta_counts", ty: "i32[4]" },
-        ],
-    },
-    SchemaMessage {
         type_tag: 0x0088,
         name: "SetDiffDamper",
         version: 2,

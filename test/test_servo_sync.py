@@ -6,12 +6,14 @@ from klippy.extras import servo_axis, servo_sync
 class FakeReactor:
     def __init__(self):
         self._t = 0.0
+        self.pauses = []
 
     def monotonic(self):
         self._t += 0.001
         return self._t
 
     def pause(self, until):
+        self.pauses.append(until - self._t)
         self._t = until
 
 
@@ -34,14 +36,21 @@ class FakeToolhead:
     def wait_moves(self):
         self.wait_moves_calls += 1
 
+    def get_last_move_time(self):
+        return 12.5
+
 
 class FakeKin:
     def __init__(self, rails, lane_names):
         self.rails = rails
         self._lane_names = lane_names
+        self.parked = []
 
     def lanes(self):
         return [(i, name, []) for i, name in enumerate(self._lane_names)]
+
+    def mark_servo_parked(self, axes):
+        self.parked.append(tuple(axes))
 
 
 class FakeNode:
@@ -49,6 +58,9 @@ class FakeNode:
         self.name = name
         self._handle = handle
         self._slots = slots
+        self._torque_motors = set()
+        self.torque_calls = []
+        self.waiter_calls = 0
 
     def get_engine_handle(self):
         return self._handle
@@ -56,23 +68,36 @@ class FakeNode:
     def get_slot_for_motor(self, motor_name):
         return self._slots[motor_name]
 
+    def set_motor_torque(self, motor_name, value, print_time):
+        self.torque_calls.append((motor_name, value, print_time))
+        if value:
+            first = not self._torque_motors
+            self._torque_motors.add(motor_name)
+            if first:
 
-OK_REPORT = (0, 0x0F, [80, -78, 40, -38], [3, -2, 1, -1], [512, -498, 60, -55])
+                def waiter():
+                    self.waiter_calls += 1
+
+                return waiter
+        else:
+            self._torque_motors.discard(motor_name)
+        return None
 
 
 class FakeEngine:
-    def __init__(self, scripted=None):
-        self.calls = []
-        self._scripted = list(scripted or [])
+    def __init__(self, torques=None):
+        self.sdo_reads = []
+        self._torques = list(
+            torques if torques is not None else [80, -78, 40, -38, 3, -2, 1, -1]
+        )
 
     def motion_drained(self):
         return True
 
-    def sync_servo_release(self, handle, slot_mask, *tuning):
-        self.calls.append((handle, slot_mask) + tuning)
-        if self._scripted:
-            return self._scripted.pop(0)
-        return OK_REPORT
+    def sdo_read(self, handle, slot, index, subindex):
+        self.sdo_reads.append((handle, slot, index, subindex))
+        raw = self._torques.pop(0)
+        return (2, raw & 0xFFFF)
 
 
 class FakePrinter:
@@ -113,7 +138,7 @@ class FakeGcmd:
     def get(self, name, default=None):
         return self._params.get(name, default)
 
-    def get_float(self, name, default=None):
+    def get_float(self, name, default=None, **kw):
         return float(self._params.get(name, default))
 
     def respond_info(self, msg):
@@ -160,56 +185,64 @@ def make_sync(engine=None, rails=None, lane_names=("x", "y")):
         }
     )
     ss = servo_sync.ServoSync(FakeConfig(printer))
-    return ss, engine, toolhead
+    return ss, engine, node, printer
 
 
-def failed_report(result):
-    return (result,) + OK_REPORT[1:]
-
-
-def test_releases_every_belt_drive_in_one_call_with_converted_units():
-    ss, engine, toolhead = make_sync()
+def test_torque_cycles_off_then_on_for_every_belt_rail():
+    ss, engine, node, printer = make_sync()
     gcmd = FakeGcmd()
     ss.cmd_SERVO_SYNC(gcmd)
-    assert toolhead.wait_moves_calls == 1
-    assert engine.calls == [(7, 0x0F, 30, 2000)]
+    assert node.torque_calls == [
+        ("axis x", False, 12.5),
+        ("axis y", False, 12.5),
+        ("axis x", True, 12.5),
+        ("axis y", True, 12.5),
+    ]
+    assert node.waiter_calls == 1
+    assert printer._reactor.pauses == [pytest.approx(1.0)]
+    kin = printer.lookup_object("toolhead").get_kinematics()
+    assert kin.parked == [(0, 1)]
+
+
+def test_reads_torque_before_and_after_and_reports_per_axis():
+    ss, engine, node, printer = make_sync()
+    gcmd = FakeGcmd()
+    ss.cmd_SERVO_SYNC(gcmd)
+    assert engine.sdo_reads == [(7, s, 0x6077, 0) for s in (0, 1, 2, 3)] * 2
     assert len(gcmd.responses) == 2
-    assert "axis x released" in gcmd.responses[0]
-    assert "motor_a +8.0% -> +0.3%" in gcmd.responses[0]
+    assert "axis x released: motor_a +8.0% -> +0.3%" in gcmd.responses[0]
     assert "motor_a1 -7.8% -> -0.2%" in gcmd.responses[0]
-    assert "rotor moved +0.1562 mm" in gcmd.responses[0]
-    assert "axis y released" in gcmd.responses[1]
-    assert "motor_b +4.0% -> +0.1%" in gcmd.responses[1]
+    assert "axis y released: motor_b +4.0% -> +0.1%" in gcmd.responses[1]
 
 
 def test_axis_filter_releases_only_that_pair():
-    ss, engine, _ = make_sync()
+    ss, engine, node, _ = make_sync(engine=FakeEngine(torques=[40, -38, 1, -1]))
     ss.cmd_SERVO_SYNC(FakeGcmd(AXIS="Y"))
-    assert engine.calls == [(7, 0x0C, 30, 2000)]
+    assert [c[0] for c in node.torque_calls] == ["axis y", "axis y"]
+    assert [r[1] for r in engine.sdo_reads] == [2, 3, 2, 3]
 
 
-def test_gcode_torque_ok_override_reaches_the_engine():
-    ss, engine, _ = make_sync()
-    ss.cmd_SERVO_SYNC(FakeGcmd(TORQUE_OK="5.0"))
-    assert engine.calls == [(7, 0x0F, 50, 2000)]
+def test_settle_override_stretches_the_relax_pause():
+    ss, _, _, printer = make_sync()
+    ss.cmd_SERVO_SYNC(FakeGcmd(SETTLE="2.5"))
+    assert printer._reactor.pauses == [pytest.approx(2.5)]
 
 
-def test_failed_release_reports_measurements_and_raises():
-    ss, engine, _ = make_sync(engine=FakeEngine([failed_report(-846)]))
+def test_residual_fight_after_release_errors_loudly():
+    ss, _, _, _ = make_sync(
+        engine=FakeEngine(torques=[80, -78, 40, -38, 60, -55, 1, -1])
+    )
     gcmd = FakeGcmd()
-    with pytest.raises(RuntimeError, match="see measurements"):
+    with pytest.raises(RuntimeError, match="still fighting"):
         ss.cmd_SERVO_SYNC(gcmd)
-    assert len(gcmd.responses) == 2
-    assert "still fighting" in gcmd.responses[0]
-    assert "code -846" in gcmd.responses[0]
+    assert any("motor_a +8.0% -> +6.0%" in r for r in gcmd.responses)
 
 
-def test_settle_timeout_names_the_failure():
-    ss, engine, _ = make_sync(engine=FakeEngine([failed_report(-844)]))
-    gcmd = FakeGcmd()
-    with pytest.raises(RuntimeError):
-        ss.cmd_SERVO_SYNC(gcmd)
-    assert any("settle timeout" in r for r in gcmd.responses)
+def test_torque_ok_override_loosens_the_threshold():
+    ss, _, _, _ = make_sync(
+        engine=FakeEngine(torques=[80, -78, 40, -38, 60, -55, 1, -1])
+    )
+    ss.cmd_SERVO_SYNC(FakeGcmd(TORQUE_OK="7.0"))
 
 
 def test_z_axis_is_rejected_loudly():
@@ -217,13 +250,13 @@ def test_z_axis_is_rejected_loudly():
         make_rail("x", ["motor_a", "motor_a1"]),
         make_rail("z", ["motor_z", "motor_z1"]),
     ]
-    ss, _, _ = make_sync(rails=rails, lane_names=("x", "z"))
+    ss, _, _, _ = make_sync(rails=rails, lane_names=("x", "z"))
     with pytest.raises(RuntimeError, match="racking"):
         ss.cmd_SERVO_SYNC(FakeGcmd(AXIS="Z"))
 
 
 def test_single_drive_axes_are_not_syncable():
     rails = [make_rail("x", ["motor_a"]), make_rail("y", ["motor_b"])]
-    ss, _, _ = make_sync(rails=rails)
+    ss, _, _, _ = make_sync(rails=rails)
     with pytest.raises(RuntimeError, match="no belt axis"):
         ss.cmd_SERVO_SYNC(FakeGcmd())

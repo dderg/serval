@@ -511,6 +511,5 @@ pub fn bringup(args: Args) -> EndpointCtx {
         latched_drive_err,
         sensorless,
         stream_halt,
-        sync: None,
     }
 }

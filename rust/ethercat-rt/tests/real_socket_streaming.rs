@@ -95,7 +95,6 @@ fn run_endpoint(socket_path: String, faulted: Arc<AtomicBool>) {
                     todo!("wired in the endpoint task")
                 }
                 Command::Unknown { .. }
-                | Command::SyncRelease { .. }
                 | Command::SetDiffDamper { .. }
                 | Command::SetDiffTrim { .. } => {}
             }

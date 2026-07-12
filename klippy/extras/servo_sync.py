@@ -2,17 +2,11 @@ from .. import engine_wait
 from . import servo_axis
 
 MOTION_DRAIN_TIMEOUT = 60.0
+TORQUE_ACTUAL_INDEX = 0x6077
 
-SYNC_ERROR_TEXT = {
-    -840: "another sync is already running on the node",
-    -841: "servo torque is not enabled",
-    -842: "motion ring is not empty",
-    -843: "release mask does not select valid drive slots",
-    -844: "a coasting drive never settled (settle timeout)",
-    -846: "drives still fighting after re-enable",
-    -847: "motion arrived during sync",
-    -849: "sync aborted by stop or drive fault",
-}
+
+def _signed16(raw):
+    return raw - 0x10000 if raw >= 0x8000 else raw
 
 
 class SyncableAxis:
@@ -33,12 +27,13 @@ class SyncableAxis:
 
 class ServoSync:
     cmd_SERVO_SYNC_help = (
-        "Release the strain the belt drives have built up against each "
-        "other: de-energize every belt drive at once, let the mechanics "
-        "relax freely, re-energize (each drive re-seeds at its settled "
-        "position, so no position is lost). Standstill torque is verified "
-        "before and after. AXIS=X|Y releases just one pair; TORQUE_OK "
-        "overrides the config threshold."
+        "Release trapped belt strain the M84 way, XY only: torque off every "
+        "belt drive at once, let the mechanics relax freely, torque back "
+        "on. Each drive re-seeds at its actual position and the next move "
+        "re-adopts the measured carriage position (exactly like after M84), "
+        "so nothing is lost or rehomed. AXIS=X|Y releases one pair; "
+        "TORQUE_OK sets the residual-fight error threshold; SETTLE "
+        "overrides the relax time in seconds."
     )
 
     def __init__(self, config):
@@ -46,8 +41,8 @@ class ServoSync:
         self.torque_ok_pct = config.getfloat(
             "torque_ok", 3.0, above=0.0, maxval=40.0
         )
-        self.settle_timeout = config.getfloat(
-            "settle_timeout", 2.0, above=0.0, maxval=60.0
+        self.settle_time = config.getfloat(
+            "settle_time", 1.0, above=0.0, maxval=10.0
         )
         gcode = self.printer.lookup_object("gcode")
         gcode.register_command(
@@ -106,39 +101,46 @@ class ServoSync:
                 % MOTION_DRAIN_TIMEOUT
             )
 
-    def _describe(self, entry, report):
-        result, _slot_mask, baseline, final, released = report
+    def _node_handle(self, gcmd, node):
+        handle = node.get_engine_handle()
+        if handle is None:
+            raise gcmd.error(
+                "SERVO_SYNC: ethercat_node %s has no engine handle" % node.name
+            )
+        return handle
+
+    def _read_torques(self, engine, handle, entries):
+        torques = {}
+        for entry in entries:
+            for slot, _motor in entry.slot_motors():
+                _size, raw = engine.sdo_read(
+                    handle, slot, TORQUE_ACTUAL_INDEX, 0
+                )
+                torques[slot] = _signed16(raw)
+        return torques
+
+    def _describe(self, entry, baseline, final):
         parts = []
         for slot, motor in entry.slot_motors():
             parts.append(
-                "%s %+.1f%% -> %+.1f%% (rotor moved %+.4f mm)"
+                "%s %+.1f%% -> %+.1f%%"
                 % (
                     motor.get_motor_name(),
                     baseline[slot] / 10.0,
                     final[slot] / 10.0,
-                    released[slot] / motor.get_counts_per_mm(),
                 )
             )
-        text = "axis %s released: %s" % (entry.axis_name(), "; ".join(parts))
-        if result != 0:
-            text += " — FAILED: %s (code %d)" % (
-                SYNC_ERROR_TEXT.get(result, "unknown error"),
-                result,
-            )
-        return text
+        return "axis %s released: %s" % (entry.axis_name(), "; ".join(parts))
 
-    def default_tuning(self):
-        return {
-            "torque_ok_tenth_pct": int(round(self.torque_ok_pct * 10.0)),
-            "settle_timeout_ms": int(round(self.settle_timeout * 1000.0)),
-        }
-
-    def run(self, gcmd, axis_filter=None, tuning=None):
-        if tuning is None:
-            tuning = self.default_tuning()
+    def run(self, gcmd, axis_filter=None, torque_ok_pct=None, settle=None):
+        if torque_ok_pct is None:
+            torque_ok_pct = self.torque_ok_pct
+        if settle is None:
+            settle = self.settle_time
         axes = self._syncable_axes(gcmd, axis_filter)
         toolhead = self.printer.lookup_object("toolhead")
         engine = self.printer.lookup_object("motion_engine")
+        reactor = self.printer.get_reactor()
         toolhead.wait_moves()
         self._drain_motion(gcmd, engine)
         by_node = {}
@@ -146,41 +148,48 @@ class ServoSync:
             by_node.setdefault(id(entry.node), (entry.node, []))[1].append(
                 entry
             )
-        failed = False
+        residual = []
         for node, entries in by_node.values():
-            handle = node.get_engine_handle()
-            if handle is None:
-                raise gcmd.error(
-                    "SERVO_SYNC: ethercat_node %s has no engine handle"
-                    % node.name
-                )
-            slot_mask = 0
+            handle = self._node_handle(gcmd, node)
+            baseline = self._read_torques(engine, handle, entries)
+            print_time = toolhead.get_last_move_time()
             for entry in entries:
-                for slot, _motor in entry.slot_motors():
-                    slot_mask |= 1 << slot
-            report = engine.sync_servo_release(
-                handle,
-                slot_mask,
-                tuning["torque_ok_tenth_pct"],
-                tuning["settle_timeout_ms"],
+                node.set_motor_torque(entry.rail.get_name(), False, print_time)
+            reactor.pause(reactor.monotonic() + settle)
+            print_time = toolhead.get_last_move_time()
+            waiters = [
+                node.set_motor_torque(entry.rail.get_name(), True, print_time)
+                for entry in entries
+            ]
+            for waiter in waiters:
+                if waiter is not None:
+                    waiter()
+            final = self._read_torques(engine, handle, entries)
+            for entry in entries:
+                gcmd.respond_info(self._describe(entry, baseline, final))
+                for slot, motor in entry.slot_motors():
+                    if abs(final[slot]) > torque_ok_pct * 10.0:
+                        residual.append(motor.get_motor_name())
+        toolhead.get_kinematics().mark_servo_parked((0, 1))
+        if residual:
+            raise gcmd.error(
+                "SERVO_SYNC: %s still fighting after release — "
+                "did the torque cycle execute? (mechanical binding?)"
+                % ", ".join(residual)
             )
-            for entry in entries:
-                gcmd.respond_info(self._describe(entry, report))
-            failed = failed or report[0] != 0
-        if failed:
-            raise gcmd.error("SERVO_SYNC failed — see measurements above")
 
     def cmd_SERVO_SYNC(self, gcmd):
         axis_filter = gcmd.get("AXIS", None)
         if axis_filter is not None:
             axis_filter = axis_filter.lower()
-        tuning = {
-            "torque_ok_tenth_pct": int(
-                round(gcmd.get_float("TORQUE_OK", self.torque_ok_pct) * 10.0)
+        self.run(
+            gcmd,
+            axis_filter,
+            torque_ok_pct=gcmd.get_float("TORQUE_OK", self.torque_ok_pct),
+            settle=gcmd.get_float(
+                "SETTLE", self.settle_time, above=0.0, maxval=10.0
             ),
-            "settle_timeout_ms": int(round(self.settle_timeout * 1000.0)),
-        }
-        self.run(gcmd, axis_filter, tuning)
+        )
 
 
 def load_config(config):

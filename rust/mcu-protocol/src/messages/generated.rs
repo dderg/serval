@@ -61,8 +61,6 @@ pub enum MessageKind {
     StatusHeartbeat = 0x0083,
     McuLog = 0x0084,
     EndstopTrip = 0x0085,
-    SyncRelease = 0x0086,
-    SyncReleaseResponse = 0x0087,
     SetDiffDamper = 0x0088,
     SetDiffDamperResponse = 0x0089,
     SetDiffTrim = 0x008A,
@@ -112,8 +110,6 @@ impl MessageKind {
             0x0083 => Self::StatusHeartbeat,
             0x0084 => Self::McuLog,
             0x0085 => Self::EndstopTrip,
-            0x0086 => Self::SyncRelease,
-            0x0087 => Self::SyncReleaseResponse,
             0x0088 => Self::SetDiffDamper,
             0x0089 => Self::SetDiffDamperResponse,
             0x008A => Self::SetDiffTrim,
@@ -823,68 +819,6 @@ impl Decode for EndstopTrip {
         Ok(Self {
             endstop_id: get_u8(c)?,
             trip_clock: get_u64(c)?,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SyncRelease {
-    pub slot_mask: u8,
-    pub torque_ok_tenth_pct: u16,
-    pub settle_timeout_ms: u16,
-}
-
-impl Encode for SyncRelease {
-    fn encode(&self, out: &mut Vec<u8>) {
-        put_u8(out, self.slot_mask);
-        put_u16(out, self.torque_ok_tenth_pct);
-        put_u16(out, self.settle_timeout_ms);
-    }
-}
-
-impl Decode for SyncRelease {
-    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
-        Ok(Self {
-            slot_mask: get_u8(c)?,
-            torque_ok_tenth_pct: get_u16(c)?,
-            settle_timeout_ms: get_u16(c)?,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SyncReleaseResponse {
-    pub result: i32,
-    pub slot_mask: u8,
-    pub torque_baseline: [i32; 4],
-    pub torque_final: [i32; 4],
-    pub released_delta_counts: [i32; 4],
-}
-
-impl Encode for SyncReleaseResponse {
-    fn encode(&self, out: &mut Vec<u8>) {
-        put_i32(out, self.result);
-        put_u8(out, self.slot_mask);
-        for v in &self.torque_baseline {
-            put_i32(out, *v);
-        }
-        for v in &self.torque_final {
-            put_i32(out, *v);
-        }
-        for v in &self.released_delta_counts {
-            put_i32(out, *v);
-        }
-    }
-}
-
-impl Decode for SyncReleaseResponse {
-    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
-        Ok(Self {
-            result: get_i32(c)?,
-            slot_mask: get_u8(c)?,
-            torque_baseline: [get_i32(c)?, get_i32(c)?, get_i32(c)?, get_i32(c)?],
-            torque_final: [get_i32(c)?, get_i32(c)?, get_i32(c)?, get_i32(c)?],
-            released_delta_counts: [get_i32(c)?, get_i32(c)?, get_i32(c)?, get_i32(c)?],
         })
     }
 }

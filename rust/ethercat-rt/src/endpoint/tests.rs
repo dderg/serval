@@ -192,7 +192,6 @@ fn test_ctx_with_drive(name: &str, drive: TrackingLagDrive) -> EndpointCtx {
         latched_drive_err: 0,
         sensorless: SensorlessBank::new(NUM_SLAVES),
         stream_halt: StreamHalt::default(),
-        sync: None,
     }
 }
 
