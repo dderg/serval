@@ -24,11 +24,19 @@ const PAGE_DEFS = {
     experiments: ["gain_sweep", "refine_sweep", "gain_ladder"],
     charts: ["psd"],
     intro: "find the highest speed gain without resonance or torque rail",
+    metrics: true,
     templates: [
       {
         label: "ladder…",
         command: "SERVO_GAIN_LADDER SAFE=550 START=700 STEP=50 MAX=900 AXIS=X ITERATIONS=1",
         title: "climb from START by STEP until a rung flags, then revert to SAFE",
+      },
+      {
+        label: "tracking…",
+        command: "SERVO_MEASURE_TRACKING AXIS=X SPEED=100 ACCEL=3000 ITERATIONS=3",
+        title:
+          "single stroke run with capture — the before/after check for any tuning " +
+          "change; per-drive overshoot/settle land in the tracking metrics table",
       },
     ],
   },
@@ -52,6 +60,7 @@ const PAGE_DEFS = {
     groups: ["load"],
     experiments: ["tracking", "inertia_grid", "differential"],
     charts: ["frf"],
+    metrics: true,
     intro: "identify the load, then let feedforward carry it",
     templates: [
       {
@@ -60,6 +69,13 @@ const PAGE_DEFS = {
         title:
           "strokes the axis, fits inertia/friction per drive, prints the recommended " +
           "inertia ratio and writes the feedforward profile",
+      },
+      {
+        label: "tracking…",
+        command: "SERVO_MEASURE_TRACKING AXIS=X SPEED=100 ACCEL=3000 ITERATIONS=3",
+        title:
+          "single stroke run with capture — the before/after check for any tuning " +
+          "change; per-drive overshoot/settle land in the tracking metrics table",
       },
     ],
   },
@@ -341,6 +357,16 @@ function analysisSectionsHtml(def) {
       `</tr></thead><tbody id="journal-body"></tbody></table></div>` +
       `</section>`
   );
+  if (def.metrics) {
+    parts.push(
+      `<section class="metrics-section">` +
+        `<div class="section-head"><h2>tracking metrics</h2>` +
+        `<span class="note">per drive, worst move of each step — ` +
+        `overshoot/settle measured over the dwell after each move</span></div>` +
+        `<div id="metrics-table"><p class="note">select runs above</p></div>` +
+        `</section>`
+    );
+  }
   if (def.charts && def.charts.includes("frf")) {
     parts.push(
       `<section class="frf-section" id="frf-section" hidden>` +
@@ -915,6 +941,111 @@ function countsPerMm(runName, driveName) {
     throw new Error(`${runName}: manifest has no counts_per_mm for ${driveName}`);
   }
   return motor.counts_per_mm;
+}
+
+// --- tracking metrics table -----------------------------------------------
+//
+// The replacement for the old gain-report PNG's "metrics vs gain" panel:
+// results.json already carries per-drive, per-move ferr/overshoot/settle and
+// the torque summary — this table is the view on top of them.
+
+function driveMoveSummary(metrics) {
+  const s = {
+    ferrPeak: 0,
+    ferrRms: 0,
+    overshoot: 0,
+    settleWorstMs: null,
+    neverSettled: false,
+    truncated: false,
+  };
+  for (const mv of metrics.moves) {
+    s.ferrPeak = Math.max(s.ferrPeak, mv.ferr_peak);
+    s.ferrRms = Math.max(s.ferrRms, mv.ferr_rms);
+    s.overshoot = Math.max(s.overshoot, mv.overshoot);
+    if (mv.settle_ms != null) {
+      if (s.settleWorstMs == null || mv.settle_ms > s.settleWorstMs) {
+        s.settleWorstMs = mv.settle_ms;
+      }
+    } else if (mv.settle_window_truncated) {
+      s.truncated = true;
+    } else {
+      s.neverSettled = true;
+    }
+  }
+  return s;
+}
+
+function settleCellHtml(s) {
+  if (s.neverSettled) return `<span class="badge resonance">never</span>`;
+  const truncatedBadge =
+    `<span class="badge truncated" title="the capture ended inside a move's ` +
+    `settle window, so the worst settle may be underestimated">truncated</span>`;
+  if (s.settleWorstMs == null) return s.truncated ? truncatedBadge : "—";
+  const value = `${s.settleWorstMs.toFixed(1)} ms`;
+  return s.truncated ? `${value} ${truncatedBadge}` : value;
+}
+
+function torqueCellHtml(tq) {
+  const peak = `${tq.peak_pct_rated.toFixed(0)}%`;
+  if (!tq.rail_detected) return peak;
+  return (
+    `${peak} <span class="badge torque" title="on the rail ${tq.rail_pct_moving.toFixed(1)}% ` +
+    `of moving time (${tq.rail_ms.toFixed(0)} ms, longest burst ${tq.longest_burst_ms.toFixed(0)} ms)">rail</span>`
+  );
+}
+
+function metricsTableRows(names, steps) {
+  const rows = [];
+  for (const name of names) {
+    const detail = state.details.get(name);
+    if (!detail || !detail.results) continue;
+    for (const step of detail.results.steps) {
+      if (!steps.includes(step.name)) continue;
+      for (const [drive, dr] of Object.entries(step.drives)) {
+        rows.push({
+          run: name,
+          step: step.name,
+          drive,
+          umPerCount: 1000 / countsPerMm(name, drive),
+          summary: driveMoveSummary(dr.metrics),
+          torque: dr.metrics.torque,
+        });
+      }
+    }
+  }
+  return rows;
+}
+
+function renderMetricsTable(names, steps) {
+  const container = el("metrics-table");
+  if (!container) return;
+  const rows = metricsTableRows(names, steps);
+  if (!rows.length) {
+    container.innerHTML = '<p class="note">select runs above</p>';
+    return;
+  }
+  const um = (counts, r) => (counts * r.umPerCount).toFixed(1);
+  const body = rows
+    .map((r) => {
+      const swatch = `<span class="swatch" style="background:${runColor(r.run)}"></span>`;
+      return (
+        `<tr><td class="run-cell" title="${r.run}">${swatch}${r.run}</td>` +
+        `<td>${r.step}</td><td>${r.drive}</td>` +
+        `<td class="num">${um(r.summary.ferrPeak, r)}</td>` +
+        `<td class="num">${um(r.summary.ferrRms, r)}</td>` +
+        `<td class="num">${um(r.summary.overshoot, r)}</td>` +
+        `<td class="num">${settleCellHtml(r.summary)}</td>` +
+        `<td class="num">${torqueCellHtml(r.torque)}</td></tr>`
+      );
+    })
+    .join("");
+  container.innerHTML =
+    `<table class="metrics-table"><thead><tr>` +
+    `<th>run</th><th>step</th><th>drive</th>` +
+    `<th class="num">ferr peak (µm)</th><th class="num">ferr rms (µm)</th>` +
+    `<th class="num">overshoot (µm)</th><th class="num">settle</th>` +
+    `<th class="num">torque peak</th>` +
+    `</tr></thead><tbody>${body}</tbody></table>`;
 }
 
 function psdFerrTraces(names, plots, steps) {
@@ -1969,6 +2100,10 @@ async function redrawCharts() {
     state.stepFilter = null;
   }
   const steps = visibleStepNames(stepNames);
+  if (def.metrics) {
+    const onPage = new Set(pageRuns(def).map((r) => r.name));
+    renderMetricsTable(okNames.filter((n) => onPage.has(n)), steps);
+  }
   if (def.charts && def.charts.includes("frf")) renderFrfCharts(okNames, plots);
   if (def.charts && def.charts.includes("psd")) {
     renderPsdChips(stepNames);

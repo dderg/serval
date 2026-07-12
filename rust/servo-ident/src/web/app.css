@@ -271,6 +271,18 @@ select.cell-input { text-align: left; }
 
 .rederive { color: #7db8f0; font-size: 11px; }
 
+/* --- tracking metrics table --------------------------------------------- */
+
+table.metrics-table { width: auto; }
+table.metrics-table th, table.metrics-table td { padding: 2px 16px 2px 0; }
+table.metrics-table th.num, table.metrics-table td.num { text-align: right; }
+table.metrics-table td.run-cell {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* --- differential belt FRF (dynamics page) ----------------------------- */
 
 #frf-modes h3 { margin-top: 10px; }
