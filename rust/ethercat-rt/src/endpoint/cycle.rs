@@ -404,6 +404,18 @@ fn emit_slot_commands(
             ctx.drive.set_velocity_offset(s, 0);
             ctx.drive
                 .set_torque_offset(s, damper_tenths[s].round() as i16);
+            // A held slot follows the compensation too: the stiffness probe
+            // steps offsets at standstill, and a map ramping while parked
+            // must move the held target now so the next stream doesn't.
+            if ctx.comp.active() {
+                if let Some(base) = ctx.last_counts[s] {
+                    ctx.drive.set_target_position(
+                        s,
+                        base.wrapping_add(trim_counts[s])
+                            .wrapping_add(comp_counts[s]),
+                    );
+                }
+            }
         }
     }
     motion_active

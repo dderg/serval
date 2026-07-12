@@ -509,3 +509,32 @@ fn damper_stays_quiet_on_common_mode_velocity() {
         assert_eq!(ctx.drive.telemetry(s).torque_offset, 0);
     }
 }
+
+/// The stiffness probe's regime: a constant compensation grid uploaded at
+/// standstill must reach the drives — held targets follow the (slew-limited)
+/// offset even though nothing is streaming.
+#[test]
+fn strain_comp_moves_held_targets_at_standstill() {
+    let mut ctx = test_ctx("comp-hold");
+    push_all(&mut ctx, piece(1_000_000, 0.01, &[0.0]));
+    run_cycles(&mut ctx, 1_000_000, 12_000_000);
+    let held = targets(&ctx);
+    assert_eq!(
+        ctx.comp
+            .set(NUM_SLAVES, 0, 1, 0, 1, 0, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
+        0
+    );
+    run_cycles(&mut ctx, 12_250_000, 200_000_000);
+    let now = targets(&ctx);
+    let expect = 0.1 * COUNTS_PER_MM;
+    assert!(
+        (f64::from(now[0] - held[0]) - expect).abs() < 2.0,
+        "slot 0 held target must follow +100 um, moved {}",
+        now[0] - held[0]
+    );
+    assert!(
+        (f64::from(now[1] - held[1]) + expect).abs() < 2.0,
+        "slot 1 held target must follow -100 um, moved {}",
+        now[1] - held[1]
+    );
+}

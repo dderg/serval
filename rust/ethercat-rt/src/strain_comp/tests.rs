@@ -240,3 +240,17 @@ fn bad_inputs_are_rejected() {
         ERR_COMP_SLOT_IN_USE
     );
 }
+
+#[test]
+fn constant_grid_applies_without_any_lane_data() {
+    let mut b = bank();
+    assert_eq!(
+        b.set(4, 0, 1, 0, 1, KIN_COREXY, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
+        0
+    );
+    // The stiffness probe runs entirely at standstill: no lane ever streams.
+    let idle = [None, None, None, None];
+    let out = settle(&mut b, &idle, 2000);
+    assert!((out[0] - 0.1).abs() < 1e-9, "got {}", out[0]);
+    assert!((out[1] + 0.1).abs() < 1e-9);
+}

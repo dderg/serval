@@ -189,7 +189,11 @@ impl StrainCompBank {
                     .find(|&(&axis, mm)| usize::from(axis) == lane && mm.is_some())
                     .and_then(|(_, mm)| *mm)
             };
-            if let (Some(pa), Some(pb)) = (lane_pos(comp.lane_a), lane_pos(comp.lane_b)) {
+            if comp.nx == 1 && comp.ny == 1 {
+                // A constant grid needs no position — this is the stiffness
+                // probe's path, which runs entirely at standstill.
+                comp.target_mm = comp.values_mm[0];
+            } else if let (Some(pa), Some(pb)) = (lane_pos(comp.lane_a), lane_pos(comp.lane_b)) {
                 let (x, y) = comp.carriage_xy(pa, pb);
                 comp.target_mm = comp.sample(x, y);
             }
