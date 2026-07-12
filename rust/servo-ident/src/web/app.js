@@ -131,6 +131,7 @@ const state = {
   strain: {
     selected: null, // run name shown on the strain page; auto-picks the newest
     cache: new Map(), // name -> {mtime_utc, data} from /api/runs/<name>/strain
+    field: "elastic", // which half to chart: elastic (fwd+back)/2 or friction (fwd-back)/2
   },
   sentLog: [], // {time, label, lines, results} — every G-code batch sent this session
 };
@@ -402,6 +403,12 @@ function renderPage() {
   if (def.strain) {
     root.innerHTML = strainShellHtml(def);
     bindPageEvents();
+    document.querySelectorAll("button.strain-field-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.strain.field = btn.dataset.field;
+        redrawStrain();
+      });
+    });
     renderSentLog();
     redrawStrain();
     return;
@@ -1333,7 +1340,10 @@ function strainShellHtml(def) {
     `</tr></thead><tbody id="strain-run-body"></tbody></table></div>` +
     `</section>` +
     `<section>` +
-    `<div class="section-head"><h2>elastic strain map</h2>` +
+    `<div class="section-head"><h2>strain map</h2>` +
+    `<button class="strain-field-btn" data-field="elastic">elastic</button>` +
+    `<button class="strain-field-btn" data-field="friction" ` +
+    `title="the direction-dependent half: (forward - backward)/2 — what a position-keyed offset cannot cancel">friction</button>` +
     `<span class="note" id="strain-summary"></span></div>` +
     `<div id="strain-heatmaps" class="strain-grid"></div>` +
     `<div id="strain-scale"></div>` +
@@ -1489,6 +1499,7 @@ function strainBedGeometry(groups, plan) {
 
 function strainStats(data) {
   let maxElastic = 0;
+  let maxFriction = 0;
   let fricSum = 0;
   let fricN = 0;
   for (const line of data.lines) {
@@ -1498,13 +1509,14 @@ function strainStats(data) {
       }
       for (const v of belt.friction) {
         if (v !== null) {
+          maxFriction = Math.max(maxFriction, Math.abs(v));
           fricSum += Math.abs(v);
           fricN++;
         }
       }
     }
   }
-  return { maxElastic, meanFriction: fricN ? fricSum / fricN : 0 };
+  return { maxElastic, maxFriction, meanFriction: fricN ? fricSum / fricN : 0 };
 }
 
 function lineBinWidth(line) {
@@ -1536,7 +1548,7 @@ function drawStrainHeatmap(canvas, group, beltIdx, vmax, geo) {
     const half = lineBinWidth(line) / 2;
     const sweepOrigin = group.orientation === "x" ? geo.x0 : geo.y0;
     line.bin_centers.forEach((center, b) => {
-      const v = line.belts[beltIdx].elastic[b];
+      const v = line.belts[beltIdx][state.strain.field][b];
       if (v === null) return;
       ctx.fillStyle = strainColor(v / vmax);
       const lo = sweepOrigin + center - half;
@@ -1582,11 +1594,15 @@ function strainHeatmapBox(title, group, beltIdx, vmax, geo) {
 function strainScaleHtml(vmax) {
   const stops = [];
   for (let i = 0; i <= 8; i++) stops.push(strainColor(i / 4 - 1));
+  const what =
+    state.strain.field === "friction"
+      ? "friction (direction-dependent) differential torque"
+      : "elastic differential torque";
   return (
     `<div class="strain-scale"><span>−${vmax.toFixed(1)}%</span>` +
     `<span class="bar" style="background:linear-gradient(90deg,${stops.join(",")})"></span>` +
     `<span>+${vmax.toFixed(1)}%</span>` +
-    `<span class="hint">elastic differential torque, % rated — null bins stay dark</span></div>`
+    `<span class="hint">${what}, % rated — null bins stay dark</span></div>`
   );
 }
 
@@ -1610,10 +1626,16 @@ function strainProfileBox(title, beltIdx, group, vmax, geo) {
     );
   const traces = lines.map((line, i) => ({
     t: line.bin_centers.map((c) => sweepOrigin + c),
-    y: line.belts[beltIdx].elastic,
+    y: line.belts[beltIdx][state.strain.field],
     color: ramp(i),
   }));
-  drawChart(canvas, traces, `elastic (%) vs bed ${group.orientation}`, { yMin: -vmax, yMax: vmax }, "mm");
+  drawChart(
+    canvas,
+    traces,
+    `${state.strain.field} (%) vs bed ${group.orientation}`,
+    { yMin: -vmax, yMax: vmax },
+    "mm"
+  );
   const legend = document.createElement("div");
   legend.className = "legend";
   lines.forEach((line, i) => {
@@ -1713,10 +1735,16 @@ function renderStrainCharts(data) {
     return;
   }
   const stats = strainStats(data);
-  const vmax = Math.max(1e-6, stats.maxElastic);
+  const vmax = Math.max(
+    1e-6,
+    state.strain.field === "friction" ? stats.maxFriction : stats.maxElastic
+  );
   summary.textContent =
     `max |elastic| ${stats.maxElastic.toFixed(1)}% · ` +
     `mean |friction| ${stats.meanFriction.toFixed(1)}%`;
+  document.querySelectorAll("button.strain-field-btn").forEach((btn) => {
+    btn.disabled = btn.dataset.field === state.strain.field;
+  });
   el("strain-scale").innerHTML = strainScaleHtml(vmax);
   const groups = strainGroups(data);
   const detail = state.details.get(state.strain.selected);
