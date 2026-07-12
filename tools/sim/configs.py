@@ -88,16 +88,6 @@ k: 0.03
 type: smooth_triangle
 smooth_time: 0.04
 
-[limit gantry]
-axes: x, y
-max_velocity: 300
-max_accel: 4000
-
-[limit z]
-axes: z
-max_velocity: 25
-max_accel: 200
-
 [motor x]
 drive: stepper
 step_pin: gpiochip0/gpio0
@@ -161,6 +151,8 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
+max_z_velocity: 10
+max_z_accel: 30
 
 [kinematics]
 type: cartesian
@@ -193,16 +185,6 @@ position_endstop: 0
 position_max: 250
 endstop_pin: ^gpiochip0/gpio12
 homing_speed: 5
-
-[limit gantry]
-axes: x, y
-max_velocity: 100
-max_accel: 1000
-
-[limit z]
-axes: z
-max_velocity: 10
-max_accel: 30
 
 [motor x]
 drive: stepper
@@ -279,16 +261,6 @@ position_endstop: 0
 position_max: 250
 endstop_pin: ^gpiochip0/gpio12
 homing_speed: 5
-
-[limit gantry]
-axes: x, y
-max_velocity: 2800
-max_accel: 100000
-
-[limit z]
-axes: z
-max_velocity: 25
-max_accel: 100
 
 [motor a]
 drive: stepper
@@ -381,16 +353,6 @@ position_max: 250
 endstop_pin: ^gpiochip0/gpio12
 homing_speed: 5
 
-[limit gantry]
-axes: x, y
-max_velocity: 1000
-max_accel: 10000
-
-[limit z]
-axes: z
-max_velocity: 25
-max_accel: 100
-
 [motor a]
 drive: stepper
 step_pin: gpiochip0/gpio18
@@ -466,6 +428,8 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
+max_z_velocity: 10
+max_z_accel: 30
 
 [kinematics]
 type: corexy
@@ -499,15 +463,86 @@ position_max: 250
 endstop_pin: ^gpiochip0/gpio12
 homing_speed: 5
 
-[limit gantry]
-axes: x, y
+{motor_sections}
+[motor z]
+drive: stepper
+step_pin: gpiochip0/gpio50
+dir_pin: gpiochip0/gpio51
+enable_pin: !gpiochip0/gpio52
+microsteps: 16
+rotation_distance: 4
+{_tail(gcode_dir)}"""
+
+
+def awd_corexy_positive_dir_config(h7_pty: str, gcode_dir: str) -> str:
+    """AWD CoreXY homing toward position_max on X and Y, with the
+    min_home_dist early-trigger guard active — the bench layout where a
+    long Y homing travel was misreported as an early trigger after an X
+    rehome (see test_homing_min_dist_corexy.py)."""
+    motor_sections = ""
+    for i, name in enumerate(("a", "a1", "b", "b1")):
+        motor_sections += f"""
+[motor {name}]
+drive: stepper
+step_pin: gpiochip0/gpio{30 + 3 * i}
+dir_pin: gpiochip0/gpio{31 + 3 * i}
+enable_pin: !gpiochip0/gpio{32 + 3 * i}
+microsteps: 16
+rotation_distance: 40
+
+[tmc5160 {name}]
+spi_bus: spidev0.0
+cs_pin: gpiochip0/gpio{AWD_TMC_CS_LINES[name]}
+run_current: {AWD_TMC_RUN_CURRENT}
+home_current: {AWD_TMC_HOME_CURRENTS[name]}
+sense_resistor: {AWD_TMC_SENSE_RESISTOR}
+"""
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[printer]
 max_velocity: 100
 max_accel: 1000
+max_z_velocity: 10
+max_z_accel: 30
 
-[limit z]
-axes: z
-max_velocity: 10
-max_accel: 30
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a, a1
+b_motors: b, b1
+z_motors: z
+
+[axis x]
+position_min: 0
+position_endstop: 300
+position_max: 300
+endstop_pin: ^gpiochip0/gpio10
+homing_speed: 10
+homing_retract_dist: 5
+min_home_dist: 10
+post_processors: is_xy
+
+[axis y]
+position_min: 0
+position_endstop: 300
+position_max: 300
+endstop_pin: ^gpiochip0/gpio11
+homing_speed: 10
+homing_retract_dist: 5
+min_home_dist: 10
+post_processors: is_xy
+
+[axis z]
+position_min: -5
+position_endstop: 0
+position_max: 250
+endstop_pin: ^gpiochip0/gpio12
+homing_speed: 5
+
 {motor_sections}
 [motor z]
 drive: stepper
@@ -528,6 +563,8 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
+max_z_velocity: 10
+max_z_accel: 30
 
 [kinematics]
 type: cartesian
@@ -560,16 +597,6 @@ position_endstop: 0
 position_max: 250
 endstop_pin: ^gpiochip0/gpio12
 homing_speed: 5
-
-[limit gantry]
-axes: x, y
-max_velocity: 100
-max_accel: 1000
-
-[limit z]
-axes: z
-max_velocity: 10
-max_accel: 30
 
 [motor x]
 drive: stepper
@@ -620,6 +647,8 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
+max_z_velocity: 10
+max_z_accel: 30
 
 [kinematics]
 type: cartesian
@@ -653,16 +682,6 @@ position_max: 250
 endstop_pin: tmc5160_z:virtual_endstop
 homing_speed: 5
 homing_retract_dist: 0
-
-[limit gantry]
-axes: x, y
-max_velocity: 100
-max_accel: 1000
-
-[limit z]
-axes: z
-max_velocity: 10
-max_accel: 30
 
 [motor x]
 drive: stepper
@@ -758,6 +777,8 @@ serial: {h7_pty}
 [printer]
 max_velocity: 300
 max_accel: 3000
+max_z_velocity: 10
+max_z_accel: 100
 # is_xy's kernel share (0.0196mm at 3000mm/s^2) + the old default blend
 # budget (scv 5 -> 0.0035mm): corner_deviation is the TOTAL since the
 # kernel-share deduction landed, so this keeps the pre-change geometry.
@@ -791,16 +812,6 @@ position_min: -5
 position_max: 250
 endstop_pin: probe:z_virtual_endstop
 homing_speed: 5
-
-[limit gantry]
-axes: x, y
-max_velocity: 300
-max_accel: 3000
-
-[limit z]
-axes: z
-max_velocity: 10
-max_accel: 100
 
 [motor a]
 drive: stepper
@@ -1010,6 +1021,8 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
+max_z_velocity: 10
+max_z_accel: 30
 
 [kinematics]
 type: cartesian
@@ -1042,16 +1055,6 @@ position_max: 250
 homing_speed: 5
 {z_min_home_dist}
 {z_endstop}
-
-[limit gantry]
-axes: x, y
-max_velocity: 100
-max_accel: 1000
-
-[limit z]
-axes: z
-max_velocity: 10
-max_accel: 30
 
 [motor x]
 drive: stepper
@@ -1087,7 +1090,7 @@ def bed_mesh_config(h7_pty: str, gcode_dir: str) -> str:
       spans only 20..70mm so node-to-node verification moves stay short
       enough for the sim's virtual clock to execute them faithfully.
     - "steep": a +/-4mm linear tilt whose XY-coupled Z demand exceeds the
-      [limit z] velocity/accel budget, so activation must be refused by
+      [printer] Z velocity/accel budget, so activation must be refused by
       the motion engine's gross-error gate.
 
     Z homes against the auto-endstop wall (step line 15 -> gpio202), the
@@ -1100,6 +1103,8 @@ serial: {h7_pty}
 [printer]
 max_velocity: 100
 max_accel: 1000
+max_z_velocity: 10
+max_z_accel: 100
 
 [kinematics]
 type: cartesian
@@ -1132,16 +1137,6 @@ position_endstop: 0
 position_max: 250
 endstop_pin: ^gpiochip0/gpio202
 homing_speed: 5
-
-[limit gantry]
-axes: x, y
-max_velocity: 100
-max_accel: 1000
-
-[limit z]
-axes: z
-max_velocity: 10
-max_accel: 100
 
 [motor x]
 drive: stepper

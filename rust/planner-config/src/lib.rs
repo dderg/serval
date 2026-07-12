@@ -403,7 +403,6 @@ impl Default for AxisRegistry {
 #[derive(Debug, Clone)]
 pub struct PlannerConfig {
     pub axis_registry: AxisRegistry,
-    pub limit_sections: Vec<LimitSection>,
     pub cartesian: CartesianLimits,
     pub runtime_caps: RuntimeCaps,
     pub runtime_corner_deviation: Option<f64>,
@@ -413,15 +412,6 @@ pub struct PlannerConfig {
     pub max_extrude_only_accel: Option<f64>,
     pub fit_tolerance_mm: f64,
     pub fit_tolerance_accel_mm_s2: f64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct LimitSection {
-    pub name: String,
-    pub axes: Vec<usize>,
-    pub max_velocity: Option<f64>,
-    pub max_accel: Option<f64>,
-    pub max_jerk: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -543,22 +533,6 @@ impl Default for PlannerConfig {
             .expect("empty post-processor set is always valid");
         Self {
             axis_registry,
-            limit_sections: vec![
-                LimitSection {
-                    name: "gantry".into(),
-                    axes: vec![0, 1],
-                    max_velocity: Some(300.0),
-                    max_accel: Some(3000.0),
-                    max_jerk: None,
-                },
-                LimitSection {
-                    name: "z".into(),
-                    axes: vec![2],
-                    max_velocity: Some(15.0),
-                    max_accel: Some(100.0),
-                    max_jerk: None,
-                },
-            ],
             cartesian: CartesianLimits::default(),
             runtime_caps: RuntimeCaps::default(),
             runtime_corner_deviation: None,

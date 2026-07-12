@@ -1,5 +1,5 @@
 //! Read the planner's config sections straight from a parsed config
-//! [`Document`]: `[printer]` cartesian limits, `[axis *]`, `[limit *]`,
+//! [`Document`]: `[printer]` cartesian limits, `[axis *]`,
 //! `[post_processor *]`, and the `[extruder]` extrude-only caps.
 //!
 //! This is the single source of the option names, defaults, bounds, and
@@ -82,41 +82,18 @@ impl KinematicsDecl {
     }
 }
 
-/// A `[limit <name>]` section with axes still by name; they resolve to
-/// indices against the `AxisRegistry` at planner-init time.
-#[derive(Debug, Clone)]
-pub struct LimitDecl {
-    pub name: String,
-    pub axes: Vec<String>,
-    pub max_velocity: Option<f64>,
-    pub max_accel: Option<f64>,
-    pub max_jerk: Option<f64>,
-}
-
 #[derive(Debug, Clone)]
 pub struct MotionSettings {
     /// `None` when the config has no `[kinematics]` section — legal for
     /// planner-only harnesses (snapshots, viz); a live printer requires it.
     pub kinematics: Option<KinematicsDecl>,
     pub axes: Vec<AxisDecl>,
-    pub limits: Vec<LimitDecl>,
     pub post_processors: Vec<PostProcessorDecl>,
     pub cartesian: CartesianLimits,
     pub fit_tolerance_mm: f64,
     pub fit_tolerance_accel_mm_s2: f64,
     pub max_extrude_only_velocity: Option<f64>,
     pub max_extrude_only_accel: Option<f64>,
-}
-
-impl MotionSettings {
-    /// The lowest `[limit]` acceleration covering `axis`, if any covers it.
-    pub fn axis_accel_cap(&self, axis: &str) -> Option<f64> {
-        self.limits
-            .iter()
-            .filter(|l| l.max_accel.is_some() && l.axes.iter().any(|a| a == axis))
-            .filter_map(|l| l.max_accel)
-            .fold(None, |acc, a| Some(acc.map_or(a, |m: f64| m.min(a))))
-    }
 }
 
 /// One option this reader consumed, echoed back for access tracking.
@@ -147,7 +124,6 @@ pub fn read_motion_settings(
     let (cartesian, fit_tolerance_mm, fit_tolerance_accel_mm_s2) = reader.printer_section()?;
     let axes = reader.axis_sections()?;
     let kinematics = reader.kinematics_section(&axes)?;
-    let limits = reader.limit_sections(&axes)?;
     let post_processors = reader.post_processor_sections(&axes)?;
     let (max_extrude_only_velocity, max_extrude_only_accel) = reader.extruder_caps()?;
 
@@ -155,7 +131,6 @@ pub fn read_motion_settings(
         MotionSettings {
             kinematics,
             axes,
-            limits,
             post_processors,
             cartesian,
             fit_tolerance_mm,
@@ -580,39 +555,6 @@ impl Reader<'_> {
             });
         }
         Ok(axes)
-    }
-
-    fn limit_sections(&mut self, axes: &[AxisDecl]) -> Result<Vec<LimitDecl>, String> {
-        let mut limits = Vec::new();
-        for (section, name) in prefix_sections(self.doc, "limit ") {
-            let section = section.to_owned();
-            let limit_axes: Vec<String> = self
-                .get_list(&section, "axes")?
-                .ok_or_else(|| format!("Option 'axes' in section '{section}' must be specified"))?
-                .into_iter()
-                .map(|a| a.to_lowercase())
-                .collect();
-            for axis in &limit_axes {
-                if !axes.iter().any(|a| &a.name == axis) {
-                    return Err(format!(
-                        "[limit] references undeclared axis '{axis}' (declare [axis {axis}])"
-                    ));
-                }
-            }
-            let max_velocity = self.getfloat(&section, "max_velocity", Bounds::above(0.0))?;
-            let max_accel = self.getfloat(&section, "max_accel", Bounds::above(0.0))?;
-            let max_jerk = self
-                .getfloat(&section, "max_jerk", Bounds::min(0.0))?
-                .map(|j| if j > 0.0 { j } else { f64::INFINITY });
-            limits.push(LimitDecl {
-                name: name.to_owned(),
-                axes: limit_axes,
-                max_velocity,
-                max_accel,
-                max_jerk,
-            });
-        }
-        Ok(limits)
     }
 
     fn post_processor_sections(

@@ -13,7 +13,7 @@ SPATIAL = "[axis x]\n[axis y]\n[axis z]\n"
 
 
 def load(extra):
-    _limits, axes, _limit_sections, _kinematics, _consumed = (
+    _limits, axes, _kinematics, _consumed = (
         configfile._config_doc.read_motion_settings(MINIMAL + SPATIAL + extra)
     )
     return axes

@@ -25,16 +25,15 @@ type RefTuple = (String, String, String);
 /// Bumped on any change to the Python-visible surface; klippy's loader
 /// refuses a module whose API_VERSION does not match, so a stale build
 /// fails loud instead of running with skewed semantics.
-const API_VERSION: u32 = 3;
+const API_VERSION: u32 = 4;
 
 /// Parse the motion-owned config sections ([printer] limits, [kinematics]
-/// + [motor] topology, [axis], [limit], [post_processor], [extruder]
+/// + [motor] topology, [axis], [post_processor], [extruder]
 /// extrude-only caps) with the same reader the engine's init_planner uses.
 /// Returns:
 ///   ((max_velocity, max_accel, max_jerk, max_z_velocity, max_z_accel,
 ///     corner_deviation),
 ///    [(axis, follows, motors, post_processors)],
-///    [(limit, axes, max_velocity, max_accel, max_jerk)],
 ///    (kind, [(lane_idx, axis, motors, drive)], [(axis, motors, slot)])
 ///        or None when the config has no [kinematics] section,
 ///    [(section, option, value)])   — every option consumed, for klippy's
@@ -47,7 +46,6 @@ fn read_motion_settings(
 ) -> PyResult<(
     (f64, f64, f64, f64, f64, f64),
     Vec<(String, Vec<String>, Vec<String>, Vec<String>)>,
-    Vec<(String, Vec<String>, Option<f64>, Option<f64>, Option<f64>)>,
     Option<(
         String,
         Vec<(usize, String, Vec<String>, &'static str)>,
@@ -75,11 +73,6 @@ fn read_motion_settings(
         .into_iter()
         .map(|a| (a.name, a.follows, a.motors, a.post_processors))
         .collect();
-    let limits = settings
-        .limits
-        .into_iter()
-        .map(|l| (l.name, l.axes, l.max_velocity, l.max_accel, l.max_jerk))
-        .collect();
     let kinematics = settings.kinematics.map(|k| {
         (
             k.kind,
@@ -103,7 +96,7 @@ fn read_motion_settings(
             Ok((entry.section, entry.option, value))
         })
         .collect::<PyResult<_>>()?;
-    Ok((cartesian, axes, limits, kinematics, consumed))
+    Ok((cartesian, axes, kinematics, consumed))
 }
 
 #[pyclass(name = "ConfigDocument")]

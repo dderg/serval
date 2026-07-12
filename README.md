@@ -5,93 +5,137 @@ fork of [Klipper](https://github.com/Klipper3d/klipper)) that replaces the
 motion stack. The upstream README, with Kalico's feature list and install
 instructions, is at [README_KALICO.md](README_KALICO.md).
 
-The short version: each move's timing is solved as a time-optimal control
-problem instead of being approximated with lookahead heuristics, and the
-machine model is reduced to a single concept — axes — with two relations
-between them.
+Everything here is under active development on the `sota-motion` branch.
+The pieces described below exist and run on real hardware, but interfaces,
+config formats, and even some of the design decisions may still change.
+
+## Goals
+
+The aim is to print faster without giving up quality, by removing the
+approximations that classical planners are built from — trapezoidal
+profiles, instant velocity-vector changes at corners, a single
+accel-to-decel ratio — and
+replacing them with a model where every limit is stated explicitly and
+applied where it actually binds. A second goal is to keep the machine
+model small: a printer is a set of axes with relations between them, and
+the planner does not know what any axis is for.
 
 ## The planner
 
-Classical planners are built from approximations: trapezoidal velocity
-profiles, a lookahead queue joining them, a single square-corner-velocity
-number standing in for cornering dynamics, an accel-to-decel ratio papering
-over the difference between commanded and felt acceleration. All of these
-stand in for a question that used to be too expensive to answer directly:
-what is the fastest way through this path that stays within every limit?
+The motion pipeline is four streaming stages — fitter, planner, lowerer,
+shaper — each a pure stage on its own thread. The entry point is
+`setup_pipeline` in `rust/motion-core/src/worker.rs`.
 
-This planner answers it directly. It discretizes each move's timing and
-solves for the fastest profile that satisfies every constraint pointwise
-along the path. Where your gantry's acceleration limit binds, the trajectory
-rides it; where the extruder's flow limit takes over, it rides that instead.
+The fitter turns incoming moves into smooth geometry. Sharp junctions are
+replaced with arc and clothoid easing blends inside a corner-deviation
+budget (configured directly, or derived from a classic
+`square_corner_velocity` value), so cornering speed comes from the axis
+limits and the local curvature of the rounded path rather than from a
+velocity carve-out at the corner. The input can also be curved to begin
+with: G5 / G5.1 cubic Bézier moves are accepted directly.
 
-Square corner velocity is the clearest casualty. Taking a sharp corner at
-any nonzero speed means the velocity vector changes direction instantly —
-infinite acceleration. SCV is the agreement to permit a small dose of
-infinity and cap it with one global number. Here the path is curves end to
-end (G5 cubic Bézier input), so turning at speed is just acceleration, and
-the same acceleration limits that govern straights govern every turn; where
-the input does contain a genuinely sharp junction, junction deviation
-(planned) replaces it with real rounded geometry inside a configured
-tolerance, which then gets planned like everything else. Cornering speed
-emerges per-corner from your limits and the local curvature — never from a
-fudge factor, never from infinity.
+The planner then finds a jerk-limited velocity profile over a lookahead
+window, with limits applied along the path: where the gantry's
+acceleration limit binds, the profile rides it; where an extruder flow
+limit takes over, it rides that instead.
 
-Motion is also genuinely third-order: jerk is a constraint row like
-velocity and acceleration, solved per axis along the path, not a trapezoid
-with sharp acceleration steps and a smoothing knob on top.
+Jerk is currently a per-axis constraint like velocity and acceleration.
+Honestly, it may not stay one: the smoothing post-processors (below)
+bound the same physical quantity more directly, and in practice a short
+bell kernel (~2 ms) seems to be all the smoothing a fast machine needs.
+Whether an explicit jerk limit earns its keep is an open question we're
+still testing.
 
 ## Axes
 
-There is no toolhead and no extruder concept in this model. A printer is a
-set of axes. Two things can be said about an axis: what it follows, and
-which limits cover it.
+Internally there is no toolhead and no extruder concept. A printer is a
+set of axes; a kinematics section maps them onto motors, and an axis can
+declare that it follows other axes:
 
 ```
+[kinematics]
+type: cartesian
+axis_x: x
+axis_y: y
+axis_z: z
+x_motors: x
+y_motors: y
+z_motors: z
+
 [axis e]
 follows: x, y, z
-
-[limit gantry]
-axes: x, y
-max_velocity: 500
-max_accel: 30000
-
-[limit extruder]
-axes: e
-max_velocity: 75
-max_accel: 1500
+motors: extruder
+post_processors: pa
 ```
 
 A follower axis pays out its commanded displacement in proportion to the
 distance actually traveled along the path of the axes it follows. The
 extruder is the obvious example, but nothing in the system knows it's an
-extruder. Because following is measured along the real path in 3D, the cases
-that needed special handling before — vase mode, retract while z-hopping,
-extrude-only moves — are just moves.
+extruder. Because following is measured along the real path in 3D, the
+cases that needed special handling before — vase mode, retract while
+z-hopping, extrude-only moves — are just moves.
 
-Limits work the same way for every axis: each `[limit]` section caps the
-combined motion of the axes it names, and all sections constrain the shared
-move clock together. A slow extruder limit slows the gantry exactly where the
-flow demand would exceed it, and nowhere else. The planner never knows what
-any axis is for — which is exactly why adding a second extruder, a paste
-head, or anything else that should track the print path is a config section,
-not a feature request.
+The global limits are configured the classic way, in `[printer]`:
+`max_velocity`, `max_accel`, `max_jerk`, `square_corner_velocity`,
+`max_z_velocity`, `max_z_accel`. A more general per-axis-group limit
+model may come later, but it isn't there today.
+
+## Post-processors
+
+Input shaping and pressure advance are the same kind of object here: a
+linear operator applied to one axis's motion. They are declared the same
+way and can be chained:
+
+```
+[post_processor is]
+type: smooth_bell
+smooth_time: 0.018
+
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.045
+
+[axis x]
+post_processors: is
+
+[axis e]
+follows: x, y, z
+post_processors: pa
+```
+
+Six types exist today. `smooth_bell` and `smooth_triangle` are plain
+low-pass kernels parameterized by `smooth_time`. `smooth_zv` and
+`smooth_mzv` are frequency-targeted input smoothers parameterized by
+`frequency_hz`; their kernel duration is derived from the target
+frequency. `linear_pressure_advance` sharpens the extruder signal to
+compensate pressure lag. `mode_inverse` inverts an identified
+second-order resonance (belt compliance, for example) so the toolhead
+follows the nominal path with the residual scaling with model error; it
+must be preceded in the chain by a short smoothing kernel, and the config
+compiler enforces that ordering.
+
+Limits apply to the output of the chain — the signal the motor actually
+receives — not to the nominal command. Pressure advance spikes extruder
+velocity during acceleration, so corners where that spike would exceed
+the flow limit are slowed, and only those.
+
+Post-processor parameters are tunable at runtime: a live update
+recompiles the axis chains, revalidates them, and swaps them into the
+running planner. Corner deviation and acceleration caps can be changed
+the same way.
 
 ## Kinematics, motors, drives
 
-Axes are what the planner thinks in; motors are what the printer is built
-from. A kinematics module connects the two — cartesian and corexy today, a
-new geometry is one new module — and in this model a motor is an arbitrary
-named object bound to an axis through that module, nothing more (`stepper_x`
-on a corexy machine was always a polite fiction, and here the fiction has
-nowhere to live). A motor is also whatever actually produces the motion: a
-classic step/dir stepper, a phase-stepped one, or an EtherCAT servo — the
-fork speaks to servo drives natively. Nothing on the planning side knows or
-cares which drive technology sits at the end.
+Axes are what the planner thinks in; motors are what the printer is
+built from. A kinematics module connects the two — cartesian and corexy
+are supported today, and other geometries are not yet. A motor is a named
+object bound to an axis through that module.
 
-This is running hardware, not a roadmap. From one of the test benches, where
-the X axis is an industrial EtherCAT servo and the other axes are steppers
-(a stepper opts into phase stepping with `phase_stepping: 1` in its existing
-section):
+A motor can be driven three ways: classic step/dir, phase stepping (a
+stepper opts in with `phase_stepping: 1` in its existing section), or an
+EtherCAT servo drive. The planning side doesn't know which. The EtherCAT
+path runs on a test bench today — an industrial servo on X, steppers
+elsewhere:
 
 ```
 [ethercat_node node_x]
@@ -111,91 +155,67 @@ params:
 dynamics_profile: servo_dynamics/dynamics_ident_20260611_181313.toml
 ```
 
-The `params:` block writes straight into the drive's object dictionary at
-startup — loop gains live in version-controlled printer config, not in a
-vendor tuning GUI. And the inertia ratio comment isn't a guess:
-`dynamics_profile` points at the output of the fork's own identification
-routine, which excites the axis, fits its dynamics, and feeds the result
-forward.
+The `params:` block writes into the drive's object dictionary at startup,
+so loop gains live in version-controlled config rather than a vendor
+tuning GUI. `dynamics_profile` points at the output of the fork's own
+identification routine, which excites the axis, fits its dynamics
+(including friction), and feeds the result forward as torque in addition
+to velocity feedforward. There is a calibration suite around this —
+G-code commands for gain and inertia identification and tracking
+measurement, tuning profiles, telemetry capture to file, and a live
+dashboard — plus torque-threshold sensorless homing on servo axes.
 
-Standing this up on a Raspberry Pi 5 — the PREEMPT_RT kernel, the IgH EtherCAT
-master built with the native `ec_macb` driver, and the drive bring-up — is
-documented in
-[Installing the IgH EtherCAT master with native `ec_macb`](docs/rewrite/ethercat-igh-macb-install.md),
-with [`ethercat-bench-bringup.md`](docs/rewrite/ethercat-bench-bringup.md) for
-the drive side.
+Standing up the EtherCAT master on a Raspberry Pi 5 (PREEMPT_RT kernel,
+IgH master with the native `ec_macb` driver) is documented in
+[docs/rewrite/ethercat-igh-macb-install.md](docs/rewrite/ethercat-igh-macb-install.md),
+with [docs/rewrite/ethercat-bench-bringup.md](docs/rewrite/ethercat-bench-bringup.md)
+for the drive side.
 
 ## The MCU plays motion, not steps
 
-The host writes every axis's final motion — planned, followed, shaped,
-post-processed — as cubic position curves and streams those to the
-microcontroller, which simply plays them back. The MCU holds the actual
-trajectory, not a precompiled queue of step times. That is what unblocks
-smooth phase stepping: a driver that knows the true continuous position at
-every instant can place the stator field exactly there, instead of
-stair-stepping toward it. The same stream feeds servo drives their position
-setpoints.
+The host writes each axis's final motion — planned, followed, shaped —
+as polynomial position pieces and streams them to the microcontroller,
+which evaluates them at a fixed sample rate and produces step edges or
+phase currents from the true continuous position. The MCU holds the
+actual trajectory, not a precompiled queue of step times. That is what
+makes smooth phase stepping possible, and the same stream feeds servo
+drives their position setpoints.
 
-## Post-processors
+Supported MCU targets: STM32 H7, F4, G0, and a Linux-process MCU. The
+motion sample rate is a per-target build option.
 
-Input shaping and pressure advance turn out to be the same kind of object: a
-linear operator applied to one axis's motion. One smooths the signal to avoid
-exciting resonances, the other sharpens it to compensate pressure lag in the
-melt zone. They are declared the same way and can be chained:
+## Homing and probing
 
-```
-[post_processor is]
-type: smooth_bell
-smooth_time: 0.018
+Homing plans a guarded run toward the endstop and, on trigger, matches
+the trip against the streamed trajectory to reconstruct the exact trip
+position (including overshoot) and re-anchor the axis. Endstops on
+remote MCUs and probe-style triggers (Beacon and similar) go through the
+same mechanism. Sensorless homing exists on the servo path via a torque
+threshold.
 
-[post_processor pa]
-type: linear_pressure_advance
-k: 0.045
+## Development infrastructure
 
-[axis x]
-post_processors: is
+Most day-to-day verification happens off-hardware:
 
-[axis e]
-follows: x, y, z
-post_processors: pa
-```
-
-The smoothing kernels come in two families, and each takes its honest
-parameter. `smooth_bell` and `smooth_triangle` are plain low-pass kernels —
-no frequency selectivity, just smoothing — so they take `smooth_time`: more
-time, more smoothing. `smooth_zv` and `smooth_mzv` are the bleeding_edge_v2
-input smoothers (Maxima-optimized polynomials whose lobe structure cancels
-a target resonance band), so they take `frequency_hz`: the kernel duration
-is derived (`0.8025 / f` and `0.95625 / f` respectively), and making it
-longer would move the notch off the resonance, not suppress it harder —
-mzv trades a wider window for a broader suppression band.
-
-`mode_inverse` is the third kind of linear operator: kernels smooth, pressure
-advance sharpens, and this one inverts. Given an identified belt-compliance
-resonance (`frequency_hz`, `damping_ratio`), it commands the motor through the
-inverse of that second-order model — `x + (2ζ/ω)·ẋ + (1/ω²)·ẍ` — so the
-toolhead follows the nominal path with zero added deviation and zero delay;
-residual ringing scales with the model error rather than the excitation. The
-ẍ term amplifies high frequencies, so it must be paired with a short smoothing
-kernel that bandlimits its input (e.g. `smooth_bell` with `smooth_time:
-0.0015`) listed before it in the chain — the config compiler enforces that
-ordering.
-
-Limits apply to the output of the chain — the signal the motor actually
-receives — rather than to the nominal command. The planner folds the chain
-into its constraints: pressure advance spikes extruder velocity during
-acceleration, so the corners where that spike would exceed the flow limit
-are slowed, and only those. The same rule will let the planner command
-tighter nominal corners on shaped axes, knowing the shaper rounds them
-before the motor sees them. Post-processor parameters are designed to be
-tunable at runtime, and new types (a different pressure advance model, for
-instance) plug in as new sections rather than code changes.
+- **Simulator** (`tools/sim/`): runs the real firmware binaries and the
+  real host against faked hardware on virtual clocks, in Docker. Used
+  for end-to-end G-code runs, homing and probing tests, and comparing
+  behavior between branches. Part of CI.
+- **Trajectory snapshot tests** (`snapshots/`): drive the real planner
+  over a config × G-code matrix and diff the full output trajectory
+  against committed baselines, with a browser gallery for reviewing
+  before/after when behavior changes.
+- **Playground**: the actual pipeline compiled to WASM —
+  [dderg.github.io/kalico/playground](https://dderg.github.io/kalico/playground/)
+  — paste G-code, tweak config, watch it re-plan in the browser.
+- **Structured logging**: host and MCU emit structured events
+  (`events/*.jsonl`) instead of free-form log text, queryable with
+  VictoriaLogs; the MCU keeps a diagnostic ring and dumps prior-crash
+  forensics on reboot.
 
 ## Status
 
-Under heavy development on the `sota-motion` branch. The geometry pipeline is
-cubic-Bézier native (G5/G5.1 input) and the time-optimal solver is in place;
-the follower and post-processor constraint families are landing now, with the
-per-axis emission chain (including runtime tuning) planned and next. The
-architecture documents in [`docs/rewrite/`](docs/rewrite/) describe the
-design.
+Active development; expect breakage and change. The architecture
+documents in [docs/rewrite/](docs/rewrite/) describe the design and are
+kept closer to the code than this file — when they disagree, trust the
+docs and the code.

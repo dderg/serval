@@ -64,16 +64,6 @@ k: 0.017
 type: smooth_triangle
 smooth_time: 0.016
 
-[limit gantry]
-axes: x, y
-max_velocity: 2800
-max_accel: 50000
-
-[limit z]
-axes: z
-max_velocity: 25
-max_accel: 1000
-
 [motor a]
 drive: stepper
 step_pin: bottom:gpiochip0/gpio0

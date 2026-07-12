@@ -111,8 +111,7 @@ class PrinterExtruder:
             if config.get(key, None) is not None:
                 raise config.error(
                     "[%s] option '%s' is no longer supported: the planner "
-                    "enforces motion through [limit] sections and has no such "
-                    "concept" % (self.name, key)
+                    "has no such concept" % (self.name, key)
                 )
 
     def check_move(self, move):

@@ -102,23 +102,6 @@ fn axis_sections_parse_lists() {
 }
 
 #[test]
-fn limit_sections_resolve_and_validate() {
-    let s = settings(&format!(
-        "{MINIMAL}[axis x]\n[axis y]\n[limit travel]\naxes: X, y\nmax_accel: 500\nmax_jerk: 0\n"
-    ));
-    assert_eq!(s.limits.len(), 1);
-    assert_eq!(s.limits[0].axes, vec!["x", "y"]);
-    assert_eq!(s.limits[0].max_accel, Some(500.0));
-    assert_eq!(s.limits[0].max_velocity, None);
-    assert_eq!(s.limits[0].max_jerk, Some(f64::INFINITY));
-    assert_eq!(s.axis_accel_cap("x"), Some(500.0));
-    assert_eq!(s.axis_accel_cap("z"), None);
-
-    let err = read_err(&format!("{MINIMAL}[limit t]\naxes: nope\n"));
-    assert!(err.contains("undeclared axis 'nope'"), "{err}");
-}
-
-#[test]
 fn post_processor_sections_and_reference_validation() {
     let s = settings(&format!(
         "{MINIMAL}[axis x]\npost_processors: sm\n[post_processor sm]\ntype: smooth\nfreq: 42.5\n"

@@ -346,12 +346,9 @@ class Motion:
 
     def get_max_axis_accel(self, axis_idx):
         axis_name = self._declared_axis_order()[axis_idx]
-        accels = [
-            max_accel
-            for _name, axes, _v, max_accel, _j in self._limit_sections
-            if max_accel is not None and axis_name in axes
-        ]
-        return min(accels) if accels else self.max_accel
+        if axis_name == "z":
+            return min(self.max_accel, self.max_z_accel)
+        return self.max_accel
 
     def _effective_limits(self):
         if self._planner_ready:
@@ -750,7 +747,7 @@ class Motion:
 
     def _load_motion_config(self, config):
         """Parse and validate the motion-owned sections ([printer] limits,
-        [kinematics] + [motor] topology, [axis], [limit], [post_processor],
+        [kinematics] + [motor] topology, [axis], [post_processor],
         [extruder] caps) with the native reader — the same one the engine
         re-runs at init_planner — and record every option it consumed for
         the unused-option accounting."""
@@ -765,7 +762,6 @@ class Motion:
                 self._corner_deviation,
             ),
             self.axis_sections,
-            self._limit_sections,
             self.kinematics_decl,
             consumed,
         ) = configfile._config_doc.read_motion_settings(
