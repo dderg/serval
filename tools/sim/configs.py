@@ -242,7 +242,9 @@ serial: {h7_pty}
 [printer]
 max_velocity: 2800
 max_accel: 100000
-square_corner_velocity: 100
+# shaper_x kernel share 0.653mm at 100000mm/s^2 + the old scv-100 blend
+# budget 0.041mm (corner_deviation is the total incl. the kernel share).
+corner_deviation: 0.695
 max_z_velocity: 25
 max_z_accel: 100
 
@@ -341,7 +343,9 @@ serial: {h7_pty}
 [printer]
 max_velocity: 1000
 max_accel: 10000
-square_corner_velocity: 30
+# shaper kernel share 0.173mm at 10000mm/s^2 + the old scv-30 blend
+# budget 0.037mm (corner_deviation is the total incl. the kernel share).
+corner_deviation: 0.21
 max_z_velocity: 25
 max_z_accel: 100
 
@@ -754,6 +758,10 @@ serial: {h7_pty}
 [printer]
 max_velocity: 300
 max_accel: 3000
+# is_xy's kernel share (0.0196mm at 3000mm/s^2) + the old default blend
+# budget (scv 5 -> 0.0035mm): corner_deviation is the TOTAL since the
+# kernel-share deduction landed, so this keeps the pre-change geometry.
+corner_deviation: 0.023
 
 [kinematics]
 type: corexy
@@ -1233,4 +1241,269 @@ G1 X100 F2000
 G1 X50 F3000
 G1 X0 F1000
 M400
+"""
+
+
+def heaters_config(
+    h7_pty: str, gcode_dir: str, control: str = "pid", heated_fan: bool = False
+) -> str:
+    """Cartesian world carrying the heater/fan/pwm zoo the legacy batch
+    suite (test/klippy) covered: extruder heater (pid or mpc), chamber
+    heater with saved PID profiles, plain/scaled/generic/temperature/heated
+    fans, output_pin soft PWM, pwm_cycle_time, pwm_tool, and the
+    thermistor/ADC sensor family. SPI thermocouples (max6675/31855/31856)
+    are omitted: the sim has no emulators for them, so they would read
+    garbage instead of exercising anything.
+    """
+    if control == "mpc":
+        extruder_control = """\
+control: mpc
+heater_power: 50
+cooling_fan: fan
+filament_density: 1.20
+filament_heat_capacity: 1.8
+block_heat_capacity: 22.3110
+sensor_responsiveness: 0.0998635
+ambient_transfer: 0.155082
+fan_ambient_transfer: 0.155082, 0.20156, 0.216441
+"""
+        mpc_sensors = """
+[temperature_sensor test_mpc_block]
+sensor_type: mpc_block_temperature
+heater_name: extruder
+min_temp: 0
+max_temp: 325
+ignore_limits: True
+
+[temperature_sensor test_mpc_ambient]
+sensor_type: mpc_ambient_temperature
+heater_name: extruder
+min_temp: 0
+max_temp: 100
+ignore_limits: True
+"""
+    else:
+        extruder_control = """\
+control: pid
+pid_kp: 22.200
+pid_ki: 1.080
+pid_kd: 114.000
+"""
+        mpc_sensors = ""
+    if heated_fan:
+        # heated_fan registers itself as THE fan and refuses to coexist
+        # with a [fan] section, exactly like the legacy world split.
+        fan_section = """\
+[heated_fan]
+heater_pin: gpiochip0/gpio34
+sensor_type: Generic 3950
+sensor_pin: analog2
+min_temp: 0
+max_temp: 130
+control: pid
+pid_kp: 63.350
+pid_ki: 4.100
+pid_kd: 244.691
+pin: gpiochip0/gpio35
+heater_temp: 50
+min_speed: 0.5
+idle_timeout: 5
+"""
+    else:
+        fan_section = """\
+[fan]
+pin: gpiochip0/gpio31
+min_power: 0.1
+max_power: 1
+"""
+    return f"""\
+[mcu]
+serial: {h7_pty}
+
+[printer]
+max_velocity: 300
+max_accel: 3000
+max_z_velocity: 5
+max_z_accel: 100
+
+[kinematics]
+type: cartesian
+axis_x: x
+axis_y: y
+axis_z: z
+x_motors: x
+y_motors: y
+z_motors: z
+
+[axis x]
+position_min: 0
+position_endstop: 0
+position_max: 200
+endstop_pin: ^gpiochip0/gpio200
+homing_speed: 10
+
+[axis y]
+position_min: 0
+position_endstop: 0
+position_max: 200
+endstop_pin: ^gpiochip0/gpio201
+homing_speed: 10
+
+[axis z]
+position_min: -5
+position_endstop: 0
+position_max: 200
+endstop_pin: ^gpiochip0/gpio202
+homing_speed: 5
+
+[axis e]
+follows: x, y, z
+motors: extruder
+post_processors: pa
+
+[post_processor pa]
+type: linear_pressure_advance
+k: 0.02
+
+[motor x]
+drive: stepper
+step_pin: gpiochip0/gpio0
+dir_pin: gpiochip0/gpio1
+enable_pin: !gpiochip0/gpio2
+microsteps: 16
+rotation_distance: 40
+
+[motor y]
+drive: stepper
+step_pin: gpiochip0/gpio3
+dir_pin: gpiochip0/gpio4
+enable_pin: !gpiochip0/gpio5
+microsteps: 16
+rotation_distance: 40
+
+[motor z]
+drive: stepper
+step_pin: gpiochip0/gpio6
+dir_pin: gpiochip0/gpio7
+enable_pin: !gpiochip0/gpio8
+microsteps: 16
+rotation_distance: 8
+
+[motor extruder]
+drive: stepper
+step_pin: gpiochip0/gpio20
+dir_pin: !gpiochip0/gpio21
+enable_pin: !gpiochip0/gpio22
+microsteps: 16
+rotation_distance: 33.5
+
+[extruder]
+axis: e
+nozzle_diameter: 0.400
+filament_diameter: 1.750
+heater_pin: gpiochip0/gpio30
+sensor_type: EPCOS 100K B57560G104F
+sensor_pin: analog0
+min_temp: 0
+max_temp: 210
+min_extrude_temp: 0
+{extruder_control}
+[heater_generic chamber]
+heater_pin: gpiochip0/gpio36
+sensor_type: EPCOS 100K B57560G104F
+sensor_pin: analog3
+control: pid
+pid_kp: 22.200
+pid_ki: 1.080
+pid_kd: 114.000
+min_temp: 0
+max_temp: 120
+
+[pid_profile chamber TEST]
+pid_version: 1
+control: pid
+pid_kp: 22.200
+pid_ki: 1.080
+pid_kd: 114.000
+
+{fan_section}
+[fan_generic xxx]
+pin: gpiochip0/gpio32
+min_power: 0.1
+shutdown_speed: 1
+max_power: 0.95
+
+[temperature_fan my_temp_fan]
+pin: gpiochip0/gpio33
+reverse: true
+sensor_type: EPCOS 100K B57560G104F
+sensor_pin: analog1
+control: pid
+pid_Kp: 22.2
+pid_Ki: 1.08
+pid_Kd: 114
+min_temp: 0
+max_temp: 210
+
+[output_pin soft_pwm_pin]
+pin: gpiochip0/gpio37
+pwm: True
+value: 0
+shutdown_value: 0
+cycle_time: 0.01
+
+[pwm_cycle_time cycle_pwm_pin]
+pin: gpiochip0/gpio38
+value: 0
+shutdown_value: 0
+cycle_time: 0.01
+
+[thermistor my_custom_thermistor]
+temperature1: 20
+resistance1: 100000
+beta: 4066
+
+[temperature_fan test_custom_thermistor]
+pin: gpiochip0/gpio40
+sensor_type: my_custom_thermistor
+sensor_pin: analog4
+control: watermark
+min_temp: 0
+max_temp: 210
+
+# Calibrated around the sim shim's resting ADC (3900/4095 at 5V, ~4.76V):
+# the linear fit reads ~34C there. PT1000/resistance calibrations are
+# omitted — the fixed ADC ratio puts them kilo-degrees out of range.
+[adc_temperature my_custom_adc]
+temperature1: 20
+voltage1: 4.9
+temperature2: 60
+voltage2: 4.5
+
+[temperature_sensor test_custom_adc]
+sensor_type: my_custom_adc
+sensor_pin: analog5
+min_temp: 0
+max_temp: 210
+
+[temperature_sensor test_epcos]
+sensor_type: EPCOS 100K B57560G104F
+sensor_pin: analog6
+min_temp: 0
+max_temp: 210
+
+[temperature_sensor test_combined]
+sensor_type: temperature_combined
+sensor_list: temperature_sensor test_custom_adc, temperature_sensor test_epcos
+combination_method: max
+maximum_deviation: 999
+{mpc_sensors}
+[controller_fan test_controller_fan]
+pin: gpiochip0/gpio41
+
+[virtual_sdcard]
+path: {gcode_dir}
+
+[force_move]
+enable_force_move: True
 """

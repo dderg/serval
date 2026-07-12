@@ -4,88 +4,11 @@ use super::{
     require_positive,
 };
 use crate::lock_ext::LockExt;
+use config::from_doc::{MotionSettings, read_motion_settings};
 use pyo3::FromPyObject;
 
 fn unsupported_curve(py: Python<'_>, message: &'static str) -> PyResult<()> {
     py.detach(|| Err(PyRuntimeError::new_err(message)))
-}
-
-/// One `[axis <name>]` section. Extracted by attribute from the Python
-/// `AxisSection` namedtuple — a reordered field fails loud instead of, say,
-/// silently swapping `motors` and `follows`.
-#[derive(FromPyObject)]
-pub(crate) struct AxisSection {
-    name: String,
-    follows: Vec<String>,
-    motors: Vec<String>,
-    post_processors: Vec<String>,
-}
-
-impl From<AxisSection> for config::AxisDecl {
-    fn from(a: AxisSection) -> Self {
-        config::AxisDecl {
-            name: a.name,
-            follows: a.follows,
-            motors: a.motors,
-            post_processors: a.post_processors,
-        }
-    }
-}
-
-/// One `[limit <name>]` section. `axes` are axis names here; they resolve to
-/// indices against the registry in `read_planner_config_sections`.
-#[derive(FromPyObject)]
-struct LimitSection {
-    name: String,
-    axes: Vec<String>,
-    max_velocity: Option<f64>,
-    max_accel: Option<f64>,
-    max_jerk: Option<f64>,
-}
-
-/// One `[post_processor <name>]` section. `type` is a Rust keyword, so the
-/// field is `ty`, extracted from the namedtuple's `type` attribute.
-#[derive(FromPyObject)]
-pub(crate) struct PostProcessor {
-    name: String,
-    #[pyo3(attribute("type"))]
-    ty: String,
-    params: Vec<(String, f64)>,
-}
-
-impl From<PostProcessor> for config::PostProcessorDecl {
-    fn from(p: PostProcessor) -> Self {
-        config::PostProcessorDecl {
-            name: p.name,
-            ty: p.ty,
-            params: p.params,
-        }
-    }
-}
-
-/// The `[printer]` cartesian limits, as six named floats rather than a bare
-/// 6-tuple where a transposed velocity/accel would type-check silently.
-#[derive(FromPyObject)]
-struct CartesianLimitsArg {
-    max_velocity: f64,
-    max_accel: f64,
-    max_jerk: f64,
-    max_z_velocity: f64,
-    max_z_accel: f64,
-    corner_deviation: f64,
-}
-
-impl From<CartesianLimitsArg> for config::CartesianLimits {
-    fn from(c: CartesianLimitsArg) -> Self {
-        config::CartesianLimits {
-            max_velocity: c.max_velocity,
-            max_accel: c.max_accel,
-            max_jerk: c.max_jerk,
-            max_z_velocity: c.max_z_velocity,
-            max_z_accel: c.max_z_accel,
-            corner_deviation: c.corner_deviation,
-        }
-    }
 }
 
 #[derive(FromPyObject)]
@@ -107,35 +30,25 @@ impl McuTopology {
     }
 }
 
-fn read_planner_config_sections(
-    axes: Vec<AxisSection>,
-    limits: Vec<LimitSection>,
-    post_processors: Vec<PostProcessor>,
-    kinematics_axes: &[String],
-    cartesian_limits: CartesianLimitsArg,
-) -> PyResult<(
-    config::AxisRegistry,
-    config::PostProcessorSet,
-    Vec<config::LimitSection>,
-    config::CartesianLimits,
-)> {
-    let axis_registry =
-        config::AxisRegistry::try_new(axes.into_iter().map(config::AxisDecl::from).collect())
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+fn planner_config_from_settings(settings: &MotionSettings) -> PyResult<config::PlannerConfig> {
+    let kinematics = settings
+        .kinematics
+        .as_ref()
+        .ok_or_else(|| PyValueError::new_err("[kinematics] section is required"))?;
+    let axis_registry = config::AxisRegistry::try_new(settings.axes.clone())
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     axis_registry
-        .validate_motor_mapping(kinematics_axes)
+        .validate_motor_mapping(&kinematics.claimed_axes())
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    let pp_decls: Vec<config::PostProcessorDecl> = post_processors
-        .into_iter()
-        .map(config::PostProcessorDecl::from)
-        .collect();
-    let post_processor_set = config::PostProcessorSet::try_new(&axis_registry, &pp_decls)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let post_processor_set =
+        config::PostProcessorSet::try_new(&axis_registry, &settings.post_processors)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    let limit_sections: Vec<config::LimitSection> = limits
-        .into_iter()
+    let limit_sections: Vec<config::LimitSection> = settings
+        .limits
+        .iter()
         .map(|limit| {
             let axes = limit
                 .axes
@@ -144,7 +57,7 @@ fn read_planner_config_sections(
                 .collect::<Result<Vec<usize>, _>>()
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
             Ok(config::LimitSection {
-                name: limit.name,
+                name: limit.name.clone(),
                 axes,
                 max_velocity: limit.max_velocity,
                 max_accel: limit.max_accel,
@@ -153,111 +66,21 @@ fn read_planner_config_sections(
         })
         .collect::<PyResult<_>>()?;
 
-    let cartesian = config::CartesianLimits::from(cartesian_limits);
-    cartesian.validate().map_err(PyValueError::new_err)?;
+    settings
+        .cartesian
+        .validate()
+        .map_err(PyValueError::new_err)?;
 
-    Ok((axis_registry, post_processor_set, limit_sections, cartesian))
-}
-
-fn validate_extrude_and_fit_params(
-    max_extrude_only_velocity: Option<f64>,
-    max_extrude_only_accel: Option<f64>,
-    fit_tolerance_mm: Option<f64>,
-    fit_tolerance_accel_mm_s2: Option<f64>,
-) -> PyResult<()> {
-    for (label, value) in [
-        ("max_extrude_only_velocity", max_extrude_only_velocity),
-        ("max_extrude_only_accel", max_extrude_only_accel),
-    ] {
-        if let Some(v) = value {
-            if !(v.is_finite() && v > 0.0) {
-                return Err(PyValueError::new_err(format!(
-                    "[extruder] {label} must be finite and positive, got {v}"
-                )));
-            }
-        }
-    }
-
-    if let Some(v) = fit_tolerance_mm {
-        if !(v.is_finite() && v > 0.0) {
-            return Err(PyValueError::new_err(format!(
-                "[printer] max_path_deviation must be finite and positive, got {v}"
-            )));
-        }
-    }
-
-    if let Some(v) = fit_tolerance_accel_mm_s2 {
-        if !(v > 0.0) {
-            return Err(PyValueError::new_err(format!(
-                "[printer] max_accel_deviation must be positive, got {v}"
-            )));
-        }
-    }
-
-    Ok(())
-}
-
-struct PlannerTuning {
-    max_extrude_only_velocity: Option<f64>,
-    max_extrude_only_accel: Option<f64>,
-    fit_tolerance_mm: Option<f64>,
-    fit_tolerance_accel_mm_s2: Option<f64>,
-}
-
-fn apply_planner_config(
-    axis_registry: config::AxisRegistry,
-    limit_sections: Vec<config::LimitSection>,
-    cartesian: config::CartesianLimits,
-    post_processor_set: config::PostProcessorSet,
-    tuning: &PlannerTuning,
-) -> PyResult<config::PlannerConfig> {
     let mut cfg = config::PlannerConfig::default();
     cfg.axis_registry = axis_registry;
     cfg.limit_sections = limit_sections;
-    cfg.cartesian = cartesian;
+    cfg.cartesian = settings.cartesian;
     cfg.post_processors = post_processor_set;
-    cfg.max_extrude_only_velocity = tuning.max_extrude_only_velocity;
-    cfg.max_extrude_only_accel = tuning.max_extrude_only_accel;
-    if let Some(v) = tuning.fit_tolerance_mm {
-        cfg.fit_tolerance_mm = v;
-    }
-    if let Some(v) = tuning.fit_tolerance_accel_mm_s2 {
-        cfg.fit_tolerance_accel_mm_s2 = v;
-    }
+    cfg.max_extrude_only_velocity = settings.max_extrude_only_velocity;
+    cfg.max_extrude_only_accel = settings.max_extrude_only_accel;
+    cfg.fit_tolerance_mm = settings.fit_tolerance_mm;
+    cfg.fit_tolerance_accel_mm_s2 = settings.fit_tolerance_accel_mm_s2;
     Ok(cfg)
-}
-
-fn build_planner_config(
-    axes: Vec<AxisSection>,
-    limits: Vec<LimitSection>,
-    post_processors: Vec<PostProcessor>,
-    kinematics_axes: &[String],
-    cartesian_limits: CartesianLimitsArg,
-    tuning: &PlannerTuning,
-) -> PyResult<config::PlannerConfig> {
-    let (axis_registry, post_processor_set, limit_sections, cartesian) =
-        read_planner_config_sections(
-            axes,
-            limits,
-            post_processors,
-            kinematics_axes,
-            cartesian_limits,
-        )?;
-
-    validate_extrude_and_fit_params(
-        tuning.max_extrude_only_velocity,
-        tuning.max_extrude_only_accel,
-        tuning.fit_tolerance_mm,
-        tuning.fit_tolerance_accel_mm_s2,
-    )?;
-
-    apply_planner_config(
-        axis_registry,
-        limit_sections,
-        cartesian,
-        post_processor_set,
-        tuning,
-    )
 }
 
 #[pymethods]
@@ -300,49 +123,19 @@ impl PyMotionEngine {
         let (accel_t, cruise_t, _v) = crate::nudge::calc_move_time(delta_mm, speed, accel);
         Ok(accel_t + cruise_t + accel_t)
     }
-    #[pyo3(signature = (
-        axes,
-        limits,
-        post_processors,
-        mcus,
-        kinematics_axes,
-        cartesian_limits,
-        max_extrude_only_velocity = None,
-        max_extrude_only_accel = None,
-        fit_tolerance_mm = None,
-        fit_tolerance_accel_mm_s2 = None,
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    fn init_planner(
-        &self,
-        axes: Vec<AxisSection>,
-        limits: Vec<LimitSection>,
-        post_processors: Vec<PostProcessor>,
-        mcus: Vec<McuTopology>,
-        kinematics_axes: Vec<String>,
-        cartesian_limits: CartesianLimitsArg,
-        max_extrude_only_velocity: Option<f64>,
-        max_extrude_only_accel: Option<f64>,
-        fit_tolerance_mm: Option<f64>,
-        fit_tolerance_accel_mm_s2: Option<f64>,
-    ) -> PyResult<()> {
+    /// `config_text` is the serialized config document; the motion-owned
+    /// sections are re-read here with the same reader
+    /// (`_config_doc.read_motion_settings`) klippy used at config time, so
+    /// the planner cannot drift from what the host validated and reported.
+    fn init_planner(&self, config_text: &str, mcus: Vec<McuTopology>) -> PyResult<()> {
         if self.planner.lock_ok().is_some() {
             return Err(PyRuntimeError::new_err("planner already initialized"));
         }
 
-        let cfg = build_planner_config(
-            axes,
-            limits,
-            post_processors,
-            &kinematics_axes,
-            cartesian_limits,
-            &PlannerTuning {
-                max_extrude_only_velocity,
-                max_extrude_only_accel,
-                fit_tolerance_mm,
-                fit_tolerance_accel_mm_s2,
-            },
-        )?;
+        let doc = config_doc::Document::parse(config_text, "<config>")
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let (settings, _consumed) = read_motion_settings(&doc).map_err(PyValueError::new_err)?;
+        let cfg = planner_config_from_settings(&settings)?;
         *self.planner_config.lock_ok() = cfg.clone();
 
         let mcus: Vec<McuTopologyInput> = mcus.into_iter().map(McuTopology::into_core).collect();

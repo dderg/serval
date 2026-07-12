@@ -20,10 +20,32 @@ RUN apt update \
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
+# Rust toolchain for the _config_doc parser module klippy needs at startup.
+# The version comes from rust-toolchain.toml (single source of truth);
+# RUSTUP_TOOLCHAIN overrides the toml at cargo time so this image never
+# downloads the cross-compilation targets the firmware builds want.
+COPY rust/rust-toolchain.toml /tmp/rust-toolchain.toml
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain \
+      "$(sed -n 's/^channel = "\(.*\)"/\1/p' /tmp/rust-toolchain.toml)"
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Built from rust/ alone so Python-only edits keep this layer cached.
+# Installed OUTSIDE /klipper: the test container bind-mounts the host
+# checkout over /klipper, which would shadow anything placed in the tree;
+# klippy/configfile.py probes $KALICO_NATIVE_DIR by explicit path.
+COPY rust/ /build-rust/
+RUN cd /build-rust \
+    && RUSTUP_TOOLCHAIN="$(sed -n 's/^channel = "\(.*\)"/\1/p' /tmp/rust-toolchain.toml)" \
+       cargo build -p config-py --release --features extension-module \
+    && mkdir -p /opt/kalico-native \
+    && cp target/release/lib_config_doc.so /opt/kalico-native/_config_doc.so \
+    && rm -rf /build-rust
+ENV KALICO_NATIVE_DIR=/opt/kalico-native
+
 COPY . /klipper
 WORKDIR /klipper
 
-ENV DICTDIR=/ci_build/dict
 RUN uv run ./scripts/ci-build.sh
 
 ENTRYPOINT [ "/bin/uv", "run" ]

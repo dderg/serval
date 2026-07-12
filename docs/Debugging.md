@@ -4,24 +4,13 @@ This document describes some of the Kalico debugging tools.
 
 ## Running the regression tests
 
-The main Kalico GitHub repository uses "github actions" to run a
-series of regression tests. It can be useful to run some of these
-tests locally.
-
-The source code "whitespace check" can be run with:
-```
-./scripts/check_whitespace.sh
-```
-
-The Klippy regression test suite requires "data dictionaries" from
-many platforms. The easiest way to obtain them is to
-[download them from github](https://github.com/Klipper3d/klipper/issues/1438).
-Once the data dictionaries are downloaded, use the following to run
-the regression suite:
-```
-tar xfz klipper-dict-20??????.tar.gz
-~/klippy-env/bin/python ~/klipper/scripts/test_klippy.py -d dict/ ~/klipper/test/klippy/*.test
-```
+The host-side suite runs with pytest (`./scripts/ci.sh quick` for the
+full fast gate, `uv run py.test` for the Python tests alone). End-to-end
+regression coverage — real firmware, homing, probing, heaters — lives in
+the Docker simulator: `tools/sim/run.sh test`. The mainline batch-mode
+harness (`scripts/test_klippy.py` against data dictionaries) does not
+exist on this fork; debugoutput mode was removed with the legacy
+serialqueue transport.
 
 ## Manually sending commands to the micro-controller
 

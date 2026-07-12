@@ -961,3 +961,78 @@ fn step_rate_over_ceiling_fails_loud() {
         },
     );
 }
+
+#[test]
+fn wire_conversion_is_stable_for_degenerate_monomial_pieces() {
+    // Dumped from the beacon scan world: micron-scale wiggles carried by
+    // astronomically large high-order monomial coefficients (the Bernstein
+    // -> monomial form of short refit pieces). The wire path must reproduce
+    // the endpoint velocities, not amplify the representation.
+    let cases: [(&[f64], f64); 3] = [
+        (
+            &[
+                283.5219666246614,
+                766.0457904603335,
+                -8006.749983414673,
+                -896999.3794658832,
+                -43366405.328479744,
+                971766147.459237,
+                109018350026.89812,
+                -3283770381114.973,
+            ],
+            1.292e-2,
+        ),
+        (
+            &[
+                110.52631578947295,
+                725.5774209211204,
+                -2.0711482881069907e-7,
+                -1795460.2955709593,
+                7447230.794832499,
+                -1038860882.9561985,
+                234602761710.78116,
+                60.611655939161174,
+            ],
+            6.459e-3,
+        ),
+        (
+            &[
+                104.25336672135639,
+                137.37878622547987,
+                22057.916795512243,
+                1245412.0450424282,
+                -22810635.154832594,
+                -5634773910.426252,
+                164843014187.2756,
+                121.22331187832235,
+            ],
+            6.459e-3,
+        ),
+    ];
+    for (coeffs, dur) in cases {
+        // f64 truth at the endpoints.
+        let vel_true_start = coeffs[1];
+        let mut vel_true_end = 0.0;
+        for (k, &c) in coeffs.iter().enumerate().skip(1) {
+            vel_true_end += (k as f64) * c * dur.powi(k as i32 - 1);
+        }
+        let cheb = nurbs::chebyshev::monomial_tau_to_chebyshev(coeffs, dur);
+        let cheb = nurbs::chebyshev::truncate_chebyshev_c2(&cheb, dur, 1e-6, 1e-3, 0.1);
+        let mut entry = runtime::piece_ring::PieceEntry::zeroed();
+        entry.duration = dur as f32;
+        entry.coeff_count = cheb.len() as u8;
+        for (dst, &c) in entry.coeffs.iter_mut().zip(&cheb) {
+            *dst = c as f32;
+        }
+        assert!(
+            (f64::from(entry.vel_start()) - vel_true_start).abs() < 1.0,
+            "vel_start {} != {vel_true_start}",
+            entry.vel_start()
+        );
+        assert!(
+            (f64::from(entry.vel_end()) - vel_true_end).abs() < 1.0,
+            "vel_end {} != {vel_true_end}",
+            entry.vel_end()
+        );
+    }
+}

@@ -502,13 +502,15 @@ fn main() {
         }
 
         let sensorless_tripped = sensorless.poll(
+            now,
             |_slot| sim_torque,
-            |_slot, endstop_id, torque| {
+            |_slot| 0,
+            |_slot, endstop_id, torque, contact_clock| {
                 eprintln!(
                     "ec-rt-stub: sensorless endstop {endstop_id} tripped torque={torque} \
-                     — local stop, stream halted, trip_clock={now}"
+                     — local stop, stream halted, trip_clock={contact_clock}"
                 );
-                server.respond(&endstop_trip_frame(endstop_id, now));
+                server.respond(&endstop_trip_frame(endstop_id, contact_clock));
             },
         );
         if sensorless_tripped {

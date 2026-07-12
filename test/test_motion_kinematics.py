@@ -1,6 +1,6 @@
 import pytest
 
-from klippy import motion, motion_kinematics
+from klippy import motion_kinematics
 from klippy.extras import servo_axis
 
 
@@ -244,7 +244,7 @@ def axis_section(**extra):
 
 def corexy_sections():
     return {
-        "printer": {},
+        "printer": {"max_velocity": 300, "max_accel": 3000},
         "kinematics": {
             "type": "corexy",
             "axis_x": "x",
@@ -266,7 +266,7 @@ def corexy_sections():
 
 def cartesian_sections():
     return {
-        "printer": {},
+        "printer": {"max_velocity": 300, "max_accel": 3000},
         "kinematics": {
             "type": "cartesian",
             "axis_x": "x",
@@ -285,10 +285,35 @@ def cartesian_sections():
     }
 
 
-def make_kin(sections, axis_sections=()):
+def sections_to_text(sections):
+    lines = []
+    for name, options in sections.items():
+        lines.append("[%s]" % name)
+        lines.extend("%s: %s" % (k, v) for k, v in options.items())
+    return "\n".join(lines) + "\n"
+
+
+def read_native_decl(sections):
+    """Parse the topology with the native reader, surfacing its errors the
+    way Motion._load_motion_config does."""
+    from klippy import configfile
+
+    try:
+        _limits, _axes, _limit_sections, kinematics_decl, _consumed = (
+            configfile._config_doc.read_motion_settings(
+                sections_to_text(sections)
+            )
+        )
+    except configfile.error as e:
+        raise FakeError(str(e))
+    return kinematics_decl
+
+
+def make_kin(sections):
     printer = FakePrinter()
     config = FakeConfig(printer, sections)
-    motion = FakeMotion(axis_sections)
+    motion = FakeMotion()
+    motion.kinematics_decl = read_native_decl(sections)
     return motion_kinematics.load_kinematics(config, motion)
 
 
@@ -389,11 +414,19 @@ def test_note_z_not_homed_clears_only_z():
 
 
 def reject_legacy(extra_sections):
-    sections = cartesian_sections()
-    sections.update(extra_sections)
-    printer = FakePrinter()
-    config = FakeConfig(printer, sections)
-    motion.reject_legacy_role_sections(config)
+    """Legacy role-section rejection lives in the native motion-config
+    reader; feed it the sections as config text and surface its error like
+    Motion._load_motion_config does."""
+    from klippy import configfile
+
+    lines = ["[printer]", "max_velocity: 300", "max_accel: 3000"]
+    for name, options in extra_sections.items():
+        lines.append("[%s]" % name)
+        lines.extend("%s: %s" % (k, v) for k, v in options.items())
+    try:
+        configfile._config_doc.read_motion_settings("\n".join(lines) + "\n")
+    except configfile.error as e:
+        raise FakeError(str(e))
 
 
 def test_stepper_x_section_rejected():
@@ -442,12 +475,33 @@ def test_orphan_motor_rejected():
     assert "not assigned" in str(exc.value)
 
 
-def test_follower_motor_not_orphan():
+def test_follower_motor_not_orphan_and_gets_the_free_slot():
     sections = cartesian_sections()
     sections["motor e"] = motor_section()
-    axis_sections = [("e", ["x"], ["e"], [])]
-    kin = make_kin(sections, axis_sections=axis_sections)
+    sections["axis e"] = {"follows": "x", "motors": "e"}
+    kin = make_kin(sections)
     assert kin.kind == "cartesian"
+    decl = read_native_decl(sections)
+    assert decl[2] == [("e", ["e"], 3)]
+
+
+def test_follower_with_servo_motor_rejected():
+    sections = cartesian_sections()
+    sections["motor e"] = {"drive": "servo"}
+    sections["axis e"] = {"follows": "x", "motors": "e"}
+    with pytest.raises(FakeError) as exc:
+        make_kin(sections)
+    assert "follower axes support stepper motors only" in str(exc.value)
+
+
+def test_two_followers_overflow_the_free_slots():
+    sections = cartesian_sections()
+    for name in ("e", "f"):
+        sections["motor " + name] = motor_section()
+        sections["axis " + name] = {"follows": "x", "motors": name}
+    with pytest.raises(FakeError) as exc:
+        make_kin(sections)
+    assert "motion slot(s) free of kinematics lanes" in str(exc.value)
 
 
 def test_missing_drive_rejected():
@@ -457,28 +511,12 @@ def test_missing_drive_rejected():
         make_kin(sections)
 
 
-def test_read_claimed_axes_returns_role_bound_names():
-    printer = FakePrinter()
-    assert motion_kinematics.read_claimed_axes(
-        FakeConfig(printer, corexy_sections())
-    ) == ["x", "y", "z"]
-    assert motion_kinematics.read_claimed_axes(
-        FakeConfig(printer, cartesian_sections())
-    ) == ["x", "y", "z"]
-
-
-def test_read_claimed_axes_unknown_type_rejected():
+def test_mixed_drive_lane_rejected():
     sections = corexy_sections()
-    sections["kinematics"]["type"] = "bogus"
-    with pytest.raises(FakeError):
-        motion_kinematics.read_claimed_axes(FakeConfig(FakePrinter(), sections))
-
-
-def test_read_claimed_axes_missing_section_rejected():
-    sections = corexy_sections()
-    del sections["kinematics"]
-    with pytest.raises(FakeError):
-        motion_kinematics.read_claimed_axes(FakeConfig(FakePrinter(), sections))
+    sections["motor z1"] = {"drive": "servo"}
+    with pytest.raises(FakeError) as exc:
+        make_kin(sections)
+    assert "all-stepper or all-servo" in str(exc.value)
 
 
 def _servo_rail():

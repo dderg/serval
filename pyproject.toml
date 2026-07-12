@@ -86,9 +86,7 @@ pythonpath = [".", "klippy", "scripts"]
 # ELF/hardware tests that must not run in CI. The full-stack sim e2e
 # suite runs via `tools/sim/run.sh test` (Docker).
 # scripts/ and snapshots/ are listed as explicit files, not whole
-# directories: scripts/ also holds scripts/test_klippy.py (a legacy
-# optparse-based CLI runner, not a pytest module), which should not be
-# swept into this job.
+# directories, so unrelated helper scripts are not swept into this job.
 testpaths = [
   "test",
   "tests",

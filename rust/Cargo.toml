@@ -2,6 +2,8 @@
 members = [
     "nurbs",
     "c-api",
+    "config-doc",
+    "config-py",
     "gcode",
     "geometry",
     "trajectory",

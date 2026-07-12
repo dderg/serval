@@ -86,6 +86,7 @@ AXIS_KEYS = frozenset(
         "homing_retract_dist",
         "homing_retract_speed",
         "min_home_dist",
+        "sensorless_home_offset",
     )
 )
 
@@ -136,6 +137,33 @@ def test_no_endstop_pin_means_zero_retract():
     hi = rail.get_homing_info()
     assert hi.retract_dist == 0.0
     assert rail.second_homing_speed == 0.0
+
+
+def test_measured_trip_position_defaults_to_endstop_plus_overshoot():
+    rail = make_servo_rail()
+    trip_pos = [0.0, 0.0, 12.0]
+    final_pos = [0.0, 0.0, 10.5]
+    assert rail.measured_trip_position(2, trip_pos, final_pos) == -6.0 + (
+        10.5 - 12.0
+    )
+
+
+def test_measured_trip_position_backs_off_negative_dir_home():
+    rail = make_servo_rail(extra={"sensorless_home_offset": 0.4})
+    trip_pos = [0.0, 0.0, 12.0]
+    final_pos = [0.0, 0.0, 12.0]
+    assert rail.measured_trip_position(2, trip_pos, final_pos) == -6.0 - 0.4
+
+
+def test_measured_trip_position_backs_off_positive_dir_home():
+    rail = make_servo_rail(
+        extra={"position_endstop": 235.0, "sensorless_home_offset": 0.4}
+    )
+    trip_pos = [0.0, 0.0, 230.0]
+    final_pos = [0.0, 0.0, 231.5]
+    assert rail.measured_trip_position(2, trip_pos, final_pos) == (
+        235.0 + 0.4 + 1.5
+    )
 
 
 def test_min_home_dist_parsed_from_axis_config():
