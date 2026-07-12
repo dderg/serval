@@ -148,7 +148,7 @@ fn idle_lanes_hold_the_last_target() {
 }
 
 #[test]
-fn clearing_ramps_the_applied_offset_back_to_zero() {
+fn clearing_ramps_the_applied_offset_out_before_removal() {
     let mut b = bank();
     assert_eq!(
         b.set(4, 0, 1, 0, 1, KIN_COREXY, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
@@ -160,7 +160,19 @@ fn clearing_ramps_the_applied_offset_back_to_zero() {
         b.set(4, 0, 1, 0, 1, KIN_COREXY, 0, 0, 0.0, 0.0, 0.0, 0.0, &[]),
         0
     );
-    assert!(!b.active(), "cleared pair leaves the bank inactive");
+    assert!(
+        b.active(),
+        "a cleared pair keeps applying while it ramps out"
+    );
+    let mid = settle(&mut b, &lanes, 100);
+    assert!(
+        mid[0] > 0.0 && mid[0] < 0.1,
+        "ramp-out must pass through intermediate offsets, got {}",
+        mid[0]
+    );
+    let out = settle(&mut b, &lanes, 2000);
+    assert_eq!(out[0], 0.0, "cleared offset must fully unwind");
+    assert!(!b.active(), "pair is dropped once the offset reaches zero");
 }
 
 #[test]

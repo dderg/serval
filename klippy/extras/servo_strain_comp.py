@@ -224,6 +224,9 @@ class ServoStrainComp:
                     points.append((value_um / 1000.0, diff))
             finally:
                 self._clear_pair(engine, handle, pair)
+            ramp_out_s = 2.0 * step_um / 1000.0 / COMP_SLEW_MM_S
+            reactor.pause(reactor.monotonic() + settle + ramp_out_s)
+            restored = self._read_diff_pct(engine, handle, pair)
             n = len(points)
             mean_x = sum(p[0] for p in points) / n
             mean_y = sum(p[1] for p in points) / n
@@ -239,7 +242,7 @@ class ServoStrainComp:
             self.measured_stiffness[tuple(names)] = slope
             gcmd.respond_info(
                 "belt %s (%s/%s): stiffness %.1f %%/mm (R^2 %.3f, "
-                "points %s)"
+                "points %s; restored to %+.2f%%)"
                 % (
                     pair.axis_name(),
                     names[0],
@@ -249,6 +252,7 @@ class ServoStrainComp:
                     " ".join(
                         "%+.0fum:%+.2f%%" % (x * 1000, y) for x, y in points
                     ),
+                    restored,
                 )
             )
             if abs(slope) < 1e-6 or r2 < 0.9:

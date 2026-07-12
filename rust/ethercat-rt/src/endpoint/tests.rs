@@ -588,3 +588,31 @@ fn strain_comp_reaches_targets_that_never_streamed() {
     );
     assert!((f64::from(now[1] - held[1]) + expect).abs() < 2.0);
 }
+
+/// The probe's cleanup: clearing after the last (nonzero) step must ramp
+/// the held targets back to their base instead of leaving the pair parked
+/// in a standing fight.
+#[test]
+fn strain_comp_clear_returns_held_targets_to_base() {
+    let mut ctx = test_ctx("comp-clear");
+    let held = targets(&ctx);
+    assert_eq!(
+        ctx.comp
+            .set(NUM_SLAVES, 0, 1, 0, 1, 0, 1, 1, 0.0, 0.0, 1.0, 1.0, &[-100]),
+        0
+    );
+    run_cycles(&mut ctx, 1_000_000, 200_000_000);
+    assert_ne!(targets(&ctx), held, "probe offset must be applied first");
+    assert_eq!(
+        ctx.comp
+            .set(NUM_SLAVES, 0, 1, 0, 1, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, &[]),
+        0
+    );
+    run_cycles(&mut ctx, 200_250_000, 400_000_000);
+    assert_eq!(
+        targets(&ctx),
+        held,
+        "clear must unwind the offset completely"
+    );
+    assert!(!ctx.comp.active());
+}

@@ -46,6 +46,7 @@ struct PairComp {
     values_mm: Vec<f64>,
     target_mm: f64,
     applied_mm: f64,
+    clearing: bool,
 }
 
 impl PairComp {
@@ -121,7 +122,13 @@ impl StrainCompBank {
             |c: &PairComp| (c.slot_a, c.slot_b) == (a, b) || (c.slot_a, c.slot_b) == (b, a);
         let (nx, ny) = (usize::from(nx), usize::from(ny));
         if nx == 0 || ny == 0 {
-            self.comps.retain(|c| !same_pair(c));
+            // Clearing must not drop the applied offset on the floor — the
+            // last written targets would keep it baked in as a standing
+            // fight. Ramp it out through the slew limiter; update() removes
+            // the pair once the applied offset reaches zero.
+            for c in self.comps.iter_mut().filter(|c| same_pair(c)) {
+                c.clearing = true;
+            }
             return 0;
         }
         if kinematics != KIN_COREXY && kinematics != KIN_CARTESIAN {
@@ -169,6 +176,7 @@ impl StrainCompBank {
             values_mm: values_um.iter().map(|&v| f64::from(v) * 1e-3).collect(),
             target_mm: applied,
             applied_mm: applied,
+            clearing: false,
         });
         0
     }
@@ -198,6 +206,9 @@ impl StrainCompBank {
     /// positions (held when a lane is not streaming), slew the applied
     /// offset toward it, and accumulate the antisymmetric per-slot offsets.
     pub fn update(&mut self, lane_mm: &[Option<f64>], slave_axes: &[u8], offsets_mm: &mut [f64]) {
+        // A cleared pair leaves only after a full update at zero, so the
+        // final zero-offset write reaches the drive before active() drops.
+        self.comps.retain(|c| !(c.clearing && c.applied_mm == 0.0));
         for comp in &mut self.comps {
             let lane_pos = |lane: usize| {
                 slave_axes
@@ -206,7 +217,9 @@ impl StrainCompBank {
                     .find(|&(&axis, mm)| usize::from(axis) == lane && mm.is_some())
                     .and_then(|(_, mm)| *mm)
             };
-            if comp.nx == 1 && comp.ny == 1 {
+            if comp.clearing {
+                comp.target_mm = 0.0;
+            } else if comp.nx == 1 && comp.ny == 1 {
                 // A constant grid needs no position — this is the stiffness
                 // probe's path, which runs entirely at standstill.
                 comp.target_mm = comp.values_mm[0];
