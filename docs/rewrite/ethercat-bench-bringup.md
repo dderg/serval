@@ -100,13 +100,13 @@ position_max: 300
 # endstop on any bridge MCU; without endstop_pin the axis has no endstop and
 # G28 on it fails loudly.
 #endstop_pin: PA13             # pin on the MCU that carries the switch
-#position_endstop: 0           # must equal position_min or position_max
+#position_endstop: 0           # at or beyond position_min or position_max; placing it
+                               # past the range (e.g. 300.5 with position_max 300) keeps
+                               # that margin between full-range moves and the crash point
+                               # a sensorless home lands on (encoder noise, belt stretch)
 #homing_speed: 50
 #homing_retract_dist: 5        # back-off after endstop contact (default 5, 0 disables)
 #homing_retract_speed: 50      # back-off speed (default: homing_speed)
-#sensorless_home_offset: 0     # mm the recorded endstop sits inside the sensorless
-                               # crash point — margin for encoder noise and belt
-                               # stretch so full-range moves stop short of the wall
 # Drive protection (homing-scoped: written to 6065h/6072h around each G28,
 # restored after; a trip de-energizes the drive and fails the G28 loudly):
 #homing_following_error: 2.5   # mm of commanded-vs-actual deviation (default 2.5)

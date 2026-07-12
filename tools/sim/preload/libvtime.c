@@ -275,9 +275,12 @@ vtime_init(void)
     real_timer_settime = dlsym(RTLD_NEXT, "timer_settime");
     real_usleep = dlsym(RTLD_NEXT, "usleep");
 
-    int fd = shm_open(VTIME_SHM_NAME, O_RDWR, 0);
+    const char *shm_name = getenv("VTIME_SHM_NAME");
+    if (!shm_name || !shm_name[0])
+        shm_name = VTIME_SHM_NAME;
+    int fd = shm_open(shm_name, O_RDWR, 0);
     if (fd < 0) {
-        fd = shm_open(VTIME_SHM_NAME, O_CREAT | O_RDWR, 0666);
+        fd = shm_open(shm_name, O_CREAT | O_RDWR, 0666);
         if (fd < 0) {
             fprintf(stderr, "[vtime] shm_open failed: %s\n", strerror(errno));
             return;

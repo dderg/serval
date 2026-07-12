@@ -2,6 +2,7 @@
 #include <dlfcn.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <fcntl.h>
@@ -23,7 +24,10 @@ static void vtime_clock_init(void)
 {
     real_clock_gettime = dlsym(RTLD_NEXT, "clock_gettime");
 
-    int fd = open("/dev/shm/vtime", O_RDWR);
+    const char *shm_name = getenv("VTIME_SHM_NAME");
+    if (!shm_name || !shm_name[0])
+        shm_name = "/vtime";
+    int fd = shm_open(shm_name, O_RDWR, 0);
     if (fd < 0)
         return;
     void *p = mmap(NULL, 32, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);

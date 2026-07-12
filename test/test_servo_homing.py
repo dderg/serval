@@ -18,6 +18,16 @@ def test_infer_positive_dir_at_max_is_positive():
     assert servo_axis.infer_positive_dir(cfg, "x", 235.0, -6.0, 235.0) is True
 
 
+def test_infer_positive_dir_past_min_is_negative():
+    cfg = FakeErrConfig()
+    assert servo_axis.infer_positive_dir(cfg, "x", -6.5, -6.0, 235.0) is False
+
+
+def test_infer_positive_dir_past_max_is_positive():
+    cfg = FakeErrConfig()
+    assert servo_axis.infer_positive_dir(cfg, "x", 235.5, -6.0, 235.0) is True
+
+
 def test_infer_positive_dir_mid_range_is_config_error():
     cfg = FakeErrConfig()
     with pytest.raises(RuntimeError, match="position_endstop"):
@@ -86,7 +96,6 @@ AXIS_KEYS = frozenset(
         "homing_retract_dist",
         "homing_retract_speed",
         "min_home_dist",
-        "sensorless_home_offset",
     )
 )
 
@@ -139,31 +148,11 @@ def test_no_endstop_pin_means_zero_retract():
     assert rail.second_homing_speed == 0.0
 
 
-def test_measured_trip_position_defaults_to_endstop_plus_overshoot():
-    rail = make_servo_rail()
-    trip_pos = [0.0, 0.0, 12.0]
-    final_pos = [0.0, 0.0, 10.5]
-    assert rail.measured_trip_position(2, trip_pos, final_pos) == -6.0 + (
-        10.5 - 12.0
-    )
-
-
-def test_measured_trip_position_backs_off_negative_dir_home():
-    rail = make_servo_rail(extra={"sensorless_home_offset": 0.4})
-    trip_pos = [0.0, 0.0, 12.0]
-    final_pos = [0.0, 0.0, 12.0]
-    assert rail.measured_trip_position(2, trip_pos, final_pos) == -6.0 - 0.4
-
-
-def test_measured_trip_position_backs_off_positive_dir_home():
-    rail = make_servo_rail(
-        extra={"position_endstop": 235.0, "sensorless_home_offset": 0.4}
-    )
-    trip_pos = [0.0, 0.0, 230.0]
-    final_pos = [0.0, 0.0, 231.5]
-    assert rail.measured_trip_position(2, trip_pos, final_pos) == (
-        235.0 + 0.4 + 1.5
-    )
+def test_rail_accepts_endstop_past_the_travel_range():
+    rail = make_servo_rail(extra={"position_endstop": 235.5})
+    hi = rail.get_homing_info()
+    assert hi.position_endstop == 235.5
+    assert hi.positive_dir is True
 
 
 def test_min_home_dist_parsed_from_axis_config():
