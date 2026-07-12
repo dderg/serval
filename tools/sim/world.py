@@ -9,6 +9,7 @@ klippy host process. Tests and the CLI drive it over klippy's API socket.
 from __future__ import annotations
 
 import dataclasses
+import itertools
 import json
 import os
 import pathlib
@@ -21,27 +22,34 @@ import time
 from typing import Optional
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-VTIME_SHM = "/dev/shm/vtime"
+VTIME_SHM_DIR = "/dev/shm"
 VTIME_SHM_SIZE = 256
 VTIME_STRUCT_FMT = "<QIIII"
 
 READY_POLL_S = 0.05
+
+_vtime_shm_counter = itertools.count()
 
 
 class SimError(Exception):
     pass
 
 
-def vtime_create(start_ns: int = 1_000_000_000) -> None:
-    with open(VTIME_SHM, "wb") as f:
+def vtime_shm_name_alloc() -> str:
+    return f"/vtime-{os.getpid()}-{next(_vtime_shm_counter)}"
+
+
+def vtime_create(shm_name: str, start_ns: int = 1_000_000_000) -> None:
+    path = VTIME_SHM_DIR + shm_name
+    with open(path, "wb") as f:
         header = struct.pack(VTIME_STRUCT_FMT, start_ns, 0, 0, 1, 0)
         f.write(header + b"\x00" * (VTIME_SHM_SIZE - len(header)))
-    os.chmod(VTIME_SHM, 0o666)
+    os.chmod(path, 0o666)
 
 
-def vtime_destroy() -> None:
+def vtime_destroy(shm_name: str) -> None:
     try:
-        os.unlink(VTIME_SHM)
+        os.unlink(VTIME_SHM_DIR + shm_name)
     except FileNotFoundError:
         pass
 
@@ -174,6 +182,7 @@ class SimWorld:
         # budget (drip windows, trsync timeouts) by 1/speed — the margin that
         # keeps timing-sensitive scenarios deterministic under CPU load.
         self.vtime_speed = vtime_speed
+        self.vtime_shm_name = vtime_shm_name_alloc()
 
         self.log_dir = self.workdir / "logs"
         self.gcode_dir = self.workdir / "gcodes"
@@ -206,7 +215,7 @@ class SimWorld:
         self.gcode_dir.mkdir(parents=True, exist_ok=True)
 
         shim_so, vtime_so = self._ensure_shims_built()
-        vtime_create()
+        vtime_create(self.vtime_shm_name)
 
         if spawn_mcus:
             self._spawn_mcus(shim_so, vtime_so)
@@ -285,6 +294,7 @@ class SimWorld:
         # The motion tick thread registers as a vtime pacer: virtual time
         # can never advance past the tick the engine is about to execute.
         env["LD_PRELOAD"] = f"{vtime_so}:{shim_so}"
+        env["VTIME_SHM_NAME"] = self.vtime_shm_name
         env["VTIME_SPEED"] = os.environ.get(
             "VTIME_SPEED", str(self.vtime_speed)
         )
@@ -612,4 +622,4 @@ class SimWorld:
             srv.stop()
         if self.beacon:
             self.beacon.stop()
-        vtime_destroy()
+        vtime_destroy(self.vtime_shm_name)

@@ -148,6 +148,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-jinja2 \
     python3-markupsafe \
     python3-pytest \
+    python3-pytest-xdist \
     libffi8 \
     libudev1 \
     gdb \

@@ -65,7 +65,7 @@ Run one test: `tools/sim/run.sh test -k my_scenario`.
 - `CONFIG_MCU_SIM=y` firmware: motion tick registers as a vtime pacer (virtual time never skips a sample period), step queues notify the shim, and the timer-in-past / timer-too-close / tick-gap checks that police real-time hardware are compiled out (gated in src/linux/timer.c, src/sched.c, rust/runtime tick.rs + motion_core.rs).
 - Auto-endstops: step-queue lines X=18/Y=7/Z=15 count toward a 50-step wall → endstop lines gpio200/201/202/203. Direct injection via each MCU's `sim_control` unix socket (`set_gpio_input`, `set_adc`, `get_gpio_output`, `get_steps`).
 - Beacon: `emulators/beacon_mcu.py` speaks full msgproto (identify, streaming, trsync, contact, NVM, accel) and tracks Z via the shim's step counter. The klippy-side plugin is the `dderg/beacon_klipper` fork branch `motion-stack-rename`, pinned in `fetch_plugins.sh` — NOT upstream beacon3d (incompatible with the motion rewrite).
-- One virtual clock per container (`/dev/shm/vtime`) → e2e tests run sequentially inside a container; parallelism = multiple `docker run`s (fully namespace-isolated, safe for concurrent agents).
+- Each SimWorld has its own virtual clock (`/dev/shm/vtime-<pid>-<n>`, handed to the shims via `VTIME_SHM_NAME`), but `run.sh test` runs tests sequentially by default: klippy lives on the real clock, and CPU contention from concurrent worlds flakes its timing budgets. `SIM_TEST_JOBS=N` opts into pytest-xdist parallelism; `SIM_TEST_TARGETS` picks test files (used by the CI shards, which parallelize across separate runners instead). Separate `docker run`s remain fully isolated for concurrent agents.
 
 ## Build caching
 
