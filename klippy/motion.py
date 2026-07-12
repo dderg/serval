@@ -263,17 +263,19 @@ class Motion:
                         "RESONANCE_BUZZ: servo axis %s has no live EtherCAT "
                         "engine handle" % rail.axis
                     )
-                slot_bit = 1 << rail.chain_index
                 slot_masks = servo_targets.setdefault(handle, [0, 0])
-                if slot_masks[0] & slot_bit:
-                    raise self.printer.command_error(
-                        "RESONANCE_BUZZ: servo axis %s maps to EtherCAT slot "
-                        "%d which is already claimed by another buzzed axis "
-                        "on the same node" % (rail.axis, rail.chain_index)
-                    )
-                slot_masks[0] |= slot_bit
-                if sign_mask & rail_mask:
-                    slot_masks[1] |= slot_bit
+                for motor in rail.get_motors():
+                    slot_bit = 1 << motor.get_chain_index()
+                    if slot_masks[0] & slot_bit:
+                        raise self.printer.command_error(
+                            "RESONANCE_BUZZ: servo motor %s maps to EtherCAT "
+                            "slot %d which is already claimed by another "
+                            "buzzed axis on the same node"
+                            % (motor.get_motor_name(), motor.get_chain_index())
+                        )
+                    slot_masks[0] |= slot_bit
+                    if sign_mask & rail_mask:
+                        slot_masks[1] |= slot_bit
         for handle, (slot_mask, slot_sign_mask) in servo_targets.items():
             self.engine.resonance_buzz(
                 handle,
