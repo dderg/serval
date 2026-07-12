@@ -842,12 +842,21 @@ function mixColor(hex, targetHex, t) {
   return `#${((mix(16) << 16) | (mix(8) << 8) | mix(0)).toString(16).padStart(6, "0")}`;
 }
 
-/// One run selected: each step gets its own palette color. Several runs:
-/// each run keeps its table-swatch hue and its steps ramp toward white, so
-/// runs stay distinguishable and the step chips are the clutter valve.
+/// One run selected: each step gets its own palette color, rotated so the
+/// first step is exactly the run's table-swatch color — the swatch and the
+/// chart must never disagree, whatever color the run ended up holding.
+/// Several runs: each run keeps its table-swatch hue and its steps ramp
+/// toward white, so runs stay distinguishable and the step chips are the
+/// clutter valve.
 function traceStyle(names, steps, runIdx, stepIdx) {
   if (names.length === 1) {
-    return { color: PALETTE[stepIdx % PALETTE.length], name: steps[stepIdx] };
+    const base = runColor(names[0]);
+    const baseIdx = PALETTE.indexOf(base);
+    if (baseIdx < 0) throw new Error(`${base}: run color is not in the palette`);
+    return {
+      color: PALETTE[(baseIdx + stepIdx) % PALETTE.length],
+      name: steps[stepIdx],
+    };
   }
   const base = runColor(names[runIdx]);
   const ramp = steps.length > 1 ? (0.55 * stepIdx) / (steps.length - 1) : 0;
