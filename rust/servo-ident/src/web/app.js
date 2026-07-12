@@ -66,6 +66,16 @@ const PAGE_DEFS = {
     strain: true,
     experiments: ["strain_map"],
     intro: "map differential belt torque across the bed — elastic strain and friction",
+    templates: [
+      {
+        label: "map…",
+        command: "SERVO_MEASURE_STRAIN_MAP LINE_SPACING=20 SPEED=50 ACCEL=1000 TAG=strain",
+        title:
+          "raster the bed with slow strokes — parks at the region center and runs " +
+          "SERVO_SYNC first so every map shares a preload zero; omit X/Y_START/END " +
+          "to cover the whole probed region",
+      },
+    ],
   },
   live: {
     label: "live",
@@ -1319,7 +1329,7 @@ function strainShellHtml(def) {
     `<div class="section-head"><h2>strain runs</h2>` +
     `<span class="note">strain_map — click a row to render its map</span></div>` +
     `<div class="table-wrap runs-wrap"><table><thead><tr>` +
-    `<th>time</th><th>tag</th>` +
+    `<th>time</th><th>tag</th><th></th>` +
     `</tr></thead><tbody id="strain-run-body"></tbody></table></div>` +
     `</section>` +
     `<section>` +
@@ -1376,6 +1386,18 @@ function renderStrainRuns() {
     const tagTd = document.createElement("td");
     tagTd.textContent = `${run.tag}${run.axis ? " " + run.axis : ""}`;
     tr.appendChild(tagTd);
+    const actionTd = document.createElement("td");
+    actionTd.className = "actions";
+    const prefillBtn = document.createElement("button");
+    prefillBtn.textContent = "→ console";
+    prefillBtn.title = "prefill the console with this run's command";
+    prefillBtn.disabled = !(state.details.get(run.name) || {}).manifest;
+    prefillBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      loadRerunForm(run.name);
+    });
+    actionTd.appendChild(prefillBtn);
+    tr.appendChild(actionTd);
     tbody.appendChild(tr);
   }
 }
@@ -2661,6 +2683,15 @@ function reconstructCommand(manifest) {
     case "accel_sweep": {
       const values = manifest.steps.map((s) => s.swept.accel ?? Object.values(s.swept)[0]).join(",");
       return `SERVO_SWEEP_ACCEL ACCELS=${values} ${common}${strokeSuffix(manifest, false)}`;
+    }
+    case "strain_map": {
+      const plan = manifest.stroke_plan;
+      return (
+        `SERVO_MEASURE_STRAIN_MAP LINE_SPACING=${plan.line_spacing} SPEED=${plan.speed} ` +
+        `ACCEL=${plan.accel} X_START=${plan.x_start} X_END=${plan.x_end} ` +
+        `Y_START=${plan.y_start} Y_END=${plan.y_end} DWELL_MS=${plan.dwell_ms} ` +
+        `${plan.zero_sync ? "" : "SYNC=0 "}TAG=${tag}`
+      );
     }
     case "differential": {
       const plan = manifest.stroke_plan;
