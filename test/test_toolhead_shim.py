@@ -69,6 +69,9 @@ class FakeMcu:
     def estimated_print_time(self, eventtime):
         return eventtime + 1.0
 
+    def get_engine_handle(self):
+        return 0
+
 
 class FakePrinter:
     def __init__(self):
@@ -94,7 +97,6 @@ def toolhead_fixture():
     toolhead.Coord = gcode.Coord
     toolhead.commanded_pos = [0.0, 0.0, 0.0, 0.0]
     toolhead.print_time = 0.0
-    toolhead._mcu_pending_end_time = 0.0
     toolhead.print_stall = 0
     toolhead.extruder = extruder_mod.DummyExtruder(printer)
     toolhead._max_velocity = 300.0
@@ -134,7 +136,7 @@ class _RecordingEngine:
     def fence_start(self, force):
         return 1
 
-    def fence_poll(self, fence_id):
+    def fence_print_time_poll(self, fence_id, mcu_handle):
         return 0.0
 
     def wait_moves(self):
@@ -182,11 +184,11 @@ class _NoopPrinter:
 def _make_correction_toolhead(duration):
     th = Motion.__new__(Motion)
     th.mcu = FakeMcu()  # estimated_print_time(t) = t + 1.0
+    th.kin = None
     th.reactor = _FixedReactor()
     th.engine = _RecordingEngine(duration)
     th.printer = _NoopPrinter(th.reactor)
     th.motion_lead = 0.25
-    th._mcu_pending_end_time = 0.0
     return th
 
 
@@ -216,4 +218,4 @@ def test_submit_nudge_builds_single_bit_mask_and_forwards():
 def test_submit_nudge_does_not_bump_host_frontier():
     th = _make_correction_toolhead(0.6)
     th.submit_nudge(7, 1, 2, 0.3, 80.0, 5000.0)
-    assert th._mcu_pending_end_time == pytest.approx(0.0)
+    assert th.engine.waits == 0 and th.engine.dwells == []

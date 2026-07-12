@@ -612,7 +612,7 @@ fn register_ethercat_mcu_seeds_nominal_clock_freq() {
     use host_rt::mcu_serial_conn::McuSerialConn;
 
     let engine = PyMotionEngine::new();
-    const RAW: u32 = 77;
+    let raw = engine.router.lock_ok().claim_mcu("servo").raw();
 
     let (conn_stream, _peer) = UnixStream::pair().expect("socketpair");
     let conn = McuSerialConn::from_stream(conn_stream).expect("from_stream");
@@ -620,17 +620,26 @@ fn register_ethercat_mcu_seeds_nominal_clock_freq() {
         .spawn()
         .expect("spawn true");
 
-    engine.register_ethercat_mcu(RAW, "servo", "/tmp/test.sock", child, conn, vec![0]);
+    engine.register_ethercat_mcu(raw, "servo", "/tmp/test.sock", child, conn, vec![0]);
 
     assert!(
-        engine.mcus.lock_ok().contains_key(&RAW),
+        engine.mcus.lock_ok().contains_key(&raw),
         "mcus must contain the raw handle after register_ethercat_mcu"
     );
     assert_eq!(
-        engine.nominal_clock_freqs.lock_ok().get(&RAW).copied(),
+        engine.nominal_clock_freqs.lock_ok().get(&raw).copied(),
         Some(1_000_000_000_u32),
         "nominal_clock_freqs must contain 1 GHz for the ethercat raw handle; \
          removing the insert from register_ethercat_mcu must cause this to fail"
+    );
+    let host = engine
+        .router
+        .lock_ok()
+        .print_time_to_host_secs(host_rt::passthrough_queue::McuHandle::from_raw(raw), 1.0);
+    assert!(
+        host.is_none(),
+        "print_time conversions stay unavailable until a clock estimate \
+         arrives, even with the nominal frequency seeded"
     );
 }
 

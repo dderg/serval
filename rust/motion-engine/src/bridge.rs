@@ -596,6 +596,13 @@ impl PyMotionEngine {
         self.nominal_clock_freqs
             .lock_ok()
             .insert(raw, ETHERCAT_CLOCK_FREQ_HZ);
+        self.router
+            .lock_ok()
+            .set_nominal_freq(
+                crate::types::mcu_handle_from_raw(raw),
+                f64::from(ETHERCAT_CLOCK_FREQ_HZ),
+            )
+            .expect("ethercat mcu handle was claimed on this router");
     }
 }
 

@@ -17,6 +17,9 @@ class _FakeMcu:
     def estimated_print_time(self, eventtime):
         return self._est
 
+    def get_engine_handle(self):
+        return 0
+
 
 class _FakeReactor:
     def __init__(self, now):
@@ -36,29 +39,29 @@ class _FakePrinter:
 
 
 class _FakeEngine:
-    def __init__(self, queued_secs):
-        self._queued_secs = queued_secs
+    def __init__(self, frontier):
+        self._frontier = frontier
 
-    def queued_motion_secs(self):
-        return self._queued_secs
+    def frontier_print_time(self, mcu_handle):
+        return self._frontier
 
 
 class _Stub:
-    def __init__(self, pending_end, est, queued_secs=0.0, now=1000.0):
-        self._mcu_pending_end_time = pending_end
+    def __init__(self, frontier, est, now=1000.0):
         self.mcu = _FakeMcu(est)
-        self.engine = _FakeEngine(queued_secs)
+        self.engine = _FakeEngine(frontier)
         self.reactor = _FakeReactor(now)
         self.printer = _FakePrinter()
+        self._planner_ready = True
 
 
 def test_check_busy_reports_idle_when_motion_has_drained():
-    stub = _Stub(pending_end=10.0, est=70.0, queued_secs=0.0)
+    stub = _Stub(frontier=10.0, est=70.0)
     print_time, est_print_time, lookahead_empty = Motion.check_busy(
         stub, eventtime=123.0
     )
     assert print_time == 10.0, (
-        "drained frontier must stay at the pending end time, not get "
+        "a drained frontier must report the past end of motion, not get "
         "clamped up to est (that clamp kept idle_timeout stuck busy)"
     )
     assert est_print_time == 70.0
@@ -66,13 +69,13 @@ def test_check_busy_reports_idle_when_motion_has_drained():
 
 
 def test_check_busy_reports_busy_while_motion_queued():
-    stub = _Stub(pending_end=80.0, est=70.0, queued_secs=2.5)
+    stub = _Stub(frontier=80.0, est=70.0)
     _, _, lookahead_empty = Motion.check_busy(stub, eventtime=123.0)
     assert lookahead_empty is False
 
 
 def test_sync_print_time_emits_event_with_stock_arg_order():
-    stub = _Stub(pending_end=80.0, est=70.0, now=1000.0)
+    stub = _Stub(frontier=80.0, est=70.0, now=1000.0)
     Motion._sync_print_time(stub)
     assert stub.printer.events == [
         ("toolhead:sync_print_time", 1000.0, 70.0, 80.0)

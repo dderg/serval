@@ -370,7 +370,7 @@ class ProbePointsHelper:
         done = False
         finalize = len(self.results) >= len(self.probe_points)
         if finalize:
-            toolhead.get_last_move_time()
+            toolhead.wait_moves()
             res = self.finalize_callback(self.probe_offsets, self.results)
             if isinstance(res, (int, float)):
                 if res == 0:

@@ -121,9 +121,6 @@ class MoveMotion(FakeMotion):
     def get_last_move_time(self):
         return 0.0
 
-    def _bump_pending_end_time(self, dt):
-        pass
-
     def _sync_print_time(self):
         pass
 

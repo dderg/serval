@@ -242,6 +242,102 @@ fn dwell_inserts_a_time_gap_then_resumes() {
 }
 
 #[test]
+fn dwell_after_a_dispatched_segment_advances_last_move_time_and_dispatched_through() {
+    let cap = Capture::default();
+    let mut h = StreamWorkerHandle::spawn(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0],
+        cap.clone(),
+        Arc::default(),
+        None,
+    );
+
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    h.flush().unwrap();
+    let t_end = cap.snapshot().last().unwrap().1;
+
+    h.dwell(2.5).unwrap();
+    assert!(
+        (h.last_move_time() - (t_end + 2.5)).abs() < 1e-9,
+        "last_move_time must publish dispatched_through + dwell secs: \
+         last_move_time={} t_end={t_end}",
+        h.last_move_time()
+    );
+
+    let id = h.fence_start(true).unwrap();
+    let dispatched_through = poll_fence(&h, id, Duration::from_secs(5))
+        .expect("fence on a dwelt-but-idle pipe must resolve with a stream time");
+    assert!(
+        (dispatched_through - (t_end + 2.5)).abs() < 1e-9,
+        "barrier ack's dispatched_through must include the dwell: \
+         dispatched_through={dispatched_through} t_end={t_end}"
+    );
+    h.shutdown();
+}
+
+#[test]
+fn dwell_with_no_prior_dispatch_leaves_last_move_time_and_dispatched_through_unset() {
+    let cap = Capture::default();
+    let mut h = StreamWorkerHandle::spawn(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0],
+        cap.clone(),
+        Arc::default(),
+        None,
+    );
+
+    h.dwell(1.0).unwrap();
+    assert!(
+        (h.last_move_time() - 0.0).abs() < 1e-9,
+        "last_move_time must stay at 0.0 when a dwell never follows a dispatch, got {}",
+        h.last_move_time()
+    );
+
+    let id = h.fence_start(true).unwrap();
+    let dispatched_through = poll_fence(&h, id, Duration::from_secs(5));
+    assert!(
+        dispatched_through.is_none(),
+        "dispatched_through must stay None when a dwell never follows a dispatch, got {dispatched_through:?}"
+    );
+    assert!(
+        cap.snapshot().is_empty(),
+        "nothing should have been dispatched to the sink"
+    );
+    h.shutdown();
+}
+
+#[test]
+fn two_consecutive_dwells_accumulate_into_last_move_time() {
+    let cap = Capture::default();
+    let mut h = StreamWorkerHandle::spawn(
+        cfg(),
+        AxisChainSet::default(),
+        vec![0.0, 0.0, 0.0],
+        cap.clone(),
+        Arc::default(),
+        None,
+    );
+
+    h.submit_move(line(1, [0.0, 0.0, 0.0], [30.0, 0.0, 0.0]))
+        .unwrap();
+    h.flush().unwrap();
+    let t_end = cap.snapshot().last().unwrap().1;
+
+    h.dwell(1.0).unwrap();
+    h.dwell(2.0).unwrap();
+
+    assert!(
+        (h.last_move_time() - (t_end + 3.0)).abs() < 1e-9,
+        "two consecutive dwells must accumulate: last_move_time={} t_end={t_end}",
+        h.last_move_time()
+    );
+    h.shutdown();
+}
+
+#[test]
 fn stream_open_restarts_the_timeline_at_zero() {
     let cap = Capture::default();
     let mut h = StreamWorkerHandle::spawn(

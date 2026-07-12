@@ -273,6 +273,10 @@ impl PyMotionEngine {
             ));
         }
         self.nominal_clock_freqs.lock_ok().insert(mcu, freq_hz);
+        self.router
+            .lock_ok()
+            .set_nominal_freq(mcu_handle_from_raw(mcu), f64::from(freq_hz))
+            .map_err(router_err)?;
         Ok(())
     }
 }

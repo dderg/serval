@@ -77,7 +77,6 @@ class Motion:
             from . import motion_engine
 
             self.engine = motion_engine._StubEngine()
-        self._mcu_pending_end_time = 0.0
         self.motion_lead = self.engine.motion_lead_secs()
         if self.motion_lead is None:
             self.motion_lead = 0.25
@@ -381,9 +380,11 @@ class Motion:
         return velocity, accel
 
     def get_status(self, eventtime):
-        # print_time is the MCU-clock end of the last queued move (the frontier),
-        # like mainline's toolhead.print_time — not a constant.
-        print_time = self._mcu_pending_end_time
+        print_time = (
+            self.engine.frontier_print_time(self.mcu.get_engine_handle())
+            if self._planner_ready
+            else 0.0
+        )
         estimated_print_time = self.mcu.estimated_print_time(eventtime)
         velocity, accel, corner_deviation = self._effective_limits()
         res = dict(self.kin.get_status(eventtime))
@@ -456,7 +457,6 @@ class Motion:
             feedrate = min(feedrate, self.max_z_velocity)
         self._fire_active_callbacks(move.axes_d)
         self._submit_paced(self.engine.submit_move, dx, dy, dz, de, feedrate)
-        self._bump_pending_end_time(move.min_move_t)
         self.commanded_pos[:] = move.end_pos
         self._sync_print_time()
 
@@ -482,7 +482,6 @@ class Motion:
             feedrate = min(feedrate, self.max_z_velocity)
         self._fire_active_callbacks([dx, dy, dz, de])
         self._submit_paced(submit, dx, dy, dz, de, feedrate)
-        self._bump_pending_end_time(move.min_move_t)
         self.commanded_pos[:] = list(newpos)
         self._sync_print_time()
 
@@ -550,7 +549,6 @@ class Motion:
     def dwell(self, delay):
         self.engine.submit_dwell(delay)
         if delay > 0.0:
-            self._bump_pending_end_time(delay)
             self._sync_print_time()
 
     def wait_moves(self):
@@ -590,16 +588,15 @@ class Motion:
             interval_s=0.010,
         )
         self.engine.motion_drain_finalize()
-        # A dwell queues time, not motion: the engine drains straight through
-        # it, but M400-after-G4 must not return before the dwell has really
-        # elapsed on the MCU clock (the motion_lead slice is the standing
-        # scheduling margin, not queued time — waiting for it would tax every
-        # wait_moves).
-        if self.mcu is not None and self._mcu_pending_end_time > 0.0:
-            self.wait_until_print_time(
-                self._mcu_pending_end_time - self.motion_lead
+        # M400-after-G4 must not return before the dwell has really elapsed
+        # on the MCU clock; the frontier includes queued dwells. The
+        # motion_lead slice is the standing scheduling margin, not queued
+        # time — waiting for it would tax every wait_moves.
+        if self.mcu is not None:
+            frontier = self.engine.frontier_print_time(
+                self.mcu.get_engine_handle()
             )
-        self._ground_pending_end_time_after_engine_drain()
+            self.wait_until_print_time(frontier - self.motion_lead)
 
     def cmd_M400(self, gcmd):
         self.wait_moves_and_mcu()
@@ -640,46 +637,51 @@ class Motion:
 
     def _drain_to_mcu_execution(self):
         self.engine.wait_moves()
-        if self._mcu_pending_end_time > 0.0:
-            for mcu in self._engine_mcus():
+        frontier = self.engine.frontier_print_time(self.mcu.get_engine_handle())
+        for mcu in self._engine_mcus():
 
-                def _mcu_caught_up(mcu=mcu):
-                    est = mcu.estimated_print_time(self.reactor.monotonic())
-                    if self._mcu_pending_end_time - est <= 0.0:
-                        return True
-                    return None
+            def _mcu_caught_up(mcu=mcu):
+                est = mcu.estimated_print_time(self.reactor.monotonic())
+                if frontier - est <= 0.0:
+                    return True
+                return None
 
-                engine_wait.wait_for(
-                    self.printer,
-                    _mcu_caught_up,
-                    "mcu execution drain",
-                    engine_wait.UNBOUNDED,
-                    interval_s=0.010,
-                )
-        self._ground_pending_end_time_after_engine_drain()
+            engine_wait.wait_for(
+                self.printer,
+                _mcu_caught_up,
+                "mcu execution drain",
+                engine_wait.UNBOUNDED,
+                interval_s=0.010,
+            )
+
+    def _schedule_floor(self):
+        now = self.reactor.monotonic()
+        return (
+            max(m.estimated_print_time(now) for m in self._engine_mcus())
+            + self.motion_lead
+        )
 
     def get_last_move_time(self):
-        lead = self._fence_wait_blocking()
-        est = 0.0
-        if self.mcu is not None:
-            est = self.mcu.estimated_print_time(self.reactor.monotonic())
-        return est + max(lead, self.motion_lead)
+        fence_print_time = self._fence_wait_blocking()
+        return max(fence_print_time, self._schedule_floor())
 
     def _fence_wait_blocking(self):
         if self.mcu is None:
             return 0.0
         fence_id = [None]
 
-        def _fence_lead():
+        def _fence_print_time():
             if fence_id[0] is None:
                 fence_id[0] = self.engine.fence_start(True)
             if fence_id[0] is None:
                 return None
-            return self.engine.fence_poll(fence_id[0])
+            return self.engine.fence_print_time_poll(
+                fence_id[0], self.mcu.get_engine_handle()
+            )
 
         return engine_wait.wait_for(
             self.printer,
-            _fence_lead,
+            _fence_print_time,
             "get_last_move_time motion fence",
             engine_wait.UNBOUNDED,
             interval_s=0.002,
@@ -703,28 +705,14 @@ class Motion:
                 entry[0] = self.engine.fence_start(False)
                 if entry[0] is None:
                     return eventtime + 0.020
-            lead = self.engine.fence_poll(entry[0])
-            if lead is None:
+            fence_print_time = self.engine.fence_print_time_poll(
+                entry[0], self.mcu.get_engine_handle()
+            )
+            if fence_print_time is None:
                 return eventtime + 0.020
             self._lookahead_fences.pop(0)
-            est = self.mcu.estimated_print_time(self.reactor.monotonic())
-            entry[1](est + max(lead, self.motion_lead))
+            entry[1](max(fence_print_time, self._schedule_floor()))
         return self.reactor.NEVER
-
-    def _ground_pending_end_time_after_engine_drain(self):
-        if self.mcu is None:
-            return
-        est = self.mcu.estimated_print_time(self.reactor.monotonic())
-        command_time = est + self.motion_lead
-        if self._mcu_pending_end_time > command_time:
-            self._mcu_pending_end_time = command_time
-
-    def _bump_pending_end_time(self, duration_added):
-        if self.mcu is None or duration_added <= 0.0:
-            return
-        est = self.mcu.estimated_print_time(self.reactor.monotonic())
-        base = max(self._mcu_pending_end_time, est)
-        self._mcu_pending_end_time = base + duration_added
 
     def _yield_to_reactor_if_due(self, now):
         if now - self._last_reactor_yield > REACTOR_YIELD_INTERVAL:
@@ -769,10 +757,12 @@ class Motion:
 
     def check_busy(self, eventtime):
         est_print_time = self.mcu.estimated_print_time(eventtime)
-        print_time = self._mcu_pending_end_time
-        queued = self.engine.queued_motion_secs()
-        if queued > 0.0:
-            print_time = max(print_time, est_print_time + queued)
+        if self._planner_ready:
+            print_time = self.engine.frontier_print_time(
+                self.mcu.get_engine_handle()
+            )
+        else:
+            print_time = est_print_time
         lookahead_empty = print_time <= est_print_time
         return print_time, est_print_time, lookahead_empty
 
@@ -811,11 +801,16 @@ class Motion:
             return
         curtime = self.reactor.monotonic()
         est_print_time = self.mcu.estimated_print_time(curtime)
+        frontier = (
+            self.engine.frontier_print_time(self.mcu.get_engine_handle())
+            if self._planner_ready
+            else 0.0
+        )
         self.printer.send_event(
             "toolhead:sync_print_time",
             curtime,
             est_print_time,
-            self._mcu_pending_end_time,
+            frontier,
         )
 
     def set_accel(self, accel):
@@ -900,22 +895,26 @@ class Motion:
         self.engine.set_corner_deviation(None)
 
     def stats(self, eventtime):
-        max_queue_time = self._mcu_pending_end_time
+        frontier = (
+            self.engine.frontier_print_time(self.mcu.get_engine_handle())
+            if self._planner_ready
+            else 0.0
+        )
         for m in self.all_mcus:
             if getattr(m, "non_critical_disconnected", False):
                 continue
-            m.check_active(max_queue_time, eventtime)
+            m.check_active(frontier, eventtime)
         buffer_time = 0.0
         pump_backlog = 0
         if self.mcu is not None:
             est = self.mcu.estimated_print_time(eventtime)
-            buffer_time = self._mcu_pending_end_time - est
+            buffer_time = frontier - est
             pump_backlog = self.engine.pump_backlog()
         return (
             False,
             "print_time=%.3f buffer_time=%.3f pump_backlog=%d print_stall=%d"
             % (
-                self._mcu_pending_end_time,
+                frontier,
                 buffer_time,
                 pump_backlog,
                 self.print_stall,
