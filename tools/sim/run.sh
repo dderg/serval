@@ -116,12 +116,20 @@ fi
 
 case "$MODE" in
     test)
-        # The virtual clock is one shared /dev/shm segment per container,
-        # so e2e tests run sequentially inside one container. Parallelism
-        # comes from separate docker runs (namespaces fully isolate them).
+        # Sequential by default: klippy runs on the real clock, so CPU
+        # contention from concurrent worlds stutters its timing budgets
+        # into flakes (anchor underruns, missed trip windows). Each
+        # SimWorld has its own virtual-clock shm segment, so SIM_TEST_JOBS=N
+        # opts into pytest-xdist parallelism when the flake risk is
+        # acceptable. SIM_TEST_TARGETS narrows the run to specific test
+        # files (used by the CI shards).
         [[ -n "${VTIME_SPEED:-}" ]] && DOCKER_ARGS+=(-e VTIME_SPEED)
+        XDIST_ARGS=()
+        [[ -n "${SIM_TEST_JOBS:-}" ]] && XDIST_ARGS=(-n "$SIM_TEST_JOBS")
         docker run ${DOCKER_ARGS[@]+"${DOCKER_ARGS[@]}"} --entrypoint python3 "$IMAGE_TAG" \
-            -m pytest tools/sim/tests -m needs_elf -v -p no:cacheprovider \
+            -m pytest ${SIM_TEST_TARGETS:-tools/sim/tests} \
+            -m needs_elf -v -p no:cacheprovider \
+            ${XDIST_ARGS[@]+"${XDIST_ARGS[@]}"} \
             ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
         ;;
     serve)

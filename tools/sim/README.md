@@ -45,9 +45,14 @@ tools/sim/run.sh --branch X ...     # any of the above for another branch
   clock. Loading vtime into klippy deadlocks — don't.
 - Auto-endstops (libsim_intercept): step-queue lines X=18/Y=7/Z=15 count
   toward a 50-step wall, asserting endstop lines gpio200/201/202/203.
-- One virtual clock per container (`/dev/shm/vtime`), so e2e tests run
-  sequentially inside a container; run multiple `docker run`s for
-  parallelism — namespaces isolate them completely.
+- Each SimWorld allocates its own virtual-clock segment
+  (`/dev/shm/vtime-<pid>-<n>`, passed to the shims via `VTIME_SHM_NAME`),
+  so worlds never share state. `run.sh test` still runs tests
+  sequentially by default — klippy lives on the real clock, and CPU
+  contention from concurrent worlds flakes its timing budgets.
+  `SIM_TEST_JOBS=N` opts into pytest-xdist parallelism;
+  `SIM_TEST_TARGETS` narrows the run to specific test files (how the CI
+  shards split the suite across separate runners).
 
 ## CI
 
