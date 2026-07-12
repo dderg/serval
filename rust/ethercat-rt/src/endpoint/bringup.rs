@@ -494,6 +494,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
         comp,
         cmaps,
         last_counts,
+        last_written_offset: vec![0; num_slaves],
         report_anchor,
         last_streamed_target,
         last_sent_retired,

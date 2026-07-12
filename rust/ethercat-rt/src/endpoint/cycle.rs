@@ -159,8 +159,12 @@ pub(super) fn compute_motion_targets(
     } else {
         ctx.damper.reset_filters();
         ctx.trim.reset();
+        ctx.comp.reset_applied();
         for lc in &mut ctx.last_counts {
             *lc = None;
+        }
+        for off in &mut ctx.last_written_offset {
+            *off = 0;
         }
     }
     (motion_active, all_acc, all_vel)
@@ -324,6 +328,19 @@ fn comp_offset_counts(ctx: &mut EndpointCtx, lane_mm: &[Option<f64>]) -> Vec<i32
     for s in 0..ctx.num_slaves {
         counts[s] = (offset_mm[s] * ctx.cmd_counts_per_mm[s]).round() as i32;
     }
+    if ctx.cycle_index % TRIM_STATE_LOG_CYCLES == 0 {
+        for (slot_a, slot_b, applied_mm, target_mm) in ctx.comp.snapshot() {
+            tracing::info!(
+                subsystem = "ethercat",
+                event = "strain_comp_state",
+                slot_a,
+                slot_b,
+                applied_um = (applied_mm * 1e3).round() as i64,
+                target_um = (target_mm * 1e3).round() as i64,
+                "strain compensation state"
+            );
+        }
+    }
     counts
 }
 
@@ -391,12 +408,10 @@ fn emit_slot_commands(
             }
             ctx.last_counts[s] = Some(counts);
             ctx.last_streamed_target[s] = Some(counts);
-            ctx.drive.set_target_position(
-                s,
-                counts
-                    .wrapping_add(trim_counts[s])
-                    .wrapping_add(comp_counts[s]),
-            );
+            let offset = trim_counts[s].wrapping_add(comp_counts[s]);
+            ctx.drive
+                .set_target_position(s, counts.wrapping_add(offset));
+            ctx.last_written_offset[s] = offset;
             ctx.drive.set_velocity_offset(s, vel_offset);
             ctx.drive.set_torque_offset(s, torque_offset);
             motion_active = true;
@@ -406,15 +421,20 @@ fn emit_slot_commands(
                 .set_torque_offset(s, damper_tenths[s].round() as i16);
             // A held slot follows the compensation too: the stiffness probe
             // steps offsets at standstill, and a map ramping while parked
-            // must move the held target now so the next stream doesn't.
+            // must move the held target now so the next stream doesn't. The
+            // base is the drive's own output-image target (always seeded —
+            // by enable if nothing ever streamed) minus the offsets baked
+            // into the last write; last_counts is no good here, Stop and
+            // ResumeStream clear it while the drive keeps holding.
             if ctx.comp.active() {
-                if let Some(base) = ctx.last_counts[s] {
-                    ctx.drive.set_target_position(
-                        s,
-                        base.wrapping_add(trim_counts[s])
-                            .wrapping_add(comp_counts[s]),
-                    );
-                }
+                let offset = trim_counts[s].wrapping_add(comp_counts[s]);
+                let base = ctx
+                    .drive
+                    .telemetry(s)
+                    .target_position
+                    .wrapping_sub(ctx.last_written_offset[s]);
+                ctx.drive.set_target_position(s, base.wrapping_add(offset));
+                ctx.last_written_offset[s] = offset;
             }
         }
     }

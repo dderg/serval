@@ -163,6 +163,7 @@ fn test_ctx_with_drive(name: &str, drive: TrackingLagDrive) -> EndpointCtx {
         comp: crate::strain_comp::StrainCompBank::new(CYCLE_NS as i64),
         cmaps: vec![None; NUM_SLAVES],
         last_counts: vec![None; NUM_SLAVES],
+        last_written_offset: vec![0; NUM_SLAVES],
         report_anchor: vec![None; NUM_SLAVES],
         last_streamed_target: vec![None; NUM_SLAVES],
         last_sent_retired: 0,
@@ -537,4 +538,53 @@ fn strain_comp_moves_held_targets_at_standstill() {
         "slot 1 held target must follow -100 um, moved {}",
         now[1] - held[1]
     );
+}
+
+/// The bench regression: homing ends with Stop/ResumeStream, which clear
+/// last_counts while the drive keeps holding its last target — the probe
+/// must still reach the drives. The held base comes from the output image.
+#[test]
+fn strain_comp_reaches_held_targets_after_a_stop_discard() {
+    let mut ctx = test_ctx("comp-stop");
+    push_all(&mut ctx, piece(1_000_000, 0.01, &[0.0]));
+    run_cycles(&mut ctx, 1_000_000, 12_000_000);
+    super::discard_motion(&mut ctx);
+    assert!(ctx.last_counts.iter().all(Option::is_none));
+    let held = targets(&ctx);
+    assert_eq!(
+        ctx.comp
+            .set(NUM_SLAVES, 0, 1, 0, 1, 0, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
+        0
+    );
+    run_cycles(&mut ctx, 12_250_000, 200_000_000);
+    let now = targets(&ctx);
+    let expect = 0.1 * COUNTS_PER_MM;
+    assert!(
+        (f64::from(now[0] - held[0]) - expect).abs() < 2.0,
+        "slot 0 must follow +100 um after a discard, moved {}",
+        now[0] - held[0]
+    );
+    assert!((f64::from(now[1] - held[1]) + expect).abs() < 2.0);
+}
+
+/// Fresh session, torque enabled, nothing ever streamed: the probe still
+/// works because enable seeded the output-image targets.
+#[test]
+fn strain_comp_reaches_targets_that_never_streamed() {
+    let mut ctx = test_ctx("comp-fresh");
+    let held = targets(&ctx);
+    assert_eq!(
+        ctx.comp
+            .set(NUM_SLAVES, 0, 1, 0, 1, 0, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
+        0
+    );
+    run_cycles(&mut ctx, 1_000_000, 200_000_000);
+    let now = targets(&ctx);
+    let expect = 0.1 * COUNTS_PER_MM;
+    assert!(
+        (f64::from(now[0] - held[0]) - expect).abs() < 2.0,
+        "slot 0 must follow +100 um with no stream history, moved {}",
+        now[0] - held[0]
+    );
+    assert!((f64::from(now[1] - held[1]) + expect).abs() < 2.0);
 }

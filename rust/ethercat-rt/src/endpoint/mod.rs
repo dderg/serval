@@ -57,6 +57,7 @@ pub struct EndpointCtx {
     comp: StrainCompBank,
     cmaps: Vec<Option<CountMap>>,
     last_counts: Vec<Option<i32>>,
+    last_written_offset: Vec<i32>,
     report_anchor: Vec<Option<(i32, f64)>>,
     last_streamed_target: Vec<Option<i32>>,
     last_sent_retired: u32,

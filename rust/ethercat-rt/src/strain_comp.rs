@@ -177,6 +177,23 @@ impl StrainCompBank {
         !self.comps.is_empty()
     }
 
+    /// Torque was dropped: the rotors relaxed to neutral, so the physically
+    /// applied offset is gone. Forget it and re-slew from zero on re-enable
+    /// instead of stepping the freshly seeded targets by the stale amount.
+    pub fn reset_applied(&mut self) {
+        for comp in &mut self.comps {
+            comp.applied_mm = 0.0;
+            comp.target_mm = 0.0;
+        }
+    }
+
+    pub fn snapshot(&self) -> Vec<(usize, usize, f64, f64)> {
+        self.comps
+            .iter()
+            .map(|c| (c.slot_a, c.slot_b, c.applied_mm, c.target_mm))
+            .collect()
+    }
+
     /// One cycle: refresh each pair's target from the streamed lane
     /// positions (held when a lane is not streaming), slew the applied
     /// offset toward it, and accumulate the antisymmetric per-slot offsets.
