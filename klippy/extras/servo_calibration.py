@@ -171,6 +171,7 @@ class _OverrideGcmd:
         self._overrides = overrides
         self.error = base.error
         self.respond_info = base.respond_info
+        self.get_commandline = base.get_commandline
 
     def get(self, name: str, default: Any = None, **kw: Any) -> Any:
         if name in self._overrides:
@@ -905,6 +906,7 @@ class ServoCalibration:
         manifest = {
             "version": 1,
             "experiment": experiment,
+            "command": gcmd.get_commandline(),
             "tag": tag,
             "created_utc": _utc_now(),
             "axis": axis,

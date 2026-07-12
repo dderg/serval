@@ -6,7 +6,9 @@ const CONSOLE_HISTORY_KEY = "servoCalConsoleHistory";
 const CONSOLE_HISTORY_MAX = 500;
 const PALETTE = ["#4fb3ff", "#e05a4f", "#4caf50", "#d9a441", "#b388ff", "#4fd8c4"];
 const RESONANCE_BAND_HZ = [20, 450];
-const PSD_MAX_FREQ_HZ = 500;
+const PSD_MAX_FREQ_KEY = "servoCalPsdMaxFreqHz";
+const PSD_MAX_FREQ_CHOICES_HZ = [250, 500, 750, 1000, 1500];
+const PSD_MAX_FREQ_DEFAULT_HZ = 750;
 const INITIAL_SELECTED_RUNS = 1;
 const PEAK_MIN_SEPARATION_HZ = 15;
 const PEAK_LIST_SIZE = 3;
@@ -353,6 +355,12 @@ function analysisSectionsHtml(def) {
     parts.push(
       `<section class="psd-section">` +
         `<div class="section-head"><h2>following-error PSD</h2>` +
+        `<label class="note">to <select id="psd-max-freq">` +
+        PSD_MAX_FREQ_CHOICES_HZ.map(
+          (f) =>
+            `<option value="${f}"${f === psdMaxFreqHz() ? " selected" : ""}>${f}</option>`
+        ).join("") +
+        `</select> Hz</label>` +
         `<div class="chips" id="psd-step-chips"></div></div>` +
         `<div class="charts" id="psd-charts"><p class="note">select runs above</p></div>` +
         `</section>`
@@ -470,6 +478,13 @@ function bindPageEvents() {
   bindConsole();
   const applyBtn = el("drive-apply-btn");
   if (applyBtn) applyBtn.addEventListener("click", applyDriveChanges);
+  const psdMax = el("psd-max-freq");
+  if (psdMax) {
+    psdMax.addEventListener("change", () => {
+      localStorage.setItem(PSD_MAX_FREQ_KEY, psdMax.value);
+      redrawCharts();
+    });
+  }
   const def = currentPageDef();
   document.querySelectorAll("button.template-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -865,11 +880,19 @@ function traceStyle(names, steps, runIdx, stepIdx) {
   return { color: mixColor(base, "#ffffff", ramp), name };
 }
 
-/// The interesting servo/mechanical modes all live below 500 Hz; drawing the
-/// full Nyquist span squished them into the left quarter of the chart.
+/// Drawing the full Nyquist span squishes the servo/mechanical modes into
+/// the left quarter of the chart, so the user picks the band ceiling.
+function psdMaxFreqHz() {
+  const stored = Number(localStorage.getItem(PSD_MAX_FREQ_KEY));
+  return PSD_MAX_FREQ_CHOICES_HZ.includes(stored)
+    ? stored
+    : PSD_MAX_FREQ_DEFAULT_HZ;
+}
+
 function clipToPsdBand(freq, y) {
+  const maxHz = psdMaxFreqHz();
   let end = freq.length;
-  while (end > 0 && freq[end - 1] > PSD_MAX_FREQ_HZ) end--;
+  while (end > 0 && freq[end - 1] > maxHz) end--;
   return { freq: freq.slice(0, end), y: y.slice(0, end) };
 }
 
@@ -2714,7 +2737,10 @@ function strokeSuffix(manifest, includeAccel) {
   return suffix;
 }
 
+/// Old manifests predate the recorded `command` field; rebuilding from the
+/// manifest is a lossy fallback that only knows the parameters listed here.
 function reconstructCommand(manifest) {
+  if (manifest.command) return manifest.command;
   const tag = manifest.tag || "cal";
   const axis = manifest.axis || "X";
   const iterations = (manifest.stroke_plan && manifest.stroke_plan.iterations) || 1;
