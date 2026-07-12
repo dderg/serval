@@ -1,31 +1,29 @@
-//! Belt-pair synchronization: release the strain two drives on one belt have
-//! built up against each other (frame expansion, homing preload) without
-//! moving the axis.
+//! Belt strain release: de-energize every selected drive at once, let the
+//! mechanics relax freely, re-energize. With all rotors free nothing
+//! constrains the relaxation through the CoreXY coupling and no stiction band
+//! has to be crossed by an energized partner — the belts simply spring to
+//! their neutral state. CiA402 enable seeds each drive's target at its actual
+//! position and streaming is always relative, so no position is lost.
 //!
-//! Sequence, one cycle-driven state machine per SyncPair command:
-//! coast the secondary (CiA402 disable, belt back-drives the rotor), dither
-//! the primary through the stiction band so the strain fully dissipates, then
-//! re-enable the secondary at its settled position. The next stream anchors
-//! it there (streaming is always relative), so no host-side offset exists.
-//! Standstill torque is measured at every phase — it is both the fight
-//! metric and the pass/fail verdict.
-
-use crate::buzz::BuzzOsc;
-use crate::scale::mm_to_counts;
+//! One cycle-driven state machine per SyncRelease command: measure the
+//! standstill torques (the fight metric), disable the selected slots, wait
+//! for every encoder to go quiet, re-enable, then measure again — the final
+//! torques are the pass/fail verdict.
 
 pub const ERR_SYNC_BUSY: i32 = -840;
 pub const ERR_SYNC_NOT_ENABLED: i32 = -841;
 pub const ERR_SYNC_STREAMING: i32 = -842;
-pub const ERR_SYNC_BAD_AXIS: i32 = -843;
+pub const ERR_SYNC_BAD_MASK: i32 = -843;
 pub const ERR_SYNC_SETTLE_TIMEOUT: i32 = -844;
-pub const ERR_SYNC_TORQUE_RESIDUAL: i32 = -845;
 pub const ERR_SYNC_FINAL_TORQUE: i32 = -846;
 pub const ERR_PIECES_DURING_SYNC: i32 = -847;
-pub const ERR_SYNC_BAD_DITHER: i32 = -848;
 pub const ERR_SYNC_ABORTED: i32 = -849;
 
-/// Secondary rotor is "settled" once its encoder stays within this band of a
-/// quiet anchor for `quiet_cycles`. Judged on 606Ch position, NOT 606Ch
+/// Matches the fixed-size arrays in the SyncReleaseResponse wire message.
+pub const MAX_RELEASE_SLOTS: usize = 4;
+
+/// A coasting rotor is "settled" once its encoder stays within this band of a
+/// quiet anchor for `quiet_cycles`. Judged on 6064h position, NOT 606Ch
 /// velocity: the A6-EC velocity estimate carries hundreds to thousands of
 /// counts/s of standstill noise, so no velocity threshold tight enough to
 /// mean "settled" is ever met, while encoder position noise is a few counts.
@@ -37,18 +35,14 @@ pub struct SyncParams {
     pub settle_timeout_cycles: u64,
     pub measure_cycles: u64,
     pub quiet_cycles: u64,
-    pub dither_amplitude_nm: u32,
-    pub dither_freq_millihz: u32,
-    pub dither_duration_ms: u16,
 }
 
-/// One cycle's drive readings, supplied by the caller.
+/// One cycle's drive readings for every slot, supplied by the caller;
+/// entries outside the release mask are ignored.
 #[derive(Debug, Clone, Copy)]
 pub struct SyncInputs {
-    pub now_ns: u64,
-    pub torque_primary: i16,
-    pub torque_secondary: i16,
-    pub position_secondary: i32,
+    pub torque: [i16; MAX_RELEASE_SLOTS],
+    pub position: [i32; MAX_RELEASE_SLOTS],
 }
 
 /// What the caller must do this cycle. Exactly one action per poll; the
@@ -57,13 +51,12 @@ pub struct SyncInputs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncStep {
     Idle,
-    /// Command the primary drive to this absolute count target this cycle.
-    SetPrimaryTarget(i32),
-    /// CiA402-disable the secondary (blocking), then keep polling.
-    DisableSecondary,
-    /// CiA402-enable the secondary (blocking; enable seeds target=actual),
-    /// then call `enable_finished(rc)`.
-    EnableSecondary,
+    /// CiA402-disable every masked slot (blocking), then keep polling.
+    DisableAll,
+    /// CiA402-enable every masked slot (blocking; enable seeds
+    /// target=actual), then call `enable_finished` with the settled
+    /// positions.
+    EnableAll,
     /// Terminal: respond to the host and drop the machine.
     Done(SyncReport),
 }
@@ -71,63 +64,51 @@ pub enum SyncStep {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyncReport {
     pub result: i32,
-    pub torque_baseline_primary: i32,
-    pub torque_baseline_secondary: i32,
-    pub torque_released: i32,
-    pub torque_dithered: i32,
-    pub torque_final_primary: i32,
-    pub torque_final_secondary: i32,
-    pub released_delta_counts: i32,
-    /// True when the secondary was re-enabled at a settled position, so the
-    /// caller must clear its stream state and shift its report anchor even on
-    /// a non-zero result.
-    pub secondary_reseeded: bool,
+    pub torque_baseline: [i32; MAX_RELEASE_SLOTS],
+    pub torque_final: [i32; MAX_RELEASE_SLOTS],
+    pub released_delta_counts: [i32; MAX_RELEASE_SLOTS],
+    /// True once the masked slots were re-enabled at settled positions, so
+    /// the caller must clear their stream state and shift their report
+    /// anchors even on a non-zero result.
+    pub reseeded: bool,
 }
 
 impl SyncReport {
     fn blank() -> Self {
         SyncReport {
             result: 0,
-            torque_baseline_primary: 0,
-            torque_baseline_secondary: 0,
-            torque_released: 0,
-            torque_dithered: 0,
-            torque_final_primary: 0,
-            torque_final_secondary: 0,
-            released_delta_counts: 0,
-            secondary_reseeded: false,
+            torque_baseline: [0; MAX_RELEASE_SLOTS],
+            torque_final: [0; MAX_RELEASE_SLOTS],
+            released_delta_counts: [0; MAX_RELEASE_SLOTS],
+            reseeded: false,
         }
     }
 }
 
 #[derive(Debug)]
 struct Meas {
-    sum_primary: i64,
-    sum_secondary: i64,
+    sums: [i64; MAX_RELEASE_SLOTS],
     cycles: u64,
 }
 
 impl Meas {
     fn new() -> Self {
         Meas {
-            sum_primary: 0,
-            sum_secondary: 0,
+            sums: [0; MAX_RELEASE_SLOTS],
             cycles: 0,
         }
     }
 
-    fn push(&mut self, primary: i16, secondary: i16) {
-        self.sum_primary += i64::from(primary);
-        self.sum_secondary += i64::from(secondary);
+    fn push(&mut self, torque: &[i16; MAX_RELEASE_SLOTS]) {
+        for (sum, &t) in self.sums.iter_mut().zip(torque.iter()) {
+            *sum += i64::from(t);
+        }
         self.cycles += 1;
     }
 
-    fn avg(&self) -> (i32, i32) {
+    fn avg(&self) -> [i32; MAX_RELEASE_SLOTS] {
         let n = self.cycles.max(1) as i64;
-        (
-            (self.sum_primary / n) as i32,
-            (self.sum_secondary / n) as i32,
-        )
+        self.sums.map(|sum| (sum / n) as i32)
     }
 }
 
@@ -135,86 +116,60 @@ impl Meas {
 enum Phase {
     MeasureBaseline,
     AwaitDisable,
-    CoastSettle {
-        waited: u64,
-        quiet: u64,
-        anchor: i32,
-    },
-    MeasureReleased,
-    Dither,
-    PostDitherSettle {
-        waited: u64,
-        quiet: u64,
-        anchor: i32,
-    },
-    MeasureDithered,
-    AwaitEnable {
-        fail_result: i32,
-    },
+    CoastSettle,
+    AwaitEnable { fail_result: i32 },
     MeasureFinal,
     Finished,
 }
 
-#[allow(missing_debug_implementations)]
-pub struct PairSync {
+#[derive(Debug)]
+pub struct SyncRelease {
     params: SyncParams,
-    cmd_counts_per_mm_primary: f64,
-    counts_per_mm_secondary: f64,
-    primary_base_target: i32,
+    slot_mask: u8,
+    counts_per_mm: [f64; MAX_RELEASE_SLOTS],
     phase: Phase,
     meas: Meas,
     report: SyncReport,
-    position_at_disable: i32,
-    dither: BuzzOsc,
-    dither_returned_to_base: bool,
+    position_at_disable: [i32; MAX_RELEASE_SLOTS],
+    settle_waited: u64,
+    settle_quiet: [u64; MAX_RELEASE_SLOTS],
+    settle_anchor: [i32; MAX_RELEASE_SLOTS],
 }
 
-impl PairSync {
-    /// `primary_base_target` is the primary's current commanded hold target;
-    /// the dither oscillates around it and must end exactly there.
+impl SyncRelease {
     pub fn begin(
         params: SyncParams,
-        cmd_counts_per_mm_primary: f64,
-        counts_per_mm_secondary: f64,
-        primary_base_target: i32,
+        slot_mask: u8,
+        counts_per_mm: [f64; MAX_RELEASE_SLOTS],
     ) -> Result<Self, i32> {
-        let mut dither = BuzzOsc::new();
-        let ramp_ms = u32::from(params.dither_duration_ms) / 4;
-        let rc = dither.arm(
-            1,
-            0x01,
-            0x00,
-            params.dither_freq_millihz,
-            params.dither_freq_millihz,
-            params.dither_amplitude_nm,
-            u32::from(params.dither_duration_ms),
-            ramp_ms,
-            [0; crate::buzz::MAX_BUZZ_SLOTS],
-        );
-        if rc != 0 {
-            return Err(ERR_SYNC_BAD_DITHER);
+        if slot_mask == 0 || usize::from(slot_mask) >> MAX_RELEASE_SLOTS != 0 {
+            return Err(ERR_SYNC_BAD_MASK);
         }
-        Ok(PairSync {
+        Ok(SyncRelease {
             params,
-            cmd_counts_per_mm_primary,
-            counts_per_mm_secondary,
-            primary_base_target,
+            slot_mask,
+            counts_per_mm,
             phase: Phase::MeasureBaseline,
             meas: Meas::new(),
             report: SyncReport::blank(),
-            position_at_disable: 0,
-            dither,
-            dither_returned_to_base: false,
+            position_at_disable: [0; MAX_RELEASE_SLOTS],
+            settle_waited: 0,
+            settle_quiet: [0; MAX_RELEASE_SLOTS],
+            settle_anchor: [0; MAX_RELEASE_SLOTS],
         })
     }
 
-    fn quiet_counts(&self) -> i32 {
-        (POSITION_QUIET_MM * self.counts_per_mm_secondary.abs())
+    pub fn masked_slots(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..MAX_RELEASE_SLOTS).filter(move |s| self.slot_mask & (1 << s) != 0)
+    }
+
+    fn quiet_counts(&self, slot: usize) -> i32 {
+        (POSITION_QUIET_MM * self.counts_per_mm[slot].abs())
             .ceil()
             .max(1.0) as i32
     }
 
-    fn measure_done(&mut self) -> Option<(i32, i32)> {
+    fn measure_done(&mut self) -> Option<[i32; MAX_RELEASE_SLOTS]> {
         if self.meas.cycles >= self.params.measure_cycles {
             let avg = self.meas.avg();
             self.meas = Meas::new();
@@ -224,40 +179,41 @@ impl PairSync {
         }
     }
 
-    fn settle_step(
-        waited: &mut u64,
-        quiet: &mut u64,
-        anchor: &mut i32,
-        position: i32,
-        quiet_counts: i32,
-        quiet_cycles: u64,
-        timeout: u64,
-    ) -> Result<bool, i32> {
-        *waited += 1;
-        if position.wrapping_sub(*anchor).abs() <= quiet_counts {
-            *quiet += 1;
-        } else {
-            *quiet = 0;
-            *anchor = position;
+    fn settle_step(&mut self, position: &[i32; MAX_RELEASE_SLOTS]) -> Result<bool, i32> {
+        self.settle_waited += 1;
+        let mask = self.slot_mask;
+        for s in (0..MAX_RELEASE_SLOTS).filter(|s| mask & (1 << s) != 0) {
+            if position[s].wrapping_sub(self.settle_anchor[s]).abs() <= self.quiet_counts(s) {
+                self.settle_quiet[s] += 1;
+            } else {
+                self.settle_quiet[s] = 0;
+                self.settle_anchor[s] = position[s];
+            }
         }
-        if *quiet >= quiet_cycles {
+        let quiet_cycles = self.params.quiet_cycles;
+        if self
+            .masked_slots()
+            .all(|s| self.settle_quiet[s] >= quiet_cycles)
+        {
             return Ok(true);
         }
-        if *waited >= timeout {
+        if self.settle_waited >= self.params.settle_timeout_cycles {
             return Err(ERR_SYNC_SETTLE_TIMEOUT);
         }
         Ok(false)
     }
 
-    /// Called by the caller after performing `EnableSecondary`; a failed
-    /// enable is terminal for the caller (drive without torque on a belt),
-    /// so the machine only handles success here. The final torques are
-    /// measured even on a failed sync so the report shows the true end
-    /// state instead of blank zeros.
-    pub fn enable_finished(&mut self, position_secondary: i32) {
-        self.report.secondary_reseeded = true;
-        self.report.released_delta_counts =
-            position_secondary.wrapping_sub(self.position_at_disable);
+    /// Called by the caller after performing `EnableAll`; a failed enable is
+    /// terminal for the caller (drive without torque on a belt), so the
+    /// machine only handles success here. The final torques are measured
+    /// even on a failed release so the report shows the true end state
+    /// instead of blank zeros.
+    pub fn enable_finished(&mut self, position: &[i32; MAX_RELEASE_SLOTS]) {
+        self.report.reseeded = true;
+        for s in 0..MAX_RELEASE_SLOTS {
+            self.report.released_delta_counts[s] =
+                position[s].wrapping_sub(self.position_at_disable[s]);
+        }
         let Phase::AwaitEnable { fail_result } = self.phase else {
             panic!("enable_finished outside AwaitEnable phase");
         };
@@ -268,156 +224,43 @@ impl PairSync {
     pub fn poll(&mut self, inputs: &SyncInputs) -> SyncStep {
         match self.phase {
             Phase::MeasureBaseline => {
-                self.meas
-                    .push(inputs.torque_primary, inputs.torque_secondary);
-                if let Some((p, s)) = self.measure_done() {
-                    self.report.torque_baseline_primary = p;
-                    self.report.torque_baseline_secondary = s;
-                    self.position_at_disable = inputs.position_secondary;
+                self.meas.push(&inputs.torque);
+                if let Some(avg) = self.measure_done() {
+                    self.report.torque_baseline = avg;
+                    self.position_at_disable = inputs.position;
                     self.phase = Phase::AwaitDisable;
-                    return SyncStep::DisableSecondary;
+                    return SyncStep::DisableAll;
                 }
                 SyncStep::Idle
             }
             Phase::AwaitDisable => {
-                self.phase = Phase::CoastSettle {
-                    waited: 0,
-                    quiet: 0,
-                    anchor: inputs.position_secondary,
-                };
+                self.settle_anchor = inputs.position;
+                self.phase = Phase::CoastSettle;
                 SyncStep::Idle
             }
-            Phase::CoastSettle {
-                mut waited,
-                mut quiet,
-                mut anchor,
-            } => {
-                match Self::settle_step(
-                    &mut waited,
-                    &mut quiet,
-                    &mut anchor,
-                    inputs.position_secondary,
-                    self.quiet_counts(),
-                    self.params.quiet_cycles,
-                    self.params.settle_timeout_cycles,
-                ) {
-                    Ok(true) => {
-                        self.phase = Phase::MeasureReleased;
-                        SyncStep::Idle
-                    }
-                    Ok(false) => {
-                        self.phase = Phase::CoastSettle {
-                            waited,
-                            quiet,
-                            anchor,
-                        };
-                        SyncStep::Idle
-                    }
-                    Err(code) => {
-                        self.phase = Phase::AwaitEnable { fail_result: code };
-                        SyncStep::EnableSecondary
-                    }
+            Phase::CoastSettle => match self.settle_step(&inputs.position) {
+                Ok(true) => {
+                    self.phase = Phase::AwaitEnable { fail_result: 0 };
+                    SyncStep::EnableAll
                 }
-            }
-            Phase::MeasureReleased => {
-                self.meas
-                    .push(inputs.torque_primary, inputs.torque_secondary);
-                if let Some((p, _s)) = self.measure_done() {
-                    self.report.torque_released = p;
-                    self.phase = Phase::Dither;
-                }
-                SyncStep::Idle
-            }
-            Phase::Dither => match self.dither.eval(inputs.now_ns) {
-                Some((rel_mm, _vel, _acc)) => {
-                    let counts = self.primary_base_target.wrapping_add(mm_to_counts(
-                        f64::from(rel_mm),
-                        self.cmd_counts_per_mm_primary,
-                    ));
-                    SyncStep::SetPrimaryTarget(counts)
-                }
-                None => {
-                    if self.dither_returned_to_base {
-                        self.phase = Phase::PostDitherSettle {
-                            waited: 0,
-                            quiet: 0,
-                            anchor: inputs.position_secondary,
-                        };
-                        SyncStep::Idle
-                    } else {
-                        self.dither_returned_to_base = true;
-                        SyncStep::SetPrimaryTarget(self.primary_base_target)
-                    }
+                Ok(false) => SyncStep::Idle,
+                Err(code) => {
+                    self.phase = Phase::AwaitEnable { fail_result: code };
+                    SyncStep::EnableAll
                 }
             },
-            Phase::PostDitherSettle {
-                mut waited,
-                mut quiet,
-                mut anchor,
-            } => {
-                match Self::settle_step(
-                    &mut waited,
-                    &mut quiet,
-                    &mut anchor,
-                    inputs.position_secondary,
-                    self.quiet_counts(),
-                    self.params.quiet_cycles,
-                    self.params.settle_timeout_cycles,
-                ) {
-                    Ok(true) => {
-                        self.phase = Phase::MeasureDithered;
-                        SyncStep::Idle
-                    }
-                    Ok(false) => {
-                        self.phase = Phase::PostDitherSettle {
-                            waited,
-                            quiet,
-                            anchor,
-                        };
-                        SyncStep::Idle
-                    }
-                    Err(code) => {
-                        self.phase = Phase::AwaitEnable { fail_result: code };
-                        SyncStep::EnableSecondary
-                    }
-                }
-            }
-            Phase::MeasureDithered => {
-                self.meas
-                    .push(inputs.torque_primary, inputs.torque_secondary);
-                if let Some((p, _s)) = self.measure_done() {
-                    self.report.torque_dithered = p;
-                    // With the secondary coasting, the primary alone holds
-                    // the whole axis (CoreXY coupling, friction), and the
-                    // dither parks it at a random spot in its stiction band
-                    // — a high torque here is only "mechanical binding" if
-                    // the coasting rotor ALSO never released any strain.
-                    let released = inputs
-                        .position_secondary
-                        .wrapping_sub(self.position_at_disable);
-                    let torque_high = p.unsigned_abs() > u32::from(self.params.torque_ok_tenth_pct);
-                    let nothing_drained = released.abs() <= self.quiet_counts();
-                    let fail_result = if torque_high && nothing_drained {
-                        ERR_SYNC_TORQUE_RESIDUAL
-                    } else {
-                        0
-                    };
-                    self.phase = Phase::AwaitEnable { fail_result };
-                    return SyncStep::EnableSecondary;
-                }
-                SyncStep::Idle
-            }
             Phase::AwaitEnable { .. } => {
                 panic!("poll during AwaitEnable — caller must call enable_finished first")
             }
             Phase::MeasureFinal => {
-                self.meas
-                    .push(inputs.torque_primary, inputs.torque_secondary);
-                if let Some((p, s)) = self.measure_done() {
-                    self.report.torque_final_primary = p;
-                    self.report.torque_final_secondary = s;
+                self.meas.push(&inputs.torque);
+                if let Some(avg) = self.measure_done() {
+                    self.report.torque_final = avg;
                     let ok = u32::from(self.params.torque_ok_tenth_pct);
-                    if self.report.result == 0 && (p.unsigned_abs() > ok || s.unsigned_abs() > ok) {
+                    let too_high = self
+                        .masked_slots()
+                        .any(|s| self.report.torque_final[s].unsigned_abs() > ok);
+                    if self.report.result == 0 && too_high {
                         self.report.result = ERR_SYNC_FINAL_TORQUE;
                     }
                     self.phase = Phase::Finished;

@@ -138,34 +138,23 @@ class MotionEngineWrapper:
             "restore_drive_limits",
         )
 
-    def sync_servo_pair(
-        self,
-        mcu_handle,
-        axis,
-        torque_ok_tenth_pct,
-        settle_timeout_ms,
-        dither_amplitude_nm,
-        dither_freq_millihz,
-        dither_duration_ms,
-        swap_roles=False,
+    def sync_servo_release(
+        self, mcu_handle, slot_mask, torque_ok_tenth_pct, settle_timeout_ms
     ):
-        """Run a belt-pair sync on the endpoint and return the measurement
-        tuple even when the run failed — the phase torques are the
-        diagnosis. Raises only when no report exists (transport failure)."""
+        """De-energize the masked belt drives, let the mechanics relax,
+        re-energize. Returns the measurement tuple even when the run failed
+        — the phase torques are the diagnosis. Raises only when no report
+        exists (transport failure)."""
         error = None
         try:
             self._wait_endpoint_call(
-                self._engine.sync_servo_pair_start(
+                self._engine.sync_servo_release_start(
                     mcu_handle,
-                    axis,
+                    slot_mask,
                     torque_ok_tenth_pct,
                     settle_timeout_ms,
-                    dither_amplitude_nm,
-                    dither_freq_millihz,
-                    dither_duration_ms,
-                    swap_roles,
                 ),
-                "sync_servo_pair",
+                "sync_servo_release",
             )
         except Exception as e:
             error = e
@@ -173,7 +162,9 @@ class MotionEngineWrapper:
         if report is None:
             if error is not None:
                 raise error
-            raise RuntimeError("sync_servo_pair: endpoint returned no report")
+            raise RuntimeError(
+                "sync_servo_release: endpoint returned no report"
+            )
         return report
 
     def arm_sensorless_endstop(

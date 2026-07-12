@@ -9,10 +9,10 @@ use crate::clock::raw_from_monotonic_ns;
 use crate::curves::ENGINE_STATE_FAULT;
 use crate::dynamics::clamp_torque;
 use crate::scale::{mm_to_counts, CountMap};
-use crate::sync::{SyncStep, ERR_SYNC_ABORTED};
+use crate::sync::{SyncStep, ERR_SYNC_ABORTED, MAX_RELEASE_SLOTS};
 use crate::torque::{TickAction, TorqueState};
-use crate::wire::{endstop_trip_frame, status_heartbeat_frame, sync_pair_response_frame};
-use mcu_protocol::messages::SyncPairResponse;
+use crate::wire::{endstop_trip_frame, status_heartbeat_frame, sync_release_response_frame};
+use mcu_protocol::messages::SyncReleaseResponse;
 
 macro_rules! log_slot_drive_telemetry {
     ($level:ident, $event:literal, $msg:literal, $ctx:expr, $slot:expr, $t:expr,
@@ -51,7 +51,7 @@ pub(super) fn run_cycle(ctx: &mut EndpointCtx) -> ControlFlow<()> {
 
     let (motion_active, all_acc, all_vel) = compute_motion_targets(ctx, apply_time);
 
-    poll_sync(ctx, apply_time);
+    poll_sync(ctx);
 
     handle_ring_fault(ctx);
 
@@ -374,49 +374,49 @@ fn emit_slot_commands(
     motion_active
 }
 
-fn poll_sync(ctx: &mut EndpointCtx, apply_time: u64) {
+fn poll_sync(ctx: &mut EndpointCtx) {
     let Some(mut run) = ctx.sync.take() else {
         return;
     };
-    let inputs = crate::sync::SyncInputs {
-        now_ns: apply_time,
-        torque_primary: ctx.drive.torque_actual(run.primary),
-        torque_secondary: ctx.drive.torque_actual(run.secondary),
-        position_secondary: ctx.drive.position_actual(run.secondary),
+    let mut inputs = crate::sync::SyncInputs {
+        torque: [0; MAX_RELEASE_SLOTS],
+        position: [0; MAX_RELEASE_SLOTS],
     };
+    for slot in run.machine.masked_slots() {
+        inputs.torque[slot] = ctx.drive.torque_actual(slot);
+        inputs.position[slot] = ctx.drive.position_actual(slot);
+    }
     match run.machine.poll(&inputs) {
         SyncStep::Idle => ctx.sync = Some(run),
-        SyncStep::SetPrimaryTarget(counts) => {
-            ctx.drive.set_target_position(run.primary, counts);
-            ctx.sync = Some(run);
-        }
-        SyncStep::DisableSecondary => {
-            eprintln!(
-                "ec-rt: sync: coasting secondary slot {} (pos={})",
-                run.secondary, inputs.position_secondary
-            );
-            ctx.drive.disable(run.secondary);
-            run.secondary_disabled = true;
-            ctx.sync = Some(run);
-        }
-        SyncStep::EnableSecondary => {
-            let rc = ctx.drive.enable(run.secondary);
-            if rc != 0 {
+        SyncStep::DisableAll => {
+            for slot in run.machine.masked_slots() {
                 eprintln!(
-                    "ec-rt: sync: re-enable of slot {} failed rc={rc} — parking",
-                    run.secondary
+                    "ec-rt: sync: coasting slot {slot} (pos={})",
+                    inputs.position[slot]
                 );
-                ctx.sync = Some(run);
-                abort_sync(ctx, ERR_SYNC_ABORTED);
-                ctx.drive.shutdown_and_exit(ctx.num_slaves);
+                ctx.drive.disable(slot);
             }
-            run.secondary_disabled = false;
-            let settled = ctx.drive.position_actual(run.secondary);
-            eprintln!(
-                "ec-rt: sync: secondary slot {} re-enabled at {settled}",
-                run.secondary
-            );
-            run.machine.enable_finished(settled);
+            run.disabled = true;
+            ctx.sync = Some(run);
+        }
+        SyncStep::EnableAll => {
+            let slots: Vec<usize> = run.machine.masked_slots().collect();
+            for &slot in &slots {
+                let rc = ctx.drive.enable(slot);
+                if rc != 0 {
+                    eprintln!("ec-rt: sync: re-enable of slot {slot} failed rc={rc} — parking");
+                    ctx.sync = Some(run);
+                    abort_sync(ctx, ERR_SYNC_ABORTED);
+                    ctx.drive.shutdown_and_exit(ctx.num_slaves);
+                }
+            }
+            run.disabled = false;
+            let mut settled = [0i32; MAX_RELEASE_SLOTS];
+            for &slot in &slots {
+                settled[slot] = ctx.drive.position_actual(slot);
+                eprintln!("ec-rt: sync: slot {slot} re-enabled at {}", settled[slot]);
+            }
+            run.machine.enable_finished(&settled);
             ctx.sync = Some(run);
         }
         SyncStep::Done(report) => finalize_sync(ctx, &run, &report),
@@ -424,60 +424,47 @@ fn poll_sync(ctx: &mut EndpointCtx, apply_time: u64) {
 }
 
 fn finalize_sync(ctx: &mut EndpointCtx, run: &super::SyncRun, report: &crate::sync::SyncReport) {
-    if report.secondary_reseeded {
-        ctx.last_counts[run.secondary] = None;
-        ctx.last_streamed_target[run.secondary] = None;
-        ctx.cmaps[run.secondary] = None;
-        // The rotor turned by the released delta while the axis stood still,
-        // so the same host-frame mm now maps to counts+delta.
-        if let Some((anchor_counts, anchor_mm)) = ctx.report_anchor[run.secondary] {
-            ctx.report_anchor[run.secondary] = Some((
-                anchor_counts.wrapping_add(report.released_delta_counts),
-                anchor_mm,
-            ));
+    let slots: Vec<usize> = run.machine.masked_slots().collect();
+    if report.reseeded {
+        for &slot in &slots {
+            ctx.last_counts[slot] = None;
+            ctx.last_streamed_target[slot] = None;
+            ctx.cmaps[slot] = None;
+            // The rotor turned by the released delta while the axis stood
+            // still, so the same host-frame mm now maps to counts+delta.
+            if let Some((anchor_counts, anchor_mm)) = ctx.report_anchor[slot] {
+                ctx.report_anchor[slot] = Some((
+                    anchor_counts.wrapping_add(report.released_delta_counts[slot]),
+                    anchor_mm,
+                ));
+            }
         }
     }
+    let slot_mask = slots.iter().fold(0u8, |mask, &slot| mask | (1 << slot));
     tracing::info!(
         subsystem = "ethercat",
-        event = "pair_sync_done",
+        event = "sync_release_done",
         result = report.result,
-        primary = run.primary,
-        secondary = run.secondary,
-        torque_baseline_primary = report.torque_baseline_primary,
-        torque_baseline_secondary = report.torque_baseline_secondary,
-        torque_released = report.torque_released,
-        torque_dithered = report.torque_dithered,
-        torque_final_primary = report.torque_final_primary,
-        torque_final_secondary = report.torque_final_secondary,
-        released_delta_counts = report.released_delta_counts,
-        "belt pair sync finished"
+        slot_mask,
+        torque_baseline = format!("{:?}", report.torque_baseline),
+        torque_final = format!("{:?}", report.torque_final),
+        released_delta_counts = format!("{:?}", report.released_delta_counts),
+        "belt strain release finished"
     );
     eprintln!(
-        "ec-rt: sync done result={} baseline=({}, {}) released={} dithered={} \
-         final=({}, {}) delta={} counts",
-        report.result,
-        report.torque_baseline_primary,
-        report.torque_baseline_secondary,
-        report.torque_released,
-        report.torque_dithered,
-        report.torque_final_primary,
-        report.torque_final_secondary,
-        report.released_delta_counts
+        "ec-rt: sync done result={} slot_mask=0x{slot_mask:02x} baseline={:?} \
+         final={:?} released={:?} counts",
+        report.result, report.torque_baseline, report.torque_final, report.released_delta_counts
     );
-    let resp = SyncPairResponse {
+    let resp = SyncReleaseResponse {
         result: report.result,
-        primary_slot: run.primary as u8,
-        secondary_slot: run.secondary as u8,
-        torque_baseline_primary: report.torque_baseline_primary,
-        torque_baseline_secondary: report.torque_baseline_secondary,
-        torque_released: report.torque_released,
-        torque_dithered: report.torque_dithered,
-        torque_final_primary: report.torque_final_primary,
-        torque_final_secondary: report.torque_final_secondary,
+        slot_mask,
+        torque_baseline: report.torque_baseline,
+        torque_final: report.torque_final,
         released_delta_counts: report.released_delta_counts,
     };
     ctx.server
-        .respond(&sync_pair_response_frame(run.correlation_id, &resp));
+        .respond(&sync_release_response_frame(run.correlation_id, &resp));
 }
 
 fn fault_non_finite_torque(ctx: &mut EndpointCtx, slot: usize, acc: f32, vel: f32) -> ! {

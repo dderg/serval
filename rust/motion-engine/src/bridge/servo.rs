@@ -314,76 +314,57 @@ impl PyMotionEngine {
             Ok(())
         }))
     }
-    #[allow(clippy::too_many_arguments)]
-    fn sync_servo_pair_start(
+    fn sync_servo_release_start(
         &self,
         mcu_handle: u32,
-        axis: u8,
+        slot_mask: u8,
         torque_ok_tenth_pct: u16,
         settle_timeout_ms: u16,
-        dither_amplitude_nm: u32,
-        dither_freq_millihz: u32,
-        dither_duration_ms: u16,
-        swap_roles: bool,
     ) -> PyResult<u64> {
-        let conn = self.ethercat_conn(mcu_handle, "sync_servo_pair")?;
+        let conn = self.ethercat_conn(mcu_handle, "sync_servo_release")?;
         let reports = std::sync::Arc::clone(&self.sync_reports);
         tracing::info!(
             subsystem = "engine",
-            event = "servo_pair_sync_start",
+            event = "servo_sync_release_start",
             mcu_handle,
-            axis,
+            slot_mask,
             torque_ok_tenth_pct,
             settle_timeout_ms,
-            dither_amplitude_nm,
-            dither_freq_millihz,
-            dither_duration_ms,
-            swap_roles,
-            "servo belt pair sync"
+            "servo belt strain release"
         );
-        Ok(self.endpoint_calls.start("sync_servo_pair", move || {
-            let resp = crate::servo_torque::send_sync_pair(
+        Ok(self.endpoint_calls.start("sync_servo_release", move || {
+            let resp = crate::servo_torque::send_sync_release(
                 &conn,
-                mcu_protocol::messages::SyncPair {
-                    axis,
+                mcu_protocol::messages::SyncRelease {
+                    slot_mask,
                     torque_ok_tenth_pct,
                     settle_timeout_ms,
-                    dither_amplitude_nm,
-                    dither_freq_millihz,
-                    dither_duration_ms,
-                    swap_roles: u8::from(swap_roles),
                 },
             )?;
             let result = resp.result;
             reports.lock_ok().insert(mcu_handle, resp);
             if result != 0 {
-                return Err(format!("sync_servo_pair: endpoint result {result}"));
+                return Err(format!("sync_servo_release: endpoint result {result}"));
             }
             Ok(())
         }))
     }
-    /// The measurements of the most recent pair sync on this node, as
-    /// (result, primary_slot, secondary_slot, torque_baseline_primary,
-    /// torque_baseline_secondary, torque_released, torque_dithered,
-    /// torque_final_primary, torque_final_secondary, released_delta_counts).
-    /// Available for failed runs too — the phase torques are the diagnosis.
+    /// The measurements of the most recent release on this node, as
+    /// (result, slot_mask, torque_baseline, torque_final,
+    /// released_delta_counts) with one array entry per slot. Available for
+    /// failed runs too — the phase torques are the diagnosis.
     #[allow(clippy::type_complexity)]
     fn take_sync_report(
         &self,
         mcu_handle: u32,
-    ) -> PyResult<Option<(i32, u8, u8, i32, i32, i32, i32, i32, i32, i32)>> {
+    ) -> PyResult<Option<(i32, u8, Vec<i32>, Vec<i32>, Vec<i32>)>> {
         Ok(self.sync_reports.lock_ok().remove(&mcu_handle).map(|r| {
             (
                 r.result,
-                r.primary_slot,
-                r.secondary_slot,
-                r.torque_baseline_primary,
-                r.torque_baseline_secondary,
-                r.torque_released,
-                r.torque_dithered,
-                r.torque_final_primary,
-                r.torque_final_secondary,
-                r.released_delta_counts,
+                r.slot_mask,
+                r.torque_baseline.to_vec(),
+                r.torque_final.to_vec(),
+                r.released_delta_counts.to_vec(),
             )
         }))
     }

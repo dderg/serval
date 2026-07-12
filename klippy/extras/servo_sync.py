@@ -7,13 +7,10 @@ SYNC_ERROR_TEXT = {
     -840: "another sync is already running on the node",
     -841: "servo torque is not enabled",
     -842: "motion ring is not empty",
-    -843: "axis is not driven by exactly two servos on one node",
-    -844: "coasting drive never settled (settle timeout)",
-    -845: "torque stayed high and the coasting rotor never released any "
-    "strain — mechanical binding?",
-    -846: "pair still fighting after re-enable",
+    -843: "release mask does not select valid drive slots",
+    -844: "a coasting drive never settled (settle timeout)",
+    -846: "drives still fighting after re-enable",
     -847: "motion arrived during sync",
-    -848: "dither parameters rejected",
     -849: "sync aborted by stop or drive fault",
 }
 
@@ -27,22 +24,21 @@ class SyncableAxis:
     def axis_name(self):
         return self.rail.get_name(short=True)
 
-    def motor_for_slot(self, slot):
-        for motor in self.rail.get_motors():
-            if self.node.get_slot_for_motor(motor.get_motor_name()) == slot:
-                return motor
-        raise KeyError(slot)
+    def slot_motors(self):
+        return [
+            (self.node.get_slot_for_motor(motor.get_motor_name()), motor)
+            for motor in self.rail.get_motors()
+        ]
 
 
 class ServoSync:
     cmd_SERVO_SYNC_help = (
-        "Release the strain between the paired servo drives of each belt "
-        "axis: coast one drive, dither the other through stiction, re-seed "
-        "the coasting drive at its settled position — then swap roles so "
-        "both rotors get released (BOTH=0 keeps the single-pass behavior). "
-        "Standstill torque is verified at every phase. AXIS=X|Y limits to "
-        "one axis; TORQUE_OK/AMPLITUDE/FREQ/DURATION override the config "
-        "tuning."
+        "Release the strain the belt drives have built up against each "
+        "other: de-energize every belt drive at once, let the mechanics "
+        "relax freely, re-energize (each drive re-seeds at its settled "
+        "position, so no position is lost). Standstill torque is verified "
+        "before and after. AXIS=X|Y releases just one pair; TORQUE_OK "
+        "overrides the config threshold."
     )
 
     def __init__(self, config):
@@ -53,16 +49,6 @@ class ServoSync:
         self.settle_timeout = config.getfloat(
             "settle_timeout", 2.0, above=0.0, maxval=60.0
         )
-        self.dither_amplitude = config.getfloat(
-            "dither_amplitude", 0.25, above=0.0, maxval=1.0
-        )
-        self.dither_frequency = config.getfloat(
-            "dither_frequency", 4.0, above=0.0, maxval=50.0
-        )
-        self.dither_duration = config.getfloat(
-            "dither_duration", 1.5, above=0.0, maxval=5.0
-        )
-        self.max_rounds = config.getint("max_rounds", 2, minval=1, maxval=5)
         gcode = self.printer.lookup_object("gcode")
         gcode.register_command(
             "SERVO_SYNC", self.cmd_SERVO_SYNC, desc=self.cmd_SERVO_SYNC_help
@@ -120,58 +106,20 @@ class ServoSync:
                 % MOTION_DRAIN_TIMEOUT
             )
 
-    def _run_pair(self, gcmd, engine, entry, tuning, swap_roles):
-        handle = entry.node.get_engine_handle()
-        if handle is None:
-            raise gcmd.error(
-                "SERVO_SYNC: ethercat_node %s has no engine handle"
-                % entry.node.name
-            )
-        return engine.sync_servo_pair(
-            handle,
-            entry.lane_idx,
-            tuning["torque_ok_tenth_pct"],
-            tuning["settle_timeout_ms"],
-            tuning["dither_amplitude_nm"],
-            tuning["dither_freq_millihz"],
-            tuning["dither_duration_ms"],
-            swap_roles,
-        )
-
     def _describe(self, entry, report):
-        (
-            result,
-            primary_slot,
-            secondary_slot,
-            baseline_p,
-            baseline_s,
-            released,
-            dithered,
-            final_p,
-            final_s,
-            delta_counts,
-        ) = report
-        primary = entry.motor_for_slot(primary_slot)
-        secondary = entry.motor_for_slot(secondary_slot)
-        delta_mm = delta_counts / secondary.get_counts_per_mm()
-        text = (
-            "axis %s (%s holds, %s re-seeded): fight (%+.1f%%, %+.1f%%) -> "
-            "coast %+.1f%% -> dither %+.1f%% -> final (%+.1f%%, %+.1f%%); "
-            "released %d counts (%.4f mm)"
-            % (
-                entry.axis_name(),
-                primary.get_motor_name(),
-                secondary.get_motor_name(),
-                baseline_p / 10.0,
-                baseline_s / 10.0,
-                released / 10.0,
-                dithered / 10.0,
-                final_p / 10.0,
-                final_s / 10.0,
-                delta_counts,
-                delta_mm,
+        result, _slot_mask, baseline, final, released = report
+        parts = []
+        for slot, motor in entry.slot_motors():
+            parts.append(
+                "%s %+.1f%% -> %+.1f%% (rotor moved %+.4f mm)"
+                % (
+                    motor.get_motor_name(),
+                    baseline[slot] / 10.0,
+                    final[slot] / 10.0,
+                    released[slot] / motor.get_counts_per_mm(),
+                )
             )
-        )
+        text = "axis %s released: %s" % (entry.axis_name(), "; ".join(parts))
         if result != 0:
             text += " — FAILED: %s (code %d)" % (
                 SYNC_ERROR_TEXT.get(result, "unknown error"),
@@ -183,14 +131,9 @@ class ServoSync:
         return {
             "torque_ok_tenth_pct": int(round(self.torque_ok_pct * 10.0)),
             "settle_timeout_ms": int(round(self.settle_timeout * 1000.0)),
-            "dither_amplitude_nm": int(
-                round(self.dither_amplitude * 1_000_000.0)
-            ),
-            "dither_freq_millihz": int(round(self.dither_frequency * 1000.0)),
-            "dither_duration_ms": int(round(self.dither_duration * 1000.0)),
         }
 
-    def run(self, gcmd, axis_filter=None, tuning=None, both_rotors=True):
+    def run(self, gcmd, axis_filter=None, tuning=None):
         if tuning is None:
             tuning = self.default_tuning()
         axes = self._syncable_axes(gcmd, axis_filter)
@@ -198,32 +141,34 @@ class ServoSync:
         engine = self.printer.lookup_object("motion_engine")
         toolhead.wait_moves()
         self._drain_motion(gcmd, engine)
-        passes = [False, True] if both_rotors else [False]
-        for round_idx in range(self.max_rounds):
-            reports = [
-                (entry, self._run_pair(gcmd, engine, entry, tuning, swap))
-                for entry in axes
-                for swap in passes
-            ]
-            for entry, report in reports:
-                gcmd.respond_info(self._describe(entry, report))
-            results = [report[0] for _entry, report in reports]
-            if all(r == 0 for r in results):
-                return
-            # A later pass's dither can push a small residual into an
-            # earlier pair; only that cross-coupling failure mode earns
-            # another round. Anything else is a hard error now.
-            if any(r != -846 for r in results if r != 0):
-                raise gcmd.error("SERVO_SYNC failed — see measurements above")
-            if round_idx + 1 >= self.max_rounds:
-                raise gcmd.error(
-                    "SERVO_SYNC: pairs still fighting after %d rounds"
-                    % self.max_rounds
-                )
-            gcmd.respond_info(
-                "SERVO_SYNC: residual fight after round %d, running another"
-                " round" % (round_idx + 1)
+        by_node = {}
+        for entry in axes:
+            by_node.setdefault(id(entry.node), (entry.node, []))[1].append(
+                entry
             )
+        failed = False
+        for node, entries in by_node.values():
+            handle = node.get_engine_handle()
+            if handle is None:
+                raise gcmd.error(
+                    "SERVO_SYNC: ethercat_node %s has no engine handle"
+                    % node.name
+                )
+            slot_mask = 0
+            for entry in entries:
+                for slot, _motor in entry.slot_motors():
+                    slot_mask |= 1 << slot
+            report = engine.sync_servo_release(
+                handle,
+                slot_mask,
+                tuning["torque_ok_tenth_pct"],
+                tuning["settle_timeout_ms"],
+            )
+            for entry in entries:
+                gcmd.respond_info(self._describe(entry, report))
+            failed = failed or report[0] != 0
+        if failed:
+            raise gcmd.error("SERVO_SYNC failed — see measurements above")
 
     def cmd_SERVO_SYNC(self, gcmd):
         axis_filter = gcmd.get("AXIS", None)
@@ -234,21 +179,8 @@ class ServoSync:
                 round(gcmd.get_float("TORQUE_OK", self.torque_ok_pct) * 10.0)
             ),
             "settle_timeout_ms": int(round(self.settle_timeout * 1000.0)),
-            "dither_amplitude_nm": int(
-                round(
-                    gcmd.get_float("AMPLITUDE", self.dither_amplitude)
-                    * 1_000_000.0
-                )
-            ),
-            "dither_freq_millihz": int(
-                round(gcmd.get_float("FREQ", self.dither_frequency) * 1000.0)
-            ),
-            "dither_duration_ms": int(
-                round(gcmd.get_float("DURATION", self.dither_duration) * 1000.0)
-            ),
         }
-        both_rotors = gcmd.get_int("BOTH", 1, minval=0, maxval=1) == 1
-        self.run(gcmd, axis_filter, tuning, both_rotors)
+        self.run(gcmd, axis_filter, tuning)
 
 
 def load_config(config):

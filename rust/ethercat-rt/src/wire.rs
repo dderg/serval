@@ -7,8 +7,8 @@ use mcu_protocol::messages::{
     RuntimeCapsResponse, SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse, SeedServoHome,
     SeedServoHomeResponse, SetDiffDamper, SetDiffDamperResponse, SetDiffTrim, SetDiffTrimResponse,
     SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse, StartCapture,
-    StartCaptureResponse, StatusHeartbeat, StopCaptureResponse, StopResponse, SyncPair,
-    SyncPairResponse,
+    StartCaptureResponse, StatusHeartbeat, StopCaptureResponse, StopResponse, SyncRelease,
+    SyncReleaseResponse,
 };
 use mcu_protocol::MCU_CHANNEL_PIECES;
 use mcu_transport::frame::{encode_frame, CHANNEL_CONTROL, CHANNEL_EVENTS};
@@ -81,9 +81,9 @@ pub enum Command {
         correlation_id: u32,
         msg: SdoWrite,
     },
-    SyncPair {
+    SyncRelease {
         correlation_id: u32,
-        msg: SyncPair,
+        msg: SyncRelease,
     },
     SetDiffDamper {
         correlation_id: u32,
@@ -193,9 +193,9 @@ pub fn decode_command(channel: u8, payload: &[u8]) -> Result<Command, DecodeCmdE
                 msg,
             })
         }
-        Some(MessageKind::SyncPair) => {
-            let msg = SyncPair::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
-            Ok(Command::SyncPair {
+        Some(MessageKind::SyncRelease) => {
+            let msg = SyncRelease::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
+            Ok(Command::SyncRelease {
                 correlation_id: cid,
                 msg,
             })
@@ -353,9 +353,9 @@ pub fn arm_sensorless_endstop_response_frame(cid: u32, result: i32) -> Vec<u8> {
     control_frame(MessageKind::ArmSensorlessEndstopResponse, cid, &body)
 }
 
-pub fn sync_pair_response_frame(cid: u32, resp: &SyncPairResponse) -> Vec<u8> {
+pub fn sync_release_response_frame(cid: u32, resp: &SyncReleaseResponse) -> Vec<u8> {
     let body = resp.encoded_to_vec();
-    control_frame(MessageKind::SyncPairResponse, cid, &body)
+    control_frame(MessageKind::SyncReleaseResponse, cid, &body)
 }
 
 pub fn endstop_trip_frame(endstop_id: u8, trip_clock: u64) -> Vec<u8> {

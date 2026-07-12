@@ -61,8 +61,8 @@ pub enum MessageKind {
     StatusHeartbeat = 0x0083,
     McuLog = 0x0084,
     EndstopTrip = 0x0085,
-    SyncPair = 0x0086,
-    SyncPairResponse = 0x0087,
+    SyncRelease = 0x0086,
+    SyncReleaseResponse = 0x0087,
     SetDiffDamper = 0x0088,
     SetDiffDamperResponse = 0x0089,
     SetDiffTrim = 0x008A,
@@ -112,8 +112,8 @@ impl MessageKind {
             0x0083 => Self::StatusHeartbeat,
             0x0084 => Self::McuLog,
             0x0085 => Self::EndstopTrip,
-            0x0086 => Self::SyncPair,
-            0x0087 => Self::SyncPairResponse,
+            0x0086 => Self::SyncRelease,
+            0x0087 => Self::SyncReleaseResponse,
             0x0088 => Self::SetDiffDamper,
             0x0089 => Self::SetDiffDamperResponse,
             0x008A => Self::SetDiffTrim,
@@ -828,84 +828,63 @@ impl Decode for EndstopTrip {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SyncPair {
-    pub axis: u8,
+pub struct SyncRelease {
+    pub slot_mask: u8,
     pub torque_ok_tenth_pct: u16,
     pub settle_timeout_ms: u16,
-    pub dither_amplitude_nm: u32,
-    pub dither_freq_millihz: u32,
-    pub dither_duration_ms: u16,
-    pub swap_roles: u8,
 }
 
-impl Encode for SyncPair {
+impl Encode for SyncRelease {
     fn encode(&self, out: &mut Vec<u8>) {
-        put_u8(out, self.axis);
+        put_u8(out, self.slot_mask);
         put_u16(out, self.torque_ok_tenth_pct);
         put_u16(out, self.settle_timeout_ms);
-        put_u32(out, self.dither_amplitude_nm);
-        put_u32(out, self.dither_freq_millihz);
-        put_u16(out, self.dither_duration_ms);
-        put_u8(out, self.swap_roles);
     }
 }
 
-impl Decode for SyncPair {
+impl Decode for SyncRelease {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         Ok(Self {
-            axis: get_u8(c)?,
+            slot_mask: get_u8(c)?,
             torque_ok_tenth_pct: get_u16(c)?,
             settle_timeout_ms: get_u16(c)?,
-            dither_amplitude_nm: get_u32(c)?,
-            dither_freq_millihz: get_u32(c)?,
-            dither_duration_ms: get_u16(c)?,
-            swap_roles: get_u8(c)?,
         })
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SyncPairResponse {
+pub struct SyncReleaseResponse {
     pub result: i32,
-    pub primary_slot: u8,
-    pub secondary_slot: u8,
-    pub torque_baseline_primary: i32,
-    pub torque_baseline_secondary: i32,
-    pub torque_released: i32,
-    pub torque_dithered: i32,
-    pub torque_final_primary: i32,
-    pub torque_final_secondary: i32,
-    pub released_delta_counts: i32,
+    pub slot_mask: u8,
+    pub torque_baseline: [i32; 4],
+    pub torque_final: [i32; 4],
+    pub released_delta_counts: [i32; 4],
 }
 
-impl Encode for SyncPairResponse {
+impl Encode for SyncReleaseResponse {
     fn encode(&self, out: &mut Vec<u8>) {
         put_i32(out, self.result);
-        put_u8(out, self.primary_slot);
-        put_u8(out, self.secondary_slot);
-        put_i32(out, self.torque_baseline_primary);
-        put_i32(out, self.torque_baseline_secondary);
-        put_i32(out, self.torque_released);
-        put_i32(out, self.torque_dithered);
-        put_i32(out, self.torque_final_primary);
-        put_i32(out, self.torque_final_secondary);
-        put_i32(out, self.released_delta_counts);
+        put_u8(out, self.slot_mask);
+        for v in &self.torque_baseline {
+            put_i32(out, *v);
+        }
+        for v in &self.torque_final {
+            put_i32(out, *v);
+        }
+        for v in &self.released_delta_counts {
+            put_i32(out, *v);
+        }
     }
 }
 
-impl Decode for SyncPairResponse {
+impl Decode for SyncReleaseResponse {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         Ok(Self {
             result: get_i32(c)?,
-            primary_slot: get_u8(c)?,
-            secondary_slot: get_u8(c)?,
-            torque_baseline_primary: get_i32(c)?,
-            torque_baseline_secondary: get_i32(c)?,
-            torque_released: get_i32(c)?,
-            torque_dithered: get_i32(c)?,
-            torque_final_primary: get_i32(c)?,
-            torque_final_secondary: get_i32(c)?,
-            released_delta_counts: get_i32(c)?,
+            slot_mask: get_u8(c)?,
+            torque_baseline: [get_i32(c)?, get_i32(c)?, get_i32(c)?, get_i32(c)?],
+            torque_final: [get_i32(c)?, get_i32(c)?, get_i32(c)?, get_i32(c)?],
+            released_delta_counts: [get_i32(c)?, get_i32(c)?, get_i32(c)?, get_i32(c)?],
         })
     }
 }

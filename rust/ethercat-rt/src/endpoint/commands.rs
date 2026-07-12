@@ -10,8 +10,8 @@ use crate::mailbox::{MailboxReply, MailboxRequest};
 use crate::push_plan::plan_bundle;
 use crate::sensorless::{ERR_ARM_SENSORLESS_AMBIGUOUS_PAIR, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
 use crate::sync::{
-    PairSync, SyncParams, ERR_PIECES_DURING_SYNC, ERR_SYNC_ABORTED, ERR_SYNC_BAD_AXIS,
-    ERR_SYNC_BUSY, ERR_SYNC_NOT_ENABLED, ERR_SYNC_STREAMING,
+    SyncParams, SyncRelease as ReleaseMachine, ERR_PIECES_DURING_SYNC, ERR_SYNC_ABORTED,
+    ERR_SYNC_BAD_MASK, ERR_SYNC_BUSY, ERR_SYNC_NOT_ENABLED, ERR_SYNC_STREAMING, MAX_RELEASE_SLOTS,
 };
 use crate::torque::{CommandAction, TorqueState, ERR_ENABLE_FAILED, ERR_PIECES_WHILE_FAULTED};
 use crate::wire::{
@@ -22,12 +22,12 @@ use crate::wire::{
     sdo_write_response_frame, seed_servo_home_response_frame, set_diff_damper_response_frame,
     set_diff_trim_response_frame, set_drive_limits_response_frame, set_torque_response_frame,
     start_capture_response_frame, stop_capture_response_frame, stop_response_frame,
-    sync_pair_response_frame, Command,
+    sync_release_response_frame, Command,
 };
 use mcu_protocol::messages::{
     ArmSensorlessEndstop, PushPieces, ResonanceBuzz, SdoRead, SdoReadResponse, SdoWrite,
     SdoWriteResponse, SetDiffDamper, SetDiffTrim, SetDriveLimits, SetTorque, StartCapture,
-    StopCaptureResponse, SyncPair,
+    StopCaptureResponse, SyncRelease,
 };
 
 pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
@@ -134,11 +134,11 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
             } => {
                 handle_resonance_buzz(ctx, correlation_id, msg);
             }
-            Command::SyncPair {
+            Command::SyncRelease {
                 correlation_id,
                 msg,
             } => {
-                handle_sync_pair(ctx, correlation_id, msg);
+                handle_sync_release(ctx, correlation_id, msg);
             }
             Command::SetDiffDamper {
                 correlation_id,
@@ -648,10 +648,13 @@ fn handle_query_motor_state(ctx: &mut EndpointCtx, correlation_id: u32) {
     }
 }
 
-fn handle_sync_pair(ctx: &mut EndpointCtx, correlation_id: u32, msg: SyncPair) {
+fn handle_sync_release(ctx: &mut EndpointCtx, correlation_id: u32, msg: SyncRelease) {
     let reject = |ctx: &mut EndpointCtx, code: i32| {
-        eprintln!("ec-rt: SyncPair axis={} rejected code={code}", msg.axis);
-        ctx.server.respond(&sync_pair_response_frame(
+        eprintln!(
+            "ec-rt: SyncRelease slot_mask=0x{:02x} rejected code={code}",
+            msg.slot_mask
+        );
+        ctx.server.respond(&sync_release_response_frame(
             correlation_id,
             &sync_response_with_code(code),
         ));
@@ -665,60 +668,36 @@ fn handle_sync_pair(ctx: &mut EndpointCtx, correlation_id: u32, msg: SyncPair) {
     if ctx.rings.iter().any(|r| !r.is_empty()) || ctx.buzz.active() {
         return reject(ctx, ERR_SYNC_STREAMING);
     }
-    let slots: Vec<usize> = ctx
-        .slave_axes
-        .iter()
-        .enumerate()
-        .filter_map(|(slot, &a)| (a == msg.axis).then_some(slot))
-        .collect();
-    let [primary, secondary] = slots[..] else {
+    if usize::from(msg.slot_mask) >> ctx.num_slaves.min(MAX_RELEASE_SLOTS) != 0 {
         eprintln!(
-            "ec-rt: SyncPair axis={} maps to {} slot(s), need exactly 2 (slave_axes={:?})",
-            msg.axis,
-            slots.len(),
-            ctx.slave_axes
+            "ec-rt: SyncRelease slot_mask=0x{:02x} selects slots beyond the \
+             {} present (max {MAX_RELEASE_SLOTS})",
+            msg.slot_mask, ctx.num_slaves
         );
-        return reject(ctx, ERR_SYNC_BAD_AXIS);
-    };
-    let (primary, secondary) = if msg.swap_roles != 0 {
-        (secondary, primary)
-    } else {
-        (primary, secondary)
-    };
+        return reject(ctx, ERR_SYNC_BAD_MASK);
+    }
     let cycles_per_ms = (1_000_000 / ctx.cycle_ns.max(1)) as u64;
     let params = SyncParams {
         torque_ok_tenth_pct: msg.torque_ok_tenth_pct,
         settle_timeout_cycles: u64::from(msg.settle_timeout_ms) * cycles_per_ms,
         measure_cycles: 100 * cycles_per_ms,
         quiet_cycles: 50 * cycles_per_ms,
-        dither_amplitude_nm: msg.dither_amplitude_nm,
-        dither_freq_millihz: msg.dither_freq_millihz,
-        dither_duration_ms: msg.dither_duration_ms,
     };
-    let primary_base_target = ctx.drive.telemetry(primary).target_position;
-    let machine = match PairSync::begin(
-        params,
-        ctx.cmd_counts_per_mm[primary],
-        ctx.counts_per_mm[secondary],
-        primary_base_target,
-    ) {
+    let mut counts_per_mm = [0f64; MAX_RELEASE_SLOTS];
+    for (slot, cpm) in counts_per_mm.iter_mut().enumerate().take(ctx.num_slaves) {
+        *cpm = ctx.counts_per_mm[slot];
+    }
+    let machine = match ReleaseMachine::begin(params, msg.slot_mask, counts_per_mm) {
         Ok(m) => m,
         Err(code) => return reject(ctx, code),
     };
     eprintln!(
-        "ec-rt: SyncPair axis={} started primary={primary} secondary={secondary} \
-         base_target={primary_base_target} torque_ok={} dither={}nm@{}mHz/{}ms",
-        msg.axis,
-        msg.torque_ok_tenth_pct,
-        msg.dither_amplitude_nm,
-        msg.dither_freq_millihz,
-        msg.dither_duration_ms
+        "ec-rt: SyncRelease started slot_mask=0x{:02x} torque_ok={} settle_timeout={}ms",
+        msg.slot_mask, msg.torque_ok_tenth_pct, msg.settle_timeout_ms
     );
     ctx.sync = Some(SyncRun {
         correlation_id,
-        primary,
-        secondary,
-        secondary_disabled: false,
+        disabled: false,
         machine,
     });
 }

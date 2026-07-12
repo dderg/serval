@@ -171,7 +171,7 @@ fn push_pieces_and_heartbeat_closes_the_loop() {
                     Command::SeedServoHome { .. } => {}
                     Command::ArmSensorlessEndstop { .. } => {}
                     Command::ResonanceBuzz { .. }
-                    | Command::SyncPair { .. }
+                    | Command::SyncRelease { .. }
                     | Command::SetDiffDamper { .. }
                     | Command::SetDiffTrim { .. } => {}
                     Command::SdoRead { .. } | Command::SdoWrite { .. } => {
@@ -207,7 +207,7 @@ fn push_pieces_and_heartbeat_closes_the_loop() {
                     | Command::ResonanceBuzz { .. }
                     | Command::SdoRead { .. }
                     | Command::SdoWrite { .. }
-                    | Command::SyncPair { .. }
+                    | Command::SyncRelease { .. }
                     | Command::SetDiffDamper { .. }
                     | Command::SetDiffTrim { .. }
                     | Command::PushPieces { .. } => {}

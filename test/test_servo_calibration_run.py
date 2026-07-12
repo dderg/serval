@@ -563,8 +563,8 @@ class FakeServoSync:
     def __init__(self):
         self.runs = []
 
-    def run(self, gcmd, axis_filter=None, tuning=None, both_rotors=True):
-        self.runs.append((axis_filter, both_rotors))
+    def run(self, gcmd, axis_filter=None, tuning=None):
+        self.runs.append(axis_filter)
 
 
 def test_strain_map_raster_records_one_capture_per_line():
@@ -575,7 +575,7 @@ def test_strain_map_raster_records_one_capture_per_line():
     sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
     gcmd = FakeGcmd(LINE_SPACING="120", SPEED="50", ACCEL="1000")
     sc.cmd_SERVO_MEASURE_STRAIN_MAP(gcmd)
-    assert sync.runs == [(None, True)]
+    assert sync.runs == [None]
     caps = sc.printer.lookup_object("servo_capture").captures
     names = [os.path.basename(path) for path, _servos in caps]
     assert names == [

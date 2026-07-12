@@ -57,7 +57,7 @@ class FakeNode:
         return self._slots[motor_name]
 
 
-OK_REPORT = (0, 0, 1, 80, -78, 40, 3, 2, -1, 512)
+OK_REPORT = (0, 0x0F, [80, -78, 40, -38], [3, -2, 1, -1], [512, -498, 60, -55])
 
 
 class FakeEngine:
@@ -68,8 +68,8 @@ class FakeEngine:
     def motion_drained(self):
         return True
 
-    def sync_servo_pair(self, handle, axis, *tuning):
-        self.calls.append((handle, axis) + tuning)
+    def sync_servo_release(self, handle, slot_mask, *tuning):
+        self.calls.append((handle, slot_mask) + tuning)
         if self._scripted:
             return self._scripted.pop(0)
         return OK_REPORT
@@ -102,9 +102,6 @@ class FakeConfig:
     def getfloat(self, name, default, **kw):
         return default
 
-    def getint(self, name, default, **kw):
-        return default
-
 
 class FakeGcmd:
     error = RuntimeError
@@ -119,14 +116,11 @@ class FakeGcmd:
     def get_float(self, name, default=None):
         return float(self._params.get(name, default))
 
-    def get_int(self, name, default=None, minval=None, maxval=None):
-        return int(self._params.get(name, default))
-
     def respond_info(self, msg):
         self.responses.append(msg)
 
 
-def make_motor(name, node_name, slot_ignored=None):
+def make_motor(name, node_name):
     m = servo_axis.ServoMotor.__new__(servo_axis.ServoMotor)
     m.motor_name = name
     m.node_name = node_name
@@ -169,123 +163,52 @@ def make_sync(engine=None, rails=None, lane_names=("x", "y")):
     return ss, engine, toolhead
 
 
-def slot_reports(primary, secondary, result=0):
-    return (result, primary, secondary, 80, -78, 40, 3, 2, -1, 512)
+def failed_report(result):
+    return (result,) + OK_REPORT[1:]
 
 
-def test_syncs_every_belt_pair_twice_with_converted_units():
-    ss, engine, toolhead = make_sync(
-        engine=FakeEngine(
-            [
-                slot_reports(0, 1),
-                slot_reports(1, 0),
-                slot_reports(2, 3),
-                slot_reports(3, 2),
-            ]
-        )
-    )
+def test_releases_every_belt_drive_in_one_call_with_converted_units():
+    ss, engine, toolhead = make_sync()
     gcmd = FakeGcmd()
     ss.cmd_SERVO_SYNC(gcmd)
     assert toolhead.wait_moves_calls == 1
-    assert engine.calls == [
-        (7, 0, 30, 2000, 250_000, 4000, 1500, False),
-        (7, 0, 30, 2000, 250_000, 4000, 1500, True),
-        (7, 1, 30, 2000, 250_000, 4000, 1500, False),
-        (7, 1, 30, 2000, 250_000, 4000, 1500, True),
-    ]
-    assert len(gcmd.responses) == 4
-    assert "motor_a holds" in gcmd.responses[0]
-    assert "motor_a1 re-seeded" in gcmd.responses[0]
-    assert "released 512 counts" in gcmd.responses[0]
-    assert "motor_a1 holds" in gcmd.responses[1]
-    assert "motor_a re-seeded" in gcmd.responses[1]
-    assert "motor_b1 re-seeded" in gcmd.responses[2]
+    assert engine.calls == [(7, 0x0F, 30, 2000)]
+    assert len(gcmd.responses) == 2
+    assert "axis x released" in gcmd.responses[0]
+    assert "motor_a +8.0% -> +0.3%" in gcmd.responses[0]
+    assert "motor_a1 -7.8% -> -0.2%" in gcmd.responses[0]
+    assert "rotor moved +0.1562 mm" in gcmd.responses[0]
+    assert "axis y released" in gcmd.responses[1]
+    assert "motor_b +4.0% -> +0.1%" in gcmd.responses[1]
 
 
-def test_both_zero_keeps_the_single_pass_behavior():
-    ss, engine, _ = make_sync(
-        engine=FakeEngine([slot_reports(0, 1), slot_reports(2, 3)])
-    )
-    ss.cmd_SERVO_SYNC(FakeGcmd(BOTH="0"))
-    assert [c[-1] for c in engine.calls] == [False, False]
-    assert [c[1] for c in engine.calls] == [0, 1]
-
-
-def test_axis_filter_limits_to_one_lane():
-    ss, engine, _ = make_sync(
-        engine=FakeEngine([slot_reports(2, 3), slot_reports(3, 2)])
-    )
+def test_axis_filter_releases_only_that_pair():
+    ss, engine, _ = make_sync()
     ss.cmd_SERVO_SYNC(FakeGcmd(AXIS="Y"))
-    assert [c[1] for c in engine.calls] == [1, 1]
+    assert engine.calls == [(7, 0x0C, 30, 2000)]
 
 
-def test_gcode_overrides_reach_the_engine():
-    ss, engine, _ = make_sync(
-        engine=FakeEngine(
-            [
-                slot_reports(0, 1),
-                slot_reports(1, 0),
-                slot_reports(2, 3),
-                slot_reports(3, 2),
-            ]
-        )
-    )
-    ss.cmd_SERVO_SYNC(
-        FakeGcmd(TORQUE_OK="5.0", AMPLITUDE="0.05", FREQ="8", DURATION="0.25")
-    )
-    assert engine.calls[0][2:] == (50, 2000, 50_000, 8000, 250, False)
+def test_gcode_torque_ok_override_reaches_the_engine():
+    ss, engine, _ = make_sync()
+    ss.cmd_SERVO_SYNC(FakeGcmd(TORQUE_OK="5.0"))
+    assert engine.calls == [(7, 0x0F, 50, 2000)]
 
 
-def test_residual_final_fight_earns_one_more_round():
-    engine = FakeEngine(
-        [
-            slot_reports(0, 1, result=-846),
-            slot_reports(1, 0),
-            slot_reports(2, 3),
-            slot_reports(3, 2),
-            slot_reports(0, 1),
-            slot_reports(1, 0),
-            slot_reports(2, 3),
-            slot_reports(3, 2),
-        ]
-    )
-    ss, engine, _ = make_sync(engine=engine)
-    gcmd = FakeGcmd()
-    ss.cmd_SERVO_SYNC(gcmd)
-    assert len(engine.calls) == 8
-    assert any("running another" in r for r in gcmd.responses)
-
-
-def test_still_fighting_after_max_rounds_errors():
-    engine = FakeEngine(
-        [
-            slot_reports(0, 1, result=-846),
-            slot_reports(1, 0),
-            slot_reports(2, 3, result=-846),
-            slot_reports(3, 2),
-        ]
-        * 4
-    )
-    ss, engine, _ = make_sync(engine=engine)
-    with pytest.raises(RuntimeError, match="still fighting"):
-        ss.cmd_SERVO_SYNC(FakeGcmd())
-    assert len(engine.calls) == 8
-
-
-def test_hard_failure_stops_immediately_with_measurements():
-    engine = FakeEngine(
-        [
-            slot_reports(0, 1, result=-844),
-            slot_reports(1, 0),
-            slot_reports(2, 3),
-            slot_reports(3, 2),
-        ]
-    )
-    ss, engine, _ = make_sync(engine=engine)
+def test_failed_release_reports_measurements_and_raises():
+    ss, engine, _ = make_sync(engine=FakeEngine([failed_report(-846)]))
     gcmd = FakeGcmd()
     with pytest.raises(RuntimeError, match="see measurements"):
         ss.cmd_SERVO_SYNC(gcmd)
-    assert len(engine.calls) == 4
+    assert len(gcmd.responses) == 2
+    assert "still fighting" in gcmd.responses[0]
+    assert "code -846" in gcmd.responses[0]
+
+
+def test_settle_timeout_names_the_failure():
+    ss, engine, _ = make_sync(engine=FakeEngine([failed_report(-844)]))
+    gcmd = FakeGcmd()
+    with pytest.raises(RuntimeError):
+        ss.cmd_SERVO_SYNC(gcmd)
     assert any("settle timeout" in r for r in gcmd.responses)
 
 

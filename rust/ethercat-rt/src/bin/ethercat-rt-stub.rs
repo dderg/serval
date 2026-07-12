@@ -19,7 +19,7 @@ use ethercat_rt::sync::{ERR_SYNC_NOT_ENABLED, ERR_SYNC_STREAMING};
 use ethercat_rt::torque::{
     CommandAction, TickAction, TorqueGate, TorqueState, ERR_ENABLE_FAILED, ERR_PIECES_WHILE_FAULTED,
 };
-use ethercat_rt::wire::sync_pair_response_frame;
+use ethercat_rt::wire::sync_release_response_frame;
 use ethercat_rt::wire::{
     arm_sensorless_endstop_response_frame, claim_handshake_reply_frame, endstop_trip_frame,
     identify_response_frame, push_pieces_response_frame, resonance_buzz_response_frame,
@@ -29,7 +29,9 @@ use ethercat_rt::wire::{
     set_torque_response_frame, start_capture_response_frame, status_heartbeat_frame,
     stop_capture_response_frame, stop_response_frame, Command,
 };
-use mcu_protocol::messages::{SdoReadResponse, SlaveState, StopCaptureResponse, SyncPairResponse};
+use mcu_protocol::messages::{
+    SdoReadResponse, SlaveState, StopCaptureResponse, SyncReleaseResponse,
+};
 
 static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
 
@@ -100,18 +102,13 @@ fn stub_object_dictionary() -> DictSdoBus {
     ])
 }
 
-fn sim_sync_response(baseline: i16) -> SyncPairResponse {
-    SyncPairResponse {
+fn sim_sync_response(baseline: i16) -> SyncReleaseResponse {
+    SyncReleaseResponse {
         result: 0,
-        primary_slot: 0,
-        secondary_slot: 1,
-        torque_baseline_primary: i32::from(baseline),
-        torque_baseline_secondary: i32::from(-baseline),
-        torque_released: i32::from(baseline / 2),
-        torque_dithered: 2,
-        torque_final_primary: 1,
-        torque_final_secondary: -1,
-        released_delta_counts: 512,
+        slot_mask: 0x03,
+        torque_baseline: [i32::from(baseline), i32::from(-baseline), 0, 0],
+        torque_final: [1, -1, 0, 0],
+        released_delta_counts: [512, -512, 0, 0],
     }
 }
 
@@ -429,21 +426,21 @@ fn main() {
                     );
                     server.respond(&sdo_write_response_frame(correlation_id, &resp));
                 }
-                Command::SyncPair {
+                Command::SyncRelease {
                     correlation_id,
                     msg,
                 } => {
-                    // Single-slave stub: simulate a full pair sync so host
+                    // Single-slave stub: simulate a full release so host
                     // plumbing can be exercised end-to-end. Baseline torque
                     // is the SDO-injected 0x6077 value (same knob as the
                     // sensorless tests).
                     let resp = if gate.state() != TorqueState::Enabled {
-                        SyncPairResponse {
+                        SyncReleaseResponse {
                             result: ERR_SYNC_NOT_ENABLED,
                             ..sim_sync_response(0)
                         }
                     } else if !ring.is_empty() {
-                        SyncPairResponse {
+                        SyncReleaseResponse {
                             result: ERR_SYNC_STREAMING,
                             ..sim_sync_response(0)
                         }
@@ -451,10 +448,10 @@ fn main() {
                         sim_sync_response(sim_torque)
                     };
                     eprintln!(
-                        "ec-rt-stub: SyncPair axis={} torque_ok={} -> result={}",
-                        msg.axis, msg.torque_ok_tenth_pct, resp.result
+                        "ec-rt-stub: SyncRelease slot_mask=0x{:02x} torque_ok={} -> result={}",
+                        msg.slot_mask, msg.torque_ok_tenth_pct, resp.result
                     );
-                    server.respond(&sync_pair_response_frame(correlation_id, &resp));
+                    server.respond(&sync_release_response_frame(correlation_id, &resp));
                 }
                 Command::StartCapture {
                     correlation_id,
