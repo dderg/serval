@@ -81,6 +81,28 @@ fn app_js_defines_the_differential_frf_functions() {
     }
 }
 
+/// Same contract for the tracking-metrics table (the gains/dynamics pages'
+/// view on results.json's per-drive overshoot/settle/torque metrics) and
+/// the console template that launches the tracking run those metrics come
+/// from.
+#[test]
+fn app_js_defines_the_tracking_metrics_functions() {
+    let required = [
+        "function driveMoveSummary(",
+        "function settleCellHtml(",
+        "function torqueCellHtml(",
+        "function metricsTableRows(",
+        "function renderMetricsTable(",
+        "SERVO_MEASURE_TRACKING",
+    ];
+    for needle in required {
+        assert!(
+            APP_JS.contains(needle),
+            "app.js must define {needle} — the tracking metrics table"
+        );
+    }
+}
+
 /// Same contract for the strain-map tab: the grouping, colormap, heatmap,
 /// and profile/DC rendering stay grep-able function declarations in the
 /// served asset, and the tab's data source stays the strain endpoint.
