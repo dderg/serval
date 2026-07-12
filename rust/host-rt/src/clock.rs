@@ -8,6 +8,9 @@
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+pub mod domains;
+pub use domains::{HostSecs, PrintTime};
+
 /// Read CLOCK_MONOTONIC_RAW and return the value as seconds since an arbitrary
 /// but stable epoch.
 ///

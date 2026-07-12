@@ -170,6 +170,9 @@ impl<S: SegmentSink> Dispatcher<S> {
             Control::Dwell { secs } => {
                 if let Some(t) = &mut self.dispatched_through {
                     *t += secs;
+                    self.links
+                        .last_move_time_bits
+                        .store(t.to_bits(), Ordering::Release);
                 }
             }
             Control::Nudge { mcu_id, pieces } => self.handle_nudge(mcu_id, &pieces),

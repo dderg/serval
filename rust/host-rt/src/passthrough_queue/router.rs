@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use indexmap::IndexMap;
 
-use crate::clock::{Clock, instant_to_f64};
+use crate::clock::{Clock, HostSecs, PrintTime, instant_to_f64};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct McuHandle(u32);
@@ -35,9 +35,16 @@ impl std::error::Error for RouterError {}
 
 #[derive(Debug)]
 struct McuRecord {
+    /// Measured ticks-per-host-second from the clocksync regression; drifts
+    /// around the nominal frequency by ppm. Used to extrapolate what the
+    /// MCU's clock reads at a host instant — never to define print_time.
     clock_freq: f64,
     clock_offset: f64,
     last_clock: u64,
+    /// The datasheet CLOCK_FREQ. `print_time` is defined as
+    /// `clock / nominal_freq`, so converting through the regression frequency
+    /// instead accumulates ppm × uptime of error (seconds after hours).
+    nominal_freq: f64,
 }
 
 pub struct PassthroughRouter {
@@ -73,9 +80,19 @@ impl PassthroughRouter {
                 clock_freq: 0.0,
                 clock_offset: 0.0,
                 last_clock: 0,
+                nominal_freq: 0.0,
             },
         );
         handle
+    }
+
+    pub fn set_nominal_freq(&mut self, mcu: McuHandle, freq_hz: f64) -> Result<(), RouterError> {
+        let rec = self
+            .mcus
+            .get_mut(&mcu)
+            .ok_or(RouterError::UnknownMcu(mcu))?;
+        rec.nominal_freq = freq_hz;
+        Ok(())
     }
 
     pub fn release_mcu(&mut self, handle: McuHandle) {
@@ -245,6 +262,31 @@ impl PassthroughRouter {
         instant_to_f64(self.clock.now())
     }
 
+    /// The scheduling timeline (`print_time ≡ clock / nominal_freq`) at a
+    /// host instant, from the reference MCU's record: the regression
+    /// extrapolates what the clock reads at `host`, the nominal frequency
+    /// names that tick count in print_time seconds. Only the MCU whose clock
+    /// defines the timeline (the primary) gives a meaningful answer. `None`
+    /// until both a clock estimate and the nominal frequency are set.
+    pub fn print_time_at_host(
+        &self,
+        reference_mcu: McuHandle,
+        host: HostSecs,
+    ) -> Option<PrintTime> {
+        let rec = self.mcus.get(&reference_mcu)?;
+        if rec.clock_freq <= 0.0 || rec.nominal_freq <= 0.0 {
+            return None;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let clock = (rec.last_clock as f64) + (host.get() - rec.clock_offset) * rec.clock_freq;
+        Some(PrintTime::new(clock / rec.nominal_freq))
+    }
+
+    /// [`Self::print_time_at_host`] at this instant, from one clock read.
+    pub fn print_time_now(&self, reference_mcu: McuHandle) -> Option<PrintTime> {
+        self.print_time_at_host(reference_mcu, HostSecs::from_instant(self.clock.now()))
+    }
+
     pub fn clock_to_host_secs(&self, mcu: McuHandle, mcu_clock: u64) -> Option<f64> {
         let rec = self.mcus.get(&mcu)?;
         if rec.clock_freq == 0.0 {
@@ -255,17 +297,21 @@ impl PassthroughRouter {
         Some(rec.clock_offset + delta_ticks / rec.clock_freq)
     }
 
+    /// Inverse of [`Self::print_time_at_host`]: `print_time` names a tick
+    /// count via the nominal frequency; the regression places that tick on
+    /// the host clock.
     pub fn print_time_to_host_secs(
         &self,
         reference_mcu: McuHandle,
         print_time: f64,
     ) -> Option<f64> {
         let rec = self.mcus.get(&reference_mcu)?;
-        if rec.clock_freq == 0.0 {
+        if rec.clock_freq <= 0.0 || rec.nominal_freq <= 0.0 {
             return None;
         }
         #[allow(clippy::cast_precision_loss)]
-        Some(rec.clock_offset + print_time - (rec.last_clock as f64) / rec.clock_freq)
+        let clock = print_time * rec.nominal_freq;
+        Some(rec.clock_offset + (clock - rec.last_clock as f64) / rec.clock_freq)
     }
 
     pub fn host_time_to_mcu_clock(

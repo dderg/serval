@@ -209,6 +209,7 @@ fn print_time_to_host_secs_matches_clock_conversion() {
     router
         .set_clock_est(mcu, 1_000_000.0, base_host, 10_000_000)
         .unwrap();
+    router.set_nominal_freq(mcu, 1_000_000.0).unwrap();
 
     let via_print_time = router.print_time_to_host_secs(mcu, 11.5).unwrap();
     let via_clock = router.clock_to_host_secs(mcu, 11_500_000).unwrap();
@@ -255,14 +256,260 @@ fn wall_time_at_mcu_no_record_returns_none() {
 fn correction_anchor_round_trips_print_time_to_mcu_clock() {
     let (mut router, _) = make_router();
     let mcu = router.claim_mcu("mcu");
-    let freq = 48_000_000.0;
+    let nominal = 48_000_000.0;
+    let regression = 48_000_048.0; // 1 ppm off from nominal — must not be conflated.
     let offset = 5.0;
     let last_clock = 1_000_000u64;
-    router.set_clock_est(mcu, freq, offset, last_clock).unwrap();
+    router
+        .set_clock_est(mcu, regression, offset, last_clock)
+        .unwrap();
+    router.set_nominal_freq(mcu, nominal).unwrap();
     let glmt_print_time = 7.5;
     let host = router
         .print_time_to_host_secs(mcu, glmt_print_time)
         .unwrap();
     let clock = router.host_time_to_mcu_clock(mcu, host).unwrap();
-    assert_eq!(clock, (glmt_print_time * freq) as u64);
+    // Klipper defines print_time_to_clock as pt * nominal CLOCK_FREQ
+    // (klippy/clocksync.py:181); the regression frequency used along the way
+    // must cancel out, not leak into the target tick count.
+    let expected = (glmt_print_time * nominal) as u64;
+    let diff = (clock as i64 - expected as i64).unsigned_abs();
+    assert!(
+        diff <= 1,
+        "clock target must track the nominal frequency, not the drifted \
+         regression: clock={clock} expected={expected} diff={diff}"
+    );
+}
+
+#[test]
+fn print_time_at_host_matches_hand_computed_case_after_offset() {
+    let (mut router, _) = make_router();
+    let mcu = router.claim_mcu("mcu");
+    // Regression (clock_freq) and nominal (datasheet) frequencies deliberately
+    // differ so conflating them would be caught.
+    router
+        .set_clock_est(mcu, 1_000_000.0, 100.0, 5_000_000)
+        .unwrap();
+    router.set_nominal_freq(mcu, 2_000_000.0).unwrap();
+
+    // clock = last_clock + (host - offset) * clock_freq
+    //       = 5_000_000 + 1.0 * 1_000_000 = 6_000_000
+    // print_time = clock / nominal_freq = 6_000_000 / 2_000_000 = 3.0
+    let pt = router
+        .print_time_at_host(mcu, HostSecs::from_anchor_frame(101.0))
+        .unwrap();
+    assert!(
+        (pt.get() - 3.0).abs() < 1e-9,
+        "expected print_time 3.0, got {}",
+        pt.get()
+    );
+}
+
+#[test]
+fn print_time_at_host_second_hand_computed_case() {
+    let (mut router, _) = make_router();
+    let mcu = router.claim_mcu("mcu");
+    // Swap which of the two frequencies is larger versus the first case, so
+    // a test that only worked by accident (e.g. using max/min) would fail.
+    router
+        .set_clock_est(mcu, 2_000_000.0, 50.0, 3_000_000)
+        .unwrap();
+    router.set_nominal_freq(mcu, 1_000_000.0).unwrap();
+
+    // clock = 3_000_000 + (52.0 - 50.0) * 2_000_000 = 7_000_000
+    // print_time = 7_000_000 / 1_000_000 = 7.0
+    let pt = router
+        .print_time_at_host(mcu, HostSecs::from_anchor_frame(52.0))
+        .unwrap();
+    assert!(
+        (pt.get() - 7.0).abs() < 1e-9,
+        "expected print_time 7.0, got {}",
+        pt.get()
+    );
+}
+
+#[test]
+fn print_time_at_host_before_offset_goes_negative_without_clamping() {
+    let (mut router, _) = make_router();
+    let mcu = router.claim_mcu("mcu");
+    router
+        .set_clock_est(mcu, 1_000_000.0, 100.0, 4_000_000)
+        .unwrap();
+    router.set_nominal_freq(mcu, 500_000.0).unwrap();
+
+    // host precedes offset by 10s:
+    // clock = 4_000_000 + (-10.0) * 1_000_000 = -6_000_000
+    // print_time = -6_000_000 / 500_000 = -12.0 — the projection must NOT
+    // clamp to last_clock/nominal_freq (8.0).
+    let pt = router
+        .print_time_at_host(mcu, HostSecs::from_anchor_frame(90.0))
+        .unwrap();
+    assert!(
+        (pt.get() - (-12.0)).abs() < 1e-9,
+        "expected print_time -12.0 (host before offset must not clamp), got {}",
+        pt.get()
+    );
+    assert!(
+        pt.get() < 4_000_000.0 / 500_000.0,
+        "print_time must go below last_clock/nominal_freq when host precedes offset, got {}",
+        pt.get()
+    );
+}
+
+#[test]
+fn print_time_at_host_clock_est_set_but_nominal_missing_returns_none() {
+    let (mut router, _) = make_router();
+    let mcu = router.claim_mcu("mcu");
+    router.set_clock_est(mcu, 1_000_000.0, 0.0, 0).unwrap();
+    assert!(
+        router
+            .print_time_at_host(mcu, HostSecs::from_anchor_frame(1.0))
+            .is_none(),
+        "clock est set but nominal_freq never set must return None"
+    );
+}
+
+#[test]
+fn print_time_at_host_nominal_set_but_clock_est_missing_returns_none() {
+    let (mut router, _) = make_router();
+    let mcu = router.claim_mcu("mcu");
+    router.set_nominal_freq(mcu, 1_000_000.0).unwrap();
+    assert!(
+        router
+            .print_time_at_host(mcu, HostSecs::from_anchor_frame(1.0))
+            .is_none(),
+        "nominal_freq set but clock est never set (clock_freq == 0) must return None"
+    );
+}
+
+#[test]
+fn print_time_now_equals_print_time_at_host_of_mock_now() {
+    let (mut router, clock) = make_router();
+    let mcu = router.claim_mcu("mcu");
+    let base_host = instant_to_f64(clock.now());
+    router
+        .set_clock_est(mcu, 1_000_000.0, base_host, 10_000_000)
+        .unwrap();
+    router.set_nominal_freq(mcu, 1_000_000.0).unwrap();
+
+    let now_hs = HostSecs::from_instant(clock.now());
+    let via_now = router.print_time_now(mcu).unwrap();
+    let via_at_host = router.print_time_at_host(mcu, now_hs).unwrap();
+    assert!(
+        (via_now.get() - via_at_host.get()).abs() < 1e-9,
+        "print_time_now must equal print_time_at_host(now): via_now={} via_at_host={}",
+        via_now.get(),
+        via_at_host.get()
+    );
+}
+
+#[test]
+fn print_time_now_advances_by_exactly_the_clock_advance() {
+    let (mut router, clock) = make_router();
+    let mcu = router.claim_mcu("mcu");
+    let base_host = instant_to_f64(clock.now());
+    // No drift here (clock_freq == nominal_freq): advancing the host clock by
+    // D must advance print_time by exactly D.
+    router
+        .set_clock_est(mcu, 1_000_000.0, base_host, 10_000_000)
+        .unwrap();
+    router.set_nominal_freq(mcu, 1_000_000.0).unwrap();
+
+    let before = router.print_time_now(mcu).unwrap();
+    clock.advance(Duration::from_millis(1500));
+    let after = router.print_time_now(mcu).unwrap();
+
+    let delta = after.get() - before.get();
+    assert!(
+        (delta - 1.5).abs() < 1e-9,
+        "print_time_now must advance by exactly the mock clock advance: delta={delta}"
+    );
+}
+
+#[test]
+fn print_time_at_host_zero_freq_returns_none() {
+    let (mut router, _) = make_router();
+    let mcu = router.claim_mcu("mcu");
+    assert!(
+        router
+            .print_time_at_host(mcu, HostSecs::from_anchor_frame(1.0))
+            .is_none(),
+        "freq == 0 (no estimate yet) must return None"
+    );
+}
+
+#[test]
+fn print_time_now_zero_freq_returns_none() {
+    let (mut router, _) = make_router();
+    let mcu = router.claim_mcu("mcu");
+    assert!(
+        router.print_time_now(mcu).is_none(),
+        "freq == 0 (no estimate yet) must return None"
+    );
+}
+
+#[test]
+fn print_time_at_host_unknown_mcu_returns_none() {
+    let (router, _) = make_router();
+    assert!(
+        router
+            .print_time_at_host(McuHandle::from_raw(999), HostSecs::from_anchor_frame(1.0))
+            .is_none()
+    );
+}
+
+#[test]
+fn print_time_now_unknown_mcu_returns_none() {
+    let (router, _) = make_router();
+    assert!(router.print_time_now(McuHandle::from_raw(999)).is_none());
+}
+
+#[test]
+fn print_time_at_host_consistency_with_print_time_now() {
+    let (mut router, clock) = make_router();
+    let mcu = router.claim_mcu("mcu");
+    let base_host = instant_to_f64(clock.now());
+    // No drift here: the two frequencies match, so the offsets cancel exactly
+    // and print_time advances 1:1 with host time.
+    router
+        .set_clock_est(mcu, 3_000_000.0, base_host, 7_000_000)
+        .unwrap();
+    router.set_nominal_freq(mcu, 3_000_000.0).unwrap();
+
+    let now = router.print_time_now(mcu).unwrap();
+    let now_secs = instant_to_f64(clock.now());
+
+    for h_delta in [-5.0_f64, -0.001, 0.0, 0.001, 5.0, 123.456] {
+        let h = HostSecs::from_anchor_frame(now_secs + h_delta);
+        let pt = router.print_time_at_host(mcu, h).unwrap();
+        let diff = pt.get() - now.get();
+        assert!(
+            (diff - h_delta).abs() < 1e-9,
+            "print_time_at_host(h) - print_time_now() must equal h - now within 1e-9: \
+             h_delta={h_delta} diff={diff}"
+        );
+    }
+}
+
+#[test]
+fn print_time_round_trips_through_host_secs_with_regression_drift() {
+    let (mut router, _) = make_router();
+    let mcu = router.claim_mcu("mcu");
+    let nominal = 400_000_000.0;
+    let regression = 400_000_400.0; // 1 ppm high — must not be conflated with nominal.
+    router.set_clock_est(mcu, regression, 10.0, 0).unwrap();
+    router.set_nominal_freq(mcu, nominal).unwrap();
+
+    for pt in [0.0_f64, 1.0, 10.5, 123.456] {
+        let host = router.print_time_to_host_secs(mcu, pt).unwrap();
+        let back = router
+            .print_time_at_host(mcu, HostSecs::from_anchor_frame(host))
+            .unwrap();
+        assert!(
+            (back.get() - pt).abs() < 1e-6,
+            "round trip must recover print_time through the drifted regression \
+             frequency, not the nominal one: pt={pt} back={}",
+            back.get()
+        );
+    }
 }

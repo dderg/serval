@@ -3,6 +3,8 @@ use super::{
     collect_motor_positions_inner, planner_err, pymethods,
 };
 use crate::lock_ext::LockExt;
+use crate::types::mcu_handle_from_raw;
+use host_rt::clock::{HostSecs, PrintTime};
 
 #[pymethods]
 impl PyMotionEngine {
@@ -185,23 +187,65 @@ impl PyMotionEngine {
             Err(e) => Err(planner_err(e)),
         }
     }
-    /// `None` while pending; once resolved, the seconds from now until the
-    /// fenced motion ends (0.0 when the stream was reset or already idle).
-    /// Consumes the resolution.
-    fn fence_poll(&self, id: u64) -> Option<f64> {
+    /// `None` while the fence is pending; once resolved, the absolute
+    /// print_time at which everything submitted before the fence ends —
+    /// the fenced trajectory's end projected through the same clock record
+    /// the pump schedules pieces with. An idle or reset stream resolves to
+    /// now. Consumes the resolution. Not floored: callers that schedule MCU
+    /// commands against this apply their own scheduling floor
+    /// (`Motion._schedule_floor`).
+    ///
+    /// Absolute results are the authority's contract: a "seconds from now"
+    /// lead decays between the instant it is computed and the instant the
+    /// caller adds its own "now" to it, and the two nows never match.
+    fn fence_print_time_poll(&self, id: u64, mcu_handle: u32) -> PyResult<Option<f64>> {
         let taken = {
             let guard = self.planner.lock_ok();
-            guard.as_ref()?.fence_take(id)
-        }?;
-        let Some(t_end) = taken else {
-            return Some(0.0);
+            let planner = guard.as_ref().ok_or_else(|| {
+                PyRuntimeError::new_err("planner not initialized — call init_planner first")
+            })?;
+            planner.fence_take(id)
         };
-        let anchored = self.dispatch_anchor.lock_ok().t0();
-        let Some(t0) = anchored else {
-            return Some(0.0);
+        let Some(fenced_end) = taken else {
+            return Ok(None);
         };
-        let host_now = self.router.lock_ok().host_now_secs();
-        Some((t0 + t_end - host_now).max(0.0))
+        let t0 = self.dispatch_anchor.lock_ok().t0();
+        Ok(Some(self.timeline_end_print_time(
+            mcu_handle,
+            fenced_end,
+            t0,
+            "fence_print_time_poll",
+        )?))
+    }
+
+    /// Absolute print_time at which everything committed to the MCUs ends —
+    /// segments, dwells, and nudges alike. This is the engine's own frontier;
+    /// it replaces the host-side shadow clock that used to approximate it.
+    /// The value sits in the past while the printer is idle — deliberately:
+    /// idle detection measures `est_now − frontier`, so flooring it to now
+    /// would keep the printer "busy" forever. Schedulers floor it themselves.
+    /// Cheap: two atomics and one clock read.
+    fn frontier_print_time(&self, mcu_handle: u32) -> PyResult<f64> {
+        let last_move_time = {
+            let guard = self.planner.lock_ok();
+            let planner = guard.as_ref().ok_or_else(|| {
+                PyRuntimeError::new_err("planner not initialized — call init_planner first")
+            })?;
+            planner.last_move_time()
+        };
+        let t0 = self.dispatch_anchor.lock_ok().t0();
+        self.timeline_end_print_time(mcu_handle, Some(last_move_time), t0, "frontier_print_time")
+    }
+
+    /// Estimated print_time at this instant, from the router's clock record
+    /// for `mcu_handle` — the same record the pump projects pieces with.
+    /// `None` until a clock estimate is established. Meaningful only for the
+    /// MCU whose clock defines the print_time timeline (the primary).
+    fn print_time_now(&self, mcu_handle: u32) -> Option<f64> {
+        self.router
+            .lock_ok()
+            .print_time_now(mcu_handle_from_raw(mcu_handle))
+            .map(PrintTime::get)
     }
     fn get_last_move_time(&self) -> f64 {
         match self.planner.lock_ok().as_ref() {
@@ -261,6 +305,39 @@ impl PyMotionEngine {
 }
 
 impl PyMotionEngine {
+    /// Project a stream-time end onto the print_time timeline: `t0 +
+    /// stream_end` in the anchor's host frame, converted through the router's
+    /// record for `mcu_handle` — all against one clock read, so no caller
+    /// ever composes an absolute time from two different nows. The result is
+    /// NOT floored to now; an ended timeline reports the past honestly.
+    ///
+    /// A `stream_end` of exactly 0.0 is the dispatcher's "nothing dispatched
+    /// on this timeline" state (a real segment always ends past 0.0), and a
+    /// reset leaves the anchor's `t0` pointing at the abandoned timeline —
+    /// both mean the committed timeline holds no motion, so its end is now.
+    fn timeline_end_print_time(
+        &self,
+        mcu_handle: u32,
+        stream_end: Option<f64>,
+        t0: Option<f64>,
+        what: &str,
+    ) -> PyResult<f64> {
+        let mcu = mcu_handle_from_raw(mcu_handle);
+        let router = self.router.lock_ok();
+        let now = router.print_time_now(mcu).ok_or_else(|| {
+            PyRuntimeError::new_err(format!(
+                "{what}: no clock estimate established for mcu_handle {mcu_handle}"
+            ))
+        })?;
+        let pt = match (stream_end, t0) {
+            (Some(end), Some(t0)) if end > 0.0 => router
+                .print_time_at_host(mcu, HostSecs::from_anchor_frame(t0 + end))
+                .expect("print_time_now succeeded against the same record"),
+            _ => now,
+        };
+        Ok(pt.get())
+    }
+
     /// Live/queried motor states are machine space; every Python consumer
     /// compares them against gcode-space toolhead positions, so the Z lane
     /// crosses through the active mesh here (position via the exact inverse,
