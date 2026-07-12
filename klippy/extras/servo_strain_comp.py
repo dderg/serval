@@ -442,8 +442,10 @@ class ServoStrainComp:
         zero_xy = payload.get("zero_xy")
         if zero_xy:
             gcmd.respond_info(
-                "map zero point is (%.1f, %.1f) — for a clean DC, "
-                "SERVO_SYNC there with the compensation enabled"
+                "map zero point is (%.1f, %.1f) — any torque release "
+                "(SERVO_SYNC, M84, idle timeout) re-anchors the map where "
+                "torque returns; SERVO_SYNC at the zero point restores the "
+                "calibrated anchor and the best accuracy"
                 % (zero_xy[0], zero_xy[1])
             )
         if by_motors:
@@ -717,7 +719,21 @@ def _merge_offsets(gcmd, grid, delta_offsets, base):
             "merged compensation would need %d um (max %d) — the maps are "
             "fighting each other, rebuild from scratch" % (worst, MAX_OFFSET_UM)
         )
+    _check_span(gcmd, merged)
     return merged
+
+
+def _check_span(gcmd, offsets):
+    """The endpoint re-anchors the map wherever torque returns after a
+    release, so the applied offset can reach the map's full span — the span,
+    not just each value, must fit the offset budget."""
+    span = max(offsets) - min(offsets)
+    if span > MAX_OFFSET_UM:
+        raise gcmd.error(
+            "compensation spans %d um (max %d) — re-anchoring after a "
+            "torque release could exceed the offset budget"
+            % (span, MAX_OFFSET_UM)
+        )
 
 
 def _grid_value_at(grid, x, y):
@@ -750,6 +766,7 @@ def _offsets_from_grid(gcmd, grid, stiffness_pct_per_mm):
             "is implausibly low or the strain field is out of range"
             % (worst, MAX_OFFSET_UM, stiffness_pct_per_mm)
         )
+    _check_span(gcmd, offsets)
     return offsets
 
 

@@ -186,9 +186,26 @@ pair's two drives by equal and opposite amounts — the rotors absorb the
 position-dependent tension variation (belt thickness lumps, pitch
 nonuniformity, frame geometry) instead of fighting through the belt,
 while the carriage never moves. Offsets ride outside the command anchors
-(like the differential trim's), are clamped to ±500 µm and slew-limited
-to 1 mm/s, so enabling, replacing, or clearing a map can never yank the
+(like the differential trim's), are clamped to ±500 µm (the grid's span
+too, since re-anchoring can apply the full span) and slew-limited to
+1 mm/s, so enabling, replacing, or clearing a map can never yank the
 targets.
+
+**Re-anchoring.** The map's DC follows the mechanics. Whenever torque
+drops — SERVO_SYNC, M84, idle timeout — the free rotors relax the pair's
+differential strain at wherever the carriage sits, including a hand-move
+while unpowered, so the position where torque returns is the new
+physical zero. The endpoint re-anchors the map there automatically: it
+samples the grid at the re-engage position and applies everything
+relative to that value, so a freshly relaxed gantry is never re-racked
+and jogging after an idle timeout just works. The accepted limitation:
+the map's residual error is then measured from the re-engage position
+instead of the calibrated zero, so an anchor at a field extreme can
+roughly double the worst-case residual. When accuracy matters — before a
+print, before measuring a residual strain map (`MERGE=1`) — run
+SERVO_SYNC at the map's zero point to restore the calibrated anchor;
+nothing does this for you. The live anchor bias is visible in the
+`strain_comp_state` event (`anchor_bias_um`).
 
 The workflow: (1) `SERVO_MEASURE_PAIR_STIFFNESS` steps a constant
 antisymmetric offset (a 1×1 grid) through the same mechanism and reads
