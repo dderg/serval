@@ -6,7 +6,8 @@ use mcu_protocol::messages::{
     ArmSensorlessEndstop, ArmSensorlessEndstopResponse, MessageKind, ResonanceBuzz,
     ResonanceBuzzResponse, RestoreDriveLimits, RestoreDriveLimitsResponse, SeedServoHome,
     SeedServoHomeResponse, SetDiffDamper, SetDiffDamperResponse, SetDiffTrim, SetDiffTrimResponse,
-    SetDriveLimits, SetDriveLimitsResponse, SetTorque, SetTorqueResponse, StopResponse,
+    SetDriveLimits, SetDriveLimitsResponse, SetStrainComp, SetStrainCompResponse, SetTorque,
+    SetTorqueResponse, StopResponse,
 };
 
 use crate::servo_call::mcu_typed_call;
@@ -173,6 +174,21 @@ pub fn send_set_diff_trim(conn: &McuSerialConn, trim: SetDiffTrim) -> Result<i32
         MessageKind::SetDiffTrimResponse,
         body,
         SET_DIFF_TRIM_TIMEOUT,
+    )?;
+    Ok(r.result)
+}
+
+const SET_STRAIN_COMP_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub fn send_set_strain_comp(conn: &McuSerialConn, comp: SetStrainComp) -> Result<i32, String> {
+    let body = comp.encoded_to_vec();
+    let r: SetStrainCompResponse = mcu_typed_call(
+        conn,
+        "SetStrainComp",
+        MessageKind::SetStrainComp,
+        MessageKind::SetStrainCompResponse,
+        body,
+        SET_STRAIN_COMP_TIMEOUT,
     )?;
     Ok(r.result)
 }

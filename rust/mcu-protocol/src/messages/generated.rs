@@ -61,6 +61,8 @@ pub enum MessageKind {
     StatusHeartbeat = 0x0083,
     McuLog = 0x0084,
     EndstopTrip = 0x0085,
+    SetStrainComp = 0x0086,
+    SetStrainCompResponse = 0x0087,
     SetDiffDamper = 0x0088,
     SetDiffDamperResponse = 0x0089,
     SetDiffTrim = 0x008A,
@@ -110,6 +112,8 @@ impl MessageKind {
             0x0083 => Self::StatusHeartbeat,
             0x0084 => Self::McuLog,
             0x0085 => Self::EndstopTrip,
+            0x0086 => Self::SetStrainComp,
+            0x0087 => Self::SetStrainCompResponse,
             0x0088 => Self::SetDiffDamper,
             0x0089 => Self::SetDiffDamperResponse,
             0x008A => Self::SetDiffTrim,
@@ -819,6 +823,25 @@ impl Decode for EndstopTrip {
         Ok(Self {
             endstop_id: get_u8(c)?,
             trip_clock: get_u64(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetStrainCompResponse {
+    pub result: i32,
+}
+
+impl Encode for SetStrainCompResponse {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_i32(out, self.result);
+    }
+}
+
+impl Decode for SetStrainCompResponse {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            result: get_i32(c)?,
         })
     }
 }

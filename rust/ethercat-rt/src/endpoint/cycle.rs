@@ -152,8 +152,10 @@ pub(super) fn compute_motion_targets(
         eprintln!("ec-rt: buzz cleared — torque gate left Enabled mid-buzz");
     }
     if ctx.gate.state() == TorqueState::Enabled {
-        let sp_counts = sample_slot_targets(ctx, apply_time, &mut all_acc, &mut all_vel);
-        motion_active = emit_slot_commands(ctx, &sp_counts, &all_acc, &all_vel);
+        let mut lane_mm = vec![None; num_slaves];
+        let sp_counts =
+            sample_slot_targets(ctx, apply_time, &mut all_acc, &mut all_vel, &mut lane_mm);
+        motion_active = emit_slot_commands(ctx, &sp_counts, &lane_mm, &all_acc, &all_vel);
     } else {
         ctx.damper.reset_filters();
         ctx.trim.reset();
@@ -171,6 +173,7 @@ fn sample_slot_targets(
     apply_time: u64,
     all_acc: &mut [f32],
     all_vel: &mut [f32],
+    lane_mm: &mut [Option<f64>],
 ) -> Vec<Option<i32>> {
     let num_slaves = ctx.num_slaves;
     let mut sp_counts: Vec<Option<i32>> = vec![None; num_slaves];
@@ -217,6 +220,7 @@ fn sample_slot_targets(
                     commanded_anchor.unwrap_or_else(|| ctx.drive.position_actual(s));
                 CountMap::new(cpm, anchor_counts, f64::from(pos_mm))
             });
+            lane_mm[s] = Some(f64::from(pos_mm));
             Some((map.target_counts(f64::from(pos_mm)), vel_mm_s, acc_mm_s2))
         } else {
             None
@@ -306,9 +310,27 @@ fn trim_offset_counts(ctx: &mut EndpointCtx, sp_counts: &[Option<i32>]) -> Vec<i
     counts
 }
 
+// The strain compensation is feedforward on the COMMANDED carriage position:
+// a per-pair antisymmetric offset interpolated from the calibrated map. Like
+// the trim it stays out of last_counts / last_streamed_target so a sync or
+// re-anchor never bakes a live offset in.
+fn comp_offset_counts(ctx: &mut EndpointCtx, lane_mm: &[Option<f64>]) -> Vec<i32> {
+    let mut counts = vec![0i32; ctx.num_slaves];
+    if !ctx.comp.active() {
+        return counts;
+    }
+    let mut offset_mm = vec![0f64; ctx.num_slaves];
+    ctx.comp.update(lane_mm, &ctx.slave_axes, &mut offset_mm);
+    for s in 0..ctx.num_slaves {
+        counts[s] = (offset_mm[s] * ctx.cmd_counts_per_mm[s]).round() as i32;
+    }
+    counts
+}
+
 fn emit_slot_commands(
     ctx: &mut EndpointCtx,
     sp_counts: &[Option<i32>],
+    lane_mm: &[Option<f64>],
     all_acc: &[f32],
     all_vel: &[f32],
 ) -> bool {
@@ -316,6 +338,7 @@ fn emit_slot_commands(
     let mut motion_active = false;
     let damper_tenths = damper_torque_tenths(ctx);
     let trim_counts = trim_offset_counts(ctx, sp_counts);
+    let comp_counts = comp_offset_counts(ctx, lane_mm);
     // The dynamics profile is fitted in the drive frame (the capture
     // flips each drive's commanded kinematics by its direction sign),
     // so the model must be evaluated on drive-frame vectors — flipping
@@ -368,8 +391,12 @@ fn emit_slot_commands(
             }
             ctx.last_counts[s] = Some(counts);
             ctx.last_streamed_target[s] = Some(counts);
-            ctx.drive
-                .set_target_position(s, counts.wrapping_add(trim_counts[s]));
+            ctx.drive.set_target_position(
+                s,
+                counts
+                    .wrapping_add(trim_counts[s])
+                    .wrapping_add(comp_counts[s]),
+            );
             ctx.drive.set_velocity_offset(s, vel_offset);
             ctx.drive.set_torque_offset(s, torque_offset);
             motion_active = true;

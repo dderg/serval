@@ -282,6 +282,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
     let buzz = BuzzOsc::new();
     let damper = DiffDamperBank::new(cycle_ns);
     let trim = DiffTrimBank::new(cycle_ns);
+    let comp = crate::strain_comp::StrainCompBank::new(cycle_ns);
     let cmaps: Vec<Option<CountMap>> = (0..num_slaves).map(|_| None).collect();
     let last_counts: Vec<Option<i32>> = vec![None; num_slaves];
     // Per-slot report frame: (counts, host mm) captured at the homing finalize.
@@ -490,6 +491,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
         buzz,
         damper,
         trim,
+        comp,
         cmaps,
         last_counts,
         report_anchor,

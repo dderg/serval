@@ -176,6 +176,37 @@ run directory is charted by the dashboard's strain tab. Params: `SPEED`
 (50) `ACCEL` (1000) `LINE_SPACING` (10) `X_START` `X_END` `Y_START`
 `Y_END` `DWELL_MS` `TAG` (strain) `SYNC` (1).
 
+#### Strain compensation (SERVO_MEASURE_PAIR_STIFFNESS / SERVO_STRAIN_COMP_BUILD / SERVO_STRAIN_COMP)
+The application half of the strain map, config section
+`[servo_strain_comp]`. The endpoint carries a per-belt 2D lookup table of
+**antisymmetric position offsets** keyed on the commanded carriage
+position: every cycle it reconstructs (x, y) from the streamed lane
+positions, bilinearly interpolates each belt's grid, and offsets the
+pair's two drives by equal and opposite amounts — the rotors absorb the
+position-dependent tension variation (belt thickness lumps, pitch
+nonuniformity, frame geometry) instead of fighting through the belt,
+while the carriage never moves. Offsets ride outside the command anchors
+(like the differential trim's), are clamped to ±500 µm and slew-limited
+to 1 mm/s, so enabling, replacing, or clearing a map can never yank the
+targets.
+
+The workflow: (1) `SERVO_MEASURE_PAIR_STIFFNESS` steps a constant
+antisymmetric offset (a 1×1 grid) through the same mechanism and reads
+the differential torque response over SDO 0x6077 — the fitted slope
+(%/mm) is the pair stiffness, and a poor fit (R² < 0.9) fails loudly.
+(2) `SERVO_STRAIN_COMP_BUILD RUN=<dir>` grids the run's elastic
+differential field per belt (each raster line's dense profile evaluated
+at the grid nodes it crosses), zeroes the map at the region center
+(SERVO_SYNC's zero point), divides by the stiffness, and writes
+`map_file` (default `~/printer_data/config/strain_comp.json`).
+(3) `SERVO_STRAIN_COMP ENABLE=1` resolves the map's motor names to
+slots/lanes on the live topology and uploads it; `ENABLE=0` ramps the
+compensation back out. Verify by re-running the strain map with the
+compensation enabled — the residual field should collapse. Params:
+stiffness `STEP_UM` (50) `SETTLE` (0.8) `AXIS`; build `RUN` (required)
+`STIFFNESS_A`/`STIFFNESS_B` (%/mm override) `SPACING` (run's line
+spacing).
+
 #### SERVO_MEASURE_INERTIA
 Records the excitation grid for the inertia/friction fit (no report — it is the
 capture building block behind the fit commands). The active kinematics decides

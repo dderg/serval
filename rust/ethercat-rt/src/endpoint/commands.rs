@@ -9,6 +9,7 @@ use crate::curves::AXIS_RING_CAPACITY;
 use crate::mailbox::{MailboxReply, MailboxRequest};
 use crate::push_plan::plan_bundle;
 use crate::sensorless::{ERR_ARM_SENSORLESS_AMBIGUOUS_PAIR, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
+use crate::strain_comp::ERR_COMP_BAD_LANE;
 use crate::torque::{CommandAction, TorqueState, ERR_ENABLE_FAILED, ERR_PIECES_WHILE_FAULTED};
 use crate::wire::{
     arm_sensorless_endstop_response_frame, identify_response_frame, motor_state_empty_frame,
@@ -16,13 +17,14 @@ use crate::wire::{
     resonance_buzz_response_frame, restore_drive_limits_response_frame,
     resume_stream_response_frame, runtime_caps_response_frame, sdo_read_response_frame,
     sdo_write_response_frame, seed_servo_home_response_frame, set_diff_damper_response_frame,
-    set_diff_trim_response_frame, set_drive_limits_response_frame, set_torque_response_frame,
-    start_capture_response_frame, stop_capture_response_frame, stop_response_frame, Command,
+    set_diff_trim_response_frame, set_drive_limits_response_frame, set_strain_comp_response_frame,
+    set_torque_response_frame, start_capture_response_frame, stop_capture_response_frame,
+    stop_response_frame, Command,
 };
 use mcu_protocol::messages::{
     ArmSensorlessEndstop, PushPieces, ResonanceBuzz, SdoRead, SdoReadResponse, SdoWrite,
-    SdoWriteResponse, SetDiffDamper, SetDiffTrim, SetDriveLimits, SetTorque, StartCapture,
-    StopCaptureResponse,
+    SdoWriteResponse, SetDiffDamper, SetDiffTrim, SetDriveLimits, SetStrainComp, SetTorque,
+    StartCapture, StopCaptureResponse,
 };
 
 pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
@@ -139,6 +141,12 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
                 msg,
             } => {
                 handle_set_diff_trim(ctx, correlation_id, msg);
+            }
+            Command::SetStrainComp {
+                correlation_id,
+                msg,
+            } => {
+                handle_set_strain_comp(ctx, correlation_id, msg);
             }
             Command::SdoRead {
                 correlation_id,
@@ -541,6 +549,67 @@ fn handle_set_diff_trim(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDiff
     );
     ctx.server
         .respond(&set_diff_trim_response_frame(correlation_id, rc));
+}
+
+fn handle_set_strain_comp(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetStrainComp) {
+    let lane_missing = |lane: u8| !ctx.slave_axes.iter().any(|&a| a == lane);
+    let rc = if msg.nx > 0 && msg.ny > 0 && (lane_missing(msg.lane_a) || lane_missing(msg.lane_b)) {
+        eprintln!(
+            "ec-rt: SetStrainComp lanes ({}, {}) not present in slave_axes {:?}",
+            msg.lane_a, msg.lane_b, ctx.slave_axes
+        );
+        ERR_COMP_BAD_LANE
+    } else {
+        let values: Vec<i16> = msg
+            .values_um
+            .iter()
+            .map(|&v| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16)
+            .collect();
+        ctx.comp.set(
+            ctx.num_slaves,
+            msg.slot_a,
+            msg.slot_b,
+            msg.lane_a,
+            msg.lane_b,
+            msg.kinematics,
+            msg.nx,
+            msg.ny,
+            f64::from(msg.x0),
+            f64::from(msg.y0),
+            f64::from(msg.dx),
+            f64::from(msg.dy),
+            &values,
+        )
+    };
+    eprintln!(
+        "ec-rt: SetStrainComp slots=({},{}) lanes=({},{}) kin={} grid={}x{} \
+         origin=({}, {}) spacing=({}, {}) values={} rc={rc}",
+        msg.slot_a,
+        msg.slot_b,
+        msg.lane_a,
+        msg.lane_b,
+        msg.kinematics,
+        msg.nx,
+        msg.ny,
+        msg.x0,
+        msg.y0,
+        msg.dx,
+        msg.dy,
+        msg.values_um.len(),
+    );
+    tracing::info!(
+        subsystem = "ethercat",
+        event = "set_strain_comp",
+        slot_a = msg.slot_a,
+        slot_b = msg.slot_b,
+        nx = msg.nx,
+        ny = msg.ny,
+        values = msg.values_um.len(),
+        rc,
+        "strain compensation map reconfigured"
+    );
+    ctx.server
+        .respond(&set_strain_comp_response_frame(correlation_id, rc));
 }
 
 fn handle_sdo_read(ctx: &mut EndpointCtx, correlation_id: u32, msg: SdoRead) {

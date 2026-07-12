@@ -10,6 +10,7 @@ use crate::mailbox::MailboxWorker;
 use crate::scale::CountMap;
 use crate::sensorless::SensorlessBank;
 use crate::server::FrameServer;
+use crate::strain_comp::StrainCompBank;
 use crate::stream_halt::StreamHalt;
 use crate::torque::TorqueGate;
 use crate::trim::DiffTrimBank;
@@ -53,6 +54,7 @@ pub struct EndpointCtx {
     buzz: BuzzOsc,
     damper: DiffDamperBank,
     trim: DiffTrimBank,
+    comp: StrainCompBank,
     cmaps: Vec<Option<CountMap>>,
     last_counts: Vec<Option<i32>>,
     report_anchor: Vec<Option<(i32, f64)>>,

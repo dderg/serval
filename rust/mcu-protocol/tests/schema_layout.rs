@@ -12,8 +12,8 @@
 use mcu_protocol::Encode;
 use mcu_protocol::messages::{
     AxisDiag, AxisPieces, CaptureDrive, ClaimHandshakeReply, ConfigureAxes, McuLog, MotorSample,
-    MotorStateResponse, PushPieces, PushPiecesResponse, SdoReadResponse, SdoWrite, SlaveState,
-    SlaveStatus, StartCapture, StatusHeartbeat,
+    MotorStateResponse, PushPieces, PushPiecesResponse, SdoReadResponse, SdoWrite, SetStrainComp,
+    SlaveState, SlaveStatus, StartCapture, StatusHeartbeat,
 };
 
 include!("../schema_def.rs");
@@ -356,6 +356,25 @@ fn motor_state_response_matches_schema_layout() {
         ],
     };
     reference_decode("MotorStateResponse", &msg.encoded_to_vec()).unwrap();
+}
+
+#[test]
+fn set_strain_comp_matches_schema_layout() {
+    let msg = SetStrainComp {
+        slot_a: 0,
+        slot_b: 1,
+        lane_a: 0,
+        lane_b: 1,
+        kinematics: 0,
+        nx: 2,
+        ny: 2,
+        x0: 30.0,
+        y0: 30.0,
+        dx: 120.0,
+        dy: 120.0,
+        values_um: vec![-150, 40, 0, 220],
+    };
+    reference_decode("SetStrainComp", &msg.encoded_to_vec()).unwrap();
 }
 
 #[test]

@@ -491,6 +491,60 @@ impl PyMotionEngine {
         }
         Ok(())
     }
+    #[allow(clippy::too_many_arguments)]
+    fn set_strain_comp(
+        &self,
+        mcu_handle: u32,
+        slot_a: u8,
+        slot_b: u8,
+        lane_a: u8,
+        lane_b: u8,
+        kinematics: u8,
+        nx: u8,
+        ny: u8,
+        x0: f32,
+        y0: f32,
+        dx: f32,
+        dy: f32,
+        values_um: Vec<i32>,
+    ) -> PyResult<()> {
+        let conn = self.ethercat_conn(mcu_handle, "set_strain_comp")?;
+        tracing::info!(
+            subsystem = "engine",
+            event = "servo_strain_comp",
+            mcu_handle,
+            slot_a,
+            slot_b,
+            nx,
+            ny,
+            values = values_um.len(),
+            "servo strain compensation map upload"
+        );
+        let result = crate::servo_torque::send_set_strain_comp(
+            &conn,
+            mcu_protocol::messages::SetStrainComp {
+                slot_a,
+                slot_b,
+                lane_a,
+                lane_b,
+                kinematics,
+                nx,
+                ny,
+                x0,
+                y0,
+                dx,
+                dy,
+                values_um,
+            },
+        )
+        .map_err(PyRuntimeError::new_err)?;
+        if result != 0 {
+            return Err(PyRuntimeError::new_err(format!(
+                "set_strain_comp: endpoint result {result}"
+            )));
+        }
+        Ok(())
+    }
     fn set_diff_trim(
         &self,
         py: Python<'_>,

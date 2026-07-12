@@ -160,6 +160,7 @@ fn test_ctx_with_drive(name: &str, drive: TrackingLagDrive) -> EndpointCtx {
         buzz: BuzzOsc::new(),
         damper: DiffDamperBank::new(CYCLE_NS as i64),
         trim: DiffTrimBank::new(CYCLE_NS as i64),
+        comp: crate::strain_comp::StrainCompBank::new(CYCLE_NS as i64),
         cmaps: vec![None; NUM_SLAVES],
         last_counts: vec![None; NUM_SLAVES],
         report_anchor: vec![None; NUM_SLAVES],
