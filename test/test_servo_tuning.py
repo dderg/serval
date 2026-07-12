@@ -718,6 +718,71 @@ def test_tune_by_name_writes_and_records(tmp_path):
     assert any("speed_gain" in r and "600" in r for r in gcmd.responses)
 
 
+def _tmp_calibration_sections(tmp_path):
+    return {"servo_calibration": FakeCalibrationSection(str(tmp_path))}
+
+
+def test_tune_patches_drive_state_in_place(tmp_path):
+    objs, _a, _b = _two_motor_printer(
+        FakeReadEngine(_full_readback()),
+        node=FakeNode(7, slots={"motor_a": 0, "motor_b": 1}),
+        sdo_params_by_motor={"motor_b": [(0x2001, 2, 2, 550)]},
+    )
+    st = _make_full_servo_tuning(
+        objs, config_sections=_tmp_calibration_sections(tmp_path)
+    )
+    st.cmd_SERVO_DUMP_TUNING(FakeGcmd())
+    objs["motion_engine"] = FakeWriteEngine()
+    st.cmd_SERVO_TUNE(FakeGcmd(PARAM="speed_gain", VALUE=640, MOTORS="motor_a"))
+    payload = json.loads((tmp_path / "drive_state.json").read_text())
+    assert payload["motors"]["motor_a"]["C01.01"] == 640
+    assert payload["motors"]["motor_b"]["C01.01"] == 550
+    assert payload["config_pins"]["motor_b"]["C01.01"] == 550
+    st.cmd_SERVO_TUNE(FakeGcmd(PARAM="speed_gain", VALUE=700, MOTORS="motor_b"))
+    payload = json.loads((tmp_path / "drive_state.json").read_text())
+    assert payload["motors"]["motor_b"]["C01.01"] == 700
+    assert payload["config_pins"]["motor_b"]["C01.01"] == 700
+    servo_param.drain_param_writes()
+
+
+def test_tune_without_drive_state_writes_no_file(tmp_path):
+    objs, _a, _b = _two_motor_printer(FakeWriteEngine())
+    st = _make_full_servo_tuning(
+        objs, config_sections=_tmp_calibration_sections(tmp_path)
+    )
+    st.cmd_SERVO_TUNE(FakeGcmd(PARAM="speed_gain", VALUE=600, MOTORS="motor_a"))
+    assert not (tmp_path / "drive_state.json").exists()
+    servo_param.drain_param_writes()
+
+
+def test_tune_unmapped_addr_leaves_drive_state_untouched(tmp_path):
+    objs, _a, _b = _two_motor_printer(
+        FakeReadEngine(_full_readback()),
+        node=FakeNode(7, slots={"motor_a": 0, "motor_b": 1}),
+    )
+    st = _make_full_servo_tuning(
+        objs, config_sections=_tmp_calibration_sections(tmp_path)
+    )
+    st.cmd_SERVO_DUMP_TUNING(FakeGcmd())
+    before = (tmp_path / "drive_state.json").read_text()
+    objs["motion_engine"] = FakeWriteEngine()
+    st.cmd_SERVO_TUNE(FakeGcmd(PARAM="0x2005.0x03", VALUE=42, MOTORS="motor_a"))
+    assert (tmp_path / "drive_state.json").read_text() == before
+    servo_param.drain_param_writes()
+
+
+def test_tune_corrupt_drive_state_is_command_error(tmp_path):
+    (tmp_path / "drive_state.json").write_text("{not json")
+    objs, _a, _b = _two_motor_printer(FakeWriteEngine())
+    st = _make_full_servo_tuning(
+        objs, config_sections=_tmp_calibration_sections(tmp_path)
+    )
+    gcmd = FakeGcmd(PARAM="speed_gain", VALUE=600, MOTORS="motor_a")
+    with pytest.raises(RuntimeError, match="SERVO_DUMP_TUNING to rebuild"):
+        st.cmd_SERVO_TUNE(gcmd)
+    servo_param.drain_param_writes()
+
+
 def test_tune_by_c_code(tmp_path):
     engine = FakeWriteEngine()
     objs, motor_a, motor_b = _two_motor_printer(engine)

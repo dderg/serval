@@ -675,6 +675,15 @@ NOTCH_VALUES = {
     (0x2001, 0x44): 222,
     (0x2001, 0x45): 3,
     (0x2001, 0x46): 4,
+    (0x2001, 0x47): 333,
+    (0x2001, 0x48): 5,
+    (0x2001, 0x49): 6,
+    (0x2001, 0x4A): 444,
+    (0x2001, 0x4B): 8,
+    (0x2001, 0x4C): 9,
+    (0x2001, 0x4D): 555,
+    (0x2001, 0x4E): 11,
+    (0x2001, 0x4F): 12,
 }
 
 
@@ -742,6 +751,9 @@ def test_ambient_records_notch_state_per_drive():
             "mode": 1,
             "notch1": {"freq_hz": 111, "width": 1, "depth": 2},
             "notch2": {"freq_hz": 222, "width": 3, "depth": 4},
+            "notch3": {"freq_hz": 333, "width": 5, "depth": 6},
+            "notch4": {"freq_hz": 444, "width": 8, "depth": 9},
+            "notch5": {"freq_hz": 555, "width": 11, "depth": 12},
         }
 
 

@@ -630,6 +630,41 @@ class ServoTuning:
             % (path, len(motors_out), len(self.params))
         )
 
+    def _patch_drive_state(
+        self, gcmd: Any, motor_names: list[str], addr: str, value: int
+    ) -> None:
+        """SERVO_TUNE just readback-verified `value` on every motor, so
+        drive_state.json can absorb it in place - the tuning panel reloads
+        the file instead of paying for a full SERVO_DUMP_TUNING re-read of
+        the drives after every apply."""
+        mapped = self._by_addr.get(_addr_key(addr))
+        if mapped is None:
+            return
+        path = os.path.join(self.captures_root, "drive_state.json")
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path) as f:
+                payload = json.load(f)
+        except (OSError, ValueError) as e:
+            raise gcmd.error(
+                "SERVO_TUNE: writes verified, but drive_state.json at %s "
+                "is unreadable (%s) - run SERVO_DUMP_TUNING to rebuild it"
+                % (path, e)
+            )
+        for motor_name in motor_names:
+            motors = payload.get("motors") or {}
+            if motor_name in motors:
+                motors[motor_name][mapped.c_code] = value
+            pins = (payload.get("config_pins") or {}).get(motor_name)
+            if pins is not None and mapped.c_code in pins:
+                pins[mapped.c_code] = value
+        payload["created_utc"] = _utc_now()
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(tmp, path)
+
     def cmd_SERVO_TUNE(self, gcmd: Any) -> None:
         param_text = gcmd.get("PARAM")
         value = gcmd.get_int("VALUE")
@@ -679,6 +714,7 @@ class ServoTuning:
                     "read %d" % (motor.get_motor_name(), addr, value, rb_value)
                 )
             motor_names.append(motor.get_motor_name())
+        self._patch_drive_state(gcmd, motor_names, addr, value)
         gcmd.respond_info(
             "SERVO_TUNE: %s = %d on %s"
             % (param_text, value, ", ".join(motor_names))

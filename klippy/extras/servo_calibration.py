@@ -90,6 +90,9 @@ NOTCH_MODE_ADDR = "0x2001.0x31"
 NOTCH_READBACK: tuple[tuple[str, tuple[str, str, str]], ...] = (
     ("notch1", ("0x2001.0x41", "0x2001.0x42", "0x2001.0x43")),
     ("notch2", ("0x2001.0x44", "0x2001.0x45", "0x2001.0x46")),
+    ("notch3", ("0x2001.0x47", "0x2001.0x48", "0x2001.0x49")),
+    ("notch4", ("0x2001.0x4a", "0x2001.0x4b", "0x2001.0x4c")),
+    ("notch5", ("0x2001.0x4d", "0x2001.0x4e", "0x2001.0x4f")),
 )
 LADDER_STOP_FLAGS = frozenset(
     {"resonance_detected", "torque_saturated", "settle_window_truncated"}
@@ -2344,7 +2347,7 @@ class ServoCalibration:
         self._write_notch_mode(servos, 0)
         self._restore()
         for servo in servos:
-            n1, n2 = harvested[servo]
+            n1, n2 = harvested[servo][:2]
             gcmd.respond_info(
                 "%s notch1 %d Hz w%d d%d | notch2 %d Hz w%d d%d"
                 % (servo, n1[0], n1[1], n1[2], n2[0], n2[1], n2[2])
