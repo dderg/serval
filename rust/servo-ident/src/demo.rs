@@ -525,7 +525,10 @@ fn manifest_json(attempt: &DemoAttempt, created: SystemTime) -> serde_json::Valu
             "iterations": 1, "dwell_ms": 700
         },
         "motors": [
-            {"name": "motor_a", "invert": false, "rotation_distance": 40.0, "counts_per_mm": 3276.8}
+            {"name": "motor_a", "invert": false, "rotation_distance": 40.0, "counts_per_mm": 3276.8},
+            {"name": "motor_a1", "invert": false, "rotation_distance": 40.0, "counts_per_mm": 3276.8},
+            {"name": "motor_b", "invert": false, "rotation_distance": 40.0, "counts_per_mm": 3276.8},
+            {"name": "motor_b1", "invert": false, "rotation_distance": 40.0, "counts_per_mm": 3276.8}
         ],
         "belts": "motor_a:1+motor_a1:-1,motor_b:-1+motor_b1:-1",
         "steps": [
