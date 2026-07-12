@@ -93,16 +93,23 @@ pub(crate) fn place_motor_response(
         }
     }
     if is_ethercat {
-        // With AWD, several slots claim the same axis; the lowest slot is the
-        // axis's reporting drive so the answer is deterministic.
-        let mut samples: Vec<&mcu_protocol::messages::MotorSample> = resp.motors.iter().collect();
-        samples.sort_by_key(|m| m.slot);
-        for m in samples {
+        // With AWD, several slots claim the same axis; report the mean of
+        // their positions — the differential component between the pair is
+        // internal belt strain, the common mode is where the carriage is.
+        let mut sums = vec![(0f64, 0f64, 0u32); motors.len()];
+        for m in &resp.motors {
             if let Some(&axis) = slot_to_axis.get(m.slot as usize) {
-                if motors.get(axis).is_some_and(Option::is_some) {
-                    continue;
+                if let Some(entry) = sums.get_mut(axis) {
+                    entry.0 += f64::from(m.pos_q16) / 65536.0;
+                    entry.1 += f64::from(m.vel_q16) / 65536.0;
+                    entry.2 += 1;
                 }
-                put(motors, vmotors, axis, m);
+            }
+        }
+        for (axis, &(pos, vel, n)) in sums.iter().enumerate() {
+            if n > 0 {
+                motors[axis] = Some(pos / f64::from(n));
+                vmotors[axis] = Some(vel / f64::from(n));
             }
         }
     } else {

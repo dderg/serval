@@ -151,12 +151,16 @@ class FakeEngine:
     def __init__(self):
         self.buzzes = []
         self.dampers = []
+        self.trims = []
 
     def resonance_buzz(self, *args):
         self.buzzes.append(args)
 
     def set_diff_damper(self, *args):
         self.dampers.append(args)
+
+    def set_diff_trim(self, *args):
+        self.trims.append(args)
 
 
 class FakeReactor:
@@ -575,6 +579,43 @@ def test_diff_damper_rejects_single_drive_belts():
     with pytest.raises(RuntimeError, match="two drives per belt"):
         sc.cmd_SERVO_DIFF_DAMPER(FakeGcmd(GAIN="1"))
     assert not engine.dampers
+
+
+def test_diff_trim_arms_both_belts_by_default():
+    sc, _gcode, engine = make_differential_calibration()
+    sc.cmd_SERVO_DIFF_TRIM(FakeGcmd(GAIN="0.05"))
+    assert engine.trims == [
+        (7, 0, 1, 50000, 150, 25000),
+        (7, 2, 3, 50000, 150, 25000),
+    ]
+
+
+def test_diff_trim_single_belt_with_explicit_knobs():
+    sc, _gcode, engine = make_differential_calibration()
+    sc.cmd_SERVO_DIFF_TRIM(
+        FakeGcmd(BELT="B", GAIN="0.2", CLAMP_UM="300", LPF_HZ="10")
+    )
+    assert engine.trims == [(7, 2, 3, 200000, 300, 10000)]
+
+
+def test_diff_trim_zero_gain_disarms():
+    sc, _gcode, engine = make_differential_calibration()
+    sc.cmd_SERVO_DIFF_TRIM(FakeGcmd(BELT="A", GAIN="0"))
+    assert engine.trims == [(7, 0, 1, 0, 150, 25000)]
+
+
+def test_diff_trim_rejects_single_drive_belts():
+    sc, _gcode, engine = make_differential_calibration()
+    sc.printer = FakePrinter(
+        {
+            "gcode": sc.gcode,
+            "toolhead": FakeToolhead(FakeKin(single_drive_rails())),
+            "motion_engine": engine,
+        }
+    )
+    with pytest.raises(RuntimeError, match="two drives per belt"):
+        sc.cmd_SERVO_DIFF_TRIM(FakeGcmd(GAIN="0.05"))
+    assert not engine.trims
 
 
 def test_tracking_single_rail_dual_motor_axis_gets_no_combine():

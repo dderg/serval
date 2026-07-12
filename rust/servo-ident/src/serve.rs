@@ -17,6 +17,7 @@ use crate::http::{Request, Response};
 use crate::live;
 use crate::live_stream::LiveTap;
 use crate::results::Manifest;
+use crate::strain;
 use crate::time_fmt::iso8601_utc;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -120,7 +121,7 @@ fn newest_input_mtime(run_dir: &Path) -> Result<SystemTime, String> {
         let entry = entry.map_err(|e| format!("{}: {e}", run_dir.display()))?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name == "results.json" || name == "plot_series.json" {
+        if name == "results.json" || name == "plot_series.json" || name == "strain.json" {
             continue;
         }
         let m = mtime(&entry.path())?;
@@ -132,11 +133,15 @@ fn newest_input_mtime(run_dir: &Path) -> Result<SystemTime, String> {
 }
 
 fn needs_analyze(run_dir: &Path) -> Result<bool, String> {
-    let results_path = run_dir.join("results.json");
-    if !results_path.is_file() {
+    output_is_stale(run_dir, "results.json")
+}
+
+fn output_is_stale(run_dir: &Path, output: &str) -> Result<bool, String> {
+    let output_path = run_dir.join(output);
+    if !output_path.is_file() {
         return Ok(true);
     }
-    Ok(newest_input_mtime(run_dir)? > mtime(&results_path)?)
+    Ok(newest_input_mtime(run_dir)? > mtime(&output_path)?)
 }
 
 fn read_run_file(captures_root: &Path, name: &str, file: &str) -> Response {
@@ -241,6 +246,53 @@ fn handle_analyze(captures_root: &Path, name: &str) -> Response {
         200,
         serde_json::to_string(&results).expect("Results always serializes"),
     )
+}
+
+/// `GET /api/runs/<name>/strain`: the strain-map tab's data source. Only
+/// answers for `strain_map` runs (404 otherwise); recomputes and rewrites
+/// `strain.json` when any capture or the manifest is newer than it, else
+/// serves the cached file.
+fn handle_strain(captures_root: &Path, name: &str) -> Response {
+    if !valid_run_name(name) {
+        return Response::not_found(&format!("invalid run name {name:?}"));
+    }
+    let run_dir = captures_root.join(name);
+    let manifest_path = run_dir.join("manifest.json");
+    let text = match std::fs::read_to_string(&manifest_path) {
+        Ok(t) => t,
+        Err(_) => return Response::not_found(&format!("no such run {name:?}")),
+    };
+    let manifest: Manifest = match serde_json::from_str(&text) {
+        Ok(m) => m,
+        Err(e) => return Response::text(500, "text/plain", format!("{name}: manifest parse: {e}")),
+    };
+    if !strain::is_strain_map(&manifest) {
+        return Response::not_found(&format!(
+            "run {name:?} is a {:?} experiment, not strain_map",
+            manifest.experiment
+        ));
+    }
+    let stale = match output_is_stale(&run_dir, "strain.json") {
+        Ok(s) => s,
+        Err(e) => return Response::text(500, "text/plain", e),
+    };
+    if !stale {
+        return read_run_file(captures_root, name, "strain.json");
+    }
+    let map = match strain::analyze_run(&run_dir) {
+        Ok(m) => m,
+        Err(e) => return Response::text(500, "text/plain", e),
+    };
+    let body = serde_json::to_string(&map).expect("StrainMap always serializes");
+    let out_path = run_dir.join("strain.json");
+    if let Err(e) = std::fs::write(&out_path, &body) {
+        return Response::text(
+            500,
+            "text/plain",
+            format!("write {}: {e}", out_path.display()),
+        );
+    }
+    Response::json(200, body)
 }
 
 /// Newest flat capture in the root, with its current size and age — the
@@ -361,6 +413,7 @@ pub fn handle(captures_root: &Path, req: &Request) -> Response {
         ("GET", ["api", "runs", name, "plot_series"]) => {
             read_run_file(captures_root, name, "plot_series.json")
         }
+        ("GET", ["api", "runs", name, "strain"]) => handle_strain(captures_root, name),
         ("POST", ["api", "runs", name, "analyze"]) => handle_analyze(captures_root, name),
         _ => Response::not_found(&format!("no such route: {} {}", req.method, req.path)),
     }

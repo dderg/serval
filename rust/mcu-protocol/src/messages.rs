@@ -4,8 +4,8 @@
 //! plus the protocol constants that are not part of any one message.
 
 use crate::codec::{
-    Cursor, Decode, DecodeError, Encode, get_i32, get_str, get_u8, get_u16, get_u32, get_u64,
-    put_i32, put_str, put_u8, put_u16, put_u32, put_u64,
+    Cursor, Decode, DecodeError, Encode, get_f32, get_i32, get_str, get_u8, get_u16, get_u32,
+    get_u64, put_f32, put_i32, put_str, put_u8, put_u16, put_u32, put_u64,
 };
 
 mod generated;
@@ -381,6 +381,90 @@ impl Decode for MotorStateResponse {
             });
         }
         Ok(Self { motors })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetStrainComp {
+    pub slot_a: u8,
+    pub slot_b: u8,
+    pub lane_a: u8,
+    pub lane_b: u8,
+    pub kinematics: u8,
+    pub nx: u8,
+    pub ny: u8,
+    pub x0: f32,
+    pub y0: f32,
+    pub dx: f32,
+    pub dy: f32,
+    pub values_um: Vec<i32>,
+}
+
+impl Encode for SetStrainComp {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_u8(out, self.slot_a);
+        put_u8(out, self.slot_b);
+        put_u8(out, self.lane_a);
+        put_u8(out, self.lane_b);
+        put_u8(out, self.kinematics);
+        put_u8(out, self.nx);
+        put_u8(out, self.ny);
+        put_f32(out, self.x0);
+        put_f32(out, self.y0);
+        put_f32(out, self.dx);
+        put_f32(out, self.dy);
+        put_u16(out, self.values_um.len() as u16);
+        for v in &self.values_um {
+            put_i32(out, *v);
+        }
+    }
+}
+
+impl Decode for SetStrainComp {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let slot_a = get_u8(c)?;
+        let slot_b = get_u8(c)?;
+        let lane_a = get_u8(c)?;
+        let lane_b = get_u8(c)?;
+        let kinematics = get_u8(c)?;
+        let nx = get_u8(c)?;
+        let ny = get_u8(c)?;
+        let x0 = get_f32(c)?;
+        let y0 = get_f32(c)?;
+        let dx = get_f32(c)?;
+        let dy = get_f32(c)?;
+        let count = get_u16(c)?;
+        let need =
+            (count as usize)
+                .checked_mul(4)
+                .ok_or(DecodeError::ArrayLengthExceedsBuffer {
+                    claimed: u32::from(count),
+                    available: c.remaining(),
+                })?;
+        if need > c.remaining() {
+            return Err(DecodeError::ArrayLengthExceedsBuffer {
+                claimed: u32::from(count),
+                available: c.remaining(),
+            });
+        }
+        let mut values_um = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            values_um.push(get_i32(c)?);
+        }
+        Ok(Self {
+            slot_a,
+            slot_b,
+            lane_a,
+            lane_b,
+            kinematics,
+            nx,
+            ny,
+            x0,
+            y0,
+            dx,
+            dy,
+            values_um,
+        })
     }
 }
 

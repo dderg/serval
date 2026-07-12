@@ -15,21 +15,19 @@ use ethercat_rt::sdo::{execute_sdo_read, execute_sdo_write, DictObject, DictSdoB
 use ethercat_rt::sensorless::{SensorlessBank, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
 use ethercat_rt::server::FrameServer;
 use ethercat_rt::stream_halt::StreamHalt;
-use ethercat_rt::sync::{ERR_SYNC_NOT_ENABLED, ERR_SYNC_STREAMING};
 use ethercat_rt::torque::{
     CommandAction, TickAction, TorqueGate, TorqueState, ERR_ENABLE_FAILED, ERR_PIECES_WHILE_FAULTED,
 };
-use ethercat_rt::wire::sync_pair_response_frame;
 use ethercat_rt::wire::{
     arm_sensorless_endstop_response_frame, claim_handshake_reply_frame, endstop_trip_frame,
     identify_response_frame, push_pieces_response_frame, resonance_buzz_response_frame,
     restore_drive_limits_response_frame, resume_stream_response_frame, runtime_caps_response_frame,
     sdo_read_response_frame, sdo_write_response_frame, seed_servo_home_response_frame,
-    set_diff_damper_response_frame, set_drive_limits_response_frame, set_torque_response_frame,
-    start_capture_response_frame, status_heartbeat_frame, stop_capture_response_frame,
-    stop_response_frame, Command,
+    set_diff_damper_response_frame, set_diff_trim_response_frame, set_drive_limits_response_frame,
+    set_strain_comp_response_frame, set_torque_response_frame, start_capture_response_frame,
+    status_heartbeat_frame, stop_capture_response_frame, stop_response_frame, Command,
 };
-use mcu_protocol::messages::{SdoReadResponse, SlaveState, StopCaptureResponse, SyncPairResponse};
+use mcu_protocol::messages::{SdoReadResponse, SlaveState, StopCaptureResponse};
 
 static SIGTERM_RECEIVED: AtomicBool = AtomicBool::new(false);
 
@@ -98,21 +96,6 @@ fn stub_object_dictionary() -> DictSdoBus {
             },
         ),
     ])
-}
-
-fn sim_sync_response(baseline: i16) -> SyncPairResponse {
-    SyncPairResponse {
-        result: 0,
-        primary_slot: 0,
-        secondary_slot: 1,
-        torque_baseline_primary: i32::from(baseline),
-        torque_baseline_secondary: i32::from(-baseline),
-        torque_released: i32::from(baseline / 2),
-        torque_dithered: 2,
-        torque_final_primary: 1,
-        torque_final_secondary: -1,
-        released_delta_counts: 512,
-    }
 }
 
 fn main() {
@@ -429,33 +412,6 @@ fn main() {
                     );
                     server.respond(&sdo_write_response_frame(correlation_id, &resp));
                 }
-                Command::SyncPair {
-                    correlation_id,
-                    msg,
-                } => {
-                    // Single-slave stub: simulate a full pair sync so host
-                    // plumbing can be exercised end-to-end. Baseline torque
-                    // is the SDO-injected 0x6077 value (same knob as the
-                    // sensorless tests).
-                    let resp = if gate.state() != TorqueState::Enabled {
-                        SyncPairResponse {
-                            result: ERR_SYNC_NOT_ENABLED,
-                            ..sim_sync_response(0)
-                        }
-                    } else if !ring.is_empty() {
-                        SyncPairResponse {
-                            result: ERR_SYNC_STREAMING,
-                            ..sim_sync_response(0)
-                        }
-                    } else {
-                        sim_sync_response(sim_torque)
-                    };
-                    eprintln!(
-                        "ec-rt-stub: SyncPair axis={} torque_ok={} -> result={}",
-                        msg.axis, msg.torque_ok_tenth_pct, resp.result
-                    );
-                    server.respond(&sync_pair_response_frame(correlation_id, &resp));
-                }
                 Command::StartCapture {
                     correlation_id,
                     msg,
@@ -508,6 +464,26 @@ fn main() {
                         msg.slot_a, msg.slot_b, msg.gain_milli
                     );
                     server.respond(&set_diff_damper_response_frame(correlation_id, 0));
+                }
+                Command::SetDiffTrim {
+                    correlation_id,
+                    msg,
+                } => {
+                    eprintln!(
+                        "ec-rt-stub: SetDiffTrim slots=({},{}) gain_micro={}",
+                        msg.slot_a, msg.slot_b, msg.gain_micro
+                    );
+                    server.respond(&set_diff_trim_response_frame(correlation_id, 0));
+                }
+                Command::SetStrainComp {
+                    correlation_id,
+                    msg,
+                } => {
+                    eprintln!(
+                        "ec-rt-stub: SetStrainComp slots=({},{}) grid={}x{}",
+                        msg.slot_a, msg.slot_b, msg.nx, msg.ny
+                    );
+                    server.respond(&set_strain_comp_response_frame(correlation_id, 0));
                 }
                 Command::Unknown { kind_raw, .. } => {
                     eprintln!("ec-rt-stub: ignoring kind 0x{kind_raw:04x}");

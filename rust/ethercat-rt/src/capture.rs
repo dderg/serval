@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender, TrySendError};
 use std::thread::JoinHandle;
@@ -16,7 +16,11 @@ pub const ERR_CAPTURE_BAD_ARG: i32 = -324;
 pub const ERR_CAPTURE_BAD_DRIVE_LIST: i32 = -325;
 pub const ERR_CAPTURE_CHANNEL_NOT_READY: i32 = -326;
 
-pub const CAPTURE_RING_CAPACITY: usize = 16384;
+/// Sized to hold a full calibration stroke (~55k records at the 4 kHz DC
+/// cycle) even if the SD card stalls for the stroke's whole duration —
+/// observed contention from journald/Vector/VictoriaLogs on the same card
+/// cut writer throughput to ~60% for 10+ seconds (2026-07-12 bench).
+pub const CAPTURE_RING_CAPACITY: usize = 65536;
 
 pub const MAX_DRIVES: usize = EC_RT_MAX_SLAVES;
 pub const RECORD_PREFIX_SIZE: usize = 9;
@@ -254,7 +258,7 @@ type RecordChannel = (SyncSender<CaptureRecord>, Receiver<CaptureRecord>);
 /// (ErC1.1 / AL 0x001a). Thread creation is banned on the DC thread for the
 /// same reason — under mlockall(MCL_FUTURE) a pthread spawn prefaults and
 /// locks the new stack, which is milliseconds by itself. The record channel
-/// obeys the same rule: its bounded buffer preallocates ~1 MB at construction
+/// obeys the same rule: its bounded buffer preallocates ~20 MB at construction
 /// (prefaulted and locked under MCL_FUTURE — 57 of 66 working-counter misses
 /// on the 2026-07-06 bench were capture starts), so the capture-io thread
 /// builds each channel and hands it over; start only try_recv()s a spare.
@@ -533,12 +537,15 @@ fn open_session(path: &PathBuf) -> Result<File, i32> {
     File::create(path).map_err(|_| ERR_CAPTURE_FILE)
 }
 
+const WRITE_BUFFER_SIZE: usize = 256 * 1024;
+
 fn run_session(
-    mut file: File,
+    file: File,
     header: String,
     hook: WriterHook,
     rx: Receiver<CaptureRecord>,
 ) -> Result<u64, (u64, String)> {
+    let mut file = BufWriter::with_capacity(WRITE_BUFFER_SIZE, file);
     file.write_all(header.as_bytes())
         .map_err(|e| (0u64, format!("capture header write: {e}")))?;
     match hook {
@@ -567,12 +574,18 @@ fn run_session(
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
         if last_sync.elapsed() >= WRITER_SYNC_INTERVAL {
-            file.sync_data()
+            file.flush()
+                .map_err(|e| (written, format!("capture flush: {e}")))?;
+            file.get_ref()
+                .sync_data()
                 .map_err(|e| (written, format!("capture fsync: {e}")))?;
             last_sync = Instant::now();
         }
     }
-    file.sync_data()
+    file.flush()
+        .map_err(|e| (written, format!("capture final flush: {e}")))?;
+    file.get_ref()
+        .sync_data()
         .map_err(|e| (written, format!("capture final fsync: {e}")))?;
     Ok(written)
 }

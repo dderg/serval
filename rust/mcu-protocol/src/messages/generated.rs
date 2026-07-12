@@ -61,10 +61,12 @@ pub enum MessageKind {
     StatusHeartbeat = 0x0083,
     McuLog = 0x0084,
     EndstopTrip = 0x0085,
-    SyncPair = 0x0086,
-    SyncPairResponse = 0x0087,
+    SetStrainComp = 0x0086,
+    SetStrainCompResponse = 0x0087,
     SetDiffDamper = 0x0088,
     SetDiffDamperResponse = 0x0089,
+    SetDiffTrim = 0x008A,
+    SetDiffTrimResponse = 0x008B,
 }
 
 impl MessageKind {
@@ -110,10 +112,12 @@ impl MessageKind {
             0x0083 => Self::StatusHeartbeat,
             0x0084 => Self::McuLog,
             0x0085 => Self::EndstopTrip,
-            0x0086 => Self::SyncPair,
-            0x0087 => Self::SyncPairResponse,
+            0x0086 => Self::SetStrainComp,
+            0x0087 => Self::SetStrainCompResponse,
             0x0088 => Self::SetDiffDamper,
             0x0089 => Self::SetDiffDamperResponse,
+            0x008A => Self::SetDiffTrim,
+            0x008B => Self::SetDiffTrimResponse,
             _ => return None,
         })
     }
@@ -824,81 +828,20 @@ impl Decode for EndstopTrip {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SyncPair {
-    pub axis: u8,
-    pub torque_ok_tenth_pct: u16,
-    pub settle_timeout_ms: u16,
-    pub dither_amplitude_nm: u32,
-    pub dither_freq_millihz: u32,
-    pub dither_duration_ms: u16,
-}
-
-impl Encode for SyncPair {
-    fn encode(&self, out: &mut Vec<u8>) {
-        put_u8(out, self.axis);
-        put_u16(out, self.torque_ok_tenth_pct);
-        put_u16(out, self.settle_timeout_ms);
-        put_u32(out, self.dither_amplitude_nm);
-        put_u32(out, self.dither_freq_millihz);
-        put_u16(out, self.dither_duration_ms);
-    }
-}
-
-impl Decode for SyncPair {
-    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
-        Ok(Self {
-            axis: get_u8(c)?,
-            torque_ok_tenth_pct: get_u16(c)?,
-            settle_timeout_ms: get_u16(c)?,
-            dither_amplitude_nm: get_u32(c)?,
-            dither_freq_millihz: get_u32(c)?,
-            dither_duration_ms: get_u16(c)?,
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SyncPairResponse {
+pub struct SetStrainCompResponse {
     pub result: i32,
-    pub primary_slot: u8,
-    pub secondary_slot: u8,
-    pub torque_baseline_primary: i32,
-    pub torque_baseline_secondary: i32,
-    pub torque_released: i32,
-    pub torque_dithered: i32,
-    pub torque_final_primary: i32,
-    pub torque_final_secondary: i32,
-    pub released_delta_counts: i32,
 }
 
-impl Encode for SyncPairResponse {
+impl Encode for SetStrainCompResponse {
     fn encode(&self, out: &mut Vec<u8>) {
         put_i32(out, self.result);
-        put_u8(out, self.primary_slot);
-        put_u8(out, self.secondary_slot);
-        put_i32(out, self.torque_baseline_primary);
-        put_i32(out, self.torque_baseline_secondary);
-        put_i32(out, self.torque_released);
-        put_i32(out, self.torque_dithered);
-        put_i32(out, self.torque_final_primary);
-        put_i32(out, self.torque_final_secondary);
-        put_i32(out, self.released_delta_counts);
     }
 }
 
-impl Decode for SyncPairResponse {
+impl Decode for SetStrainCompResponse {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         Ok(Self {
             result: get_i32(c)?,
-            primary_slot: get_u8(c)?,
-            secondary_slot: get_u8(c)?,
-            torque_baseline_primary: get_i32(c)?,
-            torque_baseline_secondary: get_i32(c)?,
-            torque_released: get_i32(c)?,
-            torque_dithered: get_i32(c)?,
-            torque_final_primary: get_i32(c)?,
-            torque_final_secondary: get_i32(c)?,
-            released_delta_counts: get_i32(c)?,
         })
     }
 }
@@ -949,6 +892,56 @@ impl Encode for SetDiffDamperResponse {
 }
 
 impl Decode for SetDiffDamperResponse {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            result: get_i32(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetDiffTrim {
+    pub slot_a: u8,
+    pub slot_b: u8,
+    pub gain_micro: u32,
+    pub clamp_um: u16,
+    pub lpf_millihz: u32,
+}
+
+impl Encode for SetDiffTrim {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_u8(out, self.slot_a);
+        put_u8(out, self.slot_b);
+        put_u32(out, self.gain_micro);
+        put_u16(out, self.clamp_um);
+        put_u32(out, self.lpf_millihz);
+    }
+}
+
+impl Decode for SetDiffTrim {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            slot_a: get_u8(c)?,
+            slot_b: get_u8(c)?,
+            gain_micro: get_u32(c)?,
+            clamp_um: get_u16(c)?,
+            lpf_millihz: get_u32(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetDiffTrimResponse {
+    pub result: i32,
+}
+
+impl Encode for SetDiffTrimResponse {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_i32(out, self.result);
+    }
+}
+
+impl Decode for SetDiffTrimResponse {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         Ok(Self {
             result: get_i32(c)?,

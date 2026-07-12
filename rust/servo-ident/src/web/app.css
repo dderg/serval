@@ -277,6 +277,21 @@ select.cell-input { text-align: left; }
 table.mode-table { width: auto; }
 table.mode-table th, table.mode-table td { padding: 2px 16px 2px 0; }
 
+/* --- strain map (strain page) ------------------------------------------ */
+
+.strain-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 1100px) { .strain-grid { grid-template-columns: minmax(0, 1fr); } }
+#strain-scale .strain-scale {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--dim);
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+.strain-scale .bar { height: 10px; width: 180px; border-radius: 3px; border: 1px solid var(--border); }
+
 /* --- PSD peak list (notches page) ------------------------------------- */
 
 .peak-row {

@@ -557,6 +557,28 @@ class Motion:
     def wait_moves_and_mcu(self):
         self._wait_mcu_drained()
 
+    def wait_until_print_time(self, print_time):
+        """Block (reactor-yielding) until the MCU clock has really passed
+        print_time. This is the sequencing primitive for anything scheduled
+        on the MCU clock (scheduled torque changes, pin pulses): a wall
+        clock pause can finish before the schedule fires and race it."""
+        if self.mcu is None:
+            return
+
+        def _caught_up():
+            est = self.mcu.estimated_print_time(self.reactor.monotonic())
+            if est >= print_time:
+                return True
+            return None
+
+        engine_wait.wait_for(
+            self.printer,
+            _caught_up,
+            "wait_until_print_time",
+            engine_wait.UNBOUNDED,
+            interval_s=0.010,
+        )
+
     def _wait_mcu_drained(self):
         engine_wait.wait_for(
             self.printer,
@@ -566,6 +588,15 @@ class Motion:
             interval_s=0.010,
         )
         self.engine.motion_drain_finalize()
+        # M400-after-G4 must not return before the dwell has really elapsed
+        # on the MCU clock; the frontier includes queued dwells. The
+        # motion_lead slice is the standing scheduling margin, not queued
+        # time — waiting for it would tax every wait_moves.
+        if self.mcu is not None:
+            frontier = self.engine.frontier_print_time(
+                self.mcu.get_engine_handle()
+            )
+            self.wait_until_print_time(frontier - self.motion_lead)
 
     def cmd_M400(self, gcmd):
         self.wait_moves_and_mcu()
