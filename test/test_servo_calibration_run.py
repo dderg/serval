@@ -103,12 +103,17 @@ class FakeEngine:
 
 class FakePrinter:
     command_error = RuntimeError
+    _sentinel = object()
 
     def __init__(self, objs):
         self._objs = objs
 
-    def lookup_object(self, name):
-        return self._objs[name]
+    def lookup_object(self, name, default=_sentinel):
+        if name in self._objs:
+            return self._objs[name]
+        if default is not self._sentinel:
+            return default
+        raise KeyError(name)
 
 
 class FakeConfig:
@@ -503,6 +508,127 @@ def test_apply_default_off_does_not_apply():
     assert not any(
         isinstance(r, str) and "APPLY verified" in r for r in gcmd.responses
     )
+
+
+def test_base_speed_gain_pins_non_swept_servos():
+    servo_param.drain_param_writes()
+    sc, gcode = make_sc_apply(
+        verdict={
+            "recommended_step": "cal_p1040_s650_i1923",
+            "reason": "highest clean gain",
+            "flags": [],
+            "apply": [_applied("motor_a", "0x2001.0x02", 650)],
+        }
+    )
+    gcmd = FakeGcmd(
+        AXIS="X", SERVO="motor_a", SPEED_GAINS="500,650", BASE_SPEED_GAIN="400"
+    )
+    sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
+
+    base_writes = [
+        s
+        for s in gcode.scripts
+        if isinstance(s, str) and "SERVO=motor_b" in s and "0x2001" in s
+    ]
+    assert any("VALUE=640" in s for s in base_writes)
+    assert any("VALUE=400" in s for s in base_writes)
+    assert any("VALUE=3125" in s for s in base_writes)
+    for s in gcode.scripts:
+        if isinstance(s, str) and ("VALUE=650" in s or "VALUE=500" in s):
+            assert "motor_b" not in s, "sweep must not touch the pinned servo"
+    assert _manifest(sc)["base_gains"] == {
+        "servos": ["motor_b"],
+        "position": 640,
+        "speed": 400,
+        "integral": 3125,
+    }
+
+
+def test_base_speed_gain_without_servo_subset_errors():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc_apply(
+        verdict={
+            "recommended_step": "cal_p1040_s650_i1923",
+            "reason": "highest clean gain",
+            "flags": [],
+            "apply": None,
+        }
+    )
+    gcmd = FakeGcmd(AXIS="X", SPEED_GAINS="500,650", BASE_SPEED_GAIN="400")
+    with pytest.raises(RuntimeError, match="subset"):
+        sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
+
+
+class FakeServoSync:
+    def __init__(self):
+        self.runs = []
+
+    def run(self, gcmd, axis_filter=None, torque_ok_pct=None, settle=None):
+        self.runs.append(axis_filter)
+
+
+def test_strain_map_raster_records_one_capture_per_line():
+    servo_param.drain_param_writes()
+    sc, gcode = make_sc()
+    sync = FakeServoSync()
+    sc.printer._objs["servo_sync"] = sync
+    sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
+    gcmd = FakeGcmd(LINE_SPACING="120", SPEED="50", ACCEL="1000")
+    sc.cmd_SERVO_MEASURE_STRAIN_MAP(gcmd)
+    assert sync.runs == [None]
+    caps = sc.printer.lookup_object("servo_capture").captures
+    names = [os.path.basename(path) for path, _servos in caps]
+    assert names == [
+        "step_xline_y030.scap",
+        "step_xline_y150.scap",
+        "step_xline_y270.scap",
+        "step_yline_x030.scap",
+        "step_yline_x150.scap",
+        "step_yline_x270.scap",
+    ]
+    m = _manifest(sc)
+    assert m["experiment"] == "strain_map"
+    assert [s["name"] for s in m["steps"]] == [n[5:-5] for n in names]
+    assert m["steps"][0]["swept"] == {"y": 30.0}
+    assert m["stroke_plan"]["line_spacing"] == 120.0
+    g1 = [
+        line
+        for script in gcode.scripts
+        if isinstance(script, str)
+        for line in script.split("\n")
+        if line.startswith("G1 ")
+    ]
+    strokes = [line for line in g1 if "F3000" in line]
+    assert len(strokes) == 12, "6 lines, each forward and back"
+    m2 = _manifest(sc)
+    assert m2["stroke_plan"]["zero_sync"] is True
+    assert m2["stroke_plan"]["zero_xy"] == [150.0, 150.0]
+
+
+def test_strain_map_without_servo_sync_errors_loudly():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
+    with pytest.raises(RuntimeError, match="servo_sync"):
+        sc.cmd_SERVO_MEASURE_STRAIN_MAP(FakeGcmd(LINE_SPACING="120"))
+
+
+def test_strain_map_sync_zero_skips_the_zero_point():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
+    gcmd = FakeGcmd(LINE_SPACING="120", SYNC="0")
+    sc.cmd_SERVO_MEASURE_STRAIN_MAP(gcmd)
+    assert _manifest(sc)["stroke_plan"]["zero_sync"] is False
+
+
+def test_strain_map_rejects_cartesian_kinematics():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
+    sc.printer.lookup_object("toolhead").kin.coupled_xy = lambda: False
+    with pytest.raises(RuntimeError, match="coupled XY"):
+        sc.cmd_SERVO_MEASURE_STRAIN_MAP(FakeGcmd())
 
 
 NOTCH_VALUES = {

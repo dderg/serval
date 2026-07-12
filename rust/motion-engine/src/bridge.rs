@@ -169,7 +169,6 @@ pub struct PyMotionEngine {
     latched: LatchedFaults,
     remote_triggers: Mutex<HashMap<u8, (u32, host_rt::host_io::InterceptorId)>>,
     endpoint_calls: crate::bg_call::BgCalls,
-    sync_reports: Arc<Mutex<HashMap<u32, mcu_protocol::messages::SyncPairResponse>>>,
     shut_down: AtomicBool,
 }
 
@@ -204,7 +203,6 @@ impl PyMotionEngine {
             latched: LatchedFaults::default(),
             remote_triggers: Mutex::new(HashMap::new()),
             endpoint_calls: crate::bg_call::BgCalls::default(),
-            sync_reports: Arc::new(Mutex::new(HashMap::new())),
             shut_down: AtomicBool::new(false),
         }
     }

@@ -2,17 +2,15 @@ use std::ops::ControlFlow;
 
 #[cfg(feature = "hw")]
 use super::bringup::log_al_states;
-use super::{abort_sync, discard_motion, respond_fault_heartbeat, EndpointCtx};
+use super::{discard_motion, respond_fault_heartbeat, EndpointCtx};
 use crate::capture::{CaptureRecord, DriveSample, FLAG_MOTION_ACTIVE, FLAG_TORQUE_ENABLED};
 use crate::claim::{eval_wkc, WkcDecision};
 use crate::clock::raw_from_monotonic_ns;
 use crate::curves::ENGINE_STATE_FAULT;
 use crate::dynamics::clamp_torque;
 use crate::scale::{mm_to_counts, CountMap};
-use crate::sync::{SyncStep, ERR_SYNC_ABORTED};
 use crate::torque::{TickAction, TorqueState};
-use crate::wire::{endstop_trip_frame, status_heartbeat_frame, sync_pair_response_frame};
-use mcu_protocol::messages::SyncPairResponse;
+use crate::wire::{endstop_trip_frame, status_heartbeat_frame};
 
 macro_rules! log_slot_drive_telemetry {
     ($level:ident, $event:literal, $msg:literal, $ctx:expr, $slot:expr, $t:expr,
@@ -53,8 +51,6 @@ pub(super) fn run_cycle(ctx: &mut EndpointCtx) -> ControlFlow<()> {
 
     ctx.sensorless
         .record_commanded(apply_time, |slot| ctx.last_counts[slot]);
-
-    poll_sync(ctx, apply_time);
 
     handle_ring_fault(ctx);
 
@@ -156,12 +152,19 @@ pub(super) fn compute_motion_targets(
         eprintln!("ec-rt: buzz cleared — torque gate left Enabled mid-buzz");
     }
     if ctx.gate.state() == TorqueState::Enabled {
-        let sp_counts = sample_slot_targets(ctx, apply_time, &mut all_acc, &mut all_vel);
-        motion_active = emit_slot_commands(ctx, &sp_counts, &all_acc, &all_vel);
+        let mut lane_mm = vec![None; num_slaves];
+        let sp_counts =
+            sample_slot_targets(ctx, apply_time, &mut all_acc, &mut all_vel, &mut lane_mm);
+        motion_active = emit_slot_commands(ctx, &sp_counts, &lane_mm, &all_acc, &all_vel);
     } else {
         ctx.damper.reset_filters();
+        ctx.trim.reset();
+        ctx.comp.reset_applied();
         for lc in &mut ctx.last_counts {
             *lc = None;
+        }
+        for off in &mut ctx.last_written_offset {
+            *off = 0;
         }
     }
     (motion_active, all_acc, all_vel)
@@ -174,6 +177,7 @@ fn sample_slot_targets(
     apply_time: u64,
     all_acc: &mut [f32],
     all_vel: &mut [f32],
+    lane_mm: &mut [Option<f64>],
 ) -> Vec<Option<i32>> {
     let num_slaves = ctx.num_slaves;
     let mut sp_counts: Vec<Option<i32>> = vec![None; num_slaves];
@@ -220,6 +224,7 @@ fn sample_slot_targets(
                     commanded_anchor.unwrap_or_else(|| ctx.drive.position_actual(s));
                 CountMap::new(cpm, anchor_counts, f64::from(pos_mm))
             });
+            lane_mm[s] = Some(f64::from(pos_mm));
             Some((map.target_counts(f64::from(pos_mm)), vel_mm_s, acc_mm_s2))
         } else {
             None
@@ -249,10 +254,6 @@ fn damper_torque_tenths(ctx: &mut EndpointCtx) -> Vec<f32> {
     if !ctx.damper.active() {
         return host_frame;
     }
-    if ctx.sync.is_some() {
-        ctx.damper.reset_filters();
-        return host_frame;
-    }
     let pos_mm: Vec<f64> = (0..ctx.num_slaves)
         .map(|s| f64::from(ctx.drive.position_actual(s)) / ctx.cmd_counts_per_mm[s])
         .collect();
@@ -263,15 +264,98 @@ fn damper_torque_tenths(ctx: &mut EndpointCtx) -> Vec<f32> {
     host_frame
 }
 
+// The trim integrates the pair's mechanical-frame differential torque into
+// an antisymmetric target offset. The offset deliberately stays OUT of
+// last_counts / last_streamed_target: command anchors live in the raw
+// stream frame, so a sync or re-anchor never bakes a live trim offset in,
+// and freezing integration while a pair is not streaming (targets are not
+// being rewritten) keeps the held drive targets continuous across gaps.
+const TRIM_STATE_LOG_CYCLES: u64 = 4000;
+
+fn trim_offset_counts(ctx: &mut EndpointCtx, sp_counts: &[Option<i32>]) -> Vec<i32> {
+    let mut counts = vec![0i32; ctx.num_slaves];
+    if !ctx.trim.active() {
+        return counts;
+    }
+    let torque_mech: Vec<f64> = (0..ctx.num_slaves)
+        .map(|s| f64::from(ctx.drive.torque_actual(s)) * ctx.cmd_counts_per_mm[s].signum())
+        .collect();
+    let streaming: Vec<bool> = sp_counts.iter().map(Option::is_some).collect();
+    let mut offset_mm = vec![0f64; ctx.num_slaves];
+    ctx.trim.update(&torque_mech, &streaming, &mut offset_mm);
+    if let Some((slot_a, slot_b)) = ctx.trim.drain_clamp_warning() {
+        tracing::warn!(
+            subsystem = "ethercat",
+            event = "diff_trim_clamped",
+            slot_a,
+            slot_b,
+            "differential trim offset hit its clamp — residual pair fight \
+             exceeds the trim's authority"
+        );
+    }
+    if ctx.cycle_index % TRIM_STATE_LOG_CYCLES == 0 {
+        for (slot_a, slot_b, offset_mm, filt_tenths) in ctx.trim.snapshot() {
+            tracing::info!(
+                subsystem = "ethercat",
+                event = "diff_trim_state",
+                slot_a,
+                slot_b,
+                offset_um = (offset_mm * 1e3).round() as i64,
+                diff_torque_tenths = filt_tenths.round() as i64,
+                streaming_a = streaming[slot_a],
+                streaming_b = streaming[slot_b],
+                "differential trim state"
+            );
+        }
+    }
+    for s in 0..ctx.num_slaves {
+        counts[s] = (offset_mm[s] * ctx.cmd_counts_per_mm[s]).round() as i32;
+    }
+    counts
+}
+
+// The strain compensation is feedforward on the COMMANDED carriage position:
+// a per-pair antisymmetric offset interpolated from the calibrated map. Like
+// the trim it stays out of last_counts / last_streamed_target so a sync or
+// re-anchor never bakes a live offset in.
+fn comp_offset_counts(ctx: &mut EndpointCtx, lane_mm: &[Option<f64>]) -> Vec<i32> {
+    let mut counts = vec![0i32; ctx.num_slaves];
+    if !ctx.comp.active() {
+        return counts;
+    }
+    let mut offset_mm = vec![0f64; ctx.num_slaves];
+    ctx.comp.update(lane_mm, &ctx.slave_axes, &mut offset_mm);
+    for s in 0..ctx.num_slaves {
+        counts[s] = (offset_mm[s] * ctx.cmd_counts_per_mm[s]).round() as i32;
+    }
+    if ctx.cycle_index % TRIM_STATE_LOG_CYCLES == 0 {
+        for (slot_a, slot_b, applied_mm, target_mm) in ctx.comp.snapshot() {
+            tracing::info!(
+                subsystem = "ethercat",
+                event = "strain_comp_state",
+                slot_a,
+                slot_b,
+                applied_um = (applied_mm * 1e3).round() as i64,
+                target_um = (target_mm * 1e3).round() as i64,
+                "strain compensation state"
+            );
+        }
+    }
+    counts
+}
+
 fn emit_slot_commands(
     ctx: &mut EndpointCtx,
     sp_counts: &[Option<i32>],
+    lane_mm: &[Option<f64>],
     all_acc: &[f32],
     all_vel: &[f32],
 ) -> bool {
     let num_slaves = ctx.num_slaves;
     let mut motion_active = false;
     let damper_tenths = damper_torque_tenths(ctx);
+    let trim_counts = trim_offset_counts(ctx, sp_counts);
+    let comp_counts = comp_offset_counts(ctx, lane_mm);
     // The dynamics profile is fitted in the drive frame (the capture
     // flips each drive's commanded kinematics by its direction sign),
     // so the model must be evaluated on drive-frame vectors — flipping
@@ -324,7 +408,10 @@ fn emit_slot_commands(
             }
             ctx.last_counts[s] = Some(counts);
             ctx.last_streamed_target[s] = Some(counts);
-            ctx.drive.set_target_position(s, counts);
+            let offset = trim_counts[s].wrapping_add(comp_counts[s]);
+            ctx.drive
+                .set_target_position(s, counts.wrapping_add(offset));
+            ctx.last_written_offset[s] = offset;
             ctx.drive.set_velocity_offset(s, vel_offset);
             ctx.drive.set_torque_offset(s, torque_offset);
             motion_active = true;
@@ -332,116 +419,26 @@ fn emit_slot_commands(
             ctx.drive.set_velocity_offset(s, 0);
             ctx.drive
                 .set_torque_offset(s, damper_tenths[s].round() as i16);
+            // A held slot follows the compensation too: the stiffness probe
+            // steps offsets at standstill, and a map ramping while parked
+            // must move the held target now so the next stream doesn't. The
+            // base is the drive's own output-image target (always seeded —
+            // by enable if nothing ever streamed) minus the offsets baked
+            // into the last write; last_counts is no good here, Stop and
+            // ResumeStream clear it while the drive keeps holding.
+            if ctx.comp.active() {
+                let offset = trim_counts[s].wrapping_add(comp_counts[s]);
+                let base = ctx
+                    .drive
+                    .telemetry(s)
+                    .target_position
+                    .wrapping_sub(ctx.last_written_offset[s]);
+                ctx.drive.set_target_position(s, base.wrapping_add(offset));
+                ctx.last_written_offset[s] = offset;
+            }
         }
     }
     motion_active
-}
-
-fn poll_sync(ctx: &mut EndpointCtx, apply_time: u64) {
-    let Some(mut run) = ctx.sync.take() else {
-        return;
-    };
-    let inputs = crate::sync::SyncInputs {
-        now_ns: apply_time,
-        torque_primary: ctx.drive.torque_actual(run.primary),
-        torque_secondary: ctx.drive.torque_actual(run.secondary),
-        velocity_secondary: ctx.drive.velocity_actual(run.secondary),
-        position_secondary: ctx.drive.position_actual(run.secondary),
-    };
-    match run.machine.poll(&inputs) {
-        SyncStep::Idle => ctx.sync = Some(run),
-        SyncStep::SetPrimaryTarget(counts) => {
-            ctx.drive.set_target_position(run.primary, counts);
-            ctx.sync = Some(run);
-        }
-        SyncStep::DisableSecondary => {
-            eprintln!(
-                "ec-rt: sync: coasting secondary slot {} (pos={})",
-                run.secondary, inputs.position_secondary
-            );
-            ctx.drive.disable(run.secondary);
-            run.secondary_disabled = true;
-            ctx.sync = Some(run);
-        }
-        SyncStep::EnableSecondary => {
-            let rc = ctx.drive.enable(run.secondary);
-            if rc != 0 {
-                eprintln!(
-                    "ec-rt: sync: re-enable of slot {} failed rc={rc} — parking",
-                    run.secondary
-                );
-                ctx.sync = Some(run);
-                abort_sync(ctx, ERR_SYNC_ABORTED);
-                ctx.drive.shutdown_and_exit(ctx.num_slaves);
-            }
-            run.secondary_disabled = false;
-            let settled = ctx.drive.position_actual(run.secondary);
-            eprintln!(
-                "ec-rt: sync: secondary slot {} re-enabled at {settled}",
-                run.secondary
-            );
-            run.machine.enable_finished(settled);
-            ctx.sync = Some(run);
-        }
-        SyncStep::Done(report) => finalize_sync(ctx, &run, &report),
-    }
-}
-
-fn finalize_sync(ctx: &mut EndpointCtx, run: &super::SyncRun, report: &crate::sync::SyncReport) {
-    if report.secondary_reseeded {
-        ctx.last_counts[run.secondary] = None;
-        ctx.last_streamed_target[run.secondary] = None;
-        ctx.cmaps[run.secondary] = None;
-        // The rotor turned by the released delta while the axis stood still,
-        // so the same host-frame mm now maps to counts+delta.
-        if let Some((anchor_counts, anchor_mm)) = ctx.report_anchor[run.secondary] {
-            ctx.report_anchor[run.secondary] = Some((
-                anchor_counts.wrapping_add(report.released_delta_counts),
-                anchor_mm,
-            ));
-        }
-    }
-    tracing::info!(
-        subsystem = "ethercat",
-        event = "pair_sync_done",
-        result = report.result,
-        primary = run.primary,
-        secondary = run.secondary,
-        torque_baseline_primary = report.torque_baseline_primary,
-        torque_baseline_secondary = report.torque_baseline_secondary,
-        torque_released = report.torque_released,
-        torque_dithered = report.torque_dithered,
-        torque_final_primary = report.torque_final_primary,
-        torque_final_secondary = report.torque_final_secondary,
-        released_delta_counts = report.released_delta_counts,
-        "belt pair sync finished"
-    );
-    eprintln!(
-        "ec-rt: sync done result={} baseline=({}, {}) released={} dithered={} \
-         final=({}, {}) delta={} counts",
-        report.result,
-        report.torque_baseline_primary,
-        report.torque_baseline_secondary,
-        report.torque_released,
-        report.torque_dithered,
-        report.torque_final_primary,
-        report.torque_final_secondary,
-        report.released_delta_counts
-    );
-    let resp = SyncPairResponse {
-        result: report.result,
-        primary_slot: run.primary as u8,
-        secondary_slot: run.secondary as u8,
-        torque_baseline_primary: report.torque_baseline_primary,
-        torque_baseline_secondary: report.torque_baseline_secondary,
-        torque_released: report.torque_released,
-        torque_dithered: report.torque_dithered,
-        torque_final_primary: report.torque_final_primary,
-        torque_final_secondary: report.torque_final_secondary,
-        released_delta_counts: report.released_delta_counts,
-    };
-    ctx.server
-        .respond(&sync_pair_response_frame(run.correlation_id, &resp));
 }
 
 fn fault_non_finite_torque(ctx: &mut EndpointCtx, slot: usize, acc: f32, vel: f32) -> ! {
@@ -502,7 +499,6 @@ fn handle_drive_fault(ctx: &mut EndpointCtx) {
     });
     if let Some((slot, err)) = drive_fault {
         if ctx.gate.state() != TorqueState::Faulted {
-            abort_sync(ctx, ERR_SYNC_ABORTED);
             eprintln!(
                 "ec-rt: DRIVE FAULT slot {slot} err=0x{err:04x} — parking, reporting via heartbeat"
             );

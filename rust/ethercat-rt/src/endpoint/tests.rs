@@ -28,6 +28,7 @@ use crate::sensorless::SensorlessBank;
 use crate::server::FrameServer;
 use crate::stream_halt::StreamHalt;
 use crate::torque::TorqueGate;
+use crate::trim::DiffTrimBank;
 
 const NUM_SLAVES: usize = 2;
 const COUNTS_PER_MM: f64 = 3276.8;
@@ -39,6 +40,7 @@ struct TrackingLagDrive {
     drift_counts_per_cycle: Vec<f64>,
     drifted_counts: Vec<f64>,
     torque_offsets: Vec<i16>,
+    torques: Vec<i16>,
 }
 
 impl TrackingLagDrive {
@@ -54,6 +56,15 @@ impl TrackingLagDrive {
             drift_counts_per_cycle,
             drifted_counts: vec![0.0; NUM_SLAVES],
             torque_offsets: vec![0; NUM_SLAVES],
+            torques: vec![0; NUM_SLAVES],
+        }
+    }
+
+    /// A pair standing in a constant fight, for the trim tests.
+    fn with_torques(torques: Vec<i16>) -> Self {
+        Self {
+            torques,
+            ..Self::at_rest()
         }
     }
 }
@@ -90,8 +101,8 @@ impl DriveChain for TrackingLagDrive {
     fn velocity_actual(&self, _slot: usize) -> i32 {
         0
     }
-    fn torque_actual(&self, _slot: usize) -> i16 {
-        0
+    fn torque_actual(&self, slot: usize) -> i16 {
+        self.torques[slot]
     }
     fn error_code(&self, _slot: usize) -> u16 {
         0
@@ -148,8 +159,11 @@ fn test_ctx_with_drive(name: &str, drive: TrackingLagDrive) -> EndpointCtx {
         rings: (0..NUM_SLAVES).map(AxisRing::with_slot).collect(),
         buzz: BuzzOsc::new(),
         damper: DiffDamperBank::new(CYCLE_NS as i64),
+        trim: DiffTrimBank::new(CYCLE_NS as i64),
+        comp: crate::strain_comp::StrainCompBank::new(CYCLE_NS as i64),
         cmaps: vec![None; NUM_SLAVES],
         last_counts: vec![None; NUM_SLAVES],
+        last_written_offset: vec![0; NUM_SLAVES],
         report_anchor: vec![None; NUM_SLAVES],
         last_streamed_target: vec![None; NUM_SLAVES],
         last_sent_retired: 0,
@@ -180,7 +194,6 @@ fn test_ctx_with_drive(name: &str, drive: TrackingLagDrive) -> EndpointCtx {
         latched_drive_err: 0,
         sensorless: SensorlessBank::new(NUM_SLAVES),
         stream_halt: StreamHalt::default(),
-        sync: None,
     }
 }
 
@@ -398,6 +411,90 @@ fn damper_writes_antisymmetric_torque_in_the_drive_frame() {
     );
 }
 
+/// The trim must land on the wire: a standing fight (+10%, -10%) integrates
+/// into an antisymmetric target offset that shrinks the pair's commanded
+/// separation, while the pair's target midpoint stays exactly where the
+/// stream put it (carriage-neutral).
+#[test]
+fn trim_applies_antisymmetric_target_offsets_during_streaming() {
+    let mut trimmed =
+        test_ctx_with_drive("trim-on", TrackingLagDrive::with_torques(vec![100, -100]));
+    let mut plain =
+        test_ctx_with_drive("trim-off", TrackingLagDrive::with_torques(vec![100, -100]));
+    assert_eq!(trimmed.trim.set(NUM_SLAVES, 0, 1, 200_000, 500, 25_000), 0);
+
+    for ctx in [&mut trimmed, &mut plain] {
+        push_all(ctx, piece(1_000_000, 0.05, &[2.5, 2.5]));
+        run_cycles(ctx, 1_000_000, 41_000_000);
+    }
+
+    let with = targets(&trimmed);
+    let without = targets(&plain);
+    let offset0 = i64::from(with[0]) - i64::from(without[0]);
+    let offset1 = i64::from(with[1]) - i64::from(without[1]);
+    assert_eq!(offset0, -offset1, "trim must be carriage-neutral");
+    assert!(
+        offset0 < -100,
+        "positive differential fight must pull slot 0 back \
+         (offsets {offset0}/{offset1})"
+    );
+}
+
+/// Slot 1 mounted mirrored (negative cmd counts/mm). A mechanical fight
+/// (+10%, -10% in the host frame) reads (+100, +100) raw off the drives, and
+/// the antisymmetric host-frame offset must land as the SAME drive-frame
+/// count delta on both slots. Getting either torque- or position-frame
+/// conversion wrong flips a sign here.
+#[test]
+fn trim_handles_a_mirrored_pair_in_both_frames() {
+    let mut trimmed = test_ctx_with_drive(
+        "trim-mirror-on",
+        TrackingLagDrive::with_torques(vec![100, 100]),
+    );
+    let mut plain = test_ctx_with_drive(
+        "trim-mirror-off",
+        TrackingLagDrive::with_torques(vec![100, 100]),
+    );
+    for ctx in [&mut trimmed, &mut plain] {
+        ctx.cmd_counts_per_mm[1] = -COUNTS_PER_MM;
+    }
+    assert_eq!(trimmed.trim.set(NUM_SLAVES, 0, 1, 200_000, 500, 25_000), 0);
+
+    for ctx in [&mut trimmed, &mut plain] {
+        push_all(ctx, piece(1_000_000, 0.05, &[2.5, 2.5]));
+        run_cycles(ctx, 1_000_000, 41_000_000);
+    }
+
+    let with = targets(&trimmed);
+    let without = targets(&plain);
+    let offset0 = i64::from(with[0]) - i64::from(without[0]);
+    let offset1 = i64::from(with[1]) - i64::from(without[1]);
+    assert_eq!(
+        offset0, offset1,
+        "mirrored slot gets the mechanically opposite offset, which in its \
+         inverted drive frame is the same count delta"
+    );
+    assert!(
+        offset0 < -100,
+        "fight must pull the pair together: {offset0}"
+    );
+}
+
+#[test]
+fn trim_freezes_while_the_ring_is_dry() {
+    let mut ctx = test_ctx_with_drive(
+        "trim-freeze",
+        TrackingLagDrive::with_torques(vec![100, -100]),
+    );
+    assert_eq!(ctx.trim.set(NUM_SLAVES, 0, 1, 200_000, 500, 25_000), 0);
+    run_cycles(&mut ctx, 0, 40_000_000);
+    assert_eq!(
+        targets(&ctx),
+        vec![0, 0],
+        "no stream, no target writes, no trim motion"
+    );
+}
+
 #[test]
 fn damper_stays_quiet_on_common_mode_velocity() {
     let drift = 25.0 * COUNTS_PER_MM / CYCLES_PER_S;
@@ -412,4 +509,110 @@ fn damper_stays_quiet_on_common_mode_velocity() {
     for s in 0..NUM_SLAVES {
         assert_eq!(ctx.drive.telemetry(s).torque_offset, 0);
     }
+}
+
+/// The stiffness probe's regime: a constant compensation grid uploaded at
+/// standstill must reach the drives — held targets follow the (slew-limited)
+/// offset even though nothing is streaming.
+#[test]
+fn strain_comp_moves_held_targets_at_standstill() {
+    let mut ctx = test_ctx("comp-hold");
+    push_all(&mut ctx, piece(1_000_000, 0.01, &[0.0]));
+    run_cycles(&mut ctx, 1_000_000, 12_000_000);
+    let held = targets(&ctx);
+    assert_eq!(
+        ctx.comp
+            .set(NUM_SLAVES, 0, 1, 0, 1, 0, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
+        0
+    );
+    run_cycles(&mut ctx, 12_250_000, 200_000_000);
+    let now = targets(&ctx);
+    let expect = 0.1 * COUNTS_PER_MM;
+    assert!(
+        (f64::from(now[0] - held[0]) - expect).abs() < 2.0,
+        "slot 0 held target must follow +100 um, moved {}",
+        now[0] - held[0]
+    );
+    assert!(
+        (f64::from(now[1] - held[1]) + expect).abs() < 2.0,
+        "slot 1 held target must follow -100 um, moved {}",
+        now[1] - held[1]
+    );
+}
+
+/// The bench regression: homing ends with Stop/ResumeStream, which clear
+/// last_counts while the drive keeps holding its last target — the probe
+/// must still reach the drives. The held base comes from the output image.
+#[test]
+fn strain_comp_reaches_held_targets_after_a_stop_discard() {
+    let mut ctx = test_ctx("comp-stop");
+    push_all(&mut ctx, piece(1_000_000, 0.01, &[0.0]));
+    run_cycles(&mut ctx, 1_000_000, 12_000_000);
+    super::discard_motion(&mut ctx);
+    assert!(ctx.last_counts.iter().all(Option::is_none));
+    let held = targets(&ctx);
+    assert_eq!(
+        ctx.comp
+            .set(NUM_SLAVES, 0, 1, 0, 1, 0, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
+        0
+    );
+    run_cycles(&mut ctx, 12_250_000, 200_000_000);
+    let now = targets(&ctx);
+    let expect = 0.1 * COUNTS_PER_MM;
+    assert!(
+        (f64::from(now[0] - held[0]) - expect).abs() < 2.0,
+        "slot 0 must follow +100 um after a discard, moved {}",
+        now[0] - held[0]
+    );
+    assert!((f64::from(now[1] - held[1]) + expect).abs() < 2.0);
+}
+
+/// Fresh session, torque enabled, nothing ever streamed: the probe still
+/// works because enable seeded the output-image targets.
+#[test]
+fn strain_comp_reaches_targets_that_never_streamed() {
+    let mut ctx = test_ctx("comp-fresh");
+    let held = targets(&ctx);
+    assert_eq!(
+        ctx.comp
+            .set(NUM_SLAVES, 0, 1, 0, 1, 0, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
+        0
+    );
+    run_cycles(&mut ctx, 1_000_000, 200_000_000);
+    let now = targets(&ctx);
+    let expect = 0.1 * COUNTS_PER_MM;
+    assert!(
+        (f64::from(now[0] - held[0]) - expect).abs() < 2.0,
+        "slot 0 must follow +100 um with no stream history, moved {}",
+        now[0] - held[0]
+    );
+    assert!((f64::from(now[1] - held[1]) + expect).abs() < 2.0);
+}
+
+/// The probe's cleanup: clearing after the last (nonzero) step must ramp
+/// the held targets back to their base instead of leaving the pair parked
+/// in a standing fight.
+#[test]
+fn strain_comp_clear_returns_held_targets_to_base() {
+    let mut ctx = test_ctx("comp-clear");
+    let held = targets(&ctx);
+    assert_eq!(
+        ctx.comp
+            .set(NUM_SLAVES, 0, 1, 0, 1, 0, 1, 1, 0.0, 0.0, 1.0, 1.0, &[-100]),
+        0
+    );
+    run_cycles(&mut ctx, 1_000_000, 200_000_000);
+    assert_ne!(targets(&ctx), held, "probe offset must be applied first");
+    assert_eq!(
+        ctx.comp
+            .set(NUM_SLAVES, 0, 1, 0, 1, 0, 0, 0, 0.0, 0.0, 0.0, 0.0, &[]),
+        0
+    );
+    run_cycles(&mut ctx, 200_250_000, 400_000_000);
+    assert_eq!(
+        targets(&ctx),
+        held,
+        "clear must unwind the offset completely"
+    );
+    assert!(!ctx.comp.active());
 }

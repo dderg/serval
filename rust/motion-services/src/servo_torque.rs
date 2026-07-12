@@ -5,8 +5,9 @@ use mcu_protocol::codec::Encode as _;
 use mcu_protocol::messages::{
     ArmSensorlessEndstop, ArmSensorlessEndstopResponse, MessageKind, ResonanceBuzz,
     ResonanceBuzzResponse, RestoreDriveLimits, RestoreDriveLimitsResponse, SeedServoHome,
-    SeedServoHomeResponse, SetDiffDamper, SetDiffDamperResponse, SetDriveLimits,
-    SetDriveLimitsResponse, SetTorque, SetTorqueResponse, StopResponse, SyncPair, SyncPairResponse,
+    SeedServoHomeResponse, SetDiffDamper, SetDiffDamperResponse, SetDiffTrim, SetDiffTrimResponse,
+    SetDriveLimits, SetDriveLimitsResponse, SetStrainComp, SetStrainCompResponse, SetTorque,
+    SetTorqueResponse, StopResponse,
 };
 
 use crate::servo_call::mcu_typed_call;
@@ -162,20 +163,34 @@ pub fn send_set_diff_damper(conn: &McuSerialConn, damper: SetDiffDamper) -> Resu
     Ok(r.result)
 }
 
-/// A pair sync runs baseline/coast/dither/final phases with per-phase settle
-/// windows; a couple of seconds is normal, so give the round-trip real room.
-const SYNC_PAIR_TIMEOUT: Duration = Duration::from_secs(30);
+const SET_DIFF_TRIM_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub fn send_sync_pair(conn: &McuSerialConn, msg: SyncPair) -> Result<SyncPairResponse, String> {
-    let body = msg.encoded_to_vec();
-    mcu_typed_call(
+pub fn send_set_diff_trim(conn: &McuSerialConn, trim: SetDiffTrim) -> Result<i32, String> {
+    let body = trim.encoded_to_vec();
+    let r: SetDiffTrimResponse = mcu_typed_call(
         conn,
-        "SyncPair",
-        MessageKind::SyncPair,
-        MessageKind::SyncPairResponse,
+        "SetDiffTrim",
+        MessageKind::SetDiffTrim,
+        MessageKind::SetDiffTrimResponse,
         body,
-        SYNC_PAIR_TIMEOUT,
-    )
+        SET_DIFF_TRIM_TIMEOUT,
+    )?;
+    Ok(r.result)
+}
+
+const SET_STRAIN_COMP_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub fn send_set_strain_comp(conn: &McuSerialConn, comp: SetStrainComp) -> Result<i32, String> {
+    let body = comp.encoded_to_vec();
+    let r: SetStrainCompResponse = mcu_typed_call(
+        conn,
+        "SetStrainComp",
+        MessageKind::SetStrainComp,
+        MessageKind::SetStrainCompResponse,
+        body,
+        SET_STRAIN_COMP_TIMEOUT,
+    )?;
+    Ok(r.result)
 }
 
 #[cfg(test)]

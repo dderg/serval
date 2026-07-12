@@ -34,11 +34,6 @@ fn mcu_log_is_event_kind() {
         MessageKind::from_u16(0x0085),
         Some(MessageKind::EndstopTrip)
     );
-    assert_eq!(MessageKind::from_u16(0x0086), Some(MessageKind::SyncPair));
-    assert_eq!(
-        MessageKind::from_u16(0x0087),
-        Some(MessageKind::SyncPairResponse)
-    );
     assert_eq!(
         MessageKind::from_u16(0x0088),
         Some(MessageKind::SetDiffDamper)
@@ -47,7 +42,15 @@ fn mcu_log_is_event_kind() {
         MessageKind::from_u16(0x0089),
         Some(MessageKind::SetDiffDamperResponse)
     );
-    assert_eq!(MessageKind::from_u16(0x008A), None);
+    assert_eq!(
+        MessageKind::from_u16(0x008A),
+        Some(MessageKind::SetDiffTrim)
+    );
+    assert_eq!(
+        MessageKind::from_u16(0x008B),
+        Some(MessageKind::SetDiffTrimResponse)
+    );
+    assert_eq!(MessageKind::from_u16(0x008C), None);
 }
 
 #[test]

@@ -314,76 +314,6 @@ impl PyMotionEngine {
             Ok(())
         }))
     }
-    #[allow(clippy::too_many_arguments)]
-    fn sync_servo_pair_start(
-        &self,
-        mcu_handle: u32,
-        axis: u8,
-        torque_ok_tenth_pct: u16,
-        settle_timeout_ms: u16,
-        dither_amplitude_nm: u32,
-        dither_freq_millihz: u32,
-        dither_duration_ms: u16,
-    ) -> PyResult<u64> {
-        let conn = self.ethercat_conn(mcu_handle, "sync_servo_pair")?;
-        let reports = std::sync::Arc::clone(&self.sync_reports);
-        tracing::info!(
-            subsystem = "engine",
-            event = "servo_pair_sync_start",
-            mcu_handle,
-            axis,
-            torque_ok_tenth_pct,
-            settle_timeout_ms,
-            dither_amplitude_nm,
-            dither_freq_millihz,
-            dither_duration_ms,
-            "servo belt pair sync"
-        );
-        Ok(self.endpoint_calls.start("sync_servo_pair", move || {
-            let resp = crate::servo_torque::send_sync_pair(
-                &conn,
-                mcu_protocol::messages::SyncPair {
-                    axis,
-                    torque_ok_tenth_pct,
-                    settle_timeout_ms,
-                    dither_amplitude_nm,
-                    dither_freq_millihz,
-                    dither_duration_ms,
-                },
-            )?;
-            let result = resp.result;
-            reports.lock_ok().insert(mcu_handle, resp);
-            if result != 0 {
-                return Err(format!("sync_servo_pair: endpoint result {result}"));
-            }
-            Ok(())
-        }))
-    }
-    /// The measurements of the most recent pair sync on this node, as
-    /// (result, primary_slot, secondary_slot, torque_baseline_primary,
-    /// torque_baseline_secondary, torque_released, torque_dithered,
-    /// torque_final_primary, torque_final_secondary, released_delta_counts).
-    /// Available for failed runs too — the phase torques are the diagnosis.
-    #[allow(clippy::type_complexity)]
-    fn take_sync_report(
-        &self,
-        mcu_handle: u32,
-    ) -> PyResult<Option<(i32, u8, u8, i32, i32, i32, i32, i32, i32, i32)>> {
-        Ok(self.sync_reports.lock_ok().remove(&mcu_handle).map(|r| {
-            (
-                r.result,
-                r.primary_slot,
-                r.secondary_slot,
-                r.torque_baseline_primary,
-                r.torque_baseline_secondary,
-                r.torque_released,
-                r.torque_dithered,
-                r.torque_final_primary,
-                r.torque_final_secondary,
-                r.released_delta_counts,
-            )
-        }))
-    }
     fn take_drive_fault(&self, mcu_handle: u32) -> PyResult<Option<u16>> {
         Ok(self.latched.drive.lock_ok().remove(&mcu_handle))
     }
@@ -557,6 +487,103 @@ impl PyMotionEngine {
         if result != 0 {
             return Err(PyRuntimeError::new_err(format!(
                 "set_diff_damper: endpoint rejected (result {result})"
+            )));
+        }
+        Ok(())
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn set_strain_comp(
+        &self,
+        mcu_handle: u32,
+        slot_a: u8,
+        slot_b: u8,
+        lane_a: u8,
+        lane_b: u8,
+        kinematics: u8,
+        nx: u8,
+        ny: u8,
+        x0: f32,
+        y0: f32,
+        dx: f32,
+        dy: f32,
+        values_um: Vec<i32>,
+    ) -> PyResult<()> {
+        let conn = self.ethercat_conn(mcu_handle, "set_strain_comp")?;
+        tracing::info!(
+            subsystem = "engine",
+            event = "servo_strain_comp",
+            mcu_handle,
+            slot_a,
+            slot_b,
+            nx,
+            ny,
+            values = values_um.len(),
+            "servo strain compensation map upload"
+        );
+        let result = crate::servo_torque::send_set_strain_comp(
+            &conn,
+            mcu_protocol::messages::SetStrainComp {
+                slot_a,
+                slot_b,
+                lane_a,
+                lane_b,
+                kinematics,
+                nx,
+                ny,
+                x0,
+                y0,
+                dx,
+                dy,
+                values_um,
+            },
+        )
+        .map_err(PyRuntimeError::new_err)?;
+        if result != 0 {
+            return Err(PyRuntimeError::new_err(format!(
+                "set_strain_comp: endpoint result {result}"
+            )));
+        }
+        Ok(())
+    }
+    fn set_diff_trim(
+        &self,
+        py: Python<'_>,
+        mcu_handle: u32,
+        slot_a: u8,
+        slot_b: u8,
+        gain_micro: u32,
+        clamp_um: u16,
+        lpf_millihz: u32,
+    ) -> PyResult<()> {
+        let conn = self.ethercat_conn(mcu_handle, "set_diff_trim")?;
+        tracing::info!(
+            subsystem = "engine",
+            event = "servo_set_diff_trim",
+            mcu_handle,
+            slot_a,
+            slot_b,
+            gain_micro,
+            clamp_um,
+            lpf_millihz,
+            "servo differential trim"
+        );
+        let result = py
+            .detach(|| {
+                crate::servo_torque::send_set_diff_trim(
+                    &conn,
+                    mcu_protocol::messages::SetDiffTrim {
+                        slot_a,
+                        slot_b,
+                        gain_micro,
+                        clamp_um,
+                        lpf_millihz,
+                    },
+                )
+            })
+            .map_err(PyRuntimeError::new_err)?;
+        if result != 0 {
+            return Err(PyRuntimeError::new_err(format!(
+                "set_diff_trim: endpoint rejected (result {result})"
             )));
         }
         Ok(())

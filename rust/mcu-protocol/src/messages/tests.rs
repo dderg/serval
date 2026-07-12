@@ -107,6 +107,22 @@ fn set_diff_damper_roundtrip() {
 }
 
 #[test]
+fn set_diff_trim_roundtrip() {
+    let v = SetDiffTrim {
+        slot_a: 2,
+        slot_b: 3,
+        gain_micro: 50_000,
+        clamp_um: 150,
+        lpf_millihz: 25_000,
+    };
+    assert_eq!(roundtrip(&v), v);
+    assert_eq!(v.encoded_to_vec().len(), 12);
+    let r = SetDiffTrimResponse { result: -851 };
+    assert_eq!(roundtrip(&r), r);
+    assert_eq!(r.encoded_to_vec().len(), 4);
+}
+
+#[test]
 fn arm_sensorless_endstop_roundtrip() {
     let v = ArmSensorlessEndstop {
         slot: 1,

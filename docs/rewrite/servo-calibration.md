@@ -133,6 +133,80 @@ running endpoint — re-arm after a firmware restart. Verify with an A/B
 rise with the damper on. Params: `BELT` (AB) `GAIN` (required) `CLAMP`
 (50) `LPF_HZ` (300) `LEAD_US` (0).
 
+#### SERVO_DIFF_TRIM
+Arms (or disarms) the engine-resident differential belt-pair **trim** — the
+always-on, in-motion counterpart of `SERVO_SYNC`. Every EtherCAT cycle the
+endpoint low-passes the pair's mechanical-frame differential torque (the
+fight) and integrates it into a small **antisymmetric position offset** on
+top of the streamed targets: the pair unwinds against itself while the
+carriage never moves. Where the damper (torque feedback at the 90–200 Hz
+belt modes) is phase-limited by the ~ms loop lag, the trim's crossover sits
+at a few Hz — gain × pair stiffness — where that lag is a harmless few
+degrees, so it safely nulls homing preload, thermal drift and the 1–3 Hz
+toolhead-position dependence of residual strain at full traverse speed,
+and leaves the resonant band alone. Integration freezes whenever the pair
+is not streaming targets (the held offset keeps drive targets continuous
+across stream gaps) and resets on a pair sync or torque-gate drop. `GAIN`
+is mm/s of offset slew per 1% differential torque (0.05 ⇒ ~2–5 Hz
+crossover on a typical belt pair); `GAIN=0` disarms. The offset is clamped
+to `CLAMP_UM` (µm, ceiling 500); hitting the clamp logs a
+`diff_trim_clamped` warning — residual fight beyond the trim's authority.
+Torque LPF at `LPF_HZ`. State lives in the running endpoint — re-arm after
+a firmware restart. Verify with `SERVO_SYNC` afterwards: its baseline
+fight should read near zero while the trim is armed. Params: `BELT` (AB)
+`GAIN` (required) `CLAMP_UM` (150) `LPF_HZ` (25).
+
+#### SERVO_MEASURE_STRAIN_MAP
+The measurement half of the belt strain map (CoreXY only). Rasters the bed
+with slow constant-speed strokes — serpentine X sweeps stepped along Y by
+`LINE_SPACING`, then Y sweeps stepped along X — recording one capture per
+line, each stroked forward and back so the direction-dependent (friction)
+half of the differential torque averages out of the analysis. The
+per-belt differential pair torque as a function of (x, y) is the raw
+material for separating trapped preload (DC), pulley/idler runout
+(periodic in travel at each element's circumference — 40 mm motor
+pulleys) and geometry/squareness (smooth 2D) — and eventually for the
+feedforward strain-compensation map. `LINE_SPACING` must stay under half
+the shortest period of interest (10 mm covers the 40 mm and ~13 mm
+elements). Before rastering the carriage parks at the region center and
+`SERVO_SYNC` releases the trapped preload, so the DC of every map is
+measured from the same zero (`SYNC=0` skips, and the manifest records
+`zero_sync`); without `[servo_sync]` configured the command errors. The
+run directory is charted by the dashboard's strain tab. Params: `SPEED`
+(50) `ACCEL` (1000) `LINE_SPACING` (10) `X_START` `X_END` `Y_START`
+`Y_END` `DWELL_MS` `TAG` (strain) `SYNC` (1).
+
+#### Strain compensation (SERVO_MEASURE_PAIR_STIFFNESS / SERVO_STRAIN_COMP_BUILD / SERVO_STRAIN_COMP)
+The application half of the strain map, config section
+`[servo_strain_comp]`. The endpoint carries a per-belt 2D lookup table of
+**antisymmetric position offsets** keyed on the commanded carriage
+position: every cycle it reconstructs (x, y) from the streamed lane
+positions, bilinearly interpolates each belt's grid, and offsets the
+pair's two drives by equal and opposite amounts — the rotors absorb the
+position-dependent tension variation (belt thickness lumps, pitch
+nonuniformity, frame geometry) instead of fighting through the belt,
+while the carriage never moves. Offsets ride outside the command anchors
+(like the differential trim's), are clamped to ±500 µm and slew-limited
+to 1 mm/s, so enabling, replacing, or clearing a map can never yank the
+targets.
+
+The workflow: (1) `SERVO_MEASURE_PAIR_STIFFNESS` steps a constant
+antisymmetric offset (a 1×1 grid) through the same mechanism and reads
+the differential torque response over SDO 0x6077 — the fitted slope
+(%/mm) is the pair stiffness, and a poor fit (R² < 0.9) fails loudly.
+(2) `SERVO_STRAIN_COMP_BUILD RUN=<dir>` grids the run's elastic
+differential field per belt (each raster line's dense profile evaluated
+at the grid nodes it crosses), zeroes the map at the region center
+(SERVO_SYNC's zero point), divides by the stiffness, and writes
+`map_file` (default `~/printer_data/config/strain_comp.json`).
+(3) `SERVO_STRAIN_COMP ENABLE=1` resolves the map's motor names to
+slots/lanes on the live topology and uploads it; `ENABLE=0` ramps the
+compensation back out. Verify by re-running the strain map with the
+compensation enabled — the residual field should collapse. Params:
+stiffness `STEP_UM` (50) `SETTLE` (0.8) `AXIS`; build `RUN` (required)
+`STIFFNESS_A`/`STIFFNESS_B` (%/mm override) `SPACING` (run's line
+spacing).
+
 #### SERVO_MEASURE_INERTIA
 Records the excitation grid for the inertia/friction fit (no report — it is the
 capture building block behind the fit commands). The active kinematics decides
@@ -221,10 +295,15 @@ report-only) writes the verdict's recommended gains *after* the revert,
 reads them back (a mismatch is a command error, nothing left half-applied),
 and runs one `SERVO_MEASURE_TRACKING` to report before/after following-error
 peak and overshoot; a null verdict (every step flagged) makes `APPLY=1` a
-command error naming the reason instead of writing anything. Params:
+command error naming the reason instead of writing anything. `SERVO=` (comma
+list) restricts the sweep to a subset of the axis servos; adding
+`BASE_SPEED_GAIN=` then pins every non-swept axis servo at that gain (same
+`×1.6`/`Ti` derivation, recorded as `base_gains` in the manifest) for the whole
+sweep — the asymmetric-gain experiment: hold one belt pair soft while sweeping
+the other pair higher. Params:
 `SPEED_GAINS` (500,650,800,1000) `AXIS` (X) `START` `END`
 `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2) `DWELL_MS` `TAG` (cal)
-`ACCEL_CHIP` `APPLY` `SERVO`.
+`ACCEL_CHIP` `APPLY` `SERVO` `BASE_SPEED_GAIN`.
 
 #### SERVO_GAIN_LADDER
 Speed-gain sweep that climbs until analysis flags trouble, instead of a fixed
@@ -332,6 +411,8 @@ Schemas: [servo-cal-contracts.md](servo-cal-contracts.md).
 | `SERVO_MEASURE_TRACKING` | `servo-cal analyze` | run dir + `results.json` (per-motor + combined tracking metrics; records every motor driving the axis — both lanes on CoreXY) |
 | `SERVO_MEASURE_DIFFERENTIAL` | `servo-cal analyze` | run dir + `results.json` (differential FRF modes: frequency, peak gain, damping, coherence; dashboard renders the FRF) |
 | `SERVO_DIFF_DAMPER` | — | no run dir; reconfigures the running endpoint |
+| `SERVO_DIFF_TRIM` | — | no run dir; reconfigures the running endpoint |
+| `SERVO_MEASURE_STRAIN_MAP` | dashboard `/api/runs/<name>/strain` | run dir with one capture per raster line; charted by the dashboard's strain tab |
 | `SERVO_CALIBRATE_GAINS` | `servo-cal analyze` | run dir + `results.json` verdict (highest clean gain step); `APPLY=1` also writes + verifies |
 | `SERVO_GAIN_LADDER` | `servo-cal analyze` (per rung + final) | run dir + `results.json` verdict; climbs until a rung flags trouble, then applies `SAFE` |
 | `SERVO_HARVEST_NOTCHES` | — | no run dir; writes C01.30, strokes, reads back notch 1–2, locks (C01.30=0); journaled param writes |

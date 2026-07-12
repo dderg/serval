@@ -768,6 +768,8 @@ class ServoCalibration:
             "SERVO_MEASURE_TRACKING",
             "SERVO_MEASURE_DIFFERENTIAL",
             "SERVO_DIFF_DAMPER",
+            "SERVO_DIFF_TRIM",
+            "SERVO_MEASURE_STRAIN_MAP",
             "SERVO_MEASURE_INERTIA",
             "SERVO_FIT_DYNAMICS",
             "SERVO_CALIBRATE_INERTIA_RATIO",
@@ -1554,6 +1556,175 @@ class ServoCalibration:
             else:
                 gcmd.respond_info("belt %s damper disarmed" % (belt,))
 
+    MAX_TRIM_GAIN = 2.0
+    MAX_TRIM_CLAMP_UM = 500.0
+    cmd_SERVO_DIFF_TRIM_help = (
+        "Arm or disarm the differential belt-pair trim: the engine "
+        "integrates each pair's low-passed differential torque into a "
+        "small antisymmetric position offset, continuously nulling the "
+        "static fight (homing preload, thermal drift) during motion - the "
+        "always-on version of SERVO_SYNC. Loop bandwidth is a few Hz, far "
+        "below the belt resonances. GAIN is in mm/s of offset slew per 1% "
+        "differential torque; GAIN=0 disarms. CLAMP_UM bounds the offset "
+        "(hitting it logs a warning). Params BELT=A|B|AB GAIN CLAMP_UM "
+        "LPF_HZ"
+    )
+
+    def cmd_SERVO_DIFF_TRIM(self, gcmd):
+        belts = gcmd.get("BELT", "AB").upper()
+        if belts not in ("A", "B", "AB"):
+            raise gcmd.error("BELT must be A, B or AB (got %r)" % (belts,))
+        gain = gcmd.get_float("GAIN", minval=0.0, maxval=self.MAX_TRIM_GAIN)
+        clamp_um = gcmd.get_float(
+            "CLAMP_UM", 150.0, above=0.0, maxval=self.MAX_TRIM_CLAMP_UM
+        )
+        lpf_hz = gcmd.get_float("LPF_HZ", 25.0, minval=1.0, maxval=100.0)
+        engine = self.printer.lookup_object("motion_engine")
+        for belt in belts:
+            pair_names, _motors, handle, slots = self._belt_pair(
+                gcmd, belt, "SERVO_DIFF_TRIM"
+            )
+            engine.set_diff_trim(
+                handle,
+                slots[0],
+                slots[1],
+                int(round(gain * 1e6)),
+                int(round(clamp_um)),
+                int(round(lpf_hz * 1000.0)),
+            )
+            if gain > 0.0:
+                gcmd.respond_info(
+                    "belt %s trim armed (%s vs %s): gain %.3f (mm/s)/%%, "
+                    "clamp %.0f um, lpf %.1f Hz"
+                    % (
+                        belt,
+                        pair_names[0],
+                        pair_names[1],
+                        gain,
+                        clamp_um,
+                        lpf_hz,
+                    )
+                )
+            else:
+                gcmd.respond_info("belt %s trim disarmed" % (belt,))
+
+    STRAIN_MAP_MIN_LINE_SPACING_MM = 2.0
+
+    cmd_SERVO_MEASURE_STRAIN_MAP_help = (
+        "Raster the bed with slow constant-speed strokes, one capture per "
+        "line - the measurement half of the belt strain map. Differential "
+        "pair torque vs (x, y) separates trapped preload, pulley/idler "
+        "runout (periodic in travel) and geometry (smooth) when the run is "
+        "analyzed. Serpentine X sweeps stepped along Y by LINE_SPACING, "
+        "then Y sweeps stepped along X; every line strokes forward and "
+        "back so friction asymmetry averages out. Before rastering the "
+        "carriage parks at the region center and SERVO_SYNC releases the "
+        "trapped preload, so every map shares the same zero (SYNC=0 "
+        "skips). CoreXY only. Params SPEED (50) ACCEL (1000) LINE_SPACING "
+        "(10) X_START X_END Y_START Y_END DWELL_MS TAG SYNC"
+    )
+
+    @staticmethod
+    def _raster_levels(start: float, end: float, spacing: float) -> list[float]:
+        n = max(1, int(round((end - start) / spacing)))
+        return [start + (end - start) * i / n for i in range(n + 1)]
+
+    def cmd_SERVO_MEASURE_STRAIN_MAP(self, gcmd: Any) -> None:
+        kin = self._kin()
+        if not kin.coupled_xy():
+            raise gcmd.error(
+                "SERVO_MEASURE_STRAIN_MAP requires coupled XY (CoreXY) "
+                "kinematics - the strain map is a belt-pair measurement"
+            )
+        x_start, x_end, y_start, y_end = servo_strokes.xy_bounds(
+            gcmd, self.bounds
+        )
+        speed = gcmd.get_float("SPEED", 50.0, above=0.0)
+        accel = gcmd.get_float("ACCEL", 1000.0, above=0.0)
+        spacing = gcmd.get_float(
+            "LINE_SPACING", 10.0, minval=self.STRAIN_MAP_MIN_LINE_SPACING_MM
+        )
+        dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
+        tag = gcmd.get("TAG", "strain")
+        zero_sync = gcmd.get_int("SYNC", 1, minval=0, maxval=1) == 1
+        servos = servo_strokes.axis_servos(gcmd, kin, "X")
+        # The zero point must be reproducible when the map is APPLIED, not
+        # just when it is measured: always the center of the configured
+        # calibration area, never the (run-specific) raster region.
+        zero_x = (self.bounds["X"][0] + self.bounds["X"][1]) / 2.0
+        zero_y = (self.bounds["Y"][0] + self.bounds["Y"][1]) / 2.0
+        stroke_plan = {
+            "x_start": x_start,
+            "x_end": x_end,
+            "y_start": y_start,
+            "y_end": y_end,
+            "speed": speed,
+            "accel": accel,
+            "line_spacing": spacing,
+            "dwell_ms": dwell,
+            "zero_sync": zero_sync,
+            "zero_xy": [zero_x, zero_y],
+        }
+        if zero_sync:
+            sync = self.printer.lookup_object("servo_sync", None)
+            if sync is None:
+                raise gcmd.error(
+                    "SERVO_MEASURE_STRAIN_MAP: [servo_sync] is not "
+                    "configured - add it so every map shares a preload "
+                    "zero, or pass SYNC=0 to raster without one"
+                )
+            self._goto_xy(zero_x, zero_y, dwell)
+            gcmd.respond_info(
+                "strain map zero point: SERVO_SYNC at (%.1f, %.1f) — the "
+                "calibration area center; repeat there when applying the "
+                "map" % (zero_x, zero_y)
+            )
+            sync.run(gcmd)
+        run = self._begin_run(
+            gcmd,
+            "strain_map",
+            tag,
+            "XY",
+            servos,
+            stroke_plan,
+            self._corexy_rails(gcmd, "X"),
+        )
+        lines = [
+            ("X", x_start, x_end, "y", level)
+            for level in self._raster_levels(y_start, y_end, spacing)
+        ] + [
+            ("Y", y_start, y_end, "x", level)
+            for level in self._raster_levels(x_start, x_end, spacing)
+        ]
+        try:
+            self._prep("X", dwell)
+            self._prep("Y", dwell)
+            for i, (axis, start, end, fixed_axis, level) in enumerate(lines):
+                if axis == "X":
+                    self._goto_xy(start, level, dwell)
+                else:
+                    self._goto_xy(level, start, dwell)
+                name = "%sline_%s%03d" % (
+                    axis.lower(),
+                    fixed_axis,
+                    int(round(level)),
+                )
+                gcmd.respond_info(
+                    "strain map line %d/%d: %s sweep at %s=%.1f"
+                    % (i + 1, len(lines), axis, fixed_axis.upper(), level)
+                )
+                self._start_capture(name, servos)
+                self._strokes(axis, start, end, speed, accel, 1, dwell)
+                self._stop_capture()
+                run.record_step(SweepStep(name, {fixed_axis: level}, []))
+            self._restore()
+            gcmd.respond_info(
+                "strain map raster complete: %d lines in %s"
+                % (len(lines), run.run_dir)
+            )
+        finally:
+            self._active_run = None
+
     cmd_SERVO_MEASURE_INERTIA_help = (
         "Excitation grid for the inertia/friction fit (servo-ident). "
         "coupled_xy kinematics run the X+Y belt grid (SERVOS=/X_START etc "
@@ -1968,10 +2139,12 @@ class ServoCalibration:
         "to the lowest gains afterwards. APPLY=1 writes the verdict's "
         "recommended gains after the revert, reads them back, and runs one "
         "SERVO_MEASURE_TRACKING to report before/after tracking metrics "
-        "(default APPLY=0, report-only). Params SPEED_GAINS AXIS START END "
-        "SPEED ACCEL "
-        "ITERATIONS DWELL_MS TAG ACCEL_CHIP APPLY SERVO (comma list "
-        "override)"
+        "(default APPLY=0, report-only). SERVO= (comma list) restricts the "
+        "sweep to a subset of the axis servos; BASE_SPEED_GAIN then pins "
+        "every non-swept axis servo at that gain (same 1.6x/Ti derivation) "
+        "for an asymmetric-gain experiment. Params SPEED_GAINS AXIS START "
+        "END SPEED ACCEL ITERATIONS DWELL_MS TAG ACCEL_CHIP APPLY SERVO "
+        "BASE_SPEED_GAIN"
     )
 
     def cmd_SERVO_CALIBRATE_GAINS(self, gcmd: Any) -> list[SweepStep]:
@@ -1990,6 +2163,23 @@ class ServoCalibration:
                     "SPEED_GAIN %d outside 100..3000 (0.1 Hz units)" % (sg,)
                 )
         sgains = [int(sg) for sg in sgains]
+        base_sg = gcmd.get("BASE_SPEED_GAIN", None)
+        base_servos: list[str] = []
+        if base_sg is not None:
+            base_sg = int(base_sg)
+            if not 100 <= base_sg <= 3000:
+                raise gcmd.error(
+                    "BASE_SPEED_GAIN %d outside 100..3000 (0.1 Hz units)"
+                    % (base_sg,)
+                )
+            axis_servos = servo_strokes.axis_servos(gcmd, self._kin(), axis)
+            base_servos = [s for s in axis_servos if s not in servos]
+            if not base_servos:
+                raise gcmd.error(
+                    "BASE_SPEED_GAIN needs SERVO= to name a subset of the "
+                    "axis servos - every servo on axis %s is already in the "
+                    "sweep" % (axis,)
+                )
         apply = gcmd.get_int("APPLY", 0)
         chip, chip_name = self._accel_chip(gcmd)
         stroke_plan = {
@@ -2013,6 +2203,27 @@ class ServoCalibration:
         try:
             self._prep(axis, dwell)
             self._set_manual_tuning(servos)
+            if base_servos:
+                base_pos, base_integral = GainSetAdapter.derive(base_sg)
+                self._set_manual_tuning(base_servos)
+                self._write_gains(base_servos, base_pos, base_sg, base_integral)
+                run.manifest["base_gains"] = {
+                    "servos": base_servos,
+                    "position": base_pos,
+                    "speed": base_sg,
+                    "integral": base_integral,
+                }
+                run.write()
+                gcmd.respond_info(
+                    "base gains on %s: pos %.1f rad/s, speed %.1f Hz, "
+                    "Ti %.2f ms (held for the whole sweep)"
+                    % (
+                        ", ".join(base_servos),
+                        base_pos / 10.0,
+                        base_sg / 10.0,
+                        base_integral / 100.0,
+                    )
+                )
             steps = self._engine.run(
                 adapter,
                 sgains,

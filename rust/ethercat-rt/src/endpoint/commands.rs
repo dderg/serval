@@ -1,6 +1,6 @@
 use std::ops::ControlFlow;
 
-use super::{abort_sync, discard_motion, sync_response_with_code, EndpointCtx, SyncRun};
+use super::{discard_motion, EndpointCtx};
 use crate::capture::{
     any_slot_out_of_range, CaptureConfig, CaptureDriveConfig, ERR_CAPTURE_BAD_DRIVE_LIST,
 };
@@ -9,10 +9,7 @@ use crate::curves::AXIS_RING_CAPACITY;
 use crate::mailbox::{MailboxReply, MailboxRequest};
 use crate::push_plan::plan_bundle;
 use crate::sensorless::{ERR_ARM_SENSORLESS_AMBIGUOUS_PAIR, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
-use crate::sync::{
-    PairSync, SyncParams, ERR_PIECES_DURING_SYNC, ERR_SYNC_ABORTED, ERR_SYNC_BAD_AXIS,
-    ERR_SYNC_BUSY, ERR_SYNC_NOT_ENABLED, ERR_SYNC_STREAMING,
-};
+use crate::strain_comp::ERR_COMP_BAD_LANE;
 use crate::torque::{CommandAction, TorqueState, ERR_ENABLE_FAILED, ERR_PIECES_WHILE_FAULTED};
 use crate::wire::{
     arm_sensorless_endstop_response_frame, identify_response_frame, motor_state_empty_frame,
@@ -20,13 +17,14 @@ use crate::wire::{
     resonance_buzz_response_frame, restore_drive_limits_response_frame,
     resume_stream_response_frame, runtime_caps_response_frame, sdo_read_response_frame,
     sdo_write_response_frame, seed_servo_home_response_frame, set_diff_damper_response_frame,
-    set_drive_limits_response_frame, set_torque_response_frame, start_capture_response_frame,
-    stop_capture_response_frame, stop_response_frame, sync_pair_response_frame, Command,
+    set_diff_trim_response_frame, set_drive_limits_response_frame, set_strain_comp_response_frame,
+    set_torque_response_frame, start_capture_response_frame, stop_capture_response_frame,
+    stop_response_frame, Command,
 };
 use mcu_protocol::messages::{
     ArmSensorlessEndstop, PushPieces, ResonanceBuzz, SdoRead, SdoReadResponse, SdoWrite,
-    SdoWriteResponse, SetDiffDamper, SetDriveLimits, SetTorque, StartCapture, StopCaptureResponse,
-    SyncPair,
+    SdoWriteResponse, SetDiffDamper, SetDiffTrim, SetDriveLimits, SetStrainComp, SetTorque,
+    StartCapture, StopCaptureResponse,
 };
 
 pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
@@ -65,7 +63,6 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
             }
             Command::Stop { correlation_id } => {
                 let now_ns = monotonic_ns();
-                abort_sync(ctx, ERR_SYNC_ABORTED);
                 discard_motion(ctx);
                 ctx.stream_halt.halt();
                 eprintln!("ec-rt: Stop — rings discarded, stream halted, discard_clock={now_ns}");
@@ -133,17 +130,23 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
             } => {
                 handle_resonance_buzz(ctx, correlation_id, msg);
             }
-            Command::SyncPair {
-                correlation_id,
-                msg,
-            } => {
-                handle_sync_pair(ctx, correlation_id, msg);
-            }
             Command::SetDiffDamper {
                 correlation_id,
                 msg,
             } => {
                 handle_set_diff_damper(ctx, correlation_id, msg);
+            }
+            Command::SetDiffTrim {
+                correlation_id,
+                msg,
+            } => {
+                handle_set_diff_trim(ctx, correlation_id, msg);
+            }
+            Command::SetStrainComp {
+                correlation_id,
+                msg,
+            } => {
+                handle_set_strain_comp(ctx, correlation_id, msg);
             }
             Command::SdoRead {
                 correlation_id,
@@ -184,8 +187,6 @@ fn handle_push_pieces(ctx: &mut EndpointCtx, correlation_id: u32, msg: PushPiece
         .collect();
     let result = if ctx.gate.state() == TorqueState::Faulted {
         ERR_PIECES_WHILE_FAULTED
-    } else if ctx.sync.is_some() {
-        ERR_PIECES_DURING_SYNC
     } else if let Err(code) = ctx.stream_halt.check_push_allowed() {
         code
     } else {
@@ -210,12 +211,6 @@ fn handle_push_pieces(ctx: &mut EndpointCtx, correlation_id: u32, msg: PushPiece
 }
 
 fn handle_set_torque(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetTorque) {
-    if ctx.sync.is_some() {
-        eprintln!("ec-rt: SetTorque rejected — pair sync in progress");
-        ctx.server
-            .respond(&set_torque_response_frame(correlation_id, ERR_SYNC_BUSY));
-        return;
-    }
     let num_slaves = ctx.num_slaves;
     match ctx.gate.on_set_torque(msg.value != 0, msg.execute_at_ns) {
         CommandAction::Enable => {
@@ -351,13 +346,7 @@ fn handle_restore_drive_limits(ctx: &mut EndpointCtx, correlation_id: u32, slot:
 const ERR_SEED_HOME_STREAMING: i32 = -826;
 
 fn handle_seed_servo_home(ctx: &mut EndpointCtx, correlation_id: u32, slot: u8, home_q16: i32) {
-    if ctx.sync.is_some() {
-        eprintln!("ec-rt: SeedServoHome rejected — pair sync in progress");
-        ctx.server.respond(&seed_servo_home_response_frame(
-            correlation_id,
-            ERR_SYNC_BUSY,
-        ));
-    } else if slot as usize >= ctx.counts_per_mm.len() {
+    if slot as usize >= ctx.counts_per_mm.len() {
         eprintln!(
             "ec-rt: SeedServoHome for slot {slot} but only {} slave(s)",
             ctx.counts_per_mm.len()
@@ -390,10 +379,7 @@ fn handle_arm_sensorless_endstop(
     msg: ArmSensorlessEndstop,
 ) {
     let num_slaves = ctx.num_slaves;
-    let result = if ctx.sync.is_some() {
-        eprintln!("ec-rt: ArmSensorlessEndstop rejected — pair sync in progress");
-        ERR_SYNC_BUSY
-    } else if msg.slot as usize >= num_slaves {
+    let result = if msg.slot as usize >= num_slaves {
         eprintln!(
             "ec-rt: ArmSensorlessEndstop for slot {} but only {num_slaves} slave(s)",
             msg.slot
@@ -456,10 +442,7 @@ fn handle_arm_sensorless_endstop(
 }
 
 fn handle_resonance_buzz(ctx: &mut EndpointCtx, correlation_id: u32, msg: ResonanceBuzz) {
-    let rc = if ctx.sync.is_some() {
-        eprintln!("ec-rt: ResonanceBuzz rejected — pair sync in progress");
-        ERR_SYNC_BUSY
-    } else if ctx.gate.state() != TorqueState::Enabled {
+    let rc = if ctx.gate.state() != TorqueState::Enabled {
         eprintln!("ec-rt: ResonanceBuzz rejected — drive not operation-enabled");
         crate::buzz::ERR_BUZZ_NOT_ENABLED
     } else if ctx.rings.iter().any(|r| !r.is_empty()) || ctx.buzz.active() {
@@ -506,10 +489,7 @@ fn handle_resonance_buzz(ctx: &mut EndpointCtx, correlation_id: u32, msg: Resona
 }
 
 fn handle_set_diff_damper(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDiffDamper) {
-    let rc = if ctx.sync.is_some() {
-        eprintln!("ec-rt: SetDiffDamper rejected — pair sync in progress");
-        ERR_SYNC_BUSY
-    } else {
+    let rc = {
         ctx.damper.set(
             ctx.num_slaves,
             msg.slot_a,
@@ -539,6 +519,97 @@ fn handle_set_diff_damper(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDi
     );
     ctx.server
         .respond(&set_diff_damper_response_frame(correlation_id, rc));
+}
+
+fn handle_set_diff_trim(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDiffTrim) {
+    let rc = {
+        ctx.trim.set(
+            ctx.num_slaves,
+            msg.slot_a,
+            msg.slot_b,
+            msg.gain_micro,
+            msg.clamp_um,
+            msg.lpf_millihz,
+        )
+    };
+    eprintln!(
+        "ec-rt: SetDiffTrim slots=({},{}) gain_micro={} clamp={} um lpf={} mHz rc={rc}",
+        msg.slot_a, msg.slot_b, msg.gain_micro, msg.clamp_um, msg.lpf_millihz,
+    );
+    tracing::info!(
+        subsystem = "ethercat",
+        event = "set_diff_trim",
+        slot_a = msg.slot_a,
+        slot_b = msg.slot_b,
+        gain_micro = msg.gain_micro,
+        clamp_um = msg.clamp_um,
+        lpf_millihz = msg.lpf_millihz,
+        rc,
+        "differential trim reconfigured"
+    );
+    ctx.server
+        .respond(&set_diff_trim_response_frame(correlation_id, rc));
+}
+
+fn handle_set_strain_comp(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetStrainComp) {
+    let lane_missing = |lane: u8| !ctx.slave_axes.iter().any(|&a| a == lane);
+    let rc = if msg.nx > 0 && msg.ny > 0 && (lane_missing(msg.lane_a) || lane_missing(msg.lane_b)) {
+        eprintln!(
+            "ec-rt: SetStrainComp lanes ({}, {}) not present in slave_axes {:?}",
+            msg.lane_a, msg.lane_b, ctx.slave_axes
+        );
+        ERR_COMP_BAD_LANE
+    } else {
+        let values: Vec<i16> = msg
+            .values_um
+            .iter()
+            .map(|&v| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16)
+            .collect();
+        ctx.comp.set(
+            ctx.num_slaves,
+            msg.slot_a,
+            msg.slot_b,
+            msg.lane_a,
+            msg.lane_b,
+            msg.kinematics,
+            msg.nx,
+            msg.ny,
+            f64::from(msg.x0),
+            f64::from(msg.y0),
+            f64::from(msg.dx),
+            f64::from(msg.dy),
+            &values,
+        )
+    };
+    eprintln!(
+        "ec-rt: SetStrainComp slots=({},{}) lanes=({},{}) kin={} grid={}x{} \
+         origin=({}, {}) spacing=({}, {}) values={} rc={rc}",
+        msg.slot_a,
+        msg.slot_b,
+        msg.lane_a,
+        msg.lane_b,
+        msg.kinematics,
+        msg.nx,
+        msg.ny,
+        msg.x0,
+        msg.y0,
+        msg.dx,
+        msg.dy,
+        msg.values_um.len(),
+    );
+    tracing::info!(
+        subsystem = "ethercat",
+        event = "set_strain_comp",
+        slot_a = msg.slot_a,
+        slot_b = msg.slot_b,
+        nx = msg.nx,
+        ny = msg.ny,
+        values = msg.values_um.len(),
+        rc,
+        "strain compensation map reconfigured"
+    );
+    ctx.server
+        .respond(&set_strain_comp_response_frame(correlation_id, rc));
 }
 
 fn handle_sdo_read(ctx: &mut EndpointCtx, correlation_id: u32, msg: SdoRead) {
@@ -606,76 +677,6 @@ fn handle_query_motor_state(ctx: &mut EndpointCtx, correlation_id: u32) {
         ctx.server
             .respond(&motor_state_response_frame_multi(correlation_id, &samples));
     }
-}
-
-fn handle_sync_pair(ctx: &mut EndpointCtx, correlation_id: u32, msg: SyncPair) {
-    let reject = |ctx: &mut EndpointCtx, code: i32| {
-        eprintln!("ec-rt: SyncPair axis={} rejected code={code}", msg.axis);
-        ctx.server.respond(&sync_pair_response_frame(
-            correlation_id,
-            &sync_response_with_code(code),
-        ));
-    };
-    if ctx.sync.is_some() {
-        return reject(ctx, ERR_SYNC_BUSY);
-    }
-    if ctx.gate.state() != TorqueState::Enabled {
-        return reject(ctx, ERR_SYNC_NOT_ENABLED);
-    }
-    if ctx.rings.iter().any(|r| !r.is_empty()) || ctx.buzz.active() {
-        return reject(ctx, ERR_SYNC_STREAMING);
-    }
-    let slots: Vec<usize> = ctx
-        .slave_axes
-        .iter()
-        .enumerate()
-        .filter_map(|(slot, &a)| (a == msg.axis).then_some(slot))
-        .collect();
-    let [primary, secondary] = slots[..] else {
-        eprintln!(
-            "ec-rt: SyncPair axis={} maps to {} slot(s), need exactly 2 (slave_axes={:?})",
-            msg.axis,
-            slots.len(),
-            ctx.slave_axes
-        );
-        return reject(ctx, ERR_SYNC_BAD_AXIS);
-    };
-    let cycles_per_ms = (1_000_000 / ctx.cycle_ns.max(1)) as u64;
-    let params = SyncParams {
-        torque_ok_tenth_pct: msg.torque_ok_tenth_pct,
-        settle_timeout_cycles: u64::from(msg.settle_timeout_ms) * cycles_per_ms,
-        measure_cycles: 100 * cycles_per_ms,
-        quiet_cycles: 50 * cycles_per_ms,
-        dither_amplitude_nm: msg.dither_amplitude_nm,
-        dither_freq_millihz: msg.dither_freq_millihz,
-        dither_duration_ms: msg.dither_duration_ms,
-    };
-    let primary_base_target = ctx.drive.telemetry(primary).target_position;
-    let machine = match PairSync::begin(
-        params,
-        ctx.cmd_counts_per_mm[primary],
-        ctx.counts_per_mm[secondary],
-        primary_base_target,
-    ) {
-        Ok(m) => m,
-        Err(code) => return reject(ctx, code),
-    };
-    eprintln!(
-        "ec-rt: SyncPair axis={} started primary={primary} secondary={secondary} \
-         base_target={primary_base_target} torque_ok={} dither={}nm@{}mHz/{}ms",
-        msg.axis,
-        msg.torque_ok_tenth_pct,
-        msg.dither_amplitude_nm,
-        msg.dither_freq_millihz,
-        msg.dither_duration_ms
-    );
-    ctx.sync = Some(SyncRun {
-        correlation_id,
-        primary,
-        secondary,
-        secondary_disabled: false,
-        machine,
-    });
 }
 
 pub(super) fn drain_pending_starts(ctx: &mut EndpointCtx) {

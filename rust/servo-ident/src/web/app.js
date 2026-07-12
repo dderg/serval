@@ -61,6 +61,22 @@ const PAGE_DEFS = {
       },
     ],
   },
+  strain: {
+    label: "strain",
+    strain: true,
+    experiments: ["strain_map"],
+    intro: "map differential belt torque across the bed — elastic strain and friction",
+    templates: [
+      {
+        label: "map…",
+        command: "SERVO_MEASURE_STRAIN_MAP LINE_SPACING=20 SPEED=50 ACCEL=1000 TAG=strain",
+        title:
+          "raster the bed with slow strokes — parks at the region center and runs " +
+          "SERVO_SYNC first so every map shares a preload zero; omit X/Y_START/END " +
+          "to cover the whole probed region",
+      },
+    ],
+  },
   live: {
     label: "live",
     live: true,
@@ -107,10 +123,15 @@ const state = {
     cycle0: null, // first streamed cycle_index — the chart's t=0
     lastCycle: null, // cycle_index of the last kept sample, for gap breaks
     t: [], // seconds since stream start, one per kept point
-    perDrive: {}, // tap drive name -> ferr values (null = gap break)
+    perDrive: {}, // tap drive name -> {ferr, torque} arrays (null = gap break)
     windowS: 10, // seconds kept and drawn, set by the slider
     timers: [], // interval ids cleared on page switch
     polling: false,
+  },
+  strain: {
+    selected: null, // run name shown on the strain page; auto-picks the newest
+    cache: new Map(), // name -> {mtime_utc, data} from /api/runs/<name>/strain
+    field: "elastic", // which half to chart: elastic (fwd+back)/2 or friction (fwd-back)/2
   },
   sentLog: [], // {time, label, lines, results} — every G-code batch sent this session
 };
@@ -344,6 +365,10 @@ function liveShellHtml() {
     `no capture, no file</p>` +
     `</div>` +
     `</section>` +
+    `<section class="live-section">` +
+    `<div class="section-head"><h2>live actual torque — per motor</h2></div>` +
+    `<div class="charts" id="live-torque-charts"></div>` +
+    `</section>` +
     `</main>` +
     `<aside class="controls">` +
     `<section class="sweep">` +
@@ -373,6 +398,19 @@ function renderPage() {
     bindLiveEvents();
     renderSentLog();
     startLivePolling();
+    return;
+  }
+  if (def.strain) {
+    root.innerHTML = strainShellHtml(def);
+    bindPageEvents();
+    document.querySelectorAll("button.strain-field-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        state.strain.field = btn.dataset.field;
+        redrawStrain();
+      });
+    });
+    renderSentLog();
+    redrawStrain();
     return;
   }
   if (def.journal) {
@@ -624,7 +662,7 @@ function pickSeries(step) {
 /// Renders at the device pixel ratio so lines stay vector-crisp on hidpi
 /// displays: the backing store is sized to the CSS box × dpr and the
 /// context scaled back, while all layout math stays in CSS pixels.
-function drawChart(canvas, traces, yLabel, fixedY) {
+function drawChart(canvas, traces, yLabel, fixedY, xUnit) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth || canvas.width;
   const h = canvas.clientHeight || canvas.height;
@@ -673,7 +711,7 @@ function drawChart(canvas, traces, yLabel, fixedY) {
   for (let i = 0; i <= 4; i++) {
     const t = tMin + ((tMax - tMin) * i) / 4;
     const px = x(t);
-    ctx.fillText(t.toFixed(2) + "s", px, h - 6);
+    ctx.fillText(t.toFixed(2) + (xUnit || "s"), px, h - 6);
   }
   ctx.stroke();
 
@@ -1273,6 +1311,480 @@ function renderFrfCharts(names, plots) {
   meta.textContent = metaParts.join(" · ");
 }
 
+// --- strain map (strain page) -------------------------------------------------
+//
+// Renders GET /api/runs/<name>/strain: per raster line, the elastic
+// (direction-symmetric) differential belt torque binned along the sweep.
+// All four heatmaps (belt × sweep orientation) draw in BED coordinates —
+// horizontal = bed x, vertical = bed y increasing upward, square aspect —
+// on one symmetric diverging scale, so a feature at some bed position
+// lines up across every panel. X-sweep lines are horizontal bands at
+// their swept y; Y-sweep lines are vertical bands at their swept x.
+
+const STRAIN_NEUTRAL = "#1f2630";
+const STRAIN_NEG = "#4fb3ff";
+const STRAIN_POS = "#e05a4f";
+const STRAIN_HEAT_PAD = { l: 40, r: 8, t: 16, b: 26 };
+const STRAIN_HEAT_CANVAS_W = 430;
+const STRAIN_LINE_SPACING_FALLBACK_MM = 20;
+
+function strainShellHtml(def) {
+  return (
+    `<div class="workspace">` +
+    `<main class="analysis">` +
+    `<section class="runs-section">` +
+    `<div class="section-head"><h2>strain runs</h2>` +
+    `<span class="note">strain_map — click a row to render its map</span></div>` +
+    `<div class="table-wrap runs-wrap"><table><thead><tr>` +
+    `<th>time</th><th>tag</th><th></th>` +
+    `</tr></thead><tbody id="strain-run-body"></tbody></table></div>` +
+    `</section>` +
+    `<section>` +
+    `<div class="section-head"><h2>strain map</h2>` +
+    `<button class="strain-field-btn" data-field="elastic">elastic</button>` +
+    `<button class="strain-field-btn" data-field="friction" ` +
+    `title="the direction-dependent half: (forward - backward)/2 — what a position-keyed offset cannot cancel">friction</button>` +
+    `<span class="note" id="strain-summary"></span></div>` +
+    `<div id="strain-heatmaps" class="strain-grid"></div>` +
+    `<div id="strain-scale"></div>` +
+    `</section>` +
+    `<section>` +
+    `<div class="section-head"><h2>per-line elastic profiles</h2>` +
+    `<span class="note">one polyline per raster line, in bed coordinates</span></div>` +
+    `<div class="charts" id="strain-profiles"></div>` +
+    `</section>` +
+    `<section>` +
+    `<div class="section-head"><h2>per-line DC offset — mean elastic</h2>` +
+    `<span class="note">a line-to-line offset is trapped preload, not local strain</span></div>` +
+    `<div class="strain-grid" id="strain-dc"></div>` +
+    `</section>` +
+    `</main>` +
+    `<aside class="controls">${controlsSectionsHtml(def)}</aside>` +
+    `</div>`
+  );
+}
+
+async function ensureStrain(name) {
+  const run = state.runs.find((r) => r.name === name);
+  const cached = state.strain.cache.get(name);
+  if (cached && run && cached.mtime_utc === run.mtime_utc) return cached.data;
+  const data = await api(`/api/runs/${encodeURIComponent(name)}/strain`);
+  state.strain.cache.set(name, { mtime_utc: run ? run.mtime_utc : null, data });
+  return data;
+}
+
+function renderStrainRuns() {
+  const tbody = el("strain-run-body");
+  if (!tbody) return;
+  const runs = pageRuns(currentPageDef());
+  if (!runs.some((r) => r.name === state.strain.selected)) {
+    state.strain.selected = runs.length ? runs[0].name : null;
+  }
+  tbody.innerHTML = "";
+  for (const run of runs) {
+    const tr = document.createElement("tr");
+    tr.classList.add("selectable");
+    if (run.name === state.strain.selected) tr.classList.add("selected");
+    tr.addEventListener("click", () => {
+      state.strain.selected = run.name;
+      redrawStrain();
+    });
+    const timeTd = document.createElement("td");
+    timeTd.textContent = shortTime(run.mtime_utc);
+    timeTd.title = `${run.name} — ${run.mtime_utc}`;
+    tr.appendChild(timeTd);
+    const tagTd = document.createElement("td");
+    tagTd.textContent = `${run.tag}${run.axis ? " " + run.axis : ""}`;
+    tr.appendChild(tagTd);
+    const actionTd = document.createElement("td");
+    actionTd.className = "actions";
+    const prefillBtn = document.createElement("button");
+    prefillBtn.textContent = "→ console";
+    prefillBtn.title = "prefill the console with this run's command";
+    prefillBtn.disabled = !(state.details.get(run.name) || {}).manifest;
+    prefillBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      loadRerunForm(run.name);
+    });
+    actionTd.appendChild(prefillBtn);
+    tr.appendChild(actionTd);
+    tbody.appendChild(tr);
+  }
+}
+
+function strainColor(t) {
+  const clamped = Math.max(-1, Math.min(1, t));
+  return clamped < 0
+    ? mixColor(STRAIN_NEUTRAL, STRAIN_NEG, -clamped)
+    : mixColor(STRAIN_NEUTRAL, STRAIN_POS, clamped);
+}
+
+function sweptEntry(line) {
+  const entries = Object.entries(line.swept || {});
+  return entries.length ? entries[0] : ["?", 0];
+}
+
+function strainLineLabel(line) {
+  const [key, value] = sweptEntry(line);
+  return `${key}=${Number(value).toFixed(0)}`;
+}
+
+/// Raster lines grouped by sweep orientation and ordered by the swept
+/// coordinate, so heatmap bands lay out like the bed does.
+function strainGroups(data) {
+  const bySwept = (a, b) => sweptEntry(a)[1] - sweptEntry(b)[1];
+  const group = (orientation, prefix, title) => ({
+    orientation,
+    title,
+    lines: data.lines.filter((l) => l.name.startsWith(prefix)).sort(bySwept),
+  });
+  return [group("x", "xline", "X sweep"), group("y", "yline", "Y sweep")].filter(
+    (g) => g.lines.length
+  );
+}
+
+/// Bed-frame geometry: the sweep coordinate is shifted to start at 0, so
+/// its bed origin is the manifest's stroke_plan start; when the plan is
+/// unavailable it is recovered from the run itself — each orientation's
+/// sweep starts where the OTHER orientation's raster lines sit, so their
+/// minimum swept value is the origin. Band thickness is the raster pitch.
+function strainBedGeometry(groups, plan) {
+  const sweptOf = (orientation) => {
+    const g = groups.find((x) => x.orientation === orientation);
+    return g ? g.lines.map((l) => sweptEntry(l)[1]) : [];
+  };
+  const minGap = (vals) => {
+    const s = [...vals].sort((a, b) => a - b);
+    let gap = Infinity;
+    for (let i = 1; i < s.length; i++) gap = Math.min(gap, s[i] - s[i - 1]);
+    return isFinite(gap) && gap > 0 ? gap : STRAIN_LINE_SPACING_FALLBACK_MM;
+  };
+  const xBands = sweptOf("y");
+  const yBands = sweptOf("x");
+  const spacing = plan.line_spacing || Math.min(minGap(xBands), minGap(yBands));
+  const bandHalf = spacing / 2;
+  const x0 = plan.x_start != null ? plan.x_start : xBands.length ? Math.min(...xBands) : 0;
+  const y0 = plan.y_start != null ? plan.y_start : yBands.length ? Math.min(...yBands) : 0;
+  const xs = [];
+  const ys = [];
+  for (const g of groups) {
+    for (const line of g.lines) {
+      const half = lineBinWidth(line) / 2;
+      const c = line.bin_centers;
+      const swept = sweptEntry(line)[1];
+      const sweepOrigin = g.orientation === "x" ? x0 : y0;
+      const along = [sweepOrigin + c[0] - half, sweepOrigin + c[c.length - 1] + half];
+      const across = [swept - bandHalf, swept + bandHalf];
+      if (g.orientation === "x") {
+        xs.push(...along);
+        ys.push(...across);
+      } else {
+        ys.push(...along);
+        xs.push(...across);
+      }
+    }
+  }
+  const xlo = Math.min(...xs);
+  const ylo = Math.min(...ys);
+  return {
+    x0,
+    y0,
+    bandHalf,
+    xlo,
+    xhi: Math.max(Math.max(...xs), xlo + 1),
+    ylo,
+    yhi: Math.max(Math.max(...ys), ylo + 1),
+  };
+}
+
+function strainStats(data) {
+  let maxElastic = 0;
+  let maxFriction = 0;
+  let fricSum = 0;
+  let fricN = 0;
+  for (const line of data.lines) {
+    for (const belt of line.belts) {
+      for (const v of belt.elastic) {
+        if (v !== null) maxElastic = Math.max(maxElastic, Math.abs(v));
+      }
+      for (const v of belt.friction) {
+        if (v !== null) {
+          maxFriction = Math.max(maxFriction, Math.abs(v));
+          fricSum += Math.abs(v);
+          fricN++;
+        }
+      }
+    }
+  }
+  return { maxElastic, maxFriction, meanFriction: fricN ? fricSum / fricN : 0 };
+}
+
+function lineBinWidth(line) {
+  const c = line.bin_centers;
+  return c.length > 1 ? c[1] - c[0] : 2 * c[0];
+}
+
+function drawStrainHeatmap(canvas, group, beltIdx, vmax, geo) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || canvas.width;
+  const h = canvas.clientHeight || canvas.height;
+  const backingW = Math.round(w * dpr);
+  const backingH = Math.round(h * dpr);
+  if (canvas.width !== backingW || canvas.height !== backingH) {
+    canvas.width = backingW;
+    canvas.height = backingH;
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = "#0d1117";
+  ctx.fillRect(0, 0, w, h);
+  const pad = STRAIN_HEAT_PAD;
+  const px = (mm) => pad.l + ((mm - geo.xlo) / (geo.xhi - geo.xlo)) * (w - pad.l - pad.r);
+  const py = (mm) => h - pad.b - ((mm - geo.ylo) / (geo.yhi - geo.ylo)) * (h - pad.t - pad.b);
+
+  ctx.font = "10px monospace";
+  for (const line of group.lines) {
+    const swept = sweptEntry(line)[1];
+    const half = lineBinWidth(line) / 2;
+    const sweepOrigin = group.orientation === "x" ? geo.x0 : geo.y0;
+    line.bin_centers.forEach((center, b) => {
+      const v = line.belts[beltIdx][state.strain.field][b];
+      if (v === null) return;
+      ctx.fillStyle = strainColor(v / vmax);
+      const lo = sweepOrigin + center - half;
+      const hi = sweepOrigin + center + half;
+      if (group.orientation === "x") {
+        const top = py(swept + geo.bandHalf);
+        ctx.fillRect(px(lo), top + 0.5, px(hi) - px(lo), py(swept - geo.bandHalf) - top - 1);
+      } else {
+        const left = px(swept - geo.bandHalf);
+        ctx.fillRect(left + 0.5, py(hi), px(swept + geo.bandHalf) - left - 1, py(lo) - py(hi));
+      }
+    });
+  }
+
+  ctx.fillStyle = "#8a97a3";
+  for (let i = 0; i <= 4; i++) {
+    const xmm = geo.xlo + ((geo.xhi - geo.xlo) * i) / 4;
+    ctx.fillText(xmm.toFixed(0), Math.min(px(xmm) - 6, w - 20), h - pad.b + 12);
+    const ymm = geo.ylo + ((geo.yhi - geo.ylo) * i) / 4;
+    ctx.fillText(ymm.toFixed(0), 2, Math.max(py(ymm) + 3, pad.t + 8));
+  }
+  ctx.fillText("bed x (mm)", pad.l + (w - pad.l - pad.r) / 2 - 30, h - 4);
+  ctx.fillText("bed y (mm)", pad.l, 11);
+}
+
+function strainHeatmapBox(title, group, beltIdx, vmax, geo) {
+  const box = document.createElement("div");
+  box.className = "chart-box";
+  const head = document.createElement("h3");
+  head.textContent = title;
+  box.appendChild(head);
+  const canvas = document.createElement("canvas");
+  const pad = STRAIN_HEAT_PAD;
+  const plotW = STRAIN_HEAT_CANVAS_W - pad.l - pad.r;
+  const plotH = plotW * ((geo.yhi - geo.ylo) / (geo.xhi - geo.xlo));
+  canvas.width = STRAIN_HEAT_CANVAS_W;
+  canvas.height = Math.round(pad.t + pad.b + plotH);
+  box.appendChild(canvas);
+  drawStrainHeatmap(canvas, group, beltIdx, vmax, geo);
+  return box;
+}
+
+function strainScaleHtml(vmax) {
+  const stops = [];
+  for (let i = 0; i <= 8; i++) stops.push(strainColor(i / 4 - 1));
+  const what =
+    state.strain.field === "friction"
+      ? "friction (direction-dependent) differential torque"
+      : "elastic differential torque";
+  return (
+    `<div class="strain-scale"><span>−${vmax.toFixed(1)}%</span>` +
+    `<span class="bar" style="background:linear-gradient(90deg,${stops.join(",")})"></span>` +
+    `<span>+${vmax.toFixed(1)}%</span>` +
+    `<span class="hint">${what}, % rated — null bins stay dark</span></div>`
+  );
+}
+
+function strainProfileBox(title, beltIdx, group, vmax, geo) {
+  const box = document.createElement("div");
+  box.className = "chart-box";
+  const head = document.createElement("h3");
+  head.textContent = title;
+  box.appendChild(head);
+  const canvas = document.createElement("canvas");
+  canvas.width = 860;
+  canvas.height = 300;
+  box.appendChild(canvas);
+  const lines = group.lines;
+  const sweepOrigin = group.orientation === "x" ? geo.x0 : geo.y0;
+  const ramp = (i) =>
+    mixColor(
+      PALETTE[beltIdx % PALETTE.length],
+      "#ffffff",
+      lines.length > 1 ? (0.65 * i) / (lines.length - 1) : 0
+    );
+  const traces = lines.map((line, i) => ({
+    t: line.bin_centers.map((c) => sweepOrigin + c),
+    y: line.belts[beltIdx][state.strain.field],
+    color: ramp(i),
+  }));
+  drawChart(
+    canvas,
+    traces,
+    `${state.strain.field} (%) vs bed ${group.orientation}`,
+    { yMin: -vmax, yMax: vmax },
+    "mm"
+  );
+  const legend = document.createElement("div");
+  legend.className = "legend";
+  lines.forEach((line, i) => {
+    const item = document.createElement("span");
+    item.innerHTML = `<span class="swatch" style="background:${ramp(i)}"></span>${line.name}`;
+    legend.appendChild(item);
+  });
+  box.appendChild(legend);
+  return box;
+}
+
+function meanElastic(line, beltIdx) {
+  const kept = line.belts[beltIdx].elastic.filter((v) => v !== null);
+  if (!kept.length) return null;
+  return kept.reduce((a, b) => a + b, 0) / kept.length;
+}
+
+function drawStrainDcBars(canvas, labels, values) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || canvas.width;
+  const h = canvas.clientHeight || canvas.height;
+  const backingW = Math.round(w * dpr);
+  const backingH = Math.round(h * dpr);
+  if (canvas.width !== backingW || canvas.height !== backingH) {
+    canvas.width = backingW;
+    canvas.height = backingH;
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = "#0d1117";
+  ctx.fillRect(0, 0, w, h);
+  const pad = { l: 46, r: 8, t: 8, b: 40 };
+  const vmax = Math.max(1e-6, ...values.filter((v) => v !== null).map(Math.abs));
+  const y = (v) => pad.t + ((vmax - v) / (2 * vmax)) * (h - pad.t - pad.b);
+  const slot = (w - pad.l - pad.r) / labels.length;
+
+  ctx.font = "10px monospace";
+  ctx.fillStyle = "#8a97a3";
+  for (const v of [-vmax, 0, vmax]) {
+    ctx.fillText(v.toFixed(1), 2, y(v) + 3);
+  }
+  ctx.strokeStyle = "#29313a";
+  ctx.beginPath();
+  ctx.moveTo(pad.l, y(0));
+  ctx.lineTo(w - pad.r, y(0));
+  ctx.stroke();
+
+  values.forEach((v, i) => {
+    const cx = pad.l + (i + 0.5) * slot;
+    if (v !== null) {
+      ctx.fillStyle = strainColor(v / vmax);
+      const top = Math.min(y(0), y(v));
+      ctx.fillRect(cx - slot * 0.35, top, slot * 0.7, Math.max(1, Math.abs(y(v) - y(0))));
+    }
+    ctx.save();
+    ctx.translate(cx + 3, h - pad.b + 10);
+    ctx.rotate(-Math.PI / 4);
+    ctx.fillStyle = "#8a97a3";
+    ctx.textAlign = "right";
+    ctx.fillText(labels[i], 0, 0);
+    ctx.restore();
+  });
+  ctx.fillStyle = "#8a97a3";
+  ctx.textAlign = "left";
+  ctx.fillText("mean elastic (%)", pad.l, 10);
+}
+
+function strainDcBox(title, beltIdx, lines) {
+  const box = document.createElement("div");
+  box.className = "chart-box";
+  const head = document.createElement("h3");
+  head.textContent = title;
+  box.appendChild(head);
+  const canvas = document.createElement("canvas");
+  canvas.width = 430;
+  canvas.height = 210;
+  box.appendChild(canvas);
+  drawStrainDcBars(
+    canvas,
+    lines.map(strainLineLabel),
+    lines.map((line) => meanElastic(line, beltIdx))
+  );
+  return box;
+}
+
+function renderStrainCharts(data) {
+  const heatmaps = el("strain-heatmaps");
+  const profiles = el("strain-profiles");
+  const dc = el("strain-dc");
+  const summary = el("strain-summary");
+  heatmaps.innerHTML = "";
+  profiles.innerHTML = "";
+  dc.innerHTML = "";
+  if (!data.lines.length) {
+    summary.textContent = "run has no lines";
+    el("strain-scale").innerHTML = "";
+    return;
+  }
+  const stats = strainStats(data);
+  const vmax = Math.max(
+    1e-6,
+    state.strain.field === "friction" ? stats.maxFriction : stats.maxElastic
+  );
+  summary.textContent =
+    `max |elastic| ${stats.maxElastic.toFixed(1)}% · ` +
+    `mean |friction| ${stats.meanFriction.toFixed(1)}%`;
+  document.querySelectorAll("button.strain-field-btn").forEach((btn) => {
+    btn.disabled = btn.dataset.field === state.strain.field;
+  });
+  el("strain-scale").innerHTML = strainScaleHtml(vmax);
+  const groups = strainGroups(data);
+  const detail = state.details.get(state.strain.selected);
+  const plan = (detail && detail.manifest && detail.manifest.stroke_plan) || {};
+  const geo = strainBedGeometry(groups, plan);
+  const pairs = data.lines[0].belts.map((b) => b.pair);
+  pairs.forEach((pair, beltIdx) => {
+    for (const group of groups) {
+      const title = `${pair} — ${group.title}`;
+      heatmaps.appendChild(strainHeatmapBox(title, group, beltIdx, vmax, geo));
+      profiles.appendChild(strainProfileBox(title, beltIdx, group, vmax, geo));
+      dc.appendChild(strainDcBox(title, beltIdx, group.lines));
+    }
+  });
+}
+
+async function redrawStrain() {
+  renderStrainRuns();
+  if (!el("strain-heatmaps")) return;
+  const summary = el("strain-summary");
+  const name = state.strain.selected;
+  if (!name) {
+    summary.textContent = "no strain_map runs yet — run SERVO_STRAIN_MAP first";
+    el("strain-heatmaps").innerHTML = "";
+    el("strain-scale").innerHTML = "";
+    el("strain-profiles").innerHTML = "";
+    el("strain-dc").innerHTML = "";
+    return;
+  }
+  let data;
+  try {
+    data = await ensureStrain(name);
+  } catch (e) {
+    summary.textContent = String(e);
+    return;
+  }
+  if (state.strain.selected !== name || !el("strain-heatmaps")) return;
+  renderStrainCharts(data);
+}
+
 // --- PSD peak list (notches page) -------------------------------------------
 
 /// Greedy spaced peak-picking inside the resonance band: repeatedly take
@@ -1378,6 +1890,10 @@ function renderPeakList(names, plots, steps) {
 async function redrawCharts() {
   const def = currentPageDef();
   if (def.journal) return;
+  if (def.strain) {
+    await redrawStrain();
+    return;
+  }
   const names = selectedRunNames();
   const plots = [];
   const okNames = [];
@@ -1487,7 +2003,10 @@ function appendTapSamples(payload) {
   if (state.live.cycle0 === null) state.live.cycle0 = payload.first_cycle;
   for (const drive of drives) {
     if (!state.live.perDrive[drive]) {
-      state.live.perDrive[drive] = new Array(state.live.t.length).fill(null);
+      state.live.perDrive[drive] = {
+        ferr: new Array(state.live.t.length).fill(null),
+        torque: new Array(state.live.t.length).fill(null),
+      };
     }
   }
   const stride = payload.stride;
@@ -1496,11 +2015,15 @@ function appendTapSamples(payload) {
     const cycle = payload.first_cycle + i * stride;
     if (state.live.lastCycle !== null && cycle - state.live.lastCycle > gapThreshold) {
       state.live.t.push((state.live.lastCycle + stride - state.live.cycle0) / payload.fs_hz);
-      for (const drive of drives) state.live.perDrive[drive].push(null);
+      for (const drive of drives) {
+        state.live.perDrive[drive].ferr.push(null);
+        state.live.perDrive[drive].torque.push(null);
+      }
     }
     state.live.t.push((cycle - state.live.cycle0) / payload.fs_hz);
     for (const drive of drives) {
-      state.live.perDrive[drive].push(payload.drives[drive].ferr[i]);
+      state.live.perDrive[drive].ferr.push(payload.drives[drive].ferr[i]);
+      state.live.perDrive[drive].torque.push(payload.drives[drive].torque[i] / 10);
     }
     state.live.lastCycle = cycle;
   }
@@ -1514,7 +2037,10 @@ function trimLiveWindow() {
   while (drop < state.live.t.length && state.live.t[drop] < cutoff) drop++;
   if (drop > 0) {
     state.live.t.splice(0, drop);
-    for (const series of Object.values(state.live.perDrive)) series.splice(0, drop);
+    for (const series of Object.values(state.live.perDrive)) {
+      series.ferr.splice(0, drop);
+      series.torque.splice(0, drop);
+    }
   }
 }
 
@@ -1533,24 +2059,20 @@ function liveDriveLabel(tapName) {
   return tapName;
 }
 
-function liveChartId(drive) {
-  return `live-canvas-${drive}`;
-}
-
-function ensureLiveChartBoxes(drives) {
-  const container = el("live-charts");
+function ensureLiveChartBoxes(containerId, idPrefix, drives) {
+  const container = el(containerId);
   if (!container) return false;
   const have = [...container.querySelectorAll("canvas")].map((c) => c.id).join();
-  const want = drives.map(liveChartId).join();
+  const want = drives.map((d) => `${idPrefix}-canvas-${d}`).join();
   if (have !== want) {
     container.innerHTML = drives
       .map(
         (d, i) =>
           `<div class="chart-box">` +
           `<h3><span class="swatch" style="background:${PALETTE[i % PALETTE.length]}"></span>` +
-          `<span id="live-name-${d}">${liveDriveLabel(d)}</span> ` +
-          `<span class="note" id="live-peak-${d}"></span></h3>` +
-          `<canvas id="${liveChartId(d)}" width="860" height="130"></canvas>` +
+          `<span id="${idPrefix}-name-${d}">${liveDriveLabel(d)}</span> ` +
+          `<span class="note" id="${idPrefix}-peak-${d}"></span></h3>` +
+          `<canvas id="${idPrefix}-canvas-${d}" width="860" height="130"></canvas>` +
           `</div>`
       )
       .join("");
@@ -1558,16 +2080,14 @@ function ensureLiveChartBoxes(drives) {
   return true;
 }
 
-function drawLiveCharts() {
-  if (!state.live.t.length) return;
-  const drives = Object.keys(state.live.perDrive).sort();
-  if (!drives.length || !ensureLiveChartBoxes(drives)) return;
+function drawLiveChartGroup(containerId, idPrefix, drives, channel, yLabel, peakFmt) {
+  if (!ensureLiveChartBoxes(containerId, idPrefix, drives)) return;
   let yMin = Infinity;
   let yMax = -Infinity;
   const peaks = {};
   for (const d of drives) {
     let peak = 0;
-    for (const v of state.live.perDrive[d]) {
+    for (const v of state.live.perDrive[d][channel]) {
       if (v === null) continue;
       if (v < yMin) yMin = v;
       if (v > yMax) yMax = v;
@@ -1578,19 +2098,47 @@ function drawLiveCharts() {
   }
   if (!isFinite(yMin)) return;
   drives.forEach((d, i) => {
-    const canvas = el(liveChartId(d));
+    const canvas = el(`${idPrefix}-canvas-${d}`);
     if (!canvas) return;
     drawChart(
       canvas,
-      [{ t: state.live.t, y: state.live.perDrive[d], color: PALETTE[i % PALETTE.length] }],
-      "ferr (counts)",
+      [
+        {
+          t: state.live.t,
+          y: state.live.perDrive[d][channel],
+          color: PALETTE[i % PALETTE.length],
+        },
+      ],
+      yLabel,
       { yMin, yMax }
     );
-    const name = el(`live-name-${d}`);
+    const name = el(`${idPrefix}-name-${d}`);
     if (name) name.textContent = liveDriveLabel(d);
-    const label = el(`live-peak-${d}`);
-    if (label) label.textContent = `peak |ferr| ${peaks[d]}`;
+    const label = el(`${idPrefix}-peak-${d}`);
+    if (label) label.textContent = peakFmt(peaks[d]);
   });
+}
+
+function drawLiveCharts() {
+  if (!state.live.t.length) return;
+  const drives = Object.keys(state.live.perDrive).sort();
+  if (!drives.length) return;
+  drawLiveChartGroup(
+    "live-charts",
+    "live",
+    drives,
+    "ferr",
+    "ferr (counts)",
+    (p) => `peak |ferr| ${p}`
+  );
+  drawLiveChartGroup(
+    "live-torque-charts",
+    "live-torque",
+    drives,
+    "torque",
+    "torque (% rated)",
+    (p) => `peak |torque| ${p.toFixed(1)}%`
+  );
 }
 
 function startLivePolling() {
@@ -2163,6 +2711,15 @@ function reconstructCommand(manifest) {
     case "accel_sweep": {
       const values = manifest.steps.map((s) => s.swept.accel ?? Object.values(s.swept)[0]).join(",");
       return `SERVO_SWEEP_ACCEL ACCELS=${values} ${common}${strokeSuffix(manifest, false)}`;
+    }
+    case "strain_map": {
+      const plan = manifest.stroke_plan;
+      return (
+        `SERVO_MEASURE_STRAIN_MAP LINE_SPACING=${plan.line_spacing} SPEED=${plan.speed} ` +
+        `ACCEL=${plan.accel} X_START=${plan.x_start} X_END=${plan.x_end} ` +
+        `Y_START=${plan.y_start} Y_END=${plan.y_end} DWELL_MS=${plan.dwell_ms} ` +
+        `${plan.zero_sync ? "" : "SYNC=0 "}TAG=${tag}`
+      );
     }
     case "differential": {
       const plan = manifest.stroke_plan;

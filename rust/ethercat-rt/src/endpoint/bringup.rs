@@ -20,6 +20,7 @@ use crate::sensorless::SensorlessBank;
 use crate::server::FrameServer;
 use crate::stream_halt::StreamHalt;
 use crate::torque::TorqueGate;
+use crate::trim::DiffTrimBank;
 use crate::wire::claim_handshake_reply_frame;
 use mcu_protocol::messages::{SlaveState, ERR_SDO_TRANSPORT, ERR_SDO_UNSUPPORTED_SIZE};
 
@@ -280,6 +281,8 @@ pub fn bringup(args: Args) -> EndpointCtx {
     let rings: Vec<AxisRing> = (0..num_slaves).map(AxisRing::with_slot).collect();
     let buzz = BuzzOsc::new();
     let damper = DiffDamperBank::new(cycle_ns);
+    let trim = DiffTrimBank::new(cycle_ns);
+    let comp = crate::strain_comp::StrainCompBank::new(cycle_ns);
     let cmaps: Vec<Option<CountMap>> = (0..num_slaves).map(|_| None).collect();
     let last_counts: Vec<Option<i32>> = vec![None; num_slaves];
     // Per-slot report frame: (counts, host mm) captured at the homing finalize.
@@ -487,8 +490,11 @@ pub fn bringup(args: Args) -> EndpointCtx {
         rings,
         buzz,
         damper,
+        trim,
+        comp,
         cmaps,
         last_counts,
+        last_written_offset: vec![0; num_slaves],
         report_anchor,
         last_streamed_target,
         last_sent_retired,
@@ -508,6 +514,5 @@ pub fn bringup(args: Args) -> EndpointCtx {
         latched_drive_err,
         sensorless,
         stream_halt,
-        sync: None,
     }
 }

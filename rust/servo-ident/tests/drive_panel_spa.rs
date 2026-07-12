@@ -81,6 +81,29 @@ fn app_js_defines_the_differential_frf_functions() {
     }
 }
 
+/// Same contract for the strain-map tab: the grouping, colormap, heatmap,
+/// and profile/DC rendering stay grep-able function declarations in the
+/// served asset, and the tab's data source stays the strain endpoint.
+#[test]
+fn app_js_defines_the_strain_map_functions() {
+    let required = [
+        "function strainGroups(",
+        "function strainColor(",
+        "function drawStrainHeatmap(",
+        "function strainProfileBox(",
+        "function drawStrainDcBars(",
+        "function renderStrainCharts(",
+        "\"strain_map\"",
+        "/strain`",
+    ];
+    for needle in required {
+        assert!(
+            APP_JS.contains(needle),
+            "app.js must define {needle} — the strain map rendering"
+        );
+    }
+}
+
 /// `GET /api/drive_state` and the SPA are both driven by the same
 /// `drive_state.json`; this asserts the demo's copy satisfies what the
 /// panel's grouping/autofill/drift logic assumes, so the demo actually
