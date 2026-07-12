@@ -119,6 +119,7 @@ case "$MODE" in
         # The virtual clock is one shared /dev/shm segment per container,
         # so e2e tests run sequentially inside one container. Parallelism
         # comes from separate docker runs (namespaces fully isolate them).
+        [[ -n "${VTIME_SPEED:-}" ]] && DOCKER_ARGS+=(-e VTIME_SPEED)
         docker run ${DOCKER_ARGS[@]+"${DOCKER_ARGS[@]}"} --entrypoint python3 "$IMAGE_TAG" \
             -m pytest tools/sim/tests -m needs_elf -v -p no:cacheprovider \
             ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
