@@ -14,6 +14,17 @@
 //! bakes a live offset in. A 1x1 grid is a constant offset — that is how the
 //! pair stiffness itself is measured (step a known offset, read the torque
 //! response).
+//!
+//! The map's DC follows the mechanics: whenever torque drops (SERVO_SYNC,
+//! M84, idle timeout), the free rotors relax the pair's differential strain
+//! at wherever the carriage sits — including a hand-move while unpowered —
+//! so the position where torque returns becomes the new physical zero. The
+//! bank re-anchors there: it samples the grid at the re-engage position and
+//! applies the map relative to that value, never re-racking a freshly
+//! relaxed gantry. The cost is accuracy: the map's fractional error is now
+//! measured from the re-engage position instead of the calibrated zero, so
+//! re-anchoring at a field extreme can double the worst-case residual. A
+//! SERVO_SYNC at the map's zero point restores the calibrated anchor.
 
 pub const ERR_COMP_BAD_SLOT: i32 = -856;
 pub const ERR_COMP_BAD_GRID: i32 = -857;
@@ -46,6 +57,8 @@ struct PairComp {
     values_mm: Vec<f64>,
     target_mm: f64,
     applied_mm: f64,
+    anchor_xy: Option<(f64, f64)>,
+    needs_rebias: bool,
     clearing: bool,
 }
 
@@ -81,6 +94,19 @@ impl PairComp {
             _ => (pa, pb),
         }
     }
+
+    fn bias_mm(&self) -> f64 {
+        self.anchor_xy.map_or(0.0, |(ax, ay)| self.sample(ax, ay))
+    }
+}
+
+/// With re-anchoring, the applied offset can reach the grid's full span
+/// (sample minus anchor sample), so the span — not just each value — must
+/// stay inside the offset budget.
+fn grid_span_um(values_um: &[i16]) -> i32 {
+    let lo = values_um.iter().copied().min().unwrap_or(0);
+    let hi = values_um.iter().copied().max().unwrap_or(0);
+    i32::from(hi) - i32::from(lo)
 }
 
 pub struct StrainCompBank {
@@ -143,6 +169,7 @@ impl StrainCompBank {
             || values_um.len() != nx * ny
             || !(dx > 0.0 && dy > 0.0 && x0.is_finite() && y0.is_finite())
             || values_um.iter().any(|v| v.abs() > MAX_COMP_OFFSET_UM)
+            || grid_span_um(values_um) > i32::from(MAX_COMP_OFFSET_UM)
         {
             return ERR_COMP_BAD_GRID;
         }
@@ -155,11 +182,13 @@ impl StrainCompBank {
         }
         // A replaced map keeps ramping from the currently applied offset —
         // the slew limiter owns every transition, including enable and clear.
-        let applied = self
+        // The anchor position survives too: the physical zero is wherever
+        // torque last returned, and the new grid gets sampled there.
+        let (applied, anchor_xy) = self
             .comps
             .iter()
             .find(|c| same_pair(c))
-            .map_or(0.0, |c| c.applied_mm);
+            .map_or((0.0, None), |c| (c.applied_mm, c.anchor_xy));
         self.comps.retain(|c| !same_pair(c));
         self.comps.push(PairComp {
             slot_a: a,
@@ -176,6 +205,8 @@ impl StrainCompBank {
             values_mm: values_um.iter().map(|&v| f64::from(v) * 1e-3).collect(),
             target_mm: applied,
             applied_mm: applied,
+            anchor_xy,
+            needs_rebias: false,
             clearing: false,
         });
         0
@@ -188,17 +219,22 @@ impl StrainCompBank {
     /// Torque was dropped: the rotors relaxed to neutral, so the physically
     /// applied offset is gone. Forget it and re-slew from zero on re-enable
     /// instead of stepping the freshly seeded targets by the stale amount.
+    /// The relax also moved the pair's physical zero to wherever the
+    /// carriage sits when torque returns, so positional grids re-anchor
+    /// there; constant grids are the stiffness probe's deliberate offset
+    /// and keep their value.
     pub fn reset_applied(&mut self) {
         for comp in &mut self.comps {
             comp.applied_mm = 0.0;
             comp.target_mm = 0.0;
+            comp.needs_rebias = comp.nx * comp.ny > 1;
         }
     }
 
-    pub fn snapshot(&self) -> Vec<(usize, usize, f64, f64)> {
+    pub fn snapshot(&self) -> Vec<(usize, usize, f64, f64, f64)> {
         self.comps
             .iter()
-            .map(|c| (c.slot_a, c.slot_b, c.applied_mm, c.target_mm))
+            .map(|c| (c.slot_a, c.slot_b, c.applied_mm, c.target_mm, c.bias_mm()))
             .collect()
     }
 
@@ -225,7 +261,11 @@ impl StrainCompBank {
                 comp.target_mm = comp.values_mm[0];
             } else if let (Some(pa), Some(pb)) = (lane_pos(comp.lane_a), lane_pos(comp.lane_b)) {
                 let (x, y) = comp.carriage_xy(pa, pb);
-                comp.target_mm = comp.sample(x, y);
+                if comp.needs_rebias {
+                    comp.anchor_xy = Some((x, y));
+                    comp.needs_rebias = false;
+                }
+                comp.target_mm = comp.sample(x, y) - comp.bias_mm();
             }
             let step = (comp.target_mm - comp.applied_mm)
                 .clamp(-self.slew_per_cycle_mm, self.slew_per_cycle_mm);

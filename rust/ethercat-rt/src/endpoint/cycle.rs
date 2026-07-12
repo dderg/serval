@@ -329,7 +329,7 @@ fn comp_offset_counts(ctx: &mut EndpointCtx, lane_mm: &[Option<f64>]) -> Vec<i32
         counts[s] = (offset_mm[s] * ctx.cmd_counts_per_mm[s]).round() as i32;
     }
     if ctx.cycle_index % TRIM_STATE_LOG_CYCLES == 0 {
-        for (slot_a, slot_b, applied_mm, target_mm) in ctx.comp.snapshot() {
+        for (slot_a, slot_b, applied_mm, target_mm, bias_mm) in ctx.comp.snapshot() {
             tracing::info!(
                 subsystem = "ethercat",
                 event = "strain_comp_state",
@@ -337,6 +337,7 @@ fn comp_offset_counts(ctx: &mut EndpointCtx, lane_mm: &[Option<f64>]) -> Vec<i32
                 slot_b,
                 applied_um = (applied_mm * 1e3).round() as i64,
                 target_um = (target_mm * 1e3).round() as i64,
+                anchor_bias_um = (bias_mm * 1e3).round() as i64,
                 "strain compensation state"
             );
         }

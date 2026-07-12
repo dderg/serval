@@ -244,6 +244,26 @@ fn bad_inputs_are_rejected() {
         ERR_COMP_BAD_GRID
     );
     assert_eq!(
+        b.set(
+            4,
+            0,
+            1,
+            0,
+            1,
+            KIN_COREXY,
+            2,
+            1,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            &[-300, 300]
+        ),
+        ERR_COMP_BAD_GRID,
+        "a span beyond the offset budget must be rejected — re-anchoring \
+         can apply the full span"
+    );
+    assert_eq!(
         b.set(4, 0, 1, 0, 1, KIN_COREXY, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
         0
     );
@@ -251,6 +271,117 @@ fn bad_inputs_are_rejected() {
         b.set(4, 1, 2, 0, 1, KIN_COREXY, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
         ERR_COMP_SLOT_IN_USE
     );
+}
+
+#[test]
+fn torque_release_reanchors_the_map_at_the_reengage_position() {
+    let mut b = bank();
+    // Cartesian 2x1 grid: 0 um at x=0, 100 um at x=100.
+    assert_eq!(
+        b.set(
+            4,
+            0,
+            1,
+            0,
+            1,
+            KIN_CARTESIAN,
+            2,
+            1,
+            0.0,
+            0.0,
+            100.0,
+            1.0,
+            &[0, 100]
+        ),
+        0
+    );
+    let at_x100 = [Some(100.0), Some(100.0), Some(0.0), Some(0.0)];
+    let out = settle(&mut b, &at_x100, 2000);
+    assert!((out[0] - 0.1).abs() < 1e-9);
+    // Torque drops with the carriage at x=100: the relax makes that the
+    // pair's physical zero, and re-engaging there must not re-rack it.
+    b.reset_applied();
+    let out = settle(&mut b, &at_x100, 2000);
+    assert!(
+        out[0].abs() < 1e-9,
+        "no offset at the re-engage position, got {}",
+        out[0]
+    );
+    let at_x0 = [Some(0.0), Some(0.0), Some(0.0), Some(0.0)];
+    let out = settle(&mut b, &at_x0, 2000);
+    assert!(
+        (out[0] + 0.1).abs() < 1e-9,
+        "map applies relative to the x=100 anchor, got {}",
+        out[0]
+    );
+}
+
+#[test]
+fn reanchor_survives_a_map_replacement() {
+    let mut b = bank();
+    assert_eq!(
+        b.set(
+            4,
+            0,
+            1,
+            0,
+            1,
+            KIN_CARTESIAN,
+            2,
+            1,
+            0.0,
+            0.0,
+            100.0,
+            1.0,
+            &[0, 100]
+        ),
+        0
+    );
+    let at_x100 = [Some(100.0), Some(100.0), Some(0.0), Some(0.0)];
+    b.reset_applied();
+    settle(&mut b, &at_x100, 2000);
+    // A replacement map gets sampled at the surviving anchor position.
+    assert_eq!(
+        b.set(
+            4,
+            0,
+            1,
+            0,
+            1,
+            KIN_CARTESIAN,
+            2,
+            1,
+            0.0,
+            0.0,
+            100.0,
+            1.0,
+            &[0, 200]
+        ),
+        0
+    );
+    let at_x0 = [Some(0.0), Some(0.0), Some(0.0), Some(0.0)];
+    let out = settle(&mut b, &at_x0, 2000);
+    assert!(
+        (out[0] + 0.2).abs() < 1e-9,
+        "new grid anchored at x=100, got {}",
+        out[0]
+    );
+}
+
+#[test]
+fn constant_grid_reapplies_after_a_torque_release() {
+    let mut b = bank();
+    assert_eq!(
+        b.set(4, 0, 1, 0, 1, KIN_COREXY, 1, 1, 0.0, 0.0, 1.0, 1.0, &[100]),
+        0
+    );
+    let idle = [None, None, None, None];
+    settle(&mut b, &idle, 2000);
+    // The stiffness probe's constant is a deliberate offset, not a
+    // compensation — it must come back at full value, never re-anchor.
+    b.reset_applied();
+    let out = settle(&mut b, &idle, 2000);
+    assert!((out[0] - 0.1).abs() < 1e-9, "got {}", out[0]);
 }
 
 #[test]
