@@ -9,7 +9,7 @@ class ConfigError(Exception):
 
 
 def cartesian_limits(extra="", max_accel=3000.0):
-    limits, _axes, _limit_sections, _kinematics, _consumed = (
+    limits, _axes, _kinematics, _consumed = (
         configfile._config_doc.read_motion_settings(
             "[printer]\nmax_velocity: 300\nmax_accel: %s\n%s"
             % (max_accel, extra)

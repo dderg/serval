@@ -299,7 +299,7 @@ def read_native_decl(sections):
     from klippy import configfile
 
     try:
-        _limits, _axes, _limit_sections, kinematics_decl, _consumed = (
+        _limits, _axes, kinematics_decl, _consumed = (
             configfile._config_doc.read_motion_settings(
                 sections_to_text(sections)
             )

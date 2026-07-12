@@ -46,26 +46,6 @@ fn planner_config_from_settings(settings: &MotionSettings) -> PyResult<config::P
         config::PostProcessorSet::try_new(&axis_registry, &settings.post_processors)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    let limit_sections: Vec<config::LimitSection> = settings
-        .limits
-        .iter()
-        .map(|limit| {
-            let axes = limit
-                .axes
-                .iter()
-                .map(|a| axis_registry.axis_index(a))
-                .collect::<Result<Vec<usize>, _>>()
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            Ok(config::LimitSection {
-                name: limit.name.clone(),
-                axes,
-                max_velocity: limit.max_velocity,
-                max_accel: limit.max_accel,
-                max_jerk: limit.max_jerk,
-            })
-        })
-        .collect::<PyResult<_>>()?;
-
     settings
         .cartesian
         .validate()
@@ -73,7 +53,6 @@ fn planner_config_from_settings(settings: &MotionSettings) -> PyResult<config::P
 
     let mut cfg = config::PlannerConfig::default();
     cfg.axis_registry = axis_registry;
-    cfg.limit_sections = limit_sections;
     cfg.cartesian = settings.cartesian;
     cfg.post_processors = post_processor_set;
     cfg.max_extrude_only_velocity = settings.max_extrude_only_velocity;
@@ -463,28 +442,10 @@ impl PyMotionEngine {
         }
         let (limits, z_velocity_budget, z_accel_budget) = {
             let cfg = self.planner_config.lock_ok();
-            let z_axis = cfg
-                .axis_registry
-                .axis_index("z")
-                .map_err(|e| PyValueError::new_err(format!("set_bed_mesh: {e}")))?;
-            let mut z_v = cfg.cartesian.max_z_velocity;
-            let mut z_a = cfg.cartesian.max_z_accel;
-            for section in cfg
-                .limit_sections
-                .iter()
-                .filter(|s| s.axes.contains(&z_axis))
-            {
-                if let Some(v) = section.max_velocity {
-                    z_v = z_v.min(v);
-                }
-                if let Some(a) = section.max_accel {
-                    z_a = z_a.min(a);
-                }
-            }
             (
                 cfg.cartesian,
-                z_velocity_limit.unwrap_or(z_v),
-                z_accel_limit.unwrap_or(z_a),
+                z_velocity_limit.unwrap_or(cfg.cartesian.max_z_velocity),
+                z_accel_limit.unwrap_or(cfg.cartesian.max_z_accel),
             )
         };
         let coupled_v = bounds.max_gradient * limits.max_velocity;
