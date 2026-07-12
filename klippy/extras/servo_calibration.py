@@ -90,6 +90,9 @@ NOTCH_MODE_ADDR = "0x2001.0x31"
 NOTCH_READBACK: tuple[tuple[str, tuple[str, str, str]], ...] = (
     ("notch1", ("0x2001.0x41", "0x2001.0x42", "0x2001.0x43")),
     ("notch2", ("0x2001.0x44", "0x2001.0x45", "0x2001.0x46")),
+    ("notch3", ("0x2001.0x47", "0x2001.0x48", "0x2001.0x49")),
+    ("notch4", ("0x2001.0x4a", "0x2001.0x4b", "0x2001.0x4c")),
+    ("notch5", ("0x2001.0x4d", "0x2001.0x4e", "0x2001.0x4f")),
 )
 LADDER_STOP_FLAGS = frozenset(
     {"resonance_detected", "torque_saturated", "settle_window_truncated"}
@@ -279,10 +282,9 @@ class GainSetAdapter:
         )
         return swept, applied
 
-    def revert(self, values: list[int]) -> None:
-        sg0 = values[0]
-        pg0, ig0 = self.derive(sg0)
-        self._cal._write_gains(self.servos, pg0, sg0, ig0)
+    def revert(self, speed_gain: int) -> None:
+        pos_gain, integral = self.derive(speed_gain)
+        self._cal._write_gains(self.servos, pos_gain, speed_gain, integral)
 
 
 class SingleGainAdapter:
@@ -881,6 +883,9 @@ class ServoCalibration:
             journal[servo] = readings
         return {
             "journal_params": journal,
+            "notches": {
+                servo: self._notch_state(gcmd, servo) for servo in servos
+            },
             "param_writes_since_last_run": servo_param.drain_param_writes(),
         }
 
@@ -2136,7 +2141,9 @@ class ServoCalibration:
         "results.json with a typed verdict (the recommended step). "
         "With an accelerometer (accel_chip config option or ACCEL_CHIP=) "
         "each step also records vibration data next to its capture. Reverts "
-        "to the lowest gains afterwards. APPLY=1 writes the verdict's "
+        "to REVERT_GAIN afterwards (0.1 Hz units, default the lowest "
+        "SPEED_GAINS entry) - pass it to test one gain and land on a known "
+        "safe one. APPLY=1 writes the verdict's "
         "recommended gains after the revert, reads them back, and runs one "
         "SERVO_MEASURE_TRACKING to report before/after tracking metrics "
         "(default APPLY=0, report-only). SERVO= (comma list) restricts the "
@@ -2144,7 +2151,7 @@ class ServoCalibration:
         "every non-swept axis servo at that gain (same 1.6x/Ti derivation) "
         "for an asymmetric-gain experiment. Params SPEED_GAINS AXIS START "
         "END SPEED ACCEL ITERATIONS DWELL_MS TAG ACCEL_CHIP APPLY SERVO "
-        "BASE_SPEED_GAIN"
+        "BASE_SPEED_GAIN REVERT_GAIN"
     )
 
     def cmd_SERVO_CALIBRATE_GAINS(self, gcmd: Any) -> list[SweepStep]:
@@ -2163,6 +2170,12 @@ class ServoCalibration:
                     "SPEED_GAIN %d outside 100..3000 (0.1 Hz units)" % (sg,)
                 )
         sgains = [int(sg) for sg in sgains]
+        revert_gain = gcmd.get_int("REVERT_GAIN", sgains[0])
+        if not 100 <= revert_gain <= 3000:
+            raise gcmd.error(
+                "REVERT_GAIN %d outside 100..3000 (0.1 Hz units)"
+                % (revert_gain,)
+            )
         base_sg = gcmd.get("BASE_SPEED_GAIN", None)
         base_servos: list[str] = []
         if base_sg is not None:
@@ -2236,10 +2249,10 @@ class ServoCalibration:
                 accel_chip_name=chip_name,
             )
             gcmd.respond_info(
-                "sweep done - reverting to first step (%.1f Hz) until you "
-                "apply the recommendation" % (sgains[0] / 10.0,)
+                "sweep done - reverting to speed gain %.1f Hz until you "
+                "apply the recommendation" % (revert_gain / 10.0,)
             )
-            adapter.revert(sgains)
+            adapter.revert(revert_gain)
             self._restore()
             results = self._analyze_and_report(gcmd, run)
             self._last_sweep_run, self._last_sweep_results = run, results
@@ -2285,22 +2298,35 @@ class ServoCalibration:
             )
         )
 
+    def _read_notch_param(self, gcmd: Any, servo: str, addr: str) -> int:
+        try:
+            return self._read_param(servo, addr)
+        except (RuntimeError, ValueError) as e:
+            raise gcmd.error(
+                "notch readback failed for %s %s: %s" % (servo, addr, e)
+            )
+
     def _read_notches(
         self, gcmd: Any, servo: str
     ) -> list[tuple[int, int, int]]:
-        notches: list[tuple[int, int, int]] = []
-        for _label, addrs in NOTCH_READBACK:
-            triple: list[int] = []
-            for addr in addrs:
-                try:
-                    triple.append(self._read_param(servo, addr))
-                except (RuntimeError, ValueError) as e:
-                    raise gcmd.error(
-                        "SERVO_HARVEST_NOTCHES: notch readback failed for "
-                        "%s %s: %s" % (servo, addr, e)
-                    )
-            notches.append((triple[0], triple[1], triple[2]))
-        return notches
+        return [
+            (
+                self._read_notch_param(gcmd, servo, addrs[0]),
+                self._read_notch_param(gcmd, servo, addrs[1]),
+                self._read_notch_param(gcmd, servo, addrs[2]),
+            )
+            for _label, addrs in NOTCH_READBACK
+        ]
+
+    def _notch_state(self, gcmd: Any, servo: str) -> dict[str, Any]:
+        state: dict[str, Any] = {
+            "mode": self._read_notch_param(gcmd, servo, NOTCH_MODE_ADDR)
+        }
+        for (label, _addrs), (freq, width, depth) in zip(
+            NOTCH_READBACK, self._read_notches(gcmd, servo)
+        ):
+            state[label] = {"freq_hz": freq, "width": width, "depth": depth}
+        return state
 
     def cmd_SERVO_HARVEST_NOTCHES(self, gcmd: Any) -> None:
         axis = gcmd.get("AXIS", "X").upper()
@@ -2321,7 +2347,7 @@ class ServoCalibration:
         self._write_notch_mode(servos, 0)
         self._restore()
         for servo in servos:
-            n1, n2 = harvested[servo]
+            n1, n2 = harvested[servo][:2]
             gcmd.respond_info(
                 "%s notch1 %d Hz w%d d%d | notch2 %d Hz w%d d%d"
                 % (servo, n1[0], n1[1], n1[2], n2[0], n2[1], n2[2])

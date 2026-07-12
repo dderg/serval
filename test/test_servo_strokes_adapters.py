@@ -132,12 +132,12 @@ def test_gain_set_adapter_step_name_and_apply_writes_triple():
     ]
 
 
-def test_gain_set_adapter_revert_uses_first_value_in_list():
+def test_gain_set_adapter_revert_writes_the_named_gain():
     sc, gcode = make_calibration()
     adapter = servo_calibration.GainSetAdapter(sc, ["motor_a"], "cal")
     adapter.apply(500)
     adapter.apply(1000)
-    adapter.revert([700, 500, 1000])
+    adapter.revert(700)
     writes = _writes(gcode, "0x2001.0x02")
     assert writes[-1].split("VALUE=")[1].split()[0] == "700"
 

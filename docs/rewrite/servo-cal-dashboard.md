@@ -242,9 +242,11 @@ same convention as the vendor manual and the drive's front panel.
 - **Apply** previews the exact pending `SERVO_TUNE PARAM=... VALUE=...
   MOTORS=<explicit list>` lines above the button (motors grouped per
   value), sends them through Moonraker, appends the batch to the
-  timestamped session log, then re-dumps the drives — `SERVO_TUNE`
-  readback-verifies each write but does not rewrite `drive_state.json`,
-  so without the re-dump the grid would snap back to stale values.
+  timestamped session log, then reloads `drive_state.json` — `SERVO_TUNE`
+  readback-verifies each write and patches the mapped value into
+  `drive_state.json` in place, so the grid refreshes from the file in
+  milliseconds; the full `SERVO_DUMP_TUNING` drive re-read stays behind
+  the refresh button.
 - **Console.** One terminal-style G-code line under the session log on
   every page — sweeps, manual commands, and multi-line pastes all go
   through it. Enter runs (shift+enter for a newline, `;` lines are

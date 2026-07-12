@@ -263,4 +263,12 @@ or a missing engine handle aborts with a command error naming the motor.
 `autofill` from the dump and issues the derived writes itself, one
 register per `SERVO_TUNE` call.
 
+After the writes verify, a mapped param's new value is patched into
+`<captures_root>/drive_state.json` in place (same atomic tmp+rename;
+`created_utc` is refreshed) — the readback verification makes the file's
+entry truth without a full `SERVO_DUMP_TUNING` re-read, which is what lets
+the dashboard's Apply be instant. No file, no patch; an unmapped raw
+address is not in the file's schema and is skipped; an unreadable file is
+a command error telling you to rebuild it with `SERVO_DUMP_TUNING`.
+
 One `respond_info` line reports the param, value, and the motors written.

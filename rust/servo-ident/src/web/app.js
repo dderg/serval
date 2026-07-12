@@ -184,13 +184,40 @@ function journalParams(manifest) {
   return (manifest && manifest.ambient && manifest.ambient.journal_params) || {};
 }
 
+function ambientNotches(manifest) {
+  return (manifest && manifest.ambient && manifest.ambient.notches) || null;
+}
+
+function flatAmbient(manifest, includeNotches) {
+  const flat = {};
+  for (const [motor, addrs] of Object.entries(journalParams(manifest))) {
+    flat[motor] = { ...addrs };
+  }
+  if (!includeNotches) return flat;
+  for (const [motor, state] of Object.entries(ambientNotches(manifest) || {})) {
+    const dst = (flat[motor] = flat[motor] || {});
+    for (const [key, value] of Object.entries(state)) {
+      if (value && typeof value === "object") {
+        for (const [field, v] of Object.entries(value)) dst[`${key}.${field}`] = v;
+      } else {
+        dst[`notch_${key}`] = value;
+      }
+    }
+  }
+  return flat;
+}
+
 function motorCount(journal) {
   return Object.keys(journal).length;
 }
 
 function ambientDiff(prevManifest, curManifest) {
-  const prev = journalParams(prevManifest);
-  const cur = journalParams(curManifest);
+  // Notch state only diffs when both runs recorded it - a null/legacy
+  // previous manifest would otherwise flood the column with ?->value
+  // lines for every notch field.
+  const bothNotches = !!(ambientNotches(prevManifest) && ambientNotches(curManifest));
+  const prev = flatAmbient(prevManifest, bothNotches);
+  const cur = flatAmbient(curManifest, bothNotches);
   const multiMotor = motorCount(prev) > 1 || motorCount(cur) > 1;
   const parts = [];
   const motors = new Set([...Object.keys(prev), ...Object.keys(cur)]);
@@ -815,12 +842,21 @@ function mixColor(hex, targetHex, t) {
   return `#${((mix(16) << 16) | (mix(8) << 8) | mix(0)).toString(16).padStart(6, "0")}`;
 }
 
-/// One run selected: each step gets its own palette color. Several runs:
-/// each run keeps its table-swatch hue and its steps ramp toward white, so
-/// runs stay distinguishable and the step chips are the clutter valve.
+/// One run selected: each step gets its own palette color, rotated so the
+/// first step is exactly the run's table-swatch color — the swatch and the
+/// chart must never disagree, whatever color the run ended up holding.
+/// Several runs: each run keeps its table-swatch hue and its steps ramp
+/// toward white, so runs stay distinguishable and the step chips are the
+/// clutter valve.
 function traceStyle(names, steps, runIdx, stepIdx) {
   if (names.length === 1) {
-    return { color: PALETTE[stepIdx % PALETTE.length], name: steps[stepIdx] };
+    const base = runColor(names[0]);
+    const baseIdx = PALETTE.indexOf(base);
+    if (baseIdx < 0) throw new Error(`${base}: run color is not in the palette`);
+    return {
+      color: PALETTE[(baseIdx + stepIdx) % PALETTE.length],
+      name: steps[stepIdx],
+    };
   }
   const base = runColor(names[runIdx]);
   const ramp = steps.length > 1 ? (0.55 * stepIdx) / (steps.length - 1) : 0;
@@ -2653,16 +2689,16 @@ async function refreshDriveState() {
   if (late) late.textContent = " refresh timed out — drive_state.json never got newer";
 }
 
-/// Apply sends the previewed SERVO_TUNE batch, then re-dumps the drives —
-/// SERVO_TUNE readback-verifies each write but does not rewrite
-/// drive_state.json, so without the re-dump the grid would snap back to
-/// stale values and the apply would look like a no-op.
+/// Apply sends the previewed SERVO_TUNE batch, then reloads
+/// drive_state.json — SERVO_TUNE readback-verifies each write and patches
+/// the file in place, so re-reading it is enough; the full
+/// SERVO_DUMP_TUNING drive re-read stays behind the refresh button.
 async function applyDriveChanges() {
   const changed = diffChangedParams(state.drive.data.params, state.drive.data.motors, state.drive.pending);
   const lines = buildServoTuneCommands(changed);
   if (!lines.length) return;
   await runGcode(lines, "apply");
-  await refreshDriveState();
+  await loadDriveState();
 }
 
 // --- sweep re-run ---------------------------------------------------------
