@@ -155,12 +155,11 @@ class ServoSync:
             for entry in entries:
                 node.set_motor_torque(entry.rail.get_name(), False, print_time)
             # The disable executes at print_time on the MCU clock; a wall
-            # clock pause can finish before it ever fires, and the re-enable
-            # then CANCELS the pending disable — no release at all. Dwelling
-            # in the print-time domain guarantees the disable executed and
-            # the mechanics got the full relax window.
-            toolhead.dwell(settle)
-            toolhead.wait_moves()
+            # clock pause (or a drain-based wait) can finish before it ever
+            # fires, and the re-enable then CANCELS the pending disable — no
+            # release at all. Waiting on the same clock guarantees the
+            # disable executed and the mechanics got the full relax window.
+            toolhead.wait_until_print_time(print_time + settle)
             print_time = toolhead.get_last_move_time()
             waiters = [
                 node.set_motor_torque(entry.rail.get_name(), True, print_time)

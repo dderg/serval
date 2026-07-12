@@ -29,7 +29,7 @@ class FakeToolhead:
     def __init__(self, kin):
         self._kin = kin
         self.wait_moves_calls = 0
-        self.dwells = []
+        self.print_time_waits = []
 
     def get_kinematics(self):
         return self._kin
@@ -37,8 +37,8 @@ class FakeToolhead:
     def wait_moves(self):
         self.wait_moves_calls += 1
 
-    def dwell(self, delay):
-        self.dwells.append(delay)
+    def wait_until_print_time(self, print_time):
+        self.print_time_waits.append(print_time)
 
     def get_last_move_time(self):
         return 12.5
@@ -204,10 +204,9 @@ def test_torque_cycles_off_then_on_for_every_belt_rail():
     ]
     assert node.waiter_calls == 1
     toolhead = printer.lookup_object("toolhead")
-    assert toolhead.dwells == [pytest.approx(1.0)]
-    assert toolhead.wait_moves_calls == 2, (
-        "the settle must be waited out in the print-time domain, or the "
-        "re-enable cancels the still-pending disable"
+    assert toolhead.print_time_waits == [pytest.approx(13.5)], (
+        "the settle must be waited out past the scheduled disable time on "
+        "the MCU clock, or the re-enable cancels the still-pending disable"
     )
     assert toolhead.get_kinematics().parked == [(0, 1)]
 
@@ -230,10 +229,11 @@ def test_axis_filter_releases_only_that_pair():
     assert [r[1] for r in engine.sdo_reads] == [2, 3, 2, 3]
 
 
-def test_settle_override_stretches_the_relax_dwell():
+def test_settle_override_stretches_the_relax_window():
     ss, _, _, printer = make_sync()
     ss.cmd_SERVO_SYNC(FakeGcmd(SETTLE="2.5"))
-    assert printer.lookup_object("toolhead").dwells == [pytest.approx(2.5)]
+    toolhead = printer.lookup_object("toolhead")
+    assert toolhead.print_time_waits == [pytest.approx(15.0)]
 
 
 def test_residual_fight_after_release_errors_loudly():
