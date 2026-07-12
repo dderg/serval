@@ -140,7 +140,6 @@ class ServoSync:
         axes = self._syncable_axes(gcmd, axis_filter)
         toolhead = self.printer.lookup_object("toolhead")
         engine = self.printer.lookup_object("motion_engine")
-        reactor = self.printer.get_reactor()
         toolhead.wait_moves()
         self._drain_motion(gcmd, engine)
         by_node = {}
@@ -155,7 +154,13 @@ class ServoSync:
             print_time = toolhead.get_last_move_time()
             for entry in entries:
                 node.set_motor_torque(entry.rail.get_name(), False, print_time)
-            reactor.pause(reactor.monotonic() + settle)
+            # The disable executes at print_time on the MCU clock; a wall
+            # clock pause can finish before it ever fires, and the re-enable
+            # then CANCELS the pending disable — no release at all. Dwelling
+            # in the print-time domain guarantees the disable executed and
+            # the mechanics got the full relax window.
+            toolhead.dwell(settle)
+            toolhead.wait_moves()
             print_time = toolhead.get_last_move_time()
             waiters = [
                 node.set_motor_torque(entry.rail.get_name(), True, print_time)
