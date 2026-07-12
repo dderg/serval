@@ -248,22 +248,7 @@ def test_prune_removes_now_empty_group_dir(tmp_path):
     assert not dead.exists()
 
 
-def test_no_axis_sections_yields_empty_lists(tmp_path):
-    cfg = tmp_path / "printer.cfg"
-    cfg.write_text(
-        "[printer]\n"
-        "max_velocity: 300\n"
-        "max_accel: 1000\n"
-        "square_corner_velocity: 0\n"
-        "max_jerk: 100000\n"
-    )
-    data = harness.read_printer_config(cfg)
-    assert data.axis_sections == []
-    assert data.post_processor_sections == []
-    assert data.max_velocity == 300.0
-
-
-def test_axis_and_post_processor_sections_are_parsed(tmp_path):
+def test_read_printer_config_serializes_document(tmp_path):
     cfg = tmp_path / "printer.cfg"
     cfg.write_text(
         "[printer]\n"
@@ -278,31 +263,11 @@ def test_axis_and_post_processor_sections_are_parsed(tmp_path):
         "\n"
         "[axis x]\n"
         "post_processors: is_xy\n"
-        "\n"
-        "[axis y]\n"
-        "post_processors: is_xy\n"
     )
     data = harness.read_printer_config(cfg)
-    names = {a.name for a in data.axis_sections}
-    assert names == {"x", "y"}
-    assert len(data.post_processor_sections) == 1
-    pp = data.post_processor_sections[0]
-    assert pp.name == "is_xy"
-    assert pp.type == "smooth_mzv"
-    assert pp.params == [("frequency_hz", 39.3)]
-
-
-def test_undeclared_post_processor_reference_fails_loudly(tmp_path):
-    cfg = tmp_path / "printer.cfg"
-    cfg.write_text(
-        "[printer]\n"
-        "max_velocity: 300\n"
-        "max_accel: 1000\n"
-        "square_corner_velocity: 0\n"
-        "max_jerk: 100000\n"
-        "\n"
-        "[axis x]\n"
-        "post_processors: nope\n"
-    )
-    with pytest.raises(Exception):
-        harness.read_printer_config(cfg)
+    assert data.max_velocity == 300.0
+    # The engine re-reads the motion sections from the serialized document;
+    # section parsing itself is covered by planner-config's from_doc tests.
+    assert "[post_processor is_xy]" in data.config_text
+    assert "frequency_hz = 39.3" in data.config_text
+    assert "[axis x]" in data.config_text

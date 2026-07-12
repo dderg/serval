@@ -61,67 +61,23 @@ FLOAT_RTOL = 1e-7
 @dataclass
 class PrinterConfigData:
     max_velocity: float
-    max_accel: float
-    square_corner_velocity: float
-    max_jerk: float
-    max_extrude_only_velocity: float | None
-    max_extrude_only_accel: float | None
-    max_path_deviation: float
-    max_accel_deviation: float
-    axis_sections: list
-    post_processor_sections: list
+    config_text: str
 
 
 def read_printer_config(cfg_path: Path) -> PrinterConfigData:
-    # Parse through klippy's own loader so includes resolve and the keys
-    # and defaults match the live printer exactly.
-    from klippy import configfile, motion_setup
-    from klippy.motion import Motion
+    # Parse through klippy's own loader so includes resolve exactly like the
+    # live printer; the engine's pipeline_snapshot re-reads the motion
+    # sections from the serialized document with the same Rust reader
+    # (defaults, bounds, scv conversion) init_planner uses.
+    from klippy import configfile
 
     loader = configfile.PrinterConfig.__new__(configfile.PrinterConfig)
     loader.printer = None
     config = loader.read_config(str(cfg_path))
     printer = config.getsection("printer")
-    max_accel = printer.getfloat("max_accel", above=0.0)
-    if config.has_section("extruder"):
-        extruder = config.getsection("extruder")
-        extrude_only_velocity = extruder.getfloat(
-            "max_extrude_only_velocity", None, above=0.0
-        )
-        extrude_only_accel = extruder.getfloat(
-            "max_extrude_only_accel", None, above=0.0
-        )
-    else:
-        extrude_only_velocity = extrude_only_accel = None
-    max_jerk = printer.getfloat("max_jerk", max_accel * 2.0, minval=0.0)
-
-    # Same [axis]/[post_processor] parsing and validation a live printer goes
-    # through — motion_setup.read_axes/read_post_processors, not a
-    # reimplementation. They only need limit_sections preset (for a
-    # [limit]-references-undeclared-axis check this tool's cases never
-    # trigger, since cases don't declare [limit] sections).
-    stub = Motion.__new__(Motion)
-    stub.limit_sections = []
-    motion_setup.read_axes(stub, config)
-    motion_setup.read_post_processors(stub, config)
-
     return PrinterConfigData(
         max_velocity=printer.getfloat("max_velocity", above=0.0),
-        max_accel=max_accel,
-        square_corner_velocity=printer.getfloat(
-            "square_corner_velocity", 5.0, minval=0.0
-        ),
-        max_jerk=max_jerk if max_jerk > 0.0 else float("inf"),
-        max_extrude_only_velocity=extrude_only_velocity,
-        max_extrude_only_accel=extrude_only_accel,
-        max_path_deviation=printer.getfloat(
-            "max_path_deviation", 0.005, above=0.0, maxval=1.0
-        ),
-        max_accel_deviation=printer.getfloat(
-            "max_accel_deviation", 50.0, above=0.0
-        ),
-        axis_sections=stub.axis_sections,
-        post_processor_sections=stub.post_processor_sections,
+        config_text=config.fileconfig.write_string(),
     )
 
 
@@ -351,19 +307,7 @@ def run_case(case: Case) -> dict:
         )
 
     engine = _import_engine()
-    return engine.pipeline_snapshot(
-        waypoints,
-        cfg.max_velocity,
-        cfg.max_accel,
-        cfg.square_corner_velocity,
-        cfg.max_jerk,
-        max_extrude_only_velocity=cfg.max_extrude_only_velocity,
-        max_extrude_only_accel=cfg.max_extrude_only_accel,
-        max_path_deviation=cfg.max_path_deviation,
-        max_accel_deviation=cfg.max_accel_deviation,
-        axes=cfg.axis_sections,
-        post_processors=cfg.post_processor_sections,
-    )
+    return engine.pipeline_snapshot(waypoints, cfg.config_text)
 
 
 def _run_case_named(case: Case) -> tuple[str, dict]:

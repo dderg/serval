@@ -144,13 +144,20 @@ def test_swaps_keep_machine_z_and_rebase_gcode_z(sim_world):
     assert world.shutdown_line() is None
 
 
-def test_steep_mesh_refused_by_gross_error_gate(sim_world):
+def test_steep_mesh_warns_and_check_z_limits_gates(sim_world):
+    # The gross-error gate warns instead of refusing (a warped bed still
+    # prints, just loudly); CHECK_Z_LIMITS is the hard gate for macros.
     world = sim_world(_cfg, dual_mcu=False)
     world.gcode_ok("SET_KINEMATIC_POSITION X=45 Y=45 Z=5")
 
-    resp = world.gcode("BED_MESH_PROFILE LOAD=steep")
-    assert "bed deviation needs" in str(resp.get("error", ""))
+    world.gcode_ok("BED_MESH_PROFILE LOAD=steep")
+    assert "bed_mesh_z_budget_exceeded" in world.events_text()
+    # Position 5 sits at the (45,45) zero reference: activation renames
+    # nothing and must not move the machine.
     assert world.toolhead_z() == pytest.approx(5.0, abs=1e-6)
+
+    resp = world.gcode("BED_MESH_CHECK CHECK_Z_LIMITS=1")
+    assert "mesh-following needs" in str(resp.get("error", ""))
     assert world.shutdown_line() is None
 
 

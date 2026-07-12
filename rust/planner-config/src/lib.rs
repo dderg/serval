@@ -572,5 +572,11 @@ impl Default for PlannerConfig {
     }
 }
 
+#[cfg(feature = "doc")]
+pub mod from_doc;
+
+#[cfg(all(test, feature = "doc"))]
+mod from_doc_tests;
+
 #[cfg(test)]
 mod tests;

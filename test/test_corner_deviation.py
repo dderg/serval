@@ -1,6 +1,6 @@
 import pytest
 
-from klippy import motion_setup
+from klippy import configfile, motion_setup
 from klippy.motion import Motion
 
 
@@ -8,57 +8,39 @@ class ConfigError(Exception):
     pass
 
 
-class StubPrinterConfig:
-    error = ConfigError
-
-    def __init__(self, options):
-        self.options = options
-
-    def get(self, key, default="!missing"):
-        value = self.options.get(key, default)
-        if value == "!missing":
-            raise ConfigError("missing option '%s'" % key)
-        return value
-
-    def getfloat(self, key, default="!missing", **kwargs):
-        value = self.get(key, default)
-        return None if value is None else float(value)
-
-    def get_prefix_sections(self, prefix):
-        return []
-
-
-def read_limits(**options):
-    m = Motion.__new__(Motion)
-    motion_setup.read_limits(
-        m,
-        StubPrinterConfig(
-            {"max_velocity": 300.0, "max_accel": 3000.0, **options}
-        ),
+def cartesian_limits(extra="", max_accel=3000.0):
+    limits, _axes, _limit_sections, _kinematics, _consumed = (
+        configfile._config_doc.read_motion_settings(
+            "[printer]\nmax_velocity: 300\nmax_accel: %s\n%s"
+            % (max_accel, extra)
+        )
     )
-    return m
+    return limits
+
+
+def corner_deviation(extra=""):
+    return cartesian_limits(extra)[5]
 
 
 def test_corner_deviation_only_is_taken_verbatim():
-    m = read_limits(corner_deviation=0.02)
-    assert m._corner_deviation == 0.02
+    assert corner_deviation("corner_deviation: 0.02\n") == 0.02
 
 
 def test_scv_only_converts_at_max_accel():
-    m = read_limits(square_corner_velocity=8.0)
-    assert m._corner_deviation == pytest.approx(
+    assert corner_deviation("square_corner_velocity: 8.0\n") == pytest.approx(
         motion_setup.corner_deviation_from_scv(8.0, 3000.0)
     )
 
 
 def test_both_corner_keys_is_a_config_error():
-    with pytest.raises(ConfigError, match="corner_deviation"):
-        read_limits(square_corner_velocity=8.0, corner_deviation=0.02)
+    with pytest.raises(configfile.error, match="corner_deviation"):
+        corner_deviation(
+            "square_corner_velocity: 8.0\ncorner_deviation: 0.02\n"
+        )
 
 
 def test_neither_key_defaults_to_converted_default_scv():
-    m = read_limits()
-    assert m._corner_deviation == pytest.approx(
+    assert corner_deviation() == pytest.approx(
         motion_setup.corner_deviation_from_scv(
             motion_setup.DEFAULT_SQUARE_CORNER_VELOCITY, 3000.0
         )

@@ -67,7 +67,10 @@ done
 # concurrent session could silently retag the image between this session's
 # build and its test run.
 BUILD_BRANCH="${BRANCH:-$(cd "$REPO_ROOT" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo head)}"
-IMAGE_TAG="kalico-sim-${BUILD_BRANCH//\//-}"
+# Detached HEAD (e.g. GitHub Actions' PR checkout) yields the literal string
+# "HEAD", which is not a valid docker image name — fall back to the commit.
+[[ "$BUILD_BRANCH" == "HEAD" ]] && BUILD_BRANCH="$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo head)"
+IMAGE_TAG="kalico-sim-$(echo "${BUILD_BRANCH//\//-}" | tr '[:upper:]' '[:lower:]')"
 
 echo "=== Kalico Simulator ==="
 echo "  Mode:      $MODE"
@@ -116,6 +119,7 @@ case "$MODE" in
         # The virtual clock is one shared /dev/shm segment per container,
         # so e2e tests run sequentially inside one container. Parallelism
         # comes from separate docker runs (namespaces fully isolate them).
+        [[ -n "${VTIME_SPEED:-}" ]] && DOCKER_ARGS+=(-e VTIME_SPEED)
         docker run ${DOCKER_ARGS[@]+"${DOCKER_ARGS[@]}"} --entrypoint python3 "$IMAGE_TAG" \
             -m pytest tools/sim/tests -m needs_elf -v -p no:cacheprovider \
             ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}

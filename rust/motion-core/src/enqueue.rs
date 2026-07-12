@@ -175,6 +175,27 @@ struct MergedPiece {
     curve_u_start: f64,
 }
 
+/// Pieces shorter than this are knot dust from curve arithmetic (observed at
+/// 2-4 ULP of the timeline, ~4e-16 s): far below the nanosecond start_time
+/// quantization and the MCU sample period, they cannot be executed, and
+/// their epsilon duration turns f32 coefficient noise into six-figure
+/// endpoint velocities. They are dropped exactly — provided they carry no
+/// real motion, which is asserted.
+const PIECE_DUST_FLOOR_SECS: f64 = 1e-9;
+
+/// Upper bound on how far a monomial-in-τ piece can move over its duration.
+fn motion_span_bound(coeffs: &[f64], duration: f64) -> f64 {
+    let mut pow = 1.0;
+    coeffs
+        .iter()
+        .skip(1)
+        .map(|c| {
+            pow *= duration;
+            c.abs() * pow
+        })
+        .sum()
+}
+
 pub(crate) struct FlattenCtx<'a, P> {
     pub t0: f64,
     pub mcu_id: u32,
@@ -205,6 +226,17 @@ where
     for bp in bps.iter() {
         let coeffs = trimmed_monomial(bp);
         let duration = bp.u_end - bp.u_start;
+
+        if duration < PIECE_DUST_FLOOR_SECS {
+            let span = motion_span_bound(&coeffs, duration);
+            assert!(
+                span <= WIRE_TRUNC_POS_MM,
+                "sub-nanosecond piece at u={} moves {span} mm in {duration} s — \
+                 a real discontinuity crammed into zero time, not droppable knot dust",
+                bp.u_start
+            );
+            continue;
+        }
 
         if coeffs.len() == 1 {
             if let Some(last) = merged.last_mut() {

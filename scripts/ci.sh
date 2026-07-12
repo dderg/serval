@@ -212,6 +212,8 @@ job_sim() {
     fi
 }
 
+job_sim_e2e() { "$ROOT/tools/sim/run.sh" test "$@"; }
+
 job_docs() { cd "$ROOT/docs/_kalico" && uv run mkdocs build --strict; }
 
 job_snapshot() {
@@ -315,6 +317,7 @@ case "${1:-all}" in
     py-typecheck)     job_py_typecheck ;;
     docs)             job_docs ;;
     sim)              job_sim ;;
+    sim-e2e)          shift; job_sim_e2e "$@" ;;
     snapshot)         job_snapshot ;;
     all)              run_all false ;;
     quick|--quick)    run_all true ;;

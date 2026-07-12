@@ -694,3 +694,189 @@ fn worker_join_deadline_detaches_a_stuck_thread() {
     join_worker_thread(handle, Instant::now());
     release.send(()).unwrap();
 }
+
+/// The beacon rapid-scan path on the corexy_fast world (2800 mm/s, 100k
+/// accel, bell shapers, corner_deviation covering the kernel share) through
+/// the LIVE worker — windowed lookahead, continuity commits, streaming
+/// backpressure. Regression for the shaped track spiking to ~2e6 mm/s and
+/// tripping the per-motor step ceiling on the sim bench worlds.
+#[test]
+fn beacon_scan_path_live_worker_velocity_stays_bounded() {
+    #[derive(Clone, Default)]
+    struct MaxV {
+        worst: Arc<Mutex<(f64, f64, usize)>>,
+        overspeed: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl SegmentSink for MaxV {
+        fn dispatch(&mut self, seg: &ShapedSegment) -> Result<(), DispatchError> {
+            // The corexy_fast world's exact motor config: CoreXY mixing, the
+            // 2083 mm/s per-motor step ceiling from its pulse timing. The
+            // wire-piece build panics on any -307-class overspeed track,
+            // exactly like the live dispatch stage.
+            let cfg = vec![crate::mcu_config::McuAxisConfig {
+                mcu_id: 0,
+                axes: vec![0, 1, 2],
+                kinematics: crate::mcu_config::KINEMATICS_COREXY,
+                caps: crate::mcu_config::McuCaps {
+                    total_piece_memory: 62 * 1024,
+                },
+                max_motor_velocity: vec![2083.3, 2083.3, 208.3],
+            }];
+            let seg_clone = seg.clone();
+            let cfg_clone = cfg.clone();
+            let result = std::panic::catch_unwind(move || {
+                crate::enqueue::enqueue_segment(
+                    &seg_clone,
+                    &cfg_clone,
+                    &crate::enqueue::EnqueueCtx {
+                        t0: seg_clone.t_start,
+                        epoch: crate::anchor::StreamEpoch::Reposition,
+                        host_now: 0.0,
+                        lead_secs: crate::pump::MAX_LEAD_SECS,
+                        project: |_mcu, hs| (hs * 1_000_000.0) as u64,
+                        max_piece_secs: None,
+                    },
+                )
+            });
+            if result.is_err() {
+                eprintln!(
+                    "OVERSPEED seg line={} t=[{}..{}]",
+                    seg.source_line, seg.t_start, seg.t_end
+                );
+                for (axis, curve) in seg.axes.iter().enumerate().take(2) {
+                    for bp in nurbs::bezier::extract_bezier_pieces(curve) {
+                        let dur = bp.u_end - bp.u_start;
+                        let c1 = bp.coeffs.get(1).copied().unwrap_or(0.0);
+                        if dur < 1e-3 || c1.abs() / dur.max(1e-12) > 4000.0 {
+                            eprintln!(
+                                "  axis{axis} piece u=[{:.9}..{:.9}] dur={dur:.3e} coeffs={:?}",
+                                bp.u_start, bp.u_end, bp.coeffs
+                            );
+                        }
+                    }
+                }
+                self.overspeed
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            let mut worst = self.worst.lock().unwrap();
+            for axis in 0..seg.axes.len().min(2) {
+                let h = 1e-5;
+                let steps = 64;
+                for i in 0..steps {
+                    let t = seg.t_start
+                        + (seg.t_end - seg.t_start - h) * f64::from(i) / f64::from(steps);
+                    let v = (eval(&seg.axes[axis], t + h) - eval(&seg.axes[axis], t)) / h;
+                    if v.abs() > worst.0.abs() {
+                        *worst = (v, t, axis);
+                    }
+                }
+            }
+            Ok(())
+        }
+        fn dispatch_nudge(
+            &mut self,
+            _mcu_id: u32,
+            _piece: &motion_pipeline::NudgePiece,
+        ) -> Result<(), DispatchError> {
+            Ok(())
+        }
+    }
+
+    let chains = trajectory::AxisChainSet::spatial(
+        trajectory::CompiledChain::compile(&[trajectory::PostProcessorInstance::new(
+            "sx",
+            &trajectory::algos::SmoothBell,
+            vec![0.019125],
+        )])
+        .expect("compiles"),
+        trajectory::CompiledChain::compile(&[trajectory::PostProcessorInstance::new(
+            "sy",
+            &trajectory::algos::SmoothBell,
+            vec![0.018238636363636363],
+        )])
+        .expect("compiles"),
+        trajectory::CompiledChain::default(),
+    );
+    let limits = VelocityLimits::try_new(2800.0, 100000.0, 0.695, 1_000_000.0).unwrap();
+    let config = StreamConfig {
+        corner: CornerFitConfig {
+            kernel_variance_s2: chains.max_spatial_kernel_variance_s2(),
+            ..CornerFitConfig::default()
+        },
+        integration_tol: 1e-4,
+        max_extrude_only_velocity_mm_s: f64::INFINITY,
+        max_extrude_only_accel_mm_s2: f64::INFINITY,
+        fit_tol_mm: 0.005,
+        fit_tol_accel_mm_s2: 50.0,
+        max_buffer_moves: 128,
+        limits,
+    };
+    let pts: Vec<(f64, f64)> = include_str!("../../beacon_scan_pts.txt")
+        .lines()
+        .map(|l| {
+            let (x, y) = l.split_once(' ').expect("two floats");
+            (x.parse().unwrap(), y.parse().unwrap())
+        })
+        .collect();
+
+    let sink = MaxV::default();
+    let mut h = StreamWorkerHandle::spawn(
+        config,
+        chains,
+        vec![pts[0].0, pts[0].1, 2.0, 0.0],
+        sink.clone(),
+        Arc::default(),
+        None,
+    );
+
+    let mut prev = [pts[0].0, pts[0].1, 2.0];
+    for (i, &(x, y)) in pts.iter().enumerate().skip(1) {
+        let end = [x, y, 2.0];
+        let ctx = MoveContext {
+            extruder_axis: 3,
+            feedrate_mm_s: 800.0,
+            limits,
+            source: SourceRange {
+                start_line: i as u32,
+                end_line: i as u32,
+            },
+        };
+        let Ok(m) = line_move(prev, end, 0.0, ctx) else {
+            continue;
+        };
+        let mut m = Some(m);
+        loop {
+            match h.submit_move(m.take().expect("retry keeps the move")) {
+                Ok(()) => break,
+                Err(StreamWorkerError::ChannelFull) => {
+                    let ctx = MoveContext {
+                        extruder_axis: 3,
+                        feedrate_mm_s: 800.0,
+                        limits,
+                        source: SourceRange {
+                            start_line: i as u32,
+                            end_line: i as u32,
+                        },
+                    };
+                    m = Some(line_move(prev, end, 0.0, ctx).unwrap());
+                    std::thread::yield_now();
+                }
+                Err(e) => panic!("submit failed: {e}"),
+            }
+        }
+        prev = end;
+    }
+    h.flush().unwrap();
+    h.shutdown();
+
+    let (v, t, axis) = *sink.worst.lock().unwrap();
+    assert!(
+        v.abs() < 4000.0,
+        "shaped velocity spiked to {v} mm/s on axis {axis} at t={t}"
+    );
+    let overspeed = sink.overspeed.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        overspeed, 0,
+        "{overspeed} segments tripped the motor step ceiling"
+    );
+}

@@ -11,6 +11,13 @@ license.workspace = true
 trajectory = { path = "../trajectory" }
 geometry = { path = "../geometry" }
 thiserror = { workspace = true }
+config-doc = { path = "../config-doc", optional = true }
+
+[features]
+# Reading planner sections straight from a parsed config Document. Off by
+# default so the wasm32 consumers (pipeline-snapshot, motion-playground)
+# never pull in the filesystem-touching parser crate.
+doc = ["dep:config-doc"]
 
 [lints]
 workspace = true

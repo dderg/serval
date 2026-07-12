@@ -1,118 +1,34 @@
 from . import stepper
 
-DRIVE_CHOICES = {"stepper": "stepper", "servo": "servo"}
-
 _KIN_COREXY = 0
 _KIN_CARTESIAN = 1
 
 
-def resolve_motor_section(config, name, referenced_by):
-    section_name = "motor " + name
-    if not config.has_section(section_name):
-        raise config.error(
-            "%s references motor '%s' but no [motor %s] section exists"
-            % (referenced_by, name, name)
-        )
-    section = config.getsection(section_name)
-    drive = section.getchoice("drive", DRIVE_CHOICES)
-    return section, drive
-
-
-def motor_short_name(section):
-    return section.get_name().split(None, 1)[1]
-
-
-KINEMATICS_TYPES = {
-    "corexy": [
-        ("a_motors", "axis_x", 0),
-        ("b_motors", "axis_y", 1),
-        ("z_motors", "axis_z", 2),
-    ],
-    "cartesian": [
-        ("x_motors", "axis_x", 0),
-        ("y_motors", "axis_y", 1),
-        ("z_motors", "axis_z", 2),
-    ],
-}
-
-
-def read_claimed_axes(config):
-    if not config.has_section("kinematics"):
-        raise config.error("[kinematics] section is required")
-    section = config.getsection("kinematics")
-    kind = section.get("type")
-    if kind not in KINEMATICS_TYPES:
-        raise config.error(
-            "[kinematics] type '%s' is not supported (supported: %s)"
-            % (kind, ", ".join(sorted(KINEMATICS_TYPES)))
-        )
-    return [
-        section.get(axis_role_key)
-        for _role_motors_key, axis_role_key, _lane_idx in KINEMATICS_TYPES[kind]
-    ]
-
-
 def load_kinematics(config, motion):
-    if config.getsection("printer").get("kinematics", None) is not None:
-        raise config.error(
-            "[printer] kinematics is not supported: declare a [kinematics] "
-            "section (type + axis role bindings + motor lists)"
-        )
-    if not config.has_section("kinematics"):
+    """Build the kinematics from the topology the native reader parsed and
+    validated ([kinematics] type/roles, [motor] drives, follower slotting,
+    orphan rejection) in Motion._load_motion_config."""
+    if motion.kinematics_decl is None:
         raise config.error("[kinematics] section is required")
-    section = config.getsection("kinematics")
-    kind = section.get("type")
-    if kind not in KINEMATICS_TYPES:
-        raise config.error(
-            "[kinematics] type '%s' is not supported (supported: %s)"
-            % (kind, ", ".join(sorted(KINEMATICS_TYPES)))
-        )
+    kind, lanes, _followers = motion.kinematics_decl
     frontend_visible_kinematics = kind
     config.getsection("printer").get("kinematics", frontend_visible_kinematics)
-    role_specs = KINEMATICS_TYPES[kind]
-    kin = _LinearKinematics(config, motion, kind, role_specs)
-    _reject_orphan_motors(config, motion, section, role_specs)
-    return kin
-
-
-def _reject_orphan_motors(config, motion, section, role_specs):
-    declared = {
-        sc.get_name().split(None, 1)[1]
-        for sc in config.get_prefix_sections("motor ")
-    }
-    consumed = set()
-    for role_key, _axis_key, _idx in role_specs:
-        consumed.update(section.getlist(role_key, []))
-    for _name, _follows, motors, _pp in motion.axis_sections:
-        consumed.update(motors)
-    orphans = sorted(declared - consumed)
-    if orphans:
-        raise config.error(
-            "motor(s) %s declared but not assigned to any axis (reference them "
-            "from a [kinematics] role list or [axis <name>] motors:)"
-            % ", ".join("[motor %s]" % m for m in orphans)
-        )
+    return _LinearKinematics(config, motion, kind, lanes)
 
 
 class _LinearKinematics:
     supports_dual_carriage = False
 
-    def __init__(self, config, motion, kind, role_specs):
+    def __init__(self, config, motion, kind, lanes):
         self._motion = motion
         self.kind = kind
-        self._role_specs = role_specs
         self._printer = config.get_printer()
-        section = config.getsection("kinematics")
 
-        self._lanes = self._read_lanes(config, section)
-        if [lane_idx for lane_idx, _, _ in self._lanes] != list(
-            range(len(self._lanes))
-        ):
-            raise config.error(
-                "[kinematics] internal error: lanes must be contiguous 0..N "
-                "(got %s)" % ([lane[0] for lane in self._lanes],)
-            )
-        self.rails = [self._build_lane(config, lane) for lane in self._lanes]
+        self._lanes = [
+            (lane_idx, axis_name, motors)
+            for lane_idx, axis_name, motors, _drive in lanes
+        ]
+        self.rails = [self._build_lane(config, lane) for lane in lanes]
         self.limits = [(1.0, -1.0)] * 3
         self._parked_dirty = [False, False, False]
 
@@ -121,56 +37,23 @@ class _LinearKinematics:
             "stepper_enable:motor_off", self._handle_motor_off
         )
 
-    def _read_lanes(self, config, section):
-        lanes = []
-        for role_motors_key, axis_role_key, lane_idx in self._role_specs:
-            axis_name = section.get(axis_role_key)
-            if not config.has_section("axis " + axis_name):
-                raise config.error(
-                    "[kinematics] %s binds to axis '%s' but no [axis %s] "
-                    "section exists" % (axis_role_key, axis_name, axis_name)
-                )
-            motor_names = section.getlist(role_motors_key, [])
-            if not motor_names:
-                raise config.error(
-                    "[kinematics] %s declares no motors (lane %d needs at "
-                    "least one motor)" % (role_motors_key, lane_idx)
-                )
-            lanes.append((lane_idx, axis_name, motor_names))
-        lanes.sort(key=lambda lane: lane[0])
-        return lanes
-
     def _build_lane(self, config, lane):
-        lane_idx, axis_name, motor_names = lane
-        role_motors_key = self._role_specs[lane_idx][0]
-        referenced_by = "[kinematics] %s" % role_motors_key
-        motor_specs = []
-        drives = set()
-        for motor_name in motor_names:
-            motor_section, drive = resolve_motor_section(
-                config, motor_name, referenced_by
-            )
-            motor_specs.append((motor_section, motor_short_name(motor_section)))
-            drives.add(drive)
-        if len(drives) > 1:
-            raise config.error(
-                "%s mixes stepper and servo motors in one lane; a lane must "
-                "be all-stepper or all-servo" % referenced_by
-            )
-        drive = drives.pop()
+        lane_idx, axis_name, motor_names, drive = lane
+        motor_sections = [
+            config.getsection("motor " + name) for name in motor_names
+        ]
         if drive == "servo":
-            motor_sections = [section for section, _ in motor_specs]
-            return self._build_servo_lane(config, lane, motor_sections)
+            return self._build_servo_lane(config, axis_name, motor_sections)
         rail = stepper.AxisRail(
-            config.getsection("axis " + axis_name), motor_specs
+            config.getsection("axis " + axis_name),
+            list(zip(motor_sections, motor_names)),
         )
         rail.setup_itersolve(
             "cartesian_stepper_alloc", "xyz"[lane_idx].encode()
         )
         return rail
 
-    def _build_servo_lane(self, config, lane, motor_sections):
-        _lane_idx, axis_name, _motor_names = lane
+    def _build_servo_lane(self, config, axis_name, motor_sections):
         from .extras import servo_axis
 
         axis_config = config.getsection("axis " + axis_name)

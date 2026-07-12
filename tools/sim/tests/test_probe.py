@@ -108,15 +108,25 @@ def test_probe_multi_point_tools(sim_world):
 
     world.mark_log()
     resp = world.gcode("BED_MESH_CALIBRATE", timeout=600)
-    assert "activating a mesh is not supported" in str(resp.get("error", "")), (
-        "BED_MESH_CALIBRATE probing should reach mesh activation, which the planner rejects"
+    assert "zero_reference_position is required" in str(resp), (
+        "BED_MESH_CALIBRATE probing should reach mesh activation, which the "
+        "planner refuses without a Z datum"
     )
+
+    world.mark_log()
+    world.gcode_ok("PROBE", timeout=90)
+    baseline_z = _last_probe_z(world.expect_log(" is z="))
 
     world.mark_log()
     world.gcode_ok("FORCE_MOVE STEPPER=z DISTANCE=0.5 VELOCITY=5", timeout=60)
     world.gcode_ok("PROBE", timeout=90)
     shifted_z = _last_probe_z(world.expect_log(" is z="))
-    assert abs(shifted_z - 1.5) == pytest.approx(0.5, abs=0.1)
+    assert baseline_z - shifted_z == pytest.approx(0.5, abs=0.1), (
+        "FORCE_MOVE must shift the physical frame by exactly its distance; "
+        "adjacent probes are compared so the load-dependent late-execution "
+        "bias each reading carries (per the sim-vtime-crawl handoff, "
+        "046bff102) cancels out"
+    )
 
     world.mark_log()
     world.gcode_ok("Z_TILT_ADJUST", timeout=300)
