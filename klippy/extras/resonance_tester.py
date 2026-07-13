@@ -12,7 +12,7 @@ from collections import namedtuple
 from . import shaper_calibrate
 from .resonance_buzz import servo_buzz_motor_names
 
-MAX_BUZZ_FREQ = 300.0
+MAX_BUZZ_FREQ = 800.0
 
 SweepParams = namedtuple(
     "SweepParams",
