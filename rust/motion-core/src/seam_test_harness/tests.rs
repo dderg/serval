@@ -315,6 +315,105 @@ fn extruder_track_is_continuous_across_a_pressure_advance_change() {
     );
 }
 
+fn bell_leader_extruder_chain_set(e_smooth_time: f64) -> trajectory::AxisChainSet {
+    let bell =
+        trajectory::PostProcessorInstance::new("bell", &trajectory::algos::SmoothBell, vec![0.002]);
+    let spatial =
+        trajectory::CompiledChain::compile(std::slice::from_ref(&bell)).expect("bell compiles");
+    let pa = trajectory::PostProcessorInstance::new(
+        "pa",
+        &trajectory::algos::LinearPressureAdvance,
+        vec![0.025],
+    );
+    let st = trajectory::PostProcessorInstance::new(
+        "st",
+        &trajectory::algos::SmoothTriangle,
+        vec![e_smooth_time],
+    );
+    let e_chain = trajectory::CompiledChain::compile(&[pa, st]).expect("extruder chain compiles");
+    trajectory::AxisChainSet {
+        chains: vec![
+            spatial.clone(),
+            spatial,
+            trajectory::CompiledChain::default(),
+            e_chain,
+        ],
+        followers: vec![(EXTRUDER_AXIS, vec![0, 1, 2])],
+    }
+}
+
+/// Changing the extruder kernel's smooth_time mid-print (SET_PRESSURE_ADVANCE
+/// SMOOTH_TIME=…) swaps the kernel at a forced rest. The pieces committed by
+/// the pre-swap flush were convolved with the old kernel while its window
+/// still straddled the deceleration's pressure-advance transient; the resumed
+/// track convolves the same kept history with the new kernel, which weighs
+/// that transient differently — without a settling hold the seam steps by
+/// ~k·ė and the MCU takes it as a one-sample burst (fault -310, trident
+/// 2026-07-13 18:55:33: 0.0475 mm = 106 µsteps).
+#[test]
+fn extruder_track_is_continuous_across_a_smooth_time_change() {
+    let config = default_stream_config();
+    let gcode = "\
+G90
+G1 X0 Y0 F3600
+G1 X20 Y0 E0.68
+G1 X20 Y20 E1.36
+G1 X0 Y20 E2.04
+G1 X0 Y0 E2.72
+G1 X20 Y0 E3.40
+G1 X20 Y20 E4.08
+G1 X0 Y20 E4.76
+G1 X0 Y0 E5.44
+G1 X20 Y0 E6.12
+";
+    let moves = parse_gcode_to_moves(gcode, config.limits);
+    assert_eq!(moves.len(), 9, "nine extruding perimeter sides");
+
+    let handle = setup_stages(
+        config,
+        bell_leader_extruder_chain_set(0.022),
+        vec![0.0, 0.0, 0.0, 0.0],
+        0.0,
+    );
+    let output = handle.output;
+    let collector = std::thread::spawn(move || {
+        let mut segs: Vec<ShapedSegment> = Vec::new();
+        while let Ok(item) = output.recv() {
+            if let motion_pipeline::ShapedItem::Seg(seg) = item {
+                segs.push(seg);
+            }
+        }
+        segs
+    });
+    let swaps = [0.017, 0.03];
+    for (i, m) in moves.into_iter().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            handle
+                .input
+                .send(motion_pipeline::StreamInput::Drain)
+                .expect("pipeline accepts drain");
+            handle
+                .input
+                .send(motion_pipeline::StreamInput::Control(
+                    motion_pipeline::Control::SetAxisChains(bell_leader_extruder_chain_set(
+                        swaps[i / 3 - 1],
+                    )),
+                ))
+                .expect("pipeline accepts chain swap");
+        }
+        handle.input.send(m.into()).expect("pipeline accepts move");
+    }
+    drop(handle.input);
+    let segs = collector.join().expect("collector thread");
+    for axis in 0..4 {
+        let worst = worst_track_seam(&segs, axis);
+        assert!(
+            worst < 1e-5,
+            "axis {axis} track jumps {worst:.6} mm across a smooth_time change"
+        );
+    }
+}
+
 /// A drain flushed while the shaper's window is clamped ("signal constant past
 /// the rest") must not disagree with the shaped trajectory once motion
 /// resumes: the seam becomes a one-sample step burst on the MCU (fault -310).
