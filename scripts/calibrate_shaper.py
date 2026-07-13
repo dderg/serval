@@ -424,6 +424,41 @@ def plot_freq_response(
     accels_per_hz,
     raw_data=None,
 ):
+    if raw_data is not None:
+        fig, (ax, ax_spec) = matplotlib.pyplot.subplots(
+            nrows=2,
+            sharex=True,
+            gridspec_kw={"height_ratios": [3, 1]},
+        )
+    else:
+        fig, ax = matplotlib.pyplot.subplots()
+        ax_spec = None
+    draw_freq_response(
+        ax,
+        ax_spec,
+        lognames,
+        calibration_data,
+        shapers,
+        selected_shaper,
+        max_freq,
+        accels_per_hz,
+        raw_data,
+    )
+    fig.tight_layout()
+    return fig
+
+
+def draw_freq_response(
+    ax,
+    ax_spec,
+    lognames,
+    calibration_data,
+    shapers,
+    selected_shaper,
+    max_freq,
+    accels_per_hz,
+    raw_data,
+):
     freqs = calibration_data.freq_bins
     psd = calibration_data.psd_sum[freqs <= max_freq]
     px = calibration_data.psd_x[freqs <= max_freq]
@@ -434,15 +469,6 @@ def plot_freq_response(
     fontP = matplotlib.font_manager.FontProperties()
     fontP.set_size("x-small")
 
-    if raw_data is not None:
-        fig, (ax, ax_spec) = matplotlib.pyplot.subplots(
-            nrows=2,
-            sharex=True,
-            gridspec_kw={"height_ratios": [3, 1]},
-        )
-    else:
-        fig, ax = matplotlib.pyplot.subplots()
-        ax_spec = None
     ax.set_xlim([0, max_freq])
     ax.set_ylabel("Power spectral density")
     if ax_spec is None:
@@ -477,10 +503,16 @@ def plot_freq_response(
             linestyle = "dashdot"
             best_shaper_vals = shaper.vals
         ax2.plot(freqs, shaper.vals, label=label, linestyle=linestyle)
-    ax.plot(freqs, psd * best_shaper_vals, label="After\nshaper", color="cyan")
+    if best_shaper_vals is not None:
+        ax.plot(
+            freqs, psd * best_shaper_vals, label="After\nshaper", color="cyan"
+        )
     # A hack to add a human-readable shaper recommendation to legend
     ax2.plot(
-        [], [], " ", label="Recommended shaper: %s" % (selected_shaper.upper())
+        [],
+        [],
+        " ",
+        label="Recommended shaper: %s" % (str(selected_shaper).upper()),
     )
 
     ax2.plot(
@@ -507,16 +539,16 @@ def plot_freq_response(
         ax_spec.set_ylabel("Time, s")
         ax_spec.set_xlabel("Frequency, Hz")
 
-    fig.tight_layout()
-    return fig
-
 
 ######################################################################
 # Plot demodulated chirp frequency response
 ######################################################################
 
 
-def plot_chirp_frf(
+def draw_chirp_frf(
+    ax_h,
+    ax_harm,
+    ax_snr,
     lognames,
     response,
     shapers,
@@ -528,11 +560,6 @@ def plot_chirp_frf(
     fontP = matplotlib.font_manager.FontProperties()
     fontP.set_size("x-small")
 
-    fig, (ax_h, ax_harm, ax_snr) = matplotlib.pyplot.subplots(
-        nrows=3,
-        sharex=True,
-        gridspec_kw={"height_ratios": [3, 1.3, 1.3]},
-    )
     grid = response.calibration_data.freq_bins
     band = grid <= max_freq
     hx = response.calibration_data.psd_x[band] ** 0.5
@@ -647,6 +674,55 @@ def plot_chirp_frf(
     ax_snr.legend(loc="upper right", prop=fontP)
     ax_snr.grid(color="lightgrey")
 
+
+def plot_classic_with_chirp(
+    lognames,
+    raw_data,
+    classic_data,
+    classic_shapers,
+    classic_name,
+    accels_per_hz,
+    response,
+    chirp_shapers,
+    chirp_name,
+    max_freq,
+):
+    fig = matplotlib.pyplot.figure()
+    outer = fig.add_gridspec(
+        nrows=2, ncols=1, height_ratios=[4, 5.6], hspace=0.3
+    )
+    gs_classic = outer[0].subgridspec(nrows=2, ncols=1, height_ratios=[3, 1])
+    gs_chirp = outer[1].subgridspec(
+        nrows=3, ncols=1, height_ratios=[3, 1.3, 1.3]
+    )
+    ax_psd = fig.add_subplot(gs_classic[0])
+    ax_spec = fig.add_subplot(gs_classic[1], sharex=ax_psd)
+    ax_h = fig.add_subplot(gs_chirp[0])
+    ax_harm = fig.add_subplot(gs_chirp[1], sharex=ax_h)
+    ax_snr = fig.add_subplot(gs_chirp[2], sharex=ax_h)
+    draw_freq_response(
+        ax_psd,
+        ax_spec,
+        lognames,
+        classic_data,
+        classic_shapers,
+        classic_name,
+        max_freq,
+        accels_per_hz,
+        raw_data,
+    )
+    draw_chirp_frf(
+        ax_h,
+        ax_harm,
+        ax_snr,
+        lognames[:1],
+        response,
+        chirp_shapers,
+        chirp_name,
+        classic_data,
+        classic_name,
+        max_freq,
+    )
     fig.tight_layout()
     return fig
 
@@ -656,7 +732,9 @@ def plot_chirp_frf(
 ######################################################################
 
 
-def run_chirp_mode(lognames, data, config, options, shaper_kwargs):
+def run_chirp_mode(
+    lognames, data, config, options, shaper_kwargs, accels_per_hz
+):
     helper = shaper_calibrate.ShaperCalibrate(printer=None)
     response = analyze_chirp(data, config, options.chirp_bw)
 
@@ -749,19 +827,22 @@ def run_chirp_mode(lognames, data, config, options, shaper_kwargs):
 
     if not options.csv or options.output:
         setup_matplotlib(options.output is not None)
-        fig = plot_chirp_frf(
-            lognames[:1],
+        fig = plot_classic_with_chirp(
+            lognames,
+            data,
+            classic_data,
+            classic_shapers,
+            classic_name,
+            accels_per_hz,
             response,
             chirp_shapers,
             chirp_name,
-            classic_data,
-            classic_name,
             shaper_kwargs["max_freq"],
         )
         if options.output is None:
             matplotlib.pyplot.show()
         else:
-            fig.set_size_inches(9, 11)
+            fig.set_size_inches(9, 16)
             fig.savefig(options.output)
 
 
@@ -950,7 +1031,9 @@ def main():
             test_damping_ratios=test_damping_ratios,
             max_freq=max_freq,
         )
-        run_chirp_mode(args, datas[0], chirp_config, options, shaper_kwargs)
+        run_chirp_mode(
+            args, datas[0], chirp_config, options, shaper_kwargs, accels_per_hz
+        )
         return
 
     # Calibrate shaper and generate outputs
