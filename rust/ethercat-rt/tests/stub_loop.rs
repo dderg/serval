@@ -157,7 +157,10 @@ fn push_pieces_and_heartbeat_closes_the_loop() {
                         push_received = true;
                     }
                     Command::QueryRuntimeCaps { correlation_id } => {
-                        let total = (AXIS_RING_CAPACITY * NUM_AXES * 32) as u32;
+                        let total = (AXIS_RING_CAPACITY
+                            * NUM_AXES
+                            * runtime::piece_ring::PIECE_ENTRY_BYTES)
+                            as u32;
                         server.respond(&runtime_caps_response_frame(correlation_id, total));
                     }
                     Command::QueryMotorState { .. } => {}
@@ -342,7 +345,7 @@ fn ethercat_endpoint_query_runtime_caps_round_trip() {
     let socket_path = format!("/tmp/kalico-caps-rt-{}.sock", std::process::id());
     let _ = std::fs::remove_file(&socket_path);
 
-    const PIECE_ENTRY_SIZE: usize = 32;
+    const PIECE_ENTRY_SIZE: usize = runtime::piece_ring::PIECE_ENTRY_BYTES;
     let expected_total: u32 = (AXIS_RING_CAPACITY * NUM_AXES * PIECE_ENTRY_SIZE) as u32;
 
     {
@@ -410,7 +413,7 @@ fn ethercat_endpoint_query_runtime_caps_round_trip() {
     assert_eq!(
         caps.total_piece_memory, expected_total,
         "total_piece_memory must be AXIS_RING_CAPACITY({AXIS_RING_CAPACITY}) \
-         * NUM_AXES({NUM_AXES}) * 32 = {expected_total}, \
+         * NUM_AXES({NUM_AXES}) * PIECE_ENTRY_BYTES({PIECE_ENTRY_SIZE}) = {expected_total}, \
          got {}",
         caps.total_piece_memory,
     );

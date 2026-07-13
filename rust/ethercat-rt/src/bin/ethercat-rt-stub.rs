@@ -243,7 +243,8 @@ fn main() {
                     }
                 }
                 Command::QueryRuntimeCaps { correlation_id } => {
-                    let total: u32 = (AXIS_RING_CAPACITY * 32) as u32;
+                    let total: u32 =
+                        (AXIS_RING_CAPACITY * runtime::piece_ring::PIECE_ENTRY_BYTES) as u32;
                     server.respond(&runtime_caps_response_frame(correlation_id, total));
                 }
                 Command::QueryMotorState { .. } => {}

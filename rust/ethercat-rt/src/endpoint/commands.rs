@@ -51,7 +51,10 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
                 let mut distinct_axes: Vec<u8> = ctx.slave_axes.clone();
                 distinct_axes.sort_unstable();
                 distinct_axes.dedup();
-                let total: u32 = (AXIS_RING_CAPACITY * distinct_axes.len() * 32) as u32;
+                let total: u32 = (AXIS_RING_CAPACITY
+                    * distinct_axes.len()
+                    * runtime::piece_ring::PIECE_ENTRY_BYTES)
+                    as u32;
                 ctx.server
                     .respond(&runtime_caps_response_frame(correlation_id, total));
             }
