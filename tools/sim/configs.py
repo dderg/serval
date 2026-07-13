@@ -848,9 +848,10 @@ home_xy_move_speed: 50
 home_method: proximity
 home_method_when_homed: proximity
 home_autocalibrate: never
-# The emulator fires the contact trigger within step/poll latency
-# (~0.01mm) of the true bed crossing, so the hardware-default touch
-# repeatability gate (0.008) is marginally flaky in the sim.
+# Contact positions reconstructed from the emulator's trigger clock
+# carry the real-clock <-> virtual-clock mapping jitter (~0.01mm at the
+# 3mm/s autocal speed), so the hardware-default touch repeatability
+# gate (0.008) is marginally flaky in the sim.
 autocal_tolerance: 0.02
 {bed_mesh_section}
 [post_processor is_xy]

@@ -114,18 +114,26 @@ def _probe_samples(world):
 
 
 def test_contact_auto_calibrate_with_mesh_active(sim_world):
+    # PROBE_SPEED=1: the measured-z noise floor is the emulator's
+    # real-clock <-> virtual-clock mapping jitter (a few ms) times the
+    # probing speed, so 3mm/s leaves per-series spreads straddling the
+    # 0.012 assertion floor while 1mm/s keeps them well under it.
     world = sim_world(_cfg(bed_mesh=True), beacon=True)
     world.gcode_ok("SET_KINEMATIC_POSITION X=150 Y=150 Z=10", timeout=10)
     world.gcode_ok("G4 P1000", timeout=15)
     world.gcode_ok("BEACON_AUTO_CALIBRATE", timeout=300)
     world.gcode_ok("G1 Z3 F600", timeout=30)
     world.gcode_ok(
-        "PROBE PROBE_METHOD=contact SAMPLES=6 SAMPLES_TOLERANCE=9", timeout=300
+        "PROBE PROBE_METHOD=contact SAMPLES=6 SAMPLES_TOLERANCE=9"
+        " PROBE_SPEED=1",
+        timeout=300,
     )
     plain = _probe_samples(world)
     world.gcode_ok("BED_MESH_PROFILE LOAD=edge", timeout=15)
     world.gcode_ok(
-        "PROBE PROBE_METHOD=contact SAMPLES=6 SAMPLES_TOLERANCE=9", timeout=300
+        "PROBE PROBE_METHOD=contact SAMPLES=6 SAMPLES_TOLERANCE=9"
+        " PROBE_SPEED=1",
+        timeout=300,
     )
     meshed = _probe_samples(world)[len(plain) :]
     assert world.shutdown_line() is None
