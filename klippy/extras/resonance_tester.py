@@ -12,8 +12,6 @@ from collections import namedtuple
 from . import shaper_calibrate
 from .resonance_buzz import servo_buzz_motor_names
 
-MAX_BUZZ_FREQ = 800.0
-
 SweepParams = namedtuple(
     "SweepParams",
     "freq_start freq_end accel_per_hz duration ramp amplitude_mm",
@@ -107,9 +105,7 @@ class ResonanceTester:
         self.printer.load_object(config, "servo_capture")
         self.move_speed = config.getfloat("move_speed", 50.0, above=0.0)
         self.min_freq = config.getfloat("min_freq", 5.0, minval=1.0)
-        self.max_freq = config.getfloat(
-            "max_freq", 135.0, minval=self.min_freq, maxval=MAX_BUZZ_FREQ
-        )
+        self.max_freq = config.getfloat("max_freq", 135.0, minval=self.min_freq)
         self.accel_per_hz = config.getfloat("accel_per_hz", 75.0, above=0.0)
         self.graph_max_freq = config.getfloat("graph_max_freq", None, above=0.0)
         self.hz_per_sec = config.getfloat(
@@ -201,9 +197,7 @@ class ResonanceTester:
 
     def _parse_sweep(self, gcmd, test_accel_per_hz=None):
         freq_start = gcmd.get_float("FREQ_START", self.min_freq, minval=1.0)
-        freq_end = gcmd.get_float(
-            "FREQ_END", self.max_freq, minval=freq_start, maxval=MAX_BUZZ_FREQ
-        )
+        freq_end = gcmd.get_float("FREQ_END", self.max_freq, minval=freq_start)
         if test_accel_per_hz is None:
             accel_per_hz = gcmd.get_float(
                 "ACCEL_PER_HZ", self.accel_per_hz, above=0.0
