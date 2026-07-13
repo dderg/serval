@@ -10,7 +10,9 @@ use core::ptr;
 use core::sync::atomic::{Ordering, fence};
 
 /// Power-of-two ring depth shared with the C side; see `src/step_queue.h`.
-pub const STEP_QUEUE_DEPTH: usize = 32;
+/// Derived in build.rs from the configured sample rate: two worst-case
+/// `MAX_STEPS_PER_SAMPLE` producer bursts, rounded up to a power of two.
+pub const STEP_QUEUE_DEPTH: usize = crate::sizing::STEP_QUEUE_DEPTH;
 pub const STEP_QUEUE_DEPTH_MASK: u16 = (STEP_QUEUE_DEPTH as u16) - 1;
 pub const N_AXIS_STEP_QUEUES: usize = 4;
 
@@ -115,8 +117,9 @@ impl Default for StepQueue {
 
 const _: () = {
     assert!(core::mem::size_of::<StepEntry>() == 8);
-    assert!(core::mem::size_of::<StepQueue>() == 264);
+    assert!(core::mem::size_of::<StepQueue>() == 8 + 8 * STEP_QUEUE_DEPTH);
     assert!(STEP_QUEUE_DEPTH.is_power_of_two());
+    assert!(STEP_QUEUE_DEPTH >= 2 * crate::sub_sample_timing::MAX_STEPS_PER_SAMPLE);
 };
 
 #[cfg(not(any(test, feature = "host")))]

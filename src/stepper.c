@@ -13,6 +13,7 @@
 #include "sched.h" // DECL_SHUTDOWN
 #include "trsync.h" // trsync_add_signal
 #include "runtime.h" // StepperBindingRust
+#include "step_queue.h" // RUNTIME_MAX_STEPS_PER_SAMPLE
 #include "event_log.h" // event_log_emit (mcu structured-log ready marker)
 #include "generic/fault_handler.h" // kalico_diag_emit_prior_crash (Stage 5)
 
@@ -26,10 +27,6 @@ struct stepper {
 // Minimum spacing between successive step edges enforced by
 // runtime_emit_step_pulses (~1 us), in CONFIG_CLOCK_FREQ ticks.
 #define STEP_MIN_EDGE_DWT ((CONFIG_CLOCK_FREQ) / 1000000u)
-
-// Mirrors runtime::sub_sample_timing::MAX_STEPS_PER_SAMPLE (the inline
-// timestamp capacity); runtime_set_axis_step_budget rejects anything larger.
-#define RUNTIME_MAX_STEPS_PER_SAMPLE 64
 
 volatile uint32_t config_stepper_oids_seen
     __attribute__((used, externally_visible));
