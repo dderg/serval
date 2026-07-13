@@ -62,6 +62,12 @@ def sinusoid_amplitude_mm(accel_per_hz, freq_hz):
 class ResonanceBuzz:
     def __init__(self, config):
         self.printer = config.get_printer()
+        self.max_peak_accel = config.getfloat(
+            "max_peak_accel", BUZZ_PEAK_ACCEL_CEILING_MM_S2, above=0.0
+        )
+        self.max_amplitude = config.getfloat(
+            "max_amplitude", BUZZ_MAX_AMPLITUDE_MM, above=0.0
+        )
         self.gcode = self.printer.lookup_object("gcode")
         self.gcode.register_command(
             "RESONANCE_BUZZ",
@@ -99,24 +105,26 @@ class ResonanceBuzz:
         if amplitude_mm <= 0.0:
             highest_freq = max(freq_start, freq_end)
             peak_accel = sinusoid_peak_accel(accel_per_hz, highest_freq)
-            if peak_accel > BUZZ_PEAK_ACCEL_CEILING_MM_S2:
+            if peak_accel > self.max_peak_accel:
                 raise gcmd.error(
                     "RESONANCE_BUZZ: ACCEL_PER_HZ %.1f commands %.0f mm/s^2 "
-                    "peak accel at %.1f Hz, over the %.0f mm/s^2 ceiling; "
-                    "the largest ACCEL_PER_HZ for this band is %.1f"
+                    "peak accel at %.1f Hz, over the %.0f mm/s^2 "
+                    "max_peak_accel; the largest ACCEL_PER_HZ for this band "
+                    "is %.1f"
                     % (
                         accel_per_hz,
                         peak_accel,
                         highest_freq,
-                        BUZZ_PEAK_ACCEL_CEILING_MM_S2,
-                        BUZZ_PEAK_ACCEL_CEILING_MM_S2 / highest_freq,
+                        self.max_peak_accel,
+                        self.max_peak_accel / highest_freq,
                     )
                 )
             amplitude_mm = sinusoid_amplitude_mm(accel_per_hz, freq_start)
-        if amplitude_mm > BUZZ_MAX_AMPLITUDE_MM:
+        if amplitude_mm > self.max_amplitude:
             raise gcmd.error(
-                "RESONANCE_BUZZ amplitude %.3f mm at %.1f Hz exceeds %.1f mm "
-                "ceiling" % (amplitude_mm, freq_start, BUZZ_MAX_AMPLITUDE_MM)
+                "RESONANCE_BUZZ amplitude %.3f mm at %.1f Hz exceeds the "
+                "%.1f mm max_amplitude"
+                % (amplitude_mm, freq_start, self.max_amplitude)
             )
 
         toolhead.wait_moves()

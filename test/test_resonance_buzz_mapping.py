@@ -85,9 +85,11 @@ class FakeBuzzGcmd:
         self.infos.append(msg)
 
 
-def _resonance_buzz():
+def _resonance_buzz(max_peak_accel=200000.0, max_amplitude=5.0):
     buzz = ResonanceBuzz.__new__(ResonanceBuzz)
     buzz.printer = FakeBuzzPrinter()
+    buzz.max_peak_accel = max_peak_accel
+    buzz.max_amplitude = max_amplitude
     return buzz
 
 
@@ -107,3 +109,17 @@ def test_accel_per_hz_at_ceiling_runs():
     )
     assert buzz.printer.motion.calls
     assert amplitude > 0.0
+
+
+def test_configured_max_peak_accel_bounds_the_sweep():
+    buzz = _resonance_buzz(max_peak_accel=10000.0)
+    with pytest.raises(RuntimeError, match="max_peak_accel"):
+        buzz.run_sweep(FakeBuzzGcmd(), "x", 100.0, 400.0, 300.0, 0.1, 50.0, 0.0)
+    assert buzz.printer.motion.calls == []
+
+
+def test_configured_max_amplitude_bounds_explicit_amplitude():
+    buzz = _resonance_buzz(max_amplitude=0.5)
+    with pytest.raises(RuntimeError, match="max_amplitude"):
+        buzz.run_sweep(FakeBuzzGcmd(), "x", 100.0, 400.0, 300.0, 0.1, 50.0, 1.0)
+    assert buzz.printer.motion.calls == []

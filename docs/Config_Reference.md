@@ -2381,6 +2381,26 @@ section of the measuring resonances guide for more information on
 #   choice. Set it to 0 do disable it. The default is 0.
 ```
 
+### [resonance_buzz]
+
+Engine-resident resonance excitation (loaded automatically by
+[resonance_tester]). Both limits refuse loudly — a request over a limit
+aborts the command with the exact numbers rather than substituting a
+weaker excitation.
+
+```
+[resonance_buzz]
+#max_peak_accel: 200000
+#   Largest peak acceleration (mm/s^2) a buzz may command. A sweep with
+#   accel_per_hz * freq_end above this errors out. The default is
+#   200000, roughly full rated torque on typical servo dynamics.
+#max_amplitude: 5.0
+#   Largest displacement (mm) a buzz may command around the current
+#   position. The buzz bypasses the motion planner and its soft limits,
+#   so this is the only bound on carriage travel during a test. The
+#   default is 5.0 mm.
+```
+
 ## Config file helpers
 
 ### [board_pins]
