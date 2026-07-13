@@ -271,13 +271,14 @@ class ResonanceTester:
                 scap = None
                 if servo_names:
                     scap = self.printer.lookup_object("servo_capture")
-                    scap_name = self.get_filename(
-                        "raw_servo",
-                        capture_name_suffix,
-                        axis,
-                        point if len(test_points) > 1 else None,
+                    scap_path = scap.capture_path(
+                        self.get_data_name(
+                            "raw_servo",
+                            capture_name_suffix,
+                            axis,
+                            point if len(test_points) > 1 else None,
+                        )
                     )
-                    scap_path = os.path.splitext(scap_name)[0] + ".scap"
                     scap.start_capture_to(scap_path, servo_names)
                 try:
                     amplitude_mm = buzz.run_sweep(
@@ -508,7 +509,7 @@ class ResonanceTester:
     def is_valid_name_suffix(self, name_suffix):
         return name_suffix.replace("-", "").replace("_", "").isalnum()
 
-    def get_filename(
+    def get_data_name(
         self, base, name_suffix, axis=None, point=None, chip_name=None
     ):
         name = base
@@ -518,7 +519,12 @@ class ResonanceTester:
             name += "_" + chip_name.replace(" ", "_")
         if point:
             name += "_%.3f_%.3f_%.3f" % (point[0], point[1], point[2])
-        name += "_" + name_suffix
+        return name + "_" + name_suffix
+
+    def get_filename(
+        self, base, name_suffix, axis=None, point=None, chip_name=None
+    ):
+        name = self.get_data_name(base, name_suffix, axis, point, chip_name)
         return os.path.join("/tmp", name + ".csv")
 
     def save_calibration_data(

@@ -72,6 +72,10 @@ class FakeServoCapture:
     def __init__(self, events):
         self.events = events
         self.starts = []
+        self.capture_dir = "/captures"
+
+    def capture_path(self, name):
+        return os.path.join(self.capture_dir, name + ".scap")
 
     def start_capture_to(self, path, servos):
         self.events.append("capture_start")
@@ -349,7 +353,7 @@ def test_run_test_brackets_servo_capture_around_buzz():
 
     assert scap.starts == [
         (
-            "/tmp/raw_servo_y_cap1.scap",
+            "/captures/raw_servo_y_cap1.scap",
             ["motor_a", "motor_a1", "motor_b", "motor_b1"],
         )
     ]

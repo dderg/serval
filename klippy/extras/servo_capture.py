@@ -171,6 +171,12 @@ class ServoCapture:
         Fails loud on a non-zero endpoint code."""
         return self._end()
 
+    def capture_path(self, name):
+        """Where a capture named `name` lands: on real disk, never tmpfs —
+        the writer streams the whole run, so a RAM-backed path turns a long
+        sweep into memory exhaustion."""
+        return os.path.join(self.capture_dir, name + ".scap")
+
     def cmd_SERVO_CAPTURE_START(self, gcmd):
         if self.active is not None:
             raise gcmd.error(
@@ -182,9 +188,8 @@ class ServoCapture:
                 "SERVO_CAPTURE: NAME must match [A-Za-z0-9_-]+, got %r" % (tag,)
             )
         node, drives = self._resolve_node(gcmd)
-        path = os.path.join(
-            self.capture_dir,
-            "%s_%s.scap" % (tag, time.strftime("%Y%m%d_%H%M%S")),
+        path = self.capture_path(
+            "%s_%s" % (tag, time.strftime("%Y%m%d_%H%M%S"))
         )
         self._begin(node, drives, path)
         gcmd.respond_info("Servo capture started: %s" % (path,))
