@@ -98,18 +98,18 @@ class ResonanceBuzz:
 
         if amplitude_mm <= 0.0:
             highest_freq = max(freq_start, freq_end)
-            if (
-                sinusoid_peak_accel(accel_per_hz, highest_freq)
-                > BUZZ_PEAK_ACCEL_CEILING_MM_S2
-            ):
-                accel_per_hz = BUZZ_PEAK_ACCEL_CEILING_MM_S2 / highest_freq
-                gcmd.respond_info(
-                    "RESONANCE_BUZZ: clamped accel_per_hz to %.1f to keep peak "
-                    "accel <= %.0f mm/s^2 at %.1f Hz"
+            peak_accel = sinusoid_peak_accel(accel_per_hz, highest_freq)
+            if peak_accel > BUZZ_PEAK_ACCEL_CEILING_MM_S2:
+                raise gcmd.error(
+                    "RESONANCE_BUZZ: ACCEL_PER_HZ %.1f commands %.0f mm/s^2 "
+                    "peak accel at %.1f Hz, over the %.0f mm/s^2 ceiling; "
+                    "the largest ACCEL_PER_HZ for this band is %.1f"
                     % (
                         accel_per_hz,
-                        BUZZ_PEAK_ACCEL_CEILING_MM_S2,
+                        peak_accel,
                         highest_freq,
+                        BUZZ_PEAK_ACCEL_CEILING_MM_S2,
+                        BUZZ_PEAK_ACCEL_CEILING_MM_S2 / highest_freq,
                     )
                 )
             amplitude_mm = sinusoid_amplitude_mm(accel_per_hz, freq_start)
