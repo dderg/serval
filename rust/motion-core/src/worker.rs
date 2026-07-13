@@ -74,7 +74,10 @@ pub struct NudgeParams {
     pub accel: f64,
 }
 
-pub const INPUT_CHANNEL_CAP: usize = 64;
+/// Every slot in the pipe is queued-command latency (fan changes ride fences
+/// behind the buffered moves), so this covers host reactor scheduling gaps
+/// and nothing more; the submitter parks on the feed wakeup when it fills.
+pub const INPUT_CHANNEL_CAP: usize = 16;
 const SHUTDOWN_SEND_TIMEOUT: Duration = Duration::from_secs(1);
 const SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -287,7 +290,29 @@ impl StreamWorkerHandle {
     }
 
     pub fn submit_move(&self, m: geometry::Move) -> Result<(), StreamWorkerError> {
-        try_submit_move(&self.sender, m)
+        self.try_send_arming(StreamMsg::Move(m))
+    }
+
+    /// Non-blocking send that arms the feed wakeup on a full channel: the
+    /// caller that receives `ChannelFull` parks on the wakeup fd and the
+    /// ingress pings it when it next frees a slot. The post-arm retry closes
+    /// the race where the ingress freed a slot (and saw the flag unarmed)
+    /// between the first attempt and the arm.
+    fn try_send_arming(&self, msg: StreamMsg) -> Result<(), StreamWorkerError> {
+        let msg = match self.sender.try_send(msg) {
+            Ok(()) => return Ok(()),
+            Err(TrySendError::Disconnected(_)) => return Err(StreamWorkerError::ChannelClosed),
+            Err(TrySendError::Full(msg)) => msg,
+        };
+        self.links.wakeup.arm();
+        try_send_msg(&self.sender, msg)
+    }
+
+    /// Fd the host reactor parks on for `ChannelFull` retries and fence
+    /// resolution. Owned by the pipeline — callers must not close it.
+    #[must_use]
+    pub fn feed_wakeup_read_fd(&self) -> i32 {
+        self.links.wakeup.read_fd()
     }
 
     pub fn pending_channel_moves(&self) -> usize {
@@ -312,12 +337,7 @@ impl StreamWorkerHandle {
         &self,
     ) -> Result<crossbeam_channel::Receiver<Option<Instant>>, StreamWorkerError> {
         let (tx, rx) = crossbeam_channel::bounded(1);
-        self.sender
-            .try_send(StreamMsg::Flush { notify: tx })
-            .map_err(|e| match e {
-                TrySendError::Full(_) => StreamWorkerError::ChannelFull,
-                TrySendError::Disconnected(_) => StreamWorkerError::ChannelClosed,
-            })?;
+        self.try_send_arming(StreamMsg::Flush { notify: tx })?;
         Ok(rx)
     }
 
@@ -327,12 +347,7 @@ impl StreamWorkerHandle {
     /// pipe takes to admit one message — seconds at full buffers.
     pub fn fence_start(&self, force: bool) -> Result<u64, StreamWorkerError> {
         let id = self.links.fences.alloc_id();
-        self.sender
-            .try_send(StreamMsg::Fence { id, force })
-            .map_err(|e| match e {
-                TrySendError::Full(_) => StreamWorkerError::ChannelFull,
-                TrySendError::Disconnected(_) => StreamWorkerError::ChannelClosed,
-            })?;
+        self.try_send_arming(StreamMsg::Fence { id, force })?;
         Ok(id)
     }
 
@@ -476,8 +491,8 @@ fn join_worker_thread(handle: JoinHandle<()>, deadline: Instant) {
     }
 }
 
-fn try_submit_move(sender: &Sender<StreamMsg>, m: geometry::Move) -> Result<(), StreamWorkerError> {
-    sender.try_send(StreamMsg::Move(m)).map_err(|e| match e {
+fn try_send_msg(sender: &Sender<StreamMsg>, msg: StreamMsg) -> Result<(), StreamWorkerError> {
+    sender.try_send(msg).map_err(|e| match e {
         TrySendError::Full(_) => StreamWorkerError::ChannelFull,
         TrySendError::Disconnected(_) => StreamWorkerError::ChannelClosed,
     })

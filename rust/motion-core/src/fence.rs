@@ -67,21 +67,24 @@ impl FenceRegistry {
     }
 
     /// Dispatch-progress hook: a segment labeled `source_line` was dispatched
-    /// and the committed timeline now reaches `t_end`.
-    pub fn on_dispatch(&self, source_line: u32, t_end: f64) {
+    /// and the committed timeline now reaches `t_end`. Returns whether any
+    /// fence resolved, so the caller can wake pollers.
+    pub fn on_dispatch(&self, source_line: u32, t_end: f64) -> bool {
         let mut inner = self.inner.lock_ok();
         let resolve_at = inner.prev_t_end;
         inner.prev_t_end = t_end;
         if inner.armed.iter().all(|f| f.after_line >= source_line) {
-            return;
+            return false;
         }
         let (done, still_armed): (Vec<Armed>, Vec<Armed>) = std::mem::take(&mut inner.armed)
             .into_iter()
             .partition(|f| f.after_line < source_line);
         inner.armed = still_armed;
+        let resolved_any = !done.is_empty();
         for f in done {
             inner.resolved.insert(f.id, Some(resolve_at));
         }
+        resolved_any
     }
 
     /// The stream timeline restarted; the previous frontier is meaningless.
@@ -91,13 +94,16 @@ impl FenceRegistry {
     }
 
     /// Barrier hook: everything ahead of every armed fence has been
-    /// dispatched (or discarded) through `t`.
-    pub fn resolve_armed(&self, t: Option<f64>) {
+    /// dispatched (or discarded) through `t`. Returns whether any fence
+    /// resolved, so the caller can wake pollers.
+    pub fn resolve_armed(&self, t: Option<f64>) -> bool {
         let mut inner = self.inner.lock_ok();
         let armed = std::mem::take(&mut inner.armed);
+        let resolved_any = !armed.is_empty();
         for f in armed {
             inner.resolved.insert(f.id, t);
         }
+        resolved_any
     }
 
     /// Removes and returns the resolution for `id`; `None` while pending.

@@ -69,6 +69,7 @@ pub(crate) struct WorkerLinks {
     pub(crate) last_move_time_bits: AtomicU64,
     pub(crate) commit_fire_count: AtomicU32,
     pub(crate) fences: crate::fence::FenceRegistry,
+    pub(crate) wakeup: crate::feed_wakeup::FeedWakeup,
 }
 
 /// Final pipeline stage: dispatches shaped segments into the sink and
@@ -120,7 +121,9 @@ impl<S: SegmentSink> Dispatcher<S> {
             Ok(()) => {
                 self.dispatched_through = Some(seg.t_end);
                 self.publish_progress(seg.t_end);
-                self.links.fences.on_dispatch(seg.source_line, seg.t_end);
+                if self.links.fences.on_dispatch(seg.source_line, seg.t_end) {
+                    self.links.wakeup.notify_fence_resolved();
+                }
             }
             Err(e) if self.links.shutting_down.load(Ordering::Acquire) => {
                 tracing::debug!(

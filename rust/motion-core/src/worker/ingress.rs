@@ -127,6 +127,7 @@ impl Ingress {
                 self.drain_and_fence();
                 return;
             };
+            self.links.wakeup.notify_space_freed();
             match msg {
                 StreamMsg::Move(m) => self.handle_move(m),
                 other => {
@@ -155,7 +156,9 @@ impl Ingress {
         if let Some(t) = ack.dispatched_through {
             self.t_next = t;
         }
-        self.links.fences.resolve_armed(ack.dispatched_through);
+        if self.links.fences.resolve_armed(ack.dispatched_through) {
+            self.links.wakeup.notify_fence_resolved();
+        }
         ack
     }
 
@@ -249,9 +252,11 @@ impl Ingress {
                 if !self.intake.has_moves() {
                     let ack = self.barrier();
                     self.links.fences.resolve(id, ack.dispatched_through);
+                    self.links.wakeup.notify_fence_resolved();
                 } else if force {
                     let ack = self.drain_and_fence();
                     self.links.fences.resolve(id, ack.dispatched_through);
+                    self.links.wakeup.notify_fence_resolved();
                 } else {
                     self.links.fences.arm(id, self.last_line);
                 }

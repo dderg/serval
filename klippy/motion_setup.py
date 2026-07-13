@@ -154,6 +154,7 @@ def init_planner(motion):
         motion.engine.init_planner(motion._motion_config_text, topology)
         motion._configure_axes_per_mcu(engine_mcus)
         motion._planner_ready = True
+        motion._register_engine_wakeup()
 
     except Exception:
         logging.exception("Motion: init_planner failed")

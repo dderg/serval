@@ -82,6 +82,32 @@ def test_fans(sim_world):
     assert world.shutdown_line() is None
 
 
+def test_fan_changes_ride_the_print_queue(sim_world):
+    # M106 inside a streamed print resolves through a lookahead fence queued
+    # behind the moves ahead of it: the virtual-SD feed saturates the move
+    # pipe, each fan request must survive the backpressured submit path, and
+    # after the print drains the fan must hold the LAST value in stream
+    # order — a dropped or reordered fence surfaces as a different value.
+    world = sim_world(_cfg, dual_mcu=False)
+    world.gcode_ok("SET_KINEMATIC_POSITION X=10 Y=10 Z=5")
+    lines = []
+    y = 10
+    for s in (64, 128, 255, 0, 191):
+        lines.append(f"M106 S{s}")
+        for _ in range(5):
+            y += 2
+            lines.append(f"G1 X100 Y{y} F9000")
+            lines.append(f"G1 X10 Y{y} F9000")
+    path = world.gcode_dir / "fan_stream.gcode"
+    path.write_text("\n".join(lines) + "\n")
+
+    world.print_file(path, timeout=300)
+
+    fan = world.status(objects={"fan": None})["fan"]
+    assert fan["value"] == pytest.approx(191 / 255, abs=1e-3)
+    assert world.shutdown_line() is None
+
+
 def test_heated_fan(sim_world):
     world = sim_world(_cfg_heated_fan, dual_mcu=False)
     _extrude_preamble(world)
