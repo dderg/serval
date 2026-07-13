@@ -347,33 +347,112 @@ def analyze_chirp(data, config, bw):
     )
 
 
-def fit_second_order_mode(freqs, magnitude):
-    """Least-squares fit of g * |1/(1 - r^2 + 2j*zeta*r)|, r = f/fn, to the
-    measured transmissibility. The (fn, zeta) pair parameterizes the
-    mode_inverse post-processor; g absorbs drive tracking gain."""
-    fn_grid = np.linspace(freqs.min(), 1.6 * freqs.max(), 240)
+MODE_PEAK_MIN_HEIGHT = 0.35
+MODE_PEAK_MIN_PROMINENCE = 0.10
+MODE_PEAK_SMOOTH_HZ = 2.0
+MODE_MAX_CANDIDATES = 4
+MODE_FIT_MIN_HALF_WIDTH = 1.15
+MODE_FIT_FN_SPAN = (0.8, 1.25)
+
+
+def _smoothed_magnitude(freqs, magnitude):
+    bin_hz = max(float(freqs[1] - freqs[0]), 1e-9) if len(freqs) > 1 else 1.0
+    return _moving_average(
+        magnitude, max(3, int(round(MODE_PEAK_SMOOTH_HZ / bin_hz)))
+    )
+
+
+def _prominence(smooth, peak):
+    height = smooth[peak]
+    bases = []
+    for step in (-1, 1):
+        base = height
+        j = peak + step
+        while 0 <= j < len(smooth) and smooth[j] <= height:
+            base = min(base, smooth[j])
+            j += step
+        bases.append(base)
+    return float(height - max(bases))
+
+
+def find_mode_peaks(smooth):
+    """Interior local maxima tall enough to matter and prominent enough to be
+    distinct resonances rather than shoulders of a neighbor, lowest first."""
+    ceiling = float(smooth.max())
+    maxima = (
+        np.flatnonzero(
+            (smooth[1:-1] >= smooth[:-2]) & (smooth[1:-1] > smooth[2:])
+        )
+        + 1
+    )
+    peaks = [
+        int(i)
+        for i in maxima
+        if smooth[i] >= MODE_PEAK_MIN_HEIGHT * ceiling
+        and _prominence(smooth, i) >= MODE_PEAK_MIN_PROMINENCE * smooth[i]
+    ]
+    if not peaks:
+        peaks = [int(np.argmax(smooth))]
+    return peaks[:MODE_MAX_CANDIDATES]
+
+
+def _mode_valleys(smooth, peak):
+    left = peak
+    while left > 0 and smooth[left - 1] <= smooth[left]:
+        left -= 1
+    right = peak
+    while right < len(smooth) - 1 and smooth[right + 1] <= smooth[right]:
+        right += 1
+    return left, right
+
+
+def fit_mode_inverse_candidates(freqs, magnitude):
+    smooth = _smoothed_magnitude(freqs, magnitude)
+    return [
+        fit_second_order_mode(freqs, magnitude, smooth, peak)
+        for peak in find_mode_peaks(smooth)
+    ]
+
+
+def fit_second_order_mode(freqs, magnitude, smooth, peak):
+    """Weighted least-squares fit of g * |1/(1 - r^2 + 2j*zeta*r)|, r = f/fn,
+    over one isolated resonance: the fit window runs valley-to-valley around
+    the given peak, so neighboring modes cannot drag fn off the resonance
+    being inverted. The (fn, zeta) pair parameterizes the mode_inverse
+    post-processor; g absorbs drive tracking gain."""
+    f_peak = float(freqs[peak])
+    left, right = _mode_valleys(smooth, peak)
+    lo = min(float(freqs[left]), f_peak / MODE_FIT_MIN_HALF_WIDTH)
+    hi = max(float(freqs[right]), f_peak * MODE_FIT_MIN_HALF_WIDTH)
+    window = (freqs >= lo) & (freqs <= hi)
+    f = freqs[window]
+    h = magnitude[window]
+    weights = h**2
+    wh2 = float(np.sum(weights * h**2))
+    fn_lo = max(f_peak * MODE_FIT_FN_SPAN[0], float(freqs.min()))
+    fn_hi = min(f_peak * MODE_FIT_FN_SPAN[1], float(freqs.max()))
+    fn_grid = np.linspace(fn_lo, fn_hi, 160)
     zeta_grid = np.geomspace(0.02, 0.9, 60)
-    h_norm = float(np.sum(magnitude**2))
-    best = (math.inf, 0.0, 0.0, 0.0)
+    best = (math.inf, f_peak, 0.1, 1.0)
     for fn in fn_grid:
-        r = freqs / fn
+        r = f / fn
         model = 1.0 / np.sqrt(
             ((1.0 - r**2) ** 2)[None, :]
             + (2.0 * zeta_grid[:, None] * r[None, :]) ** 2
         )
-        mh = model @ magnitude
-        mm = np.maximum((model**2).sum(axis=1), 1e-12)
-        residual = h_norm - mh**2 / mm
+        wmh = model @ (weights * h)
+        wmm = np.maximum((model**2 * weights[None, :]).sum(axis=1), 1e-12)
+        residual = wh2 - wmh**2 / wmm
         k = int(np.argmin(residual))
         if residual[k] < best[0]:
             best = (
                 float(residual[k]),
                 float(fn),
                 float(zeta_grid[k]),
-                float(mh[k] / mm[k]),
+                float(wmh[k] / wmm[k]),
             )
     res, fn, zeta, gain = best
-    rel_err = math.sqrt(max(res, 0.0) / h_norm)
+    rel_err = math.sqrt(max(res, 0.0) / max(wh2, 1e-12))
     return fn, zeta, gain, rel_err
 
 
@@ -778,9 +857,9 @@ def plot_classic_with_chirp(
     max_freq,
     mode_fit=None,
 ):
-    fig = matplotlib.pyplot.figure()
+    fig = matplotlib.pyplot.figure(constrained_layout=True)
     outer = fig.add_gridspec(
-        nrows=2, ncols=1, height_ratios=[4, 5.6], hspace=0.3
+        nrows=2, ncols=1, height_ratios=[4, 5.6], hspace=0.08
     )
     gs_classic = outer[0].subgridspec(nrows=2, ncols=1, height_ratios=[3, 1])
     gs_chirp = outer[1].subgridspec(
@@ -815,7 +894,6 @@ def plot_classic_with_chirp(
         max_freq,
         mode_fit,
     )
-    fig.tight_layout()
     return fig
 
 
@@ -900,11 +978,17 @@ def run_chirp_mode(
         print("Chirp FRF   : no recommendation")
     frf_freqs = response.calibration_data.freq_bins
     frf_mag = np.sqrt(response.calibration_data.psd_sum)
-    mode_fit = fit_second_order_mode(frf_freqs, frf_mag)
+    mode_fits = fit_mode_inverse_candidates(frf_freqs, frf_mag)
+    for fn, zeta, gain, err in sorted(mode_fits[1:]):
+        print(
+            "  higher mode: frequency_hz=%.1f damping_ratio=%.3f "
+            "(gain %.2f, rel err %.0f%%)" % (fn, zeta, gain, 100.0 * err)
+        )
+    mode_fit = mode_fits[0]
     inv_fn, inv_zeta, inv_gain, inv_err = mode_fit
     print(
         "mode_inverse: frequency_hz=%.1f damping_ratio=%.3f "
-        "(2nd-order fit: gain %.2f, rel err %.0f%%)"
+        "(lowest significant mode; gain %.2f, rel err %.0f%%)"
         % (inv_fn, inv_zeta, inv_gain, 100.0 * inv_err)
     )
     if inv_err > 0.25:
@@ -1142,6 +1226,7 @@ def main():
     except (ValueError, OSError) as e:
         opts.error("Invalid chirp configuration: %s" % (e,))
     if chirp_config is not None and isinstance(datas[0], np.ndarray):
+        max_freq = max(max_freq, 1.05 * chirp_config["freq_end"])
         shaper_kwargs = dict(
             shapers=shapers,
             damping_ratio=options.damping_ratio,
