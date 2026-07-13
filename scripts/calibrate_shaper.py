@@ -41,6 +41,11 @@ T0_COARSE_STEP = 0.025
 T0_REFINE_STEP = 0.002
 SNR_WARN_LEVEL = 3.0
 REACHED_TOOLHEAD_MIN_H = 1.0
+MIN_FRF_SAMPLES = 32
+
+
+class ChirpBandTooShort(ValueError):
+    pass
 
 
 def parse_log(logname):
@@ -276,6 +281,12 @@ def analyze_chirp(data, config, bw):
     trim = 2 * int(fs / bw)
     keep = slice(trim, len(f0_full) - trim)
     f0 = f0_full[keep]
+    if len(f0) < MIN_FRF_SAMPLES:
+        raise ChirpBandTooShort(
+            "only %.2f s of sweep remain after the %.2f s lock-in filter "
+            "settling on each side; sweep longer than %.1f s or raise "
+            "--chirp-bw" % (len(f0) / fs, trim / fs, 3.0 * trim / fs)
+        )
     aph_eff = chirp_aph_eff(config)
     fundamental = [
         demod_amplitude(axis[mask], dt, fs, f0_full, bw)[keep] for axis in axes
@@ -740,7 +751,14 @@ def run_chirp_mode(
     lognames, data, config, options, shaper_kwargs, accels_per_hz
 ):
     helper = shaper_calibrate.ShaperCalibrate(printer=None)
-    response = analyze_chirp(data, config, options.chirp_bw)
+    try:
+        response = analyze_chirp(data, config, options.chirp_bw)
+    except ChirpBandTooShort as e:
+        print(
+            "Chirp FRF analysis skipped (%s); falling back to the classic "
+            "estimate" % (e,)
+        )
+        return False
 
     if len(lognames) > 1:
         print(
@@ -848,6 +866,7 @@ def run_chirp_mode(
         else:
             fig.set_size_inches(9, 16)
             fig.savefig(options.output)
+    return True
 
 
 ######################################################################
@@ -1035,10 +1054,10 @@ def main():
             test_damping_ratios=test_damping_ratios,
             max_freq=max_freq,
         )
-        run_chirp_mode(
+        if run_chirp_mode(
             args, datas[0], chirp_config, options, shaper_kwargs, accels_per_hz
-        )
-        return
+        ):
+            return
 
     # Calibrate shaper and generate outputs
     selected_shaper, shapers, calibration_data = calibrate_shaper(
