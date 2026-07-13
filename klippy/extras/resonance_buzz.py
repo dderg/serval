@@ -47,7 +47,7 @@ def servo_buzz_motor_names(printer, axis_name):
     return names
 
 
-BUZZ_PEAK_ACCEL_CEILING_MM_S2 = 15000.0
+BUZZ_PEAK_ACCEL_CEILING_MM_S2 = 200000.0
 BUZZ_MAX_AMPLITUDE_MM = 5.0
 
 
