@@ -115,6 +115,8 @@ class BeaconMcuStub:
         self._contact_latch_timer: Optional[threading.Timer] = None
 
         self._z_current: float = 10.0
+        self._prev_poll_time: Optional[float] = None
+        self._prev_poll_z: float = 10.0
         self._freq_base: int = 5_183_000
         self._freq_coeff: float = 763_000.0
         self._freq_offset: float = 2.857
@@ -257,6 +259,7 @@ class BeaconMcuStub:
                 sock = None
                 continue
             if line.startswith(b"steps="):
+                sampled_at = time.monotonic()
                 steps = int(line[6:])
                 self._steps_now = steps
                 if self._z_line_locked and not self._step_tracking:
@@ -271,16 +274,30 @@ class BeaconMcuStub:
                     )
                     self._z_current = z
                     if self._contact_homing_active and z <= 0.0:
-                        self._fire_contact_trigger()
+                        self._fire_contact_trigger(
+                            self._bed_crossing_time(sampled_at, z)
+                        )
+                    self._prev_poll_time = sampled_at
+                    self._prev_poll_z = z
             time.sleep(0.005)
 
-    def _anchor_z(self, z_mm: float) -> None:
-        if self._step_tracking:
-            self._z_anchor_mm = z_mm
-            self._z_anchor_steps = self._steps_now
+    def _bed_crossing_time(self, sampled_at: float, z: float) -> float:
+        """The poll that sees z <= 0 runs up to one poll period after the
+        true crossing; the descent is constant-speed until the trigger
+        fires, so interpolating between the last two polls recovers the
+        crossing time exactly. Detecting late is fine, but reporting the
+        detection time as the trigger clock biases every reconstructed
+        contact position downward by poll latency."""
+        prev_t, prev_z = self._prev_poll_time, self._prev_poll_z
+        if prev_t is None or prev_z <= 0.0 or prev_z <= z:
+            return sampled_at
+        return prev_t + (sampled_at - prev_t) * prev_z / (prev_z - z)
 
     def _now_clock(self) -> int:
-        elapsed = time.monotonic() - self._clock_origin
+        return self._clock_at(time.monotonic())
+
+    def _clock_at(self, monotonic_time: float) -> int:
+        elapsed = monotonic_time - self._clock_origin
         return int(elapsed * CLOCK_FREQ) & 0xFFFFFFFF
 
     def _now_clock_high(self) -> int:
@@ -599,7 +616,9 @@ class BeaconMcuStub:
             self._homing_trigger_timer.daemon = True
             self._homing_trigger_timer.start()
 
-    def _fire_contact_trigger(self) -> None:
+    def _fire_contact_trigger(
+        self, trigger_time: Optional[float] = None
+    ) -> None:
         if not self._contact_homing_active:
             return
         self._contact_homing_active = False
@@ -611,15 +630,17 @@ class BeaconMcuStub:
             )
             self._contact_latch_timer.daemon = True
             self._contact_latch_timer.start()
-        self._contact_trigger_clock = self._now_clock()
+        self._contact_trigger_clock = (
+            self._now_clock()
+            if trigger_time is None
+            else self._clock_at(trigger_time)
+        )
         self._contact_trigger_sample = self._sample_index
         self._contact_trigger_freq = self._z_to_frequency(0.0)
         self._trsync_can_trigger[self._contact_trsync_oid] = False
         self._trsync_trigger_reason[self._contact_trsync_oid] = (
             self._contact_trigger_reason
         )
-        nozzle_touches_bed_z = 0.0
-        self._anchor_z(nozzle_touches_bed_z)
         self._send_msg(
             "beacon_contact armed_clock=%u trigger_clock=%u"
             " detect_clock=%u latency=%c error=%c",
