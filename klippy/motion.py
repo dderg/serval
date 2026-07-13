@@ -265,13 +265,20 @@ class Motion:
                     )
                 slot_masks = servo_targets.setdefault(handle, [0, 0])
                 for motor in rail.get_motors():
-                    slot_bit = 1 << motor.get_chain_index()
+                    slot = node.get_slot_for_motor(motor.get_motor_name())
+                    if slot is None:
+                        raise self.printer.command_error(
+                            "RESONANCE_BUZZ: servo motor %s has no claim "
+                            "slot on ethercat node %s"
+                            % (motor.get_motor_name(), rail.get_node_name())
+                        )
+                    slot_bit = 1 << slot
                     if slot_masks[0] & slot_bit:
                         raise self.printer.command_error(
                             "RESONANCE_BUZZ: servo motor %s maps to EtherCAT "
                             "slot %d which is already claimed by another "
                             "buzzed axis on the same node"
-                            % (motor.get_motor_name(), motor.get_chain_index())
+                            % (motor.get_motor_name(), slot)
                         )
                     slot_masks[0] |= slot_bit
                     if sign_mask & rail_mask:
