@@ -30,21 +30,26 @@ fn envelope_never_exceeds_unity_or_drops_below_zero() {
 }
 
 #[test]
-fn arm_rejects_out_of_range_arguments() {
+fn arm_rejects_malformed_arguments() {
     let buzz = Buzz::new();
     assert_eq!(buzz.arm(4, 0b1, 0, 0, 100_000, 10_000, 1000, 100), -1);
     assert_eq!(buzz.arm(4, 0b1, 0, 100_000, 0, 10_000, 1000, 100), -1);
     assert_eq!(
-        buzz.arm(4, 0b1, 0, 9_000_000, 9_000_000, 10_000, 1000, 100),
+        buzz.arm(4, 0b1_0000, 0, 100_000, 100_000, 10_000, 1000, 100),
         -1
+    );
+}
+
+#[test]
+fn arm_accepts_arbitrary_magnitudes() {
+    let buzz = Buzz::new();
+    assert_eq!(
+        buzz.arm(4, 0b1, 0, 100_000, 800_000_000, 10_000, 8_000_000, 100),
+        0
     );
     assert_eq!(
         buzz.arm(4, 0b1, 0, 100_000, 100_000, 9_000_000, 1000, 100),
-        -1
-    );
-    assert_eq!(
-        buzz.arm(4, 0b1_0000, 0, 100_000, 100_000, 10_000, 1000, 100),
-        -1
+        0
     );
 }
 
