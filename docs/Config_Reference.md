@@ -2351,6 +2351,12 @@ section of the measuring resonances guide for more information on
 #   Minimum frequency to test for resonances. The default is 5 Hz.
 #max_freq: 133.33
 #   Maximum frequency to test for resonances. The default is 133.33 Hz.
+#graph_max_freq:
+#   Upper frequency bound for the generated resonance graphs. The plots
+#   extend to this frequency even when the sweep itself stops at
+#   max_freq, so response above the excited band (reached only via
+#   harmonics) stays visible. Shaper fitting still uses only the swept
+#   band. The default is to end the graphs slightly past max_freq.
 #accel_per_hz: 75
 #   This parameter is used to determine which acceleration to use to
 #   test a specific frequency: accel = accel_per_hz * freq. Higher the

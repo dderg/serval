@@ -903,7 +903,13 @@ def plot_classic_with_chirp(
 
 
 def run_chirp_mode(
-    lognames, data, config, options, shaper_kwargs, accels_per_hz
+    lognames,
+    data,
+    config,
+    options,
+    shaper_kwargs,
+    accels_per_hz,
+    plot_max_freq,
 ):
     helper = shaper_calibrate.ShaperCalibrate(printer=None)
     try:
@@ -1039,7 +1045,7 @@ def run_chirp_mode(
             response,
             chirp_shapers,
             chirp_name,
-            shaper_kwargs["max_freq"],
+            plot_max_freq,
             mode_fit,
         )
         if options.output is None:
@@ -1226,7 +1232,10 @@ def main():
     except (ValueError, OSError) as e:
         opts.error("Invalid chirp configuration: %s" % (e,))
     if chirp_config is not None and isinstance(datas[0], np.ndarray):
-        max_freq = max(max_freq, 1.05 * chirp_config["freq_end"])
+        fit_max_freq = max(max_freq, 1.05 * chirp_config["freq_end"])
+        plot_max_freq = max(
+            fit_max_freq, chirp_config.get("graph_max_freq", 0.0)
+        )
         shaper_kwargs = dict(
             shapers=shapers,
             damping_ratio=options.damping_ratio,
@@ -1234,10 +1243,16 @@ def main():
             shaper_freqs=shaper_freqs,
             max_smoothing=options.max_smoothing,
             test_damping_ratios=test_damping_ratios,
-            max_freq=max_freq,
+            max_freq=fit_max_freq,
         )
         if run_chirp_mode(
-            args, datas[0], chirp_config, options, shaper_kwargs, accels_per_hz
+            args,
+            datas[0],
+            chirp_config,
+            options,
+            shaper_kwargs,
+            accels_per_hz,
+            plot_max_freq,
         ):
             return
 

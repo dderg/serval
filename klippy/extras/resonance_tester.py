@@ -29,8 +29,8 @@ def _write_samples_to_file(filename, samples, chirp_line):
             f.write("%.6f,%.6f,%.6f,%.6f\n" % (t, accel_x, accel_y, accel_z))
 
 
-def chirp_metadata_line(sweep, amplitude_mm):
-    return (
+def chirp_metadata_line(sweep, amplitude_mm, graph_max_freq=None):
+    line = (
         "# chirp freq_start=%.3f freq_end=%.3f duration=%.3f ramp=%.4f"
         " accel_per_hz=%.3f amplitude_mm=%.6f"
         % (
@@ -42,6 +42,9 @@ def chirp_metadata_line(sweep, amplitude_mm):
             amplitude_mm,
         )
     )
+    if graph_max_freq is not None:
+        line += " graph_max_freq=%.1f" % (graph_max_freq,)
+    return line
 
 
 def write_raw_data_blocking(printer, aclient, filename, chirp_line=None):
@@ -108,6 +111,7 @@ class ResonanceTester:
             "max_freq", 135.0, minval=self.min_freq, maxval=MAX_BUZZ_FREQ
         )
         self.accel_per_hz = config.getfloat("accel_per_hz", 75.0, above=0.0)
+        self.graph_max_freq = config.getfloat("graph_max_freq", None, above=0.0)
         self.hz_per_sec = config.getfloat(
             "hz_per_sec", 1.0, minval=0.1, maxval=2.0
         )
@@ -296,7 +300,9 @@ class ResonanceTester:
                         % (scap_path, scap_samples, 1000.0 / cycle_us)
                     )
 
-                chirp_line = chirp_metadata_line(sweep, amplitude_mm)
+                chirp_line = chirp_metadata_line(
+                    sweep, amplitude_mm, self.graph_max_freq
+                )
                 for chip_axis, aclient, chip_name in raw_values:
                     aclient.finish_measurements()
                     if raw_name_suffix is not None:

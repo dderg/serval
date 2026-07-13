@@ -295,9 +295,34 @@ def test_run_test_writes_raw_data_when_named():
     os.remove(raw_name)
     assert lines[0].startswith("# chirp freq_start=")
     assert "accel_per_hz=" in lines[0]
+    assert "graph_max_freq" not in lines[0]
     assert lines[1] == "#time,accel_x,accel_y,accel_z"
     assert len(lines) == 2 + len(chip.clients[0].samples)
     assert any(r.startswith("Raw accelerometer data") for r in gcmd.responses)
+
+
+def test_raw_data_header_carries_graph_max_freq():
+    tester, printer, buzz, toolhead = make_tester(
+        values={"graph_max_freq": 450.0}
+    )
+    chip = FakeChip("adxl345")
+    tester.accel_chips = [("xy", chip)]
+    gcmd = FakeGcmd()
+    sweep = tester._parse_sweep(gcmd)
+
+    tester._run_test(
+        gcmd,
+        [resonance_tester.TestAxis("x")],
+        None,
+        sweep,
+        raw_name_suffix="gmf1",
+    )
+
+    raw_name = "/tmp/raw_data_x_adxl345_gmf1.csv"
+    with open(raw_name) as f:
+        header = f.readline().strip()
+    os.remove(raw_name)
+    assert header.endswith("graph_max_freq=450.0")
 
 
 def test_run_test_brackets_servo_capture_around_buzz():
