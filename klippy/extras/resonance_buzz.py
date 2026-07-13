@@ -26,6 +26,27 @@ def buzz_axis_to_motor_mask(axis, coupled):
     return mapping[axis]
 
 
+def servo_buzz_motor_names(printer, axis_name):
+    from . import servo_axis
+
+    toolhead = printer.lookup_object("toolhead")
+    kin = toolhead.get_kinematics()
+    lanes = getattr(kin, "lanes", None)
+    if lanes is None:
+        return []
+    coupled = bool(getattr(kin, "coupled_xy", lambda: False)())
+    axis_mask, _ = buzz_axis_to_motor_mask(axis_name, coupled)
+    names = []
+    for lane_idx, _axis_name, _motors in lanes():
+        rail = kin.rails[lane_idx]
+        if not isinstance(rail, servo_axis.ServoRail):
+            continue
+        rail_mask, _ = buzz_axis_to_motor_mask(rail.axis, False)
+        if axis_mask & rail_mask:
+            names.extend(m.get_motor_name() for m in rail.get_motors())
+    return names
+
+
 BUZZ_PEAK_ACCEL_CEILING_MM_S2 = 15000.0
 BUZZ_MAX_AMPLITUDE_MM = 5.0
 
@@ -123,7 +144,7 @@ class ResonanceBuzz:
         )
         reactor = self.printer.get_reactor()
         reactor.pause(reactor.monotonic() + duration + 0.1)
-        return duration
+        return amplitude_mm
 
     cmd_RESONANCE_BUZZ_help = (
         "Excite a single resonance frequency on one axis via the engine-"

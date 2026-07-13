@@ -10,6 +10,7 @@ import time
 from collections import namedtuple
 
 from . import shaper_calibrate
+from .resonance_buzz import servo_buzz_motor_names
 
 MAX_BUZZ_FREQ = 300.0
 
@@ -19,17 +20,34 @@ SweepParams = namedtuple(
 )
 
 
-def _write_samples_to_file(filename, samples):
+def _write_samples_to_file(filename, samples, chirp_line):
     with open(filename, "w") as f:
+        if chirp_line is not None:
+            f.write(chirp_line + "\n")
         f.write("#time,accel_x,accel_y,accel_z\n")
         for t, accel_x, accel_y, accel_z in samples:
             f.write("%.6f,%.6f,%.6f,%.6f\n" % (t, accel_x, accel_y, accel_z))
 
 
-def write_raw_data_blocking(printer, aclient, filename):
+def chirp_metadata_line(sweep, amplitude_mm):
+    return (
+        "# chirp freq_start=%.3f freq_end=%.3f duration=%.3f ramp=%.4f"
+        " accel_per_hz=%.3f amplitude_mm=%.6f"
+        % (
+            sweep.freq_start,
+            sweep.freq_end,
+            sweep.duration,
+            sweep.ramp,
+            sweep.accel_per_hz,
+            amplitude_mm,
+        )
+    )
+
+
+def write_raw_data_blocking(printer, aclient, filename, chirp_line=None):
     samples = aclient.get_samples()
     write_proc = multiprocessing.Process(
-        target=_write_samples_to_file, args=(filename, samples)
+        target=_write_samples_to_file, args=(filename, samples, chirp_line)
     )
     write_proc.start()
     reactor = printer.get_reactor()
@@ -83,6 +101,7 @@ class ResonanceTester:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.printer.load_object(config, "resonance_buzz")
+        self.printer.load_object(config, "servo_capture")
         self.move_speed = config.getfloat("move_speed", 50.0, above=0.0)
         self.min_freq = config.getfloat("min_freq", 5.0, minval=1.0)
         self.max_freq = config.getfloat(
@@ -206,10 +225,13 @@ class ResonanceTester:
         raw_name_suffix=None,
         accel_chips=None,
         test_point=None,
+        capture_name_suffix=None,
     ):
         toolhead = self.printer.lookup_object("toolhead")
         buzz = self.printer.lookup_object("resonance_buzz")
         calibration_data = {axis: None for axis in axes}
+        if capture_name_suffix is None:
+            capture_name_suffix = time.strftime("%Y%m%d_%H%M%S")
 
         test_points = (
             [test_point] if test_point else (self.probe_points or [None])
@@ -239,17 +261,42 @@ class ResonanceTester:
                         aclient = chip.start_internal_client()
                         raw_values.append((axis.get_name(), aclient, chip.name))
 
-                buzz.run_sweep(
-                    gcmd,
-                    axis.buzz_axis(),
-                    sweep.freq_start,
-                    sweep.freq_end,
-                    sweep.duration,
-                    sweep.ramp,
-                    sweep.accel_per_hz,
-                    sweep.amplitude_mm,
+                servo_names = servo_buzz_motor_names(
+                    self.printer, axis.buzz_axis()
                 )
+                scap = None
+                if servo_names:
+                    scap = self.printer.lookup_object("servo_capture")
+                    scap_name = self.get_filename(
+                        "raw_servo",
+                        capture_name_suffix,
+                        axis,
+                        point if len(test_points) > 1 else None,
+                    )
+                    scap_path = os.path.splitext(scap_name)[0] + ".scap"
+                    scap.start_capture_to(scap_path, servo_names)
+                try:
+                    amplitude_mm = buzz.run_sweep(
+                        gcmd,
+                        axis.buzz_axis(),
+                        sweep.freq_start,
+                        sweep.freq_end,
+                        sweep.duration,
+                        sweep.ramp,
+                        sweep.accel_per_hz,
+                        sweep.amplitude_mm,
+                    )
+                finally:
+                    if scap is not None:
+                        scap_path, scap_samples, cycle_us = scap.stop_capture()
+                if scap is not None:
+                    gcmd.respond_info(
+                        "Servo encoder capture written to %s file "
+                        "(%d samples at %.1f kHz)"
+                        % (scap_path, scap_samples, 1000.0 / cycle_us)
+                    )
 
+                chirp_line = chirp_metadata_line(sweep, amplitude_mm)
                 for chip_axis, aclient, chip_name in raw_values:
                     aclient.finish_measurements()
                     if raw_name_suffix is not None:
@@ -260,7 +307,9 @@ class ResonanceTester:
                             point if len(test_points) > 1 else None,
                             chip_name,
                         )
-                        write_raw_data_blocking(self.printer, aclient, raw_name)
+                        write_raw_data_blocking(
+                            self.printer, aclient, raw_name, chirp_line
+                        )
                         gcmd.respond_info(
                             "Raw accelerometer data written to "
                             "%s file" % (raw_name,)
@@ -321,6 +370,7 @@ class ResonanceTester:
             raw_name_suffix=name_suffix if raw_output else None,
             accel_chips=accel_chips,
             test_point=test_point,
+            capture_name_suffix=name_suffix,
         )[axis]
         if csv_output:
             csv_name = self.save_calibration_data(
@@ -365,7 +415,12 @@ class ResonanceTester:
         sweep = self._parse_sweep(gcmd)
 
         calibration_data = self._run_test(
-            gcmd, calibrate_axes, helper, sweep, accel_chips=accel_chips
+            gcmd,
+            calibrate_axes,
+            helper,
+            sweep,
+            accel_chips=accel_chips,
+            capture_name_suffix=name_suffix,
         )
 
         configfile = self.printer.lookup_object("configfile")
