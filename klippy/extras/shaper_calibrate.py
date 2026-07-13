@@ -12,9 +12,9 @@ import traceback
 from . import shaper_defs
 
 MIN_FREQ = 5.0
-MAX_FREQ = 200.0
+MAX_FREQ = 600.0
 WINDOW_T_SEC = 0.5
-MAX_SHAPER_FREQ = 200.0
+MAX_SHAPER_FREQ = 600.0
 
 TEST_DAMPING_RATIOS = [0.075, 0.1, 0.15]
 
