@@ -38,6 +38,18 @@ fn main() {
 
     let rss = lookup("RUNTIME_STORAGE_SIZE", "122880", is_mcu);
     let prs = lookup("RUNTIME_PIECE_RING_SIZE", "63488", is_mcu);
+    let rate_str = lookup("RUNTIME_SAMPLE_RATE_HZ", "10000", is_mcu);
+    let sample_rate_hz: usize = rate_str
+        .parse()
+        .unwrap_or_else(|_| panic!("RUNTIME_SAMPLE_RATE_HZ is not a valid usize: {rate_str}"));
+    assert!(sample_rate_hz > 0, "RUNTIME_SAMPLE_RATE_HZ must be > 0");
+
+    // Per-axis step throughput target: the 500 kHz single-edge ceiling set by
+    // STEP_MIN_EDGE_DWT's 1 us edge spacing in src/stepper.c. Both constants
+    // mirror the C preprocessor derivation in src/step_queue.h — keep in sync.
+    const TARGET_STEP_RATE_HZ: usize = 500_000;
+    let max_steps_per_sample = TARGET_STEP_RATE_HZ.div_ceil(sample_rate_hz).clamp(16, 256);
+    let step_queue_depth = (2 * max_steps_per_sample).next_power_of_two();
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set by cargo"));
 
@@ -53,7 +65,9 @@ fn main() {
          #[allow(clippy::unreadable_literal)]\n\
          pub const PIECE_RING_SIZE: usize = {prs};\n\
          #[allow(clippy::unreadable_literal)]\n\
-         pub const TOTAL_RING_PIECES: usize = {total_ring_pieces};\n"
+         pub const TOTAL_RING_PIECES: usize = {total_ring_pieces};\n\
+         pub const MAX_STEPS_PER_SAMPLE: usize = {max_steps_per_sample};\n\
+         pub const STEP_QUEUE_DEPTH: usize = {step_queue_depth};\n"
     );
     fs::write(out_dir.join("sizing.rs"), sizing_body).expect("write sizing.rs");
 

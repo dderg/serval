@@ -302,3 +302,19 @@ simulated response. That closes the loop on everything above:
 Watch a square at high accel while flipping `mode_inverse` on and off and
 the counter-drive, the feedforward, and the corner budget all become
 visible.
+
+## Classic-Klipper compatibility
+
+`SET_PRESSURE_ADVANCE` (what the Mainsail/Fluidd UI sends) is served by
+`klippy/extras/pressure_advance_compat.py`, loaded for every config. Per
+extruder it maps `ADVANCE=` onto the `k` of the single
+`linear_pressure_advance` post-processor on that extruder's axis and
+`SMOOTH_TIME=` onto the `smooth_time` of the single `smooth_triangle` one;
+the extruder's `get_status` reports the live engine values back as
+`pressure_advance` / `smooth_time`, which is where the frontends read them
+from. If the extruder's axis carries no such post-processor the command
+answers that the knob is disabled instead of erroring, and the status
+fields are omitted. An ambiguous chain (two processors of the same type on
+one axis) also reports as disabled; disambiguate with `post_processor:` /
+`smooth_post_processor:` in an explicit `[pressure_advance_compat]`
+section, or drive the chain directly with `SET_POST_PROCESSOR`.

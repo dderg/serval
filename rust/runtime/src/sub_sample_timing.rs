@@ -16,10 +16,12 @@
 use heapless::Vec;
 
 /// Storage ceiling on the per-sample step count: the inline capacity of the
-/// timestamp vectors below (4 bytes per slot on the ISR stack). The enforced
-/// limit is per-axis (`AxisState::max_steps_per_sample`), computed from the
-/// motor's real pulse timing and always ≤ this capacity.
-pub const MAX_STEPS_PER_SAMPLE: usize = 64;
+/// timestamp vectors below (4 bytes per slot on the ISR stack). Derived in
+/// build.rs as `ceil(500 kHz / sample_rate)` clamped to [16, 256], so slower
+/// ticks get proportionally larger bursts. The enforced limit is per-axis
+/// (`AxisState::max_steps_per_sample`), computed from the motor's real pulse
+/// timing and always ≤ this capacity.
+pub const MAX_STEPS_PER_SAMPLE: usize = crate::sizing::MAX_STEPS_PER_SAMPLE;
 
 /// Per-axis enforced limit when the motor's pulse timing is unknown: the
 /// conservative single-edge budget (16 steps / 100 µs sample = 160 k steps/s).

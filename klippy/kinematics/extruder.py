@@ -70,6 +70,9 @@ class PrinterExtruder:
                 % (self.name, axis_name, axis_name)
             )
         self.axis_name = axis_name
+        self.pa_compat = self.printer.lookup_object(
+            "pressure_advance_compat", None
+        )
         # Register commands
         gcode = self.printer.lookup_object("gcode")
         if self.name == "extruder":
@@ -92,6 +95,8 @@ class PrinterExtruder:
     def get_status(self, eventtime):
         sts = self.heater.get_status(eventtime)
         sts["can_extrude"] = self.heater.can_extrude
+        if self.pa_compat is not None:
+            sts.update(self.pa_compat.get_status_fields(self.name))
         return sts
 
     def get_name(self):
