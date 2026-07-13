@@ -171,10 +171,14 @@ def _demod_phase(freq_track, dt):
     )
 
 
+def _triangular_lowpass(x, width):
+    return _moving_average(_moving_average(x, width), width)
+
+
 def _lockin(signal, dt, fs, freq_track, bw):
     iq = signal * np.exp(-1j * _demod_phase(freq_track, dt))
     width = fs / bw
-    return _moving_average(iq.real, width) + 1j * _moving_average(
+    return _triangular_lowpass(iq.real, width) + 1j * _triangular_lowpass(
         iq.imag, width
     )
 
@@ -269,7 +273,7 @@ def analyze_chirp(data, config, bw):
     t0, at_boundary, flat = estimate_t0(t, dt, fs, axes, config, bw)
     mask = sweep_mask(t, t0, config)
     f0_full = sweep_freq_track(t[mask], t0, config)
-    trim = int(fs / bw)
+    trim = 2 * int(fs / bw)
     keep = slice(trim, len(f0_full) - trim)
     f0 = f0_full[keep]
     aph_eff = chirp_aph_eff(config)
