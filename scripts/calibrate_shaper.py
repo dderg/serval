@@ -37,8 +37,6 @@ OFFTRACK_RATIO = 1.31
 NYQUIST_FRACTION = 0.9
 FRF_BIN_HZ = 0.2
 T0_SEARCH_RANGE = (-1.0, 3.0)
-T0_COARSE_STEP = 0.025
-T0_REFINE_STEP = 0.002
 SNR_WARN_LEVEL = 3.0
 REACHED_TOOLHEAD_MIN_H = 1.0
 MIN_FRF_SAMPLES = 32
@@ -180,16 +178,12 @@ def _triangular_lowpass(x, width):
     return _moving_average(_moving_average(x, width), width)
 
 
-def _lockin(signal, dt, fs, freq_track, bw):
-    iq = signal * np.exp(-1j * _demod_phase(freq_track, dt))
-    width = fs / bw
-    return _triangular_lowpass(iq.real, width) + 1j * _triangular_lowpass(
+def tracked_amplitude(signal, carrier, width):
+    iq = signal * carrier
+    lp = _triangular_lowpass(iq.real, width) + 1j * _triangular_lowpass(
         iq.imag, width
     )
-
-
-def demod_amplitude(signal, dt, fs, freq_track, bw):
-    return 2.0 * np.abs(_lockin(signal, dt, fs, freq_track, bw))
+    return 2.0 * np.abs(lp)
 
 
 def sweep_freq_track(t, t0, config):
@@ -200,43 +194,40 @@ def sweep_mask(t, t0, config):
     return (t >= t0) & (t <= t0 + config["duration"])
 
 
-def _fundamental_energy(t, dt, fs, axes, t0, config, bw):
-    mask = sweep_mask(t, t0, config)
-    if mask.sum() < 10:
-        return 0.0
-    f0 = sweep_freq_track(t[mask], t0, config)
-    carrier = np.exp(-1j * _demod_phase(f0, dt))
-    width = fs / bw
-    total = 0.0
-    for axis in axes:
-        iq = axis[mask] * carrier
-        lp = _moving_average(iq.real, width) + 1j * _moving_average(
-            iq.imag, width
-        )
-        total += float(np.sum(lp.real**2 + lp.imag**2))
-    return total
-
-
 def estimate_t0(t, dt, fs, axes, config, bw):
-    coarse = np.arange(
-        T0_SEARCH_RANGE[0], T0_SEARCH_RANGE[1] + 1e-9, T0_COARSE_STEP
+    """A signal chirping from a start offset t0 differs from the t0=0
+    reference demodulation by a pure tone at -slope*t0 Hz, so the whole t0
+    scan is one FFT of the reference-demodulated capture: the strongest
+    spectral line inside the search window IS the sweep offset."""
+    slope = chirp_sweep_rate(config)
+    reference = sweep_freq_track(t, 0.0, config)
+    carrier = np.exp(-1j * _demod_phase(reference, dt))
+    power = np.zeros(len(t))
+    for axis in axes:
+        power += np.abs(np.fft.fft(axis * carrier)) ** 2
+    power = np.fft.fftshift(power)
+    tone_freqs = np.fft.fftshift(np.fft.fftfreq(len(t), dt))
+    t0_candidates = -tone_freqs / slope
+    window = (t0_candidates >= T0_SEARCH_RANGE[0]) & (
+        t0_candidates <= T0_SEARCH_RANGE[1]
     )
-    energy = np.array(
-        [_fundamental_energy(t, dt, fs, axes, g, config, bw) for g in coarse]
-    )
-    peak = int(np.argmax(energy))
-    at_boundary = peak == 0 or peak == len(coarse) - 1
-    lo, hi = max(0, peak - 4), min(len(energy), peak + 5)
-    flat = bool(energy[lo:hi].min() > 0.9 * energy[peak])
-    fine = np.arange(
-        coarse[peak] - T0_COARSE_STEP,
-        coarse[peak] + T0_COARSE_STEP + 1e-9,
-        T0_REFINE_STEP,
-    )
-    fine_energy = np.array(
-        [_fundamental_energy(t, dt, fs, axes, g, config, bw) for g in fine]
-    )
-    return float(fine[int(np.argmax(fine_energy))]), at_boundary, flat
+    if slope < 0:
+        window = window[::-1]
+        power = power[::-1]
+        t0_candidates = t0_candidates[::-1]
+    idx = np.flatnonzero(window)
+    peak = idx[int(np.argmax(power[idx]))]
+    at_boundary = peak in (idx[0], idx[-1])
+    flat = bool(power[peak] < 4.0 * np.median(power[idx]))
+    t0 = t0_candidates[peak]
+    if idx[0] < peak < idx[-1]:
+        pm, p0, pp = power[peak - 1], power[peak], power[peak + 1]
+        curvature = pm - 2.0 * p0 + pp
+        if curvature < 0:
+            shift = 0.5 * (pm - pp) / curvature
+            bin_step = t0_candidates[peak + 1] - t0_candidates[peak]
+            t0 += shift * bin_step
+    return float(t0), at_boundary, flat
 
 
 class ChirpResponse:
@@ -273,6 +264,10 @@ class ChirpResponse:
 
 
 def analyze_chirp(data, config, bw):
+    if chirp_sweep_rate(config) == 0.0:
+        raise ChirpBandTooShort(
+            "sweep has zero frequency span; nothing to demodulate"
+        )
     t, dt, fs, axes = resample_uniform(data)
     nyquist = fs / 2.0
     t0, at_boundary, flat = estimate_t0(t, dt, fs, axes, config, bw)
@@ -288,19 +283,26 @@ def analyze_chirp(data, config, bw):
             "--chirp-bw" % (len(f0) / fs, trim / fs, 3.0 * trim / fs)
         )
     aph_eff = chirp_aph_eff(config)
+    width = fs / bw
+    carrier = np.exp(-1j * _demod_phase(f0_full, dt))
     fundamental = [
-        demod_amplitude(axis[mask], dt, fs, f0_full, bw)[keep] for axis in axes
+        tracked_amplitude(axis[mask], carrier, width)[keep] for axis in axes
     ]
     transmissibility = [amp / (aph_eff * f0) for amp in fundamental]
     fundamental_mag = np.sqrt(sum(amp**2 for amp in fundamental))
     harmonics = {}
-    for order in HARMONIC_ORDERS:
+    harmonic_carrier = carrier
+    harmonic_exponent = 1
+    for order in sorted(HARMONIC_ORDERS):
+        while harmonic_exponent < order:
+            harmonic_carrier = harmonic_carrier * carrier
+            harmonic_exponent += 1
         valid = (order * f0) < NYQUIST_FRACTION * nyquist
         if valid.sum() < 10:
             continue
         harmonic_mag = np.sqrt(
             sum(
-                demod_amplitude(axis[mask], dt, fs, order * f0_full, bw)[keep]
+                tracked_amplitude(axis[mask], harmonic_carrier, width)[keep]
                 ** 2
                 for axis in axes
             )
@@ -309,9 +311,10 @@ def analyze_chirp(data, config, bw):
             valid, harmonic_mag / np.maximum(fundamental_mag, 1e-9), np.nan
         )
     offtrack = np.minimum(OFFTRACK_RATIO * f0_full, NYQUIST_FRACTION * nyquist)
+    offtrack_carrier = np.exp(-1j * _demod_phase(offtrack, dt))
     noise_mag = np.sqrt(
         sum(
-            demod_amplitude(axis[mask], dt, fs, offtrack, bw)[keep] ** 2
+            tracked_amplitude(axis[mask], offtrack_carrier, width)[keep] ** 2
             for axis in axes
         )
     )
@@ -342,6 +345,41 @@ def analyze_chirp(data, config, bw):
         calibration_data=calibration_data,
         t0_weakly_constrained=at_boundary or flat,
     )
+
+
+def fit_second_order_mode(freqs, magnitude):
+    """Least-squares fit of g * |1/(1 - r^2 + 2j*zeta*r)|, r = f/fn, to the
+    measured transmissibility. The (fn, zeta) pair parameterizes the
+    mode_inverse post-processor; g absorbs drive tracking gain."""
+    fn_grid = np.linspace(freqs.min(), 1.6 * freqs.max(), 240)
+    zeta_grid = np.geomspace(0.02, 0.9, 60)
+    h_norm = float(np.sum(magnitude**2))
+    best = (math.inf, 0.0, 0.0, 0.0)
+    for fn in fn_grid:
+        r = freqs / fn
+        model = 1.0 / np.sqrt(
+            ((1.0 - r**2) ** 2)[None, :]
+            + (2.0 * zeta_grid[:, None] * r[None, :]) ** 2
+        )
+        mh = model @ magnitude
+        mm = np.maximum((model**2).sum(axis=1), 1e-12)
+        residual = h_norm - mh**2 / mm
+        k = int(np.argmin(residual))
+        if residual[k] < best[0]:
+            best = (
+                float(residual[k]),
+                float(fn),
+                float(zeta_grid[k]),
+                float(mh[k] / mm[k]),
+            )
+    res, fn, zeta, gain = best
+    rel_err = math.sqrt(max(res, 0.0) / h_norm)
+    return fn, zeta, gain, rel_err
+
+
+def second_order_magnitude(freqs, fn, zeta, gain):
+    r = freqs / fn
+    return gain / np.sqrt((1.0 - r**2) ** 2 + (2.0 * zeta * r) ** 2)
 
 
 def calc_specgram(data, axis):
@@ -474,12 +512,12 @@ def draw_freq_response(
     accels_per_hz,
     raw_data,
 ):
-    freqs = calibration_data.freq_bins
-    psd = calibration_data.psd_sum[freqs <= max_freq]
-    px = calibration_data.psd_x[freqs <= max_freq]
-    py = calibration_data.psd_y[freqs <= max_freq]
-    pz = calibration_data.psd_z[freqs <= max_freq]
-    freqs = freqs[freqs <= max_freq]
+    all_freqs = calibration_data.freq_bins
+    psd = calibration_data.psd_sum[all_freqs <= max_freq]
+    px = calibration_data.psd_x[all_freqs <= max_freq]
+    py = calibration_data.psd_y[all_freqs <= max_freq]
+    pz = calibration_data.psd_z[all_freqs <= max_freq]
+    freqs = all_freqs[all_freqs <= max_freq]
 
     fontP = matplotlib.font_manager.FontProperties()
     fontP.set_size("x-small")
@@ -517,10 +555,21 @@ def draw_freq_response(
         if shaper.name == selected_shaper:
             linestyle = "dashdot"
             best_shaper_vals = shaper.vals
-        ax2.plot(freqs, shaper.vals, label=label, linestyle=linestyle)
+        fit_freqs = all_freqs[: len(shaper.vals)]
+        fit_band = fit_freqs <= max_freq
+        ax2.plot(
+            fit_freqs[fit_band],
+            shaper.vals[fit_band],
+            label=label,
+            linestyle=linestyle,
+        )
     if best_shaper_vals is not None:
+        shaped = min(len(freqs), len(best_shaper_vals))
         ax.plot(
-            freqs, psd * best_shaper_vals, label="After\nshaper", color="cyan"
+            freqs[:shaped],
+            psd[:shaped] * best_shaper_vals[:shaped],
+            label="After\nshaper",
+            color="cyan",
         )
     # A hack to add a human-readable shaper recommendation to legend
     ax2.plot(
@@ -571,6 +620,7 @@ def draw_chirp_frf(
     classic_data,
     classic_shaper,
     max_freq,
+    mode_fit=None,
 ):
     fontP = matplotlib.font_manager.FontProperties()
     fontP.set_size("x-small")
@@ -620,12 +670,20 @@ def draw_chirp_frf(
         linestyle = "dotted"
         if shaper.name == selected_shaper:
             linestyle = "dashdot"
-            best_shaper_vals = shaper.vals[band]
-        ax2.plot(freqs, shaper.vals[band], label=label, linestyle=linestyle)
+            best_shaper_vals = shaper.vals
+        fit_freqs = grid[: len(shaper.vals)]
+        fit_band = fit_freqs <= max_freq
+        ax2.plot(
+            fit_freqs[fit_band],
+            shaper.vals[fit_band],
+            label=label,
+            linestyle=linestyle,
+        )
     if best_shaper_vals is not None:
+        shaped = min(len(freqs), len(best_shaper_vals))
         ax_h.plot(
-            freqs,
-            h_sum * best_shaper_vals,
+            freqs[:shaped],
+            h_sum[:shaped] * best_shaper_vals[:shaped],
             label="After\nshaper",
             color="cyan",
         )
@@ -641,6 +699,23 @@ def draw_chirp_frf(
         " ",
         label="Classic PSD shaper: %s" % (str(classic_shaper).upper()),
     )
+    if mode_fit is not None:
+        inv_fn, inv_zeta, inv_gain, _inv_err = mode_fit
+        ax_h.plot(
+            freqs,
+            second_order_magnitude(freqs, inv_fn, inv_zeta, inv_gain),
+            color="black",
+            linestyle="dotted",
+            linewidth=1.0,
+            label="2nd-order\nfit",
+        )
+        ax2.plot(
+            [],
+            [],
+            " ",
+            label="mode_inverse: frequency_hz=%.1f damping_ratio=%.3f"
+            % (inv_fn, inv_zeta),
+        )
     ax_h.legend(loc="upper left", prop=fontP)
     ax2.legend(loc="upper right", prop=fontP)
 
@@ -701,6 +776,7 @@ def plot_classic_with_chirp(
     chirp_shapers,
     chirp_name,
     max_freq,
+    mode_fit=None,
 ):
     fig = matplotlib.pyplot.figure()
     outer = fig.add_gridspec(
@@ -737,6 +813,7 @@ def plot_classic_with_chirp(
         classic_data,
         classic_name,
         max_freq,
+        mode_fit,
     )
     fig.tight_layout()
     return fig
@@ -821,6 +898,25 @@ def run_chirp_mode(
         )
     else:
         print("Chirp FRF   : no recommendation")
+    frf_freqs = response.calibration_data.freq_bins
+    frf_mag = np.sqrt(response.calibration_data.psd_sum)
+    mode_fit = fit_second_order_mode(frf_freqs, frf_mag)
+    inv_fn, inv_zeta, inv_gain, inv_err = mode_fit
+    print(
+        "mode_inverse: frequency_hz=%.1f damping_ratio=%.3f "
+        "(2nd-order fit: gain %.2f, rel err %.0f%%)"
+        % (inv_fn, inv_zeta, inv_gain, 100.0 * inv_err)
+    )
+    if inv_err > 0.25:
+        print(
+            "  note: the 2nd-order model fits this response poorly; "
+            "mode_inverse parameters are approximate"
+        )
+    if not response.excitation_reached_toolhead():
+        print(
+            "  note: excitation warning active; mode_inverse parameters "
+            "are unreliable"
+        )
 
     if (
         not response.excitation_reached_toolhead()
@@ -860,6 +956,7 @@ def run_chirp_mode(
             chirp_shapers,
             chirp_name,
             shaper_kwargs["max_freq"],
+            mode_fit,
         )
         if options.output is None:
             matplotlib.pyplot.show()
