@@ -616,3 +616,70 @@ fn strain_comp_clear_returns_held_targets_to_base() {
     );
     assert!(!ctx.comp.active());
 }
+
+const BUZZ_DYNAMICS: &str = r#"
+version = 1
+axes = ["a", "b"]
+mass = [[0.00001, 0.0], [0.0, 0.00001]]
+viscous = [0.01, 0.01]
+coulomb_fwd = [50.0, 50.0]
+coulomb_rev = [-50.0, -50.0]
+coulomb_deadband_mm_s = 0.5
+fit_rms_residual = [0.1, 0.1]
+"#;
+
+/// A buzz flips sign(v) every half period; if the Coulomb term stayed in the
+/// feedforward it would land as a +/-50 tenths-pct square wave at the buzz
+/// frequency, dwarfing the micrometre-scale excitation under test.
+#[test]
+fn buzzed_slot_ff_carries_no_coulomb_square_wave() {
+    let mut ctx = test_ctx("buzz-coulomb");
+    ctx.dynamics =
+        Some(crate::dynamics::DynamicsModel::from_toml_str(BUZZ_DYNAMICS).expect("valid profile"));
+    ctx.torque_clamp_tenths = vec![300; NUM_SLAVES];
+    let rc = ctx.buzz.arm(
+        NUM_SLAVES as u8,
+        0b01,
+        0,
+        60_000,
+        60_000,
+        100_000,
+        500,
+        20,
+        [0; crate::buzz::MAX_BUZZ_SLOTS],
+    );
+    assert_eq!(rc, 0);
+
+    let mut max_abs_offset: i16 = 0;
+    let mut max_abs_target: i32 = 0;
+    for cycle in 0..1200u64 {
+        compute_motion_targets(&mut ctx, cycle * CYCLE_NS);
+        ctx.drive.cycle();
+        let tel = ctx.drive.telemetry(0);
+        max_abs_offset = max_abs_offset.max(tel.torque_offset.abs());
+        max_abs_target = max_abs_target.max(tel.target_position.abs());
+    }
+    assert!(
+        max_abs_target > 100,
+        "buzz never moved the target: {max_abs_target}"
+    );
+    assert!(
+        max_abs_offset < 5,
+        "coulomb square wave leaked into the buzz feedforward: {max_abs_offset}"
+    );
+}
+
+#[test]
+fn streamed_motion_keeps_coulomb_in_the_ff() {
+    let mut ctx = test_ctx("stream-coulomb");
+    ctx.dynamics =
+        Some(crate::dynamics::DynamicsModel::from_toml_str(BUZZ_DYNAMICS).expect("valid profile"));
+    ctx.torque_clamp_tenths = vec![300; NUM_SLAVES];
+    push_all(&mut ctx, piece(1_000_000, 0.05, &[0.25, 0.25]));
+    run_cycles(&mut ctx, 1_000_000, 40_000_000);
+    let offset = ctx.drive.telemetry(0).torque_offset;
+    assert!(
+        (49..=51).contains(&offset),
+        "constant-velocity stroke must keep coulomb + viscous FF: {offset}"
+    );
+}

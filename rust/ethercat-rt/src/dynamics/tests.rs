@@ -193,3 +193,13 @@ fn corexy_awd_pair_split_profile_is_positive_definite_and_sums_cross_coupling() 
     let expect2 = 0.015 * -400.0 + (-0.005) * 1000.0 + 0.002 * -30.0 + -1.0;
     assert!((tau2 - expect2).abs() < 1e-3, "{tau2} vs {expect2}");
 }
+
+#[test]
+fn torque_ff_without_coulomb_keeps_the_linear_terms() {
+    let m = DynamicsModel::from_toml_str(SCALAR).unwrap();
+    let linear = m.torque_ff_without_coulomb(0, &[1000.0], &[100.0]);
+    let expect = 0.0123 * 1000.0 + 0.0045 * 100.0;
+    assert!((linear - expect).abs() < 1e-4, "{linear} vs {expect}");
+    let full = m.torque_ff(0, &[1000.0], &[100.0]);
+    assert!((full - (expect + 1.2)).abs() < 1e-4, "{full}");
+}

@@ -373,10 +373,13 @@ fn emit_slot_commands(
             } else {
                 0
             };
-            let raw_ff = ctx
-                .dynamics
-                .as_ref()
-                .map(|model| model.torque_ff(s, &acc_drive, &vel_drive));
+            let raw_ff = ctx.dynamics.as_ref().map(|model| {
+                if ctx.buzz.drives_slot(s) {
+                    model.torque_ff_without_coulomb(s, &acc_drive, &vel_drive)
+                } else {
+                    model.torque_ff(s, &acc_drive, &vel_drive)
+                }
+            });
             let torque_offset = match raw_ff {
                 Some(raw) => {
                     if !raw.is_finite() {

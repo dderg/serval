@@ -59,10 +59,59 @@ class FakeChip:
 class FakeBuzz:
     def __init__(self):
         self.calls = []
+        self.events = None
 
     def run_sweep(self, gcmd, axis_name, *args):
         self.calls.append((axis_name, args))
-        return args[2]
+        if self.events is not None:
+            self.events.append("buzz")
+        return args[5]
+
+
+class FakeServoCapture:
+    def __init__(self, events):
+        self.events = events
+        self.starts = []
+
+    def start_capture_to(self, path, servos):
+        self.events.append("capture_start")
+        self.starts.append((path, list(servos)))
+        return path
+
+    def stop_capture(self):
+        self.events.append("capture_stop")
+        return ("/tmp/fake.scap", 4321, 250.0)
+
+
+class FakeServoMotor:
+    def __init__(self, name):
+        self._name = name
+
+    def get_motor_name(self):
+        return self._name
+
+
+def _servo_rail(axis, motor_names):
+    from klippy.extras.servo_axis import ServoRail
+
+    rail = ServoRail.__new__(ServoRail)
+    rail.axis = axis
+    rail.motors = [FakeServoMotor(n) for n in motor_names]
+    return rail
+
+
+class FakeServoKin:
+    def __init__(self, rails):
+        self.rails = rails
+
+    def lanes(self):
+        return [
+            (lane_idx, rail.axis, rail.motors)
+            for lane_idx, rail in enumerate(self.rails)
+        ]
+
+    def coupled_xy(self):
+        return True
 
 
 class FakeToolhead:
@@ -70,6 +119,10 @@ class FakeToolhead:
         self.moves = []
         self.dwells = []
         self.waited = 0
+        self._kin = object()
+
+    def get_kinematics(self):
+        return self._kin
 
     def manual_move(self, point, speed):
         self.moves.append((point, speed))
@@ -138,10 +191,13 @@ class FakeConfig:
 def make_tester(values=None):
     printer = FakePrinter()
     gcode = FakeGcode()
+    events = []
     buzz = FakeBuzz()
+    buzz.events = events
     toolhead = FakeToolhead()
     printer._objs["gcode"] = gcode
     printer._objs["resonance_buzz"] = buzz
+    printer._objs["servo_capture"] = FakeServoCapture(events)
     printer._objs["toolhead"] = toolhead
     cfg_values = {"accel_chip": "adxl345"}
     if values:
@@ -237,9 +293,81 @@ def test_run_test_writes_raw_data_when_named():
     with open(raw_name) as f:
         lines = f.read().splitlines()
     os.remove(raw_name)
-    assert lines[0] == "#time,accel_x,accel_y,accel_z"
-    assert len(lines) == 1 + len(chip.clients[0].samples)
+    assert lines[0].startswith("# chirp freq_start=")
+    assert "accel_per_hz=" in lines[0]
+    assert "graph_max_freq" not in lines[0]
+    assert lines[1] == "#time,accel_x,accel_y,accel_z"
+    assert len(lines) == 2 + len(chip.clients[0].samples)
     assert any(r.startswith("Raw accelerometer data") for r in gcmd.responses)
+
+
+def test_raw_data_header_carries_graph_max_freq():
+    tester, printer, buzz, toolhead = make_tester(
+        values={"graph_max_freq": 450.0}
+    )
+    chip = FakeChip("adxl345")
+    tester.accel_chips = [("xy", chip)]
+    gcmd = FakeGcmd()
+    sweep = tester._parse_sweep(gcmd)
+
+    tester._run_test(
+        gcmd,
+        [resonance_tester.TestAxis("x")],
+        None,
+        sweep,
+        raw_name_suffix="gmf1",
+    )
+
+    raw_name = "/tmp/raw_data_x_adxl345_gmf1.csv"
+    with open(raw_name) as f:
+        header = f.readline().strip()
+    os.remove(raw_name)
+    assert header.endswith("graph_max_freq=450.0")
+
+
+def test_run_test_brackets_servo_capture_around_buzz():
+    tester, printer, buzz, toolhead = make_tester()
+    chip = FakeChip("beacon")
+    tester.accel_chips = [("xy", chip)]
+    toolhead._kin = FakeServoKin(
+        [
+            _servo_rail("x", ["motor_a", "motor_a1"]),
+            _servo_rail("y", ["motor_b", "motor_b1"]),
+        ]
+    )
+    scap = printer._objs["servo_capture"]
+    gcmd = FakeGcmd()
+    sweep = tester._parse_sweep(gcmd)
+
+    tester._run_test(
+        gcmd,
+        [resonance_tester.TestAxis("y")],
+        None,
+        sweep,
+        capture_name_suffix="cap1",
+    )
+
+    assert scap.starts == [
+        (
+            "/tmp/raw_servo_y_cap1.scap",
+            ["motor_a", "motor_a1", "motor_b", "motor_b1"],
+        )
+    ]
+    assert scap.events == ["capture_start", "buzz", "capture_stop"]
+    assert any(r.startswith("Servo encoder capture") for r in gcmd.responses)
+
+
+def test_run_test_skips_servo_capture_without_servo_rails():
+    tester, printer, buzz, toolhead = make_tester()
+    tester.accel_chips = [("xy", FakeChip("adxl345"))]
+    scap = printer._objs["servo_capture"]
+    gcmd = FakeGcmd()
+    sweep = tester._parse_sweep(gcmd)
+
+    tester._run_test(gcmd, [resonance_tester.TestAxis("x")], None, sweep)
+
+    assert scap.starts == []
+    assert scap.events == ["buzz"]
 
 
 def test_run_test_moves_to_probe_point():

@@ -88,11 +88,6 @@ impl DynamicsModel {
     }
 
     pub fn torque_ff(&self, axis: usize, acc_mm_s2: &[f32], vel_mm_s: &[f32]) -> f32 {
-        assert_eq!(acc_mm_s2.len(), self.n);
-        assert_eq!(vel_mm_s.len(), self.n);
-        assert!(axis < self.n);
-        let row = &self.mass[axis * self.n..][..self.n];
-        let inertial: f32 = row.iter().zip(acc_mm_s2.iter()).map(|(m, a)| m * a).sum();
         let v = vel_mm_s[axis];
         let coulomb = if v > self.deadband {
             self.coulomb_fwd[axis]
@@ -101,7 +96,24 @@ impl DynamicsModel {
         } else {
             0.0
         };
-        inertial + self.viscous[axis] * v + coulomb
+        self.torque_ff_without_coulomb(axis, acc_mm_s2, vel_mm_s) + coulomb
+    }
+
+    /// Buzzed slots use this variant: a buzz flips sign(v) every half period,
+    /// which would turn the Coulomb term into a square-wave torque at the buzz
+    /// frequency — far larger than the micrometre-scale excitation it rides on.
+    pub fn torque_ff_without_coulomb(
+        &self,
+        axis: usize,
+        acc_mm_s2: &[f32],
+        vel_mm_s: &[f32],
+    ) -> f32 {
+        assert_eq!(acc_mm_s2.len(), self.n);
+        assert_eq!(vel_mm_s.len(), self.n);
+        assert!(axis < self.n);
+        let row = &self.mass[axis * self.n..][..self.n];
+        let inertial: f32 = row.iter().zip(acc_mm_s2.iter()).map(|(m, a)| m * a).sum();
+        inertial + self.viscous[axis] * vel_mm_s[axis]
     }
 
     /// Stack independent per-servo profiles into one node model whose mass

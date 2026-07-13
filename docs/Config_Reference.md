@@ -2351,6 +2351,12 @@ section of the measuring resonances guide for more information on
 #   Minimum frequency to test for resonances. The default is 5 Hz.
 #max_freq: 133.33
 #   Maximum frequency to test for resonances. The default is 133.33 Hz.
+#graph_max_freq:
+#   Upper frequency bound for the generated resonance graphs. The plots
+#   extend to this frequency even when the sweep itself stops at
+#   max_freq, so response above the excited band (reached only via
+#   harmonics) stays visible. Shaper fitting still uses only the swept
+#   band. The default is to end the graphs slightly past max_freq.
 #accel_per_hz: 75
 #   This parameter is used to determine which acceleration to use to
 #   test a specific frequency: accel = accel_per_hz * freq. Higher the
@@ -2373,6 +2379,26 @@ section of the measuring resonances guide for more information on
 #   non-zero value in order to not poison the measurements.
 #   To enable it, start by setting it to 1.2 sec which is a good all-round
 #   choice. Set it to 0 do disable it. The default is 0.
+```
+
+### [resonance_buzz]
+
+Engine-resident resonance excitation (loaded automatically by
+[resonance_tester]). Both limits refuse loudly — a request over a limit
+aborts the command with the exact numbers rather than substituting a
+weaker excitation.
+
+```
+[resonance_buzz]
+#max_peak_accel: 200000
+#   Largest peak acceleration (mm/s^2) a buzz may command. A sweep with
+#   accel_per_hz * freq_end above this errors out. The default is
+#   200000, roughly full rated torque on typical servo dynamics.
+#max_amplitude: 5.0
+#   Largest displacement (mm) a buzz may command around the current
+#   position. The buzz bypasses the motion planner and its soft limits,
+#   so this is the only bound on carriage travel during a test. The
+#   default is 5.0 mm.
 ```
 
 ## Config file helpers

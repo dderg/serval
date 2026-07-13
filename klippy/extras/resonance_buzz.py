@@ -26,7 +26,28 @@ def buzz_axis_to_motor_mask(axis, coupled):
     return mapping[axis]
 
 
-BUZZ_PEAK_ACCEL_CEILING_MM_S2 = 15000.0
+def servo_buzz_motor_names(printer, axis_name):
+    from . import servo_axis
+
+    toolhead = printer.lookup_object("toolhead")
+    kin = toolhead.get_kinematics()
+    lanes = getattr(kin, "lanes", None)
+    if lanes is None:
+        return []
+    coupled = bool(getattr(kin, "coupled_xy", lambda: False)())
+    axis_mask, _ = buzz_axis_to_motor_mask(axis_name, coupled)
+    names = []
+    for lane_idx, _axis_name, _motors in lanes():
+        rail = kin.rails[lane_idx]
+        if not isinstance(rail, servo_axis.ServoRail):
+            continue
+        rail_mask, _ = buzz_axis_to_motor_mask(rail.axis, False)
+        if axis_mask & rail_mask:
+            names.extend(m.get_motor_name() for m in rail.get_motors())
+    return names
+
+
+BUZZ_PEAK_ACCEL_CEILING_MM_S2 = 200000.0
 BUZZ_MAX_AMPLITUDE_MM = 5.0
 
 
@@ -41,6 +62,12 @@ def sinusoid_amplitude_mm(accel_per_hz, freq_hz):
 class ResonanceBuzz:
     def __init__(self, config):
         self.printer = config.get_printer()
+        self.max_peak_accel = config.getfloat(
+            "max_peak_accel", BUZZ_PEAK_ACCEL_CEILING_MM_S2, above=0.0
+        )
+        self.max_amplitude = config.getfloat(
+            "max_amplitude", BUZZ_MAX_AMPLITUDE_MM, above=0.0
+        )
         self.gcode = self.printer.lookup_object("gcode")
         self.gcode.register_command(
             "RESONANCE_BUZZ",
@@ -77,25 +104,27 @@ class ResonanceBuzz:
 
         if amplitude_mm <= 0.0:
             highest_freq = max(freq_start, freq_end)
-            if (
-                sinusoid_peak_accel(accel_per_hz, highest_freq)
-                > BUZZ_PEAK_ACCEL_CEILING_MM_S2
-            ):
-                accel_per_hz = BUZZ_PEAK_ACCEL_CEILING_MM_S2 / highest_freq
-                gcmd.respond_info(
-                    "RESONANCE_BUZZ: clamped accel_per_hz to %.1f to keep peak "
-                    "accel <= %.0f mm/s^2 at %.1f Hz"
+            peak_accel = sinusoid_peak_accel(accel_per_hz, highest_freq)
+            if peak_accel > self.max_peak_accel:
+                raise gcmd.error(
+                    "RESONANCE_BUZZ: ACCEL_PER_HZ %.1f commands %.0f mm/s^2 "
+                    "peak accel at %.1f Hz, over the %.0f mm/s^2 "
+                    "max_peak_accel; the largest ACCEL_PER_HZ for this band "
+                    "is %.1f"
                     % (
                         accel_per_hz,
-                        BUZZ_PEAK_ACCEL_CEILING_MM_S2,
+                        peak_accel,
                         highest_freq,
+                        self.max_peak_accel,
+                        self.max_peak_accel / highest_freq,
                     )
                 )
             amplitude_mm = sinusoid_amplitude_mm(accel_per_hz, freq_start)
-        if amplitude_mm > BUZZ_MAX_AMPLITUDE_MM:
+        if amplitude_mm > self.max_amplitude:
             raise gcmd.error(
-                "RESONANCE_BUZZ amplitude %.3f mm at %.1f Hz exceeds %.1f mm "
-                "ceiling" % (amplitude_mm, freq_start, BUZZ_MAX_AMPLITUDE_MM)
+                "RESONANCE_BUZZ amplitude %.3f mm at %.1f Hz exceeds the "
+                "%.1f mm max_amplitude"
+                % (amplitude_mm, freq_start, self.max_amplitude)
             )
 
         toolhead.wait_moves()
@@ -123,7 +152,7 @@ class ResonanceBuzz:
         )
         reactor = self.printer.get_reactor()
         reactor.pause(reactor.monotonic() + duration + 0.1)
-        return duration
+        return amplitude_mm
 
     cmd_RESONANCE_BUZZ_help = (
         "Excite a single resonance frequency on one axis via the engine-"
