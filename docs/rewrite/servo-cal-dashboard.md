@@ -161,7 +161,11 @@ chart.
   view, where a peak is a spike, not a bump on a log floor. Following
   error converts to µm via the manifest's `counts_per_mm`; both convert
   the analyzer's Welch PSD to tone amplitude as `sqrt(2 · psd · ENBW)`
-  (Hann ENBW = 1.5·Δf). Between the metrics table and the PSD sits the
+  (Hann ENBW = 1.5·Δf). The tracking metrics table heat-tints its µm
+  columns (red intensity scaled between each column's best and worst
+  visible value), so the low-overshoot step reads without comparing
+  four drives' digits per step. Between the metrics table and the PSD
+  sits the
   **metrics-vs-gain chart** — the old gain-report PNG's bottom-left panel:
   each selected sweep run draws worst-drive overshoot (solid, dotted
   markers), ferr rms (dashed), and ferr peak (dotted) in µm against the

@@ -93,6 +93,7 @@ fn app_js_defines_the_tracking_metrics_functions() {
         "function torqueCellHtml(",
         "function metricsTableRows(",
         "function renderMetricsTable(",
+        "function heatCellStyle(",
         "SERVO_MEASURE_TRACKING",
     ];
     for needle in required {

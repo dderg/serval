@@ -1051,6 +1051,15 @@ function metricsTableRows(names, steps) {
   return rows;
 }
 
+/// Red tint scaled to where the value sits between the column's best and
+/// worst — the cheap-to-scan replacement for reading 4-drives-per-step
+/// numbers one by one. Identical columns get no tint.
+function heatCellStyle(value, min, max) {
+  if (!(max > min)) return "";
+  const alpha = (0.32 * (value - min)) / (max - min);
+  return alpha < 0.02 ? "" : ` style="background:rgba(224,90,79,${alpha.toFixed(3)})"`;
+}
+
 function renderMetricsTable(names, steps) {
   const container = el("metrics-table");
   if (!container) return;
@@ -1059,16 +1068,24 @@ function renderMetricsTable(names, steps) {
     container.innerHTML = '<p class="note">select runs above</p>';
     return;
   }
+  const columns = ["ferrPeak", "ferrRms", "overshoot"];
+  const bounds = {};
+  for (const c of columns) {
+    const values = rows.map((r) => r.summary[c] * r.umPerCount);
+    bounds[c] = { min: Math.min(...values), max: Math.max(...values) };
+  }
   const um = (counts, r) => (counts * r.umPerCount).toFixed(1);
+  const heat = (c, r) =>
+    heatCellStyle(r.summary[c] * r.umPerCount, bounds[c].min, bounds[c].max);
   const body = rows
     .map((r) => {
       const swatch = `<span class="swatch" style="background:${runColor(r.run)}"></span>`;
       return (
         `<tr><td class="run-cell" title="${r.run}">${swatch}${r.run}</td>` +
         `<td>${r.step}</td><td>${r.drive}</td>` +
-        `<td class="num">${um(r.summary.ferrPeak, r)}</td>` +
-        `<td class="num">${um(r.summary.ferrRms, r)}</td>` +
-        `<td class="num">${um(r.summary.overshoot, r)}</td>` +
+        `<td class="num"${heat("ferrPeak", r)}>${um(r.summary.ferrPeak, r)}</td>` +
+        `<td class="num"${heat("ferrRms", r)}>${um(r.summary.ferrRms, r)}</td>` +
+        `<td class="num"${heat("overshoot", r)}>${um(r.summary.overshoot, r)}</td>` +
         `<td class="num">${settleCellHtml(r.summary)}</td>` +
         `<td class="num">${torqueCellHtml(r.torque)}</td></tr>`
       );
