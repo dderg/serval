@@ -30,9 +30,9 @@ pub fn reconstruct_axis_position(
 ) -> Result<f64, String> {
     let axis_mcu = axis_key.mcu_id;
 
-    let trip_host = {
+    let (trip_host, axis_clock) = {
         let router_guard = router.lock_ok();
-        crate::motion_history::clock_to_host(
+        let trip_host = crate::motion_history::clock_to_host(
             &router_guard,
             crate::types::mcu_handle_from_raw(endstop_mcu),
             trip_clock,
@@ -45,7 +45,25 @@ pub fn reconstruct_axis_position(
                 trip_clock,
             }
             .to_string()
-        })?
+        })?;
+        // The trip is answered in the axis MCU's clock domain — the domain
+        // the recorded pieces are keyed in — never against their host-time
+        // keys. Host keys are the schedule as projected at send time; the
+        // clock↔host mapping drifts between send and trip (sync jitter,
+        // and in the simulator the virtual clock legally slips against
+        // real time), and that drift lands the lookup a velocity-scaled
+        // distance away. A remote endstop converts through both CURRENT
+        // models back-to-back, so their shared drift cancels.
+        let axis_clock = if endstop_mcu == axis_mcu {
+            trip_clock
+        } else {
+            router_guard
+                .host_time_to_mcu_clock(crate::types::mcu_handle_from_raw(axis_mcu), trip_host)
+                .map_err(|e| {
+                    format!("host_time_to_mcu_clock failed for axis mcu {axis_mcu}: {e:?}")
+                })?
+        };
+        (trip_host, axis_clock)
     };
 
     if trip_host <= window_start_host {
@@ -59,7 +77,7 @@ pub fn reconstruct_axis_position(
 
     let store = history.lock_ok();
     let st = store
-        .state_at_host(axis_key, trip_host, None)
+        .state_at_clock(axis_key, axis_clock, trip_host, None)
         .map_err(|e| e.to_string())?;
     Ok(st.position)
 }

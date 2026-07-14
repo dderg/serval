@@ -647,3 +647,76 @@ fn host_clock_round_trip_is_identity() {
         "T then T^-1 must return the original clock (got {back}, want {clock})"
     );
 }
+
+#[test]
+fn state_at_clock_matches_state_at_host_when_mapping_is_exact() {
+    let mut store = HistoryStore::default();
+    rec(&mut store, key(), linear(0, 1.0, 0.0, 10.0));
+    let clock = FREQ as u64 / 4;
+    let by_clock = store
+        .state_at_clock(key(), clock, h(clock), Some(f64::INFINITY))
+        .unwrap();
+    let by_host = store
+        .state_at_host(key(), h(clock), Some(f64::INFINITY))
+        .unwrap();
+    assert!((by_clock.position - by_host.position).abs() < 1e-9);
+    assert!((by_clock.position - 2.5).abs() < 1e-6);
+    assert!((by_clock.velocity - 10.0).abs() < 1e-6);
+}
+
+#[test]
+fn state_at_clock_is_immune_to_host_mapping_skew() {
+    let mut store = HistoryStore::default();
+    // The piece was keyed with a host time 40 ms later than its clock
+    // implies — the sync estimate drifted between send and query. 10 mm/s
+    // over 40 ms is a 0.4 mm bias in the host-domain answer.
+    let skew_s = 0.040;
+    let e = linear(0, 1.0, 0.0, 10.0);
+    store.record(key(), &e, FREQ, skew_s);
+    let clock = FREQ as u64 / 2;
+    let by_clock = store
+        .state_at_clock(key(), clock, h(clock), Some(f64::INFINITY))
+        .unwrap();
+    let by_host = store
+        .state_at_host(key(), h(clock), Some(f64::INFINITY))
+        .unwrap();
+    assert!(
+        (by_clock.position - 5.0).abs() < 1e-6,
+        "clock-domain answer must track the executed trajectory, got {}",
+        by_clock.position
+    );
+    assert!(
+        (by_host.position - 4.6).abs() < 1e-6,
+        "host-domain answer is expected to carry the 0.4 mm skew bias, got {}",
+        by_host.position
+    );
+}
+
+#[test]
+fn state_at_clock_holds_endpoint_in_gap_after_piece() {
+    let mut store = HistoryStore::default();
+    rec(&mut store, key(), linear(0, 1.0, 0.0, 10.0));
+    let after_end = 2 * FREQ as u64;
+    let st = store
+        .state_at_clock(key(), after_end, h(after_end), Some(f64::INFINITY))
+        .unwrap();
+    assert!((st.position - 10.0).abs() < 1e-6);
+    assert!(st.velocity.abs() < 1e-9);
+}
+
+#[test]
+fn state_at_clock_before_ring_falls_back_to_host_hold() {
+    let mut store = HistoryStore::default();
+    rec(&mut store, key(), linear(FREQ as u64, 1.0, 3.0, 3.0));
+    store.drop_pieces_on_reanchor();
+    rec(&mut store, key(), linear(4 * FREQ as u64, 1.0, 3.0, 7.0));
+    let held = store
+        .state_at_clock(
+            key(),
+            3 * FREQ as u64,
+            h(3 * FREQ as u64),
+            Some(f64::INFINITY),
+        )
+        .unwrap();
+    assert!((held.position - 3.0).abs() < 1e-6);
+}

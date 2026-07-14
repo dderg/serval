@@ -257,6 +257,16 @@ fn eval_state(piece: &HistoryPiece, host_t: f64) -> AxisState {
     eval_at_u(piece, u)
 }
 
+fn eval_state_at_clock(piece: &HistoryPiece, clock: u64) -> AxisState {
+    let span = piece.end_clock.saturating_sub(piece.start_clock);
+    let u = if span > 0 {
+        (clock.saturating_sub(piece.start_clock) as f64 / span as f64).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    eval_at_u(piece, u)
+}
+
 fn trailing_rest_start(ring: &VecDeque<HistoryPiece>, endpoint: AxisEndpoint) -> f64 {
     let mut start = endpoint.host;
     for piece in ring.iter().rev() {
@@ -411,6 +421,47 @@ impl HistoryStore {
 
     pub fn final_position(&self, key: AxisKey) -> Option<f64> {
         self.endpoints.get(&key).map(|e| e.position)
+    }
+
+    /// Axis state at an MCU clock reading from the same MCU the pieces were
+    /// sent to. Pieces execute at exactly their wire start clock, so
+    /// evaluating by clock is exact where `state_at_host` goes through the
+    /// clock↔host mapping twice (once keying the piece at send, once
+    /// converting the query) and inherits the sync estimate's jitter between
+    /// those two moments — an error that scales with axis velocity and, in
+    /// the simulator, with `VTIME_SPEED`. `host_t` is the clock's host-time
+    /// projection, used only for the hold fallbacks, where the position is
+    /// constant and mapping jitter cannot bias it.
+    pub fn state_at_clock(
+        &self,
+        key: AxisKey,
+        clock: u64,
+        host_t: f64,
+        now_host: Option<f64>,
+    ) -> Result<AxisState, HistoryError> {
+        let Some(ring) = self.rings.get(&key).filter(|r| !r.is_empty()) else {
+            return self.state_at_host(key, host_t, now_host);
+        };
+        // Reverse scan instead of binary search: recorded start clocks are
+        // projections and may regress a few ticks across re-syncs
+        // (`history_order_jitter`), which would break a sorted-ring
+        // precondition. Trip queries are rare, so O(len) is fine.
+        let Some(piece) = ring.iter().rev().find(|p| p.start_clock <= clock) else {
+            return self.state_at_host(key, host_t, now_host);
+        };
+        if clock < piece.end_clock {
+            return Ok(eval_state_at_clock(piece, clock));
+        }
+        if let Some(now_host) = now_host {
+            if host_t > now_host {
+                return Err(HistoryError::QueryInFuture {
+                    key,
+                    queried: host_t,
+                    now_host,
+                });
+            }
+        }
+        Ok(piece.endpoint().hold_state())
     }
 
     pub fn state_at_host(
