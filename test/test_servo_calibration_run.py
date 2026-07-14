@@ -616,7 +616,7 @@ def test_strain_map_raster_records_one_capture_per_line():
     sync = FakeServoSync()
     sc.printer._objs["servo_sync"] = sync
     sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
-    gcmd = FakeGcmd(LINE_SPACING="120", SPEED="50", ACCEL="1000")
+    gcmd = FakeGcmd(LINE_SPACING="120", SPEED="50", ACCEL="1000", PROBE="0")
     sc.cmd_SERVO_MEASURE_STRAIN_MAP(gcmd)
     assert sync.runs == [None]
     caps = sc.printer.lookup_object("servo_capture").captures
@@ -653,16 +653,94 @@ def test_strain_map_without_servo_sync_errors_loudly():
     sc, _gcode = make_sc()
     sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
     with pytest.raises(RuntimeError, match="servo_sync"):
-        sc.cmd_SERVO_MEASURE_STRAIN_MAP(FakeGcmd(LINE_SPACING="120"))
+        sc.cmd_SERVO_MEASURE_STRAIN_MAP(FakeGcmd(LINE_SPACING="120", PROBE="0"))
 
 
 def test_strain_map_sync_zero_skips_the_zero_point():
     servo_param.drain_param_writes()
     sc, _gcode = make_sc()
     sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
-    gcmd = FakeGcmd(LINE_SPACING="120", SYNC="0")
+    gcmd = FakeGcmd(LINE_SPACING="120", SYNC="0", PROBE="0")
     sc.cmd_SERVO_MEASURE_STRAIN_MAP(gcmd)
     assert _manifest(sc)["stroke_plan"]["zero_sync"] is False
+
+
+class FakeBeltPair:
+    def __init__(self, axis, motors):
+        self._axis = axis
+        self._motors = motors
+
+    def axis_name(self):
+        return self._axis
+
+    def motor_names(self):
+        return self._motors
+
+
+class FakeStrainComp:
+    def __init__(self):
+        self.offsets = []
+        self.cleared = 0
+        self.pairs = [
+            FakeBeltPair("x", ["motor_a", "motor_a1"]),
+            FakeBeltPair("y", ["motor_b", "motor_b1"]),
+        ]
+
+    def belt_pairs_for_probe(self, gcmd):
+        return self.pairs
+
+    def set_probe_offset(self, gcmd, pair, value_um):
+        self.offsets.append((pair.axis_name(), value_um))
+
+    def clear_probe_offset(self, gcmd, pair):
+        self.cleared += 1
+
+
+def test_strain_map_probe_lines_record_the_applied_offsets():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    sc.printer._objs["servo_sync"] = FakeServoSync()
+    strain_comp = FakeStrainComp()
+    sc.printer._objs["servo_strain_comp"] = strain_comp
+    sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
+    gcmd = FakeGcmd(LINE_SPACING="120")
+    sc.cmd_SERVO_MEASURE_STRAIN_MAP(gcmd)
+    assert strain_comp.offsets == [
+        ("x", 50.0),
+        ("x", -50.0),
+        ("y", 50.0),
+        ("y", -50.0),
+    ]
+    assert strain_comp.cleared == 4
+    m = _manifest(sc)
+    probes = [s for s in m["steps"] if s["applied"]]
+    assert [s["name"] for s in probes] == [
+        "probe_x_plus",
+        "probe_x_minus",
+        "probe_y_plus",
+        "probe_y_minus",
+    ]
+    assert probes[0]["swept"] == {"y": 150.0}
+    assert probes[0]["applied"] == [
+        {"motors": ["motor_a", "motor_a1"], "offset_um": 50.0}
+    ]
+    caps = sc.printer.lookup_object("servo_capture").captures
+    names = [os.path.basename(path) for path, _servos in caps]
+    assert names[-4:] == [
+        "step_probe_x_plus.scap",
+        "step_probe_x_minus.scap",
+        "step_probe_y_plus.scap",
+        "step_probe_y_minus.scap",
+    ]
+
+
+def test_strain_map_probe_without_strain_comp_errors_loudly():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    sc.printer._objs["servo_sync"] = FakeServoSync()
+    sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
+    with pytest.raises(RuntimeError, match="PROBE=0"):
+        sc.cmd_SERVO_MEASURE_STRAIN_MAP(FakeGcmd(LINE_SPACING="120"))
 
 
 def test_strain_map_rejects_cartesian_kinematics():

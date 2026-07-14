@@ -61,12 +61,13 @@ class ServoStrainComp:
     cmd_SERVO_STRAIN_COMP_BUILD_help = (
         "Build the compensation map from a SERVO_MEASURE_STRAIN_MAP run: "
         "grid the elastic differential field per belt, invert the pair "
-        "stiffness matrix, write the map file. RUN=<run dir> is required; "
-        "stiffness comes from SERVO_MEASURE_PAIR_STIFFNESS or "
-        "STIFFNESS_A/STIFFNESS_B (%/mm); gantry cross-coupling comes from "
-        "the same measurement or CROSS_AB/CROSS_BA (%/mm, the response of "
-        "one belt's differential to the other belt's offset); SPACING "
-        "overrides the grid pitch (defaults to the run's line spacing). "
+        "response matrix, write the map file. RUN=<run dir> is required. "
+        "The response matrix comes from the run's own probe lines "
+        "(SERVO_MEASURE_STRAIN_MAP PROBE=1, the default); "
+        "STIFFNESS_A/STIFFNESS_B and CROSS_AB/CROSS_BA (%/mm) override "
+        "it, and the standstill SERVO_MEASURE_PAIR_STIFFNESS values are "
+        "the last resort (they over-read). SPACING overrides the grid "
+        "pitch (defaults to the run's line spacing). "
         "MERGE=1 treats the run as a residual measured WITH the current "
         "map enabled, identifies the effective response matrix from the "
         "map's applied offsets and the field change since its base run "
@@ -86,6 +87,7 @@ class ServoStrainComp:
         )
         self.measured_stiffness = {}
         self.measured_cross = {}
+        self.map_enabled = False
         gcode = self.printer.lookup_object("gcode")
         gcode.register_command(
             "SERVO_MEASURE_PAIR_STIFFNESS",
@@ -208,7 +210,29 @@ class ServoStrainComp:
             [],
         )
 
+    def _reject_active_map(self, gcmd, would):
+        if self.map_enabled:
+            raise gcmd.error(
+                "strain compensation is enabled — %s would replace the "
+                "active map; SERVO_STRAIN_COMP ENABLE=0 first" % would
+            )
+
+    def belt_pairs_for_probe(self, gcmd):
+        self._reject_active_map(gcmd, "probe offsets (pass PROBE=0)")
+        return self._belt_pairs(gcmd)
+
+    def set_probe_offset(self, gcmd, pair, value_um):
+        engine = self.printer.lookup_object("motion_engine")
+        handle = self._node_handle(gcmd, pair.node)
+        self._upload_constant(engine, handle, pair, value_um)
+
+    def clear_probe_offset(self, gcmd, pair):
+        engine = self.printer.lookup_object("motion_engine")
+        handle = self._node_handle(gcmd, pair.node)
+        self._clear_pair(engine, handle, pair)
+
     def cmd_SERVO_MEASURE_PAIR_STIFFNESS(self, gcmd):
+        self._reject_active_map(gcmd, "the stiffness probe")
         axis_filter = gcmd.get("AXIS", None)
         if axis_filter is not None:
             axis_filter = axis_filter.lower()
@@ -319,7 +343,7 @@ class ServoStrainComp:
                     return value * obs_sign * act_sign
         return None
 
-    def _probe_kmat(self, gcmd, belts, matrix_params):
+    def _standstill_kmat(self, gcmd, belts, matrix_params):
         stiffness_a, stiffness_b, cross_ab, cross_ba = matrix_params
         stiffness = [
             self._stiffness_for(gcmd, 0, belts[0], stiffness_a),
@@ -388,10 +412,20 @@ class ServoStrainComp:
                 _rezero_grid_at(grid, bases[belt_idx]["zero_xy"])
                 grid["zero_xy"] = list(bases[belt_idx]["zero_xy"])
             grids.append(grid)
-        if merge and not any(p is not None for p in matrix_params):
+        explicit = any(p is not None for p in matrix_params)
+        if merge and not explicit:
             kmat = _identify_response(gcmd, grids, bases, base_payload["run"])
+        elif explicit:
+            kmat = self._standstill_kmat(gcmd, belts, matrix_params)
         else:
-            kmat = self._probe_kmat(gcmd, belts, matrix_params)
+            kmat = _kmat_from_probe_steps(gcmd, run_dir, manifest, belts)
+            if kmat is None:
+                gcmd.respond_info(
+                    "run has no probe lines (SERVO_MEASURE_STRAIN_MAP "
+                    "PROBE=1) — falling back to the standstill stiffness, "
+                    "which over-reads the response"
+                )
+                kmat = self._standstill_kmat(gcmd, belts, matrix_params)
         per_belt_offsets = _offsets_from_grids(gcmd, grids, kmat)
         pairs_out = []
         for belt_idx, motor_names in enumerate(belts):
@@ -455,6 +489,7 @@ class ServoStrainComp:
             for pair in pairs:
                 handle = self._node_handle(gcmd, pair.node)
                 self._clear_pair(engine, handle, pair)
+            self.map_enabled = False
             gcmd.respond_info("strain compensation cleared (ramping out)")
             return
         if not os.path.exists(self.map_file):
@@ -466,6 +501,7 @@ class ServoStrainComp:
         with open(self.map_file) as fh:
             payload = json.load(fh)
         by_motors = {tuple(p["motors"]): p for p in payload["pairs"]}
+        self.map_enabled = True
         for pair in pairs:
             key = tuple(pair.motor_names())
             entry = by_motors.pop(key, None)
@@ -576,75 +612,87 @@ def _load_scap(path):
     return header, col
 
 
-def _collect_elastic_samples(run_dir, manifest):
-    """Per belt, one dense elastic profile per raster line, placed in
-    absolute bed coordinates via the stroke plan: a list of
-    {fixed_axis, fixed_value, coords, elastic} dicts."""
+def _step_profiles(run_dir, manifest, step):
+    """One step's dense elastic profile per belt, in absolute bed
+    coordinates: (fixed_axis, fixed_value, [(coords, elastic), ...])."""
     import numpy as np
 
     plan = manifest["stroke_plan"]
     belts = _belt_motor_names(manifest)
+    swept = step.get("swept", {})
+    if "y" in swept:
+        fixed_axis, fixed_value = "y", float(swept["y"])
+        sweep_start = plan["x_start"]
+    elif "x" in swept:
+        fixed_axis, fixed_value = "x", float(swept["x"])
+        sweep_start = plan["y_start"]
+    else:
+        raise ValueError("step %s has no swept coordinate" % step["name"])
+    path = os.path.join(run_dir, "step_%s.scap" % step["name"])
+    header, col = _load_scap(path)
+    hdr_drives = {d["name"]: i for i, d in enumerate(header["drives"])}
+    cpm = {d["name"]: d["counts_per_mm"] for d in header["drives"]}
+    tc = {}
+    tq = {}
+    for mname, di in hdr_drives.items():
+        t = col("target_counts", di).astype(np.float64)
+        sign = -1.0 if header["drives"][di]["invert"] else 1.0
+        tc[mname] = sign * (t - t[0]) / cpm[mname]
+        tq[mname] = col("torque_actual", di).astype(np.float64) / 10.0 * sign
+    pa = tc[belts[0][0]]
+    pb = tc[belts[1][0]]
+    x = (pa + pb) / 2.0
+    y = (pa - pb) / 2.0
+    sweep = x if np.ptp(x) > np.ptp(y) else y
+    sweep = sweep - sweep.min()
+    span = np.ptp(sweep)
+    if span <= 0.0:
+        raise ValueError("step %s never moved" % step["name"])
+    nbins = max(2, int(round(span / BIN_MM)))
+    centers = (np.arange(nbins) + 0.5) * span / nbins
+    vel = np.gradient(sweep)
+    moving = np.abs(vel) > 1e-4
+    fwd = moving & (vel > 0)
+    back = moving & (vel < 0)
+    idx = np.clip((sweep / span * nbins).astype(int), 0, nbins - 1)
+    profiles = []
+    for m0, m1 in belts:
+        diff = (tq[m0] - tq[m1]) / 2.0
+        prof = {}
+        for key, sel in (("f", fwd), ("b", back)):
+            profile = np.full(nbins, np.nan)
+            if sel.sum() > 0:
+                sums = np.bincount(idx[sel], weights=diff[sel], minlength=nbins)
+                cnts = np.bincount(idx[sel], minlength=nbins)
+                ok = cnts > 0
+                profile[ok] = sums[ok] / cnts[ok]
+            prof[key] = profile
+        elastic = (prof["f"] + prof["b"]) / 2.0
+        coords = []
+        values = []
+        for center, value in zip(centers, elastic):
+            if math.isnan(value):
+                continue
+            coords.append(sweep_start + float(center))
+            values.append(float(value))
+        profiles.append((coords, values))
+    return fixed_axis, fixed_value, profiles
+
+
+def _collect_elastic_samples(run_dir, manifest):
+    """Per belt, one dense elastic profile per raster line, placed in
+    absolute bed coordinates via the stroke plan: a list of
+    {fixed_axis, fixed_value, coords, elastic} dicts. Probe lines (steps
+    with applied offsets) are excitation, not field — skipped here."""
+    belts = _belt_motor_names(manifest)
     lines = [[] for _ in belts]
     for step in manifest["steps"]:
-        swept = step.get("swept", {})
-        if "y" in swept:
-            fixed_axis, fixed_value = "y", float(swept["y"])
-            sweep_start = plan["x_start"]
-        elif "x" in swept:
-            fixed_axis, fixed_value = "x", float(swept["x"])
-            sweep_start = plan["y_start"]
-        else:
-            raise ValueError("step %s has no swept coordinate" % step["name"])
-        path = os.path.join(run_dir, "step_%s.scap" % step["name"])
-        header, col = _load_scap(path)
-        hdr_drives = {d["name"]: i for i, d in enumerate(header["drives"])}
-        cpm = {d["name"]: d["counts_per_mm"] for d in header["drives"]}
-        tc = {}
-        tq = {}
-        for mname, di in hdr_drives.items():
-            t = col("target_counts", di).astype(np.float64)
-            sign = -1.0 if header["drives"][di]["invert"] else 1.0
-            tc[mname] = sign * (t - t[0]) / cpm[mname]
-            tq[mname] = (
-                col("torque_actual", di).astype(np.float64) / 10.0 * sign
-            )
-        pa = tc[belts[0][0]]
-        pb = tc[belts[1][0]]
-        x = (pa + pb) / 2.0
-        y = (pa - pb) / 2.0
-        sweep = x if np.ptp(x) > np.ptp(y) else y
-        sweep = sweep - sweep.min()
-        span = np.ptp(sweep)
-        if span <= 0.0:
-            raise ValueError("step %s never moved" % step["name"])
-        nbins = max(2, int(round(span / BIN_MM)))
-        centers = (np.arange(nbins) + 0.5) * span / nbins
-        vel = np.gradient(sweep)
-        moving = np.abs(vel) > 1e-4
-        fwd = moving & (vel > 0)
-        back = moving & (vel < 0)
-        idx = np.clip((sweep / span * nbins).astype(int), 0, nbins - 1)
-        for belt_idx, (m0, m1) in enumerate(belts):
-            diff = (tq[m0] - tq[m1]) / 2.0
-            prof = {}
-            for key, sel in (("f", fwd), ("b", back)):
-                profile = np.full(nbins, np.nan)
-                if sel.sum() > 0:
-                    sums = np.bincount(
-                        idx[sel], weights=diff[sel], minlength=nbins
-                    )
-                    cnts = np.bincount(idx[sel], minlength=nbins)
-                    ok = cnts > 0
-                    profile[ok] = sums[ok] / cnts[ok]
-                prof[key] = profile
-            elastic = (prof["f"] + prof["b"]) / 2.0
-            coords = []
-            values = []
-            for center, value in zip(centers, elastic):
-                if math.isnan(value):
-                    continue
-                coords.append(sweep_start + float(center))
-                values.append(float(value))
+        if step.get("applied"):
+            continue
+        fixed_axis, fixed_value, profiles = _step_profiles(
+            run_dir, manifest, step
+        )
+        for belt_idx, (coords, values) in enumerate(profiles):
             if coords:
                 lines[belt_idx].append(
                     {
@@ -655,6 +703,92 @@ def _collect_elastic_samples(run_dir, manifest):
                     }
                 )
     return lines
+
+
+def _kmat_from_probe_steps(gcmd, run_dir, manifest, belts):
+    """Identify the pair response from the run's own probe lines: sweeps
+    captured with a constant offset applied on one pair, measured by the
+    same fwd/back-averaged instrument as the field itself. The standstill
+    probe reads a stiction-locked transient instead (bench data: 477/-140
+    at standstill vs 380/-100 once the mechanism has moved), so it must
+    not size the offsets."""
+    probe_steps = [s for s in manifest["steps"] if s.get("applied")]
+    if not probe_steps:
+        return None
+    by_pair = {0: [], 1: []}
+    for step in probe_steps:
+        applied = step["applied"]
+        if len(applied) != 1 or "offset_um" not in applied[0]:
+            raise gcmd.error(
+                "probe step %s applied %r is not a single pair offset"
+                % (step["name"], applied)
+            )
+        act = None
+        for belt_idx, names in enumerate(belts):
+            if set(names) == set(applied[0]["motors"]):
+                act = belt_idx
+        if act is None:
+            raise gcmd.error(
+                "probe step %s motors %s match no belt pair"
+                % (step["name"], "/".join(applied[0]["motors"]))
+            )
+        _axis, _value, profiles = _step_profiles(run_dir, manifest, step)
+        by_pair[act].append((float(applied[0]["offset_um"]), profiles))
+    kmat = [[0.0, 0.0], [0.0, 0.0]]
+    stds = [[0.0, 0.0], [0.0, 0.0]]
+    for act in (0, 1):
+        plus = [e for e in by_pair[act] if e[0] > 0]
+        minus = [e for e in by_pair[act] if e[0] < 0]
+        if not plus or not minus:
+            raise gcmd.error(
+                "run has probe lines but belt %s lacks a +/- pair of them"
+                % "AB"[act]
+            )
+        value_p, prof_p = plus[0]
+        value_m, prof_m = minus[0]
+        denom_mm = (value_p - value_m) / 1000.0
+        for obs in (0, 1):
+            coords_p, vals_p = prof_p[obs]
+            coords_m, vals_m = prof_m[obs]
+            if not coords_p or not coords_m:
+                raise gcmd.error(
+                    "probe line for belt %s has no elastic samples" % "AB"[act]
+                )
+            slopes = [
+                (vp - _interp(coords_m, vals_m, c)) / denom_mm
+                for c, vp in zip(coords_p, vals_p)
+                if coords_m[0] <= c <= coords_m[-1]
+            ]
+            if len(slopes) < 8:
+                raise gcmd.error(
+                    "probe lines for belt %s barely overlap" % "AB"[act]
+                )
+            mean = sum(slopes) / len(slopes)
+            std = math.sqrt(sum((s - mean) ** 2 for s in slopes) / len(slopes))
+            if obs == act and (abs(mean) < 1e-6 or std > 0.5 * abs(mean)):
+                raise gcmd.error(
+                    "probe response for belt %s is not credible "
+                    "(%.1f +/- %.1f %%/mm) — was torque enabled?"
+                    % ("AB"[act], mean, std)
+                )
+            kmat[obs][act] = mean
+            stds[obs][act] = std
+    gcmd.respond_info(
+        "effective response from the run's probe lines: "
+        "belt A [%.1f±%.1f, %.1f±%.1f] %%/mm, "
+        "belt B [%.1f±%.1f, %.1f±%.1f] %%/mm"
+        % (
+            kmat[0][0],
+            stds[0][0],
+            kmat[0][1],
+            stds[0][1],
+            kmat[1][0],
+            stds[1][0],
+            kmat[1][1],
+            stds[1][1],
+        )
+    )
+    return kmat
 
 
 def _interp(coords, values, at):

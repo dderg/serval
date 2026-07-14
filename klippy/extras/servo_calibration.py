@@ -1878,8 +1878,13 @@ class ServoCalibration:
         "back so friction asymmetry averages out. Before rastering the "
         "carriage parks at the region center and SERVO_SYNC releases the "
         "trapped preload, so every map shares the same zero (SYNC=0 "
-        "skips). CoreXY only. Params SPEED (50) ACCEL (1000) LINE_SPACING "
-        "(10) X_START X_END Y_START Y_END DWELL_MS TAG SYNC"
+        "skips). After the raster, PROBE=1 (default) re-sweeps the center "
+        "line with a constant +/-PROBE_STEP_UM offset applied per belt "
+        "pair, so SERVO_STRAIN_COMP_BUILD can identify the effective pair "
+        "response from the run itself; pass PROBE=0 when mapping a "
+        "residual with compensation enabled. CoreXY only. Params SPEED "
+        "(50) ACCEL (1000) LINE_SPACING (10) X_START X_END Y_START Y_END "
+        "DWELL_MS TAG SYNC PROBE PROBE_STEP_UM (50)"
     )
 
     @staticmethod
@@ -1905,6 +1910,21 @@ class ServoCalibration:
         dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
         tag = gcmd.get("TAG", "strain")
         zero_sync = gcmd.get_int("SYNC", 1, minval=0, maxval=1) == 1
+        probe = gcmd.get_int("PROBE", 1, minval=0, maxval=1) == 1
+        probe_step_um = gcmd.get_float(
+            "PROBE_STEP_UM", 50.0, above=0.0, maxval=200.0
+        )
+        probe_pairs = []
+        strain_comp = None
+        if probe:
+            strain_comp = self.printer.lookup_object("servo_strain_comp", None)
+            if strain_comp is None:
+                raise gcmd.error(
+                    "PROBE=1 needs [servo_strain_comp] to drive the belt "
+                    "offsets for the response probe lines - configure it "
+                    "or pass PROBE=0"
+                )
+            probe_pairs = strain_comp.belt_pairs_for_probe(gcmd)
         servos = servo_strokes.axis_servos(gcmd, kin, "X")
         # The zero point must be reproducible when the map is APPLIED, not
         # just when it is measured: always the center of the configured
@@ -1975,10 +1995,43 @@ class ServoCalibration:
                 self._strokes(axis, start, end, speed, accel, 1, dwell)
                 self._stop_capture()
                 run.record_step(SweepStep(name, {fixed_axis: level}, []))
+            probe_level = (y_start + y_end) / 2.0
+            for pair in probe_pairs:
+                for value_um in (probe_step_um, -probe_step_um):
+                    name = "probe_%s_%s" % (
+                        pair.axis_name(),
+                        "plus" if value_um > 0 else "minus",
+                    )
+                    gcmd.respond_info(
+                        "strain map probe line: %+.0f um on belt %s"
+                        % (value_um, pair.axis_name())
+                    )
+                    strain_comp.set_probe_offset(gcmd, pair, value_um)
+                    try:
+                        self._goto_xy(x_start, probe_level, dwell)
+                        self._start_capture(name, servos)
+                        self._strokes(
+                            "X", x_start, x_end, speed, accel, 1, dwell
+                        )
+                        self._stop_capture()
+                    finally:
+                        strain_comp.clear_probe_offset(gcmd, pair)
+                    run.record_step(
+                        SweepStep(
+                            name,
+                            {"y": probe_level},
+                            [
+                                {
+                                    "motors": pair.motor_names(),
+                                    "offset_um": value_um,
+                                }
+                            ],
+                        )
+                    )
             self._restore()
             gcmd.respond_info(
-                "strain map raster complete: %d lines in %s"
-                % (len(lines), run.run_dir)
+                "strain map raster complete: %d lines (%d response probes) "
+                "in %s" % (len(lines), 2 * len(probe_pairs), run.run_dir)
             )
         finally:
             self._active_run = None

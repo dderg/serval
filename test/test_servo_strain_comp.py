@@ -240,7 +240,7 @@ def write_scap(path, xs, ys, field_a, field_b):
         fh.write(json.dumps(header).encode() + b"\n" + b"".join(rows))
 
 
-def write_run(run_dir, field_a=elastic_a, field_b=no_field):
+def write_run(run_dir, field_a=elastic_a, field_b=no_field, probe_k=None):
     run_dir.mkdir()
     steps = []
     lines = [("xline_y%03d" % y, {"y": float(y)}) for y in (0, 50, 100)]
@@ -255,6 +255,41 @@ def write_run(run_dir, field_a=elastic_a, field_b=no_field):
             xs, ys = [swept["x"]] * len(sweep), sweep
         write_scap(run_dir / ("step_%s.scap" % name), xs, ys, field_a, field_b)
         steps.append({"name": name, "swept": swept})
+    if probe_k is not None:
+        motor_pairs = (["m_a", "m_a1"], ["m_b", "m_b1"])
+        n = 400
+        fwd = [i * 100.0 / (n - 1) for i in range(n)]
+        sweep = fwd + fwd[::-1]
+        for act in (0, 1):
+            for value_um in (50.0, -50.0):
+                o_mm = value_um / 1000.0
+
+                def probed(base, gain, o=o_mm):
+                    return lambda x, y: base(x, y) + gain * o
+
+                name = "probe_%s_%s" % (
+                    "ab"[act],
+                    "plus" if value_um > 0 else "minus",
+                )
+                write_scap(
+                    run_dir / ("step_%s.scap" % name),
+                    sweep,
+                    [50.0] * len(sweep),
+                    probed(field_a, probe_k[0][act]),
+                    probed(field_b, probe_k[1][act]),
+                )
+                steps.append(
+                    {
+                        "name": name,
+                        "swept": {"y": 50.0},
+                        "applied": [
+                            {
+                                "motors": motor_pairs[act],
+                                "offset_um": value_um,
+                            }
+                        ],
+                    }
+                )
     manifest = {
         "experiment": "strain_map",
         "stroke_plan": {
@@ -516,6 +551,70 @@ def make_residual_field(belt_idx, k_used=200.0):
         return base + sum(K_TRUE[belt_idx][j] * offsets[j] for j in range(2))
 
     return field
+
+
+def test_build_identifies_the_response_from_the_runs_probe_lines(tmp_path):
+    run_dir = tmp_path / "strainrun"
+    write_run(run_dir, field_a=elastic_a, field_b=elastic_b, probe_k=K_TRUE)
+    sc, _ = make_comp(tmp_path)
+    gcmd = FakeGcmd(RUN=str(run_dir))
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(gcmd)
+    assert any("probe lines" in r for r in gcmd.responses)
+    payload = json.loads((tmp_path / "strain_comp.json").read_text())
+    for belt_idx, pair in enumerate(payload["pairs"]):
+        assert pair["stiffness_pct_per_mm"] == pytest.approx(
+            K_TRUE[belt_idx][belt_idx], abs=3
+        )
+        assert pair["cross_pct_per_mm"] == pytest.approx(
+            K_TRUE[belt_idx][1 - belt_idx], abs=3
+        )
+    det = K_TRUE[0][0] * K_TRUE[1][1] - K_TRUE[0][1] * K_TRUE[1][0]
+    expect_a = -(K_TRUE[1][1] * -5.0 - K_TRUE[0][1] * -4.0) / det * 1000.0
+    expect_b = -(K_TRUE[0][0] * -4.0 - K_TRUE[1][0] * -5.0) / det * 1000.0
+    belt_a, belt_b = payload["pairs"]
+    assert belt_a["offsets_um"][0] == pytest.approx(expect_a, abs=4)
+    assert belt_b["offsets_um"][0] == pytest.approx(expect_b, abs=4)
+    center = belt_a["ny"] // 2 * belt_a["nx"] + belt_a["nx"] // 2
+    assert belt_a["offsets_um"][center] == 0
+
+
+def test_build_explicit_params_override_the_probe_lines(tmp_path):
+    run_dir = tmp_path / "strainrun"
+    write_run(run_dir, field_a=elastic_a, field_b=elastic_b, probe_k=K_TRUE)
+    sc, _ = make_comp(tmp_path)
+    gcmd = FakeGcmd(RUN=str(run_dir), STIFFNESS_A="200", STIFFNESS_B="200")
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(gcmd)
+    payload = json.loads((tmp_path / "strain_comp.json").read_text())
+    assert payload["pairs"][0]["stiffness_pct_per_mm"] == 200.0
+
+
+def test_build_probe_lines_need_a_plus_minus_pair(tmp_path):
+    run_dir = tmp_path / "strainrun"
+    write_run(run_dir, field_a=elastic_a, field_b=elastic_b, probe_k=K_TRUE)
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    manifest["steps"] = [
+        s for s in manifest["steps"] if s["name"] != "probe_b_minus"
+    ]
+    (run_dir / "manifest.json").write_text(json.dumps(manifest))
+    sc, _ = make_comp(tmp_path)
+    with pytest.raises(RuntimeError, match="lacks"):
+        sc.cmd_SERVO_STRAIN_COMP_BUILD(FakeGcmd(RUN=str(run_dir)))
+
+
+def test_probe_offsets_refuse_to_clobber_an_enabled_map(tmp_path):
+    run_dir = tmp_path / "strainrun"
+    write_run(run_dir)
+    sc, _ = make_comp(tmp_path)
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(
+        FakeGcmd(RUN=str(run_dir), STIFFNESS_A="200", STIFFNESS_B="200")
+    )
+    sc.cmd_SERVO_STRAIN_COMP(FakeGcmd(ENABLE="1"))
+    with pytest.raises(RuntimeError, match="ENABLE=0"):
+        sc.belt_pairs_for_probe(FakeGcmd())
+    with pytest.raises(RuntimeError, match="ENABLE=0"):
+        sc.cmd_SERVO_MEASURE_PAIR_STIFFNESS(FakeGcmd())
+    sc.cmd_SERVO_STRAIN_COMP(FakeGcmd(ENABLE="0"))
+    assert len(sc.belt_pairs_for_probe(FakeGcmd())) == 2
 
 
 def test_merge_identifies_the_effective_response(tmp_path):
