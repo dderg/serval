@@ -7,7 +7,6 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -105,11 +104,9 @@ host_tick_main(void *arg)
     (void)arg;
 
 #if CONFIG_MCU_SIM
-    // The main thread's ppoll must advance virtual time, so deprioritise this
-    // tick thread below it (throughput is irrelevant in sim).
-    pid_t tid = (pid_t)syscall(SYS_gettid);
-    setpriority(PRIO_PROCESS, tid, 19);
-
+    // This thread paces virtual time (its pacer floor bounds the vtime
+    // driver), so it must not be demoted: every starved tick is a span
+    // where the whole simulated world stands still against real time.
     sim_notify_step = dlsym(RTLD_DEFAULT, "sim_intercept_notify_step");
     vtime_pacer_register = dlsym(RTLD_DEFAULT, "vtime_pacer_register");
     vtime_pacer_advance = dlsym(RTLD_DEFAULT, "vtime_pacer_advance");
@@ -125,10 +122,10 @@ host_tick_main(void *arg)
     clock_gettime(CLOCK_MONOTONIC, &next);
 
 #if CONFIG_MCU_SIM
-    int (*real_cgt)(clockid_t, struct timespec *)
-        = dlsym(RTLD_NEXT, "clock_gettime");
+    // Raw syscall: dlsym(RTLD_NEXT) resolves to the libvtime preload (it is
+    // ahead of libc), which silently made "real_ms" a copy of virtual time.
     struct timespec real_prev, vt_prev;
-    real_cgt(CLOCK_MONOTONIC, &real_prev);
+    syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &real_prev);
     clock_gettime(CLOCK_MONOTONIC, &vt_prev);
     uint64_t ticks_done = 0, ticks_prev = 0;
     uint64_t max_tick_gap_real_ns = 0;
@@ -156,7 +153,7 @@ host_tick_main(void *arg)
 #if CONFIG_MCU_SIM
         ticks_done++;
         struct timespec real_now_ts;
-        real_cgt(CLOCK_MONOTONIC, &real_now_ts);
+        syscall(SYS_clock_gettime, CLOCK_MONOTONIC, &real_now_ts);
         uint64_t gap = (uint64_t)(real_now_ts.tv_sec - real_last_tick.tv_sec)
                            * 1000000000ULL
                        + (uint64_t)(real_now_ts.tv_nsec
