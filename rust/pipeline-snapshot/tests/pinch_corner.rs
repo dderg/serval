@@ -166,19 +166,22 @@ fn jerk_starved_clothoid_lowers_within_accel_budget() {
 /// micrometre debris facets fit into clothoids whose curvature-cap descent is
 /// steeper than the acceleration rail on both flanks of a one-node notch, so
 /// neither pass can land on it tangentially and both fly a hair over the
-/// notch bottom. Granting the jerk-starved regime full authority to *raise*
-/// acceleration let the flight build toward the rail across the tiny feature
-/// and arrive higher above the notch, and the emission's cap clamp then
-/// carved a 100x-jerk cliff into one 12 us sample window. Raising stays
-/// frozen in the starved regime (only lowering keeps full authority), which
-/// restores the old baseline's fly-over residual.
+/// notch bottom. Unbounded raising authority in the jerk-starved regime once
+/// let the flight build toward the rail across the tiny feature and arrive
+/// higher above the notch, and the emission's cap clamp then carved a
+/// 100x-jerk cliff into one 12 us sample window; the bankrupt rail-follow's
+/// velocity-doubling bound now caps what one substep may build, so the
+/// fly-over arrives near the notch bottom while the debris field is still
+/// crossed at the disk-planned speed instead of the old frozen crawl
+/// (~16.6 mm/s vs ~13.1). The residual snap scales with that fly-over
+/// speed, which is why the pinned bound sits above the frozen-era value.
 ///
-/// The jerk bound is the old baseline's residual with headroom, far above the
-/// configured 1e5 limit: the notch's curvature spike is jerk-infeasible at
-/// any printing speed (the normal jerk of traversing a 3 um kappa=11 facet
-/// at 16 mm/s exceeds the budget geometrically), so a bounded snap residual
-/// at the notch node is the designed outcome, not a bug — this test pins its
-/// magnitude so it cannot silently grow two orders again.
+/// The jerk bound is the current fly-over residual with headroom, far above
+/// the configured 1e5 limit: the notch's curvature spike is jerk-infeasible
+/// at any printing speed (the normal jerk of traversing a 3 um kappa=11
+/// facet at 16 mm/s exceeds the budget geometrically), so a bounded snap
+/// residual at the notch node is the designed outcome, not a bug — this test
+/// pins its magnitude so it cannot silently grow two orders again.
 #[test]
 fn debris_notch_fly_over_keeps_bounded_jerk() {
     let planned = stream_case("facet_debris/debris_corners.gcode", 300.0, 3000.0, 9.0, 1e5);
@@ -186,7 +189,7 @@ fn debris_notch_fly_over_keeps_bounded_jerk() {
     let budget = 3000.0 + TRAJECTORY_FIT_TOL_ACCEL_MM_S2;
     assert!(max_a <= budget, "lowered accel {max_a:.1} exceeds {budget}");
     assert!(
-        max_j <= 1.5e7,
+        max_j <= 5e7,
         "lowered jerk {max_j:.3e} exceeds the pinned debris-notch residual"
     );
 }
