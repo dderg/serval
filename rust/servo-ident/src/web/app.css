@@ -149,6 +149,23 @@ section { background: var(--panel); border: 1px solid var(--border); border-radi
   flex-wrap: wrap;
 }
 
+/* --- collapsible sections (accordion) --------------------------------- */
+.analysis .section-head { cursor: pointer; }
+.analysis .section-head.has-caret::before {
+  content: "▾";
+  color: var(--dim);
+  font-size: 10px;
+  align-self: center;
+  margin-right: -2px;
+  transition: transform 0.12s ease;
+}
+.analysis section.collapsed > .section-head { margin-bottom: 0; }
+.analysis section.collapsed > .section-head.has-caret::before { transform: rotate(-90deg); }
+.analysis section.collapsed > *:not(.section-head) { display: none; }
+/* strain compare: mark a runs-table row that diffs against the primary */
+tr.compare td { background: #20160e; }
+tr.compare.selected td { background: #241a12; }
+
 .row { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 
 .workspace.single { grid-template-columns: minmax(0, 1fr); }
@@ -293,7 +310,7 @@ table.mode-table th, table.mode-table td { padding: 2px 16px 2px 0; }
 
 .strain-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 @media (max-width: 1100px) { .strain-grid { grid-template-columns: minmax(0, 1fr); } }
-#strain-scale .strain-scale {
+.strain-scale {
   display: flex;
   align-items: center;
   gap: 8px;

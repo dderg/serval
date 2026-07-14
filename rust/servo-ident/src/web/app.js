@@ -149,6 +149,7 @@ const state = {
   },
   strain: {
     selected: null, // run name shown on the strain page; auto-picks the newest
+    compare: new Set(), // extra run names diffed against `selected` when dimensions match
     cache: new Map(), // name -> {mtime_utc, data} from /api/runs/<name>/strain
     field: "elastic", // which half to chart: elastic (fwd+back)/2 or friction (fwd-back)/2
   },
@@ -459,6 +460,56 @@ function liveShellHtml() {
   );
 }
 
+/// Collapsible analysis sections (accordion). Each `.analysis .section-head`
+/// is a click target that toggles a `.collapsed` class on its parent
+/// `<section>`; CSS hides everything but the head when collapsed. The head's
+/// own controls (buttons, selects, labels) don't trigger the toggle, so the
+/// PSD range selector and the strain field buttons stay clickable. Collapse
+/// state is keyed by page + heading text and persists in localStorage.
+const ACCORDION_KEY = "servoCal.collapsedSections";
+
+function loadCollapsedSections() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(ACCORDION_KEY) || "[]"));
+  } catch {
+    return new Set();
+  }
+}
+
+function sectionLabel(head) {
+  const h = head.querySelector("h2");
+  return `${state.page}::${h ? h.textContent.trim() : head.textContent.trim()}`;
+}
+
+function applyAccordionState() {
+  const collapsed = loadCollapsedSections();
+  document.querySelectorAll("#page-root .analysis .section-head").forEach((head) => {
+    head.classList.add("has-caret");
+    const section = head.parentElement;
+    if (section && section.tagName === "SECTION") {
+      if (collapsed.has(sectionLabel(head))) section.classList.add("collapsed");
+      else section.classList.remove("collapsed");
+    }
+  });
+}
+
+/// Bound once at boot: one delegated listener survives every page rebuild.
+function bindAccordionToggle() {
+  document.addEventListener("click", (e) => {
+    const head = e.target.closest(".analysis .section-head");
+    if (!head) return;
+    if (e.target.closest("button,select,input,textarea,a,label")) return;
+    const section = head.parentElement;
+    if (!section || section.tagName !== "SECTION") return;
+    section.classList.toggle("collapsed");
+    const collapsed = loadCollapsedSections();
+    const label = sectionLabel(head);
+    if (section.classList.contains("collapsed")) collapsed.add(label);
+    else collapsed.delete(label);
+    localStorage.setItem(ACCORDION_KEY, JSON.stringify([...collapsed]));
+  });
+}
+
 function renderPage() {
   renderTabs();
   const def = currentPageDef();
@@ -470,6 +521,7 @@ function renderPage() {
     bindLiveEvents();
     renderSentLog();
     startLivePolling();
+    applyAccordionState();
     return;
   }
   if (def.strain) {
@@ -483,6 +535,7 @@ function renderPage() {
     });
     renderSentLog();
     redrawStrain();
+    applyAccordionState();
     return;
   }
   if (def.journal) {
@@ -509,6 +562,7 @@ function renderPage() {
   renderDriveGroups();
   renderSentLog();
   redrawCharts();
+  applyAccordionState();
 }
 
 function bindPageEvents() {
@@ -1667,7 +1721,7 @@ function strainShellHtml(def) {
     `<main class="analysis">` +
     `<section class="runs-section">` +
     `<div class="section-head"><h2>strain runs</h2>` +
-    `<span class="note">strain_map — click a row to render its map</span></div>` +
+    `<span class="note">strain_map — click to map, shift+click a second run to diff (matching dimensions)</span></div>` +
     `<div class="table-wrap runs-wrap"><table><thead><tr>` +
     `<th>time</th><th>tag</th><th></th>` +
     `</tr></thead><tbody id="strain-run-body"></tbody></table></div>` +
@@ -1706,6 +1760,50 @@ async function ensureStrain(name) {
   return data;
 }
 
+function runTag(name) {
+  const r = state.runs.find((x) => x.name === name);
+  return r ? `${r.tag}${r.axis ? " " + r.axis : ""}` : name;
+}
+
+/// Builds per-belt elastic/friction diff arrays (a − b); a null on either
+/// side propagates, since an unbinned cell has no meaning to subtract.
+function buildDiffLine(base, cmp) {
+  return {
+    name: base.name,
+    swept: base.swept,
+    bin_centers: base.bin_centers,
+    belts: base.belts.map((bb, bi) => {
+      const cb = cmp.belts[bi];
+      return {
+        pair: bb.pair,
+        elastic: cb ? pointwiseDiff(bb.elastic, cb.elastic) : nulls(bb.elastic.length),
+        friction: cb ? pointwiseDiff(bb.friction, cb.friction) : nulls(bb.friction.length),
+      };
+    }),
+  };
+}
+
+function pointwiseDiff(a, b) {
+  const out = new Array(a.length);
+  for (let i = 0; i < a.length; i++) {
+    out[i] = a[i] === null || b[i] === null ? null : a[i] - b[i];
+  }
+  return out;
+}
+
+function nulls(n) {
+  return new Array(n).fill(null);
+}
+
+/// Compression of a strain map's geometry: line names (which encode
+/// orientation + swept coordinate), per-line bin centers, and belt pairs.
+/// Two maps with an identical signature can be subtracted cell-by-cell.
+function strainSignature(data) {
+  return JSON.stringify({
+    l: data.lines.map((l) => ({ n: l.name, b: l.bin_centers, p: l.belts.map((x) => x.pair) })),
+  });
+}
+
 function renderStrainRuns() {
   const tbody = el("strain-run-body");
   if (!tbody) return;
@@ -1713,13 +1811,25 @@ function renderStrainRuns() {
   if (!runs.some((r) => r.name === state.strain.selected)) {
     state.strain.selected = runs.length ? runs[0].name : null;
   }
+  const known = new Set(runs.map((r) => r.name));
+  for (const name of [...state.strain.compare]) {
+    if (!known.has(name)) state.strain.compare.delete(name);
+  }
   tbody.innerHTML = "";
   for (const run of runs) {
     const tr = document.createElement("tr");
     tr.classList.add("selectable");
     if (run.name === state.strain.selected) tr.classList.add("selected");
-    tr.addEventListener("click", () => {
-      state.strain.selected = run.name;
+    if (state.strain.compare.has(run.name)) tr.classList.add("compare");
+    tr.addEventListener("click", (ev) => {
+      if (ev.shiftKey) {
+        if (run.name === state.strain.selected) return;
+        if (state.strain.compare.has(run.name)) state.strain.compare.delete(run.name);
+        else state.strain.compare.add(run.name);
+      } else {
+        state.strain.selected = run.name;
+        state.strain.compare.clear();
+      }
       redrawStrain();
     });
     const timeTd = document.createElement("td");
@@ -1727,7 +1837,7 @@ function renderStrainRuns() {
     timeTd.title = `${run.name} — ${run.mtime_utc}`;
     tr.appendChild(timeTd);
     const tagTd = document.createElement("td");
-    tagTd.textContent = `${run.tag}${run.axis ? " " + run.axis : ""}`;
+    tagTd.textContent = runTag(run.name);
     tr.appendChild(tagTd);
     const actionTd = document.createElement("td");
     actionTd.className = "actions";
@@ -2054,6 +2164,18 @@ function strainDcBox(title, beltIdx, lines) {
   return box;
 }
 
+/// Shared geometry for a strain map: ordered groups (sweep orientation),
+/// bed-frame extents, and the belt pair names. Diffing two maps reuses the
+/// selected run's geometry since both must match its signature to compare.
+function strainGeometry(data) {
+  const groups = strainGroups(data);
+  const detail = state.details.get(state.strain.selected);
+  const plan = (detail && detail.manifest && detail.manifest.stroke_plan) || {};
+  const geo = strainBedGeometry(groups, plan);
+  const pairs = data.lines[0].belts.map((b) => b.pair);
+  return { groups, geo, pairs };
+}
+
 function renderStrainCharts(data) {
   const heatmaps = el("strain-heatmaps");
   const profiles = el("strain-profiles");
@@ -2079,11 +2201,7 @@ function renderStrainCharts(data) {
     btn.disabled = btn.dataset.field === state.strain.field;
   });
   el("strain-scale").innerHTML = strainScaleHtml(vmax);
-  const groups = strainGroups(data);
-  const detail = state.details.get(state.strain.selected);
-  const plan = (detail && detail.manifest && detail.manifest.stroke_plan) || {};
-  const geo = strainBedGeometry(groups, plan);
-  const pairs = data.lines[0].belts.map((b) => b.pair);
+  const { groups, geo, pairs } = strainGeometry(data);
   pairs.forEach((pair, beltIdx) => {
     for (const group of groups) {
       const title = `${pair} — ${group.title}`;
@@ -2092,6 +2210,92 @@ function renderStrainCharts(data) {
       dc.appendChild(strainDcBox(title, beltIdx, group.lines));
     }
   });
+}
+
+/// Appends a diverging diff heatmap (selected − compare) per belt×orientation
+/// for every compare run whose strain signature matches the selected run's.
+/// A mismatched run is named in the summary instead of drawn — subtracting
+/// cells only means something when both maps bin the bed identically.
+async function renderStrainDiffs(selectedData) {
+  const heatmaps = el("strain-heatmaps");
+  if (!heatmaps || !state.strain.compare.size) return;
+  if (!selectedData || !selectedData.lines.length) return;
+  const baseName = state.strain.selected;
+  const base = strainGeometry(selectedData);
+  const baseSig = strainSignature(selectedData);
+  const baseTag = runTag(baseName);
+  const field = state.strain.field;
+  const skips = [];
+  for (const name of [...state.strain.compare]) {
+    let cmp;
+    try {
+      cmp = await ensureStrain(name);
+    } catch (e) {
+      skips.push(`${runTag(name)}: ${String(e)}`);
+      continue;
+    }
+    if (state.strain.selected !== baseName || !el("strain-heatmaps")) return;
+    if (!cmp || !cmp.lines.length || strainSignature(cmp) !== baseSig) {
+      skips.push(`${runTag(name)}: dimensions differ`);
+      continue;
+    }
+    const cmpGroups = strainGroups(cmp);
+    const aligned = [];
+    let mismatch = false;
+    for (const bg of base.groups) {
+      const cg = cmpGroups.find((g) => g.orientation === bg.orientation);
+      if (!cg || cg.lines.length !== bg.lines.length) {
+        mismatch = true;
+        break;
+      }
+      aligned.push(cg);
+    }
+    if (mismatch || aligned.length !== base.groups.length || state.strain.selected !== baseName) {
+      skips.push(`${runTag(name)}: layout mismatch`);
+      continue;
+    }
+    const cmpTag = runTag(name);
+    let vmaxDiff = 1e-6;
+    for (let gi = 0; gi < base.groups.length; gi++) {
+      const bg = base.groups[gi];
+      const cg = aligned[gi];
+      for (let li = 0; li < bg.lines.length; li++) {
+        for (let bi = 0; bi < bg.lines[li].belts.length; bi++) {
+          for (const v of pointwiseDiff(bg.lines[li].belts[bi][field], cg.lines[li].belts[bi][field])) {
+            if (v !== null) vmaxDiff = Math.max(vmaxDiff, Math.abs(v));
+          }
+        }
+      }
+    }
+    base.pairs.forEach((pair, beltIdx) => {
+      if (state.strain.selected !== baseName || !el("strain-heatmaps")) return;
+      for (let gi = 0; gi < base.groups.length; gi++) {
+        const bg = base.groups[gi];
+        const cg = aligned[gi];
+        const diffLines = bg.lines.map((bl, li) => buildDiffLine(bl, cg.lines[li]));
+        const diffGroup = { orientation: bg.orientation, title: bg.title, lines: diffLines };
+        const title = `Δ ${baseTag} − ${cmpTag} · ${pair} — ${bg.title}`;
+        heatmaps.appendChild(strainHeatmapBox(title, diffGroup, beltIdx, vmaxDiff, base.geo));
+      }
+    });
+    if (state.strain.selected === baseName && el("strain-heatmaps")) {
+      const scaleEl = document.createElement("div");
+      scaleEl.className = "strain-scale";
+      scaleEl.style.gridColumn = "1 / -1";
+      const stops = [];
+      for (let i = 0; i <= 8; i++) stops.push(strainColor(i / 4 - 1));
+      scaleEl.innerHTML =
+        `<span>−${vmaxDiff.toFixed(1)}%</span>` +
+        `<span class="bar" style="background:linear-gradient(90deg,${stops.join(",")})"></span>` +
+        `<span>+${vmaxDiff.toFixed(1)}%</span>` +
+        `<span class="hint">Δ scale for ${cmpTag} — ${field}, null bins stay dark</span>`;
+      heatmaps.appendChild(scaleEl);
+    }
+  }
+  if (skips.length) {
+    const note = el("strain-summary");
+    if (note) note.textContent += `  · skipped: ${skips.join("; ")}`;
+  }
 }
 
 async function redrawStrain() {
@@ -2116,6 +2320,7 @@ async function redrawStrain() {
   }
   if (state.strain.selected !== name || !el("strain-heatmaps")) return;
   renderStrainCharts(data);
+  await renderStrainDiffs(data);
 }
 
 // --- PSD peak list (notches page) -------------------------------------------
@@ -3442,6 +3647,7 @@ function initShell() {
   });
   pollMoonrakerHealth();
   setInterval(pollMoonrakerHealth, MOONRAKER_HEALTH_POLL_MS);
+  bindAccordionToggle();
   window.addEventListener("hashchange", () => {
     state.page = pageFromHash();
     renderPage();
