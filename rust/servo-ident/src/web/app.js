@@ -21,10 +21,11 @@ const PAGE_DEFS = {
   gains: {
     label: "gains",
     groups: ["gains"],
-    experiments: ["gain_sweep", "refine_sweep", "gain_ladder"],
+    experiments: ["gain_sweep", "refine_sweep", "gain_ladder", "tracking"],
     charts: ["psd"],
     intro: "find the highest speed gain without resonance or torque rail",
     metrics: true,
+    sweepChart: true,
     templates: [
       {
         label: "ladder…",
@@ -364,6 +365,16 @@ function analysisSectionsHtml(def) {
         `<span class="note">per drive, worst move of each step — ` +
         `overshoot/settle measured over the dwell after each move</span></div>` +
         `<div id="metrics-table"><p class="note">select runs above</p></div>` +
+        `</section>`
+    );
+  }
+  if (def.sweepChart) {
+    parts.push(
+      `<section class="sweep-metrics-section">` +
+        `<div class="section-head"><h2>metrics vs gain</h2>` +
+        `<span class="note">worst drive per step — ● solid: overshoot, dashed: ferr rms, ` +
+        `dotted: ferr peak; red rung: step flagged resonance/torque</span></div>` +
+        `<div class="charts" id="sweep-metrics-chart"><p class="note">select runs above</p></div>` +
         `</section>`
     );
   }
@@ -730,7 +741,7 @@ function pickSeries(step) {
 /// Renders at the device pixel ratio so lines stay vector-crisp on hidpi
 /// displays: the backing store is sized to the CSS box × dpr and the
 /// context scaled back, while all layout math stays in CSS pixels.
-function drawChart(canvas, traces, yLabel, fixedY, xUnit) {
+function drawChart(canvas, traces, yLabel, fixedY, xUnit, marks) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth || canvas.width;
   const h = canvas.clientHeight || canvas.height;
@@ -765,6 +776,7 @@ function drawChart(canvas, traces, yLabel, fixedY, xUnit) {
   const x = (t) => pad.l + ((t - tMin) / (tMax - tMin || 1)) * (w - pad.l - pad.r);
   const y = (v) => h - pad.b - ((v - yMin) / (yMax - yMin || 1)) * (h - pad.t - pad.b);
 
+  const fmtTick = (v, span) => (Math.abs(span) >= 20 ? v.toFixed(0) : v.toFixed(2));
   ctx.strokeStyle = "#29313a";
   ctx.fillStyle = "#8a97a3";
   ctx.font = "10px monospace";
@@ -774,18 +786,31 @@ function drawChart(canvas, traces, yLabel, fixedY, xUnit) {
     const py = y(v);
     ctx.moveTo(pad.l, py);
     ctx.lineTo(w - pad.r, py);
-    ctx.fillText(v.toFixed(2), 2, py + 3);
+    ctx.fillText(fmtTick(v, yMax - yMin), 2, py + 3);
   }
   for (let i = 0; i <= 4; i++) {
     const t = tMin + ((tMax - tMin) * i) / 4;
     const px = x(t);
-    ctx.fillText(t.toFixed(2) + (xUnit || "s"), px, h - 6);
+    ctx.fillText(fmtTick(t, tMax - tMin) + (xUnit == null ? "s" : xUnit), px, h - 6);
   }
   ctx.stroke();
+
+  for (const m of marks || []) {
+    if (m.x < tMin || m.x > tMax) continue;
+    ctx.strokeStyle = m.color;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(x(m.x), pad.t);
+    ctx.lineTo(x(m.x), h - pad.b);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
 
   for (const tr of traces) {
     ctx.strokeStyle = tr.color;
     ctx.lineWidth = 1.25;
+    ctx.setLineDash(tr.dash || []);
     ctx.beginPath();
     let penDown = false;
     for (let i = 0; i < tr.t.length; i++) {
@@ -800,6 +825,16 @@ function drawChart(canvas, traces, yLabel, fixedY, xUnit) {
       penDown = true;
     }
     ctx.stroke();
+    ctx.setLineDash([]);
+    if (tr.points) {
+      ctx.fillStyle = tr.color;
+      for (let i = 0; i < tr.t.length; i++) {
+        if (tr.y[i] === null) continue;
+        ctx.beginPath();
+        ctx.arc(x(tr.t[i]), y(tr.y[i]), 3, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+    }
   }
   ctx.fillStyle = "#8a97a3";
   ctx.fillText(yLabel, pad.l, 10);
@@ -1046,6 +1081,97 @@ function renderMetricsTable(names, steps) {
     `<th class="num">overshoot (µm)</th><th class="num">settle</th>` +
     `<th class="num">torque peak</th>` +
     `</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+// --- metrics vs gain chart --------------------------------------------------
+//
+// The old gain-report PNG's "metrics vs gain" panel: one x position per
+// sweep step (the swept gain value from the manifest), overshoot / ferr
+// per step maxed over drives, flagged steps marked as red rungs.
+
+function sweptAxisKey(manifest) {
+  if (!manifest || manifest.steps.length < 2) return null;
+  const keys = Object.keys(manifest.steps[0].swept || {}).filter((k) =>
+    manifest.steps.every((s) => typeof (s.swept || {})[k] === "number")
+  );
+  const varying = keys.filter(
+    (k) => new Set(manifest.steps.map((s) => s.swept[k])).size > 1
+  );
+  if (!varying.length) return null;
+  return varying.includes("speed") ? "speed" : varying[0];
+}
+
+function sweepMetricsSeries(names) {
+  const series = [];
+  for (const name of names) {
+    const detail = state.details.get(name);
+    if (!detail || !detail.results || !detail.manifest) continue;
+    const key = sweptAxisKey(detail.manifest);
+    if (!key) continue;
+    const sweptByStep = new Map(detail.manifest.steps.map((s) => [s.name, s.swept[key]]));
+    const points = [];
+    for (const step of detail.results.steps) {
+      if (!sweptByStep.has(step.name)) continue;
+      let overshootUm = 0, ferrRmsUm = 0, ferrPeakUm = 0;
+      for (const [drive, dr] of Object.entries(step.drives)) {
+        const umPerCount = 1000 / countsPerMm(name, drive);
+        const s = driveMoveSummary(dr.metrics);
+        overshootUm = Math.max(overshootUm, s.overshoot * umPerCount);
+        ferrRmsUm = Math.max(ferrRmsUm, s.ferrRms * umPerCount);
+        ferrPeakUm = Math.max(ferrPeakUm, s.ferrPeak * umPerCount);
+      }
+      points.push({
+        x: sweptByStep.get(step.name),
+        overshootUm,
+        ferrRmsUm,
+        ferrPeakUm,
+        flagged: step.flags.some((f) => f === "resonance_detected" || f === "torque_saturated"),
+      });
+    }
+    if (points.length < 2) continue;
+    points.sort((a, b) => a.x - b.x);
+    series.push({ run: name, key, points });
+  }
+  return series;
+}
+
+function renderSweepMetricsChart(names) {
+  const container = el("sweep-metrics-chart");
+  if (!container) return;
+  const series = sweepMetricsSeries(names);
+  if (!series.length) {
+    container.innerHTML =
+      '<p class="note">select a gain sweep / ladder run above (tracking runs have a single step — read them in the metrics table)</p>';
+    return;
+  }
+  container.innerHTML = "";
+  const box = document.createElement("div");
+  box.className = "chart-box";
+  const title = document.createElement("h3");
+  title.textContent = `worst-drive metrics vs swept ${series[0].key} (µm)`;
+  box.appendChild(title);
+  const canvas = document.createElement("canvas");
+  canvas.width = 860;
+  canvas.height = 260;
+  box.appendChild(canvas);
+  const legend = document.createElement("div");
+  legend.className = "legend";
+  const traces = [];
+  const marks = [];
+  for (const s of series) {
+    const color = runColor(s.run);
+    const t = s.points.map((p) => p.x);
+    traces.push({ t, y: s.points.map((p) => p.overshootUm), color, points: true });
+    traces.push({ t, y: s.points.map((p) => p.ferrRmsUm), color, dash: [6, 4] });
+    traces.push({ t, y: s.points.map((p) => p.ferrPeakUm), color, dash: [2, 3] });
+    for (const p of s.points) if (p.flagged) marks.push({ x: p.x, color: "#e05a4f" });
+    const item = document.createElement("span");
+    item.innerHTML = `<span class="swatch" style="background:${color}"></span>${s.run}`;
+    legend.appendChild(item);
+  }
+  drawChart(canvas, traces, "µm", null, "", marks);
+  box.appendChild(legend);
+  container.appendChild(box);
 }
 
 function psdFerrTraces(names, plots, steps) {
@@ -2100,9 +2226,11 @@ async function redrawCharts() {
     state.stepFilter = null;
   }
   const steps = visibleStepNames(stepNames);
-  if (def.metrics) {
+  if (def.metrics || def.sweepChart) {
     const onPage = new Set(pageRuns(def).map((r) => r.name));
-    renderMetricsTable(okNames.filter((n) => onPage.has(n)), steps);
+    const pageNames = okNames.filter((n) => onPage.has(n));
+    if (def.metrics) renderMetricsTable(pageNames, steps);
+    if (def.sweepChart) renderSweepMetricsChart(pageNames);
   }
   if (def.charts && def.charts.includes("frf")) renderFrfCharts(okNames, plots);
   if (def.charts && def.charts.includes("psd")) {
@@ -2996,9 +3124,15 @@ function sentEntryHtml(entry) {
       .map((l, i) => {
         const r = entry.results[i];
         const suffix = r && !r.ok ? ` <span class="status-err">HTTP ${r.status}</span>` : "";
+        const responses = ((entry.responses && entry.responses[i]) || [])
+          .map((m) => {
+            const cls = m.startsWith("!!") ? "resp-line resp-err" : "resp-line";
+            return `<div class="${cls}">${escapeHtml(m)}</div>`;
+          })
+          .join("");
         return (
           `<div class="sent-line" data-line="${escapeHtml(l)}" ` +
-          `title="click to insert into the console">${escapeHtml(l)}${suffix}</div>`
+          `title="click to insert into the console">${escapeHtml(l)}${suffix}</div>${responses}`
         );
       })
       .join("") +
@@ -3019,32 +3153,70 @@ function renderSentLog() {
   container.scrollTop = container.scrollHeight;
 }
 
+/// Timestamps in Moonraker's gcode store are server clock, so diffing
+/// against its own latest entry needs no client/server clock agreement.
+async function latestGcodeStoreTime(base) {
+  const resp = await fetch(`${base}/server/gcode_store?count=1`);
+  if (!resp.ok) throw new Error(`gcode_store HTTP ${resp.status}`);
+  const store = (await resp.json()).result.gcode_store;
+  return store.length ? store[store.length - 1].time : 0;
+}
+
+async function fetchGcodeResponses(base, sinceTime) {
+  const resp = await fetch(`${base}/server/gcode_store?count=500`);
+  if (!resp.ok) throw new Error(`gcode_store HTTP ${resp.status}`);
+  const store = (await resp.json()).result.gcode_store;
+  return store
+    .filter((e) => e.type === "response" && e.time > sinceTime)
+    .map((e) => e.message);
+}
+
 /// Sends `lines` (already-built gcode) through the shared Moonraker
 /// plumbing — the grid's Apply and the console land in the same session
-/// log, which survives page switches.
+/// log, which survives page switches. `/printer/gcode/script` blocks
+/// until the command finishes, and klippy's respond_info output only
+/// travels the websocket — so each line's responses are harvested from
+/// `/server/gcode_store` afterwards and echoed under the sent line.
 async function runGcode(lines, label) {
   const base = moonrakerUrl();
   const statusEl = el("run-status");
   if (statusEl) statusEl.textContent = "";
-  const entry = { time: new Date().toISOString(), label, lines: [], results: [] };
+  const entry = { time: new Date().toISOString(), label, lines: [], results: [], responses: [] };
+  state.sentLog.push(entry);
   for (const line of lines) {
     const url = `${base}/printer/gcode/script?script=${encodeURIComponent(line)}`;
     entry.lines.push(line);
+    let sentAt = null;
+    try {
+      sentAt = await latestGcodeStoreTime(base);
+    } catch (e) {
+      console.error(e);
+    }
+    let ok = false;
     try {
       const resp = await fetch(url, { method: "POST" });
       const text = await resp.text();
       if (!resp.ok && statusEl) {
         statusEl.innerHTML += `<div class="status-err">${line} -> HTTP ${resp.status} ${text.slice(0, 200)}</div>`;
       }
+      ok = resp.ok;
       entry.results.push({ ok: resp.ok, status: resp.status });
-      if (!resp.ok) break;
     } catch (e) {
       if (statusEl) statusEl.innerHTML += `<div class="status-err">${line} -> ${e}</div>`;
       entry.results.push({ ok: false, status: 0 });
-      break;
     }
+    let responses = [];
+    if (sentAt !== null) {
+      try {
+        responses = await fetchGcodeResponses(base, sentAt);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    entry.responses.push(responses);
+    renderSentLog();
+    if (!ok) break;
   }
-  state.sentLog.push(entry);
   renderSentLog();
 }
 

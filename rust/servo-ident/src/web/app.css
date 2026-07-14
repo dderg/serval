@@ -377,3 +377,12 @@ details.adaptive-actions .hint { margin: 4px 0 0; }
   cursor: pointer;
 }
 .sent-line:hover { color: var(--text); background: #161d26; }
+.resp-line {
+  font-size: 11px;
+  color: var(--dim);
+  white-space: pre-wrap;
+  padding-left: 14px;
+  border-left: 2px solid #1b2129;
+  margin-left: 2px;
+}
+.resp-err { color: var(--bad); }
