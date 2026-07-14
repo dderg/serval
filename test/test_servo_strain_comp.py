@@ -276,6 +276,17 @@ def test_stiffness_probe_reports_the_gantry_cross_coupling(tmp_path):
     )
 
 
+def test_stiffness_probe_stores_the_cross_coupling_for_the_build(tmp_path):
+    sc, engine = make_comp(
+        tmp_path, FakeEngine(stiffness_pct_per_mm=200.0, cross_pct_per_mm=24.0)
+    )
+    sc.cmd_SERVO_MEASURE_PAIR_STIFFNESS(FakeGcmd())
+    key_ba = (("m_b", "m_b1"), ("m_a", "m_a1"))
+    key_ab = (("m_a", "m_a1"), ("m_b", "m_b1"))
+    assert sc.measured_cross[key_ba] == pytest.approx(24.0, rel=0.05)
+    assert sc.measured_cross[key_ab] == pytest.approx(24.0, rel=0.05)
+
+
 def test_stiffness_measurement_recovers_the_simulated_slope(tmp_path):
     sc, engine = make_comp(tmp_path, FakeEngine(stiffness_pct_per_mm=200.0))
     gcmd = FakeGcmd()
@@ -310,6 +321,73 @@ def test_build_produces_offsets_that_cancel_the_field(tmp_path):
     belt_b = payload["pairs"][1]
     assert all(abs(v) <= 3 for v in belt_b["offsets_um"])
     assert payload["zero_xy"] == [50.0, 50.0]
+
+
+def test_build_solves_the_coupled_pair_response(tmp_path):
+    run_dir = tmp_path / "strainrun"
+    write_run(run_dir)
+    sc, _ = make_comp(tmp_path)
+    gcmd = FakeGcmd(
+        RUN=str(run_dir),
+        STIFFNESS_A="200",
+        STIFFNESS_B="200",
+        CROSS_AB="-60",
+        CROSS_BA="-60",
+    )
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(gcmd)
+    payload = json.loads((tmp_path / "strain_comp.json").read_text())
+    belt_a, belt_b = payload["pairs"]
+    assert belt_a["cross_pct_per_mm"] == -60.0
+    # Field is 0.1 %/mm in x on belt A only; K = [[200, -60], [-60, 200]],
+    # det = 36400. At x=0 (elastic -5%): o_a = +200*5/36400 mm = +27.5 um,
+    # and belt B must counter the racking it would otherwise pick up:
+    # o_b = -60*5/36400 mm = +8.2 um.
+    for iy in range(3):
+        assert belt_a["offsets_um"][iy * 3 + 0] == pytest.approx(27, abs=3)
+        assert belt_a["offsets_um"][iy * 3 + 2] == pytest.approx(-27, abs=3)
+        assert belt_b["offsets_um"][iy * 3 + 0] == pytest.approx(8, abs=3)
+        assert belt_b["offsets_um"][iy * 3 + 2] == pytest.approx(-8, abs=3)
+
+
+def test_build_uses_the_measured_cross_coupling_by_default(tmp_path):
+    run_dir = tmp_path / "strainrun"
+    write_run(run_dir)
+    sc, _ = make_comp(
+        tmp_path, FakeEngine(stiffness_pct_per_mm=200.0, cross_pct_per_mm=24.0)
+    )
+    sc.cmd_SERVO_MEASURE_PAIR_STIFFNESS(FakeGcmd())
+    gcmd = FakeGcmd(RUN=str(run_dir))
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(gcmd)
+    payload = json.loads((tmp_path / "strain_comp.json").read_text())
+    for pair in payload["pairs"]:
+        assert pair["cross_pct_per_mm"] == pytest.approx(24.0, rel=0.05)
+    assert not any("independently" in r for r in gcmd.responses)
+
+
+def test_build_without_cross_coupling_solves_independently(tmp_path):
+    run_dir = tmp_path / "strainrun"
+    write_run(run_dir)
+    sc, _ = make_comp(tmp_path)
+    gcmd = FakeGcmd(RUN=str(run_dir), STIFFNESS_A="200", STIFFNESS_B="200")
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(gcmd)
+    assert any("independently" in r for r in gcmd.responses)
+    payload = json.loads((tmp_path / "strain_comp.json").read_text())
+    assert payload["pairs"][0]["cross_pct_per_mm"] == 0.0
+
+
+def test_build_rejects_a_nearly_singular_stiffness_matrix(tmp_path):
+    run_dir = tmp_path / "strainrun"
+    write_run(run_dir)
+    sc, _ = make_comp(tmp_path)
+    gcmd = FakeGcmd(
+        RUN=str(run_dir),
+        STIFFNESS_A="200",
+        STIFFNESS_B="200",
+        CROSS_AB="190",
+        CROSS_BA="190",
+    )
+    with pytest.raises(RuntimeError, match="nearly singular"):
+        sc.cmd_SERVO_STRAIN_COMP_BUILD(gcmd)
 
 
 def test_build_zeroes_the_map_at_the_recorded_zero_point(tmp_path):
