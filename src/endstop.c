@@ -1,6 +1,3 @@
-#include <stdio.h>
-
-#include "autoconf.h"
 #include "basecmd.h"
 #include "board/gpio.h"
 #include "board/misc.h"
@@ -52,13 +49,6 @@ endstop_event(struct timer *t)
         uint32_t mid32 = e->last_clear_clock + gap / 2;
         int32_t mid_delta = (int32_t)(mid32 - (uint32_t)now64);
         e->trip_clock = now64 + (int64_t)mid_delta;
-#if CONFIG_MCU_SIM
-        fprintf(stderr,
-                "[endstop-trip] id=%u trip64=%llu now64=%llu cur32=%u"
-                " gap=%u\n",
-                e->endstop_id, (unsigned long long)e->trip_clock,
-                (unsigned long long)now64, obs_clock, gap);
-#endif
         e->armed = 0;
         e->trip_pending = 1;
         e->tripped = 1;
