@@ -3,6 +3,9 @@
 # reason verification, and the measured-position override. Reference
 # implementation for external-probe providers (Spec D).
 import logging
+import mmap
+import os
+import struct
 
 from klippy import pins
 from klippy.motion_endstop import RemoteMotionEndstop
@@ -37,7 +40,24 @@ class SimRemoteEndstop:
         self._trsync_trigger_cmd = None
         self._last_reason = None
         self._trigger_timer = None
+        self._trigger_deadline_v = None
         self._trip_start_pos = None
+        # trigger_delay emulates a physical event, so it elapses in virtual
+        # time: vtime legally slips against the wall clock while pacer
+        # floors hold it, and a wall-clock delay would fire at a
+        # slip-dependent position. Klippy itself never loads libvtime, so
+        # read the shared clock word directly.
+        self._vtime_map = None
+        shm_name = os.environ.get("VTIME_SHM_NAME")
+        if shm_name:
+            try:
+                with open("/dev/shm" + shm_name, "r+b") as shm_file:
+                    self._vtime_map = mmap.mmap(shm_file.fileno(), 8)
+            except OSError:
+                logging.exception(
+                    "sim_remote_endstop: VTIME_SHM_NAME set but unreadable;"
+                    " falling back to the wall clock"
+                )
         self.mcu.register_config_callback(self._build_config)
         self.mcu.register_response(
             self._handle_trsync_state, "trsync_state", self.oid
@@ -76,17 +96,25 @@ class SimRemoteEndstop:
     def get_position_endstop(self):
         return self.trigger_height
 
+    def _virtual_now(self):
+        if self._vtime_map is not None:
+            return struct.unpack_from("<Q", self._vtime_map, 0)[0] / 1e9
+        return self.printer.get_reactor().monotonic()
+
     def trip_move_begin(self, entry):
         self._last_reason = None
         toolhead = self.printer.lookup_object("toolhead")
         self._trip_start_pos = list(toolhead.get_position())
         self._trsync_start_cmd.send([self.oid, 0, 0, REASON_COMMS_TIMEOUT])
         reactor = self.printer.get_reactor()
+        self._trigger_deadline_v = self._virtual_now() + self.trigger_delay
         self._trigger_timer = reactor.register_timer(
-            self._fire_trigger, reactor.monotonic() + self.trigger_delay
+            self._fire_trigger, reactor.monotonic() + 0.002
         )
 
     def _fire_trigger(self, eventtime):
+        if self._virtual_now() < self._trigger_deadline_v:
+            return eventtime + 0.002
         logging.info("sim_remote_endstop: firing trsync_trigger")
         self._trsync_trigger_cmd.send([self.oid, REASON_ENDSTOP_HIT])
         return self.printer.get_reactor().NEVER

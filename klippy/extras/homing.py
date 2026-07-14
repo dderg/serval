@@ -7,7 +7,6 @@ from klippy.motion_endstop import AXIS_ENDSTOP_IDS, MotionEndstop
 
 HOMING_POLL_PERIOD = 0.001
 HOMING_TRAVEL_MARGIN_FACTOR = 1.5
-TRIP_DEADLINE_MARGIN = 5.0
 _DRAIN_PAUSE_TIMEOUT = 60.0
 
 
@@ -589,7 +588,8 @@ class Homing:
                     self.printer,
                     engine.home_axis_poll,
                     "%s trip move" % ("XYZ"[axis],),
-                    max_travel / speed + TRIP_DEADLINE_MARGIN,
+                    max_travel / speed
+                    + get_danger_options().homing_trip_deadline_margin,
                     interval_s=0.010,
                 )
             except engine_wait.EngineWaitTimeout:

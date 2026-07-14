@@ -38,6 +38,9 @@ class DangerOptions:
         self.homing_elapsed_distance_tolerance = config.getfloat(
             "homing_elapsed_distance_tolerance", 0.5, minval=0.0
         )
+        self.homing_trip_deadline_margin = config.getfloat(
+            "homing_trip_deadline_margin", 5.0, minval=0.0
+        )
 
         temp_ignore_limits = False
         if config.getboolean("temp_ignore_limits", None) is None:
