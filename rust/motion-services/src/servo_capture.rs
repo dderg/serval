@@ -8,7 +8,8 @@ use mcu_protocol::messages::{
 
 use crate::servo_call::mcu_typed_call;
 
-const CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
+const START_CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
+const STOP_CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn send_start_capture(
     conn: &McuSerialConn,
@@ -34,7 +35,7 @@ pub fn send_start_capture(
         MessageKind::StartCapture,
         MessageKind::StartCaptureResponse,
         body,
-        CAPTURE_TIMEOUT,
+        START_CAPTURE_TIMEOUT,
     )?;
     Ok(r.result)
 }
@@ -46,7 +47,7 @@ pub fn send_stop_capture(conn: &McuSerialConn) -> Result<StopCaptureResponse, St
         MessageKind::StopCapture,
         MessageKind::StopCaptureResponse,
         StopCapture.encoded_to_vec(),
-        CAPTURE_TIMEOUT,
+        STOP_CAPTURE_TIMEOUT,
     )
 }
 
