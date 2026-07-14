@@ -68,8 +68,11 @@ class ServoStrainComp:
         "one belt's differential to the other belt's offset); SPACING "
         "overrides the grid pitch (defaults to the run's line spacing). "
         "MERGE=1 treats the run as a residual measured WITH the current "
-        "map enabled and adds the correction on top — the second-order "
-        "iteration."
+        "map enabled, identifies the effective response matrix from the "
+        "map's applied offsets and the field change since its base run "
+        "(the standstill probe over-reads the slopes), and adds the "
+        "correction on top; explicit STIFFNESS/CROSS values skip the "
+        "identification."
     )
     cmd_SERVO_STRAIN_COMP_help = (
         "ENABLE=1 uploads the map file to the endpoint (offsets ramp in at "
@@ -316,6 +319,24 @@ class ServoStrainComp:
                     return value * obs_sign * act_sign
         return None
 
+    def _probe_kmat(self, gcmd, belts, matrix_params):
+        stiffness_a, stiffness_b, cross_ab, cross_ba = matrix_params
+        stiffness = [
+            self._stiffness_for(gcmd, 0, belts[0], stiffness_a),
+            self._stiffness_for(gcmd, 1, belts[1], stiffness_b),
+        ]
+        cross = [
+            self._cross_for(belts[0], belts[1], cross_ab),
+            self._cross_for(belts[1], belts[0], cross_ba),
+        ]
+        if None in cross:
+            gcmd.respond_info(
+                "no cross-coupling measured or given (CROSS_AB/CROSS_BA) — "
+                "solving the belts independently"
+            )
+            cross = [c if c is not None else 0.0 for c in cross]
+        return [[stiffness[0], cross[0]], [cross[1], stiffness[1]]]
+
     def cmd_SERVO_STRAIN_COMP_BUILD(self, gcmd):
         run_dir = os.path.expanduser(gcmd.get("RUN"))
         manifest_path = os.path.join(run_dir, "manifest.json")
@@ -329,6 +350,7 @@ class ServoStrainComp:
                 % (run_dir, manifest.get("experiment"))
             )
         merge = gcmd.get_int("MERGE", 0, minval=0, maxval=1) == 1
+        base_payload = None
         base_pairs = {}
         if merge:
             if not os.path.exists(self.map_file):
@@ -336,65 +358,55 @@ class ServoStrainComp:
                     "MERGE=1 needs an existing map at %s" % self.map_file
                 )
             with open(self.map_file) as fh:
-                base_pairs = {
-                    tuple(p["motors"]): p for p in json.load(fh)["pairs"]
-                }
+                base_payload = json.load(fh)
+            base_pairs = {tuple(p["motors"]): p for p in base_payload["pairs"]}
         plan = manifest["stroke_plan"]
         spacing = gcmd.get_float(
             "SPACING", plan["line_spacing"], above=2.0, maxval=100.0
         )
-        overrides = [
+        matrix_params = [
             gcmd.get_float("STIFFNESS_A", None),
             gcmd.get_float("STIFFNESS_B", None),
+            gcmd.get_float("CROSS_AB", None),
+            gcmd.get_float("CROSS_BA", None),
         ]
         belts = _belt_motor_names(manifest)
         samples = _collect_elastic_samples(run_dir, manifest)
-        stiffness = [
-            self._stiffness_for(gcmd, i, belts[i], overrides[i])
-            for i in range(2)
-        ]
-        cross = [
-            self._cross_for(
-                belts[0], belts[1], gcmd.get_float("CROSS_AB", None)
-            ),
-            self._cross_for(
-                belts[1], belts[0], gcmd.get_float("CROSS_BA", None)
-            ),
-        ]
-        if None in cross:
-            gcmd.respond_info(
-                "no cross-coupling measured or given (CROSS_AB/CROSS_BA) — "
-                "solving the belts independently"
-            )
-            cross = [c if c is not None else 0.0 for c in cross]
-        kmat = [[stiffness[0], cross[0]], [cross[1], stiffness[1]]]
-        grids = []
-        bases = []
-        for belt_idx, motor_names in enumerate(belts):
-            grid = _build_grid(gcmd, plan, spacing, samples[belt_idx])
-            base = base_pairs.get(tuple(motor_names))
-            if merge:
-                if base is None:
+        bases = [None, None]
+        if merge:
+            for belt_idx, motor_names in enumerate(belts):
+                bases[belt_idx] = base_pairs.get(tuple(motor_names))
+                if bases[belt_idx] is None:
                     raise gcmd.error(
                         "existing map has no entry for belt %s (%s)"
                         % ("AB"[belt_idx], "/".join(motor_names))
                     )
-                _rezero_grid_at(grid, base["zero_xy"])
-                grid["zero_xy"] = list(base["zero_xy"])
+        grids = []
+        for belt_idx in range(2):
+            grid = _build_grid(gcmd, plan, spacing, samples[belt_idx])
+            if merge:
+                _rezero_grid_at(grid, bases[belt_idx]["zero_xy"])
+                grid["zero_xy"] = list(bases[belt_idx]["zero_xy"])
             grids.append(grid)
-            bases.append(base)
+        if merge and not any(p is not None for p in matrix_params):
+            kmat = _identify_response(gcmd, grids, bases, base_payload["run"])
+        else:
+            kmat = self._probe_kmat(gcmd, belts, matrix_params)
         per_belt_offsets = _offsets_from_grids(gcmd, grids, kmat)
         pairs_out = []
         for belt_idx, motor_names in enumerate(belts):
             grid = grids[belt_idx]
-            offsets = per_belt_offsets[belt_idx]
+            delta_offsets = per_belt_offsets[belt_idx]
+            offsets = delta_offsets
             if merge:
-                offsets = _merge_offsets(gcmd, grid, offsets, bases[belt_idx])
+                offsets = _merge_offsets(
+                    gcmd, grid, delta_offsets, bases[belt_idx]
+                )
             pairs_out.append(
                 {
                     "motors": motor_names,
-                    "stiffness_pct_per_mm": stiffness[belt_idx],
-                    "cross_pct_per_mm": cross[belt_idx],
+                    "stiffness_pct_per_mm": kmat[belt_idx][belt_idx],
+                    "cross_pct_per_mm": kmat[belt_idx][1 - belt_idx],
                     "nx": grid["nx"],
                     "ny": grid["ny"],
                     "x0": grid["x0"],
@@ -402,6 +414,7 @@ class ServoStrainComp:
                     "dx": grid["dx"],
                     "dy": grid["dy"],
                     "offsets_um": offsets,
+                    "applied_delta_um": delta_offsets,
                     "zero_xy": grid["zero_xy"],
                 }
             )
@@ -415,8 +428,8 @@ class ServoStrainComp:
                     grid["ny"],
                     min(offsets),
                     max(offsets),
-                    stiffness[belt_idx],
-                    cross[belt_idx],
+                    kmat[belt_idx][belt_idx],
+                    kmat[belt_idx][1 - belt_idx],
                 )
             )
         payload = {
@@ -771,6 +784,128 @@ def _merge_offsets(gcmd, grid, delta_offsets, base):
         )
     _check_span(gcmd, merged)
     return merged
+
+
+IDENTIFY_MIN_OFFSET_RMS_UM = 5.0
+IDENTIFY_MIN_R2 = 0.8
+
+
+def _identify_response(gcmd, grids, bases, base_run):
+    """The base map records the offset delta it applied at every node and
+    the run it was built from records the field those offsets acted on, so
+    regressing the field change against the offset delta yields the pair
+    response that actually holds during a mapping run. The standstill
+    probe over-reads both slopes (bench data: probe 477/-140, effective
+    ~380/-100), so the probe matrix must not be reused for the merge."""
+    manifest_path = os.path.join(base_run, "manifest.json")
+    if not os.path.exists(manifest_path):
+        raise gcmd.error(
+            "the base map's run %s is gone — cannot identify the effective "
+            "response; pass STIFFNESS_A/STIFFNESS_B (and CROSS_AB/CROSS_BA) "
+            "to merge with an explicit matrix" % base_run
+        )
+    with open(manifest_path) as fh:
+        base_manifest = json.load(fh)
+    base_plan = base_manifest["stroke_plan"]
+    base_samples = _collect_elastic_samples(base_run, base_manifest)
+    base_fields = []
+    offset_grids = []
+    for belt_idx in range(2):
+        field = _build_grid(
+            gcmd,
+            base_plan,
+            base_plan["line_spacing"],
+            base_samples[belt_idx],
+        )
+        _rezero_grid_at(field, bases[belt_idx]["zero_xy"])
+        base_fields.append(field)
+        base = bases[belt_idx]
+        offset_grids.append(
+            {
+                "nx": base["nx"],
+                "ny": base["ny"],
+                "x0": base["x0"],
+                "y0": base["y0"],
+                "dx": base["dx"],
+                "dy": base["dy"],
+                "values_pct": [
+                    float(v)
+                    for v in base.get("applied_delta_um", base["offsets_um"])
+                ],
+            }
+        )
+    o_a = []
+    o_b = []
+    deltas = ([], [])
+    grid = grids[0]
+    for i in range(grid["nx"] * grid["ny"]):
+        x = grid["x0"] + (i % grid["nx"]) * grid["dx"]
+        y = grid["y0"] + (i // grid["nx"]) * grid["dy"]
+        o_a.append(_grid_value_at(offset_grids[0], x, y) / 1000.0)
+        o_b.append(_grid_value_at(offset_grids[1], x, y) / 1000.0)
+        for belt_idx in range(2):
+            deltas[belt_idx].append(
+                grids[belt_idx]["values_pct"][i]
+                - _grid_value_at(base_fields[belt_idx], x, y)
+            )
+    n = len(o_a)
+    sxx = sum(v * v for v in o_a)
+    syy = sum(v * v for v in o_b)
+    sxy = sum(a * b for a, b in zip(o_a, o_b))
+    for name, s in (("A", sxx), ("B", syy)):
+        rms_um = math.sqrt(s / n) * 1000.0
+        if rms_um < IDENTIFY_MIN_OFFSET_RMS_UM:
+            raise gcmd.error(
+                "the base map's belt %s offsets are too small "
+                "(rms %.1f um) to identify the response — pass "
+                "STIFFNESS_A/STIFFNESS_B to merge with an explicit matrix"
+                % (name, rms_um)
+            )
+    det = sxx * syy - sxy * sxy
+    if det < 0.01 * sxx * syy:
+        raise gcmd.error(
+            "the base map's belt offsets are too correlated to separate "
+            "the direct and cross responses — pass STIFFNESS_A/STIFFNESS_B "
+            "and CROSS_AB/CROSS_BA instead"
+        )
+    kmat = []
+    r2s = []
+    for belt_idx in range(2):
+        d = deltas[belt_idx]
+        sxd = sum(a * v for a, v in zip(o_a, d))
+        syd = sum(b * v for b, v in zip(o_b, d))
+        row = [
+            (syy * sxd - sxy * syd) / det,
+            (sxx * syd - sxy * sxd) / det,
+        ]
+        ss_res = sum(
+            (v - row[0] * a - row[1] * b) ** 2 for v, a, b in zip(d, o_a, o_b)
+        )
+        ss_tot = sum(v * v for v in d)
+        r2 = 1.0 - ss_res / ss_tot if ss_tot > 0.0 else 0.0
+        if r2 < IDENTIFY_MIN_R2:
+            raise gcmd.error(
+                "the base map's offsets explain only R^2=%.2f of belt %s's "
+                "field change — the strain field drifted between the runs "
+                "or the map does not match the base run" % (r2, "AB"[belt_idx])
+            )
+        kmat.append(row)
+        r2s.append(r2)
+    gcmd.respond_info(
+        "identified effective response from %s + this run: "
+        "belt A [%.1f, %.1f] %%/mm (R^2 %.3f), "
+        "belt B [%.1f, %.1f] %%/mm (R^2 %.3f)"
+        % (
+            base_run,
+            kmat[0][0],
+            kmat[0][1],
+            r2s[0],
+            kmat[1][0],
+            kmat[1][1],
+            r2s[1],
+        )
+    )
+    return kmat
 
 
 def _check_span(gcmd, offsets):

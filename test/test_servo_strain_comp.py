@@ -201,7 +201,16 @@ def elastic_a(x, y):
     return 0.1 * (x - 50.0)
 
 
-def write_scap(path, xs, ys):
+def elastic_b(x, y):
+    """Belt B's field: 0.08 %/mm slope in y around the center."""
+    return 0.08 * (y - 50.0)
+
+
+def no_field(x, y):
+    return 0.0
+
+
+def write_scap(path, xs, ys, field_a, field_b):
     channels = [
         {"name": "time", "offset": 0, "dtype": "u64"},
         {"name": "target_counts", "offset": 8, "dtype": "i32"},
@@ -220,9 +229,9 @@ def write_scap(path, xs, ys):
     rows = []
     for i, (x, y) in enumerate(zip(xs, ys)):
         pa, pb = x + y, x - y
-        fa = elastic_a(x, y)
+        fa, fb = field_a(x, y), field_b(x, y)
         row = struct.pack("<Q", i)
-        for pos_mm, diff in ((pa, fa), (pa, -fa), (pb, 0.0), (pb, 0.0)):
+        for pos_mm, diff in ((pa, fa), (pa, -fa), (pb, fb), (pb, -fb)):
             row += struct.pack(
                 "<ih", int(round(pos_mm * CPM)), int(round(diff * 10.0))
             )
@@ -231,7 +240,7 @@ def write_scap(path, xs, ys):
         fh.write(json.dumps(header).encode() + b"\n" + b"".join(rows))
 
 
-def write_run(run_dir):
+def write_run(run_dir, field_a=elastic_a, field_b=no_field):
     run_dir.mkdir()
     steps = []
     lines = [("xline_y%03d" % y, {"y": float(y)}) for y in (0, 50, 100)]
@@ -244,7 +253,7 @@ def write_run(run_dir):
             xs, ys = sweep, [swept["y"]] * len(sweep)
         else:
             xs, ys = [swept["x"]] * len(sweep), sweep
-        write_scap(run_dir / ("step_%s.scap" % name), xs, ys)
+        write_scap(run_dir / ("step_%s.scap" % name), xs, ys, field_a, field_b)
         steps.append({"name": name, "swept": swept})
     manifest = {
         "experiment": "strain_map",
@@ -491,6 +500,100 @@ def test_merge_adds_the_residual_on_top_of_the_existing_map(tmp_path):
         assert pair_merged["zero_xy"] == pair_first["zero_xy"]
         for a, b in zip(pair_first["offsets_um"], pair_merged["offsets_um"]):
             assert abs(b - 2 * a) <= 2, (a, b)
+
+
+K_TRUE = [[150.0, -40.0], [-30.0, 160.0]]
+
+
+def make_residual_field(belt_idx, k_used=200.0):
+    """The field a rerun would measure with the first map active, when the
+    real pair response is K_TRUE rather than the diagonal k_used the map
+    was built with."""
+
+    def field(x, y):
+        offsets = [-elastic_a(x, y) / k_used, -elastic_b(x, y) / k_used]
+        base = (elastic_a, elastic_b)[belt_idx](x, y)
+        return base + sum(K_TRUE[belt_idx][j] * offsets[j] for j in range(2))
+
+    return field
+
+
+def test_merge_identifies_the_effective_response(tmp_path):
+    run1 = tmp_path / "buildrun"
+    write_run(run1, field_a=elastic_a, field_b=elastic_b)
+    sc, _ = make_comp(tmp_path)
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(
+        FakeGcmd(RUN=str(run1), STIFFNESS_A="200", STIFFNESS_B="200")
+    )
+    run2 = tmp_path / "residualrun"
+    write_run(
+        run2,
+        field_a=make_residual_field(0),
+        field_b=make_residual_field(1),
+    )
+    gcmd = FakeGcmd(RUN=str(run2), MERGE="1")
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(gcmd)
+    assert any("identified effective response" in r for r in gcmd.responses)
+    payload = json.loads((tmp_path / "strain_comp.json").read_text())
+    for belt_idx, pair in enumerate(payload["pairs"]):
+        assert pair["stiffness_pct_per_mm"] == pytest.approx(
+            K_TRUE[belt_idx][belt_idx], abs=10
+        )
+        assert pair["cross_pct_per_mm"] == pytest.approx(
+            K_TRUE[belt_idx][1 - belt_idx], abs=10
+        )
+    # The merged map must cancel the ORIGINAL field under K_TRUE:
+    # offsets = -K_TRUE^-1 * e. At (0, 0), e = (-5, -4).
+    det = K_TRUE[0][0] * K_TRUE[1][1] - K_TRUE[0][1] * K_TRUE[1][0]
+    expect_a = -(K_TRUE[1][1] * -5.0 - K_TRUE[0][1] * -4.0) / det * 1000.0
+    expect_b = -(K_TRUE[0][0] * -4.0 - K_TRUE[1][0] * -5.0) / det * 1000.0
+    belt_a, belt_b = payload["pairs"]
+    assert belt_a["offsets_um"][0] == pytest.approx(expect_a, abs=4)
+    assert belt_b["offsets_um"][0] == pytest.approx(expect_b, abs=4)
+
+
+def test_merge_identification_requires_the_base_run(tmp_path):
+    import shutil
+
+    run1 = tmp_path / "buildrun"
+    write_run(run1, field_a=elastic_a, field_b=elastic_b)
+    sc, _ = make_comp(tmp_path)
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(
+        FakeGcmd(RUN=str(run1), STIFFNESS_A="200", STIFFNESS_B="200")
+    )
+    shutil.rmtree(run1)
+    run2 = tmp_path / "residualrun"
+    write_run(run2, field_a=elastic_a, field_b=elastic_b)
+    with pytest.raises(RuntimeError, match="is gone"):
+        sc.cmd_SERVO_STRAIN_COMP_BUILD(FakeGcmd(RUN=str(run2), MERGE="1"))
+
+
+def test_merge_identification_needs_offset_excitation(tmp_path):
+    run1 = tmp_path / "buildrun"
+    write_run(run1, field_a=no_field, field_b=no_field)
+    sc, _ = make_comp(tmp_path)
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(
+        FakeGcmd(RUN=str(run1), STIFFNESS_A="200", STIFFNESS_B="200")
+    )
+    run2 = tmp_path / "residualrun"
+    write_run(run2, field_a=elastic_a, field_b=elastic_b)
+    with pytest.raises(RuntimeError, match="too small"):
+        sc.cmd_SERVO_STRAIN_COMP_BUILD(FakeGcmd(RUN=str(run2), MERGE="1"))
+
+
+def test_merge_identification_rejects_an_unresponsive_field(tmp_path):
+    run1 = tmp_path / "buildrun"
+    write_run(run1, field_a=elastic_a, field_b=elastic_b)
+    sc, _ = make_comp(tmp_path)
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(
+        FakeGcmd(RUN=str(run1), STIFFNESS_A="200", STIFFNESS_B="200")
+    )
+    # Rerun measures the identical field: the map demonstrably did
+    # nothing (not enabled?) — merging on top would double-correct.
+    run2 = tmp_path / "residualrun"
+    write_run(run2, field_a=elastic_a, field_b=elastic_b)
+    with pytest.raises(RuntimeError, match="R\\^2"):
+        sc.cmd_SERVO_STRAIN_COMP_BUILD(FakeGcmd(RUN=str(run2), MERGE="1"))
 
 
 def test_merge_without_an_existing_map_errors_loudly(tmp_path):
