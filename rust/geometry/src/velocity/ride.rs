@@ -28,7 +28,9 @@
 //! closed-form, so an all-straight run reproduces the analytic 7-segment
 //! profile and its phase log lowers to exact cubics; curved cells fall back
 //! to short time substeps that bill the normal jerk share of the rotating
-//! acceleration vector before steering with what remains.
+//! acceleration vector before steering with what remains — and where that
+//! share alone exceeds the budget, steer along the disk rail instead, since
+//! the jerk limit is unmeetable there no matter what the tangent does.
 
 use super::profile::StraightPhase;
 
@@ -229,7 +231,7 @@ fn committed_march(g: &Grid, st: State, s_stop: f64) -> March {
         let curved = g.curved_in(cell);
         let (j_dn, dt_budget) = if curved {
             let budget = substep_budget(g, st, j);
-            (effective_jerk(g, st, budget.max(1e-9), true), budget)
+            (effective_jerk(g, st, budget.max(1e-9)), budget)
         } else {
             (j, f64::INFINITY)
         };
@@ -1197,21 +1199,10 @@ fn substep_budget(g: &Grid, st: State, j_nominal: f64) -> f64 {
     jerk_dt.max(cell_dt)
 }
 
-/// Tangential jerk available after billing the normal share the rotating
-/// acceleration vector demands over `dt` (the increment disk). `lowering`
-/// says which way the caller will steer `a`: when the normal share alone
-/// blows the vector budget — the geometry at this speed is jerk-infeasible
-/// no matter what the tangential component does — the *lowering* direction
-/// keeps full authority (freezing `a` there restores nothing; it only
-/// strands the state off every acceleration constraint ahead, turning a
-/// bounded jerk overrun into an acceleration one), while the raising
-/// direction stays frozen (building acceleration through already-infeasible
-/// geometry only deepens the overrun and arrives at the next cap with more
-/// to shed than any landing can absorb).
-fn effective_jerk(g: &Grid, st: State, dt: f64, lowering: bool) -> f64 {
-    if !g.curved_near(st.s) {
-        return g.t.j_max;
-    }
+/// The normal jerk the rotating acceleration vector demands over `dt` — the
+/// swing of `aₙ` plus the rotation of the tangential component — as a total
+/// increment, comparable against `j_max · dt`.
+fn normal_jerk_share(g: &Grid, st: State, dt: f64) -> f64 {
     let ds = st.v * dt + 0.5 * st.a * dt * dt;
     let k0 = g.kappa_at(st.s);
     let k1 = g.kappa_at(st.s + ds.max(0.0));
@@ -1219,10 +1210,32 @@ fn effective_jerk(g: &Grid, st: State, dt: f64, lowering: bool) -> f64 {
     let v1 = st.v + st.a * dt;
     let a_n1 = k1 * v1 * v1;
     let dtheta = k1 * ds;
-    let j_norm = (a_n1 - a_n0) + st.a * dtheta;
-    let budget = (g.t.j_max * dt) * (g.t.j_max * dt) - j_norm * j_norm;
+    (a_n1 - a_n0) + st.a * dtheta
+}
+
+/// The vector jerk budget left over `dt` after the normal share (the
+/// increment disk). Non-positive means the geometry at this speed is
+/// jerk-infeasible no matter what the tangential component does.
+fn steering_budget(g: &Grid, st: State, dt: f64) -> f64 {
+    let j_norm = normal_jerk_share(g, st, dt);
+    (g.t.j_max * dt) * (g.t.j_max * dt) - j_norm * j_norm
+}
+
+/// Tangential jerk available after billing the normal share of the rotating
+/// acceleration vector. When the normal share alone blows the vector budget
+/// the geometry at this speed is jerk-infeasible no matter what the
+/// tangential component does, so the shed direction keeps full nominal
+/// authority — freezing `a` there restores nothing; it only strands the
+/// state off every acceleration constraint ahead, turning a bounded jerk
+/// overrun into an acceleration one. Raising through such geometry is
+/// [`flight_step`]'s rail-following aim, with its own disk-scaled authority.
+fn effective_jerk(g: &Grid, st: State, dt: f64) -> f64 {
+    if !g.curved_near(st.s) {
+        return g.t.j_max;
+    }
+    let budget = steering_budget(g, st, dt);
     if budget <= 0.0 {
-        return if lowering { g.t.j_max } else { 0.0 };
+        return g.t.j_max;
     }
     budget.sqrt() / dt.max(1e-12)
 }
@@ -1248,32 +1261,70 @@ fn flight_step(
         f64::INFINITY
     };
     let rail = g.rail_at(st.s, st.v);
-    let (j_shed, j_raise) = if curved {
-        (
-            effective_jerk(g, *st, dt_budget.max(1e-9), true),
-            effective_jerk(g, *st, dt_budget.max(1e-9), false),
-        )
+    let j_eff = if curved {
+        effective_jerk(g, *st, dt_budget.max(1e-9))
     } else {
-        (track.j_max, track.j_max)
+        track.j_max
     };
     // A jerk swing smaller than one floor-duration step cannot be integrated:
     // with an effectively-unlimited jerk the rail's hold band is far narrower
     // than one step's `j·dt`, so the correction overshoots into a
     // zero-progress limit cycle ping-ponging across the rail until the cell
     // guard gives up. At this resolution the swing is instantaneous — snap.
-    if (st.a - rail).abs() <= j_shed * 2e-12 {
+    if (st.a - rail).abs() <= j_eff * 2e-12 {
         st.a = rail;
     }
-    let (j_cmd, dt_event) = if st.a > rail + rel_eps(rail) {
+    let dt_aim = dt_budget.max(1e-9);
+    let bankrupt = curved && steering_budget(g, *st, dt_aim) <= 0.0;
+    // Jerk-bankrupt geometry: the vector budget is blown by the normal share
+    // no matter what the tangential component does — freezing tangential
+    // control restores nothing (the overrun is billed either way) while it
+    // forfeits the disk margin `√(A² − aₙ²)` the whole blend still offers.
+    // The disk rail is the honest constraint there: steering aims to *land*
+    // on the rail where it will be at the substep's end, with disk-scaled
+    // authority, sweeping a blend notch like the infinite-jerk
+    // reconstruction. Aiming (not saturating toward the rail's current
+    // value) keeps the swing from chattering against the moving rail, whose
+    // overshoot would ring through the lowering as acceleration spikes. Two
+    // scale guards keep the follow at the resolutions where it is meaningful,
+    // freezing tangential control (the pre-existing conservative fly-over)
+    // otherwise: the substep must sweep at least one grid cell — below that
+    // pace the state crawls a near-rest micro-corner where following is
+    // sub-resolution noise whose chatter hands the lowering dynamically
+    // inconsistent samples — and the target never exceeds one
+    // velocity-doubling per substep, far above any rail at printing speeds
+    // but the binding bound over micrometre debris, whose notch is swept
+    // whole and must not arrive above its bottom with speed the one-node
+    // cap clamp then carves into a jerk cliff.
+    let rail_follow_aim = bankrupt
+        .then(|| {
+            let c = g.cell(st.s);
+            let ds = st.v * dt_aim;
+            (ds >= g.t.s[c + 1] - g.t.s[c]).then(|| {
+                let rail_ahead =
+                    g.rail_at((st.s + ds).min(g.end_s()), (st.v + st.a * dt_aim).max(0.0));
+                let target = rail_ahead.min(st.v / dt_aim);
+                let disk_swing = 2.0 * g.lerp_node(g.t.accel, st.s) / dt_aim;
+                ((target - st.a) / dt_aim).clamp(-disk_swing, disk_swing)
+            })
+        })
+        .flatten();
+    let (j_cmd, dt_event) = if let Some(aim) = rail_follow_aim {
+        (aim, dt_aim)
+    } else if st.a > rail + rel_eps(rail) {
         // Above the rail (a curved cell shrank it, or a cap slope leaked into
         // the state): jerk back down to it.
-        (-j_shed, (st.a - rail) / j_shed.max(1e-9))
+        (-j_eff, (st.a - rail) / j_eff.max(1e-9))
     } else if st.a >= rail - rel_eps(rail) {
         // Hold the rail. On straight cells the rail is a constant, so the
         // hold is exact; on curved cells the substep re-clamps below.
         (0.0, f64::INFINITY)
+    } else if bankrupt {
+        // Sub-cell pace: raising stays frozen through jerk-infeasible
+        // geometry, as before.
+        (0.0, dt_aim)
     } else {
-        (j_raise, (rail - st.a) / j_raise.max(1e-9))
+        (j_eff, (rail - st.a) / j_eff.max(1e-9))
     };
     let dt = step_within(*st, j_cmd, dt_event.min(dt_budget), rem).max(1e-12);
     let (mut next, dt) = advance_on_disk(g, *st, j_cmd, dt, curved);
@@ -1331,7 +1382,7 @@ fn peel_step(g: &Grid, st: &mut State, log: &mut PhaseLog, mode: &mut Mode, i: u
         f64::INFINITY
     };
     let j_dn = if curved {
-        effective_jerk(g, *st, dt_budget.max(1e-9), true)
+        effective_jerk(g, *st, dt_budget.max(1e-9))
     } else {
         track.j_max
     };
