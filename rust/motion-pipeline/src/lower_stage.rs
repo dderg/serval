@@ -42,6 +42,7 @@ pub struct Lowerer {
     odometer: Vec<f64>,
     t: f64,
     rest_hold_pending: bool,
+    has_motion_history: bool,
     mesh: Option<Arc<SurfaceTransform>>,
 }
 
@@ -59,6 +60,7 @@ impl Lowerer {
             odometer: home_pos,
             t: t_start,
             rest_hold_pending: true,
+            has_motion_history: false,
             mesh: None,
         }
     }
@@ -80,8 +82,38 @@ impl Lowerer {
                         self.odometer.clone_from(pos);
                         self.t = 0.0;
                         self.rest_hold_pending = true;
+                        self.has_motion_history = false;
                     }
                     Control::SetAxisChains(chains) => {
+                        // The committed track just before the swap still
+                        // carries the deceleration transient through the old
+                        // kernels' windows (the extruder's pre-kernel PA term
+                        // above all). A different kernel weighs that transient
+                        // differently, so swapping at the bare rest point
+                        // steps the track by ~k·ė — a one-sample burst on the
+                        // MCU. Hold the rest as real trajectory until both
+                        // eras' windows see only rest, then swap.
+                        let settle = self.axis_chains.back_support().max(chains.back_support());
+                        if self.has_motion_history && settle > 0.0 {
+                            let hold = rest_hold_segment(
+                                &self.odometer,
+                                rest_z_warp(self.mesh.as_deref(), &self.odometer),
+                                self.t,
+                                self.t + settle,
+                                self.odometer.len(),
+                                0,
+                            );
+                            if output
+                                .send(LoweredItem::Seg(LoweredSegment {
+                                    seg: hold,
+                                    rest_at_end: true,
+                                }))
+                                .is_err()
+                            {
+                                return false;
+                            }
+                            self.t += settle;
+                        }
                         self.axis_chains = chains.clone();
                         self.lower_chains = lowering_chains(&self.axis_chains);
                     }
@@ -138,6 +170,7 @@ impl Lowerer {
         }
 
         self.t = seg.t_end;
+        self.has_motion_history = true;
         advance_odometer(&mut self.odometer, &planned.geometry);
         tracing::debug!(
             subsystem = "motion",

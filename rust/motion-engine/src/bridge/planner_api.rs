@@ -394,6 +394,13 @@ impl PyMotionEngine {
         Ok(())
     }
 
+    fn post_processor_param(&self, name: &str, key: &str) -> Option<f64> {
+        self.planner_config
+            .lock_ok()
+            .post_processors
+            .param(name, key)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn set_bed_mesh(
         &self,

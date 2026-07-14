@@ -20,16 +20,20 @@ const SPAN_LOOKUP_SLACK_MM: f64 = 1e-6;
 /// counter-drive), which the physical toolhead — the thing the follower must
 /// track — does not perform; the shaper applies them only after projection.
 ///
-/// The raw move stream defines an extrusion-per-path-distance profile: each
-/// spatial segment contributes a span of raw arc length carrying its follower
-/// demand's ratio (zero for travel). The projection extrudes each raw
-/// millimeter when the *shaped* path traverses it: the follower's velocity is
-/// `r(s_shaped(t)) · |v_shaped(t)|` and its position the running integral.
-/// This keeps the follower moving through rest holds (the kernel's creep is
-/// real traversal of the raw path's tail) and continuous across every seam,
-/// and it makes the extruded amount track the shaped path's true distance —
-/// permanently short of the commanded total by exactly the corner-cut length.
-/// Extrude-only moves ride no spatial path; their raw track adds in directly.
+/// A smoothing kernel reshapes the commanded path itself, so the shaped
+/// leader signal is the trajectory the follower rides. Each segment's
+/// extrusion demand is laid out over the shaped arc the toolhead covers
+/// during that segment, and the follower extrudes it as the shaped path
+/// traverses it: its velocity is `r(s_shaped(t)) · |v_shaped(t)|` and its
+/// position the running integral. Demand spans and the traversal odometer
+/// measure the same shaped path, so ratio transitions stay glued to the
+/// geometry — a travel↔extrude boundary fires where the shaped path crosses
+/// the seam (mid corner cut), never displaced by the path length the kernel
+/// smoothed away, which would otherwise accumulate without bound and land
+/// full-flow steps at cruise speed. The extruded amount tracks the shaped
+/// path's true distance — short of the commanded total by the corner-cut
+/// length. Extrude-only moves ride no spatial path; their raw track adds in
+/// directly.
 ///
 /// The follower's own chain applies on top of the projection in the stage
 /// order the leaders use: derivative-gain stages before the kernel act on the
@@ -65,8 +69,8 @@ pub(crate) fn project_followers(
         }
         if projecting {
             state.active = true;
-            for seg in base {
-                state.ingest(seg, axis, leaders);
+            for (i, shaped) in out.iter().enumerate() {
+                state.ingest(&base[i], shaped, axis, leaders, &base[i + 1..]);
             }
         }
         for i in 0..out.len() {
@@ -205,7 +209,7 @@ struct ProjSeg {
     track: ScalarNurbs,
 }
 
-/// One raw segment's stretch of path: raw arc length `[s0, s1]` carrying a
+/// One segment's stretch of path: shaped arc length `[s0, s1]` carrying a
 /// linearly ramped follower ratio, with `e0` the cumulative projected
 /// extrusion at its start.
 #[derive(Debug, Clone, Copy)]
@@ -232,15 +236,15 @@ impl RatioSpan {
     }
 }
 
-/// Per-follower streaming state: the raw extrusion-per-distance table and the
-/// shaped path odometer, carried across emit windows so the projected track
-/// stays continuous through window boundaries, resets, and chain swaps.
+/// Per-follower streaming state: the extrusion-per-shaped-distance table and
+/// the shaped path odometer, carried across emit windows so the projected
+/// track stays continuous through window boundaries, resets, and chain swaps.
 #[derive(Debug, Default)]
 pub(crate) struct FollowerState {
     active: bool,
     spans: Vec<RatioSpan>,
     ingested_through_t: Option<f64>,
-    s_raw_end: f64,
+    s_ingested_end: f64,
     s_shaped: f64,
     e_end: Option<f64>,
     carried_deficit: f64,
@@ -256,7 +260,7 @@ impl FollowerState {
     pub(crate) fn reset_timeline(&mut self) {
         self.spans.clear();
         self.ingested_through_t = None;
-        self.s_raw_end = 0.0;
+        self.s_ingested_end = 0.0;
         self.s_shaped = 0.0;
         self.e_end = None;
         self.projected.clear();
@@ -313,54 +317,76 @@ impl FollowerState {
         }
     }
 
-    fn ingest(&mut self, seg: &ShapedSegment, axis: usize, leaders: &[usize]) {
+    /// Lays the segment's demand along the shaped arc the toolhead covers
+    /// during it. While the raw stream rests, the kernel's creep first
+    /// finishes the previous stretch — converging on the rest point, at that
+    /// stretch's terminal ratio — and then leads into the upcoming spatial
+    /// stretch at its opening ratio. The stretch a lead creeps into is always
+    /// already pending: the shaper only projects a segment once the lookahead
+    /// covers its convolution window, and a lead exists only where that
+    /// window reaches the upcoming motion.
+    fn ingest(
+        &mut self,
+        raw: &ShapedSegment,
+        shaped: &ShapedSegment,
+        axis: usize,
+        leaders: &[usize],
+        upcoming: &[ShapedSegment],
+    ) {
         if let Some(through) = self.ingested_through_t {
-            if seg.t_end <= through + GRID_DEDUP_EPS_S {
+            if raw.t_end <= through + GRID_DEDUP_EPS_S {
                 return;
             }
             assert!(
-                seg.t_start >= through - GRID_DEDUP_EPS_S,
+                raw.t_start >= through - GRID_DEDUP_EPS_S,
                 "follower span ingestion saw an out-of-order segment: \
                  t_start {} before ingested-through {}",
-                seg.t_start,
+                raw.t_start,
                 through
             );
         }
-        self.ingested_through_t = Some(seg.t_end);
-        let leader_d1: Vec<ScalarNurbs> = leaders
-            .iter()
-            .map(|&l| derivative_or_zero(&seg.axes[l]))
-            .collect();
-        let speed = |t: f64| {
-            leader_d1
-                .iter()
-                .map(|c| nurbs::eval::eval(c, t).powi(2))
-                .sum::<f64>()
-                .sqrt()
-        };
-        let grid = knot_grid(&leader_d1, seg.t_start, seg.t_end);
-        let mut ds = 0.0;
-        for w in grid.windows(2) {
-            ds += integrate(&speed, w[0], w[1]);
-        }
-        if ds <= SPAN_MIN_LEN_MM {
+        self.ingested_through_t = Some(raw.t_end);
+        let shaped_ds = leader_arc_length(shaped, leaders);
+        if shaped_ds <= SPAN_MIN_LEN_MM {
             return;
         }
-        let (r0, r1) = seg
-            .followers
-            .iter()
-            .find(|f| f.axis_index == axis)
-            .filter(|_| seg.spatial_path)
-            .map_or((0.0, 0.0), |f| (f.ratio, f.ratio_end));
+        let raw_ds = leader_arc_length(raw, leaders);
+        if raw_ds > SPAN_MIN_LEN_MM {
+            let (r0, r1) = raw
+                .followers
+                .iter()
+                .find(|f| f.axis_index == axis)
+                .filter(|_| raw.spatial_path)
+                .map_or((0.0, 0.0), |f| (f.ratio, f.ratio_end));
+            self.push_span(shaped_ds, r0, r1);
+            return;
+        }
+        let tail = leader_distance(shaped, raw, leaders, raw.t_start).min(shaped_ds);
+        if tail > SPAN_MIN_LEN_MM {
+            let r = self.spans.last().map_or(0.0, |span| span.r1);
+            self.push_span(tail, r, r);
+        }
+        let lead = shaped_ds - tail;
+        if lead > SPAN_MIN_LEN_MM {
+            let r = upcoming
+                .iter()
+                .find(|seg| seg.spatial_path)
+                .and_then(|seg| seg.followers.iter().find(|f| f.axis_index == axis))
+                .map_or(0.0, |f| f.ratio);
+            self.push_span(lead, r, r);
+        }
+    }
+
+    fn push_span(&mut self, len: f64, r0: f64, r1: f64) {
         let e0 = self.spans.last().map_or(0.0, |span| span.e_at(span.s1));
         self.spans.push(RatioSpan {
-            s0: self.s_raw_end,
-            s1: self.s_raw_end + ds,
+            s0: self.s_ingested_end,
+            s1: self.s_ingested_end + len,
             r0,
             r1,
             e0,
         });
-        self.s_raw_end += ds;
+        self.s_ingested_end += len;
     }
 
     fn prune_spans(&mut self) {
@@ -401,6 +427,31 @@ impl FollowerState {
             None => (self.spans.last().map_or(0.0, |span| span.r1), 0.0),
         }
     }
+}
+
+fn leader_arc_length(seg: &ShapedSegment, leaders: &[usize]) -> f64 {
+    let d1: Vec<ScalarNurbs> = leaders
+        .iter()
+        .map(|&l| derivative_or_zero(&seg.axes[l]))
+        .collect();
+    let speed = |t: f64| {
+        d1.iter()
+            .map(|c| nurbs::eval::eval(c, t).powi(2))
+            .sum::<f64>()
+            .sqrt()
+    };
+    knot_grid(&d1, seg.t_start, seg.t_end)
+        .windows(2)
+        .map(|w| integrate(&speed, w[0], w[1]))
+        .sum()
+}
+
+fn leader_distance(a: &ShapedSegment, b: &ShapedSegment, leaders: &[usize], t: f64) -> f64 {
+    leaders
+        .iter()
+        .map(|&l| (nurbs::eval::eval(&a.axes[l], t) - nurbs::eval::eval(&b.axes[l], t)).powi(2))
+        .sum::<f64>()
+        .sqrt()
 }
 
 /// A constant track (a held axis) differentiates to zero; `nurbs` refuses
