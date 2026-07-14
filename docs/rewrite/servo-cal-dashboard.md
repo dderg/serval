@@ -152,14 +152,30 @@ assigned when it is selected and held until it is deselected — changing the
 rest of the selection never reshuffles the colors of runs already on the
 chart.
 
-- **gains** — gain-sweep/refine runs, following-error PSD overlay (step
-  chips, 20–450 Hz band marked, per-trace peak annotations), the `gains`
-  grid with autofill. The spectrum charts (here and the accelerometer box)
-  draw linear amplitude from a zero floor, clipped to 0–500 Hz — the old
-  report's resonance-zoom view, where a peak is a spike, not a bump on a
-  log floor. Following error converts to µm via the manifest's
-  `counts_per_mm`; both convert the analyzer's Welch PSD to tone amplitude
-  as `sqrt(2 · psd · ENBW)` (Hann ENBW = 1.5·Δf).
+- **gains** — gain-sweep/refine/ladder plus tracking runs (the page's own
+  template launches `SERVO_MEASURE_TRACKING`, so its before/after strokes
+  must land here), following-error PSD overlay (step chips, 20–450 Hz band
+  marked, per-trace peak annotations), the `gains` grid with autofill. The
+  spectrum charts (here and the accelerometer box) draw linear amplitude
+  from a zero floor, clipped to 0–500 Hz — the old report's resonance-zoom
+  view, where a peak is a spike, not a bump on a log floor. Following
+  error converts to µm via the manifest's `counts_per_mm`; both convert
+  the analyzer's Welch PSD to tone amplitude as `sqrt(2 · psd · ENBW)`
+  (Hann ENBW = 1.5·Δf). The tracking metrics table heat-tints its µm
+  columns (red intensity scaled between each column's best and worst
+  visible value), so the low-overshoot step reads without comparing
+  four drives' digits per step. Between the metrics table and the PSD
+  sits the
+  **metrics-vs-gain chart** — the old gain-report PNG's bottom-left panel:
+  each selected sweep run draws worst-drive overshoot (solid, dotted
+  markers), ferr rms (dashed), and ferr peak (dotted) in µm against the
+  swept value (the `speed` gain when that's what varies), with a red
+  dashed rung at every step flagged `resonance_detected` or
+  `torque_saturated` (settle truncation stays a table badge — it's a
+  capture-length artifact, not a gain quality signal). Runs whose
+  manifests sweep nothing —
+  tracking's single step — stay off the chart and are read in the metrics
+  table instead.
 - **notches** — same PSD plus a detected-peak list (top spaced peaks in
   the band, from the newest selected run's recommended step when visible,
   else its last visible step); "→ notch n" pushes a peak's frequency
@@ -258,7 +274,14 @@ same convention as the vendor manual and the drive's front panel.
   reads tweak grid -> apply -> run sweep -> run strip updates. Every
   batch from Apply or the console lands in the same session log, which
   survives page switches; clicking any logged line inserts it back into
-  the console.
+  the console. Command output is echoed under each sent line:
+  `respond_info` text only travels Moonraker's websocket, so after every
+  blocking `/printer/gcode/script` call the console diffs
+  `/server/gcode_store` against its pre-send tail (server-side
+  timestamps, so no clock agreement needed) and renders the new
+  `response` entries — `SERVO_MEASURE_TRACKING`'s ferr/overshoot summary
+  reads in the dashboard, not just in mainsail. `!!`-prefixed lines tint
+  red; concurrent responses from another console may ride along.
 
 ## Implementation notes
 
