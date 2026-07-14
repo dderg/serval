@@ -6,6 +6,7 @@ use crate::capture::{
 };
 use crate::clock::monotonic_ns;
 use crate::curves::AXIS_RING_CAPACITY;
+use crate::dynamics::{DynamicsModel, ERR_DYNAMICS_BAD_DIM, ERR_DYNAMICS_REJECTED};
 use crate::mailbox::{MailboxReply, MailboxRequest};
 use crate::push_plan::plan_bundle;
 use crate::sensorless::{ERR_ARM_SENSORLESS_AMBIGUOUS_PAIR, ERR_ARM_SENSORLESS_BAD_THRESHOLD};
@@ -17,14 +18,14 @@ use crate::wire::{
     resonance_buzz_response_frame, restore_drive_limits_response_frame,
     resume_stream_response_frame, runtime_caps_response_frame, sdo_read_response_frame,
     sdo_write_response_frame, seed_servo_home_response_frame, set_diff_damper_response_frame,
-    set_diff_trim_response_frame, set_drive_limits_response_frame, set_strain_comp_response_frame,
-    set_torque_response_frame, start_capture_response_frame, stop_capture_response_frame,
-    stop_response_frame, Command,
+    set_diff_trim_response_frame, set_drive_limits_response_frame,
+    set_dynamics_model_response_frame, set_strain_comp_response_frame, set_torque_response_frame,
+    start_capture_response_frame, stop_capture_response_frame, stop_response_frame, Command,
 };
 use mcu_protocol::messages::{
     ArmSensorlessEndstop, PushPieces, ResonanceBuzz, SdoRead, SdoReadResponse, SdoWrite,
-    SdoWriteResponse, SetDiffDamper, SetDiffTrim, SetDriveLimits, SetStrainComp, SetTorque,
-    StartCapture, StopCaptureResponse,
+    SdoWriteResponse, SetDiffDamper, SetDiffTrim, SetDriveLimits, SetDynamicsModel, SetStrainComp,
+    SetTorque, StartCapture, StopCaptureResponse,
 };
 
 pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
@@ -147,6 +148,12 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
                 msg,
             } => {
                 handle_set_strain_comp(ctx, correlation_id, msg);
+            }
+            Command::SetDynamicsModel {
+                correlation_id,
+                msg,
+            } => {
+                handle_set_dynamics_model(ctx, correlation_id, msg);
             }
             Command::SdoRead {
                 correlation_id,
@@ -610,6 +617,55 @@ fn handle_set_strain_comp(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetSt
     );
     ctx.server
         .respond(&set_strain_comp_response_frame(correlation_id, rc));
+}
+
+pub(super) fn handle_set_dynamics_model(
+    ctx: &mut EndpointCtx,
+    correlation_id: u32,
+    msg: SetDynamicsModel,
+) {
+    let n = msg.axes_count as usize;
+    let rc = if n != ctx.num_slaves || msg.mass.len() != n * n {
+        eprintln!(
+            "ec-rt: SetDynamicsModel axes_count={} mass_len={} does not match {} slaves",
+            msg.axes_count,
+            msg.mass.len(),
+            ctx.num_slaves,
+        );
+        ERR_DYNAMICS_BAD_DIM
+    } else {
+        match DynamicsModel::from_parts(
+            n,
+            &msg.mass,
+            &msg.viscous,
+            &msg.coulomb_fwd,
+            &msg.coulomb_rev,
+            msg.deadband_mm_s,
+        ) {
+            Ok(model) => {
+                ctx.dynamics = Some(model);
+                0
+            }
+            Err(e) => {
+                eprintln!("ec-rt: SetDynamicsModel rejected: {e:?} — keeping previous model");
+                ERR_DYNAMICS_REJECTED
+            }
+        }
+    };
+    eprintln!(
+        "ec-rt: SetDynamicsModel n={} deadband={} mm/s rc={rc}",
+        msg.axes_count, msg.deadband_mm_s,
+    );
+    tracing::info!(
+        subsystem = "ethercat",
+        event = "set_dynamics_model",
+        axes_count = msg.axes_count,
+        deadband_mm_s = msg.deadband_mm_s,
+        rc,
+        "dynamics feedforward model reconfigured"
+    );
+    ctx.server
+        .respond(&set_dynamics_model_response_frame(correlation_id, rc));
 }
 
 fn handle_sdo_read(ctx: &mut EndpointCtx, correlation_id: u32, msg: SdoRead) {

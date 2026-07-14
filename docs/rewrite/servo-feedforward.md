@@ -176,6 +176,18 @@ dynamics_profile: ~/printer_data/config/servo_dynamics/dynamics_ident_<timestamp
 
 Restart klippy. The endpoint loads and validates the profile at claim time.
 
+### Step 2½ — optional empirical refinement
+
+The regression fit can vary with the excitation grid's speeds and
+accelerations. `SERVO_REFINE_DYNAMICS` (see
+[servo-calibration.md](servo-calibration.md)) refines the loaded profile
+empirically: it streams scaled candidate models into the running endpoint,
+measures tracking per candidate (overshoot for the mass term, following
+error for the viscous term), converges on the best scale by golden-section
+search, and writes the winning profile as a new TOML — repoint
+`dynamics_profile` and restart to keep it. The live model is always
+restored to the baseline when the command finishes.
+
 ### Step 3 — validate tracking
 
 ```

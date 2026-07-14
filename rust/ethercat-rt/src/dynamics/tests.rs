@@ -144,6 +144,59 @@ fn rejects_each_invariant_violation() {
 }
 
 #[test]
+fn from_parts_agrees_with_toml_parse() {
+    let toml = DynamicsModel::from_toml_str(COREXY).unwrap();
+    let parts = DynamicsModel::from_parts(
+        2,
+        &[0.030, -0.010, -0.010, 0.030],
+        &[0.004, 0.004],
+        &[1.0, 1.0],
+        &[-1.0, -1.0],
+        0.5,
+    )
+    .unwrap();
+    assert_eq!(parts.n, 2);
+    assert_eq!(parts.axes, ["slot0", "slot1"]);
+    let acc = [1000.0, -400.0];
+    let vel = [100.0, -30.0];
+    for axis in 0..2 {
+        let a = toml.torque_ff(axis, &acc, &vel);
+        let b = parts.torque_ff(axis, &acc, &vel);
+        assert!((a - b).abs() < 1e-6, "axis {axis}: {a} vs {b}");
+    }
+}
+
+#[test]
+fn from_parts_rejects_each_invariant_violation() {
+    let mass = [0.030, -0.010, -0.010, 0.030];
+    let vec2 = [0.004, 0.004];
+    assert!(matches!(
+        DynamicsModel::from_parts(0, &[], &[], &[], &[], 0.5),
+        Err(ProfileError::Dim(_))
+    ));
+    assert!(matches!(
+        DynamicsModel::from_parts(2, &mass[..3], &vec2, &vec2, &vec2, 0.5),
+        Err(ProfileError::Dim(_))
+    ));
+    assert!(matches!(
+        DynamicsModel::from_parts(2, &mass, &vec2[..1], &vec2, &vec2, 0.5),
+        Err(ProfileError::Dim(_))
+    ));
+    assert!(matches!(
+        DynamicsModel::from_parts(2, &[0.030, -0.011, -0.010, 0.030], &vec2, &vec2, &vec2, 0.5),
+        Err(ProfileError::NotSymmetric)
+    ));
+    assert!(matches!(
+        DynamicsModel::from_parts(2, &[0.010, 0.020, 0.020, 0.010], &vec2, &vec2, &vec2, 0.5),
+        Err(ProfileError::NotPositiveDefinite)
+    ));
+    assert!(matches!(
+        DynamicsModel::from_parts(2, &mass, &[f32::NAN, 0.004], &vec2, &vec2, 0.5),
+        Err(ProfileError::NotFinite(_))
+    ));
+}
+
+#[test]
 #[should_panic(expected = "non-finite torque FF")]
 fn clamp_panics_on_nan() {
     let mut sat = 0u32;

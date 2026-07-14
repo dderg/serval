@@ -67,6 +67,8 @@ pub enum MessageKind {
     SetDiffDamperResponse = 0x0089,
     SetDiffTrim = 0x008A,
     SetDiffTrimResponse = 0x008B,
+    SetDynamicsModel = 0x008C,
+    SetDynamicsModelResponse = 0x008D,
 }
 
 impl MessageKind {
@@ -118,6 +120,8 @@ impl MessageKind {
             0x0089 => Self::SetDiffDamperResponse,
             0x008A => Self::SetDiffTrim,
             0x008B => Self::SetDiffTrimResponse,
+            0x008C => Self::SetDynamicsModel,
+            0x008D => Self::SetDynamicsModelResponse,
             _ => return None,
         })
     }
@@ -942,6 +946,25 @@ impl Encode for SetDiffTrimResponse {
 }
 
 impl Decode for SetDiffTrimResponse {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            result: get_i32(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetDynamicsModelResponse {
+    pub result: i32,
+}
+
+impl Encode for SetDynamicsModelResponse {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_i32(out, self.result);
+    }
+}
+
+impl Decode for SetDynamicsModelResponse {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         Ok(Self {
             result: get_i32(c)?,

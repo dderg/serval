@@ -468,6 +468,73 @@ impl Decode for SetStrainComp {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetDynamicsModel {
+    pub mass: Vec<f32>,
+    pub axes_count: u8,
+    pub viscous: Vec<f32>,
+    pub coulomb_fwd: Vec<f32>,
+    pub coulomb_rev: Vec<f32>,
+    pub deadband_mm_s: f32,
+}
+
+impl Encode for SetDynamicsModel {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_u16(out, self.mass.len() as u16);
+        for v in &self.mass {
+            put_f32(out, *v);
+        }
+        put_u8(out, self.axes_count);
+        for vec in [&self.viscous, &self.coulomb_fwd, &self.coulomb_rev] {
+            assert_eq!(vec.len(), self.axes_count as usize);
+            for v in vec {
+                put_f32(out, *v);
+            }
+        }
+        put_f32(out, self.deadband_mm_s);
+    }
+}
+
+fn get_f32_vec(c: &mut Cursor<'_>, count: usize) -> Result<Vec<f32>, DecodeError> {
+    let need = count
+        .checked_mul(4)
+        .ok_or(DecodeError::ArrayLengthExceedsBuffer {
+            claimed: count as u32,
+            available: c.remaining(),
+        })?;
+    if need > c.remaining() {
+        return Err(DecodeError::ArrayLengthExceedsBuffer {
+            claimed: count as u32,
+            available: c.remaining(),
+        });
+    }
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values.push(get_f32(c)?);
+    }
+    Ok(values)
+}
+
+impl Decode for SetDynamicsModel {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let mass_count = get_u16(c)?;
+        let mass = get_f32_vec(c, mass_count as usize)?;
+        let axes_count = get_u8(c)?;
+        let viscous = get_f32_vec(c, axes_count as usize)?;
+        let coulomb_fwd = get_f32_vec(c, axes_count as usize)?;
+        let coulomb_rev = get_f32_vec(c, axes_count as usize)?;
+        let deadband_mm_s = get_f32(c)?;
+        Ok(Self {
+            mass,
+            axes_count,
+            viscous,
+            coulomb_fwd,
+            coulomb_rev,
+            deadband_mm_s,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum SlaveState {
