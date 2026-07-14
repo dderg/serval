@@ -211,22 +211,40 @@ SERVO_SYNC at the map's zero point to restore the calibrated anchor;
 nothing does this for you. The live anchor bias is visible in the
 `strain_comp_state` event (`anchor_bias_um`).
 
+**The stiffness is a matrix.** The two belts share the gantry, so an
+antisymmetric offset on one pair also strains the other — on the Trident
+bench the cross term is ~25% of the direct term, symmetric (reciprocity),
+and same-signed with the racking direction. Dividing each belt's field by
+its own scalar stiffness therefore copies every single-belt feature into
+the other belt at the coupling ratio (the diagonal "ghost" in a
+verification map). The build instead solves the 2×2 system per grid node,
+`offsets = -inv(K) @ strain`: each belt gets its own correction plus a
+partial same-sign helper offset for the other belt's field. A
+near-singular matrix (cross terms rivaling the direct terms) fails
+loudly. Beware that the static probe can over-read the dynamic stiffness
+(stiction locks the gantry relief path at standstill — ~427 static vs
+~277 effective on the bench); a `MERGE=1` iteration converges the
+calibration error away, and with the cross terms in place it contracts
+instead of leaking sideways.
+
 The workflow: (1) `SERVO_MEASURE_PAIR_STIFFNESS` steps a constant
 antisymmetric offset (a 1×1 grid) through the same mechanism and reads
-the differential torque response over SDO 0x6077 — the fitted slope
-(%/mm) is the pair stiffness, and a poor fit (R² < 0.9) fails loudly.
+every pair's differential torque response over SDO 0x6077 — the fitted
+direct slope (%/mm) plus the cross-belt slope populate the stiffness
+matrix for the build, and a poor direct fit (R² < 0.9) fails loudly.
 (2) `SERVO_STRAIN_COMP_BUILD RUN=<dir>` grids the run's elastic
 differential field per belt (each raster line's dense profile evaluated
-at the grid nodes it crosses), zeroes the map at the region center
-(SERVO_SYNC's zero point), divides by the stiffness, and writes
+at the grid nodes it crosses), zeroes the maps at the region center
+(SERVO_SYNC's zero point), solves the per-node 2×2 system, and writes
 `map_file` (default `~/printer_data/config/strain_comp.json`).
 (3) `SERVO_STRAIN_COMP ENABLE=1` resolves the map's motor names to
 slots/lanes on the live topology and uploads it; `ENABLE=0` ramps the
 compensation back out. Verify by re-running the strain map with the
 compensation enabled — the residual field should collapse. Params:
 stiffness `STEP_UM` (50) `SETTLE` (0.8) `AXIS`; build `RUN` (required)
-`STIFFNESS_A`/`STIFFNESS_B` (%/mm override) `SPACING` (run's line
-spacing).
+`STIFFNESS_A`/`STIFFNESS_B` with `CROSS_AB`/`CROSS_BA` (%/mm matrix
+override; `CROSS_AB` is belt A's response to a belt B offset, 0 disables
+the cross term) `SPACING` (run's line spacing).
 
 #### SERVO_MEASURE_INERTIA
 Records the excitation grid for the inertia/friction fit (no report — it is the

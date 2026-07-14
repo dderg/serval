@@ -276,6 +276,16 @@ def test_stiffness_probe_reports_the_gantry_cross_coupling(tmp_path):
     )
 
 
+def test_stiffness_probe_stores_the_cross_terms_for_the_build(tmp_path):
+    sc, _ = make_comp(
+        tmp_path, FakeEngine(stiffness_pct_per_mm=200.0, cross_pct_per_mm=24.0)
+    )
+    sc.cmd_SERVO_MEASURE_PAIR_STIFFNESS(FakeGcmd())
+    a, b = ("m_a", "m_a1"), ("m_b", "m_b1")
+    assert sc.measured_cross[(b, a)] == pytest.approx(24.0, rel=0.05)
+    assert sc.measured_cross[(a, b)] == pytest.approx(24.0, rel=0.05)
+
+
 def test_stiffness_measurement_recovers_the_simulated_slope(tmp_path):
     sc, engine = make_comp(tmp_path, FakeEngine(stiffness_pct_per_mm=200.0))
     gcmd = FakeGcmd()
@@ -294,6 +304,10 @@ def test_build_produces_offsets_that_cancel_the_field(tmp_path):
     sc.measured_stiffness = {
         ("m_a", "m_a1"): 200.0,
         ("m_b", "m_b1"): 200.0,
+    }
+    sc.measured_cross = {
+        (("m_a", "m_a1"), ("m_b", "m_b1")): 0.0,
+        (("m_b", "m_b1"), ("m_a", "m_a1")): 0.0,
     }
     gcmd = FakeGcmd(RUN=str(run_dir))
     sc.cmd_SERVO_STRAIN_COMP_BUILD(gcmd)
@@ -322,7 +336,13 @@ def test_build_zeroes_the_map_at_the_recorded_zero_point(tmp_path):
     (run_dir / "manifest.json").write_text(json.dumps(manifest))
     sc, _ = make_comp(tmp_path)
     sc.cmd_SERVO_STRAIN_COMP_BUILD(
-        FakeGcmd(RUN=str(run_dir), STIFFNESS_A="200", STIFFNESS_B="200")
+        FakeGcmd(
+            RUN=str(run_dir),
+            STIFFNESS_A="200",
+            STIFFNESS_B="200",
+            CROSS_AB="0",
+            CROSS_BA="0",
+        )
     )
     payload = json.loads((tmp_path / "strain_comp.json").read_text())
     belt_a = payload["pairs"][0]
@@ -346,7 +366,13 @@ def test_build_accepts_explicit_stiffness_overrides(tmp_path):
     run_dir = tmp_path / "strainrun"
     write_run(run_dir)
     sc, _ = make_comp(tmp_path)
-    gcmd = FakeGcmd(RUN=str(run_dir), STIFFNESS_A="100", STIFFNESS_B="100")
+    gcmd = FakeGcmd(
+        RUN=str(run_dir),
+        STIFFNESS_A="100",
+        STIFFNESS_B="100",
+        CROSS_AB="0",
+        CROSS_BA="0",
+    )
     sc.cmd_SERVO_STRAIN_COMP_BUILD(gcmd)
     payload = json.loads((tmp_path / "strain_comp.json").read_text())
     assert payload["pairs"][0]["offsets_um"][0] == pytest.approx(50, abs=6)
@@ -357,7 +383,13 @@ def test_enable_uploads_grids_with_resolved_slots(tmp_path):
     write_run(run_dir)
     sc, engine = make_comp(tmp_path)
     sc.cmd_SERVO_STRAIN_COMP_BUILD(
-        FakeGcmd(RUN=str(run_dir), STIFFNESS_A="200", STIFFNESS_B="200")
+        FakeGcmd(
+            RUN=str(run_dir),
+            STIFFNESS_A="200",
+            STIFFNESS_B="200",
+            CROSS_AB="0",
+            CROSS_BA="0",
+        )
     )
     sc.cmd_SERVO_STRAIN_COMP(FakeGcmd(ENABLE="1"))
     grids = [u for u in engine.uploads if u[6] == 3]
@@ -388,7 +420,13 @@ def test_excessive_offsets_error_instead_of_clamping(tmp_path):
     run_dir = tmp_path / "strainrun"
     write_run(run_dir)
     sc, _ = make_comp(tmp_path)
-    gcmd = FakeGcmd(RUN=str(run_dir), STIFFNESS_A="5", STIFFNESS_B="5")
+    gcmd = FakeGcmd(
+        RUN=str(run_dir),
+        STIFFNESS_A="5",
+        STIFFNESS_B="5",
+        CROSS_AB="0",
+        CROSS_BA="0",
+    )
     with pytest.raises(RuntimeError, match="implausibly low"):
         sc.cmd_SERVO_STRAIN_COMP_BUILD(gcmd)
 
@@ -398,14 +436,25 @@ def test_merge_adds_the_residual_on_top_of_the_existing_map(tmp_path):
     write_run(run_dir)
     sc, _ = make_comp(tmp_path)
     sc.cmd_SERVO_STRAIN_COMP_BUILD(
-        FakeGcmd(RUN=str(run_dir), STIFFNESS_A="200", STIFFNESS_B="200")
+        FakeGcmd(
+            RUN=str(run_dir),
+            STIFFNESS_A="200",
+            STIFFNESS_B="200",
+            CROSS_AB="0",
+            CROSS_BA="0",
+        )
     )
     first = json.loads((tmp_path / "strain_comp.json").read_text())
     # The same field measured again as a "residual" and merged: offsets
     # must double (both passes correct the same thing), zero point kept.
     sc.cmd_SERVO_STRAIN_COMP_BUILD(
         FakeGcmd(
-            RUN=str(run_dir), STIFFNESS_A="200", STIFFNESS_B="200", MERGE="1"
+            RUN=str(run_dir),
+            STIFFNESS_A="200",
+            STIFFNESS_B="200",
+            CROSS_AB="0",
+            CROSS_BA="0",
+            MERGE="1",
         )
     )
     merged = json.loads((tmp_path / "strain_comp.json").read_text())
@@ -425,6 +474,78 @@ def test_merge_without_an_existing_map_errors_loudly(tmp_path):
                 RUN=str(run_dir),
                 STIFFNESS_A="200",
                 STIFFNESS_B="200",
+                CROSS_AB="0",
+                CROSS_BA="0",
                 MERGE="1",
             )
         )
+
+
+def test_build_solves_the_cross_coupled_system_jointly(tmp_path):
+    run_dir = tmp_path / "strainrun"
+    write_run(run_dir)
+    sc, _ = make_comp(tmp_path)
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(
+        FakeGcmd(
+            RUN=str(run_dir),
+            STIFFNESS_A="200",
+            STIFFNESS_B="200",
+            CROSS_AB="-50",
+            CROSS_BA="-50",
+        )
+    )
+    payload = json.loads((tmp_path / "strain_comp.json").read_text())
+    belt_a, belt_b = payload["pairs"]
+    assert belt_a["stiffness_pct_per_mm"] == 200.0
+    assert belt_a["cross_pct_per_mm"] == -50.0
+    # The field lives on belt A only (+5% at x=100). Solving
+    # [[200, -50], [-50, 200]] @ [o_a, o_b] = -[5, 0] gives
+    # o_a = -200*5/37500 mm = -26.7 um and o_b = -50*5/37500 mm = -6.7 um:
+    # the OTHER belt gets a same-sign quarter-strength offset, or the
+    # correction would leak back through the gantry.
+    for iy in range(3):
+        assert belt_a["offsets_um"][iy * 3 + 2] == pytest.approx(-27, abs=3)
+        assert belt_a["offsets_um"][iy * 3 + 0] == pytest.approx(27, abs=3)
+        assert belt_b["offsets_um"][iy * 3 + 2] == pytest.approx(-7, abs=2)
+        assert belt_b["offsets_um"][iy * 3 + 0] == pytest.approx(7, abs=2)
+
+
+def test_probe_then_build_uses_the_measured_matrix(tmp_path):
+    run_dir = tmp_path / "strainrun"
+    write_run(run_dir)
+    sc, _ = make_comp(
+        tmp_path, FakeEngine(stiffness_pct_per_mm=200.0, cross_pct_per_mm=24.0)
+    )
+    sc.cmd_SERVO_MEASURE_PAIR_STIFFNESS(FakeGcmd())
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(FakeGcmd(RUN=str(run_dir)))
+    payload = json.loads((tmp_path / "strain_comp.json").read_text())
+    belt_a, belt_b = payload["pairs"]
+    # inv([[200, 24], [24, 200]]) @ [5, 0]: o_a = -25.4 um, o_b = +3.0 um —
+    # a POSITIVE cross term flips the helper offset's sign.
+    for iy in range(3):
+        assert belt_a["offsets_um"][iy * 3 + 2] == pytest.approx(-25, abs=3)
+        assert belt_b["offsets_um"][iy * 3 + 2] == pytest.approx(3, abs=2)
+
+
+def test_build_without_cross_terms_errors_loudly(tmp_path):
+    run_dir = tmp_path / "strainrun"
+    write_run(run_dir)
+    sc, _ = make_comp(tmp_path)
+    gcmd = FakeGcmd(RUN=str(run_dir), STIFFNESS_A="200", STIFFNESS_B="200")
+    with pytest.raises(RuntimeError, match="CROSS_AB"):
+        sc.cmd_SERVO_STRAIN_COMP_BUILD(gcmd)
+
+
+def test_build_rejects_a_near_singular_stiffness_matrix(tmp_path):
+    run_dir = tmp_path / "strainrun"
+    write_run(run_dir)
+    sc, _ = make_comp(tmp_path)
+    gcmd = FakeGcmd(
+        RUN=str(run_dir),
+        STIFFNESS_A="200",
+        STIFFNESS_B="200",
+        CROSS_AB="-200",
+        CROSS_BA="-200",
+    )
+    with pytest.raises(RuntimeError, match="singular"):
+        sc.cmd_SERVO_STRAIN_COMP_BUILD(gcmd)

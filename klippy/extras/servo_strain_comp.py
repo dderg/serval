@@ -1,7 +1,8 @@
-"""Belt strain compensation: measure the pair stiffness, build a per-belt
-2D offset map from a strain_map run, and feed it to the endpoint's
-compensation bank (antisymmetric position offsets keyed on the commanded
-carriage position)."""
+"""Belt strain compensation: measure the pair stiffness matrix (direct and
+cross-belt terms — the shared gantry couples the pairs), build per-belt 2D
+offset maps from a strain_map run by solving the joint 2x2 system per grid
+node, and feed them to the endpoint's compensation bank (antisymmetric
+position offsets keyed on the commanded carriage position)."""
 
 import json
 import math
@@ -51,22 +52,25 @@ class BeltPair:
 
 class ServoStrainComp:
     cmd_SERVO_MEASURE_PAIR_STIFFNESS_help = (
-        "Measure each belt pair's differential stiffness: step a known "
-        "antisymmetric offset through the compensation bank and read the "
-        "differential torque response. The slope (%/mm) converts a strain "
-        "map into compensation offsets. STEP_UM (50) sets the probe "
-        "amplitude, SETTLE (0.8) the wait per step, AXIS=X|Y limits to one "
-        "pair."
+        "Measure the belt stiffness matrix: step a known antisymmetric "
+        "offset through the compensation bank and read every pair's "
+        "differential torque response — the direct slope (%/mm) plus the "
+        "cross-belt slope through the shared gantry. Both feed the build's "
+        "joint solve. STEP_UM (50) sets the probe amplitude, SETTLE (0.8) "
+        "the wait per step, AXIS=X|Y limits to one pair."
     )
     cmd_SERVO_STRAIN_COMP_BUILD_help = (
         "Build the compensation map from a SERVO_MEASURE_STRAIN_MAP run: "
-        "grid the elastic differential field per belt, divide by the pair "
-        "stiffness, write the map file. RUN=<run dir> is required; "
-        "stiffness comes from SERVO_MEASURE_PAIR_STIFFNESS or "
-        "STIFFNESS_A/STIFFNESS_B (%/mm); SPACING overrides the grid pitch "
-        "(defaults to the run's line spacing). MERGE=1 treats the run as a "
-        "residual measured WITH the current map enabled and adds the "
-        "correction on top — the second-order iteration."
+        "grid the elastic differential field per belt, solve the 2x2 "
+        "stiffness system per grid node (an offset on one belt also "
+        "strains the other through the gantry), write the map file. "
+        "RUN=<run dir> is required; the stiffness matrix comes from "
+        "SERVO_MEASURE_PAIR_STIFFNESS or STIFFNESS_A/STIFFNESS_B with "
+        "CROSS_AB/CROSS_BA (%/mm, CROSS_AB = belt A's response to a belt "
+        "B offset, 0 disables the cross term); SPACING overrides the grid "
+        "pitch (defaults to the run's line spacing). MERGE=1 treats the "
+        "run as a residual measured WITH the current map enabled and adds "
+        "the correction on top — the second-order iteration."
     )
     cmd_SERVO_STRAIN_COMP_help = (
         "ENABLE=1 uploads the map file to the endpoint (offsets ramp in at "
@@ -79,6 +83,7 @@ class ServoStrainComp:
             config.get("map_file", "~/printer_data/config/strain_comp.json")
         )
         self.measured_stiffness = {}
+        self.measured_cross = {}
         gcode = self.printer.lookup_object("gcode")
         gcode.register_command(
             "SERVO_MEASURE_PAIR_STIFFNESS",
@@ -260,6 +265,8 @@ class ServoStrainComp:
                 if obs.axis_name() == pair.axis_name():
                     continue
                 cross, _cross_r2 = _fit_slope(points[obs.axis_name()])
+                obs_key = tuple(obs.motor_names())
+                self.measured_cross[(obs_key, tuple(names))] = cross
                 gcmd.respond_info(
                     "  cross-coupling into belt %s: %+.1f %%/mm "
                     "(%.0f%% of direct)"
@@ -291,6 +298,33 @@ class ServoStrainComp:
             % ("AB"[belt_idx], "/".join(motor_names), "AB"[belt_idx])
         )
 
+    def _cross_for(self, gcmd, belt_idx, belts, override):
+        """k[belt_idx][other]: this belt's differential torque response per
+        mm of the OTHER belt's antisymmetric offset. Reversing either
+        pair's motor order flips the sign."""
+        if override is not None:
+            return override
+        obs = tuple(belts[belt_idx])
+        drv = tuple(belts[1 - belt_idx])
+        for obs_key, obs_sign in ((obs, 1.0), (tuple(reversed(obs)), -1.0)):
+            for drv_key, drv_sign in (
+                (drv, 1.0),
+                (tuple(reversed(drv)), -1.0),
+            ):
+                if (obs_key, drv_key) in self.measured_cross:
+                    return (
+                        obs_sign
+                        * drv_sign
+                        * self.measured_cross[(obs_key, drv_key)]
+                    )
+        param = "CROSS_%s%s" % ("AB"[belt_idx], "AB"[1 - belt_idx])
+        raise gcmd.error(
+            "no cross stiffness for belt %s (%s) — run "
+            "SERVO_MEASURE_PAIR_STIFFNESS first or pass %s=<%%/mm> "
+            "(0 disables the cross term)"
+            % ("AB"[belt_idx], "/".join(obs), param)
+        )
+
     def cmd_SERVO_STRAIN_COMP_BUILD(self, gcmd):
         run_dir = os.path.expanduser(gcmd.get("RUN"))
         manifest_path = os.path.join(run_dir, "manifest.json")
@@ -318,17 +352,35 @@ class ServoStrainComp:
         spacing = gcmd.get_float(
             "SPACING", plan["line_spacing"], above=2.0, maxval=100.0
         )
-        overrides = [
+        stiffness_overrides = [
             gcmd.get_float("STIFFNESS_A", None),
             gcmd.get_float("STIFFNESS_B", None),
         ]
+        cross_overrides = [
+            gcmd.get_float("CROSS_AB", None),
+            gcmd.get_float("CROSS_BA", None),
+        ]
         belts = _belt_motor_names(manifest)
-        samples = _collect_elastic_samples(run_dir, manifest)
-        pairs_out = []
-        for belt_idx, motor_names in enumerate(belts):
-            stiffness = self._stiffness_for(
-                gcmd, belt_idx, motor_names, overrides[belt_idx]
+        if len(belts) != 2:
+            raise gcmd.error(
+                "the joint stiffness solve needs exactly two belts, run "
+                "has %d" % len(belts)
             )
+        direct = [
+            self._stiffness_for(
+                gcmd, belt_idx, motor_names, stiffness_overrides[belt_idx]
+            )
+            for belt_idx, motor_names in enumerate(belts)
+        ]
+        cross = [
+            self._cross_for(gcmd, belt_idx, belts, cross_overrides[belt_idx])
+            for belt_idx in range(2)
+        ]
+        k_matrix = [(direct[0], cross[0]), (cross[1], direct[1])]
+        samples = _collect_elastic_samples(run_dir, manifest)
+        grids = []
+        bases = []
+        for belt_idx, motor_names in enumerate(belts):
             grid = _build_grid(gcmd, plan, spacing, samples[belt_idx])
             base = base_pairs.get(tuple(motor_names))
             if merge:
@@ -339,13 +391,20 @@ class ServoStrainComp:
                     )
                 _rezero_grid_at(grid, base["zero_xy"])
                 grid["zero_xy"] = list(base["zero_xy"])
-            offsets = _offsets_from_grid(gcmd, grid, stiffness)
+            grids.append(grid)
+            bases.append(base)
+        belt_offsets = _offsets_from_grids(gcmd, grids, k_matrix)
+        pairs_out = []
+        for belt_idx, motor_names in enumerate(belts):
+            grid = grids[belt_idx]
+            offsets = belt_offsets[belt_idx]
             if merge:
-                offsets = _merge_offsets(gcmd, grid, offsets, base)
+                offsets = _merge_offsets(gcmd, grid, offsets, bases[belt_idx])
             pairs_out.append(
                 {
                     "motors": motor_names,
-                    "stiffness_pct_per_mm": stiffness,
+                    "stiffness_pct_per_mm": direct[belt_idx],
+                    "cross_pct_per_mm": cross[belt_idx],
                     "nx": grid["nx"],
                     "ny": grid["ny"],
                     "x0": grid["x0"],
@@ -358,7 +417,7 @@ class ServoStrainComp:
             )
             gcmd.respond_info(
                 "belt %s (%s): %dx%d grid, offsets %+d..%+d um "
-                "(stiffness %.1f %%/mm)"
+                "(stiffness %.1f, cross %.1f %%/mm)"
                 % (
                     "AB"[belt_idx],
                     "/".join(motor_names),
@@ -366,7 +425,8 @@ class ServoStrainComp:
                     grid["ny"],
                     min(offsets),
                     max(offsets),
-                    stiffness,
+                    direct[belt_idx],
+                    cross[belt_idx],
                 )
             )
         payload = {
@@ -754,20 +814,38 @@ def _grid_value_at(grid, x, y):
     return top * (1.0 - ty) + bottom * ty
 
 
-def _offsets_from_grid(gcmd, grid, stiffness_pct_per_mm):
-    offsets = [
-        int(round(-v / stiffness_pct_per_mm * 1000.0))
-        for v in grid["values_pct"]
-    ]
-    worst = max(abs(o) for o in offsets)
-    if worst > MAX_OFFSET_UM:
+def _offsets_from_grids(gcmd, grids, k_matrix):
+    """Solve the 2x2 stiffness system per grid node: an antisymmetric
+    offset on one belt also strains the other through the shared gantry,
+    so the offsets that null both fields are -inv(K) @ strain, not each
+    field divided by its own stiffness."""
+    (kaa, kab), (kba, kbb) = k_matrix
+    det = kaa * kbb - kab * kba
+    if abs(det) < 1e-2 * abs(kaa * kbb):
         raise gcmd.error(
-            "compensation would need %d um (max %d) — stiffness %.1f %%/mm "
-            "is implausibly low or the strain field is out of range"
-            % (worst, MAX_OFFSET_UM, stiffness_pct_per_mm)
+            "stiffness matrix [[%.1f, %.1f], [%.1f, %.1f]] is near "
+            "singular — cross terms rivaling the direct terms cannot be "
+            "solved" % (kaa, kab, kba, kbb)
         )
-    _check_span(gcmd, offsets)
-    return offsets
+    inv_own_other = [(kbb / det, -kab / det), (kaa / det, -kba / det)]
+    values = [grid["values_pct"] for grid in grids]
+    assert len(values[0]) == len(values[1])
+    belt_offsets = []
+    for belt_idx, (inv_own, inv_other) in enumerate(inv_own_other):
+        offsets = [
+            int(round(-(inv_own * va + inv_other * vb) * 1000.0))
+            for va, vb in zip(values[belt_idx], values[1 - belt_idx])
+        ]
+        worst = max(abs(o) for o in offsets)
+        if worst > MAX_OFFSET_UM:
+            raise gcmd.error(
+                "compensation for belt %s would need %d um (max %d) — the "
+                "stiffness is implausibly low or the strain field is out "
+                "of range" % ("AB"[belt_idx], worst, MAX_OFFSET_UM)
+            )
+        _check_span(gcmd, offsets)
+        belt_offsets.append(offsets)
+    return belt_offsets
 
 
 def load_config(config):
