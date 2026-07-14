@@ -221,11 +221,15 @@ verification map). The build instead solves the 2×2 system per grid node,
 `offsets = -inv(K) @ strain`: each belt gets its own correction plus a
 partial same-sign helper offset for the other belt's field. A
 near-singular matrix (cross terms rivaling the direct terms) fails
-loudly. Beware that the static probe can over-read the dynamic stiffness
-(stiction locks the gantry relief path at standstill — ~427 static vs
-~277 effective on the bench); a `MERGE=1` iteration converges the
-calibration error away, and with the cross terms in place it contracts
-instead of leaking sideways.
+loudly. Beware that the static probe over-reads the moving-belt
+response: on the bench both the direct and cross terms measure ~25%
+lower during a sweep (~428/−122 static vs ~335/−88 fitted from run
+pairs) — plausibly the running belt keeps redistributing differential
+tension at the pulley/idler contacts where standstill friction holds it
+in place. Compensation acts while moving, so calibrate in that regime:
+fit the matrix from an uncompensated + compensated run pair, or let a
+`MERGE=1` iteration converge the scale error away — with the cross
+terms in place it contracts instead of leaking sideways.
 
 The workflow: (1) `SERVO_MEASURE_PAIR_STIFFNESS` steps a constant
 antisymmetric offset (a 1×1 grid) through the same mechanism and reads
