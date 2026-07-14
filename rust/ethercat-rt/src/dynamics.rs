@@ -1,5 +1,8 @@
 use serde::Deserialize;
 
+pub const ERR_DYNAMICS_BAD_DIM: i32 = -861;
+pub const ERR_DYNAMICS_REJECTED: i32 = -862;
+
 #[derive(Debug, Deserialize)]
 struct ProfileFile {
     version: u32,
@@ -39,28 +42,72 @@ impl DynamicsModel {
             return Err(ProfileError::Version(f.version));
         }
         let n = f.axes.len();
-        if n == 0 {
-            return Err(ProfileError::Dim("axes is empty"));
-        }
         if f.mass.len() != n || f.mass.iter().any(|row| row.len() != n) {
             return Err(ProfileError::Dim("mass must be n x n"));
         }
-        if f.viscous.len() != n {
+        let mass: Vec<f64> = f.mass.iter().flatten().copied().collect();
+        Self::validated(
+            n,
+            f.axes,
+            mass,
+            f.viscous,
+            f.coulomb_fwd,
+            f.coulomb_rev,
+            f.coulomb_deadband_mm_s,
+        )
+    }
+
+    pub fn from_parts(
+        n: usize,
+        mass: &[f32],
+        viscous: &[f32],
+        coulomb_fwd: &[f32],
+        coulomb_rev: &[f32],
+        deadband_mm_s: f32,
+    ) -> Result<Self, ProfileError> {
+        let axes = (0..n).map(|i| format!("slot{i}")).collect();
+        let widen = |v: &[f32]| v.iter().map(|&x| f64::from(x)).collect::<Vec<f64>>();
+        Self::validated(
+            n,
+            axes,
+            widen(mass),
+            widen(viscous),
+            widen(coulomb_fwd),
+            widen(coulomb_rev),
+            f64::from(deadband_mm_s),
+        )
+    }
+
+    fn validated(
+        n: usize,
+        axes: Vec<String>,
+        mass: Vec<f64>,
+        viscous: Vec<f64>,
+        coulomb_fwd: Vec<f64>,
+        coulomb_rev: Vec<f64>,
+        deadband_mm_s: f64,
+    ) -> Result<Self, ProfileError> {
+        if n == 0 {
+            return Err(ProfileError::Dim("axes is empty"));
+        }
+        if mass.len() != n * n {
+            return Err(ProfileError::Dim("mass must be n x n"));
+        }
+        if viscous.len() != n {
             return Err(ProfileError::Dim("viscous length"));
         }
-        if f.coulomb_fwd.len() != n {
+        if coulomb_fwd.len() != n {
             return Err(ProfileError::Dim("coulomb_fwd length"));
         }
-        if f.coulomb_rev.len() != n {
+        if coulomb_rev.len() != n {
             return Err(ProfileError::Dim("coulomb_rev length"));
         }
-        let mass: Vec<f64> = f.mass.iter().flatten().copied().collect();
         let all_finite = mass
             .iter()
-            .chain(&f.viscous)
-            .chain(&f.coulomb_fwd)
-            .chain(&f.coulomb_rev)
-            .chain(std::iter::once(&f.coulomb_deadband_mm_s))
+            .chain(&viscous)
+            .chain(&coulomb_fwd)
+            .chain(&coulomb_rev)
+            .chain(std::iter::once(&deadband_mm_s))
             .all(|v| v.is_finite());
         if !all_finite {
             return Err(ProfileError::NotFinite("profile contains non-finite value"));
@@ -78,12 +125,12 @@ impl DynamicsModel {
         }
         Ok(Self {
             n,
-            axes: f.axes,
+            axes,
             mass: mass.iter().map(|&v| v as f32).collect(),
-            viscous: f.viscous.iter().map(|&v| v as f32).collect(),
-            coulomb_fwd: f.coulomb_fwd.iter().map(|&v| v as f32).collect(),
-            coulomb_rev: f.coulomb_rev.iter().map(|&v| v as f32).collect(),
-            deadband: f.coulomb_deadband_mm_s as f32,
+            viscous: viscous.iter().map(|&v| v as f32).collect(),
+            coulomb_fwd: coulomb_fwd.iter().map(|&v| v as f32).collect(),
+            coulomb_rev: coulomb_rev.iter().map(|&v| v as f32).collect(),
+            deadband: deadband_mm_s as f32,
         })
     }
 

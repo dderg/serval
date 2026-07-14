@@ -323,6 +323,9 @@ class EtherCatNode:
     def get_drive_count(self):
         return len(self._slot_by_motor)
 
+    def get_dynamics_profile(self):
+        return self.dynamics_profile
+
     def set_motor_torque(self, motor_name, value, print_time):
         if self.engine_handle is None:
             raise self.printer.command_error(

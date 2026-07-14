@@ -73,6 +73,10 @@ with `cargo build --release -p servo-ident` (from `rust/`).
    gains.
 4. **`SERVO_FIT_DYNAMICS`** — fit the dynamic profile at the final gains and
    point `dynamics_profile` at it to enable torque feedforward.
+5. **`SERVO_REFINE_DYNAMICS`** — empirically refine the fitted profile on the
+   running endpoint (mass scale first, then viscous) when the regression fit
+   varies with the excitation grid; point `dynamics_profile` at the refined
+   TOML it writes.
 
 **`SERVO_MEASURE_TRACKING`** is the before/after check for any single change.
 **`SERVO_AUTOTUNE`** packages this exact order into one command — see
@@ -270,6 +274,37 @@ Params: as `SERVO_MEASURE_INERTIA` plus `TORQUE_NM` `INERTIA_KGM2` `NAME`
 `~/printer_data/config/servo_dynamics/dynamics_<name>_<stamp>.toml` and a new
 fit never overwrites an existing profile.
 
+#### SERVO_REFINE_DYNAMICS
+Empirical refinement of an existing dynamics profile, for when the
+`SERVO_FIT_DYNAMICS` regression differs run-to-run with the excitation
+grid. Golden-section search over a scale factor applied to the baseline
+profile's **mass matrix** (`TERM=MASS`, default) or **viscous vector**
+(`TERM=VISCOUS`): each candidate model is streamed into the *running*
+endpoint (no restart), measured with one tracking capture of `ITERATIONS`
+strokes, and scored from `servo-cal analyze` — mean per-move **overshoot**
+for `MASS` (mass-FF error shows up as overshoot at move ends; use a high
+`ACCEL`), mean per-move **ferr_rms** for `VISCOUS` (viscous error shows up
+as cruise following error; use a high `SPEED` and a long stroke). The
+baseline is `PROFILE=` or the node-level `[ethercat_node]
+dynamics_profile`; per-motor profiles are not supported (point `PROFILE=`
+at an equivalent node-level TOML). The search brackets `[LO, HI]` around
+1.0 and stops when the bracket is narrower than `TOL` or `MAX_EVALS`
+candidates have been measured; an explicit baseline measurement at scale
+1.0 always competes, and the winner is the best *measured* candidate. A
+`torque_saturated`/`resonance_detected` flag on any candidate aborts the
+run. The live model is **always** restored to the baseline afterwards
+(also on failure; if klippy dies mid-run the endpoint keeps the last
+candidate until restart). When a scale beats 1.0 the scaled profile is
+written to a new TOML under `~/printer_data/config/servo_dynamics/` (with
+`refined_source`/`refined_term`/`refined_scale`/`refined_run` provenance
+keys, never overwriting) and the `dynamics_profile` paste line is printed
+— config edit + restart is the only way to keep it; when the baseline
+wins, nothing is written. Refine `MASS` first, then re-run with
+`TERM=VISCOUS` against the refined profile. Params: `TERM` (MASS) `AXIS`
+(X) `SERVO` `PROFILE` `LO` (0.7) `HI` (1.3) `TOL` (0.02) `MAX_EVALS` (10)
+`START` `END` `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (3) `DWELL_MS`
+`TAG` (refdyn) `NAME` (refined_<term>).
+
 #### SERVO_CALIBRATE_INERTIA_RATIO
 Step 2 of tuning: identify the load inertia and print the recommended C00.06.
 `TORQUE_NM` and `INERTIA_KGM2` are **required** (config or param). On
@@ -440,6 +475,7 @@ Schemas: [servo-cal-contracts.md](servo-cal-contracts.md).
 | `SERVO_SWEEP_INERTIA` | `servo-cal analyze` | run dir + `results.json` (no automated pick, so `APPLY=1` always errors) |
 | `SERVO_SWEEP_ACCEL` | `servo-cal analyze` | run dir + `results.json` verdict (max non-railing accel); `APPLY=1` verifies at the recommended accel (no SDO write) |
 | `SERVO_FIT_DYNAMICS`, `SERVO_CALIBRATE_INERTIA_RATIO` | `servo-cal fit` | run dir + `~/printer_data/config/servo_dynamics/dynamics_<name>_<stamp>.toml` + C00.06 |
+| `SERVO_REFINE_DYNAMICS` | `servo-cal analyze` (per candidate) | run dir + refined `dynamics_<name>_<stamp>.toml` when a scale beats the baseline (pick is host-side; live model always reverted) |
 | `SERVO_MEASURE_INERTIA` | — | run dir + `.scap` capture only (the building block behind the fit commands) |
 | `SERVO_AUTOTUNE` | all of the above, in sequence | one run dir per stage; `APPLY=0` (default) is a dry rehearsal, `APPLY=1` runs and applies for real |
 

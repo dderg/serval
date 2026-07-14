@@ -1,7 +1,7 @@
 //! Schema-driven reference decoder — the drift tripwire.
 //!
 //! Flat-message codecs are generated from `SCHEMA_MESSAGES` by `build.rs`, so
-//! they cannot drift from the schema. The six variable-length messages keep
+//! they cannot drift from the schema. The variable-length messages keep
 //! hand-written codecs; for those, nothing structural forces the schema entry
 //! to stay truthful. These tests close that gap: they decode real encoder
 //! output using only the schema's field descriptions and fail when the bytes
@@ -12,8 +12,8 @@
 use mcu_protocol::Encode;
 use mcu_protocol::messages::{
     AxisDiag, AxisPieces, CaptureDrive, ClaimHandshakeReply, ConfigureAxes, McuLog, MotorSample,
-    MotorStateResponse, PushPieces, PushPiecesResponse, SdoReadResponse, SdoWrite, SetStrainComp,
-    SlaveState, SlaveStatus, StartCapture, StatusHeartbeat,
+    MotorStateResponse, PushPieces, PushPiecesResponse, SdoReadResponse, SdoWrite,
+    SetDynamicsModel, SetStrainComp, SlaveState, SlaveStatus, StartCapture, StatusHeartbeat,
 };
 
 include!("../schema_def.rs");
@@ -375,6 +375,19 @@ fn set_strain_comp_matches_schema_layout() {
         values_um: vec![-150, 40, 0, 220],
     };
     reference_decode("SetStrainComp", &msg.encoded_to_vec()).unwrap();
+}
+
+#[test]
+fn set_dynamics_model_matches_schema_layout() {
+    let msg = SetDynamicsModel {
+        mass: vec![0.0123, 0.0021, 0.0021, 0.0119],
+        axes_count: 2,
+        viscous: vec![0.0045, 0.0044],
+        coulomb_fwd: vec![1.2, 1.1],
+        coulomb_rev: vec![-1.1, -1.0],
+        deadband_mm_s: 0.5,
+    };
+    reference_decode("SetDynamicsModel", &msg.encoded_to_vec()).unwrap();
 }
 
 #[test]

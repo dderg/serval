@@ -562,3 +562,41 @@ fn sdo_response_frames_decode_back() {
         (-802, 2, [0xF4, 0x01, 0, 0])
     );
 }
+
+#[test]
+fn decodes_set_dynamics_model_command() {
+    let msg = SetDynamicsModel {
+        mass: vec![0.030, -0.010, -0.010, 0.030],
+        axes_count: 2,
+        viscous: vec![0.004, 0.004],
+        coulomb_fwd: vec![1.0, 1.0],
+        coulomb_rev: vec![-1.0, -1.0],
+        deadband_mm_s: 0.5,
+    };
+    let payload = frame_payload(MessageKind::SetDynamicsModel, 33, &msg.encoded_to_vec());
+    match decode_command(0, &payload).expect("decode") {
+        Command::SetDynamicsModel {
+            correlation_id,
+            msg: m,
+        } => {
+            assert_eq!(correlation_id, 33);
+            assert_eq!(m, msg);
+        }
+        other => panic!("expected SetDynamicsModel, got {other:?}"),
+    }
+}
+
+#[test]
+fn set_dynamics_model_response_frame_round_trips() {
+    let frame = set_dynamics_model_response_frame(34, -862);
+    let (chan, payload) = decode_frame(&frame).unwrap();
+    assert_eq!(chan, CHANNEL_CONTROL);
+    let (hdr, body) = decode_message_header(payload).unwrap();
+    assert_eq!(hdr.correlation_id, 34);
+    assert_eq!(
+        MessageKind::from_u16(hdr.kind_raw),
+        Some(MessageKind::SetDynamicsModelResponse)
+    );
+    let r = SetDynamicsModelResponse::decode(body).unwrap();
+    assert_eq!(r.result, -862);
+}

@@ -588,6 +588,60 @@ impl PyMotionEngine {
         }
         Ok(())
     }
+    fn set_dynamics_model(
+        &self,
+        py: Python<'_>,
+        mcu_handle: u32,
+        mass: Vec<f32>,
+        viscous: Vec<f32>,
+        coulomb_fwd: Vec<f32>,
+        coulomb_rev: Vec<f32>,
+        deadband_mm_s: f32,
+    ) -> PyResult<()> {
+        let n = viscous.len();
+        let axes_count = u8::try_from(n).map_err(|_| {
+            PyRuntimeError::new_err(format!("set_dynamics_model: {n} axes exceed u8"))
+        })?;
+        if mass.len() != n * n || coulomb_fwd.len() != n || coulomb_rev.len() != n {
+            return Err(PyRuntimeError::new_err(format!(
+                "set_dynamics_model: inconsistent lengths (mass {}, viscous {n}, \
+                 coulomb_fwd {}, coulomb_rev {})",
+                mass.len(),
+                coulomb_fwd.len(),
+                coulomb_rev.len()
+            )));
+        }
+        let conn = self.ethercat_conn(mcu_handle, "set_dynamics_model")?;
+        tracing::info!(
+            subsystem = "engine",
+            event = "servo_set_dynamics_model",
+            mcu_handle,
+            axes_count,
+            deadband_mm_s,
+            "servo dynamics feedforward model upload"
+        );
+        let result = py
+            .detach(|| {
+                crate::servo_torque::send_set_dynamics_model(
+                    &conn,
+                    mcu_protocol::messages::SetDynamicsModel {
+                        mass,
+                        axes_count,
+                        viscous,
+                        coulomb_fwd,
+                        coulomb_rev,
+                        deadband_mm_s,
+                    },
+                )
+            })
+            .map_err(PyRuntimeError::new_err)?;
+        if result != 0 {
+            return Err(PyRuntimeError::new_err(format!(
+                "set_dynamics_model: endpoint rejected (result {result})"
+            )));
+        }
+        Ok(())
+    }
 }
 
 fn require_endpoint_ok(result: i32, context: &str) -> Result<(), String> {

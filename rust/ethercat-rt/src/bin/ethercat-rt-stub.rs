@@ -24,8 +24,9 @@ use ethercat_rt::wire::{
     restore_drive_limits_response_frame, resume_stream_response_frame, runtime_caps_response_frame,
     sdo_read_response_frame, sdo_write_response_frame, seed_servo_home_response_frame,
     set_diff_damper_response_frame, set_diff_trim_response_frame, set_drive_limits_response_frame,
-    set_strain_comp_response_frame, set_torque_response_frame, start_capture_response_frame,
-    status_heartbeat_frame, stop_capture_response_frame, stop_response_frame, Command,
+    set_dynamics_model_response_frame, set_strain_comp_response_frame, set_torque_response_frame,
+    start_capture_response_frame, status_heartbeat_frame, stop_capture_response_frame,
+    stop_response_frame, Command,
 };
 use mcu_protocol::messages::{SdoReadResponse, SlaveState, StopCaptureResponse};
 
@@ -484,6 +485,16 @@ fn main() {
                         msg.slot_a, msg.slot_b, msg.nx, msg.ny
                     );
                     server.respond(&set_strain_comp_response_frame(correlation_id, 0));
+                }
+                Command::SetDynamicsModel {
+                    correlation_id,
+                    msg,
+                } => {
+                    eprintln!(
+                        "ec-rt-stub: SetDynamicsModel n={} deadband={}",
+                        msg.axes_count, msg.deadband_mm_s
+                    );
+                    server.respond(&set_dynamics_model_response_frame(correlation_id, 0));
                 }
                 Command::Unknown { kind_raw, .. } => {
                     eprintln!("ec-rt-stub: ignoring kind 0x{kind_raw:04x}");

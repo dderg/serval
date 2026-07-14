@@ -526,6 +526,30 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
             SchemaField { name: "result", ty: "i32" },
         ],
     },
+    SchemaMessage {
+        type_tag: 0x008C,
+        name: "SetDynamicsModel",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "mass_count", ty: "u16" },
+            SchemaField { name: "mass", ty: "array<f32>" },
+            SchemaField { name: "axes_count", ty: "u8" },
+            SchemaField { name: "viscous", ty: "array<f32>" },
+            SchemaField { name: "coulomb_fwd", ty: "array<f32>" },
+            SchemaField { name: "coulomb_rev", ty: "array<f32>" },
+            SchemaField { name: "deadband_mm_s", ty: "f32" },
+        ],
+    },
+    SchemaMessage {
+        type_tag: 0x008D,
+        name: "SetDynamicsModelResponse",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "result", ty: "i32" },
+        ],
+    },
 ];
 
 /// Bootstrap type tags that the C header must define alongside the schema

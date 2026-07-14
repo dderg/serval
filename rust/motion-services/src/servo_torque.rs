@@ -6,8 +6,8 @@ use mcu_protocol::messages::{
     ArmSensorlessEndstop, ArmSensorlessEndstopResponse, MessageKind, ResonanceBuzz,
     ResonanceBuzzResponse, RestoreDriveLimits, RestoreDriveLimitsResponse, SeedServoHome,
     SeedServoHomeResponse, SetDiffDamper, SetDiffDamperResponse, SetDiffTrim, SetDiffTrimResponse,
-    SetDriveLimits, SetDriveLimitsResponse, SetStrainComp, SetStrainCompResponse, SetTorque,
-    SetTorqueResponse, StopResponse,
+    SetDriveLimits, SetDriveLimitsResponse, SetDynamicsModel, SetDynamicsModelResponse,
+    SetStrainComp, SetStrainCompResponse, SetTorque, SetTorqueResponse, StopResponse,
 };
 
 use crate::servo_call::mcu_typed_call;
@@ -189,6 +189,24 @@ pub fn send_set_strain_comp(conn: &McuSerialConn, comp: SetStrainComp) -> Result
         MessageKind::SetStrainCompResponse,
         body,
         SET_STRAIN_COMP_TIMEOUT,
+    )?;
+    Ok(r.result)
+}
+
+const SET_DYNAMICS_MODEL_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub fn send_set_dynamics_model(
+    conn: &McuSerialConn,
+    model: SetDynamicsModel,
+) -> Result<i32, String> {
+    let body = model.encoded_to_vec();
+    let r: SetDynamicsModelResponse = mcu_typed_call(
+        conn,
+        "SetDynamicsModel",
+        MessageKind::SetDynamicsModel,
+        MessageKind::SetDynamicsModelResponse,
+        body,
+        SET_DYNAMICS_MODEL_TIMEOUT,
     )?;
     Ok(r.result)
 }

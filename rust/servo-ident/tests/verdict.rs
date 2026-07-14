@@ -127,6 +127,18 @@ fn tracking_and_grid_are_not_sweeps() {
 }
 
 #[test]
+fn dynamics_refine_defers_to_the_host_macro() {
+    let v = compute_verdict(
+        "dynamics_refine",
+        &[step_result("a", &[])],
+        &[manifest_step("a", json!({"scale": 0.95}))],
+    )
+    .unwrap();
+    assert_eq!(v.recommended_step, None);
+    assert!(v.reason.contains("SERVO_REFINE_DYNAMICS"));
+}
+
+#[test]
 fn unknown_experiment_fails_loud() {
     assert!(compute_verdict("bogus", &[], &[]).is_err());
 }

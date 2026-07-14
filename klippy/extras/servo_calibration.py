@@ -12,10 +12,16 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import subprocess
 import time
+
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Callable, overload
@@ -143,6 +149,163 @@ def validate_gain_values(values: list[int], param: str) -> list[int]:
                 "%s value %d outside drive range %d..%d" % (param, v, lo, hi)
             )
     return values
+
+
+DYNAMICS_METRIC_BY_TERM = {"MASS": "overshoot", "VISCOUS": "ferr_rms"}
+DYNAMICS_PROFILE_VECTORS = ("viscous", "coulomb_fwd", "coulomb_rev")
+GOLDEN_RATIO_CONJ = (math.sqrt(5.0) - 1.0) / 2.0
+
+
+def parse_dynamics_profile(text: str) -> dict[str, Any]:
+    if tomllib is None:
+        raise ValueError(
+            "parsing dynamics profiles requires Python 3.11+ (tomllib)"
+        )
+    data = tomllib.loads(text)
+    if data.get("version") != 1:
+        raise ValueError(
+            "profile version must be 1 (got %r)" % (data.get("version"),)
+        )
+    axes = data.get("axes")
+    if not isinstance(axes, list) or not axes:
+        raise ValueError("profile axes must be a non-empty list")
+    n = len(axes)
+    mass = data.get("mass")
+    if (
+        not isinstance(mass, list)
+        or len(mass) != n
+        or any(not isinstance(row, list) or len(row) != n for row in mass)
+    ):
+        raise ValueError("profile mass must be %dx%d" % (n, n))
+    for key in DYNAMICS_PROFILE_VECTORS:
+        vec = data.get(key)
+        if not isinstance(vec, list) or len(vec) != n:
+            raise ValueError("profile %s must list %d values" % (key, n))
+    numbers = [v for row in mass for v in row]
+    for key in DYNAMICS_PROFILE_VECTORS:
+        numbers += data[key]
+    numbers.append(data.get("coulomb_deadband_mm_s"))
+    for v in numbers:
+        if (
+            isinstance(v, bool)
+            or not isinstance(v, (int, float))
+            or not math.isfinite(v)
+        ):
+            raise ValueError(
+                "profile contains a non-numeric or non-finite value: %r" % (v,)
+            )
+    profile = {
+        "axes": [str(a) for a in axes],
+        "mass": [[float(v) for v in row] for row in mass],
+        "coulomb_deadband_mm_s": float(data["coulomb_deadband_mm_s"]),
+    }
+    for key in DYNAMICS_PROFILE_VECTORS:
+        profile[key] = [float(v) for v in data[key]]
+    return profile
+
+
+def scale_dynamics(
+    profile: dict[str, Any], term: str, scale: float
+) -> dict[str, Any]:
+    scaled = {
+        "axes": list(profile["axes"]),
+        "mass": [list(row) for row in profile["mass"]],
+        "coulomb_deadband_mm_s": profile["coulomb_deadband_mm_s"],
+    }
+    for key in DYNAMICS_PROFILE_VECTORS:
+        scaled[key] = list(profile[key])
+    if term == "MASS":
+        scaled["mass"] = [[v * scale for v in row] for row in scaled["mass"]]
+    elif term == "VISCOUS":
+        scaled["viscous"] = [v * scale for v in scaled["viscous"]]
+    else:
+        raise ValueError("unknown dynamics term %r" % (term,))
+    return scaled
+
+
+def render_dynamics_toml(
+    profile: dict[str, Any],
+    source: str,
+    term: str,
+    scale: float,
+    run_dir: str,
+) -> str:
+    def num(v: float) -> str:
+        if not math.isfinite(v):
+            raise ValueError("refusing to render non-finite value %r" % (v,))
+        return repr(float(v))
+
+    def vec(values: list[float]) -> str:
+        return "[%s]" % (", ".join(num(v) for v in values),)
+
+    lines = [
+        "version = 1",
+        "axes = %s" % (json.dumps(profile["axes"]),),
+        "mass = [%s]" % (", ".join(vec(row) for row in profile["mass"]),),
+        "viscous = %s" % (vec(profile["viscous"]),),
+        "coulomb_fwd = %s" % (vec(profile["coulomb_fwd"]),),
+        "coulomb_rev = %s" % (vec(profile["coulomb_rev"]),),
+        "coulomb_deadband_mm_s = %s" % (num(profile["coulomb_deadband_mm_s"]),),
+        "refined_source = %s" % (json.dumps(source),),
+        "refined_term = %s" % (json.dumps(term.lower()),),
+        "refined_scale = %s" % (num(scale),),
+        "refined_run = %s" % (json.dumps(run_dir),),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+class _GssBudgetExhausted(Exception):
+    pass
+
+
+def golden_section_search(
+    evaluate: Callable[[float], float],
+    lo: float,
+    hi: float,
+    tol: float,
+    max_evals: int,
+) -> tuple[float, float, list[tuple[float, float]]]:
+    """Minimize evaluate() over [lo, hi]; probes are cached on round(x, 4)
+    so re-probes are free, and the search stops once the bracket is
+    narrower than tol or max_evals distinct probes have run. Returns the
+    measured best probe (argmin over the cache), not the bracket midpoint -
+    under measurement noise the point actually measured best is the only
+    defensible pick."""
+    if not 0.0 < lo < hi:
+        raise ValueError("bracket must satisfy 0 < LO < HI")
+    if tol <= 0.0:
+        raise ValueError("TOL must be > 0")
+    if max_evals < 3:
+        raise ValueError("MAX_EVALS must be at least 3")
+    cache: dict[float, float] = {}
+
+    def probe(x: float) -> float:
+        key = round(x, 4)
+        if key in cache:
+            return cache[key]
+        if len(cache) >= max_evals:
+            raise _GssBudgetExhausted()
+        cache[key] = evaluate(key)
+        return cache[key]
+
+    a, b = lo, hi
+    try:
+        c = b - GOLDEN_RATIO_CONJ * (b - a)
+        d = a + GOLDEN_RATIO_CONJ * (b - a)
+        fc, fd = probe(c), probe(d)
+        while b - a > tol:
+            if fc <= fd:
+                b, d, fd = d, c, fc
+                c = b - GOLDEN_RATIO_CONJ * (b - a)
+                fc = probe(c)
+            else:
+                a, c, fc = c, d, fd
+                d = a + GOLDEN_RATIO_CONJ * (b - a)
+                fd = probe(d)
+    except _GssBudgetExhausted:
+        pass
+    best_scale, best_score = min(cache.items(), key=lambda kv: (kv[1], kv[0]))
+    return best_scale, best_score, sorted(cache.items())
 
 
 def _applied(servo: str, addr: str, value: int) -> dict[str, Any]:
@@ -422,6 +585,62 @@ class MotionAccelAdapter:
 
     def revert(self) -> None:
         pass
+
+
+class DynamicsModelAdapter:
+    """SERVO_REFINE_DYNAMICS: streams a scaled copy of the baseline dynamics
+    model into the running endpoint per step; revert re-sends the baseline
+    (the message is an idempotent full replacement)."""
+
+    def __init__(
+        self,
+        engine: Any,
+        handle: int,
+        baseline: dict[str, Any],
+        term: str,
+        tag: str,
+    ):
+        self._engine = engine
+        self._handle = handle
+        self.baseline = baseline
+        self.term = term
+        self.tag = tag
+        self.applied = False
+
+    def step_name(self, scale: float) -> str:
+        return "%s_%s_s%04d" % (
+            self.tag,
+            self.term.lower(),
+            round(scale * 1000),
+        )
+
+    def describe(
+        self, i: int, scale: float, total: int, servos: list[str]
+    ) -> str:
+        return "dynamics %s eval %d: scale %.4f on %s" % (
+            self.term.lower(),
+            i + 1,
+            scale,
+            ", ".join(servos),
+        )
+
+    def apply(self, scale: float) -> ApplyResult:
+        self._send(scale_dynamics(self.baseline, self.term, scale))
+        self.applied = True
+        return {"scale": scale}, []
+
+    def revert(self) -> None:
+        self._send(self.baseline)
+
+    def _send(self, profile: dict[str, Any]) -> None:
+        self._engine.set_dynamics_model(
+            self._handle,
+            [float(v) for row in profile["mass"] for v in row],
+            [float(v) for v in profile["viscous"]],
+            [float(v) for v in profile["coulomb_fwd"]],
+            [float(v) for v in profile["coulomb_rev"]],
+            float(profile["coulomb_deadband_mm_s"]),
+        )
 
 
 class SweepEngine:
@@ -782,6 +1001,7 @@ class ServoCalibration:
             "SERVO_CALIBRATE_GAINS",
             "SERVO_GAIN_LADDER",
             "SERVO_REFINE_GAIN",
+            "SERVO_REFINE_DYNAMICS",
             "SERVO_HARVEST_NOTCHES",
             "SERVO_SWEEP_INERTIA",
             "SERVO_SWEEP_ACCEL",
@@ -1003,6 +1223,37 @@ class ServoCalibration:
         raise self.printer.command_error(
             "step %r missing from results.json" % (step_name,)
         )
+
+    def _step_metric_mean(
+        self, gcmd: Any, results: dict[str, Any], step_name: str, metric: str
+    ) -> float:
+        """Mean of one per-move metric over every drive and move of the
+        named step - the refinement objective, so mean (not max): lower
+        variance under stroke noise, and constant per-drive offsets do not
+        move the argmin."""
+        bad = sorted(
+            set(self._step_flags(results, step_name)) & VERDICT_ABORT_FLAGS
+        )
+        if bad:
+            raise gcmd.error(
+                "step %s flagged %s - aborting refinement" % (step_name, bad)
+            )
+        for step in results.get("steps") or []:
+            if step.get("name") != step_name:
+                continue
+            values = [
+                move[metric]
+                for drive in (step.get("drives") or {}).values()
+                for move in (drive.get("metrics") or {}).get("moves") or []
+                if metric in move
+            ]
+            if not values:
+                raise gcmd.error(
+                    "step %s carries no %r move metrics in results.json"
+                    % (step_name, metric)
+                )
+            return sum(values) / len(values)
+        raise gcmd.error("step %r missing from results.json" % (step_name,))
 
     def _step_flags(self, results: dict[str, Any], step_name: str) -> list[str]:
         for step in results.get("steps") or []:
@@ -2558,6 +2809,225 @@ class ServoCalibration:
         finally:
             self._active_run = None
         return steps
+
+    cmd_SERVO_REFINE_DYNAMICS_help = (
+        "Empirically refine the torque-feedforward dynamics profile on the "
+        "RUNNING endpoint: golden-section search over a scale factor on the "
+        "baseline profile's mass matrix (TERM=MASS, scored on mean "
+        "overshoot - use a high ACCEL) or viscous vector (TERM=VISCOUS, "
+        "scored on mean ferr_rms - use a high SPEED and a long stroke), one "
+        "tracking capture per candidate. The baseline is PROFILE= or the "
+        "node-level [ethercat_node] dynamics_profile (per-motor profiles "
+        "are not supported). The live model is ALWAYS restored to the "
+        "baseline afterwards (also on failure; if klippy dies mid-run the "
+        "endpoint keeps the last candidate until restart). When a scale "
+        "beats 1.0 the scaled profile is written to a new TOML - pointing "
+        "dynamics_profile at it (then RESTART) is the only way to keep it. "
+        "Params TERM (MASS) AXIS (X) SERVO PROFILE LO (0.7) HI (1.3) TOL "
+        "(0.02) MAX_EVALS (10) START END SPEED ACCEL ITERATIONS DWELL_MS "
+        "TAG (refdyn) NAME"
+    )
+
+    def _refine_dynamics_node(self, gcmd: Any, servos: list[str]) -> Any:
+        nodes = {}
+        for servo in servos:
+            node, _slot = self._resolve_node_slot(servo)
+            nodes[node.name] = node
+        if len(nodes) != 1:
+            raise gcmd.error(
+                "servos %s span multiple ethercat nodes (%s) - the dynamics "
+                "model is per-node" % (servos, sorted(nodes))
+            )
+        return nodes.popitem()[1]
+
+    def _load_baseline_dynamics(
+        self, gcmd: Any, node: Any
+    ) -> tuple[str, dict[str, Any]]:
+        profile_path = gcmd.get("PROFILE", None) or node.get_dynamics_profile()
+        if profile_path is None:
+            raise gcmd.error(
+                "no baseline dynamics profile - set dynamics_profile on "
+                "[ethercat_node %s] or pass PROFILE= (per-motor profiles "
+                "are not supported by SERVO_REFINE_DYNAMICS)" % (node.name,)
+            )
+        profile_path = os.path.expanduser(profile_path)
+        try:
+            with open(profile_path) as f:
+                baseline = parse_dynamics_profile(f.read())
+        except (OSError, ValueError) as e:
+            raise gcmd.error(
+                "failed to load dynamics profile %s: %s" % (profile_path, e)
+            )
+        if len(baseline["axes"]) != node.get_drive_count():
+            raise gcmd.error(
+                "profile %s describes %d axes but node %s has %d drives"
+                % (
+                    profile_path,
+                    len(baseline["axes"]),
+                    node.name,
+                    node.get_drive_count(),
+                )
+            )
+        return profile_path, baseline
+
+    def cmd_SERVO_REFINE_DYNAMICS(self, gcmd: Any) -> None:
+        if tomllib is None:
+            raise gcmd.error(
+                "SERVO_REFINE_DYNAMICS requires Python 3.11+ (tomllib)"
+            )
+        term = gcmd.get("TERM", "MASS").upper()
+        if term not in DYNAMICS_METRIC_BY_TERM:
+            raise gcmd.error(
+                "TERM must be MASS or VISCOUS (got %r)"
+                % (gcmd.get("TERM", ""),)
+            )
+        axis = gcmd.get("AXIS", "X").upper()
+        servos = self._servos(gcmd, axis)
+        node = self._refine_dynamics_node(gcmd, servos)
+        handle = node.get_engine_handle()
+        if handle is None:
+            raise gcmd.error(
+                "ethercat_node %s has no engine handle" % (node.name,)
+            )
+        engine = self.printer.lookup_object("motion_engine")
+        profile_path, baseline = self._load_baseline_dynamics(gcmd, node)
+        start, end = servo_strokes.axis_bounds(gcmd, self.bounds, axis)
+        speed = gcmd.get_float("SPEED", 100.0, above=0.0)
+        accel = gcmd.get_float("ACCEL", 3000.0, above=0.0)
+        iterations = gcmd.get_int("ITERATIONS", 3, minval=1)
+        dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
+        tag = gcmd.get("TAG", "refdyn")
+        name = gcmd.get("NAME", "refined_%s" % (term.lower(),))
+        lo = gcmd.get_float("LO", 0.7, above=0.0)
+        hi = gcmd.get_float("HI", 1.3)
+        tol = gcmd.get_float("TOL", 0.02, above=0.0)
+        max_evals = gcmd.get_int("MAX_EVALS", 10, minval=3)
+        if not lo < 1.0 < hi:
+            raise gcmd.error(
+                "bracket [LO, HI] = [%g, %g] must contain 1.0 strictly - "
+                "the search is centered on the baseline" % (lo, hi)
+            )
+        metric = DYNAMICS_METRIC_BY_TERM[term]
+        stroke_plan = {
+            "start": start,
+            "end": end,
+            "speed": speed,
+            "accel": accel,
+            "iterations": iterations,
+            "dwell_ms": dwell,
+        }
+        run = self._begin_run(
+            gcmd,
+            "dynamics_refine",
+            tag,
+            axis,
+            servos,
+            stroke_plan,
+            self._corexy_rails(gcmd, axis),
+        )
+        run.manifest["dynamics_refine"] = {
+            "baseline_profile": profile_path,
+            "term": term.lower(),
+            "metric": metric,
+            "bracket": [lo, hi],
+            "tol": tol,
+            "max_evals": max_evals,
+        }
+        run.write()
+        adapter = DynamicsModelAdapter(engine, handle, baseline, term, tag)
+        scores: dict[float, float] = {}
+
+        def evaluate(scale: float) -> float:
+            key = round(scale, 4)
+            if key in scores:
+                return scores[key]
+            step = self._engine.run_one(
+                adapter,
+                len(scores),
+                key,
+                max_evals + 1,
+                servos,
+                lambda _s: self._strokes(
+                    axis, start, end, speed, accel, iterations, dwell
+                ),
+                gcmd,
+            )
+            results = self._run_analyze(gcmd, run)
+            score = self._step_metric_mean(gcmd, results, step.name, metric)
+            gcmd.respond_info(
+                "scale %.4f -> mean %s %.1f counts" % (key, metric, score)
+            )
+            scores[key] = score
+            return score
+
+        try:
+            out_path = self._dynamics_out_path(gcmd, run, name)
+            self._prep(axis, dwell)
+            baseline_score = evaluate(1.0)
+            best_scale, best_score, _probes = golden_section_search(
+                evaluate, lo, hi, tol, max_evals
+            )
+            if baseline_score <= best_score:
+                best_scale, best_score = 1.0, baseline_score
+        finally:
+            try:
+                if adapter.applied:
+                    adapter.revert()
+                    gcmd.respond_info(
+                        "live dynamics model restored to baseline %s"
+                        % (profile_path,)
+                    )
+            finally:
+                self._restore()
+                self._active_run = None
+        for scale, score in sorted(scores.items()):
+            marker = "  <- best" if scale == round(best_scale, 4) else ""
+            gcmd.respond_info(
+                "  scale %.4f: mean %s %.1f%s" % (scale, metric, score, marker)
+            )
+        structured_log.event(
+            "calibration",
+            "dynamics_refined",
+            run_dir=run.run_dir,
+            term=term.lower(),
+            metric=metric,
+            best_scale=best_scale,
+            best_score=best_score,
+            baseline_score=baseline_score,
+            evals=len(scores),
+        )
+        if best_scale == 1.0:
+            gcmd.respond_info(
+                "baseline already optimal within the bracket (mean %s %.1f) "
+                "- no profile written | run %s"
+                % (metric, baseline_score, run.run_dir)
+            )
+            return
+        with open(out_path, "w") as f:
+            f.write(
+                render_dynamics_toml(
+                    scale_dynamics(baseline, term, best_scale),
+                    profile_path,
+                    term,
+                    best_scale,
+                    run.run_dir,
+                )
+            )
+        gcmd.respond_info(
+            "%s scale %.4f wins: mean %s %.1f -> %.1f counts | refined "
+            "profile: %s | point [ethercat_node %s] dynamics_profile at it "
+            "and RESTART | run %s"
+            % (
+                term.lower(),
+                best_scale,
+                metric,
+                baseline_score,
+                best_score,
+                out_path,
+                node.name,
+                run.run_dir,
+            )
+        )
 
     cmd_SERVO_SWEEP_INERTIA_help = (
         "Empirical inertia sweep, gain-sweep style. Resolves every servo "

@@ -488,6 +488,12 @@ pub fn compute_verdict(
             flags: Vec::new(),
             apply: None,
         }),
+        "dynamics_refine" => Ok(Verdict {
+            recommended_step: None,
+            reason: "scale pick is computed host-side by SERVO_REFINE_DYNAMICS".to_string(),
+            flags: Vec::new(),
+            apply: None,
+        }),
         "differential" => {
             let first = steps
                 .first()

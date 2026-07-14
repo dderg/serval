@@ -50,7 +50,15 @@ fn mcu_log_is_event_kind() {
         MessageKind::from_u16(0x008B),
         Some(MessageKind::SetDiffTrimResponse)
     );
-    assert_eq!(MessageKind::from_u16(0x008C), None);
+    assert_eq!(
+        MessageKind::from_u16(0x008C),
+        Some(MessageKind::SetDynamicsModel)
+    );
+    assert_eq!(
+        MessageKind::from_u16(0x008D),
+        Some(MessageKind::SetDynamicsModelResponse)
+    );
+    assert_eq!(MessageKind::from_u16(0x008E), None);
 }
 
 #[test]
