@@ -77,9 +77,6 @@ void runtime_emit_xdirect(struct Runtime *rt, uint8_t axis_idx, int32_t offset_s
 
 int32_t runtime_gate_pieces(struct Runtime *rt);
 
-/* 1 if piece intake is currently gated, 0 if not, negative on error. */
-int32_t runtime_pieces_gated(struct Runtime *rt);
-
 int32_t runtime_get_heartbeat(struct Runtime *rt,
                               uint8_t *out_engine_state,
                               uint16_t *out_fault_code,
@@ -121,6 +118,8 @@ int32_t runtime_phase_jog_to(struct Runtime *rt,
                              uint8_t stepper_oid,
                              uint16_t target_phase,
                              uint16_t max_microsteps_per_sample);
+
+int32_t runtime_pieces_gated(struct Runtime *rt);
 
 int32_t runtime_query_motor_state(struct Runtime *rt,
                                   uint8_t *out_slots,
