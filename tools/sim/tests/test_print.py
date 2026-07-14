@@ -33,7 +33,7 @@ def test_motion_state_query_mid_move(sim_world):
 
     world.mark_log()
     world.gcode_ok("MCU_SIM_MOTION_STATE T_AGO=1.0", timeout=15)
-    out = world.log_tail()
+    out = world.expect_log("x: pos=")
     m = re.search(r"x: pos=([0-9.eE+-]+) vel=([0-9.eE+-]+)", out)
     assert m, f"no x-axis state in response: {out!r}"
     pos, vel = float(m.group(1)), float(m.group(2))

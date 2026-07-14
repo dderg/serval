@@ -121,11 +121,15 @@ def test_probe_multi_point_tools(sim_world):
     world.gcode_ok("FORCE_MOVE STEPPER=z DISTANCE=0.5 VELOCITY=5", timeout=60)
     world.gcode_ok("PROBE", timeout=90)
     shifted_z = _last_probe_z(world.expect_log(" is z="))
-    assert baseline_z - shifted_z == pytest.approx(0.5, abs=0.1), (
-        "FORCE_MOVE must shift the physical frame by exactly its distance; "
-        "adjacent probes are compared so the load-dependent late-execution "
-        "bias each reading carries (per the sim-vtime-crawl handoff, "
-        "046bff102) cancels out"
+    # Tolerances bound the sim's per-trip measurement noise, not the frame
+    # bookkeeping under test: each reading is stamped at the midpoint of
+    # the two endstop polls that bracket the trip, so it carries a
+    # symmetric error of half the poll-observation gap x probe speed —
+    # tens of microns idle, up to ~75 um per probe on a loaded host. The
+    # frame bugs this test exists for (per-probe drift, halt-clock skew)
+    # were 0.2-0.5 mm and systematic.
+    assert baseline_z - shifted_z == pytest.approx(0.5, abs=0.2), (
+        "FORCE_MOVE must shift the physical frame by exactly its distance"
     )
 
     world.mark_log()
@@ -135,7 +139,7 @@ def test_probe_multi_point_tools(sim_world):
     world.mark_log()
     world.gcode_ok("PROBE", timeout=90)
     rebased_z = _last_probe_z(world.expect_log(" is z="))
-    assert rebased_z == pytest.approx(1.5, abs=0.1), (
+    assert rebased_z == pytest.approx(1.5, abs=0.2), (
         "probe height must be frame-consistent after the common-mode rebase"
     )
     assert world.shutdown_line() is None

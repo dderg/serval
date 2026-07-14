@@ -79,6 +79,15 @@ pub unsafe extern "C" fn runtime_gate_pieces(rt: *mut Runtime) -> i32 {
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn runtime_pieces_gated(rt: *mut Runtime) -> i32 {
+    let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
+    unsafe {
+        let isr_ptr: *mut IsrState = UnsafeCell::raw_get(core::ptr::addr_of!((*ctx).isr));
+        i32::from((*isr_ptr).engine.pieces_gated())
+    }
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn runtime_ungate_pieces(rt: *mut Runtime) -> i32 {
     let ctx = guarded_ctx!(rt, RUNTIME_ERR_NULL_PTR, RUNTIME_ERR_NOT_INIT);
     unsafe {

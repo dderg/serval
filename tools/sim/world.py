@@ -224,6 +224,21 @@ class SimWorld:
                 self._start_beacon()
 
         cfg_path = self.workdir / "printer.cfg"
+        if "[danger_options]" not in config_text:
+            # Homing trip deadlines are wall-clock budgets sized for
+            # real-time motion. Virtual time legally runs slower than real
+            # time under load (pacer floors), so give every sim world the
+            # slack to stay a trip-detection guard without becoming a
+            # host-scheduling lottery. Inserted before any autosave block —
+            # that section must stay at the end of the file.
+            danger = "\n[danger_options]\nhoming_trip_deadline_margin: 30\n"
+            marker = config_text.find("#*#")
+            if marker == -1:
+                config_text += danger
+            else:
+                config_text = (
+                    config_text[:marker] + danger + "\n" + config_text[marker:]
+                )
         cfg_path.write_text(config_text)
         self._spawn_klippy(cfg_path)
 
@@ -376,6 +391,7 @@ class SimWorld:
             self.beacon_pty,
             log_path=str(self.log_dir / "beacon_traffic.log"),
             step_sock_path=z_mcu.sim_control,
+            vtime_shm_name=self.vtime_shm_name,
         )
         self.beacon.start_sample_stream(z_target_mm=10.0, rate_hz=200)
 
@@ -387,6 +403,9 @@ class SimWorld:
         # advances time).
         if self.mcus:
             env["MCU_SIM_SOCK_DIR"] = str(self.mcus[0].sock_dir)
+        # No preload, but sim-only extras (sim_remote_endstop) read the
+        # virtual clock word directly to time emulated physical events.
+        env["VTIME_SHM_NAME"] = self.vtime_shm_name
         third_party = self.repo_root / "tools" / "sim" / "third_party_repos"
         beacon_repo = third_party / "beacon_klipper"
         if beacon_repo.exists():

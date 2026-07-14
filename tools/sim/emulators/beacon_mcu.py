@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import mmap
 import os
 import pty
 import select
@@ -52,7 +53,18 @@ class BeaconMcuStub:
         z_steps_per_mm: float = 800.0,
         z_step_line: int = 15,
         z_step_sign: int = 1,
+        vtime_shm_name: Optional[str] = None,
     ) -> None:
+        # The stub's MCU clock must tick with the world's virtual clock,
+        # not the wall clock: virtual time legally slips against real time
+        # (pacer floors hold it while the motion tick catches up), and this
+        # clock is what klippy's clocksync maps trigger clocks through. A
+        # wall-clock stub drifts against the steppers by the accumulated
+        # slip, which lands reconstructed contact positions seconds away.
+        self._vtime_map: Optional[mmap.mmap] = None
+        if vtime_shm_name:
+            with open("/dev/shm" + vtime_shm_name, "r+b") as f:
+                self._vtime_map = mmap.mmap(f.fileno(), 8)
         self._pty_path = pty_path
         self._log_path = log_path
         self._step_sock_path = step_sock_path
@@ -99,10 +111,10 @@ class BeaconMcuStub:
         self._accel_thread: Optional[threading.Thread] = None
         self._accel_clock_at_last_emit: int = 0
         self._sample_index: int = 0
-        self._clock_origin = time.monotonic()
+        self._clock_origin = self._monotonic()
 
         self._homing_trigger_delay: float = 0.5
-        self._homing_trigger_timer: Optional[threading.Timer] = None
+        self._homing_trigger_timer: Optional[threading.Event] = None
         self._contact_homing_active: bool = False
         self._contact_armed_clock: int = 0
         self._contact_trsync_oid: int = 0
@@ -112,7 +124,7 @@ class BeaconMcuStub:
         self._contact_trigger_freq: int = 0
         self._contact_triggered: bool = False
         self.contact_latch_commit_delay: float = 0.0
-        self._contact_latch_timer: Optional[threading.Timer] = None
+        self._contact_latch_timer: Optional[threading.Event] = None
 
         self._z_current: float = 10.0
         self._prev_poll_time: Optional[float] = None
@@ -259,7 +271,7 @@ class BeaconMcuStub:
                 sock = None
                 continue
             if line.startswith(b"steps="):
-                sampled_at = time.monotonic()
+                sampled_at = self._monotonic()
                 steps = int(line[6:])
                 self._steps_now = steps
                 if self._z_line_locked and not self._step_tracking:
@@ -293,15 +305,38 @@ class BeaconMcuStub:
             return sampled_at
         return prev_t + (sampled_at - prev_t) * prev_z / (prev_z - z)
 
+    def _monotonic(self) -> float:
+        if self._vtime_map is not None:
+            return struct.unpack_from("<Q", self._vtime_map, 0)[0] / 1e9
+        return time.monotonic()
+
+    def _start_virtual_timer(self, delay_s: float, fn) -> threading.Event:
+        """threading.Timer on the virtual clock: these delays emulate
+        physical latencies, so they must elapse with the simulated world,
+        not the wall clock. Returns the cancel event."""
+        cancelled = threading.Event()
+        deadline = self._monotonic() + delay_s
+
+        def poll() -> None:
+            while not cancelled.is_set() and not self._stop.is_set():
+                if self._monotonic() >= deadline:
+                    if not cancelled.is_set():
+                        fn()
+                    return
+                time.sleep(0.002)
+
+        threading.Thread(target=poll, daemon=True).start()
+        return cancelled
+
     def _now_clock(self) -> int:
-        return self._clock_at(time.monotonic())
+        return self._clock_at(self._monotonic())
 
     def _clock_at(self, monotonic_time: float) -> int:
         elapsed = monotonic_time - self._clock_origin
         return int(elapsed * CLOCK_FREQ) & 0xFFFFFFFF
 
     def _now_clock_high(self) -> int:
-        elapsed = time.monotonic() - self._clock_origin
+        elapsed = self._monotonic() - self._clock_origin
         return (int(elapsed * CLOCK_FREQ) >> 32) & 0xFFFFFFFF
 
     def _send_msg(self, msgformat: str, **kwargs) -> None:
@@ -522,7 +557,7 @@ class BeaconMcuStub:
             if not self._step_tracking:
                 self._z_current = APPROACH_FROM_ABOVE_Z_MM
             self._homing_start_z = self._z_current
-            self._homing_start_time = time.monotonic()
+            self._homing_start_time = self._monotonic()
             self._home_active = True
             self._start_homing_monitor()
         logging.info(
@@ -552,7 +587,7 @@ class BeaconMcuStub:
         while not self._stop.is_set() and self._home_active:
             time.sleep(period)
             if not self._step_tracking:
-                elapsed = time.monotonic() - self._homing_start_time
+                elapsed = self._monotonic() - self._homing_start_time
                 self._z_current = max(
                     0.0,
                     self._homing_start_z
@@ -607,14 +642,12 @@ class BeaconMcuStub:
         self._contact_trigger_reason = params["trigger_reason"]
 
         if self._homing_trigger_timer is not None:
-            self._homing_trigger_timer.cancel()
+            self._homing_trigger_timer.set()
         step_tracking_will_fire_at_bed_contact = self._step_thread is not None
         if not step_tracking_will_fire_at_bed_contact:
-            self._homing_trigger_timer = threading.Timer(
+            self._homing_trigger_timer = self._start_virtual_timer(
                 self._homing_trigger_delay, self._fire_contact_trigger
             )
-            self._homing_trigger_timer.daemon = True
-            self._homing_trigger_timer.start()
 
     def _fire_contact_trigger(
         self, trigger_time: Optional[float] = None
@@ -625,11 +658,9 @@ class BeaconMcuStub:
         if self.contact_latch_commit_delay <= 0.0:
             self._contact_triggered = True
         else:
-            self._contact_latch_timer = threading.Timer(
+            self._contact_latch_timer = self._start_virtual_timer(
                 self.contact_latch_commit_delay, self._commit_contact_latch
             )
-            self._contact_latch_timer.daemon = True
-            self._contact_latch_timer.start()
         self._contact_trigger_clock = (
             self._now_clock()
             if trigger_time is None
@@ -665,10 +696,10 @@ class BeaconMcuStub:
     def _handle_beacon_contact_stop_home(self, params: dict) -> None:
         self._contact_homing_active = False
         if self._homing_trigger_timer is not None:
-            self._homing_trigger_timer.cancel()
+            self._homing_trigger_timer.set()
             self._homing_trigger_timer = None
         if self._contact_latch_timer is not None:
-            self._contact_latch_timer.cancel()
+            self._contact_latch_timer.set()
             self._contact_latch_timer = None
 
     def _handle_beacon_contact_query(self, params: dict) -> None:
