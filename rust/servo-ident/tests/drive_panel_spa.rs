@@ -113,6 +113,7 @@ fn app_js_defines_the_sweep_metrics_chart_functions() {
         "function sweptAxisKey(",
         "function sweepMetricsSeries(",
         "function renderSweepMetricsChart(",
+        "function motorViewPerMotor(",
         "sweep-metrics-chart",
     ];
     for needle in required {
