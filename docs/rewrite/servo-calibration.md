@@ -365,7 +365,14 @@ Empirical refinement of an existing dynamics profile, for when the
 `SERVO_FIT_DYNAMICS` regression differs run-to-run with the excitation
 grid. Golden-section search over a scale factor applied to the baseline
 profile's per-mode **mass** (`TERM=MASS`, default), **viscous**
-(`TERM=VISCOUS`) or **coulomb** (`TERM=COULOMB`) vector: each candidate
+(`TERM=VISCOUS`) or **coulomb** (`TERM=COULOMB`) vector, or the pair
+load-share coefficients (`TERM=SPLIT`: one sequential phase per belt
+pair, each scaling that pair's six `[[pair]]` coefficients and scored on
+mean ferr_peak over **that pair's drives only** — the split moves error
+between pair mates while leaving the pair total invariant, so a
+whole-machine mean would wash the signal out; scale 0 would mean no
+split feedforward, so the search also doubles as an on-machine test that
+the fitted split helps at all): each candidate
 model is streamed into the *running*
 endpoint (no restart) and measured with one tracking capture of the full
 `SERVO_MEASURE_INERTIA` `ACCELS` × `SPEEDS` grid, then scored from
@@ -412,7 +419,9 @@ keys — `refined_scale_x`/`refined_scale_y` for the sequential corexy mass
 refine — never overwriting) and the `dynamics_profile` paste line is printed
 — config edit + restart is the only way to keep it; when the baseline
 wins, nothing is written. Refine `MASS` first, then `TERM=VISCOUS`
-against the refined profile, then `TERM=COULOMB` against that. Params: `TERM` (MASS) `AXIS`
+against the refined profile, then `TERM=COULOMB` against that, then
+optionally `TERM=SPLIT` last — the split rides on the other terms'
+forces, so refine it against their final values. Params: `TERM` (MASS) `AXIS`
 (X) `SERVOS` `PROFILE` `LO` (0.7) `HI` (1.3) `TOL` (0.02) `MAX_EVALS` (10)
 `START` `END` `X_START` `X_END` `Y_START` `Y_END` `ACCELS` `SPEEDS`
 `ITERATIONS` `DWELL_MS` `TAG` (refdyn) `NAME` (refined_<term>).

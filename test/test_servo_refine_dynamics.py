@@ -795,3 +795,160 @@ def test_refine_dynamics_rejects_bad_term_and_bracket():
     with pytest.raises(RuntimeError, match="must contain 1.0"):
         sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(AXIS="X", LO=1.05, HI=1.3))
     assert engine.dynamics_calls == []
+
+
+def test_scale_dynamics_pair_scales_only_that_pair():
+    p = servo_calibration.parse_dynamics_profile(AWD_TOML)
+    s = servo_calibration.scale_dynamics_pair(p, 0, 2.0)
+    assert s["pairs"][0]["split"] == [w * 2.0 for w in p["pairs"][0]["split"]]
+    assert s["pairs"][1]["split"] == p["pairs"][1]["split"]
+    assert s["mass"] == p["mass"]
+    assert s["viscous"] == p["viscous"]
+    assert s["coulomb"] == p["coulomb"]
+
+
+def _make_awd_rail(names, node_name, axis):
+    motors = []
+    for name in names:
+        m = servo_axis.ServoMotor.__new__(servo_axis.ServoMotor)
+        m.motor_name = name
+        m.node_name = node_name
+        m.invert_direction = False
+        m.chain_index = 0
+        m.rotation_distance = 40.0
+        m.encoder_counts_per_rev = 131072
+        motors.append(m)
+    rail = servo_axis.ServoRail.__new__(servo_axis.ServoRail)
+    rail.name = "servo " + axis
+    rail.axis = axis
+    rail.motors = motors
+    return rail
+
+
+def make_calibration_awd(minima=(0.9, 1.15), off_pair_min=1.3):
+    """The fake analyzer gives each split phase's own pair a ferr_peak
+    minimum at its minima entry, and the OTHER pair an adversarial minimum
+    at off_pair_min - if the per-pair drive filter broke and the score
+    averaged every drive, the found best would drift off the minima."""
+    gcode = FakeGcode()
+    rails = [
+        _make_awd_rail(["motor_a", "motor_a1"], "drive_all", "x"),
+        _make_awd_rail(["motor_b", "motor_b1"], "drive_all", "y"),
+    ]
+    engine = FakeEngine()
+    fd, profile_path = tempfile.mkstemp(suffix=".toml")
+    with os.fdopen(fd, "w") as f:
+        f.write(AWD_TOML)
+    objs = {
+        "gcode": gcode,
+        "toolhead": FakeToolhead(FakeKin(rails)),
+        "motion_engine": engine,
+        "servo_capture": FakeServoCapture(),
+        "ethercat_node drive_all": FakeNode(
+            "drive_all",
+            1,
+            {"motor_a": 0, "motor_a1": 1, "motor_b": 2, "motor_b1": 3},
+            profile_path,
+        ),
+    }
+    sc = servo_calibration.ServoCalibration(FakeConfig(FakePrinter(objs)))
+    sc.captures_root = tempfile.mkdtemp()
+    sc.dynamics_dir = tempfile.mkdtemp()
+    sc.servo_cal_binary = sys.executable
+    sc._prep = lambda *a, **k: None
+    sc._strokes = lambda *a, **k: None
+    sc._restore = lambda *a, **k: None
+    sc._goto_xy = lambda *a, **k: None
+
+    def move_for(mini, scale):
+        return {
+            "move": 0,
+            "ferr_peak": 500.0 + 3000.0 * (scale - mini) ** 2,
+            "ferr_rms": 100.0 + 2000.0 * (scale - mini) ** 2,
+            "overshoot": 40.0 + 5000.0 * (scale - mini) ** 2,
+            "settle_ms": 10.0,
+            "settle_window_truncated": False,
+        }
+
+    def fake_run(gcmd, argv, timeout):
+        gcode.scripts.append(("RUN", argv, timeout))
+        if argv[1] != "analyze":
+            return
+        run_dir = argv[2]
+        with open(os.path.join(run_dir, "manifest.json")) as f:
+            manifest = json.load(f)
+        steps = []
+        for step in manifest["steps"]:
+            scale = step["swept"].get("scale", 1.0)
+            if "split_motor_a" in step["name"]:
+                pair_a, pair_b = minima[0], off_pair_min
+            elif "split_motor_b" in step["name"]:
+                pair_a, pair_b = off_pair_min, minima[1]
+            else:
+                pair_a = pair_b = 1.0
+            steps.append(
+                {
+                    "name": step["name"],
+                    "flags": [],
+                    "drives": {
+                        "motor_a": {
+                            "metrics": {"moves": [move_for(pair_a, scale)]}
+                        },
+                        "motor_a1": {
+                            "metrics": {"moves": [move_for(pair_a, scale)]}
+                        },
+                        "motor_b": {
+                            "metrics": {"moves": [move_for(pair_b, scale)]}
+                        },
+                        "motor_b1": {
+                            "metrics": {"moves": [move_for(pair_b, scale)]}
+                        },
+                    },
+                }
+            )
+        results = {
+            "steps": steps,
+            "verdict": {"reason": "host-side", "flags": []},
+        }
+        with open(os.path.join(run_dir, "results.json"), "w") as f:
+            json.dump(results, f)
+
+    sc._run = fake_run
+    return sc, gcode, engine, profile_path
+
+
+def test_refine_dynamics_split_requires_pairs():
+    sc, _gcode, engine, _path = make_calibration()
+    with pytest.raises(RuntimeError, match="no \\[\\[pair\\]\\] tables"):
+        sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(AXIS="X", TERM="SPLIT"))
+    assert engine.dynamics_calls == []
+
+
+def test_refine_dynamics_split_refines_each_pair_on_its_own_drives():
+    sc, gcode, engine, profile_path = make_calibration_awd()
+    sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(TERM="SPLIT"))
+    profiles = _written_profiles(sc)
+    assert len(profiles) == 1
+    with open(profiles[0], "rb") as f:
+        raw = tomllib.load(f)
+    assert raw["refined_term"] == "split"
+    sa = raw["refined_scale_motor_a"]
+    sb = raw["refined_scale_motor_b"]
+    assert abs(sa - 0.9) < 0.03, sa
+    assert abs(sb - 1.15) < 0.03, sb
+    base = servo_calibration.parse_dynamics_profile(AWD_TOML)
+    for written, pair, scale in zip(raw["pair"], base["pairs"], (sa, sb)):
+        got = (
+            written["split_inertial"]
+            + written["split_viscous"]
+            + written["split_coulomb"]
+        )
+        assert got == pytest.approx([w * scale for w in pair["split"]])
+    assert raw["mass"] == pytest.approx(base["mass"])
+    assert raw["viscous"] == pytest.approx(base["viscous"])
+    assert raw["coulomb"] == pytest.approx(base["coulomb"])
+    last = engine.dynamics_calls[-1]
+    assert last[5] == [0, 1, 2, 3]
+    assert last[6] == pytest.approx(
+        base["pairs"][0]["split"] + base["pairs"][1]["split"]
+    )
