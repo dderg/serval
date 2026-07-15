@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, overload
 
 from .. import structured_log
-from . import servo_param, servo_strokes
+from . import servo_param, servo_strain_comp, servo_strokes
 
 ApplyResult = tuple[Mapping[str, float], list[dict[str, Any]]]
 VERDICT_ABORT_FLAGS = frozenset({"torque_saturated", "resonance_detected"})
@@ -97,6 +97,10 @@ SPEED_GAIN_MAX = min(
 
 
 INERTIA_RATIO_ADDR = "0x2000.0x07"
+C00_06_INERTIA_RATIO_MAX = 12000
+
+C00_05_STIFFNESS_LEVEL_MIN = 1
+C00_05_STIFFNESS_LEVEL_MAX = 31
 
 NOTCH_MODE_ADDR = "0x2001.0x31"
 NOTCH_READBACK: tuple[tuple[str, tuple[str, str, str]], ...] = (
@@ -1894,7 +1898,7 @@ class ServoCalibration:
         clamp_um = gcmd.get_float(
             "CLAMP_UM", 150.0, above=0.0, maxval=self.MAX_TRIM_CLAMP_UM
         )
-        lpf_hz = gcmd.get_float("LPF_HZ", 25.0, minval=1.0, maxval=100.0)
+        lpf_hz = gcmd.get_float("LPF_HZ", 25.0, above=0.0)
         engine = self.printer.lookup_object("motion_engine")
         for belt in belts:
             pair_names, _motors, handle, slots = self._belt_pair(
@@ -1924,7 +1928,7 @@ class ServoCalibration:
             else:
                 gcmd.respond_info("belt %s trim disarmed" % (belt,))
 
-    STRAIN_MAP_MIN_LINE_SPACING_MM = 2.0
+    STRAIN_MAP_MIN_LINE_SPACING_MM = servo_strain_comp.MIN_LINE_SPACING_MM
 
     cmd_SERVO_MEASURE_STRAIN_MAP_help = (
         "Raster the bed with slow constant-speed strokes, one capture per "
@@ -2042,6 +2046,7 @@ class ServoCalibration:
             self._active_run = None
 
     STRAIN_RESPONSE_STEPS = (0.0, 1.0, -1.0, 2.0, -2.0)
+    MAX_STRAIN_STEP_UM = servo_strain_comp.MAX_STRAIN_STEP_UM
 
     cmd_SERVO_MEASURE_STRAIN_RESPONSE_help = (
         "Measure the belt stiffness matrix in the rolling regime — the one "
@@ -2077,8 +2082,10 @@ class ServoCalibration:
         )
         speed = gcmd.get_float("SPEED", 50.0, above=0.0)
         accel = gcmd.get_float("ACCEL", 1000.0, above=0.0)
-        step_um = gcmd.get_float("STEP_UM", 50.0, above=0.0, maxval=200.0)
-        settle = gcmd.get_float("SETTLE", 0.8, above=0.0, maxval=5.0)
+        step_um = gcmd.get_float(
+            "STEP_UM", 50.0, above=0.0, maxval=self.MAX_STRAIN_STEP_UM
+        )
+        settle = gcmd.get_float("SETTLE", 0.8, above=0.0)
         dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
         tag = gcmd.get("TAG", "strainresp")
         zero_sync = gcmd.get_int("SYNC", 1, minval=0, maxval=1) == 1
@@ -2188,14 +2195,14 @@ class ServoCalibration:
                 "SERVO_STRAIN_COMP_TUNE needs [servo_strain_comp] "
                 "configured - it builds and applies the map"
             )
-        spacing = gcmd.get_float("SPACING", None, above=2.0, maxval=100.0)
+        spacing = gcmd.get_float(
+            "SPACING", None, minval=self.STRAIN_MAP_MIN_LINE_SPACING_MM
+        )
         speed = gcmd.get_float("SPEED", 50.0, above=0.0)
         accel = gcmd.get_float("ACCEL", 1000.0, above=0.0)
-        settle = gcmd.get_float("SETTLE", 0.8, above=0.0, maxval=5.0)
+        settle = gcmd.get_float("SETTLE", 0.8, above=0.0)
         tol = gcmd.get_float("TOL", 0.05, above=0.0, below=0.5)
-        max_iters = gcmd.get_int(
-            "MAX_ITERS", self.TUNE_MAX_ITERS, minval=1, maxval=10
-        )
+        max_iters = gcmd.get_int("MAX_ITERS", self.TUNE_MAX_ITERS, minval=1)
         dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
         tag = gcmd.get("TAG", "straintune")
         zero_sync = gcmd.get_int("SYNC", 1, minval=0, maxval=1) == 1
@@ -2663,7 +2670,7 @@ class ServoCalibration:
 
     def cmd_SERVO_SET_INERTIA_RATIO(self, gcmd: Any) -> None:
         servo = self._servo(gcmd)
-        ratio = gcmd.get_int("RATIO", minval=0, maxval=12000)
+        ratio = gcmd.get_int("RATIO", minval=0, maxval=C00_06_INERTIA_RATIO_MAX)
         self.gcode.run_script_from_command(
             "SERVO_PARAM SERVO=%s SET=%s VALUE=%d TYPE=u16"
             % (servo, INERTIA_RATIO_ADDR, ratio)
@@ -3508,9 +3515,10 @@ class ServoCalibration:
         ratios: list[int] = []
         for r in self._floats(gcmd.get("RATIOS", "40,70,100,130")):
             rv = int(r)
-            if not 0 <= rv <= 12000:
+            if not 0 <= rv <= C00_06_INERTIA_RATIO_MAX:
                 raise gcmd.error(
-                    "ratio %d outside C00.06 range 0..12000 (%%)" % (rv,)
+                    "ratio %d outside C00.06 range 0..%d (%%)"
+                    % (rv, C00_06_INERTIA_RATIO_MAX)
                 )
             if rv not in ratios:
                 ratios.append(rv)
@@ -3653,7 +3661,11 @@ class ServoCalibration:
 
     def cmd_SERVO_SET_STIFFNESS(self, gcmd: Any) -> None:
         servo = self._servo(gcmd)
-        level = gcmd.get_int("LEVEL", minval=1, maxval=31)
+        level = gcmd.get_int(
+            "LEVEL",
+            minval=C00_05_STIFFNESS_LEVEL_MIN,
+            maxval=C00_05_STIFFNESS_LEVEL_MAX,
+        )
         self.gcode.run_script_from_command(
             "\n".join(
                 [

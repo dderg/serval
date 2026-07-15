@@ -38,12 +38,8 @@ class ServoSync:
 
     def __init__(self, config):
         self.printer = config.get_printer()
-        self.torque_ok_pct = config.getfloat(
-            "torque_ok", 3.0, above=0.0, maxval=40.0
-        )
-        self.settle_time = config.getfloat(
-            "settle_time", 1.0, above=0.0, maxval=10.0
-        )
+        self.torque_ok_pct = config.getfloat("torque_ok", 3.0, above=0.0)
+        self.settle_time = config.getfloat("settle_time", 1.0, above=0.0)
         gcode = self.printer.lookup_object("gcode")
         gcode.register_command(
             "SERVO_SYNC", self.cmd_SERVO_SYNC, desc=self.cmd_SERVO_SYNC_help
@@ -190,9 +186,7 @@ class ServoSync:
             gcmd,
             axis_filter,
             torque_ok_pct=gcmd.get_float("TORQUE_OK", self.torque_ok_pct),
-            settle=gcmd.get_float(
-                "SETTLE", self.settle_time, above=0.0, maxval=10.0
-            ),
+            settle=gcmd.get_float("SETTLE", self.settle_time, above=0.0),
         )
 
 
