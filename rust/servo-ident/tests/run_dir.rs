@@ -121,7 +121,7 @@ fn gain_sweep_run_dir_analyzes_and_picks_a_step() {
         );
     }
 
-    analyze_run(&dir).unwrap();
+    analyze_run(&dir, false).unwrap();
     let results_text = std::fs::read_to_string(dir.join("results.json")).unwrap();
     let parsed: Value = serde_json::from_str(&results_text).unwrap();
     assert_eq!(parsed["version"], json!(1));
@@ -129,6 +129,14 @@ fn gain_sweep_run_dir_analyzes_and_picks_a_step() {
     let plot_text = std::fs::read_to_string(dir.join("plot_series.json")).unwrap();
     let plot_parsed: Value = serde_json::from_str(&plot_text).unwrap();
     assert_eq!(plot_parsed["version"], json!(1));
+
+    analyze_run(&dir, true).unwrap();
+    let incr_text = std::fs::read_to_string(dir.join("results.json")).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&incr_text).unwrap(),
+        parsed,
+        "incremental re-analyze must reproduce the full analyze byte-for-byte"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }

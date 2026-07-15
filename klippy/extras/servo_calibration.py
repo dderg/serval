@@ -1235,9 +1235,14 @@ class ServoCalibration:
                 "failed to read results.json from %s: %s" % (run_dir, e)
             )
 
-    def _run_analyze(self, gcmd: Any, run: ExperimentRun) -> dict[str, Any]:
+    def _run_analyze(
+        self, gcmd: Any, run: ExperimentRun, incremental: bool = False
+    ) -> dict[str, Any]:
         binary = self._servo_cal(gcmd)
-        self._run(gcmd, [binary, "analyze", run.run_dir], 120.0)
+        argv = [binary, "analyze", run.run_dir]
+        if incremental:
+            argv.append("--incremental")
+        self._run(gcmd, argv, 120.0)
         return self._read_results(gcmd, run.run_dir)
 
     def _analyze_and_report(
@@ -1561,7 +1566,10 @@ class ServoCalibration:
         label = os.path.basename(argv[0])
         try:
             proc = subprocess.Popen(
-                argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                preexec_fn=lambda: os.nice(10),
             )
         except Exception:
             logging.exception("servo_calibration: failed to launch %s", label)
@@ -3040,7 +3048,7 @@ class ServoCalibration:
                 steps.append(step)
                 if value < start_g:
                     continue
-                results = self._run_analyze(gcmd, run)
+                results = self._run_analyze(gcmd, run, incremental=True)
                 flags = sorted(
                     set(self._step_flags(results, step.name))
                     & LADDER_STOP_FLAGS
@@ -3407,7 +3415,7 @@ class ServoCalibration:
                     lambda _s: run_grid(),
                     gcmd,
                 )
-                results = self._run_analyze(gcmd, run)
+                results = self._run_analyze(gcmd, run, incremental=True)
                 gate_torque_rail(step.name, results)
                 reports[key] = {
                     m: self._step_metric_mean(gcmd, results, step.name, m)

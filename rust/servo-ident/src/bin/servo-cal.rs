@@ -167,7 +167,8 @@ fn cmd_analyze(args: &[String]) {
     if arg(args, "--dump-csv").is_some() {
         die("--dump-csv works with --scap <file>, not a run directory");
     }
-    analyze_run(Path::new(dir)).unwrap_or_else(|e| die(&e));
+    let incremental = args.iter().any(|a| a == "--incremental");
+    analyze_run(Path::new(dir), incremental).unwrap_or_else(|e| die(&e));
 }
 
 const FIT_KEYS: [&str; 13] = [
