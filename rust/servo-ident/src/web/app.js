@@ -939,66 +939,45 @@ function drawChart(canvas, traces, yLabel, fixedY, xUnit, marks, opts) {
   ctx.fillStyle = "#8a97a3";
   ctx.fillText(yLabel, pad.l, 10);
   if (opts.hover) {
-    // The metrics-vs-gain chart is discrete (one x per sweep step), so the
-    // readout snaps to the nearest point by x — a vertical crosshair lands
-    // on a step, and every trace with a point at that swept value reports
-    // its reading. overshoot/ferr-rms/ferr-peak of a run share x, so a
-    // hover reads the three metrics of that step at once.
+    // Like the PSD chart: snap to the single nearest point (by 2D distance),
+    // draw a vertical line through it, and read out that one point's values.
+    // Not every trace at that x — the hovered point, for that run/metric.
     let best = null;
-    for (let ti = 0; ti < traces.length; ti++) {
-      const tr = traces[ti];
+    for (const tr of traces) {
       for (let i = 0; i < tr.t.length; i++) {
         if (tr.y[i] === null) continue;
-        const d = Math.abs(x(tr.t[i]) - opts.hover.mx);
-        if (best === null || d < best.d) best = { ti, i };
+        const dx = x(tr.t[i]) - opts.hover.mx;
+        const dy = y(tr.y[i]) - opts.hover.my;
+        const d = dx * dx + dy * dy;
+        if (!best || d < best.d) best = { d, tr, i };
       }
     }
     if (best) {
-      const snappedX = traces[best.ti].t[best.i];
-      const sx = x(snappedX);
+      const px = x(best.tr.t[best.i]);
+      const py = y(best.tr.y[best.i]);
       ctx.strokeStyle = "#4a5560";
-      ctx.setLineDash([3, 3]);
       ctx.beginPath();
-      ctx.moveTo(sx, pad.t);
-      ctx.lineTo(sx, h - pad.b);
+      ctx.moveTo(px, pad.t);
+      ctx.lineTo(px, h - pad.b);
       ctx.stroke();
-      ctx.setLineDash([]);
-      const lines = [];
-      for (const tr of traces) {
-        for (let i = 0; i < tr.t.length; i++) {
-          if (tr.y[i] === null) continue;
-          if (Math.abs(tr.t[i] - snappedX) >= 1e-9) continue;
-          const py = y(tr.y[i]);
-          ctx.fillStyle = tr.color;
-          ctx.beginPath();
-          ctx.arc(x(tr.t[i]), py, 3, 0, 2 * Math.PI);
-          ctx.fill();
-          const lab = tr.label != null ? tr.label : "";
-          lines.push({
-            color: tr.color,
-            text: `${lab}${lab ? "  " : ""}${fmtVal(tr.y[i])} ${yLabel}`,
-          });
-          break;
-        }
-      }
+      ctx.fillStyle = best.tr.color;
+      ctx.beginPath();
+      ctx.arc(px, py, 3, 0, Math.PI * 2);
+      ctx.fill();
       const xUnitSuffix = xUnit == null ? "s" : xUnit;
-      const head = `${opts.xTitle ? opts.xTitle + " = " : ""}${fmtTick(snappedX, tMax - tMin)}${xUnitSuffix}`;
-      const allLines = [{ color: "#8a97a3", text: head }, ...lines];
+      const swept = opts.xTitle ? opts.xTitle + " = " : "";
+      const lab = best.tr.label != null ? best.tr.label : "";
+      const text = `${swept}${fmtTick(best.tr.t[best.i], tMax - tMin)}${xUnitSuffix}  ${fmtVal(best.tr.y[best.i])} ${yLabel}${lab ? "  " + lab : ""}`;
       ctx.font = "11px monospace";
-      let tw = 0;
-      for (const l of allLines) tw = Math.max(tw, ctx.measureText(l.text).width);
-      const boxW = tw + 12;
-      const boxH = allLines.length * 14 + 6;
-      const tx = Math.min(Math.max(sx + 8, pad.l), w - pad.r - boxW - 4);
-      const ty = Math.max(pad.t, Math.min(opts.hover.my - boxH / 2, h - pad.b - boxH));
+      const tw = ctx.measureText(text).width;
+      const tx = Math.min(Math.max(px + 8, pad.l), w - pad.r - tw - 8);
+      const ty = Math.max(py - 10, pad.t + 12);
       ctx.fillStyle = "#0d1117";
-      ctx.fillRect(tx, ty, boxW, boxH);
+      ctx.fillRect(tx - 4, ty - 10, tw + 8, 14);
       ctx.strokeStyle = "#4a5560";
-      ctx.strokeRect(tx, ty, boxW, boxH);
-      allLines.forEach((l, i) => {
-        ctx.fillStyle = l.color;
-        ctx.fillText(l.text, tx + 6, ty + 12 + i * 14);
-      });
+      ctx.strokeRect(tx - 4, ty - 10, tw + 8, 14);
+      ctx.fillStyle = "#e6edf3";
+      ctx.fillText(text, tx, ty);
     }
   }
 }
