@@ -383,9 +383,9 @@ def make_calibration(
             scale = step["swept"].get("scale", 1.0)
             move = {
                 "move": 0,
-                "ferr_peak": 500.0 + 3000.0 * (scale - ferr_rms_min) ** 2,
+                "ferr_peak": 500.0 + 3000.0 * (scale - overshoot_min) ** 2,
                 "ferr_rms": 100.0 + 2000.0 * (scale - ferr_rms_min) ** 2,
-                "overshoot": 4000.0 + 5000.0 * (scale - overshoot_min) ** 2,
+                "overshoot": 40.0 + 5000.0 * (scale - overshoot_min) ** 2,
                 "settle_ms": 10.0,
                 "settle_window_truncated": False,
             }
@@ -504,7 +504,6 @@ def test_refine_dynamics_reports_all_metrics_per_scale():
         assert "overshoot" in line
         assert "ferr_rms" in line
         assert "ferr_peak" in line
-        assert "err_worst" in line
 
 
 def test_refine_dynamics_skips_write_when_baseline_wins():

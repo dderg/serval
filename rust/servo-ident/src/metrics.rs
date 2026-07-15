@@ -222,7 +222,6 @@ pub fn compute_metrics(
     let segs = target_motion_segments(&d.target, fs);
     let mut moves = Vec::with_capacity(segs.len());
     for (idx, &(s, e)) in segs.iter().enumerate() {
-        let move_err = &ferr[s..e];
         let post_end = if idx + 1 < segs.len() {
             segs[idx + 1].0
         } else {
@@ -231,6 +230,7 @@ pub fn compute_metrics(
         let post = &ferr[e..post_end];
         let settle_sample = settle_index(post, band, hold);
         let overshoot_end = settle_sample.unwrap_or(post.len());
+        let move_err = &ferr[s..e + overshoot_end];
         let settle_ms = settle_sample.map(|x| x as f64 * ms_per_sample);
         let ferr_peak = move_err.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
         let ferr_rms =

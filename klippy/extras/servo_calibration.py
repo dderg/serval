@@ -151,7 +151,7 @@ def validate_gain_values(values: list[int], param: str) -> list[int]:
     return values
 
 
-DYNAMICS_METRIC_BY_TERM = {"MASS": "err_worst", "VISCOUS": "ferr_rms"}
+DYNAMICS_METRIC_BY_TERM = {"MASS": "ferr_peak", "VISCOUS": "ferr_rms"}
 DYNAMICS_PROFILE_VECTORS = ("viscous", "coulomb_fwd", "coulomb_rev")
 GOLDEN_RATIO_CONJ = (math.sqrt(5.0) - 1.0) / 2.0
 
@@ -1273,21 +1273,14 @@ class ServoCalibration:
                 "step %s flagged %s - aborting refinement" % (step_name, bad)
             )
 
-        def move_value(move: dict[str, Any]) -> float | None:
-            if metric == "err_worst":
-                if "ferr_peak" not in move or "overshoot" not in move:
-                    return None
-                return max(move["ferr_peak"], move["overshoot"])
-            return move.get(metric)
-
         for step in results.get("steps") or []:
             if step.get("name") != step_name:
                 continue
             values = [
-                v
+                move[metric]
                 for drive in (step.get("drives") or {}).values()
                 for move in (drive.get("metrics") or {}).get("moves") or []
-                if (v := move_value(move)) is not None
+                if metric in move
             ]
             if not values:
                 raise gcmd.error(
@@ -3119,9 +3112,10 @@ class ServoCalibration:
     cmd_SERVO_REFINE_DYNAMICS_help = (
         "Empirically refine the torque-feedforward dynamics profile on the "
         "RUNNING endpoint: golden-section search over a scale factor on the "
-        "baseline profile's mass matrix (TERM=MASS, scored on mean worst "
-        "per-move error - max of in-move ferr_peak and post-move overshoot) "
-        "or viscous vector (TERM=VISCOUS, scored on mean ferr_rms). On "
+        "baseline profile's mass matrix (TERM=MASS, scored on mean per-move "
+        "ferr_peak - the error window runs from move start through settle, "
+        "so it covers in-move tracking and endpoint overshoot alike) or "
+        "viscous vector (TERM=VISCOUS, scored on mean ferr_rms). On "
         "coupled_xy TERM=MASS refines the two directions sequentially - "
         "X strokes scaling only the X-direction mass mode, then Y strokes "
         "scaling the Y mode on top of the X winner - since the directions "

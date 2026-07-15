@@ -210,13 +210,13 @@ def compute_metrics(data, settle_band, torque_limit, fs=1000.0):
     segs = target_motion_segments(data["target_counts"], fs)
     moves = []
     for idx, (s, e) in enumerate(segs):
-        move_err = ferr[s:e]
         post_end = segs[idx + 1][0] if idx + 1 < len(segs) else len(ferr)
         post = ferr[e:post_end]
         settle_sample = _settle_index(post, settle_band, hold)
         overshoot_end = (
             settle_sample if settle_sample is not None else len(post)
         )
+        move_err = ferr[s : e + overshoot_end]
         settle_ms = (
             float(settle_sample) * ms_per_sample
             if settle_sample is not None
