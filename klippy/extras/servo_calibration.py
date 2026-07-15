@@ -151,7 +151,11 @@ def validate_gain_values(values: list[int], param: str) -> list[int]:
     return values
 
 
-DYNAMICS_METRIC_BY_TERM = {"MASS": "ferr_peak", "VISCOUS": "ferr_rms"}
+DYNAMICS_METRIC_BY_TERM = {
+    "MASS": "ferr_peak",
+    "VISCOUS": "ferr_rms",
+    "COULOMB": "ferr_peak",
+}
 DYNAMICS_PROFILE_VECTORS = ("viscous", "coulomb_fwd", "coulomb_rev")
 GOLDEN_RATIO_CONJ = (math.sqrt(5.0) - 1.0) / 2.0
 
@@ -218,6 +222,9 @@ def scale_dynamics(
         scaled["mass"] = [[v * scale for v in row] for row in scaled["mass"]]
     elif term == "VISCOUS":
         scaled["viscous"] = [v * scale for v in scaled["viscous"]]
+    elif term == "COULOMB":
+        scaled["coulomb_fwd"] = [v * scale for v in scaled["coulomb_fwd"]]
+        scaled["coulomb_rev"] = [v * scale for v in scaled["coulomb_rev"]]
     else:
         raise ValueError("unknown dynamics term %r" % (term,))
     return scaled
@@ -3125,7 +3132,9 @@ class ServoCalibration:
         "baseline profile's mass matrix (TERM=MASS, scored on mean per-move "
         "ferr_peak - the error window runs from move start through settle, "
         "so it covers in-move tracking and endpoint overshoot alike) or "
-        "viscous vector (TERM=VISCOUS, scored on mean ferr_rms). On "
+        "viscous vector (TERM=VISCOUS, scored on mean ferr_rms) or "
+        "coulomb friction vectors (TERM=COULOMB, fwd and rev together, "
+        "scored on mean ferr_peak - friction error peaks at breakaway). On "
         "coupled_xy TERM=MASS refines the two directions sequentially - "
         "X strokes scaling only the X-direction mass mode, then Y strokes "
         "scaling the Y mode on top of the X winner - since the directions "
@@ -3194,7 +3203,7 @@ class ServoCalibration:
         term = gcmd.get("TERM", "MASS").upper()
         if term not in DYNAMICS_METRIC_BY_TERM:
             raise gcmd.error(
-                "TERM must be MASS or VISCOUS (got %r)"
+                "TERM must be MASS, VISCOUS or COULOMB (got %r)"
                 % (gcmd.get("TERM", ""),)
             )
         kin = self._kin()

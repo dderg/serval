@@ -344,13 +344,15 @@ fit never overwrites an existing profile.
 Empirical refinement of an existing dynamics profile, for when the
 `SERVO_FIT_DYNAMICS` regression differs run-to-run with the excitation
 grid. Golden-section search over a scale factor applied to the baseline
-profile's **mass matrix** (`TERM=MASS`, default) or **viscous vector**
-(`TERM=VISCOUS`): each candidate model is streamed into the *running*
+profile's **mass matrix** (`TERM=MASS`, default), **viscous vector**
+(`TERM=VISCOUS`) or **coulomb friction vectors** (`TERM=COULOMB`, fwd and
+rev scaled together): each candidate model is streamed into the *running*
 endpoint (no restart) and measured with one tracking capture of the full
 `SERVO_MEASURE_INERTIA` `ACCELS` × `SPEEDS` grid, then scored from
-`servo-cal analyze` — mean per-move **ferr_peak** for `MASS`, mean
-per-move **ferr_rms** for `VISCOUS` (viscous error shows up as cruise
-following error). The analyzer's per-move error window starts
+`servo-cal analyze` — mean per-move **ferr_peak** for `MASS` and
+`COULOMB` (friction error peaks at breakaway, right at the start of the
+window), mean per-move **ferr_rms** for `VISCOUS` (viscous error shows
+up as cruise following error). The analyzer's per-move error window starts
 `ff_lead_cycles` samples **before** the commanded move (torque
 feedforward is sent that many cycles early, so its error signature
 lands ahead of the position command; the run manifest carries the
@@ -385,8 +387,8 @@ written to a new TOML under `~/printer_data/config/servo_dynamics/` (with
 keys — `refined_scale_x`/`refined_scale_y` for the sequential corexy mass
 refine — never overwriting) and the `dynamics_profile` paste line is printed
 — config edit + restart is the only way to keep it; when the baseline
-wins, nothing is written. Refine `MASS` first, then re-run with
-`TERM=VISCOUS` against the refined profile. Params: `TERM` (MASS) `AXIS`
+wins, nothing is written. Refine `MASS` first, then `TERM=VISCOUS`
+against the refined profile, then `TERM=COULOMB` against that. Params: `TERM` (MASS) `AXIS`
 (X) `SERVOS` `PROFILE` `LO` (0.7) `HI` (1.3) `TOL` (0.02) `MAX_EVALS` (10)
 `START` `END` `X_START` `X_END` `Y_START` `Y_END` `ACCELS` `SPEEDS`
 `ITERATIONS` `DWELL_MS` `TAG` (refdyn) `NAME` (refined_<term>).

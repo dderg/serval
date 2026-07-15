@@ -135,8 +135,13 @@ def test_scale_dynamics_touches_only_the_chosen_term():
     v = servo_calibration.scale_dynamics(p, "VISCOUS", 0.5)
     assert v["viscous"] == [0.002, 0.002]
     assert v["mass"] == p["mass"]
+    c = servo_calibration.scale_dynamics(p, "COULOMB", 2.0)
+    assert c["coulomb_fwd"] == [2.0, 2.0]
+    assert c["coulomb_rev"] == [-2.0, -2.0]
+    assert c["mass"] == p["mass"]
+    assert c["viscous"] == p["viscous"]
     with pytest.raises(ValueError, match="unknown dynamics term"):
-        servo_calibration.scale_dynamics(p, "COULOMB", 1.0)
+        servo_calibration.scale_dynamics(p, "STICTION", 1.0)
 
 
 def test_render_dynamics_toml_reparses_with_provenance():
@@ -506,6 +511,23 @@ def test_refine_dynamics_reports_all_metrics_per_scale():
         assert "ferr_peak" in line
 
 
+def test_refine_dynamics_coulomb_scales_both_friction_vectors():
+    sc, gcode, engine, _path = make_calibration(overshoot_min=1.05)
+    gcmd = FakeGcmd(AXIS="X", TERM="COULOMB")
+    sc.cmd_SERVO_REFINE_DYNAMICS(gcmd)
+    profiles = _written_profiles(sc)
+    assert len(profiles) == 1
+    with open(profiles[0], "rb") as f:
+        raw = tomllib.load(f)
+    assert raw["refined_term"] == "coulomb"
+    scale = raw["refined_scale"]
+    assert abs(scale - 1.05) < 0.03
+    assert raw["coulomb_fwd"][0] == pytest.approx(1.0 * scale)
+    assert raw["coulomb_rev"][0] == pytest.approx(-1.0 * scale)
+    assert raw["mass"][0][0] == pytest.approx(0.030)
+    assert raw["viscous"] == BASELINE_VISCOUS
+
+
 def test_refine_dynamics_skips_write_when_baseline_wins():
     sc, gcode, engine, _path = make_calibration(overshoot_min=1.0)
     gcmd = FakeGcmd(AXIS="X")
@@ -590,7 +612,7 @@ def test_refine_dynamics_rejects_axis_count_mismatch():
 def test_refine_dynamics_rejects_bad_term_and_bracket():
     sc, _gcode, engine, _path = make_calibration()
     with pytest.raises(RuntimeError, match="TERM must be"):
-        sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(AXIS="X", TERM="COULOMB"))
+        sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(AXIS="X", TERM="STICTION"))
     with pytest.raises(RuntimeError, match="must contain 1.0"):
         sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(AXIS="X", LO=1.05, HI=1.3))
     assert engine.dynamics_calls == []
