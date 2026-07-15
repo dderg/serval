@@ -202,7 +202,12 @@ def elastic_a(x, y):
     return 0.1 * (x - 50.0)
 
 
-def write_scap(path, xs, ys, field):
+def elastic_b(x, y):
+    """Belt B's field: 0.08 %/mm slope in y around the center."""
+    return 0.08 * (y - 50.0)
+
+
+def write_scap(path, xs, ys, field, field_b=None):
     channels = [
         {"name": "time", "offset": 0, "dtype": "u64"},
         {"name": "target_counts", "offset": 8, "dtype": "i32"},
@@ -222,8 +227,9 @@ def write_scap(path, xs, ys, field):
     for i, (x, y) in enumerate(zip(xs, ys)):
         pa, pb = x + y, x - y
         fa = field(x, y)
+        fb = field_b(x, y) if field_b else 0.0
         row = struct.pack("<Q", i)
-        for pos_mm, diff in ((pa, fa), (pa, -fa), (pb, 0.0), (pb, 0.0)):
+        for pos_mm, diff in ((pa, fa), (pa, -fa), (pb, fb), (pb, -fb)):
             row += struct.pack(
                 "<ih", int(round(pos_mm * CPM)), int(round(diff * 10.0))
             )
@@ -232,7 +238,7 @@ def write_scap(path, xs, ys, field):
         fh.write(json.dumps(header).encode() + b"\n" + b"".join(rows))
 
 
-def write_run(run_dir, field=elastic_a):
+def write_run(run_dir, field=elastic_a, field_b=None):
     run_dir.mkdir()
     steps = []
     lines = [("xline_y%03d" % y, {"y": float(y)}) for y in (0, 50, 100)]
@@ -245,7 +251,7 @@ def write_run(run_dir, field=elastic_a):
             xs, ys = sweep, [swept["y"]] * len(sweep)
         else:
             xs, ys = [swept["x"]] * len(sweep), sweep
-        write_scap(run_dir / ("step_%s.scap" % name), xs, ys, field)
+        write_scap(run_dir / ("step_%s.scap" % name), xs, ys, field, field_b)
         steps.append({"name": name, "swept": swept})
     manifest = {
         "experiment": "strain_map",
@@ -628,3 +634,110 @@ def test_build_rejects_grids_beyond_the_endpoint_caps(tmp_path):
     )
     with pytest.raises(RuntimeError, match="raise SPACING"):
         sc.cmd_SERVO_STRAIN_COMP_BUILD(gcmd)
+
+
+def build_wrong_scalar_map(sc, baseline):
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(
+        FakeGcmd(
+            RUN=str(baseline),
+            STIFFNESS_A="300",
+            STIFFNESS_B="300",
+            CROSS_AB="0",
+            CROSS_BA="0",
+        )
+    )
+
+
+def test_fit_recovers_the_in_use_matrix_from_a_run_pair(tmp_path):
+    baseline = tmp_path / "baseline"
+    write_run(baseline, field=elastic_a, field_b=elastic_b)
+    sc, _ = make_comp(tmp_path)
+    build_wrong_scalar_map(sc, baseline)
+
+    # The map holds o = -f/300; the true in-use response is
+    # [[200, -50], [-50, 200]], so the compensated field is f + K @ o.
+    def after_a(x, y):
+        return elastic_a(x, y) / 3.0 + elastic_b(x, y) / 6.0
+
+    def after_b(x, y):
+        return elastic_b(x, y) / 3.0 + elastic_a(x, y) / 6.0
+
+    verification = tmp_path / "verification"
+    write_run(verification, field=after_a, field_b=after_b)
+    sc.cmd_SERVO_STRAIN_COMP_FIT(
+        FakeGcmd(BASELINE=str(baseline), RUN=str(verification))
+    )
+    assert sc.measured_stiffness[("m_a", "m_a1")] == pytest.approx(200, abs=10)
+    assert sc.measured_stiffness[("m_b", "m_b1")] == pytest.approx(200, abs=10)
+    assert sc.measured_cross[
+        (("m_a", "m_a1"), ("m_b", "m_b1"))
+    ] == pytest.approx(-50, abs=5)
+    assert sc.measured_cross[
+        (("m_b", "m_b1"), ("m_a", "m_a1"))
+    ] == pytest.approx(-50, abs=5)
+    # A rebuild with no stiffness params picks the fitted matrix up.
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(FakeGcmd(RUN=str(baseline)))
+    payload = json.loads((tmp_path / "strain_comp.json").read_text())
+    for pair in payload["pairs"]:
+        assert pair["stiffness_pct_per_mm"] == pytest.approx(200, abs=10)
+        assert pair["cross_pct_per_mm"] == pytest.approx(-50, abs=5)
+
+
+def test_fit_without_a_map_errors_loudly(tmp_path):
+    baseline = tmp_path / "baseline"
+    write_run(baseline)
+    verification = tmp_path / "verification"
+    write_run(verification)
+    sc, _ = make_comp(tmp_path)
+    with pytest.raises(RuntimeError, match="current map"):
+        sc.cmd_SERVO_STRAIN_COMP_FIT(
+            FakeGcmd(BASELINE=str(baseline), RUN=str(verification))
+        )
+
+
+def test_fit_needs_offsets_on_both_belts(tmp_path):
+    baseline = tmp_path / "baseline"
+    write_run(baseline)
+    sc, _ = make_comp(tmp_path)
+    build_wrong_scalar_map(sc, baseline)
+    verification = tmp_path / "verification"
+    write_run(verification, field=lambda x, y: elastic_a(x, y) / 3.0)
+    with pytest.raises(RuntimeError, match="too little excitation"):
+        sc.cmd_SERVO_STRAIN_COMP_FIT(
+            FakeGcmd(BASELINE=str(baseline), RUN=str(verification))
+        )
+
+
+def test_fit_rejects_collinear_offsets(tmp_path):
+    baseline = tmp_path / "baseline"
+
+    def half_a(x, y):
+        return elastic_a(x, y) / 2.0
+
+    write_run(baseline, field=elastic_a, field_b=half_a)
+    sc, _ = make_comp(tmp_path)
+    build_wrong_scalar_map(sc, baseline)
+    verification = tmp_path / "verification"
+    write_run(verification, field=elastic_a, field_b=half_a)
+    with pytest.raises(RuntimeError, match="collinear"):
+        sc.cmd_SERVO_STRAIN_COMP_FIT(
+            FakeGcmd(BASELINE=str(baseline), RUN=str(verification))
+        )
+
+
+def test_fit_detects_a_run_captured_without_compensation(tmp_path):
+    baseline = tmp_path / "baseline"
+    write_run(baseline, field=elastic_a, field_b=elastic_b)
+    sc, _ = make_comp(tmp_path)
+    build_wrong_scalar_map(sc, baseline)
+
+    # The map changed nothing; only an unrelated ripple drifted in.
+    def drifted_a(x, y):
+        return elastic_a(x, y) + 0.5 * math.sin(2.0 * math.pi * x / 7.0)
+
+    verification = tmp_path / "verification"
+    write_run(verification, field=drifted_a, field_b=elastic_b)
+    with pytest.raises(RuntimeError, match="not credible"):
+        sc.cmd_SERVO_STRAIN_COMP_FIT(
+            FakeGcmd(BASELINE=str(baseline), RUN=str(verification))
+        )

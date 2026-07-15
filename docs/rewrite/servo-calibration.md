@@ -180,7 +180,7 @@ run directory is charted by the dashboard's strain tab. Params: `SPEED`
 (50) `ACCEL` (1000) `LINE_SPACING` (10) `X_START` `X_END` `Y_START`
 `Y_END` `DWELL_MS` `TAG` (strain) `SYNC` (1).
 
-#### Strain compensation (SERVO_MEASURE_PAIR_STIFFNESS / SERVO_STRAIN_COMP_BUILD / SERVO_STRAIN_COMP)
+#### Strain compensation (SERVO_MEASURE_PAIR_STIFFNESS / SERVO_STRAIN_COMP_BUILD / SERVO_STRAIN_COMP_FIT / SERVO_STRAIN_COMP)
 The application half of the strain map, config section
 `[servo_strain_comp]`. The endpoint carries a per-belt 2D lookup table of
 **antisymmetric position offsets** keyed on the commanded carriage
@@ -227,18 +227,23 @@ cross terms fit ~25% lower from run pairs than the probe reads
 (~428/−122 probed vs ~335/−88 fitted; mechanism not established — the
 probe's own secant slopes soften slightly with amplitude).
 Compensation acts while moving, so calibrate in that regime:
-fit the matrix from an uncompensated + compensated run pair — regress
-the per-sample field change against the offsets the map applied at each
-sample point (both belts' offsets in one least-squares gives the direct
-and cross columns together; on the Trident repeat fits landed at
-~330/344 direct, ~−90/−86 cross) — or let a `MERGE=1` iteration
-converge the scale error away — with the cross terms in place it
-contracts instead of leaking sideways. The exact value is not
-critical: a fractional matrix error leaves the same fraction of the
-field behind, and each merge pass shrinks it by that factor again. The
-map file records the matrix per pair (`stiffness_pct_per_mm`,
-`cross_pct_per_mm`), so the numbers only need establishing once —
-`MERGE=1` reuses them unless overridden.
+`SERVO_STRAIN_COMP_FIT BASELINE=<uncompensated run> RUN=<run captured
+with the current map enabled>` models the baseline field, then
+regresses the compensated run's change from it against the offsets the
+map applied at each sample point — both belts' offsets as regressors,
+so one least-squares yields the direct and cross terms together (on
+the Trident ~353/354 direct, ~−89/−91 cross, R² 0.985). It fails
+loudly when either belt's offsets barely vary or the two belts'
+offsets are collinear (the responses cannot be separated) and when the
+fit is not credible (R² < 0.8 — usually a RUN captured without the map
+enabled). The fitted matrix is stored for the next build, which
+records it in the map. The exact value is not critical for
+convergence: a fractional matrix error leaves the same fraction of the
+field behind, and each `MERGE=1` pass shrinks it by that factor again
+— with the cross terms in place it contracts instead of leaking
+sideways. The map file records the matrix per pair
+(`stiffness_pct_per_mm`, `cross_pct_per_mm`), so the numbers only need
+establishing once — `MERGE=1` reuses them unless overridden.
 
 The workflow: (1) `SERVO_MEASURE_PAIR_STIFFNESS` steps a constant
 antisymmetric offset (a 1×1 grid) through the same mechanism and reads
@@ -263,14 +268,17 @@ loudly beyond them).
 (3) `SERVO_STRAIN_COMP ENABLE=1` resolves the map's motor names to
 slots/lanes on the live topology and uploads it; `ENABLE=0` ramps the
 compensation back out. Verify by re-running the strain map with the
-compensation enabled — the residual field should collapse — then
-`SERVO_STRAIN_COMP_BUILD RUN=<verification run> MERGE=1` folds what is
-left into the map (no stiffness params needed: the recorded matrix is
-reused) and another `ENABLE=1` uploads it. Params:
-stiffness `STEP_UM` (50) `SETTLE` (0.8) `AXIS`; build `RUN` (required)
-`STIFFNESS_A`/`STIFFNESS_B` with `CROSS_AB`/`CROSS_BA` (%/mm matrix
-override; `CROSS_AB` is belt A's response to a belt B offset, 0 disables
-the cross term) `SPACING` (run's line spacing).
+compensation enabled — the residual field should collapse. (4) From
+that verification run either refine the matrix
+(`SERVO_STRAIN_COMP_FIT` against the baseline, then rebuild) or fold
+the residual straight into the map (`SERVO_STRAIN_COMP_BUILD
+RUN=<verification run> MERGE=1`, no stiffness params needed: the
+recorded matrix is reused) — then another `ENABLE=1` uploads it.
+Params: stiffness `STEP_UM` (50) `SETTLE` (0.8) `AXIS`; build `RUN`
+(required) `STIFFNESS_A`/`STIFFNESS_B` with `CROSS_AB`/`CROSS_BA`
+(%/mm matrix override; `CROSS_AB` is belt A's response to a belt B
+offset, 0 disables the cross term) `SPACING` (run's line spacing);
+fit `BASELINE` and `RUN` (both required).
 
 #### SERVO_MEASURE_INERTIA
 Records the excitation grid for the inertia/friction fit (no report — it is the

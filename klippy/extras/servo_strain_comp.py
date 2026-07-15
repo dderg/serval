@@ -25,6 +25,9 @@ FIELD_2D_PITCH_MM = 20.0
 FIELD_2D_SMOOTH = 2.0
 MAX_GRID_DIM = 64
 MAX_GRID_VALUES = 4096
+FIT_MIN_EXCITATION_MM = 0.005
+FIT_MAX_OFFSET_CORR = 0.98
+FIT_MIN_R2 = 0.8
 
 
 def _signed16(raw):
@@ -84,6 +87,15 @@ class ServoStrainComp:
         "second-order iteration; it reuses the stiffness matrix recorded "
         "in the existing map unless overridden."
     )
+    cmd_SERVO_STRAIN_COMP_FIT_help = (
+        "Fit the stiffness matrix in the regime the map operates in: "
+        "BASELINE=<strain_map run without compensation>, RUN=<strain_map "
+        "run captured WITH the current map enabled>. The field change "
+        "between the runs, regressed against the offsets the map applied "
+        "at each sample point, is the in-use response — direct and cross "
+        "terms in one least-squares (the parked probe reads high). The "
+        "fitted matrix is stored for the next SERVO_STRAIN_COMP_BUILD."
+    )
     cmd_SERVO_STRAIN_COMP_help = (
         "ENABLE=1 uploads the map file to the endpoint (offsets ramp in at "
         "1 mm/s); ENABLE=0 clears the compensation."
@@ -106,6 +118,11 @@ class ServoStrainComp:
             "SERVO_STRAIN_COMP_BUILD",
             self.cmd_SERVO_STRAIN_COMP_BUILD,
             desc=self.cmd_SERVO_STRAIN_COMP_BUILD_help,
+        )
+        gcode.register_command(
+            "SERVO_STRAIN_COMP_FIT",
+            self.cmd_SERVO_STRAIN_COMP_FIT,
+            desc=self.cmd_SERVO_STRAIN_COMP_FIT_help,
         )
         gcode.register_command(
             "SERVO_STRAIN_COMP",
@@ -338,17 +355,7 @@ class ServoStrainComp:
         )
 
     def cmd_SERVO_STRAIN_COMP_BUILD(self, gcmd):
-        run_dir = os.path.expanduser(gcmd.get("RUN"))
-        manifest_path = os.path.join(run_dir, "manifest.json")
-        if not os.path.exists(manifest_path):
-            raise gcmd.error("no manifest.json in %s" % run_dir)
-        with open(manifest_path) as fh:
-            manifest = json.load(fh)
-        if manifest.get("experiment") != "strain_map":
-            raise gcmd.error(
-                "%s is a %r run, need a strain_map run"
-                % (run_dir, manifest.get("experiment"))
-            )
+        run_dir, manifest = _strain_map_run(gcmd, gcmd.get("RUN"))
         merge = gcmd.get_int("MERGE", 0, minval=0, maxval=1) == 1
         base_pairs = {}
         if merge:
@@ -468,6 +475,87 @@ class ServoStrainComp:
             "SERVO_STRAIN_COMP ENABLE=1" % self.map_file
         )
 
+    def cmd_SERVO_STRAIN_COMP_FIT(self, gcmd):
+        baseline_dir, baseline_manifest = _strain_map_run(
+            gcmd, gcmd.get("BASELINE")
+        )
+        run_dir, run_manifest = _strain_map_run(gcmd, gcmd.get("RUN"))
+        if baseline_manifest.get("belts") != run_manifest.get("belts"):
+            raise gcmd.error("BASELINE and RUN have different belt layouts")
+        if baseline_manifest.get("kinematics") != run_manifest.get(
+            "kinematics"
+        ):
+            raise gcmd.error("BASELINE and RUN have different kinematics")
+        kinematics = run_manifest.get("kinematics")
+        if kinematics is None:
+            raise gcmd.error("manifest has no kinematics field")
+        corexy = kinematics == "corexy"
+        belts = _belt_motor_names(run_manifest)
+        if len(belts) != 2:
+            raise gcmd.error(
+                "the matrix fit needs exactly two belts, run has %d"
+                % len(belts)
+            )
+        if not os.path.exists(self.map_file):
+            raise gcmd.error(
+                "no map at %s — RUN must be captured with the current map "
+                "enabled" % self.map_file
+            )
+        with open(self.map_file) as fh:
+            map_pairs = {tuple(p["motors"]): p for p in json.load(fh)["pairs"]}
+        offset_grids = []
+        for belt_idx, motor_names in enumerate(belts):
+            pair = map_pairs.get(tuple(motor_names))
+            if pair is None:
+                raise gcmd.error(
+                    "map has no entry for belt %s (%s)"
+                    % ("AB"[belt_idx], "/".join(motor_names))
+                )
+            offset_grids.append(
+                {
+                    "nx": pair["nx"],
+                    "ny": pair["ny"],
+                    "x0": pair["x0"],
+                    "y0": pair["y0"],
+                    "dx": pair["dx"],
+                    "dy": pair["dy"],
+                    "values_pct": [o / 1000.0 for o in pair["offsets_um"]],
+                }
+            )
+        base_samples = _collect_elastic_samples(baseline_dir, baseline_manifest)
+        run_samples = _collect_elastic_samples(run_dir, run_manifest)
+        plan = baseline_manifest["stroke_plan"]
+        for belt_idx, motor_names in enumerate(belts):
+            k_own, k_cross, r2, n = _fit_in_use_response(
+                gcmd,
+                belt_idx,
+                base_samples[belt_idx],
+                run_samples[belt_idx],
+                plan,
+                corexy,
+                offset_grids,
+            )
+            self.measured_stiffness[tuple(motor_names)] = k_own
+            self.measured_cross[
+                (tuple(motor_names), tuple(belts[1 - belt_idx]))
+            ] = k_cross
+            gcmd.respond_info(
+                "belt %s (%s): in-use stiffness %.1f %%/mm, cross %.1f "
+                "%%/mm (R^2 %.3f, %d samples)"
+                % (
+                    "AB"[belt_idx],
+                    "/".join(motor_names),
+                    k_own,
+                    k_cross,
+                    r2,
+                    n,
+                )
+            )
+        gcmd.respond_info(
+            "in-use matrix stored — rebuild with SERVO_STRAIN_COMP_BUILD "
+            "RUN=%s to apply it" % baseline_dir
+        )
+
     def cmd_SERVO_STRAIN_COMP(self, gcmd):
         enable = gcmd.get_int("ENABLE", 1, minval=0, maxval=1) == 1
         pairs = self._belt_pairs(gcmd)
@@ -550,6 +638,21 @@ def _fit_slope(points):
     total = sum((p[1] - mean_y) ** 2 for p in points)
     r2 = 1.0 - resid / total if total > 0.0 else 0.0
     return slope, r2
+
+
+def _strain_map_run(gcmd, raw_dir):
+    run_dir = os.path.expanduser(raw_dir)
+    manifest_path = os.path.join(run_dir, "manifest.json")
+    if not os.path.exists(manifest_path):
+        raise gcmd.error("no manifest.json in %s" % run_dir)
+    with open(manifest_path) as fh:
+        manifest = json.load(fh)
+    if manifest.get("experiment") != "strain_map":
+        raise gcmd.error(
+            "%s is a %r run, need a strain_map run"
+            % (run_dir, manifest.get("experiment"))
+        )
+    return run_dir, manifest
 
 
 def _belt_motor_names(manifest):
@@ -678,6 +781,23 @@ def _collect_elastic_samples(run_dir, manifest):
     return lines
 
 
+def _flatten_lines(belt_lines):
+    import numpy as np
+
+    xs, ys, vs = [], [], []
+    for line in belt_lines:
+        coords = np.asarray(line["coords"], float)
+        vals = np.asarray(line["elastic"], float)
+        if line["fixed_axis"] == "y":
+            xs.append(coords)
+            ys.append(np.full(len(coords), line["fixed_value"]))
+        else:
+            xs.append(np.full(len(coords), line["fixed_value"]))
+            ys.append(coords)
+        vs.append(vals)
+    return np.concatenate(xs), np.concatenate(ys), np.concatenate(vs)
+
+
 def _field_model_fit(x, y, v, plan, corexy):
     """Least-squares fit of the structured field model: 1D components at
     2mm knots along each belt phase (x+y and x-y, CoreXY only) and along
@@ -804,20 +924,7 @@ def _build_grid(gcmd, plan, spacing, belt_lines, corexy):
 
     if not belt_lines:
         raise gcmd.error("run contains no usable elastic samples")
-    xs, ys, vs = [], [], []
-    for line in belt_lines:
-        coords = np.asarray(line["coords"], float)
-        vals = np.asarray(line["elastic"], float)
-        if line["fixed_axis"] == "y":
-            xs.append(coords)
-            ys.append(np.full(len(coords), line["fixed_value"]))
-        else:
-            xs.append(np.full(len(coords), line["fixed_value"]))
-            ys.append(coords)
-        vs.append(vals)
-    x = np.concatenate(xs)
-    y = np.concatenate(ys)
-    v = np.concatenate(vs)
+    x, y, v = _flatten_lines(belt_lines)
     x0, x1 = plan["x_start"], plan["x_end"]
     y0, y1 = plan["y_start"], plan["y_end"]
     nx = max(2, int(round((x1 - x0) / spacing)) + 1)
@@ -913,6 +1020,56 @@ def _grid_value_at(grid, x, y):
     top = at(ix, iy) * (1.0 - tx) + at(ix + 1, iy) * tx
     bottom = at(ix, iy + 1) * (1.0 - tx) + at(ix + 1, iy + 1) * tx
     return top * (1.0 - ty) + bottom * ty
+
+
+def _fit_in_use_response(
+    gcmd, belt_idx, base_lines, run_lines, plan, corexy, offset_grids
+):
+    """The exact in-use stiffness row for one belt: model the baseline
+    field, then regress the compensated run's change from it against the
+    offsets the map applied at each sample point — both belts' offsets as
+    regressors, so the direct and cross responses separate in one
+    least-squares. An intercept absorbs the runs' DC anchor difference."""
+    import numpy as np
+
+    if not base_lines or not run_lines:
+        raise gcmd.error("run contains no usable elastic samples")
+    bx, by, bv = _flatten_lines(base_lines)
+    rx, ry, rv = _flatten_lines(run_lines)
+    baseline_field = _field_model_fit(bx, by, bv, plan, corexy)
+    delta = rv - baseline_field(rx, ry)
+    own_grid = offset_grids[belt_idx]
+    other_grid = offset_grids[1 - belt_idx]
+    own = np.array([_grid_value_at(own_grid, px, py) for px, py in zip(rx, ry)])
+    other = np.array(
+        [_grid_value_at(other_grid, px, py) for px, py in zip(rx, ry)]
+    )
+    for label, regressor in (("own", own), ("other", other)):
+        if float(np.ptp(regressor)) < FIT_MIN_EXCITATION_MM:
+            raise gcmd.error(
+                "belt %s: the map's %s-belt offsets vary by less than "
+                "%.0f um over the run — too little excitation to fit the "
+                "response"
+                % ("AB"[belt_idx], label, FIT_MIN_EXCITATION_MM * 1000.0)
+            )
+    corr = float(np.corrcoef(own, other)[0, 1])
+    if abs(corr) > FIT_MAX_OFFSET_CORR:
+        raise gcmd.error(
+            "the two belts' offsets are collinear (corr %.3f) — the "
+            "direct and cross responses cannot be separated" % corr
+        )
+    design = np.column_stack([own, other, np.ones_like(own)])
+    coef, *_ = np.linalg.lstsq(design, delta, rcond=None)
+    pred = design @ coef
+    ss_res = float(((delta - pred) ** 2).sum())
+    ss_tot = float(((delta - delta.mean()) ** 2).sum())
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    if r2 < FIT_MIN_R2:
+        raise gcmd.error(
+            "belt %s: response fit is not credible (R^2 %.3f) — was RUN "
+            "captured with the current map enabled?" % ("AB"[belt_idx], r2)
+        )
+    return float(coef[0]), float(coef[1]), r2, len(delta)
 
 
 def _offsets_from_grids(gcmd, grids, k_matrix):
