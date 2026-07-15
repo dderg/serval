@@ -992,6 +992,8 @@ class ServoCalibration:
             "SERVO_DIFF_DAMPER",
             "SERVO_DIFF_TRIM",
             "SERVO_MEASURE_STRAIN_MAP",
+            "SERVO_MEASURE_STRAIN_RESPONSE",
+            "SERVO_STRAIN_COMP_TUNE",
             "SERVO_MEASURE_INERTIA",
             "SERVO_FIT_DYNAMICS",
             "SERVO_CALIBRATE_INERTIA_RATIO",
@@ -1982,6 +1984,270 @@ class ServoCalibration:
             )
         finally:
             self._active_run = None
+
+    STRAIN_RESPONSE_STEPS = (0.0, 1.0, -1.0, 2.0, -2.0)
+
+    cmd_SERVO_MEASURE_STRAIN_RESPONSE_help = (
+        "Measure the belt stiffness matrix in the rolling regime — the one "
+        "the strain map and its compensation operate in (a parked belt "
+        "reads ~20% stiffer). Strokes ONE X line forward and back while "
+        "stepping a constant antisymmetric offset through each pair's "
+        "compensation bank; the line's own strain field is identical on "
+        "every pass and cancels out of the offset-response slope, so no "
+        "baseline raster is needed. Both pairs' responses are captured per "
+        "step, so the direct and cross terms come from the same strokes. "
+        "The fitted matrix is stored for SERVO_STRAIN_COMP_BUILD. CoreXY "
+        "only, needs [servo_strain_comp]. Params SPEED (50) ACCEL (1000) "
+        "STEP_UM (50) SETTLE (0.8) Y (area center) X_START X_END DWELL_MS "
+        "TAG SYNC"
+    )
+
+    def cmd_SERVO_MEASURE_STRAIN_RESPONSE(self, gcmd: Any) -> None:
+        kin = self._kin()
+        if not kin.coupled_xy():
+            raise gcmd.error(
+                "SERVO_MEASURE_STRAIN_RESPONSE requires coupled XY "
+                "(CoreXY) kinematics - the response is a belt-pair "
+                "measurement"
+            )
+        comp = self.printer.lookup_object("servo_strain_comp", None)
+        if comp is None:
+            raise gcmd.error(
+                "SERVO_MEASURE_STRAIN_RESPONSE needs [servo_strain_comp] "
+                "configured - it drives the compensation bank"
+            )
+        x_start, x_end, _y_start, _y_end = servo_strokes.xy_bounds(
+            gcmd, self.bounds
+        )
+        speed = gcmd.get_float("SPEED", 50.0, above=0.0)
+        accel = gcmd.get_float("ACCEL", 1000.0, above=0.0)
+        step_um = gcmd.get_float("STEP_UM", 50.0, above=0.0, maxval=200.0)
+        settle = gcmd.get_float("SETTLE", 0.8, above=0.0, maxval=5.0)
+        dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
+        tag = gcmd.get("TAG", "strainresp")
+        zero_sync = gcmd.get_int("SYNC", 1, minval=0, maxval=1) == 1
+        servos = servo_strokes.axis_servos(gcmd, kin, "X")
+        zero_x = (self.bounds["X"][0] + self.bounds["X"][1]) / 2.0
+        zero_y = (self.bounds["Y"][0] + self.bounds["Y"][1]) / 2.0
+        line_y = gcmd.get_float("Y", zero_y)
+        session = comp.begin_constant_offsets(gcmd)
+        steps_um = [k * step_um for k in self.STRAIN_RESPONSE_STEPS]
+        stroke_plan = {
+            "x_start": x_start,
+            "x_end": x_end,
+            "y": line_y,
+            "speed": speed,
+            "accel": accel,
+            "step_um": step_um,
+            "offset_steps_um": steps_um,
+            "dwell_ms": dwell,
+            "zero_sync": zero_sync,
+            "zero_xy": [zero_x, zero_y],
+            "response_pairs": session.pair_motor_names(),
+        }
+        if zero_sync:
+            sync = self.printer.lookup_object("servo_sync", None)
+            if sync is None:
+                raise gcmd.error(
+                    "SERVO_MEASURE_STRAIN_RESPONSE: [servo_sync] is not "
+                    "configured - add it so the line shares the maps' "
+                    "preload zero, or pass SYNC=0"
+                )
+            self._goto_xy(zero_x, zero_y, dwell)
+            sync.run(gcmd)
+        run = self._begin_run(
+            gcmd,
+            "strain_response",
+            tag,
+            "XY",
+            servos,
+            stroke_plan,
+            self._corexy_rails(gcmd, "X"),
+        )
+        reactor = self.printer.get_reactor()
+        total = session.pair_count() * len(steps_um)
+        try:
+            self._prep("X", dwell)
+            self._goto_xy(x_start, line_y, dwell)
+            for belt_idx in range(session.pair_count()):
+                for step_idx, value_um in enumerate(steps_um):
+                    slew_s = session.apply(belt_idx, value_um)
+                    reactor.pause(reactor.monotonic() + settle + slew_s)
+                    name = "belt%s_step%d" % ("ab"[belt_idx], step_idx)
+                    gcmd.respond_info(
+                        "strain response %d/%d: belt %s at %+.0f um"
+                        % (
+                            belt_idx * len(steps_um) + step_idx + 1,
+                            total,
+                            "AB"[belt_idx],
+                            value_um,
+                        )
+                    )
+                    self._start_capture(name, servos)
+                    self._strokes("X", x_start, x_end, speed, accel, 1, dwell)
+                    self._stop_capture()
+                    run.record_step(
+                        SweepStep(
+                            name,
+                            {"belt": float(belt_idx), "offset_um": value_um},
+                            [],
+                        )
+                    )
+                slew_s = session.apply(belt_idx, 0.0)
+                reactor.pause(reactor.monotonic() + slew_s)
+            self._restore()
+        finally:
+            session.clear()
+            self._active_run = None
+        comp.fit_strain_response(gcmd, run.run_dir)
+
+    TUNE_MAX_ITERS = 5
+
+    cmd_SERVO_STRAIN_COMP_TUNE_help = (
+        "Converge the strain map's stiffness matrix against reality: "
+        "rebuild the FULL map from RUN=<baseline raster> at the trial "
+        "matrix (starting from the probe's values or "
+        "STIFFNESS_A/B+CROSS_AB/BA), enable it, sweep ONE verification "
+        "line, and scale each belt's matrix row by the fraction of the "
+        "intended correction the line actually shows — repeat until the "
+        "line reads flat (|1-rho| <= TOL). Each iteration costs one line "
+        "sweep, not a raster, and the converged map is already on disk "
+        "and enabled — it is the same full-bed map that was being "
+        "verified. Fails loudly if MAX_ITERS passes don't converge. "
+        "CoreXY only, needs [servo_strain_comp] and [servo_sync]. Params "
+        "RUN (required) SPACING TOL (0.05) MAX_ITERS (5) Y (map zero) "
+        "SPEED (50) ACCEL (1000) SETTLE (0.8) DWELL_MS TAG SYNC"
+    )
+
+    def cmd_SERVO_STRAIN_COMP_TUNE(self, gcmd: Any) -> None:
+        kin = self._kin()
+        if not kin.coupled_xy():
+            raise gcmd.error(
+                "SERVO_STRAIN_COMP_TUNE requires coupled XY (CoreXY) "
+                "kinematics - the strain map is a belt-pair measurement"
+            )
+        comp = self.printer.lookup_object("servo_strain_comp", None)
+        if comp is None:
+            raise gcmd.error(
+                "SERVO_STRAIN_COMP_TUNE needs [servo_strain_comp] "
+                "configured - it builds and applies the map"
+            )
+        spacing = gcmd.get_float("SPACING", None, above=2.0, maxval=100.0)
+        speed = gcmd.get_float("SPEED", 50.0, above=0.0)
+        accel = gcmd.get_float("ACCEL", 1000.0, above=0.0)
+        settle = gcmd.get_float("SETTLE", 0.8, above=0.0, maxval=5.0)
+        tol = gcmd.get_float("TOL", 0.05, above=0.0, below=0.5)
+        max_iters = gcmd.get_int(
+            "MAX_ITERS", self.TUNE_MAX_ITERS, minval=1, maxval=10
+        )
+        dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
+        tag = gcmd.get("TAG", "straintune")
+        zero_sync = gcmd.get_int("SYNC", 1, minval=0, maxval=1) == 1
+        servos = servo_strokes.axis_servos(gcmd, kin, "X")
+        tuner = comp.begin_tune(gcmd, gcmd.get("RUN"), spacing)
+        x_start = tuner.plan["x_start"]
+        x_end = tuner.plan["x_end"]
+        zero_xy = tuner.plan["zero_xy"]
+        line_y = gcmd.get_float("Y", zero_xy[1])
+        stroke_plan = {
+            "x_start": x_start,
+            "x_end": x_end,
+            "y": line_y,
+            "speed": speed,
+            "accel": accel,
+            "tol": tol,
+            "dwell_ms": dwell,
+            "zero_sync": zero_sync,
+            "zero_xy": list(zero_xy),
+        }
+        if zero_sync:
+            sync = self.printer.lookup_object("servo_sync", None)
+            if sync is None:
+                raise gcmd.error(
+                    "SERVO_STRAIN_COMP_TUNE: [servo_sync] is not "
+                    "configured - add it so the verification line shares "
+                    "the map's preload zero, or pass SYNC=0"
+                )
+            self._goto_xy(zero_xy[0], zero_xy[1], dwell)
+            sync.run(gcmd)
+        run = self._begin_run(
+            gcmd,
+            "strain_tune",
+            tag,
+            "XY",
+            servos,
+            stroke_plan,
+            self._corexy_rails(gcmd, "X"),
+        )
+        reactor = self.printer.get_reactor()
+        converged = False
+        results = None
+        try:
+            self._prep("X", dwell)
+            for iteration in range(max_iters):
+                tuner.rebuild_and_enable(gcmd)
+                reactor.pause(
+                    reactor.monotonic() + settle + tuner.enable_ramp_s()
+                )
+                self._goto_xy(x_start, line_y, dwell)
+                name = "iter%d" % iteration
+                self._start_capture(name, servos)
+                self._strokes("X", x_start, x_end, speed, accel, 1, dwell)
+                self._stop_capture()
+                results = tuner.score_line(gcmd, run.run_dir, name, line_y)
+                (kaa, kab), (kba, kbb) = tuner.matrix_rows()
+                swept = {
+                    "y": line_y,
+                    "kaa": kaa,
+                    "kab": kab,
+                    "kba": kba,
+                    "kbb": kbb,
+                }
+                for belt_idx, result in enumerate(results):
+                    swept["rho_%s" % "ab"[belt_idx]] = result["rho"]
+                    swept["rms_%s" % "ab"[belt_idx]] = result["rms"]
+                run.record_step(SweepStep(name, swept, []))
+                for belt_idx, result in enumerate(results):
+                    gcmd.respond_info(
+                        "tune %d/%d belt %s: achieved %.0f%% of intended "
+                        "correction, line residual %.2f%% rms "
+                        "(uncompensated %.2f%%)"
+                        % (
+                            iteration + 1,
+                            max_iters,
+                            "AB"[belt_idx],
+                            result["rho"] * 100.0,
+                            result["rms"],
+                            result["base_rms"],
+                        )
+                    )
+                if all(abs(r["rho"] - 1.0) <= tol for r in results):
+                    converged = True
+                    break
+                tuner.apply(results)
+            self._restore()
+        finally:
+            self._active_run = None
+        if not converged:
+            raise gcmd.error(
+                "did not converge within %d iterations — last rho %s; the "
+                "map from the final pass is still enabled"
+                % (
+                    max_iters,
+                    ", ".join(
+                        "belt %s %.2f" % ("AB"[i], r["rho"])
+                        for i, r in enumerate(results)
+                    ),
+                )
+            )
+        tuner.store_matrix()
+        (kaa, kab), (kba, kbb) = tuner.matrix_rows()
+        gcmd.respond_info(
+            "converged: stiffness A %.1f B %.1f, cross AB %.1f BA %.1f "
+            "%%/mm — full-bed map rebuilt with these values, written and "
+            "ENABLED; the matrix is stored for future builds"
+            % (kaa, kbb, kab, kba)
+        )
 
     cmd_SERVO_MEASURE_INERTIA_help = (
         "Excitation grid for the inertia/friction fit (servo-ident). "

@@ -180,7 +180,7 @@ run directory is charted by the dashboard's strain tab. Params: `SPEED`
 (50) `ACCEL` (1000) `LINE_SPACING` (10) `X_START` `X_END` `Y_START`
 `Y_END` `DWELL_MS` `TAG` (strain) `SYNC` (1).
 
-#### Strain compensation (SERVO_MEASURE_PAIR_STIFFNESS / SERVO_STRAIN_COMP_BUILD / SERVO_STRAIN_COMP)
+#### Strain compensation (SERVO_STRAIN_COMP_TUNE / SERVO_MEASURE_STRAIN_RESPONSE / SERVO_MEASURE_PAIR_STIFFNESS / SERVO_STRAIN_COMP_BUILD / SERVO_STRAIN_COMP_FIT / SERVO_STRAIN_COMP)
 The application half of the strain map, config section
 `[servo_strain_comp]`. The endpoint carries a per-belt 2D lookup table of
 **antisymmetric position offsets** keyed on the commanded carriage
@@ -211,22 +211,88 @@ SERVO_SYNC at the map's zero point to restore the calibrated anchor;
 nothing does this for you. The live anchor bias is visible in the
 `strain_comp_state` event (`anchor_bias_um`).
 
-The workflow: (1) `SERVO_MEASURE_PAIR_STIFFNESS` steps a constant
-antisymmetric offset (a 1×1 grid) through the same mechanism and reads
-the differential torque response over SDO 0x6077 — the fitted slope
-(%/mm) is the pair stiffness, and a poor fit (R² < 0.9) fails loudly.
-(2) `SERVO_STRAIN_COMP_BUILD RUN=<dir>` grids the run's elastic
-differential field per belt (each raster line's dense profile evaluated
-at the grid nodes it crosses), zeroes the map at the region center
-(SERVO_SYNC's zero point), divides by the stiffness, and writes
-`map_file` (default `~/printer_data/config/strain_comp.json`).
+**The stiffness is a matrix.** The two belts share the gantry, so an
+antisymmetric offset on one pair also strains the other — on the Trident
+bench the cross term is ~25% of the direct term, symmetric (reciprocity),
+and same-signed with the racking direction. Dividing each belt's field by
+its own scalar stiffness therefore copies every single-belt feature into
+the other belt at the coupling ratio (the diagonal "ghost" in a
+verification map). The build instead solves the 2×2 system per grid node,
+`offsets = -inv(K) @ strain`: each belt gets its own correction plus a
+partial same-sign helper offset for the other belt's field. A
+near-singular matrix (cross terms rivaling the direct terms) fails
+loudly.
+
+**Measure the matrix rolling, not parked.** A parked belt reads
+stiffer than one rolling over the pulleys and idlers — on the bench
+the parked probe (`SERVO_MEASURE_PAIR_STIFFNESS`) reads ~428/−122
+while every rolling measurement lands at ~353/−89, consistently across
+independent excitations. The map operates while moving, so calibrate
+in that regime; the parked probe supplies the starting values (its
+SHAPE — the cross/direct ratio — carries over; only the overall scale
+is off), and the tune loop converges the scale against reality.
+
+`SERVO_STRAIN_COMP_TUNE RUN=<baseline raster>` is that loop: rebuild
+the FULL map from the run at the trial matrix (never merging), enable
+it, sweep ONE verification line, and scale each belt's matrix row by
+the fraction of the intended correction the line actually shows —
+repeat until the line reads flat (|1−ρ| ≤ `TOL`). Each pass costs a
+line sweep, not a raster; on the bench ρ repeats line-to-line to
+±0.02, so it converges in about two passes. When it converges the
+tuned full-bed map is already on disk and enabled — it is the same
+map that was being verified — and the matrix is stored for future
+builds and recorded in the map (`stiffness_pct_per_mm`,
+`cross_pct_per_mm` per pair). Running out of `MAX_ITERS`, a line the
+map doesn't vary along, or an achieved fraction outside (0.2, 5) all
+fail loudly. Open-loop alternates that measure the matrix directly:
+`SERVO_MEASURE_STRAIN_RESPONSE` steps a constant antisymmetric offset
+through each pair's bank (0, ±STEP_UM, ±2·STEP_UM) while stroking one
+line — the line's field cancels out of the offset-response slope, no
+map or baseline needed; and `SERVO_STRAIN_COMP_FIT
+BASELINE=<uncompensated run> RUN=<compensated run>` regresses the
+field change between an existing run pair against the offsets the map
+applied. The exact scale is in any case not critical for `MERGE=1`
+convergence: a fractional matrix error leaves the same fraction of
+the field behind, and each merge pass shrinks it by that factor
+again.
+
+The workflow: (1) `SERVO_MEASURE_STRAIN_MAP` rasters the baseline;
+`SERVO_MEASURE_PAIR_STIFFNESS` (parked) supplies starting values.
+(2) `SERVO_STRAIN_COMP_TUNE RUN=<raster> SPACING=5` converges the
+matrix and leaves the tuned map enabled. Its rebuilds are the same
+build as `SERVO_STRAIN_COMP_BUILD RUN=<dir>`, which fits each belt's
+dense line
+samples with a structured field model — 1D components at 2 mm knots
+along each belt phase (x+y, x−y; CoreXY only) and along each axis, plus
+a smooth 2D remainder — evaluates the model at the output grid nodes,
+zeroes the maps at the region center (SERVO_SYNC's zero point), solves
+the per-node 2×2 system, and writes `map_file` (default
+`~/printer_data/config/strain_comp.json`). The model matters:
+point-sampling the raster at grid nodes aliases everything shorter than
+twice the node pitch, and the dominant fine structure is belt-phase
+diagonal at the 40 mm pulley period — on the bench it left a ~35%
+diagonal residue that the model build removes because diagonals stay
+diagonal between the raster lines. Pass `SPACING=5` on CoreXY so the
+40 mm harmonics also survive the endpoint's bilinear lookup (57×55
+stays within the 64/4096 grid caps on a 300 mm bed; the build fails
+loudly beyond them).
 (3) `SERVO_STRAIN_COMP ENABLE=1` resolves the map's motor names to
-slots/lanes on the live topology and uploads it; `ENABLE=0` ramps the
-compensation back out. Verify by re-running the strain map with the
-compensation enabled — the residual field should collapse. Params:
-stiffness `STEP_UM` (50) `SETTLE` (0.8) `AXIS`; build `RUN` (required)
-`STIFFNESS_A`/`STIFFNESS_B` (%/mm override) `SPACING` (run's line
-spacing).
+slots/lanes on the live topology and uploads it (the tune already
+leaves it enabled); `ENABLE=0` ramps the compensation back out. Verify
+with a full raster when the whole-bed picture matters — the residual
+field should collapse. (4) Fold later residuals straight into the map:
+`SERVO_STRAIN_COMP_BUILD RUN=<verification run> MERGE=1` (no stiffness
+params needed: the recorded matrix is reused), then `ENABLE=1`.
+Params: tune `RUN` (required) `SPACING` `TOL` (0.05) `MAX_ITERS` (5)
+`Y` (map zero) `SPEED` (50) `ACCEL` (1000) `SETTLE` (0.8) `DWELL_MS`
+`TAG` `SYNC` plus the build's matrix overrides; response `SPEED` (50)
+`ACCEL` (1000) `STEP_UM` (50) `SETTLE` (0.8) `Y` (area center)
+`X_START`/`X_END` `DWELL_MS` `TAG` `SYNC`;
+parked stiffness `STEP_UM` (50) `SETTLE` (0.8) `AXIS`; build `RUN`
+(required) `STIFFNESS_A`/`STIFFNESS_B` with `CROSS_AB`/`CROSS_BA`
+(%/mm matrix override; `CROSS_AB` is belt A's response to a belt B
+offset, 0 disables the cross term) `SPACING` (run's line spacing);
+fit `BASELINE` and `RUN` (both required).
 
 #### SERVO_MEASURE_INERTIA
 Records the excitation grid for the inertia/friction fit (no report — it is the
@@ -468,6 +534,8 @@ Schemas: [servo-cal-contracts.md](servo-cal-contracts.md).
 | `SERVO_DIFF_DAMPER` | — | no run dir; reconfigures the running endpoint |
 | `SERVO_DIFF_TRIM` | — | no run dir; reconfigures the running endpoint |
 | `SERVO_MEASURE_STRAIN_MAP` | dashboard `/api/runs/<name>/strain` | run dir with one capture per raster line; charted by the dashboard's strain tab |
+| `SERVO_MEASURE_STRAIN_RESPONSE` | in-klippy fit | run dir with one capture per offset step; reports + stores the rolling stiffness matrix |
+| `SERVO_STRAIN_COMP_TUNE` | in-klippy loop | run dir with one capture per iteration; converges the matrix, leaves the tuned map written + enabled |
 | `SERVO_CALIBRATE_GAINS` | `servo-cal analyze` | run dir + `results.json` verdict (highest clean gain step); `APPLY=1` also writes + verifies |
 | `SERVO_GAIN_LADDER` | `servo-cal analyze` (per rung + final) | run dir + `results.json` verdict; climbs until a rung flags trouble, then applies `SAFE` |
 | `SERVO_HARVEST_NOTCHES` | — | no run dir; writes C01.30, strokes, reads back notch 1–2, locks (C01.30=0); journaled param writes |

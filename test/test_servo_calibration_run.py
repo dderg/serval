@@ -106,12 +106,28 @@ class FakeEngine:
         return 2, self._values.get((index, subindex), 7)
 
 
+class FakeReactor:
+    def __init__(self):
+        self._t = 0.0
+
+    def monotonic(self):
+        self._t += 0.001
+        return self._t
+
+    def pause(self, until):
+        self._t = until
+
+
 class FakePrinter:
     command_error = RuntimeError
     _sentinel = object()
 
     def __init__(self, objs):
         self._objs = objs
+        self._reactor = FakeReactor()
+
+    def get_reactor(self):
+        return self._reactor
 
     def lookup_object(self, name, default=_sentinel):
         if name in self._objs:
@@ -674,6 +690,72 @@ def test_strain_map_rejects_cartesian_kinematics():
         sc.cmd_SERVO_MEASURE_STRAIN_MAP(FakeGcmd())
 
 
+class FakeStrainComp:
+    def __init__(self):
+        self.applied = []
+        self.cleared = 0
+        self.fits = []
+
+    def begin_constant_offsets(self, gcmd):
+        comp = self
+
+        class Session:
+            def pair_count(self):
+                return 2
+
+            def pair_motor_names(self):
+                return [["motor_a"], ["motor_b"]]
+
+            def apply(self, belt_idx, value_um):
+                comp.applied.append((belt_idx, value_um))
+                return 0.0
+
+            def clear(self):
+                comp.cleared += 1
+
+        return Session()
+
+    def fit_strain_response(self, gcmd, run_dir):
+        self.fits.append(run_dir)
+
+
+def test_strain_response_steps_each_pair_along_one_line_and_fits():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    sc.printer._objs["servo_sync"] = FakeServoSync()
+    comp = FakeStrainComp()
+    sc.printer._objs["servo_strain_comp"] = comp
+    sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
+    sc.cmd_SERVO_MEASURE_STRAIN_RESPONSE(FakeGcmd(STEP_UM="50"))
+    steps = [0.0, 50.0, -50.0, 100.0, -100.0]
+    assert comp.applied == (
+        [(0, v) for v in steps]
+        + [(0, 0.0)]
+        + [(1, v) for v in steps]
+        + [(1, 0.0)]
+    )
+    assert comp.cleared == 1
+    caps = sc.printer.lookup_object("servo_capture").captures
+    names = [os.path.basename(path) for path, _servos in caps]
+    assert names == [
+        "step_belt%s_step%d.scap" % (belt, i) for belt in "ab" for i in range(5)
+    ]
+    m = _manifest(sc)
+    assert m["experiment"] == "strain_response"
+    assert m["stroke_plan"]["response_pairs"] == [["motor_a"], ["motor_b"]]
+    assert m["stroke_plan"]["y"] == 150.0
+    assert m["steps"][1]["swept"] == {"belt": 0.0, "offset_um": 50.0}
+    assert comp.fits == [os.path.dirname(caps[0][0])]
+
+
+def test_strain_response_without_strain_comp_errors_loudly():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
+    with pytest.raises(RuntimeError, match="servo_strain_comp"):
+        sc.cmd_SERVO_MEASURE_STRAIN_RESPONSE(FakeGcmd())
+
+
 NOTCH_VALUES = {
     (0x2001, 0x41): 111,
     (0x2001, 0x42): 1,
@@ -912,3 +994,90 @@ def test_load_config_pulls_in_servo_tuning():
     printer = RecordingPrinter(objs)
     servo_calibration.load_config(FakeConfig(printer))
     assert printer.loaded == ["servo_tuning"]
+
+
+class FakeTuner:
+    def __init__(self, rho_seq):
+        self.plan = {
+            "x_start": 30.0,
+            "x_end": 270.0,
+            "zero_xy": [150.0, 150.0],
+            "line_spacing": 10.0,
+        }
+        self.rho_seq = list(rho_seq)
+        self.rebuilds = 0
+        self.applied = []
+        self.stored = 0
+        self.scored = []
+
+    def matrix_rows(self):
+        return [[300.0, -75.0], [-75.0, 300.0]]
+
+    def enable_ramp_s(self):
+        return 0.0
+
+    def rebuild_and_enable(self, gcmd):
+        self.rebuilds += 1
+
+    def score_line(self, gcmd, run_dir, name, line_y):
+        self.scored.append((run_dir, name, line_y))
+        rho = self.rho_seq.pop(0)
+        return [
+            {"rho": rho, "rms": 1.0, "base_rms": 9.0},
+            {"rho": rho, "rms": 1.0, "base_rms": 8.0},
+        ]
+
+    def apply(self, results):
+        self.applied.append([r["rho"] for r in results])
+
+    def store_matrix(self):
+        self.stored += 1
+
+
+def make_tune_sc(rho_seq):
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    sc.printer._objs["servo_sync"] = FakeServoSync()
+    comp = FakeStrainComp()
+    comp.tuner = FakeTuner(rho_seq)
+    comp.begin_tune = lambda gcmd, run_raw, spacing: comp.tuner
+    sc.printer._objs["servo_strain_comp"] = comp
+    sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
+    return sc, comp
+
+
+def test_tune_loops_one_line_until_converged():
+    sc, comp = make_tune_sc([0.66, 1.01])
+    sc.cmd_SERVO_STRAIN_COMP_TUNE(FakeGcmd(RUN="ignored"))
+    tuner = comp.tuner
+    assert tuner.rebuilds == 2
+    assert tuner.applied == [[0.66, 0.66]]
+    assert tuner.stored == 1
+    caps = sc.printer.lookup_object("servo_capture").captures
+    names = [os.path.basename(path) for path, _servos in caps]
+    assert names == ["step_iter0.scap", "step_iter1.scap"]
+    assert tuner.scored[0][1] == "iter0"
+    assert tuner.scored[0][2] == 150.0
+    m = _manifest(sc)
+    assert m["experiment"] == "strain_tune"
+    # The dashboard's manifest parser types `applied` strictly (servo
+    # param writes); diagnostics ride in the free-form `swept`.
+    assert m["steps"][0]["applied"] == []
+    assert m["steps"][0]["swept"]["rho_a"] == 0.66
+    assert m["steps"][0]["swept"]["kaa"] == 300.0
+    assert m["steps"][0]["swept"]["y"] == 150.0
+
+
+def test_tune_fails_loudly_when_it_does_not_converge():
+    sc, comp = make_tune_sc([0.5] * 5)
+    with pytest.raises(RuntimeError, match="did not converge"):
+        sc.cmd_SERVO_STRAIN_COMP_TUNE(FakeGcmd(RUN="ignored"))
+    assert comp.tuner.stored == 0
+
+
+def test_tune_without_strain_comp_errors_loudly():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
+    with pytest.raises(RuntimeError, match="servo_strain_comp"):
+        sc.cmd_SERVO_STRAIN_COMP_TUNE(FakeGcmd(RUN="ignored"))
