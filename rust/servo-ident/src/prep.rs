@@ -28,8 +28,11 @@ pub struct PrepOptions {
     /// Zero-phase low-pass cutoff applied to both sides of the regression
     /// (Hz), and used for the in-band residual report. 0 disables filtering.
     pub cutoff_hz: f64,
-    /// Samples within this distance of a velocity-deadband sample are
-    /// dropped: breakaway/landing stiction transients are unmodeled.
+    /// Samples within this distance of a velocity-deadband sample of an
+    /// active mode are dropped: breakaway/landing stiction transients are
+    /// unmodeled. A mode idle for a whole segment (an axis-aligned stroke
+    /// leaves the other mode at exactly zero) blanks nothing — it is not
+    /// reversing, and its coulomb column is zero there anyway.
     pub blank_reversal_s: f64,
     /// Search range for the accel→torque delay. 0 disables alignment.
     pub max_delay_s: f64,
@@ -308,6 +311,12 @@ pub fn prep(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> Prepped
     let blank = (opts.blank_reversal_s / dt).round() as usize;
     for md in 0..n_modes {
         for seg in segs.iter() {
+            let mode_moves = seg
+                .clone()
+                .any(|k| vel_mode_raw[md][k].abs() > COULOMB_DEADBAND_MM_S);
+            if !mode_moves {
+                continue;
+            }
             for k in seg.clone() {
                 if vel_mode_raw[md][k].abs() <= COULOMB_DEADBAND_MM_S {
                     let lo = k.saturating_sub(blank).max(seg.start);

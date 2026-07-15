@@ -282,3 +282,89 @@ fn in_band_residual_excludes_out_of_band_pollution() {
     );
     assert!(inband < 5.0, "in-band residual {inband}");
 }
+
+fn corexy_capture(opposing_second_segment: bool) -> Capture {
+    let (t1, acc1, vel1) = strokes(10000.0, 500.0, 0.4, 2);
+    let n1 = t1.len();
+    let gap = t1[n1 - 1] + 0.1;
+    let (t2, acc2, vel2) = strokes(10000.0, 500.0, 0.4, 2);
+    let t: Vec<f64> = t1
+        .iter()
+        .chain(t2.iter().map(|v| *v + gap).collect::<Vec<_>>().iter())
+        .copied()
+        .collect();
+    let second_b: Vec<f64> = if opposing_second_segment {
+        vel2.iter().map(|v| -v).collect()
+    } else {
+        vel2.clone()
+    };
+    let second_b_acc: Vec<f64> = if opposing_second_segment {
+        acc2.iter().map(|a| -a).collect()
+    } else {
+        acc2.clone()
+    };
+    let vel_a: Vec<f64> = vel1.iter().chain(vel2.iter()).copied().collect();
+    let vel_b: Vec<f64> = vel1.iter().chain(second_b.iter()).copied().collect();
+    let acc_a: Vec<f64> = acc1.iter().chain(acc2.iter()).copied().collect();
+    let acc_b: Vec<f64> = acc1.iter().chain(second_b_acc.iter()).copied().collect();
+    let n = t.len();
+    Capture {
+        t,
+        acc: vec![acc_a, acc_b],
+        vel: vec![vel_a.clone(), vel_b.clone()],
+        vel_act: vec![vel_a, vel_b],
+        torque: vec![vec![0.0; n], vec![0.0; n]],
+    }
+}
+
+#[test]
+fn axis_aligned_strokes_survive_the_idle_modes_blanking() {
+    let cap = corexy_capture(false);
+    let structure = Structure::new(vec![vec![0.5, 0.5], vec![0.5, -0.5]]);
+    let pp = prep(&cap, &structure, &PrepOptions::default());
+    let kept = pp.valid.iter().filter(|v| **v).count();
+    assert!(
+        kept * 2 > cap.t.len(),
+        "idle y mode blanked axis-aligned strokes: kept {kept}/{}",
+        cap.t.len()
+    );
+}
+
+#[test]
+fn a_mode_active_in_the_segment_still_blanks_its_deadband() {
+    let n = 8000;
+    let v = 300.0;
+    let t: Vec<f64> = (0..n).map(|k| k as f64 * DT).collect();
+    let vel_a = vec![v; n];
+    let vel_b: Vec<f64> = (0..n)
+        .map(|k| -3.0 * v + 6.0 * v * k as f64 / (n - 1) as f64)
+        .collect();
+    let acc_b = vec![6.0 * v / ((n - 1) as f64 * DT); n];
+    let cap = Capture {
+        t,
+        acc: vec![vec![0.0; n], acc_b],
+        vel: vec![vel_a.clone(), vel_b.clone()],
+        vel_act: vec![vel_a.clone(), vel_b.clone()],
+        torque: vec![vec![0.0; n], vec![0.0; n]],
+    };
+    let structure = Structure::new(vec![vec![0.5, 0.5], vec![0.5, -0.5]]);
+    let pp = prep(&cap, &structure, &PrepOptions::default());
+    let mut crossing_blanked = 0;
+    let mut crossing_total = 0;
+    for k in 0..n {
+        let vx = 0.5 * (vel_a[k] + vel_b[k]);
+        let vy = 0.5 * (vel_a[k] - vel_b[k]);
+        if vx.abs() <= 0.5 || vy.abs() <= 0.5 {
+            crossing_total += 1;
+            if !pp.valid[k] {
+                crossing_blanked += 1;
+            }
+        }
+    }
+    assert!(crossing_total > 0, "test capture has no mode crossings");
+    assert_eq!(
+        crossing_blanked, crossing_total,
+        "deadband samples of active modes must be blanked"
+    );
+    assert!(pp.valid[n / 2], "sample far from any crossing was blanked");
+}
