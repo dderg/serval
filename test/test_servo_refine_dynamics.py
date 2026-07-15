@@ -550,9 +550,7 @@ def test_refine_dynamics_restores_baseline_on_stroke_failure():
     assert _written_profiles(sc) == []
 
 
-def _flagging_run(sc, flag, steps, resonance=None):
-    """steps='all' flags every step (the baseline included);
-    steps='candidates' flags only non-baseline scales (names not _s1000)."""
+def _flagging_run(sc, flag):
     real_run = sc._run
 
     def flagged_run(gcmd, argv, timeout):
@@ -563,64 +561,27 @@ def _flagging_run(sc, flag, steps, resonance=None):
         with open(path) as f:
             results = json.load(f)
         for step in results["steps"]:
-            if steps == "candidates" and step["name"].endswith("_s1000"):
-                continue
             step["flags"] = [flag]
-            if resonance is not None:
-                for dr in step["drives"].values():
-                    dr["resonance"] = resonance
         with open(path, "w") as f:
             json.dump(results, f)
 
     return flagged_run
 
 
-def test_refine_dynamics_aborts_on_candidate_torque_rail():
+def test_refine_dynamics_aborts_on_torque_rail():
     sc, gcode, engine, _path = make_calibration()
-    sc._run = _flagging_run(sc, "torque_saturated", steps="candidates")
-    with pytest.raises(RuntimeError, match="torque rail"):
-        sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(AXIS="X"))
-    assert engine.dynamics_calls[-1] == _baseline_call(engine, _path)
-
-
-def test_refine_dynamics_aborts_on_baseline_torque_rail():
-    sc, gcode, engine, _path = make_calibration()
-    sc._run = _flagging_run(sc, "torque_saturated", steps="all")
+    sc._run = _flagging_run(sc, "torque_saturated")
     with pytest.raises(RuntimeError, match="torque rail"):
         sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(AXIS="X"))
     assert len(engine.dynamics_calls) == 2
     assert engine.dynamics_calls[-1] == _baseline_call(engine, _path)
 
 
-def test_refine_dynamics_aborts_when_candidate_introduces_resonance():
-    sc, gcode, engine, _path = make_calibration()
-    sc._run = _flagging_run(
-        sc,
-        "resonance_detected",
-        steps="candidates",
-        resonance={"detected": True, "ratio": 11.0, "peak_hz": 95.0},
-    )
-    with pytest.raises(RuntimeError, match="introduced it"):
-        sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(AXIS="X"))
-    assert engine.dynamics_calls[-1] == _baseline_call(engine, _path)
-
-
-def test_refine_dynamics_continues_past_preexisting_resonance():
+def test_refine_dynamics_ignores_the_resonance_flag():
     sc, gcode, engine, _path = make_calibration(overshoot_min=0.9)
-    sc._run = _flagging_run(
-        sc,
-        "resonance_detected",
-        steps="all",
-        resonance={"detected": True, "ratio": 13.7, "peak_hz": 98.0},
-    )
+    sc._run = _flagging_run(sc, "resonance_detected")
     gcmd = FakeGcmd(AXIS="X")
     sc.cmd_SERVO_REFINE_DYNAMICS(gcmd)
-    warnings = [r for r in gcmd.responses if r.startswith("warning: step ")]
-    assert len(warnings) == 2, "one warning per phase baseline"
-    assert "resonance ratio 13.7 at 98 Hz" in warnings[0]
-    assert any(
-        "scale " in r and "resonance ratio 13.7" in r for r in gcmd.responses
-    )
     profiles = _written_profiles(sc)
     assert len(profiles) == 1
     with open(profiles[0], "rb") as f:

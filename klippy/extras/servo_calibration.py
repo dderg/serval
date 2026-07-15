@@ -1315,23 +1315,6 @@ class ServoCalibration:
                 return list(step.get("flags") or [])
         return []
 
-    def _step_worst_resonance(
-        self, results: dict[str, Any], step_name: str
-    ) -> tuple[float, float, str] | None:
-        """(ratio, peak_hz, drive) of the strongest resonance reading on the
-        named step, None when the analyzer recorded none."""
-        worst = None
-        for step in results.get("steps") or []:
-            if step.get("name") != step_name:
-                continue
-            for drive, dr in sorted((step.get("drives") or {}).items()):
-                res = dr.get("resonance") or {}
-                if "ratio" not in res:
-                    continue
-                if worst is None or res["ratio"] > worst[0]:
-                    worst = (res["ratio"], res.get("peak_hz", 0.0), drive)
-        return worst
-
     def _check_clean_verdict(
         self,
         gcmd: Any,
@@ -3171,10 +3154,9 @@ class ServoCalibration:
         "are not supported). The live model is ALWAYS restored to the "
         "baseline afterwards (also on failure; if klippy dies mid-run the "
         "endpoint keeps the last candidate until restart). A torque-rail "
-        "flag on any step aborts; a resonance flag aborts only when that "
-        "phase's scale-1.0 baseline was clean - a baseline that already "
-        "resonates just prints a warning and the per-scale resonance "
-        "ratios, and the run continues. When a scale "
+        "flag on any step aborts (clipped strokes cannot score a "
+        "candidate); the resonance flag is ignored here - scaling a "
+        "feedforward term does not move the loop's resonances. When a scale "
         "beats 1.0 the scaled profile is written to a new TOML - pointing "
         "dynamics_profile at it (then RESTART) is the only way to keep it. "
         "Params TERM (MASS) AXIS (X) SERVOS PROFILE LO (0.7) HI (1.3) TOL "
@@ -3368,52 +3350,15 @@ class ServoCalibration:
         ) -> tuple[float, float, float, dict[float, dict[str, float]]]:
             scores: dict[float, float] = {}
             reports: dict[float, dict[str, float]] = {}
-            baseline_flags: set[str] | None = None
 
-            def resonance_note(results: dict[str, Any], step_name: str) -> str:
-                worst = self._step_worst_resonance(results, step_name)
-                if worst is None:
-                    return ""
-                return ", resonance ratio %.1f at %.0f Hz (%s)" % worst
-
-            def gate_flags(step_name: str, results: dict[str, Any]) -> None:
-                nonlocal baseline_flags
-                flags = (
-                    set(self._step_flags(results, step_name))
-                    & VERDICT_ABORT_FLAGS
-                )
-                if "torque_saturated" in flags:
+            def gate_torque_rail(
+                step_name: str, results: dict[str, Any]
+            ) -> None:
+                if "torque_saturated" in self._step_flags(results, step_name):
                     raise gcmd.error(
                         "step %s hit the torque rail - clipped strokes "
                         "cannot score a candidate, aborting refinement"
                         % (step_name,)
-                    )
-                if baseline_flags is None:
-                    baseline_flags = flags
-                    if flags:
-                        gcmd.respond_info(
-                            "warning: step %s flags %s at scale 1.0%s - the "
-                            "baseline model does this on its own, so the "
-                            "flag cannot disqualify candidates; watch the "
-                            "per-scale ratios and judge the winner yourself"
-                            % (
-                                step_name,
-                                sorted(flags),
-                                resonance_note(results, step_name),
-                            )
-                        )
-                    return
-                introduced = sorted(flags - baseline_flags)
-                if introduced:
-                    raise gcmd.error(
-                        "step %s flags %s%s on a candidate the baseline "
-                        "never tripped - the scaled model introduced it, "
-                        "aborting refinement"
-                        % (
-                            step_name,
-                            introduced,
-                            resonance_note(results, step_name),
-                        )
                     )
 
             def evaluate(scale: float) -> float:
@@ -3430,19 +3375,14 @@ class ServoCalibration:
                     gcmd,
                 )
                 results = self._run_analyze(gcmd, run)
-                gate_flags(step.name, results)
+                gate_torque_rail(step.name, results)
                 reports[key] = {
                     m: self._step_metric_mean(gcmd, results, step.name, m)
                     for m in eval_metrics
                 }
                 gcmd.respond_info(
-                    "%s scale %.4f -> %s (counts, mean per move)%s"
-                    % (
-                        adapter.label,
-                        key,
-                        metrics_line(reports[key]),
-                        resonance_note(results, step.name),
-                    )
+                    "%s scale %.4f -> %s (counts, mean per move)"
+                    % (adapter.label, key, metrics_line(reports[key]))
                 )
                 scores[key] = reports[key][metric]
                 return scores[key]
