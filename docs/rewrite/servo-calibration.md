@@ -346,11 +346,16 @@ Empirical refinement of an existing dynamics profile, for when the
 grid. Golden-section search over a scale factor applied to the baseline
 profile's **mass matrix** (`TERM=MASS`, default) or **viscous vector**
 (`TERM=VISCOUS`): each candidate model is streamed into the *running*
-endpoint (no restart), measured with one tracking capture of `ITERATIONS`
-strokes, and scored from `servo-cal analyze` — mean per-move **overshoot**
-for `MASS` (mass-FF error shows up as overshoot at move ends; use a high
-`ACCEL`), mean per-move **ferr_rms** for `VISCOUS` (viscous error shows up
-as cruise following error; use a high `SPEED` and a long stroke). The
+endpoint (no restart) and measured with one tracking capture of the full
+`SERVO_MEASURE_INERTIA` `ACCELS` × `SPEEDS` grid (X and Y strokes on
+`coupled_xy`, so both directions of the coupled mass matrix are excited),
+then scored from `servo-cal analyze` — mean per-move **overshoot** for
+`MASS` (mass-FF error shows up as overshoot at move ends), mean per-move
+**ferr_rms** for `VISCOUS` (viscous error shows up as cruise following
+error). Scoring the mean over the whole grid keeps a scale that helps at
+one operating point but hurts at another from winning; the per-scale
+report also lists mean overshoot, ferr_rms, and ferr_peak so the
+non-scored metrics can be sanity-checked. The
 baseline is `PROFILE=` or the node-level `[ethercat_node]
 dynamics_profile`; per-motor profiles are not supported (point `PROFILE=`
 at an equivalent node-level TOML). The search brackets `[LO, HI]` around
@@ -367,9 +372,9 @@ keys, never overwriting) and the `dynamics_profile` paste line is printed
 — config edit + restart is the only way to keep it; when the baseline
 wins, nothing is written. Refine `MASS` first, then re-run with
 `TERM=VISCOUS` against the refined profile. Params: `TERM` (MASS) `AXIS`
-(X) `SERVO` `PROFILE` `LO` (0.7) `HI` (1.3) `TOL` (0.02) `MAX_EVALS` (10)
-`START` `END` `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (3) `DWELL_MS`
-`TAG` (refdyn) `NAME` (refined_<term>).
+(X) `SERVOS` `PROFILE` `LO` (0.7) `HI` (1.3) `TOL` (0.02) `MAX_EVALS` (10)
+`START` `END` `X_START` `X_END` `Y_START` `Y_END` `ACCELS` `SPEEDS`
+`ITERATIONS` `DWELL_MS` `TAG` (refdyn) `NAME` (refined_<term>).
 
 #### SERVO_CALIBRATE_INERTIA_RATIO
 Step 2 of tuning: identify the load inertia and print the recommended C00.06.

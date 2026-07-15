@@ -3080,18 +3080,20 @@ class ServoCalibration:
         "Empirically refine the torque-feedforward dynamics profile on the "
         "RUNNING endpoint: golden-section search over a scale factor on the "
         "baseline profile's mass matrix (TERM=MASS, scored on mean "
-        "overshoot - use a high ACCEL) or viscous vector (TERM=VISCOUS, "
-        "scored on mean ferr_rms - use a high SPEED and a long stroke), one "
-        "tracking capture per candidate. The baseline is PROFILE= or the "
+        "overshoot) or viscous vector (TERM=VISCOUS, scored on mean "
+        "ferr_rms). Each candidate runs the full SERVO_MEASURE_INERTIA "
+        "ACCELS x SPEEDS grid (X and Y strokes on coupled_xy) in one "
+        "tracking capture, so the score averages over every operating "
+        "point. The baseline is PROFILE= or the "
         "node-level [ethercat_node] dynamics_profile (per-motor profiles "
         "are not supported). The live model is ALWAYS restored to the "
         "baseline afterwards (also on failure; if klippy dies mid-run the "
         "endpoint keeps the last candidate until restart). When a scale "
         "beats 1.0 the scaled profile is written to a new TOML - pointing "
         "dynamics_profile at it (then RESTART) is the only way to keep it. "
-        "Params TERM (MASS) AXIS (X) SERVO PROFILE LO (0.7) HI (1.3) TOL "
-        "(0.02) MAX_EVALS (10) START END SPEED ACCEL ITERATIONS DWELL_MS "
-        "TAG (refdyn) NAME"
+        "Params TERM (MASS) AXIS (X) SERVOS PROFILE LO (0.7) HI (1.3) TOL "
+        "(0.02) MAX_EVALS (10) START END X_START X_END Y_START Y_END "
+        "ACCELS SPEEDS ITERATIONS DWELL_MS TAG (refdyn) NAME"
     )
 
     def _refine_dynamics_node(self, gcmd: Any, servos: list[str]) -> Any:
@@ -3147,8 +3149,8 @@ class ServoCalibration:
                 "TERM must be MASS or VISCOUS (got %r)"
                 % (gcmd.get("TERM", ""),)
             )
-        axis = gcmd.get("AXIS", "X").upper()
-        servos = self._servos(gcmd, axis)
+        kin = self._kin()
+        servos, rails, axis = self._grid_servos(gcmd, kin)
         node = self._refine_dynamics_node(gcmd, servos)
         handle = node.get_engine_handle()
         if handle is None:
@@ -3157,11 +3159,44 @@ class ServoCalibration:
             )
         engine = self.printer.lookup_object("motion_engine")
         profile_path, baseline = self._load_baseline_dynamics(gcmd, node)
-        start, end = servo_strokes.axis_bounds(gcmd, self.bounds, axis)
-        speed = gcmd.get_float("SPEED", 100.0, above=0.0)
-        accel = gcmd.get_float("ACCEL", 3000.0, above=0.0)
-        iterations = gcmd.get_int("ITERATIONS", 3, minval=1)
-        dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
+        accels, speeds, iterations, dwell = servo_strokes.grid(
+            gcmd, self.accels, self.speeds, self.iterations, self.dwell_ms
+        )
+        if kin.coupled_xy():
+            x_start, x_end, y_start, y_end = servo_strokes.xy_bounds(
+                gcmd, self.bounds
+            )
+            x_center = (x_start + x_end) / 2.0
+            y_center = (y_start + y_end) / 2.0
+
+            def prep_axes() -> None:
+                self._prep("X", dwell)
+                self._prep("Y", dwell)
+
+            def run_grid() -> None:
+                for accel in accels:
+                    for speed in speeds:
+                        self._goto_xy(x_start, y_center, dwell)
+                        self._strokes(
+                            "X", x_start, x_end, speed, accel, iterations, dwell
+                        )
+                        self._goto_xy(x_center, y_start, dwell)
+                        self._strokes(
+                            "Y", y_start, y_end, speed, accel, iterations, dwell
+                        )
+        else:
+            start, end = servo_strokes.axis_bounds(gcmd, self.bounds, axis)
+
+            def prep_axes() -> None:
+                self._prep(axis, dwell)
+
+            def run_grid() -> None:
+                for accel in accels:
+                    for speed in speeds:
+                        self._strokes(
+                            axis, start, end, speed, accel, iterations, dwell
+                        )
+
         tag = gcmd.get("TAG", "refdyn")
         name = gcmd.get("NAME", "refined_%s" % (term.lower(),))
         lo = gcmd.get_float("LO", 0.7, above=0.0)
@@ -3175,10 +3210,8 @@ class ServoCalibration:
             )
         metric = DYNAMICS_METRIC_BY_TERM[term]
         stroke_plan = {
-            "start": start,
-            "end": end,
-            "speed": speed,
-            "accel": accel,
+            "speeds": speeds,
+            "accels": accels,
             "iterations": iterations,
             "dwell_ms": dwell,
         }
@@ -3189,7 +3222,7 @@ class ServoCalibration:
             axis,
             servos,
             stroke_plan,
-            self._corexy_rails(gcmd, axis),
+            rails,
         )
         run.manifest["dynamics_refine"] = {
             "baseline_profile": profile_path,
@@ -3201,7 +3234,9 @@ class ServoCalibration:
         }
         run.write()
         adapter = DynamicsModelAdapter(engine, handle, baseline, term, tag)
+        report_metrics = ("overshoot", "ferr_rms", "ferr_peak")
         scores: dict[float, float] = {}
+        reports: dict[float, dict[str, float]] = {}
 
         def evaluate(scale: float) -> float:
             key = round(scale, 4)
@@ -3213,22 +3248,31 @@ class ServoCalibration:
                 key,
                 max_evals + 1,
                 servos,
-                lambda _s: self._strokes(
-                    axis, start, end, speed, accel, iterations, dwell
-                ),
+                lambda _s: run_grid(),
                 gcmd,
             )
             results = self._run_analyze(gcmd, run)
-            score = self._step_metric_mean(gcmd, results, step.name, metric)
+            reports[key] = {
+                m: self._step_metric_mean(gcmd, results, step.name, m)
+                for m in report_metrics
+            }
+            score = reports[key][metric]
             gcmd.respond_info(
-                "scale %.4f -> mean %s %.1f counts" % (key, metric, score)
+                "scale %.4f -> %s (counts)"
+                % (
+                    key,
+                    ", ".join(
+                        "mean %s %.1f" % (m, reports[key][m])
+                        for m in report_metrics
+                    ),
+                )
             )
             scores[key] = score
             return score
 
         try:
             out_path = self._dynamics_out_path(gcmd, run, name)
-            self._prep(axis, dwell)
+            prep_axes()
             baseline_score = evaluate(1.0)
             best_scale, best_score, _probes = golden_section_search(
                 evaluate, lo, hi, tol, max_evals
@@ -3246,10 +3290,18 @@ class ServoCalibration:
             finally:
                 self._restore()
                 self._active_run = None
-        for scale, score in sorted(scores.items()):
+        for scale in sorted(scores):
             marker = "  <- best" if scale == round(best_scale, 4) else ""
             gcmd.respond_info(
-                "  scale %.4f: mean %s %.1f%s" % (scale, metric, score, marker)
+                "  scale %.4f: %s%s"
+                % (
+                    scale,
+                    ", ".join(
+                        "%s %.1f" % (m, reports[scale][m])
+                        for m in report_metrics
+                    ),
+                    marker,
+                )
             )
         structured_log.event(
             "calibration",

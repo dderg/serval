@@ -465,6 +465,34 @@ def test_refine_dynamics_viscous_scales_only_viscous():
     assert raw["viscous"][0] == pytest.approx(0.004 * raw["refined_scale"])
 
 
+def test_refine_dynamics_runs_full_grid_on_both_axes_per_candidate():
+    sc, gcode, engine, _path = make_calibration()
+    strokes = []
+    sc._strokes = lambda axis, start, end, speed, accel, *a: strokes.append(
+        (axis, speed, accel)
+    )
+    sc.cmd_SERVO_REFINE_DYNAMICS(
+        FakeGcmd(ACCELS="5000,10000", SPEEDS="100,400")
+    )
+    candidates = len(engine.dynamics_calls) - 1
+    grid = {(s, a) for a in (5000.0, 10000.0) for s in (100.0, 400.0)}
+    assert len(strokes) == candidates * len(grid) * 2
+    for axis in ("X", "Y"):
+        assert {(s, a) for ax, s, a in strokes if ax == axis} == grid
+
+
+def test_refine_dynamics_reports_all_metrics_per_scale():
+    sc, gcode, engine, _path = make_calibration(overshoot_min=0.9)
+    gcmd = FakeGcmd(AXIS="X")
+    sc.cmd_SERVO_REFINE_DYNAMICS(gcmd)
+    summary = [r for r in gcmd.responses if r.startswith("  scale ")]
+    assert summary, "no per-scale summary lines"
+    for line in summary:
+        assert "overshoot" in line
+        assert "ferr_rms" in line
+        assert "ferr_peak" in line
+
+
 def test_refine_dynamics_skips_write_when_baseline_wins():
     sc, gcode, engine, _path = make_calibration(overshoot_min=1.0)
     gcmd = FakeGcmd(AXIS="X")
