@@ -624,23 +624,31 @@ pub(super) fn handle_set_dynamics_model(
     correlation_id: u32,
     msg: SetDynamicsModel,
 ) {
-    let n = msg.axes_count as usize;
-    let rc = if n != ctx.num_slaves || msg.mass.len() != n * n {
+    let slots = msg.slots_count as usize;
+    let modes = msg.modes_count as usize;
+    let dims_consistent = msg.frame.len() == modes * slots
+        && msg.mass.len() == modes
+        && msg.viscous.len() == modes
+        && msg.coulomb.len() == modes;
+    let rc = if slots != ctx.num_slaves || !dims_consistent {
         eprintln!(
-            "ec-rt: SetDynamicsModel axes_count={} mass_len={} does not match {} slaves",
-            msg.axes_count,
+            "ec-rt: SetDynamicsModel slots_count={} modes_count={} \
+             frame_len={} mass_len={} does not match {} slaves",
+            msg.slots_count,
+            msg.modes_count,
+            msg.frame.len(),
             msg.mass.len(),
             ctx.num_slaves,
         );
         ERR_DYNAMICS_BAD_DIM
     } else {
         match DynamicsModel::from_parts(
-            n,
+            slots,
+            modes,
+            &msg.frame,
             &msg.mass,
             &msg.viscous,
-            &msg.coulomb_fwd,
-            &msg.coulomb_rev,
-            msg.deadband_mm_s,
+            &msg.coulomb,
         ) {
             Ok(model) => {
                 ctx.dynamics = Some(model);
@@ -653,14 +661,14 @@ pub(super) fn handle_set_dynamics_model(
         }
     };
     eprintln!(
-        "ec-rt: SetDynamicsModel n={} deadband={} mm/s rc={rc}",
-        msg.axes_count, msg.deadband_mm_s,
+        "ec-rt: SetDynamicsModel slots={} modes={} rc={rc}",
+        msg.slots_count, msg.modes_count,
     );
     tracing::info!(
         subsystem = "ethercat",
         event = "set_dynamics_model",
-        axes_count = msg.axes_count,
-        deadband_mm_s = msg.deadband_mm_s,
+        slots_count = msg.slots_count,
+        modes_count = msg.modes_count,
         rc,
         "dynamics feedforward model reconfigured"
     );

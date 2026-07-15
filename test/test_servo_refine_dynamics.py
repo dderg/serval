@@ -17,18 +17,40 @@ pytestmark = pytest.mark.skipif(
 )
 
 BASELINE_TOML = """\
-version = 1
+version = 2
 axes = ["motor_a", "motor_b"]
-mass = [[0.030, -0.010], [-0.010, 0.030]]
-viscous = [0.004, 0.004]
-coulomb_fwd = [1.0, 1.0]
-coulomb_rev = [-1.0, -1.0]
-coulomb_deadband_mm_s = 0.5
+modes = ["x", "y"]
+frame = [[0.5, 0.5], [0.5, -0.5]]
+mass = [0.020, 0.030]
+viscous = [0.004, 0.005]
+coulomb = [1.0, 1.5]
 fit_rms_residual = [0.5, 0.5]
 """
 
-BASELINE_MASS_FLAT = [0.030, -0.010, -0.010, 0.030]
-BASELINE_VISCOUS = [0.004, 0.004]
+ONE_AXIS_TOML = """\
+version = 2
+axes = ["motor_a"]
+modes = ["x"]
+frame = [[1.0]]
+mass = [0.020]
+viscous = [0.004]
+coulomb = [1.0]
+"""
+
+NON_XY_TOML = """\
+version = 2
+axes = ["motor_a", "motor_b"]
+modes = ["a", "b"]
+frame = [[0.5, 0.5], [0.5, -0.5]]
+mass = [0.020, 0.030]
+viscous = [0.004, 0.005]
+coulomb = [1.0, 1.5]
+"""
+
+BASELINE_FRAME_FLAT = [0.5, 0.5, 0.5, -0.5]
+BASELINE_MASS = [0.020, 0.030]
+BASELINE_VISCOUS = [0.004, 0.005]
+BASELINE_COULOMB = [1.0, 1.5]
 
 
 def test_gss_converges_on_a_quadratic():
@@ -95,33 +117,38 @@ def test_gss_rejects_bad_inputs():
 def test_parse_dynamics_profile_roundtrip():
     p = servo_calibration.parse_dynamics_profile(BASELINE_TOML)
     assert p["axes"] == ["motor_a", "motor_b"]
-    assert p["mass"] == [[0.030, -0.010], [-0.010, 0.030]]
+    assert p["modes"] == ["x", "y"]
+    assert p["frame"] == [[0.5, 0.5], [0.5, -0.5]]
+    assert p["mass"] == BASELINE_MASS
     assert p["viscous"] == BASELINE_VISCOUS
-    assert p["coulomb_deadband_mm_s"] == 0.5
+    assert p["coulomb"] == BASELINE_COULOMB
 
 
 def test_parse_dynamics_profile_rejects_violations():
-    with pytest.raises(ValueError, match="version"):
+    with pytest.raises(ValueError, match="refit with SERVO_FIT_DYNAMICS"):
         servo_calibration.parse_dynamics_profile(
-            BASELINE_TOML.replace("version = 1", "version = 2")
+            BASELINE_TOML.replace("version = 2", "version = 1")
+        )
+    with pytest.raises(ValueError, match="frame"):
+        servo_calibration.parse_dynamics_profile(
+            BASELINE_TOML.replace(
+                "frame = [[0.5, 0.5], [0.5, -0.5]]", "frame = [[0.5, 0.5]]"
+            )
         )
     with pytest.raises(ValueError, match="mass"):
         servo_calibration.parse_dynamics_profile(
-            BASELINE_TOML.replace(
-                "mass = [[0.030, -0.010], [-0.010, 0.030]]",
-                "mass = [[0.030, -0.010]]",
-            )
+            BASELINE_TOML.replace("mass = [0.020, 0.030]", "mass = [0.020]")
         )
     with pytest.raises(ValueError, match="viscous"):
         servo_calibration.parse_dynamics_profile(
             BASELINE_TOML.replace(
-                "viscous = [0.004, 0.004]", "viscous = [0.004]"
+                "viscous = [0.004, 0.005]", "viscous = [0.004]"
             )
         )
     with pytest.raises(ValueError, match="non-finite"):
         servo_calibration.parse_dynamics_profile(
             BASELINE_TOML.replace(
-                "viscous = [0.004, 0.004]", "viscous = [0.004, nan]"
+                "viscous = [0.004, 0.005]", "viscous = [0.004, nan]"
             )
         )
 
@@ -129,19 +156,32 @@ def test_parse_dynamics_profile_rejects_violations():
 def test_scale_dynamics_touches_only_the_chosen_term():
     p = servo_calibration.parse_dynamics_profile(BASELINE_TOML)
     m = servo_calibration.scale_dynamics(p, "MASS", 1.1)
-    assert m["mass"][0][0] == pytest.approx(0.033)
-    assert m["mass"][0][1] == pytest.approx(-0.011)
+    assert m["mass"][0] == pytest.approx(0.022)
+    assert m["mass"][1] == pytest.approx(0.033)
     assert m["viscous"] == p["viscous"]
+    assert m["frame"] == p["frame"]
     v = servo_calibration.scale_dynamics(p, "VISCOUS", 0.5)
-    assert v["viscous"] == [0.002, 0.002]
+    assert v["viscous"] == [0.002, 0.0025]
     assert v["mass"] == p["mass"]
     c = servo_calibration.scale_dynamics(p, "COULOMB", 2.0)
-    assert c["coulomb_fwd"] == [2.0, 2.0]
-    assert c["coulomb_rev"] == [-2.0, -2.0]
+    assert c["coulomb"] == [2.0, 3.0]
     assert c["mass"] == p["mass"]
     assert c["viscous"] == p["viscous"]
     with pytest.raises(ValueError, match="unknown dynamics term"):
         servo_calibration.scale_dynamics(p, "STICTION", 1.0)
+
+
+def test_scale_dynamics_mode_scales_one_entry():
+    p = servo_calibration.parse_dynamics_profile(BASELINE_TOML)
+    mx = servo_calibration.scale_dynamics_mode(p, "MASS", 0, 1.25)
+    assert mx["mass"][0] == pytest.approx(0.025)
+    assert mx["mass"][1] == pytest.approx(0.030)
+    my = servo_calibration.scale_dynamics_mode(p, "MASS", 1, 2.0)
+    assert my["mass"][0] == pytest.approx(0.020)
+    assert my["mass"][1] == pytest.approx(0.060)
+    assert my["viscous"] == p["viscous"]
+    with pytest.raises(ValueError, match="unknown dynamics term"):
+        servo_calibration.scale_dynamics_mode(p, "STICTION", 0, 1.0)
 
 
 def test_render_dynamics_toml_reparses_with_provenance():
@@ -151,7 +191,9 @@ def test_render_dynamics_toml_reparses_with_provenance():
         scaled, "/cfg/dynamics_ident.toml", "MASS", {"": 0.93}, "/logs/run_1"
     )
     again = servo_calibration.parse_dynamics_profile(text)
-    assert again["mass"][0][0] == pytest.approx(0.030 * 0.93)
+    assert again["mass"][0] == pytest.approx(0.020 * 0.93)
+    assert again["mass"][1] == pytest.approx(0.030 * 0.93)
+    assert again["frame"] == [[0.5, 0.5], [0.5, -0.5]]
     raw = tomllib.loads(text)
     assert raw["refined_source"] == "/cfg/dynamics_ident.toml"
     assert raw["refined_term"] == "mass"
@@ -267,17 +309,14 @@ class FakeEngine:
     def sdo_read(self, handle, slot, index, subindex):
         return 2, 7
 
-    def set_dynamics_model(
-        self, handle, mass, viscous, coulomb_fwd, coulomb_rev, deadband_mm_s
-    ):
+    def set_dynamics_model(self, handle, frame, mass, viscous, coulomb):
         self.dynamics_calls.append(
             (
                 handle,
+                list(frame),
                 list(mass),
                 list(viscous),
-                list(coulomb_fwd),
-                list(coulomb_rev),
-                deadband_mm_s,
+                list(coulomb),
             )
         )
 
@@ -418,11 +457,10 @@ def make_calibration(
 def _baseline_call(engine, profile_path):
     return (
         1,
-        BASELINE_MASS_FLAT,
+        BASELINE_FRAME_FLAT,
+        BASELINE_MASS,
         BASELINE_VISCOUS,
-        [1.0, 1.0],
-        [-1.0, -1.0],
-        0.5,
+        BASELINE_COULOMB,
     )
 
 
@@ -451,12 +489,9 @@ def test_refine_dynamics_mass_converges_and_restores():
     assert abs(sy - 0.9) < 0.03
     assert raw["refined_term"] == "mass"
     assert raw["refined_source"] == profile_path
-    assert raw["mass"][0][0] == pytest.approx(
-        0.030 + (sx - 1.0) * 0.010 + (sy - 1.0) * 0.020
-    )
-    assert raw["mass"][0][1] == pytest.approx(
-        -0.010 + (sx - 1.0) * 0.010 - (sy - 1.0) * 0.020
-    )
+    assert raw["frame"] == [[0.5, 0.5], [0.5, -0.5]]
+    assert raw["mass"][0] == pytest.approx(0.020 * sx)
+    assert raw["mass"][1] == pytest.approx(0.030 * sy)
     assert raw["viscous"] == BASELINE_VISCOUS
 
 
@@ -465,15 +500,17 @@ def test_refine_dynamics_viscous_scales_only_viscous():
     gcmd = FakeGcmd(AXIS="X", TERM="VISCOUS")
     sc.cmd_SERVO_REFINE_DYNAMICS(gcmd)
     candidate = engine.dynamics_calls[-2]
-    assert candidate[1] == BASELINE_MASS_FLAT
+    assert candidate[1] == BASELINE_FRAME_FLAT
+    assert candidate[2] == BASELINE_MASS
     profiles = _written_profiles(sc)
     assert len(profiles) == 1
     with open(profiles[0], "rb") as f:
         raw = tomllib.load(f)
     assert raw["refined_term"] == "viscous"
     assert abs(raw["refined_scale"] - 1.1) < 0.03
-    assert raw["mass"][0][0] == pytest.approx(0.030)
+    assert raw["mass"] == BASELINE_MASS
     assert raw["viscous"][0] == pytest.approx(0.004 * raw["refined_scale"])
+    assert raw["viscous"][1] == pytest.approx(0.005 * raw["refined_scale"])
 
 
 def test_refine_dynamics_mass_runs_full_grid_one_axis_per_phase():
@@ -511,7 +548,7 @@ def test_refine_dynamics_reports_all_metrics_per_scale():
         assert "ferr_peak" in line
 
 
-def test_refine_dynamics_coulomb_scales_both_friction_vectors():
+def test_refine_dynamics_coulomb_scales_the_coulomb_vector():
     sc, gcode, engine, _path = make_calibration(overshoot_min=1.05)
     gcmd = FakeGcmd(AXIS="X", TERM="COULOMB")
     sc.cmd_SERVO_REFINE_DYNAMICS(gcmd)
@@ -522,9 +559,9 @@ def test_refine_dynamics_coulomb_scales_both_friction_vectors():
     assert raw["refined_term"] == "coulomb"
     scale = raw["refined_scale"]
     assert abs(scale - 1.05) < 0.03
-    assert raw["coulomb_fwd"][0] == pytest.approx(1.0 * scale)
-    assert raw["coulomb_rev"][0] == pytest.approx(-1.0 * scale)
-    assert raw["mass"][0][0] == pytest.approx(0.030)
+    assert raw["coulomb"][0] == pytest.approx(1.0 * scale)
+    assert raw["coulomb"][1] == pytest.approx(1.5 * scale)
+    assert raw["mass"] == BASELINE_MASS
     assert raw["viscous"] == BASELINE_VISCOUS
 
 
@@ -611,19 +648,15 @@ def test_refine_dynamics_rejects_multi_node_axes():
 
 
 def test_refine_dynamics_rejects_axis_count_mismatch():
-    one_axis = BASELINE_TOML.replace(
-        'axes = ["motor_a", "motor_b"]', 'axes = ["motor_a"]'
-    ).replace("mass = [[0.030, -0.010], [-0.010, 0.030]]", "mass = [[0.030]]")
-    for key in ("viscous = [0.004, 0.004]",):
-        one_axis = one_axis.replace(key, "viscous = [0.004]")
-    one_axis = one_axis.replace(
-        "coulomb_fwd = [1.0, 1.0]", "coulomb_fwd = [1.0]"
-    )
-    one_axis = one_axis.replace(
-        "coulomb_rev = [-1.0, -1.0]", "coulomb_rev = [-1.0]"
-    )
-    sc, _gcode, engine, _path = make_calibration(profile_text=one_axis)
+    sc, _gcode, engine, _path = make_calibration(profile_text=ONE_AXIS_TOML)
     with pytest.raises(RuntimeError, match="describes 1 axes"):
+        sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(AXIS="X"))
+    assert engine.dynamics_calls == []
+
+
+def test_refine_dynamics_rejects_non_xy_modes():
+    sc, _gcode, engine, _path = make_calibration(profile_text=NON_XY_TOML)
+    with pytest.raises(RuntimeError, match="x and y modes"):
         sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(AXIS="X"))
     assert engine.dynamics_calls == []
 

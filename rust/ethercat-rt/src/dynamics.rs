@@ -7,11 +7,14 @@ pub const ERR_DYNAMICS_REJECTED: i32 = -862;
 struct ProfileFile {
     version: u32,
     axes: Vec<String>,
-    mass: Vec<Vec<f64>>,
+    modes: Vec<String>,
+    frame: Vec<Vec<f64>>,
+    mass: Vec<f64>,
     viscous: Vec<f64>,
-    coulomb_fwd: Vec<f64>,
-    coulomb_rev: Vec<f64>,
-    coulomb_deadband_mm_s: f64,
+    coulomb: Vec<f64>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    fit_rms_residual: Vec<f64>,
 }
 
 #[derive(Debug)]
@@ -20,202 +23,265 @@ pub enum ProfileError {
     Version(u32),
     Dim(&'static str),
     NotFinite(&'static str),
-    NotSymmetric,
-    NotPositiveDefinite,
+    NonPositive(&'static str),
+    ZeroFrameRow(usize),
+    FrameRankDeficient,
 }
 
 #[derive(Debug)]
 pub struct DynamicsModel {
-    pub n: usize,
+    pub n_slots: usize,
+    pub n_modes: usize,
     pub axes: Vec<String>,
+    pub modes: Vec<String>,
+    frame: Vec<f32>,
     mass: Vec<f32>,
     viscous: Vec<f32>,
-    coulomb_fwd: Vec<f32>,
-    coulomb_rev: Vec<f32>,
-    deadband: f32,
+    coulomb: Vec<f32>,
 }
 
 impl DynamicsModel {
     pub fn from_toml_str(s: &str) -> Result<Self, ProfileError> {
         let f: ProfileFile = toml::from_str(s).map_err(|e| ProfileError::Parse(e.to_string()))?;
-        if f.version != 1 {
+        if f.version != 2 {
             return Err(ProfileError::Version(f.version));
         }
-        let n = f.axes.len();
-        if f.mass.len() != n || f.mass.iter().any(|row| row.len() != n) {
-            return Err(ProfileError::Dim("mass must be n x n"));
+        let n_slots = f.axes.len();
+        let n_modes = f.modes.len();
+        if f.frame.len() != n_modes {
+            return Err(ProfileError::Dim("frame row count must equal modes"));
         }
-        let mass: Vec<f64> = f.mass.iter().flatten().copied().collect();
+        if f.frame.iter().any(|row| row.len() != n_slots) {
+            return Err(ProfileError::Dim("frame row width must equal slots"));
+        }
+        let frame: Vec<f64> = f.frame.iter().flatten().copied().collect();
         Self::validated(
-            n,
-            f.axes,
-            mass,
-            f.viscous,
-            f.coulomb_fwd,
-            f.coulomb_rev,
-            f.coulomb_deadband_mm_s,
+            n_slots, n_modes, f.axes, f.modes, frame, f.mass, f.viscous, f.coulomb,
         )
     }
 
     pub fn from_parts(
-        n: usize,
+        n_slots: usize,
+        n_modes: usize,
+        frame: &[f32],
         mass: &[f32],
         viscous: &[f32],
-        coulomb_fwd: &[f32],
-        coulomb_rev: &[f32],
-        deadband_mm_s: f32,
+        coulomb: &[f32],
     ) -> Result<Self, ProfileError> {
-        let axes = (0..n).map(|i| format!("slot{i}")).collect();
+        let axes = (0..n_slots).map(|i| format!("slot{i}")).collect();
+        let modes = (0..n_modes).map(|k| format!("mode{k}")).collect();
         let widen = |v: &[f32]| v.iter().map(|&x| f64::from(x)).collect::<Vec<f64>>();
         Self::validated(
-            n,
+            n_slots,
+            n_modes,
             axes,
+            modes,
+            widen(frame),
             widen(mass),
             widen(viscous),
-            widen(coulomb_fwd),
-            widen(coulomb_rev),
-            f64::from(deadband_mm_s),
+            widen(coulomb),
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn validated(
-        n: usize,
+        n_slots: usize,
+        n_modes: usize,
         axes: Vec<String>,
+        modes: Vec<String>,
+        frame: Vec<f64>,
         mass: Vec<f64>,
         viscous: Vec<f64>,
-        coulomb_fwd: Vec<f64>,
-        coulomb_rev: Vec<f64>,
-        deadband_mm_s: f64,
+        coulomb: Vec<f64>,
     ) -> Result<Self, ProfileError> {
-        if n == 0 {
-            return Err(ProfileError::Dim("axes is empty"));
+        if axes.len() != n_slots {
+            return Err(ProfileError::Dim("axes length must equal slots"));
         }
-        if mass.len() != n * n {
-            return Err(ProfileError::Dim("mass must be n x n"));
+        if n_modes < 1 {
+            return Err(ProfileError::Dim("at least one mode required"));
         }
-        if viscous.len() != n {
-            return Err(ProfileError::Dim("viscous length"));
+        if modes.len() != n_modes {
+            return Err(ProfileError::Dim("modes length must equal modes"));
         }
-        if coulomb_fwd.len() != n {
-            return Err(ProfileError::Dim("coulomb_fwd length"));
+        if n_modes > n_slots {
+            return Err(ProfileError::Dim("modes must not exceed slots"));
         }
-        if coulomb_rev.len() != n {
-            return Err(ProfileError::Dim("coulomb_rev length"));
+        if frame.len() != n_modes * n_slots {
+            return Err(ProfileError::Dim("frame must be modes x slots"));
         }
-        let all_finite = mass
+        if mass.len() != n_modes {
+            return Err(ProfileError::Dim("mass length must equal modes"));
+        }
+        if viscous.len() != n_modes {
+            return Err(ProfileError::Dim("viscous length must equal modes"));
+        }
+        if coulomb.len() != n_modes {
+            return Err(ProfileError::Dim("coulomb length must equal modes"));
+        }
+        let all_finite = frame
             .iter()
+            .chain(&mass)
             .chain(&viscous)
-            .chain(&coulomb_fwd)
-            .chain(&coulomb_rev)
-            .chain(std::iter::once(&deadband_mm_s))
+            .chain(&coulomb)
             .all(|v| v.is_finite());
         if !all_finite {
             return Err(ProfileError::NotFinite("profile contains non-finite value"));
         }
-        for i in 0..n {
-            for j in (i + 1)..n {
-                let (a, b) = (mass[i * n + j], mass[j * n + i]);
-                if (a - b).abs() > 1e-9 * a.abs().max(b.abs()).max(1e-12) {
-                    return Err(ProfileError::NotSymmetric);
-                }
+        for &m in &mass {
+            if m <= 0.0 {
+                return Err(ProfileError::NonPositive("mass must be positive"));
             }
         }
-        if !cholesky_is_pd(&mass, n) {
-            return Err(ProfileError::NotPositiveDefinite);
+        for &b in &viscous {
+            if b < 0.0 {
+                return Err(ProfileError::NonPositive("viscous must be non-negative"));
+            }
+        }
+        for &c in &coulomb {
+            if c < 0.0 {
+                return Err(ProfileError::NonPositive("coulomb must be non-negative"));
+            }
+        }
+        for k in 0..n_modes {
+            let row = &frame[k * n_slots..][..n_slots];
+            if row.iter().all(|&x| x == 0.0) {
+                return Err(ProfileError::ZeroFrameRow(k));
+            }
+        }
+        if !frame_rows_independent(&frame, n_modes, n_slots) {
+            return Err(ProfileError::FrameRankDeficient);
         }
         Ok(Self {
-            n,
+            n_slots,
+            n_modes,
             axes,
+            modes,
+            frame: frame.iter().map(|&v| v as f32).collect(),
             mass: mass.iter().map(|&v| v as f32).collect(),
             viscous: viscous.iter().map(|&v| v as f32).collect(),
-            coulomb_fwd: coulomb_fwd.iter().map(|&v| v as f32).collect(),
-            coulomb_rev: coulomb_rev.iter().map(|&v| v as f32).collect(),
-            deadband: deadband_mm_s as f32,
+            coulomb: coulomb.iter().map(|&v| v as f32).collect(),
         })
     }
 
-    pub fn torque_ff(&self, axis: usize, acc_mm_s2: &[f32], vel_mm_s: &[f32]) -> f32 {
-        let v = vel_mm_s[axis];
-        let coulomb = if v > self.deadband {
-            self.coulomb_fwd[axis]
-        } else if v < -self.deadband {
-            self.coulomb_rev[axis]
-        } else {
-            0.0
-        };
-        self.torque_ff_without_coulomb(axis, acc_mm_s2, vel_mm_s) + coulomb
+    pub fn torque_ff(&self, slot: usize, acc_mm_s2: &[f32], vel_mm_s: &[f32]) -> f32 {
+        self.eval(slot, acc_mm_s2, vel_mm_s, true)
     }
 
-    /// Buzzed slots use this variant: a buzz flips sign(v) every half period,
-    /// which would turn the Coulomb term into a square-wave torque at the buzz
-    /// frequency — far larger than the micrometre-scale excitation it rides on.
+    /// Buzzed cycles use this variant: a buzz flips sign(v_mode) every half
+    /// period, which would turn the Coulomb term into a square-wave torque at
+    /// the buzz frequency — far larger than the micrometre-scale excitation it
+    /// rides on. Coulomb is a mode-space quantity, so a buzz on any slot
+    /// contaminates it and the whole node must drop Coulomb for the cycle.
     pub fn torque_ff_without_coulomb(
         &self,
-        axis: usize,
+        slot: usize,
         acc_mm_s2: &[f32],
         vel_mm_s: &[f32],
     ) -> f32 {
-        assert_eq!(acc_mm_s2.len(), self.n);
-        assert_eq!(vel_mm_s.len(), self.n);
-        assert!(axis < self.n);
-        let row = &self.mass[axis * self.n..][..self.n];
-        let inertial: f32 = row.iter().zip(acc_mm_s2.iter()).map(|(m, a)| m * a).sum();
-        inertial + self.viscous[axis] * vel_mm_s[axis]
+        self.eval(slot, acc_mm_s2, vel_mm_s, false)
     }
 
-    /// Stack independent per-servo profiles into one node model whose mass
-    /// matrix is block-diagonal — the cartesian case, where no axis's torque
-    /// depends on another's acceleration. `parts` must be in slot order.
+    fn eval(&self, slot: usize, acc_mm_s2: &[f32], vel_mm_s: &[f32], with_coulomb: bool) -> f32 {
+        assert_eq!(acc_mm_s2.len(), self.n_slots);
+        assert_eq!(vel_mm_s.len(), self.n_slots);
+        assert!(slot < self.n_slots);
+        let mut tau = 0.0f32;
+        for k in 0..self.n_modes {
+            let row = &self.frame[k * self.n_slots..][..self.n_slots];
+            let a_mode: f32 = row.iter().zip(acc_mm_s2).map(|(f, a)| f * a).sum();
+            let v_mode: f32 = row.iter().zip(vel_mm_s).map(|(f, v)| f * v).sum();
+            let mut mode_force = self.mass[k] * a_mode + self.viscous[k] * v_mode;
+            if with_coulomb {
+                let sign = if v_mode > 0.0 {
+                    1.0
+                } else if v_mode < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                };
+                mode_force += self.coulomb[k] * sign;
+            }
+            tau += row[slot] * mode_force;
+        }
+        tau
+    }
+
+    /// Stack independent per-servo profiles into one node model. Slots and
+    /// modes concatenate, the frame becomes block-diagonal, and the per-mode
+    /// vectors concatenate. `parts` must be in slot order.
     pub fn block_diagonal(parts: Vec<DynamicsModel>) -> Result<Self, ProfileError> {
         if parts.is_empty() {
             return Err(ProfileError::Dim(
                 "block_diagonal needs at least one profile",
             ));
         }
-        let n: usize = parts.iter().map(|p| p.n).sum();
-        let deadband = parts[0].deadband;
-        if parts.iter().any(|p| (p.deadband - deadband).abs() > 1e-6) {
-            return Err(ProfileError::Dim(
-                "per-servo profiles disagree on coulomb deadband",
-            ));
-        }
-        let mut mass = vec![0.0f32; n * n];
-        let mut viscous = Vec::with_capacity(n);
-        let mut coulomb_fwd = Vec::with_capacity(n);
-        let mut coulomb_rev = Vec::with_capacity(n);
-        let mut axes = Vec::with_capacity(n);
-        let mut base = 0usize;
+        let n_slots: usize = parts.iter().map(|p| p.n_slots).sum();
+        let n_modes: usize = parts.iter().map(|p| p.n_modes).sum();
+        let mut frame = vec![0.0f32; n_modes * n_slots];
+        let mut mass = Vec::with_capacity(n_modes);
+        let mut viscous = Vec::with_capacity(n_modes);
+        let mut coulomb = Vec::with_capacity(n_modes);
+        let mut axes = Vec::with_capacity(n_slots);
+        let mut modes = Vec::with_capacity(n_modes);
+        let mut slot_base = 0usize;
+        let mut mode_base = 0usize;
         for p in &parts {
-            for i in 0..p.n {
-                for j in 0..p.n {
-                    mass[(base + i) * n + (base + j)] = p.mass[i * p.n + j];
+            for k in 0..p.n_modes {
+                for s in 0..p.n_slots {
+                    frame[(mode_base + k) * n_slots + (slot_base + s)] = p.frame[k * p.n_slots + s];
                 }
-                viscous.push(p.viscous[i]);
-                coulomb_fwd.push(p.coulomb_fwd[i]);
-                coulomb_rev.push(p.coulomb_rev[i]);
-                axes.push(p.axes[i].clone());
+                mass.push(p.mass[k]);
+                viscous.push(p.viscous[k]);
+                coulomb.push(p.coulomb[k]);
+                modes.push(p.modes[k].clone());
             }
-            base += p.n;
+            for s in 0..p.n_slots {
+                axes.push(p.axes[s].clone());
+            }
+            slot_base += p.n_slots;
+            mode_base += p.n_modes;
         }
         Ok(Self {
-            n,
+            n_slots,
+            n_modes,
             axes,
+            modes,
+            frame,
             mass,
             viscous,
-            coulomb_fwd,
-            coulomb_rev,
-            deadband,
+            coulomb,
         })
     }
 }
 
-fn cholesky_is_pd(m: &[f64], n: usize) -> bool {
+fn frame_rows_independent(frame: &[f64], n_modes: usize, n_slots: usize) -> bool {
+    let mut gram = vec![0.0f64; n_modes * n_modes];
+    for i in 0..n_modes {
+        let ri = &frame[i * n_slots..][..n_slots];
+        for j in 0..n_modes {
+            let rj = &frame[j * n_slots..][..n_slots];
+            gram[i * n_modes + j] = ri.iter().zip(rj).map(|(a, b)| a * b).sum();
+        }
+    }
+    let scale = (0..n_modes)
+        .map(|i| gram[i * n_modes + i])
+        .fold(0.0, f64::max);
+    if scale <= 0.0 {
+        return false;
+    }
+    cholesky_is_pd(&gram, n_modes, scale * 1e-9)
+}
+
+/// Rank check: a rank-deficient Gram matrix leaves a final pivot at zero in
+/// exact arithmetic, so floating-point rounding can push it either side of
+/// zero. `pivot_floor` keeps that noise from reading as positive-definite.
+fn cholesky_is_pd(m: &[f64], n: usize, pivot_floor: f64) -> bool {
     let mut l = m.to_vec();
     for k in 0..n {
         for j in 0..k {
             l[k * n + k] -= l[k * n + j] * l[k * n + j];
         }
-        if l[k * n + k] <= 0.0 {
+        if l[k * n + k] <= pivot_floor {
             return false;
         }
         l[k * n + k] = l[k * n + k].sqrt();

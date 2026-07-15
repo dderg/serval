@@ -7,6 +7,10 @@ use servo_ident::prep::{band_limited_rms, median_dt, prep, segments, sinc_kernel
 
 const DT: f64 = 0.00025;
 
+fn identity() -> Structure {
+    Structure::new(vec![vec![1.0]])
+}
+
 fn white(k: usize) -> f64 {
     let h = (k as u32).wrapping_mul(2654435761);
     f64::from(h % 1000) / 1000.0 - 0.5
@@ -44,16 +48,16 @@ fn strokes(accel: f64, vmax: f64, cruise_s: f64, reps: usize) -> (Vec<f64>, Vec<
     (t, acc, vel)
 }
 
-fn make_capture(delay_samples: usize, ripple_period_mm: f64) -> (Capture, f64, f64, f64, f64) {
-    let (m, b, cf, cr) = (0.008, 0.09, 200.0, -210.0);
+fn make_capture(delay_samples: usize, ripple_period_mm: f64) -> (Capture, f64, f64, f64) {
+    let (m, b, coul) = (0.008, 0.09, 205.0);
     let (t, acc, vel) = strokes(10000.0, 500.0, 0.4, 8);
     let n = t.len();
     let clean: Vec<f64> = (0..n)
         .map(|k| {
             let c = if vel[k] > 0.5 {
-                cf
+                coul
             } else if vel[k] < -0.5 {
-                cr
+                -coul
             } else {
                 0.0
             };
@@ -93,8 +97,7 @@ fn make_capture(delay_samples: usize, ripple_period_mm: f64) -> (Capture, f64, f
         },
         m,
         b,
-        cf,
-        cr,
+        coul,
     )
 }
 
@@ -107,7 +110,8 @@ fn run_fit_with(
     opts: &PrepOptions,
     fit_opts: &FitOptions,
 ) -> (servo_ident::fit::FitResult, f64) {
-    let pp = prep(cap, opts);
+    let structure = identity();
+    let pp = prep(cap, &structure, opts);
     let track = tracking_keep(&cap.vel, &cap.vel_act, &TrackingOptions::default());
     let plateau = steady_accel_keep(&cap.t, &cap.acc, &PlateauOptions::default());
     let keep: Vec<usize> = (0..cap.t.len())
@@ -120,11 +124,10 @@ fn run_fit_with(
             .collect()
     };
     let input = FitInput {
-        structure: Structure::CartesianScalar,
-        acc: pick(&pp.acc),
-        vel: pick(&pp.vel),
-        cf: pick(&pp.cf),
-        cr: pick(&pp.cr),
+        structure,
+        acc_mode: pick(&pp.acc_mode),
+        vel_mode: pick(&pp.vel_mode),
+        cs_mode: pick(&pp.cs_mode),
         torque: pick(&pp.torque),
         extra: pp.extra.iter().map(|cols| pick(cols)).collect(),
     };
@@ -156,7 +159,7 @@ fn kernel_preserves_dc_and_kills_out_of_band() {
 
 #[test]
 fn segments_split_on_time_gaps() {
-    let (cap, _, _, _, _) = make_capture(0, 40.0);
+    let (cap, _, _, _) = make_capture(0, 40.0);
     let dt = median_dt(&cap.t);
     let segs = segments(&cap.t, dt);
     assert_eq!(segs.len(), 8);
@@ -166,8 +169,8 @@ fn segments_split_on_time_gaps() {
 
 #[test]
 fn recovers_injected_delay() {
-    let (cap, _, _, _, _) = make_capture(4, 40.0);
-    let pp = prep(&cap, &PrepOptions::default());
+    let (cap, _, _, _) = make_capture(4, 40.0);
+    let pp = prep(&cap, &identity(), &PrepOptions::default());
     assert!(
         (pp.delay_s - 4.0 * DT).abs() < DT / 2.0,
         "delay {} vs injected {}",
@@ -178,8 +181,8 @@ fn recovers_injected_delay() {
 
 #[test]
 fn reversal_neighborhoods_are_blanked() {
-    let (cap, _, _, _, _) = make_capture(0, 40.0);
-    let pp = prep(&cap, &PrepOptions::default());
+    let (cap, _, _, _) = make_capture(0, 40.0);
+    let pp = prep(&cap, &identity(), &PrepOptions::default());
     let blank = (PrepOptions::default().blank_reversal_s / DT) as usize;
     for k in 0..cap.t.len() {
         if cap.vel[0][k].abs() <= 0.5 {
@@ -194,7 +197,7 @@ fn reversal_neighborhoods_are_blanked() {
 
 #[test]
 fn prepped_fit_recovers_truth_through_pollution() {
-    let (cap, m, b, cf, cr) = make_capture(4, 40.0);
+    let (cap, m, b, coul) = make_capture(4, 40.0);
     let opts = PrepOptions {
         ripple_period_mm: Some(40.0),
         ..PrepOptions::default()
@@ -203,17 +206,20 @@ fn prepped_fit_recovers_truth_through_pollution() {
     assert!(delay > 0.0);
     let p = &r.params;
     assert!(
-        (p.mass[0][0] - m).abs() < 0.02 * m,
+        (p.mass[0] - m).abs() < 0.02 * m,
         "mass {} vs {m}",
-        p.mass[0][0]
+        p.mass[0]
     );
     assert!(
         (p.viscous[0] - b).abs() < 0.05 * b,
         "viscous {} vs {b}",
         p.viscous[0]
     );
-    assert!((p.coulomb_fwd[0] - cf).abs() < 0.02 * cf);
-    assert!((p.coulomb_rev[0] - cr).abs() < 0.02 * cr.abs());
+    assert!(
+        (p.coulomb[0] - coul).abs() < 0.02 * coul,
+        "coulomb {} vs {coul}",
+        p.coulomb[0]
+    );
     assert!(
         r.rms_residual < 8.0,
         "residual {} with ripple columns and band-limiting",
@@ -229,15 +235,15 @@ fn prepped_fit_recovers_truth_through_pollution() {
 
 #[test]
 fn ripple_columns_debias_the_mass() {
-    let (cap, m, _, _, _) = make_capture(4, 40.0);
+    let (cap, m, _, _) = make_capture(4, 40.0);
     let with_cols = PrepOptions {
         ripple_period_mm: Some(40.0),
         ..PrepOptions::default()
     };
     let (r_with, _) = run_fit(&cap, &with_cols);
     let (r_without, _) = run_fit(&cap, &PrepOptions::default());
-    let err_with = (r_with.params.mass[0][0] - m).abs() / m;
-    let err_without = (r_without.params.mass[0][0] - m).abs() / m;
+    let err_with = (r_with.params.mass[0] - m).abs() / m;
+    let err_without = (r_without.params.mass[0] - m).abs() / m;
     assert!(
         err_without > 0.05,
         "stroke-locked ripple should bias the plain fit; got {err_without}"
@@ -247,19 +253,18 @@ fn ripple_columns_debias_the_mass() {
 
 #[test]
 fn in_band_residual_excludes_out_of_band_pollution() {
-    let (cap, _, _, _, _) = make_capture(4, 40.0);
+    let (cap, _, _, _) = make_capture(4, 40.0);
     let opts = PrepOptions {
         ripple_period_mm: Some(40.0),
         ..PrepOptions::default()
     };
-    let pp = prep(&cap, &opts);
+    let pp = prep(&cap, &identity(), &opts);
     let (r, _) = run_fit(&cap, &opts);
     let full = FitInput {
-        structure: Structure::CartesianScalar,
-        acc: pp.acc.clone(),
-        vel: pp.vel.clone(),
-        cf: pp.cf.clone(),
-        cr: pp.cr.clone(),
+        structure: identity(),
+        acc_mode: pp.acc_mode.clone(),
+        vel_mode: pp.vel_mode.clone(),
+        cs_mode: pp.cs_mode.clone(),
         torque: pp.torque.clone(),
         extra: pp.extra.clone(),
     };

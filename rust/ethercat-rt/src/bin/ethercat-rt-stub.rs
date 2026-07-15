@@ -491,8 +491,8 @@ fn main() {
                     msg,
                 } => {
                     eprintln!(
-                        "ec-rt-stub: SetDynamicsModel n={} deadband={}",
-                        msg.axes_count, msg.deadband_mm_s
+                        "ec-rt-stub: SetDynamicsModel slots={} modes={}",
+                        msg.slots_count, msg.modes_count
                     );
                     server.respond(&set_dynamics_model_response_frame(correlation_id, 0));
                 }

@@ -125,15 +125,15 @@ fn set_diff_trim_roundtrip() {
 #[test]
 fn set_dynamics_model_roundtrip() {
     let v = SetDynamicsModel {
-        mass: vec![0.0123, 0.0021, 0.0021, 0.0119],
-        axes_count: 2,
+        slots_count: 4,
+        modes_count: 2,
+        frame: vec![0.25, -0.25, -0.25, -0.25, 0.25, -0.25, 0.25, 0.25],
+        mass: vec![0.0123, 0.0119],
         viscous: vec![0.0045, 0.0044],
-        coulomb_fwd: vec![1.2, 1.1],
-        coulomb_rev: vec![-1.1, -1.0],
-        deadband_mm_s: 0.5,
+        coulomb: vec![1.2, 1.1],
     };
     assert_eq!(roundtrip(&v), v);
-    assert_eq!(v.encoded_to_vec().len(), 47);
+    assert_eq!(v.encoded_to_vec().len(), 2 + (8 + 2 + 2 + 2) * 4);
     let r = SetDynamicsModelResponse { result: -862 };
     assert_eq!(roundtrip(&r), r);
     assert_eq!(r.encoded_to_vec().len(), 4);
@@ -142,12 +142,12 @@ fn set_dynamics_model_roundtrip() {
 #[test]
 fn set_dynamics_model_truncated_array_is_decode_error() {
     let v = SetDynamicsModel {
-        mass: vec![0.01; 4],
-        axes_count: 2,
+        slots_count: 4,
+        modes_count: 2,
+        frame: vec![0.25; 8],
+        mass: vec![0.01; 2],
         viscous: vec![0.0; 2],
-        coulomb_fwd: vec![0.0; 2],
-        coulomb_rev: vec![0.0; 2],
-        deadband_mm_s: 0.5,
+        coulomb: vec![0.0; 2],
     };
     let mut bytes = v.encoded_to_vec();
     bytes.truncate(bytes.len() - 8);

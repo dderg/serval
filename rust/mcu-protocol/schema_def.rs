@@ -529,16 +529,15 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
     SchemaMessage {
         type_tag: 0x008C,
         name: "SetDynamicsModel",
-        version: 1,
+        version: 2,
         channel: "control",
         fields: &[
-            SchemaField { name: "mass_count", ty: "u16" },
+            SchemaField { name: "slots_count", ty: "u8" },
+            SchemaField { name: "modes_count", ty: "u8" },
+            SchemaField { name: "frame", ty: "array<f32;slots_count*modes_count>" },
             SchemaField { name: "mass", ty: "array<f32>" },
-            SchemaField { name: "axes_count", ty: "u8" },
             SchemaField { name: "viscous", ty: "array<f32>" },
-            SchemaField { name: "coulomb_fwd", ty: "array<f32>" },
-            SchemaField { name: "coulomb_rev", ty: "array<f32>" },
-            SchemaField { name: "deadband_mm_s", ty: "f32" },
+            SchemaField { name: "coulomb", ty: "array<f32>" },
         ],
     },
     SchemaMessage {

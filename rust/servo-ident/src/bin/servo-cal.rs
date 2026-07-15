@@ -6,7 +6,7 @@
 //!       [--json <path>]            also write a results-shaped step object
 //!       [--dump-csv <path>]        write per-drive raw series CSV
 //!       [--combine <spec> --axis X] add the CoreXY belt combine
-//!   fit --capture <file.scap> --structure scalar|corexy|corexy-awd --axes a[,b]
+//!   fit --capture <file.scap> --frame "r0;r1" --modes x[,y] --axes a[,b,...]
 //!       --out profile.toml [--rated-torque-nm T --rotor-inertia-kgm2 J
 //!       --rotation-distance-mm D --cutoff-hz C --blank-ms B --max-delay-ms M
 //!       --ripple-period-mm P]
@@ -170,9 +170,10 @@ fn cmd_analyze(args: &[String]) {
     analyze_run(Path::new(dir)).unwrap_or_else(|e| die(&e));
 }
 
-const FIT_KEYS: [&str; 12] = [
+const FIT_KEYS: [&str; 13] = [
     "--capture",
-    "--structure",
+    "--frame",
+    "--modes",
     "--axes",
     "--out",
     "--rated-torque-nm",
@@ -196,19 +197,38 @@ fn reject_unknown_fit_flags(args: &[String]) {
     }
 }
 
+fn parse_frame(spec: &str) -> Vec<Vec<f64>> {
+    spec.split(';')
+        .map(|row| {
+            row.split(',')
+                .map(|e| {
+                    e.trim()
+                        .parse::<f64>()
+                        .unwrap_or_else(|_| die(&format!("bad frame entry {e:?}")))
+                })
+                .collect()
+        })
+        .collect()
+}
+
 fn cmd_fit(args: &[String]) {
     reject_unknown_fit_flags(args);
-    let structure = match req(args, "--structure").as_str() {
-        "scalar" => Structure::CartesianScalar,
-        "corexy" => Structure::CoreXY,
-        "corexy-awd" => Structure::CoreXYAwd,
-        other => die(&format!("unknown structure {other}")),
-    };
+    let frame = parse_frame(&req(args, "--frame"));
+    let modes_arg = req(args, "--modes");
+    let modes: Vec<&str> = modes_arg.split(',').map(str::trim).collect();
+    if modes.len() != frame.len() {
+        die(&format!(
+            "{} modes given, frame has {} rows",
+            modes.len(),
+            frame.len()
+        ));
+    }
+    let structure = Structure::new(frame.clone());
     let axes_arg = req(args, "--axes");
     let axes: Vec<&str> = axes_arg.split(',').map(str::trim).collect();
     if axes.len() != structure.axis_count() {
         die(&format!(
-            "{} axes given, structure needs {}",
+            "{} axes given, frame has {} columns",
             axes.len(),
             structure.axis_count()
         ));
@@ -230,7 +250,7 @@ fn cmd_fit(args: &[String]) {
     }
     prep_opts.ripple_period_mm =
         opt_f64(args, "--ripple-period-mm").or_else(|| opt_f64(args, "--rotation-distance-mm"));
-    let pp = prep(&fit_cap, &prep_opts);
+    let pp = prep(&fit_cap, &structure, &prep_opts);
     eprintln!(
         "prep: {} segments, accel->torque delay {:.2} ms removed",
         pp.segments,
@@ -267,11 +287,10 @@ fn cmd_fit(args: &[String]) {
             .collect()
     };
     let input = FitInput {
-        structure,
-        acc: pick(&pp.acc),
-        vel: pick(&pp.vel),
-        cf: pick(&pp.cf),
-        cr: pick(&pp.cr),
+        structure: structure.clone(),
+        acc_mode: pick(&pp.acc_mode),
+        vel_mode: pick(&pp.vel_mode),
+        cs_mode: pick(&pp.cs_mode),
         torque: pick(&pp.torque),
         extra: pp.extra.iter().map(|cols| pick(cols)).collect(),
     };
@@ -285,11 +304,10 @@ fn cmd_fit(args: &[String]) {
     );
     if prep_opts.cutoff_hz > 0.0 {
         let full = FitInput {
-            structure,
-            acc: pp.acc.clone(),
-            vel: pp.vel.clone(),
-            cf: pp.cf.clone(),
-            cr: pp.cr.clone(),
+            structure: structure.clone(),
+            acc_mode: pp.acc_mode.clone(),
+            vel_mode: pp.vel_mode.clone(),
+            cs_mode: pp.cs_mode.clone(),
             torque: pp.torque.clone(),
             extra: pp.extra.clone(),
         };
@@ -303,50 +321,37 @@ fn cmd_fit(args: &[String]) {
             prep_opts.cutoff_hz, inband
         );
     }
-    let min_diag = (0..r.params.mass.len())
-        .map(|i| r.params.mass[i][i])
-        .fold(f64::INFINITY, f64::min);
-    let physical = min_diag > 0.0;
+    let min_mass = r.params.mass.iter().copied().fold(f64::INFINITY, f64::min);
+    let physical = min_mass > 0.0;
 
     if let (Some(t), Some(j), Some(d)) = (
         opt_f64(args, "--rated-torque-nm"),
         opt_f64(args, "--rotor-inertia-kgm2"),
         opt_f64(args, "--rotation-distance-mm"),
     ) {
-        let n = r.params.mass.len();
-        if n >= 2 {
-            let m_off: f64 = r.params.mass[0][1..].iter().sum();
-            let sum = r.params.mass[0][0] + m_off;
-            let diff = r.params.mass[0][0] - m_off;
-            let m_light = sum.min(diff);
-            let m_heavy = sum.max(diff);
+        for (m, mass) in modes.iter().zip(&r.params.mass) {
             eprintln!(
-                "recommended C00.06 (light direction): {:.0}%",
-                c0006_recommendation(m_light, t, d, j)
-            );
-            eprintln!(
-                "heavy-direction equivalent (reference only): {:.0}%",
-                c0006_recommendation(m_heavy, t, d, j)
-            );
-        } else {
-            eprintln!(
-                "recommended C00.06 (light direction): {:.0}%",
-                c0006_recommendation(r.params.mass[0][0], t, d, j)
+                "recommended C00.06 (mode {m}): {:.0}%",
+                c0006_recommendation(*mass, t, d, j)
             );
         }
     }
 
     if !physical {
         eprintln!(
-            "servo-cal: fitted diagonal mass {min_diag:.5} <= 0 is physically \
+            "servo-cal: fitted mode mass {min_mass:.5} <= 0 is physically \
              impossible — a torque-polarity / invert_direction sign mismatch, \
              not a real inertia. No profile written."
         );
         return;
     }
 
-    let rms = vec![r.rms_residual; axes.len()];
-    let profile = render_profile(&r.params, &axes, &rms);
+    let per_motor = residual_by_motor(&input, &r.params, &r.extra_params);
+    let rms: Vec<f64> = per_motor
+        .iter()
+        .map(|res| (res.iter().map(|e| e * e).sum::<f64>() / res.len() as f64).sqrt())
+        .collect();
+    let profile = render_profile(&r.params, &axes, &modes, &frame, &rms);
     let out = req(args, "--out");
     std::fs::write(&out, profile).unwrap_or_else(|e| die(&format!("write {out}: {e}")));
     eprintln!("profile written to {out}");

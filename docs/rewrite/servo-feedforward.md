@@ -6,36 +6,49 @@
 
 ## The dynamics model
 
-All dynamics live in **motor-stream coordinates** — the per-motor trajectories
-the endpoint already receives, in mm of axis travel:
+The machine's inertia and friction live on the **Cartesian axes** — the moved
+mass, the linear rails, the gantry — not on the individual motors. The model
+therefore works in *mode space*: a constant frame matrix `F` (n_modes ×
+n_slots) maps the per-motor commanded kinematics the endpoint already receives
+into Cartesian mode kinematics, one scalar mass/viscous/coulomb per mode, and
+the resulting mode forces project back to motor torques through `Fᵀ`:
 
 ```
-τᵢ = Σⱼ Mᵢⱼ·αⱼ + bᵢ·ωᵢ + cᵢ·(deadband-gated sign(ωᵢ))
+ν  = F·ω          (mode velocities from slot velocities; same for accel)
+τ  = Fᵀ·( m∘(F·α) + b∘ν + c∘sign(ν) )
 ```
 
 | Symbol | Meaning | Units |
 |--------|---------|-------|
-| τᵢ | torque feedforward, motor i | 0.1% of rated (60B2h native) |
-| αⱼ | acceleration, motor j stream | mm/s² |
-| ωᵢ | velocity, motor i stream | mm/s |
-| Mᵢⱼ | mass matrix (constant, symmetric, positive-definite) | (0.1% rated) / (mm/s²) |
-| bᵢ | viscous friction | (0.1% rated) / (mm/s) |
-| cᵢ | Coulomb friction (separate fwd/rev fits) | 0.1% rated |
+| τ | torque feedforward per motor slot | 0.1% of rated (60B2h native) |
+| α, ω | commanded accel/velocity per motor stream | mm/s², mm/s |
+| F | frame matrix, modes × slots (constant) | dimensionless |
+| mₖ | mode mass, > 0 | (0.1% rated) / (mm/s²) |
+| bₖ | mode viscous friction, ≥ 0 | (0.1% rated) / (mm/s) |
+| cₖ | mode Coulomb friction, ≥ 0, **symmetric** — no fwd/rev split | 0.1% rated |
+
+`sign(ν)` is strict (+1, −1, or exactly 0). There is no deadband: the FF is
+evaluated on *commanded* velocity, which is exactly zero at rest, so the
+Coulomb term engages on the first commanded cycle (breakaway) and never
+chatters.
 
 Velocity feedforward (60B1h) is `ωᵢ · counts_per_mm`, where `counts_per_mm =
 encoder_counts_per_rev / rotation_distance` and the result is in counts/s.
 
-**M is constant.** No configuration dependence — evaluation per DC cycle is a
-dot product. The endpoint receives M at claim time alongside `counts_per_mm`
-and never interprets the kinematics.
+**F is constant.** No configuration dependence — evaluation per DC cycle is
+two small matrix-vector products. The endpoint receives the model at claim
+time alongside `counts_per_mm` and never interprets the kinematics.
 
-**Plain English.** Think of M as a recipe card stapled to each motor: "push X
-units of torque per unit of my own acceleration, and an additional Y units per
-unit of the other motor's acceleration." The card never changes. What changes
-each cycle is how hard each motor is actually accelerating. On CoreXY a pure-X
-move and a pure-Y move involve totally different pairs of motor accelerations,
-so a single drive-side inertia ratio (C00.06) cannot be right for both — M
-handles that by having off-diagonal entries that encode the coupling.
+**Plain English.** On CoreXY the X carriage and the Y gantry each have their
+own moved mass and their own rails; a motor sees some mix of both depending on
+the move direction. The frame rows are exactly that bookkeeping: the x row
+says how each motor's motion adds up to X-carriage motion, the y row likewise.
+Fit one mass, one viscous drag, and one stiction level per Cartesian axis,
+and `Fᵀ` hands every motor its correct share — including the *holding* torque
+a stationary belt must supply on a pure diagonal move, which no per-motor
+friction term can express. A buzz excitation on any slot contaminates the
+mode velocities, so an active buzz suppresses the Coulomb term for the whole
+node for its duration.
 
 ## Configuration (`[servo_x]`)
 
@@ -75,14 +88,14 @@ offset is always 0, bit-identical to pre-FF behavior.
 
 The option can sit in two places, and they are mutually exclusive per node:
 
-- On each motor — every motor on the node points at its own single-axis
-  profile (the file `servo-ident` emits). The host stacks them into a
-  block-diagonal node model: each axis's torque feedforward depends only on its
-  own acceleration. This is the cartesian case, where the axes are independent.
-  All motors on the node must carry one, or none — a partial set fails the claim.
-- On `[ethercat_node]` — one combined `n×n` profile for the whole node, whose
-  off-diagonal mass terms express cross-axis coupling (CoreXY, where moving one
-  logical axis needs feedforward on both motors).
+- On each motor — every motor on the node points at its own single-mode
+  profile (identity frame). The host stacks them into a block-diagonal node
+  model: each motor's torque feedforward depends only on its own kinematics.
+  This is the cartesian case, where the axes are independent. All motors on
+  the node must carry one, or none — a partial set fails the claim.
+- On `[ethercat_node]` — one combined profile for the whole node, whose frame
+  rows express the cross-axis coupling (CoreXY, where a Cartesian mode mixes
+  every motor and every motor serves both modes).
 
 Setting it in both places at once is a config error.
 
@@ -120,23 +133,25 @@ message naming the file and the violated invariant.
 
 ```toml
 # generated by servo-ident; units: torque in 0.1% rated, motion in mm
-version = 1
-axes = ["x"]               # motor-stream names; order fixes matrix indices
-mass = [[0.0123]]          # M, (0.1% rated)/(mm/s²), row-major, n×n
-viscous = [0.0045]         # b per motor
-coulomb_fwd = [1.2]        # c per motor, forward direction
-coulomb_rev = [-1.1]       # c per motor, reverse direction
-coulomb_deadband_mm_s = 0.0  # commanded-velocity window where the Coulomb term is suppressed;
-                             # 0 engages it from the first non-zero commanded cycle (breakaway) —
-                             # safe because commanded velocity is exactly 0 at rest
-fit_rms_residual = [0.8]   # 0.1% rated — fit quality, informational
+version = 2
+axes = ["motor_a", "motor_a1", "motor_b", "motor_b1"]  # slot names; order fixes frame columns
+modes = ["x", "y"]                                     # mode names; order fixes frame rows
+frame = [[0.25, -0.25, -0.25, -0.25],                  # F, modes × slots — built from the
+         [0.25, -0.25, 0.25, 0.25]]                    # kinematics' belt signs, never by hand
+mass = [0.0123, 0.0119]      # m per mode, (0.1% rated)/(mm/s²)
+viscous = [0.09, 0.11]       # b per mode
+coulomb = [160.0, 175.0]     # c per mode, symmetric magnitude
+fit_rms_residual = [0.8, 0.7, 0.8, 0.9]  # per motor, 0.1% rated — fit quality, informational
 ```
 
-All 8 fields are required. Validation rules (any failure = hard claim error):
-- `version` must equal 1
-- `mass` must be `n×n` where `n = len(axes)`, symmetric, positive-definite
-- All values must be finite
-- `n` must equal the endpoint's axis count
+Validation rules (any failure = hard claim error):
+- `version` must equal 2 — older per-motor profiles (version 1) are not
+  supported; refit with `SERVO_FIT_DYNAMICS`
+- `frame` must be `n_modes × n_slots` with `n_slots = len(axes)`,
+  `n_modes = len(modes)`, `1 ≤ n_modes ≤ n_slots`, every row nonzero, rows
+  linearly independent
+- `mass` entries > 0; `viscous` and `coulomb` entries ≥ 0; all values finite
+- `n_slots` must equal the endpoint's slot count
 
 ## Identification workflow
 
@@ -213,7 +228,8 @@ behind; then:
 python3 scripts/servo_capture.py run.scap --csv run.csv
 servo-ident \
     --capture run.csv \
-    --structure scalar \
+    --frame "1" \
+    --modes x \
     --axes x \
     --out dynamics_x.toml \
     --rated-torque-nm 1.27 \
@@ -240,8 +256,11 @@ where the closed loop has caught up to the command, so the jerk transitions —
 where actual motion lags command and the soft-loop "negative inertia" artifact
 lives — never bias the fit.
 
-`--structure scalar` for a single Cartesian servo; `--structure corexy` for a
-coupled A/B pair (requires `--axes a,b` and both motors' columns in the CSV).
+`--frame` is the mode matrix, rows `;`-separated and entries `,`-separated —
+`"1"` for a single Cartesian servo, `"0.5,0.5;0.5,-0.5"` for a coupled A/B
+pair (with `--modes x,y --axes a,b` and both motors' columns in the CSV). The
+`SERVO_FIT_DYNAMICS` command builds it from the kinematics' slot order and
+invert flags; write it by hand only for offline experiments.
 
 `servo-ident` exits with code **2** and a reason when the data cannot support a
 fit:

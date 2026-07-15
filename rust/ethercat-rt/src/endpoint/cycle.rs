@@ -366,6 +366,10 @@ fn emit_slot_commands(
     let (acc_drive, vel_drive): (Vec<f32>, Vec<f32>) = (0..num_slaves)
         .map(|s| (drive_dir(s) * all_acc[s], drive_dir(s) * all_vel[s]))
         .unzip();
+    // Coulomb is a mode-space quantity, so a buzz on any slot flips the sign
+    // of a mode velocity that other slots share; drop Coulomb for every slot
+    // whenever the buzz drives any slot this cycle.
+    let buzz_active = ctx.buzz.active();
     for s in 0..num_slaves {
         if let Some(counts) = sp_counts[s] {
             let vel_offset = if ctx.velocity_ff[s] {
@@ -374,7 +378,7 @@ fn emit_slot_commands(
                 0
             };
             let raw_ff = ctx.dynamics.as_ref().map(|model| {
-                if ctx.buzz.drives_slot(s) {
+                if buzz_active {
                     model.torque_ff_without_coulomb(s, &acc_drive, &vel_drive)
                 } else {
                     model.torque_ff(s, &acc_drive, &vel_drive)

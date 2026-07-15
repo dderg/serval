@@ -4,13 +4,14 @@ use crate::model::{PhysicalParams, Structure};
 #[derive(Clone)]
 pub struct FitInput {
     pub structure: Structure,
-    /// Per motor, equal lengths: acc[motor][sample] (mm/s²).
-    pub acc: Vec<Vec<f64>>,
-    pub vel: Vec<Vec<f64>>,
-    /// Coulomb regressor columns, filtered identically to acc/vel/torque.
-    pub cf: Vec<Vec<f64>>,
-    pub cr: Vec<Vec<f64>>,
-    /// Measured torque per motor (0.1% rated units).
+    /// Mode-space commanded acceleration, equal lengths: acc_mode[mode][sample]
+    /// (mm/s²), already `frame`-projected and band-filtered.
+    pub acc_mode: Vec<Vec<f64>>,
+    pub vel_mode: Vec<Vec<f64>>,
+    /// Per-mode coulomb sign regressor column, filtered identically to
+    /// acc_mode/vel_mode/torque.
+    pub cs_mode: Vec<Vec<f64>>,
+    /// Measured torque per motor/slot (0.1% rated units).
     pub torque: Vec<Vec<f64>>,
     /// Extra per-motor regressor columns (extra[motor][column][sample]) —
     /// nuisance channels like the pulley-eccentricity sin/cos pair. Each
@@ -51,6 +52,7 @@ pub enum FitError {
     ShapeMismatch(&'static str),
     SaturatedTorque { fraction: f64 },
     InsufficientExcitation { condition: f64 },
+    UnexcitedMode { mode: usize },
     ResidualTooLarge { rms: f64 },
 }
 
@@ -81,13 +83,12 @@ struct Accum {
 }
 
 fn full_row(input: &FitInput, motor: usize, k: usize, p: usize) -> Vec<f64> {
-    let s = input.structure;
-    let n_motors = s.axis_count();
-    let acc_k: Vec<f64> = (0..n_motors).map(|m| input.acc[m][k]).collect();
-    let vel_k: Vec<f64> = (0..n_motors).map(|m| input.vel[m][k]).collect();
-    let cf_k: Vec<f64> = (0..n_motors).map(|m| input.cf[m][k]).collect();
-    let cr_k: Vec<f64> = (0..n_motors).map(|m| input.cr[m][k]).collect();
-    let mut row = s.row(motor, &acc_k, &vel_k, &cf_k, &cr_k);
+    let s = &input.structure;
+    let n_modes = s.mode_count();
+    let acc_k: Vec<f64> = (0..n_modes).map(|m| input.acc_mode[m][k]).collect();
+    let vel_k: Vec<f64> = (0..n_modes).map(|m| input.vel_mode[m][k]).collect();
+    let cs_k: Vec<f64> = (0..n_modes).map(|m| input.cs_mode[m][k]).collect();
+    let mut row = s.row(motor, &acc_k, &vel_k, &cs_k);
     let e = input.extra.first().map_or(0, Vec::len);
     row.resize(p, 0.0);
     let base = s.param_count();
@@ -98,9 +99,9 @@ fn full_row(input: &FitInput, motor: usize, k: usize, p: usize) -> Vec<f64> {
 }
 
 fn accumulate(input: &FitInput, p: usize, weights: Option<&[f64]>) -> Accum {
-    let s = input.structure;
+    let s = &input.structure;
     let n_motors = s.axis_count();
-    let n_samples = input.acc[0].len();
+    let n_samples = input.acc_mode[0].len();
     let mut ata = vec![0.0_f64; p * p];
     let mut aty = vec![0.0_f64; p];
     let mut col_norm2 = vec![0.0_f64; p];
@@ -159,7 +160,7 @@ pub fn residual_by_motor(
     params: &PhysicalParams,
     extra_params: &[Vec<f64>],
 ) -> Vec<Vec<f64>> {
-    let s = input.structure;
+    let s = &input.structure;
     let n_motors = s.axis_count();
     let e = input.extra.first().map_or(0, Vec::len);
     let p = s.param_count() + n_motors * e;
@@ -169,7 +170,7 @@ pub fn residual_by_motor(
         theta.extend_from_slice(coeffs);
     }
     assert_eq!(theta.len(), p);
-    let n_samples = input.acc[0].len();
+    let n_samples = input.acc_mode[0].len();
     let mut out = vec![Vec::with_capacity(n_samples); n_motors];
     for k in 0..n_samples {
         for (motor, series) in out.iter_mut().enumerate() {
@@ -182,9 +183,9 @@ pub fn residual_by_motor(
 }
 
 fn residuals(input: &FitInput, theta: &[f64], p: usize) -> Vec<f64> {
-    let s = input.structure;
+    let s = &input.structure;
     let n_motors = s.axis_count();
-    let n_samples = input.acc[0].len();
+    let n_samples = input.acc_mode[0].len();
     let mut out = Vec::with_capacity(n_samples * n_motors);
     for k in 0..n_samples {
         for motor in 0..n_motors {
@@ -224,28 +225,33 @@ fn stderr_from(acc: &Accum, scale: &[f64], sigma2: f64, p: usize) -> Vec<f64> {
 }
 
 pub fn fit(input: &FitInput, opts: &FitOptions) -> Result<FitResult, FitError> {
-    let s = input.structure;
+    let s = &input.structure;
     let n_motors = s.axis_count();
-    if input.acc.len() != n_motors
-        || input.vel.len() != n_motors
-        || input.cf.len() != n_motors
-        || input.cr.len() != n_motors
-        || input.torque.len() != n_motors
+    let n_modes = s.mode_count();
+    if input.acc_mode.len() != n_modes
+        || input.vel_mode.len() != n_modes
+        || input.cs_mode.len() != n_modes
     {
+        return Err(FitError::ShapeMismatch("mode channel count"));
+    }
+    if input.torque.len() != n_motors {
         return Err(FitError::ShapeMismatch("motor count"));
     }
-    let n_samples = input.acc[0].len();
+    let n_samples = input.acc_mode[0].len();
     if n_samples == 0 {
         return Err(FitError::ShapeMismatch("no samples"));
     }
-    for m in 0..n_motors {
-        if input.acc[m].len() != n_samples
-            || input.vel[m].len() != n_samples
-            || input.cf[m].len() != n_samples
-            || input.cr[m].len() != n_samples
-            || input.torque[m].len() != n_samples
+    for m in 0..n_modes {
+        if input.acc_mode[m].len() != n_samples
+            || input.vel_mode[m].len() != n_samples
+            || input.cs_mode[m].len() != n_samples
         {
-            return Err(FitError::ShapeMismatch("sample count"));
+            return Err(FitError::ShapeMismatch("mode sample count"));
+        }
+    }
+    for m in 0..n_motors {
+        if input.torque[m].len() != n_samples {
+            return Err(FitError::ShapeMismatch("torque sample count"));
         }
     }
 
@@ -272,6 +278,11 @@ pub fn fit(input: &FitInput, opts: &FitOptions) -> Result<FitResult, FitError> {
     }
     let p = s.param_count() + n_motors * e;
     let mut acc = accumulate(input, p, None);
+    for k in 0..s.param_count() {
+        if acc.col_norm2[k] == 0.0 {
+            return Err(FitError::UnexcitedMode { mode: k / 3 });
+        }
+    }
     let (mut theta, condition, mut scale) = solve_scaled(&acc, p)?;
     if condition > opts.max_condition {
         return Err(FitError::InsufficientExcitation { condition });

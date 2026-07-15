@@ -104,17 +104,45 @@ fn tracking_mask_drops_stiction_and_overshoot() {
 }
 
 #[test]
-fn renders_loadable_profile() {
+fn renders_loadable_v2_profile() {
     let p = PhysicalParams {
-        mass: vec![vec![0.0123]],
-        viscous: vec![0.0045],
-        coulomb_fwd: vec![1.2],
-        coulomb_rev: vec![-1.1],
+        mass: vec![0.0123, 0.0119],
+        viscous: vec![0.09, 0.11],
+        coulomb: vec![160.0, 175.0],
     };
-    let toml_text = render_profile(&p, &["x"], &[0.8]);
-    assert!(toml_text.contains("version = 1"));
-    assert!(toml_text.contains("coulomb_deadband_mm_s = 0.0"));
-    assert!(toml_text.contains("mass = [[0.0123]]"));
+    let frame = vec![
+        vec![0.25, -0.25, -0.25, -0.25],
+        vec![0.25, -0.25, 0.25, 0.25],
+    ];
+    let toml_text = render_profile(
+        &p,
+        &["motor_a", "motor_a1", "motor_b", "motor_b1"],
+        &["x", "y"],
+        &frame,
+        &[0.8, 0.7, 0.8, 0.9],
+    );
+    assert!(toml_text.contains("version = 2"), "{toml_text}");
+    assert!(
+        toml_text.contains("axes = [\"motor_a\", \"motor_a1\", \"motor_b\", \"motor_b1\"]"),
+        "{toml_text}"
+    );
+    assert!(toml_text.contains("modes = [\"x\", \"y\"]"), "{toml_text}");
+    assert!(
+        toml_text.contains("frame = [[0.25, -0.25, -0.25, -0.25], [0.25, -0.25, 0.25, 0.25]]"),
+        "{toml_text}"
+    );
+    assert!(toml_text.contains("mass = [0.0123, 0.0119]"), "{toml_text}");
+    assert!(toml_text.contains("viscous = [0.09, 0.11]"), "{toml_text}");
+    assert!(
+        toml_text.contains("coulomb = [160.0, 175.0]"),
+        "{toml_text}"
+    );
+    assert!(
+        toml_text.contains("fit_rms_residual = [0.8, 0.7, 0.8, 0.9]"),
+        "{toml_text}"
+    );
+    assert!(!toml_text.contains("coulomb_fwd"), "{toml_text}");
+    assert!(!toml_text.contains("coulomb_deadband"), "{toml_text}");
 }
 
 #[test]
@@ -130,14 +158,15 @@ fn c0006_matches_hand_calculation() {
 #[test]
 fn renders_integer_valued_floats_as_toml_floats() {
     let p = PhysicalParams {
-        mass: vec![vec![2.0]],
+        mass: vec![2.0],
         viscous: vec![0.0],
-        coulomb_fwd: vec![1.0],
-        coulomb_rev: vec![-1.0],
+        coulomb: vec![1.0],
     };
-    let toml_text = render_profile(&p, &["x"], &[1.0]);
-    assert!(toml_text.contains("mass = [[2.0]]"), "{toml_text}");
+    let toml_text = render_profile(&p, &["x"], &["x"], &[vec![1.0]], &[1.0]);
+    assert!(toml_text.contains("mass = [2.0]"), "{toml_text}");
     assert!(toml_text.contains("viscous = [0.0]"), "{toml_text}");
+    assert!(toml_text.contains("frame = [[1.0]]"), "{toml_text}");
+    assert!(toml_text.contains("coulomb = [1.0]"), "{toml_text}");
     assert!(
         toml_text.contains("fit_rms_residual = [1.0]"),
         "{toml_text}"

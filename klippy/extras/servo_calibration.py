@@ -166,7 +166,11 @@ DYNAMICS_METRIC_BY_TERM = {
     "VISCOUS": "ferr_rms",
     "COULOMB": "ferr_peak",
 }
-DYNAMICS_PROFILE_VECTORS = ("viscous", "coulomb_fwd", "coulomb_rev")
+DYNAMICS_TERM_KEYS = {
+    "MASS": "mass",
+    "VISCOUS": "viscous",
+    "COULOMB": "coulomb",
+}
 GOLDEN_RATIO_CONJ = (math.sqrt(5.0) - 1.0) / 2.0
 
 
@@ -176,29 +180,39 @@ def parse_dynamics_profile(text: str) -> dict[str, Any]:
             "parsing dynamics profiles requires Python 3.11+ (tomllib)"
         )
     data = tomllib.loads(text)
-    if data.get("version") != 1:
+    if data.get("version") != 2:
         raise ValueError(
-            "profile version must be 1 (got %r)" % (data.get("version"),)
+            "dynamics profile version must be 2 (got %r) - refit with "
+            "SERVO_FIT_DYNAMICS" % (data.get("version"),)
         )
     axes = data.get("axes")
     if not isinstance(axes, list) or not axes:
         raise ValueError("profile axes must be a non-empty list")
-    n = len(axes)
-    mass = data.get("mass")
+    n_slots = len(axes)
+    modes = data.get("modes")
+    if not isinstance(modes, list) or not modes:
+        raise ValueError("profile modes must be a non-empty list")
+    n_modes = len(modes)
+    frame = data.get("frame")
     if (
-        not isinstance(mass, list)
-        or len(mass) != n
-        or any(not isinstance(row, list) or len(row) != n for row in mass)
+        not isinstance(frame, list)
+        or len(frame) != n_modes
+        or any(
+            not isinstance(row, list) or len(row) != n_slots for row in frame
+        )
     ):
-        raise ValueError("profile mass must be %dx%d" % (n, n))
-    for key in DYNAMICS_PROFILE_VECTORS:
+        raise ValueError(
+            "profile frame must be %d modes x %d slots" % (n_modes, n_slots)
+        )
+    for key in ("mass", "viscous", "coulomb"):
         vec = data.get(key)
-        if not isinstance(vec, list) or len(vec) != n:
-            raise ValueError("profile %s must list %d values" % (key, n))
-    numbers = [v for row in mass for v in row]
-    for key in DYNAMICS_PROFILE_VECTORS:
+        if not isinstance(vec, list) or len(vec) != n_modes:
+            raise ValueError(
+                "profile %s must list %d per-mode values" % (key, n_modes)
+            )
+    numbers = [v for row in frame for v in row]
+    for key in ("mass", "viscous", "coulomb"):
         numbers += data[key]
-    numbers.append(data.get("coulomb_deadband_mm_s"))
     for v in numbers:
         if (
             isinstance(v, bool)
@@ -208,62 +222,48 @@ def parse_dynamics_profile(text: str) -> dict[str, Any]:
             raise ValueError(
                 "profile contains a non-numeric or non-finite value: %r" % (v,)
             )
-    profile = {
+    return {
         "axes": [str(a) for a in axes],
-        "mass": [[float(v) for v in row] for row in mass],
-        "coulomb_deadband_mm_s": float(data["coulomb_deadband_mm_s"]),
+        "modes": [str(m) for m in modes],
+        "frame": [[float(v) for v in row] for row in frame],
+        "mass": [float(v) for v in data["mass"]],
+        "viscous": [float(v) for v in data["viscous"]],
+        "coulomb": [float(v) for v in data["coulomb"]],
     }
-    for key in DYNAMICS_PROFILE_VECTORS:
-        profile[key] = [float(v) for v in data[key]]
-    return profile
+
+
+def _copy_dynamics(profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "axes": list(profile["axes"]),
+        "modes": list(profile["modes"]),
+        "frame": [list(row) for row in profile["frame"]],
+        "mass": list(profile["mass"]),
+        "viscous": list(profile["viscous"]),
+        "coulomb": list(profile["coulomb"]),
+    }
 
 
 def scale_dynamics(
     profile: dict[str, Any], term: str, scale: float
 ) -> dict[str, Any]:
-    scaled = {
-        "axes": list(profile["axes"]),
-        "mass": [list(row) for row in profile["mass"]],
-        "coulomb_deadband_mm_s": profile["coulomb_deadband_mm_s"],
-    }
-    for key in DYNAMICS_PROFILE_VECTORS:
-        scaled[key] = list(profile[key])
-    if term == "MASS":
-        scaled["mass"] = [[v * scale for v in row] for row in scaled["mass"]]
-    elif term == "VISCOUS":
-        scaled["viscous"] = [v * scale for v in scaled["viscous"]]
-    elif term == "COULOMB":
-        scaled["coulomb_fwd"] = [v * scale for v in scaled["coulomb_fwd"]]
-        scaled["coulomb_rev"] = [v * scale for v in scaled["coulomb_rev"]]
-    else:
+    key = DYNAMICS_TERM_KEYS.get(term)
+    if key is None:
         raise ValueError("unknown dynamics term %r" % (term,))
+    scaled = _copy_dynamics(profile)
+    scaled[key] = [v * scale for v in profile[key]]
     return scaled
 
 
-def scale_dynamics_direction(
-    profile: dict[str, Any], mode_signs: list[float], scale: float
+def scale_dynamics_mode(
+    profile: dict[str, Any], term: str, mode_index: int, scale: float
 ) -> dict[str, Any]:
-    """Scale the mass response of one CoreXY direction, leaving the other
-    untouched. mode_signs is the belt excitation pattern of the direction
-    (+1/-1 per profile axis; X moves both belts the same way, Y opposite),
-    and the scaled component is the mass matrix projected onto that mode:
-    M' = M + (scale - 1) * (u^T M u) * u u^T with u the normalized mode."""
-    mass = profile["mass"]
-    n = len(mass)
-    if len(mode_signs) != n:
-        raise ValueError(
-            "mode has %d signs but the mass matrix is %dx%d"
-            % (len(mode_signs), n, n)
-        )
-    u = [s / math.sqrt(n) for s in mode_signs]
-    mode_mass = sum(
-        u[i] * mass[i][j] * u[j] for i in range(n) for j in range(n)
-    )
-    scaled = scale_dynamics(profile, "MASS", 1.0)
-    scaled["mass"] = [
-        [mass[i][j] + (scale - 1.0) * mode_mass * u[i] * u[j] for j in range(n)]
-        for i in range(n)
-    ]
+    key = DYNAMICS_TERM_KEYS.get(term)
+    if key is None:
+        raise ValueError("unknown dynamics term %r" % (term,))
+    scaled = _copy_dynamics(profile)
+    values = list(profile[key])
+    values[mode_index] = values[mode_index] * scale
+    scaled[key] = values
     return scaled
 
 
@@ -283,13 +283,13 @@ def render_dynamics_toml(
         return "[%s]" % (", ".join(num(v) for v in values),)
 
     lines = [
-        "version = 1",
+        "version = 2",
         "axes = %s" % (json.dumps(profile["axes"]),),
-        "mass = [%s]" % (", ".join(vec(row) for row in profile["mass"]),),
+        "modes = %s" % (json.dumps(profile["modes"]),),
+        "frame = [%s]" % (", ".join(vec(row) for row in profile["frame"]),),
+        "mass = %s" % (vec(profile["mass"]),),
         "viscous = %s" % (vec(profile["viscous"]),),
-        "coulomb_fwd = %s" % (vec(profile["coulomb_fwd"]),),
-        "coulomb_rev = %s" % (vec(profile["coulomb_rev"]),),
-        "coulomb_deadband_mm_s = %s" % (num(profile["coulomb_deadband_mm_s"]),),
+        "coulomb = %s" % (vec(profile["coulomb"]),),
         "refined_source = %s" % (json.dumps(source),),
         "refined_term = %s" % (json.dumps(term.lower()),),
     ]
@@ -684,11 +684,10 @@ class DynamicsModelAdapter:
     def _send(self, profile: dict[str, Any]) -> None:
         self._engine.set_dynamics_model(
             self._handle,
-            [float(v) for row in profile["mass"] for v in row],
+            [float(f) for row in profile["frame"] for f in row],
+            [float(v) for v in profile["mass"]],
             [float(v) for v in profile["viscous"]],
-            [float(v) for v in profile["coulomb_fwd"]],
-            [float(v) for v in profile["coulomb_rev"]],
-            float(profile["coulomb_deadband_mm_s"]),
+            [float(v) for v in profile["coulomb"]],
         )
 
 
@@ -2418,23 +2417,44 @@ class ServoCalibration:
     cmd_SERVO_FIT_DYNAMICS_help = (
         "Identify axis dynamics for torque feedforward - runs the "
         "SERVO_MEASURE_INERTIA grid, fits mass/viscous/coulomb, and writes "
-        "a timestamped profile (node-level on coupled_xy, the coupled mass "
-        "matrix with AWD drives paired from the kinematics; per-axis "
+        "a timestamped profile (node-level on coupled_xy, a Cartesian "
+        "mode-space model with the frame built from the kinematics; per-axis "
         "otherwise, DRIVE= picking the scalar fit on a multi-drive axis). "
         "Optional TORQUE_NM + INERTIA_KGM2 add the C00.06 recommendation. "
         "Params as SERVO_MEASURE_INERTIA plus TORQUE_NM INERTIA_KGM2 DRIVE"
     )
+
+    def _corexy_frame(
+        self, gcmd: Any, kin: Any
+    ) -> tuple[list[str], list[str], list[list[float]]]:
+        rails = servo_strokes.axis_rails(gcmd, kin, "X")
+        slots: list[tuple[str, int, float, int]] = []
+        for belt_index, rail in enumerate(rails):
+            motors = servo_strokes.rail_motors_in_slot_order(rail)
+            drives = len(motors)
+            for m in motors:
+                sign = -1.0 if m.get_invert_direction() else 1.0
+                slots.append((m.get_motor_name(), belt_index, sign, drives))
+        axes = [name for name, _b, _s, _d in slots]
+        frame_x = [sign / (2.0 * drives) for _n, _b, sign, drives in slots]
+        frame_y = [
+            (sign if belt == 0 else -sign) / (2.0 * drives)
+            for _n, belt, sign, drives in slots
+        ]
+        return axes, ["x", "y"], [frame_x, frame_y]
 
     def _fit_plan(self, gcmd: Any) -> dict[str, Any]:
         kin = self._kin()
         if kin.coupled_xy():
             layout = servo_strokes.corexy_fit_layout(gcmd, kin)
             servo_strokes.check_servos_override(gcmd, layout)
+            axes, modes, frame = self._corexy_frame(gcmd, kin)
             return {
                 "corexy": True,
                 "servos": layout["servos"],
-                "axes": layout["servos"],
-                "structure": "corexy-awd" if layout["pairs"] else "corexy",
+                "axes": axes,
+                "modes": modes,
+                "frame": frame,
                 "axis": "X",
                 "rails": servo_strokes.axis_rails(gcmd, kin, "X"),
             }
@@ -2442,11 +2462,13 @@ class ServoCalibration:
         axis = gcmd.get("AXIS", "X").upper()
         drive = servo_strokes.scalar_fit_drive(gcmd, kin)
         servos = servo_strokes.axis_servos(gcmd, kin, axis)
+        axes = [drive if drive is not None else servos[0]]
         return {
             "corexy": False,
             "servos": servos,
-            "axes": [drive if drive is not None else servos[0]],
-            "structure": "scalar",
+            "axes": axes,
+            "modes": list(axes),
+            "frame": [[1.0]],
             "axis": axis,
             "rails": None,
         }
@@ -2505,8 +2527,12 @@ class ServoCalibration:
                 "fit",
                 "--capture",
                 run.step_scap(name),
-                "--structure",
-                plan["structure"],
+                "--frame",
+                ";".join(
+                    ",".join("%g" % (f,) for f in row) for row in plan["frame"]
+                ),
+                "--modes",
+                ",".join(plan["modes"]),
                 "--axes",
                 ",".join(plan["axes"]),
                 "--out",
@@ -2536,7 +2562,7 @@ class ServoCalibration:
     cmd_SERVO_CALIBRATE_INERTIA_RATIO_help = (
         "Step 2 of servo tuning - identify the load inertia and print the "
         "recommended C00.06 (on coupled_xy kinematics: for both belt "
-        "directions, via the coupled X+Y grid and mass-matrix fit; the "
+        "directions, via the coupled X+Y grid and mode-space fit; the "
         "drive takes one scalar, so start from the light-direction number "
         "and confirm with SERVO_SWEEP_INERTIA). TORQUE_NM and INERTIA_KGM2 "
         "required (config or param). Params as SERVO_MEASURE_INERTIA plus "
@@ -3263,18 +3289,25 @@ class ServoCalibration:
             x_grid = axis_grid("X", x_start, x_end, (x_start, y_center))
             y_grid = axis_grid("Y", y_start, y_end, (x_center, y_start))
             if term == "MASS":
-                belt_signs = self._corexy_belt_signs(gcmd, kin, baseline)
-                x_signs = [1.0] * len(belt_signs)
+                modes = baseline["modes"]
+                if len(modes) != 2 or not {"x", "y"} <= set(modes):
+                    raise gcmd.error(
+                        "coupled_xy TERM=MASS refine needs a 2-mode profile "
+                        "with x and y modes; profile %s has modes %s"
+                        % (profile_path, modes)
+                    )
+                x_index = modes.index("x")
+                y_index = modes.index("y")
 
                 def x_scale_fn(
                     profile: dict[str, Any], scale: float
                 ) -> dict[str, Any]:
-                    return scale_dynamics_direction(profile, x_signs, scale)
+                    return scale_dynamics_mode(profile, "MASS", x_index, scale)
 
                 def y_scale_fn(
                     profile: dict[str, Any], scale: float
                 ) -> dict[str, Any]:
-                    return scale_dynamics_direction(profile, belt_signs, scale)
+                    return scale_dynamics_mode(profile, "MASS", y_index, scale)
 
                 phases = [
                     ("mass_x", "x", x_scale_fn, x_grid),
@@ -3478,21 +3511,6 @@ class ServoCalibration:
                 run.run_dir,
             )
         )
-
-    def _corexy_belt_signs(
-        self, gcmd: Any, kin: Any, profile: dict[str, Any]
-    ) -> list[float]:
-        signs_by_motor: dict[str, float] = {}
-        for rail, sign in zip(kin.rails[:2], (1.0, -1.0)):
-            for m in rail.get_motors():
-                signs_by_motor[m.get_motor_name()] = sign
-        missing = [a for a in profile["axes"] if a not in signs_by_motor]
-        if missing:
-            raise gcmd.error(
-                "profile axes %s are not corexy belt motors (belts drive %s)"
-                % (missing, sorted(signs_by_motor))
-            )
-        return [signs_by_motor[a] for a in profile["axes"]]
 
     cmd_SERVO_SWEEP_INERTIA_help = (
         "Empirical inertia sweep, gain-sweep style. Resolves every servo "

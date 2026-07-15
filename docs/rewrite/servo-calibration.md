@@ -301,9 +301,9 @@ the shape of the grid:
 
 - **`coupled_xy` kinematics** (CoreXY): one capture of **every** belt drive
   with X and Y strokes at every grid point (`SERVOS=` overrides; the default
-  is every motor the kinematics says drives the belts), so the coupled fit
-  can separate the diagonal and off-diagonal inertia (X strokes excite
-  `m_diag+m_off`, Y strokes `m_diag−m_off`). Before each stroke set the
+  is every motor the kinematics says drives the belts), so the fit sees each
+  Cartesian mode excited on its own (X strokes excite only the x mode, Y
+  strokes only the y mode). Before each stroke set the
   toolhead moves (at `travel_speed`) to the active axis' start with the idle
   axis centered in its range, so both belt runs are near-equal length during
   the measurement. Bounds come from `X_START`/`X_END`/`Y_START`/`Y_END`.
@@ -318,21 +318,22 @@ Params: `AXIS` (X) `START` `END` `X_START` `X_END` `Y_START` `Y_END` `ACCELS`
 ## Fit / inertia-ratio commands
 
 #### SERVO_FIT_DYNAMICS
-Runs the `SERVO_MEASURE_INERTIA` grid, fits mass/viscous/coulomb, and writes a
-timestamped feedforward profile. Optional `TORQUE_NM` + `INERTIA_KGM2` also
-print the recommended C00.06. The active kinematics decides the fit
-structure:
+Runs the `SERVO_MEASURE_INERTIA` grid, fits one mass/viscous/coulomb triple
+per Cartesian mode (see the model in
+[servo-feedforward.md](servo-feedforward.md)), and writes a timestamped
+feedforward profile. Optional `TORQUE_NM` + `INERTIA_KGM2` also print the
+recommended C00.06. The active kinematics decides the frame the fit and the
+profile share:
 
 - **`coupled_xy` kinematics**: runs the X+Y grid over every belt drive and
-  fits the coupled mass matrix. The drive list and, on AWD, the belt pairing
-  are derived from the kinematics motor lists (two drives per belt fit
-  `--structure corexy-awd`: shared per-drive mass/coupling, per-drive
-  friction; all four drives must sit on one node). The resulting profile
-  goes on `[ethercat_node] dynamics_profile` (node-level, coupled) rather
-  than per-motor.
-- **cartesian kinematics**: fits a single axis. On a multi-drive (AWD) axis
-  `DRIVE=` picks which drive the scalar fit describes — required there,
-  since the capture records every drive.
+  fits the x and y modes through the frame matrix built from the kinematics'
+  slot order and invert flags (passed to the fitter as `--frame`/`--modes`;
+  on AWD each belt's pair shares its columns and all four drives must sit on
+  one node). The resulting profile goes on `[ethercat_node]
+  dynamics_profile` (node-level, coupled) rather than per-motor.
+- **cartesian kinematics**: fits a single mode with an identity frame. On a
+  multi-drive (AWD) axis `DRIVE=` picks which drive the scalar fit
+  describes — required there, since the capture records every drive.
 
 Params: as `SERVO_MEASURE_INERTIA` plus `TORQUE_NM` `INERTIA_KGM2` `NAME`
 (ident) `DRIVE`. Captures the grid into a run directory and runs
@@ -344,9 +345,9 @@ fit never overwrites an existing profile.
 Empirical refinement of an existing dynamics profile, for when the
 `SERVO_FIT_DYNAMICS` regression differs run-to-run with the excitation
 grid. Golden-section search over a scale factor applied to the baseline
-profile's **mass matrix** (`TERM=MASS`, default), **viscous vector**
-(`TERM=VISCOUS`) or **coulomb friction vectors** (`TERM=COULOMB`, fwd and
-rev scaled together): each candidate model is streamed into the *running*
+profile's per-mode **mass** (`TERM=MASS`, default), **viscous**
+(`TERM=VISCOUS`) or **coulomb** (`TERM=COULOMB`) vector: each candidate
+model is streamed into the *running*
 endpoint (no restart) and measured with one tracking capture of the full
 `SERVO_MEASURE_INERTIA` `ACCELS` × `SPEEDS` grid, then scored from
 `servo-cal analyze` — mean per-move **ferr_peak** for `MASS` and
@@ -360,14 +361,12 @@ value) and runs **through the settle duration**, so ferr_peak/ferr_rms
 cover FF lead-in, in-move tracking, and endpoint overshoot alike (for
 every command that reads these metrics, not just the refine);
 `overshoot` remains reported separately as the post-move-only peak. On
-`coupled_xy`, `TERM=MASS` refines the two directions **sequentially** —
-first a search over the X-direction mass mode with X-only strokes, then,
-on top of the X winner, the Y mode with Y-only strokes — because the two
-directions carry different moved mass (`m_diag ± m_off` in the fitted
-structure) and one shared scale cannot serve both. Direction scaling
-projects the mass matrix onto the belt excitation mode of that axis
-(X: both belts same sign, Y: opposite) and scales only that component,
-leaving the other direction's response untouched. Scoring the mean over
+`coupled_xy`, `TERM=MASS` refines the two modes **sequentially** — first a
+search over the x-mode mass with X-only strokes, then, on top of the X
+winner, the y mode with Y-only strokes — because the two modes carry
+different moved mass and one shared scale cannot serve both. Each phase
+scales exactly its own `mass[mode]` entry, leaving the other mode's
+response untouched. Scoring the mean over
 the whole grid keeps a scale that helps at one operating point but hurts
 at another from winning; every per-scale line also lists mean overshoot,
 ferr_rms, and ferr_peak so the non-scored metrics can be sanity-checked.
@@ -403,7 +402,7 @@ against the refined profile, then `TERM=COULOMB` against that. Params: `TERM` (M
 Step 2 of tuning: identify the load inertia and print the recommended C00.06.
 `TORQUE_NM` and `INERTIA_KGM2` are **required** (config or param). On
 `coupled_xy` kinematics this runs the X+Y grid over every belt drive, fits the
-coupled mass matrix, and prints C00.06 for both directions (per drive on AWD);
+per-mode masses, and prints C00.06 for both directions (per drive on AWD);
 the drive takes one scalar, so start from the light-direction number and
 confirm with `SERVO_SWEEP_INERTIA` (both motors must be the same model). On
 cartesian kinematics it fits the single axis named by `AXIS`. Params: as
