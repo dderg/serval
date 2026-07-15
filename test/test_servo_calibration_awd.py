@@ -713,7 +713,7 @@ def _capture_paths(sc):
     ]
 
 
-def test_fit_dynamics_coupled_defaults_to_three_windows():
+def test_fit_dynamics_coupled_defaults_to_four_quadrant_windows():
     sc, gcode = make_calibration(awd_rails())
     strokes = []
     sc._strokes = lambda axis, start, end, *a: strokes.append(
@@ -721,22 +721,39 @@ def test_fit_dynamics_coupled_defaults_to_three_windows():
     )
     sc.bounds = {"X": (20.0, 280.0), "Y": (20.0, 280.0)}
     sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd())
+    expected = [
+        "step_ident_w0.scap",
+        "step_ident_w1.scap",
+        "step_ident_w2.scap",
+        "step_ident_w3.scap",
+    ]
+    assert _capture_paths(sc) == expected
+    argv = _fit_argv(gcode)
+    caps = [argv[i + 1] for i, a in enumerate(argv) if a == "--capture"]
+    assert [os.path.basename(c) for c in caps] == expected
+    x_windows = {(s, e) for ax, s, e in strokes if ax == "X"}
+    y_windows = {(s, e) for ax, s, e in strokes if ax == "Y"}
+    assert x_windows == {(20.0, 150.0), (150.0, 280.0)}
+    assert y_windows == {(20.0, 150.0), (150.0, 280.0)}
+
+
+def test_fit_dynamics_windows_three_skips_rear_right():
+    sc, gcode = make_calibration(awd_rails())
+    windows = []
+    real = sc._strokes
+    sc._strokes = lambda *a: windows.append(a[:3])
+    del real
+    sc.bounds = {"X": (20.0, 280.0), "Y": (20.0, 280.0)}
+    sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd(WINDOWS="3"))
     assert _capture_paths(sc) == [
         "step_ident_w0.scap",
         "step_ident_w1.scap",
         "step_ident_w2.scap",
     ]
-    argv = _fit_argv(gcode)
-    caps = [argv[i + 1] for i, a in enumerate(argv) if a == "--capture"]
-    assert [os.path.basename(c) for c in caps] == [
-        "step_ident_w0.scap",
-        "step_ident_w1.scap",
-        "step_ident_w2.scap",
+    highs = [
+        w for w in windows if w[1] == 150.0 and w[2] == 280.0 and w[0] == "Y"
     ]
-    x_windows = {(s, e) for ax, s, e in strokes if ax == "X"}
-    y_windows = {(s, e) for ax, s, e in strokes if ax == "Y"}
-    assert x_windows == {(20.0, 150.0), (150.0, 280.0)}
-    assert y_windows == {(20.0, 150.0), (150.0, 280.0)}
+    assert highs, "rear windows must still stroke Y 150..280"
 
 
 def test_fit_dynamics_windows_one_is_the_full_range():

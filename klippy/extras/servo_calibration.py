@@ -2405,9 +2405,10 @@ class ServoCalibration:
     cmd_SERVO_MEASURE_INERTIA_help = (
         "Excitation grid for the inertia/friction fit (servo-ident). "
         "coupled_xy kinematics run the X+Y belt grid over WINDOWS position "
-        "windows (default 3: front-left, front-right and rear-left "
-        "half-range windows, one capture each - the plan that identifies "
-        "the pair load-share split; WINDOWS=1 is one full-range capture); "
+        "windows (default 4: one half-range window per quadrant, one "
+        "capture each - the plan that identifies the pair load-share "
+        "split and checks its linearity; 3 skips rear-right, 1 is one "
+        "full-range capture); "
         "SERVOS=/X_START etc override; travel_speed centers the idle axis "
         "between strokes. "
         "cartesian kinematics run a single AXIS grid and reject SERVOS/"
@@ -2487,19 +2488,27 @@ class ServoCalibration:
         self, gcmd: Any
     ) -> list[tuple[float, float, float, float]]:
         x0, x1, y0, y1 = servo_strokes.xy_bounds(gcmd, self.bounds)
-        n = gcmd.get_int("WINDOWS", 3)
+        n = gcmd.get_int("WINDOWS", 4)
         if n == 1:
             return [(x0, x1, y0, y1)]
-        if n != 3:
+        if n not in (3, 4):
             raise gcmd.error(
                 "WINDOWS must be 1 (one full-range window; the pair "
-                "load-share split is then unidentifiable and gets zeroed) "
-                "or 3 (front-left, front-right and rear-left half-range "
-                "windows, which separate both belt coordinates)"
+                "load-share split is then unidentifiable and gets zeroed), "
+                "3 (front-left, front-right, rear-left half-range windows "
+                "- both belt coordinates separated, but one belt gets only "
+                "two position levels) or 4 (all quadrants - three levels "
+                "per belt, enough to also check the split's linearity)"
             )
         xm = (x0 + x1) / 2.0
         ym = (y0 + y1) / 2.0
-        return [(x0, xm, y0, ym), (xm, x1, y0, ym), (x0, xm, ym, y1)]
+        windows = [
+            (x0, xm, y0, ym),
+            (xm, x1, y0, ym),
+            (x0, xm, ym, y1),
+            (xm, x1, ym, y1),
+        ]
+        return windows[:n]
 
     def _measure_inertia_corexy(
         self, gcmd: Any, name: str, servos: str | list[str] | None = None
@@ -2542,10 +2551,11 @@ class ServoCalibration:
         "a timestamped profile (node-level on coupled_xy, a Cartesian "
         "mode-space model with the frame built from the kinematics; per-axis "
         "otherwise, DRIVE= picking the scalar fit on a multi-drive axis). "
-        "On coupled_xy the default WINDOWS=3 position windows are pooled "
+        "On coupled_xy the default WINDOWS=4 quadrant windows are pooled "
         "into one fit, which also identifies the pair load-share split's "
-        "inertial component; WINDOWS=1 is faster but that component gets "
-        "zeroed as unidentifiable. "
+        "inertial component and checks its linearity (3 skips rear-right "
+        "and loses the check; WINDOWS=1 is fastest but the split's "
+        "inertial component gets zeroed as unidentifiable). "
         "Optional TORQUE_NM + INERTIA_KGM2 add the C00.06 recommendation. "
         "Params as SERVO_MEASURE_INERTIA plus TORQUE_NM INERTIA_KGM2 DRIVE"
     )
