@@ -2195,21 +2195,18 @@ class ServoCalibration:
                 self._strokes("X", x_start, x_end, speed, accel, 1, dwell)
                 self._stop_capture()
                 results = tuner.score_line(gcmd, run.run_dir, name, line_y)
-                run.record_step(
-                    SweepStep(
-                        name,
-                        {"y": line_y},
-                        [
-                            {
-                                "belt": "AB"[belt_idx],
-                                "matrix_row": tuner.matrix_rows()[belt_idx],
-                                "rho": result["rho"],
-                                "residual_rms_pct": result["rms"],
-                            }
-                            for belt_idx, result in enumerate(results)
-                        ],
-                    )
-                )
+                (kaa, kab), (kba, kbb) = tuner.matrix_rows()
+                swept = {
+                    "y": line_y,
+                    "kaa": kaa,
+                    "kab": kab,
+                    "kba": kba,
+                    "kbb": kbb,
+                }
+                for belt_idx, result in enumerate(results):
+                    swept["rho_%s" % "ab"[belt_idx]] = result["rho"]
+                    swept["rms_%s" % "ab"[belt_idx]] = result["rms"]
+                run.record_step(SweepStep(name, swept, []))
                 for belt_idx, result in enumerate(results):
                     gcmd.respond_info(
                         "tune %d/%d belt %s: achieved %.0f%% of intended "

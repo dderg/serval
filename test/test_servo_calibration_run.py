@@ -1060,8 +1060,12 @@ def test_tune_loops_one_line_until_converged():
     assert tuner.scored[0][2] == 150.0
     m = _manifest(sc)
     assert m["experiment"] == "strain_tune"
-    assert m["steps"][0]["applied"][0]["rho"] == 0.66
-    assert m["steps"][0]["applied"][0]["belt"] == "A"
+    # The dashboard's manifest parser types `applied` strictly (servo
+    # param writes); diagnostics ride in the free-form `swept`.
+    assert m["steps"][0]["applied"] == []
+    assert m["steps"][0]["swept"]["rho_a"] == 0.66
+    assert m["steps"][0]["swept"]["kaa"] == 300.0
+    assert m["steps"][0]["swept"]["y"] == 150.0
 
 
 def test_tune_fails_loudly_when_it_does_not_converge():
