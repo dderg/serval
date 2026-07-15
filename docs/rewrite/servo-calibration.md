@@ -221,12 +221,12 @@ verification map). The build instead solves the 2×2 system per grid node,
 `offsets = -inv(K) @ strain`: each belt gets its own correction plus a
 partial same-sign helper offset for the other belt's field. A
 near-singular matrix (cross terms rivaling the direct terms) fails
-loudly. Beware that the static probe over-reads the moving-belt
-response: on the bench both the direct and cross terms measure ~25%
-lower during a sweep (~428/−122 static vs ~335/−88 fitted from run
-pairs) — plausibly the running belt keeps redistributing differential
-tension at the pulley/idler contacts where standstill friction holds it
-in place. Compensation acts while moving, so calibrate in that regime:
+loudly. Beware that the probe's constant-offset slope does not match
+the response the map sees in use: on the bench both the direct and
+cross terms fit ~25% lower from run pairs than the probe reads
+(~428/−122 probed vs ~335/−88 fitted; mechanism not established — the
+probe's own secant slopes soften slightly with amplitude).
+Compensation acts while moving, so calibrate in that regime:
 fit the matrix from an uncompensated + compensated run pair, or let a
 `MERGE=1` iteration converge the scale error away — with the cross
 terms in place it contracts instead of leaking sideways.
