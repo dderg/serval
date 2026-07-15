@@ -119,6 +119,24 @@ pub fn run(ctx: &mut EndpointCtx) {
     eprintln!("ec-rt: shutdown complete");
 }
 
+impl EndpointCtx {
+    /// Hand the installed dynamics model this node's per-slot drive signs
+    /// (`±1`, from `cmd_counts_per_mm`). The pair load-share differential is
+    /// evaluated in the belt frame, which the model can only reconstruct once
+    /// it knows the drive directions. Call after every model install and after
+    /// the startup profile load.
+    pub(super) fn bind_dynamics_drive_signs(&mut self) {
+        let signs: Vec<f32> = self
+            .cmd_counts_per_mm
+            .iter()
+            .map(|c| c.signum() as f32)
+            .collect();
+        if let Some(model) = self.dynamics.as_mut() {
+            model.bind_drive_signs(&signs);
+        }
+    }
+}
+
 pub(super) fn respond_fault_heartbeat(
     ctx: &mut EndpointCtx,
     engine_state: u8,

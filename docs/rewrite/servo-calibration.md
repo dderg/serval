@@ -327,10 +327,17 @@ profile share:
 
 - **`coupled_xy` kinematics**: runs the X+Y grid over every belt drive and
   fits the x and y modes through the frame matrix built from the kinematics'
-  slot order and invert flags (passed to the fitter as `--frame`/`--modes`;
-  on AWD each belt's pair shares its columns and all four drives must sit on
-  one node). The resulting profile goes on `[ethercat_node]
-  dynamics_profile` (node-level, coupled) rather than per-motor.
+  slot order and invert flags (passed to the fitter as
+  `--frame`/`--modes`/`--signs`; on AWD each belt's pair shares its columns
+  and all four drives must sit on one node). On AWD the fit then runs a
+  second stage per belt pair: the measured pair torque differential is
+  regressed on the mode model's per-component belt forces × {1, position},
+  and the six load-share coefficients land in the profile's `[[pair]]`
+  tables (see [servo-feedforward.md](servo-feedforward.md)); role-dependent
+  (|F|-shaped) components are printed as diagnostics — a large one means
+  check belt tension — and never written. The resulting profile goes on
+  `[ethercat_node] dynamics_profile` (node-level, coupled) rather than
+  per-motor.
 - **cartesian kinematics**: fits a single mode with an identity frame. On a
   multi-drive (AWD) axis `DRIVE=` picks which drive the scalar fit
   describes — required there, since the capture records every drive.

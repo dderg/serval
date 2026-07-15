@@ -87,6 +87,36 @@ fn corexy_frame_row_projects_with_frame_weights() {
 }
 
 #[test]
+fn awd_frame_pairs_parallel_columns() {
+    let s = Structure::new(vec![
+        vec![0.25, -0.25, -0.25, -0.25],
+        vec![0.25, -0.25, 0.25, 0.25],
+    ]);
+    assert_eq!(s.pairs(), vec![(0, 1, -1.0), (2, 3, 1.0)]);
+}
+
+#[test]
+fn corexy_frame_has_no_pairs() {
+    let s = Structure::new(vec![vec![0.5, -0.5], vec![0.5, 0.5]]);
+    assert!(s.pairs().is_empty(), "corexy columns are not parallel");
+    let s2 = Structure::new(vec![vec![0.5, 0.5], vec![0.5, -0.5]]);
+    assert!(s2.pairs().is_empty());
+}
+
+#[test]
+fn identity_frame_has_no_pairs() {
+    let s = Structure::new(vec![vec![1.0]]);
+    assert!(s.pairs().is_empty());
+}
+
+#[test]
+#[should_panic(expected = "|λ|")]
+fn parallel_column_with_non_unit_scale_panics() {
+    let s = Structure::new(vec![vec![0.25, 0.5], vec![0.25, 0.5]]);
+    let _ = s.pairs();
+}
+
+#[test]
 fn param_layout_is_grouped_per_mode() {
     let s = Structure::new(vec![vec![0.25, -0.25], vec![0.25, 0.25]]);
     assert_eq!(s.param_count(), 6);

@@ -94,6 +94,7 @@ fn make_capture(delay_samples: usize, ripple_period_mm: f64) -> (Capture, f64, f
             vel: vec![vel.clone()],
             vel_act: vec![vel],
             torque: vec![torque],
+            pos: Vec::new(),
         },
         m,
         b,
@@ -314,6 +315,7 @@ fn corexy_capture(opposing_second_segment: bool) -> Capture {
         vel: vec![vel_a.clone(), vel_b.clone()],
         vel_act: vec![vel_a, vel_b],
         torque: vec![vec![0.0; n], vec![0.0; n]],
+        pos: Vec::new(),
     }
 }
 
@@ -346,6 +348,7 @@ fn a_mode_active_in_the_segment_still_blanks_its_deadband() {
         vel: vec![vel_a.clone(), vel_b.clone()],
         vel_act: vec![vel_a.clone(), vel_b.clone()],
         torque: vec![vec![0.0; n], vec![0.0; n]],
+        pos: Vec::new(),
     };
     let structure = Structure::new(vec![vec![0.5, 0.5], vec![0.5, -0.5]]);
     let pp = prep(&cap, &structure, &PrepOptions::default());

@@ -468,6 +468,16 @@ impl Decode for SetStrainComp {
     }
 }
 
+/// One pair load-share record. `w` holds the six differential split weights in
+/// `[I0, I1, V0, V1, C0, C1]` order. `λ` is derived from the frame at the
+/// endpoint, so it is not on the wire.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DynamicsPair {
+    pub first: u8,
+    pub second: u8,
+    pub w: [f32; 6],
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetDynamicsModel {
     pub slots_count: u8,
@@ -476,6 +486,7 @@ pub struct SetDynamicsModel {
     pub mass: Vec<f32>,
     pub viscous: Vec<f32>,
     pub coulomb: Vec<f32>,
+    pub pairs: Vec<DynamicsPair>,
 }
 
 impl Encode for SetDynamicsModel {
@@ -491,6 +502,14 @@ impl Encode for SetDynamicsModel {
         for vec in [&self.frame, &self.mass, &self.viscous, &self.coulomb] {
             for v in vec {
                 put_f32(out, *v);
+            }
+        }
+        put_u8(out, self.pairs.len() as u8);
+        for pair in &self.pairs {
+            put_u8(out, pair.first);
+            put_u8(out, pair.second);
+            for v in pair.w {
+                put_f32(out, v);
             }
         }
     }
@@ -526,6 +545,18 @@ impl Decode for SetDynamicsModel {
         let mass = get_f32_vec(c, modes)?;
         let viscous = get_f32_vec(c, modes)?;
         let coulomb = get_f32_vec(c, modes)?;
+        let pairs_count = get_u8(c)?;
+        let mut pairs = Vec::with_capacity(pairs_count as usize);
+        for _ in 0..pairs_count {
+            let first = get_u8(c)?;
+            let second = get_u8(c)?;
+            let w = get_f32_vec(c, 6)?;
+            pairs.push(DynamicsPair {
+                first,
+                second,
+                w: [w[0], w[1], w[2], w[3], w[4], w[5]],
+            });
+        }
         Ok(Self {
             slots_count,
             modes_count,
@@ -533,6 +564,7 @@ impl Decode for SetDynamicsModel {
             mass,
             viscous,
             coulomb,
+            pairs,
         })
     }
 }

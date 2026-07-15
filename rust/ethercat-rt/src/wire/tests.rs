@@ -572,6 +572,11 @@ fn decodes_set_dynamics_model_command() {
         mass: vec![0.030, 0.030],
         viscous: vec![0.004, 0.004],
         coulomb: vec![1.0, 1.0],
+        pairs: vec![mcu_protocol::messages::DynamicsPair {
+            first: 0,
+            second: 1,
+            w: [0.1, 0.01, 0.0, 0.0, 0.0, 0.0],
+        }],
     };
     let payload = frame_payload(MessageKind::SetDynamicsModel, 33, &msg.encoded_to_vec());
     match decode_command(0, &payload).expect("decode") {

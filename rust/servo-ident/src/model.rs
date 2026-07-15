@@ -50,6 +50,59 @@ impl Structure {
         self.frame[0].len()
     }
 
+    /// Slots whose frame columns are exactly parallel share one belt: two
+    /// motors whose reaction forces the frame maps identically (up to a sign).
+    /// Returns `(first, second, λ)` with `first < second` and `column[second]
+    /// = λ · column[first]`, `λ = ±1`. Columns parallel within `1e-9` relative
+    /// are a pair; a parallel column with `|λ| ≠ 1` is a malformed frame and
+    /// panics. Each slot joins at most one pair (greedy, lowest index first).
+    pub fn pairs(&self) -> Vec<(usize, usize, f64)> {
+        let n_slots = self.axis_count();
+        let n_modes = self.mode_count();
+        let column = |c: usize| -> Vec<f64> { (0..n_modes).map(|m| self.frame[m][c]).collect() };
+        let mut used = vec![false; n_slots];
+        let mut out = Vec::new();
+        for i in 0..n_slots {
+            if used[i] {
+                continue;
+            }
+            let ui = column(i);
+            let ni2: f64 = ui.iter().map(|x| x * x).sum();
+            if ni2 == 0.0 {
+                continue;
+            }
+            for j in (i + 1)..n_slots {
+                if used[j] {
+                    continue;
+                }
+                let vj = column(j);
+                let dot: f64 = ui.iter().zip(&vj).map(|(a, b)| a * b).sum();
+                let lambda = dot / ni2;
+                let resid2: f64 = ui
+                    .iter()
+                    .zip(&vj)
+                    .map(|(a, b)| {
+                        let d = b - lambda * a;
+                        d * d
+                    })
+                    .sum();
+                if (resid2 / ni2).sqrt() < 1e-9 {
+                    assert!(
+                        (lambda.abs() - 1.0).abs() < 1e-6,
+                        "parallel frame columns {i},{j} have |λ|={} ≠ 1 — a belt \
+                         pair shares reaction forces one-for-one",
+                        lambda.abs()
+                    );
+                    out.push((i, j, if lambda >= 0.0 { 1.0 } else { -1.0 }));
+                    used[i] = true;
+                    used[j] = true;
+                    break;
+                }
+            }
+        }
+        out
+    }
+
     pub fn mode_count(&self) -> usize {
         self.frame.len()
     }

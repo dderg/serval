@@ -618,7 +618,7 @@ fn strain_comp_clear_returns_held_targets_to_base() {
 }
 
 const BUZZ_DYNAMICS: &str = r#"
-version = 2
+version = 3
 axes = ["a", "b"]
 modes = ["a", "b"]
 frame = [[1.0, 0.0], [0.0, 1.0]]
@@ -692,6 +692,7 @@ fn dynamics_msg(mass0: f32) -> mcu_protocol::messages::SetDynamicsModel {
         mass: vec![mass0, 0.030],
         viscous: vec![0.004, 0.004],
         coulomb: vec![1.0, 1.0],
+        pairs: vec![],
     }
 }
 
@@ -702,7 +703,7 @@ fn set_dynamics_model_installs_model_when_none_was_loaded() {
     super::commands::handle_set_dynamics_model(&mut ctx, 1, dynamics_msg(0.030));
     let model = ctx.dynamics.as_ref().expect("model installed");
     assert_eq!(model.n_slots, NUM_SLAVES);
-    let tau = model.torque_ff(0, &[1000.0, 0.0], &[100.0, 0.0]);
+    let tau = model.torque_ff(0, &[1000.0, 0.0], &[100.0, 0.0], &[0.0, 0.0]);
     let expect = 0.030 * 1000.0 + 0.004 * 100.0 + 1.0;
     assert!((tau - expect).abs() < 1e-3, "{tau} vs {expect}");
 }
@@ -713,7 +714,7 @@ fn set_dynamics_model_replaces_existing_model() {
     super::commands::handle_set_dynamics_model(&mut ctx, 1, dynamics_msg(0.030));
     super::commands::handle_set_dynamics_model(&mut ctx, 2, dynamics_msg(0.045));
     let model = ctx.dynamics.as_ref().expect("model installed");
-    let tau = model.torque_ff(0, &[1000.0, 0.0], &[0.0, 0.0]);
+    let tau = model.torque_ff(0, &[1000.0, 0.0], &[0.0, 0.0], &[0.0, 0.0]);
     assert!((tau - 45.0).abs() < 1e-3, "{tau}");
 }
 
@@ -725,7 +726,7 @@ fn set_dynamics_model_wrong_axes_count_keeps_previous_model() {
     bad.slots_count = 3;
     super::commands::handle_set_dynamics_model(&mut ctx, 2, bad);
     let model = ctx.dynamics.as_ref().expect("previous model kept");
-    let tau = model.torque_ff(0, &[1000.0, 0.0], &[0.0, 0.0]);
+    let tau = model.torque_ff(0, &[1000.0, 0.0], &[0.0, 0.0], &[0.0, 0.0]);
     assert!((tau - 30.0).abs() < 1e-3, "{tau}");
 }
 
@@ -737,7 +738,7 @@ fn set_dynamics_model_rank_deficient_frame_keeps_previous_model() {
     bad.frame = vec![1.0, 0.0, 1.0, 0.0];
     super::commands::handle_set_dynamics_model(&mut ctx, 2, bad);
     let model = ctx.dynamics.as_ref().expect("previous model kept");
-    let tau = model.torque_ff(0, &[1000.0, 0.0], &[0.0, 0.0]);
+    let tau = model.torque_ff(0, &[1000.0, 0.0], &[0.0, 0.0], &[0.0, 0.0]);
     assert!((tau - 30.0).abs() < 1e-3, "{tau}");
 }
 

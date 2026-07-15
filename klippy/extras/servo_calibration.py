@@ -180,9 +180,9 @@ def parse_dynamics_profile(text: str) -> dict[str, Any]:
             "parsing dynamics profiles requires Python 3.11+ (tomllib)"
         )
     data = tomllib.loads(text)
-    if data.get("version") != 2:
+    if data.get("version") != 3:
         raise ValueError(
-            "dynamics profile version must be 2 (got %r) - refit with "
+            "dynamics profile version must be 3 (got %r) - refit with "
             "SERVO_FIT_DYNAMICS" % (data.get("version"),)
         )
     axes = data.get("axes")
@@ -222,14 +222,74 @@ def parse_dynamics_profile(text: str) -> dict[str, Any]:
             raise ValueError(
                 "profile contains a non-numeric or non-finite value: %r" % (v,)
             )
+    axis_names = [str(a) for a in axes]
     return {
-        "axes": [str(a) for a in axes],
+        "axes": axis_names,
         "modes": [str(m) for m in modes],
         "frame": [[float(v) for v in row] for row in frame],
         "mass": [float(v) for v in data["mass"]],
         "viscous": [float(v) for v in data["viscous"]],
         "coulomb": [float(v) for v in data["coulomb"]],
+        "pairs": _parse_dynamics_pairs(data, axis_names),
     }
+
+
+def _parse_dynamics_pairs(
+    data: Mapping[str, Any], axis_names: list[str]
+) -> list[dict[str, Any]]:
+    raw = data.get("pair", [])
+    if not isinstance(raw, list):
+        raise ValueError("profile pair must be an array of tables")
+    axis_set = set(axis_names)
+    claimed: set[str] = set()
+    pairs: list[dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, Mapping):
+            raise ValueError("each pair must be a table")
+        slots = entry.get("slots")
+        if (
+            not isinstance(slots, list)
+            or len(slots) != 2
+            or not all(isinstance(s, str) for s in slots)
+        ):
+            raise ValueError(
+                "pair slots must be a list of two motor names (got %r)"
+                % (slots,)
+            )
+        a, b = slots
+        if a == b:
+            raise ValueError(
+                "pair slots must name two distinct motors (got %r)" % (slots,)
+            )
+        for name in slots:
+            if name not in axis_set:
+                raise ValueError(
+                    "pair slot %r is not among profile axes %s"
+                    % (name, axis_names)
+                )
+            if name in claimed:
+                raise ValueError(
+                    "motor %r appears in more than one pair" % (name,)
+                )
+        claimed.update(slots)
+        split: list[float] = []
+        for key in ("split_inertial", "split_viscous", "split_coulomb"):
+            vec = entry.get(key)
+            if not isinstance(vec, list) or len(vec) != 2:
+                raise ValueError("pair %s must list exactly 2 values" % (key,))
+            for v in vec:
+                if (
+                    isinstance(v, bool)
+                    or not isinstance(v, (int, float))
+                    or not math.isfinite(v)
+                ):
+                    raise ValueError(
+                        "pair %s contains a non-numeric or non-finite value: "
+                        "%r" % (key, v)
+                    )
+            split += [float(vec[0]), float(vec[1])]
+        pairs.append({"slots": [str(a), str(b)], "split": split})
+    return pairs
 
 
 def _copy_dynamics(profile: dict[str, Any]) -> dict[str, Any]:
@@ -240,6 +300,10 @@ def _copy_dynamics(profile: dict[str, Any]) -> dict[str, Any]:
         "mass": list(profile["mass"]),
         "viscous": list(profile["viscous"]),
         "coulomb": list(profile["coulomb"]),
+        "pairs": [
+            {"slots": list(p["slots"]), "split": list(p["split"])}
+            for p in profile.get("pairs", [])
+        ],
     }
 
 
@@ -283,7 +347,7 @@ def render_dynamics_toml(
         return "[%s]" % (", ".join(num(v) for v in values),)
 
     lines = [
-        "version = 2",
+        "version = 3",
         "axes = %s" % (json.dumps(profile["axes"]),),
         "modes = %s" % (json.dumps(profile["modes"]),),
         "frame = [%s]" % (", ".join(vec(row) for row in profile["frame"]),),
@@ -299,6 +363,17 @@ def render_dynamics_toml(
             % ("_%s" % (suffix,) if suffix else "", num(scale))
         )
     lines.append("refined_run = %s" % (json.dumps(run_dir),))
+    for pair in profile.get("pairs", []):
+        inertial = pair["split"][0:2]
+        viscous = pair["split"][2:4]
+        coulomb = pair["split"][4:6]
+        lines += [
+            "[[pair]]",
+            "slots = %s" % (json.dumps(list(pair["slots"])),),
+            "split_inertial = %s" % (vec(inertial),),
+            "split_viscous = %s" % (vec(viscous),),
+            "split_coulomb = %s" % (vec(coulomb),),
+        ]
     return "\n".join(lines) + "\n"
 
 
@@ -682,12 +757,21 @@ class DynamicsModelAdapter:
         self._send(self.baseline)
 
     def _send(self, profile: dict[str, Any]) -> None:
+        axis_index = {name: i for i, name in enumerate(profile["axes"])}
+        pairs: list[int] = []
+        pair_split: list[float] = []
+        for pair in profile.get("pairs", []):
+            a, b = pair["slots"]
+            pairs += [axis_index[a], axis_index[b]]
+            pair_split += [float(v) for v in pair["split"]]
         self._engine.set_dynamics_model(
             self._handle,
             [float(f) for row in profile["frame"] for f in row],
             [float(v) for v in profile["mass"]],
             [float(v) for v in profile["viscous"]],
             [float(v) for v in profile["coulomb"]],
+            pairs,
+            pair_split,
         )
 
 
@@ -2434,7 +2518,7 @@ class ServoCalibration:
 
     def _corexy_frame(
         self, gcmd: Any, kin: Any
-    ) -> tuple[list[str], list[str], list[list[float]]]:
+    ) -> tuple[list[str], list[str], list[list[float]], list[int]]:
         rails = servo_strokes.axis_rails(gcmd, kin, "X")
         slots: list[tuple[str, int, float, int]] = []
         for belt_index, rail in enumerate(rails):
@@ -2449,20 +2533,22 @@ class ServoCalibration:
             (sign if belt == 0 else -sign) / (2.0 * drives)
             for _n, belt, sign, drives in slots
         ]
-        return axes, ["x", "y"], [frame_x, frame_y]
+        signs = [int(sign) for _n, _b, sign, _d in slots]
+        return axes, ["x", "y"], [frame_x, frame_y], signs
 
     def _fit_plan(self, gcmd: Any) -> dict[str, Any]:
         kin = self._kin()
         if kin.coupled_xy():
             layout = servo_strokes.corexy_fit_layout(gcmd, kin)
             servo_strokes.check_servos_override(gcmd, layout)
-            axes, modes, frame = self._corexy_frame(gcmd, kin)
+            axes, modes, frame, signs = self._corexy_frame(gcmd, kin)
             return {
                 "corexy": True,
                 "servos": layout["servos"],
                 "axes": axes,
                 "modes": modes,
                 "frame": frame,
+                "signs": signs,
                 "axis": "X",
                 "rails": servo_strokes.axis_rails(gcmd, kin, "X"),
             }
@@ -2471,12 +2557,16 @@ class ServoCalibration:
         drive = servo_strokes.scalar_fit_drive(gcmd, kin)
         servos = servo_strokes.axis_servos(gcmd, kin, axis)
         axes = [drive if drive is not None else servos[0]]
+        signs = [
+            -1 if self._resolve_motor(axes[0]).get_invert_direction() else 1
+        ]
         return {
             "corexy": False,
             "servos": servos,
             "axes": axes,
             "modes": list(axes),
             "frame": [[1.0]],
+            "signs": signs,
             "axis": axis,
             "rails": None,
         }
@@ -2543,6 +2633,8 @@ class ServoCalibration:
                 ",".join(plan["modes"]),
                 "--axes",
                 ",".join(plan["axes"]),
+                "--signs",
+                ",".join("%d" % (s,) for s in plan["signs"]),
                 "--out",
                 out_path,
                 "--rotation-distance-mm",

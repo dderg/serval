@@ -131,9 +131,18 @@ fn set_dynamics_model_roundtrip() {
         mass: vec![0.0123, 0.0119],
         viscous: vec![0.0045, 0.0044],
         coulomb: vec![1.2, 1.1],
+        pairs: vec![DynamicsPair {
+            first: 0,
+            second: 1,
+            w: [0.02, -0.0003, 0.05, 0.0001, -0.01, 0.0002],
+        }],
     };
     assert_eq!(roundtrip(&v), v);
-    assert_eq!(v.encoded_to_vec().len(), 2 + (8 + 2 + 2 + 2) * 4);
+    // slots+modes (2) + f32 arrays (14*4) + pairs_count (1) + one pair (2 + 6*4)
+    assert_eq!(
+        v.encoded_to_vec().len(),
+        2 + (8 + 2 + 2 + 2) * 4 + 1 + (2 + 6 * 4)
+    );
     let r = SetDynamicsModelResponse { result: -862 };
     assert_eq!(roundtrip(&r), r);
     assert_eq!(r.encoded_to_vec().len(), 4);
@@ -148,6 +157,7 @@ fn set_dynamics_model_truncated_array_is_decode_error() {
         mass: vec![0.01; 2],
         viscous: vec![0.0; 2],
         coulomb: vec![0.0; 2],
+        pairs: vec![],
     };
     let mut bytes = v.encoded_to_vec();
     bytes.truncate(bytes.len() - 8);

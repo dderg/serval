@@ -642,6 +642,15 @@ pub(super) fn handle_set_dynamics_model(
         );
         ERR_DYNAMICS_BAD_DIM
     } else {
+        let pairs: Vec<crate::dynamics::PairSpec> = msg
+            .pairs
+            .iter()
+            .map(|p| crate::dynamics::PairSpec {
+                first: p.first as usize,
+                second: p.second as usize,
+                w: p.w,
+            })
+            .collect();
         match DynamicsModel::from_parts(
             slots,
             modes,
@@ -649,9 +658,11 @@ pub(super) fn handle_set_dynamics_model(
             &msg.mass,
             &msg.viscous,
             &msg.coulomb,
+            &pairs,
         ) {
             Ok(model) => {
                 ctx.dynamics = Some(model);
+                ctx.bind_dynamics_drive_signs();
                 0
             }
             Err(e) => {

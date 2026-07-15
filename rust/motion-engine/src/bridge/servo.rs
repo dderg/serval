@@ -588,6 +588,7 @@ impl PyMotionEngine {
         }
         Ok(())
     }
+    #[allow(clippy::too_many_arguments)]
     fn set_dynamics_model(
         &self,
         py: Python<'_>,
@@ -596,6 +597,8 @@ impl PyMotionEngine {
         mass: Vec<f32>,
         viscous: Vec<f32>,
         coulomb: Vec<f32>,
+        pairs: Vec<u32>,
+        pair_split: Vec<f32>,
     ) -> PyResult<()> {
         let modes = mass.len();
         if modes == 0 {
@@ -629,6 +632,38 @@ impl PyMotionEngine {
                 "set_dynamics_model: {modes} modes exceed {slots} slots"
             )));
         }
+        if pairs.len() % 2 != 0 {
+            return Err(PyRuntimeError::new_err(format!(
+                "set_dynamics_model: pairs must be flat [first, second, ...], got {} entries",
+                pairs.len()
+            )));
+        }
+        let pair_count = pairs.len() / 2;
+        if pair_split.len() != pair_count * 6 {
+            return Err(PyRuntimeError::new_err(format!(
+                "set_dynamics_model: pair_split must be 6 per pair ({} expected, got {})",
+                pair_count * 6,
+                pair_split.len()
+            )));
+        }
+        let wire_pairs = pairs
+            .chunks_exact(2)
+            .zip(pair_split.chunks_exact(6))
+            .map(|(slots, w)| {
+                let slot_u8 = |v: u32| {
+                    u8::try_from(v).map_err(|_| {
+                        PyRuntimeError::new_err(format!(
+                            "set_dynamics_model: pair slot {v} exceeds u8"
+                        ))
+                    })
+                };
+                Ok(mcu_protocol::messages::DynamicsPair {
+                    first: slot_u8(slots[0])?,
+                    second: slot_u8(slots[1])?,
+                    w: [w[0], w[1], w[2], w[3], w[4], w[5]],
+                })
+            })
+            .collect::<PyResult<Vec<_>>>()?;
         let conn = self.ethercat_conn(mcu_handle, "set_dynamics_model")?;
         tracing::info!(
             subsystem = "engine",
@@ -636,6 +671,7 @@ impl PyMotionEngine {
             mcu_handle,
             slots_count,
             modes_count,
+            pairs = wire_pairs.len(),
             "servo dynamics feedforward model upload"
         );
         let result = py
@@ -649,6 +685,7 @@ impl PyMotionEngine {
                         mass,
                         viscous,
                         coulomb,
+                        pairs: wire_pairs,
                     },
                 )
             })

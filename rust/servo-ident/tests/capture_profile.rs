@@ -53,6 +53,7 @@ fn steady_accel_mask_keeps_plateau_drops_ramp() {
         vel: vec![vec![0.0; n]],
         vel_act: vec![vec![0.0; n]],
         torque: vec![vec![5.0; n]],
+        pos: Vec::new(),
     };
     let keep_mask = steady_accel_keep(&cap.t, &cap.acc, &PlateauOptions::default());
     let kept: Vec<f64> = (0..cap.t.len())
@@ -87,6 +88,7 @@ fn tracking_mask_drops_stiction_and_overshoot() {
         vel: vec![vel],
         vel_act: vec![vel_act],
         torque: vec![vec![100.0; n]],
+        pos: Vec::new(),
     };
     // tol = 0.2 * 300 = 60 mm/s: the first cycles of the stuck phase pass
     // (commanded velocity still small), the rest of the stick and the whole
@@ -104,7 +106,7 @@ fn tracking_mask_drops_stiction_and_overshoot() {
 }
 
 #[test]
-fn renders_loadable_v2_profile() {
+fn renders_loadable_v3_profile_without_pairs() {
     let p = PhysicalParams {
         mass: vec![0.0123, 0.0119],
         viscous: vec![0.09, 0.11],
@@ -120,8 +122,9 @@ fn renders_loadable_v2_profile() {
         &["x", "y"],
         &frame,
         &[0.8, 0.7, 0.8, 0.9],
+        &[],
     );
-    assert!(toml_text.contains("version = 2"), "{toml_text}");
+    assert!(toml_text.contains("version = 3"), "{toml_text}");
     assert!(
         toml_text.contains("axes = [\"motor_a\", \"motor_a1\", \"motor_b\", \"motor_b1\"]"),
         "{toml_text}"
@@ -141,8 +144,69 @@ fn renders_loadable_v2_profile() {
         toml_text.contains("fit_rms_residual = [0.8, 0.7, 0.8, 0.9]"),
         "{toml_text}"
     );
+    assert!(!toml_text.contains("[[pair]]"), "{toml_text}");
     assert!(!toml_text.contains("coulomb_fwd"), "{toml_text}");
     assert!(!toml_text.contains("coulomb_deadband"), "{toml_text}");
+}
+
+#[test]
+fn renders_v3_profile_with_pairs() {
+    use servo_ident::profile_out::PairSplit;
+    let p = PhysicalParams {
+        mass: vec![0.012, 0.011],
+        viscous: vec![0.09, 0.11],
+        coulomb: vec![160.0, 175.0],
+    };
+    let frame = vec![
+        vec![0.25, -0.25, -0.25, -0.25],
+        vec![0.25, -0.25, 0.25, 0.25],
+    ];
+    let pairs = [
+        PairSplit {
+            first: 0,
+            second: 1,
+            w: [0.02, -0.0002, 0.05, 0.0, -0.01, 0.0001],
+        },
+        PairSplit {
+            first: 2,
+            second: 3,
+            w: [0.03, 0.0004, 0.06, 0.0, -0.02, 0.0],
+        },
+    ];
+    let toml_text = render_profile(
+        &p,
+        &["motor_a", "motor_a1", "motor_b", "motor_b1"],
+        &["x", "y"],
+        &frame,
+        &[0.8, 0.7, 0.8, 0.9],
+        &pairs,
+    );
+    assert!(toml_text.contains("version = 3"), "{toml_text}");
+    assert_eq!(
+        toml_text.matches("[[pair]]").count(),
+        2,
+        "two pair tables: {toml_text}"
+    );
+    assert!(
+        toml_text.contains("slots = [\"motor_a\", \"motor_a1\"]"),
+        "{toml_text}"
+    );
+    assert!(
+        toml_text.contains("slots = [\"motor_b\", \"motor_b1\"]"),
+        "{toml_text}"
+    );
+    assert!(
+        toml_text.contains("split_inertial = [0.02, -0.0002]"),
+        "{toml_text}"
+    );
+    assert!(
+        toml_text.contains("split_viscous  = [0.05, 0.0]"),
+        "{toml_text}"
+    );
+    assert!(
+        toml_text.contains("split_coulomb  = [-0.01, 0.0001]"),
+        "{toml_text}"
+    );
 }
 
 #[test]
@@ -162,7 +226,7 @@ fn renders_integer_valued_floats_as_toml_floats() {
         viscous: vec![0.0],
         coulomb: vec![1.0],
     };
-    let toml_text = render_profile(&p, &["x"], &["x"], &[vec![1.0]], &[1.0]);
+    let toml_text = render_profile(&p, &["x"], &["x"], &[vec![1.0]], &[1.0], &[]);
     assert!(toml_text.contains("mass = [2.0]"), "{toml_text}");
     assert!(toml_text.contains("viscous = [0.0]"), "{toml_text}");
     assert!(toml_text.contains("frame = [[1.0]]"), "{toml_text}");

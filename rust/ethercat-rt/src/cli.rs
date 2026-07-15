@@ -209,7 +209,7 @@ fn load_dynamics_profile(path: &str) -> crate::dynamics::DynamicsModel {
     crate::dynamics::DynamicsModel::from_toml_str(&text).unwrap_or_else(|e| {
         if let crate::dynamics::ProfileError::Version(v) = e {
             eprintln!(
-                "ec-rt: dynamics profile {path} is version {v}, expected 2 — \
+                "ec-rt: dynamics profile {path} is version {v}, expected 3 — \
                  refit with SERVO_FIT_DYNAMICS"
             );
         } else {
