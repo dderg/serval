@@ -66,7 +66,7 @@ const PAGE_DEFS = {
     templates: [
       {
         label: "fit…",
-        command: "SERVO_FIT_DYNAMICS AXIS=X",
+        command: "SERVO_FIT_DYNAMICS",
         title:
           "strokes the axis, fits inertia/friction per drive, prints the recommended " +
           "inertia ratio and writes the feedforward profile",
