@@ -440,13 +440,13 @@ Gain sweep, shaper-calibrate style: for each `SPEED_GAINS` entry (0.1 Hz units)
 it derives the position gain (`×1.6`) and integral (`1250000 ÷ gain`), records
 one capture per step into the run directory, then `servo-cal analyze` writes
 `results.json` whose verdict names the highest gain step without resonance or a
-torque rail. Reverts to `REVERT_GAIN` afterwards (0.1 Hz units, default the
-lowest `SPEED_GAINS` entry) — the single-gain iteration loop is
-`SPEED_GAINS=<gain under test> REVERT_GAIN=<known safe gain>`, so the sweep
-tests one gain and always lands somewhere safe. With an accelerometer
+torque rail. Always **restores the gains that were active before the sweep**
+when it finishes — also on failure — so the machine is never left on a tested
+value by accident; keeping a result is always an explicit act (`APPLY=1` or
+`SERVO_APPLY_GAINS`). With an accelerometer
 (`accel_chip` config option or `ACCEL_CHIP=`) each step also records vibration
 data (`step_<name>_accel.csv` next to the `.scap`). `APPLY=1` (default 0,
-report-only) writes the verdict's recommended gains *after* the revert,
+report-only) writes the verdict's recommended gains *after* the restore,
 reads them back (a mismatch is a command error, nothing left half-applied),
 and runs one `SERVO_MEASURE_TRACKING` to report before/after following-error
 peak and overshoot; a null verdict (every step flagged) makes `APPLY=1` a
@@ -455,30 +455,37 @@ list) restricts the sweep to a subset of the axis servos; adding
 `BASE_SPEED_GAIN=` then pins every non-swept axis servo at that gain (same
 `×1.6`/`Ti` derivation, recorded as `base_gains` in the manifest) for the whole
 sweep — the asymmetric-gain experiment: hold one belt pair soft while sweeping
-the other pair higher. Params:
+the other pair higher; those servos are restored to their prior gains too.
+Params:
 `SPEED_GAINS` (500,650,800,1000) `AXIS` (X) `START` `END`
 `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2) `DWELL_MS` `TAG` (cal)
-`ACCEL_CHIP` `APPLY` `SERVO` `BASE_SPEED_GAIN` `REVERT_GAIN`.
+`ACCEL_CHIP` `APPLY` `SERVO` `BASE_SPEED_GAIN`.
 
 #### SERVO_GAIN_LADDER
-Speed-gain sweep that climbs until analysis flags trouble, instead of a fixed
-`SPEED_GAINS` list. Runs the ladder `[SAFE, START, START+STEP, … ≤ MAX]` with
-the same `SERVO_CALIBRATE_GAINS` machinery (position gain `×1.6`, integral
-`1250000 ÷ gain`). After **each** rung at or above `START` completes its
+Gain sweep that climbs until analysis flags trouble, instead of a fixed
+`SPEED_GAINS` list. Runs the ladder `[SAFE, START, START+STEP, … ≤ MAX]`.
+Without `PARAM` it climbs the speed gain with the coupled derivation
+(position gain `×1.6`, integral `1250000 ÷ gain`); with
+`PARAM=position|speed|integral` it climbs **that one gain in its device
+units, holding the other two at their pre-ladder values** — the
+single-knob edge finder (the drives must agree on their current gains,
+else a command error tells you to align them first). After **each** rung
+at or above `START` completes its
 capture, `servo-cal analyze` runs on the run so far and that rung's step flags
 are inspected; the first rung whose step carries `resonance_detected`,
 `torque_saturated` or `settle_window_truncated` **stops the climb** — higher
 rungs are never executed. The `SAFE` baseline (always the first rung) never
-counts as a stop reason and is applied to every drive at the end via the gain
-write path, so the axis is left at a known-good gain regardless of where the
-climb stopped. Output is the usual verdict one-liner (recommended step, reason,
+counts as a stop reason. The ladder always **restores the pre-ladder gains**
+at the end (also on failure) — keep a rung with `SERVO_APPLY_GAINS`.
+Output is the usual verdict one-liner (recommended step, reason,
 run dir) plus, on an early stop, one line naming the rung and the flags that
-stopped it. `START` names the first climb gain, not a stroke bound — the stroke
+stopped it. `START` names the first climb value, not a stroke bound — the
+stroke
 window comes from the configured axis bounds. A mid-ladder analysis failure
 (binary non-zero, unreadable `results.json`) aborts loudly; the run directory
 keeps everything captured so far. Params: `SAFE` `START` `STEP` (50, must be
-> 0) `MAX` (≥ `START`) `AXIS` (X) `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2)
-`DWELL_MS` `TAG` (ladder) `SERVO`.
+> 0) `MAX` (≥ `START`) `PARAM` `AXIS` (X) `SPEED` (100) `ACCEL` (3000)
+`ITERATIONS` (2) `DWELL_MS` `TAG` (ladder) `SERVO`.
 
 #### SERVO_HARVEST_NOTCHES
 Automates the "let the drive's adaptive notch tuning find the resonances during

@@ -581,40 +581,52 @@ def test_base_speed_gain_without_servo_subset_errors():
         sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
 
 
-def test_revert_gain_reverts_to_the_named_gain():
+def test_calibrate_gains_restores_prior_gains():
     servo_param.drain_param_writes()
     sc, gcode = make_sc()
-    gcmd = FakeGcmd(AXIS="Y", SPEED_GAINS="450", REVERT_GAIN="300")
+    gcmd = FakeGcmd(AXIS="Y", SPEED_GAINS="450")
     sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
-    # derive(450) writes integral 2778 mid-sweep; derive(300) writes
-    # pos 480 / speed 300 / integral 4167 - only the revert writes those.
+    # derive(450) writes integral 2778 mid-sweep; the fake drive reads every
+    # gain as 7, so the restore writes VALUE=7 to all three addresses after
+    # the last sweep write.
     sweep_idx = _script_indices(gcode, "VALUE=2778")
-    revert_idx = _script_indices(gcode, "VALUE=4167")
-    assert sweep_idx and revert_idx
-    assert min(revert_idx) > max(sweep_idx)
-    assert any("VALUE=480" in s for s in _str_scripts(gcode))
-    assert any("reverting to speed gain 30.0 Hz" in r for r in gcmd.responses)
+    restore_idx = [
+        i
+        for i, s in enumerate(_str_scripts(gcode))
+        if "SET=0x2001.0x03 VALUE=7" in s
+    ]
+    assert sweep_idx and restore_idx
+    assert min(restore_idx) > max(sweep_idx)
+    assert any("restoring the pre-sweep gains" in r for r in gcmd.responses)
 
 
-def test_revert_gain_defaults_to_lowest_sweep_entry():
+def test_calibrate_gains_restores_on_failure():
     servo_param.drain_param_writes()
     sc, gcode = make_sc()
-    gcmd = FakeGcmd(AXIS="Y", SPEED_GAINS="500,650")
-    sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
-    # sg=500's integral 2500 is written at step one and again by the revert,
-    # after sg=650's 1923.
-    revert_idx = _script_indices(gcode, "VALUE=2500")
-    high_idx = _script_indices(gcode, "VALUE=1923")
-    assert revert_idx and high_idx
-    assert max(revert_idx) > max(high_idx)
-    assert any("reverting to speed gain 50.0 Hz" in r for r in gcmd.responses)
+
+    def boom(*a, **k):
+        raise RuntimeError("stroke exploded")
+
+    sc._strokes = boom
+    gcmd = FakeGcmd(AXIS="Y", SPEED_GAINS="450")
+    with pytest.raises(RuntimeError, match="stroke exploded"):
+        sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
+    scripts = _str_scripts(gcode)
+    sweep_idx = [
+        i for i, s in enumerate(scripts) if "SET=0x2001.0x03 VALUE=2778" in s
+    ]
+    restore_idx = [
+        i for i, s in enumerate(scripts) if "SET=0x2001.0x03 VALUE=7" in s
+    ]
+    assert sweep_idx and restore_idx
+    assert min(restore_idx) > max(sweep_idx)
 
 
-def test_revert_gain_out_of_range_is_command_error():
+def test_revert_gain_param_is_rejected():
     servo_param.drain_param_writes()
     sc, _gcode = make_sc()
-    gcmd = FakeGcmd(AXIS="Y", SPEED_GAINS="450", REVERT_GAIN="50")
-    with pytest.raises(RuntimeError, match="REVERT_GAIN 50 outside"):
+    gcmd = FakeGcmd(AXIS="Y", SPEED_GAINS="450", REVERT_GAIN="300")
+    with pytest.raises(RuntimeError, match="REVERT_GAIN was removed"):
         sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
 
 
@@ -930,31 +942,67 @@ def test_ladder_stops_climbing_after_flagged_rung():
     assert _step_scap(700) in names  # flagged rung ran
     assert _step_scap(800) not in names  # fourth rung never executed
     assert any(
-        "climb stopped at speed gain 700" in r and "torque_saturated" in r
+        "climb stopped at 700" in r and "torque_saturated" in r
         for r in gcmd.responses
     )
     assert any(r.startswith("verdict:") for r in gcmd.responses)
 
 
-def test_ladder_applies_safe_at_end():
+def test_ladder_restores_prior_gains_at_end():
     servo_param.drain_param_writes()
     sc, gcode = make_sc_ladder()  # no flag -> climbs the whole ladder
     gcmd = FakeGcmd(AXIS="X", SAFE=300, START=500, STEP=100, MAX=700)
     sc.cmd_SERVO_GAIN_LADDER(gcmd)
     scripts = _str_scripts(gcode)
-    # SAFE integral = round(1250000/300) = 4167, unique to the SAFE rung; a
-    # climbing rung (500) has integral 2500. The final SAFE application must
-    # land after every climbing write.
-    safe_idx = [
-        i for i, s in enumerate(scripts) if "SET=0x2001.0x03 VALUE=4167" in s
-    ]
+    # The fake drive reads every gain as 7; the restore writes VALUE=7 to
+    # all three addresses after the last climbing write (rung 700's
+    # integral is 1786).
     climb_idx = [
-        i for i, s in enumerate(scripts) if "SET=0x2001.0x03 VALUE=2500" in s
+        i for i, s in enumerate(scripts) if "SET=0x2001.0x03 VALUE=1786" in s
     ]
-    assert safe_idx and climb_idx
-    assert max(safe_idx) > max(climb_idx)
-    assert any("SAFE speed gain 300 applied" in r for r in gcmd.responses)
+    restore_idx = [
+        i for i, s in enumerate(scripts) if "SET=0x2001.0x03 VALUE=7" in s
+    ]
+    assert climb_idx and restore_idx
+    assert min(restore_idx) > max(climb_idx)
+    assert any("restoring the pre-ladder gains" in r for r in gcmd.responses)
     assert any(r.startswith("verdict:") for r in gcmd.responses)
+
+
+def test_ladder_single_param_climbs_position_and_holds_the_rest():
+    servo_param.drain_param_writes()
+    sc, gcode = make_sc_ladder()
+    gcmd = FakeGcmd(
+        AXIS="X", PARAM="position", SAFE=400, START=600, STEP=200, MAX=800
+    )
+    sc.cmd_SERVO_GAIN_LADDER(gcmd)
+    names = _capture_names(sc)
+    assert "step_ladder_position_v400.scap" in names
+    assert "step_ladder_position_v800.scap" in names
+    scripts = _str_scripts(gcode)
+    rung = [
+        s
+        for s in scripts
+        if "SET=0x2001.0x01 VALUE=800" in s or "VALUE=800" in s
+    ]
+    assert rung, "position rung 800 never written"
+    held = [
+        s
+        for s in scripts
+        if "SET=0x2001.0x02 VALUE=7" in s and "SET=0x2001.0x03 VALUE=7" in s
+    ]
+    assert held, "speed/integral must hold the pre-ladder value during rungs"
+    assert any("restoring the pre-ladder gains" in r for r in gcmd.responses)
+
+
+def test_ladder_single_param_rejects_bad_param():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc_ladder()
+    gcmd = FakeGcmd(
+        AXIS="X", PARAM="stiffness", SAFE=400, START=600, STEP=200, MAX=800
+    )
+    with pytest.raises(RuntimeError, match="PARAM must be"):
+        sc.cmd_SERVO_GAIN_LADDER(gcmd)
 
 
 def test_ladder_rejects_nonpositive_step():

@@ -2840,18 +2840,18 @@ class ServoCalibration:
         "drives into a run directory, then servo-cal analyzes it into "
         "results.json with a typed verdict (the recommended step). "
         "With an accelerometer (accel_chip config option or ACCEL_CHIP=) "
-        "each step also records vibration data next to its capture. Reverts "
-        "to REVERT_GAIN afterwards (0.1 Hz units, default the lowest "
-        "SPEED_GAINS entry) - pass it to test one gain and land on a known "
-        "safe one. APPLY=1 writes the verdict's "
-        "recommended gains after the revert, reads them back, and runs one "
+        "each step also records vibration data next to its capture. Always "
+        "restores the gains that were active before the sweep (also on "
+        "failure). APPLY=1 writes the verdict's "
+        "recommended gains after the restore, reads them back, and runs one "
         "SERVO_MEASURE_TRACKING to report before/after tracking metrics "
         "(default APPLY=0, report-only). SERVO= (comma list) restricts the "
         "sweep to a subset of the axis servos; BASE_SPEED_GAIN then pins "
         "every non-swept axis servo at that gain (same 1.6x/Ti derivation) "
-        "for an asymmetric-gain experiment. Params SPEED_GAINS AXIS START "
+        "for an asymmetric-gain experiment; those servos are restored too. "
+        "Params SPEED_GAINS AXIS START "
         "END SPEED ACCEL ITERATIONS DWELL_MS TAG ACCEL_CHIP APPLY SERVO "
-        "BASE_SPEED_GAIN REVERT_GAIN"
+        "BASE_SPEED_GAIN"
     )
 
     def cmd_SERVO_CALIBRATE_GAINS(self, gcmd: Any) -> list[SweepStep]:
@@ -2872,11 +2872,11 @@ class ServoCalibration:
                     % (sg, SPEED_GAIN_MIN, SPEED_GAIN_MAX)
                 )
         sgains = [int(sg) for sg in sgains]
-        revert_gain = gcmd.get_int("REVERT_GAIN", sgains[0])
-        if not SPEED_GAIN_MIN <= revert_gain <= SPEED_GAIN_MAX:
+        if gcmd.get("REVERT_GAIN", None) is not None:
             raise gcmd.error(
-                "REVERT_GAIN %d outside %d..%d (0.1 Hz units)"
-                % (revert_gain, SPEED_GAIN_MIN, SPEED_GAIN_MAX)
+                "REVERT_GAIN was removed - the sweep always restores the "
+                "gains that were active before it ran; keep a result with "
+                "APPLY=1 or SERVO_APPLY_GAINS"
             )
         base_sg = gcmd.get("BASE_SPEED_GAIN", None)
         base_servos: list[str] = []
@@ -2897,6 +2897,13 @@ class ServoCalibration:
                 )
         apply = gcmd.get_int("APPLY", 0)
         chip, chip_name = self._accel_chip(gcmd)
+        affected = list(dict.fromkeys(servos + base_servos))
+        prior = {s: self._read_gains(s) for s in affected}
+
+        def restore_prior() -> None:
+            for s, g in prior.items():
+                self._write_gains([s], g["position"], g["speed"], g["integral"])
+
         stroke_plan = {
             "start": start,
             "end": end,
@@ -2915,6 +2922,7 @@ class ServoCalibration:
             self._corexy_rails(gcmd, axis),
         )
         adapter = GainSetAdapter(self, servos, tag)
+        restored = False
         try:
             self._prep(axis, dwell)
             self._set_manual_tuning(servos)
@@ -2951,16 +2959,19 @@ class ServoCalibration:
                 accel_chip_name=chip_name,
             )
             gcmd.respond_info(
-                "sweep done - reverting to speed gain %.1f Hz until you "
-                "apply the recommendation" % (revert_gain / 10.0,)
+                "sweep done - restoring the pre-sweep gains until you "
+                "apply the recommendation"
             )
-            adapter.revert(revert_gain)
+            restore_prior()
+            restored = True
             self._restore()
             results = self._analyze_and_report(gcmd, run)
             self._last_sweep_run, self._last_sweep_results = run, results
             if apply:
                 self._apply_verdict(gcmd, run, results, axis)
         finally:
+            if not restored:
+                restore_prior()
             self._active_run = None
         return steps
 
@@ -3060,21 +3071,28 @@ class ServoCalibration:
         )
 
     cmd_SERVO_GAIN_LADDER_help = (
-        "Speed-gain sweep that climbs until analysis flags trouble instead of "
-        "a fixed list. Runs [SAFE, START, START+STEP, ... <= MAX] with the "
-        "SERVO_CALIBRATE_GAINS machinery (position/integral derived from the "
-        "speed gain). After every rung at or above START, servo-cal analyzes "
+        "Gain sweep that climbs until analysis flags trouble instead of "
+        "a fixed list. Runs [SAFE, START, START+STEP, ... <= MAX]. Without "
+        "PARAM it climbs the speed gain with position/integral derived from "
+        "it (1.6x / Ti); with PARAM=position|speed|integral it climbs that "
+        "one gain in its device units, holding the other two at their "
+        "pre-ladder values (the drives must agree on the current gains). "
+        "After every rung at or above START, servo-cal analyzes "
         "the run so far; the first rung whose step carries a resonance, "
         "torque-rail or truncated-settle flag stops the climb (higher rungs "
-        "are never executed). The SAFE baseline never stops the climb and is "
-        "applied at the end. Prints the verdict one-liner and, on an early "
+        "are never executed). The SAFE baseline never stops the climb. "
+        "Always restores the pre-ladder gains at the end (also on failure) "
+        "- keep a rung with SERVO_APPLY_GAINS. Prints the verdict one-liner "
+        "and, on an early "
         "stop, the rung and flags that stopped it. START names the first "
-        "climb gain, not a stroke bound - the stroke window comes from the "
-        "configured axis bounds. Params SAFE START STEP (50) MAX AXIS (X) "
-        "SPEED ACCEL ITERATIONS DWELL_MS TAG (ladder) SERVO"
+        "climb value, not a stroke bound - the stroke window comes from the "
+        "configured axis bounds. Params SAFE START STEP (50) MAX PARAM "
+        "AXIS (X) SPEED ACCEL ITERATIONS DWELL_MS TAG (ladder) SERVO"
     )
 
-    def _ladder_values(self, gcmd: Any) -> tuple[int, list[int]]:
+    def _ladder_values(
+        self, gcmd: Any, param: str | None
+    ) -> tuple[int, list[int]]:
         safe_g = gcmd.get_int("SAFE")
         start_g = gcmd.get_int("START")
         step_g = gcmd.get_int("STEP", 50)
@@ -3086,22 +3104,56 @@ class ServoCalibration:
                 "MAX (%d) must be >= START (%d)" % (max_g, start_g)
             )
         values = [safe_g] + list(range(start_g, max_g + 1, step_g))
-        for sg in values:
-            if not SPEED_GAIN_MIN <= sg <= SPEED_GAIN_MAX:
-                raise gcmd.error(
-                    "speed gain %d outside %d..%d (0.1 Hz units)"
-                    % (sg, SPEED_GAIN_MIN, SPEED_GAIN_MAX)
-                )
+        if param is None:
+            for sg in values:
+                if not SPEED_GAIN_MIN <= sg <= SPEED_GAIN_MAX:
+                    raise gcmd.error(
+                        "speed gain %d outside %d..%d (0.1 Hz units)"
+                        % (sg, SPEED_GAIN_MIN, SPEED_GAIN_MAX)
+                    )
+            return start_g, values
+        try:
+            validate_gain_values(values, param)
+        except ValueError as e:
+            raise gcmd.error("SERVO_GAIN_LADDER: %s" % (e,))
         return start_g, values
 
     def cmd_SERVO_GAIN_LADDER(self, gcmd: Any) -> list[SweepStep]:
         axis = gcmd.get("AXIS", "X").upper()
         servos = self._servos(gcmd, axis)
-        start_g, values = self._ladder_values(gcmd)
-        safe_g = values[0]
+        param = gcmd.get("PARAM", None)
+        if param is not None:
+            param = param.lower()
+            if param not in GAIN_PARAMS:
+                raise gcmd.error(
+                    "PARAM must be position, speed or integral (got %r)"
+                    % (gcmd.get("PARAM"),)
+                )
+        start_g, values = self._ladder_values(gcmd, param)
         start, end = self._config_bounds(gcmd, axis)
         speed, accel, iterations, dwell = self._stroke_motion(gcmd)
         tag = gcmd.get("TAG", "ladder")
+        prior = {s: self._read_gains(s) for s in servos}
+        if param is not None:
+            first = prior[servos[0]]
+            for s, g in prior.items():
+                if g != first:
+                    raise gcmd.error(
+                        "servos disagree on the current gains (%s=%s vs "
+                        "%s=%s) - a single-parameter ladder holds the other "
+                        "two at one shared value; align the drives first "
+                        "(SERVO_APPLY_GAINS)" % (servos[0], first, s, g)
+                    )
+            adapter: Any = SingleGainAdapter(
+                self, servos, param, tag, dict(first), first[param]
+            )
+        else:
+            adapter = GainSetAdapter(self, servos, tag)
+
+        def restore_prior() -> None:
+            for s, g in prior.items():
+                self._write_gains([s], g["position"], g["speed"], g["integral"])
+
         stroke_plan = {
             "start": start,
             "end": end,
@@ -3119,9 +3171,9 @@ class ServoCalibration:
             stroke_plan,
             self._corexy_rails(gcmd, axis),
         )
-        adapter = GainSetAdapter(self, servos, tag)
         stopped: tuple[int, str, list[str]] | None = None
         steps: list[SweepStep] = []
+        restored = False
         try:
             self._prep(axis, dwell)
             self._set_manual_tuning(servos)
@@ -3148,20 +3200,22 @@ class ServoCalibration:
                 if flags:
                     stopped = (value, step.name, flags)
                     break
-            pos_gain, integral = GainSetAdapter.derive(safe_g)
-            self._write_gains(servos, pos_gain, safe_g, integral)
             gcmd.respond_info(
-                "ladder done - SAFE speed gain %d applied on %s"
-                % (safe_g, ", ".join(servos))
+                "ladder done - restoring the pre-ladder gains on %s; keep "
+                "a rung with SERVO_APPLY_GAINS" % (", ".join(servos),)
             )
+            restore_prior()
+            restored = True
             self._restore()
             results = self._analyze_and_report(gcmd, run)
             self._last_sweep_run, self._last_sweep_results = run, results
         finally:
+            if not restored:
+                restore_prior()
             self._active_run = None
         if stopped is not None:
             gcmd.respond_info(
-                "climb stopped at speed gain %d (step %s): flags %s"
+                "climb stopped at %s (step %s): flags %s"
                 % (stopped[0], stopped[1], stopped[2])
             )
         return steps
