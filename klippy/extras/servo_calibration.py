@@ -90,6 +90,12 @@ GAIN_PARAMS = {
     ),
 }
 
+SPEED_GAIN_MIN = 100
+SPEED_GAIN_MAX = min(
+    GAIN_PARAMS["speed"][2], int(GAIN_PARAMS["position"][2] / 1.6)
+)
+
+
 INERTIA_RATIO_ADDR = "0x2000.0x07"
 
 NOTCH_MODE_ADDR = "0x2001.0x31"
@@ -2734,25 +2740,27 @@ class ServoCalibration:
         tag = gcmd.get("TAG", "cal")
         sgains = self._floats(gcmd.get("SPEED_GAINS", "500,650,800,1000"))
         for sg in sgains:
-            if not 100 <= sg <= 3000:
+            if not SPEED_GAIN_MIN <= sg <= SPEED_GAIN_MAX:
                 raise gcmd.error(
-                    "SPEED_GAIN %d outside 100..3000 (0.1 Hz units)" % (sg,)
+                    "SPEED_GAIN %d outside %d..%d (0.1 Hz units; max keeps "
+                    "the derived 1.6x position gain in drive range)"
+                    % (sg, SPEED_GAIN_MIN, SPEED_GAIN_MAX)
                 )
         sgains = [int(sg) for sg in sgains]
         revert_gain = gcmd.get_int("REVERT_GAIN", sgains[0])
-        if not 100 <= revert_gain <= 3000:
+        if not SPEED_GAIN_MIN <= revert_gain <= SPEED_GAIN_MAX:
             raise gcmd.error(
-                "REVERT_GAIN %d outside 100..3000 (0.1 Hz units)"
-                % (revert_gain,)
+                "REVERT_GAIN %d outside %d..%d (0.1 Hz units)"
+                % (revert_gain, SPEED_GAIN_MIN, SPEED_GAIN_MAX)
             )
         base_sg = gcmd.get("BASE_SPEED_GAIN", None)
         base_servos: list[str] = []
         if base_sg is not None:
             base_sg = int(base_sg)
-            if not 100 <= base_sg <= 3000:
+            if not SPEED_GAIN_MIN <= base_sg <= SPEED_GAIN_MAX:
                 raise gcmd.error(
-                    "BASE_SPEED_GAIN %d outside 100..3000 (0.1 Hz units)"
-                    % (base_sg,)
+                    "BASE_SPEED_GAIN %d outside %d..%d (0.1 Hz units)"
+                    % (base_sg, SPEED_GAIN_MIN, SPEED_GAIN_MAX)
                 )
             axis_servos = servo_strokes.axis_servos(gcmd, self._kin(), axis)
             base_servos = [s for s in axis_servos if s not in servos]
@@ -2954,9 +2962,10 @@ class ServoCalibration:
             )
         values = [safe_g] + list(range(start_g, max_g + 1, step_g))
         for sg in values:
-            if not 100 <= sg <= 3000:
+            if not SPEED_GAIN_MIN <= sg <= SPEED_GAIN_MAX:
                 raise gcmd.error(
-                    "speed gain %d outside 100..3000 (0.1 Hz units)" % (sg,)
+                    "speed gain %d outside %d..%d (0.1 Hz units)"
+                    % (sg, SPEED_GAIN_MIN, SPEED_GAIN_MAX)
                 )
         return start_g, values
 
