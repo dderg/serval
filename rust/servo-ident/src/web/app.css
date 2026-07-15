@@ -322,7 +322,7 @@ table.mode-table th, table.mode-table td { padding: 2px 16px 2px 0; }
 }
 .strain-scale .bar { height: 10px; width: 180px; border-radius: 3px; border: 1px solid var(--border); }
 
-/* --- PSD peak list (notches page) ------------------------------------- */
+/* --- PSD peak list (gains page) ------------------------------------- */
 
 .peak-row {
   display: flex;

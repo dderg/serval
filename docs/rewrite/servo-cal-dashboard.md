@@ -9,7 +9,7 @@ the how-to-run companion.
 A run directory (`manifest.json` + `results.json` + `plot_series.json`,
 [schema](servo-cal-contracts.md)) is a self-contained record of one
 calibration attempt. `servo-cal serve` turns a folder of them into a set
-of task pages — **gains**, **notches**, **observers**, **dynamics**,
+of task pages — **gains** (gains + notches, always tuned together), **observers**, **dynamics**,
 **journal** — each serving one calibration activity with only the tools
 that activity needs (the page design lives in the plan's second demo
 review amendment). Every page shares the same spine: a strip of that
@@ -131,7 +131,7 @@ before it ever reaches the filesystem.
 
 ## Task pages
 
-Hash-routed (`#/gains`, `#/notches`, `#/observers`, `#/dynamics`,
+Hash-routed (`#/gains`, `#/observers`, `#/dynamics`,
 `#/journal`); the tuning loop is navigation between pages, not scrolling
 within one. Non-journal pages are a two-column workspace: charts and the
 page's run strip on the left, the page's slice of the drive tuning grid
@@ -152,37 +152,41 @@ assigned when it is selected and held until it is deselected — changing the
 rest of the selection never reshuffles the colors of runs already on the
 chart.
 
-- **gains** — gain-sweep/refine/ladder plus tracking runs (the page's own
-  template launches `SERVO_MEASURE_TRACKING`, so its before/after strokes
-  must land here), following-error PSD overlay (step chips, 20–450 Hz band
-  marked, per-trace peak annotations), the `gains` grid with autofill. The
-  spectrum charts (here and the accelerometer box) draw linear amplitude
-  from a zero floor, clipped to 0–500 Hz — the old report's resonance-zoom
-  view, where a peak is a spike, not a bump on a log floor. Following
-  error converts to µm via the manifest's `counts_per_mm`; both convert
-  the analyzer's Welch PSD to tone amplitude as `sqrt(2 · psd · ENBW)`
+- **gains** — the gain and notch loop live on one page because they are
+  always tuned together: the resonances the PSD shows are what keep gains
+  from going higher. Gain-sweep/refine/ladder plus tracking runs (the
+  page's own template launches `SERVO_MEASURE_TRACKING`, so its
+  before/after strokes must land here), following-error PSD overlay (step
+  chips, 20–450 Hz band marked, per-trace peak annotations), the `gains`
+  and notch grids with autofill, and a detected-peak list. The spectrum
+  charts (here and the accelerometer box) draw linear amplitude from a
+  zero floor, clipped to 0–500 Hz — the old report's resonance-zoom view,
+  where a peak is a spike, not a bump on a log floor. Following error
+  converts to µm via the manifest's `counts_per_mm`; both convert the
+  analyzer's Welch PSD to tone amplitude as `sqrt(2 · psd · ENBW)`
   (Hann ENBW = 1.5·Δf). The tracking metrics table heat-tints its µm
   columns (red intensity scaled between each column's best and worst
-  visible value), so the low-overshoot step reads without comparing
-  four drives' digits per step. Between the metrics table and the PSD
-  sits the
+  visible value), so the low-overshoot step reads without comparing four
+  drives' digits per step. Between the metrics table and the PSD sits the
   **metrics-vs-gain chart** — the old gain-report PNG's bottom-left panel:
   each selected sweep run draws worst-drive overshoot (solid, dotted
   markers), ferr rms (dashed), and ferr peak (dotted) in µm against the
   swept value (the `speed` gain when that's what varies), with a red
   dashed rung at every step flagged `resonance_detected` or
   `torque_saturated` (settle truncation stays a table badge — it's a
-  capture-length artifact, not a gain quality signal). Runs whose
-  manifests sweep nothing —
-  tracking's single step — stay off the chart and are read in the metrics
-  table instead.
-- **notches** — same PSD plus a detected-peak list (top spaced peaks in
-  the band, from the newest selected run's recommended step when visible,
-  else its last visible step); "→ notch n" pushes a peak's frequency
-  into that slot's pending edits for all motors (width/depth stay
-  operator-chosen); the compact notch grid and the folded adaptive-mode
-  recipes (reset params / 1 adaptive / 2 adaptive / disable), which only
-  stage `adaptive_notch_mode` — nothing is written until Apply.
+  capture-length artifact, not a gain quality signal). Hovering the chart
+  snaps a crosshair to the nearest swept step and reads out that step's
+  exact swept value plus each run's overshoot / ferr rms / ferr peak in µm
+  — the values are exact instead of eyeballed off the axis. Runs whose
+  manifests sweep nothing — tracking's single step — stay off the chart
+  and are read in the metrics table instead. The detected-peak list (top
+  spaced peaks in the band, from the newest selected run's recommended
+  step when visible, else its last visible step) sits under the PSD; "→
+  notch n" pushes a peak's frequency into that slot's pending edits for
+  all motors (width/depth stay operator-chosen). The notch grid ships
+  compact and per-motor views, plus the folded adaptive-mode recipes
+  (reset params / 1 adaptive / 2 adaptive / disable), which only stage
+  `adaptive_notch_mode` — nothing is written until Apply.
 - **observers** — torque filter, speed observer, disturbance observer
   grids; time-domain following-error overlay (disturbance rejection is a
   time-domain signal).

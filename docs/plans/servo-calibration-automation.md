@@ -317,15 +317,17 @@ identical entries; every write is a `SERVO_TUNE ... MOTORS=<explicit>`
 line, previewed before sending; pending edits and inter-motor drift are
 highlighted; enum params render as labeled selects).
 
-- **Gains** — sweep launcher (`SPEED_GAINS=<safe>,<target>` prefilled from
-  the last gain run), recent gain runs with ambient diffs, PSD overlay
-  with per-step chips, verdict, the 3-gain grid with autofill.
-  Automation: existing verdict. Human input: target choice, apply.
-- **Notches** — PSD of selected runs plus a detected-peak list (top peaks
-  in the 20–450 Hz band); "→ notch n" pushes a peak's frequency into a
-  chosen manual slot's pending edits (width/depth stay human — manual
-  defaults 0/1000 are parked values); notch bank grid; adaptive-mode
-  quick actions (reset → lock recipe); re-run sweep to validate.
+- **Gains** (gains + notches, combined — always tuned together) — sweep
+  launcher (`SPEED_GAINS=<safe>,<target>` prefilled from the last gain
+  run), recent gain runs with ambient diffs, PSD overlay with per-step
+  chips, verdict, the 3-gain grid with autofill, the detected-peak list
+  ("→ notch n" pushes a peak's frequency into a chosen manual slot's
+  pending edits — width/depth stay human, manual defaults 0/1000 are
+  parked values), the notch bank grid, and adaptive-mode quick actions
+  (reset → lock recipe). The metrics-vs-gain chart's hover reads out the
+  nearest swept step's exact value and per-run overshoot/ferr metrics.
+  Automation: existing verdict. Human input: target choice, notch
+  placement, apply. Re-run sweep to validate.
 - **Observers** — speed-observer and disturbance-observer grids plus
   torque filter; time-domain ferr/torque overlay (disturbance rejection
   is a time-domain signal, not a PSD one); sweep re-run.
