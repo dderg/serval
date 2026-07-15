@@ -387,12 +387,15 @@ value) and runs **through the settle duration**, so ferr_peak/ferr_rms
 cover FF lead-in, in-move tracking, and endpoint overshoot alike (for
 every command that reads these metrics, not just the refine);
 `overshoot` remains reported separately as the post-move-only peak. On
-`coupled_xy`, `TERM=MASS` refines the two modes **sequentially** — first a
-search over the x-mode mass with X-only strokes, then, on top of the X
-winner, the y mode with Y-only strokes — because the two modes carry
-different moved mass and one shared scale cannot serve both. Each phase
-scales exactly its own `mass[mode]` entry, leaving the other mode's
-response untouched. Scoring the mean over
+`coupled_xy`, every vector term (`MASS`, `VISCOUS`, `COULOMB`) refines the
+two modes **sequentially** — first a
+search over the x-mode entry with X-only strokes, then, on top of the X
+winner, the y mode with Y-only strokes — because the two modes are
+independent physical quantities (the moved mass, the rail friction) and
+one shared scale cannot serve both; an axis stroke leaves the other
+mode's velocity at exactly zero, so each phase's score depends only on
+its own entry. The provenance keys are `refined_scale_x`/`refined_scale_y`
+(`refined_scale_<first-slot>` per pair for `SPLIT`). Scoring the mean over
 the whole grid keeps a scale that helps at one operating point but hurts
 at another from winning; every per-scale line also lists mean overshoot,
 ferr_rms, and ferr_peak so the non-scored metrics can be sanity-checked.
@@ -415,8 +418,9 @@ The live model is **always** restored to the baseline afterwards
 candidate until restart). When a scale beats 1.0 the scaled profile is
 written to a new TOML under `~/printer_data/config/servo_dynamics/` (with
 `refined_source`/`refined_term`/`refined_scale`/`refined_run` provenance
-keys — `refined_scale_x`/`refined_scale_y` for the sequential corexy mass
-refine — never overwriting) and the `dynamics_profile` paste line is printed
+keys — `refined_scale_x`/`refined_scale_y` for the sequential corexy
+refines, `refined_scale_<first-slot>` per pair for `SPLIT` — never
+overwriting) and the `dynamics_profile` paste line is printed
 — config edit + restart is the only way to keep it; when the baseline
 wins, nothing is written. Refine `MASS` first, then `TERM=VISCOUS`
 against the refined profile, then `TERM=COULOMB` against that, then

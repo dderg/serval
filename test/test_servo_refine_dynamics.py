@@ -622,7 +622,7 @@ def test_refine_dynamics_mass_converges_and_restores():
     assert raw["viscous"] == BASELINE_VISCOUS
 
 
-def test_refine_dynamics_viscous_scales_only_viscous():
+def test_refine_dynamics_viscous_refines_each_mode():
     sc, gcode, engine, _path = make_calibration(ferr_rms_min=1.1)
     gcmd = FakeGcmd(AXIS="X", TERM="VISCOUS")
     sc.cmd_SERVO_REFINE_DYNAMICS(gcmd)
@@ -634,10 +634,12 @@ def test_refine_dynamics_viscous_scales_only_viscous():
     with open(profiles[0], "rb") as f:
         raw = tomllib.load(f)
     assert raw["refined_term"] == "viscous"
-    assert abs(raw["refined_scale"] - 1.1) < 0.03
+    sx, sy = raw["refined_scale_x"], raw["refined_scale_y"]
+    assert abs(sx - 1.1) < 0.03
+    assert abs(sy - 1.1) < 0.03
     assert raw["mass"] == BASELINE_MASS
-    assert raw["viscous"][0] == pytest.approx(0.004 * raw["refined_scale"])
-    assert raw["viscous"][1] == pytest.approx(0.005 * raw["refined_scale"])
+    assert raw["viscous"][0] == pytest.approx(0.004 * sx)
+    assert raw["viscous"][1] == pytest.approx(0.005 * sy)
 
 
 def test_refine_dynamics_mass_runs_full_grid_one_axis_per_phase():
@@ -675,7 +677,7 @@ def test_refine_dynamics_reports_all_metrics_per_scale():
         assert "ferr_peak" in line
 
 
-def test_refine_dynamics_coulomb_scales_the_coulomb_vector():
+def test_refine_dynamics_coulomb_refines_each_mode():
     sc, gcode, engine, _path = make_calibration(overshoot_min=1.05)
     gcmd = FakeGcmd(AXIS="X", TERM="COULOMB")
     sc.cmd_SERVO_REFINE_DYNAMICS(gcmd)
@@ -684,10 +686,11 @@ def test_refine_dynamics_coulomb_scales_the_coulomb_vector():
     with open(profiles[0], "rb") as f:
         raw = tomllib.load(f)
     assert raw["refined_term"] == "coulomb"
-    scale = raw["refined_scale"]
-    assert abs(scale - 1.05) < 0.03
-    assert raw["coulomb"][0] == pytest.approx(1.0 * scale)
-    assert raw["coulomb"][1] == pytest.approx(1.5 * scale)
+    sx, sy = raw["refined_scale_x"], raw["refined_scale_y"]
+    assert abs(sx - 1.05) < 0.03
+    assert abs(sy - 1.05) < 0.03
+    assert raw["coulomb"][0] == pytest.approx(1.0 * sx)
+    assert raw["coulomb"][1] == pytest.approx(1.5 * sy)
     assert raw["mass"] == BASELINE_MASS
     assert raw["viscous"] == BASELINE_VISCOUS
 

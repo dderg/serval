@@ -3397,10 +3397,12 @@ class ServoCalibration:
         "and scored on mean ferr_peak over THAT PAIR'S drives only - the "
         "split moves error between pair mates, so a whole-machine mean "
         "would wash it out; scale 0 would mean no split feedforward). On "
-        "coupled_xy TERM=MASS refines the two directions sequentially - "
-        "X strokes scaling only the X-direction mass mode, then Y strokes "
-        "scaling the Y mode on top of the X winner - since the directions "
-        "carry different mass. Each candidate runs the full "
+        "coupled_xy every vector term refines the two modes sequentially - "
+        "X strokes scaling only the x-mode entry, then Y strokes scaling "
+        "the y mode on top of the X winner - since the modes are "
+        "independent physical quantities (moved mass, rail friction) and "
+        "an axis stroke leaves the other mode's velocity at exactly zero. "
+        "Each candidate runs the full "
         "SERVO_MEASURE_INERTIA ACCELS x SPEEDS grid in one tracking "
         "capture, so the score averages over every operating point. The "
         "baseline is PROFILE= or the "
@@ -3528,32 +3530,7 @@ class ServoCalibration:
                 x_grid()
                 y_grid()
 
-            if term == "MASS":
-                modes = baseline["modes"]
-                if len(modes) != 2 or not {"x", "y"} <= set(modes):
-                    raise gcmd.error(
-                        "coupled_xy TERM=MASS refine needs a 2-mode profile "
-                        "with x and y modes; profile %s has modes %s"
-                        % (profile_path, modes)
-                    )
-                x_index = modes.index("x")
-                y_index = modes.index("y")
-
-                def x_scale_fn(
-                    profile: dict[str, Any], scale: float
-                ) -> dict[str, Any]:
-                    return scale_dynamics_mode(profile, "MASS", x_index, scale)
-
-                def y_scale_fn(
-                    profile: dict[str, Any], scale: float
-                ) -> dict[str, Any]:
-                    return scale_dynamics_mode(profile, "MASS", y_index, scale)
-
-                phases = [
-                    ("mass_x", "x", x_scale_fn, x_grid, None),
-                    ("mass_y", "y", y_scale_fn, y_grid, None),
-                ]
-            elif term == "SPLIT":
+            if term == "SPLIT":
 
                 def pair_scale_fn(
                     index: int,
@@ -3576,7 +3553,40 @@ class ServoCalibration:
                     for i, pair in enumerate(baseline["pairs"])
                 ]
             else:
-                phases = [(term.lower(), "", term_scale_fn, both_grids, None)]
+                modes = baseline["modes"]
+                if len(modes) != 2 or not {"x", "y"} <= set(modes):
+                    raise gcmd.error(
+                        "coupled_xy TERM=%s refine needs a 2-mode profile "
+                        "with x and y modes; profile %s has modes %s"
+                        % (term, profile_path, modes)
+                    )
+
+                def mode_scale_fn(
+                    index: int,
+                ) -> Callable[[dict[str, Any], float], dict[str, Any]]:
+                    def scale_fn(
+                        profile: dict[str, Any], scale: float
+                    ) -> dict[str, Any]:
+                        return scale_dynamics_mode(profile, term, index, scale)
+
+                    return scale_fn
+
+                phases = [
+                    (
+                        "%s_x" % (term.lower(),),
+                        "x",
+                        mode_scale_fn(modes.index("x")),
+                        x_grid,
+                        None,
+                    ),
+                    (
+                        "%s_y" % (term.lower(),),
+                        "y",
+                        mode_scale_fn(modes.index("y")),
+                        y_grid,
+                        None,
+                    ),
+                ]
         else:
             start, end = servo_strokes.axis_bounds(gcmd, self.bounds, axis)
 
