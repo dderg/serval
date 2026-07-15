@@ -74,9 +74,9 @@ with `cargo build --release -p servo-ident` (from `rust/`).
 4. **`SERVO_FIT_DYNAMICS`** — fit the dynamic profile at the final gains and
    point `dynamics_profile` at it to enable torque feedforward.
 5. **`SERVO_REFINE_DYNAMICS`** — empirically refine the fitted profile on the
-   running endpoint (mass scale first, then viscous) when the regression fit
-   varies with the excitation grid; point `dynamics_profile` at the refined
-   TOML it writes.
+   running endpoint (mass first, then viscous, then coulomb) when the
+   regression fit varies with the excitation grid; point `dynamics_profile`
+   at the refined TOML it writes.
 
 **`SERVO_MEASURE_TRACKING`** is the before/after check for any single change.
 **`SERVO_AUTOTUNE`** packages this exact order into one command — see
