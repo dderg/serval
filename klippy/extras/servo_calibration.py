@@ -67,7 +67,7 @@ GAIN_PARAMS = {
     "position": (
         "0x2001.0x01",
         1,
-        30000,
+        20000,
         "C01.00 position loop gain",
         "0.1 rad/s",
         10.0,
