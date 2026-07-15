@@ -378,8 +378,15 @@ at an equivalent node-level TOML). The search brackets `[LO, HI]` around
 1.0 and stops when the bracket is narrower than `TOL` or `MAX_EVALS`
 candidates have been measured; an explicit baseline measurement at scale
 1.0 always competes, and the winner is the best *measured* candidate. A
-`torque_saturated`/`resonance_detected` flag on any candidate aborts the
-run. The live model is **always** restored to the baseline afterwards
+`torque_saturated` flag on any step aborts the run — clipped strokes
+cannot score a candidate. `resonance_detected` aborts only when the
+phase's own scale-1.0 baseline was clean, i.e. when the scaled model
+*introduced* the resonance; a baseline that already trips the detector
+(the ratio metric is amplitude-blind — the strongest 20–450 Hz PSD peak
+over the mean 1–4 Hz power, so a µm-level peak flags on high-accel
+strokes that put almost nothing in the low band) prints a warning plus
+per-scale resonance ratios and the run continues — judge the trend
+yourself. The live model is **always** restored to the baseline afterwards
 (also on failure; if klippy dies mid-run the endpoint keeps the last
 candidate until restart). When a scale beats 1.0 the scaled profile is
 written to a new TOML under `~/printer_data/config/servo_dynamics/` (with
