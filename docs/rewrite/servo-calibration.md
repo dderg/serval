@@ -347,15 +347,22 @@ grid. Golden-section search over a scale factor applied to the baseline
 profile's **mass matrix** (`TERM=MASS`, default) or **viscous vector**
 (`TERM=VISCOUS`): each candidate model is streamed into the *running*
 endpoint (no restart) and measured with one tracking capture of the full
-`SERVO_MEASURE_INERTIA` `ACCELS` × `SPEEDS` grid (X and Y strokes on
-`coupled_xy`, so both directions of the coupled mass matrix are excited),
-then scored from `servo-cal analyze` — mean per-move **overshoot** for
-`MASS` (mass-FF error shows up as overshoot at move ends), mean per-move
-**ferr_rms** for `VISCOUS` (viscous error shows up as cruise following
-error). Scoring the mean over the whole grid keeps a scale that helps at
-one operating point but hurts at another from winning; the per-scale
-report also lists mean overshoot, ferr_rms, and ferr_peak so the
-non-scored metrics can be sanity-checked. The
+`SERVO_MEASURE_INERTIA` `ACCELS` × `SPEEDS` grid, then scored from
+`servo-cal analyze` — mean per-move **worst error** (max of in-move
+ferr_peak and post-move overshoot) for `MASS`, mean per-move **ferr_rms**
+for `VISCOUS` (viscous error shows up as cruise following error). On
+`coupled_xy`, `TERM=MASS` refines the two directions **sequentially** —
+first a search over the X-direction mass mode with X-only strokes, then,
+on top of the X winner, the Y mode with Y-only strokes — because the two
+directions carry different moved mass (`m_diag ± m_off` in the fitted
+structure) and one shared scale cannot serve both. Direction scaling
+projects the mass matrix onto the belt excitation mode of that axis
+(X: both belts same sign, Y: opposite) and scales only that component,
+leaving the other direction's response untouched. Scoring the mean over
+the whole grid keeps a scale that helps at one operating point but hurts
+at another from winning; every per-scale line also lists mean overshoot,
+ferr_rms, and ferr_peak so the non-scored metrics can be sanity-checked.
+The
 baseline is `PROFILE=` or the node-level `[ethercat_node]
 dynamics_profile`; per-motor profiles are not supported (point `PROFILE=`
 at an equivalent node-level TOML). The search brackets `[LO, HI]` around
@@ -368,7 +375,8 @@ run. The live model is **always** restored to the baseline afterwards
 candidate until restart). When a scale beats 1.0 the scaled profile is
 written to a new TOML under `~/printer_data/config/servo_dynamics/` (with
 `refined_source`/`refined_term`/`refined_scale`/`refined_run` provenance
-keys, never overwriting) and the `dynamics_profile` paste line is printed
+keys — `refined_scale_x`/`refined_scale_y` for the sequential corexy mass
+refine — never overwriting) and the `dynamics_profile` paste line is printed
 — config edit + restart is the only way to keep it; when the baseline
 wins, nothing is written. Refine `MASS` first, then re-run with
 `TERM=VISCOUS` against the refined profile. Params: `TERM` (MASS) `AXIS`

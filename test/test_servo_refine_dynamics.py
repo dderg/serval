@@ -18,7 +18,7 @@ pytestmark = pytest.mark.skipif(
 
 BASELINE_TOML = """\
 version = 1
-axes = ["a", "b"]
+axes = ["motor_a", "motor_b"]
 mass = [[0.030, -0.010], [-0.010, 0.030]]
 viscous = [0.004, 0.004]
 coulomb_fwd = [1.0, 1.0]
@@ -94,7 +94,7 @@ def test_gss_rejects_bad_inputs():
 
 def test_parse_dynamics_profile_roundtrip():
     p = servo_calibration.parse_dynamics_profile(BASELINE_TOML)
-    assert p["axes"] == ["a", "b"]
+    assert p["axes"] == ["motor_a", "motor_b"]
     assert p["mass"] == [[0.030, -0.010], [-0.010, 0.030]]
     assert p["viscous"] == BASELINE_VISCOUS
     assert p["coulomb_deadband_mm_s"] == 0.5
@@ -143,7 +143,7 @@ def test_render_dynamics_toml_reparses_with_provenance():
     p = servo_calibration.parse_dynamics_profile(BASELINE_TOML)
     scaled = servo_calibration.scale_dynamics(p, "MASS", 0.93)
     text = servo_calibration.render_dynamics_toml(
-        scaled, "/cfg/dynamics_ident.toml", "MASS", 0.93, "/logs/run_1"
+        scaled, "/cfg/dynamics_ident.toml", "MASS", {"": 0.93}, "/logs/run_1"
     )
     again = servo_calibration.parse_dynamics_profile(text)
     assert again["mass"][0][0] == pytest.approx(0.030 * 0.93)
@@ -385,7 +385,7 @@ def make_calibration(
                 "move": 0,
                 "ferr_peak": 500.0 + 3000.0 * (scale - ferr_rms_min) ** 2,
                 "ferr_rms": 100.0 + 2000.0 * (scale - ferr_rms_min) ** 2,
-                "overshoot": 40.0 + 5000.0 * (scale - overshoot_min) ** 2,
+                "overshoot": 4000.0 + 5000.0 * (scale - overshoot_min) ** 2,
                 "settle_ms": 10.0,
                 "settle_window_truncated": False,
             }
@@ -441,11 +441,17 @@ def test_refine_dynamics_mass_converges_and_restores():
     assert len(profiles) == 1
     with open(profiles[0], "rb") as f:
         raw = tomllib.load(f)
-    scale = raw["refined_scale"]
-    assert abs(scale - 0.9) < 0.03
+    sx, sy = raw["refined_scale_x"], raw["refined_scale_y"]
+    assert abs(sx - 0.9) < 0.03
+    assert abs(sy - 0.9) < 0.03
     assert raw["refined_term"] == "mass"
     assert raw["refined_source"] == profile_path
-    assert raw["mass"][0][0] == pytest.approx(0.030 * scale)
+    assert raw["mass"][0][0] == pytest.approx(
+        0.030 + (sx - 1.0) * 0.010 + (sy - 1.0) * 0.020
+    )
+    assert raw["mass"][0][1] == pytest.approx(
+        -0.010 + (sx - 1.0) * 0.010 - (sy - 1.0) * 0.020
+    )
     assert raw["viscous"] == BASELINE_VISCOUS
 
 
@@ -465,7 +471,7 @@ def test_refine_dynamics_viscous_scales_only_viscous():
     assert raw["viscous"][0] == pytest.approx(0.004 * raw["refined_scale"])
 
 
-def test_refine_dynamics_runs_full_grid_on_both_axes_per_candidate():
+def test_refine_dynamics_mass_runs_full_grid_one_axis_per_phase():
     sc, gcode, engine, _path = make_calibration()
     strokes = []
     sc._strokes = lambda axis, start, end, speed, accel, *a: strokes.append(
@@ -476,7 +482,12 @@ def test_refine_dynamics_runs_full_grid_on_both_axes_per_candidate():
     )
     candidates = len(engine.dynamics_calls) - 1
     grid = {(s, a) for a in (5000.0, 10000.0) for s in (100.0, 400.0)}
-    assert len(strokes) == candidates * len(grid) * 2
+    assert len(strokes) == candidates * len(grid)
+    axes_order = [ax for ax, _s, _a in strokes]
+    assert set(axes_order) == {"X", "Y"}
+    first_y = axes_order.index("Y")
+    assert all(ax == "X" for ax in axes_order[:first_y])
+    assert all(ax == "Y" for ax in axes_order[first_y:])
     for axis in ("X", "Y"):
         assert {(s, a) for ax, s, a in strokes if ax == axis} == grid
 
@@ -485,12 +496,15 @@ def test_refine_dynamics_reports_all_metrics_per_scale():
     sc, gcode, engine, _path = make_calibration(overshoot_min=0.9)
     gcmd = FakeGcmd(AXIS="X")
     sc.cmd_SERVO_REFINE_DYNAMICS(gcmd)
-    summary = [r for r in gcmd.responses if r.startswith("  scale ")]
+    summary = [r for r in gcmd.responses if r.startswith("  mass_")]
     assert summary, "no per-scale summary lines"
+    assert any(r.startswith("  mass_x scale ") for r in summary)
+    assert any(r.startswith("  mass_y scale ") for r in summary)
     for line in summary:
         assert "overshoot" in line
         assert "ferr_rms" in line
         assert "ferr_peak" in line
+        assert "err_worst" in line
 
 
 def test_refine_dynamics_skips_write_when_baseline_wins():
@@ -558,7 +572,7 @@ def test_refine_dynamics_rejects_multi_node_axes():
 
 def test_refine_dynamics_rejects_axis_count_mismatch():
     one_axis = BASELINE_TOML.replace(
-        'axes = ["a", "b"]', 'axes = ["a"]'
+        'axes = ["motor_a", "motor_b"]', 'axes = ["motor_a"]'
     ).replace("mass = [[0.030, -0.010], [-0.010, 0.030]]", "mass = [[0.030]]")
     for key in ("viscous = [0.004, 0.004]",):
         one_axis = one_axis.replace(key, "viscous = [0.004]")

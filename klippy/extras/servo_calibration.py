@@ -151,7 +151,7 @@ def validate_gain_values(values: list[int], param: str) -> list[int]:
     return values
 
 
-DYNAMICS_METRIC_BY_TERM = {"MASS": "overshoot", "VISCOUS": "ferr_rms"}
+DYNAMICS_METRIC_BY_TERM = {"MASS": "err_worst", "VISCOUS": "ferr_rms"}
 DYNAMICS_PROFILE_VECTORS = ("viscous", "coulomb_fwd", "coulomb_rev")
 GOLDEN_RATIO_CONJ = (math.sqrt(5.0) - 1.0) / 2.0
 
@@ -223,11 +223,38 @@ def scale_dynamics(
     return scaled
 
 
+def scale_dynamics_direction(
+    profile: dict[str, Any], mode_signs: list[float], scale: float
+) -> dict[str, Any]:
+    """Scale the mass response of one CoreXY direction, leaving the other
+    untouched. mode_signs is the belt excitation pattern of the direction
+    (+1/-1 per profile axis; X moves both belts the same way, Y opposite),
+    and the scaled component is the mass matrix projected onto that mode:
+    M' = M + (scale - 1) * (u^T M u) * u u^T with u the normalized mode."""
+    mass = profile["mass"]
+    n = len(mass)
+    if len(mode_signs) != n:
+        raise ValueError(
+            "mode has %d signs but the mass matrix is %dx%d"
+            % (len(mode_signs), n, n)
+        )
+    u = [s / math.sqrt(n) for s in mode_signs]
+    mode_mass = sum(
+        u[i] * mass[i][j] * u[j] for i in range(n) for j in range(n)
+    )
+    scaled = scale_dynamics(profile, "MASS", 1.0)
+    scaled["mass"] = [
+        [mass[i][j] + (scale - 1.0) * mode_mass * u[i] * u[j] for j in range(n)]
+        for i in range(n)
+    ]
+    return scaled
+
+
 def render_dynamics_toml(
     profile: dict[str, Any],
     source: str,
     term: str,
-    scale: float,
+    scales: dict[str, float],
     run_dir: str,
 ) -> str:
     def num(v: float) -> str:
@@ -248,9 +275,13 @@ def render_dynamics_toml(
         "coulomb_deadband_mm_s = %s" % (num(profile["coulomb_deadband_mm_s"]),),
         "refined_source = %s" % (json.dumps(source),),
         "refined_term = %s" % (json.dumps(term.lower()),),
-        "refined_scale = %s" % (num(scale),),
-        "refined_run = %s" % (json.dumps(run_dir),),
     ]
+    for suffix, scale in sorted(scales.items()):
+        lines.append(
+            "refined_scale%s = %s"
+            % ("_%s" % (suffix,) if suffix else "", num(scale))
+        )
+    lines.append("refined_run = %s" % (json.dumps(run_dir),))
     return "\n".join(lines) + "\n"
 
 
@@ -597,35 +628,36 @@ class DynamicsModelAdapter:
         engine: Any,
         handle: int,
         baseline: dict[str, Any],
-        term: str,
+        scale_fn: Callable[[dict[str, Any], float], dict[str, Any]],
+        label: str,
         tag: str,
     ):
         self._engine = engine
         self._handle = handle
         self.baseline = baseline
-        self.term = term
+        self._scale_fn = scale_fn
+        self.label = label
         self.tag = tag
         self.applied = False
 
     def step_name(self, scale: float) -> str:
-        return "%s_%s_s%04d" % (
-            self.tag,
-            self.term.lower(),
-            round(scale * 1000),
-        )
+        return "%s_%s_s%04d" % (self.tag, self.label, round(scale * 1000))
 
     def describe(
         self, i: int, scale: float, total: int, servos: list[str]
     ) -> str:
         return "dynamics %s eval %d: scale %.4f on %s" % (
-            self.term.lower(),
+            self.label,
             i + 1,
             scale,
             ", ".join(servos),
         )
 
+    def scaled(self, scale: float) -> dict[str, Any]:
+        return self._scale_fn(self.baseline, scale)
+
     def apply(self, scale: float) -> ApplyResult:
-        self._send(scale_dynamics(self.baseline, self.term, scale))
+        self._send(self.scaled(scale))
         self.applied = True
         return {"scale": scale}, []
 
@@ -1240,14 +1272,22 @@ class ServoCalibration:
             raise gcmd.error(
                 "step %s flagged %s - aborting refinement" % (step_name, bad)
             )
+
+        def move_value(move: dict[str, Any]) -> float | None:
+            if metric == "err_worst":
+                if "ferr_peak" not in move or "overshoot" not in move:
+                    return None
+                return max(move["ferr_peak"], move["overshoot"])
+            return move.get(metric)
+
         for step in results.get("steps") or []:
             if step.get("name") != step_name:
                 continue
             values = [
-                move[metric]
+                v
                 for drive in (step.get("drives") or {}).values()
                 for move in (drive.get("metrics") or {}).get("moves") or []
-                if metric in move
+                if (v := move_value(move)) is not None
             ]
             if not values:
                 raise gcmd.error(
@@ -3079,12 +3119,16 @@ class ServoCalibration:
     cmd_SERVO_REFINE_DYNAMICS_help = (
         "Empirically refine the torque-feedforward dynamics profile on the "
         "RUNNING endpoint: golden-section search over a scale factor on the "
-        "baseline profile's mass matrix (TERM=MASS, scored on mean "
-        "overshoot) or viscous vector (TERM=VISCOUS, scored on mean "
-        "ferr_rms). Each candidate runs the full SERVO_MEASURE_INERTIA "
-        "ACCELS x SPEEDS grid (X and Y strokes on coupled_xy) in one "
-        "tracking capture, so the score averages over every operating "
-        "point. The baseline is PROFILE= or the "
+        "baseline profile's mass matrix (TERM=MASS, scored on mean worst "
+        "per-move error - max of in-move ferr_peak and post-move overshoot) "
+        "or viscous vector (TERM=VISCOUS, scored on mean ferr_rms). On "
+        "coupled_xy TERM=MASS refines the two directions sequentially - "
+        "X strokes scaling only the X-direction mass mode, then Y strokes "
+        "scaling the Y mode on top of the X winner - since the directions "
+        "carry different mass. Each candidate runs the full "
+        "SERVO_MEASURE_INERTIA ACCELS x SPEEDS grid in one tracking "
+        "capture, so the score averages over every operating point. The "
+        "baseline is PROFILE= or the "
         "node-level [ethercat_node] dynamics_profile (per-motor profiles "
         "are not supported). The live model is ALWAYS restored to the "
         "baseline afterwards (also on failure; if klippy dies mid-run the "
@@ -3162,6 +3206,25 @@ class ServoCalibration:
         accels, speeds, iterations, dwell = servo_strokes.grid(
             gcmd, self.accels, self.speeds, self.iterations, self.dwell_ms
         )
+
+        def axis_grid(
+            ax: str, a_start: float, a_end: float, goto: tuple[float, float]
+        ) -> Callable[[], None]:
+            def run_grid() -> None:
+                self._goto_xy(goto[0], goto[1], dwell)
+                for accel in accels:
+                    for speed in speeds:
+                        self._strokes(
+                            ax, a_start, a_end, speed, accel, iterations, dwell
+                        )
+
+            return run_grid
+
+        def term_scale_fn(
+            profile: dict[str, Any], scale: float
+        ) -> dict[str, Any]:
+            return scale_dynamics(profile, term, scale)
+
         if kin.coupled_xy():
             x_start, x_end, y_start, y_end = servo_strokes.xy_bounds(
                 gcmd, self.bounds
@@ -3173,29 +3236,47 @@ class ServoCalibration:
                 self._prep("X", dwell)
                 self._prep("Y", dwell)
 
-            def run_grid() -> None:
-                for accel in accels:
-                    for speed in speeds:
-                        self._goto_xy(x_start, y_center, dwell)
-                        self._strokes(
-                            "X", x_start, x_end, speed, accel, iterations, dwell
-                        )
-                        self._goto_xy(x_center, y_start, dwell)
-                        self._strokes(
-                            "Y", y_start, y_end, speed, accel, iterations, dwell
-                        )
+            x_grid = axis_grid("X", x_start, x_end, (x_start, y_center))
+            y_grid = axis_grid("Y", y_start, y_end, (x_center, y_start))
+            if term == "MASS":
+                belt_signs = self._corexy_belt_signs(gcmd, kin, baseline)
+                x_signs = [1.0] * len(belt_signs)
+
+                def x_scale_fn(
+                    profile: dict[str, Any], scale: float
+                ) -> dict[str, Any]:
+                    return scale_dynamics_direction(profile, x_signs, scale)
+
+                def y_scale_fn(
+                    profile: dict[str, Any], scale: float
+                ) -> dict[str, Any]:
+                    return scale_dynamics_direction(profile, belt_signs, scale)
+
+                phases = [
+                    ("mass_x", "x", x_scale_fn, x_grid),
+                    ("mass_y", "y", y_scale_fn, y_grid),
+                ]
+            else:
+
+                def both_grids() -> None:
+                    x_grid()
+                    y_grid()
+
+                phases = [(term.lower(), "", term_scale_fn, both_grids)]
         else:
             start, end = servo_strokes.axis_bounds(gcmd, self.bounds, axis)
 
             def prep_axes() -> None:
                 self._prep(axis, dwell)
 
-            def run_grid() -> None:
+            def cart_grid() -> None:
                 for accel in accels:
                     for speed in speeds:
                         self._strokes(
                             axis, start, end, speed, accel, iterations, dwell
                         )
+
+            phases = [(term.lower(), "", term_scale_fn, cart_grid)]
 
         tag = gcmd.get("TAG", "refdyn")
         name = gcmd.get("NAME", "refined_%s" % (term.lower(),))
@@ -3228,61 +3309,79 @@ class ServoCalibration:
             "baseline_profile": profile_path,
             "term": term.lower(),
             "metric": metric,
+            "phases": [label for label, _s, _fn, _g in phases],
             "bracket": [lo, hi],
             "tol": tol,
             "max_evals": max_evals,
         }
         run.write()
-        adapter = DynamicsModelAdapter(engine, handle, baseline, term, tag)
         report_metrics = ("overshoot", "ferr_rms", "ferr_peak")
-        scores: dict[float, float] = {}
-        reports: dict[float, dict[str, float]] = {}
+        eval_metrics = tuple(dict.fromkeys(report_metrics + (metric,)))
 
-        def evaluate(scale: float) -> float:
-            key = round(scale, 4)
-            if key in scores:
-                return scores[key]
-            step = self._engine.run_one(
-                adapter,
-                len(scores),
-                key,
-                max_evals + 1,
-                servos,
-                lambda _s: run_grid(),
-                gcmd,
-            )
-            results = self._run_analyze(gcmd, run)
-            reports[key] = {
-                m: self._step_metric_mean(gcmd, results, step.name, m)
-                for m in report_metrics
-            }
-            score = reports[key][metric]
-            gcmd.respond_info(
-                "scale %.4f -> %s (counts)"
-                % (
+        def metrics_line(values: dict[str, float]) -> str:
+            return ", ".join("%s %.1f" % (m, values[m]) for m in eval_metrics)
+
+        def run_phase(
+            adapter: DynamicsModelAdapter, run_grid: Callable[[], None]
+        ) -> tuple[float, float, float, dict[float, dict[str, float]]]:
+            scores: dict[float, float] = {}
+            reports: dict[float, dict[str, float]] = {}
+
+            def evaluate(scale: float) -> float:
+                key = round(scale, 4)
+                if key in scores:
+                    return scores[key]
+                step = self._engine.run_one(
+                    adapter,
+                    len(scores),
                     key,
-                    ", ".join(
-                        "mean %s %.1f" % (m, reports[key][m])
-                        for m in report_metrics
-                    ),
+                    max_evals + 1,
+                    servos,
+                    lambda _s: run_grid(),
+                    gcmd,
                 )
-            )
-            scores[key] = score
-            return score
+                results = self._run_analyze(gcmd, run)
+                reports[key] = {
+                    m: self._step_metric_mean(gcmd, results, step.name, m)
+                    for m in eval_metrics
+                }
+                gcmd.respond_info(
+                    "%s scale %.4f -> %s (counts, mean per move)"
+                    % (adapter.label, key, metrics_line(reports[key]))
+                )
+                scores[key] = reports[key][metric]
+                return scores[key]
 
-        try:
-            out_path = self._dynamics_out_path(gcmd, run, name)
-            prep_axes()
             baseline_score = evaluate(1.0)
-            best_scale, best_score, _probes = golden_section_search(
+            best, best_score, _probes = golden_section_search(
                 evaluate, lo, hi, tol, max_evals
             )
             if baseline_score <= best_score:
-                best_scale, best_score = 1.0, baseline_score
+                best, best_score = 1.0, baseline_score
+            return best, best_score, baseline_score, reports
+
+        phase_out: list[tuple[str, str, float, float, float, dict]] = []
+        adapters: list[DynamicsModelAdapter] = []
+        refined = baseline
+        try:
+            out_path = self._dynamics_out_path(gcmd, run, name)
+            prep_axes()
+            for label, suffix, scale_fn, run_grid in phases:
+                adapter = DynamicsModelAdapter(
+                    engine, handle, refined, scale_fn, label, tag
+                )
+                adapters.append(adapter)
+                best, best_score, baseline_score, reports = run_phase(
+                    adapter, run_grid
+                )
+                phase_out.append(
+                    (label, suffix, best, best_score, baseline_score, reports)
+                )
+                refined = adapter.scaled(best)
         finally:
             try:
-                if adapter.applied:
-                    adapter.revert()
+                if any(a.applied for a in adapters):
+                    adapters[0].revert()
                     gcmd.respond_info(
                         "live dynamics model restored to baseline %s"
                         % (profile_path,)
@@ -3290,62 +3389,75 @@ class ServoCalibration:
             finally:
                 self._restore()
                 self._active_run = None
-        for scale in sorted(scores):
-            marker = "  <- best" if scale == round(best_scale, 4) else ""
-            gcmd.respond_info(
-                "  scale %.4f: %s%s"
-                % (
-                    scale,
-                    ", ".join(
-                        "%s %.1f" % (m, reports[scale][m])
-                        for m in report_metrics
-                    ),
-                    marker,
+        for (
+            label,
+            _suffix,
+            best,
+            best_score,
+            baseline_score,
+            reports,
+        ) in phase_out:
+            for scale in sorted(reports):
+                marker = "  <- best" if scale == round(best, 4) else ""
+                gcmd.respond_info(
+                    "  %s scale %.4f: %s%s"
+                    % (label, scale, metrics_line(reports[scale]), marker)
                 )
+            structured_log.event(
+                "calibration",
+                "dynamics_refined",
+                run_dir=run.run_dir,
+                term=label,
+                metric=metric,
+                best_scale=best,
+                best_score=best_score,
+                baseline_score=baseline_score,
+                evals=len(reports),
             )
-        structured_log.event(
-            "calibration",
-            "dynamics_refined",
-            run_dir=run.run_dir,
-            term=term.lower(),
-            metric=metric,
-            best_scale=best_scale,
-            best_score=best_score,
-            baseline_score=baseline_score,
-            evals=len(scores),
-        )
-        if best_scale == 1.0:
+        if all(best == 1.0 for _l, _s, best, _bs, _bl, _r in phase_out):
             gcmd.respond_info(
-                "baseline already optimal within the bracket (mean %s %.1f) "
-                "- no profile written | run %s"
-                % (metric, baseline_score, run.run_dir)
+                "baseline already optimal within the bracket - no profile "
+                "written | run %s" % (run.run_dir,)
             )
             return
+        scales = {suffix: best for _l, suffix, best, _bs, _bl, _r in phase_out}
         with open(out_path, "w") as f:
             f.write(
                 render_dynamics_toml(
-                    scale_dynamics(baseline, term, best_scale),
-                    profile_path,
-                    term,
-                    best_scale,
-                    run.run_dir,
+                    refined, profile_path, term, scales, run.run_dir
                 )
             )
         gcmd.respond_info(
-            "%s scale %.4f wins: mean %s %.1f -> %.1f counts | refined "
-            "profile: %s | point [ethercat_node %s] dynamics_profile at it "
-            "and RESTART | run %s"
+            "%s | refined profile: %s | point [ethercat_node %s] "
+            "dynamics_profile at it and RESTART | run %s"
             % (
-                term.lower(),
-                best_scale,
-                metric,
-                baseline_score,
-                best_score,
+                "; ".join(
+                    "%s scale %.4f (mean %s %.1f -> %.1f)"
+                    % (label, best, metric, baseline_score, best_score)
+                    for label, _s, best, best_score, baseline_score, _r in (
+                        phase_out
+                    )
+                ),
                 out_path,
                 node.name,
                 run.run_dir,
             )
         )
+
+    def _corexy_belt_signs(
+        self, gcmd: Any, kin: Any, profile: dict[str, Any]
+    ) -> list[float]:
+        signs_by_motor: dict[str, float] = {}
+        for rail, sign in zip(kin.rails[:2], (1.0, -1.0)):
+            for m in rail.get_motors():
+                signs_by_motor[m.get_motor_name()] = sign
+        missing = [a for a in profile["axes"] if a not in signs_by_motor]
+        if missing:
+            raise gcmd.error(
+                "profile axes %s are not corexy belt motors (belts drive %s)"
+                % (missing, sorted(signs_by_motor))
+            )
+        return [signs_by_motor[a] for a in profile["axes"]]
 
     cmd_SERVO_SWEEP_INERTIA_help = (
         "Empirical inertia sweep, gain-sweep style. Resolves every servo "
