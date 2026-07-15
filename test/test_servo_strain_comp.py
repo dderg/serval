@@ -836,3 +836,146 @@ def test_constant_offset_session_applies_slew_aware_and_clears(tmp_path):
     assert session.apply(0, -100.0) == pytest.approx(0.2)
     session.clear()
     assert engine.applied_um == {}
+
+
+def elastic_bx(x, y):
+    """A belt B field that varies along x, so a fixed-y verification line
+    exercises both belts' corrections."""
+    return 0.06 * (x - 50.0)
+
+
+def read_map_offset_grids(map_path):
+    payload = json.loads(map_path.read_text())
+    return [
+        {
+            "nx": p["nx"],
+            "ny": p["ny"],
+            "x0": p["x0"],
+            "y0": p["y0"],
+            "dx": p["dx"],
+            "dy": p["dy"],
+            "values_pct": [o / 1000.0 for o in p["offsets_um"]],
+        }
+        for p in payload["pairs"]
+    ]
+
+
+def write_line_scap(path, field, field_b, y):
+    n = 400
+    fwd = [i * 100.0 / (n - 1) for i in range(n)]
+    sweep = fwd + fwd[::-1]
+    write_scap(path, sweep, [y] * len(sweep), field, field_b)
+
+
+def test_tune_converges_the_matrix_against_the_true_response(tmp_path):
+    baseline = tmp_path / "baseline"
+    write_run(baseline, field=elastic_a, field_b=elastic_bx)
+    sc, _ = make_comp(tmp_path)
+    k_true = [[200.0, -50.0], [-50.0, 200.0]]
+    # The probe got the SHAPE right but the scale 1.5x off — the loop's
+    # job is to converge the scale without another raster.
+    tuner = sc.begin_tune(
+        FakeGcmd(
+            STIFFNESS_A="300",
+            STIFFNESS_B="300",
+            CROSS_AB="-75",
+            CROSS_BA="-75",
+        ),
+        str(baseline),
+        None,
+    )
+    tune_dir = tmp_path / "tunerun"
+    tune_dir.mkdir()
+    last = None
+    for iteration in range(3):
+        tuner.rebuild_and_enable(FakeGcmd())
+        grids = read_map_offset_grids(tmp_path / "strain_comp.json")
+
+        def offsets_at(x, y):
+            return (
+                servo_strain_comp._grid_value_at(grids[0], x, y),
+                servo_strain_comp._grid_value_at(grids[1], x, y),
+            )
+
+        def measured_a(x, y):
+            o_a, o_b = offsets_at(x, y)
+            return elastic_a(x, y) + k_true[0][0] * o_a + k_true[0][1] * o_b
+
+        def measured_b(x, y):
+            o_a, o_b = offsets_at(x, y)
+            return elastic_bx(x, y) + k_true[1][0] * o_a + k_true[1][1] * o_b
+
+        name = "iter%d" % iteration
+        write_line_scap(
+            tune_dir / ("step_%s.scap" % name), measured_a, measured_b, 50.0
+        )
+        last = tuner.score_line(FakeGcmd(), str(tune_dir), name, 50.0)
+        if all(abs(r["rho"] - 1.0) <= 0.03 for r in last):
+            break
+        tuner.apply(last)
+    assert all(abs(r["rho"] - 1.0) <= 0.03 for r in last)
+    (kaa, kab), (kba, kbb) = tuner.matrix_rows()
+    assert kaa == pytest.approx(200, rel=0.06)
+    assert kbb == pytest.approx(200, rel=0.06)
+    assert kab == pytest.approx(-50, rel=0.12)
+    assert kba == pytest.approx(-50, rel=0.12)
+    # The converged loop rebuilt before scoring, so the map on disk is
+    # already the one built with the converged matrix.
+    tuner.store_matrix()
+    payload = json.loads((tmp_path / "strain_comp.json").read_text())
+    assert sc.measured_stiffness[("m_a", "m_a1")] == pytest.approx(kaa)
+    assert payload["pairs"][0]["stiffness_pct_per_mm"] == pytest.approx(kaa)
+    assert payload["pairs"][0]["cross_pct_per_mm"] == pytest.approx(kab)
+
+
+def test_tune_flags_a_line_that_ignores_the_correction(tmp_path):
+    baseline = tmp_path / "baseline"
+    write_run(baseline, field=elastic_a, field_b=elastic_bx)
+    sc, _ = make_comp(tmp_path)
+    tuner = sc.begin_tune(
+        FakeGcmd(
+            STIFFNESS_A="300",
+            STIFFNESS_B="300",
+            CROSS_AB="-75",
+            CROSS_BA="-75",
+        ),
+        str(baseline),
+        None,
+    )
+    tune_dir = tmp_path / "tunerun"
+    tune_dir.mkdir()
+    tuner.rebuild_and_enable(FakeGcmd())
+    write_line_scap(tune_dir / "step_iter0.scap", elastic_a, elastic_bx, 50.0)
+    with pytest.raises(RuntimeError, match="not credible"):
+        tuner.score_line(FakeGcmd(), str(tune_dir), "iter0", 50.0)
+
+
+def test_tune_rejects_a_flat_line(tmp_path):
+    baseline = tmp_path / "baseline"
+    write_run(baseline, field=elastic_a, field_b=elastic_b)
+    sc, _ = make_comp(tmp_path)
+    tuner = sc.begin_tune(
+        FakeGcmd(
+            STIFFNESS_A="300",
+            STIFFNESS_B="300",
+            CROSS_AB="0",
+            CROSS_BA="0",
+        ),
+        str(baseline),
+        None,
+    )
+    tune_dir = tmp_path / "tunerun"
+    tune_dir.mkdir()
+    tuner.rebuild_and_enable(FakeGcmd())
+    grids = read_map_offset_grids(tmp_path / "strain_comp.json")
+
+    def measured_a(x, y):
+        return elastic_a(x, y) + 300.0 * servo_strain_comp._grid_value_at(
+            grids[0], x, y
+        )
+
+    # elastic_b only varies with y, so along a fixed-y line belt B's map
+    # applies no varying correction — unverifiable, fail loudly.
+    write_line_scap(tune_dir / "step_iter0.scap", measured_a, elastic_b, 50.0)
+    with pytest.raises(RuntimeError, match="no correction"):
+        tuner.score_line(FakeGcmd(), str(tune_dir), "iter0", 50.0)

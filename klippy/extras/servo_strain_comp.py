@@ -95,6 +95,142 @@ class ConstantOffsetSession:
             self._comp._clear_pair(self._engine, handle, pair)
 
 
+TUNE_RHO_MIN = 0.2
+TUNE_RHO_MAX = 5.0
+
+
+class StrainCompTune:
+    """One closed-loop stiffness tune: rebuild the FULL map from the
+    baseline run at the trial matrix (never merging), verify it along a
+    single line, and scale each belt's matrix row by the fraction of the
+    intended correction the line actually shows. When the line reads
+    flat the matrix on disk is right for the whole map — it is the same
+    map that was being verified."""
+
+    def __init__(self, comp, gcmd, run_dir, manifest, spacing, k_matrix):
+        self.comp = comp
+        self.run_dir = run_dir
+        self.manifest = manifest
+        self.plan = manifest["stroke_plan"]
+        self.spacing = (
+            spacing if spacing is not None else self.plan["line_spacing"]
+        )
+        self.k_matrix = [list(row) for row in k_matrix]
+        self.belts = _belt_motor_names(manifest)
+        kinematics = manifest.get("kinematics")
+        if kinematics is None:
+            raise gcmd.error("manifest has no kinematics field")
+        corexy = kinematics == "corexy"
+        samples = _collect_elastic_samples(run_dir, manifest)
+        self.baseline_models = []
+        for belt_idx in range(2):
+            if not samples[belt_idx]:
+                raise gcmd.error("run contains no usable elastic samples")
+            bx, by, bv = _flatten_lines(samples[belt_idx])
+            self.baseline_models.append(
+                _field_model_fit(bx, by, bv, self.plan, corexy)
+            )
+
+    def matrix_rows(self):
+        return [list(row) for row in self.k_matrix]
+
+    def enable_ramp_s(self):
+        return MAX_OFFSET_UM / 1000.0 / COMP_SLEW_MM_S
+
+    def rebuild_and_enable(self, gcmd):
+        self.comp._build_and_write(
+            gcmd,
+            self.run_dir,
+            self.manifest,
+            self.spacing,
+            [tuple(row) for row in self.k_matrix],
+            quiet=True,
+        )
+        self.comp.enable_from_map(gcmd, quiet=True)
+
+    def score_line(self, gcmd, capture_run_dir, step_name, line_y):
+        """Per belt: the verification line's residual rms and the achieved
+        fraction rho of the intended correction — the row-scale update."""
+        import numpy as np
+
+        mini_manifest = {
+            "stroke_plan": self.plan,
+            "belts": self.manifest["belts"],
+            "steps": [{"name": step_name, "swept": {"y": line_y}}],
+        }
+        samples = _collect_elastic_samples(capture_run_dir, mini_manifest)
+        offset_grids = self.comp._load_map_offset_grids(
+            gcmd, self.belts, "no map at %s" % self.comp.map_file
+        )
+        results = []
+        for belt_idx in range(2):
+            if not samples[belt_idx]:
+                raise gcmd.error(
+                    "verification line has no usable samples for belt %s"
+                    % "AB"[belt_idx]
+                )
+            rx, ry, rv = _flatten_lines(samples[belt_idx])
+            baseline = self.baseline_models[belt_idx](rx, ry)
+            delta = rv - baseline
+            own = np.array(
+                [
+                    _grid_value_at(offset_grids[belt_idx], px, py)
+                    for px, py in zip(rx, ry)
+                ]
+            )
+            other = np.array(
+                [
+                    _grid_value_at(offset_grids[1 - belt_idx], px, py)
+                    for px, py in zip(rx, ry)
+                ]
+            )
+            row = self.k_matrix[belt_idx]
+            if belt_idx == 0:
+                predicted = row[0] * own + row[1] * other
+            else:
+                predicted = row[0] * other + row[1] * own
+            predicted = predicted - predicted.mean()
+            delta = delta - delta.mean()
+            denom = float((predicted**2).sum())
+            if denom < 1e-9:
+                raise gcmd.error(
+                    "the map applies no correction to belt %s along the "
+                    "verification line — pick a Y where the field varies"
+                    % "AB"[belt_idx]
+                )
+            rho = float((delta * predicted).sum() / denom)
+            if not (TUNE_RHO_MIN < rho < TUNE_RHO_MAX):
+                raise gcmd.error(
+                    "belt %s achieved %.0f%% of the intended correction — "
+                    "not credible; is the compensation actually applied?"
+                    % ("AB"[belt_idx], rho * 100.0)
+                )
+            residual = rv - rv.mean()
+            baseline_c = baseline - baseline.mean()
+            results.append(
+                {
+                    "rho": rho,
+                    "rms": float(np.sqrt(np.mean(residual**2))),
+                    "base_rms": float(np.sqrt(np.mean(baseline_c**2))),
+                }
+            )
+        return results
+
+    def apply(self, results):
+        for belt_idx, result in enumerate(results):
+            self.k_matrix[belt_idx] = [
+                value * result["rho"] for value in self.k_matrix[belt_idx]
+            ]
+
+    def store_matrix(self):
+        (kaa, kab), (kba, kbb) = self.k_matrix
+        belt_a, belt_b = tuple(self.belts[0]), tuple(self.belts[1])
+        self.comp.measured_stiffness[belt_a] = kaa
+        self.comp.measured_stiffness[belt_b] = kbb
+        self.comp.measured_cross[(belt_a, belt_b)] = kab
+        self.comp.measured_cross[(belt_b, belt_a)] = kba
+
+
 class ServoStrainComp:
     cmd_SERVO_MEASURE_PAIR_STIFFNESS_help = (
         "Measure the belt stiffness matrix PARKED: step a known "
@@ -432,6 +568,20 @@ class ServoStrainComp:
                 stiffness_overrides[belt_idx] = base.get("stiffness_pct_per_mm")
             if cross_overrides[belt_idx] is None:
                 cross_overrides[belt_idx] = base.get("cross_pct_per_mm")
+        k_matrix = self._resolve_k_matrix(
+            gcmd, belts, stiffness_overrides, cross_overrides
+        )
+        self._build_and_write(
+            gcmd, run_dir, manifest, spacing, k_matrix, merge, base_pairs
+        )
+        gcmd.respond_info(
+            "strain compensation map written to %s — apply it with "
+            "SERVO_STRAIN_COMP ENABLE=1" % self.map_file
+        )
+
+    def _resolve_k_matrix(
+        self, gcmd, belts, stiffness_overrides, cross_overrides
+    ):
         direct = [
             self._stiffness_for(
                 gcmd, belt_idx, motor_names, stiffness_overrides[belt_idx]
@@ -442,7 +592,24 @@ class ServoStrainComp:
             self._cross_for(gcmd, belt_idx, belts, cross_overrides[belt_idx])
             for belt_idx in range(2)
         ]
-        k_matrix = [(direct[0], cross[0]), (cross[1], direct[1])]
+        return [(direct[0], cross[0]), (cross[1], direct[1])]
+
+    def _build_and_write(
+        self,
+        gcmd,
+        run_dir,
+        manifest,
+        spacing,
+        k_matrix,
+        merge=False,
+        base_pairs=None,
+        quiet=False,
+    ):
+        base_pairs = base_pairs or {}
+        plan = manifest["stroke_plan"]
+        belts = _belt_motor_names(manifest)
+        direct = [k_matrix[0][0], k_matrix[1][1]]
+        cross = [k_matrix[0][1], k_matrix[1][0]]
         kinematics = manifest.get("kinematics")
         if kinematics is None:
             raise gcmd.error("manifest has no kinematics field")
@@ -485,20 +652,21 @@ class ServoStrainComp:
                     "zero_xy": grid["zero_xy"],
                 }
             )
-            gcmd.respond_info(
-                "belt %s (%s): %dx%d grid, offsets %+d..%+d um "
-                "(stiffness %.1f, cross %.1f %%/mm)"
-                % (
-                    "AB"[belt_idx],
-                    "/".join(motor_names),
-                    grid["nx"],
-                    grid["ny"],
-                    min(offsets),
-                    max(offsets),
-                    direct[belt_idx],
-                    cross[belt_idx],
+            if not quiet:
+                gcmd.respond_info(
+                    "belt %s (%s): %dx%d grid, offsets %+d..%+d um "
+                    "(stiffness %.1f, cross %.1f %%/mm)"
+                    % (
+                        "AB"[belt_idx],
+                        "/".join(motor_names),
+                        grid["nx"],
+                        grid["ny"],
+                        min(offsets),
+                        max(offsets),
+                        direct[belt_idx],
+                        cross[belt_idx],
+                    )
                 )
-            )
         payload = {
             "version": 1,
             "run": run_dir,
@@ -509,10 +677,6 @@ class ServoStrainComp:
         with open(tmp_path, "w") as fh:
             json.dump(payload, fh)
         os.replace(tmp_path, self.map_file)
-        gcmd.respond_info(
-            "strain compensation map written to %s — apply it with "
-            "SERVO_STRAIN_COMP ENABLE=1" % self.map_file
-        )
 
     def cmd_SERVO_STRAIN_COMP_FIT(self, gcmd):
         baseline_dir, baseline_manifest = _strain_map_run(
@@ -535,32 +699,12 @@ class ServoStrainComp:
                 "the matrix fit needs exactly two belts, run has %d"
                 % len(belts)
             )
-        if not os.path.exists(self.map_file):
-            raise gcmd.error(
-                "no map at %s — RUN must be captured with the current map "
-                "enabled" % self.map_file
-            )
-        with open(self.map_file) as fh:
-            map_pairs = {tuple(p["motors"]): p for p in json.load(fh)["pairs"]}
-        offset_grids = []
-        for belt_idx, motor_names in enumerate(belts):
-            pair = map_pairs.get(tuple(motor_names))
-            if pair is None:
-                raise gcmd.error(
-                    "map has no entry for belt %s (%s)"
-                    % ("AB"[belt_idx], "/".join(motor_names))
-                )
-            offset_grids.append(
-                {
-                    "nx": pair["nx"],
-                    "ny": pair["ny"],
-                    "x0": pair["x0"],
-                    "y0": pair["y0"],
-                    "dx": pair["dx"],
-                    "dy": pair["dy"],
-                    "values_pct": [o / 1000.0 for o in pair["offsets_um"]],
-                }
-            )
+        offset_grids = self._load_map_offset_grids(
+            gcmd,
+            belts,
+            "no map at %s — RUN must be captured with the current map "
+            "enabled" % self.map_file,
+        )
         base_samples = _collect_elastic_samples(baseline_dir, baseline_manifest)
         run_samples = _collect_elastic_samples(run_dir, run_manifest)
         plan = baseline_manifest["stroke_plan"]
@@ -595,8 +739,58 @@ class ServoStrainComp:
             "RUN=%s to apply it" % baseline_dir
         )
 
+    def _load_map_offset_grids(self, gcmd, belts, missing):
+        if not os.path.exists(self.map_file):
+            raise gcmd.error(missing)
+        with open(self.map_file) as fh:
+            map_pairs = {tuple(p["motors"]): p for p in json.load(fh)["pairs"]}
+        offset_grids = []
+        for belt_idx, motor_names in enumerate(belts):
+            pair = map_pairs.get(tuple(motor_names))
+            if pair is None:
+                raise gcmd.error(
+                    "map has no entry for belt %s (%s)"
+                    % ("AB"[belt_idx], "/".join(motor_names))
+                )
+            offset_grids.append(
+                {
+                    "nx": pair["nx"],
+                    "ny": pair["ny"],
+                    "x0": pair["x0"],
+                    "y0": pair["y0"],
+                    "dx": pair["dx"],
+                    "dy": pair["dy"],
+                    "values_pct": [o / 1000.0 for o in pair["offsets_um"]],
+                }
+            )
+        return offset_grids
+
     def begin_constant_offsets(self, gcmd):
         return ConstantOffsetSession(self, gcmd)
+
+    def begin_tune(self, gcmd, run_dir_raw, spacing_param):
+        run_dir, manifest = _strain_map_run(gcmd, run_dir_raw)
+        belts = _belt_motor_names(manifest)
+        if len(belts) != 2:
+            raise gcmd.error(
+                "the joint stiffness solve needs exactly two belts, run "
+                "has %d" % len(belts)
+            )
+        k_matrix = self._resolve_k_matrix(
+            gcmd,
+            belts,
+            [
+                gcmd.get_float("STIFFNESS_A", None),
+                gcmd.get_float("STIFFNESS_B", None),
+            ],
+            [
+                gcmd.get_float("CROSS_AB", None),
+                gcmd.get_float("CROSS_BA", None),
+            ],
+        )
+        return StrainCompTune(
+            self, gcmd, run_dir, manifest, spacing_param, k_matrix
+        )
 
     def fit_strain_response(self, gcmd, run_dir):
         manifest_path = os.path.join(run_dir, "manifest.json")
@@ -655,14 +849,19 @@ class ServoStrainComp:
 
     def cmd_SERVO_STRAIN_COMP(self, gcmd):
         enable = gcmd.get_int("ENABLE", 1, minval=0, maxval=1) == 1
-        pairs = self._belt_pairs(gcmd)
-        engine = self.printer.lookup_object("motion_engine")
         if not enable:
+            pairs = self._belt_pairs(gcmd)
+            engine = self.printer.lookup_object("motion_engine")
             for pair in pairs:
                 handle = self._node_handle(gcmd, pair.node)
                 self._clear_pair(engine, handle, pair)
             gcmd.respond_info("strain compensation cleared (ramping out)")
             return
+        self.enable_from_map(gcmd)
+
+    def enable_from_map(self, gcmd, quiet=False):
+        pairs = self._belt_pairs(gcmd)
+        engine = self.printer.lookup_object("motion_engine")
         if not os.path.exists(self.map_file):
             raise gcmd.error(
                 "no map file at %s — record one with "
@@ -697,19 +896,20 @@ class ServoStrainComp:
                 entry["dy"],
                 [int(v) for v in entry["offsets_um"]],
             )
-            gcmd.respond_info(
-                "belt %s compensation enabled: %dx%d grid, "
-                "offsets %+d..%+d um"
-                % (
-                    pair.axis_name(),
-                    entry["nx"],
-                    entry["ny"],
-                    min(entry["offsets_um"]),
-                    max(entry["offsets_um"]),
+            if not quiet:
+                gcmd.respond_info(
+                    "belt %s compensation enabled: %dx%d grid, "
+                    "offsets %+d..%+d um"
+                    % (
+                        pair.axis_name(),
+                        entry["nx"],
+                        entry["ny"],
+                        min(entry["offsets_um"]),
+                        max(entry["offsets_um"]),
+                    )
                 )
-            )
         zero_xy = payload.get("zero_xy")
-        if zero_xy:
+        if zero_xy and not quiet:
             gcmd.respond_info(
                 "map zero point is (%.1f, %.1f) — any torque release "
                 "(SERVO_SYNC, M84, idle timeout) re-anchors the map where "
