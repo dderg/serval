@@ -19,6 +19,12 @@ MAX_OFFSET_UM = 500
 COMP_SLEW_MM_S = 1.0
 TORQUE_READS = 5
 BIN_MM = 2.0
+FIELD_KNOT_MM = 2.0
+FIELD_SMOOTH = 0.5
+FIELD_2D_PITCH_MM = 20.0
+FIELD_2D_SMOOTH = 2.0
+MAX_GRID_DIM = 64
+MAX_GRID_VALUES = 4096
 
 
 def _signed16(raw):
@@ -67,10 +73,15 @@ class ServoStrainComp:
         "RUN=<run dir> is required; the stiffness matrix comes from "
         "SERVO_MEASURE_PAIR_STIFFNESS or STIFFNESS_A/STIFFNESS_B with "
         "CROSS_AB/CROSS_BA (%/mm, CROSS_AB = belt A's response to a belt "
-        "B offset, 0 disables the cross term); SPACING overrides the grid "
-        "pitch (defaults to the run's line spacing). MERGE=1 treats the "
-        "run as a residual measured WITH the current map enabled and adds "
-        "the correction on top — the second-order iteration."
+        "B offset, 0 disables the cross term). The field is fit through "
+        "a structured model (belt-phase diagonals on CoreXY, axis-locked "
+        "1D terms, smooth 2D remainder) so pulley-period diagonal "
+        "features survive between raster lines; SPACING sets the output "
+        "grid pitch (defaults to the run's line spacing; 5 recommended "
+        "on CoreXY so 40mm pulley harmonics survive the bilinear "
+        "lookup). MERGE=1 treats the run as a residual measured WITH the "
+        "current map enabled and adds the correction on top — the "
+        "second-order iteration."
     )
     cmd_SERVO_STRAIN_COMP_help = (
         "ENABLE=1 uploads the map file to the endpoint (offsets ramp in at "
@@ -377,11 +388,15 @@ class ServoStrainComp:
             for belt_idx in range(2)
         ]
         k_matrix = [(direct[0], cross[0]), (cross[1], direct[1])]
+        kinematics = manifest.get("kinematics")
+        if kinematics is None:
+            raise gcmd.error("manifest has no kinematics field")
+        corexy = kinematics == "corexy"
         samples = _collect_elastic_samples(run_dir, manifest)
         grids = []
         bases = []
         for belt_idx, motor_names in enumerate(belts):
-            grid = _build_grid(gcmd, plan, spacing, samples[belt_idx])
+            grid = _build_grid(gcmd, plan, spacing, samples[belt_idx], corexy)
             base = base_pairs.get(tuple(motor_names))
             if merge:
                 if base is None:
@@ -654,86 +669,163 @@ def _collect_elastic_samples(run_dir, manifest):
     return lines
 
 
-def _interp(coords, values, at):
-    """Linear interpolation clamped to the profile's ends; coords ascend."""
-    if at <= coords[0]:
-        return values[0]
-    if at >= coords[-1]:
-        return values[-1]
-    lo, hi = 0, len(coords) - 1
-    while hi - lo > 1:
-        mid = (lo + hi) // 2
-        if coords[mid] <= at:
-            lo = mid
-        else:
-            hi = mid
-    t = (at - coords[lo]) / (coords[hi] - coords[lo])
-    return values[lo] * (1.0 - t) + values[hi] * t
+def _field_model_fit(x, y, v, plan, corexy):
+    """Least-squares fit of the structured field model: 1D components at
+    2mm knots along each belt phase (x+y and x-y, CoreXY only) and along
+    each axis, plus a smooth coarse 2D remainder. Point-sampling the
+    raster at grid nodes aliases everything shorter than twice the node
+    pitch; the model carries belt-phase (diagonal) and axis-locked
+    structure between the raster lines at full 2mm resolution, so it
+    survives evaluation onto any output grid."""
+    import numpy as np
+
+    coords_1d = [x + y, x - y, x, y] if corexy else [x, y]
+    blocks = []
+    col_idx = []
+    col_w = []
+    off = 0
+    for u in coords_1d:
+        u0 = float(u.min())
+        n = int(np.ceil((float(u.max()) - u0) / FIELD_KNOT_MM)) + 1
+        f = np.clip((u - u0) / FIELD_KNOT_MM, 0.0, n - 1.0)
+        i0 = np.minimum(f.astype(int), n - 2)
+        t = f - i0
+        col_idx += [off + i0, off + i0 + 1]
+        col_w += [1.0 - t, t]
+        blocks.append((off, u0, n))
+        off += n
+    x0, x1 = plan["x_start"], plan["x_end"]
+    y0, y1 = plan["y_start"], plan["y_end"]
+    g_nx = max(2, int(round((x1 - x0) / FIELD_2D_PITCH_MM)) + 1)
+    g_ny = max(2, int(round((y1 - y0) / FIELD_2D_PITCH_MM)) + 1)
+    g_dx = (x1 - x0) / (g_nx - 1)
+    g_dy = (y1 - y0) / (g_ny - 1)
+    goff = off
+    fx = np.clip((x - x0) / g_dx, 0.0, g_nx - 1.0)
+    fy = np.clip((y - y0) / g_dy, 0.0, g_ny - 1.0)
+    gix = np.minimum(fx.astype(int), g_nx - 2)
+    giy = np.minimum(fy.astype(int), g_ny - 2)
+    gtx, gty = fx - gix, fy - giy
+    for di, dj, w in (
+        (0, 0, (1 - gtx) * (1 - gty)),
+        (0, 1, gtx * (1 - gty)),
+        (1, 0, (1 - gtx) * gty),
+        (1, 1, gtx * gty),
+    ):
+        col_idx.append(goff + (giy + di) * g_nx + gix + dj)
+        col_w.append(w)
+    cols = goff + g_nx * g_ny
+    ata = np.zeros((cols, cols))
+    atb = np.zeros(cols)
+    for a in range(len(col_idx)):
+        np.add.at(atb, col_idx[a], col_w[a] * v)
+        for b in range(len(col_idx)):
+            np.add.at(ata, (col_idx[a], col_idx[b]), col_w[a] * col_w[b])
+
+    def add_second_diff(idx0, step, weight):
+        base = np.asarray(idx0).ravel()
+        k = np.array([1.0, -2.0, 1.0]) * weight
+        triples = [base, base + step, base + 2 * step]
+        for a in range(3):
+            for b in range(3):
+                np.add.at(ata, (triples[a], triples[b]), k[a] * k[b])
+
+    for boff, _u0, n in blocks:
+        if n >= 3:
+            add_second_diff(boff + np.arange(n - 2), 1, FIELD_SMOOTH)
+    ii, jj = np.meshgrid(np.arange(g_ny), np.arange(g_nx - 2), indexing="ij")
+    add_second_diff(goff + ii * g_nx + jj, 1, FIELD_2D_SMOOTH)
+    ii, jj = np.meshgrid(np.arange(g_ny - 2), np.arange(g_nx), indexing="ij")
+    add_second_diff(goff + ii * g_nx + jj, g_nx, FIELD_2D_SMOOTH)
+    ata[np.diag_indices(cols)] += 1e-6
+    sol = np.linalg.solve(ata, atb)
+
+    def evaluate(px, py):
+        out = np.zeros(np.shape(px), float)
+        coords = [px + py, px - py, px, py] if corexy else [px, py]
+        for (boff, u0, n), u in zip(blocks, coords):
+            f = np.clip((u - u0) / FIELD_KNOT_MM, 0.0, n - 1.0)
+            i0 = np.minimum(f.astype(int), n - 2)
+            t = f - i0
+            out += sol[boff + i0] * (1.0 - t) + sol[boff + i0 + 1] * t
+        efx = np.clip((px - x0) / g_dx, 0.0, g_nx - 1.0)
+        efy = np.clip((py - y0) / g_dy, 0.0, g_ny - 1.0)
+        eix = np.minimum(efx.astype(int), g_nx - 2)
+        eiy = np.minimum(efy.astype(int), g_ny - 2)
+        etx, ety = efx - eix, efy - eiy
+        g = sol[goff:].reshape(g_ny, g_nx)
+        out += (
+            g[eiy, eix] * (1 - etx) * (1 - ety)
+            + g[eiy, eix + 1] * etx * (1 - ety)
+            + g[eiy + 1, eix] * (1 - etx) * ety
+            + g[eiy + 1, eix + 1] * etx * ety
+        )
+        return out
+
+    return evaluate
 
 
-def _build_grid(gcmd, plan, spacing, belt_lines):
-    """Evaluate each raster line's dense profile at the grid nodes it
-    crosses, averaging where an X line and a Y line meet, and fill
-    uncrossed nodes from their neighbors. The center node is the zero
+def _check_coverage(gcmd, plan, x, y, gx, gy):
+    """Every output node needs a sample within one raster pitch, or the
+    model is extrapolating there."""
+    import numpy as np
+
+    radius = float(plan["line_spacing"]) + 1e-6
+    uncovered = 0
+    px, py = np.meshgrid(gx, gy)
+    nodes_x = px.ravel()
+    nodes_y = py.ravel()
+    for start in range(0, len(nodes_x), 256):
+        nx_chunk = nodes_x[start : start + 256, None]
+        ny_chunk = nodes_y[start : start + 256, None]
+        d2 = (nx_chunk - x[None, :]) ** 2 + (ny_chunk - y[None, :]) ** 2
+        uncovered += int((d2.min(axis=1) > radius * radius).sum())
+    if uncovered:
+        raise gcmd.error(
+            "%d grid nodes are farther than %.0fmm from any sample — the "
+            "run does not cover the region" % (uncovered, radius)
+        )
+
+
+def _build_grid(gcmd, plan, spacing, belt_lines, corexy):
+    """Fit the structured field model to the dense line samples and
+    evaluate it at the output grid nodes. The zero_xy node is the zero
     reference — SERVO_SYNC's zero point."""
+    import numpy as np
+
     if not belt_lines:
         raise gcmd.error("run contains no usable elastic samples")
+    xs, ys, vs = [], [], []
+    for line in belt_lines:
+        coords = np.asarray(line["coords"], float)
+        vals = np.asarray(line["elastic"], float)
+        if line["fixed_axis"] == "y":
+            xs.append(coords)
+            ys.append(np.full(len(coords), line["fixed_value"]))
+        else:
+            xs.append(np.full(len(coords), line["fixed_value"]))
+            ys.append(coords)
+        vs.append(vals)
+    x = np.concatenate(xs)
+    y = np.concatenate(ys)
+    v = np.concatenate(vs)
     x0, x1 = plan["x_start"], plan["x_end"]
     y0, y1 = plan["y_start"], plan["y_end"]
     nx = max(2, int(round((x1 - x0) / spacing)) + 1)
     ny = max(2, int(round((y1 - y0) / spacing)) + 1)
+    if nx > MAX_GRID_DIM or ny > MAX_GRID_DIM or nx * ny > MAX_GRID_VALUES:
+        raise gcmd.error(
+            "%dx%d grid exceeds the endpoint's limits (%d per axis, %d "
+            "total) — raise SPACING" % (nx, ny, MAX_GRID_DIM, MAX_GRID_VALUES)
+        )
     dx = (x1 - x0) / (nx - 1)
     dy = (y1 - y0) / (ny - 1)
-    sums = [0.0] * (nx * ny)
-    counts = [0] * (nx * ny)
-    for line in belt_lines:
-        if line["fixed_axis"] == "y":
-            iy = int(round((line["fixed_value"] - y0) / dy))
-            if not 0 <= iy < ny:
-                continue
-            if abs(line["fixed_value"] - (y0 + iy * dy)) > dy / 2.0:
-                continue
-            for ix in range(nx):
-                value = _interp(line["coords"], line["elastic"], x0 + ix * dx)
-                sums[iy * nx + ix] += value
-                counts[iy * nx + ix] += 1
-        else:
-            ix = int(round((line["fixed_value"] - x0) / dx))
-            if not 0 <= ix < nx:
-                continue
-            if abs(line["fixed_value"] - (x0 + ix * dx)) > dx / 2.0:
-                continue
-            for iy in range(ny):
-                value = _interp(line["coords"], line["elastic"], y0 + iy * dy)
-                sums[iy * nx + ix] += value
-                counts[iy * nx + ix] += 1
-    values = [
-        sums[i] / counts[i] if counts[i] else None for i in range(nx * ny)
-    ]
-    for _ in range(nx + ny):
-        holes = [i for i, v in enumerate(values) if v is None]
-        if not holes:
-            break
-        for i in holes:
-            ix, iy = i % nx, i // nx
-            neighbors = [
-                values[jy * nx + jx]
-                for jx, jy in (
-                    (ix - 1, iy),
-                    (ix + 1, iy),
-                    (ix, iy - 1),
-                    (ix, iy + 1),
-                )
-                if 0 <= jx < nx
-                and 0 <= jy < ny
-                and values[jy * nx + jx] is not None
-            ]
-            if neighbors:
-                values[i] = sum(neighbors) / len(neighbors)
-    if any(v is None for v in values):
-        raise gcmd.error(
-            "grid has unfillable holes — the run does not cover the region"
-        )
+    gx = x0 + np.arange(nx) * dx
+    gy = y0 + np.arange(ny) * dy
+    _check_coverage(gcmd, plan, x, y, gx, gy)
+    evaluate = _field_model_fit(x, y, v, plan, corexy)
+    px, py = np.meshgrid(gx, gy)
+    values = evaluate(px, py).ravel()
     zero_xy = plan.get("zero_xy", [(x0 + x1) / 2.0, (y0 + y1) / 2.0])
     grid = {
         "nx": nx,
@@ -742,11 +834,11 @@ def _build_grid(gcmd, plan, spacing, belt_lines):
         "y0": y0,
         "dx": dx,
         "dy": dy,
-        "values_pct": values,
+        "values_pct": [float(val) for val in values],
         "zero_xy": list(zero_xy),
     }
     zero_value = _grid_value_at(grid, zero_xy[0], zero_xy[1])
-    grid["values_pct"] = [v - zero_value for v in values]
+    grid["values_pct"] = [val - zero_value for val in grid["values_pct"]]
     return grid
 
 

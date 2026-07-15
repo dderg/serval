@@ -236,11 +236,21 @@ antisymmetric offset (a 1×1 grid) through the same mechanism and reads
 every pair's differential torque response over SDO 0x6077 — the fitted
 direct slope (%/mm) plus the cross-belt slope populate the stiffness
 matrix for the build, and a poor direct fit (R² < 0.9) fails loudly.
-(2) `SERVO_STRAIN_COMP_BUILD RUN=<dir>` grids the run's elastic
-differential field per belt (each raster line's dense profile evaluated
-at the grid nodes it crosses), zeroes the maps at the region center
-(SERVO_SYNC's zero point), solves the per-node 2×2 system, and writes
-`map_file` (default `~/printer_data/config/strain_comp.json`).
+(2) `SERVO_STRAIN_COMP_BUILD RUN=<dir>` fits each belt's dense line
+samples with a structured field model — 1D components at 2 mm knots
+along each belt phase (x+y, x−y; CoreXY only) and along each axis, plus
+a smooth 2D remainder — evaluates the model at the output grid nodes,
+zeroes the maps at the region center (SERVO_SYNC's zero point), solves
+the per-node 2×2 system, and writes `map_file` (default
+`~/printer_data/config/strain_comp.json`). The model matters:
+point-sampling the raster at grid nodes aliases everything shorter than
+twice the node pitch, and the dominant fine structure is belt-phase
+diagonal at the 40 mm pulley period — on the bench it left a ~35%
+diagonal residue that the model build removes because diagonals stay
+diagonal between the raster lines. Pass `SPACING=5` on CoreXY so the
+40 mm harmonics also survive the endpoint's bilinear lookup (57×55
+stays within the 64/4096 grid caps on a 300 mm bed; the build fails
+loudly beyond them).
 (3) `SERVO_STRAIN_COMP ENABLE=1` resolves the map's motor names to
 slots/lanes on the live topology and uploads it; `ENABLE=0` ramps the
 compensation back out. Verify by re-running the strain map with the

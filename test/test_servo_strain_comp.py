@@ -1,4 +1,5 @@
 import json
+import math
 import struct
 
 import pytest
@@ -201,7 +202,7 @@ def elastic_a(x, y):
     return 0.1 * (x - 50.0)
 
 
-def write_scap(path, xs, ys):
+def write_scap(path, xs, ys, field):
     channels = [
         {"name": "time", "offset": 0, "dtype": "u64"},
         {"name": "target_counts", "offset": 8, "dtype": "i32"},
@@ -220,7 +221,7 @@ def write_scap(path, xs, ys):
     rows = []
     for i, (x, y) in enumerate(zip(xs, ys)):
         pa, pb = x + y, x - y
-        fa = elastic_a(x, y)
+        fa = field(x, y)
         row = struct.pack("<Q", i)
         for pos_mm, diff in ((pa, fa), (pa, -fa), (pb, 0.0), (pb, 0.0)):
             row += struct.pack(
@@ -231,7 +232,7 @@ def write_scap(path, xs, ys):
         fh.write(json.dumps(header).encode() + b"\n" + b"".join(rows))
 
 
-def write_run(run_dir):
+def write_run(run_dir, field=elastic_a):
     run_dir.mkdir()
     steps = []
     lines = [("xline_y%03d" % y, {"y": float(y)}) for y in (0, 50, 100)]
@@ -244,10 +245,11 @@ def write_run(run_dir):
             xs, ys = sweep, [swept["y"]] * len(sweep)
         else:
             xs, ys = [swept["x"]] * len(sweep), sweep
-        write_scap(run_dir / ("step_%s.scap" % name), xs, ys)
+        write_scap(run_dir / ("step_%s.scap" % name), xs, ys, field)
         steps.append({"name": name, "swept": swept})
     manifest = {
         "experiment": "strain_map",
+        "kinematics": "corexy",
         "stroke_plan": {
             "x_start": 0.0,
             "x_end": 100.0,
@@ -548,4 +550,55 @@ def test_build_rejects_a_near_singular_stiffness_matrix(tmp_path):
         CROSS_BA="-200",
     )
     with pytest.raises(RuntimeError, match="singular"):
+        sc.cmd_SERVO_STRAIN_COMP_BUILD(gcmd)
+
+
+def test_build_preserves_diagonal_features_between_lines(tmp_path):
+    run_dir = tmp_path / "strainrun"
+    write_run(
+        run_dir,
+        field=lambda x, y: 4.0 * math.sin(2.0 * math.pi * (x + y) / 40.0),
+    )
+    sc, _ = make_comp(tmp_path)
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(
+        FakeGcmd(
+            RUN=str(run_dir),
+            STIFFNESS_A="200",
+            STIFFNESS_B="200",
+            CROSS_AB="0",
+            CROSS_BA="0",
+            SPACING="5",
+        )
+    )
+    payload = json.loads((tmp_path / "strain_comp.json").read_text())
+    belt_a = payload["pairs"][0]
+    assert (belt_a["nx"], belt_a["ny"]) == (21, 21)
+
+    def offset_at(x, y):
+        ix = int(round((x - belt_a["x0"]) / belt_a["dx"]))
+        iy = int(round((y - belt_a["y0"]) / belt_a["dy"]))
+        return belt_a["offsets_um"][iy * belt_a["nx"] + ix]
+
+    # A 4% belt-A-phase sine (40mm period, the pulley circumference) with
+    # 200 %/mm stiffness needs -/+20 um at its extremes. The probed nodes
+    # sit BETWEEN the raster lines (lines at 0/50/100): only a model that
+    # knows diagonals stay diagonal can fill them in.
+    assert offset_at(25.0, 25.0) == pytest.approx(-20, abs=4)  # u=50, sin +1
+    assert offset_at(35.0, 35.0) == pytest.approx(20, abs=4)  # u=70, sin -1
+    assert offset_at(45.0, 45.0) == pytest.approx(-20, abs=4)  # u=90, sin +1
+
+
+def test_build_rejects_grids_beyond_the_endpoint_caps(tmp_path):
+    run_dir = tmp_path / "strainrun"
+    write_run(run_dir)
+    sc, _ = make_comp(tmp_path)
+    gcmd = FakeGcmd(
+        RUN=str(run_dir),
+        STIFFNESS_A="200",
+        STIFFNESS_B="200",
+        CROSS_AB="0",
+        CROSS_BA="0",
+        SPACING="1",
+    )
+    with pytest.raises(RuntimeError, match="raise SPACING"):
         sc.cmd_SERVO_STRAIN_COMP_BUILD(gcmd)
