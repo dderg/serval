@@ -81,7 +81,8 @@ class ServoStrainComp:
         "on CoreXY so 40mm pulley harmonics survive the bilinear "
         "lookup). MERGE=1 treats the run as a residual measured WITH the "
         "current map enabled and adds the correction on top — the "
-        "second-order iteration."
+        "second-order iteration; it reuses the stiffness matrix recorded "
+        "in the existing map unless overridden."
     )
     cmd_SERVO_STRAIN_COMP_help = (
         "ENABLE=1 uploads the map file to the endpoint (offsets ramp in at "
@@ -377,6 +378,14 @@ class ServoStrainComp:
                 "the joint stiffness solve needs exactly two belts, run "
                 "has %d" % len(belts)
             )
+        for belt_idx, motor_names in enumerate(belts):
+            base = base_pairs.get(tuple(motor_names))
+            if base is None:
+                continue
+            if stiffness_overrides[belt_idx] is None:
+                stiffness_overrides[belt_idx] = base.get("stiffness_pct_per_mm")
+            if cross_overrides[belt_idx] is None:
+                cross_overrides[belt_idx] = base.get("cross_pct_per_mm")
         direct = [
             self._stiffness_for(
                 gcmd, belt_idx, motor_names, stiffness_overrides[belt_idx]

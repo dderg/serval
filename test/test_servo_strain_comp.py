@@ -466,6 +466,32 @@ def test_merge_adds_the_residual_on_top_of_the_existing_map(tmp_path):
             assert abs(b - 2 * a) <= 2, (a, b)
 
 
+def test_merge_reuses_the_matrix_recorded_in_the_existing_map(tmp_path):
+    run_dir = tmp_path / "strainrun"
+    write_run(run_dir)
+    sc, _ = make_comp(tmp_path)
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(
+        FakeGcmd(
+            RUN=str(run_dir),
+            STIFFNESS_A="200",
+            STIFFNESS_B="210",
+            CROSS_AB="-50",
+            CROSS_BA="-48",
+        )
+    )
+    first = json.loads((tmp_path / "strain_comp.json").read_text())
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(FakeGcmd(RUN=str(run_dir), MERGE="1"))
+    merged = json.loads((tmp_path / "strain_comp.json").read_text())
+    for pair_first, pair_merged in zip(first["pairs"], merged["pairs"]):
+        assert (
+            pair_merged["stiffness_pct_per_mm"]
+            == pair_first["stiffness_pct_per_mm"]
+        )
+        assert pair_merged["cross_pct_per_mm"] == pair_first["cross_pct_per_mm"]
+        for a, b in zip(pair_first["offsets_um"], pair_merged["offsets_um"]):
+            assert abs(b - 2 * a) <= 2, (a, b)
+
+
 def test_merge_without_an_existing_map_errors_loudly(tmp_path):
     run_dir = tmp_path / "strainrun"
     write_run(run_dir)

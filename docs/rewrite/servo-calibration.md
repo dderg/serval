@@ -227,9 +227,18 @@ cross terms fit ~25% lower from run pairs than the probe reads
 (~428/−122 probed vs ~335/−88 fitted; mechanism not established — the
 probe's own secant slopes soften slightly with amplitude).
 Compensation acts while moving, so calibrate in that regime:
-fit the matrix from an uncompensated + compensated run pair, or let a
-`MERGE=1` iteration converge the scale error away — with the cross
-terms in place it contracts instead of leaking sideways.
+fit the matrix from an uncompensated + compensated run pair — regress
+the per-sample field change against the offsets the map applied at each
+sample point (both belts' offsets in one least-squares gives the direct
+and cross columns together; on the Trident repeat fits landed at
+~330/344 direct, ~−90/−86 cross) — or let a `MERGE=1` iteration
+converge the scale error away — with the cross terms in place it
+contracts instead of leaking sideways. The exact value is not
+critical: a fractional matrix error leaves the same fraction of the
+field behind, and each merge pass shrinks it by that factor again. The
+map file records the matrix per pair (`stiffness_pct_per_mm`,
+`cross_pct_per_mm`), so the numbers only need establishing once —
+`MERGE=1` reuses them unless overridden.
 
 The workflow: (1) `SERVO_MEASURE_PAIR_STIFFNESS` steps a constant
 antisymmetric offset (a 1×1 grid) through the same mechanism and reads
@@ -254,7 +263,10 @@ loudly beyond them).
 (3) `SERVO_STRAIN_COMP ENABLE=1` resolves the map's motor names to
 slots/lanes on the live topology and uploads it; `ENABLE=0` ramps the
 compensation back out. Verify by re-running the strain map with the
-compensation enabled — the residual field should collapse. Params:
+compensation enabled — the residual field should collapse — then
+`SERVO_STRAIN_COMP_BUILD RUN=<verification run> MERGE=1` folds what is
+left into the map (no stiffness params needed: the recorded matrix is
+reused) and another `ENABLE=1` uploads it. Params:
 stiffness `STEP_UM` (50) `SETTLE` (0.8) `AXIS`; build `RUN` (required)
 `STIFFNESS_A`/`STIFFNESS_B` with `CROSS_AB`/`CROSS_BA` (%/mm matrix
 override; `CROSS_AB` is belt A's response to a belt B offset, 0 disables
