@@ -409,3 +409,56 @@ fn pools_multiple_captures_with_per_capture_offset() {
         r.intercepts
     );
 }
+
+#[test]
+fn unphysical_split_fraction_is_zeroed_and_flagged() {
+    let slots = four_slot_motion();
+    let sane = [0.02, -0.0002, 0.05, 0.0, -0.01, 0.0001];
+    let insane = [0.9, 0.0, 0.05, 0.0, -0.01, 0.0001];
+    let inj = vec![
+        (
+            0,
+            1,
+            -1.0,
+            Injection {
+                w: insane,
+                even_kappa: 0.0,
+                offset: 0.0,
+                noise: 0.0,
+            },
+        ),
+        (
+            2,
+            3,
+            1.0,
+            Injection {
+                w: sane,
+                even_kappa: 0.0,
+                offset: 0.0,
+                noise: 0.0,
+            },
+        ),
+    ];
+    let (cap, torque_filt) = synth(&slots, &inj, 0);
+    let n = cap.t.len();
+    let keep = keep_all(n);
+    let structure = Structure::new(frame());
+    let scaps = vec![SplitCapture {
+        cap: &cap,
+        torque_filt: &torque_filt,
+        keep: &keep,
+    }];
+    let reports = fit_pair_splits(&structure, &params(), &SIGNS, 0.0, &scaps);
+    let bad = &reports[0];
+    assert!(bad.rejected[0], "inertial fraction 0.9 must be rejected");
+    assert!(bad.peak_fraction[0] > servo_ident::split::SPLIT_MAX_FRACTION);
+    assert_eq!(bad.split.w[0], 0.0);
+    assert_eq!(bad.split.w[1], 0.0);
+    assert!(!bad.rejected[1] && !bad.rejected[2], "sane components kept");
+    assert!(bad.split.w[2] != 0.0 && bad.split.w[4] != 0.0);
+    let good = &reports[1];
+    assert_eq!(good.rejected, [false; 3]);
+    for i in 0..6 {
+        assert!((good.split.w[i] - sane[i]).abs() < 1e-6);
+    }
+}

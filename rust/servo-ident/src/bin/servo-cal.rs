@@ -128,7 +128,28 @@ fn report_splits(reports: &[PairReport], axes: &[&str]) -> Vec<PairSplit> {
                  tension/pulley drag; not fed forward"
             );
         }
-        out.push(r.split.clone());
+        for (c, name) in ["inertial", "viscous", "coulomb"].iter().enumerate() {
+            if r.rejected[c] {
+                eprintln!(
+                    "  WARNING pair {a}/{b}: {name} split rejected — |w(p)| reaches \
+                     {:.2} over the captured range (cap {}); this stroke plan cannot \
+                     identify it (position windows too narrow or accel confounded \
+                     with position); component zeroed. Capture several \
+                     SERVO_MEASURE_INERTIA windows at different positions to \
+                     identify it.",
+                    r.peak_fraction[c],
+                    servo_ident::split::SPLIT_MAX_FRACTION
+                );
+            }
+        }
+        if r.split.w.iter().any(|&v| v != 0.0) {
+            out.push(r.split.clone());
+        } else {
+            eprintln!(
+                "  pair {a}/{b}: every split component rejected — pair omitted \
+                 from the profile"
+            );
+        }
     }
     out
 }
@@ -404,10 +425,13 @@ fn cmd_fit(args: &[String]) {
         opt_f64(args, "--rotor-inertia-kgm2"),
         opt_f64(args, "--rotation-distance-mm"),
     ) {
-        for (m, mass) in modes.iter().zip(&r.params.mass) {
+        for (k, (m, mass)) in modes.iter().zip(&r.params.mass).enumerate() {
+            let drive_share = structure.frame[k]
+                .iter()
+                .fold(0.0_f64, |acc, f| acc.max(f.abs()));
             eprintln!(
                 "recommended C00.06 (mode {m}): {:.0}%",
-                c0006_recommendation(*mass, t, d, j)
+                c0006_recommendation(*mass * drive_share, t, d, j)
             );
         }
     }

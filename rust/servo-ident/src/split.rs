@@ -38,10 +38,21 @@ pub struct PairReport {
     pub rms_after: f64,
     pub role_dependent: bool,
     pub samples: usize,
+    /// Peak |w0 + w1·p| over the captured position range, per component
+    /// [inertial, viscous, coulomb] — computed BEFORE the cap zeroed anything.
+    pub peak_fraction: [f64; 3],
+    /// Components zeroed in `split` because `peak_fraction` exceeded
+    /// `SPLIT_MAX_FRACTION` (identifiability failure of the stroke plan).
+    pub rejected: [bool; 3],
 }
 
 const N_FORCE_COLS: usize = 8;
 const DEADBAND_MM_S: f64 = crate::model::COULOMB_DEADBAND_MM_S;
+/// A pair's split fraction |w0 + w1·p| cannot physically approach 1 — that
+/// would mean one motor carries more than the whole belt force. A fitted
+/// component exceeding this cap anywhere in the captured position range is
+/// an identifiability failure (degenerate stroke plan), not a measurement.
+pub const SPLIT_MAX_FRACTION: f64 = 0.6;
 
 struct Ols {
     theta: Vec<f64>,
@@ -275,9 +286,32 @@ pub fn fit_pair_splits(
             )
         });
 
-        let w: [f64; 6] = std::array::from_fn(|i| fit.theta[i]);
+        let mut p_min = f64::INFINITY;
+        let mut p_max = f64::NEG_INFINITY;
+        for sc in captures {
+            for k in 0..sc.keep.len() {
+                if sc.keep[k] {
+                    let p = signs[first] * sc.cap.pos[first][k];
+                    p_min = p_min.min(p);
+                    p_max = p_max.max(p);
+                }
+            }
+        }
+
+        let mut w: [f64; 6] = std::array::from_fn(|i| fit.theta[i]);
+        let peak_fraction: [f64; 3] = std::array::from_fn(|c| {
+            let (w0, w1) = (w[2 * c], w[2 * c + 1]);
+            (w0 + w1 * p_min).abs().max((w0 + w1 * p_max).abs())
+        });
+        let rejected: [bool; 3] = std::array::from_fn(|c| peak_fraction[c] > SPLIT_MAX_FRACTION);
+        for c in 0..3 {
+            if rejected[c] {
+                w[2 * c] = 0.0;
+                w[2 * c + 1] = 0.0;
+            }
+        }
         let w_stderr: [f64; 6] = std::array::from_fn(|i| fit.stderr[i]);
-        let w_tvalue: [f64; 6] = std::array::from_fn(|i| w[i] / fit.stderr[i]);
+        let w_tvalue: [f64; 6] = std::array::from_fn(|i| fit.theta[i] / fit.stderr[i]);
         let even_coeff = [fit.theta[6], fit.theta[7]];
         let intercepts: Vec<f64> = (0..n_cap).map(|c| fit.theta[N_FORCE_COLS + c]).collect();
 
@@ -297,11 +331,11 @@ pub fn fit_pair_splits(
         let mut rss_after = 0.0;
         for row in 0..total {
             let mut pred = 0.0;
-            for (i, col) in cols.iter().enumerate() {
-                if i == 6 || i == 7 {
-                    continue;
-                }
-                pred += fit.theta[i] * col[row];
+            for i in 0..6 {
+                pred += w[i] * cols[i][row];
+            }
+            for (ic, intercept) in intercepts.iter().enumerate() {
+                pred += intercept * cols[N_FORCE_COLS + ic][row];
             }
             let e = y[row] - pred;
             rss_after += e * e;
@@ -321,6 +355,8 @@ pub fn fit_pair_splits(
             rms_after,
             role_dependent,
             samples: total,
+            peak_fraction,
+            rejected,
         });
     }
     reports

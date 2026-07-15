@@ -77,7 +77,10 @@ pub fn render_profile(
     out
 }
 
-/// `m_diag`: fitted diagonal mass entry, units (0.1% rated) / (mm/s²).
+/// `per_drive_mass`: the mass ONE DRIVE perceives, units (0.1% rated) /
+/// (mm/s²) — for a mode-space profile this is `m_mode · max_i |F[mode][i]|`
+/// (the frame column scales the mode mass down to a single drive's torque
+/// share), NOT the raw mode mass.
 /// `rated_torque_nm`: motor rated torque in N·m.
 /// `rot_dist_mm`: linear distance per revolution in mm/rev.
 /// `rotor_inertia_kgm2`: rotor moment of inertia in kg·m².
@@ -85,11 +88,12 @@ pub fn render_profile(
 /// Returns the drive load-inertia-ratio C00.06 in percent:
 /// `(J_total - J_rotor) / J_rotor * 100`.
 pub fn c0006_recommendation(
-    m_diag: f64,
+    per_drive_mass: f64,
     rated_torque_nm: f64,
     rot_dist_mm: f64,
     rotor_inertia_kgm2: f64,
 ) -> f64 {
-    let j_total = m_diag * (rated_torque_nm / 1000.0) * rot_dist_mm / (2.0 * std::f64::consts::PI);
+    let j_total =
+        per_drive_mass * (rated_torque_nm / 1000.0) * rot_dist_mm / (2.0 * std::f64::consts::PI);
     (j_total - rotor_inertia_kgm2) / rotor_inertia_kgm2 * 100.0
 }
