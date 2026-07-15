@@ -70,7 +70,7 @@ fn compute_metrics_settle_and_overshoot() {
     }
     let flags = vec![2i64; n];
     let d = series_from(ferr, target, vec![0; n], flags);
-    let m = compute_metrics(&d, 50, 1400, fs).unwrap();
+    let m = compute_metrics(&d, 50, 1400, fs, 0).unwrap();
     assert_eq!(m.moves.len(), 1);
     let mv = &m.moves[0];
     assert_eq!(mv.ferr_peak, 200.0);
@@ -79,4 +79,26 @@ fn compute_metrics_settle_and_overshoot() {
     assert!(!mv.settle_window_truncated);
     assert_eq!(m.ferr_crosscheck_max, 0);
     assert_eq!(m.torque_saturation_pct, 0.0);
+}
+
+#[test]
+fn ff_lead_extends_the_error_window_before_the_move() {
+    let fs = 1000.0;
+    let mut target = vec![0i64; 10];
+    for k in 1..=100 {
+        target.push(k);
+    }
+    target.extend(std::iter::repeat(100).take(200));
+    let n = target.len();
+    let mut ferr = vec![0i64; n];
+    ferr[8] = 300; // FF applied 2 cycles ahead of the position command
+    for f in ferr.iter_mut().take(110).skip(10) {
+        *f = 200;
+    }
+    let flags = vec![2i64; n];
+    let d = series_from(ferr, target, vec![0; n], flags);
+    let without_lead = compute_metrics(&d, 50, 1400, fs, 0).unwrap();
+    assert_eq!(without_lead.moves[0].ferr_peak, 200.0);
+    let with_lead = compute_metrics(&d, 50, 1400, fs, 2).unwrap();
+    assert_eq!(with_lead.moves[0].ferr_peak, 300.0);
 }

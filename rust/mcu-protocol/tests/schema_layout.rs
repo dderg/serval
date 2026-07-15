@@ -52,6 +52,7 @@ enum Ty {
     Array {
         elem: Elem,
         bounds: Option<(u64, u64)>,
+        product: Option<(String, String)>,
     },
 }
 
@@ -108,23 +109,33 @@ fn parse_array(inner: &str) -> Ty {
         return Ty::Array {
             elem: Elem::Struct(fields),
             bounds: None,
+            product: None,
         };
     }
-    if let Some((scalar, bounds)) = inner.split_once(';') {
-        let (lo, hi) = bounds
+    if let Some((scalar, spec)) = inner.split_once(';') {
+        if let Some((a, b)) = spec.split_once('*') {
+            return Ty::Array {
+                elem: Elem::Scalar(parse_scalar(scalar)),
+                bounds: None,
+                product: Some((a.to_string(), b.to_string())),
+            };
+        }
+        let (lo, hi) = spec
             .split_once("..=")
-            .unwrap_or_else(|| panic!("array bounds must be lo..=hi — got {bounds}"));
+            .unwrap_or_else(|| panic!("array bounds must be lo..=hi — got {spec}"));
         return Ty::Array {
             elem: Elem::Scalar(parse_scalar(scalar)),
             bounds: Some((
                 lo.parse().unwrap_or_else(|_| panic!("bad bound {lo}")),
                 hi.parse().unwrap_or_else(|_| panic!("bad bound {hi}")),
             )),
+            product: None,
         };
     }
     Ty::Array {
         elem: Elem::Scalar(parse_scalar(inner)),
         bounds: None,
+        product: None,
     }
 }
 
@@ -202,10 +213,26 @@ fn decode_struct(fields: &[(String, Ty)], r: &mut Reader<'_>) -> Result<(), Stri
                 let len = le_u64(r.take(2)?) as usize;
                 r.take(len)?;
             }
-            Ty::Array { elem, bounds } => {
-                let n = match latest_count(&ints) {
-                    Some(v) => v,
-                    None => le_u64(r.take(1)?),
+            Ty::Array {
+                elem,
+                bounds,
+                product,
+            } => {
+                let n = match product {
+                    Some((a, b)) => {
+                        let lookup = |name: &str| {
+                            ints.iter()
+                                .rev()
+                                .find(|(n, _)| n == name)
+                                .map(|(_, v)| *v)
+                                .unwrap_or_else(|| panic!("array {name} refers to unknown field"))
+                        };
+                        lookup(a) * lookup(b)
+                    }
+                    None => match latest_count(&ints) {
+                        Some(v) => v,
+                        None => le_u64(r.take(1)?),
+                    },
                 };
                 if let Some((lo, hi)) = bounds {
                     if n < *lo || n > *hi {
@@ -380,12 +407,12 @@ fn set_strain_comp_matches_schema_layout() {
 #[test]
 fn set_dynamics_model_matches_schema_layout() {
     let msg = SetDynamicsModel {
-        mass: vec![0.0123, 0.0021, 0.0021, 0.0119],
-        axes_count: 2,
+        slots_count: 4,
+        modes_count: 2,
+        frame: vec![0.25, -0.25, -0.25, -0.25, 0.25, -0.25, 0.25, 0.25],
+        mass: vec![0.0123, 0.0119],
         viscous: vec![0.0045, 0.0044],
-        coulomb_fwd: vec![1.2, 1.1],
-        coulomb_rev: vec![-1.1, -1.0],
-        deadband_mm_s: 0.5,
+        coulomb: vec![1.2, 1.1],
     };
     reference_decode("SetDynamicsModel", &msg.encoded_to_vec()).unwrap();
 }

@@ -470,28 +470,29 @@ impl Decode for SetStrainComp {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetDynamicsModel {
+    pub slots_count: u8,
+    pub modes_count: u8,
+    pub frame: Vec<f32>,
     pub mass: Vec<f32>,
-    pub axes_count: u8,
     pub viscous: Vec<f32>,
-    pub coulomb_fwd: Vec<f32>,
-    pub coulomb_rev: Vec<f32>,
-    pub deadband_mm_s: f32,
+    pub coulomb: Vec<f32>,
 }
 
 impl Encode for SetDynamicsModel {
     fn encode(&self, out: &mut Vec<u8>) {
-        put_u16(out, self.mass.len() as u16);
-        for v in &self.mass {
-            put_f32(out, *v);
-        }
-        put_u8(out, self.axes_count);
-        for vec in [&self.viscous, &self.coulomb_fwd, &self.coulomb_rev] {
-            assert_eq!(vec.len(), self.axes_count as usize);
+        let slots = self.slots_count as usize;
+        let modes = self.modes_count as usize;
+        assert_eq!(self.frame.len(), modes * slots);
+        assert_eq!(self.mass.len(), modes);
+        assert_eq!(self.viscous.len(), modes);
+        assert_eq!(self.coulomb.len(), modes);
+        put_u8(out, self.slots_count);
+        put_u8(out, self.modes_count);
+        for vec in [&self.frame, &self.mass, &self.viscous, &self.coulomb] {
             for v in vec {
                 put_f32(out, *v);
             }
         }
-        put_f32(out, self.deadband_mm_s);
     }
 }
 
@@ -517,20 +518,21 @@ fn get_f32_vec(c: &mut Cursor<'_>, count: usize) -> Result<Vec<f32>, DecodeError
 
 impl Decode for SetDynamicsModel {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
-        let mass_count = get_u16(c)?;
-        let mass = get_f32_vec(c, mass_count as usize)?;
-        let axes_count = get_u8(c)?;
-        let viscous = get_f32_vec(c, axes_count as usize)?;
-        let coulomb_fwd = get_f32_vec(c, axes_count as usize)?;
-        let coulomb_rev = get_f32_vec(c, axes_count as usize)?;
-        let deadband_mm_s = get_f32(c)?;
+        let slots_count = get_u8(c)?;
+        let modes_count = get_u8(c)?;
+        let slots = slots_count as usize;
+        let modes = modes_count as usize;
+        let frame = get_f32_vec(c, modes * slots)?;
+        let mass = get_f32_vec(c, modes)?;
+        let viscous = get_f32_vec(c, modes)?;
+        let coulomb = get_f32_vec(c, modes)?;
         Ok(Self {
+            slots_count,
+            modes_count,
+            frame,
             mass,
-            axes_count,
             viscous,
-            coulomb_fwd,
-            coulomb_rev,
-            deadband_mm_s,
+            coulomb,
         })
     }
 }

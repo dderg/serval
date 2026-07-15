@@ -122,7 +122,9 @@ def test_following_error_rms_matches_numpy(tmp_path):
     path, ferr = synth_capture(tmp_path)
     _, data, _ = sc.load_capture(path)
     m = sc.compute_metrics(data, settle_band=10, torque_limit=900)
-    expected_rms = float(np.sqrt(np.mean(np.round(ferr[1000:2000]) ** 2)))
+    settle_samples = int(round(m["moves"][0]["settle_ms"]))
+    window = np.round(ferr[1000 : 2000 + settle_samples])
+    expected_rms = float(np.sqrt(np.mean(window**2)))
     assert m["moves"][0]["ferr_rms"] == pytest.approx(expected_rms, rel=0.01)
     assert m["moves"][0]["ferr_peak"] == pytest.approx(200.0, rel=0.02)
 

@@ -16,6 +16,8 @@ TORQUE_ACTUAL_INDEX = 0x6077
 KIN_COREXY = 0
 KIN_CARTESIAN = 1
 MAX_OFFSET_UM = 500
+MAX_STRAIN_STEP_UM = 200.0
+MIN_LINE_SPACING_MM = 2.0
 COMP_SLEW_MM_S = 1.0
 TORQUE_READS = 5
 BIN_MM = 2.0
@@ -414,8 +416,10 @@ class ServoStrainComp:
         axis_filter = gcmd.get("AXIS", None)
         if axis_filter is not None:
             axis_filter = axis_filter.lower()
-        step_um = gcmd.get_float("STEP_UM", 50.0, above=0.0, maxval=200.0)
-        settle = gcmd.get_float("SETTLE", 0.8, above=0.0, maxval=5.0)
+        step_um = gcmd.get_float(
+            "STEP_UM", 50.0, above=0.0, maxval=MAX_STRAIN_STEP_UM
+        )
+        settle = gcmd.get_float("SETTLE", 0.8, above=0.0)
         pairs = self._belt_pairs(gcmd, axis_filter)
         all_pairs = self._belt_pairs(gcmd, None)
         toolhead = self.printer.lookup_object("toolhead")
@@ -544,7 +548,7 @@ class ServoStrainComp:
                 }
         plan = manifest["stroke_plan"]
         spacing = gcmd.get_float(
-            "SPACING", plan["line_spacing"], above=2.0, maxval=100.0
+            "SPACING", plan["line_spacing"], minval=MIN_LINE_SPACING_MM
         )
         stiffness_overrides = [
             gcmd.get_float("STIFFNESS_A", None),

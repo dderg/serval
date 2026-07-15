@@ -618,13 +618,13 @@ fn strain_comp_clear_returns_held_targets_to_base() {
 }
 
 const BUZZ_DYNAMICS: &str = r#"
-version = 1
+version = 2
 axes = ["a", "b"]
-mass = [[0.00001, 0.0], [0.0, 0.00001]]
+modes = ["a", "b"]
+frame = [[1.0, 0.0], [0.0, 1.0]]
+mass = [0.00001, 0.00001]
 viscous = [0.01, 0.01]
-coulomb_fwd = [50.0, 50.0]
-coulomb_rev = [-50.0, -50.0]
-coulomb_deadband_mm_s = 0.5
+coulomb = [50.0, 50.0]
 fit_rms_residual = [0.1, 0.1]
 "#;
 
@@ -684,14 +684,14 @@ fn streamed_motion_keeps_coulomb_in_the_ff() {
     );
 }
 
-fn dynamics_msg(mass_diag: f32) -> mcu_protocol::messages::SetDynamicsModel {
+fn dynamics_msg(mass0: f32) -> mcu_protocol::messages::SetDynamicsModel {
     mcu_protocol::messages::SetDynamicsModel {
-        mass: vec![mass_diag, -0.010, -0.010, mass_diag],
-        axes_count: NUM_SLAVES as u8,
+        slots_count: NUM_SLAVES as u8,
+        modes_count: 2,
+        frame: vec![1.0, 0.0, 0.0, 1.0],
+        mass: vec![mass0, 0.030],
         viscous: vec![0.004, 0.004],
-        coulomb_fwd: vec![1.0, 1.0],
-        coulomb_rev: vec![-1.0, -1.0],
-        deadband_mm_s: 0.5,
+        coulomb: vec![1.0, 1.0],
     }
 }
 
@@ -701,7 +701,7 @@ fn set_dynamics_model_installs_model_when_none_was_loaded() {
     assert!(ctx.dynamics.is_none());
     super::commands::handle_set_dynamics_model(&mut ctx, 1, dynamics_msg(0.030));
     let model = ctx.dynamics.as_ref().expect("model installed");
-    assert_eq!(model.n, NUM_SLAVES);
+    assert_eq!(model.n_slots, NUM_SLAVES);
     let tau = model.torque_ff(0, &[1000.0, 0.0], &[100.0, 0.0]);
     let expect = 0.030 * 1000.0 + 0.004 * 100.0 + 1.0;
     assert!((tau - expect).abs() < 1e-3, "{tau} vs {expect}");
@@ -722,7 +722,7 @@ fn set_dynamics_model_wrong_axes_count_keeps_previous_model() {
     let mut ctx = test_ctx("dyn-baddim");
     super::commands::handle_set_dynamics_model(&mut ctx, 1, dynamics_msg(0.030));
     let mut bad = dynamics_msg(0.045);
-    bad.axes_count = 3;
+    bad.slots_count = 3;
     super::commands::handle_set_dynamics_model(&mut ctx, 2, bad);
     let model = ctx.dynamics.as_ref().expect("previous model kept");
     let tau = model.torque_ff(0, &[1000.0, 0.0], &[0.0, 0.0]);
@@ -730,11 +730,11 @@ fn set_dynamics_model_wrong_axes_count_keeps_previous_model() {
 }
 
 #[test]
-fn set_dynamics_model_non_positive_definite_keeps_previous_model() {
+fn set_dynamics_model_rank_deficient_frame_keeps_previous_model() {
     let mut ctx = test_ctx("dyn-notpd");
     super::commands::handle_set_dynamics_model(&mut ctx, 1, dynamics_msg(0.030));
     let mut bad = dynamics_msg(0.045);
-    bad.mass = vec![0.010, 0.020, 0.020, 0.010];
+    bad.frame = vec![1.0, 0.0, 1.0, 0.0];
     super::commands::handle_set_dynamics_model(&mut ctx, 2, bad);
     let model = ctx.dynamics.as_ref().expect("previous model kept");
     let tau = model.torque_ff(0, &[1000.0, 0.0], &[0.0, 0.0]);

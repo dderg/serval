@@ -566,12 +566,12 @@ fn sdo_response_frames_decode_back() {
 #[test]
 fn decodes_set_dynamics_model_command() {
     let msg = SetDynamicsModel {
-        mass: vec![0.030, -0.010, -0.010, 0.030],
-        axes_count: 2,
+        slots_count: 2,
+        modes_count: 2,
+        frame: vec![0.5, 0.5, 0.5, -0.5],
+        mass: vec![0.030, 0.030],
         viscous: vec![0.004, 0.004],
-        coulomb_fwd: vec![1.0, 1.0],
-        coulomb_rev: vec![-1.0, -1.0],
-        deadband_mm_s: 0.5,
+        coulomb: vec![1.0, 1.0],
     };
     let payload = frame_payload(MessageKind::SetDynamicsModel, 33, &msg.encoded_to_vec());
     match decode_command(0, &payload).expect("decode") {

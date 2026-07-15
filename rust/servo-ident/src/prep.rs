@@ -21,15 +21,18 @@
 //! authority, without ripple and quantization noise drowning the number.
 
 use crate::capture::Capture;
-use crate::model::{coulomb_cols, COULOMB_DEADBAND_MM_S};
+use crate::model::{coulomb_sign, Structure, COULOMB_DEADBAND_MM_S};
 
 #[derive(Debug, Clone)]
 pub struct PrepOptions {
     /// Zero-phase low-pass cutoff applied to both sides of the regression
     /// (Hz), and used for the in-band residual report. 0 disables filtering.
     pub cutoff_hz: f64,
-    /// Samples within this distance of a velocity-deadband sample are
-    /// dropped: breakaway/landing stiction transients are unmodeled.
+    /// Samples within this distance of a velocity-deadband sample of an
+    /// active mode are dropped: breakaway/landing stiction transients are
+    /// unmodeled. A mode idle for a whole segment (an axis-aligned stroke
+    /// leaves the other mode at exactly zero) blanks nothing — it is not
+    /// reversing, and its coulomb column is zero there anyway.
     pub blank_reversal_s: f64,
     /// Search range for the accel→torque delay. 0 disables alignment.
     pub max_delay_s: f64,
@@ -56,12 +59,14 @@ impl Default for PrepOptions {
 #[derive(Debug)]
 pub struct Prepped {
     pub t: Vec<f64>,
-    pub acc: Vec<Vec<f64>>,
-    pub vel: Vec<Vec<f64>>,
-    pub vel_act: Vec<Vec<f64>>,
+    /// Mode-space channels: `[mode][sample]`, frame-projected then filtered.
+    pub acc_mode: Vec<Vec<f64>>,
+    pub vel_mode: Vec<Vec<f64>>,
+    /// Per-mode coulomb sign column (sign of the RAW mode velocity, then
+    /// filtered like every other channel).
+    pub cs_mode: Vec<Vec<f64>>,
+    /// Measured torque per motor/slot, delay-aligned and filtered.
     pub torque: Vec<Vec<f64>>,
-    pub cf: Vec<Vec<f64>>,
-    pub cr: Vec<Vec<f64>>,
     /// Pulley-angle sin/cos nuisance columns per motor (empty when
     /// `ripple_period_mm` is unset), filtered like every other channel.
     pub extra: Vec<Vec<Vec<f64>>>,
@@ -201,19 +206,33 @@ fn estimate_delay_samples(
     best_lag
 }
 
-pub fn prep(cap: &Capture, opts: &PrepOptions) -> Prepped {
+pub fn prep(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> Prepped {
     let n = cap.t.len();
     let n_motors = cap.acc.len();
+    assert_eq!(
+        structure.axis_count(),
+        n_motors,
+        "frame slot count vs capture motor count"
+    );
+    let n_modes = structure.mode_count();
     let dt = median_dt(&cap.t);
     let segs = segments(&cap.t, dt);
 
-    let mut cf_raw = vec![vec![0.0; n]; n_motors];
-    let mut cr_raw = vec![vec![0.0; n]; n_motors];
-    for m in 0..n_motors {
+    let mut acc_mode_raw = vec![vec![0.0; n]; n_modes];
+    let mut vel_mode_raw = vec![vec![0.0; n]; n_modes];
+    let mut cs_raw = vec![vec![0.0; n]; n_modes];
+    for md in 0..n_modes {
         for k in 0..n {
-            let (f, r) = coulomb_cols(cap.vel[m][k]);
-            cf_raw[m][k] = f;
-            cr_raw[m][k] = r;
+            let mut a = 0.0;
+            let mut v = 0.0;
+            for s in 0..n_motors {
+                let f = structure.frame[md][s];
+                a += f * cap.acc[s][k];
+                v += f * cap.vel[s][k];
+            }
+            acc_mode_raw[md][k] = a;
+            vel_mode_raw[md][k] = v;
+            cs_raw[md][k] = coulomb_sign(v);
         }
     }
 
@@ -251,12 +270,10 @@ pub fn prep(cap: &Capture, opts: &PrepOptions) -> Prepped {
             .map(|c| filter_segments(c, &segs, kref))
             .collect()
     };
-    let acc = filt(&cap.acc);
-    let vel = filt(&cap.vel);
-    let vel_act = filt(&cap.vel_act);
+    let acc_mode = filt(&acc_mode_raw);
+    let vel_mode = filt(&vel_mode_raw);
+    let cs_mode = filt(&cs_raw);
     let torque = filt(&torque);
-    let cf = filt(&cf_raw);
-    let cr = filt(&cr_raw);
     let extra: Vec<Vec<Vec<f64>>> = match opts.ripple_period_mm {
         None => Vec::new(),
         Some(period) => {
@@ -292,10 +309,16 @@ pub fn prep(cap: &Capture, opts: &PrepOptions) -> Prepped {
     }
 
     let blank = (opts.blank_reversal_s / dt).round() as usize;
-    for m in 0..n_motors {
+    for md in 0..n_modes {
         for seg in segs.iter() {
+            let mode_moves = seg
+                .clone()
+                .any(|k| vel_mode_raw[md][k].abs() > COULOMB_DEADBAND_MM_S);
+            if !mode_moves {
+                continue;
+            }
             for k in seg.clone() {
-                if cap.vel[m][k].abs() <= COULOMB_DEADBAND_MM_S {
+                if vel_mode_raw[md][k].abs() <= COULOMB_DEADBAND_MM_S {
                     let lo = k.saturating_sub(blank).max(seg.start);
                     let hi = (k + blank + 1).min(seg.end);
                     for v in valid.iter_mut().take(hi).skip(lo) {
@@ -308,12 +331,10 @@ pub fn prep(cap: &Capture, opts: &PrepOptions) -> Prepped {
 
     Prepped {
         t: cap.t.clone(),
-        acc,
-        vel,
-        vel_act,
+        acc_mode,
+        vel_mode,
+        cs_mode,
         torque,
-        cf,
-        cr,
         extra,
         valid,
         delay_s: lag as f64 * dt,

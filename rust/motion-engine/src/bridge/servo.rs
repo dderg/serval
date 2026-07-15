@@ -592,23 +592,41 @@ impl PyMotionEngine {
         &self,
         py: Python<'_>,
         mcu_handle: u32,
+        frame: Vec<f32>,
         mass: Vec<f32>,
         viscous: Vec<f32>,
-        coulomb_fwd: Vec<f32>,
-        coulomb_rev: Vec<f32>,
-        deadband_mm_s: f32,
+        coulomb: Vec<f32>,
     ) -> PyResult<()> {
-        let n = viscous.len();
-        let axes_count = u8::try_from(n).map_err(|_| {
-            PyRuntimeError::new_err(format!("set_dynamics_model: {n} axes exceed u8"))
-        })?;
-        if mass.len() != n * n || coulomb_fwd.len() != n || coulomb_rev.len() != n {
+        let modes = mass.len();
+        if modes == 0 {
+            return Err(PyRuntimeError::new_err(
+                "set_dynamics_model: at least one mode required".to_string(),
+            ));
+        }
+        if viscous.len() != modes || coulomb.len() != modes {
             return Err(PyRuntimeError::new_err(format!(
-                "set_dynamics_model: inconsistent lengths (mass {}, viscous {n}, \
-                 coulomb_fwd {}, coulomb_rev {})",
-                mass.len(),
-                coulomb_fwd.len(),
-                coulomb_rev.len()
+                "set_dynamics_model: per-mode length mismatch (mass {modes}, \
+                 viscous {}, coulomb {})",
+                viscous.len(),
+                coulomb.len()
+            )));
+        }
+        if frame.len() % modes != 0 {
+            return Err(PyRuntimeError::new_err(format!(
+                "set_dynamics_model: frame length {} not a multiple of {modes} modes",
+                frame.len()
+            )));
+        }
+        let slots = frame.len() / modes;
+        let slots_count = u8::try_from(slots).map_err(|_| {
+            PyRuntimeError::new_err(format!("set_dynamics_model: {slots} slots exceed u8"))
+        })?;
+        let modes_count = u8::try_from(modes).map_err(|_| {
+            PyRuntimeError::new_err(format!("set_dynamics_model: {modes} modes exceed u8"))
+        })?;
+        if modes > slots {
+            return Err(PyRuntimeError::new_err(format!(
+                "set_dynamics_model: {modes} modes exceed {slots} slots"
             )));
         }
         let conn = self.ethercat_conn(mcu_handle, "set_dynamics_model")?;
@@ -616,8 +634,8 @@ impl PyMotionEngine {
             subsystem = "engine",
             event = "servo_set_dynamics_model",
             mcu_handle,
-            axes_count,
-            deadband_mm_s,
+            slots_count,
+            modes_count,
             "servo dynamics feedforward model upload"
         );
         let result = py
@@ -625,12 +643,12 @@ impl PyMotionEngine {
                 crate::servo_torque::send_set_dynamics_model(
                     &conn,
                     mcu_protocol::messages::SetDynamicsModel {
+                        slots_count,
+                        modes_count,
+                        frame,
                         mass,
-                        axes_count,
                         viscous,
-                        coulomb_fwd,
-                        coulomb_rev,
-                        deadband_mm_s,
+                        coulomb,
                     },
                 )
             })
