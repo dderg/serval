@@ -1,4 +1,11 @@
-use crate::model::{PhysicalParams, COULOMB_DEADBAND_MM_S};
+use crate::model::PhysicalParams;
+
+/// Applied at runtime against COMMANDED velocity, which is exactly zero at
+/// rest — so the endpoint can engage the coulomb term from the first
+/// non-zero commanded cycle (friction breakaway is where it matters most)
+/// with no sign-chatter risk. The fit keeps its own wider regressor
+/// deadband (`model::COULOMB_DEADBAND_MM_S`) for identification.
+pub const APPLIED_COULOMB_DEADBAND_MM_S: f64 = 0.0;
 
 fn fmt_float(x: f64) -> String {
     assert!(x.is_finite(), "profile value must be finite, got {x}");
@@ -24,7 +31,7 @@ pub fn render_profile(p: &PhysicalParams, axes: &[&str], rms_residual: &[f64]) -
         fmt_vec(&p.viscous),
         fmt_vec(&p.coulomb_fwd),
         fmt_vec(&p.coulomb_rev),
-        fmt_float(COULOMB_DEADBAND_MM_S),
+        fmt_float(APPLIED_COULOMB_DEADBAND_MM_S),
         fmt_vec(rms_residual),
     )
 }

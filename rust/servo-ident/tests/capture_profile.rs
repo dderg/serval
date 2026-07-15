@@ -113,7 +113,7 @@ fn renders_loadable_profile() {
     };
     let toml_text = render_profile(&p, &["x"], &[0.8]);
     assert!(toml_text.contains("version = 1"));
-    assert!(toml_text.contains("coulomb_deadband_mm_s = 0.5"));
+    assert!(toml_text.contains("coulomb_deadband_mm_s = 0.0"));
     assert!(toml_text.contains("mass = [[0.0123]]"));
 }
 

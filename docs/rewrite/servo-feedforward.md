@@ -126,7 +126,9 @@ mass = [[0.0123]]          # M, (0.1% rated)/(mm/s²), row-major, n×n
 viscous = [0.0045]         # b per motor
 coulomb_fwd = [1.2]        # c per motor, forward direction
 coulomb_rev = [-1.1]       # c per motor, reverse direction
-coulomb_deadband_mm_s = 0.5  # velocity window around zero where Coulomb term is suppressed
+coulomb_deadband_mm_s = 0.0  # commanded-velocity window where the Coulomb term is suppressed;
+                             # 0 engages it from the first non-zero commanded cycle (breakaway) —
+                             # safe because commanded velocity is exactly 0 at rest
 fit_rms_residual = [0.8]   # 0.1% rated — fit quality, informational
 ```
 
