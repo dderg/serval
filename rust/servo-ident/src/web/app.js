@@ -20,13 +20,19 @@ const PEAK_LIST_SIZE = 3;
 // scrolling within one.
 const PAGE_DEFS = {
   gains: {
+    // gains and notches are one tuning loop, not two — the resonances the
+    // PSD shows are what keep gains from going higher, so the gains and notch
+    // grids, the peak list, and the metrics-vs-gain chart share one page.
     label: "gains",
-    groups: ["gains"],
+    groups: ["gains", "notch"],
     experiments: ["gain_sweep", "refine_sweep", "gain_ladder", "tracking"],
     charts: ["psd"],
-    intro: "find the highest speed gain without resonance or torque rail",
+    intro:
+      "find the highest speed gain without resonance or torque rail, then " +
+      "notch out whatever resonance the PSD shows so gains can go higher",
     metrics: true,
     sweepChart: true,
+    peaks: true,
     templates: [
       {
         label: "ladder…",
@@ -41,14 +47,6 @@ const PAGE_DEFS = {
           "change; per-drive overshoot/settle land in the tracking metrics table",
       },
     ],
-  },
-  notches: {
-    label: "notches",
-    groups: ["notch"],
-    experiments: ["gain_sweep", "refine_sweep", "gain_ladder"],
-    charts: ["psd"],
-    peaks: true,
-    intro: "kill the resonances the PSD shows so gains can go higher",
   },
   observers: {
     label: "observers",
@@ -839,7 +837,8 @@ function pickSeries(runName, step) {
 /// Renders at the device pixel ratio so lines stay vector-crisp on hidpi
 /// displays: the backing store is sized to the CSS box × dpr and the
 /// context scaled back, while all layout math stays in CSS pixels.
-function drawChart(canvas, traces, yLabel, fixedY, xUnit, marks) {
+function drawChart(canvas, traces, yLabel, fixedY, xUnit, marks, opts) {
+  opts = opts || {};
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth || canvas.width;
   const h = canvas.clientHeight || canvas.height;
@@ -875,6 +874,9 @@ function drawChart(canvas, traces, yLabel, fixedY, xUnit, marks) {
   const y = (v) => h - pad.b - ((v - yMin) / (yMax - yMin || 1)) * (h - pad.t - pad.b);
 
   const fmtTick = (v, span) => (Math.abs(span) >= 20 ? v.toFixed(0) : v.toFixed(2));
+  // Tooltip readout: keep one more decimal than the axis ticks so the
+  // hovered step's metrics read exact, not rounded to a gridline scale.
+  const fmtVal = (v) => (Math.abs(v) >= 1000 ? v.toFixed(0) : v.toFixed(1));
   ctx.strokeStyle = "#29313a";
   ctx.fillStyle = "#8a97a3";
   ctx.font = "10px monospace";
@@ -936,6 +938,79 @@ function drawChart(canvas, traces, yLabel, fixedY, xUnit, marks) {
   }
   ctx.fillStyle = "#8a97a3";
   ctx.fillText(yLabel, pad.l, 10);
+  if (opts.hover) {
+    // The metrics-vs-gain chart is discrete (one x per sweep step), so the
+    // readout snaps to the nearest point by x — a vertical crosshair lands
+    // on a step, and every trace with a point at that swept value reports
+    // its reading. overshoot/ferr-rms/ferr-peak of a run share x, so a
+    // hover reads the three metrics of that step at once.
+    let best = null;
+    for (let ti = 0; ti < traces.length; ti++) {
+      const tr = traces[ti];
+      for (let i = 0; i < tr.t.length; i++) {
+        if (tr.y[i] === null) continue;
+        const d = Math.abs(x(tr.t[i]) - opts.hover.mx);
+        if (best === null || d < best.d) best = { ti, i };
+      }
+    }
+    if (best) {
+      const snappedX = traces[best.ti].t[best.i];
+      const sx = x(snappedX);
+      ctx.strokeStyle = "#4a5560";
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(sx, pad.t);
+      ctx.lineTo(sx, h - pad.b);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const lines = [];
+      for (const tr of traces) {
+        for (let i = 0; i < tr.t.length; i++) {
+          if (tr.y[i] === null) continue;
+          if (Math.abs(tr.t[i] - snappedX) >= 1e-9) continue;
+          const py = y(tr.y[i]);
+          ctx.fillStyle = tr.color;
+          ctx.beginPath();
+          ctx.arc(x(tr.t[i]), py, 3, 0, 2 * Math.PI);
+          ctx.fill();
+          const lab = tr.label != null ? tr.label : "";
+          lines.push({
+            color: tr.color,
+            text: `${lab}${lab ? "  " : ""}${fmtVal(tr.y[i])} ${yLabel}`,
+          });
+          break;
+        }
+      }
+      const xUnitSuffix = xUnit == null ? "s" : xUnit;
+      const head = `${opts.xTitle ? opts.xTitle + " = " : ""}${fmtTick(snappedX, tMax - tMin)}${xUnitSuffix}`;
+      const allLines = [{ color: "#8a97a3", text: head }, ...lines];
+      ctx.font = "11px monospace";
+      let tw = 0;
+      for (const l of allLines) tw = Math.max(tw, ctx.measureText(l.text).width);
+      const boxW = tw + 12;
+      const boxH = allLines.length * 14 + 6;
+      const tx = Math.min(Math.max(sx + 8, pad.l), w - pad.r - boxW - 4);
+      const ty = Math.max(pad.t, Math.min(opts.hover.my - boxH / 2, h - pad.b - boxH));
+      ctx.fillStyle = "#0d1117";
+      ctx.fillRect(tx, ty, boxW, boxH);
+      ctx.strokeStyle = "#4a5560";
+      ctx.strokeRect(tx, ty, boxW, boxH);
+      allLines.forEach((l, i) => {
+        ctx.fillStyle = l.color;
+        ctx.fillText(l.text, tx + 6, ty + 12 + i * 14);
+      });
+    }
+  }
+}
+
+/// Redraws with the cursor on every move so the readout snaps to the nearest
+/// sweep step — the discrete metrics-vs-gain variant of the PSD hover.
+/// drawChart reruns the full axis/line pass each redraw; it's cheap.
+function attachChartHover(canvas, traces, yLabel, fixedY, xUnit, marks, opts) {
+  const redraw = (hover) =>
+    drawChart(canvas, traces, yLabel, fixedY, xUnit, marks, hover ? { ...opts, hover } : opts);
+  canvas.addEventListener("mousemove", (e) => redraw({ mx: e.offsetX, my: e.offsetY }));
+  canvas.addEventListener("mouseleave", () => redraw(null));
 }
 
 function drawTimeDomain(names, plots, steps) {
@@ -1301,16 +1376,18 @@ function renderSweepMetricsChart(names) {
       driveRamp(runSeries.length, runSeries.indexOf(s))
     );
     const t = s.points.map((p) => p.x);
-    traces.push({ t, y: s.points.map((p) => p.overshootUm), color, points: true });
-    traces.push({ t, y: s.points.map((p) => p.ferrRmsUm), color, dash: [6, 4] });
-    traces.push({ t, y: s.points.map((p) => p.ferrPeakUm), color, dash: [2, 3] });
+    const label = motorViewPerMotor() ? `${s.run} · ${s.drive}` : s.run;
+    traces.push({ t, y: s.points.map((p) => p.overshootUm), color, points: true, label: `${label} overshoot` });
+    traces.push({ t, y: s.points.map((p) => p.ferrRmsUm), color, dash: [6, 4], label: `${label} ferr rms` });
+    traces.push({ t, y: s.points.map((p) => p.ferrPeakUm), color, dash: [2, 3], label: `${label} ferr peak` });
     for (const p of s.points) if (p.flagged) marks.push({ x: p.x, color: "#e05a4f" });
     const item = document.createElement("span");
-    const label = motorViewPerMotor() ? `${s.run} · ${s.drive}` : s.run;
     item.innerHTML = `<span class="swatch" style="background:${color}"></span>${label}`;
     legend.appendChild(item);
   });
-  drawChart(canvas, traces, "µm", null, "", marks);
+  const sweepOpts = { xTitle: series[0].key };
+  drawChart(canvas, traces, "µm", null, "", marks, sweepOpts);
+  attachChartHover(canvas, traces, "µm", null, "", marks, sweepOpts);
   box.appendChild(legend);
   container.appendChild(box);
 }
@@ -2425,7 +2502,7 @@ async function redrawStrain() {
   await renderStrainDiffs(data);
 }
 
-// --- PSD peak list (notches page) -------------------------------------------
+// --- PSD peak list (gains page) ---------------------------------------------
 
 /// Greedy spaced peak-picking inside the resonance band: repeatedly take
 /// the highest remaining bin at least PEAK_MIN_SEPARATION_HZ away from
