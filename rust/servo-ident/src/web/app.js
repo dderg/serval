@@ -7,6 +7,7 @@ const CONSOLE_HISTORY_MAX = 500;
 const PALETTE = ["#4fb3ff", "#e05a4f", "#4caf50", "#d9a441", "#b388ff", "#4fd8c4"];
 const RESONANCE_BAND_HZ = [20, 450];
 const PSD_MAX_FREQ_KEY = "servoCalPsdMaxFreqHz";
+const MOTOR_VIEW_KEY = "servoCalMotorView";
 const PSD_MAX_FREQ_CHOICES_HZ = [250, 500, 750, 1000, 1500];
 const PSD_MAX_FREQ_DEFAULT_HZ = 750;
 const INITIAL_SELECTED_RUNS = 1;
@@ -66,7 +67,7 @@ const PAGE_DEFS = {
     templates: [
       {
         label: "fit…",
-        command: "SERVO_FIT_DYNAMICS AXIS=X",
+        command: "SERVO_FIT_DYNAMICS",
         title:
           "strokes the axis, fits inertia/friction per drive, prints the recommended " +
           "inertia ratio and writes the feedforward profile",
@@ -348,6 +349,23 @@ function consoleSectionHtml(def) {
   );
 }
 
+/// The charts that fold drives into one trace (avg PSD, worst-drive sweep
+/// metrics, combined time domain) all obey this one switch; per-motor
+/// expands them into a trace per drive.
+function motorViewPerMotor() {
+  return localStorage.getItem(MOTOR_VIEW_KEY) === "per-motor";
+}
+
+function motorViewToggleHtml(aggLabel) {
+  const per = motorViewPerMotor();
+  return (
+    `<span class="chips">` +
+    `<button class="chip motor-view-btn${per ? "" : " active"}" data-view="agg">${aggLabel}</button>` +
+    `<button class="chip motor-view-btn${per ? " active" : ""}" data-view="per-motor">per-motor</button>` +
+    `</span>`
+  );
+}
+
 function analysisSectionsHtml(def) {
   const parts = [];
   parts.push(
@@ -373,7 +391,8 @@ function analysisSectionsHtml(def) {
     parts.push(
       `<section class="sweep-metrics-section">` +
         `<div class="section-head"><h2>metrics vs gain</h2>` +
-        `<span class="note">worst drive per step — ● solid: overshoot, dashed: ferr rms, ` +
+        motorViewToggleHtml("worst drive") +
+        `<span class="note">● solid: overshoot, dashed: ferr rms, ` +
         `dotted: ferr peak; red rung: step flagged resonance/torque</span></div>` +
         `<div class="charts" id="sweep-metrics-chart"><p class="note">select runs above</p></div>` +
         `</section>`
@@ -393,6 +412,7 @@ function analysisSectionsHtml(def) {
     parts.push(
       `<section class="psd-section">` +
         `<div class="section-head"><h2>following-error PSD</h2>` +
+        motorViewToggleHtml("avg") +
         `<label class="note">to <select id="psd-max-freq">` +
         PSD_MAX_FREQ_CHOICES_HZ.map(
           (f) =>
@@ -415,7 +435,9 @@ function analysisSectionsHtml(def) {
   if (def.charts && def.charts.includes("time")) {
     parts.push(
       `<section class="time-section">` +
-        `<div class="section-head"><h2>time domain — following error</h2></div>` +
+        `<div class="section-head"><h2>time domain — following error</h2>` +
+        motorViewToggleHtml("combined") +
+        `</div>` +
         `<div class="charts" id="charts"><p class="note">select runs above</p></div>` +
         `</section>`
     );
@@ -576,6 +598,12 @@ function bindPageEvents() {
       redrawCharts();
     });
   }
+  document.querySelectorAll("button.motor-view-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      localStorage.setItem(MOTOR_VIEW_KEY, btn.dataset.view);
+      renderPage();
+    });
+  });
   const def = currentPageDef();
   document.querySelectorAll("button.template-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -784,12 +812,28 @@ async function refresh() {
 
 // --- chart drawing ------------------------------------------------------------
 
-function pickSeries(step) {
+function pickSeries(runName, step) {
+  if (motorViewPerMotor()) {
+    const drives = Object.entries(step.drives);
+    return drives.map(([drive, d], k) => ({
+      y: d.ferr_counts.map((c) => c * (1000 / countsPerMm(runName, drive))),
+      label: "ferr (µm)",
+      suffix: ` (${drive})`,
+      ramp: driveRamp(drives.length, k),
+    }));
+  }
   if (step.combined) {
-    return { y: step.combined.on_ferr_mm, label: "on-axis ferr (mm)" };
+    return [{ y: step.combined.on_ferr_mm, label: "on-axis ferr (mm)", suffix: "", ramp: 0 }];
   }
   const firstDrive = Object.values(step.drives)[0];
-  return { y: firstDrive ? firstDrive.ferr_counts : [], label: "ferr (counts)" };
+  return [
+    {
+      y: firstDrive ? firstDrive.ferr_counts : [],
+      label: "ferr (counts)",
+      suffix: "",
+      ramp: 0,
+    },
+  ];
 }
 
 /// Renders at the device pixel ratio so lines stay vector-crisp on hidpi
@@ -920,13 +964,16 @@ function drawTimeDomain(names, plots, steps) {
     plots.forEach((p, i) => {
       const step = p.steps.find((s) => s.name === stepName);
       if (!step) return;
-      const { y: series, label } = pickSeries(step);
-      yLabel = label;
-      const color = runColor(names[i]);
-      traces.push({ t: step.t_s, y: series, color });
-      const item = document.createElement("span");
-      item.innerHTML = `<span class="swatch" style="background:${color}"></span>${names[i]}`;
-      legend.appendChild(item);
+      for (const series of pickSeries(names[i], step)) {
+        yLabel = series.label;
+        const color = mixColor(runColor(names[i]), "#ffffff", series.ramp);
+        traces.push({ t: step.t_s, y: series.y, color });
+        const item = document.createElement("span");
+        item.innerHTML =
+          `<span class="swatch" style="background:${color}"></span>` +
+          `${names[i]}${series.suffix}`;
+        legend.appendChild(item);
+      }
     });
     drawChart(canvas, traces, yLabel);
     box.appendChild(legend);
@@ -1131,12 +1178,23 @@ function renderMetricsTable(names, steps) {
   const um = (counts, r) => (counts * r.umPerCount).toFixed(1);
   const heat = (c, r) =>
     heatCellStyle(r.summary[c] * r.umPerCount, bounds[c].min, bounds[c].max);
+  const stepColors = new Map();
+  for (const r of rows) {
+    if (!stepColors.has(r.step)) {
+      stepColors.set(r.step, PALETTE[stepColors.size % PALETTE.length]);
+    }
+  }
   const body = rows
-    .map((r) => {
+    .map((r, i) => {
       const swatch = `<span class="swatch" style="background:${runColor(r.run)}"></span>`;
+      const stepColor = stepColors.get(r.step);
+      const prev = rows[i - 1];
+      const groupStart = !prev || prev.run !== r.run || prev.step !== r.step;
       return (
-        `<tr><td class="run-cell" title="${r.run}">${swatch}${r.run}</td>` +
-        `<td>${r.step}</td><td>${r.drive}</td>` +
+        `<tr${groupStart && i > 0 ? ' class="group-start"' : ""}>` +
+        `<td class="run-cell" style="border-left:3px solid ${stepColor};padding-left:6px" ` +
+        `title="${r.run}">${swatch}${r.run}</td>` +
+        `<td style="color:${stepColor}">${r.step}</td><td>${r.drive}</td>` +
         `<td class="num"${heat("ferrPeak", r)}>${um(r.summary.ferrPeak, r)}</td>` +
         `<td class="num"${heat("ferrRms", r)}>${um(r.summary.ferrRms, r)}</td>` +
         `<td class="num"${heat("overshoot", r)}>${um(r.summary.overshoot, r)}</td>` +
@@ -1180,28 +1238,34 @@ function sweepMetricsSeries(names) {
     const key = sweptAxisKey(detail.manifest);
     if (!key) continue;
     const sweptByStep = new Map(detail.manifest.steps.map((s) => [s.name, s.swept[key]]));
-    const points = [];
+    const perDrivePoints = new Map();
     for (const step of detail.results.steps) {
       if (!sweptByStep.has(step.name)) continue;
-      let overshootUm = 0, ferrRmsUm = 0, ferrPeakUm = 0;
+      const flagged = step.flags.some(
+        (f) => f === "resonance_detected" || f === "torque_saturated"
+      );
+      const stepPoints = new Map();
       for (const [drive, dr] of Object.entries(step.drives)) {
         const umPerCount = 1000 / countsPerMm(name, drive);
         const s = driveMoveSummary(dr.metrics);
-        overshootUm = Math.max(overshootUm, s.overshoot * umPerCount);
-        ferrRmsUm = Math.max(ferrRmsUm, s.ferrRms * umPerCount);
-        ferrPeakUm = Math.max(ferrPeakUm, s.ferrPeak * umPerCount);
+        const label = motorViewPerMotor() ? drive : "worst drive";
+        const prev = stepPoints.get(label) || { overshootUm: 0, ferrRmsUm: 0, ferrPeakUm: 0 };
+        stepPoints.set(label, {
+          overshootUm: Math.max(prev.overshootUm, s.overshoot * umPerCount),
+          ferrRmsUm: Math.max(prev.ferrRmsUm, s.ferrRms * umPerCount),
+          ferrPeakUm: Math.max(prev.ferrPeakUm, s.ferrPeak * umPerCount),
+        });
       }
-      points.push({
-        x: sweptByStep.get(step.name),
-        overshootUm,
-        ferrRmsUm,
-        ferrPeakUm,
-        flagged: step.flags.some((f) => f === "resonance_detected" || f === "torque_saturated"),
-      });
+      for (const [drive, p] of stepPoints) {
+        if (!perDrivePoints.has(drive)) perDrivePoints.set(drive, []);
+        perDrivePoints.get(drive).push({ x: sweptByStep.get(step.name), flagged, ...p });
+      }
     }
-    if (points.length < 2) continue;
-    points.sort((a, b) => a.x - b.x);
-    series.push({ run: name, key, points });
+    for (const [drive, points] of perDrivePoints) {
+      if (points.length < 2) continue;
+      points.sort((a, b) => a.x - b.x);
+      series.push({ run: name, drive, key, points });
+    }
   }
   return series;
 }
@@ -1219,7 +1283,7 @@ function renderSweepMetricsChart(names) {
   const box = document.createElement("div");
   box.className = "chart-box";
   const title = document.createElement("h3");
-  title.textContent = `worst-drive metrics vs swept ${series[0].key} (µm)`;
+  title.textContent = `${motorViewPerMotor() ? "per-motor" : "worst-drive"} metrics vs swept ${series[0].key} (µm)`;
   box.appendChild(title);
   const canvas = document.createElement("canvas");
   canvas.width = 860;
@@ -1229,20 +1293,38 @@ function renderSweepMetricsChart(names) {
   legend.className = "legend";
   const traces = [];
   const marks = [];
-  for (const s of series) {
-    const color = runColor(s.run);
+  series.forEach((s) => {
+    const runSeries = series.filter((x) => x.run === s.run);
+    const color = mixColor(
+      runColor(s.run),
+      "#ffffff",
+      driveRamp(runSeries.length, runSeries.indexOf(s))
+    );
     const t = s.points.map((p) => p.x);
     traces.push({ t, y: s.points.map((p) => p.overshootUm), color, points: true });
     traces.push({ t, y: s.points.map((p) => p.ferrRmsUm), color, dash: [6, 4] });
     traces.push({ t, y: s.points.map((p) => p.ferrPeakUm), color, dash: [2, 3] });
     for (const p of s.points) if (p.flagged) marks.push({ x: p.x, color: "#e05a4f" });
     const item = document.createElement("span");
-    item.innerHTML = `<span class="swatch" style="background:${color}"></span>${s.run}`;
+    const label = motorViewPerMotor() ? `${s.run} · ${s.drive}` : s.run;
+    item.innerHTML = `<span class="swatch" style="background:${color}"></span>${label}`;
     legend.appendChild(item);
-  }
+  });
   drawChart(canvas, traces, "µm", null, "", marks);
   box.appendChild(legend);
   container.appendChild(box);
+}
+
+function driveRamp(count, idx) {
+  return count > 1 ? (0.5 * idx) / (count - 1) : 0;
+}
+
+/// Per-drive PSDs are counts²/Hz on drives whose counts_per_mm may differ,
+/// so averaging happens in µm²/Hz — each drive converted first, then the
+/// power mean — and only then collapses to a tone amplitude.
+function psdFerrUm2(step, runName, drive) {
+  const umPerCount = 1000 / countsPerMm(runName, drive);
+  return step.psd.per_drive[drive].map((p) => p * umPerCount * umPerCount);
 }
 
 function psdFerrTraces(names, plots, steps) {
@@ -1254,16 +1336,36 @@ function psdFerrTraces(names, plots, steps) {
       const driveNames = Object.keys(step.psd.per_drive);
       if (!driveNames.length) return;
       const style = traceStyle(names, steps, i, j);
-      const clipped = clipToPsdBand(step.psd.freq_hz, step.psd.per_drive[driveNames[0]]);
-      const umPerCount = 1000 / countsPerMm(names[i], driveNames[0]);
-      traces.push({
-        freq: clipped.freq,
-        y: psdToAmplitude(clipped.freq, clipped.y).map((a) => a * umPerCount),
-        color: style.color,
-        dashed: false,
-        label: `${style.name} (${driveNames[0]})`,
-        run: names[i],
-      });
+      const pushTrace = (psdUm2, color, label) => {
+        const clipped = clipToPsdBand(step.psd.freq_hz, psdUm2);
+        traces.push({
+          freq: clipped.freq,
+          y: psdToAmplitude(clipped.freq, clipped.y),
+          color,
+          dashed: false,
+          label,
+          run: names[i],
+        });
+      };
+      if (motorViewPerMotor()) {
+        driveNames.forEach((drive, k) => {
+          pushTrace(
+            psdFerrUm2(step, names[i], drive),
+            mixColor(style.color, "#ffffff", driveRamp(driveNames.length, k)),
+            `${style.name} (${drive})`
+          );
+        });
+        return;
+      }
+      const avgUm2 = new Array(step.psd.freq_hz.length).fill(0);
+      for (const drive of driveNames) {
+        psdFerrUm2(step, names[i], drive).forEach((v, n) => (avgUm2[n] += v));
+      }
+      pushTrace(
+        avgUm2.map((v) => v / driveNames.length),
+        style.color,
+        `${style.name} (avg of ${driveNames.length})`
+      );
     });
   });
   return traces;
