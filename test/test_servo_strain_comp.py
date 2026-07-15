@@ -741,3 +741,98 @@ def test_fit_detects_a_run_captured_without_compensation(tmp_path):
         sc.cmd_SERVO_STRAIN_COMP_FIT(
             FakeGcmd(BASELINE=str(baseline), RUN=str(verification))
         )
+
+
+def write_response_run(run_dir, k_matrix):
+    run_dir.mkdir()
+    steps = []
+    steps_um = [0.0, 50.0, -50.0, 100.0, -100.0]
+    for belt_idx in (0, 1):
+        for step_idx, value in enumerate(steps_um):
+            offsets = [0.0, 0.0]
+            offsets[belt_idx] = value / 1000.0
+
+            def resp_a(x, y, o=offsets):
+                return (
+                    elastic_a(x, y)
+                    + k_matrix[0][0] * o[0]
+                    + k_matrix[0][1] * o[1]
+                )
+
+            def resp_b(x, y, o=offsets):
+                return (
+                    elastic_b(x, y)
+                    + k_matrix[1][0] * o[0]
+                    + k_matrix[1][1] * o[1]
+                )
+
+            name = "belt%s_step%d" % ("ab"[belt_idx], step_idx)
+            n = 400
+            fwd = [i * 100.0 / (n - 1) for i in range(n)]
+            sweep = fwd + fwd[::-1]
+            write_scap(
+                run_dir / ("step_%s.scap" % name),
+                sweep,
+                [50.0] * len(sweep),
+                resp_a,
+                resp_b,
+            )
+            steps.append(
+                {
+                    "name": name,
+                    "swept": {"belt": float(belt_idx), "offset_um": value},
+                }
+            )
+    manifest = {
+        "experiment": "strain_response",
+        "stroke_plan": {
+            "response_pairs": [["m_a", "m_a1"], ["m_b", "m_b1"]],
+        },
+        "steps": steps,
+    }
+    (run_dir / "manifest.json").write_text(json.dumps(manifest))
+
+
+def test_rolling_response_fit_recovers_the_matrix(tmp_path):
+    run_dir = tmp_path / "resp"
+    write_response_run(run_dir, [[200.0, -50.0], [-50.0, 200.0]])
+    sc, _ = make_comp(tmp_path)
+    sc.fit_strain_response(FakeGcmd(), str(run_dir))
+    assert sc.measured_stiffness[("m_a", "m_a1")] == pytest.approx(200, abs=3)
+    assert sc.measured_stiffness[("m_b", "m_b1")] == pytest.approx(200, abs=3)
+    assert sc.measured_cross[
+        (("m_a", "m_a1"), ("m_b", "m_b1"))
+    ] == pytest.approx(-50, abs=2)
+    assert sc.measured_cross[
+        (("m_b", "m_b1"), ("m_a", "m_a1"))
+    ] == pytest.approx(-50, abs=2)
+    # The stored matrix feeds a build with no stiffness params.
+    baseline = tmp_path / "baseline"
+    write_run(baseline, field=elastic_a, field_b=elastic_b)
+    sc.cmd_SERVO_STRAIN_COMP_BUILD(FakeGcmd(RUN=str(baseline)))
+    payload = json.loads((tmp_path / "strain_comp.json").read_text())
+    for pair in payload["pairs"]:
+        assert pair["stiffness_pct_per_mm"] == pytest.approx(200, abs=3)
+        assert pair["cross_pct_per_mm"] == pytest.approx(-50, abs=2)
+
+
+def test_rolling_response_fit_rejects_a_flat_response(tmp_path):
+    run_dir = tmp_path / "resp"
+    write_response_run(run_dir, [[0.0, 0.0], [0.0, 0.0]])
+    sc, _ = make_comp(tmp_path)
+    with pytest.raises(RuntimeError, match="not credible"):
+        sc.fit_strain_response(FakeGcmd(), str(run_dir))
+
+
+def test_constant_offset_session_applies_slew_aware_and_clears(tmp_path):
+    sc, engine = make_comp(tmp_path)
+    session = sc.begin_constant_offsets(FakeGcmd())
+    assert session.pair_motor_names() == [
+        ["m_a", "m_a1"],
+        ["m_b", "m_b1"],
+    ]
+    assert session.apply(0, 100.0) == pytest.approx(0.1)
+    assert engine.applied_um[(0, 1)] == 100
+    assert session.apply(0, -100.0) == pytest.approx(0.2)
+    session.clear()
+    assert engine.applied_um == {}

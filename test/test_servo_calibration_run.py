@@ -106,12 +106,28 @@ class FakeEngine:
         return 2, self._values.get((index, subindex), 7)
 
 
+class FakeReactor:
+    def __init__(self):
+        self._t = 0.0
+
+    def monotonic(self):
+        self._t += 0.001
+        return self._t
+
+    def pause(self, until):
+        self._t = until
+
+
 class FakePrinter:
     command_error = RuntimeError
     _sentinel = object()
 
     def __init__(self, objs):
         self._objs = objs
+        self._reactor = FakeReactor()
+
+    def get_reactor(self):
+        return self._reactor
 
     def lookup_object(self, name, default=_sentinel):
         if name in self._objs:
@@ -672,6 +688,72 @@ def test_strain_map_rejects_cartesian_kinematics():
     sc.printer.lookup_object("toolhead").kin.coupled_xy = lambda: False
     with pytest.raises(RuntimeError, match="coupled XY"):
         sc.cmd_SERVO_MEASURE_STRAIN_MAP(FakeGcmd())
+
+
+class FakeStrainComp:
+    def __init__(self):
+        self.applied = []
+        self.cleared = 0
+        self.fits = []
+
+    def begin_constant_offsets(self, gcmd):
+        comp = self
+
+        class Session:
+            def pair_count(self):
+                return 2
+
+            def pair_motor_names(self):
+                return [["motor_a"], ["motor_b"]]
+
+            def apply(self, belt_idx, value_um):
+                comp.applied.append((belt_idx, value_um))
+                return 0.0
+
+            def clear(self):
+                comp.cleared += 1
+
+        return Session()
+
+    def fit_strain_response(self, gcmd, run_dir):
+        self.fits.append(run_dir)
+
+
+def test_strain_response_steps_each_pair_along_one_line_and_fits():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    sc.printer._objs["servo_sync"] = FakeServoSync()
+    comp = FakeStrainComp()
+    sc.printer._objs["servo_strain_comp"] = comp
+    sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
+    sc.cmd_SERVO_MEASURE_STRAIN_RESPONSE(FakeGcmd(STEP_UM="50"))
+    steps = [0.0, 50.0, -50.0, 100.0, -100.0]
+    assert comp.applied == (
+        [(0, v) for v in steps]
+        + [(0, 0.0)]
+        + [(1, v) for v in steps]
+        + [(1, 0.0)]
+    )
+    assert comp.cleared == 1
+    caps = sc.printer.lookup_object("servo_capture").captures
+    names = [os.path.basename(path) for path, _servos in caps]
+    assert names == [
+        "step_belt%s_step%d.scap" % (belt, i) for belt in "ab" for i in range(5)
+    ]
+    m = _manifest(sc)
+    assert m["experiment"] == "strain_response"
+    assert m["stroke_plan"]["response_pairs"] == [["motor_a"], ["motor_b"]]
+    assert m["stroke_plan"]["y"] == 150.0
+    assert m["steps"][1]["swept"] == {"belt": 0.0, "offset_um": 50.0}
+    assert comp.fits == [os.path.dirname(caps[0][0])]
+
+
+def test_strain_response_without_strain_comp_errors_loudly():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
+    with pytest.raises(RuntimeError, match="servo_strain_comp"):
+        sc.cmd_SERVO_MEASURE_STRAIN_RESPONSE(FakeGcmd())
 
 
 NOTCH_VALUES = {

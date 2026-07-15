@@ -59,14 +59,53 @@ class BeltPair:
         return [-1.0 if m.get_invert_direction() else 1.0 for m in self.motors]
 
 
+class ConstantOffsetSession:
+    """Steps constant antisymmetric offsets through the compensation bank
+    for a moving stiffness measurement; apply() reports the slew time the
+    change needs before the offset is fully in."""
+
+    def __init__(self, comp, gcmd):
+        self._comp = comp
+        self._engine = comp.printer.lookup_object("motion_engine")
+        self._pairs = comp._belt_pairs(gcmd)
+        self._handles = [comp._node_handle(gcmd, p.node) for p in self._pairs]
+        self._applied_um = [0.0] * len(self._pairs)
+
+    def pair_count(self):
+        return len(self._pairs)
+
+    def pair_motor_names(self):
+        return [pair.motor_names() for pair in self._pairs]
+
+    def apply(self, belt_idx, value_um):
+        self._comp._upload_constant(
+            self._engine,
+            self._handles[belt_idx],
+            self._pairs[belt_idx],
+            value_um,
+        )
+        slew_s = (
+            abs(value_um - self._applied_um[belt_idx]) / 1000.0 / COMP_SLEW_MM_S
+        )
+        self._applied_um[belt_idx] = value_um
+        return slew_s
+
+    def clear(self):
+        for handle, pair in zip(self._handles, self._pairs):
+            self._comp._clear_pair(self._engine, handle, pair)
+
+
 class ServoStrainComp:
     cmd_SERVO_MEASURE_PAIR_STIFFNESS_help = (
-        "Measure the belt stiffness matrix: step a known antisymmetric "
-        "offset through the compensation bank and read every pair's "
-        "differential torque response — the direct slope (%/mm) plus the "
-        "cross-belt slope through the shared gantry. Both feed the build's "
-        "joint solve. STEP_UM (50) sets the probe amplitude, SETTLE (0.8) "
-        "the wait per step, AXIS=X|Y limits to one pair."
+        "Measure the belt stiffness matrix PARKED: step a known "
+        "antisymmetric offset through the compensation bank and read every "
+        "pair's differential torque response — the direct slope (%/mm) "
+        "plus the cross-belt slope through the shared gantry. A parked "
+        "belt reads stiffer than one rolling over the pulleys (~20% on "
+        "the bench); the map operates rolling, so prefer "
+        "SERVO_MEASURE_STRAIN_RESPONSE and keep this as a sanity check. "
+        "STEP_UM (50) sets the probe amplitude, SETTLE (0.8) the wait per "
+        "step, AXIS=X|Y limits to one pair."
     )
     cmd_SERVO_STRAIN_COMP_BUILD_help = (
         "Build the compensation map from a SERVO_MEASURE_STRAIN_MAP run: "
@@ -556,6 +595,64 @@ class ServoStrainComp:
             "RUN=%s to apply it" % baseline_dir
         )
 
+    def begin_constant_offsets(self, gcmd):
+        return ConstantOffsetSession(self, gcmd)
+
+    def fit_strain_response(self, gcmd, run_dir):
+        manifest_path = os.path.join(run_dir, "manifest.json")
+        with open(manifest_path) as fh:
+            manifest = json.load(fh)
+        if manifest.get("experiment") != "strain_response":
+            raise gcmd.error(
+                "%s is a %r run, need a strain_response run"
+                % (run_dir, manifest.get("experiment"))
+            )
+        pair_names = [
+            tuple(names) for names in manifest["stroke_plan"]["response_pairs"]
+        ]
+        if len(pair_names) != 2:
+            raise gcmd.error(
+                "the response fit needs exactly two belts, run has %d"
+                % len(pair_names)
+            )
+        points = {(obs, drv): [] for obs in range(2) for drv in range(2)}
+        for step in manifest["steps"]:
+            drv = int(step["swept"]["belt"])
+            offset_mm = step["swept"]["offset_um"] / 1000.0
+            path = os.path.join(run_dir, "step_%s.scap" % step["name"])
+            try:
+                means = _rolling_elastic_means(path, pair_names)
+            except ValueError as e:
+                raise gcmd.error(str(e))
+            for obs in range(2):
+                points[(obs, drv)].append((offset_mm, means[obs]))
+        for drv in range(2):
+            slope, r2 = _fit_slope(points[(drv, drv)])
+            if abs(slope) < 1e-6 or r2 < 0.9:
+                raise gcmd.error(
+                    "rolling stiffness fit for belt %s is not credible "
+                    "(slope %.3f %%/mm, R^2 %.3f)" % ("AB"[drv], slope, r2)
+                )
+            obs = 1 - drv
+            cross, _cross_r2 = _fit_slope(points[(obs, drv)])
+            self.measured_stiffness[pair_names[drv]] = slope
+            self.measured_cross[(pair_names[obs], pair_names[drv])] = cross
+            gcmd.respond_info(
+                "belt %s (%s): rolling stiffness %.1f %%/mm, cross into "
+                "belt %s %+.1f %%/mm (R^2 %.3f)"
+                % (
+                    "AB"[drv],
+                    "/".join(pair_names[drv]),
+                    slope,
+                    "AB"[obs],
+                    cross,
+                    r2,
+                )
+            )
+        gcmd.respond_info(
+            "rolling matrix stored — it feeds the next SERVO_STRAIN_COMP_BUILD"
+        )
+
     def cmd_SERVO_STRAIN_COMP(self, gcmd):
         enable = gcmd.get_int("ENABLE", 1, minval=0, maxval=1) == 1
         pairs = self._belt_pairs(gcmd)
@@ -698,6 +795,47 @@ def _load_scap(path):
         return table[:, off : off + width].copy().view(dt).ravel()
 
     return header, col
+
+
+def _rolling_elastic_means(path, pair_names):
+    """Mean elastic differential per pair over one forward+back stroke.
+    Every step strokes the identical line, so the line's own strain field
+    contributes the same mean to every step and cancels out of the
+    offset-response slope; only the applied offset moves it."""
+    import numpy as np
+
+    header, col = _load_scap(path)
+    hdr_drives = {d["name"]: i for i, d in enumerate(header["drives"])}
+    for names in pair_names:
+        for name in names:
+            if name not in hdr_drives:
+                raise ValueError("capture %s has no drive %s" % (path, name))
+    lead = pair_names[0][0]
+    lead_idx = hdr_drives[lead]
+    target = col("target_counts", lead_idx).astype(np.float64)
+    sweep_mm = (target - target[0]) / header["drives"][lead_idx][
+        "counts_per_mm"
+    ]
+    vel = np.gradient(sweep_mm)
+    fwd = vel > 1e-4
+    back = vel < -1e-4
+    if not fwd.any() or not back.any():
+        raise ValueError(
+            "capture %s has no forward+back sweep — the response "
+            "measurement needs both directions to cancel friction" % path
+        )
+    means = []
+    for names in pair_names:
+        torques = []
+        for name in names:
+            drive_idx = hdr_drives[name]
+            sign = -1.0 if header["drives"][drive_idx]["invert"] else 1.0
+            torques.append(
+                col("torque_actual", drive_idx).astype(np.float64) / 10.0 * sign
+            )
+        diff = (torques[0] - torques[1]) / 2.0
+        means.append(float((diff[fwd].mean() + diff[back].mean()) / 2.0))
+    return means
 
 
 def _collect_elastic_samples(run_dir, manifest):

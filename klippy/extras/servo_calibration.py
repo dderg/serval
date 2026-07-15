@@ -992,6 +992,7 @@ class ServoCalibration:
             "SERVO_DIFF_DAMPER",
             "SERVO_DIFF_TRIM",
             "SERVO_MEASURE_STRAIN_MAP",
+            "SERVO_MEASURE_STRAIN_RESPONSE",
             "SERVO_MEASURE_INERTIA",
             "SERVO_FIT_DYNAMICS",
             "SERVO_CALIBRATE_INERTIA_RATIO",
@@ -1982,6 +1983,122 @@ class ServoCalibration:
             )
         finally:
             self._active_run = None
+
+    STRAIN_RESPONSE_STEPS = (0.0, 1.0, -1.0, 2.0, -2.0)
+
+    cmd_SERVO_MEASURE_STRAIN_RESPONSE_help = (
+        "Measure the belt stiffness matrix in the rolling regime — the one "
+        "the strain map and its compensation operate in (a parked belt "
+        "reads ~20% stiffer). Strokes ONE X line forward and back while "
+        "stepping a constant antisymmetric offset through each pair's "
+        "compensation bank; the line's own strain field is identical on "
+        "every pass and cancels out of the offset-response slope, so no "
+        "baseline raster is needed. Both pairs' responses are captured per "
+        "step, so the direct and cross terms come from the same strokes. "
+        "The fitted matrix is stored for SERVO_STRAIN_COMP_BUILD. CoreXY "
+        "only, needs [servo_strain_comp]. Params SPEED (50) ACCEL (1000) "
+        "STEP_UM (50) SETTLE (0.8) Y (area center) X_START X_END DWELL_MS "
+        "TAG SYNC"
+    )
+
+    def cmd_SERVO_MEASURE_STRAIN_RESPONSE(self, gcmd: Any) -> None:
+        kin = self._kin()
+        if not kin.coupled_xy():
+            raise gcmd.error(
+                "SERVO_MEASURE_STRAIN_RESPONSE requires coupled XY "
+                "(CoreXY) kinematics - the response is a belt-pair "
+                "measurement"
+            )
+        comp = self.printer.lookup_object("servo_strain_comp", None)
+        if comp is None:
+            raise gcmd.error(
+                "SERVO_MEASURE_STRAIN_RESPONSE needs [servo_strain_comp] "
+                "configured - it drives the compensation bank"
+            )
+        x_start, x_end, _y_start, _y_end = servo_strokes.xy_bounds(
+            gcmd, self.bounds
+        )
+        speed = gcmd.get_float("SPEED", 50.0, above=0.0)
+        accel = gcmd.get_float("ACCEL", 1000.0, above=0.0)
+        step_um = gcmd.get_float("STEP_UM", 50.0, above=0.0, maxval=200.0)
+        settle = gcmd.get_float("SETTLE", 0.8, above=0.0, maxval=5.0)
+        dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
+        tag = gcmd.get("TAG", "strainresp")
+        zero_sync = gcmd.get_int("SYNC", 1, minval=0, maxval=1) == 1
+        servos = servo_strokes.axis_servos(gcmd, kin, "X")
+        zero_x = (self.bounds["X"][0] + self.bounds["X"][1]) / 2.0
+        zero_y = (self.bounds["Y"][0] + self.bounds["Y"][1]) / 2.0
+        line_y = gcmd.get_float("Y", zero_y)
+        session = comp.begin_constant_offsets(gcmd)
+        steps_um = [k * step_um for k in self.STRAIN_RESPONSE_STEPS]
+        stroke_plan = {
+            "x_start": x_start,
+            "x_end": x_end,
+            "y": line_y,
+            "speed": speed,
+            "accel": accel,
+            "step_um": step_um,
+            "offset_steps_um": steps_um,
+            "dwell_ms": dwell,
+            "zero_sync": zero_sync,
+            "zero_xy": [zero_x, zero_y],
+            "response_pairs": session.pair_motor_names(),
+        }
+        if zero_sync:
+            sync = self.printer.lookup_object("servo_sync", None)
+            if sync is None:
+                raise gcmd.error(
+                    "SERVO_MEASURE_STRAIN_RESPONSE: [servo_sync] is not "
+                    "configured - add it so the line shares the maps' "
+                    "preload zero, or pass SYNC=0"
+                )
+            self._goto_xy(zero_x, zero_y, dwell)
+            sync.run(gcmd)
+        run = self._begin_run(
+            gcmd,
+            "strain_response",
+            tag,
+            "XY",
+            servos,
+            stroke_plan,
+            self._corexy_rails(gcmd, "X"),
+        )
+        reactor = self.printer.get_reactor()
+        total = session.pair_count() * len(steps_um)
+        try:
+            self._prep("X", dwell)
+            self._goto_xy(x_start, line_y, dwell)
+            for belt_idx in range(session.pair_count()):
+                for step_idx, value_um in enumerate(steps_um):
+                    slew_s = session.apply(belt_idx, value_um)
+                    reactor.pause(reactor.monotonic() + settle + slew_s)
+                    name = "belt%s_step%d" % ("ab"[belt_idx], step_idx)
+                    gcmd.respond_info(
+                        "strain response %d/%d: belt %s at %+.0f um"
+                        % (
+                            belt_idx * len(steps_um) + step_idx + 1,
+                            total,
+                            "AB"[belt_idx],
+                            value_um,
+                        )
+                    )
+                    self._start_capture(name, servos)
+                    self._strokes("X", x_start, x_end, speed, accel, 1, dwell)
+                    self._stop_capture()
+                    run.record_step(
+                        SweepStep(
+                            name,
+                            {"belt": float(belt_idx), "offset_um": value_um},
+                            [],
+                        )
+                    )
+                slew_s = session.apply(belt_idx, 0.0)
+                reactor.pause(reactor.monotonic() + slew_s)
+            self._restore()
+        finally:
+            session.clear()
+            self._active_run = None
+        comp.fit_strain_response(gcmd, run.run_dir)
 
     cmd_SERVO_MEASURE_INERTIA_help = (
         "Excitation grid for the inertia/friction fit (servo-ident). "
