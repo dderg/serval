@@ -210,6 +210,7 @@ pub fn compute_metrics(
     settle_band: i64,
     torque_limit: i64,
     fs: f64,
+    ff_lead_samples: usize,
 ) -> Result<Metrics, String> {
     let n = d.following_error.len();
     if n == 0 {
@@ -230,7 +231,9 @@ pub fn compute_metrics(
         let post = &ferr[e..post_end];
         let settle_sample = settle_index(post, band, hold);
         let overshoot_end = settle_sample.unwrap_or(post.len());
-        let move_err = &ferr[s..e + overshoot_end];
+        let prev_end = if idx > 0 { segs[idx - 1].1 } else { 0 };
+        let lead_start = s.saturating_sub(ff_lead_samples).max(prev_end);
+        let move_err = &ferr[lead_start..e + overshoot_end];
         let settle_ms = settle_sample.map(|x| x as f64 * ms_per_sample);
         let ferr_peak = move_err.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
         let ferr_rms =

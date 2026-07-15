@@ -128,6 +128,12 @@ fn cmd_analyze(args: &[String]) {
         }
         let combine = arg(args, "--combine");
         let axis = arg(args, "--axis");
+        let ff_lead: usize = arg(args, "--ff-lead-cycles")
+            .map(|v| {
+                v.parse()
+                    .unwrap_or_else(|_| die(&format!("bad --ff-lead-cycles {v:?}")))
+            })
+            .unwrap_or(0);
         let name = Path::new(&scap_path)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -141,6 +147,7 @@ fn cmd_analyze(args: &[String]) {
             combine.as_deref(),
             axis.as_deref(),
             None,
+            ff_lead,
         )
         .unwrap_or_else(|e| die(&e));
         println!("file: {scap_path}");

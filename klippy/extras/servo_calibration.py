@@ -1096,6 +1096,15 @@ class ServoCalibration:
             "counts_per_mm": motor.get_counts_per_mm(),
         }
 
+    def _ff_lead_cycles(self, gcmd: Any, motors: list[Any]) -> int:
+        leads = {getattr(m, "ff_lead_cycles", 0) for m in motors}
+        if len(leads) > 1:
+            raise gcmd.error(
+                "motors disagree on ff_lead_cycles (%s); the analyzer "
+                "needs a single per-run value" % (sorted(leads),)
+            )
+        return leads.pop() if leads else 0
+
     def _belts(self, rails: list[Any] | None) -> str | None:
         if not rails:
             return None
@@ -1169,6 +1178,7 @@ class ServoCalibration:
             "session_id": structured_log.get_session(),
             "stroke_plan": stroke_plan,
             "motors": [self._motor_manifest(m) for m in motors],
+            "ff_lead_cycles": self._ff_lead_cycles(gcmd, motors),
             "belts": self._belts(belts_rails),
             "steps": [],
             "ambient": self._ambient(gcmd, servos),

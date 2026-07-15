@@ -61,6 +61,8 @@ pub struct Manifest {
     pub belts: Option<String>,
     #[serde(default)]
     pub stroke_plan: Value,
+    #[serde(default)]
+    pub ff_lead_cycles: u64,
     pub steps: Vec<Step>,
 }
 

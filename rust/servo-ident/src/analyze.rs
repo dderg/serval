@@ -78,9 +78,10 @@ fn analyze_drive(
     settle_band: i64,
     torque_limit: i64,
     fs: f64,
+    ff_lead_samples: usize,
 ) -> Result<DriveAnalysis, String> {
     let series = drive_series(cap, idx)?;
-    let metrics = compute_metrics(&series, settle_band, torque_limit, fs)?;
+    let metrics = compute_metrics(&series, settle_band, torque_limit, fs, ff_lead_samples)?;
     let segs = motion_segments(&series.flags);
     let (freq_hz, psd) = moving_psd(&series, &segs, fs)?;
     let psd_peaks = top_peaks(&freq_hz, &psd, PSD_PEAK_COUNT);
@@ -131,6 +132,7 @@ pub fn analyze_capture(
     belts: Option<&str>,
     axis: Option<&str>,
     accel_path: Option<&Path>,
+    ff_lead_samples: usize,
 ) -> Result<(StepResult, PlotStep), String> {
     let fs = cap.fs();
     let n = cap.n_records;
@@ -138,7 +140,7 @@ pub fn analyze_capture(
     for (idx, dname) in cap.drive_names().into_iter().enumerate() {
         analyses.push((
             dname,
-            analyze_drive(cap, idx, settle_band, torque_limit, fs)?,
+            analyze_drive(cap, idx, settle_band, torque_limit, fs, ff_lead_samples)?,
         ));
     }
 
@@ -578,6 +580,7 @@ pub fn build_run(dir: &Path) -> Result<(Results, PlotSeries), String> {
                     manifest.belts.as_deref(),
                     manifest.axis.as_deref(),
                     accel_path.as_deref(),
+                    manifest.ff_lead_cycles as usize,
                 )?
             }
         };
