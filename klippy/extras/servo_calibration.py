@@ -1568,7 +1568,14 @@ class ServoCalibration:
     def _reject_corexy_only_params(self, gcmd: Any) -> None:
         bad = [
             p
-            for p in ("SERVOS", "X_START", "X_END", "Y_START", "Y_END")
+            for p in (
+                "SERVOS",
+                "X_START",
+                "X_END",
+                "Y_START",
+                "Y_END",
+                "WINDOWS",
+            )
             if gcmd.get(p, None) is not None
         ]
         if bad:
@@ -2397,11 +2404,16 @@ class ServoCalibration:
 
     cmd_SERVO_MEASURE_INERTIA_help = (
         "Excitation grid for the inertia/friction fit (servo-ident). "
-        "coupled_xy kinematics run the X+Y belt grid (SERVOS=/X_START etc "
-        "override; travel_speed centers the idle axis between strokes); "
+        "coupled_xy kinematics run the X+Y belt grid over WINDOWS position "
+        "windows (default 3: front-left, front-right and rear-left "
+        "half-range windows, one capture each - the plan that identifies "
+        "the pair load-share split; WINDOWS=1 is one full-range capture); "
+        "SERVOS=/X_START etc override; travel_speed centers the idle axis "
+        "between strokes. "
         "cartesian kinematics run a single AXIS grid and reject SERVOS/"
-        "X_START/X_END/Y_START/Y_END. Params AXIS START END X_START X_END "
-        "Y_START Y_END ACCELS SPEEDS ITERATIONS DWELL_MS NAME SERVOS"
+        "X_START/X_END/Y_START/Y_END/WINDOWS. Params AXIS START END X_START "
+        "X_END Y_START Y_END WINDOWS ACCELS SPEEDS ITERATIONS DWELL_MS NAME "
+        "SERVOS"
     )
 
     def _grid_stroke_plan(self, gcmd: Any) -> dict[str, Any]:
@@ -2443,18 +2455,18 @@ class ServoCalibration:
             belts_rails,
         )
         try:
-            self._measure_inertia(gcmd, name)
+            steps = self._measure_inertia(gcmd, name)
             run = self._active_run
             assert run is not None, "inertia grid ran outside its run"
-            run.record_step(SweepStep(name, {}, []))
+            for step in steps:
+                run.record_step(SweepStep(step, {}, []))
         finally:
             self._active_run = None
 
-    def _measure_inertia(self, gcmd: Any, name: str) -> None:
+    def _measure_inertia(self, gcmd: Any, name: str) -> list[str]:
         kin = self._kin()
         if kin.coupled_xy():
-            self._measure_inertia_corexy(gcmd, name)
-            return
+            return self._measure_inertia_corexy(gcmd, name)
         self._reject_corexy_only_params(gcmd)
         axis = gcmd.get("AXIS", "X").upper()
         start, end = servo_strokes.axis_bounds(gcmd, self.bounds, axis)
@@ -2469,10 +2481,29 @@ class ServoCalibration:
                 self._strokes(axis, start, end, speed, accel, iterations, dwell)
         self._stop_capture()
         self._restore()
+        return [name]
+
+    def _corexy_grid_windows(
+        self, gcmd: Any
+    ) -> list[tuple[float, float, float, float]]:
+        x0, x1, y0, y1 = servo_strokes.xy_bounds(gcmd, self.bounds)
+        n = gcmd.get_int("WINDOWS", 3)
+        if n == 1:
+            return [(x0, x1, y0, y1)]
+        if n != 3:
+            raise gcmd.error(
+                "WINDOWS must be 1 (one full-range window; the pair "
+                "load-share split is then unidentifiable and gets zeroed) "
+                "or 3 (front-left, front-right and rear-left half-range "
+                "windows, which separate both belt coordinates)"
+            )
+        xm = (x0 + x1) / 2.0
+        ym = (y0 + y1) / 2.0
+        return [(x0, xm, y0, ym), (xm, x1, y0, ym), (x0, xm, ym, y1)]
 
     def _measure_inertia_corexy(
         self, gcmd: Any, name: str, servos: str | list[str] | None = None
-    ) -> None:
+    ) -> list[str]:
         kin = self._kin()
         if servos is None:
             servos = gcmd.get("SERVOS", None)
@@ -2482,29 +2513,28 @@ class ServoCalibration:
             servo_list = [s.strip() for s in servos.split(",") if s.strip()]
         else:
             servo_list = list(servos)
-        x_start, x_end, y_start, y_end = servo_strokes.xy_bounds(
-            gcmd, self.bounds
-        )
+        windows = self._corexy_grid_windows(gcmd)
         accels, speeds, iterations, dwell = servo_strokes.grid(
             gcmd, self.accels, self.speeds, self.iterations, self.dwell_ms
         )
-        x_center = (x_start + x_end) / 2.0
-        y_center = (y_start + y_end) / 2.0
         self._prep("X", dwell)
         self._prep("Y", dwell)
-        self._start_capture(name, servo_list)
-        for accel in accels:
-            for speed in speeds:
-                self._goto_xy(x_start, y_center, dwell)
-                self._strokes(
-                    "X", x_start, x_end, speed, accel, iterations, dwell
-                )
-                self._goto_xy(x_center, y_start, dwell)
-                self._strokes(
-                    "Y", y_start, y_end, speed, accel, iterations, dwell
-                )
-        self._stop_capture()
+        steps: list[str] = []
+        for wi, (x0, x1, y0, y1) in enumerate(windows):
+            step = name if len(windows) == 1 else "%s_w%d" % (name, wi)
+            x_center = (x0 + x1) / 2.0
+            y_center = (y0 + y1) / 2.0
+            self._start_capture(step, servo_list)
+            for accel in accels:
+                for speed in speeds:
+                    self._goto_xy(x0, y_center, dwell)
+                    self._strokes("X", x0, x1, speed, accel, iterations, dwell)
+                    self._goto_xy(x_center, y0, dwell)
+                    self._strokes("Y", y0, y1, speed, accel, iterations, dwell)
+            self._stop_capture()
+            steps.append(step)
         self._restore()
+        return steps
 
     cmd_SERVO_FIT_DYNAMICS_help = (
         "Identify axis dynamics for torque feedforward - runs the "
@@ -2512,6 +2542,10 @@ class ServoCalibration:
         "a timestamped profile (node-level on coupled_xy, a Cartesian "
         "mode-space model with the frame built from the kinematics; per-axis "
         "otherwise, DRIVE= picking the scalar fit on a multi-drive axis). "
+        "On coupled_xy the default WINDOWS=3 position windows are pooled "
+        "into one fit, which also identifies the pair load-share split's "
+        "inertial component; WINDOWS=1 is faster but that component gets "
+        "zeroed as unidentifiable. "
         "Optional TORQUE_NM + INERTIA_KGM2 add the C00.06 recommendation. "
         "Params as SERVO_MEASURE_INERTIA plus TORQUE_NM INERTIA_KGM2 DRIVE"
     )
@@ -2615,16 +2649,17 @@ class ServoCalibration:
         )
         try:
             if plan["corexy"]:
-                self._measure_inertia_corexy(gcmd, name, servos=plan["servos"])
+                steps = self._measure_inertia_corexy(
+                    gcmd, name, servos=plan["servos"]
+                )
             else:
-                self._measure_inertia(gcmd, name)
-            run.record_step(SweepStep(name, {}, []))
+                steps = self._measure_inertia(gcmd, name)
+            argv = [self._servo_cal(gcmd), "fit"]
+            for step in steps:
+                run.record_step(SweepStep(step, {}, []))
+                argv += ["--capture", run.step_scap(step)]
             out_path = self._dynamics_out_path(gcmd, run, name)
-            argv = [
-                self._servo_cal(gcmd),
-                "fit",
-                "--capture",
-                run.step_scap(name),
+            argv += [
                 "--frame",
                 ";".join(
                     ",".join("%g" % (f,) for f in row) for row in plan["frame"]

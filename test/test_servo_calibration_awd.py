@@ -704,3 +704,62 @@ def test_calibrate_inertia_ratio_cartesian_rejects_corexy_only_params():
         sc.cmd_SERVO_CALIBRATE_INERTIA_RATIO(
             FakeGcmd(TORQUE_NM=0.3, INERTIA_KGM2=1e-5, Y_START="10")
         )
+
+
+def _capture_paths(sc):
+    return [
+        os.path.basename(p)
+        for p, _s in sc.printer.lookup_object("servo_capture").captures
+    ]
+
+
+def test_fit_dynamics_coupled_defaults_to_three_windows():
+    sc, gcode = make_calibration(awd_rails())
+    strokes = []
+    sc._strokes = lambda axis, start, end, *a: strokes.append(
+        (axis, start, end)
+    )
+    sc.bounds = {"X": (20.0, 280.0), "Y": (20.0, 280.0)}
+    sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd())
+    assert _capture_paths(sc) == [
+        "step_ident_w0.scap",
+        "step_ident_w1.scap",
+        "step_ident_w2.scap",
+    ]
+    argv = _fit_argv(gcode)
+    caps = [argv[i + 1] for i, a in enumerate(argv) if a == "--capture"]
+    assert [os.path.basename(c) for c in caps] == [
+        "step_ident_w0.scap",
+        "step_ident_w1.scap",
+        "step_ident_w2.scap",
+    ]
+    x_windows = {(s, e) for ax, s, e in strokes if ax == "X"}
+    y_windows = {(s, e) for ax, s, e in strokes if ax == "Y"}
+    assert x_windows == {(20.0, 150.0), (150.0, 280.0)}
+    assert y_windows == {(20.0, 150.0), (150.0, 280.0)}
+
+
+def test_fit_dynamics_windows_one_is_the_full_range():
+    sc, gcode = make_calibration(awd_rails())
+    strokes = []
+    sc._strokes = lambda axis, start, end, *a: strokes.append(
+        (axis, start, end)
+    )
+    sc.bounds = {"X": (20.0, 280.0), "Y": (20.0, 280.0)}
+    sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd(WINDOWS="1"))
+    assert _capture_paths(sc) == ["step_ident.scap"]
+    assert {(s, e) for _ax, s, e in strokes} == {(20.0, 280.0)}
+
+
+def test_fit_dynamics_rejects_unsupported_window_counts():
+    sc, _gcode = make_calibration(awd_rails())
+    with pytest.raises(RuntimeError, match="WINDOWS must be 1"):
+        sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd(WINDOWS="2"))
+
+
+def test_windows_param_requires_coupled_kinematics():
+    sc, _gcode = make_calibration(cartesian_awd_rails(), coupled=False)
+    with pytest.raises(RuntimeError, match="coupled_xy"):
+        sc.cmd_SERVO_FIT_DYNAMICS(
+            FakeGcmd(AXIS="X", DRIVE="motor_a", WINDOWS="3")
+        )

@@ -299,13 +299,21 @@ Records the excitation grid for the inertia/friction fit (no report — it is th
 capture building block behind the fit commands). The active kinematics decides
 the shape of the grid:
 
-- **`coupled_xy` kinematics** (CoreXY): one capture of **every** belt drive
+- **`coupled_xy` kinematics** (CoreXY): captures of **every** belt drive
   with X and Y strokes at every grid point (`SERVOS=` overrides; the default
   is every motor the kinematics says drives the belts), so the fit sees each
   Cartesian mode excited on its own (X strokes excite only the x mode, Y
-  strokes only the y mode). Before each stroke set the
+  strokes only the y mode). The grid runs over `WINDOWS` position windows,
+  one capture each — default **3**: front-left, front-right and rear-left
+  half-range windows, which put acceleration events at distinct belt
+  coordinates in both directions and thereby make the pair load-share
+  split identifiable (full-range strokes always accelerate toward the
+  long-span side, confounding position with force direction). `WINDOWS=1`
+  is the faster single full-range capture; the split's inertial component
+  is then unidentifiable and gets zeroed by the fit's sanity gate. Before
+  each stroke set the
   toolhead moves (at `travel_speed`) to the active axis' start with the idle
-  axis centered in its range, so both belt runs are near-equal length during
+  axis centered in the window, so both belt runs are near-equal length during
   the measurement. Bounds come from `X_START`/`X_END`/`Y_START`/`Y_END`.
 - **cartesian kinematics**: captures every motor that moves `AXIS` (every
   drive of an AWD rail), bounded by `START`/`END`. `SERVOS`, `X_START`,
@@ -313,7 +321,7 @@ the shape of the grid:
   rejected with an error otherwise.
 
 Params: `AXIS` (X) `START` `END` `X_START` `X_END` `Y_START` `Y_END` `ACCELS`
-`SPEEDS` `ITERATIONS` `DWELL_MS` `NAME` (ident) `SERVOS`.
+`SPEEDS` `ITERATIONS` `DWELL_MS` `NAME` (ident) `SERVOS` `WINDOWS` (3).
 
 ## Fit / inertia-ratio commands
 
