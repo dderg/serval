@@ -14,7 +14,6 @@ const READ_CHUNK: usize = 4096;
 pub struct Request {
     pub method: String,
     pub path: String,
-    #[allow(dead_code)]
     pub body: Vec<u8>,
 }
 

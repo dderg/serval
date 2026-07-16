@@ -198,6 +198,18 @@ td.diff {
 td.diff.empty { color: #4d5761; }
 td.verdict { max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
 td.actions button { padding: 1px 7px; font-size: 11px; }
+td.run-note {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: text;
+}
+td.run-note.empty { color: #4d5761; font-style: italic; }
+input.run-note-input {
+  width: 200px;
+  font: inherit;
+  padding: 1px 4px;
+}
 
 button.pin-toggle {
   background: none;

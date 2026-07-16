@@ -371,7 +371,7 @@ function analysisSectionsHtml(def) {
       `<div class="section-head"><h2>runs</h2>` +
       `<span class="note">${def.experiments ? def.experiments.join(", ") : "all experiments"} — click a row to chart it</span></div>` +
       `<div class="table-wrap runs-wrap"><table><thead><tr>` +
-      `<th></th><th>time</th><th>tag</th><th>ambient diff vs previous</th><th>verdict</th><th></th>` +
+      `<th></th><th>time</th><th>tag</th><th>ambient diff vs previous</th><th>verdict</th><th>note</th><th></th>` +
       `</tr></thead><tbody id="journal-body"></tbody></table></div>` +
       `</section>`
   );
@@ -565,7 +565,7 @@ function renderPage() {
       `<section class="runs-section">` +
       `<div class="section-head"><h2>journal — every run</h2></div>` +
       `<div class="table-wrap journal-wrap"><table><thead><tr>` +
-      `<th></th><th>time</th><th>experiment/tag</th><th>ambient diff vs previous</th><th>verdict</th><th></th>` +
+      `<th></th><th>time</th><th>experiment/tag</th><th>ambient diff vs previous</th><th>verdict</th><th>note</th><th></th>` +
       `</tr></thead><tbody id="journal-body"></tbody></table></div>` +
       `</section>` +
       consoleSectionHtml({}) +
@@ -718,6 +718,8 @@ function renderRuns() {
     verdictTd.innerHTML = verdictCellHtml(run, results);
     tr.appendChild(verdictTd);
 
+    tr.appendChild(noteCell(run));
+
     const actionTd = document.createElement("td");
     actionTd.className = "actions";
     const prefillBtn = document.createElement("button");
@@ -742,6 +744,61 @@ function renderRuns() {
 
     tbody.appendChild(tr);
   });
+}
+
+/// Click-to-edit note cell: shows the saved note (or a faint "add note…"
+/// hint), swaps to an input on click, saves to POST /api/runs/<name>/note
+/// on Enter/blur, and cancels on Escape. Clicks stop propagating so
+/// editing a note never toggles the row's chart selection.
+function noteCell(run) {
+  const td = document.createElement("td");
+  td.className = run.note ? "run-note" : "run-note empty";
+  td.textContent = run.note || "add note…";
+  td.title = run.note ? `${run.note} — click to edit` : "click to add a note";
+  td.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (td.querySelector("input")) return;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "run-note-input";
+    input.value = run.note || "";
+    td.textContent = "";
+    td.appendChild(input);
+    input.focus();
+    let done = false;
+    const finish = (save) => {
+      if (done) return;
+      done = true;
+      if (save) {
+        saveNote(run, input.value);
+      } else {
+        renderRuns();
+      }
+    };
+    input.addEventListener("keydown", (ev) => {
+      ev.stopPropagation();
+      if (ev.key === "Enter") finish(true);
+      if (ev.key === "Escape") finish(false);
+    });
+    input.addEventListener("blur", () => finish(true));
+    input.addEventListener("click", (ev) => ev.stopPropagation());
+  });
+  return td;
+}
+
+async function saveNote(run, text) {
+  try {
+    const saved = await api(`/api/runs/${encodeURIComponent(run.name)}/note`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note: text }),
+    });
+    run.note = saved.note || null;
+  } catch (e) {
+    console.error(e);
+    alert(`saving note failed: ${e.message}`);
+  }
+  renderRuns();
 }
 
 async function triggerAnalyze(name) {
