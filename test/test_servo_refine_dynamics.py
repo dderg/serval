@@ -938,6 +938,24 @@ def test_refine_dynamics_split_even_mates_keep_baseline():
     assert _written_profiles(sc) == []
 
 
+def test_refine_dynamics_split_reports_each_mate_per_scale():
+    sc, _gcode, _engine, _path = make_calibration_awd()
+    gcmd = FakeGcmd(TERM="SPLIT")
+    sc.cmd_SERVO_REFINE_DYNAMICS(gcmd)
+    for pair, mates in (
+        ("split_motor_a", ("motor_a", "motor_a1")),
+        ("split_motor_b", ("motor_b", "motor_b1")),
+    ):
+        summary = [
+            r for r in gcmd.responses if r.startswith("  %s scale " % pair)
+        ]
+        assert summary, "no per-scale summary lines for %s" % pair
+        for line in summary:
+            for mate in mates:
+                assert "ferr_rms[%s]" % mate in line
+            assert "ferr_rms_imbalance" in line
+
+
 def test_refine_dynamics_split_refines_each_pair_on_its_own_drives():
     sc, gcode, engine, profile_path = make_calibration_awd()
     sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(TERM="SPLIT"))

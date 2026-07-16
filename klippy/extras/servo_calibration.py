@@ -1422,30 +1422,29 @@ class ServoCalibration:
             return sum(values) / len(values)
         raise gcmd.error("step %r missing from results.json" % (step_name,))
 
-    def _step_metric_imbalance(
+    def _step_metric_per_drive(
         self,
         gcmd: Any,
         results: dict[str, Any],
         step_name: str,
         metric: str,
         drives: list[str] | None,
-    ) -> float:
-        """Absolute difference of the two pair mates' per-drive metric
-        means - the SPLIT objective. The pair scale only moves error
-        between the mates (pair total torque is invariant), so the pair
-        mean is first-order flat at the optimum while the mate difference
-        crosses zero steeply there: minimizing it is a well-conditioned
-        root-find on the same data."""
+    ) -> dict[str, float]:
+        """Each pair mate's own metric mean - the SPLIT objective is the
+        absolute difference between the two. The pair scale only moves
+        error between the mates (pair total torque is invariant), so the
+        pair mean is first-order flat at the optimum while the mate
+        difference crosses zero steeply there: minimizing it is a
+        well-conditioned root-find on the same data."""
         if drives is None or len(drives) != 2:
             raise gcmd.error(
                 "imbalance scoring needs exactly the 2 pair drives (got %r)"
                 % (drives,)
             )
-        means = [
-            self._step_metric_mean(gcmd, results, step_name, metric, [d])
+        return {
+            d: self._step_metric_mean(gcmd, results, step_name, metric, [d])
             for d in drives
-        ]
-        return abs(means[0] - means[1])
+        }
 
     def _step_flags(self, results: dict[str, Any], step_name: str) -> list[str]:
         for step in results.get("steps") or []:
@@ -3669,12 +3668,9 @@ class ServoCalibration:
         }
         run.write()
         report_metrics = ("overshoot", "ferr_rms", "ferr_peak")
-        eval_metrics = report_metrics + (
-            (metric,) if metric not in report_metrics else ()
-        )
 
         def metrics_line(values: dict[str, float]) -> str:
-            return ", ".join("%s %.1f" % (m, values[m]) for m in eval_metrics)
+            return ", ".join("%s %.1f" % kv for kv in values.items())
 
         def run_phase(
             adapter: DynamicsModelAdapter,
@@ -3716,13 +3712,22 @@ class ServoCalibration:
                     for m in report_metrics
                 }
                 if term == "SPLIT":
-                    reports[key][metric] = self._step_metric_imbalance(
+                    per_drive = self._step_metric_per_drive(
                         gcmd,
                         results,
                         step.name,
                         SPLIT_IMBALANCE_BASE_METRIC,
                         drives,
                     )
+                    reports[key].update(
+                        (
+                            "%s[%s]" % (SPLIT_IMBALANCE_BASE_METRIC, d),
+                            value,
+                        )
+                        for d, value in per_drive.items()
+                    )
+                    mate_a, mate_b = per_drive.values()
+                    reports[key][metric] = abs(mate_a - mate_b)
                 gcmd.respond_info(
                     "%s scale %.4f -> %s (counts, mean per move)"
                     % (adapter.label, key, metrics_line(reports[key]))

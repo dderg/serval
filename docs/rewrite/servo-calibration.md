@@ -404,7 +404,10 @@ its own entry. The provenance keys are `refined_scale_x`/`refined_scale_y`
 (`refined_scale_<first-slot>` per pair for `SPLIT`). Scoring the mean over
 the whole grid keeps a scale that helps at one operating point but hurts
 at another from winning; every per-scale line also lists mean overshoot,
-ferr_rms, and ferr_peak so the non-scored metrics can be sanity-checked.
+ferr_rms, and ferr_peak so the non-scored metrics can be sanity-checked,
+and `SPLIT` lines add each mate's own ferr_rms (`ferr_rms[<motor>]`) so
+the before/after per motor — and whether evening the mates out raised
+the pair's error level — is visible at a glance.
 The
 baseline is `PROFILE=` or the node-level `[ethercat_node]
 dynamics_profile`; per-motor profiles are not supported (point `PROFILE=`
