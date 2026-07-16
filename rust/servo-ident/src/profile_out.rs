@@ -66,7 +66,7 @@ pub fn render_profile(
         out.push_str(&format!(
             "\n[[pair]]\n\
              slots = [\"{first}\", \"{second}\"]\n\
-             split = {}\n",
+             belt_position_split = {}\n",
             fmt_vec(&[ps.w[0], ps.w[1]]),
         ));
     }

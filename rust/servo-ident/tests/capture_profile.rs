@@ -195,8 +195,14 @@ fn renders_v4_profile_with_pairs() {
         toml_text.contains("slots = [\"motor_b\", \"motor_b1\"]"),
         "{toml_text}"
     );
-    assert!(toml_text.contains("split = [0.02, -0.0002]"), "{toml_text}");
-    assert!(toml_text.contains("split = [0.03, 0.0004]"), "{toml_text}");
+    assert!(
+        toml_text.contains("belt_position_split = [0.02, -0.0002]"),
+        "{toml_text}"
+    );
+    assert!(
+        toml_text.contains("belt_position_split = [0.03, 0.0004]"),
+        "{toml_text}"
+    );
 }
 
 #[test]

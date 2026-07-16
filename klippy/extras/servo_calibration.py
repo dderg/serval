@@ -277,9 +277,11 @@ def _parse_dynamics_pairs(
                     "motor %r appears in more than one pair" % (name,)
                 )
         claimed.update(slots)
-        vec = entry.get("split")
+        vec = entry.get("belt_position_split")
         if not isinstance(vec, list) or len(vec) != 2:
-            raise ValueError("pair split must list exactly 2 values")
+            raise ValueError(
+                "pair belt_position_split must list exactly 2 values"
+            )
         for v in vec:
             if (
                 isinstance(v, bool)
@@ -287,8 +289,8 @@ def _parse_dynamics_pairs(
                 or not math.isfinite(v)
             ):
                 raise ValueError(
-                    "pair split contains a non-numeric or non-finite value: "
-                    "%r" % (v,)
+                    "pair belt_position_split contains a non-numeric or "
+                    "non-finite value: %r" % (v,)
                 )
         pairs.append(
             {"slots": [str(a), str(b)], "split": [float(v) for v in vec]}
@@ -380,7 +382,7 @@ def render_dynamics_toml(
         lines += [
             "[[pair]]",
             "slots = %s" % (json.dumps(list(pair["slots"])),),
-            "split = %s" % (vec(pair["split"]),),
+            "belt_position_split = %s" % (vec(pair["split"]),),
         ]
     return "\n".join(lines) + "\n"
 

@@ -6,7 +6,7 @@ pub const ERR_DYNAMICS_REJECTED: i32 = -862;
 #[derive(Debug, Deserialize)]
 struct PairTable {
     slots: Vec<String>,
-    split: [f64; 2],
+    belt_position_split: [f64; 2],
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,7 +101,10 @@ impl DynamicsModel {
             pairs.push(PairSpec {
                 first,
                 second,
-                w: [p.split[0] as f32, p.split[1] as f32],
+                w: [
+                    p.belt_position_split[0] as f32,
+                    p.belt_position_split[1] as f32,
+                ],
             });
         }
         Self::validated(

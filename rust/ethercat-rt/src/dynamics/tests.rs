@@ -286,7 +286,7 @@ fit_rms_residual = [0.5, 0.5, 0.5, 0.5]
 
 [[pair]]
 slots = ["a", "a1"]
-split = [0.1, 0.01]
+belt_position_split = [0.1, 0.01]
 "#;
 
 fn awd_pair_model() -> DynamicsModel {
@@ -336,7 +336,10 @@ fn pair_differential_is_split_antisymmetrically() {
 // so zero split weights must make the two evals identical for every slot.
 #[test]
 fn zero_weight_pair_differential_vanishes() {
-    let zeroed = AWD_PAIR.replace("split = [0.1, 0.01]", "split = [0.0, 0.0]");
+    let zeroed = AWD_PAIR.replace(
+        "belt_position_split = [0.1, 0.01]",
+        "belt_position_split = [0.0, 0.0]",
+    );
     let mut paired = DynamicsModel::from_toml_str(&zeroed).unwrap();
     paired.bind_drive_signs(&[1.0, -1.0, -1.0, -1.0]);
     let acc = [4.0, 0.0, 0.0, 0.0];
@@ -391,7 +394,10 @@ fn pair_validation_rejections() {
         DynamicsModel::from_toml_str(&not_parallel),
         Err(ProfileError::PairNotParallel(0))
     ));
-    let nan_w = AWD_PAIR.replace("split = [0.1, 0.01]", "split = [nan, 0.01]");
+    let nan_w = AWD_PAIR.replace(
+        "belt_position_split = [0.1, 0.01]",
+        "belt_position_split = [nan, 0.01]",
+    );
     assert!(matches!(
         DynamicsModel::from_toml_str(&nan_w),
         Err(ProfileError::NotFinite(_))
@@ -407,11 +413,11 @@ coulomb = [1.0, 1.0]
 
 [[pair]]
 slots = ["a", "a1"]
-split = [0.1, 0.0]
+belt_position_split = [0.1, 0.0]
 
 [[pair]]
 slots = ["a1", "b"]
-split = [0.1, 0.0]
+belt_position_split = [0.1, 0.0]
 "#;
     assert!(matches!(
         DynamicsModel::from_toml_str(reused),

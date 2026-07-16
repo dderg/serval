@@ -58,11 +58,11 @@ coulomb = [1.0, 1.5]
 
 [[pair]]
 slots = ["motor_a", "motor_a1"]
-split = [0.02, -0.0003]
+belt_position_split = [0.02, -0.0003]
 
 [[pair]]
 slots = ["motor_b", "motor_b1"]
-split = [0.03, -0.0002]
+belt_position_split = [0.03, -0.0002]
 """
 
 AWD_PAIRS = [
@@ -213,11 +213,17 @@ def test_parse_dynamics_profile_rejects_pair_violations():
         )
     with pytest.raises(ValueError, match="split must list exactly 2"):
         servo_calibration.parse_dynamics_profile(
-            AWD_TOML.replace("split = [0.02, -0.0003]", "split = [0.02]")
+            AWD_TOML.replace(
+                "belt_position_split = [0.02, -0.0003]",
+                "belt_position_split = [0.02]",
+            )
         )
     with pytest.raises(ValueError, match="non-finite"):
         servo_calibration.parse_dynamics_profile(
-            AWD_TOML.replace("split = [0.02, -0.0003]", "split = [0.02, inf]")
+            AWD_TOML.replace(
+                "belt_position_split = [0.02, -0.0003]",
+                "belt_position_split = [0.02, inf]",
+            )
         )
 
 
@@ -961,7 +967,7 @@ def test_refine_dynamics_split_refines_each_pair_on_its_own_drives():
     assert abs(sb - 1.15) < 0.03, sb
     base = servo_calibration.parse_dynamics_profile(AWD_TOML)
     for written, pair, scale in zip(raw["pair"], base["pairs"], (sa, sb)):
-        assert written["split"] == pytest.approx(
+        assert written["belt_position_split"] == pytest.approx(
             [w * scale for w in pair["split"]]
         )
     assert raw["mass"] == pytest.approx(base["mass"])

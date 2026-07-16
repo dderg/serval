@@ -181,7 +181,7 @@ fit_rms_residual = [0.8, 0.7, 0.8, 0.9]  # per motor, 0.1% rated — fit quality
 
 [[pair]]                     # zero or more; only dual-drive belts have them
 slots = ["motor_a", "motor_a1"]        # first name = '+' side of the differential
-split = [0.02, -0.0003]                # [w0, w1 per mm of belt coordinate]
+belt_position_split = [0.02, -0.0003]                # [w0, w1 per mm of belt coordinate]
 ```
 
 Validation rules (any failure = hard claim error):
