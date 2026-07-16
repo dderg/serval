@@ -7,6 +7,15 @@
 //! nuisances and reported, never fed forward: a large even contribution is a
 //! role-dependent split (tension/pulley-drag asymmetry), not the symmetric
 //! span-stiffness effect the profile carries.
+//!
+//! Elastic span sharing is force-agnostic — the spans transmit whatever force
+//! the carriage needs, so pure geometry predicts ONE shared `w(p)` for all
+//! three components (rank-1). Per-component structure beyond that has no
+//! mechanism and is suspect (V/C column collinearity, role leakage, residual
+//! strain). Each pair therefore also gets a rank-1 constrained fit and, with
+//! ≥2 capture windows, a leave-one-window-out comparison of held-out
+//! prediction: if shared `w(p)` predicts unseen windows as well as the free
+//! per-component fit, the extra structure is noise.
 
 use crate::capture::Capture;
 use crate::linalg::solve_spd;
@@ -21,6 +30,21 @@ pub struct SplitCapture<'a> {
     pub cap: &'a Capture,
     pub torque_filt: &'a [Vec<f64>],
     pub keep: &'a [bool],
+}
+
+/// Leave-one-window-out comparison of held-out differential prediction.
+/// Every rms pools the same folds' residuals (each held-out window's
+/// intercept is refit as its residual mean, since the training fit cannot
+/// know it), so the three numbers are directly comparable.
+#[derive(Debug)]
+pub struct SplitCrossval {
+    pub folds: usize,
+    /// Held-out rms with no split model at all (centered D).
+    pub rms_none: f64,
+    /// Held-out rms of the free six-coefficient per-component fit.
+    pub rms_free: f64,
+    /// Held-out rms of the rank-1 shared `w(p)·F_total` fit.
+    pub rms_rank1: f64,
 }
 
 #[derive(Debug)]
@@ -44,6 +68,14 @@ pub struct PairReport {
     /// Components zeroed in `split` because `peak_fraction` exceeded
     /// `SPLIT_MAX_FRACTION` (identifiability failure of the stroke plan).
     pub rejected: [bool; 3],
+    /// Rank-1 constrained fit: one shared `w0 + w1·p` applied to the total
+    /// belt force — the pure span-stiffness model.
+    pub rank1_w: [f64; 2],
+    /// In-sample rms(D) after the rank-1 odd model + intercepts (same
+    /// convention as `rms_after`: even nuisances excluded).
+    pub rank1_rms_after: f64,
+    /// Present with ≥2 capture windows (and ≥2 usable folds).
+    pub crossval: Option<SplitCrossval>,
 }
 
 const N_FORCE_COLS: usize = 8;
@@ -53,6 +85,95 @@ const DEADBAND_MM_S: f64 = crate::model::COULOMB_DEADBAND_MM_S;
 /// component exceeding this cap anywhere in the captured position range is
 /// an identifiability failure (degenerate stroke plan), not a measurement.
 pub const SPLIT_MAX_FRACTION: f64 = 0.6;
+
+/// Print the per-pair fit report to stderr and return the splits worth
+/// writing to the profile (a pair with every component rejected is omitted).
+pub fn report_splits(reports: &[PairReport], axes: &[&str]) -> Vec<PairSplit> {
+    const LABELS: [&str; 6] = ["I0", "I1", "V0", "V1", "C0", "C1"];
+    let mut out = Vec::with_capacity(reports.len());
+    for r in reports {
+        let a = axes[r.split.first];
+        let b = axes[r.split.second];
+        eprintln!(
+            "pair {a}/{b} (λ={:+.0}): rms(D) {:.2} -> {:.2} (odd model), {} samples",
+            r.lambda, r.rms_before, r.rms_after, r.samples
+        );
+        for i in 0..6 {
+            eprintln!(
+                "  w_{} = {:+.6e}  (stderr {:.2e}, t = {:+.2})",
+                LABELS[i], r.split.w[i], r.w_stderr[i], r.w_tvalue[i]
+            );
+        }
+        eprintln!(
+            "  rank-1 check: shared w(p) = {:+.4e} {:+.4e}/mm, in-sample rms(D) {:.2} \
+             (per-component {:.2})",
+            r.rank1_w[0], r.rank1_w[1], r.rank1_rms_after, r.rms_after
+        );
+        match &r.crossval {
+            Some(cv) => {
+                eprintln!(
+                    "  held-out rms(D) over {} window folds: no split {:.2}, shared \
+                     w(p) {:.2}, per-component {:.2}",
+                    cv.folds, cv.rms_none, cv.rms_rank1, cv.rms_free
+                );
+                if cv.rms_free < 0.95 * cv.rms_rank1 {
+                    eprintln!(
+                        "  per-component split supported: it predicts held-out windows \
+                         >=5% better than shared w(p)"
+                    );
+                } else {
+                    eprintln!(
+                        "  WARNING pair {a}/{b}: shared w(p) predicts held-out windows \
+                         as well as the per-component fit — the per-component structure \
+                         is likely noise (V/C collinearity, role leakage, or residual \
+                         strain), not physics"
+                    );
+                }
+            }
+            None => eprintln!("  held-out rank-1 comparison skipped: needs >=2 capture windows"),
+        }
+        eprintln!(
+            "  diag |F_I| coeff {:+.4e} (contrib {:.3}), |F_V| coeff {:+.4e} (contrib {:.3}); \
+             largest odd contrib {:.3}",
+            r.even_coeff[0],
+            r.even_contribution[0],
+            r.even_coeff[1],
+            r.even_contribution[1],
+            r.max_odd_contribution
+        );
+        for (c, off) in r.intercepts.iter().enumerate() {
+            eprintln!("  diag intercept[capture {c}] {off:+.3}");
+        }
+        if r.role_dependent {
+            eprintln!(
+                "  WARNING pair {a}/{b}: role-dependent split detected — check belt \
+                 tension/pulley drag; not fed forward"
+            );
+        }
+        for (c, name) in ["inertial", "viscous", "coulomb"].iter().enumerate() {
+            if r.rejected[c] {
+                eprintln!(
+                    "  WARNING pair {a}/{b}: {name} split rejected — |w(p)| reaches \
+                     {:.2} over the captured range (cap {SPLIT_MAX_FRACTION}); this \
+                     stroke plan cannot identify it (position windows too narrow or \
+                     accel confounded with position); component zeroed. Capture several \
+                     SERVO_MEASURE_INERTIA windows at different positions to \
+                     identify it.",
+                    r.peak_fraction[c],
+                );
+            }
+        }
+        if r.split.w.iter().any(|&v| v != 0.0) {
+            out.push(r.split.clone());
+        } else {
+            eprintln!(
+                "  pair {a}/{b}: every split component rejected — pair omitted \
+                 from the profile"
+            );
+        }
+    }
+    out
+}
 
 struct Ols {
     theta: Vec<f64>,
@@ -188,6 +309,123 @@ fn pair_columns(
     (cols, d)
 }
 
+/// One capture's kept rows of the pair regression: the eight force columns
+/// and the differential, mask already applied.
+struct CapRows {
+    cols: [Vec<f64>; N_FORCE_COLS],
+    d: Vec<f64>,
+}
+
+const FREE_ODD: usize = 6;
+const RANK1_ODD: usize = 2;
+
+fn n_odd(rank1: bool) -> usize {
+    if rank1 {
+        RANK1_ODD
+    } else {
+        FREE_ODD
+    }
+}
+
+/// Odd regressor `i` of the chosen basis at one row: the free basis is the
+/// six per-component columns; the rank-1 basis sums the components into
+/// `F_total` (i = 0) and `F_total·p` (i = 1).
+fn odd_col(cr: &CapRows, rank1: bool, i: usize, row: usize) -> f64 {
+    if rank1 {
+        cr.cols[i][row] + cr.cols[i + 2][row] + cr.cols[i + 4][row]
+    } else {
+        cr.cols[i][row]
+    }
+}
+
+/// Pooled design for the chosen odd basis over every capture except `skip`:
+/// odd columns, the two even nuisances, then one intercept indicator per
+/// training capture.
+fn design(cap_rows: &[CapRows], skip: Option<usize>, rank1: bool) -> (Vec<Vec<f64>>, Vec<f64>) {
+    let odd = n_odd(rank1);
+    let training: Vec<usize> = (0..cap_rows.len()).filter(|&c| Some(c) != skip).collect();
+    let mut cols: Vec<Vec<f64>> = vec![Vec::new(); odd + 2 + training.len()];
+    let mut y: Vec<f64> = Vec::new();
+    for (ti, &ci) in training.iter().enumerate() {
+        let cr = &cap_rows[ci];
+        for row in 0..cr.d.len() {
+            for i in 0..odd {
+                cols[i].push(odd_col(cr, rank1, i, row));
+            }
+            cols[odd].push(cr.cols[6][row]);
+            cols[odd + 1].push(cr.cols[7][row]);
+            for tj in 0..training.len() {
+                cols[odd + 2 + tj].push(if tj == ti { 1.0 } else { 0.0 });
+            }
+            y.push(cr.d[row]);
+        }
+    }
+    (cols, y)
+}
+
+/// Centered residual sum of squares of one held-out capture under a fitted
+/// odd + even model (the held-out intercept is unknowable from training, so
+/// centering refits it).
+fn heldout_rss(cr: &CapRows, rank1: bool, theta: &[f64]) -> (f64, usize) {
+    let odd = n_odd(rank1);
+    let resid: Vec<f64> = (0..cr.d.len())
+        .map(|row| {
+            let mut pred = 0.0;
+            for i in 0..odd {
+                pred += theta[i] * odd_col(cr, rank1, i, row);
+            }
+            pred += theta[odd] * cr.cols[6][row];
+            pred += theta[odd + 1] * cr.cols[7][row];
+            cr.d[row] - pred
+        })
+        .collect();
+    (centered_rss(&resid), resid.len())
+}
+
+fn centered_rss(v: &[f64]) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    let mean = v.iter().sum::<f64>() / v.len() as f64;
+    v.iter().map(|x| (x - mean) * (x - mean)).sum()
+}
+
+fn crossval(cap_rows: &[CapRows]) -> Option<SplitCrossval> {
+    if cap_rows.len() < 2 {
+        return None;
+    }
+    let mut folds = 0;
+    let mut rows = 0usize;
+    let (mut rss_none, mut rss_free, mut rss_rank1) = (0.0, 0.0, 0.0);
+    for h in 0..cap_rows.len() {
+        if cap_rows[h].d.is_empty() {
+            continue;
+        }
+        let (cols_f, y_f) = design(cap_rows, Some(h), false);
+        let (cols_r, y_r) = design(cap_rows, Some(h), true);
+        let (Some(fit_f), Some(fit_r)) = (ols(&cols_f, &y_f), ols(&cols_r, &y_r)) else {
+            continue;
+        };
+        let (fold_free, n_h) = heldout_rss(&cap_rows[h], false, &fit_f.theta);
+        let (fold_rank1, _) = heldout_rss(&cap_rows[h], true, &fit_r.theta);
+        rss_none += centered_rss(&cap_rows[h].d);
+        rss_free += fold_free;
+        rss_rank1 += fold_rank1;
+        rows += n_h;
+        folds += 1;
+    }
+    if folds < 2 || rows == 0 {
+        return None;
+    }
+    let pooled = |rss: f64| (rss / rows as f64).sqrt();
+    Some(SplitCrossval {
+        folds,
+        rms_none: pooled(rss_none),
+        rms_free: pooled(rss_free),
+        rms_rank1: pooled(rss_rank1),
+    })
+}
+
 fn assert_shared_belt(captures: &[SplitCapture], first: usize, second: usize) {
     let (mut sx, mut sy, mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0, 0.0, 0.0);
     let mut n = 0.0_f64;
@@ -259,25 +497,29 @@ pub fn fit_pair_splits(
     for (first, second, lambda) in structure.pairs() {
         assert_shared_belt(captures, first, second);
 
-        let mut cols: Vec<Vec<f64>> = vec![Vec::new(); N_FORCE_COLS + n_cap];
-        let mut y: Vec<f64> = Vec::new();
-        for (ci, sc) in captures.iter().enumerate() {
-            let (fcols, d) = pair_columns(
-                structure, params, signs, cutoff_hz, sc, first, second, lambda,
-            );
-            for k in 0..sc.keep.len() {
-                if !sc.keep[k] {
-                    continue;
+        let cap_rows: Vec<CapRows> = captures
+            .iter()
+            .map(|sc| {
+                let (fcols, d) = pair_columns(
+                    structure, params, signs, cutoff_hz, sc, first, second, lambda,
+                );
+                let mut cr = CapRows {
+                    cols: std::array::from_fn(|_| Vec::new()),
+                    d: Vec::new(),
+                };
+                for k in 0..sc.keep.len() {
+                    if !sc.keep[k] {
+                        continue;
+                    }
+                    for c in 0..N_FORCE_COLS {
+                        cr.cols[c].push(fcols[c][k]);
+                    }
+                    cr.d.push(d[k]);
                 }
-                for c in 0..N_FORCE_COLS {
-                    cols[c].push(fcols[c][k]);
-                }
-                for ic in 0..n_cap {
-                    cols[N_FORCE_COLS + ic].push(if ic == ci { 1.0 } else { 0.0 });
-                }
-                y.push(d[k]);
-            }
-        }
+                cr
+            })
+            .collect();
+        let (cols, y) = design(&cap_rows, None, false);
         let total = y.len();
         let fit = ols(&cols, &y).unwrap_or_else(|| {
             panic!(
@@ -342,6 +584,26 @@ pub fn fit_pair_splits(
         }
         let rms_after = (rss_after / total.max(1) as f64).sqrt();
 
+        let (cols_r1, y_r1) = design(&cap_rows, None, true);
+        let rank1_fit = ols(&cols_r1, &y_r1).unwrap_or_else(|| {
+            panic!(
+                "pair {first},{second}: rank-1 shared-w(p) regression is \
+                 rank-deficient even though the free fit succeeded — the \
+                 summed force columns collapsed"
+            )
+        });
+        let rank1_w = [rank1_fit.theta[0], rank1_fit.theta[1]];
+        let mut rank1_rss = 0.0;
+        for row in 0..y_r1.len() {
+            let mut pred = rank1_w[0] * cols_r1[0][row] + rank1_w[1] * cols_r1[1][row];
+            for ic in 0..n_cap {
+                pred += rank1_fit.theta[RANK1_ODD + 2 + ic] * cols_r1[RANK1_ODD + 2 + ic][row];
+            }
+            let e = y_r1[row] - pred;
+            rank1_rss += e * e;
+        }
+        let rank1_rms_after = (rank1_rss / y_r1.len().max(1) as f64).sqrt();
+
         reports.push(PairReport {
             split: PairSplit { first, second, w },
             lambda,
@@ -357,6 +619,9 @@ pub fn fit_pair_splits(
             samples: total,
             peak_fraction,
             rejected,
+            rank1_w,
+            rank1_rms_after,
+            crossval: crossval(&cap_rows),
         });
     }
     reports

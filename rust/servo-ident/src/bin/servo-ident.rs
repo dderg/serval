@@ -11,7 +11,7 @@ use servo_ident::model::Structure;
 use servo_ident::pipeline::{pooled_input, prepare, split_captures, Prepared};
 use servo_ident::prep::{band_limited_rms, PrepOptions};
 use servo_ident::profile_out::{c0006_recommendation, render_profile, PairSplit};
-use servo_ident::split::{fit_pair_splits, PairReport};
+use servo_ident::split::{fit_pair_splits, report_splits};
 
 fn arg(args: &[String], key: &str) -> Option<String> {
     args.iter()
@@ -55,66 +55,6 @@ fn parse_signs(spec: &str, n_slots: usize) -> Vec<f64> {
         std::process::exit(1);
     }
     v
-}
-
-fn report_splits(reports: &[PairReport], axes: &[&str]) -> Vec<PairSplit> {
-    const LABELS: [&str; 6] = ["I0", "I1", "V0", "V1", "C0", "C1"];
-    let mut out = Vec::with_capacity(reports.len());
-    for r in reports {
-        let a = axes[r.split.first];
-        let b = axes[r.split.second];
-        eprintln!(
-            "pair {a}/{b} (λ={:+.0}): rms(D) {:.2} -> {:.2} (odd model), {} samples",
-            r.lambda, r.rms_before, r.rms_after, r.samples
-        );
-        for i in 0..6 {
-            eprintln!(
-                "  w_{} = {:+.6e}  (stderr {:.2e}, t = {:+.2})",
-                LABELS[i], r.split.w[i], r.w_stderr[i], r.w_tvalue[i]
-            );
-        }
-        eprintln!(
-            "  diag |F_I| coeff {:+.4e} (contrib {:.3}), |F_V| coeff {:+.4e} (contrib {:.3}); \
-             largest odd contrib {:.3}",
-            r.even_coeff[0],
-            r.even_contribution[0],
-            r.even_coeff[1],
-            r.even_contribution[1],
-            r.max_odd_contribution
-        );
-        for (c, off) in r.intercepts.iter().enumerate() {
-            eprintln!("  diag intercept[capture {c}] {off:+.3}");
-        }
-        if r.role_dependent {
-            eprintln!(
-                "  WARNING pair {a}/{b}: role-dependent split detected — check belt \
-                 tension/pulley drag; not fed forward"
-            );
-        }
-        for (c, name) in ["inertial", "viscous", "coulomb"].iter().enumerate() {
-            if r.rejected[c] {
-                eprintln!(
-                    "  WARNING pair {a}/{b}: {name} split rejected — |w(p)| reaches \
-                     {:.2} over the captured range (cap {}); this stroke plan cannot \
-                     identify it (position windows too narrow or accel confounded \
-                     with position); component zeroed. Capture several \
-                     SERVO_MEASURE_INERTIA windows at different positions to \
-                     identify it.",
-                    r.peak_fraction[c],
-                    servo_ident::split::SPLIT_MAX_FRACTION
-                );
-            }
-        }
-        if r.split.w.iter().any(|&v| v != 0.0) {
-            out.push(r.split.clone());
-        } else {
-            eprintln!(
-                "  pair {a}/{b}: every split component rejected — pair omitted \
-                 from the profile"
-            );
-        }
-    }
-    out
 }
 
 fn opt_f64(args: &[String], key: &str) -> Option<f64> {

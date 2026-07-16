@@ -55,6 +55,18 @@ even (|F|-shaped, role-dependent) components are reported as diagnostics —
 a large one means check belt tension or pulley drag — and never fed
 forward.
 
+Pure span-stiffness geometry is force-agnostic (the spans transmit whatever
+force the carriage needs), so it predicts one shared `w(p)` for all three
+components; per-component structure beyond that has no mechanism and can be
+faked by V/C column collinearity, role leakage, or residual strain. The fit
+therefore also runs a rank-1 constrained fit (shared `w(p)·F_total`) and,
+given ≥2 capture windows, compares the two by leave-one-window-out held-out
+prediction. If the shared model predicts unseen windows as well as the free
+per-component fit (within 5%), the report warns that the per-component
+structure is likely noise — the free coefficients are still what gets
+written, but treat them with suspicion and prefer cleaner captures (better
+strain calibration, more windows) over trusting the extra structure.
+
 Velocity feedforward (60B1h) is `ωᵢ · counts_per_mm`, where `counts_per_mm =
 encoder_counts_per_rev / rotation_distance` and the result is in counts/s.
 

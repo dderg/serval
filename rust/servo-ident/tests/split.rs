@@ -240,6 +240,104 @@ fn recovers_injected_split_exactly() {
         assert!(r.even_contribution[0] < 1e-4 && r.even_contribution[1] < 1e-4);
         assert!(!r.role_dependent);
         assert!(r.rms_after < 1e-6 * r.rms_before.max(1.0) + 1e-6);
+        assert!(r.crossval.is_none(), "one capture cannot cross-validate");
+    }
+}
+
+fn multi_window_captures(slots: &Slots, w: [f64; 6], noise: f64) -> Vec<(Capture, Vec<Vec<f64>>)> {
+    (0..3)
+        .map(|c| {
+            let inj = vec![
+                (
+                    0,
+                    1,
+                    -1.0,
+                    Injection {
+                        w,
+                        even_kappa: 0.0,
+                        offset: 3.0 - 2.5 * c as f64,
+                        noise,
+                    },
+                ),
+                (
+                    2,
+                    3,
+                    1.0,
+                    Injection {
+                        w,
+                        even_kappa: 0.0,
+                        offset: -1.0 + 1.5 * c as f64,
+                        noise,
+                    },
+                ),
+            ];
+            synth(slots, &inj, 11 + 7 * c)
+        })
+        .collect()
+}
+
+fn fit_multi_window(caps: &[(Capture, Vec<Vec<f64>>)]) -> Vec<servo_ident::split::PairReport> {
+    let keep = keep_all(caps[0].0.t.len());
+    let scaps: Vec<SplitCapture> = caps
+        .iter()
+        .map(|(cap, tq)| SplitCapture {
+            cap,
+            torque_filt: tq,
+            keep: &keep,
+        })
+        .collect();
+    fit_pair_splits(&Structure::new(frame()), &params(), &SIGNS, 0.0, &scaps)
+}
+
+#[test]
+fn crossval_rejects_per_component_structure_in_a_rank1_world() {
+    let slots = four_slot_motion();
+    let (w0, w1) = (0.03, -0.0002);
+    let caps = multi_window_captures(&slots, [w0, w1, w0, w1, w0, w1], 0.5);
+    let reports = fit_multi_window(&caps);
+    for r in &reports {
+        assert!(
+            (r.rank1_w[0] - w0).abs() < 0.05 * w0.abs(),
+            "{:?}",
+            r.rank1_w
+        );
+        assert!(
+            (r.rank1_w[1] - w1).abs() < 0.15 * w1.abs(),
+            "{:?}",
+            r.rank1_w
+        );
+        let cv = r.crossval.as_ref().expect("3 windows must cross-validate");
+        assert_eq!(cv.folds, 3);
+        assert!(
+            cv.rms_rank1 < cv.rms_none,
+            "shared w(p) must beat no model: {} !< {}",
+            cv.rms_rank1,
+            cv.rms_none
+        );
+        assert!(
+            cv.rms_free >= 0.95 * cv.rms_rank1,
+            "free must NOT clear the 5% support threshold in a rank-1 world: \
+             free {} vs rank1 {}",
+            cv.rms_free,
+            cv.rms_rank1
+        );
+    }
+}
+
+#[test]
+fn crossval_supports_true_per_component_structure() {
+    let slots = four_slot_motion();
+    let caps = multi_window_captures(&slots, [0.05, 0.0, -0.04, -0.0003, 0.02, 0.0002], 0.05);
+    let reports = fit_multi_window(&caps);
+    for r in &reports {
+        let cv = r.crossval.as_ref().expect("3 windows must cross-validate");
+        assert!(
+            cv.rms_free < 0.95 * cv.rms_rank1,
+            "free must beat shared w(p) held-out: free {} vs rank1 {}",
+            cv.rms_free,
+            cv.rms_rank1
+        );
+        assert!(cv.rms_free < cv.rms_none);
     }
 }
 
