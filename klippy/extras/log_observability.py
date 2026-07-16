@@ -40,9 +40,7 @@ def host_memory_snapshot(proc="/proc"):
         with open(os.path.join(proc, "pressure", "memory")) as f:
             for line in f:
                 parts = line.split()
-                avg10 = next(
-                    p for p in parts[1:] if p.startswith("avg10=")
-                )
+                avg10 = next(p for p in parts[1:] if p.startswith("avg10="))
                 fields["psi_mem_%s_avg10" % (parts[0],)] = float(
                     avg10.split("=", 1)[1]
                 )
