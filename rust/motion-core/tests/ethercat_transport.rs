@@ -11,14 +11,14 @@ use motion_core::pump::{
 use runtime::piece_ring::PieceEntry;
 
 fn piece(t: u64) -> (PieceEntry, f64) {
-    (
-        PieceEntry {
-            start_time: t,
-            duration: 0.001,
-            ..PieceEntry::zeroed()
-        },
-        t as f64,
-    )
+    let mut entry = PieceEntry {
+        start_time: t,
+        duration: 0.001,
+        coeff_count: 2,
+        ..PieceEntry::zeroed()
+    };
+    entry.coeffs[1] = 1.0;
+    (entry, t as f64)
 }
 
 #[test]

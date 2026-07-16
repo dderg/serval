@@ -111,6 +111,7 @@ impl<S: PieceSink> Pump<S> {
                     if let Some(q) = self.queues.get_mut(&key) {
                         let dropped = q.pieces.len() as u32;
                         q.pieces.clear();
+                        q.staged_motion = 0;
                         if dropped > 0 {
                             (self.callbacks.on_abandon)(key, dropped);
                         }
@@ -229,6 +230,10 @@ impl<S: PieceSink> Pump<S> {
             .entry(key)
             .or_insert_with(|| AxisQueue::new(ring_depth));
         q.lead_secs = lead_secs;
+        q.staged_motion += pieces
+            .iter()
+            .filter(|(p, _)| !super::sched::is_hold_piece(p))
+            .count() as u32;
         match hold_merge_freq {
             Some(freq) => {
                 append_pieces_merging_holds(&mut q.pieces, pieces, freq, !epoch.is_fresh());
@@ -494,6 +499,12 @@ impl<S: PieceSink> Pump<S> {
                     .pieces
                     .pop_front()
                     .expect("sent frame outran its axis queue");
+                if super::sched::is_hold_piece(&piece) {
+                    q.wire_hold_tail += 1;
+                } else {
+                    q.wire_hold_tail = 0;
+                    q.staged_motion = q.staged_motion.saturating_sub(1);
+                }
                 if let Some(history) = &self.history {
                     history.record(key, &piece, host_t);
                 }
@@ -626,6 +637,8 @@ impl<S: PieceSink> Pump<S> {
                         pending: q.pieces.len() as u32,
                         pushed: q.pushed,
                         retired: q.retired,
+                        staged_motion: q.staged_motion,
+                        hold_tail: q.wire_hold_tail,
                     },
                 )
             })

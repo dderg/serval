@@ -23,11 +23,20 @@ pub struct AxisDrainState {
     pub pending: u32,
     pub pushed: u32,
     pub retired: u32,
+    /// Staged pieces that carry motion (non-hold). Trailing hold coverage —
+    /// the constant-position blanket the pipeline emits so the RT sampler
+    /// always has a valid piece — is not motion and must not gate a drain.
+    pub staged_motion: u32,
+    /// Consecutive hold pieces at the pushed (wire) tail. A hold retires
+    /// only when its end time passes, up to the full scheduling lead after
+    /// the last real move — waiting for that is waiting for idle time to
+    /// elapse, not for motion to finish.
+    pub hold_tail: u32,
 }
 
 impl AxisDrainState {
     fn drained(&self) -> bool {
-        self.pending == 0 && self.pushed == self.retired
+        self.staged_motion == 0 && self.pushed.wrapping_sub(self.retired) <= self.hold_tail
     }
 }
 
