@@ -1,7 +1,7 @@
 use super::*;
 
 const SCALAR: &str = r#"
-version = 3
+version = 4
 axes = ["x"]
 modes = ["x"]
 frame = [[1.0]]
@@ -12,7 +12,7 @@ fit_rms_residual = [0.8]
 "#;
 
 const SCALAR_Y: &str = r#"
-version = 3
+version = 4
 axes = ["y"]
 modes = ["y"]
 frame = [[1.0]]
@@ -23,7 +23,7 @@ fit_rms_residual = [0.3]
 "#;
 
 const COREXY: &str = r#"
-version = 3
+version = 4
 axes = ["a", "b"]
 modes = ["x", "y"]
 frame = [[0.5, 0.5], [0.5, -0.5]]
@@ -95,7 +95,7 @@ fn block_diagonal_rejects_empty() {
 
 #[test]
 fn rejects_each_invariant_violation() {
-    let bad_version = SCALAR.replace("version = 3", "version = 2");
+    let bad_version = SCALAR.replace("version = 4", "version = 2");
     assert!(matches!(
         DynamicsModel::from_toml_str(&bad_version),
         Err(ProfileError::Version(2))
@@ -241,7 +241,7 @@ fn clamp_counts_saturation() {
 }
 
 const COREXY_AWD: &str = r#"
-version = 3
+version = 4
 axes = ["a", "a1", "b", "b1"]
 modes = ["x", "y"]
 frame = [[0.25, 0.25, 0.25, 0.25], [0.25, 0.25, -0.25, -0.25]]
@@ -275,7 +275,7 @@ fn torque_ff_without_coulomb_keeps_the_linear_terms() {
 }
 
 const AWD_PAIR: &str = r#"
-version = 3
+version = 4
 axes = ["a", "a1", "b", "b1"]
 modes = ["x", "y"]
 frame = [[0.25, -0.25, -0.25, -0.25], [0.25, -0.25, 0.25, 0.25]]
@@ -286,9 +286,7 @@ fit_rms_residual = [0.5, 0.5, 0.5, 0.5]
 
 [[pair]]
 slots = ["a", "a1"]
-split_inertial = [0.1, 0.01]
-split_viscous = [0.0, 0.0]
-split_coulomb = [0.0, 0.0]
+split = [0.1, 0.01]
 "#;
 
 fn awd_pair_model() -> DynamicsModel {
@@ -338,10 +336,7 @@ fn pair_differential_is_split_antisymmetrically() {
 // so zero split weights must make the two evals identical for every slot.
 #[test]
 fn zero_weight_pair_differential_vanishes() {
-    let zeroed = AWD_PAIR.replace(
-        "split_inertial = [0.1, 0.01]",
-        "split_inertial = [0.0, 0.0]",
-    );
+    let zeroed = AWD_PAIR.replace("split = [0.1, 0.01]", "split = [0.0, 0.0]");
     let mut paired = DynamicsModel::from_toml_str(&zeroed).unwrap();
     paired.bind_drive_signs(&[1.0, -1.0, -1.0, -1.0]);
     let acc = [4.0, 0.0, 0.0, 0.0];
@@ -396,16 +391,13 @@ fn pair_validation_rejections() {
         DynamicsModel::from_toml_str(&not_parallel),
         Err(ProfileError::PairNotParallel(0))
     ));
-    let nan_w = AWD_PAIR.replace(
-        "split_inertial = [0.1, 0.01]",
-        "split_inertial = [nan, 0.01]",
-    );
+    let nan_w = AWD_PAIR.replace("split = [0.1, 0.01]", "split = [nan, 0.01]");
     assert!(matches!(
         DynamicsModel::from_toml_str(&nan_w),
         Err(ProfileError::NotFinite(_))
     ));
     let reused = r#"
-version = 3
+version = 4
 axes = ["a", "a1", "b", "b1"]
 modes = ["x", "y"]
 frame = [[0.25, -0.25, -0.25, -0.25], [0.25, -0.25, 0.25, 0.25]]
@@ -415,15 +407,11 @@ coulomb = [1.0, 1.0]
 
 [[pair]]
 slots = ["a", "a1"]
-split_inertial = [0.1, 0.0]
-split_viscous = [0.0, 0.0]
-split_coulomb = [0.0, 0.0]
+split = [0.1, 0.0]
 
 [[pair]]
 slots = ["a1", "b"]
-split_inertial = [0.1, 0.0]
-split_viscous = [0.0, 0.0]
-split_coulomb = [0.0, 0.0]
+split = [0.1, 0.0]
 "#;
     assert!(matches!(
         DynamicsModel::from_toml_str(reused),
@@ -437,7 +425,7 @@ fn from_parts_carries_pairs_and_derives_lambda() {
     let pair = PairSpec {
         first: 0,
         second: 1,
-        w: [0.1, 0.01, 0.0, 0.0, 0.0, 0.0],
+        w: [0.1, 0.01],
     };
     let mut m = DynamicsModel::from_parts(
         4,

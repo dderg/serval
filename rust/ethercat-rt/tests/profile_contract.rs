@@ -52,7 +52,7 @@ fn fitter_rendered_pair_loads_and_applies_a_differential() {
     let pairs = [PairSplit {
         first: 0,
         second: 1,
-        w: [0.1, 0.01, 0.0, 0.0, 0.0, 0.0],
+        w: [0.1, 0.01],
     }];
     let text = render_profile(
         &p,

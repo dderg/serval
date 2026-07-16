@@ -639,16 +639,16 @@ impl PyMotionEngine {
             )));
         }
         let pair_count = pairs.len() / 2;
-        if pair_split.len() != pair_count * 6 {
+        if pair_split.len() != pair_count * 2 {
             return Err(PyRuntimeError::new_err(format!(
-                "set_dynamics_model: pair_split must be 6 per pair ({} expected, got {})",
-                pair_count * 6,
+                "set_dynamics_model: pair_split must be 2 per pair ({} expected, got {})",
+                pair_count * 2,
                 pair_split.len()
             )));
         }
         let wire_pairs = pairs
             .chunks_exact(2)
-            .zip(pair_split.chunks_exact(6))
+            .zip(pair_split.chunks_exact(2))
             .map(|(slots, w)| {
                 let slot_u8 = |v: u32| {
                     u8::try_from(v).map_err(|_| {
@@ -660,7 +660,7 @@ impl PyMotionEngine {
                 Ok(mcu_protocol::messages::DynamicsPair {
                     first: slot_u8(slots[0])?,
                     second: slot_u8(slots[1])?,
-                    w: [w[0], w[1], w[2], w[3], w[4], w[5]],
+                    w: [w[0], w[1]],
                 })
             })
             .collect::<PyResult<Vec<_>>>()?;

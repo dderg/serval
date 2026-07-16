@@ -575,7 +575,7 @@ fn decodes_set_dynamics_model_command() {
         pairs: vec![mcu_protocol::messages::DynamicsPair {
             first: 0,
             second: 1,
-            w: [0.1, 0.01, 0.0, 0.0, 0.0, 0.0],
+            w: [0.1, 0.01],
         }],
     };
     let payload = frame_payload(MessageKind::SetDynamicsModel, 33, &msg.encoded_to_vec());

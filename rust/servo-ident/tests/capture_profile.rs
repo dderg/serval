@@ -106,7 +106,7 @@ fn tracking_mask_drops_stiction_and_overshoot() {
 }
 
 #[test]
-fn renders_loadable_v3_profile_without_pairs() {
+fn renders_loadable_v4_profile_without_pairs() {
     let p = PhysicalParams {
         mass: vec![0.0123, 0.0119],
         viscous: vec![0.09, 0.11],
@@ -124,7 +124,7 @@ fn renders_loadable_v3_profile_without_pairs() {
         &[0.8, 0.7, 0.8, 0.9],
         &[],
     );
-    assert!(toml_text.contains("version = 3"), "{toml_text}");
+    assert!(toml_text.contains("version = 4"), "{toml_text}");
     assert!(
         toml_text.contains("axes = [\"motor_a\", \"motor_a1\", \"motor_b\", \"motor_b1\"]"),
         "{toml_text}"
@@ -150,7 +150,7 @@ fn renders_loadable_v3_profile_without_pairs() {
 }
 
 #[test]
-fn renders_v3_profile_with_pairs() {
+fn renders_v4_profile_with_pairs() {
     use servo_ident::profile_out::PairSplit;
     let p = PhysicalParams {
         mass: vec![0.012, 0.011],
@@ -165,12 +165,12 @@ fn renders_v3_profile_with_pairs() {
         PairSplit {
             first: 0,
             second: 1,
-            w: [0.02, -0.0002, 0.05, 0.0, -0.01, 0.0001],
+            w: [0.02, -0.0002],
         },
         PairSplit {
             first: 2,
             second: 3,
-            w: [0.03, 0.0004, 0.06, 0.0, -0.02, 0.0],
+            w: [0.03, 0.0004],
         },
     ];
     let toml_text = render_profile(
@@ -181,7 +181,7 @@ fn renders_v3_profile_with_pairs() {
         &[0.8, 0.7, 0.8, 0.9],
         &pairs,
     );
-    assert!(toml_text.contains("version = 3"), "{toml_text}");
+    assert!(toml_text.contains("version = 4"), "{toml_text}");
     assert_eq!(
         toml_text.matches("[[pair]]").count(),
         2,
@@ -195,18 +195,8 @@ fn renders_v3_profile_with_pairs() {
         toml_text.contains("slots = [\"motor_b\", \"motor_b1\"]"),
         "{toml_text}"
     );
-    assert!(
-        toml_text.contains("split_inertial = [0.02, -0.0002]"),
-        "{toml_text}"
-    );
-    assert!(
-        toml_text.contains("split_viscous  = [0.05, 0.0]"),
-        "{toml_text}"
-    );
-    assert!(
-        toml_text.contains("split_coulomb  = [-0.01, 0.0001]"),
-        "{toml_text}"
-    );
+    assert!(toml_text.contains("split = [0.02, -0.0002]"), "{toml_text}");
+    assert!(toml_text.contains("split = [0.03, 0.0004]"), "{toml_text}");
 }
 
 #[test]

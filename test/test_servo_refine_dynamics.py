@@ -17,7 +17,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 BASELINE_TOML = """\
-version = 3
+version = 4
 axes = ["motor_a", "motor_b"]
 modes = ["x", "y"]
 frame = [[0.5, 0.5], [0.5, -0.5]]
@@ -28,7 +28,7 @@ fit_rms_residual = [0.5, 0.5]
 """
 
 ONE_AXIS_TOML = """\
-version = 3
+version = 4
 axes = ["motor_a"]
 modes = ["x"]
 frame = [[1.0]]
@@ -38,7 +38,7 @@ coulomb = [1.0]
 """
 
 NON_XY_TOML = """\
-version = 3
+version = 4
 axes = ["motor_a", "motor_b"]
 modes = ["a", "b"]
 frame = [[0.5, 0.5], [0.5, -0.5]]
@@ -48,7 +48,7 @@ coulomb = [1.0, 1.5]
 """
 
 AWD_TOML = """\
-version = 3
+version = 4
 axes = ["motor_a", "motor_a1", "motor_b", "motor_b1"]
 modes = ["x", "y"]
 frame = [[0.25, 0.25, -0.25, 0.25], [0.25, 0.25, 0.25, -0.25]]
@@ -58,25 +58,21 @@ coulomb = [1.0, 1.5]
 
 [[pair]]
 slots = ["motor_a", "motor_a1"]
-split_inertial = [0.02, -0.0003]
-split_viscous = [0.05, 0.0001]
-split_coulomb = [-0.01, 0.0002]
+split = [0.02, -0.0003]
 
 [[pair]]
 slots = ["motor_b", "motor_b1"]
-split_inertial = [0.03, -0.0002]
-split_viscous = [0.06, 0.0002]
-split_coulomb = [-0.02, 0.0003]
+split = [0.03, -0.0002]
 """
 
 AWD_PAIRS = [
     {
         "slots": ["motor_a", "motor_a1"],
-        "split": [0.02, -0.0003, 0.05, 0.0001, -0.01, 0.0002],
+        "split": [0.02, -0.0003],
     },
     {
         "slots": ["motor_b", "motor_b1"],
-        "split": [0.03, -0.0002, 0.06, 0.0002, -0.02, 0.0003],
+        "split": [0.03, -0.0002],
     },
 ]
 
@@ -167,7 +163,7 @@ def test_parse_dynamics_profile_parses_pairs():
 def test_parse_dynamics_profile_rejects_violations():
     with pytest.raises(ValueError, match="refit with SERVO_FIT_DYNAMICS"):
         servo_calibration.parse_dynamics_profile(
-            BASELINE_TOML.replace("version = 3", "version = 1")
+            BASELINE_TOML.replace("version = 4", "version = 1")
         )
     with pytest.raises(ValueError, match="frame"):
         servo_calibration.parse_dynamics_profile(
@@ -215,18 +211,13 @@ def test_parse_dynamics_profile_rejects_pair_violations():
                 'slots = ["motor_a", "motor_a"]',
             )
         )
-    with pytest.raises(ValueError, match="split_viscous must list exactly 2"):
+    with pytest.raises(ValueError, match="split must list exactly 2"):
         servo_calibration.parse_dynamics_profile(
-            AWD_TOML.replace(
-                "split_viscous = [0.05, 0.0001]", "split_viscous = [0.05]"
-            )
+            AWD_TOML.replace("split = [0.02, -0.0003]", "split = [0.02]")
         )
     with pytest.raises(ValueError, match="non-finite"):
         servo_calibration.parse_dynamics_profile(
-            AWD_TOML.replace(
-                "split_inertial = [0.02, -0.0003]",
-                "split_inertial = [0.02, inf]",
-            )
+            AWD_TOML.replace("split = [0.02, -0.0003]", "split = [0.02, inf]")
         )
 
 
@@ -250,7 +241,7 @@ def test_render_dynamics_toml_roundtrips_pairs():
     assert again["frame"] == p["frame"]
     assert again["pairs"] == AWD_PAIRS
     raw = tomllib.loads(text)
-    assert raw["version"] == 3
+    assert raw["version"] == 4
 
 
 def test_adapter_streams_pair_indices_and_split():
@@ -970,12 +961,9 @@ def test_refine_dynamics_split_refines_each_pair_on_its_own_drives():
     assert abs(sb - 1.15) < 0.03, sb
     base = servo_calibration.parse_dynamics_profile(AWD_TOML)
     for written, pair, scale in zip(raw["pair"], base["pairs"], (sa, sb)):
-        got = (
-            written["split_inertial"]
-            + written["split_viscous"]
-            + written["split_coulomb"]
+        assert written["split"] == pytest.approx(
+            [w * scale for w in pair["split"]]
         )
-        assert got == pytest.approx([w * scale for w in pair["split"]])
     assert raw["mass"] == pytest.approx(base["mass"])
     assert raw["viscous"] == pytest.approx(base["viscous"])
     assert raw["coulomb"] == pytest.approx(base["coulomb"])

@@ -468,14 +468,14 @@ impl Decode for SetStrainComp {
     }
 }
 
-/// One pair load-share record. `w` holds the six differential split weights in
-/// `[I0, I1, V0, V1, C0, C1]` order. `λ` is derived from the frame at the
-/// endpoint, so it is not on the wire.
+/// One pair load-share record. `w` holds the shared differential split
+/// `w0 + w1·p_belt` applied to the total belt force. `λ` is derived from the
+/// frame at the endpoint, so it is not on the wire.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DynamicsPair {
     pub first: u8,
     pub second: u8,
-    pub w: [f32; 6],
+    pub w: [f32; 2],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -550,11 +550,11 @@ impl Decode for SetDynamicsModel {
         for _ in 0..pairs_count {
             let first = get_u8(c)?;
             let second = get_u8(c)?;
-            let w = get_f32_vec(c, 6)?;
+            let w = get_f32_vec(c, 2)?;
             pairs.push(DynamicsPair {
                 first,
                 second,
-                w: [w[0], w[1], w[2], w[3], w[4], w[5]],
+                w: [w[0], w[1]],
             });
         }
         Ok(Self {

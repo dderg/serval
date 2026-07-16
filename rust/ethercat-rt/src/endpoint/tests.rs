@@ -618,7 +618,7 @@ fn strain_comp_clear_returns_held_targets_to_base() {
 }
 
 const BUZZ_DYNAMICS: &str = r#"
-version = 3
+version = 4
 axes = ["a", "b"]
 modes = ["a", "b"]
 frame = [[1.0, 0.0], [0.0, 1.0]]

@@ -6,9 +6,7 @@ pub const ERR_DYNAMICS_REJECTED: i32 = -862;
 #[derive(Debug, Deserialize)]
 struct PairTable {
     slots: Vec<String>,
-    split_inertial: [f64; 2],
-    split_viscous: [f64; 2],
-    split_coulomb: [f64; 2],
+    split: [f64; 2],
 }
 
 #[derive(Debug, Deserialize)]
@@ -28,13 +26,14 @@ struct ProfileFile {
 }
 
 /// A pair load-share spec as it arrives from the profile or the wire: two slot
-/// indices and the six differential weights in `[I0, I1, V0, V1, C0, C1]`
-/// order. `λ` is derived from the frame during validation, never supplied.
+/// indices and the shared differential split `w0 + w1·p_belt` applied to the
+/// total belt force. `λ` is derived from the frame during validation, never
+/// supplied.
 #[derive(Debug, Clone, Copy)]
 pub struct PairSpec {
     pub first: usize,
     pub second: usize,
-    pub w: [f32; 6],
+    pub w: [f32; 2],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -42,7 +41,7 @@ struct Pair {
     first: usize,
     second: usize,
     lambda: f32,
-    w: [f32; 6],
+    w: [f32; 2],
 }
 
 #[derive(Debug)]
@@ -75,7 +74,7 @@ pub struct DynamicsModel {
 impl DynamicsModel {
     pub fn from_toml_str(s: &str) -> Result<Self, ProfileError> {
         let f: ProfileFile = toml::from_str(s).map_err(|e| ProfileError::Parse(e.to_string()))?;
-        if f.version != 3 {
+        if f.version != 4 {
             return Err(ProfileError::Version(f.version));
         }
         let n_slots = f.axes.len();
@@ -102,14 +101,7 @@ impl DynamicsModel {
             pairs.push(PairSpec {
                 first,
                 second,
-                w: [
-                    p.split_inertial[0] as f32,
-                    p.split_inertial[1] as f32,
-                    p.split_viscous[0] as f32,
-                    p.split_viscous[1] as f32,
-                    p.split_coulomb[0] as f32,
-                    p.split_coulomb[1] as f32,
-                ],
+                w: [p.split[0] as f32, p.split[1] as f32],
             });
         }
         Self::validated(
@@ -292,7 +284,7 @@ impl DynamicsModel {
             None
         };
         let mut tau = 0.0f32;
-        let mut belt = [0.0f32; 3];
+        let mut belt = 0.0f32;
         for k in 0..self.n_modes {
             let row = &self.frame[k * self.n_slots..][..self.n_slots];
             let a_mode: f32 = row.iter().zip(acc_mm_s2).map(|(f, a)| f * a).sum();
@@ -306,24 +298,16 @@ impl DynamicsModel {
             }
             tau += row[slot] * mode_force;
             if let Some(p) = pair {
-                belt[0] += row[p.first] * f_inertial;
-                belt[1] += row[p.first] * f_viscous;
-                belt[2] += row[p.first] * f_coulomb;
+                belt += row[p.first] * (f_inertial + f_viscous + f_coulomb);
             }
         }
         if let Some(p) = pair {
-            tau += self.pair_differential(p, slot, &belt, pos_mm);
+            tau += self.pair_differential(p, slot, belt, pos_mm);
         }
         tau
     }
 
-    fn pair_differential(
-        &self,
-        p: &Pair,
-        slot: usize,
-        belt_share: &[f32; 3],
-        pos_mm: &[f32],
-    ) -> f32 {
+    fn pair_differential(&self, p: &Pair, slot: usize, belt_share: f32, pos_mm: &[f32]) -> f32 {
         let signs = self
             .drive_signs
             .as_ref()
@@ -332,9 +316,7 @@ impl DynamicsModel {
         let s_second = signs[p.second];
         let belt_sign = s_first + p.lambda * s_second;
         let p_belt = s_first * pos_mm[p.first];
-        let differential = (p.w[0] + p.w[1] * p_belt) * belt_sign * belt_share[0]
-            + (p.w[2] + p.w[3] * p_belt) * belt_sign * belt_share[1]
-            + (p.w[4] + p.w[5] * p_belt) * belt_sign * belt_share[2];
+        let differential = (p.w[0] + p.w[1] * p_belt) * belt_sign * belt_share;
         if slot == p.first {
             s_first * differential * 0.5
         } else {

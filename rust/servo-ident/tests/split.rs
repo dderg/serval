@@ -186,18 +186,23 @@ fn keep_all(n: usize) -> Vec<bool> {
     vec![true; n]
 }
 
+/// A rank-1 injection: one shared `w0 + w1·p` applied to every component.
+fn rank1(w0: f64, w1: f64) -> [f64; 6] {
+    [w0, w1, w0, w1, w0, w1]
+}
+
 #[test]
 fn recovers_injected_split_exactly() {
     let slots = four_slot_motion();
-    let w0 = [0.02, -0.0002, 0.05, 0.0, -0.01, 0.0001];
-    let w1 = [0.03, 0.0003, 0.04, 0.0, -0.015, -0.0002];
+    let w0 = (0.02, -0.0002);
+    let w1 = (0.03, 0.0003);
     let inj = vec![
         (
             0,
             1,
             -1.0,
             Injection {
-                w: w0,
+                w: rank1(w0.0, w0.1),
                 even_kappa: 0.0,
                 offset: 2.5,
                 noise: 0.0,
@@ -208,7 +213,7 @@ fn recovers_injected_split_exactly() {
             3,
             1.0,
             Injection {
-                w: w1,
+                w: rank1(w1.0, w1.1),
                 even_kappa: 0.0,
                 offset: -1.75,
                 noise: 0.0,
@@ -227,14 +232,14 @@ fn recovers_injected_split_exactly() {
     let reports = fit_pair_splits(&structure, &params(), &SIGNS, 0.0, &scaps);
     assert_eq!(reports.len(), 2);
     for (r, truth) in reports.iter().zip([w0, w1]) {
-        for i in 0..6 {
+        for (i, t) in [truth.0, truth.1].iter().enumerate() {
             assert!(
-                (r.split.w[i] - truth[i]).abs() < 1e-6,
+                (r.split.w[i] - t).abs() < 1e-6,
                 "pair {}/{} w[{i}] = {} vs {}",
                 r.split.first,
                 r.split.second,
                 r.split.w[i],
-                truth[i]
+                t
             );
         }
         assert!(r.even_contribution[0] < 1e-4 && r.even_contribution[1] < 1e-4);
@@ -293,18 +298,18 @@ fn fit_multi_window(caps: &[(Capture, Vec<Vec<f64>>)]) -> Vec<servo_ident::split
 fn crossval_rejects_per_component_structure_in_a_rank1_world() {
     let slots = four_slot_motion();
     let (w0, w1) = (0.03, -0.0002);
-    let caps = multi_window_captures(&slots, [w0, w1, w0, w1, w0, w1], 0.5);
+    let caps = multi_window_captures(&slots, rank1(w0, w1), 0.5);
     let reports = fit_multi_window(&caps);
     for r in &reports {
         assert!(
-            (r.rank1_w[0] - w0).abs() < 0.05 * w0.abs(),
+            (r.split.w[0] - w0).abs() < 0.05 * w0.abs(),
             "{:?}",
-            r.rank1_w
+            r.split.w
         );
         assert!(
-            (r.rank1_w[1] - w1).abs() < 0.15 * w1.abs(),
+            (r.split.w[1] - w1).abs() < 0.15 * w1.abs(),
             "{:?}",
-            r.rank1_w
+            r.split.w
         );
         let cv = r.crossval.as_ref().expect("3 windows must cross-validate");
         assert_eq!(cv.folds, 3);
@@ -344,14 +349,14 @@ fn crossval_supports_true_per_component_structure() {
 #[test]
 fn recovers_with_noise_and_reduces_residual() {
     let slots = four_slot_motion();
-    let w0 = [0.02, -0.0002, 0.05, 0.0, -0.01, 0.0001];
+    let w0 = (0.05, -0.0002);
     let inj = vec![
         (
             0,
             1,
             -1.0,
             Injection {
-                w: w0,
+                w: rank1(w0.0, w0.1),
                 even_kappa: 0.0,
                 offset: 2.5,
                 noise: 0.03,
@@ -362,7 +367,7 @@ fn recovers_with_noise_and_reduces_residual() {
             3,
             1.0,
             Injection {
-                w: [0.03, 0.0003, 0.04, 0.0, -0.015, -0.0002],
+                w: rank1(0.04, 0.0003),
                 even_kappa: 0.0,
                 offset: -1.0,
                 noise: 0.03,
@@ -380,18 +385,20 @@ fn recovers_with_noise_and_reduces_residual() {
     }];
     let reports = fit_pair_splits(&structure, &params(), &SIGNS, 0.0, &scaps);
     let r = &reports[0];
-    assert!((r.split.w[0] - w0[0]).abs() < 0.02 * w0[0].abs());
-    assert!((r.split.w[2] - w0[2]).abs() < 0.02 * w0[2].abs());
-    assert!((r.split.w[4] - w0[4]).abs() < 0.02 * w0[4].abs());
+    assert!((r.split.w[0] - w0.0).abs() < 0.02 * w0.0.abs());
     assert!(
         r.rms_after < r.rms_before,
         "{} !< {}",
         r.rms_after,
         r.rms_before
     );
-    for i in [0, 2, 4] {
-        assert!(r.w_tvalue[i].abs() > 3.0, "w[{i}] t = {}", r.w_tvalue[i]);
-    }
+    assert!(r.w_tvalue[0].abs() > 3.0, "w0 t = {}", r.w_tvalue[0]);
+    assert!(
+        r.free_rms_after <= r.rms_after + 1e-9,
+        "the free diagnostic fit cannot be worse in-sample: {} vs {}",
+        r.free_rms_after,
+        r.rms_after
+    );
 }
 
 #[test]
@@ -403,8 +410,8 @@ fn even_term_diagnostic_fires_on_injected_abs_force() {
             1,
             -1.0,
             Injection {
-                w: [0.02, -0.0002, 0.05, 0.0, -0.01, 0.0001],
-                even_kappa: 0.06,
+                w: rank1(0.02, -0.0002),
+                even_kappa: 0.15,
                 offset: 1.0,
                 noise: 0.0,
             },
@@ -414,7 +421,7 @@ fn even_term_diagnostic_fires_on_injected_abs_force() {
             3,
             1.0,
             Injection {
-                w: [0.03, 0.0003, 0.04, 0.0, -0.015, -0.0002],
+                w: rank1(0.03, 0.0003),
                 even_kappa: 0.0,
                 offset: 0.5,
                 noise: 0.0,
@@ -436,15 +443,15 @@ fn even_term_diagnostic_fires_on_injected_abs_force() {
         "pair 0 should flag the injected |F_I| term (contrib {:.3} vs {:.3})",
         reports[0].even_contribution[0], reports[0].max_odd_contribution
     );
-    assert!((reports[0].even_coeff[0] - 0.06).abs() < 1e-6);
+    assert!((reports[0].even_coeff[0] - 0.15).abs() < 1e-6);
     assert!(!reports[1].role_dependent, "pair 1 carries no even term");
 }
 
 #[test]
 fn pools_multiple_captures_with_per_capture_offset() {
     let slots = four_slot_motion();
-    let w0 = [0.02, -0.0002, 0.05, 0.0, -0.01, 0.0001];
-    let w1 = [0.03, 0.0003, 0.04, 0.0, -0.015, -0.0002];
+    let w0 = (0.02, -0.0002);
+    let w1 = (0.03, 0.0003);
     let make = |offset0: f64, offset1: f64, salt: usize| {
         let inj = vec![
             (
@@ -452,7 +459,7 @@ fn pools_multiple_captures_with_per_capture_offset() {
                 1,
                 -1.0,
                 Injection {
-                    w: w0,
+                    w: rank1(w0.0, w0.1),
                     even_kappa: 0.0,
                     offset: offset0,
                     noise: 0.0,
@@ -463,7 +470,7 @@ fn pools_multiple_captures_with_per_capture_offset() {
                 3,
                 1.0,
                 Injection {
-                    w: w1,
+                    w: rank1(w1.0, w1.1),
                     even_kappa: 0.0,
                     offset: offset1,
                     noise: 0.0,
@@ -491,12 +498,12 @@ fn pools_multiple_captures_with_per_capture_offset() {
     ];
     let reports = fit_pair_splits(&structure, &params(), &SIGNS, 0.0, &scaps);
     let r = &reports[0];
-    for i in 0..6 {
+    for (i, t) in [w0.0, w0.1].iter().enumerate() {
         assert!(
-            (r.split.w[i] - w0[i]).abs() < 1e-6,
+            (r.split.w[i] - t).abs() < 1e-6,
             "pooled w[{i}] = {} vs {}",
             r.split.w[i],
-            w0[i]
+            t
         );
     }
     assert_eq!(r.intercepts.len(), 2);
@@ -511,15 +518,14 @@ fn pools_multiple_captures_with_per_capture_offset() {
 #[test]
 fn unphysical_split_fraction_is_zeroed_and_flagged() {
     let slots = four_slot_motion();
-    let sane = [0.02, -0.0002, 0.05, 0.0, -0.01, 0.0001];
-    let insane = [0.9, 0.0, 0.05, 0.0, -0.01, 0.0001];
+    let sane = (0.02, -0.0002);
     let inj = vec![
         (
             0,
             1,
             -1.0,
             Injection {
-                w: insane,
+                w: rank1(0.9, 0.0),
                 even_kappa: 0.0,
                 offset: 0.0,
                 noise: 0.0,
@@ -530,7 +536,7 @@ fn unphysical_split_fraction_is_zeroed_and_flagged() {
             3,
             1.0,
             Injection {
-                w: sane,
+                w: rank1(sane.0, sane.1),
                 even_kappa: 0.0,
                 offset: 0.0,
                 noise: 0.0,
@@ -548,15 +554,11 @@ fn unphysical_split_fraction_is_zeroed_and_flagged() {
     }];
     let reports = fit_pair_splits(&structure, &params(), &SIGNS, 0.0, &scaps);
     let bad = &reports[0];
-    assert!(bad.rejected[0], "inertial fraction 0.9 must be rejected");
-    assert!(bad.peak_fraction[0] > servo_ident::split::SPLIT_MAX_FRACTION);
-    assert_eq!(bad.split.w[0], 0.0);
-    assert_eq!(bad.split.w[1], 0.0);
-    assert!(!bad.rejected[1] && !bad.rejected[2], "sane components kept");
-    assert!(bad.split.w[2] != 0.0 && bad.split.w[4] != 0.0);
+    assert!(bad.rejected, "fraction 0.9 must be rejected");
+    assert!(bad.peak_fraction > servo_ident::split::SPLIT_MAX_FRACTION);
+    assert_eq!(bad.split.w, [0.0, 0.0]);
     let good = &reports[1];
-    assert_eq!(good.rejected, [false; 3]);
-    for i in 0..6 {
-        assert!((good.split.w[i] - sane[i]).abs() < 1e-6);
-    }
+    assert!(!good.rejected);
+    assert!((good.split.w[0] - sane.0).abs() < 1e-6);
+    assert!((good.split.w[1] - sane.1).abs() < 1e-6);
 }

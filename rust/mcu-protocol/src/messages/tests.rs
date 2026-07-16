@@ -134,14 +134,14 @@ fn set_dynamics_model_roundtrip() {
         pairs: vec![DynamicsPair {
             first: 0,
             second: 1,
-            w: [0.02, -0.0003, 0.05, 0.0001, -0.01, 0.0002],
+            w: [0.02, -0.0003],
         }],
     };
     assert_eq!(roundtrip(&v), v);
-    // slots+modes (2) + f32 arrays (14*4) + pairs_count (1) + one pair (2 + 6*4)
+    // slots+modes (2) + f32 arrays (14*4) + pairs_count (1) + one pair (2 + 2*4)
     assert_eq!(
         v.encoded_to_vec().len(),
-        2 + (8 + 2 + 2 + 2) * 4 + 1 + (2 + 6 * 4)
+        2 + (8 + 2 + 2 + 2) * 4 + 1 + (2 + 2 * 4)
     );
     let r = SetDynamicsModelResponse { result: -862 };
     assert_eq!(roundtrip(&r), r);

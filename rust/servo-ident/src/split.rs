@@ -1,21 +1,23 @@
 //! Pair load-share differential fit: two motors on one belt share reaction
-//! forces by span stiffness, position-dependently. For each frame pair we
-//! regress the measured torque differential `D = s_i·τ_i − s_j·τ_j` on the
-//! fitted mode model's per-component belt forces scaled by `{1, p_belt}`,
-//! yielding six odd coefficients per component the endpoint applies
-//! antisymmetrically. Even (`|F|`) terms and per-capture intercepts are fit as
-//! nuisances and reported, never fed forward: a large even contribution is a
+//! forces by span stiffness, position-dependently. Elastic span sharing is
+//! force-agnostic — the spans transmit whatever force the carriage needs, so
+//! pure geometry predicts ONE shared `w(p) = w0 + w1·p_belt` for all force
+//! components. For each frame pair we regress the measured torque
+//! differential `D = s_i·τ_i − s_j·τ_j` on the fitted mode model's TOTAL
+//! belt force scaled by `{1, p_belt}`; those two rank-1 coefficients are what
+//! the profile carries and the endpoint applies antisymmetrically. Even
+//! (`|F|`) terms and per-capture intercepts are fit as nuisances and
+//! reported, never fed forward: a large even contribution is a
 //! role-dependent split (tension/pulley-drag asymmetry), not the symmetric
 //! span-stiffness effect the profile carries.
 //!
-//! Elastic span sharing is force-agnostic — the spans transmit whatever force
-//! the carriage needs, so pure geometry predicts ONE shared `w(p)` for all
-//! three components (rank-1). Per-component structure beyond that has no
-//! mechanism and is suspect (V/C column collinearity, role leakage, residual
-//! strain). Each pair therefore also gets a rank-1 constrained fit and, with
-//! ≥2 capture windows, a leave-one-window-out comparison of held-out
-//! prediction: if shared `w(p)` predicts unseen windows as well as the free
-//! per-component fit, the extra structure is noise.
+//! Per-component structure beyond the shared `w(p)` has no mechanism and is
+//! suspect (V/C column collinearity, role leakage, residual strain), so it is
+//! never fed forward — but each pair still gets the free six-coefficient
+//! per-component fit as a diagnostic and, with ≥2 capture windows, a
+//! leave-one-window-out comparison of held-out prediction: if the free fit
+//! predicts unseen windows clearly better than shared `w(p)`, the rank-1
+//! constraint is discarding real structure and the report says so.
 
 use crate::capture::Capture;
 use crate::linalg::solve_spd;
@@ -49,31 +51,34 @@ pub struct SplitCrossval {
 
 #[derive(Debug)]
 pub struct PairReport {
+    /// The rank-1 shared `w(p)` fit — the only split the profile carries.
     pub split: PairSplit,
     pub lambda: f64,
-    pub w_stderr: [f64; 6],
-    pub w_tvalue: [f64; 6],
+    pub w_stderr: [f64; 2],
+    pub w_tvalue: [f64; 2],
     /// Diagnostic `|F_belt^I|`, `|F_belt^V|` coefficients — not written.
     pub even_coeff: [f64; 2],
     pub even_contribution: [f64; 2],
     pub max_odd_contribution: f64,
     pub intercepts: Vec<f64>,
     pub rms_before: f64,
+    /// In-sample rms(D) after the rank-1 odd model + intercepts (even
+    /// nuisances excluded).
     pub rms_after: f64,
     pub role_dependent: bool,
     pub samples: usize,
-    /// Peak |w0 + w1·p| over the captured position range, per component
-    /// [inertial, viscous, coulomb] — computed BEFORE the cap zeroed anything.
-    pub peak_fraction: [f64; 3],
-    /// Components zeroed in `split` because `peak_fraction` exceeded
-    /// `SPLIT_MAX_FRACTION` (identifiability failure of the stroke plan).
-    pub rejected: [bool; 3],
-    /// Rank-1 constrained fit: one shared `w0 + w1·p` applied to the total
-    /// belt force — the pure span-stiffness model.
-    pub rank1_w: [f64; 2],
-    /// In-sample rms(D) after the rank-1 odd model + intercepts (same
-    /// convention as `rms_after`: even nuisances excluded).
-    pub rank1_rms_after: f64,
+    /// Peak |w0 + w1·p| over the captured position range — computed BEFORE
+    /// the cap zeroed anything.
+    pub peak_fraction: f64,
+    /// `split` zeroed because `peak_fraction` exceeded `SPLIT_MAX_FRACTION`
+    /// (identifiability failure of the stroke plan).
+    pub rejected: bool,
+    /// Diagnostic free per-component fit `[I0, I1, V0, V1, C0, C1]` — never
+    /// fed forward; per-component structure has no physical mechanism.
+    pub free_w: [f64; 6],
+    pub free_tvalue: [f64; 6],
+    /// In-sample rms(D) after the free odd model + intercepts.
+    pub free_rms_after: f64,
     /// Present with ≥2 capture windows (and ≥2 usable folds).
     pub crossval: Option<SplitCrossval>,
 }
@@ -87,7 +92,7 @@ const DEADBAND_MM_S: f64 = crate::model::COULOMB_DEADBAND_MM_S;
 pub const SPLIT_MAX_FRACTION: f64 = 0.6;
 
 /// Print the per-pair fit report to stderr and return the splits worth
-/// writing to the profile (a pair with every component rejected is omitted).
+/// writing to the profile (a rejected pair is omitted).
 pub fn report_splits(reports: &[PairReport], axes: &[&str]) -> Vec<PairSplit> {
     const LABELS: [&str; 6] = ["I0", "I1", "V0", "V1", "C0", "C1"];
     let mut out = Vec::with_capacity(reports.len());
@@ -95,20 +100,25 @@ pub fn report_splits(reports: &[PairReport], axes: &[&str]) -> Vec<PairSplit> {
         let a = axes[r.split.first];
         let b = axes[r.split.second];
         eprintln!(
-            "pair {a}/{b} (λ={:+.0}): rms(D) {:.2} -> {:.2} (odd model), {} samples",
+            "pair {a}/{b} (λ={:+.0}): rms(D) {:.2} -> {:.2} (shared w(p) model), {} samples",
             r.lambda, r.rms_before, r.rms_after, r.samples
         );
-        for i in 0..6 {
+        for i in 0..2 {
             eprintln!(
-                "  w_{} = {:+.6e}  (stderr {:.2e}, t = {:+.2})",
-                LABELS[i], r.split.w[i], r.w_stderr[i], r.w_tvalue[i]
+                "  w{i} = {:+.6e}  (stderr {:.2e}, t = {:+.2})",
+                r.split.w[i], r.w_stderr[i], r.w_tvalue[i]
             );
         }
         eprintln!(
-            "  rank-1 check: shared w(p) = {:+.4e} {:+.4e}/mm, in-sample rms(D) {:.2} \
-             (per-component {:.2})",
-            r.rank1_w[0], r.rank1_w[1], r.rank1_rms_after, r.rms_after
+            "  diag free per-component fit: in-sample rms(D) {:.2} — not fed forward",
+            r.free_rms_after
         );
+        for i in 0..6 {
+            eprintln!(
+                "    w_{} = {:+.6e}  (t = {:+.2})",
+                LABELS[i], r.free_w[i], r.free_tvalue[i]
+            );
+        }
         match &r.crossval {
             Some(cv) => {
                 eprintln!(
@@ -118,15 +128,9 @@ pub fn report_splits(reports: &[PairReport], axes: &[&str]) -> Vec<PairSplit> {
                 );
                 if cv.rms_free < 0.95 * cv.rms_rank1 {
                     eprintln!(
-                        "  per-component split supported: it predicts held-out windows \
-                         >=5% better than shared w(p)"
-                    );
-                } else {
-                    eprintln!(
-                        "  WARNING pair {a}/{b}: shared w(p) predicts held-out windows \
-                         as well as the per-component fit — the per-component structure \
-                         is likely noise (V/C collinearity, role leakage, or residual \
-                         strain), not physics"
+                        "  WARNING pair {a}/{b}: the free per-component fit predicts \
+                         held-out windows >=5% better than shared w(p) — the rank-1 \
+                         constraint may be discarding real structure"
                     );
                 }
             }
@@ -150,26 +154,18 @@ pub fn report_splits(reports: &[PairReport], axes: &[&str]) -> Vec<PairSplit> {
                  tension/pulley drag; not fed forward"
             );
         }
-        for (c, name) in ["inertial", "viscous", "coulomb"].iter().enumerate() {
-            if r.rejected[c] {
-                eprintln!(
-                    "  WARNING pair {a}/{b}: {name} split rejected — |w(p)| reaches \
-                     {:.2} over the captured range (cap {SPLIT_MAX_FRACTION}); this \
-                     stroke plan cannot identify it (position windows too narrow or \
-                     accel confounded with position); component zeroed. Capture several \
-                     SERVO_MEASURE_INERTIA windows at different positions to \
-                     identify it.",
-                    r.peak_fraction[c],
-                );
-            }
-        }
-        if r.split.w.iter().any(|&v| v != 0.0) {
-            out.push(r.split.clone());
-        } else {
+        if r.rejected {
             eprintln!(
-                "  pair {a}/{b}: every split component rejected — pair omitted \
-                 from the profile"
+                "  WARNING pair {a}/{b}: split rejected — |w(p)| reaches \
+                 {:.2} over the captured range (cap {SPLIT_MAX_FRACTION}); this \
+                 stroke plan cannot identify it (position windows too narrow or \
+                 accel confounded with position); pair omitted from the profile. \
+                 Capture several SERVO_MEASURE_INERTIA windows at different \
+                 positions to identify it.",
+                r.peak_fraction,
             );
+        } else {
+            out.push(r.split.clone());
         }
     }
     out
@@ -519,12 +515,36 @@ pub fn fit_pair_splits(
                 cr
             })
             .collect();
-        let (cols, y) = design(&cap_rows, None, false);
-        let total = y.len();
-        let fit = ols(&cols, &y).unwrap_or_else(|| {
+        let (cols_free, y_free) = design(&cap_rows, None, false);
+        let total = y_free.len();
+        let free_fit = ols(&cols_free, &y_free).unwrap_or_else(|| {
             panic!(
                 "pair {first},{second}: differential regression is rank-deficient \
                  ({total} kept rows) — the pair was never excited independently"
+            )
+        });
+        let free_w: [f64; 6] = std::array::from_fn(|i| free_fit.theta[i]);
+        let free_tvalue: [f64; 6] = std::array::from_fn(|i| free_fit.theta[i] / free_fit.stderr[i]);
+        let mut free_rss = 0.0;
+        for row in 0..total {
+            let mut pred = 0.0;
+            for i in 0..FREE_ODD {
+                pred += free_w[i] * cols_free[i][row];
+            }
+            for ic in 0..n_cap {
+                pred += free_fit.theta[FREE_ODD + 2 + ic] * cols_free[FREE_ODD + 2 + ic][row];
+            }
+            let e = y_free[row] - pred;
+            free_rss += e * e;
+        }
+        let free_rms_after = (free_rss / total.max(1) as f64).sqrt();
+
+        let (cols, y) = design(&cap_rows, None, true);
+        let fit = ols(&cols, &y).unwrap_or_else(|| {
+            panic!(
+                "pair {first},{second}: rank-1 shared-w(p) regression is \
+                 rank-deficient even though the free fit succeeded — the \
+                 summed force columns collapsed"
             )
         });
 
@@ -540,30 +560,24 @@ pub fn fit_pair_splits(
             }
         }
 
-        let mut w: [f64; 6] = std::array::from_fn(|i| fit.theta[i]);
-        let peak_fraction: [f64; 3] = std::array::from_fn(|c| {
-            let (w0, w1) = (w[2 * c], w[2 * c + 1]);
-            (w0 + w1 * p_min).abs().max((w0 + w1 * p_max).abs())
-        });
-        let rejected: [bool; 3] = std::array::from_fn(|c| peak_fraction[c] > SPLIT_MAX_FRACTION);
-        for c in 0..3 {
-            if rejected[c] {
-                w[2 * c] = 0.0;
-                w[2 * c + 1] = 0.0;
-            }
+        let mut w = [fit.theta[0], fit.theta[1]];
+        let peak_fraction = (w[0] + w[1] * p_min).abs().max((w[0] + w[1] * p_max).abs());
+        let rejected = peak_fraction > SPLIT_MAX_FRACTION;
+        if rejected {
+            w = [0.0, 0.0];
         }
-        let w_stderr: [f64; 6] = std::array::from_fn(|i| fit.stderr[i]);
-        let w_tvalue: [f64; 6] = std::array::from_fn(|i| fit.theta[i] / fit.stderr[i]);
-        let even_coeff = [fit.theta[6], fit.theta[7]];
-        let intercepts: Vec<f64> = (0..n_cap).map(|c| fit.theta[N_FORCE_COLS + c]).collect();
+        let w_stderr = [fit.stderr[0], fit.stderr[1]];
+        let w_tvalue = [fit.theta[0] / fit.stderr[0], fit.theta[1] / fit.stderr[1]];
+        let even_coeff = [fit.theta[RANK1_ODD], fit.theta[RANK1_ODD + 1]];
+        let intercepts: Vec<f64> = (0..n_cap).map(|c| fit.theta[RANK1_ODD + 2 + c]).collect();
 
         let col_rms = |i: usize| rms(&cols[i]);
-        let max_odd_contribution = (0..6)
+        let max_odd_contribution = (0..RANK1_ODD)
             .map(|i| w[i].abs() * col_rms(i))
             .fold(0.0_f64, f64::max);
         let even_contribution = [
-            even_coeff[0].abs() * col_rms(6),
-            even_coeff[1].abs() * col_rms(7),
+            even_coeff[0].abs() * col_rms(RANK1_ODD),
+            even_coeff[1].abs() * col_rms(RANK1_ODD + 1),
         ];
         let role_dependent = even_contribution
             .iter()
@@ -572,37 +586,14 @@ pub fn fit_pair_splits(
         let rms_before = rms(&y);
         let mut rss_after = 0.0;
         for row in 0..total {
-            let mut pred = 0.0;
-            for i in 0..6 {
-                pred += w[i] * cols[i][row];
-            }
+            let mut pred = w[0] * cols[0][row] + w[1] * cols[1][row];
             for (ic, intercept) in intercepts.iter().enumerate() {
-                pred += intercept * cols[N_FORCE_COLS + ic][row];
+                pred += intercept * cols[RANK1_ODD + 2 + ic][row];
             }
             let e = y[row] - pred;
             rss_after += e * e;
         }
         let rms_after = (rss_after / total.max(1) as f64).sqrt();
-
-        let (cols_r1, y_r1) = design(&cap_rows, None, true);
-        let rank1_fit = ols(&cols_r1, &y_r1).unwrap_or_else(|| {
-            panic!(
-                "pair {first},{second}: rank-1 shared-w(p) regression is \
-                 rank-deficient even though the free fit succeeded — the \
-                 summed force columns collapsed"
-            )
-        });
-        let rank1_w = [rank1_fit.theta[0], rank1_fit.theta[1]];
-        let mut rank1_rss = 0.0;
-        for row in 0..y_r1.len() {
-            let mut pred = rank1_w[0] * cols_r1[0][row] + rank1_w[1] * cols_r1[1][row];
-            for ic in 0..n_cap {
-                pred += rank1_fit.theta[RANK1_ODD + 2 + ic] * cols_r1[RANK1_ODD + 2 + ic][row];
-            }
-            let e = y_r1[row] - pred;
-            rank1_rss += e * e;
-        }
-        let rank1_rms_after = (rank1_rss / y_r1.len().max(1) as f64).sqrt();
 
         reports.push(PairReport {
             split: PairSplit { first, second, w },
@@ -619,8 +610,9 @@ pub fn fit_pair_splits(
             samples: total,
             peak_fraction,
             rejected,
-            rank1_w,
-            rank1_rms_after,
+            free_w,
+            free_tvalue,
+            free_rms_after,
             crossval: crossval(&cap_rows),
         });
     }

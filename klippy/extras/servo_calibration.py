@@ -185,9 +185,9 @@ def parse_dynamics_profile(text: str) -> dict[str, Any]:
             "parsing dynamics profiles requires Python 3.11+ (tomllib)"
         )
     data = tomllib.loads(text)
-    if data.get("version") != 3:
+    if data.get("version") != 4:
         raise ValueError(
-            "dynamics profile version must be 3 (got %r) - refit with "
+            "dynamics profile version must be 4 (got %r) - refit with "
             "SERVO_FIT_DYNAMICS" % (data.get("version"),)
         )
     axes = data.get("axes")
@@ -277,23 +277,22 @@ def _parse_dynamics_pairs(
                     "motor %r appears in more than one pair" % (name,)
                 )
         claimed.update(slots)
-        split: list[float] = []
-        for key in ("split_inertial", "split_viscous", "split_coulomb"):
-            vec = entry.get(key)
-            if not isinstance(vec, list) or len(vec) != 2:
-                raise ValueError("pair %s must list exactly 2 values" % (key,))
-            for v in vec:
-                if (
-                    isinstance(v, bool)
-                    or not isinstance(v, (int, float))
-                    or not math.isfinite(v)
-                ):
-                    raise ValueError(
-                        "pair %s contains a non-numeric or non-finite value: "
-                        "%r" % (key, v)
-                    )
-            split += [float(vec[0]), float(vec[1])]
-        pairs.append({"slots": [str(a), str(b)], "split": split})
+        vec = entry.get("split")
+        if not isinstance(vec, list) or len(vec) != 2:
+            raise ValueError("pair split must list exactly 2 values")
+        for v in vec:
+            if (
+                isinstance(v, bool)
+                or not isinstance(v, (int, float))
+                or not math.isfinite(v)
+            ):
+                raise ValueError(
+                    "pair split contains a non-numeric or non-finite value: "
+                    "%r" % (v,)
+                )
+        pairs.append(
+            {"slots": [str(a), str(b)], "split": [float(v) for v in vec]}
+        )
     return pairs
 
 
@@ -361,7 +360,7 @@ def render_dynamics_toml(
         return "[%s]" % (", ".join(num(v) for v in values),)
 
     lines = [
-        "version = 3",
+        "version = 4",
         "axes = %s" % (json.dumps(profile["axes"]),),
         "modes = %s" % (json.dumps(profile["modes"]),),
         "frame = [%s]" % (", ".join(vec(row) for row in profile["frame"]),),
@@ -378,15 +377,10 @@ def render_dynamics_toml(
         )
     lines.append("refined_run = %s" % (json.dumps(run_dir),))
     for pair in profile.get("pairs", []):
-        inertial = pair["split"][0:2]
-        viscous = pair["split"][2:4]
-        coulomb = pair["split"][4:6]
         lines += [
             "[[pair]]",
             "slots = %s" % (json.dumps(list(pair["slots"])),),
-            "split_inertial = %s" % (vec(inertial),),
-            "split_viscous = %s" % (vec(viscous),),
-            "split_coulomb = %s" % (vec(coulomb),),
+            "split = %s" % (vec(pair["split"]),),
         ]
     return "\n".join(lines) + "\n"
 

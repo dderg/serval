@@ -416,7 +416,7 @@ fn set_dynamics_model_matches_schema_layout() {
         pairs: vec![DynamicsPair {
             first: 0,
             second: 1,
-            w: [0.02, -0.0003, 0.05, 0.0001, -0.01, 0.0002],
+            w: [0.02, -0.0003],
         }],
     };
     reference_decode("SetDynamicsModel", &msg.encoded_to_vec()).unwrap();
