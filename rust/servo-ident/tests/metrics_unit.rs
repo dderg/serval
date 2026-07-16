@@ -110,9 +110,9 @@ fn move_direction_and_signed_mean_use_only_the_moving_window() {
     let mut target = vec![0i64; n];
     for k in 1..n {
         let step = if (20..60).contains(&k) {
-            1
+            2
         } else if (100..140).contains(&k) {
-            -1
+            -2
         } else {
             0
         };
@@ -149,9 +149,9 @@ fn merged_zero_net_move_has_zero_direction() {
     let n = 200;
     let mut target = vec![0i64; n];
     for k in 1..n {
-        let step = if (20..60).contains(&k) {
+        let step = if (20..80).contains(&k) {
             1
-        } else if (70..110).contains(&k) {
+        } else if (90..150).contains(&k) {
             -1
         } else {
             0
@@ -164,4 +164,26 @@ fn merged_zero_net_move_has_zero_direction() {
     assert_eq!(metrics.moves.len(), 1);
     assert_eq!(metrics.moves[0].direction, 0);
     assert_eq!(metrics.moves[0].ferr_mean_moving, 3.0);
+}
+
+#[test]
+fn target_ripple_inside_the_settle_band_is_not_a_move() {
+    let fs = 1000.0;
+    let n = 400;
+    let mut target = vec![0i64; n];
+    for k in 1..n {
+        let step = if (20..80).contains(&k) {
+            100
+        } else if (150..350).contains(&k) {
+            [1, -1, 0, -1, 1, 0][k % 6]
+        } else {
+            0
+        };
+        target[k] = target[k - 1] + step;
+    }
+    let d = series_from(vec![0; n], target, vec![0; n], vec![2; n]);
+
+    let metrics = compute_metrics(&d, 50, 1400, fs, 0).unwrap();
+    assert_eq!(metrics.moves.len(), 1);
+    assert_eq!(metrics.moves[0].direction, 1);
 }

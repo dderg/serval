@@ -222,7 +222,15 @@ pub fn compute_metrics(
     let hold = (SETTLE_HOLD_MS * fs / 1000.0).round_ties_even() as usize;
     let ferr = &d.following_error;
     let band = settle_band as f64;
-    let segs = target_motion_segments(&d.target, fs);
+    let segs: Vec<(usize, usize)> = target_motion_segments(&d.target, fs)
+        .into_iter()
+        .filter(|&(s, e)| {
+            let window = &d.target[s - 1..e];
+            let lo = window.iter().min().expect("segment is nonempty");
+            let hi = window.iter().max().expect("segment is nonempty");
+            hi - lo > settle_band
+        })
+        .collect();
     let mut moves = Vec::with_capacity(segs.len());
     for (idx, &(s, e)) in segs.iter().enumerate() {
         let post_end = if idx + 1 < segs.len() {
