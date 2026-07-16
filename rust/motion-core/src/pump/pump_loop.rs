@@ -8,6 +8,7 @@ use crossbeam_channel::{Receiver, Select, TryRecvError};
 use super::diag;
 use super::drip::DripCohort;
 use super::junction::{JunctionTracker, check_junction_position_continuity};
+use super::memstat::MemPressureProbe;
 use super::messages::{
     EnqueueMsg, HeartbeatMsg, HistoryRecorder, PieceSink, PumpCallbacks, PumpMsg, SendError,
 };
@@ -100,6 +101,7 @@ pub(super) struct Pump<S> {
     pub(super) holding_ahead: bool,
     pub(super) data_open: bool,
     pub(super) retirement_stall: RetirementStallWatch,
+    pub(super) mem_probe: MemPressureProbe,
 }
 
 impl<S: PieceSink> Pump<S> {
@@ -460,11 +462,22 @@ impl<S: PieceSink> Pump<S> {
         }
     }
 
-    fn send_bundle_logged(&self, mcu_id: u32, bundle: &[AxisFrame]) -> Result<(), SendError> {
+    fn send_bundle_logged(&mut self, mcu_id: u32, bundle: &[AxisFrame]) -> Result<(), SendError> {
+        let mem_before = self.mem_probe.sample();
         let send_started = Instant::now();
         let send_result = self.sink.send_mcu_frames(mcu_id, bundle);
         let send_elapsed = send_started.elapsed();
         if send_elapsed >= Duration::from_millis(5) {
+            let mem_after = self.mem_probe.sample();
+            let (majflt_delta, vm_swap_before_kb, vm_swap_after_kb) = match (mem_before, mem_after)
+            {
+                (Some(before), Some(after)) => (
+                    Some(after.majflt.saturating_sub(before.majflt)),
+                    Some(before.vm_swap_kb),
+                    Some(after.vm_swap_kb),
+                ),
+                _ => (None, None, None),
+            };
             tracing::warn!(
                 subsystem = "motion",
                 event = "pump_send_blocked",
@@ -472,11 +485,17 @@ impl<S: PieceSink> Pump<S> {
                 elapsed_ms = send_elapsed.as_millis() as u64,
                 frames = bundle.len(),
                 ok = send_result.is_ok(),
-                "[pump-send] send_mcu_frames blocked {}ms on mcu {} ({} frames, ok={})",
+                majflt_delta,
+                vm_swap_before_kb,
+                vm_swap_after_kb,
+                "[pump-send] send_mcu_frames blocked {}ms on mcu {} ({} frames, ok={}, majflt_delta={:?}, vm_swap_kb={:?}->{:?})",
                 send_elapsed.as_millis() as u64,
                 mcu_id,
                 bundle.len(),
-                send_result.is_ok()
+                send_result.is_ok(),
+                majflt_delta,
+                vm_swap_before_kb,
+                vm_swap_after_kb
             );
         }
         send_result
@@ -719,6 +738,7 @@ pub fn run_pump<S: PieceSink>(
         holding_ahead: false,
         data_open: true,
         retirement_stall: RetirementStallWatch::new(RETIREMENT_STALL_FATAL),
+        mem_probe: MemPressureProbe::new(),
     };
     pump.run(control_rx, data_rx);
 }

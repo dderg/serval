@@ -882,6 +882,7 @@ fn stalled_queue_pump(
         holding_ahead: false,
         data_open: true,
         retirement_stall: super::stall::RetirementStallWatch::new(retirement_stall_fatal),
+        mem_probe: super::memstat::MemPressureProbe::new(),
     }
 }
 
