@@ -22,8 +22,8 @@ session log.
 One-off (SSH session):
 
 ```sh
-cd rust && cargo build --release -p servo-ident
-rust/target/release/servo-cal serve --dir ~/printer_data/logs/servo_captures --port 8085
+cd rust && cargo build --profile snapshot -p servo-ident
+rust/target/snapshot/servo-cal serve --dir ~/printer_data/logs/servo_captures --port 8085
 ```
 
 Permanent: from the dev machine,
@@ -44,7 +44,7 @@ when the checked-out `~/klipper` has no `rust/servo-ident`, builds and
 serves when it does, and exits whenever HEAD moves — `Restart=always`
 turns a flash-script pull or branch switch into an automatic
 rebuild-and-restart. The binary it builds is the same one klippy resolves
-for `servo-cal analyze` (`~/klipper/rust/target/release/servo-cal`), so
+for `servo-cal analyze` (`~/klipper/rust/target/snapshot/servo-cal`), so
 one build feeds both.
 
 Open `http://<bench-host>:8085/` in a browser. The run strips poll
@@ -87,8 +87,8 @@ notch-tuning attempts that share the same captures but differ in the
 then runs `analyze` on each:
 
 ```sh
-rust/target/release/servo-cal demo /tmp/servo-cal-demo
-rust/target/release/servo-cal serve --dir /tmp/servo-cal-demo --port 8085
+rust/target/snapshot/servo-cal demo /tmp/servo-cal-demo
+rust/target/snapshot/servo-cal serve --dir /tmp/servo-cal-demo --port 8085
 ```
 
 Open `http://127.0.0.1:8085/` — the gains page preselects the newest

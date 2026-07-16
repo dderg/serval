@@ -356,7 +356,7 @@ def test_missing_binary_is_command_error():
     sc, _ = make_sc()
     sc.servo_cal_binary = "/nonexistent/servo-cal"
     with pytest.raises(
-        RuntimeError, match="cargo build --release -p servo-ident"
+        RuntimeError, match="cargo build --profile snapshot -p servo-ident"
     ):
         sc.cmd_SERVO_MEASURE_TRACKING(FakeGcmd(AXIS="X"))
 

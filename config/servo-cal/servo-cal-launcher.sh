@@ -6,7 +6,7 @@
 # Behavior, driven by the systemd unit's Restart=always:
 #   - checked-out branch has no rust/servo-ident -> idle and re-check
 #     (the unit stays green, nothing serves)
-#   - branch has it -> cargo build --release -p servo-ident, then serve
+#   - branch has it -> cargo build --profile snapshot -p servo-ident, then serve
 #   - HEAD moves (flash script pull / checkout) or the server dies ->
 #     exit, systemd relaunches, the new code gets rebuilt and served
 #
@@ -37,9 +37,9 @@ PATH="$HOME/.cargo/bin:$PATH"
 export PATH
 start_rev=$(head_rev)
 echo "servo-cal: building at $start_rev"
-cargo build --release --manifest-path "$KLIPPER/rust/Cargo.toml" -p servo-ident
+cargo build --profile snapshot --manifest-path "$KLIPPER/rust/Cargo.toml" -p servo-ident
 
-"$KLIPPER/rust/target/release/servo-cal" serve \
+"$KLIPPER/rust/target/snapshot/servo-cal" serve \
     --dir "$CAPTURES" --port "$PORT" --host "$HOST" &
 server=$!
 trap 'kill "$server" 2>/dev/null || true' EXIT INT TERM

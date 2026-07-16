@@ -180,7 +180,7 @@ servo-cal serve --dir <captures_root> [--port 8085]
 
 Exit non-zero with a one-line reason on any malformed input (fail loud, no
 partial results.json). klippy resolves the binary at
-`rust/target/release/servo-cal` relative to the repo root, overridable via
+`rust/target/snapshot/servo-cal` relative to the repo root, overridable via
 `[servo_calibration] servo_cal_binary:`.
 
 `serve` endpoints: `GET /api/runs` (list: name, mtime, experiment, verdict

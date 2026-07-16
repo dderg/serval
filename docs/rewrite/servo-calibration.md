@@ -53,11 +53,11 @@ they are configured or passed.
 | `accel_chip` | — | accelerometer section name (e.g. `adxl345`); when set, `SERVO_CALIBRATE_GAINS` also records vibration per step (`ACCEL_CHIP=`) |
 | `captures_root` | `~/printer_data/logs/servo_captures` | parent directory for experiment run directories |
 | `journal_params` | — | comma list of drive SDO addresses (`addr[:type]`, e.g. `0x2001.0x31:u16`) read back from every captured drive at run start and recorded under `ambient.journal_params` in the manifest — the campaign's varied registers (notch mode, etc.) |
-| `servo_cal_binary` | `rust/target/release/servo-cal` | path to the `servo-cal` analysis binary |
+| `servo_cal_binary` | `rust/target/snapshot/servo-cal` | path to the `servo-cal` analysis binary |
 
 Prerequisites: the EtherCAT servo stack (`[servo_param]`, `[servo_capture]`)
 must be configured, and the `servo-cal` binary must be built once on the host
-with `cargo build --release -p servo-ident` (from `rust/`).
+with `cargo build --profile snapshot -p servo-ident` (from `rust/`).
 
 ## Tuning order
 

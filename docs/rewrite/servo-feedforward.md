@@ -161,7 +161,7 @@ The whole loop is driven from the console by the `SERVO_*` commands the
 to `printer.cfg`; the motor datasheet values, safe stroke window, drive
 names, and excitation grid go in that section as overridable defaults). One-
 time prerequisite: build the fitter on the host with
-`cargo build --release -p servo-ident` (from `rust/`).
+`cargo build --profile snapshot -p servo-ident` (from `rust/`).
 
 ### Step 1 — excite, capture, and fit in one command
 

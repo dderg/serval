@@ -5,7 +5,7 @@
 #   klippy/_config_doc.so     config parser (klippy refuses to start without it)
 #   klippy/_motion_engine.so  motion engine cdylib
 # and, when requested or auto-detected, the bench-side binaries:
-#   rust/target/release/servo-ident
+#   rust/target/snapshot/servo-ident
 #   rust/target/release/ethercat-rt        (--ethercat hw; needs IgH libs)
 #   rust/target/release/ethercat-rt-stub   (--ethercat stub)
 #
@@ -59,7 +59,7 @@ require klippy/_motion_engine.so
 
 if [ "$BENCH" = 1 ]; then
     make -f Makefile.rust servo-ident
-    require rust/target/release/servo-ident
+    require rust/target/snapshot/servo-ident
 
     if [ "$ETHERCAT" = auto ]; then
         if [ -d /opt/etherlab ]; then ETHERCAT=hw; else ETHERCAT=stub; fi

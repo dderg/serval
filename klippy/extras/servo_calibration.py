@@ -1035,7 +1035,7 @@ class ServoCalibration:
         self.dynamics_dir = os.path.expanduser(DEFAULT_DYNAMICS_DIR)
         self.servo_cal_binary = config.get(
             "servo_cal_binary",
-            os.path.join(REPO_ROOT, "rust", "target", "release", "servo-cal"),
+            os.path.join(REPO_ROOT, "rust", "target", "snapshot", "servo-cal"),
         )
         self.journal_params = self._parse_journal_params(config)
         self._active_run: ExperimentRun | None = None
@@ -1231,7 +1231,7 @@ class ServoCalibration:
         if not os.path.exists(self.servo_cal_binary):
             raise gcmd.error(
                 "servo-cal binary not found at %s - build it with: "
-                "cargo build --release -p servo-ident"
+                "cargo build --profile snapshot -p servo-ident"
                 % (self.servo_cal_binary,)
             )
         return self.servo_cal_binary
