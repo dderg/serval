@@ -368,9 +368,14 @@ profile's per-mode **mass** (`TERM=MASS`, default), **viscous**
 (`TERM=VISCOUS`) or **coulomb** (`TERM=COULOMB`) vector, or the pair
 load-share coefficients (`TERM=SPLIT`: one sequential phase per belt
 pair, each scaling that pair's six `[[pair]]` coefficients and scored on
-mean ferr_peak over **that pair's drives only** — the split moves error
-between pair mates while leaving the pair total invariant, so a
-whole-machine mean would wash the signal out; scale 0 would mean no
+the **ferr_rms imbalance** — the absolute difference of the two mates'
+mean ferr_rms, over **that pair's drives only**. The split moves error
+between pair mates while leaving the pair total invariant, so the pair
+mean is first-order *flat* at the optimum — golden section would hunt a
+shallow, noise-dominated valley — while the mate difference crosses zero
+steeply there: minimizing it is a well-conditioned root-find on the same
+data. The absolute error level is the common-mode terms' job — refine
+`MASS`/`VISCOUS`/`COULOMB` for that. Scale 0 would mean no
 split feedforward, so the search also doubles as an on-machine test that
 the fitted split helps at all): each candidate
 model is streamed into the *running*
@@ -379,7 +384,8 @@ endpoint (no restart) and measured with one tracking capture of the full
 `servo-cal analyze` — mean per-move **ferr_peak** for `MASS` and
 `COULOMB` (friction error peaks at breakaway, right at the start of the
 window), mean per-move **ferr_rms** for `VISCOUS` (viscous error shows
-up as cruise following error). The analyzer's per-move error window starts
+up as cruise following error), and the per-pair **ferr_rms imbalance**
+for `SPLIT`. The analyzer's per-move error window starts
 `ff_lead_cycles` samples **before** the commanded move (torque
 feedforward is sent that many cycles early, so its error signature
 lands ahead of the position command; the run manifest carries the

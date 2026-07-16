@@ -165,8 +165,9 @@ DYNAMICS_METRIC_BY_TERM = {
     "MASS": "ferr_peak",
     "VISCOUS": "ferr_rms",
     "COULOMB": "ferr_peak",
-    "SPLIT": "ferr_peak",
+    "SPLIT": "ferr_rms_imbalance",
 }
+SPLIT_IMBALANCE_BASE_METRIC = "ferr_rms"
 DYNAMICS_TERM_KEYS = {
     "MASS": "mass",
     "VISCOUS": "viscous",
@@ -1420,6 +1421,31 @@ class ServoCalibration:
                 )
             return sum(values) / len(values)
         raise gcmd.error("step %r missing from results.json" % (step_name,))
+
+    def _step_metric_imbalance(
+        self,
+        gcmd: Any,
+        results: dict[str, Any],
+        step_name: str,
+        metric: str,
+        drives: list[str] | None,
+    ) -> float:
+        """Absolute difference of the two pair mates' per-drive metric
+        means - the SPLIT objective. The pair scale only moves error
+        between the mates (pair total torque is invariant), so the pair
+        mean is first-order flat at the optimum while the mate difference
+        crosses zero steeply there: minimizing it is a well-conditioned
+        root-find on the same data."""
+        if drives is None or len(drives) != 2:
+            raise gcmd.error(
+                "imbalance scoring needs exactly the 2 pair drives (got %r)"
+                % (drives,)
+            )
+        means = [
+            self._step_metric_mean(gcmd, results, step_name, metric, [d])
+            for d in drives
+        ]
+        return abs(means[0] - means[1])
 
     def _step_flags(self, results: dict[str, Any], step_name: str) -> list[str]:
         for step in results.get("steps") or []:
@@ -3394,9 +3420,12 @@ class ServoCalibration:
         "scored on mean ferr_peak - friction error peaks at breakaway) or "
         "pair load-share coefficients (TERM=SPLIT: one sequential phase "
         "per belt pair, each scaling that pair's six [[pair]] coefficients "
-        "and scored on mean ferr_peak over THAT PAIR'S drives only - the "
-        "split moves error between pair mates, so a whole-machine mean "
-        "would wash it out; scale 0 would mean no split feedforward). On "
+        "and scored on the ferr_rms IMBALANCE between that pair's two "
+        "drives - the split only moves error between the mates, so their "
+        "mean is flat at the optimum while the mate difference crosses "
+        "zero steeply there; the absolute error level belongs to the "
+        "common-mode terms MASS/VISCOUS/COULOMB. Scale 0 would mean no "
+        "split feedforward). On "
         "coupled_xy every vector term refines the two modes sequentially - "
         "X strokes scaling only the x-mode entry, then Y strokes scaling "
         "the y mode on top of the X winner - since the modes are "
@@ -3640,7 +3669,9 @@ class ServoCalibration:
         }
         run.write()
         report_metrics = ("overshoot", "ferr_rms", "ferr_peak")
-        eval_metrics = tuple(dict.fromkeys(report_metrics + (metric,)))
+        eval_metrics = report_metrics + (
+            (metric,) if metric not in report_metrics else ()
+        )
 
         def metrics_line(values: dict[str, float]) -> str:
             return ", ".join("%s %.1f" % (m, values[m]) for m in eval_metrics)
@@ -3682,8 +3713,16 @@ class ServoCalibration:
                     m: self._step_metric_mean(
                         gcmd, results, step.name, m, drives
                     )
-                    for m in eval_metrics
+                    for m in report_metrics
                 }
+                if term == "SPLIT":
+                    reports[key][metric] = self._step_metric_imbalance(
+                        gcmd,
+                        results,
+                        step.name,
+                        SPLIT_IMBALANCE_BASE_METRIC,
+                        drives,
+                    )
                 gcmd.respond_info(
                     "%s scale %.4f -> %s (counts, mean per move)"
                     % (adapter.label, key, metrics_line(reports[key]))
@@ -3771,7 +3810,7 @@ class ServoCalibration:
             "dynamics_profile at it and RESTART | run %s"
             % (
                 "; ".join(
-                    "%s scale %.4f (mean %s %.1f -> %.1f)"
+                    "%s scale %.4f (%s %.1f -> %.1f)"
                     % (label, best, metric, baseline_score, best_score)
                     for label, _s, best, best_score, baseline_score, _r in (
                         phase_out

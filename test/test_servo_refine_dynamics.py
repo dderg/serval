@@ -828,11 +828,13 @@ def _make_awd_rail(names, node_name, axis):
     return rail
 
 
-def make_calibration_awd(minima=(0.9, 1.15), off_pair_min=1.3):
-    """The fake analyzer gives each split phase's own pair a ferr_peak
-    minimum at its minima entry, and the OTHER pair an adversarial minimum
-    at off_pair_min - if the per-pair drive filter broke and the score
-    averaged every drive, the found best would drift off the minima."""
+def make_calibration_awd(minima=(0.9, 1.15), off_pair_min=1.3, lean_gain=200.0):
+    """The fake analyzer leans each split phase's own pair mates apart in
+    ferr_rms proportionally to (scale - minima entry), so the imbalance
+    objective crosses zero exactly at the minima entry, and leans the
+    OTHER pair around an adversarial off_pair_min - if the per-pair drive
+    filter broke and the score read the wrong pair's mates, the found
+    best would drift to off_pair_min."""
     gcode = FakeGcode()
     rails = [
         _make_awd_rail(["motor_a", "motor_a1"], "drive_all", "x"),
@@ -863,15 +865,22 @@ def make_calibration_awd(minima=(0.9, 1.15), off_pair_min=1.3):
     sc._restore = lambda *a, **k: None
     sc._goto_xy = lambda *a, **k: None
 
-    def move_for(mini, scale):
+    def move_for(mini, scale, lean):
         return {
             "move": 0,
             "ferr_peak": 500.0 + 3000.0 * (scale - mini) ** 2,
-            "ferr_rms": 100.0 + 2000.0 * (scale - mini) ** 2,
+            "ferr_rms": 300.0 + 2000.0 * (scale - mini) ** 2 + lean,
             "overshoot": 40.0 + 5000.0 * (scale - mini) ** 2,
             "settle_ms": 10.0,
             "settle_window_truncated": False,
         }
+
+    def mate_moves(mini, scale):
+        lean = lean_gain * (scale - mini)
+        return (
+            [move_for(mini, scale, lean)],
+            [move_for(mini, scale, -lean)],
+        )
 
     def fake_run(gcmd, argv, timeout):
         gcode.scripts.append(("RUN", argv, timeout))
@@ -889,23 +898,17 @@ def make_calibration_awd(minima=(0.9, 1.15), off_pair_min=1.3):
                 pair_a, pair_b = off_pair_min, minima[1]
             else:
                 pair_a = pair_b = 1.0
+            a0, a1 = mate_moves(pair_a, scale)
+            b0, b1 = mate_moves(pair_b, scale)
             steps.append(
                 {
                     "name": step["name"],
                     "flags": [],
                     "drives": {
-                        "motor_a": {
-                            "metrics": {"moves": [move_for(pair_a, scale)]}
-                        },
-                        "motor_a1": {
-                            "metrics": {"moves": [move_for(pair_a, scale)]}
-                        },
-                        "motor_b": {
-                            "metrics": {"moves": [move_for(pair_b, scale)]}
-                        },
-                        "motor_b1": {
-                            "metrics": {"moves": [move_for(pair_b, scale)]}
-                        },
+                        "motor_a": {"metrics": {"moves": a0}},
+                        "motor_a1": {"metrics": {"moves": a1}},
+                        "motor_b": {"metrics": {"moves": b0}},
+                        "motor_b1": {"metrics": {"moves": b1}},
                     },
                 }
             )
@@ -925,6 +928,14 @@ def test_refine_dynamics_split_requires_pairs():
     with pytest.raises(RuntimeError, match="no \\[\\[pair\\]\\] tables"):
         sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(AXIS="X", TERM="SPLIT"))
     assert engine.dynamics_calls == []
+
+
+def test_refine_dynamics_split_even_mates_keep_baseline():
+    sc, _gcode, _engine, _path = make_calibration_awd(
+        minima=(0.8, 0.8), off_pair_min=0.8, lean_gain=0.0
+    )
+    sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(TERM="SPLIT"))
+    assert _written_profiles(sc) == []
 
 
 def test_refine_dynamics_split_refines_each_pair_on_its_own_drives():
