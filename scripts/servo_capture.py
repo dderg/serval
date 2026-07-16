@@ -221,6 +221,9 @@ def compute_metrics(
         prev_end = segs[idx - 1][1] if idx else 0
         lead_start = max(s - ff_lead_samples, prev_end)
         move_err = ferr[lead_start : e + overshoot_end]
+        displacement = int(data["target_counts"][e - 1]) - int(
+            data["target_counts"][s - 1]
+        )
         settle_ms = (
             float(settle_sample) * ms_per_sample
             if settle_sample is not None
@@ -231,6 +234,8 @@ def compute_metrics(
                 "move": idx,
                 "start_ms": float(s) * ms_per_sample,
                 "end_ms": float(e) * ms_per_sample,
+                "direction": int(np.sign(displacement)),
+                "ferr_mean_moving": float(np.mean(ferr[s:e])),
                 "ferr_peak": float(np.max(np.abs(move_err))),
                 "ferr_rms": float(np.sqrt(np.mean(move_err**2))),
                 "overshoot": float(np.max(np.abs(post[:overshoot_end])))

@@ -168,9 +168,8 @@ DYNAMICS_METRIC_BY_TERM = {
     "MASS": "ferr_peak",
     "VISCOUS": "ferr_rms",
     "COULOMB": "ferr_peak",
-    "DIRECTION_SPLIT": "ferr_rms_imbalance",
+    "DIRECTION_SPLIT": "ferr_mean_direction_imbalance",
 }
-DIRECTION_SPLIT_BASE_METRIC = "ferr_rms"
 DYNAMICS_TERM_KEYS = {
     "MASS": "mass",
     "VISCOUS": "viscous",
@@ -383,12 +382,171 @@ def add_dynamics_direction_split(
     return refined
 
 
+def _frame_column_lambda(first: list[float], second: list[float]) -> int:
+    if len(first) != len(second) or not any(value != 0.0 for value in first):
+        raise ValueError("frame columns must be nonzero and equal length")
+    if all(a == b for a, b in zip(first, second)):
+        return 1
+    if all(b == -a for a, b in zip(first, second)):
+        return -1
+    raise ValueError("frame columns are not exactly equal or opposite")
+
+
 def _equal_or_opposite_columns(a: list[float], b: list[float]) -> bool:
-    if not any(v != 0.0 for v in a):
+    try:
+        _frame_column_lambda(a, b)
+    except ValueError:
         return False
-    return all(x == y for x, y in zip(a, b)) or all(
-        x == -y for x, y in zip(a, b)
-    )
+    return True
+
+
+def _direction_split_lambda(profile: dict[str, Any], slots: list[str]) -> int:
+    axis_index = {name: i for i, name in enumerate(profile["axes"])}
+    try:
+        first_index, second_index = (axis_index[name] for name in slots)
+    except (KeyError, ValueError) as e:
+        raise ValueError(
+            "direction-split pair must name two profile slots (got %r)"
+            % (slots,)
+        ) from e
+    columns = [list(column) for column in zip(*profile["frame"])]
+    try:
+        return _frame_column_lambda(columns[first_index], columns[second_index])
+    except ValueError as e:
+        raise ValueError(
+            "direction-split pair %s has invalid frame columns: %s" % (slots, e)
+        ) from e
+
+
+def _direction_split_moves(
+    step_name: str, drive_name: str, step_drives: Mapping[str, Any]
+) -> dict[Any, Mapping[str, Any]]:
+    if drive_name not in step_drives:
+        raise ValueError(
+            "step %s is missing direction-split drive %s"
+            % (step_name, drive_name)
+        )
+    moves = (step_drives[drive_name].get("metrics") or {}).get("moves") or []
+    indexed = {}
+    for move in moves:
+        if not isinstance(move, Mapping) or "move" not in move:
+            raise ValueError(
+                "step %s drive %s has a move without a move id"
+                % (step_name, drive_name)
+            )
+        move_id = move["move"]
+        try:
+            duplicate = move_id in indexed
+        except TypeError as e:
+            raise ValueError(
+                "step %s drive %s has an invalid move id %r"
+                % (step_name, drive_name, move_id)
+            ) from e
+        if duplicate:
+            raise ValueError(
+                "step %s drive %s repeats move id %r"
+                % (step_name, drive_name, move_id)
+            )
+        indexed[move_id] = move
+    return indexed
+
+
+def direction_split_candidate_metrics(
+    profile: dict[str, Any], step: Mapping[str, Any], slots: list[str]
+) -> dict[str, float]:
+    if len(slots) != 2:
+        raise ValueError(
+            "direction-split scoring requires two slots (got %r)" % (slots,)
+        )
+    step_name = str(step.get("name", "<unnamed>"))
+    pair_lambda = _direction_split_lambda(profile, slots)
+    step_drives = step.get("drives") or {}
+    first_moves = _direction_split_moves(step_name, slots[0], step_drives)
+    second_moves = _direction_split_moves(step_name, slots[1], step_drives)
+    if first_moves.keys() != second_moves.keys():
+        raise ValueError(
+            "step %s pair %s has different move sets: %s vs %s"
+            % (
+                step_name,
+                slots,
+                sorted(first_moves, key=repr),
+                sorted(second_moves, key=repr),
+            )
+        )
+    directional_q: dict[int, list[float]] = {1: [], -1: []}
+    for move_id, first in first_moves.items():
+        second = second_moves[move_id]
+        for window_key in ("start_ms", "end_ms"):
+            if window_key not in first or window_key not in second:
+                raise ValueError(
+                    "step %s pair %s move %r is missing %s"
+                    % (step_name, slots, move_id, window_key)
+                )
+            if first[window_key] != second[window_key]:
+                raise ValueError(
+                    "step %s pair %s move %r has mismatched %s: %r vs %r"
+                    % (
+                        step_name,
+                        slots,
+                        move_id,
+                        window_key,
+                        first[window_key],
+                        second[window_key],
+                    )
+                )
+        first_direction = first.get("direction")
+        second_direction = second.get("direction")
+        if first_direction not in (-1, 1):
+            raise ValueError(
+                "step %s drive %s move %r has nonmoving direction %r"
+                % (step_name, slots[0], move_id, first_direction)
+            )
+        if second_direction not in (-1, 1):
+            raise ValueError(
+                "step %s drive %s move %r has nonmoving direction %r"
+                % (step_name, slots[1], move_id, second_direction)
+            )
+        expected_direction = pair_lambda * first_direction
+        if second_direction != expected_direction:
+            raise ValueError(
+                "step %s pair %s move %r directions do not match lambda %d: "
+                "%r vs %r"
+                % (
+                    step_name,
+                    slots,
+                    move_id,
+                    pair_lambda,
+                    first_direction,
+                    second_direction,
+                )
+            )
+        for drive_name, move in zip(slots, (first, second)):
+            value = move.get("ferr_mean_moving")
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+            ):
+                raise ValueError(
+                    "step %s drive %s move %r has invalid "
+                    "ferr_mean_moving %r"
+                    % (step_name, drive_name, move_id, value)
+                )
+        q = first["ferr_mean_moving"] - pair_lambda * second["ferr_mean_moving"]
+        directional_q[first_direction].append(q)
+    missing = [direction for direction, q in directional_q.items() if not q]
+    if missing:
+        raise ValueError(
+            "step %s pair %s needs moves in both first-drive directions; "
+            "missing %s" % (step_name, slots, missing)
+        )
+    q_plus = sum(directional_q[1]) / len(directional_q[1])
+    q_minus = sum(directional_q[-1]) / len(directional_q[-1])
+    return {
+        "q_plus": q_plus,
+        "q_minus": q_minus,
+        "ferr_mean_direction_imbalance": abs(q_plus + q_minus) / 2.0,
+    }
 
 
 def discover_dynamics_pairs(profile: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1499,33 +1657,6 @@ class ServoCalibration:
                     % (step_name, metric)
                 )
             return sum(values) / len(values)
-        raise gcmd.error("step %r missing from results.json" % (step_name,))
-
-    def _step_metric_per_drive(
-        self,
-        gcmd: Any,
-        results: dict[str, Any],
-        step_name: str,
-        metric: str,
-        drives: list[str],
-    ) -> dict[str, float]:
-        for step in results.get("steps") or []:
-            if step.get("name") != step_name:
-                continue
-            step_drives = step.get("drives") or {}
-            means = {}
-            for drive_name in drives:
-                moves = (
-                    step_drives.get(drive_name, {}).get("metrics") or {}
-                ).get("moves") or []
-                values = [move[metric] for move in moves if metric in move]
-                if not values:
-                    raise gcmd.error(
-                        "step %s drive %s carries no %r move metrics in "
-                        "results.json" % (step_name, drive_name, metric)
-                    )
-                means[drive_name] = sum(values) / len(values)
-            return means
         raise gcmd.error("step %r missing from results.json" % (step_name,))
 
     def _step_flags(self, results: dict[str, Any], step_name: str) -> list[str]:
@@ -3552,7 +3683,8 @@ class ServoCalibration:
         "coulomb vector (TERM=COULOMB, "
         "scored on mean ferr_peak - friction error peaks at breakaway), or "
         "an additive signed coefficient for each AWD pair "
-        "(TERM=DIRECTION_SPLIT, scored on pair ferr_rms imbalance). On "
+        "(TERM=DIRECTION_SPLIT, scored on the even directional differential "
+        "of signed moving-error means). On "
         "coupled_xy every vector term refines the two modes sequentially - "
         "X strokes scaling only the x-mode entry, then Y strokes scaling "
         "the y mode on top of the X winner - since the modes are "
@@ -3954,22 +4086,26 @@ class ServoCalibration:
                     for m in report_metrics
                 }
                 if drives is not None:
-                    per_drive = self._step_metric_per_drive(
-                        gcmd,
-                        results,
-                        step.name,
-                        DIRECTION_SPLIT_BASE_METRIC,
-                        drives,
-                    )
-                    reports[key].update(
+                    result_step = next(
                         (
-                            "%s[%s]" % (DIRECTION_SPLIT_BASE_METRIC, drive),
-                            value,
-                        )
-                        for drive, value in per_drive.items()
+                            item
+                            for item in results.get("steps") or []
+                            if item.get("name") == step.name
+                        ),
+                        None,
                     )
-                    first, second = per_drive.values()
-                    reports[key][metric] = abs(first - second)
+                    if result_step is None:
+                        raise gcmd.error(
+                            "step %r missing from results.json" % (step.name,)
+                        )
+                    try:
+                        reports[key].update(
+                            direction_split_candidate_metrics(
+                                adapter.baseline, result_step, drives
+                            )
+                        )
+                    except ValueError as e:
+                        raise gcmd.error(str(e))
                 gcmd.respond_info(
                     "%s %s %.4f -> %s (counts, mean per move)"
                     % (

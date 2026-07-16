@@ -412,15 +412,29 @@ mean 1–4 Hz power), so high-accel refine strokes — which put almost
 nothing in the low band — trip it on µm-level mechanical peaks the
 machine shows on every normal move.
 
-`DIRECTION_SPLIT` runs one sequential phase per pair and scores the absolute
-difference between the two mates' mean per-move `ferr_rms`. Its candidate is
-an additive delta, not a scale, so delta `0` is the measured baseline and a
-profile with no `[[pair]]` records can be augmented without refitting the
-common dynamics. Missing pairs are taken from the current slot-ordered AWD
-kinematic layout when it agrees with the profile frame, otherwise from groups
-of exactly two equal or opposite frame columns; zero and unmatched columns are
-ignored, ambiguous larger exact-match groups fail, and a kinematically known
-pair with unequal parallel columns fails rather than guessing.
+`DIRECTION_SPLIT` runs one sequential phase per pair. For each candidate step,
+the profile frame defines `lambda`: `+1` for exactly equal pair columns and
+`-1` for exactly opposite columns. Analyzer moves are joined by `move`; both
+drives must have identical move sets and matching `start_ms`/`end_ms`, nonzero
+directions, and `direction_second = lambda * direction_first`. Each aligned
+move contributes the signed differential `q = ferr_mean_moving_first -
+lambda * ferr_mean_moving_second`. The scorer averages `q` separately as
+`q_plus` for first-drive direction `+1` and `q_minus` for direction `-1`,
+requires both bins, and minimizes `ferr_mean_direction_imbalance =
+abs(q_plus + q_minus) / 2`. Thus a persistent
+per-motor error that reverses with travel direction cancels, while an even
+pair-split error remains. Candidate output reports `q_plus`, `q_minus`, and
+`ferr_mean_direction_imbalance`; malformed alignment or direction data aborts
+refinement.
+
+The candidate is an additive delta, not a scale, so delta `0` is the measured
+baseline and a profile with no `[[pair]]` records can be augmented without
+refitting the common dynamics. Missing pairs are taken from the current
+slot-ordered AWD kinematic layout when it agrees with the profile frame,
+otherwise from groups of exactly two equal or opposite frame columns; zero and
+unmatched columns are ignored, ambiguous larger exact-match groups fail, and a
+kinematically known pair with unequal parallel columns fails rather than
+guessing.
 The default delta bracket is `[-0.25, 0.25]`, reduced when needed to keep every
 candidate at `abs(direction_split) < 0.5`, with default `TOL=0.01`. Explicit
 `LO`/`HI` must contain zero and keep both bracket ends in range. The signed

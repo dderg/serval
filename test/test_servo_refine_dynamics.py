@@ -923,7 +923,14 @@ def _make_awd_rail(names, node_name, axis, first_slot):
     return rail
 
 
-def make_calibration_awd(profile_text=OLD_AWD_TOML, minima=(-0.12, 0.15)):
+def make_calibration_awd(
+    profile_text=OLD_AWD_TOML,
+    minima=(-0.12, 0.15),
+    motor_biases=None,
+    malformed=None,
+):
+    if motor_biases is None:
+        motor_biases = {}
     gcode = FakeGcode()
     rails = [
         _make_awd_rail(["motor_a", "motor_a1"], "drive_all", "x", 0),
@@ -955,11 +962,15 @@ def make_calibration_awd(profile_text=OLD_AWD_TOML, minima=(-0.12, 0.15)):
     sc._goto_xy = lambda *a, **k: None
     sc._restore = lambda *a, **k: None
 
-    def move(ferr_rms):
+    def move(move_id, direction, ferr_mean_moving):
         return {
-            "move": 0,
+            "move": move_id,
+            "direction": direction,
+            "start_ms": 1000.0 + 2000.0 * move_id,
+            "end_ms": 2000.0 + 2000.0 * move_id,
+            "ferr_mean_moving": ferr_mean_moving,
             "ferr_peak": 500.0,
-            "ferr_rms": ferr_rms,
+            "ferr_rms": 300.0 + abs(ferr_mean_moving),
             "overshoot": 40.0,
             "settle_ms": 10.0,
             "settle_window_truncated": False,
@@ -984,13 +995,44 @@ def make_calibration_awd(profile_text=OLD_AWD_TOML, minima=(-0.12, 0.15)):
                 (("motor_a", "motor_a1"), ("motor_b", "motor_b1")),
                 pair_minima,
             ):
-                lean = 200.0 * (delta - optimum)
-                values[pair_names[0]] = {
-                    "metrics": {"moves": [move(300 + lean)]}
-                }
-                values[pair_names[1]] = {
-                    "metrics": {"moves": [move(300 - lean)]}
-                }
+                pair_lambda = 1 if pair_names[0] == "motor_a" else -1
+                split_error = 200.0 * (delta - optimum)
+                first_bias = motor_biases.get(pair_names[0], 0.0)
+                second_bias = motor_biases.get(pair_names[1], 0.0)
+                first_moves = []
+                second_moves = []
+                for move_id, first_direction in enumerate((1, -1)):
+                    second_direction = pair_lambda * first_direction
+                    first_error = (
+                        split_error / 2.0 + first_direction * first_bias
+                    )
+                    second_error = (
+                        -pair_lambda * split_error / 2.0
+                        + second_direction * second_bias
+                    )
+                    first_moves.append(
+                        move(move_id, first_direction, first_error)
+                    )
+                    second_moves.append(
+                        move(move_id, second_direction, second_error)
+                    )
+                values[pair_names[0]] = {"metrics": {"moves": first_moves}}
+                values[pair_names[1]] = {"metrics": {"moves": second_moves}}
+            first_moves = values["motor_a"]["metrics"]["moves"]
+            second_moves = values["motor_a1"]["metrics"]["moves"]
+            if malformed == "move_set":
+                second_moves[0]["move"] = 9
+            elif malformed == "window":
+                second_moves[0]["start_ms"] += 1.0
+            elif malformed == "zero_direction":
+                first_moves[0]["direction"] = 0
+            elif malformed == "lambda_direction":
+                second_moves[0]["direction"] *= -1
+            elif malformed == "missing_bin":
+                first_moves.pop()
+                second_moves.pop()
+            elif malformed == "missing_mean":
+                del first_moves[0]["ferr_mean_moving"]
             steps.append({"name": step["name"], "flags": [], "drives": values})
         with open(os.path.join(run_dir, "results.json"), "w") as f:
             json.dump(
@@ -1038,9 +1080,10 @@ def test_kinematic_pair_rejects_unequal_parallel_columns():
         sc._direction_split_baseline(FakeGcmd(), sc._kin(), baseline)
 
 
-def test_direction_split_refine_augments_old_v6_profile_additively():
+def test_direction_split_refine_recovers_both_lambda_signs_on_old_v6_profile():
     sc, _gcode, engine, _path = make_calibration_awd()
-    sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(TERM="DIRECTION_SPLIT"))
+    gcmd = FakeGcmd(TERM="DIRECTION_SPLIT")
+    sc.cmd_SERVO_REFINE_DYNAMICS(gcmd)
     profiles = _written_profiles(sc)
     assert len(profiles) == 1
     with open(profiles[0], "rb") as f:
@@ -1057,6 +1100,31 @@ def test_direction_split_refine_augments_old_v6_profile_additively():
     assert raw["coulomb"] == BASELINE_COULOMB
     assert engine.dynamics_calls[-1][5] == [0, 1, 2, 3]
     assert engine.dynamics_calls[-1][6] == [0.0, 0.0]
+    candidates = [
+        response
+        for response in gcmd.responses
+        if response.endswith("(counts, mean per move)")
+    ]
+    assert candidates
+    assert all("q_plus" in line for line in candidates)
+    assert all("q_minus" in line for line in candidates)
+    assert all("ferr_mean_direction_imbalance" in line for line in candidates)
+
+
+def test_direction_split_refine_cancels_bidirectional_per_motor_bias():
+    sc, _gcode, _engine, _path = make_calibration_awd(
+        motor_biases={
+            "motor_a": 80.0,
+            "motor_a1": -35.0,
+            "motor_b": -60.0,
+            "motor_b1": 25.0,
+        }
+    )
+    sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(TERM="DIRECTION_SPLIT"))
+    with open(_written_profiles(sc)[0], "rb") as f:
+        raw = tomllib.load(f)
+    assert raw["refined_delta_motor_a"] == pytest.approx(-0.12, abs=0.03)
+    assert raw["refined_delta_motor_b"] == pytest.approx(0.15, abs=0.03)
 
 
 def test_direction_split_refine_adds_to_existing_signed_coefficients():
@@ -1069,6 +1137,36 @@ def test_direction_split_refine_adds_to_existing_signed_coefficients():
     )
     assert raw["pair"][1]["direction_split"] == pytest.approx(
         -0.1 + raw["refined_delta_motor_b"]
+    )
+
+
+@pytest.mark.parametrize(
+    "malformed, message",
+    [
+        ("move_set", "different move sets"),
+        ("window", "mismatched start_ms"),
+        ("zero_direction", "nonmoving direction"),
+        ("lambda_direction", "directions do not match lambda"),
+        ("missing_bin", "needs moves in both"),
+        ("missing_mean", "invalid ferr_mean_moving"),
+    ],
+)
+def test_direction_split_refine_rejects_malformed_directional_moves(
+    malformed, message
+):
+    sc, _gcode, engine, _profile_path = make_calibration_awd(
+        malformed=malformed
+    )
+    with pytest.raises(RuntimeError, match=message):
+        sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(TERM="DIRECTION_SPLIT"))
+    assert engine.dynamics_calls[-1] == (
+        1,
+        [0.25, 0.25, -0.25, 0.25, 0.25, 0.25, 0.25, -0.25],
+        BASELINE_MASS,
+        BASELINE_VISCOUS,
+        BASELINE_COULOMB,
+        [0, 1, 2, 3],
+        [0.0, 0.0],
     )
 
 

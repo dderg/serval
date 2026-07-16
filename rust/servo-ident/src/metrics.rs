@@ -17,6 +17,8 @@ pub struct Move {
     pub index: usize,
     pub start_ms: f64,
     pub end_ms: f64,
+    pub direction: i8,
+    pub ferr_mean_moving: f64,
     pub ferr_peak: f64,
     pub ferr_rms: f64,
     pub overshoot: f64,
@@ -234,6 +236,9 @@ pub fn compute_metrics(
         let prev_end = if idx > 0 { segs[idx - 1].1 } else { 0 };
         let lead_start = s.saturating_sub(ff_lead_samples).max(prev_end);
         let move_err = &ferr[lead_start..e + overshoot_end];
+        let displacement = d.target[e - 1] - d.target[s - 1];
+        let direction = displacement.signum() as i8;
+        let ferr_mean_moving = ferr[s..e].iter().sum::<f64>() / (e - s) as f64;
         let settle_ms = settle_sample.map(|x| x as f64 * ms_per_sample);
         let ferr_peak = move_err.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
         let ferr_rms =
@@ -249,6 +254,8 @@ pub fn compute_metrics(
             index: idx,
             start_ms: s as f64 * ms_per_sample,
             end_ms: e as f64 * ms_per_sample,
+            direction,
+            ferr_mean_moving,
             ferr_peak,
             ferr_rms,
             overshoot,

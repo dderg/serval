@@ -238,7 +238,15 @@ measures tracking per candidate, converges on the best value by golden-section
 search, and writes the winning profile as a new TOML. The three common-mode
 terms use multiplicative scales; `TERM=DIRECTION_SPLIT` searches a signed
 additive delta per pair and can therefore augment an older v6 profile with no
-pair tables or refine a zero coefficient. Repoint
+pair tables or refine a zero coefficient. Its objective aligns analyzer moves
+between pair mates and derives `lambda` from their exact equal/opposite profile
+frame columns. For each move it forms `q = ferr_mean_moving_first - lambda *
+ferr_mean_moving_second`, then minimizes `ferr_mean_direction_imbalance =
+abs(q_plus + q_minus) / 2`, where the two means are binned by positive and
+negative first-drive direction. Both bins and matching move IDs, windows, and
+lambda-related nonzero directions are required. This cancels persistent motor
+error that reverses with travel while retaining the even pair-split error.
+Repoint
 `dynamics_profile` and restart to keep it. The live model is always
 restored to the baseline when the command finishes.
 
