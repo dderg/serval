@@ -8,10 +8,9 @@ use servo_ident::capture::{parse_capture_csv, Capture};
 use servo_ident::fit::residual_by_motor;
 use servo_ident::fit::{fit, FitInput, FitOptions};
 use servo_ident::model::Structure;
-use servo_ident::pipeline::{pooled_input, prepare, split_captures, Prepared};
+use servo_ident::pipeline::{pooled_input, prepare, Prepared};
 use servo_ident::prep::{band_limited_rms, PrepOptions};
-use servo_ident::profile_out::{c0006_recommendation, render_profile, PairSplit};
-use servo_ident::split::{fit_pair_splits, report_splits};
+use servo_ident::profile_out::{c0006_recommendation, render_profile};
 
 fn arg(args: &[String], key: &str) -> Option<String> {
     args.iter()
@@ -35,28 +34,6 @@ fn args_all(args: &[String], key: &str) -> Vec<String> {
     out
 }
 
-fn parse_signs(spec: &str, n_slots: usize) -> Vec<f64> {
-    let v: Vec<f64> = spec
-        .split(',')
-        .map(|s| match s.trim() {
-            "1" | "+1" => 1.0,
-            "-1" => -1.0,
-            other => {
-                eprintln!("servo-ident: --signs entry {other:?} must be 1 or -1");
-                std::process::exit(1);
-            }
-        })
-        .collect();
-    if v.len() != n_slots {
-        eprintln!(
-            "servo-ident: --signs has {} entries, frame has {n_slots} slots",
-            v.len()
-        );
-        std::process::exit(1);
-    }
-    v
-}
-
 fn opt_f64(args: &[String], key: &str) -> Option<f64> {
     arg(args, key).map(|v| {
         v.parse().unwrap_or_else(|_| {
@@ -73,13 +50,12 @@ fn req(args: &[String], key: &str) -> String {
     })
 }
 
-const KNOWN_KEYS: [&str; 13] = [
+const KNOWN_KEYS: [&str; 12] = [
     "--capture",
     "--frame",
     "--modes",
     "--axes",
     "--out",
-    "--signs",
     "--rated-torque-nm",
     "--rotor-inertia-kgm2",
     "--rotation-distance-mm",
@@ -142,18 +118,6 @@ fn main() {
         std::process::exit(1);
     }
 
-    let pairs = structure.pairs();
-    let signs: Option<Vec<f64>> =
-        arg(&args, "--signs").map(|s| parse_signs(&s, structure.axis_count()));
-    if !pairs.is_empty() && signs.is_none() {
-        eprintln!(
-            "servo-ident: frame has {} motor pair(s); --signs \"±1,...\" (one per \
-             slot) is required so the belt coordinate and differential transfer",
-            pairs.len()
-        );
-        std::process::exit(1);
-    }
-
     let capture_paths = args_all(&args, "--capture");
     if capture_paths.is_empty() {
         eprintln!("servo-ident: missing required --capture");
@@ -182,7 +146,7 @@ fn main() {
             eprintln!("servo-ident: capture {path} invalid: {e:?}");
             std::process::exit(1);
         });
-        let (pr, stats) = prepare(cap, &structure, &prep_opts);
+        let (pr, stats) = prepare(&cap, &structure, &prep_opts);
         eprintln!(
             "prep [{path}]: {} segments, delay {:.2} ms; prep+tracking kept {}/{}, \
              +steady-accel plateaus kept {}/{}",
@@ -289,31 +253,12 @@ fn main() {
         return;
     }
 
-    let pair_splits: Vec<PairSplit> = if pairs.is_empty() {
-        Vec::new()
-    } else {
-        for (path, pr) in capture_paths.iter().zip(&prepared) {
-            if !pr.cap.has_positions() {
-                eprintln!(
-                    "servo-ident: frame has motor pairs but {path} carries no \
-                     pos_<axis> columns — the load-share split needs commanded \
-                     positions; re-capture with them"
-                );
-                std::process::exit(2);
-            }
-        }
-        let signs = signs.as_ref().expect("signs required when pairs present");
-        let scaps = split_captures(&prepared);
-        let reports = fit_pair_splits(&structure, &r.params, signs, prep_opts.cutoff_hz, &scaps);
-        report_splits(&reports, &axes)
-    };
-
     let per_motor = residual_by_motor(&input, &r.params, &r.extra_params);
     let rms: Vec<f64> = per_motor
         .iter()
         .map(|res| (res.iter().map(|e| e * e).sum::<f64>() / res.len() as f64).sqrt())
         .collect();
-    let profile = render_profile(&r.params, &axes, &modes, &frame, &rms, &pair_splits);
+    let profile = render_profile(&r.params, &axes, &modes, &frame, &rms);
     let out = req(&args, "--out");
     std::fs::write(&out, profile).unwrap_or_else(|e| {
         eprintln!("servo-ident: write {out}: {e}");

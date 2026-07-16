@@ -1,16 +1,13 @@
 //! Shared multi-capture plumbing for the `fit` path of both CLIs: prep one
 //! capture into its mode channels + keep mask, and pool several prepped
-//! captures into one `FitInput` (mode fit) and the `SplitCapture` set (pair
-//! load-share fit). The per-tool reporting stays in each binary.
+//! captures into one `FitInput`. The per-tool reporting stays in each binary.
 
 use crate::capture::{steady_accel_keep, tracking_keep, Capture, PlateauOptions, TrackingOptions};
 use crate::fit::FitInput;
 use crate::model::Structure;
 use crate::prep::{prep, PrepOptions, Prepped};
-use crate::split::SplitCapture;
 
 pub struct Prepared {
-    pub cap: Capture,
     pub pp: Prepped,
     /// valid ∧ tracking ∧ steady-accel — the exact keep set the mode fit uses.
     pub keep: Vec<bool>,
@@ -24,8 +21,8 @@ pub struct PrepStats {
     pub kept: usize,
 }
 
-pub fn prepare(cap: Capture, structure: &Structure, opts: &PrepOptions) -> (Prepared, PrepStats) {
-    let pp = prep(&cap, structure, opts);
+pub fn prepare(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> (Prepared, PrepStats) {
+    let pp = prep(cap, structure, opts);
     let total = cap.t.len();
     let track = tracking_keep(&cap.vel, &cap.vel_act, &TrackingOptions::default());
     let plateau = steady_accel_keep(&cap.t, &cap.acc, &PlateauOptions::default());
@@ -41,7 +38,7 @@ pub fn prepare(cap: Capture, structure: &Structure, opts: &PrepOptions) -> (Prep
         tracked,
         kept,
     };
-    (Prepared { cap, pp, keep }, stats)
+    (Prepared { pp, keep }, stats)
 }
 
 pub fn pooled_input(structure: &Structure, prepared: &[Prepared]) -> FitInput {
@@ -91,15 +88,4 @@ pub fn pooled_input(structure: &Structure, prepared: &[Prepared]) -> FitInput {
         torque,
         extra,
     }
-}
-
-pub fn split_captures(prepared: &[Prepared]) -> Vec<SplitCapture<'_>> {
-    prepared
-        .iter()
-        .map(|pr| SplitCapture {
-            cap: &pr.cap,
-            torque_filt: &pr.pp.torque,
-            keep: &pr.keep,
-        })
-        .collect()
 }

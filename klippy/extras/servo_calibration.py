@@ -168,9 +168,7 @@ DYNAMICS_METRIC_BY_TERM = {
     "MASS": "ferr_peak",
     "VISCOUS": "ferr_rms",
     "COULOMB": "ferr_peak",
-    "SPLIT": "ferr_rms_imbalance",
 }
-SPLIT_IMBALANCE_BASE_METRIC = "ferr_rms"
 DYNAMICS_TERM_KEYS = {
     "MASS": "mass",
     "VISCOUS": "viscous",
@@ -185,10 +183,15 @@ def parse_dynamics_profile(text: str) -> dict[str, Any]:
             "parsing dynamics profiles requires Python 3.11+ (tomllib)"
         )
     data = tomllib.loads(text)
-    if data.get("version") != 5:
+    if data.get("version") != 6:
         raise ValueError(
-            "dynamics profile version must be 5 (got %r) - refit with "
+            "dynamics profile version must be 6 (got %r) - refit with "
             "SERVO_FIT_DYNAMICS" % (data.get("version"),)
+        )
+    if "pair" in data:
+        raise ValueError(
+            "dynamics profile contains [[pair]] tables - the belt pair "
+            "load-share split was removed; refit with SERVO_FIT_DYNAMICS"
         )
     axes = data.get("axes")
     if not isinstance(axes, list) or not axes:
@@ -227,75 +230,14 @@ def parse_dynamics_profile(text: str) -> dict[str, Any]:
             raise ValueError(
                 "profile contains a non-numeric or non-finite value: %r" % (v,)
             )
-    axis_names = [str(a) for a in axes]
     return {
-        "axes": axis_names,
+        "axes": [str(a) for a in axes],
         "modes": [str(m) for m in modes],
         "frame": [[float(v) for v in row] for row in frame],
         "mass": [float(v) for v in data["mass"]],
         "viscous": [float(v) for v in data["viscous"]],
         "coulomb": [float(v) for v in data["coulomb"]],
-        "pairs": _parse_dynamics_pairs(data, axis_names),
     }
-
-
-def _parse_dynamics_pairs(
-    data: Mapping[str, Any], axis_names: list[str]
-) -> list[dict[str, Any]]:
-    raw = data.get("pair", [])
-    if not isinstance(raw, list):
-        raise ValueError("profile pair must be an array of tables")
-    axis_set = set(axis_names)
-    claimed: set[str] = set()
-    pairs: list[dict[str, Any]] = []
-    for entry in raw:
-        if not isinstance(entry, Mapping):
-            raise ValueError("each pair must be a table")
-        slots = entry.get("slots")
-        if (
-            not isinstance(slots, list)
-            or len(slots) != 2
-            or not all(isinstance(s, str) for s in slots)
-        ):
-            raise ValueError(
-                "pair slots must be a list of two motor names (got %r)"
-                % (slots,)
-            )
-        a, b = slots
-        if a == b:
-            raise ValueError(
-                "pair slots must name two distinct motors (got %r)" % (slots,)
-            )
-        for name in slots:
-            if name not in axis_set:
-                raise ValueError(
-                    "pair slot %r is not among profile axes %s"
-                    % (name, axis_names)
-                )
-            if name in claimed:
-                raise ValueError(
-                    "motor %r appears in more than one pair" % (name,)
-                )
-        claimed.update(slots)
-        vec = entry.get("belt_position_split")
-        if not isinstance(vec, list) or len(vec) != 2:
-            raise ValueError(
-                "pair belt_position_split must list exactly 2 values"
-            )
-        for v in vec:
-            if (
-                isinstance(v, bool)
-                or not isinstance(v, (int, float))
-                or not math.isfinite(v)
-            ):
-                raise ValueError(
-                    "pair belt_position_split contains a non-numeric or "
-                    "non-finite value: %r" % (v,)
-                )
-        pairs.append(
-            {"slots": [str(a), str(b)], "split": [float(v) for v in vec]}
-        )
-    return pairs
 
 
 def _copy_dynamics(profile: dict[str, Any]) -> dict[str, Any]:
@@ -306,10 +248,6 @@ def _copy_dynamics(profile: dict[str, Any]) -> dict[str, Any]:
         "mass": list(profile["mass"]),
         "viscous": list(profile["viscous"]),
         "coulomb": list(profile["coulomb"]),
-        "pairs": [
-            {"slots": list(p["slots"]), "split": list(p["split"])}
-            for p in profile.get("pairs", [])
-        ],
     }
 
 
@@ -337,15 +275,6 @@ def scale_dynamics_mode(
     return scaled
 
 
-def scale_dynamics_pair(
-    profile: dict[str, Any], pair_index: int, scale: float
-) -> dict[str, Any]:
-    scaled = _copy_dynamics(profile)
-    pair = scaled["pairs"][pair_index]
-    pair["split"] = [w * scale for w in pair["split"]]
-    return scaled
-
-
 def render_dynamics_toml(
     profile: dict[str, Any],
     source: str,
@@ -362,7 +291,7 @@ def render_dynamics_toml(
         return "[%s]" % (", ".join(num(v) for v in values),)
 
     lines = [
-        "version = 5",
+        "version = 6",
         "axes = %s" % (json.dumps(profile["axes"]),),
         "modes = %s" % (json.dumps(profile["modes"]),),
         "frame = [%s]" % (", ".join(vec(row) for row in profile["frame"]),),
@@ -378,12 +307,6 @@ def render_dynamics_toml(
             % ("_%s" % (suffix,) if suffix else "", num(scale))
         )
     lines.append("refined_run = %s" % (json.dumps(run_dir),))
-    for pair in profile.get("pairs", []):
-        lines += [
-            "[[pair]]",
-            "slots = %s" % (json.dumps(list(pair["slots"])),),
-            "belt_position_split = %s" % (vec(pair["split"]),),
-        ]
     return "\n".join(lines) + "\n"
 
 
@@ -767,21 +690,12 @@ class DynamicsModelAdapter:
         self._send(self.baseline)
 
     def _send(self, profile: dict[str, Any]) -> None:
-        axis_index = {name: i for i, name in enumerate(profile["axes"])}
-        pairs: list[int] = []
-        pair_split: list[float] = []
-        for pair in profile.get("pairs", []):
-            a, b = pair["slots"]
-            pairs += [axis_index[a], axis_index[b]]
-            pair_split += [float(v) for v in pair["split"]]
         self._engine.set_dynamics_model(
             self._handle,
             [float(f) for row in profile["frame"] for f in row],
             [float(v) for v in profile["mass"]],
             [float(v) for v in profile["viscous"]],
             [float(v) for v in profile["coulomb"]],
-            pairs,
-            pair_split,
         )
 
 
@@ -1392,24 +1306,14 @@ class ServoCalibration:
         results: dict[str, Any],
         step_name: str,
         metric: str,
-        drives: list[str] | None = None,
     ) -> float:
-        """Mean of one per-move metric over the named step's drives (all of
-        them, or the `drives` subset) - the refinement objective, so mean
-        (not max): lower variance under stroke noise, and constant per-drive
-        offsets do not move the argmin."""
+        """Mean of one per-move metric over the named step's drives - the
+        refinement objective, so mean (not max): lower variance under stroke
+        noise, and constant per-drive offsets do not move the argmin."""
         for step in results.get("steps") or []:
             if step.get("name") != step_name:
                 continue
             step_drives = step.get("drives") or {}
-            if drives is not None:
-                missing = [d for d in drives if d not in step_drives]
-                if missing:
-                    raise gcmd.error(
-                        "step %s carries no metrics for drives %s"
-                        % (step_name, missing)
-                    )
-                step_drives = {d: step_drives[d] for d in drives}
             values = [
                 move[metric]
                 for drive in step_drives.values()
@@ -1423,30 +1327,6 @@ class ServoCalibration:
                 )
             return sum(values) / len(values)
         raise gcmd.error("step %r missing from results.json" % (step_name,))
-
-    def _step_metric_per_drive(
-        self,
-        gcmd: Any,
-        results: dict[str, Any],
-        step_name: str,
-        metric: str,
-        drives: list[str] | None,
-    ) -> dict[str, float]:
-        """Each pair mate's own metric mean - the SPLIT objective is the
-        absolute difference between the two. The pair scale only moves
-        error between the mates (pair total torque is invariant), so the
-        pair mean is first-order flat at the optimum while the mate
-        difference crosses zero steeply there: minimizing it is a
-        well-conditioned root-find on the same data."""
-        if drives is None or len(drives) != 2:
-            raise gcmd.error(
-                "imbalance scoring needs exactly the 2 pair drives (got %r)"
-                % (drives,)
-            )
-        return {
-            d: self._step_metric_mean(gcmd, results, step_name, metric, [d])
-            for d in drives
-        }
 
     def _step_flags(self, results: dict[str, Any], step_name: str) -> list[str]:
         for step in results.get("steps") or []:
@@ -2552,8 +2432,8 @@ class ServoCalibration:
         "Excitation grid for the inertia/friction fit (servo-ident). "
         "coupled_xy kinematics run the X+Y belt grid over WINDOWS position "
         "windows (default 4: one half-range window per quadrant, one "
-        "capture each - the plan that identifies the pair load-share "
-        "split and checks its linearity; 3 skips rear-right, 1 is one "
+        "capture each, pooled into a single fit so acceleration events "
+        "land at distinct belt positions; 3 skips rear-right, 1 is one "
         "full-range capture); "
         "SERVOS=/X_START etc override; travel_speed centers the idle axis "
         "between strokes. "
@@ -2639,12 +2519,9 @@ class ServoCalibration:
             return [(x0, x1, y0, y1)]
         if n not in (3, 4):
             raise gcmd.error(
-                "WINDOWS must be 1 (one full-range window; the pair "
-                "load-share split is then unidentifiable and gets zeroed), "
-                "3 (front-left, front-right, rear-left half-range windows "
-                "- both belt coordinates separated, but one belt gets only "
-                "two position levels) or 4 (all quadrants - three levels "
-                "per belt, enough to also check the split's linearity)"
+                "WINDOWS must be 1 (one full-range window), 3 (front-left, "
+                "front-right, rear-left half-range windows) or 4 (one "
+                "half-range window per quadrant)"
             )
         xm = (x0 + x1) / 2.0
         ym = (y0 + y1) / 2.0
@@ -2698,17 +2575,14 @@ class ServoCalibration:
         "mode-space model with the frame built from the kinematics; per-axis "
         "otherwise, DRIVE= picking the scalar fit on a multi-drive axis). "
         "On coupled_xy the default WINDOWS=4 quadrant windows are pooled "
-        "into one fit, which also identifies the pair load-share split's "
-        "inertial component and checks its linearity (3 skips rear-right "
-        "and loses the check; WINDOWS=1 is fastest but the split's "
-        "inertial component gets zeroed as unidentifiable). "
+        "into one fit (WINDOWS=1 is the fastest single full-range capture). "
         "Optional TORQUE_NM + INERTIA_KGM2 add the C00.06 recommendation. "
         "Params as SERVO_MEASURE_INERTIA plus TORQUE_NM INERTIA_KGM2 DRIVE"
     )
 
     def _corexy_frame(
         self, gcmd: Any, kin: Any
-    ) -> tuple[list[str], list[str], list[list[float]], list[int]]:
+    ) -> tuple[list[str], list[str], list[list[float]]]:
         rails = servo_strokes.axis_rails(gcmd, kin, "X")
         slots: list[tuple[str, int, float, int]] = []
         for belt_index, rail in enumerate(rails):
@@ -2723,22 +2597,20 @@ class ServoCalibration:
             (sign if belt == 0 else -sign) / (2.0 * drives)
             for _n, belt, sign, drives in slots
         ]
-        signs = [int(sign) for _n, _b, sign, _d in slots]
-        return axes, ["x", "y"], [frame_x, frame_y], signs
+        return axes, ["x", "y"], [frame_x, frame_y]
 
     def _fit_plan(self, gcmd: Any) -> dict[str, Any]:
         kin = self._kin()
         if kin.coupled_xy():
             layout = servo_strokes.corexy_fit_layout(gcmd, kin)
             servo_strokes.check_servos_override(gcmd, layout)
-            axes, modes, frame, signs = self._corexy_frame(gcmd, kin)
+            axes, modes, frame = self._corexy_frame(gcmd, kin)
             return {
                 "corexy": True,
                 "servos": layout["servos"],
                 "axes": axes,
                 "modes": modes,
                 "frame": frame,
-                "signs": signs,
                 "axis": "X",
                 "rails": servo_strokes.axis_rails(gcmd, kin, "X"),
             }
@@ -2747,16 +2619,12 @@ class ServoCalibration:
         drive = servo_strokes.scalar_fit_drive(gcmd, kin)
         servos = servo_strokes.axis_servos(gcmd, kin, axis)
         axes = [drive if drive is not None else servos[0]]
-        signs = [
-            -1 if self._resolve_motor(axes[0]).get_invert_direction() else 1
-        ]
         return {
             "corexy": False,
             "servos": servos,
             "axes": axes,
             "modes": list(axes),
             "frame": [[1.0]],
-            "signs": signs,
             "axis": axis,
             "rails": None,
         }
@@ -2824,8 +2692,6 @@ class ServoCalibration:
                 ",".join(plan["modes"]),
                 "--axes",
                 ",".join(plan["axes"]),
-                "--signs",
-                ",".join("%d" % (s,) for s in plan["signs"]),
                 "--out",
                 out_path,
                 "--rotation-distance-mm",
@@ -3520,19 +3386,11 @@ class ServoCalibration:
         "RUNNING endpoint: golden-section search over a scale factor on the "
         "baseline profile's mass matrix (TERM=MASS, scored on mean per-move "
         "ferr_peak - the error window runs from move start through settle, "
-        "so it covers in-move tracking and endpoint overshoot alike) or "
-        "viscous vector (TERM=VISCOUS, scored on mean ferr_rms), "
+        "so it covers in-move tracking and endpoint overshoot alike), "
+        "viscous vector (TERM=VISCOUS, scored on mean ferr_rms) or "
         "coulomb vector (TERM=COULOMB, "
-        "scored on mean ferr_peak - friction error peaks at breakaway) or "
-        "pair load-share coefficients (TERM=SPLIT: one sequential phase "
-        "per belt pair, each scaling that pair's six [[pair]] coefficients "
-        "and scored on the ferr_rms IMBALANCE between that pair's two "
-        "drives - the split only moves error between the mates, so their "
-        "mean is flat at the optimum while the mate difference crosses "
-        "zero steeply there; the absolute error level belongs to the "
-        "common-mode terms MASS/VISCOUS/COULOMB. Scale 0 would mean no "
-        "split feedforward). On "
-        "coupled_xy every vector term refines the two modes sequentially - "
+        "scored on mean ferr_peak - friction error peaks at breakaway). On "
+        "coupled_xy every term refines the two modes sequentially - "
         "X strokes scaling only the x-mode entry, then Y strokes scaling "
         "the y mode on top of the X winner - since the modes are "
         "independent physical quantities (moved mass, rail friction) and "
@@ -3605,7 +3463,7 @@ class ServoCalibration:
         term = gcmd.get("TERM", "MASS").upper()
         if term not in DYNAMICS_METRIC_BY_TERM:
             raise gcmd.error(
-                "TERM must be MASS, VISCOUS, COULOMB or SPLIT (got %r)"
+                "TERM must be MASS, VISCOUS or COULOMB (got %r)"
                 % (gcmd.get("TERM", ""),)
             )
         kin = self._kin()
@@ -3618,13 +3476,6 @@ class ServoCalibration:
             )
         engine = self.printer.lookup_object("motion_engine")
         profile_path, baseline = self._load_baseline_dynamics(gcmd, node)
-        if term == "SPLIT" and not baseline.get("pairs"):
-            raise gcmd.error(
-                "TERM=SPLIT refines the pair load-share coefficients, but "
-                "profile %s carries no [[pair]] tables - fit one with "
-                "SERVO_FIT_DYNAMICS on a dual-drive machine first"
-                % (profile_path,)
-            )
         accels, speeds, iterations, dwell = servo_strokes.grid(
             gcmd, self.accels, self.speeds, self.iterations, self.dwell_ms
         )
@@ -3661,67 +3512,38 @@ class ServoCalibration:
             x_grid = axis_grid("X", x_start, x_end, (x_start, y_center))
             y_grid = axis_grid("Y", y_start, y_end, (x_center, y_start))
 
-            def both_grids() -> None:
-                x_grid()
-                y_grid()
+            modes = baseline["modes"]
+            if len(modes) != 2 or not {"x", "y"} <= set(modes):
+                raise gcmd.error(
+                    "coupled_xy TERM=%s refine needs a 2-mode profile "
+                    "with x and y modes; profile %s has modes %s"
+                    % (term, profile_path, modes)
+                )
 
-            if term == "SPLIT":
+            def mode_scale_fn(
+                index: int,
+            ) -> Callable[[dict[str, Any], float], dict[str, Any]]:
+                def scale_fn(
+                    profile: dict[str, Any], scale: float
+                ) -> dict[str, Any]:
+                    return scale_dynamics_mode(profile, term, index, scale)
 
-                def pair_scale_fn(
-                    index: int,
-                ) -> Callable[[dict[str, Any], float], dict[str, Any]]:
-                    def scale_fn(
-                        profile: dict[str, Any], scale: float
-                    ) -> dict[str, Any]:
-                        return scale_dynamics_pair(profile, index, scale)
+                return scale_fn
 
-                    return scale_fn
-
-                phases = [
-                    (
-                        "split_%s" % (pair["slots"][0],),
-                        pair["slots"][0],
-                        pair_scale_fn(i),
-                        both_grids,
-                        list(pair["slots"]),
-                    )
-                    for i, pair in enumerate(baseline["pairs"])
-                ]
-            else:
-                modes = baseline["modes"]
-                if len(modes) != 2 or not {"x", "y"} <= set(modes):
-                    raise gcmd.error(
-                        "coupled_xy TERM=%s refine needs a 2-mode profile "
-                        "with x and y modes; profile %s has modes %s"
-                        % (term, profile_path, modes)
-                    )
-
-                def mode_scale_fn(
-                    index: int,
-                ) -> Callable[[dict[str, Any], float], dict[str, Any]]:
-                    def scale_fn(
-                        profile: dict[str, Any], scale: float
-                    ) -> dict[str, Any]:
-                        return scale_dynamics_mode(profile, term, index, scale)
-
-                    return scale_fn
-
-                phases = [
-                    (
-                        "%s_x" % (term.lower(),),
-                        "x",
-                        mode_scale_fn(modes.index("x")),
-                        x_grid,
-                        None,
-                    ),
-                    (
-                        "%s_y" % (term.lower(),),
-                        "y",
-                        mode_scale_fn(modes.index("y")),
-                        y_grid,
-                        None,
-                    ),
-                ]
+            phases = [
+                (
+                    "%s_x" % (term.lower(),),
+                    "x",
+                    mode_scale_fn(modes.index("x")),
+                    x_grid,
+                ),
+                (
+                    "%s_y" % (term.lower(),),
+                    "y",
+                    mode_scale_fn(modes.index("y")),
+                    y_grid,
+                ),
+            ]
         else:
             start, end = servo_strokes.axis_bounds(gcmd, self.bounds, axis)
 
@@ -3735,7 +3557,7 @@ class ServoCalibration:
                             axis, start, end, speed, accel, iterations, dwell
                         )
 
-            phases = [(term.lower(), "", term_scale_fn, cart_grid, None)]
+            phases = [(term.lower(), "", term_scale_fn, cart_grid)]
 
         tag = gcmd.get("TAG", "refdyn")
         name = gcmd.get("NAME", "refined_%s" % (term.lower(),))
@@ -3768,7 +3590,7 @@ class ServoCalibration:
             "baseline_profile": profile_path,
             "term": term.lower(),
             "metric": metric,
-            "phases": [label for label, _s, _fn, _g, _d in phases],
+            "phases": [label for label, _s, _fn, _g in phases],
             "bracket": [lo, hi],
             "tol": tol,
             "max_evals": max_evals,
@@ -3782,7 +3604,6 @@ class ServoCalibration:
         def run_phase(
             adapter: DynamicsModelAdapter,
             run_grid: Callable[[], None],
-            drives: list[str] | None,
         ) -> tuple[float, float, float, dict[float, dict[str, float]]]:
             scores: dict[float, float] = {}
             reports: dict[float, dict[str, float]] = {}
@@ -3813,28 +3634,9 @@ class ServoCalibration:
                 results = self._run_analyze(gcmd, run, incremental=True)
                 gate_torque_rail(step.name, results)
                 reports[key] = {
-                    m: self._step_metric_mean(
-                        gcmd, results, step.name, m, drives
-                    )
+                    m: self._step_metric_mean(gcmd, results, step.name, m)
                     for m in report_metrics
                 }
-                if term == "SPLIT":
-                    per_drive = self._step_metric_per_drive(
-                        gcmd,
-                        results,
-                        step.name,
-                        SPLIT_IMBALANCE_BASE_METRIC,
-                        drives,
-                    )
-                    reports[key].update(
-                        (
-                            "%s[%s]" % (SPLIT_IMBALANCE_BASE_METRIC, d),
-                            value,
-                        )
-                        for d, value in per_drive.items()
-                    )
-                    mate_a, mate_b = per_drive.values()
-                    reports[key][metric] = abs(mate_a - mate_b)
                 gcmd.respond_info(
                     "%s scale %.4f -> %s (counts, mean per move)"
                     % (adapter.label, key, metrics_line(reports[key]))
@@ -3856,13 +3658,13 @@ class ServoCalibration:
         try:
             out_path = self._dynamics_out_path(gcmd, run, name)
             prep_axes()
-            for label, suffix, scale_fn, run_grid, drives in phases:
+            for label, suffix, scale_fn, run_grid in phases:
                 adapter = DynamicsModelAdapter(
                     engine, handle, refined, scale_fn, label, tag
                 )
                 adapters.append(adapter)
                 best, best_score, baseline_score, reports = run_phase(
-                    adapter, run_grid, drives
+                    adapter, run_grid
                 )
                 phase_out.append(
                     (label, suffix, best, best_score, baseline_score, reports)

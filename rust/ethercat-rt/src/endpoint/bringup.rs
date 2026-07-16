@@ -470,7 +470,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
         jump_log_counts,
     } = columns;
 
-    let mut ctx = EndpointCtx {
+    EndpointCtx {
         server,
         drive,
         num_slaves,
@@ -514,7 +514,5 @@ pub fn bringup(args: Args) -> EndpointCtx {
         latched_drive_err,
         sensorless,
         stream_halt,
-    };
-    ctx.bind_dynamics_drive_signs();
-    ctx
+    }
 }

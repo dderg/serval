@@ -26,12 +26,11 @@ use servo_ident::http;
 use servo_ident::live_stream::{LiveTap, DEFAULT_IDLE_TIMEOUT, DEFAULT_TAP_SOCKET};
 use servo_ident::metrics::{DEFAULT_SETTLE_BAND_COUNTS, DEFAULT_TORQUE_LIMIT_PER_MILLE};
 use servo_ident::model::Structure;
-use servo_ident::pipeline::{pooled_input, prepare, split_captures, Prepared};
+use servo_ident::pipeline::{pooled_input, prepare, Prepared};
 use servo_ident::prep::{band_limited_rms, PrepOptions};
-use servo_ident::profile_out::{c0006_recommendation, render_profile, PairSplit};
+use servo_ident::profile_out::{c0006_recommendation, render_profile};
 use servo_ident::scap::Scap;
 use servo_ident::serve;
-use servo_ident::split::{fit_pair_splits, report_splits};
 
 fn arg(args: &[String], key: &str) -> Option<String> {
     args.iter()
@@ -74,24 +73,6 @@ fn args_all(args: &[String], key: &str) -> Vec<String> {
         }
     }
     out
-}
-
-fn parse_signs(spec: &str, n_slots: usize) -> Vec<f64> {
-    let v: Vec<f64> = spec
-        .split(',')
-        .map(|s| match s.trim() {
-            "1" | "+1" => 1.0,
-            "-1" => -1.0,
-            other => die(&format!("--signs entry {other:?} must be 1 or -1")),
-        })
-        .collect();
-    if v.len() != n_slots {
-        die(&format!(
-            "--signs has {} entries, frame has {n_slots} slots",
-            v.len()
-        ));
-    }
-    v
 }
 
 fn main() {
@@ -206,13 +187,12 @@ fn cmd_analyze(args: &[String]) {
     analyze_run(Path::new(dir), incremental).unwrap_or_else(|e| die(&e));
 }
 
-const FIT_KEYS: [&str; 14] = [
+const FIT_KEYS: [&str; 13] = [
     "--capture",
     "--frame",
     "--modes",
     "--axes",
     "--out",
-    "--signs",
     "--rated-torque-nm",
     "--rotor-inertia-kgm2",
     "--rotation-distance-mm",
@@ -270,16 +250,6 @@ fn cmd_fit(args: &[String]) {
             structure.axis_count()
         ));
     }
-    let pairs = structure.pairs();
-    let signs: Option<Vec<f64>> =
-        arg(args, "--signs").map(|s| parse_signs(&s, structure.axis_count()));
-    if !pairs.is_empty() && signs.is_none() {
-        die(&format!(
-            "frame has {} motor pair(s); --signs \"±1,...\" (one per slot) is required",
-            pairs.len()
-        ));
-    }
-
     let capture_paths = args_all(args, "--capture");
     if capture_paths.is_empty() {
         die("missing required --capture");
@@ -301,7 +271,7 @@ fn cmd_fit(args: &[String]) {
     for path in &capture_paths {
         let cap = Scap::load(path).unwrap_or_else(|e| die(&e));
         let fit_cap = scap_to_capture(&cap, &axes).unwrap_or_else(|e| die(&e));
-        let (pr, stats) = prepare(fit_cap, &structure, &prep_opts);
+        let (pr, stats) = prepare(&fit_cap, &structure, &prep_opts);
         eprintln!(
             "prep [{path}]: {} segments, delay {:.2} ms; prep+tracking kept {}/{}, \
              +steady-accel plateaus kept {}/{}",
@@ -385,29 +355,12 @@ fn cmd_fit(args: &[String]) {
         return;
     }
 
-    let pair_splits: Vec<PairSplit> = if pairs.is_empty() {
-        Vec::new()
-    } else {
-        for (path, pr) in capture_paths.iter().zip(&prepared) {
-            if !pr.cap.has_positions() {
-                die(&format!(
-                    "frame has motor pairs but {path} carries no commanded \
-                     positions (target_counts) — the load-share split needs them"
-                ));
-            }
-        }
-        let signs = signs.as_ref().expect("signs required when pairs present");
-        let scaps = split_captures(&prepared);
-        let reports = fit_pair_splits(&structure, &r.params, signs, prep_opts.cutoff_hz, &scaps);
-        report_splits(&reports, &axes)
-    };
-
     let per_motor = residual_by_motor(&input, &r.params, &r.extra_params);
     let rms: Vec<f64> = per_motor
         .iter()
         .map(|res| (res.iter().map(|e| e * e).sum::<f64>() / res.len() as f64).sqrt())
         .collect();
-    let profile = render_profile(&r.params, &axes, &modes, &frame, &rms, &pair_splits);
+    let profile = render_profile(&r.params, &axes, &modes, &frame, &rms);
     let out = req(args, "--out");
     std::fs::write(&out, profile).unwrap_or_else(|e| die(&format!("write {out}: {e}")));
     eprintln!("profile written to {out}");

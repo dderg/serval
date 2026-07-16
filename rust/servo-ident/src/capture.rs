@@ -5,19 +5,6 @@ pub struct Capture {
     pub vel: Vec<Vec<f64>>,
     pub vel_act: Vec<Vec<f64>>,
     pub torque: Vec<Vec<f64>>,
-    /// Per-slot commanded position (mm). Empty when the source carried no
-    /// position channel; the pair load-share split stage requires it and
-    /// fails loudly when a frame with pairs meets a position-less capture.
-    pub pos: Vec<Vec<f64>>,
-}
-
-impl Capture {
-    /// True when every slot has a full-length commanded-position column.
-    pub fn has_positions(&self) -> bool {
-        !self.pos.is_empty()
-            && self.pos.len() == self.acc.len()
-            && self.pos.iter().all(|c| c.len() == self.t.len())
-    }
 }
 
 #[derive(Debug)]
@@ -55,17 +42,11 @@ pub fn parse_capture_csv(text: &str, axes: &[&str]) -> Result<Capture, CaptureEr
         .iter()
         .map(|a| col(&format!("torque_{a}")))
         .collect::<Result<_, _>>()?;
-    let pos_cols: Option<Vec<usize>> = axes
-        .iter()
-        .map(|a| cols.iter().position(|c| *c == format!("pos_{a}")))
-        .collect();
-
     let mut t: Vec<f64> = Vec::new();
     let mut acc: Vec<Vec<f64>> = vec![Vec::new(); axes.len()];
     let mut vel: Vec<Vec<f64>> = vec![Vec::new(); axes.len()];
     let mut vel_act: Vec<Vec<f64>> = vec![Vec::new(); axes.len()];
     let mut torque: Vec<Vec<f64>> = vec![Vec::new(); axes.len()];
-    let mut pos: Vec<Vec<f64>> = vec![Vec::new(); axes.len()];
 
     for (lineno, line) in lines {
         if line.trim().is_empty() {
@@ -94,11 +75,6 @@ pub fn parse_capture_csv(text: &str, axes: &[&str]) -> Result<Capture, CaptureEr
             vel_act[a].push(num(wc)?);
             torque[a].push(num(qc)?);
         }
-        if let Some(pc) = &pos_cols {
-            for (a, &idx) in pc.iter().enumerate() {
-                pos[a].push(num(idx)?);
-            }
-        }
     }
 
     if t.len() < 5 {
@@ -111,7 +87,6 @@ pub fn parse_capture_csv(text: &str, axes: &[&str]) -> Result<Capture, CaptureEr
         vel,
         vel_act,
         torque,
-        pos: if pos_cols.is_some() { pos } else { Vec::new() },
     })
 }
 

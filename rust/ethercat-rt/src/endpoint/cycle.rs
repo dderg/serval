@@ -366,14 +366,6 @@ fn emit_slot_commands(
     let (acc_drive, vel_drive): (Vec<f32>, Vec<f32>) = (0..num_slaves)
         .map(|s| (drive_dir(s) * all_acc[s], drive_dir(s) * all_vel[s]))
         .unzip();
-    // The pair load-share differential varies with the belt's absolute machine
-    // position, so the model needs the commanded carriage position too. Like
-    // accel/vel it is fitted and applied in the drive frame; a slot without a
-    // streamed target this cycle (buzz, dwell) reports zero, which the model
-    // only consults for pair slots (suppressed during buzz).
-    let pos_drive: Vec<f32> = (0..num_slaves)
-        .map(|s| drive_dir(s) * lane_mm[s].map_or(0.0, |m| m as f32))
-        .collect();
     // Coulomb is a mode-space quantity, so a buzz on any slot flips the sign
     // of a mode velocity that other slots share; drop Coulomb for every slot
     // whenever the buzz drives any slot this cycle.
@@ -387,9 +379,9 @@ fn emit_slot_commands(
             };
             let raw_ff = ctx.dynamics.as_ref().map(|model| {
                 if buzz_active {
-                    model.torque_ff_without_coulomb(s, &acc_drive, &vel_drive, &pos_drive)
+                    model.torque_ff_without_coulomb(s, &acc_drive, &vel_drive)
                 } else {
-                    model.torque_ff(s, &acc_drive, &vel_drive, &pos_drive)
+                    model.torque_ff(s, &acc_drive, &vel_drive)
                 }
             });
             let torque_offset = match raw_ff {

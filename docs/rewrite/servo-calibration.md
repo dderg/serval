@@ -327,17 +327,10 @@ the shape of the grid:
   Cartesian mode excited on its own (X strokes excite only the x mode, Y
   strokes only the y mode). The grid runs over `WINDOWS` position windows,
   one capture each — default **4**: one half-range window per quadrant,
-  which puts acceleration events at three distinct belt coordinates per
-  belt in both directions. That makes the pair load-share split
-  identifiable (full-range strokes always accelerate toward the long-span
-  side, confounding position with force direction) *and* over-determines
-  its linear position model, so a nonlinear split — a tension problem —
-  shows up instead of hiding. `WINDOWS=3` skips the rear-right window
-  (both belt coordinates still separated, but one belt drops to two
-  position levels and the linearity check is lost); `WINDOWS=1`
-  is the fastest single full-range capture; the split's inertial component
-  is then unidentifiable and gets zeroed by the fit's sanity gate. Before
-  each stroke set the
+  which puts acceleration events at distinct belt coordinates per belt in
+  both directions; the captures are pooled into one fit. `WINDOWS=3` skips
+  the rear-right window; `WINDOWS=1` is the fastest single full-range
+  capture. Before each stroke set the
   toolhead moves (at `travel_speed`) to the active axis' start with the idle
   axis centered in the window, so both belt runs are near-equal length during
   the measurement. Bounds come from `X_START`/`X_END`/`Y_START`/`Y_END`.
@@ -361,15 +354,9 @@ profile share:
 
 - **`coupled_xy` kinematics**: runs the X+Y grid over every belt drive and
   fits the x and y modes through the frame matrix built from the kinematics'
-  slot order and invert flags (passed to the fitter as
-  `--frame`/`--modes`/`--signs`; on AWD each belt's pair shares its columns
-  and all four drives must sit on one node). On AWD the fit then runs a
-  second stage per belt pair: the measured pair torque differential is
-  regressed on the mode model's per-component belt forces × {1, position},
-  and the six load-share coefficients land in the profile's `[[pair]]`
-  tables (see [servo-feedforward.md](servo-feedforward.md)); role-dependent
-  (|F|-shaped) components are printed as diagnostics — a large one means
-  check belt tension — and never written. The resulting profile goes on
+  slot order and invert flags (passed to the fitter as `--frame`/`--modes`;
+  on AWD each belt's drives share its columns and all four drives must sit
+  on one node). The resulting profile goes on
   `[ethercat_node] dynamics_profile` (node-level, coupled) rather than
   per-motor.
 - **cartesian kinematics**: fits a single mode with an identity frame. On a
@@ -387,27 +374,14 @@ Empirical refinement of an existing dynamics profile, for when the
 `SERVO_FIT_DYNAMICS` regression differs run-to-run with the excitation
 grid. Golden-section search over a scale factor applied to the baseline
 profile's per-mode **mass** (`TERM=MASS`, default), **viscous**
-(`TERM=VISCOUS`) or **coulomb** (`TERM=COULOMB`) vector, or the pair
-load-share coefficients (`TERM=SPLIT`: one sequential phase per belt
-pair, each scaling that pair's six `[[pair]]` coefficients and scored on
-the **ferr_rms imbalance** — the absolute difference of the two mates'
-mean ferr_rms, over **that pair's drives only**. The split moves error
-between pair mates while leaving the pair total invariant, so the pair
-mean is first-order *flat* at the optimum — golden section would hunt a
-shallow, noise-dominated valley — while the mate difference crosses zero
-steeply there: minimizing it is a well-conditioned root-find on the same
-data. The absolute error level is the common-mode terms' job — refine
-`MASS`/`VISCOUS`/`COULOMB` for that. Scale 0 would mean no
-split feedforward, so the search also doubles as an on-machine test that
-the fitted split helps at all): each candidate
+(`TERM=VISCOUS`) or **coulomb** (`TERM=COULOMB`) vector: each candidate
 model is streamed into the *running*
 endpoint (no restart) and measured with one tracking capture of the full
 `SERVO_MEASURE_INERTIA` `ACCELS` × `SPEEDS` grid, then scored from
 `servo-cal analyze` — mean per-move **ferr_peak** for `MASS` and
 `COULOMB` (friction error peaks at breakaway, right at the start of the
-window), mean per-move **ferr_rms** for `VISCOUS` (viscous error shows
-up as cruise following error), and the per-pair **ferr_rms imbalance**
-for `SPLIT`. The analyzer's per-move error window starts
+window), and mean per-move **ferr_rms** for `VISCOUS` (viscous error
+shows up as cruise following error). The analyzer's per-move error window starts
 `ff_lead_cycles` samples **before** the commanded move (torque
 feedforward is sent that many cycles early, so its error signature
 lands ahead of the position command; the run manifest carries the
@@ -422,14 +396,11 @@ winner, the y mode with Y-only strokes — because the two modes are
 independent physical quantities (the moved mass, the rail friction) and
 one shared scale cannot serve both; an axis stroke leaves the other
 mode's velocity at exactly zero, so each phase's score depends only on
-its own entry. The provenance keys are `refined_scale_x`/`refined_scale_y`
-(`refined_scale_<first-slot>` per pair for `SPLIT`). Scoring the mean over
+its own entry. The provenance keys are `refined_scale_x`/`refined_scale_y`.
+Scoring the mean over
 the whole grid keeps a scale that helps at one operating point but hurts
 at another from winning; every per-scale line also lists mean overshoot,
-ferr_rms, and ferr_peak so the non-scored metrics can be sanity-checked,
-and `SPLIT` lines add each mate's own ferr_rms (`ferr_rms[<motor>]`) so
-the before/after per motor — and whether evening the mates out raised
-the pair's error level — is visible at a glance.
+ferr_rms, and ferr_peak so the non-scored metrics can be sanity-checked.
 The
 baseline is `PROFILE=` or the node-level `[ethercat_node]
 dynamics_profile`; per-motor profiles are not supported (point `PROFILE=`
@@ -450,13 +421,12 @@ candidate until restart). When a scale beats 1.0 the scaled profile is
 written to a new TOML under `~/printer_data/config/servo_dynamics/` (with
 `refined_source`/`refined_term`/`refined_scale`/`refined_run` provenance
 keys — `refined_scale_x`/`refined_scale_y` for the sequential corexy
-refines, `refined_scale_<first-slot>` per pair for `SPLIT` — never
+refines — never
 overwriting) and the `dynamics_profile` paste line is printed
 — config edit + restart is the only way to keep it; when the baseline
 wins, nothing is written. Refine `MASS` first, then `TERM=VISCOUS`
-against the refined profile, then `TERM=COULOMB` against that, then
-optionally `TERM=SPLIT` last — the split rides on the other terms'
-forces, so refine it against their final values. Params: `TERM` (MASS) `AXIS`
+against the refined profile, then `TERM=COULOMB` against
+that. Params: `TERM` (MASS) `AXIS`
 (X) `SERVOS` `PROFILE` `LO` (0.7) `HI` (1.3) `TOL` (0.02) `MAX_EVALS` (10)
 `START` `END` `X_START` `X_END` `Y_START` `Y_END` `ACCELS` `SPEEDS`
 `ITERATIONS` `DWELL_MS` `TAG` (refdyn) `NAME` (refined_<term>).

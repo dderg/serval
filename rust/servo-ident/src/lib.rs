@@ -20,6 +20,5 @@ pub mod resonance;
 pub mod results;
 pub mod scap;
 pub mod serve;
-pub mod split;
 pub mod strain;
 pub mod time_fmt;

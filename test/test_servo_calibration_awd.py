@@ -370,15 +370,17 @@ def test_fit_dynamics_corexy_captures_all_four_and_passes_axes():
     assert _flag(argv, "--modes") == "x,y"
     assert _flag(argv, "--axes") == "motor_a,motor_a1,motor_b,motor_b1"
     assert _flag(argv, "--frame") == "0.25,0.25,-0.25,0.25;0.25,0.25,0.25,-0.25"
-    assert _flag(argv, "--signs") == "1,1,-1,1"
+    assert "--signs" not in argv
 
 
-def test_fit_dynamics_trident_awd_signs_track_invert_direction():
+def test_fit_dynamics_trident_awd_inverted_drives_share_axes():
     sc, gcode = make_calibration(trident_awd_rails())
     sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd())
     argv = _fit_argv(gcode)
     assert _flag(argv, "--axes") == "motor_a,motor_a1,motor_b,motor_b1"
-    assert _flag(argv, "--signs") == "1,-1,-1,-1"
+    assert _flag(argv, "--frame") == (
+        "0.25,-0.25,-0.25,-0.25;0.25,-0.25,0.25,0.25"
+    )
 
 
 def test_fit_dynamics_corexy_two_drives_is_plain_corexy():
@@ -390,7 +392,6 @@ def test_fit_dynamics_corexy_two_drives_is_plain_corexy():
     assert _flag(argv, "--modes") == "x,y"
     assert _flag(argv, "--axes") == "motor_a,motor_b"
     assert _flag(argv, "--frame") == "0.5,0.5;0.5,-0.5"
-    assert _flag(argv, "--signs") == "1,1"
 
 
 def test_scalar_fit_requires_drive_on_multi_drive_axis():
@@ -413,7 +414,6 @@ def test_fit_dynamics_scalar_fit_selects_drive_via_axes():
     assert _flag(argv, "--modes") == "motor_a"
     assert _flag(argv, "--axes") == "motor_a"
     assert _flag(argv, "--frame") == "1"
-    assert _flag(argv, "--signs") == "1"
 
 
 def test_tracking_combined_view_lists_every_motor_per_belt():

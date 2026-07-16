@@ -39,8 +39,6 @@ pub fn scap_to_capture(cap: &Scap, axes: &[&str]) -> Result<Capture, String> {
     let mut vel = Vec::with_capacity(axes.len());
     let mut vel_act = Vec::with_capacity(axes.len());
     let mut torque = Vec::with_capacity(axes.len());
-    let mut pos = Vec::with_capacity(axes.len());
-    let has_pos = cap.has_channel("target_counts");
     for &name in axes {
         let idx = cap
             .drive_index(name)
@@ -54,14 +52,6 @@ pub fn scap_to_capture(cap: &Scap, axes: &[&str]) -> Result<Capture, String> {
         vel.push(keep.iter().map(|&k| vel_cmd[k]).collect());
         vel_act.push(keep.iter().map(|&k| velocity_actual[k] / cpm).collect());
         torque.push(keep.iter().map(|&k| torque_actual[k]).collect());
-        if has_pos {
-            let target_counts = cap.read_i64(idx, "target_counts")?;
-            pos.push(
-                keep.iter()
-                    .map(|&k| target_counts[k] as f64 / cpm)
-                    .collect(),
-            );
-        }
     }
     Ok(Capture {
         t,
@@ -69,6 +59,5 @@ pub fn scap_to_capture(cap: &Scap, axes: &[&str]) -> Result<Capture, String> {
         vel,
         vel_act,
         torque,
-        pos,
     })
 }

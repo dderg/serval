@@ -209,8 +209,14 @@ fn load_dynamics_profile(path: &str) -> crate::dynamics::DynamicsModel {
     crate::dynamics::DynamicsModel::from_toml_str(&text).unwrap_or_else(|e| {
         if let crate::dynamics::ProfileError::Version(v) = e {
             eprintln!(
-                "ec-rt: dynamics profile {path} is version {v}, expected 3 — \
+                "ec-rt: dynamics profile {path} is version {v}, expected 6 — \
                  refit with SERVO_FIT_DYNAMICS"
+            );
+        } else if matches!(e, crate::dynamics::ProfileError::PairTablesRemoved) {
+            eprintln!(
+                "ec-rt: dynamics profile {path} contains [[pair]] tables — the \
+                 belt pair load-share split was removed; refit with \
+                 SERVO_FIT_DYNAMICS"
             );
         } else {
             eprintln!("ec-rt: dynamics profile {path} invalid: {e:?}");
