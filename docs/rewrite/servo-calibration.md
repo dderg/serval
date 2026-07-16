@@ -245,17 +245,28 @@ is off), and the tune loop converges the scale against reality.
 
 `SERVO_STRAIN_COMP_TUNE RUN=<baseline raster>` is that loop: rebuild
 the FULL map from the run at the trial matrix (never merging), enable
-it, sweep ONE verification line, and scale each belt's matrix row by
-the fraction of the intended correction the line actually shows —
-repeat until the line reads flat (|1−ρ| ≤ `TOL`). Each pass costs a
-line sweep, not a raster; on the bench ρ repeats line-to-line to
-±0.02, so it converges in about two passes. When it converges the
-tuned full-bed map is already on disk and enabled — it is the same
-map that was being verified — and the matrix is stored for future
-builds and recorded in the map (`stiffness_pct_per_mm`,
-`cross_pct_per_mm` per pair). Running out of `MAX_ITERS`, a line the
-map doesn't vary along, or an achieved fraction outside (0.2, 5) all
-fail loudly. Open-loop alternates that measure the matrix directly:
+it, sweep an X **and** a Y verification line, and refit every belt's
+direct and cross stiffness from the measured response to the applied
+offsets — the two sweeps swap the belts' roles, so all four matrix
+elements are measured independently (a single X line cannot separate
+them: the own- and cross-corrections it applies are near-collinear,
+and the old row-scale loop silently froze the cross:direct ratio at
+whatever was passed in). Repeat until the measured matrix reproduces
+the applied one — per element, within `TOL` of the row's direct
+stiffness. Each pass costs two line sweeps, not a raster, and one
+correction step usually lands it. When it converges the tuned
+full-bed map is already on disk and enabled — it is the same map that
+was being verified — and the matrix is stored for future builds and
+recorded in the map (`stiffness_pct_per_mm`, `cross_pct_per_mm` per
+pair). Running out of `MAX_ITERS`, lines the map doesn't vary along,
+collinear own/cross corrections, or a measured direct stiffness
+outside (0.2, 5)× the applied one all fail loudly. Know what the
+numbers cover: the verification metric is the **smooth elastic
+field** (forward/backward passes are averaged, so direction-dependent
+friction asymmetry cancels out of it, and sub-20 mm ripple is below
+the field model's bandwidth) — raw differential measurements keep
+both, so they read higher than the tune's residual and no
+position-keyed map can close that gap. Open-loop alternates that measure the matrix directly:
 `SERVO_MEASURE_STRAIN_RESPONSE` steps a constant antisymmetric offset
 through each pair's bank (0, ±STEP_UM, ±2·STEP_UM) while stroking one
 line — the line's field cancels out of the offset-response slope, no

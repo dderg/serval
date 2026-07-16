@@ -2369,15 +2369,21 @@ class ServoCalibration:
         "Converge the strain map's stiffness matrix against reality: "
         "rebuild the FULL map from RUN=<baseline raster> at the trial "
         "matrix (starting from the probe's values or "
-        "STIFFNESS_A/B+CROSS_AB/BA), enable it, sweep ONE verification "
-        "line, and scale each belt's matrix row by the fraction of the "
-        "intended correction the line actually shows — repeat until the "
-        "line reads flat (|1-rho| <= TOL). Each iteration costs one line "
-        "sweep, not a raster, and the converged map is already on disk "
-        "and enabled — it is the same full-bed map that was being "
-        "verified. Fails loudly if MAX_ITERS passes don't converge. "
-        "CoreXY only, needs [servo_strain_comp] and [servo_sync]. Params "
-        "RUN (required) SPACING TOL (0.05) MAX_ITERS (5) Y (map zero) "
+        "STIFFNESS_A/B+CROSS_AB/BA), enable it, sweep an X and a Y "
+        "verification line, and refit every belt's direct AND cross "
+        "stiffness from the measured response to the applied offsets - "
+        "the two sweeps swap the belts' roles, so all four matrix "
+        "elements are measured independently. Repeat until the measured "
+        "matrix reproduces the applied one (per element, within TOL of "
+        "the row's direct stiffness). Each iteration costs two line "
+        "sweeps, not a raster, and the converged map is already on disk "
+        "and enabled - it is the same full-bed map that was being "
+        "verified. The residuals cover only the smooth elastic field: "
+        "direction-dependent friction asymmetry and short-wavelength "
+        "ripple are invisible to a position-keyed map. Fails loudly if "
+        "MAX_ITERS passes don't converge. CoreXY only, needs "
+        "[servo_strain_comp] and [servo_sync]. Params RUN (required) "
+        "SPACING TOL (0.05) MAX_ITERS (5) Y (map zero) X (map zero) "
         "SPEED (50) ACCEL (1000) SETTLE (0.8) DWELL_MS TAG SYNC"
     )
 
@@ -2409,12 +2415,18 @@ class ServoCalibration:
         tuner = comp.begin_tune(gcmd, gcmd.get("RUN"), spacing)
         x_start = tuner.plan["x_start"]
         x_end = tuner.plan["x_end"]
+        y_start = tuner.plan["y_start"]
+        y_end = tuner.plan["y_end"]
         zero_xy = tuner.plan["zero_xy"]
         line_y = gcmd.get_float("Y", zero_xy[1])
+        line_x = gcmd.get_float("X", zero_xy[0])
         stroke_plan = {
             "x_start": x_start,
             "x_end": x_end,
+            "y_start": y_start,
+            "y_end": y_end,
             "y": line_y,
+            "x": line_x,
             "speed": speed,
             "accel": accel,
             "tol": tol,
@@ -2446,44 +2458,67 @@ class ServoCalibration:
         results = None
         try:
             self._prep("X", dwell)
+            self._prep("Y", dwell)
             for iteration in range(max_iters):
                 tuner.rebuild_and_enable(gcmd)
                 reactor.pause(
                     reactor.monotonic() + settle + tuner.enable_ramp_s()
                 )
+                name_x = "iter%d_x" % iteration
                 self._goto_xy(x_start, line_y, dwell)
-                name = "iter%d" % iteration
-                self._start_capture(name, servos)
+                self._start_capture(name_x, servos)
                 self._strokes("X", x_start, x_end, speed, accel, 1, dwell)
                 self._stop_capture()
-                results = tuner.score_line(gcmd, run.run_dir, name, line_y)
+                name_y = "iter%d_y" % iteration
+                self._goto_xy(line_x, y_start, dwell)
+                self._start_capture(name_y, servos)
+                self._strokes("Y", y_start, y_end, speed, accel, 1, dwell)
+                self._stop_capture()
+                results = tuner.score_lines(
+                    gcmd,
+                    run.run_dir,
+                    [(name_x, "y", line_y), (name_y, "x", line_x)],
+                )
                 (kaa, kab), (kba, kbb) = tuner.matrix_rows()
                 swept = {
                     "y": line_y,
+                    "x": line_x,
                     "kaa": kaa,
                     "kab": kab,
                     "kba": kba,
                     "kbb": kbb,
                 }
                 for belt_idx, result in enumerate(results):
-                    swept["rho_%s" % "ab"[belt_idx]] = result["rho"]
-                    swept["rms_%s" % "ab"[belt_idx]] = result["rms"]
-                run.record_step(SweepStep(name, swept, []))
+                    belt = "ab"[belt_idx]
+                    swept["s_own_%s" % belt] = result["s_own"]
+                    swept["s_cross_%s" % belt] = result["s_cross"]
+                    for axis, (rms, base) in result["lines"].items():
+                        swept["rms_%s_%s" % (belt, axis)] = rms
+                        swept["base_rms_%s_%s" % (belt, axis)] = base
+                run.record_step(SweepStep("iter%d" % iteration, swept, []))
                 for belt_idx, result in enumerate(results):
+                    k_own = tuner.k_matrix[belt_idx][belt_idx]
+                    k_cross = tuner.k_matrix[belt_idx][1 - belt_idx]
+                    lines = ", ".join(
+                        "%s-line residual %.2f%% rms (smooth field was "
+                        "%.2f%%)" % (axis.upper(), rms, base)
+                        for axis, (rms, base) in sorted(result["lines"].items())
+                    )
                     gcmd.respond_info(
-                        "tune %d/%d belt %s: achieved %.0f%% of intended "
-                        "correction, line residual %.2f%% rms "
-                        "(uncompensated %.2f%%)"
+                        "tune %d/%d belt %s: measured direct %.1f (map "
+                        "used %.1f), cross %.1f (map used %.1f) %%/mm; %s"
                         % (
                             iteration + 1,
                             max_iters,
                             "AB"[belt_idx],
-                            result["rho"] * 100.0,
-                            result["rms"],
-                            result["base_rms"],
+                            result["s_own"],
+                            k_own,
+                            result["s_cross"],
+                            k_cross,
+                            lines,
                         )
                     )
-                if all(abs(r["rho"] - 1.0) <= tol for r in results):
+                if tuner.converged(results, tol):
                     converged = True
                     break
                 tuner.apply(results)
@@ -2492,12 +2527,13 @@ class ServoCalibration:
             self._active_run = None
         if not converged:
             raise gcmd.error(
-                "did not converge within %d iterations — last rho %s; the "
-                "map from the final pass is still enabled"
+                "did not converge within %d iterations — last measured %s; "
+                "the map from the final pass is still enabled"
                 % (
                     max_iters,
                     ", ".join(
-                        "belt %s %.2f" % ("AB"[i], r["rho"])
+                        "belt %s direct %.1f cross %.1f"
+                        % ("AB"[i], r["s_own"], r["s_cross"])
                         for i, r in enumerate(results)
                     ),
                 )
@@ -2506,9 +2542,14 @@ class ServoCalibration:
         (kaa, kab), (kba, kbb) = tuner.matrix_rows()
         gcmd.respond_info(
             "converged: stiffness A %.1f B %.1f, cross AB %.1f BA %.1f "
-            "%%/mm — full-bed map rebuilt with these values, written and "
-            "ENABLED; the matrix is stored for future builds"
-            % (kaa, kbb, kab, kba)
+            "%%/mm - all four measured independently on the X and Y "
+            "verification lines. Full-bed map rebuilt, written and "
+            "ENABLED; the matrix is stored for future builds. The "
+            "residuals above only cover the smooth elastic field: "
+            "direction-dependent friction asymmetry and sub-%.0fmm ripple "
+            "are invisible to a position-keyed map and remain in raw "
+            "measurements."
+            % (kaa, kbb, kab, kba, servo_strain_comp.FIELD_2D_PITCH_MM)
         )
 
     cmd_SERVO_MEASURE_INERTIA_help = (

@@ -1053,9 +1053,12 @@ class FakeTuner:
         self.plan = {
             "x_start": 30.0,
             "x_end": 270.0,
+            "y_start": 30.0,
+            "y_end": 270.0,
             "zero_xy": [150.0, 150.0],
             "line_spacing": 10.0,
         }
+        self.k_matrix = [[300.0, -75.0], [-75.0, 300.0]]
         self.rho_seq = list(rho_seq)
         self.rebuilds = 0
         self.applied = []
@@ -1063,7 +1066,7 @@ class FakeTuner:
         self.scored = []
 
     def matrix_rows(self):
-        return [[300.0, -75.0], [-75.0, 300.0]]
+        return [list(row) for row in self.k_matrix]
 
     def enable_ramp_s(self):
         return 0.0
@@ -1071,13 +1074,26 @@ class FakeTuner:
     def rebuild_and_enable(self, gcmd):
         self.rebuilds += 1
 
-    def score_line(self, gcmd, run_dir, name, line_y):
-        self.scored.append((run_dir, name, line_y))
+    def score_lines(self, gcmd, run_dir, steps):
+        self.scored.append((run_dir, list(steps)))
         rho = self.rho_seq.pop(0)
         return [
-            {"rho": rho, "rms": 1.0, "base_rms": 9.0},
-            {"rho": rho, "rms": 1.0, "base_rms": 8.0},
+            {
+                "s_own": 300.0 * rho,
+                "s_cross": -75.0 * rho,
+                "rho": rho,
+                "lines": {"x": (1.0, 9.0), "y": (1.5, 8.0)},
+            },
+            {
+                "s_own": 300.0 * rho,
+                "s_cross": -75.0 * rho,
+                "rho": rho,
+                "lines": {"x": (1.0, 8.0), "y": (1.5, 7.0)},
+            },
         ]
+
+    def converged(self, results, tol):
+        return all(abs(r["rho"] - 1.0) <= tol for r in results)
 
     def apply(self, results):
         self.applied.append([r["rho"] for r in results])
@@ -1098,7 +1114,7 @@ def make_tune_sc(rho_seq):
     return sc, comp
 
 
-def test_tune_loops_one_line_until_converged():
+def test_tune_loops_xy_lines_until_converged():
     sc, comp = make_tune_sc([0.66, 1.01])
     sc.cmd_SERVO_STRAIN_COMP_TUNE(FakeGcmd(RUN="ignored"))
     tuner = comp.tuner
@@ -1107,17 +1123,28 @@ def test_tune_loops_one_line_until_converged():
     assert tuner.stored == 1
     caps = sc.printer.lookup_object("servo_capture").captures
     names = [os.path.basename(path) for path, _servos in caps]
-    assert names == ["step_iter0.scap", "step_iter1.scap"]
-    assert tuner.scored[0][1] == "iter0"
-    assert tuner.scored[0][2] == 150.0
+    assert names == [
+        "step_iter0_x.scap",
+        "step_iter0_y.scap",
+        "step_iter1_x.scap",
+        "step_iter1_y.scap",
+    ]
+    assert tuner.scored[0][1] == [
+        ("iter0_x", "y", 150.0),
+        ("iter0_y", "x", 150.0),
+    ]
     m = _manifest(sc)
     assert m["experiment"] == "strain_tune"
     # The dashboard's manifest parser types `applied` strictly (servo
     # param writes); diagnostics ride in the free-form `swept`.
     assert m["steps"][0]["applied"] == []
-    assert m["steps"][0]["swept"]["rho_a"] == 0.66
+    assert m["steps"][0]["swept"]["s_own_a"] == pytest.approx(300.0 * 0.66)
+    assert m["steps"][0]["swept"]["s_cross_a"] == pytest.approx(-75.0 * 0.66)
+    assert m["steps"][0]["swept"]["rms_a_x"] == 1.0
+    assert m["steps"][0]["swept"]["rms_a_y"] == 1.5
     assert m["steps"][0]["swept"]["kaa"] == 300.0
     assert m["steps"][0]["swept"]["y"] == 150.0
+    assert m["steps"][0]["swept"]["x"] == 150.0
 
 
 def test_tune_fails_loudly_when_it_does_not_converge():
