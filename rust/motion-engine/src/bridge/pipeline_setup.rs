@@ -235,10 +235,9 @@ impl PyMotionEngine {
             sink: crate::pump::WireSink {
                 transports: wire_transports,
                 timeout: Duration::from_secs(5),
-                freq_of: Arc::new(move |mcu_id: u32| {
+                clock_of: Arc::new(move |mcu_id: u32| {
                     let r = router_for_freq.lock_ok();
                     r.ack_clock_and_freq(mcu_handle_from_raw(mcu_id))
-                        .map(|(_, f)| f)
                 }),
             },
             callbacks: crate::pump::PumpCallbacks {

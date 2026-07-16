@@ -424,7 +424,7 @@ impl<S: PieceSink> Pump<S> {
     // endpoint ring) trip a cryptic -308 PieceStartInPast after the fact.
     // Mirrors the MCU's MAX_START_IN_PAST_SECS=200us threshold with a margin
     // above host-projection jitter so a healthy print never false-aborts.
-    fn guard_pieces_not_in_past(&self, mcu_id: u32, bundle: &[AxisFrame]) {
+    fn guard_pieces_not_in_past(&self, mcu_id: u32, bundle: &[AxisFrame], context: &str) {
         if let Some((mcu_now, freq)) = (self.callbacks.mcu_clock_of)(mcu_id) {
             if self.cohort.is_some() {
                 diag::log_send_projection(mcu_id, mcu_now, freq, bundle);
@@ -444,10 +444,11 @@ impl<S: PieceSink> Pump<S> {
                                 start_time = piece.start_time,
                                 mcu_now,
                                 deficit_us,
-                                "[pump-guard] piece already in the MCU's past at send time — failing loud on host before the MCU/endpoint trips -308"
+                                context,
+                                "[pump-guard] piece already in the MCU's past {context} — failing loud on host before the MCU/endpoint trips -308"
                             );
                             eprintln!(
-                                "pump: piece in past at send — mcu {mcu_id} axis {} start_time={} mcu_now={mcu_now} deficit_us={deficit_us} — aborting host before MCU -308",
+                                "pump: piece in past {context} — mcu {mcu_id} axis {} start_time={} mcu_now={mcu_now} deficit_us={deficit_us} — aborting host before MCU -308",
                                 af.axis, piece.start_time
                             );
                             let _ = std::io::Write::flush(&mut std::io::stderr());
@@ -549,7 +550,7 @@ impl<S: PieceSink> Pump<S> {
                     activity = true;
                     let mcu_id = frames[0].key.mcu_id;
                     let bundle = self.build_bundle(frames);
-                    self.guard_pieces_not_in_past(mcu_id, &bundle);
+                    self.guard_pieces_not_in_past(mcu_id, &bundle, "at send");
                     let send_result = self.send_bundle_logged(mcu_id, &bundle);
                     match send_result {
                         Ok(()) => {
@@ -576,6 +577,12 @@ impl<S: PieceSink> Pump<S> {
                                 mcu = mcu_id,
                                 error = %e,
                                 "pump send_mcu_frames failed"
+                            );
+                            self.guard_pieces_not_in_past(
+                                mcu_id,
+                                &bundle,
+                                "after a failed send (transport gave no response \
+                                 while the piece's scheduling lead ran out)",
                             );
                             break;
                         }

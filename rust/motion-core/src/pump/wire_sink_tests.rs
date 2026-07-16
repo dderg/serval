@@ -33,7 +33,7 @@ fn closed_peer_yields_fatal_send_error() {
             m
         },
         timeout: Duration::from_millis(50),
-        freq_of: Arc::new(|_| None),
+        clock_of: Arc::new(|_| None),
     };
     let frame = AxisFrame {
         axis: key().axis,
@@ -58,7 +58,7 @@ fn detached_ethercat_conn_yields_fatal_send_error() {
             m
         },
         timeout: Duration::from_millis(50),
-        freq_of: Arc::new(|_| None),
+        clock_of: Arc::new(|_| None),
     };
     let frame = AxisFrame {
         axis: key().axis,
