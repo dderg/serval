@@ -26,7 +26,7 @@ use servo_ident::http;
 use servo_ident::live_stream::{LiveTap, DEFAULT_IDLE_TIMEOUT, DEFAULT_TAP_SOCKET};
 use servo_ident::metrics::{DEFAULT_SETTLE_BAND_COUNTS, DEFAULT_TORQUE_LIMIT_PER_MILLE};
 use servo_ident::model::Structure;
-use servo_ident::pipeline::{pooled_input, prepare, Prepared};
+use servo_ident::pipeline::{fit_input, prepare};
 use servo_ident::prep::{band_limited_rms, PrepOptions};
 use servo_ident::profile_out::{c0006_recommendation, render_profile};
 use servo_ident::scap::Scap;
@@ -57,22 +57,6 @@ fn req(args: &[String], key: &str) -> String {
 fn die(msg: &str) -> ! {
     eprintln!("servo-cal: {msg}");
     std::process::exit(1);
-}
-
-fn args_all(args: &[String], key: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == key {
-            if let Some(v) = args.get(i + 1) {
-                out.push(v.clone());
-            }
-            i += 2;
-        } else {
-            i += 1;
-        }
-    }
-    out
 }
 
 fn main() {
@@ -250,10 +234,10 @@ fn cmd_fit(args: &[String]) {
             structure.axis_count()
         ));
     }
-    let capture_paths = args_all(args, "--capture");
-    if capture_paths.is_empty() {
-        die("missing required --capture");
+    if args.iter().filter(|a| *a == "--capture").count() > 1 {
+        die("--capture given more than once — the fit consumes exactly one capture");
     }
+    let capture_path = req(args, "--capture");
     let mut prep_opts = PrepOptions::default();
     if let Some(v) = opt_f64(args, "--cutoff-hz") {
         prep_opts.cutoff_hz = v;
@@ -267,65 +251,59 @@ fn cmd_fit(args: &[String]) {
     prep_opts.ripple_period_mm =
         opt_f64(args, "--ripple-period-mm").or_else(|| opt_f64(args, "--rotation-distance-mm"));
 
-    let mut prepared: Vec<Prepared> = Vec::new();
-    for path in &capture_paths {
-        let cap = Scap::load(path).unwrap_or_else(|e| die(&e));
-        let fit_cap = scap_to_capture(&cap, &axes).unwrap_or_else(|e| die(&e));
-        let (pr, stats) = prepare(&fit_cap, &structure, &prep_opts);
+    let cap = Scap::load(&capture_path).unwrap_or_else(|e| die(&e));
+    let fit_cap = scap_to_capture(&cap, &axes).unwrap_or_else(|e| die(&e));
+    let (prepared, stats) = prepare(&fit_cap, &structure, &prep_opts);
+    eprintln!(
+        "prep: {} segments, delay {:.2} ms; prep+tracking kept {}/{}, \
+         +steady-accel plateaus kept {}/{}",
+        stats.segments,
+        stats.delay_s * 1000.0,
+        stats.tracked,
+        stats.total,
+        stats.kept,
+        stats.total
+    );
+    if stats.tracked == 0 {
         eprintln!(
-            "prep [{path}]: {} segments, delay {:.2} ms; prep+tracking kept {}/{}, \
-             +steady-accel plateaus kept {}/{}",
-            stats.segments,
-            stats.delay_s * 1000.0,
-            stats.tracked,
-            stats.total,
-            stats.kept,
-            stats.total
+            "servo-cal: {capture_path}: the drive never tracked the commanded \
+             trajectory — stiction breakaway or an untuned/lagging loop; enable \
+             velocity feedforward and check the mechanics, then re-capture"
         );
-        if stats.tracked == 0 {
-            eprintln!(
-                "servo-cal: {path}: the drive never tracked the commanded \
-                 trajectory — stiction breakaway or an untuned/lagging loop; enable \
-                 velocity feedforward and check the mechanics, then re-capture"
-            );
-            std::process::exit(2);
-        }
-        if stats.kept == 0 {
-            eprintln!(
-                "servo-cal: {path}: no steady-accel plateaus — strokes too short \
-                 or jerk-limited accel never holds; lengthen strokes or lower accel"
-            );
-            std::process::exit(2);
-        }
-        prepared.push(pr);
+        std::process::exit(2);
+    }
+    if stats.kept == 0 {
+        eprintln!(
+            "servo-cal: {capture_path}: no steady-accel plateaus — strokes too short \
+             or jerk-limited accel never holds; lengthen strokes or lower accel"
+        );
+        std::process::exit(2);
     }
 
-    let input = pooled_input(&structure, &prepared);
+    let input = fit_input(&structure, &prepared);
     let r = fit(&input, &FitOptions::default()).unwrap_or_else(|e| {
         eprintln!("servo-cal: refusing to emit a profile: {e:?}");
         std::process::exit(2);
     });
     eprintln!(
-        "fit: {} pooled samples/motor, rms residual {:.2} (0.1% rated), condition {:.1e}",
+        "fit: {} samples/motor, rms residual {:.2} (0.1% rated), condition {:.1e}",
         r.samples, r.rms_residual, r.condition
     );
     if prep_opts.cutoff_hz > 0.0 {
-        for (ci, pr) in prepared.iter().enumerate() {
-            let full = FitInput {
-                structure: structure.clone(),
-                acc_mode: pr.pp.acc_mode.clone(),
-                vel_mode: pr.pp.vel_mode.clone(),
-                cs_mode: pr.pp.cs_mode.clone(),
-                torque: pr.pp.torque.clone(),
-                extra: pr.pp.extra.clone(),
-            };
-            let res = residual_by_motor(&full, &r.params, &r.extra_params);
-            let inband = band_limited_rms(&res, &pr.pp.t, &pr.keep, prep_opts.cutoff_hz);
-            eprintln!(
-                "in-band (<= {:.0} Hz) rms residual [capture {ci}]: {:.2} (0.1% rated)",
-                prep_opts.cutoff_hz, inband
-            );
-        }
+        let full = FitInput {
+            structure: structure.clone(),
+            acc_mode: prepared.pp.acc_mode.clone(),
+            vel_mode: prepared.pp.vel_mode.clone(),
+            cs_mode: prepared.pp.cs_mode.clone(),
+            torque: prepared.pp.torque.clone(),
+            extra: prepared.pp.extra.clone(),
+        };
+        let res = residual_by_motor(&full, &r.params, &r.extra_params);
+        let inband = band_limited_rms(&res, &prepared.pp.t, &prepared.keep, prep_opts.cutoff_hz);
+        eprintln!(
+            "in-band (<= {:.0} Hz) rms residual: {:.2} (0.1% rated)",
+            prep_opts.cutoff_hz, inband
+        );
     }
     let min_mass = r.params.mass.iter().copied().fold(f64::INFINITY, f64::min);
     let physical = min_mass > 0.0;

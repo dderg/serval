@@ -1,6 +1,6 @@
-//! Shared multi-capture plumbing for the `fit` path of both CLIs: prep one
-//! capture into its mode channels + keep mask, and pool several prepped
-//! captures into one `FitInput`. The per-tool reporting stays in each binary.
+//! Shared capture plumbing for the `fit` path of both CLIs: prep the capture
+//! into its mode channels + keep mask, and reduce it to the `FitInput` the
+//! fit consumes. The per-tool reporting stays in each binary.
 
 use crate::capture::{steady_accel_keep, tracking_keep, Capture, PlateauOptions, TrackingOptions};
 use crate::fit::FitInput;
@@ -41,51 +41,22 @@ pub fn prepare(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> (Pre
     (Prepared { pp, keep }, stats)
 }
 
-pub fn pooled_input(structure: &Structure, prepared: &[Prepared]) -> FitInput {
-    let n_modes = structure.mode_count();
-    let n_motors = structure.axis_count();
-    let e = prepared
-        .first()
-        .map_or(0, |p| p.pp.extra.first().map_or(0, Vec::len));
-    let mut acc_mode = vec![Vec::new(); n_modes];
-    let mut vel_mode = vec![Vec::new(); n_modes];
-    let mut cs_mode = vec![Vec::new(); n_modes];
-    let mut torque = vec![Vec::new(); n_motors];
-    let mut extra: Vec<Vec<Vec<f64>>> = if e > 0 {
-        vec![vec![Vec::new(); e]; n_motors]
-    } else {
-        Vec::new()
-    };
-    for pr in prepared {
-        let idx: Vec<usize> = (0..pr.keep.len()).filter(|&k| pr.keep[k]).collect();
-        for md in 0..n_modes {
-            for &k in &idx {
-                acc_mode[md].push(pr.pp.acc_mode[md][k]);
-                vel_mode[md].push(pr.pp.vel_mode[md][k]);
-                cs_mode[md].push(pr.pp.cs_mode[md][k]);
-            }
-        }
-        for m in 0..n_motors {
-            for &k in &idx {
-                torque[m].push(pr.pp.torque[m][k]);
-            }
-        }
-        if e > 0 {
-            for m in 0..n_motors {
-                for c in 0..e {
-                    for &k in &idx {
-                        extra[m][c].push(pr.pp.extra[m][c][k]);
-                    }
-                }
-            }
-        }
-    }
+pub fn fit_input(structure: &Structure, prepared: &Prepared) -> FitInput {
+    let idx: Vec<usize> = (0..prepared.keep.len())
+        .filter(|&k| prepared.keep[k])
+        .collect();
+    let select = |chan: &[f64]| -> Vec<f64> { idx.iter().map(|&k| chan[k]).collect() };
     FitInput {
         structure: structure.clone(),
-        acc_mode,
-        vel_mode,
-        cs_mode,
-        torque,
-        extra,
+        acc_mode: prepared.pp.acc_mode.iter().map(|c| select(c)).collect(),
+        vel_mode: prepared.pp.vel_mode.iter().map(|c| select(c)).collect(),
+        cs_mode: prepared.pp.cs_mode.iter().map(|c| select(c)).collect(),
+        torque: prepared.pp.torque.iter().map(|c| select(c)).collect(),
+        extra: prepared
+            .pp
+            .extra
+            .iter()
+            .map(|per_motor| per_motor.iter().map(|c| select(c)).collect())
+            .collect(),
     }
 }
