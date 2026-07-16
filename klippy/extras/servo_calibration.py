@@ -185,9 +185,9 @@ def parse_dynamics_profile(text: str) -> dict[str, Any]:
             "parsing dynamics profiles requires Python 3.11+ (tomllib)"
         )
     data = tomllib.loads(text)
-    if data.get("version") != 4:
+    if data.get("version") != 5:
         raise ValueError(
-            "dynamics profile version must be 4 (got %r) - refit with "
+            "dynamics profile version must be 5 (got %r) - refit with "
             "SERVO_FIT_DYNAMICS" % (data.get("version"),)
         )
     axes = data.get("axes")
@@ -362,7 +362,7 @@ def render_dynamics_toml(
         return "[%s]" % (", ".join(num(v) for v in values),)
 
     lines = [
-        "version = 4",
+        "version = 5",
         "axes = %s" % (json.dumps(profile["axes"]),),
         "modes = %s" % (json.dumps(profile["modes"]),),
         "frame = [%s]" % (", ".join(vec(row) for row in profile["frame"]),),

@@ -124,7 +124,7 @@ fn renders_loadable_v4_profile_without_pairs() {
         &[0.8, 0.7, 0.8, 0.9],
         &[],
     );
-    assert!(toml_text.contains("version = 4"), "{toml_text}");
+    assert!(toml_text.contains("version = 5"), "{toml_text}");
     assert!(
         toml_text.contains("axes = [\"motor_a\", \"motor_a1\", \"motor_b\", \"motor_b1\"]"),
         "{toml_text}"
@@ -181,7 +181,7 @@ fn renders_v4_profile_with_pairs() {
         &[0.8, 0.7, 0.8, 0.9],
         &pairs,
     );
-    assert!(toml_text.contains("version = 4"), "{toml_text}");
+    assert!(toml_text.contains("version = 5"), "{toml_text}");
     assert_eq!(
         toml_text.matches("[[pair]]").count(),
         2,

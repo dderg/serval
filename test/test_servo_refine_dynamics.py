@@ -17,7 +17,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 BASELINE_TOML = """\
-version = 4
+version = 5
 axes = ["motor_a", "motor_b"]
 modes = ["x", "y"]
 frame = [[0.5, 0.5], [0.5, -0.5]]
@@ -28,7 +28,7 @@ fit_rms_residual = [0.5, 0.5]
 """
 
 ONE_AXIS_TOML = """\
-version = 4
+version = 5
 axes = ["motor_a"]
 modes = ["x"]
 frame = [[1.0]]
@@ -38,7 +38,7 @@ coulomb = [1.0]
 """
 
 NON_XY_TOML = """\
-version = 4
+version = 5
 axes = ["motor_a", "motor_b"]
 modes = ["a", "b"]
 frame = [[0.5, 0.5], [0.5, -0.5]]
@@ -48,7 +48,7 @@ coulomb = [1.0, 1.5]
 """
 
 AWD_TOML = """\
-version = 4
+version = 5
 axes = ["motor_a", "motor_a1", "motor_b", "motor_b1"]
 modes = ["x", "y"]
 frame = [[0.25, 0.25, -0.25, 0.25], [0.25, 0.25, 0.25, -0.25]]
@@ -163,7 +163,7 @@ def test_parse_dynamics_profile_parses_pairs():
 def test_parse_dynamics_profile_rejects_violations():
     with pytest.raises(ValueError, match="refit with SERVO_FIT_DYNAMICS"):
         servo_calibration.parse_dynamics_profile(
-            BASELINE_TOML.replace("version = 4", "version = 1")
+            BASELINE_TOML.replace("version = 5", "version = 1")
         )
     with pytest.raises(ValueError, match="frame"):
         servo_calibration.parse_dynamics_profile(
@@ -247,7 +247,7 @@ def test_render_dynamics_toml_roundtrips_pairs():
     assert again["frame"] == p["frame"]
     assert again["pairs"] == AWD_PAIRS
     raw = tomllib.loads(text)
-    assert raw["version"] == 4
+    assert raw["version"] == 5
 
 
 def test_adapter_streams_pair_indices_and_split():

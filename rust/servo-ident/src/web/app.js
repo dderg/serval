@@ -352,11 +352,11 @@ function consoleSectionHtml(def) {
     `<span class="note" id="form-run-name"></span>${templates}</div>` +
     `<div id="sent-log" class="sent-log"></div>` +
     `<div id="run-status" class="status-line"></div>` +
-    `<div id="console-help" class="console-help"></div>` +
     `<div class="console-line"><span class="console-prompt">›</span>` +
     `<textarea id="console-input" rows="1" spellcheck="false" ` +
-    `placeholder="g-code — enter runs, shift+enter multiline, ↑/↓ history, ctrl+r search"></textarea></div>` +
+    `placeholder="g-code — enter runs, tab completes, ↑/↓ history, ctrl+r search"></textarea></div>` +
     `<div id="console-search" class="console-search"></div>` +
+    `<div id="console-help" class="console-help"></div>` +
     `</section>`
   );
 }
@@ -449,6 +449,7 @@ function analysisSectionsHtml(def) {
       `<section class="time-section">` +
         `<div class="section-head"><h2>time domain — following error</h2>` +
         motorViewToggleHtml("combined") +
+        `<div class="chips" id="time-step-chips"></div>` +
         `</div>` +
         `<div class="charts" id="charts"><p class="note">select runs above</p></div>` +
         `</section>`
@@ -532,7 +533,7 @@ function bindAccordionToggle() {
   document.addEventListener("click", (e) => {
     const head = e.target.closest(".analysis .section-head");
     if (!head) return;
-    if (e.target.closest("button,select,input,textarea,a,label")) return;
+    if (e.target.closest("button,select,input,textarea,a,label,.chips")) return;
     const section = head.parentElement;
     if (!section || section.tagName !== "SECTION") return;
     section.classList.toggle("collapsed");
@@ -1768,9 +1769,18 @@ function visibleStepNames(stepNames) {
   return kept.length ? kept : stepNames;
 }
 
-function renderPsdChips(stepNames) {
-  const container = el("psd-step-chips");
-  if (!container) return;
+/// The one step filter drives every chart that splits by step (PSD, time
+/// domain, metrics), so its chips render into every section that has a
+/// container for them — otherwise a filter picked on one page silently
+/// shapes another page's chart with no control in sight.
+function renderStepChips(stepNames) {
+  for (const id of ["psd-step-chips", "time-step-chips"]) {
+    const container = el(id);
+    if (container) fillStepChips(container, stepNames);
+  }
+}
+
+function fillStepChips(container, stepNames) {
   container.innerHTML = "";
   const all = document.createElement("button");
   all.className = "chip" + (state.stepFilter ? "" : " active");
@@ -2692,9 +2702,9 @@ async function redrawCharts() {
     if (def.metrics) renderMetricsTable(pageNames, steps);
     if (def.sweepChart) renderSweepMetricsChart(pageNames);
   }
+  renderStepChips(stepNames);
   if (def.charts && def.charts.includes("frf")) renderFrfCharts(okNames, plots);
   if (def.charts && def.charts.includes("psd")) {
-    renderPsdChips(stepNames);
     renderPsdChart(okNames, plots, steps);
   }
   if (def.peaks) renderPeakList(okNames, plots, steps);
@@ -3719,8 +3729,6 @@ function bindConsole() {
   input.addEventListener("click", renderConsoleHelp);
   input.addEventListener("keydown", consoleKeydown);
   input.addEventListener("blur", () => exitConsoleSearch(true));
-  const helpBox = el("console-help");
-  if (helpBox) helpBox.addEventListener("click", consoleHelpClick);
   renderConsoleHelp();
 }
 
@@ -3737,6 +3745,7 @@ function setConsoleValue(text, focus) {
   input.selectionStart = input.selectionEnd = text.length;
   autosizeConsole(input);
   if (focus) input.focus();
+  renderConsoleHelp();
 }
 
 function caretOnFirstLine(input) {
@@ -3757,6 +3766,11 @@ function consoleKeydown(ev) {
   if (ev.key === "Enter" && !ev.shiftKey) {
     ev.preventDefault();
     submitConsole();
+    return;
+  }
+  if (ev.key === "Tab" && !ev.shiftKey && !ev.ctrlKey && !ev.altKey) {
+    ev.preventDefault();
+    consoleTabComplete(input);
     return;
   }
   if (ev.ctrlKey && ev.key === "r") {
@@ -3992,7 +4006,7 @@ function parseParamsTail(tail) {
   return items;
 }
 
-function paramChipsHtml(items, activeName) {
+function paramChipsHtml(items) {
   const known = state.help.commands || {};
   return items
     .map((it) => {
@@ -4005,8 +4019,7 @@ function paramChipsHtml(items, activeName) {
       if (known[it.name]) {
         return `<a class="chip param-chip xref" href="#/docs/${it.name}">${label}</a>`;
       }
-      const active = it.name === activeName ? " active" : "";
-      return `<span class="chip param-chip${active}" data-param="${it.name}">${label}</span>`;
+      return `<span class="chip param-chip">${label}</span>`;
     })
     .join("");
 }
@@ -4046,7 +4059,7 @@ function macroDocHtml(name, text, open) {
     `<div class="macro-body">` +
     `<p class="macro-prose">${escapeHtml(prose)}</p>` +
     (items.length
-      ? `<div class="chips param-chips">${paramChipsHtml(items, null)}</div>`
+      ? `<div class="chips param-chips">${paramChipsHtml(items)}</div>`
       : "") +
     `</div></details>`
   );
@@ -4097,16 +4110,6 @@ function renderDocsList() {
   if (retry) retry.addEventListener("click", fetchMacroHelp);
 }
 
-/// Caret-position → the UPPERCASE param name the caret sits inside, so the
-/// matching chip lights up while its value is being typed.
-function caretParamName(line, caretInLine) {
-  const start = line.lastIndexOf(" ", caretInLine - 1) + 1;
-  let end = line.indexOf(" ", caretInLine);
-  if (end < 0) end = line.length;
-  const name = line.slice(start, end).split("=")[0].toUpperCase();
-  return /^[A-Z][A-Z0-9_]*$/.test(name) ? name : null;
-}
-
 function consoleCaretLine(input) {
   const caret = input.selectionStart;
   const text = input.value;
@@ -4116,12 +4119,90 @@ function consoleCaretLine(input) {
   return { line: text.slice(start, end), start, caretInLine: caret - start };
 }
 
+function lineCommand(line) {
+  return (line.trim().split(/\s+/)[0] || "").toUpperCase();
+}
+
+function macroParamNames(cmdName) {
+  const known = state.help.commands || {};
+  const text = known[cmdName];
+  if (!text) return null;
+  const { params } = splitMacroHelp(text);
+  if (!params) return [];
+  return parseParamsTail(params)
+    .filter((it) => it.kind === "param" && !known[it.name])
+    .map((it) => it.name);
+}
+
+/// What tab completion would complete at the current caret: SERVO_* command
+/// names for the line's first word, otherwise the command's param names not
+/// already given on the line. A token with "=" is a value — nothing to
+/// complete there.
+function consoleCompletion(input) {
+  const none = { candidates: [] };
+  const h = state.help;
+  if (!h.commands) return none;
+  const { line, start, caretInLine } = consoleCaretLine(input);
+  const tokenStart = line.lastIndexOf(" ", caretInLine - 1) + 1;
+  const token = line.slice(tokenStart, caretInLine);
+  if (token.includes("=")) return none;
+  const up = token.toUpperCase();
+  const common = { lineStart: start, tokenStart, tokenLen: token.length };
+  if (!line.slice(0, tokenStart).trim().length) {
+    if (!up.length) return none;
+    return {
+      ...common,
+      candidates: Object.keys(h.commands).filter((n) => n.startsWith(up)),
+      suffix: " ",
+    };
+  }
+  const names = macroParamNames(lineCommand(line));
+  if (!names) return none;
+  const taken = new Set(
+    Array.from(line.matchAll(/([A-Za-z][A-Za-z0-9_]*)=/g), (m) => m[1].toUpperCase())
+  );
+  return {
+    ...common,
+    candidates: names.filter((n) => n.startsWith(up) && !taken.has(n)),
+    suffix: "=",
+  };
+}
+
+function longestCommonPrefix(names) {
+  let prefix = names[0];
+  for (const n of names.slice(1)) {
+    while (!n.startsWith(prefix)) prefix = prefix.slice(0, -1);
+  }
+  return prefix;
+}
+
+function consoleTabComplete(input) {
+  const c = consoleCompletion(input);
+  if (!c.candidates.length) return;
+  const replacement =
+    c.candidates.length === 1
+      ? c.candidates[0] + c.suffix
+      : longestCommonPrefix(c.candidates);
+  const from = c.lineStart + c.tokenStart;
+  const text = input.value;
+  setConsoleValue(
+    text.slice(0, from) + replacement + text.slice(from + c.tokenLen),
+    true
+  );
+  input.selectionStart = input.selectionEnd = from + replacement.length;
+  renderConsoleHelp();
+}
+
+/// The terminal-style help under the prompt: one dim description line and a
+/// usage line of the command's params. The param whose value the caret is in
+/// is highlighted; while a param name is being typed, every candidate the
+/// prefix still matches is highlighted.
 function renderConsoleHelp() {
   const box = el("console-help");
   const input = el("console-input");
   if (!box || !input) return;
   const { line, caretInLine } = consoleCaretLine(input);
-  const first = (line.trim().split(/\s+/)[0] || "").toUpperCase();
+  const first = lineCommand(line);
   if (!first.startsWith("SERVO")) {
     box.innerHTML = "";
     return;
@@ -4129,78 +4210,51 @@ function renderConsoleHelp() {
   const h = state.help;
   if (!h.commands) {
     if (!h.pending && !h.error) fetchMacroHelp();
-    box.innerHTML = `<span class="hint">${
+    box.innerHTML = `<div class="hint">${
       h.error ? `macro help unavailable — ${escapeHtml(h.error)}` : "fetching macro help…"
-    }</span>`;
+    }</div>`;
     return;
   }
   const helpText = h.commands[first];
   if (!helpText) {
     const matches = Object.keys(h.commands).filter((n) => n.startsWith(first));
-    box.innerHTML = matches
-      .map(
-        (n) =>
-          `<button class="chip param-chip complete-btn" data-cmd="${n}">${n}</button>`
-      )
-      .join("");
+    box.innerHTML = matches.length
+      ? `<div class="console-help-cands">${matches.map(escapeHtml).join("  ")}</div>`
+      : "";
     return;
   }
+  const tokenStart = line.lastIndexOf(" ", caretInLine - 1) + 1;
+  let tokenEnd = line.indexOf(" ", caretInLine);
+  if (tokenEnd < 0) tokenEnd = line.length;
+  const caretToken = line.slice(tokenStart, tokenEnd);
+  const onFirstWord = !line.slice(0, tokenStart).trim().length;
+  const activeName = !onFirstWord && caretToken.includes("=")
+    ? caretToken.split("=")[0].toUpperCase()
+    : null;
+  const typedPrefix = !onFirstWord && !caretToken.includes("=")
+    ? line.slice(tokenStart, caretInLine).toUpperCase()
+    : "";
   const { prose, params } = splitMacroHelp(helpText);
   const items = params ? parseParamsTail(params) : [];
+  const usage = items
+    .map((it) => {
+      if (it.kind === "text") return `<span class="dim">${escapeHtml(it.text)}</span>`;
+      let cls = "p";
+      if (it.name === activeName) cls += " active";
+      else if (typedPrefix.length && it.name.startsWith(typedPrefix)) cls += " match";
+      let s = `<span class="${cls}">${escapeHtml(it.name)}`;
+      if (it.choices) s += `<span class="dim">=${escapeHtml(it.choices)}</span>`;
+      if (it.dflt) s += `<span class="dim">(${escapeHtml(it.dflt)})</span>`;
+      return `${s}</span>`;
+    })
+    .join(" ");
   box.innerHTML =
-    `<div class="console-help-head">` +
-    `<a href="#/docs/${first}" class="macro-name" title="open in the docs tab">${first}</a>` +
-    (h.cached ? `<span class="hint">cached — klippy unreachable</span>` : "") +
+    `<div class="console-help-desc"><a href="#/docs/${first}" ` +
+    `title="open in the docs tab">${first}</a>` +
+    `<span class="dim"> — ${escapeHtml(prose)}</span>` +
+    (h.cached ? `<span class="hint"> (cached — klippy unreachable)</span>` : "") +
     `</div>` +
-    `<div class="macro-prose clamped" title="click to expand">${escapeHtml(prose)}</div>` +
-    (items.length
-      ? `<div class="chips param-chips">${paramChipsHtml(items, caretParamName(line, caretInLine))}</div>`
-      : "");
-}
-
-/// Completion chips replace the caret line's first word; a param chip click
-/// appends NAME= to the line so the value can be typed straight away.
-function consoleHelpClick(ev) {
-  const input = el("console-input");
-  const prose = ev.target.closest(".macro-prose");
-  if (prose) {
-    prose.classList.toggle("clamped");
-    return;
-  }
-  const complete = ev.target.closest(".complete-btn");
-  if (complete) {
-    const { line, start } = consoleCaretLine(input);
-    const rest = line.replace(/^\s*\S+/, "");
-    const newLine = complete.dataset.cmd + (rest || " ");
-    const text = input.value;
-    setConsoleValue(
-      text.slice(0, start) + newLine + text.slice(start + line.length),
-      true
-    );
-    input.selectionStart = input.selectionEnd = start + newLine.length;
-    renderConsoleHelp();
-    return;
-  }
-  const chip = ev.target.closest(".param-chip[data-param]");
-  if (chip) {
-    const { line, start } = consoleCaretLine(input);
-    const name = chip.dataset.param;
-    const text = input.value;
-    if (line.includes(`${name}=`)) {
-      const pos = start + line.indexOf(`${name}=`) + name.length + 1;
-      input.focus();
-      input.selectionStart = input.selectionEnd = pos;
-    } else {
-      const newLine = `${line.replace(/\s+$/, "")} ${name}=`;
-      setConsoleValue(
-        text.slice(0, start) + newLine + text.slice(start + line.length),
-        true
-      );
-      const pos = start + newLine.length;
-      input.selectionStart = input.selectionEnd = pos;
-    }
-    renderConsoleHelp();
-  }
+    (usage ? `<div class="console-help-usage">${usage}</div>` : "");
 }
 
 // --- boot -------------------------------------------------------------------

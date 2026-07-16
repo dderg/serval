@@ -1,7 +1,7 @@
 use super::*;
 
 const SCALAR: &str = r#"
-version = 4
+version = 5
 axes = ["x"]
 modes = ["x"]
 frame = [[1.0]]
@@ -12,7 +12,7 @@ fit_rms_residual = [0.8]
 "#;
 
 const SCALAR_Y: &str = r#"
-version = 4
+version = 5
 axes = ["y"]
 modes = ["y"]
 frame = [[1.0]]
@@ -23,7 +23,7 @@ fit_rms_residual = [0.3]
 "#;
 
 const COREXY: &str = r#"
-version = 4
+version = 5
 axes = ["a", "b"]
 modes = ["x", "y"]
 frame = [[0.5, 0.5], [0.5, -0.5]]
@@ -95,7 +95,7 @@ fn block_diagonal_rejects_empty() {
 
 #[test]
 fn rejects_each_invariant_violation() {
-    let bad_version = SCALAR.replace("version = 4", "version = 2");
+    let bad_version = SCALAR.replace("version = 5", "version = 2");
     assert!(matches!(
         DynamicsModel::from_toml_str(&bad_version),
         Err(ProfileError::Version(2))
@@ -241,7 +241,7 @@ fn clamp_counts_saturation() {
 }
 
 const COREXY_AWD: &str = r#"
-version = 4
+version = 5
 axes = ["a", "a1", "b", "b1"]
 modes = ["x", "y"]
 frame = [[0.25, 0.25, 0.25, 0.25], [0.25, 0.25, -0.25, -0.25]]
@@ -275,7 +275,7 @@ fn torque_ff_without_coulomb_keeps_the_linear_terms() {
 }
 
 const AWD_PAIR: &str = r#"
-version = 4
+version = 5
 axes = ["a", "a1", "b", "b1"]
 modes = ["x", "y"]
 frame = [[0.25, -0.25, -0.25, -0.25], [0.25, -0.25, 0.25, 0.25]]
@@ -403,7 +403,7 @@ fn pair_validation_rejections() {
         Err(ProfileError::NotFinite(_))
     ));
     let reused = r#"
-version = 4
+version = 5
 axes = ["a", "a1", "b", "b1"]
 modes = ["x", "y"]
 frame = [[0.25, -0.25, -0.25, -0.25], [0.25, -0.25, 0.25, 0.25]]
