@@ -102,8 +102,8 @@ C00_06_INERTIA_RATIO_MAX = 12000
 C00_05_STIFFNESS_LEVEL_MIN = 1
 C00_05_STIFFNESS_LEVEL_MAX = 31
 
-SYNC_LOSS_COUNT_ADDR = "0x200d.0x05"
-SYNC_LOSS_THRESHOLD_ADDR = "0x200d.0x03"
+SYNC_LOSS_COUNT_ADDR = "0x2013.0x05"
+SYNC_LOSS_THRESHOLD_ADDR = "0x2013.0x03"
 
 NOTCH_MODE_ADDR = "0x2001.0x31"
 NOTCH_READBACK: tuple[tuple[str, tuple[str, str, str]], ...] = (
@@ -1692,11 +1692,19 @@ class ServoCalibration:
         """C13.04 per drive - the drive's own EtherCAT sync loss counter.
         The drive silently tolerates up to C13.02 (default 8) consecutive
         lost/late sync events before faulting, so this counter is the only
-        way to see the tolerated ones."""
-        return {
-            servo: self._read_param(servo, SYNC_LOSS_COUNT_ADDR)
-            for servo in servos
-        }
+        way to see the tolerated ones. A failed read aborts the command
+        (not the printer): the counter is diagnostics, and a CoE abort here
+        means the drive does not expose it where expected."""
+        counts = {}
+        for servo in servos:
+            try:
+                counts[servo] = self._read_param(servo, SYNC_LOSS_COUNT_ADDR)
+            except Exception as e:
+                raise self.printer.command_error(
+                    "reading EtherCAT sync loss counter C13.04 (%s) failed "
+                    "for %s: %s" % (SYNC_LOSS_COUNT_ADDR, servo, e)
+                )
+        return counts
 
     def _check_sync_loss(self) -> None:
         if self._capture_sync_loss is None:

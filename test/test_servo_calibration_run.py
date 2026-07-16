@@ -1142,7 +1142,7 @@ def test_capture_warns_when_sync_loss_counter_increments():
     reads = {"n": 0}
 
     def sdo_read(handle, slot, index, subindex):
-        if (index, subindex) == (0x200D, 0x05):
+        if (index, subindex) == (0x2013, 0x05):
             reads["n"] += 1
             return 2, reads["n"]
         return 2, 7
@@ -1161,3 +1161,18 @@ def test_capture_quiet_when_sync_loss_counter_steady():
     sc, gcode = make_sc()
     sc.cmd_SERVO_MEASURE_TRACKING(FakeGcmd(AXIS="X"))
     assert not any("sync loss" in r for r in gcode.responses)
+
+
+def test_capture_sync_loss_read_failure_is_command_error():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    engine = sc.printer.lookup_object("motion_engine")
+
+    def sdo_read(handle, slot, index, subindex):
+        if (index, subindex) == (0x2013, 0x05):
+            raise RuntimeError("SDO read failed: CoE abort 0x06020000")
+        return 2, 7
+
+    engine.sdo_read = sdo_read
+    with pytest.raises(RuntimeError, match="C13.04"):
+        sc.cmd_SERVO_MEASURE_TRACKING(FakeGcmd(AXIS="X"))
