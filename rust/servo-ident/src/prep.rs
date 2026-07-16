@@ -157,7 +157,11 @@ fn convolve_same(x: &[f64], kernel: &[f64]) -> Vec<f64> {
     out
 }
 
-fn filter_segments(x: &[f64], segs: &[std::ops::Range<usize>], kernel: Option<&[f64]>) -> Vec<f64> {
+pub(crate) fn filter_segments(
+    x: &[f64],
+    segs: &[std::ops::Range<usize>],
+    kernel: Option<&[f64]>,
+) -> Vec<f64> {
     match kernel {
         None => x.to_vec(),
         Some(k) => {

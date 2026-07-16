@@ -60,3 +60,14 @@ pub fn fit_input(structure: &Structure, prepared: &Prepared) -> FitInput {
             .collect(),
     }
 }
+
+pub fn full_fit_input(structure: &Structure, prepared: &Prepared) -> FitInput {
+    FitInput {
+        structure: structure.clone(),
+        acc_mode: prepared.pp.acc_mode.clone(),
+        vel_mode: prepared.pp.vel_mode.clone(),
+        cs_mode: prepared.pp.cs_mode.clone(),
+        torque: prepared.pp.torque.clone(),
+        extra: prepared.pp.extra.clone(),
+    }
+}

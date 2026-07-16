@@ -32,6 +32,24 @@ evaluated on *commanded* velocity, which is exactly zero at rest, so the
 Coulomb term engages on the first commanded cycle (breakaway) and never
 chatters.
 
+On an AWD belt, an optional per-pair `direction_split` redistributes the
+mode-model torque between two slots without changing their common-mode torque.
+For a pair whose frame columns satisfy `F[:,second] = λ F[:,first]`, with
+`λ = +1` for equal columns and `λ = -1` for opposite columns, the corrected
+differential is
+
+```
+D = τ_first - λ·τ_second = 2·w·|τ_base,first|
+```
+
+where `w` is the signed `direction_split`. The endpoint adds half of `D` to
+the first slot and subtracts `λ·D/2` from the second. The sign convention is
+only the order in `slots`. Swapping the slots requires `w′ = -λ·w`: equal
+columns (`λ = +1`) negate the coefficient, while opposite columns (`λ = -1`)
+preserve it. There is no global split, motor-orientation scalar, or metadata;
+`λ` follows directly from the equal/opposite frame columns. The bound `abs(w)
+< 0.5` keeps the redistribution below the pair's base share.
+
 Velocity feedforward (60B1h) is `ωᵢ · counts_per_mm`, where `counts_per_mm =
 encoder_counts_per_rev / rotation_distance` and the result is in counts/s.
 
@@ -47,8 +65,8 @@ Fit one mass, one viscous drag, and one stiction level per Cartesian axis,
 and `Fᵀ` hands every motor its correct share — including the *holding* torque
 a stationary belt must supply on a pure diagonal move, which no per-motor
 friction term can express. A buzz excitation on any slot contaminates the
-mode velocities, so an active buzz suppresses the Coulomb term for the whole
-node for its duration.
+mode velocities, so an active buzz suppresses both the Coulomb term and every
+pair direction-split correction on the whole node for its duration.
 
 ## Configuration (`[servo_x]`)
 
@@ -142,16 +160,23 @@ mass = [0.0123, 0.0119]      # m per mode, (0.1% rated)/(mm/s²)
 viscous = [0.09, 0.11]       # b per mode
 coulomb = [160.0, 175.0]     # c per mode, symmetric magnitude
 fit_rms_residual = [0.8, 0.7, 0.8, 0.9]  # per motor, 0.1% rated — fit quality, informational
+
+[[pair]]                                  # optional; one record per AWD belt
+slots = ["motor_a", "motor_a1"]           # order defines the coefficient sign
+direction_split = -0.125                  # signed, finite, abs(value) < 0.5
 ```
 
 Validation rules (any failure = hard claim error):
 - `version` must equal 6 — older profiles are not supported; refit with
-  `SERVO_FIT_DYNAMICS`. Profiles carrying the removed `[[pair]]` load-share
-  tables (v3–v5) are rejected with an explicit refit message.
+  `SERVO_FIT_DYNAMICS`.
+- `axes` must contain unique, non-empty strings
 - `frame` must be `n_modes × n_slots` with `n_slots = len(axes)`,
   `n_modes = len(modes)`, `1 ≤ n_modes ≤ n_slots`, every row nonzero, rows
   linearly independent
 - `mass` entries > 0; `viscous` and `coulomb` entries ≥ 0; all values finite
+- each optional `pair` names two distinct, otherwise-unused `axes` entries
+  with exactly equal or opposite frame columns; `direction_split` is finite
+  and has absolute value below `0.5`
 - `n_slots` must equal the endpoint's slot count
 
 ## Identification workflow
@@ -179,6 +204,15 @@ new fit never replaces an existing profile; switching is an explicit config
 edit. `TORQUE_NM`/`INERTIA_KGM2`/`ROT_DIST` are optional; when given, the fit
 also prints the recommended drive load-inertia ratio C00.06.
 
+After fitting the shared mass/viscous/coulomb model, AWD identification finds
+groups of exactly two equal or opposite frame columns and fits each pair's
+signed differential against `2·|τ_base,first|`. Pair order follows frame/slot
+order. A group larger than two is ambiguous and fails instead of guessing;
+zero and unmatched columns are simply not pairs. During `DIRECTION_SPLIT`
+refinement, when the current AWD kinematic layout identifies two slots as a
+pair, unequal parallel columns fail instead of being silently paired. No motor
+direction signs are passed to the fitter.
+
 The stroke engine refuses any (speed, accel) pair where `v²/a` exceeds the
 stroke span — that combination cannot reach the target speed within the
 available travel and would not produce the intended excitation.
@@ -200,9 +234,11 @@ The regression fit can vary with the excitation grid's speeds and
 accelerations. `SERVO_REFINE_DYNAMICS` (see
 [servo-calibration.md](servo-calibration.md)) refines the loaded profile
 empirically: it streams scaled candidate models into the running endpoint,
-measures tracking per candidate (overshoot for the mass term, following
-error for the viscous term), converges on the best scale by golden-section
-search, and writes the winning profile as a new TOML — repoint
+measures tracking per candidate, converges on the best value by golden-section
+search, and writes the winning profile as a new TOML. The three common-mode
+terms use multiplicative scales; `TERM=DIRECTION_SPLIT` searches a signed
+additive delta per pair and can therefore augment an older v6 profile with no
+pair tables or refine a zero coefficient. Repoint
 `dynamics_profile` and restart to keep it. The live model is always
 restored to the baseline when the command finishes.
 

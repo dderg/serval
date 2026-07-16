@@ -96,9 +96,10 @@ fn main() {
     h.push_str("static const uint8_t MCU_SCHEMA_HASH[32] = {\n    ");
     for (i, b) in hash.iter().enumerate() {
         if i > 0 {
-            h.push_str(", ");
             if i % 8 == 0 {
-                h.push_str("\n    ");
+                h.push_str(",\n    ");
+            } else {
+                h.push_str(", ");
             }
         }
         h.push_str(&format!("0x{b:02x}"));

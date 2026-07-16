@@ -11,6 +11,7 @@
 //! to position_actual only where the rotor genuinely moved uncommanded
 //! (torque cycle, drive fault, sync coast).
 
+use mcu_protocol::{Decode, Encode};
 use runtime::piece_ring::PieceEntry;
 
 use super::cycle::compute_motion_targets;
@@ -692,7 +693,51 @@ fn dynamics_msg(mass0: f32) -> mcu_protocol::messages::SetDynamicsModel {
         mass: vec![mass0, 0.030],
         viscous: vec![0.004, 0.004],
         coulomb: vec![1.0, 1.0],
+        pairs: vec![],
     }
+}
+
+#[test]
+fn set_dynamics_model_installs_wire_pair_and_evaluates_it() {
+    let mut ctx = test_ctx("dyn-pair");
+    let mut msg = dynamics_msg(0.030);
+    msg.modes_count = 1;
+    msg.frame = vec![0.5, 0.5];
+    msg.mass = vec![0.030];
+    msg.viscous = vec![0.0];
+    msg.coulomb = vec![0.0];
+    msg.pairs = vec![mcu_protocol::messages::DynamicsPair {
+        first: 0,
+        second: 1,
+        direction_split: 0.2,
+    }];
+    let msg = mcu_protocol::messages::SetDynamicsModel::decode(&msg.encoded_to_vec()).unwrap();
+    super::commands::handle_set_dynamics_model(&mut ctx, 1, msg);
+    let model = ctx.dynamics.as_ref().expect("model installed");
+    let acc = [1000.0, 1000.0];
+    let vel = [0.0, 0.0];
+    let first = model.torque_ff(0, &acc, &vel);
+    let second = model.torque_ff(1, &acc, &vel);
+    assert!((first - 18.0).abs() < 1e-6, "first torque {first}");
+    assert!((second - 12.0).abs() < 1e-6, "second torque {second}");
+}
+
+#[test]
+fn set_dynamics_model_rejects_zero_pair_first_column() {
+    let mut ctx = test_ctx("dyn-zero-pair");
+    let mut msg = dynamics_msg(0.030);
+    msg.modes_count = 1;
+    msg.frame = vec![0.0, 0.0];
+    msg.mass = vec![0.030];
+    msg.viscous = vec![0.0];
+    msg.coulomb = vec![0.0];
+    msg.pairs = vec![mcu_protocol::messages::DynamicsPair {
+        first: 0,
+        second: 1,
+        direction_split: 0.1,
+    }];
+    super::commands::handle_set_dynamics_model(&mut ctx, 1, msg);
+    assert!(ctx.dynamics.is_none());
 }
 
 #[test]

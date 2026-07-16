@@ -468,6 +468,13 @@ impl Decode for SetStrainComp {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DynamicsPair {
+    pub first: u8,
+    pub second: u8,
+    pub direction_split: f32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetDynamicsModel {
     pub slots_count: u8,
@@ -476,6 +483,7 @@ pub struct SetDynamicsModel {
     pub mass: Vec<f32>,
     pub viscous: Vec<f32>,
     pub coulomb: Vec<f32>,
+    pub pairs: Vec<DynamicsPair>,
 }
 
 impl Encode for SetDynamicsModel {
@@ -492,6 +500,13 @@ impl Encode for SetDynamicsModel {
             for v in vec {
                 put_f32(out, *v);
             }
+        }
+        assert!(u8::try_from(self.pairs.len()).is_ok());
+        put_u8(out, self.pairs.len() as u8);
+        for pair in &self.pairs {
+            put_u8(out, pair.first);
+            put_u8(out, pair.second);
+            put_f32(out, pair.direction_split);
         }
     }
 }
@@ -526,6 +541,15 @@ impl Decode for SetDynamicsModel {
         let mass = get_f32_vec(c, modes)?;
         let viscous = get_f32_vec(c, modes)?;
         let coulomb = get_f32_vec(c, modes)?;
+        let pairs_count = get_u8(c)?;
+        let mut pairs = Vec::with_capacity(pairs_count as usize);
+        for _ in 0..pairs_count {
+            pairs.push(DynamicsPair {
+                first: get_u8(c)?,
+                second: get_u8(c)?,
+                direction_split: get_f32(c)?,
+            });
+        }
         Ok(Self {
             slots_count,
             modes_count,
@@ -533,6 +557,7 @@ impl Decode for SetDynamicsModel {
             mass,
             viscous,
             coulomb,
+            pairs,
         })
     }
 }

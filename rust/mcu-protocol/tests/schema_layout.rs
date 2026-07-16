@@ -11,8 +11,8 @@
 
 use mcu_protocol::Encode;
 use mcu_protocol::messages::{
-    AxisDiag, AxisPieces, CaptureDrive, ClaimHandshakeReply, ConfigureAxes, McuLog, MotorSample,
-    MotorStateResponse, PushPieces, PushPiecesResponse, SdoReadResponse, SdoWrite,
+    AxisDiag, AxisPieces, CaptureDrive, ClaimHandshakeReply, ConfigureAxes, DynamicsPair, McuLog,
+    MotorSample, MotorStateResponse, PushPieces, PushPiecesResponse, SdoReadResponse, SdoWrite,
     SetDynamicsModel, SetStrainComp, SlaveState, SlaveStatus, StartCapture, StatusHeartbeat,
 };
 
@@ -413,6 +413,11 @@ fn set_dynamics_model_matches_schema_layout() {
         mass: vec![0.0123, 0.0119],
         viscous: vec![0.0045, 0.0044],
         coulomb: vec![1.2, 1.1],
+        pairs: vec![DynamicsPair {
+            first: 0,
+            second: 1,
+            direction_split: 0.125,
+        }],
     };
     reference_decode("SetDynamicsModel", &msg.encoded_to_vec()).unwrap();
 }

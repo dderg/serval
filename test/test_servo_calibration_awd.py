@@ -381,6 +381,7 @@ def test_fit_dynamics_trident_awd_inverted_drives_share_axes():
     assert _flag(argv, "--frame") == (
         "0.25,-0.25,-0.25,-0.25;0.25,-0.25,0.25,0.25"
     )
+    assert "--signs" not in argv
 
 
 def test_fit_dynamics_corexy_two_drives_is_plain_corexy():

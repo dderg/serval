@@ -131,13 +131,32 @@ fn set_dynamics_model_roundtrip() {
         mass: vec![0.0123, 0.0119],
         viscous: vec![0.0045, 0.0044],
         coulomb: vec![1.2, 1.1],
+        pairs: vec![DynamicsPair {
+            first: 0,
+            second: 1,
+            direction_split: -0.125,
+        }],
     };
     assert_eq!(roundtrip(&v), v);
-    // slots+modes (2) + f32 arrays (14*4)
-    assert_eq!(v.encoded_to_vec().len(), 2 + (8 + 2 + 2 + 2) * 4);
+    assert_eq!(v.encoded_to_vec().len(), 2 + (8 + 2 + 2 + 2) * 4 + 1 + 6);
     let r = SetDynamicsModelResponse { result: -862 };
     assert_eq!(roundtrip(&r), r);
     assert_eq!(r.encoded_to_vec().len(), 4);
+}
+
+#[test]
+fn set_dynamics_model_empty_pairs_roundtrip() {
+    let v = SetDynamicsModel {
+        slots_count: 1,
+        modes_count: 1,
+        frame: vec![1.0],
+        mass: vec![0.01],
+        viscous: vec![0.0],
+        coulomb: vec![0.0],
+        pairs: vec![],
+    };
+    assert_eq!(roundtrip(&v), v);
+    assert_eq!(v.encoded_to_vec().last(), Some(&0));
 }
 
 #[test]
@@ -149,11 +168,32 @@ fn set_dynamics_model_truncated_array_is_decode_error() {
         mass: vec![0.01; 2],
         viscous: vec![0.0; 2],
         coulomb: vec![0.0; 2],
+        pairs: vec![],
     };
     let mut bytes = v.encoded_to_vec();
     bytes.truncate(bytes.len() - 8);
     let mut c = Cursor::new(&bytes);
     assert!(SetDynamicsModel::decode_from(&mut c).is_err());
+}
+
+#[test]
+fn set_dynamics_model_truncated_pair_tail_is_decode_error() {
+    let v = SetDynamicsModel {
+        slots_count: 2,
+        modes_count: 1,
+        frame: vec![0.5, 0.5],
+        mass: vec![0.01],
+        viscous: vec![0.0],
+        coulomb: vec![0.0],
+        pairs: vec![DynamicsPair {
+            first: 0,
+            second: 1,
+            direction_split: 0.1,
+        }],
+    };
+    let mut bytes = v.encoded_to_vec();
+    bytes.pop();
+    assert!(SetDynamicsModel::decode(&bytes).is_err());
 }
 
 #[test]

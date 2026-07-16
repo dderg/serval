@@ -20,17 +20,18 @@ use std::path::{Path, PathBuf};
 use servo_ident::analyze::{analyze_capture, analyze_run, dump_csv, print_step};
 use servo_ident::demo::{build_demo, default_fixtures_dir};
 use servo_ident::fit::residual_by_motor;
-use servo_ident::fit::{fit, FitInput, FitOptions};
+use servo_ident::fit::{fit, FitOptions};
 use servo_ident::fit_driver::scap_to_capture;
 use servo_ident::http;
 use servo_ident::live_stream::{LiveTap, DEFAULT_IDLE_TIMEOUT, DEFAULT_TAP_SOCKET};
 use servo_ident::metrics::{DEFAULT_SETTLE_BAND_COUNTS, DEFAULT_TORQUE_LIMIT_PER_MILLE};
 use servo_ident::model::Structure;
-use servo_ident::pipeline::{fit_input, prepare};
+use servo_ident::pipeline::{fit_input, full_fit_input, prepare};
 use servo_ident::prep::{band_limited_rms, PrepOptions};
 use servo_ident::profile_out::{c0006_recommendation, render_profile};
 use servo_ident::scap::Scap;
 use servo_ident::serve;
+use servo_ident::split::{fit_pair_splits, report_pair_splits, SplitCapture};
 
 fn arg(args: &[String], key: &str) -> Option<String> {
     args.iter()
@@ -289,22 +290,31 @@ fn cmd_fit(args: &[String]) {
         "fit: {} samples/motor, rms residual {:.2} (0.1% rated), condition {:.1e}",
         r.samples, r.rms_residual, r.condition
     );
+    let full = full_fit_input(&structure, &prepared);
+    let full_residual = residual_by_motor(&full, &r.params, &r.extra_params);
     if prep_opts.cutoff_hz > 0.0 {
-        let full = FitInput {
-            structure: structure.clone(),
-            acc_mode: prepared.pp.acc_mode.clone(),
-            vel_mode: prepared.pp.vel_mode.clone(),
-            cs_mode: prepared.pp.cs_mode.clone(),
-            torque: prepared.pp.torque.clone(),
-            extra: prepared.pp.extra.clone(),
-        };
-        let res = residual_by_motor(&full, &r.params, &r.extra_params);
-        let inband = band_limited_rms(&res, &prepared.pp.t, &prepared.keep, prep_opts.cutoff_hz);
+        let inband = band_limited_rms(
+            &full_residual,
+            &prepared.pp.t,
+            &prepared.keep,
+            prep_opts.cutoff_hz,
+        );
         eprintln!(
             "in-band (<= {:.0} Hz) rms residual: {:.2} (0.1% rated)",
             prep_opts.cutoff_hz, inband
         );
     }
+    let split_capture = SplitCapture {
+        cap: &fit_cap,
+        residual_filt: &full_residual,
+        keep: &prepared.keep,
+    };
+    let pair_reports = fit_pair_splits(&structure, &r.params, prep_opts.cutoff_hz, &split_capture)
+        .unwrap_or_else(|e| {
+            eprintln!("servo-cal: refusing to emit a profile: pair split fit failed: {e:?}");
+            std::process::exit(2);
+        });
+    let pair_splits = report_pair_splits(&pair_reports, &axes);
     let min_mass = r.params.mass.iter().copied().fold(f64::INFINITY, f64::min);
     let physical = min_mass > 0.0;
 
@@ -338,7 +348,7 @@ fn cmd_fit(args: &[String]) {
         .iter()
         .map(|res| (res.iter().map(|e| e * e).sum::<f64>() / res.len() as f64).sqrt())
         .collect();
-    let profile = render_profile(&r.params, &axes, &modes, &frame, &rms);
+    let profile = render_profile(&r.params, &axes, &modes, &frame, &rms, &pair_splits);
     let out = req(args, "--out");
     std::fs::write(&out, profile).unwrap_or_else(|e| die(&format!("write {out}: {e}")));
     eprintln!("profile written to {out}");
