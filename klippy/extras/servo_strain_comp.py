@@ -25,8 +25,10 @@ FIELD_KNOT_MM = 2.0
 FIELD_SMOOTH = 0.5
 FIELD_2D_PITCH_MM = 20.0
 FIELD_2D_SMOOTH = 2.0
-MAX_GRID_DIM = 64
-MAX_GRID_VALUES = 4096
+# Mirrors MAX_COMP_GRID_DIM/_VALUES in rust/ethercat-rt/src/strain_comp.rs:
+# u16 wire dims; total capped by the endpoint's 8 MB-per-pair grid budget.
+MAX_GRID_DIM = 65535
+MAX_GRID_VALUES = 1 << 20
 FIT_MIN_EXCITATION_MM = 0.005
 FIT_MAX_OFFSET_CORR = 0.98
 FIT_MIN_R2 = 0.8

@@ -630,7 +630,7 @@ def test_build_rejects_grids_beyond_the_endpoint_caps(tmp_path):
         STIFFNESS_B="200",
         CROSS_AB="0",
         CROSS_BA="0",
-        SPACING="1",
+        SPACING="0.05",
     )
     with pytest.raises(RuntimeError, match="raise SPACING"):
         sc.cmd_SERVO_STRAIN_COMP_BUILD(gcmd)

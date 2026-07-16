@@ -391,8 +391,8 @@ pub struct SetStrainComp {
     pub lane_a: u8,
     pub lane_b: u8,
     pub kinematics: u8,
-    pub nx: u8,
-    pub ny: u8,
+    pub nx: u16,
+    pub ny: u16,
     pub x0: f32,
     pub y0: f32,
     pub dx: f32,
@@ -407,13 +407,13 @@ impl Encode for SetStrainComp {
         put_u8(out, self.lane_a);
         put_u8(out, self.lane_b);
         put_u8(out, self.kinematics);
-        put_u8(out, self.nx);
-        put_u8(out, self.ny);
+        put_u16(out, self.nx);
+        put_u16(out, self.ny);
         put_f32(out, self.x0);
         put_f32(out, self.y0);
         put_f32(out, self.dx);
         put_f32(out, self.dy);
-        put_u16(out, self.values_um.len() as u16);
+        put_u32(out, self.values_um.len() as u32);
         for v in &self.values_um {
             put_i32(out, *v);
         }
@@ -427,23 +427,23 @@ impl Decode for SetStrainComp {
         let lane_a = get_u8(c)?;
         let lane_b = get_u8(c)?;
         let kinematics = get_u8(c)?;
-        let nx = get_u8(c)?;
-        let ny = get_u8(c)?;
+        let nx = get_u16(c)?;
+        let ny = get_u16(c)?;
         let x0 = get_f32(c)?;
         let y0 = get_f32(c)?;
         let dx = get_f32(c)?;
         let dy = get_f32(c)?;
-        let count = get_u16(c)?;
+        let count = get_u32(c)?;
         let need =
             (count as usize)
                 .checked_mul(4)
                 .ok_or(DecodeError::ArrayLengthExceedsBuffer {
-                    claimed: u32::from(count),
+                    claimed: count,
                     available: c.remaining(),
                 })?;
         if need > c.remaining() {
             return Err(DecodeError::ArrayLengthExceedsBuffer {
-                claimed: u32::from(count),
+                claimed: count,
                 available: c.remaining(),
             });
         }

@@ -32,8 +32,13 @@ pub const ERR_COMP_BAD_LANE: i32 = -858;
 pub const ERR_COMP_SLOT_IN_USE: i32 = -859;
 pub const ERR_COMP_BAD_KINEMATICS: i32 = -860;
 
-pub const MAX_COMP_GRID_VALUES: usize = 4096;
-pub const MAX_COMP_GRID_DIM: usize = 64;
+/// The wire carries `u16` dims and a `u32` value count; cycle-time cost is
+/// O(1) bilinear sampling regardless of size, so the binding constraint is
+/// endpoint memory and upload latency. 2^20 values = 8 MB of f64 per pair
+/// (a 0.5 mm grid over a 500 mm bed) - far past any physical field detail
+/// while still refusing a nonsense upload.
+pub const MAX_COMP_GRID_DIM: usize = u16::MAX as usize;
+pub const MAX_COMP_GRID_VALUES: usize = 1 << 20;
 pub const MAX_COMP_OFFSET_UM: i16 = 500;
 /// Hard cap on how fast an applied offset may move, so enabling a map (or a
 /// bad grid cell) can never yank the targets.
@@ -132,8 +137,8 @@ impl StrainCompBank {
         lane_a: u8,
         lane_b: u8,
         kinematics: u8,
-        nx: u8,
-        ny: u8,
+        nx: u16,
+        ny: u16,
         x0: f64,
         y0: f64,
         dx: f64,
