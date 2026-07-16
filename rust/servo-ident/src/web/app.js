@@ -3,6 +3,7 @@
 const REFRESH_MS = 5000;
 const MOONRAKER_KEY = "servoCalMoonrakerUrl";
 const CONSOLE_HISTORY_KEY = "servoCalConsoleHistory";
+const HELP_CACHE_KEY = "servoCalGcodeHelp";
 const CONSOLE_HISTORY_MAX = 500;
 const PALETTE = ["#4fb3ff", "#e05a4f", "#4caf50", "#d9a441", "#b388ff", "#4fd8c4"];
 const RESONANCE_BAND_HZ = [20, 450];
@@ -104,6 +105,10 @@ const PAGE_DEFS = {
     label: "journal",
     journal: true,
   },
+  docs: {
+    label: "docs",
+    docs: true,
+  },
 };
 const DEFAULT_PAGE = "gains";
 const LIVE_STATUS_POLL_MS = 1000;
@@ -153,6 +158,14 @@ const state = {
     field: "elastic", // which half to chart: elastic (fwd+back)/2 or friction (fwd-back)/2
   },
   sentLog: [], // {time, label, lines, results} — every G-code batch sent this session
+  help: {
+    commands: null, // SERVO_* name -> cmd_*_help string, straight from klippy
+    fetchedUtc: null,
+    cached: false, // true when `commands` came from localStorage, not a live fetch
+    error: null,
+    pending: false,
+    klippyState: null, // last /server/info klippy_state, to refetch after a RESTART
+  },
 };
 
 async function api(path, opts) {
@@ -339,6 +352,7 @@ function consoleSectionHtml(def) {
     `<span class="note" id="form-run-name"></span>${templates}</div>` +
     `<div id="sent-log" class="sent-log"></div>` +
     `<div id="run-status" class="status-line"></div>` +
+    `<div id="console-help" class="console-help"></div>` +
     `<div class="console-line"><span class="console-prompt">›</span>` +
     `<textarea id="console-input" rows="1" spellcheck="false" ` +
     `placeholder="g-code — enter runs, shift+enter multiline, ↑/↓ history, ctrl+r search"></textarea></div>` +
@@ -556,6 +570,15 @@ function renderPage() {
     renderSentLog();
     redrawStrain();
     applyAccordionState();
+    return;
+  }
+  if (def.docs) {
+    root.innerHTML = docsShellHtml();
+    bindPageEvents();
+    renderDocsList();
+    renderSentLog();
+    applyAccordionState();
+    if (!state.help.commands || state.help.cached) fetchMacroHelp();
     return;
   }
   if (def.journal) {
@@ -3522,6 +3545,9 @@ async function pollMoonrakerHealth() {
     const info = (await resp.json()).result;
     badge.className = "mr-health ok";
     badge.textContent = `klippy ${info.klippy_state || "unknown"}`;
+    const ks = info.klippy_state || "unknown";
+    if (ks === "ready" && state.help.klippyState !== "ready") fetchMacroHelp();
+    state.help.klippyState = ks;
   } catch (e) {
     badge.className = "mr-health err";
     badge.textContent = "moonraker unreachable — bad URL, moonraker down, or origin missing from cors_domains";
@@ -3687,9 +3713,15 @@ function bindConsole() {
   input.addEventListener("input", () => {
     state.console.text = input.value;
     autosizeConsole(input);
+    renderConsoleHelp();
   });
+  input.addEventListener("keyup", renderConsoleHelp);
+  input.addEventListener("click", renderConsoleHelp);
   input.addEventListener("keydown", consoleKeydown);
   input.addEventListener("blur", () => exitConsoleSearch(true));
+  const helpBox = el("console-help");
+  if (helpBox) helpBox.addEventListener("click", consoleHelpClick);
+  renderConsoleHelp();
 }
 
 function autosizeConsole(input) {
@@ -3850,6 +3882,327 @@ async function submitConsole() {
   await runGcode(lines, "console");
 }
 
+// --- macro docs -----------------------------------------------------------------
+
+/// The macro documentation IS klippy's cmd_*_help strings, fetched from the
+/// running instance over Moonraker's /printer/gcode/help — so it can never
+/// drift from the code that executes the command. localStorage keeps the
+/// last good copy readable while klippy is down, which is exactly when a
+/// failed run sends you looking for the docs.
+async function fetchMacroHelp() {
+  const h = state.help;
+  if (h.pending) return;
+  h.pending = true;
+  try {
+    const resp = await fetch(`${moonrakerUrl()}/printer/gcode/help`);
+    if (!resp.ok) throw new Error(`gcode/help HTTP ${resp.status}`);
+    const all = (await resp.json()).result;
+    const commands = {};
+    for (const [name, text] of Object.entries(all)) {
+      if (name.startsWith("SERVO_")) commands[name] = text;
+    }
+    h.commands = commands;
+    h.fetchedUtc = new Date().toISOString();
+    h.cached = false;
+    h.error = null;
+    localStorage.setItem(
+      HELP_CACHE_KEY,
+      JSON.stringify({ fetched_utc: h.fetchedUtc, commands })
+    );
+  } catch (e) {
+    h.error = String(e);
+    if (!h.commands) loadCachedMacroHelp();
+  } finally {
+    h.pending = false;
+  }
+  renderDocsList();
+  renderConsoleHelp();
+}
+
+/// The catch only forgives corrupt localStorage JSON, same contract as
+/// loadConsoleHistory.
+function loadCachedMacroHelp() {
+  const raw = localStorage.getItem(HELP_CACHE_KEY);
+  if (!raw) return;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    return;
+  }
+  if (!parsed || typeof parsed.commands !== "object" || parsed.commands === null) return;
+  state.help.commands = parsed.commands;
+  state.help.fetchedUtc = parsed.fetched_utc || null;
+  state.help.cached = true;
+}
+
+/// Every cmd_*_help string ends in a "Params NAME (default) ..." tail — the
+/// one convention this rendering leans on. A string without the marker just
+/// renders as prose.
+function splitMacroHelp(text) {
+  const m = /\bParams\b/.exec(text);
+  if (!m) return { prose: text.trim(), params: null };
+  return {
+    prose: text.slice(0, m.index).trim(),
+    params: text.slice(m.index + m[0].length).trim(),
+  };
+}
+
+/// Tokenizes a Params tail into param chips and plain-text runs. UPPERCASE
+/// words are params (an optional =A|B suffix lists choices), a following
+/// (...) group is that param's default, anything else — "as
+/// SERVO_MEASURE_INERTIA plus" — stays literal text.
+function parseParamsTail(tail) {
+  const items = [];
+  const tokens = tail.split(/\s+/).filter((t) => t.length);
+  let i = 0;
+  while (i < tokens.length) {
+    const tok = tokens[i];
+    const clean = tok.replace(/[.,;]$/, "");
+    const eq = clean.indexOf("=");
+    const name = eq < 0 ? clean : clean.slice(0, eq);
+    if (/^[A-Z][A-Z0-9_]*$/.test(name)) {
+      items.push({
+        kind: "param",
+        name,
+        choices: eq < 0 ? null : clean.slice(eq + 1),
+        dflt: null,
+      });
+      i++;
+      continue;
+    }
+    if (tok.startsWith("(")) {
+      let group = tok;
+      while (!group.endsWith(")") && i + 1 < tokens.length) {
+        i++;
+        group += ` ${tokens[i]}`;
+      }
+      i++;
+      const dflt = group.replace(/^\(/, "").replace(/\)$/, "");
+      const last = items[items.length - 1];
+      if (last && last.kind === "param" && last.dflt === null) last.dflt = dflt;
+      else items.push({ kind: "text", text: group });
+      continue;
+    }
+    const last = items[items.length - 1];
+    if (last && last.kind === "text") last.text += ` ${tok}`;
+    else items.push({ kind: "text", text: tok });
+    i++;
+  }
+  return items;
+}
+
+function paramChipsHtml(items, activeName) {
+  const known = state.help.commands || {};
+  return items
+    .map((it) => {
+      if (it.kind === "text") {
+        return `<span class="param-text">${escapeHtml(it.text)}</span>`;
+      }
+      let label = escapeHtml(it.name);
+      if (it.choices) label += `<span class="param-extra">=${escapeHtml(it.choices)}</span>`;
+      if (it.dflt) label += ` <span class="param-extra">(${escapeHtml(it.dflt)})</span>`;
+      if (known[it.name]) {
+        return `<a class="chip param-chip xref" href="#/docs/${it.name}">${label}</a>`;
+      }
+      const active = it.name === activeName ? " active" : "";
+      return `<span class="chip param-chip${active}" data-param="${it.name}">${label}</span>`;
+    })
+    .join("");
+}
+
+function docsShellHtml() {
+  return (
+    `<div class="workspace single">` +
+    `<main class="analysis">` +
+    `<section class="docs-section">` +
+    `<div class="section-head"><h2>calibration macros</h2>` +
+    `<span class="note" id="docs-status"></span></div>` +
+    `<div id="docs-list"></div>` +
+    `</section>` +
+    consoleSectionHtml({}) +
+    `</main></div>`
+  );
+}
+
+function docsDeepLinkTarget() {
+  const m = /^#\/docs\/([A-Za-z0-9_]+)/.exec(location.hash || "");
+  return m ? m[1].toUpperCase() : null;
+}
+
+function firstSentence(prose) {
+  const cut = prose.indexOf(". ");
+  return cut < 0 ? prose : prose.slice(0, cut + 1);
+}
+
+function macroDocHtml(name, text, open) {
+  const { prose, params } = splitMacroHelp(text);
+  const items = params ? parseParamsTail(params) : [];
+  return (
+    `<details class="macro-doc" id="doc-${escapeHtml(name)}"${open ? " open" : ""}>` +
+    `<summary><span class="macro-name">${escapeHtml(name)}</span>` +
+    `<span class="hint" title="${escapeHtml(firstSentence(prose))}">` +
+    `${escapeHtml(firstSentence(prose))}</span></summary>` +
+    `<div class="macro-body">` +
+    `<p class="macro-prose">${escapeHtml(prose)}</p>` +
+    (items.length
+      ? `<div class="chips param-chips">${paramChipsHtml(items, null)}</div>`
+      : "") +
+    `</div></details>`
+  );
+}
+
+function renderDocsList() {
+  const list = el("docs-list");
+  if (!list) return;
+  const h = state.help;
+  const status = el("docs-status");
+  if (status) {
+    if (h.commands && !h.cached) {
+      status.textContent =
+        `the running klippy's cmd_*_help strings, fetched ${shortTime(h.fetchedUtc)}`;
+    } else if (h.commands) {
+      status.innerHTML =
+        `cached copy${h.fetchedUtc ? ` from ${shortTime(h.fetchedUtc)}` : ""} — ` +
+        `klippy unreachable <button id="docs-retry">retry</button>`;
+    } else if (h.pending) {
+      status.textContent = "fetching from klippy…";
+    } else {
+      status.innerHTML =
+        `${escapeHtml(h.error || "not fetched yet")} <button id="docs-retry">retry</button>`;
+    }
+  }
+  if (!h.commands) {
+    list.innerHTML = `<p class="note">no macro help yet — is klippy up and the moonraker URL right?</p>`;
+  } else {
+    const target = docsDeepLinkTarget();
+    const openNow = new Set(
+      Array.from(list.querySelectorAll("details.macro-doc[open]")).map((d) =>
+        d.id.slice("doc-".length)
+      )
+    );
+    const firstRender = !list.dataset.rendered;
+    list.innerHTML = Object.entries(h.commands)
+      .map(([name, text]) =>
+        macroDocHtml(name, text, name === target || openNow.has(name))
+      )
+      .join("");
+    list.dataset.rendered = "1";
+    if (firstRender && target && h.commands[target]) {
+      const entry = el(`doc-${target}`);
+      if (entry) entry.scrollIntoView({ block: "start" });
+    }
+  }
+  const retry = el("docs-retry");
+  if (retry) retry.addEventListener("click", fetchMacroHelp);
+}
+
+/// Caret-position → the UPPERCASE param name the caret sits inside, so the
+/// matching chip lights up while its value is being typed.
+function caretParamName(line, caretInLine) {
+  const start = line.lastIndexOf(" ", caretInLine - 1) + 1;
+  let end = line.indexOf(" ", caretInLine);
+  if (end < 0) end = line.length;
+  const name = line.slice(start, end).split("=")[0].toUpperCase();
+  return /^[A-Z][A-Z0-9_]*$/.test(name) ? name : null;
+}
+
+function consoleCaretLine(input) {
+  const caret = input.selectionStart;
+  const text = input.value;
+  const start = text.lastIndexOf("\n", caret - 1) + 1;
+  let end = text.indexOf("\n", caret);
+  if (end < 0) end = text.length;
+  return { line: text.slice(start, end), start, caretInLine: caret - start };
+}
+
+function renderConsoleHelp() {
+  const box = el("console-help");
+  const input = el("console-input");
+  if (!box || !input) return;
+  const { line, caretInLine } = consoleCaretLine(input);
+  const first = (line.trim().split(/\s+/)[0] || "").toUpperCase();
+  if (!first.startsWith("SERVO")) {
+    box.innerHTML = "";
+    return;
+  }
+  const h = state.help;
+  if (!h.commands) {
+    if (!h.pending && !h.error) fetchMacroHelp();
+    box.innerHTML = `<span class="hint">${
+      h.error ? `macro help unavailable — ${escapeHtml(h.error)}` : "fetching macro help…"
+    }</span>`;
+    return;
+  }
+  const helpText = h.commands[first];
+  if (!helpText) {
+    const matches = Object.keys(h.commands).filter((n) => n.startsWith(first));
+    box.innerHTML = matches
+      .map(
+        (n) =>
+          `<button class="chip param-chip complete-btn" data-cmd="${n}">${n}</button>`
+      )
+      .join("");
+    return;
+  }
+  const { prose, params } = splitMacroHelp(helpText);
+  const items = params ? parseParamsTail(params) : [];
+  box.innerHTML =
+    `<div class="console-help-head">` +
+    `<a href="#/docs/${first}" class="macro-name" title="open in the docs tab">${first}</a>` +
+    (h.cached ? `<span class="hint">cached — klippy unreachable</span>` : "") +
+    `</div>` +
+    `<div class="macro-prose clamped" title="click to expand">${escapeHtml(prose)}</div>` +
+    (items.length
+      ? `<div class="chips param-chips">${paramChipsHtml(items, caretParamName(line, caretInLine))}</div>`
+      : "");
+}
+
+/// Completion chips replace the caret line's first word; a param chip click
+/// appends NAME= to the line so the value can be typed straight away.
+function consoleHelpClick(ev) {
+  const input = el("console-input");
+  const prose = ev.target.closest(".macro-prose");
+  if (prose) {
+    prose.classList.toggle("clamped");
+    return;
+  }
+  const complete = ev.target.closest(".complete-btn");
+  if (complete) {
+    const { line, start } = consoleCaretLine(input);
+    const rest = line.replace(/^\s*\S+/, "");
+    const newLine = complete.dataset.cmd + (rest || " ");
+    const text = input.value;
+    setConsoleValue(
+      text.slice(0, start) + newLine + text.slice(start + line.length),
+      true
+    );
+    input.selectionStart = input.selectionEnd = start + newLine.length;
+    renderConsoleHelp();
+    return;
+  }
+  const chip = ev.target.closest(".param-chip[data-param]");
+  if (chip) {
+    const { line, start } = consoleCaretLine(input);
+    const name = chip.dataset.param;
+    const text = input.value;
+    if (line.includes(`${name}=`)) {
+      const pos = start + line.indexOf(`${name}=`) + name.length + 1;
+      input.focus();
+      input.selectionStart = input.selectionEnd = pos;
+    } else {
+      const newLine = `${line.replace(/\s+$/, "")} ${name}=`;
+      setConsoleValue(
+        text.slice(0, start) + newLine + text.slice(start + line.length),
+        true
+      );
+      const pos = start + newLine.length;
+      input.selectionStart = input.selectionEnd = pos;
+    }
+    renderConsoleHelp();
+  }
+}
+
 // --- boot -------------------------------------------------------------------
 
 function initShell() {
@@ -3859,7 +4212,10 @@ function initShell() {
   input.addEventListener("change", () => {
     localStorage.setItem(MOONRAKER_KEY, input.value);
     pollMoonrakerHealth();
+    fetchMacroHelp();
   });
+  loadCachedMacroHelp();
+  fetchMacroHelp();
   pollMoonrakerHealth();
   setInterval(pollMoonrakerHealth, MOONRAKER_HEALTH_POLL_MS);
   bindAccordionToggle();
