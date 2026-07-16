@@ -680,5 +680,6 @@ fn emit_periodic_telemetry(ctx: &mut EndpointCtx, wkc: i32, toff: i64) {
             let latched_drive_err = ctx.latched_drive_err;
             respond_fault_heartbeat(ctx, 0, latched_drive_err);
         }
+        crate::obs::emit_dropped_line_report();
     }
 }
