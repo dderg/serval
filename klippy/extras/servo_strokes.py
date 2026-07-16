@@ -208,20 +208,24 @@ def emit_strokes(
     gcode.run_script_from_command("\n".join(lines))
 
 
-def goto_xy(
-    gcode: Any, travel_speed: float, x: float, y: float, dwell: int
-) -> None:
+def goto(gcode: Any, travel_speed: float, coord: str, dwell: int) -> None:
     gcode.run_script_from_command(
         "\n".join(
             [
                 "G90",
-                "G1 X%.3f Y%.3f F%d" % (x, y, int(travel_speed * 60)),
+                "G1 %s F%d" % (coord, int(travel_speed * 60)),
                 "M400",
                 "G4 P%d" % (dwell,),
                 "M400",
             ]
         )
     )
+
+
+def goto_xy(
+    gcode: Any, travel_speed: float, x: float, y: float, dwell: int
+) -> None:
+    goto(gcode, travel_speed, "X%.3f Y%.3f" % (x, y), dwell)
 
 
 def corexy_fit_layout(gcmd: Any, kin: Any) -> dict[str, Any]:

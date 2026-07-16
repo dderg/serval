@@ -3019,6 +3019,12 @@ class ServoCalibration:
         restored = False
         try:
             self._prep(axis, dwell)
+            servo_strokes.goto(
+                self.gcode,
+                self.travel_speed,
+                "%s%.3f" % (axis, start),
+                dwell,
+            )
             self._set_manual_tuning(servos)
             if base_servos:
                 base_pos, base_integral = GainSetAdapter.derive(base_sg)
