@@ -25,12 +25,16 @@ class FakeGcode:
     def __init__(self):
         self.commands = {}
         self.scripts = []
+        self.responses = []
 
     def register_command(self, name, func, desc=None):
         self.commands[name] = func
 
     def run_script_from_command(self, script):
         self.scripts.append(script)
+
+    def respond_info(self, msg):
+        self.responses.append(msg)
 
 
 class FakeGcmd:
@@ -1129,3 +1133,31 @@ def test_tune_without_strain_comp_errors_loudly():
     sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
     with pytest.raises(RuntimeError, match="servo_strain_comp"):
         sc.cmd_SERVO_STRAIN_COMP_TUNE(FakeGcmd(RUN="ignored"))
+
+
+def test_capture_warns_when_sync_loss_counter_increments():
+    servo_param.drain_param_writes()
+    sc, gcode = make_sc()
+    engine = sc.printer.lookup_object("motion_engine")
+    reads = {"n": 0}
+
+    def sdo_read(handle, slot, index, subindex):
+        if (index, subindex) == (0x200D, 0x05):
+            reads["n"] += 1
+            return 2, reads["n"]
+        return 2, 7
+
+    engine.sdo_read = sdo_read
+    sc.cmd_SERVO_MEASURE_TRACKING(FakeGcmd(AXIS="X"))
+    warns = [r for r in gcode.responses if "sync loss" in r]
+    assert warns, gcode.responses
+    assert "C13.04" in warns[0]
+    assert "motor_a +2" in warns[0]
+    assert "motor_b +2" in warns[0]
+
+
+def test_capture_quiet_when_sync_loss_counter_steady():
+    servo_param.drain_param_writes()
+    sc, gcode = make_sc()
+    sc.cmd_SERVO_MEASURE_TRACKING(FakeGcmd(AXIS="X"))
+    assert not any("sync loss" in r for r in gcode.responses)

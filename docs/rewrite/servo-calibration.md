@@ -91,6 +91,17 @@ produce the intended excitation.
 
 ## Measurement commands
 
+Every capture reads each drive's EtherCAT sync loss counter (C13.04) before
+and after the strokes. The drive silently tolerates up to C13.02 (default 8)
+consecutive lost/late sync events before faulting, so a tolerated loss shows
+up nowhere except this counter — but it makes the drive's internal position
+demand skip and double-step, injecting a following-error transient of
+exactly one cycle of travel. When the counter moved during a capture the
+command prints a WARNING naming the drives and deltas (and emits a
+`calibration/sync_loss` event): that step's tracking metrics are
+contaminated and must not be compared or scored. `SERVO_SHOW_TUNING` also
+reads C13.02/C13.04 for manual checks.
+
 #### SERVO_MEASURE_TRACKING
 Single accel/speed stroke run with capture, then prints per-move following
 error, overshoot and settling — the before/after check for any tuning change.

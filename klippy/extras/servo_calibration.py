@@ -102,6 +102,9 @@ C00_06_INERTIA_RATIO_MAX = 12000
 C00_05_STIFFNESS_LEVEL_MIN = 1
 C00_05_STIFFNESS_LEVEL_MAX = 31
 
+SYNC_LOSS_COUNT_ADDR = "0x200d.0x05"
+SYNC_LOSS_THRESHOLD_ADDR = "0x200d.0x03"
+
 NOTCH_MODE_ADDR = "0x2001.0x31"
 NOTCH_READBACK: tuple[tuple[str, tuple[str, str, str]], ...] = (
     ("notch1", ("0x2001.0x41", "0x2001.0x42", "0x2001.0x43")),
@@ -1126,6 +1129,9 @@ class ServoCalibration:
         )
         self.journal_params = self._parse_journal_params(config)
         self._active_run: ExperimentRun | None = None
+        self._capture_sync_loss: (
+            tuple[str, list[str], dict[str, int]] | None
+        ) = None
         self._last_sweep_run: ExperimentRun | None = None
         self._last_sweep_results: dict[str, Any] | None = None
         self._engine = SweepEngine(self)
@@ -1669,12 +1675,58 @@ class ServoCalibration:
             raise self.printer.command_error(
                 "servo capture requested without an active experiment run"
             )
+        self._capture_sync_loss = (
+            name,
+            list(servos),
+            self._sync_loss_counts(servos),
+        )
         self._servo_capture().start_capture_to(
             self._active_run.step_scap(name), servos
         )
 
     def _stop_capture(self) -> None:
         self._servo_capture().stop_capture()
+        self._check_sync_loss()
+
+    def _sync_loss_counts(self, servos: list[str]) -> dict[str, int]:
+        """C13.04 per drive - the drive's own EtherCAT sync loss counter.
+        The drive silently tolerates up to C13.02 (default 8) consecutive
+        lost/late sync events before faulting, so this counter is the only
+        way to see the tolerated ones."""
+        return {
+            servo: self._read_param(servo, SYNC_LOSS_COUNT_ADDR)
+            for servo in servos
+        }
+
+    def _check_sync_loss(self) -> None:
+        if self._capture_sync_loss is None:
+            return
+        name, servos, before = self._capture_sync_loss
+        self._capture_sync_loss = None
+        after = self._sync_loss_counts(servos)
+        deltas = {
+            servo: (after[servo] - before[servo]) & 0xFFFF for servo in servos
+        }
+        hits = {servo: d for servo, d in deltas.items() if d}
+        if not hits:
+            return
+        detail = ", ".join(
+            "%s +%d" % (servo, d) for servo, d in sorted(hits.items())
+        )
+        self.gcode.respond_info(
+            "WARNING step %s: EtherCAT sync loss count (C13.04) incremented "
+            "during the capture: %s. The drive tolerated lost/late sync "
+            "cycles without faulting (it only faults after C13.02 "
+            "consecutive losses) - this step's tracking metrics are "
+            "contaminated." % (name, detail)
+        )
+        structured_log.event(
+            "calibration",
+            "sync_loss",
+            step=name,
+            drives=detail,
+            total=sum(hits.values()),
+        )
 
     def _accel_chip(self, gcmd: Any) -> tuple[Any, str | None]:
         chip_name = gcmd.get("ACCEL_CHIP", self.accel_chip_name)
@@ -2867,6 +2919,10 @@ class ServoCalibration:
             (
                 "C01.16 torque FF source / C01.17 pct / C01.18 filter:",
                 ["0x2001.0x17", "0x2001.0x18", "0x2001.0x19"],
+            ),
+            (
+                "C13.02 sync loss fault threshold / C13.04 sync loss count:",
+                [SYNC_LOSS_THRESHOLD_ADDR, SYNC_LOSS_COUNT_ADDR],
             ),
         ]
         script = ['RESPOND MSG="=== %s ==="' % (servo,)]
