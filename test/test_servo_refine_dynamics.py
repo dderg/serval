@@ -1020,10 +1020,13 @@ def make_calibration_awd(
                 values[pair_names[1]] = {"metrics": {"moves": second_moves}}
             first_moves = values["motor_a"]["metrics"]["moves"]
             second_moves = values["motor_a1"]["metrics"]["moves"]
-            if malformed == "move_set":
-                second_moves[0]["move"] = 9
-            elif malformed == "window":
-                second_moves[0]["start_ms"] += 1.0
+            if malformed == "extra_ripple_move":
+                second_moves.append(move(9, 1, 123.0))
+            elif malformed == "no_shared_windows":
+                for entry in second_moves:
+                    entry["start_ms"] += 1.0
+            elif malformed == "bad_window":
+                second_moves[0]["start_ms"] = float("nan")
             elif malformed == "zero_direction":
                 first_moves[0]["direction"] = 0
             elif malformed == "lambda_direction":
@@ -1143,8 +1146,8 @@ def test_direction_split_refine_adds_to_existing_signed_coefficients():
 @pytest.mark.parametrize(
     "malformed, message",
     [
-        ("move_set", "different move sets"),
-        ("window", "mismatched start_ms"),
+        ("no_shared_windows", "needs moves in both"),
+        ("bad_window", "invalid start_ms"),
         ("zero_direction", "nonmoving direction"),
         ("lambda_direction", "directions do not match lambda"),
         ("missing_bin", "needs moves in both"),
@@ -1168,6 +1171,17 @@ def test_direction_split_refine_rejects_malformed_directional_moves(
         [0, 1, 2, 3],
         [0.0, 0.0],
     )
+
+
+def test_direction_split_refine_ignores_single_drive_ripple_moves():
+    sc, _gcode, _engine, _path = make_calibration_awd(
+        malformed="extra_ripple_move"
+    )
+    sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(TERM="DIRECTION_SPLIT"))
+    with open(_written_profiles(sc)[0], "rb") as f:
+        raw = tomllib.load(f)
+    assert raw["refined_delta_motor_a"] == pytest.approx(-0.12, abs=0.03)
+    assert raw["refined_delta_motor_b"] == pytest.approx(0.15, abs=0.03)
 
 
 def test_direction_split_refine_rejects_missing_or_unsafe_pairs():

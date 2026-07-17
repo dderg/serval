@@ -429,25 +429,37 @@ def _direction_split_moves(
     moves = (step_drives[drive_name].get("metrics") or {}).get("moves") or []
     indexed = {}
     for move in moves:
-        if not isinstance(move, Mapping) or "move" not in move:
+        if not isinstance(move, Mapping):
             raise ValueError(
-                "step %s drive %s has a move without a move id"
-                % (step_name, drive_name)
+                "step %s drive %s has a malformed move entry %r"
+                % (step_name, drive_name, move)
             )
-        move_id = move["move"]
-        try:
-            duplicate = move_id in indexed
-        except TypeError as e:
+        window = []
+        for window_key in ("start_ms", "end_ms"):
+            value = move.get(window_key)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+            ):
+                raise ValueError(
+                    "step %s drive %s move %r has invalid %s %r"
+                    % (
+                        step_name,
+                        drive_name,
+                        move.get("move"),
+                        window_key,
+                        value,
+                    )
+                )
+            window.append(value)
+        window = tuple(window)
+        if window in indexed:
             raise ValueError(
-                "step %s drive %s has an invalid move id %r"
-                % (step_name, drive_name, move_id)
-            ) from e
-        if duplicate:
-            raise ValueError(
-                "step %s drive %s repeats move id %r"
-                % (step_name, drive_name, move_id)
+                "step %s drive %s repeats move window %r"
+                % (step_name, drive_name, window)
             )
-        indexed[move_id] = move
+        indexed[window] = move
     return indexed
 
 
@@ -463,58 +475,32 @@ def direction_split_candidate_metrics(
     step_drives = step.get("drives") or {}
     first_moves = _direction_split_moves(step_name, slots[0], step_drives)
     second_moves = _direction_split_moves(step_name, slots[1], step_drives)
-    if first_moves.keys() != second_moves.keys():
-        raise ValueError(
-            "step %s pair %s has different move sets: %s vs %s"
-            % (
-                step_name,
-                slots,
-                sorted(first_moves, key=repr),
-                sorted(second_moves, key=repr),
-            )
-        )
+    shared_windows = sorted(first_moves.keys() & second_moves.keys())
     directional_q: dict[int, list[float]] = {1: [], -1: []}
-    for move_id, first in first_moves.items():
-        second = second_moves[move_id]
-        for window_key in ("start_ms", "end_ms"):
-            if window_key not in first or window_key not in second:
-                raise ValueError(
-                    "step %s pair %s move %r is missing %s"
-                    % (step_name, slots, move_id, window_key)
-                )
-            if first[window_key] != second[window_key]:
-                raise ValueError(
-                    "step %s pair %s move %r has mismatched %s: %r vs %r"
-                    % (
-                        step_name,
-                        slots,
-                        move_id,
-                        window_key,
-                        first[window_key],
-                        second[window_key],
-                    )
-                )
+    for window in shared_windows:
+        first = first_moves[window]
+        second = second_moves[window]
         first_direction = first.get("direction")
         second_direction = second.get("direction")
         if first_direction not in (-1, 1):
             raise ValueError(
-                "step %s drive %s move %r has nonmoving direction %r"
-                % (step_name, slots[0], move_id, first_direction)
+                "step %s drive %s move window %r has nonmoving direction %r"
+                % (step_name, slots[0], window, first_direction)
             )
         if second_direction not in (-1, 1):
             raise ValueError(
-                "step %s drive %s move %r has nonmoving direction %r"
-                % (step_name, slots[1], move_id, second_direction)
+                "step %s drive %s move window %r has nonmoving direction %r"
+                % (step_name, slots[1], window, second_direction)
             )
         expected_direction = pair_lambda * first_direction
         if second_direction != expected_direction:
             raise ValueError(
-                "step %s pair %s move %r directions do not match lambda %d: "
+                "step %s pair %s move window %r directions do not match lambda %d: "
                 "%r vs %r"
                 % (
                     step_name,
                     slots,
-                    move_id,
+                    window,
                     pair_lambda,
                     first_direction,
                     second_direction,
@@ -528,9 +514,9 @@ def direction_split_candidate_metrics(
                 or not math.isfinite(value)
             ):
                 raise ValueError(
-                    "step %s drive %s move %r has invalid "
+                    "step %s drive %s move window %r has invalid "
                     "ferr_mean_moving %r"
-                    % (step_name, drive_name, move_id, value)
+                    % (step_name, drive_name, window, value)
                 )
         q = first["ferr_mean_moving"] - pair_lambda * second["ferr_mean_moving"]
         directional_q[first_direction].append(q)
