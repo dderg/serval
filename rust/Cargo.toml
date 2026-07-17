@@ -155,7 +155,10 @@ unnecessary_cast = "allow"
 # on the H723/F4x targets.
 opt-level = 3
 lto = "fat"
-codegen-units = 1
+# 16 codegen units parallelize the per-crate compile; fat LTO then merges
+# every unit back into one module and re-optimizes it whole, so the final
+# code is the same as codegen-units = 1 — only the build gets faster.
+codegen-units = 16
 panic = "abort"
 debug = true
 overflow-checks = false

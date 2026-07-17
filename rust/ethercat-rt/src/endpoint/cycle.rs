@@ -265,14 +265,33 @@ fn damper_torque_tenths(ctx: &mut EndpointCtx) -> Vec<f32> {
 }
 
 // The trim integrates the pair's mechanical-frame differential torque into
-// an antisymmetric target offset. The offset deliberately stays OUT of
-// last_counts / last_streamed_target: command anchors live in the raw
-// stream frame, so a sync or re-anchor never bakes a live trim offset in,
-// and freezing integration while a pair is not streaming (targets are not
-// being rewritten) keeps the held drive targets continuous across gaps.
+// an antisymmetric target offset, but ONLY at commanded standstill: during
+// motion a differential torque is legitimate (feedforward, direction- and
+// load-dependent inner-loop effort). A slot is quiescent when its ring is
+// empty — pieces land in the ring at least the feedforward lead before
+// their start, so an empty ring also proves no lead-window torque is being
+// commanded — no buzz is running, and its strain-comp pair is not mid-ramp
+// (the ramp changes the differential torque by design). The offset
+// deliberately stays OUT of last_counts / last_streamed_target: command
+// anchors live in the raw stream frame, so a sync or re-anchor never bakes
+// a live trim offset in.
 const TRIM_STATE_LOG_CYCLES: u64 = 4000;
 
-fn trim_offset_counts(ctx: &mut EndpointCtx, sp_counts: &[Option<i32>]) -> Vec<i32> {
+fn trim_quiescent_slots(ctx: &EndpointCtx) -> Vec<bool> {
+    if ctx.buzz.active() {
+        return vec![false; ctx.num_slaves];
+    }
+    let mut quiescent: Vec<bool> = ctx.rings.iter().map(|r| r.is_empty()).collect();
+    for (slot_a, slot_b, applied_mm, target_mm, _bias_mm) in ctx.comp.snapshot() {
+        if (applied_mm - target_mm).abs() > f64::EPSILON {
+            quiescent[slot_a] = false;
+            quiescent[slot_b] = false;
+        }
+    }
+    quiescent
+}
+
+fn trim_offset_counts(ctx: &mut EndpointCtx) -> Vec<i32> {
     let mut counts = vec![0i32; ctx.num_slaves];
     if !ctx.trim.active() {
         return counts;
@@ -280,9 +299,9 @@ fn trim_offset_counts(ctx: &mut EndpointCtx, sp_counts: &[Option<i32>]) -> Vec<i
     let torque_mech: Vec<f64> = (0..ctx.num_slaves)
         .map(|s| f64::from(ctx.drive.torque_actual(s)) * ctx.cmd_counts_per_mm[s].signum())
         .collect();
-    let streaming: Vec<bool> = sp_counts.iter().map(Option::is_some).collect();
+    let quiescent = trim_quiescent_slots(ctx);
     let mut offset_mm = vec![0f64; ctx.num_slaves];
-    ctx.trim.update(&torque_mech, &streaming, &mut offset_mm);
+    ctx.trim.update(&torque_mech, &quiescent, &mut offset_mm);
     if let Some((slot_a, slot_b)) = ctx.trim.drain_clamp_warning() {
         tracing::warn!(
             subsystem = "ethercat",
@@ -294,7 +313,7 @@ fn trim_offset_counts(ctx: &mut EndpointCtx, sp_counts: &[Option<i32>]) -> Vec<i
         );
     }
     if ctx.cycle_index % TRIM_STATE_LOG_CYCLES == 0 {
-        for (slot_a, slot_b, offset_mm, filt_tenths) in ctx.trim.snapshot() {
+        for (slot_a, slot_b, offset_mm, filt_tenths, integrating) in ctx.trim.snapshot() {
             tracing::info!(
                 subsystem = "ethercat",
                 event = "diff_trim_state",
@@ -302,8 +321,9 @@ fn trim_offset_counts(ctx: &mut EndpointCtx, sp_counts: &[Option<i32>]) -> Vec<i
                 slot_b,
                 offset_um = (offset_mm * 1e3).round() as i64,
                 diff_torque_tenths = filt_tenths.round() as i64,
-                streaming_a = streaming[slot_a],
-                streaming_b = streaming[slot_b],
+                quiescent_a = quiescent[slot_a],
+                quiescent_b = quiescent[slot_b],
+                integrating,
                 "differential trim state"
             );
         }
@@ -355,7 +375,7 @@ fn emit_slot_commands(
     let num_slaves = ctx.num_slaves;
     let mut motion_active = false;
     let damper_tenths = damper_torque_tenths(ctx);
-    let trim_counts = trim_offset_counts(ctx, sp_counts);
+    let trim_counts = trim_offset_counts(ctx);
     let comp_counts = comp_offset_counts(ctx, lane_mm);
     // The dynamics profile is fitted in the drive frame (the capture
     // flips each drive's commanded kinematics by its direction sign),
@@ -427,14 +447,16 @@ fn emit_slot_commands(
             ctx.drive.set_velocity_offset(s, 0);
             ctx.drive
                 .set_torque_offset(s, damper_tenths[s].round() as i16);
-            // A held slot follows the compensation too: the stiffness probe
-            // steps offsets at standstill, and a map ramping while parked
-            // must move the held target now so the next stream doesn't. The
-            // base is the drive's own output-image target (always seeded —
-            // by enable if nothing ever streamed) minus the offsets baked
-            // into the last write; last_counts is no good here, Stop and
-            // ResumeStream clear it while the drive keeps holding.
-            if ctx.comp.active() {
+            // A held slot follows the compensation and trim too: the
+            // stiffness probe steps offsets at standstill, a map ramping
+            // while parked must move the held target now so the next stream
+            // doesn't, and the trim does all of its integrating exactly
+            // here — at commanded standstill. The base is the drive's own
+            // output-image target (always seeded — by enable if nothing
+            // ever streamed) minus the offsets baked into the last write;
+            // last_counts is no good here, Stop and ResumeStream clear it
+            // while the drive keeps holding.
+            if ctx.comp.active() || ctx.trim.active() {
                 let offset = trim_counts[s].wrapping_add(comp_counts[s]);
                 let base = ctx
                     .drive
@@ -680,5 +702,6 @@ fn emit_periodic_telemetry(ctx: &mut EndpointCtx, wkc: i32, toff: i64) {
             let latched_drive_err = ctx.latched_drive_err;
             respond_fault_heartbeat(ctx, 0, latched_drive_err);
         }
+        crate::obs::emit_dropped_line_report();
     }
 }

@@ -4,6 +4,13 @@ pub const ERR_DYNAMICS_BAD_DIM: i32 = -861;
 pub const ERR_DYNAMICS_REJECTED: i32 = -862;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PairTable {
+    slots: Vec<String>,
+    direction_split: f64,
+}
+
+#[derive(Debug, Deserialize)]
 struct ProfileFile {
     version: u32,
     axes: Vec<String>,
@@ -15,6 +22,25 @@ struct ProfileFile {
     #[serde(default)]
     #[allow(dead_code)]
     fit_rms_residual: Vec<f64>,
+    #[serde(default)]
+    pair: Vec<PairTable>,
+    #[serde(flatten)]
+    extra: toml::Table,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PairSpec {
+    pub first: usize,
+    pub second: usize,
+    pub direction_split: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Pair {
+    first: usize,
+    second: usize,
+    lambda: f32,
+    direction_split: f32,
 }
 
 #[derive(Debug)]
@@ -26,6 +52,13 @@ pub enum ProfileError {
     NonPositive(&'static str),
     ZeroFrameRow(usize),
     FrameRankDeficient,
+    ForbiddenField(&'static str),
+    InvalidAxis(usize),
+    DuplicateAxis(String),
+    PairSlot(&'static str),
+    PairDirectionSplit(usize),
+    PairFirstColumnZero(usize),
+    PairNotParallel(usize),
 }
 
 #[derive(Debug)]
@@ -38,13 +71,27 @@ pub struct DynamicsModel {
     mass: Vec<f32>,
     viscous: Vec<f32>,
     coulomb: Vec<f32>,
+    pairs: Vec<Pair>,
 }
 
 impl DynamicsModel {
     pub fn from_toml_str(s: &str) -> Result<Self, ProfileError> {
         let f: ProfileFile = toml::from_str(s).map_err(|e| ProfileError::Parse(e.to_string()))?;
-        if f.version != 2 {
+        if f.version != 6 {
             return Err(ProfileError::Version(f.version));
+        }
+        for field in ["direction_split", "orientation"] {
+            if f.extra.contains_key(field) {
+                return Err(ProfileError::ForbiddenField(field));
+            }
+        }
+        for (idx, axis) in f.axes.iter().enumerate() {
+            if axis.is_empty() {
+                return Err(ProfileError::InvalidAxis(idx));
+            }
+            if f.axes[..idx].contains(axis) {
+                return Err(ProfileError::DuplicateAxis(axis.clone()));
+            }
         }
         let n_slots = f.axes.len();
         let n_modes = f.modes.len();
@@ -55,8 +102,26 @@ impl DynamicsModel {
             return Err(ProfileError::Dim("frame row width must equal slots"));
         }
         let frame: Vec<f64> = f.frame.iter().flatten().copied().collect();
+        let mut pairs = Vec::with_capacity(f.pair.len());
+        for p in &f.pair {
+            if p.slots.len() != 2 {
+                return Err(ProfileError::PairSlot(
+                    "pair slots must name exactly two axes",
+                ));
+            }
+            let resolve = |name: &str| f.axes.iter().position(|a| a == name);
+            let first = resolve(&p.slots[0])
+                .ok_or(ProfileError::PairSlot("pair slot not found in axes"))?;
+            let second = resolve(&p.slots[1])
+                .ok_or(ProfileError::PairSlot("pair slot not found in axes"))?;
+            pairs.push(PairSpec {
+                first,
+                second,
+                direction_split: p.direction_split as f32,
+            });
+        }
         Self::validated(
-            n_slots, n_modes, f.axes, f.modes, frame, f.mass, f.viscous, f.coulomb,
+            n_slots, n_modes, f.axes, f.modes, frame, f.mass, f.viscous, f.coulomb, &pairs,
         )
     }
 
@@ -67,6 +132,7 @@ impl DynamicsModel {
         mass: &[f32],
         viscous: &[f32],
         coulomb: &[f32],
+        pairs: &[PairSpec],
     ) -> Result<Self, ProfileError> {
         let axes = (0..n_slots).map(|i| format!("slot{i}")).collect();
         let modes = (0..n_modes).map(|k| format!("mode{k}")).collect();
@@ -80,6 +146,7 @@ impl DynamicsModel {
             widen(mass),
             widen(viscous),
             widen(coulomb),
+            pairs,
         )
     }
 
@@ -93,6 +160,7 @@ impl DynamicsModel {
         mass: Vec<f64>,
         viscous: Vec<f64>,
         coulomb: Vec<f64>,
+        pairs: &[PairSpec],
     ) -> Result<Self, ProfileError> {
         if axes.len() != n_slots {
             return Err(ProfileError::Dim("axes length must equal slots"));
@@ -142,6 +210,7 @@ impl DynamicsModel {
                 return Err(ProfileError::NonPositive("coulomb must be non-negative"));
             }
         }
+        let pairs = resolve_pairs(&frame, n_slots, n_modes, pairs)?;
         for k in 0..n_modes {
             let row = &frame[k * n_slots..][..n_slots];
             if row.iter().all(|&x| x == 0.0) {
@@ -151,15 +220,17 @@ impl DynamicsModel {
         if !frame_rows_independent(&frame, n_modes, n_slots) {
             return Err(ProfileError::FrameRankDeficient);
         }
+        let frame: Vec<f32> = frame.iter().map(|&v| v as f32).collect();
         Ok(Self {
             n_slots,
             n_modes,
             axes,
             modes,
-            frame: frame.iter().map(|&v| v as f32).collect(),
+            frame,
             mass: mass.iter().map(|&v| v as f32).collect(),
             viscous: viscous.iter().map(|&v| v as f32).collect(),
             coulomb: coulomb.iter().map(|&v| v as f32).collect(),
+            pairs,
         })
     }
 
@@ -185,23 +256,35 @@ impl DynamicsModel {
         assert_eq!(acc_mm_s2.len(), self.n_slots);
         assert_eq!(vel_mm_s.len(), self.n_slots);
         assert!(slot < self.n_slots);
+        let pair = with_coulomb
+            .then(|| {
+                self.pairs
+                    .iter()
+                    .find(|p| p.first == slot || p.second == slot)
+            })
+            .flatten();
         let mut tau = 0.0f32;
+        let mut first_share = 0.0f32;
         for k in 0..self.n_modes {
             let row = &self.frame[k * self.n_slots..][..self.n_slots];
             let a_mode: f32 = row.iter().zip(acc_mm_s2).map(|(f, a)| f * a).sum();
             let v_mode: f32 = row.iter().zip(vel_mm_s).map(|(f, v)| f * v).sum();
             let mut mode_force = self.mass[k] * a_mode + self.viscous[k] * v_mode;
             if with_coulomb {
-                let sign = if v_mode > 0.0 {
-                    1.0
-                } else if v_mode < 0.0 {
-                    -1.0
-                } else {
-                    0.0
-                };
-                mode_force += self.coulomb[k] * sign;
+                mode_force += self.coulomb[k] * strict_sign(v_mode);
             }
             tau += row[slot] * mode_force;
+            if let Some(pair) = pair {
+                first_share += row[pair.first] * mode_force;
+            }
+        }
+        if let Some(pair) = pair {
+            let differential = pair.direction_split * 2.0 * first_share.abs();
+            if slot == pair.first {
+                tau += differential * 0.5;
+            } else {
+                tau -= pair.lambda * differential * 0.5;
+            }
         }
         tau
     }
@@ -223,6 +306,7 @@ impl DynamicsModel {
         let mut coulomb = Vec::with_capacity(n_modes);
         let mut axes = Vec::with_capacity(n_slots);
         let mut modes = Vec::with_capacity(n_modes);
+        let mut pairs = Vec::new();
         let mut slot_base = 0usize;
         let mut mode_base = 0usize;
         for p in &parts {
@@ -238,6 +322,14 @@ impl DynamicsModel {
             for s in 0..p.n_slots {
                 axes.push(p.axes[s].clone());
             }
+            for pair in &p.pairs {
+                pairs.push(Pair {
+                    first: pair.first + slot_base,
+                    second: pair.second + slot_base,
+                    lambda: pair.lambda,
+                    direction_split: pair.direction_split,
+                });
+            }
             slot_base += p.n_slots;
             mode_base += p.n_modes;
         }
@@ -250,7 +342,76 @@ impl DynamicsModel {
             mass,
             viscous,
             coulomb,
+            pairs,
         })
+    }
+}
+
+fn resolve_pairs(
+    frame: &[f64],
+    n_slots: usize,
+    n_modes: usize,
+    pairs: &[PairSpec],
+) -> Result<Vec<Pair>, ProfileError> {
+    let mut used = vec![false; n_slots];
+    let mut resolved = Vec::with_capacity(pairs.len());
+    for (idx, pair) in pairs.iter().enumerate() {
+        if pair.first >= n_slots || pair.second >= n_slots {
+            return Err(ProfileError::PairSlot("pair slot index out of range"));
+        }
+        if pair.first == pair.second {
+            return Err(ProfileError::PairSlot("pair slots must be distinct"));
+        }
+        if !pair.direction_split.is_finite() || pair.direction_split.abs() >= 0.5 {
+            return Err(ProfileError::PairDirectionSplit(idx));
+        }
+        if (0..n_modes).all(|k| frame[k * n_slots + pair.first] == 0.0) {
+            return Err(ProfileError::PairFirstColumnZero(idx));
+        }
+        for slot in [pair.first, pair.second] {
+            if used[slot] {
+                return Err(ProfileError::PairSlot("slot appears in more than one pair"));
+            }
+            used[slot] = true;
+        }
+        let lambda = derive_lambda(frame, n_slots, n_modes, pair.first, pair.second)
+            .ok_or(ProfileError::PairNotParallel(idx))?;
+        resolved.push(Pair {
+            first: pair.first,
+            second: pair.second,
+            lambda,
+            direction_split: pair.direction_split,
+        });
+    }
+    Ok(resolved)
+}
+
+fn derive_lambda(
+    frame: &[f64],
+    n_slots: usize,
+    n_modes: usize,
+    first: usize,
+    second: usize,
+) -> Option<f32> {
+    let matches = |lambda: f64| {
+        (0..n_modes).all(|k| frame[k * n_slots + second] == lambda * frame[k * n_slots + first])
+    };
+    if matches(1.0) {
+        Some(1.0)
+    } else if matches(-1.0) {
+        Some(-1.0)
+    } else {
+        None
+    }
+}
+
+fn strict_sign(v: f32) -> f32 {
+    if v > 0.0 {
+        1.0
+    } else if v < 0.0 {
+        -1.0
+    } else {
+        0.0
     }
 }
 

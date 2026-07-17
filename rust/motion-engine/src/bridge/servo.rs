@@ -500,8 +500,8 @@ impl PyMotionEngine {
         lane_a: u8,
         lane_b: u8,
         kinematics: u8,
-        nx: u8,
-        ny: u8,
+        nx: u16,
+        ny: u16,
         x0: f32,
         y0: f32,
         dx: f32,
@@ -554,6 +554,7 @@ impl PyMotionEngine {
         gain_micro: u32,
         clamp_um: u16,
         lpf_millihz: u32,
+        settle_ms: u32,
     ) -> PyResult<()> {
         let conn = self.ethercat_conn(mcu_handle, "set_diff_trim")?;
         tracing::info!(
@@ -565,6 +566,7 @@ impl PyMotionEngine {
             gain_micro,
             clamp_um,
             lpf_millihz,
+            settle_ms,
             "servo differential trim"
         );
         let result = py
@@ -577,6 +579,7 @@ impl PyMotionEngine {
                         gain_micro,
                         clamp_um,
                         lpf_millihz,
+                        settle_ms,
                     },
                 )
             })
@@ -588,6 +591,7 @@ impl PyMotionEngine {
         }
         Ok(())
     }
+    #[allow(clippy::too_many_arguments)]
     fn set_dynamics_model(
         &self,
         py: Python<'_>,
@@ -596,6 +600,8 @@ impl PyMotionEngine {
         mass: Vec<f32>,
         viscous: Vec<f32>,
         coulomb: Vec<f32>,
+        pairs: Vec<u32>,
+        direction_split: Vec<f32>,
     ) -> PyResult<()> {
         let modes = mass.len();
         if modes == 0 {
@@ -629,6 +635,8 @@ impl PyMotionEngine {
                 "set_dynamics_model: {modes} modes exceed {slots} slots"
             )));
         }
+        let wire_pairs = validate_dynamics_pairs(&frame, modes, slots, &pairs, &direction_split)
+            .map_err(PyRuntimeError::new_err)?;
         let conn = self.ethercat_conn(mcu_handle, "set_dynamics_model")?;
         tracing::info!(
             subsystem = "engine",
@@ -636,6 +644,7 @@ impl PyMotionEngine {
             mcu_handle,
             slots_count,
             modes_count,
+            pairs = wire_pairs.len(),
             "servo dynamics feedforward model upload"
         );
         let result = py
@@ -649,6 +658,7 @@ impl PyMotionEngine {
                         mass,
                         viscous,
                         coulomb,
+                        pairs: wire_pairs,
                     },
                 )
             })
@@ -660,6 +670,86 @@ impl PyMotionEngine {
         }
         Ok(())
     }
+}
+
+pub(super) fn validate_dynamics_pairs(
+    frame: &[f32],
+    modes: usize,
+    slots: usize,
+    pairs: &[u32],
+    direction_split: &[f32],
+) -> Result<Vec<mcu_protocol::messages::DynamicsPair>, String> {
+    if pairs.len() % 2 != 0 {
+        return Err(format!(
+            "set_dynamics_model: pairs must be flat [first, second, ...], got {} entries",
+            pairs.len()
+        ));
+    }
+    let pair_count = pairs.len() / 2;
+    if direction_split.len() != pair_count {
+        return Err(format!(
+            "set_dynamics_model: direction_split must have one coefficient per pair \
+             ({pair_count} expected, got {})",
+            direction_split.len()
+        ));
+    }
+    if pair_count > u8::MAX as usize {
+        return Err(format!("set_dynamics_model: {pair_count} pairs exceed u8"));
+    }
+    let wire_pairs = pairs
+        .chunks_exact(2)
+        .zip(direction_split.iter().copied())
+        .map(|(pair, direction_split)| {
+            let first = u8::try_from(pair[0]).map_err(|_| {
+                format!("set_dynamics_model: pair slot {} exceeds u8", pair[0])
+            })?;
+            let second = u8::try_from(pair[1]).map_err(|_| {
+                format!("set_dynamics_model: pair slot {} exceeds u8", pair[1])
+            })?;
+            if first == second || first as usize >= slots || second as usize >= slots {
+                return Err(format!(
+                    "set_dynamics_model: invalid pair slots ({first}, {second}) for {slots} slots"
+                ));
+            }
+            if (0..modes).all(|mode| frame[mode * slots + first as usize] == 0.0) {
+                return Err(format!(
+                    "set_dynamics_model: pair slots ({first}, {second}) first frame column must be nonzero"
+                ));
+            }
+            let columns_match = |lambda: f32| {
+                (0..modes).all(|mode| {
+                    frame[mode * slots + second as usize]
+                        == lambda * frame[mode * slots + first as usize]
+                })
+            };
+            if !columns_match(1.0) && !columns_match(-1.0) {
+                return Err(format!(
+                    "set_dynamics_model: pair slots ({first}, {second}) must have exact equal or opposite frame columns"
+                ));
+            }
+            if !direction_split.is_finite() || direction_split.abs() >= 0.5 {
+                return Err(format!(
+                    "set_dynamics_model: direction_split must be finite with abs < 0.5, got {direction_split}"
+                ));
+            }
+            Ok(mcu_protocol::messages::DynamicsPair {
+                first,
+                second,
+                direction_split,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut used = vec![false; slots];
+    for pair in &wire_pairs {
+        for slot in [pair.first as usize, pair.second as usize] {
+            if std::mem::replace(&mut used[slot], true) {
+                return Err(format!(
+                    "set_dynamics_model: slot {slot} appears in more than one pair"
+                ));
+            }
+        }
+    }
+    Ok(wire_pairs)
 }
 
 fn require_endpoint_ok(result: i32, context: &str) -> Result<(), String> {

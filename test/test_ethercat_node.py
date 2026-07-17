@@ -205,7 +205,7 @@ def test_coupled_uniformity_rejects_mismatched_torque_clamp():
     )
     with pytest.raises(FakeConfigError) as e:
         ethercat_node.EtherCatNode._validate_coupled_uniformity(node, rails)
-    assert "ff_torque_clamp must be identical" in str(e.value)
+    assert "ff_max_torque must be identical" in str(e.value)
 
 
 def test_coupled_uniformity_allows_identical_ff_config():

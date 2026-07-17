@@ -129,6 +129,69 @@ def test_following_error_rms_matches_numpy(tmp_path):
     assert m["moves"][0]["ferr_peak"] == pytest.approx(200.0, rel=0.02)
 
 
+def _metric_data(target, ferr):
+    data = np.zeros(
+        len(target),
+        dtype=[
+            ("target_counts", "<i8"),
+            ("position_actual", "<i8"),
+            ("following_error", "<i8"),
+            ("torque_actual", "<i8"),
+            ("flags", "u1"),
+        ],
+    )
+    data["target_counts"] = target
+    data["following_error"] = ferr
+    data["position_actual"] = target - ferr
+    data["flags"] = FLAG_MOTION_ACTIVE
+    return data
+
+
+def test_move_direction_and_signed_mean_use_only_moving_window():
+    n = 220
+    step = np.zeros(n, dtype=np.int64)
+    step[20:60] = 1
+    step[100:140] = -1
+    target = np.cumsum(step)
+    ferr = np.zeros(n, dtype=np.int64)
+    forward_lead = slice(18, 20)
+    forward_move = slice(20, 60)
+    forward_settle = slice(60, 100)
+    reverse_lead = slice(98, 100)
+    reverse_move = slice(100, 140)
+    reverse_settle = slice(140, 150)
+    ferr[forward_lead] = 1000
+    ferr[forward_move] = 12
+    ferr[forward_settle] = 600
+    ferr[reverse_lead] = -1000
+    ferr[reverse_move] = -8
+    ferr[reverse_settle] = -700
+
+    metrics = sc.compute_metrics(
+        _metric_data(target, ferr), 50, 1400, ff_lead_samples=2
+    )
+    assert [move["direction"] for move in metrics["moves"]] == [1, -1]
+    assert [move["ferr_mean_moving"] for move in metrics["moves"]] == [
+        12.0,
+        -8.0,
+    ]
+    assert [move["ferr_peak"] for move in metrics["moves"]] == [1000.0, 1000.0]
+
+
+def test_merged_zero_net_move_has_zero_direction():
+    n = 200
+    step = np.zeros(n, dtype=np.int64)
+    step[20:60] = 1
+    step[70:110] = -1
+    target = np.cumsum(step)
+    ferr = np.full(n, 3, dtype=np.int64)
+
+    metrics = sc.compute_metrics(_metric_data(target, ferr), 50, 1400)
+    assert len(metrics["moves"]) == 1
+    assert metrics["moves"][0]["direction"] == 0
+    assert metrics["moves"][0]["ferr_mean_moving"] == 3.0
+
+
 def test_resonance_peak_detected_at_80hz(tmp_path):
     path, _ = synth_capture(tmp_path)
     _, data, _ = sc.load_capture(path)

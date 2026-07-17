@@ -17,7 +17,7 @@ EthercatDrive = namedtuple(
         "following_error_counts",
         "max_torque_tenth_pct",
         "velocity_ff",
-        "ff_torque_clamp",
+        "ff_max_torque",
         "ff_lead_cycles",
         "invert_direction",
         "dynamics_profile",
@@ -45,7 +45,7 @@ CYCLE_US_QUANTUM = 250
 # skews the coupled model instead of tuning one motor.
 COUPLED_UNIFORM_OPTIONS = (
     ("velocity_ff", lambda motor: motor.get_ff_config()[0]),
-    ("ff_torque_clamp", lambda motor: motor.get_ff_config()[1]),
+    ("ff_max_torque", lambda motor: motor.get_ff_config()[1]),
     ("ff_lead_cycles", lambda motor: motor.get_ff_config()[2]),
 )
 
@@ -205,7 +205,7 @@ class EtherCatNode:
             following_error_counts, max_torque_tenth_pct = (
                 motor.get_session_drive_limits()
             )
-            velocity_ff, ff_torque_clamp, ff_lead_cycles = motor.get_ff_config()
+            velocity_ff, ff_max_torque, ff_lead_cycles = motor.get_ff_config()
             drives.append(
                 EthercatDrive(
                     chain_index=motor.get_chain_index(),
@@ -215,7 +215,7 @@ class EtherCatNode:
                     following_error_counts=following_error_counts,
                     max_torque_tenth_pct=max_torque_tenth_pct,
                     velocity_ff=velocity_ff,
-                    ff_torque_clamp=ff_torque_clamp,
+                    ff_max_torque=ff_max_torque,
                     ff_lead_cycles=ff_lead_cycles,
                     invert_direction=motor.get_invert_direction(),
                     dynamics_profile=motor.get_dynamics_profile(),

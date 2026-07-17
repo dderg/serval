@@ -4,14 +4,14 @@
 //!   [--rated-torque-nm T --rotor-inertia-kgm2 J --rotation-distance-mm D]
 #![allow(clippy::exit)]
 
-use servo_ident::capture::{
-    parse_capture_csv, steady_accel_keep, tracking_keep, PlateauOptions, TrackingOptions,
-};
+use servo_ident::capture::{parse_capture_csv, Capture};
 use servo_ident::fit::residual_by_motor;
-use servo_ident::fit::{fit, FitInput, FitOptions};
+use servo_ident::fit::{fit, FitOptions};
 use servo_ident::model::Structure;
-use servo_ident::prep::{band_limited_rms, prep, PrepOptions};
+use servo_ident::pipeline::{fit_input, full_fit_input, prepare};
+use servo_ident::prep::{band_limited_rms, PrepOptions};
 use servo_ident::profile_out::{c0006_recommendation, render_profile};
+use servo_ident::split::{fit_pair_splits, report_pair_splits, SplitCapture};
 
 fn arg(args: &[String], key: &str) -> Option<String> {
     args.iter()
@@ -103,16 +103,13 @@ fn main() {
         std::process::exit(1);
     }
 
+    if args.iter().filter(|a| *a == "--capture").count() > 1 {
+        eprintln!(
+            "servo-ident: --capture given more than once — the fit consumes exactly one capture"
+        );
+        std::process::exit(1);
+    }
     let capture_path = req(&args, "--capture");
-    let text = std::fs::read_to_string(&capture_path).unwrap_or_else(|e| {
-        eprintln!("servo-ident: read {capture_path}: {e}");
-        std::process::exit(1);
-    });
-    let cap = parse_capture_csv(&text, &axes).unwrap_or_else(|e| {
-        eprintln!("servo-ident: capture invalid: {e:?}");
-        std::process::exit(1);
-    });
-    let total = cap.t.len();
     let mut prep_opts = PrepOptions::default();
     if let Some(v) = opt_f64(&args, "--cutoff-hz") {
         prep_opts.cutoff_hz = v;
@@ -125,50 +122,43 @@ fn main() {
     }
     prep_opts.ripple_period_mm =
         opt_f64(&args, "--ripple-period-mm").or_else(|| opt_f64(&args, "--rotation-distance-mm"));
-    let pp = prep(&cap, &structure, &prep_opts);
+
+    let text = std::fs::read_to_string(&capture_path).unwrap_or_else(|e| {
+        eprintln!("servo-ident: read {capture_path}: {e}");
+        std::process::exit(1);
+    });
+    let cap: Capture = parse_capture_csv(&text, &axes).unwrap_or_else(|e| {
+        eprintln!("servo-ident: capture {capture_path} invalid: {e:?}");
+        std::process::exit(1);
+    });
+    let (prepared, stats) = prepare(&cap, &structure, &prep_opts);
     eprintln!(
-        "prep: {} segments, accel->torque delay {:.2} ms removed",
-        pp.segments,
-        pp.delay_s * 1000.0
+        "prep: {} segments, delay {:.2} ms; prep+tracking kept {}/{}, \
+         +steady-accel plateaus kept {}/{}",
+        stats.segments,
+        stats.delay_s * 1000.0,
+        stats.tracked,
+        stats.total,
+        stats.kept,
+        stats.total
     );
-    let track = tracking_keep(&cap.vel, &cap.vel_act, &TrackingOptions::default());
-    let plateau = steady_accel_keep(&cap.t, &cap.acc, &PlateauOptions::default());
-    let keep: Vec<usize> = (0..total)
-        .filter(|&k| pp.valid[k] && track[k] && plateau[k])
-        .collect();
-    let tracked = (0..total).filter(|&k| pp.valid[k] && track[k]).count();
-    eprintln!(
-        "masks: prep+tracking kept {tracked}/{total}, +steady-accel plateaus kept {}/{total}",
-        keep.len()
-    );
-    if tracked == 0 {
+    if stats.tracked == 0 {
         eprintln!(
-            "servo-ident: the drive never tracked the commanded trajectory — \
-             stiction breakaway or an untuned/lagging loop; enable velocity \
-             feedforward and check the mechanics, then re-capture"
+            "servo-ident: {capture_path}: the drive never tracked the commanded \
+             trajectory — stiction breakaway or an untuned/lagging loop; enable \
+             velocity feedforward and check the mechanics, then re-capture"
         );
         std::process::exit(2);
     }
-    if keep.is_empty() {
+    if stats.kept == 0 {
         eprintln!(
-            "servo-ident: no steady-accel plateaus in capture — strokes too short \
+            "servo-ident: {capture_path}: no steady-accel plateaus — strokes too short \
              or jerk-limited accel never holds; lengthen strokes or lower accel"
         );
         std::process::exit(2);
     }
-    let pick = |cols: &[Vec<f64>]| -> Vec<Vec<f64>> {
-        cols.iter()
-            .map(|c| keep.iter().map(|&k| c[k]).collect())
-            .collect()
-    };
-    let input = FitInput {
-        structure: structure.clone(),
-        acc_mode: pick(&pp.acc_mode),
-        vel_mode: pick(&pp.vel_mode),
-        cs_mode: pick(&pp.cs_mode),
-        torque: pick(&pp.torque),
-        extra: pp.extra.iter().map(|cols| pick(cols)).collect(),
-    };
+
+    let input = fit_input(&structure, &prepared);
     let r = fit(&input, &FitOptions::default()).unwrap_or_else(|e| {
         eprintln!("servo-ident: refusing to emit a profile: {e:?}");
         std::process::exit(2);
@@ -178,24 +168,17 @@ fn main() {
         "fit: {} samples/motor, rms residual {:.2} (0.1% rated), condition {:.1e}",
         r.samples, r.rms_residual, r.condition
     );
+    let full = full_fit_input(&structure, &prepared);
+    let full_residual = residual_by_motor(&full, &r.params, &r.extra_params);
     if prep_opts.cutoff_hz > 0.0 {
-        let full = FitInput {
-            structure: structure.clone(),
-            acc_mode: pp.acc_mode.clone(),
-            vel_mode: pp.vel_mode.clone(),
-            cs_mode: pp.cs_mode.clone(),
-            torque: pp.torque.clone(),
-            extra: pp.extra.clone(),
-        };
-        let res = residual_by_motor(&full, &r.params, &r.extra_params);
-        let keep_mask: Vec<bool> = (0..total)
-            .map(|k| pp.valid[k] && track[k] && plateau[k])
-            .collect();
-        let inband = band_limited_rms(&res, &pp.t, &keep_mask, prep_opts.cutoff_hz);
+        let inband = band_limited_rms(
+            &full_residual,
+            &prepared.pp.t,
+            &prepared.keep,
+            prep_opts.cutoff_hz,
+        );
         eprintln!(
-            "in-band (<= {:.0} Hz) rms residual: {:.2} (0.1% rated) — model error \
-             in the band a feedforward model controls; the raw residual above \
-             also counts ripple, loop transients and quantization",
+            "in-band (<= {:.0} Hz) rms residual: {:.2} (0.1% rated)",
             prep_opts.cutoff_hz, inband
         );
     }
@@ -218,6 +201,17 @@ fn main() {
             );
         }
     }
+    let split_capture = SplitCapture {
+        cap: &cap,
+        residual_filt: &full_residual,
+        keep: &prepared.keep,
+    };
+    let pair_reports = fit_pair_splits(&structure, &r.params, prep_opts.cutoff_hz, &split_capture)
+        .unwrap_or_else(|e| {
+            eprintln!("servo-ident: refusing to emit a profile: pair split fit failed: {e:?}");
+            std::process::exit(2);
+        });
+    let pair_splits = report_pair_splits(&pair_reports, &axes);
     let min_mass = r.params.mass.iter().copied().fold(f64::INFINITY, f64::min);
     let physical = min_mass > 0.0;
 
@@ -226,10 +220,13 @@ fn main() {
         opt_f64(&args, "--rotor-inertia-kgm2"),
         opt_f64(&args, "--rotation-distance-mm"),
     ) {
-        for (m, mass) in modes.iter().zip(&r.params.mass) {
+        for (k, (m, mass)) in modes.iter().zip(&r.params.mass).enumerate() {
+            let drive_share = structure.frame[k]
+                .iter()
+                .fold(0.0_f64, |acc, f| acc.max(f.abs()));
             eprintln!(
                 "recommended C00.06 (mode {m}): {:.0}%",
-                c0006_recommendation(*mass, t, d, j)
+                c0006_recommendation(*mass * drive_share, t, d, j)
             );
         }
     }
@@ -251,7 +248,7 @@ fn main() {
         .iter()
         .map(|res| (res.iter().map(|e| e * e).sum::<f64>() / res.len() as f64).sqrt())
         .collect();
-    let profile = render_profile(&r.params, &axes, &modes, &frame, &rms);
+    let profile = render_profile(&r.params, &axes, &modes, &frame, &rms, &pair_splits);
     let out = req(&args, "--out");
     std::fs::write(&out, profile).unwrap_or_else(|e| {
         eprintln!("servo-ident: write {out}: {e}");

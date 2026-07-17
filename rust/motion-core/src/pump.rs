@@ -3,6 +3,7 @@ pub use crate::types::AxisKey;
 mod diag;
 mod drip;
 mod junction;
+mod memstat;
 mod messages;
 mod pump_loop;
 mod sched;
@@ -25,6 +26,8 @@ pub use wire_sink::{McuTransport, WireSink};
 
 #[cfg(test)]
 mod drip_tests;
+#[cfg(test)]
+mod memstat_tests;
 #[cfg(test)]
 mod sched_tests;
 #[cfg(test)]

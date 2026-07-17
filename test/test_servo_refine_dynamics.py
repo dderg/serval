@@ -5,7 +5,7 @@ import tempfile
 
 import pytest
 
-from klippy.extras import servo_axis, servo_calibration
+from klippy.extras import servo_axis, servo_calibration, servo_strokes
 
 try:
     import tomllib
@@ -17,7 +17,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 BASELINE_TOML = """\
-version = 2
+version = 6
 axes = ["motor_a", "motor_b"]
 modes = ["x", "y"]
 frame = [[0.5, 0.5], [0.5, -0.5]]
@@ -28,7 +28,7 @@ fit_rms_residual = [0.5, 0.5]
 """
 
 ONE_AXIS_TOML = """\
-version = 2
+version = 6
 axes = ["motor_a"]
 modes = ["x"]
 frame = [[1.0]]
@@ -38,7 +38,7 @@ coulomb = [1.0]
 """
 
 NON_XY_TOML = """\
-version = 2
+version = 6
 axes = ["motor_a", "motor_b"]
 modes = ["a", "b"]
 frame = [[0.5, 0.5], [0.5, -0.5]]
@@ -46,6 +46,31 @@ mass = [0.020, 0.030]
 viscous = [0.004, 0.005]
 coulomb = [1.0, 1.5]
 """
+
+AWD_TOML = """\
+version = 6
+axes = ["motor_a", "motor_a1", "motor_b", "motor_b1"]
+modes = ["x", "y"]
+frame = [[0.25, 0.25, -0.25, 0.25], [0.25, 0.25, 0.25, -0.25]]
+mass = [0.020, 0.030]
+viscous = [0.004, 0.005]
+coulomb = [1.0, 1.5]
+
+[[pair]]
+slots = ["motor_a", "motor_a1"]
+direction_split = 0.05
+
+[[pair]]
+slots = ["motor_b", "motor_b1"]
+direction_split = -0.1
+"""
+
+OLD_AWD_TOML = AWD_TOML.split("\n[[pair]]", 1)[0] + "\n"
+
+AWD_PAIRS = [
+    {"slots": ["motor_a", "motor_a1"], "direction_split": 0.05},
+    {"slots": ["motor_b", "motor_b1"], "direction_split": -0.1},
+]
 
 BASELINE_FRAME_FLAT = [0.5, 0.5, 0.5, -0.5]
 BASELINE_MASS = [0.020, 0.030]
@@ -106,15 +131,19 @@ def test_gss_rejects_bad_inputs():
     f = lambda x: x  # noqa: E731
     with pytest.raises(ValueError, match="LO < HI"):
         servo_calibration.golden_section_search(f, 1.3, 0.7, 0.02, 10)
-    with pytest.raises(ValueError, match="LO < HI"):
-        servo_calibration.golden_section_search(f, -1.0, 1.0, 0.02, 10)
+    best, _score, _probes = servo_calibration.golden_section_search(
+        lambda x: (x + 0.2) ** 2, -1.0, 1.0, 0.02, 10
+    )
+    assert abs(best + 0.2) < 0.03
+    with pytest.raises(ValueError, match="finite LO < HI"):
+        servo_calibration.golden_section_search(f, float("nan"), 1.0, 0.02, 10)
     with pytest.raises(ValueError, match="TOL"):
         servo_calibration.golden_section_search(f, 0.7, 1.3, 0.0, 10)
     with pytest.raises(ValueError, match="MAX_EVALS"):
         servo_calibration.golden_section_search(f, 0.7, 1.3, 0.02, 2)
 
 
-def test_parse_dynamics_profile_roundtrip():
+def test_parse_old_v6_dynamics_profile_without_pairs():
     p = servo_calibration.parse_dynamics_profile(BASELINE_TOML)
     assert p["axes"] == ["motor_a", "motor_b"]
     assert p["modes"] == ["x", "y"]
@@ -122,12 +151,72 @@ def test_parse_dynamics_profile_roundtrip():
     assert p["mass"] == BASELINE_MASS
     assert p["viscous"] == BASELINE_VISCOUS
     assert p["coulomb"] == BASELINE_COULOMB
+    assert p["pairs"] == []
+
+
+@pytest.mark.parametrize(
+    "axes, message",
+    [
+        ('["motor_a", ""]', "non-empty strings"),
+        ('["motor_a", "   "]', "non-empty strings"),
+        ('["motor_a", 7]', "non-empty strings"),
+        ('["motor_a", "motor_a"]', "unique"),
+    ],
+)
+def test_parse_dynamics_profile_requires_unique_nonempty_axis_names(
+    axes, message
+):
+    text = BASELINE_TOML.replace(
+        'axes = ["motor_a", "motor_b"]', "axes = " + axes
+    )
+    with pytest.raises(ValueError, match=message):
+        servo_calibration.parse_dynamics_profile(text)
+
+
+def test_axis_uniqueness_is_checked_before_pair_mapping():
+    text = AWD_TOML.replace(
+        'axes = ["motor_a", "motor_a1", "motor_b", "motor_b1"]',
+        'axes = ["motor_a", "motor_a", "motor_b", "motor_b1"]',
+    )
+    with pytest.raises(ValueError, match="axes must be unique"):
+        servo_calibration.parse_dynamics_profile(text)
+
+
+def test_parse_dynamics_profile_parses_signed_pairs():
+    p = servo_calibration.parse_dynamics_profile(AWD_TOML)
+    assert p["axes"] == ["motor_a", "motor_a1", "motor_b", "motor_b1"]
+    assert p["pairs"] == AWD_PAIRS
+
+
+def test_pair_slot_order_transforms_coefficient_by_frame_lambda():
+    swapped = AWD_TOML.replace(
+        'slots = ["motor_a", "motor_a1"]\ndirection_split = 0.05',
+        'slots = ["motor_a1", "motor_a"]\ndirection_split = -0.05',
+    ).replace(
+        'slots = ["motor_b", "motor_b1"]\ndirection_split = -0.1',
+        'slots = ["motor_b1", "motor_b"]\ndirection_split = -0.1',
+    )
+    pairs = servo_calibration.parse_dynamics_profile(swapped)["pairs"]
+    assert pairs == [
+        {"slots": ["motor_a1", "motor_a"], "direction_split": -0.05},
+        {"slots": ["motor_b1", "motor_b"], "direction_split": -0.1},
+    ]
 
 
 def test_parse_dynamics_profile_rejects_violations():
     with pytest.raises(ValueError, match="refit with SERVO_FIT_DYNAMICS"):
         servo_calibration.parse_dynamics_profile(
-            BASELINE_TOML.replace("version = 2", "version = 1")
+            BASELINE_TOML.replace("version = 6", "version = 1")
+        )
+    with pytest.raises(ValueError, match="refit with SERVO_FIT_DYNAMICS"):
+        servo_calibration.parse_dynamics_profile(
+            BASELINE_TOML.replace("version = 6", "version = 5")
+        )
+    with pytest.raises(ValueError, match="direction_split"):
+        servo_calibration.parse_dynamics_profile(
+            BASELINE_TOML
+            + '\n[[pair]]\nslots = ["motor_a", "motor_b"]\n'
+            + "belt_position_split = [0.02, -0.0003]\n"
         )
     with pytest.raises(ValueError, match="frame"):
         servo_calibration.parse_dynamics_profile(
@@ -153,6 +242,51 @@ def test_parse_dynamics_profile_rejects_violations():
         )
 
 
+@pytest.mark.parametrize("value", ["nan", "0.5", "-0.5", "true"])
+def test_parse_dynamics_profile_rejects_bad_direction_split(value):
+    with pytest.raises(ValueError, match="direction_split"):
+        servo_calibration.parse_dynamics_profile(
+            AWD_TOML.replace(
+                "direction_split = 0.05", "direction_split = " + value
+            )
+        )
+
+
+def test_parse_dynamics_profile_rejects_pair_slot_violations():
+    with pytest.raises(ValueError, match="not among profile axes"):
+        servo_calibration.parse_dynamics_profile(
+            AWD_TOML.replace('motor_a1"]', 'motor_z"]', 1)
+        )
+    with pytest.raises(ValueError, match="more than one pair"):
+        servo_calibration.parse_dynamics_profile(
+            AWD_TOML.replace(
+                'slots = ["motor_b", "motor_b1"]',
+                'slots = ["motor_a", "motor_b1"]',
+            )
+        )
+    with pytest.raises(ValueError, match="exact equal or opposite"):
+        servo_calibration.parse_dynamics_profile(
+            AWD_TOML.replace(
+                "frame = [[0.25, 0.25, -0.25, 0.25]",
+                "frame = [[0.25, 0.2, -0.25, 0.25]",
+            )
+        )
+
+
+def test_parse_dynamics_profile_rejects_global_split_and_orientation():
+    with pytest.raises(ValueError, match="not a global field"):
+        servo_calibration.parse_dynamics_profile(
+            BASELINE_TOML.replace("mass =", "direction_split = 0.1\nmass =")
+        )
+    with pytest.raises(ValueError, match="orientation is not supported"):
+        servo_calibration.parse_dynamics_profile(
+            AWD_TOML.replace(
+                "direction_split = 0.05",
+                "direction_split = 0.05\norientation = -1",
+            )
+        )
+
+
 def test_scale_dynamics_touches_only_the_chosen_term():
     p = servo_calibration.parse_dynamics_profile(BASELINE_TOML)
     m = servo_calibration.scale_dynamics(p, "MASS", 1.1)
@@ -169,6 +303,41 @@ def test_scale_dynamics_touches_only_the_chosen_term():
     assert c["viscous"] == p["viscous"]
     with pytest.raises(ValueError, match="unknown dynamics term"):
         servo_calibration.scale_dynamics(p, "STICTION", 1.0)
+
+
+def test_dynamics_scaling_preserves_pairs_and_direction_adds():
+    p = servo_calibration.parse_dynamics_profile(AWD_TOML)
+    for term in ("MASS", "VISCOUS", "COULOMB"):
+        scaled = servo_calibration.scale_dynamics(p, term, 1.1)
+        assert scaled["pairs"] == AWD_PAIRS
+        assert scaled["pairs"] is not p["pairs"]
+    mode = servo_calibration.scale_dynamics_mode(p, "MASS", 0, 1.1)
+    assert mode["pairs"] == AWD_PAIRS
+    added = servo_calibration.add_dynamics_direction_split(p, 0, -0.2)
+    assert added["pairs"][0]["direction_split"] == pytest.approx(-0.15)
+    assert added["pairs"][1] == AWD_PAIRS[1]
+    assert added["mass"] == p["mass"]
+    with pytest.raises(ValueError, match=r"abs\(value\) < 0.5"):
+        servo_calibration.add_dynamics_direction_split(p, 0, 0.45)
+
+
+def test_discover_dynamics_pairs_uses_equal_or_opposite_columns():
+    p = servo_calibration.parse_dynamics_profile(OLD_AWD_TOML)
+    assert servo_calibration.discover_dynamics_pairs(p) == [
+        {"slots": ["motor_a", "motor_a1"], "direction_split": 0.0},
+        {"slots": ["motor_b", "motor_b1"], "direction_split": 0.0},
+    ]
+    mixed = dict(p)
+    mixed["axes"] = ["a", "a1", "zero", "u", "u1"]
+    mixed["frame"] = [[1.0, 1.0, 0.0, 2.0, 4.0], [0.0, 0.0, 0.0, 1.0, 2.0]]
+    assert servo_calibration.discover_dynamics_pairs(mixed) == [
+        {"slots": ["a", "a1"], "direction_split": 0.0}
+    ]
+    ambiguous = dict(p)
+    ambiguous["axes"] = ["a", "b", "c"]
+    ambiguous["frame"] = [[0.5, 0.5, -0.5]]
+    with pytest.raises(ValueError, match="ambiguous equal/opposite"):
+        servo_calibration.discover_dynamics_pairs(ambiguous)
 
 
 def test_scale_dynamics_mode_scales_one_entry():
@@ -200,6 +369,21 @@ def test_render_dynamics_toml_reparses_with_provenance():
     assert raw["refined_scale"] == pytest.approx(0.93)
     assert raw["refined_run"] == "/logs/run_1"
     assert "fit_rms_residual" not in raw
+
+
+def test_render_dynamics_toml_preserves_pairs():
+    p = servo_calibration.parse_dynamics_profile(AWD_TOML)
+    text = servo_calibration.render_dynamics_toml(
+        p,
+        "/cfg/awd.toml",
+        "DIRECTION_SPLIT",
+        {"motor_a": -0.1, "motor_b": 0.2},
+        "/logs/awd",
+    )
+    assert servo_calibration.parse_dynamics_profile(text)["pairs"] == AWD_PAIRS
+    raw = tomllib.loads(text)
+    assert raw["refined_delta_motor_a"] == pytest.approx(-0.1)
+    assert raw["refined_delta_motor_b"] == pytest.approx(0.2)
 
 
 class FakeServoCapture:
@@ -309,7 +493,16 @@ class FakeEngine:
     def sdo_read(self, handle, slot, index, subindex):
         return 2, 7
 
-    def set_dynamics_model(self, handle, frame, mass, viscous, coulomb):
+    def set_dynamics_model(
+        self,
+        handle,
+        frame,
+        mass,
+        viscous,
+        coulomb,
+        pair_slots,
+        direction_split,
+    ):
         self.dynamics_calls.append(
             (
                 handle,
@@ -317,6 +510,8 @@ class FakeEngine:
                 list(mass),
                 list(viscous),
                 list(coulomb),
+                list(pair_slots),
+                list(direction_split),
             )
         )
 
@@ -461,7 +656,31 @@ def _baseline_call(engine, profile_path):
         BASELINE_MASS,
         BASELINE_VISCOUS,
         BASELINE_COULOMB,
+        [],
+        [],
     )
+
+
+def test_adapter_streams_flat_pair_slots_and_coefficients():
+    p = servo_calibration.parse_dynamics_profile(AWD_TOML)
+    engine = FakeEngine()
+    adapter = servo_calibration.DynamicsModelAdapter(
+        engine, 5, p, lambda profile, _value: profile, "pair", "test"
+    )
+    adapter.apply(0.0)
+    assert engine.dynamics_calls[0][0] == 5
+    assert engine.dynamics_calls[0][5] == [0, 1, 2, 3]
+    assert engine.dynamics_calls[0][6] == pytest.approx([0.05, -0.1])
+
+
+def test_adapter_uploads_old_v6_profile_with_empty_pairs():
+    p = servo_calibration.parse_dynamics_profile(BASELINE_TOML)
+    engine = FakeEngine()
+    adapter = servo_calibration.DynamicsModelAdapter(
+        engine, 5, p, lambda profile, _value: profile, "plain", "test"
+    )
+    adapter.apply(0.0)
+    assert engine.dynamics_calls[0][5:] == ([], [])
 
 
 def _written_profiles(sc):
@@ -495,7 +714,7 @@ def test_refine_dynamics_mass_converges_and_restores():
     assert raw["viscous"] == BASELINE_VISCOUS
 
 
-def test_refine_dynamics_viscous_scales_only_viscous():
+def test_refine_dynamics_viscous_refines_each_mode():
     sc, gcode, engine, _path = make_calibration(ferr_rms_min=1.1)
     gcmd = FakeGcmd(AXIS="X", TERM="VISCOUS")
     sc.cmd_SERVO_REFINE_DYNAMICS(gcmd)
@@ -507,10 +726,12 @@ def test_refine_dynamics_viscous_scales_only_viscous():
     with open(profiles[0], "rb") as f:
         raw = tomllib.load(f)
     assert raw["refined_term"] == "viscous"
-    assert abs(raw["refined_scale"] - 1.1) < 0.03
+    sx, sy = raw["refined_scale_x"], raw["refined_scale_y"]
+    assert abs(sx - 1.1) < 0.03
+    assert abs(sy - 1.1) < 0.03
     assert raw["mass"] == BASELINE_MASS
-    assert raw["viscous"][0] == pytest.approx(0.004 * raw["refined_scale"])
-    assert raw["viscous"][1] == pytest.approx(0.005 * raw["refined_scale"])
+    assert raw["viscous"][0] == pytest.approx(0.004 * sx)
+    assert raw["viscous"][1] == pytest.approx(0.005 * sy)
 
 
 def test_refine_dynamics_mass_runs_full_grid_one_axis_per_phase():
@@ -548,7 +769,7 @@ def test_refine_dynamics_reports_all_metrics_per_scale():
         assert "ferr_peak" in line
 
 
-def test_refine_dynamics_coulomb_scales_the_coulomb_vector():
+def test_refine_dynamics_coulomb_refines_each_mode():
     sc, gcode, engine, _path = make_calibration(overshoot_min=1.05)
     gcmd = FakeGcmd(AXIS="X", TERM="COULOMB")
     sc.cmd_SERVO_REFINE_DYNAMICS(gcmd)
@@ -557,10 +778,11 @@ def test_refine_dynamics_coulomb_scales_the_coulomb_vector():
     with open(profiles[0], "rb") as f:
         raw = tomllib.load(f)
     assert raw["refined_term"] == "coulomb"
-    scale = raw["refined_scale"]
-    assert abs(scale - 1.05) < 0.03
-    assert raw["coulomb"][0] == pytest.approx(1.0 * scale)
-    assert raw["coulomb"][1] == pytest.approx(1.5 * scale)
+    sx, sy = raw["refined_scale_x"], raw["refined_scale_y"]
+    assert abs(sx - 1.05) < 0.03
+    assert abs(sy - 1.05) < 0.03
+    assert raw["coulomb"][0] == pytest.approx(1.0 * sx)
+    assert raw["coulomb"][1] == pytest.approx(1.5 * sy)
     assert raw["mass"] == BASELINE_MASS
     assert raw["viscous"] == BASELINE_VISCOUS
 
@@ -654,6 +876,17 @@ def test_refine_dynamics_rejects_axis_count_mismatch():
     assert engine.dynamics_calls == []
 
 
+def test_refine_dynamics_rejects_profile_axis_order_mismatch():
+    reordered = BASELINE_TOML.replace(
+        'axes = ["motor_a", "motor_b"]',
+        'axes = ["motor_b", "motor_a"]',
+    )
+    sc, _gcode, engine, _path = make_calibration(profile_text=reordered)
+    with pytest.raises(RuntimeError, match="maps it to slot"):
+        sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(AXIS="X"))
+    assert engine.dynamics_calls == []
+
+
 def test_refine_dynamics_rejects_non_xy_modes():
     sc, _gcode, engine, _path = make_calibration(profile_text=NON_XY_TOML)
     with pytest.raises(RuntimeError, match="x and y modes"):
@@ -665,6 +898,300 @@ def test_refine_dynamics_rejects_bad_term_and_bracket():
     sc, _gcode, engine, _path = make_calibration()
     with pytest.raises(RuntimeError, match="TERM must be"):
         sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(AXIS="X", TERM="STICTION"))
-    with pytest.raises(RuntimeError, match="must contain 1.0"):
+    with pytest.raises(RuntimeError, match="TERM must be"):
+        sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(AXIS="X", TERM="SPLIT"))
+    with pytest.raises(RuntimeError, match="must contain 1"):
         sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(AXIS="X", LO=1.05, HI=1.3))
+    assert engine.dynamics_calls == []
+
+
+def _make_awd_rail(names, node_name, axis, first_slot):
+    motors = []
+    for offset, name in enumerate(names):
+        motor = servo_axis.ServoMotor.__new__(servo_axis.ServoMotor)
+        motor.motor_name = name
+        motor.node_name = node_name
+        motor.invert_direction = False
+        motor.chain_index = first_slot + offset
+        motor.rotation_distance = 40.0
+        motor.encoder_counts_per_rev = 131072
+        motors.append(motor)
+    rail = servo_axis.ServoRail.__new__(servo_axis.ServoRail)
+    rail.name = "servo " + axis
+    rail.axis = axis
+    rail.motors = motors
+    return rail
+
+
+def make_calibration_awd(
+    profile_text=OLD_AWD_TOML,
+    minima=(-0.12, 0.15),
+    motor_biases=None,
+    malformed=None,
+):
+    if motor_biases is None:
+        motor_biases = {}
+    gcode = FakeGcode()
+    rails = [
+        _make_awd_rail(["motor_a", "motor_a1"], "drive_all", "x", 0),
+        _make_awd_rail(["motor_b", "motor_b1"], "drive_all", "y", 2),
+    ]
+    engine = FakeEngine()
+    fd, profile_path = tempfile.mkstemp(suffix=".toml")
+    with os.fdopen(fd, "w") as f:
+        f.write(profile_text)
+    node = FakeNode(
+        "drive_all",
+        1,
+        {"motor_a": 0, "motor_a1": 1, "motor_b": 2, "motor_b1": 3},
+        profile_path,
+    )
+    objs = {
+        "gcode": gcode,
+        "toolhead": FakeToolhead(FakeKin(rails)),
+        "motion_engine": engine,
+        "servo_capture": FakeServoCapture(),
+        "ethercat_node drive_all": node,
+    }
+    sc = servo_calibration.ServoCalibration(FakeConfig(FakePrinter(objs)))
+    sc.captures_root = tempfile.mkdtemp()
+    sc.dynamics_dir = tempfile.mkdtemp()
+    sc.servo_cal_binary = sys.executable
+    sc._prep = lambda *a, **k: None
+    sc._strokes = lambda *a, **k: None
+    sc._goto_xy = lambda *a, **k: None
+    sc._restore = lambda *a, **k: None
+
+    def move(move_id, direction, ferr_mean_moving):
+        return {
+            "move": move_id,
+            "direction": direction,
+            "start_ms": 1000.0 + 2000.0 * move_id,
+            "end_ms": 2000.0 + 2000.0 * move_id,
+            "ferr_mean_moving": ferr_mean_moving,
+            "ferr_peak": 500.0,
+            "ferr_rms": 300.0 + abs(ferr_mean_moving),
+            "overshoot": 40.0,
+            "settle_ms": 10.0,
+            "settle_window_truncated": False,
+        }
+
+    def fake_run(gcmd, argv, timeout):
+        gcode.scripts.append(("RUN", argv, timeout))
+        if argv[1] != "analyze":
+            return
+        run_dir = argv[2]
+        with open(os.path.join(run_dir, "manifest.json")) as f:
+            manifest = json.load(f)
+        steps = []
+        for step in manifest["steps"]:
+            delta = step["swept"].get("delta", 0.0)
+            if "direction_split_motor_a" in step["name"]:
+                pair_minima = (minima[0], -0.24)
+            else:
+                pair_minima = (0.24, minima[1])
+            values = {}
+            for pair_names, optimum in zip(
+                (("motor_a", "motor_a1"), ("motor_b", "motor_b1")),
+                pair_minima,
+            ):
+                pair_lambda = 1 if pair_names[0] == "motor_a" else -1
+                split_error = 200.0 * (delta - optimum)
+                first_bias = motor_biases.get(pair_names[0], 0.0)
+                second_bias = motor_biases.get(pair_names[1], 0.0)
+                first_moves = []
+                second_moves = []
+                for move_id, first_direction in enumerate((1, -1)):
+                    second_direction = pair_lambda * first_direction
+                    first_error = (
+                        split_error / 2.0 + first_direction * first_bias
+                    )
+                    second_error = (
+                        -pair_lambda * split_error / 2.0
+                        + second_direction * second_bias
+                    )
+                    first_moves.append(
+                        move(move_id, first_direction, first_error)
+                    )
+                    second_moves.append(
+                        move(move_id, second_direction, second_error)
+                    )
+                values[pair_names[0]] = {"metrics": {"moves": first_moves}}
+                values[pair_names[1]] = {"metrics": {"moves": second_moves}}
+            first_moves = values["motor_a"]["metrics"]["moves"]
+            second_moves = values["motor_a1"]["metrics"]["moves"]
+            if malformed == "extra_ripple_move":
+                second_moves.append(move(9, 1, 123.0))
+            elif malformed == "no_shared_windows":
+                for entry in second_moves:
+                    entry["start_ms"] += 1.0
+            elif malformed == "bad_window":
+                second_moves[0]["start_ms"] = float("nan")
+            elif malformed == "zero_direction":
+                first_moves[0]["direction"] = 0
+            elif malformed == "lambda_direction":
+                second_moves[0]["direction"] *= -1
+            elif malformed == "missing_bin":
+                first_moves.pop()
+                second_moves.pop()
+            elif malformed == "missing_mean":
+                del first_moves[0]["ferr_mean_moving"]
+            steps.append({"name": step["name"], "flags": [], "drives": values})
+        with open(os.path.join(run_dir, "results.json"), "w") as f:
+            json.dump(
+                {
+                    "steps": steps,
+                    "verdict": {"reason": "host-side", "flags": []},
+                },
+                f,
+            )
+
+    sc._run = fake_run
+    return sc, gcode, engine, profile_path
+
+
+@pytest.mark.parametrize(
+    "pairs, message",
+    [
+        ("motor_a,motor_a;motor_b,motor_b1", "must be distinct"),
+        ("motor_a,motor_a1;motor_a,motor_b1", "overlap at slots"),
+    ],
+)
+def test_kinematically_derived_pairs_reject_repeated_slots(
+    monkeypatch, pairs, message
+):
+    sc, _gcode, _engine, _path = make_calibration_awd()
+    monkeypatch.setattr(
+        servo_strokes,
+        "corexy_fit_layout",
+        lambda _gcmd, _kin: {"servos": [], "pairs": pairs},
+    )
+    baseline = servo_calibration.parse_dynamics_profile(OLD_AWD_TOML)
+    with pytest.raises(RuntimeError, match=message):
+        sc._direction_split_baseline(FakeGcmd(), sc._kin(), baseline)
+
+
+def test_kinematic_pair_rejects_unequal_parallel_columns():
+    unequal = OLD_AWD_TOML.replace(
+        "frame = [[0.25, 0.25, -0.25, 0.25], [0.25, 0.25, 0.25, -0.25]]",
+        "frame = [[0.25, 0.2, -0.25, 0.25], [0.25, 0.2, 0.25, -0.25]]",
+    )
+    baseline = servo_calibration.parse_dynamics_profile(unequal)
+    assert baseline["pairs"] == []
+    sc, _gcode, _engine, _path = make_calibration_awd(unequal)
+    with pytest.raises(RuntimeError, match="does not have equal parallel"):
+        sc._direction_split_baseline(FakeGcmd(), sc._kin(), baseline)
+
+
+def test_direction_split_refine_recovers_both_lambda_signs_on_old_v6_profile():
+    sc, _gcode, engine, _path = make_calibration_awd()
+    gcmd = FakeGcmd(TERM="DIRECTION_SPLIT")
+    sc.cmd_SERVO_REFINE_DYNAMICS(gcmd)
+    profiles = _written_profiles(sc)
+    assert len(profiles) == 1
+    with open(profiles[0], "rb") as f:
+        raw = tomllib.load(f)
+    da = raw["refined_delta_motor_a"]
+    db = raw["refined_delta_motor_b"]
+    assert da == pytest.approx(-0.12, abs=0.03)
+    assert db == pytest.approx(0.15, abs=0.03)
+    assert [pair["direction_split"] for pair in raw["pair"]] == pytest.approx(
+        [da, db]
+    )
+    assert raw["mass"] == BASELINE_MASS
+    assert raw["viscous"] == BASELINE_VISCOUS
+    assert raw["coulomb"] == BASELINE_COULOMB
+    assert engine.dynamics_calls[-1][5] == [0, 1, 2, 3]
+    assert engine.dynamics_calls[-1][6] == [0.0, 0.0]
+    candidates = [
+        response
+        for response in gcmd.responses
+        if response.endswith("(counts, mean per move)")
+    ]
+    assert candidates
+    assert all("q_plus" in line for line in candidates)
+    assert all("q_minus" in line for line in candidates)
+    assert all("ferr_mean_direction_imbalance" in line for line in candidates)
+
+
+def test_direction_split_refine_cancels_bidirectional_per_motor_bias():
+    sc, _gcode, _engine, _path = make_calibration_awd(
+        motor_biases={
+            "motor_a": 80.0,
+            "motor_a1": -35.0,
+            "motor_b": -60.0,
+            "motor_b1": 25.0,
+        }
+    )
+    sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(TERM="DIRECTION_SPLIT"))
+    with open(_written_profiles(sc)[0], "rb") as f:
+        raw = tomllib.load(f)
+    assert raw["refined_delta_motor_a"] == pytest.approx(-0.12, abs=0.03)
+    assert raw["refined_delta_motor_b"] == pytest.approx(0.15, abs=0.03)
+
+
+def test_direction_split_refine_adds_to_existing_signed_coefficients():
+    sc, _gcode, _engine, _path = make_calibration_awd(AWD_TOML)
+    sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(TERM="DIRECTION_SPLIT"))
+    with open(_written_profiles(sc)[0], "rb") as f:
+        raw = tomllib.load(f)
+    assert raw["pair"][0]["direction_split"] == pytest.approx(
+        0.05 + raw["refined_delta_motor_a"]
+    )
+    assert raw["pair"][1]["direction_split"] == pytest.approx(
+        -0.1 + raw["refined_delta_motor_b"]
+    )
+
+
+@pytest.mark.parametrize(
+    "malformed, message",
+    [
+        ("no_shared_windows", "needs moves in both"),
+        ("bad_window", "invalid start_ms"),
+        ("zero_direction", "nonmoving direction"),
+        ("lambda_direction", "directions do not match lambda"),
+        ("missing_bin", "needs moves in both"),
+        ("missing_mean", "invalid ferr_mean_moving"),
+    ],
+)
+def test_direction_split_refine_rejects_malformed_directional_moves(
+    malformed, message
+):
+    sc, _gcode, engine, _profile_path = make_calibration_awd(
+        malformed=malformed
+    )
+    with pytest.raises(RuntimeError, match=message):
+        sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(TERM="DIRECTION_SPLIT"))
+    assert engine.dynamics_calls[-1] == (
+        1,
+        [0.25, 0.25, -0.25, 0.25, 0.25, 0.25, 0.25, -0.25],
+        BASELINE_MASS,
+        BASELINE_VISCOUS,
+        BASELINE_COULOMB,
+        [0, 1, 2, 3],
+        [0.0, 0.0],
+    )
+
+
+def test_direction_split_refine_ignores_single_drive_ripple_moves():
+    sc, _gcode, _engine, _path = make_calibration_awd(
+        malformed="extra_ripple_move"
+    )
+    sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(TERM="DIRECTION_SPLIT"))
+    with open(_written_profiles(sc)[0], "rb") as f:
+        raw = tomllib.load(f)
+    assert raw["refined_delta_motor_a"] == pytest.approx(-0.12, abs=0.03)
+    assert raw["refined_delta_motor_b"] == pytest.approx(0.15, abs=0.03)
+
+
+def test_direction_split_refine_rejects_missing_or_unsafe_pairs():
+    sc, _gcode, engine, _path = make_calibration()
+    with pytest.raises(RuntimeError, match="found no explicit"):
+        sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(TERM="DIRECTION_SPLIT"))
+    assert engine.dynamics_calls == []
+    sc, _gcode, engine, _path = make_calibration_awd(AWD_TOML)
+    with pytest.raises(RuntimeError, match=r"outside abs\(w\) < 0.5"):
+        sc.cmd_SERVO_REFINE_DYNAMICS(
+            FakeGcmd(TERM="DIRECTION_SPLIT", LO=-0.45, HI=0.45)
+        )
     assert engine.dynamics_calls == []

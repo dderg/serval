@@ -538,6 +538,50 @@ pub fn compute_verdict(
 }
 
 pub fn build_run(dir: &Path) -> Result<(Results, PlotSeries), String> {
+    build_run_reusing(dir, BTreeMap::new())
+}
+
+/// Load prior `results.json` / `plot_series.json` as a per-step-name cache so
+/// re-analyzing an append-only run only pays for the new steps. Sweeps that
+/// analyze after every eval (SERVO_REFINE_DYNAMICS, gain sweeps) otherwise go
+/// quadratic in run length — the growing between-eval stall starves the
+/// motion stream. Only sound while the analyzer parameters are unchanged, so
+/// it is opt-in (`servo-cal analyze --incremental`).
+pub fn build_run_incremental(dir: &Path) -> Result<(Results, PlotSeries), String> {
+    let mut cache = BTreeMap::new();
+    let results_text = std::fs::read_to_string(dir.join("results.json"));
+    let plot_text = std::fs::read_to_string(dir.join("plot_series.json"));
+    if let (Ok(results_text), Ok(plot_text)) = (results_text, plot_text) {
+        let prev_results: Results = serde_json::from_str(&results_text)
+            .map_err(|e| format!("prior results.json parse: {e}"))?;
+        let prev_plot: PlotSeries = serde_json::from_str(&plot_text)
+            .map_err(|e| format!("prior plot_series.json parse: {e}"))?;
+        if prev_results.steps.len() != prev_plot.steps.len() {
+            return Err(format!(
+                "prior results.json has {} steps but plot_series.json has {} — \
+                 stale outputs, re-run a full analyze",
+                prev_results.steps.len(),
+                prev_plot.steps.len()
+            ));
+        }
+        for (sr, ps) in prev_results.steps.into_iter().zip(prev_plot.steps) {
+            if sr.name != ps.name {
+                return Err(format!(
+                    "prior results step {:?} does not match plot step {:?} — \
+                     stale outputs, re-run a full analyze",
+                    sr.name, ps.name
+                ));
+            }
+            cache.insert(sr.name.clone(), (sr, ps, prev_results.fs_hz));
+        }
+    }
+    build_run_reusing(dir, cache)
+}
+
+fn build_run_reusing(
+    dir: &Path,
+    mut cache: BTreeMap<String, (StepResult, PlotStep, f64)>,
+) -> Result<(Results, PlotSeries), String> {
     let manifest_path = dir.join("manifest.json");
     let text = std::fs::read_to_string(&manifest_path)
         .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
@@ -564,6 +608,12 @@ pub fn build_run(dir: &Path) -> Result<(Results, PlotSeries), String> {
     let mut plot_steps = Vec::new();
     let mut fs_hz = 0.0;
     for step in &manifest.steps {
+        if let Some((sr, ps, cached_fs)) = cache.remove(&step.name) {
+            fs_hz = cached_fs;
+            step_results.push(sr);
+            plot_steps.push(ps);
+            continue;
+        }
         let cap = Scap::load(dir.join(&step.capture).to_str().unwrap())?;
         fs_hz = cap.fs();
         let (sr, ps) = match differential_band {
@@ -618,8 +668,12 @@ pub fn write_run_outputs(dir: &Path, results: &Results, plot: &PlotSeries) -> Re
         .map_err(|e| format!("write plot_series.json: {e}"))
 }
 
-pub fn analyze_run(dir: &Path) -> Result<(), String> {
-    let (results, plot) = build_run(dir)?;
+pub fn analyze_run(dir: &Path, incremental: bool) -> Result<(), String> {
+    let (results, plot) = if incremental {
+        build_run_incremental(dir)?
+    } else {
+        build_run(dir)?
+    };
     write_run_outputs(dir, &results, &plot)?;
     print_results(&results);
     Ok(())

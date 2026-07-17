@@ -11,6 +11,19 @@ pub struct Structure {
     pub frame: Vec<Vec<f64>>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct FramePair {
+    pub first: usize,
+    pub second: usize,
+    pub lambda: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PairDiscoveryError {
+    UnequalMagnitude { first: usize, second: usize },
+    AmbiguousGroup { slots: Vec<usize> },
+}
+
 /// One entry per Cartesian mode.
 #[derive(Debug, PartialEq)]
 pub struct PhysicalParams {
@@ -48,6 +61,97 @@ impl Structure {
 
     pub fn axis_count(&self) -> usize {
         self.frame[0].len()
+    }
+
+    pub fn pairs(&self) -> Result<Vec<FramePair>, PairDiscoveryError> {
+        const PARALLEL_TOLERANCE: f64 = 1.0e-9;
+
+        let columns: Vec<Vec<f64>> = (0..self.axis_count())
+            .map(|slot| self.frame.iter().map(|row| row[slot]).collect())
+            .collect();
+        let norm2: Vec<f64> = columns
+            .iter()
+            .map(|column| column.iter().map(|value| value * value).sum())
+            .collect();
+
+        let exact_lambda = |first: usize, second: usize| {
+            if columns[first]
+                .iter()
+                .zip(&columns[second])
+                .all(|(a, b)| b == a)
+            {
+                Some(1.0)
+            } else if columns[first]
+                .iter()
+                .zip(&columns[second])
+                .all(|(a, b)| *b == -*a)
+            {
+                Some(-1.0)
+            } else {
+                None
+            }
+        };
+        let clearly_parallel = |first: usize, second: usize| {
+            if norm2[first] == 0.0 || norm2[second] == 0.0 {
+                return false;
+            }
+            let dot: f64 = columns[first]
+                .iter()
+                .zip(&columns[second])
+                .map(|(a, b)| a * b)
+                .sum();
+            let scale = dot / norm2[first];
+            let residual2: f64 = columns[first]
+                .iter()
+                .zip(&columns[second])
+                .map(|(a, b)| {
+                    let residual = b - scale * a;
+                    residual * residual
+                })
+                .sum();
+            residual2.sqrt() <= PARALLEL_TOLERANCE * norm2[first].sqrt().max(norm2[second].sqrt())
+        };
+
+        let mut pairs = Vec::new();
+        let mut consumed = vec![false; columns.len()];
+        for first in 0..columns.len() {
+            if consumed[first] || norm2[first] == 0.0 {
+                continue;
+            }
+            let exact: Vec<(usize, f64)> = (first + 1..columns.len())
+                .filter_map(|second| exact_lambda(first, second).map(|lambda| (second, lambda)))
+                .collect();
+            if exact.len() > 1 {
+                let mut slots = vec![first];
+                slots.extend(exact.iter().map(|(slot, _)| *slot));
+                return Err(PairDiscoveryError::AmbiguousGroup { slots });
+            }
+            if let Some(&(second, lambda)) = exact.first() {
+                pairs.push(FramePair {
+                    first,
+                    second,
+                    lambda,
+                });
+                consumed[first] = true;
+                consumed[second] = true;
+            }
+        }
+
+        for first in 0..columns.len() {
+            if consumed[first] || norm2[first] == 0.0 {
+                continue;
+            }
+            let parallel: Vec<usize> = (0..columns.len())
+                .filter(|&second| second != first && clearly_parallel(first, second))
+                .collect();
+            if parallel.len() == 1 && !consumed[parallel[0]] {
+                return Err(PairDiscoveryError::UnequalMagnitude {
+                    first,
+                    second: parallel[0],
+                });
+            }
+        }
+        Ok(pairs)
     }
 
     pub fn mode_count(&self) -> usize {

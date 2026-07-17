@@ -25,8 +25,10 @@ FIELD_KNOT_MM = 2.0
 FIELD_SMOOTH = 0.5
 FIELD_2D_PITCH_MM = 20.0
 FIELD_2D_SMOOTH = 2.0
-MAX_GRID_DIM = 64
-MAX_GRID_VALUES = 4096
+# Mirrors MAX_COMP_GRID_DIM/_VALUES in rust/ethercat-rt/src/strain_comp.rs:
+# u16 wire dims; total capped by the endpoint's 8 MB-per-pair grid budget.
+MAX_GRID_DIM = 65535
+MAX_GRID_VALUES = 1 << 20
 FIT_MIN_EXCITATION_MM = 0.005
 FIT_MAX_OFFSET_CORR = 0.98
 FIT_MIN_R2 = 0.8
@@ -103,11 +105,12 @@ TUNE_RHO_MAX = 5.0
 
 class StrainCompTune:
     """One closed-loop stiffness tune: rebuild the FULL map from the
-    baseline run at the trial matrix (never merging), verify it along a
-    single line, and scale each belt's matrix row by the fraction of the
-    intended correction the line actually shows. When the line reads
-    flat the matrix on disk is right for the whole map — it is the same
-    map that was being verified."""
+    baseline run at the trial matrix (never merging), verify it along an
+    X line and a Y line, and refit each belt's direct and cross stiffness
+    from the measured response to the applied offsets. The two sweeps
+    swap the belts' roles, so the two matrix columns separate; when the
+    measured matrix reproduces the applied one, the map on disk is right
+    for the whole map — it is the same map that was being verified."""
 
     def __init__(self, comp, gcmd, run_dir, manifest, spacing, k_matrix):
         self.comp = comp
@@ -150,15 +153,22 @@ class StrainCompTune:
         )
         self.comp.enable_from_map(gcmd, quiet=True)
 
-    def score_line(self, gcmd, capture_run_dir, step_name, line_y):
-        """Per belt: the verification line's residual rms and the achieved
-        fraction rho of the intended correction — the row-scale update."""
+    def score_lines(self, gcmd, capture_run_dir, steps):
+        """Per belt: least-squares fit of the verification lines' measured
+        response onto the applied own-belt and cross-belt offsets — the
+        direct AND cross stiffness, measured independently. `steps` is a
+        list of (step_name, fixed_axis, fixed_value); an X sweep exercises
+        mostly the own-belt offset and a Y sweep swaps the belts' roles,
+        so together they separate the two columns."""
         import numpy as np
 
         mini_manifest = {
             "stroke_plan": self.plan,
             "belts": self.manifest["belts"],
-            "steps": [{"name": step_name, "swept": {"y": line_y}}],
+            "steps": [
+                {"name": name, "swept": {fixed_axis: fixed_value}}
+                for name, fixed_axis, fixed_value in steps
+            ],
         }
         samples = _collect_elastic_samples(capture_run_dir, mini_manifest)
         offset_grids = self.comp._load_map_offset_grids(
@@ -168,7 +178,7 @@ class StrainCompTune:
         for belt_idx in range(2):
             if not samples[belt_idx]:
                 raise gcmd.error(
-                    "verification line has no usable samples for belt %s"
+                    "verification lines have no usable samples for belt %s"
                     % "AB"[belt_idx]
                 )
             rx, ry, rv = _flatten_lines(samples[belt_idx])
@@ -186,43 +196,80 @@ class StrainCompTune:
                     for px, py in zip(rx, ry)
                 ]
             )
-            row = self.k_matrix[belt_idx]
-            if belt_idx == 0:
-                predicted = row[0] * own + row[1] * other
-            else:
-                predicted = row[0] * other + row[1] * own
-            predicted = predicted - predicted.mean()
-            delta = delta - delta.mean()
-            denom = float((predicted**2).sum())
-            if denom < 1e-9:
+            own_c = own - own.mean()
+            other_c = other - other.mean()
+            delta_c = delta - delta.mean()
+            own_norm = float(np.sqrt((own_c**2).sum()))
+            other_norm = float(np.sqrt((other_c**2).sum()))
+            if own_norm < 1e-6:
                 raise gcmd.error(
                     "the map applies no correction to belt %s along the "
-                    "verification line — pick a Y where the field varies"
+                    "verification lines — pick lines where the field varies"
                     % "AB"[belt_idx]
                 )
-            rho = float((delta * predicted).sum() / denom)
+            if other_norm < 1e-6:
+                raise gcmd.error(
+                    "the other belt's map is flat along belt %s's "
+                    "verification lines — the cross stiffness is not "
+                    "identifiable; pick different lines" % "AB"[belt_idx]
+                )
+            corr = float((own_c * other_c).sum()) / (own_norm * other_norm)
+            if abs(corr) > 0.98:
+                raise gcmd.error(
+                    "own and cross corrections are collinear (corr %.3f) "
+                    "along belt %s's verification lines — direct and cross "
+                    "stiffness cannot be separated; the X and Y sweeps must "
+                    "cover different field shapes" % (corr, "AB"[belt_idx])
+                )
+            a_mat = np.column_stack([own_c, other_c])
+            (s_own, s_cross), *_ = np.linalg.lstsq(a_mat, delta_c, rcond=None)
+            s_own, s_cross = float(s_own), float(s_cross)
+            k_own = self.k_matrix[belt_idx][belt_idx]
+            rho = s_own / k_own if k_own != 0.0 else float("inf")
             if not (TUNE_RHO_MIN < rho < TUNE_RHO_MAX):
                 raise gcmd.error(
-                    "belt %s achieved %.0f%% of the intended correction — "
-                    "not credible; is the compensation actually applied?"
-                    % ("AB"[belt_idx], rho * 100.0)
+                    "belt %s achieved %.0f%% of the intended direct "
+                    "correction — not credible; is the compensation "
+                    "actually applied?" % ("AB"[belt_idx], rho * 100.0)
                 )
-            residual = rv - rv.mean()
-            baseline_c = baseline - baseline.mean()
+            per_line = {}
+            for line in samples[belt_idx]:
+                lx, ly, lv = _flatten_lines([line])
+                lb = self.baseline_models[belt_idx](lx, ly)
+                key = "x" if line["fixed_axis"] == "y" else "y"
+                per_line[key] = (
+                    float(np.sqrt(np.mean((lv - lv.mean()) ** 2))),
+                    float(np.sqrt(np.mean((lb - lb.mean()) ** 2))),
+                )
             results.append(
                 {
+                    "s_own": s_own,
+                    "s_cross": s_cross,
                     "rho": rho,
-                    "rms": float(np.sqrt(np.mean(residual**2))),
-                    "base_rms": float(np.sqrt(np.mean(baseline_c**2))),
+                    "lines": per_line,
                 }
             )
         return results
 
+    def converged(self, results, tol):
+        """All four matrix elements reproduced by the measurement within
+        tol, each normalized by the row's direct stiffness."""
+        for belt_idx, result in enumerate(results):
+            k_own = self.k_matrix[belt_idx][belt_idx]
+            k_cross = self.k_matrix[belt_idx][1 - belt_idx]
+            scale = abs(k_own)
+            if abs(result["s_own"] - k_own) > tol * scale:
+                return False
+            if abs(result["s_cross"] - k_cross) > tol * scale:
+                return False
+        return True
+
     def apply(self, results):
         for belt_idx, result in enumerate(results):
-            self.k_matrix[belt_idx] = [
-                value * result["rho"] for value in self.k_matrix[belt_idx]
-            ]
+            row = [0.0, 0.0]
+            row[belt_idx] = result["s_own"]
+            row[1 - belt_idx] = result["s_cross"]
+            self.k_matrix[belt_idx] = row
 
     def store_matrix(self):
         (kaa, kab), (kba, kbb) = self.k_matrix

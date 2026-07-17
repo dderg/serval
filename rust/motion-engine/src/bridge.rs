@@ -32,6 +32,8 @@ mod pipeline_setup_tests;
 mod planner_api;
 mod runtime_caps;
 mod servo;
+#[cfg(test)]
+mod servo_tests;
 mod state;
 mod telemetry;
 

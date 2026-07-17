@@ -1,7 +1,7 @@
 use super::*;
 
 const SCALAR: &str = r#"
-version = 2
+version = 6
 axes = ["x"]
 modes = ["x"]
 frame = [[1.0]]
@@ -12,7 +12,7 @@ fit_rms_residual = [0.8]
 "#;
 
 const SCALAR_Y: &str = r#"
-version = 2
+version = 6
 axes = ["y"]
 modes = ["y"]
 frame = [[1.0]]
@@ -23,7 +23,7 @@ fit_rms_residual = [0.3]
 "#;
 
 const COREXY: &str = r#"
-version = 2
+version = 6
 axes = ["a", "b"]
 modes = ["x", "y"]
 frame = [[0.5, 0.5], [0.5, -0.5]]
@@ -95,10 +95,21 @@ fn block_diagonal_rejects_empty() {
 
 #[test]
 fn rejects_each_invariant_violation() {
-    let bad_version = SCALAR.replace("version = 2", "version = 1");
+    let bad_version = SCALAR.replace("version = 6", "version = 2");
     assert!(matches!(
         DynamicsModel::from_toml_str(&bad_version),
-        Err(ProfileError::Version(1))
+        Err(ProfileError::Version(2))
+    ));
+    let pre_split_removal = SCALAR.replace("version = 6", "version = 5");
+    assert!(matches!(
+        DynamicsModel::from_toml_str(&pre_split_removal),
+        Err(ProfileError::Version(5))
+    ));
+    let with_pair_table =
+        format!("{SCALAR}\n[[pair]]\nslots = [\"x\", \"x1\"]\ndirection_split = 0.1\n");
+    assert!(matches!(
+        DynamicsModel::from_toml_str(&with_pair_table),
+        Err(ProfileError::PairSlot(_))
     ));
     let bad_width = COREXY.replace("[0.5, 0.5]", "[0.5, 0.5, 0.5]");
     assert!(matches!(
@@ -161,6 +172,7 @@ fn from_parts_agrees_with_toml_parse() {
         &[0.040, 0.080],
         &[0.004, 0.004],
         &[1.0, 1.0],
+        &[],
     )
     .unwrap();
     assert_eq!(parts.n_slots, 2);
@@ -181,27 +193,35 @@ fn from_parts_rejects_each_invariant_violation() {
     let frame = [0.5, 0.5, 0.5, -0.5];
     let mode2 = [0.004, 0.004];
     assert!(matches!(
-        DynamicsModel::from_parts(0, 0, &[], &[], &[], &[]),
+        DynamicsModel::from_parts(0, 0, &[], &[], &[], &[], &[]),
         Err(ProfileError::Dim(_))
     ));
     assert!(matches!(
-        DynamicsModel::from_parts(2, 2, &frame[..3], &[0.04, 0.08], &mode2, &mode2),
+        DynamicsModel::from_parts(2, 2, &frame[..3], &[0.04, 0.08], &mode2, &mode2, &[]),
         Err(ProfileError::Dim(_))
     ));
     assert!(matches!(
-        DynamicsModel::from_parts(2, 2, &frame, &[0.04], &mode2, &mode2),
+        DynamicsModel::from_parts(2, 2, &frame, &[0.04], &mode2, &mode2, &[]),
         Err(ProfileError::Dim(_))
     ));
     assert!(matches!(
-        DynamicsModel::from_parts(2, 2, &[0.5, 0.5, 0.5, 0.5], &[0.04, 0.08], &mode2, &mode2),
+        DynamicsModel::from_parts(
+            2,
+            2,
+            &[0.5, 0.5, 0.5, 0.5],
+            &[0.04, 0.08],
+            &mode2,
+            &mode2,
+            &[]
+        ),
         Err(ProfileError::FrameRankDeficient)
     ));
     assert!(matches!(
-        DynamicsModel::from_parts(2, 2, &frame, &[0.0, 0.08], &mode2, &mode2),
+        DynamicsModel::from_parts(2, 2, &frame, &[0.0, 0.08], &mode2, &mode2, &[]),
         Err(ProfileError::NonPositive(_))
     ));
     assert!(matches!(
-        DynamicsModel::from_parts(2, 2, &frame, &[0.04, 0.08], &[f32::NAN, 0.004], &mode2),
+        DynamicsModel::from_parts(2, 2, &frame, &[0.04, 0.08], &[f32::NAN, 0.004], &mode2, &[]),
         Err(ProfileError::NotFinite(_))
     ));
 }
@@ -231,7 +251,7 @@ fn clamp_counts_saturation() {
 }
 
 const COREXY_AWD: &str = r#"
-version = 2
+version = 6
 axes = ["a", "a1", "b", "b1"]
 modes = ["x", "y"]
 frame = [[0.25, 0.25, 0.25, 0.25], [0.25, 0.25, -0.25, -0.25]]
@@ -239,10 +259,14 @@ mass = [0.030, 0.060]
 viscous = [0.002, 0.002]
 coulomb = [1.0, 1.0]
 fit_rms_residual = [0.5, 0.5, 0.5, 0.5]
+
+[[pair]]
+slots = ["a", "a1"]
+direction_split = 0.2
 "#;
 
 #[test]
-fn corexy_awd_pair_slots_share_the_load() {
+fn profile_pair_applies_the_total_belt_force_factor() {
     let m = DynamicsModel::from_toml_str(COREXY_AWD).unwrap();
     assert_eq!(m.n_slots, 4);
     assert_eq!(m.n_modes, 2);
@@ -250,7 +274,158 @@ fn corexy_awd_pair_slots_share_the_load() {
     let vel = [0.0, 0.0, 0.0, 0.0];
     let tau0 = m.torque_ff(0, &acc, &vel);
     let tau1 = m.torque_ff(1, &acc, &vel);
-    assert!((tau0 - tau1).abs() < 1e-6, "pair drives share the load");
+    assert!((tau0 - 9.0).abs() < 1e-6, "first torque {tau0}");
+    assert!((tau1 - 6.0).abs() < 1e-6, "second torque {tau1}");
+    assert!((tau0 + tau1 - 15.0).abs() < 1e-6, "pair sum changed");
+}
+
+#[test]
+fn opposite_pair_columns_preserve_generalized_force() {
+    let pair = PairSpec {
+        first: 0,
+        second: 1,
+        direction_split: 0.2,
+    };
+    let model =
+        DynamicsModel::from_parts(2, 1, &[0.5, -0.5], &[0.04], &[0.0], &[0.0], &[pair]).unwrap();
+    let acc = [1000.0, -1000.0];
+    let first = model.torque_ff(0, &acc, &[0.0, 0.0]);
+    let second = model.torque_ff(1, &acc, &[0.0, 0.0]);
+    assert!((first - 24.0).abs() < 1e-6, "first torque {first}");
+    assert!((second + 16.0).abs() < 1e-6, "second torque {second}");
+    assert!((0.5 * first - 0.5 * second - 20.0).abs() < 1e-6);
+}
+
+#[test]
+fn pair_validation_rejects_invalid_contracts() {
+    let frame = [0.5, 0.5, 0.5, 0.5];
+    let vectors = [0.04, 0.08];
+    let pair = |first, second, direction_split| PairSpec {
+        first,
+        second,
+        direction_split,
+    };
+    for spec in [
+        pair(0, 0, 0.1),
+        pair(0, 2, 0.1),
+        pair(0, 1, 0.5),
+        pair(0, 1, -0.5),
+        pair(0, 1, f32::NAN),
+    ] {
+        assert!(DynamicsModel::from_parts(
+            2,
+            1,
+            &frame[..2],
+            &vectors[..1],
+            &[0.0],
+            &[0.0],
+            &[spec],
+        )
+        .is_err());
+    }
+    assert!(matches!(
+        DynamicsModel::from_parts(
+            4,
+            1,
+            &[0.25; 4],
+            &vectors[..1],
+            &[0.0],
+            &[0.0],
+            &[pair(0, 1, 0.1), pair(1, 2, 0.1)],
+        ),
+        Err(ProfileError::PairSlot(_))
+    ));
+    assert!(matches!(
+        DynamicsModel::from_parts(
+            2,
+            1,
+            &[0.5, 0.500_001],
+            &vectors[..1],
+            &[0.0],
+            &[0.0],
+            &[pair(0, 1, 0.1)],
+        ),
+        Err(ProfileError::PairNotParallel(0))
+    ));
+}
+
+#[test]
+fn profile_rejects_pair_orientation_and_global_split() {
+    let orientation = COREXY_AWD.replace(
+        "direction_split = 0.2",
+        "direction_split = 0.2\norientation = 1",
+    );
+    assert!(matches!(
+        DynamicsModel::from_toml_str(&orientation),
+        Err(ProfileError::Parse(_))
+    ));
+    let global = SCALAR.replace("mass =", "direction_split = 0.1\nmass =");
+    assert!(matches!(
+        DynamicsModel::from_toml_str(&global),
+        Err(ProfileError::ForbiddenField("direction_split"))
+    ));
+    let global_orientation = SCALAR.replace("mass =", "orientation = 1\nmass =");
+    assert!(matches!(
+        DynamicsModel::from_toml_str(&global_orientation),
+        Err(ProfileError::ForbiddenField("orientation"))
+    ));
+}
+
+#[test]
+fn profile_accepts_refinement_provenance() {
+    let refined = SCALAR.replace(
+        "mass =",
+        "refined_source = \"baseline.toml\"\nrefined_term = \"mass\"\nrefined_delta_mass = 0.001\nrefined_delta_direction_split_a = -0.02\nmass =",
+    );
+    DynamicsModel::from_toml_str(&refined).expect("refinement provenance must be ignored");
+}
+
+#[test]
+fn profile_rejects_duplicate_axes_before_pair_resolution() {
+    let duplicate = COREXY_AWD.replace(
+        "axes = [\"a\", \"a1\", \"b\", \"b1\"]",
+        "axes = [\"a\", \"a\", \"b\", \"b1\"]",
+    );
+    assert!(matches!(
+        DynamicsModel::from_toml_str(&duplicate),
+        Err(ProfileError::DuplicateAxis(axis)) if axis == "a"
+    ));
+}
+
+#[test]
+fn pair_rejects_zero_first_frame_column() {
+    assert!(matches!(
+        DynamicsModel::from_parts(
+            3,
+            1,
+            &[0.0, 0.0, 1.0],
+            &[0.04],
+            &[0.0],
+            &[0.0],
+            &[PairSpec {
+                first: 0,
+                second: 1,
+                direction_split: 0.1,
+            }],
+        ),
+        Err(ProfileError::PairFirstColumnZero(0))
+    ));
+}
+
+#[test]
+fn buzz_path_suppresses_pair_correction() {
+    let paired = DynamicsModel::from_toml_str(COREXY_AWD).unwrap();
+    let unpaired = DynamicsModel::from_toml_str(&COREXY_AWD.replace(
+        "[[pair]]\nslots = [\"a\", \"a1\"]\ndirection_split = 0.2",
+        "",
+    ))
+    .unwrap();
+    let acc = [1000.0; 4];
+    let vel = [0.0; 4];
+    assert_eq!(
+        paired.torque_ff_without_coulomb(0, &acc, &vel),
+        unpaired.torque_ff_without_coulomb(0, &acc, &vel)
+    );
 }
 
 #[test]

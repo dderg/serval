@@ -8,6 +8,7 @@ use crossbeam_channel::{Receiver, Select, TryRecvError};
 use super::diag;
 use super::drip::DripCohort;
 use super::junction::{JunctionTracker, check_junction_position_continuity};
+use super::memstat::MemPressureProbe;
 use super::messages::{
     EnqueueMsg, HeartbeatMsg, HistoryRecorder, PieceSink, PumpCallbacks, PumpMsg, SendError,
 };
@@ -100,6 +101,7 @@ pub(super) struct Pump<S> {
     pub(super) holding_ahead: bool,
     pub(super) data_open: bool,
     pub(super) retirement_stall: RetirementStallWatch,
+    pub(super) mem_probe: MemPressureProbe,
 }
 
 impl<S: PieceSink> Pump<S> {
@@ -111,6 +113,7 @@ impl<S: PieceSink> Pump<S> {
                     if let Some(q) = self.queues.get_mut(&key) {
                         let dropped = q.pieces.len() as u32;
                         q.pieces.clear();
+                        q.staged_motion = 0;
                         if dropped > 0 {
                             (self.callbacks.on_abandon)(key, dropped);
                         }
@@ -229,6 +232,10 @@ impl<S: PieceSink> Pump<S> {
             .entry(key)
             .or_insert_with(|| AxisQueue::new(ring_depth));
         q.lead_secs = lead_secs;
+        q.staged_motion += pieces
+            .iter()
+            .filter(|(p, _)| !super::sched::is_hold_piece(p))
+            .count() as u32;
         match hold_merge_freq {
             Some(freq) => {
                 append_pieces_merging_holds(&mut q.pieces, pieces, freq, !epoch.is_fresh());
@@ -419,7 +426,7 @@ impl<S: PieceSink> Pump<S> {
     // endpoint ring) trip a cryptic -308 PieceStartInPast after the fact.
     // Mirrors the MCU's MAX_START_IN_PAST_SECS=200us threshold with a margin
     // above host-projection jitter so a healthy print never false-aborts.
-    fn guard_pieces_not_in_past(&self, mcu_id: u32, bundle: &[AxisFrame]) {
+    fn guard_pieces_not_in_past(&self, mcu_id: u32, bundle: &[AxisFrame], context: &str) {
         if let Some((mcu_now, freq)) = (self.callbacks.mcu_clock_of)(mcu_id) {
             if self.cohort.is_some() {
                 diag::log_send_projection(mcu_id, mcu_now, freq, bundle);
@@ -439,10 +446,11 @@ impl<S: PieceSink> Pump<S> {
                                 start_time = piece.start_time,
                                 mcu_now,
                                 deficit_us,
-                                "[pump-guard] piece already in the MCU's past at send time — failing loud on host before the MCU/endpoint trips -308"
+                                context,
+                                "[pump-guard] piece already in the MCU's past {context} — failing loud on host before the MCU/endpoint trips -308"
                             );
                             eprintln!(
-                                "pump: piece in past at send — mcu {mcu_id} axis {} start_time={} mcu_now={mcu_now} deficit_us={deficit_us} — aborting host before MCU -308",
+                                "pump: piece in past {context} — mcu {mcu_id} axis {} start_time={} mcu_now={mcu_now} deficit_us={deficit_us} — aborting host before MCU -308",
                                 af.axis, piece.start_time
                             );
                             let _ = std::io::Write::flush(&mut std::io::stderr());
@@ -454,11 +462,22 @@ impl<S: PieceSink> Pump<S> {
         }
     }
 
-    fn send_bundle_logged(&self, mcu_id: u32, bundle: &[AxisFrame]) -> Result<(), SendError> {
+    fn send_bundle_logged(&mut self, mcu_id: u32, bundle: &[AxisFrame]) -> Result<(), SendError> {
+        let mem_before = self.mem_probe.sample();
         let send_started = Instant::now();
         let send_result = self.sink.send_mcu_frames(mcu_id, bundle);
         let send_elapsed = send_started.elapsed();
         if send_elapsed >= Duration::from_millis(5) {
+            let mem_after = self.mem_probe.sample();
+            let (majflt_delta, vm_swap_before_kb, vm_swap_after_kb) = match (mem_before, mem_after)
+            {
+                (Some(before), Some(after)) => (
+                    Some(after.majflt.saturating_sub(before.majflt)),
+                    Some(before.vm_swap_kb),
+                    Some(after.vm_swap_kb),
+                ),
+                _ => (None, None, None),
+            };
             tracing::warn!(
                 subsystem = "motion",
                 event = "pump_send_blocked",
@@ -466,11 +485,17 @@ impl<S: PieceSink> Pump<S> {
                 elapsed_ms = send_elapsed.as_millis() as u64,
                 frames = bundle.len(),
                 ok = send_result.is_ok(),
-                "[pump-send] send_mcu_frames blocked {}ms on mcu {} ({} frames, ok={})",
+                majflt_delta,
+                vm_swap_before_kb,
+                vm_swap_after_kb,
+                "[pump-send] send_mcu_frames blocked {}ms on mcu {} ({} frames, ok={}, majflt_delta={:?}, vm_swap_kb={:?}->{:?})",
                 send_elapsed.as_millis() as u64,
                 mcu_id,
                 bundle.len(),
-                send_result.is_ok()
+                send_result.is_ok(),
+                majflt_delta,
+                vm_swap_before_kb,
+                vm_swap_after_kb
             );
         }
         send_result
@@ -494,6 +519,12 @@ impl<S: PieceSink> Pump<S> {
                     .pieces
                     .pop_front()
                     .expect("sent frame outran its axis queue");
+                if super::sched::is_hold_piece(&piece) {
+                    q.wire_hold_tail += 1;
+                } else {
+                    q.wire_hold_tail = 0;
+                    q.staged_motion = q.staged_motion.saturating_sub(1);
+                }
                 if let Some(history) = &self.history {
                     history.record(key, &piece, host_t);
                 }
@@ -538,7 +569,7 @@ impl<S: PieceSink> Pump<S> {
                     activity = true;
                     let mcu_id = frames[0].key.mcu_id;
                     let bundle = self.build_bundle(frames);
-                    self.guard_pieces_not_in_past(mcu_id, &bundle);
+                    self.guard_pieces_not_in_past(mcu_id, &bundle, "at send");
                     let send_result = self.send_bundle_logged(mcu_id, &bundle);
                     match send_result {
                         Ok(()) => {
@@ -565,6 +596,12 @@ impl<S: PieceSink> Pump<S> {
                                 mcu = mcu_id,
                                 error = %e,
                                 "pump send_mcu_frames failed"
+                            );
+                            self.guard_pieces_not_in_past(
+                                mcu_id,
+                                &bundle,
+                                "after a failed send (transport gave no response \
+                                 while the piece's scheduling lead ran out)",
                             );
                             break;
                         }
@@ -626,6 +663,8 @@ impl<S: PieceSink> Pump<S> {
                         pending: q.pieces.len() as u32,
                         pushed: q.pushed,
                         retired: q.retired,
+                        staged_motion: q.staged_motion,
+                        hold_tail: q.wire_hold_tail,
                     },
                 )
             })
@@ -699,6 +738,7 @@ pub fn run_pump<S: PieceSink>(
         holding_ahead: false,
         data_open: true,
         retirement_stall: RetirementStallWatch::new(RETIREMENT_STALL_FATAL),
+        mem_probe: MemPressureProbe::new(),
     };
     pump.run(control_rx, data_rx);
 }

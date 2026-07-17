@@ -6,10 +6,15 @@
 //! with `source = "host-ec"`. Vector's `events/*.jsonl` glob ships the file to
 //! VictoriaLogs, so endpoint events are queryable alongside the bridge's
 //! (`source:=host-ec`). Writes go through a non-blocking worker thread so the DC
-//! cycle never blocks on log I/O.
+//! cycle never blocks on log I/O; the channel to that worker is LOSSY — when it
+//! fills (wedged SD, log storm) lines are dropped rather than blocking the
+//! 250 µs cycle, and the drops are counted. [`emit_dropped_line_report`] turns
+//! counter growth into an `obs_log_lines_dropped` warn from a periodic
+//! non-RT-critical caller.
 
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 use serde_json::{Map, Value};
@@ -18,7 +23,7 @@ use time::macros::format_description;
 use time::OffsetDateTime;
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
-use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
+use tracing_appender::non_blocking::{ErrorCounter, NonBlocking, WorkerGuard};
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{EnvFilter, Layer};
@@ -30,6 +35,43 @@ const TIME_FMT: &[FormatItem<'static>] =
 
 static GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 static SESSION: OnceLock<String> = OnceLock::new();
+static DROPPED_LINES: OnceLock<ErrorCounter> = OnceLock::new();
+static DROP_REPORT: DropReport = DropReport::new();
+
+pub(crate) struct DropReport {
+    reported: AtomicUsize,
+}
+
+impl DropReport {
+    pub(crate) const fn new() -> Self {
+        Self {
+            reported: AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn newly_dropped(&self, cumulative: usize) -> Option<usize> {
+        let previously_reported = self.reported.swap(cumulative, Ordering::Relaxed);
+        (cumulative > previously_reported).then_some(cumulative)
+    }
+}
+
+/// Report appender drops since the last call. Call from a periodic
+/// non-RT-critical path — a counter load plus, only on growth, one warn event.
+pub fn emit_dropped_line_report() {
+    let Some(counter) = DROPPED_LINES.get() else {
+        return;
+    };
+    let Some(dropped_total) = DROP_REPORT.newly_dropped(counter.dropped_lines()) else {
+        return;
+    };
+    eprintln!("ec-rt: obs: lossy log channel overflowed — {dropped_total} lines dropped so far");
+    tracing::warn!(
+        subsystem = "ethercat",
+        event = "obs_log_lines_dropped",
+        dropped_total = dropped_total as u64,
+        "log appender channel overflowed; {dropped_total} lines dropped so far (cumulative)"
+    );
+}
 
 fn session_id() -> &'static str {
     SESSION.get().map_or("ec-unbound", String::as_str)
@@ -156,8 +198,9 @@ pub fn init(events_dir: &Path, session: String) {
         }
     };
     let (non_blocking, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
-        .lossy(false)
+        .lossy(true)
         .finish(file);
+    let error_counter = non_blocking.error_counter();
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let subscriber = tracing_subscriber::registry()
         .with(filter)
@@ -169,4 +212,9 @@ pub fn init(events_dir: &Path, session: String) {
         return;
     }
     let _ = GUARD.set(guard);
+    let _ = DROPPED_LINES.set(error_counter);
 }
+
+#[cfg(test)]
+#[path = "obs_tests.rs"]
+mod obs_tests;

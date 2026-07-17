@@ -19,12 +19,17 @@ struct HttpResult {
 }
 
 fn request(port: u16, method: &str, path: &str) -> HttpResult {
+    request_with_body(port, method, path, "")
+}
+
+fn request_with_body(port: u16, method: &str, path: &str, body: &str) -> HttpResult {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
     let req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
     );
     stream.write_all(req.as_bytes()).unwrap();
     let mut raw = Vec::new();
@@ -304,6 +309,99 @@ fn analyze_on_demand_regenerates_stale_results() {
         third_mtime > second_mtime,
         "a newer capture must trigger re-analysis"
     );
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn delete_run_removes_the_directory() {
+    let (root, run_dirs) = demo_root("delete");
+    let run_dir = &run_dirs[0];
+    let name = run_dir.file_name().unwrap().to_string_lossy().into_owned();
+    let port = spawn_server(root.clone());
+
+    let resp = request(port, "DELETE", &format!("/api/runs/{name}"));
+    assert_eq!(resp.status, 200);
+    let body: Value = serde_json::from_str(&resp.body).unwrap();
+    assert_eq!(body["deleted"], Value::from(name.as_str()));
+    assert!(!run_dir.exists(), "run directory must be gone");
+
+    let resp = request(port, "GET", "/api/runs");
+    let runs: Value = serde_json::from_str(&resp.body).unwrap();
+    assert!(runs
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["name"] != *name.as_str()));
+
+    let resp = request(port, "DELETE", &format!("/api/runs/{name}"));
+    assert_eq!(resp.status, 404, "second delete must 404");
+    let resp = request(port, "DELETE", "/api/runs/../escape");
+    assert_eq!(resp.status, 404, "path traversal must be rejected");
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn note_roundtrips_without_marking_results_stale() {
+    let (root, run_dirs) = demo_root("note");
+    let run_dir = &run_dirs[0];
+    let name = run_dir.file_name().unwrap().to_string_lossy().into_owned();
+    let port = spawn_server(root.clone());
+
+    let listed_note = |port| {
+        let resp = request(port, "GET", "/api/runs");
+        let runs: Value = serde_json::from_str(&resp.body).unwrap();
+        runs.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == *name.as_str())
+            .unwrap()["note"]
+            .clone()
+    };
+    assert_eq!(listed_note(port), Value::Null);
+
+    let results_mtime_before = mtime(&run_dir.join("results.json"));
+    std::thread::sleep(Duration::from_millis(20));
+    let resp = request_with_body(
+        port,
+        "POST",
+        &format!("/api/runs/{name}/note"),
+        r#"{"note": "  best run so far  "}"#,
+    );
+    assert_eq!(resp.status, 200);
+    assert_eq!(listed_note(port), Value::from("best run so far"));
+
+    // A note is commentary, not an analysis input: analyze must keep the
+    // existing results even though note.txt now postdates results.json.
+    let resp = request(port, "POST", &format!("/api/runs/{name}/analyze"));
+    assert_eq!(resp.status, 200);
+    assert_eq!(
+        mtime(&run_dir.join("results.json")),
+        results_mtime_before,
+        "writing a note must not trigger re-analysis"
+    );
+
+    // Empty note clears it and removes the file.
+    let resp = request_with_body(
+        port,
+        "POST",
+        &format!("/api/runs/{name}/note"),
+        r#"{"note": ""}"#,
+    );
+    assert_eq!(resp.status, 200);
+    assert_eq!(listed_note(port), Value::Null);
+    assert!(!run_dir.join("note.txt").exists());
+
+    let resp = request_with_body(
+        port,
+        "POST",
+        "/api/runs/no_such_run/note",
+        r#"{"note":"x"}"#,
+    );
+    assert_eq!(resp.status, 404);
+    let resp = request_with_body(port, "POST", &format!("/api/runs/{name}/note"), "not json");
+    assert_eq!(resp.status, 400);
 
     std::fs::remove_dir_all(&root).ok();
 }

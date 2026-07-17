@@ -102,6 +102,9 @@ C00_06_INERTIA_RATIO_MAX = 12000
 C00_05_STIFFNESS_LEVEL_MIN = 1
 C00_05_STIFFNESS_LEVEL_MAX = 31
 
+SYNC_LOSS_COUNT_ADDR = "0x2013.0x05"
+SYNC_LOSS_THRESHOLD_ADDR = "0x2013.0x03"
+
 NOTCH_MODE_ADDR = "0x2001.0x31"
 NOTCH_READBACK: tuple[tuple[str, tuple[str, str, str]], ...] = (
     ("notch1", ("0x2001.0x41", "0x2001.0x42", "0x2001.0x43")),
@@ -165,6 +168,7 @@ DYNAMICS_METRIC_BY_TERM = {
     "MASS": "ferr_peak",
     "VISCOUS": "ferr_rms",
     "COULOMB": "ferr_peak",
+    "DIRECTION_SPLIT": "ferr_mean_direction_imbalance",
 }
 DYNAMICS_TERM_KEYS = {
     "MASS": "mass",
@@ -180,14 +184,24 @@ def parse_dynamics_profile(text: str) -> dict[str, Any]:
             "parsing dynamics profiles requires Python 3.11+ (tomllib)"
         )
     data = tomllib.loads(text)
-    if data.get("version") != 2:
+    if data.get("version") != 6:
         raise ValueError(
-            "dynamics profile version must be 2 (got %r) - refit with "
+            "dynamics profile version must be 6 (got %r) - refit with "
             "SERVO_FIT_DYNAMICS" % (data.get("version"),)
         )
+    for key in ("direction_split", "orientation"):
+        if key in data:
+            raise ValueError(
+                "profile %s is not a global field; direction split is only "
+                "defined by ordered [[pair]] records" % (key,)
+            )
     axes = data.get("axes")
     if not isinstance(axes, list) or not axes:
         raise ValueError("profile axes must be a non-empty list")
+    if any(not isinstance(axis, str) or not axis.strip() for axis in axes):
+        raise ValueError("profile axes must contain only non-empty strings")
+    if len(set(axes)) != len(axes):
+        raise ValueError("profile axes must be unique (got %s)" % (axes,))
     n_slots = len(axes)
     modes = data.get("modes")
     if not isinstance(modes, list) or not modes:
@@ -222,14 +236,93 @@ def parse_dynamics_profile(text: str) -> dict[str, Any]:
             raise ValueError(
                 "profile contains a non-numeric or non-finite value: %r" % (v,)
             )
+    axis_names = list(axes)
+    parsed_frame = [[float(v) for v in row] for row in frame]
+    pairs = _parse_dynamics_pairs(data, axis_names)
+    columns = [list(col) for col in zip(*parsed_frame)]
+    axis_index = {name: i for i, name in enumerate(axis_names)}
+    for pair in pairs:
+        first, second = (axis_index[name] for name in pair["slots"])
+        if not _equal_or_opposite_columns(columns[first], columns[second]):
+            raise ValueError(
+                "pair slots %s must have exact equal or opposite frame columns"
+                % (pair["slots"],)
+            )
     return {
-        "axes": [str(a) for a in axes],
+        "axes": axis_names,
         "modes": [str(m) for m in modes],
-        "frame": [[float(v) for v in row] for row in frame],
+        "frame": parsed_frame,
         "mass": [float(v) for v in data["mass"]],
         "viscous": [float(v) for v in data["viscous"]],
         "coulomb": [float(v) for v in data["coulomb"]],
+        "pairs": pairs,
     }
+
+
+def _parse_dynamics_pairs(
+    data: Mapping[str, Any], axis_names: list[str]
+) -> list[dict[str, Any]]:
+    raw = data.get("pair", [])
+    if not isinstance(raw, list):
+        raise ValueError("profile pair must be an array of tables")
+    axis_set = set(axis_names)
+    claimed: set[str] = set()
+    pairs: list[dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, Mapping):
+            raise ValueError("each pair must be a table")
+        if "orientation" in entry:
+            raise ValueError(
+                "pair orientation is not supported; slots order defines the sign"
+            )
+        slots = entry.get("slots")
+        if (
+            not isinstance(slots, list)
+            or len(slots) != 2
+            or not all(isinstance(s, str) for s in slots)
+        ):
+            raise ValueError(
+                "pair slots must be a list of two motor names (got %r)"
+                % (slots,)
+            )
+        first, second = slots
+        if first == second:
+            raise ValueError(
+                "pair slots must name two distinct motors (got %r)" % (slots,)
+            )
+        for name in slots:
+            if name not in axis_set:
+                raise ValueError(
+                    "pair slot %r is not among profile axes %s"
+                    % (name, axis_names)
+                )
+            if name in claimed:
+                raise ValueError(
+                    "motor %r appears in more than one pair" % (name,)
+                )
+        value = entry.get("direction_split")
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise ValueError(
+                "pair direction_split must be a finite number (got %r)"
+                % (value,)
+            )
+        if abs(value) >= 0.5:
+            raise ValueError(
+                "pair direction_split must satisfy abs(value) < 0.5 (got %r)"
+                % (value,)
+            )
+        claimed.update(slots)
+        pairs.append(
+            {
+                "slots": [str(first), str(second)],
+                "direction_split": float(value),
+            }
+        )
+    return pairs
 
 
 def _copy_dynamics(profile: dict[str, Any]) -> dict[str, Any]:
@@ -240,6 +333,13 @@ def _copy_dynamics(profile: dict[str, Any]) -> dict[str, Any]:
         "mass": list(profile["mass"]),
         "viscous": list(profile["viscous"]),
         "coulomb": list(profile["coulomb"]),
+        "pairs": [
+            {
+                "slots": list(pair["slots"]),
+                "direction_split": float(pair["direction_split"]),
+            }
+            for pair in profile.get("pairs", [])
+        ],
     }
 
 
@@ -267,6 +367,205 @@ def scale_dynamics_mode(
     return scaled
 
 
+def add_dynamics_direction_split(
+    profile: dict[str, Any], pair_index: int, delta: float
+) -> dict[str, Any]:
+    refined = _copy_dynamics(profile)
+    pair = refined["pairs"][pair_index]
+    value = pair["direction_split"] + delta
+    if not math.isfinite(value) or abs(value) >= 0.5:
+        raise ValueError(
+            "direction_split candidate must satisfy abs(value) < 0.5 "
+            "(got %r)" % (value,)
+        )
+    pair["direction_split"] = value
+    return refined
+
+
+def _frame_column_lambda(first: list[float], second: list[float]) -> int:
+    if len(first) != len(second) or not any(value != 0.0 for value in first):
+        raise ValueError("frame columns must be nonzero and equal length")
+    if all(a == b for a, b in zip(first, second)):
+        return 1
+    if all(b == -a for a, b in zip(first, second)):
+        return -1
+    raise ValueError("frame columns are not exactly equal or opposite")
+
+
+def _equal_or_opposite_columns(a: list[float], b: list[float]) -> bool:
+    try:
+        _frame_column_lambda(a, b)
+    except ValueError:
+        return False
+    return True
+
+
+def _direction_split_lambda(profile: dict[str, Any], slots: list[str]) -> int:
+    axis_index = {name: i for i, name in enumerate(profile["axes"])}
+    try:
+        first_index, second_index = (axis_index[name] for name in slots)
+    except (KeyError, ValueError) as e:
+        raise ValueError(
+            "direction-split pair must name two profile slots (got %r)"
+            % (slots,)
+        ) from e
+    columns = [list(column) for column in zip(*profile["frame"])]
+    try:
+        return _frame_column_lambda(columns[first_index], columns[second_index])
+    except ValueError as e:
+        raise ValueError(
+            "direction-split pair %s has invalid frame columns: %s" % (slots, e)
+        ) from e
+
+
+def _direction_split_moves(
+    step_name: str, drive_name: str, step_drives: Mapping[str, Any]
+) -> dict[Any, Mapping[str, Any]]:
+    if drive_name not in step_drives:
+        raise ValueError(
+            "step %s is missing direction-split drive %s"
+            % (step_name, drive_name)
+        )
+    moves = (step_drives[drive_name].get("metrics") or {}).get("moves") or []
+    indexed = {}
+    for move in moves:
+        if not isinstance(move, Mapping):
+            raise ValueError(
+                "step %s drive %s has a malformed move entry %r"
+                % (step_name, drive_name, move)
+            )
+        window = []
+        for window_key in ("start_ms", "end_ms"):
+            value = move.get(window_key)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+            ):
+                raise ValueError(
+                    "step %s drive %s move %r has invalid %s %r"
+                    % (
+                        step_name,
+                        drive_name,
+                        move.get("move"),
+                        window_key,
+                        value,
+                    )
+                )
+            window.append(value)
+        window = tuple(window)
+        if window in indexed:
+            raise ValueError(
+                "step %s drive %s repeats move window %r"
+                % (step_name, drive_name, window)
+            )
+        indexed[window] = move
+    return indexed
+
+
+def direction_split_candidate_metrics(
+    profile: dict[str, Any], step: Mapping[str, Any], slots: list[str]
+) -> dict[str, float]:
+    if len(slots) != 2:
+        raise ValueError(
+            "direction-split scoring requires two slots (got %r)" % (slots,)
+        )
+    step_name = str(step.get("name", "<unnamed>"))
+    pair_lambda = _direction_split_lambda(profile, slots)
+    step_drives = step.get("drives") or {}
+    first_moves = _direction_split_moves(step_name, slots[0], step_drives)
+    second_moves = _direction_split_moves(step_name, slots[1], step_drives)
+    shared_windows = sorted(first_moves.keys() & second_moves.keys())
+    directional_q: dict[int, list[float]] = {1: [], -1: []}
+    for window in shared_windows:
+        first = first_moves[window]
+        second = second_moves[window]
+        first_direction = first.get("direction")
+        second_direction = second.get("direction")
+        if first_direction not in (-1, 1):
+            raise ValueError(
+                "step %s drive %s move window %r has nonmoving direction %r"
+                % (step_name, slots[0], window, first_direction)
+            )
+        if second_direction not in (-1, 1):
+            raise ValueError(
+                "step %s drive %s move window %r has nonmoving direction %r"
+                % (step_name, slots[1], window, second_direction)
+            )
+        expected_direction = pair_lambda * first_direction
+        if second_direction != expected_direction:
+            raise ValueError(
+                "step %s pair %s move window %r directions do not match lambda %d: "
+                "%r vs %r"
+                % (
+                    step_name,
+                    slots,
+                    window,
+                    pair_lambda,
+                    first_direction,
+                    second_direction,
+                )
+            )
+        for drive_name, move in zip(slots, (first, second)):
+            value = move.get("ferr_mean_moving")
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+            ):
+                raise ValueError(
+                    "step %s drive %s move window %r has invalid "
+                    "ferr_mean_moving %r"
+                    % (step_name, drive_name, window, value)
+                )
+        q = first["ferr_mean_moving"] - pair_lambda * second["ferr_mean_moving"]
+        directional_q[first_direction].append(q)
+    missing = [direction for direction, q in directional_q.items() if not q]
+    if missing:
+        raise ValueError(
+            "step %s pair %s needs moves in both first-drive directions; "
+            "missing %s" % (step_name, slots, missing)
+        )
+    q_plus = sum(directional_q[1]) / len(directional_q[1])
+    q_minus = sum(directional_q[-1]) / len(directional_q[-1])
+    return {
+        "q_plus": q_plus,
+        "q_minus": q_minus,
+        "ferr_mean_direction_imbalance": abs(q_plus + q_minus) / 2.0,
+    }
+
+
+def discover_dynamics_pairs(profile: dict[str, Any]) -> list[dict[str, Any]]:
+    columns = [list(col) for col in zip(*profile["frame"])]
+    remaining = set(range(len(columns)))
+    pairs = []
+    for first in range(len(columns)):
+        if first not in remaining:
+            continue
+        if not any(value != 0.0 for value in columns[first]):
+            continue
+        group = [
+            i
+            for i in sorted(remaining)
+            if _equal_or_opposite_columns(columns[first], columns[i])
+        ]
+        if len(group) > 2:
+            names = [profile["axes"][i] for i in group]
+            raise ValueError(
+                "ambiguous equal/opposite frame column group %s; expected "
+                "exactly two slots per pair" % (names,)
+            )
+        if len(group) == 2:
+            remaining.difference_update(group)
+            pairs.append(
+                {
+                    "slots": [profile["axes"][i] for i in group],
+                    "direction_split": 0.0,
+                }
+            )
+    return pairs
+
+
 def render_dynamics_toml(
     profile: dict[str, Any],
     source: str,
@@ -283,7 +582,7 @@ def render_dynamics_toml(
         return "[%s]" % (", ".join(num(v) for v in values),)
 
     lines = [
-        "version = 2",
+        "version = 6",
         "axes = %s" % (json.dumps(profile["axes"]),),
         "modes = %s" % (json.dumps(profile["modes"]),),
         "frame = [%s]" % (", ".join(vec(row) for row in profile["frame"]),),
@@ -293,12 +592,26 @@ def render_dynamics_toml(
         "refined_source = %s" % (json.dumps(source),),
         "refined_term = %s" % (json.dumps(term.lower()),),
     ]
+    provenance_key = (
+        "refined_delta" if term == "DIRECTION_SPLIT" else "refined_scale"
+    )
     for suffix, scale in sorted(scales.items()):
         lines.append(
-            "refined_scale%s = %s"
-            % ("_%s" % (suffix,) if suffix else "", num(scale))
+            "%s%s = %s"
+            % (
+                provenance_key,
+                "_%s" % (suffix,) if suffix else "",
+                num(scale),
+            )
         )
     lines.append("refined_run = %s" % (json.dumps(run_dir),))
+    for pair in profile.get("pairs", []):
+        lines += [
+            "",
+            "[[pair]]",
+            "slots = %s" % (json.dumps(pair["slots"]),),
+            "direction_split = %s" % (num(pair["direction_split"]),),
+        ]
     return "\n".join(lines) + "\n"
 
 
@@ -319,8 +632,8 @@ def golden_section_search(
     measured best probe (argmin over the cache), not the bracket midpoint -
     under measurement noise the point actually measured best is the only
     defensible pick."""
-    if not 0.0 < lo < hi:
-        raise ValueError("bracket must satisfy 0 < LO < HI")
+    if not math.isfinite(lo) or not math.isfinite(hi) or not lo < hi:
+        raise ValueError("bracket must satisfy finite LO < HI")
     if tol <= 0.0:
         raise ValueError("TOL must be > 0")
     if max_evals < 3:
@@ -648,6 +961,7 @@ class DynamicsModelAdapter:
         scale_fn: Callable[[dict[str, Any], float], dict[str, Any]],
         label: str,
         tag: str,
+        value_name: str = "scale",
     ):
         self._engine = engine
         self._handle = handle
@@ -655,6 +969,7 @@ class DynamicsModelAdapter:
         self._scale_fn = scale_fn
         self.label = label
         self.tag = tag
+        self.value_name = value_name
         self.applied = False
 
     def step_name(self, scale: float) -> str:
@@ -663,9 +978,10 @@ class DynamicsModelAdapter:
     def describe(
         self, i: int, scale: float, total: int, servos: list[str]
     ) -> str:
-        return "dynamics %s eval %d: scale %.4f on %s" % (
+        return "dynamics %s eval %d: %s %.4f on %s" % (
             self.label,
             i + 1,
+            self.value_name,
             scale,
             ", ".join(servos),
         )
@@ -676,18 +992,27 @@ class DynamicsModelAdapter:
     def apply(self, scale: float) -> ApplyResult:
         self._send(self.scaled(scale))
         self.applied = True
-        return {"scale": scale}, []
+        return {self.value_name: scale}, []
 
     def revert(self) -> None:
         self._send(self.baseline)
 
     def _send(self, profile: dict[str, Any]) -> None:
+        axis_index = {name: i for i, name in enumerate(profile["axes"])}
+        pair_slots: list[int] = []
+        direction_split: list[float] = []
+        for pair in profile.get("pairs", []):
+            first, second = pair["slots"]
+            pair_slots += [axis_index[first], axis_index[second]]
+            direction_split.append(float(pair["direction_split"]))
         self._engine.set_dynamics_model(
             self._handle,
             [float(f) for row in profile["frame"] for f in row],
             [float(v) for v in profile["mass"]],
             [float(v) for v in profile["viscous"]],
             [float(v) for v in profile["coulomb"]],
+            pair_slots,
+            direction_split,
         )
 
 
@@ -1027,10 +1352,13 @@ class ServoCalibration:
         self.dynamics_dir = os.path.expanduser(DEFAULT_DYNAMICS_DIR)
         self.servo_cal_binary = config.get(
             "servo_cal_binary",
-            os.path.join(REPO_ROOT, "rust", "target", "release", "servo-cal"),
+            os.path.join(REPO_ROOT, "rust", "target", "snapshot", "servo-cal"),
         )
         self.journal_params = self._parse_journal_params(config)
         self._active_run: ExperimentRun | None = None
+        self._capture_sync_loss: (
+            tuple[str, list[str], dict[str, int]] | None
+        ) = None
         self._last_sweep_run: ExperimentRun | None = None
         self._last_sweep_results: dict[str, Any] | None = None
         self._engine = SweepEngine(self)
@@ -1038,7 +1366,6 @@ class ServoCalibration:
             "SERVO_MEASURE_TRACKING",
             "SERVO_MEASURE_DIFFERENTIAL",
             "SERVO_DIFF_DAMPER",
-            "SERVO_DIFF_TRIM",
             "SERVO_MEASURE_STRAIN_MAP",
             "SERVO_MEASURE_STRAIN_RESPONSE",
             "SERVO_STRAIN_COMP_TUNE",
@@ -1220,7 +1547,7 @@ class ServoCalibration:
         if not os.path.exists(self.servo_cal_binary):
             raise gcmd.error(
                 "servo-cal binary not found at %s - build it with: "
-                "cargo build --release -p servo-ident"
+                "cargo build --profile snapshot -p servo-ident"
                 % (self.servo_cal_binary,)
             )
         return self.servo_cal_binary
@@ -1235,9 +1562,14 @@ class ServoCalibration:
                 "failed to read results.json from %s: %s" % (run_dir, e)
             )
 
-    def _run_analyze(self, gcmd: Any, run: ExperimentRun) -> dict[str, Any]:
+    def _run_analyze(
+        self, gcmd: Any, run: ExperimentRun, incremental: bool = False
+    ) -> dict[str, Any]:
         binary = self._servo_cal(gcmd)
-        self._run(gcmd, [binary, "analyze", run.run_dir], 120.0)
+        argv = [binary, "analyze", run.run_dir]
+        if incremental:
+            argv.append("--incremental")
+        self._run(gcmd, argv, 120.0)
         return self._read_results(gcmd, run.run_dir)
 
     def _analyze_and_report(
@@ -1285,18 +1617,22 @@ class ServoCalibration:
         )
 
     def _step_metric_mean(
-        self, gcmd: Any, results: dict[str, Any], step_name: str, metric: str
+        self,
+        gcmd: Any,
+        results: dict[str, Any],
+        step_name: str,
+        metric: str,
     ) -> float:
-        """Mean of one per-move metric over every drive and move of the
-        named step - the refinement objective, so mean (not max): lower
-        variance under stroke noise, and constant per-drive offsets do not
-        move the argmin."""
+        """Mean of one per-move metric over the named step's drives - the
+        refinement objective, so mean (not max): lower variance under stroke
+        noise, and constant per-drive offsets do not move the argmin."""
         for step in results.get("steps") or []:
             if step.get("name") != step_name:
                 continue
+            step_drives = step.get("drives") or {}
             values = [
                 move[metric]
-                for drive in (step.get("drives") or {}).values()
+                for drive in step_drives.values()
                 for move in (drive.get("metrics") or {}).get("moves") or []
                 if metric in move
             ]
@@ -1524,12 +1860,66 @@ class ServoCalibration:
             raise self.printer.command_error(
                 "servo capture requested without an active experiment run"
             )
+        self._capture_sync_loss = (
+            name,
+            list(servos),
+            self._sync_loss_counts(servos),
+        )
         self._servo_capture().start_capture_to(
             self._active_run.step_scap(name), servos
         )
 
     def _stop_capture(self) -> None:
         self._servo_capture().stop_capture()
+        self._check_sync_loss()
+
+    def _sync_loss_counts(self, servos: list[str]) -> dict[str, int]:
+        """C13.04 per drive - the drive's own EtherCAT sync loss counter.
+        The drive silently tolerates up to C13.02 (default 8) consecutive
+        lost/late sync events before faulting, so this counter is the only
+        way to see the tolerated ones. A failed read aborts the command
+        (not the printer): the counter is diagnostics, and a CoE abort here
+        means the drive does not expose it where expected."""
+        counts = {}
+        for servo in servos:
+            try:
+                counts[servo] = self._read_param(servo, SYNC_LOSS_COUNT_ADDR)
+            except Exception as e:
+                raise self.printer.command_error(
+                    "reading EtherCAT sync loss counter C13.04 (%s) failed "
+                    "for %s: %s" % (SYNC_LOSS_COUNT_ADDR, servo, e)
+                )
+        return counts
+
+    def _check_sync_loss(self) -> None:
+        if self._capture_sync_loss is None:
+            return
+        name, servos, before = self._capture_sync_loss
+        self._capture_sync_loss = None
+        after = self._sync_loss_counts(servos)
+        deltas = {
+            servo: (after[servo] - before[servo]) & 0xFFFF for servo in servos
+        }
+        hits = {servo: d for servo, d in deltas.items() if d}
+        if not hits:
+            return
+        detail = ", ".join(
+            "%s +%d" % (servo, d) for servo, d in sorted(hits.items())
+        )
+        self.gcode.respond_info(
+            "WARNING step %s: EtherCAT sync loss count (C13.04) incremented "
+            "during the capture: %s. The drive tolerated lost/late sync "
+            "cycles without faulting (it only faults after C13.02 "
+            "consecutive losses) - this step's tracking metrics are "
+            "contaminated." % (name, detail)
+        )
+        structured_log.event(
+            "calibration",
+            "sync_loss",
+            step=name,
+            drives=detail,
+            total=sum(hits.values()),
+        )
 
     def _accel_chip(self, gcmd: Any) -> tuple[Any, str | None]:
         chip_name = gcmd.get("ACCEL_CHIP", self.accel_chip_name)
@@ -1561,7 +1951,10 @@ class ServoCalibration:
         label = os.path.basename(argv[0])
         try:
             proc = subprocess.Popen(
-                argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                preexec_fn=lambda: os.nice(10),
             )
         except Exception:
             logging.exception("servo_calibration: failed to launch %s", label)
@@ -1695,25 +2088,9 @@ class ServoCalibration:
     )
 
     def _belt_pair(self, gcmd, belt, cmd_name):
-        layout = servo_strokes.corexy_fit_layout(gcmd, self._kin())
-        if layout["pairs"] is None:
-            raise gcmd.error(
-                "%s needs two drives per belt "
-                "(AWD); this printer has one drive per belt" % (cmd_name,)
-            )
-        pair_names = layout["pairs"].split(";")["AB".index(belt)].split(",")
-        motors = [self._resolve_motor(name) for name in pair_names]
-        node = self.printer.lookup_object(
-            "ethercat_node " + motors[0].get_node_name()
+        return servo_strokes.belt_pair(
+            self.printer, gcmd, self._kin(), belt, cmd_name
         )
-        handle = node.get_engine_handle()
-        if handle is None:
-            raise gcmd.error(
-                "belt %s drives have no live EtherCAT engine handle "
-                "(node not claimed)" % (belt,)
-            )
-        slots = [node.get_slot_for_motor(m.get_motor_name()) for m in motors]
-        return pair_names, motors, handle, slots
 
     def cmd_SERVO_MEASURE_DIFFERENTIAL(self, gcmd):
         belt = gcmd.get("BELT", "A").upper()
@@ -1866,58 +2243,6 @@ class ServoCalibration:
                 )
             else:
                 gcmd.respond_info("belt %s damper disarmed" % (belt,))
-
-    MAX_TRIM_GAIN = 2.0
-    MAX_TRIM_CLAMP_UM = 500.0
-    cmd_SERVO_DIFF_TRIM_help = (
-        "Arm or disarm the differential belt-pair trim: the engine "
-        "integrates each pair's low-passed differential torque into a "
-        "small antisymmetric position offset, continuously nulling the "
-        "static fight (homing preload, thermal drift) during motion - the "
-        "always-on version of SERVO_SYNC. Loop bandwidth is a few Hz, far "
-        "below the belt resonances. GAIN is in mm/s of offset slew per 1% "
-        "differential torque; GAIN=0 disarms. CLAMP_UM bounds the offset "
-        "(hitting it logs a warning). Params BELT=A|B|AB GAIN CLAMP_UM "
-        "LPF_HZ"
-    )
-
-    def cmd_SERVO_DIFF_TRIM(self, gcmd):
-        belts = gcmd.get("BELT", "AB").upper()
-        if belts not in ("A", "B", "AB"):
-            raise gcmd.error("BELT must be A, B or AB (got %r)" % (belts,))
-        gain = gcmd.get_float("GAIN", minval=0.0, maxval=self.MAX_TRIM_GAIN)
-        clamp_um = gcmd.get_float(
-            "CLAMP_UM", 150.0, above=0.0, maxval=self.MAX_TRIM_CLAMP_UM
-        )
-        lpf_hz = gcmd.get_float("LPF_HZ", 25.0, above=0.0)
-        engine = self.printer.lookup_object("motion_engine")
-        for belt in belts:
-            pair_names, _motors, handle, slots = self._belt_pair(
-                gcmd, belt, "SERVO_DIFF_TRIM"
-            )
-            engine.set_diff_trim(
-                handle,
-                slots[0],
-                slots[1],
-                int(round(gain * 1e6)),
-                int(round(clamp_um)),
-                int(round(lpf_hz * 1000.0)),
-            )
-            if gain > 0.0:
-                gcmd.respond_info(
-                    "belt %s trim armed (%s vs %s): gain %.3f (mm/s)/%%, "
-                    "clamp %.0f um, lpf %.1f Hz"
-                    % (
-                        belt,
-                        pair_names[0],
-                        pair_names[1],
-                        gain,
-                        clamp_um,
-                        lpf_hz,
-                    )
-                )
-            else:
-                gcmd.respond_info("belt %s trim disarmed" % (belt,))
 
     STRAIN_MAP_MIN_LINE_SPACING_MM = servo_strain_comp.MIN_LINE_SPACING_MM
 
@@ -2161,15 +2486,21 @@ class ServoCalibration:
         "Converge the strain map's stiffness matrix against reality: "
         "rebuild the FULL map from RUN=<baseline raster> at the trial "
         "matrix (starting from the probe's values or "
-        "STIFFNESS_A/B+CROSS_AB/BA), enable it, sweep ONE verification "
-        "line, and scale each belt's matrix row by the fraction of the "
-        "intended correction the line actually shows — repeat until the "
-        "line reads flat (|1-rho| <= TOL). Each iteration costs one line "
-        "sweep, not a raster, and the converged map is already on disk "
-        "and enabled — it is the same full-bed map that was being "
-        "verified. Fails loudly if MAX_ITERS passes don't converge. "
-        "CoreXY only, needs [servo_strain_comp] and [servo_sync]. Params "
-        "RUN (required) SPACING TOL (0.05) MAX_ITERS (5) Y (map zero) "
+        "STIFFNESS_A/B+CROSS_AB/BA), enable it, sweep an X and a Y "
+        "verification line, and refit every belt's direct AND cross "
+        "stiffness from the measured response to the applied offsets - "
+        "the two sweeps swap the belts' roles, so all four matrix "
+        "elements are measured independently. Repeat until the measured "
+        "matrix reproduces the applied one (per element, within TOL of "
+        "the row's direct stiffness). Each iteration costs two line "
+        "sweeps, not a raster, and the converged map is already on disk "
+        "and enabled - it is the same full-bed map that was being "
+        "verified. The residuals cover only the smooth elastic field: "
+        "direction-dependent friction asymmetry and short-wavelength "
+        "ripple are invisible to a position-keyed map. Fails loudly if "
+        "MAX_ITERS passes don't converge. CoreXY only, needs "
+        "[servo_strain_comp] and [servo_sync]. Params RUN (required) "
+        "SPACING TOL (0.05) MAX_ITERS (5) Y (map zero) X (map zero) "
         "SPEED (50) ACCEL (1000) SETTLE (0.8) DWELL_MS TAG SYNC"
     )
 
@@ -2201,12 +2532,18 @@ class ServoCalibration:
         tuner = comp.begin_tune(gcmd, gcmd.get("RUN"), spacing)
         x_start = tuner.plan["x_start"]
         x_end = tuner.plan["x_end"]
+        y_start = tuner.plan["y_start"]
+        y_end = tuner.plan["y_end"]
         zero_xy = tuner.plan["zero_xy"]
         line_y = gcmd.get_float("Y", zero_xy[1])
+        line_x = gcmd.get_float("X", zero_xy[0])
         stroke_plan = {
             "x_start": x_start,
             "x_end": x_end,
+            "y_start": y_start,
+            "y_end": y_end,
             "y": line_y,
+            "x": line_x,
             "speed": speed,
             "accel": accel,
             "tol": tol,
@@ -2238,44 +2575,67 @@ class ServoCalibration:
         results = None
         try:
             self._prep("X", dwell)
+            self._prep("Y", dwell)
             for iteration in range(max_iters):
                 tuner.rebuild_and_enable(gcmd)
                 reactor.pause(
                     reactor.monotonic() + settle + tuner.enable_ramp_s()
                 )
+                name_x = "iter%d_x" % iteration
                 self._goto_xy(x_start, line_y, dwell)
-                name = "iter%d" % iteration
-                self._start_capture(name, servos)
+                self._start_capture(name_x, servos)
                 self._strokes("X", x_start, x_end, speed, accel, 1, dwell)
                 self._stop_capture()
-                results = tuner.score_line(gcmd, run.run_dir, name, line_y)
+                name_y = "iter%d_y" % iteration
+                self._goto_xy(line_x, y_start, dwell)
+                self._start_capture(name_y, servos)
+                self._strokes("Y", y_start, y_end, speed, accel, 1, dwell)
+                self._stop_capture()
+                results = tuner.score_lines(
+                    gcmd,
+                    run.run_dir,
+                    [(name_x, "y", line_y), (name_y, "x", line_x)],
+                )
                 (kaa, kab), (kba, kbb) = tuner.matrix_rows()
                 swept = {
                     "y": line_y,
+                    "x": line_x,
                     "kaa": kaa,
                     "kab": kab,
                     "kba": kba,
                     "kbb": kbb,
                 }
                 for belt_idx, result in enumerate(results):
-                    swept["rho_%s" % "ab"[belt_idx]] = result["rho"]
-                    swept["rms_%s" % "ab"[belt_idx]] = result["rms"]
-                run.record_step(SweepStep(name, swept, []))
+                    belt = "ab"[belt_idx]
+                    swept["s_own_%s" % belt] = result["s_own"]
+                    swept["s_cross_%s" % belt] = result["s_cross"]
+                    for axis, (rms, base) in result["lines"].items():
+                        swept["rms_%s_%s" % (belt, axis)] = rms
+                        swept["base_rms_%s_%s" % (belt, axis)] = base
+                run.record_step(SweepStep("iter%d" % iteration, swept, []))
                 for belt_idx, result in enumerate(results):
+                    k_own = tuner.k_matrix[belt_idx][belt_idx]
+                    k_cross = tuner.k_matrix[belt_idx][1 - belt_idx]
+                    lines = ", ".join(
+                        "%s-line residual %.2f%% rms (smooth field was "
+                        "%.2f%%)" % (axis.upper(), rms, base)
+                        for axis, (rms, base) in sorted(result["lines"].items())
+                    )
                     gcmd.respond_info(
-                        "tune %d/%d belt %s: achieved %.0f%% of intended "
-                        "correction, line residual %.2f%% rms "
-                        "(uncompensated %.2f%%)"
+                        "tune %d/%d belt %s: measured direct %.1f (map "
+                        "used %.1f), cross %.1f (map used %.1f) %%/mm; %s"
                         % (
                             iteration + 1,
                             max_iters,
                             "AB"[belt_idx],
-                            result["rho"] * 100.0,
-                            result["rms"],
-                            result["base_rms"],
+                            result["s_own"],
+                            k_own,
+                            result["s_cross"],
+                            k_cross,
+                            lines,
                         )
                     )
-                if all(abs(r["rho"] - 1.0) <= tol for r in results):
+                if tuner.converged(results, tol):
                     converged = True
                     break
                 tuner.apply(results)
@@ -2284,12 +2644,13 @@ class ServoCalibration:
             self._active_run = None
         if not converged:
             raise gcmd.error(
-                "did not converge within %d iterations — last rho %s; the "
-                "map from the final pass is still enabled"
+                "did not converge within %d iterations — last measured %s; "
+                "the map from the final pass is still enabled"
                 % (
                     max_iters,
                     ", ".join(
-                        "belt %s %.2f" % ("AB"[i], r["rho"])
+                        "belt %s direct %.1f cross %.1f"
+                        % ("AB"[i], r["s_own"], r["s_cross"])
                         for i, r in enumerate(results)
                     ),
                 )
@@ -2298,9 +2659,14 @@ class ServoCalibration:
         (kaa, kab), (kba, kbb) = tuner.matrix_rows()
         gcmd.respond_info(
             "converged: stiffness A %.1f B %.1f, cross AB %.1f BA %.1f "
-            "%%/mm — full-bed map rebuilt with these values, written and "
-            "ENABLED; the matrix is stored for future builds"
-            % (kaa, kbb, kab, kba)
+            "%%/mm - all four measured independently on the X and Y "
+            "verification lines. Full-bed map rebuilt, written and "
+            "ENABLED; the matrix is stored for future builds. The "
+            "residuals above only cover the smooth elastic field: "
+            "direction-dependent friction asymmetry and sub-%.0fmm ripple "
+            "are invisible to a position-keyed map and remain in raw "
+            "measurements."
+            % (kaa, kbb, kab, kba, servo_strain_comp.FIELD_2D_PITCH_MM)
         )
 
     cmd_SERVO_MEASURE_INERTIA_help = (
@@ -2674,6 +3040,10 @@ class ServoCalibration:
                 "C01.16 torque FF source / C01.17 pct / C01.18 filter:",
                 ["0x2001.0x17", "0x2001.0x18", "0x2001.0x19"],
             ),
+            (
+                "C13.02 sync loss fault threshold / C13.04 sync loss count:",
+                [SYNC_LOSS_THRESHOLD_ADDR, SYNC_LOSS_COUNT_ADDR],
+            ),
         ]
         script = ['RESPOND MSG="=== %s ==="' % (servo,)]
         for msg, addrs in reads:
@@ -2740,18 +3110,18 @@ class ServoCalibration:
         "drives into a run directory, then servo-cal analyzes it into "
         "results.json with a typed verdict (the recommended step). "
         "With an accelerometer (accel_chip config option or ACCEL_CHIP=) "
-        "each step also records vibration data next to its capture. Reverts "
-        "to REVERT_GAIN afterwards (0.1 Hz units, default the lowest "
-        "SPEED_GAINS entry) - pass it to test one gain and land on a known "
-        "safe one. APPLY=1 writes the verdict's "
-        "recommended gains after the revert, reads them back, and runs one "
+        "each step also records vibration data next to its capture. Always "
+        "restores the gains that were active before the sweep (also on "
+        "failure). APPLY=1 writes the verdict's "
+        "recommended gains after the restore, reads them back, and runs one "
         "SERVO_MEASURE_TRACKING to report before/after tracking metrics "
         "(default APPLY=0, report-only). SERVO= (comma list) restricts the "
         "sweep to a subset of the axis servos; BASE_SPEED_GAIN then pins "
         "every non-swept axis servo at that gain (same 1.6x/Ti derivation) "
-        "for an asymmetric-gain experiment. Params SPEED_GAINS AXIS START "
+        "for an asymmetric-gain experiment; those servos are restored too. "
+        "Params SPEED_GAINS AXIS START "
         "END SPEED ACCEL ITERATIONS DWELL_MS TAG ACCEL_CHIP APPLY SERVO "
-        "BASE_SPEED_GAIN REVERT_GAIN"
+        "BASE_SPEED_GAIN"
     )
 
     def cmd_SERVO_CALIBRATE_GAINS(self, gcmd: Any) -> list[SweepStep]:
@@ -2772,11 +3142,11 @@ class ServoCalibration:
                     % (sg, SPEED_GAIN_MIN, SPEED_GAIN_MAX)
                 )
         sgains = [int(sg) for sg in sgains]
-        revert_gain = gcmd.get_int("REVERT_GAIN", sgains[0])
-        if not SPEED_GAIN_MIN <= revert_gain <= SPEED_GAIN_MAX:
+        if gcmd.get("REVERT_GAIN", None) is not None:
             raise gcmd.error(
-                "REVERT_GAIN %d outside %d..%d (0.1 Hz units)"
-                % (revert_gain, SPEED_GAIN_MIN, SPEED_GAIN_MAX)
+                "REVERT_GAIN was removed - the sweep always restores the "
+                "gains that were active before it ran; keep a result with "
+                "APPLY=1 or SERVO_APPLY_GAINS"
             )
         base_sg = gcmd.get("BASE_SPEED_GAIN", None)
         base_servos: list[str] = []
@@ -2797,6 +3167,13 @@ class ServoCalibration:
                 )
         apply = gcmd.get_int("APPLY", 0)
         chip, chip_name = self._accel_chip(gcmd)
+        affected = list(dict.fromkeys(servos + base_servos))
+        prior = {s: self._read_gains(s) for s in affected}
+
+        def restore_prior() -> None:
+            for s, g in prior.items():
+                self._write_gains([s], g["position"], g["speed"], g["integral"])
+
         stroke_plan = {
             "start": start,
             "end": end,
@@ -2815,8 +3192,15 @@ class ServoCalibration:
             self._corexy_rails(gcmd, axis),
         )
         adapter = GainSetAdapter(self, servos, tag)
+        restored = False
         try:
             self._prep(axis, dwell)
+            servo_strokes.goto(
+                self.gcode,
+                self.travel_speed,
+                "%s%.3f" % (axis, start),
+                dwell,
+            )
             self._set_manual_tuning(servos)
             if base_servos:
                 base_pos, base_integral = GainSetAdapter.derive(base_sg)
@@ -2851,16 +3235,19 @@ class ServoCalibration:
                 accel_chip_name=chip_name,
             )
             gcmd.respond_info(
-                "sweep done - reverting to speed gain %.1f Hz until you "
-                "apply the recommendation" % (revert_gain / 10.0,)
+                "sweep done - restoring the pre-sweep gains until you "
+                "apply the recommendation"
             )
-            adapter.revert(revert_gain)
+            restore_prior()
+            restored = True
             self._restore()
             results = self._analyze_and_report(gcmd, run)
             self._last_sweep_run, self._last_sweep_results = run, results
             if apply:
                 self._apply_verdict(gcmd, run, results, axis)
         finally:
+            if not restored:
+                restore_prior()
             self._active_run = None
         return steps
 
@@ -2960,21 +3347,28 @@ class ServoCalibration:
         )
 
     cmd_SERVO_GAIN_LADDER_help = (
-        "Speed-gain sweep that climbs until analysis flags trouble instead of "
-        "a fixed list. Runs [SAFE, START, START+STEP, ... <= MAX] with the "
-        "SERVO_CALIBRATE_GAINS machinery (position/integral derived from the "
-        "speed gain). After every rung at or above START, servo-cal analyzes "
+        "Gain sweep that climbs until analysis flags trouble instead of "
+        "a fixed list. Runs [SAFE, START, START+STEP, ... <= MAX]. Without "
+        "PARAM it climbs the speed gain with position/integral derived from "
+        "it (1.6x / Ti); with PARAM=position|speed|integral it climbs that "
+        "one gain in its device units, holding the other two at their "
+        "pre-ladder values (the drives must agree on the current gains). "
+        "After every rung at or above START, servo-cal analyzes "
         "the run so far; the first rung whose step carries a resonance, "
         "torque-rail or truncated-settle flag stops the climb (higher rungs "
-        "are never executed). The SAFE baseline never stops the climb and is "
-        "applied at the end. Prints the verdict one-liner and, on an early "
+        "are never executed). The SAFE baseline never stops the climb. "
+        "Always restores the pre-ladder gains at the end (also on failure) "
+        "- keep a rung with SERVO_APPLY_GAINS. Prints the verdict one-liner "
+        "and, on an early "
         "stop, the rung and flags that stopped it. START names the first "
-        "climb gain, not a stroke bound - the stroke window comes from the "
-        "configured axis bounds. Params SAFE START STEP (50) MAX AXIS (X) "
-        "SPEED ACCEL ITERATIONS DWELL_MS TAG (ladder) SERVO"
+        "climb value, not a stroke bound - the stroke window comes from the "
+        "configured axis bounds. Params SAFE START STEP (50) MAX PARAM "
+        "AXIS (X) SPEED ACCEL ITERATIONS DWELL_MS TAG (ladder) SERVO"
     )
 
-    def _ladder_values(self, gcmd: Any) -> tuple[int, list[int]]:
+    def _ladder_values(
+        self, gcmd: Any, param: str | None
+    ) -> tuple[int, list[int]]:
         safe_g = gcmd.get_int("SAFE")
         start_g = gcmd.get_int("START")
         step_g = gcmd.get_int("STEP", 50)
@@ -2986,22 +3380,56 @@ class ServoCalibration:
                 "MAX (%d) must be >= START (%d)" % (max_g, start_g)
             )
         values = [safe_g] + list(range(start_g, max_g + 1, step_g))
-        for sg in values:
-            if not SPEED_GAIN_MIN <= sg <= SPEED_GAIN_MAX:
-                raise gcmd.error(
-                    "speed gain %d outside %d..%d (0.1 Hz units)"
-                    % (sg, SPEED_GAIN_MIN, SPEED_GAIN_MAX)
-                )
+        if param is None:
+            for sg in values:
+                if not SPEED_GAIN_MIN <= sg <= SPEED_GAIN_MAX:
+                    raise gcmd.error(
+                        "speed gain %d outside %d..%d (0.1 Hz units)"
+                        % (sg, SPEED_GAIN_MIN, SPEED_GAIN_MAX)
+                    )
+            return start_g, values
+        try:
+            validate_gain_values(values, param)
+        except ValueError as e:
+            raise gcmd.error("SERVO_GAIN_LADDER: %s" % (e,))
         return start_g, values
 
     def cmd_SERVO_GAIN_LADDER(self, gcmd: Any) -> list[SweepStep]:
         axis = gcmd.get("AXIS", "X").upper()
         servos = self._servos(gcmd, axis)
-        start_g, values = self._ladder_values(gcmd)
-        safe_g = values[0]
+        param = gcmd.get("PARAM", None)
+        if param is not None:
+            param = param.lower()
+            if param not in GAIN_PARAMS:
+                raise gcmd.error(
+                    "PARAM must be position, speed or integral (got %r)"
+                    % (gcmd.get("PARAM"),)
+                )
+        start_g, values = self._ladder_values(gcmd, param)
         start, end = self._config_bounds(gcmd, axis)
         speed, accel, iterations, dwell = self._stroke_motion(gcmd)
         tag = gcmd.get("TAG", "ladder")
+        prior = {s: self._read_gains(s) for s in servos}
+        if param is not None:
+            first = prior[servos[0]]
+            for s, g in prior.items():
+                if g != first:
+                    raise gcmd.error(
+                        "servos disagree on the current gains (%s=%s vs "
+                        "%s=%s) - a single-parameter ladder holds the other "
+                        "two at one shared value; align the drives first "
+                        "(SERVO_APPLY_GAINS)" % (servos[0], first, s, g)
+                    )
+            adapter: Any = SingleGainAdapter(
+                self, servos, param, tag, dict(first), first[param]
+            )
+        else:
+            adapter = GainSetAdapter(self, servos, tag)
+
+        def restore_prior() -> None:
+            for s, g in prior.items():
+                self._write_gains([s], g["position"], g["speed"], g["integral"])
+
         stroke_plan = {
             "start": start,
             "end": end,
@@ -3019,9 +3447,9 @@ class ServoCalibration:
             stroke_plan,
             self._corexy_rails(gcmd, axis),
         )
-        adapter = GainSetAdapter(self, servos, tag)
         stopped: tuple[int, str, list[str]] | None = None
         steps: list[SweepStep] = []
+        restored = False
         try:
             self._prep(axis, dwell)
             self._set_manual_tuning(servos)
@@ -3040,7 +3468,7 @@ class ServoCalibration:
                 steps.append(step)
                 if value < start_g:
                     continue
-                results = self._run_analyze(gcmd, run)
+                results = self._run_analyze(gcmd, run, incremental=True)
                 flags = sorted(
                     set(self._step_flags(results, step.name))
                     & LADDER_STOP_FLAGS
@@ -3048,20 +3476,22 @@ class ServoCalibration:
                 if flags:
                     stopped = (value, step.name, flags)
                     break
-            pos_gain, integral = GainSetAdapter.derive(safe_g)
-            self._write_gains(servos, pos_gain, safe_g, integral)
             gcmd.respond_info(
-                "ladder done - SAFE speed gain %d applied on %s"
-                % (safe_g, ", ".join(servos))
+                "ladder done - restoring the pre-ladder gains on %s; keep "
+                "a rung with SERVO_APPLY_GAINS" % (", ".join(servos),)
             )
+            restore_prior()
+            restored = True
             self._restore()
             results = self._analyze_and_report(gcmd, run)
             self._last_sweep_run, self._last_sweep_results = run, results
         finally:
+            if not restored:
+                restore_prior()
             self._active_run = None
         if stopped is not None:
             gcmd.respond_info(
-                "climb stopped at speed gain %d (step %s): flags %s"
+                "climb stopped at %s (step %s): flags %s"
                 % (stopped[0], stopped[1], stopped[2])
             )
         return steps
@@ -3165,14 +3595,19 @@ class ServoCalibration:
         "RUNNING endpoint: golden-section search over a scale factor on the "
         "baseline profile's mass matrix (TERM=MASS, scored on mean per-move "
         "ferr_peak - the error window runs from move start through settle, "
-        "so it covers in-move tracking and endpoint overshoot alike) or "
+        "so it covers in-move tracking and endpoint overshoot alike), "
         "viscous vector (TERM=VISCOUS, scored on mean ferr_rms) or "
-        "coulomb friction vectors (TERM=COULOMB, fwd and rev together, "
-        "scored on mean ferr_peak - friction error peaks at breakaway). On "
-        "coupled_xy TERM=MASS refines the two directions sequentially - "
-        "X strokes scaling only the X-direction mass mode, then Y strokes "
-        "scaling the Y mode on top of the X winner - since the directions "
-        "carry different mass. Each candidate runs the full "
+        "coulomb vector (TERM=COULOMB, "
+        "scored on mean ferr_peak - friction error peaks at breakaway), or "
+        "an additive signed coefficient for each AWD pair "
+        "(TERM=DIRECTION_SPLIT, scored on the even directional differential "
+        "of signed moving-error means). On "
+        "coupled_xy every vector term refines the two modes sequentially - "
+        "X strokes scaling only the x-mode entry, then Y strokes scaling "
+        "the y mode on top of the X winner - since the modes are "
+        "independent physical quantities (moved mass, rail friction) and "
+        "an axis stroke leaves the other mode's velocity at exactly zero. "
+        "Each candidate runs the full "
         "SERVO_MEASURE_INERTIA ACCELS x SPEEDS grid in one tracking "
         "capture, so the score averages over every operating point. The "
         "baseline is PROFILE= or the "
@@ -3182,10 +3617,11 @@ class ServoCalibration:
         "endpoint keeps the last candidate until restart). A torque-rail "
         "flag on any step aborts (clipped strokes cannot score a "
         "candidate); the resonance flag is ignored here - scaling a "
-        "feedforward term does not move the loop's resonances. When a scale "
-        "beats 1.0 the scaled profile is written to a new TOML - pointing "
+        "feedforward term does not move the loop's resonances. When a "
+        "candidate beats the baseline, the refined profile is written to a "
+        "new TOML - pointing "
         "dynamics_profile at it (then RESTART) is the only way to keep it. "
-        "Params TERM (MASS) AXIS (X) SERVOS PROFILE LO (0.7) HI (1.3) TOL "
+        "Params TERM (MASS) AXIS (X) SERVOS PROFILE LO HI TOL "
         "(0.02) MAX_EVALS (10) START END X_START X_END Y_START Y_END "
         "ACCELS SPEEDS ITERATIONS DWELL_MS TAG (refdyn) NAME"
     )
@@ -3230,7 +3666,82 @@ class ServoCalibration:
                     node.get_drive_count(),
                 )
             )
+        for profile_slot, motor in enumerate(baseline["axes"]):
+            node_slot = node.get_slot_for_motor(motor)
+            if node_slot is None:
+                raise gcmd.error(
+                    "profile %s axis %r is not a motor on node %s"
+                    % (profile_path, motor, node.name)
+                )
+            if node_slot != profile_slot:
+                raise gcmd.error(
+                    "profile %s axis %r is at slot %d, but node %s maps it "
+                    "to slot %d"
+                    % (profile_path, motor, profile_slot, node.name, node_slot)
+                )
         return profile_path, baseline
+
+    def _direction_split_baseline(
+        self, gcmd: Any, kin: Any, baseline: dict[str, Any]
+    ) -> dict[str, Any]:
+        if baseline.get("pairs"):
+            return baseline
+        pair_slots = None
+        if kin.coupled_xy():
+            layout = servo_strokes.corexy_fit_layout(gcmd, kin)
+            pair_slots = layout["pairs"]
+        derived = _copy_dynamics(baseline)
+        if pair_slots is not None:
+            pairs = [part.split(",") for part in pair_slots.split(";") if part]
+            axis_index = {name: i for i, name in enumerate(baseline["axes"])}
+            columns = [list(col) for col in zip(*baseline["frame"])]
+            claimed: set[str] = set()
+            for slots in pairs:
+                if len(slots) != 2:
+                    raise gcmd.error(
+                        "kinematic AWD pair must contain exactly two slots "
+                        "(got %s)" % (slots,)
+                    )
+                if slots[0] == slots[1]:
+                    raise gcmd.error(
+                        "kinematic AWD pair slots must be distinct (got %s)"
+                        % (slots,)
+                    )
+                overlap = claimed.intersection(slots)
+                if overlap:
+                    raise gcmd.error(
+                        "kinematic AWD pairs overlap at slots %s"
+                        % (sorted(overlap),)
+                    )
+                if any(s not in axis_index for s in slots):
+                    raise gcmd.error(
+                        "kinematic AWD pair %s does not match profile axes %s"
+                        % (slots, baseline["axes"])
+                    )
+                claimed.update(slots)
+                first, second = (axis_index[s] for s in slots)
+                if not _equal_or_opposite_columns(
+                    columns[first], columns[second]
+                ):
+                    raise gcmd.error(
+                        "kinematic AWD pair %s does not have equal parallel "
+                        "or antiparallel frame columns" % (slots,)
+                    )
+            derived["pairs"] = [
+                {"slots": slots, "direction_split": 0.0} for slots in pairs
+            ]
+        else:
+            try:
+                derived["pairs"] = discover_dynamics_pairs(baseline)
+            except ValueError as e:
+                raise gcmd.error("cannot derive dynamics pairs: %s" % (e,))
+        if not derived["pairs"]:
+            raise gcmd.error(
+                "TERM=DIRECTION_SPLIT found no explicit [[pair]] tables, "
+                "kinematic AWD pairs, or groups of exactly two equal "
+                "parallel/antiparallel frame columns"
+            )
+        return derived
 
     def cmd_SERVO_REFINE_DYNAMICS(self, gcmd: Any) -> None:
         if tomllib is None:
@@ -3240,8 +3751,8 @@ class ServoCalibration:
         term = gcmd.get("TERM", "MASS").upper()
         if term not in DYNAMICS_METRIC_BY_TERM:
             raise gcmd.error(
-                "TERM must be MASS, VISCOUS or COULOMB (got %r)"
-                % (gcmd.get("TERM", ""),)
+                "TERM must be MASS, VISCOUS, COULOMB or DIRECTION_SPLIT "
+                "(got %r)" % (gcmd.get("TERM", ""),)
             )
         kin = self._kin()
         servos, rails, axis = self._grid_servos(gcmd, kin)
@@ -3253,6 +3764,8 @@ class ServoCalibration:
             )
         engine = self.printer.lookup_object("motion_engine")
         profile_path, baseline = self._load_baseline_dynamics(gcmd, node)
+        if term == "DIRECTION_SPLIT":
+            baseline = self._direction_split_baseline(gcmd, kin, baseline)
         accels, speeds, iterations, dwell = servo_strokes.grid(
             gcmd, self.accels, self.speeds, self.iterations, self.dwell_ms
         )
@@ -3288,38 +3801,70 @@ class ServoCalibration:
 
             x_grid = axis_grid("X", x_start, x_end, (x_start, y_center))
             y_grid = axis_grid("Y", y_start, y_end, (x_center, y_start))
-            if term == "MASS":
+
+            def both_grids() -> None:
+                x_grid()
+                y_grid()
+
+            if term == "DIRECTION_SPLIT":
+
+                def pair_add_fn(
+                    index: int,
+                ) -> Callable[[dict[str, Any], float], dict[str, Any]]:
+                    def add_fn(
+                        profile: dict[str, Any], delta: float
+                    ) -> dict[str, Any]:
+                        return add_dynamics_direction_split(
+                            profile, index, delta
+                        )
+
+                    return add_fn
+
+                phases = [
+                    (
+                        "direction_split_%s" % (pair["slots"][0],),
+                        pair["slots"][0],
+                        pair_add_fn(i),
+                        both_grids,
+                        list(pair["slots"]),
+                    )
+                    for i, pair in enumerate(baseline["pairs"])
+                ]
+            else:
                 modes = baseline["modes"]
                 if len(modes) != 2 or not {"x", "y"} <= set(modes):
                     raise gcmd.error(
-                        "coupled_xy TERM=MASS refine needs a 2-mode profile "
+                        "coupled_xy TERM=%s refine needs a 2-mode profile "
                         "with x and y modes; profile %s has modes %s"
-                        % (profile_path, modes)
+                        % (term, profile_path, modes)
                     )
-                x_index = modes.index("x")
-                y_index = modes.index("y")
 
-                def x_scale_fn(
-                    profile: dict[str, Any], scale: float
-                ) -> dict[str, Any]:
-                    return scale_dynamics_mode(profile, "MASS", x_index, scale)
+                def mode_scale_fn(
+                    index: int,
+                ) -> Callable[[dict[str, Any], float], dict[str, Any]]:
+                    def scale_fn(
+                        profile: dict[str, Any], scale: float
+                    ) -> dict[str, Any]:
+                        return scale_dynamics_mode(profile, term, index, scale)
 
-                def y_scale_fn(
-                    profile: dict[str, Any], scale: float
-                ) -> dict[str, Any]:
-                    return scale_dynamics_mode(profile, "MASS", y_index, scale)
+                    return scale_fn
 
                 phases = [
-                    ("mass_x", "x", x_scale_fn, x_grid),
-                    ("mass_y", "y", y_scale_fn, y_grid),
+                    (
+                        "%s_x" % (term.lower(),),
+                        "x",
+                        mode_scale_fn(modes.index("x")),
+                        x_grid,
+                        None,
+                    ),
+                    (
+                        "%s_y" % (term.lower(),),
+                        "y",
+                        mode_scale_fn(modes.index("y")),
+                        y_grid,
+                        None,
+                    ),
                 ]
-            else:
-
-                def both_grids() -> None:
-                    x_grid()
-                    y_grid()
-
-                phases = [(term.lower(), "", term_scale_fn, both_grids)]
         else:
             start, end = servo_strokes.axis_bounds(gcmd, self.bounds, axis)
 
@@ -3333,19 +3878,62 @@ class ServoCalibration:
                             axis, start, end, speed, accel, iterations, dwell
                         )
 
-            phases = [(term.lower(), "", term_scale_fn, cart_grid)]
+            if term == "DIRECTION_SPLIT":
+
+                def pair_add_fn(
+                    index: int,
+                ) -> Callable[[dict[str, Any], float], dict[str, Any]]:
+                    return lambda profile, delta: add_dynamics_direction_split(
+                        profile, index, delta
+                    )
+
+                phases = [
+                    (
+                        "direction_split_%s" % (pair["slots"][0],),
+                        pair["slots"][0],
+                        pair_add_fn(i),
+                        cart_grid,
+                        list(pair["slots"]),
+                    )
+                    for i, pair in enumerate(baseline["pairs"])
+                ]
+            else:
+                phases = [(term.lower(), "", term_scale_fn, cart_grid, None)]
 
         tag = gcmd.get("TAG", "refdyn")
         name = gcmd.get("NAME", "refined_%s" % (term.lower(),))
-        lo = gcmd.get_float("LO", 0.7, above=0.0)
-        hi = gcmd.get_float("HI", 1.3)
-        tol = gcmd.get_float("TOL", 0.02, above=0.0)
-        max_evals = gcmd.get_int("MAX_EVALS", 10, minval=3)
-        if not lo < 1.0 < hi:
-            raise gcmd.error(
-                "bracket [LO, HI] = [%g, %g] must contain 1.0 strictly - "
-                "the search is centered on the baseline" % (lo, hi)
+        if term == "DIRECTION_SPLIT":
+            span = min(
+                0.25,
+                min(
+                    0.9 * (0.5 - abs(pair["direction_split"]))
+                    for pair in baseline["pairs"]
+                ),
             )
+            lo = gcmd.get_float("LO", -span)
+            hi = gcmd.get_float("HI", span)
+            tol = gcmd.get_float("TOL", 0.01, above=0.0)
+        else:
+            lo = gcmd.get_float("LO", 0.7, above=0.0)
+            hi = gcmd.get_float("HI", 1.3)
+            tol = gcmd.get_float("TOL", 0.02, above=0.0)
+        max_evals = gcmd.get_int("MAX_EVALS", 10, minval=3)
+        baseline_candidate = 0.0 if term == "DIRECTION_SPLIT" else 1.0
+        if not lo < baseline_candidate < hi:
+            raise gcmd.error(
+                "bracket [LO, HI] = [%g, %g] must contain %g strictly - "
+                "the search is centered on the baseline"
+                % (lo, hi, baseline_candidate)
+            )
+        if term == "DIRECTION_SPLIT":
+            for pair in baseline["pairs"]:
+                base = pair["direction_split"]
+                if abs(base + lo) >= 0.5 or abs(base + hi) >= 0.5:
+                    raise gcmd.error(
+                        "direction split delta bracket [%g, %g] takes pair "
+                        "%s from %g outside abs(w) < 0.5"
+                        % (lo, hi, pair["slots"], base)
+                    )
         metric = DYNAMICS_METRIC_BY_TERM[term]
         stroke_plan = {
             "speeds": speeds,
@@ -3366,20 +3954,21 @@ class ServoCalibration:
             "baseline_profile": profile_path,
             "term": term.lower(),
             "metric": metric,
-            "phases": [label for label, _s, _fn, _g in phases],
+            "phases": [label for label, _s, _fn, _g, _d in phases],
             "bracket": [lo, hi],
             "tol": tol,
             "max_evals": max_evals,
         }
         run.write()
         report_metrics = ("overshoot", "ferr_rms", "ferr_peak")
-        eval_metrics = tuple(dict.fromkeys(report_metrics + (metric,)))
 
         def metrics_line(values: dict[str, float]) -> str:
-            return ", ".join("%s %.1f" % (m, values[m]) for m in eval_metrics)
+            return ", ".join("%s %.1f" % kv for kv in values.items())
 
         def run_phase(
-            adapter: DynamicsModelAdapter, run_grid: Callable[[], None]
+            adapter: DynamicsModelAdapter,
+            run_grid: Callable[[], None],
+            drives: list[str] | None,
         ) -> tuple[float, float, float, dict[float, dict[str, float]]]:
             scores: dict[float, float] = {}
             reports: dict[float, dict[str, float]] = {}
@@ -3407,25 +3996,51 @@ class ServoCalibration:
                     lambda _s: run_grid(),
                     gcmd,
                 )
-                results = self._run_analyze(gcmd, run)
+                results = self._run_analyze(gcmd, run, incremental=True)
                 gate_torque_rail(step.name, results)
                 reports[key] = {
                     m: self._step_metric_mean(gcmd, results, step.name, m)
-                    for m in eval_metrics
+                    for m in report_metrics
                 }
+                if drives is not None:
+                    result_step = next(
+                        (
+                            item
+                            for item in results.get("steps") or []
+                            if item.get("name") == step.name
+                        ),
+                        None,
+                    )
+                    if result_step is None:
+                        raise gcmd.error(
+                            "step %r missing from results.json" % (step.name,)
+                        )
+                    try:
+                        reports[key].update(
+                            direction_split_candidate_metrics(
+                                adapter.baseline, result_step, drives
+                            )
+                        )
+                    except ValueError as e:
+                        raise gcmd.error(str(e))
                 gcmd.respond_info(
-                    "%s scale %.4f -> %s (counts, mean per move)"
-                    % (adapter.label, key, metrics_line(reports[key]))
+                    "%s %s %.4f -> %s (counts, mean per move)"
+                    % (
+                        adapter.label,
+                        adapter.value_name,
+                        key,
+                        metrics_line(reports[key]),
+                    )
                 )
                 scores[key] = reports[key][metric]
                 return scores[key]
 
-            baseline_score = evaluate(1.0)
+            baseline_score = evaluate(baseline_candidate)
             best, best_score, _probes = golden_section_search(
                 evaluate, lo, hi, tol, max_evals
             )
             if baseline_score <= best_score:
-                best, best_score = 1.0, baseline_score
+                best, best_score = baseline_candidate, baseline_score
             return best, best_score, baseline_score, reports
 
         phase_out: list[tuple[str, str, float, float, float, dict]] = []
@@ -3434,13 +4049,19 @@ class ServoCalibration:
         try:
             out_path = self._dynamics_out_path(gcmd, run, name)
             prep_axes()
-            for label, suffix, scale_fn, run_grid in phases:
+            for label, suffix, scale_fn, run_grid, drives in phases:
                 adapter = DynamicsModelAdapter(
-                    engine, handle, refined, scale_fn, label, tag
+                    engine,
+                    handle,
+                    refined,
+                    scale_fn,
+                    label,
+                    tag,
+                    "delta" if term == "DIRECTION_SPLIT" else "scale",
                 )
                 adapters.append(adapter)
                 best, best_score, baseline_score, reports = run_phase(
-                    adapter, run_grid
+                    adapter, run_grid, drives
                 )
                 phase_out.append(
                     (label, suffix, best, best_score, baseline_score, reports)
@@ -3468,8 +4089,14 @@ class ServoCalibration:
             for scale in sorted(reports):
                 marker = "  <- best" if scale == round(best, 4) else ""
                 gcmd.respond_info(
-                    "  %s scale %.4f: %s%s"
-                    % (label, scale, metrics_line(reports[scale]), marker)
+                    "  %s %s %.4f: %s%s"
+                    % (
+                        label,
+                        "delta" if term == "DIRECTION_SPLIT" else "scale",
+                        scale,
+                        metrics_line(reports[scale]),
+                        marker,
+                    )
                 )
             structured_log.event(
                 "calibration",
@@ -3482,7 +4109,10 @@ class ServoCalibration:
                 baseline_score=baseline_score,
                 evals=len(reports),
             )
-        if all(best == 1.0 for _l, _s, best, _bs, _bl, _r in phase_out):
+        if all(
+            best == baseline_candidate
+            for _l, _s, best, _bs, _bl, _r in phase_out
+        ):
             gcmd.respond_info(
                 "baseline already optimal within the bracket - no profile "
                 "written | run %s" % (run.run_dir,)
@@ -3500,8 +4130,15 @@ class ServoCalibration:
             "dynamics_profile at it and RESTART | run %s"
             % (
                 "; ".join(
-                    "%s scale %.4f (mean %s %.1f -> %.1f)"
-                    % (label, best, metric, baseline_score, best_score)
+                    "%s %s %.4f (%s %.1f -> %.1f)"
+                    % (
+                        label,
+                        "delta" if term == "DIRECTION_SPLIT" else "scale",
+                        best,
+                        metric,
+                        baseline_score,
+                        best_score,
+                    )
                     for label, _s, best, best_score, baseline_score, _r in (
                         phase_out
                     )

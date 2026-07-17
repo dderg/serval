@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use time::OffsetDateTime;
 
@@ -9,7 +9,7 @@ use host_rt::passthrough_queue::{McuHandle, PassthroughRouter};
 use motion_services::logging::context;
 use motion_services::logging::writer::RotatingJsonlWriter;
 use motion_services::logging::writer::{DEFAULT_BACKUP_COUNT, DEFAULT_MAX_BYTES, FSYNC_INTERVAL};
-use motion_services::mcu_log::build_mcu_log_hook;
+use motion_services::mcu_log::{build_mcu_log_hook, spawn_jsonl_writer_thread};
 
 static GLOBAL_CONTEXT_SERIALISER: Mutex<()> = Mutex::new(());
 
@@ -21,7 +21,28 @@ fn tmp_jsonl(dir_suffix: &str, filename: &str) -> std::path::PathBuf {
     ));
     std::fs::create_dir_all(&p).unwrap();
     p.push(filename);
+    let _ = std::fs::remove_file(&p);
     p
+}
+
+/// The hook hands the line to the writer thread; poll until it lands on disk.
+fn wait_for_first_line(path: &std::path::Path) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if let Some(line) = content.lines().next() {
+                if !line.is_empty() {
+                    return line.to_owned();
+                }
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "mcu-log writer thread never wrote a line to {}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 fn make_router_with_clock_record(label: &str) -> (Arc<Mutex<PassthroughRouter>>, McuHandle) {
@@ -53,18 +74,17 @@ fn re_emit_closure_produces_schema_conformant_line() {
     context::set_context("k-test-session".to_string(), "print-42".to_string());
 
     let path = tmp_jsonl("reemit", "mcu-h7.jsonl");
-    let writer = Arc::new(Mutex::new(
-        RotatingJsonlWriter::new(
-            &path,
-            DEFAULT_MAX_BYTES,
-            DEFAULT_BACKUP_COUNT,
-            FSYNC_INTERVAL,
-        )
-        .unwrap(),
-    ));
+    let writer = RotatingJsonlWriter::new(
+        &path,
+        DEFAULT_MAX_BYTES,
+        DEFAULT_BACKUP_COUNT,
+        FSYNC_INTERVAL,
+    )
+    .unwrap();
 
     let (router, mcu) = make_router_with_clock_record("mcu-h7");
-    let hook = build_mcu_log_hook(router, mcu, Arc::clone(&writer), "mcu-h7".to_string());
+    let sink = spawn_jsonl_writer_thread(writer, "mcu-h7");
+    let hook = build_mcu_log_hook(router, mcu, sink, "mcu-h7".to_string());
 
     let event = McuLogEvent {
         mcu_tick: 15 * 100_000_000u64,
@@ -79,15 +99,8 @@ fn re_emit_closure_produces_schema_conformant_line() {
 
     hook(event);
 
-    {
-        let mut w = writer.lock().unwrap();
-        use std::io::Write;
-        w.flush().unwrap();
-    }
-
-    let content = std::fs::read_to_string(&path).unwrap();
-    let line = content.lines().next().expect("at least one line");
-    let rec: serde_json::Value = serde_json::from_str(line).expect("valid JSON");
+    let line = wait_for_first_line(&path);
+    let rec: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
 
     assert_eq!(rec["source"], "mcu-h7");
     assert_eq!(rec["level"], "warn");
@@ -122,18 +135,17 @@ fn fallback_stamps_time_estimated_true_when_no_clock_sync_samples() {
     );
 
     let path = tmp_jsonl("fallback", "mcu-h7-fallback.jsonl");
-    let writer = Arc::new(Mutex::new(
-        RotatingJsonlWriter::new(
-            &path,
-            DEFAULT_MAX_BYTES,
-            DEFAULT_BACKUP_COUNT,
-            FSYNC_INTERVAL,
-        )
-        .unwrap(),
-    ));
+    let writer = RotatingJsonlWriter::new(
+        &path,
+        DEFAULT_MAX_BYTES,
+        DEFAULT_BACKUP_COUNT,
+        FSYNC_INTERVAL,
+    )
+    .unwrap();
 
     let (router, mcu) = make_empty_router("mcu-h7");
-    let hook = build_mcu_log_hook(router, mcu, Arc::clone(&writer), "mcu-h7".to_string());
+    let sink = spawn_jsonl_writer_thread(writer, "mcu-h7");
+    let hook = build_mcu_log_hook(router, mcu, sink, "mcu-h7".to_string());
 
     let event = McuLogEvent {
         mcu_tick: 5 * 100_000_000u64,
@@ -148,15 +160,8 @@ fn fallback_stamps_time_estimated_true_when_no_clock_sync_samples() {
 
     hook(event);
 
-    {
-        let mut w = writer.lock().unwrap();
-        use std::io::Write;
-        w.flush().unwrap();
-    }
-
-    let content = std::fs::read_to_string(&path).unwrap();
-    let line = content.lines().next().expect("at least one NDJSON line");
-    let rec: serde_json::Value = serde_json::from_str(line).expect("valid JSON");
+    let line = wait_for_first_line(&path);
+    let rec: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
 
     let time_str = rec["_time"].as_str().expect("_time must be a string");
     assert!(
@@ -184,18 +189,17 @@ fn source_matches_label() {
         let filename = format!("{label}.jsonl");
         let path = tmp_jsonl(&format!("source-label-{label}"), &filename);
 
-        let writer = Arc::new(Mutex::new(
-            RotatingJsonlWriter::new(
-                &path,
-                DEFAULT_MAX_BYTES,
-                DEFAULT_BACKUP_COUNT,
-                FSYNC_INTERVAL,
-            )
-            .unwrap(),
-        ));
+        let writer = RotatingJsonlWriter::new(
+            &path,
+            DEFAULT_MAX_BYTES,
+            DEFAULT_BACKUP_COUNT,
+            FSYNC_INTERVAL,
+        )
+        .unwrap();
 
         let (router, mcu) = make_router_with_clock_record(label);
-        let hook = build_mcu_log_hook(router, mcu, Arc::clone(&writer), (*label).to_string());
+        let sink = spawn_jsonl_writer_thread(writer, label);
+        let hook = build_mcu_log_hook(router, mcu, sink, (*label).to_string());
 
         let event = McuLogEvent {
             mcu_tick: 3 * 100_000_000u64,
@@ -210,15 +214,8 @@ fn source_matches_label() {
 
         hook(event);
 
-        {
-            let mut w = writer.lock().unwrap();
-            use std::io::Write;
-            w.flush().unwrap();
-        }
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        let line = content.lines().next().expect("at least one line");
-        let rec: serde_json::Value = serde_json::from_str(line).expect("valid JSON");
+        let line = wait_for_first_line(&path);
+        let rec: serde_json::Value = serde_json::from_str(&line).expect("valid JSON");
 
         assert_eq!(
             rec["source"], *label,

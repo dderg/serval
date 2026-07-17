@@ -53,11 +53,11 @@ they are configured or passed.
 | `accel_chip` | — | accelerometer section name (e.g. `adxl345`); when set, `SERVO_CALIBRATE_GAINS` also records vibration per step (`ACCEL_CHIP=`) |
 | `captures_root` | `~/printer_data/logs/servo_captures` | parent directory for experiment run directories |
 | `journal_params` | — | comma list of drive SDO addresses (`addr[:type]`, e.g. `0x2001.0x31:u16`) read back from every captured drive at run start and recorded under `ambient.journal_params` in the manifest — the campaign's varied registers (notch mode, etc.) |
-| `servo_cal_binary` | `rust/target/release/servo-cal` | path to the `servo-cal` analysis binary |
+| `servo_cal_binary` | `rust/target/snapshot/servo-cal` | path to the `servo-cal` analysis binary |
 
 Prerequisites: the EtherCAT servo stack (`[servo_param]`, `[servo_capture]`)
 must be configured, and the `servo-cal` binary must be built once on the host
-with `cargo build --release -p servo-ident` (from `rust/`).
+with `cargo build --profile snapshot -p servo-ident` (from `rust/`).
 
 ## Tuning order
 
@@ -90,6 +90,17 @@ span — that pair cannot reach the target speed within the travel and would not
 produce the intended excitation.
 
 ## Measurement commands
+
+Every capture reads each drive's EtherCAT sync loss counter (C13.04) before
+and after the strokes. The drive silently tolerates up to C13.02 (default 8)
+consecutive lost/late sync events before faulting, so a tolerated loss shows
+up nowhere except this counter — but it makes the drive's internal position
+demand skip and double-step, injecting a following-error transient of
+exactly one cycle of travel. When the counter moved during a capture the
+command prints a WARNING naming the drives and deltas (and emits a
+`calibration/sync_loss` event): that step's tracking metrics are
+contaminated and must not be compared or scored. `SERVO_SHOW_TUNING` also
+reads C13.02/C13.04 for manual checks.
 
 #### SERVO_MEASURE_TRACKING
 Single accel/speed stroke run with capture, then prints per-move following
@@ -138,27 +149,40 @@ rise with the damper on. Params: `BELT` (AB) `GAIN` (required) `CLAMP`
 (50) `LPF_HZ` (300) `LEAD_US` (0).
 
 #### SERVO_DIFF_TRIM
-Arms (or disarms) the engine-resident differential belt-pair **trim** — the
-always-on, in-motion counterpart of `SERVO_SYNC`. Every EtherCAT cycle the
-endpoint low-passes the pair's mechanical-frame differential torque (the
-fight) and integrates it into a small **antisymmetric position offset** on
-top of the streamed targets: the pair unwinds against itself while the
-carriage never moves. Where the damper (torque feedback at the 90–200 Hz
-belt modes) is phase-limited by the ~ms loop lag, the trim's crossover sits
-at a few Hz — gain × pair stiffness — where that lag is a harmless few
-degrees, so it safely nulls homing preload, thermal drift and the 1–3 Hz
-toolhead-position dependence of residual strain at full traverse speed,
-and leaves the resonant band alone. Integration freezes whenever the pair
-is not streaming targets (the held offset keeps drive targets continuous
-across stream gaps) and resets on a pair sync or torque-gate drop. `GAIN`
-is mm/s of offset slew per 1% differential torque (0.05 ⇒ ~2–5 Hz
-crossover on a typical belt pair); `GAIN=0` disarms. The offset is clamped
-to `CLAMP_UM` (µm, ceiling 500); hitting the clamp logs a
-`diff_trim_clamped` warning — residual fight beyond the trim's authority.
-Torque LPF at `LPF_HZ`. State lives in the running endpoint — re-arm after
-a firmware restart. Verify with `SERVO_SYNC` afterwards: its baseline
-fight should read near zero while the trim is armed. Params: `BELT` (AB)
-`GAIN` (required) `CLAMP_UM` (150) `LPF_HZ` (25).
+Arms (or disarms) the engine-resident differential belt-pair **trim** —
+standstill zeroing of the pair fight, config section `[servo_diff_trim]`.
+Servo sync and homing leave a run-to-run differential preload between the
+two drives of a belt (each enable seeds at a slightly different relax
+point), so the same strain-comp map can show a different peak differential
+torque on every home+sync cycle. Whenever the pair sits at **commanded
+standstill** the endpoint low-passes its mechanical-frame differential
+torque and integrates it into a small flat **antisymmetric position
+offset** on top of the streamed targets and the strain-comp map: the pair
+unwinds against itself while the carriage never moves. During motion the
+loop freezes entirely (filter and integrator) — an in-motion differential
+torque is legitimate (commanded feedforward, direction- and
+toolhead-position-dependent inner-loop load) and must not be nulled. A
+slot counts as quiescent only when its piece ring is empty (pieces land at
+least the feedforward lead before their start, so an empty ring also
+proves no lead-window torque is being commanded), no buzz is running, the
+strain-comp ramp has settled, and the pair has been still for `SETTLE_MS`
+(torque relax + telemetry lag after a decel). The offset resets on a pair
+sync or torque-gate drop — the `SERVO_SYNC` release is the new zero.
+`GAIN` is mm/s of offset slew per 1% differential torque — start around
+`0.0001` and raise it until the offset converges within your typical
+dwells; too much gain (with the loop crossover approaching the LPF
+corner) oscillates. `GAIN=0` freezes the loop with the learned offset
+held. Retuning any knob updates the running pair in place — the learned
+offset and filter state carry over — and `REMOVE=1` drops the pair (and
+its offset) entirely. `MAX_OFFSET_UM` (µm, ceiling 500) bounds the
+offset — the trim's total authority; hitting it logs a
+`diff_trim_clamped` warning: residual fight beyond what the trim may
+absorb. Torque LPF at `LPF_HZ` (floor 0.1). Config options (`gain`,
+`max_offset_um`, `lpf_hz`, `settle_ms`) arm the trim at startup when
+`gain` is non-zero; the command overrides them live for tuning and
+`SAVE=1` stages the current values for `SAVE_CONFIG`. Params: `BELT`
+(AB) `GAIN` `MAX_OFFSET_UM` (150) `LPF_HZ` (2) `SETTLE_MS` (300)
+`REMOVE` (0) `SAVE` (0).
 
 #### SERVO_MEASURE_STRAIN_MAP
 The measurement half of the belt strain map (CoreXY only). Rasters the bed
@@ -234,17 +258,28 @@ is off), and the tune loop converges the scale against reality.
 
 `SERVO_STRAIN_COMP_TUNE RUN=<baseline raster>` is that loop: rebuild
 the FULL map from the run at the trial matrix (never merging), enable
-it, sweep ONE verification line, and scale each belt's matrix row by
-the fraction of the intended correction the line actually shows —
-repeat until the line reads flat (|1−ρ| ≤ `TOL`). Each pass costs a
-line sweep, not a raster; on the bench ρ repeats line-to-line to
-±0.02, so it converges in about two passes. When it converges the
-tuned full-bed map is already on disk and enabled — it is the same
-map that was being verified — and the matrix is stored for future
-builds and recorded in the map (`stiffness_pct_per_mm`,
-`cross_pct_per_mm` per pair). Running out of `MAX_ITERS`, a line the
-map doesn't vary along, or an achieved fraction outside (0.2, 5) all
-fail loudly. Open-loop alternates that measure the matrix directly:
+it, sweep an X **and** a Y verification line, and refit every belt's
+direct and cross stiffness from the measured response to the applied
+offsets — the two sweeps swap the belts' roles, so all four matrix
+elements are measured independently (a single X line cannot separate
+them: the own- and cross-corrections it applies are near-collinear,
+and the old row-scale loop silently froze the cross:direct ratio at
+whatever was passed in). Repeat until the measured matrix reproduces
+the applied one — per element, within `TOL` of the row's direct
+stiffness. Each pass costs two line sweeps, not a raster, and one
+correction step usually lands it. When it converges the tuned
+full-bed map is already on disk and enabled — it is the same map that
+was being verified — and the matrix is stored for future builds and
+recorded in the map (`stiffness_pct_per_mm`, `cross_pct_per_mm` per
+pair). Running out of `MAX_ITERS`, lines the map doesn't vary along,
+collinear own/cross corrections, or a measured direct stiffness
+outside (0.2, 5)× the applied one all fail loudly. Know what the
+numbers cover: the verification metric is the **smooth elastic
+field** (forward/backward passes are averaged, so direction-dependent
+friction asymmetry cancels out of it, and sub-20 mm ripple is below
+the field model's bandwidth) — raw differential measurements keep
+both, so they read higher than the tune's residual and no
+position-keyed map can close that gap. Open-loop alternates that measure the matrix directly:
 `SERVO_MEASURE_STRAIN_RESPONSE` steps a constant antisymmetric offset
 through each pair's bank (0, ±STEP_UM, ±2·STEP_UM) while stroking one
 line — the line's field cancels out of the offset-response slope, no
@@ -328,9 +363,10 @@ profile share:
 - **`coupled_xy` kinematics**: runs the X+Y grid over every belt drive and
   fits the x and y modes through the frame matrix built from the kinematics'
   slot order and invert flags (passed to the fitter as `--frame`/`--modes`;
-  on AWD each belt's pair shares its columns and all four drives must sit on
-  one node). The resulting profile goes on `[ethercat_node]
-  dynamics_profile` (node-level, coupled) rather than per-motor.
+  on AWD each belt's drives share its columns and all four drives must sit
+  on one node). The resulting profile goes on
+  `[ethercat_node] dynamics_profile` (node-level, coupled) rather than
+  per-motor.
 - **cartesian kinematics**: fits a single mode with an identity frame. On a
   multi-drive (AWD) axis `DRIVE=` picks which drive the scalar fit
   describes — required there, since the capture records every drive.
@@ -346,14 +382,15 @@ Empirical refinement of an existing dynamics profile, for when the
 `SERVO_FIT_DYNAMICS` regression differs run-to-run with the excitation
 grid. Golden-section search over a scale factor applied to the baseline
 profile's per-mode **mass** (`TERM=MASS`, default), **viscous**
-(`TERM=VISCOUS`) or **coulomb** (`TERM=COULOMB`) vector: each candidate
+(`TERM=VISCOUS`) or **coulomb** (`TERM=COULOMB`) vector, or an additive signed
+per-pair **direction split** (`TERM=DIRECTION_SPLIT`): each candidate
 model is streamed into the *running*
 endpoint (no restart) and measured with one tracking capture of the full
 `SERVO_MEASURE_INERTIA` `ACCELS` × `SPEEDS` grid, then scored from
 `servo-cal analyze` — mean per-move **ferr_peak** for `MASS` and
 `COULOMB` (friction error peaks at breakaway, right at the start of the
-window), mean per-move **ferr_rms** for `VISCOUS` (viscous error shows
-up as cruise following error). The analyzer's per-move error window starts
+window), and mean per-move **ferr_rms** for `VISCOUS` (viscous error
+shows up as cruise following error). The analyzer's per-move error window starts
 `ff_lead_cycles` samples **before** the commanded move (torque
 feedforward is sent that many cycles early, so its error signature
 lands ahead of the position command; the run manifest carries the
@@ -361,12 +398,15 @@ value) and runs **through the settle duration**, so ferr_peak/ferr_rms
 cover FF lead-in, in-move tracking, and endpoint overshoot alike (for
 every command that reads these metrics, not just the refine);
 `overshoot` remains reported separately as the post-move-only peak. On
-`coupled_xy`, `TERM=MASS` refines the two modes **sequentially** — first a
-search over the x-mode mass with X-only strokes, then, on top of the X
-winner, the y mode with Y-only strokes — because the two modes carry
-different moved mass and one shared scale cannot serve both. Each phase
-scales exactly its own `mass[mode]` entry, leaving the other mode's
-response untouched. Scoring the mean over
+`coupled_xy`, every vector term (`MASS`, `VISCOUS`, `COULOMB`) refines the
+two modes **sequentially** — first a
+search over the x-mode entry with X-only strokes, then, on top of the X
+winner, the y mode with Y-only strokes — because the two modes are
+independent physical quantities (the moved mass, the rail friction) and
+one shared scale cannot serve both; an axis stroke leaves the other
+mode's velocity at exactly zero, so each phase's score depends only on
+its own entry. The provenance keys are `refined_scale_x`/`refined_scale_y`.
+Scoring the mean over
 the whole grid keeps a scale that helps at one operating point but hurts
 at another from winning; every per-scale line also lists mean overshoot,
 ferr_rms, and ferr_peak so the non-scored metrics can be sanity-checked.
@@ -384,16 +424,50 @@ metric is amplitude-blind (the strongest 20–450 Hz PSD peak over the
 mean 1–4 Hz power), so high-accel refine strokes — which put almost
 nothing in the low band — trip it on µm-level mechanical peaks the
 machine shows on every normal move.
+
+`DIRECTION_SPLIT` runs one sequential phase per pair. For each candidate step,
+the profile frame defines `lambda`: `+1` for exactly equal pair columns and
+`-1` for exactly opposite columns. Analyzer moves are joined by `move`; both
+drives must have identical move sets and matching `start_ms`/`end_ms`, nonzero
+directions, and `direction_second = lambda * direction_first`. Each aligned
+move contributes the signed differential `q = ferr_mean_moving_first -
+lambda * ferr_mean_moving_second`. The scorer averages `q` separately as
+`q_plus` for first-drive direction `+1` and `q_minus` for direction `-1`,
+requires both bins, and minimizes `ferr_mean_direction_imbalance =
+abs(q_plus + q_minus) / 2`. Thus a persistent
+per-motor error that reverses with travel direction cancels, while an even
+pair-split error remains. Candidate output reports `q_plus`, `q_minus`, and
+`ferr_mean_direction_imbalance`; malformed alignment or direction data aborts
+refinement.
+
+The candidate is an additive delta, not a scale, so delta `0` is the measured
+baseline and a profile with no `[[pair]]` records can be augmented without
+refitting the common dynamics. Missing pairs are taken from the current
+slot-ordered AWD kinematic layout when it agrees with the profile frame,
+otherwise from groups of exactly two equal or opposite frame columns; zero and
+unmatched columns are ignored, ambiguous larger exact-match groups fail, and a
+kinematically known pair with unequal parallel columns fails rather than
+guessing.
+The default delta bracket is `[-0.25, 0.25]`, reduced when needed to keep every
+candidate at `abs(direction_split) < 0.5`, with default `TOL=0.01`. Explicit
+`LO`/`HI` must contain zero and keep both bracket ends in range. The signed
+convention is solely `slots = [first, second]`, with differential
+`tau_first - lambda*tau_second`; swapping the slots requires
+`w' = -lambda*w` (equal columns negate `w`, opposite columns preserve it), and
+no motor orientation metadata participates.
 The live model is **always** restored to the baseline afterwards
 (also on failure; if klippy dies mid-run the endpoint keeps the last
-candidate until restart). When a scale beats 1.0 the scaled profile is
-written to a new TOML under `~/printer_data/config/servo_dynamics/` (with
+candidate until restart). When a candidate beats its baseline the refined
+profile is written to a new TOML under
+`~/printer_data/config/servo_dynamics/` (with
 `refined_source`/`refined_term`/`refined_scale`/`refined_run` provenance
-keys — `refined_scale_x`/`refined_scale_y` for the sequential corexy mass
-refine — never overwriting) and the `dynamics_profile` paste line is printed
+keys — `refined_scale_x`/`refined_scale_y` for the sequential corexy
+refines and `refined_delta_<first-slot>` for direction splits — never
+overwriting) and the `dynamics_profile` paste line is printed
 — config edit + restart is the only way to keep it; when the baseline
 wins, nothing is written. Refine `MASS` first, then `TERM=VISCOUS`
-against the refined profile, then `TERM=COULOMB` against that. Params: `TERM` (MASS) `AXIS`
+against the refined profile, then `TERM=COULOMB` against
+that, and `TERM=DIRECTION_SPLIT` last on AWD. Params: `TERM` (MASS) `AXIS`
 (X) `SERVOS` `PROFILE` `LO` (0.7) `HI` (1.3) `TOL` (0.02) `MAX_EVALS` (10)
 `START` `END` `X_START` `X_END` `Y_START` `Y_END` `ACCELS` `SPEEDS`
 `ITERATIONS` `DWELL_MS` `TAG` (refdyn) `NAME` (refined_<term>).
@@ -433,13 +507,13 @@ Gain sweep, shaper-calibrate style: for each `SPEED_GAINS` entry (0.1 Hz units)
 it derives the position gain (`×1.6`) and integral (`1250000 ÷ gain`), records
 one capture per step into the run directory, then `servo-cal analyze` writes
 `results.json` whose verdict names the highest gain step without resonance or a
-torque rail. Reverts to `REVERT_GAIN` afterwards (0.1 Hz units, default the
-lowest `SPEED_GAINS` entry) — the single-gain iteration loop is
-`SPEED_GAINS=<gain under test> REVERT_GAIN=<known safe gain>`, so the sweep
-tests one gain and always lands somewhere safe. With an accelerometer
+torque rail. Always **restores the gains that were active before the sweep**
+when it finishes — also on failure — so the machine is never left on a tested
+value by accident; keeping a result is always an explicit act (`APPLY=1` or
+`SERVO_APPLY_GAINS`). With an accelerometer
 (`accel_chip` config option or `ACCEL_CHIP=`) each step also records vibration
 data (`step_<name>_accel.csv` next to the `.scap`). `APPLY=1` (default 0,
-report-only) writes the verdict's recommended gains *after* the revert,
+report-only) writes the verdict's recommended gains *after* the restore,
 reads them back (a mismatch is a command error, nothing left half-applied),
 and runs one `SERVO_MEASURE_TRACKING` to report before/after following-error
 peak and overshoot; a null verdict (every step flagged) makes `APPLY=1` a
@@ -448,30 +522,37 @@ list) restricts the sweep to a subset of the axis servos; adding
 `BASE_SPEED_GAIN=` then pins every non-swept axis servo at that gain (same
 `×1.6`/`Ti` derivation, recorded as `base_gains` in the manifest) for the whole
 sweep — the asymmetric-gain experiment: hold one belt pair soft while sweeping
-the other pair higher. Params:
+the other pair higher; those servos are restored to their prior gains too.
+Params:
 `SPEED_GAINS` (500,650,800,1000) `AXIS` (X) `START` `END`
 `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2) `DWELL_MS` `TAG` (cal)
-`ACCEL_CHIP` `APPLY` `SERVO` `BASE_SPEED_GAIN` `REVERT_GAIN`.
+`ACCEL_CHIP` `APPLY` `SERVO` `BASE_SPEED_GAIN`.
 
 #### SERVO_GAIN_LADDER
-Speed-gain sweep that climbs until analysis flags trouble, instead of a fixed
-`SPEED_GAINS` list. Runs the ladder `[SAFE, START, START+STEP, … ≤ MAX]` with
-the same `SERVO_CALIBRATE_GAINS` machinery (position gain `×1.6`, integral
-`1250000 ÷ gain`). After **each** rung at or above `START` completes its
+Gain sweep that climbs until analysis flags trouble, instead of a fixed
+`SPEED_GAINS` list. Runs the ladder `[SAFE, START, START+STEP, … ≤ MAX]`.
+Without `PARAM` it climbs the speed gain with the coupled derivation
+(position gain `×1.6`, integral `1250000 ÷ gain`); with
+`PARAM=position|speed|integral` it climbs **that one gain in its device
+units, holding the other two at their pre-ladder values** — the
+single-knob edge finder (the drives must agree on their current gains,
+else a command error tells you to align them first). After **each** rung
+at or above `START` completes its
 capture, `servo-cal analyze` runs on the run so far and that rung's step flags
 are inspected; the first rung whose step carries `resonance_detected`,
 `torque_saturated` or `settle_window_truncated` **stops the climb** — higher
 rungs are never executed. The `SAFE` baseline (always the first rung) never
-counts as a stop reason and is applied to every drive at the end via the gain
-write path, so the axis is left at a known-good gain regardless of where the
-climb stopped. Output is the usual verdict one-liner (recommended step, reason,
+counts as a stop reason. The ladder always **restores the pre-ladder gains**
+at the end (also on failure) — keep a rung with `SERVO_APPLY_GAINS`.
+Output is the usual verdict one-liner (recommended step, reason,
 run dir) plus, on an early stop, one line naming the rung and the flags that
-stopped it. `START` names the first climb gain, not a stroke bound — the stroke
+stopped it. `START` names the first climb value, not a stroke bound — the
+stroke
 window comes from the configured axis bounds. A mid-ladder analysis failure
 (binary non-zero, unreadable `results.json`) aborts loudly; the run directory
 keeps everything captured so far. Params: `SAFE` `START` `STEP` (50, must be
-> 0) `MAX` (≥ `START`) `AXIS` (X) `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2)
-`DWELL_MS` `TAG` (ladder) `SERVO`.
+> 0) `MAX` (≥ `START`) `PARAM` `AXIS` (X) `SPEED` (100) `ACCEL` (3000)
+`ITERATIONS` (2) `DWELL_MS` `TAG` (ladder) `SERVO`.
 
 #### SERVO_HARVEST_NOTCHES
 Automates the "let the drive's adaptive notch tuning find the resonances during

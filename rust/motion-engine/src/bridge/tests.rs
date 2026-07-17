@@ -519,7 +519,7 @@ fn shutdown_does_not_abort_on_detached_ethercat_weak() {
             m
         },
         timeout: Duration::from_millis(50),
-        freq_of: Arc::new(|_| None),
+        clock_of: Arc::new(|_| None),
     };
 
     let mcu_clock_of = |_mcu_id: u32| -> Option<(u64, f64)> { Some((1, 1.0)) };

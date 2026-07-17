@@ -10,6 +10,18 @@ pub struct AxisQueue {
     pub ring_depth: u32,
     pub physical_write_cursor: u32,
     pub lead_secs: f64,
+    /// Staged pieces that carry motion (`!is_hold_piece`), maintained
+    /// incrementally so the per-loop ledger publish never scans the queue.
+    pub staged_motion: u32,
+    /// Consecutive hold pieces at the pushed (wire) tail; any non-hold send
+    /// resets it. Feeds the drain ledger's motion-only drained condition.
+    pub wire_hold_tail: u32,
+}
+
+/// A constant-position piece: one coefficient, so zero velocity everywhere.
+/// These are dwell / idle-blanket coverage, not motion.
+pub fn is_hold_piece(p: &PieceEntry) -> bool {
+    p.coeff_count == 1
 }
 
 impl AxisQueue {
@@ -21,6 +33,8 @@ impl AxisQueue {
             ring_depth,
             physical_write_cursor: 0,
             lead_secs: MAX_LEAD_SECS,
+            staged_motion: 0,
+            wire_hold_tail: 0,
         }
     }
     pub fn room(&self) -> u32 {

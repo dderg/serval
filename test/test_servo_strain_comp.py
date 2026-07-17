@@ -630,7 +630,7 @@ def test_build_rejects_grids_beyond_the_endpoint_caps(tmp_path):
         STIFFNESS_B="200",
         CROSS_AB="0",
         CROSS_BA="0",
-        SPACING="1",
+        SPACING="0.05",
     )
     with pytest.raises(RuntimeError, match="raise SPACING"):
         sc.cmd_SERVO_STRAIN_COMP_BUILD(gcmd)
@@ -867,19 +867,33 @@ def write_line_scap(path, field, field_b, y):
     write_scap(path, sweep, [y] * len(sweep), field, field_b)
 
 
+def write_line_scap_y(path, field, field_b, x):
+    n = 400
+    fwd = [i * 100.0 / (n - 1) for i in range(n)]
+    sweep = fwd + fwd[::-1]
+    write_scap(path, [x] * len(sweep), sweep, field, field_b)
+
+
+def tune_steps(iteration):
+    return [
+        ("iter%d_x" % iteration, "y", 50.0),
+        ("iter%d_y" % iteration, "x", 50.0),
+    ]
+
+
 def test_tune_converges_the_matrix_against_the_true_response(tmp_path):
     baseline = tmp_path / "baseline"
-    write_run(baseline, field=elastic_a, field_b=elastic_bx)
+    write_run(baseline, field=elastic_a, field_b=elastic_b)
     sc, _ = make_comp(tmp_path)
-    k_true = [[200.0, -50.0], [-50.0, 200.0]]
-    # The probe got the SHAPE right but the scale 1.5x off — the loop's
-    # job is to converge the scale without another raster.
+    # Asymmetric true cross terms, and the initial guess has NO cross at
+    # all - the loop must measure all four elements, not scale a row.
+    k_true = [[200.0, -50.0], [-40.0, 160.0]]
     tuner = sc.begin_tune(
         FakeGcmd(
             STIFFNESS_A="300",
             STIFFNESS_B="300",
-            CROSS_AB="-75",
-            CROSS_BA="-75",
+            CROSS_AB="0",
+            CROSS_BA="0",
         ),
         str(baseline),
         None,
@@ -887,7 +901,8 @@ def test_tune_converges_the_matrix_against_the_true_response(tmp_path):
     tune_dir = tmp_path / "tunerun"
     tune_dir.mkdir()
     last = None
-    for iteration in range(3):
+    converged = False
+    for iteration in range(4):
         tuner.rebuild_and_enable(FakeGcmd())
         grids = read_map_offset_grids(tmp_path / "strain_comp.json")
 
@@ -903,22 +918,33 @@ def test_tune_converges_the_matrix_against_the_true_response(tmp_path):
 
         def measured_b(x, y):
             o_a, o_b = offsets_at(x, y)
-            return elastic_bx(x, y) + k_true[1][0] * o_a + k_true[1][1] * o_b
+            return elastic_b(x, y) + k_true[1][0] * o_a + k_true[1][1] * o_b
 
-        name = "iter%d" % iteration
         write_line_scap(
-            tune_dir / ("step_%s.scap" % name), measured_a, measured_b, 50.0
+            tune_dir / ("step_iter%d_x.scap" % iteration),
+            measured_a,
+            measured_b,
+            50.0,
         )
-        last = tuner.score_line(FakeGcmd(), str(tune_dir), name, 50.0)
-        if all(abs(r["rho"] - 1.0) <= 0.03 for r in last):
+        write_line_scap_y(
+            tune_dir / ("step_iter%d_y.scap" % iteration),
+            measured_a,
+            measured_b,
+            50.0,
+        )
+        last = tuner.score_lines(
+            FakeGcmd(), str(tune_dir), tune_steps(iteration)
+        )
+        if tuner.converged(last, 0.03):
+            converged = True
             break
         tuner.apply(last)
-    assert all(abs(r["rho"] - 1.0) <= 0.03 for r in last)
+    assert converged, last
     (kaa, kab), (kba, kbb) = tuner.matrix_rows()
     assert kaa == pytest.approx(200, rel=0.06)
-    assert kbb == pytest.approx(200, rel=0.06)
+    assert kbb == pytest.approx(160, rel=0.06)
     assert kab == pytest.approx(-50, rel=0.12)
-    assert kba == pytest.approx(-50, rel=0.12)
+    assert kba == pytest.approx(-40, rel=0.12)
     # The converged loop rebuilt before scoring, so the map on disk is
     # already the one built with the converged matrix.
     tuner.store_matrix()
@@ -928,9 +954,9 @@ def test_tune_converges_the_matrix_against_the_true_response(tmp_path):
     assert payload["pairs"][0]["cross_pct_per_mm"] == pytest.approx(kab)
 
 
-def test_tune_flags_a_line_that_ignores_the_correction(tmp_path):
+def test_tune_flags_lines_that_ignore_the_correction(tmp_path):
     baseline = tmp_path / "baseline"
-    write_run(baseline, field=elastic_a, field_b=elastic_bx)
+    write_run(baseline, field=elastic_a, field_b=elastic_b)
     sc, _ = make_comp(tmp_path)
     tuner = sc.begin_tune(
         FakeGcmd(
@@ -945,9 +971,12 @@ def test_tune_flags_a_line_that_ignores_the_correction(tmp_path):
     tune_dir = tmp_path / "tunerun"
     tune_dir.mkdir()
     tuner.rebuild_and_enable(FakeGcmd())
-    write_line_scap(tune_dir / "step_iter0.scap", elastic_a, elastic_bx, 50.0)
+    write_line_scap(tune_dir / "step_iter0_x.scap", elastic_a, elastic_b, 50.0)
+    write_line_scap_y(
+        tune_dir / "step_iter0_y.scap", elastic_a, elastic_b, 50.0
+    )
     with pytest.raises(RuntimeError, match="not credible"):
-        tuner.score_line(FakeGcmd(), str(tune_dir), "iter0", 50.0)
+        tuner.score_lines(FakeGcmd(), str(tune_dir), tune_steps(0))
 
 
 def test_tune_rejects_a_flat_line(tmp_path):
@@ -974,8 +1003,37 @@ def test_tune_rejects_a_flat_line(tmp_path):
             grids[0], x, y
         )
 
-    # elastic_b only varies with y, so along a fixed-y line belt B's map
-    # applies no varying correction — unverifiable, fail loudly.
-    write_line_scap(tune_dir / "step_iter0.scap", measured_a, elastic_b, 50.0)
-    with pytest.raises(RuntimeError, match="no correction"):
-        tuner.score_line(FakeGcmd(), str(tune_dir), "iter0", 50.0)
+    # elastic_b only varies with y, so along a single fixed-y line the
+    # other belt's map is flat - direct and cross stiffness cannot be
+    # separated from an X sweep alone; fail loudly.
+    write_line_scap(tune_dir / "step_iter0_x.scap", measured_a, elastic_b, 50.0)
+    with pytest.raises(RuntimeError, match="not identifiable"):
+        tuner.score_lines(FakeGcmd(), str(tune_dir), [("iter0_x", "y", 50.0)])
+
+
+def test_tune_rejects_collinear_own_and_cross_corrections(tmp_path):
+    baseline = tmp_path / "baseline"
+    # Both belts' fields are pure x slopes, so both maps' offsets are
+    # proportional along every line - no set of sweeps separates direct
+    # from cross stiffness.
+    write_run(baseline, field=elastic_a, field_b=elastic_bx)
+    sc, _ = make_comp(tmp_path)
+    tuner = sc.begin_tune(
+        FakeGcmd(
+            STIFFNESS_A="300",
+            STIFFNESS_B="300",
+            CROSS_AB="0",
+            CROSS_BA="0",
+        ),
+        str(baseline),
+        None,
+    )
+    tune_dir = tmp_path / "tunerun"
+    tune_dir.mkdir()
+    tuner.rebuild_and_enable(FakeGcmd())
+    write_line_scap(tune_dir / "step_iter0_x.scap", elastic_a, elastic_bx, 50.0)
+    write_line_scap_y(
+        tune_dir / "step_iter0_y.scap", elastic_a, elastic_bx, 50.0
+    )
+    with pytest.raises(RuntimeError, match="cannot be separated"):
+        tuner.score_lines(FakeGcmd(), str(tune_dir), tune_steps(0))

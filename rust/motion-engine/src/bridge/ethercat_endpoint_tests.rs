@@ -16,7 +16,7 @@ fn drive() -> EthercatDrive {
         following_error_counts: None,
         max_torque_tenth_pct: None,
         velocity_ff: false,
-        ff_torque_clamp: 30.0,
+        ff_max_torque: 30.0,
         ff_lead_cycles: 0,
         invert_direction: false,
         dynamics_profile: None,
@@ -84,7 +84,7 @@ fn endpoint_args_per_drive_ff_flags() {
             EthercatDrive {
                 rotation_distance: 50.0,
                 velocity_ff: true,
-                ff_torque_clamp: 25.0,
+                ff_max_torque: 25.0,
                 ff_lead_cycles: 2,
                 ..drive()
             },
@@ -92,7 +92,7 @@ fn endpoint_args_per_drive_ff_flags() {
                 chain_index: 1,
                 axis: 2,
                 counts_per_mm: 2000.0,
-                ff_torque_clamp: 60.0,
+                ff_max_torque: 60.0,
                 invert_direction: true,
                 ..drive()
             },
@@ -420,7 +420,7 @@ fn endpoint_args_emit_ff_lead_cycles_only_when_nonzero() {
             EthercatDrive {
                 rotation_distance: 50.0,
                 velocity_ff: true,
-                ff_torque_clamp: 25.0,
+                ff_max_torque: 25.0,
                 ff_lead_cycles: 2,
                 ..drive()
             },
@@ -428,7 +428,7 @@ fn endpoint_args_emit_ff_lead_cycles_only_when_nonzero() {
                 chain_index: 1,
                 axis: 2,
                 counts_per_mm: 2000.0,
-                ff_torque_clamp: 60.0,
+                ff_max_torque: 60.0,
                 invert_direction: true,
                 ..drive()
             },

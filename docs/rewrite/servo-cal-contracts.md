@@ -116,6 +116,22 @@ block.
 ratio of the 20–450 Hz band peak to the 1–4 Hz band mean, detected at ratio
 ≥ 8.0 (ports `scripts/servo_gain_report.py` before its deletion).
 
+Each `metrics.moves[]` entry has this schema:
+
+```json
+{"move": 0, "start_ms": 299.0, "end_ms": 1129.0,
+ "direction": 1, "ferr_mean_moving": 12.5,
+ "ferr_peak": 1738.0, "ferr_rms": 299.45, "overshoot": 482.0,
+ "settle_ms": 107.0, "settle_window_truncated": false}
+```
+
+`direction` is -1, 0, or +1 from the actual target displacement
+`target_counts[e-1] - target_counts[s-1]` for move window `[s,e)`; a bridged
+or merged zero-net segment remains 0. `ferr_mean_moving` is the signed mean
+following error over exactly `[s,e)`, excluding feedforward lead and the
+post-move settling window. Peak and RMS retain their existing extended-window
+semantics.
+
 A `differential` step instead carries an empty `drives` map and a
 `differential` block — the anti-phase belt-pair FRF (H1 Welch estimate,
 differential commanded position → differential encoder position, drive
@@ -180,7 +196,7 @@ servo-cal serve --dir <captures_root> [--port 8085]
 
 Exit non-zero with a one-line reason on any malformed input (fail loud, no
 partial results.json). klippy resolves the binary at
-`rust/target/release/servo-cal` relative to the repo root, overridable via
+`rust/target/snapshot/servo-cal` relative to the repo root, overridable via
 `[servo_calibration] servo_cal_binary:`.
 
 `serve` endpoints: `GET /api/runs` (list: name, mtime, experiment, verdict
