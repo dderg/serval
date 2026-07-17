@@ -308,38 +308,59 @@ impl<S: PieceSink> Pump<S> {
     }
 
     fn check_cohort_deadline(&mut self) {
-        if let Some(ref co) = self.cohort {
-            let now = Instant::now();
-            let floor = co.floor(&self.queues);
-            if floor > co.deadline_floor {
-                let co = self.cohort.as_mut().unwrap();
-                co.step_deadline = now + co.timeout;
-                co.deadline_floor = floor;
-            } else if now >= co.step_deadline {
-                let co = self.cohort.as_ref().unwrap();
-                let lagging: Vec<String> = co
-                    .participants
-                    .iter()
-                    .map(|k| {
-                        format!(
-                            "mcu{} axis{}: executed {} queued {}",
-                            k.mcu_id,
-                            k.axis,
-                            co.executed(k, &self.queues),
-                            self.queues.get(k).map_or(0, |q| q.pieces.len()),
-                        )
-                    })
-                    .collect();
-                let id = co.id;
-                (self.callbacks.on_drip_stall)(format!(
-                    "drip cohort {id}: floor stalled at {floor} for {:?}; \
-                     participants: [{}]",
-                    co.timeout,
-                    lagging.join(", ")
-                ));
-                self.cohort = None;
-            }
+        let Some(co) = &self.cohort else {
+            return;
+        };
+        let now = Instant::now();
+        let floor = co.floor(&self.queues);
+        if floor > co.deadline_floor {
+            let co = self.cohort.as_mut().unwrap();
+            co.step_deadline = now + co.timeout;
+            co.deadline_floor = floor;
+            return;
         }
+        if now < co.step_deadline {
+            return;
+        }
+        let fully_executed = co.participants.iter().all(|k| {
+            self.queues
+                .get(k)
+                .is_none_or(|q| q.pieces.is_empty() && q.pushed == q.retired)
+        });
+        if fully_executed {
+            tracing::warn!(
+                subsystem = "motion",
+                event = "drip_cohort_executed_awaiting_trip",
+                cohort = co.id,
+                floor,
+                "drip cohort fully executed with no trip; the host trip \
+                 deadline adjudicates — not a stall"
+            );
+            let co = self.cohort.as_mut().unwrap();
+            co.step_deadline = now + co.timeout;
+            return;
+        }
+        let lagging: Vec<String> = co
+            .participants
+            .iter()
+            .map(|k| {
+                format!(
+                    "mcu{} axis{}: executed {} queued {}",
+                    k.mcu_id,
+                    k.axis,
+                    co.executed(k, &self.queues),
+                    self.queues.get(k).map_or(0, |q| q.pieces.len()),
+                )
+            })
+            .collect();
+        let id = co.id;
+        (self.callbacks.on_drip_stall)(format!(
+            "drip cohort {id}: floor stalled at {floor} for {:?}; \
+             participants: [{}]",
+            co.timeout,
+            lagging.join(", ")
+        ));
+        self.cohort = None;
     }
 
     fn handle_stall_full(&mut self, stall_key: AxisKey) -> Result<(), ()> {
