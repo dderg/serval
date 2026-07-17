@@ -280,27 +280,6 @@ function shortTime(mtimeUtc) {
   return m ? m[1] : mtimeUtc;
 }
 
-function verdictCellHtml(run, results) {
-  if (!results) {
-    return run.has_results
-      ? '<span class="note">loading…</span>'
-      : '<span class="note">no results yet</span>';
-  }
-  const v = results.verdict;
-  const flags = [...new Set(results.steps.flatMap((s) => s.flags))];
-  const flagBadges = flags
-    .map((f) => {
-      const cls =
-        f === "resonance_detected" ? "resonance" : f === "torque_saturated" ? "torque" : "truncated";
-      return `<span class="badge ${cls}" title="${f}">${f.split("_")[0]}</span>`;
-    })
-    .join("");
-  const head = v.recommended_step
-    ? `<span class="badge step">${v.recommended_step}</span>`
-    : `<span class="badge none">none</span>`;
-  return `${head}${flagBadges}<span class="hint" title="${v.reason}"> ${v.reason}</span>`;
-}
-
 // --- page shell ---------------------------------------------------------------
 
 function currentPageDef() {
@@ -363,18 +342,51 @@ function consoleSectionHtml(def) {
 
 /// The charts that fold drives into one trace (avg PSD, worst-drive sweep
 /// metrics, combined time domain) all obey this one switch; per-motor
-/// expands them into a trace per drive.
-function motorViewPerMotor() {
-  return localStorage.getItem(MOTOR_VIEW_KEY) === "per-motor";
+/// expands them into a trace per drive, and "avg" (where offered) shows
+/// the mean over drives instead of the worst.
+function motorView() {
+  const v = localStorage.getItem(MOTOR_VIEW_KEY);
+  return v === "per-motor" || v === "avg" ? v : "agg";
 }
 
-function motorViewToggleHtml(aggLabel) {
-  const per = motorViewPerMotor();
+function motorViewPerMotor() {
+  return motorView() === "per-motor";
+}
+
+/// Sections whose aggregate is already an average (PSD, combined time
+/// domain) don't offer a separate "avg" chip; there, the stored "avg"
+/// view lights up the aggregate chip.
+function motorViewEffective(withAvg) {
+  const view = motorView();
+  return !withAvg && view === "avg" ? "agg" : view;
+}
+
+function motorViewToggleHtml(aggLabel, withAvg = false) {
+  const effective = motorViewEffective(withAvg);
+  const chip = (v, label) =>
+    `<button class="chip motor-view-btn${effective === v ? " active" : ""}" data-view="${v}">${label}</button>`;
   return (
-    `<span class="chips">` +
-    `<button class="chip motor-view-btn${per ? "" : " active"}" data-view="agg">${aggLabel}</button>` +
-    `<button class="chip motor-view-btn${per ? " active" : ""}" data-view="per-motor">per-motor</button>` +
+    `<span class="chips motor-view-chips${withAvg ? " with-avg" : ""}">` +
+    chip("agg", aggLabel) +
+    (withAvg ? chip("avg", "avg") : "") +
+    chip("per-motor", "per-motor") +
     `</span>`
+  );
+}
+
+function syncMotorViewChips() {
+  document.querySelectorAll(".motor-view-chips").forEach((group) => {
+    const effective = motorViewEffective(group.classList.contains("with-avg"));
+    group.querySelectorAll(".motor-view-btn").forEach((b) => {
+      b.classList.toggle("active", b.dataset.view === effective);
+    });
+  });
+}
+
+function sectionHeadHtml(title, toolsHtml) {
+  return (
+    `<div class="section-head"><h2>${title}</h2></div>` +
+    (toolsHtml ? `<div class="section-tools">${toolsHtml}</div>` : "")
   );
 }
 
@@ -382,19 +394,24 @@ function analysisSectionsHtml(def) {
   const parts = [];
   parts.push(
     `<section class="runs-section">` +
-      `<div class="section-head"><h2>runs</h2>` +
-      `<span class="note">${def.experiments ? def.experiments.join(", ") : "all experiments"} — click a row to chart it</span></div>` +
+      sectionHeadHtml(
+        "runs",
+        `<span class="note">${def.experiments ? def.experiments.join(", ") : "all experiments"} — click a row to chart it</span>`
+      ) +
       `<div class="table-wrap runs-wrap"><table><thead><tr>` +
-      `<th></th><th>time</th><th>tag</th><th>ambient diff vs previous</th><th>verdict</th><th>note</th><th></th>` +
+      `<th></th><th>time</th><th>tag</th><th>ambient diff vs previous</th><th>note</th><th></th>` +
       `</tr></thead><tbody id="journal-body"></tbody></table></div>` +
       `</section>`
   );
   if (def.metrics) {
     parts.push(
       `<section class="metrics-section">` +
-        `<div class="section-head"><h2>tracking metrics</h2>` +
-        `<span class="note">per drive, worst move of each step — ` +
-        `overshoot/settle measured over the dwell after each move</span></div>` +
+        sectionHeadHtml(
+          "tracking metrics",
+          motorViewToggleHtml("worst drive", true) +
+            `<span class="note">worst move of each step — ` +
+            `overshoot/settle measured over the dwell after each move</span>`
+        ) +
         `<div id="metrics-table"><p class="note">select runs above</p></div>` +
         `</section>`
     );
@@ -402,10 +419,12 @@ function analysisSectionsHtml(def) {
   if (def.sweepChart) {
     parts.push(
       `<section class="sweep-metrics-section">` +
-        `<div class="section-head"><h2>metrics vs gain</h2>` +
-        motorViewToggleHtml("worst drive") +
-        `<span class="note">● solid: overshoot, dashed: ferr rms, ` +
-        `dotted: ferr peak; red rung: step flagged resonance/torque</span></div>` +
+        sectionHeadHtml(
+          "metrics vs gain",
+          motorViewToggleHtml("worst drive", true) +
+            `<span class="note">● solid: overshoot, dashed: ferr rms, ` +
+            `dotted: ferr peak; red rung: step flagged resonance/torque</span>`
+        ) +
         `<div class="charts" id="sweep-metrics-chart"><p class="note">select runs above</p></div>` +
         `</section>`
     );
@@ -413,8 +432,7 @@ function analysisSectionsHtml(def) {
   if (def.charts && def.charts.includes("frf")) {
     parts.push(
       `<section class="frf-section" id="frf-section" hidden>` +
-        `<div class="section-head"><h2>differential belt FRF</h2>` +
-        `<span class="note" id="frf-meta"></span></div>` +
+        sectionHeadHtml("differential belt FRF", `<span class="note" id="frf-meta"></span>`) +
         `<div class="charts" id="frf-charts"></div>` +
         `<div id="frf-modes"></div>` +
         `</section>`
@@ -423,15 +441,17 @@ function analysisSectionsHtml(def) {
   if (def.charts && def.charts.includes("psd")) {
     parts.push(
       `<section class="psd-section">` +
-        `<div class="section-head"><h2>following-error PSD</h2>` +
-        motorViewToggleHtml("avg") +
-        `<label class="note">to <select id="psd-max-freq">` +
-        PSD_MAX_FREQ_CHOICES_HZ.map(
-          (f) =>
-            `<option value="${f}"${f === psdMaxFreqHz() ? " selected" : ""}>${f}</option>`
-        ).join("") +
-        `</select> Hz</label>` +
-        `<div class="chips" id="psd-step-chips"></div></div>` +
+        sectionHeadHtml(
+          "following-error PSD",
+          motorViewToggleHtml("avg") +
+            `<label class="note">to <select id="psd-max-freq">` +
+            PSD_MAX_FREQ_CHOICES_HZ.map(
+              (f) =>
+                `<option value="${f}"${f === psdMaxFreqHz() ? " selected" : ""}>${f}</option>`
+            ).join("") +
+            `</select> Hz</label>` +
+            `<div class="chips" id="psd-step-chips"></div>`
+        ) +
         `<div class="charts" id="psd-charts"><p class="note">select runs above</p></div>` +
         `</section>`
     );
@@ -439,7 +459,7 @@ function analysisSectionsHtml(def) {
   if (def.peaks) {
     parts.push(
       `<section class="peaks-section">` +
-        `<div class="section-head"><h2>detected peaks</h2><span class="note" id="peaks-run"></span></div>` +
+        sectionHeadHtml("detected peaks", `<span class="note" id="peaks-run"></span>`) +
         `<div id="peak-list"><p class="note">select runs above</p></div>` +
         `</section>`
     );
@@ -447,10 +467,10 @@ function analysisSectionsHtml(def) {
   if (def.charts && def.charts.includes("time")) {
     parts.push(
       `<section class="time-section">` +
-        `<div class="section-head"><h2>time domain — following error</h2>` +
-        motorViewToggleHtml("combined") +
-        `<div class="chips" id="time-step-chips"></div>` +
-        `</div>` +
+        sectionHeadHtml(
+          "time domain — following error",
+          motorViewToggleHtml("combined") + `<div class="chips" id="time-step-chips"></div>`
+        ) +
         `<div class="charts" id="charts"><p class="note">select runs above</p></div>` +
         `</section>`
     );
@@ -463,11 +483,13 @@ function liveShellHtml() {
     `<div class="workspace">` +
     `<main class="analysis">` +
     `<section class="live-section">` +
-    `<div class="section-head"><h2>live following error — per motor</h2>` +
-    `<label class="live-window">window ` +
-    `<input type="range" id="live-window" min="2" max="30" step="1" value="${state.live.windowS}">` +
-    `<span id="live-window-value">${state.live.windowS} s</span></label>` +
-    `<span class="note" id="live-status">connecting to the telemetry tap…</span></div>` +
+    sectionHeadHtml(
+      "live following error — per motor",
+      `<label class="live-window">window ` +
+        `<input type="range" id="live-window" min="2" max="30" step="1" value="${state.live.windowS}">` +
+        `<span id="live-window-value">${state.live.windowS} s</span></label>` +
+        `<span class="note" id="live-status">connecting to the telemetry tap…</span>`
+    ) +
     `<div class="charts" id="live-charts">` +
     `<p class="note">streams straight from the drives the moment the tap answers — ` +
     `no capture, no file</p>` +
@@ -496,11 +518,11 @@ function liveShellHtml() {
 }
 
 /// Collapsible analysis sections (accordion). Each `.analysis .section-head`
-/// is a click target that toggles a `.collapsed` class on its parent
-/// `<section>`; CSS hides everything but the head when collapsed. The head's
-/// own controls (buttons, selects, labels) don't trigger the toggle, so the
-/// PSD range selector and the strain field buttons stay clickable. Collapse
-/// state is keyed by page + heading text and persists in localStorage.
+/// holds only the section's h2 and is the sole click target; it toggles a
+/// `.collapsed` class on its parent `<section>`. Controls (chips, selects,
+/// notes) live in a `.section-tools` row below the head, so they collapse
+/// with the content and never sit inside the fold hitbox. Collapse state
+/// is keyed by page + heading text and persists in localStorage.
 const ACCORDION_KEY = "servoCal.collapsedSections";
 
 function loadCollapsedSections() {
@@ -533,7 +555,6 @@ function bindAccordionToggle() {
   document.addEventListener("click", (e) => {
     const head = e.target.closest(".analysis .section-head");
     if (!head) return;
-    if (e.target.closest("button,select,input,textarea,a,label,.chips")) return;
     const section = head.parentElement;
     if (!section || section.tagName !== "SECTION") return;
     section.classList.toggle("collapsed");
@@ -589,7 +610,7 @@ function renderPage() {
       `<section class="runs-section">` +
       `<div class="section-head"><h2>journal — every run</h2></div>` +
       `<div class="table-wrap journal-wrap"><table><thead><tr>` +
-      `<th></th><th>time</th><th>experiment/tag</th><th>ambient diff vs previous</th><th>verdict</th><th>note</th><th></th>` +
+      `<th></th><th>time</th><th>experiment/tag</th><th>ambient diff vs previous</th><th>note</th><th></th>` +
       `</tr></thead><tbody id="journal-body"></tbody></table></div>` +
       `</section>` +
       consoleSectionHtml({}) +
@@ -609,8 +630,45 @@ function renderPage() {
   applyAccordionState();
 }
 
+/// Drag handles on every header cell of the run tables. The first drag
+/// freezes the browser's auto layout into explicit widths and switches the
+/// table to fixed layout, so a column can shrink below its content (cells
+/// ellipsize) instead of forcing horizontal scroll.
+function makeColumnsResizable(table) {
+  const ths = [...table.querySelectorAll("thead th")];
+  const freezeLayout = () => {
+    if (table.style.tableLayout === "fixed") return;
+    for (const th of ths) th.style.width = `${th.offsetWidth}px`;
+    table.style.tableLayout = "fixed";
+  };
+  ths.forEach((th) => {
+    const grip = document.createElement("span");
+    grip.className = "col-resizer";
+    th.appendChild(grip);
+    grip.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      freezeLayout();
+      const startX = e.pageX;
+      const startW = th.offsetWidth;
+      const onMove = (ev) => {
+        th.style.width = `${Math.max(24, startW + ev.pageX - startX)}px`;
+      };
+      const onUp = () => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+  });
+}
+
 function bindPageEvents() {
   bindConsole();
+  document
+    .querySelectorAll(".runs-wrap table, .journal-wrap table")
+    .forEach(makeColumnsResizable);
   const applyBtn = el("drive-apply-btn");
   if (applyBtn) applyBtn.addEventListener("click", applyDriveChanges);
   const psdMax = el("psd-max-freq");
@@ -623,7 +681,8 @@ function bindPageEvents() {
   document.querySelectorAll("button.motor-view-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       localStorage.setItem(MOTOR_VIEW_KEY, btn.dataset.view);
-      renderPage();
+      syncMotorViewChips();
+      redrawCharts();
     });
   });
   const def = currentPageDef();
@@ -644,6 +703,10 @@ function bindPageEvents() {
 function renderRuns() {
   const tbody = el("journal-body");
   if (!tbody) return;
+  const editing = document.activeElement;
+  if (editing && editing.classList.contains("run-note-input") && tbody.contains(editing)) {
+    return;
+  }
   const def = currentPageDef();
   const runs = def.journal ? state.runs : pageRuns(def);
   tbody.innerHTML = "";
@@ -651,7 +714,6 @@ function renderRuns() {
     const globalIdx = state.runs.indexOf(run);
     const detail = state.details.get(run.name);
     const manifest = detail && detail.manifest;
-    const results = detail && detail.results;
     const prevManifest =
       globalIdx + 1 < state.runs.length
         ? (state.details.get(state.runs[globalIdx + 1].name) || {}).manifest
@@ -737,11 +799,6 @@ function renderRuns() {
     if (diff) diffTd.title = diff;
     tr.appendChild(diffTd);
 
-    const verdictTd = document.createElement("td");
-    verdictTd.className = "verdict";
-    verdictTd.innerHTML = verdictCellHtml(run, results);
-    tr.appendChild(verdictTd);
-
     tr.appendChild(noteCell(run));
 
     const actionTd = document.createElement("td");
@@ -793,8 +850,10 @@ function noteCell(run) {
     const finish = (save) => {
       if (done) return;
       done = true;
+      const text = input.value;
+      input.remove();
       if (save) {
-        saveNote(run, input.value);
+        saveNote(run, text);
       } else {
         renderRuns();
       }
@@ -1265,23 +1324,75 @@ function torqueCellHtml(tq) {
   );
 }
 
+function metricsDriveRow(name, stepName, drive, dr) {
+  const umPerCount = 1000 / countsPerMm(name, drive);
+  const s = driveMoveSummary(dr.metrics);
+  return {
+    run: name,
+    step: stepName,
+    drive,
+    ferrPeakUm: s.ferrPeak * umPerCount,
+    ferrRmsUm: s.ferrRms * umPerCount,
+    overshootUm: s.overshoot * umPerCount,
+    settle: {
+      settleWorstMs: s.settleWorstMs,
+      neverSettled: s.neverSettled,
+      truncated: s.truncated,
+    },
+    torque: dr.metrics.torque,
+  };
+}
+
+/// One row per (run, step) folded over drives: "agg" keeps the worst drive
+/// per metric, "avg" the mean. Rail badges survive both folds — a railed
+/// drive is a railed step no matter the view.
+function foldDriveRows(driveRows, view) {
+  const fold = (values) =>
+    view === "avg"
+      ? values.reduce((a, b) => a + b, 0) / values.length
+      : Math.max(...values);
+  const settled = driveRows
+    .map((r) => r.settle.settleWorstMs)
+    .filter((v) => v != null);
+  const worstTorque = driveRows.reduce((a, r) =>
+    r.torque.peak_pct_rated > a.torque.peak_pct_rated ? r : a
+  ).torque;
+  return {
+    run: driveRows[0].run,
+    step: driveRows[0].step,
+    drive: view === "avg" ? "avg" : "worst",
+    ferrPeakUm: fold(driveRows.map((r) => r.ferrPeakUm)),
+    ferrRmsUm: fold(driveRows.map((r) => r.ferrRmsUm)),
+    overshootUm: fold(driveRows.map((r) => r.overshootUm)),
+    settle: {
+      settleWorstMs: settled.length ? fold(settled) : null,
+      neverSettled: driveRows.some((r) => r.settle.neverSettled),
+      truncated: driveRows.some((r) => r.settle.truncated),
+    },
+    torque:
+      view === "avg"
+        ? {
+            ...worstTorque,
+            peak_pct_rated: fold(driveRows.map((r) => r.torque.peak_pct_rated)),
+          }
+        : worstTorque,
+  };
+}
+
 function metricsTableRows(names, steps) {
+  const view = motorView();
   const rows = [];
   for (const name of names) {
     const detail = state.details.get(name);
     if (!detail || !detail.results) continue;
     for (const step of detail.results.steps) {
       if (!steps.includes(step.name)) continue;
-      for (const [drive, dr] of Object.entries(step.drives)) {
-        rows.push({
-          run: name,
-          step: step.name,
-          drive,
-          umPerCount: 1000 / countsPerMm(name, drive),
-          summary: driveMoveSummary(dr.metrics),
-          torque: dr.metrics.torque,
-        });
-      }
+      const driveRows = Object.entries(step.drives).map(([drive, dr]) =>
+        metricsDriveRow(name, step.name, drive, dr)
+      );
+      if (!driveRows.length) continue;
+      if (view === "per-motor") rows.push(...driveRows);
+      else rows.push(foldDriveRows(driveRows, view));
     }
   }
   return rows;
@@ -1304,15 +1415,13 @@ function renderMetricsTable(names, steps) {
     container.innerHTML = '<p class="note">select runs above</p>';
     return;
   }
-  const columns = ["ferrPeak", "ferrRms", "overshoot"];
+  const columns = ["ferrPeakUm", "ferrRmsUm", "overshootUm"];
   const bounds = {};
   for (const c of columns) {
-    const values = rows.map((r) => r.summary[c] * r.umPerCount);
+    const values = rows.map((r) => r[c]);
     bounds[c] = { min: Math.min(...values), max: Math.max(...values) };
   }
-  const um = (counts, r) => (counts * r.umPerCount).toFixed(1);
-  const heat = (c, r) =>
-    heatCellStyle(r.summary[c] * r.umPerCount, bounds[c].min, bounds[c].max);
+  const heat = (c, r) => heatCellStyle(r[c], bounds[c].min, bounds[c].max);
   const stepColors = new Map();
   for (const r of rows) {
     if (!stepColors.has(r.step)) {
@@ -1330,10 +1439,10 @@ function renderMetricsTable(names, steps) {
         `<td class="run-cell" style="border-left:3px solid ${stepColor};padding-left:6px" ` +
         `title="${r.run}">${swatch}${r.run}</td>` +
         `<td style="color:${stepColor}">${r.step}</td><td>${r.drive}</td>` +
-        `<td class="num"${heat("ferrPeak", r)}>${um(r.summary.ferrPeak, r)}</td>` +
-        `<td class="num"${heat("ferrRms", r)}>${um(r.summary.ferrRms, r)}</td>` +
-        `<td class="num"${heat("overshoot", r)}>${um(r.summary.overshoot, r)}</td>` +
-        `<td class="num">${settleCellHtml(r.summary)}</td>` +
+        `<td class="num"${heat("ferrPeakUm", r)}>${r.ferrPeakUm.toFixed(1)}</td>` +
+        `<td class="num"${heat("ferrRmsUm", r)}>${r.ferrRmsUm.toFixed(1)}</td>` +
+        `<td class="num"${heat("overshootUm", r)}>${r.overshootUm.toFixed(1)}</td>` +
+        `<td class="num">${settleCellHtml(r.settle)}</td>` +
         `<td class="num">${torqueCellHtml(r.torque)}</td></tr>`
       );
     })
@@ -1379,16 +1488,29 @@ function sweepMetricsSeries(names) {
       const flagged = step.flags.some(
         (f) => f === "resonance_detected" || f === "torque_saturated"
       );
-      const stepPoints = new Map();
-      for (const [drive, dr] of Object.entries(step.drives)) {
+      const view = motorView();
+      const driveValues = Object.entries(step.drives).map(([drive, dr]) => {
         const umPerCount = 1000 / countsPerMm(name, drive);
         const s = driveMoveSummary(dr.metrics);
-        const label = motorViewPerMotor() ? drive : "worst drive";
-        const prev = stepPoints.get(label) || { overshootUm: 0, ferrRmsUm: 0, ferrPeakUm: 0 };
-        stepPoints.set(label, {
-          overshootUm: Math.max(prev.overshootUm, s.overshoot * umPerCount),
-          ferrRmsUm: Math.max(prev.ferrRmsUm, s.ferrRms * umPerCount),
-          ferrPeakUm: Math.max(prev.ferrPeakUm, s.ferrPeak * umPerCount),
+        return {
+          drive,
+          overshootUm: s.overshoot * umPerCount,
+          ferrRmsUm: s.ferrRms * umPerCount,
+          ferrPeakUm: s.ferrPeak * umPerCount,
+        };
+      });
+      const stepPoints = new Map();
+      if (view === "per-motor") {
+        for (const v of driveValues) stepPoints.set(v.drive, v);
+      } else if (driveValues.length) {
+        const fold = (f) =>
+          view === "avg"
+            ? driveValues.reduce((a, v) => a + f(v), 0) / driveValues.length
+            : Math.max(...driveValues.map(f));
+        stepPoints.set(view === "avg" ? "avg" : "worst drive", {
+          overshootUm: fold((v) => v.overshootUm),
+          ferrRmsUm: fold((v) => v.ferrRmsUm),
+          ferrPeakUm: fold((v) => v.ferrPeakUm),
         });
       }
       for (const [drive, p] of stepPoints) {
@@ -1418,7 +1540,8 @@ function renderSweepMetricsChart(names) {
   const box = document.createElement("div");
   box.className = "chart-box";
   const title = document.createElement("h3");
-  title.textContent = `${motorViewPerMotor() ? "per-motor" : "worst-drive"} metrics vs swept ${series[0].key} (µm)`;
+  const viewLabel = { agg: "worst-drive", avg: "avg", "per-motor": "per-motor" }[motorView()];
+  title.textContent = `${viewLabel} metrics vs swept ${series[0].key} (µm)`;
   box.appendChild(title);
   const canvas = document.createElement("canvas");
   canvas.width = 860;
@@ -1968,29 +2091,37 @@ function strainShellHtml(def) {
     `<div class="workspace">` +
     `<main class="analysis">` +
     `<section class="runs-section">` +
-    `<div class="section-head"><h2>strain runs</h2>` +
-    `<span class="note">strain_map — click to map, shift+click a second run to diff (matching dimensions)</span></div>` +
+    sectionHeadHtml(
+      "strain runs",
+      `<span class="note">strain_map — click to map, shift+click a second run to diff (matching dimensions)</span>`
+    ) +
     `<div class="table-wrap runs-wrap"><table><thead><tr>` +
     `<th>time</th><th>tag</th><th></th>` +
     `</tr></thead><tbody id="strain-run-body"></tbody></table></div>` +
     `</section>` +
     `<section>` +
-    `<div class="section-head"><h2>strain map</h2>` +
-    `<button class="strain-field-btn" data-field="elastic">elastic</button>` +
-    `<button class="strain-field-btn" data-field="friction" ` +
-    `title="the direction-dependent half: (forward - backward)/2 — what a position-keyed offset cannot cancel">friction</button>` +
-    `<span class="note" id="strain-summary"></span></div>` +
+    sectionHeadHtml(
+      "strain map",
+      `<button class="strain-field-btn" data-field="elastic">elastic</button>` +
+        `<button class="strain-field-btn" data-field="friction" ` +
+        `title="the direction-dependent half: (forward - backward)/2 — what a position-keyed offset cannot cancel">friction</button>` +
+        `<span class="note" id="strain-summary"></span>`
+    ) +
     `<div id="strain-heatmaps" class="strain-grid"></div>` +
     `<div id="strain-scale"></div>` +
     `</section>` +
     `<section>` +
-    `<div class="section-head"><h2>per-line elastic profiles</h2>` +
-    `<span class="note">one polyline per raster line, in bed coordinates</span></div>` +
+    sectionHeadHtml(
+      "per-line elastic profiles",
+      `<span class="note">one polyline per raster line, in bed coordinates</span>`
+    ) +
     `<div class="charts" id="strain-profiles"></div>` +
     `</section>` +
     `<section>` +
-    `<div class="section-head"><h2>per-line DC offset — mean elastic</h2>` +
-    `<span class="note">a line-to-line offset is trapped preload, not local strain</span></div>` +
+    sectionHeadHtml(
+      "per-line DC offset — mean elastic",
+      `<span class="note">a line-to-line offset is trapped preload, not local strain</span>`
+    ) +
     `<div class="strain-grid" id="strain-dc"></div>` +
     `</section>` +
     `</main>` +

@@ -149,6 +149,14 @@ section { background: var(--panel); border: 1px solid var(--border); border-radi
   flex-wrap: wrap;
 }
 
+.section-tools {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
 /* --- collapsible sections (accordion) --------------------------------- */
 .analysis .section-head { cursor: pointer; }
 .analysis .section-head.has-caret::before {
@@ -204,8 +212,19 @@ td.diff {
   color: var(--warn);
 }
 td.diff.empty { color: #4d5761; }
-td.verdict { max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
 td.actions button { padding: 1px 7px; font-size: 11px; }
+.runs-wrap td, .journal-wrap td { overflow: hidden; text-overflow: ellipsis; }
+.col-resizer {
+  position: absolute;
+  right: -3px;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: col-resize;
+  user-select: none;
+  z-index: 2;
+}
+.col-resizer:hover { background: #2d5a8a; }
 td.run-note {
   max-width: 220px;
   overflow: hidden;
