@@ -353,38 +353,18 @@ impl PyMotionEngine {
                 ));
             }
         }
-        let mut cfg = self.planner_config.lock_ok();
-        let previous = cfg.runtime_corner_deviation;
-        cfg.runtime_corner_deviation = corner_deviation;
-        let axis_chains = cfg
-            .post_processors
-            .compile(&cfg.axis_registry)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        if let Err(e) = cfg.validate_corner_budget(&axis_chains) {
-            cfg.runtime_corner_deviation = previous;
-            return Err(PyValueError::new_err(e));
-        }
+        self.planner_config.lock_ok().runtime_corner_deviation = corner_deviation;
         Ok(())
     }
     fn update_post_processor(&self, name: &str, key: &str, value: f64) -> PyResult<()> {
         let axis_chains = {
             let mut cfg = self.planner_config.lock_ok();
-            let previous = cfg.post_processors.param(name, key);
             cfg.post_processors
                 .set_param(name, key, value)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let axis_chains = cfg
-                .post_processors
+            cfg.post_processors
                 .compile(&cfg.axis_registry)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            if let Err(e) = cfg.validate_corner_budget(&axis_chains) {
-                let previous = previous.expect("set_param succeeded, so the param exists");
-                cfg.post_processors
-                    .set_param(name, key, previous)
-                    .expect("restoring a previously accepted param value");
-                return Err(PyValueError::new_err(e));
-            }
-            axis_chains
+                .map_err(|e| PyValueError::new_err(e.to_string()))?
         };
         if let Some(handle) = self.planner.lock_ok().as_ref() {
             handle

@@ -31,14 +31,6 @@ impl ChainStage {
         }
     }
 
-    #[must_use]
-    pub fn kernel_variance_s2(&self) -> f64 {
-        match self {
-            Self::SmoothKernel(kernel) => kernel.second_moment(),
-            Self::DerivativeGains { .. } => 0.0,
-        }
-    }
-
     fn composition_slot(&self) -> (usize, &'static str) {
         match self {
             Self::SmoothKernel(_) => (0, "kernel"),
@@ -198,14 +190,6 @@ impl CompiledChain {
     }
 
     #[must_use]
-    pub fn kernel_variance_s2(&self) -> f64 {
-        self.stages
-            .iter()
-            .map(ChainStage::kernel_variance_s2)
-            .fold(0.0, f64::max)
-    }
-
-    #[must_use]
     pub fn max_input_window(&self) -> (f64, f64) {
         self.stages.iter().fold((0.0, 0.0), |(lo, hi), stage| {
             let (stage_lo, stage_hi) = stage.input_window();
@@ -250,15 +234,6 @@ impl AxisChainSet {
     #[must_use]
     pub fn n_axes(&self) -> usize {
         self.chains.len()
-    }
-
-    #[must_use]
-    pub fn max_spatial_kernel_variance_s2(&self) -> f64 {
-        self.chains
-            .iter()
-            .take(3)
-            .map(CompiledChain::kernel_variance_s2)
-            .fold(0.0, f64::max)
     }
 
     /// Follower axes that ride on at least one leader: their tracks are not

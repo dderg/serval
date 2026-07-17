@@ -121,7 +121,7 @@ pub fn merge_collinear_lines(
     let chord_len = dist(line_prev.start, line_next.end);
     let followers = merged_followers(prev, next, chord_len, config.extrusion_ramp_rel_tol)?;
 
-    let budget = super::junction_deviation(prev.limits, config);
+    let budget = prev.limits.corner_deviation_mm;
     if !(budget.is_finite() && budget > 0.0) {
         return None;
     }
