@@ -299,6 +299,8 @@ impl PyMotionEngine {
             .post_processors
             .compile(&cfg.axis_registry)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cfg.validate_corner_budget(&axis_chains)
+            .map_err(PyValueError::new_err)?;
         let home = vec![0.0; cfg.axis_registry.n_axes()];
 
         let mut planner_guard = self.planner.lock_ok();

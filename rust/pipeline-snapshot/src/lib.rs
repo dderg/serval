@@ -171,7 +171,10 @@ pub fn pipeline_snapshot_streaming(
     let raw_points = extract_raw_path(&moves);
 
     let axis_chains = build_axis_chains(&params).map_err(SnapshotError::InvalidChain)?;
-    let corner = geometry::CornerFitConfig::default();
+    let corner = geometry::CornerFitConfig {
+        kernel_variance_s2: axis_chains.max_spatial_kernel_variance_s2(),
+        ..geometry::CornerFitConfig::default()
+    };
     let config = StreamConfig {
         corner,
         integration_tol: VELOCITY_INTEGRATION_TOL,

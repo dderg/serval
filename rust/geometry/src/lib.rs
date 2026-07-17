@@ -14,7 +14,7 @@ pub(crate) mod vec3;
 pub mod velocity;
 
 pub use error::{Fatal, GeometryError, InternalDetails, InternalKind, Recovery, SlotDegeneracy};
-pub use fitter::{CornerFitConfig, FitError, UnblendReason};
+pub use fitter::{CornerFitConfig, FitError, UnblendReason, kernel_corner_deviation_mm};
 pub use frontend::{
     CORNER_DEVIATION_SCV_FACTOR, FrontendError, Move, MoveContext, VelocityLimits,
     corner_deviation_from_scv, line_move, scv_from_corner_deviation,

@@ -481,11 +481,38 @@ impl CartesianLimits {
 
 pub const DEFAULT_SQUARE_CORNER_VELOCITY_MM_S: f64 = 5.0;
 
+pub fn validate_corner_budget(
+    corner_deviation_mm: f64,
+    max_accel_mm_s2: f64,
+    chains: &AxisChainSet,
+) -> Result<(), String> {
+    if !(corner_deviation_mm > 0.0) {
+        return Ok(());
+    }
+    for (axis, chain) in SPATIAL.iter().zip(&chains.chains) {
+        let kernel_deviation_mm =
+            geometry::kernel_corner_deviation_mm(chain.kernel_variance_s2(), max_accel_mm_s2);
+        if kernel_deviation_mm >= corner_deviation_mm {
+            return Err(format!(
+                "smoothing kernel on axis {axis} already deviates \
+                 {kernel_deviation_mm:.4} mm at accel {max_accel_mm_s2} mm/s^2, \
+                 which exhausts corner_deviation = {corner_deviation_mm:.4} mm \
+                 — increase corner_deviation or shorten the kernel"
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl PlannerConfig {
     #[must_use]
     pub fn corner_deviation(&self) -> f64 {
         self.runtime_corner_deviation
             .unwrap_or(self.cartesian.corner_deviation)
+    }
+
+    pub fn validate_corner_budget(&self, chains: &AxisChainSet) -> Result<(), String> {
+        validate_corner_budget(self.corner_deviation(), self.cartesian.max_accel, chains)
     }
 
     #[must_use]
