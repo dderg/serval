@@ -12,7 +12,7 @@
 from . import servo_strokes
 
 MAX_GAIN = 2.0
-MAX_CLAMP_UM = 500.0
+OFFSET_UM_CEILING = 500.0
 MAX_SETTLE_MS = 60000
 BELTS = ("A", "B")
 
@@ -24,18 +24,18 @@ class ServoDiffTrim:
         "differential torque into a small antisymmetric position offset, "
         "zeroing the fight left behind by servo sync / homing variance; "
         "the loop freezes during motion. GAIN is in mm/s of offset slew "
-        "per 1% differential torque; GAIN=0 disarms. CLAMP_UM bounds the "
-        "offset (hitting it logs a warning). SETTLE_MS is how long the "
-        "pair must sit still before measuring resumes. SAVE=1 stores the "
-        "values for SAVE_CONFIG. Params BELT=A|B|AB GAIN CLAMP_UM LPF_HZ "
-        "SETTLE_MS SAVE"
+        "per 1% differential torque; GAIN=0 disarms. MAX_OFFSET_UM bounds "
+        "the offset (hitting it logs a warning). SETTLE_MS is how long "
+        "the pair must sit still before measuring resumes. SAVE=1 stores "
+        "the values for SAVE_CONFIG. Params BELT=A|B|AB GAIN "
+        "MAX_OFFSET_UM LPF_HZ SETTLE_MS SAVE"
     )
 
     def __init__(self, config):
         self.printer = config.get_printer()
         self.gain = config.getfloat("gain", 0.0, minval=0.0, maxval=MAX_GAIN)
-        self.clamp_um = config.getfloat(
-            "clamp_um", 150.0, above=0.0, maxval=MAX_CLAMP_UM
+        self.max_offset_um = config.getfloat(
+            "max_offset_um", 150.0, above=0.0, maxval=OFFSET_UM_CEILING
         )
         self.lpf_hz = config.getfloat("lpf_hz", 2.0, above=0.0)
         self.settle_ms = config.getint(
@@ -60,7 +60,7 @@ class ServoDiffTrim:
             slots[0],
             slots[1],
             int(round(self.gain * 1e6)),
-            int(round(self.clamp_um)),
+            int(round(self.max_offset_um)),
             int(round(self.lpf_hz * 1000.0)),
             self.settle_ms,
         )
@@ -79,8 +79,11 @@ class ServoDiffTrim:
         self.gain = gcmd.get_float(
             "GAIN", self.gain, minval=0.0, maxval=MAX_GAIN
         )
-        self.clamp_um = gcmd.get_float(
-            "CLAMP_UM", self.clamp_um, above=0.0, maxval=MAX_CLAMP_UM
+        self.max_offset_um = gcmd.get_float(
+            "MAX_OFFSET_UM",
+            self.max_offset_um,
+            above=0.0,
+            maxval=OFFSET_UM_CEILING,
         )
         self.lpf_hz = gcmd.get_float("LPF_HZ", self.lpf_hz, above=0.0)
         self.settle_ms = gcmd.get_int(
@@ -91,13 +94,13 @@ class ServoDiffTrim:
             if self.gain > 0.0:
                 gcmd.respond_info(
                     "belt %s trim armed (%s vs %s): gain %.3f (mm/s)/%%, "
-                    "clamp %.0f um, lpf %.2f Hz, settle %d ms"
+                    "max offset %.0f um, lpf %.2f Hz, settle %d ms"
                     % (
                         belt,
                         pair_names[0],
                         pair_names[1],
                         self.gain,
-                        self.clamp_um,
+                        self.max_offset_um,
                         self.lpf_hz,
                         self.settle_ms,
                     )
@@ -108,7 +111,9 @@ class ServoDiffTrim:
             configfile = self.printer.lookup_object("configfile")
             configfile.set("servo_diff_trim", "gain", "%.6f" % (self.gain,))
             configfile.set(
-                "servo_diff_trim", "clamp_um", "%.1f" % (self.clamp_um,)
+                "servo_diff_trim",
+                "max_offset_um",
+                "%.1f" % (self.max_offset_um,),
             )
             configfile.set("servo_diff_trim", "lpf_hz", "%.3f" % (self.lpf_hz,))
             configfile.set(

@@ -169,13 +169,14 @@ strain-comp ramp has settled, and the pair has been still for `SETTLE_MS`
 (torque relax + telemetry lag after a decel). The offset resets on a pair
 sync or torque-gate drop — the `SERVO_SYNC` release is the new zero.
 `GAIN` is mm/s of offset slew per 1% differential torque; `GAIN=0`
-disarms. The offset is clamped to `CLAMP_UM` (µm, ceiling 500); hitting
-the clamp logs a `diff_trim_clamped` warning — residual fight beyond the
-trim's authority. Torque LPF at `LPF_HZ` (floor 0.1). Config options
-(`gain`, `clamp_um`, `lpf_hz`, `settle_ms`) arm the trim at startup when
-`gain` is non-zero; the command overrides them live for tuning and
-`SAVE=1` stages the current values for `SAVE_CONFIG`. Params: `BELT` (AB)
-`GAIN` `CLAMP_UM` (150) `LPF_HZ` (2) `SETTLE_MS` (300) `SAVE` (0).
+disarms. `MAX_OFFSET_UM` (µm, ceiling 500) bounds the offset — the trim's
+total authority; hitting it logs a `diff_trim_clamped` warning: residual
+fight beyond what the trim may absorb. Torque LPF at `LPF_HZ` (floor
+0.1). Config options (`gain`, `max_offset_um`, `lpf_hz`, `settle_ms`)
+arm the trim at startup when `gain` is non-zero; the command overrides
+them live for tuning and `SAVE=1` stages the current values for
+`SAVE_CONFIG`. Params: `BELT` (AB) `GAIN` `MAX_OFFSET_UM` (150) `LPF_HZ`
+(2) `SETTLE_MS` (300) `SAVE` (0).
 
 #### SERVO_MEASURE_STRAIN_MAP
 The measurement half of the belt strain map (CoreXY only). Rasters the bed

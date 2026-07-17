@@ -81,7 +81,11 @@ def test_single_belt_with_explicit_knobs():
     trim, _printer, engine = make_diff_trim()
     trim.cmd_SERVO_DIFF_TRIM(
         FakeGcmd(
-            BELT="B", GAIN="0.2", CLAMP_UM="300", LPF_HZ="10", SETTLE_MS="500"
+            BELT="B",
+            GAIN="0.2",
+            MAX_OFFSET_UM="300",
+            LPF_HZ="10",
+            SETTLE_MS="500",
         )
     )
     assert engine.trims == [(7, 2, 3, 200000, 300, 10000, 500)]
@@ -102,7 +106,12 @@ def test_rejects_single_drive_belts():
 
 def test_config_values_arm_at_ready():
     trim, printer, engine = make_diff_trim(
-        {"gain": "0.1", "clamp_um": "200", "lpf_hz": "1.5", "settle_ms": "400"}
+        {
+            "gain": "0.1",
+            "max_offset_um": "200",
+            "lpf_hz": "1.5",
+            "settle_ms": "400",
+        }
     )
     for handler in printer.event_handlers["klippy:ready"]:
         handler()
@@ -121,7 +130,12 @@ def test_zero_config_gain_stays_disarmed_at_ready():
 
 def test_command_defaults_come_from_config():
     trim, _printer, engine = make_diff_trim(
-        {"gain": "0.1", "clamp_um": "200", "lpf_hz": "1.5", "settle_ms": "400"}
+        {
+            "gain": "0.1",
+            "max_offset_um": "200",
+            "lpf_hz": "1.5",
+            "settle_ms": "400",
+        }
     )
     trim.cmd_SERVO_DIFF_TRIM(FakeGcmd(BELT="A"))
     assert engine.trims == [(7, 0, 1, 100000, 200, 1500, 400)]
@@ -133,7 +147,7 @@ def test_save_stages_current_values_for_save_config():
     configfile = printer.lookup_object("configfile")
     assert configfile.values == {
         ("servo_diff_trim", "gain"): "0.050000",
-        ("servo_diff_trim", "clamp_um"): "150.0",
+        ("servo_diff_trim", "max_offset_um"): "150.0",
         ("servo_diff_trim", "lpf_hz"): "2.000",
         ("servo_diff_trim", "settle_ms"): "1000",
     }
