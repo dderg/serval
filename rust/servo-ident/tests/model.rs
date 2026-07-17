@@ -1,57 +1,57 @@
-use servo_ident::model::{coulomb_cols, Structure, COULOMB_DEADBAND_MM_S};
+use servo_ident::model::{coulomb_sign, PhysicalParams, Structure, COULOMB_DEADBAND_MM_S};
 
 fn physical_torque(
-    p: &servo_ident::model::PhysicalParams,
+    frame: &[Vec<f64>],
+    p: &PhysicalParams,
     motor: usize,
-    acc: &[f64],
-    vel: &[f64],
+    acc_mode: &[f64],
+    vel_mode: &[f64],
 ) -> f64 {
-    let inertial: f64 = p.mass[motor].iter().zip(acc).map(|(m, a)| m * a).sum();
-    let v = vel[motor];
-    let coulomb = if v > COULOMB_DEADBAND_MM_S {
-        p.coulomb_fwd[motor]
-    } else if v < -COULOMB_DEADBAND_MM_S {
-        p.coulomb_rev[motor]
-    } else {
-        0.0
-    };
-    inertial + p.viscous[motor] * v + coulomb
+    let mut tau = 0.0;
+    for k in 0..frame.len() {
+        let f = frame[k][motor];
+        let coulomb = p.coulomb[k] * coulomb_sign(vel_mode[k]);
+        tau += f * (p.mass[k] * acc_mode[k] + p.viscous[k] * vel_mode[k] + coulomb);
+    }
+    tau
 }
 
 #[test]
 fn row_dot_theta_matches_unpacked_physics() {
-    let cases: &[(Structure, Vec<f64>)] = &[
-        (Structure::CartesianScalar, vec![0.0123, 0.0045, 1.2, -1.1]),
+    let cases: &[(Vec<Vec<f64>>, Vec<f64>)] = &[
+        (vec![vec![1.0]], vec![0.0123, 0.09, 1.2]),
         (
-            Structure::CoreXY,
-            vec![0.030, -0.010, 0.004, 1.0, -1.1, 0.005, 0.9, -0.8],
+            vec![vec![0.25, -0.25], vec![0.25, 0.25]],
+            vec![0.030, 0.004, 1.0, 0.020, 0.005, 0.9],
         ),
     ];
-    for (s, theta) in cases {
+    for (frame, theta) in cases {
+        let s = Structure::new(frame.clone());
         let p = s.unpack(theta);
-        let n = s.axis_count();
+        let n_modes = s.mode_count();
+        let n_slots = s.axis_count();
         #[allow(clippy::cast_precision_loss)]
         let probes: &[(Vec<f64>, Vec<f64>)] = &[
-            (vec![1000.0; n], vec![100.0; n]),
-            (vec![-500.0; n], vec![-30.0; n]),
+            (vec![1000.0; n_modes], vec![100.0; n_modes]),
+            (vec![-500.0; n_modes], vec![-30.0; n_modes]),
             (
-                (0..n).map(|i| 800.0 - 1600.0 * i as f64).collect(),
-                (0..n).map(|i| 0.1 * i as f64).collect(),
+                (0..n_modes).map(|i| 800.0 - 1600.0 * i as f64).collect(),
+                (0..n_modes).map(|i| 40.0 - 90.0 * i as f64).collect(),
             ),
         ];
-        for (acc, vel) in probes {
-            let (cf, cr): (Vec<f64>, Vec<f64>) = vel.iter().map(|&v| coulomb_cols(v)).unzip();
-            for motor in 0..n {
+        for (acc_mode, vel_mode) in probes {
+            let cs: Vec<f64> = vel_mode.iter().map(|&v| coulomb_sign(v)).collect();
+            for motor in 0..n_slots {
                 let via_row: f64 = s
-                    .row(motor, acc, vel, &cf, &cr)
+                    .row(motor, acc_mode, vel_mode, &cs)
                     .iter()
                     .zip(theta)
                     .map(|(r, t)| r * t)
                     .sum();
-                let via_physics = physical_torque(&p, motor, acc, vel);
+                let via_physics = physical_torque(frame, &p, motor, acc_mode, vel_mode);
                 assert!(
                     (via_row - via_physics).abs() < 1e-12,
-                    "{s:?} motor {motor}: row {via_row} vs physics {via_physics}"
+                    "frame {frame:?} motor {motor}: row {via_row} vs physics {via_physics}"
                 );
             }
         }
@@ -59,120 +59,41 @@ fn row_dot_theta_matches_unpacked_physics() {
 }
 
 #[test]
-fn scalar_row_layout() {
-    let s = Structure::CartesianScalar;
-    assert_eq!(s.param_count(), 4);
-    let (cf, cr) = coulomb_cols(100.0);
-    let row = s.row(0, &[1000.0], &[100.0], &[cf], &[cr]);
-    assert_eq!(row, vec![1000.0, 100.0, 1.0, 0.0]);
-    let (cf, cr) = coulomb_cols(-100.0);
-    let row_rev = s.row(0, &[1000.0], &[-100.0], &[cf], &[cr]);
-    assert_eq!(row_rev, vec![1000.0, -100.0, 0.0, 1.0]);
-    let (cf, cr) = coulomb_cols(COULOMB_DEADBAND_MM_S / 2.0);
-    let row_dead = s.row(0, &[1000.0], &[COULOMB_DEADBAND_MM_S / 2.0], &[cf], &[cr]);
-    assert_eq!(row_dead[2], 0.0);
-    assert_eq!(row_dead[3], 0.0);
+fn identity_frame_row_layout() {
+    let s = Structure::new(vec![vec![1.0]]);
+    assert_eq!(s.axis_count(), 1);
+    assert_eq!(s.mode_count(), 1);
+    assert_eq!(s.param_count(), 3);
+    let row = s.row(0, &[1000.0], &[100.0], &[coulomb_sign(100.0)]);
+    assert_eq!(row, vec![1000.0, 100.0, 1.0]);
+    let row_rev = s.row(0, &[1000.0], &[-100.0], &[coulomb_sign(-100.0)]);
+    assert_eq!(row_rev, vec![1000.0, -100.0, -1.0]);
+    let dead = s.row(
+        0,
+        &[1000.0],
+        &[COULOMB_DEADBAND_MM_S / 2.0],
+        &[coulomb_sign(COULOMB_DEADBAND_MM_S / 2.0)],
+    );
+    assert_eq!(dead[2], 0.0);
 }
 
 #[test]
-fn corexy_rows_share_mass_params() {
-    let s = Structure::CoreXY;
-    assert_eq!(s.param_count(), 8);
-    let cf = [1.0, 0.0];
-    let cr = [0.0, 1.0];
-    let ra = s.row(0, &[100.0, 50.0], &[10.0, -10.0], &cf, &cr);
-    assert_eq!(ra, vec![100.0, 50.0, 10.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
-    let rb = s.row(1, &[100.0, 50.0], &[10.0, -10.0], &cf, &cr);
-    assert_eq!(rb, vec![50.0, 100.0, 0.0, 0.0, 0.0, -10.0, 0.0, 1.0]);
+fn corexy_frame_row_projects_with_frame_weights() {
+    let s = Structure::new(vec![vec![0.5, -0.5], vec![0.5, 0.5]]);
+    let row0 = s.row(0, &[100.0, 60.0], &[10.0, -10.0], &[1.0, -1.0]);
+    assert_eq!(row0, vec![50.0, 5.0, 0.5, 30.0, -5.0, -0.5]);
+    let row1 = s.row(1, &[100.0, 60.0], &[10.0, -10.0], &[1.0, -1.0]);
+    assert_eq!(row1, vec![-50.0, -5.0, -0.5, 30.0, -5.0, -0.5]);
 }
 
 #[test]
-fn params_to_profile_blocks() {
-    let s = Structure::CoreXY;
-    let theta = vec![0.030, -0.010, 0.004, 1.0, -1.1, 0.005, 0.9, -0.8];
+fn param_layout_is_grouped_per_mode() {
+    let s = Structure::new(vec![vec![0.25, -0.25], vec![0.25, 0.25]]);
+    assert_eq!(s.param_count(), 6);
+    let theta = vec![0.030, 0.004, 1.0, 0.020, 0.005, 0.9];
     let p = s.unpack(&theta);
-    assert_eq!(p.mass, vec![vec![0.030, -0.010], vec![-0.010, 0.030]]);
+    assert_eq!(p.mass, vec![0.030, 0.020]);
     assert_eq!(p.viscous, vec![0.004, 0.005]);
-    assert_eq!(p.coulomb_fwd, vec![1.0, 0.9]);
-    assert_eq!(p.coulomb_rev, vec![-1.1, -0.8]);
-}
-
-#[test]
-fn corexy_awd_row_layout() {
-    let s = Structure::CoreXYAwd;
-    assert_eq!(s.axis_count(), 4);
-    assert_eq!(s.param_count(), 14);
-    let acc = [100.0, 100.0, 50.0, 50.0];
-    let vel = [10.0, 10.0, -10.0, -10.0];
-    let cf = [1.0, 1.0, 0.0, 0.0];
-    let cr = [0.0, 0.0, 1.0, 1.0];
-    let r0 = s.row(0, &acc, &vel, &cf, &cr);
-    assert_eq!(
-        r0,
-        vec![100.0, 50.0, 10.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    );
-    let r1 = s.row(1, &acc, &vel, &cf, &cr);
-    assert_eq!(
-        r1,
-        vec![100.0, 50.0, 0.0, 0.0, 0.0, 10.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    );
-    let r3 = s.row(3, &acc, &vel, &cf, &cr);
-    assert_eq!(
-        r3,
-        vec![50.0, 100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -10.0, 0.0, 1.0]
-    );
-}
-
-#[test]
-fn corexy_awd_unpacks_symmetric_pair_split_matrix() {
-    let s = Structure::CoreXYAwd;
-    let mut theta = vec![0.015, -0.005];
-    for m in 0..4 {
-        theta.extend([0.002 + 0.001 * m as f64, 1.0, -1.1]);
-    }
-    let p = s.unpack(&theta);
-    assert_eq!(
-        p.mass,
-        vec![
-            vec![0.015, 0.0, -0.0025, -0.0025],
-            vec![0.0, 0.015, -0.0025, -0.0025],
-            vec![-0.0025, -0.0025, 0.015, 0.0],
-            vec![-0.0025, -0.0025, 0.0, 0.015],
-        ]
-    );
-    assert_eq!(p.viscous, vec![0.002, 0.003, 0.004, 0.005]);
+    assert_eq!(p.coulomb, vec![1.0, 0.9]);
     assert_eq!(s.pack(&p), theta);
-}
-
-#[test]
-fn corexy_awd_row_matches_matrix_physics_for_belt_consistent_kinematics() {
-    let s = Structure::CoreXYAwd;
-    let mut theta = vec![0.015, -0.005];
-    for m in 0..4 {
-        theta.extend([0.002 + 0.001 * m as f64, 1.0 + 0.1 * m as f64, -1.1]);
-    }
-    let p = s.unpack(&theta);
-    let probes: &[(Vec<f64>, Vec<f64>)] = &[
-        (
-            vec![1000.0, 1000.0, -400.0, -400.0],
-            vec![100.0, 100.0, -30.0, -30.0],
-        ),
-        (vec![-500.0, -500.0, 0.0, 0.0], vec![-30.0, -30.0, 0.0, 0.0]),
-    ];
-    for (acc, vel) in probes {
-        let (cf, cr): (Vec<f64>, Vec<f64>) = vel.iter().map(|&v| coulomb_cols(v)).unzip();
-        for motor in 0..4 {
-            let via_row: f64 = s
-                .row(motor, acc, vel, &cf, &cr)
-                .iter()
-                .zip(&theta)
-                .map(|(r, t)| r * t)
-                .sum();
-            let via_physics = physical_torque(&p, motor, acc, vel);
-            assert!(
-                (via_row - via_physics).abs() < 1e-12,
-                "motor {motor}: row {via_row} vs physics {via_physics}"
-            );
-        }
-    }
 }

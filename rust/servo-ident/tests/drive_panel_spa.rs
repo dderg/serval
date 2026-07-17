@@ -93,12 +93,53 @@ fn app_js_defines_the_tracking_metrics_functions() {
         "function torqueCellHtml(",
         "function metricsTableRows(",
         "function renderMetricsTable(",
+        "function heatCellStyle(",
         "SERVO_MEASURE_TRACKING",
     ];
     for needle in required {
         assert!(
             APP_JS.contains(needle),
             "app.js must define {needle} — the tracking metrics table"
+        );
+    }
+}
+
+/// Same contract for the metrics-vs-gain chart (the gains page's revival of
+/// the old gain-report PNG's "metrics vs gain" panel: per-step overshoot /
+/// ferr against the swept value, flagged steps as red rungs).
+#[test]
+fn app_js_defines_the_sweep_metrics_chart_functions() {
+    let required = [
+        "function sweptAxisKey(",
+        "function sweepMetricsSeries(",
+        "function renderSweepMetricsChart(",
+        "function motorViewPerMotor(",
+        "sweep-metrics-chart",
+    ];
+    for needle in required {
+        assert!(
+            APP_JS.contains(needle),
+            "app.js must define {needle} — the metrics-vs-gain chart"
+        );
+    }
+}
+
+/// Same contract for the console's response echo: klippy respond_info text
+/// only travels Moonraker's websocket, so the console harvests it from
+/// /server/gcode_store after each blocking script call and renders it under
+/// the sent line — without this, command output is only visible in mainsail.
+#[test]
+fn app_js_defines_the_console_response_functions() {
+    let required = [
+        "function latestGcodeStoreTime(",
+        "function fetchGcodeResponses(",
+        "/server/gcode_store",
+        "resp-line",
+    ];
+    for needle in required {
+        assert!(
+            APP_JS.contains(needle),
+            "app.js must define {needle} — the console response echo"
         );
     }
 }

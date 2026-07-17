@@ -621,9 +621,14 @@ static void auto_endstop_advance(int chip_id, int offset, long delta) {
             pthread_mutex_lock(&gpio_state_mtx);
             gpio_lines[ae->endstop_chip][ae->endstop_line].value = trig;
             pthread_mutex_unlock(&gpio_state_mtx);
+            struct timespec vt;
+            clock_gettime(CLOCK_MONOTONIC, &vt);
             fprintf(stderr,
-                    "[auto-endstop] line=%d pos=%ld toward=%d trig=%d\n",
-                    ae->endstop_line, ae->pos, ae->toward_sign, trig);
+                    "[auto-endstop] line=%d pos=%ld toward=%d trig=%d"
+                    " vt_ns=%llu\n",
+                    ae->endstop_line, ae->pos, ae->toward_sign, trig,
+                    (unsigned long long)vt.tv_sec * 1000000000ULL
+                        + (unsigned long long)vt.tv_nsec);
         }
     }
     pthread_mutex_unlock(&auto_endstop_mtx);

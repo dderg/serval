@@ -1,5 +1,5 @@
 use super::{
-    Arc, McuHostIo, Mutex, PyMotionEngine, PyResult, PyRuntimeError, mcu_handle_from_raw,
+    Arc, McuHostIo, PyMotionEngine, PyResult, PyRuntimeError, mcu_handle_from_raw,
     query_runtime_caps, require_events_dir_for_mcu_transport,
 };
 use crate::lock_ext::LockExt;
@@ -196,12 +196,12 @@ impl PyMotionEngine {
                     FSYNC_INTERVAL,
                 ) {
                     Ok(writer) => {
-                        let arc_writer = Arc::new(Mutex::new(writer));
+                        let sink = crate::mcu_log::spawn_jsonl_writer_thread(writer, &source);
                         let mcu_h = mcu_handle_from_raw(mcu_handle);
                         let hook = crate::mcu_log::build_mcu_log_hook(
                             Arc::clone(&self.router),
                             mcu_h,
-                            arc_writer,
+                            sink,
                             source,
                         );
                         host_io_arc.set_mcu_log_hook(Box::new(hook));

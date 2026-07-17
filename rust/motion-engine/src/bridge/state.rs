@@ -143,7 +143,7 @@ pub(crate) struct EthercatDrive {
     pub(crate) following_error_counts: Option<u32>,
     pub(crate) max_torque_tenth_pct: Option<u16>,
     pub(crate) velocity_ff: bool,
-    pub(crate) ff_torque_clamp: f64,
+    pub(crate) ff_max_torque: f64,
     pub(crate) ff_lead_cycles: u32,
     pub(crate) invert_direction: bool,
     pub(crate) dynamics_profile: Option<String>,

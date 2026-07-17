@@ -41,6 +41,20 @@ pub struct RunSummary {
     pub axis: Option<String>,
     pub has_results: bool,
     pub verdict: Option<VerdictSummary>,
+    pub note: Option<String>,
+}
+
+const NOTE_FILE: &str = "note.txt";
+
+fn read_note(run_dir: &Path) -> Result<Option<String>, String> {
+    let path = run_dir.join(NOTE_FILE);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let trimmed = text.trim();
+    Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
 }
 
 fn valid_run_name(name: &str) -> bool {
@@ -89,6 +103,7 @@ pub fn list_runs(captures_root: &Path) -> Result<Vec<RunSummary>, String> {
             None
         };
         let manifest_mtime = mtime(&manifest_path)?;
+        let note = read_note(&path)?;
         runs.push((
             manifest_mtime,
             RunSummary {
@@ -99,6 +114,7 @@ pub fn list_runs(captures_root: &Path) -> Result<Vec<RunSummary>, String> {
                 axis: manifest.axis,
                 has_results,
                 verdict,
+                note,
             },
         ));
     }
@@ -121,7 +137,11 @@ fn newest_input_mtime(run_dir: &Path) -> Result<SystemTime, String> {
         let entry = entry.map_err(|e| format!("{}: {e}", run_dir.display()))?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name == "results.json" || name == "plot_series.json" || name == "strain.json" {
+        if name == "results.json"
+            || name == "plot_series.json"
+            || name == "strain.json"
+            || name == NOTE_FILE
+        {
             continue;
         }
         let m = mtime(&entry.path())?;
@@ -246,6 +266,62 @@ fn handle_analyze(captures_root: &Path, name: &str) -> Response {
         200,
         serde_json::to_string(&results).expect("Results always serializes"),
     )
+}
+
+#[derive(Deserialize)]
+struct NoteBody {
+    note: String,
+}
+
+/// `POST /api/runs/<name>/note`: body `{"note": "..."}`. Writes
+/// `note.txt` in the run directory; an empty (or all-whitespace) note
+/// deletes the file. Notes are user commentary, never an analysis input —
+/// `newest_input_mtime` skips them so editing one can't mark results stale.
+fn handle_note(captures_root: &Path, name: &str, body: &[u8]) -> Response {
+    if !valid_run_name(name) {
+        return Response::not_found(&format!("invalid run name {name:?}"));
+    }
+    let run_dir = captures_root.join(name);
+    if !run_dir.join("manifest.json").is_file() {
+        return Response::not_found(&format!("no such run {name:?}"));
+    }
+    let parsed: NoteBody = match serde_json::from_slice(body) {
+        Ok(p) => p,
+        Err(e) => {
+            return Response::text(400, "text/plain", format!("note body parse: {e}"));
+        }
+    };
+    let note = parsed.note.trim();
+    let path = run_dir.join(NOTE_FILE);
+    let result = if note.is_empty() {
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    } else {
+        std::fs::write(&path, note)
+    };
+    if let Err(e) = result {
+        return Response::text(500, "text/plain", format!("{}: {e}", path.display()));
+    }
+    Response::json(200, serde_json::json!({ "note": note }).to_string())
+}
+
+/// `DELETE /api/runs/<name>`: removes the run directory — manifest,
+/// captures, results, note, everything. User-initiated housekeeping from
+/// the runs table; `valid_run_name` keeps the path inside `captures_root`.
+fn handle_delete_run(captures_root: &Path, name: &str) -> Response {
+    if !valid_run_name(name) {
+        return Response::not_found(&format!("invalid run name {name:?}"));
+    }
+    let run_dir = captures_root.join(name);
+    if !run_dir.join("manifest.json").is_file() {
+        return Response::not_found(&format!("no such run {name:?}"));
+    }
+    if let Err(e) = std::fs::remove_dir_all(&run_dir) {
+        return Response::text(500, "text/plain", format!("{}: {e}", run_dir.display()));
+    }
+    Response::json(200, serde_json::json!({ "deleted": name }).to_string())
 }
 
 /// `GET /api/runs/<name>/strain`: the strain-map tab's data source. Only
@@ -415,6 +491,8 @@ pub fn handle(captures_root: &Path, req: &Request) -> Response {
         }
         ("GET", ["api", "runs", name, "strain"]) => handle_strain(captures_root, name),
         ("POST", ["api", "runs", name, "analyze"]) => handle_analyze(captures_root, name),
+        ("POST", ["api", "runs", name, "note"]) => handle_note(captures_root, name, &req.body),
+        ("DELETE", ["api", "runs", name]) => handle_delete_run(captures_root, name),
         _ => Response::not_found(&format!("no such route: {} {}", req.method, req.path)),
     }
 }

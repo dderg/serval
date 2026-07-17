@@ -454,7 +454,7 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
     SchemaMessage {
         type_tag: 0x0086,
         name: "SetStrainComp",
-        version: 1,
+        version: 2,
         channel: "control",
         fields: &[
             SchemaField { name: "slot_a", ty: "u8" },
@@ -462,13 +462,13 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
             SchemaField { name: "lane_a", ty: "u8" },
             SchemaField { name: "lane_b", ty: "u8" },
             SchemaField { name: "kinematics", ty: "u8" },
-            SchemaField { name: "nx", ty: "u8" },
-            SchemaField { name: "ny", ty: "u8" },
+            SchemaField { name: "nx", ty: "u16" },
+            SchemaField { name: "ny", ty: "u16" },
             SchemaField { name: "x0", ty: "f32" },
             SchemaField { name: "y0", ty: "f32" },
             SchemaField { name: "dx", ty: "f32" },
             SchemaField { name: "dy", ty: "f32" },
-            SchemaField { name: "value_count", ty: "u16" },
+            SchemaField { name: "value_count", ty: "u32" },
             SchemaField { name: "values_um", ty: "array<i32>" },
         ],
     },
@@ -507,7 +507,7 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
     SchemaMessage {
         type_tag: 0x008A,
         name: "SetDiffTrim",
-        version: 1,
+        version: 2,
         channel: "control",
         fields: &[
             SchemaField { name: "slot_a", ty: "u8" },
@@ -515,11 +515,37 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
             SchemaField { name: "gain_micro", ty: "u32" },
             SchemaField { name: "clamp_um", ty: "u16" },
             SchemaField { name: "lpf_millihz", ty: "u32" },
+            SchemaField { name: "settle_ms", ty: "u32" },
         ],
     },
     SchemaMessage {
         type_tag: 0x008B,
         name: "SetDiffTrimResponse",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "result", ty: "i32" },
+        ],
+    },
+    SchemaMessage {
+        type_tag: 0x008C,
+        name: "SetDynamicsModel",
+        version: 6,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "slots_count", ty: "u8" },
+            SchemaField { name: "modes_count", ty: "u8" },
+            SchemaField { name: "frame", ty: "array<f32;slots_count*modes_count>" },
+            SchemaField { name: "mass", ty: "array<f32>" },
+            SchemaField { name: "viscous", ty: "array<f32>" },
+            SchemaField { name: "coulomb", ty: "array<f32>" },
+            SchemaField { name: "pairs_count", ty: "u8" },
+            SchemaField { name: "pairs", ty: "array<{first:u8,second:u8,direction_split:f32}>" },
+        ],
+    },
+    SchemaMessage {
+        type_tag: 0x008D,
+        name: "SetDynamicsModelResponse",
         version: 1,
         channel: "control",
         fields: &[

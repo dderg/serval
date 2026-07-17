@@ -25,12 +25,16 @@ class FakeGcode:
     def __init__(self):
         self.commands = {}
         self.scripts = []
+        self.responses = []
 
     def register_command(self, name, func, desc=None):
         self.commands[name] = func
 
     def run_script_from_command(self, script):
         self.scripts.append(script)
+
+    def respond_info(self, msg):
+        self.responses.append(msg)
 
 
 class FakeGcmd:
@@ -106,12 +110,28 @@ class FakeEngine:
         return 2, self._values.get((index, subindex), 7)
 
 
+class FakeReactor:
+    def __init__(self):
+        self._t = 0.0
+
+    def monotonic(self):
+        self._t += 0.001
+        return self._t
+
+    def pause(self, until):
+        self._t = until
+
+
 class FakePrinter:
     command_error = RuntimeError
     _sentinel = object()
 
     def __init__(self, objs):
         self._objs = objs
+        self._reactor = FakeReactor()
+
+    def get_reactor(self):
+        return self._reactor
 
     def lookup_object(self, name, default=_sentinel):
         if name in self._objs:
@@ -336,7 +356,7 @@ def test_missing_binary_is_command_error():
     sc, _ = make_sc()
     sc.servo_cal_binary = "/nonexistent/servo-cal"
     with pytest.raises(
-        RuntimeError, match="cargo build --release -p servo-ident"
+        RuntimeError, match="cargo build --profile snapshot -p servo-ident"
     ):
         sc.cmd_SERVO_MEASURE_TRACKING(FakeGcmd(AXIS="X"))
 
@@ -565,40 +585,52 @@ def test_base_speed_gain_without_servo_subset_errors():
         sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
 
 
-def test_revert_gain_reverts_to_the_named_gain():
+def test_calibrate_gains_restores_prior_gains():
     servo_param.drain_param_writes()
     sc, gcode = make_sc()
-    gcmd = FakeGcmd(AXIS="Y", SPEED_GAINS="450", REVERT_GAIN="300")
+    gcmd = FakeGcmd(AXIS="Y", SPEED_GAINS="450")
     sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
-    # derive(450) writes integral 2778 mid-sweep; derive(300) writes
-    # pos 480 / speed 300 / integral 4167 - only the revert writes those.
+    # derive(450) writes integral 2778 mid-sweep; the fake drive reads every
+    # gain as 7, so the restore writes VALUE=7 to all three addresses after
+    # the last sweep write.
     sweep_idx = _script_indices(gcode, "VALUE=2778")
-    revert_idx = _script_indices(gcode, "VALUE=4167")
-    assert sweep_idx and revert_idx
-    assert min(revert_idx) > max(sweep_idx)
-    assert any("VALUE=480" in s for s in _str_scripts(gcode))
-    assert any("reverting to speed gain 30.0 Hz" in r for r in gcmd.responses)
+    restore_idx = [
+        i
+        for i, s in enumerate(_str_scripts(gcode))
+        if "SET=0x2001.0x03 VALUE=7" in s
+    ]
+    assert sweep_idx and restore_idx
+    assert min(restore_idx) > max(sweep_idx)
+    assert any("restoring the pre-sweep gains" in r for r in gcmd.responses)
 
 
-def test_revert_gain_defaults_to_lowest_sweep_entry():
+def test_calibrate_gains_restores_on_failure():
     servo_param.drain_param_writes()
     sc, gcode = make_sc()
-    gcmd = FakeGcmd(AXIS="Y", SPEED_GAINS="500,650")
-    sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
-    # sg=500's integral 2500 is written at step one and again by the revert,
-    # after sg=650's 1923.
-    revert_idx = _script_indices(gcode, "VALUE=2500")
-    high_idx = _script_indices(gcode, "VALUE=1923")
-    assert revert_idx and high_idx
-    assert max(revert_idx) > max(high_idx)
-    assert any("reverting to speed gain 50.0 Hz" in r for r in gcmd.responses)
+
+    def boom(*a, **k):
+        raise RuntimeError("stroke exploded")
+
+    sc._strokes = boom
+    gcmd = FakeGcmd(AXIS="Y", SPEED_GAINS="450")
+    with pytest.raises(RuntimeError, match="stroke exploded"):
+        sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
+    scripts = _str_scripts(gcode)
+    sweep_idx = [
+        i for i, s in enumerate(scripts) if "SET=0x2001.0x03 VALUE=2778" in s
+    ]
+    restore_idx = [
+        i for i, s in enumerate(scripts) if "SET=0x2001.0x03 VALUE=7" in s
+    ]
+    assert sweep_idx and restore_idx
+    assert min(restore_idx) > max(sweep_idx)
 
 
-def test_revert_gain_out_of_range_is_command_error():
+def test_revert_gain_param_is_rejected():
     servo_param.drain_param_writes()
     sc, _gcode = make_sc()
-    gcmd = FakeGcmd(AXIS="Y", SPEED_GAINS="450", REVERT_GAIN="50")
-    with pytest.raises(RuntimeError, match="REVERT_GAIN 50 outside"):
+    gcmd = FakeGcmd(AXIS="Y", SPEED_GAINS="450", REVERT_GAIN="300")
+    with pytest.raises(RuntimeError, match="REVERT_GAIN was removed"):
         sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
 
 
@@ -672,6 +704,72 @@ def test_strain_map_rejects_cartesian_kinematics():
     sc.printer.lookup_object("toolhead").kin.coupled_xy = lambda: False
     with pytest.raises(RuntimeError, match="coupled XY"):
         sc.cmd_SERVO_MEASURE_STRAIN_MAP(FakeGcmd())
+
+
+class FakeStrainComp:
+    def __init__(self):
+        self.applied = []
+        self.cleared = 0
+        self.fits = []
+
+    def begin_constant_offsets(self, gcmd):
+        comp = self
+
+        class Session:
+            def pair_count(self):
+                return 2
+
+            def pair_motor_names(self):
+                return [["motor_a"], ["motor_b"]]
+
+            def apply(self, belt_idx, value_um):
+                comp.applied.append((belt_idx, value_um))
+                return 0.0
+
+            def clear(self):
+                comp.cleared += 1
+
+        return Session()
+
+    def fit_strain_response(self, gcmd, run_dir):
+        self.fits.append(run_dir)
+
+
+def test_strain_response_steps_each_pair_along_one_line_and_fits():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    sc.printer._objs["servo_sync"] = FakeServoSync()
+    comp = FakeStrainComp()
+    sc.printer._objs["servo_strain_comp"] = comp
+    sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
+    sc.cmd_SERVO_MEASURE_STRAIN_RESPONSE(FakeGcmd(STEP_UM="50"))
+    steps = [0.0, 50.0, -50.0, 100.0, -100.0]
+    assert comp.applied == (
+        [(0, v) for v in steps]
+        + [(0, 0.0)]
+        + [(1, v) for v in steps]
+        + [(1, 0.0)]
+    )
+    assert comp.cleared == 1
+    caps = sc.printer.lookup_object("servo_capture").captures
+    names = [os.path.basename(path) for path, _servos in caps]
+    assert names == [
+        "step_belt%s_step%d.scap" % (belt, i) for belt in "ab" for i in range(5)
+    ]
+    m = _manifest(sc)
+    assert m["experiment"] == "strain_response"
+    assert m["stroke_plan"]["response_pairs"] == [["motor_a"], ["motor_b"]]
+    assert m["stroke_plan"]["y"] == 150.0
+    assert m["steps"][1]["swept"] == {"belt": 0.0, "offset_um": 50.0}
+    assert comp.fits == [os.path.dirname(caps[0][0])]
+
+
+def test_strain_response_without_strain_comp_errors_loudly():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
+    with pytest.raises(RuntimeError, match="servo_strain_comp"):
+        sc.cmd_SERVO_MEASURE_STRAIN_RESPONSE(FakeGcmd())
 
 
 NOTCH_VALUES = {
@@ -848,31 +946,67 @@ def test_ladder_stops_climbing_after_flagged_rung():
     assert _step_scap(700) in names  # flagged rung ran
     assert _step_scap(800) not in names  # fourth rung never executed
     assert any(
-        "climb stopped at speed gain 700" in r and "torque_saturated" in r
+        "climb stopped at 700" in r and "torque_saturated" in r
         for r in gcmd.responses
     )
     assert any(r.startswith("verdict:") for r in gcmd.responses)
 
 
-def test_ladder_applies_safe_at_end():
+def test_ladder_restores_prior_gains_at_end():
     servo_param.drain_param_writes()
     sc, gcode = make_sc_ladder()  # no flag -> climbs the whole ladder
     gcmd = FakeGcmd(AXIS="X", SAFE=300, START=500, STEP=100, MAX=700)
     sc.cmd_SERVO_GAIN_LADDER(gcmd)
     scripts = _str_scripts(gcode)
-    # SAFE integral = round(1250000/300) = 4167, unique to the SAFE rung; a
-    # climbing rung (500) has integral 2500. The final SAFE application must
-    # land after every climbing write.
-    safe_idx = [
-        i for i, s in enumerate(scripts) if "SET=0x2001.0x03 VALUE=4167" in s
-    ]
+    # The fake drive reads every gain as 7; the restore writes VALUE=7 to
+    # all three addresses after the last climbing write (rung 700's
+    # integral is 1786).
     climb_idx = [
-        i for i, s in enumerate(scripts) if "SET=0x2001.0x03 VALUE=2500" in s
+        i for i, s in enumerate(scripts) if "SET=0x2001.0x03 VALUE=1786" in s
     ]
-    assert safe_idx and climb_idx
-    assert max(safe_idx) > max(climb_idx)
-    assert any("SAFE speed gain 300 applied" in r for r in gcmd.responses)
+    restore_idx = [
+        i for i, s in enumerate(scripts) if "SET=0x2001.0x03 VALUE=7" in s
+    ]
+    assert climb_idx and restore_idx
+    assert min(restore_idx) > max(climb_idx)
+    assert any("restoring the pre-ladder gains" in r for r in gcmd.responses)
     assert any(r.startswith("verdict:") for r in gcmd.responses)
+
+
+def test_ladder_single_param_climbs_position_and_holds_the_rest():
+    servo_param.drain_param_writes()
+    sc, gcode = make_sc_ladder()
+    gcmd = FakeGcmd(
+        AXIS="X", PARAM="position", SAFE=400, START=600, STEP=200, MAX=800
+    )
+    sc.cmd_SERVO_GAIN_LADDER(gcmd)
+    names = _capture_names(sc)
+    assert "step_ladder_position_v400.scap" in names
+    assert "step_ladder_position_v800.scap" in names
+    scripts = _str_scripts(gcode)
+    rung = [
+        s
+        for s in scripts
+        if "SET=0x2001.0x01 VALUE=800" in s or "VALUE=800" in s
+    ]
+    assert rung, "position rung 800 never written"
+    held = [
+        s
+        for s in scripts
+        if "SET=0x2001.0x02 VALUE=7" in s and "SET=0x2001.0x03 VALUE=7" in s
+    ]
+    assert held, "speed/integral must hold the pre-ladder value during rungs"
+    assert any("restoring the pre-ladder gains" in r for r in gcmd.responses)
+
+
+def test_ladder_single_param_rejects_bad_param():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc_ladder()
+    gcmd = FakeGcmd(
+        AXIS="X", PARAM="stiffness", SAFE=400, START=600, STEP=200, MAX=800
+    )
+    with pytest.raises(RuntimeError, match="PARAM must be"):
+        sc.cmd_SERVO_GAIN_LADDER(gcmd)
 
 
 def test_ladder_rejects_nonpositive_step():
@@ -912,3 +1046,160 @@ def test_load_config_pulls_in_servo_tuning():
     printer = RecordingPrinter(objs)
     servo_calibration.load_config(FakeConfig(printer))
     assert printer.loaded == ["servo_tuning"]
+
+
+class FakeTuner:
+    def __init__(self, rho_seq):
+        self.plan = {
+            "x_start": 30.0,
+            "x_end": 270.0,
+            "y_start": 30.0,
+            "y_end": 270.0,
+            "zero_xy": [150.0, 150.0],
+            "line_spacing": 10.0,
+        }
+        self.k_matrix = [[300.0, -75.0], [-75.0, 300.0]]
+        self.rho_seq = list(rho_seq)
+        self.rebuilds = 0
+        self.applied = []
+        self.stored = 0
+        self.scored = []
+
+    def matrix_rows(self):
+        return [list(row) for row in self.k_matrix]
+
+    def enable_ramp_s(self):
+        return 0.0
+
+    def rebuild_and_enable(self, gcmd):
+        self.rebuilds += 1
+
+    def score_lines(self, gcmd, run_dir, steps):
+        self.scored.append((run_dir, list(steps)))
+        rho = self.rho_seq.pop(0)
+        return [
+            {
+                "s_own": 300.0 * rho,
+                "s_cross": -75.0 * rho,
+                "rho": rho,
+                "lines": {"x": (1.0, 9.0), "y": (1.5, 8.0)},
+            },
+            {
+                "s_own": 300.0 * rho,
+                "s_cross": -75.0 * rho,
+                "rho": rho,
+                "lines": {"x": (1.0, 8.0), "y": (1.5, 7.0)},
+            },
+        ]
+
+    def converged(self, results, tol):
+        return all(abs(r["rho"] - 1.0) <= tol for r in results)
+
+    def apply(self, results):
+        self.applied.append([r["rho"] for r in results])
+
+    def store_matrix(self):
+        self.stored += 1
+
+
+def make_tune_sc(rho_seq):
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    sc.printer._objs["servo_sync"] = FakeServoSync()
+    comp = FakeStrainComp()
+    comp.tuner = FakeTuner(rho_seq)
+    comp.begin_tune = lambda gcmd, run_raw, spacing: comp.tuner
+    sc.printer._objs["servo_strain_comp"] = comp
+    sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
+    return sc, comp
+
+
+def test_tune_loops_xy_lines_until_converged():
+    sc, comp = make_tune_sc([0.66, 1.01])
+    sc.cmd_SERVO_STRAIN_COMP_TUNE(FakeGcmd(RUN="ignored"))
+    tuner = comp.tuner
+    assert tuner.rebuilds == 2
+    assert tuner.applied == [[0.66, 0.66]]
+    assert tuner.stored == 1
+    caps = sc.printer.lookup_object("servo_capture").captures
+    names = [os.path.basename(path) for path, _servos in caps]
+    assert names == [
+        "step_iter0_x.scap",
+        "step_iter0_y.scap",
+        "step_iter1_x.scap",
+        "step_iter1_y.scap",
+    ]
+    assert tuner.scored[0][1] == [
+        ("iter0_x", "y", 150.0),
+        ("iter0_y", "x", 150.0),
+    ]
+    m = _manifest(sc)
+    assert m["experiment"] == "strain_tune"
+    # The dashboard's manifest parser types `applied` strictly (servo
+    # param writes); diagnostics ride in the free-form `swept`.
+    assert m["steps"][0]["applied"] == []
+    assert m["steps"][0]["swept"]["s_own_a"] == pytest.approx(300.0 * 0.66)
+    assert m["steps"][0]["swept"]["s_cross_a"] == pytest.approx(-75.0 * 0.66)
+    assert m["steps"][0]["swept"]["rms_a_x"] == 1.0
+    assert m["steps"][0]["swept"]["rms_a_y"] == 1.5
+    assert m["steps"][0]["swept"]["kaa"] == 300.0
+    assert m["steps"][0]["swept"]["y"] == 150.0
+    assert m["steps"][0]["swept"]["x"] == 150.0
+
+
+def test_tune_fails_loudly_when_it_does_not_converge():
+    sc, comp = make_tune_sc([0.5] * 5)
+    with pytest.raises(RuntimeError, match="did not converge"):
+        sc.cmd_SERVO_STRAIN_COMP_TUNE(FakeGcmd(RUN="ignored"))
+    assert comp.tuner.stored == 0
+
+
+def test_tune_without_strain_comp_errors_loudly():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
+    with pytest.raises(RuntimeError, match="servo_strain_comp"):
+        sc.cmd_SERVO_STRAIN_COMP_TUNE(FakeGcmd(RUN="ignored"))
+
+
+def test_capture_warns_when_sync_loss_counter_increments():
+    servo_param.drain_param_writes()
+    sc, gcode = make_sc()
+    engine = sc.printer.lookup_object("motion_engine")
+    reads = {"n": 0}
+
+    def sdo_read(handle, slot, index, subindex):
+        if (index, subindex) == (0x2013, 0x05):
+            reads["n"] += 1
+            return 2, reads["n"]
+        return 2, 7
+
+    engine.sdo_read = sdo_read
+    sc.cmd_SERVO_MEASURE_TRACKING(FakeGcmd(AXIS="X"))
+    warns = [r for r in gcode.responses if "sync loss" in r]
+    assert warns, gcode.responses
+    assert "C13.04" in warns[0]
+    assert "motor_a +2" in warns[0]
+    assert "motor_b +2" in warns[0]
+
+
+def test_capture_quiet_when_sync_loss_counter_steady():
+    servo_param.drain_param_writes()
+    sc, gcode = make_sc()
+    sc.cmd_SERVO_MEASURE_TRACKING(FakeGcmd(AXIS="X"))
+    assert not any("sync loss" in r for r in gcode.responses)
+
+
+def test_capture_sync_loss_read_failure_is_command_error():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    engine = sc.printer.lookup_object("motion_engine")
+
+    def sdo_read(handle, slot, index, subindex):
+        if (index, subindex) == (0x2013, 0x05):
+            raise RuntimeError("SDO read failed: CoE abort 0x06020000")
+        return 2, 7
+
+    engine.sdo_read = sdo_read
+    with pytest.raises(RuntimeError, match="C13.04"):
+        sc.cmd_SERVO_MEASURE_TRACKING(FakeGcmd(AXIS="X"))

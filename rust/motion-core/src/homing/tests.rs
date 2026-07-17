@@ -557,6 +557,17 @@ mod corexy_reconstruction_tests {
         );
 
         const Z_MCU: u32 = 120;
+        {
+            use crate::lock_ext::LockExt;
+            let mut r = router.lock_ok();
+            for i in (MCU_ID + 1)..Z_MCU {
+                let _ = r.claim_mcu(&format!("dummy-{i}"));
+            }
+            let h = r.claim_mcu("mcu-z");
+            assert_eq!(h.raw(), Z_MCU);
+            let _ =
+                r.set_clock_est_from_sample(h, FREQ_F64, std::time::Instant::now(), 1_000_000_000);
+        }
         let z_host = super::host_of(&router, MCU_ID, piece_start);
         store.record(
             key(Z_MCU, AXIS_Z),

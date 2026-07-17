@@ -140,7 +140,7 @@ fn push_drive_flags(args: &mut Vec<String>, d: &EthercatDrive) {
         args.push("--invert".into());
     }
     args.push("--torque-clamp-pct".into());
-    args.push(d.ff_torque_clamp.to_string());
+    args.push(d.ff_max_torque.to_string());
     if d.ff_lead_cycles > 0 {
         args.push("--ff-lead-cycles".into());
         args.push(d.ff_lead_cycles.to_string());

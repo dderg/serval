@@ -56,14 +56,14 @@ def test_refine_values_bad_span_or_steps_fail():
 
 
 def test_validate_gain_values_ranges():
-    servo_calibration.validate_gain_values([1, 30000], "position")
+    servo_calibration.validate_gain_values([1, 20000], "position")
     servo_calibration.validate_gain_values([1, 20000], "speed")
     servo_calibration.validate_gain_values([15, 51200], "integral")
 
 
 def test_validate_gain_values_rejects_out_of_range():
     with pytest.raises(ValueError, match="outside drive range"):
-        servo_calibration.validate_gain_values([30001], "position")
+        servo_calibration.validate_gain_values([20001], "position")
     with pytest.raises(ValueError, match="outside drive range"):
         servo_calibration.validate_gain_values([14], "integral")
 

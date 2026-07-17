@@ -50,7 +50,7 @@ fn analyze(name: &str) -> Value {
     for (idx, dname) in cap.drive_names().into_iter().enumerate() {
         let series = drive_series(&cap, idx).unwrap();
         let metrics =
-            compute_metrics(&series, SETTLE_BAND_COUNTS, TORQUE_LIMIT_PER_MILLE, fs).unwrap();
+            compute_metrics(&series, SETTLE_BAND_COUNTS, TORQUE_LIMIT_PER_MILLE, fs, 0).unwrap();
         let segs = motion_segments(&series.flags);
         let (freqs, psd) = moving_psd(&series, &segs, fs).unwrap();
         let peaks: Vec<Value> = top_peaks(&freqs, &psd, 5)

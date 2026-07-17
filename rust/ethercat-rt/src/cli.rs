@@ -207,7 +207,14 @@ fn load_dynamics_profile(path: &str) -> crate::dynamics::DynamicsModel {
         std::process::exit(1);
     });
     crate::dynamics::DynamicsModel::from_toml_str(&text).unwrap_or_else(|e| {
-        eprintln!("ec-rt: dynamics profile {path} invalid: {e:?}");
+        if let crate::dynamics::ProfileError::Version(v) = e {
+            eprintln!(
+                "ec-rt: dynamics profile {path} is version {v}, expected 6 — \
+                 refit with SERVO_FIT_DYNAMICS"
+            );
+        } else {
+            eprintln!("ec-rt: dynamics profile {path} invalid: {e:?}");
+        }
         std::process::exit(1);
     })
 }
@@ -237,10 +244,10 @@ fn resolve_dynamics(
             eprintln!("ec-rt: per-slave dynamics profiles invalid: {e:?}");
             std::process::exit(1);
         });
-        if model.n != num_slaves {
+        if model.n_slots != num_slaves {
             eprintln!(
                 "ec-rt: per-slave dynamics profiles cover {} axes, endpoint drives {num_slaves}",
-                model.n
+                model.n_slots
             );
             std::process::exit(1);
         }
@@ -248,10 +255,10 @@ fn resolve_dynamics(
     } else {
         node_profile.map(|path| {
             let model = load_dynamics_profile(&path);
-            if model.n != num_slaves {
+            if model.n_slots != num_slaves {
                 eprintln!(
                     "ec-rt: dynamics profile {path} has {} axes, endpoint drives {num_slaves}",
-                    model.n
+                    model.n_slots
                 );
                 std::process::exit(1);
             }

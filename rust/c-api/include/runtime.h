@@ -119,6 +119,8 @@ int32_t runtime_phase_jog_to(struct Runtime *rt,
                              uint16_t target_phase,
                              uint16_t max_microsteps_per_sample);
 
+int32_t runtime_pieces_gated(struct Runtime *rt);
+
 int32_t runtime_query_motor_state(struct Runtime *rt,
                                   uint8_t *out_slots,
                                   int32_t *out_pos_q16,

@@ -58,7 +58,11 @@ impl std::fmt::Debug for McuTransport {
 pub struct WireSink {
     pub transports: HashMap<u32, McuTransport>,
     pub timeout: Duration,
-    pub freq_of: Arc<dyn Fn(u32) -> Option<f64> + Send + Sync>,
+    /// Current (mcu_now_ticks, freq_hz) from the clock regression — the same
+    /// record the pump's in-past guard reads. Used for transit diagnostics
+    /// and to cap the PushPieces retry budget by the front piece's remaining
+    /// scheduling lead.
+    pub clock_of: Arc<dyn Fn(u32) -> Option<(u64, f64)> + Send + Sync>,
 }
 
 /// Per-attempt response wait for a serial `PushPieces` re-request, before the
@@ -84,9 +88,11 @@ fn pushpieces_attempt_timeout(body_len: usize) -> Duration {
 /// (`DRIP_WINDOW_SECS` = 100 ms) — otherwise the retry itself starves the MCU
 /// of later pieces and recreates the very `-308` it prevents. Batched print
 /// frames get a larger per-attempt timeout (wire time scales with frame size)
-/// but also run under the much deeper `MAX_LEAD_SECS` lead. Recovers isolated
-/// corruption; sustained corruption gives up fast to the loud in-past-guard
-/// backstop.
+/// but also run under the much deeper `MAX_LEAD_SECS` lead — the attempt-count
+/// cap alone can exceed a shallow post-re-anchor lead (250 ms), so the retry
+/// loop is additionally capped by the front piece's remaining lead (`deadline`).
+/// Recovers isolated corruption; sustained corruption gives up fast to the
+/// loud in-past-guard backstop.
 const PUSHPIECES_MAX_ATTEMPTS: u32 = 3;
 
 /// Bounded re-request policy for serial `PushPieces` (the frame is idempotent on
@@ -96,17 +102,22 @@ const PUSHPIECES_MAX_ATTEMPTS: u32 = 3;
 /// genuine MCU failure (`Closed`/`Io` dead transport, `McuShutdown`) so it surfaces
 /// loud instead of being buried under the retry budget; `Transient` once the budget
 /// is spent on recoverable corruption so the existing pump path + in-past guard
-/// remain the backstop. Pure (no I/O of its own) so the policy is unit-testable
-/// with a scripted `attempt_call`.
+/// remain the backstop. `deadline` is when the bundle's front piece enters the
+/// MCU's past: retrying beyond it cannot succeed, so the loop stops there and
+/// names the transport as unresponsive instead of burning the remaining budget.
+/// Pure (no I/O of its own) so the policy is unit-testable with a scripted
+/// `attempt_call`.
 pub(crate) fn pushpieces_retransmit_serial<F>(
     mcu_id: u32,
     max_attempts: u32,
+    deadline: Option<Instant>,
     mut attempt_call: F,
 ) -> Result<Vec<u8>, SendError>
 where
     F: FnMut() -> Result<Vec<u8>, host_rt::transport::TransportError>,
 {
     use host_rt::transport::TransportError;
+    let started = Instant::now();
     let mut attempt: u32 = 0;
     loop {
         attempt += 1;
@@ -122,6 +133,23 @@ where
                 )));
             }
             Err(e) => {
+                if deadline.is_some_and(|d| Instant::now() >= d) {
+                    let unresponsive_ms = started.elapsed().as_millis() as u64;
+                    tracing::error!(
+                        subsystem = "mcu-comms",
+                        event = "pushpieces_giveup_lead_expired",
+                        mcu = mcu_id,
+                        attempts = attempt,
+                        unresponsive_ms,
+                        error = ?e,
+                        "[pushpieces] transport unresponsive through the front piece's entire scheduling lead — giving up; in-past guard aborts next"
+                    );
+                    return Err(SendError::Transient(format!(
+                        "serial PushPieces mcu {mcu_id}: transport unresponsive for \
+                         {unresponsive_ms} ms — no response within the front piece's \
+                         remaining lead after {attempt} attempts ({e:?})"
+                    )));
+                }
                 if attempt >= max_attempts {
                     tracing::warn!(
                         subsystem = "mcu-comms",
@@ -150,6 +178,23 @@ where
 }
 
 impl WireSink {
+    /// The wall-clock instant at which the bundle's earliest piece enters the
+    /// MCU's past — retrying a send beyond it cannot succeed. `None` when the
+    /// clock regression has no record yet (attempt-count cap still applies).
+    fn front_lead_deadline(&self, mcu_id: u32, frames: &[AxisFrame]) -> Option<Instant> {
+        let front = frames
+            .iter()
+            .filter_map(|f| f.pieces.first())
+            .map(|p| p.start_time)
+            .min()?;
+        let (mcu_now, freq) = (self.clock_of)(mcu_id)?;
+        if freq <= 0.0 {
+            return None;
+        }
+        let lead_secs = front.saturating_sub(mcu_now) as f64 / freq;
+        Some(Instant::now() + Duration::from_secs_f64(lead_secs))
+    }
+
     fn call_push_pieces(
         &self,
         mcu_id: u32,
@@ -191,7 +236,8 @@ impl WireSink {
                     SendError::Transient(format!("McuHostIo for mcu {mcu_id} detached"))
                 })?;
                 let attempt_timeout = pushpieces_attempt_timeout(body.len());
-                pushpieces_retransmit_serial(mcu_id, PUSHPIECES_MAX_ATTEMPTS, || {
+                let deadline = self.front_lead_deadline(mcu_id, frames);
+                pushpieces_retransmit_serial(mcu_id, PUSHPIECES_MAX_ATTEMPTS, deadline, || {
                     io.kalico_call_on_channel(
                         mcu_protocol::MCU_CHANNEL_PIECES,
                         mcu_protocol::MessageKind::PushPieces,
@@ -269,7 +315,7 @@ impl WireSink {
         if !(zero_st || past_arrival || healthy_sample) {
             return;
         }
-        let approx_freq_hz = (self.freq_of)(key.mcu_id);
+        let approx_freq_hz = (self.clock_of)(key.mcu_id).map(|(_, f)| f);
         let host_send_secs = {
             use std::time::{SystemTime, UNIX_EPOCH};
             SystemTime::now()

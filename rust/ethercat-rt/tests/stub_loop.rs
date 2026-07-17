@@ -176,7 +176,8 @@ fn push_pieces_and_heartbeat_closes_the_loop() {
                     Command::ResonanceBuzz { .. }
                     | Command::SetDiffDamper { .. }
                     | Command::SetDiffTrim { .. }
-                    | Command::SetStrainComp { .. } => {}
+                    | Command::SetStrainComp { .. }
+                    | Command::SetDynamicsModel { .. } => {}
                     Command::SdoRead { .. } | Command::SdoWrite { .. } => {
                         todo!("wired in the endpoint task")
                     }
@@ -213,6 +214,7 @@ fn push_pieces_and_heartbeat_closes_the_loop() {
                     | Command::SetDiffDamper { .. }
                     | Command::SetDiffTrim { .. }
                     | Command::SetStrainComp { .. }
+                    | Command::SetDynamicsModel { .. }
                     | Command::PushPieces { .. } => {}
                 }
             }

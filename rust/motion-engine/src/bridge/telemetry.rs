@@ -446,9 +446,11 @@ impl PyMotionEngine {
                 pending = state.pending,
                 pushed = state.pushed,
                 retired = state.retired,
+                staged_motion = state.staged_motion,
+                hold_tail = state.hold_tail,
                 waited_s,
                 "drain wait not completing — this axis still has staged or \
-                 unretired wire pieces"
+                 unretired motion pieces (trailing hold coverage excluded)"
             );
         }
     }

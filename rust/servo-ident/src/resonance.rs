@@ -7,13 +7,13 @@
 //! `scripts/servo_gain_report.py`. The accel recommendation ports
 //! `scripts/servo_accel_report.py::recommend`.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub const RESONANCE_BAND_HZ: (f64, f64) = (20.0, 450.0);
 pub const LOW_BAND_HZ: (f64, f64) = (1.0, 4.0);
 pub const RESONANCE_RATIO_LIMIT: f64 = 8.0;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Resonance {
     pub detected: bool,
     pub ratio: f64,

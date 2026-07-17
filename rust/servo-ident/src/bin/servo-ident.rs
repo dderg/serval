@@ -1,16 +1,17 @@
-//! Usage: servo-ident --capture run.csv --structure scalar|corexy \
-//!   --axes x[,b] --out profile.toml \
+//! Usage: servo-ident --capture run.csv \
+//!   --frame "r0c0,r0c1,...;r1c0,r1c1,..." --modes x[,y] --axes a[,b,...] \
+//!   --out profile.toml \
 //!   [--rated-torque-nm T --rotor-inertia-kgm2 J --rotation-distance-mm D]
 #![allow(clippy::exit)]
 
-use servo_ident::capture::{
-    parse_capture_csv, steady_accel_keep, tracking_keep, PlateauOptions, TrackingOptions,
-};
+use servo_ident::capture::{parse_capture_csv, Capture};
 use servo_ident::fit::residual_by_motor;
-use servo_ident::fit::{fit, FitInput, FitOptions};
+use servo_ident::fit::{fit, FitOptions};
 use servo_ident::model::Structure;
-use servo_ident::prep::{band_limited_rms, prep, PrepOptions};
+use servo_ident::pipeline::{fit_input, full_fit_input, prepare};
+use servo_ident::prep::{band_limited_rms, PrepOptions};
 use servo_ident::profile_out::{c0006_recommendation, render_profile};
+use servo_ident::split::{fit_pair_splits, report_pair_splits, SplitCapture};
 
 fn arg(args: &[String], key: &str) -> Option<String> {
     args.iter()
@@ -34,9 +35,10 @@ fn req(args: &[String], key: &str) -> String {
     })
 }
 
-const KNOWN_KEYS: [&str; 11] = [
+const KNOWN_KEYS: [&str; 12] = [
     "--capture",
-    "--structure",
+    "--frame",
+    "--modes",
     "--axes",
     "--out",
     "--rated-torque-nm",
@@ -60,39 +62,54 @@ fn reject_unknown_flags(args: &[String]) {
     }
 }
 
+fn parse_frame(spec: &str) -> Vec<Vec<f64>> {
+    spec.split(';')
+        .map(|row| {
+            row.split(',')
+                .map(|e| {
+                    e.trim().parse::<f64>().unwrap_or_else(|_| {
+                        eprintln!("servo-ident: bad frame entry {e:?}");
+                        std::process::exit(1);
+                    })
+                })
+                .collect()
+        })
+        .collect()
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     reject_unknown_flags(&args);
-    let structure = match req(&args, "--structure").as_str() {
-        "scalar" => Structure::CartesianScalar,
-        "corexy" => Structure::CoreXY,
-        "corexy-awd" => Structure::CoreXYAwd,
-        other => {
-            eprintln!("servo-ident: unknown structure {other}");
-            std::process::exit(1);
-        }
-    };
+    let frame = parse_frame(&req(&args, "--frame"));
+    let modes_arg = req(&args, "--modes");
+    let modes: Vec<&str> = modes_arg.split(',').map(str::trim).collect();
+    if modes.len() != frame.len() {
+        eprintln!(
+            "servo-ident: {} modes given, frame has {} rows",
+            modes.len(),
+            frame.len()
+        );
+        std::process::exit(1);
+    }
+    let structure = Structure::new(frame.clone());
     let axes_arg = req(&args, "--axes");
     let axes: Vec<&str> = axes_arg.split(',').map(str::trim).collect();
     if axes.len() != structure.axis_count() {
         eprintln!(
-            "servo-ident: {} axes given, structure needs {}",
+            "servo-ident: {} axes given, frame has {} columns",
             axes.len(),
             structure.axis_count()
         );
         std::process::exit(1);
     }
 
+    if args.iter().filter(|a| *a == "--capture").count() > 1 {
+        eprintln!(
+            "servo-ident: --capture given more than once — the fit consumes exactly one capture"
+        );
+        std::process::exit(1);
+    }
     let capture_path = req(&args, "--capture");
-    let text = std::fs::read_to_string(&capture_path).unwrap_or_else(|e| {
-        eprintln!("servo-ident: read {capture_path}: {e}");
-        std::process::exit(1);
-    });
-    let cap = parse_capture_csv(&text, &axes).unwrap_or_else(|e| {
-        eprintln!("servo-ident: capture invalid: {e:?}");
-        std::process::exit(1);
-    });
-    let total = cap.t.len();
     let mut prep_opts = PrepOptions::default();
     if let Some(v) = opt_f64(&args, "--cutoff-hz") {
         prep_opts.cutoff_hz = v;
@@ -105,51 +122,43 @@ fn main() {
     }
     prep_opts.ripple_period_mm =
         opt_f64(&args, "--ripple-period-mm").or_else(|| opt_f64(&args, "--rotation-distance-mm"));
-    let pp = prep(&cap, &prep_opts);
+
+    let text = std::fs::read_to_string(&capture_path).unwrap_or_else(|e| {
+        eprintln!("servo-ident: read {capture_path}: {e}");
+        std::process::exit(1);
+    });
+    let cap: Capture = parse_capture_csv(&text, &axes).unwrap_or_else(|e| {
+        eprintln!("servo-ident: capture {capture_path} invalid: {e:?}");
+        std::process::exit(1);
+    });
+    let (prepared, stats) = prepare(&cap, &structure, &prep_opts);
     eprintln!(
-        "prep: {} segments, accel->torque delay {:.2} ms removed",
-        pp.segments,
-        pp.delay_s * 1000.0
+        "prep: {} segments, delay {:.2} ms; prep+tracking kept {}/{}, \
+         +steady-accel plateaus kept {}/{}",
+        stats.segments,
+        stats.delay_s * 1000.0,
+        stats.tracked,
+        stats.total,
+        stats.kept,
+        stats.total
     );
-    let track = tracking_keep(&cap.vel, &cap.vel_act, &TrackingOptions::default());
-    let plateau = steady_accel_keep(&cap.t, &cap.acc, &PlateauOptions::default());
-    let keep: Vec<usize> = (0..total)
-        .filter(|&k| pp.valid[k] && track[k] && plateau[k])
-        .collect();
-    let tracked = (0..total).filter(|&k| pp.valid[k] && track[k]).count();
-    eprintln!(
-        "masks: prep+tracking kept {tracked}/{total}, +steady-accel plateaus kept {}/{total}",
-        keep.len()
-    );
-    if tracked == 0 {
+    if stats.tracked == 0 {
         eprintln!(
-            "servo-ident: the drive never tracked the commanded trajectory — \
-             stiction breakaway or an untuned/lagging loop; enable velocity \
-             feedforward and check the mechanics, then re-capture"
+            "servo-ident: {capture_path}: the drive never tracked the commanded \
+             trajectory — stiction breakaway or an untuned/lagging loop; enable \
+             velocity feedforward and check the mechanics, then re-capture"
         );
         std::process::exit(2);
     }
-    if keep.is_empty() {
+    if stats.kept == 0 {
         eprintln!(
-            "servo-ident: no steady-accel plateaus in capture — strokes too short \
+            "servo-ident: {capture_path}: no steady-accel plateaus — strokes too short \
              or jerk-limited accel never holds; lengthen strokes or lower accel"
         );
         std::process::exit(2);
     }
-    let pick = |cols: &[Vec<f64>]| -> Vec<Vec<f64>> {
-        cols.iter()
-            .map(|c| keep.iter().map(|&k| c[k]).collect())
-            .collect()
-    };
-    let input = FitInput {
-        structure,
-        acc: pick(&pp.acc),
-        vel: pick(&pp.vel),
-        cf: pick(&pp.cf),
-        cr: pick(&pp.cr),
-        torque: pick(&pp.torque),
-        extra: pp.extra.iter().map(|cols| pick(cols)).collect(),
-    };
+
+    let input = fit_input(&structure, &prepared);
     let r = fit(&input, &FitOptions::default()).unwrap_or_else(|e| {
         eprintln!("servo-ident: refusing to emit a profile: {e:?}");
         std::process::exit(2);
@@ -159,43 +168,26 @@ fn main() {
         "fit: {} samples/motor, rms residual {:.2} (0.1% rated), condition {:.1e}",
         r.samples, r.rms_residual, r.condition
     );
+    let full = full_fit_input(&structure, &prepared);
+    let full_residual = residual_by_motor(&full, &r.params, &r.extra_params);
     if prep_opts.cutoff_hz > 0.0 {
-        let full = FitInput {
-            structure,
-            acc: pp.acc.clone(),
-            vel: pp.vel.clone(),
-            cf: pp.cf.clone(),
-            cr: pp.cr.clone(),
-            torque: pp.torque.clone(),
-            extra: pp.extra.clone(),
-        };
-        let res = residual_by_motor(&full, &r.params, &r.extra_params);
-        let keep_mask: Vec<bool> = (0..total)
-            .map(|k| pp.valid[k] && track[k] && plateau[k])
-            .collect();
-        let inband = band_limited_rms(&res, &pp.t, &keep_mask, prep_opts.cutoff_hz);
+        let inband = band_limited_rms(
+            &full_residual,
+            &prepared.pp.t,
+            &prepared.keep,
+            prep_opts.cutoff_hz,
+        );
         eprintln!(
-            "in-band (<= {:.0} Hz) rms residual: {:.2} (0.1% rated) — model error \
-             in the band a feedforward model controls; the raw residual above \
-             also counts ripple, loop transients and quantization",
+            "in-band (<= {:.0} Hz) rms residual: {:.2} (0.1% rated)",
             prep_opts.cutoff_hz, inband
         );
     }
-    let names: Vec<String> = match structure {
-        Structure::CartesianScalar => ["mass", "viscous", "coulomb_fwd", "coulomb_rev"]
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect(),
-        Structure::CoreXY | Structure::CoreXYAwd => {
-            let mut v = vec!["mass_diag".to_string(), "mass_off".to_string()];
-            for a in &axes {
-                v.push(format!("viscous_{a}"));
-                v.push(format!("coulomb_fwd_{a}"));
-                v.push(format!("coulomb_rev_{a}"));
-            }
-            v
-        }
-    };
+    let mut names: Vec<String> = Vec::with_capacity(3 * modes.len());
+    for m in &modes {
+        names.push(format!("mass_{m}"));
+        names.push(format!("viscous_{m}"));
+        names.push(format!("coulomb_{m}"));
+    }
     for (name, se) in names.iter().zip(&r.param_stderr) {
         eprintln!("  stderr {name}: {se:.4}");
     }
@@ -209,48 +201,39 @@ fn main() {
             );
         }
     }
-    let min_diag = (0..r.params.mass.len())
-        .map(|i| r.params.mass[i][i])
-        .fold(f64::INFINITY, f64::min);
-    let physical = min_diag > 0.0;
+    let split_capture = SplitCapture {
+        cap: &cap,
+        residual_filt: &full_residual,
+        keep: &prepared.keep,
+    };
+    let pair_reports = fit_pair_splits(&structure, &r.params, prep_opts.cutoff_hz, &split_capture)
+        .unwrap_or_else(|e| {
+            eprintln!("servo-ident: refusing to emit a profile: pair split fit failed: {e:?}");
+            std::process::exit(2);
+        });
+    let pair_splits = report_pair_splits(&pair_reports, &axes);
+    let min_mass = r.params.mass.iter().copied().fold(f64::INFINITY, f64::min);
+    let physical = min_mass > 0.0;
 
     if let (Some(t), Some(j), Some(d)) = (
         opt_f64(&args, "--rated-torque-nm"),
         opt_f64(&args, "--rotor-inertia-kgm2"),
         opt_f64(&args, "--rotation-distance-mm"),
     ) {
-        let n = r.params.mass.len();
-        if n >= 2 {
-            // The sign of the fitted off-diagonal follows the capture frame
-            // (invert_direction flips it per drive), so the eigen-directions
-            // are labeled by magnitude, not by which formula produced them.
-            // For AWD the cross-belt coupling is split across the pair's two
-            // columns; summing row 0's off-diagonal entries recovers the
-            // per-drive m_off in both layouts.
-            let m_off: f64 = r.params.mass[0][1..].iter().sum();
-            let sum = r.params.mass[0][0] + m_off;
-            let diff = r.params.mass[0][0] - m_off;
-            let m_light = sum.min(diff);
-            let m_heavy = sum.max(diff);
+        for (k, (m, mass)) in modes.iter().zip(&r.params.mass).enumerate() {
+            let drive_share = structure.frame[k]
+                .iter()
+                .fold(0.0_f64, |acc, f| acc.max(f.abs()));
             eprintln!(
-                "recommended C00.06 (light direction): {:.0}%",
-                c0006_recommendation(m_light, t, d, j)
-            );
-            eprintln!(
-                "heavy-direction equivalent (reference only): {:.0}%",
-                c0006_recommendation(m_heavy, t, d, j)
-            );
-        } else {
-            eprintln!(
-                "recommended C00.06 (light direction): {:.0}%",
-                c0006_recommendation(r.params.mass[0][0], t, d, j)
+                "recommended C00.06 (mode {m}): {:.0}%",
+                c0006_recommendation(*mass * drive_share, t, d, j)
             );
         }
     }
 
     if !physical {
         eprintln!(
-            "servo-ident: fitted diagonal mass {min_diag:.5} <= 0 is physically \
+            "servo-ident: fitted mode mass {min_mass:.5} <= 0 is physically \
              impossible — C00.06 is J_load/J_rotor and load inertia cannot be \
              negative (drive accepts 0..12000%). The captured torque runs opposite \
              to the commanded acceleration: a drive torque-polarity / \
@@ -260,8 +243,12 @@ fn main() {
         return;
     }
 
-    let rms = vec![r.rms_residual; axes.len()];
-    let profile = render_profile(&r.params, &axes, &rms);
+    let per_motor = residual_by_motor(&input, &r.params, &r.extra_params);
+    let rms: Vec<f64> = per_motor
+        .iter()
+        .map(|res| (res.iter().map(|e| e * e).sum::<f64>() / res.len() as f64).sqrt())
+        .collect();
+    let profile = render_profile(&r.params, &axes, &modes, &frame, &rms, &pair_splits);
     let out = req(&args, "--out");
     std::fs::write(&out, profile).unwrap_or_else(|e| {
         eprintln!("servo-ident: write {out}: {e}");

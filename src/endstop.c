@@ -12,6 +12,7 @@ struct endstop {
     struct timer time;
     uint32_t rest_ticks;
     uint32_t pin_id;
+    uint32_t last_clear_clock;
     struct gpio_in pin;
     uint64_t trip_clock;
     uint8_t endstop_id;
@@ -27,20 +28,34 @@ static struct task_wake endstop_trip_wake;
 // the transport write to endstop_trip_task — mcu_transport_send_frame uses
 // a shared tx_buf and the USB transmit cursor, neither safe against the
 // foreground from IRQ.
+//
+// The trip clock is the midpoint of the two observations that bracket the
+// edge: the pin was clear when last read and active now, so the trip lies
+// between those reads. Midpoint error is bounded by half the observation
+// gap and is unbiased — stamping the detection time instead would be late
+// by up to the full gap, always in the same direction, and the gap
+// stretches well past rest_ticks when timer dispatch runs late (host
+// preemption and pacing slack under the simulator's virtual clock).
 static uint_fast8_t
 endstop_event(struct timer *t)
 {
     struct endstop *e = container_of(t, struct endstop, time);
     uint8_t raw = gpio_in_read(e->pin) ? 1 : 0;
     uint8_t active = raw ^ e->invert;
+    uint32_t obs_clock = timer_read_time();
     if (active && e->armed) {
-        e->trip_clock = runtime_now_ticks(runtime_handle);
+        uint64_t now64 = runtime_now_ticks(runtime_handle);
+        uint32_t gap = obs_clock - e->last_clear_clock;
+        uint32_t mid32 = e->last_clear_clock + gap / 2;
+        int32_t mid_delta = (int32_t)(mid32 - (uint32_t)now64);
+        e->trip_clock = now64 + (int64_t)mid_delta;
         e->armed = 0;
         e->trip_pending = 1;
         e->tripped = 1;
         sched_wake_task(&endstop_trip_wake);
         return SF_DONE;
     }
+    e->last_clear_clock = obs_clock;
     e->time.waketime += e->rest_ticks;
     return SF_RESCHEDULE;
 }
@@ -82,7 +97,8 @@ command_query_endstop(uint32_t *args)
     e->tripped = 0;
     e->trip_clock = 0;
     e->armed = 1;
-    e->time.waketime = timer_read_time() + e->rest_ticks;
+    e->last_clear_clock = timer_read_time();
+    e->time.waketime = e->last_clear_clock + e->rest_ticks;
     sched_add_timer(&e->time);
 }
 DECL_COMMAND(command_query_endstop,

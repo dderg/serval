@@ -5,6 +5,8 @@ fn axis(pending: u32, pushed: u32, retired: u32) -> AxisDrainState {
         pending,
         pushed,
         retired,
+        staged_motion: pending,
+        hold_tail: 0,
     }
 }
 
@@ -54,6 +56,52 @@ fn wait_drained_wakes_on_publish() {
     std::thread::sleep(Duration::from_millis(30));
     d.publish(snapshot(&[((0, 3), axis(0, 10, 10))]));
     assert!(waiter.join().unwrap().is_ok());
+}
+
+#[test]
+fn trailing_hold_coverage_does_not_gate_drain() {
+    let d = DrainLedger::new();
+    let hold_tail = AxisDrainState {
+        pending: 0,
+        pushed: 10,
+        retired: 9,
+        staged_motion: 0,
+        hold_tail: 1,
+    };
+    d.publish(snapshot(&[((0, 0), hold_tail)]));
+    assert!(
+        d.drained(),
+        "an unretired wire tail that is all hold coverage is not motion"
+    );
+    let motion_behind_hold = AxisDrainState {
+        retired: 8,
+        ..hold_tail
+    };
+    d.publish(snapshot(&[((0, 0), motion_behind_hold)]));
+    assert!(
+        !d.drained(),
+        "an unretired motion piece behind the hold tail still gates"
+    );
+}
+
+#[test]
+fn staged_holds_do_not_gate_but_staged_motion_does() {
+    let d = DrainLedger::new();
+    let staged_holds = AxisDrainState {
+        pending: 3,
+        pushed: 5,
+        retired: 5,
+        staged_motion: 0,
+        hold_tail: 0,
+    };
+    d.publish(snapshot(&[((0, 0), staged_holds)]));
+    assert!(d.drained(), "staged hold coverage is not motion");
+    let staged_motion = AxisDrainState {
+        staged_motion: 1,
+        ..staged_holds
+    };
+    d.publish(snapshot(&[((0, 0), staged_motion)]));
+    assert!(!d.drained(), "staged motion gates the drain");
 }
 
 #[test]

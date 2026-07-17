@@ -269,6 +269,25 @@ def awd_rails(node="xy_drives", node_b=None):
     ]
 
 
+def trident_awd_rails(node="xy_drives"):
+    return [
+        _rail(
+            "x",
+            [
+                _motor("motor_a1", node, 1, invert=True),
+                _motor("motor_a", node, 0),
+            ],
+        ),
+        _rail(
+            "y",
+            [
+                _motor("motor_b", node, 2, invert=True),
+                _motor("motor_b1", node, 3, invert=True),
+            ],
+        ),
+    ]
+
+
 def single_drive_rails():
     return [
         _rail("x", [_motor("motor_a", "xy_drives", 0)]),
@@ -347,8 +366,22 @@ def test_fit_dynamics_corexy_captures_all_four_and_passes_axes():
         "motor_b1",
     ]
     argv = _fit_argv(gcode)
-    assert _flag(argv, "--structure") == "corexy-awd"
+    assert "--structure" not in argv
+    assert _flag(argv, "--modes") == "x,y"
     assert _flag(argv, "--axes") == "motor_a,motor_a1,motor_b,motor_b1"
+    assert _flag(argv, "--frame") == "0.25,0.25,-0.25,0.25;0.25,0.25,0.25,-0.25"
+    assert "--signs" not in argv
+
+
+def test_fit_dynamics_trident_awd_inverted_drives_share_axes():
+    sc, gcode = make_calibration(trident_awd_rails())
+    sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd())
+    argv = _fit_argv(gcode)
+    assert _flag(argv, "--axes") == "motor_a,motor_a1,motor_b,motor_b1"
+    assert _flag(argv, "--frame") == (
+        "0.25,-0.25,-0.25,-0.25;0.25,-0.25,0.25,0.25"
+    )
+    assert "--signs" not in argv
 
 
 def test_fit_dynamics_corexy_two_drives_is_plain_corexy():
@@ -356,8 +389,10 @@ def test_fit_dynamics_corexy_two_drives_is_plain_corexy():
     sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd())
     argv = _fit_argv(gcode)
     assert "--pairs" not in argv
-    assert _flag(argv, "--structure") == "corexy"
+    assert "--structure" not in argv
+    assert _flag(argv, "--modes") == "x,y"
     assert _flag(argv, "--axes") == "motor_a,motor_b"
+    assert _flag(argv, "--frame") == "0.5,0.5;0.5,-0.5"
 
 
 def test_scalar_fit_requires_drive_on_multi_drive_axis():
@@ -376,8 +411,10 @@ def test_fit_dynamics_scalar_fit_selects_drive_via_axes():
     sc, gcode = make_calibration(cartesian_awd_rails(), coupled=False)
     sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd(AXIS="X", DRIVE="motor_a"))
     argv = _fit_argv(gcode)
-    assert _flag(argv, "--structure") == "scalar"
+    assert "--structure" not in argv
+    assert _flag(argv, "--modes") == "motor_a"
     assert _flag(argv, "--axes") == "motor_a"
+    assert _flag(argv, "--frame") == "1"
 
 
 def test_tracking_combined_view_lists_every_motor_per_belt():
@@ -596,43 +633,6 @@ def test_diff_damper_rejects_single_drive_belts():
     assert not engine.dampers
 
 
-def test_diff_trim_arms_both_belts_by_default():
-    sc, _gcode, engine = make_differential_calibration()
-    sc.cmd_SERVO_DIFF_TRIM(FakeGcmd(GAIN="0.05"))
-    assert engine.trims == [
-        (7, 0, 1, 50000, 150, 25000),
-        (7, 2, 3, 50000, 150, 25000),
-    ]
-
-
-def test_diff_trim_single_belt_with_explicit_knobs():
-    sc, _gcode, engine = make_differential_calibration()
-    sc.cmd_SERVO_DIFF_TRIM(
-        FakeGcmd(BELT="B", GAIN="0.2", CLAMP_UM="300", LPF_HZ="10")
-    )
-    assert engine.trims == [(7, 2, 3, 200000, 300, 10000)]
-
-
-def test_diff_trim_zero_gain_disarms():
-    sc, _gcode, engine = make_differential_calibration()
-    sc.cmd_SERVO_DIFF_TRIM(FakeGcmd(BELT="A", GAIN="0"))
-    assert engine.trims == [(7, 0, 1, 0, 150, 25000)]
-
-
-def test_diff_trim_rejects_single_drive_belts():
-    sc, _gcode, engine = make_differential_calibration()
-    sc.printer = FakePrinter(
-        {
-            "gcode": sc.gcode,
-            "toolhead": FakeToolhead(FakeKin(single_drive_rails())),
-            "motion_engine": engine,
-        }
-    )
-    with pytest.raises(RuntimeError, match="two drives per belt"):
-        sc.cmd_SERVO_DIFF_TRIM(FakeGcmd(GAIN="0.05"))
-    assert not engine.trims
-
-
 def test_tracking_single_rail_dual_motor_axis_gets_no_combine():
     rails = [
         _rail(
@@ -657,7 +657,8 @@ def test_calibrate_inertia_ratio_corexy_uses_coupled_grid():
         "motor_b1",
     ]
     argv = _fit_argv(gcode)
-    assert _flag(argv, "--structure") == "corexy-awd"
+    assert "--structure" not in argv
+    assert _flag(argv, "--frame") == "0.25,0.25,-0.25,0.25;0.25,0.25,0.25,-0.25"
     assert _flag(argv, "--rated-torque-nm") == "0.3"
 
 
@@ -667,3 +668,26 @@ def test_calibrate_inertia_ratio_cartesian_rejects_corexy_only_params():
         sc.cmd_SERVO_CALIBRATE_INERTIA_RATIO(
             FakeGcmd(TORQUE_NM=0.3, INERTIA_KGM2=1e-5, Y_START="10")
         )
+
+
+def _capture_paths(sc):
+    return [
+        os.path.basename(p)
+        for p, _s in sc.printer.lookup_object("servo_capture").captures
+    ]
+
+
+def test_fit_dynamics_coupled_runs_one_full_range_capture():
+    sc, gcode = make_calibration(awd_rails())
+    strokes = []
+    sc._strokes = lambda axis, start, end, *a: strokes.append(
+        (axis, start, end)
+    )
+    sc.bounds = {"X": (20.0, 280.0), "Y": (20.0, 280.0)}
+    sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd())
+    assert _capture_paths(sc) == ["step_ident.scap"]
+    argv = _fit_argv(gcode)
+    caps = [argv[i + 1] for i, a in enumerate(argv) if a == "--capture"]
+    assert [os.path.basename(c) for c in caps] == ["step_ident.scap"]
+    assert {(s, e) for ax, s, e in strokes if ax == "X"} == {(20.0, 280.0)}
+    assert {(s, e) for ax, s, e in strokes if ax == "Y"} == {(20.0, 280.0)}

@@ -350,6 +350,14 @@ send_stop_response(uint32_t correlation_id, int32_t result, uint64_t discard_clo
     mcu_transport_send_frame(MCU_CHANNEL_CONTROL, payload, sizeof(payload));
 }
 
+// Motion halts at the FIRST gate — the endstop trip task gates locally
+// before the host's Stop broadcast arrives — so the discard clock is
+// latched then and re-reported for any repeat Stop while still gated.
+// Stamping each Stop with a fresh clock would place the halt several ms
+// of travel past where the steppers actually stopped, and every probe
+// seeds the toolhead frame from the position reconstructed at this clock.
+static uint64_t stop_halt_clock;
+
 int32_t
 handle_stop_inner(uint64_t *discard_clock)
 {
@@ -357,8 +365,11 @@ handle_stop_inner(uint64_t *discard_clock)
     *discard_clock = 0;
     if (runtime_handle) {
         irqstatus_t flag = irq_save();
+        int32_t was_gated = runtime_pieces_gated(runtime_handle);
         rc = runtime_gate_pieces(runtime_handle);
-        *discard_clock = runtime_now_ticks(runtime_handle);
+        if (was_gated <= 0)
+            stop_halt_clock = runtime_now_ticks(runtime_handle);
+        *discard_clock = stop_halt_clock;
         irq_restore(flag);
     }
     return rc;

@@ -5,10 +5,6 @@ use portable_atomic::{AtomicU8, AtomicU32};
 use crate::buzz_gen::ToneParams;
 use crate::stepping_state::MAX_AXES;
 
-const MAX_FREQ_MILLIHZ: u32 = 2_000_000;
-const MAX_AMPLITUDE_NM: u32 = 5_000_000;
-const MAX_DURATION_MS: u32 = 300_000;
-
 const TWO_PI: f64 = 2.0 * core::f64::consts::PI;
 const NM_PER_MM: f64 = 1.0e6;
 
@@ -92,15 +88,7 @@ impl Buzz {
             if axis_mask & !axis_bits != 0 {
                 return -1;
             }
-            for f in [freq_start_millihz, freq_end_millihz] {
-                if f == 0 || f > MAX_FREQ_MILLIHZ {
-                    return -1;
-                }
-            }
-            if amplitude_nm > MAX_AMPLITUDE_NM {
-                return -1;
-            }
-            if duration_ms > MAX_DURATION_MS {
+            if freq_start_millihz == 0 || freq_end_millihz == 0 {
                 return -1;
             }
         }

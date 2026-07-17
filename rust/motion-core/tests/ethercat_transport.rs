@@ -11,14 +11,14 @@ use motion_core::pump::{
 use runtime::piece_ring::PieceEntry;
 
 fn piece(t: u64) -> (PieceEntry, f64) {
-    (
-        PieceEntry {
-            start_time: t,
-            duration: 0.001,
-            ..PieceEntry::zeroed()
-        },
-        t as f64,
-    )
+    let mut entry = PieceEntry {
+        start_time: t,
+        duration: 0.001,
+        coeff_count: 2,
+        ..PieceEntry::zeroed()
+    };
+    entry.coeffs[1] = 1.0;
+    (entry, t as f64)
 }
 
 #[test]
@@ -28,7 +28,7 @@ fn wire_sink_missing_transport_is_hard_error() {
     let sink = WireSink {
         transports: HashMap::new(),
         timeout: Duration::from_secs(1),
-        freq_of: Arc::new(|_| None),
+        clock_of: Arc::new(|_| None),
     };
     let (p, _) = piece(0);
     let result = sink.send_frame(

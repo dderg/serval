@@ -2,7 +2,7 @@ import tempfile
 
 import pytest
 
-from klippy.extras import servo_calibration
+from klippy.extras import servo_axis, servo_calibration
 
 
 class FakeGcode:
@@ -74,9 +74,61 @@ class FakeConfig:
         return default
 
 
+class FakeKin:
+    kind = "corexy"
+
+    def __init__(self, rails):
+        self.rails = rails
+
+    def coupled_xy(self):
+        return True
+
+
+class FakeToolhead:
+    def __init__(self, kin):
+        self._kin = kin
+
+    def get_kinematics(self):
+        return self._kin
+
+
+class FakeNode:
+    name = "ethercat_node n"
+
+    def get_engine_handle(self):
+        return 1
+
+    def get_slot_for_motor(self, motor_name):
+        return 0
+
+
+class FakeEngine:
+    def sdo_read(self, handle, slot, index, subindex):
+        return 2, 7
+
+
 def make_calibration():
     gcode = FakeGcode()
-    printer = FakePrinter({"gcode": gcode, "servo_capture": FakeServoCapture()})
+    motor = servo_axis.ServoMotor.__new__(servo_axis.ServoMotor)
+    motor.motor_name = "motor_a"
+    motor.node_name = "n"
+    motor.chain_index = 0
+    motor.invert_direction = False
+    motor.rotation_distance = 40.0
+    motor.encoder_counts_per_rev = 131072
+    rail = servo_axis.ServoRail.__new__(servo_axis.ServoRail)
+    rail.name = "axis x"
+    rail.axis = "x"
+    rail.motors = [motor]
+    printer = FakePrinter(
+        {
+            "gcode": gcode,
+            "servo_capture": FakeServoCapture(),
+            "toolhead": FakeToolhead(FakeKin([rail])),
+            "motion_engine": FakeEngine(),
+            "ethercat_node n": FakeNode(),
+        }
+    )
     sc = servo_calibration.ServoCalibration(FakeConfig(printer))
     sc.captures_root = tempfile.mkdtemp()
     return sc, gcode

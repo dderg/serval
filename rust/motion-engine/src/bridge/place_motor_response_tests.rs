@@ -41,10 +41,10 @@ fn ethercat_maps_slot_through_slot_axis_map() {
 }
 
 #[test]
-fn ethercat_awd_corexy_reports_the_pair_mean_per_axis() {
-    // AWD corexy: two drives per belt, slot map [0, 0, 1, 1]. Each axis
-    // reports the mean of its pair — the differential between the two
-    // encoders is internal belt strain, the common mode is the carriage.
+fn ethercat_awd_corexy_reports_pair_mean_per_axis() {
+    // AWD corexy: two drives per belt, slot map [0, 0, 1, 1]. The pair's
+    // differential is internal belt strain; the common mode (mean) is where
+    // the carriage actually is, and it is what the parked resync adopts.
     let resp = MotorStateResponse {
         motors: vec![
             sample(3, 246 * 65536, 0),
@@ -61,12 +61,20 @@ fn ethercat_awd_corexy_reports_the_pair_mean_per_axis() {
     assert_eq!(
         motors[0],
         Some(286.5),
+<<<<<<< HEAD
         "axis 0 reports the mean of slots 0+1"
+=======
+        "axis 0 reports the belt-a pair mean"
+>>>>>>> origin/sota-motion
     );
     assert_eq!(
         motors[1],
         Some(245.5),
+<<<<<<< HEAD
         "axis 1 reports the mean of slots 2+3"
+=======
+        "axis 1 reports the belt-b pair mean"
+>>>>>>> origin/sota-motion
     );
 }
 

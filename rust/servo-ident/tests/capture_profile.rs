@@ -2,7 +2,7 @@ use servo_ident::capture::{
     parse_capture_csv, steady_accel_keep, tracking_keep, Capture, PlateauOptions, TrackingOptions,
 };
 use servo_ident::model::PhysicalParams;
-use servo_ident::profile_out::{c0006_recommendation, render_profile};
+use servo_ident::profile_out::{c0006_recommendation, render_profile, PairSplit};
 
 #[test]
 fn parses_commanded_kinematics_columns() {
@@ -106,15 +106,45 @@ fn tracking_mask_drops_stiction_and_overshoot() {
 #[test]
 fn renders_loadable_profile() {
     let p = PhysicalParams {
-        mass: vec![vec![0.0123]],
-        viscous: vec![0.0045],
-        coulomb_fwd: vec![1.2],
-        coulomb_rev: vec![-1.1],
+        mass: vec![0.0123, 0.0119],
+        viscous: vec![0.09, 0.11],
+        coulomb: vec![160.0, 175.0],
     };
-    let toml_text = render_profile(&p, &["x"], &[0.8]);
-    assert!(toml_text.contains("version = 1"));
-    assert!(toml_text.contains("coulomb_deadband_mm_s = 0.5"));
-    assert!(toml_text.contains("mass = [[0.0123]]"));
+    let frame = vec![
+        vec![0.25, -0.25, -0.25, -0.25],
+        vec![0.25, -0.25, 0.25, 0.25],
+    ];
+    let toml_text = render_profile(
+        &p,
+        &["motor_a", "motor_a1", "motor_b", "motor_b1"],
+        &["x", "y"],
+        &frame,
+        &[0.8, 0.7, 0.8, 0.9],
+        &[],
+    );
+    assert!(toml_text.contains("version = 6"), "{toml_text}");
+    assert!(
+        toml_text.contains("axes = [\"motor_a\", \"motor_a1\", \"motor_b\", \"motor_b1\"]"),
+        "{toml_text}"
+    );
+    assert!(toml_text.contains("modes = [\"x\", \"y\"]"), "{toml_text}");
+    assert!(
+        toml_text.contains("frame = [[0.25, -0.25, -0.25, -0.25], [0.25, -0.25, 0.25, 0.25]]"),
+        "{toml_text}"
+    );
+    assert!(toml_text.contains("mass = [0.0123, 0.0119]"), "{toml_text}");
+    assert!(toml_text.contains("viscous = [0.09, 0.11]"), "{toml_text}");
+    assert!(
+        toml_text.contains("coulomb = [160.0, 175.0]"),
+        "{toml_text}"
+    );
+    assert!(
+        toml_text.contains("fit_rms_residual = [0.8, 0.7, 0.8, 0.9]"),
+        "{toml_text}"
+    );
+    assert!(!toml_text.contains("[[pair]]"), "{toml_text}");
+    assert!(!toml_text.contains("coulomb_fwd"), "{toml_text}");
+    assert!(!toml_text.contains("coulomb_deadband"), "{toml_text}");
 }
 
 #[test]
@@ -130,16 +160,46 @@ fn c0006_matches_hand_calculation() {
 #[test]
 fn renders_integer_valued_floats_as_toml_floats() {
     let p = PhysicalParams {
-        mass: vec![vec![2.0]],
+        mass: vec![2.0],
         viscous: vec![0.0],
-        coulomb_fwd: vec![1.0],
-        coulomb_rev: vec![-1.0],
+        coulomb: vec![1.0],
     };
-    let toml_text = render_profile(&p, &["x"], &[1.0]);
-    assert!(toml_text.contains("mass = [[2.0]]"), "{toml_text}");
+    let toml_text = render_profile(&p, &["x"], &["x"], &[vec![1.0]], &[1.0], &[]);
+    assert!(toml_text.contains("mass = [2.0]"), "{toml_text}");
     assert!(toml_text.contains("viscous = [0.0]"), "{toml_text}");
+    assert!(toml_text.contains("frame = [[1.0]]"), "{toml_text}");
+    assert!(toml_text.contains("coulomb = [1.0]"), "{toml_text}");
     assert!(
         toml_text.contains("fit_rms_residual = [1.0]"),
         "{toml_text}"
     );
+}
+
+#[test]
+fn renders_optional_direction_split_pair() {
+    let p = PhysicalParams {
+        mass: vec![0.02],
+        viscous: vec![0.1],
+        coulomb: vec![2.0],
+    };
+    let text = render_profile(
+        &p,
+        &["a", "a1"],
+        &["x"],
+        &[vec![0.5, -0.5]],
+        &[1.0, 1.0],
+        &[PairSplit {
+            first: 0,
+            second: 1,
+            direction_split: -0.125,
+        }],
+    );
+    assert!(text.contains("version = 6"), "{text}");
+    assert!(
+        text.contains("[[pair]]\nslots = [\"a\", \"a1\"]\ndirection_split = -0.125"),
+        "{text}"
+    );
+    assert!(!text.contains("position"), "{text}");
+    assert!(!text.contains("orientation"), "{text}");
+    assert!(!text.contains("drive_sign"), "{text}");
 }

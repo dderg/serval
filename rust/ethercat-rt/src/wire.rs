@@ -6,9 +6,9 @@ use mcu_protocol::messages::{
     ResonanceBuzzResponse, RestoreDriveLimits, RestoreDriveLimitsResponse, ResumeStreamResponse,
     RuntimeCapsResponse, SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse, SeedServoHome,
     SeedServoHomeResponse, SetDiffDamper, SetDiffDamperResponse, SetDiffTrim, SetDiffTrimResponse,
-    SetDriveLimits, SetDriveLimitsResponse, SetStrainComp, SetStrainCompResponse, SetTorque,
-    SetTorqueResponse, StartCapture, StartCaptureResponse, StatusHeartbeat, StopCaptureResponse,
-    StopResponse,
+    SetDriveLimits, SetDriveLimitsResponse, SetDynamicsModel, SetDynamicsModelResponse,
+    SetStrainComp, SetStrainCompResponse, SetTorque, SetTorqueResponse, StartCapture,
+    StartCaptureResponse, StatusHeartbeat, StopCaptureResponse, StopResponse,
 };
 use mcu_protocol::MCU_CHANNEL_PIECES;
 use mcu_transport::frame::{encode_frame, CHANNEL_CONTROL, CHANNEL_EVENTS};
@@ -92,6 +92,10 @@ pub enum Command {
     SetStrainComp {
         correlation_id: u32,
         msg: SetStrainComp,
+    },
+    SetDynamicsModel {
+        correlation_id: u32,
+        msg: SetDynamicsModel,
     },
     Unknown {
         correlation_id: u32,
@@ -224,6 +228,13 @@ pub fn decode_command(channel: u8, payload: &[u8]) -> Result<Command, DecodeCmdE
         Some(MessageKind::SetStrainComp) => {
             let msg = SetStrainComp::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
             Ok(Command::SetStrainComp {
+                correlation_id: cid,
+                msg,
+            })
+        }
+        Some(MessageKind::SetDynamicsModel) => {
+            let msg = SetDynamicsModel::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
+            Ok(Command::SetDynamicsModel {
                 correlation_id: cid,
                 msg,
             })
@@ -378,6 +389,11 @@ pub fn set_diff_damper_response_frame(cid: u32, result: i32) -> Vec<u8> {
 pub fn set_strain_comp_response_frame(cid: u32, result: i32) -> Vec<u8> {
     let body = SetStrainCompResponse { result }.encoded_to_vec();
     control_frame(MessageKind::SetStrainCompResponse, cid, &body)
+}
+
+pub fn set_dynamics_model_response_frame(cid: u32, result: i32) -> Vec<u8> {
+    let body = SetDynamicsModelResponse { result }.encoded_to_vec();
+    control_frame(MessageKind::SetDynamicsModelResponse, cid, &body)
 }
 
 pub fn set_diff_trim_response_frame(cid: u32, result: i32) -> Vec<u8> {

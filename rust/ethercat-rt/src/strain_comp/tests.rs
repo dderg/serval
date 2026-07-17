@@ -397,3 +397,27 @@ fn constant_grid_applies_without_any_lane_data() {
     assert!((out[0] - 0.1).abs() < 1e-9, "got {}", out[0]);
     assert!((out[1] + 0.1).abs() < 1e-9);
 }
+
+#[test]
+fn grids_past_the_old_64_cap_are_accepted() {
+    let mut b = bank();
+    let (nx, ny) = (113u16, 109u16);
+    let values = vec![0i16; usize::from(nx) * usize::from(ny)];
+    assert_eq!(
+        b.set(4, 0, 1, 0, 1, KIN_COREXY, nx, ny, 0.0, 0.0, 2.5, 2.5, &values),
+        0,
+        "a 2.5mm strain map over a 280mm bed must fit"
+    );
+}
+
+#[test]
+fn grid_over_the_memory_budget_is_rejected() {
+    let mut b = bank();
+    let (nx, ny) = (1025u16, 1024u16);
+    let values = vec![0i16; usize::from(nx) * usize::from(ny)];
+    assert_eq!(
+        b.set(4, 0, 1, 0, 1, KIN_COREXY, nx, ny, 0.0, 0.0, 0.1, 0.1, &values),
+        ERR_COMP_BAD_GRID,
+        "past MAX_COMP_GRID_VALUES the upload must be refused"
+    );
+}

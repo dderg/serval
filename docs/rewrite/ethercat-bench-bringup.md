@@ -95,7 +95,7 @@ position_max: 300
 # Feedforward (optional; see servo-feedforward.md):
 #velocity_ff: True              # stream 60B1h velocity feedforward
 #dynamics_profile: dynamics_x.toml  # enables 60B2h torque feedforward
-#ff_torque_clamp: 30.0          # torque-offset clamp, % of rated
+#ff_max_torque: 30.0          # torque-offset ceiling, % of rated
 # Homing (optional). With these set, G28 homes the servo axis against a GPIO
 # endstop on any bridge MCU; without endstop_pin the axis has no endstop and
 # G28 on it fails loudly.

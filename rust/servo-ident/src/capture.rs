@@ -42,7 +42,6 @@ pub fn parse_capture_csv(text: &str, axes: &[&str]) -> Result<Capture, CaptureEr
         .iter()
         .map(|a| col(&format!("torque_{a}")))
         .collect::<Result<_, _>>()?;
-
     let mut t: Vec<f64> = Vec::new();
     let mut acc: Vec<Vec<f64>> = vec![Vec::new(); axes.len()];
     let mut vel: Vec<Vec<f64>> = vec![Vec::new(); axes.len()];

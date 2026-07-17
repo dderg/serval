@@ -11,6 +11,7 @@
 //! to position_actual only where the rotor genuinely moved uncommanded
 //! (torque cycle, drive fault, sync coast).
 
+use mcu_protocol::{Decode, Encode};
 use runtime::piece_ring::PieceEntry;
 
 use super::cycle::compute_motion_targets;
@@ -411,32 +412,27 @@ fn damper_writes_antisymmetric_torque_in_the_drive_frame() {
     );
 }
 
-/// The trim must land on the wire: a standing fight (+10%, -10%) integrates
-/// into an antisymmetric target offset that shrinks the pair's commanded
-/// separation, while the pair's target midpoint stays exactly where the
-/// stream put it (carriage-neutral).
+/// The trim must land on the wire at commanded standstill: with the rings
+/// dry, a standing fight (+10%, -10%) integrates into an antisymmetric
+/// offset written onto the pair's held targets — the pair unwinds while the
+/// target midpoint never moves (carriage-neutral).
 #[test]
-fn trim_applies_antisymmetric_target_offsets_during_streaming() {
-    let mut trimmed =
-        test_ctx_with_drive("trim-on", TrackingLagDrive::with_torques(vec![100, -100]));
-    let mut plain =
-        test_ctx_with_drive("trim-off", TrackingLagDrive::with_torques(vec![100, -100]));
-    assert_eq!(trimmed.trim.set(NUM_SLAVES, 0, 1, 200_000, 500, 25_000), 0);
-
-    for ctx in [&mut trimmed, &mut plain] {
-        push_all(ctx, piece(1_000_000, 0.05, &[2.5, 2.5]));
-        run_cycles(ctx, 1_000_000, 41_000_000);
-    }
-
-    let with = targets(&trimmed);
-    let without = targets(&plain);
-    let offset0 = i64::from(with[0]) - i64::from(without[0]);
-    let offset1 = i64::from(with[1]) - i64::from(without[1]);
-    assert_eq!(offset0, -offset1, "trim must be carriage-neutral");
+fn trim_zeroes_a_standing_fight_at_commanded_standstill() {
+    let mut ctx = test_ctx_with_drive(
+        "trim-standstill",
+        TrackingLagDrive::with_torques(vec![100, -100]),
+    );
+    assert_eq!(ctx.trim.set(NUM_SLAVES, 0, 1, 200_000, 500, 25_000, 0), 0);
+    run_cycles(&mut ctx, 0, 40_000_000);
+    let t = targets(&ctx);
+    assert_eq!(
+        i64::from(t[0]),
+        -i64::from(t[1]),
+        "trim must be carriage-neutral: {t:?}"
+    );
     assert!(
-        offset0 < -100,
-        "positive differential fight must pull slot 0 back \
-         (offsets {offset0}/{offset1})"
+        t[0] < -100,
+        "positive differential fight must pull slot 0 back: {t:?}"
     );
 }
 
@@ -447,51 +443,77 @@ fn trim_applies_antisymmetric_target_offsets_during_streaming() {
 /// conversion wrong flips a sign here.
 #[test]
 fn trim_handles_a_mirrored_pair_in_both_frames() {
-    let mut trimmed = test_ctx_with_drive(
-        "trim-mirror-on",
+    let mut ctx = test_ctx_with_drive(
+        "trim-mirror",
         TrackingLagDrive::with_torques(vec![100, 100]),
+    );
+    ctx.cmd_counts_per_mm[1] = -COUNTS_PER_MM;
+    assert_eq!(ctx.trim.set(NUM_SLAVES, 0, 1, 200_000, 500, 25_000, 0), 0);
+    run_cycles(&mut ctx, 0, 40_000_000);
+    let t = targets(&ctx);
+    assert_eq!(
+        t[0], t[1],
+        "mirrored slot gets the mechanically opposite offset, which in its \
+         inverted drive frame is the same count delta"
+    );
+    assert!(t[0] < -100, "fight must pull the pair together: {t:?}");
+}
+
+/// While the pair streams, a differential torque is legitimate (commanded
+/// feedforward, direction-dependent load) — the trim must stay frozen and
+/// leave the streamed targets untouched.
+#[test]
+fn trim_freezes_while_the_pair_is_streaming() {
+    let mut trimmed = test_ctx_with_drive(
+        "trim-stream-on",
+        TrackingLagDrive::with_torques(vec![100, -100]),
     );
     let mut plain = test_ctx_with_drive(
-        "trim-mirror-off",
-        TrackingLagDrive::with_torques(vec![100, 100]),
+        "trim-stream-off",
+        TrackingLagDrive::with_torques(vec![100, -100]),
     );
-    for ctx in [&mut trimmed, &mut plain] {
-        ctx.cmd_counts_per_mm[1] = -COUNTS_PER_MM;
-    }
-    assert_eq!(trimmed.trim.set(NUM_SLAVES, 0, 1, 200_000, 500, 25_000), 0);
+    assert_eq!(
+        trimmed.trim.set(NUM_SLAVES, 0, 1, 200_000, 500, 25_000, 0),
+        0
+    );
 
     for ctx in [&mut trimmed, &mut plain] {
         push_all(ctx, piece(1_000_000, 0.05, &[2.5, 2.5]));
         run_cycles(ctx, 1_000_000, 41_000_000);
     }
 
-    let with = targets(&trimmed);
-    let without = targets(&plain);
-    let offset0 = i64::from(with[0]) - i64::from(without[0]);
-    let offset1 = i64::from(with[1]) - i64::from(without[1]);
     assert_eq!(
-        offset0, offset1,
-        "mirrored slot gets the mechanically opposite offset, which in its \
-         inverted drive frame is the same count delta"
-    );
-    assert!(
-        offset0 < -100,
-        "fight must pull the pair together: {offset0}"
+        targets(&trimmed),
+        targets(&plain),
+        "in-motion differential torque must not move the targets"
     );
 }
 
+/// The settle window keeps the trim blind right after motion stops, while
+/// torque telemetry still carries the decel transient.
 #[test]
-fn trim_freezes_while_the_ring_is_dry() {
+fn trim_waits_out_the_settle_window_after_motion() {
     let mut ctx = test_ctx_with_drive(
-        "trim-freeze",
+        "trim-settle",
         TrackingLagDrive::with_torques(vec![100, -100]),
     );
-    assert_eq!(ctx.trim.set(NUM_SLAVES, 0, 1, 200_000, 500, 25_000), 0);
-    run_cycles(&mut ctx, 0, 40_000_000);
+    assert_eq!(ctx.trim.set(NUM_SLAVES, 0, 1, 200_000, 500, 25_000, 200), 0);
+    push_all(&mut ctx, piece(1_000_000, 0.01, &[2.5, 2.5]));
+    run_cycles(&mut ctx, 1_000_000, 12_000_000);
+    let at_rest = targets(&ctx);
+    // 100 ms of standstill: inside the 200 ms settle window, still blind.
+    run_cycles(&mut ctx, 12_000_000 + CYCLE_NS, 112_000_000);
     assert_eq!(
         targets(&ctx),
-        vec![0, 0],
-        "no stream, no target writes, no trim motion"
+        at_rest,
+        "trim must stay blind through the settle window"
+    );
+    // Well past the window the fight starts unwinding.
+    run_cycles(&mut ctx, 112_000_000 + CYCLE_NS, 400_000_000);
+    let after = targets(&ctx);
+    assert!(
+        after[0] < at_rest[0],
+        "trim must integrate once settled: {at_rest:?} -> {after:?}"
     );
 }
 
@@ -618,13 +640,13 @@ fn strain_comp_clear_returns_held_targets_to_base() {
 }
 
 const BUZZ_DYNAMICS: &str = r#"
-version = 1
+version = 6
 axes = ["a", "b"]
-mass = [[0.00001, 0.0], [0.0, 0.00001]]
+modes = ["a", "b"]
+frame = [[1.0, 0.0], [0.0, 1.0]]
+mass = [0.00001, 0.00001]
 viscous = [0.01, 0.01]
-coulomb_fwd = [50.0, 50.0]
-coulomb_rev = [-50.0, -50.0]
-coulomb_deadband_mm_s = 0.5
+coulomb = [50.0, 50.0]
 fit_rms_residual = [0.1, 0.1]
 "#;
 
@@ -682,4 +704,114 @@ fn streamed_motion_keeps_coulomb_in_the_ff() {
         (49..=51).contains(&offset),
         "constant-velocity stroke must keep coulomb + viscous FF: {offset}"
     );
+}
+
+fn dynamics_msg(mass0: f32) -> mcu_protocol::messages::SetDynamicsModel {
+    mcu_protocol::messages::SetDynamicsModel {
+        slots_count: NUM_SLAVES as u8,
+        modes_count: 2,
+        frame: vec![1.0, 0.0, 0.0, 1.0],
+        mass: vec![mass0, 0.030],
+        viscous: vec![0.004, 0.004],
+        coulomb: vec![1.0, 1.0],
+        pairs: vec![],
+    }
+}
+
+#[test]
+fn set_dynamics_model_installs_wire_pair_and_evaluates_it() {
+    let mut ctx = test_ctx("dyn-pair");
+    let mut msg = dynamics_msg(0.030);
+    msg.modes_count = 1;
+    msg.frame = vec![0.5, 0.5];
+    msg.mass = vec![0.030];
+    msg.viscous = vec![0.0];
+    msg.coulomb = vec![0.0];
+    msg.pairs = vec![mcu_protocol::messages::DynamicsPair {
+        first: 0,
+        second: 1,
+        direction_split: 0.2,
+    }];
+    let msg = mcu_protocol::messages::SetDynamicsModel::decode(&msg.encoded_to_vec()).unwrap();
+    super::commands::handle_set_dynamics_model(&mut ctx, 1, msg);
+    let model = ctx.dynamics.as_ref().expect("model installed");
+    let acc = [1000.0, 1000.0];
+    let vel = [0.0, 0.0];
+    let first = model.torque_ff(0, &acc, &vel);
+    let second = model.torque_ff(1, &acc, &vel);
+    assert!((first - 18.0).abs() < 1e-6, "first torque {first}");
+    assert!((second - 12.0).abs() < 1e-6, "second torque {second}");
+}
+
+#[test]
+fn set_dynamics_model_rejects_zero_pair_first_column() {
+    let mut ctx = test_ctx("dyn-zero-pair");
+    let mut msg = dynamics_msg(0.030);
+    msg.modes_count = 1;
+    msg.frame = vec![0.0, 0.0];
+    msg.mass = vec![0.030];
+    msg.viscous = vec![0.0];
+    msg.coulomb = vec![0.0];
+    msg.pairs = vec![mcu_protocol::messages::DynamicsPair {
+        first: 0,
+        second: 1,
+        direction_split: 0.1,
+    }];
+    super::commands::handle_set_dynamics_model(&mut ctx, 1, msg);
+    assert!(ctx.dynamics.is_none());
+}
+
+#[test]
+fn set_dynamics_model_installs_model_when_none_was_loaded() {
+    let mut ctx = test_ctx("dyn-install");
+    assert!(ctx.dynamics.is_none());
+    super::commands::handle_set_dynamics_model(&mut ctx, 1, dynamics_msg(0.030));
+    let model = ctx.dynamics.as_ref().expect("model installed");
+    assert_eq!(model.n_slots, NUM_SLAVES);
+    let tau = model.torque_ff(0, &[1000.0, 0.0], &[100.0, 0.0]);
+    let expect = 0.030 * 1000.0 + 0.004 * 100.0 + 1.0;
+    assert!((tau - expect).abs() < 1e-3, "{tau} vs {expect}");
+}
+
+#[test]
+fn set_dynamics_model_replaces_existing_model() {
+    let mut ctx = test_ctx("dyn-replace");
+    super::commands::handle_set_dynamics_model(&mut ctx, 1, dynamics_msg(0.030));
+    super::commands::handle_set_dynamics_model(&mut ctx, 2, dynamics_msg(0.045));
+    let model = ctx.dynamics.as_ref().expect("model installed");
+    let tau = model.torque_ff(0, &[1000.0, 0.0], &[0.0, 0.0]);
+    assert!((tau - 45.0).abs() < 1e-3, "{tau}");
+}
+
+#[test]
+fn set_dynamics_model_wrong_axes_count_keeps_previous_model() {
+    let mut ctx = test_ctx("dyn-baddim");
+    super::commands::handle_set_dynamics_model(&mut ctx, 1, dynamics_msg(0.030));
+    let mut bad = dynamics_msg(0.045);
+    bad.slots_count = 3;
+    super::commands::handle_set_dynamics_model(&mut ctx, 2, bad);
+    let model = ctx.dynamics.as_ref().expect("previous model kept");
+    let tau = model.torque_ff(0, &[1000.0, 0.0], &[0.0, 0.0]);
+    assert!((tau - 30.0).abs() < 1e-3, "{tau}");
+}
+
+#[test]
+fn set_dynamics_model_rank_deficient_frame_keeps_previous_model() {
+    let mut ctx = test_ctx("dyn-notpd");
+    super::commands::handle_set_dynamics_model(&mut ctx, 1, dynamics_msg(0.030));
+    let mut bad = dynamics_msg(0.045);
+    bad.frame = vec![1.0, 0.0, 1.0, 0.0];
+    super::commands::handle_set_dynamics_model(&mut ctx, 2, bad);
+    let model = ctx.dynamics.as_ref().expect("previous model kept");
+    let tau = model.torque_ff(0, &[1000.0, 0.0], &[0.0, 0.0]);
+    assert!((tau - 30.0).abs() < 1e-3, "{tau}");
+}
+
+#[test]
+fn set_dynamics_model_mass_len_mismatch_keeps_no_model() {
+    let mut ctx = test_ctx("dyn-masslen");
+    let mut bad = dynamics_msg(0.030);
+    bad.mass.pop();
+    super::commands::handle_set_dynamics_model(&mut ctx, 1, bad);
+    assert!(ctx.dynamics.is_none());
 }

@@ -45,9 +45,11 @@
      "ff_velocity_offset_max": 983040,
      "moves": [
       {
+       "direction": 1,
        "end_ms": 1129.0,
+       "ferr_mean_moving": 57.799397590361444,
        "ferr_peak": 1738.0,
-       "ferr_rms": 306.3730313479785,
+       "ferr_rms": 299.45272653998416,
        "move": 0,
        "overshoot": 482.0,
        "settle_ms": 107.0,
@@ -55,9 +57,11 @@
        "start_ms": 299.0
       },
       {
+       "direction": -1,
        "end_ms": 3167.25,
+       "ferr_mean_moving": -56.1144578313253,
        "ferr_peak": 1410.0,
-       "ferr_rms": 259.2697680999511,
+       "ferr_rms": 263.3291293948852,
        "move": 1,
        "overshoot": 415.0,
        "settle_ms": null,
@@ -109,9 +113,11 @@
      "ff_velocity_offset_max": 983040,
      "moves": [
       {
+       "direction": -1,
        "end_ms": 1129.0,
+       "ferr_mean_moving": -12.722289156626506,
        "ferr_peak": 1685.0,
-       "ferr_rms": 302.84615761261176,
+       "ferr_rms": 296.36506012676347,
        "move": 0,
        "overshoot": 483.0,
        "settle_ms": 105.25,
@@ -119,9 +125,11 @@
        "start_ms": 299.0
       },
       {
+       "direction": 1,
        "end_ms": 3167.25,
+       "ferr_mean_moving": 35.35120481927711,
        "ferr_peak": 1368.0,
-       "ferr_rms": 268.20306324225703,
+       "ferr_rms": 277.1345104659864,
        "move": 1,
        "overshoot": 562.0,
        "settle_ms": null,
@@ -173,9 +181,11 @@
      "ff_velocity_offset_max": 983040,
      "moves": [
       {
+       "direction": 1,
        "end_ms": 1129.0,
+       "ferr_mean_moving": 23.218975903614457,
        "ferr_peak": 1689.0,
-       "ferr_rms": 297.91063439282823,
+       "ferr_rms": 291.2208539847526,
        "move": 0,
        "overshoot": 444.0,
        "settle_ms": 92.25,
@@ -183,9 +193,11 @@
        "start_ms": 299.0
       },
       {
+       "direction": -1,
        "end_ms": 3167.25,
+       "ferr_mean_moving": -67.5051204819277,
        "ferr_peak": 1369.0,
-       "ferr_rms": 262.0781814512057,
+       "ferr_rms": 269.737091574392,
        "move": 1,
        "overshoot": 506.0,
        "settle_ms": null,
@@ -237,9 +249,11 @@
      "ff_velocity_offset_max": 983040,
      "moves": [
       {
+       "direction": 1,
        "end_ms": 1129.0,
+       "ferr_mean_moving": 53.684036144578315,
        "ferr_peak": 1687.0,
-       "ferr_rms": 299.03224883509387,
+       "ferr_rms": 291.45919048065684,
        "move": 0,
        "overshoot": 472.0,
        "settle_ms": 119.5,
@@ -247,9 +261,11 @@
        "start_ms": 299.0
       },
       {
+       "direction": -1,
        "end_ms": 3167.25,
+       "ferr_mean_moving": -35.11536144578313,
        "ferr_peak": 1373.0,
-       "ferr_rms": 248.7538853604657,
+       "ferr_rms": 254.53967738006304,
        "move": 1,
        "overshoot": 450.0,
        "settle_ms": null,
@@ -345,9 +361,11 @@
      "ff_velocity_offset_max": 983040,
      "moves": [
       {
+       "direction": 1,
        "end_ms": 1119.25,
+       "ferr_mean_moving": 123.71798734558602,
        "ferr_peak": 3200.0,
-       "ferr_rms": 559.301860048589,
+       "ferr_rms": 552.8126605332633,
        "move": 0,
        "overshoot": 1042.0,
        "settle_ms": 155.75,
@@ -355,9 +373,11 @@
        "start_ms": 289.5
       },
       {
+       "direction": -1,
        "end_ms": 3157.5,
+       "ferr_mean_moving": -107.89454655016571,
        "ferr_peak": 2435.0,
-       "ferr_rms": 443.72904106685456,
+       "ferr_rms": 456.8644726740662,
        "move": 1,
        "overshoot": 917.0,
        "settle_ms": null,
@@ -409,9 +429,11 @@
      "ff_velocity_offset_max": 983040,
      "moves": [
       {
+       "direction": -1,
        "end_ms": 1119.25,
+       "ferr_mean_moving": -46.62789996987044,
        "ferr_peak": 3153.0,
-       "ferr_rms": 549.6969249047825,
+       "ferr_rms": 544.9316578295251,
        "move": 0,
        "overshoot": 1070.0,
        "settle_ms": 152.75,
@@ -419,9 +441,11 @@
        "start_ms": 289.5
       },
       {
+       "direction": 1,
        "end_ms": 3157.5,
+       "ferr_mean_moving": 86.20247062368183,
        "ferr_peak": 2380.0,
-       "ferr_rms": 450.97179057046174,
+       "ferr_rms": 469.17584307285284,
        "move": 1,
        "overshoot": 1103.0,
        "settle_ms": null,
@@ -473,9 +497,11 @@
      "ff_velocity_offset_max": 983040,
      "moves": [
       {
+       "direction": 1,
        "end_ms": 1119.25,
+       "ferr_mean_moving": 59.32841217234107,
        "ferr_peak": 3140.0,
-       "ferr_rms": 548.1215353691207,
+       "ferr_rms": 543.2979142317724,
        "move": 0,
        "overshoot": 1003.0,
        "settle_ms": 136.0,
@@ -483,9 +509,11 @@
        "start_ms": 289.5
       },
       {
+       "direction": -1,
        "end_ms": 3157.5,
+       "ferr_mean_moving": -125.24645977704128,
        "ferr_peak": 2328.0,
-       "ferr_rms": 443.9621874922101,
+       "ferr_rms": 459.69419399011116,
        "move": 1,
        "overshoot": 1002.0,
        "settle_ms": null,
@@ -537,9 +565,11 @@
      "ff_velocity_offset_max": 983040,
      "moves": [
       {
+       "direction": 1,
        "end_ms": 1119.25,
+       "ferr_mean_moving": 117.72401325700513,
        "ferr_peak": 3139.0,
-       "ferr_rms": 552.0818797318851,
+       "ferr_rms": 544.9036963053322,
        "move": 0,
        "overshoot": 1023.0,
        "settle_ms": 157.25,
@@ -547,9 +577,11 @@
        "start_ms": 289.5
       },
       {
+       "direction": -1,
        "end_ms": 3157.5,
+       "ferr_mean_moving": -89.66676709852365,
        "ferr_peak": 2344.0,
-       "ferr_rms": 432.077610812678,
+       "ferr_rms": 446.52296686854737,
        "move": 1,
        "overshoot": 938.0,
        "settle_ms": null,

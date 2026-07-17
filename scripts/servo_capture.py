@@ -198,7 +198,9 @@ def torque_summary(data, torque_limit, fs):
     return summary
 
 
-def compute_metrics(data, settle_band, torque_limit, fs=1000.0):
+def compute_metrics(
+    data, settle_band, torque_limit, fs=1000.0, ff_lead_samples=0
+):
     if not len(data):
         raise SystemExit("capture contains no records")
     ms_per_sample = 1000.0 / fs
@@ -210,12 +212,17 @@ def compute_metrics(data, settle_band, torque_limit, fs=1000.0):
     segs = target_motion_segments(data["target_counts"], fs)
     moves = []
     for idx, (s, e) in enumerate(segs):
-        move_err = ferr[s:e]
         post_end = segs[idx + 1][0] if idx + 1 < len(segs) else len(ferr)
         post = ferr[e:post_end]
         settle_sample = _settle_index(post, settle_band, hold)
         overshoot_end = (
             settle_sample if settle_sample is not None else len(post)
+        )
+        prev_end = segs[idx - 1][1] if idx else 0
+        lead_start = max(s - ff_lead_samples, prev_end)
+        move_err = ferr[lead_start : e + overshoot_end]
+        displacement = int(data["target_counts"][e - 1]) - int(
+            data["target_counts"][s - 1]
         )
         settle_ms = (
             float(settle_sample) * ms_per_sample
@@ -227,6 +234,8 @@ def compute_metrics(data, settle_band, torque_limit, fs=1000.0):
                 "move": idx,
                 "start_ms": float(s) * ms_per_sample,
                 "end_ms": float(e) * ms_per_sample,
+                "direction": int(np.sign(displacement)),
+                "ferr_mean_moving": float(np.mean(ferr[s:e])),
                 "ferr_peak": float(np.max(np.abs(move_err))),
                 "ferr_rms": float(np.sqrt(np.mean(move_err**2))),
                 "overshoot": float(np.max(np.abs(post[:overshoot_end])))
@@ -792,6 +801,14 @@ def main(argv=None):
         "(default 1400); samples at/above it count as railed",
     )
     p.add_argument(
+        "--ff-lead-cycles",
+        type=int,
+        default=0,
+        help="cycles the host sends torque feedforward ahead of the "
+        "position command; the per-move error window starts this many "
+        "samples early (default 0)",
+    )
+    p.add_argument(
         "--fft",
         action="store_true",
         help="print resonance peaks from the moving-segment PSD",
@@ -853,7 +870,13 @@ def main(argv=None):
         if len(drive_datas) > 1:
             print("drive: %s" % (name,))
         counts_per_mm = header["drives"][idx]["counts_per_mm"]
-        m = compute_metrics(data, args.settle_band, args.torque_limit, fs=fs)
+        m = compute_metrics(
+            data,
+            args.settle_band,
+            args.torque_limit,
+            fs=fs,
+            ff_lead_samples=args.ff_lead_cycles,
+        )
         _print_metrics(m, counts_per_mm)
         if args.fft:
             freqs, psd = moving_psd(data, motion_segments(data["flags"]), fs)

@@ -3,10 +3,12 @@
 const REFRESH_MS = 5000;
 const MOONRAKER_KEY = "servoCalMoonrakerUrl";
 const CONSOLE_HISTORY_KEY = "servoCalConsoleHistory";
+const HELP_CACHE_KEY = "servoCalGcodeHelp";
 const CONSOLE_HISTORY_MAX = 500;
 const PALETTE = ["#4fb3ff", "#e05a4f", "#4caf50", "#d9a441", "#b388ff", "#4fd8c4"];
 const RESONANCE_BAND_HZ = [20, 450];
 const PSD_MAX_FREQ_KEY = "servoCalPsdMaxFreqHz";
+const MOTOR_VIEW_KEY = "servoCalMotorView";
 const PSD_MAX_FREQ_CHOICES_HZ = [250, 500, 750, 1000, 1500];
 const PSD_MAX_FREQ_DEFAULT_HZ = 750;
 const INITIAL_SELECTED_RUNS = 1;
@@ -19,12 +21,19 @@ const PEAK_LIST_SIZE = 3;
 // scrolling within one.
 const PAGE_DEFS = {
   gains: {
+    // gains and notches are one tuning loop, not two — the resonances the
+    // PSD shows are what keep gains from going higher, so the gains and notch
+    // grids, the peak list, and the metrics-vs-gain chart share one page.
     label: "gains",
-    groups: ["gains"],
-    experiments: ["gain_sweep", "refine_sweep", "gain_ladder"],
+    groups: ["gains", "notch"],
+    experiments: ["gain_sweep", "refine_sweep", "gain_ladder", "tracking"],
     charts: ["psd"],
-    intro: "find the highest speed gain without resonance or torque rail",
+    intro:
+      "find the highest speed gain without resonance or torque rail, then " +
+      "notch out whatever resonance the PSD shows so gains can go higher",
     metrics: true,
+    sweepChart: true,
+    peaks: true,
     templates: [
       {
         label: "ladder…",
@@ -39,14 +48,6 @@ const PAGE_DEFS = {
           "change; per-drive overshoot/settle land in the tracking metrics table",
       },
     ],
-  },
-  notches: {
-    label: "notches",
-    groups: ["notch"],
-    experiments: ["gain_sweep", "refine_sweep", "gain_ladder"],
-    charts: ["psd"],
-    peaks: true,
-    intro: "kill the resonances the PSD shows so gains can go higher",
   },
   observers: {
     label: "observers",
@@ -65,7 +66,7 @@ const PAGE_DEFS = {
     templates: [
       {
         label: "fit…",
-        command: "SERVO_FIT_DYNAMICS AXIS=X",
+        command: "SERVO_FIT_DYNAMICS",
         title:
           "strokes the axis, fits inertia/friction per drive, prints the recommended " +
           "inertia ratio and writes the feedforward profile",
@@ -104,6 +105,10 @@ const PAGE_DEFS = {
     label: "journal",
     journal: true,
   },
+  docs: {
+    label: "docs",
+    docs: true,
+  },
 };
 const DEFAULT_PAGE = "gains";
 const LIVE_STATUS_POLL_MS = 1000;
@@ -119,6 +124,7 @@ const state = {
   pinned: new Set(), // runs that stay selected when a plain click switches runs
   runColors: new Map(), // run name -> palette color, kept while the run stays selected
   autoSelected: false,
+  pendingNotes: new Map(), // run name -> note text saved locally, awaiting server confirmation
   stepFilter: null, // null = every step; otherwise a Set of visible step names
   console: {
     text: "", // current input line, survives page switches
@@ -148,10 +154,19 @@ const state = {
   },
   strain: {
     selected: null, // run name shown on the strain page; auto-picks the newest
+    compare: new Set(), // extra run names diffed against `selected` when dimensions match
     cache: new Map(), // name -> {mtime_utc, data} from /api/runs/<name>/strain
     field: "elastic", // which half to chart: elastic (fwd+back)/2 or friction (fwd-back)/2
   },
   sentLog: [], // {time, label, lines, results} — every G-code batch sent this session
+  help: {
+    commands: null, // SERVO_* name -> cmd_*_help string, straight from klippy
+    fetchedUtc: null,
+    cached: false, // true when `commands` came from localStorage, not a live fetch
+    error: null,
+    pending: false,
+    klippyState: null, // last /server/info klippy_state, to refetch after a RESTART
+  },
 };
 
 async function api(path, opts) {
@@ -266,27 +281,6 @@ function shortTime(mtimeUtc) {
   return m ? m[1] : mtimeUtc;
 }
 
-function verdictCellHtml(run, results) {
-  if (!results) {
-    return run.has_results
-      ? '<span class="note">loading…</span>'
-      : '<span class="note">no results yet</span>';
-  }
-  const v = results.verdict;
-  const flags = [...new Set(results.steps.flatMap((s) => s.flags))];
-  const flagBadges = flags
-    .map((f) => {
-      const cls =
-        f === "resonance_detected" ? "resonance" : f === "torque_saturated" ? "torque" : "truncated";
-      return `<span class="badge ${cls}" title="${f}">${f.split("_")[0]}</span>`;
-    })
-    .join("");
-  const head = v.recommended_step
-    ? `<span class="badge step">${v.recommended_step}</span>`
-    : `<span class="badge none">none</span>`;
-  return `${head}${flagBadges}<span class="hint" title="${v.reason}"> ${v.reason}</span>`;
-}
-
 // --- page shell ---------------------------------------------------------------
 
 function currentPageDef() {
@@ -340,9 +334,60 @@ function consoleSectionHtml(def) {
     `<div id="run-status" class="status-line"></div>` +
     `<div class="console-line"><span class="console-prompt">›</span>` +
     `<textarea id="console-input" rows="1" spellcheck="false" ` +
-    `placeholder="g-code — enter runs, shift+enter multiline, ↑/↓ history, ctrl+r search"></textarea></div>` +
+    `placeholder="g-code — enter runs, tab completes, ↑/↓ history, ctrl+r search"></textarea></div>` +
     `<div id="console-search" class="console-search"></div>` +
+    `<div id="console-help" class="console-help"></div>` +
     `</section>`
+  );
+}
+
+/// The charts that fold drives into one trace (avg PSD, worst-drive sweep
+/// metrics, combined time domain) all obey this one switch; per-motor
+/// expands them into a trace per drive, and "avg" (where offered) shows
+/// the mean over drives instead of the worst.
+function motorView() {
+  const v = localStorage.getItem(MOTOR_VIEW_KEY);
+  return v === "per-motor" || v === "avg" ? v : "agg";
+}
+
+function motorViewPerMotor() {
+  return motorView() === "per-motor";
+}
+
+/// Sections whose aggregate is already an average (PSD, combined time
+/// domain) don't offer a separate "avg" chip; there, the stored "avg"
+/// view lights up the aggregate chip.
+function motorViewEffective(withAvg) {
+  const view = motorView();
+  return !withAvg && view === "avg" ? "agg" : view;
+}
+
+function motorViewToggleHtml(aggLabel, withAvg = false) {
+  const effective = motorViewEffective(withAvg);
+  const chip = (v, label) =>
+    `<button class="chip motor-view-btn${effective === v ? " active" : ""}" data-view="${v}">${label}</button>`;
+  return (
+    `<span class="chips motor-view-chips${withAvg ? " with-avg" : ""}">` +
+    chip("agg", aggLabel) +
+    (withAvg ? chip("avg", "avg") : "") +
+    chip("per-motor", "per-motor") +
+    `</span>`
+  );
+}
+
+function syncMotorViewChips() {
+  document.querySelectorAll(".motor-view-chips").forEach((group) => {
+    const effective = motorViewEffective(group.classList.contains("with-avg"));
+    group.querySelectorAll(".motor-view-btn").forEach((b) => {
+      b.classList.toggle("active", b.dataset.view === effective);
+    });
+  });
+}
+
+function sectionHeadHtml(title, toolsHtml) {
+  return (
+    `<div class="section-head"><h2>${title}</h2></div>` +
+    (toolsHtml ? `<div class="section-tools">${toolsHtml}</div>` : "")
   );
 }
 
@@ -350,28 +395,45 @@ function analysisSectionsHtml(def) {
   const parts = [];
   parts.push(
     `<section class="runs-section">` +
-      `<div class="section-head"><h2>runs</h2>` +
-      `<span class="note">${def.experiments ? def.experiments.join(", ") : "all experiments"} — click a row to chart it</span></div>` +
+      sectionHeadHtml(
+        "runs",
+        `<span class="note">${def.experiments ? def.experiments.join(", ") : "all experiments"} — click a row to chart it</span>`
+      ) +
       `<div class="table-wrap runs-wrap"><table><thead><tr>` +
-      `<th></th><th>time</th><th>tag</th><th>ambient diff vs previous</th><th>verdict</th><th></th>` +
+      `<th></th><th>time</th><th>tag</th><th>ambient diff vs previous</th><th>note</th><th></th>` +
       `</tr></thead><tbody id="journal-body"></tbody></table></div>` +
       `</section>`
   );
   if (def.metrics) {
     parts.push(
       `<section class="metrics-section">` +
-        `<div class="section-head"><h2>tracking metrics</h2>` +
-        `<span class="note">per drive, worst move of each step — ` +
-        `overshoot/settle measured over the dwell after each move</span></div>` +
+        sectionHeadHtml(
+          "tracking metrics",
+          motorViewToggleHtml("worst drive", true) +
+            `<span class="note">worst move of each step — ` +
+            `overshoot/settle measured over the dwell after each move</span>`
+        ) +
         `<div id="metrics-table"><p class="note">select runs above</p></div>` +
+        `</section>`
+    );
+  }
+  if (def.sweepChart) {
+    parts.push(
+      `<section class="sweep-metrics-section">` +
+        sectionHeadHtml(
+          "metrics vs gain",
+          motorViewToggleHtml("worst drive", true) +
+            `<span class="note">● solid: overshoot, dashed: ferr rms, ` +
+            `dotted: ferr peak; red rung: step flagged resonance/torque</span>`
+        ) +
+        `<div class="charts" id="sweep-metrics-chart"><p class="note">select runs above</p></div>` +
         `</section>`
     );
   }
   if (def.charts && def.charts.includes("frf")) {
     parts.push(
       `<section class="frf-section" id="frf-section" hidden>` +
-        `<div class="section-head"><h2>differential belt FRF</h2>` +
-        `<span class="note" id="frf-meta"></span></div>` +
+        sectionHeadHtml("differential belt FRF", `<span class="note" id="frf-meta"></span>`) +
         `<div class="charts" id="frf-charts"></div>` +
         `<div id="frf-modes"></div>` +
         `</section>`
@@ -380,14 +442,17 @@ function analysisSectionsHtml(def) {
   if (def.charts && def.charts.includes("psd")) {
     parts.push(
       `<section class="psd-section">` +
-        `<div class="section-head"><h2>following-error PSD</h2>` +
-        `<label class="note">to <select id="psd-max-freq">` +
-        PSD_MAX_FREQ_CHOICES_HZ.map(
-          (f) =>
-            `<option value="${f}"${f === psdMaxFreqHz() ? " selected" : ""}>${f}</option>`
-        ).join("") +
-        `</select> Hz</label>` +
-        `<div class="chips" id="psd-step-chips"></div></div>` +
+        sectionHeadHtml(
+          "following-error PSD",
+          motorViewToggleHtml("avg") +
+            `<label class="note">to <select id="psd-max-freq">` +
+            PSD_MAX_FREQ_CHOICES_HZ.map(
+              (f) =>
+                `<option value="${f}"${f === psdMaxFreqHz() ? " selected" : ""}>${f}</option>`
+            ).join("") +
+            `</select> Hz</label>` +
+            `<div class="chips" id="psd-step-chips"></div>`
+        ) +
         `<div class="charts" id="psd-charts"><p class="note">select runs above</p></div>` +
         `</section>`
     );
@@ -395,7 +460,7 @@ function analysisSectionsHtml(def) {
   if (def.peaks) {
     parts.push(
       `<section class="peaks-section">` +
-        `<div class="section-head"><h2>detected peaks</h2><span class="note" id="peaks-run"></span></div>` +
+        sectionHeadHtml("detected peaks", `<span class="note" id="peaks-run"></span>`) +
         `<div id="peak-list"><p class="note">select runs above</p></div>` +
         `</section>`
     );
@@ -403,7 +468,10 @@ function analysisSectionsHtml(def) {
   if (def.charts && def.charts.includes("time")) {
     parts.push(
       `<section class="time-section">` +
-        `<div class="section-head"><h2>time domain — following error</h2></div>` +
+        sectionHeadHtml(
+          "time domain — following error",
+          motorViewToggleHtml("combined") + `<div class="chips" id="time-step-chips"></div>`
+        ) +
         `<div class="charts" id="charts"><p class="note">select runs above</p></div>` +
         `</section>`
     );
@@ -416,11 +484,13 @@ function liveShellHtml() {
     `<div class="workspace">` +
     `<main class="analysis">` +
     `<section class="live-section">` +
-    `<div class="section-head"><h2>live following error — per motor</h2>` +
-    `<label class="live-window">window ` +
-    `<input type="range" id="live-window" min="2" max="30" step="1" value="${state.live.windowS}">` +
-    `<span id="live-window-value">${state.live.windowS} s</span></label>` +
-    `<span class="note" id="live-status">connecting to the telemetry tap…</span></div>` +
+    sectionHeadHtml(
+      "live following error — per motor",
+      `<label class="live-window">window ` +
+        `<input type="range" id="live-window" min="2" max="30" step="1" value="${state.live.windowS}">` +
+        `<span id="live-window-value">${state.live.windowS} s</span></label>` +
+        `<span class="note" id="live-status">connecting to the telemetry tap…</span>`
+    ) +
     `<div class="charts" id="live-charts">` +
     `<p class="note">streams straight from the drives the moment the tap answers — ` +
     `no capture, no file</p>` +
@@ -448,6 +518,55 @@ function liveShellHtml() {
   );
 }
 
+/// Collapsible analysis sections (accordion). Each `.analysis .section-head`
+/// holds only the section's h2 and is the sole click target; it toggles a
+/// `.collapsed` class on its parent `<section>`. Controls (chips, selects,
+/// notes) live in a `.section-tools` row below the head, so they collapse
+/// with the content and never sit inside the fold hitbox. Collapse state
+/// is keyed by page + heading text and persists in localStorage.
+const ACCORDION_KEY = "servoCal.collapsedSections";
+
+function loadCollapsedSections() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(ACCORDION_KEY) || "[]"));
+  } catch {
+    return new Set();
+  }
+}
+
+function sectionLabel(head) {
+  const h = head.querySelector("h2");
+  return `${state.page}::${h ? h.textContent.trim() : head.textContent.trim()}`;
+}
+
+function applyAccordionState() {
+  const collapsed = loadCollapsedSections();
+  document.querySelectorAll("#page-root .analysis .section-head").forEach((head) => {
+    head.classList.add("has-caret");
+    const section = head.parentElement;
+    if (section && section.tagName === "SECTION") {
+      if (collapsed.has(sectionLabel(head))) section.classList.add("collapsed");
+      else section.classList.remove("collapsed");
+    }
+  });
+}
+
+/// Bound once at boot: one delegated listener survives every page rebuild.
+function bindAccordionToggle() {
+  document.addEventListener("click", (e) => {
+    const head = e.target.closest(".analysis .section-head");
+    if (!head) return;
+    const section = head.parentElement;
+    if (!section || section.tagName !== "SECTION") return;
+    section.classList.toggle("collapsed");
+    const collapsed = loadCollapsedSections();
+    const label = sectionLabel(head);
+    if (section.classList.contains("collapsed")) collapsed.add(label);
+    else collapsed.delete(label);
+    localStorage.setItem(ACCORDION_KEY, JSON.stringify([...collapsed]));
+  });
+}
+
 function renderPage() {
   renderTabs();
   const def = currentPageDef();
@@ -459,6 +578,7 @@ function renderPage() {
     bindLiveEvents();
     renderSentLog();
     startLivePolling();
+    applyAccordionState();
     return;
   }
   if (def.strain) {
@@ -472,6 +592,16 @@ function renderPage() {
     });
     renderSentLog();
     redrawStrain();
+    applyAccordionState();
+    return;
+  }
+  if (def.docs) {
+    root.innerHTML = docsShellHtml();
+    bindPageEvents();
+    renderDocsList();
+    renderSentLog();
+    applyAccordionState();
+    if (!state.help.commands || state.help.cached) fetchMacroHelp();
     return;
   }
   if (def.journal) {
@@ -481,7 +611,7 @@ function renderPage() {
       `<section class="runs-section">` +
       `<div class="section-head"><h2>journal — every run</h2></div>` +
       `<div class="table-wrap journal-wrap"><table><thead><tr>` +
-      `<th></th><th>time</th><th>experiment/tag</th><th>ambient diff vs previous</th><th>verdict</th><th></th>` +
+      `<th></th><th>time</th><th>experiment/tag</th><th>ambient diff vs previous</th><th>note</th><th></th>` +
       `</tr></thead><tbody id="journal-body"></tbody></table></div>` +
       `</section>` +
       consoleSectionHtml({}) +
@@ -498,10 +628,48 @@ function renderPage() {
   renderDriveGroups();
   renderSentLog();
   redrawCharts();
+  applyAccordionState();
+}
+
+/// Drag handles on every header cell of the run tables. The first drag
+/// freezes the browser's auto layout into explicit widths and switches the
+/// table to fixed layout, so a column can shrink below its content (cells
+/// ellipsize) instead of forcing horizontal scroll.
+function makeColumnsResizable(table) {
+  const ths = [...table.querySelectorAll("thead th")];
+  const freezeLayout = () => {
+    if (table.style.tableLayout === "fixed") return;
+    for (const th of ths) th.style.width = `${th.offsetWidth}px`;
+    table.style.tableLayout = "fixed";
+  };
+  ths.forEach((th) => {
+    const grip = document.createElement("span");
+    grip.className = "col-resizer";
+    th.appendChild(grip);
+    grip.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      freezeLayout();
+      const startX = e.pageX;
+      const startW = th.offsetWidth;
+      const onMove = (ev) => {
+        th.style.width = `${Math.max(24, startW + ev.pageX - startX)}px`;
+      };
+      const onUp = () => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    });
+  });
 }
 
 function bindPageEvents() {
   bindConsole();
+  document
+    .querySelectorAll(".runs-wrap table, .journal-wrap table")
+    .forEach(makeColumnsResizable);
   const applyBtn = el("drive-apply-btn");
   if (applyBtn) applyBtn.addEventListener("click", applyDriveChanges);
   const psdMax = el("psd-max-freq");
@@ -511,6 +679,13 @@ function bindPageEvents() {
       redrawCharts();
     });
   }
+  document.querySelectorAll("button.motor-view-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      localStorage.setItem(MOTOR_VIEW_KEY, btn.dataset.view);
+      syncMotorViewChips();
+      redrawCharts();
+    });
+  });
   const def = currentPageDef();
   document.querySelectorAll("button.template-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -529,6 +704,10 @@ function bindPageEvents() {
 function renderRuns() {
   const tbody = el("journal-body");
   if (!tbody) return;
+  const editing = document.activeElement;
+  if (editing && editing.classList.contains("run-note-input") && tbody.contains(editing)) {
+    return;
+  }
   const def = currentPageDef();
   const runs = def.journal ? state.runs : pageRuns(def);
   tbody.innerHTML = "";
@@ -536,7 +715,6 @@ function renderRuns() {
     const globalIdx = state.runs.indexOf(run);
     const detail = state.details.get(run.name);
     const manifest = detail && detail.manifest;
-    const results = detail && detail.results;
     const prevManifest =
       globalIdx + 1 < state.runs.length
         ? (state.details.get(state.runs[globalIdx + 1].name) || {}).manifest
@@ -572,6 +750,11 @@ function renderRuns() {
       syncRunColors();
       renderRuns();
       redrawCharts();
+    });
+
+    tr.addEventListener("contextmenu", (ev) => {
+      ev.preventDefault();
+      deleteRun(run);
     });
 
     const dotTd = document.createElement("td");
@@ -622,10 +805,7 @@ function renderRuns() {
     if (diff) diffTd.title = diff;
     tr.appendChild(diffTd);
 
-    const verdictTd = document.createElement("td");
-    verdictTd.className = "verdict";
-    verdictTd.innerHTML = verdictCellHtml(run, results);
-    tr.appendChild(verdictTd);
+    tr.appendChild(noteCell(run));
 
     const actionTd = document.createElement("td");
     actionTd.className = "actions";
@@ -651,6 +831,107 @@ function renderRuns() {
 
     tbody.appendChild(tr);
   });
+}
+
+/// Click-to-edit note cell: shows the saved note (or a faint "add note…"
+/// hint), swaps to an input on click, saves to POST /api/runs/<name>/note
+/// on Enter/blur, and cancels on Escape. Clicks stop propagating so
+/// editing a note never toggles the row's chart selection.
+function noteCell(run) {
+  const td = document.createElement("td");
+  td.className = run.note ? "run-note" : "run-note empty";
+  td.textContent = run.note || "add note…";
+  td.title = run.note ? `${run.note} — click to edit` : "click to add a note";
+  td.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (td.querySelector("input")) return;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "run-note-input";
+    input.value = run.note || "";
+    td.textContent = "";
+    td.appendChild(input);
+    input.focus();
+    let done = false;
+    const finish = (save) => {
+      if (done) return;
+      done = true;
+      const text = input.value;
+      input.remove();
+      if (save) {
+        saveNote(run, text);
+      } else {
+        renderRuns();
+      }
+    };
+    input.addEventListener("keydown", (ev) => {
+      ev.stopPropagation();
+      if (ev.key === "Enter") finish(true);
+      if (ev.key === "Escape") finish(false);
+    });
+    input.addEventListener("blur", () => finish(true));
+    input.addEventListener("click", (ev) => ev.stopPropagation());
+  });
+  return td;
+}
+
+/// The note shows up the moment Enter is pressed: it goes into
+/// state.pendingNotes, which renderRuns/refresh overlay onto whatever the
+/// server returns, then the POST confirms (or rolls back) in the background.
+/// Without the overlay, the periodic refresh replaces state.runs with
+/// server data that predates the save — during a long calibration the POST
+/// can sit queued behind it, blanking the note until the run finishes.
+function applyNoteLocally(name, note) {
+  const current = state.runs.find((r) => r.name === name);
+  if (current) current.note = note;
+  renderRuns();
+}
+
+async function saveNote(run, text) {
+  const note = text.trim() || null;
+  state.pendingNotes.set(run.name, note);
+  applyNoteLocally(run.name, note);
+  try {
+    const saved = await api(`/api/runs/${encodeURIComponent(run.name)}/note`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note: text }),
+    });
+    if (state.pendingNotes.get(run.name) === note) {
+      state.pendingNotes.delete(run.name);
+      applyNoteLocally(run.name, saved.note || null);
+    }
+  } catch (e) {
+    console.error(e);
+    if (state.pendingNotes.get(run.name) === note) {
+      state.pendingNotes.delete(run.name);
+      renderRuns();
+    }
+    alert(`saving note failed: ${e.message}`);
+  }
+}
+
+async function deleteRun(run) {
+  const ok = confirm(
+    `Delete run ${run.name}?\n\nRemoves its whole directory — captures, results, note.`
+  );
+  if (!ok) return;
+  try {
+    await api(`/api/runs/${encodeURIComponent(run.name)}`, { method: "DELETE" });
+  } catch (e) {
+    console.error(e);
+    alert(`deleting ${run.name} failed: ${e.message}`);
+    return;
+  }
+  state.runs = state.runs.filter((r) => r.name !== run.name);
+  state.selected.delete(run.name);
+  state.pinned.delete(run.name);
+  state.details.delete(run.name);
+  state.plotSeries.delete(run.name);
+  state.pendingNotes.delete(run.name);
+  syncRunColors();
+  renderRuns();
+  redrawCharts();
 }
 
 async function triggerAnalyze(name) {
@@ -703,6 +984,10 @@ function autoSelectInitialRuns() {
 async function refresh() {
   const runs = await api("/api/runs");
   state.runs = runs;
+  for (const [name, note] of state.pendingNotes) {
+    const run = state.runs.find((r) => r.name === name);
+    if (run) run.note = note;
+  }
   await Promise.all(runs.map((r) => ensureDetail(r).catch((e) => console.error(e))));
   const known = new Set(runs.map((r) => r.name));
   for (const name of [...state.selected]) {
@@ -719,18 +1004,35 @@ async function refresh() {
 
 // --- chart drawing ------------------------------------------------------------
 
-function pickSeries(step) {
+function pickSeries(runName, step) {
+  if (motorViewPerMotor()) {
+    const drives = Object.entries(step.drives);
+    return drives.map(([drive, d], k) => ({
+      y: d.ferr_counts.map((c) => c * (1000 / countsPerMm(runName, drive))),
+      label: "ferr (µm)",
+      suffix: ` (${drive})`,
+      ramp: driveRamp(drives.length, k),
+    }));
+  }
   if (step.combined) {
-    return { y: step.combined.on_ferr_mm, label: "on-axis ferr (mm)" };
+    return [{ y: step.combined.on_ferr_mm, label: "on-axis ferr (mm)", suffix: "", ramp: 0 }];
   }
   const firstDrive = Object.values(step.drives)[0];
-  return { y: firstDrive ? firstDrive.ferr_counts : [], label: "ferr (counts)" };
+  return [
+    {
+      y: firstDrive ? firstDrive.ferr_counts : [],
+      label: "ferr (counts)",
+      suffix: "",
+      ramp: 0,
+    },
+  ];
 }
 
 /// Renders at the device pixel ratio so lines stay vector-crisp on hidpi
 /// displays: the backing store is sized to the CSS box × dpr and the
 /// context scaled back, while all layout math stays in CSS pixels.
-function drawChart(canvas, traces, yLabel, fixedY, xUnit) {
+function drawChart(canvas, traces, yLabel, fixedY, xUnit, marks, opts) {
+  opts = opts || {};
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth || canvas.width;
   const h = canvas.clientHeight || canvas.height;
@@ -765,6 +1067,10 @@ function drawChart(canvas, traces, yLabel, fixedY, xUnit) {
   const x = (t) => pad.l + ((t - tMin) / (tMax - tMin || 1)) * (w - pad.l - pad.r);
   const y = (v) => h - pad.b - ((v - yMin) / (yMax - yMin || 1)) * (h - pad.t - pad.b);
 
+  const fmtTick = (v, span) => (Math.abs(span) >= 20 ? v.toFixed(0) : v.toFixed(2));
+  // Tooltip readout: keep one more decimal than the axis ticks so the
+  // hovered step's metrics read exact, not rounded to a gridline scale.
+  const fmtVal = (v) => (Math.abs(v) >= 1000 ? v.toFixed(0) : v.toFixed(1));
   ctx.strokeStyle = "#29313a";
   ctx.fillStyle = "#8a97a3";
   ctx.font = "10px monospace";
@@ -774,18 +1080,31 @@ function drawChart(canvas, traces, yLabel, fixedY, xUnit) {
     const py = y(v);
     ctx.moveTo(pad.l, py);
     ctx.lineTo(w - pad.r, py);
-    ctx.fillText(v.toFixed(2), 2, py + 3);
+    ctx.fillText(fmtTick(v, yMax - yMin), 2, py + 3);
   }
   for (let i = 0; i <= 4; i++) {
     const t = tMin + ((tMax - tMin) * i) / 4;
     const px = x(t);
-    ctx.fillText(t.toFixed(2) + (xUnit || "s"), px, h - 6);
+    ctx.fillText(fmtTick(t, tMax - tMin) + (xUnit == null ? "s" : xUnit), px, h - 6);
   }
   ctx.stroke();
+
+  for (const m of marks || []) {
+    if (m.x < tMin || m.x > tMax) continue;
+    ctx.strokeStyle = m.color;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(x(m.x), pad.t);
+    ctx.lineTo(x(m.x), h - pad.b);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
 
   for (const tr of traces) {
     ctx.strokeStyle = tr.color;
     ctx.lineWidth = 1.25;
+    ctx.setLineDash(tr.dash || []);
     ctx.beginPath();
     let penDown = false;
     for (let i = 0; i < tr.t.length; i++) {
@@ -800,9 +1119,71 @@ function drawChart(canvas, traces, yLabel, fixedY, xUnit) {
       penDown = true;
     }
     ctx.stroke();
+    ctx.setLineDash([]);
+    if (tr.points) {
+      ctx.fillStyle = tr.color;
+      for (let i = 0; i < tr.t.length; i++) {
+        if (tr.y[i] === null) continue;
+        ctx.beginPath();
+        ctx.arc(x(tr.t[i]), y(tr.y[i]), 3, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+    }
   }
   ctx.fillStyle = "#8a97a3";
   ctx.fillText(yLabel, pad.l, 10);
+  if (opts.hover) {
+    // Like the PSD chart: snap to the single nearest point (by 2D distance),
+    // draw a vertical line through it, and read out that one point's values.
+    // Not every trace at that x — the hovered point, for that run/metric.
+    let best = null;
+    for (const tr of traces) {
+      for (let i = 0; i < tr.t.length; i++) {
+        if (tr.y[i] === null) continue;
+        const dx = x(tr.t[i]) - opts.hover.mx;
+        const dy = y(tr.y[i]) - opts.hover.my;
+        const d = dx * dx + dy * dy;
+        if (!best || d < best.d) best = { d, tr, i };
+      }
+    }
+    if (best) {
+      const px = x(best.tr.t[best.i]);
+      const py = y(best.tr.y[best.i]);
+      ctx.strokeStyle = "#4a5560";
+      ctx.beginPath();
+      ctx.moveTo(px, pad.t);
+      ctx.lineTo(px, h - pad.b);
+      ctx.stroke();
+      ctx.fillStyle = best.tr.color;
+      ctx.beginPath();
+      ctx.arc(px, py, 3, 0, Math.PI * 2);
+      ctx.fill();
+      const xUnitSuffix = xUnit == null ? "s" : xUnit;
+      const swept = opts.xTitle ? opts.xTitle + " = " : "";
+      const lab = best.tr.label != null ? best.tr.label : "";
+      const text = `${swept}${fmtTick(best.tr.t[best.i], tMax - tMin)}${xUnitSuffix}  ${fmtVal(best.tr.y[best.i])} ${yLabel}${lab ? "  " + lab : ""}`;
+      ctx.font = "11px monospace";
+      const tw = ctx.measureText(text).width;
+      const tx = Math.min(Math.max(px + 8, pad.l), w - pad.r - tw - 8);
+      const ty = Math.max(py - 10, pad.t + 12);
+      ctx.fillStyle = "#0d1117";
+      ctx.fillRect(tx - 4, ty - 10, tw + 8, 14);
+      ctx.strokeStyle = "#4a5560";
+      ctx.strokeRect(tx - 4, ty - 10, tw + 8, 14);
+      ctx.fillStyle = "#e6edf3";
+      ctx.fillText(text, tx, ty);
+    }
+  }
+}
+
+/// Redraws with the cursor on every move so the readout snaps to the nearest
+/// sweep step — the discrete metrics-vs-gain variant of the PSD hover.
+/// drawChart reruns the full axis/line pass each redraw; it's cheap.
+function attachChartHover(canvas, traces, yLabel, fixedY, xUnit, marks, opts) {
+  const redraw = (hover) =>
+    drawChart(canvas, traces, yLabel, fixedY, xUnit, marks, hover ? { ...opts, hover } : opts);
+  canvas.addEventListener("mousemove", (e) => redraw({ mx: e.offsetX, my: e.offsetY }));
+  canvas.addEventListener("mouseleave", () => redraw(null));
 }
 
 function drawTimeDomain(names, plots, steps) {
@@ -831,13 +1212,16 @@ function drawTimeDomain(names, plots, steps) {
     plots.forEach((p, i) => {
       const step = p.steps.find((s) => s.name === stepName);
       if (!step) return;
-      const { y: series, label } = pickSeries(step);
-      yLabel = label;
-      const color = runColor(names[i]);
-      traces.push({ t: step.t_s, y: series, color });
-      const item = document.createElement("span");
-      item.innerHTML = `<span class="swatch" style="background:${color}"></span>${names[i]}`;
-      legend.appendChild(item);
+      for (const series of pickSeries(names[i], step)) {
+        yLabel = series.label;
+        const color = mixColor(runColor(names[i]), "#ffffff", series.ramp);
+        traces.push({ t: step.t_s, y: series.y, color });
+        const item = document.createElement("span");
+        item.innerHTML =
+          `<span class="swatch" style="background:${color}"></span>` +
+          `${names[i]}${series.suffix}`;
+        legend.appendChild(item);
+      }
     });
     drawChart(canvas, traces, yLabel);
     box.appendChild(legend);
@@ -994,26 +1378,87 @@ function torqueCellHtml(tq) {
   );
 }
 
+function metricsDriveRow(name, stepName, drive, dr) {
+  const umPerCount = 1000 / countsPerMm(name, drive);
+  const s = driveMoveSummary(dr.metrics);
+  return {
+    run: name,
+    step: stepName,
+    drive,
+    ferrPeakUm: s.ferrPeak * umPerCount,
+    ferrRmsUm: s.ferrRms * umPerCount,
+    overshootUm: s.overshoot * umPerCount,
+    settle: {
+      settleWorstMs: s.settleWorstMs,
+      neverSettled: s.neverSettled,
+      truncated: s.truncated,
+    },
+    torque: dr.metrics.torque,
+  };
+}
+
+/// One row per (run, step) folded over drives: "agg" keeps the worst drive
+/// per metric, "avg" the mean. Rail badges survive both folds — a railed
+/// drive is a railed step no matter the view.
+function foldDriveRows(driveRows, view) {
+  const fold = (values) =>
+    view === "avg"
+      ? values.reduce((a, b) => a + b, 0) / values.length
+      : Math.max(...values);
+  const settled = driveRows
+    .map((r) => r.settle.settleWorstMs)
+    .filter((v) => v != null);
+  const worstTorque = driveRows.reduce((a, r) =>
+    r.torque.peak_pct_rated > a.torque.peak_pct_rated ? r : a
+  ).torque;
+  return {
+    run: driveRows[0].run,
+    step: driveRows[0].step,
+    drive: view === "avg" ? "avg" : "worst",
+    ferrPeakUm: fold(driveRows.map((r) => r.ferrPeakUm)),
+    ferrRmsUm: fold(driveRows.map((r) => r.ferrRmsUm)),
+    overshootUm: fold(driveRows.map((r) => r.overshootUm)),
+    settle: {
+      settleWorstMs: settled.length ? fold(settled) : null,
+      neverSettled: driveRows.some((r) => r.settle.neverSettled),
+      truncated: driveRows.some((r) => r.settle.truncated),
+    },
+    torque:
+      view === "avg"
+        ? {
+            ...worstTorque,
+            peak_pct_rated: fold(driveRows.map((r) => r.torque.peak_pct_rated)),
+          }
+        : worstTorque,
+  };
+}
+
 function metricsTableRows(names, steps) {
+  const view = motorView();
   const rows = [];
   for (const name of names) {
     const detail = state.details.get(name);
     if (!detail || !detail.results) continue;
     for (const step of detail.results.steps) {
       if (!steps.includes(step.name)) continue;
-      for (const [drive, dr] of Object.entries(step.drives)) {
-        rows.push({
-          run: name,
-          step: step.name,
-          drive,
-          umPerCount: 1000 / countsPerMm(name, drive),
-          summary: driveMoveSummary(dr.metrics),
-          torque: dr.metrics.torque,
-        });
-      }
+      const driveRows = Object.entries(step.drives).map(([drive, dr]) =>
+        metricsDriveRow(name, step.name, drive, dr)
+      );
+      if (!driveRows.length) continue;
+      if (view === "per-motor") rows.push(...driveRows);
+      else rows.push(foldDriveRows(driveRows, view));
     }
   }
   return rows;
+}
+
+/// Red tint scaled to where the value sits between the column's best and
+/// worst — the cheap-to-scan replacement for reading 4-drives-per-step
+/// numbers one by one. Identical columns get no tint.
+function heatCellStyle(value, min, max) {
+  if (!(max > min)) return "";
+  const alpha = (0.32 * (value - min)) / (max - min);
+  return alpha < 0.02 ? "" : ` style="background:rgba(224,90,79,${alpha.toFixed(3)})"`;
 }
 
 function renderMetricsTable(names, steps) {
@@ -1024,17 +1469,34 @@ function renderMetricsTable(names, steps) {
     container.innerHTML = '<p class="note">select runs above</p>';
     return;
   }
-  const um = (counts, r) => (counts * r.umPerCount).toFixed(1);
+  const columns = ["ferrPeakUm", "ferrRmsUm", "overshootUm"];
+  const bounds = {};
+  for (const c of columns) {
+    const values = rows.map((r) => r[c]);
+    bounds[c] = { min: Math.min(...values), max: Math.max(...values) };
+  }
+  const heat = (c, r) => heatCellStyle(r[c], bounds[c].min, bounds[c].max);
+  const stepColors = new Map();
+  for (const r of rows) {
+    if (!stepColors.has(r.step)) {
+      stepColors.set(r.step, PALETTE[stepColors.size % PALETTE.length]);
+    }
+  }
   const body = rows
-    .map((r) => {
+    .map((r, i) => {
       const swatch = `<span class="swatch" style="background:${runColor(r.run)}"></span>`;
+      const stepColor = stepColors.get(r.step);
+      const prev = rows[i - 1];
+      const groupStart = !prev || prev.run !== r.run || prev.step !== r.step;
       return (
-        `<tr><td class="run-cell" title="${r.run}">${swatch}${r.run}</td>` +
-        `<td>${r.step}</td><td>${r.drive}</td>` +
-        `<td class="num">${um(r.summary.ferrPeak, r)}</td>` +
-        `<td class="num">${um(r.summary.ferrRms, r)}</td>` +
-        `<td class="num">${um(r.summary.overshoot, r)}</td>` +
-        `<td class="num">${settleCellHtml(r.summary)}</td>` +
+        `<tr${groupStart && i > 0 ? ' class="group-start"' : ""}>` +
+        `<td class="run-cell" style="border-left:3px solid ${stepColor};padding-left:6px" ` +
+        `title="${r.run}">${swatch}${r.run}</td>` +
+        `<td style="color:${stepColor}">${r.step}</td><td>${r.drive}</td>` +
+        `<td class="num"${heat("ferrPeakUm", r)}>${r.ferrPeakUm.toFixed(1)}</td>` +
+        `<td class="num"${heat("ferrRmsUm", r)}>${r.ferrRmsUm.toFixed(1)}</td>` +
+        `<td class="num"${heat("overshootUm", r)}>${r.overshootUm.toFixed(1)}</td>` +
+        `<td class="num">${settleCellHtml(r.settle)}</td>` +
         `<td class="num">${torqueCellHtml(r.torque)}</td></tr>`
       );
     })
@@ -1048,6 +1510,137 @@ function renderMetricsTable(names, steps) {
     `</tr></thead><tbody>${body}</tbody></table>`;
 }
 
+// --- metrics vs gain chart --------------------------------------------------
+//
+// The old gain-report PNG's "metrics vs gain" panel: one x position per
+// sweep step (the swept gain value from the manifest), overshoot / ferr
+// per step maxed over drives, flagged steps marked as red rungs.
+
+function sweptAxisKey(manifest) {
+  if (!manifest || manifest.steps.length < 2) return null;
+  const keys = Object.keys(manifest.steps[0].swept || {}).filter((k) =>
+    manifest.steps.every((s) => typeof (s.swept || {})[k] === "number")
+  );
+  const varying = keys.filter(
+    (k) => new Set(manifest.steps.map((s) => s.swept[k])).size > 1
+  );
+  if (!varying.length) return null;
+  return varying.includes("speed") ? "speed" : varying[0];
+}
+
+function sweepMetricsSeries(names) {
+  const series = [];
+  for (const name of names) {
+    const detail = state.details.get(name);
+    if (!detail || !detail.results || !detail.manifest) continue;
+    const key = sweptAxisKey(detail.manifest);
+    if (!key) continue;
+    const sweptByStep = new Map(detail.manifest.steps.map((s) => [s.name, s.swept[key]]));
+    const perDrivePoints = new Map();
+    for (const step of detail.results.steps) {
+      if (!sweptByStep.has(step.name)) continue;
+      const flagged = step.flags.some(
+        (f) => f === "resonance_detected" || f === "torque_saturated"
+      );
+      const view = motorView();
+      const driveValues = Object.entries(step.drives).map(([drive, dr]) => {
+        const umPerCount = 1000 / countsPerMm(name, drive);
+        const s = driveMoveSummary(dr.metrics);
+        return {
+          drive,
+          overshootUm: s.overshoot * umPerCount,
+          ferrRmsUm: s.ferrRms * umPerCount,
+          ferrPeakUm: s.ferrPeak * umPerCount,
+        };
+      });
+      const stepPoints = new Map();
+      if (view === "per-motor") {
+        for (const v of driveValues) stepPoints.set(v.drive, v);
+      } else if (driveValues.length) {
+        const fold = (f) =>
+          view === "avg"
+            ? driveValues.reduce((a, v) => a + f(v), 0) / driveValues.length
+            : Math.max(...driveValues.map(f));
+        stepPoints.set(view === "avg" ? "avg" : "worst drive", {
+          overshootUm: fold((v) => v.overshootUm),
+          ferrRmsUm: fold((v) => v.ferrRmsUm),
+          ferrPeakUm: fold((v) => v.ferrPeakUm),
+        });
+      }
+      for (const [drive, p] of stepPoints) {
+        if (!perDrivePoints.has(drive)) perDrivePoints.set(drive, []);
+        perDrivePoints.get(drive).push({ x: sweptByStep.get(step.name), flagged, ...p });
+      }
+    }
+    for (const [drive, points] of perDrivePoints) {
+      if (points.length < 2) continue;
+      points.sort((a, b) => a.x - b.x);
+      series.push({ run: name, drive, key, points });
+    }
+  }
+  return series;
+}
+
+function renderSweepMetricsChart(names) {
+  const container = el("sweep-metrics-chart");
+  if (!container) return;
+  const series = sweepMetricsSeries(names);
+  if (!series.length) {
+    container.innerHTML =
+      '<p class="note">select a gain sweep / ladder run above (tracking runs have a single step — read them in the metrics table)</p>';
+    return;
+  }
+  container.innerHTML = "";
+  const box = document.createElement("div");
+  box.className = "chart-box";
+  const title = document.createElement("h3");
+  const viewLabel = { agg: "worst-drive", avg: "avg", "per-motor": "per-motor" }[motorView()];
+  title.textContent = `${viewLabel} metrics vs swept ${series[0].key} (µm)`;
+  box.appendChild(title);
+  const canvas = document.createElement("canvas");
+  canvas.width = 860;
+  canvas.height = 260;
+  box.appendChild(canvas);
+  const legend = document.createElement("div");
+  legend.className = "legend";
+  const traces = [];
+  const marks = [];
+  series.forEach((s) => {
+    const runSeries = series.filter((x) => x.run === s.run);
+    const color = mixColor(
+      runColor(s.run),
+      "#ffffff",
+      driveRamp(runSeries.length, runSeries.indexOf(s))
+    );
+    const t = s.points.map((p) => p.x);
+    const label = motorViewPerMotor() ? `${s.run} · ${s.drive}` : s.run;
+    traces.push({ t, y: s.points.map((p) => p.overshootUm), color, points: true, label: `${label} overshoot` });
+    traces.push({ t, y: s.points.map((p) => p.ferrRmsUm), color, dash: [6, 4], label: `${label} ferr rms` });
+    traces.push({ t, y: s.points.map((p) => p.ferrPeakUm), color, dash: [2, 3], label: `${label} ferr peak` });
+    for (const p of s.points) if (p.flagged) marks.push({ x: p.x, color: "#e05a4f" });
+    const item = document.createElement("span");
+    item.innerHTML = `<span class="swatch" style="background:${color}"></span>${label}`;
+    legend.appendChild(item);
+  });
+  const sweepOpts = { xTitle: series[0].key };
+  drawChart(canvas, traces, "µm", null, "", marks, sweepOpts);
+  attachChartHover(canvas, traces, "µm", null, "", marks, sweepOpts);
+  box.appendChild(legend);
+  container.appendChild(box);
+}
+
+function driveRamp(count, idx) {
+  return count > 1 ? (0.5 * idx) / (count - 1) : 0;
+}
+
+/// Per-drive PSDs are counts²/Hz on drives whose counts_per_mm may differ,
+/// so averaging happens in µm²/Hz — each drive converted first, then the
+/// power mean — and only then collapses to a tone amplitude.
+function psdFerrUm2(step, runName, drive) {
+  const umPerCount = 1000 / countsPerMm(runName, drive);
+  return step.psd.per_drive[drive].map((p) => p * umPerCount * umPerCount);
+}
+
 function psdFerrTraces(names, plots, steps) {
   const traces = [];
   plots.forEach((p, i) => {
@@ -1057,16 +1650,36 @@ function psdFerrTraces(names, plots, steps) {
       const driveNames = Object.keys(step.psd.per_drive);
       if (!driveNames.length) return;
       const style = traceStyle(names, steps, i, j);
-      const clipped = clipToPsdBand(step.psd.freq_hz, step.psd.per_drive[driveNames[0]]);
-      const umPerCount = 1000 / countsPerMm(names[i], driveNames[0]);
-      traces.push({
-        freq: clipped.freq,
-        y: psdToAmplitude(clipped.freq, clipped.y).map((a) => a * umPerCount),
-        color: style.color,
-        dashed: false,
-        label: `${style.name} (${driveNames[0]})`,
-        run: names[i],
-      });
+      const pushTrace = (psdUm2, color, label) => {
+        const clipped = clipToPsdBand(step.psd.freq_hz, psdUm2);
+        traces.push({
+          freq: clipped.freq,
+          y: psdToAmplitude(clipped.freq, clipped.y),
+          color,
+          dashed: false,
+          label,
+          run: names[i],
+        });
+      };
+      if (motorViewPerMotor()) {
+        driveNames.forEach((drive, k) => {
+          pushTrace(
+            psdFerrUm2(step, names[i], drive),
+            mixColor(style.color, "#ffffff", driveRamp(driveNames.length, k)),
+            `${style.name} (${drive})`
+          );
+        });
+        return;
+      }
+      const avgUm2 = new Array(step.psd.freq_hz.length).fill(0);
+      for (const drive of driveNames) {
+        psdFerrUm2(step, names[i], drive).forEach((v, n) => (avgUm2[n] += v));
+      }
+      pushTrace(
+        avgUm2.map((v) => v / driveNames.length),
+        style.color,
+        `${style.name} (avg of ${driveNames.length})`
+      );
     });
   });
   return traces;
@@ -1333,9 +1946,18 @@ function visibleStepNames(stepNames) {
   return kept.length ? kept : stepNames;
 }
 
-function renderPsdChips(stepNames) {
-  const container = el("psd-step-chips");
-  if (!container) return;
+/// The one step filter drives every chart that splits by step (PSD, time
+/// domain, metrics), so its chips render into every section that has a
+/// container for them — otherwise a filter picked on one page silently
+/// shapes another page's chart with no control in sight.
+function renderStepChips(stepNames) {
+  for (const id of ["psd-step-chips", "time-step-chips"]) {
+    const container = el(id);
+    if (container) fillStepChips(container, stepNames);
+  }
+}
+
+function fillStepChips(container, stepNames) {
   container.innerHTML = "";
   const all = document.createElement("button");
   all.className = "chip" + (state.stepFilter ? "" : " active");
@@ -1523,29 +2145,37 @@ function strainShellHtml(def) {
     `<div class="workspace">` +
     `<main class="analysis">` +
     `<section class="runs-section">` +
-    `<div class="section-head"><h2>strain runs</h2>` +
-    `<span class="note">strain_map — click a row to render its map</span></div>` +
+    sectionHeadHtml(
+      "strain runs",
+      `<span class="note">strain_map — click to map, shift+click a second run to diff (matching dimensions)</span>`
+    ) +
     `<div class="table-wrap runs-wrap"><table><thead><tr>` +
     `<th>time</th><th>tag</th><th></th>` +
     `</tr></thead><tbody id="strain-run-body"></tbody></table></div>` +
     `</section>` +
     `<section>` +
-    `<div class="section-head"><h2>strain map</h2>` +
-    `<button class="strain-field-btn" data-field="elastic">elastic</button>` +
-    `<button class="strain-field-btn" data-field="friction" ` +
-    `title="the direction-dependent half: (forward - backward)/2 — what a position-keyed offset cannot cancel">friction</button>` +
-    `<span class="note" id="strain-summary"></span></div>` +
+    sectionHeadHtml(
+      "strain map",
+      `<button class="strain-field-btn" data-field="elastic">elastic</button>` +
+        `<button class="strain-field-btn" data-field="friction" ` +
+        `title="the direction-dependent half: (forward - backward)/2 — what a position-keyed offset cannot cancel">friction</button>` +
+        `<span class="note" id="strain-summary"></span>`
+    ) +
     `<div id="strain-heatmaps" class="strain-grid"></div>` +
     `<div id="strain-scale"></div>` +
     `</section>` +
     `<section>` +
-    `<div class="section-head"><h2>per-line elastic profiles</h2>` +
-    `<span class="note">one polyline per raster line, in bed coordinates</span></div>` +
+    sectionHeadHtml(
+      "per-line elastic profiles",
+      `<span class="note">one polyline per raster line, in bed coordinates</span>`
+    ) +
     `<div class="charts" id="strain-profiles"></div>` +
     `</section>` +
     `<section>` +
-    `<div class="section-head"><h2>per-line DC offset — mean elastic</h2>` +
-    `<span class="note">a line-to-line offset is trapped preload, not local strain</span></div>` +
+    sectionHeadHtml(
+      "per-line DC offset — mean elastic",
+      `<span class="note">a line-to-line offset is trapped preload, not local strain</span>`
+    ) +
     `<div class="strain-grid" id="strain-dc"></div>` +
     `</section>` +
     `</main>` +
@@ -1563,6 +2193,50 @@ async function ensureStrain(name) {
   return data;
 }
 
+function runTag(name) {
+  const r = state.runs.find((x) => x.name === name);
+  return r ? `${r.tag}${r.axis ? " " + r.axis : ""}` : name;
+}
+
+/// Builds per-belt elastic/friction diff arrays (a − b); a null on either
+/// side propagates, since an unbinned cell has no meaning to subtract.
+function buildDiffLine(base, cmp) {
+  return {
+    name: base.name,
+    swept: base.swept,
+    bin_centers: base.bin_centers,
+    belts: base.belts.map((bb, bi) => {
+      const cb = cmp.belts[bi];
+      return {
+        pair: bb.pair,
+        elastic: cb ? pointwiseDiff(bb.elastic, cb.elastic) : nulls(bb.elastic.length),
+        friction: cb ? pointwiseDiff(bb.friction, cb.friction) : nulls(bb.friction.length),
+      };
+    }),
+  };
+}
+
+function pointwiseDiff(a, b) {
+  const out = new Array(a.length);
+  for (let i = 0; i < a.length; i++) {
+    out[i] = a[i] === null || b[i] === null ? null : a[i] - b[i];
+  }
+  return out;
+}
+
+function nulls(n) {
+  return new Array(n).fill(null);
+}
+
+/// Compression of a strain map's geometry: line names (which encode
+/// orientation + swept coordinate), per-line bin centers, and belt pairs.
+/// Two maps with an identical signature can be subtracted cell-by-cell.
+function strainSignature(data) {
+  return JSON.stringify({
+    l: data.lines.map((l) => ({ n: l.name, b: l.bin_centers, p: l.belts.map((x) => x.pair) })),
+  });
+}
+
 function renderStrainRuns() {
   const tbody = el("strain-run-body");
   if (!tbody) return;
@@ -1570,13 +2244,25 @@ function renderStrainRuns() {
   if (!runs.some((r) => r.name === state.strain.selected)) {
     state.strain.selected = runs.length ? runs[0].name : null;
   }
+  const known = new Set(runs.map((r) => r.name));
+  for (const name of [...state.strain.compare]) {
+    if (!known.has(name)) state.strain.compare.delete(name);
+  }
   tbody.innerHTML = "";
   for (const run of runs) {
     const tr = document.createElement("tr");
     tr.classList.add("selectable");
     if (run.name === state.strain.selected) tr.classList.add("selected");
-    tr.addEventListener("click", () => {
-      state.strain.selected = run.name;
+    if (state.strain.compare.has(run.name)) tr.classList.add("compare");
+    tr.addEventListener("click", (ev) => {
+      if (ev.shiftKey) {
+        if (run.name === state.strain.selected) return;
+        if (state.strain.compare.has(run.name)) state.strain.compare.delete(run.name);
+        else state.strain.compare.add(run.name);
+      } else {
+        state.strain.selected = run.name;
+        state.strain.compare.clear();
+      }
       redrawStrain();
     });
     const timeTd = document.createElement("td");
@@ -1584,7 +2270,7 @@ function renderStrainRuns() {
     timeTd.title = `${run.name} — ${run.mtime_utc}`;
     tr.appendChild(timeTd);
     const tagTd = document.createElement("td");
-    tagTd.textContent = `${run.tag}${run.axis ? " " + run.axis : ""}`;
+    tagTd.textContent = runTag(run.name);
     tr.appendChild(tagTd);
     const actionTd = document.createElement("td");
     actionTd.className = "actions";
@@ -1911,6 +2597,18 @@ function strainDcBox(title, beltIdx, lines) {
   return box;
 }
 
+/// Shared geometry for a strain map: ordered groups (sweep orientation),
+/// bed-frame extents, and the belt pair names. Diffing two maps reuses the
+/// selected run's geometry since both must match its signature to compare.
+function strainGeometry(data) {
+  const groups = strainGroups(data);
+  const detail = state.details.get(state.strain.selected);
+  const plan = (detail && detail.manifest && detail.manifest.stroke_plan) || {};
+  const geo = strainBedGeometry(groups, plan);
+  const pairs = data.lines[0].belts.map((b) => b.pair);
+  return { groups, geo, pairs };
+}
+
 function renderStrainCharts(data) {
   const heatmaps = el("strain-heatmaps");
   const profiles = el("strain-profiles");
@@ -1936,11 +2634,7 @@ function renderStrainCharts(data) {
     btn.disabled = btn.dataset.field === state.strain.field;
   });
   el("strain-scale").innerHTML = strainScaleHtml(vmax);
-  const groups = strainGroups(data);
-  const detail = state.details.get(state.strain.selected);
-  const plan = (detail && detail.manifest && detail.manifest.stroke_plan) || {};
-  const geo = strainBedGeometry(groups, plan);
-  const pairs = data.lines[0].belts.map((b) => b.pair);
+  const { groups, geo, pairs } = strainGeometry(data);
   pairs.forEach((pair, beltIdx) => {
     for (const group of groups) {
       const title = `${pair} — ${group.title}`;
@@ -1949,6 +2643,92 @@ function renderStrainCharts(data) {
       dc.appendChild(strainDcBox(title, beltIdx, group.lines));
     }
   });
+}
+
+/// Appends a diverging diff heatmap (selected − compare) per belt×orientation
+/// for every compare run whose strain signature matches the selected run's.
+/// A mismatched run is named in the summary instead of drawn — subtracting
+/// cells only means something when both maps bin the bed identically.
+async function renderStrainDiffs(selectedData) {
+  const heatmaps = el("strain-heatmaps");
+  if (!heatmaps || !state.strain.compare.size) return;
+  if (!selectedData || !selectedData.lines.length) return;
+  const baseName = state.strain.selected;
+  const base = strainGeometry(selectedData);
+  const baseSig = strainSignature(selectedData);
+  const baseTag = runTag(baseName);
+  const field = state.strain.field;
+  const skips = [];
+  for (const name of [...state.strain.compare]) {
+    let cmp;
+    try {
+      cmp = await ensureStrain(name);
+    } catch (e) {
+      skips.push(`${runTag(name)}: ${String(e)}`);
+      continue;
+    }
+    if (state.strain.selected !== baseName || !el("strain-heatmaps")) return;
+    if (!cmp || !cmp.lines.length || strainSignature(cmp) !== baseSig) {
+      skips.push(`${runTag(name)}: dimensions differ`);
+      continue;
+    }
+    const cmpGroups = strainGroups(cmp);
+    const aligned = [];
+    let mismatch = false;
+    for (const bg of base.groups) {
+      const cg = cmpGroups.find((g) => g.orientation === bg.orientation);
+      if (!cg || cg.lines.length !== bg.lines.length) {
+        mismatch = true;
+        break;
+      }
+      aligned.push(cg);
+    }
+    if (mismatch || aligned.length !== base.groups.length || state.strain.selected !== baseName) {
+      skips.push(`${runTag(name)}: layout mismatch`);
+      continue;
+    }
+    const cmpTag = runTag(name);
+    let vmaxDiff = 1e-6;
+    for (let gi = 0; gi < base.groups.length; gi++) {
+      const bg = base.groups[gi];
+      const cg = aligned[gi];
+      for (let li = 0; li < bg.lines.length; li++) {
+        for (let bi = 0; bi < bg.lines[li].belts.length; bi++) {
+          for (const v of pointwiseDiff(bg.lines[li].belts[bi][field], cg.lines[li].belts[bi][field])) {
+            if (v !== null) vmaxDiff = Math.max(vmaxDiff, Math.abs(v));
+          }
+        }
+      }
+    }
+    base.pairs.forEach((pair, beltIdx) => {
+      if (state.strain.selected !== baseName || !el("strain-heatmaps")) return;
+      for (let gi = 0; gi < base.groups.length; gi++) {
+        const bg = base.groups[gi];
+        const cg = aligned[gi];
+        const diffLines = bg.lines.map((bl, li) => buildDiffLine(bl, cg.lines[li]));
+        const diffGroup = { orientation: bg.orientation, title: bg.title, lines: diffLines };
+        const title = `Δ ${baseTag} − ${cmpTag} · ${pair} — ${bg.title}`;
+        heatmaps.appendChild(strainHeatmapBox(title, diffGroup, beltIdx, vmaxDiff, base.geo));
+      }
+    });
+    if (state.strain.selected === baseName && el("strain-heatmaps")) {
+      const scaleEl = document.createElement("div");
+      scaleEl.className = "strain-scale";
+      scaleEl.style.gridColumn = "1 / -1";
+      const stops = [];
+      for (let i = 0; i <= 8; i++) stops.push(strainColor(i / 4 - 1));
+      scaleEl.innerHTML =
+        `<span>−${vmaxDiff.toFixed(1)}%</span>` +
+        `<span class="bar" style="background:linear-gradient(90deg,${stops.join(",")})"></span>` +
+        `<span>+${vmaxDiff.toFixed(1)}%</span>` +
+        `<span class="hint">Δ scale for ${cmpTag} — ${field}, null bins stay dark</span>`;
+      heatmaps.appendChild(scaleEl);
+    }
+  }
+  if (skips.length) {
+    const note = el("strain-summary");
+    if (note) note.textContent += `  · skipped: ${skips.join("; ")}`;
+  }
 }
 
 async function redrawStrain() {
@@ -1973,9 +2753,10 @@ async function redrawStrain() {
   }
   if (state.strain.selected !== name || !el("strain-heatmaps")) return;
   renderStrainCharts(data);
+  await renderStrainDiffs(data);
 }
 
-// --- PSD peak list (notches page) -------------------------------------------
+// --- PSD peak list (gains page) ---------------------------------------------
 
 /// Greedy spaced peak-picking inside the resonance band: repeatedly take
 /// the highest remaining bin at least PEAK_MIN_SEPARATION_HZ away from
@@ -2100,13 +2881,15 @@ async function redrawCharts() {
     state.stepFilter = null;
   }
   const steps = visibleStepNames(stepNames);
-  if (def.metrics) {
+  if (def.metrics || def.sweepChart) {
     const onPage = new Set(pageRuns(def).map((r) => r.name));
-    renderMetricsTable(okNames.filter((n) => onPage.has(n)), steps);
+    const pageNames = okNames.filter((n) => onPage.has(n));
+    if (def.metrics) renderMetricsTable(pageNames, steps);
+    if (def.sweepChart) renderSweepMetricsChart(pageNames);
   }
+  renderStepChips(stepNames);
   if (def.charts && def.charts.includes("frf")) renderFrfCharts(okNames, plots);
   if (def.charts && def.charts.includes("psd")) {
-    renderPsdChips(stepNames);
     renderPsdChart(okNames, plots, steps);
   }
   if (def.peaks) renderPeakList(okNames, plots, steps);
@@ -2957,6 +3740,9 @@ async function pollMoonrakerHealth() {
     const info = (await resp.json()).result;
     badge.className = "mr-health ok";
     badge.textContent = `klippy ${info.klippy_state || "unknown"}`;
+    const ks = info.klippy_state || "unknown";
+    if (ks === "ready" && state.help.klippyState !== "ready") fetchMacroHelp();
+    state.help.klippyState = ks;
   } catch (e) {
     badge.className = "mr-health err";
     badge.textContent = "moonraker unreachable — bad URL, moonraker down, or origin missing from cors_domains";
@@ -2996,9 +3782,15 @@ function sentEntryHtml(entry) {
       .map((l, i) => {
         const r = entry.results[i];
         const suffix = r && !r.ok ? ` <span class="status-err">HTTP ${r.status}</span>` : "";
+        const responses = ((entry.responses && entry.responses[i]) || [])
+          .map((m) => {
+            const cls = m.startsWith("!!") ? "resp-line resp-err" : "resp-line";
+            return `<div class="${cls}">${escapeHtml(m)}</div>`;
+          })
+          .join("");
         return (
           `<div class="sent-line" data-line="${escapeHtml(l)}" ` +
-          `title="click to insert into the console">${escapeHtml(l)}${suffix}</div>`
+          `title="click to insert into the console">${escapeHtml(l)}${suffix}</div>${responses}`
         );
       })
       .join("") +
@@ -3019,32 +3811,70 @@ function renderSentLog() {
   container.scrollTop = container.scrollHeight;
 }
 
+/// Timestamps in Moonraker's gcode store are server clock, so diffing
+/// against its own latest entry needs no client/server clock agreement.
+async function latestGcodeStoreTime(base) {
+  const resp = await fetch(`${base}/server/gcode_store?count=1`);
+  if (!resp.ok) throw new Error(`gcode_store HTTP ${resp.status}`);
+  const store = (await resp.json()).result.gcode_store;
+  return store.length ? store[store.length - 1].time : 0;
+}
+
+async function fetchGcodeResponses(base, sinceTime) {
+  const resp = await fetch(`${base}/server/gcode_store?count=500`);
+  if (!resp.ok) throw new Error(`gcode_store HTTP ${resp.status}`);
+  const store = (await resp.json()).result.gcode_store;
+  return store
+    .filter((e) => e.type === "response" && e.time > sinceTime)
+    .map((e) => e.message);
+}
+
 /// Sends `lines` (already-built gcode) through the shared Moonraker
 /// plumbing — the grid's Apply and the console land in the same session
-/// log, which survives page switches.
+/// log, which survives page switches. `/printer/gcode/script` blocks
+/// until the command finishes, and klippy's respond_info output only
+/// travels the websocket — so each line's responses are harvested from
+/// `/server/gcode_store` afterwards and echoed under the sent line.
 async function runGcode(lines, label) {
   const base = moonrakerUrl();
   const statusEl = el("run-status");
   if (statusEl) statusEl.textContent = "";
-  const entry = { time: new Date().toISOString(), label, lines: [], results: [] };
+  const entry = { time: new Date().toISOString(), label, lines: [], results: [], responses: [] };
+  state.sentLog.push(entry);
   for (const line of lines) {
     const url = `${base}/printer/gcode/script?script=${encodeURIComponent(line)}`;
     entry.lines.push(line);
+    let sentAt = null;
+    try {
+      sentAt = await latestGcodeStoreTime(base);
+    } catch (e) {
+      console.error(e);
+    }
+    let ok = false;
     try {
       const resp = await fetch(url, { method: "POST" });
       const text = await resp.text();
       if (!resp.ok && statusEl) {
         statusEl.innerHTML += `<div class="status-err">${line} -> HTTP ${resp.status} ${text.slice(0, 200)}</div>`;
       }
+      ok = resp.ok;
       entry.results.push({ ok: resp.ok, status: resp.status });
-      if (!resp.ok) break;
     } catch (e) {
       if (statusEl) statusEl.innerHTML += `<div class="status-err">${line} -> ${e}</div>`;
       entry.results.push({ ok: false, status: 0 });
-      break;
     }
+    let responses = [];
+    if (sentAt !== null) {
+      try {
+        responses = await fetchGcodeResponses(base, sentAt);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    entry.responses.push(responses);
+    renderSentLog();
+    if (!ok) break;
   }
-  state.sentLog.push(entry);
   renderSentLog();
 }
 
@@ -3078,9 +3908,13 @@ function bindConsole() {
   input.addEventListener("input", () => {
     state.console.text = input.value;
     autosizeConsole(input);
+    renderConsoleHelp();
   });
+  input.addEventListener("keyup", renderConsoleHelp);
+  input.addEventListener("click", renderConsoleHelp);
   input.addEventListener("keydown", consoleKeydown);
   input.addEventListener("blur", () => exitConsoleSearch(true));
+  renderConsoleHelp();
 }
 
 function autosizeConsole(input) {
@@ -3096,6 +3930,7 @@ function setConsoleValue(text, focus) {
   input.selectionStart = input.selectionEnd = text.length;
   autosizeConsole(input);
   if (focus) input.focus();
+  renderConsoleHelp();
 }
 
 function caretOnFirstLine(input) {
@@ -3116,6 +3951,11 @@ function consoleKeydown(ev) {
   if (ev.key === "Enter" && !ev.shiftKey) {
     ev.preventDefault();
     submitConsole();
+    return;
+  }
+  if (ev.key === "Tab" && !ev.shiftKey && !ev.ctrlKey && !ev.altKey) {
+    ev.preventDefault();
+    consoleTabComplete(input);
     return;
   }
   if (ev.ctrlKey && ev.key === "r") {
@@ -3241,6 +4081,367 @@ async function submitConsole() {
   await runGcode(lines, "console");
 }
 
+// --- macro docs -----------------------------------------------------------------
+
+/// The macro documentation IS klippy's cmd_*_help strings, fetched from the
+/// running instance over Moonraker's /printer/gcode/help — so it can never
+/// drift from the code that executes the command. localStorage keeps the
+/// last good copy readable while klippy is down, which is exactly when a
+/// failed run sends you looking for the docs.
+async function fetchMacroHelp() {
+  const h = state.help;
+  if (h.pending) return;
+  h.pending = true;
+  try {
+    const resp = await fetch(`${moonrakerUrl()}/printer/gcode/help`);
+    if (!resp.ok) throw new Error(`gcode/help HTTP ${resp.status}`);
+    const all = (await resp.json()).result;
+    const commands = {};
+    for (const [name, text] of Object.entries(all)) {
+      if (name.startsWith("SERVO_")) commands[name] = text;
+    }
+    h.commands = commands;
+    h.fetchedUtc = new Date().toISOString();
+    h.cached = false;
+    h.error = null;
+    localStorage.setItem(
+      HELP_CACHE_KEY,
+      JSON.stringify({ fetched_utc: h.fetchedUtc, commands })
+    );
+  } catch (e) {
+    h.error = String(e);
+    if (!h.commands) loadCachedMacroHelp();
+  } finally {
+    h.pending = false;
+  }
+  renderDocsList();
+  renderConsoleHelp();
+}
+
+/// The catch only forgives corrupt localStorage JSON, same contract as
+/// loadConsoleHistory.
+function loadCachedMacroHelp() {
+  const raw = localStorage.getItem(HELP_CACHE_KEY);
+  if (!raw) return;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    return;
+  }
+  if (!parsed || typeof parsed.commands !== "object" || parsed.commands === null) return;
+  state.help.commands = parsed.commands;
+  state.help.fetchedUtc = parsed.fetched_utc || null;
+  state.help.cached = true;
+}
+
+/// Every cmd_*_help string ends in a "Params NAME (default) ..." tail — the
+/// one convention this rendering leans on. A string without the marker just
+/// renders as prose.
+function splitMacroHelp(text) {
+  const m = /\bParams\b/.exec(text);
+  if (!m) return { prose: text.trim(), params: null };
+  return {
+    prose: text.slice(0, m.index).trim(),
+    params: text.slice(m.index + m[0].length).trim(),
+  };
+}
+
+/// Tokenizes a Params tail into param chips and plain-text runs. UPPERCASE
+/// words are params (an optional =A|B suffix lists choices), a following
+/// (...) group is that param's default, anything else — "as
+/// SERVO_MEASURE_INERTIA plus" — stays literal text.
+function parseParamsTail(tail) {
+  const items = [];
+  const tokens = tail.split(/\s+/).filter((t) => t.length);
+  let i = 0;
+  while (i < tokens.length) {
+    const tok = tokens[i];
+    const clean = tok.replace(/[.,;]$/, "");
+    const eq = clean.indexOf("=");
+    const name = eq < 0 ? clean : clean.slice(0, eq);
+    if (/^[A-Z][A-Z0-9_]*$/.test(name)) {
+      items.push({
+        kind: "param",
+        name,
+        choices: eq < 0 ? null : clean.slice(eq + 1),
+        dflt: null,
+      });
+      i++;
+      continue;
+    }
+    if (tok.startsWith("(")) {
+      let group = tok;
+      while (!group.endsWith(")") && i + 1 < tokens.length) {
+        i++;
+        group += ` ${tokens[i]}`;
+      }
+      i++;
+      const dflt = group.replace(/^\(/, "").replace(/\)$/, "");
+      const last = items[items.length - 1];
+      if (last && last.kind === "param" && last.dflt === null) last.dflt = dflt;
+      else items.push({ kind: "text", text: group });
+      continue;
+    }
+    const last = items[items.length - 1];
+    if (last && last.kind === "text") last.text += ` ${tok}`;
+    else items.push({ kind: "text", text: tok });
+    i++;
+  }
+  return items;
+}
+
+function paramChipsHtml(items) {
+  const known = state.help.commands || {};
+  return items
+    .map((it) => {
+      if (it.kind === "text") {
+        return `<span class="param-text">${escapeHtml(it.text)}</span>`;
+      }
+      let label = escapeHtml(it.name);
+      if (it.choices) label += `<span class="param-extra">=${escapeHtml(it.choices)}</span>`;
+      if (it.dflt) label += ` <span class="param-extra">(${escapeHtml(it.dflt)})</span>`;
+      if (known[it.name]) {
+        return `<a class="chip param-chip xref" href="#/docs/${it.name}">${label}</a>`;
+      }
+      return `<span class="chip param-chip">${label}</span>`;
+    })
+    .join("");
+}
+
+function docsShellHtml() {
+  return (
+    `<div class="workspace single">` +
+    `<main class="analysis">` +
+    `<section class="docs-section">` +
+    `<div class="section-head"><h2>calibration macros</h2>` +
+    `<span class="note" id="docs-status"></span></div>` +
+    `<div id="docs-list"></div>` +
+    `</section>` +
+    consoleSectionHtml({}) +
+    `</main></div>`
+  );
+}
+
+function docsDeepLinkTarget() {
+  const m = /^#\/docs\/([A-Za-z0-9_]+)/.exec(location.hash || "");
+  return m ? m[1].toUpperCase() : null;
+}
+
+function firstSentence(prose) {
+  const cut = prose.indexOf(". ");
+  return cut < 0 ? prose : prose.slice(0, cut + 1);
+}
+
+function macroDocHtml(name, text, open) {
+  const { prose, params } = splitMacroHelp(text);
+  const items = params ? parseParamsTail(params) : [];
+  return (
+    `<details class="macro-doc" id="doc-${escapeHtml(name)}"${open ? " open" : ""}>` +
+    `<summary><span class="macro-name">${escapeHtml(name)}</span>` +
+    `<span class="hint" title="${escapeHtml(firstSentence(prose))}">` +
+    `${escapeHtml(firstSentence(prose))}</span></summary>` +
+    `<div class="macro-body">` +
+    `<p class="macro-prose">${escapeHtml(prose)}</p>` +
+    (items.length
+      ? `<div class="chips param-chips">${paramChipsHtml(items)}</div>`
+      : "") +
+    `</div></details>`
+  );
+}
+
+function renderDocsList() {
+  const list = el("docs-list");
+  if (!list) return;
+  const h = state.help;
+  const status = el("docs-status");
+  if (status) {
+    if (h.commands && !h.cached) {
+      status.textContent =
+        `the running klippy's cmd_*_help strings, fetched ${shortTime(h.fetchedUtc)}`;
+    } else if (h.commands) {
+      status.innerHTML =
+        `cached copy${h.fetchedUtc ? ` from ${shortTime(h.fetchedUtc)}` : ""} — ` +
+        `klippy unreachable <button id="docs-retry">retry</button>`;
+    } else if (h.pending) {
+      status.textContent = "fetching from klippy…";
+    } else {
+      status.innerHTML =
+        `${escapeHtml(h.error || "not fetched yet")} <button id="docs-retry">retry</button>`;
+    }
+  }
+  if (!h.commands) {
+    list.innerHTML = `<p class="note">no macro help yet — is klippy up and the moonraker URL right?</p>`;
+  } else {
+    const target = docsDeepLinkTarget();
+    const openNow = new Set(
+      Array.from(list.querySelectorAll("details.macro-doc[open]")).map((d) =>
+        d.id.slice("doc-".length)
+      )
+    );
+    const firstRender = !list.dataset.rendered;
+    list.innerHTML = Object.entries(h.commands)
+      .map(([name, text]) =>
+        macroDocHtml(name, text, name === target || openNow.has(name))
+      )
+      .join("");
+    list.dataset.rendered = "1";
+    if (firstRender && target && h.commands[target]) {
+      const entry = el(`doc-${target}`);
+      if (entry) entry.scrollIntoView({ block: "start" });
+    }
+  }
+  const retry = el("docs-retry");
+  if (retry) retry.addEventListener("click", fetchMacroHelp);
+}
+
+function consoleCaretLine(input) {
+  const caret = input.selectionStart;
+  const text = input.value;
+  const start = text.lastIndexOf("\n", caret - 1) + 1;
+  let end = text.indexOf("\n", caret);
+  if (end < 0) end = text.length;
+  return { line: text.slice(start, end), start, caretInLine: caret - start };
+}
+
+function lineCommand(line) {
+  return (line.trim().split(/\s+/)[0] || "").toUpperCase();
+}
+
+function macroParamNames(cmdName) {
+  const known = state.help.commands || {};
+  const text = known[cmdName];
+  if (!text) return null;
+  const { params } = splitMacroHelp(text);
+  if (!params) return [];
+  return parseParamsTail(params)
+    .filter((it) => it.kind === "param" && !known[it.name])
+    .map((it) => it.name);
+}
+
+/// What tab completion would complete at the current caret: SERVO_* command
+/// names for the line's first word, otherwise the command's param names not
+/// already given on the line. A token with "=" is a value — nothing to
+/// complete there.
+function consoleCompletion(input) {
+  const none = { candidates: [] };
+  const h = state.help;
+  if (!h.commands) return none;
+  const { line, start, caretInLine } = consoleCaretLine(input);
+  const tokenStart = line.lastIndexOf(" ", caretInLine - 1) + 1;
+  const token = line.slice(tokenStart, caretInLine);
+  if (token.includes("=")) return none;
+  const up = token.toUpperCase();
+  const common = { lineStart: start, tokenStart, tokenLen: token.length };
+  if (!line.slice(0, tokenStart).trim().length) {
+    if (!up.length) return none;
+    return {
+      ...common,
+      candidates: Object.keys(h.commands).filter((n) => n.startsWith(up)),
+      suffix: " ",
+    };
+  }
+  const names = macroParamNames(lineCommand(line));
+  if (!names) return none;
+  const taken = new Set(
+    Array.from(line.matchAll(/([A-Za-z][A-Za-z0-9_]*)=/g), (m) => m[1].toUpperCase())
+  );
+  return {
+    ...common,
+    candidates: names.filter((n) => n.startsWith(up) && !taken.has(n)),
+    suffix: "=",
+  };
+}
+
+function longestCommonPrefix(names) {
+  let prefix = names[0];
+  for (const n of names.slice(1)) {
+    while (!n.startsWith(prefix)) prefix = prefix.slice(0, -1);
+  }
+  return prefix;
+}
+
+function consoleTabComplete(input) {
+  const c = consoleCompletion(input);
+  if (!c.candidates.length) return;
+  const replacement =
+    c.candidates.length === 1
+      ? c.candidates[0] + c.suffix
+      : longestCommonPrefix(c.candidates);
+  const from = c.lineStart + c.tokenStart;
+  const text = input.value;
+  setConsoleValue(
+    text.slice(0, from) + replacement + text.slice(from + c.tokenLen),
+    true
+  );
+  input.selectionStart = input.selectionEnd = from + replacement.length;
+  renderConsoleHelp();
+}
+
+/// The terminal-style help under the prompt: one dim description line and a
+/// usage line of the command's params. The param whose value the caret is in
+/// is highlighted; while a param name is being typed, every candidate the
+/// prefix still matches is highlighted.
+function renderConsoleHelp() {
+  const box = el("console-help");
+  const input = el("console-input");
+  if (!box || !input) return;
+  const { line, caretInLine } = consoleCaretLine(input);
+  const first = lineCommand(line);
+  if (!first.startsWith("SERVO")) {
+    box.innerHTML = "";
+    return;
+  }
+  const h = state.help;
+  if (!h.commands) {
+    if (!h.pending && !h.error) fetchMacroHelp();
+    box.innerHTML = `<div class="hint">${
+      h.error ? `macro help unavailable — ${escapeHtml(h.error)}` : "fetching macro help…"
+    }</div>`;
+    return;
+  }
+  const helpText = h.commands[first];
+  if (!helpText) {
+    const matches = Object.keys(h.commands).filter((n) => n.startsWith(first));
+    box.innerHTML = matches.length
+      ? `<div class="console-help-cands">${matches.map(escapeHtml).join("  ")}</div>`
+      : "";
+    return;
+  }
+  const tokenStart = line.lastIndexOf(" ", caretInLine - 1) + 1;
+  let tokenEnd = line.indexOf(" ", caretInLine);
+  if (tokenEnd < 0) tokenEnd = line.length;
+  const caretToken = line.slice(tokenStart, tokenEnd);
+  const onFirstWord = !line.slice(0, tokenStart).trim().length;
+  const activeName = !onFirstWord && caretToken.includes("=")
+    ? caretToken.split("=")[0].toUpperCase()
+    : null;
+  const typedPrefix = !onFirstWord && !caretToken.includes("=")
+    ? line.slice(tokenStart, caretInLine).toUpperCase()
+    : "";
+  const { prose, params } = splitMacroHelp(helpText);
+  const items = params ? parseParamsTail(params) : [];
+  const usage = items
+    .map((it) => {
+      if (it.kind === "text") return `<span class="dim">${escapeHtml(it.text)}</span>`;
+      let cls = "p";
+      if (it.name === activeName) cls += " active";
+      else if (typedPrefix.length && it.name.startsWith(typedPrefix)) cls += " match";
+      let s = `<span class="${cls}">${escapeHtml(it.name)}`;
+      if (it.choices) s += `<span class="dim">=${escapeHtml(it.choices)}</span>`;
+      if (it.dflt) s += `<span class="dim">(${escapeHtml(it.dflt)})</span>`;
+      return `${s}</span>`;
+    })
+    .join(" ");
+  box.innerHTML =
+    `<div class="console-help-desc"><a href="#/docs/${first}" ` +
+    `title="open in the docs tab">${first}</a>` +
+    `<span class="dim"> — ${escapeHtml(prose)}</span>` +
+    (h.cached ? `<span class="hint"> (cached — klippy unreachable)</span>` : "") +
+    `</div>` +
+    (usage ? `<div class="console-help-usage">${usage}</div>` : "");
+}
+
 // --- boot -------------------------------------------------------------------
 
 function initShell() {
@@ -3250,9 +4451,13 @@ function initShell() {
   input.addEventListener("change", () => {
     localStorage.setItem(MOONRAKER_KEY, input.value);
     pollMoonrakerHealth();
+    fetchMacroHelp();
   });
+  loadCachedMacroHelp();
+  fetchMacroHelp();
   pollMoonrakerHealth();
   setInterval(pollMoonrakerHealth, MOONRAKER_HEALTH_POLL_MS);
+  bindAccordionToggle();
   window.addEventListener("hashchange", () => {
     state.page = pageFromHash();
     renderPage();

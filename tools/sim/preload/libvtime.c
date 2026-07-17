@@ -65,6 +65,13 @@ real_monotonic_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
+// Real time this process observed pacers holding virtual time back,
+// subtracted from the speed cap: after a pacer stall the cap resumes its
+// slope from the stalled point instead of fast-forwarding through the lost
+// span. A catch-up chase would run virtual time faster than the configured
+// speed and burn the pump's piece-lead margin.
+static _Atomic uint64_t vtime_stall_offset_ns = 0;
+
 static uint64_t
 vtime_speed_cap(void)
 {
@@ -72,7 +79,9 @@ vtime_speed_cap(void)
         return UINT64_MAX;
     uint64_t real_elapsed = real_monotonic_ns() - vtime_real_t0_ns;
     uint64_t vtime_start = 1000000000ULL;
-    return vtime_start + (uint64_t)(real_elapsed * vtime_speed);
+    return vtime_start + (uint64_t)(real_elapsed * vtime_speed)
+           - atomic_load_explicit(&vtime_stall_offset_ns,
+                                  memory_order_acquire);
 }
 
 static struct {
@@ -103,6 +112,16 @@ vtime_now(void)
 
 static int owned_pacer_slots[VTIME_MAX_PACERS];
 
+// Virtual time may run this far ahead of the slowest pacer. Zero slack
+// serializes every pacer step through a real sleep quantum — with two MCU
+// processes that drags virtual time to a fraction of the configured speed.
+// The slack is the burst bound: a preempted tick thread replays at most
+// this much virtual time at once, so position observed against the virtual
+// clock is never more than slack x velocity stale (2 ms at probing speeds
+// is ~10 um). Keep it far below the ~1 ms endstop poll error budget only
+// if probing speeds rise well past 5 mm/s.
+#define VTIME_PACER_SLACK_NS 2000000ULL
+
 static uint64_t
 pacer_floor_min(void)
 {
@@ -120,7 +139,9 @@ pacer_floor_min(void)
         if (f < floor)
             floor = f;
     }
-    return floor;
+    if (floor == UINT64_MAX)
+        return floor;
+    return floor + VTIME_PACER_SLACK_NS;
 }
 
 static void
@@ -167,19 +188,31 @@ vtime_advance_by(uint64_t delta_ns)
 
 static void vtimer_check_and_fire(void);
 
-// Steady wall driver: raises virtual time to the speed cap every 1ms so
-// vtime is a strict linear function of real time (speed x real) instead
-// of demand-driven. Demand-driven advancement stalls while nothing
-// sleeps and then leaps to the cap, which klippy's clocksync tracks as a
-// wildly nonuniform MCU clock — projections made across a leap land
-// seconds off (PieceStartInPast, trip-time resolution failures). With
-// the driver the MCU clock is uniform and clocksync stays honest.
+// Steady wall driver: raises virtual time toward the speed cap every 1ms
+// so vtime is a linear function of real time (speed x real) instead of
+// demand-driven. Demand-driven advancement stalls while nothing sleeps
+// and then leaps to the cap, which klippy's clocksync tracks as a wildly
+// nonuniform MCU clock — projections made across a leap land seconds off
+// (PieceStartInPast, trip-time resolution failures).
+//
+// The driver honors pacer floors: virtual time never outruns the tick the
+// motion pacer is about to execute. Otherwise a preempted tick thread
+// resumes to a clock that already moved on, replays the gap as one
+// catch-up burst, and every position observed against the virtual clock
+// during that span (endstop walls above all) is late by the whole stall.
+// Time the floor held back is folded into vtime_stall_offset_ns so the
+// cap resumes at the configured speed instead of chasing.
 static void *
 vtime_driver_main(void *arg)
 {
     (void)arg;
     for (;;) {
-        vtime_raise_to(vtime_speed_cap());
+        uint64_t cap = vtime_speed_cap();
+        uint64_t floor = pacer_floor_min();
+        if (floor < cap && cap != UINT64_MAX)
+            atomic_fetch_add_explicit(&vtime_stall_offset_ns, cap - floor,
+                                      memory_order_acq_rel);
+        vtime_raise_to(floor < cap ? floor : cap);
         vtimer_check_and_fire();
         struct timespec w = { 0, 1000000 };
         real_nanosleep(&w, NULL);
@@ -222,6 +255,20 @@ vtime_pacer_advance(int slot, uint64_t target_ns, uint64_t period_ns)
     vtime_advance_to(target_ns);
     vtimer_check_and_fire();
     sched_yield();
+}
+
+// Non-blocking floor update for pacers that gate on scheduled work without
+// consuming virtual time themselves (the MCU main thread's timer queue:
+// virtual time must not run past a pending software timer, or timers
+// dispatch late in virtual terms and every position sampled by one — the
+// endstop polls above all — lands a velocity-scaled distance off).
+__attribute__((visibility("default"))) void
+vtime_pacer_set_floor(int slot, uint64_t target_ns)
+{
+    if (!vshm || slot < 0 || slot >= VTIME_MAX_PACERS)
+        return;
+    atomic_store_explicit(&vshm->pacers[slot].floor_ns, target_ns,
+                          memory_order_release);
 }
 
 __attribute__((destructor))

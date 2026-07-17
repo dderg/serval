@@ -882,6 +882,7 @@ fn stalled_queue_pump(
         holding_ahead: false,
         data_open: true,
         retirement_stall: super::stall::RetirementStallWatch::new(retirement_stall_fatal),
+        mem_probe: super::memstat::MemPressureProbe::new(),
     }
 }
 
@@ -1018,7 +1019,7 @@ mod pushpieces_retransmit_tests {
     #[test]
     fn recovers_after_transient_failures_within_budget() {
         let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 10, || {
+        let res = pushpieces_retransmit_serial(0, 10, None, || {
             calls += 1;
             if calls < 3 {
                 Err(TransportError::Timeout)
@@ -1036,7 +1037,7 @@ mod pushpieces_retransmit_tests {
     #[test]
     fn first_attempt_success_does_not_retry() {
         let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 10, || {
+        let res = pushpieces_retransmit_serial(0, 10, None, || {
             calls += 1;
             Ok(vec![1, 2, 3])
         });
@@ -1050,7 +1051,7 @@ mod pushpieces_retransmit_tests {
     #[test]
     fn persistent_corruption_gives_up_as_transient_after_budget() {
         let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 4, || {
+        let res = pushpieces_retransmit_serial(0, 4, None, || {
             calls += 1;
             Err(TransportError::Timeout)
         });
@@ -1065,9 +1066,45 @@ mod pushpieces_retransmit_tests {
     }
 
     #[test]
+    fn expired_front_lead_stops_retrying_immediately() {
+        let past = std::time::Instant::now() - std::time::Duration::from_millis(1);
+        let mut calls = 0u32;
+        let res = pushpieces_retransmit_serial(0, 10, Some(past), || {
+            calls += 1;
+            Err(TransportError::Timeout)
+        });
+        match res {
+            Err(SendError::Transient(msg)) => assert!(
+                msg.contains("transport unresponsive"),
+                "give-up must name the unresponsive transport: {msg}"
+            ),
+            other => panic!("expected Transient, got {other:?}"),
+        }
+        assert_eq!(
+            calls, 1,
+            "retrying past the front piece's lead cannot succeed — one attempt only"
+        );
+    }
+
+    #[test]
+    fn distant_deadline_leaves_the_attempt_budget_in_charge() {
+        let far = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut calls = 0u32;
+        let res = pushpieces_retransmit_serial(0, 3, Some(far), || {
+            calls += 1;
+            Err(TransportError::Timeout)
+        });
+        assert!(matches!(res, Err(SendError::Transient(_))));
+        assert_eq!(
+            calls, 3,
+            "deep lead: the attempt-count budget still caps retries"
+        );
+    }
+
+    #[test]
     fn dead_transport_closed_fails_fast_no_retry() {
         let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 10, || {
+        let res = pushpieces_retransmit_serial(0, 10, None, || {
             calls += 1;
             Err(TransportError::Closed)
         });
@@ -1081,7 +1118,7 @@ mod pushpieces_retransmit_tests {
     #[test]
     fn dead_transport_io_fails_fast_no_retry() {
         let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 10, || {
+        let res = pushpieces_retransmit_serial(0, 10, None, || {
             calls += 1;
             Err(TransportError::Io(std::io::Error::from(
                 std::io::ErrorKind::BrokenPipe,
@@ -1097,7 +1134,7 @@ mod pushpieces_retransmit_tests {
     #[test]
     fn mcu_shutdown_fails_fast_no_retry() {
         let mut calls = 0u32;
-        let res = pushpieces_retransmit_serial(0, 10, || {
+        let res = pushpieces_retransmit_serial(0, 10, None, || {
             calls += 1;
             Err(TransportError::McuShutdown("fault -112".into()))
         });

@@ -3,7 +3,7 @@
 //! motion-segment helpers). Algorithmic parity with the Python is the
 //! contract these functions must hold; the golden parity test is the gate.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::scap::{Scap, FLAG_MOTION_ACTIVE};
 
@@ -11,12 +11,14 @@ pub const SETTLE_HOLD_MS: f64 = 50.0;
 pub const DEFAULT_SETTLE_BAND_COUNTS: i64 = 50;
 pub const DEFAULT_TORQUE_LIMIT_PER_MILLE: i64 = 1400;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Move {
     #[serde(rename = "move")]
     pub index: usize,
     pub start_ms: f64,
     pub end_ms: f64,
+    pub direction: i8,
+    pub ferr_mean_moving: f64,
     pub ferr_peak: f64,
     pub ferr_rms: f64,
     pub overshoot: f64,
@@ -24,7 +26,7 @@ pub struct Move {
     pub settle_window_truncated: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TorqueSummary {
     pub peak: i64,
     pub peak_pct_rated: f64,
@@ -37,7 +39,7 @@ pub struct TorqueSummary {
     pub longest_burst_ms: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Metrics {
     pub samples: usize,
     pub moves: Vec<Move>,
@@ -210,6 +212,7 @@ pub fn compute_metrics(
     settle_band: i64,
     torque_limit: i64,
     fs: f64,
+    ff_lead_samples: usize,
 ) -> Result<Metrics, String> {
     let n = d.following_error.len();
     if n == 0 {
@@ -219,10 +222,17 @@ pub fn compute_metrics(
     let hold = (SETTLE_HOLD_MS * fs / 1000.0).round_ties_even() as usize;
     let ferr = &d.following_error;
     let band = settle_band as f64;
-    let segs = target_motion_segments(&d.target, fs);
+    let segs: Vec<(usize, usize)> = target_motion_segments(&d.target, fs)
+        .into_iter()
+        .filter(|&(s, e)| {
+            let window = &d.target[s - 1..e];
+            let lo = window.iter().min().expect("segment is nonempty");
+            let hi = window.iter().max().expect("segment is nonempty");
+            hi - lo > settle_band
+        })
+        .collect();
     let mut moves = Vec::with_capacity(segs.len());
     for (idx, &(s, e)) in segs.iter().enumerate() {
-        let move_err = &ferr[s..e];
         let post_end = if idx + 1 < segs.len() {
             segs[idx + 1].0
         } else {
@@ -231,6 +241,12 @@ pub fn compute_metrics(
         let post = &ferr[e..post_end];
         let settle_sample = settle_index(post, band, hold);
         let overshoot_end = settle_sample.unwrap_or(post.len());
+        let prev_end = if idx > 0 { segs[idx - 1].1 } else { 0 };
+        let lead_start = s.saturating_sub(ff_lead_samples).max(prev_end);
+        let move_err = &ferr[lead_start..e + overshoot_end];
+        let displacement = d.target[e - 1] - d.target[s - 1];
+        let direction = displacement.signum() as i8;
+        let ferr_mean_moving = ferr[s..e].iter().sum::<f64>() / (e - s) as f64;
         let settle_ms = settle_sample.map(|x| x as f64 * ms_per_sample);
         let ferr_peak = move_err.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
         let ferr_rms =
@@ -246,6 +262,8 @@ pub fn compute_metrics(
             index: idx,
             start_ms: s as f64 * ms_per_sample,
             end_ms: e as f64 * ms_per_sample,
+            direction,
+            ferr_mean_moving,
             ferr_peak,
             ferr_rms,
             overshoot,

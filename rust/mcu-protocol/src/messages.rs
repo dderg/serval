@@ -391,8 +391,8 @@ pub struct SetStrainComp {
     pub lane_a: u8,
     pub lane_b: u8,
     pub kinematics: u8,
-    pub nx: u8,
-    pub ny: u8,
+    pub nx: u16,
+    pub ny: u16,
     pub x0: f32,
     pub y0: f32,
     pub dx: f32,
@@ -407,13 +407,13 @@ impl Encode for SetStrainComp {
         put_u8(out, self.lane_a);
         put_u8(out, self.lane_b);
         put_u8(out, self.kinematics);
-        put_u8(out, self.nx);
-        put_u8(out, self.ny);
+        put_u16(out, self.nx);
+        put_u16(out, self.ny);
         put_f32(out, self.x0);
         put_f32(out, self.y0);
         put_f32(out, self.dx);
         put_f32(out, self.dy);
-        put_u16(out, self.values_um.len() as u16);
+        put_u32(out, self.values_um.len() as u32);
         for v in &self.values_um {
             put_i32(out, *v);
         }
@@ -427,23 +427,23 @@ impl Decode for SetStrainComp {
         let lane_a = get_u8(c)?;
         let lane_b = get_u8(c)?;
         let kinematics = get_u8(c)?;
-        let nx = get_u8(c)?;
-        let ny = get_u8(c)?;
+        let nx = get_u16(c)?;
+        let ny = get_u16(c)?;
         let x0 = get_f32(c)?;
         let y0 = get_f32(c)?;
         let dx = get_f32(c)?;
         let dy = get_f32(c)?;
-        let count = get_u16(c)?;
+        let count = get_u32(c)?;
         let need =
             (count as usize)
                 .checked_mul(4)
                 .ok_or(DecodeError::ArrayLengthExceedsBuffer {
-                    claimed: u32::from(count),
+                    claimed: count,
                     available: c.remaining(),
                 })?;
         if need > c.remaining() {
             return Err(DecodeError::ArrayLengthExceedsBuffer {
-                claimed: u32::from(count),
+                claimed: count,
                 available: c.remaining(),
             });
         }
@@ -464,6 +464,100 @@ impl Decode for SetStrainComp {
             dx,
             dy,
             values_um,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DynamicsPair {
+    pub first: u8,
+    pub second: u8,
+    pub direction_split: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetDynamicsModel {
+    pub slots_count: u8,
+    pub modes_count: u8,
+    pub frame: Vec<f32>,
+    pub mass: Vec<f32>,
+    pub viscous: Vec<f32>,
+    pub coulomb: Vec<f32>,
+    pub pairs: Vec<DynamicsPair>,
+}
+
+impl Encode for SetDynamicsModel {
+    fn encode(&self, out: &mut Vec<u8>) {
+        let slots = self.slots_count as usize;
+        let modes = self.modes_count as usize;
+        assert_eq!(self.frame.len(), modes * slots);
+        assert_eq!(self.mass.len(), modes);
+        assert_eq!(self.viscous.len(), modes);
+        assert_eq!(self.coulomb.len(), modes);
+        put_u8(out, self.slots_count);
+        put_u8(out, self.modes_count);
+        for vec in [&self.frame, &self.mass, &self.viscous, &self.coulomb] {
+            for v in vec {
+                put_f32(out, *v);
+            }
+        }
+        assert!(u8::try_from(self.pairs.len()).is_ok());
+        put_u8(out, self.pairs.len() as u8);
+        for pair in &self.pairs {
+            put_u8(out, pair.first);
+            put_u8(out, pair.second);
+            put_f32(out, pair.direction_split);
+        }
+    }
+}
+
+fn get_f32_vec(c: &mut Cursor<'_>, count: usize) -> Result<Vec<f32>, DecodeError> {
+    let need = count
+        .checked_mul(4)
+        .ok_or(DecodeError::ArrayLengthExceedsBuffer {
+            claimed: count as u32,
+            available: c.remaining(),
+        })?;
+    if need > c.remaining() {
+        return Err(DecodeError::ArrayLengthExceedsBuffer {
+            claimed: count as u32,
+            available: c.remaining(),
+        });
+    }
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values.push(get_f32(c)?);
+    }
+    Ok(values)
+}
+
+impl Decode for SetDynamicsModel {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        let slots_count = get_u8(c)?;
+        let modes_count = get_u8(c)?;
+        let slots = slots_count as usize;
+        let modes = modes_count as usize;
+        let frame = get_f32_vec(c, modes * slots)?;
+        let mass = get_f32_vec(c, modes)?;
+        let viscous = get_f32_vec(c, modes)?;
+        let coulomb = get_f32_vec(c, modes)?;
+        let pairs_count = get_u8(c)?;
+        let mut pairs = Vec::with_capacity(pairs_count as usize);
+        for _ in 0..pairs_count {
+            pairs.push(DynamicsPair {
+                first: get_u8(c)?,
+                second: get_u8(c)?,
+                direction_split: get_f32(c)?,
+            });
+        }
+        Ok(Self {
+            slots_count,
+            modes_count,
+            frame,
+            mass,
+            viscous,
+            coulomb,
+            pairs,
         })
     }
 }

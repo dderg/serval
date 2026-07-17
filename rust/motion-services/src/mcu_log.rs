@@ -1,5 +1,7 @@
 use motion_core::lock_ext::LockExt;
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value};
@@ -23,12 +25,49 @@ fn mcu_level_str(level: u8) -> &'static str {
     }
 }
 
+/// MCU log records are sparse (warns, faults, arrival diagnostics); thousands
+/// queued means the writer thread has been stalled for a long time, at which
+/// point records are dropped and counted rather than ever blocking the hook's
+/// caller.
+const LOG_QUEUE_CAPACITY: usize = 4096;
+const DROP_REPORT_STRIDE: u64 = 1000;
+
+/// Move the blocking filesystem write onto a dedicated thread. The mcu-log
+/// hook runs inline on the MCU transport reactor thread, which also routes
+/// every request/response for that MCU — one `write()` wedged on a contended
+/// SD card starves PushPieces of its scheduling lead and aborts the host
+/// (2026-07-16 trident post-mortem). The thread drains the queue, flushes
+/// (fsync at most every `FSYNC_INTERVAL`), and exits when the last sender
+/// (the hook) drops.
+pub fn spawn_jsonl_writer_thread(
+    mut writer: RotatingJsonlWriter,
+    source: &str,
+) -> SyncSender<String> {
+    let (tx, rx) = sync_channel::<String>(LOG_QUEUE_CAPACITY);
+    let thread_source = source.to_owned();
+    std::thread::Builder::new()
+        .name(format!("mcu-log-{source}"))
+        .spawn(move || {
+            while let Ok(line) = rx.recv() {
+                if let Err(err) = writer.write_all(line.as_bytes()) {
+                    eprintln!("[mcu-log {thread_source}] JSONL write failed: {err}");
+                }
+                if let Err(err) = writer.flush() {
+                    eprintln!("[mcu-log {thread_source}] JSONL flush failed: {err}");
+                }
+            }
+        })
+        .expect("spawn mcu-log writer thread");
+    tx
+}
+
 pub fn build_mcu_log_hook(
     router: Arc<Mutex<PassthroughRouter>>,
     mcu: McuHandle,
-    writer: Arc<Mutex<RotatingJsonlWriter>>,
+    sink: SyncSender<String>,
     source: String,
 ) -> impl Fn(McuLogEvent) + Send + Sync + 'static {
+    let dropped = AtomicU64::new(0);
     move |e: McuLogEvent| {
         let (time_str, time_estimated) = {
             let guard = router.lock_ok();
@@ -90,9 +129,43 @@ pub fn build_mcu_log_hook(
             .unwrap_or_else(|err| format!("{{\"_msg\":\"mcu-log serialize error: {err}\"}}"));
         line.push('\n');
 
-        let mut w = writer.lock_ok();
-        if let Err(err) = w.write_all(line.as_bytes()) {
-            eprintln!("[mcu-log] JSONL write failed: {err}");
+        match sink.try_send(line) {
+            Ok(()) => {
+                let n = dropped.swap(0, Ordering::Relaxed);
+                if n > 0 {
+                    tracing::warn!(
+                        subsystem = "mcu-comms",
+                        event = "mcu_log_drops_recovered",
+                        source = %source,
+                        dropped = n,
+                        "mcu-log queue drained after dropping records"
+                    );
+                }
+            }
+            Err(TrySendError::Full(_)) => {
+                let n = dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                if n == 1 || n % DROP_REPORT_STRIDE == 0 {
+                    tracing::warn!(
+                        subsystem = "mcu-comms",
+                        event = "mcu_log_queue_overflow",
+                        source = %source,
+                        dropped = n,
+                        "mcu-log queue full — dropping record; writer thread stalled (slow disk?)"
+                    );
+                }
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                let n = dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                if n == 1 || n % DROP_REPORT_STRIDE == 0 {
+                    tracing::error!(
+                        subsystem = "mcu-comms",
+                        event = "mcu_log_writer_dead",
+                        source = %source,
+                        dropped = n,
+                        "mcu-log writer thread is gone — dropping record"
+                    );
+                }
+            }
         }
     }
 }
