@@ -307,6 +307,23 @@ fn handle_note(captures_root: &Path, name: &str, body: &[u8]) -> Response {
     Response::json(200, serde_json::json!({ "note": note }).to_string())
 }
 
+/// `DELETE /api/runs/<name>`: removes the run directory — manifest,
+/// captures, results, note, everything. User-initiated housekeeping from
+/// the runs table; `valid_run_name` keeps the path inside `captures_root`.
+fn handle_delete_run(captures_root: &Path, name: &str) -> Response {
+    if !valid_run_name(name) {
+        return Response::not_found(&format!("invalid run name {name:?}"));
+    }
+    let run_dir = captures_root.join(name);
+    if !run_dir.join("manifest.json").is_file() {
+        return Response::not_found(&format!("no such run {name:?}"));
+    }
+    if let Err(e) = std::fs::remove_dir_all(&run_dir) {
+        return Response::text(500, "text/plain", format!("{}: {e}", run_dir.display()));
+    }
+    Response::json(200, serde_json::json!({ "deleted": name }).to_string())
+}
+
 /// `GET /api/runs/<name>/strain`: the strain-map tab's data source. Only
 /// answers for `strain_map` runs (404 otherwise); recomputes and rewrites
 /// `strain.json` when any capture or the manifest is newer than it, else
@@ -475,6 +492,7 @@ pub fn handle(captures_root: &Path, req: &Request) -> Response {
         ("GET", ["api", "runs", name, "strain"]) => handle_strain(captures_root, name),
         ("POST", ["api", "runs", name, "analyze"]) => handle_analyze(captures_root, name),
         ("POST", ["api", "runs", name, "note"]) => handle_note(captures_root, name, &req.body),
+        ("DELETE", ["api", "runs", name]) => handle_delete_run(captures_root, name),
         _ => Response::not_found(&format!("no such route: {} {}", req.method, req.path)),
     }
 }

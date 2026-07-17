@@ -314,6 +314,35 @@ fn analyze_on_demand_regenerates_stale_results() {
 }
 
 #[test]
+fn delete_run_removes_the_directory() {
+    let (root, run_dirs) = demo_root("delete");
+    let run_dir = &run_dirs[0];
+    let name = run_dir.file_name().unwrap().to_string_lossy().into_owned();
+    let port = spawn_server(root.clone());
+
+    let resp = request(port, "DELETE", &format!("/api/runs/{name}"));
+    assert_eq!(resp.status, 200);
+    let body: Value = serde_json::from_str(&resp.body).unwrap();
+    assert_eq!(body["deleted"], Value::from(name.as_str()));
+    assert!(!run_dir.exists(), "run directory must be gone");
+
+    let resp = request(port, "GET", "/api/runs");
+    let runs: Value = serde_json::from_str(&resp.body).unwrap();
+    assert!(runs
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["name"] != *name.as_str()));
+
+    let resp = request(port, "DELETE", &format!("/api/runs/{name}"));
+    assert_eq!(resp.status, 404, "second delete must 404");
+    let resp = request(port, "DELETE", "/api/runs/../escape");
+    assert_eq!(resp.status, 404, "path traversal must be rejected");
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
 fn note_roundtrips_without_marking_results_stale() {
     let (root, run_dirs) = demo_root("note");
     let run_dir = &run_dirs[0];

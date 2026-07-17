@@ -752,6 +752,11 @@ function renderRuns() {
       redrawCharts();
     });
 
+    tr.addEventListener("contextmenu", (ev) => {
+      ev.preventDefault();
+      deleteRun(run);
+    });
+
     const dotTd = document.createElement("td");
     if (state.runColors.has(run.name)) {
       const swatch = document.createElement("span");
@@ -904,6 +909,29 @@ async function saveNote(run, text) {
     }
     alert(`saving note failed: ${e.message}`);
   }
+}
+
+async function deleteRun(run) {
+  const ok = confirm(
+    `Delete run ${run.name}?\n\nRemoves its whole directory — captures, results, note.`
+  );
+  if (!ok) return;
+  try {
+    await api(`/api/runs/${encodeURIComponent(run.name)}`, { method: "DELETE" });
+  } catch (e) {
+    console.error(e);
+    alert(`deleting ${run.name} failed: ${e.message}`);
+    return;
+  }
+  state.runs = state.runs.filter((r) => r.name !== run.name);
+  state.selected.delete(run.name);
+  state.pinned.delete(run.name);
+  state.details.delete(run.name);
+  state.plotSeries.delete(run.name);
+  state.pendingNotes.delete(run.name);
+  syncRunColors();
+  renderRuns();
+  redrawCharts();
 }
 
 async function triggerAnalyze(name) {
