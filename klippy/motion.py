@@ -870,7 +870,13 @@ class Motion:
                 scv, self._max_accel
             )
         if corner_deviation is not None:
-            self.engine.set_corner_deviation(corner_deviation)
+            try:
+                self.engine.set_corner_deviation(corner_deviation)
+            except ValueError as e:
+                gcmd.respond_info(
+                    "Warning: SET_VELOCITY_LIMIT left corner_deviation "
+                    "unchanged: %s" % (e,)
+                )
 
     cmd_SET_POST_PROCESSOR_help = (
         "Update a [post_processor] parameter; applies from the next replan"
