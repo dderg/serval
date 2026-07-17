@@ -149,27 +149,33 @@ rise with the damper on. Params: `BELT` (AB) `GAIN` (required) `CLAMP`
 (50) `LPF_HZ` (300) `LEAD_US` (0).
 
 #### SERVO_DIFF_TRIM
-Arms (or disarms) the engine-resident differential belt-pair **trim** — the
-always-on, in-motion counterpart of `SERVO_SYNC`. Every EtherCAT cycle the
-endpoint low-passes the pair's mechanical-frame differential torque (the
-fight) and integrates it into a small **antisymmetric position offset** on
-top of the streamed targets: the pair unwinds against itself while the
-carriage never moves. Where the damper (torque feedback at the 90–200 Hz
-belt modes) is phase-limited by the ~ms loop lag, the trim's crossover sits
-at a few Hz — gain × pair stiffness — where that lag is a harmless few
-degrees, so it safely nulls homing preload, thermal drift and the 1–3 Hz
-toolhead-position dependence of residual strain at full traverse speed,
-and leaves the resonant band alone. Integration freezes whenever the pair
-is not streaming targets (the held offset keeps drive targets continuous
-across stream gaps) and resets on a pair sync or torque-gate drop. `GAIN`
-is mm/s of offset slew per 1% differential torque (0.05 ⇒ ~2–5 Hz
-crossover on a typical belt pair); `GAIN=0` disarms. The offset is clamped
-to `CLAMP_UM` (µm, ceiling 500); hitting the clamp logs a
-`diff_trim_clamped` warning — residual fight beyond the trim's authority.
-Torque LPF at `LPF_HZ`. State lives in the running endpoint — re-arm after
-a firmware restart. Verify with `SERVO_SYNC` afterwards: its baseline
-fight should read near zero while the trim is armed. Params: `BELT` (AB)
-`GAIN` (required) `CLAMP_UM` (150) `LPF_HZ` (25).
+Arms (or disarms) the engine-resident differential belt-pair **trim** —
+standstill zeroing of the pair fight, config section `[servo_diff_trim]`.
+Servo sync and homing leave a run-to-run differential preload between the
+two drives of a belt (each enable seeds at a slightly different relax
+point), so the same strain-comp map can show a different peak differential
+torque on every home+sync cycle. Whenever the pair sits at **commanded
+standstill** the endpoint low-passes its mechanical-frame differential
+torque and integrates it into a small flat **antisymmetric position
+offset** on top of the streamed targets and the strain-comp map: the pair
+unwinds against itself while the carriage never moves. During motion the
+loop freezes entirely (filter and integrator) — an in-motion differential
+torque is legitimate (commanded feedforward, direction- and
+toolhead-position-dependent inner-loop load) and must not be nulled. A
+slot counts as quiescent only when its piece ring is empty (pieces land at
+least the feedforward lead before their start, so an empty ring also
+proves no lead-window torque is being commanded), no buzz is running, the
+strain-comp ramp has settled, and the pair has been still for `SETTLE_MS`
+(torque relax + telemetry lag after a decel). The offset resets on a pair
+sync or torque-gate drop — the `SERVO_SYNC` release is the new zero.
+`GAIN` is mm/s of offset slew per 1% differential torque; `GAIN=0`
+disarms. The offset is clamped to `CLAMP_UM` (µm, ceiling 500); hitting
+the clamp logs a `diff_trim_clamped` warning — residual fight beyond the
+trim's authority. Torque LPF at `LPF_HZ` (floor 0.1). Config options
+(`gain`, `clamp_um`, `lpf_hz`, `settle_ms`) arm the trim at startup when
+`gain` is non-zero; the command overrides them live for tuning and
+`SAVE=1` stages the current values for `SAVE_CONFIG`. Params: `BELT` (AB)
+`GAIN` `CLAMP_UM` (150) `LPF_HZ` (2) `SETTLE_MS` (300) `SAVE` (0).
 
 #### SERVO_MEASURE_STRAIN_MAP
 The measurement half of the belt strain map (CoreXY only). Rasters the bed

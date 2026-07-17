@@ -114,9 +114,10 @@ fn set_diff_trim_roundtrip() {
         gain_micro: 50_000,
         clamp_um: 150,
         lpf_millihz: 25_000,
+        settle_ms: 300,
     };
     assert_eq!(roundtrip(&v), v);
-    assert_eq!(v.encoded_to_vec().len(), 12);
+    assert_eq!(v.encoded_to_vec().len(), 16);
     let r = SetDiffTrimResponse { result: -851 };
     assert_eq!(roundtrip(&r), r);
     assert_eq!(r.encoded_to_vec().len(), 4);

@@ -1366,7 +1366,6 @@ class ServoCalibration:
             "SERVO_MEASURE_TRACKING",
             "SERVO_MEASURE_DIFFERENTIAL",
             "SERVO_DIFF_DAMPER",
-            "SERVO_DIFF_TRIM",
             "SERVO_MEASURE_STRAIN_MAP",
             "SERVO_MEASURE_STRAIN_RESPONSE",
             "SERVO_STRAIN_COMP_TUNE",
@@ -2089,25 +2088,9 @@ class ServoCalibration:
     )
 
     def _belt_pair(self, gcmd, belt, cmd_name):
-        layout = servo_strokes.corexy_fit_layout(gcmd, self._kin())
-        if layout["pairs"] is None:
-            raise gcmd.error(
-                "%s needs two drives per belt "
-                "(AWD); this printer has one drive per belt" % (cmd_name,)
-            )
-        pair_names = layout["pairs"].split(";")["AB".index(belt)].split(",")
-        motors = [self._resolve_motor(name) for name in pair_names]
-        node = self.printer.lookup_object(
-            "ethercat_node " + motors[0].get_node_name()
+        return servo_strokes.belt_pair(
+            self.printer, gcmd, self._kin(), belt, cmd_name
         )
-        handle = node.get_engine_handle()
-        if handle is None:
-            raise gcmd.error(
-                "belt %s drives have no live EtherCAT engine handle "
-                "(node not claimed)" % (belt,)
-            )
-        slots = [node.get_slot_for_motor(m.get_motor_name()) for m in motors]
-        return pair_names, motors, handle, slots
 
     def cmd_SERVO_MEASURE_DIFFERENTIAL(self, gcmd):
         belt = gcmd.get("BELT", "A").upper()
@@ -2260,58 +2243,6 @@ class ServoCalibration:
                 )
             else:
                 gcmd.respond_info("belt %s damper disarmed" % (belt,))
-
-    MAX_TRIM_GAIN = 2.0
-    MAX_TRIM_CLAMP_UM = 500.0
-    cmd_SERVO_DIFF_TRIM_help = (
-        "Arm or disarm the differential belt-pair trim: the engine "
-        "integrates each pair's low-passed differential torque into a "
-        "small antisymmetric position offset, continuously nulling the "
-        "static fight (homing preload, thermal drift) during motion - the "
-        "always-on version of SERVO_SYNC. Loop bandwidth is a few Hz, far "
-        "below the belt resonances. GAIN is in mm/s of offset slew per 1% "
-        "differential torque; GAIN=0 disarms. CLAMP_UM bounds the offset "
-        "(hitting it logs a warning). Params BELT=A|B|AB GAIN CLAMP_UM "
-        "LPF_HZ"
-    )
-
-    def cmd_SERVO_DIFF_TRIM(self, gcmd):
-        belts = gcmd.get("BELT", "AB").upper()
-        if belts not in ("A", "B", "AB"):
-            raise gcmd.error("BELT must be A, B or AB (got %r)" % (belts,))
-        gain = gcmd.get_float("GAIN", minval=0.0, maxval=self.MAX_TRIM_GAIN)
-        clamp_um = gcmd.get_float(
-            "CLAMP_UM", 150.0, above=0.0, maxval=self.MAX_TRIM_CLAMP_UM
-        )
-        lpf_hz = gcmd.get_float("LPF_HZ", 25.0, above=0.0)
-        engine = self.printer.lookup_object("motion_engine")
-        for belt in belts:
-            pair_names, _motors, handle, slots = self._belt_pair(
-                gcmd, belt, "SERVO_DIFF_TRIM"
-            )
-            engine.set_diff_trim(
-                handle,
-                slots[0],
-                slots[1],
-                int(round(gain * 1e6)),
-                int(round(clamp_um)),
-                int(round(lpf_hz * 1000.0)),
-            )
-            if gain > 0.0:
-                gcmd.respond_info(
-                    "belt %s trim armed (%s vs %s): gain %.3f (mm/s)/%%, "
-                    "clamp %.0f um, lpf %.1f Hz"
-                    % (
-                        belt,
-                        pair_names[0],
-                        pair_names[1],
-                        gain,
-                        clamp_um,
-                        lpf_hz,
-                    )
-                )
-            else:
-                gcmd.respond_info("belt %s trim disarmed" % (belt,))
 
     STRAIN_MAP_MIN_LINE_SPACING_MM = servo_strain_comp.MIN_LINE_SPACING_MM
 

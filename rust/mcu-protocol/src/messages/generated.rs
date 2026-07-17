@@ -910,6 +910,7 @@ pub struct SetDiffTrim {
     pub gain_micro: u32,
     pub clamp_um: u16,
     pub lpf_millihz: u32,
+    pub settle_ms: u32,
 }
 
 impl Encode for SetDiffTrim {
@@ -919,6 +920,7 @@ impl Encode for SetDiffTrim {
         put_u32(out, self.gain_micro);
         put_u16(out, self.clamp_um);
         put_u32(out, self.lpf_millihz);
+        put_u32(out, self.settle_ms);
     }
 }
 
@@ -930,6 +932,7 @@ impl Decode for SetDiffTrim {
             gain_micro: get_u32(c)?,
             clamp_um: get_u16(c)?,
             lpf_millihz: get_u32(c)?,
+            settle_ms: get_u32(c)?,
         })
     }
 }

@@ -266,6 +266,31 @@ def corexy_fit_layout(gcmd: Any, kin: Any) -> dict[str, Any]:
     )
 
 
+def belt_pair(
+    printer: Any, gcmd: Any, kin: Any, belt: str, cmd_name: str
+) -> tuple[list[str], list[Any], Any, list[int]]:
+    layout = corexy_fit_layout(gcmd, kin)
+    if layout["pairs"] is None:
+        raise gcmd.error(
+            "%s needs two drives per belt "
+            "(AWD); this printer has one drive per belt" % (cmd_name,)
+        )
+    pair_names = layout["pairs"].split(";")["AB".index(belt)].split(",")
+    motors = [
+        servo_axis.resolve_servo_motor(printer, name, cmd_name)[1]
+        for name in pair_names
+    ]
+    node = printer.lookup_object("ethercat_node " + motors[0].get_node_name())
+    handle = node.get_engine_handle()
+    if handle is None:
+        raise gcmd.error(
+            "belt %s drives have no live EtherCAT engine handle "
+            "(node not claimed)" % (belt,)
+        )
+    slots = [node.get_slot_for_motor(m.get_motor_name()) for m in motors]
+    return pair_names, motors, handle, slots
+
+
 def check_servos_override(gcmd: Any, layout: dict[str, Any]) -> None:
     override = gcmd.get("SERVOS", None)
     if override is None:

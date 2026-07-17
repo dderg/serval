@@ -507,7 +507,7 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
     SchemaMessage {
         type_tag: 0x008A,
         name: "SetDiffTrim",
-        version: 1,
+        version: 2,
         channel: "control",
         fields: &[
             SchemaField { name: "slot_a", ty: "u8" },
@@ -515,6 +515,7 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
             SchemaField { name: "gain_micro", ty: "u32" },
             SchemaField { name: "clamp_um", ty: "u16" },
             SchemaField { name: "lpf_millihz", ty: "u32" },
+            SchemaField { name: "settle_ms", ty: "u32" },
         ],
     },
     SchemaMessage {

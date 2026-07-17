@@ -1,35 +1,38 @@
-//! Differential belt-pair trim: the always-on, in-motion version of pair
-//! sync. Homing and thermal drift trap strain between the two drives sharing
-//! one belt; the resulting static fight re-tensions the spans asymmetrically
-//! and feeds the belt's resonances. The trim integrates the pair's
-//! low-passed differential torque into a small antisymmetric position
-//! offset — the pair unwinds against itself while the carriage never moves.
+//! Differential belt-pair trim: standstill zeroing of the pair fight.
+//! Homing following-error asymmetry, servo-sync seed variance and thermal
+//! drift trap strain between the two drives sharing one belt; the resulting
+//! static fight re-tensions the spans asymmetrically and feeds the belt's
+//! resonances. Whenever the pair sits at commanded standstill the trim
+//! integrates its low-passed differential torque into a small antisymmetric
+//! position offset — the pair unwinds against itself while the carriage
+//! never moves.
 //!
-//! Bandwidth is the whole design: the loop crossover (gain x pair stiffness)
-//! sits at a few Hz up to ~20 Hz, where the EtherCAT transport and drive
-//! torque-path lag amount to a harmless few degrees of phase — unlike the
-//! torque-feedback damper this crate also carries, which provably cannot be
-//! phased correctly at the 90-200 Hz belt modes themselves. The trim nulls
-//! the quasi-static fight (including its 1-3 Hz toolhead-position dependence
-//! at full traverse speed) and leaves the resonant band alone.
+//! Quiescence gating is the whole design: during motion a differential
+//! torque is legitimate (commanded feedforward, direction- and
+//! position-dependent load in the inner loop), so both the low-pass filter
+//! and the integrator freeze on any cycle where the pair is not quiescent —
+//! only the held offset keeps being reported. The caller decides what
+//! quiescent means (rings empty, no buzz, strain-comp ramp settled), and a
+//! per-pair settle window keeps the trim blind while torque relaxes and the
+//! telemetry lag drains after motion stops.
 //!
 //! The offset rides on top of the streamed targets and is deliberately NOT
-//! part of the command anchor: freezing integration whenever the pair is not
-//! streaming keeps the held drive targets continuous across stream gaps, and
-//! a pair sync (which re-anchors the secondary from scratch) resets the trim
-//! outright.
+//! part of the command anchor, and a torque drop (SERVO_SYNC, M84, idle
+//! timeout) resets the trim outright — the sync release is the new zero.
 
 pub const ERR_TRIM_BAD_SLOT: i32 = -851;
 pub const ERR_TRIM_BAD_CLAMP: i32 = -852;
 pub const ERR_TRIM_BAD_LPF: i32 = -853;
 pub const ERR_TRIM_SLOT_IN_USE: i32 = -854;
 pub const ERR_TRIM_BAD_GAIN: i32 = -855;
+pub const ERR_TRIM_BAD_SETTLE: i32 = -856;
 
 /// mm/s of offset slew per 1% differential torque, in millionths.
 pub const MAX_TRIM_GAIN_MICRO: u32 = 2_000_000;
 pub const MAX_TRIM_CLAMP_UM: u16 = 500;
-pub const MIN_TRIM_LPF_MILLIHZ: u32 = 1_000;
+pub const MIN_TRIM_LPF_MILLIHZ: u32 = 100;
 pub const MAX_TRIM_LPF_MILLIHZ: u32 = 100_000;
+pub const MAX_TRIM_SETTLE_MS: u32 = 60_000;
 /// Hard cap on the offset slew regardless of how hard the pair fights, so a
 /// torque transient (crash, rail) cannot yank the targets.
 const MAX_TRIM_SLEW_MM_S: f64 = 2.0;
@@ -40,10 +43,18 @@ struct PairTrim {
     gain_mm_s_per_pct: f64,
     clamp_mm: f64,
     lpf_alpha: f64,
+    settle_cycles: u64,
+    quiet_cycles: u64,
     filtered_diff_tenths: f64,
     offset_mm: f64,
     clamp_warning_pending: bool,
     clamp_warned: bool,
+}
+
+impl PairTrim {
+    fn integrating(&self) -> bool {
+        self.quiet_cycles > self.settle_cycles
+    }
 }
 
 pub struct DiffTrimBank {
@@ -68,6 +79,7 @@ impl DiffTrimBank {
         gain_micro: u32,
         clamp_um: u16,
         lpf_millihz: u32,
+        settle_ms: u32,
     ) -> i32 {
         let (a, b) = (usize::from(slot_a), usize::from(slot_b));
         if a == b || a >= num_slaves || b >= num_slaves {
@@ -88,6 +100,9 @@ impl DiffTrimBank {
         if !(MIN_TRIM_LPF_MILLIHZ..=MAX_TRIM_LPF_MILLIHZ).contains(&lpf_millihz) {
             return ERR_TRIM_BAD_LPF;
         }
+        if settle_ms > MAX_TRIM_SETTLE_MS {
+            return ERR_TRIM_BAD_SETTLE;
+        }
         if self
             .trims
             .iter()
@@ -102,6 +117,8 @@ impl DiffTrimBank {
             gain_mm_s_per_pct: f64::from(gain_micro) * 1e-6,
             clamp_mm: f64::from(clamp_um) * 1e-3,
             lpf_alpha: self.cycle_s / (lpf_tau_s + self.cycle_s),
+            settle_cycles: (f64::from(settle_ms) * 1e-3 / self.cycle_s).ceil() as u64,
+            quiet_cycles: 0,
             filtered_diff_tenths: 0.0,
             offset_mm: 0.0,
             clamp_warning_pending: false,
@@ -118,6 +135,7 @@ impl DiffTrimBank {
 
     pub fn reset(&mut self) {
         for t in &mut self.trims {
+            t.quiet_cycles = 0;
             t.filtered_diff_tenths = 0.0;
             t.offset_mm = 0.0;
             t.clamp_warning_pending = false;
@@ -127,20 +145,27 @@ impl DiffTrimBank {
 
     /// Feed one cycle of mechanical-frame torques (0.1% rated per slot) and
     /// add each pair's antisymmetric offset (host-frame mm) into `offset_mm`.
-    /// A pair only integrates on cycles where both of its slots are streaming
-    /// targets; a frozen pair still reports its held offset so the caller's
+    /// A pair filters and integrates only after both of its slots have been
+    /// quiescent for the settle window; any non-quiescent cycle restarts the
+    /// window. A frozen pair still reports its held offset so the caller's
     /// commands stay continuous.
     pub fn update(
         &mut self,
         torque_mech_tenths: &[f64],
-        streaming: &[bool],
+        quiescent: &[bool],
         offset_mm: &mut [f64],
     ) {
         for t in &mut self.trims {
-            let diff_tenths = (torque_mech_tenths[t.slot_a] - torque_mech_tenths[t.slot_b]) / 2.0;
-            assert!(diff_tenths.is_finite(), "non-finite differential torque");
-            t.filtered_diff_tenths += t.lpf_alpha * (diff_tenths - t.filtered_diff_tenths);
-            if streaming[t.slot_a] && streaming[t.slot_b] {
+            if quiescent[t.slot_a] && quiescent[t.slot_b] {
+                t.quiet_cycles += 1;
+            } else {
+                t.quiet_cycles = 0;
+            }
+            if t.integrating() {
+                let diff_tenths =
+                    (torque_mech_tenths[t.slot_a] - torque_mech_tenths[t.slot_b]) / 2.0;
+                assert!(diff_tenths.is_finite(), "non-finite differential torque");
+                t.filtered_diff_tenths += t.lpf_alpha * (diff_tenths - t.filtered_diff_tenths);
                 let slew_mm_s = (-t.gain_mm_s_per_pct * t.filtered_diff_tenths / 10.0)
                     .clamp(-MAX_TRIM_SLEW_MM_S, MAX_TRIM_SLEW_MM_S);
                 let unclamped = t.offset_mm + slew_mm_s * self.cycle_s;
@@ -155,12 +180,20 @@ impl DiffTrimBank {
         }
     }
 
-    /// Live internal state per pair, for periodic telemetry:
-    /// (slot_a, slot_b, offset_mm, filtered differential torque in 0.1%).
-    pub fn snapshot(&self) -> Vec<(usize, usize, f64, f64)> {
+    /// Live internal state per pair, for periodic telemetry: (slot_a,
+    /// slot_b, offset_mm, filtered differential torque in 0.1%, integrating).
+    pub fn snapshot(&self) -> Vec<(usize, usize, f64, f64, bool)> {
         self.trims
             .iter()
-            .map(|t| (t.slot_a, t.slot_b, t.offset_mm, t.filtered_diff_tenths))
+            .map(|t| {
+                (
+                    t.slot_a,
+                    t.slot_b,
+                    t.offset_mm,
+                    t.filtered_diff_tenths,
+                    t.integrating(),
+                )
+            })
             .collect()
     }
 

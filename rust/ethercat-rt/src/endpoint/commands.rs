@@ -537,11 +537,13 @@ fn handle_set_diff_trim(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDiff
             msg.gain_micro,
             msg.clamp_um,
             msg.lpf_millihz,
+            msg.settle_ms,
         )
     };
     eprintln!(
-        "ec-rt: SetDiffTrim slots=({},{}) gain_micro={} clamp={} um lpf={} mHz rc={rc}",
-        msg.slot_a, msg.slot_b, msg.gain_micro, msg.clamp_um, msg.lpf_millihz,
+        "ec-rt: SetDiffTrim slots=({},{}) gain_micro={} clamp={} um lpf={} mHz \
+         settle={} ms rc={rc}",
+        msg.slot_a, msg.slot_b, msg.gain_micro, msg.clamp_um, msg.lpf_millihz, msg.settle_ms,
     );
     tracing::info!(
         subsystem = "ethercat",
@@ -551,6 +553,7 @@ fn handle_set_diff_trim(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDiff
         gain_micro = msg.gain_micro,
         clamp_um = msg.clamp_um,
         lpf_millihz = msg.lpf_millihz,
+        settle_ms = msg.settle_ms,
         rc,
         "differential trim reconfigured"
     );

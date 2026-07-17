@@ -554,6 +554,7 @@ impl PyMotionEngine {
         gain_micro: u32,
         clamp_um: u16,
         lpf_millihz: u32,
+        settle_ms: u32,
     ) -> PyResult<()> {
         let conn = self.ethercat_conn(mcu_handle, "set_diff_trim")?;
         tracing::info!(
@@ -565,6 +566,7 @@ impl PyMotionEngine {
             gain_micro,
             clamp_um,
             lpf_millihz,
+            settle_ms,
             "servo differential trim"
         );
         let result = py
@@ -577,6 +579,7 @@ impl PyMotionEngine {
                         gain_micro,
                         clamp_um,
                         lpf_millihz,
+                        settle_ms,
                     },
                 )
             })
