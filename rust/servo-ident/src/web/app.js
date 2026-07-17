@@ -124,6 +124,7 @@ const state = {
   pinned: new Set(), // runs that stay selected when a plain click switches runs
   runColors: new Map(), // run name -> palette color, kept while the run stays selected
   autoSelected: false,
+  pendingNotes: new Map(), // run name -> note text saved locally, awaiting server confirmation
   stepFilter: null, // null = every step; otherwise a Set of visible step names
   console: {
     text: "", // current input line, survives page switches
@@ -869,19 +870,40 @@ function noteCell(run) {
   return td;
 }
 
+/// The note shows up the moment Enter is pressed: it goes into
+/// state.pendingNotes, which renderRuns/refresh overlay onto whatever the
+/// server returns, then the POST confirms (or rolls back) in the background.
+/// Without the overlay, the periodic refresh replaces state.runs with
+/// server data that predates the save — during a long calibration the POST
+/// can sit queued behind it, blanking the note until the run finishes.
+function applyNoteLocally(name, note) {
+  const current = state.runs.find((r) => r.name === name);
+  if (current) current.note = note;
+  renderRuns();
+}
+
 async function saveNote(run, text) {
+  const note = text.trim() || null;
+  state.pendingNotes.set(run.name, note);
+  applyNoteLocally(run.name, note);
   try {
     const saved = await api(`/api/runs/${encodeURIComponent(run.name)}/note`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ note: text }),
     });
-    run.note = saved.note || null;
+    if (state.pendingNotes.get(run.name) === note) {
+      state.pendingNotes.delete(run.name);
+      applyNoteLocally(run.name, saved.note || null);
+    }
   } catch (e) {
     console.error(e);
+    if (state.pendingNotes.get(run.name) === note) {
+      state.pendingNotes.delete(run.name);
+      renderRuns();
+    }
     alert(`saving note failed: ${e.message}`);
   }
-  renderRuns();
 }
 
 async function triggerAnalyze(name) {
@@ -934,6 +956,10 @@ function autoSelectInitialRuns() {
 async function refresh() {
   const runs = await api("/api/runs");
   state.runs = runs;
+  for (const [name, note] of state.pendingNotes) {
+    const run = state.runs.find((r) => r.name === name);
+    if (run) run.note = note;
+  }
   await Promise.all(runs.map((r) => ensureDetail(r).catch((e) => console.error(e))));
   const known = new Set(runs.map((r) => r.name));
   for (const name of [...state.selected]) {
