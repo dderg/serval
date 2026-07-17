@@ -71,6 +71,12 @@ impl DiffTrimBank {
         }
     }
 
+    /// Configure a pair. Reconfiguring an existing pair updates the knobs
+    /// in place — the filter, offset and settle state carry over, so tuning
+    /// mid-session never discards what the trim has already learned.
+    /// `gain_micro == 0` freezes the pair: the offset stays applied and the
+    /// filter keeps tracking, only the integrator stops. `clamp_um == 0`
+    /// removes the pair outright (its offset disappears from the targets).
     pub fn set(
         &mut self,
         num_slaves: usize,
@@ -87,14 +93,14 @@ impl DiffTrimBank {
         }
         let same_pair =
             |t: &PairTrim| (t.slot_a, t.slot_b) == (a, b) || (t.slot_a, t.slot_b) == (b, a);
-        if gain_micro == 0 {
+        if clamp_um == 0 {
             self.trims.retain(|t| !same_pair(t));
             return 0;
         }
         if gain_micro > MAX_TRIM_GAIN_MICRO {
             return ERR_TRIM_BAD_GAIN;
         }
-        if clamp_um == 0 || clamp_um > MAX_TRIM_CLAMP_UM {
+        if clamp_um > MAX_TRIM_CLAMP_UM {
             return ERR_TRIM_BAD_CLAMP;
         }
         if !(MIN_TRIM_LPF_MILLIHZ..=MAX_TRIM_LPF_MILLIHZ).contains(&lpf_millihz) {
@@ -111,21 +117,33 @@ impl DiffTrimBank {
             return ERR_TRIM_SLOT_IN_USE;
         }
         let lpf_tau_s = 1.0 / (2.0 * std::f64::consts::PI * f64::from(lpf_millihz) * 1e-3);
-        let trim = PairTrim {
+        let gain_mm_s_per_pct = f64::from(gain_micro) * 1e-6;
+        let clamp_mm = f64::from(clamp_um) * 1e-3;
+        let lpf_alpha = self.cycle_s / (lpf_tau_s + self.cycle_s);
+        let settle_cycles = (f64::from(settle_ms) * 1e-3 / self.cycle_s).ceil() as u64;
+        if let Some(t) = self.trims.iter_mut().find(|t| same_pair(t)) {
+            t.gain_mm_s_per_pct = gain_mm_s_per_pct;
+            t.clamp_mm = clamp_mm;
+            t.lpf_alpha = lpf_alpha;
+            t.settle_cycles = settle_cycles;
+            t.offset_mm = t.offset_mm.clamp(-clamp_mm, clamp_mm);
+            t.clamp_warning_pending = false;
+            t.clamp_warned = false;
+            return 0;
+        }
+        self.trims.push(PairTrim {
             slot_a: a,
             slot_b: b,
-            gain_mm_s_per_pct: f64::from(gain_micro) * 1e-6,
-            clamp_mm: f64::from(clamp_um) * 1e-3,
-            lpf_alpha: self.cycle_s / (lpf_tau_s + self.cycle_s),
-            settle_cycles: (f64::from(settle_ms) * 1e-3 / self.cycle_s).ceil() as u64,
+            gain_mm_s_per_pct,
+            clamp_mm,
+            lpf_alpha,
+            settle_cycles,
             quiet_cycles: 0,
             filtered_diff_tenths: 0.0,
             offset_mm: 0.0,
             clamp_warning_pending: false,
             clamp_warned: false,
-        };
-        self.trims.retain(|t| !same_pair(t));
-        self.trims.push(trim);
+        });
         0
     }
 

@@ -91,10 +91,16 @@ def test_single_belt_with_explicit_knobs():
     assert engine.trims == [(7, 2, 3, 200000, 300, 10000, 500)]
 
 
-def test_zero_gain_disarms():
+def test_zero_gain_freezes_with_offset_kept():
     trim, _printer, engine = make_diff_trim()
     trim.cmd_SERVO_DIFF_TRIM(FakeGcmd(BELT="A", GAIN="0"))
     assert engine.trims == [(7, 0, 1, 0, 150, 2000, 300)]
+
+
+def test_remove_sends_zero_max_offset():
+    trim, _printer, engine = make_diff_trim()
+    trim.cmd_SERVO_DIFF_TRIM(FakeGcmd(BELT="A", REMOVE="1"))
+    assert engine.trims == [(7, 0, 1, 0, 0, 2000, 300)]
 
 
 def test_rejects_single_drive_belts():

@@ -24,11 +24,13 @@ class ServoDiffTrim:
         "differential torque into a small antisymmetric position offset, "
         "zeroing the fight left behind by servo sync / homing variance; "
         "the loop freezes during motion. GAIN is in mm/s of offset slew "
-        "per 1% differential torque; GAIN=0 disarms. MAX_OFFSET_UM bounds "
-        "the offset (hitting it logs a warning). SETTLE_MS is how long "
-        "the pair must sit still before measuring resumes. SAVE=1 stores "
-        "the values for SAVE_CONFIG. Params BELT=A|B|AB GAIN "
-        "MAX_OFFSET_UM LPF_HZ SETTLE_MS SAVE"
+        "per 1% differential torque; GAIN=0 freezes the loop with the "
+        "learned offset held. Retuning any knob keeps the learned state. "
+        "MAX_OFFSET_UM bounds the offset (hitting it logs a warning). "
+        "SETTLE_MS is how long the pair must sit still before measuring "
+        "resumes. REMOVE=1 drops the pair and its offset entirely. SAVE=1 "
+        "stores the values for SAVE_CONFIG. Params BELT=A|B|AB GAIN "
+        "MAX_OFFSET_UM LPF_HZ SETTLE_MS REMOVE SAVE"
     )
 
     def __init__(self, config):
@@ -49,7 +51,7 @@ class ServoDiffTrim:
         )
         self.printer.register_event_handler("klippy:ready", self._on_ready)
 
-    def _arm_belt(self, gcmd, belt):
+    def _set_belt(self, gcmd, belt, max_offset_um):
         kin = self.printer.lookup_object("toolhead").get_kinematics()
         pair_names, _motors, handle, slots = servo_strokes.belt_pair(
             self.printer, gcmd, kin, belt, "SERVO_DIFF_TRIM"
@@ -60,7 +62,7 @@ class ServoDiffTrim:
             slots[0],
             slots[1],
             int(round(self.gain * 1e6)),
-            int(round(self.max_offset_um)),
+            int(round(max_offset_um)),
             int(round(self.lpf_hz * 1000.0)),
             self.settle_ms,
         )
@@ -70,7 +72,9 @@ class ServoDiffTrim:
         if self.gain <= 0.0:
             return
         for belt in BELTS:
-            self._arm_belt(_ReadyContext(self.printer), belt)
+            self._set_belt(
+                _ReadyContext(self.printer), belt, self.max_offset_um
+            )
 
     def cmd_SERVO_DIFF_TRIM(self, gcmd):
         belts = gcmd.get("BELT", "AB").upper()
@@ -89,11 +93,17 @@ class ServoDiffTrim:
         self.settle_ms = gcmd.get_int(
             "SETTLE_MS", self.settle_ms, minval=0, maxval=MAX_SETTLE_MS
         )
+        remove = gcmd.get_int("REMOVE", 0)
         for belt in belts:
-            pair_names = self._arm_belt(gcmd, belt)
-            if self.gain > 0.0:
+            if remove:
+                self._set_belt(gcmd, belt, 0)
                 gcmd.respond_info(
-                    "belt %s trim armed (%s vs %s): gain %.3f (mm/s)/%%, "
+                    "belt %s trim removed (offset dropped)" % (belt,)
+                )
+            elif self.gain > 0.0:
+                pair_names = self._set_belt(gcmd, belt, self.max_offset_um)
+                gcmd.respond_info(
+                    "belt %s trim armed (%s vs %s): gain %.4f (mm/s)/%%, "
                     "max offset %.0f um, lpf %.2f Hz, settle %d ms"
                     % (
                         belt,
@@ -106,7 +116,11 @@ class ServoDiffTrim:
                     )
                 )
             else:
-                gcmd.respond_info("belt %s trim disarmed" % (belt,))
+                self._set_belt(gcmd, belt, self.max_offset_um)
+                gcmd.respond_info(
+                    "belt %s trim frozen (gain 0, learned offset held)"
+                    % (belt,)
+                )
         if gcmd.get_int("SAVE", 0):
             configfile = self.printer.lookup_object("configfile")
             configfile.set("servo_diff_trim", "gain", "%.6f" % (self.gain,))

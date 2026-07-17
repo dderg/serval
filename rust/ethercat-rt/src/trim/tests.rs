@@ -43,7 +43,6 @@ fn set_rejects_bad_slots_gain_clamp_lpf_and_settle() {
         bank.set(4, 0, 1, MAX_TRIM_GAIN_MICRO + 1, 150, 25_000, 0),
         ERR_TRIM_BAD_GAIN
     );
-    assert_eq!(bank.set(4, 0, 1, 50_000, 0, 25_000, 0), ERR_TRIM_BAD_CLAMP);
     assert_eq!(
         bank.set(4, 0, 1, 50_000, MAX_TRIM_CLAMP_UM + 1, 25_000, 0),
         ERR_TRIM_BAD_CLAMP
@@ -71,10 +70,48 @@ fn set_rejects_slot_shared_with_another_pair() {
 }
 
 #[test]
-fn zero_gain_disarms_the_pair_in_either_slot_order() {
+fn zero_clamp_removes_the_pair_in_either_slot_order() {
     let mut bank = armed_bank(50_000, 150, 25_000);
-    assert_eq!(bank.set(4, 1, 0, 0, 0, 0, 0), 0);
+    assert_eq!(bank.set(4, 1, 0, 50_000, 0, 0, 0), 0);
     assert!(!bank.active());
+}
+
+#[test]
+fn zero_gain_freezes_the_offset_but_keeps_it_applied() {
+    let mut bank = armed_bank(50_000, 150, 25_000);
+    let (_diff, settled) = run_spring(&mut bank, 0.06, true, 40_000);
+    assert!(settled.abs() > 0.02);
+    assert_eq!(bank.set(4, 1, 0, 0, 150, 25_000, 0), 0);
+    let mut offset = vec![0f64; 4];
+    for _ in 0..4_000 {
+        offset.iter_mut().for_each(|o| *o = 0.0);
+        bank.update(&[400.0, -400.0, 0.0, 0.0], &[true; 4], &mut offset);
+    }
+    assert!(bank.active());
+    assert_eq!(
+        offset[0], settled,
+        "gain 0 must hold the learned offset, not drop it"
+    );
+}
+
+#[test]
+fn reconfiguring_a_pair_keeps_offset_and_filter_state() {
+    let mut bank = armed_bank(50_000, 150, 25_000);
+    let (_diff, settled) = run_spring(&mut bank, 0.06, true, 40_000);
+    let filtered = bank.snapshot()[0].3;
+    assert_eq!(bank.set(4, 1, 0, 100_000, 300, 10_000, 100), 0);
+    let (_a, _b, offset_mm, filtered_after, _integrating) = bank.snapshot()[0];
+    assert_eq!(offset_mm, settled, "retune must not discard the offset");
+    assert_eq!(filtered_after, filtered, "retune must not reset the filter");
+}
+
+#[test]
+fn tightening_the_clamp_reclamps_the_held_offset() {
+    let mut bank = armed_bank(50_000, 150, 25_000);
+    let (_diff, settled) = run_spring(&mut bank, 0.06, true, 40_000);
+    assert!(settled < -0.02);
+    assert_eq!(bank.set(4, 0, 1, 50_000, 10, 25_000, 0), 0);
+    assert_eq!(bank.snapshot()[0].2, -0.01);
 }
 
 #[test]
@@ -243,15 +280,4 @@ fn reset_clears_offset_filter_settle_and_warning_state() {
     bank.update(&[400.0, -400.0, 0.0, 0.0], &[true; 4], &mut offset);
     assert_eq!(offset[0], 0.0, "reset must restart the settle window too");
     assert_eq!(offset[1], 0.0);
-}
-
-#[test]
-fn replacing_a_pair_restarts_from_zero_offset() {
-    let mut bank = armed_bank(50_000, 150, 25_000);
-    let (_diff, settled) = run_spring(&mut bank, 0.06, true, 40_000);
-    assert!(settled.abs() > 0.02);
-    assert_eq!(bank.set(4, 1, 0, 100_000, 150, 25_000, 0), 0);
-    let mut offset = vec![0f64; 4];
-    bank.update(&[0.0, 0.0, 0.0, 0.0], &[true; 4], &mut offset);
-    assert_eq!(offset[0], 0.0);
 }
