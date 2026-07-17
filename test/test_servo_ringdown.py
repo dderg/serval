@@ -116,6 +116,9 @@ class FakeEngine:
     def sdo_read(self, handle, slot, index, subindex):
         return 2, 7
 
+    def effective_limits(self):
+        return 3000.0, 25000.0, 0.05
+
     def set_post_processor_bypass(self, enabled):
         self.calls.append(("bypass", enabled))
 
@@ -274,7 +277,10 @@ def test_one_step_per_speed_with_recorded_stops():
         assert step["accel"] is None
     plan = manifest["stroke_plan"]
     assert plan["speeds"] == [100, 400]
-    assert plan["accel"] == 20000.0, "defaults to the largest config accel"
+    assert plan["accel"] == 25000.0, (
+        "defaults to the printer's effective max accel, not the "
+        "[servo_calibration] accels list"
+    )
     assert plan["dwell_ms"] == 1500
     assert plan["iterations"] == 3
     assert plan["center"] == 110.0, "bounds (20,200) center on 110"
@@ -293,22 +299,36 @@ def _step_extents(gcode, coord_letter="X"):
 def test_strokes_are_short_and_centered():
     sc, gcode = make_calibration()
     sc.cmd_SERVO_MEASURE_RINGDOWN(FakeGcmd(AXIS="X", SPEEDS="100,400"))
-    # accel 20000, cruise 200 ms: v=100 -> 0.5 + 20 = 20.5 mm centered on
-    # 110 -> 99.75..120.25; v=400 -> 8 + 80 = 88 mm -> 66..154.
-    assert _step_extents(gcode) == {99.75, 120.25, 66.0, 154.0}
+    # accel 25000, cruise 200 ms: v=100 -> 0.4 + 20 = 20.4 mm centered on
+    # 110 -> 99.8..120.2; v=400 -> 6.4 + 80 = 86.4 mm -> 66.8..153.2.
+    assert _step_extents(gcode) == {99.8, 120.2, 66.8, 153.2}
 
 
 def test_cruise_ms_scales_the_stroke():
     sc, gcode = make_calibration()
     sc.cmd_SERVO_MEASURE_RINGDOWN(FakeGcmd(AXIS="X", SPEEDS="100", CRUISE_MS=0))
-    # No cruise: the stroke is exactly the accel+decel reach v^2/a = 0.5 mm.
-    assert _step_extents(gcode) == {109.75, 110.25}
+    # No cruise: the stroke is exactly the accel+decel reach v^2/a = 0.4 mm.
+    assert _step_extents(gcode) == {109.8, 110.2}
 
 
 def test_stroke_exceeding_bounds_fails_loud():
     sc, _ = make_calibration()
     with pytest.raises(RuntimeError, match="lower SPEEDS or CRUISE_MS"):
         sc.cmd_SERVO_MEASURE_RINGDOWN(FakeGcmd(AXIS="X", SPEEDS="2000"))
+
+
+def test_accel_above_printer_limit_fails_loud():
+    sc, _ = make_calibration()
+    with pytest.raises(RuntimeError, match="max accel"):
+        sc.cmd_SERVO_MEASURE_RINGDOWN(
+            FakeGcmd(AXIS="X", SPEEDS="250", ACCEL=30000)
+        )
+
+
+def test_speed_above_printer_limit_fails_loud():
+    sc, _ = make_calibration()
+    with pytest.raises(RuntimeError, match="max velocity"):
+        sc.cmd_SERVO_MEASURE_RINGDOWN(FakeGcmd(AXIS="X", SPEEDS="5000"))
 
 
 def test_bypass_and_jerk_wrap_the_strokes_and_restore():
@@ -350,7 +370,7 @@ def test_strokes_are_submitted_one_move_at_a_time():
             "lands between the move and the dwell: %r" % (s,)
         )
     assert any(
-        isinstance(s, str) and s.startswith("SET_VELOCITY_LIMIT ACCEL=20000")
+        isinstance(s, str) and s.startswith("SET_VELOCITY_LIMIT ACCEL=25000")
         for s in gcode.scripts
     )
 

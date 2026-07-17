@@ -2202,8 +2202,31 @@ class ServoCalibration:
         "ACCEL_CHIP TAG"
     )
 
+    def _ringdown_dynamics(self, gcmd: Any, engine: Any) -> tuple[float, float]:
+        """(accel, max_velocity). ACCEL defaults to the printer's effective
+        max accel — the sharpest stop excites the widest band (the decel
+        pulse's spectral null sits at a/v). Asking for more than the
+        machine allows fails loudly: SET_VELOCITY_LIMIT is a cap that
+        silently min()s with [printer] max_accel, which would shallow the
+        decel AND break the stroke-length math."""
+        max_velocity, max_accel, _deviation = engine.effective_limits()
+        accel = gcmd.get_float("ACCEL", max_accel, above=0.0)
+        if accel > max_accel:
+            raise gcmd.error(
+                "ACCEL %.0f exceeds the printer's max accel %.0f - the "
+                "runtime cap can only lower it, so the strokes would "
+                "silently run shallower; raise [printer] max_accel instead"
+                % (accel, max_accel)
+            )
+        return accel, max_velocity
+
     def _ringdown_strokes(
-        self, gcmd: Any, plan: Any, accel: float, cruise_ms: int
+        self,
+        gcmd: Any,
+        plan: Any,
+        accel: float,
+        max_velocity: float,
+        cruise_ms: int,
     ) -> list[tuple[int, float, float, float]]:
         """(speed, start_u, end_u, length_mm) per step: the shortest
         centered stroke that reaches cruise speed and holds it for
@@ -2214,6 +2237,12 @@ class ServoCalibration:
             sv = int(round(s))
             if sv <= 0:
                 raise gcmd.error("speed %d must be positive (mm/s)" % (sv,))
+            if sv > max_velocity:
+                raise gcmd.error(
+                    "speed %d exceeds the printer's max velocity %.0f - "
+                    "the stroke would silently cruise slower than the "
+                    "step claims" % (sv, max_velocity)
+                )
             if sv not in speeds:
                 speeds.append(sv)
         speeds.sort()
@@ -2244,7 +2273,8 @@ class ServoCalibration:
     def cmd_SERVO_MEASURE_RINGDOWN(self, gcmd: Any) -> None:
         axis = gcmd.get("AXIS", "X").upper()
         plan = servo_strokes.build_plan(gcmd, self._kin(), self.bounds, axis)
-        accel = gcmd.get_float("ACCEL", max(self.accels), above=0.0)
+        engine = self.printer.lookup_object("motion_engine")
+        accel, max_velocity = self._ringdown_dynamics(gcmd, engine)
         iterations = gcmd.get_int("ITERATIONS", 3, minval=1)
         dwell = gcmd.get_int(
             "DWELL_MS",
@@ -2254,11 +2284,12 @@ class ServoCalibration:
         cruise_ms = gcmd.get_int(
             "CRUISE_MS", self.RINGDOWN_DEFAULT_CRUISE_MS, minval=0
         )
-        strokes = self._ringdown_strokes(gcmd, plan, accel, cruise_ms)
+        strokes = self._ringdown_strokes(
+            gcmd, plan, accel, max_velocity, cruise_ms
+        )
         tag = gcmd.get("TAG", "ringdown")
         chip, chip_name = self._accel_chip(gcmd)
         servos = plan.servos
-        engine = self.printer.lookup_object("motion_engine")
         stroke_plan = {
             "center": (plan.start + plan.end) / 2.0,
             "speed": None,
