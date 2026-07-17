@@ -719,6 +719,7 @@ class SweepStep:
     swept: dict[str, float]
     applied: list[dict[str, Any]]
     accel: str | None = None
+    stops: list[float] | None = None
 
 
 @dataclass
@@ -748,15 +749,16 @@ class ExperimentRun:
         os.replace(tmp, self.manifest_path)
 
     def record_step(self, step: SweepStep) -> None:
-        self.manifest["steps"].append(
-            {
-                "name": step.name,
-                "swept": step.swept,
-                "applied": step.applied,
-                "capture": os.path.basename(self.step_scap(step.name)),
-                "accel": step.accel,
-            }
-        )
+        entry = {
+            "name": step.name,
+            "swept": step.swept,
+            "applied": step.applied,
+            "capture": os.path.basename(self.step_scap(step.name)),
+            "accel": step.accel,
+        }
+        if step.stops is not None:
+            entry["stops"] = step.stops
+        self.manifest["steps"].append(entry)
         self.write()
 
 
@@ -1365,6 +1367,7 @@ class ServoCalibration:
         for name in (
             "SERVO_MEASURE_TRACKING",
             "SERVO_MEASURE_DIFFERENTIAL",
+            "SERVO_MEASURE_RINGDOWN",
             "SERVO_DIFF_DAMPER",
             "SERVO_MEASURE_STRAIN_MAP",
             "SERVO_MEASURE_STRAIN_RESPONSE",
@@ -2177,6 +2180,118 @@ class ServoCalibration:
             finally:
                 self._stop_capture()
             run.record_step(SweepStep(name, {}, []))
+            self._analyze_and_report(gcmd, run)
+        finally:
+            self._active_run = None
+
+    RINGDOWN_MIN_DWELL_MS = 500
+    RINGDOWN_DEFAULT_DWELL_MS = 1500
+
+    cmd_SERVO_MEASURE_RINGDOWN_help = (
+        "Ring-down resonance measurement: high-accel strokes into a full "
+        "stop, one step per SPEEDS entry, recording each stroke's "
+        "commanded-stop time. servo-cal fits the post-stop residual "
+        "vibration (servo encoders + optional accelerometer) for per-mode "
+        "frequency and damping ratio - the free decay of the closed-loop "
+        "plant, immune to the drive compensating a steady sweep. Params "
+        "AXIS=X|Y|A|B SPEEDS ACCEL ITERATIONS DWELL_MS ACCEL_CHIP TAG"
+    )
+
+    def cmd_SERVO_MEASURE_RINGDOWN(self, gcmd: Any) -> None:
+        axis = gcmd.get("AXIS", "X").upper()
+        plan = servo_strokes.build_plan(gcmd, self._kin(), self.bounds, axis)
+        speeds_raw = self._floats(gcmd.get("SPEEDS", None)) or list(self.speeds)
+        speeds: list[int] = []
+        for s in speeds_raw:
+            sv = int(round(s))
+            if sv <= 0:
+                raise gcmd.error("speed %d must be positive (mm/s)" % (sv,))
+            if sv not in speeds:
+                speeds.append(sv)
+        speeds.sort()
+        accel = gcmd.get_float("ACCEL", max(self.accels), above=0.0)
+        iterations = gcmd.get_int("ITERATIONS", 3, minval=1)
+        dwell = gcmd.get_int(
+            "DWELL_MS",
+            max(self.dwell_ms, self.RINGDOWN_DEFAULT_DWELL_MS),
+            minval=self.RINGDOWN_MIN_DWELL_MS,
+        )
+        tag = gcmd.get("TAG", "ringdown")
+        chip, chip_name = self._accel_chip(gcmd)
+        servos = plan.servos
+        stroke_plan = {
+            "start": plan.start,
+            "end": plan.end,
+            "speed": None,
+            "speeds": speeds,
+            "accel": accel,
+            "iterations": iterations,
+            "dwell_ms": dwell,
+            "accel_chip": chip_name,
+        }
+        run = self._begin_run(
+            gcmd,
+            "ringdown",
+            tag,
+            axis,
+            servos,
+            stroke_plan,
+            self._corexy_rails(gcmd, axis),
+        )
+        try:
+            for prep_axis in plan.prep:
+                self._prep(prep_axis, dwell)
+            try:
+                for i, speed in enumerate(speeds):
+                    name = "%s_v%d" % (tag, speed)
+                    gcmd.respond_info(
+                        "ringdown %d/%d: %s at %d mm/s, accel %.0f mm/s^2, "
+                        "%d stops"
+                        % (
+                            i + 1,
+                            len(speeds),
+                            axis,
+                            speed,
+                            accel,
+                            iterations * 2,
+                        )
+                    )
+                    self._start_capture(name, servos)
+                    aclient = (
+                        None if chip is None else chip.start_internal_client()
+                    )
+                    try:
+                        stops = servo_strokes.emit_strokes_with_stop_times(
+                            self.printer,
+                            self.gcode,
+                            plan.coord,
+                            plan.start,
+                            plan.end,
+                            plan.th_per_unit,
+                            float(speed),
+                            accel,
+                            iterations,
+                            dwell,
+                        )
+                        self._stop_capture()
+                    finally:
+                        if aclient is not None:
+                            aclient.finish_measurements()
+                    step = SweepStep(
+                        name, {"speed": float(speed)}, [], stops=stops
+                    )
+                    if aclient is not None:
+                        assert chip_name is not None, (
+                            "accel client exists without a chip name"
+                        )
+                        step.accel = os.path.basename(
+                            self._write_accel_csv(
+                                gcmd, aclient, chip_name, name
+                            )
+                        )
+                    run.record_step(step)
+            finally:
+                self._restore()
             self._analyze_and_report(gcmd, run)
         finally:
             self._active_run = None

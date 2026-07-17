@@ -28,6 +28,8 @@ pub struct Step {
     pub capture: String,
     #[serde(default)]
     pub accel: Option<String>,
+    #[serde(default)]
+    pub stops: Option<Vec<f64>>,
 }
 
 impl Step {
@@ -102,6 +104,36 @@ pub struct DifferentialResult {
     pub modes: Vec<DifferentialMode>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RingdownMode {
+    pub freq_hz: f64,
+    pub zeta: f64,
+    pub zeta_lo: f64,
+    pub zeta_hi: f64,
+    pub amp: f64,
+    pub disp_um: f64,
+    pub tails: usize,
+    pub cycles: f64,
+    pub r2: f64,
+    pub fit_start_ms: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RingdownSource {
+    pub source: String,
+    pub unit: String,
+    pub tails: usize,
+    pub noise_floor: f64,
+    pub modes: Vec<RingdownMode>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RingdownResult {
+    pub guard_ms: f64,
+    pub window_ms: f64,
+    pub sources: Vec<RingdownSource>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StepResult {
     pub name: String,
@@ -109,6 +141,8 @@ pub struct StepResult {
     pub combined: Option<Combined>,
     pub accel: Option<AccelResult>,
     pub differential: Option<DifferentialResult>,
+    #[serde(default)]
+    pub ringdown: Option<RingdownResult>,
     pub flags: Vec<String>,
 }
 
@@ -174,6 +208,30 @@ pub struct PlotDifferential {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct PlotRingdownTail {
+    pub start_s: f64,
+    pub t_ms: Vec<f64>,
+    pub value: Vec<f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PlotRingdownSource {
+    pub source: String,
+    pub unit: String,
+    pub modes: Vec<RingdownMode>,
+    pub psd_freq_hz: Vec<f64>,
+    pub psd: Vec<f64>,
+    pub tails: Vec<PlotRingdownTail>,
+    pub envelope_t_ms: Vec<f64>,
+    pub envelope: Vec<f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PlotRingdown {
+    pub sources: Vec<PlotRingdownSource>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PlotStep {
     pub name: String,
     pub fs_hz: f64,
@@ -184,6 +242,8 @@ pub struct PlotStep {
     pub combined: Option<PlotCombined>,
     pub accel: Option<PlotAccel>,
     pub differential: Option<PlotDifferential>,
+    #[serde(default)]
+    pub ringdown: Option<PlotRingdown>,
     pub psd: PlotPsd,
 }
 

@@ -59,8 +59,8 @@ const PAGE_DEFS = {
   dynamics: {
     label: "dynamics",
     groups: ["load"],
-    experiments: ["tracking", "inertia_grid", "differential"],
-    charts: ["frf"],
+    experiments: ["tracking", "inertia_grid", "differential", "ringdown"],
+    charts: ["frf", "ringdown"],
     metrics: true,
     intro: "identify the load, then let feedforward carry it",
     templates: [
@@ -77,6 +77,14 @@ const PAGE_DEFS = {
         title:
           "single stroke run with capture — the before/after check for any tuning " +
           "change; per-drive overshoot/settle land in the tracking metrics table",
+      },
+      {
+        label: "ringdown…",
+        command: "SERVO_MEASURE_RINGDOWN AXIS=X SPEEDS=100,250,400 ITERATIONS=3",
+        title:
+          "high-accel strokes into a full stop — fits the post-stop free decay " +
+          "for per-mode frequency and damping ratio; the closed-loop transient " +
+          "a drive's adaptive filters can't compensate the way they fight a chirp",
       },
     ],
   },
@@ -436,6 +444,18 @@ function analysisSectionsHtml(def) {
         sectionHeadHtml("differential belt FRF", `<span class="note" id="frf-meta"></span>`) +
         `<div class="charts" id="frf-charts"></div>` +
         `<div id="frf-modes"></div>` +
+        `</section>`
+    );
+  }
+  if (def.charts && def.charts.includes("ringdown")) {
+    parts.push(
+      `<section class="ringdown-section" id="ringdown-section" hidden>` +
+        sectionHeadHtml(
+          "ring-down after stop",
+          `<span class="note" id="ringdown-meta"></span>`
+        ) +
+        `<div class="charts" id="ringdown-charts"></div>` +
+        `<div id="ringdown-modes"></div>` +
         `</section>`
     );
   }
@@ -2123,6 +2143,151 @@ function renderFrfCharts(names, plots) {
   meta.textContent = metaParts.join(" · ");
 }
 
+// --- ring-down after stop (dynamics page) -------------------------------------
+
+function ringdownModeTableHtml(sources) {
+  const rows = sources
+    .flatMap((src) =>
+      src.modes.length
+        ? src.modes.map(
+            (m) =>
+              `<tr><td>${src.source}</td><td>${m.freq_hz.toFixed(1)} Hz</td>` +
+              `<td>${m.zeta.toFixed(3)}</td>` +
+              `<td>${m.zeta_lo.toFixed(3)}–${m.zeta_hi.toFixed(3)}</td>` +
+              `<td>${m.disp_um.toFixed(2)} µm</td>` +
+              `<td>${m.tails}</td><td>${m.r2.toFixed(2)}</td></tr>`
+          )
+        : [
+            `<tr><td>${src.source}</td>` +
+              `<td colspan="6" class="note">no ring above the noise floor</td></tr>`,
+          ]
+    )
+    .join("");
+  return (
+    `<table class="mode-table"><thead><tr>` +
+    `<th>source</th><th>freq</th><th>ζ</th><th>ζ spread</th>` +
+    `<th>residual</th><th>tails</th><th>r²</th>` +
+    `</tr></thead><tbody>${rows}</tbody></table>`
+  );
+}
+
+function ringdownTailBox(stepName, source, runEntries) {
+  const traces = [];
+  const legend = [];
+  for (const { name, src } of runEntries) {
+    src.tails.forEach((tail, k) => {
+      const color = mixColor(runColor(name), "#ffffff", (0.5 * k) / Math.max(1, src.tails.length - 1));
+      traces.push({ t: tail.t_ms, y: tail.value, color });
+    });
+    legend.push({ color: runColor(name), label: `${name} (${src.tails.length} tails)` });
+  }
+  const ref = runEntries[0].src;
+  if (ref.envelope.length) {
+    traces.push({ t: ref.envelope_t_ms, y: ref.envelope, color: "#8a97a3", dash: [5, 3] });
+    traces.push({
+      t: ref.envelope_t_ms,
+      y: ref.envelope.map((v) => -v),
+      color: "#8a97a3",
+      dash: [5, 3],
+    });
+    legend.push({ color: "#8a97a3", label: "dominant-mode envelope fit" });
+  }
+  const box = document.createElement("div");
+  box.className = "chart-box";
+  const title = document.createElement("h3");
+  title.textContent = `${stepName} — ${source.source} tails (${source.unit})`;
+  box.appendChild(title);
+  const canvas = document.createElement("canvas");
+  canvas.width = 860;
+  canvas.height = 220;
+  box.appendChild(canvas);
+  drawChart(canvas, traces, source.unit, null, "ms");
+  const legendEl = document.createElement("div");
+  legendEl.className = "legend";
+  for (const item of legend) {
+    const span = document.createElement("span");
+    span.innerHTML = `<span class="swatch" style="background:${item.color}"></span>${item.label}`;
+    legendEl.appendChild(span);
+  }
+  box.appendChild(legendEl);
+  return box;
+}
+
+function ringdownModeMarkers(modes) {
+  return modes.map((m) => ({
+    freq: m.freq_hz,
+    label: `${m.freq_hz.toFixed(1)} Hz ζ=${m.zeta.toFixed(3)}`,
+  }));
+}
+
+/// Every selected run's tails overlay per source; the newest selected run
+/// with a ringdown step drives the envelope fit, the PSD mode markers and
+/// the mode table. Only sources the analyzer marked as headline (tails
+/// present in the plot payload) get charts — every source lands in the
+/// table.
+function renderRingdownCharts(names, plots) {
+  const section = el("ringdown-section");
+  if (!section) return;
+  const container = el("ringdown-charts");
+  const modesEl = el("ringdown-modes");
+  const meta = el("ringdown-meta");
+  container.innerHTML = "";
+  modesEl.innerHTML = "";
+  meta.textContent = "";
+  const stepNames = [
+    ...new Set(plots.flatMap((p) => p.steps.filter((s) => s.ringdown).map((s) => s.name))),
+  ];
+  if (!stepNames.length) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  const metaParts = [];
+  for (const stepName of visibleStepNames(stepNames)) {
+    const perSource = new Map();
+    plots.forEach((p, i) => {
+      const step = p.steps.find((s) => s.name === stepName);
+      if (!step || !step.ringdown) return;
+      for (const src of step.ringdown.sources) {
+        if (!src.tails.length) continue;
+        if (!perSource.has(src.source)) perSource.set(src.source, []);
+        perSource.get(src.source).push({ name: names[i], src });
+      }
+    });
+    let ref = null;
+    for (const p of plots) {
+      const step = p.steps.find((s) => s.name === stepName);
+      if (step && step.ringdown) {
+        ref = step.ringdown;
+        break;
+      }
+    }
+    for (const [sourceName, runEntries] of perSource) {
+      container.appendChild(ringdownTailBox(stepName, runEntries[0].src, runEntries));
+      const traces = runEntries.map(({ name, src }) => ({
+        freq: src.psd_freq_hz,
+        y: src.psd,
+        color: runColor(name),
+        dashed: false,
+        label: name,
+        run: name,
+      }));
+      container.appendChild(
+        psdBox(
+          `${stepName} — ${sourceName} tail PSD`,
+          traces,
+          null,
+          `${runEntries[0].src.unit} PSD`,
+          { markers: ringdownModeMarkers(runEntries[0].src.modes) }
+        )
+      );
+    }
+    modesEl.innerHTML += `<h3>${stepName} modes</h3>${ringdownModeTableHtml(ref.sources)}`;
+    metaParts.push(stepName);
+  }
+  meta.textContent = metaParts.join(" · ");
+}
+
 // --- strain map (strain page) -------------------------------------------------
 //
 // Renders GET /api/runs/<name>/strain: per raster line, the elastic
@@ -2889,6 +3054,7 @@ async function redrawCharts() {
   }
   renderStepChips(stepNames);
   if (def.charts && def.charts.includes("frf")) renderFrfCharts(okNames, plots);
+  if (def.charts && def.charts.includes("ringdown")) renderRingdownCharts(okNames, plots);
   if (def.charts && def.charts.includes("psd")) {
     renderPsdChart(okNames, plots, steps);
   }
@@ -3707,6 +3873,13 @@ function reconstructCommand(manifest) {
         `SERVO_MEASURE_DIFFERENTIAL BELT=${plan.belt} FREQ_START=${plan.freq_start} ` +
         `FREQ_END=${plan.freq_end} AMPLITUDE=${plan.amplitude} DURATION=${plan.duration} ` +
         `RAMP=${plan.ramp} DWELL_MS=${plan.dwell_ms} NAME=${tag}`
+      );
+    }
+    case "ringdown": {
+      const plan = manifest.stroke_plan;
+      return (
+        `SERVO_MEASURE_RINGDOWN SPEEDS=${(plan.speeds || []).join(",")} ` +
+        `ACCEL=${plan.accel} DWELL_MS=${plan.dwell_ms} ${common}`
       );
     }
     default:

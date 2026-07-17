@@ -25,7 +25,7 @@ One experiment (one command invocation) = one directory:
 ```json
 {
   "version": 1,
-  "experiment": "gain_sweep|gain_ladder|refine_sweep|inertia_sweep|accel_sweep|tracking|inertia_grid|differential",
+  "experiment": "gain_sweep|gain_ladder|refine_sweep|inertia_sweep|accel_sweep|tracking|inertia_grid|differential|ringdown",
   "tag": "cal",
   "created_utc": "2026-07-10T15:15:16Z",
   "axis": "X",
@@ -65,6 +65,16 @@ A `differential` run's `stroke_plan` instead holds the chirp:
 "duration": 46.0, "ramp": 1.5, "amplitude": 0.05, "dwell_ms": 500}`; `axis`
 is the belt letter, `motors` lists the pair in slot order and `belts` is
 null.
+A `ringdown` run (`SERVO_MEASURE_RINGDOWN`) sweeps stroke speed: its
+`stroke_plan` is `{"start": 20.0, "end": 200.0, "speed": null,
+"speeds": [100, 400], "accel": 20000.0, "iterations": 3, "dwell_ms": 1500,
+"accel_chip": "adxl345 tool"}` (`accel_chip` null without one), and each
+step additionally carries `"stops": [print_time, ...]` — the commanded-stop
+print-time of every stroke, read off the motion fence before the dwell,
+`iterations * 2` per step. The analyzer windows accelerometer ring-down
+tails from these; servo tails come from the capture's own target-motion
+segments, and a count mismatch between stops, strokes and the plan is a
+hard error.
 `ambient.journal_params` holds the readback of every
 `[servo_calibration] journal_params:` address per captured drive, taken at
 run start. `ambient.notches` is always recorded per captured drive, also at
@@ -152,6 +162,43 @@ arrays): `{"freq_hz": [..], "mag_db": [..], "phase_deg": [..],
 "coherence": [..], "torque_db": [..], "coherence_min": 0.5,
 "band": [20.0, 250.0], "modes": [..]}` — the per-drive `psd`/time series are
 computed over the chirp's active span rather than motion-flag segments.
+
+A `ringdown` step carries the normal `drives`/`accel` blocks plus a
+`ringdown` block — the free-decay modal fit of every post-stop tail
+(guard 10 ms after the commanded stop, window `dwell_ms − 50 ms`):
+
+```json
+{"ringdown": {"guard_ms": 10.0, "window_ms": 1450.0, "sources": [
+  {"source": "combined|<drive>|accel_x|accel_y|accel_z",
+   "unit": "um|mm/s2", "tails": 6, "noise_floor": 4.9,
+   "modes": [{"freq_hz": 41.2, "zeta": 0.031, "zeta_lo": 0.029,
+              "zeta_hi": 0.034, "amp": 2218.7, "disp_um": 0.42,
+              "tails": 6, "cycles": 20.1, "r2": 0.95,
+              "fit_start_ms": 30.3}]}]}}
+```
+
+Per tail, each Welch-PSD peak (≥ 6× the 10–450 Hz band median) is
+band-isolated via an FFT analytic signal (even-reflected edges; a
+wide-band refit when the decay outruns the isolation filter), and the log
+envelope + unwrapped phase give decay rate and damped frequency — hence
+natural `freq_hz` and damping ratio `zeta`. Fits below 3 cycles, R² < 0.5
+or incoherent phase are dropped; modes seen in fewer than two tails are
+noise (unless the source has a single tail). Per-source modes are the
+per-tail fits clustered within max(3 Hz, 6%), medians reported, `zeta_lo`/
+`zeta_hi` the spread, `amp` the envelope at fit start in source units and
+`disp_um` the residual displacement it implies. Servo sources are
+following error in µm (plus the belt-combined on-axis series on corexy);
+accelerometer sources are per-axis mm/s². A mode with negative `zeta`
+flags the step `ringdown_growing_oscillation`. The verdict recommends
+nothing; `reason` carries the dominant mode of the most informative source
+(accelerometer over combined over drives) and the shaper parameters it
+implies. Its plot step adds a `ringdown` block:
+`{"sources": [{"source", "unit", "modes": [..],
+"psd_freq_hz": [..], "psd": [..]` (mean tail PSD)`,
+"tails": [{"start_s", "t_ms": [..], "value": [..]}]` (headline sources
+only, ≤ 4 tails, ≤ 800 points each)`,
+"envelope_t_ms": [..], "envelope": [..]}]}` — the dominant-mode decay
+envelope over the first tail's time grid.
 
 ## plot_series.json (version 1, servo-cal writes)
 
