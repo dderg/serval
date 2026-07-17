@@ -110,30 +110,41 @@ class FakeNode:
 
 
 class FakeEngine:
+    def __init__(self):
+        self.calls = []
+
     def sdo_read(self, handle, slot, index, subindex):
         return 2, 7
 
+    def set_post_processor_bypass(self, enabled):
+        self.calls.append(("bypass", enabled))
+
+    def set_jerk_override(self, jerk):
+        self.calls.append(("jerk", jerk))
+
 
 class FakeAccelClient:
-    def __init__(self):
+    def __init__(self, valid=True):
         self.finished = False
+        self.valid = valid
 
     def finish_measurements(self):
         self.finished = True
 
     def has_valid_samples(self):
-        return True
+        return self.valid
 
     def get_samples(self):
         return [(100.0 + 0.001 * k, 1.0, 2.0, 3.0) for k in range(100)]
 
 
 class FakeAccelChip:
-    def __init__(self):
+    def __init__(self, valid=True):
         self.clients = []
+        self.valid = valid
 
     def start_internal_client(self):
-        client = FakeAccelClient()
+        client = FakeAccelClient(self.valid)
         self.clients.append(client)
         return client
 
@@ -266,6 +277,62 @@ def test_one_step_per_speed_with_recorded_stops():
     assert plan["accel"] == 20000.0, "defaults to the largest config accel"
     assert plan["dwell_ms"] == 1500
     assert plan["iterations"] == 3
+    assert plan["center"] == 110.0, "bounds (20,200) center on 110"
+    assert plan["cruise_ms"] == 200
+
+
+def _step_extents(gcode, coord_letter="X"):
+    extents = set()
+    for line in _g1_lines(gcode.scripts):
+        for tok in line.split():
+            if tok.startswith(coord_letter):
+                extents.add(float(tok[1:]))
+    return extents
+
+
+def test_strokes_are_short_and_centered():
+    sc, gcode = make_calibration()
+    sc.cmd_SERVO_MEASURE_RINGDOWN(FakeGcmd(AXIS="X", SPEEDS="100,400"))
+    # accel 20000, cruise 200 ms: v=100 -> 0.5 + 20 = 20.5 mm centered on
+    # 110 -> 99.75..120.25; v=400 -> 8 + 80 = 88 mm -> 66..154.
+    assert _step_extents(gcode) == {99.75, 120.25, 66.0, 154.0}
+
+
+def test_cruise_ms_scales_the_stroke():
+    sc, gcode = make_calibration()
+    sc.cmd_SERVO_MEASURE_RINGDOWN(FakeGcmd(AXIS="X", SPEEDS="100", CRUISE_MS=0))
+    # No cruise: the stroke is exactly the accel+decel reach v^2/a = 0.5 mm.
+    assert _step_extents(gcode) == {109.75, 110.25}
+
+
+def test_stroke_exceeding_bounds_fails_loud():
+    sc, _ = make_calibration()
+    with pytest.raises(RuntimeError, match="lower SPEEDS or CRUISE_MS"):
+        sc.cmd_SERVO_MEASURE_RINGDOWN(FakeGcmd(AXIS="X", SPEEDS="2000"))
+
+
+def test_bypass_and_jerk_wrap_the_strokes_and_restore():
+    sc, gcode = make_calibration()
+    sc.cmd_SERVO_MEASURE_RINGDOWN(FakeGcmd(AXIS="X", SPEEDS="250"))
+    engine = sc.printer.lookup_object("motion_engine")
+    assert engine.calls == [
+        ("bypass", True),
+        ("jerk", float("inf")),
+        ("jerk", None),
+        ("bypass", False),
+    ]
+
+
+def test_bypass_and_jerk_restore_on_failure():
+    sc, gcode = make_calibration()
+    sc.printer._objs["adxl345 tool"] = FakeAccelChip(valid=False)
+    with pytest.raises(RuntimeError, match="no data"):
+        sc.cmd_SERVO_MEASURE_RINGDOWN(
+            FakeGcmd(AXIS="X", SPEEDS="250", ACCEL_CHIP="adxl345 tool")
+        )
+    engine = sc.printer.lookup_object("motion_engine")
+    assert engine.calls[-2:] == [("jerk", None), ("bypass", False)]
+    assert sc._active_run is None
 
 
 def test_strokes_are_submitted_one_move_at_a_time():
@@ -273,14 +340,15 @@ def test_strokes_are_submitted_one_move_at_a_time():
     sc.cmd_SERVO_MEASURE_RINGDOWN(
         FakeGcmd(AXIS="X", SPEEDS="250", ITERATIONS=2)
     )
-    g1 = _g1_lines(gcode.scripts)
-    assert len(g1) == 4, "2 iterations = 4 single-move scripts"
-    for s in gcode.scripts:
-        if isinstance(s, str) and s.startswith("G1 "):
-            assert "\n" not in s, (
-                "each stroke must be its own script so the stop fence "
-                "lands between the move and the dwell: %r" % (s,)
-            )
+    strokes = [
+        s for s in gcode.scripts if isinstance(s, str) and s.startswith("G1 ")
+    ]
+    assert len(strokes) == 4, "2 iterations = 4 single-move stroke scripts"
+    for s in strokes:
+        assert "\n" not in s, (
+            "each stroke must be its own script so the stop fence "
+            "lands between the move and the dwell: %r" % (s,)
+        )
     assert any(
         isinstance(s, str) and s.startswith("SET_VELOCITY_LIMIT ACCEL=20000")
         for s in gcode.scripts

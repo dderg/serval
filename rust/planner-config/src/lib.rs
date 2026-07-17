@@ -408,6 +408,10 @@ pub struct PlannerConfig {
     pub runtime_corner_deviation: Option<f64>,
     pub corner: geometry::CornerFitConfig,
     pub post_processors: PostProcessorSet,
+    /// While set, `compile_active_chains` yields identity chains — the
+    /// pipeline runs unshaped so a calibration transient measures the raw
+    /// plant. The configured `post_processors` stay untouched for restore.
+    pub post_processor_bypass: bool,
     pub max_extrude_only_velocity: Option<f64>,
     pub max_extrude_only_accel: Option<f64>,
     pub fit_tolerance_mm: f64,
@@ -418,6 +422,11 @@ pub struct PlannerConfig {
 pub struct RuntimeCaps {
     pub velocity: Option<f64>,
     pub accel: Option<f64>,
+    /// REPLACES the static `[printer] max_jerk` while set — unlike
+    /// velocity/accel this is not a min-cap, because calibration
+    /// (SERVO_MEASURE_RINGDOWN) needs to RAISE jerk (to infinity) so the
+    /// stop transient excites the plant unsmoothed.
+    pub jerk_override: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -511,6 +520,24 @@ impl PlannerConfig {
             .unwrap_or(self.cartesian.corner_deviation)
     }
 
+    /// The chains the pipeline should run right now: the configured
+    /// post-processors, or identity chains while `post_processor_bypass`
+    /// is set. Every live chain push must come through here so a
+    /// parameter update during a bypass window cannot silently re-arm
+    /// shaping.
+    pub fn compile_active_chains(&self) -> Result<AxisChainSet, PostProcessorConfigError> {
+        if self.post_processor_bypass {
+            let chains = (0..self.axis_registry.n_axes())
+                .map(|_| CompiledChain::compile(&[]).map_err(PostProcessorConfigError::Param))
+                .collect::<Result<_, _>>()?;
+            return Ok(AxisChainSet {
+                chains,
+                followers: self.axis_registry.follower_index_map(),
+            });
+        }
+        self.post_processors.compile(&self.axis_registry)
+    }
+
     pub fn validate_corner_budget(&self, chains: &AxisChainSet) -> Result<(), String> {
         validate_corner_budget(self.corner_deviation(), self.cartesian.max_accel, chains)
     }
@@ -538,6 +565,7 @@ impl Default for PlannerConfig {
             runtime_corner_deviation: None,
             corner: geometry::CornerFitConfig::default(),
             post_processors,
+            post_processor_bypass: false,
             max_extrude_only_velocity: None,
             max_extrude_only_accel: None,
             fit_tolerance_mm: 0.005,

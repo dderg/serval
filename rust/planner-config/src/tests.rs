@@ -33,6 +33,7 @@ fn effective_limits_runtime_caps_clamp_but_never_raise() {
     cfg.runtime_caps = RuntimeCaps {
         velocity: Some(50.0),
         accel: Some(10_000_000.0),
+        jerk_override: None,
     };
     let (v, a, _) = cfg.effective_limits();
     assert_eq!(v, 50.0);
@@ -231,6 +232,41 @@ fn registry_with_e(e_post_processors: &[&str]) -> AxisRegistry {
     e.post_processors = e_post_processors.iter().map(|s| (*s).to_string()).collect();
     decls.push(e);
     AxisRegistry::try_new(decls).unwrap()
+}
+
+#[test]
+fn bypass_compiles_identity_chains_and_preserves_config() {
+    let mut decls: Vec<AxisDecl> = ["x", "y", "z"].iter().map(|n| decl(n, &[])).collect();
+    decls[0].post_processors = vec!["is".to_string()];
+    let registry = AxisRegistry::try_new(decls).unwrap();
+    let set = PostProcessorSet::try_new(
+        &registry,
+        &[pp("is", "smooth_bell", &[("smooth_time", 0.01605)])],
+    )
+    .unwrap();
+    let mut cfg = PlannerConfig::default();
+    cfg.axis_registry = registry;
+    cfg.post_processors = set;
+    let shaped = cfg.compile_active_chains().unwrap();
+    assert!(shaped.chains[0].kernel_variance_s2() > 0.0);
+
+    cfg.post_processor_bypass = true;
+    let identity = cfg.compile_active_chains().unwrap();
+    assert_eq!(identity.chains.len(), shaped.chains.len());
+    assert!(
+        identity
+            .chains
+            .iter()
+            .all(|c| c.kernel_variance_s2() == 0.0),
+        "bypass must yield identity chains"
+    );
+
+    cfg.post_processor_bypass = false;
+    let restored = cfg.compile_active_chains().unwrap();
+    assert!(
+        restored.chains[0].kernel_variance_s2() > 0.0,
+        "clearing the bypass must restore the configured chains"
+    );
 }
 
 #[test]

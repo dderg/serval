@@ -3877,9 +3877,10 @@ function reconstructCommand(manifest) {
     }
     case "ringdown": {
       const plan = manifest.stroke_plan;
+      const cruise = plan.cruise_ms == null ? "" : `CRUISE_MS=${plan.cruise_ms} `;
       return (
         `SERVO_MEASURE_RINGDOWN SPEEDS=${(plan.speeds || []).join(",")} ` +
-        `ACCEL=${plan.accel} DWELL_MS=${plan.dwell_ms} ${common}`
+        `ACCEL=${plan.accel} DWELL_MS=${plan.dwell_ms} ${cruise}${common}`
       );
     }
     default:

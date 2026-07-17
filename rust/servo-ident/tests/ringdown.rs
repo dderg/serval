@@ -324,9 +324,9 @@ fn build_ringdown_run(dir: &Path) {
         "axis": "X",
         "kinematics": "cartesian",
         "belts": null,
-        "stroke_plan": {"start": 20.0, "end": 200.0, "speed": null,
+        "stroke_plan": {"center": 110.0, "speed": null,
                          "accel": 30000.0, "iterations": 1, "dwell_ms": 1000,
-                         "speeds": [250.0]},
+                         "cruise_ms": 200, "speeds": [250.0]},
         "steps": [{
             "name": "rd_v250",
             "swept": {"speed": 250.0},

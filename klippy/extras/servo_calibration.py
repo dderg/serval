@@ -2186,20 +2186,28 @@ class ServoCalibration:
 
     RINGDOWN_MIN_DWELL_MS = 500
     RINGDOWN_DEFAULT_DWELL_MS = 1500
+    RINGDOWN_DEFAULT_CRUISE_MS = 200
 
     cmd_SERVO_MEASURE_RINGDOWN_help = (
-        "Ring-down resonance measurement: high-accel strokes into a full "
-        "stop, one step per SPEEDS entry, recording each stroke's "
-        "commanded-stop time. servo-cal fits the post-stop residual "
-        "vibration (servo encoders + optional accelerometer) for per-mode "
-        "frequency and damping ratio - the free decay of the closed-loop "
-        "plant, immune to the drive compensating a steady sweep. Params "
-        "AXIS=X|Y|A|B SPEEDS ACCEL ITERATIONS DWELL_MS ACCEL_CHIP TAG"
+        "Ring-down resonance measurement: short strokes centered on the "
+        "axis - accelerate to speed, cruise CRUISE_MS so the accel "
+        "transient settles, then a full stop - with post-processors "
+        "bypassed and jerk limiting lifted so the stop excites the raw "
+        "closed-loop plant. One step per SPEEDS entry; each stroke's "
+        "commanded-stop time is recorded. servo-cal fits the post-stop "
+        "residual vibration (servo encoders + optional accelerometer) for "
+        "per-mode frequency and damping ratio - the free decay a drive "
+        "cannot compensate the way it fights a steady sweep. Params "
+        "AXIS=X|Y|A|B SPEEDS ACCEL ITERATIONS DWELL_MS CRUISE_MS "
+        "ACCEL_CHIP TAG"
     )
 
-    def cmd_SERVO_MEASURE_RINGDOWN(self, gcmd: Any) -> None:
-        axis = gcmd.get("AXIS", "X").upper()
-        plan = servo_strokes.build_plan(gcmd, self._kin(), self.bounds, axis)
+    def _ringdown_strokes(
+        self, gcmd: Any, plan: Any, accel: float, cruise_ms: int
+    ) -> list[tuple[int, float, float, float]]:
+        """(speed, start_u, end_u, length_mm) per step: the shortest
+        centered stroke that reaches cruise speed and holds it for
+        `cruise_ms` before the stop."""
         speeds_raw = self._floats(gcmd.get("SPEEDS", None)) or list(self.speeds)
         speeds: list[int] = []
         for s in speeds_raw:
@@ -2209,6 +2217,33 @@ class ServoCalibration:
             if sv not in speeds:
                 speeds.append(sv)
         speeds.sort()
+        center_u = (plan.start + plan.end) / 2.0
+        avail_half_u = (plan.end - plan.start) / 2.0
+        strokes = []
+        for speed in speeds:
+            length_mm = speed * speed / accel + speed * cruise_ms / 1000.0
+            half_u = length_mm / (2.0 * plan.th_per_unit)
+            if half_u > avail_half_u:
+                raise gcmd.error(
+                    "%d mm/s needs a %.1f mm stroke (%.1f mm accel+decel + "
+                    "%.1f mm cruise) but only %.1f mm fit around the center "
+                    "- lower SPEEDS or CRUISE_MS, or widen START/END"
+                    % (
+                        speed,
+                        length_mm,
+                        speed * speed / accel,
+                        speed * cruise_ms / 1000.0,
+                        2.0 * avail_half_u * plan.th_per_unit,
+                    )
+                )
+            strokes.append(
+                (speed, center_u - half_u, center_u + half_u, length_mm)
+            )
+        return strokes
+
+    def cmd_SERVO_MEASURE_RINGDOWN(self, gcmd: Any) -> None:
+        axis = gcmd.get("AXIS", "X").upper()
+        plan = servo_strokes.build_plan(gcmd, self._kin(), self.bounds, axis)
         accel = gcmd.get_float("ACCEL", max(self.accels), above=0.0)
         iterations = gcmd.get_int("ITERATIONS", 3, minval=1)
         dwell = gcmd.get_int(
@@ -2216,17 +2251,22 @@ class ServoCalibration:
             max(self.dwell_ms, self.RINGDOWN_DEFAULT_DWELL_MS),
             minval=self.RINGDOWN_MIN_DWELL_MS,
         )
+        cruise_ms = gcmd.get_int(
+            "CRUISE_MS", self.RINGDOWN_DEFAULT_CRUISE_MS, minval=0
+        )
+        strokes = self._ringdown_strokes(gcmd, plan, accel, cruise_ms)
         tag = gcmd.get("TAG", "ringdown")
         chip, chip_name = self._accel_chip(gcmd)
         servos = plan.servos
+        engine = self.printer.lookup_object("motion_engine")
         stroke_plan = {
-            "start": plan.start,
-            "end": plan.end,
+            "center": (plan.start + plan.end) / 2.0,
             "speed": None,
-            "speeds": speeds,
+            "speeds": [s for s, _, _, _ in strokes],
             "accel": accel,
             "iterations": iterations,
             "dwell_ms": dwell,
+            "cruise_ms": cruise_ms,
             "accel_chip": chip_name,
         }
         run = self._begin_run(
@@ -2241,56 +2281,76 @@ class ServoCalibration:
         try:
             for prep_axis in plan.prep:
                 self._prep(prep_axis, dwell)
+            engine.set_post_processor_bypass(True)
             try:
-                for i, speed in enumerate(speeds):
-                    name = "%s_v%d" % (tag, speed)
-                    gcmd.respond_info(
-                        "ringdown %d/%d: %s at %d mm/s, accel %.0f mm/s^2, "
-                        "%d stops"
-                        % (
-                            i + 1,
-                            len(speeds),
-                            axis,
-                            speed,
-                            accel,
-                            iterations * 2,
-                        )
-                    )
-                    self._start_capture(name, servos)
-                    aclient = (
-                        None if chip is None else chip.start_internal_client()
-                    )
-                    try:
-                        stops = servo_strokes.emit_strokes_with_stop_times(
-                            self.printer,
-                            self.gcode,
-                            plan.coord,
-                            plan.start,
-                            plan.end,
-                            plan.th_per_unit,
-                            float(speed),
-                            accel,
-                            iterations,
-                            dwell,
-                        )
-                        self._stop_capture()
-                    finally:
-                        if aclient is not None:
-                            aclient.finish_measurements()
-                    step = SweepStep(
-                        name, {"speed": float(speed)}, [], stops=stops
-                    )
-                    if aclient is not None:
-                        assert chip_name is not None, (
-                            "accel client exists without a chip name"
-                        )
-                        step.accel = os.path.basename(
-                            self._write_accel_csv(
-                                gcmd, aclient, chip_name, name
+                engine.set_jerk_override(float("inf"))
+                try:
+                    for i, (speed, start_u, end_u, length_mm) in enumerate(
+                        strokes
+                    ):
+                        name = "%s_v%d" % (tag, speed)
+                        gcmd.respond_info(
+                            "ringdown %d/%d: %s at %d mm/s, accel %.0f "
+                            "mm/s^2, %.1f mm stroke, %d stops"
+                            % (
+                                i + 1,
+                                len(strokes),
+                                axis,
+                                speed,
+                                accel,
+                                length_mm,
+                                iterations * 2,
                             )
                         )
-                    run.record_step(step)
+                        servo_strokes.goto(
+                            self.gcode,
+                            self.travel_speed,
+                            plan.coord(start_u),
+                            dwell,
+                        )
+                        self._start_capture(name, servos)
+                        aclient = (
+                            None
+                            if chip is None
+                            else chip.start_internal_client()
+                        )
+                        try:
+                            stops = servo_strokes.emit_strokes_with_stop_times(
+                                self.printer,
+                                self.gcode,
+                                plan.coord,
+                                start_u,
+                                end_u,
+                                plan.th_per_unit,
+                                float(speed),
+                                accel,
+                                iterations,
+                                dwell,
+                            )
+                            self._stop_capture()
+                        finally:
+                            if aclient is not None:
+                                aclient.finish_measurements()
+                        step = SweepStep(
+                            name,
+                            {"speed": float(speed), "stroke_mm": length_mm},
+                            [],
+                            stops=stops,
+                        )
+                        if aclient is not None:
+                            assert chip_name is not None, (
+                                "accel client exists without a chip name"
+                            )
+                            step.accel = os.path.basename(
+                                self._write_accel_csv(
+                                    gcmd, aclient, chip_name, name
+                                )
+                            )
+                        run.record_step(step)
+                finally:
+                    engine.set_jerk_override(None)
             finally:
+                engine.set_post_processor_bypass(False)
                 self._restore()
             self._analyze_and_report(gcmd, run)
         finally:

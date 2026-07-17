@@ -66,15 +66,21 @@ A `differential` run's `stroke_plan` instead holds the chirp:
 is the belt letter, `motors` lists the pair in slot order and `belts` is
 null.
 A `ringdown` run (`SERVO_MEASURE_RINGDOWN`) sweeps stroke speed: its
-`stroke_plan` is `{"start": 20.0, "end": 200.0, "speed": null,
-"speeds": [100, 400], "accel": 20000.0, "iterations": 3, "dwell_ms": 1500,
-"accel_chip": "adxl345 tool"}` (`accel_chip` null without one), and each
-step additionally carries `"stops": [print_time, ...]` — the commanded-stop
-print-time of every stroke, read off the motion fence before the dwell,
-`iterations * 2` per step. The analyzer windows accelerometer ring-down
-tails from these; servo tails come from the capture's own target-motion
-segments, and a count mismatch between stops, strokes and the plan is a
-hard error.
+`stroke_plan` is `{"center": 110.0, "speed": null, "speeds": [100, 400],
+"accel": 20000.0, "iterations": 3, "dwell_ms": 1500, "cruise_ms": 200,
+"accel_chip": "adxl345 tool"}` (`accel_chip` null without one). Strokes
+are centered on `center`, each the shortest length that reaches cruise
+speed and holds it `cruise_ms` before the stop
+(`v²/a + v·cruise_ms`, recorded per step as `swept.stroke_mm`) — the test
+never sweeps the whole bed. The strokes run with post-processors bypassed
+and the jerk limit lifted (engine `set_post_processor_bypass` /
+`set_jerk_override`, both restored after), so the stop excites the raw
+closed-loop plant. Each step additionally carries
+`"stops": [print_time, ...]` — the commanded-stop print-time of every
+stroke, read off the motion fence before the dwell, `iterations * 2` per
+step. The analyzer windows accelerometer ring-down tails from these;
+servo tails come from the capture's own target-motion segments, and a
+count mismatch between stops, strokes and the plan is a hard error.
 `ambient.journal_params` holds the readback of every
 `[servo_calibration] journal_params:` address per captured drive, taken at
 run start. `ambient.notches` is always recorded per captured drive, also at
