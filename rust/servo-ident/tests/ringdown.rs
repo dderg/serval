@@ -8,7 +8,9 @@ use serde_json::json;
 
 use servo_ident::analyze::{analyze_run, build_run, build_run_incremental};
 use servo_ident::results::{RingdownMode, RingdownResult, RingdownSource};
-use servo_ident::ringdown::{aggregate_modes, analyze_tail, ringdown_verdict_reason, tail_ranges};
+use servo_ident::ringdown::{
+    aggregate_modes, analyze_tail, informative_plot_len, ringdown_verdict_reason, tail_ranges,
+};
 
 const FS: f64 = 4000.0;
 
@@ -114,6 +116,24 @@ fn aggregation_requires_two_sightings_across_tails() {
     assert_eq!(modes.len(), 1, "two sightings must survive: {modes:?}");
     assert!((modes[0].freq_hz - 42.0).abs() < 1.0);
     assert_eq!(modes[0].tails, 2);
+}
+
+#[test]
+fn plot_span_trims_a_fast_ring_but_keeps_a_persistent_one() {
+    // Fast decay (τ = 25 ms): quiet long before the 1 s window ends.
+    let fast = vec![decay_tail(4000, FS, &[(40.0, 0.1, 500.0)], 1.0, 0)];
+    let noise = 0.6;
+    let trimmed = informative_plot_len(&fast, FS, noise);
+    assert!(
+        (400..1600).contains(&trimmed),
+        "fast ring should trim to a few hundred samples, got {trimmed}"
+    );
+    // Barely damped: still ringing at the end — keep the full window.
+    let persistent = vec![decay_tail(4000, FS, &[(40.0, 0.001, 500.0)], 1.0, 0)];
+    assert_eq!(informative_plot_len(&persistent, FS, noise), 4000);
+    // Nothing but noise: the minimum span, not zero.
+    let quiet = vec![decay_tail(4000, FS, &[], 1.0, 0)];
+    assert_eq!(informative_plot_len(&quiet, FS, noise), 400);
 }
 
 #[test]

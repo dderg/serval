@@ -449,6 +449,41 @@ pub fn tail_ranges(
     out
 }
 
+const PLOT_NOISE_MULT: f64 = 2.0;
+const PLOT_SPAN_PAD_FRACTION: f64 = 0.3;
+const MIN_PLOT_SPAN_MS: f64 = 100.0;
+
+/// Samples worth drawing: the ring is over once every ~5 ms block of every
+/// tail sits at the noise floor, so the plotted span ends there (padded
+/// 30%) instead of stretching the ring into the left edge of a chart that
+/// is mostly quiet dwell. A ring that never settles keeps the full window.
+pub fn informative_plot_len(tails: &[Vec<f64>], fs: f64, noise_floor: f64) -> usize {
+    let n = tails.iter().map(Vec::len).min().unwrap_or(0);
+    if n == 0 {
+        return 0;
+    }
+    let block = ((0.005 * fs).ceil() as usize).max(1);
+    let mut last_active = 0usize;
+    for tail in tails {
+        let mut start = 0usize;
+        while start < tail.len() {
+            let end = (start + block).min(tail.len());
+            let seg = &tail[start..end];
+            let mean = seg.iter().sum::<f64>() / seg.len() as f64;
+            let rms = (seg.iter().map(|&v| (v - mean) * (v - mean)).sum::<f64>()
+                / seg.len() as f64)
+                .sqrt();
+            if rms > PLOT_NOISE_MULT * noise_floor {
+                last_active = last_active.max(end);
+            }
+            start = end;
+        }
+    }
+    let min_span = ((MIN_PLOT_SPAN_MS / 1000.0 * fs).ceil() as usize).min(n);
+    let padded = last_active + (last_active as f64 * PLOT_SPAN_PAD_FRACTION) as usize + block;
+    padded.max(min_span).min(n)
+}
+
 fn late_window_rms(tails: &[Vec<f64>]) -> f64 {
     let mut per_tail: Vec<f64> = Vec::new();
     for t in tails {
@@ -506,12 +541,15 @@ fn analyze_source(
         *p /= n_tails as f64;
     }
     let modes = aggregate_modes(&per_tail_fits, unit_is_accel);
+    let noise_floor = late_window_rms(&input.tails);
 
     let mut plot_tails = Vec::new();
     let mut envelope_t_ms = Vec::new();
     let mut envelope = Vec::new();
     if input.plot_tails {
+        let plot_len = informative_plot_len(&input.tails, input.fs, noise_floor);
         for (i, tail) in input.tails.iter().take(MAX_PLOT_TAILS).enumerate() {
+            let tail = &tail[..plot_len.min(tail.len())];
             let stride = tail.len().div_ceil(MAX_PLOT_POINTS).max(1);
             let idxs: Vec<usize> = (0..tail.len()).step_by(stride).collect();
             plot_tails.push(PlotRingdownTail {
@@ -539,7 +577,7 @@ fn analyze_source(
             source: input.source.clone(),
             unit: input.unit.clone(),
             tails: n_tails,
-            noise_floor: late_window_rms(&input.tails),
+            noise_floor,
             modes: modes.clone(),
         },
         PlotRingdownSource {

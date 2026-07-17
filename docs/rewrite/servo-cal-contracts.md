@@ -202,7 +202,10 @@ implies. Its plot step adds a `ringdown` block:
 `{"sources": [{"source", "unit", "modes": [..],
 "psd_freq_hz": [..], "psd": [..]` (mean tail PSD)`,
 "tails": [{"start_s", "t_ms": [..], "value": [..]}]` (headline sources
-only, ≤ 4 tails, ≤ 800 points each)`,
+only, ≤ 4 tails, ≤ 800 points each, trimmed to the informative span —
+the plot ends once every ~5 ms block of every tail sits at the noise
+floor, padded 30%, ≥ 100 ms — so a fast ring is not squeezed against the
+left edge of a mostly-quiet window)`,
 "envelope_t_ms": [..], "envelope": [..]}]}` — the dominant-mode decay
 envelope over the first tail's time grid.
 
