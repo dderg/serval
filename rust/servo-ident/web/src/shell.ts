@@ -76,7 +76,7 @@ function consoleSectionHtml(def: Partial<PageDef>): string {
 /// the mean over drives instead of the worst.
 function motorView() {
   const v = localStorage.getItem(MOTOR_VIEW_KEY);
-  return v === "per-motor" || v === "avg" ? v : "agg";
+  return v === "per-motor" || v === "avg" || v === "cartesian" ? v : "agg";
 }
 
 function motorViewPerMotor() {
@@ -85,28 +85,36 @@ function motorViewPerMotor() {
 
 /// Sections whose aggregate is already an average (PSD, combined time
 /// domain) don't offer a separate "avg" chip; there, the stored "avg"
-/// view lights up the aggregate chip.
-function motorViewEffective(withAvg: boolean): string {
+/// view lights up the aggregate chip. Likewise "cartesian" exists only
+/// where a section offers it (the PSD chart) and reads as the aggregate
+/// everywhere else.
+function motorViewEffective(withAvg: boolean, withCartesian = false): string {
   const view = motorView();
-  return !withAvg && view === "avg" ? "agg" : view;
+  if (view === "avg" && !withAvg) return "agg";
+  if (view === "cartesian" && !withCartesian) return "agg";
+  return view;
 }
 
-function motorViewToggleHtml(aggLabel: string, withAvg = false): string {
-  const effective = motorViewEffective(withAvg);
+function motorViewToggleHtml(aggLabel: string, withAvg = false, withCartesian = false): string {
+  const effective = motorViewEffective(withAvg, withCartesian);
   const chip = (v: string, label: string) =>
     `<button class="chip motor-view-btn${effective === v ? " active" : ""}" data-view="${v}">${label}</button>`;
   return (
-    `<span class="chips motor-view-chips${withAvg ? " with-avg" : ""}">` +
+    `<span class="chips motor-view-chips${withAvg ? " with-avg" : ""}${withCartesian ? " with-cartesian" : ""}">` +
     chip("agg", aggLabel) +
     (withAvg ? chip("avg", "avg") : "") +
     chip("per-motor", "per-motor") +
+    (withCartesian ? chip("cartesian", "cartesian") : "") +
     `</span>`
   );
 }
 
 function syncMotorViewChips() {
   document.querySelectorAll<HTMLElement>(".motor-view-chips").forEach((group) => {
-    const effective = motorViewEffective(group.classList.contains("with-avg"));
+    const effective = motorViewEffective(
+      group.classList.contains("with-avg"),
+      group.classList.contains("with-cartesian")
+    );
     group.querySelectorAll<HTMLElement>(".motor-view-btn").forEach((b) => {
       b.classList.toggle("active", b.dataset.view === effective);
     });
@@ -197,7 +205,7 @@ function analysisSectionsHtml(def: PageDef): string {
       `<section class="psd-section">` +
         sectionHeadHtml(
           "following-error PSD",
-          motorViewToggleHtml("avg") +
+          motorViewToggleHtml("avg", false, true) +
             `<label class="note">to <select id="psd-max-freq">` +
             PSD_MAX_FREQ_CHOICES_HZ.map(
               (f) =>

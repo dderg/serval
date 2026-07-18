@@ -446,6 +446,58 @@ function psdFerrTraces(names: string[], plots: PlotSeries[], steps: string[], un
   return traces;
 }
 
+const CARTESIAN_UM2_PER_MM2 = 1e6;
+
+function uniformCountsPerMm(runName: string): number {
+  const detail = state.details.get(runName);
+  const motors = (detail && detail.manifest && detail.manifest.motors) || [];
+  const values = [
+    ...new Set(motors.map((m) => m.counts_per_mm).filter((v): v is number => v != null && v > 0)),
+  ];
+  if (values.length !== 1) {
+    throw new Error(
+      `${runName}: cartesian counts view needs one shared counts_per_mm, manifest has ${values.length}`
+    );
+  }
+  return values[0];
+}
+
+/// Cartesian-mode PSDs arrive in mm²/Hz (motor counts already projected
+/// through the spatial frame server-side); µm view scales power by 1000²,
+/// counts view maps back through the run's single counts_per_mm.
+function psdCartesianScaled(psdMm2: number[], runName: string, unit: FerrUnit): number[] {
+  if (unit === "counts") {
+    const cpm = uniformCountsPerMm(runName);
+    return psdMm2.map((p) => p * cpm * cpm);
+  }
+  return psdMm2.map((p) => p * CARTESIAN_UM2_PER_MM2);
+}
+
+function psdCartesianTraces(names: string[], plots: PlotSeries[], steps: string[], unit: FerrUnit): PsdTrace[] {
+  const traces: PsdTrace[] = [];
+  plots.forEach((p, i) => {
+    steps.forEach((stepName, j) => {
+      const step = p.steps.find((s) => s.name === stepName);
+      if (!step || !step.psd || !step.psd.cartesian) return;
+      const cartesian = step.psd.cartesian;
+      const style = traceStyle(names, steps, i, j);
+      const modes = Object.entries(cartesian);
+      modes.forEach(([mode, psd], k) => {
+        const clipped = clipToPsdBand(step.psd.freq_hz, psdCartesianScaled(psd, names[i], unit));
+        traces.push({
+          freq: clipped.freq,
+          y: psdToAmplitude(clipped.freq, clipped.y),
+          color: mixColor(style.color, "#ffffff", driveRamp(modes.length, k)),
+          dashed: false,
+          label: `${style.name} (${mode})`,
+          run: names[i],
+        });
+      });
+    });
+  });
+  return traces;
+}
+
 const ACCEL_AXIS_KEYS = ["psd_x", "psd_y", "psd_z"] as const;
 const ACCEL_AXIS_LABELS = ["x", "y", "z"] as const;
 const ACCEL_TOTAL_WIDTH = 2.25;
@@ -571,6 +623,30 @@ function renderPsdChart(names: string[], plots: PlotSeries[], steps: string[]) {
     return;
   }
   const psdOpts = { linear: true, zeroFloor: true };
+  const hasCartesian = plots.some((p) =>
+    p.steps.some((s) => steps.includes(s.name) && s.psd && s.psd.cartesian)
+  );
+  const cartesianBtn = document.querySelector<HTMLButtonElement>(
+    '.psd-section .motor-view-btn[data-view="cartesian"]'
+  );
+  if (cartesianBtn) {
+    cartesianBtn.disabled = !hasCartesian;
+    cartesianBtn.title = hasCartesian
+      ? "project per-motor error through the spatial frame into cartesian axis modes"
+      : "unavailable — the selected runs' manifests carry no spatial frame";
+  }
+  if (motorView() === "cartesian") {
+    if (!hasCartesian) {
+      container.innerHTML =
+        '<p class="note">cartesian view needs a run whose manifest carries a spatial frame</p>';
+      return;
+    }
+    const cartesian = psdCartesianTraces(names, plots, steps, unit);
+    container.appendChild(
+      psdBox("following error — cartesian modes", cartesian, RESONANCE_BAND_HZ, `ferr amplitude (${unit})`, psdOpts)
+    );
+    return;
+  }
   const ferr = psdFerrTraces(names, plots, steps, unit);
   container.appendChild(
     psdBox("following error", ferr, RESONANCE_BAND_HZ, `ferr amplitude (${unit})`, psdOpts)
@@ -675,4 +751,4 @@ function fillStepChips(container: HTMLElement, stepNames: string[]) {
 }
 
 export type { MetricsRow, PsdBoxOpts, SweepSeries };
-export { driveMoveSummary, settleCellHtml, torqueCellHtml, metricsDriveRow, foldDriveRows, metricsTableRows, heatCellStyle, renderMetricsTable, sweptAxisKey, sweepMetricsSeries, renderSweepMetricsChart, driveRamp, psdFerrScaled, psdDrivePairs, psdFerrTraces, psdAccelTraces, renderAccelPsdChart, fmtLinear, psdBox, renderPsdChart, visibleStepNames, renderStepChips, renderMotorChips, fillStepChips };
+export { driveMoveSummary, settleCellHtml, torqueCellHtml, metricsDriveRow, foldDriveRows, metricsTableRows, heatCellStyle, renderMetricsTable, sweptAxisKey, sweepMetricsSeries, renderSweepMetricsChart, driveRamp, psdFerrScaled, psdDrivePairs, psdFerrTraces, uniformCountsPerMm, psdCartesianScaled, psdCartesianTraces, psdAccelTraces, renderAccelPsdChart, fmtLinear, psdBox, renderPsdChart, visibleStepNames, renderStepChips, renderMotorChips, fillStepChips };

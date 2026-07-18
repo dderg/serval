@@ -76,6 +76,26 @@ fn assert_psd_shape(plot: &Value) {
                 step["name"]
             );
         }
+        let cartesian = psd["cartesian"].as_object().unwrap_or_else(|| {
+            panic!(
+                "step {}: demo manifests carry a spatial frame, psd.cartesian must be present",
+                step["name"]
+            )
+        });
+        assert_eq!(
+            cartesian.keys().collect::<Vec<_>>(),
+            vec!["x", "y"],
+            "step {}: cartesian modes",
+            step["name"]
+        );
+        for (mode, series) in cartesian {
+            assert_eq!(
+                series.as_array().unwrap().len(),
+                freq_hz.len(),
+                "step {}: cartesian mode {mode} psd length must match freq_hz",
+                step["name"]
+            );
+        }
         let accel = &psd["accel"];
         assert!(
             !accel.is_null(),
@@ -83,13 +103,14 @@ fn assert_psd_shape(plot: &Value) {
             step["name"]
         );
         let accel_freq = accel["freq_hz"].as_array().unwrap();
-        let accel_psd = accel["psd"].as_array().unwrap();
-        assert_eq!(
-            accel_freq.len(),
-            accel_psd.len(),
-            "step {}: accel psd.freq_hz and psd.psd must have equal length",
-            step["name"]
-        );
+        for key in ["psd", "psd_x", "psd_y", "psd_z"] {
+            assert_eq!(
+                accel[key].as_array().unwrap().len(),
+                accel_freq.len(),
+                "step {}: accel {key} and freq_hz must have equal length",
+                step["name"]
+            );
+        }
         assert!(accel_freq.len() <= 2000);
     }
 }

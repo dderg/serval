@@ -15,7 +15,7 @@ use crate::metrics::{
     compute_metrics, drive_series, motion_segments, DriveSeries, DEFAULT_SETTLE_BAND_COUNTS,
     DEFAULT_TORQUE_LIMIT_PER_MILLE,
 };
-use crate::psd::{moving_psd, top_peaks, welch_psd};
+use crate::psd::{moving_psd, segments_welch_psd, top_peaks, welch_psd};
 use crate::resonance::{detect_resonance, recommend_accel};
 use crate::results::{
     AccelResult, Combined, DifferentialResult, DriveResult, Manifest, ManifestSpatial, PlotAccel,
@@ -59,7 +59,7 @@ pub fn path_indices(n: usize, max_points: usize) -> Vec<usize> {
 /// frame (motor counts -> cartesian, invert signs folded into the frame).
 /// `Ok(None)` when the frame has no x+y modes or the capture lacks one of
 /// the frame's motors — a single-axis capture, not an error.
-pub fn xy_path(cap: &Scap, spatial: &ManifestSpatial) -> Result<Option<PlotPath>, String> {
+fn validate_spatial_shape(spatial: &ManifestSpatial) -> Result<(), String> {
     if spatial.frame.len() != spatial.modes.len()
         || spatial.frame.iter().any(|r| r.len() != spatial.axes.len())
     {
@@ -69,6 +69,11 @@ pub fn xy_path(cap: &Scap, spatial: &ManifestSpatial) -> Result<Option<PlotPath>
             spatial.axes.len()
         ));
     }
+    Ok(())
+}
+
+pub fn xy_path(cap: &Scap, spatial: &ManifestSpatial) -> Result<Option<PlotPath>, String> {
+    validate_spatial_shape(spatial)?;
     let (Some(xi), Some(yi)) = (
         spatial.modes.iter().position(|m| m == "x"),
         spatial.modes.iter().position(|m| m == "y"),
@@ -106,6 +111,77 @@ pub fn xy_path(cap: &Scap, spatial: &ManifestSpatial) -> Result<Option<PlotPath>
         }
     }
     Ok(Some(path))
+}
+
+/// `frame` rows are modes, columns motors: `out[m][k] = Σ_s frame[m][s] *
+/// motor_series_mm[s][k]`. Every motor series must share one length.
+pub fn project_modes(frame: &[Vec<f64>], motor_series_mm: &[Vec<f64>]) -> Vec<Vec<f64>> {
+    assert!(!motor_series_mm.is_empty(), "projection needs motor series");
+    let n = motor_series_mm[0].len();
+    assert!(
+        motor_series_mm.iter().all(|s| s.len() == n),
+        "motor series lengths differ"
+    );
+    assert!(
+        frame.iter().all(|row| row.len() == motor_series_mm.len()),
+        "frame column count does not match the motor series count"
+    );
+    frame
+        .iter()
+        .map(|row| {
+            let mut mode = vec![0.0; n];
+            for (c, series) in row.iter().zip(motor_series_mm) {
+                for (o, &v) in mode.iter_mut().zip(series) {
+                    *o += c * v;
+                }
+            }
+            mode
+        })
+        .collect()
+}
+
+/// Per-cartesian-mode following-error PSD in mm²/Hz over the moving
+/// segments: per-motor ferr converted to mm, projected through the
+/// manifest's spatial frame, then Welch on the same grid the per-drive
+/// PSDs use. `Ok(None)` when the capture lacks one of the frame's motors —
+/// a single-axis capture, not an error.
+fn cartesian_ferr_psd(
+    cap: &Scap,
+    spatial: &ManifestSpatial,
+    series_by_name: &BTreeMap<String, DriveSeries>,
+    segs: &[(usize, usize)],
+    fs: f64,
+    expected_bins: usize,
+) -> Result<Option<BTreeMap<String, Vec<f64>>>, String> {
+    validate_spatial_shape(spatial)?;
+    let mut motor_ferr_mm = Vec::new();
+    for motor in &spatial.axes {
+        let Some(series) = series_by_name.get(motor) else {
+            return Ok(None);
+        };
+        let Some(idx) = cap.drive_index(motor) else {
+            return Ok(None);
+        };
+        let cpm = cap.header.drives[idx].counts_per_mm;
+        if cpm <= 0.0 {
+            return Err(format!("drive {motor:?} has counts_per_mm {cpm}"));
+        }
+        motor_ferr_mm.push(series.following_error.iter().map(|&v| v / cpm).collect());
+    }
+    let modes = project_modes(&spatial.frame, &motor_ferr_mm);
+    let mut out = BTreeMap::new();
+    for (mode_name, mode_series) in spatial.modes.iter().zip(modes) {
+        let (freq_hz, psd) = segments_welch_psd(&mode_series, segs, fs)?;
+        if freq_hz.len() != expected_bins {
+            return Err(format!(
+                "cartesian mode {mode_name:?} psd has {} bins, expected {expected_bins} \
+                 (modes must share the per-drive Welch grid)",
+                freq_hz.len()
+            ));
+        }
+        out.insert(mode_name.clone(), psd);
+    }
+    Ok(Some(out))
 }
 
 pub struct AccelSamples {
@@ -356,10 +432,22 @@ pub fn analyze_capture(
     let idxs: Vec<usize> = (0..n).step_by(stride).collect();
     let t_s: Vec<f64> = idxs.iter().map(|&k| k as f64 / fs).collect();
     let first_flags = &series_by_name.values().next().unwrap().flags;
-    let moving: Vec<(f64, f64)> = motion_segments(first_flags)
-        .into_iter()
-        .map(|(s, e)| (s as f64 / fs, e as f64 / fs))
+    let sample_segs = motion_segments(first_flags);
+    let moving: Vec<(f64, f64)> = sample_segs
+        .iter()
+        .map(|&(s, e)| (s as f64 / fs, e as f64 / fs))
         .collect();
+    let cartesian = match spatial {
+        Some(sp) => cartesian_ferr_psd(
+            cap,
+            sp,
+            &series_by_name,
+            &sample_segs,
+            fs,
+            psd_freq_hz.len(),
+        )?,
+        None => None,
+    };
     let mut plot_drives = BTreeMap::new();
     for (dname, s) in &series_by_name {
         plot_drives.insert(
@@ -418,6 +506,7 @@ pub fn analyze_capture(
         psd: PlotPsd {
             freq_hz: psd_freq_hz,
             per_drive: per_drive_psd,
+            cartesian,
             accel: plot_psd_accel,
         },
     };
@@ -533,6 +622,7 @@ pub fn analyze_differential_capture(
         psd: PlotPsd {
             freq_hz: psd_freq_hz,
             per_drive: per_drive_psd,
+            cartesian: None,
             accel: None,
         },
     };

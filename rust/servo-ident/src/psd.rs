@@ -107,19 +107,27 @@ pub fn welch_psd(x: &[f64], fs: f64) -> Result<(Vec<f64>, Vec<f64>), String> {
     Ok((freqs, psd))
 }
 
-pub fn moving_psd(
-    d: &DriveSeries,
+pub fn segments_welch_psd(
+    x: &[f64],
     segs: &[(usize, usize)],
     fs: f64,
 ) -> Result<(Vec<f64>, Vec<f64>), String> {
     if segs.is_empty() {
         return Err("no moving segments in capture — nothing to analyze".to_string());
     }
-    let mut err = Vec::new();
+    let mut moving = Vec::new();
     for &(s, e) in segs {
-        err.extend_from_slice(&d.following_error[s..e]);
+        moving.extend_from_slice(&x[s..e]);
     }
-    welch_psd(&err, fs)
+    welch_psd(&moving, fs)
+}
+
+pub fn moving_psd(
+    d: &DriveSeries,
+    segs: &[(usize, usize)],
+    fs: f64,
+) -> Result<(Vec<f64>, Vec<f64>), String> {
+    segments_welch_psd(&d.following_error, segs, fs)
 }
 
 pub fn top_peaks(freqs: &[f64], psd: &[f64], count: usize) -> Vec<(f64, f64)> {

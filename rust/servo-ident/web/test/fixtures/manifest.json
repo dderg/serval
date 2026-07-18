@@ -2,7 +2,7 @@
   "version": 1,
   "experiment": "gain_sweep",
   "tag": "cal_attempt3",
-  "created_utc": "2026-07-18T19:24:52Z",
+  "created_utc": "2026-07-18T19:29:15Z",
   "axis": "X",
   "kinematics": "corexy",
   "git_rev": "demo",
@@ -117,7 +117,7 @@
         "servo": "motor_a",
         "addr": "0x2001.0x31",
         "value": 0,
-        "time_utc": "2026-07-18T19:24:52Z"
+        "time_utc": "2026-07-18T19:29:15Z"
       }
     ]
   }

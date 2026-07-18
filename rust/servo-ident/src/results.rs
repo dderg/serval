@@ -206,6 +206,7 @@ pub struct PlotPsdAccel {
 pub struct PlotPsd {
     pub freq_hz: Vec<f64>,
     pub per_drive: BTreeMap<String, Vec<f64>>,
+    pub cartesian: Option<BTreeMap<String, Vec<f64>>>,
     pub accel: Option<PlotPsdAccel>,
 }
 
