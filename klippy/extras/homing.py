@@ -558,6 +558,34 @@ class Homing:
                 " homing" % ("XYZ"[axis], _DRAIN_PAUSE_TIMEOUT)
             )
 
+    def _abort_trip_and_adopt_stop_position(self, gcmd, toolhead, engine, axis):
+        """A trip move that never triggered still physically moved the
+        toolhead; the host must adopt the engine's reconciled stop position
+        or every later hop/retract decision runs on the pre-trip height —
+        on a tilted bed that sends the next G28's travel move through the
+        bed at the lowest corner."""
+        stop_pos = engine.home_abort()
+        if stop_pos is None:
+            raise gcmd.error(
+                "%s trip move aborted but the toolhead stop position could"
+                " not be reconciled — position is unknown; run"
+                " FIRMWARE_RESTART before any further motion" % ("XYZ"[axis],)
+            )
+        newpos = list(toolhead.get_position())
+        newpos[:3] = stop_pos
+        toolhead.set_position(newpos)
+        structured_log.event(
+            "homing",
+            "trip_aborted_position_adopted",
+            msg="homing: %s trip aborted; toolhead position reconciled to"
+            " %.4f,%.4f,%.4f"
+            % ("XYZ"[axis], stop_pos[0], stop_pos[1], stop_pos[2]),
+            axis="XYZ"[axis],
+            stop_x=stop_pos[0],
+            stop_y=stop_pos[1],
+            stop_z=stop_pos[2],
+        )
+
     def trip_move(
         self, gcmd, toolhead, engine, axis, direction, speed, max_travel, entry
     ):
@@ -593,12 +621,16 @@ class Homing:
                     interval_s=0.010,
                 )
             except engine_wait.EngineWaitTimeout:
-                engine.home_abort()
+                self._abort_trip_and_adopt_stop_position(
+                    gcmd, toolhead, engine, axis
+                )
                 raise gcmd.error(
                     _no_trigger_error_message(axis, endstop, max_travel)
                 )
             except Exception as e:
-                engine.home_abort()
+                self._abort_trip_and_adopt_stop_position(
+                    gcmd, toolhead, engine, axis
+                )
                 raise gcmd.error("%s trip move failed: %s" % ("XYZ"[axis], e))
         finally:
             disarm = getattr(endstop, "disarm", None)

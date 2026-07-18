@@ -254,15 +254,21 @@ pub(crate) struct FollowerState {
 }
 
 impl FollowerState {
-    /// A `Reset` restarts the timeline and relabels positions; the physical
-    /// gap between commanded and projected extrusion survives it, so the next
-    /// stream re-anchors at the new raw position minus the carried deficit.
+    /// A `Reset` restarts the timeline and relabels the follower odometer to
+    /// a fresh origin. Every reset flavor either re-seeds the MCU step
+    /// counters at that same origin (stream_open, set_position, home_drip) or
+    /// happens flow-free mid-homing (trip re-anchor), so the commanded-vs-
+    /// projected gap accumulated under the old labels is void: carrying it
+    /// across would anchor the next stream `carried_deficit` away from the
+    /// just-seeded counter and demand that gap in a single sample (-310
+    /// StepsPerSampleExceeded on the first follower piece).
     pub(crate) fn reset_timeline(&mut self) {
         self.spans.clear();
         self.ingested_through_t = None;
         self.s_ingested_end = 0.0;
         self.s_shaped = 0.0;
         self.e_end = None;
+        self.carried_deficit = 0.0;
         self.projected.clear();
         self.projected_through_t = None;
         self.projected_trimmed = false;

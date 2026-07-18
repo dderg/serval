@@ -676,13 +676,14 @@ fn smooth_shaper_output_matches_shaped_signal_oracle() {
         &moves,
     );
     assert_eq!(
-        base.len() + 1,
+        base.len() + 2,
         shaped.len(),
-        "a kernel chain starting from rest pads a leading hold segment"
+        "a kernel chain pads a leading hold segment from rest and a trailing \
+         settle hold at the drain"
     );
     let pad = shaped[1].t_start - base[0].t_start;
     assert!(pad > 0.0, "hold pad must shift the move start forward");
-    let shaped = &shaped[1..];
+    let shaped = &shaped[1..shaped.len() - 1];
 
     let oracle_chains = smooth_x_chains(0.044583333333333336);
     let trajectory::ChainStage::SmoothKernel(kernel) = &oracle_chains.chains[0].stages[0] else {
