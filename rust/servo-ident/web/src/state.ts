@@ -2,6 +2,7 @@ import type {
   DriveState,
   PlotSeries,
   RunDetail,
+  RunPath,
   RunSummary,
   StrainData,
   StrainField,
@@ -21,8 +22,6 @@ const LIVE_UNIT_KEY = "servoCalLiveUnit";
 const PSD_MAX_FREQ_CHOICES_HZ = [250, 500, 750, 1000, 1500];
 const PSD_MAX_FREQ_DEFAULT_HZ = 750;
 const INITIAL_SELECTED_RUNS = 1;
-const PEAK_MIN_SEPARATION_HZ = 15;
-const PEAK_LIST_SIZE = 3;
 
 /// Lives here (not console.ts) because `state` runs it at module init —
 /// pulling it from console.ts would make the state → console import cycle
@@ -54,7 +53,6 @@ interface PageDef {
   intro?: string;
   metrics?: boolean;
   sweepChart?: boolean;
-  peaks?: boolean;
   templates?: PageTemplate[];
   strain?: boolean;
   live?: boolean;
@@ -80,7 +78,6 @@ const PAGE_DEFS: Record<string, PageDef> = {
       "time domain — fold the sections you don't need",
     metrics: true,
     sweepChart: true,
-    peaks: true,
     templates: [
       {
         label: "tracking…",
@@ -157,6 +154,12 @@ interface ConsoleState {
   search: ConsoleSearch | null;
 }
 
+interface PathFullEntry {
+  mtime_utc: string | null;
+  data: RunPath | null;
+  error: string | null;
+}
+
 type PendingEdits = Record<string, Record<string, number>>;
 
 interface DrivePanelState {
@@ -227,6 +230,7 @@ interface AppState {
   runs: RunSummary[];
   details: Map<string, RunDetail>;
   plotSeries: Map<string, { mtime_utc: string | null; data: PlotSeries }>;
+  pathFull: Map<string, PathFullEntry>;
   selected: Set<string>;
   pinned: Set<string>;
   runColors: Map<string, string>;
@@ -246,6 +250,7 @@ const state: AppState = {
   runs: [],
   details: new Map(), // name -> {mtime_utc, has_results, manifest, results}
   plotSeries: new Map(), // name -> {mtime_utc, data}
+  pathFull: new Map(), // name -> {mtime_utc, data, error} from /api/runs/<name>/path
   selected: new Set(),
   pinned: new Set(), // runs that stay selected when a plain click switches runs
   runColors: new Map(), // run name -> palette color, kept while the run stays selected
@@ -298,5 +303,5 @@ const state: AppState = {
   },
 };
 
-export type { PageDef, PageTemplate, ConsoleSearch, SentEntry, LiveSeries, PendingEdits };
-export { REFRESH_MS, MOONRAKER_KEY, CONSOLE_HISTORY_KEY, HELP_CACHE_KEY, CONSOLE_HISTORY_MAX, PALETTE, RESONANCE_BAND_HZ, RINGDOWN_PSD_PLOT_MAX_HZ, PSD_MAX_FREQ_KEY, MOTOR_VIEW_KEY, LIVE_UNIT_KEY, PSD_MAX_FREQ_CHOICES_HZ, PSD_MAX_FREQ_DEFAULT_HZ, INITIAL_SELECTED_RUNS, PEAK_MIN_SEPARATION_HZ, PEAK_LIST_SIZE, PAGE_DEFS, DEFAULT_PAGE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, MOONRAKER_HEALTH_POLL_MS, RT_HEALTH_POLL_MS, loadConsoleHistory, liveDrawCount, state };
+export type { PageDef, PageTemplate, ConsoleSearch, SentEntry, LiveSeries, PendingEdits, PathFullEntry };
+export { REFRESH_MS, MOONRAKER_KEY, CONSOLE_HISTORY_KEY, HELP_CACHE_KEY, CONSOLE_HISTORY_MAX, PALETTE, RESONANCE_BAND_HZ, RINGDOWN_PSD_PLOT_MAX_HZ, PSD_MAX_FREQ_KEY, MOTOR_VIEW_KEY, LIVE_UNIT_KEY, PSD_MAX_FREQ_CHOICES_HZ, PSD_MAX_FREQ_DEFAULT_HZ, INITIAL_SELECTED_RUNS, PAGE_DEFS, DEFAULT_PAGE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, MOONRAKER_HEALTH_POLL_MS, RT_HEALTH_POLL_MS, loadConsoleHistory, liveDrawCount, state };

@@ -419,20 +419,6 @@ table.mode-table th, table.mode-table td { padding: 2px 16px 2px 0; }
 }
 .strain-scale .bar { height: 10px; width: 180px; border-radius: 3px; border: 1px solid var(--border); }
 
-/* --- PSD peak list (gains page) ------------------------------------- */
-
-.peak-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 3px 0;
-  border-bottom: 1px solid #1b2129;
-  flex-wrap: wrap;
-}
-.peak-row:last-child { border-bottom: none; }
-.peak-freq { color: var(--warn); min-width: 72px; }
-.peak-slot { font-size: 11px; padding: 1px 8px; }
-
 table.notch-grid { border-collapse: separate; border-spacing: 0 4px; }
 table.notch-grid th, table.notch-grid td { padding: 0 7px 0 0; }
 table.notch-grid th { text-align: left; color: var(--dim); font-weight: normal; }

@@ -228,14 +228,6 @@ function analysisSectionsHtml(def: PageDef): string {
         `</section>`
     );
   }
-  if (def.peaks) {
-    parts.push(
-      `<section class="peaks-section">` +
-        sectionHeadHtml("detected peaks", `<span class="note" id="peaks-run"></span>`) +
-        `<div id="peak-list"><p class="note">select runs above</p></div>` +
-        `</section>`
-    );
-  }
   if (def.charts && def.charts.includes("time")) {
     parts.push(
       `<section class="time-section">` +
