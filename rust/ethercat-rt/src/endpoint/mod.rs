@@ -70,6 +70,7 @@ pub struct EndpointCtx {
     mailbox: MailboxWorker,
     pending_starts: Vec<(u32, String, PendingStart)>,
     pending_stops: Vec<(u32, PendingStop)>,
+    pending_seed: Option<commands::PendingSeed>,
     capture_slots: Vec<u8>,
     prdiv: u64,
     ff_saturation: u32,
@@ -112,6 +113,7 @@ pub fn run(ctx: &mut EndpointCtx) {
         }
         commands::drain_pending_starts(ctx);
         commands::drain_pending_stops(ctx);
+        commands::drain_pending_seed(ctx);
         commands::drain_mailbox_replies(ctx);
 
         if cycle::run_cycle(ctx).is_break() {

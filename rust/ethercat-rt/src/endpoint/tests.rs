@@ -188,6 +188,7 @@ fn test_ctx_with_drive(name: &str, drive: TrackingLagDrive) -> EndpointCtx {
         mailbox: MailboxWorker::spawn(NoSdo, |_, _, _| 0, WorkerScheduling::Normal),
         pending_starts: Vec::new(),
         pending_stops: Vec::new(),
+        pending_seed: None,
         capture_slots: Vec::new(),
         prdiv: 0,
         ff_saturation: 0,
@@ -819,6 +820,48 @@ fn set_dynamics_model_mass_len_mismatch_keeps_no_model() {
     bad.mass.pop();
     super::commands::handle_set_dynamics_model(&mut ctx, 1, bad);
     assert!(ctx.dynamics.is_none());
+}
+
+#[test]
+fn seed_defers_while_ring_drains_and_completes_when_empty() {
+    let mut ctx = test_ctx("seed-defer");
+    push_all(&mut ctx, piece(1_000_000, 0.01, &[2.5, 2.5]));
+    super::commands::handle_seed_servo_home(&mut ctx, 7, 0, 65536);
+    assert!(ctx.pending_seed.is_some());
+    assert!(ctx.report_anchor[0].is_none());
+    super::commands::drain_pending_seed(&mut ctx);
+    assert!(
+        ctx.pending_seed.is_some(),
+        "ring still occupied — must wait"
+    );
+    for ring in &mut ctx.rings {
+        ring.reset();
+    }
+    super::commands::drain_pending_seed(&mut ctx);
+    assert!(ctx.pending_seed.is_none());
+    let (_counts, anchor_mm) = ctx.report_anchor[0].expect("seed completed");
+    assert_eq!(anchor_mm, 1.0);
+}
+
+#[test]
+fn seed_fails_when_the_ring_never_drains() {
+    let mut ctx = test_ctx("seed-timeout");
+    push_all(&mut ctx, piece(1_000_000, 0.01, &[2.5, 2.5]));
+    super::commands::handle_seed_servo_home(&mut ctx, 7, 0, 65536);
+    let deadline = ctx.pending_seed.as_ref().expect("deferred").deadline_cycle;
+    ctx.cycle_index = deadline;
+    super::commands::drain_pending_seed(&mut ctx);
+    assert!(ctx.pending_seed.is_none());
+    assert!(ctx.report_anchor[0].is_none());
+}
+
+#[test]
+fn seed_completes_immediately_on_an_empty_ring() {
+    let mut ctx = test_ctx("seed-empty");
+    super::commands::handle_seed_servo_home(&mut ctx, 7, 0, 131072);
+    assert!(ctx.pending_seed.is_none());
+    let (_counts, anchor_mm) = ctx.report_anchor[0].expect("seed completed");
+    assert_eq!(anchor_mm, 2.0);
 }
 
 #[test]

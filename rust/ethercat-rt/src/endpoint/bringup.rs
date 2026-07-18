@@ -508,6 +508,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
         mailbox,
         pending_starts,
         pending_stops,
+        pending_seed: None,
         capture_slots,
         prdiv,
         ff_saturation,
