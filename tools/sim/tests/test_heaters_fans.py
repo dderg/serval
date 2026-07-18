@@ -10,6 +10,10 @@ same (plus an explicit no-shutdown check), so the coverage is boot +
 command dispatch + heater/fan control-loop math, not physics.
 """
 
+import os
+import signal
+import time
+
 import pytest
 
 from tools.sim import configs
@@ -62,6 +66,34 @@ def test_pwm_pins(sim_world):
         if cycle is not None:
             cmd += f" CYCLE_TIME={cycle}"
         world.gcode_ok(cmd)
+    assert world.shutdown_line() is None
+
+
+def test_pwm_cycle_change_survives_mcu_stall(sim_world):
+    # A cycle change is released once the host's clock ESTIMATE passes the
+    # previous update's scheduled clock; freezing the MCU (as a starved CI
+    # runner does) lets the estimate run ahead of the MCU's actual clock, so
+    # the command historically landed while that update was still queued and
+    # tripped "Can not set soft pwm cycle ticks while updates pending". The
+    # firmware now stamps the cycle time onto each queued update, so any
+    # interleaving must survive.
+    world = sim_world(_cfg, dual_mcu=False)
+    world.gcode_ok("SET_PIN PIN=cycle_pwm_pin VALUE=0.5 CYCLE_TIME=0.1")
+    time.sleep(0.5)
+
+    mcu_pid = world.mcus[0].process.pid
+    os.kill(mcu_pid, signal.SIGSTOP)
+    try:
+        world.gcode_ok("SET_PIN PIN=cycle_pwm_pin VALUE=0.3", timeout=15)
+        world.gcode_ok(
+            "SET_PIN PIN=cycle_pwm_pin VALUE=0.6 CYCLE_TIME=0.25", timeout=15
+        )
+        time.sleep(2.0)
+    finally:
+        os.kill(mcu_pid, signal.SIGCONT)
+    time.sleep(1.0)
+
+    world.gcode_ok("SET_PIN PIN=cycle_pwm_pin VALUE=0.4 CYCLE_TIME=0.5")
     assert world.shutdown_line() is None
 
 
