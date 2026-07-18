@@ -201,6 +201,9 @@ fn test_ctx_with_drive(name: &str, drive: TrackingLagDrive) -> EndpointCtx {
         baseline_reanchor_count: 0,
         late_frames: 0,
         late_max_ns: i64::MIN,
+        last_dispatch_ns: 0,
+        last_pre_work_ns: 0,
+        prev_exchange_ns: 0,
     }
 }
 

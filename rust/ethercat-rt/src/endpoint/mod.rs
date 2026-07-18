@@ -83,6 +83,9 @@ pub struct EndpointCtx {
     baseline_reanchor_count: u32,
     late_frames: u32,
     late_max_ns: i64,
+    last_dispatch_ns: i64,
+    last_pre_work_ns: i64,
+    prev_exchange_ns: i64,
 }
 
 pub fn run(ctx: &mut EndpointCtx) {
@@ -108,13 +111,17 @@ pub fn run(ctx: &mut EndpointCtx) {
             break;
         }
 
+        let pre_work = std::time::Instant::now();
         if commands::dispatch_commands(ctx).is_break() {
             break 'dc;
         }
+        let dispatch_ns = pre_work.elapsed().as_nanos() as i64;
         commands::drain_pending_starts(ctx);
         commands::drain_pending_stops(ctx);
         commands::drain_pending_seed(ctx);
         commands::drain_mailbox_replies(ctx);
+        ctx.last_dispatch_ns = dispatch_ns;
+        ctx.last_pre_work_ns = pre_work.elapsed().as_nanos() as i64;
 
         if cycle::run_cycle(ctx).is_break() {
             break;

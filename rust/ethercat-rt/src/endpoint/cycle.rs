@@ -54,9 +54,12 @@ pub(super) fn run_cycle(ctx: &mut EndpointCtx) -> ControlFlow<()> {
 
     handle_ring_fault(ctx);
 
+    let exchange = std::time::Instant::now();
     let (wkc, toff) = ctx.drive.cycle();
+    let exchange_ns = exchange.elapsed().as_nanos() as i64;
 
     police_frame_timing(ctx, toff);
+    ctx.prev_exchange_ns = exchange_ns;
     handle_drive_fault(ctx);
 
     ctx.cycle_index += 1;
@@ -586,8 +589,13 @@ pub(super) fn police_frame_timing(ctx: &mut EndpointCtx, lateness_ns: i64) {
             subsystem = "ethercat",
             event = "cycle_skip",
             total = reanchors,
+            dispatch_ns = ctx.last_dispatch_ns,
+            pre_work_ns = ctx.last_pre_work_ns,
+            prev_exchange_ns = ctx.prev_exchange_ns,
             "cycle overran a full period and skipped forward on the grid — \
-             the drives coasted on a stale target for the missed cycles"
+             the drives coasted on a stale target for the missed cycles \
+             (dispatch/pre-work are this iteration's stage durations; \
+             prev_exchange is the prior DC exchange incl. its sleep)"
         );
     }
     if lateness_ns > 0 {
@@ -619,6 +627,9 @@ pub(super) fn police_frame_timing(ctx: &mut EndpointCtx, lateness_ns: i64) {
         tolerance_ns,
         reanchored,
         code,
+        dispatch_ns = ctx.last_dispatch_ns,
+        pre_work_ns = ctx.last_pre_work_ns,
+        prev_exchange_ns = ctx.prev_exchange_ns,
         "frame timing exceeded the configured late tolerance — parking"
     );
     ctx.gate.on_drive_fault();
