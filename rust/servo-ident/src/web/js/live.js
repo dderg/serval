@@ -1,5 +1,5 @@
 import { api, el, payloadUnchanged } from "./api.js";
-import { drawChart } from "./charts-core.js";
+import { timeSeriesPlot } from "./uplot-chart.js";
 import { formatAge } from "./drive.js";
 import { runGcode } from "./moonraker.js";
 import { PALETTE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, state } from "./state.js";
@@ -155,12 +155,37 @@ function ensureLiveChartBoxes(containerId, idPrefix, drives) {
           `<h3><span class="swatch" style="background:${PALETTE[i % PALETTE.length]}"></span>` +
           `<span id="${idPrefix}-name-${d}">${liveDriveLabel(d)}</span> ` +
           `<span class="note" id="${idPrefix}-peak-${d}"></span></h3>` +
-          `<canvas id="${idPrefix}-canvas-${d}" width="860" height="130"></canvas>` +
+          `<div id="${idPrefix}-plot-${d}"></div>` +
           `</div>`
       )
       .join("");
   }
   return true;
+}
+
+const livePlots = new Map();
+
+function livePlotFor(hostId, yLabel, trace, fixedY) {
+  const host = el(hostId);
+  if (!host) return null;
+  const existing = livePlots.get(hostId);
+  if (existing) {
+    if (existing.plot.u.root.isConnected) {
+      existing.plot.setTraces([trace], fixedY);
+      return existing.plot;
+    }
+    existing.plot.u.destroy();
+    livePlots.delete(hostId);
+  }
+  const plot = timeSeriesPlot(host, {
+    width: host.parentElement.clientWidth || 860,
+    height: 130,
+    yLabel,
+    fixedY,
+    traces: [trace],
+  });
+  livePlots.set(hostId, { plot });
+  return plot;
 }
 
 function drawLiveChartGroup(containerId, idPrefix, drives, channel, yLabel, peakFmt) {
@@ -181,18 +206,14 @@ function drawLiveChartGroup(containerId, idPrefix, drives, channel, yLabel, peak
   }
   if (!isFinite(yMin)) return;
   drives.forEach((d, i) => {
-    const canvas = el(`${idPrefix}-canvas-${d}`);
-    if (!canvas) return;
-    drawChart(
-      canvas,
-      [
-        {
-          t: state.live.t,
-          y: state.live.perDrive[d][channel],
-          color: PALETTE[i % PALETTE.length],
-        },
-      ],
+    livePlotFor(
+      `${idPrefix}-plot-${d}`,
       yLabel,
+      {
+        t: state.live.t,
+        y: state.live.perDrive[d][channel],
+        color: PALETTE[i % PALETTE.length],
+      },
       { yMin, yMax }
     );
     const name = el(`${idPrefix}-name-${d}`);

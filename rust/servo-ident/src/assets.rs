@@ -20,6 +20,7 @@ pub const JS_MODULES: &[(&str, &str)] = &[
     ("shell.js", include_str!("web/js/shell.js")),
     ("state.js", include_str!("web/js/state.js")),
     ("strain.js", include_str!("web/js/strain.js")),
+    ("uplot-chart.js", include_str!("web/js/uplot-chart.js")),
 ];
 
 pub fn js_module(name: &str) -> Option<&'static str> {
@@ -29,9 +30,9 @@ pub fn js_module(name: &str) -> Option<&'static str> {
         .map(|(_, src)| *src)
 }
 
-/// Third-party libraries staged for the SPA but not yet imported by it —
-/// see `web/vendor/VERSIONS.md` for what each file is and where it came
-/// from. `(file name, MIME type, source)`.
+/// Third-party libraries the SPA imports (uPlot via `uplot-chart.js`; the
+/// rest staged) — see `web/vendor/VERSIONS.md` for what each file is and
+/// where it came from. `(file name, MIME type, source)`.
 pub const VENDOR_ASSETS: &[(&str, &str, &str)] = &[
     (
         "htm-preact-standalone-3.1.1.mjs",

@@ -1,8 +1,9 @@
 # Vendored frontend libraries
 
 No-build ESM bundles, fetched once and checked in so `servo-cal serve`
-stays a single self-contained binary. Not wired into `app.js`/`index.html`
-yet — this directory only stages the assets and their HTTP routes.
+stays a single self-contained binary. uPlot is imported by
+`js/uplot-chart.js` (which also injects the css link); the htm/preact
+bundle is staged but not imported yet.
 
 | File | Version | Upstream source |
 | --- | --- | --- |

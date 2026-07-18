@@ -283,6 +283,8 @@ button.pin-toggle:hover { background: none; opacity: 1; }
 
 .charts { display: flex; flex-direction: column; gap: 10px; }
 .chart-box canvas { width: 100%; height: auto; display: block; border: 1px solid var(--border); border-radius: 4px; }
+.chart-box .uplot { border: 1px solid var(--border); border-radius: 4px; background: #0d1117; }
+.chart-box .uplot canvas { width: auto; border: none; border-radius: 0; }
 input[type="number"] { appearance: textfield; -moz-appearance: textfield; }
 input[type="number"]::-webkit-inner-spin-button,
 input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }

@@ -1,5 +1,6 @@
 import { el, payloadUnchanged, runDataSig } from "./api.js";
-import { drawChart, attachChartHover, mixColor, traceStyle, clipToPsdBand, psdMaxFreqHz, psdToAmplitude, countsPerMm } from "./charts-core.js";
+import { mixColor, traceStyle, clipToPsdBand, psdMaxFreqHz, psdToAmplitude, countsPerMm } from "./charts-core.js";
+import { timeSeriesPlot } from "./uplot-chart.js";
 import { redrawCharts } from "./peaks.js";
 import { runColor } from "./runs.js";
 import { motorView, motorViewPerMotor } from "./shell.js";
@@ -281,10 +282,8 @@ function renderSweepMetricsChart(names) {
   const viewLabel = { agg: "worst-drive", avg: "avg", "per-motor": "per-motor" }[motorView()];
   title.textContent = `${viewLabel} metrics vs swept ${series[0].key} (µm)`;
   box.appendChild(title);
-  const canvas = document.createElement("canvas");
-  canvas.width = 860;
-  canvas.height = 260;
-  box.appendChild(canvas);
+  const plotHost = document.createElement("div");
+  box.appendChild(plotHost);
   const legend = document.createElement("div");
   legend.className = "legend";
   const traces = [];
@@ -306,9 +305,16 @@ function renderSweepMetricsChart(names) {
     item.innerHTML = `<span class="swatch" style="background:${color}"></span>${label}`;
     legend.appendChild(item);
   });
-  const sweepOpts = { xTitle: series[0].key };
-  drawChart(canvas, traces, "µm", null, "", marks, sweepOpts);
-  attachChartHover(canvas, traces, "µm", null, "", marks, sweepOpts);
+  timeSeriesPlot(plotHost, {
+    width: container.clientWidth || 860,
+    height: 260,
+    yLabel: "µm",
+    xUnit: "",
+    xTitle: series[0].key,
+    marks,
+    traces,
+    hover: true,
+  });
   box.appendChild(legend);
   container.appendChild(box);
 }

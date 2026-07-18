@@ -3,6 +3,7 @@ import { driveRamp } from "./metrics.js";
 import { runColor } from "./runs.js";
 import { motorViewPerMotor } from "./shell.js";
 import { PALETTE, PSD_MAX_FREQ_KEY, PSD_MAX_FREQ_CHOICES_HZ, PSD_MAX_FREQ_DEFAULT_HZ, state } from "./state.js";
+import { timeSeriesPlot } from "./uplot-chart.js";
 
 // --- chart drawing ------------------------------------------------------------
 
@@ -33,8 +34,7 @@ function pickSeries(runName, step) {
 /// Renders at the device pixel ratio so lines stay vector-crisp on hidpi
 /// displays: the backing store is sized to the CSS box × dpr and the
 /// context scaled back, while all layout math stays in CSS pixels.
-function drawChart(canvas, traces, yLabel, fixedY, xUnit, marks, opts) {
-  opts = opts || {};
+function drawChart(canvas, traces, yLabel, fixedY, xUnit) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth || canvas.width;
   const h = canvas.clientHeight || canvas.height;
@@ -70,9 +70,6 @@ function drawChart(canvas, traces, yLabel, fixedY, xUnit, marks, opts) {
   const y = (v) => h - pad.b - ((v - yMin) / (yMax - yMin || 1)) * (h - pad.t - pad.b);
 
   const fmtTick = (v, span) => (Math.abs(span) >= 20 ? v.toFixed(0) : v.toFixed(2));
-  // Tooltip readout: keep one more decimal than the axis ticks so the
-  // hovered step's metrics read exact, not rounded to a gridline scale.
-  const fmtVal = (v) => (Math.abs(v) >= 1000 ? v.toFixed(0) : v.toFixed(1));
   ctx.strokeStyle = "#29313a";
   ctx.fillStyle = "#8a97a3";
   ctx.font = "10px monospace";
@@ -90,18 +87,6 @@ function drawChart(canvas, traces, yLabel, fixedY, xUnit, marks, opts) {
     ctx.fillText(fmtTick(t, tMax - tMin) + (xUnit == null ? "s" : xUnit), px, h - 6);
   }
   ctx.stroke();
-
-  for (const m of marks || []) {
-    if (m.x < tMin || m.x > tMax) continue;
-    ctx.strokeStyle = m.color;
-    ctx.lineWidth = 1;
-    ctx.setLineDash([4, 4]);
-    ctx.beginPath();
-    ctx.moveTo(x(m.x), pad.t);
-    ctx.lineTo(x(m.x), h - pad.b);
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
 
   for (const tr of traces) {
     ctx.strokeStyle = tr.color;
@@ -122,70 +107,9 @@ function drawChart(canvas, traces, yLabel, fixedY, xUnit, marks, opts) {
     }
     ctx.stroke();
     ctx.setLineDash([]);
-    if (tr.points) {
-      ctx.fillStyle = tr.color;
-      for (let i = 0; i < tr.t.length; i++) {
-        if (tr.y[i] === null) continue;
-        ctx.beginPath();
-        ctx.arc(x(tr.t[i]), y(tr.y[i]), 3, 0, 2 * Math.PI);
-        ctx.fill();
-      }
-    }
   }
   ctx.fillStyle = "#8a97a3";
   ctx.fillText(yLabel, pad.l, 10);
-  if (opts.hover) {
-    // Like the PSD chart: snap to the single nearest point (by 2D distance),
-    // draw a vertical line through it, and read out that one point's values.
-    // Not every trace at that x — the hovered point, for that run/metric.
-    let best = null;
-    for (const tr of traces) {
-      for (let i = 0; i < tr.t.length; i++) {
-        if (tr.y[i] === null) continue;
-        const dx = x(tr.t[i]) - opts.hover.mx;
-        const dy = y(tr.y[i]) - opts.hover.my;
-        const d = dx * dx + dy * dy;
-        if (!best || d < best.d) best = { d, tr, i };
-      }
-    }
-    if (best) {
-      const px = x(best.tr.t[best.i]);
-      const py = y(best.tr.y[best.i]);
-      ctx.strokeStyle = "#4a5560";
-      ctx.beginPath();
-      ctx.moveTo(px, pad.t);
-      ctx.lineTo(px, h - pad.b);
-      ctx.stroke();
-      ctx.fillStyle = best.tr.color;
-      ctx.beginPath();
-      ctx.arc(px, py, 3, 0, Math.PI * 2);
-      ctx.fill();
-      const xUnitSuffix = xUnit == null ? "s" : xUnit;
-      const swept = opts.xTitle ? opts.xTitle + " = " : "";
-      const lab = best.tr.label != null ? best.tr.label : "";
-      const text = `${swept}${fmtTick(best.tr.t[best.i], tMax - tMin)}${xUnitSuffix}  ${fmtVal(best.tr.y[best.i])} ${yLabel}${lab ? "  " + lab : ""}`;
-      ctx.font = "11px monospace";
-      const tw = ctx.measureText(text).width;
-      const tx = Math.min(Math.max(px + 8, pad.l), w - pad.r - tw - 8);
-      const ty = Math.max(py - 10, pad.t + 12);
-      ctx.fillStyle = "#0d1117";
-      ctx.fillRect(tx - 4, ty - 10, tw + 8, 14);
-      ctx.strokeStyle = "#4a5560";
-      ctx.strokeRect(tx - 4, ty - 10, tw + 8, 14);
-      ctx.fillStyle = "#e6edf3";
-      ctx.fillText(text, tx, ty);
-    }
-  }
-}
-
-/// Redraws with the cursor on every move so the readout snaps to the nearest
-/// sweep step — the discrete metrics-vs-gain variant of the PSD hover.
-/// drawChart reruns the full axis/line pass each redraw; it's cheap.
-function attachChartHover(canvas, traces, yLabel, fixedY, xUnit, marks, opts) {
-  const redraw = (hover) =>
-    drawChart(canvas, traces, yLabel, fixedY, xUnit, marks, hover ? { ...opts, hover } : opts);
-  canvas.addEventListener("mousemove", (e) => redraw({ mx: e.offsetX, my: e.offsetY }));
-  canvas.addEventListener("mouseleave", () => redraw(null));
 }
 
 function drawTimeDomain(names, plots, steps) {
@@ -204,10 +128,8 @@ function drawTimeDomain(names, plots, steps) {
     const title = document.createElement("h3");
     title.textContent = stepName;
     box.appendChild(title);
-    const canvas = document.createElement("canvas");
-    canvas.width = 860;
-    canvas.height = 200;
-    box.appendChild(canvas);
+    const plotHost = document.createElement("div");
+    box.appendChild(plotHost);
     const legend = document.createElement("div");
     legend.className = "legend";
 
@@ -227,7 +149,14 @@ function drawTimeDomain(names, plots, steps) {
         legend.appendChild(item);
       }
     });
-    drawChart(canvas, traces, yLabel);
+    if (traces.length) {
+      timeSeriesPlot(plotHost, {
+        width: container.clientWidth || 860,
+        height: 200,
+        yLabel,
+        traces,
+      });
+    }
     box.appendChild(legend);
     container.appendChild(box);
   }
@@ -331,4 +260,4 @@ function countsPerMm(runName, driveName) {
   return motor.counts_per_mm;
 }
 
-export { pickSeries, drawChart, attachChartHover, drawTimeDomain, newestSelectedRunName, peakStep, mixColor, traceStyle, psdMaxFreqHz, clipToPsdBand, WELCH_HANN_ENBW_BINS, psdToAmplitude, countsPerMm };
+export { pickSeries, drawChart, drawTimeDomain, newestSelectedRunName, peakStep, mixColor, traceStyle, psdMaxFreqHz, clipToPsdBand, WELCH_HANN_ENBW_BINS, psdToAmplitude, countsPerMm };
