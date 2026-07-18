@@ -126,14 +126,6 @@ function NoteCell({ run }: { run: RunSummary }) {
   </td>`;
 }
 
-// --- row context menu ---------------------------------------------------------
-//
-// Right-clicking a row opens a small dropdown at the cursor instead of an
-// immediate confirm() — Delete acts right away (no confirmation), the other
-// entries mirror the row's existing action buttons. Mounted once into its
-// own container (like the runs table itself) and driven off the same
-// notify()/useStore() bridge, so it can be toggled from anywhere in runs.ts.
-
 interface MenuState {
   run: RunSummary | null;
   x: number;
@@ -325,8 +317,6 @@ async function saveNote(run: RunSummary, text: string) {
   }
 }
 
-/// Deletes immediately — the row context menu is itself the confirmation
-/// step, so there's no second "are you sure?" dialog in front of it.
 async function deleteRun(run: RunSummary) {
   try {
     await api(`/api/runs/${encodeURIComponent(run.name)}`, { method: "DELETE" });
