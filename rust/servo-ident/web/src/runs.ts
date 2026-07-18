@@ -126,6 +126,95 @@ function NoteCell({ run }: { run: RunSummary }) {
   </td>`;
 }
 
+interface MenuState {
+  run: RunSummary | null;
+  x: number;
+  y: number;
+}
+
+const menu: MenuState = { run: null, x: 0, y: 0 };
+
+function openContextMenu(run: RunSummary, x: number, y: number) {
+  menu.run = run;
+  menu.x = x;
+  menu.y = y;
+  notify();
+}
+
+function closeContextMenu() {
+  if (!menu.run) return;
+  menu.run = null;
+  notify();
+}
+
+function ContextMenu() {
+  useStore();
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!menu.run) return;
+    const onPointerDown = (ev: MouseEvent) => {
+      if (ref.current && ev.target instanceof Node && ref.current.contains(ev.target)) return;
+      closeContextMenu();
+    };
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key === "Escape") closeContextMenu();
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("scroll", closeContextMenu, true);
+    window.addEventListener("blur", closeContextMenu);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("scroll", closeContextMenu, true);
+      window.removeEventListener("blur", closeContextMenu);
+    };
+  }, [menu.run]);
+  if (!menu.run) return null;
+  const run = menu.run;
+  const pinned = state.pinned.has(run.name);
+  const detail = state.details.get(run.name);
+  const width = Math.max(document.documentElement.clientWidth - 8, 0);
+  const height = Math.max(document.documentElement.clientHeight - 8, 0);
+  const style = {
+    left: `${Math.min(menu.x, width)}px`,
+    top: `${Math.min(menu.y, height)}px`,
+  };
+  const item = (label: string, onClick: () => void, opts?: { disabled?: boolean; danger?: boolean }) =>
+    html`<button
+      class=${[
+        "context-menu-item",
+        opts?.danger ? "danger" : "",
+        opts?.disabled ? "disabled" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+      disabled=${opts?.disabled || null}
+      onClick=${() => {
+        closeContextMenu();
+        onClick();
+      }}
+    >
+      ${label}
+    </button>`;
+  return html`<div class="context-menu" style=${style} ref=${ref}>
+    ${run.has_results ? item(pinned ? "unpin" : "pin", () => togglePin(run)) : null}
+    ${item("→ console", () => loadRerunForm(run.name), { disabled: !detail?.manifest })}
+    ${!run.has_results ? item("analyze", () => triggerAnalyze(run.name)) : null}
+    ${item("delete", () => deleteRun(run), { danger: true })}
+  </div>`;
+}
+
+let mountedMenuHost: HTMLElement | null = null;
+
+function ensureContextMenuMounted() {
+  if (mountedMenuHost) return;
+  const host = document.createElement("div");
+  document.body.appendChild(host);
+  mountedMenuHost = host;
+  render(html`<${ContextMenu} />`, host);
+}
+
 function RunRow({ run, def }: { run: RunSummary; def: PageDef }) {
   const globalIdx = state.runs.indexOf(run);
   const detail = state.details.get(run.name);
@@ -146,7 +235,8 @@ function RunRow({ run, def }: { run: RunSummary; def: PageDef }) {
     onClick=${(ev: MouseEvent) => toggleRunSelection(run, ev)}
     onContextMenu=${(ev: MouseEvent) => {
       ev.preventDefault();
-      deleteRun(run);
+      ensureContextMenuMounted();
+      openContextMenu(run, ev.clientX, ev.clientY);
     }}
   >
     <${DotCell} run=${run} />
@@ -228,10 +318,6 @@ async function saveNote(run: RunSummary, text: string) {
 }
 
 async function deleteRun(run: RunSummary) {
-  const ok = confirm(
-    `Delete run ${run.name}?\n\nRemoves its whole directory — captures, results, note.`
-  );
-  if (!ok) return;
   try {
     await api(`/api/runs/${encodeURIComponent(run.name)}`, { method: "DELETE" });
   } catch (e) {

@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use servo_ident::demo::{build_demo, drive_state_schema};
 use servo_ident::results::{PlotSeries, Results};
-use servo_ident::serve::RunSummary;
+use servo_ident::serve::{RunPath, RunSummary};
 use servo_ident::{http, serve};
 
 fn temp_dir(label: &str) -> PathBuf {
@@ -98,11 +98,13 @@ fn served_payloads_match_their_derived_json_schemas() {
     let results_schema = schemars::schema_for!(Results);
     let plot_series_schema = schemars::schema_for!(PlotSeries);
     let run_summary_list_schema = schemars::schema_for!(Vec<RunSummary>);
+    let run_path_schema = schemars::schema_for!(RunPath);
     let drive_state_schema = drive_state_schema();
 
     let results_validator = validator_for(&results_schema, "results.json");
     let plot_series_validator = validator_for(&plot_series_schema, "plot_series.json");
     let runs_list_validator = validator_for(&run_summary_list_schema, "runs list");
+    let run_path_validator = validator_for(&run_path_schema, "run path");
     let drive_state_validator = validator_for(&drive_state_schema, "drive_state");
 
     for run_dir in &run_dirs {
@@ -121,6 +123,9 @@ fn served_payloads_match_their_derived_json_schemas() {
             &plot_series,
             &format!("{name}: plot_series.json"),
         );
+
+        let run_path = get(port, &format!("/api/runs/{name}/path"));
+        assert_matches(&run_path_validator, &run_path, &format!("{name}: path"));
     }
 
     let runs_list = get(port, "/api/runs");

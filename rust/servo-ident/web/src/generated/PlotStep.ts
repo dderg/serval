@@ -3,7 +3,8 @@ import type { PlotAccel } from "./PlotAccel";
 import type { PlotCombined } from "./PlotCombined";
 import type { PlotDifferential } from "./PlotDifferential";
 import type { PlotDrive } from "./PlotDrive";
+import type { PlotPath } from "./PlotPath";
 import type { PlotPsd } from "./PlotPsd";
 import type { PlotRingdown } from "./PlotRingdown";
 
-export type PlotStep = { name: string, fs_hz: number, stride: number, t_s: Array<number>, moving: Array<[number, number]>, drives: { [key in string]: PlotDrive }, combined: PlotCombined | null, accel: PlotAccel | null, differential: PlotDifferential | null, ringdown: PlotRingdown | null, psd: PlotPsd, };
+export type PlotStep = { name: string, fs_hz: number, stride: number, t_s: Array<number>, moving: Array<[number, number]>, drives: { [key in string]: PlotDrive }, combined: PlotCombined | null, accel: PlotAccel | null, differential: PlotDifferential | null, ringdown: PlotRingdown | null, path: PlotPath | null, psd: PlotPsd, };

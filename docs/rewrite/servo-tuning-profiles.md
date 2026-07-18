@@ -135,9 +135,7 @@ Shipped entries, verified against the A6-EC vendor manual (chapter 7 —
 gain tuning) and `servo_calibration.GAIN_PARAMS`. The bench's
 `servos_xy.cfg` register notes record SDO *subindexes* (C-code + 1), which
 is why its `# 41` annotation on notch 1's frequency corresponds to C01.40
-here. Notches 1–2 double as the adaptive pair: while
-`adaptive_notch_mode` is 1 or 2 the drive rewrites their parameters
-itself. `C01.10` (`speed_feedback_filter`) only accepts writes at stop.
+here. `C01.10` (`speed_feedback_filter`) only accepts writes at stop.
 
 The panel shows raw register values — no display conversion anywhere in
 the chain. `unit` names the register's LSB (so a `speed_gain` reading of
@@ -153,7 +151,6 @@ drive's own front panel present it.
 | `notch_<n>_freq` (n=1..5) | C01.40+3(n−1) | Hz | notch | — (manual 7.10; default 8000 = parked) |
 | `notch_<n>_width` (n=1..5) | C01.41+3(n−1) | 0.1% | notch | — (manual 7.10; default 0) |
 | `notch_<n>_depth` (n=1..5) | C01.42+3(n−1) | 0.1% | notch | — (manual 7.10; default 1000) |
-| `adaptive_notch_mode` | C01.30 | — | notch | options: 0=disabled, 1=1 adaptive notch, 2=2 adaptive notches, 3=reset notch params, 4=test resonance only |
 | `speed_feedback_filter` | C01.10 | — | speed_observer | options: 0=internal, 1=low-pass, 2=overlapping average, 3=speed observer, 4=no filter |
 | `speed_observer_gain` | C02.30 | 0.1 Hz | speed_observer | — |
 | `speed_observer_inertia` | C02.31 | 0.1% | speed_observer | — (default 1000 = 100%) |
@@ -162,8 +159,6 @@ drive's own front panel present it.
 | `disturbance_inertia` | C02.61 | 0.1% | disturbance_observer | — (default 1000 = 100%) |
 | `disturbance_cutoff` | C02.62 | Hz | disturbance_observer | — |
 | `disturbance_comp_torque` | C02.63 | 0.1% | disturbance_observer | — |
-| `gain_mode` | C00.04 | — | load | options: 0=manual, 1=stiffness table |
-| `stiffness_level` | C00.05 | — | load | — (1..31, used when gain_mode=1) |
 | `inertia_ratio` | C00.06 | % | load | — |
 
 Names, resolved addresses, and type tokens are all validated for

@@ -51,6 +51,13 @@ impl Step {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ManifestSpatial {
+    pub modes: Vec<String>,
+    pub axes: Vec<String>,
+    pub frame: Vec<Vec<f64>>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Manifest {
     #[serde(default)]
     pub version: i64,
@@ -67,6 +74,8 @@ pub struct Manifest {
     pub stroke_plan: Value,
     #[serde(default)]
     pub ff_lead_cycles: u64,
+    #[serde(default)]
+    pub spatial: Option<ManifestSpatial>,
     pub steps: Vec<Step>,
 }
 
@@ -188,12 +197,16 @@ pub struct PlotAccel {
 pub struct PlotPsdAccel {
     pub freq_hz: Vec<f64>,
     pub psd: Vec<f64>,
+    pub psd_x: Vec<f64>,
+    pub psd_y: Vec<f64>,
+    pub psd_z: Vec<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, TS)]
 pub struct PlotPsd {
     pub freq_hz: Vec<f64>,
     pub per_drive: BTreeMap<String, Vec<f64>>,
+    pub cartesian: Option<BTreeMap<String, Vec<f64>>>,
     pub accel: Option<PlotPsdAccel>,
 }
 
@@ -232,6 +245,14 @@ pub struct PlotRingdown {
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, TS)]
+pub struct PlotPath {
+    pub cmd_x_mm: Vec<f64>,
+    pub cmd_y_mm: Vec<f64>,
+    pub act_x_mm: Vec<f64>,
+    pub act_y_mm: Vec<f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, TS)]
 pub struct PlotStep {
     pub name: String,
     pub fs_hz: f64,
@@ -244,6 +265,8 @@ pub struct PlotStep {
     pub differential: Option<PlotDifferential>,
     #[serde(default)]
     pub ringdown: Option<PlotRingdown>,
+    #[serde(default)]
+    pub path: Option<PlotPath>,
     pub psd: PlotPsd,
 }
 

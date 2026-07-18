@@ -1,5 +1,16 @@
 import { el, payloadUnchanged, runDataSig } from "./api";
-import { mixColor, traceStyle, clipToPsdBand, psdMaxFreqHz, psdToAmplitude, countsPerMm } from "./charts-core";
+import {
+  fillFilterChips,
+  mixColor,
+  traceStyle,
+  clipToPsdBand,
+  psdMaxFreqHz,
+  psdToAmplitude,
+  countsPerMm,
+  ferrUnitAvailability,
+  resolvedFerrUnit,
+  syncFerrUnitUi,
+} from "./charts-core";
 import { psdPlot, timeSeriesPlot } from "./uplot-chart";
 import type { FixedY, FreqMarker, Mark, PsdTrace, TimeTrace } from "./uplot-chart";
 import type { DriveMetrics, Manifest, PlotSeries, PlotStep, TorqueMetrics } from "./wire";
@@ -7,6 +18,7 @@ import { redrawCharts } from "./peaks";
 import { runColor } from "./runs";
 import { motorView, motorViewPerMotor } from "./shell";
 import { PALETTE, RESONANCE_BAND_HZ, state } from "./state";
+import type { FerrUnit } from "./units";
 
 // --- tracking metrics table -----------------------------------------------
 //
@@ -368,15 +380,29 @@ function driveRamp(count: number, idx: number): number {
 }
 
 /// Per-drive PSDs are counts²/Hz on drives whose counts_per_mm may differ,
-/// so averaging happens in µm²/Hz — each drive converted first, then the
-/// power mean — and only then collapses to a tone amplitude.
-function psdFerrUm2(step: PlotStep, runName: string, drive: string): number[] {
-  const umPerCount = 1000 / countsPerMm(runName, drive);
+/// so averaging in µm happens in µm²/Hz — each drive converted first, then
+/// the power mean — and only then collapses to a tone amplitude. In counts
+/// mode the raw counts²/Hz values feed the average directly.
+function psdFerrScaled(step: PlotStep, runName: string, drive: string, unit: FerrUnit): number[] {
   if (!step.psd) throw new Error(`${step.name}: step has no psd`);
+  if (unit === "counts") return step.psd.per_drive[drive];
+  const umPerCount = 1000 / countsPerMm(runName, drive);
   return step.psd.per_drive[drive].map((p) => p * umPerCount * umPerCount);
 }
 
-function psdFerrTraces(names: string[], plots: PlotSeries[], steps: string[]): PsdTrace[] {
+function psdDrivePairs(names: string[], plots: PlotSeries[], steps: string[]): [string, string][] {
+  const pairs: [string, string][] = [];
+  plots.forEach((p, i) => {
+    steps.forEach((stepName) => {
+      const step = p.steps.find((s) => s.name === stepName);
+      if (!step || !step.psd) return;
+      for (const drive of Object.keys(step.psd.per_drive)) pairs.push([names[i], drive]);
+    });
+  });
+  return pairs;
+}
+
+function psdFerrTraces(names: string[], plots: PlotSeries[], steps: string[], unit: FerrUnit): PsdTrace[] {
   const traces: PsdTrace[] = [];
   plots.forEach((p, i) => {
     steps.forEach((stepName, j) => {
@@ -386,8 +412,8 @@ function psdFerrTraces(names: string[], plots: PlotSeries[], steps: string[]): P
       const driveNames = Object.keys(psd.per_drive);
       if (!driveNames.length) return;
       const style = traceStyle(names, steps, i, j);
-      const pushTrace = (psdUm2: number[], color: string, label: string) => {
-        const clipped = clipToPsdBand(psd.freq_hz, psdUm2);
+      const pushTrace = (psdScaled: number[], color: string, label: string) => {
+        const clipped = clipToPsdBand(psd.freq_hz, psdScaled);
         traces.push({
           freq: clipped.freq,
           y: psdToAmplitude(clipped.freq, clipped.y),
@@ -400,19 +426,19 @@ function psdFerrTraces(names: string[], plots: PlotSeries[], steps: string[]): P
       if (motorViewPerMotor()) {
         driveNames.forEach((drive, k) => {
           pushTrace(
-            psdFerrUm2(step, names[i], drive),
+            psdFerrScaled(step, names[i], drive, unit),
             mixColor(style.color, "#ffffff", driveRamp(driveNames.length, k)),
             `${style.name} (${drive})`
           );
         });
         return;
       }
-      const avgUm2: number[] = new Array(psd.freq_hz.length).fill(0);
+      const avgScaled: number[] = new Array(psd.freq_hz.length).fill(0);
       for (const drive of driveNames) {
-        psdFerrUm2(step, names[i], drive).forEach((v, n) => (avgUm2[n] += v));
+        psdFerrScaled(step, names[i], drive, unit).forEach((v, n) => (avgScaled[n] += v));
       }
       pushTrace(
-        avgUm2.map((v) => v / driveNames.length),
+        avgScaled.map((v) => v / driveNames.length),
         style.color,
         `${style.name} (avg of ${driveNames.length})`
       );
@@ -420,6 +446,62 @@ function psdFerrTraces(names: string[], plots: PlotSeries[], steps: string[]): P
   });
   return traces;
 }
+
+const CARTESIAN_UM2_PER_MM2 = 1e6;
+
+function uniformCountsPerMm(runName: string): number {
+  const detail = state.details.get(runName);
+  const motors = (detail && detail.manifest && detail.manifest.motors) || [];
+  const values = [
+    ...new Set(motors.map((m) => m.counts_per_mm).filter((v): v is number => v != null && v > 0)),
+  ];
+  if (values.length !== 1) {
+    throw new Error(
+      `${runName}: cartesian counts view needs one shared counts_per_mm, manifest has ${values.length}`
+    );
+  }
+  return values[0];
+}
+
+/// Cartesian-mode PSDs arrive in mm²/Hz (motor counts already projected
+/// through the spatial frame server-side); µm view scales power by 1000²,
+/// counts view maps back through the run's single counts_per_mm.
+function psdCartesianScaled(psdMm2: number[], runName: string, unit: FerrUnit): number[] {
+  if (unit === "counts") {
+    const cpm = uniformCountsPerMm(runName);
+    return psdMm2.map((p) => p * cpm * cpm);
+  }
+  return psdMm2.map((p) => p * CARTESIAN_UM2_PER_MM2);
+}
+
+function psdCartesianTraces(names: string[], plots: PlotSeries[], steps: string[], unit: FerrUnit): PsdTrace[] {
+  const traces: PsdTrace[] = [];
+  plots.forEach((p, i) => {
+    steps.forEach((stepName, j) => {
+      const step = p.steps.find((s) => s.name === stepName);
+      if (!step || !step.psd || !step.psd.cartesian) return;
+      const cartesian = step.psd.cartesian;
+      const style = traceStyle(names, steps, i, j);
+      const modes = Object.entries(cartesian);
+      modes.forEach(([mode, psd], k) => {
+        const clipped = clipToPsdBand(step.psd.freq_hz, psdCartesianScaled(psd, names[i], unit));
+        traces.push({
+          freq: clipped.freq,
+          y: psdToAmplitude(clipped.freq, clipped.y),
+          color: mixColor(style.color, "#ffffff", driveRamp(modes.length, k)),
+          dashed: false,
+          label: `${style.name} (${mode})`,
+          run: names[i],
+        });
+      });
+    });
+  });
+  return traces;
+}
+
+const ACCEL_AXIS_KEYS = ["psd_x", "psd_y", "psd_z"] as const;
+const ACCEL_AXIS_LABELS = ["x", "y", "z"] as const;
+const ACCEL_TOTAL_WIDTH = 2.25;
 
 function psdAccelTraces(names: string[], plots: PlotSeries[], steps: string[]): PsdTrace[] {
   const traces: PsdTrace[] = [];
@@ -429,18 +511,48 @@ function psdAccelTraces(names: string[], plots: PlotSeries[], steps: string[]): 
       const accel = step && step.psd && step.psd.accel;
       if (!accel) return;
       const style = traceStyle(names, steps, i, j);
-      const clipped = clipToPsdBand(accel.freq_hz, accel.psd);
-      traces.push({
-        freq: clipped.freq,
-        y: psdToAmplitude(clipped.freq, clipped.y),
-        color: style.color,
-        dashed: false,
-        label: `${style.name} (accel)`,
-        run: names[i],
+      const pushTrace = (psd: number[], color: string, label: string, opts: { dashed: boolean; width?: number }) => {
+        const clipped = clipToPsdBand(accel.freq_hz, psd);
+        traces.push({
+          freq: clipped.freq,
+          y: psdToAmplitude(clipped.freq, clipped.y),
+          color,
+          dashed: opts.dashed,
+          width: opts.width,
+          label,
+          run: names[i],
+        });
+      };
+      pushTrace(accel.psd, style.color, `${style.name} (total)`, { dashed: false, width: ACCEL_TOTAL_WIDTH });
+      ACCEL_AXIS_KEYS.forEach((key, k) => {
+        pushTrace(
+          accel[key],
+          mixColor(style.color, "#ffffff", driveRamp(ACCEL_AXIS_KEYS.length + 1, k + 1)),
+          `${style.name} (${ACCEL_AXIS_LABELS[k]})`,
+          { dashed: true }
+        );
       });
     });
   });
   return traces;
+}
+
+function renderAccelPsdChart(names: string[], plots: PlotSeries[], steps: string[]) {
+  const section = el("accel-psd-section");
+  const container = el("accel-psd-charts");
+  if (!section || !container) return;
+  const traces = psdAccelTraces(names, plots, steps);
+  section.hidden = !traces.length;
+  const sig = { runs: runDataSig(names), steps, maxHz: psdMaxFreqHz() };
+  if (payloadUnchanged("accel-psd-charts", sig)) return;
+  container.innerHTML = "";
+  if (!traces.length) return;
+  container.appendChild(
+    psdBox("accelerometer", traces, RESONANCE_BAND_HZ, "accel amplitude (mm/s²)", {
+      linear: true,
+      zeroFloor: true,
+    })
+  );
 }
 
 function fmtLinear(v: number): string {
@@ -501,7 +613,10 @@ function psdBox(
 function renderPsdChart(names: string[], plots: PlotSeries[], steps: string[]) {
   const container = el("psd-charts");
   if (!container) return;
-  const sig = { runs: runDataSig(names), steps, view: motorView(), maxHz: psdMaxFreqHz() };
+  const availability = ferrUnitAvailability(psdDrivePairs(names, plots, steps));
+  syncFerrUnitUi("psd", availability);
+  const unit = resolvedFerrUnit(availability);
+  const sig = { runs: runDataSig(names), steps, view: motorView(), maxHz: psdMaxFreqHz(), unit };
   if (payloadUnchanged("psd-charts", sig)) return;
   container.innerHTML = "";
   if (!names.length || !steps.length) {
@@ -509,16 +624,34 @@ function renderPsdChart(names: string[], plots: PlotSeries[], steps: string[]) {
     return;
   }
   const psdOpts = { linear: true, zeroFloor: true };
-  const ferr = psdFerrTraces(names, plots, steps);
-  container.appendChild(
-    psdBox("following error", ferr, RESONANCE_BAND_HZ, "ferr amplitude (µm)", psdOpts)
+  const hasCartesian = plots.some((p) =>
+    p.steps.some((s) => steps.includes(s.name) && s.psd && s.psd.cartesian)
   );
-  const accel = psdAccelTraces(names, plots, steps);
-  if (accel.length) {
-    container.appendChild(
-      psdBox("accelerometer", accel, RESONANCE_BAND_HZ, "accel amplitude", psdOpts)
-    );
+  const cartesianBtn = document.querySelector<HTMLButtonElement>(
+    '.psd-section .motor-view-btn[data-view="cartesian"]'
+  );
+  if (cartesianBtn) {
+    cartesianBtn.disabled = !hasCartesian;
+    cartesianBtn.title = hasCartesian
+      ? "project per-motor error through the spatial frame into cartesian axis modes"
+      : "unavailable — the selected runs' manifests carry no spatial frame";
   }
+  if (motorView() === "cartesian") {
+    if (!hasCartesian) {
+      container.innerHTML =
+        '<p class="note">cartesian view needs a run whose manifest carries a spatial frame</p>';
+      return;
+    }
+    const cartesian = psdCartesianTraces(names, plots, steps, unit);
+    container.appendChild(
+      psdBox("following error — cartesian modes", cartesian, RESONANCE_BAND_HZ, `ferr amplitude (${unit})`, psdOpts)
+    );
+    return;
+  }
+  const ferr = psdFerrTraces(names, plots, steps, unit);
+  container.appendChild(
+    psdBox("following error", ferr, RESONANCE_BAND_HZ, `ferr amplitude (${unit})`, psdOpts)
+  );
 }
 
 function visibleStepNames(stepNames: string[]): string[] {
@@ -542,36 +675,18 @@ function renderMotorChips(motorNames: string[]) {
   if (payloadUnchanged("time-motor-chips", { motorNames, filter, show })) return;
   container.innerHTML = "";
   if (!show) return;
-  const all = document.createElement("button");
-  all.className = "chip" + (state.motorFilter ? "" : " active");
-  all.textContent = "all motors";
-  all.title = "show every motor";
-  all.addEventListener("click", () => {
-    state.motorFilter = null;
-    redrawCharts();
-  });
-  container.appendChild(all);
-  for (const motor of motorNames) {
-    const chip = document.createElement("button");
-    const inFilter = state.motorFilter && state.motorFilter.has(motor);
-    chip.className = "chip" + (inFilter ? " active" : "");
-    chip.textContent = motor;
-    chip.title = "click: only this motor — shift+click: add/remove it";
-    chip.addEventListener("click", (ev) => {
-      if (ev.shiftKey) {
-        const next = new Set(state.motorFilter || motorNames);
-        if (next.has(motor)) next.delete(motor);
-        else next.add(motor);
-        state.motorFilter = next.size === 0 || next.size === motorNames.length ? null : next;
-      } else if (inFilter && state.motorFilter && state.motorFilter.size === 1) {
-        state.motorFilter = null;
-      } else {
-        state.motorFilter = new Set([motor]);
-      }
-      redrawCharts();
-    });
-    container.appendChild(chip);
-  }
+  fillFilterChips(
+    container,
+    "all motors",
+    "show every motor",
+    "motor",
+    motorNames.map((m) => ({ key: m, label: m })),
+    () => state.motorFilter,
+    (next) => {
+      state.motorFilter = next;
+    },
+    redrawCharts
+  );
 }
 
 function renderStepChips(stepNames: string[]) {
@@ -585,38 +700,19 @@ function renderStepChips(stepNames: string[]) {
 }
 
 function fillStepChips(container: HTMLElement, stepNames: string[]) {
-  container.innerHTML = "";
-  const all = document.createElement("button");
-  all.className = "chip" + (state.stepFilter ? "" : " active");
-  all.textContent = "all";
-  all.title = "show every step";
-  all.addEventListener("click", () => {
-    state.stepFilter = null;
-    redrawCharts();
-  });
-  container.appendChild(all);
-  for (const stepName of stepNames) {
-    const chip = document.createElement("button");
-    const inFilter = state.stepFilter && state.stepFilter.has(stepName);
-    chip.className = "chip" + (inFilter ? " active" : "");
-    chip.textContent = stepName;
-    chip.title = "click: only this step — shift+click: add/remove it";
-    chip.addEventListener("click", (ev) => {
-      if (ev.shiftKey) {
-        const next = new Set(state.stepFilter || stepNames);
-        if (next.has(stepName)) next.delete(stepName);
-        else next.add(stepName);
-        state.stepFilter = next.size === 0 || next.size === stepNames.length ? null : next;
-      } else if (inFilter && state.stepFilter && state.stepFilter.size === 1) {
-        state.stepFilter = null;
-      } else {
-        state.stepFilter = new Set([stepName]);
-      }
-      redrawCharts();
-    });
-    container.appendChild(chip);
-  }
+  fillFilterChips(
+    container,
+    "all",
+    "show every step",
+    "step",
+    stepNames.map((s) => ({ key: s, label: s })),
+    () => state.stepFilter,
+    (next) => {
+      state.stepFilter = next;
+    },
+    redrawCharts
+  );
 }
 
 export type { MetricsRow, PsdBoxOpts, SweepSeries };
-export { driveMoveSummary, settleCellHtml, torqueCellHtml, metricsDriveRow, foldDriveRows, metricsTableRows, heatCellStyle, renderMetricsTable, sweptAxisKey, sweepMetricsSeries, renderSweepMetricsChart, driveRamp, psdFerrUm2, psdFerrTraces, psdAccelTraces, fmtLinear, psdBox, renderPsdChart, visibleStepNames, renderStepChips, renderMotorChips, fillStepChips };
+export { driveMoveSummary, settleCellHtml, torqueCellHtml, metricsDriveRow, foldDriveRows, metricsTableRows, heatCellStyle, renderMetricsTable, sweptAxisKey, sweepMetricsSeries, renderSweepMetricsChart, driveRamp, psdFerrScaled, psdDrivePairs, psdFerrTraces, uniformCountsPerMm, psdCartesianScaled, psdCartesianTraces, psdAccelTraces, renderAccelPsdChart, fmtLinear, psdBox, renderPsdChart, visibleStepNames, renderStepChips, renderMotorChips, fillStepChips };

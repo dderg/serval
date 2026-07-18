@@ -468,7 +468,7 @@ fn drive_state_endpoint_serves_shape_and_a_fresh_age() {
     assert_eq!(resp.status, 200);
     let parsed: Value = serde_json::from_str(&resp.body).expect("drive_state is json");
     assert_eq!(parsed["version"], Value::from(1));
-    assert_eq!(parsed["params"].as_array().unwrap().len(), 31);
+    assert_eq!(parsed["params"].as_array().unwrap().len(), 27);
     assert_eq!(parsed["motors"].as_object().unwrap().len(), 4);
     assert_eq!(parsed["config_pins"].as_object().unwrap().len(), 4);
     let age_s = parsed["age_s"].as_f64().expect("age_s must be a number");
@@ -499,6 +499,63 @@ fn drive_state_endpoint_404s_with_reason_when_absent() {
     let parsed: Value = serde_json::from_str(&resp.body).expect("404 body is json");
     let reason = parsed["error"].as_str().unwrap();
     assert!(reason.contains("drive_state.json"), "{reason}");
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn path_endpoint_serves_full_resolution_xy_per_step() {
+    let (root, run_dirs) = demo_root("full_path");
+    let port = spawn_server(root.clone());
+    let name = run_dirs[0]
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    let plot = request(port, "GET", &format!("/api/runs/{name}/plot_series"));
+    assert_eq!(plot.status, 200);
+    let plot: Value = serde_json::from_str(&plot.body).unwrap();
+
+    let resp = request(port, "GET", &format!("/api/runs/{name}/path"));
+    assert_eq!(resp.status, 200, "{}", resp.body);
+    let payload: Value = serde_json::from_str(&resp.body).unwrap();
+    assert_eq!(payload["version"], 1);
+    let steps = payload["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), plot["steps"].as_array().unwrap().len());
+
+    for (full, preview) in steps.iter().zip(plot["steps"].as_array().unwrap()) {
+        assert_eq!(full["name"], preview["name"]);
+        assert_eq!(full["truncated"], false);
+        let n_records = full["n_records"].as_u64().unwrap() as usize;
+        let cap_name = format!("step_{}.scap", full["name"].as_str().unwrap());
+        let cap =
+            servo_ident::scap::Scap::load(run_dirs[0].join(&cap_name).to_str().unwrap()).unwrap();
+        assert_eq!(n_records, cap.n_records);
+        for series in ["cmd_x_mm", "cmd_y_mm", "act_x_mm", "act_y_mm"] {
+            let full_len = full["path"][series].as_array().unwrap().len();
+            let preview_len = preview["path"][series].as_array().unwrap().len();
+            assert_eq!(full_len, cap.n_records, "{cap_name} {series}");
+            assert!(
+                full_len > preview_len,
+                "{cap_name} {series}: full {full_len} not denser than preview {preview_len}"
+            );
+        }
+    }
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn path_endpoint_404s_for_a_run_without_a_spatial_frame() {
+    let root = temp_dir("path_no_spatial");
+    write_bare_manifest(&root.join("flat_run"), "flat");
+    let port = spawn_server(root.clone());
+
+    let resp = request(port, "GET", "/api/runs/flat_run/path");
+    assert_eq!(resp.status, 404);
+    let parsed: Value = serde_json::from_str(&resp.body).expect("404 body is json");
+    assert!(parsed["error"].as_str().unwrap().contains("spatial"));
 
     std::fs::remove_dir_all(&root).ok();
 }

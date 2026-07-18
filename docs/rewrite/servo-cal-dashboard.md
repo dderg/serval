@@ -99,10 +99,10 @@ rows.
 
 `servo-cal demo` also writes a `drive_state.json` for four AWD corexy
 motors (`motor_a`/`motor_a1`/`motor_b`/`motor_b1`) mirroring the shipped
-31-entry `PANEL_PARAMS` (gains 880/550/2273, the full notch bank with
+`PANEL_PARAMS` (gains 880/550/2273, the full notch bank with
 slots 1–3 on bench-noted values and `notch_1_freq` deliberately drifted on
-`motor_b` to show the grid's drift highlight, both observers, `gain_mode`/
-`inertia_ratio` pinned as if set by `[motor] params:`), so every page's
+`motor_b` to show the grid's drift highlight, both observers, `inertia_ratio`
+pinned as if set by `[motor] params:`), so every page's
 grid has something plausible to render and Apply against without a
 bench — Apply still tries to reach Moonraker, so on a bench-less demo it
 will report a connection error in the session log, which is expected.
@@ -184,14 +184,12 @@ chart.
   step when visible, else its last visible step) sits under the PSD; "→
   notch n" pushes a peak's frequency into that slot's pending edits for
   all motors (width/depth stay operator-chosen). The notch grid ships
-  compact and per-motor views, plus the folded adaptive-mode recipes
-  (reset params / 1 adaptive / 2 adaptive / disable), which only stage
-  `adaptive_notch_mode` — nothing is written until Apply.
+  compact and per-motor views — nothing is written until Apply.
 - **observers** — torque filter, speed observer, disturbance observer
   grids; time-domain following-error overlay (disturbance rejection is a
   time-domain signal).
 - **dynamics** — `SERVO_FIT_DYNAMICS` runner and the `load` grid
-  (gain_mode / stiffness_level / inertia_ratio). Differential belt runs
+  (`inertia_ratio`). Differential belt runs
   (`experiment: "differential"`, the anti-phase chirp on one AWD belt
   pair) land here too: selecting one adds a four-box FRF stack over the
   sweep band — magnitude (dB), phase (deg), coherence (0–1.05 with a

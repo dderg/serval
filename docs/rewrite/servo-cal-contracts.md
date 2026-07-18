@@ -257,6 +257,9 @@ partial results.json). klippy resolves the binary at
 
 `serve` endpoints: `GET /api/runs` (list: name, mtime, experiment, verdict
 summary), `GET /api/runs/<name>/manifest|results|plot_series`,
+`GET /api/runs/<name>/path` (full-resolution commanded/actual XY per step,
+computed from the raw captures on request, values rounded to 1e-4 mm,
+≤ 500000 points per step with a `truncated` flag when the cap bites),
 `POST /api/runs/<name>/analyze` (run analyze if results.json missing or
 stale), `GET /` static SPA. G-code submission goes browser → Moonraker
 (`POST /printer/gcode/script`), not through servo-cal.
