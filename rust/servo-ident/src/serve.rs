@@ -273,6 +273,11 @@ struct NoteBody {
     note: String,
 }
 
+#[derive(Serialize)]
+struct NoteResponse<'a> {
+    note: &'a str,
+}
+
 /// `POST /api/runs/<name>/note`: body `{"note": "..."}`. Writes
 /// `note.txt` in the run directory; an empty (or all-whitespace) note
 /// deletes the file. Notes are user commentary, never an analysis input —
@@ -304,7 +309,15 @@ fn handle_note(captures_root: &Path, name: &str, body: &[u8]) -> Response {
     if let Err(e) = result {
         return Response::text(500, "text/plain", format!("{}: {e}", path.display()));
     }
-    Response::json(200, serde_json::json!({ "note": note }).to_string())
+    Response::json(
+        200,
+        serde_json::to_string(&NoteResponse { note }).expect("NoteResponse always serializes"),
+    )
+}
+
+#[derive(Serialize)]
+struct DeleteResponse<'a> {
+    deleted: &'a str,
 }
 
 /// `DELETE /api/runs/<name>`: removes the run directory — manifest,
@@ -321,7 +334,11 @@ fn handle_delete_run(captures_root: &Path, name: &str) -> Response {
     if let Err(e) = std::fs::remove_dir_all(&run_dir) {
         return Response::text(500, "text/plain", format!("{}: {e}", run_dir.display()));
     }
-    Response::json(200, serde_json::json!({ "deleted": name }).to_string())
+    Response::json(
+        200,
+        serde_json::to_string(&DeleteResponse { deleted: name })
+            .expect("DeleteResponse always serializes"),
+    )
 }
 
 /// `GET /api/runs/<name>/strain`: the strain-map tab's data source. Only
@@ -371,6 +388,18 @@ fn handle_strain(captures_root: &Path, name: &str) -> Response {
     Response::json(200, body)
 }
 
+#[derive(Serialize)]
+struct LiveCapture<'a> {
+    name: Option<&'a str>,
+    size_bytes: u64,
+    age_s: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct LiveStatus<'a> {
+    capture: Option<LiveCapture<'a>>,
+}
+
 /// Newest flat capture in the root, with its current size and age — the
 /// live page polls this to notice a capture starting or growing.
 fn handle_live_status(captures_root: &Path) -> Response {
@@ -379,23 +408,27 @@ fn handle_live_status(captures_root: &Path) -> Response {
         Err(e) => return Response::text(500, "text/plain", e),
     };
     let Some(path) = newest else {
-        return Response::json(200, serde_json::json!({ "capture": null }).to_string());
+        return Response::json(
+            200,
+            serde_json::to_string(&LiveStatus { capture: None })
+                .expect("LiveStatus always serializes"),
+        );
     };
     let meta = match path.metadata() {
         Ok(m) => m,
         Err(e) => return Response::text(500, "text/plain", format!("{}: {e}", path.display())),
     };
     let mtime = meta.modified().ok();
+    let status = LiveStatus {
+        capture: Some(LiveCapture {
+            name: path.file_name().and_then(|n| n.to_str()),
+            size_bytes: meta.len(),
+            age_s: mtime.map(age_seconds),
+        }),
+    };
     Response::json(
         200,
-        serde_json::json!({
-            "capture": {
-                "name": path.file_name().and_then(|n| n.to_str()),
-                "size_bytes": meta.len(),
-                "age_s": mtime.map(age_seconds),
-            }
-        })
-        .to_string(),
+        serde_json::to_string(&status).expect("LiveStatus always serializes"),
     )
 }
 

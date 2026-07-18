@@ -11,6 +11,7 @@
 //! can show the PSD overlay and the resonance-driven verdict fallback to
 //! `s550` — `attempt2`/`attempt3` stay on the untouched fixture bytes.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -18,10 +19,11 @@ use std::time::{Duration, SystemTime};
 use core::f64::consts::PI;
 
 use flate2::read::GzDecoder;
-use serde_json::json;
+use serde::Serialize;
 
 use crate::analyze::{build_run, write_run_outputs};
 use crate::metrics::target_motion_segments;
+use crate::results::Applied;
 use crate::scap::{Channel, Scap, RECORD_PREFIX_SIZE};
 use crate::time_fmt::{iso8601_utc, stamp_utc};
 
@@ -303,74 +305,92 @@ const DEMO_DISAGREEING_VALUE: i64 = 400;
 /// live won't survive a restart until the config is updated too.
 const DEMO_PINNED_C_CODES: [&str; 2] = ["C00.04", "C00.06"];
 
+#[derive(Debug, Serialize)]
+struct DriveStateParam {
+    name: String,
+    c_code: String,
+    addr: String,
+    #[serde(rename = "type")]
+    ty: &'static str,
+    unit: &'static str,
+    group: &'static str,
+    description: String,
+    autofill: Option<&'static str>,
+    options: Option<BTreeMap<String, String>>,
+}
+
+impl From<&DemoPanelParam> for DriveStateParam {
+    fn from(p: &DemoPanelParam) -> Self {
+        DriveStateParam {
+            name: p.name.clone(),
+            c_code: p.c_code.clone(),
+            addr: p.addr.clone(),
+            ty: "u16",
+            unit: p.unit,
+            group: p.group,
+            description: p.description.clone(),
+            autofill: p.autofill,
+            options: p.options.map(|pairs| {
+                pairs
+                    .iter()
+                    .map(|(v, label)| (v.to_string(), label.to_string()))
+                    .collect()
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct DriveStatePayload {
+    version: i64,
+    created_utc: String,
+    params: Vec<DriveStateParam>,
+    motors: BTreeMap<String, BTreeMap<String, i64>>,
+    config_pins: BTreeMap<String, BTreeMap<String, i64>>,
+    slots: BTreeMap<String, usize>,
+}
+
 /// Write `<out_dir>/drive_state.json` in the shape `SERVO_DUMP_TUNING`
 /// produces (`docs/rewrite/servo-tuning-profiles.md`), so the tuning panel
 /// has something plausible to render without a bench.
 fn write_demo_drive_state(out_dir: &Path) -> Result<(), String> {
     let panel = demo_panel_params();
-    let readings: std::collections::BTreeMap<String, i64> = panel
+    let readings: BTreeMap<String, i64> = panel
         .iter()
         .map(|p| (p.c_code.clone(), p.reading))
         .collect();
-    let params: Vec<serde_json::Value> = panel
-        .iter()
-        .map(|p| {
-            let options: serde_json::Value = match p.options {
-                None => serde_json::Value::Null,
-                Some(pairs) => pairs
-                    .iter()
-                    .map(|(v, label)| (v.to_string(), json!(label)))
-                    .collect::<serde_json::Map<_, _>>()
-                    .into(),
-            };
-            json!({
-                "name": p.name,
-                "c_code": p.c_code,
-                "addr": p.addr,
-                "type": "u16",
-                "unit": p.unit,
-                "group": p.group,
-                "description": p.description,
-                "autofill": p.autofill,
-                "options": options,
-            })
-        })
-        .collect();
-    let motors: serde_json::Value = DEMO_MOTORS
+    let params: Vec<DriveStateParam> = panel.iter().map(DriveStateParam::from).collect();
+    let motors: BTreeMap<String, BTreeMap<String, i64>> = DEMO_MOTORS
         .iter()
         .map(|m| {
             let mut motor_readings = readings.clone();
             if *m == DEMO_DISAGREEING_MOTOR {
                 motor_readings.insert(DEMO_DISAGREEING_C_CODE.to_string(), DEMO_DISAGREEING_VALUE);
             }
-            (m.to_string(), json!(motor_readings))
+            (m.to_string(), motor_readings)
         })
-        .collect::<serde_json::Map<_, _>>()
-        .into();
-    let pinned: serde_json::Value = DEMO_PINNED_C_CODES
+        .collect();
+    let pinned: BTreeMap<String, i64> = DEMO_PINNED_C_CODES
         .iter()
-        .map(|c| (c.to_string(), json!(readings[*c])))
-        .collect::<serde_json::Map<_, _>>()
-        .into();
-    let config_pins: serde_json::Value = DEMO_MOTORS
+        .map(|c| (c.to_string(), readings[*c]))
+        .collect();
+    let config_pins: BTreeMap<String, BTreeMap<String, i64>> = DEMO_MOTORS
         .iter()
         .map(|m| (m.to_string(), pinned.clone()))
-        .collect::<serde_json::Map<_, _>>()
-        .into();
-    let slots: serde_json::Value = DEMO_MOTORS
+        .collect();
+    let slots: BTreeMap<String, usize> = DEMO_MOTORS
         .iter()
         .enumerate()
-        .map(|(slot, m)| (m.to_string(), json!(slot)))
-        .collect::<serde_json::Map<_, _>>()
-        .into();
-    let payload = json!({
-        "version": 1,
-        "created_utc": iso8601_utc(SystemTime::now()),
-        "params": params,
-        "motors": motors,
-        "config_pins": config_pins,
-        "slots": slots,
-    });
+        .map(|(slot, m)| (m.to_string(), slot))
+        .collect();
+    let payload = DriveStatePayload {
+        version: 1,
+        created_utc: iso8601_utc(SystemTime::now()),
+        params,
+        motors,
+        config_pins,
+        slots,
+    };
     let path = out_dir.join("drive_state.json");
     let tmp = out_dir.join("drive_state.json.tmp");
     std::fs::write(
@@ -509,51 +529,165 @@ fn inject_decaying_resonance(bytes: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn manifest_json(attempt: &DemoAttempt, created: SystemTime) -> serde_json::Value {
+#[derive(Debug, Serialize)]
+struct DemoStrokePlan {
+    start: f64,
+    end: f64,
+    speed: f64,
+    accel: f64,
+    iterations: i64,
+    dwell_ms: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct DemoMotorSpec {
+    name: &'static str,
+    invert: bool,
+    rotation_distance: f64,
+    counts_per_mm: f64,
+}
+
+const DEMO_MOTOR_SPECS: [DemoMotorSpec; 4] = [
+    DemoMotorSpec {
+        name: "motor_a",
+        invert: false,
+        rotation_distance: 40.0,
+        counts_per_mm: 3276.8,
+    },
+    DemoMotorSpec {
+        name: "motor_a1",
+        invert: false,
+        rotation_distance: 40.0,
+        counts_per_mm: 3276.8,
+    },
+    DemoMotorSpec {
+        name: "motor_b",
+        invert: false,
+        rotation_distance: 40.0,
+        counts_per_mm: 3276.8,
+    },
+    DemoMotorSpec {
+        name: "motor_b1",
+        invert: false,
+        rotation_distance: 40.0,
+        counts_per_mm: 3276.8,
+    },
+];
+
+#[derive(Debug, Serialize)]
+struct DemoSweptGains {
+    position: i64,
+    speed: i64,
+    integral: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct DemoStep {
+    name: &'static str,
+    swept: DemoSweptGains,
+    applied: Vec<Applied>,
+    capture: &'static str,
+    accel: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct DemoParamWrite {
+    servo: &'static str,
+    addr: &'static str,
+    value: i64,
+    time_utc: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DemoAmbient {
+    journal_params: BTreeMap<String, BTreeMap<String, i64>>,
+    param_writes_since_last_run: Vec<DemoParamWrite>,
+}
+
+#[derive(Debug, Serialize)]
+struct DemoManifest {
+    version: i64,
+    experiment: &'static str,
+    tag: String,
+    created_utc: String,
+    axis: &'static str,
+    kinematics: &'static str,
+    git_rev: &'static str,
+    session_id: String,
+    stroke_plan: DemoStrokePlan,
+    motors: &'static [DemoMotorSpec],
+    belts: &'static str,
+    steps: Vec<DemoStep>,
+    ambient: DemoAmbient,
+}
+
+fn demo_applied(addr: &'static str, value: i64) -> Vec<Applied> {
+    vec![Applied {
+        servo: "motor_a".to_string(),
+        addr: addr.to_string(),
+        ty: "u16".to_string(),
+        value: serde_json::Value::from(value),
+    }]
+}
+
+fn manifest_json(attempt: &DemoAttempt, created: SystemTime) -> DemoManifest {
     let created_utc = iso8601_utc(created);
-    json!({
-        "version": 1,
-        "experiment": "gain_sweep",
-        "tag": format!("cal_{}", attempt.suffix),
-        "created_utc": created_utc,
-        "axis": "X",
-        "kinematics": "corexy",
-        "git_rev": "demo",
-        "session_id": format!("demo-{}", attempt.suffix),
-        "stroke_plan": {
-            "start": 30.0, "end": 220.0, "speed": 100.0, "accel": 3000.0,
-            "iterations": 1, "dwell_ms": 700
+    DemoManifest {
+        version: 1,
+        experiment: "gain_sweep",
+        tag: format!("cal_{}", attempt.suffix),
+        created_utc: created_utc.clone(),
+        axis: "X",
+        kinematics: "corexy",
+        git_rev: "demo",
+        session_id: format!("demo-{}", attempt.suffix),
+        stroke_plan: DemoStrokePlan {
+            start: 30.0,
+            end: 220.0,
+            speed: 100.0,
+            accel: 3000.0,
+            iterations: 1,
+            dwell_ms: 700,
         },
-        "motors": [
-            {"name": "motor_a", "invert": false, "rotation_distance": 40.0, "counts_per_mm": 3276.8},
-            {"name": "motor_a1", "invert": false, "rotation_distance": 40.0, "counts_per_mm": 3276.8},
-            {"name": "motor_b", "invert": false, "rotation_distance": 40.0, "counts_per_mm": 3276.8},
-            {"name": "motor_b1", "invert": false, "rotation_distance": 40.0, "counts_per_mm": 3276.8}
-        ],
-        "belts": "motor_a:1+motor_a1:-1,motor_b:-1+motor_b1:-1",
-        "steps": [
-            {
-                "name": "s550",
-                "swept": {"position": 880, "speed": 550, "integral": 2273},
-                "applied": [{"servo": "motor_a", "addr": "0x2001.0x01", "type": "u16", "value": 880}],
-                "capture": "step_s550.scap",
-                "accel": "step_s550_accel.csv"
+        motors: &DEMO_MOTOR_SPECS,
+        belts: "motor_a:1+motor_a1:-1,motor_b:-1+motor_b1:-1",
+        steps: vec![
+            DemoStep {
+                name: "s550",
+                swept: DemoSweptGains {
+                    position: 880,
+                    speed: 550,
+                    integral: 2273,
+                },
+                applied: demo_applied("0x2001.0x01", 880),
+                capture: "step_s550.scap",
+                accel: "step_s550_accel.csv",
             },
-            {
-                "name": "s700",
-                "swept": {"position": 1120, "speed": 700, "integral": 1786},
-                "applied": [{"servo": "motor_a", "addr": "0x2001.0x01", "type": "u16", "value": 1120}],
-                "capture": "step_s700.scap",
-                "accel": "step_s700_accel.csv"
-            }
+            DemoStep {
+                name: "s700",
+                swept: DemoSweptGains {
+                    position: 1120,
+                    speed: 700,
+                    integral: 1786,
+                },
+                applied: demo_applied("0x2001.0x01", 1120),
+                capture: "step_s700.scap",
+                accel: "step_s700_accel.csv",
+            },
         ],
-        "ambient": {
-            "journal_params": {"motor_a": {"0x2001.0x31": attempt.notch}},
-            "param_writes_since_last_run": [
-                {"servo": "motor_a", "addr": "0x2001.0x31", "value": attempt.notch, "time_utc": created_utc}
-            ]
-        }
-    })
+        ambient: DemoAmbient {
+            journal_params: BTreeMap::from([(
+                "motor_a".to_string(),
+                BTreeMap::from([("0x2001.0x31".to_string(), attempt.notch)]),
+            )]),
+            param_writes_since_last_run: vec![DemoParamWrite {
+                servo: "motor_a",
+                addr: "0x2001.0x31",
+                value: attempt.notch,
+                time_utc: created_utc,
+            }],
+        },
+    }
 }
 
 /// Build `DEMO_ATTEMPTS` under `out_dir`, gunzipping captures from
