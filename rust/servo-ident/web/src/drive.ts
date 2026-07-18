@@ -15,8 +15,8 @@ import type { VNode } from "preact";
 // --- drive tuning grid --------------------------------------------------------
 //
 // Renders purely from GET /api/drive_state (servo_tuning.PANEL_PARAMS shape,
-// docs/rewrite/servo-tuning-profiles.md) as compact labeled fields, one
-// flex line per group, whose value widget is
+// docs/rewrite/servo-tuning-profiles.md) as compact labeled fields, a
+// fixed-column grid per group, whose value widget is
 // the shared MotorValues component (motor-values.ts): one collapsed set-all
 // field when motors agree, an expandable per-motor spread when they don't,
 // so a 4-motor bench never needs the same value typed four times and every
@@ -201,10 +201,19 @@ function ParamMotorValues({ param }: { param: DriveParam }) {
   />`;
 }
 
+function displayParamName(param: DriveParam, section: string): string {
+  if (section === OTHER_GROUP) return param.name;
+  const groupTokens = new Set(section.split("_").flatMap((t) => [t, t.replace(/s$/, "")]));
+  const kept = param.name.split("_").filter((t) => !groupTokens.has(t));
+  return kept.length ? kept.join("_") : param.name;
+}
+
 function ParamLabel({ param, section }: { param: DriveParam; section: string }) {
   const pins = pinnedEntries(driveData().config_pins, param.c_code);
   const pinnedNames = Object.keys(pins);
-  return html`<span title=${`${param.description} (${param.c_code})`}>${param.name}</span>${" "}
+  return html`<span class="param-name" title=${`${param.name} — ${param.description} (${param.c_code})`}
+      >${displayParamName(param, section)}</span
+    >
     ${param.unit ? html`<span class="unit">${param.unit}</span>` : null}
     ${pinnedNames.length
       ? html`<span
@@ -261,10 +270,10 @@ function NotchGrid({ nums, byKey }: { nums: number[]; byKey: Map<string, DrivePa
   </table>`;
 }
 
-/// One compact labeled field per param, all of a group's fields flowing on
-/// one flex line so the whole group reads at a glance; expanding a field's
-/// per-motor spread pops it onto its own full-width row (CSS flex-basis)
-/// while the rest of the line stays compact.
+/// One compact labeled field per param on a fixed-column grid so every
+/// field is the same width whether or not its row is full; expanding a
+/// field's per-motor spread pops it onto its own full-width row
+/// (grid-column span) while the rest of the grid stays compact.
 function ParamLine({ params, group }: { params: DriveParam[]; group: string }) {
   return html`<div class="param-line">
     ${params.map(
@@ -476,4 +485,4 @@ function loadRerunForm(name: string) {
   setConsoleValue(reconstructCommand(detail.manifest), false);
 }
 
-export { GROUP_ORDER, OTHER_GROUP, RETIRED_PARAMS, DRIVE_REFRESH_POLL_MS, DRIVE_REFRESH_TIMEOUT_MS, paramGroupSection, groupParams, motorNames, motorRawValues, valuesAgree, pinnedEntries, cellRaw, diffChangedParams, buildServoTuneCommands, paramByName, formatAge, currentDriveAgeS, renderDriveBanner, shortMotorLabel, stageCellEdit, NOTCH_ROW_KINDS, notchMatrix, renderDriveGroups, loadDriveState, refreshDriveState, applyDriveChanges, strokeSuffix, reconstructCommand, loadRerunForm };
+export { GROUP_ORDER, OTHER_GROUP, RETIRED_PARAMS, DRIVE_REFRESH_POLL_MS, DRIVE_REFRESH_TIMEOUT_MS, paramGroupSection, groupParams, motorNames, motorRawValues, valuesAgree, pinnedEntries, cellRaw, diffChangedParams, buildServoTuneCommands, paramByName, formatAge, currentDriveAgeS, renderDriveBanner, shortMotorLabel, stageCellEdit, NOTCH_ROW_KINDS, notchMatrix, renderDriveGroups, loadDriveState, refreshDriveState, applyDriveChanges, displayParamName, strokeSuffix, reconstructCommand, loadRerunForm };

@@ -115,7 +115,7 @@ function MotorValues({ entries, options, expanded, onToggleExpanded, onStage }: 
     : summary.agree
       ? "show per-motor values"
       : `motors disagree — ${summary.spreadText}; click to edit per motor`;
-  const toggleText = expanded ? "×" : summary.agree ? "⋯" : summary.spreadText;
+  const toggleText = expanded ? "×" : summary.agree ? "⋯" : "≠";
   const toggleBtn = html`<button class=${toggleCls.join(" ")} title=${toggleTitle} onClick=${toggle}>
     ${toggleText}
   </button>`;
