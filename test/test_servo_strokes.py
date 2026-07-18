@@ -309,3 +309,81 @@ def test_spatial_frame_none_without_servo_xy_rails():
         servo_strokes.spatial_frame(FakeKin([object(), object()], coupled=True))
         is None
     )
+
+
+def test_pattern_points_closed_loop_within_bounds():
+    points = servo_strokes.pattern_points(30.0, 220.0, 30.0, 220.0, 20.0)
+    assert points[-1] == (30.0, 30.0)
+    assert all(30.0 <= x <= 220.0 and 30.0 <= y <= 220.0 for x, y in points)
+    small = points[10:20]
+    assert all(115.0 <= x <= 135.0 and 115.0 <= y <= 135.0 for x, y in small)
+
+
+def test_pattern_geometry_applies_inset_and_starts_at_min_corner():
+    points, start_x, start_y = servo_strokes.pattern_geometry(
+        FakeGcode(), 0.0, 250.0, 0.0, 250.0, 20.0, 20.0
+    )
+    assert (start_x, start_y) == (20.0, 20.0)
+    assert max(x for x, _y in points) == 230.0
+    assert points[-1] == (20.0, 20.0)
+
+
+def test_pattern_geometry_rejects_collapsed_bounds():
+    with pytest.raises(RuntimeError, match="collapse after inset"):
+        servo_strokes.pattern_geometry(
+            FakeGcode(), 0.0, 30.0, 0.0, 250.0, 20.0, 5.0
+        )
+
+
+def test_pattern_geometry_rejects_oversized_small_box():
+    with pytest.raises(RuntimeError, match="SMALL_SIZE=300.0 exceeds"):
+        servo_strokes.pattern_geometry(
+            FakeGcode(), 0.0, 250.0, 0.0, 250.0, 20.0, 300.0
+        )
+
+
+def test_pattern_moves_labels_triangular_segments_by_achieved_peak():
+    moves = servo_strokes.pattern_moves(
+        FakeGcode(), [(20.0, 0.0), (20.0, 5.0)], 0.0, 0.0, 300.0, 4000.0
+    )
+    assert moves[0].peak_velocity == pytest.approx((4000.0 * 20.0) ** 0.5)
+    assert moves[1].peak_velocity == pytest.approx((4000.0 * 5.0) ** 0.5)
+    long = servo_strokes.pattern_moves(
+        FakeGcode(), [(400.0, 0.0)], 0.0, 0.0, 300.0, 4000.0
+    )
+    assert long[0].peak_velocity == 300.0
+
+
+def test_pattern_moves_rejects_zero_length_segment():
+    with pytest.raises(RuntimeError, match="degenerate pattern segment"):
+        servo_strokes.pattern_moves(
+            FakeGcode(), [(10.0, 10.0), (10.0, 10.0)], 0.0, 0.0, 100.0, 1000.0
+        )
+
+
+def test_emit_pattern_sets_limits_and_repeats_iterations():
+    gcode = FakeGcode()
+    points, start_x, start_y = servo_strokes.pattern_geometry(
+        gcode, 0.0, 250.0, 0.0, 250.0, 20.0, 20.0
+    )
+    moves = servo_strokes.emit_pattern(
+        gcode, points, start_x, start_y, 400.0, 8000.0, 2, 250
+    )
+    (script,) = gcode.scripts
+    lines = script.splitlines()
+    assert lines[0] == "SET_VELOCITY_LIMIT VELOCITY=400 ACCEL=8000"
+    assert lines[1] == "G90"
+    g0_lines = [ln for ln in lines if ln.startswith("G0")]
+    assert len(g0_lines) == 2 * len(points) == 2 * len(moves)
+    assert all(ln.endswith("F24000") for ln in g0_lines)
+    assert lines.count("G4 P250") == 2
+
+
+def test_pattern_reach_summary_reports_triangular_segments():
+    moves = servo_strokes.pattern_moves(
+        FakeGcode(), [(20.0, 0.0), (420.0, 0.0)], 0.0, 0.0, 300.0, 4000.0
+    )
+    summary = servo_strokes.pattern_reach_summary(moves, 300.0)
+    assert "1 of 2 pattern segments run triangular" in summary
+    fast = servo_strokes.pattern_reach_summary([moves[1]], 300.0)
+    assert fast == "all 1 pattern segments reach 300mm/s"

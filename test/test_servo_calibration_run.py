@@ -1027,3 +1027,77 @@ def test_capture_sync_loss_read_failure_is_command_error():
     engine.sdo_read = sdo_read
     with pytest.raises(RuntimeError, match="C13.04"):
         sc.cmd_SERVO_MEASURE_TRACKING(FakeGcmd(AXIS="X"))
+
+
+def test_pattern_gain_sweep_drives_xy_and_records_pattern_plan():
+    servo_param.drain_param_writes()
+    sc, gcode = make_sc()
+    gcmd = FakeGcmd(PATTERN=1, SPEED_GAINS="500,650")
+    sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
+    m = _manifest(sc)
+    assert m["axis"] == "XY"
+    plan = m["stroke_plan"]
+    assert plan["pattern"]["x_bounds"] == [20.0, 200.0]
+    assert plan["pattern"]["inset"] == 20.0
+    assert plan["pattern"]["small_size"] == 20.0
+    assert plan["pattern"]["segments"] == 21
+    assert "start" not in plan
+    captures = sc.printer.lookup_object("servo_capture").captures
+    assert captures[0][1] == ["motor_a", "motor_b"]
+    pattern_scripts = [
+        s
+        for s in gcode.scripts
+        if isinstance(s, str) and "SET_VELOCITY_LIMIT VELOCITY=" in s
+    ]
+    assert len(pattern_scripts) == 2
+    assert pattern_scripts[0].count("G0 X") == 21 * 2
+    assert any("pattern segments" in r for r in gcmd.responses), gcmd.responses
+
+
+def test_pattern_reports_triangular_small_box_segments():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    gcmd = FakeGcmd(PATTERN=1, SPEED_GAINS="500", SPEED=400, ACCEL=3000)
+    sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
+    (summary,) = [r for r in gcmd.responses if "triangular" in r]
+    assert "kept on purpose" in summary
+
+
+def test_pattern_rejects_base_gain():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    gcmd = FakeGcmd(
+        PATTERN=1, SERVO="motor_a", SPEED_GAINS="500", BASE_GAIN="400"
+    )
+    with pytest.raises(RuntimeError, match="not supported with PATTERN=1"):
+        sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
+
+
+def test_pattern_rejects_start_end():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    gcmd = FakeGcmd(PATTERN=1, SPEED_GAINS="500", START=30.0)
+    with pytest.raises(RuntimeError, match="single-axis stroke bounds"):
+        sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
+
+
+def test_pattern_apply_verifies_on_x_axis_strokes():
+    servo_param.drain_param_writes()
+    sc, gcode = make_sc_apply(
+        engine_values={(0x2001, 0x02): 650},
+        verdict={
+            "recommended_step": "cal_speed_v650",
+            "reason": "highest clean gain",
+            "flags": [],
+            "apply": [
+                _applied("motor_a", "0x2001.0x02", 650),
+                _applied("motor_b", "0x2001.0x02", 650),
+            ],
+        },
+    )
+    gcmd = FakeGcmd(PATTERN=1, SPEED_GAINS="500,650", APPLY=1)
+    sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
+    assert any("APPLY verified" in r for r in gcmd.responses)
+    assert any(
+        "verification runs single-axis X strokes" in r for r in gcmd.responses
+    )
