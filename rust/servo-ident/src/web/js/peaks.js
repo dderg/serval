@@ -56,10 +56,10 @@ function proposePeakIntoSlot(slot, peakFreq) {
 function renderPeakList(names, plots, steps) {
   const container = el("peak-list");
   if (!container) return;
-  const slots = state.drive.data
+  const slotSig = state.drive.data
     ? notchSlotStates().map((s) => [s.n, s.parked, s.current])
     : [];
-  if (payloadUnchanged("peak-list", { runs: runDataSig(names), steps, slots })) return;
+  if (payloadUnchanged("peak-list", { runs: runDataSig(names), steps, slots: slotSig })) return;
   const runLabel = el("peaks-run");
   if (!names.length || !steps.length) {
     container.innerHTML = '<p class="note">select runs above</p>';
