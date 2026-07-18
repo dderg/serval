@@ -37,8 +37,8 @@ test("buildCommand with no values is just the bare macro name", () => {
 });
 
 test("missingRequired names every unfilled required param", () => {
-  expect(missingRequired(macro("SERVO_GAIN_LADDER"), {})).toEqual(["SAFE", "START", "MAX"]);
-  expect(missingRequired(macro("SERVO_GAIN_LADDER"), { SAFE: "550", START: "700", MAX: "900" })).toEqual([]);
+  expect(missingRequired(macro("SERVO_STRAIN_COMP_TUNE"), {})).toEqual(["RUN"]);
+  expect(missingRequired(macro("SERVO_STRAIN_COMP_TUNE"), { RUN: "strain_20260718" })).toEqual([]);
 });
 
 test("missingRequired treats a whitespace-only value as unfilled", () => {
