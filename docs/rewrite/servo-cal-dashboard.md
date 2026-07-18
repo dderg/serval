@@ -158,7 +158,7 @@ chart.
   page's own template launches `SERVO_MEASURE_TRACKING`, so its
   before/after strokes must land here), following-error PSD overlay (step
   chips, 20–450 Hz band marked, per-trace peak annotations), the `gains`
-  and notch grids with autofill, and a detected-peak list. The spectrum
+  and notch grids, and a detected-peak list. The spectrum
   charts (here and the accelerometer box) draw linear amplitude from a
   zero floor, clipped to 0–500 Hz — the old report's resonance-zoom view,
   where a peak is a spike, not a bump on a log floor. Following error
@@ -248,11 +248,6 @@ same convention as the vendor manual and the drive's front panel.
   `tuning_profile`, per `drive_state.json`'s `config_pins`) get a pin badge
   showing the pinned value — editing the live value here does not survive
   a restart until the config is updated too.
-- **Autofill.** Editing `speed_gain` live-derives `position_gain`
-  (`round(raw * 1.6)`) and `integral_time` (`round(1250000 / raw)`)
-  per-motor unless the operator has edited that field directly this
-  session (dirty-tracked per field); a "re-derive" link restores the
-  linkage.
 - **Staleness banner** (topbar, all pages). Shows the drive state's age
   (ticking client-side between fetches) and a Refresh button that sends
   `SERVO_DUMP_TUNING` through Moonraker, then polls `/api/drive_state`
@@ -306,10 +301,9 @@ same convention as the vendor manual and the drive's front panel.
 - The console prefill reconstructs its G-code from `manifest.json`'s
   `experiment`/`steps`/`stroke_plan` — a best-effort rendering the operator
   can edit before sending, not a guarantee of exact parameter fidelity.
-- The drive panel's pure logic (autofill derivation, changed-param
-  diffing) is a handful of plain functions in the `web/src` modules
-  (`deriveGainPositionFromSpeed`, `deriveGainIntegralFromSpeed`,
-  `groupParams`, `motorRawValues`, `valuesAgree`, `pinnedEntries`,
+- The drive panel's pure logic (changed-param diffing, SERVO_TUNE line
+  building) is a handful of plain functions in the `web/src` modules
+  (`groupParams`, `motorRawValues`, `valuesAgree`, `pinnedEntries`,
   `diffChangedParams`, `buildServoTuneCommands`);
   `rust/servo-ident/tests/drive_panel_spa.rs` asserts the modules still
   define them and that the demo's `drive_state.json` matches what they

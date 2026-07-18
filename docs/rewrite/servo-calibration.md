@@ -499,12 +499,18 @@ Writes C00.06 load inertia ratio in percent. Params: `RATIO` (0..12000) `SERVO`.
 #### SERVO_APPLY_GAINS
 Switches the drive to manual tuning (C00.04=0), writes gain set 1, and prints
 the readback. `POS_GAIN` is 0.1 rad/s, `SPEED_GAIN` 0.1 Hz, `INTEGRAL` 0.01 ms;
-defaults are the factory Low preset. Params: `POS_GAIN` (400) `SPEED_GAIN`
-(250) `INTEGRAL` (3184) `SERVO`.
+defaults are the factory Low preset. `TORQUE_FILTER` (C01.18 torque
+feedforward filter cutoff, Hz, 5–16000) is only written when given. Params:
+`POS_GAIN` (400) `SPEED_GAIN` (250) `INTEGRAL` (3184) `TORQUE_FILTER` `SERVO`.
 
 #### SERVO_CALIBRATE_GAINS
-Gain sweep, shaper-calibrate style: for each `SPEED_GAINS` entry (0.1 Hz units)
-it derives the position gain (`×1.6`) and integral (`1250000 ÷ gain`), records
+Sweep of exactly one drive gain, shaper-calibrate style: give one of
+`POS_GAINS=` (0.1 rad/s units), `SPEED_GAINS=` (0.1 Hz units), `INTEGRALS=`
+(0.01 ms units) or `TORQUE_FILTERS=` (C01.18 torque feedforward filter cutoff,
+Hz) as a comma list — the other params stay at their current
+drive values, so each one is tuned individually (the swept drives must agree
+on their current gains, else a command error tells you to align them first).
+It records
 one capture per step into the run directory, then `servo-cal analyze` writes
 `results.json` whose verdict names the highest gain step without resonance or a
 torque rail. Always **restores the gains that were active before the sweep**
@@ -519,42 +525,17 @@ and runs one `SERVO_MEASURE_TRACKING` to report before/after following-error
 peak and overshoot; a null verdict (every step flagged) makes `APPLY=1` a
 command error naming the reason instead of writing anything. `SERVO=` (comma
 list) restricts the sweep to a subset of the axis servos; adding
-`BASE_SPEED_GAIN=` then pins every non-swept axis servo at that gain (same
-`×1.6`/`Ti` derivation, recorded as `base_gains` in the manifest) for the whole
+`BASE_GAIN=` then pins the swept gain on every non-swept axis servo at that
+value (their other gains untouched, recorded as `base_gains` in the manifest)
+for the whole
 sweep — the asymmetric-gain experiment: hold one belt pair soft while sweeping
 the other pair higher; those servos are restored to their prior gains too.
 Params:
-`SPEED_GAINS` (500,650,800,1000) `AXIS` (X) `START` `END`
+`POS_GAINS` `SPEED_GAINS` (500,650,800,1000 when none given) `INTEGRALS`
+`TORQUE_FILTERS` `AXIS` (X) `START` `END`
 `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2) `DWELL_MS` `TAG` (cal)
-`ACCEL_CHIP` `APPLY` `SERVO` `BASE_SPEED_GAIN`.
+`ACCEL_CHIP` `APPLY` `SERVO` `BASE_GAIN`.
 
-#### SERVO_GAIN_LADDER
-Gain sweep that climbs until analysis flags trouble, instead of a fixed
-`SPEED_GAINS` list. Runs the ladder `[SAFE, START, START+STEP, … ≤ MAX]`.
-Without `PARAM` it climbs the speed gain with the coupled derivation
-(position gain `×1.6`, integral `1250000 ÷ gain`); with
-`PARAM=position|speed|integral` it climbs **that one gain in its device
-units, holding the other two at their pre-ladder values** — the
-single-knob edge finder (the drives must agree on their current gains,
-else a command error tells you to align them first). After **each** rung
-at or above `START` completes its
-capture, `servo-cal analyze` runs on the run so far and that rung's step flags
-are inspected; the first rung whose step carries `resonance_detected`,
-`torque_saturated` or `settle_window_truncated` **stops the climb** — higher
-rungs are never executed. The `SAFE` baseline (always the first rung) never
-counts as a stop reason. The ladder always **restores the pre-ladder gains**
-at the end (also on failure) — keep a rung with `SERVO_APPLY_GAINS`.
-Output is the usual verdict one-liner (recommended step, reason,
-run dir) plus, on an early stop, one line naming the rung and the flags that
-stopped it. `START` names the first climb value, not a stroke bound — the
-stroke
-window comes from the configured axis bounds. A mid-ladder analysis failure
-(binary non-zero, unreadable `results.json`) aborts loudly; the run directory
-keeps everything captured so far. Params: `SAFE` `START` `STEP` (50, must be
-> 0) `MAX` (≥ `START`) `PARAM` `AXIS` (X) `SPEED` (100) `ACCEL` (3000)
-`ITERATIONS` (2) `DWELL_MS` `TAG` (ladder) `SERVO`.
-
-#### SERVO_HARVEST_NOTCHES
 Automates the "let the drive's adaptive notch tuning find the resonances during
 motion, then lock and read back what it chose" recipe (manual 7.10). Writes
 C01.30 `adaptive_notch_mode` = `MODE` (1 = 1st notch adaptive, 2 = 1st+2nd
@@ -593,8 +574,7 @@ Packaged tuning sequence, the manual order above run as one state machine:
 baseline `SERVO_MEASURE_TRACKING` → `SERVO_CALIBRATE_INERTIA_RATIO` (identify
 only) → apply the recommended C00.06 (`SERVO_SET_INERTIA_RATIO`-equivalent) →
 coarse gains (`SERVO_APPLY_GAINS` factory defaults) → `SERVO_CALIBRATE_GAINS`
-sweep (apply the winner) → `SERVO_REFINE_GAIN` on the speed gain (apply the
-winner) → `SERVO_FIT_DYNAMICS` → a final `SERVO_MEASURE_TRACKING` against the
+sweep (apply the winner) → `SERVO_FIT_DYNAMICS` → a final `SERVO_MEASURE_TRACKING` against the
 baseline. Each stage transition is logged
 (`calibration.autotune_stage`: `stage`, `run_dir`, `outcome`) so the dashboard
 can show the sequence as it runs.
@@ -645,9 +625,7 @@ Schemas: [servo-cal-contracts.md](servo-cal-contracts.md).
 | `SERVO_MEASURE_STRAIN_RESPONSE` | in-klippy fit | run dir with one capture per offset step; reports + stores the rolling stiffness matrix |
 | `SERVO_STRAIN_COMP_TUNE` | in-klippy loop | run dir with one capture per iteration; converges the matrix, leaves the tuned map written + enabled |
 | `SERVO_CALIBRATE_GAINS` | `servo-cal analyze` | run dir + `results.json` verdict (highest clean gain step); `APPLY=1` also writes + verifies |
-| `SERVO_GAIN_LADDER` | `servo-cal analyze` (per rung + final) | run dir + `results.json` verdict; climbs until a rung flags trouble, then applies `SAFE` |
 | `SERVO_HARVEST_NOTCHES` | — | no run dir; writes C01.30, strokes, reads back notch 1–2, locks (C01.30=0); journaled param writes |
-| `SERVO_REFINE_GAIN` | `servo-cal analyze` | run dir + `results.json` verdict; `APPLY=1` also writes + verifies |
 | `SERVO_SWEEP_INERTIA` | `servo-cal analyze` | run dir + `results.json` (no automated pick, so `APPLY=1` always errors) |
 | `SERVO_SWEEP_ACCEL` | `servo-cal analyze` | run dir + `results.json` verdict (max non-railing accel); `APPLY=1` verifies at the recommended accel (no SDO write) |
 | `SERVO_FIT_DYNAMICS`, `SERVO_CALIBRATE_INERTIA_RATIO` | `servo-cal fit` | run dir + `~/printer_data/config/servo_dynamics/dynamics_<name>_<stamp>.toml` + C00.06 |

@@ -332,7 +332,6 @@ select.cell-input { text-align: left; }
 .cell-input.drift:not(.pending) { border-color: #6a4a8a; }
 .cell-input.all::placeholder { color: #6e7a86; }
 
-.rederive { color: #7db8f0; font-size: 11px; }
 
 /* --- tracking metrics table --------------------------------------------- */
 

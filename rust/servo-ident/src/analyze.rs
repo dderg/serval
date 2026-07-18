@@ -418,7 +418,7 @@ pub fn compute_verdict(
         "gain_sweep" | "refine_sweep" => {
             let key = |m: &Step| -> Option<f64> {
                 if experiment == "gain_sweep" {
-                    m.swept_value("speed")
+                    m.swept_value("speed").or_else(|| m.swept_max())
                 } else {
                     m.swept_max()
                 }

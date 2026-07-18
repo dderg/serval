@@ -82,11 +82,6 @@ const PAGE_DEFS: Record<string, PageDef> = {
     peaks: true,
     templates: [
       {
-        label: "ladder…",
-        command: "SERVO_GAIN_LADDER SAFE=550 START=700 STEP=50 MAX=900 AXIS=X ITERATIONS=1",
-        title: "climb from START by STEP until a rung flags, then revert to SAFE",
-      },
-      {
         label: "tracking…",
         command: "SERVO_MEASURE_TRACKING AXIS=X SPEED=100 ACCEL=3000 ITERATIONS=3",
         title:
@@ -191,7 +186,6 @@ interface DrivePanelState {
   data: DriveState | null;
   fetchedAtMs: number | null;
   pending: PendingEdits;
-  dirty: Set<string>;
   notchPerMotor: boolean;
   adaptiveOpen: boolean;
 }
@@ -281,7 +275,6 @@ const state: AppState = {
     data: null, // last /api/drive_state response (params, motors, config_pins, age_s)
     fetchedAtMs: null, // Date.now() when data was fetched, for a client-ticking age display
     pending: {}, // param name -> {motor: raw} — edits not yet applied
-    dirty: new Set(), // autofill-target param names the user has edited directly this session
     notchPerMotor: false, // compact one-value-per-notch grid unless toggled
     adaptiveOpen: false, // the adaptive-recipes fold survives re-renders
   },
