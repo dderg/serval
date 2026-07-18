@@ -16,15 +16,22 @@ interface PickedSeries {
   ramp: number;
 }
 
+function motorVisible(drive: string): boolean {
+  return !state.motorFilter || state.motorFilter.has(drive);
+}
+
 function pickSeries(runName: string, step: PlotStep): PickedSeries[] {
   if (motorViewPerMotor()) {
     const drives = Object.entries(step.drives);
-    return drives.map(([drive, d], k) => ({
-      y: d.ferr_counts.map((c) => c * (1000 / countsPerMm(runName, drive))),
-      label: "ferr (µm)",
-      suffix: ` (${drive})`,
-      ramp: driveRamp(drives.length, k),
-    }));
+    return drives
+      .map(([drive, d], k) => ({
+        y: d.ferr_counts.map((c) => c * (1000 / countsPerMm(runName, drive))),
+        label: "ferr (µm)",
+        suffix: ` (${drive})`,
+        drive,
+        ramp: driveRamp(drives.length, k),
+      }))
+      .filter((s) => motorVisible(s.drive));
   }
   if (step.combined) {
     return [{ y: step.combined.on_ferr_mm, label: "on-axis ferr (mm)", suffix: "", ramp: 0 }];

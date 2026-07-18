@@ -55,6 +55,28 @@ async function pollLiveFileStatus() {
     : `last: ${cap.name} (${cap.age_s === null ? "?" : formatAge(cap.age_s)} ago)`;
 }
 
+/// Header badge on every tab: a slow, cursor-less poll returns only the
+/// attach payload (cursor + timing, no samples), so it costs nothing beyond
+/// keeping the tap session alive while the dashboard is open.
+export async function pollRtHealth() {
+  const badge = el("rt-health");
+  if (!badge) return;
+  try {
+    const payload: LiveTapPayload = await api("/api/live_tap");
+    const t = payload.status === "streaming" ? payload.timing : null;
+    if (!t) {
+      badge.textContent = "";
+      badge.classList.remove("rt-health-bad");
+      return;
+    }
+    badge.textContent = `RT skips ${t.skips} · late ${t.late_frames} · margin ${(-t.lateness_ns / 1000).toFixed(0)} µs`;
+    badge.classList.toggle("rt-health-bad", t.skips > 0 || t.late_frames > 0);
+  } catch {
+    badge.textContent = "";
+    badge.classList.remove("rt-health-bad");
+  }
+}
+
 async function pollLiveTap() {
   if (state.live.polling) return;
   state.live.polling = true;

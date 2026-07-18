@@ -173,11 +173,9 @@ fn fs_hz(cycle_ns: u64) -> f64 {
 }
 
 fn attach_payload(stream: &Stream) -> serde_json::Value {
-    let newest = *stream
-        .ring
-        .cycle
-        .back()
-        .expect("attach_payload requires a non-empty ring");
+    let Some(&newest) = stream.ring.cycle.back() else {
+        return json!({ "status": "connecting" });
+    };
     json!({
         "status": "streaming",
         "fs_hz": fs_hz(stream.cycle_ns),
