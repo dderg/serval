@@ -128,9 +128,7 @@ C02.60 -> 0x2002.0x61
 An ordered list of `PanelParam` entries — `name`, `c_code` (its resolved
 `addr` is derived, not stored separately), `type_token` (SDO type, default
 `u16`), `unit`, `group`,
-`description`, `autofill` (`None`, `"gain_position_from_speed"`, or
-`"gain_integral_from_speed"` — a UI hint only; the backend never computes
-an autofilled value itself), and `options` (`None`, or a `{value: label}`
+`description`, and `options` (`None`, or a `{value: label}`
 enum map the UI renders as a labeled select instead of a number field;
 serialized with string keys since JSON objects cannot key on ints).
 Shipped entries, verified against the A6-EC vendor manual (chapter 7 —
@@ -146,11 +144,11 @@ the chain. `unit` names the register's LSB (so a `speed_gain` reading of
 550 with unit "0.1 Hz" means 55 Hz), exactly as the vendor manual and the
 drive's own front panel present it.
 
-| name | c_code | unit | group | autofill / options |
+| name | c_code | unit | group | options |
 | --- | --- | --- | --- | --- |
-| `position_gain` | C01.00 | 0.1 rad/s | gains | `gain_position_from_speed` (`round(speed_gain * 1.6)`) |
-| `speed_gain` | C01.01 | 0.1 Hz | gains | — (the autofill source) |
-| `integral_time` | C01.02 | 0.01 ms | gains | `gain_integral_from_speed` (`round(1250000 / speed_gain)`) |
+| `position_gain` | C01.00 | 0.1 rad/s | gains | — |
+| `speed_gain` | C01.01 | 0.1 Hz | gains | — |
+| `integral_time` | C01.02 | 0.01 ms | gains | — |
 | `torque_filter_cutoff` | C01.03 | Hz | filters | — (1st torque reference filter, manual 7.3; drive default 200) |
 | `notch_<n>_freq` (n=1..5) | C01.40+3(n−1) | Hz | notch | — (manual 7.10; default 8000 = parked) |
 | `notch_<n>_width` (n=1..5) | C01.41+3(n−1) | 0.1% | notch | — (manual 7.10; default 0) |
@@ -213,8 +211,7 @@ atomically (write to `.tmp`, then `os.replace`). `captures_root` is
       "type": "u16",
       "unit": "0.1 rad/s",
       "group": "gains",
-      "description": "C01.00 position loop gain; autofilled from speed_gain as round(speed_gain * 1.6)",
-      "autofill": "gain_position_from_speed"
+      "description": "C01.00 position loop gain"
     }
   ],
   "motors": {
@@ -259,10 +256,6 @@ unconditionally — these are user edits and must survive into the next
 calibration run's between-runs journal, so the write is never suppressed
 — and then verified against `sdo_write`'s own settled readback; a mismatch
 or a missing engine handle aborts with a command error naming the motor.
-`SERVO_TUNE` never applies an autofill formula itself; the panel UI reads
-`autofill` from the dump and issues the derived writes itself, one
-register per `SERVO_TUNE` call.
-
 After the writes verify, a mapped param's new value is patched into
 `<captures_root>/drive_state.json` in place (same atomic tmp+rename;
 `created_utc` is refreshed) — the readback verification makes the file's

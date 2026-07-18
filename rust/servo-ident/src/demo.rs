@@ -322,7 +322,6 @@ impl From<&DemoPanelParam> for DriveStateParam {
             unit: p.unit,
             group: p.group,
             description: p.description.clone(),
-            autofill: p.autofill,
             options: p.options.map(|pairs| {
                 pairs
                     .iter()

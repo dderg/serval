@@ -186,7 +186,6 @@ interface DrivePanelState {
   data: DriveState | null;
   fetchedAtMs: number | null;
   pending: PendingEdits;
-  dirty: Set<string>;
   notchPerMotor: boolean;
   adaptiveOpen: boolean;
 }
@@ -273,7 +272,6 @@ const state: AppState = {
     data: null, // last /api/drive_state response (params, motors, config_pins, age_s)
     fetchedAtMs: null, // Date.now() when data was fetched, for a client-ticking age display
     pending: {}, // param name -> {motor: raw} — edits not yet applied
-    dirty: new Set(), // autofill-target param names the user has edited directly this session
     notchPerMotor: false, // compact one-value-per-notch grid unless toggled
     adaptiveOpen: false, // the adaptive-recipes fold survives re-renders
   },
