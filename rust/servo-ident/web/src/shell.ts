@@ -3,6 +3,7 @@ import { psdMaxFreqHz } from "./charts-core";
 import { bindConsole, setConsoleValue } from "./console";
 import { fetchMacroHelp, docsShellHtml, renderDocsList } from "./docs";
 import { renderDriveGroups } from "./drive";
+import { bindLaunchpad, launchpadShellHtml } from "./launchpad";
 import { bindLiveEvents, startLivePolling, stopLivePolling } from "./live";
 import { renderSentLog } from "./moonraker";
 import { redrawCharts } from "./peaks";
@@ -227,7 +228,9 @@ function liveShellHtml() {
     `<section class="live-section">` +
     sectionHeadHtml(
       "live toolpath — commanded vs actual",
-      `<button id="live-spatial-fit">fit</button>` +
+      `<button id="live-freeze-btn" title="space toggles">freeze</button>` +
+        `<span class="note live-timing-bad" id="live-freeze-badge"></span>` +
+        `<button id="live-spatial-fit">fit</button>` +
         `<span class="note" id="live-spatial-note">waiting for the tap…</span>`
     ) +
     `<div class="spatial-box"><canvas id="live-spatial-canvas"></canvas></div>` +
@@ -236,7 +239,7 @@ function liveShellHtml() {
     sectionHeadHtml(
       "live following error — per motor",
       `<label class="live-window">window ` +
-        `<input type="range" id="live-window" min="2" max="30" step="1" value="${state.live.windowS}">` +
+        `<input type="range" id="live-window" min="1" max="30" step="1" value="${state.live.windowS}">` +
         `<span id="live-window-value">${state.live.windowS} s</span></label>` +
         `<span class="note" id="live-status">connecting to the telemetry tap…</span>`
     ) +
@@ -342,6 +345,14 @@ function renderPage() {
     });
     renderSentLog();
     redrawStrain();
+    applyAccordionState();
+    return;
+  }
+  if (def.launchpad) {
+    root.innerHTML = launchpadShellHtml();
+    bindPageEvents();
+    bindLaunchpad();
+    renderSentLog();
     applyAccordionState();
     return;
   }

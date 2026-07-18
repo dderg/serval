@@ -39,10 +39,6 @@ function loadConsoleHistory() {
   return Array.isArray(parsed) ? parsed.filter((l): l is string => typeof l === "string") : [];
 }
 
-// Each page serves one calibration activity with only the tools that
-// activity needs (docs/plans/servo-calibration-automation.md, second demo
-// review): the interleaved tuning loop is navigation between pages, not
-// scrolling within one.
 interface PageTemplate {
   label: string;
   command: string;
@@ -63,20 +59,27 @@ interface PageDef {
   live?: boolean;
   journal?: boolean;
   docs?: boolean;
+  launchpad?: boolean;
 }
 
 const PAGE_DEFS: Record<string, PageDef> = {
-  gains: {
-    // gains and notches are one tuning loop, not two — the resonances the
-    // PSD shows are what keep gains from going higher, so the gains and notch
-    // grids, the peak list, and the metrics-vs-gain chart share one page.
-    label: "gains",
-    groups: ["gains", "notch"],
-    experiments: ["gain_sweep", "refine_sweep", "gain_ladder", "tracking"],
-    charts: ["psd"],
+  tune: {
+    label: "tune",
+    groups: ["gains", "notch", "filters", "speed_observer", "disturbance_observer", "load"],
+    experiments: [
+      "gain_sweep",
+      "refine_sweep",
+      "gain_ladder",
+      "tracking",
+      "inertia_grid",
+      "differential",
+      "ringdown",
+    ],
+    charts: ["psd", "time", "frf", "ringdown"],
     intro:
-      "find the highest speed gain without resonance or torque rail, then " +
-      "notch out whatever resonance the PSD shows so gains can go higher",
+      "one tuning loop: raise gains until resonance or torque rail, notch what " +
+      "the PSD shows, identify the load, and judge disturbance rejection in the " +
+      "time domain — fold the sections you don't need",
     metrics: true,
     sweepChart: true,
     peaks: true,
@@ -93,36 +96,12 @@ const PAGE_DEFS: Record<string, PageDef> = {
           "single stroke run with capture — the before/after check for any tuning " +
           "change; per-drive overshoot/settle land in the tracking metrics table",
       },
-    ],
-  },
-  observers: {
-    label: "observers",
-    groups: ["filters", "speed_observer", "disturbance_observer"],
-    experiments: null,
-    charts: ["time"],
-    intro: "disturbance rejection and filtering — judge in the time domain",
-  },
-  dynamics: {
-    label: "dynamics",
-    groups: ["load"],
-    experiments: ["tracking", "inertia_grid", "differential", "ringdown"],
-    charts: ["frf", "ringdown"],
-    metrics: true,
-    intro: "identify the load, then let feedforward carry it",
-    templates: [
       {
         label: "fit…",
         command: "SERVO_FIT_DYNAMICS",
         title:
           "strokes the axis, fits inertia/friction per drive, prints the recommended " +
           "inertia ratio and writes the feedforward profile",
-      },
-      {
-        label: "tracking…",
-        command: "SERVO_MEASURE_TRACKING AXIS=X SPEED=100 ACCEL=3000 ITERATIONS=3",
-        title:
-          "single stroke run with capture — the before/after check for any tuning " +
-          "change; per-drive overshoot/settle land in the tracking metrics table",
       },
       {
         label: "ringdown…",
@@ -133,6 +112,11 @@ const PAGE_DEFS: Record<string, PageDef> = {
           "a drive's adaptive filters can't compensate the way they fight a chirp",
       },
     ],
+  },
+  launchpad: {
+    label: "launchpad",
+    launchpad: true,
+    intro: "a friendly form pad for every calibration macro — build and run the exact g-code line",
   },
   strain: {
     label: "strain",
@@ -164,7 +148,7 @@ const PAGE_DEFS: Record<string, PageDef> = {
     docs: true,
   },
 };
-const DEFAULT_PAGE = "gains";
+const DEFAULT_PAGE = "tune";
 const LIVE_STATUS_POLL_MS = 1000;
 const LIVE_TAIL_POLL_MS = 400;
 const MOONRAKER_HEALTH_POLL_MS = 5000;
@@ -192,8 +176,7 @@ interface DrivePanelState {
   fetchedAtMs: number | null;
   pending: PendingEdits;
   dirty: Set<string>;
-  notchPerMotor: boolean;
-  adaptiveOpen: boolean;
+  expandedParams: Set<string>;
 }
 
 interface LiveSeries {
@@ -214,6 +197,18 @@ interface LiveState {
   windowS: number;
   timers: ReturnType<typeof setInterval>[];
   polling: boolean;
+  frozen: boolean;
+  freezeStartT: number | null;
+  freezeEndT: number | null;
+  freezeTruncated: boolean;
+}
+
+function liveDrawCount(): number {
+  const t = state.live.t;
+  if (!state.live.frozen || state.live.freezeEndT === null) return t.length;
+  let n = t.length;
+  while (n > 0 && t[n - 1] > state.live.freezeEndT) n--;
+  return n;
 }
 
 interface StrainPageState {
@@ -282,8 +277,7 @@ const state: AppState = {
     fetchedAtMs: null, // Date.now() when data was fetched, for a client-ticking age display
     pending: {}, // param name -> {motor: raw} — edits not yet applied
     dirty: new Set(), // autofill-target param names the user has edited directly this session
-    notchPerMotor: false, // compact one-value-per-notch grid unless toggled
-    adaptiveOpen: false, // the adaptive-recipes fold survives re-renders
+    expandedParams: new Set(), // param names whose MotorValues cell shows per-motor fields
   },
   live: {
     cursor: null, // last next_cycle from /api/live_tap; null = attach now
@@ -296,6 +290,10 @@ const state: AppState = {
     windowS: 10, // seconds kept and drawn, set by the slider
     timers: [], // interval ids cleared on page switch
     polling: false,
+    frozen: false,
+    freezeStartT: null, // window start at freeze time; trim never drops past it
+    freezeEndT: null, // last sample time at freeze; frozen draws stop here
+    freezeTruncated: false, // set when the frozen buffer hit its cap and lost samples
   },
   strain: {
     selected: null, // run name shown on the strain page; auto-picks the newest
@@ -315,4 +313,4 @@ const state: AppState = {
 };
 
 export type { PageDef, PageTemplate, ConsoleSearch, SentEntry, LiveSeries, PendingEdits };
-export { REFRESH_MS, MOONRAKER_KEY, CONSOLE_HISTORY_KEY, HELP_CACHE_KEY, CONSOLE_HISTORY_MAX, PALETTE, RESONANCE_BAND_HZ, RINGDOWN_PSD_PLOT_MAX_HZ, PSD_MAX_FREQ_KEY, MOTOR_VIEW_KEY, PSD_MAX_FREQ_CHOICES_HZ, PSD_MAX_FREQ_DEFAULT_HZ, INITIAL_SELECTED_RUNS, PEAK_MIN_SEPARATION_HZ, PEAK_LIST_SIZE, PAGE_DEFS, DEFAULT_PAGE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, MOONRAKER_HEALTH_POLL_MS, RT_HEALTH_POLL_MS, loadConsoleHistory, state };
+export { REFRESH_MS, MOONRAKER_KEY, CONSOLE_HISTORY_KEY, HELP_CACHE_KEY, CONSOLE_HISTORY_MAX, PALETTE, RESONANCE_BAND_HZ, RINGDOWN_PSD_PLOT_MAX_HZ, PSD_MAX_FREQ_KEY, MOTOR_VIEW_KEY, PSD_MAX_FREQ_CHOICES_HZ, PSD_MAX_FREQ_DEFAULT_HZ, INITIAL_SELECTED_RUNS, PEAK_MIN_SEPARATION_HZ, PEAK_LIST_SIZE, PAGE_DEFS, DEFAULT_PAGE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, MOONRAKER_HEALTH_POLL_MS, RT_HEALTH_POLL_MS, loadConsoleHistory, liveDrawCount, state };
