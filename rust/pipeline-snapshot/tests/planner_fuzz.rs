@@ -101,10 +101,10 @@ fn move_strategy(full: bool) -> impl Strategy<Value = MoveSpec> {
         })
 }
 
-fn waypoints(moves: &[MoveSpec]) -> Vec<(f64, f64, f64, f64, f64)> {
+fn waypoints(moves: &[MoveSpec], max_accel: f64) -> Vec<pipeline_snapshot::waypoints::Waypoint> {
     let (mut x, mut y, mut z, mut e) = (150.0, 150.0, 0.2, 0.0);
     let mut heading = 0.0_f64;
-    let mut points = vec![(x, y, z, e, 0.0)];
+    let mut points = vec![(x, y, z, e, 0.0, max_accel)];
     for m in moves {
         heading = match m.turn {
             Turn::Continue => heading,
@@ -115,18 +115,18 @@ fn waypoints(moves: &[MoveSpec]) -> Vec<(f64, f64, f64, f64, f64)> {
         y += m.length_mm * libm::sin(heading);
         z = (z + m.z_step_mm).max(0.0);
         e += m.extrude_ratio * m.length_mm;
-        points.push((x, y, z, e, m.feed_mm_s));
+        points.push((x, y, z, e, m.feed_mm_s, max_accel));
     }
     points
 }
 
 fn run_case(limits: FuzzLimits, moves: &[MoveSpec]) -> (TrajectoryPieces, AuditReport) {
-    run_waypoints(limits, &waypoints(moves))
+    run_waypoints(limits, &waypoints(moves, limits.max_accel))
 }
 
 fn run_waypoints(
     limits: FuzzLimits,
-    waypoints: &[(f64, f64, f64, f64, f64)],
+    waypoints: &[pipeline_snapshot::waypoints::Waypoint],
 ) -> (TrajectoryPieces, AuditReport) {
     let params = SnapshotParams {
         max_velocity: limits.max_velocity,
@@ -468,9 +468,9 @@ fn slow_corner_rail_ramp_survives_nurbs_round_trip() {
     };
     let feed = 5932.264 / 60.0;
     let waypoints = [
-        (121.401, 114.125, 0.0, 0.0, feed),
-        (121.527, 113.034, 0.0, 0.03696, feed),
-        (126.102, 117.608, 0.0, 0.25458, feed),
+        (121.401, 114.125, 0.0, 0.0, feed, 1000.0),
+        (121.527, 113.034, 0.0, 0.03696, feed, 1000.0),
+        (126.102, 117.608, 0.0, 0.25458, feed, 1000.0),
     ];
     let (_, report) = run_waypoints(limits, &waypoints);
     assert!(report.hard_ok(), "{report}");

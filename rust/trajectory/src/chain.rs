@@ -252,15 +252,6 @@ impl AxisChainSet {
         self.chains.len()
     }
 
-    #[must_use]
-    pub fn max_spatial_kernel_variance_s2(&self) -> f64 {
-        self.chains
-            .iter()
-            .take(3)
-            .map(CompiledChain::kernel_variance_s2)
-            .fold(0.0, f64::max)
-    }
-
     /// Follower axes that ride on at least one leader: their tracks are not
     /// convolved with their own kernel but re-projected onto the leaders'
     /// shaped motion by the shaper.

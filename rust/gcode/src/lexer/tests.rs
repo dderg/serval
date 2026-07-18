@@ -238,3 +238,57 @@ fn layer_change_comment_is_marker_token() {
         other => panic!("expected Marker, got {other:?}"),
     }
 }
+
+#[test]
+fn extended_command_lexes_name_and_args() {
+    let toks = collect("SET_VELOCITY_LIMIT ACCEL=3000 VELOCITY=250.5\n");
+    assert_eq!(toks.len(), 1);
+    match &toks[0] {
+        Ok(Token::Extended {
+            name,
+            args,
+            line_no,
+        }) => {
+            assert_eq!(name.as_ref(), "SET_VELOCITY_LIMIT");
+            assert_eq!(*line_no, 1);
+            assert_eq!(
+                args.iter()
+                    .map(|(k, v)| (k.as_ref(), v.as_ref()))
+                    .collect::<Vec<_>>(),
+                vec![("ACCEL", "3000"), ("VELOCITY", "250.5")]
+            );
+        }
+        other => panic!("expected Extended, got {other:?}"),
+    }
+}
+
+#[test]
+fn extended_command_keeps_non_numeric_arg_values_raw() {
+    let toks = collect("EXCLUDE_OBJECT_DEFINE NAME=part1 CENTER=104,100\n");
+    match &toks[0] {
+        Ok(Token::Extended { name, args, .. }) => {
+            assert_eq!(name.as_ref(), "EXCLUDE_OBJECT_DEFINE");
+            assert_eq!(args[0].1.as_ref(), "part1");
+            assert_eq!(args[1].1.as_ref(), "104,100");
+        }
+        other => panic!("expected Extended, got {other:?}"),
+    }
+}
+
+#[test]
+fn extended_command_arg_without_equals_is_an_error() {
+    let toks = collect("SET_VELOCITY_LIMIT ACCEL\n");
+    assert!(matches!(
+        &toks[0],
+        Err(ParseError::MalformedNumber { line_no: 1, .. })
+    ));
+}
+
+#[test]
+fn lone_uppercase_letter_is_still_an_error() {
+    let toks = collect("M\n");
+    assert!(matches!(
+        &toks[0],
+        Err(ParseError::UnrecognizedHead { line_no: 1, .. })
+    ));
+}

@@ -61,6 +61,7 @@ FLOAT_RTOL = 1e-7
 @dataclass
 class PrinterConfigData:
     max_velocity: float
+    max_accel: float
     config_text: str
 
 
@@ -77,30 +78,38 @@ def read_printer_config(cfg_path: Path) -> PrinterConfigData:
     printer = config.getsection("printer")
     return PrinterConfigData(
         max_velocity=printer.getfloat("max_velocity", above=0.0),
+        max_accel=printer.getfloat("max_accel", above=0.0),
         config_text=config.fileconfig.write_string(),
     )
 
 
 def parse_gcode(
-    path: Path, max_velocity: float
-) -> list[tuple[float, float, float, float, float]]:
-    # Waypoints carry absolute (x, y, z, e, feedrate). E rides as a fifth
-    # coordinate so retracts (E-only moves) and extruding moves flow through the
-    # pipeline as followers; the engine differences consecutive E to a per-move
-    # delta. Extruder mode is M82 (absolute) / M83 (relative), independent of the
-    # G90/G91 flag that governs X/Y/Z; under G91 an undeclared extruder rides
-    # along as relative, and an E word with no mode declared at all is refused
-    # rather than guessed. G92 resets any axis's position (commonly `G92 E0`)
+    path: Path, max_velocity: float, max_accel: float
+) -> list[tuple[float, float, float, float, float, float]]:
+    # Waypoints carry absolute (x, y, z, e, feedrate, accel). E rides as a
+    # fifth coordinate so retracts (E-only moves) and extruding moves flow
+    # through the pipeline as followers; the engine differences consecutive E
+    # to a per-move delta. The sixth coordinate is the acceleration limit in
+    # force for the move ending at that waypoint — max_accel until a
+    # `SET_VELOCITY_LIMIT ACCEL=` line changes it. Extruder mode is M82
+    # (absolute) / M83 (relative), independent of the G90/G91 flag that
+    # governs X/Y/Z; under G91 an undeclared extruder rides along as
+    # relative, and an E word with no mode declared at all is refused rather
+    # than guessed. G92 resets any axis's position (commonly `G92 E0`)
     # without emitting a move.
-    waypoints: list[tuple[float, float, float, float, float]] = []
+    waypoints: list[tuple[float, float, float, float, float, float]] = []
     x, y, z, e = 0.0, 0.0, 0.0, 0.0
     feedrate = max_velocity
+    accel = max_accel
     relative = False
     e_relative: bool | None = None
     motion_cmd = re.compile(r"^G0?([0-3])\b", re.IGNORECASE)
     mode_cmd = re.compile(r"^G(90|91)\b", re.IGNORECASE)
     set_pos_cmd = re.compile(r"^G92\b", re.IGNORECASE)
     e_mode_cmd = re.compile(r"^M(82|83)\b", re.IGNORECASE)
+    velocity_limit_cmd = re.compile(
+        r"^SET_VELOCITY_LIMIT\b(.*)$", re.IGNORECASE
+    )
     coord = re.compile(r"([XYZEFIJ])([-+]?[0-9]*\.?[0-9]+)", re.IGNORECASE)
 
     def params_of(line: str) -> dict[str, float]:
@@ -127,6 +136,30 @@ def parse_gcode(
             y = params.get("Y", y)
             z = params.get("Z", z)
             e = params.get("E", e)
+            continue
+
+        vl = velocity_limit_cmd.match(line)
+        if vl:
+            for arg in vl.group(1).split():
+                key, sep, value = arg.partition("=")
+                if not sep:
+                    raise ValueError(
+                        f"{path.name}: malformed SET_VELOCITY_LIMIT argument "
+                        f"{arg!r} — expected KEY=VALUE"
+                    )
+                if key.upper() != "ACCEL":
+                    raise ValueError(
+                        f"{path.name}: SET_VELOCITY_LIMIT {key}=… is not "
+                        "supported here — only ACCEL is wired through the "
+                        "snapshot waypoints; silently ignoring the parameter "
+                        "would let a case claim limits it never exercised"
+                    )
+                accel = float(value)
+                if not (accel > 0.0 and accel != float("inf")):
+                    raise ValueError(
+                        f"{path.name}: SET_VELOCITY_LIMIT ACCEL={value} must "
+                        "be a positive finite number"
+                    )
             continue
 
         m = motion_cmd.match(line)
@@ -179,7 +212,7 @@ def parse_gcode(
             # the state; the first positional waypoint carries it.
             continue
         move_feedrate = max_velocity if cmd == 0 else feedrate
-        waypoints.append((x, y, z, e, move_feedrate))
+        waypoints.append((x, y, z, e, move_feedrate, accel))
 
     return waypoints
 
@@ -299,7 +332,7 @@ def run_case(case: Case) -> dict:
         )
 
     cfg = read_printer_config(case.config_path)
-    waypoints = parse_gcode(case.gcode_path, cfg.max_velocity)
+    waypoints = parse_gcode(case.gcode_path, cfg.max_velocity, cfg.max_accel)
     if len(waypoints) < 2:
         raise ValueError(
             f"case '{case.name}': fewer than two spatial moves in "

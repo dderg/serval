@@ -28,6 +28,33 @@ fn parse_head_number(s: &str) -> Option<(u32, Option<u32>)> {
     }
 }
 
+fn tokenize_extended_line(name: &str, rest: &str, line_no: u32) -> Result<Token, ParseError> {
+    let mut args = Vec::new();
+    for tok in rest.split_whitespace() {
+        let Some((key, value)) = tok.split_once('=') else {
+            return Err(ParseError::MalformedNumber {
+                line_no,
+                text: tok.to_string().into_boxed_str(),
+            });
+        };
+        if key.is_empty() {
+            return Err(ParseError::MalformedNumber {
+                line_no,
+                text: tok.to_string().into_boxed_str(),
+            });
+        }
+        args.push((
+            key.to_string().into_boxed_str(),
+            value.to_string().into_boxed_str(),
+        ));
+    }
+    Ok(Token::Extended {
+        name: name.to_string().into_boxed_str(),
+        args,
+        line_no,
+    })
+}
+
 fn tokenize_command_line(line: &str, line_no: u32) -> Result<Token, ParseError> {
     let mut chars = line.char_indices();
 
@@ -53,11 +80,20 @@ fn tokenize_command_line(line: &str, line_no: u32) -> Result<Token, ParseError> 
     let head_number_str = after_letter
         .find(char::is_whitespace)
         .map_or(after_letter, |ws_idx| &after_letter[..ws_idx]);
-    let (major, minor) =
-        parse_head_number(head_number_str).ok_or_else(|| ParseError::UnrecognizedHead {
+    let Some((major, minor)) = parse_head_number(head_number_str) else {
+        let head_word = &line[..after_letter_idx + head_number_str.len()];
+        if head_word.len() >= 2
+            && head_word
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        {
+            return tokenize_extended_line(head_word, &line[head_word.len()..], line_no);
+        }
+        return Err(ParseError::UnrecognizedHead {
             line_no,
             head: format!("{head_char}{head_number_str}").into_boxed_str(),
-        })?;
+        });
+    };
 
     let mut params = crate::Params::default();
     let mut seen = [false; 26];

@@ -82,6 +82,11 @@ pub enum Token {
         kind: MarkerKind,
         line_no: u32,
     },
+    Extended {
+        name: Box<str>,
+        args: Vec<(Box<str>, Box<str>)>,
+        line_no: u32,
+    },
 }
 
 #[cfg(test)]
