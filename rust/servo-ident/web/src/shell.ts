@@ -209,7 +209,9 @@ function analysisSectionsHtml(def: PageDef): string {
       `<section class="time-section">` +
         sectionHeadHtml(
           "time domain — following error",
-          motorViewToggleHtml("combined") + `<div class="chips" id="time-step-chips"></div>`
+          motorViewToggleHtml("combined") +
+            `<div class="chips" id="time-motor-chips"></div>` +
+            `<div class="chips" id="time-step-chips"></div>`
         ) +
         `<div class="charts" id="charts"><p class="note">select runs above</p></div>` +
         `</section>`

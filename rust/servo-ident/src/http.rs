@@ -20,6 +20,7 @@ pub struct Request {
 pub struct Response {
     pub status: u16,
     pub content_type: &'static str,
+    pub cache_control: &'static str,
     pub body: Vec<u8>,
 }
 
@@ -28,6 +29,7 @@ impl Response {
         Response {
             status,
             content_type: "application/json",
+            cache_control: "no-cache",
             body: body.into_bytes(),
         }
     }
@@ -36,6 +38,7 @@ impl Response {
         Response {
             status,
             content_type,
+            cache_control: "no-cache",
             body: body.into_bytes(),
         }
     }
@@ -110,9 +113,10 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, String> {
 
 fn write_response(stream: &mut TcpStream, resp: &Response) -> std::io::Result<()> {
     let header = format!(
-        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {}\r\nContent-Type: {}\r\nCache-Control: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         status_line(resp.status),
         resp.content_type,
+        resp.cache_control,
         resp.body.len(),
     );
     stream.write_all(header.as_bytes())?;

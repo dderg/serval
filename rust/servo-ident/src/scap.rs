@@ -18,6 +18,7 @@ pub enum Dtype {
     U16,
     I16,
     I32,
+    U32,
     U64,
     F32,
 }
@@ -29,6 +30,7 @@ impl Dtype {
             "u16" => Ok(Dtype::U16),
             "i16" => Ok(Dtype::I16),
             "i32" => Ok(Dtype::I32),
+            "u32" => Ok(Dtype::U32),
             "u64" => Ok(Dtype::U64),
             "f32" => Ok(Dtype::F32),
             other => Err(format!("unknown channel dtype {other:?}")),
@@ -39,7 +41,7 @@ impl Dtype {
         match self {
             Dtype::U8 => 1,
             Dtype::U16 | Dtype::I16 => 2,
-            Dtype::I32 | Dtype::F32 => 4,
+            Dtype::I32 | Dtype::U32 | Dtype::F32 => 4,
             Dtype::U64 => 8,
         }
     }
@@ -50,6 +52,7 @@ impl Dtype {
             Dtype::U16 => u16::from_le_bytes([b[0], b[1]]) as i64,
             Dtype::I16 => i16::from_le_bytes([b[0], b[1]]) as i64,
             Dtype::I32 => i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as i64,
+            Dtype::U32 => u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as i64,
             Dtype::U64 => {
                 u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as i64
             }
@@ -124,6 +127,10 @@ pub struct Header {
     pub drives: Vec<Drive>,
     pub channels: Vec<Channel>,
     block_size: usize,
+    /// Where the per-drive blocks start — derived from the header's own
+    /// global channels, not a compile-time constant, so captures from
+    /// endpoints with more or fewer global channels all load.
+    prefix: usize,
 }
 
 impl Header {
@@ -144,35 +151,53 @@ impl Header {
             return Err("header lists no drives".to_string());
         }
         let record_size = raw.record_size;
-        if record_size <= RECORD_PREFIX_SIZE {
+        let mut channels = Vec::with_capacity(raw.channels.len());
+        for c in raw.channels {
+            let dtype = Dtype::parse(&c.dtype)?;
+            channels.push(Channel {
+                name: c.name,
+                dtype,
+                offset: c.offset,
+            });
+        }
+        // The prefix (global region before the per-drive blocks) ends where
+        // the last known global channel ends; older captures carry only
+        // cycle_index+flags, newer ones add the RT-loop health counters.
+        const GLOBAL_CHANNELS: [&str; 5] = [
+            "cycle_index",
+            "flags",
+            "skip_count",
+            "late_frames",
+            "frame_lateness_ns",
+        ];
+        let prefix = channels
+            .iter()
+            .filter(|c| GLOBAL_CHANNELS.contains(&c.name.as_str()))
+            .map(|c| c.offset + c.dtype.itemsize())
+            .max()
+            .ok_or("header lists no global channels")?;
+        if record_size <= prefix {
             return Err(format!("record_size {record_size} has no per-drive body"));
         }
-        let body_size = record_size - RECORD_PREFIX_SIZE;
+        let body_size = record_size - prefix;
         if body_size % n_drives != 0 {
             return Err(format!(
                 "record_size {record_size} is not aligned to {n_drives} drive block(s)"
             ));
         }
         let block_size = body_size / n_drives;
-        let mut channels = Vec::with_capacity(raw.channels.len());
-        for c in raw.channels {
-            let dtype = Dtype::parse(&c.dtype)?;
-            let last_off = if c.offset >= RECORD_PREFIX_SIZE {
+        for c in &channels {
+            let last_off = if c.offset >= prefix {
                 c.offset + (n_drives - 1) * block_size
             } else {
                 c.offset
             };
-            if last_off + dtype.itemsize() > record_size {
+            if last_off + c.dtype.itemsize() > record_size {
                 return Err(format!(
                     "channel {:?} at offset {} overruns record_size {}",
                     c.name, c.offset, record_size
                 ));
             }
-            channels.push(Channel {
-                name: c.name,
-                dtype,
-                offset: c.offset,
-            });
         }
         Ok(Header {
             version: raw.version,
@@ -181,6 +206,7 @@ impl Header {
             drives: raw.drives,
             channels,
             block_size,
+            prefix,
         })
     }
 
@@ -193,7 +219,7 @@ impl Header {
     }
 
     pub fn eff_offset(&self, ch: &Channel, drive_idx: usize) -> usize {
-        if ch.offset >= RECORD_PREFIX_SIZE {
+        if ch.offset >= self.prefix {
             ch.offset + drive_idx * self.block_size
         } else {
             ch.offset

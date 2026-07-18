@@ -527,10 +527,18 @@ pub fn handle(captures_root: &Path, req: &Request) -> Response {
     }
 }
 
+/// Hashed bundle files are immutable by construction; index.html is the one
+/// mutable entry point, so it must revalidate on every load or a heuristic
+/// browser cache keeps serving the previous deploy's bundle.
 fn asset_response(asset: &'static assets::Asset) -> Response {
     Response {
         status: 200,
         content_type: asset.mime,
+        cache_control: if asset.path == "index.html" {
+            "no-cache"
+        } else {
+            "public, max-age=31536000, immutable"
+        },
         body: asset.body.to_vec(),
     }
 }

@@ -28,8 +28,55 @@ use mcu_protocol::messages::{
     SetTorque, StartCapture, StopCaptureResponse,
 };
 
+/// Command execution shares the RT thread with the DC exchange, so it must
+/// fit in the post-send slack; a jog-start piece burst measured >500 us and
+/// skipped whole cycles. Pieces arrive with ~95 ms of lead, so commands left
+/// in the queue when the budget runs out simply carry to the next cycle.
+const DISPATCH_BUDGET_NS: u128 = 100_000;
+
+fn command_name(cmd: &Command) -> &'static str {
+    match cmd {
+        Command::Identify { .. } => "Identify",
+        Command::PushPieces { .. } => "PushPieces",
+        Command::QueryRuntimeCaps { .. } => "QueryRuntimeCaps",
+        Command::SetTorque { .. } => "SetTorque",
+        Command::Stop { .. } => "Stop",
+        Command::StartCapture { .. } => "StartCapture",
+        Command::StopCapture { .. } => "StopCapture",
+        Command::ResumeStream { .. } => "ResumeStream",
+        Command::ClaimHandshake { .. } => "ClaimHandshake",
+        Command::SetDriveLimits { .. } => "SetDriveLimits",
+        Command::RestoreDriveLimits { .. } => "RestoreDriveLimits",
+        Command::SeedServoHome { .. } => "SeedServoHome",
+        Command::ArmSensorlessEndstop { .. } => "ArmSensorlessEndstop",
+        Command::ResonanceBuzz { .. } => "ResonanceBuzz",
+        Command::SetDiffDamper { .. } => "SetDiffDamper",
+        Command::SetDiffTrim { .. } => "SetDiffTrim",
+        Command::SetStrainComp { .. } => "SetStrainComp",
+        Command::SetDynamicsModel { .. } => "SetDynamicsModel",
+        Command::SdoRead { .. } => "SdoRead",
+        Command::SdoWrite { .. } => "SdoWrite",
+        Command::QueryMotorState { .. } => "QueryMotorState",
+        Command::Unknown { .. } => "Unknown",
+    }
+}
+
 pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
-    for cmd in ctx.server.poll_commands() {
+    let started = std::time::Instant::now();
+    ctx.server.pump();
+    let pump_ns = started.elapsed().as_nanos();
+    if pump_ns > DISPATCH_BUDGET_NS {
+        tracing::warn!(
+            subsystem = "ethercat",
+            event = "slow_pump",
+            pump_ns = pump_ns as i64,
+            "socket read + frame decode exceeded the dispatch budget on the \
+             RT thread"
+        );
+    }
+    while let Some(cmd) = ctx.server.pop_command() {
+        let name = command_name(&cmd);
+        let cmd_started = std::time::Instant::now();
         match cmd {
             Command::Identify {
                 correlation_id,
@@ -176,6 +223,20 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
             Command::Unknown { kind_raw, .. } => {
                 eprintln!("ec-rt: ignoring kind 0x{kind_raw:04x}");
             }
+        }
+        let cmd_ns = cmd_started.elapsed().as_nanos();
+        if cmd_ns > DISPATCH_BUDGET_NS {
+            tracing::warn!(
+                subsystem = "ethercat",
+                event = "slow_command",
+                command = name,
+                cmd_ns = cmd_ns as i64,
+                "a single command exceeded the dispatch budget on the RT \
+                 thread — this is the stall the budget cannot split"
+            );
+        }
+        if started.elapsed().as_nanos() > DISPATCH_BUDGET_NS {
+            break;
         }
     }
     ControlFlow::Continue(())
@@ -354,8 +415,25 @@ fn handle_restore_drive_limits(ctx: &mut EndpointCtx, correlation_id: u32, slot:
 }
 
 const ERR_SEED_HOME_STREAMING: i32 = -826;
+const SEED_DRAIN_TIMEOUT_NS: i64 = 2_000_000_000;
 
-fn handle_seed_servo_home(ctx: &mut EndpointCtx, correlation_id: u32, slot: u8, home_q16: i32) {
+pub(super) struct PendingSeed {
+    pub(super) correlation_id: u32,
+    pub(super) slot: u8,
+    pub(super) home_q16: i32,
+    pub(super) deadline_cycle: u64,
+}
+
+/// The host's wait_moves is a wall-clock estimate; the endpoint retires the
+/// last pieces up to the drip lead later, so a seed arriving with the ring
+/// still draining is the normal homing race, not an error. Defer it until the
+/// rings empty; only a ring that stays occupied past the timeout fails.
+pub(super) fn handle_seed_servo_home(
+    ctx: &mut EndpointCtx,
+    correlation_id: u32,
+    slot: u8,
+    home_q16: i32,
+) {
     if slot as usize >= ctx.counts_per_mm.len() {
         eprintln!(
             "ec-rt: SeedServoHome for slot {slot} but only {} slave(s)",
@@ -364,22 +442,58 @@ fn handle_seed_servo_home(ctx: &mut EndpointCtx, correlation_id: u32, slot: u8, 
         ctx.server
             .respond(&seed_servo_home_response_frame(correlation_id, -309));
     } else if ctx.rings.iter().any(|r| !r.is_empty()) {
-        eprintln!("ec-rt: SeedServoHome rejected — motion ring not empty");
-        ctx.server.respond(&seed_servo_home_response_frame(
+        if ctx.pending_seed.is_some() {
+            eprintln!("ec-rt: SeedServoHome rejected — a seed is already pending");
+            ctx.server.respond(&seed_servo_home_response_frame(
+                correlation_id,
+                ERR_SEED_HOME_STREAMING,
+            ));
+            return;
+        }
+        let drain_cycles = (SEED_DRAIN_TIMEOUT_NS / ctx.cycle_ns).max(1) as u64;
+        eprintln!("ec-rt: SeedServoHome slot={slot} deferred until the motion ring drains");
+        ctx.pending_seed = Some(PendingSeed {
             correlation_id,
+            slot,
+            home_q16,
+            deadline_cycle: ctx.cycle_index + drain_cycles,
+        });
+    } else {
+        complete_seed(ctx, correlation_id, slot, home_q16);
+    }
+}
+
+fn complete_seed(ctx: &mut EndpointCtx, correlation_id: u32, slot: u8, home_q16: i32) {
+    let anchor_mm = f64::from(home_q16) / 65536.0;
+    let anchor_counts = ctx.last_streamed_target[slot as usize]
+        .unwrap_or_else(|| ctx.drive.position_actual(usize::from(slot)));
+    ctx.report_anchor[slot as usize] = Some((anchor_counts, anchor_mm));
+    eprintln!(
+        "ec-rt: SeedServoHome slot={slot} report anchor \
+         {anchor_counts} counts = {anchor_mm:.4} mm (drive frame untouched)"
+    );
+    ctx.server
+        .respond(&seed_servo_home_response_frame(correlation_id, 0));
+}
+
+pub(super) fn drain_pending_seed(ctx: &mut EndpointCtx) {
+    let Some(seed) = &ctx.pending_seed else {
+        return;
+    };
+    if ctx.rings.iter().all(|r| r.is_empty()) {
+        let seed = ctx.pending_seed.take().expect("checked above");
+        complete_seed(ctx, seed.correlation_id, seed.slot, seed.home_q16);
+    } else if ctx.cycle_index >= seed.deadline_cycle {
+        let seed = ctx.pending_seed.take().expect("checked above");
+        eprintln!(
+            "ec-rt: SeedServoHome slot={} rejected — motion ring still not \
+             empty after the drain timeout",
+            seed.slot
+        );
+        ctx.server.respond(&seed_servo_home_response_frame(
+            seed.correlation_id,
             ERR_SEED_HOME_STREAMING,
         ));
-    } else {
-        let anchor_mm = f64::from(home_q16) / 65536.0;
-        let anchor_counts = ctx.last_streamed_target[slot as usize]
-            .unwrap_or_else(|| ctx.drive.position_actual(usize::from(slot)));
-        ctx.report_anchor[slot as usize] = Some((anchor_counts, anchor_mm));
-        eprintln!(
-            "ec-rt: SeedServoHome slot={slot} report anchor \
-             {anchor_counts} counts = {anchor_mm:.4} mm (drive frame untouched)"
-        );
-        ctx.server
-            .respond(&seed_servo_home_response_frame(correlation_id, 0));
     }
 }
 

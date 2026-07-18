@@ -28,7 +28,7 @@ use crate::sdo::SdoBus;
 use crate::sensorless::SensorlessBank;
 use crate::server::FrameServer;
 use crate::stream_halt::StreamHalt;
-use crate::torque::TorqueGate;
+use crate::torque::{TorqueGate, TorqueState};
 use crate::trim::DiffTrimBank;
 
 const NUM_SLAVES: usize = 2;
@@ -188,6 +188,7 @@ fn test_ctx_with_drive(name: &str, drive: TrackingLagDrive) -> EndpointCtx {
         mailbox: MailboxWorker::spawn(NoSdo, |_, _, _| 0, WorkerScheduling::Normal),
         pending_starts: Vec::new(),
         pending_stops: Vec::new(),
+        pending_seed: None,
         capture_slots: Vec::new(),
         prdiv: 0,
         ff_saturation: 0,
@@ -195,6 +196,17 @@ fn test_ctx_with_drive(name: &str, drive: TrackingLagDrive) -> EndpointCtx {
         latched_drive_err: 0,
         sensorless: SensorlessBank::new(NUM_SLAVES),
         stream_halt: StreamHalt::default(),
+        late_tolerance_ns: None,
+        timing_armed: true,
+        baseline_reanchor_count: 0,
+        late_frames: 0,
+        late_max_ns: i64::MIN,
+        skip_count_policed: 0,
+        late_frames_total: 0,
+        last_lateness_ns: 0,
+        last_dispatch_ns: 0,
+        last_pre_work_ns: 0,
+        prev_exchange_ns: 0,
     }
 }
 
@@ -814,4 +826,97 @@ fn set_dynamics_model_mass_len_mismatch_keeps_no_model() {
     bad.mass.pop();
     super::commands::handle_set_dynamics_model(&mut ctx, 1, bad);
     assert!(ctx.dynamics.is_none());
+}
+
+#[test]
+fn seed_defers_while_ring_drains_and_completes_when_empty() {
+    let mut ctx = test_ctx("seed-defer");
+    push_all(&mut ctx, piece(1_000_000, 0.01, &[2.5, 2.5]));
+    super::commands::handle_seed_servo_home(&mut ctx, 7, 0, 65536);
+    assert!(ctx.pending_seed.is_some());
+    assert!(ctx.report_anchor[0].is_none());
+    super::commands::drain_pending_seed(&mut ctx);
+    assert!(
+        ctx.pending_seed.is_some(),
+        "ring still occupied — must wait"
+    );
+    for ring in &mut ctx.rings {
+        ring.reset();
+    }
+    super::commands::drain_pending_seed(&mut ctx);
+    assert!(ctx.pending_seed.is_none());
+    let (_counts, anchor_mm) = ctx.report_anchor[0].expect("seed completed");
+    assert_eq!(anchor_mm, 1.0);
+}
+
+#[test]
+fn seed_fails_when_the_ring_never_drains() {
+    let mut ctx = test_ctx("seed-timeout");
+    push_all(&mut ctx, piece(1_000_000, 0.01, &[2.5, 2.5]));
+    super::commands::handle_seed_servo_home(&mut ctx, 7, 0, 65536);
+    let deadline = ctx.pending_seed.as_ref().expect("deferred").deadline_cycle;
+    ctx.cycle_index = deadline;
+    super::commands::drain_pending_seed(&mut ctx);
+    assert!(ctx.pending_seed.is_none());
+    assert!(ctx.report_anchor[0].is_none());
+}
+
+#[test]
+fn seed_completes_immediately_on_an_empty_ring() {
+    let mut ctx = test_ctx("seed-empty");
+    super::commands::handle_seed_servo_home(&mut ctx, 7, 0, 131072);
+    assert!(ctx.pending_seed.is_none());
+    let (_counts, anchor_mm) = ctx.report_anchor[0].expect("seed completed");
+    assert_eq!(anchor_mm, 2.0);
+}
+
+#[test]
+fn late_frame_is_counted_but_not_faulted_without_tolerance() {
+    let mut ctx = test_ctx("late-no-tol");
+    super::cycle::police_frame_timing(&mut ctx, 50_000);
+    assert_ne!(ctx.gate.state(), TorqueState::Faulted);
+    assert_eq!(ctx.late_frames, 1);
+    assert_eq!(ctx.late_max_ns, 50_000);
+}
+
+#[test]
+fn late_frame_beyond_tolerance_latches_a_fault() {
+    let mut ctx = test_ctx("late-fault");
+    ctx.late_tolerance_ns = Some(0);
+    super::cycle::police_frame_timing(&mut ctx, 50_000);
+    assert_eq!(ctx.gate.state(), TorqueState::Faulted);
+    assert_eq!(ctx.latched_drive_err, super::cycle::FRAME_LATE_FAULT_CODE);
+}
+
+#[test]
+fn late_frame_within_tolerance_does_not_fault() {
+    let mut ctx = test_ctx("late-within");
+    ctx.late_tolerance_ns = Some(100_000);
+    super::cycle::police_frame_timing(&mut ctx, 50_000);
+    assert_ne!(ctx.gate.state(), TorqueState::Faulted);
+}
+
+#[test]
+fn first_cycle_arms_and_absorbs_the_bringup_catchup_skip() {
+    let mut ctx = test_ctx("arming");
+    ctx.timing_armed = false;
+    ctx.late_tolerance_ns = Some(0);
+    ctx.baseline_reanchor_count = 3;
+    super::cycle::police_frame_timing(&mut ctx, 75_000);
+    assert_ne!(ctx.gate.state(), TorqueState::Faulted);
+    assert_eq!(ctx.late_frames, 0);
+    assert_eq!(ctx.baseline_reanchor_count, 0);
+    super::cycle::police_frame_timing(&mut ctx, 75_000);
+    assert_eq!(ctx.gate.state(), TorqueState::Faulted);
+    assert_eq!(ctx.latched_drive_err, super::cycle::FRAME_LATE_FAULT_CODE);
+}
+
+#[test]
+fn cycle_skip_faults_even_when_lateness_is_within_tolerance() {
+    let mut ctx = test_ctx("skip-fault");
+    ctx.late_tolerance_ns = Some(1_000_000);
+    ctx.baseline_reanchor_count = 5;
+    super::cycle::police_frame_timing(&mut ctx, -100_000);
+    assert_eq!(ctx.gate.state(), TorqueState::Faulted);
+    assert_eq!(ctx.latched_drive_err, super::cycle::CYCLE_SKIP_FAULT_CODE);
 }

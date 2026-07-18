@@ -199,6 +199,7 @@ pub struct Args {
     pub rt_prio: i32,
     pub mailbox_cpu: Option<usize>,
     pub dynamics: Option<crate::dynamics::DynamicsModel>,
+    pub late_tolerance_ns: Option<i64>,
 }
 
 fn load_dynamics_profile(path: &str) -> crate::dynamics::DynamicsModel {
@@ -297,6 +298,13 @@ impl Args {
             arg_val(&raw, "--mailbox-cpu").and_then(|s| s.parse().ok());
         let node_profile = arg_val(&raw, "--dynamics-profile");
         let dynamics = resolve_dynamics(&slaves, node_profile, num_slaves);
+        let late_tolerance_ns = arg_val(&raw, "--late-tolerance-us").map(|v| {
+            let us: f64 = v.parse().unwrap_or_else(|_| {
+                eprintln!("ec-rt: --late-tolerance-us {v} is not a number");
+                std::process::exit(1);
+            });
+            (us * 1000.0).round() as i64
+        });
         Args {
             ifname,
             socket,
@@ -306,6 +314,7 @@ impl Args {
             rt_prio,
             mailbox_cpu,
             dynamics,
+            late_tolerance_ns,
         }
     }
 }

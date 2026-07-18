@@ -162,16 +162,38 @@ static int go_realtime(int cpu, int prio) {
 }
 
 /* If the deadline has gone stale (a blocking transaction or a wait between
- * exchanges overran the cycle), re-anchor to now rather than letting
+ * exchanges overran the cycle), skip forward rather than letting
  * clock_nanosleep return immediately cycle after cycle: that catch-up burst
- * sends frames far outside the SYNC0 window and reads as sync loss. */
+ * sends frames far outside the SYNC0 window and reads as sync loss.
+ *
+ * The skip is a whole number of cycles, never "now": the slaves' SYNC0
+ * generators fire at offsets programmed from this grid at DC activation, so
+ * any fractional-cycle move would re-roll the frame-to-latch margin to a
+ * random value for the rest of the session. Staying on the grid keeps the
+ * half-cycle margin deterministic across bringup's blocking waits and any
+ * mid-session stall. The counter lets the endpoint report each skip. */
+static uint32_t g_reanchor_count;
+static int64_t g_last_reanchor_behind_ns;
+
 static void reanchor_if_stale(void) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     int64_t behind_ns = (now.tv_sec - g_ts.tv_sec) * 1000000000LL
                       + (now.tv_nsec - g_ts.tv_nsec);
-    if (behind_ns > g_cycle_ns) g_ts = now;
+    if (behind_ns > g_cycle_ns) {
+        int64_t skip = (behind_ns + g_cycle_ns - 1) / g_cycle_ns;
+        add_ts(&g_ts, skip * g_cycle_ns);
+        g_reanchor_count++;
+        g_last_reanchor_behind_ns = behind_ns;
+        fprintf(stderr,
+                "ec_rt: cycle overran by %lld ns; skipped %lld cycle(s) "
+                "forward on the grid (count %u) — SYNC0 phase preserved\n",
+                (long long)behind_ns, (long long)skip, g_reanchor_count);
+    }
 }
+
+uint32_t ec_rt_reanchor_count(void) { return g_reanchor_count; }
+int64_t ec_rt_last_reanchor_behind_ns(void) { return g_last_reanchor_behind_ns; }
 
 static void flush_outputs(void) {
     for (int s = 0; s < g_num_slaves; s++) {
@@ -193,7 +215,14 @@ static void flush_outputs(void) {
  * then queued and sent. DC drift is compensated by the kernel master:
  * application_time anchors the network clock to the CLOCK_MONOTONIC wake grid
  * and sync_reference_clock/sync_slave_clocks distribute it — so no
- * application-side phase loop is needed and *toff stays 0. */
+ * application-side phase loop is needed.
+ *
+ * *toff reports this frame's lateness relative to the nominal SYNC0 latch
+ * (wake grid + the half-cycle shift programmed at DC config): negative is
+ * margin to spare, positive means the drives latched last cycle's target.
+ * The measurement is taken when ecrt_master_send returns, so wire flight
+ * (~2.5 us to the last slave) is not included. Overrun skips stay on the
+ * grid (reanchor_if_stale), so the half-cycle latch phase holds all run. */
 static int rt_exchange(int64_t *toff) {
     add_ts(&g_ts, g_cycle_ns);
     reanchor_if_stale();
@@ -209,9 +238,14 @@ static int rt_exchange(int64_t *toff) {
     ecrt_domain_queue(g_domain);
     ecrt_master_send(g_master);
 
+    struct timespec sent;
+    clock_gettime(CLOCK_MONOTONIC, &sent);
+    int64_t lateness_ns =
+        TIMESPEC2NS(sent) - (TIMESPEC2NS(g_ts) + g_cycle_ns / 2);
+
     ec_domain_state_t ds;
     ecrt_domain_state(g_domain, &ds);
-    if (toff) *toff = 0;
+    if (toff) *toff = lateness_ns;
     return (int)ds.working_counter;
 }
 

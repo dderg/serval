@@ -48,6 +48,7 @@ fn endpoint_args_single_drive_uses_legacy_form() {
         250,
         None,
         None,
+        None,
         &[EthercatDrive {
             chain_index: 1,
             counts_per_mm: 3276.8,
@@ -78,6 +79,7 @@ fn endpoint_args_per_drive_ff_flags() {
         "eth0",
         "/tmp/x.sock",
         250,
+        None,
         None,
         None,
         &[
@@ -119,6 +121,7 @@ fn endpoint_args_multi_drive_emits_slave_and_axis_groups() {
         250,
         None,
         None,
+        None,
         &[
             EthercatDrive {
                 rotation_distance: 50.0,
@@ -157,6 +160,7 @@ fn endpoint_args_emits_per_slave_dynamics_profile() {
         250,
         None,
         None,
+        None,
         &[
             EthercatDrive {
                 rotation_distance: 50.0,
@@ -189,6 +193,7 @@ fn spawn_nonexistent_binary_errors_with_binary_path() {
         "eth0",
         "/tmp/test.sock",
         250,
+        None,
         None,
         None,
         &[],
@@ -414,6 +419,7 @@ fn endpoint_args_emit_ff_lead_cycles_only_when_nonzero() {
         "eth0",
         "/tmp/x.sock",
         250,
+        None,
         None,
         None,
         &[
