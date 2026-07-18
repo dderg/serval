@@ -42,6 +42,18 @@ function pathTraces(
 
 const runView = createPathView();
 
+function repaintPathChart(canvas: HTMLCanvasElement, traces: PathTrace[]) {
+  runView.render(canvas, traces);
+  const note = el("path-note");
+  if (note) {
+    const zoomHint = runView.isManual()
+      ? ""
+      : " — ctrl+wheel zooms, scroll or drag pans, double-click refits";
+    const text = `dashed: commanded, solid: actual, color per run${zoomHint}`;
+    if (note.textContent !== text) note.textContent = text;
+  }
+}
+
 function renderPathChart(names: string[], plots: PlotSeries[], steps: string[]) {
   const section = el("path-section");
   const canvas = el<HTMLCanvasElement>("path-canvas");
@@ -52,15 +64,8 @@ function renderPathChart(names: string[], plots: PlotSeries[], steps: string[]) 
     return;
   }
   section.hidden = false;
-  runView.bind(canvas, el("path-fit"), () => renderPathChart(names, plots, steps));
-  runView.render(canvas, traces);
-  const note = el("path-note");
-  if (note) {
-    const zoomHint = runView.isManual()
-      ? ""
-      : " — ctrl+wheel zooms, scroll or drag pans, double-click refits";
-    note.textContent = `dashed: commanded, solid: actual, color per run${zoomHint}`;
-  }
+  runView.bind(canvas, el("path-fit"), () => repaintPathChart(canvas, traces));
+  repaintPathChart(canvas, traces);
 }
 
 export { pathTraces, renderPathChart };

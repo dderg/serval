@@ -221,6 +221,7 @@ function createPathView(): PathView {
       { passive: false }
     );
     canvas.addEventListener("pointerdown", (e) => {
+      wheelSuppressUntil = 0;
       drag = { px: e.clientX, py: e.clientY };
       canvas.setPointerCapture(e.pointerId);
     });
@@ -265,11 +266,13 @@ function createPathView(): PathView {
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = BG_COLOR;
     ctx.fillRect(0, 0, w, h);
-    autoView = fitViewport(
-      traces.flatMap((t) => [t.xs, t.ys]),
-      w,
-      h
-    );
+    if (manualView === null) {
+      autoView = fitViewport(
+        traces.flatMap((t) => [t.xs, t.ys]),
+        w,
+        h
+      );
+    }
     const view = activeView();
     if (!view) return null;
     drawGrid(ctx, view, w, h);
