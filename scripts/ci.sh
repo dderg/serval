@@ -235,7 +235,12 @@ run_check() {
     printf '%-20s ' "$name"
     local log rc=0
     log="$(mktemp)"
-    ( set -e; "$@" ) >"$log" 2>&1 && rc=0 || rc=$?
+    # Standalone statement, NOT `... && rc=0 || rc=$?`: in a `&&`/`||`
+    # condition context bash ignores the subshell's `set -e`, so multi-command
+    # jobs would report only their last command's status and a failing
+    # nextest run could hide behind passing doc-tests.
+    ( set -e; "$@" ) >"$log" 2>&1
+    rc=$?
     if [ "$rc" -eq 0 ]; then
         green "PASS"; PASS=$((PASS + 1))
     else

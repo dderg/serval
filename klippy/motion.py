@@ -33,6 +33,38 @@ def _open_sim_control():
     return SimControlClient(sock_path)
 
 
+class EngineWakeup:
+    """Parks waiters on the engine's readiness fd. The fd becomes readable
+    when input-channel space frees after a refused submit and on every fence
+    resolution, so parked submits and fence pollers resume the moment the
+    engine has something for them instead of on a poll interval."""
+
+    def __init__(self, reactor, fd, on_wake):
+        self.reactor = reactor
+        self.fd = fd
+        self.on_wake = on_wake
+        self.waiters = []
+        reactor.register_fd(fd, self._on_readable)
+
+    def _on_readable(self, eventtime):
+        try:
+            os.read(self.fd, 4096)
+        except OSError:
+            pass
+        waiters = self.waiters
+        self.waiters = []
+        for completion in waiters:
+            completion.complete(None)
+        self.on_wake()
+
+    def park(self, max_wait_s):
+        completion = self.reactor.completion()
+        self.waiters.append(completion)
+        completion.wait(self.reactor.monotonic() + max_wait_s)
+        if completion in self.waiters:
+            self.waiters.remove(completion)
+
+
 class Move:
     def __init__(self, toolhead, start_pos, end_pos, speed):
         self.toolhead = toolhead
@@ -92,6 +124,7 @@ class Motion:
         )
         self.commanded_pos = [0.0, 0.0, 0.0, 0.0]
         self._planner_ready = False
+        self._engine_wakeup = None
         self._load_motion_config(config)
         self.print_stall = 0
         _deprecated_buffer_time_high = config.getfloat(
@@ -694,6 +727,7 @@ class Motion:
             "get_last_move_time motion fence",
             engine_wait.UNBOUNDED,
             interval_s=0.002,
+            park=self._engine_wakeup.park if self._engine_wakeup else None,
         )
 
     def register_lookahead_callback(self, callback):
@@ -713,15 +747,28 @@ class Motion:
             if entry[0] is None:
                 entry[0] = self.engine.fence_start(False)
                 if entry[0] is None:
-                    return eventtime + 0.020
+                    return eventtime + engine_wait.PARK_FALLBACK_S
             fence_print_time = self.engine.fence_print_time_poll(
                 entry[0], self.mcu.get_engine_handle()
             )
             if fence_print_time is None:
-                return eventtime + 0.020
+                return eventtime + engine_wait.PARK_FALLBACK_S
             self._lookahead_fences.pop(0)
             entry[1](max(fence_print_time, self._schedule_floor()))
         return self.reactor.NEVER
+
+    def _register_engine_wakeup(self):
+        self._engine_wakeup = EngineWakeup(
+            self.reactor,
+            self.engine.feed_wakeup_fd(),
+            self._kick_lookahead_fences,
+        )
+
+    def _kick_lookahead_fences(self):
+        if self._lookahead_fences:
+            self.reactor.update_timer(
+                self._lookahead_fence_timer, self.reactor.NOW
+            )
 
     def _yield_to_reactor_if_due(self, now):
         if now - self._last_reactor_yield > REACTOR_YIELD_INTERVAL:
@@ -754,6 +801,7 @@ class Motion:
             lambda: submit(*args) or None,
             "motion pipe space",
             engine_wait.UNBOUNDED,
+            park=self._engine_wakeup.park if self._engine_wakeup else None,
         )
         self._last_reactor_yield = self.reactor.monotonic()
         structured_log.event(

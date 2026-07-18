@@ -211,6 +211,7 @@ def test_init_planner_passes_config_text_and_topology():
 
     motion.printer.lookup_objects = lookup_objects
     motion._configure_axes_per_mcu = lambda engine_mcus: None
+    motion._register_engine_wakeup = lambda: None
 
     motion._init_planner()
     assert engine.init_planner_args["config_text"] == motion._motion_config_text
