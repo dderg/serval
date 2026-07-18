@@ -88,12 +88,21 @@ GAIN_PARAMS = {
         "0.01 ms",
         100.0,
     ),
+    "torque_filter": (
+        "0x2001.0x19",
+        5,
+        16000,
+        "C01.18 torque feedforward filter cutoff",
+        "Hz",
+        1.0,
+    ),
 }
 
 GAIN_LIST_PARAMS = {
     "POS_GAINS": "position",
     "SPEED_GAINS": "speed",
     "INTEGRALS": "integral",
+    "TORQUE_FILTERS": "torque_filter",
 }
 
 INERTIA_RATIO_ADDR = "0x2000.0x07"
@@ -146,7 +155,7 @@ def refine_values(
 def validate_gain_values(values: list[int], param: str) -> list[int]:
     if param not in GAIN_PARAMS:
         raise ValueError(
-            "PARAM must be position, speed or integral (got %r)" % (param,)
+            "PARAM must be one of %s (got %r)" % (", ".join(GAIN_PARAMS), param)
         )
     _addr, lo, hi, _desc, _unit, _scale = GAIN_PARAMS[param]
     for v in values:
@@ -799,24 +808,15 @@ class SingleGainAdapter:
         )
 
     def apply(self, value: int) -> ApplyResult:
-        triple = dict(self._original)
-        triple[self.param] = value
-        self._cal._write_gains(
-            self.servos, triple["position"], triple["speed"], triple["integral"]
-        )
+        values = dict(self._original)
+        values[self.param] = value
+        self._cal._write_gains(self.servos, values)
         swept = {self.param: value}
-        applied = self._cal._gain_write_records(
-            self.servos, triple["position"], triple["speed"], triple["integral"]
-        )
+        applied = self._cal._gain_write_records(self.servos, values)
         return swept, applied
 
     def revert(self) -> None:
-        self._cal._write_gains(
-            self.servos,
-            self._original["position"],
-            self._original["speed"],
-            self._original["integral"],
-        )
+        self._cal._write_gains(self.servos, self._original)
 
 
 class InertiaRatioAdapter:
@@ -3089,34 +3089,23 @@ class ServoCalibration:
         torque, inertia = self._motor(gcmd, required=True)
         self._run_fit(gcmd, gcmd.get("NAME", "inertia"), torque, inertia)
 
-    def _write_gains(
-        self, servos: list[str], pos_gain: int, speed_gain: int, integral: int
-    ) -> None:
-        lines = []
-        for servo in servos:
-            lines += [
-                "SERVO_PARAM SERVO=%s SET=0x2001.0x01 VALUE=%d TYPE=u16"
-                % (servo, pos_gain),
-                "SERVO_PARAM SERVO=%s SET=0x2001.0x02 VALUE=%d TYPE=u16"
-                % (servo, speed_gain),
-                "SERVO_PARAM SERVO=%s SET=0x2001.0x03 VALUE=%d TYPE=u16"
-                % (servo, integral),
-            ]
+    def _write_gains(self, servos: list[str], values: dict[str, int]) -> None:
+        lines = [
+            "SERVO_PARAM SERVO=%s SET=%s VALUE=%d TYPE=u16"
+            % (servo, GAIN_PARAMS[name][0], values[name])
+            for servo in servos
+            for name in values
+        ]
         with servo_param.suppress_write_log():
             self.gcode.run_script_from_command("\n".join(lines))
 
     def _gain_write_records(
-        self, servos: list[str], pos_gain: int, speed_gain: int, integral: int
+        self, servos: list[str], values: dict[str, int]
     ) -> list[dict[str, Any]]:
-        values = {
-            "position": pos_gain,
-            "speed": speed_gain,
-            "integral": integral,
-        }
         return [
             _applied(servo, GAIN_PARAMS[name][0], values[name])
             for servo in servos
-            for name in ("position", "speed", "integral")
+            for name in values
         ]
 
     def _resolve_node_slot(self, servo: str) -> tuple[Any, int]:
@@ -3147,7 +3136,7 @@ class ServoCalibration:
     def _read_gains(self, servo: str) -> dict[str, int]:
         return {
             name: self._read_param(servo, GAIN_PARAMS[name][0])
-            for name in ("position", "speed", "integral")
+            for name in GAIN_PARAMS
         }
 
     def _set_manual_tuning(self, servos: list[str]) -> None:
@@ -3217,16 +3206,23 @@ class ServoCalibration:
     cmd_SERVO_APPLY_GAINS_help = (
         "Switch the drive(s) to manual tuning (C00.04=0) and write gain set "
         "1 to every servo driving the axis. POS_GAIN 0.1 rad/s, SPEED_GAIN "
-        "0.1 Hz, INTEGRAL 0.01 ms. Params AXIS or SERVO (comma list)"
+        "0.1 Hz, INTEGRAL 0.01 ms, TORQUE_FILTER Hz (C01.18, only written "
+        "when given). Params AXIS or SERVO (comma list)"
     )
 
     def cmd_SERVO_APPLY_GAINS(self, gcmd: Any) -> None:
         servos = self._servos(gcmd)
-        pos_gain = gcmd.get_int("POS_GAIN", 400)
-        speed_gain = gcmd.get_int("SPEED_GAIN", 250)
-        integral = gcmd.get_int("INTEGRAL", 3184)
+        values = {
+            "position": gcmd.get_int("POS_GAIN", 400),
+            "speed": gcmd.get_int("SPEED_GAIN", 250),
+            "integral": gcmd.get_int("INTEGRAL", 3184),
+        }
+        torque_filter = gcmd.get("TORQUE_FILTER", None)
+        if torque_filter is not None:
+            values["torque_filter"] = int(torque_filter)
+            validate_gain_values([values["torque_filter"]], "torque_filter")
         self._set_manual_tuning(servos)
-        self._write_gains(servos, pos_gain, speed_gain, integral)
+        self._write_gains(servos, values)
         for servo in servos:
             self._show_tuning(servo)
 
@@ -3256,9 +3252,10 @@ class ServoCalibration:
     cmd_SERVO_CALIBRATE_GAINS_help = (
         "Sweep of exactly one drive gain, shaper-calibrate style. Give one "
         "of POS_GAINS (0.1 rad/s units), SPEED_GAINS (0.1 Hz units, default "
-        "500,650,800,1000) or INTEGRALS (0.01 ms units) as a comma list; "
-        "the other two gains stay at their current drive values, so tune "
-        "each gain individually. Resolves every servo driving AXIS (both "
+        "500,650,800,1000), INTEGRALS (0.01 ms units) or TORQUE_FILTERS "
+        "(C01.18 torque feedforward filter cutoff, Hz) as a comma list; "
+        "the other params stay at their current drive values, so tune "
+        "each one individually. Resolves every servo driving AXIS (both "
         "drives on CoreXY; they must agree on the current gains), writes "
         "each entry to all of them, one capture per step of all "
         "drives into a run directory, then servo-cal analyzes it into "
@@ -3273,7 +3270,7 @@ class ServoCalibration:
         "sweep to a subset of the axis servos; BASE_GAIN then pins the "
         "swept gain on every non-swept axis servo at that value "
         "for an asymmetric-gain experiment; those servos are restored too. "
-        "Params POS_GAINS SPEED_GAINS INTEGRALS AXIS START "
+        "Params POS_GAINS SPEED_GAINS INTEGRALS TORQUE_FILTERS AXIS START "
         "END SPEED ACCEL ITERATIONS DWELL_MS TAG ACCEL_CHIP APPLY SERVO "
         "BASE_GAIN"
     )
@@ -3283,8 +3280,8 @@ class ServoCalibration:
         named = [p for p, text in given.items() if text is not None]
         if len(named) > 1:
             raise gcmd.error(
-                "give exactly one of POS_GAINS, SPEED_GAINS or INTEGRALS "
-                "(got %s)" % (", ".join(named),)
+                "give exactly one of %s (got %s)"
+                % (", ".join(GAIN_LIST_PARAMS), ", ".join(named))
             )
         chosen = named[0] if named else "SPEED_GAINS"
         param = GAIN_LIST_PARAMS[chosen]
@@ -3350,7 +3347,7 @@ class ServoCalibration:
 
         def restore_prior() -> None:
             for s, g in prior.items():
-                self._write_gains([s], g["position"], g["speed"], g["integral"])
+                self._write_gains([s], g)
 
         stroke_plan = {
             "start": start,
@@ -3387,12 +3384,7 @@ class ServoCalibration:
                 for s in base_servos:
                     pinned = dict(prior[s])
                     pinned[param] = base_gain
-                    self._write_gains(
-                        [s],
-                        pinned["position"],
-                        pinned["speed"],
-                        pinned["integral"],
-                    )
+                    self._write_gains([s], pinned)
                 run.manifest["base_gains"] = {
                     "servos": base_servos,
                     "param": param,
@@ -3536,8 +3528,10 @@ class ServoCalibration:
 
     cmd_SERVO_REFINE_GAIN_help = (
         "1-D sensitivity sweep of a single drive gain around the current "
-        "operating point, holding the other two fixed. PARAM=position|speed|"
-        "integral. Reads the current gains from the drive; sweeps either an "
+        "operating point, holding the others fixed. PARAM=position|speed|"
+        "integral|torque_filter (torque_filter is the C01.18 torque "
+        "feedforward filter cutoff, Hz). "
+        "Reads the current gains from the drive; sweeps either an "
         "explicit VALUES= list or the current value +-SPAN over STEPS points "
         "(default +-30%% in 5 steps, always including the current value). "
         "Writes each step to EVERY drive on AXIS (both CoreXY lanes), one "
@@ -3555,8 +3549,8 @@ class ServoCalibration:
         param = gcmd.get("PARAM", "").lower()
         if param not in GAIN_PARAMS:
             raise gcmd.error(
-                "PARAM must be position, speed or integral (got %r)"
-                % (gcmd.get("PARAM", ""),)
+                "PARAM must be one of %s (got %r)"
+                % (", ".join(GAIN_PARAMS), gcmd.get("PARAM", ""))
             )
         axis = gcmd.get("AXIS", "X").upper()
         servos = self._servos(gcmd, axis)
@@ -3598,11 +3592,9 @@ class ServoCalibration:
 
         def on_revert() -> None:
             gcmd.respond_info(
-                "restoring original gains pos %d / speed %d / integral %d on %s"
+                "restoring original %s on %s"
                 % (
-                    gains["position"],
-                    gains["speed"],
-                    gains["integral"],
+                    " / ".join("%s %d" % (name, gains[name]) for name in gains),
                     ", ".join(servos),
                 )
             )

@@ -499,14 +499,16 @@ Writes C00.06 load inertia ratio in percent. Params: `RATIO` (0..12000) `SERVO`.
 #### SERVO_APPLY_GAINS
 Switches the drive to manual tuning (C00.04=0), writes gain set 1, and prints
 the readback. `POS_GAIN` is 0.1 rad/s, `SPEED_GAIN` 0.1 Hz, `INTEGRAL` 0.01 ms;
-defaults are the factory Low preset. Params: `POS_GAIN` (400) `SPEED_GAIN`
-(250) `INTEGRAL` (3184) `SERVO`.
+defaults are the factory Low preset. `TORQUE_FILTER` (C01.18 torque
+feedforward filter cutoff, Hz, 5–16000) is only written when given. Params:
+`POS_GAIN` (400) `SPEED_GAIN` (250) `INTEGRAL` (3184) `TORQUE_FILTER` `SERVO`.
 
 #### SERVO_CALIBRATE_GAINS
 Sweep of exactly one drive gain, shaper-calibrate style: give one of
-`POS_GAINS=` (0.1 rad/s units), `SPEED_GAINS=` (0.1 Hz units) or `INTEGRALS=`
-(0.01 ms units) as a comma list — the other two gains stay at their current
-drive values, so each gain is tuned individually (the swept drives must agree
+`POS_GAINS=` (0.1 rad/s units), `SPEED_GAINS=` (0.1 Hz units), `INTEGRALS=`
+(0.01 ms units) or `TORQUE_FILTERS=` (C01.18 torque feedforward filter cutoff,
+Hz) as a comma list — the other params stay at their current
+drive values, so each one is tuned individually (the swept drives must agree
 on their current gains, else a command error tells you to align them first).
 It records
 one capture per step into the run directory, then `servo-cal analyze` writes
@@ -530,7 +532,7 @@ sweep — the asymmetric-gain experiment: hold one belt pair soft while sweeping
 the other pair higher; those servos are restored to their prior gains too.
 Params:
 `POS_GAINS` `SPEED_GAINS` (500,650,800,1000 when none given) `INTEGRALS`
-`AXIS` (X) `START` `END`
+`TORQUE_FILTERS` `AXIS` (X) `START` `END`
 `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2) `DWELL_MS` `TAG` (cal)
 `ACCEL_CHIP` `APPLY` `SERVO` `BASE_GAIN`.
 

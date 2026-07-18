@@ -59,6 +59,7 @@ def test_validate_gain_values_ranges():
     servo_calibration.validate_gain_values([1, 20000], "position")
     servo_calibration.validate_gain_values([1, 20000], "speed")
     servo_calibration.validate_gain_values([15, 51200], "integral")
+    servo_calibration.validate_gain_values([5, 16000], "torque_filter")
 
 
 def test_validate_gain_values_rejects_out_of_range():
@@ -66,6 +67,10 @@ def test_validate_gain_values_rejects_out_of_range():
         servo_calibration.validate_gain_values([20001], "position")
     with pytest.raises(ValueError, match="outside drive range"):
         servo_calibration.validate_gain_values([14], "integral")
+    with pytest.raises(ValueError, match="outside drive range"):
+        servo_calibration.validate_gain_values([4], "torque_filter")
+    with pytest.raises(ValueError, match="outside drive range"):
+        servo_calibration.validate_gain_values([16001], "torque_filter")
 
 
 def test_validate_gain_values_rejects_nonpositive():
@@ -252,6 +257,7 @@ CURRENT_GAINS = {
     (0x2001, 0x01): 400,
     (0x2001, 0x02): 2500,
     (0x2001, 0x03): 3184,
+    (0x2001, 0x19): 318,
     (0x2000, 0x07): 100,
 }
 
@@ -301,6 +307,25 @@ def test_refine_gain_restores_on_failure():
     writes = _param_writes(gcode.scripts, "0x2001.0x02")
     last = int(writes[-1].split("VALUE=")[1].split()[0])
     assert last == 2500
+
+
+def test_refine_torque_filter_writes_both_drives_and_restores():
+    sc, gcode = make_calibration(dict(CURRENT_GAINS))
+    gcmd = FakeGcmd(PARAM="torque_filter", AXIS="X", VALUES="200,318,500")
+    sc.cmd_SERVO_REFINE_GAIN(gcmd)
+    writes = _param_writes(gcode.scripts, "0x2001.0x19")
+    values = [int(w.split("VALUE=")[1].split()[0]) for w in writes]
+    for servo in ("motor_a", "motor_b"):
+        assert any("SERVO=%s " % servo in w for w in writes)
+    assert values[-1] == 318
+    assert 200 in values and 500 in values
+
+
+def test_refine_torque_filter_rejects_out_of_range():
+    sc, _ = make_calibration(dict(CURRENT_GAINS))
+    gcmd = FakeGcmd(PARAM="torque_filter", AXIS="X", VALUES="4")
+    with pytest.raises(RuntimeError, match="outside drive range"):
+        sc.cmd_SERVO_REFINE_GAIN(gcmd)
 
 
 def test_refine_gain_rejects_bad_param():

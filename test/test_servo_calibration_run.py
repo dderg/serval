@@ -606,6 +606,35 @@ def test_calibrate_gains_restores_prior_gains():
     assert any("restoring the pre-sweep gains" in r for r in gcmd.responses)
 
 
+def test_calibrate_torque_filters_sweeps_and_restores():
+    servo_param.drain_param_writes()
+    sc, gcode = make_sc()
+    gcmd = FakeGcmd(AXIS="Y", TORQUE_FILTERS="200,500")
+    sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
+    scripts = _str_scripts(gcode)
+    sweep_idx = [
+        i for i, s in enumerate(scripts) if "SET=0x2001.0x19 VALUE=500" in s
+    ]
+    restore_idx = [
+        i for i, s in enumerate(scripts) if "SET=0x2001.0x19 VALUE=7" in s
+    ]
+    assert sweep_idx and restore_idx
+    assert min(restore_idx) > max(sweep_idx)
+    steps = _manifest(sc)["steps"]
+    assert [s["swept"] for s in steps] == [
+        {"torque_filter": 200},
+        {"torque_filter": 500},
+    ]
+
+
+def test_calibrate_gains_rejects_two_swept_lists():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    gcmd = FakeGcmd(AXIS="Y", SPEED_GAINS="450", TORQUE_FILTERS="200")
+    with pytest.raises(RuntimeError, match="exactly one of"):
+        sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
+
+
 def test_calibrate_gains_restores_on_failure():
     servo_param.drain_param_writes()
     sc, gcode = make_sc()
