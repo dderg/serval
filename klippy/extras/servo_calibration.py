@@ -3215,10 +3215,63 @@ class ServoCalibration:
         "sweep to a subset of the axis servos; BASE_GAIN then pins the "
         "swept gain on every non-swept axis servo at that value "
         "for an asymmetric-gain experiment; those servos are restored too. "
+        "PATTERN=1 replaces the single-axis strokes with a TEST_SPEED-style "
+        "XY pattern (diagonals + box over the configured XY bounds inset by "
+        "BOUND, then over a SMALL_SIZE box at center) exciting every XY "
+        "servo; segments too short to reach SPEED run triangular profiles "
+        "on purpose and are reported with their achieved peak velocity, and "
+        "the per-step settle/overshoot metrics are not meaningful "
+        "(continuous motion, no rest windows) - the verdict gates on "
+        "resonance and torque saturation only. "
         "Params POS_GAINS SPEED_GAINS INTEGRALS TORQUE_FILTERS AXIS START "
         "END SPEED ACCEL ITERATIONS DWELL_MS TAG ACCEL_CHIP APPLY SERVO "
-        "BASE_GAIN"
+        "BASE_GAIN PATTERN BOUND SMALL_SIZE"
     )
+
+    def _pattern_setup(
+        self, gcmd: Any
+    ) -> tuple[list[str], list[tuple[float, float]], float, float, dict]:
+        if gcmd.get("BASE_GAIN", None) is not None:
+            raise gcmd.error(
+                "BASE_GAIN pins gains on the non-swept servos of one axis - "
+                "not supported with PATTERN=1, which sweeps every XY servo"
+            )
+        if (
+            gcmd.get("START", None) is not None
+            or gcmd.get("END", None) is not None
+        ):
+            raise gcmd.error(
+                "START/END are single-axis stroke bounds - PATTERN=1 uses "
+                "the configured XY bounds with BOUND= inset"
+            )
+        inset = gcmd.get_float("BOUND", 20.0, minval=0.0)
+        small = gcmd.get_float("SMALL_SIZE", 20.0, above=0.0)
+        x_lo, x_hi = self._config_bounds(gcmd, "X")
+        y_lo, y_hi = self._config_bounds(gcmd, "Y")
+        points, start_x, start_y = servo_strokes.pattern_geometry(
+            gcmd, x_lo, x_hi, y_lo, y_hi, inset, small
+        )
+        servo = gcmd.get("SERVO", None)
+        if servo is not None:
+            servos = [s.strip() for s in servo.split(",") if s.strip()]
+        else:
+            kin = self._kin()
+            servos = list(
+                dict.fromkeys(
+                    servo_strokes.axis_servos(gcmd, kin, "X")
+                    + servo_strokes.axis_servos(gcmd, kin, "Y")
+                )
+            )
+        plan = {
+            "pattern": {
+                "x_bounds": [x_lo, x_hi],
+                "y_bounds": [y_lo, y_hi],
+                "inset": inset,
+                "small_size": small,
+                "segments": len(points),
+            }
+        }
+        return servos, points, start_x, start_y, plan
 
     def _swept_gain_values(self, gcmd: Any) -> tuple[str, list[int]]:
         given = {p: gcmd.get(p, None) for p in GAIN_LIST_PARAMS}
@@ -3240,8 +3293,16 @@ class ServoCalibration:
 
     def cmd_SERVO_CALIBRATE_GAINS(self, gcmd: Any) -> list[SweepStep]:
         axis = gcmd.get("AXIS", "X").upper()
-        servos = self._servos(gcmd, axis)
-        start, end = servo_strokes.axis_bounds(gcmd, self.bounds, axis)
+        pattern = gcmd.get_int("PATTERN", 0)
+        if pattern:
+            servos, points, start_x, start_y, pattern_plan = (
+                self._pattern_setup(gcmd)
+            )
+            axis = "XY"
+            start = end = None
+        else:
+            servos = self._servos(gcmd, axis)
+            start, end = servo_strokes.axis_bounds(gcmd, self.bounds, axis)
         speed = gcmd.get_float("SPEED", 100.0, above=0.0)
         accel = gcmd.get_float("ACCEL", 3000.0, above=0.0)
         iterations = gcmd.get_int("ITERATIONS", 2, minval=1)
@@ -3295,13 +3356,15 @@ class ServoCalibration:
                 self._write_gains([s], g)
 
         stroke_plan = {
-            "start": start,
-            "end": end,
             "speed": speed,
             "accel": accel,
             "iterations": iterations,
             "dwell_ms": dwell,
         }
+        if pattern:
+            stroke_plan.update(pattern_plan)
+        else:
+            stroke_plan.update({"start": start, "end": end})
         run = self._begin_run(
             gcmd,
             "gain_sweep",
@@ -3316,13 +3379,24 @@ class ServoCalibration:
         )
         restored = False
         try:
-            self._prep(axis, dwell)
-            servo_strokes.goto(
-                self.gcode,
-                self.travel_speed,
-                "%s%.3f" % (axis, start),
-                dwell,
-            )
+            if pattern:
+                self._prep("X", dwell)
+                self._prep("Y", dwell)
+                moves = servo_strokes.pattern_moves(
+                    self.gcode, points, start_x, start_y, speed, accel
+                )
+                gcmd.respond_info(
+                    servo_strokes.pattern_reach_summary(moves, speed)
+                )
+                self._goto_xy(start_x, start_y, dwell)
+            else:
+                self._prep(axis, dwell)
+                servo_strokes.goto(
+                    self.gcode,
+                    self.travel_speed,
+                    "%s%.3f" % (axis, start),
+                    dwell,
+                )
             self._set_manual_tuning(servos)
             if base_servos:
                 self._set_manual_tuning(base_servos)
@@ -3348,13 +3422,29 @@ class ServoCalibration:
                         ", ".join(base_servos),
                     )
                 )
+
+            def run_step(sg: Any) -> None:
+                if pattern:
+                    servo_strokes.emit_pattern(
+                        self.gcode,
+                        points,
+                        start_x,
+                        start_y,
+                        speed,
+                        accel,
+                        iterations,
+                        dwell,
+                    )
+                else:
+                    self._strokes(
+                        axis, start, end, speed, accel, iterations, dwell
+                    )
+
             steps = self._engine.run(
                 adapter,
                 values,
                 servos,
-                lambda sg: self._strokes(
-                    axis, start, end, speed, accel, iterations, dwell
-                ),
+                run_step,
                 gcmd,
                 accel_chip=chip,
                 accel_chip_name=chip_name,
@@ -3369,7 +3459,14 @@ class ServoCalibration:
             results = self._analyze_and_report(gcmd, run)
             self._last_sweep_run, self._last_sweep_results = run, results
             if apply:
-                self._apply_verdict(gcmd, run, results, axis)
+                if pattern:
+                    gcmd.respond_info(
+                        "PATTERN=1: APPLY verification runs single-axis X "
+                        "strokes (the tracking measurement is per-axis)"
+                    )
+                self._apply_verdict(
+                    gcmd, run, results, "X" if pattern else axis
+                )
         finally:
             if not restored:
                 restore_prior()
