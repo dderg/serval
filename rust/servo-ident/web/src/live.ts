@@ -20,18 +20,71 @@ import type { LiveStatus, LiveTapPayload } from "./wire";
 // motor gets its own stacked chart over the slider's window, all on a
 // shared y-scale so the noisy motor stands out.
 
+const FREEZE_BUFFER_MAX_S = 180;
+
+function updateFreezeUi() {
+  const btn = el("live-freeze-btn");
+  if (btn) btn.textContent = state.live.frozen ? "resume" : "freeze";
+  const badge = el("live-freeze-badge");
+  if (badge) {
+    badge.textContent = state.live.frozen
+      ? state.live.freezeTruncated
+        ? "FROZEN — buffer cap hit, oldest frozen samples dropped"
+        : "FROZEN"
+      : "";
+  }
+}
+
+function setFrozen(frozen: boolean) {
+  state.live.frozen = frozen;
+  if (frozen) {
+    const last = state.live.t.length ? state.live.t[state.live.t.length - 1] : 0;
+    state.live.freezeStartT = last - state.live.windowS;
+    state.live.freezeEndT = last;
+  } else {
+    state.live.freezeStartT = null;
+    state.live.freezeEndT = null;
+    state.live.freezeTruncated = false;
+    trimLiveWindow();
+    drawLiveCharts();
+  }
+  updateFreezeUi();
+}
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return (
+    target.tagName === "INPUT" ||
+    target.tagName === "TEXTAREA" ||
+    target.tagName === "SELECT" ||
+    target.isContentEditable
+  );
+}
+
+let freezeKeyBound = false;
+
 function bindLiveEvents() {
   mustEl("live-start-btn").addEventListener("click", () => {
     const line = mustEl<HTMLInputElement>("live-start-command").value.trim();
     if (line) runGcode([line], "live");
   });
   mustEl("live-stop-btn").addEventListener("click", () => runGcode(["SERVO_CAPTURE_STOP"], "live"));
+  mustEl("live-freeze-btn").addEventListener("click", () => setFrozen(!state.live.frozen));
+  if (!freezeKeyBound) {
+    freezeKeyBound = true;
+    document.addEventListener("keydown", (e) => {
+      if (e.code !== "Space" || e.repeat || isTypingTarget(e.target)) return;
+      if (!el("live-freeze-btn")) return;
+      e.preventDefault();
+      setFrozen(!state.live.frozen);
+    });
+  }
   const slider = mustEl<HTMLInputElement>("live-window");
   slider.addEventListener("input", () => {
     state.live.windowS = Number(slider.value);
     mustEl("live-window-value").textContent = `${state.live.windowS} s`;
     trimLiveWindow();
-    drawLiveCharts();
+    if (!state.live.frozen) drawLiveCharts();
   });
 }
 
@@ -103,7 +156,8 @@ async function pollLiveTap() {
       label.classList.toggle("live-timing-bad", !!t && (t.skips > 0 || t.late_frames > 0));
     }
     appendTapSamples(payload);
-    drawLiveCharts();
+    if (state.live.frozen) updateFreezeUi();
+    else drawLiveCharts();
   } catch (e) {
     const label = el("live-status");
     if (label) label.textContent = String(e);
@@ -161,7 +215,16 @@ function appendTapSamples(payload: LiveTapPayload) {
 
 function trimLiveWindow() {
   if (!state.live.t.length) return;
-  const cutoff = state.live.t[state.live.t.length - 1] - state.live.windowS;
+  const last = state.live.t[state.live.t.length - 1];
+  let cutoff = last - state.live.windowS;
+  if (state.live.frozen && state.live.freezeStartT !== null) {
+    cutoff = Math.min(cutoff, state.live.freezeStartT);
+    const capCutoff = last - FREEZE_BUFFER_MAX_S;
+    if (capCutoff > cutoff) {
+      cutoff = capCutoff;
+      state.live.freezeTruncated = true;
+    }
+  }
   let drop = 0;
   while (drop < state.live.t.length && state.live.t[drop] < cutoff) drop++;
   if (drop > 0) {
@@ -234,21 +297,40 @@ function livePlotFor(hostId: string, yLabel: string, trace: TimeTrace, fixedY: F
   return plot;
 }
 
+function ferrDisplayScale(drives: string[]): { unit: "µm" | "counts"; scale: Record<string, number> | null } {
+  const missing = drives.filter((d) => !state.live.countsPerMm[d]);
+  if (drives.length === 0 || missing.length === drives.length) return { unit: "counts", scale: null };
+  if (missing.length) {
+    throw new Error(
+      `counts_per_mm missing for [${missing.join(", ")}] but present for other drives — refusing a mixed-unit chart`
+    );
+  }
+  return {
+    unit: "µm",
+    scale: Object.fromEntries(drives.map((d) => [d, 1000 / state.live.countsPerMm[d]])),
+  };
+}
+
 function drawLiveChartGroup(
   containerId: string,
   idPrefix: string,
   drives: string[],
   channel: keyof LiveSeries,
   yLabel: string,
-  peakFmt: (peak: number) => string
+  peakFmt: (peak: number) => string,
+  scale: Record<string, number> | null = null
 ) {
   if (!ensureLiveChartBoxes(containerId, idPrefix, drives)) return;
   let yMin = Infinity;
   let yMax = -Infinity;
   const peaks: Record<string, number> = {};
+  const display: Record<string, (number | null)[]> = {};
   for (const d of drives) {
+    const k = scale ? scale[d] : 1;
+    const values = state.live.perDrive[d][channel];
+    display[d] = scale ? values.map((v) => (v === null ? null : v * k)) : values;
     let peak = 0;
-    for (const v of state.live.perDrive[d][channel]) {
+    for (const v of display[d]) {
       if (v === null) continue;
       if (v < yMin) yMin = v;
       if (v > yMax) yMax = v;
@@ -264,7 +346,7 @@ function drawLiveChartGroup(
       yLabel,
       {
         t: state.live.t,
-        y: state.live.perDrive[d][channel],
+        y: display[d],
         color: PALETTE[i % PALETTE.length],
       },
       { yMin, yMax }
@@ -281,13 +363,15 @@ function drawLiveCharts() {
   if (!state.live.t.length) return;
   const drives = Object.keys(state.live.perDrive).sort();
   if (!drives.length) return;
+  const ferr = ferrDisplayScale(drives);
   drawLiveChartGroup(
     "live-charts",
     "live",
     drives,
     "ferr",
-    "ferr (counts)",
-    (p) => `peak |ferr| ${p}`
+    `ferr (${ferr.unit})`,
+    ferr.unit === "µm" ? (p) => `peak |ferr| ${p.toFixed(1)} µm` : (p) => `peak |ferr| ${p} counts`,
+    ferr.scale
   );
   drawLiveChartGroup(
     "live-torque-charts",
@@ -306,6 +390,11 @@ function startLivePolling() {
   state.live.t = [];
   state.live.perDrive = {};
   state.live.countsPerMm = {};
+  state.live.frozen = false;
+  state.live.freezeStartT = null;
+  state.live.freezeEndT = null;
+  state.live.freezeTruncated = false;
+  updateFreezeUi();
   pollLiveFileStatus();
   pollLiveTap();
   state.live.timers = [
@@ -319,4 +408,4 @@ function stopLivePolling() {
   state.live.timers = [];
 }
 
-export { bindLiveEvents, pollLiveFileStatus, pollLiveTap, appendTapSamples, trimLiveWindow, liveDriveLabel, ensureLiveChartBoxes, drawLiveChartGroup, drawLiveCharts, startLivePolling, stopLivePolling };
+export { bindLiveEvents, pollLiveFileStatus, pollLiveTap, appendTapSamples, trimLiveWindow, liveDriveLabel, ensureLiveChartBoxes, drawLiveChartGroup, drawLiveCharts, startLivePolling, stopLivePolling, setFrozen, ferrDisplayScale, FREEZE_BUFFER_MAX_S };

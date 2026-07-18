@@ -1,6 +1,6 @@
 import { el } from "./api";
 import { hidpiCanvasContext } from "./charts-core";
-import { state } from "./state";
+import { liveDrawCount, state } from "./state";
 import type { LiveSeries } from "./state";
 import type { SpatialFrame } from "./wire";
 
@@ -13,9 +13,10 @@ import type { SpatialFrame } from "./wire";
 // tap payload, so the map is coeff = frame[mode][motor] / counts_per_mm
 // per tap drive and everything else is a dot product per sample. The
 // encoder zero is wherever power-on left it, so coordinates are relative —
-// the shape (corner overshoot, ringing, lag) is the signal. Wheel zooms
-// about the cursor, drag pans, double-click or the fit button restores
-// auto-fit; the time window is the live tab's shared slider.
+// the shape (corner overshoot, ringing, lag) is the signal. Ctrl/meta+wheel
+// zooms about the cursor, a plain wheel is a two-finger pan, drag pans,
+// double-click or the fit button restores auto-fit; the time window is the
+// live tab's shared slider.
 
 interface SpatialCoeffs {
   x: Record<string, number>;
@@ -271,27 +272,58 @@ function canvasMm(canvas: HTMLCanvasElement, view: Viewport, e: MouseEvent): [nu
   return [view.cx + (px - rect.width / 2) * view.mmPerPx, view.cy - (py - rect.height / 2) * view.mmPerPx];
 }
 
+let redrawQueued = false;
+let wheelSuppressUntil = 0;
+
+function scheduleSpatialDraw() {
+  if (redrawQueued) return;
+  redrawQueued = true;
+  requestAnimationFrame(() => {
+    redrawQueued = false;
+    drawSpatialView();
+  });
+}
+
+const WHEEL_ZOOM_FACTOR_LIMITS = [0.1, 10] as const;
+const WHEEL_MOUSEMOVE_SUPPRESS_MS = 80;
+
 function bindSpatialEvents(canvas: HTMLCanvasElement) {
   if (boundCanvas === canvas) return;
   boundCanvas = canvas;
-  canvas.addEventListener("wheel", (e) => {
-    const view = activeView();
-    if (!view) return;
-    e.preventDefault();
-    const [mmX, mmY] = canvasMm(canvas, view, e);
-    const factor = Math.exp(e.deltaY * 0.0015);
-    const mmPerPx = Math.min(
-      MM_PER_PX_LIMITS[1],
-      Math.max(MM_PER_PX_LIMITS[0], view.mmPerPx * factor)
-    );
-    const scale = mmPerPx / view.mmPerPx;
-    manualView = {
-      mmPerPx,
-      cx: mmX + (view.cx - mmX) * scale,
-      cy: mmY + (view.cy - mmY) * scale,
-    };
-    drawSpatialView();
-  });
+  canvas.addEventListener(
+    "wheel",
+    (e) => {
+      const view = activeView();
+      if (!view) return;
+      e.preventDefault();
+      wheelSuppressUntil = performance.now() + WHEEL_MOUSEMOVE_SUPPRESS_MS;
+      if (e.ctrlKey || e.metaKey) {
+        const [mmX, mmY] = canvasMm(canvas, view, e);
+        const factor = Math.min(
+          WHEEL_ZOOM_FACTOR_LIMITS[1],
+          Math.max(WHEEL_ZOOM_FACTOR_LIMITS[0], Math.exp(e.deltaY * 0.01))
+        );
+        const mmPerPx = Math.min(
+          MM_PER_PX_LIMITS[1],
+          Math.max(MM_PER_PX_LIMITS[0], view.mmPerPx * factor)
+        );
+        const scale = mmPerPx / view.mmPerPx;
+        manualView = {
+          mmPerPx,
+          cx: mmX + (view.cx - mmX) * scale,
+          cy: mmY + (view.cy - mmY) * scale,
+        };
+      } else {
+        manualView = {
+          mmPerPx: view.mmPerPx,
+          cx: view.cx + e.deltaX * view.mmPerPx,
+          cy: view.cy - e.deltaY * view.mmPerPx,
+        };
+      }
+      scheduleSpatialDraw();
+    },
+    { passive: false }
+  );
   canvas.addEventListener("pointerdown", (e) => {
     drag = { px: e.clientX, py: e.clientY };
     canvas.setPointerCapture(e.pointerId);
@@ -299,24 +331,25 @@ function bindSpatialEvents(canvas: HTMLCanvasElement) {
   canvas.addEventListener("pointermove", (e) => {
     const view = activeView();
     if (!drag || !view) return;
+    if (performance.now() < wheelSuppressUntil) return;
     manualView = {
       mmPerPx: view.mmPerPx,
       cx: view.cx - (e.clientX - drag.px) * view.mmPerPx,
       cy: view.cy + (e.clientY - drag.py) * view.mmPerPx,
     };
     drag = { px: e.clientX, py: e.clientY };
-    drawSpatialView();
+    scheduleSpatialDraw();
   });
   canvas.addEventListener("pointerup", () => {
     drag = null;
   });
   canvas.addEventListener("dblclick", () => {
     manualView = null;
-    drawSpatialView();
+    scheduleSpatialDraw();
   });
   el("live-spatial-fit")?.addEventListener("click", () => {
     manualView = null;
-    drawSpatialView();
+    scheduleSpatialDraw();
   });
 }
 
@@ -334,7 +367,7 @@ function drawSpatialView() {
     setNote(coeffs);
     return;
   }
-  const n = state.live.t.length;
+  const n = liveDrawCount();
   const paths = [
     projectRow(coeffs.x, state.live.perDrive, n, "target"),
     projectRow(coeffs.y, state.live.perDrive, n, "target"),
@@ -358,7 +391,7 @@ function drawSpatialView() {
   drawMarker(ctx, view, w, h, lastPoint(cmdX, cmdY), CMD_COLOR, false);
   drawMarker(ctx, view, w, h, lastPoint(actX, actY), ACT_COLOR, true);
   drawLegend(ctx, w);
-  const zoomHint = manualView ? "" : " — wheel zooms, drag pans";
+  const zoomHint = manualView ? "" : " — ctrl+wheel zooms, scroll or drag pans, double-click refits";
   setNote(`${deviationText(paths)}${zoomHint}`);
 }
 
