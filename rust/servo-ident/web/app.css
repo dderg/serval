@@ -126,16 +126,11 @@ button.estop:hover:not(:disabled) { background: #a02a22; }
 }
 @media (max-width: 1100px) {
   .workspace { grid-template-columns: minmax(0, 1fr); }
-  .controls { position: static; max-height: none; }
 }
 
 .analysis { min-width: 0; display: flex; flex-direction: column; gap: 14px; }
 
 .controls {
-  position: sticky;
-  top: 44px;
-  max-height: calc(100vh - 56px);
-  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 14px;

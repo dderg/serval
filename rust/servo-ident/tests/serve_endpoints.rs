@@ -468,7 +468,7 @@ fn drive_state_endpoint_serves_shape_and_a_fresh_age() {
     assert_eq!(resp.status, 200);
     let parsed: Value = serde_json::from_str(&resp.body).expect("drive_state is json");
     assert_eq!(parsed["version"], Value::from(1));
-    assert_eq!(parsed["params"].as_array().unwrap().len(), 27);
+    assert_eq!(parsed["params"].as_array().unwrap().len(), 29);
     assert_eq!(parsed["motors"].as_object().unwrap().len(), 4);
     assert_eq!(parsed["config_pins"].as_object().unwrap().len(), 4);
     let age_s = parsed["age_s"].as_f64().expect("age_s must be a number");

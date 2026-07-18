@@ -226,13 +226,15 @@ fn demo_writes_a_drive_state_the_panel_can_render() {
     assert!(drive_state["created_utc"].as_str().is_some());
 
     let params = drive_state["params"].as_array().unwrap();
-    assert_eq!(params.len(), 27, "must mirror all 27 shipped PANEL_PARAMS");
+    assert_eq!(params.len(), 29, "must mirror all 29 shipped PANEL_PARAMS");
     let names: Vec<&str> = params.iter().map(|p| p["name"].as_str().unwrap()).collect();
     for expected in [
         "position_gain",
         "speed_gain",
         "integral_time",
         "torque_filter_cutoff",
+        "torque_ff_filter_cutoff",
+        "speed_ff_filter_cutoff",
         "notch_1_freq",
         "notch_3_depth",
         "notch_5_width",
@@ -274,6 +276,8 @@ fn demo_writes_a_drive_state_the_panel_can_render() {
         assert_eq!(readings["C01.01"], Value::from(550));
         assert_eq!(readings["C01.02"], Value::from(2273));
         assert_eq!(readings["C01.03"], Value::from(220));
+        assert_eq!(readings["C01.18"], Value::from(318));
+        assert_eq!(readings["C01.15"], Value::from(318));
         assert_eq!(readings["C02.60"], Value::from(2000));
         assert_eq!(readings["C02.62"], Value::from(30));
         assert_eq!(readings["C02.63"], Value::from(150));

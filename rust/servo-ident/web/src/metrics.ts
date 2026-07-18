@@ -501,6 +501,7 @@ function psdCartesianTraces(names: string[], plots: PlotSeries[], steps: string[
 
 const ACCEL_AXIS_KEYS = ["psd_x", "psd_y", "psd_z"] as const;
 const ACCEL_AXIS_LABELS = ["x", "y", "z"] as const;
+const ACCEL_TRACE_KEYS = ["total", ...ACCEL_AXIS_LABELS] as const;
 const ACCEL_TOTAL_WIDTH = 2.25;
 
 function psdAccelTraces(names: string[], plots: PlotSeries[], steps: string[]): PsdTrace[] {
@@ -523,8 +524,12 @@ function psdAccelTraces(names: string[], plots: PlotSeries[], steps: string[]): 
           run: names[i],
         });
       };
-      pushTrace(accel.psd, style.color, `${style.name} (total)`, { dashed: false, width: ACCEL_TOTAL_WIDTH });
+      const visible = (k: string) => !state.accelAxisFilter || state.accelAxisFilter.has(k);
+      if (visible("total")) {
+        pushTrace(accel.psd, style.color, `${style.name} (total)`, { dashed: false, width: ACCEL_TOTAL_WIDTH });
+      }
       ACCEL_AXIS_KEYS.forEach((key, k) => {
+        if (!visible(ACCEL_AXIS_LABELS[k])) return;
         pushTrace(
           accel[key],
           mixColor(style.color, "#ffffff", driveRamp(ACCEL_AXIS_KEYS.length + 1, k + 1)),
@@ -537,16 +542,42 @@ function psdAccelTraces(names: string[], plots: PlotSeries[], steps: string[]): 
   return traces;
 }
 
+function renderAccelAxisChips(show: boolean) {
+  const container = el("accel-axis-chips");
+  if (!container) return;
+  const filter = state.accelAxisFilter ? [...state.accelAxisFilter] : null;
+  if (payloadUnchanged("accel-axis-chips", { filter, show })) return;
+  container.innerHTML = "";
+  if (!show) return;
+  fillFilterChips(
+    container,
+    "all",
+    "show the total and every axis",
+    "trace",
+    ACCEL_TRACE_KEYS.map((k) => ({ key: k, label: k })),
+    () => state.accelAxisFilter,
+    (next) => {
+      state.accelAxisFilter = next;
+    },
+    redrawCharts
+  );
+}
+
 function renderAccelPsdChart(names: string[], plots: PlotSeries[], steps: string[]) {
   const section = el("accel-psd-section");
   const container = el("accel-psd-charts");
   if (!section || !container) return;
-  const traces = psdAccelTraces(names, plots, steps);
-  section.hidden = !traces.length;
-  const sig = { runs: runDataSig(names), steps, maxHz: psdMaxFreqHz() };
+  const hasAccel = plots.some((p) =>
+    p.steps.some((s) => steps.includes(s.name) && s.psd && s.psd.accel)
+  );
+  section.hidden = !hasAccel;
+  renderAccelAxisChips(hasAccel);
+  const filter = state.accelAxisFilter ? [...state.accelAxisFilter] : null;
+  const sig = { runs: runDataSig(names), steps, maxHz: psdMaxFreqHz(), filter };
   if (payloadUnchanged("accel-psd-charts", sig)) return;
   container.innerHTML = "";
-  if (!traces.length) return;
+  if (!hasAccel) return;
+  const traces = psdAccelTraces(names, plots, steps);
   container.appendChild(
     psdBox("accelerometer", traces, RESONANCE_BAND_HZ, "accel amplitude (mm/s²)", {
       linear: true,
