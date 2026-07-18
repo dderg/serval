@@ -98,3 +98,29 @@ test("stepFullPath resolves per step name and misses cleanly", () => {
   expect(stepFullPath(payload, "s2")).toBeNull();
   expect(stepFullPath(undefined, "s1")).toBeNull();
 });
+
+const { pathEntries } = await import("../src/path-chart");
+const { mixColor } = await import("../src/charts-core");
+
+test("pathEntries ramps step colors within a run and keeps single-step runs at base", () => {
+  const colors = new Map([["run1", "#4fb3ff"]]);
+  const plots = [series([step("s1", PATH), step("s2", PATH), step("s3", PATH)])];
+  const entries = pathEntries(["run1"], plots, ["s1", "s2", "s3"], colors);
+  expect(entries.length).toBe(6);
+  expect(entries[0].trace.color).toBe("#4fb3ff");
+  expect(entries[2].trace.color).toBe(mixColor("#4fb3ff", "#ffffff", 0.275));
+  expect(entries[4].trace.color).toBe(mixColor("#4fb3ff", "#ffffff", 0.55));
+  expect(entries[0].trace.color).not.toBe(entries[2].trace.color);
+  expect(entries[0].kind).toBe("commanded");
+  expect(entries[1].kind).toBe("actual");
+  expect(entries[1].trace.color).toBe(entries[0].trace.color);
+});
+
+test("pathEntries labels steps alone for one run and run-qualified for several", () => {
+  const plots = [series([step("s1", PATH)]), series([step("s1", PATH)])];
+  const single = pathEntries(["run1"], [plots[0]], ["s1"], new Map());
+  expect(single[0].label).toBe("s1");
+  const multi = pathEntries(["run1", "run2"], plots, ["s1"], new Map());
+  expect(multi[0].label).toBe("run1 · s1");
+  expect(multi[2].label).toBe("run2 · s1");
+});

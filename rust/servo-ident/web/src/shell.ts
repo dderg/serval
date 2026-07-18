@@ -175,6 +175,7 @@ function analysisSectionsHtml(def: PageDef): string {
           `<button id="path-fit">fit</button>` +
             `<span class="note" id="path-note"></span>`
         ) +
+        `<div class="chips" id="path-legend"></div>` +
         `<div class="spatial-box"><canvas id="path-canvas"></canvas></div>` +
         `</section>`
     );

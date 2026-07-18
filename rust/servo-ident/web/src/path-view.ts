@@ -32,6 +32,112 @@ const MM_PER_PX_LIMITS = [1e-5, 10] as const;
 const TICK_TARGET_PX = 90;
 const WHEEL_ZOOM_FACTOR_LIMITS = [0.1, 10] as const;
 const WHEEL_MOUSEMOVE_SUPPRESS_MS = 80;
+const LOD_STRIDE = 4;
+const LOD_MIN_POINTS = 512;
+const LOD_TARGET_POINTS_PER_PX = 3;
+const CULL_MARGIN_PX = 8;
+
+interface LodLevel {
+  xs: Float64Array;
+  ys: Float64Array;
+}
+
+interface TraceBounds {
+  xMin: number;
+  xMax: number;
+  yMin: number;
+  yMax: number;
+}
+
+interface PreparedTrace {
+  levels: LodLevel[];
+  bounds: TraceBounds | null;
+}
+
+function baseLevel(xs: (number | null)[], ys: (number | null)[]): LodLevel {
+  const n = xs.length;
+  const fx = new Float64Array(n);
+  const fy = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = xs[i];
+    const y = ys[i];
+    if (x === null || y === null) {
+      fx[i] = NaN;
+      fy[i] = NaN;
+    } else {
+      fx[i] = x;
+      fy[i] = y;
+    }
+  }
+  return { xs: fx, ys: fy };
+}
+
+function decimateLevel(level: LodLevel): LodLevel {
+  const n = level.xs.length;
+  const out = Math.ceil(n / LOD_STRIDE);
+  const fx = new Float64Array(out);
+  const fy = new Float64Array(out);
+  for (let b = 0; b < out; b++) {
+    const start = b * LOD_STRIDE;
+    const end = Math.min(start + LOD_STRIDE, n);
+    let px = NaN;
+    let py = NaN;
+    for (let i = start; i < end; i++) {
+      if (!Number.isNaN(level.xs[i])) {
+        px = level.xs[i];
+        py = level.ys[i];
+        break;
+      }
+    }
+    fx[b] = px;
+    fy[b] = py;
+  }
+  return { xs: fx, ys: fy };
+}
+
+function levelBounds(level: LodLevel): TraceBounds | null {
+  let xMin = Infinity;
+  let xMax = -Infinity;
+  let yMin = Infinity;
+  let yMax = -Infinity;
+  for (let i = 0; i < level.xs.length; i++) {
+    const x = level.xs[i];
+    if (Number.isNaN(x)) continue;
+    const y = level.ys[i];
+    if (x < xMin) xMin = x;
+    if (x > xMax) xMax = x;
+    if (y < yMin) yMin = y;
+    if (y > yMax) yMax = y;
+  }
+  if (!isFinite(xMin) || !isFinite(yMin)) return null;
+  return { xMin, xMax, yMin, yMax };
+}
+
+const preparedCache = new WeakMap<object, PreparedTrace>();
+
+function prepareTrace(trace: PathTrace): PreparedTrace {
+  const cached = preparedCache.get(trace.xs);
+  if (cached) return cached;
+  const base = baseLevel(trace.xs, trace.ys);
+  const levels = [base];
+  while (levels[levels.length - 1].xs.length > LOD_MIN_POINTS) {
+    levels.push(decimateLevel(levels[levels.length - 1]));
+  }
+  const prepared = { levels, bounds: levelBounds(base) };
+  preparedCache.set(trace.xs, prepared);
+  return prepared;
+}
+
+function pickLevel(prepared: PreparedTrace, view: Viewport): LodLevel {
+  const b = prepared.bounds;
+  if (!b) return prepared.levels[0];
+  const extentPx = Math.max(b.xMax - b.xMin, b.yMax - b.yMin) / view.mmPerPx;
+  const budget = extentPx * LOD_TARGET_POINTS_PER_PX + LOD_MIN_POINTS;
+  for (const level of prepared.levels) {
+    if (level.xs.length <= budget) return level;
+  }
+  return prepared.levels[prepared.levels.length - 1];
+}
 
 function fitViewport(paths: (number | null)[][], w: number, h: number): Viewport | null {
   let xMin = Infinity;
@@ -52,6 +158,17 @@ function fitViewport(paths: (number | null)[][], w: number, h: number): Viewport
     }
   }
   if (!isFinite(xMin) || !isFinite(yMin)) return null;
+  return fitBounds(xMin, xMax, yMin, yMax, w, h);
+}
+
+function fitBounds(
+  xMin: number,
+  xMax: number,
+  yMin: number,
+  yMax: number,
+  w: number,
+  h: number
+): Viewport {
   const spanX = Math.max(xMax - xMin, MIN_SPAN_MM);
   const spanY = Math.max(yMax - yMin, MIN_SPAN_MM);
   const mmPerPx = Math.max(
@@ -105,31 +222,138 @@ function drawTrace(
   h: number,
   trace: PathTrace
 ) {
+  const prepared = prepareTrace(trace);
+  if (!prepared.bounds) return;
+  const level = pickLevel(prepared, view);
+  const { xs, ys } = level;
+  const margin = CULL_MARGIN_PX * view.mmPerPx;
+  const xLo = view.cx - (w / 2) * view.mmPerPx - margin;
+  const xHi = view.cx + (w / 2) * view.mmPerPx + margin;
+  const yLo = view.cy - (h / 2) * view.mmPerPx - margin;
+  const yHi = view.cy + (h / 2) * view.mmPerPx + margin;
   ctx.strokeStyle = trace.color;
   ctx.lineWidth = trace.width;
   ctx.setLineDash(trace.dash ?? []);
   ctx.beginPath();
   let penDown = false;
+  let prevX = NaN;
+  let prevY = NaN;
   let lastPx = NaN;
   let lastPy = NaN;
-  for (let i = 0; i < trace.xs.length; i++) {
-    const x = trace.xs[i];
-    const y = trace.ys[i];
-    if (x === null || y === null) {
+  for (let i = 0; i < xs.length; i++) {
+    const x = xs[i];
+    const y = ys[i];
+    if (Number.isNaN(x) || Number.isNaN(y)) {
       penDown = false;
+      prevX = NaN;
+      continue;
+    }
+    if (Number.isNaN(prevX)) {
+      prevX = x;
+      prevY = y;
+      penDown = false;
+      continue;
+    }
+    const segVisible =
+      Math.max(prevX, x) >= xLo &&
+      Math.min(prevX, x) <= xHi &&
+      Math.max(prevY, y) >= yLo &&
+      Math.min(prevY, y) <= yHi;
+    if (!segVisible) {
+      penDown = false;
+      prevX = x;
+      prevY = y;
       continue;
     }
     const px = (x - view.cx) / view.mmPerPx + w / 2;
     const py = h / 2 - (y - view.cy) / view.mmPerPx;
-    if (penDown && Math.abs(px - lastPx) < 0.5 && Math.abs(py - lastPy) < 0.5) continue;
-    if (penDown) ctx.lineTo(px, py);
-    else ctx.moveTo(px, py);
-    penDown = true;
-    lastPx = px;
-    lastPy = py;
+    if (!penDown) {
+      const ppx = (prevX - view.cx) / view.mmPerPx + w / 2;
+      const ppy = h / 2 - (prevY - view.cy) / view.mmPerPx;
+      ctx.moveTo(ppx, ppy);
+      penDown = true;
+      lastPx = ppx;
+      lastPy = ppy;
+    }
+    if (Math.abs(px - lastPx) >= 0.5 || Math.abs(py - lastPy) >= 0.5) {
+      ctx.lineTo(px, py);
+      lastPx = px;
+      lastPy = py;
+    }
+    prevX = x;
+    prevY = y;
   }
   ctx.stroke();
   ctx.setLineDash([]);
+}
+
+interface TraceHit {
+  traceIndex: number;
+  distPx: number;
+  mmX: number;
+  mmY: number;
+}
+
+function segmentDistSq(px: number, py: number, ax: number, ay: number, bx: number, by: number) {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  const t = lenSq === 0 ? 0 : Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
+  const cx = ax + t * dx;
+  const cy = ay + t * dy;
+  return (px - cx) * (px - cx) + (py - cy) * (py - cy);
+}
+
+function nearestTrace(
+  traces: PathTrace[],
+  view: Viewport,
+  w: number,
+  h: number,
+  px: number,
+  py: number,
+  maxDistPx: number
+): TraceHit | null {
+  const cursorX = view.cx + (px - w / 2) * view.mmPerPx;
+  const cursorY = view.cy - (py - h / 2) * view.mmPerPx;
+  const reach = maxDistPx * view.mmPerPx;
+  let best: TraceHit | null = null;
+  let bestDistSq = maxDistPx * maxDistPx;
+  traces.forEach((trace, traceIndex) => {
+    const prepared = prepareTrace(trace);
+    if (!prepared.bounds) return;
+    const { xs, ys } = pickLevel(prepared, view);
+    let prevX = NaN;
+    let prevY = NaN;
+    for (let i = 0; i < xs.length; i++) {
+      const x = xs[i];
+      const y = ys[i];
+      if (Number.isNaN(x) || Number.isNaN(y)) {
+        prevX = NaN;
+        continue;
+      }
+      if (!Number.isNaN(prevX)) {
+        const near =
+          Math.max(prevX, x) >= cursorX - reach &&
+          Math.min(prevX, x) <= cursorX + reach &&
+          Math.max(prevY, y) >= cursorY - reach &&
+          Math.min(prevY, y) <= cursorY + reach;
+        if (near) {
+          const ax = (prevX - view.cx) / view.mmPerPx + w / 2;
+          const ay = h / 2 - (prevY - view.cy) / view.mmPerPx;
+          const bx = (x - view.cx) / view.mmPerPx + w / 2;
+          const by = h / 2 - (y - view.cy) / view.mmPerPx;
+          const dSq = segmentDistSq(px, py, ax, ay, bx, by);
+          if (dSq < bestDistSq) {
+            bestDistSq = dSq;
+            best = { traceIndex, distPx: Math.sqrt(dSq), mmX: x, mmY: y };
+          }
+        }
+      }
+      prevX = x;
+      prevY = y;
+    }
+  });
+  return best;
 }
 
 function blankCanvas(canvas: HTMLCanvasElement) {
@@ -150,6 +374,8 @@ interface PathView {
   bind(canvas: HTMLCanvasElement, fitButton: HTMLElement | null, onRedraw: () => void): void;
   render(canvas: HTMLCanvasElement, traces: PathTrace[]): RenderedView | null;
   isManual(): boolean;
+  gestureActive(): boolean;
+  lastRendered(): RenderedView | null;
 }
 
 function createPathView(): PathView {
@@ -161,6 +387,7 @@ function createPathView(): PathView {
   let redraw: () => void = () => {};
   let redrawQueued = false;
   let wheelSuppressUntil = 0;
+  let rendered: RenderedView | null = null;
 
   function activeView(): Viewport | null {
     return manualView ?? autoView;
@@ -267,21 +494,48 @@ function createPathView(): PathView {
     ctx.fillStyle = BG_COLOR;
     ctx.fillRect(0, 0, w, h);
     if (manualView === null) {
-      autoView = fitViewport(
-        traces.flatMap((t) => [t.xs, t.ys]),
-        w,
-        h
-      );
+      let xMin = Infinity;
+      let xMax = -Infinity;
+      let yMin = Infinity;
+      let yMax = -Infinity;
+      for (const t of traces) {
+        const b = prepareTrace(t).bounds;
+        if (!b) continue;
+        if (b.xMin < xMin) xMin = b.xMin;
+        if (b.xMax > xMax) xMax = b.xMax;
+        if (b.yMin < yMin) yMin = b.yMin;
+        if (b.yMax > yMax) yMax = b.yMax;
+      }
+      autoView = isFinite(xMin) && isFinite(yMin) ? fitBounds(xMin, xMax, yMin, yMax, w, h) : null;
     }
     const view = activeView();
-    if (!view) return null;
+    if (!view) {
+      rendered = null;
+      return null;
+    }
     drawGrid(ctx, view, w, h);
     for (const t of traces) drawTrace(ctx, view, w, h, t);
-    return { ctx, view, w, h };
+    rendered = { ctx, view, w, h };
+    return rendered;
   }
 
-  return { bind, render, isManual: () => manualView !== null };
+  return {
+    bind,
+    render,
+    isManual: () => manualView !== null,
+    gestureActive: () => drag !== null || performance.now() < wheelSuppressUntil,
+    lastRendered: () => rendered,
+  };
 }
 
-export { fitViewport, tickStepMm, blankCanvas, createPathView };
-export type { Viewport, PathTrace, RenderedView, PathView };
+export {
+  fitViewport,
+  tickStepMm,
+  blankCanvas,
+  createPathView,
+  prepareTrace,
+  pickLevel,
+  drawTrace,
+  nearestTrace,
+};
+export type { Viewport, PathTrace, RenderedView, PathView, TraceHit, PreparedTrace, LodLevel };
