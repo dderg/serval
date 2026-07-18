@@ -568,8 +568,17 @@ pub(super) const CYCLE_SKIP_FAULT_CODE: u16 = 0xFE11;
 /// whole cycles went by with no frame at all — the drives coasted on a stale
 /// target — so it faults whenever a tolerance is set, regardless of the
 /// lateness measured on the cycle that finally ran.
+///
+/// The first cycle only arms: the gap between the last bringup exchange and
+/// the loop's first wake always costs one catch-up skip, which is benign —
+/// nothing is armed yet and the grid phase is preserved.
 pub(super) fn police_frame_timing(ctx: &mut EndpointCtx, lateness_ns: i64) {
     let reanchors = ctx.drive.reanchor_count();
+    if !ctx.timing_armed {
+        ctx.timing_armed = true;
+        ctx.baseline_reanchor_count = reanchors;
+        return;
+    }
     let reanchored = reanchors != ctx.baseline_reanchor_count;
     if reanchored {
         ctx.baseline_reanchor_count = reanchors;

@@ -196,6 +196,7 @@ fn test_ctx_with_drive(name: &str, drive: TrackingLagDrive) -> EndpointCtx {
         sensorless: SensorlessBank::new(NUM_SLAVES),
         stream_halt: StreamHalt::default(),
         late_tolerance_ns: None,
+        timing_armed: true,
         baseline_reanchor_count: 0,
         late_frames: 0,
         late_max_ns: i64::MIN,
@@ -844,6 +845,21 @@ fn late_frame_within_tolerance_does_not_fault() {
     ctx.late_tolerance_ns = Some(100_000);
     super::cycle::police_frame_timing(&mut ctx, 50_000);
     assert_ne!(ctx.gate.state(), TorqueState::Faulted);
+}
+
+#[test]
+fn first_cycle_arms_and_absorbs_the_bringup_catchup_skip() {
+    let mut ctx = test_ctx("arming");
+    ctx.timing_armed = false;
+    ctx.late_tolerance_ns = Some(0);
+    ctx.baseline_reanchor_count = 3;
+    super::cycle::police_frame_timing(&mut ctx, 75_000);
+    assert_ne!(ctx.gate.state(), TorqueState::Faulted);
+    assert_eq!(ctx.late_frames, 0);
+    assert_eq!(ctx.baseline_reanchor_count, 0);
+    super::cycle::police_frame_timing(&mut ctx, 75_000);
+    assert_eq!(ctx.gate.state(), TorqueState::Faulted);
+    assert_eq!(ctx.latched_drive_err, super::cycle::FRAME_LATE_FAULT_CODE);
 }
 
 #[test]

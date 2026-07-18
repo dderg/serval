@@ -471,10 +471,6 @@ pub fn bringup(args: Args) -> EndpointCtx {
         jump_log_counts,
     } = columns;
 
-    // Bringup re-anchors legitimately (blocking SDO waits between exchanges);
-    // only increments after entering the cyclic loop are policed.
-    let baseline_reanchor_count = drive.reanchor_count();
-
     EndpointCtx {
         server,
         drive,
@@ -520,7 +516,8 @@ pub fn bringup(args: Args) -> EndpointCtx {
         sensorless,
         stream_halt,
         late_tolerance_ns,
-        baseline_reanchor_count,
+        timing_armed: false,
+        baseline_reanchor_count: 0,
         late_frames: 0,
         late_max_ns: i64::MIN,
     }

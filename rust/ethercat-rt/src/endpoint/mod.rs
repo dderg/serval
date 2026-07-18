@@ -78,6 +78,7 @@ pub struct EndpointCtx {
     sensorless: SensorlessBank,
     stream_halt: StreamHalt,
     late_tolerance_ns: Option<i64>,
+    timing_armed: bool,
     baseline_reanchor_count: u32,
     late_frames: u32,
     late_max_ns: i64,
