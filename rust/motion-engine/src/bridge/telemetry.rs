@@ -174,6 +174,16 @@ impl PyMotionEngine {
     fn input_channel_capacity(&self) -> u64 {
         crate::worker::INPUT_CHANNEL_CAP as u64
     }
+    /// Fd the host reactor registers for engine readiness: it becomes
+    /// readable when input-channel space frees after a refused submit, and
+    /// on every fence resolution. Owned by the engine — never close it.
+    fn feed_wakeup_fd(&self) -> PyResult<i32> {
+        let guard = self.planner.lock_ok();
+        let planner = guard.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("planner not initialized — call init_planner first")
+        })?;
+        Ok(planner.feed_wakeup_read_fd())
+    }
     /// `None` when the move channel is full — the caller yields and retries;
     /// blocking here would stall the whole klippy reactor thread.
     fn fence_start(&self, force: bool) -> PyResult<Option<u64>> {

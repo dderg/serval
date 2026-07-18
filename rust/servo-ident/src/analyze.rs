@@ -22,6 +22,10 @@ use crate::results::{
     PlotDifferential, PlotDrive, PlotPsd, PlotPsdAccel, PlotSeries, PlotStep, Results, Step,
     StepResult, Verdict,
 };
+use crate::ringdown::{
+    compute_step_ringdown, ringdown_verdict_reason, RingdownOptions, DEFAULT_GUARD_MS,
+    RINGDOWN_BAND_HZ, RINGDOWN_WINDOW_MARGIN_MS,
+};
 use crate::scap::Scap;
 
 const MAX_SERIES_POINTS: usize = 2000;
@@ -263,6 +267,7 @@ pub fn analyze_capture(
         combined,
         accel: accel.map(|a| a.result),
         differential: None,
+        ringdown: None,
         flags,
     };
     let plot_step = PlotStep {
@@ -275,6 +280,7 @@ pub fn analyze_capture(
         combined: plot_combined,
         accel: plot_accel,
         differential: None,
+        ringdown: None,
         psd: PlotPsd {
             freq_hz: psd_freq_hz,
             per_drive: per_drive_psd,
@@ -375,6 +381,7 @@ pub fn analyze_differential_capture(
             segments: frf.segments,
             modes,
         }),
+        ringdown: None,
         flags: Vec::new(),
     };
     let plot_step = PlotStep {
@@ -387,6 +394,7 @@ pub fn analyze_differential_capture(
         combined: None,
         accel: None,
         differential: Some(plot_differential),
+        ringdown: None,
         psd: PlotPsd {
             freq_hz: psd_freq_hz,
             per_drive: per_drive_psd,
@@ -527,6 +535,22 @@ pub fn compute_verdict(
                 apply: None,
             })
         }
+        "ringdown" => {
+            let per_step: Vec<_> = steps
+                .iter()
+                .map(|sr| {
+                    sr.ringdown.as_ref().ok_or_else(|| {
+                        format!("ringdown step {:?} carries no ringdown result", sr.name)
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+            Ok(Verdict {
+                recommended_step: None,
+                reason: ringdown_verdict_reason(&per_step),
+                flags: Vec::new(),
+                apply: None,
+            })
+        }
         "tracking" | "inertia_grid" => Ok(Verdict {
             recommended_step: None,
             reason: "not a sweep".to_string(),
@@ -592,15 +616,40 @@ fn build_run_reusing(
     }
     let settle_band = DEFAULT_SETTLE_BAND_COUNTS;
     let torque_limit = DEFAULT_TORQUE_LIMIT_PER_MILLE;
+    let plan_f64 = |key: &str| {
+        manifest
+            .stroke_plan
+            .get(key)
+            .and_then(Value::as_f64)
+            .ok_or_else(|| {
+                format!(
+                    "{} manifest is missing stroke_plan.{key}",
+                    manifest.experiment
+                )
+            })
+    };
     let differential_band = if manifest.experiment == "differential" {
-        let plan_freq = |key: &str| {
-            manifest
-                .stroke_plan
-                .get(key)
-                .and_then(Value::as_f64)
-                .ok_or_else(|| format!("differential manifest is missing stroke_plan.{key}"))
-        };
-        Some((plan_freq("freq_start")?, plan_freq("freq_end")?))
+        Some((plan_f64("freq_start")?, plan_f64("freq_end")?))
+    } else {
+        None
+    };
+    let ringdown_plan = if manifest.experiment == "ringdown" {
+        let dwell_ms = plan_f64("dwell_ms")?;
+        let iterations = plan_f64("iterations")?;
+        if dwell_ms <= RINGDOWN_WINDOW_MARGIN_MS {
+            return Err(format!(
+                "ringdown stroke_plan.dwell_ms {dwell_ms} leaves no window \
+                 past the {RINGDOWN_WINDOW_MARGIN_MS} ms margin"
+            ));
+        }
+        Some((
+            RingdownOptions {
+                guard_s: DEFAULT_GUARD_MS / 1000.0,
+                window_s: (dwell_ms - RINGDOWN_WINDOW_MARGIN_MS) / 1000.0,
+                band_hz: RINGDOWN_BAND_HZ,
+            },
+            (iterations as usize) * 2,
+        ))
     } else {
         None
     };
@@ -616,7 +665,7 @@ fn build_run_reusing(
         }
         let cap = Scap::load(dir.join(&step.capture).to_str().unwrap())?;
         fs_hz = cap.fs();
-        let (sr, ps) = match differential_band {
+        let (mut sr, mut ps) = match differential_band {
             Some((freq_start, freq_end)) => {
                 analyze_differential_capture(&cap, &step.name, freq_start, freq_end)?
             }
@@ -634,6 +683,28 @@ fn build_run_reusing(
                 )?
             }
         };
+        if let Some((opts, expected_strokes)) = &ringdown_plan {
+            let accel_path = step.accel.as_ref().map(|a| dir.join(a));
+            let (rr, pr) = compute_step_ringdown(
+                &cap,
+                &step.name,
+                manifest.belts.as_deref(),
+                manifest.axis.as_deref(),
+                accel_path.as_deref(),
+                step.stops.as_deref(),
+                *expected_strokes,
+                opts,
+            )?;
+            if rr
+                .sources
+                .iter()
+                .any(|s| s.modes.iter().any(|m| m.zeta < 0.0))
+            {
+                sr.flags.push("ringdown_growing_oscillation".to_string());
+            }
+            sr.ringdown = Some(rr);
+            ps.ringdown = Some(pr);
+        }
         step_results.push(sr);
         plot_steps.push(ps);
     }
@@ -742,6 +813,32 @@ pub fn print_step(sr: &StepResult) {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+    }
+    if let Some(r) = &sr.ringdown {
+        println!(
+            "  ringdown (guard {:.0} ms, window {:.0} ms):",
+            r.guard_ms, r.window_ms
+        );
+        for src in &r.sources {
+            let modes = if src.modes.is_empty() {
+                "no ring above the noise floor".to_string()
+            } else {
+                src.modes
+                    .iter()
+                    .map(|m| {
+                        format!(
+                            "{:.1} Hz ζ {:.3} [{:.3}..{:.3}] {:.2} µm ({} tails, r² {:.2})",
+                            m.freq_hz, m.zeta, m.zeta_lo, m.zeta_hi, m.disp_um, m.tails, m.r2
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            };
+            println!(
+                "    {} [{}]: {} tails, noise {:.3}; {}",
+                src.source, src.unit, src.tails, src.noise_floor, modes
+            );
+        }
     }
     if let Some(d) = &sr.differential {
         println!(

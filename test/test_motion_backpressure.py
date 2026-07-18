@@ -101,9 +101,23 @@ class FakeMotion:
         )
         self._drip_active = drip
         self._last_reactor_yield = 0.0
+        self._engine_wakeup = None
 
     def submit(self):
         self._submit_paced(self.engine.submit_move, 1.0, 0.0, 0.0, 0.0, 100.0)
+
+
+# Stands in for motion.EngineWakeup: park() models the reactor sleeping until
+# the engine's wakeup fd fires as the channel frees (here: the wall clock
+# advancing enough to retire one in-flight move).
+class FakeWakeup:
+    def __init__(self, reactor):
+        self.reactor = reactor
+        self.parks = 0
+
+    def park(self, max_wait_s):
+        self.parks += 1
+        self.reactor.now += self.reactor.step
 
 
 def test_accepts_without_pause_when_pipe_has_space():
@@ -128,6 +142,15 @@ def test_retries_until_pipe_frees_space():
     m.submit()
     assert m.engine.accepted == 1
     assert m.reactor.pauses > 0
+
+
+def test_full_pipe_parks_on_engine_wakeup_instead_of_polling():
+    m = FakeMotion(in_flight=64)
+    m._engine_wakeup = FakeWakeup(m.reactor)
+    m.submit()
+    assert m.engine.accepted == 1
+    assert m._engine_wakeup.parks > 0
+    assert m.reactor.pauses == 0, "a parked wait must not poll the reactor"
 
 
 def test_drip_submits_without_pacing():

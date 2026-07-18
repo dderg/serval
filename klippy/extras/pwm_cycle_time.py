@@ -133,11 +133,22 @@ class PrinterOutputPWMCycle:
     def get_status(self, eventtime):
         return {"value": self.last_value}
 
-    def _set_pin(self, print_time, value, cycle_time):
+    def _set_pin(self, toolhead, print_time, value, cycle_time):
         if value == self.last_value and cycle_time == self.last_cycle_time:
             return
         min_sched_time = self.mcu_pin.get_mcu().min_schedule_time()
         print_time = max(print_time, self.last_print_time + min_sched_time)
+        if cycle_time != self.last_cycle_time:
+            # The MCU applies a cycle-time change on receipt, with no
+            # clock-gated deferral, and shuts down if its digital-out move
+            # queue for this pin isn't empty (gpiocmds.c
+            # command_set_digital_out_pwm_cycle). This function is the only
+            # source of queued moves for the pin and always advances
+            # last_print_time monotonically, so the most recent value
+            # update is the only one that can still be outstanding; waiting
+            # for real time to reach it drains the queue before the
+            # cycle-time change is transmitted.
+            toolhead.wait_until_print_time(self.last_print_time)
         self.mcu_pin.set_pwm_cycle(print_time, value, cycle_time)
         self.last_value = value
         self.last_cycle_time = cycle_time
@@ -159,7 +170,9 @@ class PrinterOutputPWMCycle:
         # Obtain print_time and apply requested settings
         toolhead = self.printer.lookup_object("toolhead")
         toolhead.register_lookahead_callback(
-            lambda print_time: self._set_pin(print_time, value, cycle_time)
+            lambda print_time: self._set_pin(
+                toolhead, print_time, value, cycle_time
+            )
         )
 
 

@@ -234,23 +234,24 @@ impl PyMotionEngine {
             None => Ok(()),
         }
     }
-    fn home_abort(&self, py: Python<'_>) {
+    /// Aborts the active homing run. Returns the reconciled gcode position
+    /// the toolhead actually stopped at, or `None` when the position could
+    /// not be reconciled — commanded_pos is then stale and the caller must
+    /// treat the position as unknown.
+    fn home_abort(&self, py: Python<'_>) -> Option<[f64; 3]> {
         let Some(ctx) = self.abort_context() else {
             self.finish_homing();
-            return;
+            return None;
         };
 
         if !self.flush_aborted_cohort(py, ctx.all_axis_keys, ctx.cohort) {
             self.finish_homing();
-            return;
+            return None;
         }
 
         self.finish_homing();
 
-        let machine = match self.reconcile_aborted_position(ctx.axis_key) {
-            Ok(p) => p,
-            Err(()) => return,
-        };
+        let machine = self.reconcile_aborted_position(ctx.axis_key).ok()?;
 
         let drain = self.drain.clone();
         let drain_result = py.detach(|| drain.wait_drained(DRAIN_TIMEOUT));
@@ -261,16 +262,17 @@ impl PyMotionEngine {
                 "home_abort: drain timed out after aborted homing move — \
                  commanded_pos is STALE; a firmware restart is required: {e}"
             );
-            return;
+            return None;
         }
 
         let gcode = self.gcode_from_machine(machine);
         if !self.reopen_stream_at(gcode) {
-            return;
+            return None;
         }
 
         *self.commanded_pos.lock_ok() = gcode;
         *self.last_g5_pq.lock_ok() = None;
+        Some([gcode.x(), gcode.y(), gcode.z()])
     }
     #[pyo3(signature = (source_mcu, clock, host_now))]
     fn motion_state_at_clock(

@@ -41,7 +41,7 @@ fn trident_extruder_chain_set() -> trajectory::AxisChainSet {
 #[test]
 fn first_move_extrude_only_has_no_step_burst() {
     let mut cfg = default_stream_config();
-    cfg.limits = geometry::VelocityLimits::try_new(2800.0, 50000.0, 100.0, 4_000_000.0)
+    cfg.limits = geometry::VelocityLimits::try_new(2800.0, 50000.0, 0.05, 4_000_000.0)
         .expect("trident bench limits are valid");
     let moves = parse_gcode_to_moves("G1 E0\nG1 E1 F60\n", cfg.limits);
     assert_eq!(moves.len(), 1, "expected exactly one extrude-only move");

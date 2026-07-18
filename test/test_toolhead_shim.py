@@ -189,6 +189,7 @@ def _make_correction_toolhead(duration):
     th.engine = _RecordingEngine(duration)
     th.printer = _NoopPrinter(th.reactor)
     th.motion_lead = 0.25
+    th._engine_wakeup = None
     return th
 
 

@@ -90,6 +90,20 @@ if [[ -z "$BRANCH" ]]; then
            -o -name third_party_repos \) -prune -o -type f -exec touch {} +)
 fi
 
+build_image() {
+    # One retry absorbs transient registry/network failures (e.g. a cargo
+    # crate download aborting mid-unpack on a CI runner). Deterministic
+    # build errors replay from the layer cache and fail fast the second
+    # time, so real breakage stays loud.
+    local ctx="$1" dockerfile="$2"
+    if ! docker build ${DOCKER_BUILD_ARGS[@]+"${DOCKER_BUILD_ARGS[@]}"} \
+            -t "$IMAGE_TAG" -f "$dockerfile" "$ctx"; then
+        echo "docker build failed; retrying once (transient network flakes)" >&2
+        docker build ${DOCKER_BUILD_ARGS[@]+"${DOCKER_BUILD_ARGS[@]}"} \
+            -t "$IMAGE_TAG" -f "$dockerfile" "$ctx"
+    fi
+}
+
 if [[ -n "$BRANCH" ]]; then
     # Extract the branch into a unique, self-cleaning staging dir. A unique
     # path per invocation means concurrent builds never race on a shared
@@ -103,15 +117,9 @@ if [[ -n "$BRANCH" ]]; then
     # run.sh / Dockerfile / configs are tested without committing.
     mkdir -p "$BUILD_CTX/tools/sim"
     cp -a "$SCRIPT_DIR"/. "$BUILD_CTX/tools/sim/"
-    docker build ${DOCKER_BUILD_ARGS[@]+"${DOCKER_BUILD_ARGS[@]}"} \
-        -t "$IMAGE_TAG" \
-        -f "$BUILD_CTX/tools/sim/Dockerfile" \
-        "$BUILD_CTX"
+    build_image "$BUILD_CTX" "$BUILD_CTX/tools/sim/Dockerfile"
 else
-    docker build ${DOCKER_BUILD_ARGS[@]+"${DOCKER_BUILD_ARGS[@]}"} \
-        -t "$IMAGE_TAG" \
-        -f "$SCRIPT_DIR/Dockerfile" \
-        "$REPO_ROOT"
+    build_image "$REPO_ROOT" "$SCRIPT_DIR/Dockerfile"
 fi
 
 case "$MODE" in

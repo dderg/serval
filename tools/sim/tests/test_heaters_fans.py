@@ -10,6 +10,10 @@ same (plus an explicit no-shutdown check), so the coverage is boot +
 command dispatch + heater/fan control-loop math, not physics.
 """
 
+import os
+import signal
+import time
+
 import pytest
 
 from tools.sim import configs
@@ -65,6 +69,34 @@ def test_pwm_pins(sim_world):
     assert world.shutdown_line() is None
 
 
+def test_pwm_cycle_change_survives_mcu_stall(sim_world):
+    # A cycle change is released once the host's clock ESTIMATE passes the
+    # previous update's scheduled clock; freezing the MCU (as a starved CI
+    # runner does) lets the estimate run ahead of the MCU's actual clock, so
+    # the command historically landed while that update was still queued and
+    # tripped "Can not set soft pwm cycle ticks while updates pending". The
+    # firmware now stamps the cycle time onto each queued update, so any
+    # interleaving must survive.
+    world = sim_world(_cfg, dual_mcu=False)
+    world.gcode_ok("SET_PIN PIN=cycle_pwm_pin VALUE=0.5 CYCLE_TIME=0.1")
+    time.sleep(0.5)
+
+    mcu_pid = world.mcus[0].process.pid
+    os.kill(mcu_pid, signal.SIGSTOP)
+    try:
+        world.gcode_ok("SET_PIN PIN=cycle_pwm_pin VALUE=0.3", timeout=15)
+        world.gcode_ok(
+            "SET_PIN PIN=cycle_pwm_pin VALUE=0.6 CYCLE_TIME=0.25", timeout=15
+        )
+        time.sleep(2.0)
+    finally:
+        os.kill(mcu_pid, signal.SIGCONT)
+    time.sleep(1.0)
+
+    world.gcode_ok("SET_PIN PIN=cycle_pwm_pin VALUE=0.4 CYCLE_TIME=0.5")
+    assert world.shutdown_line() is None
+
+
 def _cfg_heated_fan(world):
     return configs.heaters_config(
         world.h7_pty, str(world.gcode_dir), heated_fan=True
@@ -79,6 +111,38 @@ def test_fans(sim_world):
     world.gcode_ok("M107")
     world.gcode_ok("SET_FAN_SPEED FAN=xxx SPEED=0.5")
     world.gcode_ok("SET_FAN_SPEED FAN=xxx SPEED=0")
+    assert world.shutdown_line() is None
+
+
+def test_fan_changes_ride_the_print_queue(sim_world):
+    # M106 inside a streamed print resolves through a lookahead fence queued
+    # behind the moves ahead of it: the virtual-SD feed saturates the move
+    # pipe, each fan request must survive the backpressured submit path, and
+    # after the print drains the fan must hold the LAST value in stream
+    # order — a dropped or reordered fence surfaces as a different value.
+    world = sim_world(_cfg, dual_mcu=False)
+    world.gcode_ok("G28", timeout=180)
+    lines = []
+    y = 10
+    for s in (64, 128, 255, 0, 191):
+        lines.append(f"M106 S{s}")
+        for _ in range(5):
+            y += 2
+            lines.append(f"G1 X100 Y{y} F9000")
+            lines.append(f"G1 X10 Y{y} F9000")
+    path = world.gcode_dir / "fan_stream.gcode"
+    path.write_text("\n".join(lines) + "\n")
+
+    world.print_file(path, timeout=300)
+    # virtual_sdcard's "complete" fires once every line has been submitted
+    # to the engine, not once every queued side effect (the last M106's
+    # fence may still be armed behind the trailing moves) has resolved and
+    # reached the MCU; M400 drains the frontier and waits for the MCU
+    # clock to actually catch up, which the fence resolution precedes.
+    world.gcode_ok("M400", timeout=60)
+
+    fan = world.status(objects={"fan": None})["fan"]
+    assert fan["value"] == pytest.approx(191 / 255, abs=1e-3)
     assert world.shutdown_line() is None
 
 

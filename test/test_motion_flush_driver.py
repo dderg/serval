@@ -1,5 +1,6 @@
 import pytest
 
+from klippy import engine_wait
 from klippy.extras.output_pin import GCodeRequestQueue
 from klippy.mcu import MCU
 from klippy.motion import Motion, ToolheadShim
@@ -114,6 +115,7 @@ def _make_motion(
     motion._lookahead_fence_timer = reactor.register_timer(
         motion._lookahead_fence_handler
     )
+    motion._engine_wakeup = None
     return motion
 
 
@@ -287,7 +289,8 @@ def test_lookahead_callback_survives_a_full_move_channel():
     assert motion._lookahead_fences[0][0] is None
 
     waketime = motion._lookahead_fence_handler(reactor.monotonic())
-    assert seen == [] and waketime == reactor.monotonic() + 0.020
+    assert seen == []
+    assert waketime == reactor.monotonic() + engine_wait.PARK_FALLBACK_S
 
     waketime = motion._lookahead_fence_handler(reactor.monotonic())
     est = mcu.estimated_print_time(reactor.monotonic())

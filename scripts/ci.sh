@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Usage:
 #   ./scripts/ci.sh                 # run all gates with a summary (local)
-#   ./scripts/ci.sh quick           # fast subset: ruff + rust test/clippy/fmt
+#   ./scripts/ci.sh quick           # fast subset: ruff + web + rust test/clippy/fmt
 #   ./scripts/ci.sh install-hooks   # enable the pre-push hook (runs `quick` per push)
 #   ./scripts/ci.sh <job>           # run one gate, exit with its status (CI)
 #
@@ -10,6 +10,7 @@
 #   rustup component add --toolchain nightly miri
 #   cargo install cargo-nextest --locked        # or: curl -LsSf https://get.nexte.st/latest/<os> | tar zxf - -C ~/.cargo/bin
 #   cargo install cargo-deny                     # optional
+#   bun (https://bun.sh)                         # servo-ident web UI: `web` job + rust builds (build.rs)
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -45,6 +46,27 @@ host_cargo() {
 }
 
 job_rust_build()  { cd "$RUST" && cargo build --workspace; }
+
+find_bun() {
+    local candidate
+    for candidate in bun /opt/homebrew/bin/bun /usr/local/bin/bun; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    echo "bun not found (PATH, /opt/homebrew/bin, /usr/local/bin) — required for the servo-ident web UI (this 'web' job AND every rust build via servo-ident/build.rs). Install: https://bun.sh" >&2
+    return 1
+}
+
+job_web() {
+    local bun
+    bun="$(find_bun)" || return 1
+    cd "$RUST/servo-ident/web" \
+        && "$bun" install --frozen-lockfile \
+        && "$bun" run check \
+        && "$bun" test
+}
 
 job_rust_test() {
     cd "$RUST"
@@ -235,7 +257,12 @@ run_check() {
     printf '%-20s ' "$name"
     local log rc=0
     log="$(mktemp)"
-    ( set -e; "$@" ) >"$log" 2>&1 && rc=0 || rc=$?
+    # Standalone statement, NOT `... && rc=0 || rc=$?`: in a `&&`/`||`
+    # condition context bash ignores the subshell's `set -e`, so multi-command
+    # jobs would report only their last command's status and a failing
+    # nextest run could hide behind passing doc-tests.
+    ( set -e; "$@" ) >"$log" 2>&1
+    rc=$?
     if [ "$rc" -eq 0 ]; then
         green "PASS"; PASS=$((PASS + 1))
     else
@@ -248,6 +275,7 @@ run_check() {
 run_all() {
     local quick="${1:-false}"
     run_check "ruff"            job_ruff
+    run_check "web"             job_web
     run_check "rust-test"       job_rust_test
     run_check "rust-clippy"     job_rust_clippy
     run_check "rust-fmt"        job_rust_fmt
@@ -313,6 +341,7 @@ case "${1:-all}" in
     panic-grep)       job_panic_grep ;;
     watchdog-canary)  job_watchdog_canary ;;
     ruff)             job_ruff ;;
+    web)              job_web ;;
     py)               shift; job_py "${1:-3.13}" ;;
     py-typecheck)     job_py_typecheck ;;
     docs)             job_docs ;;

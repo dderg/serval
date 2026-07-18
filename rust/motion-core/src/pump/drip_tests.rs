@@ -133,6 +133,80 @@ fn stall_detection_fires_when_floor_stuck() {
 }
 
 #[test]
+fn fully_executed_cohort_awaiting_trip_is_not_a_stall() {
+    let ka = AxisKey { mcu_id: 0, axis: 0 };
+    let kb = AxisKey { mcu_id: 0, axis: 1 };
+    let sink = CountingSink::new();
+    let (ctl, control_rx) = unbounded::<PumpMsg>();
+    let (data, data_rx) = unbounded::<EnqueueMsg>();
+    let stall_msgs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let stall_msgs_clone = Arc::clone(&stall_msgs);
+
+    let sink_clone = sink.clone();
+    let handle = std::thread::spawn(move || {
+        run_pump(
+            control_rx,
+            data_rx,
+            sink_clone,
+            PumpCallbacks {
+                mcu_clock_of: Box::new(|_| Some((0u64, 1000.0))),
+                on_drip_stall: Box::new(move |msg: String| {
+                    stall_msgs_clone.lock().unwrap().push(msg);
+                }),
+                ..PumpCallbacks::noop(64)
+            },
+            None,
+            std::sync::Arc::new(crate::drain::DrainLedger::new()),
+            Arc::new(AtomicU64::new(0)),
+        );
+    });
+
+    ctl.send(PumpMsg::DripArm(DripArm {
+        cohort: 77,
+        participants: vec![ka, kb],
+        timeout: Duration::from_millis(30),
+    }))
+    .unwrap();
+    for key in [ka, kb] {
+        data.send(EnqueueMsg {
+            key,
+            pieces: (0..5).map(|i| make_piece(i as u64)).collect(),
+            epoch: crate::anchor::StreamEpoch::Continuation,
+            lead_secs: MAX_LEAD_SECS,
+            source_line: u32::MAX,
+        })
+        .unwrap();
+    }
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while sink.sent().len() < 10 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "pump never sent the drip pieces; sent: {:?}",
+            sink.sent()
+        );
+        std::thread::yield_now();
+    }
+    ctl.send(PumpMsg::Heartbeat(HeartbeatMsg {
+        mcu_id: 0,
+        retired_counts: vec![5, 5, 0, 0],
+    }))
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        stall_msgs.lock().unwrap().is_empty(),
+        "an executed-and-drained cohort awaiting its trip must not abort: {:?}",
+        stall_msgs.lock().unwrap()
+    );
+
+    ctl.send(PumpMsg::DripDisarm(77)).unwrap();
+    ctl.send(PumpMsg::Shutdown).unwrap();
+    handle.join().unwrap();
+    assert!(stall_msgs.lock().unwrap().is_empty());
+}
+
+#[test]
 fn non_participant_enqueue_aborts_cohort_and_drops_pieces() {
     let participant = AxisKey { mcu_id: 0, axis: 0 };
     let outsider = AxisKey { mcu_id: 0, axis: 3 };

@@ -438,8 +438,11 @@ fn submit_move_errors_when_channel_full_instead_of_blocking() {
     tx.try_send(StreamMsg::Move(line(1, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0])))
         .unwrap();
 
-    let err = try_submit_move(&tx, line(2, [10.0, 0.0, 0.0], [20.0, 0.0, 0.0]))
-        .expect_err("a full channel must error, not block");
+    let err = try_send_msg(
+        &tx,
+        StreamMsg::Move(line(2, [10.0, 0.0, 0.0], [20.0, 0.0, 0.0])),
+    )
+    .expect_err("a full channel must error, not block");
     assert!(matches!(err, StreamWorkerError::ChannelFull));
 }
 
@@ -449,14 +452,39 @@ fn channel_depth_tracks_occupancy_and_refuses_overflow_at_capacity() {
     let (tx, _rx) = crossbeam_channel::bounded::<StreamMsg>(cap);
     for i in 0..cap {
         assert_eq!(tx.len(), i);
-        try_submit_move(&tx, line(i as u32, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0]))
-            .expect("submit below capacity must succeed");
+        try_send_msg(
+            &tx,
+            StreamMsg::Move(line(i as u32, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0])),
+        )
+        .expect("submit below capacity must succeed");
     }
     assert_eq!(tx.len(), cap);
-    let err = try_submit_move(&tx, line(cap as u32, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0]))
-        .expect_err("submit at capacity must refuse, not block or grow");
+    let err = try_send_msg(
+        &tx,
+        StreamMsg::Move(line(cap as u32, [0.0, 0.0, 0.0], [10.0, 0.0, 0.0])),
+    )
+    .expect_err("submit at capacity must refuse, not block or grow");
     assert!(matches!(err, StreamWorkerError::ChannelFull));
     assert_eq!(tx.len(), cap, "a refused submit must not grow the queue");
+}
+
+/// The production feed parks on the wakeup fd and retries on `ChannelFull`;
+/// tests that outrun the input channel spin the same retry.
+fn submit_move_retrying(h: &StreamWorkerHandle, line_no: u32, start: [f64; 3], end: [f64; 3]) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match h.submit_move(line(line_no, start, end)) {
+            Ok(()) => return,
+            Err(StreamWorkerError::ChannelFull) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "input channel stayed full for 5s — pipeline stalled"
+                );
+                std::thread::yield_now();
+            }
+            Err(e) => panic!("submit_move: {e}"),
+        }
+    }
 }
 
 #[test]
@@ -482,7 +510,7 @@ fn continuous_blend_run_dispatches_continuously_without_flush() {
         let x = f64::from(i + 1) * 20.0;
         let y = if i % 2 == 0 { 3.0 } else { 0.0 };
         let end = [x, y, 0.0];
-        h.submit_move(line(i + 1, prev, end)).unwrap();
+        submit_move_retrying(&h, i + 1, prev, end);
         prev = end;
     }
 

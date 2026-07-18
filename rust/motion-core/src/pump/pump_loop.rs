@@ -30,10 +30,12 @@ pub const MAX_LEAD_SECS: f64 = 2.0;
 
 // Bound on the planner→pump piece-data channel. When the pump stops pulling
 // (ring full or at the lead horizon), the planner's dispatch send blocks once
-// this many segment messages are queued — propagating backpressure to the input
-// channel and the gcode reader. Host-side depth does not extend MCU lead (that
-// is the ring's job), so this only decouples planner bursts from pump intake.
-pub const PUMP_DATA_CHANNEL_CAP: usize = 1024;
+// this many axis-lane messages are queued — propagating backpressure to the
+// input channel and the gcode reader. It only needs to cover the pump's own
+// stalls (one wire-send transaction, ~20 ms/KiB bundle) — the staging queues
+// behind it hold the real depth — and every queued message is added latency
+// for fences and the queued commands riding them.
+pub const PUMP_DATA_CHANNEL_CAP: usize = 128;
 
 // Bound on total host-side staged pieces across all axes. Intake stops here so
 // the data channel backpressures the planner during streaming. It is a TOTAL,
@@ -43,12 +45,18 @@ pub const PUMP_DATA_CHANNEL_CAP: usize = 1024;
 // shared channel — starving the cohort floor and freezing the planner on the
 // full channel. Drip is finite, so greedy draining is safe there.
 //
-// Sized ≈4× a typical MCU ring (an F407 ring holds ~1877 pieces), roughly
-// 5–15 s of typical motion: the host staging buffer must be DEEPER than the
-// MCU rings, or the pump throttles the planner before the frontier is deep
-// enough to absorb host scheduling gaps — the playhead then overruns the
-// committed end (anchor_underrun → drive fault).
-const PUMP_INTAKE_BACKLOG_CAP: u64 = 8192;
+// Sizing is a latency/stall-margin trade: staged pieces plus the MCU rings
+// are the committed depth that keeps the playhead fed through upstream
+// stalls, and the longest known stall is a full planner re-plan pass
+// (~0.9 s measured on dense jerk-limited infill, planner_bench, M-series;
+// expect 2–3 s on a loaded Pi). Staging must stay comfortably above the
+// total ring cache (62 KB default = 1322 pieces per MCU, 2–3 MCUs typical)
+// or the pump throttles the planner before the frontier can absorb such a
+// gap — the playhead then overruns the committed end (anchor_underrun →
+// drive fault). Every staged piece beyond that margin is queued-command
+// latency: fan changes wait behind the whole backlog. 4096 ≈ 2–3 s of
+// typical motion, ~1.5× the two-MCU ring cache.
+const PUMP_INTAKE_BACKLOG_CAP: u64 = 4096;
 
 pub(super) const MAX_PER_FRAME: usize = 32;
 
@@ -308,38 +316,59 @@ impl<S: PieceSink> Pump<S> {
     }
 
     fn check_cohort_deadline(&mut self) {
-        if let Some(ref co) = self.cohort {
-            let now = Instant::now();
-            let floor = co.floor(&self.queues);
-            if floor > co.deadline_floor {
-                let co = self.cohort.as_mut().unwrap();
-                co.step_deadline = now + co.timeout;
-                co.deadline_floor = floor;
-            } else if now >= co.step_deadline {
-                let co = self.cohort.as_ref().unwrap();
-                let lagging: Vec<String> = co
-                    .participants
-                    .iter()
-                    .map(|k| {
-                        format!(
-                            "mcu{} axis{}: executed {} queued {}",
-                            k.mcu_id,
-                            k.axis,
-                            co.executed(k, &self.queues),
-                            self.queues.get(k).map_or(0, |q| q.pieces.len()),
-                        )
-                    })
-                    .collect();
-                let id = co.id;
-                (self.callbacks.on_drip_stall)(format!(
-                    "drip cohort {id}: floor stalled at {floor} for {:?}; \
-                     participants: [{}]",
-                    co.timeout,
-                    lagging.join(", ")
-                ));
-                self.cohort = None;
-            }
+        let Some(co) = &self.cohort else {
+            return;
+        };
+        let now = Instant::now();
+        let floor = co.floor(&self.queues);
+        if floor > co.deadline_floor {
+            let co = self.cohort.as_mut().unwrap();
+            co.step_deadline = now + co.timeout;
+            co.deadline_floor = floor;
+            return;
         }
+        if now < co.step_deadline {
+            return;
+        }
+        let fully_executed = co.participants.iter().all(|k| {
+            self.queues
+                .get(k)
+                .is_none_or(|q| q.pieces.is_empty() && q.pushed == q.retired)
+        });
+        if fully_executed {
+            tracing::warn!(
+                subsystem = "motion",
+                event = "drip_cohort_executed_awaiting_trip",
+                cohort = co.id,
+                floor,
+                "drip cohort fully executed with no trip; the host trip \
+                 deadline adjudicates — not a stall"
+            );
+            let co = self.cohort.as_mut().unwrap();
+            co.step_deadline = now + co.timeout;
+            return;
+        }
+        let lagging: Vec<String> = co
+            .participants
+            .iter()
+            .map(|k| {
+                format!(
+                    "mcu{} axis{}: executed {} queued {}",
+                    k.mcu_id,
+                    k.axis,
+                    co.executed(k, &self.queues),
+                    self.queues.get(k).map_or(0, |q| q.pieces.len()),
+                )
+            })
+            .collect();
+        let id = co.id;
+        (self.callbacks.on_drip_stall)(format!(
+            "drip cohort {id}: floor stalled at {floor} for {:?}; \
+             participants: [{}]",
+            co.timeout,
+            lagging.join(", ")
+        ));
+        self.cohort = None;
     }
 
     fn handle_stall_full(&mut self, stall_key: AxisKey) -> Result<(), ()> {

@@ -7,6 +7,7 @@ pub use planner_config as config;
 pub mod drain;
 #[doc(hidden)]
 pub mod enqueue;
+pub mod feed_wakeup;
 pub mod fence;
 #[doc(hidden)]
 pub mod homing;

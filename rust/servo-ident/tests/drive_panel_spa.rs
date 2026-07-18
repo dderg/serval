@@ -1,10 +1,9 @@
 //! The drive tuning panel's pure logic (autofill derivation,
-//! changed-param diffing) lives in `web/app.js` as
-//! plain functions rather than behind a Node toolchain this crate doesn't
-//! otherwise need. This file is the substitute test rig: it asserts the
-//! functions the panel is built from are actually present in the served
-//! asset (a rename or an accidental delete during a refactor would slip
-//! past `cargo build`, which never looks inside a `include_str!` blob), and
+//! changed-param diffing) lives in `web/src/*.ts` as plain functions.
+//! This file is the substitute test rig: it asserts the functions the
+//! panel is built from are actually present in the sources bun bundles
+//! into the served asset (a rename or an accidental delete during a
+//! refactor would slip past `cargo build`, which never greps them), and
 //! that `servo-cal demo`'s `drive_state.json` — the grid's only real
 //! fixture — has the shape those functions assume: every param's `group`
 //! known to the pages' section order, motors agreeing everywhere except
@@ -15,8 +14,32 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use servo_ident::assets::APP_JS;
 use servo_ident::demo::build_demo;
+
+fn collect_ts(dir: &std::path::Path, sources: &mut Vec<String>) {
+    for entry in std::fs::read_dir(dir).expect("read web/src dir") {
+        let path = entry.expect("read web/src entry").path();
+        if path.is_dir() {
+            collect_ts(&path, sources);
+            continue;
+        }
+        assert_eq!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("ts"),
+            "unexpected file in web/src: {}",
+            path.display()
+        );
+        sources.push(std::fs::read_to_string(&path).expect("read web/src module"));
+    }
+}
+
+fn all_js() -> String {
+    let src_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web/src");
+    let mut sources = Vec::new();
+    collect_ts(&src_dir, &mut sources);
+    assert!(!sources.is_empty(), "no modules found in web/src");
+    sources.join("\n")
+}
 
 fn fixture_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test/fixtures/servo_captures")
@@ -54,8 +77,8 @@ fn app_js_defines_the_pure_drive_panel_functions() {
     ];
     for needle in required {
         assert!(
-            APP_JS.contains(needle),
-            "app.js must define {needle} — the drive tuning panel's pure logic"
+            all_js().contains(needle),
+            "the js modules must define {needle} — the drive tuning panel's pure logic"
         );
     }
 }
@@ -75,8 +98,8 @@ fn app_js_defines_the_differential_frf_functions() {
     ];
     for needle in required {
         assert!(
-            APP_JS.contains(needle),
-            "app.js must define {needle} — the differential FRF rendering"
+            all_js().contains(needle),
+            "the js modules must define {needle} — the differential FRF rendering"
         );
     }
 }
@@ -98,8 +121,8 @@ fn app_js_defines_the_tracking_metrics_functions() {
     ];
     for needle in required {
         assert!(
-            APP_JS.contains(needle),
-            "app.js must define {needle} — the tracking metrics table"
+            all_js().contains(needle),
+            "the js modules must define {needle} — the tracking metrics table"
         );
     }
 }
@@ -118,8 +141,8 @@ fn app_js_defines_the_sweep_metrics_chart_functions() {
     ];
     for needle in required {
         assert!(
-            APP_JS.contains(needle),
-            "app.js must define {needle} — the metrics-vs-gain chart"
+            all_js().contains(needle),
+            "the js modules must define {needle} — the metrics-vs-gain chart"
         );
     }
 }
@@ -138,8 +161,8 @@ fn app_js_defines_the_console_response_functions() {
     ];
     for needle in required {
         assert!(
-            APP_JS.contains(needle),
-            "app.js must define {needle} — the console response echo"
+            all_js().contains(needle),
+            "the js modules must define {needle} — the console response echo"
         );
     }
 }
@@ -161,8 +184,8 @@ fn app_js_defines_the_strain_map_functions() {
     ];
     for needle in required {
         assert!(
-            APP_JS.contains(needle),
-            "app.js must define {needle} — the strain map rendering"
+            all_js().contains(needle),
+            "the js modules must define {needle} — the strain map rendering"
         );
     }
 }

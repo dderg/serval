@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use servo_ident::demo::build_demo;
-use servo_ident::{http, serve};
+use servo_ident::{assets, http, serve};
 
 struct HttpResult {
     status: u16,
@@ -259,6 +259,50 @@ fn index_page_serves_html() {
     assert!(lines.next().unwrap().contains("200"));
     assert!(text.to_lowercase().contains("content-type: text/html"));
     assert!(text.contains("<title>servo-cal</title>"));
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn built_assets_are_served_with_correct_mime_and_body() {
+    let (root, _run_dirs) = demo_root("assets");
+    let port = spawn_server(root.clone());
+
+    assert!(assets::BUILT_ASSETS.len() >= 3, "expect html + js + css");
+    for asset in assets::BUILT_ASSETS {
+        let name = asset.path;
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .write_all(
+                format!("GET /{name} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes(),
+            )
+            .unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).unwrap();
+        let header_end = raw
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("response has a header terminator");
+        let head = String::from_utf8_lossy(&raw[..header_end]);
+        assert!(
+            head.lines().next().unwrap().contains("200"),
+            "GET /{name} did not return 200"
+        );
+        assert!(
+            head.to_lowercase()
+                .contains(&format!("content-type: {}", asset.mime)),
+            "GET /{name} missing content-type {}",
+            asset.mime
+        );
+        assert_eq!(
+            &raw[header_end + 4..],
+            asset.body,
+            "GET /{name} body did not match the embedded bundle"
+        );
+    }
+
+    let resp = request(port, "GET", "/does-not-exist.js");
+    assert_eq!(resp.status, 404);
 
     std::fs::remove_dir_all(&root).ok();
 }

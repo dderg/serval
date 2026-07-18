@@ -25,6 +25,17 @@ pub use types::{
     StreamConfig, StreamError, StreamInput,
 };
 
+/// Inter-stage channels only smooth scheduling jitter between stage threads;
+/// throughput is set by the slowest stage regardless of depth, while every
+/// buffered slot is queued-command latency (a fan change waits behind it).
+/// Depth therefore covers a consumer's longest single-item stall, nothing
+/// more. The pipe's time-depth safety margin lives downstream, in the pump's
+/// staged pieces and the MCU rings.
+const STAGE_CHANNEL_CAP: usize = 16;
+/// The ingress is a µs-per-item pass-through sitting directly behind the
+/// input channel, so its outbox needs no burst absorption of its own.
+const RAW_CHANNEL_CAP: usize = 8;
+
 /// Wires the pure stream stages (fit stage → planner → lowerer → shaper) into
 /// OS threads. Production goes through `motion_engine::worker::setup_pipeline`,
 /// which wraps these stages with the dispatcher and pump; this stage-only
@@ -36,11 +47,11 @@ pub fn setup_stages(
     home_pos: Vec<f64>,
     t_start: f64,
 ) -> PipelineHandle {
-    let (raw_tx, raw_rx) = bounded::<StreamInput>(64);
-    let (fitted_tx, fitted_rx) = bounded::<StreamInput>(64);
-    let (planned_tx, planned_rx) = bounded::<PlannedItem>(64);
-    let (lowered_tx, lowered_rx) = bounded::<LoweredItem>(64);
-    let (shaped_tx, shaped_rx) = bounded::<ShapedItem>(64);
+    let (raw_tx, raw_rx) = bounded::<StreamInput>(RAW_CHANNEL_CAP);
+    let (fitted_tx, fitted_rx) = bounded::<StreamInput>(STAGE_CHANNEL_CAP);
+    let (planned_tx, planned_rx) = bounded::<PlannedItem>(STAGE_CHANNEL_CAP);
+    let (lowered_tx, lowered_rx) = bounded::<LoweredItem>(STAGE_CHANNEL_CAP);
+    let (shaped_tx, shaped_rx) = bounded::<ShapedItem>(STAGE_CHANNEL_CAP);
 
     let mut corner = config.corner;
     corner.ramp_accel_budget_mm_s2 = config.max_extrude_only_accel_mm_s2;
