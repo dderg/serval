@@ -5,8 +5,9 @@
 # This file may be distributed under the terms of the GNU GPLv3 license.
 import collections
 import logging
+import math
 
-from klippy import pins, stepper
+from klippy import pins, stepper, structured_log
 from klippy.motion_endstop import MotionEndstop, allocate_provider_id
 
 ######################################################################
@@ -946,3 +947,270 @@ def TMCVhighHelper(config, mcu_tmc):
     if velocity is not None:
         thigh = TMCtstepHelper(mcu_tmc, velocity, config=config)
     fields.set_field("thigh", thigh)
+
+
+######################################################################
+# Phase stepping (SPI direct mode)
+######################################################################
+
+
+def validate_phase_stepping_config(config, stepper_section):
+    sct = config.getfloat("stealthchop_threshold", 0.0, minval=0.0)
+    if sct > 0.0:
+        raise config.error(
+            "phase_stepping=True is incompatible with stealthchop_threshold "
+            "(StealthChop is bypassed in direct mode). Remove "
+            "stealthchop_threshold from [%s] or disable phase_stepping."
+            % config.get_name()
+        )
+    mres = stepper_section.getint("microsteps", 256)
+    if mres != 256:
+        raise config.error(
+            "phase_stepping=True requires microsteps: 256; [%s] has "
+            "microsteps: %d." % (stepper_section.get_name(), mres)
+        )
+
+
+class TMCPhaseStepping:
+    """Direct-mode (SPI-driven) phase stepping shared by SPI TMC drivers.
+
+    The driver class provides: printer, name, fields, mcu_tmc (SPI),
+    _mode_tracker, _echeck_helper, and PHASE_DIRECT_REGISTER — the name of
+    its register at address 0x2D that carries the direct coil currents.
+    """
+
+    PHASE_DIRECT_REGISTER = None
+    PHASE_JOG_MAX_PER_SAMPLE = 1
+    PHASE_SETTLE_TIMEOUT = 0.5
+
+    def _setup_phase_stepping(self, config):
+        self._phase_stepping = False
+        self._phase_bus_id = None
+        self._phase_cs_pin_id = None
+        self._phase_stepper_oid = None
+        self._phase_axis_idx = None
+        self._cached_mscnt = None
+        self._phase_state_query = None
+        self._phase_group = None
+        stepper_name = " ".join(config.get_name().split()[1:])
+        motor_section = "motor " + stepper_name
+        if not config.has_section(motor_section):
+            return False
+        stepper_section = config.getsection(motor_section)
+        if not stepper_section.getboolean("phase_stepping", False):
+            return False
+        validate_phase_stepping_config(config, stepper_section)
+        self._phase_stepping = True
+        return True
+
+    def set_phase_stepper_oid(self, oid):
+        self._phase_stepper_oid = oid
+
+    def set_phase_group(self, tmcs):
+        self._phase_group = tmcs
+
+    def _phase_group_members(self):
+        return self._phase_group or [self]
+
+    def _in_phase_mode(self):
+        return self._mode_tracker.mode == TMCModeTracker.PHASE_DIRECT
+
+    def phase_stepping_active(self):
+        return any(t._in_phase_mode() for t in self._phase_group_members())
+
+    def _phase_mcu(self):
+        return self.mcu_tmc.tmc_spi.spi.get_mcu()
+
+    def _lookup_phase_commands(self):
+        mcu_obj = self._phase_mcu()
+        if self._phase_stepper_oid is None:
+            raise self.printer.command_error(
+                "phase_stepping: stepper oid not registered for %s "
+                "(motion init_planner did not run?)" % (self.name,)
+            )
+        enable_spi = mcu_obj.lookup_command("kalico_phase_stepping_enable_spi")
+        disable_spi = mcu_obj.lookup_command(
+            "kalico_phase_stepping_disable_spi"
+        )
+        set_axis_mode = mcu_obj.lookup_command(
+            "kalico_set_axis_mode axis_idx=%c mode=%c"
+        )
+        jog = mcu_obj.lookup_command(
+            "kalico_phase_jog_to oid=%c target_phase=%hu"
+            " max_microsteps_per_sample=%hu"
+        )
+        align = mcu_obj.lookup_command(
+            "kalico_phase_align_to oid=%c target_phase=%hu"
+        )
+        if self._phase_state_query is None:
+            self._phase_state_query = mcu_obj.lookup_query_command(
+                "kalico_get_phase_state oid=%c",
+                "motion_phase_state oid=%c axis_idx=%c mode=%c phase=%hu"
+                " settled=%c",
+                oid=self._phase_stepper_oid,
+            )
+        return enable_spi, disable_spi, set_axis_mode, jog, align
+
+    def _query_phase_state(self):
+        return self._phase_state_query.send([self._phase_stepper_oid])
+
+    def enter_phase_mode(self):
+        for t in self._phase_group_members():
+            if not t._in_phase_mode():
+                t._enter_phase_mode_single()
+
+    def _enter_phase_mode_single(self):
+        self._mode_tracker.transition(
+            (
+                TMCModeTracker.DISABLED,
+                TMCModeTracker.PULSE,
+                TMCModeTracker.PHASE_DIRECT,
+            ),
+            TMCModeTracker.PHASE_DIRECT,
+            "phase mode entry",
+        )
+        enable_spi, disable_spi, set_axis_mode, _jog, align = (
+            self._lookup_phase_commands()
+        )
+        # Suppress ISR direct-register writes during our foreground SPI
+        # traffic (the disable command is idempotent; harmless if already
+        # disabled).
+        disable_spi.send([])
+        # CHOPCONF (toff>0) must reach the chip before direct_mode: the
+        # bootstrap charge pump depends on the chopper switching, and
+        # direct_mode with toff=0 drains the bootstrap caps (uv_cp).
+        self.mcu_tmc.set_register("CHOPCONF", self.fields.registers["CHOPCONF"])
+        gconf_val = self.fields.override_register(
+            "GCONF", {"en_pwm_mode": 0, "direct_mode": 1}
+        )
+        self.mcu_tmc.set_register("GCONF", gconf_val)
+        mscnt = self.mcu_tmc.get_register("MSCNT") & 0x3FF
+        self._cached_mscnt = mscnt
+        angle = mscnt * 2.0 * math.pi / 1024.0
+        coil_a = int(round(248.0 * math.cos(angle)))
+        coil_b = int(round(248.0 * math.sin(angle)))
+        xdirect_val = ((coil_b & 0xFFFF) << 16) | (coil_a & 0xFFFF)
+        self.mcu_tmc.set_register(self.PHASE_DIRECT_REGISTER, xdirect_val)
+        structured_log.event(
+            "phase_stepping",
+            "xdirect_preload",
+            msg="XDIRECT preload",
+            stepper=self.name,
+            mscnt=mscnt,
+            coil_a=coil_a,
+            coil_b=coil_b,
+        )
+        state = self._query_phase_state()
+        self._phase_axis_idx = state["axis_idx"]
+        align.send([self._phase_stepper_oid, mscnt])
+        enable_spi.send([])
+        set_axis_mode.send([self._phase_axis_idx, 1])
+        # The ISR's inline direct-register SPI writes corrupt concurrent
+        # foreground register reads (false drv_err/uv_cp shutdowns), so the
+        # periodic checks must stay off while phase mode is active.
+        self._echeck_helper.stop_checks()
+        structured_log.event(
+            "phase_stepping",
+            "enter",
+            msg="phase mode entered",
+            stepper=self.name,
+            axis_idx=self._phase_axis_idx,
+            mscnt=mscnt,
+        )
+
+    def exit_phase_mode(self):
+        active = [t for t in self._phase_group_members() if t._in_phase_mode()]
+        if not active:
+            raise self.printer.command_error(
+                "exit_phase_mode called but %s is not in phase mode"
+                % (self.name,)
+            )
+        _enable_spi, disable_spi, set_axis_mode, _jog, _align = (
+            self._lookup_phase_commands()
+        )
+        for t in active:
+            state = t._query_phase_state()
+            if state["mode"] != 1:
+                structured_log.event(
+                    "phase_stepping",
+                    "mode_desync",
+                    level=logging.ERROR,
+                    msg="phase mode bookkeeping desync",
+                    stepper=t.name,
+                    mcu_mode=state["mode"],
+                )
+                raise self.printer.command_error(
+                    "phase mode bookkeeping desync on %s: host=phase mcu=%d"
+                    % (t.name, state["mode"])
+                )
+        # All jogs are issued while the axis is still in Phase mode — the
+        # mode flips to Pulse only once, after every motor in the group sits
+        # on its cached MSCNT.
+        for t in active:
+            _e, _d, _s, t_jog, _a = t._lookup_phase_commands()
+            t_jog.send(
+                [
+                    t._phase_stepper_oid,
+                    t._cached_mscnt,
+                    self.PHASE_JOG_MAX_PER_SAMPLE,
+                ]
+            )
+        reactor = self.printer.get_reactor()
+        deadline = reactor.monotonic() + self.PHASE_SETTLE_TIMEOUT
+        for t in active:
+            while True:
+                state = t._query_phase_state()
+                if state["settled"] and state["phase"] == t._cached_mscnt:
+                    break
+                if reactor.monotonic() > deadline:
+                    structured_log.event(
+                        "phase_stepping",
+                        "jog_timeout",
+                        level=logging.ERROR,
+                        msg="phase handover jog did not settle",
+                        stepper=t.name,
+                        phase=state["phase"],
+                        target=t._cached_mscnt,
+                    )
+                    raise self.printer.command_error(
+                        "phase handover jog did not settle on %s "
+                        "(phase=%d target=%d)"
+                        % (t.name, state["phase"], t._cached_mscnt)
+                    )
+                reactor.pause(reactor.monotonic() + 0.005)
+        disable_spi.send([])
+        for t in active:
+            t.mcu_tmc.set_register("GCONF", t.fields.registers.get("GCONF", 0))
+        for axis_idx in sorted({t._phase_axis_idx for t in active}):
+            set_axis_mode.send([axis_idx, 0])
+        for t in active:
+            t._echeck_helper.start_checks()
+            t._mode_tracker.transition(
+                (TMCModeTracker.PHASE_DIRECT,),
+                TMCModeTracker.PULSE,
+                "phase mode exit",
+            )
+            structured_log.event(
+                "phase_stepping",
+                "exit",
+                msg="phase mode exited (pulse stepping)",
+                stepper=t.name,
+                axis_idx=t._phase_axis_idx,
+                mscnt=t._cached_mscnt,
+            )
+
+    def get_phase_config(self):
+        if not self._phase_stepping:
+            raise self.printer.config_error(
+                "get_phase_config called on a %s without "
+                "phase_stepping=True on the matching stepper section"
+                % (type(self).__name__,)
+            )
+        if self._phase_bus_id is None or self._phase_cs_pin_id is None:
+            self._phase_bus_id, self._phase_cs_pin_id = (
+                self.mcu_tmc.tmc_spi.get_bus_and_cs_ids()
+            )
+        return (self._phase_bus_id, self._phase_cs_pin_id)
+
+    def get_spi_oid(self):
+        return self.mcu_tmc.tmc_spi.spi.oid
