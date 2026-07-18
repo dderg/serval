@@ -1,3 +1,5 @@
+#![allow(unsafe_code)]
+
 //! Elevate a deadline-carrying host thread to SCHED_FIFO.
 //!
 //! The host process runs unprivileged; SCHED_FIFO for it requires
