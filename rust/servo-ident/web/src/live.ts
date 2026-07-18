@@ -71,7 +71,14 @@ async function pollLiveTap() {
       }
       return;
     }
-    if (label) label.textContent = `streaming at ${(payload.fs_hz / 1000).toFixed(1)} kHz`;
+    if (label) {
+      const t = payload.timing;
+      const health = t
+        ? ` — skipped cycles ${t.skips} · late frames ${t.late_frames} · margin ${(-t.lateness_ns / 1000).toFixed(0)} µs`
+        : "";
+      label.textContent = `streaming at ${(payload.fs_hz / 1000).toFixed(1)} kHz${health}`;
+      label.classList.toggle("live-timing-bad", !!t && (t.skips > 0 || t.late_frames > 0));
+    }
     appendTapSamples(payload);
     drawLiveCharts();
   } catch (e) {

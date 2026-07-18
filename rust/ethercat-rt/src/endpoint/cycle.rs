@@ -58,6 +58,7 @@ pub(super) fn run_cycle(ctx: &mut EndpointCtx) -> ControlFlow<()> {
     let (wkc, toff) = ctx.drive.cycle();
     let exchange_ns = exchange.elapsed().as_nanos() as i64;
 
+    ctx.last_lateness_ns = toff;
     police_frame_timing(ctx, toff);
     ctx.prev_exchange_ns = exchange_ns;
     handle_drive_fault(ctx);
@@ -584,6 +585,9 @@ pub(super) fn police_frame_timing(ctx: &mut EndpointCtx, lateness_ns: i64) {
     }
     let reanchored = reanchors != ctx.baseline_reanchor_count;
     if reanchored {
+        ctx.skip_count_policed = ctx
+            .skip_count_policed
+            .wrapping_add(reanchors.wrapping_sub(ctx.baseline_reanchor_count));
         ctx.baseline_reanchor_count = reanchors;
         tracing::error!(
             subsystem = "ethercat",
@@ -600,6 +604,7 @@ pub(super) fn police_frame_timing(ctx: &mut EndpointCtx, lateness_ns: i64) {
     }
     if lateness_ns > 0 {
         ctx.late_frames += 1;
+        ctx.late_frames_total = ctx.late_frames_total.wrapping_add(1);
         ctx.late_max_ns = ctx.late_max_ns.max(lateness_ns);
     }
     let Some(tolerance_ns) = ctx.late_tolerance_ns else {
@@ -661,6 +666,11 @@ fn record_capture_sample(
     if motion_active {
         flags |= FLAG_MOTION_ACTIVE;
     }
+    let skip_count = ctx.skip_count_policed;
+    let late_frames = ctx.late_frames_total;
+    let frame_lateness_ns = ctx
+        .last_lateness_ns
+        .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
     let EndpointCtx {
         drive,
         cmd_counts_per_mm,
@@ -673,6 +683,9 @@ fn record_capture_sample(
     } = ctx;
     let build = |slots: &[u8]| {
         let mut record = CaptureRecord::new(*cycle_index, flags);
+        record.skip_count = skip_count;
+        record.late_frames = late_frames;
+        record.frame_lateness_ns = frame_lateness_ns;
         record.drive_count = slots.len() as u8;
         for (i, &slot) in slots.iter().enumerate() {
             let t = drive.telemetry(usize::from(slot));

@@ -23,7 +23,7 @@ pub const ERR_CAPTURE_CHANNEL_NOT_READY: i32 = -326;
 pub const CAPTURE_RING_CAPACITY: usize = 65536;
 
 pub const MAX_DRIVES: usize = EC_RT_MAX_SLAVES;
-pub const RECORD_PREFIX_SIZE: usize = 9;
+pub const RECORD_PREFIX_SIZE: usize = 21;
 pub const DRIVE_BLOCK_SIZE: usize = 36;
 pub const MAX_RECORD_SIZE: usize = RECORD_PREFIX_SIZE + MAX_DRIVES * DRIVE_BLOCK_SIZE;
 
@@ -37,6 +37,9 @@ pub const FLAG_MOTION_ACTIVE: u8 = 1 << 1;
 
 const OFF_CYCLE_INDEX: usize = 0;
 const OFF_FLAGS: usize = 8;
+const OFF_SKIP_COUNT: usize = 9;
+const OFF_LATE_FRAMES: usize = 13;
+const OFF_FRAME_LATENESS_NS: usize = 17;
 
 const DOFF_TARGET_COUNTS: usize = 0;
 const DOFF_POSITION_ACTUAL: usize = 4;
@@ -73,6 +76,13 @@ pub struct DriveSample {
 pub struct CaptureRecord {
     pub cycle_index: u64,
     pub flags: u8,
+    /// Cumulative RT-loop cycle skips since policing armed — a nonzero step
+    /// between two records marks the exact cycles the drives coasted.
+    pub skip_count: u32,
+    /// Cumulative frames that finished sending after the SYNC0 latch.
+    pub late_frames: u32,
+    /// This cycle's frame lateness vs the latch; negative is margin to spare.
+    pub frame_lateness_ns: i32,
     pub drive_count: u8,
     pub drives: [DriveSample; MAX_DRIVES],
 }
@@ -83,6 +93,9 @@ impl CaptureRecord {
         Self {
             cycle_index,
             flags,
+            skip_count: 0,
+            late_frames: 0,
+            frame_lateness_ns: 0,
             drive_count: 0,
             drives: [DriveSample::default(); MAX_DRIVES],
         }
@@ -141,6 +154,10 @@ pub fn encode_record(r: &CaptureRecord) -> ([u8; MAX_RECORD_SIZE], usize) {
     let mut b = [0u8; MAX_RECORD_SIZE];
     b[OFF_CYCLE_INDEX..OFF_CYCLE_INDEX + 8].copy_from_slice(&r.cycle_index.to_le_bytes());
     b[OFF_FLAGS] = r.flags;
+    b[OFF_SKIP_COUNT..OFF_SKIP_COUNT + 4].copy_from_slice(&r.skip_count.to_le_bytes());
+    b[OFF_LATE_FRAMES..OFF_LATE_FRAMES + 4].copy_from_slice(&r.late_frames.to_le_bytes());
+    b[OFF_FRAME_LATENESS_NS..OFF_FRAME_LATENESS_NS + 4]
+        .copy_from_slice(&r.frame_lateness_ns.to_le_bytes());
     for (d, drive) in r.drives[..n].iter().enumerate() {
         let base = RECORD_PREFIX_SIZE + d * DRIVE_BLOCK_SIZE;
         encode_drive(&mut b[base..base + DRIVE_BLOCK_SIZE], drive);
@@ -178,6 +195,9 @@ pub fn header_json(cfg: &CaptureConfig) -> String {
     for (name, dtype, offset) in [
         ("cycle_index", "u64", OFF_CYCLE_INDEX),
         ("flags", "u8", OFF_FLAGS),
+        ("skip_count", "u32", OFF_SKIP_COUNT),
+        ("late_frames", "u32", OFF_LATE_FRAMES),
+        ("frame_lateness_ns", "i32", OFF_FRAME_LATENESS_NS),
         ("target_counts", "i32", p + DOFF_TARGET_COUNTS),
         ("position_actual", "i32", p + DOFF_POSITION_ACTUAL),
         ("following_error", "i32", p + DOFF_FOLLOWING_ERROR),

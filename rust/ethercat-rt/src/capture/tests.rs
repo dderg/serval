@@ -95,16 +95,22 @@ fn assert_drive_block(block: &[u8], d: &DriveSample) {
 #[test]
 fn record_encodes_to_fixed_little_endian_layout() {
     let d = distinct_sample(0);
-    let r = record_n(0x0102030405060708, &[d]);
+    let mut r = record_n(0x0102030405060708, &[d]);
+    r.skip_count = 3;
+    r.late_frames = 9;
+    r.frame_lateness_ns = -104_000;
     let (b, size) = encode_record(&r);
-    assert_eq!(size, 45);
+    assert_eq!(size, 57);
     assert_eq!(&b[0..8], &0x0102030405060708u64.to_le_bytes());
     assert_eq!(b[8], FLAG_TORQUE_ENABLED | FLAG_MOTION_ACTIVE);
-    assert_drive_block(&b[9..45], &d);
+    assert_eq!(&b[9..13], &3u32.to_le_bytes());
+    assert_eq!(&b[13..17], &9u32.to_le_bytes());
+    assert_eq!(&b[17..21], &(-104_000i32).to_le_bytes());
+    assert_drive_block(&b[21..57], &d);
 }
 
 #[test]
-fn single_drive_record_is_byte_identical_to_pre_change_layout() {
+fn single_drive_record_matches_the_documented_layout() {
     let d = DriveSample {
         target_counts: -2,
         position_actual: -1,
@@ -119,26 +125,32 @@ fn single_drive_record_is_byte_identical_to_pre_change_layout() {
         vel_cmd: -67.25,
     };
     let mut r = CaptureRecord::new(0x0102030405060708, 0x03);
+    r.skip_count = 1;
+    r.late_frames = 2;
+    r.frame_lateness_ns = -5;
     r.drive_count = 1;
     r.drives[0] = d;
 
-    let mut expected = [0u8; 45];
+    let mut expected = [0u8; 57];
     expected[0..8].copy_from_slice(&0x0102030405060708u64.to_le_bytes());
     expected[8] = 0x03;
-    expected[9..13].copy_from_slice(&(-2i32).to_le_bytes());
-    expected[13..17].copy_from_slice(&(-1i32).to_le_bytes());
-    expected[17..21].copy_from_slice(&5i32.to_le_bytes());
-    expected[21..23].copy_from_slice(&(-300i16).to_le_bytes());
-    expected[23..25].copy_from_slice(&0x0627u16.to_le_bytes());
-    expected[25..27].copy_from_slice(&0x7380u16.to_le_bytes());
-    expected[27..31].copy_from_slice(&(-654321i32).to_le_bytes());
-    expected[31..33].copy_from_slice(&250i16.to_le_bytes());
-    expected[33..37].copy_from_slice(&(0x55667788u32 as i32).to_le_bytes());
-    expected[37..41].copy_from_slice(&1234.5f32.to_le_bytes());
-    expected[41..45].copy_from_slice(&(-67.25f32).to_le_bytes());
+    expected[9..13].copy_from_slice(&1u32.to_le_bytes());
+    expected[13..17].copy_from_slice(&2u32.to_le_bytes());
+    expected[17..21].copy_from_slice(&(-5i32).to_le_bytes());
+    expected[21..25].copy_from_slice(&(-2i32).to_le_bytes());
+    expected[25..29].copy_from_slice(&(-1i32).to_le_bytes());
+    expected[29..33].copy_from_slice(&5i32.to_le_bytes());
+    expected[33..35].copy_from_slice(&(-300i16).to_le_bytes());
+    expected[35..37].copy_from_slice(&0x0627u16.to_le_bytes());
+    expected[37..39].copy_from_slice(&0x7380u16.to_le_bytes());
+    expected[39..43].copy_from_slice(&(-654321i32).to_le_bytes());
+    expected[43..45].copy_from_slice(&250i16.to_le_bytes());
+    expected[45..49].copy_from_slice(&(0x55667788u32 as i32).to_le_bytes());
+    expected[49..53].copy_from_slice(&1234.5f32.to_le_bytes());
+    expected[53..57].copy_from_slice(&(-67.25f32).to_le_bytes());
 
     let (b, size) = encode_record(&r);
-    assert_eq!(size, 45);
+    assert_eq!(size, 57);
     assert_eq!(&b[..size], &expected[..]);
 }
 
@@ -148,10 +160,10 @@ fn two_drive_record_packs_blocks_back_to_back() {
     let d1 = distinct_sample(11);
     let r = record_n(7, &[d0, d1]);
     let (b, size) = encode_record(&r);
-    assert_eq!(size, 9 + 2 * 36);
+    assert_eq!(size, 21 + 2 * 36);
     assert_eq!(&b[0..8], &7u64.to_le_bytes());
-    assert_drive_block(&b[9..45], &d0);
-    assert_drive_block(&b[45..81], &d1);
+    assert_drive_block(&b[21..57], &d0);
+    assert_drive_block(&b[57..93], &d1);
 }
 
 #[test]
@@ -163,7 +175,7 @@ fn header_is_one_json_line_describing_the_record() {
     for needle in [
         "\"version\":2",
         "\"cycle_ns\":1000000",
-        "\"record_size\":45",
+        "\"record_size\":57",
         "\"started_utc\":\"2026-06-10T12:00:00Z\"",
         "\"started_mono_ns\":7",
         "\"name\":\"x\"",
@@ -172,17 +184,20 @@ fn header_is_one_json_line_describing_the_record() {
         "\"invert\":false",
         "{\"name\":\"cycle_index\",\"dtype\":\"u64\",\"offset\":0}",
         "{\"name\":\"flags\",\"dtype\":\"u8\",\"offset\":8}",
-        "{\"name\":\"target_counts\",\"dtype\":\"i32\",\"offset\":9}",
-        "{\"name\":\"position_actual\",\"dtype\":\"i32\",\"offset\":13}",
-        "{\"name\":\"following_error\",\"dtype\":\"i32\",\"offset\":17}",
-        "{\"name\":\"torque_actual\",\"dtype\":\"i16\",\"offset\":21}",
-        "{\"name\":\"statusword\",\"dtype\":\"u16\",\"offset\":23}",
-        "{\"name\":\"error_code\",\"dtype\":\"u16\",\"offset\":25}",
-        "{\"name\":\"velocity_offset\",\"dtype\":\"i32\",\"offset\":27}",
-        "{\"name\":\"torque_offset\",\"dtype\":\"i16\",\"offset\":31}",
-        "{\"name\":\"velocity_actual\",\"dtype\":\"i32\",\"offset\":33}",
-        "{\"name\":\"accel_cmd\",\"dtype\":\"f32\",\"offset\":37}",
-        "{\"name\":\"vel_cmd\",\"dtype\":\"f32\",\"offset\":41}",
+        "{\"name\":\"skip_count\",\"dtype\":\"u32\",\"offset\":9}",
+        "{\"name\":\"late_frames\",\"dtype\":\"u32\",\"offset\":13}",
+        "{\"name\":\"frame_lateness_ns\",\"dtype\":\"i32\",\"offset\":17}",
+        "{\"name\":\"target_counts\",\"dtype\":\"i32\",\"offset\":21}",
+        "{\"name\":\"position_actual\",\"dtype\":\"i32\",\"offset\":25}",
+        "{\"name\":\"following_error\",\"dtype\":\"i32\",\"offset\":29}",
+        "{\"name\":\"torque_actual\",\"dtype\":\"i16\",\"offset\":33}",
+        "{\"name\":\"statusword\",\"dtype\":\"u16\",\"offset\":35}",
+        "{\"name\":\"error_code\",\"dtype\":\"u16\",\"offset\":37}",
+        "{\"name\":\"velocity_offset\",\"dtype\":\"i32\",\"offset\":39}",
+        "{\"name\":\"torque_offset\",\"dtype\":\"i16\",\"offset\":43}",
+        "{\"name\":\"velocity_actual\",\"dtype\":\"i32\",\"offset\":45}",
+        "{\"name\":\"accel_cmd\",\"dtype\":\"f32\",\"offset\":49}",
+        "{\"name\":\"vel_cmd\",\"dtype\":\"f32\",\"offset\":53}",
     ] {
         assert!(h.contains(needle), "header missing {needle}: {h}");
     }
@@ -250,8 +265,8 @@ fn multi_drive_round_trip_writes_two_blocks_per_record() {
     for (i, (a, b)) in samples.iter().enumerate() {
         let rec = &body[i * rsize..(i + 1) * rsize];
         assert_eq!(&rec[0..8], &(i as u64).to_le_bytes());
-        assert_drive_block(&rec[9..45], a);
-        assert_drive_block(&rec[45..81], b);
+        assert_drive_block(&rec[21..57], a);
+        assert_drive_block(&rec[57..93], b);
     }
     std::fs::remove_file(&path).unwrap();
 }
