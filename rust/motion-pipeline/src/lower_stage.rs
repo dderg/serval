@@ -69,6 +69,9 @@ impl Lowerer {
         let planned = match item {
             PlannedItem::Move(planned) => planned,
             PlannedItem::Drain => {
+                if !self.emit_settle_hold(output) {
+                    return false;
+                }
                 self.rest_hold_pending = true;
                 return output.send(LoweredItem::Drain).is_ok();
             }
@@ -191,6 +194,39 @@ impl Lowerer {
         output
             .send(LoweredItem::Seg(LoweredSegment { seg, rest_at_end }))
             .is_ok()
+    }
+
+    /// The shaped output keeps decaying for the chains' trailing support after
+    /// the raw trajectory rests (the extruder's PA unwind above all), and a
+    /// drain flush commits the track only through the last raw instant. Hold
+    /// the rest as real trajectory through that decay before the marker —
+    /// otherwise the MCU parks mid-decay, and any clock jump before the next
+    /// move (a dwell, a stream end) makes the resumed track re-enter at the
+    /// settled value: a one-sample multi-step burst.
+    fn emit_settle_hold(&mut self, output: &Sender<LoweredItem>) -> bool {
+        let settle = self.axis_chains.back_support();
+        if self.rest_hold_pending || !self.has_motion_history || settle <= 0.0 {
+            return true;
+        }
+        let hold = rest_hold_segment(
+            &self.odometer,
+            rest_z_warp(self.mesh.as_deref(), &self.odometer),
+            self.t,
+            self.t + settle,
+            self.odometer.len(),
+            0,
+        );
+        if output
+            .send(LoweredItem::Seg(LoweredSegment {
+                seg: hold,
+                rest_at_end: true,
+            }))
+            .is_err()
+        {
+            return false;
+        }
+        self.t += settle;
+        true
     }
 }
 
