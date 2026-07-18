@@ -82,11 +82,6 @@ const PAGE_DEFS: Record<string, PageDef> = {
     peaks: true,
     templates: [
       {
-        label: "ladder…",
-        command: "SERVO_GAIN_LADDER SAFE=550 START=700 STEP=50 MAX=900 AXIS=X ITERATIONS=1",
-        title: "climb from START by STEP until a rung flags, then revert to SAFE",
-      },
-      {
         label: "tracking…",
         command: "SERVO_MEASURE_TRACKING AXIS=X SPEED=100 ACCEL=3000 ITERATIONS=3",
         title:

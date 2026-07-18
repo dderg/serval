@@ -534,33 +534,6 @@ Params:
 `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2) `DWELL_MS` `TAG` (cal)
 `ACCEL_CHIP` `APPLY` `SERVO` `BASE_GAIN`.
 
-#### SERVO_GAIN_LADDER
-Gain sweep that climbs until analysis flags trouble, instead of a fixed
-`SPEED_GAINS` list. Runs the ladder `[SAFE, START, START+STEP, … ≤ MAX]`.
-Without `PARAM` it climbs the speed gain with the coupled derivation
-(position gain `×1.6`, integral `1250000 ÷ gain`); with
-`PARAM=position|speed|integral` it climbs **that one gain in its device
-units, holding the other two at their pre-ladder values** — the
-single-knob edge finder (the drives must agree on their current gains,
-else a command error tells you to align them first). After **each** rung
-at or above `START` completes its
-capture, `servo-cal analyze` runs on the run so far and that rung's step flags
-are inspected; the first rung whose step carries `resonance_detected`,
-`torque_saturated` or `settle_window_truncated` **stops the climb** — higher
-rungs are never executed. The `SAFE` baseline (always the first rung) never
-counts as a stop reason. The ladder always **restores the pre-ladder gains**
-at the end (also on failure) — keep a rung with `SERVO_APPLY_GAINS`.
-Output is the usual verdict one-liner (recommended step, reason,
-run dir) plus, on an early stop, one line naming the rung and the flags that
-stopped it. `START` names the first climb value, not a stroke bound — the
-stroke
-window comes from the configured axis bounds. A mid-ladder analysis failure
-(binary non-zero, unreadable `results.json`) aborts loudly; the run directory
-keeps everything captured so far. Params: `SAFE` `START` `STEP` (50, must be
-> 0) `MAX` (≥ `START`) `PARAM` `AXIS` (X) `SPEED` (100) `ACCEL` (3000)
-`ITERATIONS` (2) `DWELL_MS` `TAG` (ladder) `SERVO`.
-
-#### SERVO_HARVEST_NOTCHES
 Automates the "let the drive's adaptive notch tuning find the resonances during
 motion, then lock and read back what it chose" recipe (manual 7.10). Writes
 C01.30 `adaptive_notch_mode` = `MODE` (1 = 1st notch adaptive, 2 = 1st+2nd
@@ -651,7 +624,6 @@ Schemas: [servo-cal-contracts.md](servo-cal-contracts.md).
 | `SERVO_MEASURE_STRAIN_RESPONSE` | in-klippy fit | run dir with one capture per offset step; reports + stores the rolling stiffness matrix |
 | `SERVO_STRAIN_COMP_TUNE` | in-klippy loop | run dir with one capture per iteration; converges the matrix, leaves the tuned map written + enabled |
 | `SERVO_CALIBRATE_GAINS` | `servo-cal analyze` | run dir + `results.json` verdict (highest clean gain step); `APPLY=1` also writes + verifies |
-| `SERVO_GAIN_LADDER` | `servo-cal analyze` (per rung + final) | run dir + `results.json` verdict; climbs until a rung flags trouble, then applies `SAFE` |
 | `SERVO_HARVEST_NOTCHES` | — | no run dir; writes C01.30, strokes, reads back notch 1–2, locks (C01.30=0); journaled param writes |
 | `SERVO_REFINE_GAIN` | `servo-cal analyze` | run dir + `results.json` verdict; `APPLY=1` also writes + verifies |
 | `SERVO_SWEEP_INERTIA` | `servo-cal analyze` | run dir + `results.json` (no automated pick, so `APPLY=1` always errors) |

@@ -593,14 +593,6 @@ function reconstructCommand(manifest: Manifest): string {
       const values = manifest.steps.map((s) => (s.swept || {}).speed).join(",");
       return `SERVO_CALIBRATE_GAINS SPEED_GAINS=${values} ${common}${strokeSuffix(manifest, true)}`;
     }
-    case "gain_ladder": {
-      const speeds = manifest.steps.map((s) => (s.swept || {}).speed ?? 0);
-      const safe = speeds[0];
-      const start = speeds.length > 1 ? speeds[1] : safe;
-      const step = speeds.length > 2 ? speeds[2] - speeds[1] : 50;
-      const max = speeds[speeds.length - 1];
-      return `SERVO_GAIN_LADDER SAFE=${safe} START=${start} STEP=${step} MAX=${max} ${common}${strokeSuffix(manifest, true)}`;
-    }
     case "refine_sweep": {
       const param = commonKeys.length === 1 ? commonKeys[0] : "speed";
       const values = manifest.steps.map((s) => (s.swept || {})[param]).join(",");
