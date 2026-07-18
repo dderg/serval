@@ -6,6 +6,8 @@ import { PALETTE, PSD_MAX_FREQ_KEY, PSD_MAX_FREQ_CHOICES_HZ, PSD_MAX_FREQ_DEFAUL
 import { timeSeriesPlot } from "./uplot-chart";
 import type { TimeTrace } from "./uplot-chart";
 import type { PlotSeries, PlotStep } from "./wire";
+import { loadFerrUnit, setFerrUnit } from "./units";
+import type { FerrUnit } from "./units";
 
 // --- chart drawing ------------------------------------------------------------
 
@@ -20,13 +22,14 @@ function motorVisible(drive: string): boolean {
   return !state.motorFilter || state.motorFilter.has(drive);
 }
 
-function pickSeries(runName: string, step: PlotStep): PickedSeries[] {
+function pickSeries(runName: string, step: PlotStep, unit: FerrUnit): PickedSeries[] {
   if (motorViewPerMotor()) {
     const drives = Object.entries(step.drives);
+    const label = unit === "µm" ? "ferr (µm)" : "ferr (counts)";
     return drives
       .map(([drive, d], k) => ({
-        y: d.ferr_counts.map((c) => c * (1000 / countsPerMm(runName, drive))),
-        label: "ferr (µm)",
+        y: unit === "µm" ? d.ferr_counts.map((c) => c * (1000 / countsPerMm(runName, drive))) : d.ferr_counts,
+        label,
         suffix: ` (${drive})`,
         drive,
         ramp: driveRamp(drives.length, k),
@@ -66,11 +69,76 @@ function hidpiCanvasContext(canvas: HTMLCanvasElement): { ctx: CanvasRenderingCo
   return { ctx, w, h };
 }
 
+function stepDrivePairs(names: string[], plots: PlotSeries[], steps: string[]): [string, string][] {
+  const pairs: [string, string][] = [];
+  plots.forEach((p, i) => {
+    steps.forEach((stepName) => {
+      const step = p.steps.find((s) => s.name === stepName);
+      if (!step) return;
+      for (const drive of Object.keys(step.drives)) pairs.push([names[i], drive]);
+    });
+  });
+  return pairs;
+}
+
+function ferrUnitAvailability(pairs: [string, string][]): { ok: boolean; missing: string[] } {
+  const missing = [...new Set(pairs.filter(([run, drive]) => countsPerMmOrNull(run, drive) === null).map(([, d]) => d))];
+  return { ok: pairs.length > 0 && missing.length === 0, missing };
+}
+
+function resolvedFerrUnit(availability: { ok: boolean }): FerrUnit {
+  return loadFerrUnit() === "µm" && availability.ok ? "µm" : "counts";
+}
+
+function ferrUnitToggleHtml(idPrefix: string): string {
+  return (
+    `<span class="chips">` +
+    `<button class="chip" id="${idPrefix}-unit-um" data-unit="µm">µm</button>` +
+    `<button class="chip" id="${idPrefix}-unit-counts" data-unit="counts">counts</button>` +
+    `</span>` +
+    `<span class="note" id="${idPrefix}-unit-hint"></span>`
+  );
+}
+
+function syncFerrUnitUi(idPrefix: string, availability: { ok: boolean; missing: string[] }) {
+  const pref = loadFerrUnit();
+  const umBtn = el<HTMLButtonElement>(`${idPrefix}-unit-um`);
+  const countsBtn = el<HTMLButtonElement>(`${idPrefix}-unit-counts`);
+  const hint = el(`${idPrefix}-unit-hint`);
+  if (umBtn) {
+    umBtn.disabled = !availability.ok;
+    umBtn.classList.toggle("active", availability.ok && pref === "µm");
+  }
+  if (countsBtn) countsBtn.classList.toggle("active", !availability.ok || pref === "counts");
+  if (hint) hint.textContent = availability.ok ? "" : `counts_per_mm missing for ${availability.missing.join(", ")}`;
+}
+
+function bindFerrUnitToggle(idPrefix: string, redraw: () => void) {
+  const umBtn = el<HTMLButtonElement>(`${idPrefix}-unit-um`);
+  const countsBtn = el<HTMLButtonElement>(`${idPrefix}-unit-counts`);
+  if (umBtn) {
+    umBtn.addEventListener("click", () => {
+      if (umBtn.disabled) return;
+      setFerrUnit("µm");
+      redraw();
+    });
+  }
+  if (countsBtn) {
+    countsBtn.addEventListener("click", () => {
+      setFerrUnit("counts");
+      redraw();
+    });
+  }
+}
+
 function drawTimeDomain(names: string[], plots: PlotSeries[], steps: string[]) {
   const container = el("charts");
   if (!container) return;
+  const availability = ferrUnitAvailability(stepDrivePairs(names, plots, steps));
+  syncFerrUnitUi("time", availability);
+  const unit = resolvedFerrUnit(availability);
   const motorFilter = state.motorFilter ? [...state.motorFilter] : null;
-  const sig = { runs: runDataSig(names), steps, perMotor: motorViewPerMotor(), motorFilter };
+  const sig = { runs: runDataSig(names), steps, perMotor: motorViewPerMotor(), motorFilter, unit };
   if (payloadUnchanged("time-domain", sig)) return;
   container.innerHTML = "";
   if (names.length === 0) {
@@ -93,7 +161,7 @@ function drawTimeDomain(names: string[], plots: PlotSeries[], steps: string[]) {
     plots.forEach((p, i) => {
       const step = p.steps.find((s) => s.name === stepName);
       if (!step) return;
-      for (const series of pickSeries(names[i], step)) {
+      for (const series of pickSeries(names[i], step, unit)) {
         yLabel = series.label;
         const color = mixColor(runColor(names[i]), "#ffffff", series.ramp);
         const hoverLabel = (names.length > 1 ? names[i] : "") + series.suffix;
@@ -207,14 +275,38 @@ function psdToAmplitude(freq: number[], psd: number[]): number[] {
   return psd.map((p) => Math.sqrt(p) * factor);
 }
 
-function countsPerMm(runName: string, driveName: string): number {
+function countsPerMmOrNull(runName: string, driveName: string): number | null {
   const detail = state.details.get(runName);
   const motors = (detail && detail.manifest && detail.manifest.motors) || [];
   const motor = motors.find((m) => m.name === driveName);
-  if (!motor || !motor.counts_per_mm) {
-    throw new Error(`${runName}: manifest has no counts_per_mm for ${driveName}`);
-  }
-  return motor.counts_per_mm;
+  return motor && motor.counts_per_mm ? motor.counts_per_mm : null;
 }
 
-export { pickSeries, hidpiCanvasContext, drawTimeDomain, newestSelectedRunName, peakStep, mixColor, traceStyle, psdMaxFreqHz, clipToPsdBand, WELCH_HANN_ENBW_BINS, psdToAmplitude, countsPerMm };
+function countsPerMm(runName: string, driveName: string): number {
+  const v = countsPerMmOrNull(runName, driveName);
+  if (v === null) throw new Error(`${runName}: manifest has no counts_per_mm for ${driveName}`);
+  return v;
+}
+
+export type { PickedSeries };
+export {
+  pickSeries,
+  hidpiCanvasContext,
+  drawTimeDomain,
+  newestSelectedRunName,
+  peakStep,
+  mixColor,
+  traceStyle,
+  psdMaxFreqHz,
+  clipToPsdBand,
+  WELCH_HANN_ENBW_BINS,
+  psdToAmplitude,
+  countsPerMm,
+  countsPerMmOrNull,
+  stepDrivePairs,
+  ferrUnitAvailability,
+  resolvedFerrUnit,
+  ferrUnitToggleHtml,
+  syncFerrUnitUi,
+  bindFerrUnitToggle,
+};

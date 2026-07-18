@@ -1,5 +1,15 @@
 import { el, payloadUnchanged, runDataSig } from "./api";
-import { mixColor, traceStyle, clipToPsdBand, psdMaxFreqHz, psdToAmplitude, countsPerMm } from "./charts-core";
+import {
+  mixColor,
+  traceStyle,
+  clipToPsdBand,
+  psdMaxFreqHz,
+  psdToAmplitude,
+  countsPerMm,
+  ferrUnitAvailability,
+  resolvedFerrUnit,
+  syncFerrUnitUi,
+} from "./charts-core";
 import { psdPlot, timeSeriesPlot } from "./uplot-chart";
 import type { FixedY, FreqMarker, Mark, PsdTrace, TimeTrace } from "./uplot-chart";
 import type { DriveMetrics, Manifest, PlotSeries, PlotStep, TorqueMetrics } from "./wire";
@@ -7,6 +17,7 @@ import { redrawCharts } from "./peaks";
 import { runColor } from "./runs";
 import { motorView, motorViewPerMotor } from "./shell";
 import { PALETTE, RESONANCE_BAND_HZ, state } from "./state";
+import type { FerrUnit } from "./units";
 
 // --- tracking metrics table -----------------------------------------------
 //
@@ -368,15 +379,29 @@ function driveRamp(count: number, idx: number): number {
 }
 
 /// Per-drive PSDs are counts²/Hz on drives whose counts_per_mm may differ,
-/// so averaging happens in µm²/Hz — each drive converted first, then the
-/// power mean — and only then collapses to a tone amplitude.
-function psdFerrUm2(step: PlotStep, runName: string, drive: string): number[] {
-  const umPerCount = 1000 / countsPerMm(runName, drive);
+/// so averaging in µm happens in µm²/Hz — each drive converted first, then
+/// the power mean — and only then collapses to a tone amplitude. In counts
+/// mode the raw counts²/Hz values feed the average directly.
+function psdFerrScaled(step: PlotStep, runName: string, drive: string, unit: FerrUnit): number[] {
   if (!step.psd) throw new Error(`${step.name}: step has no psd`);
+  if (unit === "counts") return step.psd.per_drive[drive];
+  const umPerCount = 1000 / countsPerMm(runName, drive);
   return step.psd.per_drive[drive].map((p) => p * umPerCount * umPerCount);
 }
 
-function psdFerrTraces(names: string[], plots: PlotSeries[], steps: string[]): PsdTrace[] {
+function psdDrivePairs(names: string[], plots: PlotSeries[], steps: string[]): [string, string][] {
+  const pairs: [string, string][] = [];
+  plots.forEach((p, i) => {
+    steps.forEach((stepName) => {
+      const step = p.steps.find((s) => s.name === stepName);
+      if (!step || !step.psd) return;
+      for (const drive of Object.keys(step.psd.per_drive)) pairs.push([names[i], drive]);
+    });
+  });
+  return pairs;
+}
+
+function psdFerrTraces(names: string[], plots: PlotSeries[], steps: string[], unit: FerrUnit): PsdTrace[] {
   const traces: PsdTrace[] = [];
   plots.forEach((p, i) => {
     steps.forEach((stepName, j) => {
@@ -386,8 +411,8 @@ function psdFerrTraces(names: string[], plots: PlotSeries[], steps: string[]): P
       const driveNames = Object.keys(psd.per_drive);
       if (!driveNames.length) return;
       const style = traceStyle(names, steps, i, j);
-      const pushTrace = (psdUm2: number[], color: string, label: string) => {
-        const clipped = clipToPsdBand(psd.freq_hz, psdUm2);
+      const pushTrace = (psdScaled: number[], color: string, label: string) => {
+        const clipped = clipToPsdBand(psd.freq_hz, psdScaled);
         traces.push({
           freq: clipped.freq,
           y: psdToAmplitude(clipped.freq, clipped.y),
@@ -400,19 +425,19 @@ function psdFerrTraces(names: string[], plots: PlotSeries[], steps: string[]): P
       if (motorViewPerMotor()) {
         driveNames.forEach((drive, k) => {
           pushTrace(
-            psdFerrUm2(step, names[i], drive),
+            psdFerrScaled(step, names[i], drive, unit),
             mixColor(style.color, "#ffffff", driveRamp(driveNames.length, k)),
             `${style.name} (${drive})`
           );
         });
         return;
       }
-      const avgUm2: number[] = new Array(psd.freq_hz.length).fill(0);
+      const avgScaled: number[] = new Array(psd.freq_hz.length).fill(0);
       for (const drive of driveNames) {
-        psdFerrUm2(step, names[i], drive).forEach((v, n) => (avgUm2[n] += v));
+        psdFerrScaled(step, names[i], drive, unit).forEach((v, n) => (avgScaled[n] += v));
       }
       pushTrace(
-        avgUm2.map((v) => v / driveNames.length),
+        avgScaled.map((v) => v / driveNames.length),
         style.color,
         `${style.name} (avg of ${driveNames.length})`
       );
@@ -501,7 +526,10 @@ function psdBox(
 function renderPsdChart(names: string[], plots: PlotSeries[], steps: string[]) {
   const container = el("psd-charts");
   if (!container) return;
-  const sig = { runs: runDataSig(names), steps, view: motorView(), maxHz: psdMaxFreqHz() };
+  const availability = ferrUnitAvailability(psdDrivePairs(names, plots, steps));
+  syncFerrUnitUi("psd", availability);
+  const unit = resolvedFerrUnit(availability);
+  const sig = { runs: runDataSig(names), steps, view: motorView(), maxHz: psdMaxFreqHz(), unit };
   if (payloadUnchanged("psd-charts", sig)) return;
   container.innerHTML = "";
   if (!names.length || !steps.length) {
@@ -509,9 +537,9 @@ function renderPsdChart(names: string[], plots: PlotSeries[], steps: string[]) {
     return;
   }
   const psdOpts = { linear: true, zeroFloor: true };
-  const ferr = psdFerrTraces(names, plots, steps);
+  const ferr = psdFerrTraces(names, plots, steps, unit);
   container.appendChild(
-    psdBox("following error", ferr, RESONANCE_BAND_HZ, "ferr amplitude (µm)", psdOpts)
+    psdBox("following error", ferr, RESONANCE_BAND_HZ, `ferr amplitude (${unit})`, psdOpts)
   );
   const accel = psdAccelTraces(names, plots, steps);
   if (accel.length) {
@@ -619,4 +647,4 @@ function fillStepChips(container: HTMLElement, stepNames: string[]) {
 }
 
 export type { MetricsRow, PsdBoxOpts, SweepSeries };
-export { driveMoveSummary, settleCellHtml, torqueCellHtml, metricsDriveRow, foldDriveRows, metricsTableRows, heatCellStyle, renderMetricsTable, sweptAxisKey, sweepMetricsSeries, renderSweepMetricsChart, driveRamp, psdFerrUm2, psdFerrTraces, psdAccelTraces, fmtLinear, psdBox, renderPsdChart, visibleStepNames, renderStepChips, renderMotorChips, fillStepChips };
+export { driveMoveSummary, settleCellHtml, torqueCellHtml, metricsDriveRow, foldDriveRows, metricsTableRows, heatCellStyle, renderMetricsTable, sweptAxisKey, sweepMetricsSeries, renderSweepMetricsChart, driveRamp, psdFerrScaled, psdDrivePairs, psdFerrTraces, psdAccelTraces, fmtLinear, psdBox, renderPsdChart, visibleStepNames, renderStepChips, renderMotorChips, fillStepChips };
