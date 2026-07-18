@@ -270,12 +270,23 @@ function NotchGrid({ nums, byKey }: { nums: number[]; byKey: Map<string, DrivePa
   </table>`;
 }
 
-/// One compact labeled field per param on a fixed-column grid so every
+/// Column count adapts to the group's field count so no row ever ends in a
+/// lone orphan: 1–3 params sit N-across, 4 params go 2×2 (4-across when the
+/// container is wide, via CSS), larger groups pick the divisor that keeps
+/// the last row at least half full.
+function paramLineColumns(count: number): number {
+  if (count <= 3) return count;
+  if (count % 4 === 0) return 4;
+  if (count % 3 === 0) return 3;
+  return count % 3 === 1 ? 4 : 3;
+}
+
+/// One compact labeled field per param on a per-group uniform grid so every
 /// field is the same width whether or not its row is full; expanding a
 /// field's per-motor spread pops it onto its own full-width row
 /// (grid-column span) while the rest of the grid stays compact.
 function ParamLine({ params, group }: { params: DriveParam[]; group: string }) {
-  return html`<div class="param-line">
+  return html`<div class=${`param-line cols-${paramLineColumns(params.length)}`}>
     ${params.map(
       (p) => html`<div
         key=${p.name}

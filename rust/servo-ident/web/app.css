@@ -327,9 +327,14 @@ table.param-grid td.param-col {
   text-overflow: ellipsis;
 }
 
-.param-line { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 14px; }
-@container (min-width: 560px) { .param-line { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
-@container (max-width: 320px) { .param-line { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.param-line { display: grid; gap: 10px 14px; }
+.param-line.cols-1 { grid-template-columns: minmax(0, 1fr); }
+.param-line.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.param-line.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.param-line.cols-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@container (min-width: 560px) {
+  .param-line.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
 .param-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .param-field.expanded { grid-column: 1 / -1; }
 .param-field-label {
