@@ -2,7 +2,7 @@ import { el, payloadUnchanged, runDataSig, ensurePlotSeries, pageRuns } from "./
 import { drawTimeDomain, peakStep } from "./charts-core";
 import { motorNames, cellRaw, renderDriveGroups } from "./drive";
 import { renderFrfCharts, renderRingdownCharts } from "./dynamics";
-import { renderMetricsTable, renderSweepMetricsChart, renderPsdChart, visibleStepNames, renderStepChips, renderMotorChips } from "./metrics";
+import { renderMetricsTable, renderSweepMetricsChart, renderPsdChart, renderAccelPsdChart, visibleStepNames, renderStepChips, renderMotorChips } from "./metrics";
 import { renderPathChart } from "./path-chart";
 import { selectedRunNames } from "./runs";
 import { currentPageDef } from "./shell";
@@ -173,6 +173,7 @@ async function redrawCharts() {
   if (def.charts && def.charts.includes("ringdown")) renderRingdownCharts(okNames, plots);
   if (def.charts && def.charts.includes("psd")) {
     renderPsdChart(okNames, plots, steps);
+    renderAccelPsdChart(okNames, plots, steps);
   }
   if (def.peaks) renderPeakList(okNames, plots, steps);
   if (def.charts && def.charts.includes("time")) drawTimeDomain(okNames, plots, steps);

@@ -446,6 +446,10 @@ function psdFerrTraces(names: string[], plots: PlotSeries[], steps: string[], un
   return traces;
 }
 
+const ACCEL_AXIS_KEYS = ["psd_x", "psd_y", "psd_z"] as const;
+const ACCEL_AXIS_LABELS = ["x", "y", "z"] as const;
+const ACCEL_TOTAL_WIDTH = 2.25;
+
 function psdAccelTraces(names: string[], plots: PlotSeries[], steps: string[]): PsdTrace[] {
   const traces: PsdTrace[] = [];
   plots.forEach((p, i) => {
@@ -454,18 +458,48 @@ function psdAccelTraces(names: string[], plots: PlotSeries[], steps: string[]): 
       const accel = step && step.psd && step.psd.accel;
       if (!accel) return;
       const style = traceStyle(names, steps, i, j);
-      const clipped = clipToPsdBand(accel.freq_hz, accel.psd);
-      traces.push({
-        freq: clipped.freq,
-        y: psdToAmplitude(clipped.freq, clipped.y),
-        color: style.color,
-        dashed: false,
-        label: `${style.name} (accel)`,
-        run: names[i],
+      const pushTrace = (psd: number[], color: string, label: string, opts: { dashed: boolean; width?: number }) => {
+        const clipped = clipToPsdBand(accel.freq_hz, psd);
+        traces.push({
+          freq: clipped.freq,
+          y: psdToAmplitude(clipped.freq, clipped.y),
+          color,
+          dashed: opts.dashed,
+          width: opts.width,
+          label,
+          run: names[i],
+        });
+      };
+      pushTrace(accel.psd, style.color, `${style.name} (total)`, { dashed: false, width: ACCEL_TOTAL_WIDTH });
+      ACCEL_AXIS_KEYS.forEach((key, k) => {
+        pushTrace(
+          accel[key],
+          mixColor(style.color, "#ffffff", driveRamp(ACCEL_AXIS_KEYS.length + 1, k + 1)),
+          `${style.name} (${ACCEL_AXIS_LABELS[k]})`,
+          { dashed: true }
+        );
       });
     });
   });
   return traces;
+}
+
+function renderAccelPsdChart(names: string[], plots: PlotSeries[], steps: string[]) {
+  const section = el("accel-psd-section");
+  const container = el("accel-psd-charts");
+  if (!section || !container) return;
+  const traces = psdAccelTraces(names, plots, steps);
+  section.hidden = !traces.length;
+  const sig = { runs: runDataSig(names), steps, maxHz: psdMaxFreqHz() };
+  if (payloadUnchanged("accel-psd-charts", sig)) return;
+  container.innerHTML = "";
+  if (!traces.length) return;
+  container.appendChild(
+    psdBox("accelerometer", traces, RESONANCE_BAND_HZ, "accel amplitude (mm/s²)", {
+      linear: true,
+      zeroFloor: true,
+    })
+  );
 }
 
 function fmtLinear(v: number): string {
@@ -541,12 +575,6 @@ function renderPsdChart(names: string[], plots: PlotSeries[], steps: string[]) {
   container.appendChild(
     psdBox("following error", ferr, RESONANCE_BAND_HZ, `ferr amplitude (${unit})`, psdOpts)
   );
-  const accel = psdAccelTraces(names, plots, steps);
-  if (accel.length) {
-    container.appendChild(
-      psdBox("accelerometer", accel, RESONANCE_BAND_HZ, "accel amplitude", psdOpts)
-    );
-  }
 }
 
 function visibleStepNames(stepNames: string[]): string[] {
@@ -647,4 +675,4 @@ function fillStepChips(container: HTMLElement, stepNames: string[]) {
 }
 
 export type { MetricsRow, PsdBoxOpts, SweepSeries };
-export { driveMoveSummary, settleCellHtml, torqueCellHtml, metricsDriveRow, foldDriveRows, metricsTableRows, heatCellStyle, renderMetricsTable, sweptAxisKey, sweepMetricsSeries, renderSweepMetricsChart, driveRamp, psdFerrScaled, psdDrivePairs, psdFerrTraces, psdAccelTraces, fmtLinear, psdBox, renderPsdChart, visibleStepNames, renderStepChips, renderMotorChips, fillStepChips };
+export { driveMoveSummary, settleCellHtml, torqueCellHtml, metricsDriveRow, foldDriveRows, metricsTableRows, heatCellStyle, renderMetricsTable, sweptAxisKey, sweepMetricsSeries, renderSweepMetricsChart, driveRamp, psdFerrScaled, psdDrivePairs, psdFerrTraces, psdAccelTraces, renderAccelPsdChart, fmtLinear, psdBox, renderPsdChart, visibleStepNames, renderStepChips, renderMotorChips, fillStepChips };

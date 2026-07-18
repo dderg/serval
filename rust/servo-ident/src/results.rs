@@ -197,6 +197,9 @@ pub struct PlotAccel {
 pub struct PlotPsdAccel {
     pub freq_hz: Vec<f64>,
     pub psd: Vec<f64>,
+    pub psd_x: Vec<f64>,
+    pub psd_y: Vec<f64>,
+    pub psd_z: Vec<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, TS)]

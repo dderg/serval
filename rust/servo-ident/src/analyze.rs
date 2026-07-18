@@ -108,11 +108,29 @@ pub fn xy_path(cap: &Scap, spatial: &ManifestSpatial) -> Result<Option<PlotPath>
     Ok(Some(path))
 }
 
-fn read_accel_csv(path: &Path) -> Result<(Vec<f64>, Vec<f64>), String> {
+pub struct AccelSamples {
+    pub t: Vec<f64>,
+    pub axes: [Vec<f64>; 3],
+}
+
+impl AccelSamples {
+    pub fn magnitude(&self) -> Vec<f64> {
+        (0..self.t.len())
+            .map(|k| {
+                let [x, y, z] = &self.axes;
+                (x[k] * x[k] + y[k] * y[k] + z[k] * z[k]).sqrt()
+            })
+            .collect()
+    }
+}
+
+fn read_accel_csv(path: &Path) -> Result<AccelSamples, String> {
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let mut t = Vec::new();
-    let mut mag = Vec::new();
+    let mut samples = AccelSamples {
+        t: Vec::new(),
+        axes: [Vec::new(), Vec::new(), Vec::new()],
+    };
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -129,13 +147,54 @@ fn read_accel_csv(path: &Path) -> Result<(Vec<f64>, Vec<f64>), String> {
                 path.display()
             ));
         }
-        t.push(f[0]);
-        mag.push((f[1] * f[1] + f[2] * f[2] + f[3] * f[3]).sqrt());
+        samples.t.push(f[0]);
+        for (axis, &v) in samples.axes.iter_mut().zip(&f[1..4]) {
+            axis.push(v);
+        }
     }
-    if t.len() < 2 {
+    if samples.t.len() < 2 {
         return Err(format!("{}: too few accel samples", path.display()));
     }
-    Ok((t, mag))
+    Ok(samples)
+}
+
+/// Per-axis Welch PSDs plus their sum, the `shaper_calibrate` convention:
+/// `psd_sum = psd_x + psd_y + psd_z` on one shared frequency grid.
+pub struct AccelPsds {
+    pub freq_hz: Vec<f64>,
+    pub per_axis: [Vec<f64>; 3],
+    pub total: Vec<f64>,
+}
+
+pub fn accel_axis_psds(samples: &AccelSamples) -> Result<AccelPsds, String> {
+    let afs = samples.t.len() as f64 / (samples.t[samples.t.len() - 1] - samples.t[0]);
+    let mut freq_hz: Option<Vec<f64>> = None;
+    let mut per_axis: Vec<Vec<f64>> = Vec::new();
+    for axis in &samples.axes {
+        let (f, p) = welch_psd(axis, afs)?;
+        match &freq_hz {
+            Some(existing) if existing.len() != f.len() => {
+                return Err(format!(
+                    "accel axis psd has {} bins, expected {} (axes must share the Welch grid)",
+                    f.len(),
+                    existing.len()
+                ));
+            }
+            Some(_) => {}
+            None => freq_hz = Some(f),
+        }
+        per_axis.push(p);
+    }
+    let freq_hz = freq_hz.unwrap();
+    let total: Vec<f64> = (0..freq_hz.len())
+        .map(|b| per_axis.iter().map(|p| p[b]).sum())
+        .collect();
+    let [px, py, pz]: [Vec<f64>; 3] = per_axis.try_into().unwrap();
+    Ok(AccelPsds {
+        freq_hz,
+        per_axis: [px, py, pz],
+        total,
+    })
 }
 
 struct DriveAnalysis {
@@ -175,8 +234,7 @@ struct AccelAnalysis {
     result: AccelResult,
     t: Vec<f64>,
     mag: Vec<f64>,
-    freq_hz: Vec<f64>,
-    psd: Vec<f64>,
+    psds: AccelPsds,
 }
 
 fn step_flags(drives: &BTreeMap<String, DriveResult>) -> Vec<String> {
@@ -240,24 +298,22 @@ pub fn analyze_capture(
 
     let accel = match accel_path {
         Some(path) => {
-            let (t, mag) = read_accel_csv(path)?;
-            let afs = t.len() as f64 / (t[t.len() - 1] - t[0]);
-            let (freq_hz, psd) = welch_psd(&mag, afs)?;
-            if freq_hz.len() > MAX_SERIES_POINTS {
+            let samples = read_accel_csv(path)?;
+            let psds = accel_axis_psds(&samples)?;
+            if psds.freq_hz.len() > MAX_SERIES_POINTS {
                 return Err(format!(
                     "step {name:?}: accel psd has {} bins, over the {MAX_SERIES_POINTS} cap",
-                    freq_hz.len()
+                    psds.freq_hz.len()
                 ));
             }
             Some(AccelAnalysis {
                 result: AccelResult {
                     present: true,
-                    psd_peaks: top_peaks(&freq_hz, &psd, PSD_PEAK_COUNT),
+                    psd_peaks: top_peaks(&psds.freq_hz, &psds.total, PSD_PEAK_COUNT),
                 },
-                t,
-                mag,
-                freq_hz,
-                psd,
+                mag: samples.magnitude(),
+                t: samples.t,
+                psds,
             })
         }
         None => None,
@@ -327,8 +383,11 @@ pub fn analyze_capture(
         }
     });
     let plot_psd_accel = accel.as_ref().map(|a| PlotPsdAccel {
-        freq_hz: a.freq_hz.clone(),
-        psd: a.psd.clone(),
+        freq_hz: a.psds.freq_hz.clone(),
+        psd: a.psds.total.clone(),
+        psd_x: a.psds.per_axis[0].clone(),
+        psd_y: a.psds.per_axis[1].clone(),
+        psd_z: a.psds.per_axis[2].clone(),
     });
     let path = match spatial {
         Some(sp) => xy_path(cap, sp)?,

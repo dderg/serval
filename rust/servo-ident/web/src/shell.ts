@@ -210,6 +210,15 @@ function analysisSectionsHtml(def: PageDef): string {
         `<div class="charts" id="psd-charts"><p class="note">select runs above</p></div>` +
         `</section>`
     );
+    parts.push(
+      `<section class="accel-psd-section" id="accel-psd-section" hidden>` +
+        sectionHeadHtml(
+          "accel PSD",
+          `<span class="note">per-axis accelerometer spectra; solid: x+y+z total</span>`
+        ) +
+        `<div class="charts" id="accel-psd-charts"></div>` +
+        `</section>`
+    );
   }
   if (def.peaks) {
     parts.push(

@@ -25,6 +25,7 @@ interface PsdTrace {
   y: number[];
   color: string;
   dashed: boolean;
+  width?: number;
   label?: string;
   run?: string;
 }
@@ -487,7 +488,7 @@ function psdPlot(target: HTMLElement, opts: PsdPlotOpts): uPlot {
         ...traces.map((tr) => ({
           label: tr.label,
           stroke: tr.color,
-          width: 1.25,
+          width: tr.width ?? 1.25,
           dash: tr.dashed ? [4, 3] : undefined,
           points: { show: false },
           spanGaps: false,
