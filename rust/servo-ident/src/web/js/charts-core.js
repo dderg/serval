@@ -34,7 +34,7 @@ function pickSeries(runName, step) {
 /// Renders at the device pixel ratio so lines stay vector-crisp on hidpi
 /// displays: the backing store is sized to the CSS box × dpr and the
 /// context scaled back, while all layout math stays in CSS pixels.
-function drawChart(canvas, traces, yLabel, fixedY, xUnit) {
+function hidpiCanvasContext(canvas) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth || canvas.width;
   const h = canvas.clientHeight || canvas.height;
@@ -46,6 +46,11 @@ function drawChart(canvas, traces, yLabel, fixedY, xUnit) {
   }
   const ctx = canvas.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, w, h };
+}
+
+function drawChart(canvas, traces, yLabel, fixedY, xUnit) {
+  const { ctx, w, h } = hidpiCanvasContext(canvas);
   ctx.clearRect(0, 0, w, h);
   ctx.fillStyle = "#0d1117";
   ctx.fillRect(0, 0, w, h);
@@ -260,4 +265,4 @@ function countsPerMm(runName, driveName) {
   return motor.counts_per_mm;
 }
 
-export { pickSeries, drawChart, drawTimeDomain, newestSelectedRunName, peakStep, mixColor, traceStyle, psdMaxFreqHz, clipToPsdBand, WELCH_HANN_ENBW_BINS, psdToAmplitude, countsPerMm };
+export { pickSeries, hidpiCanvasContext, drawChart, drawTimeDomain, newestSelectedRunName, peakStep, mixColor, traceStyle, psdMaxFreqHz, clipToPsdBand, WELCH_HANN_ENBW_BINS, psdToAmplitude, countsPerMm };

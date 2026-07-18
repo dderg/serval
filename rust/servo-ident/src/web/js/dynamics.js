@@ -1,6 +1,7 @@
 import { el, payloadUnchanged, runDataSig, onRenderReset } from "./api.js";
-import { drawChart, mixColor } from "./charts-core.js";
+import { mixColor } from "./charts-core.js";
 import { psdBox, visibleStepNames } from "./metrics.js";
+import { timeSeriesPlot } from "./uplot-chart.js";
 import { runColor } from "./runs.js";
 import { RINGDOWN_PSD_PLOT_MAX_HZ, state } from "./state.js";
 
@@ -285,54 +286,33 @@ const ringdownCharts = new Map();
 onRenderReset(() => ringdownCharts.clear());
 
 /// One persistent ring-down unit: the brushable tail chart plus the PSD
-/// chart it drives. The selected time span is shaded and the PSD box
-/// switches between the full-dwell average and the per-tail PSD of the
-/// brushed span (in ms; a short drag clears it).
+/// chart it drives. The uPlot x-drag selection stays highlighted and the
+/// PSD box switches between the full-dwell average and the per-tail PSD of
+/// the brushed span (in ms; a drag under 2 ms clears it).
 function createRingdownChart(stepName, sourceName) {
   const inst = {
     stepName,
     sourceName,
     runEntries: [],
-    traces: [],
     fullTraces: [],
     markers: {},
     unit: "",
     tMax: 0,
     selection: null,
+    plot: null,
   };
   const box = document.createElement("div");
   box.className = "chart-box";
   const title = document.createElement("h3");
   box.appendChild(title);
-  const canvas = document.createElement("canvas");
-  canvas.width = 860;
-  canvas.height = 220;
-  box.appendChild(canvas);
+  const plotHost = document.createElement("div");
+  box.appendChild(plotHost);
   const legendEl = document.createElement("div");
   legendEl.className = "legend";
   box.appendChild(legendEl);
   const psdWrap = document.createElement("div");
-  Object.assign(inst, { tailBox: box, titleEl: title, canvas, legendEl, psdWrap });
+  Object.assign(inst, { tailBox: box, titleEl: title, plotHost, legendEl, psdWrap });
 
-  const pad = { l: 46, r: 8 };
-  const pxToMs = (px) => {
-    const w = canvas.clientWidth || canvas.width;
-    return ((px - pad.l) / (w - pad.l - pad.r)) * inst.tMax;
-  };
-  const msToPx = (ms) => {
-    const w = canvas.clientWidth || canvas.width;
-    return pad.l + (ms / inst.tMax) * (w - pad.l - pad.r);
-  };
-  inst.redrawTail = () => {
-    drawChart(canvas, inst.traces, inst.unit, null, "ms");
-    if (inst.selection) {
-      const ctx = canvas.getContext("2d");
-      const h = canvas.clientHeight || canvas.height;
-      ctx.fillStyle = "rgba(88, 166, 255, 0.15)";
-      const x0 = msToPx(inst.selection[0]), x1 = msToPx(inst.selection[1]);
-      ctx.fillRect(Math.min(x0, x1), 8, Math.abs(x1 - x0), h - 30);
-    }
-  };
   inst.renderPsd = () => {
     psdWrap.innerHTML = "";
     if (inst.selection) {
@@ -360,37 +340,15 @@ function createRingdownChart(stepName, sourceName) {
       )
     );
   };
-  let dragFrom = null;
-  canvas.addEventListener("mousedown", (e) => {
-    dragFrom = pxToMs(e.offsetX);
-  });
-  canvas.addEventListener("mousemove", (e) => {
-    if (dragFrom == null) return;
-    inst.selection = [dragFrom, pxToMs(e.offsetX)];
-    inst.redrawTail();
-  });
-  const finish = (e) => {
-    if (dragFrom == null) return;
-    const from = dragFrom;
-    const to = pxToMs(e.offsetX);
-    dragFrom = null;
-    const lo = Math.max(0, Math.min(from, to));
-    const hi = Math.min(inst.tMax, Math.max(from, to));
-    inst.selection = hi - lo < 2 ? null : [lo, hi];
-    inst.redrawTail();
-    inst.renderPsd();
-  };
-  canvas.addEventListener("mouseup", finish);
-  canvas.addEventListener("mouseleave", (e) => {
-    if (dragFrom != null) finish(e);
-  });
   return inst;
 }
 
+/// The tail count can change between refreshes, so each update rebuilds the
+/// uPlot; the brush selection is kept in ms on the instance and re-applied,
+/// which is what makes it survive the 5 s refresh.
 function updateRingdownChart(inst, runEntries) {
   inst.runEntries = runEntries;
   const { traces, legend } = ringdownTailTraces(runEntries);
-  inst.traces = traces;
   inst.tMax = traces.reduce((m, tr) => Math.max(m, tr.t[tr.t.length - 1] || 0), 0);
   inst.unit = runEntries[0].src.unit;
   inst.markers = { markers: ringdownModeMarkers(runEntries[0].src.modes) };
@@ -404,7 +362,22 @@ function updateRingdownChart(inst, runEntries) {
     inst.legendEl.appendChild(span);
   }
   if (inst.selection && inst.selection[1] > inst.tMax) inst.selection = null;
-  inst.redrawTail();
+  if (inst.plot) inst.plot.u.destroy();
+  inst.plot = timeSeriesPlot(inst.plotHost, {
+    width: 860,
+    height: 220,
+    yLabel: inst.unit,
+    xUnit: "ms",
+    traces,
+    brush: {
+      minSpan: 2,
+      onSelect: (sel) => {
+        inst.selection = sel;
+        inst.renderPsd();
+      },
+    },
+  });
+  inst.plot.setBrush(inst.selection);
   inst.renderPsd();
 }
 

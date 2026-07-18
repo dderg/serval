@@ -76,7 +76,7 @@ function marksPlugin(marks) {
 /// series, but this chart wants the single nearest point by 2D pixel
 /// distance — the hovered point, for that run/metric — so the plugin snaps
 /// itself and draws the vertical line, dot, and value box.
-function nearestPointPlugin({ yLabel, xUnit, xTitle, traces }) {
+function nearestPointPlugin({ yLabel, xUnit, xTitle, traces, formatText }) {
   let hovered = null;
   const fmtVal = (v) => (Math.abs(v) >= 1000 ? v.toFixed(0) : v.toFixed(1));
   return {
@@ -122,10 +122,15 @@ function nearestPointPlugin({ yLabel, xUnit, xTitle, traces }) {
         ctx.beginPath();
         ctx.arc(px, py, 3 * dpr, 0, 2 * Math.PI);
         ctx.fill();
-        const swept = xTitle ? `${xTitle} = ` : "";
-        const lab = trace.label != null ? trace.label : "";
-        const span = (u.scales.x.max ?? 0) - (u.scales.x.min ?? 0);
-        const text = `${swept}${fmtTick(xVal, span)}${xUnit}  ${fmtVal(yVal)} ${yLabel}${lab ? "  " + lab : ""}`;
+        let text;
+        if (formatText) {
+          text = formatText(xVal, yVal, trace);
+        } else {
+          const swept = xTitle ? `${xTitle} = ` : "";
+          const lab = trace.label != null ? trace.label : "";
+          const span = (u.scales.x.max ?? 0) - (u.scales.x.min ?? 0);
+          text = `${swept}${fmtTick(xVal, span)}${xUnit}  ${fmtVal(yVal)} ${yLabel}${lab ? "  " + lab : ""}`;
+        }
         ctx.font = THEME.readoutFont.replace("11px", `${11 * dpr}px`);
         const tw = ctx.measureText(text).width;
         const tx = Math.min(
@@ -163,7 +168,7 @@ function traceSeries(tr) {
 /// live charts can stream new data into a persistent instance.
 function timeSeriesPlot(target, opts) {
   ensureUplotCss();
-  const { width, height, yLabel, marks = [], hover = false } = opts;
+  const { width, height, yLabel, marks = [], hover = false, brush = null } = opts;
   const xUnit = opts.xUnit == null ? "s" : opts.xUnit;
   let fixedY = opts.fixedY || null;
   let traces = opts.traces;
@@ -176,7 +181,25 @@ function timeSeriesPlot(target, opts) {
     width,
     height,
     pxAlign: false,
-    cursor: { show: false },
+    cursor: brush
+      ? { points: { show: false }, drag: { x: true, y: false, setScale: false } }
+      : { show: false },
+    hooks: brush
+      ? {
+          setSelect: [
+            (u) => {
+              const lo = u.posToVal(u.select.left, "x");
+              const hi = u.posToVal(u.select.left + u.select.width, "x");
+              if (hi - lo < brush.minSpan) {
+                u.setSelect({ left: 0, top: 0, width: 0, height: 0 }, false);
+                brush.onSelect(null);
+              } else {
+                brush.onSelect([lo, hi]);
+              }
+            },
+          ],
+        }
+      : {},
     legend: { show: false },
     scales: {
       x: { time: false },
@@ -212,7 +235,186 @@ function timeSeriesPlot(target, opts) {
       fixedY = nextFixedY || null;
       u.setData(joinTraces(traces));
     },
+    setBrush(sel) {
+      if (!sel) {
+        u.setSelect({ left: 0, top: 0, width: 0, height: 0 }, false);
+        return;
+      }
+      const left = u.valToPos(sel[0], "x");
+      const width = u.valToPos(sel[1], "x") - left;
+      const dpr = uPlot.pxRatio || window.devicePixelRatio || 1;
+      u.setSelect({ left, top: 0, width, height: u.bbox.height / dpr }, false);
+    },
   };
 }
 
-export { timeSeriesPlot, THEME };
+const PSD_LOG_FLOOR = 1e-6;
+
+function psdBandPlugin(band, traces, plotY) {
+  return {
+    hooks: {
+      drawClear: (u) => {
+        const lo = Math.max(band[0], u.scales.x.min);
+        const hi = Math.min(band[1], u.scales.x.max);
+        if (hi <= lo) return;
+        const x0 = u.valToPos(lo, "x", true);
+        const x1 = u.valToPos(hi, "x", true);
+        u.ctx.save();
+        u.ctx.fillStyle = "rgba(217, 164, 65, 0.10)";
+        u.ctx.fillRect(x0, u.bbox.top, x1 - x0, u.bbox.height);
+        u.ctx.restore();
+      },
+      draw: (u) => {
+        const dpr = uPlot.pxRatio || window.devicePixelRatio || 1;
+        u.ctx.save();
+        u.ctx.font = THEME.font.replace("10px", `${10 * dpr}px`);
+        traces.forEach((tr, idx) => {
+          let bestI = -1;
+          let bestV = -Infinity;
+          for (let i = 0; i < tr.freq.length; i++) {
+            if (tr.freq[i] >= band[0] && tr.freq[i] < band[1] && tr.y[i] > bestV) {
+              bestV = tr.y[i];
+              bestI = i;
+            }
+          }
+          if (bestI < 0) return;
+          const px = u.valToPos(tr.freq[bestI], "x", true);
+          const py = u.valToPos(plotY(tr.y[bestI]), "y", true);
+          u.ctx.fillStyle = tr.color;
+          u.ctx.beginPath();
+          u.ctx.arc(px, py, 2.5 * dpr, 0, Math.PI * 2);
+          u.ctx.fill();
+          u.ctx.fillText(
+            `${tr.freq[bestI].toFixed(0)}Hz`,
+            px + 4 * dpr,
+            py - (4 + (idx % 3) * 10) * dpr
+          );
+        });
+        u.ctx.restore();
+      },
+    },
+  };
+}
+
+function thresholdPlugin(threshold, plotY) {
+  return {
+    hooks: {
+      draw: (u) => {
+        const dpr = uPlot.pxRatio || window.devicePixelRatio || 1;
+        const py = u.valToPos(plotY(threshold), "y", true);
+        u.ctx.save();
+        u.ctx.strokeStyle = "#d9a441";
+        u.ctx.lineWidth = dpr;
+        u.ctx.setLineDash([4 * dpr, 3 * dpr]);
+        u.ctx.beginPath();
+        u.ctx.moveTo(u.bbox.left, py);
+        u.ctx.lineTo(u.bbox.left + u.bbox.width, py);
+        u.ctx.stroke();
+        u.ctx.restore();
+      },
+    },
+  };
+}
+
+function freqMarkersPlugin(markers) {
+  return {
+    hooks: {
+      draw: (u) => {
+        const dpr = uPlot.pxRatio || window.devicePixelRatio || 1;
+        u.ctx.save();
+        u.ctx.font = THEME.font.replace("10px", `${10 * dpr}px`);
+        u.ctx.setLineDash([3 * dpr, 3 * dpr]);
+        u.ctx.lineWidth = dpr;
+        markers.forEach((m, idx) => {
+          if (m.freq < u.scales.x.min || m.freq > u.scales.x.max) return;
+          const px = u.valToPos(m.freq, "x", true);
+          u.ctx.strokeStyle = "#b388ff";
+          u.ctx.beginPath();
+          u.ctx.moveTo(px, u.bbox.top);
+          u.ctx.lineTo(px, u.bbox.top + u.bbox.height);
+          u.ctx.stroke();
+          u.ctx.fillStyle = "#b388ff";
+          u.ctx.fillText(m.label, px + 4 * dpr, u.bbox.top + (12 + (idx % 3) * 10) * dpr);
+        });
+        u.ctx.restore();
+      },
+    },
+  };
+}
+
+/// Frequency-domain sibling of timeSeriesPlot: takes PSD-style traces
+/// ({freq, y, color, dashed, label}) and builds a uPlot with a true
+/// log-10 y scale (uPlot distr:3) unless `linear`, plus the shared PSD
+/// furniture — band shading with per-trace peak dots, a threshold line,
+/// staggered vertical mode markers, and the nearest-point hover readout.
+function psdPlot(target, opts) {
+  ensureUplotCss();
+  const { width, height, traces, band, yTitle, linear, zeroFloor, fixedY, threshold, markers, formatValue } = opts;
+  const plotY = linear ? (v) => v : (v) => Math.max(v, PSD_LOG_FLOOR);
+
+  const plugins = [];
+  if (band) plugins.push(psdBandPlugin(band, traces, plotY));
+  if (threshold != null) plugins.push(thresholdPlugin(threshold, plotY));
+  if (markers && markers.length) plugins.push(freqMarkersPlugin(markers));
+  plugins.push(
+    nearestPointPlugin({
+      traces,
+      formatText: (xVal, yVal, trace) =>
+        `${xVal.toFixed(1)} Hz  ${formatValue(yVal)}  ${trace.label}`,
+    })
+  );
+
+  const yScale = linear
+    ? {
+        range: (u, dataMin, dataMax) => {
+          let lo = zeroFloor ? 0 : dataMin;
+          let hi = dataMax;
+          if (fixedY) {
+            lo = fixedY.yMin;
+            hi = fixedY.yMax;
+          }
+          if (lo == null || hi == null) return [0, 1];
+          return lo === hi ? [lo - 1, hi + 1] : [lo, hi];
+        },
+      }
+    : { distr: 3 };
+
+  const u = new uPlot(
+    {
+      width,
+      height,
+      pxAlign: false,
+      cursor: { show: true, x: false, y: false, points: { show: false } },
+      legend: { show: false },
+      scales: { x: { time: false }, y: yScale },
+      axes: [
+        themedAxis({ values: (u2, vals) => vals.map((f) => f.toFixed(0) + "Hz"), size: 24 }),
+        themedAxis({
+          label: yTitle,
+          labelFont: THEME.font,
+          labelGap: 2,
+          size: 52,
+          values: (u2, vals) => vals.map(formatValue),
+        }),
+      ],
+      series: [
+        {},
+        ...traces.map((tr) => ({
+          label: tr.label,
+          stroke: tr.color,
+          width: 1.25,
+          dash: tr.dashed ? [4, 3] : undefined,
+          points: { show: false },
+          spanGaps: false,
+        })),
+      ],
+      plugins,
+    },
+    joinTraces(traces.map((tr) => ({ t: tr.freq, y: tr.y.map(plotY) }))),
+    target
+  );
+  u.root.style.background = THEME.bg;
+  return u;
+}
+
+export { timeSeriesPlot, psdPlot, THEME };

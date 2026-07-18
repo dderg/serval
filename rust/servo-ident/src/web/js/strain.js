@@ -1,5 +1,5 @@
 import { api, el, pageRuns, shortTime } from "./api.js";
-import { drawChart, mixColor } from "./charts-core.js";
+import { drawChart, hidpiCanvasContext, mixColor } from "./charts-core.js";
 import { loadRerunForm } from "./drive.js";
 import { currentPageDef, controlsSectionsHtml, sectionHeadHtml } from "./shell.js";
 import { PALETTE, state } from "./state.js";
@@ -282,17 +282,7 @@ function lineBinWidth(line) {
 }
 
 function drawStrainHeatmap(canvas, group, beltIdx, vmax, geo) {
-  const dpr = window.devicePixelRatio || 1;
-  const w = canvas.clientWidth || canvas.width;
-  const h = canvas.clientHeight || canvas.height;
-  const backingW = Math.round(w * dpr);
-  const backingH = Math.round(h * dpr);
-  if (canvas.width !== backingW || canvas.height !== backingH) {
-    canvas.width = backingW;
-    canvas.height = backingH;
-  }
-  const ctx = canvas.getContext("2d");
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const { ctx, w, h } = hidpiCanvasContext(canvas);
   ctx.fillStyle = "#0d1117";
   ctx.fillRect(0, 0, w, h);
   const pad = STRAIN_HEAT_PAD;
@@ -411,17 +401,7 @@ function meanElastic(line, beltIdx) {
 }
 
 function drawStrainDcBars(canvas, labels, values) {
-  const dpr = window.devicePixelRatio || 1;
-  const w = canvas.clientWidth || canvas.width;
-  const h = canvas.clientHeight || canvas.height;
-  const backingW = Math.round(w * dpr);
-  const backingH = Math.round(h * dpr);
-  if (canvas.width !== backingW || canvas.height !== backingH) {
-    canvas.width = backingW;
-    canvas.height = backingH;
-  }
-  const ctx = canvas.getContext("2d");
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const { ctx, w, h } = hidpiCanvasContext(canvas);
   ctx.fillStyle = "#0d1117";
   ctx.fillRect(0, 0, w, h);
   const pad = { l: 46, r: 8, t: 8, b: 40 };

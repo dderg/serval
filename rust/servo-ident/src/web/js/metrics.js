@@ -1,6 +1,6 @@
 import { el, payloadUnchanged, runDataSig } from "./api.js";
 import { mixColor, traceStyle, clipToPsdBand, psdMaxFreqHz, psdToAmplitude, countsPerMm } from "./charts-core.js";
-import { timeSeriesPlot } from "./uplot-chart.js";
+import { psdPlot, timeSeriesPlot } from "./uplot-chart.js";
 import { redrawCharts } from "./peaks.js";
 import { runColor } from "./runs.js";
 import { motorView, motorViewPerMotor } from "./shell.js";
@@ -402,202 +402,30 @@ function fmtLinear(v) {
   return a >= 1000 || a < 0.01 ? v.toExponential(1) : v.toPrecision(3);
 }
 
-function drawPsdChart(canvas, traces, band, yTitle, hover, opts) {
-  opts = opts || {};
-  const dpr = window.devicePixelRatio || 1;
-  const w = canvas.clientWidth || canvas.width;
-  const h = canvas.clientHeight || canvas.height;
-  const backingW = Math.round(w * dpr);
-  const backingH = Math.round(h * dpr);
-  if (canvas.width !== backingW || canvas.height !== backingH) {
-    canvas.width = backingW;
-    canvas.height = backingH;
-  }
-  const ctx = canvas.getContext("2d");
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = "#0d1117";
-  ctx.fillRect(0, 0, w, h);
-  const pad = { l: 46, r: 8, t: 8, b: 22 };
-  const EPS = 1e-6;
-  const toV = (raw) => (opts.linear ? raw : Math.log10(Math.max(raw, EPS)));
-  let fMin = Infinity, fMax = -Infinity, vMin = Infinity, vMax = -Infinity;
-  for (const tr of traces) {
-    for (let i = 0; i < tr.freq.length; i++) {
-      const f = tr.freq[i];
-      const v = toV(tr.y[i]);
-      fMin = Math.min(fMin, f);
-      fMax = Math.max(fMax, f);
-      vMin = Math.min(vMin, v);
-      vMax = Math.max(vMax, v);
-    }
-  }
-  if (opts.zeroFloor) vMin = 0;
-  if (opts.fixedY) {
-    vMin = opts.fixedY.yMin;
-    vMax = opts.fixedY.yMax;
-  }
-  if (!isFinite(fMin) || !isFinite(vMin)) return;
-  if (vMin === vMax) { vMin -= 1; vMax += 1; }
-  const x = (f) => pad.l + ((f - fMin) / (fMax - fMin || 1)) * (w - pad.l - pad.r);
-  const yOfV = (v) => h - pad.b - ((v - vMin) / (vMax - vMin || 1)) * (h - pad.t - pad.b);
-  const y = (raw) => yOfV(toV(raw));
-
-  if (band) {
-    const [blo, bhi] = band;
-    const bandLo = Math.max(blo, fMin);
-    const bandHi = Math.min(bhi, fMax);
-    if (bandHi > bandLo) {
-      ctx.fillStyle = "rgba(217, 164, 65, 0.10)";
-      ctx.fillRect(x(bandLo), pad.t, x(bandHi) - x(bandLo), h - pad.t - pad.b);
-    }
-  }
-
-  ctx.strokeStyle = "#29313a";
-  ctx.fillStyle = "#8a97a3";
-  ctx.font = "10px monospace";
-  ctx.beginPath();
-  for (let i = 0; i <= 4; i++) {
-    const v = vMin + ((vMax - vMin) * i) / 4;
-    const py = yOfV(v);
-    ctx.moveTo(pad.l, py);
-    ctx.lineTo(w - pad.r, py);
-    ctx.fillText(opts.linear ? fmtLinear(v) : `1e${v.toFixed(1)}`, 2, py + 3);
-  }
-  for (let i = 0; i <= 4; i++) {
-    const f = fMin + ((fMax - fMin) * i) / 4;
-    const px = x(f);
-    ctx.fillText(f.toFixed(0) + "Hz", px, h - 6);
-  }
-  ctx.stroke();
-
-  if (opts.threshold != null) {
-    ctx.strokeStyle = "#d9a441";
-    ctx.setLineDash([4, 3]);
-    ctx.beginPath();
-    const py = y(opts.threshold);
-    ctx.moveTo(pad.l, py);
-    ctx.lineTo(w - pad.r, py);
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
-
-  for (const tr of traces) {
-    ctx.strokeStyle = tr.color;
-    ctx.lineWidth = 1.25;
-    ctx.setLineDash(tr.dashed ? [4, 3] : []);
-    ctx.beginPath();
-    for (let i = 0; i < tr.freq.length; i++) {
-      const px = x(tr.freq[i]);
-      const py = y(tr.y[i]);
-      if (i === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
-    }
-    ctx.stroke();
-  }
-  ctx.setLineDash([]);
-
-  if (opts.markers) {
-    ctx.setLineDash([3, 3]);
-    opts.markers.forEach((m, idx) => {
-      if (m.freq < fMin || m.freq > fMax) return;
-      const px = x(m.freq);
-      ctx.strokeStyle = "#b388ff";
-      ctx.beginPath();
-      ctx.moveTo(px, pad.t);
-      ctx.lineTo(px, h - pad.b);
-      ctx.stroke();
-      ctx.fillStyle = "#b388ff";
-      ctx.fillText(m.label, px + 4, pad.t + 12 + (idx % 3) * 10);
-    });
-    ctx.setLineDash([]);
-  }
-
-  if (band) {
-    const [blo, bhi] = band;
-    traces.forEach((tr, idx) => {
-      let bestI = -1, bestV = -Infinity;
-      for (let i = 0; i < tr.freq.length; i++) {
-        if (tr.freq[i] >= blo && tr.freq[i] < bhi && tr.y[i] > bestV) {
-          bestV = tr.y[i];
-          bestI = i;
-        }
-      }
-      if (bestI < 0) return;
-      const px = x(tr.freq[bestI]);
-      const py = y(tr.y[bestI]);
-      ctx.fillStyle = tr.color;
-      ctx.beginPath();
-      ctx.arc(px, py, 2.5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillText(`${tr.freq[bestI].toFixed(0)}Hz`, px + 4, py - 4 - (idx % 3) * 10);
-    });
-  }
-
-  ctx.fillStyle = "#8a97a3";
-  ctx.fillText(yTitle, pad.l, 10);
-
-  if (hover) {
-    let best = null;
-    for (const tr of traces) {
-      for (let i = 0; i < tr.freq.length; i++) {
-        const dx = x(tr.freq[i]) - hover.mx;
-        const dy = y(tr.y[i]) - hover.my;
-        const d = dx * dx + dy * dy;
-        if (!best || d < best.d) best = { d, tr, i };
-      }
-    }
-    if (best) {
-      const px = x(best.tr.freq[best.i]);
-      const py = y(best.tr.y[best.i]);
-      ctx.strokeStyle = "#4a5560";
-      ctx.beginPath();
-      ctx.moveTo(px, pad.t);
-      ctx.lineTo(px, h - pad.b);
-      ctx.stroke();
-      ctx.fillStyle = best.tr.color;
-      ctx.beginPath();
-      ctx.arc(px, py, 3, 0, Math.PI * 2);
-      ctx.fill();
-      const value = opts.linear
-        ? fmtLinear(best.tr.y[best.i])
-        : best.tr.y[best.i].toExponential(2);
-      const text = `${best.tr.freq[best.i].toFixed(1)} Hz  ${value}  ${best.tr.label}`;
-      const tw = ctx.measureText(text).width;
-      const tx = Math.min(Math.max(px + 8, pad.l), w - pad.r - tw - 8);
-      const ty = Math.max(py - 10, pad.t + 12);
-      ctx.fillStyle = "#0d1117";
-      ctx.fillRect(tx - 4, ty - 10, tw + 8, 14);
-      ctx.strokeStyle = "#4a5560";
-      ctx.strokeRect(tx - 4, ty - 10, tw + 8, 14);
-      ctx.fillStyle = "#e6edf3";
-      ctx.fillText(text, tx, ty);
-    }
-  }
-}
-
-/// Redraws with the cursor position on every move — the readout follows
-/// the nearest sample, so exact peak frequencies are readable instead of
-/// eyeballed off the axis.
-function attachPsdHover(canvas, traces, band, yTitle, opts) {
-  canvas.addEventListener("mousemove", (e) => {
-    drawPsdChart(canvas, traces, band, yTitle, { mx: e.offsetX, my: e.offsetY }, opts);
-  });
-  canvas.addEventListener("mouseleave", () => drawPsdChart(canvas, traces, band, yTitle, null, opts));
-}
-
 function psdBox(title, traces, band, yTitle, opts) {
+  opts = opts || {};
   const box = document.createElement("div");
   box.className = "chart-box";
   const head = document.createElement("h3");
   head.textContent = title;
   box.appendChild(head);
-  const canvas = document.createElement("canvas");
-  canvas.width = 860;
-  canvas.height = 280;
-  box.appendChild(canvas);
-  drawPsdChart(canvas, traces, band, yTitle, null, opts);
-  attachPsdHover(canvas, traces, band, yTitle, opts);
+  const plotHost = document.createElement("div");
+  box.appendChild(plotHost);
+  if (traces.length) {
+    psdPlot(plotHost, {
+      width: 860,
+      height: 280,
+      traces,
+      band,
+      yTitle,
+      linear: opts.linear,
+      zeroFloor: opts.zeroFloor,
+      fixedY: opts.fixedY,
+      threshold: opts.threshold,
+      markers: opts.markers,
+      formatValue: opts.linear ? fmtLinear : (v) => v.toExponential(2),
+    });
+  }
   const legend = document.createElement("div");
   legend.className = "legend";
   traces.forEach((tr) => {
@@ -686,4 +514,4 @@ function fillStepChips(container, stepNames) {
   }
 }
 
-export { driveMoveSummary, settleCellHtml, torqueCellHtml, metricsDriveRow, foldDriveRows, metricsTableRows, heatCellStyle, renderMetricsTable, sweptAxisKey, sweepMetricsSeries, renderSweepMetricsChart, driveRamp, psdFerrUm2, psdFerrTraces, psdAccelTraces, fmtLinear, drawPsdChart, attachPsdHover, psdBox, renderPsdChart, visibleStepNames, renderStepChips, fillStepChips };
+export { driveMoveSummary, settleCellHtml, torqueCellHtml, metricsDriveRow, foldDriveRows, metricsTableRows, heatCellStyle, renderMetricsTable, sweptAxisKey, sweepMetricsSeries, renderSweepMetricsChart, driveRamp, psdFerrUm2, psdFerrTraces, psdAccelTraces, fmtLinear, psdBox, renderPsdChart, visibleStepNames, renderStepChips, fillStepChips };
