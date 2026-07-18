@@ -1,5 +1,6 @@
 import { api, el, mustEl, pageRuns, shortTime } from "./api";
-import { drawChart, hidpiCanvasContext, mixColor } from "./charts-core";
+import { hidpiCanvasContext, mixColor } from "./charts-core";
+import { timeSeriesPlot } from "./uplot-chart";
 import { loadRerunForm } from "./drive";
 import { currentPageDef, controlsSectionsHtml, sectionHeadHtml } from "./shell";
 import { PALETTE, state } from "./state";
@@ -379,10 +380,8 @@ function strainProfileBox(title: string, beltIdx: number, group: StrainGroup, vm
   const head = document.createElement("h3");
   head.textContent = title;
   box.appendChild(head);
-  const canvas = document.createElement("canvas");
-  canvas.width = 860;
-  canvas.height = 300;
-  box.appendChild(canvas);
+  const plotHost = document.createElement("div");
+  box.appendChild(plotHost);
   const lines = group.lines;
   const sweepOrigin = group.orientation === "x" ? geo.x0 : geo.y0;
   const ramp = (i: number) =>
@@ -396,13 +395,14 @@ function strainProfileBox(title: string, beltIdx: number, group: StrainGroup, vm
     y: line.belts[beltIdx][state.strain.field],
     color: ramp(i),
   }));
-  drawChart(
-    canvas,
+  timeSeriesPlot(plotHost, {
+    width: 860,
+    height: 300,
+    yLabel: `${state.strain.field} (%) vs bed ${group.orientation}`,
     traces,
-    `${state.strain.field} (%) vs bed ${group.orientation}`,
-    { yMin: -vmax, yMax: vmax },
-    "mm"
-  );
+    fixedY: { yMin: -vmax, yMax: vmax },
+    xUnit: "mm",
+  });
   const legend = document.createElement("div");
   legend.className = "legend";
   lines.forEach((line, i) => {

@@ -116,6 +116,45 @@ function xSpan(u: uPlot): [number, number] {
   return [min, max];
 }
 
+const WHEEL_ZOOM_FACTOR = 0.8;
+const MIN_ZOOM_SPAN_FRACTION = 1e-4;
+
+/// Scroll-wheel zooms the x axis around the cursor; double-click restores the
+/// full data span. Wheel (not drag) so it composes with charts whose drag
+/// gesture is already a brush selection.
+function wheelZoomPlugin(): uPlot.Plugin {
+  return {
+    hooks: {
+      ready: (u) => {
+        u.over.addEventListener(
+          "wheel",
+          (e: WheelEvent) => {
+            e.preventDefault();
+            const xs = u.data[0];
+            if (xs.length < 2) return;
+            const dataMin = xs[0];
+            const dataMax = xs[xs.length - 1];
+            const [xMin, xMax] = xSpan(u);
+            const rect = u.over.getBoundingClientRect();
+            const at = u.posToVal(e.clientX - rect.left, "x");
+            const factor = e.deltaY < 0 ? WHEEL_ZOOM_FACTOR : 1 / WHEEL_ZOOM_FACTOR;
+            const lo = Math.max(at - (at - xMin) * factor, dataMin);
+            const hi = Math.min(at + (xMax - at) * factor, dataMax);
+            if (hi - lo < (dataMax - dataMin) * MIN_ZOOM_SPAN_FRACTION) return;
+            u.setScale("x", { min: lo, max: hi });
+          },
+          { passive: false }
+        );
+        u.over.addEventListener("dblclick", () => {
+          const xs = u.data[0];
+          if (xs.length < 2) return;
+          u.setScale("x", { min: xs[0], max: xs[xs.length - 1] });
+        });
+      },
+    },
+  };
+}
+
 function marksPlugin(marks: Mark[]): uPlot.Plugin {
   return {
     hooks: {
@@ -250,7 +289,7 @@ function timeSeriesPlot(target: HTMLElement, opts: TimeSeriesOpts): TimeSeriesPl
   let fixedY = opts.fixedY || null;
   let traces = opts.traces;
 
-  const plugins: uPlot.Plugin[] = [];
+  const plugins: uPlot.Plugin[] = [wheelZoomPlugin()];
   if (marks.length) plugins.push(marksPlugin(marks));
   if (hover) plugins.push(nearestPointPlugin({ yLabel, xUnit, xTitle: opts.xTitle, traces }));
 
@@ -430,7 +469,7 @@ function psdPlot(target: HTMLElement, opts: PsdPlotOpts): uPlot {
   const { width, height, traces, band, yTitle, linear, zeroFloor, fixedY, threshold, markers, formatValue } = opts;
   const plotY = linear ? (v: number) => v : (v: number) => Math.max(v, PSD_LOG_FLOOR);
 
-  const plugins: uPlot.Plugin[] = [];
+  const plugins: uPlot.Plugin[] = [wheelZoomPlugin()];
   if (band) plugins.push(psdBandPlugin(band, traces, plotY));
   if (threshold != null) plugins.push(thresholdPlugin(threshold, plotY));
   if (markers && markers.length) plugins.push(freqMarkersPlugin(markers));

@@ -7,11 +7,18 @@ use mcu_transport::demux::{Demuxer, Frame};
 
 use crate::wire::{decode_command, Command};
 
+/// Per-pump read cap. Decode cost scales with bytes (~60 ns/byte measured on
+/// the Pi 5), and the pump pass runs on the RT thread where a 4 KB gulp
+/// measured 242 us — a whole latch margin. 1 KB bounds the pass near 60 us
+/// while still granting 4 MB/s at the 4 kHz cycle, ~100x the piece stream's
+/// worst-case bandwidth; bursts simply drain over a few cycles.
+const READ_CHUNK: usize = 1024;
+
 pub struct FrameServer {
     listener: UnixListener,
     conn: Option<UnixStream>,
     demux: Demuxer,
-    buf: [u8; 4096],
+    buf: [u8; READ_CHUNK],
     /// Decoded commands not yet consumed — lets a caller stop mid-batch (the
     /// RT loop's dispatch budget) without dropping the rest.
     pending: VecDeque<Command>,
@@ -39,7 +46,7 @@ impl FrameServer {
             listener,
             conn: None,
             demux: Demuxer::new(),
-            buf: [0u8; 4096],
+            buf: [0u8; READ_CHUNK],
             pending: VecDeque::new(),
             session_ended: false,
         })
