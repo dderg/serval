@@ -3,13 +3,14 @@
 
 use std::collections::BTreeMap;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::metrics::Metrics;
 use crate::resonance::Resonance;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct Applied {
     pub servo: String,
     pub addr: String,
@@ -68,27 +69,27 @@ pub struct Manifest {
     pub steps: Vec<Step>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct DriveResult {
     pub metrics: Metrics,
     pub psd_peaks: Vec<(f64, f64)>,
     pub resonance: Resonance,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Combined {
     pub on_ferr_peak_mm: f64,
     pub on_ferr_rms_mm: f64,
     pub cross_ferr_peak_mm: f64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct AccelResult {
     pub present: bool,
     pub psd_peaks: Vec<(f64, f64)>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DifferentialMode {
     pub freq_hz: f64,
     pub gain: f64,
@@ -97,14 +98,14 @@ pub struct DifferentialMode {
     pub coherence: f64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct DifferentialResult {
     pub pair: Vec<String>,
     pub segments: usize,
     pub modes: Vec<DifferentialMode>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RingdownMode {
     pub freq_hz: f64,
     pub zeta: f64,
@@ -118,7 +119,7 @@ pub struct RingdownMode {
     pub fit_start_ms: f64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct RingdownSource {
     pub source: String,
     pub unit: String,
@@ -127,14 +128,14 @@ pub struct RingdownSource {
     pub modes: Vec<RingdownMode>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct RingdownResult {
     pub guard_ms: f64,
     pub window_ms: f64,
     pub sources: Vec<RingdownSource>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct StepResult {
     pub name: String,
     pub drives: BTreeMap<String, DriveResult>,
@@ -146,7 +147,7 @@ pub struct StepResult {
     pub flags: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Verdict {
     pub recommended_step: Option<String>,
     pub reason: String,
@@ -154,7 +155,7 @@ pub struct Verdict {
     pub apply: Option<Vec<Applied>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Results {
     pub version: i64,
     pub fs_hz: f64,
@@ -164,38 +165,38 @@ pub struct Results {
     pub verdict: Verdict,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PlotDrive {
     pub ferr_counts: Vec<f64>,
     pub torque_per_mille: Vec<f64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PlotCombined {
     pub on_ferr_mm: Vec<f64>,
     pub cross_ferr_mm: Vec<f64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PlotAccel {
     pub t_s: Vec<f64>,
     pub magnitude: Vec<f64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PlotPsdAccel {
     pub freq_hz: Vec<f64>,
     pub psd: Vec<f64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PlotPsd {
     pub freq_hz: Vec<f64>,
     pub per_drive: BTreeMap<String, Vec<f64>>,
     pub accel: Option<PlotPsdAccel>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PlotDifferential {
     pub freq_hz: Vec<f64>,
     pub mag_db: Vec<f64>,
@@ -207,13 +208,13 @@ pub struct PlotDifferential {
     pub modes: Vec<DifferentialMode>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PlotRingdownTail {
     pub start_s: f64,
     pub value: Vec<f64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PlotRingdownSource {
     pub source: String,
     pub unit: String,
@@ -224,12 +225,12 @@ pub struct PlotRingdownSource {
     pub tails: Vec<PlotRingdownTail>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PlotRingdown {
     pub sources: Vec<PlotRingdownSource>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PlotStep {
     pub name: String,
     pub fs_hz: f64,
@@ -245,7 +246,7 @@ pub struct PlotStep {
     pub psd: PlotPsd,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PlotSeries {
     pub version: i64,
     pub steps: Vec<PlotStep>,

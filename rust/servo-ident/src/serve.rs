@@ -9,6 +9,7 @@
 use std::path::Path;
 use std::time::SystemTime;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::analyze::{build_run, write_run_outputs};
@@ -20,7 +21,7 @@ use crate::results::Manifest;
 use crate::strain;
 use crate::time_fmt::iso8601_utc;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct VerdictSummary {
     pub recommended_step: Option<String>,
     pub reason: String,
@@ -32,7 +33,7 @@ struct ResultsVerdictOnly {
     verdict: VerdictSummary,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct RunSummary {
     pub name: String,
     pub mtime_utc: String,
@@ -273,7 +274,7 @@ struct NoteBody {
     note: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct NoteResponse<'a> {
     note: &'a str,
 }
@@ -315,7 +316,7 @@ fn handle_note(captures_root: &Path, name: &str, body: &[u8]) -> Response {
     )
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct DeleteResponse<'a> {
     deleted: &'a str,
 }
@@ -388,14 +389,14 @@ fn handle_strain(captures_root: &Path, name: &str) -> Response {
     Response::json(200, body)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct LiveCapture<'a> {
     name: Option<&'a str>,
     size_bytes: u64,
     age_s: Option<f64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 struct LiveStatus<'a> {
     capture: Option<LiveCapture<'a>>,
 }
