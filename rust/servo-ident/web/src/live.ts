@@ -1,4 +1,5 @@
 import { api, el, mustEl, payloadUnchanged } from "./api";
+import { drawSpatialView } from "./spatial";
 import { timeSeriesPlot } from "./uplot-chart";
 import { formatAge } from "./drive";
 import { runGcode } from "./moonraker";
@@ -114,6 +115,9 @@ async function pollLiveTap() {
 function appendTapSamples(payload: LiveTapPayload) {
   state.live.cursor = payload.next_cycle;
   state.live.fsHz = payload.fs_hz;
+  (payload.drive_names || []).forEach((name, i) => {
+    state.live.countsPerMm[name] = (payload.counts_per_mm || [])[i];
+  });
   const tapDrives = payload.drives || {};
   const drives = Object.keys(tapDrives);
   const n = drives.length ? tapDrives[drives[0]].ferr.length : 0;
@@ -125,6 +129,8 @@ function appendTapSamples(payload: LiveTapPayload) {
       state.live.perDrive[drive] = {
         ferr: new Array(state.live.t.length).fill(null),
         torque: new Array(state.live.t.length).fill(null),
+        target: new Array(state.live.t.length).fill(null),
+        pos: new Array(state.live.t.length).fill(null),
       };
     }
   }
@@ -137,12 +143,16 @@ function appendTapSamples(payload: LiveTapPayload) {
       for (const drive of drives) {
         state.live.perDrive[drive].ferr.push(null);
         state.live.perDrive[drive].torque.push(null);
+        state.live.perDrive[drive].target.push(null);
+        state.live.perDrive[drive].pos.push(null);
       }
     }
     state.live.t.push((cycle - cycle0) / payload.fs_hz);
     for (const drive of drives) {
       state.live.perDrive[drive].ferr.push(tapDrives[drive].ferr[i]);
       state.live.perDrive[drive].torque.push(tapDrives[drive].torque[i] / 10);
+      state.live.perDrive[drive].target.push(tapDrives[drive].target[i]);
+      state.live.perDrive[drive].pos.push(tapDrives[drive].pos[i]);
     }
     state.live.lastCycle = cycle;
   }
@@ -159,6 +169,8 @@ function trimLiveWindow() {
     for (const series of Object.values(state.live.perDrive)) {
       series.ferr.splice(0, drop);
       series.torque.splice(0, drop);
+      series.target.splice(0, drop);
+      series.pos.splice(0, drop);
     }
   }
 }
@@ -265,6 +277,7 @@ function drawLiveChartGroup(
 }
 
 function drawLiveCharts() {
+  drawSpatialView();
   if (!state.live.t.length) return;
   const drives = Object.keys(state.live.perDrive).sort();
   if (!drives.length) return;
@@ -292,6 +305,7 @@ function startLivePolling() {
   state.live.lastCycle = null;
   state.live.t = [];
   state.live.perDrive = {};
+  state.live.countsPerMm = {};
   pollLiveFileStatus();
   pollLiveTap();
   state.live.timers = [

@@ -53,7 +53,6 @@ struct DemoPanelParam {
     unit: &'static str,
     group: &'static str,
     description: String,
-    autofill: Option<&'static str>,
     options: Option<&'static [(&'static str, &'static str)]>,
     reading: i64,
 }
@@ -74,7 +73,6 @@ fn plain_param(
         unit,
         group,
         description: description.into(),
-        autofill: None,
         options: None,
         reading,
     }
@@ -108,39 +106,33 @@ const NOTCH_READINGS: [[i64; 3]; 5] = [
 
 fn demo_panel_params() -> Vec<DemoPanelParam> {
     let mut params = vec![
-        DemoPanelParam {
-            autofill: Some("gain_position_from_speed"),
-            ..plain_param(
-                "position_gain",
-                "C01.00",
-                "0x2001.0x01",
-                "0.1 rad/s",
-                "gains",
-                "C01.00 position loop gain; autofilled from speed_gain as round(speed_gain * 1.6)",
-                880,
-            )
-        },
+        plain_param(
+            "position_gain",
+            "C01.00",
+            "0x2001.0x01",
+            "0.1 rad/s",
+            "gains",
+            "C01.00 position loop gain",
+            880,
+        ),
         plain_param(
             "speed_gain",
             "C01.01",
             "0x2001.0x02",
             "0.1 Hz",
             "gains",
-            "C01.01 speed loop gain; the autofill source for position_gain and integral_time",
+            "C01.01 speed loop gain",
             550,
         ),
-        DemoPanelParam {
-            autofill: Some("gain_integral_from_speed"),
-            ..plain_param(
-                "integral_time",
-                "C01.02",
-                "0x2001.0x03",
-                "0.01 ms",
-                "gains",
-                "C01.02 speed integral time; autofilled from speed_gain as round(1250000 / speed_gain)",
-                2273,
-            )
-        },
+        plain_param(
+            "integral_time",
+            "C01.02",
+            "0x2001.0x03",
+            "0.01 ms",
+            "gains",
+            "C01.02 speed integral time",
+            2273,
+        ),
         plain_param(
             "torque_filter_cutoff",
             "C01.03",
@@ -317,7 +309,6 @@ pub struct DriveStateParam {
     unit: &'static str,
     group: &'static str,
     description: String,
-    autofill: Option<&'static str>,
     options: Option<BTreeMap<String, String>>,
 }
 
@@ -331,7 +322,6 @@ impl From<&DemoPanelParam> for DriveStateParam {
             unit: p.unit,
             group: p.group,
             description: p.description.clone(),
-            autofill: p.autofill,
             options: p.options.map(|pairs| {
                 pairs
                     .iter()
@@ -342,6 +332,17 @@ impl From<&DemoPanelParam> for DriveStateParam {
     }
 }
 
+/// Motor-space -> cartesian position map for the live spatial view, the
+/// SERVO_DUMP_TUNING mirror of `servo_strokes.spatial_frame`: `axes` are
+/// motor names (frame columns), each column folds the motor's invert sign
+/// in, so `mode_pos[k] = sum(frame[k][s] * drive_frame_pos_mm[s])`.
+#[derive(Debug, Serialize, JsonSchema, TS)]
+pub struct SpatialFrame {
+    modes: Vec<String>,
+    axes: Vec<String>,
+    frame: Vec<Vec<f64>>,
+}
+
 #[derive(Debug, Serialize, JsonSchema, TS)]
 pub struct DriveStatePayload {
     version: i64,
@@ -350,6 +351,7 @@ pub struct DriveStatePayload {
     motors: BTreeMap<String, BTreeMap<String, i64>>,
     config_pins: BTreeMap<String, BTreeMap<String, i64>>,
     slots: BTreeMap<String, usize>,
+    spatial: Option<SpatialFrame>,
 }
 
 /// The JSON Schema `handle_drive_state`'s response must satisfy: it adds one
@@ -357,6 +359,16 @@ pub struct DriveStatePayload {
 /// `additionalProperties` schema still accepts.
 pub fn drive_state_schema() -> schemars::Schema {
     schemars::schema_for!(DriveStatePayload)
+}
+
+/// The demo machine is CoreXY AWD — two motors per belt, none inverted —
+/// so every column carries 1/(2 belts * 2 drives).
+fn demo_spatial_frame() -> SpatialFrame {
+    SpatialFrame {
+        modes: vec!["x".to_string(), "y".to_string()],
+        axes: DEMO_MOTORS.iter().map(|m| m.to_string()).collect(),
+        frame: vec![vec![0.25, 0.25, 0.25, 0.25], vec![0.25, 0.25, -0.25, -0.25]],
+    }
 }
 
 /// Write `<out_dir>/drive_state.json` in the shape `SERVO_DUMP_TUNING`
@@ -399,6 +411,7 @@ fn write_demo_drive_state(out_dir: &Path) -> Result<(), String> {
         motors,
         config_pins,
         slots,
+        spatial: Some(demo_spatial_frame()),
     };
     let path = out_dir.join("drive_state.json");
     let tmp = out_dir.join("drive_state.json.tmp");

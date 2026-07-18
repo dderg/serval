@@ -116,7 +116,9 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
                 let now_ns = monotonic_ns();
                 discard_motion(ctx);
                 ctx.stream_halt.halt();
-                eprintln!("ec-rt: Stop — rings discarded, stream halted, discard_clock={now_ns}");
+                crate::rt_eprintln!(
+                    "ec-rt: Stop — rings discarded, stream halted, discard_clock={now_ns}"
+                );
                 ctx.server
                     .respond(&stop_response_frame(correlation_id, 0, now_ns));
             }
@@ -133,18 +135,20 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
             Command::ResumeStream { correlation_id } => match ctx.stream_halt.resume() {
                 Ok(()) => {
                     discard_motion(ctx);
-                    eprintln!("ec-rt: ResumeStream — stream reopened");
+                    crate::rt_eprintln!("ec-rt: ResumeStream — stream reopened");
                     ctx.server
                         .respond(&resume_stream_response_frame(correlation_id, 0));
                 }
                 Err(code) => {
-                    eprintln!("ec-rt: ResumeStream rejected code={code} — stream was not halted");
+                    crate::rt_eprintln!(
+                        "ec-rt: ResumeStream rejected code={code} — stream was not halted"
+                    );
                     ctx.server
                         .respond(&resume_stream_response_frame(correlation_id, code));
                 }
             },
             Command::ClaimHandshake { .. } => {
-                eprintln!(
+                crate::rt_eprintln!(
                     "ec-rt: protocol violation: ClaimHandshake after handshake \
                      — ending session"
                 );
@@ -221,11 +225,14 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
                 handle_query_motor_state(ctx, correlation_id);
             }
             Command::Unknown { kind_raw, .. } => {
-                eprintln!("ec-rt: ignoring kind 0x{kind_raw:04x}");
+                crate::rt_eprintln!("ec-rt: ignoring kind 0x{kind_raw:04x}");
             }
         }
         let cmd_ns = cmd_started.elapsed().as_nanos();
-        if cmd_ns > DISPATCH_BUDGET_NS {
+        // SetTorque's enable path is the CiA402 walk: hundreds of ms of wall
+        // time, but its internal exchanges stay on the DC grid, so it never
+        // misses a latch — warning on it would bury the real offenders.
+        if cmd_ns > DISPATCH_BUDGET_NS && name != "SetTorque" {
             tracing::warn!(
                 subsystem = "ethercat",
                 event = "slow_command",
@@ -289,20 +296,22 @@ fn handle_set_torque(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetTorque)
             for s in 0..num_slaves {
                 let rc = ctx.drive.enable(s);
                 if rc != 0 {
-                    eprintln!("ec-rt: slot {s} CiA402 enable failed rc={rc}");
+                    crate::rt_eprintln!("ec-rt: slot {s} CiA402 enable failed rc={rc}");
                     enable_rc = rc;
                     break;
                 }
             }
             ctx.gate.enable_finished(enable_rc == 0);
             if enable_rc == 0 {
-                eprintln!(
+                crate::rt_eprintln!(
                     "ec-rt: torque enabled (CiA402 operation enabled, {num_slaves} slave(s))"
                 );
                 ctx.server
                     .respond(&set_torque_response_frame(correlation_id, 0));
             } else {
-                eprintln!("ec-rt: CiA402 enable failed rc={enable_rc} — disabling and exiting");
+                crate::rt_eprintln!(
+                    "ec-rt: CiA402 enable failed rc={enable_rc} — disabling and exiting"
+                );
                 ctx.server.respond(&set_torque_response_frame(
                     correlation_id,
                     ERR_ENABLE_FAILED,
@@ -311,7 +320,7 @@ fn handle_set_torque(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetTorque)
             }
         }
         CommandAction::ScheduleDisable => {
-            eprintln!(
+            crate::rt_eprintln!(
                 "ec-rt: torque disable scheduled at {} (now {})",
                 msg.execute_at_ns,
                 monotonic_ns()
@@ -320,7 +329,7 @@ fn handle_set_torque(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetTorque)
                 .respond(&set_torque_response_frame(correlation_id, 0));
         }
         CommandAction::Reject { code } => {
-            eprintln!(
+            crate::rt_eprintln!(
                 "ec-rt: SetTorque rejected code={code} \
                      (value={} execute_at={} now={}) — exiting",
                 msg.value,
@@ -338,7 +347,7 @@ fn handle_start_capture(ctx: &mut EndpointCtx, correlation_id: u32, msg: StartCa
     let num_slaves = ctx.num_slaves;
     let slots: Vec<u8> = msg.drives.iter().map(|d| d.slot).collect();
     if any_slot_out_of_range(&slots, num_slaves) {
-        eprintln!(
+        crate::rt_eprintln!(
             "ec-rt: StartCapture drive slot out of range \
              (num_slaves={num_slaves}) — rejecting"
         );
@@ -375,7 +384,7 @@ fn handle_start_capture(ctx: &mut EndpointCtx, correlation_id: u32, msg: StartCa
 fn handle_set_drive_limits(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDriveLimits) {
     let num_slaves = ctx.num_slaves;
     if msg.slot as usize >= num_slaves {
-        eprintln!(
+        crate::rt_eprintln!(
             "ec-rt: SetDriveLimits for slot {} but only {num_slaves} slave(s)",
             msg.slot
         );
@@ -404,7 +413,7 @@ fn handle_restore_drive_limits(ctx: &mut EndpointCtx, correlation_id: u32, slot:
             });
         }
         None => {
-            eprintln!(
+            crate::rt_eprintln!(
                 "ec-rt: RestoreDriveLimits for slot {slot} but only {} slave(s)",
                 ctx.run_limits.len()
             );
@@ -435,7 +444,7 @@ pub(super) fn handle_seed_servo_home(
     home_q16: i32,
 ) {
     if slot as usize >= ctx.counts_per_mm.len() {
-        eprintln!(
+        crate::rt_eprintln!(
             "ec-rt: SeedServoHome for slot {slot} but only {} slave(s)",
             ctx.counts_per_mm.len()
         );
@@ -443,7 +452,7 @@ pub(super) fn handle_seed_servo_home(
             .respond(&seed_servo_home_response_frame(correlation_id, -309));
     } else if ctx.rings.iter().any(|r| !r.is_empty()) {
         if ctx.pending_seed.is_some() {
-            eprintln!("ec-rt: SeedServoHome rejected — a seed is already pending");
+            crate::rt_eprintln!("ec-rt: SeedServoHome rejected — a seed is already pending");
             ctx.server.respond(&seed_servo_home_response_frame(
                 correlation_id,
                 ERR_SEED_HOME_STREAMING,
@@ -451,7 +460,9 @@ pub(super) fn handle_seed_servo_home(
             return;
         }
         let drain_cycles = (SEED_DRAIN_TIMEOUT_NS / ctx.cycle_ns).max(1) as u64;
-        eprintln!("ec-rt: SeedServoHome slot={slot} deferred until the motion ring drains");
+        crate::rt_eprintln!(
+            "ec-rt: SeedServoHome slot={slot} deferred until the motion ring drains"
+        );
         ctx.pending_seed = Some(PendingSeed {
             correlation_id,
             slot,
@@ -468,7 +479,7 @@ fn complete_seed(ctx: &mut EndpointCtx, correlation_id: u32, slot: u8, home_q16:
     let anchor_counts = ctx.last_streamed_target[slot as usize]
         .unwrap_or_else(|| ctx.drive.position_actual(usize::from(slot)));
     ctx.report_anchor[slot as usize] = Some((anchor_counts, anchor_mm));
-    eprintln!(
+    crate::rt_eprintln!(
         "ec-rt: SeedServoHome slot={slot} report anchor \
          {anchor_counts} counts = {anchor_mm:.4} mm (drive frame untouched)"
     );
@@ -485,7 +496,7 @@ pub(super) fn drain_pending_seed(ctx: &mut EndpointCtx) {
         complete_seed(ctx, seed.correlation_id, seed.slot, seed.home_q16);
     } else if ctx.cycle_index >= seed.deadline_cycle {
         let seed = ctx.pending_seed.take().expect("checked above");
-        eprintln!(
+        crate::rt_eprintln!(
             "ec-rt: SeedServoHome slot={} rejected — motion ring still not \
              empty after the drain timeout",
             seed.slot
@@ -504,14 +515,16 @@ fn handle_arm_sensorless_endstop(
 ) {
     let num_slaves = ctx.num_slaves;
     let result = if msg.slot as usize >= num_slaves {
-        eprintln!(
+        crate::rt_eprintln!(
             "ec-rt: ArmSensorlessEndstop for slot {} but only {num_slaves} slave(s)",
             msg.slot
         );
         -309
     } else if msg.enable != 0 {
         if msg.torque_trip_tenth_pct == 0 {
-            eprintln!("ec-rt: ArmSensorlessEndstop rejected — zero torque trip threshold");
+            crate::rt_eprintln!(
+                "ec-rt: ArmSensorlessEndstop rejected — zero torque trip threshold"
+            );
             ERR_ARM_SENSORLESS_BAD_THRESHOLD
         } else {
             // A belt-pair slot trips on the pair's common-mode torque: the
@@ -531,15 +544,17 @@ fn handle_arm_sensorless_endstop(
                     let partner = partners.first().copied();
                     ctx.sensorless
                         .arm(slot, msg.endstop_id, msg.torque_trip_tenth_pct, partner);
-                    eprintln!(
+                    crate::rt_eprintln!(
                         "ec-rt: sensorless endstop {} armed on slot {} \
                          (torque_trip={} 0.1% partner={partner:?})",
-                        msg.endstop_id, msg.slot, msg.torque_trip_tenth_pct
+                        msg.endstop_id,
+                        msg.slot,
+                        msg.torque_trip_tenth_pct
                     );
                     0
                 }
                 _ => {
-                    eprintln!(
+                    crate::rt_eprintln!(
                         "ec-rt: ArmSensorlessEndstop rejected — slot {slot} shares \
                          axis {} with {} other slots, need at most one partner \
                          (slave_axes={:?})",
@@ -553,9 +568,10 @@ fn handle_arm_sensorless_endstop(
         }
     } else {
         ctx.sensorless.disarm(msg.slot as usize);
-        eprintln!(
+        crate::rt_eprintln!(
             "ec-rt: sensorless endstop {} disarmed on slot {}",
-            msg.endstop_id, msg.slot
+            msg.endstop_id,
+            msg.slot
         );
         0
     };
@@ -567,10 +583,10 @@ fn handle_arm_sensorless_endstop(
 
 fn handle_resonance_buzz(ctx: &mut EndpointCtx, correlation_id: u32, msg: ResonanceBuzz) {
     let rc = if ctx.gate.state() != TorqueState::Enabled {
-        eprintln!("ec-rt: ResonanceBuzz rejected — drive not operation-enabled");
+        crate::rt_eprintln!("ec-rt: ResonanceBuzz rejected — drive not operation-enabled");
         crate::buzz::ERR_BUZZ_NOT_ENABLED
     } else if ctx.rings.iter().any(|r| !r.is_empty()) || ctx.buzz.active() {
-        eprintln!("ec-rt: ResonanceBuzz rejected — motion in progress");
+        crate::rt_eprintln!("ec-rt: ResonanceBuzz rejected — motion in progress");
         if ctx.buzz.active() {
             crate::buzz::ERR_BUZZ_BUSY
         } else {
@@ -594,7 +610,7 @@ fn handle_resonance_buzz(ctx: &mut EndpointCtx, correlation_id: u32, msg: Resona
             msg.ramp_ms,
             base_counts,
         );
-        eprintln!(
+        crate::rt_eprintln!(
             "ec-rt: ResonanceBuzz axis_mask=0x{:02x} sign_mask=0x{:02x} \
              freq={}->{} mHz amplitude={} nm duration={} ms ramp={} ms \
              base_counts={base_counts:?} rc={rc}",
@@ -624,10 +640,15 @@ fn handle_set_diff_damper(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDi
             msg.lead_us,
         )
     };
-    eprintln!(
+    crate::rt_eprintln!(
         "ec-rt: SetDiffDamper slots=({},{}) gain_milli={} clamp={} 0.1% \
          lpf={} mHz lead={} us rc={rc}",
-        msg.slot_a, msg.slot_b, msg.gain_milli, msg.clamp_tenths, msg.lpf_millihz, msg.lead_us,
+        msg.slot_a,
+        msg.slot_b,
+        msg.gain_milli,
+        msg.clamp_tenths,
+        msg.lpf_millihz,
+        msg.lead_us,
     );
     tracing::info!(
         subsystem = "ethercat",
@@ -657,10 +678,15 @@ fn handle_set_diff_trim(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDiff
             msg.settle_ms,
         )
     };
-    eprintln!(
+    crate::rt_eprintln!(
         "ec-rt: SetDiffTrim slots=({},{}) gain_micro={} clamp={} um lpf={} mHz \
          settle={} ms rc={rc}",
-        msg.slot_a, msg.slot_b, msg.gain_micro, msg.clamp_um, msg.lpf_millihz, msg.settle_ms,
+        msg.slot_a,
+        msg.slot_b,
+        msg.gain_micro,
+        msg.clamp_um,
+        msg.lpf_millihz,
+        msg.settle_ms,
     );
     tracing::info!(
         subsystem = "ethercat",
@@ -681,9 +707,11 @@ fn handle_set_diff_trim(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDiff
 fn handle_set_strain_comp(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetStrainComp) {
     let lane_missing = |lane: u8| !ctx.slave_axes.iter().any(|&a| a == lane);
     let rc = if msg.nx > 0 && msg.ny > 0 && (lane_missing(msg.lane_a) || lane_missing(msg.lane_b)) {
-        eprintln!(
+        crate::rt_eprintln!(
             "ec-rt: SetStrainComp lanes ({}, {}) not present in slave_axes {:?}",
-            msg.lane_a, msg.lane_b, ctx.slave_axes
+            msg.lane_a,
+            msg.lane_b,
+            ctx.slave_axes
         );
         ERR_COMP_BAD_LANE
     } else {
@@ -708,7 +736,7 @@ fn handle_set_strain_comp(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetSt
             &values,
         )
     };
-    eprintln!(
+    crate::rt_eprintln!(
         "ec-rt: SetStrainComp slots=({},{}) lanes=({},{}) kin={} grid={}x{} \
          origin=({}, {}) spacing=({}, {}) values={} rc={rc}",
         msg.slot_a,
@@ -751,7 +779,7 @@ pub(super) fn handle_set_dynamics_model(
         && msg.viscous.len() == modes
         && msg.coulomb.len() == modes;
     let rc = if slots != ctx.num_slaves || !dims_consistent {
-        eprintln!(
+        crate::rt_eprintln!(
             "ec-rt: SetDynamicsModel slots_count={} modes_count={} \
              frame_len={} mass_len={} does not match {} slaves",
             msg.slots_count,
@@ -785,14 +813,17 @@ pub(super) fn handle_set_dynamics_model(
                 0
             }
             Err(e) => {
-                eprintln!("ec-rt: SetDynamicsModel rejected: {e:?} — keeping previous model");
+                crate::rt_eprintln!(
+                    "ec-rt: SetDynamicsModel rejected: {e:?} — keeping previous model"
+                );
                 ERR_DYNAMICS_REJECTED
             }
         }
     };
-    eprintln!(
+    crate::rt_eprintln!(
         "ec-rt: SetDynamicsModel slots={} modes={} rc={rc}",
-        msg.slots_count, msg.modes_count,
+        msg.slots_count,
+        msg.modes_count,
     );
     tracing::info!(
         subsystem = "ethercat",
@@ -809,7 +840,7 @@ pub(super) fn handle_set_dynamics_model(
 fn handle_sdo_read(ctx: &mut EndpointCtx, correlation_id: u32, msg: SdoRead) {
     let num_slaves = ctx.num_slaves;
     if msg.slot as usize >= num_slaves {
-        eprintln!(
+        crate::rt_eprintln!(
             "ec-rt: SdoRead for slot {} but only {num_slaves} slave(s)",
             msg.slot
         );
@@ -832,7 +863,7 @@ fn handle_sdo_read(ctx: &mut EndpointCtx, correlation_id: u32, msg: SdoRead) {
 fn handle_sdo_write(ctx: &mut EndpointCtx, correlation_id: u32, msg: SdoWrite) {
     let num_slaves = ctx.num_slaves;
     if msg.slot as usize >= num_slaves {
-        eprintln!(
+        crate::rt_eprintln!(
             "ec-rt: SdoWrite for slot {} but only {num_slaves} slave(s)",
             msg.slot
         );
@@ -882,7 +913,7 @@ pub(super) fn drain_pending_starts(ctx: &mut EndpointCtx) {
                 if rc != 0 && pending.claimed() {
                     ctx.capture.clear_failed_start();
                 }
-                eprintln!("ec-rt: StartCapture path={path} rc={rc}");
+                crate::rt_eprintln!("ec-rt: StartCapture path={path} rc={rc}");
                 ctx.server
                     .respond(&start_capture_response_frame(correlation_id, rc));
             }
@@ -897,9 +928,11 @@ pub(super) fn drain_pending_stops(ctx: &mut EndpointCtx) {
         match ctx.pending_stops[stop_idx].1.try_take() {
             Some(out) => {
                 let (correlation_id, _) = ctx.pending_stops.remove(stop_idx);
-                eprintln!(
+                crate::rt_eprintln!(
                     "ec-rt: StopCapture result={} samples={} overflow={:?}",
-                    out.result, out.samples, out.overflow_cycle
+                    out.result,
+                    out.samples,
+                    out.overflow_cycle
                 );
                 ctx.server.respond(&stop_capture_response_frame(
                     correlation_id,
@@ -923,9 +956,11 @@ pub(super) fn drain_mailbox_replies(ctx: &mut EndpointCtx) {
                 resp,
             } => {
                 if resp.result != 0 {
-                    eprintln!(
+                    crate::rt_eprintln!(
                         "ec-rt: SdoRead 0x{:04x}.{} failed result={}",
-                        msg.index, msg.subindex, resp.result
+                        msg.index,
+                        msg.subindex,
+                        resp.result
                     );
                 }
                 ctx.server
@@ -937,9 +972,13 @@ pub(super) fn drain_mailbox_replies(ctx: &mut EndpointCtx) {
                 resp,
             } => {
                 if resp.result != 0 {
-                    eprintln!(
+                    crate::rt_eprintln!(
                         "ec-rt: SdoWrite 0x{:04x}.{} value={} size={} failed result={}",
-                        msg.index, msg.subindex, msg.value, msg.size, resp.result
+                        msg.index,
+                        msg.subindex,
+                        msg.value,
+                        msg.size,
+                        resp.result
                     );
                 }
                 ctx.server
@@ -958,12 +997,14 @@ pub(super) fn drain_mailbox_replies(ctx: &mut EndpointCtx) {
                     "SetDriveLimits"
                 };
                 if rc != 0 {
-                    eprintln!(
+                    crate::rt_eprintln!(
                         "ec-rt: {what} SDO write failed rc={rc} \
                              ferr={ferr_counts} tq={torque_tenth_pct}"
                     );
                 } else {
-                    eprintln!("ec-rt: {what} applied ferr={ferr_counts} tq={torque_tenth_pct}");
+                    crate::rt_eprintln!(
+                        "ec-rt: {what} applied ferr={ferr_counts} tq={torque_tenth_pct}"
+                    );
                 }
                 let frame = if restore {
                     restore_drive_limits_response_frame(correlation_id, rc)

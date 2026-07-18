@@ -132,6 +132,20 @@ fn attach_now_returns_cursor_without_samples_then_polls_stream_new_records() {
         .map(|n| n.as_str().unwrap())
         .collect();
     assert_eq!(names, fx.cap.drive_names());
+    let cpm: Vec<f64> = attach["counts_per_mm"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_f64().unwrap())
+        .collect();
+    let expected_cpm: Vec<f64> = fx
+        .cap
+        .header
+        .drives
+        .iter()
+        .map(|d| d.counts_per_mm)
+        .collect();
+    assert_eq!(cpm, expected_cpm);
 
     more_tx.send(()).unwrap();
     let drive0 = fx.cap.drive_names()[0].clone();
@@ -156,6 +170,16 @@ fn attach_now_returns_cursor_without_samples_then_polls_stream_new_records() {
             i64s(&batch["drives"][name.as_str()]["torque"]),
             host_frame(&fx.cap.read_i64(idx, "torque_actual").unwrap()[500..700]),
             "torque for {name} must be host-frame (invert applied)"
+        );
+        assert_eq!(
+            i64s(&batch["drives"][name.as_str()]["target"]),
+            fx.cap.read_i64(idx, "target_counts").unwrap()[500..700].to_vec(),
+            "target for {name} must be drive-frame raw (no invert)"
+        );
+        assert_eq!(
+            i64s(&batch["drives"][name.as_str()]["pos"]),
+            fx.cap.read_i64(idx, "position_actual").unwrap()[500..700].to_vec(),
+            "pos for {name} must be drive-frame raw (no invert)"
         );
     }
     let expected_moving: Vec<bool> = fx.cap.read_i64(0, "flags").unwrap()[500..700]

@@ -19,7 +19,7 @@ import type { VNode } from "preact";
 // shows only its own param groups. Every cell shows and takes the RAW
 // register value exactly as stored on the drive — the unit label names the
 // LSB (e.g. "0.1 Hz") instead of the UI converting, so what you type is
-// what SERVO_TUNE writes. Pure helpers first — autofill derivation,
+// what SERVO_TUNE writes. Pure helpers first —
 // changed-cell diffing, SERVO_TUNE line building (always with an explicit
 // MOTORS= list) — the logic a Rust test asserts is present and exercisable
 // without a browser; the preact components that render the grid follow.
@@ -28,22 +28,8 @@ import type { VNode } from "preact";
 
 const GROUP_ORDER = ["gains", "filters", "notch", "speed_observer", "disturbance_observer", "load"];
 const OTHER_GROUP = "other";
-const AUTOFILL_SOURCE_PARAM = "speed_gain";
 const DRIVE_REFRESH_POLL_MS = 1000;
 const DRIVE_REFRESH_TIMEOUT_MS = 15000;
-
-function deriveGainPositionFromSpeed(speedGainRaw: number): number {
-  return Math.round(speedGainRaw * 1.6);
-}
-
-function deriveGainIntegralFromSpeed(speedGainRaw: number): number {
-  return Math.round(1250000 / speedGainRaw);
-}
-
-const AUTOFILL_FORMULAS: Record<string, (speedGainRaw: number) => number> = {
-  gain_position_from_speed: deriveGainPositionFromSpeed,
-  gain_integral_from_speed: deriveGainIntegralFromSpeed,
-};
 
 function paramGroupSection(param: DriveParam): string {
   return GROUP_ORDER.includes(param.group) ? param.group : OTHER_GROUP;
@@ -141,39 +127,6 @@ function paramByName(name: string): DriveParam {
   return param;
 }
 
-/// speed_gain's effective per-motor raws — the input every autofill formula
-/// maps over.
-function currentSpeedGainByMotor(): Record<string, number> {
-  const speedParam = paramByName(AUTOFILL_SOURCE_PARAM);
-  const out: Record<string, number> = {};
-  for (const m of motorNames(driveData().motors)) {
-    out[m] = cellRaw(speedParam, m);
-  }
-  return out;
-}
-
-/// speed_gain changed: push derived per-motor values into every autofill
-/// target the user hasn't dirtied (edited directly) this session.
-function propagateAutofill() {
-  const speedByMotor = currentSpeedGainByMotor();
-  for (const param of driveData().params) {
-    const formula = param.autofill ? AUTOFILL_FORMULAS[param.autofill] : undefined;
-    if (!formula || state.drive.dirty.has(param.name)) continue;
-    state.drive.pending[param.name] = Object.fromEntries(
-      Object.entries(speedByMotor).map(([m, v]) => [m, formula(v)])
-    );
-  }
-}
-
-function rederiveAutofillTarget(name: string) {
-  const autofill = paramByName(name).autofill;
-  const formula = autofill ? AUTOFILL_FORMULAS[autofill] : undefined;
-  if (!formula) return;
-  state.drive.pending[name] = Object.fromEntries(
-    Object.entries(currentSpeedGainByMotor()).map(([m, v]) => [m, formula(v)])
-  );
-}
-
 function formatAge(ageS: number): string {
   if (ageS < 60) return `${ageS.toFixed(0)}s`;
   const m = Math.floor(ageS / 60);
@@ -217,11 +170,6 @@ function stageCellEdit(param: DriveParam, motorSel: string, rawText: string) {
   const existing = { ...(state.drive.pending[param.name] || {}) };
   for (const m of targets) existing[m] = raw;
   state.drive.pending[param.name] = existing;
-  if (param.name === AUTOFILL_SOURCE_PARAM) {
-    propagateAutofill();
-  } else if (param.autofill) {
-    state.drive.dirty.add(param.name);
-  }
   renderDriveGroups();
 }
 
@@ -290,20 +238,7 @@ function ParamLabel({ param, section }: { param: DriveParam; section: string }) 
           title=${`pinned in config — a restart re-applies ${[...new Set(pinnedNames.map((m) => pins[m]))].join("/")}`}
         >pin</span>`
       : null}
-    ${section === OTHER_GROUP ? html`<span class="hint">(${param.group})</span>` : null}
-    ${state.drive.dirty.has(param.name)
-      ? html`<a
-          href="#"
-          class="rederive"
-          title="restore the autofill link"
-          onClick=${(e: MouseEvent) => {
-            e.preventDefault();
-            state.drive.dirty.delete(param.name);
-            rederiveAutofillTarget(param.name);
-            renderDriveGroups();
-          }}
-        >re-derive</a>`
-      : null}`;
+    ${section === OTHER_GROUP ? html`<span class="hint">(${param.group})</span>` : null}`;
 }
 
 /// Adaptive-notch recipe (A6-EC manual 7.10): reset the notch parameters,
@@ -511,7 +446,6 @@ async function loadDriveState() {
     console.error(e);
   }
   state.drive.pending = {};
-  state.drive.dirty = new Set();
   renderDriveBanner();
   renderDriveGroups();
 }
@@ -534,7 +468,6 @@ async function refreshDriveState() {
       state.drive.data = data;
       state.drive.fetchedAtMs = Date.now();
       state.drive.pending = {};
-      state.drive.dirty = new Set();
       renderDriveBanner();
       renderDriveGroups();
       return;
@@ -584,27 +517,12 @@ function reconstructCommand(manifest: Manifest): string {
   const tag = manifest.tag || "cal";
   const axis = manifest.axis || "X";
   const iterations = (manifest.stroke_plan && manifest.stroke_plan.iterations) || 1;
-  const sweptKeys = (manifest.steps || []).map((s) => Object.keys(s.swept || {}));
-  const commonKeys = sweptKeys.reduce((a, b) => a.filter((k) => b.includes(k)), sweptKeys[0] || []);
   const common = `AXIS=${axis} ITERATIONS=${iterations} TAG=${tag}`;
 
   switch (manifest.experiment) {
     case "gain_sweep": {
       const values = manifest.steps.map((s) => (s.swept || {}).speed).join(",");
       return `SERVO_CALIBRATE_GAINS SPEED_GAINS=${values} ${common}${strokeSuffix(manifest, true)}`;
-    }
-    case "gain_ladder": {
-      const speeds = manifest.steps.map((s) => (s.swept || {}).speed ?? 0);
-      const safe = speeds[0];
-      const start = speeds.length > 1 ? speeds[1] : safe;
-      const step = speeds.length > 2 ? speeds[2] - speeds[1] : 50;
-      const max = speeds[speeds.length - 1];
-      return `SERVO_GAIN_LADDER SAFE=${safe} START=${start} STEP=${step} MAX=${max} ${common}${strokeSuffix(manifest, true)}`;
-    }
-    case "refine_sweep": {
-      const param = commonKeys.length === 1 ? commonKeys[0] : "speed";
-      const values = manifest.steps.map((s) => (s.swept || {})[param]).join(",");
-      return `SERVO_REFINE_GAIN PARAM=${param} VALUES=${values} ${common}${strokeSuffix(manifest, true)}`;
     }
     case "inertia_sweep": {
       const values = manifest.steps.map((s) => (s.swept || {}).ratio ?? Object.values(s.swept || {})[0]).join(",");
@@ -652,4 +570,4 @@ function loadRerunForm(name: string) {
   setConsoleValue(reconstructCommand(detail.manifest), false);
 }
 
-export { GROUP_ORDER, OTHER_GROUP, AUTOFILL_SOURCE_PARAM, DRIVE_REFRESH_POLL_MS, DRIVE_REFRESH_TIMEOUT_MS, deriveGainPositionFromSpeed, deriveGainIntegralFromSpeed, AUTOFILL_FORMULAS, paramGroupSection, groupParams, motorNames, motorRawValues, valuesAgree, pinnedEntries, cellRaw, diffChangedParams, buildServoTuneCommands, paramByName, currentSpeedGainByMotor, propagateAutofill, rederiveAutofillTarget, formatAge, currentDriveAgeS, renderDriveBanner, shortMotorLabel, stageCellEdit, NOTCH_QUICK_ACTIONS, NOTCH_ROW_KINDS, notchMatrix, renderDriveGroups, loadDriveState, refreshDriveState, applyDriveChanges, strokeSuffix, reconstructCommand, loadRerunForm };
+export { GROUP_ORDER, OTHER_GROUP, DRIVE_REFRESH_POLL_MS, DRIVE_REFRESH_TIMEOUT_MS, paramGroupSection, groupParams, motorNames, motorRawValues, valuesAgree, pinnedEntries, cellRaw, diffChangedParams, buildServoTuneCommands, paramByName, formatAge, currentDriveAgeS, renderDriveBanner, shortMotorLabel, stageCellEdit, NOTCH_QUICK_ACTIONS, NOTCH_ROW_KINDS, notchMatrix, renderDriveGroups, loadDriveState, refreshDriveState, applyDriveChanges, strokeSuffix, reconstructCommand, loadRerunForm };

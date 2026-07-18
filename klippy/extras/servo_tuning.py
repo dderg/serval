@@ -10,9 +10,9 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
 
-from . import servo_axis, servo_calibration, servo_param
+from . import servo_axis, servo_calibration, servo_param, servo_strokes
 
 INERTIA_RATIO_ADDR = "0x2000.0x07"
 GAIN_NAMES = ("position", "speed", "integral")
@@ -40,9 +40,6 @@ def _addr_key(addr_text: str) -> tuple[int, int]:
     return servo_param.parse_address(addr_text)
 
 
-AutofillKind = Literal["gain_position_from_speed", "gain_integral_from_speed"]
-
-
 @dataclass
 class PanelParam:
     """One curated drive register the tuning panel can read or write."""
@@ -53,7 +50,6 @@ class PanelParam:
     group: str
     description: str
     type_token: str = "u16"
-    autofill: AutofillKind | None = None
     options: dict[int, str] | None = None
     addr: str = field(init=False, default="")
 
@@ -69,7 +65,6 @@ class PanelParam:
             "unit": self.unit,
             "group": self.group,
             "description": self.description,
-            "autofill": self.autofill,
             "options": (
                 None
                 if self.options is None
@@ -84,32 +79,21 @@ PANEL_PARAMS: tuple[PanelParam, ...] = (
         c_code="C01.00",
         unit="0.1 rad/s",
         group="gains",
-        description=(
-            "C01.00 position loop gain; autofilled from speed_gain as "
-            "round(speed_gain * 1.6)"
-        ),
-        autofill="gain_position_from_speed",
+        description="C01.00 position loop gain",
     ),
     PanelParam(
         name="speed_gain",
         c_code="C01.01",
         unit="0.1 Hz",
         group="gains",
-        description=(
-            "C01.01 speed loop gain; the autofill source for "
-            "position_gain and integral_time"
-        ),
+        description="C01.01 speed loop gain",
     ),
     PanelParam(
         name="integral_time",
         c_code="C01.02",
         unit="0.01 ms",
         group="gains",
-        description=(
-            "C01.02 speed integral time; autofilled from speed_gain as "
-            "round(1250000 / speed_gain)"
-        ),
-        autofill="gain_integral_from_speed",
+        description="C01.02 speed integral time",
     ),
     PanelParam(
         name="torque_filter_cutoff",
@@ -611,6 +595,7 @@ class ServoTuning:
                 for p in self.params
                 if _addr_key(p.addr) in sdo_keys
             }
+        kin = self.printer.lookup_object("toolhead").get_kinematics()
         payload = {
             "version": 1,
             "created_utc": _utc_now(),
@@ -618,6 +603,7 @@ class ServoTuning:
             "motors": motors_out,
             "config_pins": config_pins_out,
             "slots": slots_out,
+            "spatial": servo_strokes.spatial_frame(kin),
         }
         os.makedirs(self.captures_root, exist_ok=True)
         path = os.path.join(self.captures_root, "drive_state.json")

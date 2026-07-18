@@ -1,14 +1,13 @@
-//! The drive tuning panel's pure logic (autofill derivation,
-//! changed-param diffing) lives in `web/src/*.ts` as plain functions.
+//! The drive tuning panel's pure logic (changed-param diffing,
+//! SERVO_TUNE line building) lives in `web/src/*.ts` as plain functions.
 //! This file is the substitute test rig: it asserts the functions the
 //! panel is built from are actually present in the sources bun bundles
 //! into the served asset (a rename or an accidental delete during a
 //! refactor would slip past `cargo build`, which never greps them), and
 //! that `servo-cal demo`'s `drive_state.json` — the grid's only real
 //! fixture — has the shape those functions assume: every param's `group`
-//! known to the pages' section order, motors agreeing everywhere except
-//! the one deliberate drift fixture, and the two autofill targets
-//! pointing at `speed_gain`.
+//! known to the pages' section order, and motors agreeing everywhere
+//! except the one deliberate drift fixture.
 
 use std::collections::BTreeSet;
 
@@ -65,8 +64,6 @@ fn temp_dir(label: &str) -> std::path::PathBuf {
 #[test]
 fn app_js_defines_the_pure_drive_panel_functions() {
     let required = [
-        "function deriveGainPositionFromSpeed(",
-        "function deriveGainIntegralFromSpeed(",
         "function paramGroupSection(",
         "function groupParams(",
         "function motorRawValues(",
@@ -192,10 +189,10 @@ fn app_js_defines_the_strain_map_functions() {
 
 /// `GET /api/drive_state` and the SPA are both driven by the same
 /// `drive_state.json`; this asserts the demo's copy satisfies what the
-/// panel's grouping/autofill/drift logic assumes, so the demo actually
+/// panel's grouping/drift logic assumes, so the demo actually
 /// exercises every rendering path (grouped sections, per-motor grid rows,
-/// the drift highlight, enum selects, autofill wiring) rather than just
-/// happening to parse.
+/// the drift highlight, enum selects) rather than just happening to
+/// parse.
 #[test]
 fn demo_drive_state_matches_panel_rendering_assumptions() {
     let out_dir = temp_dir("render");
@@ -264,21 +261,6 @@ fn demo_drive_state_matches_panel_rendering_assumptions() {
     assert!(
         adaptive["options"].is_object(),
         "adaptive_notch_mode must ship enum options for the panel's labeled select"
-    );
-
-    let autofill_sources: Vec<&str> = params
-        .iter()
-        .filter_map(|p| p["autofill"].as_str())
-        .collect();
-    assert!(autofill_sources.contains(&"gain_position_from_speed"));
-    assert!(autofill_sources.contains(&"gain_integral_from_speed"));
-    let speed_gain = params
-        .iter()
-        .find(|p| p["name"] == "speed_gain")
-        .expect("speed_gain must be present as the autofill source");
-    assert!(
-        speed_gain["autofill"].is_null(),
-        "speed_gain is the autofill source, not an autofill target"
     );
 
     let slots = drive_state["slots"].as_object().unwrap();
