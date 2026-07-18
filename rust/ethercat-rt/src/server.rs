@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -11,6 +12,9 @@ pub struct FrameServer {
     conn: Option<UnixStream>,
     demux: Demuxer,
     buf: [u8; 4096],
+    /// Decoded commands not yet consumed — lets a caller stop mid-batch (the
+    /// RT loop's dispatch budget) without dropping the rest.
+    pending: VecDeque<Command>,
     /// Set on peer EOF, read error, write error, or deliberate `respond_and_close`.
     /// Once true the server refuses further accept calls (one-shot session contract).
     session_ended: bool,
@@ -36,6 +40,7 @@ impl FrameServer {
             conn: None,
             demux: Demuxer::new(),
             buf: [0u8; 4096],
+            pending: VecDeque::new(),
             session_ended: false,
         })
     }
@@ -56,11 +61,11 @@ impl FrameServer {
         }
     }
 
-    pub fn poll_commands(&mut self) -> Vec<Command> {
+    /// Read whatever the socket has ready and decode it into the pending queue.
+    pub fn pump(&mut self) {
         self.try_accept();
-        let mut cmds = Vec::new();
         let Some(stream) = self.conn.as_mut() else {
-            return cmds;
+            return;
         };
         match stream.read(&mut self.buf) {
             Ok(0) => {
@@ -76,7 +81,7 @@ impl FrameServer {
                 for f in frames {
                     if let Frame::Kalico { channel, payload } = f {
                         match decode_command(channel, &payload) {
-                            Ok(cmd) => cmds.push(cmd),
+                            Ok(cmd) => self.pending.push_back(cmd),
                             Err(e) => eprintln!("ec-rt: bad command: {e:?}"),
                         }
                     }
@@ -89,7 +94,15 @@ impl FrameServer {
                 self.session_ended = true;
             }
         }
-        cmds
+    }
+
+    pub fn pop_command(&mut self) -> Option<Command> {
+        self.pending.pop_front()
+    }
+
+    pub fn poll_commands(&mut self) -> Vec<Command> {
+        self.pump();
+        self.pending.drain(..).collect()
     }
 
     pub fn respond(&mut self, frame: &[u8]) {

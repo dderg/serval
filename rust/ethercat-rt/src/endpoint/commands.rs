@@ -28,8 +28,16 @@ use mcu_protocol::messages::{
     SetTorque, StartCapture, StopCaptureResponse,
 };
 
+/// Command execution shares the RT thread with the DC exchange, so it must
+/// fit in the post-send slack; a jog-start piece burst measured >500 us and
+/// skipped whole cycles. Pieces arrive with ~95 ms of lead, so commands left
+/// in the queue when the budget runs out simply carry to the next cycle.
+const DISPATCH_BUDGET_NS: u128 = 100_000;
+
 pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
-    for cmd in ctx.server.poll_commands() {
+    let started = std::time::Instant::now();
+    ctx.server.pump();
+    while let Some(cmd) = ctx.server.pop_command() {
         match cmd {
             Command::Identify {
                 correlation_id,
@@ -176,6 +184,9 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
             Command::Unknown { kind_raw, .. } => {
                 eprintln!("ec-rt: ignoring kind 0x{kind_raw:04x}");
             }
+        }
+        if started.elapsed().as_nanos() > DISPATCH_BUDGET_NS {
+            break;
         }
     }
     ControlFlow::Continue(())
