@@ -2243,10 +2243,15 @@ function ringdownTailColor(name, k, count) {
   return mixColor(runColor(name), "#ffffff", (0.5 * k) / Math.max(1, count - 1));
 }
 
+// Brush spans survive the periodic refresh() re-render: keyed by
+// step|source, re-applied when the chart DOM is rebuilt.
+const ringdownSelections = new Map();
+
 /// Tail chart with a drag-to-select brush: the selected time span is shaded
 /// and reported through onSelect (in ms, or null when cleared by a click),
 /// which drives the PSD-of-selection chart next to it.
 function ringdownTailBox(stepName, source, runEntries, onSelect) {
+  const selKey = `${stepName}|${source.source}`;
   const traces = [];
   const legend = [];
   for (const { name, src } of runEntries) {
@@ -2301,9 +2306,10 @@ function ringdownTailBox(stepName, source, runEntries, onSelect) {
       ctx.fillRect(Math.min(x0, x1), 8, Math.abs(x1 - x0), h - 30);
     }
   };
-  redraw(null);
   let dragFrom = null;
-  let selection = null;
+  let selection = ringdownSelections.get(selKey) || null;
+  if (selection && selection[1] > tMax) selection = null;
+  redraw(selection);
   canvas.addEventListener("mousedown", (e) => {
     dragFrom = pxToMs(e.offsetX);
   });
@@ -2321,11 +2327,13 @@ function ringdownTailBox(stepName, source, runEntries, onSelect) {
     const hi = Math.min(tMax, Math.max(from, to));
     if (hi - lo < 2) {
       selection = null;
+      ringdownSelections.delete(selKey);
       redraw(null);
       onSelect(null);
       return;
     }
     selection = [lo, hi];
+    ringdownSelections.set(selKey, selection);
     redraw(selection);
     onSelect(selection);
   };
@@ -2460,7 +2468,7 @@ function renderRingdownCharts(names, plots) {
       };
       container.appendChild(ringdownTailBox(stepName, runEntries[0].src, runEntries, renderPsd));
       container.appendChild(psdWrap);
-      renderPsd(null);
+      renderPsd(ringdownSelections.get(`${stepName}|${sourceName}`) || null);
     }
     modesEl.innerHTML += `<h3>${stepName} modes</h3>${ringdownModeTableHtml(ref.sources)}`;
     metaParts.push(stepName);
