@@ -195,6 +195,10 @@ COPY --from=firmware /kalico/tools/sim/third_party_repos/ \
 RUN for f in beacon.py beacon_motion_engine.py; do \
         src=/kalico/tools/sim/third_party_repos/beacon_klipper/$f; \
         if [ -f "$src" ]; then ln -sf "$src" /kalico/klippy/extras/$f; fi; \
+    done && \
+    for f in scanner.py scanner_motion_engine.py; do \
+        src=/kalico/tools/sim/third_party_repos/cartographer_klipper/$f; \
+        if [ -f "$src" ]; then ln -sf "$src" /kalico/klippy/extras/$f; fi; \
     done
 
 RUN mkdir -p /gcode

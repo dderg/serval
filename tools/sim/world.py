@@ -169,6 +169,7 @@ class SimWorld:
         repo_root: pathlib.Path = REPO_ROOT,
         dual_mcu: bool = True,
         beacon: bool = False,
+        cartographer: bool = False,
         verbose: bool = False,
         vtime_speed: float = 1.0,
     ):
@@ -176,6 +177,7 @@ class SimWorld:
         self.repo_root = repo_root
         self.dual_mcu = dual_mcu
         self.want_beacon = beacon
+        self.want_cartographer = cartographer
         self.verbose = verbose
         # Virtual-clock speed relative to real time. Below 1.0 the simulated
         # world runs slower than reality, inflating every host-side latency
@@ -189,6 +191,7 @@ class SimWorld:
         self.h7_pty = str(self.workdir / "pty_h7")
         self.f4_pty = str(self.workdir / "pty_f4")
         self.beacon_pty = str(self.workdir / "pty_beacon")
+        self.cartographer_pty = str(self.workdir / "pty_cartographer")
         self.api_socket = str(self.workdir / "klippy.sock")
         self.klippy_log = self.log_dir / "klippy.log"
 
@@ -197,6 +200,7 @@ class SimWorld:
         self.chip_servers: list = []
         self.tmc5160_by_cs: dict = {}
         self.beacon = None
+        self.cartographer = None
         self._log_offset = 0
         self._started = False
 
@@ -222,6 +226,8 @@ class SimWorld:
             self._start_chip_emulators()
             if self.want_beacon:
                 self._start_beacon()
+            if self.want_cartographer:
+                self._start_cartographer()
 
         cfg_path = self.workdir / "printer.cfg"
         if "[danger_options]" not in config_text:
@@ -395,6 +401,18 @@ class SimWorld:
         )
         self.beacon.start_sample_stream(z_target_mm=10.0, rate_hz=200)
 
+    def _start_cartographer(self) -> None:
+        from tools.sim.emulators.cartographer_mcu import CartographerMcuStub
+
+        z_mcu = self.mcus[1] if self.dual_mcu else self.mcus[0]
+        self.cartographer = CartographerMcuStub(
+            self.cartographer_pty,
+            log_path=str(self.log_dir / "cartographer_traffic.log"),
+            step_sock_path=z_mcu.sim_control,
+            vtime_shm_name=self.vtime_shm_name,
+        )
+        self.cartographer.start_sample_stream(z_target_mm=10.0, rate_hz=200)
+
     def _spawn_klippy(self, cfg_path: pathlib.Path) -> None:
         env = os.environ.copy()
         # Klippy deliberately does NOT load vtime: it runs at real CPU
@@ -407,11 +425,12 @@ class SimWorld:
         # virtual clock word directly to time emulated physical events.
         env["VTIME_SHM_NAME"] = self.vtime_shm_name
         third_party = self.repo_root / "tools" / "sim" / "third_party_repos"
-        beacon_repo = third_party / "beacon_klipper"
-        if beacon_repo.exists():
-            env["PYTHONPATH"] = ":".join(
-                filter(None, [str(beacon_repo), env.get("PYTHONPATH", "")])
-            )
+        for plugin_dir in ("beacon_klipper", "cartographer_klipper"):
+            plugin_repo = third_party / plugin_dir
+            if plugin_repo.exists():
+                env["PYTHONPATH"] = ":".join(
+                    filter(None, [str(plugin_repo), env.get("PYTHONPATH", "")])
+                )
         stdout_log = open(self.log_dir / "klippy.stdout", "wb")
         self.klippy_proc = subprocess.Popen(
             [
@@ -641,4 +660,6 @@ class SimWorld:
             srv.stop()
         if self.beacon:
             self.beacon.stop()
+        if self.cartographer:
+            self.cartographer.stop()
         vtime_destroy(self.vtime_shm_name)

@@ -1503,3 +1503,144 @@ path: {gcode_dir}
 [force_move]
 enable_force_move: True
 """
+
+
+def cartographer_homing_config(
+    h7_pty: str,
+    f4_pty: Optional[str],
+    cartographer_pty: str,
+    gcode_dir: str,
+    mode: str = "scan",
+) -> str:
+    """Dual-MCU CoreXY with Cartographer (scanner.py) Z homing.
+
+    The saved scanner model reuses the beacon stub's analytic frequency
+    model: the cartographer stub encodes counts against
+    sensor_freq = CLOCK_FREQ/2 (scanner.py's rule at 20 MHz), so the
+    identical polynomial maps 1/freq -> z. model_fw_version must equal
+    the stub's identify "version" or ScannerModel.validate raises.
+    """
+    f4_section = ""
+    if f4_pty:
+        f4_section = f"""
+[mcu bottom]
+serial: {f4_pty}
+"""
+    z_step_mcu = "bottom:" if f4_pty else ""
+    return f"""\
+[mcu]
+serial: {h7_pty}
+{f4_section}
+[printer]
+max_velocity: 300
+max_accel: 3000
+max_z_velocity: 10
+max_z_accel: 100
+corner_deviation: 0.023
+
+[kinematics]
+type: corexy
+axis_x: x
+axis_y: y
+axis_z: z
+a_motors: a
+b_motors: b
+z_motors: z
+
+[axis x]
+position_endstop: 0
+position_max: 300
+endstop_pin: ^gpiochip0/gpio10
+homing_speed: 10
+post_processors: is_xy
+
+[axis y]
+position_endstop: 0
+position_max: 300
+endstop_pin: ^gpiochip0/gpio11
+homing_speed: 10
+post_processors: is_xy
+
+[axis z]
+position_min: -5
+position_max: 250
+endstop_pin: probe:z_virtual_endstop
+homing_speed: 5
+
+[motor a]
+drive: stepper
+step_pin: gpiochip0/gpio0
+dir_pin: gpiochip0/gpio1
+enable_pin: !gpiochip0/gpio2
+microsteps: 16
+rotation_distance: 40
+
+[motor b]
+drive: stepper
+step_pin: gpiochip0/gpio3
+dir_pin: gpiochip0/gpio4
+enable_pin: !gpiochip0/gpio5
+microsteps: 16
+rotation_distance: 40
+
+[motor z]
+drive: stepper
+step_pin: {z_step_mcu}gpiochip0/gpio0
+dir_pin: {z_step_mcu}gpiochip0/gpio1
+enable_pin: !{z_step_mcu}gpiochip0/gpio2
+microsteps: 16
+rotation_distance: 4
+
+[scanner]
+serial: {cartographer_pty}
+sensor: cartographer
+x_offset: 0
+y_offset: 0
+mode: {mode}
+# The stub's touch trigger is step-exact, but reconstructed trip
+# positions carry the real-clock <-> virtual-clock mapping jitter.
+scanner_touch_tolerance: 0.05
+scanner_touch_speed: 3
+
+[safe_z_home]
+home_xy_position: 150, 150
+z_hop: 5
+z_hop_speed: 10
+
+[bed_mesh]
+mesh_min: 20,20
+mesh_max: 280,280
+probe_count: 3,3
+zero_reference_position: 150, 150
+
+[post_processor is_xy]
+type: smooth_bell
+smooth_time: 0.019125
+
+[virtual_sdcard]
+path: {gcode_dir}
+
+[force_move]
+enable_force_move: True
+
+#*# <---------------------- SAVE_CONFIG ---------------------->
+#*# DO NOT EDIT THIS BLOCK OR BELOW. The contents are auto-generated.
+#*#
+#*# [scanner model default]
+#*# model_coef = 1.4366832587589902,
+#*#   1.7791425946955506,
+#*#   0.8114676630327906,
+#*#   0.4077638527717382,
+#*#   0.2629778891883896,
+#*#   0.21087515838926726,
+#*#   -0.15390965626840192,
+#*#   -0.21990798533166914,
+#*#   0.24377872047881705,
+#*#   0.22573604715705745
+#*# model_domain = 1.8359521074610915e-07,1.893648763276026e-07
+#*# model_range = 0.200000,5.000000
+#*# model_temp = 30.886664
+#*# model_offset = 0.00000
+#*# model_mode = {mode}
+#*# model_fw_version = v0.0.0-sim
+"""

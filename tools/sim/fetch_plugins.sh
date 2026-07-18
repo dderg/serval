@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Fetch third-party klippy plugins at pinned revs for the simulator.
 #
-# Only the beacon fork is needed: this tree's motion rewrite is supported
-# by dderg/beacon_klipper branch `motion-stack-rename` (kalico-seam plus
-# the bridge->engine rename; see docs/rewrite/beacon-fork-survey.md),
-# NOT upstream beacon3d.
+# The kalico-seam forks are required: this tree's motion rewrite is
+# supported by dderg/beacon_klipper (branch `motion-stack-rename`
+# lineage; see docs/rewrite/beacon-fork-survey.md) and
+# dderg/cartographer-klipper (branch `kalico-seam`), NOT the upstream
+# beacon3d / Cartographer3D repos.
 #
 # To bump a pin: edit the rev below and re-run. Re-running is a no-op
 # once the pinned rev is checked out.
@@ -17,6 +18,7 @@ DEST="${1:-$REPO_ROOT/tools/sim/third_party_repos}"
 # url | dir name | pinned rev
 PLUGINS=(
   "https://github.com/dderg/beacon_klipper.git|beacon_klipper|563861d211a21b62eedf80906c8a55f70b0174d6"
+  "https://github.com/dderg/cartographer-klipper.git|cartographer_klipper|e069a36dac9ebdc84ae72e27fc10e1a3a6d01015"
 )
 
 mkdir -p "$DEST"
