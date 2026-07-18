@@ -307,6 +307,150 @@ def emit_strokes_with_stop_times(
     return stops
 
 
+@dataclass
+class PatternMove:
+    x: float
+    y: float
+    length: float
+    peak_velocity: float
+
+
+def pattern_points(
+    x_min: float,
+    x_max: float,
+    y_min: float,
+    y_max: float,
+    small_size: float,
+) -> list[tuple[float, float]]:
+    """TEST_SPEED-style corner sequence: diagonals then box over the large
+    bounds, then the same over a small box centered in them. Starts and
+    ends at (x_min, y_min) so iterations chain with identical segment
+    lengths; the caller travels there first."""
+
+    def diagonals_then_box(
+        lo_x: float, hi_x: float, lo_y: float, hi_y: float
+    ) -> list[tuple[float, float]]:
+        return [
+            (hi_x, hi_y),
+            (lo_x, lo_y),
+            (hi_x, lo_y),
+            (lo_x, hi_y),
+            (hi_x, lo_y),
+            (lo_x, lo_y),
+            (lo_x, hi_y),
+            (hi_x, hi_y),
+            (hi_x, lo_y),
+            (lo_x, lo_y),
+        ]
+
+    xc = (x_min + x_max) / 2.0
+    yc = (y_min + y_max) / 2.0
+    half = small_size / 2.0
+    return (
+        diagonals_then_box(x_min, x_max, y_min, y_max)
+        + diagonals_then_box(xc - half, xc + half, yc - half, yc + half)
+        + [(x_min, y_min)]
+    )
+
+
+def pattern_geometry(
+    gcode: Any,
+    x_lo: float,
+    x_hi: float,
+    y_lo: float,
+    y_hi: float,
+    inset: float,
+    small_size: float,
+) -> tuple[list[tuple[float, float]], float, float]:
+    x_min, x_max = x_lo + inset, x_hi - inset
+    y_min, y_max = y_lo + inset, y_hi - inset
+    if x_max <= x_min or y_max <= y_min:
+        raise gcode.error(
+            "pattern bounds collapse after inset %.1f: X %.1f..%.1f "
+            "Y %.1f..%.1f" % (inset, x_min, x_max, y_min, y_max)
+        )
+    if small_size <= 0.0:
+        raise gcode.error("SMALL_SIZE=%.1f must be positive" % (small_size,))
+    if small_size > min(x_max - x_min, y_max - y_min):
+        raise gcode.error(
+            "SMALL_SIZE=%.1f exceeds the inset pattern bounds "
+            "(X span %.1f, Y span %.1f)"
+            % (small_size, x_max - x_min, y_max - y_min)
+        )
+    points = pattern_points(x_min, x_max, y_min, y_max, small_size)
+    return points, x_min, y_min
+
+
+def pattern_moves(
+    gcode: Any,
+    points: Sequence[tuple[float, float]],
+    start_x: float,
+    start_y: float,
+    speed: float,
+    accel: float,
+) -> list[PatternMove]:
+    """Per-segment achieved-peak velocity assuming a rest-to-rest profile:
+    min(speed, sqrt(accel*length)). Segments below `speed` run a triangular
+    profile - intended behavior, not an error, so results can be labeled by
+    what the toolhead actually reached instead of the requested feed."""
+    moves: list[PatternMove] = []
+    px, py = start_x, start_y
+    for x, y in points:
+        length = math.hypot(x - px, y - py)
+        if length <= 0.0:
+            raise gcode.error(
+                "degenerate pattern segment at X%.3f Y%.3f (zero length)"
+                % (x, y)
+            )
+        moves.append(
+            PatternMove(x, y, length, min(speed, math.sqrt(accel * length)))
+        )
+        px, py = x, y
+    return moves
+
+
+def emit_pattern(
+    gcode: Any,
+    points: Sequence[tuple[float, float]],
+    start_x: float,
+    start_y: float,
+    speed: float,
+    accel: float,
+    iterations: int,
+    dwell: int,
+) -> list[PatternMove]:
+    moves = pattern_moves(gcode, points, start_x, start_y, speed, accel)
+    feed = int(speed * 60)
+    lines = [
+        "SET_VELOCITY_LIMIT VELOCITY=%.0f ACCEL=%.0f" % (speed, accel),
+        "G90",
+    ]
+    for _ in range(iterations):
+        lines += ["G0 X%.3f Y%.3f F%d" % (m.x, m.y, feed) for m in moves]
+        lines += ["M400", "G4 P%d" % (dwell,), "M400"]
+    gcode.run_script_from_command("\n".join(lines))
+    return moves
+
+
+def pattern_reach_summary(moves: Sequence[PatternMove], speed: float) -> str:
+    triangular = [m for m in moves if m.peak_velocity < speed]
+    if not triangular:
+        return "all %d pattern segments reach %.0fmm/s" % (len(moves), speed)
+    slowest = min(m.peak_velocity for m in triangular)
+    return (
+        "%d of %d pattern segments run triangular profiles (peaks "
+        "%.0f-%.0fmm/s of the requested %.0fmm/s) - kept on purpose to "
+        "excite the low-velocity range"
+        % (
+            len(triangular),
+            len(moves),
+            slowest,
+            max(m.peak_velocity for m in triangular),
+            speed,
+        )
+    )
+
+
 def goto(gcode: Any, travel_speed: float, coord: str, dwell: int) -> None:
     gcode.run_script_from_command(
         "\n".join(
