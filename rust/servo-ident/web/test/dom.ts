@@ -54,6 +54,24 @@ function fixtureJson<T>(name: string): T {
 
 const RUN_NAME = (fixtureJson<{ name: string }[]>("runs"))[0].name;
 
+interface FixturePathStep {
+  name: string;
+  path: { cmd_x_mm: number[]; cmd_y_mm: number[]; act_x_mm: number[]; act_y_mm: number[] } | null;
+}
+
+function runPathFromPlotSeries(): string {
+  const plot = fixtureJson<{ steps: FixturePathStep[] }>("plot_series");
+  const steps = plot.steps
+    .filter((s) => s.path)
+    .map((s) => ({
+      name: s.name,
+      n_records: s.path!.cmd_x_mm.length,
+      truncated: false,
+      path: s.path,
+    }));
+  return JSON.stringify({ version: 1, steps });
+}
+
 /// fetch stub covering everything boot touches: the servo-cal API answers
 /// from the captured demo fixtures, moonraker answers minimally healthy.
 /// Anything else is a test bug and fails loudly.
@@ -69,6 +87,7 @@ function installFetchStub(): { unmatched: string[] } {
     [new RegExp(`^/api/runs/${RUN_NAME}/manifest$`), () => json(fixture("manifest"))],
     [new RegExp(`^/api/runs/${RUN_NAME}/results$`), () => json(fixture("results"))],
     [new RegExp(`^/api/runs/${RUN_NAME}/plot_series$`), () => json(fixture("plot_series"))],
+    [new RegExp(`^/api/runs/${RUN_NAME}/path$`), () => json(runPathFromPlotSeries())],
     [/\/server\/info$/, () => json(JSON.stringify({ result: { klippy_state: "ready" } }))],
     [/\/printer\/gcode\/help$/, () => json(JSON.stringify({ result: {} }))],
   ];

@@ -13,12 +13,13 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::analyze::{build_run, write_run_outputs};
+use crate::analyze::{build_run, write_run_outputs, xy_path_full};
 use crate::assets;
 use crate::http::{Request, Response};
 use crate::live;
 use crate::live_stream::LiveTap;
-use crate::results::Manifest;
+use crate::results::{Manifest, PlotPath};
+use crate::scap::Scap;
 use crate::strain;
 use crate::time_fmt::iso8601_utc;
 
@@ -44,6 +45,20 @@ pub struct RunSummary {
     pub has_results: bool,
     pub verdict: Option<VerdictSummary>,
     pub note: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, TS)]
+pub struct RunPathStep {
+    pub name: String,
+    pub n_records: usize,
+    pub truncated: bool,
+    pub path: PlotPath,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema, TS)]
+pub struct RunPath {
+    pub version: i64,
+    pub steps: Vec<RunPathStep>,
 }
 
 const NOTE_FILE: &str = "note.txt";
@@ -343,6 +358,58 @@ fn handle_delete_run(captures_root: &Path, name: &str) -> Response {
     )
 }
 
+/// `GET /api/runs/<name>/path`: the toolpath chart's full-resolution data
+/// source, computed from the raw captures on every request — every cycle's
+/// commanded and actual XY through the manifest's spatial frame, rounded to
+/// 1e-4 mm, capped at [`crate::analyze::MAX_FULL_PATH_POINTS`] per step
+/// with `truncated` set when the cap bites. 404 for runs whose frame or
+/// captures carry no XY path; a malformed frame or capture is a 500, not
+/// an empty success.
+fn handle_path(captures_root: &Path, name: &str) -> Response {
+    if !valid_run_name(name) {
+        return Response::not_found(&format!("invalid run name {name:?}"));
+    }
+    let run_dir = captures_root.join(name);
+    let manifest_path = run_dir.join("manifest.json");
+    let text = match std::fs::read_to_string(&manifest_path) {
+        Ok(t) => t,
+        Err(_) => return Response::not_found(&format!("no such run {name:?}")),
+    };
+    let manifest: Manifest = match serde_json::from_str(&text) {
+        Ok(m) => m,
+        Err(e) => return Response::text(500, "text/plain", format!("{name}: manifest parse: {e}")),
+    };
+    let Some(spatial) = manifest.spatial.as_ref() else {
+        return Response::not_found(&format!("run {name:?} has no spatial frame"));
+    };
+    let mut steps = Vec::new();
+    for step in &manifest.steps {
+        let capture_path = run_dir.join(&step.capture);
+        let cap = match Scap::load(capture_path.to_str().unwrap()) {
+            Ok(c) => c,
+            Err(e) => return Response::text(500, "text/plain", e),
+        };
+        match xy_path_full(&cap, spatial) {
+            Ok(Some((path, truncated))) => steps.push(RunPathStep {
+                name: step.name.clone(),
+                n_records: cap.n_records,
+                truncated,
+                path,
+            }),
+            Ok(None) => {}
+            Err(e) => return Response::text(500, "text/plain", format!("{name}: {e}")),
+        }
+    }
+    if steps.is_empty() {
+        return Response::not_found(&format!("run {name:?} has no XY path"));
+    }
+    let payload = RunPath { version: 1, steps };
+    Response::json(
+        200,
+        serde_json::to_string(&payload).expect("RunPath always serializes"),
+    )
+}
+
 /// `GET /api/runs/<name>/strain`: the strain-map tab's data source. Only
 /// answers for `strain_map` runs (404 otherwise); recomputes and rewrites
 /// `strain.json` when any capture or the manifest is newer than it, else
@@ -516,6 +583,7 @@ pub fn handle(captures_root: &Path, req: &Request) -> Response {
         ("GET", ["api", "runs", name, "plot_series"]) => {
             read_run_file(captures_root, name, "plot_series.json")
         }
+        ("GET", ["api", "runs", name, "path"]) => handle_path(captures_root, name),
         ("GET", ["api", "runs", name, "strain"]) => handle_strain(captures_root, name),
         ("POST", ["api", "runs", name, "analyze"]) => handle_analyze(captures_root, name),
         ("POST", ["api", "runs", name, "note"]) => handle_note(captures_root, name, &req.body),

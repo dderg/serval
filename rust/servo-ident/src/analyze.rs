@@ -30,6 +30,7 @@ use crate::scap::Scap;
 
 const MAX_SERIES_POINTS: usize = 2000;
 pub const MAX_PATH_POINTS: usize = 4000;
+pub const MAX_FULL_PATH_POINTS: usize = 500_000;
 const PSD_PEAK_COUNT: usize = 5;
 
 fn stride_for(n: usize) -> usize {
@@ -73,6 +74,36 @@ fn validate_spatial_shape(spatial: &ManifestSpatial) -> Result<(), String> {
 }
 
 pub fn xy_path(cap: &Scap, spatial: &ManifestSpatial) -> Result<Option<PlotPath>, String> {
+    xy_path_at(cap, spatial, &path_indices(cap.n_records, MAX_PATH_POINTS))
+}
+
+pub fn xy_path_full(
+    cap: &Scap,
+    spatial: &ManifestSpatial,
+) -> Result<Option<(PlotPath, bool)>, String> {
+    let idxs = path_indices(cap.n_records, MAX_FULL_PATH_POINTS);
+    let truncated = idxs.len() < cap.n_records;
+    let Some(mut path) = xy_path_at(cap, spatial, &idxs)? else {
+        return Ok(None);
+    };
+    for series in [
+        &mut path.cmd_x_mm,
+        &mut path.cmd_y_mm,
+        &mut path.act_x_mm,
+        &mut path.act_y_mm,
+    ] {
+        for v in series.iter_mut() {
+            *v = (*v * 1e4).round() / 1e4;
+        }
+    }
+    Ok(Some((path, truncated)))
+}
+
+fn xy_path_at(
+    cap: &Scap,
+    spatial: &ManifestSpatial,
+    idxs: &[usize],
+) -> Result<Option<PlotPath>, String> {
     validate_spatial_shape(spatial)?;
     let (Some(xi), Some(yi)) = (
         spatial.modes.iter().position(|m| m == "x"),
@@ -91,7 +122,6 @@ pub fn xy_path(cap: &Scap, spatial: &ManifestSpatial) -> Result<Option<PlotPath>
         }
         motors.push((s, idx, cpm));
     }
-    let idxs = path_indices(cap.n_records, MAX_PATH_POINTS);
     let mut path = PlotPath {
         cmd_x_mm: vec![0.0; idxs.len()],
         cmd_y_mm: vec![0.0; idxs.len()],
