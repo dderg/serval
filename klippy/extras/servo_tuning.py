@@ -106,6 +106,30 @@ PANEL_PARAMS: tuple[PanelParam, ...] = (
             "drive default 200)"
         ),
     ),
+    PanelParam(
+        name="torque_ff_filter_cutoff",
+        c_code="C01.18",
+        unit="Hz",
+        group="filters",
+        description=(
+            "C01.18 torque feedforward filter cutoff frequency; applies "
+            "to the 60B2h torque offset in CSP (manual 7.7 / fig 4-39, "
+            "range 5-16000, drive default 318); lower smooths the FF "
+            "but adds ~1/(2*pi*f) of lag"
+        ),
+    ),
+    PanelParam(
+        name="speed_ff_filter_cutoff",
+        c_code="C01.15",
+        unit="Hz",
+        group="filters",
+        description=(
+            "C01.15 speed feedforward filter cutoff frequency; applies "
+            "to the 60B1h velocity offset in CSP (manual 7.6 / fig 4-39, "
+            "range 5-16000, drive default 318); keep matched with C01.18 "
+            "so the two FF streams stay in phase"
+        ),
+    ),
     *(
         PanelParam(
             name="notch_%d_%s" % (n, kind),

@@ -134,6 +134,24 @@ fn demo_panel_params() -> Vec<DemoPanelParam> {
             "C01.03 1st torque reference filter cutoff frequency (manual 7.3)",
             220,
         ),
+        plain_param(
+            "torque_ff_filter_cutoff",
+            "C01.18",
+            "0x2001.0x19",
+            "Hz",
+            "filters",
+            "C01.18 torque feedforward filter cutoff frequency (manual 7.7)",
+            318,
+        ),
+        plain_param(
+            "speed_ff_filter_cutoff",
+            "C01.15",
+            "0x2001.0x16",
+            "Hz",
+            "filters",
+            "C01.15 speed feedforward filter cutoff frequency (manual 7.6)",
+            318,
+        ),
     ];
     let notch_kinds: [(&str, &str, &'static str); 3] = [
         ("freq", "center frequency", "Hz"),

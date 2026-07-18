@@ -223,7 +223,8 @@ function analysisSectionsHtml(def: PageDef): string {
       `<section class="accel-psd-section" id="accel-psd-section" hidden>` +
         sectionHeadHtml(
           "accel PSD",
-          `<span class="note">per-axis accelerometer spectra; solid: x+y+z total</span>`
+          `<span class="note">per-axis accelerometer spectra; solid: x+y+z total</span>` +
+            `<div class="chips" id="accel-axis-chips"></div>`
         ) +
         `<div class="charts" id="accel-psd-charts"></div>` +
         `</section>`

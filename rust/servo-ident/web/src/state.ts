@@ -237,6 +237,7 @@ interface AppState {
   autoSelected: boolean;
   stepFilter: Set<string> | null;
   motorFilter: Set<string> | null;
+  accelAxisFilter: Set<string> | null;
   console: ConsoleState;
   drive: DrivePanelState;
   live: LiveState;
@@ -257,6 +258,7 @@ const state: AppState = {
   autoSelected: false,
   stepFilter: null, // null = every step; otherwise a Set of visible step names
   motorFilter: null, // null = every motor; only consulted in per-motor view
+  accelAxisFilter: null, // null = total + every axis; otherwise a Set of visible accel PSD trace keys
   console: {
     text: "", // current input line, survives page switches
     history: loadConsoleHistory(),

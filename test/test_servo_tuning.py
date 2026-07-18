@@ -539,6 +539,8 @@ def _full_readback(overrides=None):
         _c_code_key("C01.01"): (2, 550),
         _c_code_key("C01.02"): (2, 2273),
         _c_code_key("C01.03"): (2, 220),
+        _c_code_key("C01.18"): (2, 318),
+        _c_code_key("C01.15"): (2, 318),
         _c_code_key("C01.30"): (2, 2),
         _c_code_key("C01.10"): (2, 3),
         _c_code_key("C02.30"): (2, 8000),
