@@ -1,10 +1,13 @@
 import { html, render, useEffect, useRef, useState } from "htm/preact/standalone";
+import type { VNode } from "preact";
 import { api, ensureDetail, ambientDiff, el, pageRuns, shortTime } from "./api";
 import { loadRerunForm } from "./drive";
 import { redrawCharts } from "./peaks";
 import { currentPageDef } from "./shell";
 import { PALETTE, INITIAL_SELECTED_RUNS, state } from "./state";
 import { notify, useStore } from "./store";
+import type { PageDef } from "./state";
+import type { NotePayload, RunSummary } from "./wire";
 
 // --- runs table ---------------------------------------------------------------
 //
@@ -13,7 +16,7 @@ import { notify, useStore } from "./store";
 // component re-renders from state with keyed rows, so an in-progress note
 // edit keeps its input and focus across the periodic refresh.
 
-function toggleRunSelection(run, ev) {
+function toggleRunSelection(run: RunSummary, ev: MouseEvent) {
   if (!run.has_results) return;
   if (ev.shiftKey) {
     if (state.selected.has(run.name)) {
@@ -41,7 +44,7 @@ function toggleRunSelection(run, ev) {
   redrawCharts();
 }
 
-function togglePin(run) {
+function togglePin(run: RunSummary) {
   if (state.pinned.has(run.name)) {
     state.pinned.delete(run.name);
   } else {
@@ -53,7 +56,7 @@ function togglePin(run) {
   redrawCharts();
 }
 
-function DotCell({ run }) {
+function DotCell({ run }: { run: RunSummary }) {
   const swatch = state.runColors.has(run.name)
     ? html`<span class="swatch" style=${{ background: runColor(run.name) }}></span>`
     : null;
@@ -64,7 +67,7 @@ function DotCell({ run }) {
         title=${pinned
           ? "unpin — plain clicks will deselect this run again"
           : "pin — keep this run selected while plain clicks switch other runs"}
-        onClick=${(e) => {
+        onClick=${(e: MouseEvent) => {
           e.stopPropagation();
           togglePin(run);
         }}
@@ -79,9 +82,9 @@ function DotCell({ run }) {
 /// hint), swaps to an input on click, saves to POST /api/runs/<name>/note
 /// on Enter/blur, and cancels on Escape. Clicks stop propagating so
 /// editing a note never toggles the row's chart selection.
-function NoteCell({ run }) {
+function NoteCell({ run }: { run: RunSummary }) {
   const [editing, setEditing] = useState(false);
-  const inputRef = useRef(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const doneRef = useRef(false);
   useEffect(() => {
     if (editing && inputRef.current) inputRef.current.focus();
@@ -90,7 +93,7 @@ function NoteCell({ run }) {
     return html`<td
       class=${run.note ? "run-note" : "run-note empty"}
       title=${run.note ? `${run.note} — click to edit` : "click to add a note"}
-      onClick=${(e) => {
+      onClick=${(e: MouseEvent) => {
         e.stopPropagation();
         doneRef.current = false;
         setEditing(true);
@@ -99,37 +102,37 @@ function NoteCell({ run }) {
       ${run.note || "add note…"}
     </td>`;
   }
-  const finish = (save) => {
-    if (doneRef.current) return;
+  const finish = (save: boolean) => {
+    if (doneRef.current || !inputRef.current) return;
     doneRef.current = true;
     const text = inputRef.current.value;
     setEditing(false);
     if (save) saveNote(run, text);
   };
-  return html`<td class="run-note" onClick=${(e) => e.stopPropagation()}>
+  return html`<td class="run-note" onClick=${(e: MouseEvent) => e.stopPropagation()}>
     <input
       ref=${inputRef}
       type="text"
       class="run-note-input"
       defaultValue=${run.note || ""}
-      onKeyDown=${(ev) => {
+      onKeyDown=${(ev: KeyboardEvent) => {
         ev.stopPropagation();
         if (ev.key === "Enter") finish(true);
         if (ev.key === "Escape") finish(false);
       }}
       onBlur=${() => finish(true)}
-      onClick=${(ev) => ev.stopPropagation()}
+      onClick=${(ev: MouseEvent) => ev.stopPropagation()}
     />
   </td>`;
 }
 
-function RunRow({ run, def }) {
+function RunRow({ run, def }: { run: RunSummary; def: PageDef }) {
   const globalIdx = state.runs.indexOf(run);
   const detail = state.details.get(run.name);
   const manifest = detail && detail.manifest;
   const prevManifest =
     globalIdx + 1 < state.runs.length
-      ? (state.details.get(state.runs[globalIdx + 1].name) || {}).manifest
+      ? (state.details.get(state.runs[globalIdx + 1].name)?.manifest ?? null)
       : null;
   const diff = manifest ? ambientDiff(prevManifest, manifest) : "";
   const cls = [
@@ -140,8 +143,8 @@ function RunRow({ run, def }) {
     .join("");
   return html`<tr
     class=${cls || null}
-    onClick=${(ev) => toggleRunSelection(run, ev)}
-    onContextMenu=${(ev) => {
+    onClick=${(ev: MouseEvent) => toggleRunSelection(run, ev)}
+    onContextMenu=${(ev: MouseEvent) => {
       ev.preventDefault();
       deleteRun(run);
     }}
@@ -159,7 +162,7 @@ function RunRow({ run, def }) {
       <button
         title="prefill the console with this run's command"
         disabled=${!manifest}
-        onClick=${(e) => {
+        onClick=${(e: MouseEvent) => {
           e.stopPropagation();
           loadRerunForm(run.name);
         }}
@@ -169,7 +172,7 @@ function RunRow({ run, def }) {
       ${run.has_results
         ? null
         : html`<button
-            onClick=${(e) => {
+            onClick=${(e: MouseEvent) => {
               e.stopPropagation();
               triggerAnalyze(run.name);
             }}
@@ -187,13 +190,13 @@ function RunsTable() {
   return runs.map((run) => html`<${RunRow} key=${run.name} run=${run} def=${def} />`);
 }
 
-let mountedRunsBody = null;
+let mountedRunsBody: HTMLElement | null = null;
 
 function renderRuns() {
   const tbody = el("journal-body");
   if (!tbody) return;
   if (mountedRunsBody !== tbody) {
-    if (mountedRunsBody) render(null, mountedRunsBody);
+    if (mountedRunsBody) render(null as unknown as VNode, mountedRunsBody);
     mountedRunsBody = tbody;
     render(html`<${RunsTable} />`, tbody);
   }
@@ -202,16 +205,16 @@ function renderRuns() {
 
 /// The note shows up the moment Enter is pressed, then the POST confirms
 /// (or a refresh rolls back) in the background.
-function applyNoteLocally(name, note) {
+function applyNoteLocally(name: string, note: string | null) {
   const current = state.runs.find((r) => r.name === name);
   if (current) current.note = note;
   renderRuns();
 }
 
-async function saveNote(run, text) {
+async function saveNote(run: RunSummary, text: string) {
   applyNoteLocally(run.name, text.trim() || null);
   try {
-    const saved = await api(`/api/runs/${encodeURIComponent(run.name)}/note`, {
+    const saved: NotePayload = await api(`/api/runs/${encodeURIComponent(run.name)}/note`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ note: text }),
@@ -219,12 +222,12 @@ async function saveNote(run, text) {
     applyNoteLocally(run.name, saved.note || null);
   } catch (e) {
     console.error(e);
-    alert(`saving note failed: ${e.message}`);
+    alert(`saving note failed: ${e instanceof Error ? e.message : e}`);
     await refresh();
   }
 }
 
-async function deleteRun(run) {
+async function deleteRun(run: RunSummary) {
   const ok = confirm(
     `Delete run ${run.name}?\n\nRemoves its whole directory — captures, results, note.`
   );
@@ -233,7 +236,7 @@ async function deleteRun(run) {
     await api(`/api/runs/${encodeURIComponent(run.name)}`, { method: "DELETE" });
   } catch (e) {
     console.error(e);
-    alert(`deleting ${run.name} failed: ${e.message}`);
+    alert(`deleting ${run.name} failed: ${e instanceof Error ? e.message : e}`);
     return;
   }
   state.runs = state.runs.filter((r) => r.name !== run.name);
@@ -246,7 +249,7 @@ async function deleteRun(run) {
   redrawCharts();
 }
 
-async function triggerAnalyze(name) {
+async function triggerAnalyze(name: string) {
   await api(`/api/runs/${encodeURIComponent(name)}/analyze`, { method: "POST" });
   await refresh();
 }
@@ -267,13 +270,13 @@ function syncRunColors() {
   }
 }
 
-function leastUsedColor() {
+function leastUsedColor(): string {
   const counts = new Map(PALETTE.map((c) => [c, 0]));
-  for (const c of state.runColors.values()) counts.set(c, counts.get(c) + 1);
-  return PALETTE.reduce((best, c) => (counts.get(c) < counts.get(best) ? c : best));
+  for (const c of state.runColors.values()) counts.set(c, (counts.get(c) ?? 0) + 1);
+  return PALETTE.reduce((best, c) => ((counts.get(c) ?? 0) < (counts.get(best) ?? 0) ? c : best));
 }
 
-function runColor(name) {
+function runColor(name: string): string {
   const color = state.runColors.get(name);
   if (!color) throw new Error(`${name}: no color assigned — run is not selected`);
   return color;
@@ -294,7 +297,7 @@ function autoSelectInitialRuns() {
 }
 
 async function refresh() {
-  const runs = await api("/api/runs");
+  const runs: RunSummary[] = await api("/api/runs");
   state.runs = runs;
   await Promise.all(runs.map((r) => ensureDetail(r).catch((e) => console.error(e))));
   const known = new Set(runs.map((r) => r.name));

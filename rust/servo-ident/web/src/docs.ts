@@ -18,8 +18,8 @@ async function fetchMacroHelp() {
   try {
     const resp = await fetch(`${moonrakerUrl()}/printer/gcode/help`);
     if (!resp.ok) throw new Error(`gcode/help HTTP ${resp.status}`);
-    const all = (await resp.json()).result;
-    const commands = {};
+    const all: Record<string, string> = (await resp.json()).result;
+    const commands: Record<string, string> = {};
     for (const [name, text] of Object.entries(all)) {
       if (name.startsWith("SERVO_")) commands[name] = text;
     }
@@ -61,7 +61,7 @@ function loadCachedMacroHelp() {
 /// Every cmd_*_help string ends in a "Params NAME (default) ..." tail — the
 /// one convention this rendering leans on. A string without the marker just
 /// renders as prose.
-function splitMacroHelp(text) {
+function splitMacroHelp(text: string): { prose: string; params: string | null } {
   const m = /\bParams\b/.exec(text);
   if (!m) return { prose: text.trim(), params: null };
   return {
@@ -70,12 +70,34 @@ function splitMacroHelp(text) {
   };
 }
 
+interface ParamItem {
+  kind: "param";
+  name: string;
+  choices: string | null;
+  dflt: string | null;
+}
+
+interface TextItem {
+  kind: "text";
+  text: string;
+}
+
+type ParamsTailItem = ParamItem | TextItem;
+
+interface ConsoleCompletion {
+  candidates: string[];
+  lineStart: number;
+  tokenStart: number;
+  tokenLen: number;
+  suffix: string;
+}
+
 /// Tokenizes a Params tail into param chips and plain-text runs. UPPERCASE
 /// words are params (an optional =A|B suffix lists choices), a following
 /// (...) group is that param's default, anything else — "as
 /// SERVO_MEASURE_INERTIA plus" — stays literal text.
-function parseParamsTail(tail) {
-  const items = [];
+function parseParamsTail(tail: string): ParamsTailItem[] {
+  const items: ParamsTailItem[] = [];
   const tokens = tail.split(/\s+/).filter((t) => t.length);
   let i = 0;
   while (i < tokens.length) {
@@ -114,7 +136,7 @@ function parseParamsTail(tail) {
   return items;
 }
 
-function paramChipsHtml(items) {
+function paramChipsHtml(items: ParamsTailItem[]): string {
   const known = state.help.commands || {};
   return items
     .map((it) => {
@@ -151,12 +173,12 @@ function docsDeepLinkTarget() {
   return m ? m[1].toUpperCase() : null;
 }
 
-function firstSentence(prose) {
+function firstSentence(prose: string): string {
   const cut = prose.indexOf(". ");
   return cut < 0 ? prose : prose.slice(0, cut + 1);
 }
 
-function macroDocHtml(name, text, open) {
+function macroDocHtml(name: string, text: string, open: boolean): string {
   const { prose, params } = splitMacroHelp(text);
   const items = params ? parseParamsTail(params) : [];
   return (
@@ -181,7 +203,7 @@ function renderDocsList() {
   if (status) {
     if (h.commands && !h.cached) {
       status.textContent =
-        `the running klippy's cmd_*_help strings, fetched ${shortTime(h.fetchedUtc)}`;
+        `the running klippy's cmd_*_help strings, fetched ${h.fetchedUtc ? shortTime(h.fetchedUtc) : "?"}`;
     } else if (h.commands) {
       status.innerHTML =
         `cached copy${h.fetchedUtc ? ` from ${shortTime(h.fetchedUtc)}` : ""} — ` +
@@ -213,7 +235,7 @@ function renderDocsList() {
   if (retry) retry.addEventListener("click", fetchMacroHelp);
 }
 
-function consoleCaretLine(input) {
+function consoleCaretLine(input: HTMLTextAreaElement) {
   const caret = input.selectionStart;
   const text = input.value;
   const start = text.lastIndexOf("\n", caret - 1) + 1;
@@ -222,18 +244,18 @@ function consoleCaretLine(input) {
   return { line: text.slice(start, end), start, caretInLine: caret - start };
 }
 
-function lineCommand(line) {
+function lineCommand(line: string): string {
   return (line.trim().split(/\s+/)[0] || "").toUpperCase();
 }
 
-function macroParamNames(cmdName) {
+function macroParamNames(cmdName: string): string[] | null {
   const known = state.help.commands || {};
   const text = known[cmdName];
   if (!text) return null;
   const { params } = splitMacroHelp(text);
   if (!params) return [];
   return parseParamsTail(params)
-    .filter((it) => it.kind === "param" && !known[it.name])
+    .filter((it): it is ParamItem => it.kind === "param" && !known[it.name])
     .map((it) => it.name);
 }
 
@@ -241,8 +263,8 @@ function macroParamNames(cmdName) {
 /// names for the line's first word, otherwise the command's param names not
 /// already given on the line. A token with "=" is a value — nothing to
 /// complete there.
-function consoleCompletion(input) {
-  const none: any = { candidates: [] };
+function consoleCompletion(input: HTMLTextAreaElement): ConsoleCompletion {
+  const none: ConsoleCompletion = { candidates: [], lineStart: 0, tokenStart: 0, tokenLen: 0, suffix: "" };
   const h = state.help;
   if (!h.commands) return none;
   const { line, start, caretInLine } = consoleCaretLine(input);
@@ -271,7 +293,7 @@ function consoleCompletion(input) {
   };
 }
 
-function longestCommonPrefix(names) {
+function longestCommonPrefix(names: string[]): string {
   let prefix = names[0];
   for (const n of names.slice(1)) {
     while (!n.startsWith(prefix)) prefix = prefix.slice(0, -1);
@@ -279,7 +301,7 @@ function longestCommonPrefix(names) {
   return prefix;
 }
 
-function consoleTabComplete(input) {
+function consoleTabComplete(input: HTMLTextAreaElement) {
   const c = consoleCompletion(input);
   if (!c.candidates.length) return;
   const replacement =
@@ -302,7 +324,7 @@ function consoleTabComplete(input) {
 /// prefix still matches is highlighted.
 function renderConsoleHelp() {
   const box = el("console-help");
-  const input = el("console-input");
+  const input = el<HTMLTextAreaElement>("console-input");
   if (!box || !input) return;
   const { line, caretInLine } = consoleCaretLine(input);
   const first = lineCommand(line);

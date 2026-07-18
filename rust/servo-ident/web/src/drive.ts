@@ -1,11 +1,14 @@
 import { html, render } from "htm/preact/standalone";
-import { api, el } from "./api";
+import { api, el, mustEl } from "./api";
 import { setConsoleValue } from "./console";
 import { runGcode } from "./moonraker";
 import { refresh } from "./runs";
 import { currentPageDef } from "./shell";
 import { state } from "./state";
 import { notify, useStore } from "./store";
+import type { PendingEdits } from "./state";
+import type { DriveParam, DriveState, Manifest, StrokePlan } from "./wire";
+import type { VNode } from "preact";
 
 // --- drive tuning grid --------------------------------------------------------
 //
@@ -29,45 +32,45 @@ const AUTOFILL_SOURCE_PARAM = "speed_gain";
 const DRIVE_REFRESH_POLL_MS = 1000;
 const DRIVE_REFRESH_TIMEOUT_MS = 15000;
 
-function deriveGainPositionFromSpeed(speedGainRaw) {
+function deriveGainPositionFromSpeed(speedGainRaw: number): number {
   return Math.round(speedGainRaw * 1.6);
 }
 
-function deriveGainIntegralFromSpeed(speedGainRaw) {
+function deriveGainIntegralFromSpeed(speedGainRaw: number): number {
   return Math.round(1250000 / speedGainRaw);
 }
 
-const AUTOFILL_FORMULAS = {
+const AUTOFILL_FORMULAS: Record<string, (speedGainRaw: number) => number> = {
   gain_position_from_speed: deriveGainPositionFromSpeed,
   gain_integral_from_speed: deriveGainIntegralFromSpeed,
 };
 
-function paramGroupSection(param) {
+function paramGroupSection(param: DriveParam): string {
   return GROUP_ORDER.includes(param.group) ? param.group : OTHER_GROUP;
 }
 
-function groupParams(params) {
-  const sections = new Map([...GROUP_ORDER, OTHER_GROUP].map((g) => [g, []]));
-  for (const p of params) sections.get(paramGroupSection(p)).push(p);
+function groupParams(params: DriveParam[]): Map<string, DriveParam[]> {
+  const sections = new Map<string, DriveParam[]>([...GROUP_ORDER, OTHER_GROUP].map((g) => [g, []]));
+  for (const p of params) sections.get(paramGroupSection(p))!.push(p);
   return sections;
 }
 
-function motorNames(motors) {
+function motorNames(motors: DriveState["motors"]): string[] {
   return Object.keys(motors).sort();
 }
 
-function motorRawValues(motors, cCode) {
+function motorRawValues(motors: DriveState["motors"], cCode: string): number[] {
   return motorNames(motors).map((m) => motors[m][cCode]);
 }
 
-function valuesAgree(values) {
+function valuesAgree(values: (number | string)[]): boolean {
   return values.length > 0 && values.every((v) => v === values[0]);
 }
 
-function pinnedEntries(configPins, cCode) {
-  const out = {};
+function pinnedEntries(configPins: DriveState["config_pins"], cCode: string): Record<string, number | string> {
+  const out: Record<string, number | string> = {};
   for (const motor of Object.keys(configPins || {}).sort()) {
-    const pins = configPins[motor] || {};
+    const pins = (configPins && configPins[motor]) || {};
     if (Object.prototype.hasOwnProperty.call(pins, cCode)) out[motor] = pins[cCode];
   }
   return out;
@@ -75,21 +78,37 @@ function pinnedEntries(configPins, cCode) {
 
 /// Effective raw value of one grid cell: the session's pending edit if any,
 /// else the drive's reading from the last dump.
-function cellRaw(param, motor) {
+function driveData(): DriveState {
+  const data = state.drive.data;
+  if (!data) throw new Error("drive state not loaded");
+  return data;
+}
+
+function cellRaw(param: DriveParam, motor: string): number {
   const pend = state.drive.pending[param.name];
   if (pend && pend[motor] !== undefined) return pend[motor];
-  return state.drive.data.motors[motor][param.c_code];
+  return driveData().motors[motor][param.c_code];
 }
 
 /// Which cells differ from the drive_state's per-motor readings, given this
 /// session's pending edits. `pending[name]` is always a `{motor: raw}` map —
 /// the "all" column just writes every motor at once.
-function diffChangedParams(params, motors, pending) {
-  const changed = [];
+interface ChangedCell {
+  motor: string;
+  value: number;
+}
+
+interface ChangedParam {
+  name: string;
+  cells: ChangedCell[];
+}
+
+function diffChangedParams(params: DriveParam[], motors: DriveState["motors"], pending: PendingEdits): ChangedParam[] {
+  const changed: ChangedParam[] = [];
   for (const p of params) {
     const pend = pending[p.name];
     if (pend === undefined) continue;
-    const cells = [];
+    const cells: ChangedCell[] = [];
     for (const motor of Object.keys(pend).sort()) {
       if (motors[motor][p.c_code] !== pend[motor]) cells.push({ motor, value: pend[motor] });
     }
@@ -101,13 +120,13 @@ function diffChangedParams(params, motors, pending) {
 /// One SERVO_TUNE line per (param, value), motors grouped — the MOTORS= list
 /// is always explicit so the log and the preview state exactly which drives
 /// a write targets.
-function buildServoTuneCommands(changed) {
-  const lines = [];
+function buildServoTuneCommands(changed: ChangedParam[]): string[] {
+  const lines: string[] = [];
   for (const c of changed) {
-    const byValue = new Map();
+    const byValue = new Map<number, string[]>();
     for (const { motor, value } of c.cells) {
       if (!byValue.has(value)) byValue.set(value, []);
-      byValue.get(value).push(motor);
+      byValue.get(value)!.push(motor);
     }
     for (const [value, motorList] of byValue) {
       lines.push(`SERVO_TUNE PARAM=${c.name} VALUE=${value} MOTORS=${motorList.join(",")}`);
@@ -116,16 +135,18 @@ function buildServoTuneCommands(changed) {
   return lines;
 }
 
-function paramByName(name) {
-  return state.drive.data.params.find((p) => p.name === name);
+function paramByName(name: string): DriveParam {
+  const param = driveData().params.find((p) => p.name === name);
+  if (!param) throw new Error(`${name}: unknown drive param`);
+  return param;
 }
 
 /// speed_gain's effective per-motor raws — the input every autofill formula
 /// maps over.
-function currentSpeedGainByMotor() {
+function currentSpeedGainByMotor(): Record<string, number> {
   const speedParam = paramByName(AUTOFILL_SOURCE_PARAM);
-  const out = {};
-  for (const m of motorNames(state.drive.data.motors)) {
+  const out: Record<string, number> = {};
+  for (const m of motorNames(driveData().motors)) {
     out[m] = cellRaw(speedParam, m);
   }
   return out;
@@ -135,8 +156,8 @@ function currentSpeedGainByMotor() {
 /// target the user hasn't dirtied (edited directly) this session.
 function propagateAutofill() {
   const speedByMotor = currentSpeedGainByMotor();
-  for (const param of state.drive.data.params) {
-    const formula = AUTOFILL_FORMULAS[param.autofill];
+  for (const param of driveData().params) {
+    const formula = param.autofill ? AUTOFILL_FORMULAS[param.autofill] : undefined;
     if (!formula || state.drive.dirty.has(param.name)) continue;
     state.drive.pending[param.name] = Object.fromEntries(
       Object.entries(speedByMotor).map(([m, v]) => [m, formula(v)])
@@ -144,23 +165,24 @@ function propagateAutofill() {
   }
 }
 
-function rederiveAutofillTarget(name) {
-  const formula = AUTOFILL_FORMULAS[paramByName(name).autofill];
+function rederiveAutofillTarget(name: string) {
+  const autofill = paramByName(name).autofill;
+  const formula = autofill ? AUTOFILL_FORMULAS[autofill] : undefined;
   if (!formula) return;
   state.drive.pending[name] = Object.fromEntries(
     Object.entries(currentSpeedGainByMotor()).map(([m, v]) => [m, formula(v)])
   );
 }
 
-function formatAge(ageS) {
+function formatAge(ageS: number): string {
   if (ageS < 60) return `${ageS.toFixed(0)}s`;
   const m = Math.floor(ageS / 60);
   const s = Math.round(ageS % 60);
   return `${m}m${s}s`;
 }
 
-function currentDriveAgeS() {
-  if (!state.drive.data) return null;
+function currentDriveAgeS(): number | null {
+  if (!state.drive.data || state.drive.fetchedAtMs === null) return null;
   return state.drive.data.age_s + (Date.now() - state.drive.fetchedAtMs) / 1000;
 }
 
@@ -170,27 +192,28 @@ function currentDriveAgeS() {
 /// Rebuilt only once so the 1 s age ticker doesn't wipe the refresh
 /// status text mid-dump.
 function renderDriveBanner() {
-  const banner = el("drive-state-banner");
+  const banner = mustEl("drive-state-banner");
   if (!el("drive-refresh-btn")) {
     banner.innerHTML =
       `<span class="note" id="drive-age"></span> ` +
       `<button id="drive-refresh-btn" title="SERVO_DUMP_TUNING and re-read">refresh</button>` +
       `<span id="drive-refresh-status" class="note"></span>`;
-    el("drive-refresh-btn").addEventListener("click", refreshDriveState);
+    mustEl("drive-refresh-btn").addEventListener("click", refreshDriveState);
   }
-  el("drive-age").textContent = state.drive.data
-    ? `drive state ${formatAge(currentDriveAgeS())} old`
+  const ageS = currentDriveAgeS();
+  mustEl("drive-age").textContent = ageS !== null
+    ? `drive state ${formatAge(ageS)} old`
     : "no drive state yet — press refresh to read the drives";
 }
 
-function shortMotorLabel(motor) {
+function shortMotorLabel(motor: string): string {
   return motor.replace(/^motor_/, "");
 }
 
-function stageCellEdit(param, motorSel, rawText) {
+function stageCellEdit(param: DriveParam, motorSel: string, rawText: string) {
   const raw = parseInt(rawText, 10);
   if (Number.isNaN(raw)) return;
-  const targets = motorSel === "*" ? motorNames(state.drive.data.motors) : [motorSel];
+  const targets = motorSel === "*" ? motorNames(driveData().motors) : [motorSel];
   const existing = { ...(state.drive.pending[param.name] || {}) };
   for (const m of targets) existing[m] = raw;
   state.drive.pending[param.name] = existing;
@@ -202,23 +225,23 @@ function stageCellEdit(param, motorSel, rawText) {
   renderDriveGroups();
 }
 
-function OptionList({ param }) {
-  return Object.entries(param.options).map(
+function OptionList({ param }: { param: DriveParam }) {
+  return Object.entries(param.options || {}).map(
     ([v, label]) => html`<option key=${v} value=${v}>${v}: ${label}</option>`
   );
 }
 
-function CellInput({ param, motor }) {
+function CellInput({ param, motor }: { param: DriveParam; motor: string }) {
   const raw = cellRaw(param, motor);
-  const original = state.drive.data.motors[motor][param.c_code];
+  const original = driveData().motors[motor][param.c_code];
   const cls = ["cell-input"];
   if (raw !== original) cls.push("pending");
-  const others = motorNames(state.drive.data.motors)
+  const others = motorNames(driveData().motors)
     .filter((m) => m !== motor)
     .map((m) => cellRaw(param, m));
   if (others.some((v) => v !== raw)) cls.push("drift");
   const title = `${motor} — raw ${raw}${raw !== original ? ` (drive has ${original})` : ""}`;
-  const onChange = (e) => stageCellEdit(param, motor, e.target.value);
+  const onChange = (e: Event) => stageCellEdit(param, motor, (e.target as HTMLInputElement).value);
   if (param.options) {
     return html`<select class=${cls.join(" ")} title=${title} value=${String(raw)} onChange=${onChange}>
       <${OptionList} param=${param} />
@@ -227,18 +250,18 @@ function CellInput({ param, motor }) {
   return html`<input type="number" step="1" class=${cls.join(" ")} value=${raw} title=${title} onChange=${onChange} />`;
 }
 
-function AllInput({ param }) {
-  const motors = motorNames(state.drive.data.motors);
+function AllInput({ param }: { param: DriveParam }) {
+  const motors = motorNames(driveData().motors);
   const values = motors.map((m) => cellRaw(param, m));
   const agree = valuesAgree(values);
   const cls = ["cell-input", "all"];
-  if (motors.some((m) => cellRaw(param, m) !== state.drive.data.motors[m][param.c_code])) {
+  if (motors.some((m) => cellRaw(param, m) !== driveData().motors[m][param.c_code])) {
     cls.push("pending");
   }
   const title = agree
     ? "set all motors"
     : `set all motors — currently ${motors.map((m, i) => `${shortMotorLabel(m)}=${values[i]}`).join(" ")}`;
-  const onChange = (e) => stageCellEdit(param, "*", e.target.value);
+  const onChange = (e: Event) => stageCellEdit(param, "*", (e.target as HTMLInputElement).value);
   if (param.options) {
     return html`<select class=${cls.join(" ")} title=${title} value=${agree ? String(values[0]) : ""} onChange=${onChange}>
       <option value="" disabled>${agree ? "" : "mixed"}</option>
@@ -256,8 +279,8 @@ function AllInput({ param }) {
   />`;
 }
 
-function ParamLabel({ param, section }) {
-  const pins = pinnedEntries(state.drive.data.config_pins, param.c_code);
+function ParamLabel({ param, section }: { param: DriveParam; section: string }) {
+  const pins = pinnedEntries(driveData().config_pins, param.c_code);
   const pinnedNames = Object.keys(pins);
   return html`<span title=${`${param.description} (${param.c_code})`}>${param.name}</span>${" "}
     ${param.unit ? html`<span class="unit">${param.unit}</span>` : null}
@@ -273,7 +296,7 @@ function ParamLabel({ param, section }) {
           href="#"
           class="rederive"
           title="restore the autofill link"
-          onClick=${(e) => {
+          onClick=${(e: MouseEvent) => {
             e.preventDefault();
             state.drive.dirty.delete(param.name);
             rederiveAutofillTarget(param.name);
@@ -294,9 +317,9 @@ const NOTCH_QUICK_ACTIONS = [
   { label: "disable adaptive", value: 0 },
 ];
 
-function stageAdaptiveNotchMode(value: any) {
+function stageAdaptiveNotchMode(value: number) {
   const staged = { ...(state.drive.pending.adaptive_notch_mode || {}) };
-  for (const m of motorNames(state.drive.data.motors)) {
+  for (const m of motorNames(driveData().motors)) {
     staged[m] = value;
   }
   state.drive.pending.adaptive_notch_mode = staged;
@@ -307,8 +330,8 @@ function NotchQuickActions() {
   return html`<details
     class="adaptive-actions"
     open=${state.drive.adaptiveOpen}
-    onToggle=${(e) => {
-      state.drive.adaptiveOpen = e.target.open;
+    onToggle=${(e: Event) => {
+      state.drive.adaptiveOpen = (e.target as HTMLDetailsElement).open;
     }}
   >
     <summary>adaptive notch recipes</summary>
@@ -328,10 +351,10 @@ function NotchQuickActions() {
 
 const NOTCH_ROW_KINDS = ["freq", "width", "depth"];
 
-function notchMatrix(params) {
-  const byKey = new Map();
+function notchMatrix(params: DriveParam[]): { nums: number[]; byKey: Map<string, DriveParam>; leftover: DriveParam[] } {
+  const byKey = new Map<string, DriveParam>();
   const nums = new Set<number>();
-  const leftover = [];
+  const leftover: DriveParam[] = [];
   for (const p of params) {
     const m = /^notch_(\d+)_(freq|width|depth)$/.exec(p.name);
     if (m) {
@@ -349,7 +372,7 @@ function notchMatrix(params) {
 /// per-axis physics — on corexy every motor sees the same belt, so
 /// per-motor notch tables are noise; the per-motor toggle remains for
 /// drives that genuinely disagree).
-function NotchCompactGrid({ nums, byKey }) {
+function NotchCompactGrid({ nums, byKey }: { nums: number[]; byKey: Map<string, DriveParam> }) {
   return html`<table class="param-grid notch-grid">
     <thead>
       <tr>
@@ -374,7 +397,7 @@ function NotchCompactGrid({ nums, byKey }) {
   </table>`;
 }
 
-function PerMotorTable({ params, group, motors }) {
+function PerMotorTable({ params, group, motors }: { params: DriveParam[]; group: string; motors: string[] }) {
   return html`<table class="param-grid">
     <thead>
       <tr>
@@ -395,11 +418,11 @@ function PerMotorTable({ params, group, motors }) {
   </table>`;
 }
 
-function NotchViewToggle({ label }) {
+function NotchViewToggle({ label }: { label: string }) {
   return html` <a
     href="#"
     class="notch-view-toggle hint"
-    onClick=${(e) => {
+    onClick=${(e: MouseEvent) => {
       e.preventDefault();
       state.drive.notchPerMotor = !state.drive.notchPerMotor;
       renderDriveGroups();
@@ -409,9 +432,9 @@ function NotchViewToggle({ label }) {
 
 function DriveGroups() {
   const def = currentPageDef();
-  const motors = motorNames(state.drive.data.motors);
-  const sections = groupParams(state.drive.data.params);
-  const groups = [];
+  const motors = motorNames(driveData().motors);
+  const sections = groupParams(driveData().params);
+  const groups: VNode[] = [];
   for (const [group, params] of sections) {
     if (!params.length) continue;
     if (def.groups && group !== OTHER_GROUP && !def.groups.includes(group)) continue;
@@ -466,12 +489,12 @@ function DrivePanel() {
     </div>`;
 }
 
-let mountedDrivePanel = null;
+let mountedDrivePanel: HTMLElement | null = null;
 
 function renderDriveGroups() {
   const container = el("drive-panel");
   if (container && mountedDrivePanel !== container) {
-    if (mountedDrivePanel) render(null, mountedDrivePanel);
+    if (mountedDrivePanel) render(null as unknown as VNode, mountedDrivePanel);
     mountedDrivePanel = container;
     render(html`<${DrivePanel} />`, container);
   }
@@ -480,7 +503,7 @@ function renderDriveGroups() {
 
 async function loadDriveState() {
   try {
-    const data = await api("/api/drive_state");
+    const data: DriveState = await api("/api/drive_state");
     state.drive.data = data;
     state.drive.fetchedAtMs = Date.now();
   } catch (e) {
@@ -495,13 +518,13 @@ async function loadDriveState() {
 
 async function refreshDriveState() {
   const statusEl = el("drive-refresh-status");
-  const priorAge = state.drive.data ? currentDriveAgeS() : Infinity;
+  const priorAge = currentDriveAgeS() ?? Infinity;
   if (statusEl) statusEl.textContent = " dumping…";
   await runGcode(["SERVO_DUMP_TUNING"], "refresh");
   const deadline = Date.now() + DRIVE_REFRESH_TIMEOUT_MS;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, DRIVE_REFRESH_POLL_MS));
-    let data;
+    let data: DriveState;
     try {
       data = await api("/api/drive_state");
     } catch (e) {
@@ -526,7 +549,8 @@ async function refreshDriveState() {
 /// the file in place, so re-reading it is enough; the full
 /// SERVO_DUMP_TUNING drive re-read stays behind the refresh button.
 async function applyDriveChanges() {
-  const changed = diffChangedParams(state.drive.data.params, state.drive.data.motors, state.drive.pending);
+  const data = driveData();
+  const changed = diffChangedParams(data.params, data.motors, state.drive.pending);
   const lines = buildServoTuneCommands(changed);
   if (!lines.length) return;
   await runGcode(lines, "apply");
@@ -538,7 +562,7 @@ async function applyDriveChanges() {
 /// The stroke's SPEED/ACCEL must ride along on a re-run: they shape the
 /// excitation, so a "same sweep" at the command defaults is not the same
 /// sweep and its results are not comparable to the original.
-function strokeSuffix(manifest, includeAccel) {
+function strokeSuffix(manifest: Manifest, includeAccel: boolean): string {
   const plan = manifest.stroke_plan || {};
   let suffix = "";
   if (plan.speed != null) suffix += ` SPEED=${plan.speed}`;
@@ -546,9 +570,16 @@ function strokeSuffix(manifest, includeAccel) {
   return suffix;
 }
 
+function requiredStrokePlan(manifest: Manifest): StrokePlan {
+  if (!manifest.stroke_plan) {
+    throw new Error(`${manifest.experiment}: manifest has no stroke_plan to rebuild the command from`);
+  }
+  return manifest.stroke_plan;
+}
+
 /// Old manifests predate the recorded `command` field; rebuilding from the
 /// manifest is a lossy fallback that only knows the parameters listed here.
-function reconstructCommand(manifest) {
+function reconstructCommand(manifest: Manifest): string {
   if (manifest.command) return manifest.command;
   const tag = manifest.tag || "cal";
   const axis = manifest.axis || "X";
@@ -559,11 +590,11 @@ function reconstructCommand(manifest) {
 
   switch (manifest.experiment) {
     case "gain_sweep": {
-      const values = manifest.steps.map((s) => s.swept.speed).join(",");
+      const values = manifest.steps.map((s) => (s.swept || {}).speed).join(",");
       return `SERVO_CALIBRATE_GAINS SPEED_GAINS=${values} ${common}${strokeSuffix(manifest, true)}`;
     }
     case "gain_ladder": {
-      const speeds = manifest.steps.map((s) => s.swept.speed);
+      const speeds = manifest.steps.map((s) => (s.swept || {}).speed ?? 0);
       const safe = speeds[0];
       const start = speeds.length > 1 ? speeds[1] : safe;
       const step = speeds.length > 2 ? speeds[2] - speeds[1] : 50;
@@ -572,19 +603,19 @@ function reconstructCommand(manifest) {
     }
     case "refine_sweep": {
       const param = commonKeys.length === 1 ? commonKeys[0] : "speed";
-      const values = manifest.steps.map((s) => s.swept[param]).join(",");
+      const values = manifest.steps.map((s) => (s.swept || {})[param]).join(",");
       return `SERVO_REFINE_GAIN PARAM=${param} VALUES=${values} ${common}${strokeSuffix(manifest, true)}`;
     }
     case "inertia_sweep": {
-      const values = manifest.steps.map((s) => s.swept.ratio ?? Object.values(s.swept)[0]).join(",");
+      const values = manifest.steps.map((s) => (s.swept || {}).ratio ?? Object.values(s.swept || {})[0]).join(",");
       return `SERVO_SWEEP_INERTIA RATIOS=${values} ${common}${strokeSuffix(manifest, true)}`;
     }
     case "accel_sweep": {
-      const values = manifest.steps.map((s) => s.swept.accel ?? Object.values(s.swept)[0]).join(",");
+      const values = manifest.steps.map((s) => (s.swept || {}).accel ?? Object.values(s.swept || {})[0]).join(",");
       return `SERVO_SWEEP_ACCEL ACCELS=${values} ${common}${strokeSuffix(manifest, false)}`;
     }
     case "strain_map": {
-      const plan = manifest.stroke_plan;
+      const plan = requiredStrokePlan(manifest);
       return (
         `SERVO_MEASURE_STRAIN_MAP LINE_SPACING=${plan.line_spacing} SPEED=${plan.speed} ` +
         `ACCEL=${plan.accel} X_START=${plan.x_start} X_END=${plan.x_end} ` +
@@ -593,7 +624,7 @@ function reconstructCommand(manifest) {
       );
     }
     case "differential": {
-      const plan = manifest.stroke_plan;
+      const plan = requiredStrokePlan(manifest);
       return (
         `SERVO_MEASURE_DIFFERENTIAL BELT=${plan.belt} FREQ_START=${plan.freq_start} ` +
         `FREQ_END=${plan.freq_end} AMPLITUDE=${plan.amplitude} DURATION=${plan.duration} ` +
@@ -601,7 +632,7 @@ function reconstructCommand(manifest) {
       );
     }
     case "ringdown": {
-      const plan = manifest.stroke_plan;
+      const plan = requiredStrokePlan(manifest);
       const cruise = plan.cruise_ms == null ? "" : `CRUISE_MS=${plan.cruise_ms} `;
       return (
         `SERVO_MEASURE_RINGDOWN SPEEDS=${(plan.speeds || []).join(",")} ` +
@@ -613,7 +644,7 @@ function reconstructCommand(manifest) {
   }
 }
 
-function loadRerunForm(name) {
+function loadRerunForm(name: string) {
   const detail = state.details.get(name);
   if (!detail || !detail.manifest) return;
   const label = el("form-run-name");

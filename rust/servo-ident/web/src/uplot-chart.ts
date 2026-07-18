@@ -11,25 +11,96 @@ const THEME = {
   readoutFont: "11px monospace",
 };
 
+interface TimeTrace {
+  t: number[];
+  y: (number | null)[];
+  color: string;
+  dash?: number[];
+  points?: boolean;
+  label?: string;
+}
+
+interface PsdTrace {
+  freq: number[];
+  y: number[];
+  color: string;
+  dashed: boolean;
+  label?: string;
+  run?: string;
+}
+
+interface Mark {
+  x: number;
+  color: string;
+}
+
+interface FreqMarker {
+  freq: number;
+  label: string;
+}
+
+interface FixedY {
+  yMin: number;
+  yMax: number;
+}
+
+interface Brush {
+  minSpan: number;
+  onSelect: (sel: [number, number] | null) => void;
+}
+
+interface TimeSeriesOpts {
+  width: number;
+  height: number;
+  yLabel: string;
+  traces: TimeTrace[];
+  marks?: Mark[];
+  hover?: boolean;
+  brush?: Brush | null;
+  xUnit?: string;
+  xTitle?: string;
+  fixedY?: FixedY | null;
+}
+
+interface TimeSeriesPlot {
+  u: uPlot;
+  setTraces(nextTraces: TimeTrace[], nextFixedY?: FixedY | null): void;
+  setBrush(sel: [number, number] | null): void;
+}
+
+interface PsdPlotOpts {
+  width: number;
+  height: number;
+  traces: PsdTrace[];
+  band?: [number, number] | null;
+  yTitle: string;
+  linear?: boolean;
+  zeroFloor?: boolean;
+  fixedY?: FixedY | null;
+  threshold?: number | null;
+  markers?: FreqMarker[] | null;
+  formatValue: (v: number) => string;
+}
+
 /// uPlot.join with the default NULL_RETAIN mode: explicit nulls in a trace
 /// stay nulls (rendered as gaps), while alignment artifacts from merging
 /// per-trace x grids become undefined (rendered as connected).
-function joinTraces(traces) {
-  return uPlot.join(traces.map((tr) => [tr.t, tr.y]));
+function joinTraces(traces: { t: number[]; y: (number | null)[] }[]): uPlot.AlignedData {
+  return uPlot.join(traces.map((tr) => [tr.t, tr.y] as uPlot.AlignedData));
 }
 
-function fmtTick(v, span) {
+function fmtTick(v: number, span: number): string {
   return Math.abs(span) >= 20 ? v.toFixed(0) : v.toFixed(2);
 }
 
-function axisTickValues(unit) {
-  return (u, vals) => {
+function axisTickValues(unit: string) {
+  return (u: uPlot, vals: number[]) => {
     const span = vals.length > 1 ? vals[vals.length - 1] - vals[0] : 0;
     return vals.map((v) => fmtTick(v, span) + unit);
   };
 }
 
-function themedAxis(extra) {
+function themedAxis(extra: uPlot.Axis): uPlot.Axis {
   return {
     stroke: THEME.axisText,
     grid: { stroke: THEME.grid, width: 1 },
@@ -39,12 +110,17 @@ function themedAxis(extra) {
   };
 }
 
-function marksPlugin(marks) {
+function xSpan(u: uPlot): [number, number] {
+  const { min, max } = u.scales.x;
+  if (min == null || max == null) throw new Error("uplot x scale has no range at draw time");
+  return [min, max];
+}
+
+function marksPlugin(marks: Mark[]): uPlot.Plugin {
   return {
     hooks: {
       draw: (u) => {
-        const xMin = u.scales.x.min;
-        const xMax = u.scales.x.max;
+        const [xMin, xMax] = xSpan(u);
         u.ctx.save();
         u.ctx.lineWidth = 1;
         u.ctx.setLineDash([4, 4]);
@@ -63,27 +139,37 @@ function marksPlugin(marks) {
   };
 }
 
+interface NearestPointOpts {
+  yLabel?: string;
+  xUnit?: string;
+  xTitle?: string;
+  traces: { color: string; label?: string }[];
+  formatText?: (xVal: number, yVal: number, trace: { color: string; label?: string }) => string;
+}
+
 /// The metrics-vs-gain readout: uPlot's x-cursor picks one index across all
 /// series, but this chart wants the single nearest point by 2D pixel
 /// distance — the hovered point, for that run/metric — so the plugin snaps
 /// itself and draws the vertical line, dot, and value box.
-function nearestPointPlugin({ yLabel, xUnit, xTitle, traces, formatText }: any) {
-  let hovered = null;
-  const fmtVal = (v) => (Math.abs(v) >= 1000 ? v.toFixed(0) : v.toFixed(1));
+function nearestPointPlugin({ yLabel, xUnit, xTitle, traces, formatText }: NearestPointOpts): uPlot.Plugin {
+  let hovered: { d: number; si: number; i: number } | null = null;
+  const fmtVal = (v: number) => (Math.abs(v) >= 1000 ? v.toFixed(0) : v.toFixed(1));
   return {
     opts: (u, opts) => ({ ...opts, cursor: { ...opts.cursor, show: true, x: false, y: false, points: { show: false } } }),
     hooks: {
       setCursor: (u) => {
         const { left, top } = u.cursor;
-        let best = null;
+        let best: { d: number; si: number; i: number } | null = null;
         if (left != null && left >= 0 && top != null && top >= 0) {
           const xs = u.data[0];
           for (let si = 1; si < u.data.length; si++) {
             const ys = u.data[si];
             for (let i = 0; i < xs.length; i++) {
-              if (ys[i] == null) continue;
-              const dx = u.valToPos(xs[i], "x") - left;
-              const dy = u.valToPos(ys[i], "y") - top;
+              const xv = xs[i];
+              const yv = ys[i];
+              if (xv == null || yv == null) continue;
+              const dx = u.valToPos(xv, "x") - left;
+              const dy = u.valToPos(yv, "y") - top;
               const d = dx * dx + dy * dy;
               if (!best || d < best.d) best = { d, si, i };
             }
@@ -98,6 +184,7 @@ function nearestPointPlugin({ yLabel, xUnit, xTitle, traces, formatText }: any) 
         const dpr = uPlot.pxRatio || window.devicePixelRatio || 1;
         const xVal = u.data[0][i];
         const yVal = u.data[si][i];
+        if (xVal == null || yVal == null) return;
         const px = u.valToPos(xVal, "x", true);
         const py = u.valToPos(yVal, "y", true);
         const ctx = u.ctx;
@@ -141,7 +228,7 @@ function nearestPointPlugin({ yLabel, xUnit, xTitle, traces, formatText }: any) 
   };
 }
 
-function traceSeries(tr) {
+function traceSeries(tr: TimeTrace): uPlot.Series {
   return {
     label: tr.label != null ? tr.label : "",
     stroke: tr.color,
@@ -157,17 +244,17 @@ function traceSeries(tr) {
 /// Thin themed wrapper: builds one dark uPlot from drawChart-style traces
 /// ({t, y, color, dash?, points?, label?}) and returns {u, setTraces} so
 /// live charts can stream new data into a persistent instance.
-function timeSeriesPlot(target, opts) {
+function timeSeriesPlot(target: HTMLElement, opts: TimeSeriesOpts): TimeSeriesPlot {
   const { width, height, yLabel, marks = [], hover = false, brush = null } = opts;
   const xUnit = opts.xUnit == null ? "s" : opts.xUnit;
   let fixedY = opts.fixedY || null;
   let traces = opts.traces;
 
-  const plugins = [];
+  const plugins: uPlot.Plugin[] = [];
   if (marks.length) plugins.push(marksPlugin(marks));
   if (hover) plugins.push(nearestPointPlugin({ yLabel, xUnit, xTitle: opts.xTitle, traces }));
 
-  const uOpts: any = {
+  const uOpts: uPlot.Options = {
     width,
     height,
     pxAlign: false,
@@ -177,7 +264,7 @@ function timeSeriesPlot(target, opts) {
     hooks: brush
       ? {
           setSelect: [
-            (u) => {
+            (u: uPlot) => {
               const lo = u.posToVal(u.select.left, "x");
               const hi = u.posToVal(u.select.left + u.select.width, "x");
               if (hi - lo < brush.minSpan) {
@@ -240,12 +327,13 @@ function timeSeriesPlot(target, opts) {
 
 const PSD_LOG_FLOOR = 1e-6;
 
-function psdBandPlugin(band, traces, plotY) {
+function psdBandPlugin(band: [number, number], traces: PsdTrace[], plotY: (v: number) => number): uPlot.Plugin {
   return {
     hooks: {
       drawClear: (u) => {
-        const lo = Math.max(band[0], u.scales.x.min);
-        const hi = Math.min(band[1], u.scales.x.max);
+        const [xMin, xMax] = xSpan(u);
+        const lo = Math.max(band[0], xMin);
+        const hi = Math.min(band[1], xMax);
         if (hi <= lo) return;
         const x0 = u.valToPos(lo, "x", true);
         const x1 = u.valToPos(hi, "x", true);
@@ -286,7 +374,7 @@ function psdBandPlugin(band, traces, plotY) {
   };
 }
 
-function thresholdPlugin(threshold, plotY) {
+function thresholdPlugin(threshold: number, plotY: (v: number) => number): uPlot.Plugin {
   return {
     hooks: {
       draw: (u) => {
@@ -306,17 +394,18 @@ function thresholdPlugin(threshold, plotY) {
   };
 }
 
-function freqMarkersPlugin(markers) {
+function freqMarkersPlugin(markers: FreqMarker[]): uPlot.Plugin {
   return {
     hooks: {
       draw: (u) => {
         const dpr = uPlot.pxRatio || window.devicePixelRatio || 1;
+        const [xMin, xMax] = xSpan(u);
         u.ctx.save();
         u.ctx.font = THEME.font.replace("10px", `${10 * dpr}px`);
         u.ctx.setLineDash([3 * dpr, 3 * dpr]);
         u.ctx.lineWidth = dpr;
         markers.forEach((m, idx) => {
-          if (m.freq < u.scales.x.min || m.freq > u.scales.x.max) return;
+          if (m.freq < xMin || m.freq > xMax) return;
           const px = u.valToPos(m.freq, "x", true);
           u.ctx.strokeStyle = "#b388ff";
           u.ctx.beginPath();
@@ -337,11 +426,11 @@ function freqMarkersPlugin(markers) {
 /// log-10 y scale (uPlot distr:3) unless `linear`, plus the shared PSD
 /// furniture — band shading with per-trace peak dots, a threshold line,
 /// staggered vertical mode markers, and the nearest-point hover readout.
-function psdPlot(target, opts) {
+function psdPlot(target: HTMLElement, opts: PsdPlotOpts): uPlot {
   const { width, height, traces, band, yTitle, linear, zeroFloor, fixedY, threshold, markers, formatValue } = opts;
-  const plotY = linear ? (v) => v : (v) => Math.max(v, PSD_LOG_FLOOR);
+  const plotY = linear ? (v: number) => v : (v: number) => Math.max(v, PSD_LOG_FLOOR);
 
-  const plugins = [];
+  const plugins: uPlot.Plugin[] = [];
   if (band) plugins.push(psdBandPlugin(band, traces, plotY));
   if (threshold != null) plugins.push(thresholdPlugin(threshold, plotY));
   if (markers && markers.length) plugins.push(freqMarkersPlugin(markers));
@@ -353,7 +442,7 @@ function psdPlot(target, opts) {
     })
   );
 
-  const yScale: any = linear
+  const yScale: uPlot.Scale = linear
     ? {
         range: (u, dataMin, dataMax) => {
           let lo = zeroFloor ? 0 : dataMin;
@@ -406,4 +495,5 @@ function psdPlot(target, opts) {
   return u;
 }
 
+export type { TimeTrace, PsdTrace, Mark, FreqMarker, FixedY, Brush, TimeSeriesOpts, TimeSeriesPlot, PsdPlotOpts };
 export { timeSeriesPlot, psdPlot, THEME };

@@ -1,5 +1,12 @@
-import { api } from "./api";
 import { loadConsoleHistory } from "./console";
+import type {
+  DriveState,
+  PlotSeries,
+  RunDetail,
+  RunSummary,
+  StrainData,
+  StrainField,
+} from "./wire";
 
 const REFRESH_MS = 5000;
 const MOONRAKER_KEY = "servoCalMoonrakerUrl";
@@ -7,7 +14,7 @@ const CONSOLE_HISTORY_KEY = "servoCalConsoleHistory";
 const HELP_CACHE_KEY = "servoCalGcodeHelp";
 const CONSOLE_HISTORY_MAX = 500;
 const PALETTE = ["#4fb3ff", "#e05a4f", "#4caf50", "#d9a441", "#b388ff", "#4fd8c4"];
-const RESONANCE_BAND_HZ = [20, 450];
+const RESONANCE_BAND_HZ: [number, number] = [20, 450];
 const RINGDOWN_PSD_PLOT_MAX_HZ = 500;
 const PSD_MAX_FREQ_KEY = "servoCalPsdMaxFreqHz";
 const MOTOR_VIEW_KEY = "servoCalMotorView";
@@ -21,7 +28,29 @@ const PEAK_LIST_SIZE = 3;
 // activity needs (docs/plans/servo-calibration-automation.md, second demo
 // review): the interleaved tuning loop is navigation between pages, not
 // scrolling within one.
-const PAGE_DEFS = {
+interface PageTemplate {
+  label: string;
+  command: string;
+  title: string;
+}
+
+interface PageDef {
+  label: string;
+  groups?: string[];
+  experiments?: string[] | null;
+  charts?: string[];
+  intro?: string;
+  metrics?: boolean;
+  sweepChart?: boolean;
+  peaks?: boolean;
+  templates?: PageTemplate[];
+  strain?: boolean;
+  live?: boolean;
+  journal?: boolean;
+  docs?: boolean;
+}
+
+const PAGE_DEFS: Record<string, PageDef> = {
   gains: {
     // gains and notches are one tuning loop, not two — the resonances the
     // PSD shows are what keep gains from going higher, so the gains and notch
@@ -125,7 +154,92 @@ const LIVE_STATUS_POLL_MS = 1000;
 const LIVE_TAIL_POLL_MS = 400;
 const MOONRAKER_HEALTH_POLL_MS = 5000;
 
-const state: any = {
+interface ConsoleSearch {
+  query: string;
+  pos: number;
+  saved: string;
+  failed: boolean;
+}
+
+interface ConsoleState {
+  text: string;
+  history: string[];
+  cursor: number | null;
+  draft: string;
+  search: ConsoleSearch | null;
+}
+
+type PendingEdits = Record<string, Record<string, number>>;
+
+interface DrivePanelState {
+  data: DriveState | null;
+  fetchedAtMs: number | null;
+  pending: PendingEdits;
+  dirty: Set<string>;
+  notchPerMotor: boolean;
+  adaptiveOpen: boolean;
+}
+
+interface LiveSeries {
+  ferr: (number | null)[];
+  torque: (number | null)[];
+}
+
+interface LiveState {
+  cursor: number | null;
+  fsHz: number | null;
+  cycle0: number | null;
+  lastCycle: number | null;
+  t: number[];
+  perDrive: Record<string, LiveSeries>;
+  windowS: number;
+  timers: ReturnType<typeof setInterval>[];
+  polling: boolean;
+}
+
+interface StrainPageState {
+  selected: string | null;
+  compare: Set<string>;
+  cache: Map<string, { mtime_utc: string | null; data: StrainData }>;
+  field: StrainField;
+}
+
+interface SentEntry {
+  time: string;
+  label: string;
+  lines: string[];
+  results: { ok: boolean; status: number }[];
+  responses?: string[][];
+}
+
+interface HelpState {
+  commands: Record<string, string> | null;
+  fetchedUtc: string | null;
+  cached: boolean;
+  error: string | null;
+  pending: boolean;
+  klippyState: string | null;
+}
+
+interface AppState {
+  page: string;
+  runs: RunSummary[];
+  details: Map<string, RunDetail>;
+  plotSeries: Map<string, { mtime_utc: string | null; data: PlotSeries }>;
+  selected: Set<string>;
+  pinned: Set<string>;
+  runColors: Map<string, string>;
+  autoSelected: boolean;
+  stepFilter: Set<string> | null;
+  console: ConsoleState;
+  drive: DrivePanelState;
+  live: LiveState;
+  strain: StrainPageState;
+  sentLog: SentEntry[];
+  help: HelpState;
+}
+
+const state: AppState = {
   page: DEFAULT_PAGE,
   runs: [],
   details: new Map(), // name -> {mtime_utc, has_results, manifest, results}
@@ -178,4 +292,5 @@ const state: any = {
   },
 };
 
+export type { PageDef, PageTemplate, ConsoleSearch, SentEntry, LiveSeries, PendingEdits };
 export { REFRESH_MS, MOONRAKER_KEY, CONSOLE_HISTORY_KEY, HELP_CACHE_KEY, CONSOLE_HISTORY_MAX, PALETTE, RESONANCE_BAND_HZ, RINGDOWN_PSD_PLOT_MAX_HZ, PSD_MAX_FREQ_KEY, MOTOR_VIEW_KEY, PSD_MAX_FREQ_CHOICES_HZ, PSD_MAX_FREQ_DEFAULT_HZ, INITIAL_SELECTED_RUNS, PEAK_MIN_SEPARATION_HZ, PEAK_LIST_SIZE, PAGE_DEFS, DEFAULT_PAGE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, MOONRAKER_HEALTH_POLL_MS, state };

@@ -1,20 +1,24 @@
-import { el, payloadUnchanged, runDataSig, onRenderReset } from "./api";
+import { el, mustEl, payloadUnchanged, runDataSig, onRenderReset } from "./api";
 import { mixColor } from "./charts-core";
 import { psdBox, visibleStepNames } from "./metrics";
+import type { PsdBoxOpts } from "./metrics";
 import { timeSeriesPlot } from "./uplot-chart";
+import type { TimeSeriesPlot } from "./uplot-chart";
 import { runColor } from "./runs";
 import { RINGDOWN_PSD_PLOT_MAX_HZ, state } from "./state";
+import type { TimeTrace, PsdTrace } from "./uplot-chart";
+import type { DifferentialPlot, DifferentialResult, FrfMode, PlotSeries, PlotStep, RingdownMode, RingdownSource } from "./wire";
 
 // --- differential belt FRF (dynamics page) -----------------------------------
 
-const FRF_BOXES = [
+const FRF_BOXES: { key: "mag_db" | "phase_deg" | "coherence" | "torque_db"; title: string; yTitle: string }[] = [
   { key: "mag_db", title: "magnitude", yTitle: "|H| (dB)" },
   { key: "phase_deg", title: "phase", yTitle: "phase (deg)" },
   { key: "coherence", title: "coherence", yTitle: "coherence" },
   { key: "torque_db", title: "torque FRF", yTitle: "torque (dB)" },
 ];
 
-function differentialSeries(step) {
+function differentialSeries(step: PlotStep): DifferentialPlot | null {
   const d = step.differential;
   if (!d) return null;
   const n = d.freq_hz.length;
@@ -29,8 +33,8 @@ function differentialSeries(step) {
   return d;
 }
 
-function frfTraces(names, plots, stepName, key) {
-  const traces = [];
+function frfTraces(names: string[], plots: PlotSeries[], stepName: string, key: "mag_db" | "phase_deg" | "coherence" | "torque_db"): PsdTrace[] {
+  const traces: PsdTrace[] = [];
   plots.forEach((p, i) => {
     const step = p.steps.find((s) => s.name === stepName);
     const d = step && differentialSeries(step);
@@ -47,14 +51,14 @@ function frfTraces(names, plots, stepName, key) {
   return traces;
 }
 
-function frfModeMarkers(modes) {
+function frfModeMarkers(modes: FrfMode[]) {
   return modes.map((m) => ({
     freq: m.freq_hz,
     label: `${m.freq_hz.toFixed(1)} Hz${m.damping == null ? "" : ` ζ=${m.damping.toFixed(3)}`}`,
   }));
 }
 
-function frfModeTableHtml(modes) {
+function frfModeTableHtml(modes: FrfMode[]): string {
   if (!modes.length) return '<p class="note">no modes detected</p>';
   const rows = modes
     .map(
@@ -70,7 +74,8 @@ function frfModeTableHtml(modes) {
   );
 }
 
-function differentialResultStep(runName, stepName) {
+function differentialResultStep(runName: string | null, stepName: string): DifferentialResult | null {
+  if (runName === null) return null;
   const detail = state.details.get(runName);
   const step =
     detail && detail.results && detail.results.steps.find((s) => s.name === stepName);
@@ -80,13 +85,13 @@ function differentialResultStep(runName, stepName) {
 /// The newest selected run with a differential step drives the mode markers,
 /// the coherence threshold, and the mode table; every selected run's traces
 /// overlay on the four shared-x boxes.
-function renderFrfCharts(names, plots) {
+function renderFrfCharts(names: string[], plots: PlotSeries[]) {
   const section = el("frf-section");
   if (!section) return;
   if (payloadUnchanged("frf-charts", { runs: runDataSig(names) })) return;
-  const container = el("frf-charts");
-  const modesEl = el("frf-modes");
-  const meta = el("frf-meta");
+  const container = mustEl("frf-charts");
+  const modesEl = mustEl("frf-modes");
+  const meta = mustEl("frf-meta");
   container.innerHTML = "";
   modesEl.innerHTML = "";
   meta.textContent = "";
@@ -98,10 +103,10 @@ function renderFrfCharts(names, plots) {
     return;
   }
   section.hidden = false;
-  const metaParts = [];
+  const metaParts: string[] = [];
   for (const stepName of stepNames) {
-    let ref = null;
-    let refName = null;
+    let ref: DifferentialPlot | null = null;
+    let refName: string | null = null;
     for (let i = 0; i < plots.length; i++) {
       const step = plots[i].steps.find((s) => s.name === stepName);
       const d = step && differentialSeries(step);
@@ -111,8 +116,9 @@ function renderFrfCharts(names, plots) {
         break;
       }
     }
+    if (!ref) throw new Error(`${stepName}: no plot carries a differential series`);
     for (const spec of FRF_BOXES) {
-      const opts: any = { linear: true };
+      const opts: PsdBoxOpts = { linear: true };
       if (spec.key === "mag_db") opts.markers = frfModeMarkers(ref.modes);
       if (spec.key === "coherence") {
         opts.fixedY = { yMin: 0, yMax: 1.05 };
@@ -131,7 +137,7 @@ function renderFrfCharts(names, plots) {
     const result = differentialResultStep(refName, stepName);
     const label = result
       ? `${result.pair.join(" vs ")} — ${result.segments} Welch segments`
-      : refName;
+      : refName ?? "?";
     modesEl.innerHTML += `<h3>${stepName} modes — ${label}</h3>${frfModeTableHtml(ref.modes)}`;
     metaParts.push(label);
   }
@@ -140,7 +146,7 @@ function renderFrfCharts(names, plots) {
 
 // --- ring-down after stop (dynamics page) -------------------------------------
 
-function ringdownModeTableHtml(sources) {
+function ringdownModeTableHtml(sources: RingdownSource[]): string {
   const rows = sources
     .flatMap((src) =>
       src.modes.length
@@ -166,7 +172,7 @@ function ringdownModeTableHtml(sources) {
   );
 }
 
-function fftPow2Js(re, im) {
+function fftPow2Js(re: number[], im: number[]) {
   const n = re.length;
   for (let i = 1, j = 0; i < n; i++) {
     let bit = n >> 1;
@@ -201,13 +207,13 @@ function fftPow2Js(re, im) {
 // Mirrors the analyzer's welch_psd (Hann, pow2 nperseg ≤ 1024, 50% overlap,
 // per-segment mean removal, one-sided) so a full-tail selection reproduces
 // the server-computed PSD. Returns null when the selection is too short.
-function welchPsdJs(x, fs) {
+function welchPsdJs(x: number[], fs: number): { freqs: number[]; psd: number[] } | null {
   let nperseg = 1;
   const cap = Math.min(x.length, 1024);
   while (nperseg * 2 <= cap) nperseg *= 2;
   if (nperseg < 64) return null;
   const step = nperseg / 2;
-  const win = [];
+  const win: number[] = [];
   let winSqSum = 0;
   for (let k = 0; k < nperseg; k++) {
     const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * k) / (nperseg - 1));
@@ -216,7 +222,7 @@ function welchPsdJs(x, fs) {
   }
   const scale = 1 / (fs * winSqSum);
   const bins = nperseg / 2 + 1;
-  const acc = new Array(bins).fill(0);
+  const acc: number[] = new Array(bins).fill(0);
   let count = 0;
   for (let start = 0; start + nperseg <= x.length; start += step) {
     const seg = x.slice(start, start + nperseg);
@@ -233,13 +239,18 @@ function welchPsdJs(x, fs) {
   return { freqs, psd };
 }
 
-function ringdownTailColor(name, k, count) {
+function ringdownTailColor(name: string, k: number, count: number): string {
   return mixColor(runColor(name), "#ffffff", (0.5 * k) / Math.max(1, count - 1));
 }
 
-function ringdownTailTraces(runEntries) {
-  const traces = [];
-  const legend = [];
+interface RingdownRunEntry {
+  name: string;
+  src: RingdownSource;
+}
+
+function ringdownTailTraces(runEntries: RingdownRunEntry[]): { traces: TimeTrace[]; legend: { color: string; label: string }[] } {
+  const traces: TimeTrace[] = [];
+  const legend: { color: string; label: string }[] = [];
   for (const { name, src } of runEntries) {
     src.tails.forEach((tail, k) => {
       const t = tail.value.map((_, i) => (i / src.fs_hz) * 1000);
@@ -265,7 +276,7 @@ function ringdownTailTraces(runEntries) {
   return { traces, legend };
 }
 
-function ringdownFullPsdTraces(runEntries) {
+function ringdownFullPsdTraces(runEntries: RingdownRunEntry[]): PsdTrace[] {
   return runEntries.map(({ name, src }) => {
     const cut = src.psd_freq_hz.filter((f) => f <= RINGDOWN_PSD_PLOT_MAX_HZ).length;
     return {
@@ -282,15 +293,33 @@ function ringdownFullPsdTraces(runEntries) {
 // Chart instances persist across refreshes keyed by step|source, so the
 // brush selection is plain per-instance state and canvases/listeners are
 // created once. Cleared on page rebuild — the DOM they own is gone.
-const ringdownCharts = new Map();
+const ringdownCharts = new Map<string, RingdownChart>();
 onRenderReset(() => ringdownCharts.clear());
 
 /// One persistent ring-down unit: the brushable tail chart plus the PSD
 /// chart it drives. The uPlot x-drag selection stays highlighted and the
 /// PSD box switches between the full-dwell average and the per-tail PSD of
 /// the brushed span (in ms; a drag under 2 ms clears it).
-function createRingdownChart(stepName, sourceName) {
-  const inst: any = {
+interface RingdownChart {
+  stepName: string;
+  sourceName: string;
+  runEntries: RingdownRunEntry[];
+  fullTraces: PsdTrace[];
+  markers: PsdBoxOpts;
+  unit: string;
+  tMax: number;
+  selection: [number, number] | null;
+  plot: TimeSeriesPlot | null;
+  tailBox: HTMLElement;
+  titleEl: HTMLElement;
+  plotHost: HTMLElement;
+  legendEl: HTMLElement;
+  psdWrap: HTMLElement;
+  renderPsd: () => void;
+}
+
+function createRingdownChart(stepName: string, sourceName: string): RingdownChart {
+  const partial = {
     stepName,
     sourceName,
     runEntries: [],
@@ -298,8 +327,8 @@ function createRingdownChart(stepName, sourceName) {
     markers: {},
     unit: "",
     tMax: 0,
-    selection: null,
-    plot: null,
+    selection: null as [number, number] | null,
+    plot: null as TimeSeriesPlot | null,
   };
   const box = document.createElement("div");
   box.className = "chart-box";
@@ -311,20 +340,28 @@ function createRingdownChart(stepName, sourceName) {
   legendEl.className = "legend";
   box.appendChild(legendEl);
   const psdWrap = document.createElement("div");
-  Object.assign(inst, { tailBox: box, titleEl: title, plotHost, legendEl, psdWrap });
+  const inst: RingdownChart = {
+    ...partial,
+    tailBox: box,
+    titleEl: title,
+    plotHost,
+    legendEl,
+    psdWrap,
+    renderPsd: () => renderPsdInto(inst),
+  };
 
-  inst.renderPsd = () => {
+  const renderPsdInto = (chart: RingdownChart) => {
     psdWrap.innerHTML = "";
-    if (inst.selection) {
-      const selTraces = ringdownSelectionPsdTraces(inst.runEntries, inst.selection);
+    if (chart.selection) {
+      const selTraces = ringdownSelectionPsdTraces(chart.runEntries, chart.selection);
       if (selTraces) {
         psdWrap.appendChild(
           psdBox(
-            `${stepName} — ${sourceName} PSD of ${inst.selection[0].toFixed(0)}–${inst.selection[1].toFixed(0)}ms, per tail`,
+            `${stepName} — ${sourceName} PSD of ${chart.selection[0].toFixed(0)}–${chart.selection[1].toFixed(0)}ms, per tail`,
             selTraces,
             null,
-            `${inst.unit} PSD`,
-            inst.markers
+            `${chart.unit} PSD`,
+            chart.markers
           )
         );
         return;
@@ -333,20 +370,21 @@ function createRingdownChart(stepName, sourceName) {
     psdWrap.appendChild(
       psdBox(
         `${stepName} — ${sourceName} tail PSD (full dwell, tail average)`,
-        inst.fullTraces,
+        chart.fullTraces,
         null,
-        `${inst.unit} PSD`,
-        inst.markers
+        `${chart.unit} PSD`,
+        chart.markers
       )
     );
   };
   return inst;
 }
 
+
 /// The tail count can change between refreshes, so each update rebuilds the
 /// uPlot; the brush selection is kept in ms on the instance and re-applied,
 /// which is what makes it survive the 5 s refresh.
-function updateRingdownChart(inst, runEntries) {
+function updateRingdownChart(inst: RingdownChart, runEntries: RingdownRunEntry[]) {
   inst.runEntries = runEntries;
   const { traces, legend } = ringdownTailTraces(runEntries);
   inst.tMax = traces.reduce((m, tr) => Math.max(m, tr.t[tr.t.length - 1] || 0), 0);
@@ -384,8 +422,8 @@ function updateRingdownChart(inst, runEntries) {
 /// PSD traces for a brushed span of the tails: one trace per tail (per
 /// stroke), computed client-side with the same Welch settings as the
 /// analyzer. Returns null when the span holds too few samples.
-function ringdownSelectionPsdTraces(runEntries, selMs) {
-  const traces = [];
+function ringdownSelectionPsdTraces(runEntries: RingdownRunEntry[], selMs: [number, number]): PsdTrace[] | null {
+  const traces: PsdTrace[] = [];
   for (const { name, src } of runEntries) {
     const i0 = Math.max(0, Math.floor((selMs[0] / 1000) * src.fs_hz));
     const i1 = Math.min(
@@ -409,7 +447,7 @@ function ringdownSelectionPsdTraces(runEntries, selMs) {
   return traces;
 }
 
-function ringdownModeMarkers(modes) {
+function ringdownModeMarkers(modes: RingdownMode[]) {
   return modes.map((m) => ({
     freq: m.freq_hz,
     label: `${m.freq_hz.toFixed(1)} Hz ζ=${m.zeta.toFixed(3)}`,
@@ -421,14 +459,14 @@ function ringdownModeMarkers(modes) {
 /// the mode table. Only sources the analyzer marked as headline (tails
 /// present in the plot payload) get charts — every source lands in the
 /// table.
-function renderRingdownCharts(names, plots) {
+function renderRingdownCharts(names: string[], plots: PlotSeries[]) {
   const section = el("ringdown-section");
   if (!section) return;
   const filter = state.stepFilter ? [...state.stepFilter] : null;
   if (payloadUnchanged("ringdown-charts", { runs: runDataSig(names), filter })) return;
-  const container = el("ringdown-charts");
-  const modesEl = el("ringdown-modes");
-  const meta = el("ringdown-meta");
+  const container = mustEl("ringdown-charts");
+  const modesEl = mustEl("ringdown-modes");
+  const meta = mustEl("ringdown-meta");
   const stepNames = [
     ...new Set(plots.flatMap((p) => p.steps.filter((s) => s.ringdown).map((s) => s.name))),
   ];
@@ -441,21 +479,21 @@ function renderRingdownCharts(names, plots) {
     return;
   }
   section.hidden = false;
-  const desired = new Map();
+  const desired = new Map<string, { stepName: string; sourceName: string; runEntries: RingdownRunEntry[] }>();
   let modesHtml = "";
-  const metaParts = [];
+  const metaParts: string[] = [];
   for (const stepName of visibleStepNames(stepNames)) {
-    const perSource = new Map();
+    const perSource = new Map<string, RingdownRunEntry[]>();
     plots.forEach((p, i) => {
       const step = p.steps.find((s) => s.name === stepName);
       if (!step || !step.ringdown) return;
       for (const src of step.ringdown.sources) {
         if (!src.tails.length) continue;
         if (!perSource.has(src.source)) perSource.set(src.source, []);
-        perSource.get(src.source).push({ name: names[i], src });
+        perSource.get(src.source)!.push({ name: names[i], src });
       }
     });
-    let ref = null;
+    let ref = null as PlotStep["ringdown"] | null;
     for (const p of plots) {
       const step = p.steps.find((s) => s.name === stepName);
       if (step && step.ringdown) {
@@ -466,12 +504,13 @@ function renderRingdownCharts(names, plots) {
     for (const [sourceName, runEntries] of perSource) {
       desired.set(`${stepName}|${sourceName}`, { stepName, sourceName, runEntries });
     }
+    if (!ref) throw new Error(`${stepName}: no plot carries a ringdown payload`);
     modesHtml += `<h3>${stepName} modes</h3>${ringdownModeTableHtml(ref.sources)}`;
     metaParts.push(stepName);
   }
   for (const key of [...ringdownCharts.keys()]) {
     if (desired.has(key)) continue;
-    const inst = ringdownCharts.get(key);
+    const inst = ringdownCharts.get(key)!;
     inst.tailBox.remove();
     inst.psdWrap.remove();
     ringdownCharts.delete(key);

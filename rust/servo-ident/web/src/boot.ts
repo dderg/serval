@@ -1,4 +1,4 @@
-import { el } from "./api";
+import { mustEl } from "./api";
 import { fetchMacroHelp, loadCachedMacroHelp } from "./docs";
 import { renderDriveBanner, loadDriveState } from "./drive";
 import { pollMoonrakerHealth, emergencyStop } from "./moonraker";
@@ -9,8 +9,8 @@ import { REFRESH_MS, MOONRAKER_KEY, MOONRAKER_HEALTH_POLL_MS, state } from "./st
 // --- boot -------------------------------------------------------------------
 
 function initShell() {
-  el("estop-btn").addEventListener("click", emergencyStop);
-  const input = el("moonraker-url");
+  mustEl("estop-btn").addEventListener("click", emergencyStop);
+  const input = mustEl<HTMLInputElement>("moonraker-url");
   input.value = localStorage.getItem(MOONRAKER_KEY) || `http://${location.hostname}:7125`;
   input.addEventListener("change", () => {
     localStorage.setItem(MOONRAKER_KEY, input.value);

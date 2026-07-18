@@ -1,4 +1,4 @@
-import { el, resetRenderState } from "./api";
+import { el, mustEl, resetRenderState } from "./api";
 import { psdMaxFreqHz } from "./charts-core";
 import { bindConsole, setConsoleValue } from "./console";
 import { fetchMacroHelp, docsShellHtml, renderDocsList } from "./docs";
@@ -8,11 +8,12 @@ import { renderSentLog } from "./moonraker";
 import { redrawCharts } from "./peaks";
 import { renderRuns } from "./runs";
 import { PSD_MAX_FREQ_KEY, MOTOR_VIEW_KEY, PSD_MAX_FREQ_CHOICES_HZ, PAGE_DEFS, DEFAULT_PAGE, state } from "./state";
+import type { PageDef } from "./state";
 import { strainShellHtml, redrawStrain } from "./strain";
 
 // --- page shell ---------------------------------------------------------------
 
-function currentPageDef() {
+function currentPageDef(): PageDef {
   return PAGE_DEFS[state.page] || PAGE_DEFS[DEFAULT_PAGE];
 }
 
@@ -22,7 +23,7 @@ function pageFromHash() {
 }
 
 function renderTabs() {
-  const nav = el("page-tabs");
+  const nav = mustEl("page-tabs");
   nav.innerHTML = Object.entries(PAGE_DEFS)
     .map(
       ([key, def]) =>
@@ -31,8 +32,8 @@ function renderTabs() {
     .join("");
 }
 
-function controlsSectionsHtml(def) {
-  const parts = [];
+function controlsSectionsHtml(def: PageDef): string {
+  const parts: string[] = [];
   if (def.groups) {
     parts.push(
       `<section class="panel">` +
@@ -45,7 +46,7 @@ function controlsSectionsHtml(def) {
   return parts.join("");
 }
 
-function consoleSectionHtml(def) {
+function consoleSectionHtml(def: Partial<PageDef>): string {
   const templates = (def.templates || [])
     .map(
       (t, i) =>
@@ -83,14 +84,14 @@ function motorViewPerMotor() {
 /// Sections whose aggregate is already an average (PSD, combined time
 /// domain) don't offer a separate "avg" chip; there, the stored "avg"
 /// view lights up the aggregate chip.
-function motorViewEffective(withAvg) {
+function motorViewEffective(withAvg: boolean): string {
   const view = motorView();
   return !withAvg && view === "avg" ? "agg" : view;
 }
 
-function motorViewToggleHtml(aggLabel, withAvg = false) {
+function motorViewToggleHtml(aggLabel: string, withAvg = false): string {
   const effective = motorViewEffective(withAvg);
-  const chip = (v, label) =>
+  const chip = (v: string, label: string) =>
     `<button class="chip motor-view-btn${effective === v ? " active" : ""}" data-view="${v}">${label}</button>`;
   return (
     `<span class="chips motor-view-chips${withAvg ? " with-avg" : ""}">` +
@@ -102,23 +103,23 @@ function motorViewToggleHtml(aggLabel, withAvg = false) {
 }
 
 function syncMotorViewChips() {
-  document.querySelectorAll(".motor-view-chips").forEach((group: any) => {
+  document.querySelectorAll<HTMLElement>(".motor-view-chips").forEach((group) => {
     const effective = motorViewEffective(group.classList.contains("with-avg"));
-    group.querySelectorAll(".motor-view-btn").forEach((b: any) => {
+    group.querySelectorAll<HTMLElement>(".motor-view-btn").forEach((b) => {
       b.classList.toggle("active", b.dataset.view === effective);
     });
   });
 }
 
-function sectionHeadHtml(title, toolsHtml) {
+function sectionHeadHtml(title: string, toolsHtml: string | null): string {
   return (
     `<div class="section-head"><h2>${title}</h2></div>` +
     (toolsHtml ? `<div class="section-tools">${toolsHtml}</div>` : "")
   );
 }
 
-function analysisSectionsHtml(def) {
-  const parts = [];
+function analysisSectionsHtml(def: PageDef): string {
+  const parts: string[] = [];
   parts.push(
     `<section class="runs-section">` +
       sectionHeadHtml(
@@ -264,7 +265,7 @@ function liveShellHtml() {
 /// is keyed by page + heading text and persists in localStorage.
 const ACCORDION_KEY = "servoCal.collapsedSections";
 
-function loadCollapsedSections() {
+function loadCollapsedSections(): Set<string> {
   try {
     return new Set(JSON.parse(localStorage.getItem(ACCORDION_KEY) || "[]"));
   } catch {
@@ -272,14 +273,14 @@ function loadCollapsedSections() {
   }
 }
 
-function sectionLabel(head) {
+function sectionLabel(head: HTMLElement): string {
   const h = head.querySelector("h2");
-  return `${state.page}::${h ? h.textContent.trim() : head.textContent.trim()}`;
+  return `${state.page}::${(h ? h.textContent : head.textContent)?.trim() ?? ""}`;
 }
 
 function applyAccordionState() {
   const collapsed = loadCollapsedSections();
-  document.querySelectorAll("#page-root .analysis .section-head").forEach((head) => {
+  document.querySelectorAll<HTMLElement>("#page-root .analysis .section-head").forEach((head) => {
     head.classList.add("has-caret");
     const section = head.parentElement;
     if (section && section.tagName === "SECTION") {
@@ -292,7 +293,7 @@ function applyAccordionState() {
 /// Bound once at boot: one delegated listener survives every page rebuild.
 function bindAccordionToggle() {
   document.addEventListener("click", (e) => {
-    const head = (e.target as any).closest(".analysis .section-head");
+    const head = (e.target as HTMLElement).closest<HTMLElement>(".analysis .section-head");
     if (!head) return;
     const section = head.parentElement;
     if (!section || section.tagName !== "SECTION") return;
@@ -309,7 +310,7 @@ function renderPage() {
   resetRenderState();
   renderTabs();
   const def = currentPageDef();
-  const root = el("page-root");
+  const root = mustEl("page-root");
   stopLivePolling();
   if (def.live) {
     root.innerHTML = liveShellHtml();
@@ -323,9 +324,9 @@ function renderPage() {
   if (def.strain) {
     root.innerHTML = strainShellHtml(def);
     bindPageEvents();
-    document.querySelectorAll("button.strain-field-btn").forEach((btn: any) => {
+    document.querySelectorAll<HTMLButtonElement>("button.strain-field-btn").forEach((btn) => {
       btn.addEventListener("click", () => {
-        state.strain.field = btn.dataset.field;
+        state.strain.field = btn.dataset.field === "friction" ? "friction" : "elastic";
         redrawStrain();
       });
     });
@@ -374,8 +375,8 @@ function renderPage() {
 /// freezes the browser's auto layout into explicit widths and switches the
 /// table to fixed layout, so a column can shrink below its content (cells
 /// ellipsize) instead of forcing horizontal scroll.
-function makeColumnsResizable(table) {
-  const ths = [...table.querySelectorAll("thead th")];
+function makeColumnsResizable(table: HTMLTableElement) {
+  const ths = [...table.querySelectorAll<HTMLTableCellElement>("thead th")];
   const freezeLayout = () => {
     if (table.style.tableLayout === "fixed") return;
     for (const th of ths) th.style.width = `${th.offsetWidth}px`;
@@ -385,13 +386,13 @@ function makeColumnsResizable(table) {
     const grip = document.createElement("span");
     grip.className = "col-resizer";
     th.appendChild(grip);
-    grip.addEventListener("mousedown", (e) => {
+    grip.addEventListener("mousedown", (e: MouseEvent) => {
       e.preventDefault();
       e.stopPropagation();
       freezeLayout();
       const startX = e.pageX;
       const startW = th.offsetWidth;
-      const onMove = (ev) => {
+      const onMove = (ev: MouseEvent) => {
         th.style.width = `${Math.max(24, startW + ev.pageX - startX)}px`;
       };
       const onUp = () => {
@@ -407,26 +408,26 @@ function makeColumnsResizable(table) {
 function bindPageEvents() {
   bindConsole();
   document
-    .querySelectorAll(".runs-wrap table, .journal-wrap table")
+    .querySelectorAll<HTMLTableElement>(".runs-wrap table, .journal-wrap table")
     .forEach(makeColumnsResizable);
-  const psdMax = el("psd-max-freq");
+  const psdMax = el<HTMLSelectElement>("psd-max-freq");
   if (psdMax) {
     psdMax.addEventListener("change", () => {
       localStorage.setItem(PSD_MAX_FREQ_KEY, psdMax.value);
       redrawCharts();
     });
   }
-  document.querySelectorAll("button.motor-view-btn").forEach((btn: any) => {
+  document.querySelectorAll<HTMLButtonElement>("button.motor-view-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      localStorage.setItem(MOTOR_VIEW_KEY, btn.dataset.view);
+      localStorage.setItem(MOTOR_VIEW_KEY, btn.dataset.view ?? "agg");
       syncMotorViewChips();
       redrawCharts();
     });
   });
   const def = currentPageDef();
-  document.querySelectorAll("button.template-btn").forEach((btn: any) => {
+  document.querySelectorAll<HTMLButtonElement>("button.template-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const t = def.templates[Number(btn.dataset.template)];
+      const t = (def.templates || [])[Number(btn.dataset.template)];
       if (t) {
         setConsoleValue(t.command, true);
         const label = el("form-run-name");

@@ -7,20 +7,26 @@ import { selectedRunNames } from "./runs";
 import { currentPageDef } from "./shell";
 import { RESONANCE_BAND_HZ, PEAK_MIN_SEPARATION_HZ, PEAK_LIST_SIZE, state } from "./state";
 import { redrawStrain } from "./strain";
+import type { DriveParam, PlotSeries } from "./wire";
 
 // --- PSD peak list (gains page) ---------------------------------------------
 
 /// Greedy spaced peak-picking inside the resonance band: repeatedly take
 /// the highest remaining bin at least PEAK_MIN_SEPARATION_HZ away from
 /// every already-taken peak.
-function findPsdPeaks(freq, psd, band, count) {
+interface PsdPeak {
+  freq: number;
+  power: number;
+}
+
+function findPsdPeaks(freq: number[], psd: number[], band: [number, number], count: number): PsdPeak[] {
   const [blo, bhi] = band;
-  const candidates = [];
+  const candidates: PsdPeak[] = [];
   for (let i = 0; i < freq.length; i++) {
     if (freq[i] >= blo && freq[i] < bhi) candidates.push({ freq: freq[i], power: psd[i] });
   }
   candidates.sort((a, b) => b.power - a.power);
-  const peaks = [];
+  const peaks: PsdPeak[] = [];
   for (const c of candidates) {
     if (peaks.length >= count) break;
     if (peaks.every((p) => Math.abs(p.freq - c.freq) >= PEAK_MIN_SEPARATION_HZ)) {
@@ -30,13 +36,23 @@ function findPsdPeaks(freq, psd, band, count) {
   return peaks;
 }
 
-function notchSlotStates() {
-  const params = state.drive.data ? state.drive.data.params : [];
-  const slots = [];
+interface NotchSlot {
+  n: number;
+  freqParam: DriveParam;
+  parked: boolean;
+  adaptive: boolean;
+  current: number;
+}
+
+function notchSlotStates(): NotchSlot[] {
+  const data = state.drive.data;
+  if (!data) return [];
+  const params = data.params;
+  const slots: NotchSlot[] = [];
   for (let n = 1; n <= 5; n++) {
     const freqParam = params.find((p) => p.name === `notch_${n}_freq`);
     if (!freqParam) continue;
-    const motors = motorNames(state.drive.data.motors);
+    const motors = motorNames(data.motors);
     const values = motors.map((m) => cellRaw(freqParam, m));
     const parked = values.every((v) => v === 8000);
     slots.push({ n, freqParam, parked, adaptive: n <= 2, current: values[0] });
@@ -44,16 +60,18 @@ function notchSlotStates() {
   return slots;
 }
 
-function proposePeakIntoSlot(slot, peakFreq) {
+function proposePeakIntoSlot(slot: NotchSlot, peakFreq: number) {
+  const data = state.drive.data;
+  if (!data) throw new Error("proposePeakIntoSlot without drive state");
   const raw = Math.round(peakFreq);
-  const targets = motorNames(state.drive.data.motors);
+  const targets = motorNames(data.motors);
   const existing = { ...(state.drive.pending[slot.freqParam.name] || {}) };
   for (const m of targets) existing[m] = raw;
   state.drive.pending[slot.freqParam.name] = existing;
   renderDriveGroups();
 }
 
-function renderPeakList(names, plots, steps) {
+function renderPeakList(names: string[], plots: PlotSeries[], steps: string[]) {
   const container = el("peak-list");
   if (!container) return;
   const slotSig = state.drive.data
@@ -104,7 +122,7 @@ function renderPeakList(names, plots, steps) {
       );
     })
     .join("");
-  container.querySelectorAll("button.peak-slot").forEach((btn) => {
+  container.querySelectorAll<HTMLButtonElement>("button.peak-slot").forEach((btn) => {
     btn.addEventListener("click", () => {
       const slot = notchSlotStates().find((s) => s.n === Number(btn.dataset.slot));
       if (slot) proposePeakIntoSlot(slot, Number(btn.dataset.freq));
@@ -122,8 +140,8 @@ async function redrawCharts() {
     return;
   }
   const names = selectedRunNames();
-  const plots = [];
-  const okNames = [];
+  const plots: PlotSeries[] = [];
+  const okNames: string[] = [];
   for (const n of names) {
     try {
       plots.push(await ensurePlotSeries(n));
@@ -133,7 +151,8 @@ async function redrawCharts() {
     }
   }
   const stepNames = [...new Set(plots.flatMap((p) => p.steps.map((s) => s.name)))];
-  if (state.stepFilter && !stepNames.some((s) => state.stepFilter.has(s))) {
+  const filter = state.stepFilter;
+  if (filter && !stepNames.some((s) => filter.has(s))) {
     state.stepFilter = null;
   }
   const steps = visibleStepNames(stepNames);

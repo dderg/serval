@@ -10,7 +10,7 @@ function notify() {
   for (const listener of [...listeners]) listener();
 }
 
-function subscribe(listener) {
+function subscribe(listener: () => void) {
   listeners.add(listener);
   return () => listeners.delete(listener);
 }

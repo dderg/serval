@@ -1,8 +1,10 @@
-import { api, el, pageRuns, shortTime } from "./api";
+import { api, el, mustEl, pageRuns, shortTime } from "./api";
 import { drawChart, hidpiCanvasContext, mixColor } from "./charts-core";
 import { loadRerunForm } from "./drive";
 import { currentPageDef, controlsSectionsHtml, sectionHeadHtml } from "./shell";
 import { PALETTE, state } from "./state";
+import type { PageDef } from "./state";
+import type { StrainData, StrainField, StrainLine, StrokePlan } from "./wire";
 
 // --- strain map (strain page) -------------------------------------------------
 //
@@ -21,7 +23,7 @@ const STRAIN_HEAT_PAD = { l: 40, r: 8, t: 16, b: 26 };
 const STRAIN_HEAT_CANVAS_W = 430;
 const STRAIN_LINE_SPACING_FALLBACK_MM = 20;
 
-function strainShellHtml(def) {
+function strainShellHtml(def: PageDef): string {
   return (
     `<div class="workspace">` +
     `<main class="analysis">` +
@@ -65,23 +67,23 @@ function strainShellHtml(def) {
   );
 }
 
-async function ensureStrain(name) {
+async function ensureStrain(name: string): Promise<StrainData> {
   const run = state.runs.find((r) => r.name === name);
   const cached = state.strain.cache.get(name);
   if (cached && run && cached.mtime_utc === run.mtime_utc) return cached.data;
-  const data = await api(`/api/runs/${encodeURIComponent(name)}/strain`);
+  const data: StrainData = await api(`/api/runs/${encodeURIComponent(name)}/strain`);
   state.strain.cache.set(name, { mtime_utc: run ? run.mtime_utc : null, data });
   return data;
 }
 
-function runTag(name) {
+function runTag(name: string): string {
   const r = state.runs.find((x) => x.name === name);
   return r ? `${r.tag}${r.axis ? " " + r.axis : ""}` : name;
 }
 
 /// Builds per-belt elastic/friction diff arrays (a − b); a null on either
 /// side propagates, since an unbinned cell has no meaning to subtract.
-function buildDiffLine(base, cmp) {
+function buildDiffLine(base: StrainLine, cmp: StrainLine): StrainLine {
   return {
     name: base.name,
     swept: base.swept,
@@ -97,22 +99,24 @@ function buildDiffLine(base, cmp) {
   };
 }
 
-function pointwiseDiff(a, b) {
-  const out = new Array(a.length);
+function pointwiseDiff(a: (number | null)[], b: (number | null)[]): (number | null)[] {
+  const out: (number | null)[] = new Array(a.length);
   for (let i = 0; i < a.length; i++) {
-    out[i] = a[i] === null || b[i] === null ? null : a[i] - b[i];
+    const av = a[i];
+    const bv = b[i];
+    out[i] = av === null || bv === null ? null : av - bv;
   }
   return out;
 }
 
-function nulls(n) {
+function nulls(n: number): null[] {
   return new Array(n).fill(null);
 }
 
 /// Compression of a strain map's geometry: line names (which encode
 /// orientation + swept coordinate), per-line bin centers, and belt pairs.
 /// Two maps with an identical signature can be subtracted cell-by-cell.
-function strainSignature(data) {
+function strainSignature(data: StrainData): string {
   return JSON.stringify({
     l: data.lines.map((l) => ({ n: l.name, b: l.bin_centers, p: l.belts.map((x) => x.pair) })),
   });
@@ -135,7 +139,7 @@ function renderStrainRuns() {
     tr.classList.add("selectable");
     if (run.name === state.strain.selected) tr.classList.add("selected");
     if (state.strain.compare.has(run.name)) tr.classList.add("compare");
-    tr.addEventListener("click", (ev) => {
+    tr.addEventListener("click", (ev: MouseEvent) => {
       if (ev.shiftKey) {
         if (run.name === state.strain.selected) return;
         if (state.strain.compare.has(run.name)) state.strain.compare.delete(run.name);
@@ -158,8 +162,8 @@ function renderStrainRuns() {
     const prefillBtn = document.createElement("button");
     prefillBtn.textContent = "→ console";
     prefillBtn.title = "prefill the console with this run's command";
-    prefillBtn.disabled = !(state.details.get(run.name) || {}).manifest;
-    prefillBtn.addEventListener("click", (e) => {
+    prefillBtn.disabled = !state.details.get(run.name)?.manifest;
+    prefillBtn.addEventListener("click", (e: MouseEvent) => {
       e.stopPropagation();
       loadRerunForm(run.name);
     });
@@ -169,28 +173,34 @@ function renderStrainRuns() {
   }
 }
 
-function strainColor(t) {
+function strainColor(t: number): string {
   const clamped = Math.max(-1, Math.min(1, t));
   return clamped < 0
     ? mixColor(STRAIN_NEUTRAL, STRAIN_NEG, -clamped)
     : mixColor(STRAIN_NEUTRAL, STRAIN_POS, clamped);
 }
 
-function sweptEntry(line): [string, number] {
+function sweptEntry(line: StrainLine): [string, number] {
   const entries = Object.entries(line.swept || {});
   return entries.length ? (entries[0] as [string, number]) : ["?", 0];
 }
 
-function strainLineLabel(line) {
+function strainLineLabel(line: StrainLine): string {
   const [key, value] = sweptEntry(line);
   return `${key}=${Number(value).toFixed(0)}`;
 }
 
 /// Raster lines grouped by sweep orientation and ordered by the swept
 /// coordinate, so heatmap bands lay out like the bed does.
-function strainGroups(data) {
-  const bySwept = (a, b) => sweptEntry(a)[1] - sweptEntry(b)[1];
-  const group = (orientation, prefix, title) => ({
+interface StrainGroup {
+  orientation: string;
+  title: string;
+  lines: StrainLine[];
+}
+
+function strainGroups(data: StrainData): StrainGroup[] {
+  const bySwept = (a: StrainLine, b: StrainLine) => sweptEntry(a)[1] - sweptEntry(b)[1];
+  const group = (orientation: string, prefix: string, title: string): StrainGroup => ({
     orientation,
     title,
     lines: data.lines.filter((l) => l.name.startsWith(prefix)).sort(bySwept),
@@ -205,12 +215,22 @@ function strainGroups(data) {
 /// unavailable it is recovered from the run itself — each orientation's
 /// sweep starts where the OTHER orientation's raster lines sit, so their
 /// minimum swept value is the origin. Band thickness is the raster pitch.
-function strainBedGeometry(groups, plan) {
-  const sweptOf = (orientation) => {
+interface StrainGeo {
+  x0: number;
+  y0: number;
+  bandHalf: number;
+  xlo: number;
+  xhi: number;
+  ylo: number;
+  yhi: number;
+}
+
+function strainBedGeometry(groups: StrainGroup[], plan: StrokePlan): StrainGeo {
+  const sweptOf = (orientation: string) => {
     const g = groups.find((x) => x.orientation === orientation);
     return g ? g.lines.map((l) => sweptEntry(l)[1]) : [];
   };
-  const minGap = (vals) => {
+  const minGap = (vals: number[]) => {
     const s = [...vals].sort((a, b) => a - b);
     let gap = Infinity;
     for (let i = 1; i < s.length; i++) gap = Math.min(gap, s[i] - s[i - 1]);
@@ -222,8 +242,8 @@ function strainBedGeometry(groups, plan) {
   const bandHalf = spacing / 2;
   const x0 = plan.x_start != null ? plan.x_start : xBands.length ? Math.min(...xBands) : 0;
   const y0 = plan.y_start != null ? plan.y_start : yBands.length ? Math.min(...yBands) : 0;
-  const xs = [];
-  const ys = [];
+  const xs: number[] = [];
+  const ys: number[] = [];
   for (const g of groups) {
     for (const line of g.lines) {
       const half = lineBinWidth(line) / 2;
@@ -254,7 +274,7 @@ function strainBedGeometry(groups, plan) {
   };
 }
 
-function strainStats(data) {
+function strainStats(data: StrainData): { maxElastic: number; maxFriction: number; meanFriction: number } {
   let maxElastic = 0;
   let maxFriction = 0;
   let fricSum = 0;
@@ -276,18 +296,18 @@ function strainStats(data) {
   return { maxElastic, maxFriction, meanFriction: fricN ? fricSum / fricN : 0 };
 }
 
-function lineBinWidth(line) {
+function lineBinWidth(line: StrainLine): number {
   const c = line.bin_centers;
   return c.length > 1 ? c[1] - c[0] : 2 * c[0];
 }
 
-function drawStrainHeatmap(canvas, group, beltIdx, vmax, geo) {
+function drawStrainHeatmap(canvas: HTMLCanvasElement, group: StrainGroup, beltIdx: number, vmax: number, geo: StrainGeo) {
   const { ctx, w, h } = hidpiCanvasContext(canvas);
   ctx.fillStyle = "#0d1117";
   ctx.fillRect(0, 0, w, h);
   const pad = STRAIN_HEAT_PAD;
-  const px = (mm) => pad.l + ((mm - geo.xlo) / (geo.xhi - geo.xlo)) * (w - pad.l - pad.r);
-  const py = (mm) => h - pad.b - ((mm - geo.ylo) / (geo.yhi - geo.ylo)) * (h - pad.t - pad.b);
+  const px = (mm: number) => pad.l + ((mm - geo.xlo) / (geo.xhi - geo.xlo)) * (w - pad.l - pad.r);
+  const py = (mm: number) => h - pad.b - ((mm - geo.ylo) / (geo.yhi - geo.ylo)) * (h - pad.t - pad.b);
 
   ctx.font = "10px monospace";
   for (const line of group.lines) {
@@ -321,7 +341,7 @@ function drawStrainHeatmap(canvas, group, beltIdx, vmax, geo) {
   ctx.fillText("bed y (mm)", pad.l, 11);
 }
 
-function strainHeatmapBox(title, group, beltIdx, vmax, geo) {
+function strainHeatmapBox(title: string, group: StrainGroup, beltIdx: number, vmax: number, geo: StrainGeo): HTMLDivElement {
   const box = document.createElement("div");
   box.className = "chart-box";
   const head = document.createElement("h3");
@@ -338,8 +358,8 @@ function strainHeatmapBox(title, group, beltIdx, vmax, geo) {
   return box;
 }
 
-function strainScaleHtml(vmax) {
-  const stops = [];
+function strainScaleHtml(vmax: number): string {
+  const stops: string[] = [];
   for (let i = 0; i <= 8; i++) stops.push(strainColor(i / 4 - 1));
   const what =
     state.strain.field === "friction"
@@ -353,7 +373,7 @@ function strainScaleHtml(vmax) {
   );
 }
 
-function strainProfileBox(title, beltIdx, group, vmax, geo) {
+function strainProfileBox(title: string, beltIdx: number, group: StrainGroup, vmax: number, geo: StrainGeo): HTMLDivElement {
   const box = document.createElement("div");
   box.className = "chart-box";
   const head = document.createElement("h3");
@@ -365,7 +385,7 @@ function strainProfileBox(title, beltIdx, group, vmax, geo) {
   box.appendChild(canvas);
   const lines = group.lines;
   const sweepOrigin = group.orientation === "x" ? geo.x0 : geo.y0;
-  const ramp = (i) =>
+  const ramp = (i: number) =>
     mixColor(
       PALETTE[beltIdx % PALETTE.length],
       "#ffffff",
@@ -394,19 +414,19 @@ function strainProfileBox(title, beltIdx, group, vmax, geo) {
   return box;
 }
 
-function meanElastic(line, beltIdx) {
-  const kept = line.belts[beltIdx].elastic.filter((v) => v !== null);
+function meanElastic(line: StrainLine, beltIdx: number): number | null {
+  const kept = line.belts[beltIdx].elastic.filter((v): v is number => v !== null);
   if (!kept.length) return null;
   return kept.reduce((a, b) => a + b, 0) / kept.length;
 }
 
-function drawStrainDcBars(canvas, labels, values) {
+function drawStrainDcBars(canvas: HTMLCanvasElement, labels: string[], values: (number | null)[]) {
   const { ctx, w, h } = hidpiCanvasContext(canvas);
   ctx.fillStyle = "#0d1117";
   ctx.fillRect(0, 0, w, h);
   const pad = { l: 46, r: 8, t: 8, b: 40 };
-  const vmax = Math.max(1e-6, ...values.filter((v) => v !== null).map(Math.abs));
-  const y = (v) => pad.t + ((vmax - v) / (2 * vmax)) * (h - pad.t - pad.b);
+  const vmax = Math.max(1e-6, ...values.filter((v): v is number => v !== null).map(Math.abs));
+  const y = (v: number) => pad.t + ((vmax - v) / (2 * vmax)) * (h - pad.t - pad.b);
   const slot = (w - pad.l - pad.r) / labels.length;
 
   ctx.font = "10px monospace";
@@ -440,7 +460,7 @@ function drawStrainDcBars(canvas, labels, values) {
   ctx.fillText("mean elastic (%)", pad.l, 10);
 }
 
-function strainDcBox(title, beltIdx, lines) {
+function strainDcBox(title: string, beltIdx: number, lines: StrainLine[]): HTMLDivElement {
   const box = document.createElement("div");
   box.className = "chart-box";
   const head = document.createElement("h3");
@@ -461,26 +481,26 @@ function strainDcBox(title, beltIdx, lines) {
 /// Shared geometry for a strain map: ordered groups (sweep orientation),
 /// bed-frame extents, and the belt pair names. Diffing two maps reuses the
 /// selected run's geometry since both must match its signature to compare.
-function strainGeometry(data) {
+function strainGeometry(data: StrainData): { groups: StrainGroup[]; geo: StrainGeo; pairs: string[] } {
   const groups = strainGroups(data);
-  const detail = state.details.get(state.strain.selected);
+  const detail = state.strain.selected ? state.details.get(state.strain.selected) : undefined;
   const plan = (detail && detail.manifest && detail.manifest.stroke_plan) || {};
   const geo = strainBedGeometry(groups, plan);
   const pairs = data.lines[0].belts.map((b) => b.pair);
   return { groups, geo, pairs };
 }
 
-function renderStrainCharts(data) {
-  const heatmaps = el("strain-heatmaps");
-  const profiles = el("strain-profiles");
-  const dc = el("strain-dc");
-  const summary = el("strain-summary");
+function renderStrainCharts(data: StrainData) {
+  const heatmaps = mustEl("strain-heatmaps");
+  const profiles = mustEl("strain-profiles");
+  const dc = mustEl("strain-dc");
+  const summary = mustEl("strain-summary");
   heatmaps.innerHTML = "";
   profiles.innerHTML = "";
   dc.innerHTML = "";
   if (!data.lines.length) {
     summary.textContent = "run has no lines";
-    el("strain-scale").innerHTML = "";
+    mustEl("strain-scale").innerHTML = "";
     return;
   }
   const stats = strainStats(data);
@@ -491,10 +511,10 @@ function renderStrainCharts(data) {
   summary.textContent =
     `max |elastic| ${stats.maxElastic.toFixed(1)}% · ` +
     `mean |friction| ${stats.meanFriction.toFixed(1)}%`;
-  document.querySelectorAll("button.strain-field-btn").forEach((btn: any) => {
+  document.querySelectorAll<HTMLButtonElement>("button.strain-field-btn").forEach((btn) => {
     btn.disabled = btn.dataset.field === state.strain.field;
   });
-  el("strain-scale").innerHTML = strainScaleHtml(vmax);
+  mustEl("strain-scale").innerHTML = strainScaleHtml(vmax);
   const { groups, geo, pairs } = strainGeometry(data);
   pairs.forEach((pair, beltIdx) => {
     for (const group of groups) {
@@ -510,18 +530,19 @@ function renderStrainCharts(data) {
 /// for every compare run whose strain signature matches the selected run's.
 /// A mismatched run is named in the summary instead of drawn — subtracting
 /// cells only means something when both maps bin the bed identically.
-async function renderStrainDiffs(selectedData) {
+async function renderStrainDiffs(selectedData: StrainData) {
   const heatmaps = el("strain-heatmaps");
   if (!heatmaps || !state.strain.compare.size) return;
   if (!selectedData || !selectedData.lines.length) return;
   const baseName = state.strain.selected;
+  if (baseName === null) return;
   const base = strainGeometry(selectedData);
   const baseSig = strainSignature(selectedData);
   const baseTag = runTag(baseName);
   const field = state.strain.field;
-  const skips = [];
+  const skips: string[] = [];
   for (const name of [...state.strain.compare]) {
-    let cmp;
+    let cmp: StrainData;
     try {
       cmp = await ensureStrain(name);
     } catch (e) {
@@ -534,7 +555,7 @@ async function renderStrainDiffs(selectedData) {
       continue;
     }
     const cmpGroups = strainGroups(cmp);
-    const aligned = [];
+    const aligned: StrainGroup[] = [];
     let mismatch = false;
     for (const bg of base.groups) {
       const cg = cmpGroups.find((g) => g.orientation === bg.orientation);
@@ -576,7 +597,7 @@ async function renderStrainDiffs(selectedData) {
       const scaleEl = document.createElement("div");
       scaleEl.className = "strain-scale";
       scaleEl.style.gridColumn = "1 / -1";
-      const stops = [];
+      const stops: string[] = [];
       for (let i = 0; i <= 8; i++) stops.push(strainColor(i / 4 - 1));
       scaleEl.innerHTML =
         `<span>−${vmaxDiff.toFixed(1)}%</span>` +
@@ -595,17 +616,17 @@ async function renderStrainDiffs(selectedData) {
 async function redrawStrain() {
   renderStrainRuns();
   if (!el("strain-heatmaps")) return;
-  const summary = el("strain-summary");
+  const summary = mustEl("strain-summary");
   const name = state.strain.selected;
   if (!name) {
     summary.textContent = "no strain_map runs yet — run SERVO_STRAIN_MAP first";
-    el("strain-heatmaps").innerHTML = "";
-    el("strain-scale").innerHTML = "";
-    el("strain-profiles").innerHTML = "";
-    el("strain-dc").innerHTML = "";
+    mustEl("strain-heatmaps").innerHTML = "";
+    mustEl("strain-scale").innerHTML = "";
+    mustEl("strain-profiles").innerHTML = "";
+    mustEl("strain-dc").innerHTML = "";
     return;
   }
-  let data;
+  let data: StrainData;
   try {
     data = await ensureStrain(name);
   } catch (e) {

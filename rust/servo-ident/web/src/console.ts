@@ -15,10 +15,10 @@ function loadConsoleHistory() {
   } catch (e) {
     return [];
   }
-  return Array.isArray(parsed) ? parsed.filter((l) => typeof l === "string") : [];
+  return Array.isArray(parsed) ? parsed.filter((l): l is string => typeof l === "string") : [];
 }
 
-function pushConsoleHistory(entry) {
+function pushConsoleHistory(entry: string) {
   const hist = state.console.history;
   if (hist[hist.length - 1] !== entry) hist.push(entry);
   if (hist.length > CONSOLE_HISTORY_MAX) hist.splice(0, hist.length - CONSOLE_HISTORY_MAX);
@@ -26,7 +26,7 @@ function pushConsoleHistory(entry) {
 }
 
 function bindConsole() {
-  const input = el("console-input");
+  const input = el<HTMLTextAreaElement>("console-input");
   if (!input) return;
   input.value = state.console.text;
   autosizeConsole(input);
@@ -42,14 +42,14 @@ function bindConsole() {
   renderConsoleHelp();
 }
 
-function autosizeConsole(input) {
+function autosizeConsole(input: HTMLTextAreaElement) {
   input.style.height = "auto";
   input.style.height = `${input.scrollHeight}px`;
 }
 
-function setConsoleValue(text, focus) {
+function setConsoleValue(text: string, focus: boolean) {
   state.console.text = text;
-  const input = el("console-input");
+  const input = el<HTMLTextAreaElement>("console-input");
   if (!input) return;
   input.value = text;
   input.selectionStart = input.selectionEnd = text.length;
@@ -58,16 +58,16 @@ function setConsoleValue(text, focus) {
   renderConsoleHelp();
 }
 
-function caretOnFirstLine(input) {
+function caretOnFirstLine(input: HTMLTextAreaElement) {
   return input.value.lastIndexOf("\n", input.selectionStart - 1) === -1;
 }
 
-function caretOnLastLine(input) {
+function caretOnLastLine(input: HTMLTextAreaElement) {
   return input.value.indexOf("\n", input.selectionEnd) === -1;
 }
 
-function consoleKeydown(ev) {
-  const input = ev.target;
+function consoleKeydown(ev: KeyboardEvent) {
+  const input = ev.target as HTMLTextAreaElement;
   const c = state.console;
   if (c.search) {
     consoleSearchKeydown(ev, input);
@@ -103,7 +103,7 @@ function consoleKeydown(ev) {
   }
 }
 
-function historyStep(dir) {
+function historyStep(dir: number) {
   const c = state.console;
   if (!c.history.length) return;
   if (c.cursor === null) {
@@ -122,8 +122,9 @@ function historyStep(dir) {
   setConsoleValue(c.history[next], true);
 }
 
-function consoleSearchKeydown(ev, input) {
+function consoleSearchKeydown(ev: KeyboardEvent, input: HTMLTextAreaElement) {
   const s = state.console.search;
+  if (!s) throw new Error("console search keydown without an active search");
   if (ev.ctrlKey && ev.key === "r") {
     ev.preventDefault();
     searchHistory(s.pos - 1);
@@ -155,8 +156,9 @@ function consoleSearchKeydown(ev, input) {
   if (ev.key !== "Shift" && ev.key !== "CapsLock") exitConsoleSearch(true);
 }
 
-function searchHistory(fromIdx) {
+function searchHistory(fromIdx: number) {
   const s = state.console.search;
+  if (!s) throw new Error("searchHistory without an active search");
   const hist = state.console.history;
   if (!s.query) {
     s.pos = hist.length - 1;
@@ -174,7 +176,7 @@ function searchHistory(fromIdx) {
   renderConsoleSearch();
 }
 
-function exitConsoleSearch(keep) {
+function exitConsoleSearch(keep: boolean) {
   const c = state.console;
   if (!c.search) return;
   const saved = c.search.saved;

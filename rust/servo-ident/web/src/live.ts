@@ -1,8 +1,11 @@
-import { api, el, payloadUnchanged } from "./api";
+import { api, el, mustEl, payloadUnchanged } from "./api";
 import { timeSeriesPlot } from "./uplot-chart";
 import { formatAge } from "./drive";
 import { runGcode } from "./moonraker";
 import { PALETTE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, state } from "./state";
+import type { LiveSeries } from "./state";
+import type { FixedY, TimeSeriesPlot, TimeTrace } from "./uplot-chart";
+import type { LiveStatus, LiveTapPayload } from "./wire";
 
 // --- live tap ------------------------------------------------------------------
 //
@@ -17,15 +20,15 @@ import { PALETTE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, state } from "./state"
 // shared y-scale so the noisy motor stands out.
 
 function bindLiveEvents() {
-  el("live-start-btn").addEventListener("click", () => {
-    const line = el("live-start-command").value.trim();
+  mustEl("live-start-btn").addEventListener("click", () => {
+    const line = mustEl<HTMLInputElement>("live-start-command").value.trim();
     if (line) runGcode([line], "live");
   });
-  el("live-stop-btn").addEventListener("click", () => runGcode(["SERVO_CAPTURE_STOP"], "live"));
-  const slider = el("live-window");
+  mustEl("live-stop-btn").addEventListener("click", () => runGcode(["SERVO_CAPTURE_STOP"], "live"));
+  const slider = mustEl<HTMLInputElement>("live-window");
   slider.addEventListener("input", () => {
     state.live.windowS = Number(slider.value);
-    el("live-window-value").textContent = `${state.live.windowS} s`;
+    mustEl("live-window-value").textContent = `${state.live.windowS} s`;
     trimLiveWindow();
     drawLiveCharts();
   });
@@ -34,7 +37,7 @@ function bindLiveEvents() {
 async function pollLiveFileStatus() {
   const label = el("live-file-status");
   if (!label) return;
-  let status;
+  let status: LiveStatus;
   try {
     status = await api("/api/live");
   } catch (e) {
@@ -49,7 +52,7 @@ async function pollLiveFileStatus() {
   const growing = cap.age_s !== null && cap.age_s < 3;
   label.textContent = growing
     ? `recording ${cap.name} — ${(cap.size_bytes / 1024).toFixed(0)} KiB`
-    : `last: ${cap.name} (${formatAge(cap.age_s)} ago)`;
+    : `last: ${cap.name} (${cap.age_s === null ? "?" : formatAge(cap.age_s)} ago)`;
 }
 
 async function pollLiveTap() {
@@ -57,7 +60,7 @@ async function pollLiveTap() {
   state.live.polling = true;
   try {
     const query = state.live.cursor === null ? "" : `?since_cycle=${state.live.cursor}`;
-    const payload = await api(`/api/live_tap${query}`);
+    const payload: LiveTapPayload = await api(`/api/live_tap${query}`);
     const label = el("live-status");
     if (payload.status !== "streaming") {
       if (label) {
@@ -79,13 +82,15 @@ async function pollLiveTap() {
   }
 }
 
-function appendTapSamples(payload) {
+function appendTapSamples(payload: LiveTapPayload) {
   state.live.cursor = payload.next_cycle;
   state.live.fsHz = payload.fs_hz;
-  const drives = Object.keys(payload.drives || {});
-  const n = drives.length ? payload.drives[drives[0]].ferr.length : 0;
+  const tapDrives = payload.drives || {};
+  const drives = Object.keys(tapDrives);
+  const n = drives.length ? tapDrives[drives[0]].ferr.length : 0;
   if (!n) return;
   if (state.live.cycle0 === null) state.live.cycle0 = payload.first_cycle;
+  const cycle0 = state.live.cycle0;
   for (const drive of drives) {
     if (!state.live.perDrive[drive]) {
       state.live.perDrive[drive] = {
@@ -99,16 +104,16 @@ function appendTapSamples(payload) {
   for (let i = 0; i < n; i++) {
     const cycle = payload.first_cycle + i * stride;
     if (state.live.lastCycle !== null && cycle - state.live.lastCycle > gapThreshold) {
-      state.live.t.push((state.live.lastCycle + stride - state.live.cycle0) / payload.fs_hz);
+      state.live.t.push((state.live.lastCycle + stride - cycle0) / payload.fs_hz);
       for (const drive of drives) {
         state.live.perDrive[drive].ferr.push(null);
         state.live.perDrive[drive].torque.push(null);
       }
     }
-    state.live.t.push((cycle - state.live.cycle0) / payload.fs_hz);
+    state.live.t.push((cycle - cycle0) / payload.fs_hz);
     for (const drive of drives) {
-      state.live.perDrive[drive].ferr.push(payload.drives[drive].ferr[i]);
-      state.live.perDrive[drive].torque.push(payload.drives[drive].torque[i] / 10);
+      state.live.perDrive[drive].ferr.push(tapDrives[drive].ferr[i]);
+      state.live.perDrive[drive].torque.push(tapDrives[drive].torque[i] / 10);
     }
     state.live.lastCycle = cycle;
   }
@@ -122,7 +127,7 @@ function trimLiveWindow() {
   while (drop < state.live.t.length && state.live.t[drop] < cutoff) drop++;
   if (drop > 0) {
     state.live.t.splice(0, drop);
-    for (const series of Object.values<any>(state.live.perDrive)) {
+    for (const series of Object.values(state.live.perDrive)) {
       series.ferr.splice(0, drop);
       series.torque.splice(0, drop);
     }
@@ -132,7 +137,7 @@ function trimLiveWindow() {
 /// slot0..slotN are the tap's honest names (the RT process never sees
 /// klippy's motor names); drive_state.json's slots map recovers the
 /// motor name when a dump has run.
-function liveDriveLabel(tapName) {
+function liveDriveLabel(tapName: string): string {
   const slots = state.drive.data && state.drive.data.slots;
   if (!slots) return tapName;
   const match = /^slot(\d+)$/.exec(tapName);
@@ -144,7 +149,7 @@ function liveDriveLabel(tapName) {
   return tapName;
 }
 
-function ensureLiveChartBoxes(containerId, idPrefix, drives) {
+function ensureLiveChartBoxes(containerId: string, idPrefix: string, drives: string[]): boolean {
   const container = el(containerId);
   if (!container) return false;
   if (!payloadUnchanged(`live-boxes-${containerId}`, drives)) {
@@ -163,9 +168,9 @@ function ensureLiveChartBoxes(containerId, idPrefix, drives) {
   return true;
 }
 
-const livePlots = new Map();
+const livePlots = new Map<string, { plot: TimeSeriesPlot }>();
 
-function livePlotFor(hostId, yLabel, trace, fixedY) {
+function livePlotFor(hostId: string, yLabel: string, trace: TimeTrace, fixedY: FixedY): TimeSeriesPlot | null {
   const host = el(hostId);
   if (!host) return null;
   const existing = livePlots.get(hostId);
@@ -178,7 +183,7 @@ function livePlotFor(hostId, yLabel, trace, fixedY) {
     livePlots.delete(hostId);
   }
   const plot = timeSeriesPlot(host, {
-    width: host.parentElement.clientWidth || 860,
+    width: host.parentElement?.clientWidth || 860,
     height: 130,
     yLabel,
     fixedY,
@@ -188,11 +193,18 @@ function livePlotFor(hostId, yLabel, trace, fixedY) {
   return plot;
 }
 
-function drawLiveChartGroup(containerId, idPrefix, drives, channel, yLabel, peakFmt) {
+function drawLiveChartGroup(
+  containerId: string,
+  idPrefix: string,
+  drives: string[],
+  channel: keyof LiveSeries,
+  yLabel: string,
+  peakFmt: (peak: number) => string
+) {
   if (!ensureLiveChartBoxes(containerId, idPrefix, drives)) return;
   let yMin = Infinity;
   let yMax = -Infinity;
-  const peaks = {};
+  const peaks: Record<string, number> = {};
   for (const d of drives) {
     let peak = 0;
     for (const v of state.live.perDrive[d][channel]) {

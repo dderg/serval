@@ -1,12 +1,13 @@
-import { el, shortTime } from "./api";
+import { el, mustEl, shortTime } from "./api";
 import { setConsoleValue } from "./console";
 import { fetchMacroHelp } from "./docs";
 import { state } from "./state";
+import type { SentEntry } from "./state";
 
 // --- moonraker plumbing + session log ---------------------------------------
 
-function moonrakerUrl() {
-  return el("moonraker-url").value.replace(/\/+$/, "");
+function moonrakerUrl(): string {
+  return mustEl<HTMLInputElement>("moonraker-url").value.replace(/\/+$/, "");
 }
 
 /// Every button on every page posts G-code through Moonraker, so a broken
@@ -33,7 +34,7 @@ async function pollMoonrakerHealth() {
 /// One click, no confirmation: an accidental stop costs a FIRMWARE_RESTART,
 /// a confirm dialog in a real emergency costs the machine.
 async function emergencyStop() {
-  const entry = { time: new Date().toISOString(), label: "e-stop", lines: ["emergency_stop"], results: [] };
+  const entry: SentEntry = { time: new Date().toISOString(), label: "e-stop", lines: ["emergency_stop"], results: [] };
   try {
     const resp = await fetch(`${moonrakerUrl()}/printer/emergency_stop`, { method: "POST" });
     entry.results.push({ ok: resp.ok, status: resp.status });
@@ -45,7 +46,7 @@ async function emergencyStop() {
   pollMoonrakerHealth();
 }
 
-function escapeHtml(s) {
+function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -53,7 +54,7 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
-function sentEntryHtml(entry) {
+function sentEntryHtml(entry: SentEntry): string {
   const ok = entry.results.length > 0 && entry.results.every((r) => r.ok);
   return (
     `<div class="sent-entry">` +
@@ -64,7 +65,7 @@ function sentEntryHtml(entry) {
         const r = entry.results[i];
         const suffix = r && !r.ok ? ` <span class="status-err">HTTP ${r.status}</span>` : "";
         const responses = ((entry.responses && entry.responses[i]) || [])
-          .map((m) => {
+          .map((m: string) => {
             const cls = m.startsWith("!!") ? "resp-line resp-err" : "resp-line";
             return `<div class="${cls}">${escapeHtml(m)}</div>`;
           })
@@ -85,29 +86,30 @@ function renderSentLog() {
   container.innerHTML = state.sentLog.length
     ? state.sentLog.map(sentEntryHtml).join("")
     : '<p class="note">nothing sent yet</p>';
-  container.onclick = (ev) => {
-    const line = ev.target.closest(".sent-line");
-    if (line) setConsoleValue(line.dataset.line, true);
+  container.onclick = (ev: MouseEvent) => {
+    const target = ev.target as HTMLElement;
+    const line = target.closest<HTMLElement>(".sent-line");
+    if (line) setConsoleValue(line.dataset.line ?? "", true);
   };
   container.scrollTop = container.scrollHeight;
 }
 
 /// Timestamps in Moonraker's gcode store are server clock, so diffing
 /// against its own latest entry needs no client/server clock agreement.
-async function latestGcodeStoreTime(base) {
+async function latestGcodeStoreTime(base: string): Promise<number> {
   const resp = await fetch(`${base}/server/gcode_store?count=1`);
   if (!resp.ok) throw new Error(`gcode_store HTTP ${resp.status}`);
   const store = (await resp.json()).result.gcode_store;
   return store.length ? store[store.length - 1].time : 0;
 }
 
-async function fetchGcodeResponses(base, sinceTime) {
+async function fetchGcodeResponses(base: string, sinceTime: number): Promise<string[]> {
   const resp = await fetch(`${base}/server/gcode_store?count=500`);
   if (!resp.ok) throw new Error(`gcode_store HTTP ${resp.status}`);
   const store = (await resp.json()).result.gcode_store;
   return store
-    .filter((e) => e.type === "response" && e.time > sinceTime)
-    .map((e) => e.message);
+    .filter((e: { type: string; time: number }) => e.type === "response" && e.time > sinceTime)
+    .map((e: { message: string }) => e.message);
 }
 
 /// Sends `lines` (already-built gcode) through the shared Moonraker
@@ -116,16 +118,16 @@ async function fetchGcodeResponses(base, sinceTime) {
 /// until the command finishes, and klippy's respond_info output only
 /// travels the websocket — so each line's responses are harvested from
 /// `/server/gcode_store` afterwards and echoed under the sent line.
-async function runGcode(lines, label) {
+async function runGcode(lines: string[], label: string) {
   const base = moonrakerUrl();
   const statusEl = el("run-status");
   if (statusEl) statusEl.textContent = "";
-  const entry = { time: new Date().toISOString(), label, lines: [], results: [], responses: [] };
+  const entry: SentEntry = { time: new Date().toISOString(), label, lines: [], results: [], responses: [] };
   state.sentLog.push(entry);
   for (const line of lines) {
     const url = `${base}/printer/gcode/script?script=${encodeURIComponent(line)}`;
     entry.lines.push(line);
-    let sentAt = null;
+    let sentAt: number | null = null;
     try {
       sentAt = await latestGcodeStoreTime(base);
     } catch (e) {
@@ -144,7 +146,7 @@ async function runGcode(lines, label) {
       if (statusEl) statusEl.innerHTML += `<div class="status-err">${line} -> ${e}</div>`;
       entry.results.push({ ok: false, status: 0 });
     }
-    let responses = [];
+    let responses: string[] = [];
     if (sentAt !== null) {
       try {
         responses = await fetchGcodeResponses(base, sentAt);
@@ -152,7 +154,7 @@ async function runGcode(lines, label) {
         console.error(e);
       }
     }
-    entry.responses.push(responses);
+    entry.responses!.push(responses);
     renderSentLog();
     if (!ok) break;
   }
