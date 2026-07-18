@@ -214,6 +214,66 @@ function peakStep(names: string[], plots: PlotSeries[], steps: string[]): { newe
   return { newest, step };
 }
 
+interface FilterChipItem {
+  key: string;
+  label: string;
+  swatch?: string;
+}
+
+/// The one chip-selection grammar every filtered chart shares: an "all"
+/// chip that clears the filter, plain click selects exactly one item
+/// (clicking the lone selection clears back to all), shift+click grows or
+/// shrinks a multi-selection, and a selection of none or of everything
+/// normalizes to no filter.
+function fillFilterChips(
+  container: HTMLElement,
+  allLabel: string,
+  allTitle: string,
+  noun: string,
+  items: FilterChipItem[],
+  getFilter: () => Set<string> | null,
+  setFilter: (next: Set<string> | null) => void,
+  onChange: () => void
+) {
+  container.innerHTML = "";
+  const filter = getFilter();
+  const all = document.createElement("button");
+  all.className = "chip" + (filter ? "" : " active");
+  all.textContent = allLabel;
+  all.title = allTitle;
+  all.addEventListener("click", () => {
+    setFilter(null);
+    onChange();
+  });
+  container.appendChild(all);
+  const allKeys = items.map((i) => i.key);
+  for (const item of items) {
+    const chip = document.createElement("button");
+    const inFilter = filter !== null && filter.has(item.key);
+    chip.className = "chip" + (inFilter ? " active" : "");
+    if (item.swatch) {
+      chip.innerHTML = `<span class="swatch" style="background:${item.swatch}"></span>`;
+    }
+    chip.appendChild(document.createTextNode(item.label));
+    chip.title = `click: only this ${noun} — shift+click: add/remove it`;
+    chip.addEventListener("click", (ev) => {
+      const cur = getFilter();
+      if (ev.shiftKey) {
+        const next = new Set(cur ?? allKeys);
+        if (next.has(item.key)) next.delete(item.key);
+        else next.add(item.key);
+        setFilter(next.size === 0 || next.size === allKeys.length ? null : next);
+      } else if (cur && cur.has(item.key) && cur.size === 1) {
+        setFilter(null);
+      } else {
+        setFilter(new Set([item.key]));
+      }
+      onChange();
+    });
+    container.appendChild(chip);
+  }
+}
+
 function mixColor(hex: string, targetHex: string, t: number): string {
   const c = parseInt(hex.slice(1), 16);
   const g = parseInt(targetHex.slice(1), 16);
@@ -288,8 +348,9 @@ function countsPerMm(runName: string, driveName: string): number {
   return v;
 }
 
-export type { PickedSeries };
+export type { PickedSeries, FilterChipItem };
 export {
+  fillFilterChips,
   pickSeries,
   hidpiCanvasContext,
   drawTimeDomain,

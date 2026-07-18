@@ -1,5 +1,6 @@
 import { el, payloadUnchanged, runDataSig } from "./api";
 import {
+  fillFilterChips,
   mixColor,
   traceStyle,
   clipToPsdBand,
@@ -674,36 +675,18 @@ function renderMotorChips(motorNames: string[]) {
   if (payloadUnchanged("time-motor-chips", { motorNames, filter, show })) return;
   container.innerHTML = "";
   if (!show) return;
-  const all = document.createElement("button");
-  all.className = "chip" + (state.motorFilter ? "" : " active");
-  all.textContent = "all motors";
-  all.title = "show every motor";
-  all.addEventListener("click", () => {
-    state.motorFilter = null;
-    redrawCharts();
-  });
-  container.appendChild(all);
-  for (const motor of motorNames) {
-    const chip = document.createElement("button");
-    const inFilter = state.motorFilter && state.motorFilter.has(motor);
-    chip.className = "chip" + (inFilter ? " active" : "");
-    chip.textContent = motor;
-    chip.title = "click: only this motor — shift+click: add/remove it";
-    chip.addEventListener("click", (ev) => {
-      if (ev.shiftKey) {
-        const next = new Set(state.motorFilter || motorNames);
-        if (next.has(motor)) next.delete(motor);
-        else next.add(motor);
-        state.motorFilter = next.size === 0 || next.size === motorNames.length ? null : next;
-      } else if (inFilter && state.motorFilter && state.motorFilter.size === 1) {
-        state.motorFilter = null;
-      } else {
-        state.motorFilter = new Set([motor]);
-      }
-      redrawCharts();
-    });
-    container.appendChild(chip);
-  }
+  fillFilterChips(
+    container,
+    "all motors",
+    "show every motor",
+    "motor",
+    motorNames.map((m) => ({ key: m, label: m })),
+    () => state.motorFilter,
+    (next) => {
+      state.motorFilter = next;
+    },
+    redrawCharts
+  );
 }
 
 function renderStepChips(stepNames: string[]) {
@@ -717,37 +700,18 @@ function renderStepChips(stepNames: string[]) {
 }
 
 function fillStepChips(container: HTMLElement, stepNames: string[]) {
-  container.innerHTML = "";
-  const all = document.createElement("button");
-  all.className = "chip" + (state.stepFilter ? "" : " active");
-  all.textContent = "all";
-  all.title = "show every step";
-  all.addEventListener("click", () => {
-    state.stepFilter = null;
-    redrawCharts();
-  });
-  container.appendChild(all);
-  for (const stepName of stepNames) {
-    const chip = document.createElement("button");
-    const inFilter = state.stepFilter && state.stepFilter.has(stepName);
-    chip.className = "chip" + (inFilter ? " active" : "");
-    chip.textContent = stepName;
-    chip.title = "click: only this step — shift+click: add/remove it";
-    chip.addEventListener("click", (ev) => {
-      if (ev.shiftKey) {
-        const next = new Set(state.stepFilter || stepNames);
-        if (next.has(stepName)) next.delete(stepName);
-        else next.add(stepName);
-        state.stepFilter = next.size === 0 || next.size === stepNames.length ? null : next;
-      } else if (inFilter && state.stepFilter && state.stepFilter.size === 1) {
-        state.stepFilter = null;
-      } else {
-        state.stepFilter = new Set([stepName]);
-      }
-      redrawCharts();
-    });
-    container.appendChild(chip);
-  }
+  fillFilterChips(
+    container,
+    "all",
+    "show every step",
+    "step",
+    stepNames.map((s) => ({ key: s, label: s })),
+    () => state.stepFilter,
+    (next) => {
+      state.stepFilter = next;
+    },
+    redrawCharts
+  );
 }
 
 export type { MetricsRow, PsdBoxOpts, SweepSeries };
