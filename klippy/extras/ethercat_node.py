@@ -79,6 +79,7 @@ class EtherCatNode:
                 % (self.name, self.cycle_us, CYCLE_US_QUANTUM)
             )
         self.dynamics_profile = config.get("dynamics_profile", None)
+        self.late_tolerance_us = config.getfloat("late_tolerance_us", 0.0)
         self.engine_handle = None
         self._counts_per_mm = None
         self._slot_by_motor = {}
@@ -232,6 +233,7 @@ class EtherCatNode:
                 self.cycle_us,
                 self.dynamics_profile,
                 drives,
+                late_tolerance_us=self.late_tolerance_us,
             )
         except RuntimeError as e:
             raise self.printer.config_error(str(e))

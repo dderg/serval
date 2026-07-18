@@ -28,7 +28,7 @@ use crate::sdo::SdoBus;
 use crate::sensorless::SensorlessBank;
 use crate::server::FrameServer;
 use crate::stream_halt::StreamHalt;
-use crate::torque::TorqueGate;
+use crate::torque::{TorqueGate, TorqueState};
 use crate::trim::DiffTrimBank;
 
 const NUM_SLAVES: usize = 2;
@@ -195,6 +195,10 @@ fn test_ctx_with_drive(name: &str, drive: TrackingLagDrive) -> EndpointCtx {
         latched_drive_err: 0,
         sensorless: SensorlessBank::new(NUM_SLAVES),
         stream_halt: StreamHalt::default(),
+        late_tolerance_ns: None,
+        baseline_reanchor_count: 0,
+        late_frames: 0,
+        late_max_ns: i64::MIN,
     }
 }
 
@@ -814,4 +818,40 @@ fn set_dynamics_model_mass_len_mismatch_keeps_no_model() {
     bad.mass.pop();
     super::commands::handle_set_dynamics_model(&mut ctx, 1, bad);
     assert!(ctx.dynamics.is_none());
+}
+
+#[test]
+fn late_frame_is_counted_but_not_faulted_without_tolerance() {
+    let mut ctx = test_ctx("late-no-tol");
+    super::cycle::police_frame_timing(&mut ctx, 50_000);
+    assert_ne!(ctx.gate.state(), TorqueState::Faulted);
+    assert_eq!(ctx.late_frames, 1);
+    assert_eq!(ctx.late_max_ns, 50_000);
+}
+
+#[test]
+fn late_frame_beyond_tolerance_latches_a_fault() {
+    let mut ctx = test_ctx("late-fault");
+    ctx.late_tolerance_ns = Some(0);
+    super::cycle::police_frame_timing(&mut ctx, 50_000);
+    assert_eq!(ctx.gate.state(), TorqueState::Faulted);
+    assert_eq!(ctx.latched_drive_err, super::cycle::FRAME_LATE_FAULT_CODE);
+}
+
+#[test]
+fn late_frame_within_tolerance_does_not_fault() {
+    let mut ctx = test_ctx("late-within");
+    ctx.late_tolerance_ns = Some(100_000);
+    super::cycle::police_frame_timing(&mut ctx, 50_000);
+    assert_ne!(ctx.gate.state(), TorqueState::Faulted);
+}
+
+#[test]
+fn cycle_skip_faults_even_when_lateness_is_within_tolerance() {
+    let mut ctx = test_ctx("skip-fault");
+    ctx.late_tolerance_ns = Some(1_000_000);
+    ctx.baseline_reanchor_count = 5;
+    super::cycle::police_frame_timing(&mut ctx, -100_000);
+    assert_eq!(ctx.gate.state(), TorqueState::Faulted);
+    assert_eq!(ctx.latched_drive_err, super::cycle::CYCLE_SKIP_FAULT_CODE);
 }

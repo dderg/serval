@@ -56,6 +56,7 @@ pub(super) fn run_cycle(ctx: &mut EndpointCtx) -> ControlFlow<()> {
 
     let (wkc, toff) = ctx.drive.cycle();
 
+    police_frame_timing(ctx, toff);
     handle_drive_fault(ctx);
 
     ctx.cycle_index += 1;
@@ -558,6 +559,70 @@ fn handle_drive_fault(ctx: &mut EndpointCtx) {
     }
 }
 
+pub(super) const FRAME_LATE_FAULT_CODE: u16 = 0xFE10;
+pub(super) const CYCLE_SKIP_FAULT_CODE: u16 = 0xFE11;
+
+/// The cycle reports each frame's lateness relative to the SYNC0 latch (wake
+/// grid + half cycle — overrun skips stay on the grid, so the phase holds all
+/// run); positive means the drives latched last cycle's target. A skip means
+/// whole cycles went by with no frame at all — the drives coasted on a stale
+/// target — so it faults whenever a tolerance is set, regardless of the
+/// lateness measured on the cycle that finally ran.
+pub(super) fn police_frame_timing(ctx: &mut EndpointCtx, lateness_ns: i64) {
+    let reanchors = ctx.drive.reanchor_count();
+    let reanchored = reanchors != ctx.baseline_reanchor_count;
+    if reanchored {
+        ctx.baseline_reanchor_count = reanchors;
+        tracing::error!(
+            subsystem = "ethercat",
+            event = "cycle_skip",
+            total = reanchors,
+            "cycle overran a full period and skipped forward on the grid — \
+             the drives coasted on a stale target for the missed cycles"
+        );
+    }
+    if lateness_ns > 0 {
+        ctx.late_frames += 1;
+        ctx.late_max_ns = ctx.late_max_ns.max(lateness_ns);
+    }
+    let Some(tolerance_ns) = ctx.late_tolerance_ns else {
+        return;
+    };
+    if ctx.gate.state() == TorqueState::Faulted {
+        return;
+    }
+    let code = if reanchored {
+        CYCLE_SKIP_FAULT_CODE
+    } else if lateness_ns > tolerance_ns {
+        FRAME_LATE_FAULT_CODE
+    } else {
+        return;
+    };
+    eprintln!(
+        "ec-rt: FRAME TIMING FAULT lateness={lateness_ns} ns \
+         tolerance={tolerance_ns} ns reanchored={reanchored} — parking, \
+         reporting via heartbeat"
+    );
+    tracing::error!(
+        subsystem = "ethercat",
+        event = "frame_timing_fault",
+        lateness_ns,
+        tolerance_ns,
+        reanchored,
+        code,
+        "frame timing exceeded the configured late tolerance — parking"
+    );
+    ctx.gate.on_drive_fault();
+    discard_motion(ctx);
+    for t in &mut ctx.last_streamed_target {
+        *t = None;
+    }
+    ctx.latched_drive_err = code;
+    let retired = respond_fault_heartbeat(ctx, 0, code);
+    ctx.last_sent_retired = retired.iter().sum();
+    ctx.heartbeat_sent = true;
+}
+
 fn record_capture_sample(
     ctx: &mut EndpointCtx,
     motion_active: bool,
@@ -697,6 +762,18 @@ fn emit_periodic_telemetry(ctx: &mut EndpointCtx, wkc: i32, toff: i64) {
                     framed = ctx.report_anchor[s].is_some(),
                 }
             );
+        }
+        if ctx.late_frames > 0 {
+            tracing::warn!(
+                subsystem = "ethercat",
+                event = "frame_late",
+                count = ctx.late_frames,
+                max_lateness_ns = ctx.late_max_ns,
+                "frames finished sending after the nominal SYNC0 latch since \
+                 the last telemetry beat — drives held stale targets"
+            );
+            ctx.late_frames = 0;
+            ctx.late_max_ns = i64::MIN;
         }
         if ctx.gate.state() == TorqueState::Faulted {
             let latched_drive_err = ctx.latched_drive_err;

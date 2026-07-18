@@ -77,6 +77,10 @@ pub struct EndpointCtx {
     latched_drive_err: u16,
     sensorless: SensorlessBank,
     stream_halt: StreamHalt,
+    late_tolerance_ns: Option<i64>,
+    baseline_reanchor_count: u32,
+    late_frames: u32,
+    late_max_ns: i64,
 }
 
 pub fn run(ctx: &mut EndpointCtx) {

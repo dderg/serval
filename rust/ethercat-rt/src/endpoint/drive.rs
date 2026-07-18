@@ -20,6 +20,10 @@ pub(super) trait DriveChain {
     fn telemetry(&self, slot: usize) -> EcTelemetry;
     fn dump_al_state(&self);
 
+    fn reanchor_count(&self) -> u32 {
+        0
+    }
+
     fn disable_all(&mut self, num_slaves: usize) {
         for s in 0..num_slaves {
             self.disable(s);
@@ -51,6 +55,10 @@ impl DriveChain for FfiDriveChain {
         let mut toff = 0i64;
         let wkc = unsafe { ffi::ec_rt_cycle(&mut toff) };
         (wkc, toff)
+    }
+
+    fn reanchor_count(&self) -> u32 {
+        unsafe { ffi::ec_rt_reanchor_count() }
     }
 
     fn enable(&mut self, slot: usize) -> i32 {
