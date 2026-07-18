@@ -554,24 +554,6 @@ keeps everything captured so far. Params: `SAFE` `START` `STEP` (50, must be
 > 0) `MAX` (≥ `START`) `PARAM` `AXIS` (X) `SPEED` (100) `ACCEL` (3000)
 `ITERATIONS` (2) `DWELL_MS` `TAG` (ladder) `SERVO`.
 
-#### SERVO_HARVEST_NOTCHES
-Automates the "let the drive's adaptive notch tuning find the resonances during
-motion, then lock and read back what it chose" recipe (manual 7.10). Writes
-C01.30 `adaptive_notch_mode` = `MODE` (1 = 1st notch adaptive, 2 = 1st+2nd
-adaptive; anything else is a command error) to every servo driving `AXIS`,
-strokes the axis so the adaptive tuner sees motion (while the mode is 1 or 2 the
-drive rewrites notch 1–2 parameters itself), settles, then reads back per drive
-notch 1 and notch 2 center frequency / width / depth (C01.40–45), and finally
-writes C01.30 = 0 to **lock** the tuning. The `MODE` writes and the lock are
-journaled deliberately (`record_param_write`) — this command keeps no run
-directory, the write journal is its audit trail. Any SDO read/write failure
-aborts naming the motor and address, before the lock, so a failed readback
-never leaves the drive locked on half-harvested values. Output is one line per
-drive with the harvested notch 1 and notch 2 (freq Hz, width, depth) and a
-closing note that the values are now locked (mode 0). Params: `AXIS` (X) `MODE`
-(2) `START` `END` `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2) `DWELL_MS`
-`SERVO`.
-
 #### SERVO_SWEEP_INERTIA
 Empirical inertia sweep: apply the tuned gains first, then this writes each
 C00.06 ratio in `RATIOS`, records one capture per step, and runs
@@ -582,11 +564,6 @@ afterwards. Because there is no automated pick, `APPLY=1` always errors here
 `SERVO_SET_INERTIA_RATIO`. Params: `RATIOS`
 (40,70,100,130) `AXIS` (X) `START` `END` `SPEED` (100) `ACCEL` (3000)
 `ITERATIONS` (2) `DWELL_MS` `TAG` (inertia) `APPLY` `SERVO`.
-
-#### SERVO_SET_STIFFNESS
-Vendor-table tuning path: standard mode (C00.04=1) + C00.05 stiffness level
-1..31 (factory 12); the drive derives gain set 1 from the level. Params:
-`LEVEL` `SERVO`.
 
 #### SERVO_AUTOTUNE
 Packaged tuning sequence, the manual order above run as one state machine:
@@ -646,7 +623,6 @@ Schemas: [servo-cal-contracts.md](servo-cal-contracts.md).
 | `SERVO_STRAIN_COMP_TUNE` | in-klippy loop | run dir with one capture per iteration; converges the matrix, leaves the tuned map written + enabled |
 | `SERVO_CALIBRATE_GAINS` | `servo-cal analyze` | run dir + `results.json` verdict (highest clean gain step); `APPLY=1` also writes + verifies |
 | `SERVO_GAIN_LADDER` | `servo-cal analyze` (per rung + final) | run dir + `results.json` verdict; climbs until a rung flags trouble, then applies `SAFE` |
-| `SERVO_HARVEST_NOTCHES` | — | no run dir; writes C01.30, strokes, reads back notch 1–2, locks (C01.30=0); journaled param writes |
 | `SERVO_REFINE_GAIN` | `servo-cal analyze` | run dir + `results.json` verdict; `APPLY=1` also writes + verifies |
 | `SERVO_SWEEP_INERTIA` | `servo-cal analyze` | run dir + `results.json` (no automated pick, so `APPLY=1` always errors) |
 | `SERVO_SWEEP_ACCEL` | `servo-cal analyze` | run dir + `results.json` verdict (max non-railing accel); `APPLY=1` verifies at the recommended accel (no SDO write) |

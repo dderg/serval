@@ -72,8 +72,10 @@ Target state, split by role rather than by inertia:
 - Delete `cmd_SERVO_MEASURE_FRICTION` and its doc section in
   `docs/rewrite/servo-calibration.md`.
 - Delete `scripts/servo_fit_compare.py` and its doc bullet.
-- Keep `SERVO_SET_STIFFNESS` / `SERVO_SHOW_TUNING` / `SERVO_APPLY_GAINS` —
-  small SDO plumbing the orchestrator will reuse.
+- Keep `SERVO_SHOW_TUNING` / `SERVO_APPLY_GAINS` — small SDO plumbing the
+  orchestrator will reuse. `SERVO_SET_STIFFNESS` was later removed: the
+  vendor-table stiffness path is unused, gains are always tuned manually
+  (`gain_mode` stays 0).
 
 ## Part 1 — `servo-cal`: the Rust analysis core
 

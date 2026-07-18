@@ -253,17 +253,16 @@ fn demo_drive_state_matches_panel_rendering_assumptions() {
 
     let notch_group_count = params.iter().filter(|p| p["group"] == "notch").count();
     assert_eq!(
-        notch_group_count, 16,
-        "demo must carry the full notch bank (5 × freq/width/depth) plus \
-         adaptive_notch_mode"
+        notch_group_count, 15,
+        "demo must carry the full notch bank (5 × freq/width/depth)"
     );
-    let adaptive = params
+    let speed_feedback_filter = params
         .iter()
-        .find(|p| p["name"] == "adaptive_notch_mode")
-        .expect("adaptive_notch_mode present");
+        .find(|p| p["name"] == "speed_feedback_filter")
+        .expect("speed_feedback_filter present");
     assert!(
-        adaptive["options"].is_object(),
-        "adaptive_notch_mode must ship enum options for the panel's labeled select"
+        speed_feedback_filter["options"].is_object(),
+        "speed_feedback_filter must ship enum options for the panel's labeled select"
     );
 
     let autofill_sources: Vec<&str> = params

@@ -189,9 +189,9 @@ fn attempt1_resonance_injection_flips_the_verdict_to_the_safe_step() {
 /// The tuning grid (`docs/rewrite/servo-tuning-profiles.md`'s
 /// `SERVO_DUMP_TUNING` shape) has nothing to render without a bench unless
 /// `servo-cal demo` also ships a plausible `<out_dir>/drive_state.json` —
-/// this asserts the file mirrors the shipped `PANEL_PARAMS` map (31 params,
-/// 4 AWD corexy motors) and pins `gain_mode`/`inertia_ratio` the way a
-/// `[motor] params:` block would.
+/// this asserts the file mirrors the shipped `PANEL_PARAMS` map (28 params,
+/// 4 AWD corexy motors) and pins `inertia_ratio` the way a `[motor]
+/// params:` block would.
 #[test]
 fn demo_writes_a_drive_state_the_panel_can_render() {
     let out_dir = temp_dir("drive_state");
@@ -206,7 +206,7 @@ fn demo_writes_a_drive_state_the_panel_can_render() {
     assert!(drive_state["created_utc"].as_str().is_some());
 
     let params = drive_state["params"].as_array().unwrap();
-    assert_eq!(params.len(), 31, "must mirror all 31 shipped PANEL_PARAMS");
+    assert_eq!(params.len(), 28, "must mirror all 28 shipped PANEL_PARAMS");
     let names: Vec<&str> = params.iter().map(|p| p["name"].as_str().unwrap()).collect();
     for expected in [
         "position_gain",
@@ -216,7 +216,6 @@ fn demo_writes_a_drive_state_the_panel_can_render() {
         "notch_1_freq",
         "notch_3_depth",
         "notch_5_width",
-        "adaptive_notch_mode",
         "speed_feedback_filter",
         "speed_observer_gain",
         "speed_observer_inertia",
@@ -225,8 +224,6 @@ fn demo_writes_a_drive_state_the_panel_can_render() {
         "disturbance_inertia",
         "disturbance_cutoff",
         "disturbance_comp_torque",
-        "gain_mode",
-        "stiffness_level",
         "inertia_ratio",
     ] {
         assert!(names.contains(&expected), "missing panel param {expected}");
@@ -267,8 +264,6 @@ fn demo_writes_a_drive_state_the_panel_can_render() {
         assert_eq!(readings["C01.01"], Value::from(550));
         assert_eq!(readings["C01.02"], Value::from(2273));
         assert_eq!(readings["C01.03"], Value::from(220));
-        assert_eq!(readings["C01.30"], Value::from(0));
-        assert_eq!(readings["C00.04"], Value::from(0));
         assert_eq!(readings["C00.06"], Value::from(150));
         assert_eq!(readings["C02.60"], Value::from(2000));
         assert_eq!(readings["C02.62"], Value::from(30));
@@ -287,10 +282,9 @@ fn demo_writes_a_drive_state_the_panel_can_render() {
         let pins = config_pins.get(name).unwrap();
         assert_eq!(
             pins.as_object().unwrap().len(),
-            2,
-            "only gain_mode and inertia_ratio are pinned"
+            1,
+            "only inertia_ratio is pinned"
         );
-        assert_eq!(pins["C00.04"], Value::from(0));
         assert_eq!(pins["C00.06"], Value::from(150));
     }
 

@@ -795,56 +795,6 @@ def _str_scripts(gcode):
     return [s for s in gcode.scripts if isinstance(s, str)]
 
 
-def _g1_x_present(scripts):
-    return any(ln.startswith("G1 X") for s in scripts for ln in s.splitlines())
-
-
-def test_harvest_writes_mode_reads_back_and_locks():
-    servo_param.drain_param_writes()
-    sc, gcode = make_sc(engine_values=dict(NOTCH_VALUES))
-    gcmd = FakeGcmd(AXIS="X", MODE=2)
-    sc.cmd_SERVO_HARVEST_NOTCHES(gcmd)
-    scripts = _str_scripts(gcode)
-    for motor in ("motor_a", "motor_b"):
-        assert any(
-            "SERVO_PARAM SERVO=%s SET=0x2001.0x31 VALUE=2 TYPE=u16" % (motor,)
-            in s
-            for s in scripts
-        )
-    mode_idx = [
-        i for i, s in enumerate(scripts) if "SET=0x2001.0x31 VALUE=2" in s
-    ]
-    lock_idx = [
-        i for i, s in enumerate(scripts) if "SET=0x2001.0x31 VALUE=0" in s
-    ]
-    assert mode_idx and lock_idx
-    assert min(lock_idx) > max(mode_idx)
-    assert _g1_x_present(scripts)
-    for motor in ("motor_a", "motor_b"):
-        assert (
-            "%s notch1 111 Hz w1 d2 | notch2 222 Hz w3 d4" % (motor,)
-            in gcmd.responses
-        )
-    assert any("locked (C01.30 = 0)" in r for r in gcmd.responses)
-
-
-def test_harvest_readback_failure_aborts_before_lock():
-    servo_param.drain_param_writes()
-    sc, gcode = make_sc(handle=None)
-    gcmd = FakeGcmd(AXIS="X", MODE=2)
-    with pytest.raises(RuntimeError, match="notch readback failed"):
-        sc.cmd_SERVO_HARVEST_NOTCHES(gcmd)
-    scripts = _str_scripts(gcode)
-    assert any("SET=0x2001.0x31 VALUE=2" in s for s in scripts)
-    assert not any("SET=0x2001.0x31 VALUE=0" in s for s in scripts)
-
-
-def test_harvest_rejects_mode_3():
-    sc, _ = make_sc()
-    with pytest.raises(RuntimeError, match="MODE must be 1"):
-        sc.cmd_SERVO_HARVEST_NOTCHES(FakeGcmd(AXIS="X", MODE=3))
-
-
 def test_ambient_records_notch_state_per_drive():
     servo_param.drain_param_writes()
     sc, _ = make_sc(engine_values={**NOTCH_VALUES, (0x2001, 0x31): 1})

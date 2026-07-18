@@ -403,17 +403,13 @@ def test_observer_addresses(name, addr, group):
 
 def test_options_serialize_with_string_keys():
     by_name = {p.name: p for p in servo_tuning.PANEL_PARAMS}
-    d = by_name["adaptive_notch_mode"].as_dict()
+    d = by_name["speed_feedback_filter"].as_dict()
     assert d["options"] == {
-        "0": "disabled",
-        "1": "1 adaptive notch",
-        "2": "2 adaptive notches",
-        "3": "reset notch params",
-        "4": "test resonance only",
-    }
-    assert by_name["gain_mode"].as_dict()["options"] == {
-        "0": "manual",
-        "1": "stiffness table",
+        "0": "internal setting",
+        "1": "low-pass filter",
+        "2": "overlapping average",
+        "3": "speed observer",
+        "4": "no filter",
     }
     assert by_name["speed_gain"].as_dict()["options"] is None
 
@@ -619,7 +615,7 @@ def test_dump_tuning_writes_expected_json(tmp_path):
         node=FakeNode(7, slots={"motor_a": 0, "motor_b": 1}),
         sdo_params_by_motor={
             "motor_a": [(0x2000, 7, 2, 870)],
-            "motor_b": [(0x2001, 1, 2, 700), (0x2000, 5, 2, 1)],
+            "motor_b": [(0x2001, 1, 2, 700)],
         },
     )
     st = _make_full_servo_tuning(
@@ -642,10 +638,7 @@ def test_dump_tuning_writes_expected_json(tmp_path):
     assert payload["motors"]["motor_a"]["C01.01"] == 550
     assert payload["motors"]["motor_b"]["C00.06"] == 150
     assert payload["config_pins"]["motor_a"] == {"C00.06": 150}
-    assert payload["config_pins"]["motor_b"] == {
-        "C01.00": 700,
-        "C00.04": 0,
-    }
+    assert payload["config_pins"]["motor_b"] == {"C01.00": 700}
     assert payload["slots"] == {"motor_a": 0, "motor_b": 1}
     assert payload["spatial"] == {
         "modes": ["x"],
