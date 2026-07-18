@@ -2765,20 +2765,32 @@ class ServoCalibration:
         "coupled_xy kinematics run the X+Y belt grid (SERVOS=/X_START etc "
         "override; travel_speed centers the idle axis between strokes); "
         "cartesian kinematics run a single AXIS grid and reject SERVOS/"
-        "X_START/X_END/Y_START/Y_END. Params AXIS START END X_START X_END "
-        "Y_START Y_END ACCELS SPEEDS ITERATIONS DWELL_MS NAME SERVOS"
+        "X_START/X_END/Y_START/Y_END. PATTERN=1 runs each ACCELS x SPEEDS "
+        "cell as a TEST_SPEED-style XY pattern over the configured XY "
+        "bounds inset by BOUND (plus a SMALL_SIZE box at center) exciting "
+        "every XY servo; segments too short to reach SPEED run triangular "
+        "profiles on purpose and are reported by achieved peak velocity, "
+        "and it rejects START/END/X_START/X_END/Y_START/Y_END. Params AXIS "
+        "START END X_START X_END Y_START Y_END ACCELS SPEEDS ITERATIONS "
+        "DWELL_MS NAME SERVOS PATTERN BOUND SMALL_SIZE"
     )
 
     def _grid_stroke_plan(self, gcmd: Any) -> dict[str, Any]:
         accels, speeds, iterations, dwell = servo_strokes.grid(
             gcmd, self.accels, self.speeds, self.iterations, self.dwell_ms
         )
-        return {
+        plan = {
             "speeds": speeds,
             "accels": accels,
             "iterations": iterations,
             "dwell_ms": dwell,
         }
+        if gcmd.get_int("PATTERN", 0):
+            _points, _sx, _sy, pattern_plan = self._pattern_geometry_params(
+                gcmd
+            )
+            plan.update(pattern_plan)
+        return plan
 
     def _grid_servos(
         self, gcmd: Any, kin: Any
@@ -2796,6 +2808,8 @@ class ServoCalibration:
 
     def cmd_SERVO_MEASURE_INERTIA(self, gcmd: Any) -> None:
         name = gcmd.get("NAME", "ident")
+        if gcmd.get_int("PATTERN", 0):
+            self._reject_pattern_stroke_bounds(gcmd)
         kin = self._kin()
         servos, belts_rails, axis = self._grid_servos(gcmd, kin)
         self._begin_run(
@@ -2822,8 +2836,14 @@ class ServoCalibration:
             return
         self._reject_corexy_only_params(gcmd)
         axis = gcmd.get("AXIS", "X").upper()
-        start, end = servo_strokes.axis_bounds(gcmd, self.bounds, axis)
         servos = servo_strokes.axis_servos(gcmd, kin, axis)
+        if gcmd.get_int("PATTERN", 0):
+            points, start_x, start_y, _plan = self._pattern_geometry_params(
+                gcmd
+            )
+            self._pattern_grid(gcmd, name, servos, points, start_x, start_y)
+            return
+        start, end = servo_strokes.axis_bounds(gcmd, self.bounds, axis)
         accels, speeds, iterations, dwell = servo_strokes.grid(
             gcmd, self.accels, self.speeds, self.iterations, self.dwell_ms
         )
@@ -2847,6 +2867,12 @@ class ServoCalibration:
             servo_list = [s.strip() for s in servos.split(",") if s.strip()]
         else:
             servo_list = list(servos)
+        if gcmd.get_int("PATTERN", 0):
+            points, start_x, start_y, _plan = self._pattern_geometry_params(
+                gcmd
+            )
+            self._pattern_grid(gcmd, name, servo_list, points, start_x, start_y)
+            return
         x_start, x_end, y_start, y_end = servo_strokes.xy_bounds(
             gcmd, self.bounds
         )
@@ -2867,6 +2893,75 @@ class ServoCalibration:
                 self._goto_xy(x_center, y_start, dwell)
                 self._strokes(
                     "Y", y_start, y_end, speed, accel, iterations, dwell
+                )
+        self._stop_capture()
+        self._restore()
+
+    def _reject_pattern_stroke_bounds(self, gcmd: Any) -> None:
+        bad = [
+            p
+            for p in ("START", "END", "X_START", "X_END", "Y_START", "Y_END")
+            if gcmd.get(p, None) is not None
+        ]
+        if bad:
+            raise gcmd.error(
+                "%s are single-axis stroke bounds - PATTERN=1 uses the "
+                "configured XY bounds with BOUND= inset" % (", ".join(bad),)
+            )
+
+    def _pattern_reach_report(
+        self,
+        gcmd: Any,
+        points: list[tuple[float, float]],
+        start_x: float,
+        start_y: float,
+        accels: list[float],
+        speeds: list[float],
+    ) -> None:
+        for accel in accels:
+            for speed in speeds:
+                moves = servo_strokes.pattern_moves(
+                    self.gcode, points, start_x, start_y, speed, accel
+                )
+                gcmd.respond_info(
+                    "accel %.0f speed %.0f: %s"
+                    % (
+                        accel,
+                        speed,
+                        servo_strokes.pattern_reach_summary(moves, speed),
+                    )
+                )
+
+    def _pattern_grid(
+        self,
+        gcmd: Any,
+        name: str,
+        servos: list[str],
+        points: list[tuple[float, float]],
+        start_x: float,
+        start_y: float,
+    ) -> None:
+        accels, speeds, iterations, dwell = servo_strokes.grid(
+            gcmd, self.accels, self.speeds, self.iterations, self.dwell_ms
+        )
+        self._prep("X", dwell)
+        self._prep("Y", dwell)
+        self._pattern_reach_report(
+            gcmd, points, start_x, start_y, accels, speeds
+        )
+        self._goto_xy(start_x, start_y, dwell)
+        self._start_capture(name, servos)
+        for accel in accels:
+            for speed in speeds:
+                servo_strokes.emit_pattern(
+                    self.gcode,
+                    points,
+                    start_x,
+                    start_y,
+                    speed,
+                    accel,
+                    iterations,
+                    dwell,
                 )
         self._stop_capture()
         self._restore()
@@ -2962,6 +3057,8 @@ class ServoCalibration:
         torque: float | None,
         inertia: float | None,
     ) -> tuple[ExperimentRun, str, str]:
+        if gcmd.get_int("PATTERN", 0):
+            self._reject_pattern_stroke_bounds(gcmd)
         plan = self._fit_plan(gcmd)
         run = self._begin_run(
             gcmd,
@@ -3224,6 +3321,27 @@ class ServoCalibration:
         "BASE_GAIN PATTERN BOUND SMALL_SIZE"
     )
 
+    def _pattern_geometry_params(
+        self, gcmd: Any
+    ) -> tuple[list[tuple[float, float]], float, float, dict[str, Any]]:
+        inset = gcmd.get_float("BOUND", 20.0, minval=0.0)
+        small = gcmd.get_float("SMALL_SIZE", 20.0, above=0.0)
+        x_lo, x_hi = self._config_bounds(gcmd, "X")
+        y_lo, y_hi = self._config_bounds(gcmd, "Y")
+        points, start_x, start_y = servo_strokes.pattern_geometry(
+            gcmd, x_lo, x_hi, y_lo, y_hi, inset, small
+        )
+        plan = {
+            "pattern": {
+                "x_bounds": [x_lo, x_hi],
+                "y_bounds": [y_lo, y_hi],
+                "inset": inset,
+                "small_size": small,
+                "segments": len(points),
+            }
+        }
+        return points, start_x, start_y, plan
+
     def _pattern_setup(
         self, gcmd: Any
     ) -> tuple[list[str], list[tuple[float, float]], float, float, dict]:
@@ -3240,13 +3358,7 @@ class ServoCalibration:
                 "START/END are single-axis stroke bounds - PATTERN=1 uses "
                 "the configured XY bounds with BOUND= inset"
             )
-        inset = gcmd.get_float("BOUND", 20.0, minval=0.0)
-        small = gcmd.get_float("SMALL_SIZE", 20.0, above=0.0)
-        x_lo, x_hi = self._config_bounds(gcmd, "X")
-        y_lo, y_hi = self._config_bounds(gcmd, "Y")
-        points, start_x, start_y = servo_strokes.pattern_geometry(
-            gcmd, x_lo, x_hi, y_lo, y_hi, inset, small
-        )
+        points, start_x, start_y, plan = self._pattern_geometry_params(gcmd)
         servo = gcmd.get("SERVO", None)
         if servo is not None:
             servos = [s.strip() for s in servo.split(",") if s.strip()]
@@ -3258,15 +3370,6 @@ class ServoCalibration:
                     + servo_strokes.axis_servos(gcmd, kin, "Y")
                 )
             )
-        plan = {
-            "pattern": {
-                "x_bounds": [x_lo, x_hi],
-                "y_bounds": [y_lo, y_hi],
-                "inset": inset,
-                "small_size": small,
-                "segments": len(points),
-            }
-        }
         return servos, points, start_x, start_y, plan
 
     def _swept_gain_values(self, gcmd: Any) -> tuple[str, list[int]]:
@@ -3545,9 +3648,15 @@ class ServoCalibration:
         "candidate beats the baseline, the refined profile is written to a "
         "new TOML - pointing "
         "dynamics_profile at it (then RESTART) is the only way to keep it. "
-        "Params TERM (MASS) AXIS (X) SERVOS PROFILE LO HI TOL "
+        "PATTERN=1 replaces the per-axis stroke grids with the "
+        "TEST_SPEED-style XY pattern over the configured XY bounds inset "
+        "by BOUND (plus a SMALL_SIZE box at center); short segments run "
+        "triangular profiles on purpose, and TERM=DIRECTION_SPLIT is not "
+        "supported with PATTERN=1 (direction metrics need rest-to-rest "
+        "strokes). Params TERM (MASS) AXIS (X) SERVOS PROFILE LO HI TOL "
         "(0.02) MAX_EVALS (10) START END X_START X_END Y_START Y_END "
-        "ACCELS SPEEDS ITERATIONS DWELL_MS TAG (refdyn) NAME"
+        "ACCELS SPEEDS ITERATIONS DWELL_MS TAG (refdyn) NAME PATTERN BOUND "
+        "SMALL_SIZE"
     )
 
     def _refine_dynamics_node(self, gcmd: Any, servos: list[str]) -> Any:
@@ -3678,6 +3787,15 @@ class ServoCalibration:
                 "TERM must be MASS, VISCOUS, COULOMB or DIRECTION_SPLIT "
                 "(got %r)" % (gcmd.get("TERM", ""),)
             )
+        pattern = gcmd.get_int("PATTERN", 0)
+        if pattern:
+            if term == "DIRECTION_SPLIT":
+                raise gcmd.error(
+                    "TERM=DIRECTION_SPLIT needs rest-to-rest single-axis "
+                    "strokes for per-move direction metrics - not "
+                    "supported with PATTERN=1"
+                )
+            self._reject_pattern_stroke_bounds(gcmd)
         kin = self._kin()
         servos, rails, axis = self._grid_servos(gcmd, kin)
         node = self._refine_dynamics_node(gcmd, servos)
@@ -3693,6 +3811,26 @@ class ServoCalibration:
         accels, speeds, iterations, dwell = servo_strokes.grid(
             gcmd, self.accels, self.speeds, self.iterations, self.dwell_ms
         )
+        pattern_plan: dict[str, Any] = {}
+        if pattern:
+            points, start_x, start_y, pattern_plan = (
+                self._pattern_geometry_params(gcmd)
+            )
+
+            def pattern_grid() -> None:
+                self._goto_xy(start_x, start_y, dwell)
+                for accel in accels:
+                    for speed in speeds:
+                        servo_strokes.emit_pattern(
+                            self.gcode,
+                            points,
+                            start_x,
+                            start_y,
+                            speed,
+                            accel,
+                            iterations,
+                            dwell,
+                        )
 
         def axis_grid(
             ax: str, a_start: float, a_end: float, goto: tuple[float, float]
@@ -3773,19 +3911,21 @@ class ServoCalibration:
 
                     return scale_fn
 
+                grid_x = pattern_grid if pattern else x_grid
+                grid_y = pattern_grid if pattern else y_grid
                 phases = [
                     (
                         "%s_x" % (term.lower(),),
                         "x",
                         mode_scale_fn(modes.index("x")),
-                        x_grid,
+                        grid_x,
                         None,
                     ),
                     (
                         "%s_y" % (term.lower(),),
                         "y",
                         mode_scale_fn(modes.index("y")),
-                        y_grid,
+                        grid_y,
                         None,
                     ),
                 ]
@@ -3793,7 +3933,11 @@ class ServoCalibration:
             start, end = servo_strokes.axis_bounds(gcmd, self.bounds, axis)
 
             def prep_axes() -> None:
-                self._prep(axis, dwell)
+                if pattern:
+                    self._prep("X", dwell)
+                    self._prep("Y", dwell)
+                else:
+                    self._prep(axis, dwell)
 
             def cart_grid() -> None:
                 for accel in accels:
@@ -3822,7 +3966,15 @@ class ServoCalibration:
                     for i, pair in enumerate(baseline["pairs"])
                 ]
             else:
-                phases = [(term.lower(), "", term_scale_fn, cart_grid, None)]
+                phases = [
+                    (
+                        term.lower(),
+                        "",
+                        term_scale_fn,
+                        pattern_grid if pattern else cart_grid,
+                        None,
+                    )
+                ]
 
         tag = gcmd.get("TAG", "refdyn")
         name = gcmd.get("NAME", "refined_%s" % (term.lower(),))
@@ -3865,6 +4017,8 @@ class ServoCalibration:
             "iterations": iterations,
             "dwell_ms": dwell,
         }
+        if pattern:
+            stroke_plan.update(pattern_plan)
         run = self._begin_run(
             gcmd,
             "dynamics_refine",
@@ -3973,6 +4127,10 @@ class ServoCalibration:
         try:
             out_path = self._dynamics_out_path(gcmd, run, name)
             prep_axes()
+            if pattern:
+                self._pattern_reach_report(
+                    gcmd, points, start_x, start_y, accels, speeds
+                )
             for label, suffix, scale_fn, run_grid, drives in phases:
                 adapter = DynamicsModelAdapter(
                     engine,
