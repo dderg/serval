@@ -1,14 +1,14 @@
-import { el, resetRenderState } from "./api.js";
-import { psdMaxFreqHz } from "./charts-core.js";
-import { bindConsole, setConsoleValue } from "./console.js";
-import { fetchMacroHelp, docsShellHtml, renderDocsList } from "./docs.js";
-import { renderDriveGroups } from "./drive.js";
-import { bindLiveEvents, startLivePolling, stopLivePolling } from "./live.js";
-import { renderSentLog } from "./moonraker.js";
-import { redrawCharts } from "./peaks.js";
-import { renderRuns } from "./runs.js";
-import { PSD_MAX_FREQ_KEY, MOTOR_VIEW_KEY, PSD_MAX_FREQ_CHOICES_HZ, PAGE_DEFS, DEFAULT_PAGE, state } from "./state.js";
-import { strainShellHtml, redrawStrain } from "./strain.js";
+import { el, resetRenderState } from "./api";
+import { psdMaxFreqHz } from "./charts-core";
+import { bindConsole, setConsoleValue } from "./console";
+import { fetchMacroHelp, docsShellHtml, renderDocsList } from "./docs";
+import { renderDriveGroups } from "./drive";
+import { bindLiveEvents, startLivePolling, stopLivePolling } from "./live";
+import { renderSentLog } from "./moonraker";
+import { redrawCharts } from "./peaks";
+import { renderRuns } from "./runs";
+import { PSD_MAX_FREQ_KEY, MOTOR_VIEW_KEY, PSD_MAX_FREQ_CHOICES_HZ, PAGE_DEFS, DEFAULT_PAGE, state } from "./state";
+import { strainShellHtml, redrawStrain } from "./strain";
 
 // --- page shell ---------------------------------------------------------------
 
@@ -102,9 +102,9 @@ function motorViewToggleHtml(aggLabel, withAvg = false) {
 }
 
 function syncMotorViewChips() {
-  document.querySelectorAll(".motor-view-chips").forEach((group) => {
+  document.querySelectorAll(".motor-view-chips").forEach((group: any) => {
     const effective = motorViewEffective(group.classList.contains("with-avg"));
-    group.querySelectorAll(".motor-view-btn").forEach((b) => {
+    group.querySelectorAll(".motor-view-btn").forEach((b: any) => {
       b.classList.toggle("active", b.dataset.view === effective);
     });
   });
@@ -292,7 +292,7 @@ function applyAccordionState() {
 /// Bound once at boot: one delegated listener survives every page rebuild.
 function bindAccordionToggle() {
   document.addEventListener("click", (e) => {
-    const head = e.target.closest(".analysis .section-head");
+    const head = (e.target as any).closest(".analysis .section-head");
     if (!head) return;
     const section = head.parentElement;
     if (!section || section.tagName !== "SECTION") return;
@@ -323,7 +323,7 @@ function renderPage() {
   if (def.strain) {
     root.innerHTML = strainShellHtml(def);
     bindPageEvents();
-    document.querySelectorAll("button.strain-field-btn").forEach((btn) => {
+    document.querySelectorAll("button.strain-field-btn").forEach((btn: any) => {
       btn.addEventListener("click", () => {
         state.strain.field = btn.dataset.field;
         redrawStrain();
@@ -416,7 +416,7 @@ function bindPageEvents() {
       redrawCharts();
     });
   }
-  document.querySelectorAll("button.motor-view-btn").forEach((btn) => {
+  document.querySelectorAll("button.motor-view-btn").forEach((btn: any) => {
     btn.addEventListener("click", () => {
       localStorage.setItem(MOTOR_VIEW_KEY, btn.dataset.view);
       syncMotorViewChips();
@@ -424,7 +424,7 @@ function bindPageEvents() {
     });
   });
   const def = currentPageDef();
-  document.querySelectorAll("button.template-btn").forEach((btn) => {
+  document.querySelectorAll("button.template-btn").forEach((btn: any) => {
     btn.addEventListener("click", () => {
       const t = def.templates[Number(btn.dataset.template)];
       if (t) {

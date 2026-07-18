@@ -1,8 +1,8 @@
-import { api, el, pageRuns, shortTime } from "./api.js";
-import { drawChart, hidpiCanvasContext, mixColor } from "./charts-core.js";
-import { loadRerunForm } from "./drive.js";
-import { currentPageDef, controlsSectionsHtml, sectionHeadHtml } from "./shell.js";
-import { PALETTE, state } from "./state.js";
+import { api, el, pageRuns, shortTime } from "./api";
+import { drawChart, hidpiCanvasContext, mixColor } from "./charts-core";
+import { loadRerunForm } from "./drive";
+import { currentPageDef, controlsSectionsHtml, sectionHeadHtml } from "./shell";
+import { PALETTE, state } from "./state";
 
 // --- strain map (strain page) -------------------------------------------------
 //
@@ -176,9 +176,9 @@ function strainColor(t) {
     : mixColor(STRAIN_NEUTRAL, STRAIN_POS, clamped);
 }
 
-function sweptEntry(line) {
+function sweptEntry(line): [string, number] {
   const entries = Object.entries(line.swept || {});
-  return entries.length ? entries[0] : ["?", 0];
+  return entries.length ? (entries[0] as [string, number]) : ["?", 0];
 }
 
 function strainLineLabel(line) {
@@ -491,7 +491,7 @@ function renderStrainCharts(data) {
   summary.textContent =
     `max |elastic| ${stats.maxElastic.toFixed(1)}% · ` +
     `mean |friction| ${stats.meanFriction.toFixed(1)}%`;
-  document.querySelectorAll("button.strain-field-btn").forEach((btn) => {
+  document.querySelectorAll("button.strain-field-btn").forEach((btn: any) => {
     btn.disabled = btn.dataset.field === state.strain.field;
   });
   el("strain-scale").innerHTML = strainScaleHtml(vmax);

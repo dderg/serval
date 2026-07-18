@@ -1,11 +1,11 @@
-import { html, render } from "../vendor/htm-preact-standalone-3.1.1.mjs";
-import { api, el } from "./api.js";
-import { setConsoleValue } from "./console.js";
-import { runGcode } from "./moonraker.js";
-import { refresh } from "./runs.js";
-import { currentPageDef } from "./shell.js";
-import { state } from "./state.js";
-import { notify, useStore } from "./store.js";
+import { html, render } from "htm/preact/standalone";
+import { api, el } from "./api";
+import { setConsoleValue } from "./console";
+import { runGcode } from "./moonraker";
+import { refresh } from "./runs";
+import { currentPageDef } from "./shell";
+import { state } from "./state";
+import { notify, useStore } from "./store";
 
 // --- drive tuning grid --------------------------------------------------------
 //
@@ -294,7 +294,7 @@ const NOTCH_QUICK_ACTIONS = [
   { label: "disable adaptive", value: 0 },
 ];
 
-function stageAdaptiveNotchMode(value) {
+function stageAdaptiveNotchMode(value: any) {
   const staged = { ...(state.drive.pending.adaptive_notch_mode || {}) };
   for (const m of motorNames(state.drive.data.motors)) {
     staged[m] = value;
@@ -330,7 +330,7 @@ const NOTCH_ROW_KINDS = ["freq", "width", "depth"];
 
 function notchMatrix(params) {
   const byKey = new Map();
-  const nums = new Set();
+  const nums = new Set<number>();
   const leftover = [];
   for (const p of params) {
     const m = /^notch_(\d+)_(freq|width|depth)$/.exec(p.name);

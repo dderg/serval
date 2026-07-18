@@ -1,8 +1,8 @@
-import { api, el, payloadUnchanged } from "./api.js";
-import { timeSeriesPlot } from "./uplot-chart.js";
-import { formatAge } from "./drive.js";
-import { runGcode } from "./moonraker.js";
-import { PALETTE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, state } from "./state.js";
+import { api, el, payloadUnchanged } from "./api";
+import { timeSeriesPlot } from "./uplot-chart";
+import { formatAge } from "./drive";
+import { runGcode } from "./moonraker";
+import { PALETTE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, state } from "./state";
 
 // --- live tap ------------------------------------------------------------------
 //
@@ -122,7 +122,7 @@ function trimLiveWindow() {
   while (drop < state.live.t.length && state.live.t[drop] < cutoff) drop++;
   if (drop > 0) {
     state.live.t.splice(0, drop);
-    for (const series of Object.values(state.live.perDrive)) {
+    for (const series of Object.values<any>(state.live.perDrive)) {
       series.ferr.splice(0, drop);
       series.torque.splice(0, drop);
     }

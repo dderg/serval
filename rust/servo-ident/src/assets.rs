@@ -1,27 +1,29 @@
-//! The dashboard SPA, embedded so `servo-cal serve` ships as one self
-//! contained binary — no build step, no CDN, no framework.
+//! The dashboard SPA sources, embedded from the `web/` bun package.
+//! TODO(next phase): serve the bundled `web/dist/` output instead of the
+//! raw TypeScript modules — until then `/js/*` serves the .ts sources
+//! under their old .js names so the asset table and its tests keep working.
 
-pub const INDEX_HTML: &str = include_str!("web/index.html");
-pub const APP_CSS: &str = include_str!("web/app.css");
+pub const INDEX_HTML: &str = include_str!("../web/index.html");
+pub const APP_CSS: &str = include_str!("../web/app.css");
 
 pub const JS_MODULES: &[(&str, &str)] = &[
-    ("api.js", include_str!("web/js/api.js")),
-    ("boot.js", include_str!("web/js/boot.js")),
-    ("charts-core.js", include_str!("web/js/charts-core.js")),
-    ("console.js", include_str!("web/js/console.js")),
-    ("docs.js", include_str!("web/js/docs.js")),
-    ("drive.js", include_str!("web/js/drive.js")),
-    ("dynamics.js", include_str!("web/js/dynamics.js")),
-    ("live.js", include_str!("web/js/live.js")),
-    ("metrics.js", include_str!("web/js/metrics.js")),
-    ("moonraker.js", include_str!("web/js/moonraker.js")),
-    ("peaks.js", include_str!("web/js/peaks.js")),
-    ("runs.js", include_str!("web/js/runs.js")),
-    ("shell.js", include_str!("web/js/shell.js")),
-    ("state.js", include_str!("web/js/state.js")),
-    ("store.js", include_str!("web/js/store.js")),
-    ("strain.js", include_str!("web/js/strain.js")),
-    ("uplot-chart.js", include_str!("web/js/uplot-chart.js")),
+    ("api.js", include_str!("../web/src/api.ts")),
+    ("boot.js", include_str!("../web/src/boot.ts")),
+    ("charts-core.js", include_str!("../web/src/charts-core.ts")),
+    ("console.js", include_str!("../web/src/console.ts")),
+    ("docs.js", include_str!("../web/src/docs.ts")),
+    ("drive.js", include_str!("../web/src/drive.ts")),
+    ("dynamics.js", include_str!("../web/src/dynamics.ts")),
+    ("live.js", include_str!("../web/src/live.ts")),
+    ("metrics.js", include_str!("../web/src/metrics.ts")),
+    ("moonraker.js", include_str!("../web/src/moonraker.ts")),
+    ("peaks.js", include_str!("../web/src/peaks.ts")),
+    ("runs.js", include_str!("../web/src/runs.ts")),
+    ("shell.js", include_str!("../web/src/shell.ts")),
+    ("state.js", include_str!("../web/src/state.ts")),
+    ("store.js", include_str!("../web/src/store.ts")),
+    ("strain.js", include_str!("../web/src/strain.ts")),
+    ("uplot-chart.js", include_str!("../web/src/uplot-chart.ts")),
 ];
 
 pub fn js_module(name: &str) -> Option<&'static str> {
@@ -31,26 +33,9 @@ pub fn js_module(name: &str) -> Option<&'static str> {
         .map(|(_, src)| *src)
 }
 
-/// Third-party libraries the SPA imports (uPlot via `uplot-chart.js`; the
-/// rest staged) — see `web/vendor/VERSIONS.md` for what each file is and
-/// where it came from. `(file name, MIME type, source)`.
-pub const VENDOR_ASSETS: &[(&str, &str, &str)] = &[
-    (
-        "htm-preact-standalone-3.1.1.mjs",
-        "application/javascript",
-        include_str!("web/vendor/htm-preact-standalone-3.1.1.mjs"),
-    ),
-    (
-        "uPlot-1.6.32.esm.js",
-        "application/javascript",
-        include_str!("web/vendor/uPlot-1.6.32.esm.js"),
-    ),
-    (
-        "uPlot-1.6.32.min.css",
-        "text/css",
-        include_str!("web/vendor/uPlot-1.6.32.min.css"),
-    ),
-];
+/// Third-party libraries now come from npm via the `web/` package; nothing
+/// is vendored anymore. Kept until the serve pipeline switches to `dist/`.
+pub const VENDOR_ASSETS: &[(&str, &str, &str)] = &[];
 
 pub fn vendor_asset(name: &str) -> Option<(&'static str, &'static str)> {
     VENDOR_ASSETS

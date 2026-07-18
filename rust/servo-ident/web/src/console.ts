@@ -1,7 +1,7 @@
-import { el } from "./api.js";
-import { consoleTabComplete, renderConsoleHelp } from "./docs.js";
-import { runGcode } from "./moonraker.js";
-import { CONSOLE_HISTORY_KEY, CONSOLE_HISTORY_MAX, state } from "./state.js";
+import { el } from "./api";
+import { consoleTabComplete, renderConsoleHelp } from "./docs";
+import { runGcode } from "./moonraker";
+import { CONSOLE_HISTORY_KEY, CONSOLE_HISTORY_MAX, state } from "./state";
 
 // --- console ------------------------------------------------------------------
 

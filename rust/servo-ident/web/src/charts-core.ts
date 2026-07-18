@@ -1,15 +1,15 @@
-import { el, payloadUnchanged, runDataSig } from "./api.js";
-import { driveRamp } from "./metrics.js";
-import { runColor } from "./runs.js";
-import { motorViewPerMotor } from "./shell.js";
-import { PALETTE, PSD_MAX_FREQ_KEY, PSD_MAX_FREQ_CHOICES_HZ, PSD_MAX_FREQ_DEFAULT_HZ, state } from "./state.js";
-import { timeSeriesPlot } from "./uplot-chart.js";
+import { el, payloadUnchanged, runDataSig } from "./api";
+import { driveRamp } from "./metrics";
+import { runColor } from "./runs";
+import { motorViewPerMotor } from "./shell";
+import { PALETTE, PSD_MAX_FREQ_KEY, PSD_MAX_FREQ_CHOICES_HZ, PSD_MAX_FREQ_DEFAULT_HZ, state } from "./state";
+import { timeSeriesPlot } from "./uplot-chart";
 
 // --- chart drawing ------------------------------------------------------------
 
 function pickSeries(runName, step) {
   if (motorViewPerMotor()) {
-    const drives = Object.entries(step.drives);
+    const drives: [string, any][] = Object.entries(step.drives);
     return drives.map(([drive, d], k) => ({
       y: d.ferr_counts.map((c) => c * (1000 / countsPerMm(runName, drive))),
       label: "ferr (µm)",
@@ -20,7 +20,7 @@ function pickSeries(runName, step) {
   if (step.combined) {
     return [{ y: step.combined.on_ferr_mm, label: "on-axis ferr (mm)", suffix: "", ramp: 0 }];
   }
-  const firstDrive = Object.values(step.drives)[0];
+  const firstDrive: any = Object.values(step.drives)[0];
   return [
     {
       y: firstDrive ? firstDrive.ferr_counts : [],

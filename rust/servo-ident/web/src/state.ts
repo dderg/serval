@@ -1,5 +1,5 @@
-import { api } from "./api.js";
-import { loadConsoleHistory } from "./console.js";
+import { api } from "./api";
+import { loadConsoleHistory } from "./console";
 
 const REFRESH_MS = 5000;
 const MOONRAKER_KEY = "servoCalMoonrakerUrl";
@@ -125,7 +125,7 @@ const LIVE_STATUS_POLL_MS = 1000;
 const LIVE_TAIL_POLL_MS = 400;
 const MOONRAKER_HEALTH_POLL_MS = 5000;
 
-const state = {
+const state: any = {
   page: DEFAULT_PAGE,
   runs: [],
   details: new Map(), // name -> {mtime_utc, has_results, manifest, results}

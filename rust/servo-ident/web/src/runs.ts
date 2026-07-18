@@ -1,10 +1,10 @@
-import { html, render, useEffect, useRef, useState } from "../vendor/htm-preact-standalone-3.1.1.mjs";
-import { api, ensureDetail, ambientDiff, el, pageRuns, shortTime } from "./api.js";
-import { loadRerunForm } from "./drive.js";
-import { redrawCharts } from "./peaks.js";
-import { currentPageDef } from "./shell.js";
-import { PALETTE, INITIAL_SELECTED_RUNS, state } from "./state.js";
-import { notify, useStore } from "./store.js";
+import { html, render, useEffect, useRef, useState } from "htm/preact/standalone";
+import { api, ensureDetail, ambientDiff, el, pageRuns, shortTime } from "./api";
+import { loadRerunForm } from "./drive";
+import { redrawCharts } from "./peaks";
+import { currentPageDef } from "./shell";
+import { PALETTE, INITIAL_SELECTED_RUNS, state } from "./state";
+import { notify, useStore } from "./store";
 
 // --- runs table ---------------------------------------------------------------
 //

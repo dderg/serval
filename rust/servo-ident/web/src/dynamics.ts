@@ -1,9 +1,9 @@
-import { el, payloadUnchanged, runDataSig, onRenderReset } from "./api.js";
-import { mixColor } from "./charts-core.js";
-import { psdBox, visibleStepNames } from "./metrics.js";
-import { timeSeriesPlot } from "./uplot-chart.js";
-import { runColor } from "./runs.js";
-import { RINGDOWN_PSD_PLOT_MAX_HZ, state } from "./state.js";
+import { el, payloadUnchanged, runDataSig, onRenderReset } from "./api";
+import { mixColor } from "./charts-core";
+import { psdBox, visibleStepNames } from "./metrics";
+import { timeSeriesPlot } from "./uplot-chart";
+import { runColor } from "./runs";
+import { RINGDOWN_PSD_PLOT_MAX_HZ, state } from "./state";
 
 // --- differential belt FRF (dynamics page) -----------------------------------
 
@@ -112,7 +112,7 @@ function renderFrfCharts(names, plots) {
       }
     }
     for (const spec of FRF_BOXES) {
-      const opts = { linear: true };
+      const opts: any = { linear: true };
       if (spec.key === "mag_db") opts.markers = frfModeMarkers(ref.modes);
       if (spec.key === "coherence") {
         opts.fixedY = { yMin: 0, yMax: 1.05 };
@@ -290,7 +290,7 @@ onRenderReset(() => ringdownCharts.clear());
 /// PSD box switches between the full-dwell average and the per-tail PSD of
 /// the brushed span (in ms; a drag under 2 ms clears it).
 function createRingdownChart(stepName, sourceName) {
-  const inst = {
+  const inst: any = {
     stepName,
     sourceName,
     runEntries: [],

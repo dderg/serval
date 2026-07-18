@@ -1,6 +1,6 @@
-import { state } from "./state.js";
+import { state } from "./state";
 
-async function api(path, opts) {
+async function api(path: string, opts?: RequestInit): Promise<any> {
   const resp = await fetch(path, opts);
   const text = await resp.text();
   if (!resp.ok) {
@@ -9,7 +9,7 @@ async function api(path, opts) {
   return text.length ? JSON.parse(text) : null;
 }
 
-function el(id) {
+function el(id: string): any {
   return document.getElementById(id);
 }
 
@@ -78,7 +78,7 @@ async function ensurePlotSeries(name) {
   return data;
 }
 
-function journalParams(manifest) {
+function journalParams(manifest): any {
   return (manifest && manifest.ambient && manifest.ambient.journal_params) || {};
 }
 
@@ -89,7 +89,7 @@ function ambientNotches(manifest) {
 function flatAmbient(manifest, includeNotches) {
   const flat = {};
   for (const [motor, addrs] of Object.entries(journalParams(manifest))) {
-    flat[motor] = { ...addrs };
+    flat[motor] = { ...(addrs as any) };
   }
   if (!includeNotches) return flat;
   for (const [motor, state] of Object.entries(ambientNotches(manifest) || {})) {

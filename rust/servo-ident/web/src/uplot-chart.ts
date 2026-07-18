@@ -1,4 +1,5 @@
-import uPlot from "../vendor/uPlot-1.6.32.esm.js";
+import uPlot from "uplot";
+import "uplot/dist/uPlot.min.css";
 
 const THEME = {
   bg: "#0d1117",
@@ -9,16 +10,6 @@ const THEME = {
   font: "10px monospace",
   readoutFont: "11px monospace",
 };
-
-const UPLOT_CSS_HREF = "/vendor/uPlot-1.6.32.min.css";
-
-function ensureUplotCss() {
-  if (document.querySelector(`link[href="${UPLOT_CSS_HREF}"]`)) return;
-  const link = document.createElement("link");
-  link.rel = "stylesheet";
-  link.href = UPLOT_CSS_HREF;
-  document.head.appendChild(link);
-}
 
 /// uPlot.join with the default NULL_RETAIN mode: explicit nulls in a trace
 /// stay nulls (rendered as gaps), while alignment artifacts from merging
@@ -76,7 +67,7 @@ function marksPlugin(marks) {
 /// series, but this chart wants the single nearest point by 2D pixel
 /// distance — the hovered point, for that run/metric — so the plugin snaps
 /// itself and draws the vertical line, dot, and value box.
-function nearestPointPlugin({ yLabel, xUnit, xTitle, traces, formatText }) {
+function nearestPointPlugin({ yLabel, xUnit, xTitle, traces, formatText }: any) {
   let hovered = null;
   const fmtVal = (v) => (Math.abs(v) >= 1000 ? v.toFixed(0) : v.toFixed(1));
   return {
@@ -167,7 +158,6 @@ function traceSeries(tr) {
 /// ({t, y, color, dash?, points?, label?}) and returns {u, setTraces} so
 /// live charts can stream new data into a persistent instance.
 function timeSeriesPlot(target, opts) {
-  ensureUplotCss();
   const { width, height, yLabel, marks = [], hover = false, brush = null } = opts;
   const xUnit = opts.xUnit == null ? "s" : opts.xUnit;
   let fixedY = opts.fixedY || null;
@@ -177,7 +167,7 @@ function timeSeriesPlot(target, opts) {
   if (marks.length) plugins.push(marksPlugin(marks));
   if (hover) plugins.push(nearestPointPlugin({ yLabel, xUnit, xTitle: opts.xTitle, traces }));
 
-  const uOpts = {
+  const uOpts: any = {
     width,
     height,
     pxAlign: false,
@@ -348,7 +338,6 @@ function freqMarkersPlugin(markers) {
 /// furniture — band shading with per-trace peak dots, a threshold line,
 /// staggered vertical mode markers, and the nearest-point hover readout.
 function psdPlot(target, opts) {
-  ensureUplotCss();
   const { width, height, traces, band, yTitle, linear, zeroFloor, fixedY, threshold, markers, formatValue } = opts;
   const plotY = linear ? (v) => v : (v) => Math.max(v, PSD_LOG_FLOOR);
 
@@ -364,7 +353,7 @@ function psdPlot(target, opts) {
     })
   );
 
-  const yScale = linear
+  const yScale: any = linear
     ? {
         range: (u, dataMin, dataMax) => {
           let lo = zeroFloor ? 0 : dataMin;

@@ -1,10 +1,10 @@
-import { el, payloadUnchanged, runDataSig } from "./api.js";
-import { mixColor, traceStyle, clipToPsdBand, psdMaxFreqHz, psdToAmplitude, countsPerMm } from "./charts-core.js";
-import { psdPlot, timeSeriesPlot } from "./uplot-chart.js";
-import { redrawCharts } from "./peaks.js";
-import { runColor } from "./runs.js";
-import { motorView, motorViewPerMotor } from "./shell.js";
-import { PALETTE, RESONANCE_BAND_HZ, state } from "./state.js";
+import { el, payloadUnchanged, runDataSig } from "./api";
+import { mixColor, traceStyle, clipToPsdBand, psdMaxFreqHz, psdToAmplitude, countsPerMm } from "./charts-core";
+import { psdPlot, timeSeriesPlot } from "./uplot-chart";
+import { redrawCharts } from "./peaks";
+import { runColor } from "./runs";
+import { motorView, motorViewPerMotor } from "./shell";
+import { PALETTE, RESONANCE_BAND_HZ, state } from "./state";
 
 // --- tracking metrics table -----------------------------------------------
 //
@@ -120,7 +120,7 @@ function metricsTableRows(names, steps) {
     if (!detail || !detail.results) continue;
     for (const step of detail.results.steps) {
       if (!steps.includes(step.name)) continue;
-      const driveRows = Object.entries(step.drives).map(([drive, dr]) =>
+      const driveRows = Object.entries<any>(step.drives).map(([drive, dr]) =>
         metricsDriveRow(name, step.name, drive, dr)
       );
       if (!driveRows.length) continue;
@@ -225,7 +225,7 @@ function sweepMetricsSeries(names) {
         (f) => f === "resonance_detected" || f === "torque_saturated"
       );
       const view = motorView();
-      const driveValues = Object.entries(step.drives).map(([drive, dr]) => {
+      const driveValues = Object.entries<any>(step.drives).map(([drive, dr]) => {
         const umPerCount = 1000 / countsPerMm(name, drive);
         const s = driveMoveSummary(dr.metrics);
         return {
@@ -239,7 +239,7 @@ function sweepMetricsSeries(names) {
       if (view === "per-motor") {
         for (const v of driveValues) stepPoints.set(v.drive, v);
       } else if (driveValues.length) {
-        const fold = (f) =>
+        const fold = (f: (v: any) => number) =>
           view === "avg"
             ? driveValues.reduce((a, v) => a + f(v), 0) / driveValues.length
             : Math.max(...driveValues.map(f));

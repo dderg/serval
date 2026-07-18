@@ -1,8 +1,8 @@
-import { el, payloadUnchanged, shortTime } from "./api.js";
-import { loadConsoleHistory, setConsoleValue } from "./console.js";
-import { moonrakerUrl, escapeHtml } from "./moonraker.js";
-import { consoleSectionHtml } from "./shell.js";
-import { HELP_CACHE_KEY, state } from "./state.js";
+import { el, payloadUnchanged, shortTime } from "./api";
+import { loadConsoleHistory, setConsoleValue } from "./console";
+import { moonrakerUrl, escapeHtml } from "./moonraker";
+import { consoleSectionHtml } from "./shell";
+import { HELP_CACHE_KEY, state } from "./state";
 
 // --- macro docs -----------------------------------------------------------------
 
@@ -242,7 +242,7 @@ function macroParamNames(cmdName) {
 /// already given on the line. A token with "=" is a value — nothing to
 /// complete there.
 function consoleCompletion(input) {
-  const none = { candidates: [] };
+  const none: any = { candidates: [] };
   const h = state.help;
   if (!h.commands) return none;
   const { line, start, caretInLine } = consoleCaretLine(input);

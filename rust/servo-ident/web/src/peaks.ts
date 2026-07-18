@@ -1,12 +1,12 @@
-import { el, payloadUnchanged, runDataSig, ensurePlotSeries, pageRuns } from "./api.js";
-import { drawTimeDomain, peakStep } from "./charts-core.js";
-import { motorNames, cellRaw, renderDriveGroups } from "./drive.js";
-import { renderFrfCharts, renderRingdownCharts } from "./dynamics.js";
-import { renderMetricsTable, renderSweepMetricsChart, renderPsdChart, visibleStepNames, renderStepChips } from "./metrics.js";
-import { selectedRunNames } from "./runs.js";
-import { currentPageDef } from "./shell.js";
-import { RESONANCE_BAND_HZ, PEAK_MIN_SEPARATION_HZ, PEAK_LIST_SIZE, state } from "./state.js";
-import { redrawStrain } from "./strain.js";
+import { el, payloadUnchanged, runDataSig, ensurePlotSeries, pageRuns } from "./api";
+import { drawTimeDomain, peakStep } from "./charts-core";
+import { motorNames, cellRaw, renderDriveGroups } from "./drive";
+import { renderFrfCharts, renderRingdownCharts } from "./dynamics";
+import { renderMetricsTable, renderSweepMetricsChart, renderPsdChart, visibleStepNames, renderStepChips } from "./metrics";
+import { selectedRunNames } from "./runs";
+import { currentPageDef } from "./shell";
+import { RESONANCE_BAND_HZ, PEAK_MIN_SEPARATION_HZ, PEAK_LIST_SIZE, state } from "./state";
+import { redrawStrain } from "./strain";
 
 // --- PSD peak list (gains page) ---------------------------------------------
 

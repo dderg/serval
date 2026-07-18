@@ -1,10 +1,10 @@
-import { el } from "./api.js";
-import { fetchMacroHelp, loadCachedMacroHelp } from "./docs.js";
-import { renderDriveBanner, loadDriveState } from "./drive.js";
-import { pollMoonrakerHealth, emergencyStop } from "./moonraker.js";
-import { refresh } from "./runs.js";
-import { pageFromHash, bindAccordionToggle, renderPage } from "./shell.js";
-import { REFRESH_MS, MOONRAKER_KEY, MOONRAKER_HEALTH_POLL_MS, state } from "./state.js";
+import { el } from "./api";
+import { fetchMacroHelp, loadCachedMacroHelp } from "./docs";
+import { renderDriveBanner, loadDriveState } from "./drive";
+import { pollMoonrakerHealth, emergencyStop } from "./moonraker";
+import { refresh } from "./runs";
+import { pageFromHash, bindAccordionToggle, renderPage } from "./shell";
+import { REFRESH_MS, MOONRAKER_KEY, MOONRAKER_HEALTH_POLL_MS, state } from "./state";
 
 // --- boot -------------------------------------------------------------------
 

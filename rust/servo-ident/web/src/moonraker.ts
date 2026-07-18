@@ -1,7 +1,7 @@
-import { el, shortTime } from "./api.js";
-import { setConsoleValue } from "./console.js";
-import { fetchMacroHelp } from "./docs.js";
-import { state } from "./state.js";
+import { el, shortTime } from "./api";
+import { setConsoleValue } from "./console";
+import { fetchMacroHelp } from "./docs";
+import { state } from "./state";
 
 // --- moonraker plumbing + session log ---------------------------------------
 
