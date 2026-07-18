@@ -10,7 +10,7 @@ use ts_rs::{Config, TS};
 
 use servo_ident::demo::DriveStatePayload;
 use servo_ident::results::{PlotSeries, Results};
-use servo_ident::serve::{DeleteResponse, LiveStatus, NoteResponse, RunSummary};
+use servo_ident::serve::{DeleteResponse, LiveStatus, NoteResponse, RunPath, RunSummary};
 
 fn export_all(out_dir: &Path) {
     let cfg = Config::new().with_out_dir(out_dir).with_large_int("number");
@@ -20,6 +20,7 @@ fn export_all(out_dir: &Path) {
     NoteResponse::export_all(&cfg).expect("export NoteResponse");
     DeleteResponse::export_all(&cfg).expect("export DeleteResponse");
     LiveStatus::export_all(&cfg).expect("export LiveStatus");
+    RunPath::export_all(&cfg).expect("export RunPath");
     DriveStatePayload::export_all(&cfg).expect("export DriveStatePayload");
 }
 

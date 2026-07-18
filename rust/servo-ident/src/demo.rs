@@ -78,13 +78,6 @@ fn plain_param(
     }
 }
 
-const ADAPTIVE_NOTCH_OPTIONS: &[(&str, &str)] = &[
-    ("0", "disabled"),
-    ("1", "1 adaptive notch"),
-    ("2", "2 adaptive notches"),
-    ("3", "reset notch params"),
-    ("4", "test resonance only"),
-];
 const SPEED_FEEDBACK_FILTER_OPTIONS: &[(&str, &str)] = &[
     ("0", "internal setting"),
     ("1", "low-pass filter"),
@@ -92,7 +85,6 @@ const SPEED_FEEDBACK_FILTER_OPTIONS: &[(&str, &str)] = &[
     ("3", "speed observer"),
     ("4", "no filter"),
 ];
-const GAIN_MODE_OPTIONS: &[(&str, &str)] = &[("0", "manual"), ("1", "stiffness table")];
 
 /// A6-EC manual 7.10: notch n occupies C01.40+3(n-1) .. +2. Slots 1-3
 /// carry the bench-noted values, 4-5 sit at the drive's parked defaults.
@@ -162,18 +154,6 @@ fn demo_panel_params() -> Vec<DemoPanelParam> {
             ));
         }
     }
-    params.push(DemoPanelParam {
-        options: Some(ADAPTIVE_NOTCH_OPTIONS),
-        ..plain_param(
-            "adaptive_notch_mode",
-            "C01.30",
-            "0x2001.0x31",
-            "",
-            "notch",
-            "C01.30 adaptive notch mode (manual 7.10)",
-            0,
-        )
-    });
     params.push(DemoPanelParam {
         options: Some(SPEED_FEEDBACK_FILTER_OPTIONS),
         ..plain_param(
@@ -251,38 +231,6 @@ fn demo_panel_params() -> Vec<DemoPanelParam> {
             150,
         ),
     ]);
-    params.push(DemoPanelParam {
-        options: Some(GAIN_MODE_OPTIONS),
-        ..plain_param(
-            "gain_mode",
-            "C00.04",
-            "0x2000.0x05",
-            "",
-            "load",
-            "C00.04 auto-tuning mode: 0=manual, 1=standard/stiffness table",
-            0,
-        )
-    });
-    params.extend([
-        plain_param(
-            "stiffness_level",
-            "C00.05",
-            "0x2000.0x06",
-            "",
-            "load",
-            "C00.05 stiffness level 1-31, used when gain_mode is the stiffness table",
-            12,
-        ),
-        plain_param(
-            "inertia_ratio",
-            "C00.06",
-            "0x2000.0x07",
-            "%",
-            "load",
-            "C00.06 load inertia ratio",
-            150,
-        ),
-    ]);
     params
 }
 
@@ -294,10 +242,11 @@ const DEMO_DISAGREEING_C_CODE: &str = "C01.40";
 const DEMO_DISAGREEING_MOTOR: &str = "motor_b";
 const DEMO_DISAGREEING_VALUE: i64 = 400;
 
-/// `gain_mode` (C00.04) and `inertia_ratio` (C00.06) are pinned in every
-/// demo motor's `[motor] params:` block — the panel's cue that editing them
-/// live won't survive a restart until the config is updated too.
-const DEMO_PINNED_C_CODES: [&str; 2] = ["C00.04", "C00.06"];
+/// C-codes pinned in every demo motor's `[motor] params:` block — the
+/// panel's cue that editing them live won't survive a restart until the
+/// config is updated too. Currently none, but the demo keeps exercising
+/// the mechanism end-to-end.
+const DEMO_PINNED_C_CODES: [&str; 0] = [];
 
 #[derive(Debug, Serialize, JsonSchema, TS)]
 pub struct DriveStateParam {
@@ -639,6 +588,7 @@ struct DemoManifest {
     stroke_plan: DemoStrokePlan,
     motors: &'static [DemoMotorSpec],
     belts: &'static str,
+    spatial: SpatialFrame,
     steps: Vec<DemoStep>,
     ambient: DemoAmbient,
 }
@@ -673,6 +623,7 @@ fn manifest_json(attempt: &DemoAttempt, created: SystemTime) -> DemoManifest {
         },
         motors: &DEMO_MOTOR_SPECS,
         belts: "motor_a:1+motor_a1:-1,motor_b:-1+motor_b1:-1",
+        spatial: demo_spatial_frame(),
         steps: vec![
             DemoStep {
                 name: "s550",

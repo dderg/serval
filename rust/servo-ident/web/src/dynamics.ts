@@ -9,7 +9,7 @@ import { RINGDOWN_PSD_PLOT_MAX_HZ, state } from "./state";
 import type { TimeTrace, PsdTrace } from "./uplot-chart";
 import type { DifferentialPlot, DifferentialResult, FrfMode, PlotSeries, PlotStep, RingdownMode, RingdownSource } from "./wire";
 
-// --- differential belt FRF (dynamics page) -----------------------------------
+// --- differential belt FRF -----------------------------------
 
 const FRF_BOXES: { key: "mag_db" | "phase_deg" | "coherence" | "torque_db"; title: string; yTitle: string }[] = [
   { key: "mag_db", title: "magnitude", yTitle: "|H| (dB)" },
@@ -144,7 +144,7 @@ function renderFrfCharts(names: string[], plots: PlotSeries[]) {
   meta.textContent = metaParts.join(" · ");
 }
 
-// --- ring-down after stop (dynamics page) -------------------------------------
+// --- ring-down after stop -------------------------------------
 
 function ringdownModeTableHtml(sources: RingdownSource[]): string {
   const rows = sources

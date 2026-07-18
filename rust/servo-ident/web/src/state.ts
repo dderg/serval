@@ -2,6 +2,7 @@ import type {
   DriveState,
   PlotSeries,
   RunDetail,
+  RunPath,
   RunSummary,
   StrainData,
   StrainField,
@@ -17,11 +18,10 @@ const RESONANCE_BAND_HZ: [number, number] = [20, 450];
 const RINGDOWN_PSD_PLOT_MAX_HZ = 500;
 const PSD_MAX_FREQ_KEY = "servoCalPsdMaxFreqHz";
 const MOTOR_VIEW_KEY = "servoCalMotorView";
+const LIVE_UNIT_KEY = "servoCalLiveUnit";
 const PSD_MAX_FREQ_CHOICES_HZ = [250, 500, 750, 1000, 1500];
 const PSD_MAX_FREQ_DEFAULT_HZ = 750;
 const INITIAL_SELECTED_RUNS = 1;
-const PEAK_MIN_SEPARATION_HZ = 15;
-const PEAK_LIST_SIZE = 3;
 
 /// Lives here (not console.ts) because `state` runs it at module init —
 /// pulling it from console.ts would make the state → console import cycle
@@ -39,10 +39,6 @@ function loadConsoleHistory() {
   return Array.isArray(parsed) ? parsed.filter((l): l is string => typeof l === "string") : [];
 }
 
-// Each page serves one calibration activity with only the tools that
-// activity needs (docs/plans/servo-calibration-automation.md, second demo
-// review): the interleaved tuning loop is navigation between pages, not
-// scrolling within one.
 interface PageTemplate {
   label: string;
   command: string;
@@ -57,7 +53,6 @@ interface PageDef {
   intro?: string;
   metrics?: boolean;
   sweepChart?: boolean;
-  peaks?: boolean;
   templates?: PageTemplate[];
   strain?: boolean;
   live?: boolean;
@@ -66,20 +61,23 @@ interface PageDef {
 }
 
 const PAGE_DEFS: Record<string, PageDef> = {
-  gains: {
-    // gains and notches are one tuning loop, not two — the resonances the
-    // PSD shows are what keep gains from going higher, so the gains and notch
-    // grids, the peak list, and the metrics-vs-gain chart share one page.
-    label: "gains",
-    groups: ["gains", "notch"],
-    experiments: ["gain_sweep", "refine_sweep", "gain_ladder", "tracking"],
-    charts: ["psd"],
+  tune: {
+    label: "tune",
+    groups: ["gains", "notch", "filters", "speed_observer", "disturbance_observer", "load"],
+    experiments: [
+      "gain_sweep",
+      "tracking",
+      "inertia_grid",
+      "differential",
+      "ringdown",
+    ],
+    charts: ["psd", "time", "path", "frf", "ringdown"],
     intro:
-      "find the highest speed gain without resonance or torque rail, then " +
-      "notch out whatever resonance the PSD shows so gains can go higher",
+      "one tuning loop: raise gains until resonance or torque rail, notch what " +
+      "the PSD shows, identify the load, and judge disturbance rejection in the " +
+      "time domain — fold the sections you don't need",
     metrics: true,
     sweepChart: true,
-    peaks: true,
     templates: [
       {
         label: "tracking…",
@@ -88,36 +86,12 @@ const PAGE_DEFS: Record<string, PageDef> = {
           "single stroke run with capture — the before/after check for any tuning " +
           "change; per-drive overshoot/settle land in the tracking metrics table",
       },
-    ],
-  },
-  observers: {
-    label: "observers",
-    groups: ["filters", "speed_observer", "disturbance_observer"],
-    experiments: null,
-    charts: ["time"],
-    intro: "disturbance rejection and filtering — judge in the time domain",
-  },
-  dynamics: {
-    label: "dynamics",
-    groups: ["load"],
-    experiments: ["tracking", "inertia_grid", "differential", "ringdown"],
-    charts: ["frf", "ringdown"],
-    metrics: true,
-    intro: "identify the load, then let feedforward carry it",
-    templates: [
       {
         label: "fit…",
         command: "SERVO_FIT_DYNAMICS",
         title:
           "strokes the axis, fits inertia/friction per drive, prints the recommended " +
           "inertia ratio and writes the feedforward profile",
-      },
-      {
-        label: "tracking…",
-        command: "SERVO_MEASURE_TRACKING AXIS=X SPEED=100 ACCEL=3000 ITERATIONS=3",
-        title:
-          "single stroke run with capture — the before/after check for any tuning " +
-          "change; per-drive overshoot/settle land in the tracking metrics table",
       },
       {
         label: "ringdown…",
@@ -159,7 +133,7 @@ const PAGE_DEFS: Record<string, PageDef> = {
     docs: true,
   },
 };
-const DEFAULT_PAGE = "gains";
+const DEFAULT_PAGE = "tune";
 const LIVE_STATUS_POLL_MS = 1000;
 const LIVE_TAIL_POLL_MS = 400;
 const MOONRAKER_HEALTH_POLL_MS = 5000;
@@ -180,14 +154,19 @@ interface ConsoleState {
   search: ConsoleSearch | null;
 }
 
+interface PathFullEntry {
+  mtime_utc: string | null;
+  data: RunPath | null;
+  error: string | null;
+}
+
 type PendingEdits = Record<string, Record<string, number>>;
 
 interface DrivePanelState {
   data: DriveState | null;
   fetchedAtMs: number | null;
   pending: PendingEdits;
-  notchPerMotor: boolean;
-  adaptiveOpen: boolean;
+  expandedParams: Set<string>;
 }
 
 interface LiveSeries {
@@ -208,6 +187,18 @@ interface LiveState {
   windowS: number;
   timers: ReturnType<typeof setInterval>[];
   polling: boolean;
+  frozen: boolean;
+  freezeStartT: number | null;
+  freezeEndT: number | null;
+  freezeTruncated: boolean;
+}
+
+function liveDrawCount(): number {
+  const t = state.live.t;
+  if (!state.live.frozen || state.live.freezeEndT === null) return t.length;
+  let n = t.length;
+  while (n > 0 && t[n - 1] > state.live.freezeEndT) n--;
+  return n;
 }
 
 interface StrainPageState {
@@ -239,6 +230,7 @@ interface AppState {
   runs: RunSummary[];
   details: Map<string, RunDetail>;
   plotSeries: Map<string, { mtime_utc: string | null; data: PlotSeries }>;
+  pathFull: Map<string, PathFullEntry>;
   selected: Set<string>;
   pinned: Set<string>;
   runColors: Map<string, string>;
@@ -258,6 +250,7 @@ const state: AppState = {
   runs: [],
   details: new Map(), // name -> {mtime_utc, has_results, manifest, results}
   plotSeries: new Map(), // name -> {mtime_utc, data}
+  pathFull: new Map(), // name -> {mtime_utc, data, error} from /api/runs/<name>/path
   selected: new Set(),
   pinned: new Set(), // runs that stay selected when a plain click switches runs
   runColors: new Map(), // run name -> palette color, kept while the run stays selected
@@ -275,8 +268,7 @@ const state: AppState = {
     data: null, // last /api/drive_state response (params, motors, config_pins, age_s)
     fetchedAtMs: null, // Date.now() when data was fetched, for a client-ticking age display
     pending: {}, // param name -> {motor: raw} — edits not yet applied
-    notchPerMotor: false, // compact one-value-per-notch grid unless toggled
-    adaptiveOpen: false, // the adaptive-recipes fold survives re-renders
+    expandedParams: new Set(), // param names whose MotorValues cell shows per-motor fields
   },
   live: {
     cursor: null, // last next_cycle from /api/live_tap; null = attach now
@@ -289,6 +281,10 @@ const state: AppState = {
     windowS: 10, // seconds kept and drawn, set by the slider
     timers: [], // interval ids cleared on page switch
     polling: false,
+    frozen: false,
+    freezeStartT: null, // window start at freeze time; trim never drops past it
+    freezeEndT: null, // last sample time at freeze; frozen draws stop here
+    freezeTruncated: false, // set when the frozen buffer hit its cap and lost samples
   },
   strain: {
     selected: null, // run name shown on the strain page; auto-picks the newest
@@ -307,5 +303,5 @@ const state: AppState = {
   },
 };
 
-export type { PageDef, PageTemplate, ConsoleSearch, SentEntry, LiveSeries, PendingEdits };
-export { REFRESH_MS, MOONRAKER_KEY, CONSOLE_HISTORY_KEY, HELP_CACHE_KEY, CONSOLE_HISTORY_MAX, PALETTE, RESONANCE_BAND_HZ, RINGDOWN_PSD_PLOT_MAX_HZ, PSD_MAX_FREQ_KEY, MOTOR_VIEW_KEY, PSD_MAX_FREQ_CHOICES_HZ, PSD_MAX_FREQ_DEFAULT_HZ, INITIAL_SELECTED_RUNS, PEAK_MIN_SEPARATION_HZ, PEAK_LIST_SIZE, PAGE_DEFS, DEFAULT_PAGE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, MOONRAKER_HEALTH_POLL_MS, RT_HEALTH_POLL_MS, loadConsoleHistory, state };
+export type { PageDef, PageTemplate, ConsoleSearch, SentEntry, LiveSeries, PendingEdits, PathFullEntry };
+export { REFRESH_MS, MOONRAKER_KEY, CONSOLE_HISTORY_KEY, HELP_CACHE_KEY, CONSOLE_HISTORY_MAX, PALETTE, RESONANCE_BAND_HZ, RINGDOWN_PSD_PLOT_MAX_HZ, PSD_MAX_FREQ_KEY, MOTOR_VIEW_KEY, LIVE_UNIT_KEY, PSD_MAX_FREQ_CHOICES_HZ, PSD_MAX_FREQ_DEFAULT_HZ, INITIAL_SELECTED_RUNS, PAGE_DEFS, DEFAULT_PAGE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, MOONRAKER_HEALTH_POLL_MS, RT_HEALTH_POLL_MS, loadConsoleHistory, liveDrawCount, state };

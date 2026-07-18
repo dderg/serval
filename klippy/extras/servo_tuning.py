@@ -113,9 +113,7 @@ PANEL_PARAMS: tuple[PanelParam, ...] = (
             unit="Hz" if kind == "freq" else "0.1%",
             group="notch",
             description=(
-                "C01.%02X %s of the %d%s notch (manual 7.10; notches 1-2 "
-                "are overwritten by the drive while adaptive_notch_mode "
-                "is 1 or 2)"
+                "C01.%02X %s of the %d%s notch (manual 7.10)"
                 % (
                     0x40 + (n - 1) * 3 + kind_offset,
                     {
@@ -130,24 +128,6 @@ PANEL_PARAMS: tuple[PanelParam, ...] = (
         )
         for n in range(1, 6)
         for kind_offset, kind in enumerate(("freq", "width", "depth"))
-    ),
-    PanelParam(
-        name="adaptive_notch_mode",
-        c_code="C01.30",
-        unit="",
-        group="notch",
-        description=(
-            "C01.30 adaptive notch mode (manual 7.10): 0=disabled, "
-            "1=1st notch adaptive, 2=1st+2nd notches adaptive, "
-            "3=reset notch parameters, 4=test resonance frequency only"
-        ),
-        options={
-            0: "disabled",
-            1: "1 adaptive notch",
-            2: "2 adaptive notches",
-            3: "reset notch params",
-            4: "test resonance only",
-        },
     ),
     PanelParam(
         name="speed_feedback_filter",
@@ -235,33 +215,6 @@ PANEL_PARAMS: tuple[PanelParam, ...] = (
             "C02.63 disturbance observer compensation torque percentage "
             "(manual 7.12)"
         ),
-    ),
-    PanelParam(
-        name="gain_mode",
-        c_code="C00.04",
-        unit="",
-        group="load",
-        description=(
-            "C00.04 auto-tuning mode: 0=manual, 1=standard/stiffness table"
-        ),
-        options={0: "manual", 1: "stiffness table"},
-    ),
-    PanelParam(
-        name="stiffness_level",
-        c_code="C00.05",
-        unit="",
-        group="load",
-        description=(
-            "C00.05 stiffness level 1-31, used when gain_mode is the "
-            "stiffness table (manual 7.2, default 12)"
-        ),
-    ),
-    PanelParam(
-        name="inertia_ratio",
-        c_code="C00.06",
-        unit="%",
-        group="load",
-        description="C00.06 load inertia ratio",
     ),
 )
 

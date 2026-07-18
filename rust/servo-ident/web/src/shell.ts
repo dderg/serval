@@ -1,8 +1,9 @@
 import { el, mustEl, resetRenderState } from "./api";
-import { psdMaxFreqHz } from "./charts-core";
+import { psdMaxFreqHz, ferrUnitToggleHtml, bindFerrUnitToggle } from "./charts-core";
 import { bindConsole, setConsoleValue } from "./console";
 import { fetchMacroHelp, docsShellHtml, renderDocsList } from "./docs";
 import { renderDriveGroups } from "./drive";
+import { bindLaunchpad, launchpadSectionHtml } from "./launchpad";
 import { bindLiveEvents, startLivePolling, stopLivePolling } from "./live";
 import { renderSentLog } from "./moonraker";
 import { redrawCharts } from "./peaks";
@@ -43,6 +44,7 @@ function controlsSectionsHtml(def: PageDef): string {
     );
   }
   parts.push(consoleSectionHtml(def));
+  parts.push(launchpadSectionHtml());
   return parts.join("");
 }
 
@@ -74,7 +76,7 @@ function consoleSectionHtml(def: Partial<PageDef>): string {
 /// the mean over drives instead of the worst.
 function motorView() {
   const v = localStorage.getItem(MOTOR_VIEW_KEY);
-  return v === "per-motor" || v === "avg" ? v : "agg";
+  return v === "per-motor" || v === "avg" || v === "cartesian" ? v : "agg";
 }
 
 function motorViewPerMotor() {
@@ -83,28 +85,36 @@ function motorViewPerMotor() {
 
 /// Sections whose aggregate is already an average (PSD, combined time
 /// domain) don't offer a separate "avg" chip; there, the stored "avg"
-/// view lights up the aggregate chip.
-function motorViewEffective(withAvg: boolean): string {
+/// view lights up the aggregate chip. Likewise "cartesian" exists only
+/// where a section offers it (the PSD chart) and reads as the aggregate
+/// everywhere else.
+function motorViewEffective(withAvg: boolean, withCartesian = false): string {
   const view = motorView();
-  return !withAvg && view === "avg" ? "agg" : view;
+  if (view === "avg" && !withAvg) return "agg";
+  if (view === "cartesian" && !withCartesian) return "agg";
+  return view;
 }
 
-function motorViewToggleHtml(aggLabel: string, withAvg = false): string {
-  const effective = motorViewEffective(withAvg);
+function motorViewToggleHtml(aggLabel: string, withAvg = false, withCartesian = false): string {
+  const effective = motorViewEffective(withAvg, withCartesian);
   const chip = (v: string, label: string) =>
     `<button class="chip motor-view-btn${effective === v ? " active" : ""}" data-view="${v}">${label}</button>`;
   return (
-    `<span class="chips motor-view-chips${withAvg ? " with-avg" : ""}">` +
+    `<span class="chips motor-view-chips${withAvg ? " with-avg" : ""}${withCartesian ? " with-cartesian" : ""}">` +
     chip("agg", aggLabel) +
     (withAvg ? chip("avg", "avg") : "") +
     chip("per-motor", "per-motor") +
+    (withCartesian ? chip("cartesian", "cartesian") : "") +
     `</span>`
   );
 }
 
 function syncMotorViewChips() {
   document.querySelectorAll<HTMLElement>(".motor-view-chips").forEach((group) => {
-    const effective = motorViewEffective(group.classList.contains("with-avg"));
+    const effective = motorViewEffective(
+      group.classList.contains("with-avg"),
+      group.classList.contains("with-cartesian")
+    );
     group.querySelectorAll<HTMLElement>(".motor-view-btn").forEach((b) => {
       b.classList.toggle("active", b.dataset.view === effective);
     });
@@ -157,6 +167,19 @@ function analysisSectionsHtml(def: PageDef): string {
         `</section>`
     );
   }
+  if (def.charts && def.charts.includes("path")) {
+    parts.push(
+      `<section class="path-section" id="path-section" hidden>` +
+        sectionHeadHtml(
+          "toolpath — commanded vs actual",
+          `<button id="path-fit">fit</button>` +
+            `<span class="note" id="path-note"></span>`
+        ) +
+        `<div class="chips" id="path-legend"></div>` +
+        `<div class="spatial-box"><canvas id="path-canvas"></canvas></div>` +
+        `</section>`
+    );
+  }
   if (def.charts && def.charts.includes("frf")) {
     parts.push(
       `<section class="frf-section" id="frf-section" hidden>` +
@@ -183,24 +206,26 @@ function analysisSectionsHtml(def: PageDef): string {
       `<section class="psd-section">` +
         sectionHeadHtml(
           "following-error PSD",
-          motorViewToggleHtml("avg") +
+          motorViewToggleHtml("avg", false, true) +
             `<label class="note">to <select id="psd-max-freq">` +
             PSD_MAX_FREQ_CHOICES_HZ.map(
               (f) =>
                 `<option value="${f}"${f === psdMaxFreqHz() ? " selected" : ""}>${f}</option>`
             ).join("") +
             `</select> Hz</label>` +
+            ferrUnitToggleHtml("psd") +
             `<div class="chips" id="psd-step-chips"></div>`
         ) +
         `<div class="charts" id="psd-charts"><p class="note">select runs above</p></div>` +
         `</section>`
     );
-  }
-  if (def.peaks) {
     parts.push(
-      `<section class="peaks-section">` +
-        sectionHeadHtml("detected peaks", `<span class="note" id="peaks-run"></span>`) +
-        `<div id="peak-list"><p class="note">select runs above</p></div>` +
+      `<section class="accel-psd-section" id="accel-psd-section" hidden>` +
+        sectionHeadHtml(
+          "accel PSD",
+          `<span class="note">per-axis accelerometer spectra; solid: x+y+z total</span>`
+        ) +
+        `<div class="charts" id="accel-psd-charts"></div>` +
         `</section>`
     );
   }
@@ -210,6 +235,7 @@ function analysisSectionsHtml(def: PageDef): string {
         sectionHeadHtml(
           "time domain — following error",
           motorViewToggleHtml("combined") +
+            ferrUnitToggleHtml("time") +
             `<div class="chips" id="time-motor-chips"></div>` +
             `<div class="chips" id="time-step-chips"></div>`
         ) +
@@ -227,7 +253,9 @@ function liveShellHtml() {
     `<section class="live-section">` +
     sectionHeadHtml(
       "live toolpath — commanded vs actual",
-      `<button id="live-spatial-fit">fit</button>` +
+      `<button id="live-freeze-btn" title="space toggles">freeze</button>` +
+        `<span class="note live-timing-bad" id="live-freeze-badge"></span>` +
+        `<button id="live-spatial-fit">fit</button>` +
         `<span class="note" id="live-spatial-note">waiting for the tap…</span>`
     ) +
     `<div class="spatial-box"><canvas id="live-spatial-canvas"></canvas></div>` +
@@ -235,8 +263,13 @@ function liveShellHtml() {
     `<section class="live-section">` +
     sectionHeadHtml(
       "live following error — per motor",
-      `<label class="live-window">window ` +
-        `<input type="range" id="live-window" min="2" max="30" step="1" value="${state.live.windowS}">` +
+      `<span class="chips live-unit-chips">` +
+        `<button class="chip" id="live-unit-um" data-unit="µm">µm</button>` +
+        `<button class="chip" id="live-unit-counts" data-unit="counts">counts</button>` +
+        `</span>` +
+        `<span class="note" id="live-unit-hint"></span>` +
+        `<label class="live-window">window ` +
+        `<input type="range" id="live-window" min="1" max="30" step="1" value="${state.live.windowS}">` +
         `<span id="live-window-value">${state.live.windowS} s</span></label>` +
         `<span class="note" id="live-status">connecting to the telemetry tap…</span>`
     ) +
@@ -262,6 +295,7 @@ function liveShellHtml() {
     `analyzable .scap in the captures root; stop finalizes it.</p>` +
     `</section>` +
     consoleSectionHtml({}) +
+    launchpadSectionHtml() +
     `</aside>` +
     `</div>`
   );
@@ -365,6 +399,7 @@ function renderPage() {
       `</tr></thead><tbody id="journal-body"></tbody></table></div>` +
       `</section>` +
       consoleSectionHtml({}) +
+      launchpadSectionHtml() +
       `</main></div>`;
   } else {
     root.innerHTML =
@@ -417,6 +452,7 @@ function makeColumnsResizable(table: HTMLTableElement) {
 
 function bindPageEvents() {
   bindConsole();
+  bindLaunchpad();
   document
     .querySelectorAll<HTMLTableElement>(".runs-wrap table, .journal-wrap table")
     .forEach(makeColumnsResizable);
@@ -427,6 +463,8 @@ function bindPageEvents() {
       redrawCharts();
     });
   }
+  bindFerrUnitToggle("psd", redrawCharts);
+  bindFerrUnitToggle("time", redrawCharts);
   document.querySelectorAll<HTMLButtonElement>("button.motor-view-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       localStorage.setItem(MOTOR_VIEW_KEY, btn.dataset.view ?? "agg");

@@ -1,1 +1,685 @@
-{"version":1,"fs_hz":4000.0,"settle_band_counts":50,"torque_limit_per_mille":1400,"steps":[{"name":"s550","drives":{"motor_a":{"metrics":{"samples":12706,"moves":[{"move":0,"start_ms":289.5,"end_ms":1119.25,"direction":1,"ferr_mean_moving":123.718,"ferr_peak":3200.0,"ferr_rms":552.813,"overshoot":1042.0,"settle_ms":155.75,"settle_window_truncated":false},{"move":1,"start_ms":2327.75,"end_ms":3157.5,"direction":-1,"ferr_mean_moving":-107.895,"ferr_peak":2435.0,"ferr_rms":456.864,"overshoot":917.0,"settle_ms":null,"settle_window_truncated":true}],"torque_saturation_pct":0.0,"torque":{"peak":235,"peak_pct_rated":23.5,"moving_samples":12260,"rail_detected":false,"rail_level":1400,"rail_samples":0,"rail_pct_moving":0.0,"rail_ms":0.0,"longest_burst_ms":0.0},"ferr_crosscheck_max":529,"ff_velocity_offset_max":983040,"ff_torque_offset_max":0},"psd_peaks":[[3.90625,8787.46],[42.9688,24.015],[226.562,11.4451],[66.4062,6.94195],[148.438,1.58146]],"resonance":{"detected":false,"ratio":0.0958998,"peak_hz":23.4375}},"motor_a1":{"metrics":{"samples":12706,"moves":[{"move":0,"start_ms":289.5,"end_ms":1119.25,"direction":-1,"ferr_mean_moving":-46.6279,"ferr_peak":3153.0,"ferr_rms":544.932,"overshoot":1070.0,"settle_ms":152.75,"settle_window_truncated":false},{"move":1,"start_ms":2327.75,"end_ms":3157.5,"direction":1,"ferr_mean_moving":86.2025,"ferr_peak":2380.0,"ferr_rms":469.176,"overshoot":1103.0,"settle_ms":null,"settle_window_truncated":true}],"torque_saturation_pct":0.0,"torque":{"peak":272,"peak_pct_rated":27.2,"moving_samples":12260,"rail_detected":false,"rail_level":1400,"rail_samples":0,"rail_pct_moving":0.0,"rail_ms":0.0,"longest_burst_ms":0.0},"ferr_crosscheck_max":519,"ff_velocity_offset_max":983040,"ff_torque_offset_max":0},"psd_peaks":[[3.90625,8703.1],[42.9688,21.2049],[50.7812,20.963],[226.562,9.61232],[66.4062,6.36163]],"resonance":{"detected":false,"ratio":0.0978319,"peak_hz":23.4375}},"motor_b":{"metrics":{"samples":12706,"moves":[{"move":0,"start_ms":289.5,"end_ms":1119.25,"direction":1,"ferr_mean_moving":59.3284,"ferr_peak":3140.0,"ferr_rms":543.298,"overshoot":1003.0,"settle_ms":136.0,"settle_window_truncated":false},{"move":1,"start_ms":2327.75,"end_ms":3157.5,"direction":-1,"ferr_mean_moving":-125.246,"ferr_peak":2328.0,"ferr_rms":459.694,"overshoot":1002.0,"settle_ms":null,"settle_window_truncated":true}],"torque_saturation_pct":0.0,"torque":{"peak":246,"peak_pct_rated":24.6,"moving_samples":12260,"rail_detected":false,"rail_level":1400,"rail_samples":0,"rail_pct_moving":0.0,"rail_ms":0.0,"longest_burst_ms":0.0},"ferr_crosscheck_max":524,"ff_velocity_offset_max":983040,"ff_torque_offset_max":0},"psd_peaks":[[3.90625,8707.74],[46.875,24.0872],[226.562,9.93483],[148.438,3.94099],[74.2188,3.45141]],"resonance":{"detected":false,"ratio":0.0885988,"peak_hz":23.4375}},"motor_b1":{"metrics":{"samples":12706,"moves":[{"move":0,"start_ms":289.5,"end_ms":1119.25,"direction":1,"ferr_mean_moving":117.724,"ferr_peak":3139.0,"ferr_rms":544.904,"overshoot":1023.0,"settle_ms":157.25,"settle_window_truncated":false},{"move":1,"start_ms":2327.75,"end_ms":3157.5,"direction":-1,"ferr_mean_moving":-89.6668,"ferr_peak":2344.0,"ferr_rms":446.523,"overshoot":938.0,"settle_ms":null,"settle_window_truncated":true}],"torque_saturation_pct":0.0,"torque":{"peak":256,"peak_pct_rated":25.6,"moving_samples":12260,"rail_detected":false,"rail_level":1400,"rail_samples":0,"rail_pct_moving":0.0,"rail_ms":0.0,"longest_burst_ms":0.0},"ferr_crosscheck_max":518,"ff_velocity_offset_max":983040,"ff_torque_offset_max":0},"psd_peaks":[[3.90625,8894.53],[46.875,24.6518],[226.562,9.46974],[74.2188,3.52688],[148.438,1.10075]],"resonance":{"detected":false,"ratio":0.0860818,"peak_hz":23.4375}}},"combined":{"on_ferr_peak_mm":0.0295258,"on_ferr_rms_mm":0.00641986,"cross_ferr_peak_mm":0.963287},"accel":{"present":true,"psd_peaks":[[965.994,238259.0],[956.398,202727.0],[3.19866,164686.0],[451.011,130912.0],[985.186,121456.0]]},"differential":null,"ringdown":null,"flags":["settle_window_truncated"]},{"name":"s700","drives":{"motor_a":{"metrics":{"samples":12778,"moves":[{"move":0,"start_ms":299.0,"end_ms":1129.0,"direction":1,"ferr_mean_moving":57.7994,"ferr_peak":1738.0,"ferr_rms":299.453,"overshoot":482.0,"settle_ms":107.0,"settle_window_truncated":false},{"move":1,"start_ms":2337.25,"end_ms":3167.25,"direction":-1,"ferr_mean_moving":-56.1145,"ferr_peak":1410.0,"ferr_rms":263.329,"overshoot":415.0,"settle_ms":null,"settle_window_truncated":true}],"torque_saturation_pct":0.0,"torque":{"peak":206,"peak_pct_rated":20.6,"moving_samples":12286,"rail_detected":false,"rail_level":1400,"rail_samples":0,"rail_pct_moving":0.0,"rail_ms":0.0,"longest_burst_ms":0.0},"ferr_crosscheck_max":525,"ff_velocity_offset_max":983040,"ff_torque_offset_max":0},"psd_peaks":[[7.8125,2479.84],[50.7812,23.2488],[226.562,9.24001],[66.4062,5.94124],[300.781,2.38391]],"resonance":{"detected":false,"ratio":0.191934,"peak_hz":23.4375}},"motor_a1":{"metrics":{"samples":12778,"moves":[{"move":0,"start_ms":299.0,"end_ms":1129.0,"direction":-1,"ferr_mean_moving":-12.7223,"ferr_peak":1685.0,"ferr_rms":296.365,"overshoot":483.0,"settle_ms":105.25,"settle_window_truncated":false},{"move":1,"start_ms":2337.25,"end_ms":3167.25,"direction":1,"ferr_mean_moving":35.3512,"ferr_peak":1368.0,"ferr_rms":277.135,"overshoot":562.0,"settle_ms":null,"settle_window_truncated":true}],"torque_saturation_pct":0.0,"torque":{"peak":255,"peak_pct_rated":25.5,"moving_samples":12286,"rail_detected":false,"rail_level":1400,"rail_samples":0,"rail_pct_moving":0.0,"rail_ms":0.0,"longest_burst_ms":0.0},"ferr_crosscheck_max":520,"ff_velocity_offset_max":983040,"ff_torque_offset_max":0},"psd_peaks":[[7.8125,2626.11],[50.7812,23.0782],[226.562,12.401],[300.781,1.72981],[152.344,1.55268]],"resonance":{"detected":false,"ratio":0.184767,"peak_hz":23.4375}},"motor_b":{"metrics":{"samples":12778,"moves":[{"move":0,"start_ms":299.0,"end_ms":1129.0,"direction":1,"ferr_mean_moving":23.219,"ferr_peak":1689.0,"ferr_rms":291.221,"overshoot":444.0,"settle_ms":92.25,"settle_window_truncated":false},{"move":1,"start_ms":2337.25,"end_ms":3167.25,"direction":-1,"ferr_mean_moving":-67.5051,"ferr_peak":1369.0,"ferr_rms":269.737,"overshoot":506.0,"settle_ms":null,"settle_window_truncated":true}],"torque_saturation_pct":0.0,"torque":{"peak":241,"peak_pct_rated":24.1,"moving_samples":12286,"rail_detected":false,"rail_level":1400,"rail_samples":0,"rail_pct_moving":0.0,"rail_ms":0.0,"longest_burst_ms":0.0},"ferr_crosscheck_max":524,"ff_velocity_offset_max":983040,"ff_torque_offset_max":0},"psd_peaks":[[7.8125,2538.35],[46.875,25.9401],[226.562,8.59862],[70.3125,3.44824],[300.781,2.43084]],"resonance":{"detected":false,"ratio":0.169254,"peak_hz":23.4375}},"motor_b1":{"metrics":{"samples":12778,"moves":[{"move":0,"start_ms":299.0,"end_ms":1129.0,"direction":1,"ferr_mean_moving":53.684,"ferr_peak":1687.0,"ferr_rms":291.459,"overshoot":472.0,"settle_ms":119.5,"settle_window_truncated":false},{"move":1,"start_ms":2337.25,"end_ms":3167.25,"direction":-1,"ferr_mean_moving":-35.1154,"ferr_peak":1373.0,"ferr_rms":254.54,"overshoot":450.0,"settle_ms":null,"settle_window_truncated":true}],"torque_saturation_pct":0.0,"torque":{"peak":246,"peak_pct_rated":24.6,"moving_samples":12286,"rail_detected":false,"rail_level":1400,"rail_samples":0,"rail_pct_moving":0.0,"rail_ms":0.0,"longest_burst_ms":0.0},"ferr_crosscheck_max":521,"ff_velocity_offset_max":983040,"ff_torque_offset_max":0},"psd_peaks":[[7.8125,2491.85],[46.875,26.4674],[226.562,12.8643],[66.4062,3.43091],[300.781,2.02087]],"resonance":{"detected":false,"ratio":0.16656,"peak_hz":23.4375}}},"combined":{"on_ferr_peak_mm":0.0215149,"on_ferr_rms_mm":0.00447571,"cross_ferr_peak_mm":0.517807},"accel":{"present":true,"psd_peaks":[[3.19956,300060.0],[956.668,179647.0],[966.267,162624.0],[454.337,160694.0],[979.065,149383.0]]},"differential":null,"ringdown":null,"flags":["settle_window_truncated"]}],"verdict":{"recommended_step":"s700","reason":"highest gain step without resonance or torque rail","flags":[],"apply":[{"servo":"motor_a","addr":"0x2001.0x01","type":"u16","value":1120}]}}
+{
+  "version": 1,
+  "fs_hz": 4000.0,
+  "settle_band_counts": 50,
+  "torque_limit_per_mille": 1400,
+  "steps": [
+    {
+      "name": "s550",
+      "drives": {
+        "motor_a": {
+          "metrics": {
+            "samples": 12706,
+            "moves": [
+              {
+                "move": 0,
+                "start_ms": 289.5,
+                "end_ms": 1119.25,
+                "direction": 1,
+                "ferr_mean_moving": 123.71798734558602,
+                "ferr_peak": 3200.0,
+                "ferr_rms": 552.8126605332633,
+                "overshoot": 1042.0,
+                "settle_ms": 155.75,
+                "settle_window_truncated": false
+              },
+              {
+                "move": 1,
+                "start_ms": 2327.75,
+                "end_ms": 3157.5,
+                "direction": -1,
+                "ferr_mean_moving": -107.89454655016571,
+                "ferr_peak": 2435.0,
+                "ferr_rms": 456.8644726740662,
+                "overshoot": 917.0,
+                "settle_ms": null,
+                "settle_window_truncated": true
+              }
+            ],
+            "torque_saturation_pct": 0.0,
+            "torque": {
+              "peak": 235,
+              "peak_pct_rated": 23.5,
+              "moving_samples": 12260,
+              "rail_detected": false,
+              "rail_level": 1400,
+              "rail_samples": 0,
+              "rail_pct_moving": 0.0,
+              "rail_ms": 0.0,
+              "longest_burst_ms": 0.0
+            },
+            "ferr_crosscheck_max": 529,
+            "ff_velocity_offset_max": 983040,
+            "ff_torque_offset_max": 0
+          },
+          "psd_peaks": [
+            [
+              3.90625,
+              8787.457002016827
+            ],
+            [
+              42.96875,
+              24.01499384650183
+            ],
+            [
+              226.5625,
+              11.445081534769173
+            ],
+            [
+              66.40625,
+              6.941951551089766
+            ],
+            [
+              148.4375,
+              1.581457814463037
+            ]
+          ],
+          "resonance": {
+            "detected": false,
+            "ratio": 0.09589976486125253,
+            "peak_hz": 23.4375
+          }
+        },
+        "motor_a1": {
+          "metrics": {
+            "samples": 12706,
+            "moves": [
+              {
+                "move": 0,
+                "start_ms": 289.5,
+                "end_ms": 1119.25,
+                "direction": -1,
+                "ferr_mean_moving": -46.62789996987044,
+                "ferr_peak": 3153.0,
+                "ferr_rms": 544.9316578295251,
+                "overshoot": 1070.0,
+                "settle_ms": 152.75,
+                "settle_window_truncated": false
+              },
+              {
+                "move": 1,
+                "start_ms": 2327.75,
+                "end_ms": 3157.5,
+                "direction": 1,
+                "ferr_mean_moving": 86.20247062368183,
+                "ferr_peak": 2380.0,
+                "ferr_rms": 469.17584307285284,
+                "overshoot": 1103.0,
+                "settle_ms": null,
+                "settle_window_truncated": true
+              }
+            ],
+            "torque_saturation_pct": 0.0,
+            "torque": {
+              "peak": 272,
+              "peak_pct_rated": 27.2,
+              "moving_samples": 12260,
+              "rail_detected": false,
+              "rail_level": 1400,
+              "rail_samples": 0,
+              "rail_pct_moving": 0.0,
+              "rail_ms": 0.0,
+              "longest_burst_ms": 0.0
+            },
+            "ferr_crosscheck_max": 519,
+            "ff_velocity_offset_max": 983040,
+            "ff_torque_offset_max": 0
+          },
+          "psd_peaks": [
+            [
+              3.90625,
+              8703.096636576234
+            ],
+            [
+              42.96875,
+              21.204857331594262
+            ],
+            [
+              50.78125,
+              20.96301527208956
+            ],
+            [
+              226.5625,
+              9.612317474587229
+            ],
+            [
+              66.40625,
+              6.361626192963175
+            ]
+          ],
+          "resonance": {
+            "detected": false,
+            "ratio": 0.0978319402531429,
+            "peak_hz": 23.4375
+          }
+        },
+        "motor_b": {
+          "metrics": {
+            "samples": 12706,
+            "moves": [
+              {
+                "move": 0,
+                "start_ms": 289.5,
+                "end_ms": 1119.25,
+                "direction": 1,
+                "ferr_mean_moving": 59.32841217234107,
+                "ferr_peak": 3140.0,
+                "ferr_rms": 543.2979142317724,
+                "overshoot": 1003.0,
+                "settle_ms": 136.0,
+                "settle_window_truncated": false
+              },
+              {
+                "move": 1,
+                "start_ms": 2327.75,
+                "end_ms": 3157.5,
+                "direction": -1,
+                "ferr_mean_moving": -125.24645977704128,
+                "ferr_peak": 2328.0,
+                "ferr_rms": 459.69419399011116,
+                "overshoot": 1002.0,
+                "settle_ms": null,
+                "settle_window_truncated": true
+              }
+            ],
+            "torque_saturation_pct": 0.0,
+            "torque": {
+              "peak": 246,
+              "peak_pct_rated": 24.6,
+              "moving_samples": 12260,
+              "rail_detected": false,
+              "rail_level": 1400,
+              "rail_samples": 0,
+              "rail_pct_moving": 0.0,
+              "rail_ms": 0.0,
+              "longest_burst_ms": 0.0
+            },
+            "ferr_crosscheck_max": 524,
+            "ff_velocity_offset_max": 983040,
+            "ff_torque_offset_max": 0
+          },
+          "psd_peaks": [
+            [
+              3.90625,
+              8707.739070289965
+            ],
+            [
+              46.875,
+              24.087175146921542
+            ],
+            [
+              226.5625,
+              9.934832435328689
+            ],
+            [
+              148.4375,
+              3.9409899047153734
+            ],
+            [
+              74.21875,
+              3.45140506884464
+            ]
+          ],
+          "resonance": {
+            "detected": false,
+            "ratio": 0.08859883709532165,
+            "peak_hz": 23.4375
+          }
+        },
+        "motor_b1": {
+          "metrics": {
+            "samples": 12706,
+            "moves": [
+              {
+                "move": 0,
+                "start_ms": 289.5,
+                "end_ms": 1119.25,
+                "direction": 1,
+                "ferr_mean_moving": 117.72401325700513,
+                "ferr_peak": 3139.0,
+                "ferr_rms": 544.9036963053322,
+                "overshoot": 1023.0,
+                "settle_ms": 157.25,
+                "settle_window_truncated": false
+              },
+              {
+                "move": 1,
+                "start_ms": 2327.75,
+                "end_ms": 3157.5,
+                "direction": -1,
+                "ferr_mean_moving": -89.66676709852365,
+                "ferr_peak": 2344.0,
+                "ferr_rms": 446.52296686854737,
+                "overshoot": 938.0,
+                "settle_ms": null,
+                "settle_window_truncated": true
+              }
+            ],
+            "torque_saturation_pct": 0.0,
+            "torque": {
+              "peak": 256,
+              "peak_pct_rated": 25.6,
+              "moving_samples": 12260,
+              "rail_detected": false,
+              "rail_level": 1400,
+              "rail_samples": 0,
+              "rail_pct_moving": 0.0,
+              "rail_ms": 0.0,
+              "longest_burst_ms": 0.0
+            },
+            "ferr_crosscheck_max": 518,
+            "ff_velocity_offset_max": 983040,
+            "ff_torque_offset_max": 0
+          },
+          "psd_peaks": [
+            [
+              3.90625,
+              8894.528685641038
+            ],
+            [
+              46.875,
+              24.651817486030744
+            ],
+            [
+              226.5625,
+              9.469736260348752
+            ],
+            [
+              74.21875,
+              3.526878540895687
+            ],
+            [
+              148.4375,
+              1.1007499077294394
+            ]
+          ],
+          "resonance": {
+            "detected": false,
+            "ratio": 0.08608182764156853,
+            "peak_hz": 23.4375
+          }
+        }
+      },
+      "combined": {
+        "on_ferr_peak_mm": 0.0295257568359375,
+        "on_ferr_rms_mm": 0.006419862987476077,
+        "cross_ferr_peak_mm": 0.963287353515625
+      },
+      "accel": {
+        "present": true,
+        "psd_peaks": [
+          [
+            223.90594602975256,
+            3329898.609546262
+          ],
+          [
+            143.93953673341235,
+            657177.6071220132
+          ],
+          [
+            965.9942242997896,
+            595875.4749323975
+          ],
+          [
+            956.3982551842288,
+            452966.1387446978
+          ],
+          [
+            300.67369895423917,
+            439835.9042935634
+          ]
+        ]
+      },
+      "differential": null,
+      "ringdown": null,
+      "flags": [
+        "settle_window_truncated"
+      ]
+    },
+    {
+      "name": "s700",
+      "drives": {
+        "motor_a": {
+          "metrics": {
+            "samples": 12778,
+            "moves": [
+              {
+                "move": 0,
+                "start_ms": 299.0,
+                "end_ms": 1129.0,
+                "direction": 1,
+                "ferr_mean_moving": 57.799397590361444,
+                "ferr_peak": 1738.0,
+                "ferr_rms": 299.45272653998416,
+                "overshoot": 482.0,
+                "settle_ms": 107.0,
+                "settle_window_truncated": false
+              },
+              {
+                "move": 1,
+                "start_ms": 2337.25,
+                "end_ms": 3167.25,
+                "direction": -1,
+                "ferr_mean_moving": -56.1144578313253,
+                "ferr_peak": 1410.0,
+                "ferr_rms": 263.3291293948852,
+                "overshoot": 415.0,
+                "settle_ms": null,
+                "settle_window_truncated": true
+              }
+            ],
+            "torque_saturation_pct": 0.0,
+            "torque": {
+              "peak": 206,
+              "peak_pct_rated": 20.6,
+              "moving_samples": 12286,
+              "rail_detected": false,
+              "rail_level": 1400,
+              "rail_samples": 0,
+              "rail_pct_moving": 0.0,
+              "rail_ms": 0.0,
+              "longest_burst_ms": 0.0
+            },
+            "ferr_crosscheck_max": 525,
+            "ff_velocity_offset_max": 983040,
+            "ff_torque_offset_max": 0
+          },
+          "psd_peaks": [
+            [
+              7.8125,
+              2479.836247130727
+            ],
+            [
+              50.78125,
+              23.248829147532714
+            ],
+            [
+              226.5625,
+              9.240006628187162
+            ],
+            [
+              66.40625,
+              5.941238858424902
+            ],
+            [
+              300.78125,
+              2.3839054727057793
+            ]
+          ],
+          "resonance": {
+            "detected": false,
+            "ratio": 0.19193442990193513,
+            "peak_hz": 23.4375
+          }
+        },
+        "motor_a1": {
+          "metrics": {
+            "samples": 12778,
+            "moves": [
+              {
+                "move": 0,
+                "start_ms": 299.0,
+                "end_ms": 1129.0,
+                "direction": -1,
+                "ferr_mean_moving": -12.722289156626506,
+                "ferr_peak": 1685.0,
+                "ferr_rms": 296.36506012676347,
+                "overshoot": 483.0,
+                "settle_ms": 105.25,
+                "settle_window_truncated": false
+              },
+              {
+                "move": 1,
+                "start_ms": 2337.25,
+                "end_ms": 3167.25,
+                "direction": 1,
+                "ferr_mean_moving": 35.35120481927711,
+                "ferr_peak": 1368.0,
+                "ferr_rms": 277.1345104659864,
+                "overshoot": 562.0,
+                "settle_ms": null,
+                "settle_window_truncated": true
+              }
+            ],
+            "torque_saturation_pct": 0.0,
+            "torque": {
+              "peak": 255,
+              "peak_pct_rated": 25.5,
+              "moving_samples": 12286,
+              "rail_detected": false,
+              "rail_level": 1400,
+              "rail_samples": 0,
+              "rail_pct_moving": 0.0,
+              "rail_ms": 0.0,
+              "longest_burst_ms": 0.0
+            },
+            "ferr_crosscheck_max": 520,
+            "ff_velocity_offset_max": 983040,
+            "ff_torque_offset_max": 0
+          },
+          "psd_peaks": [
+            [
+              7.8125,
+              2626.113559518177
+            ],
+            [
+              50.78125,
+              23.078207396712973
+            ],
+            [
+              226.5625,
+              12.400962582395424
+            ],
+            [
+              300.78125,
+              1.729808140696071
+            ],
+            [
+              152.34375,
+              1.552681989308875
+            ]
+          ],
+          "resonance": {
+            "detected": false,
+            "ratio": 0.18476742266237792,
+            "peak_hz": 23.4375
+          }
+        },
+        "motor_b": {
+          "metrics": {
+            "samples": 12778,
+            "moves": [
+              {
+                "move": 0,
+                "start_ms": 299.0,
+                "end_ms": 1129.0,
+                "direction": 1,
+                "ferr_mean_moving": 23.218975903614457,
+                "ferr_peak": 1689.0,
+                "ferr_rms": 291.2208539847526,
+                "overshoot": 444.0,
+                "settle_ms": 92.25,
+                "settle_window_truncated": false
+              },
+              {
+                "move": 1,
+                "start_ms": 2337.25,
+                "end_ms": 3167.25,
+                "direction": -1,
+                "ferr_mean_moving": -67.5051204819277,
+                "ferr_peak": 1369.0,
+                "ferr_rms": 269.737091574392,
+                "overshoot": 506.0,
+                "settle_ms": null,
+                "settle_window_truncated": true
+              }
+            ],
+            "torque_saturation_pct": 0.0,
+            "torque": {
+              "peak": 241,
+              "peak_pct_rated": 24.1,
+              "moving_samples": 12286,
+              "rail_detected": false,
+              "rail_level": 1400,
+              "rail_samples": 0,
+              "rail_pct_moving": 0.0,
+              "rail_ms": 0.0,
+              "longest_burst_ms": 0.0
+            },
+            "ferr_crosscheck_max": 524,
+            "ff_velocity_offset_max": 983040,
+            "ff_torque_offset_max": 0
+          },
+          "psd_peaks": [
+            [
+              7.8125,
+              2538.3541085941415
+            ],
+            [
+              46.875,
+              25.94012253557992
+            ],
+            [
+              226.5625,
+              8.598617120293836
+            ],
+            [
+              70.3125,
+              3.448241344486934
+            ],
+            [
+              300.78125,
+              2.430841715345569
+            ]
+          ],
+          "resonance": {
+            "detected": false,
+            "ratio": 0.16925357158782273,
+            "peak_hz": 23.4375
+          }
+        },
+        "motor_b1": {
+          "metrics": {
+            "samples": 12778,
+            "moves": [
+              {
+                "move": 0,
+                "start_ms": 299.0,
+                "end_ms": 1129.0,
+                "direction": 1,
+                "ferr_mean_moving": 53.684036144578315,
+                "ferr_peak": 1687.0,
+                "ferr_rms": 291.45919048065684,
+                "overshoot": 472.0,
+                "settle_ms": 119.5,
+                "settle_window_truncated": false
+              },
+              {
+                "move": 1,
+                "start_ms": 2337.25,
+                "end_ms": 3167.25,
+                "direction": -1,
+                "ferr_mean_moving": -35.11536144578313,
+                "ferr_peak": 1373.0,
+                "ferr_rms": 254.53967738006304,
+                "overshoot": 450.0,
+                "settle_ms": null,
+                "settle_window_truncated": true
+              }
+            ],
+            "torque_saturation_pct": 0.0,
+            "torque": {
+              "peak": 246,
+              "peak_pct_rated": 24.6,
+              "moving_samples": 12286,
+              "rail_detected": false,
+              "rail_level": 1400,
+              "rail_samples": 0,
+              "rail_pct_moving": 0.0,
+              "rail_ms": 0.0,
+              "longest_burst_ms": 0.0
+            },
+            "ferr_crosscheck_max": 521,
+            "ff_velocity_offset_max": 983040,
+            "ff_torque_offset_max": 0
+          },
+          "psd_peaks": [
+            [
+              7.8125,
+              2491.854801568356
+            ],
+            [
+              46.875,
+              26.467424689843916
+            ],
+            [
+              226.5625,
+              12.86431313343665
+            ],
+            [
+              66.40625,
+              3.4309063688890777
+            ],
+            [
+              300.78125,
+              2.0208651948511527
+            ]
+          ],
+          "resonance": {
+            "detected": false,
+            "ratio": 0.16655991250744928,
+            "peak_hz": 23.4375
+          }
+        }
+      },
+      "combined": {
+        "on_ferr_peak_mm": 0.021514892578125,
+        "on_ferr_rms_mm": 0.004475707652552408,
+        "cross_ferr_peak_mm": 0.5178070068359375
+      },
+      "accel": {
+        "present": true,
+        "psd_peaks": [
+          [
+            227.16864556366878,
+            3890807.5761672794
+          ],
+          [
+            300.75848849274456,
+            730548.3561515763
+          ],
+          [
+            143.98012746993092,
+            706987.5746877303
+          ],
+          [
+            956.6679580779854,
+            466591.1206846088
+          ],
+          [
+            966.2666332426475,
+            404310.0148610499
+          ]
+        ]
+      },
+      "differential": null,
+      "ringdown": null,
+      "flags": [
+        "settle_window_truncated"
+      ]
+    }
+  ],
+  "verdict": {
+    "recommended_step": "s700",
+    "reason": "highest gain step without resonance or torque rail",
+    "flags": [],
+    "apply": [
+      {
+        "servo": "motor_a",
+        "addr": "0x2001.0x01",
+        "type": "u16",
+        "value": 1120
+      }
+    ]
+  }
+}

@@ -108,9 +108,6 @@ GAIN_LIST_PARAMS = {
 INERTIA_RATIO_ADDR = "0x2000.0x07"
 C00_06_INERTIA_RATIO_MAX = 12000
 
-C00_05_STIFFNESS_LEVEL_MIN = 1
-C00_05_STIFFNESS_LEVEL_MAX = 31
-
 SYNC_LOSS_COUNT_ADDR = "0x2013.0x05"
 SYNC_LOSS_THRESHOLD_ADDR = "0x2013.0x03"
 
@@ -1271,10 +1268,8 @@ class ServoCalibration:
             "SERVO_APPLY_GAINS",
             "SERVO_CALIBRATE_GAINS",
             "SERVO_REFINE_DYNAMICS",
-            "SERVO_HARVEST_NOTCHES",
             "SERVO_SWEEP_INERTIA",
             "SERVO_SWEEP_ACCEL",
-            "SERVO_SET_STIFFNESS",
             "SERVO_AUTOTUNE",
         ):
             self.gcode.register_command(
@@ -1415,6 +1410,7 @@ class ServoCalibration:
             "motors": [self._motor_manifest(m) for m in motors],
             "ff_lead_cycles": self._ff_lead_cycles(gcmd, motors),
             "belts": self._belts(belts_rails),
+            "spatial": servo_strokes.spatial_frame(kin),
             "steps": [],
             "ambient": self._ambient(gcmd, servos),
         }
@@ -3591,27 +3587,6 @@ class ServoCalibration:
             )
         return lo, hi
 
-    cmd_SERVO_HARVEST_NOTCHES_help = (
-        "Let the drive's adaptive notch tuning find the axis resonances "
-        "during motion, then lock and read back what it chose (manual 7.10). "
-        "Writes C01.30 adaptive_notch_mode = MODE (1 = 1st notch adaptive, "
-        "2 = 1st+2nd adaptive) to every servo driving AXIS, strokes so the "
-        "tuner sees motion, reads back notch 1 and notch 2 center frequency / "
-        "width / depth, then writes C01.30 = 0 to lock. The mode writes and "
-        "the lock are journaled (no run directory). Any SDO read/write "
-        "failure aborts naming the motor and address, before the lock. "
-        "Params AXIS (X) MODE (2) START END SPEED ACCEL ITERATIONS DWELL_MS"
-    )
-
-    def _write_notch_mode(self, servos: list[str], mode: int) -> None:
-        self.gcode.run_script_from_command(
-            "\n".join(
-                "SERVO_PARAM SERVO=%s SET=%s VALUE=%d TYPE=u16"
-                % (servo, NOTCH_MODE_ADDR, mode)
-                for servo in servos
-            )
-        )
-
     def _read_notch_param(self, gcmd: Any, servo: str, addr: str) -> int:
         try:
             return self._read_param(servo, addr)
@@ -3641,35 +3616,6 @@ class ServoCalibration:
         ):
             state[label] = {"freq_hz": freq, "width": width, "depth": depth}
         return state
-
-    def cmd_SERVO_HARVEST_NOTCHES(self, gcmd: Any) -> None:
-        axis = gcmd.get("AXIS", "X").upper()
-        mode = gcmd.get_int("MODE", 2)
-        if mode not in (1, 2):
-            raise gcmd.error(
-                "MODE must be 1 (1st notch adaptive) or 2 (1st+2nd "
-                "adaptive), got %d" % (mode,)
-            )
-        servos = self._servos(gcmd, axis)
-        start, end = servo_strokes.axis_bounds(gcmd, self.bounds, axis)
-        speed, accel, iterations, dwell = self._stroke_motion(gcmd)
-        self._prep(axis, dwell)
-        self._write_notch_mode(servos, mode)
-        self._strokes(axis, start, end, speed, accel, iterations, dwell)
-        self.gcode.run_script_from_command("M400")
-        harvested = {servo: self._read_notches(gcmd, servo) for servo in servos}
-        self._write_notch_mode(servos, 0)
-        self._restore()
-        for servo in servos:
-            n1, n2 = harvested[servo][:2]
-            gcmd.respond_info(
-                "%s notch1 %d Hz w%d d%d | notch2 %d Hz w%d d%d"
-                % (servo, n1[0], n1[1], n1[2], n2[0], n2[1], n2[2])
-            )
-        gcmd.respond_info(
-            "adaptive notch tuning locked (C01.30 = 0) on %s"
-            % (", ".join(servos),)
-        )
 
     cmd_SERVO_REFINE_DYNAMICS_help = (
         "Empirically refine the torque-feedforward dynamics profile on the "
@@ -4450,30 +4396,6 @@ class ServoCalibration:
         finally:
             self._active_run = None
         return steps
-
-    cmd_SERVO_SET_STIFFNESS_help = (
-        "Vendor-table tuning - switch to standard mode (C00.04=1) and set "
-        "C00.05 stiffness level 1..31. Params LEVEL SERVO"
-    )
-
-    def cmd_SERVO_SET_STIFFNESS(self, gcmd: Any) -> None:
-        servo = self._servo(gcmd)
-        level = gcmd.get_int(
-            "LEVEL",
-            minval=C00_05_STIFFNESS_LEVEL_MIN,
-            maxval=C00_05_STIFFNESS_LEVEL_MAX,
-        )
-        self.gcode.run_script_from_command(
-            "\n".join(
-                [
-                    "SERVO_PARAM SERVO=%s SET=0x2000.0x05 VALUE=1 TYPE=u16"
-                    % servo,
-                    "SERVO_PARAM SERVO=%s SET=0x2000.0x06 VALUE=%d TYPE=u16"
-                    % (servo, level),
-                ]
-            )
-        )
-        self.cmd_SERVO_SHOW_TUNING(gcmd)
 
     cmd_SERVO_AUTOTUNE_help = (
         "Packaged tuning sequence: baseline tracking -> inertia ratio "

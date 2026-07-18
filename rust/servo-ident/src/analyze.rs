@@ -15,12 +15,12 @@ use crate::metrics::{
     compute_metrics, drive_series, motion_segments, DriveSeries, DEFAULT_SETTLE_BAND_COUNTS,
     DEFAULT_TORQUE_LIMIT_PER_MILLE,
 };
-use crate::psd::{moving_psd, top_peaks, welch_psd};
+use crate::psd::{moving_psd, segments_welch_psd, top_peaks, welch_psd};
 use crate::resonance::{detect_resonance, recommend_accel};
 use crate::results::{
-    AccelResult, Combined, DifferentialResult, DriveResult, Manifest, PlotAccel, PlotCombined,
-    PlotDifferential, PlotDrive, PlotPsd, PlotPsdAccel, PlotSeries, PlotStep, Results, Step,
-    StepResult, Verdict,
+    AccelResult, Combined, DifferentialResult, DriveResult, Manifest, ManifestSpatial, PlotAccel,
+    PlotCombined, PlotDifferential, PlotDrive, PlotPath, PlotPsd, PlotPsdAccel, PlotSeries,
+    PlotStep, Results, Step, StepResult, Verdict,
 };
 use crate::ringdown::{
     compute_step_ringdown, ringdown_verdict_reason, RingdownOptions, DEFAULT_GUARD_MS,
@@ -29,6 +29,8 @@ use crate::ringdown::{
 use crate::scap::Scap;
 
 const MAX_SERIES_POINTS: usize = 2000;
+pub const MAX_PATH_POINTS: usize = 4000;
+pub const MAX_FULL_PATH_POINTS: usize = 500_000;
 const PSD_PEAK_COUNT: usize = 5;
 
 fn stride_for(n: usize) -> usize {
@@ -39,11 +41,202 @@ fn stride_for(n: usize) -> usize {
     }
 }
 
-fn read_accel_csv(path: &Path) -> Result<(Vec<f64>, Vec<f64>), String> {
+/// Decimation indices for a path polyline: an even stride over the capture
+/// plus the final sample, so the stroke's endpoint survives.
+pub fn path_indices(n: usize, max_points: usize) -> Vec<usize> {
+    assert!(max_points >= 2, "path budget must fit both endpoints");
+    if n == 0 {
+        return Vec::new();
+    }
+    let stride = n.div_ceil(max_points).max(1);
+    let mut idxs: Vec<usize> = (0..n).step_by(stride).collect();
+    if *idxs.last().unwrap() != n - 1 {
+        idxs.push(n - 1);
+    }
+    idxs
+}
+
+/// Commanded and actual toolhead XY in mm through the manifest's spatial
+/// frame (motor counts -> cartesian, invert signs folded into the frame).
+/// `Ok(None)` when the frame has no x+y modes or the capture lacks one of
+/// the frame's motors — a single-axis capture, not an error.
+fn validate_spatial_shape(spatial: &ManifestSpatial) -> Result<(), String> {
+    if spatial.frame.len() != spatial.modes.len()
+        || spatial.frame.iter().any(|r| r.len() != spatial.axes.len())
+    {
+        return Err(format!(
+            "manifest spatial frame shape does not match its {} mode(s) x {} axis(es)",
+            spatial.modes.len(),
+            spatial.axes.len()
+        ));
+    }
+    Ok(())
+}
+
+pub fn xy_path(cap: &Scap, spatial: &ManifestSpatial) -> Result<Option<PlotPath>, String> {
+    xy_path_at(cap, spatial, &path_indices(cap.n_records, MAX_PATH_POINTS))
+}
+
+pub fn xy_path_full(
+    cap: &Scap,
+    spatial: &ManifestSpatial,
+) -> Result<Option<(PlotPath, bool)>, String> {
+    let idxs = path_indices(cap.n_records, MAX_FULL_PATH_POINTS);
+    let truncated = idxs.len() < cap.n_records;
+    let Some(mut path) = xy_path_at(cap, spatial, &idxs)? else {
+        return Ok(None);
+    };
+    for series in [
+        &mut path.cmd_x_mm,
+        &mut path.cmd_y_mm,
+        &mut path.act_x_mm,
+        &mut path.act_y_mm,
+    ] {
+        for v in series.iter_mut() {
+            *v = (*v * 1e4).round() / 1e4;
+        }
+    }
+    Ok(Some((path, truncated)))
+}
+
+fn xy_path_at(
+    cap: &Scap,
+    spatial: &ManifestSpatial,
+    idxs: &[usize],
+) -> Result<Option<PlotPath>, String> {
+    validate_spatial_shape(spatial)?;
+    let (Some(xi), Some(yi)) = (
+        spatial.modes.iter().position(|m| m == "x"),
+        spatial.modes.iter().position(|m| m == "y"),
+    ) else {
+        return Ok(None);
+    };
+    let mut motors = Vec::new();
+    for (s, motor) in spatial.axes.iter().enumerate() {
+        let Some(idx) = cap.drive_index(motor) else {
+            return Ok(None);
+        };
+        let cpm = cap.header.drives[idx].counts_per_mm;
+        if cpm <= 0.0 {
+            return Err(format!("drive {motor:?} has counts_per_mm {cpm}"));
+        }
+        motors.push((s, idx, cpm));
+    }
+    let mut path = PlotPath {
+        cmd_x_mm: vec![0.0; idxs.len()],
+        cmd_y_mm: vec![0.0; idxs.len()],
+        act_x_mm: vec![0.0; idxs.len()],
+        act_y_mm: vec![0.0; idxs.len()],
+    };
+    for (s, idx, cpm) in motors {
+        let target = cap.read_i64(idx, "target_counts")?;
+        let actual = cap.read_i64(idx, "position_actual")?;
+        let cx = spatial.frame[xi][s] / cpm;
+        let cy = spatial.frame[yi][s] / cpm;
+        for (j, &k) in idxs.iter().enumerate() {
+            path.cmd_x_mm[j] += cx * target[k] as f64;
+            path.cmd_y_mm[j] += cy * target[k] as f64;
+            path.act_x_mm[j] += cx * actual[k] as f64;
+            path.act_y_mm[j] += cy * actual[k] as f64;
+        }
+    }
+    Ok(Some(path))
+}
+
+/// `frame` rows are modes, columns motors: `out[m][k] = Σ_s frame[m][s] *
+/// motor_series_mm[s][k]`. Every motor series must share one length.
+pub fn project_modes(frame: &[Vec<f64>], motor_series_mm: &[Vec<f64>]) -> Vec<Vec<f64>> {
+    assert!(!motor_series_mm.is_empty(), "projection needs motor series");
+    let n = motor_series_mm[0].len();
+    assert!(
+        motor_series_mm.iter().all(|s| s.len() == n),
+        "motor series lengths differ"
+    );
+    assert!(
+        frame.iter().all(|row| row.len() == motor_series_mm.len()),
+        "frame column count does not match the motor series count"
+    );
+    frame
+        .iter()
+        .map(|row| {
+            let mut mode = vec![0.0; n];
+            for (c, series) in row.iter().zip(motor_series_mm) {
+                for (o, &v) in mode.iter_mut().zip(series) {
+                    *o += c * v;
+                }
+            }
+            mode
+        })
+        .collect()
+}
+
+/// Per-cartesian-mode following-error PSD in mm²/Hz over the moving
+/// segments: per-motor ferr converted to mm, projected through the
+/// manifest's spatial frame, then Welch on the same grid the per-drive
+/// PSDs use. `Ok(None)` when the capture lacks one of the frame's motors —
+/// a single-axis capture, not an error.
+fn cartesian_ferr_psd(
+    cap: &Scap,
+    spatial: &ManifestSpatial,
+    series_by_name: &BTreeMap<String, DriveSeries>,
+    segs: &[(usize, usize)],
+    fs: f64,
+    expected_bins: usize,
+) -> Result<Option<BTreeMap<String, Vec<f64>>>, String> {
+    validate_spatial_shape(spatial)?;
+    let mut motor_ferr_mm = Vec::new();
+    for motor in &spatial.axes {
+        let Some(series) = series_by_name.get(motor) else {
+            return Ok(None);
+        };
+        let Some(idx) = cap.drive_index(motor) else {
+            return Ok(None);
+        };
+        let cpm = cap.header.drives[idx].counts_per_mm;
+        if cpm <= 0.0 {
+            return Err(format!("drive {motor:?} has counts_per_mm {cpm}"));
+        }
+        motor_ferr_mm.push(series.following_error.iter().map(|&v| v / cpm).collect());
+    }
+    let modes = project_modes(&spatial.frame, &motor_ferr_mm);
+    let mut out = BTreeMap::new();
+    for (mode_name, mode_series) in spatial.modes.iter().zip(modes) {
+        let (freq_hz, psd) = segments_welch_psd(&mode_series, segs, fs)?;
+        if freq_hz.len() != expected_bins {
+            return Err(format!(
+                "cartesian mode {mode_name:?} psd has {} bins, expected {expected_bins} \
+                 (modes must share the per-drive Welch grid)",
+                freq_hz.len()
+            ));
+        }
+        out.insert(mode_name.clone(), psd);
+    }
+    Ok(Some(out))
+}
+
+pub struct AccelSamples {
+    pub t: Vec<f64>,
+    pub axes: [Vec<f64>; 3],
+}
+
+impl AccelSamples {
+    pub fn magnitude(&self) -> Vec<f64> {
+        (0..self.t.len())
+            .map(|k| {
+                let [x, y, z] = &self.axes;
+                (x[k] * x[k] + y[k] * y[k] + z[k] * z[k]).sqrt()
+            })
+            .collect()
+    }
+}
+
+fn read_accel_csv(path: &Path) -> Result<AccelSamples, String> {
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let mut t = Vec::new();
-    let mut mag = Vec::new();
+    let mut samples = AccelSamples {
+        t: Vec::new(),
+        axes: [Vec::new(), Vec::new(), Vec::new()],
+    };
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -60,13 +253,54 @@ fn read_accel_csv(path: &Path) -> Result<(Vec<f64>, Vec<f64>), String> {
                 path.display()
             ));
         }
-        t.push(f[0]);
-        mag.push((f[1] * f[1] + f[2] * f[2] + f[3] * f[3]).sqrt());
+        samples.t.push(f[0]);
+        for (axis, &v) in samples.axes.iter_mut().zip(&f[1..4]) {
+            axis.push(v);
+        }
     }
-    if t.len() < 2 {
+    if samples.t.len() < 2 {
         return Err(format!("{}: too few accel samples", path.display()));
     }
-    Ok((t, mag))
+    Ok(samples)
+}
+
+/// Per-axis Welch PSDs plus their sum, the `shaper_calibrate` convention:
+/// `psd_sum = psd_x + psd_y + psd_z` on one shared frequency grid.
+pub struct AccelPsds {
+    pub freq_hz: Vec<f64>,
+    pub per_axis: [Vec<f64>; 3],
+    pub total: Vec<f64>,
+}
+
+pub fn accel_axis_psds(samples: &AccelSamples) -> Result<AccelPsds, String> {
+    let afs = samples.t.len() as f64 / (samples.t[samples.t.len() - 1] - samples.t[0]);
+    let mut freq_hz: Option<Vec<f64>> = None;
+    let mut per_axis: Vec<Vec<f64>> = Vec::new();
+    for axis in &samples.axes {
+        let (f, p) = welch_psd(axis, afs)?;
+        match &freq_hz {
+            Some(existing) if existing.len() != f.len() => {
+                return Err(format!(
+                    "accel axis psd has {} bins, expected {} (axes must share the Welch grid)",
+                    f.len(),
+                    existing.len()
+                ));
+            }
+            Some(_) => {}
+            None => freq_hz = Some(f),
+        }
+        per_axis.push(p);
+    }
+    let freq_hz = freq_hz.unwrap();
+    let total: Vec<f64> = (0..freq_hz.len())
+        .map(|b| per_axis.iter().map(|p| p[b]).sum())
+        .collect();
+    let [px, py, pz]: [Vec<f64>; 3] = per_axis.try_into().unwrap();
+    Ok(AccelPsds {
+        freq_hz,
+        per_axis: [px, py, pz],
+        total,
+    })
 }
 
 struct DriveAnalysis {
@@ -106,8 +340,7 @@ struct AccelAnalysis {
     result: AccelResult,
     t: Vec<f64>,
     mag: Vec<f64>,
-    freq_hz: Vec<f64>,
-    psd: Vec<f64>,
+    psds: AccelPsds,
 }
 
 fn step_flags(drives: &BTreeMap<String, DriveResult>) -> Vec<String> {
@@ -137,6 +370,7 @@ pub fn analyze_capture(
     axis: Option<&str>,
     accel_path: Option<&Path>,
     ff_lead_samples: usize,
+    spatial: Option<&ManifestSpatial>,
 ) -> Result<(StepResult, PlotStep), String> {
     let fs = cap.fs();
     let n = cap.n_records;
@@ -170,24 +404,22 @@ pub fn analyze_capture(
 
     let accel = match accel_path {
         Some(path) => {
-            let (t, mag) = read_accel_csv(path)?;
-            let afs = t.len() as f64 / (t[t.len() - 1] - t[0]);
-            let (freq_hz, psd) = welch_psd(&mag, afs)?;
-            if freq_hz.len() > MAX_SERIES_POINTS {
+            let samples = read_accel_csv(path)?;
+            let psds = accel_axis_psds(&samples)?;
+            if psds.freq_hz.len() > MAX_SERIES_POINTS {
                 return Err(format!(
                     "step {name:?}: accel psd has {} bins, over the {MAX_SERIES_POINTS} cap",
-                    freq_hz.len()
+                    psds.freq_hz.len()
                 ));
             }
             Some(AccelAnalysis {
                 result: AccelResult {
                     present: true,
-                    psd_peaks: top_peaks(&freq_hz, &psd, PSD_PEAK_COUNT),
+                    psd_peaks: top_peaks(&psds.freq_hz, &psds.total, PSD_PEAK_COUNT),
                 },
-                t,
-                mag,
-                freq_hz,
-                psd,
+                mag: samples.magnitude(),
+                t: samples.t,
+                psds,
             })
         }
         None => None,
@@ -230,10 +462,22 @@ pub fn analyze_capture(
     let idxs: Vec<usize> = (0..n).step_by(stride).collect();
     let t_s: Vec<f64> = idxs.iter().map(|&k| k as f64 / fs).collect();
     let first_flags = &series_by_name.values().next().unwrap().flags;
-    let moving: Vec<(f64, f64)> = motion_segments(first_flags)
-        .into_iter()
-        .map(|(s, e)| (s as f64 / fs, e as f64 / fs))
+    let sample_segs = motion_segments(first_flags);
+    let moving: Vec<(f64, f64)> = sample_segs
+        .iter()
+        .map(|&(s, e)| (s as f64 / fs, e as f64 / fs))
         .collect();
+    let cartesian = match spatial {
+        Some(sp) => cartesian_ferr_psd(
+            cap,
+            sp,
+            &series_by_name,
+            &sample_segs,
+            fs,
+            psd_freq_hz.len(),
+        )?,
+        None => None,
+    };
     let mut plot_drives = BTreeMap::new();
     for (dname, s) in &series_by_name {
         plot_drives.insert(
@@ -257,9 +501,16 @@ pub fn analyze_capture(
         }
     });
     let plot_psd_accel = accel.as_ref().map(|a| PlotPsdAccel {
-        freq_hz: a.freq_hz.clone(),
-        psd: a.psd.clone(),
+        freq_hz: a.psds.freq_hz.clone(),
+        psd: a.psds.total.clone(),
+        psd_x: a.psds.per_axis[0].clone(),
+        psd_y: a.psds.per_axis[1].clone(),
+        psd_z: a.psds.per_axis[2].clone(),
     });
+    let path = match spatial {
+        Some(sp) => xy_path(cap, sp)?,
+        None => None,
+    };
 
     let step_result = StepResult {
         name: name.to_string(),
@@ -281,9 +532,11 @@ pub fn analyze_capture(
         accel: plot_accel,
         differential: None,
         ringdown: None,
+        path,
         psd: PlotPsd {
             freq_hz: psd_freq_hz,
             per_drive: per_drive_psd,
+            cartesian,
             accel: plot_psd_accel,
         },
     };
@@ -395,9 +648,11 @@ pub fn analyze_differential_capture(
         accel: None,
         differential: Some(plot_differential),
         ringdown: None,
+        path: None,
         psd: PlotPsd {
             freq_hz: psd_freq_hz,
             per_drive: per_drive_psd,
+            cartesian: None,
             accel: None,
         },
     };
@@ -680,6 +935,7 @@ fn build_run_reusing(
                     manifest.axis.as_deref(),
                     accel_path.as_deref(),
                     manifest.ff_lead_cycles as usize,
+                    manifest.spatial.as_ref(),
                 )?
             }
         };
