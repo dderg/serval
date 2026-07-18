@@ -299,7 +299,7 @@ function timeSeriesPlot(target: HTMLElement, opts: TimeSeriesOpts): TimeSeriesPl
     pxAlign: false,
     cursor: brush
       ? { points: { show: false }, drag: { x: true, y: false, setScale: false } }
-      : { show: false },
+      : { x: false, y: false, points: { show: false }, drag: { x: true, y: false, setScale: true } },
     hooks: brush
       ? {
           setSelect: [
