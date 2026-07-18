@@ -691,3 +691,100 @@ def test_fit_dynamics_coupled_runs_one_full_range_capture():
     assert [os.path.basename(c) for c in caps] == ["step_ident.scap"]
     assert {(s, e) for ax, s, e in strokes if ax == "X"} == {(20.0, 280.0)}
     assert {(s, e) for ax, s, e in strokes if ax == "Y"} == {(20.0, 280.0)}
+
+
+def _pattern_scripts(gcode):
+    return [
+        s
+        for s in gcode.scripts
+        if isinstance(s, str) and "SET_VELOCITY_LIMIT VELOCITY=" in s
+    ]
+
+
+def test_measure_inertia_corexy_pattern_runs_every_grid_cell():
+    sc, gcode = make_calibration(awd_rails())
+    gcmd = FakeGcmd(PATTERN=1, ACCELS="5000,10000", SPEEDS="100,400")
+    sc.cmd_SERVO_MEASURE_INERTIA(gcmd)
+    plan = _manifest_for(sc)["stroke_plan"]
+    assert plan["pattern"]["x_bounds"] == [20.0, 200.0]
+    assert plan["pattern"]["y_bounds"] == [20.0, 200.0]
+    assert plan["pattern"]["inset"] == 20.0
+    assert plan["pattern"]["small_size"] == 20.0
+    assert plan["pattern"]["segments"] == 21
+    assert plan["speeds"] == [100.0, 400.0]
+    assert plan["accels"] == [5000.0, 10000.0]
+    assert _capture_servos(sc)[0] == [
+        "motor_a1",
+        "motor_a",
+        "motor_b",
+        "motor_b1",
+    ]
+    scripts = _pattern_scripts(gcode)
+    assert len(scripts) == 4
+    for s in scripts:
+        assert s.count("G0 X") == 21 * plan["iterations"]
+    reach = [
+        r
+        for r in gcmd.responses
+        if r.startswith("accel ") and "pattern segments" in r
+    ]
+    assert len(reach) == 4
+
+
+def test_measure_inertia_pattern_ignores_minimum_stroke_distance():
+    sc, _ = make_calibration(awd_rails())
+    sc.bounds = {"X": (20.0, 60.0), "Y": (20.0, 60.0)}
+    with pytest.raises(RuntimeError, match="too short to reach"):
+        sc.cmd_SERVO_MEASURE_INERTIA(FakeGcmd(SPEEDS="400", ACCELS="3000"))
+    sc2, _ = make_calibration(awd_rails())
+    sc2.bounds = {"X": (20.0, 60.0), "Y": (20.0, 60.0)}
+    gcmd = FakeGcmd(PATTERN=1, BOUND=0, SPEEDS="400", ACCELS="3000")
+    sc2.cmd_SERVO_MEASURE_INERTIA(gcmd)
+    assert any("triangular" in r for r in gcmd.responses), gcmd.responses
+
+
+def test_measure_inertia_corexy_pattern_rejects_stroke_bounds():
+    sc, _ = make_calibration(awd_rails())
+    with pytest.raises(RuntimeError, match="single-axis stroke bounds"):
+        sc.cmd_SERVO_MEASURE_INERTIA(FakeGcmd(PATTERN=1, X_START="10"))
+
+
+def _cartesian_dual_x_rails():
+    return [
+        _rail(
+            "x",
+            [_motor("motor_x", "node", 0), _motor("motor_x1", "node", 1)],
+        ),
+        _rail("y", [_motor("motor_y", "node", 2)]),
+    ]
+
+
+def test_measure_inertia_cartesian_pattern_rejects_stroke_bounds():
+    sc, _ = make_calibration(_cartesian_dual_x_rails(), coupled=False)
+    with pytest.raises(RuntimeError, match="single-axis stroke bounds"):
+        sc.cmd_SERVO_MEASURE_INERTIA(FakeGcmd(PATTERN=1, START="10"))
+
+
+def test_measure_inertia_cartesian_pattern_captures_axis_servos():
+    sc, gcode = make_calibration(_cartesian_dual_x_rails(), coupled=False)
+    sc.cmd_SERVO_MEASURE_INERTIA(FakeGcmd(PATTERN=1, AXIS="X"))
+    assert _capture_servos(sc)[0] == ["motor_x", "motor_x1"]
+    assert _pattern_scripts(gcode)
+
+
+def test_fit_dynamics_corexy_pattern_records_plan_and_fits():
+    sc, _gcode = make_calibration(awd_rails())
+    fit_calls = []
+
+    def rec(gcmd, argv, timeout):
+        if len(argv) >= 2 and argv[1] == "fit":
+            fit_calls.append(argv)
+        return ""
+
+    sc._run = rec
+    sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd(PATTERN=1, ACCELS="5000", SPEEDS="100"))
+    plan = _manifest_for(sc)["stroke_plan"]
+    assert plan["pattern"]["segments"] == 21
+    assert plan["pattern"]["inset"] == 20.0
+    assert len(fit_calls) == 1
+    assert fit_calls[0][1] == "fit"

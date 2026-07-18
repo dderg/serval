@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sys
 import tempfile
 
@@ -1194,4 +1195,124 @@ def test_direction_split_refine_rejects_missing_or_unsafe_pairs():
         sc.cmd_SERVO_REFINE_DYNAMICS(
             FakeGcmd(TERM="DIRECTION_SPLIT", LO=-0.45, HI=0.45)
         )
+    assert engine.dynamics_calls == []
+
+
+_SINGLE_AXIS_STROKE_G1 = re.compile(r"^G1 [XY][-\d.]+ F\d+$")
+
+
+def _string_scripts(gcode):
+    return [s for s in gcode.scripts if isinstance(s, str)]
+
+
+def _pattern_blocks(gcode):
+    return [
+        s for s in _string_scripts(gcode) if "SET_VELOCITY_LIMIT VELOCITY=" in s
+    ]
+
+
+def _pattern_gotos(gcode):
+    return [s for s in _string_scripts(gcode) if s.startswith("G90\nG1 ")]
+
+
+def _has_single_axis_stroke(gcode):
+    return any(
+        _SINGLE_AXIS_STROKE_G1.match(line)
+        for s in _string_scripts(gcode)
+        for line in s.splitlines()
+    )
+
+
+def _refine_manifest(gcode):
+    run_dir = next(
+        s[1][2]
+        for s in gcode.scripts
+        if isinstance(s, tuple) and s[1][1] == "analyze"
+    )
+    with open(os.path.join(run_dir, "manifest.json")) as f:
+        return json.load(f)
+
+
+def test_refine_dynamics_pattern_mass_uses_xy_pattern():
+    sc, gcode, engine, profile_path = make_calibration(overshoot_min=0.9)
+    strokes = []
+    sc._strokes = lambda *a: strokes.append(a)
+    sc.cmd_SERVO_REFINE_DYNAMICS(
+        FakeGcmd(PATTERN=1, ACCELS="5000,10000", SPEEDS="100,400")
+    )
+    assert strokes == []
+    assert engine.dynamics_calls[-1] == _baseline_call(engine, profile_path)
+    assert len(_written_profiles(sc)) == 1
+    blocks = _pattern_blocks(gcode)
+    assert blocks
+    for block in blocks:
+        assert "G0 X" in block and " Y" in block
+    assert not _has_single_axis_stroke(gcode)
+    gotos = _pattern_gotos(gcode)
+    assert gotos
+    assert len(blocks) == len(gotos) * 4
+
+
+def test_refine_dynamics_pattern_refines_each_mode():
+    sc, _gcode, _engine, _path = make_calibration(overshoot_min=0.9)
+    sc.cmd_SERVO_REFINE_DYNAMICS(
+        FakeGcmd(PATTERN=1, ACCELS="5000", SPEEDS="100")
+    )
+    profiles = _written_profiles(sc)
+    assert len(profiles) == 1
+    with open(profiles[0], "rb") as f:
+        raw = tomllib.load(f)
+    assert raw["refined_term"] == "mass"
+    sx, sy = raw["refined_scale_x"], raw["refined_scale_y"]
+    assert abs(sx - 0.9) < 0.03
+    assert abs(sy - 0.9) < 0.03
+    assert raw["mass"][0] == pytest.approx(0.020 * sx)
+    assert raw["mass"][1] == pytest.approx(0.030 * sy)
+    assert raw["viscous"] == BASELINE_VISCOUS
+
+
+def test_refine_dynamics_pattern_manifest_carries_pattern_plan():
+    sc, gcode, _engine, _path = make_calibration()
+    sc.cmd_SERVO_REFINE_DYNAMICS(
+        FakeGcmd(PATTERN=1, ACCELS="5000,10000", SPEEDS="100,400")
+    )
+    plan = _refine_manifest(gcode)["stroke_plan"]
+    assert plan["speeds"] == [100.0, 400.0]
+    assert plan["accels"] == [5000.0, 10000.0]
+    assert plan["iterations"] == 3
+    assert plan["dwell_ms"] == 700
+    assert plan["pattern"] == {
+        "x_bounds": [20.0, 200.0],
+        "y_bounds": [20.0, 200.0],
+        "inset": 20.0,
+        "small_size": 20.0,
+        "segments": 21,
+    }
+
+
+def test_refine_dynamics_pattern_reports_reach_once():
+    sc, _gcode, _engine, _path = make_calibration()
+    gcmd = FakeGcmd(PATTERN=1, ACCELS="5000,10000", SPEEDS="100,400")
+    sc.cmd_SERVO_REFINE_DYNAMICS(gcmd)
+    reach = [
+        r
+        for r in gcmd.responses
+        if r.startswith("accel ") and "pattern segments" in r
+    ]
+    assert len(reach) == 4
+
+
+def test_refine_dynamics_pattern_rejects_direction_split():
+    sc, _gcode, engine, _path = make_calibration_awd()
+    with pytest.raises(RuntimeError, match="rest-to-rest"):
+        sc.cmd_SERVO_REFINE_DYNAMICS(
+            FakeGcmd(PATTERN=1, TERM="DIRECTION_SPLIT")
+        )
+    assert engine.dynamics_calls == []
+
+
+def test_refine_dynamics_pattern_rejects_stroke_bounds():
+    sc, _gcode, engine, _path = make_calibration()
+    with pytest.raises(RuntimeError, match="single-axis stroke bounds"):
+        sc.cmd_SERVO_REFINE_DYNAMICS(FakeGcmd(PATTERN=1, START=30.0))
     assert engine.dynamics_calls == []
