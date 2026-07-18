@@ -69,7 +69,8 @@ function hidpiCanvasContext(canvas: HTMLCanvasElement): { ctx: CanvasRenderingCo
 function drawTimeDomain(names: string[], plots: PlotSeries[], steps: string[]) {
   const container = el("charts");
   if (!container) return;
-  const sig = { runs: runDataSig(names), steps, perMotor: motorViewPerMotor() };
+  const motorFilter = state.motorFilter ? [...state.motorFilter] : null;
+  const sig = { runs: runDataSig(names), steps, perMotor: motorViewPerMotor(), motorFilter };
   if (payloadUnchanged("time-domain", sig)) return;
   container.innerHTML = "";
   if (names.length === 0) {
@@ -95,7 +96,8 @@ function drawTimeDomain(names: string[], plots: PlotSeries[], steps: string[]) {
       for (const series of pickSeries(names[i], step)) {
         yLabel = series.label;
         const color = mixColor(runColor(names[i]), "#ffffff", series.ramp);
-        traces.push({ t: step.t_s, y: series.y, color });
+        const hoverLabel = (names.length > 1 ? names[i] : "") + series.suffix;
+        traces.push({ t: step.t_s, y: series.y, color, label: hoverLabel.trim() });
         const item = document.createElement("span");
         item.innerHTML =
           `<span class="swatch" style="background:${color}"></span>` +
@@ -109,6 +111,7 @@ function drawTimeDomain(names: string[], plots: PlotSeries[], steps: string[]) {
         height: 200,
         yLabel,
         traces,
+        hover: true,
       });
     }
     box.appendChild(legend);

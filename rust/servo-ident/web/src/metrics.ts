@@ -619,4 +619,4 @@ function fillStepChips(container: HTMLElement, stepNames: string[]) {
 }
 
 export type { MetricsRow, PsdBoxOpts, SweepSeries };
-export { driveMoveSummary, settleCellHtml, torqueCellHtml, metricsDriveRow, foldDriveRows, metricsTableRows, heatCellStyle, renderMetricsTable, sweptAxisKey, sweepMetricsSeries, renderSweepMetricsChart, driveRamp, psdFerrUm2, psdFerrTraces, psdAccelTraces, fmtLinear, psdBox, renderPsdChart, visibleStepNames, renderStepChips, fillStepChips };
+export { driveMoveSummary, settleCellHtml, torqueCellHtml, metricsDriveRow, foldDriveRows, metricsTableRows, heatCellStyle, renderMetricsTable, sweptAxisKey, sweepMetricsSeries, renderSweepMetricsChart, driveRamp, psdFerrUm2, psdFerrTraces, psdAccelTraces, fmtLinear, psdBox, renderPsdChart, visibleStepNames, renderStepChips, renderMotorChips, fillStepChips };
