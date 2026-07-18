@@ -37,17 +37,24 @@ fn main() {
 }
 
 fn which_bun() -> PathBuf {
-    let candidates = ["bun", "/opt/homebrew/bin/bun", "/usr/local/bin/bun"];
-    for candidate in candidates {
+    let mut candidates = vec![
+        PathBuf::from("bun"),
+        PathBuf::from("/opt/homebrew/bin/bun"),
+        PathBuf::from("/usr/local/bin/bun"),
+    ];
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(PathBuf::from(home).join(".bun/bin/bun"));
+    }
+    for candidate in &candidates {
         if Command::new(candidate)
             .arg("--version")
             .output()
             .is_ok_and(|out| out.status.success())
         {
-            return PathBuf::from(candidate);
+            return candidate.clone();
         }
     }
-    panic!("bun not found on PATH or in /opt/homebrew/bin, /usr/local/bin; {BUN_HINT}");
+    panic!("bun not found on PATH or in /opt/homebrew/bin, /usr/local/bin, ~/.bun/bin; {BUN_HINT}");
 }
 
 fn ensure_node_modules(bun: &Path, web_dir: &Path) {
