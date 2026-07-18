@@ -1,15 +1,17 @@
-//! G-code text → absolute `(x, y, z, e, feedrate)` waypoints, mirroring
-//! `scripts/viz_pipeline.py::parse_gcode` move for move so the playground and
+//! G-code text → absolute `(x, y, z, e, feedrate, accel)` waypoints, mirroring
+//! `snapshots/harness.py::parse_gcode` move for move so the playground and
 //! the snapshot harness agree on what a pasted file means. E rides as a fifth
 //! coordinate so retracts (E-only moves) and extruding moves flow through the
 //! pipeline as followers; the engine differences consecutive E to a per-move
-//! delta. Extruder mode is M82 (absolute) / M83 (relative), independent of
-//! the G90/G91 flag that governs X/Y/Z; under G91 an undeclared extruder
-//! rides along as relative, and an E word with no mode declared at all is
-//! refused rather than guessed. G92 resets any axis's position (commonly
-//! `G92 E0`) without emitting a move.
+//! delta. The sixth coordinate is the acceleration limit in force for the move
+//! ending at that waypoint — `max_accel` until a `SET_VELOCITY_LIMIT ACCEL=`
+//! line changes it. Extruder mode is M82 (absolute) / M83 (relative),
+//! independent of the G90/G91 flag that governs X/Y/Z; under G91 an undeclared
+//! extruder rides along as relative, and an E word with no mode declared at
+//! all is refused rather than guessed. G92 resets any axis's position
+//! (commonly `G92 E0`) without emitting a move.
 
-pub type Waypoint = (f64, f64, f64, f64, f64);
+pub type Waypoint = (f64, f64, f64, f64, f64, f64);
 
 #[derive(Debug, thiserror::Error)]
 pub enum WaypointError {
@@ -23,26 +25,60 @@ pub enum WaypointError {
         "line {line}: E word before any M82/M83 (or G91) — the extruder mode is ambiguous, and guessing absolute turns relative-E slicer output into garbage extrusion ratios. Declare the mode (slicer excerpts printed with relative extrusion need an 'M83' line at the top)."
     )]
     AmbiguousExtruderMode { line: u32 },
+    #[error(
+        "line {line}: SET_VELOCITY_LIMIT {param}=… is not supported here — only ACCEL is wired through the snapshot waypoints; silently ignoring the parameter would let a case claim limits it never exercised"
+    )]
+    UnsupportedVelocityLimitParam { line: u32, param: Box<str> },
+    #[error("line {line}: SET_VELOCITY_LIMIT ACCEL={value} must be a positive finite number")]
+    InvalidAccelLimit { line: u32, value: String },
 }
 
-pub fn parse_gcode(text: &str, max_velocity: f64) -> Result<Vec<Waypoint>, WaypointError> {
+pub fn parse_gcode(
+    text: &str,
+    max_velocity: f64,
+    max_accel: f64,
+) -> Result<Vec<Waypoint>, WaypointError> {
     let mut waypoints: Vec<Waypoint> = Vec::new();
     let (mut x, mut y, mut z, mut e) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
     let mut feedrate = max_velocity;
+    let mut accel = max_accel;
     let mut relative = false;
     let mut e_relative: Option<bool> = None;
 
     for tok in gcode::lex(text) {
         let tok = tok?;
-        let gcode::Token::Command {
-            letter,
-            major,
-            minor,
-            params,
-            line_no,
-        } = tok
-        else {
-            continue;
+        let (letter, major, minor, params, line_no) = match tok {
+            gcode::Token::Command {
+                letter,
+                major,
+                minor,
+                params,
+                line_no,
+            } => (letter, major, minor, params, line_no),
+            gcode::Token::Extended {
+                name,
+                args,
+                line_no,
+            } if &*name == "SET_VELOCITY_LIMIT" => {
+                for (param, value) in args {
+                    if &*param != "ACCEL" {
+                        return Err(WaypointError::UnsupportedVelocityLimitParam {
+                            line: line_no,
+                            param,
+                        });
+                    }
+                    let parsed: f64 = value.parse().unwrap_or(f64::NAN);
+                    if !(parsed.is_finite() && parsed > 0.0) {
+                        return Err(WaypointError::InvalidAccelLimit {
+                            line: line_no,
+                            value: value.into_string(),
+                        });
+                    }
+                    accel = parsed;
+                }
+                continue;
+            }
+            _ => continue,
         };
         if minor.is_some() {
             continue;
@@ -108,7 +144,7 @@ pub fn parse_gcode(text: &str, max_velocity: f64) -> Result<Vec<Waypoint>, Waypo
                     continue;
                 }
                 let move_feedrate = if cmd == 0 { max_velocity } else { feedrate };
-                waypoints.push((x, y, z, e, move_feedrate));
+                waypoints.push((x, y, z, e, move_feedrate, accel));
             }
             _ => {}
         }

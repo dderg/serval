@@ -248,22 +248,22 @@ of dividing by a near-zero duration. Finally
 sees one degree per segment. Matching endpoint `(p, v, a)` per span keeps
 the emitted track C² at every seam by construction.
 
-## The corner-deviation budget
+## Corner deviation and kernel smoothing are separate knobs
 
 Kernels round corners: convolving a corner traversed at accel `a` with a
-kernel of variance `σ²` pulls the path inward by `½·σ²·a`
-(`kernel_corner_deviation_mm` in `rust/geometry/src/fitter.rs`). That
-deviation is *free* smoothing — the planner should spend less of its own
-corner-cutting where the kernel will cut anyway.
-
-So the corner budget is unified: `square_corner_velocity` defines a total
-corner deviation `scv²·(√2−1)/a` (`corner_deviation_from_scv`), and the
-clothoid fitter's junction deviation is that total **minus** the kernel
-share (`junction_deviation`, using
-`AxisChainSet::max_spatial_kernel_variance_s2`). The printed corner ends up
-within the configured deviation regardless of kernel width, and wider
-kernels automatically shift work from the fitter's blending to the
-convolution.
+kernel of variance `σ²` pulls the path inward by `≈ ½·σ²·a`. That smoothing
+is deliberately **not** deducted from the fitter's corner budget: the
+clothoid fitter always spends the full `corner_deviation` on blend
+geometry (`junction_deviation` in `rust/geometry/src/fitter.rs`), so the
+fitted path is identical whatever kernels are active and whatever the
+acceleration limit is. An earlier design subtracted the kernel's
+worst-case share (predicted at the accel *cap*), which made the fitted
+rounding shrink — down to a full-stop sharp corner — as the accel limit
+grew, because the corner never actually rides the cap. The
+`snapshots/cases/corner_accel/` cases pin the accel-invariance that
+replaced it. The kernel's inward pull rides on top of the blend and
+scales with the acceleration actually ridden through the corner; it is
+the shaper's own quality/smoothing tradeoff, tuned by kernel duration.
 
 Known open items:
 

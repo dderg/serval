@@ -230,13 +230,13 @@ max_accel:
 #   The value specified here may be changed at runtime using the
 #   SET_VELOCITY_LIMIT command. The default is 0.5.
 #corner_deviation:
-#   The total distance (in mm) the printed path may deviate from the
-#   commanded geometry at a corner. This budget covers both the corner
-#   blend the planner fits and the deviation any smoothing
-#   (post-processor kernel) adds, so the printed corner never strays
-#   further than this from the G-code path. Corner speed is derived
-#   from this budget and the acceleration limit: at a fixed deviation,
-#   higher acceleration yields higher cornering speed. Set to zero to
+#   The distance (in mm) the corner blend the planner fits may deviate
+#   from the commanded geometry at a corner. The blend geometry depends
+#   only on this knob — smoothing added by post-processor kernels
+#   (input shapers) is a separate effect on top, governed by the
+#   post-processor's own parameters. Corner speed is derived from this
+#   budget and the acceleration limit: at a fixed deviation, higher
+#   acceleration yields higher cornering speed. Set to zero to
 #   decelerate to a stop at every corner. The value may be changed at
 #   runtime using the SET_VELOCITY_LIMIT command. Mutually exclusive
 #   with square_corner_velocity. The default is the conversion of the

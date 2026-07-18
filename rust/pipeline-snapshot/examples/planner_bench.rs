@@ -22,6 +22,8 @@ const MAX_VELOCITY: f64 = 2800.0;
 const MAX_ACCEL: f64 = 100_000.0;
 const SCV: f64 = 70.0;
 
+use pipeline_snapshot::waypoints::Waypoint;
+
 static PLAN_COUNT: AtomicU64 = AtomicU64::new(0);
 static PLAN_US_TOTAL: AtomicU64 = AtomicU64::new(0);
 static PLAN_US_MAX: AtomicU64 = AtomicU64::new(0);
@@ -73,11 +75,11 @@ impl tracing::Subscriber for PlanCounter {
     fn exit(&self, _: &tracing::span::Id) {}
 }
 
-fn faceted_circles(loops: usize, radius_mm: f64, chord_mm: f64) -> Vec<(f64, f64, f64, f64, f64)> {
+fn faceted_circles(loops: usize, radius_mm: f64, chord_mm: f64) -> Vec<Waypoint> {
     let facets = ((2.0 * std::f64::consts::PI * radius_mm) / chord_mm).ceil() as usize;
     let mut wp = Vec::with_capacity(loops * facets + 1);
     let mut e = 0.0;
-    wp.push((radius_mm, 0.0, 0.2, e, MAX_VELOCITY));
+    wp.push((radius_mm, 0.0, 0.2, e, MAX_VELOCITY, MAX_ACCEL));
     for k in 1..=loops * facets {
         let theta = 2.0 * std::f64::consts::PI * (k as f64) / (facets as f64);
         e += chord_mm * 0.04;
@@ -87,15 +89,16 @@ fn faceted_circles(loops: usize, radius_mm: f64, chord_mm: f64) -> Vec<(f64, f64
             0.2,
             e,
             MAX_VELOCITY,
+            MAX_ACCEL,
         ));
     }
     wp
 }
 
-fn zigzag_infill(lines: usize, line_mm: f64, pitch_mm: f64) -> Vec<(f64, f64, f64, f64, f64)> {
+fn zigzag_infill(lines: usize, line_mm: f64, pitch_mm: f64) -> Vec<Waypoint> {
     let mut wp = Vec::with_capacity(2 * lines + 1);
     let mut e = 0.0;
-    wp.push((0.0, 0.0, 0.2, e, MAX_VELOCITY));
+    wp.push((0.0, 0.0, 0.2, e, MAX_VELOCITY, MAX_ACCEL));
     for i in 0..lines {
         let y = (i as f64) * pitch_mm;
         let (x0, x1) = if i % 2 == 0 {
@@ -104,10 +107,10 @@ fn zigzag_infill(lines: usize, line_mm: f64, pitch_mm: f64) -> Vec<(f64, f64, f6
             (line_mm, 0.0)
         };
         e += line_mm * 0.04;
-        wp.push((x1, y, 0.2, e, MAX_VELOCITY));
+        wp.push((x1, y, 0.2, e, MAX_VELOCITY, MAX_ACCEL));
         let _ = x0;
         e += pitch_mm * 0.04;
-        wp.push((x1, y + pitch_mm, 0.2, e, MAX_VELOCITY));
+        wp.push((x1, y + pitch_mm, 0.2, e, MAX_VELOCITY, MAX_ACCEL));
     }
     wp
 }
@@ -203,7 +206,7 @@ fn run_planner(items: Vec<StreamInput>, config: StreamConfig, trickle: bool) -> 
     }
 }
 
-fn bench(name: &str, waypoints: &[(f64, f64, f64, f64, f64)], jerk: f64, trickle: bool) {
+fn bench(name: &str, waypoints: &[Waypoint], jerk: f64, trickle: bool) {
     let config = stream_config(jerk);
     let moves = pipeline_snapshot::build_moves(waypoints, config.limits).expect("valid waypoints");
     let fit_start = Instant::now();

@@ -670,49 +670,44 @@ fn travel_corner_blends_without_followers() {
 }
 
 #[test]
-fn kernel_variance_deducts_from_the_corner_budget() {
-    let accel = 3000.0;
-    let scv = 5.0;
-    let delta = delta_of(accel, scv);
-    let moves = right_angle_corner(accel, scv, 50.0, 0.0);
-
-    let plain = fit_corners(&moves, CornerFitConfig::default()).unwrap();
-    let kernel_variance_s2 = delta / accel;
-    let shaped_config = CornerFitConfig {
-        kernel_variance_s2,
-        ..CornerFitConfig::default()
-    };
-    let shaped = fit_corners(&moves, shaped_config).unwrap();
-
+fn corner_blend_deviation_is_the_raw_budget_regardless_of_accel() {
+    let delta = 0.05;
     let vertex = [50.0, 0.0, 0.0];
-    let deviation_of = |out: &FitOutcome| {
+    let deviation_at = |accel: f64| {
+        let limits = VelocityLimits::try_new(200.0, accel, delta, 100_000.0).unwrap();
+        let m = |line_no, start, end| {
+            line_move(
+                start,
+                end,
+                0.0,
+                MoveContext {
+                    extruder_axis: E_AXIS,
+                    feedrate_mm_s: 100.0,
+                    limits,
+                    source: SourceRange {
+                        start_line: line_no,
+                        end_line: line_no,
+                    },
+                },
+            )
+            .unwrap()
+        };
+        let moves = vec![
+            m(1, [0.0, 0.0, 0.0], vertex),
+            m(2, vertex, [50.0, 50.0, 0.0]),
+        ];
+        let out = fit_corners(&moves, CornerFitConfig::default()).unwrap();
+        assert_eq!(out.report.blended, 1);
         let half1 = as_clothoid(&out.moves[1]);
         dist(vertex, half1.point_at(half1.s_len()))
     };
-    let plain_deviation = deviation_of(&plain);
-    let shaped_deviation = deviation_of(&shaped);
-    let expected = delta - kernel_corner_deviation_mm(kernel_variance_s2, accel);
-
-    assert!((plain_deviation - delta).abs() <= 1e-6 * delta);
+    let slow = deviation_at(1_000.0);
+    let fast = deviation_at(25_000.0);
+    assert!((slow - delta).abs() <= 1e-6 * delta, "slow dev {slow}");
     assert!(
-        (shaped_deviation - expected).abs() <= 1e-6 * expected,
-        "shaped deviation {shaped_deviation} should equal the reduced budget {expected}"
+        (fast - slow).abs() <= 1e-9,
+        "corner rounding must not depend on accel: {slow} vs {fast}"
     );
-    assert!(shaped_deviation < plain_deviation);
-}
-
-#[test]
-fn kernel_variance_exhausting_the_budget_leaves_the_corner_sharp() {
-    let accel = 3000.0;
-    let scv = 5.0;
-    let moves = right_angle_corner(accel, scv, 50.0, 0.0);
-    let config = CornerFitConfig {
-        kernel_variance_s2: 2.0 * delta_of(accel, scv) / accel,
-        ..CornerFitConfig::default()
-    };
-    let out = fit_corners(&moves, config).unwrap();
-    assert_eq!(out.report.blended, 0);
-    assert_eq!(out.report.unblended[0].reason, UnblendReason::ZeroDeviation);
 }
 
 fn merge_pair(prev: &Move, next: &Move) -> Option<Move> {

@@ -11,7 +11,7 @@ use crate::config::from_doc::read_motion_settings;
 #[pyfunction]
 pub(crate) fn pipeline_snapshot(
     py: Python<'_>,
-    waypoints: Vec<(f64, f64, f64, f64, f64)>,
+    waypoints: Vec<(f64, f64, f64, f64, f64, f64)>,
     config_text: &str,
 ) -> PyResult<Py<PyDict>> {
     let doc = config_doc::Document::parse(config_text, "<config>")

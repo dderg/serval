@@ -112,7 +112,7 @@ pub struct Snapshot {
 }
 
 pub fn pipeline_snapshot(
-    waypoints: &[(f64, f64, f64, f64, f64)],
+    waypoints: &[waypoints::Waypoint],
     params: SnapshotParams,
 ) -> Result<Snapshot, SnapshotError> {
     pipeline_snapshot_streaming(waypoints, params, usize::MAX, |_| {})
@@ -128,7 +128,7 @@ pub fn pipeline_snapshot(
 /// of the total work. The returned final snapshot is identical to what
 /// [`pipeline_snapshot`] produces for the same inputs.
 pub fn pipeline_snapshot_streaming(
-    waypoints: &[(f64, f64, f64, f64, f64)],
+    waypoints: &[waypoints::Waypoint],
     params: SnapshotParams,
     partial_batch_segments: usize,
     mut on_partial: impl FnMut(&Snapshot),
@@ -171,10 +171,7 @@ pub fn pipeline_snapshot_streaming(
     let raw_points = extract_raw_path(&moves);
 
     let axis_chains = build_axis_chains(&params).map_err(SnapshotError::InvalidChain)?;
-    let corner = geometry::CornerFitConfig {
-        kernel_variance_s2: axis_chains.max_spatial_kernel_variance_s2(),
-        ..geometry::CornerFitConfig::default()
-    };
+    let corner = geometry::CornerFitConfig::default();
     let config = StreamConfig {
         corner,
         integration_tol: VELOCITY_INTEGRATION_TOL,
@@ -235,20 +232,30 @@ fn snapshot_from_segments(
 }
 
 pub fn build_moves(
-    waypoints: &[(f64, f64, f64, f64, f64)],
+    waypoints: &[waypoints::Waypoint],
     limits: geometry::VelocityLimits,
 ) -> Result<Vec<geometry::Move>, SnapshotError> {
     let mut moves = Vec::with_capacity(waypoints.len() - 1);
     for (i, pair) in waypoints.windows(2).enumerate() {
-        let (x0, y0, z0, e0, _) = pair[0];
-        let (x1, y1, z1, e1, feedrate) = pair[1];
+        let (x0, y0, z0, e0, _, _) = pair[0];
+        let (x1, y1, z1, e1, feedrate, accel) = pair[1];
         let start = [x0, y0, z0];
         let end = [x1, y1, z1];
         let e_delta = e1 - e0;
+        let move_limits = geometry::VelocityLimits::try_new(
+            limits.max_velocity_mm_s,
+            accel,
+            limits.corner_deviation_mm,
+            limits.max_jerk_mm_s3,
+        )
+        .map_err(|e| SnapshotError::InvalidMove {
+            index: i,
+            detail: e.to_string(),
+        })?;
         let ctx = geometry::MoveContext {
             extruder_axis: EXTRUDER_AXIS,
             feedrate_mm_s: feedrate,
-            limits,
+            limits: move_limits,
             source: geometry::SourceRange {
                 start_line: i as u32,
                 end_line: i as u32,

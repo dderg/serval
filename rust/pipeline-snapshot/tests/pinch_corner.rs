@@ -26,7 +26,7 @@ fn stream_case(
         env!("CARGO_MANIFEST_DIR")
     );
     let text = std::fs::read_to_string(&path).expect("read case gcode");
-    let waypoints = parse_gcode(&text, max_velocity).expect("parse");
+    let waypoints = parse_gcode(&text, max_velocity, max_accel).expect("parse");
     let corner_deviation = geometry::corner_deviation_from_scv(scv, max_accel);
     let limits =
         geometry::VelocityLimits::try_new(max_velocity, max_accel, corner_deviation, max_jerk)
