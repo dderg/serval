@@ -89,7 +89,7 @@ def test_fan_changes_ride_the_print_queue(sim_world):
     # after the print drains the fan must hold the LAST value in stream
     # order — a dropped or reordered fence surfaces as a different value.
     world = sim_world(_cfg, dual_mcu=False)
-    world.gcode_ok("SET_KINEMATIC_POSITION X=10 Y=10 Z=5")
+    world.gcode_ok("G28", timeout=180)
     lines = []
     y = 10
     for s in (64, 128, 255, 0, 191):
@@ -102,6 +102,12 @@ def test_fan_changes_ride_the_print_queue(sim_world):
     path.write_text("\n".join(lines) + "\n")
 
     world.print_file(path, timeout=300)
+    # virtual_sdcard's "complete" fires once every line has been submitted
+    # to the engine, not once every queued side effect (the last M106's
+    # fence may still be armed behind the trailing moves) has resolved and
+    # reached the MCU; M400 drains the frontier and waits for the MCU
+    # clock to actually catch up, which the fence resolution precedes.
+    world.gcode_ok("M400", timeout=60)
 
     fan = world.status(objects={"fan": None})["fan"]
     assert fan["value"] == pytest.approx(191 / 255, abs=1e-3)
