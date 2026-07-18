@@ -393,6 +393,7 @@ dependencies = [
  "libm",
  "mcu-protocol",
  "mcu-transport",
+ "parking_lot",
  "runtime",
  "serde",
  "serde_json",
