@@ -11,6 +11,7 @@ use std::time::SystemTime;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::analyze::{build_run, write_run_outputs};
 use crate::assets;
@@ -21,7 +22,7 @@ use crate::results::Manifest;
 use crate::strain;
 use crate::time_fmt::iso8601_utc;
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, TS)]
 pub struct VerdictSummary {
     pub recommended_step: Option<String>,
     pub reason: String,
@@ -33,7 +34,7 @@ struct ResultsVerdictOnly {
     verdict: VerdictSummary,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema, TS)]
 pub struct RunSummary {
     pub name: String,
     pub mtime_utc: String,
@@ -274,9 +275,9 @@ struct NoteBody {
     note: String,
 }
 
-#[derive(Serialize, JsonSchema)]
-struct NoteResponse<'a> {
-    note: &'a str,
+#[derive(Serialize, JsonSchema, TS)]
+pub struct NoteResponse<'a> {
+    pub note: &'a str,
 }
 
 /// `POST /api/runs/<name>/note`: body `{"note": "..."}`. Writes
@@ -316,9 +317,9 @@ fn handle_note(captures_root: &Path, name: &str, body: &[u8]) -> Response {
     )
 }
 
-#[derive(Serialize, JsonSchema)]
-struct DeleteResponse<'a> {
-    deleted: &'a str,
+#[derive(Serialize, JsonSchema, TS)]
+pub struct DeleteResponse<'a> {
+    pub deleted: &'a str,
 }
 
 /// `DELETE /api/runs/<name>`: removes the run directory — manifest,
@@ -389,16 +390,16 @@ fn handle_strain(captures_root: &Path, name: &str) -> Response {
     Response::json(200, body)
 }
 
-#[derive(Serialize, JsonSchema)]
-struct LiveCapture<'a> {
-    name: Option<&'a str>,
-    size_bytes: u64,
-    age_s: Option<f64>,
+#[derive(Serialize, JsonSchema, TS)]
+pub struct LiveCapture<'a> {
+    pub name: Option<&'a str>,
+    pub size_bytes: u64,
+    pub age_s: Option<f64>,
 }
 
-#[derive(Serialize, JsonSchema)]
-struct LiveStatus<'a> {
-    capture: Option<LiveCapture<'a>>,
+#[derive(Serialize, JsonSchema, TS)]
+pub struct LiveStatus<'a> {
+    pub capture: Option<LiveCapture<'a>>,
 }
 
 /// Newest flat capture in the root, with its current size and age — the

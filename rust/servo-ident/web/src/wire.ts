@@ -1,16 +1,43 @@
-// Interim hand-written shapes of the server payloads. TODO(bindings): the
-// next phase replaces this whole file with TypeScript generated from the
-// Rust wire structs (results.rs / serve.rs schemars schemas).
+// Server payload types. Everything the Rust side derives `JsonSchema` on is
+// generated into ./generated/ by ts-rs (freshness-guarded by the
+// `ts_bindings` cargo test); the shapes below are only the payloads Rust
+// reads loosely (manifest passthrough, live tap, strain) and thin
+// server-side compositions like the drive_state `age_s` field.
 
-interface RunSummary {
-  name: string;
-  mtime_utc: string;
-  has_results: boolean;
-  experiment: string;
-  tag: string;
-  axis: string | null;
-  note: string | null;
-}
+import type { DriveStatePayload } from "./generated/DriveStatePayload";
+import type { Results } from "./generated/Results";
+
+export type { DifferentialMode, DifferentialMode as FrfMode } from "./generated/DifferentialMode";
+export type { DifferentialResult } from "./generated/DifferentialResult";
+export type { DriveResult, DriveResult as ResultDrive } from "./generated/DriveResult";
+export type { DriveStateParam, DriveStateParam as DriveParam } from "./generated/DriveStateParam";
+export type { LiveCapture } from "./generated/LiveCapture";
+export type { LiveStatus } from "./generated/LiveStatus";
+export type { Metrics, Metrics as DriveMetrics } from "./generated/Metrics";
+export type { Move, Move as MoveMetrics } from "./generated/Move";
+export type { NoteResponse, NoteResponse as NotePayload } from "./generated/NoteResponse";
+export type { PlotDifferential, PlotDifferential as DifferentialPlot } from "./generated/PlotDifferential";
+export type { PlotPsd, PlotPsd as PsdData } from "./generated/PlotPsd";
+export type { PlotRingdown, PlotRingdown as RingdownPlot } from "./generated/PlotRingdown";
+export type {
+  PlotRingdownSource,
+  PlotRingdownSource as RingdownSource,
+} from "./generated/PlotRingdownSource";
+export type { PlotSeries } from "./generated/PlotSeries";
+export type { PlotStep } from "./generated/PlotStep";
+export type { Results } from "./generated/Results";
+export type { RingdownMode } from "./generated/RingdownMode";
+export type { RunSummary } from "./generated/RunSummary";
+export type { StepResult, StepResult as ResultStep } from "./generated/StepResult";
+export type { TorqueSummary, TorqueSummary as TorqueMetrics } from "./generated/TorqueSummary";
+export type { VerdictSummary } from "./generated/VerdictSummary";
+
+// `handle_drive_state` serves `DriveStatePayload` from disk plus a
+// server-computed `age_s`.
+export type DriveState = DriveStatePayload & { age_s: number };
+
+// --- Payloads Rust does not model with schemars (manifest is a raw file
+// passthrough; live tap and strain are hand-built JSON) ---
 
 interface ManifestMotor {
   name: string;
@@ -61,144 +88,11 @@ interface Manifest {
   ambient?: ManifestAmbient | null;
 }
 
-interface MoveMetrics {
-  ferr_peak: number;
-  ferr_rms: number;
-  overshoot: number;
-  settle_ms: number | null;
-  settle_window_truncated: boolean;
-}
-
-interface TorqueMetrics {
-  peak_pct_rated: number;
-  rail_detected: boolean;
-  rail_pct_moving: number;
-  rail_ms: number;
-  longest_burst_ms: number;
-}
-
-interface DriveMetrics {
-  moves: MoveMetrics[];
-  torque: TorqueMetrics;
-}
-
-interface ResultDrive {
-  metrics: DriveMetrics;
-}
-
-interface DifferentialResult {
-  pair: string[];
-  segments: number;
-}
-
-interface ResultStep {
-  name: string;
-  flags: string[];
-  drives: Record<string, ResultDrive>;
-  differential?: DifferentialResult | null;
-}
-
-interface Results {
-  verdict: { recommended_step: string | null };
-  steps: ResultStep[];
-}
-
 interface RunDetail {
   mtime_utc: string;
   has_results: boolean;
   manifest: Manifest | null;
   results: Results | null;
-}
-
-interface PsdData {
-  freq_hz: number[];
-  per_drive: Record<string, number[]>;
-  accel?: { freq_hz: number[]; psd: number[] } | null;
-}
-
-interface FrfMode {
-  freq_hz: number;
-  gain_db: number;
-  damping: number | null;
-  coherence: number;
-}
-
-interface DifferentialPlot {
-  freq_hz: number[];
-  mag_db: number[];
-  phase_deg: number[];
-  coherence: number[];
-  torque_db: number[];
-  modes: FrfMode[];
-  coherence_min: number;
-}
-
-interface RingdownMode {
-  freq_hz: number;
-  zeta: number;
-  zeta_lo: number;
-  zeta_hi: number;
-  disp_um: number;
-  tails: number;
-  r2: number;
-  amp: number;
-  fit_start_ms: number;
-}
-
-interface RingdownSource {
-  source: string;
-  unit: string;
-  fs_hz: number;
-  tails: { value: number[] }[];
-  modes: RingdownMode[];
-  psd_freq_hz: number[];
-  psd: number[];
-}
-
-interface RingdownPlot {
-  sources: RingdownSource[];
-}
-
-interface PlotStep {
-  name: string;
-  t_s: number[];
-  drives: Record<string, { ferr_counts: number[] }>;
-  combined?: { on_ferr_mm: number[] } | null;
-  psd?: PsdData | null;
-  differential?: DifferentialPlot | null;
-  ringdown?: RingdownPlot | null;
-}
-
-interface PlotSeries {
-  steps: PlotStep[];
-}
-
-interface DriveParam {
-  name: string;
-  c_code: string;
-  group: string;
-  description: string;
-  unit?: string | null;
-  autofill?: string | null;
-  options?: Record<string, string> | null;
-}
-
-interface DriveState {
-  age_s: number;
-  params: DriveParam[];
-  motors: Record<string, Record<string, number>>;
-  config_pins: Record<string, Record<string, number | string>> | null;
-  slots?: Record<string, number> | null;
-}
-
-interface LiveCapture {
-  name: string;
-  age_s: number | null;
-  size_bytes: number;
-}
-
-interface LiveStatus {
-  capture: LiveCapture | null;
 }
 
 interface LiveTapPayload {
@@ -230,42 +124,17 @@ interface StrainData {
   lines: StrainLine[];
 }
 
-interface NotePayload {
-  note: string | null;
-}
-
 export type {
-  RunSummary,
   ManifestMotor,
   StrokePlan,
   ManifestStep,
   NotchStateValue,
   ManifestAmbient,
   Manifest,
-  MoveMetrics,
-  TorqueMetrics,
-  DriveMetrics,
-  ResultDrive,
-  DifferentialResult,
-  ResultStep,
-  Results,
   RunDetail,
-  PsdData,
-  FrfMode,
-  DifferentialPlot,
-  RingdownMode,
-  RingdownSource,
-  RingdownPlot,
-  PlotStep,
-  PlotSeries,
-  DriveParam,
-  DriveState,
-  LiveCapture,
-  LiveStatus,
   LiveTapPayload,
   StrainField,
   StrainBelt,
   StrainLine,
   StrainData,
-  NotePayload,
 };

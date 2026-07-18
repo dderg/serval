@@ -9,12 +9,13 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 pub const RESONANCE_BAND_HZ: (f64, f64) = (20.0, 450.0);
 pub const LOW_BAND_HZ: (f64, f64) = (1.0, 4.0);
 pub const RESONANCE_RATIO_LIMIT: f64 = 8.0;
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, TS)]
 pub struct Resonance {
     pub detected: bool,
     pub ratio: f64,

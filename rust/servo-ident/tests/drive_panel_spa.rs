@@ -16,11 +16,13 @@ use serde_json::Value;
 
 use servo_ident::demo::build_demo;
 
-fn all_js() -> String {
-    let src_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web/src");
-    let mut sources = Vec::new();
-    for entry in std::fs::read_dir(&src_dir).expect("read web/src") {
+fn collect_ts(dir: &std::path::Path, sources: &mut Vec<String>) {
+    for entry in std::fs::read_dir(dir).expect("read web/src dir") {
         let path = entry.expect("read web/src entry").path();
+        if path.is_dir() {
+            collect_ts(&path, sources);
+            continue;
+        }
         assert_eq!(
             path.extension().and_then(|e| e.to_str()),
             Some("ts"),
@@ -29,6 +31,12 @@ fn all_js() -> String {
         );
         sources.push(std::fs::read_to_string(&path).expect("read web/src module"));
     }
+}
+
+fn all_js() -> String {
+    let src_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web/src");
+    let mut sources = Vec::new();
+    collect_ts(&src_dir, &mut sources);
     assert!(!sources.is_empty(), "no modules found in web/src");
     sources.join("\n")
 }

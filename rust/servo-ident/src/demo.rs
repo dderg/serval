@@ -21,6 +21,7 @@ use core::f64::consts::PI;
 use flate2::read::GzDecoder;
 use schemars::JsonSchema;
 use serde::Serialize;
+use ts_rs::TS;
 
 use crate::analyze::{build_run, write_run_outputs};
 use crate::metrics::target_motion_segments;
@@ -306,8 +307,8 @@ const DEMO_DISAGREEING_VALUE: i64 = 400;
 /// live won't survive a restart until the config is updated too.
 const DEMO_PINNED_C_CODES: [&str; 2] = ["C00.04", "C00.06"];
 
-#[derive(Debug, Serialize, JsonSchema)]
-struct DriveStateParam {
+#[derive(Debug, Serialize, JsonSchema, TS)]
+pub struct DriveStateParam {
     name: String,
     c_code: String,
     addr: String,
@@ -341,8 +342,8 @@ impl From<&DemoPanelParam> for DriveStateParam {
     }
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
-struct DriveStatePayload {
+#[derive(Debug, Serialize, JsonSchema, TS)]
+pub struct DriveStatePayload {
     version: i64,
     created_utc: String,
     params: Vec<DriveStateParam>,
@@ -537,7 +538,7 @@ fn inject_decaying_resonance(bytes: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema, TS)]
 struct DemoStrokePlan {
     start: f64,
     end: f64,
@@ -547,7 +548,7 @@ struct DemoStrokePlan {
     dwell_ms: i64,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema, TS)]
 struct DemoMotorSpec {
     name: &'static str,
     invert: bool,
@@ -582,14 +583,14 @@ const DEMO_MOTOR_SPECS: [DemoMotorSpec; 4] = [
     },
 ];
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema, TS)]
 struct DemoSweptGains {
     position: i64,
     speed: i64,
     integral: i64,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema, TS)]
 struct DemoStep {
     name: &'static str,
     swept: DemoSweptGains,
@@ -598,7 +599,7 @@ struct DemoStep {
     accel: &'static str,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema, TS)]
 struct DemoParamWrite {
     servo: &'static str,
     addr: &'static str,
@@ -606,13 +607,13 @@ struct DemoParamWrite {
     time_utc: String,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema, TS)]
 struct DemoAmbient {
     journal_params: BTreeMap<String, BTreeMap<String, i64>>,
     param_writes_since_last_run: Vec<DemoParamWrite>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema, TS)]
 struct DemoManifest {
     version: i64,
     experiment: &'static str,
