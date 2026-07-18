@@ -15,14 +15,14 @@ struct digital_out_s {
     struct timer timer;
     uint32_t on_duration, off_duration, end_time;
     struct gpio_out pin;
-    uint32_t max_duration, cycle_time;
+    uint32_t max_duration, next_cycle_time;
     struct move_queue_head mq;
     uint8_t flags;
 };
 
 struct digital_move {
     struct move_node node;
-    uint32_t waketime, on_duration;
+    uint32_t waketime, on_duration, cycle_time;
 };
 
 enum {
@@ -62,14 +62,14 @@ digital_load_event(struct timer *timer)
         shutdown("Missed scheduling of next digital out event");
     struct move_node *mn = move_queue_pop(&d->mq);
     struct digital_move *m = container_of(mn, struct digital_move, node);
-    uint32_t on_duration = m->on_duration;
+    uint32_t on_duration = m->on_duration, cycle_time = m->cycle_time;
     uint8_t flags = on_duration ? DF_ON : 0;
     gpio_out_write(d->pin, flags);
     move_free(m);
 
     // Calculate next end_time and flags
     uint32_t end_time = 0;
-    if (!flags || on_duration >= d->cycle_time) {
+    if (!flags || on_duration >= cycle_time) {
         // Pin is in an always on or always off state
         if (!flags != !(d->flags & DF_DEFAULT_ON) && d->max_duration) {
             end_time = d->timer.waketime + d->max_duration;
@@ -109,7 +109,7 @@ digital_load_event(struct timer *timer)
     d->timer.func = digital_toggle_event;
     d->timer.waketime = waketime;
     d->on_duration = on_duration;
-    d->off_duration = d->cycle_time - on_duration;
+    d->off_duration = cycle_time - on_duration;
     return SF_RESCHEDULE;
 }
 
@@ -128,15 +128,15 @@ DECL_COMMAND(command_config_digital_out,
              "config_digital_out oid=%c pin=%u value=%c"
              " default_value=%c max_duration=%u");
 
+// The cycle time is stamped onto each queued update (and applied when
+// that update loads) rather than written to shared state here: an
+// immediate write would race any queued-but-not-yet-loaded update that
+// was computed against the previous cycle time.
 void
 command_set_digital_out_pwm_cycle(uint32_t *args)
 {
     struct digital_out_s *d = oid_lookup(args[0], command_config_digital_out);
-    irq_disable();
-    if (!move_queue_empty(&d->mq))
-        shutdown("Can not set soft pwm cycle ticks while updates pending");
-    d->cycle_time = args[1];
-    irq_enable();
+    d->next_cycle_time = args[1];
 }
 DECL_COMMAND(command_set_digital_out_pwm_cycle,
              "set_digital_out_pwm_cycle oid=%c cycle_ticks=%u");
@@ -148,6 +148,7 @@ command_queue_digital_out(uint32_t *args)
     struct digital_move *m = move_alloc();
     uint32_t time = m->waketime = args[1];
     m->on_duration = args[2];
+    m->cycle_time = d->next_cycle_time;
 
     irq_disable();
     int first_on_queue = move_queue_push(&m->node, &d->mq);
