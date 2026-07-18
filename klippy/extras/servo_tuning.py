@@ -216,13 +216,6 @@ PANEL_PARAMS: tuple[PanelParam, ...] = (
             "(manual 7.12)"
         ),
     ),
-    PanelParam(
-        name="inertia_ratio",
-        c_code="C00.06",
-        unit="%",
-        group="load",
-        description="C00.06 load inertia ratio",
-    ),
 )
 
 

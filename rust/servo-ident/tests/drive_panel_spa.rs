@@ -206,7 +206,6 @@ fn demo_drive_state_matches_panel_rendering_assumptions() {
         "notch",
         "speed_observer",
         "disturbance_observer",
-        "load",
     ]
     .into();
     let params = drive_state["params"].as_array().unwrap();

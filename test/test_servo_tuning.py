@@ -633,11 +633,10 @@ def test_dump_tuning_writes_expected_json(tmp_path):
     assert len(payload["params"]) == len(servo_tuning.PANEL_PARAMS)
     param_names = {p["name"] for p in payload["params"]}
     assert "position_gain" in param_names
-    addr_by_name = {p["name"]: p["addr"] for p in payload["params"]}
-    assert addr_by_name["inertia_ratio"] == "0x2000.0x07"
+    assert "inertia_ratio" not in param_names
     assert payload["motors"]["motor_a"]["C01.01"] == 550
-    assert payload["motors"]["motor_b"]["C00.06"] == 150
-    assert payload["config_pins"]["motor_a"] == {"C00.06": 150}
+    assert "C00.06" not in payload["motors"]["motor_b"]
+    assert payload["config_pins"]["motor_a"] == {}
     assert payload["config_pins"]["motor_b"] == {"C01.00": 700}
     assert payload["slots"] == {"motor_a": 0, "motor_b": 1}
     assert payload["spatial"] == {

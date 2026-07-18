@@ -231,15 +231,6 @@ fn demo_panel_params() -> Vec<DemoPanelParam> {
             150,
         ),
     ]);
-    params.push(plain_param(
-        "inertia_ratio",
-        "C00.06",
-        "0x2000.0x07",
-        "%",
-        "load",
-        "C00.06 load inertia ratio",
-        150,
-    ));
     params
 }
 
@@ -251,10 +242,11 @@ const DEMO_DISAGREEING_C_CODE: &str = "C01.40";
 const DEMO_DISAGREEING_MOTOR: &str = "motor_b";
 const DEMO_DISAGREEING_VALUE: i64 = 400;
 
-/// `inertia_ratio` (C00.06) is pinned in every demo motor's `[motor]
-/// params:` block — the panel's cue that editing it live won't survive a
-/// restart until the config is updated too.
-const DEMO_PINNED_C_CODES: [&str; 1] = ["C00.06"];
+/// C-codes pinned in every demo motor's `[motor] params:` block — the
+/// panel's cue that editing them live won't survive a restart until the
+/// config is updated too. Currently none, but the demo keeps exercising
+/// the mechanism end-to-end.
+const DEMO_PINNED_C_CODES: [&str; 0] = [];
 
 #[derive(Debug, Serialize, JsonSchema, TS)]
 pub struct DriveStateParam {
