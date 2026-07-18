@@ -1,10 +1,11 @@
 import { mustEl } from "./api";
 import { fetchMacroHelp, loadCachedMacroHelp } from "./docs";
 import { renderDriveBanner, loadDriveState } from "./drive";
+import { pollRtHealth } from "./live";
 import { pollMoonrakerHealth, emergencyStop } from "./moonraker";
 import { refresh } from "./runs";
 import { pageFromHash, bindAccordionToggle, renderPage } from "./shell";
-import { REFRESH_MS, MOONRAKER_KEY, MOONRAKER_HEALTH_POLL_MS, state } from "./state";
+import { REFRESH_MS, MOONRAKER_KEY, MOONRAKER_HEALTH_POLL_MS, RT_HEALTH_POLL_MS, state } from "./state";
 
 // --- boot -------------------------------------------------------------------
 
@@ -21,6 +22,8 @@ function initShell() {
   fetchMacroHelp();
   pollMoonrakerHealth();
   setInterval(pollMoonrakerHealth, MOONRAKER_HEALTH_POLL_MS);
+  pollRtHealth();
+  setInterval(pollRtHealth, RT_HEALTH_POLL_MS);
   bindAccordionToggle();
   window.addEventListener("hashchange", () => {
     state.page = pageFromHash();

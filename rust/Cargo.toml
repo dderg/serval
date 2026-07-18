@@ -154,10 +154,12 @@ unnecessary_cast = "allow"
 # `[profile.release-mcu]` or per-package profile when it lands; size matters
 # on the H723/F4x targets.
 opt-level = 3
-lto = "fat"
-# 16 codegen units parallelize the per-crate compile; fat LTO then merges
-# every unit back into one module and re-optimizes it whole, so the final
-# code is the same as codegen-units = 1 — only the build gets faster.
+# Thin, not fat: fat LTO re-optimizes the whole merged module on one thread
+# on every build, which dominates on-printer (Pi) build time. The snapshot
+# profile already validates that planner output is bit-exact with LTO off
+# entirely, and no measured hot path here is within a few percent of a
+# deadline, so fat's residual edge over thin buys nothing we can observe.
+lto = "thin"
 codegen-units = 16
 panic = "abort"
 debug = true

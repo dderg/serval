@@ -70,6 +70,7 @@ pub struct EndpointCtx {
     mailbox: MailboxWorker,
     pending_starts: Vec<(u32, String, PendingStart)>,
     pending_stops: Vec<(u32, PendingStop)>,
+    pending_seed: Option<commands::PendingSeed>,
     capture_slots: Vec<u8>,
     prdiv: u64,
     ff_saturation: u32,
@@ -77,6 +78,17 @@ pub struct EndpointCtx {
     latched_drive_err: u16,
     sensorless: SensorlessBank,
     stream_halt: StreamHalt,
+    late_tolerance_ns: Option<i64>,
+    timing_armed: bool,
+    baseline_reanchor_count: u32,
+    late_frames: u32,
+    late_max_ns: i64,
+    skip_count_policed: u32,
+    late_frames_total: u32,
+    last_lateness_ns: i64,
+    last_dispatch_ns: i64,
+    last_pre_work_ns: i64,
+    prev_exchange_ns: i64,
 }
 
 pub fn run(ctx: &mut EndpointCtx) {
@@ -102,12 +114,17 @@ pub fn run(ctx: &mut EndpointCtx) {
             break;
         }
 
+        let pre_work = std::time::Instant::now();
         if commands::dispatch_commands(ctx).is_break() {
             break 'dc;
         }
+        let dispatch_ns = pre_work.elapsed().as_nanos() as i64;
         commands::drain_pending_starts(ctx);
         commands::drain_pending_stops(ctx);
+        commands::drain_pending_seed(ctx);
         commands::drain_mailbox_replies(ctx);
+        ctx.last_dispatch_ns = dispatch_ns;
+        ctx.last_pre_work_ns = pre_work.elapsed().as_nanos() as i64;
 
         if cycle::run_cycle(ctx).is_break() {
             break;

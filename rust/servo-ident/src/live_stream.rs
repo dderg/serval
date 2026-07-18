@@ -89,6 +89,14 @@ struct Stream {
     sign: Vec<i64>,
     counts_per_mm: Vec<f64>,
     ring: Ring,
+    timing: Option<Timing>,
+}
+
+#[derive(Clone, Copy)]
+struct Timing {
+    skips: u32,
+    late_frames: u32,
+    lateness_ns: i32,
 }
 
 struct Ring {
@@ -182,11 +190,9 @@ fn fs_hz(cycle_ns: u64) -> f64 {
 }
 
 fn attach_payload(stream: &Stream) -> serde_json::Value {
-    let newest = *stream
-        .ring
-        .cycle
-        .back()
-        .expect("attach_payload requires a non-empty ring");
+    let Some(&newest) = stream.ring.cycle.back() else {
+        return json!({ "status": "connecting" });
+    };
     json!({
         "status": "streaming",
         "fs_hz": fs_hz(stream.cycle_ns),
@@ -194,7 +200,19 @@ fn attach_payload(stream: &Stream) -> serde_json::Value {
         "drive_names": stream.drive_names,
         "counts_per_mm": stream.counts_per_mm,
         "next_cycle": newest,
+        "timing": timing_json(stream),
     })
+}
+
+fn timing_json(stream: &Stream) -> serde_json::Value {
+    match stream.timing {
+        Some(t) => json!({
+            "skips": t.skips,
+            "late_frames": t.late_frames,
+            "lateness_ns": t.lateness_ns,
+        }),
+        None => serde_json::Value::Null,
+    }
 }
 
 fn samples_payload(stream: &Stream, since: u64) -> serde_json::Value {
@@ -240,6 +258,7 @@ fn samples_payload(stream: &Stream, since: u64) -> serde_json::Value {
         "stride": stride,
         "drives": drives,
         "moving": moving,
+        "timing": timing_json(stream),
     })
 }
 
@@ -300,6 +319,7 @@ fn run_session(shared: &Shared) -> Result<SessionEnd, String> {
                 .collect(),
             counts_per_mm: header.drives.iter().map(|d| d.counts_per_mm).collect(),
             ring: Ring::new(&header),
+            timing: None,
         });
     }
     let mut record = vec![0u8; header.record_size];
@@ -388,6 +408,10 @@ struct RecordLayout {
     torque: Vec<Slot>,
     target: Vec<Slot>,
     pos: Vec<Slot>,
+    /// RT-loop health counters — absent on captures from older endpoints.
+    skip_count: Option<Slot>,
+    late_frames: Option<Slot>,
+    frame_lateness_ns: Option<Slot>,
 }
 
 impl RecordLayout {
@@ -420,6 +444,9 @@ impl RecordLayout {
             torque: per_drive("torque_actual")?,
             target: per_drive("target_counts")?,
             pos: per_drive("position_actual")?,
+            skip_count: prefix("skip_count").ok(),
+            late_frames: prefix("late_frames").ok(),
+            frame_lateness_ns: prefix("frame_lateness_ns").ok(),
         })
     }
 }
@@ -460,5 +487,16 @@ fn append_record(
         ring.pos[drive].push_back(slot.read(record) as i32);
     }
     ring.trim();
+    if let (Some(sk), Some(lf), Some(ln)) = (
+        &layout.skip_count,
+        &layout.late_frames,
+        &layout.frame_lateness_ns,
+    ) {
+        stream.timing = Some(Timing {
+            skips: sk.read(record) as u32,
+            late_frames: lf.read(record) as u32,
+            lateness_ns: ln.read(record) as i32,
+        });
+    }
     Ok(Step::Ready(()))
 }

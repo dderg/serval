@@ -16,15 +16,22 @@ interface PickedSeries {
   ramp: number;
 }
 
+function motorVisible(drive: string): boolean {
+  return !state.motorFilter || state.motorFilter.has(drive);
+}
+
 function pickSeries(runName: string, step: PlotStep): PickedSeries[] {
   if (motorViewPerMotor()) {
     const drives = Object.entries(step.drives);
-    return drives.map(([drive, d], k) => ({
-      y: d.ferr_counts.map((c) => c * (1000 / countsPerMm(runName, drive))),
-      label: "ferr (µm)",
-      suffix: ` (${drive})`,
-      ramp: driveRamp(drives.length, k),
-    }));
+    return drives
+      .map(([drive, d], k) => ({
+        y: d.ferr_counts.map((c) => c * (1000 / countsPerMm(runName, drive))),
+        label: "ferr (µm)",
+        suffix: ` (${drive})`,
+        drive,
+        ramp: driveRamp(drives.length, k),
+      }))
+      .filter((s) => motorVisible(s.drive));
   }
   if (step.combined) {
     return [{ y: step.combined.on_ferr_mm, label: "on-axis ferr (mm)", suffix: "", ramp: 0 }];
@@ -59,93 +66,11 @@ function hidpiCanvasContext(canvas: HTMLCanvasElement): { ctx: CanvasRenderingCo
   return { ctx, w, h };
 }
 
-interface CanvasTrace {
-  t: number[];
-  y: (number | null)[];
-  color: string;
-  dash?: number[];
-}
-
-function drawChart(
-  canvas: HTMLCanvasElement,
-  traces: CanvasTrace[],
-  yLabel: string,
-  fixedY: { yMin: number; yMax: number } | null,
-  xUnit?: string | null
-) {
-  const { ctx, w, h } = hidpiCanvasContext(canvas);
-  ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = "#0d1117";
-  ctx.fillRect(0, 0, w, h);
-  const pad = { l: 46, r: 8, t: 8, b: 22 };
-  let tMin = Infinity, tMax = -Infinity, yMin = Infinity, yMax = -Infinity;
-  for (const tr of traces) {
-    for (let i = 0; i < tr.t.length; i++) {
-      const v = tr.y[i];
-      if (v === null) continue;
-      tMin = Math.min(tMin, tr.t[i]);
-      tMax = Math.max(tMax, tr.t[i]);
-      yMin = Math.min(yMin, v);
-      yMax = Math.max(yMax, v);
-    }
-  }
-  if (fixedY) {
-    yMin = fixedY.yMin;
-    yMax = fixedY.yMax;
-  }
-  if (!isFinite(tMin) || !isFinite(yMin)) return;
-  if (yMin === yMax) { yMin -= 1; yMax += 1; }
-  const x = (t: number) => pad.l + ((t - tMin) / (tMax - tMin || 1)) * (w - pad.l - pad.r);
-  const y = (v: number) => h - pad.b - ((v - yMin) / (yMax - yMin || 1)) * (h - pad.t - pad.b);
-
-  const fmtTick = (v: number, span: number) => (Math.abs(span) >= 20 ? v.toFixed(0) : v.toFixed(2));
-  ctx.strokeStyle = "#29313a";
-  ctx.fillStyle = "#8a97a3";
-  ctx.font = "10px monospace";
-  ctx.beginPath();
-  for (let i = 0; i <= 4; i++) {
-    const v = yMin + ((yMax - yMin) * i) / 4;
-    const py = y(v);
-    ctx.moveTo(pad.l, py);
-    ctx.lineTo(w - pad.r, py);
-    ctx.fillText(fmtTick(v, yMax - yMin), 2, py + 3);
-  }
-  for (let i = 0; i <= 4; i++) {
-    const t = tMin + ((tMax - tMin) * i) / 4;
-    const px = x(t);
-    ctx.fillText(fmtTick(t, tMax - tMin) + (xUnit == null ? "s" : xUnit), px, h - 6);
-  }
-  ctx.stroke();
-
-  for (const tr of traces) {
-    ctx.strokeStyle = tr.color;
-    ctx.lineWidth = 1.25;
-    ctx.setLineDash(tr.dash || []);
-    ctx.beginPath();
-    let penDown = false;
-    for (let i = 0; i < tr.t.length; i++) {
-      const v = tr.y[i];
-      if (v === null) {
-        penDown = false;
-        continue;
-      }
-      const px = x(tr.t[i]);
-      const py = y(v);
-      if (penDown) ctx.lineTo(px, py);
-      else ctx.moveTo(px, py);
-      penDown = true;
-    }
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
-  ctx.fillStyle = "#8a97a3";
-  ctx.fillText(yLabel, pad.l, 10);
-}
-
 function drawTimeDomain(names: string[], plots: PlotSeries[], steps: string[]) {
   const container = el("charts");
   if (!container) return;
-  const sig = { runs: runDataSig(names), steps, perMotor: motorViewPerMotor() };
+  const motorFilter = state.motorFilter ? [...state.motorFilter] : null;
+  const sig = { runs: runDataSig(names), steps, perMotor: motorViewPerMotor(), motorFilter };
   if (payloadUnchanged("time-domain", sig)) return;
   container.innerHTML = "";
   if (names.length === 0) {
@@ -171,7 +96,8 @@ function drawTimeDomain(names: string[], plots: PlotSeries[], steps: string[]) {
       for (const series of pickSeries(names[i], step)) {
         yLabel = series.label;
         const color = mixColor(runColor(names[i]), "#ffffff", series.ramp);
-        traces.push({ t: step.t_s, y: series.y, color });
+        const hoverLabel = (names.length > 1 ? names[i] : "") + series.suffix;
+        traces.push({ t: step.t_s, y: series.y, color, label: hoverLabel.trim() });
         const item = document.createElement("span");
         item.innerHTML =
           `<span class="swatch" style="background:${color}"></span>` +
@@ -185,6 +111,7 @@ function drawTimeDomain(names: string[], plots: PlotSeries[], steps: string[]) {
         height: 200,
         yLabel,
         traces,
+        hover: true,
       });
     }
     box.appendChild(legend);
@@ -290,4 +217,4 @@ function countsPerMm(runName: string, driveName: string): number {
   return motor.counts_per_mm;
 }
 
-export { pickSeries, hidpiCanvasContext, drawChart, drawTimeDomain, newestSelectedRunName, peakStep, mixColor, traceStyle, psdMaxFreqHz, clipToPsdBand, WELCH_HANN_ENBW_BINS, psdToAmplitude, countsPerMm };
+export { pickSeries, hidpiCanvasContext, drawTimeDomain, newestSelectedRunName, peakStep, mixColor, traceStyle, psdMaxFreqHz, clipToPsdBand, WELCH_HANN_ENBW_BINS, psdToAmplitude, countsPerMm };

@@ -532,6 +532,48 @@ function visibleStepNames(stepNames: string[]): string[] {
 /// domain, metrics), so its chips render into every section that has a
 /// container for them — otherwise a filter picked on one page silently
 /// shapes another page's chart with no control in sight.
+/// Motor chips gate which drives the per-motor time charts draw; the combined
+/// view folds drives together, so the chips vanish outside per-motor mode.
+function renderMotorChips(motorNames: string[]) {
+  const container = el("time-motor-chips");
+  if (!container) return;
+  const show = motorViewPerMotor() && motorNames.length > 1;
+  const filter = state.motorFilter ? [...state.motorFilter] : null;
+  if (payloadUnchanged("time-motor-chips", { motorNames, filter, show })) return;
+  container.innerHTML = "";
+  if (!show) return;
+  const all = document.createElement("button");
+  all.className = "chip" + (state.motorFilter ? "" : " active");
+  all.textContent = "all motors";
+  all.title = "show every motor";
+  all.addEventListener("click", () => {
+    state.motorFilter = null;
+    redrawCharts();
+  });
+  container.appendChild(all);
+  for (const motor of motorNames) {
+    const chip = document.createElement("button");
+    const inFilter = state.motorFilter && state.motorFilter.has(motor);
+    chip.className = "chip" + (inFilter ? " active" : "");
+    chip.textContent = motor;
+    chip.title = "click: only this motor — shift+click: add/remove it";
+    chip.addEventListener("click", (ev) => {
+      if (ev.shiftKey) {
+        const next = new Set(state.motorFilter || motorNames);
+        if (next.has(motor)) next.delete(motor);
+        else next.add(motor);
+        state.motorFilter = next.size === 0 || next.size === motorNames.length ? null : next;
+      } else if (inFilter && state.motorFilter && state.motorFilter.size === 1) {
+        state.motorFilter = null;
+      } else {
+        state.motorFilter = new Set([motor]);
+      }
+      redrawCharts();
+    });
+    container.appendChild(chip);
+  }
+}
+
 function renderStepChips(stepNames: string[]) {
   for (const id of ["psd-step-chips", "time-step-chips"]) {
     const container = el(id);
@@ -577,4 +619,4 @@ function fillStepChips(container: HTMLElement, stepNames: string[]) {
 }
 
 export type { MetricsRow, PsdBoxOpts, SweepSeries };
-export { driveMoveSummary, settleCellHtml, torqueCellHtml, metricsDriveRow, foldDriveRows, metricsTableRows, heatCellStyle, renderMetricsTable, sweptAxisKey, sweepMetricsSeries, renderSweepMetricsChart, driveRamp, psdFerrUm2, psdFerrTraces, psdAccelTraces, fmtLinear, psdBox, renderPsdChart, visibleStepNames, renderStepChips, fillStepChips };
+export { driveMoveSummary, settleCellHtml, torqueCellHtml, metricsDriveRow, foldDriveRows, metricsTableRows, heatCellStyle, renderMetricsTable, sweptAxisKey, sweepMetricsSeries, renderSweepMetricsChart, driveRamp, psdFerrUm2, psdFerrTraces, psdAccelTraces, fmtLinear, psdBox, renderPsdChart, visibleStepNames, renderStepChips, renderMotorChips, fillStepChips };

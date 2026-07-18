@@ -54,8 +54,13 @@ pub(super) fn run_cycle(ctx: &mut EndpointCtx) -> ControlFlow<()> {
 
     handle_ring_fault(ctx);
 
+    let exchange = std::time::Instant::now();
     let (wkc, toff) = ctx.drive.cycle();
+    let exchange_ns = exchange.elapsed().as_nanos() as i64;
 
+    ctx.last_lateness_ns = toff;
+    police_frame_timing(ctx, toff);
+    ctx.prev_exchange_ns = exchange_ns;
     handle_drive_fault(ctx);
 
     ctx.cycle_index += 1;
@@ -111,7 +116,7 @@ fn poll_sensorless(ctx: &mut EndpointCtx, apply_time: u64) {
         |slot| drive.position_actual(slot),
         |slot, endstop_id, torque, contact_clock| {
             let windup_ns = apply_time.saturating_sub(contact_clock);
-            eprintln!(
+            crate::rt_eprintln!(
                 "ec-rt: sensorless endstop {endstop_id} tripped on slot {slot} \
                  torque={torque} — local stop, stream halted, \
                  contact_clock={contact_clock} ({windup_ns} ns before the trip)"
@@ -149,7 +154,7 @@ pub(super) fn compute_motion_targets(
     let mut all_vel = vec![0f32; num_slaves];
     if ctx.gate.state() != TorqueState::Enabled && ctx.buzz.active() {
         ctx.buzz.clear();
-        eprintln!("ec-rt: buzz cleared — torque gate left Enabled mid-buzz");
+        crate::rt_eprintln!("ec-rt: buzz cleared — torque gate left Enabled mid-buzz");
     }
     if ctx.gate.state() == TorqueState::Enabled {
         let mut lane_mm = vec![None; num_slaves];
@@ -472,7 +477,7 @@ fn emit_slot_commands(
 }
 
 fn fault_non_finite_torque(ctx: &mut EndpointCtx, slot: usize, acc: f32, vel: f32) -> ! {
-    eprintln!(
+    crate::rt_eprintln!(
         "ec-rt: FAULT non-finite torque FF on slot {slot} \
          (acc={acc} vel={vel}) — disabling"
     );
@@ -529,7 +534,7 @@ fn handle_drive_fault(ctx: &mut EndpointCtx) {
     });
     if let Some((slot, err)) = drive_fault {
         if ctx.gate.state() != TorqueState::Faulted {
-            eprintln!(
+            crate::rt_eprintln!(
                 "ec-rt: DRIVE FAULT slot {slot} err=0x{err:04x} — parking, reporting via heartbeat"
             );
             for d in 0..num_slaves {
@@ -558,6 +563,91 @@ fn handle_drive_fault(ctx: &mut EndpointCtx) {
     }
 }
 
+pub(super) const FRAME_LATE_FAULT_CODE: u16 = 0xFE10;
+pub(super) const CYCLE_SKIP_FAULT_CODE: u16 = 0xFE11;
+
+/// The cycle reports each frame's lateness relative to the SYNC0 latch (wake
+/// grid + half cycle — overrun skips stay on the grid, so the phase holds all
+/// run); positive means the drives latched last cycle's target. A skip means
+/// whole cycles went by with no frame at all — the drives coasted on a stale
+/// target — so it faults whenever a tolerance is set, regardless of the
+/// lateness measured on the cycle that finally ran.
+///
+/// The first cycle only arms: the gap between the last bringup exchange and
+/// the loop's first wake always costs one catch-up skip, which is benign —
+/// nothing is armed yet and the grid phase is preserved.
+pub(super) fn police_frame_timing(ctx: &mut EndpointCtx, lateness_ns: i64) {
+    let reanchors = ctx.drive.reanchor_count();
+    if !ctx.timing_armed {
+        ctx.timing_armed = true;
+        ctx.baseline_reanchor_count = reanchors;
+        return;
+    }
+    let reanchored = reanchors != ctx.baseline_reanchor_count;
+    if reanchored {
+        ctx.skip_count_policed = ctx
+            .skip_count_policed
+            .wrapping_add(reanchors.wrapping_sub(ctx.baseline_reanchor_count));
+        ctx.baseline_reanchor_count = reanchors;
+        tracing::error!(
+            subsystem = "ethercat",
+            event = "cycle_skip",
+            total = reanchors,
+            dispatch_ns = ctx.last_dispatch_ns,
+            pre_work_ns = ctx.last_pre_work_ns,
+            prev_exchange_ns = ctx.prev_exchange_ns,
+            "cycle overran a full period and skipped forward on the grid — \
+             the drives coasted on a stale target for the missed cycles \
+             (dispatch/pre-work are this iteration's stage durations; \
+             prev_exchange is the prior DC exchange incl. its sleep)"
+        );
+    }
+    if lateness_ns > 0 {
+        ctx.late_frames += 1;
+        ctx.late_frames_total = ctx.late_frames_total.wrapping_add(1);
+        ctx.late_max_ns = ctx.late_max_ns.max(lateness_ns);
+    }
+    let Some(tolerance_ns) = ctx.late_tolerance_ns else {
+        return;
+    };
+    if ctx.gate.state() == TorqueState::Faulted {
+        return;
+    }
+    let code = if reanchored {
+        CYCLE_SKIP_FAULT_CODE
+    } else if lateness_ns > tolerance_ns {
+        FRAME_LATE_FAULT_CODE
+    } else {
+        return;
+    };
+    crate::rt_eprintln!(
+        "ec-rt: FRAME TIMING FAULT lateness={lateness_ns} ns \
+         tolerance={tolerance_ns} ns reanchored={reanchored} — parking, \
+         reporting via heartbeat"
+    );
+    tracing::error!(
+        subsystem = "ethercat",
+        event = "frame_timing_fault",
+        lateness_ns,
+        tolerance_ns,
+        reanchored,
+        code,
+        dispatch_ns = ctx.last_dispatch_ns,
+        pre_work_ns = ctx.last_pre_work_ns,
+        prev_exchange_ns = ctx.prev_exchange_ns,
+        "frame timing exceeded the configured late tolerance — parking"
+    );
+    ctx.gate.on_drive_fault();
+    discard_motion(ctx);
+    for t in &mut ctx.last_streamed_target {
+        *t = None;
+    }
+    ctx.latched_drive_err = code;
+    let retired = respond_fault_heartbeat(ctx, 0, code);
+    ctx.last_sent_retired = retired.iter().sum();
+    ctx.heartbeat_sent = true;
+}
+
 fn record_capture_sample(
     ctx: &mut EndpointCtx,
     motion_active: bool,
@@ -576,6 +666,11 @@ fn record_capture_sample(
     if motion_active {
         flags |= FLAG_MOTION_ACTIVE;
     }
+    let skip_count = ctx.skip_count_policed;
+    let late_frames = ctx.late_frames_total;
+    let frame_lateness_ns = ctx
+        .last_lateness_ns
+        .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
     let EndpointCtx {
         drive,
         cmd_counts_per_mm,
@@ -588,6 +683,9 @@ fn record_capture_sample(
     } = ctx;
     let build = |slots: &[u8]| {
         let mut record = CaptureRecord::new(*cycle_index, flags);
+        record.skip_count = skip_count;
+        record.late_frames = late_frames;
+        record.frame_lateness_ns = frame_lateness_ns;
         record.drive_count = slots.len() as u8;
         for (i, &slot) in slots.iter().enumerate() {
             let t = drive.telemetry(usize::from(slot));
@@ -675,7 +773,7 @@ fn emit_heartbeat(ctx: &mut EndpointCtx) {
         ctx.last_sent_retired = current_retired;
         ctx.heartbeat_sent = true;
         if current_retired != 0 {
-            eprintln!("ec-rt: heartbeat retired={retired:?}");
+            crate::rt_eprintln!("ec-rt: heartbeat retired={retired:?}");
         }
     }
 }
@@ -697,6 +795,18 @@ fn emit_periodic_telemetry(ctx: &mut EndpointCtx, wkc: i32, toff: i64) {
                     framed = ctx.report_anchor[s].is_some(),
                 }
             );
+        }
+        if ctx.late_frames > 0 {
+            tracing::warn!(
+                subsystem = "ethercat",
+                event = "frame_late",
+                count = ctx.late_frames,
+                max_lateness_ns = ctx.late_max_ns,
+                "frames finished sending after the nominal SYNC0 latch since \
+                 the last telemetry beat — drives held stale targets"
+            );
+            ctx.late_frames = 0;
+            ctx.late_max_ns = i64::MIN;
         }
         if ctx.gate.state() == TorqueState::Faulted {
             let latched_drive_err = ctx.latched_drive_err;

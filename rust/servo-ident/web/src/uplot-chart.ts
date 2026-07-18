@@ -153,7 +153,8 @@ interface NearestPointOpts {
 /// itself and draws the vertical line, dot, and value box.
 function nearestPointPlugin({ yLabel, xUnit, xTitle, traces, formatText }: NearestPointOpts): uPlot.Plugin {
   let hovered: { d: number; si: number; i: number } | null = null;
-  const fmtVal = (v: number) => (Math.abs(v) >= 1000 ? v.toFixed(0) : v.toFixed(1));
+  const fmtVal = (v: number) =>
+    Math.abs(v) >= 1000 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toPrecision(3);
   return {
     opts: (u, opts) => ({ ...opts, cursor: { ...opts.cursor, show: true, x: false, y: false, points: { show: false } } }),
     hooks: {
@@ -210,6 +211,8 @@ function nearestPointPlugin({ yLabel, xUnit, xTitle, traces, formatText }: Neare
           text = `${swept}${fmtTick(xVal, span)}${xUnit}  ${fmtVal(yVal)} ${yLabel}${lab ? "  " + lab : ""}`;
         }
         ctx.font = THEME.readoutFont.replace("11px", `${11 * dpr}px`);
+        ctx.textAlign = "left";
+        ctx.textBaseline = "alphabetic";
         const tw = ctx.measureText(text).width;
         const tx = Math.min(
           Math.max(px + 8 * dpr, u.bbox.left),
@@ -260,7 +263,7 @@ function timeSeriesPlot(target: HTMLElement, opts: TimeSeriesOpts): TimeSeriesPl
     pxAlign: false,
     cursor: brush
       ? { points: { show: false }, drag: { x: true, y: false, setScale: false } }
-      : { show: false },
+      : { x: false, y: false, points: { show: false }, drag: { x: true, y: false, setScale: true } },
     hooks: brush
       ? {
           setSelect: [
@@ -346,6 +349,8 @@ function psdBandPlugin(band: [number, number], traces: PsdTrace[], plotY: (v: nu
         const dpr = uPlot.pxRatio || window.devicePixelRatio || 1;
         u.ctx.save();
         u.ctx.font = THEME.font.replace("10px", `${10 * dpr}px`);
+        u.ctx.textAlign = "left";
+        u.ctx.textBaseline = "alphabetic";
         traces.forEach((tr, idx) => {
           let bestI = -1;
           let bestV = -Infinity;
@@ -402,6 +407,8 @@ function freqMarkersPlugin(markers: FreqMarker[]): uPlot.Plugin {
         const [xMin, xMax] = xSpan(u);
         u.ctx.save();
         u.ctx.font = THEME.font.replace("10px", `${10 * dpr}px`);
+        u.ctx.textAlign = "left";
+        u.ctx.textBaseline = "alphabetic";
         u.ctx.setLineDash([3 * dpr, 3 * dpr]);
         u.ctx.lineWidth = dpr;
         markers.forEach((m, idx) => {

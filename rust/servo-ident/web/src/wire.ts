@@ -106,6 +106,7 @@ interface LiveTapPayload {
   next_cycle: number;
   stride: number;
   drives?: Record<string, { ferr: number[]; torque: number[]; target: number[]; pos: number[] }> | null;
+  timing?: { skips: number; late_frames: number; lateness_ns: number } | null;
 }
 
 type StrainField = "elastic" | "friction";

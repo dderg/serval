@@ -3,6 +3,7 @@
 //!        [--velocity-ff] [--dynamics-profile PATH] [--torque-clamp-pct F]
 
 fn main() {
+    ethercat_rt::rt_log::init();
     let args = ethercat_rt::cli::Args::parse();
     let mut ctx = ethercat_rt::endpoint::bringup(args);
     ethercat_rt::endpoint::run(&mut ctx);

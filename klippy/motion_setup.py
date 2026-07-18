@@ -218,6 +218,17 @@ def _build_slot_masks(mcu_obj, slot_steppers, num_engine_mcus):
     return present_mask, invert_mask, steps_per_mm, step_modes, bind_list
 
 
+PHASE_STEPPING_DRIVER_TYPES = ("tmc5160", "tmc2240")
+
+
+def _lookup_phase_tmc(printer, stepper_name):
+    for driver_type in PHASE_STEPPING_DRIVER_TYPES:
+        tmc = printer.lookup_object("%s %s" % (driver_type, stepper_name), None)
+        if tmc is not None:
+            return tmc
+    return None
+
+
 def _configure_phase_stepping_groups(
     motion, slot_steppers, step_modes, coupled
 ):
@@ -231,22 +242,30 @@ def _configure_phase_stepping_groups(
         group_key = "xy" if (xy_coupled and i in (0, 1)) else i
         slot_tmcs = phase_groups.setdefault(group_key, [])
         for stepper_name, stepper_obj in slot:
-            tmc_name = "tmc5160 " + stepper_name
-            try:
-                tmc = motion.printer.lookup_object(tmc_name)
-            except Exception:
+            tmc = _lookup_phase_tmc(motion.printer, stepper_name)
+            if tmc is None:
                 raise motion.printer.config_error(
                     "phase_stepping=True on stepper '%s' requires "
-                    "a [tmc5160 %s] section (current driver type "
-                    "or absence of TMC5160 section is "
+                    "a %s section (current driver type "
+                    "or absence of such a section is "
                     "incompatible with phase stepping)"
-                    % (stepper_name, stepper_name)
+                    % (
+                        stepper_name,
+                        " or ".join(
+                            "[%s %s]" % (t, stepper_name)
+                            for t in PHASE_STEPPING_DRIVER_TYPES
+                        ),
+                    )
                 )
             if not hasattr(tmc, "get_phase_config"):
                 raise motion.printer.config_error(
                     "phase_stepping=True on stepper '%s' requires "
-                    "a TMC5160 driver; found driver type with no "
-                    "phase-stepping support" % stepper_name
+                    "a %s driver; found driver type with no "
+                    "phase-stepping support"
+                    % (
+                        stepper_name,
+                        " or ".join(PHASE_STEPPING_DRIVER_TYPES),
+                    )
                 )
             bus_id, cs_pin_id = tmc.get_phase_config()
             tmc.set_phase_stepper_oid(stepper_obj.get_oid())
@@ -359,12 +378,9 @@ def _send_axis_configuration(
             blob.append(inv & 0x01)
             tmc_oid = TMC_CS_OID_NONE
             if step_modes[axis_idx] == STEP_MODE_MODULATED:
-                tmc_name = "tmc5160 " + sname
-                try:
-                    tmc = motion.printer.lookup_object(tmc_name)
+                tmc = _lookup_phase_tmc(motion.printer, sname)
+                if tmc is not None:
                     tmc_oid = tmc.get_spi_oid()
-                except Exception:
-                    pass
             blob.append(tmc_oid)
             blob.append(FLAGS_DEFAULT)
         ring_depth = motion.engine.ring_depth_for_axis(mcu_handle, axis_idx)

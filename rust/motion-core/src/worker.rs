@@ -201,6 +201,10 @@ pub fn setup_pipeline(
     let pump_thread = thread::Builder::new()
         .name("push-pieces-pump".into())
         .spawn(move || {
+            host_rt::thread_prio::elevate_current_thread(
+                host_rt::thread_prio::PUMP_RT_PRIORITY,
+                "push-pieces-pump",
+            );
             crate::pump::run_pump(
                 control_rx,
                 data_rx,

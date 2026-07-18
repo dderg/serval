@@ -74,6 +74,9 @@ input, select, textarea {
 .live-window input[type="range"] { width: 140px; }
 .mr-health.ok { color: var(--good); }
 .mr-health.err { color: var(--bad); }
+.live-timing-bad { color: var(--warn); }
+.rt-health { font-size: 12px; opacity: 0.75; white-space: nowrap; }
+.rt-health-bad { color: var(--warn); opacity: 1; }
 .banner { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 
 @media (max-width: 1100px) {

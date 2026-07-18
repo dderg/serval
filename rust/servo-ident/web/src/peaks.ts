@@ -2,7 +2,7 @@ import { el, payloadUnchanged, runDataSig, ensurePlotSeries, pageRuns } from "./
 import { drawTimeDomain, peakStep } from "./charts-core";
 import { motorNames, cellRaw, renderDriveGroups } from "./drive";
 import { renderFrfCharts, renderRingdownCharts } from "./dynamics";
-import { renderMetricsTable, renderSweepMetricsChart, renderPsdChart, visibleStepNames, renderStepChips } from "./metrics";
+import { renderMetricsTable, renderSweepMetricsChart, renderPsdChart, visibleStepNames, renderStepChips, renderMotorChips } from "./metrics";
 import { selectedRunNames } from "./runs";
 import { currentPageDef } from "./shell";
 import { RESONANCE_BAND_HZ, PEAK_MIN_SEPARATION_HZ, PEAK_LIST_SIZE, state } from "./state";
@@ -163,6 +163,13 @@ async function redrawCharts() {
     if (def.sweepChart) renderSweepMetricsChart(pageNames);
   }
   renderStepChips(stepNames);
+  if (def.charts && def.charts.includes("time")) {
+    const timeMotors = [...new Set(plots.flatMap((p) => p.steps.flatMap((s) => Object.keys(s.drives))))];
+    if (state.motorFilter && !timeMotors.some((m) => state.motorFilter!.has(m))) {
+      state.motorFilter = null;
+    }
+    renderMotorChips(timeMotors);
+  }
   if (def.charts && def.charts.includes("frf")) renderFrfCharts(okNames, plots);
   if (def.charts && def.charts.includes("ringdown")) renderRingdownCharts(okNames, plots);
   if (def.charts && def.charts.includes("psd")) {

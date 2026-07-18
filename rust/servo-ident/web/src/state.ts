@@ -168,6 +168,7 @@ const DEFAULT_PAGE = "gains";
 const LIVE_STATUS_POLL_MS = 1000;
 const LIVE_TAIL_POLL_MS = 400;
 const MOONRAKER_HEALTH_POLL_MS = 5000;
+const RT_HEALTH_POLL_MS = 2000;
 
 interface ConsoleSearch {
   query: string;
@@ -249,6 +250,7 @@ interface AppState {
   runColors: Map<string, string>;
   autoSelected: boolean;
   stepFilter: Set<string> | null;
+  motorFilter: Set<string> | null;
   console: ConsoleState;
   drive: DrivePanelState;
   live: LiveState;
@@ -267,6 +269,7 @@ const state: AppState = {
   runColors: new Map(), // run name -> palette color, kept while the run stays selected
   autoSelected: false,
   stepFilter: null, // null = every step; otherwise a Set of visible step names
+  motorFilter: null, // null = every motor; only consulted in per-motor view
   console: {
     text: "", // current input line, survives page switches
     history: loadConsoleHistory(),
@@ -312,4 +315,4 @@ const state: AppState = {
 };
 
 export type { PageDef, PageTemplate, ConsoleSearch, SentEntry, LiveSeries, PendingEdits };
-export { REFRESH_MS, MOONRAKER_KEY, CONSOLE_HISTORY_KEY, HELP_CACHE_KEY, CONSOLE_HISTORY_MAX, PALETTE, RESONANCE_BAND_HZ, RINGDOWN_PSD_PLOT_MAX_HZ, PSD_MAX_FREQ_KEY, MOTOR_VIEW_KEY, PSD_MAX_FREQ_CHOICES_HZ, PSD_MAX_FREQ_DEFAULT_HZ, INITIAL_SELECTED_RUNS, PEAK_MIN_SEPARATION_HZ, PEAK_LIST_SIZE, PAGE_DEFS, DEFAULT_PAGE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, MOONRAKER_HEALTH_POLL_MS, loadConsoleHistory, state };
+export { REFRESH_MS, MOONRAKER_KEY, CONSOLE_HISTORY_KEY, HELP_CACHE_KEY, CONSOLE_HISTORY_MAX, PALETTE, RESONANCE_BAND_HZ, RINGDOWN_PSD_PLOT_MAX_HZ, PSD_MAX_FREQ_KEY, MOTOR_VIEW_KEY, PSD_MAX_FREQ_CHOICES_HZ, PSD_MAX_FREQ_DEFAULT_HZ, INITIAL_SELECTED_RUNS, PEAK_MIN_SEPARATION_HZ, PEAK_LIST_SIZE, PAGE_DEFS, DEFAULT_PAGE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, MOONRAKER_HEALTH_POLL_MS, RT_HEALTH_POLL_MS, loadConsoleHistory, state };

@@ -267,6 +267,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
         rt_prio,
         mailbox_cpu,
         dynamics,
+        late_tolerance_ns,
     } = args;
 
     let num_slaves = slaves.len();
@@ -507,6 +508,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
         mailbox,
         pending_starts,
         pending_stops,
+        pending_seed: None,
         capture_slots,
         prdiv,
         ff_saturation,
@@ -514,5 +516,16 @@ pub fn bringup(args: Args) -> EndpointCtx {
         latched_drive_err,
         sensorless,
         stream_halt,
+        late_tolerance_ns,
+        timing_armed: false,
+        baseline_reanchor_count: 0,
+        late_frames: 0,
+        late_max_ns: i64::MIN,
+        skip_count_policed: 0,
+        late_frames_total: 0,
+        last_lateness_ns: 0,
+        last_dispatch_ns: 0,
+        last_pre_work_ns: 0,
+        prev_exchange_ns: 0,
     }
 }

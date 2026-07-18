@@ -44,6 +44,9 @@ APPROACH_FROM_ABOVE_Z_MM = 10.0
 
 class BeaconMcuStub:
     SAMPLE_RATE_HZ = 1600.0
+    IDENTIFY_BLOB = IDENTIFY_BLOB
+    CLOCK_FREQ = CLOCK_FREQ
+    STUB_NAME = "beacon-stub"
 
     def __init__(
         self,
@@ -89,8 +92,8 @@ class BeaconMcuStub:
         self._send_lock = threading.Lock()
         self._host_recv_seq: int = 1
         self._inbuf = bytearray()
-        self._parser = msgproto.MessageParser(warn_prefix="beacon-stub: ")
-        self._parser.process_identify(IDENTIFY_BLOB, decompress=True)
+        self._parser = msgproto.MessageParser(warn_prefix=self.STUB_NAME + ": ")
+        self._parser.process_identify(self.IDENTIFY_BLOB, decompress=True)
         self._handlers = self._build_handlers()
         self.rx_byte_count: int = 0
         self.tx_sample_count: int = 0
@@ -333,11 +336,11 @@ class BeaconMcuStub:
 
     def _clock_at(self, monotonic_time: float) -> int:
         elapsed = monotonic_time - self._clock_origin
-        return int(elapsed * CLOCK_FREQ) & 0xFFFFFFFF
+        return int(elapsed * self.CLOCK_FREQ) & 0xFFFFFFFF
 
     def _now_clock_high(self) -> int:
         elapsed = self._monotonic() - self._clock_origin
-        return (int(elapsed * CLOCK_FREQ) >> 32) & 0xFFFFFFFF
+        return (int(elapsed * self.CLOCK_FREQ) >> 32) & 0xFFFFFFFF
 
     def _send_msg(self, msgformat: str, **kwargs) -> None:
         # Framing is open-coded rather than via msgproto.encode_msgblock:
@@ -497,10 +500,10 @@ class BeaconMcuStub:
     def _handle_identify(self, params: dict) -> None:
         offset = params["offset"]
         count = params["count"]
-        if offset >= len(IDENTIFY_BLOB):
+        if offset >= len(self.IDENTIFY_BLOB):
             data = b""
         else:
-            data = IDENTIFY_BLOB[offset : offset + count]
+            data = self.IDENTIFY_BLOB[offset : offset + count]
         self._send_msg(
             "identify_response offset=%u data=%.*s",
             offset=offset,
@@ -852,7 +855,7 @@ class BeaconMcuStub:
                     last_data_value = data_value
 
                 delta_clock = (
-                    int(CLOCK_FREQ / (BATCH_HZ * SAMPLES_PER_BATCH))
+                    int(self.CLOCK_FREQ / (BATCH_HZ * SAMPLES_PER_BATCH))
                     * SAMPLES_PER_BATCH
                 )
                 self._send_msg(
@@ -909,7 +912,7 @@ class BeaconMcuStub:
         )
 
     def _freq_to_count(self, freq_hz: int) -> int:
-        return int(freq_hz * (2**28) / CLOCK_FREQ)
+        return int(freq_hz * (2**28) / self.CLOCK_FREQ)
 
     def _fire_homing_trigger(self) -> None:
         if not self._home_active:
