@@ -34,10 +34,49 @@ use mcu_protocol::messages::{
 /// in the queue when the budget runs out simply carry to the next cycle.
 const DISPATCH_BUDGET_NS: u128 = 100_000;
 
+fn command_name(cmd: &Command) -> &'static str {
+    match cmd {
+        Command::Identify { .. } => "Identify",
+        Command::PushPieces { .. } => "PushPieces",
+        Command::QueryRuntimeCaps { .. } => "QueryRuntimeCaps",
+        Command::SetTorque { .. } => "SetTorque",
+        Command::Stop { .. } => "Stop",
+        Command::StartCapture { .. } => "StartCapture",
+        Command::StopCapture { .. } => "StopCapture",
+        Command::ResumeStream { .. } => "ResumeStream",
+        Command::ClaimHandshake { .. } => "ClaimHandshake",
+        Command::SetDriveLimits { .. } => "SetDriveLimits",
+        Command::RestoreDriveLimits { .. } => "RestoreDriveLimits",
+        Command::SeedServoHome { .. } => "SeedServoHome",
+        Command::ArmSensorlessEndstop { .. } => "ArmSensorlessEndstop",
+        Command::ResonanceBuzz { .. } => "ResonanceBuzz",
+        Command::SetDiffDamper { .. } => "SetDiffDamper",
+        Command::SetDiffTrim { .. } => "SetDiffTrim",
+        Command::SetStrainComp { .. } => "SetStrainComp",
+        Command::SetDynamicsModel { .. } => "SetDynamicsModel",
+        Command::SdoRead { .. } => "SdoRead",
+        Command::SdoWrite { .. } => "SdoWrite",
+        Command::QueryMotorState { .. } => "QueryMotorState",
+        Command::Unknown { .. } => "Unknown",
+    }
+}
+
 pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
     let started = std::time::Instant::now();
     ctx.server.pump();
+    let pump_ns = started.elapsed().as_nanos();
+    if pump_ns > DISPATCH_BUDGET_NS {
+        tracing::warn!(
+            subsystem = "ethercat",
+            event = "slow_pump",
+            pump_ns = pump_ns as i64,
+            "socket read + frame decode exceeded the dispatch budget on the \
+             RT thread"
+        );
+    }
     while let Some(cmd) = ctx.server.pop_command() {
+        let name = command_name(&cmd);
+        let cmd_started = std::time::Instant::now();
         match cmd {
             Command::Identify {
                 correlation_id,
@@ -184,6 +223,17 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
             Command::Unknown { kind_raw, .. } => {
                 eprintln!("ec-rt: ignoring kind 0x{kind_raw:04x}");
             }
+        }
+        let cmd_ns = cmd_started.elapsed().as_nanos();
+        if cmd_ns > DISPATCH_BUDGET_NS {
+            tracing::warn!(
+                subsystem = "ethercat",
+                event = "slow_command",
+                command = name,
+                cmd_ns = cmd_ns as i64,
+                "a single command exceeded the dispatch budget on the RT \
+                 thread — this is the stall the budget cannot split"
+            );
         }
         if started.elapsed().as_nanos() > DISPATCH_BUDGET_NS {
             break;
