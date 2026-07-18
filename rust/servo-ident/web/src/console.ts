@@ -5,19 +5,6 @@ import { CONSOLE_HISTORY_KEY, CONSOLE_HISTORY_MAX, state } from "./state";
 
 // --- console ------------------------------------------------------------------
 
-/// The catch only forgives corrupt localStorage JSON — anything else (a
-/// mistyped key, a TDZ const) must surface, not quietly reset the history.
-function loadConsoleHistory() {
-  const raw = localStorage.getItem(CONSOLE_HISTORY_KEY) || "[]";
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (e) {
-    return [];
-  }
-  return Array.isArray(parsed) ? parsed.filter((l): l is string => typeof l === "string") : [];
-}
-
 function pushConsoleHistory(entry: string) {
   const hist = state.console.history;
   if (hist[hist.length - 1] !== entry) hist.push(entry);
@@ -208,4 +195,4 @@ async function submitConsole() {
   await runGcode(lines, "console");
 }
 
-export { loadConsoleHistory, pushConsoleHistory, bindConsole, autosizeConsole, setConsoleValue, caretOnFirstLine, caretOnLastLine, consoleKeydown, historyStep, consoleSearchKeydown, searchHistory, exitConsoleSearch, renderConsoleSearch, submitConsole };
+export { pushConsoleHistory, bindConsole, autosizeConsole, setConsoleValue, caretOnFirstLine, caretOnLastLine, consoleKeydown, historyStep, consoleSearchKeydown, searchHistory, exitConsoleSearch, renderConsoleSearch, submitConsole };

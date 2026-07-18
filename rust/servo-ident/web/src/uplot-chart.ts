@@ -472,7 +472,7 @@ function psdPlot(target: HTMLElement, opts: PsdPlotOpts): uPlot {
           labelFont: THEME.font,
           labelGap: 2,
           size: 52,
-          values: (u2, vals) => vals.map(formatValue),
+          values: (u2, vals) => vals.map((v) => (v == null ? "" : formatValue(v))),
         }),
       ],
       series: [

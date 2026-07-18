@@ -1,5 +1,5 @@
 import { el, payloadUnchanged, shortTime } from "./api";
-import { loadConsoleHistory, setConsoleValue } from "./console";
+import { setConsoleValue } from "./console";
 import { moonrakerUrl, escapeHtml } from "./moonraker";
 import { consoleSectionHtml } from "./shell";
 import { HELP_CACHE_KEY, state } from "./state";

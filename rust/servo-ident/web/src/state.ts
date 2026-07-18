@@ -1,4 +1,3 @@
-import { loadConsoleHistory } from "./console";
 import type {
   DriveState,
   PlotSeries,
@@ -23,6 +22,22 @@ const PSD_MAX_FREQ_DEFAULT_HZ = 750;
 const INITIAL_SELECTED_RUNS = 1;
 const PEAK_MIN_SEPARATION_HZ = 15;
 const PEAK_LIST_SIZE = 3;
+
+/// Lives here (not console.ts) because `state` runs it at module init —
+/// pulling it from console.ts would make the state → console import cycle
+/// hit console's TDZ under plain ESM evaluation.
+/// The catch only forgives corrupt localStorage JSON — anything else (a
+/// mistyped key, a TDZ const) must surface, not quietly reset the history.
+function loadConsoleHistory() {
+  const raw = localStorage.getItem(CONSOLE_HISTORY_KEY) || "[]";
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    return [];
+  }
+  return Array.isArray(parsed) ? parsed.filter((l): l is string => typeof l === "string") : [];
+}
 
 // Each page serves one calibration activity with only the tools that
 // activity needs (docs/plans/servo-calibration-automation.md, second demo
@@ -293,4 +308,4 @@ const state: AppState = {
 };
 
 export type { PageDef, PageTemplate, ConsoleSearch, SentEntry, LiveSeries, PendingEdits };
-export { REFRESH_MS, MOONRAKER_KEY, CONSOLE_HISTORY_KEY, HELP_CACHE_KEY, CONSOLE_HISTORY_MAX, PALETTE, RESONANCE_BAND_HZ, RINGDOWN_PSD_PLOT_MAX_HZ, PSD_MAX_FREQ_KEY, MOTOR_VIEW_KEY, PSD_MAX_FREQ_CHOICES_HZ, PSD_MAX_FREQ_DEFAULT_HZ, INITIAL_SELECTED_RUNS, PEAK_MIN_SEPARATION_HZ, PEAK_LIST_SIZE, PAGE_DEFS, DEFAULT_PAGE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, MOONRAKER_HEALTH_POLL_MS, state };
+export { REFRESH_MS, MOONRAKER_KEY, CONSOLE_HISTORY_KEY, HELP_CACHE_KEY, CONSOLE_HISTORY_MAX, PALETTE, RESONANCE_BAND_HZ, RINGDOWN_PSD_PLOT_MAX_HZ, PSD_MAX_FREQ_KEY, MOTOR_VIEW_KEY, PSD_MAX_FREQ_CHOICES_HZ, PSD_MAX_FREQ_DEFAULT_HZ, INITIAL_SELECTED_RUNS, PEAK_MIN_SEPARATION_HZ, PEAK_LIST_SIZE, PAGE_DEFS, DEFAULT_PAGE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, MOONRAKER_HEALTH_POLL_MS, loadConsoleHistory, state };
