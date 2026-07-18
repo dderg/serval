@@ -2,7 +2,7 @@ import { el, resetRenderState } from "./api.js";
 import { psdMaxFreqHz } from "./charts-core.js";
 import { bindConsole, setConsoleValue } from "./console.js";
 import { fetchMacroHelp, docsShellHtml, renderDocsList } from "./docs.js";
-import { renderDriveGroups, applyDriveChanges } from "./drive.js";
+import { renderDriveGroups } from "./drive.js";
 import { bindLiveEvents, startLivePolling, stopLivePolling } from "./live.js";
 import { renderSentLog } from "./moonraker.js";
 import { redrawCharts } from "./peaks.js";
@@ -37,10 +37,7 @@ function controlsSectionsHtml(def) {
     parts.push(
       `<section class="panel">` +
         `<div class="section-head"><h2>drive tuning</h2></div>` +
-        `<div id="drive-groups"></div>` +
-        `<div id="pending-preview" class="pending-preview"></div>` +
-        `<div class="row"><button id="drive-apply-btn" disabled>apply</button>` +
-        `<span class="note" id="drive-changed-count"></span></div>` +
+        `<div id="drive-panel"></div>` +
         `</section>`
     );
   }
@@ -412,8 +409,6 @@ function bindPageEvents() {
   document
     .querySelectorAll(".runs-wrap table, .journal-wrap table")
     .forEach(makeColumnsResizable);
-  const applyBtn = el("drive-apply-btn");
-  if (applyBtn) applyBtn.addEventListener("click", applyDriveChanges);
   const psdMax = el("psd-max-freq");
   if (psdMax) {
     psdMax.addEventListener("change", () => {

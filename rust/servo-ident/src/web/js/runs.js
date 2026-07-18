@@ -1,196 +1,207 @@
-import { api, el, payloadUnchanged, ensureDetail, ambientDiff, pageRuns, shortTime } from "./api.js";
+import { html, render, useEffect, useRef, useState } from "../vendor/htm-preact-standalone-3.1.1.mjs";
+import { api, ensureDetail, ambientDiff, el, pageRuns, shortTime } from "./api.js";
 import { loadRerunForm } from "./drive.js";
 import { redrawCharts } from "./peaks.js";
 import { currentPageDef } from "./shell.js";
 import { PALETTE, INITIAL_SELECTED_RUNS, state } from "./state.js";
+import { notify, useStore } from "./store.js";
 
 // --- runs table ---------------------------------------------------------------
+//
+// Preact owns #journal-body: renderRuns() mounts the table component into it
+// once per page build, and every later call just notifies the store — the
+// component re-renders from state with keyed rows, so an in-progress note
+// edit keeps its input and focus across the periodic refresh.
 
-function renderRuns() {
-  const tbody = el("journal-body");
-  if (!tbody) return;
-  const def = currentPageDef();
-  const runs = def.journal ? state.runs : pageRuns(def);
-  const sig = {
-    page: state.page,
-    runs,
-    selected: [...state.selected],
-    pinned: [...state.pinned],
-    colors: [...state.runColors],
-    details: state.runs.map((r) => {
-      const detail = state.details.get(r.name);
-      return detail ? detail.mtime_utc : null;
-    }),
-  };
-  if (payloadUnchanged("runs-table", sig)) return;
-  tbody.innerHTML = "";
-  runs.forEach((run) => {
-    const globalIdx = state.runs.indexOf(run);
-    const detail = state.details.get(run.name);
-    const manifest = detail && detail.manifest;
-    const prevManifest =
-      globalIdx + 1 < state.runs.length
-        ? (state.details.get(state.runs[globalIdx + 1].name) || {}).manifest
-        : null;
-    const diff = manifest ? ambientDiff(prevManifest, manifest) : "";
-
-    const tr = document.createElement("tr");
-    if (state.selected.has(run.name)) tr.classList.add("selected");
-    if (run.has_results) tr.classList.add("selectable");
-    tr.addEventListener("click", (ev) => {
-      if (!run.has_results) return;
-      if (ev.shiftKey) {
-        if (state.selected.has(run.name)) {
-          state.selected.delete(run.name);
-          state.pinned.delete(run.name);
-        } else {
-          state.selected.add(run.name);
-        }
-      } else {
-        const unpinnedOthers = [...state.selected].filter(
-          (n) => n !== run.name && !state.pinned.has(n)
-        );
-        if (
-          state.selected.has(run.name) &&
-          !state.pinned.has(run.name) &&
-          unpinnedOthers.length === 0
-        ) {
-          state.selected.delete(run.name);
-        } else {
-          state.selected = new Set([...state.pinned, run.name]);
-        }
-      }
-      syncRunColors();
-      renderRuns();
-      redrawCharts();
-    });
-
-    tr.addEventListener("contextmenu", (ev) => {
-      ev.preventDefault();
-      deleteRun(run);
-    });
-
-    const dotTd = document.createElement("td");
-    if (state.runColors.has(run.name)) {
-      const swatch = document.createElement("span");
-      swatch.className = "swatch";
-      swatch.style.background = runColor(run.name);
-      dotTd.appendChild(swatch);
+function toggleRunSelection(run, ev) {
+  if (!run.has_results) return;
+  if (ev.shiftKey) {
+    if (state.selected.has(run.name)) {
+      state.selected.delete(run.name);
+      state.pinned.delete(run.name);
+    } else {
+      state.selected.add(run.name);
     }
-    if (run.has_results) {
-      const pinBtn = document.createElement("button");
-      pinBtn.className = state.pinned.has(run.name) ? "pin-toggle pinned" : "pin-toggle";
-      pinBtn.textContent = "📌";
-      pinBtn.title = state.pinned.has(run.name)
-        ? "unpin — plain clicks will deselect this run again"
-        : "pin — keep this run selected while plain clicks switch other runs";
-      pinBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        if (state.pinned.has(run.name)) {
-          state.pinned.delete(run.name);
-        } else {
-          state.pinned.add(run.name);
-          state.selected.add(run.name);
-        }
-        syncRunColors();
-        renderRuns();
-        redrawCharts();
-      });
-      dotTd.appendChild(pinBtn);
+  } else {
+    const unpinnedOthers = [...state.selected].filter(
+      (n) => n !== run.name && !state.pinned.has(n)
+    );
+    if (
+      state.selected.has(run.name) &&
+      !state.pinned.has(run.name) &&
+      unpinnedOthers.length === 0
+    ) {
+      state.selected.delete(run.name);
+    } else {
+      state.selected = new Set([...state.pinned, run.name]);
     }
-    tr.appendChild(dotTd);
+  }
+  syncRunColors();
+  renderRuns();
+  redrawCharts();
+}
 
-    const timeTd = document.createElement("td");
-    timeTd.textContent = shortTime(run.mtime_utc);
-    timeTd.title = `${run.name} — ${run.mtime_utc}`;
-    tr.appendChild(timeTd);
+function togglePin(run) {
+  if (state.pinned.has(run.name)) {
+    state.pinned.delete(run.name);
+  } else {
+    state.pinned.add(run.name);
+    state.selected.add(run.name);
+  }
+  syncRunColors();
+  renderRuns();
+  redrawCharts();
+}
 
-    const expTd = document.createElement("td");
-    expTd.textContent = def.journal
-      ? `${run.experiment}/${run.tag}${run.axis ? " " + run.axis : ""}`
-      : `${run.tag}${run.axis ? " " + run.axis : ""}`;
-    expTd.title = run.experiment;
-    tr.appendChild(expTd);
-
-    const diffTd = document.createElement("td");
-    diffTd.className = diff ? "diff" : "diff empty";
-    diffTd.textContent = diff || "—";
-    if (diff) diffTd.title = diff;
-    tr.appendChild(diffTd);
-
-    tr.appendChild(noteCell(run));
-
-    const actionTd = document.createElement("td");
-    actionTd.className = "actions";
-    const prefillBtn = document.createElement("button");
-    prefillBtn.textContent = "→ console";
-    prefillBtn.title = "prefill the console with this run's command";
-    prefillBtn.disabled = !manifest;
-    prefillBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      loadRerunForm(run.name);
-    });
-    actionTd.appendChild(prefillBtn);
-    if (!run.has_results) {
-      const analyzeBtn = document.createElement("button");
-      analyzeBtn.textContent = "analyze";
-      analyzeBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        triggerAnalyze(run.name);
-      });
-      actionTd.appendChild(analyzeBtn);
-    }
-    tr.appendChild(actionTd);
-
-    tbody.appendChild(tr);
-  });
+function DotCell({ run }) {
+  const swatch = state.runColors.has(run.name)
+    ? html`<span class="swatch" style=${{ background: runColor(run.name) }}></span>`
+    : null;
+  const pinned = state.pinned.has(run.name);
+  const pin = run.has_results
+    ? html`<button
+        class=${pinned ? "pin-toggle pinned" : "pin-toggle"}
+        title=${pinned
+          ? "unpin — plain clicks will deselect this run again"
+          : "pin — keep this run selected while plain clicks switch other runs"}
+        onClick=${(e) => {
+          e.stopPropagation();
+          togglePin(run);
+        }}
+      >
+        📌
+      </button>`
+    : null;
+  return html`<td>${swatch}${pin}</td>`;
 }
 
 /// Click-to-edit note cell: shows the saved note (or a faint "add note…"
 /// hint), swaps to an input on click, saves to POST /api/runs/<name>/note
 /// on Enter/blur, and cancels on Escape. Clicks stop propagating so
 /// editing a note never toggles the row's chart selection.
-function noteCell(run) {
-  const td = document.createElement("td");
-  td.className = run.note ? "run-note" : "run-note empty";
-  td.textContent = run.note || "add note…";
-  td.title = run.note ? `${run.note} — click to edit` : "click to add a note";
-  td.addEventListener("click", (e) => {
-    e.stopPropagation();
-    if (td.querySelector("input")) return;
-    const input = document.createElement("input");
-    input.type = "text";
-    input.className = "run-note-input";
-    input.value = run.note || "";
-    td.textContent = "";
-    td.appendChild(input);
-    input.focus();
-    let done = false;
-    const finish = (save) => {
-      if (done) return;
-      done = true;
-      const text = input.value;
-      input.remove();
-      const note = save ? text.trim() || null : run.note;
-      td.className = note ? "run-note" : "run-note empty";
-      td.textContent = note || "add note…";
-      if (save) saveNote(run, text);
-    };
-    input.addEventListener("keydown", (ev) => {
-      ev.stopPropagation();
-      if (ev.key === "Enter") finish(true);
-      if (ev.key === "Escape") finish(false);
-    });
-    input.addEventListener("blur", () => finish(true));
-    input.addEventListener("click", (ev) => ev.stopPropagation());
-  });
-  return td;
+function NoteCell({ run }) {
+  const [editing, setEditing] = useState(false);
+  const inputRef = useRef(null);
+  const doneRef = useRef(false);
+  useEffect(() => {
+    if (editing && inputRef.current) inputRef.current.focus();
+  }, [editing]);
+  if (!editing) {
+    return html`<td
+      class=${run.note ? "run-note" : "run-note empty"}
+      title=${run.note ? `${run.note} — click to edit` : "click to add a note"}
+      onClick=${(e) => {
+        e.stopPropagation();
+        doneRef.current = false;
+        setEditing(true);
+      }}
+    >
+      ${run.note || "add note…"}
+    </td>`;
+  }
+  const finish = (save) => {
+    if (doneRef.current) return;
+    doneRef.current = true;
+    const text = inputRef.current.value;
+    setEditing(false);
+    if (save) saveNote(run, text);
+  };
+  return html`<td class="run-note" onClick=${(e) => e.stopPropagation()}>
+    <input
+      ref=${inputRef}
+      type="text"
+      class="run-note-input"
+      defaultValue=${run.note || ""}
+      onKeyDown=${(ev) => {
+        ev.stopPropagation();
+        if (ev.key === "Enter") finish(true);
+        if (ev.key === "Escape") finish(false);
+      }}
+      onBlur=${() => finish(true)}
+      onClick=${(ev) => ev.stopPropagation()}
+    />
+  </td>`;
+}
+
+function RunRow({ run, def }) {
+  const globalIdx = state.runs.indexOf(run);
+  const detail = state.details.get(run.name);
+  const manifest = detail && detail.manifest;
+  const prevManifest =
+    globalIdx + 1 < state.runs.length
+      ? (state.details.get(state.runs[globalIdx + 1].name) || {}).manifest
+      : null;
+  const diff = manifest ? ambientDiff(prevManifest, manifest) : "";
+  const cls = [
+    state.selected.has(run.name) ? "selected" : "",
+    run.has_results ? "selectable" : "",
+  ]
+    .filter(Boolean)
+    .join("");
+  return html`<tr
+    class=${cls || null}
+    onClick=${(ev) => toggleRunSelection(run, ev)}
+    onContextMenu=${(ev) => {
+      ev.preventDefault();
+      deleteRun(run);
+    }}
+  >
+    <${DotCell} run=${run} />
+    <td title=${`${run.name} — ${run.mtime_utc}`}>${shortTime(run.mtime_utc)}</td>
+    <td title=${run.experiment}>
+      ${def.journal
+        ? `${run.experiment}/${run.tag}${run.axis ? " " + run.axis : ""}`
+        : `${run.tag}${run.axis ? " " + run.axis : ""}`}
+    </td>
+    <td class=${diff ? "diff" : "diff empty"} title=${diff || null}>${diff || "—"}</td>
+    <${NoteCell} run=${run} />
+    <td class="actions">
+      <button
+        title="prefill the console with this run's command"
+        disabled=${!manifest}
+        onClick=${(e) => {
+          e.stopPropagation();
+          loadRerunForm(run.name);
+        }}
+      >
+        → console
+      </button>
+      ${run.has_results
+        ? null
+        : html`<button
+            onClick=${(e) => {
+              e.stopPropagation();
+              triggerAnalyze(run.name);
+            }}
+          >
+            analyze
+          </button>`}
+    </td>
+  </tr>`;
+}
+
+function RunsTable() {
+  useStore();
+  const def = currentPageDef();
+  const runs = def.journal ? state.runs : pageRuns(def);
+  return runs.map((run) => html`<${RunRow} key=${run.name} run=${run} def=${def} />`);
+}
+
+let mountedRunsBody = null;
+
+function renderRuns() {
+  const tbody = el("journal-body");
+  if (!tbody) return;
+  if (mountedRunsBody !== tbody) {
+    if (mountedRunsBody) render(null, mountedRunsBody);
+    mountedRunsBody = tbody;
+    render(html`<${RunsTable} />`, tbody);
+  }
+  notify();
 }
 
 /// The note shows up the moment Enter is pressed, then the POST confirms
-/// (or a refresh rolls back) in the background. The periodic refresh
-/// no longer clobbers it: an unchanged server payload skips the table
-/// render entirely.
+/// (or a refresh rolls back) in the background.
 function applyNoteLocally(name, note) {
   const current = state.runs.find((r) => r.name === name);
   if (current) current.note = note;
@@ -299,4 +310,4 @@ async function refresh() {
   await redrawCharts();
 }
 
-export { renderRuns, noteCell, applyNoteLocally, saveNote, deleteRun, triggerAnalyze, selectedRunNames, syncRunColors, leastUsedColor, runColor, autoSelectInitialRuns, refresh };
+export { renderRuns, applyNoteLocally, saveNote, deleteRun, triggerAnalyze, selectedRunNames, syncRunColors, leastUsedColor, runColor, autoSelectInitialRuns, refresh };

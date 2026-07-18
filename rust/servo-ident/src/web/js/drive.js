@@ -1,9 +1,11 @@
+import { html, render } from "../vendor/htm-preact-standalone-3.1.1.mjs";
 import { api, el } from "./api.js";
 import { setConsoleValue } from "./console.js";
 import { runGcode } from "./moonraker.js";
 import { refresh } from "./runs.js";
 import { currentPageDef } from "./shell.js";
 import { state } from "./state.js";
+import { notify, useStore } from "./store.js";
 
 // --- drive tuning grid --------------------------------------------------------
 //
@@ -17,7 +19,9 @@ import { state } from "./state.js";
 // what SERVO_TUNE writes. Pure helpers first — autofill derivation,
 // changed-cell diffing, SERVO_TUNE line building (always with an explicit
 // MOTORS= list) — the logic a Rust test asserts is present and exercisable
-// without a browser; DOM rendering and event wiring follow.
+// without a browser; the preact components that render the grid follow.
+// Preact owns #drive-panel: renderDriveGroups() mounts once per page build,
+// then every state mutation just notifies the store.
 
 const GROUP_ORDER = ["gains", "filters", "notch", "speed_observer", "disturbance_observer", "load"];
 const OTHER_GROUP = "other";
@@ -183,7 +187,28 @@ function shortMotorLabel(motor) {
   return motor.replace(/^motor_/, "");
 }
 
-function cellInputHtml(param, motor) {
+function stageCellEdit(param, motorSel, rawText) {
+  const raw = parseInt(rawText, 10);
+  if (Number.isNaN(raw)) return;
+  const targets = motorSel === "*" ? motorNames(state.drive.data.motors) : [motorSel];
+  const existing = { ...(state.drive.pending[param.name] || {}) };
+  for (const m of targets) existing[m] = raw;
+  state.drive.pending[param.name] = existing;
+  if (param.name === AUTOFILL_SOURCE_PARAM) {
+    propagateAutofill();
+  } else if (param.autofill) {
+    state.drive.dirty.add(param.name);
+  }
+  renderDriveGroups();
+}
+
+function OptionList({ param }) {
+  return Object.entries(param.options).map(
+    ([v, label]) => html`<option key=${v} value=${v}>${v}: ${label}</option>`
+  );
+}
+
+function CellInput({ param, motor }) {
   const raw = cellRaw(param, motor);
   const original = state.drive.data.motors[motor][param.c_code];
   const cls = ["cell-input"];
@@ -192,20 +217,17 @@ function cellInputHtml(param, motor) {
     .filter((m) => m !== motor)
     .map((m) => cellRaw(param, m));
   if (others.some((v) => v !== raw)) cls.push("drift");
-  const titleText = `${motor} — raw ${raw}${raw !== original ? ` (drive has ${original})` : ""}`;
+  const title = `${motor} — raw ${raw}${raw !== original ? ` (drive has ${original})` : ""}`;
+  const onChange = (e) => stageCellEdit(param, motor, e.target.value);
   if (param.options) {
-    const opts = Object.entries(param.options)
-      .map(
-        ([v, label]) =>
-          `<option value="${v}"${Number(v) === raw ? " selected" : ""}>${v}: ${label}</option>`
-      )
-      .join("");
-    return `<select class="${cls.join(" ")}" data-param="${param.name}" data-motor="${motor}" title="${titleText}">${opts}</select>`;
+    return html`<select class=${cls.join(" ")} title=${title} value=${String(raw)} onChange=${onChange}>
+      <${OptionList} param=${param} />
+    </select>`;
   }
-  return `<input type="number" step="1" class="${cls.join(" ")}" data-param="${param.name}" data-motor="${motor}" value="${raw}" title="${titleText}">`;
+  return html`<input type="number" step="1" class=${cls.join(" ")} value=${raw} title=${title} onChange=${onChange} />`;
 }
 
-function allInputHtml(param) {
+function AllInput({ param }) {
   const motors = motorNames(state.drive.data.motors);
   const values = motors.map((m) => cellRaw(param, m));
   const agree = valuesAgree(values);
@@ -216,33 +238,49 @@ function allInputHtml(param) {
   const title = agree
     ? "set all motors"
     : `set all motors — currently ${motors.map((m, i) => `${shortMotorLabel(m)}=${values[i]}`).join(" ")}`;
+  const onChange = (e) => stageCellEdit(param, "*", e.target.value);
   if (param.options) {
-    const opts =
-      `<option value=""${agree ? "" : " selected"} disabled>${agree ? "" : "mixed"}</option>` +
-      Object.entries(param.options)
-        .map(
-          ([v, label]) =>
-            `<option value="${v}"${agree && Number(v) === values[0] ? " selected" : ""}>${v}: ${label}</option>`
-        )
-        .join("");
-    return `<select class="${cls.join(" ")}" data-param="${param.name}" data-motor="*" title="${title}">${opts}</select>`;
+    return html`<select class=${cls.join(" ")} title=${title} value=${agree ? String(values[0]) : ""} onChange=${onChange}>
+      <option value="" disabled>${agree ? "" : "mixed"}</option>
+      <${OptionList} param=${param} />
+    </select>`;
   }
-  const display = agree ? values[0] : "";
-  return `<input type="number" step="1" class="${cls.join(" ")}" data-param="${param.name}" data-motor="*" value="${display}" placeholder="${agree ? "" : "mixed"}" title="${title}">`;
+  return html`<input
+    type="number"
+    step="1"
+    class=${cls.join(" ")}
+    value=${agree ? values[0] : ""}
+    placeholder=${agree ? "" : "mixed"}
+    title=${title}
+    onChange=${onChange}
+  />`;
 }
 
-function paramLabelHtml(param, section) {
+function ParamLabel({ param, section }) {
   const pins = pinnedEntries(state.drive.data.config_pins, param.c_code);
   const pinnedNames = Object.keys(pins);
-  const pinBadge = pinnedNames.length
-    ? `<span class="badge pin" title="pinned in config — a restart re-applies ${[...new Set(pinnedNames.map((m) => pins[m]))].join("/")}">pin</span>`
-    : "";
-  const groupHint = section === OTHER_GROUP ? `<span class="hint">(${param.group})</span>` : "";
-  const rederiveLink = state.drive.dirty.has(param.name)
-    ? ` <a href="#" class="rederive" data-param="${param.name}" title="restore the autofill link">re-derive</a>`
-    : "";
-  const unit = param.unit ? ` <span class="unit">${param.unit}</span>` : "";
-  return `<span title="${param.description} (${param.c_code})">${param.name}</span>${unit}${pinBadge}${groupHint}${rederiveLink}`;
+  return html`<span title=${`${param.description} (${param.c_code})`}>${param.name}</span>${" "}
+    ${param.unit ? html`<span class="unit">${param.unit}</span>` : null}
+    ${pinnedNames.length
+      ? html`<span
+          class="badge pin"
+          title=${`pinned in config — a restart re-applies ${[...new Set(pinnedNames.map((m) => pins[m]))].join("/")}`}
+        >pin</span>`
+      : null}
+    ${section === OTHER_GROUP ? html`<span class="hint">(${param.group})</span>` : null}
+    ${state.drive.dirty.has(param.name)
+      ? html`<a
+          href="#"
+          class="rederive"
+          title="restore the autofill link"
+          onClick=${(e) => {
+            e.preventDefault();
+            state.drive.dirty.delete(param.name);
+            rederiveAutofillTarget(param.name);
+            renderDriveGroups();
+          }}
+        >re-derive</a>`
+      : null}`;
 }
 
 /// Adaptive-notch recipe (A6-EC manual 7.10): reset the notch parameters,
@@ -256,18 +294,36 @@ const NOTCH_QUICK_ACTIONS = [
   { label: "disable adaptive", value: 0 },
 ];
 
-function notchQuickActionsHtml() {
-  return (
-    `<details class="adaptive-actions"${state.drive.adaptiveOpen ? " open" : ""}>` +
-    "<summary>adaptive notch recipes</summary>" +
-    '<div class="quick-actions">' +
-    NOTCH_QUICK_ACTIONS.map(
-      (a) =>
-        `<button class="quick-action" data-value="${a.value}" title="stages adaptive_notch_mode=${a.value} for all motors — nothing is written until apply">${a.label}</button>`
-    ).join("") +
-    '</div><p class="hint">stages adaptive_notch_mode — review in the pending list, then apply</p>' +
-    "</details>"
-  );
+function stageAdaptiveNotchMode(value) {
+  const staged = { ...(state.drive.pending.adaptive_notch_mode || {}) };
+  for (const m of motorNames(state.drive.data.motors)) {
+    staged[m] = value;
+  }
+  state.drive.pending.adaptive_notch_mode = staged;
+  renderDriveGroups();
+}
+
+function NotchQuickActions() {
+  return html`<details
+    class="adaptive-actions"
+    open=${state.drive.adaptiveOpen}
+    onToggle=${(e) => {
+      state.drive.adaptiveOpen = e.target.open;
+    }}
+  >
+    <summary>adaptive notch recipes</summary>
+    <div class="quick-actions">
+      ${NOTCH_QUICK_ACTIONS.map(
+        (a) => html`<button
+          key=${a.value}
+          class="quick-action"
+          title=${`stages adaptive_notch_mode=${a.value} for all motors — nothing is written until apply`}
+          onClick=${() => stageAdaptiveNotchMode(a.value)}
+        >${a.label}</button>`
+      )}
+    </div>
+    <p class="hint">stages adaptive_notch_mode — review in the pending list, then apply</p>
+  </details>`;
 }
 
 const NOTCH_ROW_KINDS = ["freq", "width", "depth"];
@@ -293,166 +349,133 @@ function notchMatrix(params) {
 /// per-axis physics — on corexy every motor sees the same belt, so
 /// per-motor notch tables are noise; the per-motor toggle remains for
 /// drives that genuinely disagree).
-function notchCompactHtml(params) {
-  const { nums, byKey, leftover } = notchMatrix(params);
-  const head =
-    `<th class="param-col"></th>` + nums.map((n) => `<th>notch ${n}</th>`).join("");
-  const rows = NOTCH_ROW_KINDS.map((kind) => {
-    const first = byKey.get(`${nums[0]}:${kind}`);
-    const unit = first && first.unit ? ` <span class="unit">${first.unit}</span>` : "";
-    const cells = nums
-      .map((n) => {
-        const p = byKey.get(`${n}:${kind}`);
-        return `<td>${p ? allInputHtml(p) : ""}</td>`;
-      })
-      .join("");
-    return `<tr><td class="param-col">${kind}${unit}</td>${cells}</tr>`;
-  }).join("");
-  return {
-    table: `<table class="param-grid notch-grid"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`,
-    leftover,
-  };
+function NotchCompactGrid({ nums, byKey }) {
+  return html`<table class="param-grid notch-grid">
+    <thead>
+      <tr>
+        <th class="param-col"></th>
+        ${nums.map((n) => html`<th key=${n}>notch ${n}</th>`)}
+      </tr>
+    </thead>
+    <tbody>
+      ${NOTCH_ROW_KINDS.map((kind) => {
+        const first = byKey.get(`${nums[0]}:${kind}`);
+        return html`<tr key=${kind}>
+          <td class="param-col">
+            ${kind}${first && first.unit ? html` <span class="unit">${first.unit}</span>` : null}
+          </td>
+          ${nums.map((n) => {
+            const p = byKey.get(`${n}:${kind}`);
+            return html`<td key=${n}>${p ? html`<${AllInput} param=${p} />` : null}</td>`;
+          })}
+        </tr>`;
+      })}
+    </tbody>
+  </table>`;
 }
 
-function renderDriveGroups() {
-  const container = el("drive-groups");
-  if (!container) return;
+function PerMotorTable({ params, group, motors }) {
+  return html`<table class="param-grid">
+    <thead>
+      <tr>
+        <th class="param-col"></th>
+        ${motors.map((m) => html`<th key=${m} title=${m}>${shortMotorLabel(m)}</th>`)}
+        <th class="all-col">all</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${params.map(
+        (p) => html`<tr key=${p.name} data-param=${p.name}>
+          <td class="param-col"><${ParamLabel} param=${p} section=${group} /></td>
+          ${motors.map((m) => html`<td key=${m}><${CellInput} param=${p} motor=${m} /></td>`)}
+          <td class="all-col"><${AllInput} param=${p} /></td>
+        </tr>`
+      )}
+    </tbody>
+  </table>`;
+}
+
+function NotchViewToggle({ label }) {
+  return html` <a
+    href="#"
+    class="notch-view-toggle hint"
+    onClick=${(e) => {
+      e.preventDefault();
+      state.drive.notchPerMotor = !state.drive.notchPerMotor;
+      renderDriveGroups();
+    }}
+  >${label}</a>`;
+}
+
+function DriveGroups() {
   const def = currentPageDef();
-  const data = state.drive.data;
-  if (!data) {
-    container.innerHTML =
-      '<p class="note">no drive state yet — press refresh in the top bar ' +
-      "to read every mapped parameter off the drives (SERVO_DUMP_TUNING)</p>";
-    updateApplyState();
-    return;
-  }
-  const motors = motorNames(data.motors);
-  const headerCells =
-    `<th class="param-col"></th>` +
-    motors.map((m) => `<th title="${m}">${shortMotorLabel(m)}</th>`).join("") +
-    `<th class="all-col">all</th>`;
-  const sections = groupParams(data.params);
-  const perMotorRows = (params, group) =>
-    params
-      .map((p) => {
-        const cells = motors.map((m) => `<td>${cellInputHtml(p, m)}</td>`).join("");
-        return (
-          `<tr data-param="${p.name}">` +
-          `<td class="param-col">${paramLabelHtml(p, group)}</td>` +
-          cells +
-          `<td class="all-col">${allInputHtml(p)}</td>` +
-          `</tr>`
-        );
-      })
-      .join("");
-  const perMotorTable = (params, group) =>
-    `<table class="param-grid"><thead><tr>${headerCells}</tr></thead>` +
-    `<tbody>${perMotorRows(params, group)}</tbody></table>`;
-  const parts = [];
+  const motors = motorNames(state.drive.data.motors);
+  const sections = groupParams(state.drive.data.params);
+  const groups = [];
   for (const [group, params] of sections) {
     if (!params.length) continue;
     if (def.groups && group !== OTHER_GROUP && !def.groups.includes(group)) continue;
     if (group === "notch" && !state.drive.notchPerMotor) {
-      const compact = notchCompactHtml(params);
-      parts.push(
-        `<div class="param-group"><h3>notch ` +
-          `<a href="#" class="notch-view-toggle hint">per-motor view</a></h3>` +
-          compact.table +
-          (compact.leftover.length ? perMotorTable(compact.leftover, group) : "") +
-          notchQuickActionsHtml() +
-          `</div>`
-      );
+      const { nums, byKey, leftover } = notchMatrix(params);
+      groups.push(html`<div key=${group} class="param-group">
+        <h3>notch<${NotchViewToggle} label="per-motor view" /></h3>
+        <${NotchCompactGrid} nums=${nums} byKey=${byKey} />
+        ${leftover.length
+          ? html`<${PerMotorTable} params=${leftover} group=${group} motors=${motors} />`
+          : null}
+        <${NotchQuickActions} />
+      </div>`);
       continue;
     }
-    const toggle =
-      group === "notch"
-        ? ` <a href="#" class="notch-view-toggle hint">compact view</a>`
-        : "";
-    const extras = group === "notch" ? notchQuickActionsHtml() : "";
-    parts.push(
-      `<div class="param-group"><h3>${group.replace(/_/g, " ")}${toggle}</h3>` +
-        perMotorTable(params, group) +
-        extras +
-        `</div>`
-    );
+    groups.push(html`<div key=${group} class="param-group">
+      <h3>
+        ${group.replace(/_/g, " ")}${group === "notch"
+          ? html`<${NotchViewToggle} label="compact view" />`
+          : null}
+      </h3>
+      <${PerMotorTable} params=${params} group=${group} motors=${motors} />
+      ${group === "notch" ? html`<${NotchQuickActions} />` : null}
+    </div>`);
   }
-  container.innerHTML = parts.join("");
-  bindDriveGridEvents();
-  updateApplyState();
+  return groups;
 }
 
-function bindDriveGridEvents() {
-  const container = el("drive-groups");
-  container.querySelectorAll(".cell-input").forEach((input) => {
-    input.addEventListener("change", onDriveCellChange);
-  });
-  container.querySelectorAll("a.rederive").forEach((elink) => {
-    elink.addEventListener("click", (e) => {
-      e.preventDefault();
-      state.drive.dirty.delete(elink.dataset.param);
-      rederiveAutofillTarget(elink.dataset.param);
-      renderDriveGroups();
-    });
-  });
-  container.querySelectorAll("details.adaptive-actions").forEach((d) => {
-    d.addEventListener("toggle", () => {
-      state.drive.adaptiveOpen = d.open;
-    });
-  });
-  container.querySelectorAll("a.notch-view-toggle").forEach((elink) => {
-    elink.addEventListener("click", (e) => {
-      e.preventDefault();
-      state.drive.notchPerMotor = !state.drive.notchPerMotor;
-      renderDriveGroups();
-    });
-  });
-  container.querySelectorAll("button.quick-action").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const staged = { ...(state.drive.pending.adaptive_notch_mode || {}) };
-      for (const m of motorNames(state.drive.data.motors)) {
-        staged[m] = Number(btn.dataset.value);
-      }
-      state.drive.pending.adaptive_notch_mode = staged;
-      renderDriveGroups();
-    });
-  });
-}
-
-function onDriveCellChange(e) {
-  const input = e.target;
-  const name = input.dataset.param;
-  const param = paramByName(name);
-  const raw = parseInt(input.value, 10);
-  if (Number.isNaN(raw)) return;
-  const targets =
-    input.dataset.motor === "*" ? motorNames(state.drive.data.motors) : [input.dataset.motor];
-  const existing = { ...(state.drive.pending[name] || {}) };
-  for (const m of targets) existing[m] = raw;
-  state.drive.pending[name] = existing;
-  if (name === AUTOFILL_SOURCE_PARAM) {
-    propagateAutofill();
-  } else if (param.autofill) {
-    state.drive.dirty.add(name);
-  }
-  renderDriveGroups();
-}
-
-function updateApplyState() {
-  const btn = el("drive-apply-btn");
-  const label = el("drive-changed-count");
-  const preview = el("pending-preview");
-  if (!btn || !label || !preview) return;
-  if (!state.drive.data) {
-    btn.disabled = true;
-    label.textContent = "";
-    preview.innerHTML = "";
-    return;
-  }
-  const changed = diffChangedParams(state.drive.data.params, state.drive.data.motors, state.drive.pending);
+function DrivePanel() {
+  useStore();
+  const data = state.drive.data;
+  const changed = data ? diffChangedParams(data.params, data.motors, state.drive.pending) : [];
   const lines = buildServoTuneCommands(changed);
-  btn.disabled = lines.length === 0;
-  label.textContent = lines.length ? `${lines.length} write(s) pending` : "no changes pending";
-  preview.innerHTML = lines.map((l) => `<div class="pending-line">${l}</div>`).join("");
+  return html`<div id="drive-groups">
+      ${data
+        ? html`<${DriveGroups} />`
+        : html`<p class="note">
+            no drive state yet — press refresh in the top bar to read every mapped parameter off
+            the drives (SERVO_DUMP_TUNING)
+          </p>`}
+    </div>
+    <div id="pending-preview" class="pending-preview">
+      ${lines.map((l) => html`<div key=${l} class="pending-line">${l}</div>`)}
+    </div>
+    <div class="row">
+      <button id="drive-apply-btn" disabled=${lines.length === 0} onClick=${applyDriveChanges}>
+        apply
+      </button>
+      <span class="note" id="drive-changed-count">
+        ${data ? (lines.length ? `${lines.length} write(s) pending` : "no changes pending") : ""}
+      </span>
+    </div>`;
+}
+
+let mountedDrivePanel = null;
+
+function renderDriveGroups() {
+  const container = el("drive-panel");
+  if (container && mountedDrivePanel !== container) {
+    if (mountedDrivePanel) render(null, mountedDrivePanel);
+    mountedDrivePanel = container;
+    render(html`<${DrivePanel} />`, container);
+  }
+  notify();
 }
 
 async function loadDriveState() {
@@ -598,4 +621,4 @@ function loadRerunForm(name) {
   setConsoleValue(reconstructCommand(detail.manifest), false);
 }
 
-export { GROUP_ORDER, OTHER_GROUP, AUTOFILL_SOURCE_PARAM, DRIVE_REFRESH_POLL_MS, DRIVE_REFRESH_TIMEOUT_MS, deriveGainPositionFromSpeed, deriveGainIntegralFromSpeed, AUTOFILL_FORMULAS, paramGroupSection, groupParams, motorNames, motorRawValues, valuesAgree, pinnedEntries, cellRaw, diffChangedParams, buildServoTuneCommands, paramByName, currentSpeedGainByMotor, propagateAutofill, rederiveAutofillTarget, formatAge, currentDriveAgeS, renderDriveBanner, shortMotorLabel, cellInputHtml, allInputHtml, paramLabelHtml, NOTCH_QUICK_ACTIONS, notchQuickActionsHtml, NOTCH_ROW_KINDS, notchMatrix, notchCompactHtml, renderDriveGroups, bindDriveGridEvents, onDriveCellChange, updateApplyState, loadDriveState, refreshDriveState, applyDriveChanges, strokeSuffix, reconstructCommand, loadRerunForm };
+export { GROUP_ORDER, OTHER_GROUP, AUTOFILL_SOURCE_PARAM, DRIVE_REFRESH_POLL_MS, DRIVE_REFRESH_TIMEOUT_MS, deriveGainPositionFromSpeed, deriveGainIntegralFromSpeed, AUTOFILL_FORMULAS, paramGroupSection, groupParams, motorNames, motorRawValues, valuesAgree, pinnedEntries, cellRaw, diffChangedParams, buildServoTuneCommands, paramByName, currentSpeedGainByMotor, propagateAutofill, rederiveAutofillTarget, formatAge, currentDriveAgeS, renderDriveBanner, shortMotorLabel, stageCellEdit, NOTCH_QUICK_ACTIONS, NOTCH_ROW_KINDS, notchMatrix, renderDriveGroups, loadDriveState, refreshDriveState, applyDriveChanges, strokeSuffix, reconstructCommand, loadRerunForm };

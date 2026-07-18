@@ -19,6 +19,7 @@ pub const JS_MODULES: &[(&str, &str)] = &[
     ("runs.js", include_str!("web/js/runs.js")),
     ("shell.js", include_str!("web/js/shell.js")),
     ("state.js", include_str!("web/js/state.js")),
+    ("store.js", include_str!("web/js/store.js")),
     ("strain.js", include_str!("web/js/strain.js")),
     ("uplot-chart.js", include_str!("web/js/uplot-chart.js")),
 ];
