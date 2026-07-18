@@ -501,20 +501,7 @@ pub fn handle(captures_root: &Path, req: &Request) -> Response {
     let path = req.path.split('?').next().unwrap_or("");
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     match (req.method.as_str(), segments.as_slice()) {
-        ("GET", []) => Response::text(
-            200,
-            "text/html; charset=utf-8",
-            assets::INDEX_HTML.to_string(),
-        ),
-        ("GET", ["js", name]) => match assets::js_module(name) {
-            Some(src) => Response::text(200, "application/javascript", src.to_string()),
-            None => Response::not_found(&format!("no such js module: {name}")),
-        },
-        ("GET", ["app.css"]) => Response::text(200, "text/css", assets::APP_CSS.to_string()),
-        ("GET", ["vendor", name]) => match assets::vendor_asset(name) {
-            Some((content_type, src)) => Response::text(200, content_type, src.to_string()),
-            None => Response::not_found(&format!("no such vendor asset: {name}")),
-        },
+        ("GET", []) => asset_response(assets::index_html()),
         ("GET", ["api", "runs"]) => handle_list(captures_root),
         ("GET", ["api", "drive_state"]) => handle_drive_state(captures_root),
         ("GET", ["api", "live"]) => handle_live_status(captures_root),
@@ -532,6 +519,17 @@ pub fn handle(captures_root: &Path, req: &Request) -> Response {
         ("POST", ["api", "runs", name, "analyze"]) => handle_analyze(captures_root, name),
         ("POST", ["api", "runs", name, "note"]) => handle_note(captures_root, name, &req.body),
         ("DELETE", ["api", "runs", name]) => handle_delete_run(captures_root, name),
+        ("GET", asset_path) if assets::built(&asset_path.join("/")).is_some() => {
+            asset_response(assets::built(&asset_path.join("/")).unwrap())
+        }
         _ => Response::not_found(&format!("no such route: {} {}", req.method, req.path)),
+    }
+}
+
+fn asset_response(asset: &'static assets::Asset) -> Response {
+    Response {
+        status: 200,
+        content_type: asset.mime,
+        body: asset.body.to_vec(),
     }
 }

@@ -264,39 +264,44 @@ fn index_page_serves_html() {
 }
 
 #[test]
-fn vendor_assets_are_served_with_correct_mime_and_body() {
-    let (root, _run_dirs) = demo_root("vendor");
+fn built_assets_are_served_with_correct_mime_and_body() {
+    let (root, _run_dirs) = demo_root("assets");
     let port = spawn_server(root.clone());
 
-    for (name, content_type, src) in assets::VENDOR_ASSETS {
+    assert!(assets::BUILT_ASSETS.len() >= 3, "expect html + js + css");
+    for asset in assets::BUILT_ASSETS {
+        let name = asset.path;
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
         stream
             .write_all(
-                format!("GET /vendor/{name} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
-                    .as_bytes(),
+                format!("GET /{name} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes(),
             )
             .unwrap();
         let mut raw = Vec::new();
         stream.read_to_end(&mut raw).unwrap();
-        let text = String::from_utf8_lossy(&raw);
-        let mut lines = text.lines();
+        let header_end = raw
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .expect("response has a header terminator");
+        let head = String::from_utf8_lossy(&raw[..header_end]);
         assert!(
-            lines.next().unwrap().contains("200"),
-            "GET /vendor/{name} did not return 200"
+            head.lines().next().unwrap().contains("200"),
+            "GET /{name} did not return 200"
         );
         assert!(
-            text.to_lowercase()
-                .contains(&format!("content-type: {content_type}")),
-            "GET /vendor/{name} missing content-type {content_type}"
+            head.to_lowercase()
+                .contains(&format!("content-type: {}", asset.mime)),
+            "GET /{name} missing content-type {}",
+            asset.mime
         );
-        let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
         assert_eq!(
-            body, *src,
-            "GET /vendor/{name} body did not match the embedded source"
+            &raw[header_end + 4..],
+            asset.body,
+            "GET /{name} body did not match the embedded bundle"
         );
     }
 
-    let resp = request(port, "GET", "/vendor/does-not-exist.js");
+    let resp = request(port, "GET", "/does-not-exist.js");
     assert_eq!(resp.status, 404);
 
     std::fs::remove_dir_all(&root).ok();

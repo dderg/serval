@@ -1,10 +1,9 @@
 //! The drive tuning panel's pure logic (autofill derivation,
-//! changed-param diffing) lives in `web/js/*.js` as
-//! plain functions rather than behind a Node toolchain this crate doesn't
-//! otherwise need. This file is the substitute test rig: it asserts the
-//! functions the panel is built from are actually present in the served
-//! asset (a rename or an accidental delete during a refactor would slip
-//! past `cargo build`, which never looks inside a `include_str!` blob), and
+//! changed-param diffing) lives in `web/src/*.ts` as plain functions.
+//! This file is the substitute test rig: it asserts the functions the
+//! panel is built from are actually present in the sources bun bundles
+//! into the served asset (a rename or an accidental delete during a
+//! refactor would slip past `cargo build`, which never greps them), and
 //! that `servo-cal demo`'s `drive_state.json` — the grid's only real
 //! fixture — has the shape those functions assume: every param's `group`
 //! known to the pages' section order, motors agreeing everywhere except
@@ -15,8 +14,24 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use servo_ident::assets::all_js;
 use servo_ident::demo::build_demo;
+
+fn all_js() -> String {
+    let src_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web/src");
+    let mut sources = Vec::new();
+    for entry in std::fs::read_dir(&src_dir).expect("read web/src") {
+        let path = entry.expect("read web/src entry").path();
+        assert_eq!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("ts"),
+            "unexpected file in web/src: {}",
+            path.display()
+        );
+        sources.push(std::fs::read_to_string(&path).expect("read web/src module"));
+    }
+    assert!(!sources.is_empty(), "no modules found in web/src");
+    sources.join("\n")
+}
 
 fn fixture_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test/fixtures/servo_captures")

@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "build": "bun build src/boot.ts --outdir dist --sourcemap=linked && cp app.css index.html dist/",
+    "build": "bun build index.html --outdir \"${SERVO_WEB_OUTDIR:-dist}\" --sourcemap=linked",
     "check": "tsc --noEmit",
     "test": "bun test"
   },
