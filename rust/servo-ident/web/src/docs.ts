@@ -1,6 +1,7 @@
 import { el, payloadUnchanged, shortTime } from "./api";
 import { setConsoleValue } from "./console";
 import { moonrakerUrl, escapeHtml } from "./moonraker";
+import { launchpadSectionHtml } from "./launchpad";
 import { consoleSectionHtml } from "./shell";
 import { HELP_CACHE_KEY, state } from "./state";
 
@@ -164,6 +165,7 @@ function docsShellHtml() {
     `<div id="docs-list"></div>` +
     `</section>` +
     consoleSectionHtml({}) +
+    launchpadSectionHtml() +
     `</main></div>`
   );
 }

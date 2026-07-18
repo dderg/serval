@@ -1,9 +1,9 @@
 import { el, mustEl, resetRenderState } from "./api";
-import { psdMaxFreqHz } from "./charts-core";
+import { psdMaxFreqHz, ferrUnitToggleHtml, bindFerrUnitToggle } from "./charts-core";
 import { bindConsole, setConsoleValue } from "./console";
 import { fetchMacroHelp, docsShellHtml, renderDocsList } from "./docs";
 import { renderDriveGroups } from "./drive";
-import { bindLaunchpad, launchpadShellHtml } from "./launchpad";
+import { bindLaunchpad, launchpadSectionHtml } from "./launchpad";
 import { bindLiveEvents, startLivePolling, stopLivePolling } from "./live";
 import { renderSentLog } from "./moonraker";
 import { redrawCharts } from "./peaks";
@@ -44,6 +44,7 @@ function controlsSectionsHtml(def: PageDef): string {
     );
   }
   parts.push(consoleSectionHtml(def));
+  parts.push(launchpadSectionHtml());
   return parts.join("");
 }
 
@@ -203,6 +204,7 @@ function analysisSectionsHtml(def: PageDef): string {
                 `<option value="${f}"${f === psdMaxFreqHz() ? " selected" : ""}>${f}</option>`
             ).join("") +
             `</select> Hz</label>` +
+            ferrUnitToggleHtml("psd") +
             `<div class="chips" id="psd-step-chips"></div>`
         ) +
         `<div class="charts" id="psd-charts"><p class="note">select runs above</p></div>` +
@@ -223,6 +225,7 @@ function analysisSectionsHtml(def: PageDef): string {
         sectionHeadHtml(
           "time domain — following error",
           motorViewToggleHtml("combined") +
+            ferrUnitToggleHtml("time") +
             `<div class="chips" id="time-motor-chips"></div>` +
             `<div class="chips" id="time-step-chips"></div>`
         ) +
@@ -282,6 +285,7 @@ function liveShellHtml() {
     `analyzable .scap in the captures root; stop finalizes it.</p>` +
     `</section>` +
     consoleSectionHtml({}) +
+    launchpadSectionHtml() +
     `</aside>` +
     `</div>`
   );
@@ -365,14 +369,6 @@ function renderPage() {
     applyAccordionState();
     return;
   }
-  if (def.launchpad) {
-    root.innerHTML = launchpadShellHtml();
-    bindPageEvents();
-    bindLaunchpad();
-    renderSentLog();
-    applyAccordionState();
-    return;
-  }
   if (def.docs) {
     root.innerHTML = docsShellHtml();
     bindPageEvents();
@@ -393,6 +389,7 @@ function renderPage() {
       `</tr></thead><tbody id="journal-body"></tbody></table></div>` +
       `</section>` +
       consoleSectionHtml({}) +
+      launchpadSectionHtml() +
       `</main></div>`;
   } else {
     root.innerHTML =
@@ -445,6 +442,7 @@ function makeColumnsResizable(table: HTMLTableElement) {
 
 function bindPageEvents() {
   bindConsole();
+  bindLaunchpad();
   document
     .querySelectorAll<HTMLTableElement>(".runs-wrap table, .journal-wrap table")
     .forEach(makeColumnsResizable);
@@ -455,6 +453,8 @@ function bindPageEvents() {
       redrawCharts();
     });
   }
+  bindFerrUnitToggle("psd", redrawCharts);
+  bindFerrUnitToggle("time", redrawCharts);
   document.querySelectorAll<HTMLButtonElement>("button.motor-view-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       localStorage.setItem(MOTOR_VIEW_KEY, btn.dataset.view ?? "agg");

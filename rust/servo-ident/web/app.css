@@ -326,6 +326,17 @@ table.param-grid td.param-col {
   text-overflow: ellipsis;
 }
 
+.param-line { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.param-field { display: flex; flex-direction: column; gap: 2px; flex: 1 1 130px; min-width: 130px; max-width: 240px; }
+.param-field.expanded { flex-basis: 100%; max-width: none; }
+.param-field-label {
+  font-size: 11px;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .cell-input { width: 100%; min-width: 0; text-align: right; padding: 2px 4px; }
 select.cell-input { text-align: left; }
 .cell-input.pending { border-color: var(--warn); background: #1d1910; }
@@ -533,27 +544,34 @@ a.chip.param-chip.xref { color: var(--accent); text-decoration: none; }
 
 /* --- launchpad (calibration macro pad) --------------------------------- */
 
-.lp-group { margin-bottom: 14px; }
+.lp-group { margin-bottom: 12px; }
 .lp-group:last-child { margin-bottom: 0; }
-.lp-group h3 { text-transform: uppercase; letter-spacing: 0.06em; }
-.lp-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
-.lp-card {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
+.lp-group h3 { text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 5px; }
+.lp-list { display: flex; flex-direction: column; gap: 3px; }
+.lp-item {
+  display: block;
+  width: 100%;
   text-align: left;
-  padding: 7px 9px;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: var(--accent);
   background: #161d26;
   border: 1px solid var(--border);
-  border-radius: 5px;
+  border-radius: 4px;
 }
-.lp-card:hover:not(:disabled) { background: #1b2530; border-color: #2d5a8a; }
-.lp-card.active { background: #14202e; border-color: #2d5a8a; }
-.lp-card-name { color: var(--accent); font-weight: 600; font-size: 12px; }
-.lp-card-blurb { color: var(--dim); font-size: 11px; line-height: 1.35; white-space: normal; }
+.lp-item:hover:not(:disabled) { background: #1b2530; border-color: #2d5a8a; }
 
-.launchpad-form { display: flex; flex-direction: column; gap: 8px; }
+.lp-detail { display: flex; flex-direction: column; gap: 8px; }
+.lp-back {
+  align-self: flex-start;
+  font-size: 11px;
+  padding: 3px 8px;
+  color: var(--dim);
+  background: #161d26;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.lp-back:hover { color: var(--text); border-color: #2d5a8a; }
 .lp-fields { display: flex; flex-direction: column; gap: 7px; }
 .lp-field { display: grid; grid-template-columns: 140px minmax(0, 1fr); align-items: baseline; gap: 6px 10px; }
 .lp-field label { font-size: 11px; color: var(--text); overflow: hidden; text-overflow: ellipsis; }

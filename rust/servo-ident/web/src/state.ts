@@ -60,7 +60,6 @@ interface PageDef {
   live?: boolean;
   journal?: boolean;
   docs?: boolean;
-  launchpad?: boolean;
 }
 
 const PAGE_DEFS: Record<string, PageDef> = {
@@ -106,11 +105,6 @@ const PAGE_DEFS: Record<string, PageDef> = {
           "a drive's adaptive filters can't compensate the way they fight a chirp",
       },
     ],
-  },
-  launchpad: {
-    label: "launchpad",
-    launchpad: true,
-    intro: "a friendly form pad for every calibration macro — build and run the exact g-code line",
   },
   strain: {
     label: "strain",

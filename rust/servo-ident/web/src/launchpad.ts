@@ -1,7 +1,6 @@
 import { el } from "./api";
 import { setConsoleValue } from "./console";
 import { escapeHtml, renderSentLog, runGcode } from "./moonraker";
-import { consoleSectionHtml } from "./shell";
 
 // --- launchpad: a friendly form pad for the calibration macros --------------
 
@@ -428,45 +427,42 @@ function formHtml(macro: LpMacro, values: Record<string, string>): string {
   );
 }
 
-function cardsHtml(selected: string | null): string {
+function listHtml(): string {
   return LAUNCHPAD_GROUPS.map(
     (g) =>
-      `<div class="lp-group"><h3>${escapeHtml(g.label)}</h3><div class="lp-cards">` +
+      `<div class="lp-group"><h3>${escapeHtml(g.label)}</h3><div class="lp-list">` +
       g.macros
         .map(
           (m) =>
-            `<button class="lp-card${m.name === selected ? " active" : ""}" data-lp-macro="${m.name}">` +
-            `<span class="lp-card-name">${escapeHtml(m.name)}</span>` +
-            `<span class="lp-card-blurb">${escapeHtml(m.blurb)}</span></button>`
+            `<button class="lp-item" data-lp-macro="${m.name}" title="${escapeHtml(m.blurb)}">` +
+            `${escapeHtml(m.name)}</button>`
         )
         .join("") +
       `</div></div>`
   ).join("");
 }
 
-function launchpadShellHtml(): string {
+function detailHtml(macro: LpMacro, values: Record<string, string>): string {
   return (
-    `<div class="workspace">` +
-    `<main class="analysis">` +
-    `<section class="launchpad-section">` +
-    `<div class="section-head"><h2>calibration launchpad</h2>` +
-    `<span class="note">pick a macro, fill the form, preview the exact g-code, run it</span></div>` +
-    `<div id="launchpad-cards">${cardsHtml(loadSelected())}</div>` +
-    `</section>` +
-    `</main>` +
-    `<aside class="controls">` +
-    `<section class="launchpad-form" id="launchpad-form">` +
-    `<p class="note">select a macro on the left to build its command</p>` +
-    `</section>` +
-    consoleSectionHtml({}) +
-    `</aside>` +
+    `<div class="lp-detail">` +
+    `<button class="lp-back" id="launchpad-back">← all macros</button>` +
+    formHtml(macro, values) +
     `</div>`
+  );
+}
+
+function launchpadSectionHtml(): string {
+  return (
+    `<section class="launchpad-panel">` +
+    `<div class="section-head"><h2>calibration launchpad</h2></div>` +
+    `<div id="launchpad-body"></div>` +
+    `</section>`
   );
 }
 
 function readFormValues(): Record<string, string> {
   const values: Record<string, string> = {};
-  document.querySelectorAll<HTMLInputElement | HTMLSelectElement>("#launchpad-form [data-lp-param]").forEach((f) => {
+  document.querySelectorAll<HTMLInputElement | HTMLSelectElement>("#launchpad-body [data-lp-param]").forEach((f) => {
     const name = f.dataset.lpParam;
     if (name) values[name] = f.value;
   });
@@ -499,38 +495,44 @@ function updatePreview() {
   persistCurrent(values);
 }
 
+function renderList() {
+  selectedMacro = null;
+  localStorage.removeItem(SELECTED_KEY);
+  const body = el("launchpad-body");
+  if (body) body.innerHTML = listHtml();
+}
+
 function selectMacro(name: string) {
   if (!MACROS[name]) throw new Error(`launchpad: unknown macro ${name}`);
   selectedMacro = name;
   localStorage.setItem(SELECTED_KEY, name);
-  const form = el("launchpad-form");
-  if (form) form.innerHTML = formHtml(MACROS[name], loadValues()[name] ?? {});
-  document.querySelectorAll<HTMLElement>(".lp-card").forEach((c) => {
-    c.classList.toggle("active", c.dataset.lpMacro === name);
-  });
+  const body = el("launchpad-body");
+  if (body) body.innerHTML = detailHtml(MACROS[name], loadValues()[name] ?? {});
   updatePreview();
 }
 
 function bindLaunchpad() {
-  const cards = el("launchpad-cards");
-  if (cards) {
-    cards.addEventListener("click", (ev) => {
-      const card = (ev.target as HTMLElement).closest<HTMLElement>(".lp-card");
-      if (card && card.dataset.lpMacro) selectMacro(card.dataset.lpMacro);
-    });
-  }
-  const form = el("launchpad-form");
-  if (form) {
-    form.addEventListener("input", updatePreview);
-    form.addEventListener("change", updatePreview);
-    form.addEventListener("click", (ev) => {
-      const target = ev.target as HTMLElement;
-      if (target.id === "launchpad-copy") onCopy();
-      if (target.id === "launchpad-run") onRun();
-    });
-  }
+  const body = el("launchpad-body");
+  if (!body) return;
+  body.addEventListener("input", updatePreview);
+  body.addEventListener("change", updatePreview);
+  body.addEventListener("click", (ev) => {
+    const target = ev.target as HTMLElement;
+    const item = target.closest<HTMLElement>(".lp-item");
+    if (item && item.dataset.lpMacro) {
+      selectMacro(item.dataset.lpMacro);
+      return;
+    }
+    if (target.closest("#launchpad-back")) {
+      renderList();
+      return;
+    }
+    if (target.id === "launchpad-copy") onCopy();
+    if (target.id === "launchpad-run") onRun();
+  });
   selectedMacro = loadSelected();
   if (selectedMacro) selectMacro(selectedMacro);
+  else renderList();
 }
 
 function onCopy() {
@@ -547,4 +549,4 @@ async function onRun() {
   renderSentLog();
 }
 
-export { LAUNCHPAD_GROUPS, buildCommand, missingRequired, launchpadShellHtml, bindLaunchpad };
+export { LAUNCHPAD_GROUPS, buildCommand, missingRequired, launchpadSectionHtml, bindLaunchpad };
