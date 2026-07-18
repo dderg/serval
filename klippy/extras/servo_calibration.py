@@ -1410,6 +1410,7 @@ class ServoCalibration:
             "motors": [self._motor_manifest(m) for m in motors],
             "ff_lead_cycles": self._ff_lead_cycles(gcmd, motors),
             "belts": self._belts(belts_rails),
+            "spatial": servo_strokes.spatial_frame(kin),
             "steps": [],
             "ambient": self._ambient(gcmd, servos),
         }

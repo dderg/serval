@@ -3,6 +3,7 @@ import { drawTimeDomain, peakStep } from "./charts-core";
 import { motorNames, cellRaw, renderDriveGroups } from "./drive";
 import { renderFrfCharts, renderRingdownCharts } from "./dynamics";
 import { renderMetricsTable, renderSweepMetricsChart, renderPsdChart, visibleStepNames, renderStepChips, renderMotorChips } from "./metrics";
+import { renderPathChart } from "./path-chart";
 import { selectedRunNames } from "./runs";
 import { currentPageDef } from "./shell";
 import { RESONANCE_BAND_HZ, PEAK_MIN_SEPARATION_HZ, PEAK_LIST_SIZE, state } from "./state";
@@ -167,6 +168,7 @@ async function redrawCharts() {
     }
     renderMotorChips(timeMotors);
   }
+  if (def.charts && def.charts.includes("path")) renderPathChart(okNames, plots, steps);
   if (def.charts && def.charts.includes("frf")) renderFrfCharts(okNames, plots);
   if (def.charts && def.charts.includes("ringdown")) renderRingdownCharts(okNames, plots);
   if (def.charts && def.charts.includes("psd")) {

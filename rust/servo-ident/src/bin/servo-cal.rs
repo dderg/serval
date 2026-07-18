@@ -149,6 +149,7 @@ fn cmd_analyze(args: &[String]) {
             axis.as_deref(),
             None,
             ff_lead,
+            None,
         )
         .unwrap_or_else(|e| die(&e));
         println!("file: {scap_path}");

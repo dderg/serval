@@ -24,6 +24,7 @@ export type {
   PlotRingdownSource,
   PlotRingdownSource as RingdownSource,
 } from "./generated/PlotRingdownSource";
+export type { PlotPath } from "./generated/PlotPath";
 export type { PlotSeries } from "./generated/PlotSeries";
 export type { PlotStep } from "./generated/PlotStep";
 export type { Results } from "./generated/Results";

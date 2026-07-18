@@ -74,7 +74,7 @@ const PAGE_DEFS: Record<string, PageDef> = {
       "differential",
       "ringdown",
     ],
-    charts: ["psd", "time", "frf", "ringdown"],
+    charts: ["psd", "time", "path", "frf", "ringdown"],
     intro:
       "one tuning loop: raise gains until resonance or torque rail, notch what " +
       "the PSD shows, identify the load, and judge disturbance rejection in the " +

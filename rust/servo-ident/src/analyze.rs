@@ -18,9 +18,9 @@ use crate::metrics::{
 use crate::psd::{moving_psd, top_peaks, welch_psd};
 use crate::resonance::{detect_resonance, recommend_accel};
 use crate::results::{
-    AccelResult, Combined, DifferentialResult, DriveResult, Manifest, PlotAccel, PlotCombined,
-    PlotDifferential, PlotDrive, PlotPsd, PlotPsdAccel, PlotSeries, PlotStep, Results, Step,
-    StepResult, Verdict,
+    AccelResult, Combined, DifferentialResult, DriveResult, Manifest, ManifestSpatial, PlotAccel,
+    PlotCombined, PlotDifferential, PlotDrive, PlotPath, PlotPsd, PlotPsdAccel, PlotSeries,
+    PlotStep, Results, Step, StepResult, Verdict,
 };
 use crate::ringdown::{
     compute_step_ringdown, ringdown_verdict_reason, RingdownOptions, DEFAULT_GUARD_MS,
@@ -29,6 +29,7 @@ use crate::ringdown::{
 use crate::scap::Scap;
 
 const MAX_SERIES_POINTS: usize = 2000;
+pub const MAX_PATH_POINTS: usize = 4000;
 const PSD_PEAK_COUNT: usize = 5;
 
 fn stride_for(n: usize) -> usize {
@@ -37,6 +38,74 @@ fn stride_for(n: usize) -> usize {
     } else {
         n.div_ceil(MAX_SERIES_POINTS)
     }
+}
+
+/// Decimation indices for a path polyline: an even stride over the capture
+/// plus the final sample, so the stroke's endpoint survives.
+pub fn path_indices(n: usize, max_points: usize) -> Vec<usize> {
+    assert!(max_points >= 2, "path budget must fit both endpoints");
+    if n == 0 {
+        return Vec::new();
+    }
+    let stride = n.div_ceil(max_points).max(1);
+    let mut idxs: Vec<usize> = (0..n).step_by(stride).collect();
+    if *idxs.last().unwrap() != n - 1 {
+        idxs.push(n - 1);
+    }
+    idxs
+}
+
+/// Commanded and actual toolhead XY in mm through the manifest's spatial
+/// frame (motor counts -> cartesian, invert signs folded into the frame).
+/// `Ok(None)` when the frame has no x+y modes or the capture lacks one of
+/// the frame's motors — a single-axis capture, not an error.
+pub fn xy_path(cap: &Scap, spatial: &ManifestSpatial) -> Result<Option<PlotPath>, String> {
+    if spatial.frame.len() != spatial.modes.len()
+        || spatial.frame.iter().any(|r| r.len() != spatial.axes.len())
+    {
+        return Err(format!(
+            "manifest spatial frame shape does not match its {} mode(s) x {} axis(es)",
+            spatial.modes.len(),
+            spatial.axes.len()
+        ));
+    }
+    let (Some(xi), Some(yi)) = (
+        spatial.modes.iter().position(|m| m == "x"),
+        spatial.modes.iter().position(|m| m == "y"),
+    ) else {
+        return Ok(None);
+    };
+    let mut motors = Vec::new();
+    for (s, motor) in spatial.axes.iter().enumerate() {
+        let Some(idx) = cap.drive_index(motor) else {
+            return Ok(None);
+        };
+        let cpm = cap.header.drives[idx].counts_per_mm;
+        if cpm <= 0.0 {
+            return Err(format!("drive {motor:?} has counts_per_mm {cpm}"));
+        }
+        motors.push((s, idx, cpm));
+    }
+    let idxs = path_indices(cap.n_records, MAX_PATH_POINTS);
+    let mut path = PlotPath {
+        cmd_x_mm: vec![0.0; idxs.len()],
+        cmd_y_mm: vec![0.0; idxs.len()],
+        act_x_mm: vec![0.0; idxs.len()],
+        act_y_mm: vec![0.0; idxs.len()],
+    };
+    for (s, idx, cpm) in motors {
+        let target = cap.read_i64(idx, "target_counts")?;
+        let actual = cap.read_i64(idx, "position_actual")?;
+        let cx = spatial.frame[xi][s] / cpm;
+        let cy = spatial.frame[yi][s] / cpm;
+        for (j, &k) in idxs.iter().enumerate() {
+            path.cmd_x_mm[j] += cx * target[k] as f64;
+            path.cmd_y_mm[j] += cy * target[k] as f64;
+            path.act_x_mm[j] += cx * actual[k] as f64;
+            path.act_y_mm[j] += cy * actual[k] as f64;
+        }
+    }
+    Ok(Some(path))
 }
 
 fn read_accel_csv(path: &Path) -> Result<(Vec<f64>, Vec<f64>), String> {
@@ -137,6 +206,7 @@ pub fn analyze_capture(
     axis: Option<&str>,
     accel_path: Option<&Path>,
     ff_lead_samples: usize,
+    spatial: Option<&ManifestSpatial>,
 ) -> Result<(StepResult, PlotStep), String> {
     let fs = cap.fs();
     let n = cap.n_records;
@@ -260,6 +330,10 @@ pub fn analyze_capture(
         freq_hz: a.freq_hz.clone(),
         psd: a.psd.clone(),
     });
+    let path = match spatial {
+        Some(sp) => xy_path(cap, sp)?,
+        None => None,
+    };
 
     let step_result = StepResult {
         name: name.to_string(),
@@ -281,6 +355,7 @@ pub fn analyze_capture(
         accel: plot_accel,
         differential: None,
         ringdown: None,
+        path,
         psd: PlotPsd {
             freq_hz: psd_freq_hz,
             per_drive: per_drive_psd,
@@ -395,6 +470,7 @@ pub fn analyze_differential_capture(
         accel: None,
         differential: Some(plot_differential),
         ringdown: None,
+        path: None,
         psd: PlotPsd {
             freq_hz: psd_freq_hz,
             per_drive: per_drive_psd,
@@ -680,6 +756,7 @@ fn build_run_reusing(
                     manifest.axis.as_deref(),
                     accel_path.as_deref(),
                     manifest.ff_lead_cycles as usize,
+                    manifest.spatial.as_ref(),
                 )?
             }
         };

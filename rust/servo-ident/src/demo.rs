@@ -596,6 +596,7 @@ struct DemoManifest {
     stroke_plan: DemoStrokePlan,
     motors: &'static [DemoMotorSpec],
     belts: &'static str,
+    spatial: SpatialFrame,
     steps: Vec<DemoStep>,
     ambient: DemoAmbient,
 }
@@ -630,6 +631,7 @@ fn manifest_json(attempt: &DemoAttempt, created: SystemTime) -> DemoManifest {
         },
         motors: &DEMO_MOTOR_SPECS,
         belts: "motor_a:1+motor_a1:-1,motor_b:-1+motor_b1:-1",
+        spatial: demo_spatial_frame(),
         steps: vec![
             DemoStep {
                 name: "s550",

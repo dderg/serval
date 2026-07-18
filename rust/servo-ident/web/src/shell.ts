@@ -158,6 +158,18 @@ function analysisSectionsHtml(def: PageDef): string {
         `</section>`
     );
   }
+  if (def.charts && def.charts.includes("path")) {
+    parts.push(
+      `<section class="path-section" id="path-section" hidden>` +
+        sectionHeadHtml(
+          "toolpath — commanded vs actual",
+          `<button id="path-fit">fit</button>` +
+            `<span class="note" id="path-note"></span>`
+        ) +
+        `<div class="spatial-box"><canvas id="path-canvas"></canvas></div>` +
+        `</section>`
+    );
+  }
   if (def.charts && def.charts.includes("frf")) {
     parts.push(
       `<section class="frf-section" id="frf-section" hidden>` +
