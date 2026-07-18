@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use servo_ident::demo::build_demo;
-use servo_ident::{http, serve};
+use servo_ident::{assets, http, serve};
 
 struct HttpResult {
     status: u16,
@@ -259,6 +259,45 @@ fn index_page_serves_html() {
     assert!(lines.next().unwrap().contains("200"));
     assert!(text.to_lowercase().contains("content-type: text/html"));
     assert!(text.contains("<title>servo-cal</title>"));
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn vendor_assets_are_served_with_correct_mime_and_body() {
+    let (root, _run_dirs) = demo_root("vendor");
+    let port = spawn_server(root.clone());
+
+    for (name, content_type, src) in assets::VENDOR_ASSETS {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .write_all(
+                format!("GET /vendor/{name} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        let mut lines = text.lines();
+        assert!(
+            lines.next().unwrap().contains("200"),
+            "GET /vendor/{name} did not return 200"
+        );
+        assert!(
+            text.to_lowercase()
+                .contains(&format!("content-type: {content_type}")),
+            "GET /vendor/{name} missing content-type {content_type}"
+        );
+        let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
+        assert_eq!(
+            body, *src,
+            "GET /vendor/{name} body did not match the embedded source"
+        );
+    }
+
+    let resp = request(port, "GET", "/vendor/does-not-exist.js");
+    assert_eq!(resp.status, 404);
 
     std::fs::remove_dir_all(&root).ok();
 }

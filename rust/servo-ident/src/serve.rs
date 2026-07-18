@@ -510,6 +510,10 @@ pub fn handle(captures_root: &Path, req: &Request) -> Response {
             None => Response::not_found(&format!("no such js module: {name}")),
         },
         ("GET", ["app.css"]) => Response::text(200, "text/css", assets::APP_CSS.to_string()),
+        ("GET", ["vendor", name]) => match assets::vendor_asset(name) {
+            Some((content_type, src)) => Response::text(200, content_type, src.to_string()),
+            None => Response::not_found(&format!("no such vendor asset: {name}")),
+        },
         ("GET", ["api", "runs"]) => handle_list(captures_root),
         ("GET", ["api", "drive_state"]) => handle_drive_state(captures_root),
         ("GET", ["api", "live"]) => handle_live_status(captures_root),

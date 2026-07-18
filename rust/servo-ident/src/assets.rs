@@ -29,6 +29,34 @@ pub fn js_module(name: &str) -> Option<&'static str> {
         .map(|(_, src)| *src)
 }
 
+/// Third-party libraries staged for the SPA but not yet imported by it —
+/// see `web/vendor/VERSIONS.md` for what each file is and where it came
+/// from. `(file name, MIME type, source)`.
+pub const VENDOR_ASSETS: &[(&str, &str, &str)] = &[
+    (
+        "htm-preact-standalone-3.1.1.mjs",
+        "application/javascript",
+        include_str!("web/vendor/htm-preact-standalone-3.1.1.mjs"),
+    ),
+    (
+        "uPlot-1.6.32.esm.js",
+        "application/javascript",
+        include_str!("web/vendor/uPlot-1.6.32.esm.js"),
+    ),
+    (
+        "uPlot-1.6.32.min.css",
+        "text/css",
+        include_str!("web/vendor/uPlot-1.6.32.min.css"),
+    ),
+];
+
+pub fn vendor_asset(name: &str) -> Option<(&'static str, &'static str)> {
+    VENDOR_ASSETS
+        .iter()
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, content_type, src)| (*content_type, *src))
+}
+
 /// Every JS module concatenated, for tests that grep the served sources
 /// for required function declarations.
 pub fn all_js() -> String {
