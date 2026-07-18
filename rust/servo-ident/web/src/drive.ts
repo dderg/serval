@@ -15,7 +15,8 @@ import type { VNode } from "preact";
 // --- drive tuning grid --------------------------------------------------------
 //
 // Renders purely from GET /api/drive_state (servo_tuning.PANEL_PARAMS shape,
-// docs/rewrite/servo-tuning-profiles.md) as param rows whose value cell is
+// docs/rewrite/servo-tuning-profiles.md) as compact labeled fields, one
+// flex line per group, whose value widget is
 // the shared MotorValues component (motor-values.ts): one collapsed set-all
 // field when motors agree, an expandable per-motor spread when they don't,
 // so a 4-motor bench never needs the same value typed four times and every
@@ -30,8 +31,9 @@ import type { VNode } from "preact";
 // Preact owns #drive-panel: renderDriveGroups() mounts once per page build,
 // then every state mutation just notifies the store.
 
-const GROUP_ORDER = ["gains", "filters", "notch", "speed_observer", "disturbance_observer", "load"];
+const GROUP_ORDER = ["gains", "filters", "notch", "speed_observer", "disturbance_observer"];
 const OTHER_GROUP = "other";
+const RETIRED_PARAMS = new Set(["gain_mode", "stiffness_level", "adaptive_notch_mode", "inertia_ratio"]);
 const DRIVE_REFRESH_POLL_MS = 1000;
 const DRIVE_REFRESH_TIMEOUT_MS = 15000;
 
@@ -42,6 +44,7 @@ function paramGroupSection(param: DriveParam): string {
 function groupParams(params: DriveParam[]): Map<string, DriveParam[]> {
   const sections = new Map<string, DriveParam[]>([...GROUP_ORDER, OTHER_GROUP].map((g) => [g, []]));
   for (const p of params) {
+    if (RETIRED_PARAMS.has(p.name)) continue;
     sections.get(paramGroupSection(p))!.push(p);
   }
   return sections;
@@ -258,17 +261,23 @@ function NotchGrid({ nums, byKey }: { nums: number[]; byKey: Map<string, DrivePa
   </table>`;
 }
 
-function ParamTable({ params, group }: { params: DriveParam[]; group: string }) {
-  return html`<table class="param-grid">
-    <tbody>
-      ${params.map(
-        (p) => html`<tr key=${p.name} data-param=${p.name}>
-          <td class="param-col"><${ParamLabel} param=${p} section=${group} /></td>
-          <td class="value-col"><${ParamMotorValues} param=${p} /></td>
-        </tr>`
-      )}
-    </tbody>
-  </table>`;
+/// One compact labeled field per param, all of a group's fields flowing on
+/// one flex line so the whole group reads at a glance; expanding a field's
+/// per-motor spread pops it onto its own full-width row (CSS flex-basis)
+/// while the rest of the line stays compact.
+function ParamLine({ params, group }: { params: DriveParam[]; group: string }) {
+  return html`<div class="param-line">
+    ${params.map(
+      (p) => html`<div
+        key=${p.name}
+        data-param=${p.name}
+        class=${state.drive.expandedParams.has(p.name) ? "param-field expanded" : "param-field"}
+      >
+        <div class="param-field-label"><${ParamLabel} param=${p} section=${group} /></div>
+        <${ParamMotorValues} param=${p} />
+      </div>`
+    )}
+  </div>`;
 }
 
 function DriveGroups() {
@@ -283,13 +292,13 @@ function DriveGroups() {
       groups.push(html`<div key=${group} class="param-group">
         <h3>notch</h3>
         <${NotchGrid} nums=${nums} byKey=${byKey} />
-        ${leftover.length ? html`<${ParamTable} params=${leftover} group=${group} />` : null}
+        ${leftover.length ? html`<${ParamLine} params=${leftover} group=${group} />` : null}
       </div>`);
       continue;
     }
     groups.push(html`<div key=${group} class="param-group">
       <h3>${group.replace(/_/g, " ")}</h3>
-      <${ParamTable} params=${params} group=${group} />
+      <${ParamLine} params=${params} group=${group} />
     </div>`);
   }
   return groups;
@@ -467,4 +476,4 @@ function loadRerunForm(name: string) {
   setConsoleValue(reconstructCommand(detail.manifest), false);
 }
 
-export { GROUP_ORDER, OTHER_GROUP, DRIVE_REFRESH_POLL_MS, DRIVE_REFRESH_TIMEOUT_MS, paramGroupSection, groupParams, motorNames, motorRawValues, valuesAgree, pinnedEntries, cellRaw, diffChangedParams, buildServoTuneCommands, paramByName, formatAge, currentDriveAgeS, renderDriveBanner, shortMotorLabel, stageCellEdit, NOTCH_ROW_KINDS, notchMatrix, renderDriveGroups, loadDriveState, refreshDriveState, applyDriveChanges, strokeSuffix, reconstructCommand, loadRerunForm };
+export { GROUP_ORDER, OTHER_GROUP, RETIRED_PARAMS, DRIVE_REFRESH_POLL_MS, DRIVE_REFRESH_TIMEOUT_MS, paramGroupSection, groupParams, motorNames, motorRawValues, valuesAgree, pinnedEntries, cellRaw, diffChangedParams, buildServoTuneCommands, paramByName, formatAge, currentDriveAgeS, renderDriveBanner, shortMotorLabel, stageCellEdit, NOTCH_ROW_KINDS, notchMatrix, renderDriveGroups, loadDriveState, refreshDriveState, applyDriveChanges, strokeSuffix, reconstructCommand, loadRerunForm };
