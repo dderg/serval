@@ -49,6 +49,22 @@ async function defaultGcode() {
   ].join("\n") + "\n";
 }
 
+// The HTML attributes are the repo's stock configuration; capturing their
+// defaultValue rebuilds it regardless of what the user has typed since.
+async function defaultState() {
+  const config = {};
+  for (const f of CONFIG_FIELDS) {
+    config[f.id] = document.getElementById(`cfg-${f.id}`).defaultValue;
+  }
+  config.post_processor_config =
+    document.getElementById("cfg-post_processor_config").defaultValue;
+  const sim = {};
+  for (const id of SIM_FIELDS) {
+    sim[id] = document.getElementById(id).defaultValue;
+  }
+  return { gcode: await defaultGcode(), config, sim };
+}
+
 let view = null;
 let worker = null;
 let seq = 0;
@@ -324,11 +340,11 @@ async function restoreState() {
     slots.A = { state: saved.slots.A, snapshot: null };
     slots.B = saved.slots.B ? { state: saved.slots.B, snapshot: null } : null;
     activeSlot = saved.active === "B" && slots.B != null ? "B" : "A";
-    applyState(slots[activeSlot].state || { gcode: await defaultGcode() });
+    applyState(slots[activeSlot].state || await defaultState());
   } else if (saved && (saved.gcode !== undefined || saved.config)) {
     applyState(saved); // pre-slots shape — migrate into slot A
   } else {
-    applyState({ gcode: await defaultGcode() });
+    applyState(await defaultState());
   }
   slots[activeSlot].state = captureState();
 }
@@ -394,12 +410,20 @@ function renderPresetDrawer() {
   const active = activePresetName();
   const currentJson = JSON.stringify(captureState());
   list.replaceChildren();
-  if (names.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "empty";
-    empty.textContent = "No presets yet — name the current state above and save it.";
-    list.appendChild(empty);
-  }
+  const defaultsRow = document.createElement("div");
+  defaultsRow.className = "preset-row";
+  const defaultsLabel = document.createElement("span");
+  defaultsLabel.className = "pname";
+  defaultsLabel.textContent = "defaults";
+  defaultsLabel.title = "The stock gcode and config shipped with the repo";
+  defaultsRow.appendChild(defaultsLabel);
+  defaultsRow.appendChild(presetRowButton("Load", "Replace the current state with the repo defaults", false, async () => {
+    applyState(await defaultState());
+    setActivePreset("");
+    invalidateActiveSlotPlan();
+    requestPlan();
+  }));
+  list.appendChild(defaultsRow);
   for (const name of names) {
     const row = document.createElement("div");
     row.className = "preset-row";
@@ -439,14 +463,14 @@ function renderPresetDrawer() {
 function syncPresetCreate() {
   const name = document.getElementById("preset-name").value.trim();
   const btn = document.getElementById("preset-create");
-  btn.disabled = name === "";
+  btn.disabled = name === "" || name === "defaults";
   btn.textContent = name !== "" && loadPresets()[name] ? "Overwrite" : "Save";
 }
 
 function createPresetFromInput() {
   const input = document.getElementById("preset-name");
   const name = input.value.trim();
-  if (name === "") return;
+  if (name === "" || name === "defaults") return;
   savePresetAs(name);
   input.value = "";
   syncPresetCreate();
@@ -552,10 +576,6 @@ async function main() {
     document.getElementById(id).addEventListener("input", onSimInput);
   }
 
-  document.getElementById("reset-everything").addEventListener("click", () => {
-    localStorage.clear();
-    location.reload();
-  });
   document.getElementById("preset-toggle").addEventListener("click", () => setDrawerOpen(!drawerOpen()));
   document.getElementById("drawer-close").addEventListener("click", () => setDrawerOpen(false));
   document.getElementById("preset-create").addEventListener("click", createPresetFromInput);

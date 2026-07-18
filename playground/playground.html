@@ -134,7 +134,6 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
         <button id="slot-b" class="slot">B</button>
       </span>
       <button id="reset-zoom">Reset Zoom</button>
-      <button id="reset-everything" title="Discard saved gcode, config and view state — back to the stock demo">Reset everything</button>
     </div>
     <div class="readout" id="readout"><span class="g">hover a panel to scrub</span></div>
     <div class="panels">
@@ -145,8 +144,8 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
             <div class="section">[printer]</div>
             <div class="row"><label for="cfg-max_velocity">max_velocity</label><input id="cfg-max_velocity" type="number" step="10" value="300"></div>
             <div class="row"><label for="cfg-max_accel">max_accel</label><input id="cfg-max_accel" type="number" step="100" value="3000"></div>
-            <div class="row"><label for="cfg-corner_deviation" title="Canonical corner budget in mm; square_corner_velocity is its legacy alias — set exactly one">corner_deviation</label><input id="cfg-corner_deviation" type="number" step="0.001" min="0" placeholder="from scv"></div>
-            <div class="row"><label for="cfg-square_corner_velocity" title="Legacy alias of corner_deviation — set exactly one">square_corner_velocity</label><input id="cfg-square_corner_velocity" type="number" step="1" value="5"></div>
+            <div class="row"><label for="cfg-corner_deviation" title="Canonical corner budget in mm; square_corner_velocity is its legacy alias — set exactly one">corner_deviation</label><input id="cfg-corner_deviation" type="number" step="0.001" min="0" value="0.05"></div>
+            <div class="row"><label for="cfg-square_corner_velocity" title="Legacy alias of corner_deviation — set exactly one">square_corner_velocity</label><input id="cfg-square_corner_velocity" type="number" step="1" placeholder="use corner_deviation"></div>
             <div class="row"><label for="cfg-max_jerk">max_jerk (0 = off)</label><input id="cfg-max_jerk" type="number" step="10000" min="0" value="2000000"></div>
             <div class="row"><label for="cfg-max_path_deviation">max_path_deviation</label><input id="cfg-max_path_deviation" type="number" step="0.001" placeholder="0.005"></div>
             <div class="row"><label for="cfg-max_accel_deviation">max_accel_deviation</label><input id="cfg-max_accel_deviation" type="number" step="10" placeholder="50"></div>
@@ -154,9 +153,9 @@ html,body{height:100%;background:#14161a;color:#e0e0e0;font-family:system-ui,san
             <div class="row"><label for="cfg-max_extrude_only_velocity">max_extrude_only_velocity</label><input id="cfg-max_extrude_only_velocity" type="number" step="5" placeholder="∞"></div>
             <div class="row"><label for="cfg-max_extrude_only_accel">max_extrude_only_accel</label><input id="cfg-max_extrude_only_accel" type="number" step="100" placeholder="∞"></div>
             <div class="section" title="Simulates the physical toolhead as a damped resonant mode driven by the motor command — view only, does not affect planning">toolhead sim (view only)</div>
-            <div class="row"><label for="sim-x-freq">x frequency_hz</label><input id="sim-x-freq" type="number" step="5" min="0" placeholder="off"></div>
+            <div class="row"><label for="sim-x-freq">x frequency_hz</label><input id="sim-x-freq" type="number" step="5" min="0" placeholder="off" value="185"></div>
             <div class="row"><label for="sim-x-zeta">x damping_ratio</label><input id="sim-x-zeta" type="number" step="0.01" min="0" max="1" placeholder="0.1"></div>
-            <div class="row"><label for="sim-y-freq">y frequency_hz</label><input id="sim-y-freq" type="number" step="5" min="0" placeholder="off"></div>
+            <div class="row"><label for="sim-y-freq">y frequency_hz</label><input id="sim-y-freq" type="number" step="5" min="0" placeholder="off" value="120"></div>
             <div class="row"><label for="sim-y-zeta">y damping_ratio</label><input id="sim-y-zeta" type="number" step="0.01" min="0" max="1" placeholder="0.1"></div>
           </div>
           <div class="settings-pp">
