@@ -342,6 +342,17 @@ impl From<&DemoPanelParam> for DriveStateParam {
     }
 }
 
+/// Motor-space -> cartesian position map for the live spatial view, the
+/// SERVO_DUMP_TUNING mirror of `servo_strokes.spatial_frame`: `axes` are
+/// motor names (frame columns), each column folds the motor's invert sign
+/// in, so `mode_pos[k] = sum(frame[k][s] * drive_frame_pos_mm[s])`.
+#[derive(Debug, Serialize, JsonSchema, TS)]
+pub struct SpatialFrame {
+    modes: Vec<String>,
+    axes: Vec<String>,
+    frame: Vec<Vec<f64>>,
+}
+
 #[derive(Debug, Serialize, JsonSchema, TS)]
 pub struct DriveStatePayload {
     version: i64,
@@ -350,6 +361,7 @@ pub struct DriveStatePayload {
     motors: BTreeMap<String, BTreeMap<String, i64>>,
     config_pins: BTreeMap<String, BTreeMap<String, i64>>,
     slots: BTreeMap<String, usize>,
+    spatial: Option<SpatialFrame>,
 }
 
 /// The JSON Schema `handle_drive_state`'s response must satisfy: it adds one
@@ -357,6 +369,16 @@ pub struct DriveStatePayload {
 /// `additionalProperties` schema still accepts.
 pub fn drive_state_schema() -> schemars::Schema {
     schemars::schema_for!(DriveStatePayload)
+}
+
+/// The demo machine is CoreXY AWD — two motors per belt, none inverted —
+/// so every column carries 1/(2 belts * 2 drives).
+fn demo_spatial_frame() -> SpatialFrame {
+    SpatialFrame {
+        modes: vec!["x".to_string(), "y".to_string()],
+        axes: DEMO_MOTORS.iter().map(|m| m.to_string()).collect(),
+        frame: vec![vec![0.25, 0.25, 0.25, 0.25], vec![0.25, 0.25, -0.25, -0.25]],
+    }
 }
 
 /// Write `<out_dir>/drive_state.json` in the shape `SERVO_DUMP_TUNING`
@@ -399,6 +421,7 @@ fn write_demo_drive_state(out_dir: &Path) -> Result<(), String> {
         motors,
         config_pins,
         slots,
+        spatial: Some(demo_spatial_frame()),
     };
     let path = out_dir.join("drive_state.json");
     let tmp = out_dir.join("drive_state.json.tmp");

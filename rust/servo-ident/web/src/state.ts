@@ -198,6 +198,8 @@ interface DrivePanelState {
 interface LiveSeries {
   ferr: (number | null)[];
   torque: (number | null)[];
+  target: (number | null)[];
+  pos: (number | null)[];
 }
 
 interface LiveState {
@@ -207,6 +209,7 @@ interface LiveState {
   lastCycle: number | null;
   t: number[];
   perDrive: Record<string, LiveSeries>;
+  countsPerMm: Record<string, number>;
   windowS: number;
   timers: ReturnType<typeof setInterval>[];
   polling: boolean;
@@ -285,7 +288,8 @@ const state: AppState = {
     cycle0: null, // first streamed cycle_index — the chart's t=0
     lastCycle: null, // cycle_index of the last kept sample, for gap breaks
     t: [], // seconds since stream start, one per kept point
-    perDrive: {}, // tap drive name -> {ferr, torque} arrays (null = gap break)
+    perDrive: {}, // tap drive name -> {ferr, torque, target, pos} arrays (null = gap break)
+    countsPerMm: {}, // tap drive name -> counts_per_mm from the tap header
     windowS: 10, // seconds kept and drawn, set by the slider
     timers: [], // interval ids cleared on page switch
     polling: false,

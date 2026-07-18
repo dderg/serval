@@ -224,6 +224,14 @@ function liveShellHtml() {
     `<main class="analysis">` +
     `<section class="live-section">` +
     sectionHeadHtml(
+      "live toolpath — commanded vs actual",
+      `<button id="live-spatial-fit">fit</button>` +
+        `<span class="note" id="live-spatial-note">waiting for the tap…</span>`
+    ) +
+    `<div class="spatial-box"><canvas id="live-spatial-canvas"></canvas></div>` +
+    `</section>` +
+    `<section class="live-section">` +
+    sectionHeadHtml(
       "live following error — per motor",
       `<label class="live-window">window ` +
         `<input type="range" id="live-window" min="2" max="30" step="1" value="${state.live.windowS}">` +

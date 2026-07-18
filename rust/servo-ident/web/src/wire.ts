@@ -13,6 +13,7 @@ export type { DriveResult, DriveResult as ResultDrive } from "./generated/DriveR
 export type { DriveStateParam, DriveStateParam as DriveParam } from "./generated/DriveStateParam";
 export type { LiveCapture } from "./generated/LiveCapture";
 export type { LiveStatus } from "./generated/LiveStatus";
+export type { SpatialFrame } from "./generated/SpatialFrame";
 export type { Metrics, Metrics as DriveMetrics } from "./generated/Metrics";
 export type { Move, Move as MoveMetrics } from "./generated/Move";
 export type { NoteResponse, NoteResponse as NotePayload } from "./generated/NoteResponse";
@@ -99,10 +100,12 @@ interface LiveTapPayload {
   status: string;
   reason?: string | null;
   fs_hz: number;
+  drive_names?: string[] | null;
+  counts_per_mm?: number[] | null;
   first_cycle: number;
   next_cycle: number;
   stride: number;
-  drives?: Record<string, { ferr: number[]; torque: number[] }> | null;
+  drives?: Record<string, { ferr: number[]; torque: number[]; target: number[]; pos: number[] }> | null;
 }
 
 type StrainField = "elastic" | "friction";

@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from . import servo_axis, servo_calibration, servo_param
+from . import servo_axis, servo_calibration, servo_param, servo_strokes
 
 INERTIA_RATIO_ADDR = "0x2000.0x07"
 GAIN_NAMES = ("position", "speed", "integral")
@@ -611,6 +611,7 @@ class ServoTuning:
                 for p in self.params
                 if _addr_key(p.addr) in sdo_keys
             }
+        kin = self.printer.lookup_object("toolhead").get_kinematics()
         payload = {
             "version": 1,
             "created_utc": _utc_now(),
@@ -618,6 +619,7 @@ class ServoTuning:
             "motors": motors_out,
             "config_pins": config_pins_out,
             "slots": slots_out,
+            "spatial": servo_strokes.spatial_frame(kin),
         }
         os.makedirs(self.captures_root, exist_ok=True)
         path = os.path.join(self.captures_root, "drive_state.json")
