@@ -43,13 +43,16 @@ fn per_axis_psds_peak_at_their_tones() {
     };
     let x_peak_hz = psds.freq_hz[peak_bin(&psds.per_axis[0])];
     let z_peak_hz = psds.freq_hz[peak_bin(&psds.per_axis[2])];
-    assert!((x_peak_hz - TONE_HZ).abs() < 2.0, "x peak at {x_peak_hz} Hz");
+    assert!(
+        (x_peak_hz - TONE_HZ).abs() < 2.0,
+        "x peak at {x_peak_hz} Hz"
+    );
     assert!(
         (z_peak_hz - 2.0 * TONE_HZ).abs() < 2.0,
         "z peak at {z_peak_hz} Hz"
     );
-    let y_max = psds.per_axis[1].iter().cloned().fold(0.0f64, f64::max);
-    let x_max = psds.per_axis[0].iter().cloned().fold(0.0f64, f64::max);
+    let y_max = psds.per_axis[1].iter().copied().fold(0.0f64, f64::max);
+    let x_max = psds.per_axis[0].iter().copied().fold(0.0f64, f64::max);
     assert!(y_max < 1e-9 * x_max, "silent axis carries power: {y_max}");
     let total_peak_hz = psds.freq_hz[peak_bin(&psds.total)];
     assert!(
