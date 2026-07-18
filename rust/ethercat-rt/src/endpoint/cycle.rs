@@ -116,7 +116,7 @@ fn poll_sensorless(ctx: &mut EndpointCtx, apply_time: u64) {
         |slot| drive.position_actual(slot),
         |slot, endstop_id, torque, contact_clock| {
             let windup_ns = apply_time.saturating_sub(contact_clock);
-            eprintln!(
+            crate::rt_eprintln!(
                 "ec-rt: sensorless endstop {endstop_id} tripped on slot {slot} \
                  torque={torque} — local stop, stream halted, \
                  contact_clock={contact_clock} ({windup_ns} ns before the trip)"
@@ -154,7 +154,7 @@ pub(super) fn compute_motion_targets(
     let mut all_vel = vec![0f32; num_slaves];
     if ctx.gate.state() != TorqueState::Enabled && ctx.buzz.active() {
         ctx.buzz.clear();
-        eprintln!("ec-rt: buzz cleared — torque gate left Enabled mid-buzz");
+        crate::rt_eprintln!("ec-rt: buzz cleared — torque gate left Enabled mid-buzz");
     }
     if ctx.gate.state() == TorqueState::Enabled {
         let mut lane_mm = vec![None; num_slaves];
@@ -477,7 +477,7 @@ fn emit_slot_commands(
 }
 
 fn fault_non_finite_torque(ctx: &mut EndpointCtx, slot: usize, acc: f32, vel: f32) -> ! {
-    eprintln!(
+    crate::rt_eprintln!(
         "ec-rt: FAULT non-finite torque FF on slot {slot} \
          (acc={acc} vel={vel}) — disabling"
     );
@@ -534,7 +534,7 @@ fn handle_drive_fault(ctx: &mut EndpointCtx) {
     });
     if let Some((slot, err)) = drive_fault {
         if ctx.gate.state() != TorqueState::Faulted {
-            eprintln!(
+            crate::rt_eprintln!(
                 "ec-rt: DRIVE FAULT slot {slot} err=0x{err:04x} — parking, reporting via heartbeat"
             );
             for d in 0..num_slaves {
@@ -620,7 +620,7 @@ pub(super) fn police_frame_timing(ctx: &mut EndpointCtx, lateness_ns: i64) {
     } else {
         return;
     };
-    eprintln!(
+    crate::rt_eprintln!(
         "ec-rt: FRAME TIMING FAULT lateness={lateness_ns} ns \
          tolerance={tolerance_ns} ns reanchored={reanchored} — parking, \
          reporting via heartbeat"
@@ -773,7 +773,7 @@ fn emit_heartbeat(ctx: &mut EndpointCtx) {
         ctx.last_sent_retired = current_retired;
         ctx.heartbeat_sent = true;
         if current_retired != 0 {
-            eprintln!("ec-rt: heartbeat retired={retired:?}");
+            crate::rt_eprintln!("ec-rt: heartbeat retired={retired:?}");
         }
     }
 }
