@@ -243,3 +243,69 @@ def test_corexy_fit_layout_single_drive_per_belt():
 
 def test_scalar_fit_drive_returns_none_for_single_drive_axis():
     assert servo_strokes.scalar_fit_drive(FakeGcmd(), cartesian_kin()) is None
+
+
+def test_spatial_frame_corexy_folds_invert_and_halves_belts():
+    inverted_b = _motor("motor_b")
+    inverted_b.invert_direction = True
+    kin = FakeKin(
+        [
+            _rail("x", [_motor("motor_a")]),
+            _rail("y", [inverted_b]),
+        ],
+        coupled=True,
+    )
+    assert servo_strokes.spatial_frame(kin) == {
+        "modes": ["x", "y"],
+        "axes": ["motor_a", "motor_b"],
+        "frame": [[0.5, -0.5], [0.5, 0.5]],
+    }
+
+
+def test_spatial_frame_corexy_awd_scales_by_drives_per_belt():
+    kin = FakeKin(
+        [
+            _rail(
+                "x",
+                [
+                    _motor("motor_a", chain_index=0),
+                    _motor("motor_a1", chain_index=1),
+                ],
+            ),
+            _rail("y", [_motor("motor_b")]),
+        ],
+        coupled=True,
+    )
+    assert servo_strokes.spatial_frame(kin) == {
+        "modes": ["x", "y"],
+        "axes": ["motor_a", "motor_a1", "motor_b"],
+        "frame": [[0.25, 0.25, 0.5], [0.25, 0.25, -0.5]],
+    }
+
+
+def test_spatial_frame_cartesian_maps_each_rail_to_its_mode():
+    assert servo_strokes.spatial_frame(cartesian_kin()) == {
+        "modes": ["x", "y"],
+        "axes": ["motor_x", "motor_y"],
+        "frame": [[1.0, 0.0], [0.0, 1.0]],
+    }
+
+
+def test_spatial_frame_cartesian_skips_non_servo_lanes():
+    kin = FakeKin(
+        [object(), _rail("y", [_motor("motor_y")])],
+        coupled=False,
+    )
+    assert servo_strokes.spatial_frame(kin) == {
+        "modes": ["y"],
+        "axes": ["motor_y"],
+        "frame": [[1.0]],
+    }
+
+
+def test_spatial_frame_none_without_servo_xy_rails():
+    assert servo_strokes.spatial_frame(FakeKin([], coupled=False)) is None
+    assert (
+        servo_strokes.spatial_frame(FakeKin([object(), object()], coupled=True))
+        is None
+    )

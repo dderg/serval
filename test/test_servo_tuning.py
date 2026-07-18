@@ -169,6 +169,9 @@ class FakeKin:
     def __init__(self, rails):
         self.rails = rails
 
+    def coupled_xy(self):
+        return False
+
 
 class FakeToolhead:
     def __init__(self, kin):
@@ -497,10 +500,11 @@ class FakeGCode:
 
 
 class FakeMotor:
-    def __init__(self, motor_name, node_name, sdo_params=()):
+    def __init__(self, motor_name, node_name, sdo_params=(), chain_index=0):
         self._motor_name = motor_name
         self._node_name = node_name
         self._sdo_params = list(sdo_params)
+        self._chain_index = chain_index
 
     def get_motor_name(self):
         return self._motor_name
@@ -510,6 +514,12 @@ class FakeMotor:
 
     def get_sdo_params(self):
         return self._sdo_params
+
+    def get_chain_index(self):
+        return self._chain_index
+
+    def get_invert_direction(self):
+        return False
 
 
 def _fake_rail(motors, axis="x"):
@@ -637,6 +647,11 @@ def test_dump_tuning_writes_expected_json(tmp_path):
         "C00.04": 0,
     }
     assert payload["slots"] == {"motor_a": 0, "motor_b": 1}
+    assert payload["spatial"] == {
+        "modes": ["x"],
+        "axes": ["motor_a", "motor_b"],
+        "frame": [[0.5, 0.5]],
+    }
     assert any(str(path) in r for r in gcmd.responses)
     assert any("2" in r and "motors" in r for r in gcmd.responses)
 

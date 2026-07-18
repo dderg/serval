@@ -17,11 +17,11 @@
 //! `{"status":"unreachable","reason":..}` after a connect/read failure
 //! (the poll that sees it also kicks off a fresh connect), and
 //! `{"status":"streaming",..}` with `fs_hz`, `cycle_ns`, `drive_names`
-//! (header order) and `next_cycle` — plus, when the client echoes
-//! `next_cycle` back as `since_cycle`: `first_cycle`, `stride`,
-//! `drives:{name:{ferr,torque}}`, and `moving` for samples strictly after
-//! `since_cycle`, thinned to at most [`MAX_POINTS_PER_RESPONSE`] points
-//! per series.
+//! (header order), `counts_per_mm` (same order) and `next_cycle` — plus,
+//! when the client echoes `next_cycle` back as `since_cycle`:
+//! `first_cycle`, `stride`, `drives:{name:{ferr,torque,target,pos}}`, and
+//! `moving` for samples strictly after `since_cycle`, thinned to at most
+//! [`MAX_POINTS_PER_RESPONSE`] points per series.
 //!
 //! Guaranteed invariant: a data response never spans a `cycle_index`
 //! discontinuity — it ends at the last record before the first hole, with
@@ -35,6 +35,12 @@
 //! per-drive `invert` flag negates both, unlike the drive-frame per-drive
 //! series everywhere else — this feed exists to compare motors doing the
 //! same physical move, and mirrored pairs must look alike.
+//!
+//! `target`/`pos` (commanded `target_counts` and encoder
+//! `position_actual`) stay drive-frame raw: the dashboard's spatial view
+//! maps them to cartesian through the `spatial` frame SERVO_DUMP_TUNING
+//! writes into drive_state.json, and that frame already folds the invert
+//! sign in — applying it here too would cancel it back out.
 
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Read};
@@ -81,6 +87,7 @@ struct Stream {
     cycle_ns: u64,
     drive_names: Vec<String>,
     sign: Vec<i64>,
+    counts_per_mm: Vec<f64>,
     ring: Ring,
     timing: Option<Timing>,
 }
@@ -98,6 +105,8 @@ struct Ring {
     flags: VecDeque<u8>,
     ferr: Vec<VecDeque<i32>>,
     torque: Vec<VecDeque<i16>>,
+    target: Vec<VecDeque<i32>>,
+    pos: Vec<VecDeque<i32>>,
 }
 
 impl Ring {
@@ -112,6 +121,8 @@ impl Ring {
             flags: VecDeque::new(),
             ferr: vec![VecDeque::new(); n_drives],
             torque: vec![VecDeque::new(); n_drives],
+            target: vec![VecDeque::new(); n_drives],
+            pos: vec![VecDeque::new(); n_drives],
         }
     }
 
@@ -124,6 +135,12 @@ impl Ring {
             }
             for t in &mut self.torque {
                 t.pop_front();
+            }
+            for t in &mut self.target {
+                t.pop_front();
+            }
+            for p in &mut self.pos {
+                p.pop_front();
             }
         }
     }
@@ -181,6 +198,7 @@ fn attach_payload(stream: &Stream) -> serde_json::Value {
         "fs_hz": fs_hz(stream.cycle_ns),
         "cycle_ns": stream.cycle_ns,
         "drive_names": stream.drive_names,
+        "counts_per_mm": stream.counts_per_mm,
         "next_cycle": newest,
         "timing": timing_json(stream),
     })
@@ -222,13 +240,19 @@ fn samples_payload(stream: &Stream, since: u64) -> serde_json::Value {
             .iter()
             .map(|&i| sign * i64::from(ring.torque[d][i]))
             .collect();
-        drives.insert(name.clone(), json!({ "ferr": ferr, "torque": torque }));
+        let target: Vec<i64> = kept.iter().map(|&i| i64::from(ring.target[d][i])).collect();
+        let pos: Vec<i64> = kept.iter().map(|&i| i64::from(ring.pos[d][i])).collect();
+        drives.insert(
+            name.clone(),
+            json!({ "ferr": ferr, "torque": torque, "target": target, "pos": pos }),
+        );
     }
     json!({
         "status": "streaming",
         "fs_hz": fs_hz(stream.cycle_ns),
         "cycle_ns": stream.cycle_ns,
         "drive_names": stream.drive_names,
+        "counts_per_mm": stream.counts_per_mm,
         "next_cycle": if n == 0 { since } else { ring.cycle[end - 1] },
         "first_cycle": ring.cycle.get(start),
         "stride": stride,
@@ -293,6 +317,7 @@ fn run_session(shared: &Shared) -> Result<SessionEnd, String> {
                 .iter()
                 .map(|d| if d.invert { -1 } else { 1 })
                 .collect(),
+            counts_per_mm: header.drives.iter().map(|d| d.counts_per_mm).collect(),
             ring: Ring::new(&header),
             timing: None,
         });
@@ -381,6 +406,8 @@ struct RecordLayout {
     flags: Slot,
     ferr: Vec<Slot>,
     torque: Vec<Slot>,
+    target: Vec<Slot>,
+    pos: Vec<Slot>,
     /// RT-loop health counters — absent on captures from older endpoints.
     skip_count: Option<Slot>,
     late_frames: Option<Slot>,
@@ -415,6 +442,8 @@ impl RecordLayout {
             flags: prefix("flags")?,
             ferr: per_drive("following_error")?,
             torque: per_drive("torque_actual")?,
+            target: per_drive("target_counts")?,
+            pos: per_drive("position_actual")?,
             skip_count: prefix("skip_count").ok(),
             late_frames: prefix("late_frames").ok(),
             frame_lateness_ns: prefix("frame_lateness_ns").ok(),
@@ -450,6 +479,12 @@ fn append_record(
     }
     for (drive, slot) in layout.torque.iter().enumerate() {
         ring.torque[drive].push_back(slot.read(record) as i16);
+    }
+    for (drive, slot) in layout.target.iter().enumerate() {
+        ring.target[drive].push_back(slot.read(record) as i32);
+    }
+    for (drive, slot) in layout.pos.iter().enumerate() {
+        ring.pos[drive].push_back(slot.read(record) as i32);
     }
     ring.trim();
     if let (Some(sk), Some(lf), Some(ln)) = (

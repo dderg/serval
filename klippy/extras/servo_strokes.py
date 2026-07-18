@@ -105,6 +105,73 @@ def rail_motors_in_slot_order(
     return sorted(rail.get_motors(), key=lambda m: m.get_chain_index())
 
 
+def _rail_columns(
+    rail: servo_axis.ServoRail,
+) -> list[tuple[str, float, int]]:
+    motors = rail_motors_in_slot_order(rail)
+    return [
+        (
+            m.get_motor_name(),
+            -1.0 if m.get_invert_direction() else 1.0,
+            len(motors),
+        )
+        for m in motors
+    ]
+
+
+def spatial_frame(kin: Any) -> dict[str, Any] | None:
+    """Motor-space -> cartesian position map for the dashboard's spatial
+    view: mode_pos[k] = sum(frame[k][s] * drive_frame_pos_mm[s]) over the
+    motors listed in `axes`. Each motor's invert sign is folded into its
+    column (the SERVO_FIT_DYNAMICS profile convention), so raw drive-frame
+    positions go in. None when no servo rail drives X or Y."""
+    if kin.coupled_xy():
+        belts = list(kin.rails[:2])
+        if not all(isinstance(r, servo_axis.ServoRail) for r in belts):
+            return None
+        columns = [
+            (belt, name, sign, drives)
+            for belt, rail in enumerate(belts)
+            for name, sign, drives in _rail_columns(rail)
+        ]
+        return {
+            "modes": ["x", "y"],
+            "axes": [name for _b, name, _s, _d in columns],
+            "frame": [
+                [sign / (2.0 * drives) for _b, _n, sign, drives in columns],
+                [
+                    (sign if belt == 0 else -sign) / (2.0 * drives)
+                    for belt, _n, sign, drives in columns
+                ],
+            ],
+        }
+    lanes = [
+        (mode, kin.rails[lane])
+        for lane, mode in ((0, "x"), (1, "y"))
+        if lane < len(kin.rails)
+        and isinstance(kin.rails[lane], servo_axis.ServoRail)
+    ]
+    if not lanes:
+        return None
+    axes: list[str] = []
+    columns = []
+    for mode, rail in lanes:
+        for name, sign, drives in _rail_columns(rail):
+            axes.append(name)
+            columns.append((mode, sign, drives))
+    return {
+        "modes": [mode for mode, _rail in lanes],
+        "axes": axes,
+        "frame": [
+            [
+                sign / drives if col_mode == mode else 0.0
+                for col_mode, sign, drives in columns
+            ]
+            for mode, _rail in lanes
+        ],
+    }
+
+
 def diagonal_rail(gcmd: Any, kin: Any, axis: str) -> servo_axis.ServoRail:
     if not kin.coupled_xy():
         raise gcmd.error(
