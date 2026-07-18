@@ -185,11 +185,10 @@ impl PyMotionEngine {
                 if let Some(ra) = cfg.runtime_caps.accel {
                     a = a.min(ra);
                 }
-                // No runtime jerk cap exists yet (RuntimeCaps has no `jerk` field);
-                // this is the static [printer] max_jerk. A future
-                // `cfg.runtime_caps.jerk` would `.min()` in here exactly like
-                // velocity/accel above.
-                let j = cfg.cartesian.max_jerk;
+                let j = cfg
+                    .runtime_caps
+                    .jerk_override
+                    .unwrap_or(cfg.cartesian.max_jerk);
                 (v, a, cfg.corner_deviation(), j)
             };
             let limits = geometry::VelocityLimits::try_new(max_v, max_a, corner_deviation, jerk)
@@ -344,6 +343,52 @@ impl PyMotionEngine {
         self.planner_config.lock_ok().runtime_caps.accel = accel;
         Ok(())
     }
+    /// Replace the static `[printer] max_jerk` for subsequent moves —
+    /// unlike the velocity/accel caps this may RAISE the limit (infinity
+    /// disables jerk limiting entirely). Calibration transients
+    /// (SERVO_MEASURE_RINGDOWN) use it so the stop excites the raw plant.
+    /// `None` restores the configured limit.
+    #[pyo3(signature = (jerk))]
+    fn set_jerk_override(&self, jerk: Option<f64>) -> PyResult<()> {
+        if let Some(j) = jerk {
+            if !(j > 0.0) {
+                return Err(PyValueError::new_err(
+                    "jerk override must be positive (infinity disables jerk limiting)",
+                ));
+            }
+        }
+        self.planner_config.lock_ok().runtime_caps.jerk_override = jerk;
+        Ok(())
+    }
+    /// Swap the live pipeline chains between the configured post-processors
+    /// and identity (no shaping). Fails without touching the flag when the
+    /// restored chains no longer fit the corner budget — the caller must
+    /// hear that shaping did NOT come back.
+    fn set_post_processor_bypass(&self, enabled: bool) -> PyResult<()> {
+        let axis_chains = {
+            let mut cfg = self.planner_config.lock_ok();
+            let previous = cfg.post_processor_bypass;
+            cfg.post_processor_bypass = enabled;
+            let axis_chains = match cfg.compile_active_chains() {
+                Ok(chains) => chains,
+                Err(e) => {
+                    cfg.post_processor_bypass = previous;
+                    return Err(PyValueError::new_err(e.to_string()));
+                }
+            };
+            if let Err(e) = cfg.validate_corner_budget(&axis_chains) {
+                cfg.post_processor_bypass = previous;
+                return Err(PyValueError::new_err(e));
+            }
+            axis_chains
+        };
+        if let Some(handle) = self.planner.lock_ok().as_ref() {
+            handle
+                .update_axis_chains(axis_chains)
+                .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        }
+        Ok(())
+    }
     #[pyo3(signature = (corner_deviation))]
     fn set_corner_deviation(&self, corner_deviation: Option<f64>) -> PyResult<()> {
         if let Some(deviation) = corner_deviation {
@@ -373,18 +418,22 @@ impl PyMotionEngine {
             cfg.post_processors
                 .set_param(name, key, value)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let axis_chains = cfg
+            // Budget-validate against the CONFIGURED chains even while a
+            // bypass is active — a param that only fits identity chains
+            // would otherwise detonate at bypass restore.
+            let configured = cfg
                 .post_processors
                 .compile(&cfg.axis_registry)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            if let Err(e) = cfg.validate_corner_budget(&axis_chains) {
+            if let Err(e) = cfg.validate_corner_budget(&configured) {
                 let previous = previous.expect("set_param succeeded, so the param exists");
                 cfg.post_processors
                     .set_param(name, key, previous)
                     .expect("restoring a previously accepted param value");
                 return Err(PyValueError::new_err(e));
             }
-            axis_chains
+            cfg.compile_active_chains()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?
         };
         if let Some(handle) = self.planner.lock_ok().as_ref() {
             handle

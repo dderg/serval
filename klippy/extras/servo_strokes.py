@@ -208,6 +208,38 @@ def emit_strokes(
     gcode.run_script_from_command("\n".join(lines))
 
 
+def emit_strokes_with_stop_times(
+    printer: Any,
+    gcode: Any,
+    coord: Callable[[float], str],
+    start: float,
+    end: float,
+    th_per_unit: float,
+    speed: float,
+    accel: float,
+    iterations: int,
+    dwell: int,
+) -> list[float]:
+    """`emit_strokes`, but each stroke is submitted alone and its
+    commanded-stop print-time is read off the motion fence before the dwell —
+    the ring-down analyzer windows accelerometer tails from these."""
+    if end <= start:
+        raise gcode.error("END=%.1f must exceed START=%.1f" % (end, start))
+    check_reachable(gcode, (end - start) * th_per_unit, speed, accel)
+    toolhead = printer.lookup_object("toolhead")
+    feed = int(speed * 60)
+    gcode.run_script_from_command(
+        "SET_VELOCITY_LIMIT ACCEL=%.0f\nG90" % (accel,)
+    )
+    stops: list[float] = []
+    for _ in range(iterations):
+        for target in (end, start):
+            gcode.run_script_from_command("G1 %s F%d" % (coord(target), feed))
+            stops.append(toolhead.get_last_move_time())
+            gcode.run_script_from_command("M400\nG4 P%d\nM400" % (dwell,))
+    return stops
+
+
 def goto(gcode: Any, travel_speed: float, coord: str, dwell: int) -> None:
     gcode.run_script_from_command(
         "\n".join(

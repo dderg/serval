@@ -3,7 +3,9 @@
 //! motion-segment helpers). Algorithmic parity with the Python is the
 //! contract these functions must hold; the golden parity test is the gate.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::scap::{Scap, FLAG_MOTION_ACTIVE};
 
@@ -11,7 +13,7 @@ pub const SETTLE_HOLD_MS: f64 = 50.0;
 pub const DEFAULT_SETTLE_BAND_COUNTS: i64 = 50;
 pub const DEFAULT_TORQUE_LIMIT_PER_MILLE: i64 = 1400;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, TS)]
 pub struct Move {
     #[serde(rename = "move")]
     pub index: usize,
@@ -26,7 +28,7 @@ pub struct Move {
     pub settle_window_truncated: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, TS)]
 pub struct TorqueSummary {
     pub peak: i64,
     pub peak_pct_rated: f64,
@@ -39,7 +41,7 @@ pub struct TorqueSummary {
     pub longest_burst_ms: f64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, TS)]
 pub struct Metrics {
     pub samples: usize,
     pub moves: Vec<Move>,
@@ -47,8 +49,10 @@ pub struct Metrics {
     pub torque: TorqueSummary,
     pub ferr_crosscheck_max: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub ff_velocity_offset_max: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub ff_torque_offset_max: Option<i64>,
 }
 

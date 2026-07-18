@@ -9,7 +9,9 @@
 use std::path::Path;
 use std::time::SystemTime;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use crate::analyze::{build_run, write_run_outputs};
 use crate::assets;
@@ -20,7 +22,7 @@ use crate::results::Manifest;
 use crate::strain;
 use crate::time_fmt::iso8601_utc;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, TS)]
 pub struct VerdictSummary {
     pub recommended_step: Option<String>,
     pub reason: String,
@@ -32,7 +34,7 @@ struct ResultsVerdictOnly {
     verdict: VerdictSummary,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema, TS)]
 pub struct RunSummary {
     pub name: String,
     pub mtime_utc: String,
@@ -273,6 +275,11 @@ struct NoteBody {
     note: String,
 }
 
+#[derive(Serialize, JsonSchema, TS)]
+pub struct NoteResponse<'a> {
+    pub note: &'a str,
+}
+
 /// `POST /api/runs/<name>/note`: body `{"note": "..."}`. Writes
 /// `note.txt` in the run directory; an empty (or all-whitespace) note
 /// deletes the file. Notes are user commentary, never an analysis input —
@@ -304,7 +311,15 @@ fn handle_note(captures_root: &Path, name: &str, body: &[u8]) -> Response {
     if let Err(e) = result {
         return Response::text(500, "text/plain", format!("{}: {e}", path.display()));
     }
-    Response::json(200, serde_json::json!({ "note": note }).to_string())
+    Response::json(
+        200,
+        serde_json::to_string(&NoteResponse { note }).expect("NoteResponse always serializes"),
+    )
+}
+
+#[derive(Serialize, JsonSchema, TS)]
+pub struct DeleteResponse<'a> {
+    pub deleted: &'a str,
 }
 
 /// `DELETE /api/runs/<name>`: removes the run directory — manifest,
@@ -321,7 +336,11 @@ fn handle_delete_run(captures_root: &Path, name: &str) -> Response {
     if let Err(e) = std::fs::remove_dir_all(&run_dir) {
         return Response::text(500, "text/plain", format!("{}: {e}", run_dir.display()));
     }
-    Response::json(200, serde_json::json!({ "deleted": name }).to_string())
+    Response::json(
+        200,
+        serde_json::to_string(&DeleteResponse { deleted: name })
+            .expect("DeleteResponse always serializes"),
+    )
 }
 
 /// `GET /api/runs/<name>/strain`: the strain-map tab's data source. Only
@@ -371,6 +390,18 @@ fn handle_strain(captures_root: &Path, name: &str) -> Response {
     Response::json(200, body)
 }
 
+#[derive(Serialize, JsonSchema, TS)]
+pub struct LiveCapture<'a> {
+    pub name: Option<&'a str>,
+    pub size_bytes: u64,
+    pub age_s: Option<f64>,
+}
+
+#[derive(Serialize, JsonSchema, TS)]
+pub struct LiveStatus<'a> {
+    pub capture: Option<LiveCapture<'a>>,
+}
+
 /// Newest flat capture in the root, with its current size and age — the
 /// live page polls this to notice a capture starting or growing.
 fn handle_live_status(captures_root: &Path) -> Response {
@@ -379,23 +410,27 @@ fn handle_live_status(captures_root: &Path) -> Response {
         Err(e) => return Response::text(500, "text/plain", e),
     };
     let Some(path) = newest else {
-        return Response::json(200, serde_json::json!({ "capture": null }).to_string());
+        return Response::json(
+            200,
+            serde_json::to_string(&LiveStatus { capture: None })
+                .expect("LiveStatus always serializes"),
+        );
     };
     let meta = match path.metadata() {
         Ok(m) => m,
         Err(e) => return Response::text(500, "text/plain", format!("{}: {e}", path.display())),
     };
     let mtime = meta.modified().ok();
+    let status = LiveStatus {
+        capture: Some(LiveCapture {
+            name: path.file_name().and_then(|n| n.to_str()),
+            size_bytes: meta.len(),
+            age_s: mtime.map(age_seconds),
+        }),
+    };
     Response::json(
         200,
-        serde_json::json!({
-            "capture": {
-                "name": path.file_name().and_then(|n| n.to_str()),
-                "size_bytes": meta.len(),
-                "age_s": mtime.map(age_seconds),
-            }
-        })
-        .to_string(),
+        serde_json::to_string(&status).expect("LiveStatus always serializes"),
     )
 }
 
@@ -467,15 +502,7 @@ pub fn handle(captures_root: &Path, req: &Request) -> Response {
     let path = req.path.split('?').next().unwrap_or("");
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     match (req.method.as_str(), segments.as_slice()) {
-        ("GET", []) => Response::text(
-            200,
-            "text/html; charset=utf-8",
-            assets::INDEX_HTML.to_string(),
-        ),
-        ("GET", ["app.js"]) => {
-            Response::text(200, "application/javascript", assets::APP_JS.to_string())
-        }
-        ("GET", ["app.css"]) => Response::text(200, "text/css", assets::APP_CSS.to_string()),
+        ("GET", []) => asset_response(assets::index_html()),
         ("GET", ["api", "runs"]) => handle_list(captures_root),
         ("GET", ["api", "drive_state"]) => handle_drive_state(captures_root),
         ("GET", ["api", "live"]) => handle_live_status(captures_root),
@@ -493,6 +520,17 @@ pub fn handle(captures_root: &Path, req: &Request) -> Response {
         ("POST", ["api", "runs", name, "analyze"]) => handle_analyze(captures_root, name),
         ("POST", ["api", "runs", name, "note"]) => handle_note(captures_root, name, &req.body),
         ("DELETE", ["api", "runs", name]) => handle_delete_run(captures_root, name),
+        ("GET", asset_path) if assets::built(&asset_path.join("/")).is_some() => {
+            asset_response(assets::built(&asset_path.join("/")).unwrap())
+        }
         _ => Response::not_found(&format!("no such route: {} {}", req.method, req.path)),
+    }
+}
+
+fn asset_response(asset: &'static assets::Asset) -> Response {
+    Response {
+        status: 200,
+        content_type: asset.mime,
+        body: asset.body.to_vec(),
     }
 }

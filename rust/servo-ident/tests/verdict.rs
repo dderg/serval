@@ -12,6 +12,7 @@ fn step_result(name: &str, flags: &[&str]) -> StepResult {
         combined: None,
         accel: None,
         differential: None,
+        ringdown: None,
         flags: flags.iter().map(|s| s.to_string()).collect(),
     }
 }
@@ -28,6 +29,7 @@ fn manifest_step(name: &str, swept: serde_json::Value) -> Step {
         }],
         capture: format!("step_{name}.scap"),
         accel: None,
+        stops: None,
     }
 }
 

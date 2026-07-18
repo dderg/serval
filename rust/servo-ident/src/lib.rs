@@ -18,6 +18,7 @@ pub mod profile_out;
 pub mod psd;
 pub mod resonance;
 pub mod results;
+pub mod ringdown;
 pub mod scap;
 pub mod serve;
 pub mod split;
