@@ -220,9 +220,12 @@ static void flush_outputs(void) {
  * *toff reports this frame's lateness relative to the nominal SYNC0 latch
  * (wake grid + the half-cycle shift programmed at DC config): negative is
  * margin to spare, positive means the drives latched last cycle's target.
- * The measurement is taken when ecrt_master_send returns, so wire flight
- * (~2.5 us to the last slave) is not included. Overrun skips stay on the
- * grid (reanchor_if_stale), so the half-cycle latch phase holds all run. */
+ * The measurement is taken when ecrt_master_send returns; WIRE_FLIGHT_NS
+ * covers the propagation to the last slave in the chain (measured 2.52 us
+ * on the 4-drive bench, ~0.84 us per hop) so the reported number reflects
+ * arrival, not transmit. Overrun skips stay on the grid
+ * (reanchor_if_stale), so the half-cycle latch phase holds all run. */
+#define WIRE_FLIGHT_NS 3000
 static int rt_exchange(int64_t *toff) {
     add_ts(&g_ts, g_cycle_ns);
     reanchor_if_stale();
@@ -241,7 +244,7 @@ static int rt_exchange(int64_t *toff) {
     struct timespec sent;
     clock_gettime(CLOCK_MONOTONIC, &sent);
     int64_t lateness_ns =
-        TIMESPEC2NS(sent) - (TIMESPEC2NS(g_ts) + g_cycle_ns / 2);
+        TIMESPEC2NS(sent) + WIRE_FLIGHT_NS - (TIMESPEC2NS(g_ts) + g_cycle_ns / 2);
 
     ec_domain_state_t ds;
     ecrt_domain_state(g_domain, &ds);
