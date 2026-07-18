@@ -9,7 +9,7 @@ import { RESONANCE_BAND_HZ, PEAK_MIN_SEPARATION_HZ, PEAK_LIST_SIZE, state } from
 import { redrawStrain } from "./strain";
 import type { DriveParam, PlotSeries } from "./wire";
 
-// --- PSD peak list (gains page) ---------------------------------------------
+// --- PSD peak list -----------------------------------------------------------
 
 /// Greedy spaced peak-picking inside the resonance band: repeatedly take
 /// the highest remaining bin at least PEAK_MIN_SEPARATION_HZ away from
@@ -40,7 +40,6 @@ interface NotchSlot {
   n: number;
   freqParam: DriveParam;
   parked: boolean;
-  adaptive: boolean;
   current: number;
 }
 
@@ -55,7 +54,7 @@ function notchSlotStates(): NotchSlot[] {
     const motors = motorNames(data.motors);
     const values = motors.map((m) => cellRaw(freqParam, m));
     const parked = values.every((v) => v === 8000);
-    slots.push({ n, freqParam, parked, adaptive: n <= 2, current: values[0] });
+    slots.push({ n, freqParam, parked, current: values[0] });
   }
   return slots;
 }
@@ -110,9 +109,7 @@ function renderPeakList(names: string[], plots: PlotSeries[], steps: string[]) {
       const buttons = slots
         .map((s) => {
           const label = s.parked ? `→ notch ${s.n}` : `→ notch ${s.n} (${s.current}Hz)`;
-          const title = s.adaptive
-            ? `notch ${s.n} is adaptive while adaptive_notch_mode is ${s.n <= 1 ? "1 or 2" : "2"} — the drive will overwrite it`
-            : `set notch_${s.n}_freq to ${Math.round(p.freq)} on all motors (width/depth stay yours)`;
+          const title = `set notch_${s.n}_freq to ${Math.round(p.freq)} on all motors (width/depth stay yours)`;
           return `<button class="peak-slot" data-slot="${s.n}" data-freq="${p.freq}" title="${title}">${label}</button>`;
         })
         .join("");
