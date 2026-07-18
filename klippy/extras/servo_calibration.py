@@ -124,34 +124,6 @@ NOTCH_READBACK: tuple[tuple[str, tuple[str, str, str]], ...] = (
 )
 
 
-def refine_values(
-    current: float,
-    values_text: str | None,
-    span: float | None,
-    steps: int,
-) -> list[int]:
-    if values_text is not None:
-        vals = [
-            int(round(float(v))) for v in values_text.split(",") if v.strip()
-        ]
-        if not vals:
-            raise ValueError("VALUES lists no usable numbers")
-    else:
-        if steps < 2:
-            raise ValueError("STEPS must be at least 2")
-        if span is None or not 0.0 < span < 1.0:
-            raise ValueError(
-                "SPAN must be between 0 and 1 (fraction of current)"
-            )
-        lo, hi = 1.0 - span, 1.0 + span
-        vals = [
-            int(round(current * (lo + (hi - lo) * i / (steps - 1))))
-            for i in range(steps)
-        ]
-        vals.append(int(round(current)))
-    return sorted(set(vals))
-
-
 def validate_gain_values(values: list[int], param: str) -> list[int]:
     if param not in GAIN_PARAMS:
         raise ValueError(
@@ -769,7 +741,7 @@ class ExperimentRun:
 
 
 class SingleGainAdapter:
-    """SERVO_REFINE_GAIN: sweeps one gain, holding the other two fixed."""
+    """SERVO_CALIBRATE_GAINS: sweeps one gain, holding the others fixed."""
 
     def __init__(
         self,
@@ -795,7 +767,7 @@ class SingleGainAdapter:
     ) -> str:
         _addr, _lo, _hi, desc, unit, scale = GAIN_PARAMS[self.param]
         marker = "  <- current" if value == self.current else ""
-        return "refine %s step %d/%d: %s = %d (%.4g %s)%s on %s" % (
+        return "sweep %s step %d/%d: %s = %d (%.4g %s)%s on %s" % (
             self.param,
             i + 1,
             total,
@@ -1170,31 +1142,6 @@ class GainSweepStage(AutotuneStage):
         }
 
 
-class RefineGainStage(AutotuneStage):
-    name = "refine_gain"
-
-    def run(
-        self, cal: "ServoCalibration", ctx: AutotuneContext
-    ) -> dict[str, Any]:
-        if not ctx.apply:
-            return {
-                "outcome": "would_run",
-                "detail": "refine PARAM=speed around the gain-sweep winner",
-            }
-        extra = {"PARAM": "speed", "TAG": "autotune_refine", "APPLY": 1}
-        cal.cmd_SERVO_REFINE_GAIN(ctx.gcmd_for(**extra))
-        run, results = cal._last_sweep_run, cal._last_sweep_results
-        assert run is not None and results is not None
-        verdict = cal._check_clean_verdict(
-            ctx.gcmd, self.name, run, results, require_step=True
-        )
-        return {
-            "outcome": "ran",
-            "run_dir": run.run_dir,
-            "recommended_step": verdict.get("recommended_step"),
-        }
-
-
 class FitDynamicsStage(AutotuneStage):
     name = "fit_dynamics"
 
@@ -1262,7 +1209,6 @@ AUTOTUNE_STAGES: tuple[AutotuneStage, ...] = (
     ApplyInertiaRatioStage(),
     CoarseGainsStage(),
     GainSweepStage(),
-    RefineGainStage(),
     FitDynamicsStage(),
     VerifyStage(),
 )
@@ -1324,7 +1270,6 @@ class ServoCalibration:
             "SERVO_SET_INERTIA_RATIO",
             "SERVO_APPLY_GAINS",
             "SERVO_CALIBRATE_GAINS",
-            "SERVO_REFINE_GAIN",
             "SERVO_REFINE_DYNAMICS",
             "SERVO_HARVEST_NOTCHES",
             "SERVO_SWEEP_INERTIA",
@@ -3526,100 +3471,6 @@ class ServoCalibration:
             % (", ".join(servos),)
         )
 
-    cmd_SERVO_REFINE_GAIN_help = (
-        "1-D sensitivity sweep of a single drive gain around the current "
-        "operating point, holding the others fixed. PARAM=position|speed|"
-        "integral|torque_filter (torque_filter is the C01.18 torque "
-        "feedforward filter cutoff, Hz). "
-        "Reads the current gains from the drive; sweeps either an "
-        "explicit VALUES= list or the current value +-SPAN over STEPS points "
-        "(default +-30%% in 5 steps, always including the current value). "
-        "Writes each step to EVERY drive on AXIS (both CoreXY lanes), one "
-        "capture per step, restores the original gains afterwards (also on "
-        "failure), then servo-cal analyzes the run into results.json. "
-        "APPLY=1 writes the verdict's recommended value after the restore, "
-        "reads it back, and runs one SERVO_MEASURE_TRACKING to report "
-        "before/after tracking metrics (default APPLY=0, report-only). "
-        "Params PARAM AXIS VALUES SPAN "
-        "STEPS CURRENT START END SPEED ACCEL ITERATIONS DWELL_MS TAG APPLY "
-        "SERVO (comma list override)"
-    )
-
-    def cmd_SERVO_REFINE_GAIN(self, gcmd: Any) -> list[SweepStep]:
-        param = gcmd.get("PARAM", "").lower()
-        if param not in GAIN_PARAMS:
-            raise gcmd.error(
-                "PARAM must be one of %s (got %r)"
-                % (", ".join(GAIN_PARAMS), gcmd.get("PARAM", ""))
-            )
-        axis = gcmd.get("AXIS", "X").upper()
-        servos = self._servos(gcmd, axis)
-        start, end = servo_strokes.axis_bounds(gcmd, self.bounds, axis)
-        speed = gcmd.get_float("SPEED", 100.0, above=0.0)
-        accel = gcmd.get_float("ACCEL", 3000.0, above=0.0)
-        iterations = gcmd.get_int("ITERATIONS", 2, minval=1)
-        dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
-        tag = gcmd.get("TAG", "refine")
-        gains = self._read_gains(servos[0])
-        current = gcmd.get_int("CURRENT", gains[param], minval=1)
-        span = gcmd.get_float("SPAN", 0.3, above=0.0, below=1.0)
-        stepcount = gcmd.get_int("STEPS", 5, minval=2)
-        values_text = gcmd.get("VALUES", None)
-        apply = gcmd.get_int("APPLY", 0)
-        try:
-            values = refine_values(current, values_text, span, stepcount)
-            validate_gain_values(values, param)
-        except ValueError as e:
-            raise gcmd.error("SERVO_REFINE_GAIN: %s" % (e,))
-        stroke_plan = {
-            "start": start,
-            "end": end,
-            "speed": speed,
-            "accel": accel,
-            "iterations": iterations,
-            "dwell_ms": dwell,
-        }
-        run = self._begin_run(
-            gcmd,
-            "refine_sweep",
-            tag,
-            axis,
-            servos,
-            stroke_plan,
-            self._corexy_rails(gcmd, axis),
-        )
-        adapter = SingleGainAdapter(self, servos, param, tag, gains, current)
-
-        def on_revert() -> None:
-            gcmd.respond_info(
-                "restoring original %s on %s"
-                % (
-                    " / ".join("%s %d" % (name, gains[name]) for name in gains),
-                    ", ".join(servos),
-                )
-            )
-
-        try:
-            self._prep(axis, dwell)
-            self._set_manual_tuning(servos)
-            steps = self._run_sweep_with_revert(
-                adapter,
-                values,
-                servos,
-                lambda v: self._strokes(
-                    axis, start, end, speed, accel, iterations, dwell
-                ),
-                gcmd,
-                on_revert,
-            )
-            results = self._analyze_and_report(gcmd, run)
-            self._last_sweep_run, self._last_sweep_results = run, results
-            if apply:
-                self._apply_verdict(gcmd, run, results, axis)
-        finally:
-            self._active_run = None
-        return steps
-
     cmd_SERVO_REFINE_DYNAMICS_help = (
         "Empirically refine the torque-feedforward dynamics profile on the "
         "RUNNING endpoint: golden-section search over a scale factor on the "
@@ -4372,8 +4223,8 @@ class ServoCalibration:
     cmd_SERVO_AUTOTUNE_help = (
         "Packaged tuning sequence: baseline tracking -> inertia ratio "
         "identify -> apply C00.06 -> coarse gains (SERVO_APPLY_GAINS "
-        "defaults) -> gain sweep (apply winner) -> refine speed gain "
-        "(apply winner) -> fit dynamics -> verify vs baseline. APPLY=0 "
+        "defaults) -> gain sweep (apply winner) "
+        "-> fit dynamics -> verify vs baseline. APPLY=0 "
         "(default) is a dry run: it still measures the baseline and "
         "identifies the inertia ratio, then walks every remaining stage "
         "reporting what it WOULD write instead of touching the drive. "

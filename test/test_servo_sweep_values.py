@@ -19,42 +19,6 @@ class FakeServoCapture:
         return self.captures[-1][0], 1000, 250
 
 
-def test_refine_values_default_span_includes_current():
-    vals = servo_calibration.refine_values(2500, None, 0.3, 5)
-    assert 2500 in vals
-    assert vals == sorted(vals)
-    assert vals[0] == 1750 and vals[-1] == 3250
-    assert len(vals) == 5
-
-
-def test_refine_values_odd_steps_center_is_current():
-    vals = servo_calibration.refine_values(1000, None, 0.2, 3)
-    assert vals == [800, 1000, 1200]
-
-
-def test_refine_values_even_steps_still_include_current():
-    vals = servo_calibration.refine_values(1000, None, 0.2, 4)
-    assert 1000 in vals
-    assert vals == sorted(set(vals))
-
-
-def test_refine_values_explicit_list_dedupes_and_sorts():
-    vals = servo_calibration.refine_values(0, "300,250,300,400", None, 0)
-    assert vals == [250, 300, 400]
-
-
-def test_refine_values_empty_explicit_list_fails():
-    with pytest.raises(ValueError, match="no usable numbers"):
-        servo_calibration.refine_values(0, " , ", None, 0)
-
-
-def test_refine_values_bad_span_or_steps_fail():
-    with pytest.raises(ValueError, match="STEPS"):
-        servo_calibration.refine_values(1000, None, 0.3, 1)
-    with pytest.raises(ValueError, match="SPAN"):
-        servo_calibration.refine_values(1000, None, 1.5, 5)
-
-
 def test_validate_gain_values_ranges():
     servo_calibration.validate_gain_values([1, 20000], "position")
     servo_calibration.validate_gain_values([1, 20000], "speed")
@@ -271,67 +235,6 @@ def _param_writes(scripts, addr):
             if "SET=" + addr in line:
                 out.append(line)
     return out
-
-
-def test_refine_gain_writes_both_drives_and_restores():
-    sc, gcode = make_calibration(dict(CURRENT_GAINS))
-    gcmd = FakeGcmd(PARAM="speed", AXIS="X", VALUES="1750,2500,3250")
-    sc.cmd_SERVO_REFINE_GAIN(gcmd)
-    writes = _param_writes(gcode.scripts, "0x2001.0x02")
-    values = [int(w.split("VALUE=")[1].split()[0]) for w in writes]
-    for servo in ("motor_a", "motor_b"):
-        assert any("SERVO=%s " % servo in w for w in writes)
-    assert values[-1] == 2500
-    assert 1750 in values and 3250 in values
-
-
-def test_refine_gain_reads_current_as_center():
-    sc, gcode = make_calibration(dict(CURRENT_GAINS))
-    gcmd = FakeGcmd(PARAM="speed", AXIS="X", SPAN=0.2, STEPS=3)
-    sc.cmd_SERVO_REFINE_GAIN(gcmd)
-    writes = _param_writes(gcode.scripts, "0x2001.0x02")
-    values = sorted({int(w.split("VALUE=")[1].split()[0]) for w in writes})
-    assert values == [2000, 2500, 3000]
-
-
-def test_refine_gain_restores_on_failure():
-    sc, gcode = make_calibration(dict(CURRENT_GAINS))
-
-    def boom(*a, **k):
-        raise RuntimeError("stroke exploded")
-
-    sc._strokes = boom
-    gcmd = FakeGcmd(PARAM="speed", AXIS="X", VALUES="1750,2500,3250")
-    with pytest.raises(RuntimeError, match="stroke exploded"):
-        sc.cmd_SERVO_REFINE_GAIN(gcmd)
-    writes = _param_writes(gcode.scripts, "0x2001.0x02")
-    last = int(writes[-1].split("VALUE=")[1].split()[0])
-    assert last == 2500
-
-
-def test_refine_torque_filter_writes_both_drives_and_restores():
-    sc, gcode = make_calibration(dict(CURRENT_GAINS))
-    gcmd = FakeGcmd(PARAM="torque_filter", AXIS="X", VALUES="200,318,500")
-    sc.cmd_SERVO_REFINE_GAIN(gcmd)
-    writes = _param_writes(gcode.scripts, "0x2001.0x19")
-    values = [int(w.split("VALUE=")[1].split()[0]) for w in writes]
-    for servo in ("motor_a", "motor_b"):
-        assert any("SERVO=%s " % servo in w for w in writes)
-    assert values[-1] == 318
-    assert 200 in values and 500 in values
-
-
-def test_refine_torque_filter_rejects_out_of_range():
-    sc, _ = make_calibration(dict(CURRENT_GAINS))
-    gcmd = FakeGcmd(PARAM="torque_filter", AXIS="X", VALUES="4")
-    with pytest.raises(RuntimeError, match="outside drive range"):
-        sc.cmd_SERVO_REFINE_GAIN(gcmd)
-
-
-def test_refine_gain_rejects_bad_param():
-    sc, _ = make_calibration(dict(CURRENT_GAINS))
-    with pytest.raises(RuntimeError, match="PARAM must be"):
-        sc.cmd_SERVO_REFINE_GAIN(FakeGcmd(PARAM="torque", AXIS="X"))
 
 
 def test_sweep_inertia_axis_writes_both_drives_and_restores():

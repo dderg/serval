@@ -574,8 +574,7 @@ Packaged tuning sequence, the manual order above run as one state machine:
 baseline `SERVO_MEASURE_TRACKING` → `SERVO_CALIBRATE_INERTIA_RATIO` (identify
 only) → apply the recommended C00.06 (`SERVO_SET_INERTIA_RATIO`-equivalent) →
 coarse gains (`SERVO_APPLY_GAINS` factory defaults) → `SERVO_CALIBRATE_GAINS`
-sweep (apply the winner) → `SERVO_REFINE_GAIN` on the speed gain (apply the
-winner) → `SERVO_FIT_DYNAMICS` → a final `SERVO_MEASURE_TRACKING` against the
+sweep (apply the winner) → `SERVO_FIT_DYNAMICS` → a final `SERVO_MEASURE_TRACKING` against the
 baseline. Each stage transition is logged
 (`calibration.autotune_stage`: `stage`, `run_dir`, `outcome`) so the dashboard
 can show the sequence as it runs.
@@ -627,7 +626,6 @@ Schemas: [servo-cal-contracts.md](servo-cal-contracts.md).
 | `SERVO_STRAIN_COMP_TUNE` | in-klippy loop | run dir with one capture per iteration; converges the matrix, leaves the tuned map written + enabled |
 | `SERVO_CALIBRATE_GAINS` | `servo-cal analyze` | run dir + `results.json` verdict (highest clean gain step); `APPLY=1` also writes + verifies |
 | `SERVO_HARVEST_NOTCHES` | — | no run dir; writes C01.30, strokes, reads back notch 1–2, locks (C01.30=0); journaled param writes |
-| `SERVO_REFINE_GAIN` | `servo-cal analyze` | run dir + `results.json` verdict; `APPLY=1` also writes + verifies |
 | `SERVO_SWEEP_INERTIA` | `servo-cal analyze` | run dir + `results.json` (no automated pick, so `APPLY=1` always errors) |
 | `SERVO_SWEEP_ACCEL` | `servo-cal analyze` | run dir + `results.json` verdict (max non-railing accel); `APPLY=1` verifies at the recommended accel (no SDO write) |
 | `SERVO_FIT_DYNAMICS`, `SERVO_CALIBRATE_INERTIA_RATIO` | `servo-cal fit` | run dir + `~/printer_data/config/servo_dynamics/dynamics_<name>_<stamp>.toml` + C00.06 |

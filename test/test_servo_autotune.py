@@ -171,9 +171,8 @@ POS_ADDR, SPEED_ADDR, INTEGRAL_ADDR = (
 )
 
 # The bench state a successful sequence settles on: C00.06=85%, gain-sweep
-# picks speed=1000 (pos=1600, integral=1250), refine confirms that same
-# value is already the best point (value == current, a real refine_values
-# member) - one static readback map serves the whole chain.
+# picks speed=1000 (pos=1600, integral=1250) - one static readback map
+# serves the whole chain.
 GOOD_ENGINE_VALUES = {
     (0x2000, 0x07): 85,
     (0x2001, 0x01): 1600,
@@ -211,7 +210,6 @@ def _synth_results(run_dir, verdict, ferr_peak, overshoot, flagged_step=None):
 def make_autotune(
     engine_values=None,
     gain_recommend_speed=1000,
-    refine_recommend_speed=1000,
     flagged_stage=None,
     baseline_ferr=100.0,
     verify_ferr=90.0,
@@ -267,21 +265,6 @@ def make_autotune(
             )
         ],
     }
-    refine_step_name = "autotune_refine_speed_v%d" % (refine_recommend_speed,)
-    refine_verdict = {
-        "recommended_step": refine_step_name,
-        "reason": "highest gain step without resonance or torque rail",
-        "flags": [],
-        "apply": [
-            _applied(servo, addr, value)
-            for servo in ("motor_a", "motor_b")
-            for addr, value in (
-                (POS_ADDR, pos),
-                (SPEED_ADDR, refine_recommend_speed),
-                (INTEGRAL_ADDR, integral),
-            )
-        ],
-    }
     no_pick_verdict = {
         "recommended_step": None,
         "reason": "not a sweep",
@@ -306,15 +289,8 @@ def make_autotune(
             results = _synth_results(
                 run_dir, gain_verdict, 100.0, 10.0, flagged_step=flagged
             )
-        elif base.startswith("autotune_refine_"):
-            flagged = (
-                refine_step_name if flagged_stage == "refine_gain" else None
-            )
-            results = _synth_results(
-                run_dir, refine_verdict, 100.0, 10.0, flagged_step=flagged
-            )
         elif base.startswith("verify_"):
-            # SERVO_CALIBRATE_GAINS/SERVO_REFINE_GAIN's own APPLY=1 nested
+            # SERVO_CALIBRATE_GAINS's own APPLY=1 nested
             # verification stroke - irrelevant to the autotune-level
             # before/after check, just needs to analyze cleanly.
             results = _synth_results(run_dir, no_pick_verdict, 40.0, 5.0)
@@ -339,7 +315,6 @@ def test_stage_order_matches_the_documented_sequence():
         "apply_inertia_ratio",
         "coarse_gains",
         "gain_sweep",
-        "refine_gain",
         "fit_dynamics",
         "verify",
     ]
@@ -355,9 +330,8 @@ def test_dry_run_walks_every_stage_without_persistent_writes():
     assert outcomes[2]["outcome"] == "would_run"  # apply_inertia_ratio
     assert outcomes[3]["outcome"] == "would_run"  # coarse_gains
     assert outcomes[4]["outcome"] == "ran"  # gain_sweep (report-only)
-    assert outcomes[5]["outcome"] == "would_run"  # refine_gain
-    assert outcomes[6]["outcome"] == "would_run"  # fit_dynamics
-    assert outcomes[7]["outcome"] == "skipped"  # verify
+    assert outcomes[5]["outcome"] == "would_run"  # fit_dynamics
+    assert outcomes[6]["outcome"] == "skipped"  # verify
 
     scripts = [s for s in gcode.scripts if isinstance(s, str)]
     assert not any(
@@ -375,8 +349,7 @@ def test_apply_run_succeeds_end_to_end_and_reminds_to_save():
     assert all(o["outcome"] == "ran" for o in outcomes)
     assert outcomes[1]["recommended_ratio"] == 85
     assert outcomes[4]["recommended_step"].startswith("autotune_gain_")
-    assert outcomes[5]["recommended_step"].startswith("autotune_refine_")
-    assert outcomes[6]["profile"]
+    assert outcomes[5]["profile"]
 
     scripts = [s for s in gcode.scripts if isinstance(s, str)]
     assert any("SET=%s VALUE=85" % (INERTIA_RATIO_ADDR,) in s for s in scripts)
@@ -401,12 +374,6 @@ def test_flagged_gain_sweep_verdict_aborts_the_sequence():
     assert "aborting at stage 'gain_sweep'" in msg
     assert "torque_saturated" in msg
     assert "autotune_gain_" in msg  # names the run directory
-
-
-def test_flagged_refine_verdict_aborts_the_sequence():
-    sc, _ = make_autotune(flagged_stage="refine_gain")
-    with pytest.raises(RuntimeError, match="aborting at stage 'refine_gain'"):
-        sc.cmd_SERVO_AUTOTUNE(FakeGcmd(AXIS="X", APPLY=1))
 
 
 def test_verification_regression_aborts():

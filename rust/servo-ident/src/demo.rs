@@ -53,7 +53,6 @@ struct DemoPanelParam {
     unit: &'static str,
     group: &'static str,
     description: String,
-    autofill: Option<&'static str>,
     options: Option<&'static [(&'static str, &'static str)]>,
     reading: i64,
 }
@@ -74,7 +73,6 @@ fn plain_param(
         unit,
         group,
         description: description.into(),
-        autofill: None,
         options: None,
         reading,
     }
@@ -108,39 +106,33 @@ const NOTCH_READINGS: [[i64; 3]; 5] = [
 
 fn demo_panel_params() -> Vec<DemoPanelParam> {
     let mut params = vec![
-        DemoPanelParam {
-            autofill: Some("gain_position_from_speed"),
-            ..plain_param(
-                "position_gain",
-                "C01.00",
-                "0x2001.0x01",
-                "0.1 rad/s",
-                "gains",
-                "C01.00 position loop gain; autofilled from speed_gain as round(speed_gain * 1.6)",
-                880,
-            )
-        },
+        plain_param(
+            "position_gain",
+            "C01.00",
+            "0x2001.0x01",
+            "0.1 rad/s",
+            "gains",
+            "C01.00 position loop gain",
+            880,
+        ),
         plain_param(
             "speed_gain",
             "C01.01",
             "0x2001.0x02",
             "0.1 Hz",
             "gains",
-            "C01.01 speed loop gain; the autofill source for position_gain and integral_time",
+            "C01.01 speed loop gain",
             550,
         ),
-        DemoPanelParam {
-            autofill: Some("gain_integral_from_speed"),
-            ..plain_param(
-                "integral_time",
-                "C01.02",
-                "0x2001.0x03",
-                "0.01 ms",
-                "gains",
-                "C01.02 speed integral time; autofilled from speed_gain as round(1250000 / speed_gain)",
-                2273,
-            )
-        },
+        plain_param(
+            "integral_time",
+            "C01.02",
+            "0x2001.0x03",
+            "0.01 ms",
+            "gains",
+            "C01.02 speed integral time",
+            2273,
+        ),
         plain_param(
             "torque_filter_cutoff",
             "C01.03",
@@ -317,7 +309,6 @@ pub struct DriveStateParam {
     unit: &'static str,
     group: &'static str,
     description: String,
-    autofill: Option<&'static str>,
     options: Option<BTreeMap<String, String>>,
 }
 

@@ -584,19 +584,12 @@ function reconstructCommand(manifest: Manifest): string {
   const tag = manifest.tag || "cal";
   const axis = manifest.axis || "X";
   const iterations = (manifest.stroke_plan && manifest.stroke_plan.iterations) || 1;
-  const sweptKeys = (manifest.steps || []).map((s) => Object.keys(s.swept || {}));
-  const commonKeys = sweptKeys.reduce((a, b) => a.filter((k) => b.includes(k)), sweptKeys[0] || []);
   const common = `AXIS=${axis} ITERATIONS=${iterations} TAG=${tag}`;
 
   switch (manifest.experiment) {
     case "gain_sweep": {
       const values = manifest.steps.map((s) => (s.swept || {}).speed).join(",");
       return `SERVO_CALIBRATE_GAINS SPEED_GAINS=${values} ${common}${strokeSuffix(manifest, true)}`;
-    }
-    case "refine_sweep": {
-      const param = commonKeys.length === 1 ? commonKeys[0] : "speed";
-      const values = manifest.steps.map((s) => (s.swept || {})[param]).join(",");
-      return `SERVO_REFINE_GAIN PARAM=${param} VALUES=${values} ${common}${strokeSuffix(manifest, true)}`;
     }
     case "inertia_sweep": {
       const values = manifest.steps.map((s) => (s.swept || {}).ratio ?? Object.values(s.swept || {})[0]).join(",");
