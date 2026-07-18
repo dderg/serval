@@ -446,14 +446,13 @@ table.notch-grid td.param-col, table.notch-grid th.param-col { width: 70px; }
 .status-ok { color: var(--good); }
 .status-err { color: var(--bad); }
 
-.sent-log { max-height: 26vh; overflow-y: auto; }
-.sent-entry { border-top: 1px solid #1b2129; padding: 4px 0; }
+.sent-log { max-height: 26vh; overflow-y: auto; overflow-x: hidden; }
+.sent-entry { border-top: 1px solid #1b2129; padding: 4px 0; min-width: 0; }
 .sent-head { color: var(--dim); font-size: 11px; }
 .sent-line {
   font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   cursor: pointer;
 }
 .sent-line:hover { color: var(--text); background: #161d26; }
@@ -461,6 +460,7 @@ table.notch-grid td.param-col, table.notch-grid th.param-col { width: 70px; }
   font-size: 11px;
   color: var(--dim);
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   padding-left: 14px;
   border-left: 2px solid #1b2129;
   margin-left: 2px;
