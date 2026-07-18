@@ -421,15 +421,11 @@ fn ringdown_run_dir_recovers_frequency_and_damping() {
         .find(|s| s.source == "accel_x")
         .expect("accel_x plot source");
     assert_eq!(accel_plot.tails.len(), 2, "both tails plotted");
-    assert!(
-        !accel_plot.envelope.is_empty(),
-        "dominant-mode envelope drawn"
-    );
     assert!(!accel_plot.psd_freq_hz.is_empty());
     for s in &pr.sources {
+        assert!(s.fs_hz > 0.0, "plot source carries its sample rate");
         for tail in &s.tails {
-            assert!(tail.t_ms.len() <= 800);
-            assert_eq!(tail.t_ms.len(), tail.value.len());
+            assert!(!tail.value.is_empty());
         }
     }
 

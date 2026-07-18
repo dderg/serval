@@ -27,8 +27,7 @@ pub const PEAK_OVER_MEDIAN: f64 = 6.0;
 pub const MIN_FIT_CYCLES: f64 = 3.0;
 pub const MIN_FIT_R2: f64 = 0.5;
 const MIN_PHASE_R2: f64 = 0.9;
-const MAX_PLOT_TAILS: usize = 4;
-const MAX_PLOT_POINTS: usize = 800;
+const MAX_PLOT_TAILS: usize = 8;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RingdownOptions {
@@ -544,32 +543,13 @@ fn analyze_source(
     let noise_floor = late_window_rms(&input.tails);
 
     let mut plot_tails = Vec::new();
-    let mut envelope_t_ms = Vec::new();
-    let mut envelope = Vec::new();
     if input.plot_tails {
         let plot_len = informative_plot_len(&input.tails, input.fs, noise_floor);
         for (i, tail) in input.tails.iter().take(MAX_PLOT_TAILS).enumerate() {
-            let tail = &tail[..plot_len.min(tail.len())];
-            let stride = tail.len().div_ceil(MAX_PLOT_POINTS).max(1);
-            let idxs: Vec<usize> = (0..tail.len()).step_by(stride).collect();
             plot_tails.push(PlotRingdownTail {
                 start_s: input.starts_s.get(i).copied().unwrap_or(0.0),
-                t_ms: idxs.iter().map(|&k| k as f64 / input.fs * 1000.0).collect(),
-                value: idxs.iter().map(|&k| tail[k]).collect(),
+                value: tail[..plot_len.min(tail.len())].to_vec(),
             });
-        }
-        let dominant = modes
-            .iter()
-            .max_by(|a, b| a.amp.partial_cmp(&b.amp).expect("mode amp holds a NaN"));
-        if let (Some(dominant), Some(first)) = (dominant, plot_tails.first()) {
-            let sigma = dominant.zeta * 2.0 * PI * dominant.freq_hz;
-            envelope_t_ms = first.t_ms.clone();
-            envelope = envelope_t_ms
-                .iter()
-                .map(|&t_ms| {
-                    dominant.amp * libm::exp(-sigma * (t_ms - dominant.fit_start_ms) / 1000.0)
-                })
-                .collect();
         }
     }
     Ok((
@@ -583,12 +563,11 @@ fn analyze_source(
         PlotRingdownSource {
             source: input.source.clone(),
             unit: input.unit.clone(),
+            fs_hz: input.fs,
             modes,
             psd_freq_hz: psd_freqs,
             psd: psd_acc,
             tails: plot_tails,
-            envelope_t_ms,
-            envelope,
         },
     ))
 }

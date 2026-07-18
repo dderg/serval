@@ -210,7 +210,6 @@ pub struct PlotDifferential {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PlotRingdownTail {
     pub start_s: f64,
-    pub t_ms: Vec<f64>,
     pub value: Vec<f64>,
 }
 
@@ -218,12 +217,11 @@ pub struct PlotRingdownTail {
 pub struct PlotRingdownSource {
     pub source: String,
     pub unit: String,
+    pub fs_hz: f64,
     pub modes: Vec<RingdownMode>,
     pub psd_freq_hz: Vec<f64>,
     pub psd: Vec<f64>,
     pub tails: Vec<PlotRingdownTail>,
-    pub envelope_t_ms: Vec<f64>,
-    pub envelope: Vec<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

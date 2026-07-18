@@ -7,6 +7,7 @@ const HELP_CACHE_KEY = "servoCalGcodeHelp";
 const CONSOLE_HISTORY_MAX = 500;
 const PALETTE = ["#4fb3ff", "#e05a4f", "#4caf50", "#d9a441", "#b388ff", "#4fd8c4"];
 const RESONANCE_BAND_HZ = [20, 450];
+const RINGDOWN_PSD_PLOT_MAX_HZ = 500;
 const PSD_MAX_FREQ_KEY = "servoCalPsdMaxFreqHz";
 const MOTOR_VIEW_KEY = "servoCalMotorView";
 const PSD_MAX_FREQ_CHOICES_HZ = [250, 500, 750, 1000, 1500];
@@ -2171,37 +2172,168 @@ function ringdownModeTableHtml(sources) {
   );
 }
 
-function ringdownTailBox(stepName, source, runEntries) {
+function fftPow2Js(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      [re[i], re[j]] = [re[j], re[i]];
+      [im[i], im[j]] = [im[j], im[i]];
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (-2 * Math.PI) / len;
+    const wRe = Math.cos(ang), wIm = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let curRe = 1, curIm = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const uRe = re[i + k], uIm = im[i + k];
+        const vRe = re[i + k + len / 2] * curRe - im[i + k + len / 2] * curIm;
+        const vIm = re[i + k + len / 2] * curIm + im[i + k + len / 2] * curRe;
+        re[i + k] = uRe + vRe;
+        im[i + k] = uIm + vIm;
+        re[i + k + len / 2] = uRe - vRe;
+        im[i + k + len / 2] = uIm - vIm;
+        const nextRe = curRe * wRe - curIm * wIm;
+        curIm = curRe * wIm + curIm * wRe;
+        curRe = nextRe;
+      }
+    }
+  }
+}
+
+// Mirrors the analyzer's welch_psd (Hann, pow2 nperseg ≤ 1024, 50% overlap,
+// per-segment mean removal, one-sided) so a full-tail selection reproduces
+// the server-computed PSD. Returns null when the selection is too short.
+function welchPsdJs(x, fs) {
+  let nperseg = 1;
+  const cap = Math.min(x.length, 1024);
+  while (nperseg * 2 <= cap) nperseg *= 2;
+  if (nperseg < 64) return null;
+  const step = nperseg / 2;
+  const win = [];
+  let winSqSum = 0;
+  for (let k = 0; k < nperseg; k++) {
+    const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * k) / (nperseg - 1));
+    win.push(w);
+    winSqSum += w * w;
+  }
+  const scale = 1 / (fs * winSqSum);
+  const bins = nperseg / 2 + 1;
+  const acc = new Array(bins).fill(0);
+  let count = 0;
+  for (let start = 0; start + nperseg <= x.length; start += step) {
+    const seg = x.slice(start, start + nperseg);
+    const mean = seg.reduce((a, b) => a + b, 0) / nperseg;
+    const re = seg.map((v, k) => (v - mean) * win[k]);
+    const im = new Array(nperseg).fill(0);
+    fftPow2Js(re, im);
+    for (let b = 0; b < bins; b++) acc[b] += (re[b] * re[b] + im[b] * im[b]) * scale;
+    count++;
+  }
+  const psd = acc.map((a) => a / count);
+  for (let b = 1; b < bins - 1; b++) psd[b] *= 2;
+  const freqs = Array.from({ length: bins }, (_, i) => (i * fs) / nperseg);
+  return { freqs, psd };
+}
+
+function ringdownTailColor(name, k, count) {
+  return mixColor(runColor(name), "#ffffff", (0.5 * k) / Math.max(1, count - 1));
+}
+
+/// Tail chart with a drag-to-select brush: the selected time span is shaded
+/// and reported through onSelect (in ms, or null when cleared by a click),
+/// which drives the PSD-of-selection chart next to it.
+function ringdownTailBox(stepName, source, runEntries, onSelect) {
   const traces = [];
   const legend = [];
   for (const { name, src } of runEntries) {
     src.tails.forEach((tail, k) => {
-      const color = mixColor(runColor(name), "#ffffff", (0.5 * k) / Math.max(1, src.tails.length - 1));
-      traces.push({ t: tail.t_ms, y: tail.value, color });
+      const t = tail.value.map((_, i) => (i / src.fs_hz) * 1000);
+      traces.push({ t, y: tail.value, color: ringdownTailColor(name, k, src.tails.length) });
     });
     legend.push({ color: runColor(name), label: `${name} (${src.tails.length} tails)` });
   }
   const ref = runEntries[0].src;
-  if (ref.envelope.length) {
-    traces.push({ t: ref.envelope_t_ms, y: ref.envelope, color: "#8a97a3", dash: [5, 3] });
-    traces.push({
-      t: ref.envelope_t_ms,
-      y: ref.envelope.map((v) => -v),
+  if (ref.modes.length && traces.length) {
+    const dominant = ref.modes.reduce((a, b) => (b.amp > a.amp ? b : a));
+    const sigma = dominant.zeta * 2 * Math.PI * dominant.freq_hz;
+    const tEnv = traces[0].t;
+    const env = tEnv.map((tMs) => dominant.amp * Math.exp((-sigma * (tMs - dominant.fit_start_ms)) / 1000));
+    traces.push({ t: tEnv, y: env, color: "#8a97a3", dash: [5, 3] });
+    traces.push({ t: tEnv, y: env.map((v) => -v), color: "#8a97a3", dash: [5, 3] });
+    legend.push({
       color: "#8a97a3",
-      dash: [5, 3],
+      label:
+        `dominant mode ${dominant.freq_hz.toFixed(1)} Hz ` +
+        `ζ=${dominant.zeta.toFixed(3)} — envelope fit`,
     });
-    legend.push({ color: "#8a97a3", label: "dominant-mode envelope fit" });
   }
   const box = document.createElement("div");
   box.className = "chart-box";
   const title = document.createElement("h3");
-  title.textContent = `${stepName} — ${source.source} tails (${source.unit})`;
+  title.textContent = `${stepName} — ${source.source} tails (${source.unit}) — drag to select a span for the PSD`;
   box.appendChild(title);
   const canvas = document.createElement("canvas");
   canvas.width = 860;
   canvas.height = 220;
   box.appendChild(canvas);
-  drawChart(canvas, traces, source.unit, null, "ms");
+
+  const tMax = traces.reduce((m, tr) => Math.max(m, tr.t[tr.t.length - 1] || 0), 0);
+  const pad = { l: 46, r: 8 };
+  const pxToMs = (px) => {
+    const w = canvas.clientWidth || canvas.width;
+    return ((px - pad.l) / (w - pad.l - pad.r)) * tMax;
+  };
+  const msToPx = (ms) => {
+    const w = canvas.clientWidth || canvas.width;
+    return pad.l + (ms / tMax) * (w - pad.l - pad.r);
+  };
+  const redraw = (sel) => {
+    drawChart(canvas, traces, source.unit, null, "ms");
+    if (sel) {
+      const ctx = canvas.getContext("2d");
+      const h = canvas.clientHeight || canvas.height;
+      ctx.fillStyle = "rgba(88, 166, 255, 0.15)";
+      const x0 = msToPx(sel[0]), x1 = msToPx(sel[1]);
+      ctx.fillRect(Math.min(x0, x1), 8, Math.abs(x1 - x0), h - 30);
+    }
+  };
+  redraw(null);
+  let dragFrom = null;
+  let selection = null;
+  canvas.addEventListener("mousedown", (e) => {
+    dragFrom = pxToMs(e.offsetX);
+  });
+  canvas.addEventListener("mousemove", (e) => {
+    if (dragFrom == null) return;
+    selection = [dragFrom, pxToMs(e.offsetX)];
+    redraw(selection);
+  });
+  const finish = (e) => {
+    if (dragFrom == null) return;
+    const from = dragFrom;
+    const to = pxToMs(e.offsetX);
+    dragFrom = null;
+    const lo = Math.max(0, Math.min(from, to));
+    const hi = Math.min(tMax, Math.max(from, to));
+    if (hi - lo < 2) {
+      selection = null;
+      redraw(null);
+      onSelect(null);
+      return;
+    }
+    selection = [lo, hi];
+    redraw(selection);
+    onSelect(selection);
+  };
+  canvas.addEventListener("mouseup", finish);
+  canvas.addEventListener("mouseleave", (e) => {
+    if (dragFrom != null) finish(e);
+  });
+
   const legendEl = document.createElement("div");
   legendEl.className = "legend";
   for (const item of legend) {
@@ -2211,6 +2343,34 @@ function ringdownTailBox(stepName, source, runEntries) {
   }
   box.appendChild(legendEl);
   return box;
+}
+
+/// PSD traces for a brushed span of the tails: one trace per tail (per
+/// stroke), computed client-side with the same Welch settings as the
+/// analyzer. Returns null when the span holds too few samples.
+function ringdownSelectionPsdTraces(runEntries, selMs) {
+  const traces = [];
+  for (const { name, src } of runEntries) {
+    const i0 = Math.max(0, Math.floor((selMs[0] / 1000) * src.fs_hz));
+    const i1 = Math.min(
+      Math.min(...src.tails.map((t) => t.value.length)),
+      Math.ceil((selMs[1] / 1000) * src.fs_hz)
+    );
+    for (let k = 0; k < src.tails.length; k++) {
+      const out = welchPsdJs(src.tails[k].value.slice(i0, i1), src.fs_hz);
+      if (!out) return null;
+      const cut = out.freqs.filter((f) => f <= RINGDOWN_PSD_PLOT_MAX_HZ).length;
+      traces.push({
+        freq: out.freqs.slice(0, cut),
+        y: out.psd.slice(0, cut),
+        color: ringdownTailColor(name, k, src.tails.length),
+        dashed: false,
+        label: `${name} tail ${k + 1}`,
+        run: name,
+      });
+    }
+  }
+  return traces;
 }
 
 function ringdownModeMarkers(modes) {
@@ -2263,24 +2423,44 @@ function renderRingdownCharts(names, plots) {
       }
     }
     for (const [sourceName, runEntries] of perSource) {
-      container.appendChild(ringdownTailBox(stepName, runEntries[0].src, runEntries));
-      const traces = runEntries.map(({ name, src }) => ({
-        freq: src.psd_freq_hz,
-        y: src.psd,
-        color: runColor(name),
-        dashed: false,
-        label: name,
-        run: name,
-      }));
-      container.appendChild(
-        psdBox(
-          `${stepName} — ${sourceName} tail PSD`,
-          traces,
-          null,
-          `${runEntries[0].src.unit} PSD`,
-          { markers: ringdownModeMarkers(runEntries[0].src.modes) }
-        )
-      );
+      const fullTraces = runEntries.map(({ name, src }) => {
+        const cut = src.psd_freq_hz.filter((f) => f <= RINGDOWN_PSD_PLOT_MAX_HZ).length;
+        return {
+          freq: src.psd_freq_hz.slice(0, cut),
+          y: src.psd.slice(0, cut),
+          color: runColor(name),
+          dashed: false,
+          label: name,
+          run: name,
+        };
+      });
+      const unit = runEntries[0].src.unit;
+      const markers = { markers: ringdownModeMarkers(runEntries[0].src.modes) };
+      const psdWrap = document.createElement("div");
+      const renderPsd = (selMs) => {
+        psdWrap.innerHTML = "";
+        if (selMs) {
+          const selTraces = ringdownSelectionPsdTraces(runEntries, selMs);
+          if (selTraces) {
+            psdWrap.appendChild(
+              psdBox(
+                `${stepName} — ${sourceName} PSD of ${selMs[0].toFixed(0)}–${selMs[1].toFixed(0)}ms, per tail`,
+                selTraces,
+                null,
+                `${unit} PSD`,
+                markers
+              )
+            );
+            return;
+          }
+        }
+        psdWrap.appendChild(
+          psdBox(`${stepName} — ${sourceName} tail PSD (full dwell, tail average)`, fullTraces, null, `${unit} PSD`, markers)
+        );
+      };
+      container.appendChild(ringdownTailBox(stepName, runEntries[0].src, runEntries, renderPsd));
+      container.appendChild(psdWrap);
+      renderPsd(null);
     }
     modesEl.innerHTML += `<h3>${stepName} modes</h3>${ringdownModeTableHtml(ref.sources)}`;
     metaParts.push(stepName);
