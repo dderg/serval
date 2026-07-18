@@ -3,7 +3,9 @@ import { registerDom } from "./dom";
 
 registerDom();
 
-const { trimLiveWindow, ferrDisplayScale, setFrozen, FREEZE_BUFFER_MAX_S } = await import("../src/live");
+const { trimLiveWindow, ferrDisplayScale, ferrUnitAvailability, setFrozen, FREEZE_BUFFER_MAX_S } = await import(
+  "../src/live"
+);
 const { liveDrawCount, state } = await import("../src/state");
 
 function seedBuffer(seconds: number, hz = 10) {
@@ -84,20 +86,43 @@ test("setFrozen anchors the freeze window and unfreezing snaps back to live", ()
   expect(liveDrawCount()).toBe(state.live.t.length);
 });
 
-test("ferrDisplayScale converts counts to µm when every drive has counts_per_mm", () => {
+test("ferrDisplayScale converts counts to µm when every drive has counts_per_mm and µm is requested", () => {
   state.live.countsPerMm = { slot0: 1000, slot1: 500 };
-  const { unit, scale } = ferrDisplayScale(["slot0", "slot1"]);
+  const { unit, scale } = ferrDisplayScale(["slot0", "slot1"], "µm");
   expect(unit).toBe("µm");
   expect(scale).toEqual({ slot0: 1, slot1: 2 });
 });
 
-test("ferrDisplayScale falls back to counts when no counts_per_mm is known", () => {
-  const { unit, scale } = ferrDisplayScale(["slot0", "slot1"]);
+test("ferrDisplayScale renders counts when counts mode is requested even with full coverage", () => {
+  state.live.countsPerMm = { slot0: 1000, slot1: 500 };
+  const { unit, scale } = ferrDisplayScale(["slot0", "slot1"], "counts");
   expect(unit).toBe("counts");
   expect(scale).toBeNull();
 });
 
-test("ferrDisplayScale refuses a mixed-unit chart", () => {
+test("ferrDisplayScale falls back to counts when no counts_per_mm is known", () => {
+  const { unit, scale } = ferrDisplayScale(["slot0", "slot1"], "µm");
+  expect(unit).toBe("counts");
+  expect(scale).toBeNull();
+});
+
+test("ferrDisplayScale falls back to counts on a mixed set even when µm is requested", () => {
   state.live.countsPerMm = { slot0: 1000 };
-  expect(() => ferrDisplayScale(["slot0", "slot1"])).toThrow("mixed-unit");
+  const { unit, scale } = ferrDisplayScale(["slot0", "slot1"], "µm");
+  expect(unit).toBe("counts");
+  expect(scale).toBeNull();
+});
+
+test("ferrUnitAvailability is ok only when every drive has counts_per_mm", () => {
+  state.live.countsPerMm = { slot0: 1000, slot1: 500 };
+  expect(ferrUnitAvailability(["slot0", "slot1"])).toEqual({ ok: true, missing: [] });
+});
+
+test("ferrUnitAvailability reports the drives missing counts_per_mm", () => {
+  state.live.countsPerMm = { slot0: 1000 };
+  expect(ferrUnitAvailability(["slot0", "slot1"])).toEqual({ ok: false, missing: ["slot1"] });
+});
+
+test("ferrUnitAvailability is not ok with an empty drive set", () => {
+  expect(ferrUnitAvailability([])).toEqual({ ok: false, missing: [] });
 });

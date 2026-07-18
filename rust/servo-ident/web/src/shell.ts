@@ -238,7 +238,12 @@ function liveShellHtml() {
     `<section class="live-section">` +
     sectionHeadHtml(
       "live following error — per motor",
-      `<label class="live-window">window ` +
+      `<span class="chips live-unit-chips">` +
+        `<button class="chip" id="live-unit-um" data-unit="µm">µm</button>` +
+        `<button class="chip" id="live-unit-counts" data-unit="counts">counts</button>` +
+        `</span>` +
+        `<span class="note" id="live-unit-hint"></span>` +
+        `<label class="live-window">window ` +
         `<input type="range" id="live-window" min="1" max="30" step="1" value="${state.live.windowS}">` +
         `<span id="live-window-value">${state.live.windowS} s</span></label>` +
         `<span class="note" id="live-status">connecting to the telemetry tap…</span>`

@@ -3,7 +3,7 @@ import { drawSpatialView } from "./spatial";
 import { timeSeriesPlot } from "./uplot-chart";
 import { formatAge } from "./drive";
 import { runGcode } from "./moonraker";
-import { PALETTE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, state } from "./state";
+import { PALETTE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, LIVE_UNIT_KEY, state } from "./state";
 import type { LiveSeries } from "./state";
 import type { FixedY, TimeSeriesPlot, TimeTrace } from "./uplot-chart";
 import type { LiveStatus, LiveTapPayload } from "./wire";
@@ -61,6 +61,33 @@ function isTypingTarget(target: EventTarget | null): boolean {
   );
 }
 
+function loadLiveUnit(): "µm" | "counts" {
+  return localStorage.getItem(LIVE_UNIT_KEY) === "counts" ? "counts" : "µm";
+}
+
+function setLiveUnit(unit: "µm" | "counts") {
+  localStorage.setItem(LIVE_UNIT_KEY, unit);
+  drawLiveCharts();
+}
+
+function ferrUnitAvailability(drives: string[]): { ok: boolean; missing: string[] } {
+  const missing = drives.filter((d) => !state.live.countsPerMm[d]);
+  return { ok: drives.length > 0 && missing.length === 0, missing };
+}
+
+function syncLiveUnitUi(availability: { ok: boolean; missing: string[] }) {
+  const pref = loadLiveUnit();
+  const umBtn = el<HTMLButtonElement>("live-unit-um");
+  const countsBtn = el<HTMLButtonElement>("live-unit-counts");
+  const hint = el("live-unit-hint");
+  if (umBtn) {
+    umBtn.disabled = !availability.ok;
+    umBtn.classList.toggle("active", availability.ok && pref === "µm");
+  }
+  if (countsBtn) countsBtn.classList.toggle("active", !availability.ok || pref === "counts");
+  if (hint) hint.textContent = availability.ok ? "" : `counts_per_mm missing for ${availability.missing.join(", ")}`;
+}
+
 let freezeKeyBound = false;
 
 function bindLiveEvents() {
@@ -70,6 +97,11 @@ function bindLiveEvents() {
   });
   mustEl("live-stop-btn").addEventListener("click", () => runGcode(["SERVO_CAPTURE_STOP"], "live"));
   mustEl("live-freeze-btn").addEventListener("click", () => setFrozen(!state.live.frozen));
+  const umBtn = mustEl<HTMLButtonElement>("live-unit-um");
+  umBtn.addEventListener("click", () => {
+    if (!umBtn.disabled) setLiveUnit("µm");
+  });
+  mustEl("live-unit-counts").addEventListener("click", () => setLiveUnit("counts"));
   if (!freezeKeyBound) {
     freezeKeyBound = true;
     document.addEventListener("keydown", (e) => {
@@ -297,14 +329,11 @@ function livePlotFor(hostId: string, yLabel: string, trace: TimeTrace, fixedY: F
   return plot;
 }
 
-function ferrDisplayScale(drives: string[]): { unit: "µm" | "counts"; scale: Record<string, number> | null } {
-  const missing = drives.filter((d) => !state.live.countsPerMm[d]);
-  if (drives.length === 0 || missing.length === drives.length) return { unit: "counts", scale: null };
-  if (missing.length) {
-    throw new Error(
-      `counts_per_mm missing for [${missing.join(", ")}] but present for other drives — refusing a mixed-unit chart`
-    );
-  }
+function ferrDisplayScale(
+  drives: string[],
+  unit: "µm" | "counts"
+): { unit: "µm" | "counts"; scale: Record<string, number> | null } {
+  if (unit === "counts" || !ferrUnitAvailability(drives).ok) return { unit: "counts", scale: null };
   return {
     unit: "µm",
     scale: Object.fromEntries(drives.map((d) => [d, 1000 / state.live.countsPerMm[d]])),
@@ -363,7 +392,10 @@ function drawLiveCharts() {
   if (!state.live.t.length) return;
   const drives = Object.keys(state.live.perDrive).sort();
   if (!drives.length) return;
-  const ferr = ferrDisplayScale(drives);
+  const availability = ferrUnitAvailability(drives);
+  syncLiveUnitUi(availability);
+  const wanted = loadLiveUnit() === "µm" && availability.ok ? "µm" : "counts";
+  const ferr = ferrDisplayScale(drives, wanted);
   drawLiveChartGroup(
     "live-charts",
     "live",
@@ -408,4 +440,4 @@ function stopLivePolling() {
   state.live.timers = [];
 }
 
-export { bindLiveEvents, pollLiveFileStatus, pollLiveTap, appendTapSamples, trimLiveWindow, liveDriveLabel, ensureLiveChartBoxes, drawLiveChartGroup, drawLiveCharts, startLivePolling, stopLivePolling, setFrozen, ferrDisplayScale, FREEZE_BUFFER_MAX_S };
+export { bindLiveEvents, pollLiveFileStatus, pollLiveTap, appendTapSamples, trimLiveWindow, liveDriveLabel, ensureLiveChartBoxes, drawLiveChartGroup, drawLiveCharts, startLivePolling, stopLivePolling, setFrozen, ferrDisplayScale, ferrUnitAvailability, loadLiveUnit, setLiveUnit, FREEZE_BUFFER_MAX_S };
