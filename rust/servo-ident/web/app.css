@@ -352,7 +352,6 @@ select.cell-input { text-align: left; }
 .mv-toggle:hover:not(:disabled) { color: var(--text); border-color: var(--border); }
 .mv-toggle.mixed { color: #b388ff; border-color: #6a4a8a; }
 
-.rederive { color: #7db8f0; font-size: 11px; }
 
 /* --- tracking metrics table --------------------------------------------- */
 

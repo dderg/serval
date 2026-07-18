@@ -244,15 +244,6 @@ fn demo_writes_a_drive_state_the_panel_can_render() {
     assert_eq!(position_gain["c_code"], Value::from("C01.00"));
     assert_eq!(position_gain["addr"], Value::from("0x2001.0x01"));
     assert_eq!(position_gain["group"], Value::from("gains"));
-    assert_eq!(
-        position_gain["autofill"],
-        Value::from("gain_position_from_speed")
-    );
-    let speed_gain = params.iter().find(|p| p["name"] == "speed_gain").unwrap();
-    assert!(
-        speed_gain["autofill"].is_null(),
-        "autofill source carries no autofill marker"
-    );
 
     let motors = drive_state["motors"].as_object().unwrap();
     assert_eq!(motors.len(), 4);

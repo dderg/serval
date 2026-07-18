@@ -151,61 +151,6 @@ def _writes(gcode, addr):
     return out
 
 
-def test_gain_set_adapter_derives_position_and_integral():
-    assert servo_calibration.GainSetAdapter.derive(500) == (800, 2500)
-    assert servo_calibration.GainSetAdapter.derive(1000) == (1600, 1250)
-
-
-def test_gain_set_adapter_step_name_and_apply_writes_triple():
-    sc, gcode = make_calibration()
-    adapter = servo_calibration.GainSetAdapter(sc, ["motor_a"], "cal")
-    assert adapter.step_name(500) == "cal_p800_s500_i2500"
-    swept, applied = adapter.apply(500)
-    assert swept == {"position": 800, "speed": 500, "integral": 2500}
-    assert applied == [
-        {
-            "servo": "motor_a",
-            "addr": "0x2001.0x01",
-            "type": "u16",
-            "value": 800,
-        },
-        {
-            "servo": "motor_a",
-            "addr": "0x2001.0x02",
-            "type": "u16",
-            "value": 500,
-        },
-        {
-            "servo": "motor_a",
-            "addr": "0x2001.0x03",
-            "type": "u16",
-            "value": 2500,
-        },
-    ]
-
-
-def test_gain_set_adapter_revert_writes_the_named_gain():
-    sc, gcode = make_calibration()
-    adapter = servo_calibration.GainSetAdapter(sc, ["motor_a"], "cal")
-    adapter.apply(500)
-    adapter.apply(1000)
-    adapter.revert(700)
-    writes = _writes(gcode, "0x2001.0x02")
-    assert writes[-1].split("VALUE=")[1].split()[0] == "700"
-
-
-def test_gain_set_adapter_describe_matches_derived_values():
-    sc, _ = make_calibration()
-    adapter = servo_calibration.GainSetAdapter(
-        sc, ["motor_a", "motor_b"], "cal"
-    )
-    msg = adapter.describe(0, 500, 3, ["motor_a", "motor_b"])
-    assert msg == (
-        "gain step 1/3: pos 80.0 rad/s, speed 50.0 Hz, Ti 25.00 ms on "
-        "motor_a, motor_b"
-    )
-
-
 def test_single_gain_adapter_holds_other_two_fixed():
     sc, gcode = make_calibration()
     original = {"position": 400, "speed": 500, "integral": 2500}
