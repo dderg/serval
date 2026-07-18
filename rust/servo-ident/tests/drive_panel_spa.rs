@@ -1,5 +1,5 @@
 //! The drive tuning panel's pure logic (autofill derivation,
-//! changed-param diffing) lives in `web/app.js` as
+//! changed-param diffing) lives in `web/js/*.js` as
 //! plain functions rather than behind a Node toolchain this crate doesn't
 //! otherwise need. This file is the substitute test rig: it asserts the
 //! functions the panel is built from are actually present in the served
@@ -15,7 +15,7 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use servo_ident::assets::APP_JS;
+use servo_ident::assets::all_js;
 use servo_ident::demo::build_demo;
 
 fn fixture_dir() -> std::path::PathBuf {
@@ -54,8 +54,8 @@ fn app_js_defines_the_pure_drive_panel_functions() {
     ];
     for needle in required {
         assert!(
-            APP_JS.contains(needle),
-            "app.js must define {needle} — the drive tuning panel's pure logic"
+            all_js().contains(needle),
+            "the js modules must define {needle} — the drive tuning panel's pure logic"
         );
     }
 }
@@ -75,8 +75,8 @@ fn app_js_defines_the_differential_frf_functions() {
     ];
     for needle in required {
         assert!(
-            APP_JS.contains(needle),
-            "app.js must define {needle} — the differential FRF rendering"
+            all_js().contains(needle),
+            "the js modules must define {needle} — the differential FRF rendering"
         );
     }
 }
@@ -98,8 +98,8 @@ fn app_js_defines_the_tracking_metrics_functions() {
     ];
     for needle in required {
         assert!(
-            APP_JS.contains(needle),
-            "app.js must define {needle} — the tracking metrics table"
+            all_js().contains(needle),
+            "the js modules must define {needle} — the tracking metrics table"
         );
     }
 }
@@ -118,8 +118,8 @@ fn app_js_defines_the_sweep_metrics_chart_functions() {
     ];
     for needle in required {
         assert!(
-            APP_JS.contains(needle),
-            "app.js must define {needle} — the metrics-vs-gain chart"
+            all_js().contains(needle),
+            "the js modules must define {needle} — the metrics-vs-gain chart"
         );
     }
 }
@@ -138,8 +138,8 @@ fn app_js_defines_the_console_response_functions() {
     ];
     for needle in required {
         assert!(
-            APP_JS.contains(needle),
-            "app.js must define {needle} — the console response echo"
+            all_js().contains(needle),
+            "the js modules must define {needle} — the console response echo"
         );
     }
 }
@@ -161,8 +161,8 @@ fn app_js_defines_the_strain_map_functions() {
     ];
     for needle in required {
         assert!(
-            APP_JS.contains(needle),
-            "app.js must define {needle} — the strain map rendering"
+            all_js().contains(needle),
+            "the js modules must define {needle} — the strain map rendering"
         );
     }
 }

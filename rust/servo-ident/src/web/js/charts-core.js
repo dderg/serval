@@ -1,0 +1,332 @@
+import { el } from "./api.js";
+import { driveRamp } from "./metrics.js";
+import { runColor } from "./runs.js";
+import { motorViewPerMotor } from "./shell.js";
+import { PALETTE, PSD_MAX_FREQ_KEY, PSD_MAX_FREQ_CHOICES_HZ, PSD_MAX_FREQ_DEFAULT_HZ, state } from "./state.js";
+
+// --- chart drawing ------------------------------------------------------------
+
+function pickSeries(runName, step) {
+  if (motorViewPerMotor()) {
+    const drives = Object.entries(step.drives);
+    return drives.map(([drive, d], k) => ({
+      y: d.ferr_counts.map((c) => c * (1000 / countsPerMm(runName, drive))),
+      label: "ferr (µm)",
+      suffix: ` (${drive})`,
+      ramp: driveRamp(drives.length, k),
+    }));
+  }
+  if (step.combined) {
+    return [{ y: step.combined.on_ferr_mm, label: "on-axis ferr (mm)", suffix: "", ramp: 0 }];
+  }
+  const firstDrive = Object.values(step.drives)[0];
+  return [
+    {
+      y: firstDrive ? firstDrive.ferr_counts : [],
+      label: "ferr (counts)",
+      suffix: "",
+      ramp: 0,
+    },
+  ];
+}
+
+/// Renders at the device pixel ratio so lines stay vector-crisp on hidpi
+/// displays: the backing store is sized to the CSS box × dpr and the
+/// context scaled back, while all layout math stays in CSS pixels.
+function drawChart(canvas, traces, yLabel, fixedY, xUnit, marks, opts) {
+  opts = opts || {};
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || canvas.width;
+  const h = canvas.clientHeight || canvas.height;
+  const backingW = Math.round(w * dpr);
+  const backingH = Math.round(h * dpr);
+  if (canvas.width !== backingW || canvas.height !== backingH) {
+    canvas.width = backingW;
+    canvas.height = backingH;
+  }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#0d1117";
+  ctx.fillRect(0, 0, w, h);
+  const pad = { l: 46, r: 8, t: 8, b: 22 };
+  let tMin = Infinity, tMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+  for (const tr of traces) {
+    for (let i = 0; i < tr.t.length; i++) {
+      if (tr.y[i] === null) continue;
+      tMin = Math.min(tMin, tr.t[i]);
+      tMax = Math.max(tMax, tr.t[i]);
+      yMin = Math.min(yMin, tr.y[i]);
+      yMax = Math.max(yMax, tr.y[i]);
+    }
+  }
+  if (fixedY) {
+    yMin = fixedY.yMin;
+    yMax = fixedY.yMax;
+  }
+  if (!isFinite(tMin) || !isFinite(yMin)) return;
+  if (yMin === yMax) { yMin -= 1; yMax += 1; }
+  const x = (t) => pad.l + ((t - tMin) / (tMax - tMin || 1)) * (w - pad.l - pad.r);
+  const y = (v) => h - pad.b - ((v - yMin) / (yMax - yMin || 1)) * (h - pad.t - pad.b);
+
+  const fmtTick = (v, span) => (Math.abs(span) >= 20 ? v.toFixed(0) : v.toFixed(2));
+  // Tooltip readout: keep one more decimal than the axis ticks so the
+  // hovered step's metrics read exact, not rounded to a gridline scale.
+  const fmtVal = (v) => (Math.abs(v) >= 1000 ? v.toFixed(0) : v.toFixed(1));
+  ctx.strokeStyle = "#29313a";
+  ctx.fillStyle = "#8a97a3";
+  ctx.font = "10px monospace";
+  ctx.beginPath();
+  for (let i = 0; i <= 4; i++) {
+    const v = yMin + ((yMax - yMin) * i) / 4;
+    const py = y(v);
+    ctx.moveTo(pad.l, py);
+    ctx.lineTo(w - pad.r, py);
+    ctx.fillText(fmtTick(v, yMax - yMin), 2, py + 3);
+  }
+  for (let i = 0; i <= 4; i++) {
+    const t = tMin + ((tMax - tMin) * i) / 4;
+    const px = x(t);
+    ctx.fillText(fmtTick(t, tMax - tMin) + (xUnit == null ? "s" : xUnit), px, h - 6);
+  }
+  ctx.stroke();
+
+  for (const m of marks || []) {
+    if (m.x < tMin || m.x > tMax) continue;
+    ctx.strokeStyle = m.color;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(x(m.x), pad.t);
+    ctx.lineTo(x(m.x), h - pad.b);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  for (const tr of traces) {
+    ctx.strokeStyle = tr.color;
+    ctx.lineWidth = 1.25;
+    ctx.setLineDash(tr.dash || []);
+    ctx.beginPath();
+    let penDown = false;
+    for (let i = 0; i < tr.t.length; i++) {
+      if (tr.y[i] === null) {
+        penDown = false;
+        continue;
+      }
+      const px = x(tr.t[i]);
+      const py = y(tr.y[i]);
+      if (penDown) ctx.lineTo(px, py);
+      else ctx.moveTo(px, py);
+      penDown = true;
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+    if (tr.points) {
+      ctx.fillStyle = tr.color;
+      for (let i = 0; i < tr.t.length; i++) {
+        if (tr.y[i] === null) continue;
+        ctx.beginPath();
+        ctx.arc(x(tr.t[i]), y(tr.y[i]), 3, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+    }
+  }
+  ctx.fillStyle = "#8a97a3";
+  ctx.fillText(yLabel, pad.l, 10);
+  if (opts.hover) {
+    // Like the PSD chart: snap to the single nearest point (by 2D distance),
+    // draw a vertical line through it, and read out that one point's values.
+    // Not every trace at that x — the hovered point, for that run/metric.
+    let best = null;
+    for (const tr of traces) {
+      for (let i = 0; i < tr.t.length; i++) {
+        if (tr.y[i] === null) continue;
+        const dx = x(tr.t[i]) - opts.hover.mx;
+        const dy = y(tr.y[i]) - opts.hover.my;
+        const d = dx * dx + dy * dy;
+        if (!best || d < best.d) best = { d, tr, i };
+      }
+    }
+    if (best) {
+      const px = x(best.tr.t[best.i]);
+      const py = y(best.tr.y[best.i]);
+      ctx.strokeStyle = "#4a5560";
+      ctx.beginPath();
+      ctx.moveTo(px, pad.t);
+      ctx.lineTo(px, h - pad.b);
+      ctx.stroke();
+      ctx.fillStyle = best.tr.color;
+      ctx.beginPath();
+      ctx.arc(px, py, 3, 0, Math.PI * 2);
+      ctx.fill();
+      const xUnitSuffix = xUnit == null ? "s" : xUnit;
+      const swept = opts.xTitle ? opts.xTitle + " = " : "";
+      const lab = best.tr.label != null ? best.tr.label : "";
+      const text = `${swept}${fmtTick(best.tr.t[best.i], tMax - tMin)}${xUnitSuffix}  ${fmtVal(best.tr.y[best.i])} ${yLabel}${lab ? "  " + lab : ""}`;
+      ctx.font = "11px monospace";
+      const tw = ctx.measureText(text).width;
+      const tx = Math.min(Math.max(px + 8, pad.l), w - pad.r - tw - 8);
+      const ty = Math.max(py - 10, pad.t + 12);
+      ctx.fillStyle = "#0d1117";
+      ctx.fillRect(tx - 4, ty - 10, tw + 8, 14);
+      ctx.strokeStyle = "#4a5560";
+      ctx.strokeRect(tx - 4, ty - 10, tw + 8, 14);
+      ctx.fillStyle = "#e6edf3";
+      ctx.fillText(text, tx, ty);
+    }
+  }
+}
+
+/// Redraws with the cursor on every move so the readout snaps to the nearest
+/// sweep step — the discrete metrics-vs-gain variant of the PSD hover.
+/// drawChart reruns the full axis/line pass each redraw; it's cheap.
+function attachChartHover(canvas, traces, yLabel, fixedY, xUnit, marks, opts) {
+  const redraw = (hover) =>
+    drawChart(canvas, traces, yLabel, fixedY, xUnit, marks, hover ? { ...opts, hover } : opts);
+  canvas.addEventListener("mousemove", (e) => redraw({ mx: e.offsetX, my: e.offsetY }));
+  canvas.addEventListener("mouseleave", () => redraw(null));
+}
+
+function drawTimeDomain(names, plots, steps) {
+  const container = el("charts");
+  if (!container) return;
+  container.innerHTML = "";
+  if (names.length === 0) {
+    container.innerHTML = '<p class="note">select runs above</p>';
+    return;
+  }
+  for (const stepName of steps) {
+    const box = document.createElement("div");
+    box.className = "chart-box";
+    const title = document.createElement("h3");
+    title.textContent = stepName;
+    box.appendChild(title);
+    const canvas = document.createElement("canvas");
+    canvas.width = 860;
+    canvas.height = 200;
+    box.appendChild(canvas);
+    const legend = document.createElement("div");
+    legend.className = "legend";
+
+    const traces = [];
+    let yLabel = "";
+    plots.forEach((p, i) => {
+      const step = p.steps.find((s) => s.name === stepName);
+      if (!step) return;
+      for (const series of pickSeries(names[i], step)) {
+        yLabel = series.label;
+        const color = mixColor(runColor(names[i]), "#ffffff", series.ramp);
+        traces.push({ t: step.t_s, y: series.y, color });
+        const item = document.createElement("span");
+        item.innerHTML =
+          `<span class="swatch" style="background:${color}"></span>` +
+          `${names[i]}${series.suffix}`;
+        legend.appendChild(item);
+      }
+    });
+    drawChart(canvas, traces, yLabel);
+    box.appendChild(legend);
+    container.appendChild(box);
+  }
+}
+
+// --- following-error PSD --------------------------------------------------
+
+function newestSelectedRunName(names) {
+  const selected = new Set(names);
+  const found = state.runs.find((r) => selected.has(r.name));
+  return found ? found.name : names[0];
+}
+
+/// The peak list needs one step to harvest from: the newest selected run's
+/// recommended step when it is visible, else its last visible step.
+function peakStep(names, plots, steps) {
+  const newest = newestSelectedRunName(names);
+  const plot = plots[names.indexOf(newest)];
+  const present = plot
+    ? steps.filter((s) => plot.steps.some((x) => x.name === s))
+    : [];
+  const detail = state.details.get(newest);
+  const recommended = detail && detail.results && detail.results.verdict.recommended_step;
+  const step =
+    recommended && present.includes(recommended)
+      ? recommended
+      : present.length
+        ? present[present.length - 1]
+        : null;
+  return { newest, step };
+}
+
+function mixColor(hex, targetHex, t) {
+  const c = parseInt(hex.slice(1), 16);
+  const g = parseInt(targetHex.slice(1), 16);
+  const mix = (shift) => {
+    const a = (c >> shift) & 0xff;
+    const b = (g >> shift) & 0xff;
+    return Math.round(a + (b - a) * t);
+  };
+  return `#${((mix(16) << 16) | (mix(8) << 8) | mix(0)).toString(16).padStart(6, "0")}`;
+}
+
+/// One run selected: each step gets its own palette color, rotated so the
+/// first step is exactly the run's table-swatch color — the swatch and the
+/// chart must never disagree, whatever color the run ended up holding.
+/// Several runs: each run keeps its table-swatch hue and its steps ramp
+/// toward white, so runs stay distinguishable and the step chips are the
+/// clutter valve.
+function traceStyle(names, steps, runIdx, stepIdx) {
+  if (names.length === 1) {
+    const base = runColor(names[0]);
+    const baseIdx = PALETTE.indexOf(base);
+    if (baseIdx < 0) throw new Error(`${base}: run color is not in the palette`);
+    return {
+      color: PALETTE[(baseIdx + stepIdx) % PALETTE.length],
+      name: steps[stepIdx],
+    };
+  }
+  const base = runColor(names[runIdx]);
+  const ramp = steps.length > 1 ? (0.55 * stepIdx) / (steps.length - 1) : 0;
+  const name =
+    steps.length === 1 ? names[runIdx] : `${names[runIdx]} · ${steps[stepIdx]}`;
+  return { color: mixColor(base, "#ffffff", ramp), name };
+}
+
+/// Drawing the full Nyquist span squishes the servo/mechanical modes into
+/// the left quarter of the chart, so the user picks the band ceiling.
+function psdMaxFreqHz() {
+  const stored = Number(localStorage.getItem(PSD_MAX_FREQ_KEY));
+  return PSD_MAX_FREQ_CHOICES_HZ.includes(stored)
+    ? stored
+    : PSD_MAX_FREQ_DEFAULT_HZ;
+}
+
+function clipToPsdBand(freq, y) {
+  const maxHz = psdMaxFreqHz();
+  let end = freq.length;
+  while (end > 0 && freq[end - 1] > maxHz) end--;
+  return { freq: freq.slice(0, end), y: y.slice(0, end) };
+}
+
+/// Welch PSD -> single-sided tone amplitude: a sinusoid of amplitude A puts
+/// A²/2 of power into its bin's equivalent noise bandwidth, so
+/// A = sqrt(2 · psd · ENBW) with ENBW = 1.5·Δf for the analyzer's Hann window.
+const WELCH_HANN_ENBW_BINS = 1.5;
+
+function psdToAmplitude(freq, psd) {
+  if (freq.length < 2) throw new Error("psd grid too short for a bin width");
+  const factor = Math.sqrt(2 * WELCH_HANN_ENBW_BINS * (freq[1] - freq[0]));
+  return psd.map((p) => Math.sqrt(p) * factor);
+}
+
+function countsPerMm(runName, driveName) {
+  const detail = state.details.get(runName);
+  const motors = detail && detail.manifest ? detail.manifest.motors : [];
+  const motor = motors.find((m) => m.name === driveName);
+  if (!motor || !motor.counts_per_mm) {
+    throw new Error(`${runName}: manifest has no counts_per_mm for ${driveName}`);
+  }
+  return motor.counts_per_mm;
+}
+
+export { pickSeries, drawChart, attachChartHover, drawTimeDomain, newestSelectedRunName, peakStep, mixColor, traceStyle, psdMaxFreqHz, clipToPsdBand, WELCH_HANN_ENBW_BINS, psdToAmplitude, countsPerMm };

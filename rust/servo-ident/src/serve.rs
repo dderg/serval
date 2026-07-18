@@ -505,9 +505,10 @@ pub fn handle(captures_root: &Path, req: &Request) -> Response {
             "text/html; charset=utf-8",
             assets::INDEX_HTML.to_string(),
         ),
-        ("GET", ["app.js"]) => {
-            Response::text(200, "application/javascript", assets::APP_JS.to_string())
-        }
+        ("GET", ["js", name]) => match assets::js_module(name) {
+            Some(src) => Response::text(200, "application/javascript", src.to_string()),
+            None => Response::not_found(&format!("no such js module: {name}")),
+        },
         ("GET", ["app.css"]) => Response::text(200, "text/css", assets::APP_CSS.to_string()),
         ("GET", ["api", "runs"]) => handle_list(captures_root),
         ("GET", ["api", "drive_state"]) => handle_drive_state(captures_root),

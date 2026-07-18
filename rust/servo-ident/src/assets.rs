@@ -2,5 +2,39 @@
 //! contained binary — no build step, no CDN, no framework.
 
 pub const INDEX_HTML: &str = include_str!("web/index.html");
-pub const APP_JS: &str = include_str!("web/app.js");
 pub const APP_CSS: &str = include_str!("web/app.css");
+
+pub const JS_MODULES: &[(&str, &str)] = &[
+    ("api.js", include_str!("web/js/api.js")),
+    ("boot.js", include_str!("web/js/boot.js")),
+    ("charts-core.js", include_str!("web/js/charts-core.js")),
+    ("console.js", include_str!("web/js/console.js")),
+    ("docs.js", include_str!("web/js/docs.js")),
+    ("drive.js", include_str!("web/js/drive.js")),
+    ("dynamics.js", include_str!("web/js/dynamics.js")),
+    ("live.js", include_str!("web/js/live.js")),
+    ("metrics.js", include_str!("web/js/metrics.js")),
+    ("moonraker.js", include_str!("web/js/moonraker.js")),
+    ("peaks.js", include_str!("web/js/peaks.js")),
+    ("runs.js", include_str!("web/js/runs.js")),
+    ("shell.js", include_str!("web/js/shell.js")),
+    ("state.js", include_str!("web/js/state.js")),
+    ("strain.js", include_str!("web/js/strain.js")),
+];
+
+pub fn js_module(name: &str) -> Option<&'static str> {
+    JS_MODULES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, src)| *src)
+}
+
+/// Every JS module concatenated, for tests that grep the served sources
+/// for required function declarations.
+pub fn all_js() -> String {
+    JS_MODULES
+        .iter()
+        .map(|(_, src)| *src)
+        .collect::<Vec<_>>()
+        .join("\n")
+}

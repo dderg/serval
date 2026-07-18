@@ -115,7 +115,7 @@ pass `--fixtures <dir>` if the binary has been copied elsewhere.
 
 | Method | Path                              | Behavior                                                                 |
 |--------|-----------------------------------|---------------------------------------------------------------------------|
-| GET    | `/`, `/app.js`, `/app.css`        | the embedded dashboard (hash-routed task pages; no build step, no CDN)     |
+| GET    | `/`, `/js/<module>.js`, `/app.css`        | the embedded dashboard (hash-routed task pages; no build step, no CDN)     |
 | GET    | `/api/runs`                       | run directories under `--dir` holding a `manifest.json`, newest mtime first: name, `mtime_utc`, experiment, tag, axis, `has_results`, and a verdict summary (`recommended_step`, `reason`, `flags`) when `results.json` exists, else `null` |
 | GET    | `/api/runs/<name>/manifest`       | raw `manifest.json`; 404 with a JSON `{"error": ...}` body if missing      |
 | GET    | `/api/runs/<name>/results`        | raw `results.json`; 404 if missing                                        |
@@ -295,7 +295,7 @@ same convention as the vendor manual and the drive's front panel.
   crate's existing `flate2` (previously dev-only, used to gunzip the
   committed `.scap.gz` fixtures) is now a normal dependency so `servo-cal
   demo` can unpack fixtures at runtime.
-- The dashboard (`rust/servo-ident/src/web/{index.html,app.js,app.css}`) is
+- The dashboard (`rust/servo-ident/src/web/{index.html,js/*.js,app.css}`) is
   embedded into the binary via `include_str!` — vanilla DOM + `<canvas>`,
   no framework, no build step.
 - Charts never re-run a sweep; they only draw `plot_series.json` already
@@ -306,10 +306,10 @@ same convention as the vendor manual and the drive's front panel.
   can edit before sending, not a guarantee of exact parameter fidelity.
 - The drive panel's pure logic (autofill derivation, changed-param
   diffing) is a handful of plain functions in
-  `app.js` (`deriveGainPositionFromSpeed`,
+  the `web/js` modules (`deriveGainPositionFromSpeed`,
   `deriveGainIntegralFromSpeed`, `groupParams`, `motorRawValues`,
   `valuesAgree`, `pinnedEntries`, `diffChangedParams`,
   `buildServoTuneCommands`) rather than behind a Node toolchain this crate
   doesn't otherwise need; `rust/servo-ident/tests/drive_panel_spa.rs` is
-  the substitute test rig, asserting the served `app.js` still defines them
+  the substitute test rig, asserting the served js modules still define them
   and that the demo's `drive_state.json` matches what they assume.
