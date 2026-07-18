@@ -1,7 +1,7 @@
-import { el } from "./api.js";
+import { el, payloadUnchanged, runDataSig, onRenderReset } from "./api.js";
 import { drawChart, mixColor } from "./charts-core.js";
 import { psdBox, visibleStepNames } from "./metrics.js";
-import { runColor, refresh } from "./runs.js";
+import { runColor } from "./runs.js";
 import { RINGDOWN_PSD_PLOT_MAX_HZ, state } from "./state.js";
 
 // --- differential belt FRF (dynamics page) -----------------------------------
@@ -82,6 +82,7 @@ function differentialResultStep(runName, stepName) {
 function renderFrfCharts(names, plots) {
   const section = el("frf-section");
   if (!section) return;
+  if (payloadUnchanged("frf-charts", { runs: runDataSig(names) })) return;
   const container = el("frf-charts");
   const modesEl = el("frf-modes");
   const meta = el("frf-meta");
@@ -235,15 +236,7 @@ function ringdownTailColor(name, k, count) {
   return mixColor(runColor(name), "#ffffff", (0.5 * k) / Math.max(1, count - 1));
 }
 
-// Brush spans survive the periodic refresh() re-render: keyed by
-// step|source, re-applied when the chart DOM is rebuilt.
-const ringdownSelections = new Map();
-
-/// Tail chart with a drag-to-select brush: the selected time span is shaded
-/// and reported through onSelect (in ms, or null when cleared by a click),
-/// which drives the PSD-of-selection chart next to it.
-function ringdownTailBox(stepName, source, runEntries, onSelect) {
-  const selKey = `${stepName}|${source.source}`;
+function ringdownTailTraces(runEntries) {
   const traces = [];
   const legend = [];
   for (const { name, src } of runEntries) {
@@ -268,47 +261,113 @@ function ringdownTailBox(stepName, source, runEntries, onSelect) {
         `ζ=${dominant.zeta.toFixed(3)} — envelope fit`,
     });
   }
+  return { traces, legend };
+}
+
+function ringdownFullPsdTraces(runEntries) {
+  return runEntries.map(({ name, src }) => {
+    const cut = src.psd_freq_hz.filter((f) => f <= RINGDOWN_PSD_PLOT_MAX_HZ).length;
+    return {
+      freq: src.psd_freq_hz.slice(0, cut),
+      y: src.psd.slice(0, cut),
+      color: runColor(name),
+      dashed: false,
+      label: name,
+      run: name,
+    };
+  });
+}
+
+// Chart instances persist across refreshes keyed by step|source, so the
+// brush selection is plain per-instance state and canvases/listeners are
+// created once. Cleared on page rebuild — the DOM they own is gone.
+const ringdownCharts = new Map();
+onRenderReset(() => ringdownCharts.clear());
+
+/// One persistent ring-down unit: the brushable tail chart plus the PSD
+/// chart it drives. The selected time span is shaded and the PSD box
+/// switches between the full-dwell average and the per-tail PSD of the
+/// brushed span (in ms; a short drag clears it).
+function createRingdownChart(stepName, sourceName) {
+  const inst = {
+    stepName,
+    sourceName,
+    runEntries: [],
+    traces: [],
+    fullTraces: [],
+    markers: {},
+    unit: "",
+    tMax: 0,
+    selection: null,
+  };
   const box = document.createElement("div");
   box.className = "chart-box";
   const title = document.createElement("h3");
-  title.textContent = `${stepName} — ${source.source} tails (${source.unit}) — drag to select a span for the PSD`;
   box.appendChild(title);
   const canvas = document.createElement("canvas");
   canvas.width = 860;
   canvas.height = 220;
   box.appendChild(canvas);
+  const legendEl = document.createElement("div");
+  legendEl.className = "legend";
+  box.appendChild(legendEl);
+  const psdWrap = document.createElement("div");
+  Object.assign(inst, { tailBox: box, titleEl: title, canvas, legendEl, psdWrap });
 
-  const tMax = traces.reduce((m, tr) => Math.max(m, tr.t[tr.t.length - 1] || 0), 0);
   const pad = { l: 46, r: 8 };
   const pxToMs = (px) => {
     const w = canvas.clientWidth || canvas.width;
-    return ((px - pad.l) / (w - pad.l - pad.r)) * tMax;
+    return ((px - pad.l) / (w - pad.l - pad.r)) * inst.tMax;
   };
   const msToPx = (ms) => {
     const w = canvas.clientWidth || canvas.width;
-    return pad.l + (ms / tMax) * (w - pad.l - pad.r);
+    return pad.l + (ms / inst.tMax) * (w - pad.l - pad.r);
   };
-  const redraw = (sel) => {
-    drawChart(canvas, traces, source.unit, null, "ms");
-    if (sel) {
+  inst.redrawTail = () => {
+    drawChart(canvas, inst.traces, inst.unit, null, "ms");
+    if (inst.selection) {
       const ctx = canvas.getContext("2d");
       const h = canvas.clientHeight || canvas.height;
       ctx.fillStyle = "rgba(88, 166, 255, 0.15)";
-      const x0 = msToPx(sel[0]), x1 = msToPx(sel[1]);
+      const x0 = msToPx(inst.selection[0]), x1 = msToPx(inst.selection[1]);
       ctx.fillRect(Math.min(x0, x1), 8, Math.abs(x1 - x0), h - 30);
     }
   };
+  inst.renderPsd = () => {
+    psdWrap.innerHTML = "";
+    if (inst.selection) {
+      const selTraces = ringdownSelectionPsdTraces(inst.runEntries, inst.selection);
+      if (selTraces) {
+        psdWrap.appendChild(
+          psdBox(
+            `${stepName} — ${sourceName} PSD of ${inst.selection[0].toFixed(0)}–${inst.selection[1].toFixed(0)}ms, per tail`,
+            selTraces,
+            null,
+            `${inst.unit} PSD`,
+            inst.markers
+          )
+        );
+        return;
+      }
+    }
+    psdWrap.appendChild(
+      psdBox(
+        `${stepName} — ${sourceName} tail PSD (full dwell, tail average)`,
+        inst.fullTraces,
+        null,
+        `${inst.unit} PSD`,
+        inst.markers
+      )
+    );
+  };
   let dragFrom = null;
-  let selection = ringdownSelections.get(selKey) || null;
-  if (selection && selection[1] > tMax) selection = null;
-  redraw(selection);
   canvas.addEventListener("mousedown", (e) => {
     dragFrom = pxToMs(e.offsetX);
   });
   canvas.addEventListener("mousemove", (e) => {
     if (dragFrom == null) return;
-    selection = [dragFrom, pxToMs(e.offsetX)];
-    redraw(selection);
+    inst.selection = [dragFrom, pxToMs(e.offsetX)];
+    inst.redrawTail();
   });
   const finish = (e) => {
     if (dragFrom == null) return;
@@ -316,33 +375,37 @@ function ringdownTailBox(stepName, source, runEntries, onSelect) {
     const to = pxToMs(e.offsetX);
     dragFrom = null;
     const lo = Math.max(0, Math.min(from, to));
-    const hi = Math.min(tMax, Math.max(from, to));
-    if (hi - lo < 2) {
-      selection = null;
-      ringdownSelections.delete(selKey);
-      redraw(null);
-      onSelect(null);
-      return;
-    }
-    selection = [lo, hi];
-    ringdownSelections.set(selKey, selection);
-    redraw(selection);
-    onSelect(selection);
+    const hi = Math.min(inst.tMax, Math.max(from, to));
+    inst.selection = hi - lo < 2 ? null : [lo, hi];
+    inst.redrawTail();
+    inst.renderPsd();
   };
   canvas.addEventListener("mouseup", finish);
   canvas.addEventListener("mouseleave", (e) => {
     if (dragFrom != null) finish(e);
   });
+  return inst;
+}
 
-  const legendEl = document.createElement("div");
-  legendEl.className = "legend";
+function updateRingdownChart(inst, runEntries) {
+  inst.runEntries = runEntries;
+  const { traces, legend } = ringdownTailTraces(runEntries);
+  inst.traces = traces;
+  inst.tMax = traces.reduce((m, tr) => Math.max(m, tr.t[tr.t.length - 1] || 0), 0);
+  inst.unit = runEntries[0].src.unit;
+  inst.markers = { markers: ringdownModeMarkers(runEntries[0].src.modes) };
+  inst.fullTraces = ringdownFullPsdTraces(runEntries);
+  inst.titleEl.textContent =
+    `${inst.stepName} — ${inst.sourceName} tails (${inst.unit}) — drag to select a span for the PSD`;
+  inst.legendEl.innerHTML = "";
   for (const item of legend) {
     const span = document.createElement("span");
     span.innerHTML = `<span class="swatch" style="background:${item.color}"></span>${item.label}`;
-    legendEl.appendChild(span);
+    inst.legendEl.appendChild(span);
   }
-  box.appendChild(legendEl);
-  return box;
+  if (inst.selection && inst.selection[1] > inst.tMax) inst.selection = null;
+  inst.redrawTail();
+  inst.renderPsd();
 }
 
 /// PSD traces for a brushed span of the tails: one trace per tail (per
@@ -388,20 +451,25 @@ function ringdownModeMarkers(modes) {
 function renderRingdownCharts(names, plots) {
   const section = el("ringdown-section");
   if (!section) return;
+  const filter = state.stepFilter ? [...state.stepFilter] : null;
+  if (payloadUnchanged("ringdown-charts", { runs: runDataSig(names), filter })) return;
   const container = el("ringdown-charts");
   const modesEl = el("ringdown-modes");
   const meta = el("ringdown-meta");
-  container.innerHTML = "";
-  modesEl.innerHTML = "";
-  meta.textContent = "";
   const stepNames = [
     ...new Set(plots.flatMap((p) => p.steps.filter((s) => s.ringdown).map((s) => s.name))),
   ];
   if (!stepNames.length) {
     section.hidden = true;
+    container.innerHTML = "";
+    modesEl.innerHTML = "";
+    meta.textContent = "";
+    ringdownCharts.clear();
     return;
   }
   section.hidden = false;
+  const desired = new Map();
+  let modesHtml = "";
   const metaParts = [];
   for (const stepName of visibleStepNames(stepNames)) {
     const perSource = new Map();
@@ -423,49 +491,30 @@ function renderRingdownCharts(names, plots) {
       }
     }
     for (const [sourceName, runEntries] of perSource) {
-      const fullTraces = runEntries.map(({ name, src }) => {
-        const cut = src.psd_freq_hz.filter((f) => f <= RINGDOWN_PSD_PLOT_MAX_HZ).length;
-        return {
-          freq: src.psd_freq_hz.slice(0, cut),
-          y: src.psd.slice(0, cut),
-          color: runColor(name),
-          dashed: false,
-          label: name,
-          run: name,
-        };
-      });
-      const unit = runEntries[0].src.unit;
-      const markers = { markers: ringdownModeMarkers(runEntries[0].src.modes) };
-      const psdWrap = document.createElement("div");
-      const renderPsd = (selMs) => {
-        psdWrap.innerHTML = "";
-        if (selMs) {
-          const selTraces = ringdownSelectionPsdTraces(runEntries, selMs);
-          if (selTraces) {
-            psdWrap.appendChild(
-              psdBox(
-                `${stepName} — ${sourceName} PSD of ${selMs[0].toFixed(0)}–${selMs[1].toFixed(0)}ms, per tail`,
-                selTraces,
-                null,
-                `${unit} PSD`,
-                markers
-              )
-            );
-            return;
-          }
-        }
-        psdWrap.appendChild(
-          psdBox(`${stepName} — ${sourceName} tail PSD (full dwell, tail average)`, fullTraces, null, `${unit} PSD`, markers)
-        );
-      };
-      container.appendChild(ringdownTailBox(stepName, runEntries[0].src, runEntries, renderPsd));
-      container.appendChild(psdWrap);
-      renderPsd(ringdownSelections.get(`${stepName}|${sourceName}`) || null);
+      desired.set(`${stepName}|${sourceName}`, { stepName, sourceName, runEntries });
     }
-    modesEl.innerHTML += `<h3>${stepName} modes</h3>${ringdownModeTableHtml(ref.sources)}`;
+    modesHtml += `<h3>${stepName} modes</h3>${ringdownModeTableHtml(ref.sources)}`;
     metaParts.push(stepName);
   }
+  for (const key of [...ringdownCharts.keys()]) {
+    if (desired.has(key)) continue;
+    const inst = ringdownCharts.get(key);
+    inst.tailBox.remove();
+    inst.psdWrap.remove();
+    ringdownCharts.delete(key);
+  }
+  for (const [key, d] of desired) {
+    let inst = ringdownCharts.get(key);
+    if (!inst) {
+      inst = createRingdownChart(d.stepName, d.sourceName);
+      ringdownCharts.set(key, inst);
+    }
+    container.appendChild(inst.tailBox);
+    container.appendChild(inst.psdWrap);
+    updateRingdownChart(inst, d.runEntries);
+  }
+  modesEl.innerHTML = modesHtml;
   meta.textContent = metaParts.join(" · ");
 }
 
-export { FRF_BOXES, differentialSeries, frfTraces, frfModeMarkers, frfModeTableHtml, differentialResultStep, renderFrfCharts, ringdownModeTableHtml, fftPow2Js, welchPsdJs, ringdownTailColor, ringdownSelections, ringdownTailBox, ringdownSelectionPsdTraces, ringdownModeMarkers, renderRingdownCharts };
+export { FRF_BOXES, differentialSeries, frfTraces, frfModeMarkers, frfModeTableHtml, differentialResultStep, renderFrfCharts, ringdownModeTableHtml, fftPow2Js, welchPsdJs, ringdownTailColor, ringdownTailTraces, ringdownFullPsdTraces, createRingdownChart, updateRingdownChart, ringdownSelectionPsdTraces, ringdownModeMarkers, renderRingdownCharts };

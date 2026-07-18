@@ -1,5 +1,5 @@
-import { el } from "./api.js";
-import { drawChart, attachChartHover, mixColor, traceStyle, clipToPsdBand, psdToAmplitude, countsPerMm } from "./charts-core.js";
+import { el, payloadUnchanged, runDataSig } from "./api.js";
+import { drawChart, attachChartHover, mixColor, traceStyle, clipToPsdBand, psdMaxFreqHz, psdToAmplitude, countsPerMm } from "./charts-core.js";
 import { redrawCharts } from "./peaks.js";
 import { runColor } from "./runs.js";
 import { motorView, motorViewPerMotor } from "./shell.js";
@@ -142,6 +142,9 @@ function heatCellStyle(value, min, max) {
 function renderMetricsTable(names, steps) {
   const container = el("metrics-table");
   if (!container) return;
+  if (payloadUnchanged("metrics-table", { runs: runDataSig(names), steps, view: motorView() })) {
+    return;
+  }
   const rows = metricsTableRows(names, steps);
   if (!rows.length) {
     container.innerHTML = '<p class="note">select runs above</p>';
@@ -262,6 +265,9 @@ function sweepMetricsSeries(names) {
 function renderSweepMetricsChart(names) {
   const container = el("sweep-metrics-chart");
   if (!container) return;
+  if (payloadUnchanged("sweep-metrics", { runs: runDataSig(names), view: motorView() })) {
+    return;
+  }
   const series = sweepMetricsSeries(names);
   if (!series.length) {
     container.innerHTML =
@@ -600,6 +606,8 @@ function psdBox(title, traces, band, yTitle, opts) {
 function renderPsdChart(names, plots, steps) {
   const container = el("psd-charts");
   if (!container) return;
+  const sig = { runs: runDataSig(names), steps, view: motorView(), maxHz: psdMaxFreqHz() };
+  if (payloadUnchanged("psd-charts", sig)) return;
   container.innerHTML = "";
   if (!names.length || !steps.length) {
     container.innerHTML = '<p class="note">select runs above</p>';
@@ -631,7 +639,10 @@ function visibleStepNames(stepNames) {
 function renderStepChips(stepNames) {
   for (const id of ["psd-step-chips", "time-step-chips"]) {
     const container = el(id);
-    if (container) fillStepChips(container, stepNames);
+    if (!container) continue;
+    const filter = state.stepFilter ? [...state.stepFilter] : null;
+    if (payloadUnchanged(`step-chips-${id}`, { stepNames, filter })) continue;
+    fillStepChips(container, stepNames);
   }
 }
 

@@ -134,7 +134,6 @@ const state = {
   pinned: new Set(), // runs that stay selected when a plain click switches runs
   runColors: new Map(), // run name -> palette color, kept while the run stays selected
   autoSelected: false,
-  pendingNotes: new Map(), // run name -> note text saved locally, awaiting server confirmation
   stepFilter: null, // null = every step; otherwise a Set of visible step names
   console: {
     text: "", // current input line, survives page switches

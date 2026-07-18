@@ -1,4 +1,4 @@
-import { el, ensurePlotSeries, pageRuns } from "./api.js";
+import { el, payloadUnchanged, runDataSig, ensurePlotSeries, pageRuns } from "./api.js";
 import { drawTimeDomain, peakStep } from "./charts-core.js";
 import { motorNames, cellRaw, renderDriveGroups } from "./drive.js";
 import { renderFrfCharts, renderRingdownCharts } from "./dynamics.js";
@@ -56,6 +56,10 @@ function proposePeakIntoSlot(slot, peakFreq) {
 function renderPeakList(names, plots, steps) {
   const container = el("peak-list");
   if (!container) return;
+  const slots = state.drive.data
+    ? notchSlotStates().map((s) => [s.n, s.parked, s.current])
+    : [];
+  if (payloadUnchanged("peak-list", { runs: runDataSig(names), steps, slots })) return;
   const runLabel = el("peaks-run");
   if (!names.length || !steps.length) {
     container.innerHTML = '<p class="note">select runs above</p>';

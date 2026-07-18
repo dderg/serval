@@ -1,4 +1,4 @@
-import { el } from "./api.js";
+import { el, resetRenderState } from "./api.js";
 import { psdMaxFreqHz } from "./charts-core.js";
 import { bindConsole, setConsoleValue } from "./console.js";
 import { fetchMacroHelp, docsShellHtml, renderDocsList } from "./docs.js";
@@ -309,6 +309,7 @@ function bindAccordionToggle() {
 }
 
 function renderPage() {
+  resetRenderState();
   renderTabs();
   const def = currentPageDef();
   const root = el("page-root");

@@ -1,4 +1,4 @@
-import { el } from "./api.js";
+import { el, payloadUnchanged, runDataSig } from "./api.js";
 import { driveRamp } from "./metrics.js";
 import { runColor } from "./runs.js";
 import { motorViewPerMotor } from "./shell.js";
@@ -191,6 +191,8 @@ function attachChartHover(canvas, traces, yLabel, fixedY, xUnit, marks, opts) {
 function drawTimeDomain(names, plots, steps) {
   const container = el("charts");
   if (!container) return;
+  const sig = { runs: runDataSig(names), steps, perMotor: motorViewPerMotor() };
+  if (payloadUnchanged("time-domain", sig)) return;
   container.innerHTML = "";
   if (names.length === 0) {
     container.innerHTML = '<p class="note">select runs above</p>';

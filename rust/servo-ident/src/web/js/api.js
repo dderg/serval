@@ -13,6 +13,40 @@ function el(id) {
   return document.getElementById(id);
 }
 
+// --- render gating ----------------------------------------------------------
+//
+// Every periodic render short-circuits through payloadUnchanged: a section
+// whose inputs serialize to the same signature as its last render keeps its
+// DOM (and any in-progress interaction) untouched. renderPage wipes the DOM
+// wholesale, so it calls resetRenderState to drop every signature and let
+// registered hooks discard DOM-bound caches.
+
+const renderSigs = new Map();
+const renderResetHooks = [];
+
+function payloadUnchanged(key, payload) {
+  const sig = JSON.stringify(payload);
+  if (renderSigs.get(key) === sig) return true;
+  renderSigs.set(key, sig);
+  return false;
+}
+
+function onRenderReset(hook) {
+  renderResetHooks.push(hook);
+}
+
+function resetRenderState() {
+  renderSigs.clear();
+  for (const hook of renderResetHooks) hook();
+}
+
+function runDataSig(names) {
+  return names.map((n) => {
+    const run = state.runs.find((r) => r.name === n);
+    return [n, run ? run.mtime_utc : null, state.runColors.get(n) || null];
+  });
+}
+
 // --- run data ---------------------------------------------------------------
 
 function detailIsFresh(name, run) {
@@ -112,4 +146,4 @@ function shortTime(mtimeUtc) {
   return m ? m[1] : mtimeUtc;
 }
 
-export { api, el, detailIsFresh, ensureDetail, ensurePlotSeries, journalParams, ambientNotches, flatAmbient, motorCount, ambientDiff, pageRuns, shortTime };
+export { api, el, payloadUnchanged, onRenderReset, resetRenderState, runDataSig, detailIsFresh, ensureDetail, ensurePlotSeries, journalParams, ambientNotches, flatAmbient, motorCount, ambientDiff, pageRuns, shortTime };

@@ -1,4 +1,4 @@
-import { el, shortTime } from "./api.js";
+import { el, payloadUnchanged, shortTime } from "./api.js";
 import { loadConsoleHistory, setConsoleValue } from "./console.js";
 import { moonrakerUrl, escapeHtml } from "./moonraker.js";
 import { consoleSectionHtml } from "./shell.js";
@@ -197,21 +197,16 @@ function renderDocsList() {
     list.innerHTML = `<p class="note">no macro help yet — is klippy up and the moonraker URL right?</p>`;
   } else {
     const target = docsDeepLinkTarget();
-    const openNow = new Set(
-      Array.from(list.querySelectorAll("details.macro-doc[open]")).map((d) =>
-        d.id.slice("doc-".length)
-      )
-    );
-    const firstRender = !list.dataset.rendered;
-    list.innerHTML = Object.entries(h.commands)
-      .map(([name, text]) =>
-        macroDocHtml(name, text, name === target || openNow.has(name))
-      )
-      .join("");
-    list.dataset.rendered = "1";
-    if (firstRender && target && h.commands[target]) {
-      const entry = el(`doc-${target}`);
-      if (entry) entry.scrollIntoView({ block: "start" });
+    if (!payloadUnchanged("docs-list", { commands: h.commands, target })) {
+      const firstRender = !list.dataset.rendered;
+      list.innerHTML = Object.entries(h.commands)
+        .map(([name, text]) => macroDocHtml(name, text, name === target))
+        .join("");
+      list.dataset.rendered = "1";
+      if (firstRender && target && h.commands[target]) {
+        const entry = el(`doc-${target}`);
+        if (entry) entry.scrollIntoView({ block: "start" });
+      }
     }
   }
   const retry = el("docs-retry");

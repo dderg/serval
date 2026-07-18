@@ -1,4 +1,4 @@
-import { api, el, ensureDetail, ambientDiff, pageRuns, shortTime } from "./api.js";
+import { api, el, payloadUnchanged, ensureDetail, ambientDiff, pageRuns, shortTime } from "./api.js";
 import { loadRerunForm } from "./drive.js";
 import { redrawCharts } from "./peaks.js";
 import { currentPageDef } from "./shell.js";
@@ -9,12 +9,20 @@ import { PALETTE, INITIAL_SELECTED_RUNS, state } from "./state.js";
 function renderRuns() {
   const tbody = el("journal-body");
   if (!tbody) return;
-  const editing = document.activeElement;
-  if (editing && editing.classList.contains("run-note-input") && tbody.contains(editing)) {
-    return;
-  }
   const def = currentPageDef();
   const runs = def.journal ? state.runs : pageRuns(def);
+  const sig = {
+    page: state.page,
+    runs,
+    selected: [...state.selected],
+    pinned: [...state.pinned],
+    colors: [...state.runColors],
+    details: state.runs.map((r) => {
+      const detail = state.details.get(r.name);
+      return detail ? detail.mtime_utc : null;
+    }),
+  };
+  if (payloadUnchanged("runs-table", sig)) return;
   tbody.innerHTML = "";
   runs.forEach((run) => {
     const globalIdx = state.runs.indexOf(run);
@@ -163,11 +171,10 @@ function noteCell(run) {
       done = true;
       const text = input.value;
       input.remove();
-      if (save) {
-        saveNote(run, text);
-      } else {
-        renderRuns();
-      }
+      const note = save ? text.trim() || null : run.note;
+      td.className = note ? "run-note" : "run-note empty";
+      td.textContent = note || "add note…";
+      if (save) saveNote(run, text);
     };
     input.addEventListener("keydown", (ev) => {
       ev.stopPropagation();
@@ -180,12 +187,10 @@ function noteCell(run) {
   return td;
 }
 
-/// The note shows up the moment Enter is pressed: it goes into
-/// state.pendingNotes, which renderRuns/refresh overlay onto whatever the
-/// server returns, then the POST confirms (or rolls back) in the background.
-/// Without the overlay, the periodic refresh replaces state.runs with
-/// server data that predates the save — during a long calibration the POST
-/// can sit queued behind it, blanking the note until the run finishes.
+/// The note shows up the moment Enter is pressed, then the POST confirms
+/// (or a refresh rolls back) in the background. The periodic refresh
+/// no longer clobbers it: an unchanged server payload skips the table
+/// render entirely.
 function applyNoteLocally(name, note) {
   const current = state.runs.find((r) => r.name === name);
   if (current) current.note = note;
@@ -193,26 +198,18 @@ function applyNoteLocally(name, note) {
 }
 
 async function saveNote(run, text) {
-  const note = text.trim() || null;
-  state.pendingNotes.set(run.name, note);
-  applyNoteLocally(run.name, note);
+  applyNoteLocally(run.name, text.trim() || null);
   try {
     const saved = await api(`/api/runs/${encodeURIComponent(run.name)}/note`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ note: text }),
     });
-    if (state.pendingNotes.get(run.name) === note) {
-      state.pendingNotes.delete(run.name);
-      applyNoteLocally(run.name, saved.note || null);
-    }
+    applyNoteLocally(run.name, saved.note || null);
   } catch (e) {
     console.error(e);
-    if (state.pendingNotes.get(run.name) === note) {
-      state.pendingNotes.delete(run.name);
-      renderRuns();
-    }
     alert(`saving note failed: ${e.message}`);
+    await refresh();
   }
 }
 
@@ -233,7 +230,6 @@ async function deleteRun(run) {
   state.pinned.delete(run.name);
   state.details.delete(run.name);
   state.plotSeries.delete(run.name);
-  state.pendingNotes.delete(run.name);
   syncRunColors();
   renderRuns();
   redrawCharts();
@@ -289,10 +285,6 @@ function autoSelectInitialRuns() {
 async function refresh() {
   const runs = await api("/api/runs");
   state.runs = runs;
-  for (const [name, note] of state.pendingNotes) {
-    const run = state.runs.find((r) => r.name === name);
-    if (run) run.note = note;
-  }
   await Promise.all(runs.map((r) => ensureDetail(r).catch((e) => console.error(e))));
   const known = new Set(runs.map((r) => r.name));
   for (const name of [...state.selected]) {

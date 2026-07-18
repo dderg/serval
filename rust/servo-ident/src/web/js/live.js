@@ -1,4 +1,4 @@
-import { api, el } from "./api.js";
+import { api, el, payloadUnchanged } from "./api.js";
 import { drawChart } from "./charts-core.js";
 import { formatAge } from "./drive.js";
 import { runGcode } from "./moonraker.js";
@@ -147,9 +147,7 @@ function liveDriveLabel(tapName) {
 function ensureLiveChartBoxes(containerId, idPrefix, drives) {
   const container = el(containerId);
   if (!container) return false;
-  const have = [...container.querySelectorAll("canvas")].map((c) => c.id).join();
-  const want = drives.map((d) => `${idPrefix}-canvas-${d}`).join();
-  if (have !== want) {
+  if (!payloadUnchanged(`live-boxes-${containerId}`, drives)) {
     container.innerHTML = drives
       .map(
         (d, i) =>
