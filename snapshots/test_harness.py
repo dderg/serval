@@ -266,8 +266,36 @@ def test_read_printer_config_serializes_document(tmp_path):
     )
     data = harness.read_printer_config(cfg)
     assert data.max_velocity == 300.0
+    assert data.max_accel == 1000.0
     # The engine re-reads the motion sections from the serialized document;
     # section parsing itself is covered by planner-config's from_doc tests.
     assert "[post_processor is_xy]" in data.config_text
     assert "frequency_hz = 39.3" in data.config_text
     assert "[axis x]" in data.config_text
+
+
+def test_parse_gcode_set_velocity_limit_accel(tmp_path):
+    gcode = tmp_path / "two_pass.gcode"
+    gcode.write_text(
+        "G1 X10 F6000\n"
+        "SET_VELOCITY_LIMIT ACCEL=500\n"
+        "G1 X20\n"
+        "SET_VELOCITY_LIMIT ACCEL=8000\n"
+        "G1 X30\n"
+    )
+    wp = harness.parse_gcode(gcode, 300.0, 3000.0)
+    assert [p[5] for p in wp] == [3000.0, 500.0, 8000.0]
+
+
+def test_parse_gcode_rejects_unsupported_velocity_limit_param(tmp_path):
+    gcode = tmp_path / "bad.gcode"
+    gcode.write_text("SET_VELOCITY_LIMIT VELOCITY=100\nG1 X10 F6000\n")
+    with pytest.raises(ValueError, match="only ACCEL"):
+        harness.parse_gcode(gcode, 300.0, 3000.0)
+
+
+def test_parse_gcode_rejects_non_positive_accel(tmp_path):
+    gcode = tmp_path / "bad.gcode"
+    gcode.write_text("SET_VELOCITY_LIMIT ACCEL=0\nG1 X10 F6000\n")
+    with pytest.raises(ValueError, match="positive finite"):
+        harness.parse_gcode(gcode, 300.0, 3000.0)

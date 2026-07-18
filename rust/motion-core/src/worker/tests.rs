@@ -923,10 +923,7 @@ fn beacon_scan_path_live_worker_velocity_stays_bounded() {
     );
     let limits = VelocityLimits::try_new(2800.0, 100000.0, 0.695, 1_000_000.0).unwrap();
     let config = StreamConfig {
-        corner: CornerFitConfig {
-            kernel_variance_s2: chains.max_spatial_kernel_variance_s2(),
-            ..CornerFitConfig::default()
-        },
+        corner: CornerFitConfig::default(),
         integration_tol: 1e-4,
         max_extrude_only_velocity_mm_s: f64::INFINITY,
         max_extrude_only_accel_mm_s2: f64::INFINITY,

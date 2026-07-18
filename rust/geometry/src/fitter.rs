@@ -277,8 +277,7 @@ pub fn facet_consumption_candidate(
     if theta1 <= config.theta_min_rad || theta1 >= config.theta_max_rad {
         return false;
     }
-    let delta =
-        junction_deviation(m_in.limits, config).min(junction_deviation(m_mid.limits, config));
+    let delta = junction_deviation(m_in.limits).min(junction_deviation(m_mid.limits));
     if !(delta.is_finite() && delta > 0.0) {
         return false;
     }
@@ -368,7 +367,7 @@ pub fn plan_facet_consumption(
     let delta = std::iter::once(m_in)
         .chain(mids.iter().copied())
         .chain(std::iter::once(m_out))
-        .map(|m| junction_deviation(m.limits, config))
+        .map(|m| junction_deviation(m.limits))
         .fold(f64::INFINITY, f64::min);
     if !(delta.is_finite() && delta > 0.0) {
         return Ok(None);
@@ -548,8 +547,7 @@ fn classify_junction(
         return Ok(JunctionPlan::Unblended(UnblendReason::NearReversal));
     }
 
-    let delta =
-        junction_deviation(m_in.limits, config).min(junction_deviation(m_out.limits, config));
+    let delta = junction_deviation(m_in.limits).min(junction_deviation(m_out.limits));
     if delta <= 0.0 {
         return Ok(JunctionPlan::Unblended(UnblendReason::ZeroDeviation));
     }
@@ -616,21 +614,14 @@ fn biclothoid_followers(
     )
 }
 
-#[must_use]
-pub fn kernel_corner_deviation_mm(kernel_variance_s2: f64, accel_mm_s2: f64) -> f64 {
-    0.5 * kernel_variance_s2 * accel_mm_s2
-}
-
-/// The deviation budget a clothoid corner blend may spend. The smoothing
-/// kernel pulls the blended corner inward by a further ~(sigma^2/2)*a, additive
-/// with the blend's own deviation, so the blend gets what remains of
-/// `corner_deviation` after the kernel's share. Arc-run fitting and collinear
-/// merging deliberately do NOT use this: there the budget is a reconstruction
-/// tolerance ("are these facets one intended curve/line"), and the kernel's
-/// pull on the result is the same whether or not the facets fuse.
-fn junction_deviation(limits: VelocityLimits, config: CornerFitConfig) -> f64 {
+/// The deviation budget a clothoid corner blend may spend: the move's
+/// `corner_deviation` limit, verbatim. Smoothing kernels downstream add their
+/// own inward pull on top — deliberately NOT deducted here, so the fitted
+/// geometry depends only on this knob and never on acceleration or the active
+/// post-processor chain. Arc-run fitting and collinear merging use the raw
+/// limit as a reconstruction tolerance for the same reason.
+fn junction_deviation(limits: VelocityLimits) -> f64 {
     limits.corner_deviation_mm
-        - kernel_corner_deviation_mm(config.kernel_variance_s2, limits.accel_mm_s2)
 }
 
 #[cfg(test)]

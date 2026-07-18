@@ -28,7 +28,7 @@ struct PlaygroundConfig {
     post_processor_config: String,
 }
 
-type Waypoint = (f64, f64, f64, f64, f64);
+type Waypoint = pipeline_snapshot::waypoints::Waypoint;
 
 fn parse_inputs(
     gcode_text: &str,
@@ -54,7 +54,8 @@ fn parse_inputs(
     if cfg.square_corner_velocity.is_none() && cfg.corner_deviation.is_none() {
         return Err("one of square_corner_velocity or corner_deviation is required".to_string());
     }
-    let waypoints = parse_gcode(gcode_text, cfg.max_velocity).map_err(|e| e.to_string())?;
+    let waypoints =
+        parse_gcode(gcode_text, cfg.max_velocity, cfg.max_accel).map_err(|e| e.to_string())?;
     let (axis_decls, post_processor_decls) =
         config_text::parse(&cfg.post_processor_config).map_err(|e| e.to_string())?;
     Ok((

@@ -1,13 +1,13 @@
 use super::*;
 use motion_pipeline::StreamConfig;
 
-fn square_waypoints() -> Vec<(f64, f64, f64, f64, f64)> {
+fn square_waypoints() -> Vec<waypoints::Waypoint> {
     vec![
-        (0.0, 0.0, 0.0, 0.0, 100.0),
-        (10.0, 0.0, 0.0, 0.0, 100.0),
-        (10.0, 10.0, 0.0, 0.0, 100.0),
-        (0.0, 10.0, 0.0, 0.0, 100.0),
-        (0.0, 0.0, 0.0, 0.0, 100.0),
+        (0.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
+        (10.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
+        (10.0, 10.0, 0.0, 0.0, 100.0, 3000.0),
+        (0.0, 10.0, 0.0, 0.0, 100.0, 3000.0),
+        (0.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
     ]
 }
 
@@ -115,7 +115,10 @@ fn cubic_pieces_are_position_continuous_at_joins() {
 #[test]
 fn single_move_skips_fitting() {
     let limits = default_limits();
-    let waypoints = vec![(0.0, 0.0, 0.0, 0.0, 100.0), (10.0, 0.0, 0.0, 0.0, 100.0)];
+    let waypoints = vec![
+        (0.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
+        (10.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
+    ];
     let moves = build_moves(&waypoints, limits).unwrap();
     let (fitted, _, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());
     assert_eq!(fitted.len(), 1, "single move must pass through unchanged");
@@ -124,9 +127,9 @@ fn single_move_skips_fitting() {
 #[test]
 fn zero_displacement_filtered() {
     let waypoints = vec![
-        (0.0, 0.0, 0.0, 0.0, 100.0),
-        (0.0, 0.0, 0.0, 0.0, 100.0),
-        (10.0, 0.0, 0.0, 0.0, 100.0),
+        (0.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
+        (0.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
+        (10.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
     ];
     let moves = build_moves(&waypoints, default_limits()).unwrap();
     assert_eq!(moves.len(), 1);
@@ -144,7 +147,10 @@ fn follower_ratio(m: &geometry::Move, axis: usize) -> Option<f64> {
 fn spatial_move_with_extrusion_sets_follower_ratio() {
     // 10 mm move in X, extruding 2 mm of filament: the E follower ratio is
     // ΔE / Δs on the real extruder axis (index 3).
-    let waypoints = vec![(0.0, 0.0, 0.0, 0.0, 100.0), (10.0, 0.0, 0.0, 2.0, 100.0)];
+    let waypoints = vec![
+        (0.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
+        (10.0, 0.0, 0.0, 2.0, 100.0, 3000.0),
+    ];
     let moves = build_moves(&waypoints, default_limits()).unwrap();
     assert_eq!(moves.len(), 1);
     let ratio = follower_ratio(&moves[0], EXTRUDER_AXIS).expect("extruder follower present");
@@ -154,7 +160,10 @@ fn spatial_move_with_extrusion_sets_follower_ratio() {
 #[test]
 fn diagonal_move_extrusion_ratio_uses_spatial_distance() {
     // 3-4-5 triangle: Δs = 5, ΔE = 1, ratio = 0.2.
-    let waypoints = vec![(0.0, 0.0, 0.0, 0.0, 100.0), (3.0, 4.0, 0.0, 1.0, 100.0)];
+    let waypoints = vec![
+        (0.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
+        (3.0, 4.0, 0.0, 1.0, 100.0, 3000.0),
+    ];
     let moves = build_moves(&waypoints, default_limits()).unwrap();
     let ratio = follower_ratio(&moves[0], EXTRUDER_AXIS).expect("extruder follower present");
     assert!((ratio - 0.2).abs() < 1e-12, "ΔE/Δs should be 1/5 = 0.2");
@@ -164,7 +173,10 @@ fn diagonal_move_extrusion_ratio_uses_spatial_distance() {
 fn pure_retract_is_a_non_spatial_follower_move() {
     // E-only retract: no XYZ change, ΔE = -3. It must survive as a virtual
     // (non-spatial) move carrying only the extruder follower.
-    let waypoints = vec![(0.0, 0.0, 0.0, 0.0, 100.0), (0.0, 0.0, 0.0, -3.0, 100.0)];
+    let waypoints = vec![
+        (0.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
+        (0.0, 0.0, 0.0, -3.0, 100.0, 3000.0),
+    ];
     let moves = build_moves(&waypoints, default_limits()).unwrap();
     assert_eq!(
         moves.len(),
@@ -184,7 +196,10 @@ fn pure_retract_is_a_non_spatial_follower_move() {
 
 #[test]
 fn no_extrusion_means_no_follower() {
-    let waypoints = vec![(0.0, 0.0, 0.0, 0.0, 100.0), (10.0, 0.0, 0.0, 0.0, 100.0)];
+    let waypoints = vec![
+        (0.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
+        (10.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
+    ];
     let moves = build_moves(&waypoints, default_limits()).unwrap();
     assert!(
         follower_ratio(&moves[0], EXTRUDER_AXIS).is_none(),
@@ -197,9 +212,9 @@ fn extrusion_lowers_to_a_moving_e_track() {
     let limits = default_limits();
     // Extrude the whole way around the square so every axis[3] track moves.
     let waypoints = vec![
-        (0.0, 0.0, 0.0, 0.0, 100.0),
-        (10.0, 0.0, 0.0, 1.0, 100.0),
-        (10.0, 10.0, 0.0, 2.0, 100.0),
+        (0.0, 0.0, 0.0, 0.0, 100.0, 3000.0),
+        (10.0, 0.0, 0.0, 1.0, 100.0, 3000.0),
+        (10.0, 10.0, 0.0, 2.0, 100.0, 3000.0),
     ];
     let moves = build_moves(&waypoints, limits).unwrap();
     let (_, shaped, _) = run_pipeline(&moves, default_config(limits), AxisChainSet::default());

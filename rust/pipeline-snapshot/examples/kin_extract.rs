@@ -22,7 +22,7 @@ fn main() {
     let line: u32 = args.next().expect("line").parse().unwrap();
 
     let text = std::fs::read_to_string(&path).expect("read gcode");
-    let waypoints = parse_gcode(&text, max_velocity).expect("parse gcode");
+    let waypoints = parse_gcode(&text, max_velocity, max_accel).expect("parse gcode");
     let corner_deviation = geometry::corner_deviation_from_scv(scv, max_accel);
     let limits =
         geometry::VelocityLimits::try_new(max_velocity, max_accel, corner_deviation, max_jerk)
