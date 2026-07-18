@@ -460,7 +460,7 @@ def test_apply_writes_after_revert_and_verifies():
             (0x2001, 0x03): 1923,
         },
         verdict={
-            "recommended_step": "cal_p1040_s650_i1923",
+            "recommended_step": "cal_speed_v650",
             "reason": "highest clean gain",
             "flags": [],
             "apply": apply_writes,
@@ -469,15 +469,12 @@ def test_apply_writes_after_revert_and_verifies():
     gcmd = FakeGcmd(AXIS="X", SPEED_GAINS="500,650", APPLY=1)
     sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
 
-    # sg=500 reverts to pos=800/speed=500/integral=2500 - the revert write
-    # is the only place VALUE=2500 (integral) is ever written.
-    revert_idx = _script_indices(gcode, "VALUE=2500")
-    # sg=650 -> integral=1923 is written once mid-sweep and again by APPLY;
-    # ordering only holds if APPLY runs after the revert, so it must be the
-    # *last* occurrence that matters.
+    # VALUE=500 only ever appears in the first sweep step's write; the
+    # restore and APPLY write speed 650 / integral 1923 afterwards.
+    sweep_idx = _script_indices(gcode, "VALUE=500")
     win_idx = _script_indices(gcode, "VALUE=1923")
-    assert revert_idx and win_idx
-    assert max(win_idx) > max(revert_idx)
+    assert sweep_idx and win_idx
+    assert max(win_idx) > max(sweep_idx)
     assert any("APPLY verified" in r for r in gcmd.responses)
 
 
@@ -536,18 +533,18 @@ def test_apply_default_off_does_not_apply():
     )
 
 
-def test_base_speed_gain_pins_non_swept_servos():
+def test_base_gain_pins_swept_param_on_non_swept_servos():
     servo_param.drain_param_writes()
     sc, gcode = make_sc_apply(
         verdict={
-            "recommended_step": "cal_p1040_s650_i1923",
+            "recommended_step": "cal_speed_v650",
             "reason": "highest clean gain",
             "flags": [],
             "apply": [_applied("motor_a", "0x2001.0x02", 650)],
         }
     )
     gcmd = FakeGcmd(
-        AXIS="X", SERVO="motor_a", SPEED_GAINS="500,650", BASE_SPEED_GAIN="400"
+        AXIS="X", SERVO="motor_a", SPEED_GAINS="500,650", BASE_GAIN="400"
     )
     sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
 
@@ -556,32 +553,37 @@ def test_base_speed_gain_pins_non_swept_servos():
         for s in gcode.scripts
         if isinstance(s, str) and "SERVO=motor_b" in s and "0x2001" in s
     ]
-    assert any("VALUE=640" in s for s in base_writes)
-    assert any("VALUE=400" in s for s in base_writes)
-    assert any("VALUE=3125" in s for s in base_writes)
+    assert any("SET=0x2001.0x02 VALUE=400" in s for s in base_writes)
     for s in gcode.scripts:
         if isinstance(s, str) and ("VALUE=650" in s or "VALUE=500" in s):
             assert "motor_b" not in s, "sweep must not touch the pinned servo"
     assert _manifest(sc)["base_gains"] == {
         "servos": ["motor_b"],
-        "position": 640,
-        "speed": 400,
-        "integral": 3125,
+        "param": "speed",
+        "value": 400,
     }
 
 
-def test_base_speed_gain_without_servo_subset_errors():
+def test_base_gain_without_servo_subset_errors():
     servo_param.drain_param_writes()
     sc, _gcode = make_sc_apply(
         verdict={
-            "recommended_step": "cal_p1040_s650_i1923",
+            "recommended_step": "cal_speed_v650",
             "reason": "highest clean gain",
             "flags": [],
             "apply": None,
         }
     )
-    gcmd = FakeGcmd(AXIS="X", SPEED_GAINS="500,650", BASE_SPEED_GAIN="400")
+    gcmd = FakeGcmd(AXIS="X", SPEED_GAINS="500,650", BASE_GAIN="400")
     with pytest.raises(RuntimeError, match="subset"):
+        sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
+
+
+def test_base_speed_gain_param_is_rejected():
+    servo_param.drain_param_writes()
+    sc, _gcode = make_sc()
+    gcmd = FakeGcmd(AXIS="X", SPEED_GAINS="500,650", BASE_SPEED_GAIN="400")
+    with pytest.raises(RuntimeError, match="BASE_SPEED_GAIN was removed"):
         sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
 
 
@@ -590,14 +592,14 @@ def test_calibrate_gains_restores_prior_gains():
     sc, gcode = make_sc()
     gcmd = FakeGcmd(AXIS="Y", SPEED_GAINS="450")
     sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
-    # derive(450) writes integral 2778 mid-sweep; the fake drive reads every
-    # gain as 7, so the restore writes VALUE=7 to all three addresses after
-    # the last sweep write.
-    sweep_idx = _script_indices(gcode, "VALUE=2778")
+    # the sweep writes speed 450 while holding the other gains at the fake
+    # drive's readback (7); the restore is the only place the speed address
+    # is written back to VALUE=7, after the last sweep write.
+    sweep_idx = _script_indices(gcode, "VALUE=450")
     restore_idx = [
         i
         for i, s in enumerate(_str_scripts(gcode))
-        if "SET=0x2001.0x03 VALUE=7" in s
+        if "SET=0x2001.0x02 VALUE=7" in s
     ]
     assert sweep_idx and restore_idx
     assert min(restore_idx) > max(sweep_idx)
@@ -617,10 +619,10 @@ def test_calibrate_gains_restores_on_failure():
         sc.cmd_SERVO_CALIBRATE_GAINS(gcmd)
     scripts = _str_scripts(gcode)
     sweep_idx = [
-        i for i, s in enumerate(scripts) if "SET=0x2001.0x03 VALUE=2778" in s
+        i for i, s in enumerate(scripts) if "SET=0x2001.0x02 VALUE=450" in s
     ]
     restore_idx = [
-        i for i, s in enumerate(scripts) if "SET=0x2001.0x03 VALUE=7" in s
+        i for i, s in enumerate(scripts) if "SET=0x2001.0x02 VALUE=7" in s
     ]
     assert sweep_idx and restore_idx
     assert min(restore_idx) > max(sweep_idx)

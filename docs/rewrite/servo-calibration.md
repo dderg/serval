@@ -503,8 +503,12 @@ defaults are the factory Low preset. Params: `POS_GAIN` (400) `SPEED_GAIN`
 (250) `INTEGRAL` (3184) `SERVO`.
 
 #### SERVO_CALIBRATE_GAINS
-Gain sweep, shaper-calibrate style: for each `SPEED_GAINS` entry (0.1 Hz units)
-it derives the position gain (`×1.6`) and integral (`1250000 ÷ gain`), records
+Sweep of exactly one drive gain, shaper-calibrate style: give one of
+`POS_GAINS=` (0.1 rad/s units), `SPEED_GAINS=` (0.1 Hz units) or `INTEGRALS=`
+(0.01 ms units) as a comma list — the other two gains stay at their current
+drive values, so each gain is tuned individually (the swept drives must agree
+on their current gains, else a command error tells you to align them first).
+It records
 one capture per step into the run directory, then `servo-cal analyze` writes
 `results.json` whose verdict names the highest gain step without resonance or a
 torque rail. Always **restores the gains that were active before the sweep**
@@ -519,14 +523,16 @@ and runs one `SERVO_MEASURE_TRACKING` to report before/after following-error
 peak and overshoot; a null verdict (every step flagged) makes `APPLY=1` a
 command error naming the reason instead of writing anything. `SERVO=` (comma
 list) restricts the sweep to a subset of the axis servos; adding
-`BASE_SPEED_GAIN=` then pins every non-swept axis servo at that gain (same
-`×1.6`/`Ti` derivation, recorded as `base_gains` in the manifest) for the whole
+`BASE_GAIN=` then pins the swept gain on every non-swept axis servo at that
+value (their other gains untouched, recorded as `base_gains` in the manifest)
+for the whole
 sweep — the asymmetric-gain experiment: hold one belt pair soft while sweeping
 the other pair higher; those servos are restored to their prior gains too.
 Params:
-`SPEED_GAINS` (500,650,800,1000) `AXIS` (X) `START` `END`
+`POS_GAINS` `SPEED_GAINS` (500,650,800,1000 when none given) `INTEGRALS`
+`AXIS` (X) `START` `END`
 `SPEED` (100) `ACCEL` (3000) `ITERATIONS` (2) `DWELL_MS` `TAG` (cal)
-`ACCEL_CHIP` `APPLY` `SERVO` `BASE_SPEED_GAIN`.
+`ACCEL_CHIP` `APPLY` `SERVO` `BASE_GAIN`.
 
 #### SERVO_GAIN_LADDER
 Gain sweep that climbs until analysis flags trouble, instead of a fixed

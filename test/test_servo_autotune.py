@@ -250,14 +250,9 @@ def make_autotune(
     sc._prep = lambda *a, **k: None
     sc._restore = lambda *a, **k: None
 
-    pos, integral = servo_calibration.GainSetAdapter.derive(
-        gain_recommend_speed
-    )
-    gain_step_name = "autotune_gain_p%d_s%d_i%d" % (
-        pos,
-        gain_recommend_speed,
-        integral,
-    )
+    pos = GOOD_ENGINE_VALUES[(0x2001, 0x01)]
+    integral = GOOD_ENGINE_VALUES[(0x2001, 0x03)]
+    gain_step_name = "autotune_gain_speed_v%d" % (gain_recommend_speed,)
     gain_verdict = {
         "recommended_step": gain_step_name,
         "reason": "highest gain step without resonance or torque rail",

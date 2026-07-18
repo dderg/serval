@@ -90,6 +90,12 @@ GAIN_PARAMS = {
     ),
 }
 
+GAIN_LIST_PARAMS = {
+    "POS_GAINS": "position",
+    "SPEED_GAINS": "speed",
+    "INTEGRALS": "integral",
+}
+
 SPEED_GAIN_MIN = 100
 SPEED_GAIN_MAX = min(
     GAIN_PARAMS["speed"][2], int(GAIN_PARAMS["position"][2] / 1.6)
@@ -3310,9 +3316,13 @@ class ServoCalibration:
         return steps
 
     cmd_SERVO_CALIBRATE_GAINS_help = (
-        "Gain sweep, shaper-calibrate style. Resolves every servo driving "
-        "AXIS (both drives on CoreXY), writes each SPEED_GAINS entry (0.1 Hz "
-        "units, comma list) to all of them, one capture per step of all "
+        "Sweep of exactly one drive gain, shaper-calibrate style. Give one "
+        "of POS_GAINS (0.1 rad/s units), SPEED_GAINS (0.1 Hz units, default "
+        "500,650,800,1000) or INTEGRALS (0.01 ms units) as a comma list; "
+        "the other two gains stay at their current drive values, so tune "
+        "each gain individually. Resolves every servo driving AXIS (both "
+        "drives on CoreXY; they must agree on the current gains), writes "
+        "each entry to all of them, one capture per step of all "
         "drives into a run directory, then servo-cal analyzes it into "
         "results.json with a typed verdict (the recommended step). "
         "With an accelerometer (accel_chip config option or ACCEL_CHIP=) "
@@ -3322,13 +3332,31 @@ class ServoCalibration:
         "recommended gains after the restore, reads them back, and runs one "
         "SERVO_MEASURE_TRACKING to report before/after tracking metrics "
         "(default APPLY=0, report-only). SERVO= (comma list) restricts the "
-        "sweep to a subset of the axis servos; BASE_SPEED_GAIN then pins "
-        "every non-swept axis servo at that gain (same 1.6x/Ti derivation) "
+        "sweep to a subset of the axis servos; BASE_GAIN then pins the "
+        "swept gain on every non-swept axis servo at that value "
         "for an asymmetric-gain experiment; those servos are restored too. "
-        "Params SPEED_GAINS AXIS START "
+        "Params POS_GAINS SPEED_GAINS INTEGRALS AXIS START "
         "END SPEED ACCEL ITERATIONS DWELL_MS TAG ACCEL_CHIP APPLY SERVO "
-        "BASE_SPEED_GAIN"
+        "BASE_GAIN"
     )
+
+    def _swept_gain_values(self, gcmd: Any) -> tuple[str, list[int]]:
+        given = {p: gcmd.get(p, None) for p in GAIN_LIST_PARAMS}
+        named = [p for p, text in given.items() if text is not None]
+        if len(named) > 1:
+            raise gcmd.error(
+                "give exactly one of POS_GAINS, SPEED_GAINS or INTEGRALS "
+                "(got %s)" % (", ".join(named),)
+            )
+        chosen = named[0] if named else "SPEED_GAINS"
+        param = GAIN_LIST_PARAMS[chosen]
+        text = given.get(chosen) or "500,650,800,1000"
+        values = [int(round(v)) for v in self._floats(text)]
+        try:
+            validate_gain_values(values, param)
+        except ValueError as e:
+            raise gcmd.error("SERVO_CALIBRATE_GAINS: %s" % (e,))
+        return param, values
 
     def cmd_SERVO_CALIBRATE_GAINS(self, gcmd: Any) -> list[SweepStep]:
         axis = gcmd.get("AXIS", "X").upper()
@@ -3339,35 +3367,32 @@ class ServoCalibration:
         iterations = gcmd.get_int("ITERATIONS", 2, minval=1)
         dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
         tag = gcmd.get("TAG", "cal")
-        sgains = self._floats(gcmd.get("SPEED_GAINS", "500,650,800,1000"))
-        for sg in sgains:
-            if not SPEED_GAIN_MIN <= sg <= SPEED_GAIN_MAX:
-                raise gcmd.error(
-                    "SPEED_GAIN %d outside %d..%d (0.1 Hz units; max keeps "
-                    "the derived 1.6x position gain in drive range)"
-                    % (sg, SPEED_GAIN_MIN, SPEED_GAIN_MAX)
-                )
-        sgains = [int(sg) for sg in sgains]
+        param, values = self._swept_gain_values(gcmd)
         if gcmd.get("REVERT_GAIN", None) is not None:
             raise gcmd.error(
                 "REVERT_GAIN was removed - the sweep always restores the "
                 "gains that were active before it ran; keep a result with "
                 "APPLY=1 or SERVO_APPLY_GAINS"
             )
-        base_sg = gcmd.get("BASE_SPEED_GAIN", None)
+        if gcmd.get("BASE_SPEED_GAIN", None) is not None:
+            raise gcmd.error(
+                "BASE_SPEED_GAIN was removed - the sweep no longer derives "
+                "position/integral from the speed gain; use BASE_GAIN= to "
+                "pin the swept gain on the non-swept axis servos"
+            )
+        base_gain = gcmd.get("BASE_GAIN", None)
         base_servos: list[str] = []
-        if base_sg is not None:
-            base_sg = int(base_sg)
-            if not SPEED_GAIN_MIN <= base_sg <= SPEED_GAIN_MAX:
-                raise gcmd.error(
-                    "BASE_SPEED_GAIN %d outside %d..%d (0.1 Hz units)"
-                    % (base_sg, SPEED_GAIN_MIN, SPEED_GAIN_MAX)
-                )
+        if base_gain is not None:
+            base_gain = int(base_gain)
+            try:
+                validate_gain_values([base_gain], param)
+            except ValueError as e:
+                raise gcmd.error("BASE_GAIN: %s" % (e,))
             axis_servos = servo_strokes.axis_servos(gcmd, self._kin(), axis)
             base_servos = [s for s in axis_servos if s not in servos]
             if not base_servos:
                 raise gcmd.error(
-                    "BASE_SPEED_GAIN needs SERVO= to name a subset of the "
+                    "BASE_GAIN needs SERVO= to name a subset of the "
                     "axis servos - every servo on axis %s is already in the "
                     "sweep" % (axis,)
                 )
@@ -3375,6 +3400,15 @@ class ServoCalibration:
         chip, chip_name = self._accel_chip(gcmd)
         affected = list(dict.fromkeys(servos + base_servos))
         prior = {s: self._read_gains(s) for s in affected}
+        first = prior[servos[0]]
+        for s in servos:
+            if prior[s] != first:
+                raise gcmd.error(
+                    "servos disagree on the current gains (%s=%s vs %s=%s) "
+                    "- the sweep holds the non-swept gains at one shared "
+                    "value; align the drives first (SERVO_APPLY_GAINS)"
+                    % (servos[0], first, s, prior[s])
+                )
 
         def restore_prior() -> None:
             for s, g in prior.items():
@@ -3397,7 +3431,9 @@ class ServoCalibration:
             stroke_plan,
             self._corexy_rails(gcmd, axis),
         )
-        adapter = GainSetAdapter(self, servos, tag)
+        adapter = SingleGainAdapter(
+            self, servos, param, tag, dict(first), first[param]
+        )
         restored = False
         try:
             self._prep(axis, dwell)
@@ -3409,29 +3445,37 @@ class ServoCalibration:
             )
             self._set_manual_tuning(servos)
             if base_servos:
-                base_pos, base_integral = GainSetAdapter.derive(base_sg)
                 self._set_manual_tuning(base_servos)
-                self._write_gains(base_servos, base_pos, base_sg, base_integral)
+                for s in base_servos:
+                    pinned = dict(prior[s])
+                    pinned[param] = base_gain
+                    self._write_gains(
+                        [s],
+                        pinned["position"],
+                        pinned["speed"],
+                        pinned["integral"],
+                    )
                 run.manifest["base_gains"] = {
                     "servos": base_servos,
-                    "position": base_pos,
-                    "speed": base_sg,
-                    "integral": base_integral,
+                    "param": param,
+                    "value": base_gain,
                 }
                 run.write()
+                _addr, _lo, _hi, desc, unit, scale = GAIN_PARAMS[param]
                 gcmd.respond_info(
-                    "base gains on %s: pos %.1f rad/s, speed %.1f Hz, "
-                    "Ti %.2f ms (held for the whole sweep)"
+                    "base %s pinned at %d (%.4g %s) on %s (held for the "
+                    "whole sweep)"
                     % (
+                        desc,
+                        base_gain,
+                        base_gain / scale,
+                        unit,
                         ", ".join(base_servos),
-                        base_pos / 10.0,
-                        base_sg / 10.0,
-                        base_integral / 100.0,
                     )
                 )
             steps = self._engine.run(
                 adapter,
-                sgains,
+                values,
                 servos,
                 lambda sg: self._strokes(
                     axis, start, end, speed, accel, iterations, dwell
