@@ -357,6 +357,64 @@ def add_dynamics_direction_split(
     return refined
 
 
+def send_dynamics_model(
+    engine: Any, handle: int, profile: dict[str, Any]
+) -> None:
+    axis_index = {name: i for i, name in enumerate(profile["axes"])}
+    pair_slots: list[int] = []
+    direction_split: list[float] = []
+    for pair in profile.get("pairs", []):
+        first, second = pair["slots"]
+        pair_slots += [axis_index[first], axis_index[second]]
+        direction_split.append(float(pair["direction_split"]))
+    engine.set_dynamics_model(
+        handle,
+        [float(f) for row in profile["frame"] for f in row],
+        [float(v) for v in profile["mass"]],
+        [float(v) for v in profile["viscous"]],
+        [float(v) for v in profile["coulomb"]],
+        pair_slots,
+        direction_split,
+    )
+
+
+def dynamics_torque_changes(
+    prev: dict[str, Any],
+    new: dict[str, Any],
+    accel_mm_s2: float,
+    speed_mm_s: float,
+) -> list[float]:
+    """Per-mode relative parameter change, weighted into torque units at the
+    excitation ceiling (0.1% rated): |dm|*a + |db|*v + |dc| over the previous
+    model's total feedforward there. A raw per-term ratio would flag a
+    physically negligible flap of a near-zero viscous term as divergence."""
+    if prev["modes"] != new["modes"]:
+        raise ValueError(
+            "fit rounds disagree on modes: %s vs %s"
+            % (prev["modes"], new["modes"])
+        )
+    changes = []
+    for k in range(len(prev["modes"])):
+        ref = (
+            abs(prev["mass"][k]) * accel_mm_s2
+            + abs(prev["viscous"][k]) * speed_mm_s
+            + abs(prev["coulomb"][k])
+        )
+        if ref <= 0.0:
+            raise ValueError(
+                "mode %s fitted to zero feedforward torque at accel %g / "
+                "speed %g - degenerate fit"
+                % (prev["modes"][k], accel_mm_s2, speed_mm_s)
+            )
+        delta = (
+            abs(new["mass"][k] - prev["mass"][k]) * accel_mm_s2
+            + abs(new["viscous"][k] - prev["viscous"][k]) * speed_mm_s
+            + abs(new["coulomb"][k] - prev["coulomb"][k])
+        )
+        changes.append(delta / ref)
+    return changes
+
+
 def _frame_column_lambda(first: list[float], second: list[float]) -> int:
     if len(first) != len(second) or not any(value != 0.0 for value in first):
         raise ValueError("frame columns must be nonzero and equal length")
@@ -581,6 +639,44 @@ def render_dynamics_toml(
         )
     lines.append("refined_run = %s" % (json.dumps(run_dir),))
     for pair in profile.get("pairs", []):
+        lines += [
+            "",
+            "[[pair]]",
+            "slots = %s" % (json.dumps(pair["slots"]),),
+            "direction_split = %s" % (num(pair["direction_split"]),),
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def render_fit_dynamics_toml(
+    applied: dict[str, Any],
+    fitted: dict[str, Any],
+    terms: list[str],
+    run_dir: str,
+) -> str:
+    def num(v: float) -> str:
+        if not math.isfinite(v):
+            raise ValueError("refusing to render non-finite value %r" % (v,))
+        return repr(float(v))
+
+    def vec(values: list[float]) -> str:
+        return "[%s]" % (", ".join(num(v) for v in values),)
+
+    lines = [
+        "version = 6",
+        "axes = %s" % (json.dumps(applied["axes"]),),
+        "modes = %s" % (json.dumps(applied["modes"]),),
+        "frame = [%s]" % (", ".join(vec(row) for row in applied["frame"]),),
+        "mass = %s" % (vec(applied["mass"]),),
+        "viscous = %s" % (vec(applied["viscous"]),),
+        "coulomb = %s" % (vec(applied["coulomb"]),),
+        "applied_terms = %s" % (json.dumps([t.lower() for t in terms]),),
+    ]
+    for key in ("mass", "viscous", "coulomb"):
+        if applied[key] != fitted[key]:
+            lines.append("fitted_%s = %s" % (key, vec(fitted[key])))
+    lines.append("fit_run = %s" % (json.dumps(run_dir),))
+    for pair in applied.get("pairs", []):
         lines += [
             "",
             "[[pair]]",
@@ -914,22 +1010,7 @@ class DynamicsModelAdapter:
         self._send(self.baseline)
 
     def _send(self, profile: dict[str, Any]) -> None:
-        axis_index = {name: i for i, name in enumerate(profile["axes"])}
-        pair_slots: list[int] = []
-        direction_split: list[float] = []
-        for pair in profile.get("pairs", []):
-            first, second = pair["slots"]
-            pair_slots += [axis_index[first], axis_index[second]]
-            direction_split.append(float(pair["direction_split"]))
-        self._engine.set_dynamics_model(
-            self._handle,
-            [float(f) for row in profile["frame"] for f in row],
-            [float(v) for v in profile["mass"]],
-            [float(v) for v in profile["viscous"]],
-            [float(v) for v in profile["coulomb"]],
-            pair_slots,
-            direction_split,
-        )
+        send_dynamics_model(self._engine, self._handle, profile)
 
 
 class SweepEngine:
@@ -2967,13 +3048,40 @@ class ServoCalibration:
         self._restore()
 
     cmd_SERVO_FIT_DYNAMICS_help = (
-        "Identify axis dynamics for torque feedforward - runs the "
-        "SERVO_MEASURE_INERTIA grid, fits mass/viscous/coulomb, and writes "
-        "a timestamped profile (node-level on coupled_xy, a Cartesian "
-        "mode-space model with the frame built from the kinematics; per-axis "
-        "otherwise, DRIVE= picking the scalar fit on a multi-drive axis). "
-        "Optional TORQUE_NM + INERTIA_KGM2 add the C00.06 recommendation. "
-        "Params as SERVO_MEASURE_INERTIA plus TORQUE_NM INERTIA_KGM2 DRIVE"
+        "Identify axis dynamics for torque feedforward. On coupled_xy this "
+        "is an iterative closed-loop identification: it runs the "
+        "TEST_SPEED-style XY pattern (always - there is no PATTERN option), "
+        "fits mass/viscous/coulomb (all three always regressed - the "
+        "friction columns keep the mass estimate unbiased), streams the "
+        "APPLIED model into the running endpoint, and re-captures with the "
+        "feedforward active - "
+        "with FF in the loop the drives track the command, so regressing "
+        "measured torque against commanded kinematics loses its bias - "
+        "until the parameters move less than TOL (torque-weighted, at the "
+        "excitation ceiling) between rounds. It then re-identifies once at "
+        "MAX_ACCEL: a converged model that shifts more than DRIFT there is "
+        "a fit artifact, not physics, and the command aborts with the "
+        "numbers. No ACCELS/SPEEDS matrix: give the calibration envelope as "
+        "MAX_ACCEL/MAX_SPEED limits (e.g. capped below ringing; defaults "
+        "are the config grid maxima) - convergence rounds run at half "
+        "MAX_ACCEL, speeds at half and full MAX_SPEED. The live model is "
+        "restored to the configured dynamics_profile afterwards (also on "
+        "failure); without one the last fitted model stays live until "
+        "RESTART. TERMS picks what the applied/written model keeps "
+        "(default MASS: with velocity_ff on, the speed-loop integrator "
+        "already supplies friction torque at all but reversal transients, "
+        "and a wrong friction FF is worse than none; fitted-but-dropped "
+        "values are reported and recorded as fitted_* keys so enabling "
+        "TERMS=MASS,COULOMB later is a data-driven call). Writes a "
+        "timestamped node-level profile from the "
+        "MAX_ACCEL verification fit. On non-coupled kinematics the "
+        "single-shot per-axis grid fit remains (a per-motor candidate "
+        "cannot be streamed into a multi-drive node), with params as "
+        "SERVO_MEASURE_INERTIA plus DRIVE. Optional TORQUE_NM + "
+        "INERTIA_KGM2 add the C00.06 recommendation. Params TERMS (MASS) "
+        "MAX_ACCEL "
+        "MAX_SPEED TOL (0.05) DRIFT (0.15) MAX_ROUNDS (4) ITERATIONS "
+        "DWELL_MS BOUND SMALL_SIZE NAME SERVOS TORQUE_NM INERTIA_KGM2"
     )
 
     def _corexy_frame(
@@ -3050,7 +3158,54 @@ class ServoCalibration:
             )
         return path
 
+    def _fit_argv_for(
+        self,
+        gcmd: Any,
+        plan: dict[str, Any],
+        scap: str,
+        out_path: str,
+        torque: float | None,
+        inertia: float | None,
+    ) -> list[str]:
+        argv = [
+            self._servo_cal(gcmd),
+            "fit",
+            "--capture",
+            scap,
+            "--frame",
+            ";".join(
+                ",".join("%g" % (f,) for f in row) for row in plan["frame"]
+            ),
+            "--modes",
+            ",".join(plan["modes"]),
+            "--axes",
+            ",".join(plan["axes"]),
+            "--out",
+            out_path,
+            "--rotation-distance-mm",
+            "%g" % (self._rotation_distance(gcmd, plan["servos"]),),
+        ]
+        if torque is not None:
+            argv += [
+                "--rated-torque-nm",
+                "%g" % (torque,),
+                "--rotor-inertia-kgm2",
+                "%g" % (inertia,),
+            ]
+        return argv
+
     def _run_fit(
+        self,
+        gcmd: Any,
+        name: str,
+        torque: float | None,
+        inertia: float | None,
+    ) -> tuple[ExperimentRun, str, str]:
+        if self._kin().coupled_xy():
+            return self._run_fit_iterative(gcmd, name, torque, inertia)
+        return self._run_fit_grid(gcmd, name, torque, inertia)
+
+    def _run_fit_grid(
         self,
         gcmd: Any,
         name: str,
@@ -3070,43 +3225,360 @@ class ServoCalibration:
             plan["rails"],
         )
         try:
-            if plan["corexy"]:
-                self._measure_inertia_corexy(gcmd, name, servos=plan["servos"])
-            else:
-                self._measure_inertia(gcmd, name)
+            self._measure_inertia(gcmd, name)
             run.record_step(SweepStep(name, {}, []))
             out_path = self._dynamics_out_path(gcmd, run, name)
-            argv = [
-                self._servo_cal(gcmd),
-                "fit",
-                "--capture",
-                run.step_scap(name),
-                "--frame",
-                ";".join(
-                    ",".join("%g" % (f,) for f in row) for row in plan["frame"]
-                ),
-                "--modes",
-                ",".join(plan["modes"]),
-                "--axes",
-                ",".join(plan["axes"]),
-                "--out",
-                out_path,
-                "--rotation-distance-mm",
-                "%g" % (self._rotation_distance(gcmd, plan["servos"]),),
-            ]
-            if torque is not None:
-                argv += [
-                    "--rated-torque-nm",
-                    "%g" % (torque,),
-                    "--rotor-inertia-kgm2",
-                    "%g" % (inertia,),
-                ]
+            argv = self._fit_argv_for(
+                gcmd, plan, run.step_scap(name), out_path, torque, inertia
+            )
             text = self._run(gcmd, argv, 120.0)
             gcmd.respond_info(
                 "dynamics profile: %s | run %s" % (out_path, run.run_dir)
             )
         finally:
             self._active_run = None
+        return run, text, out_path
+
+    def _reject_fit_grid_params(self, gcmd: Any) -> None:
+        stale = [
+            p
+            for p in ("ACCELS", "SPEEDS", "PATTERN")
+            if gcmd.get(p, None) is not None
+        ]
+        if stale:
+            raise gcmd.error(
+                "%s: the iterative fit has no excitation matrix and always "
+                "runs the XY pattern - give the calibration envelope as "
+                "MAX_ACCEL/MAX_SPEED limits" % (", ".join(stale),)
+            )
+
+    def _validate_fit_slots(
+        self, gcmd: Any, node: Any, profile: dict[str, Any]
+    ) -> None:
+        for slot, motor in enumerate(profile["axes"]):
+            if node.get_slot_for_motor(motor) != slot:
+                raise gcmd.error(
+                    "fitted profile axis %r is at slot %d but node %s maps "
+                    "it to %s - cannot stream the candidate model"
+                    % (motor, slot, node.name, node.get_slot_for_motor(motor))
+                )
+
+    def _fit_round(
+        self,
+        gcmd: Any,
+        plan: dict[str, Any],
+        run: ExperimentRun,
+        step: str,
+        out_path: str,
+        torque: float | None,
+        inertia: float | None,
+    ) -> tuple[dict[str, Any], str]:
+        argv = self._fit_argv_for(
+            gcmd, plan, run.step_scap(step), out_path, torque, inertia
+        )
+        text = self._run(gcmd, argv, 120.0)
+        try:
+            with open(out_path) as f:
+                fitted = parse_dynamics_profile(f.read())
+        except (OSError, ValueError) as e:
+            raise gcmd.error(
+                "servo-cal fit for step %s produced an unusable profile "
+                "%s: %s" % (step, out_path, e)
+            )
+        return fitted, text
+
+    def _dynamics_params_line(self, profile: dict[str, Any]) -> str:
+        return " | ".join(
+            "%s mass %.5g viscous %.5g coulomb %.5g"
+            % (
+                mode,
+                profile["mass"][k],
+                profile["viscous"][k],
+                profile["coulomb"][k],
+            )
+            for k, mode in enumerate(profile["modes"])
+        )
+
+    def _run_fit_iterative(
+        self,
+        gcmd: Any,
+        name: str,
+        torque: float | None,
+        inertia: float | None,
+    ) -> tuple[ExperimentRun, str, str]:
+        if tomllib is None:
+            raise gcmd.error(
+                "SERVO_FIT_DYNAMICS requires Python 3.11+ (tomllib)"
+            )
+        self._reject_fit_grid_params(gcmd)
+        self._reject_pattern_stroke_bounds(gcmd)
+        plan = self._fit_plan(gcmd)
+        node = self._refine_dynamics_node(gcmd, plan["servos"])
+        handle = node.get_engine_handle()
+        if handle is None:
+            raise gcmd.error(
+                "ethercat_node %s has no engine handle" % (node.name,)
+            )
+        engine = self.printer.lookup_object("motion_engine")
+        restore = None
+        if node.get_dynamics_profile() is not None:
+            _path, restore = self._load_baseline_dynamics(gcmd, node)
+        max_accel = gcmd.get_float("MAX_ACCEL", max(self.accels), above=0.0)
+        max_speed = gcmd.get_float("MAX_SPEED", max(self.speeds), above=0.0)
+        tol = gcmd.get_float("TOL", 0.05, above=0.0)
+        drift = gcmd.get_float("DRIFT", 0.15, above=0.0)
+        max_rounds = gcmd.get_int("MAX_ROUNDS", 4, minval=2)
+        iterations = gcmd.get_int("ITERATIONS", self.iterations, minval=1)
+        dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
+        terms = [
+            t.strip().upper()
+            for t in gcmd.get("TERMS", "MASS").split(",")
+            if t.strip()
+        ]
+        if (
+            not terms
+            or any(t not in DYNAMICS_TERM_KEYS for t in terms)
+            or "MASS" not in terms
+        ):
+            raise gcmd.error(
+                "TERMS must be a comma list drawn from MASS, VISCOUS, "
+                "COULOMB and include MASS (got %r)" % (gcmd.get("TERMS", ""),)
+            )
+        dropped = [
+            key for term, key in DYNAMICS_TERM_KEYS.items() if term not in terms
+        ]
+
+        def applied_model(full: dict[str, Any]) -> dict[str, Any]:
+            trimmed = _copy_dynamics(full)
+            for key in dropped:
+                trimmed[key] = [0.0] * len(full[key])
+            return trimmed
+
+        def round_line(full: dict[str, Any], trimmed: dict[str, Any]) -> str:
+            line = self._dynamics_params_line(trimmed)
+            if dropped:
+                line += " | fitted but not applied: " + ", ".join(
+                    "%s [%s]"
+                    % (key, ", ".join("%.5g" % (v,) for v in full[key]))
+                    for key in dropped
+                )
+            return line
+
+        converge_accel = max_accel / 2.0
+        speeds = [max_speed / 2.0, max_speed]
+        points, start_x, start_y, pattern_plan = self._pattern_geometry_params(
+            gcmd
+        )
+        stroke_plan = {
+            "max_accel": max_accel,
+            "max_speed": max_speed,
+            "converge_accel": converge_accel,
+            "speeds": speeds,
+            "tol": tol,
+            "drift": drift,
+            "max_rounds": max_rounds,
+            "terms": [t.lower() for t in terms],
+            "iterations": iterations,
+            "dwell_ms": dwell,
+        }
+        stroke_plan.update(pattern_plan)
+        run = self._begin_run(
+            gcmd,
+            "dynamics_fit",
+            name,
+            plan["axis"],
+            plan["servos"],
+            stroke_plan,
+            plan["rails"],
+        )
+
+        def capture_round(step: str, accel: float) -> None:
+            self._start_capture(step, plan["servos"])
+            self._goto_xy(start_x, start_y, dwell)
+            for speed in speeds:
+                servo_strokes.emit_pattern(
+                    self.gcode,
+                    points,
+                    start_x,
+                    start_y,
+                    speed,
+                    accel,
+                    iterations,
+                    dwell,
+                )
+            self._stop_capture()
+            run.record_step(SweepStep(step, {"accel": accel}, []))
+
+        def torque_changes(
+            prev: dict[str, Any],
+            new: dict[str, Any],
+            accel: float,
+        ) -> list[float]:
+            try:
+                return dynamics_torque_changes(prev, new, accel, max_speed)
+            except ValueError as e:
+                raise gcmd.error(str(e))
+
+        applied = False
+        try:
+            out_path = self._dynamics_out_path(gcmd, run, name)
+            self._prep("X", dwell)
+            self._prep("Y", dwell)
+            self._pattern_reach_report(
+                gcmd,
+                points,
+                start_x,
+                start_y,
+                [converge_accel, max_accel],
+                speeds,
+            )
+            prev = None
+            fitted = None
+            converged = False
+            last_change = None
+            rounds_run = 0
+            for round_i in range(max_rounds):
+                step = "fit_r%d" % (round_i,)
+                capture_round(step, converge_accel)
+                fitted_full, _text = self._fit_round(
+                    gcmd,
+                    plan,
+                    run,
+                    step,
+                    os.path.join(run.run_dir, "dynamics_%s.toml" % (step,)),
+                    None,
+                    None,
+                )
+                fitted = applied_model(fitted_full)
+                rounds_run = round_i + 1
+                if round_i == 0:
+                    self._validate_fit_slots(gcmd, node, fitted)
+                send_dynamics_model(engine, handle, fitted)
+                applied = True
+                if prev is None:
+                    gcmd.respond_info(
+                        "round %d: %s (feedforward now live for the next "
+                        "round)" % (round_i, round_line(fitted_full, fitted))
+                    )
+                else:
+                    last_change = max(
+                        torque_changes(prev, fitted, converge_accel)
+                    )
+                    gcmd.respond_info(
+                        "round %d: %s | torque-weighted change %.1f%% "
+                        "(TOL %.1f%%)"
+                        % (
+                            round_i,
+                            round_line(fitted_full, fitted),
+                            100.0 * last_change,
+                            100.0 * tol,
+                        )
+                    )
+                    if last_change <= tol:
+                        converged = True
+                        break
+                prev = fitted
+            if not converged:
+                raise gcmd.error(
+                    "dynamics fit did not converge in %d rounds at accel "
+                    "%.0f (last torque-weighted change %.1f%% > TOL %.1f%%) "
+                    "- the identification is not settling; inspect run %s"
+                    % (
+                        max_rounds,
+                        converge_accel,
+                        100.0
+                        * (last_change if last_change is not None else 1.0),
+                        100.0 * tol,
+                        run.run_dir,
+                    )
+                )
+            capture_round("fit_verify", max_accel)
+            verified_full, text = self._fit_round(
+                gcmd,
+                plan,
+                run,
+                "fit_verify",
+                os.path.join(run.run_dir, "dynamics_fit_verify.toml"),
+                torque,
+                inertia,
+            )
+            verified = applied_model(verified_full)
+            shift = max(torque_changes(fitted, verified, max_accel))
+            if shift > drift:
+                raise gcmd.error(
+                    "converged model does not hold at MAX_ACCEL %.0f: "
+                    "re-identification shifted the parameters %.1f%% "
+                    "(DRIFT %.1f%%) - converged %s vs verify %s | the fit "
+                    "at accel %.0f was an artifact of that operating "
+                    "point, not physics; lower MAX_ACCEL below the "
+                    "regime change or investigate | run %s"
+                    % (
+                        max_accel,
+                        100.0 * shift,
+                        100.0 * drift,
+                        self._dynamics_params_line(fitted),
+                        self._dynamics_params_line(verified),
+                        converge_accel,
+                        run.run_dir,
+                    )
+                )
+            with open(out_path, "w") as f:
+                f.write(
+                    render_fit_dynamics_toml(
+                        verified, verified_full, terms, run.run_dir
+                    )
+                )
+            run.manifest["dynamics_fit"] = {
+                "rounds": rounds_run,
+                "converged_change": last_change,
+                "verify_shift": shift,
+                "terms": [t.lower() for t in terms],
+                "fitted_not_applied": {
+                    key: verified_full[key] for key in dropped
+                },
+                "profile": out_path,
+            }
+            run.write()
+            structured_log.event(
+                "calibration",
+                "dynamics_fit",
+                run_dir=run.run_dir,
+                rounds=rounds_run,
+                converged_change=last_change,
+                verify_shift=shift,
+                profile=out_path,
+            )
+            gcmd.respond_info(
+                "converged in %d rounds (change %.1f%%), holds at MAX_ACCEL "
+                "%.0f (shift %.1f%% <= DRIFT %.1f%%) | dynamics profile: %s "
+                "| run %s"
+                % (
+                    rounds_run,
+                    100.0 * (last_change or 0.0),
+                    max_accel,
+                    100.0 * shift,
+                    100.0 * drift,
+                    out_path,
+                    run.run_dir,
+                )
+            )
+        finally:
+            try:
+                if applied:
+                    if restore is not None:
+                        send_dynamics_model(engine, handle, restore)
+                        gcmd.respond_info(
+                            "live dynamics model restored to configured "
+                            "baseline"
+                        )
+                    else:
+                        gcmd.respond_info(
+                            "WARNING: no dynamics_profile configured - the "
+                            "last fitted model stays live until RESTART"
+                        )
+            finally:
+                self._restore()
+                self._active_run = None
         return run, text, out_path
 
     def cmd_SERVO_FIT_DYNAMICS(self, gcmd: Any) -> None:

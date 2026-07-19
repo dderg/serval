@@ -7,6 +7,16 @@ import pytest
 
 from klippy.extras import servo_axis, servo_calibration, servo_strokes
 
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
+
+requires_tomllib = pytest.mark.skipif(
+    tomllib is None,
+    reason="the iterative SERVO_FIT_DYNAMICS requires tomllib (3.11+)",
+)
+
 
 class FakeServoCapture:
     def __init__(self):
@@ -141,9 +151,11 @@ def _rail(axis, motors):
 
 
 class FakeNode:
-    def __init__(self, slots, handle=7):
+    def __init__(self, name, slots, handle=7):
+        self.name = name
         self._slots = slots
         self._handle = handle
+        self.dynamics_profile = None
 
     def get_engine_handle(self):
         return self._handle
@@ -151,12 +163,19 @@ class FakeNode:
     def get_slot_for_motor(self, motor_name):
         return self._slots[motor_name]
 
+    def get_dynamics_profile(self):
+        return self.dynamics_profile
+
+    def get_drive_count(self):
+        return len(self._slots)
+
 
 class FakeEngine:
     def __init__(self):
         self.buzzes = []
         self.dampers = []
         self.trims = []
+        self.dynamics_calls = []
 
     def sdo_read(self, handle, slot, index, subindex):
         return 2, 7
@@ -169,6 +188,9 @@ class FakeEngine:
 
     def set_diff_trim(self, *args):
         self.trims.append(args)
+
+    def set_dynamics_model(self, *args):
+        self.dynamics_calls.append(args)
 
 
 class FakeReactor:
@@ -192,7 +214,7 @@ def make_calibration(rails, coupled=True, extra_objs=None, reactor=None):
         for m in rail.motors:
             node_slots.setdefault(m.node_name, {})[m.motor_name] = m.chain_index
     for node_name, slots in node_slots.items():
-        objs["ethercat_node " + node_name] = FakeNode(slots)
+        objs["ethercat_node " + node_name] = FakeNode(node_name, slots)
     objs.update(extra_objs or {})
     sc = servo_calibration.ServoCalibration(
         FakeConfig(FakePrinter(objs, reactor))
@@ -203,6 +225,8 @@ def make_calibration(rails, coupled=True, extra_objs=None, reactor=None):
     sc._prep = lambda *a, **k: None
     sc._goto_xy = lambda *a, **k: None
     sc._restore = lambda *a, **k: None
+
+    sc.fake_fit_params = []
 
     def fake_run(gcmd, argv, timeout):
         gcode.scripts.append(("RUN", argv, timeout))
@@ -218,9 +242,45 @@ def make_calibration(rails, coupled=True, extra_objs=None, reactor=None):
                     },
                     f,
                 )
+        if len(argv) >= 2 and argv[1] == "fit":
+            params = (
+                sc.fake_fit_params.pop(0)
+                if sc.fake_fit_params
+                else (0.02, 0.004, 1.0)
+            )
+            _write_fit_profile(argv, *params)
+        return ""
 
     sc._run = fake_run
     return sc, gcode
+
+
+def _write_fit_profile(argv, mass, viscous, coulomb):
+    def flag(key):
+        return argv[argv.index(key) + 1]
+
+    axes = flag("--axes").split(",")
+    modes = flag("--modes").split(",")
+    frame = [
+        [float(v) for v in row.split(",")] for row in flag("--frame").split(";")
+    ]
+    n = len(modes)
+    lines = [
+        "version = 6",
+        "axes = [%s]" % (", ".join('"%s"' % a for a in axes),),
+        "modes = [%s]" % (", ".join('"%s"' % m for m in modes),),
+        "frame = [%s]"
+        % (
+            ", ".join(
+                "[%s]" % (", ".join("%r" % v for v in row),) for row in frame
+            ),
+        ),
+        "mass = [%s]" % (", ".join("%r" % mass for _ in range(n)),),
+        "viscous = [%s]" % (", ".join("%r" % viscous for _ in range(n)),),
+        "coulomb = [%s]" % (", ".join("%r" % coulomb for _ in range(n)),),
+    ]
+    with open(flag("--out"), "w") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 def _cap(sc):
@@ -356,6 +416,7 @@ def test_servos_override_must_match_kinematics():
     )
 
 
+@requires_tomllib
 def test_fit_dynamics_corexy_captures_all_four_and_passes_axes():
     sc, gcode = make_calibration(awd_rails())
     sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd())
@@ -373,6 +434,7 @@ def test_fit_dynamics_corexy_captures_all_four_and_passes_axes():
     assert "--signs" not in argv
 
 
+@requires_tomllib
 def test_fit_dynamics_trident_awd_inverted_drives_share_axes():
     sc, gcode = make_calibration(trident_awd_rails())
     sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd())
@@ -384,6 +446,7 @@ def test_fit_dynamics_trident_awd_inverted_drives_share_axes():
     assert "--signs" not in argv
 
 
+@requires_tomllib
 def test_fit_dynamics_corexy_two_drives_is_plain_corexy():
     sc, gcode = make_calibration(single_drive_rails())
     sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd())
@@ -496,7 +559,7 @@ def test_measure_inertia_corexy_servos_override():
 def make_differential_calibration():
     slots = {"motor_a": 0, "motor_a1": 1, "motor_b": 2, "motor_b1": 3}
     engine = FakeEngine()
-    node = FakeNode(slots)
+    node = FakeNode("xy_drives", slots)
     sc, gcode = make_calibration(
         awd_rails(),
         extra_objs={
@@ -645,6 +708,7 @@ def test_tracking_single_rail_dual_motor_axis_gets_no_combine():
     assert _manifest_for(sc)["belts"] is None
 
 
+@requires_tomllib
 def test_calibrate_inertia_ratio_corexy_uses_coupled_grid():
     sc, gcode = make_calibration(awd_rails())
     sc.cmd_SERVO_CALIBRATE_INERTIA_RATIO(
@@ -677,20 +741,27 @@ def _capture_paths(sc):
     ]
 
 
-def test_fit_dynamics_coupled_runs_one_full_range_capture():
+@requires_tomllib
+def test_fit_dynamics_iterates_pattern_captures_until_convergence():
     sc, gcode = make_calibration(awd_rails())
-    strokes = []
-    sc._strokes = lambda axis, start, end, *a: strokes.append(
-        (axis, start, end)
-    )
     sc.bounds = {"X": (20.0, 280.0), "Y": (20.0, 280.0)}
-    sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd())
-    assert _capture_paths(sc) == ["step_ident.scap"]
+    strokes = []
+    sc._strokes = lambda axis, start, end, *a: strokes.append(axis)
+    gcmd = FakeGcmd()
+    sc.cmd_SERVO_FIT_DYNAMICS(gcmd)
+    assert _capture_paths(sc) == [
+        "step_fit_r0.scap",
+        "step_fit_r1.scap",
+        "step_fit_verify.scap",
+    ]
+    assert strokes == []
     argv = _fit_argv(gcode)
     caps = [argv[i + 1] for i, a in enumerate(argv) if a == "--capture"]
-    assert [os.path.basename(c) for c in caps] == ["step_ident.scap"]
-    assert {(s, e) for ax, s, e in strokes if ax == "X"} == {(20.0, 280.0)}
-    assert {(s, e) for ax, s, e in strokes if ax == "Y"} == {(20.0, 280.0)}
+    assert [os.path.basename(c) for c in caps] == ["step_fit_verify.scap"]
+    engine = sc.printer.lookup_object("motion_engine")
+    assert len(engine.dynamics_calls) == 2
+    assert any("stays live until RESTART" in r for r in gcmd.responses)
+    assert any("converged in 2 rounds" in r for r in gcmd.responses)
 
 
 def _pattern_scripts(gcode):
@@ -772,19 +843,190 @@ def test_measure_inertia_cartesian_pattern_captures_axis_servos():
     assert _pattern_scripts(gcode)
 
 
-def test_fit_dynamics_corexy_pattern_records_plan_and_fits():
+def _metric_profile(mass, viscous, coulomb):
+    return {
+        "modes": ["x", "y"],
+        "mass": [mass, mass],
+        "viscous": [viscous, viscous],
+        "coulomb": [coulomb, coulomb],
+    }
+
+
+def test_torque_changes_zero_for_identical_fits():
+    p = _metric_profile(0.02, 0.004, 1.0)
+    assert servo_calibration.dynamics_torque_changes(p, p, 10000, 400) == [
+        0.0,
+        0.0,
+    ]
+
+
+def test_torque_changes_weight_terms_by_operating_point():
+    prev = _metric_profile(0.02, 0.004, 1.0)
+    new = _metric_profile(0.02, 0.004, 2.0)
+    ref = 0.02 * 10000 + 0.004 * 400 + 1.0
+    changes = servo_calibration.dynamics_torque_changes(prev, new, 10000, 400)
+    assert changes == pytest.approx([1.0 / ref, 1.0 / ref])
+    near_zero_viscous_flap = servo_calibration.dynamics_torque_changes(
+        _metric_profile(0.02, 1e-6, 1.0),
+        _metric_profile(0.02, 3e-6, 1.0),
+        10000,
+        400,
+    )
+    assert max(near_zero_viscous_flap) < 0.001
+
+
+def test_torque_changes_reject_degenerate_and_mismatched_fits():
+    zero = _metric_profile(0.0, 0.0, 0.0)
+    with pytest.raises(ValueError, match="degenerate"):
+        servo_calibration.dynamics_torque_changes(
+            zero, _metric_profile(0.02, 0.004, 1.0), 10000, 400
+        )
+    swapped = dict(_metric_profile(0.02, 0.004, 1.0), modes=["y", "x"])
+    with pytest.raises(ValueError, match="disagree on modes"):
+        servo_calibration.dynamics_torque_changes(
+            _metric_profile(0.02, 0.004, 1.0), swapped, 10000, 400
+        )
+
+
+@requires_tomllib
+def test_fit_dynamics_rejects_the_excitation_matrix_params():
+    sc, _ = make_calibration(awd_rails())
+    for params in (
+        {"ACCELS": "5000"},
+        {"SPEEDS": "100"},
+        {"PATTERN": "1"},
+    ):
+        with pytest.raises(RuntimeError, match="MAX_ACCEL/MAX_SPEED"):
+            sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd(**params))
+
+
+@requires_tomllib
+def test_fit_dynamics_records_the_envelope_and_pattern_plan():
     sc, _gcode = make_calibration(awd_rails())
-    fit_calls = []
-
-    def rec(gcmd, argv, timeout):
-        if len(argv) >= 2 and argv[1] == "fit":
-            fit_calls.append(argv)
-        return ""
-
-    sc._run = rec
-    sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd(PATTERN=1, ACCELS="5000", SPEEDS="100"))
+    sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd(MAX_ACCEL="8000", MAX_SPEED="300"))
     plan = _manifest_for(sc)["stroke_plan"]
     assert plan["pattern"]["segments"] == 21
     assert plan["pattern"]["inset"] == 20.0
-    assert len(fit_calls) == 1
-    assert fit_calls[0][1] == "fit"
+    assert plan["max_accel"] == 8000.0
+    assert plan["converge_accel"] == 4000.0
+    assert plan["speeds"] == [150.0, 300.0]
+    fit = _manifest_for(sc)["dynamics_fit"]
+    assert fit["rounds"] == 2
+    assert fit["converged_change"] == 0.0
+    assert fit["verify_shift"] == 0.0
+
+
+@requires_tomllib
+def test_fit_dynamics_fails_loudly_when_rounds_never_converge():
+    sc, _ = make_calibration(awd_rails())
+    sc.fake_fit_params = [
+        (0.02, 0.004, 1.0),
+        (0.04, 0.004, 1.0),
+        (0.08, 0.004, 1.0),
+        (0.16, 0.004, 1.0),
+    ]
+    gcmd = FakeGcmd(MAX_ROUNDS="4")
+    with pytest.raises(RuntimeError, match="did not converge in 4 rounds"):
+        sc.cmd_SERVO_FIT_DYNAMICS(gcmd)
+    assert any("stays live until RESTART" in r for r in gcmd.responses)
+
+
+@requires_tomllib
+def test_fit_dynamics_applies_mass_only_by_default():
+    sc, _gcode = make_calibration(awd_rails())
+    gcmd = FakeGcmd()
+    sc.cmd_SERVO_FIT_DYNAMICS(gcmd)
+    engine = sc.printer.lookup_object("motion_engine")
+    for call in engine.dynamics_calls:
+        assert call[2] == [0.02, 0.02]
+        assert call[3] == [0.0, 0.0]
+        assert call[4] == [0.0, 0.0]
+    profile_path = _manifest_for(sc)["dynamics_fit"]["profile"]
+    with open(profile_path) as f:
+        text = f.read()
+    written = servo_calibration.parse_dynamics_profile(text)
+    assert written["mass"] == [0.02, 0.02]
+    assert written["viscous"] == [0.0, 0.0]
+    assert written["coulomb"] == [0.0, 0.0]
+    assert 'applied_terms = ["mass"]' in text
+    assert "fitted_viscous = [0.004, 0.004]" in text
+    assert "fitted_coulomb = [1.0, 1.0]" in text
+    assert "fitted_mass" not in text
+    assert any("fitted but not applied" in r for r in gcmd.responses)
+
+
+@requires_tomllib
+def test_fit_dynamics_terms_can_apply_the_full_model():
+    sc, _gcode = make_calibration(awd_rails())
+    sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd(TERMS="MASS,VISCOUS,COULOMB"))
+    engine = sc.printer.lookup_object("motion_engine")
+    assert engine.dynamics_calls[-1][3] == [0.004, 0.004]
+    assert engine.dynamics_calls[-1][4] == [1.0, 1.0]
+    profile_path = _manifest_for(sc)["dynamics_fit"]["profile"]
+    with open(profile_path) as f:
+        text = f.read()
+    assert "fitted_viscous" not in text
+    assert 'applied_terms = ["mass", "viscous", "coulomb"]' in text
+
+
+@requires_tomllib
+def test_fit_dynamics_rejects_massless_or_unknown_terms():
+    sc, _ = make_calibration(awd_rails())
+    for terms in ("COULOMB", "MASS,STICTION", ""):
+        with pytest.raises(RuntimeError, match="include MASS"):
+            sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd(TERMS=terms))
+
+
+@requires_tomllib
+def test_fit_dynamics_mass_only_converges_despite_wandering_friction():
+    sc, _ = make_calibration(awd_rails())
+    sc.fake_fit_params = [
+        (0.02, 0.004, 1.0),
+        (0.02, 0.008, 3.0),
+        (0.02, 0.001, 0.2),
+    ]
+    gcmd = FakeGcmd()
+    sc.cmd_SERVO_FIT_DYNAMICS(gcmd)
+    assert any("converged in 2 rounds" in r for r in gcmd.responses)
+
+
+@requires_tomllib
+def test_fit_dynamics_aborts_when_the_model_drifts_at_max_accel():
+    sc, _ = make_calibration(awd_rails())
+    sc.fake_fit_params = [
+        (0.02, 0.004, 1.0),
+        (0.02, 0.004, 1.0),
+        (0.04, 0.004, 1.0),
+    ]
+    with pytest.raises(RuntimeError, match="does not hold at MAX_ACCEL"):
+        sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd())
+
+
+@requires_tomllib
+def test_fit_dynamics_restores_the_configured_baseline_model():
+    sc, _ = make_calibration(awd_rails())
+    node = sc.printer.lookup_object("ethercat_node xy_drives")
+    baseline = os.path.join(tempfile.mkdtemp(), "baseline.toml")
+    with open(baseline, "w") as f:
+        f.write(
+            "\n".join(
+                [
+                    "version = 6",
+                    'axes = ["motor_a", "motor_a1", "motor_b", "motor_b1"]',
+                    'modes = ["x", "y"]',
+                    "frame = [[0.25, 0.25, -0.25, 0.25],"
+                    " [0.25, 0.25, 0.25, -0.25]]",
+                    "mass = [0.5, 0.5]",
+                    "viscous = [0.01, 0.01]",
+                    "coulomb = [9.0, 9.0]",
+                ]
+            )
+            + "\n"
+        )
+    node.dynamics_profile = baseline
+    gcmd = FakeGcmd()
+    sc.cmd_SERVO_FIT_DYNAMICS(gcmd)
+    engine = sc.printer.lookup_object("motion_engine")
+    assert engine.dynamics_calls[-1][2] == [0.5, 0.5]
+    assert engine.dynamics_calls[-1][4] == [9.0, 9.0]
+    assert any("restored to configured baseline" in r for r in gcmd.responses)
