@@ -20,6 +20,13 @@ pub struct FitInput {
     pub snap_mode: Vec<Vec<f64>>,
     /// Measured torque per motor/slot (0.1% rated units).
     pub torque: Vec<Vec<f64>>,
+    /// Mode-space following error (mm), `frame`-projected and band-filtered
+    /// identically to `acc_mode`/`vel_mode`/`cs_mode`. Used only by
+    /// `fit_ferr`, which regresses THIS channel per mode against the same
+    /// three columns instead of regressing `torque` per motor — following
+    /// error is already a mode-space quantity, so no `Structure::row`
+    /// frame projection is needed on the response side.
+    pub ferr_mode: Vec<Vec<f64>>,
     /// Extra per-motor regressor columns (extra[motor][column][sample]) —
     /// nuisance channels like the pulley-eccentricity sin/cos pair. Each
     /// motor must carry the same column count. Their coefficients absorb
@@ -371,6 +378,173 @@ pub fn fit(input: &FitInput, opts: &FitOptions) -> Result<FitResult, FitError> {
         extra_params,
         rms_residual: rms,
         param_stderr,
+        condition,
+        samples: n_samples,
+    })
+}
+
+/// Result of `fit_ferr`: per-mode following-error dynamics, from regressing
+/// `ferr_mode` against `[acc_mode, vel_mode, cs_mode]` independently per
+/// mode — following error is already mode-space, so there is no
+/// `Structure::row` frame projection on the response side; each mode's
+/// three columns only predict that mode's own ferr channel.
+///
+/// Sign convention: a positive `params.mass[k]` means mode `k`'s following
+/// error grows WITH commanded accel — the command path under-feeds torque
+/// during acceleration (mass too low as the closed loop sees it). Positive
+/// `viscous`/`coulomb` read the same way against commanded velocity and its
+/// sign. Coefficients statistically indistinguishable from zero (within a
+/// few `param_stderr`) mean the command-path dynamics already match what
+/// the closed loop needs — the tuning loop's stopping condition.
+#[derive(Debug)]
+pub struct FerrFitResult {
+    pub params: PhysicalParams,
+    /// Standard error per raw theta parameter, packed like
+    /// `Structure::unpack` (`[mass_0, viscous_0, coulomb_0, mass_1, ...]`).
+    pub param_stderr: Vec<f64>,
+    /// Per-mode RMS following error after fitting (mm).
+    pub ferr_rms: Vec<f64>,
+    /// λmax/λmin of the column-scaled Gram matrix.
+    pub condition: f64,
+    /// Time samples per mode; every mode shares the same sample axis.
+    pub samples: usize,
+}
+
+fn ferr_row(input: &FitInput, mode: usize, k: usize, p: usize) -> Vec<f64> {
+    let mut row = vec![0.0; p];
+    let base = 3 * mode;
+    row[base] = input.acc_mode[mode][k];
+    row[base + 1] = input.vel_mode[mode][k];
+    row[base + 2] = input.cs_mode[mode][k];
+    row
+}
+
+fn accumulate_ferr(input: &FitInput, p: usize, weights: Option<&[f64]>) -> Accum {
+    let n_modes = input.structure.mode_count();
+    let n_samples = input.acc_mode[0].len();
+    let mut ata = vec![0.0_f64; p * p];
+    let mut aty = vec![0.0_f64; p];
+    let mut col_norm2 = vec![0.0_f64; p];
+    for k in 0..n_samples {
+        for mode in 0..n_modes {
+            let w = weights.map_or(1.0, |ws| ws[k * n_modes + mode]);
+            let row = ferr_row(input, mode, k, p);
+            let y = input.ferr_mode[mode][k];
+            for i in 0..p {
+                aty[i] += w * row[i] * y;
+                col_norm2[i] += w * row[i] * row[i];
+                for j in 0..p {
+                    ata[i * p + j] += w * row[i] * row[j];
+                }
+            }
+        }
+    }
+    Accum {
+        ata,
+        aty,
+        col_norm2,
+    }
+}
+
+fn residuals_ferr(input: &FitInput, theta: &[f64], p: usize) -> Vec<f64> {
+    let n_modes = input.structure.mode_count();
+    let n_samples = input.acc_mode[0].len();
+    let mut out = Vec::with_capacity(n_samples * n_modes);
+    for k in 0..n_samples {
+        for mode in 0..n_modes {
+            let row = ferr_row(input, mode, k, p);
+            let pred: f64 = row.iter().zip(theta).map(|(r, t)| r * t).sum();
+            out.push(input.ferr_mode[mode][k] - pred);
+        }
+    }
+    out
+}
+
+/// Fits `input.ferr_mode` per mode against `[acc_mode, vel_mode, cs_mode]`,
+/// reusing the same scaled-Gram solve, Huber IRLS reweighting and stderr
+/// machinery `fit` uses for the torque response. Unlike `fit`, there is no
+/// snap or extra nuisance column and no torque-saturation gate — the
+/// following-error response has neither.
+pub fn fit_ferr(input: &FitInput, opts: &FitOptions) -> Result<FerrFitResult, FitError> {
+    let s = &input.structure;
+    let n_modes = s.mode_count();
+    if input.acc_mode.len() != n_modes
+        || input.vel_mode.len() != n_modes
+        || input.cs_mode.len() != n_modes
+        || input.ferr_mode.len() != n_modes
+    {
+        return Err(FitError::ShapeMismatch("mode channel count"));
+    }
+    let n_samples = input.acc_mode[0].len();
+    if n_samples == 0 {
+        return Err(FitError::ShapeMismatch("no samples"));
+    }
+    for m in 0..n_modes {
+        if input.acc_mode[m].len() != n_samples
+            || input.vel_mode[m].len() != n_samples
+            || input.cs_mode[m].len() != n_samples
+            || input.ferr_mode[m].len() != n_samples
+        {
+            return Err(FitError::ShapeMismatch("mode sample count"));
+        }
+    }
+
+    let p = s.param_count();
+    let mut acc = accumulate_ferr(input, p, None);
+    for k in 0..p {
+        if acc.col_norm2[k] == 0.0 {
+            return Err(FitError::UnexcitedMode { mode: k / 3 });
+        }
+    }
+    let (mut theta, condition, mut scale) = solve_scaled(&acc, p)?;
+    if condition > opts.max_condition {
+        return Err(FitError::InsufficientExcitation { condition });
+    }
+
+    let mut weights: Vec<f64> = Vec::new();
+    for _ in 0..opts.huber_iterations {
+        let res = residuals_ferr(input, &theta, p);
+        let sigma = robust_sigma(&res);
+        if sigma <= 0.0 {
+            break;
+        }
+        let cut = opts.huber_k * sigma;
+        weights = res
+            .iter()
+            .map(|e| if e.abs() <= cut { 1.0 } else { cut / e.abs() })
+            .collect();
+        acc = accumulate_ferr(input, p, Some(&weights));
+        let (t, _c, sc) = solve_scaled(&acc, p)?;
+        theta = t;
+        scale = sc;
+    }
+
+    let res = residuals_ferr(input, &theta, p);
+    let (mut wsq, mut wsum) = (0.0_f64, 0.0_f64);
+    for (i, e) in res.iter().enumerate() {
+        let w = if weights.is_empty() { 1.0 } else { weights[i] };
+        wsq += w * e * e;
+        wsum += w;
+    }
+    let dof = (wsum - p as f64).max(1.0);
+    let sigma2 = wsq / dof;
+    let param_stderr = stderr_from(&acc, &scale, sigma2, p);
+
+    let mut ferr_rms = vec![0.0; n_modes];
+    for (mode, out) in ferr_rms.iter_mut().enumerate() {
+        let sum_sq: f64 = (0..n_samples)
+            .map(|k| {
+                let e = res[k * n_modes + mode];
+                e * e
+            })
+            .sum();
+        *out = (sum_sq / n_samples as f64).sqrt();
+    }
+
+    Ok(FerrFitResult {
+        params: s.unpack(&theta),
+        param_stderr,
+        ferr_rms,
         condition,
         samples: n_samples,
     })

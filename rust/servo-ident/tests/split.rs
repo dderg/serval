@@ -58,6 +58,7 @@ fn synthetic_pair(lambda: f64, direction_split: f64, intercept: f64) -> Syntheti
             vel: vel.clone(),
             vel_act: vel,
             torque: vec![vec![0.0; samples], vec![0.0; samples]],
+            ferr: vec![vec![0.0; samples], vec![0.0; samples]],
         },
         residual,
         keep: vec![true; samples],

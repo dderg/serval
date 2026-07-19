@@ -97,6 +97,7 @@ fn make_capture(delay_samples: usize, ripple_period_mm: f64) -> (Capture, f64, f
             vel: vec![vel.clone()],
             vel_act: vec![vel],
             torque: vec![torque],
+            ferr: vec![vec![0.0; n]],
         },
         m,
         b,
@@ -133,6 +134,7 @@ fn run_fit_with(
         cs_mode: pick(&pp.cs_mode),
         snap_mode: vec![],
         torque: pick(&pp.torque),
+        ferr_mode: pick(&pp.ferr_mode),
         extra: pp.extra.iter().map(|cols| pick(cols)).collect(),
     };
     (fit(&input, fit_opts).unwrap(), pp.delay_s)
@@ -271,6 +273,7 @@ fn in_band_residual_excludes_out_of_band_pollution() {
         cs_mode: pp.cs_mode.clone(),
         snap_mode: vec![],
         torque: pp.torque.clone(),
+        ferr_mode: pp.ferr_mode.clone(),
         extra: pp.extra.clone(),
     };
     let res = residual_by_motor(&full, &r.params, &r.snap_params, &r.extra_params);
@@ -319,6 +322,7 @@ fn corexy_capture(opposing_second_segment: bool) -> Capture {
         vel: vec![vel_a.clone(), vel_b.clone()],
         vel_act: vec![vel_a, vel_b],
         torque: vec![vec![0.0; n], vec![0.0; n]],
+        ferr: vec![vec![0.0; n], vec![0.0; n]],
     }
 }
 
@@ -351,6 +355,7 @@ fn a_mode_active_in_the_segment_still_blanks_its_deadband() {
         vel: vec![vel_a.clone(), vel_b.clone()],
         vel_act: vec![vel_a.clone(), vel_b.clone()],
         torque: vec![vec![0.0; n], vec![0.0; n]],
+        ferr: vec![vec![0.0; n], vec![0.0; n]],
     };
     let structure = Structure::new(vec![vec![0.5, 0.5], vec![0.5, -0.5]]);
     let pp = prep(&cap, &structure, &PrepOptions::default());
@@ -433,6 +438,7 @@ fn modal_snap_recovers_the_injected_compliance_term() {
         vel: vec![vel.clone()],
         vel_act: vec![vel],
         torque: vec![torque],
+        ferr: vec![vec![0.0; n]],
     };
     let structure = identity();
     let opts = PrepOptions {
@@ -463,6 +469,7 @@ fn modal_snap_recovers_the_injected_compliance_term() {
         cs_mode: pick(&pp.cs_mode),
         snap_mode: pick(&pp.snap_mode),
         torque: pick(&pp.torque),
+        ferr_mode: pick(&pp.ferr_mode),
         extra: pp.extra.iter().map(|cols| pick(cols)).collect(),
     };
     let r = fit(&input, &FitOptions::default()).unwrap();
@@ -501,6 +508,7 @@ fn reversal_blanking_catches_deadband_skipping_flips() {
         vel: vec![vel.clone()],
         vel_act: vec![vel],
         torque: vec![vec![0.0; n]],
+        ferr: vec![vec![0.0; n]],
     };
     let pp = prep(&cap, &identity(), &PrepOptions::default());
     let blank = (0.03 / DT) as usize;

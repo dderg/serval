@@ -3,6 +3,7 @@ pub mod assets;
 pub mod capture;
 pub mod combine;
 pub mod demo;
+pub mod ferr_out;
 pub mod fit;
 pub mod fit_driver;
 pub mod frf;

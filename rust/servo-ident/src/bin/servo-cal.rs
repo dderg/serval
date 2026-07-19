@@ -7,6 +7,7 @@
 //!       [--dump-csv <path>]        write per-drive raw series CSV
 //!       [--combine <spec> --axis X] add the CoreXY belt combine
 //!   fit --capture <file.scap> --frame "r0;r1" --modes x[,y] --axes a[,b,...]
+//!       [--response <torque|ferr>] (default torque)
 //!       --out profile.toml [--rated-torque-nm T --rotor-inertia-kgm2 J
 //!       --rotation-distance-mm D --cutoff-hz C --blank-ms B --max-delay-ms M
 //!       --ripple-period-mm P --modal <mode>:<fz_hz>:<zeta> ...
@@ -15,6 +16,11 @@
 //!       ringdown-measured resonance; the row gates and the settle override
 //!       are operating-point probes - fit subsets to localize where a
 //!       parameter drift lives)
+//!       --response ferr regresses following error (mm) instead of torque
+//!       against the same commanded-kinematics columns: `--out` then writes
+//!       a JSON coefficient report (see `ferr_out::render_ferr_json`), no
+//!       profile is rendered, and exactly one --capture is required (same
+//!       as torque). `fit --help` prints this usage block.
 //!   serve --dir <captures_root> [--port 8085] [--host 127.0.0.1]
 //!       [--live-sock /tmp/kalico-ethercat.sock.live]
 //!   demo <out-dir> [--fixtures <dir>]
@@ -25,8 +31,9 @@ use std::path::{Path, PathBuf};
 use servo_ident::analyze::{analyze_capture, analyze_run, dump_csv, print_step};
 use servo_ident::capture::PlateauOptions;
 use servo_ident::demo::{build_demo, default_fixtures_dir};
+use servo_ident::ferr_out::render_ferr_json;
 use servo_ident::fit::residual_by_motor;
-use servo_ident::fit::{fit, FitOptions};
+use servo_ident::fit::{fit, fit_ferr, FitInput, FitOptions};
 use servo_ident::fit_driver::scap_to_capture;
 use servo_ident::http;
 use servo_ident::live_stream::{LiveTap, DEFAULT_IDLE_TIMEOUT, DEFAULT_TAP_SOCKET};
@@ -179,11 +186,27 @@ fn cmd_analyze(args: &[String]) {
     analyze_run(Path::new(dir), incremental).unwrap_or_else(|e| die(&e));
 }
 
-const FIT_KEYS: [&str; 19] = [
+const FIT_USAGE: &str = "\
+usage: servo-cal fit --capture <file.scap> --frame \"r0;r1\" --modes x[,y] \\
+    --axes a[,b,...] [--response <torque|ferr>] --out <path>
+    [--rated-torque-nm T --rotor-inertia-kgm2 J --rotation-distance-mm D
+     --cutoff-hz C --blank-ms B --max-delay-ms M --ripple-period-mm P
+     --modal <mode>:<fz_hz>:<zeta> ... --settle-ms S --max-mode-accel A
+     --max-mode-vel V --min-mode-vel V --dump-rows <path>]
+
+--response defaults to torque (regress measured torque, write a profile
+TOML). --response ferr regresses following error (mm) instead, against the
+same commanded-kinematics columns; --out then writes a JSON coefficient
+report instead of a profile, and exactly one --capture is required (same
+as torque).
+";
+
+const FIT_KEYS: [&str; 20] = [
     "--capture",
     "--frame",
     "--modes",
     "--axes",
+    "--response",
     "--out",
     "--rated-torque-nm",
     "--rotor-inertia-kgm2",
@@ -227,7 +250,17 @@ fn parse_frame(spec: &str) -> Vec<Vec<f64>> {
 }
 
 fn cmd_fit(args: &[String]) {
+    if args.iter().any(|a| a == "--help") {
+        eprint!("{FIT_USAGE}");
+        return;
+    }
     reject_unknown_fit_flags(args);
+    let response = arg(args, "--response").unwrap_or_else(|| "torque".to_string());
+    if response != "torque" && response != "ferr" {
+        die(&format!(
+            "--response must be \"torque\" or \"ferr\", got {response:?}"
+        ));
+    }
     let frame = parse_frame(&req(args, "--frame"));
     let modes_arg = req(args, "--modes");
     let modes: Vec<&str> = modes_arg.split(',').map(str::trim).collect();
@@ -362,6 +395,7 @@ fn cmd_fit(args: &[String]) {
         pick(&mut input.cs_mode);
         pick(&mut input.snap_mode);
         pick(&mut input.torque);
+        pick(&mut input.ferr_mode);
         for cols in &mut input.extra {
             pick(cols);
         }
@@ -408,6 +442,10 @@ fn cmd_fit(args: &[String]) {
         }
         std::fs::write(&path, out).unwrap_or_else(|e| die(&format!("write {path}: {e}")));
         eprintln!("kept fit rows dumped to {path}");
+    }
+    if response == "ferr" {
+        run_ferr_fit(&structure, &modes, &input, &req(args, "--out"));
+        return;
     }
     let r = fit(&input, &FitOptions::default()).unwrap_or_else(|e| {
         eprintln!("servo-cal: refusing to emit a profile: {e:?}");
@@ -512,4 +550,28 @@ fn cmd_fit(args: &[String]) {
     let out = req(args, "--out");
     std::fs::write(&out, profile).unwrap_or_else(|e| die(&format!("write {out}: {e}")));
     eprintln!("profile written to {out}");
+}
+
+fn run_ferr_fit(structure: &Structure, modes: &[&str], input: &FitInput, out_path: &str) {
+    let r = fit_ferr(input, &FitOptions::default()).unwrap_or_else(|e| {
+        eprintln!("servo-cal: refusing to emit a ferr fit: {e:?}");
+        std::process::exit(2);
+    });
+    for (k, mode) in modes.iter().enumerate() {
+        eprintln!(
+            "ferr-fit mode {mode}: mass={:+.3e} (se {:.2e}) viscous={:+.3e} (se {:.2e}) \
+             coulomb={:+.3e} (se {:.2e}) rms={:.3e}mm samples={}",
+            r.params.mass[k],
+            r.param_stderr[3 * k],
+            r.params.viscous[k],
+            r.param_stderr[3 * k + 1],
+            r.params.coulomb[k],
+            r.param_stderr[3 * k + 2],
+            r.ferr_rms[k],
+            r.samples,
+        );
+    }
+    let json = render_ferr_json(structure, modes, &r);
+    std::fs::write(out_path, json).unwrap_or_else(|e| die(&format!("write {out_path}: {e}")));
+    eprintln!("ferr fit written to {out_path}");
 }

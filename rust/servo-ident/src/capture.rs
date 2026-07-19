@@ -5,6 +5,12 @@ pub struct Capture {
     pub vel: Vec<Vec<f64>>,
     pub vel_act: Vec<Vec<f64>>,
     pub torque: Vec<Vec<f64>>,
+    /// Following error per motor/slot (mm), same sign convention as
+    /// `vel_act` — counts divided by `counts_per_mm`, no additional invert.
+    /// Absent in captures predating the ferr response (CSV bridge without a
+    /// `ferr_<axis>` column): zero-filled, which only matters if a caller
+    /// asks for the ferr response on such a capture.
+    pub ferr: Vec<Vec<f64>>,
 }
 
 #[derive(Debug)]
@@ -42,11 +48,16 @@ pub fn parse_capture_csv(text: &str, axes: &[&str]) -> Result<Capture, CaptureEr
         .iter()
         .map(|a| col(&format!("torque_{a}")))
         .collect::<Result<_, _>>()?;
+    let ferr_cols: Vec<Option<usize>> = axes
+        .iter()
+        .map(|a| col(&format!("ferr_{a}")).ok())
+        .collect();
     let mut t: Vec<f64> = Vec::new();
     let mut acc: Vec<Vec<f64>> = vec![Vec::new(); axes.len()];
     let mut vel: Vec<Vec<f64>> = vec![Vec::new(); axes.len()];
     let mut vel_act: Vec<Vec<f64>> = vec![Vec::new(); axes.len()];
     let mut torque: Vec<Vec<f64>> = vec![Vec::new(); axes.len()];
+    let mut ferr: Vec<Vec<f64>> = vec![Vec::new(); axes.len()];
 
     for (lineno, line) in lines {
         if line.trim().is_empty() {
@@ -74,6 +85,10 @@ pub fn parse_capture_csv(text: &str, axes: &[&str]) -> Result<Capture, CaptureEr
             vel[a].push(num(vc)?);
             vel_act[a].push(num(wc)?);
             torque[a].push(num(qc)?);
+            ferr[a].push(match ferr_cols[a] {
+                Some(idx) => num(idx)?,
+                None => 0.0,
+            });
         }
     }
 
@@ -87,6 +102,7 @@ pub fn parse_capture_csv(text: &str, axes: &[&str]) -> Result<Capture, CaptureEr
         vel,
         vel_act,
         torque,
+        ferr,
     })
 }
 

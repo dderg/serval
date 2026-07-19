@@ -96,6 +96,11 @@ pub struct Prepped {
     pub cs_mode: Vec<Vec<f64>>,
     /// Measured torque per motor/slot, delay-aligned and filtered.
     pub torque: Vec<Vec<f64>>,
+    /// Following error (mm), frame-projected into mode space exactly like
+    /// `acc_mode`/`vel_mode` and filtered identically. Not delay-aligned —
+    /// following error is a state of the closed loop, not a torque-report
+    /// artifact, so there is no accel→torque lag to remove from it.
+    pub ferr_mode: Vec<Vec<f64>>,
     /// Pulley-angle sin/cos nuisance columns per motor (empty when
     /// `ripple_period_mm` is unset), filtered like every other channel.
     pub extra: Vec<Vec<Vec<f64>>>,
@@ -297,18 +302,22 @@ pub fn prep(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> Prepped
     let mut acc_mode_raw = vec![vec![0.0; n]; n_modes];
     let mut vel_mode_raw = vec![vec![0.0; n]; n_modes];
     let mut cs_raw = vec![vec![0.0; n]; n_modes];
+    let mut ferr_mode_raw = vec![vec![0.0; n]; n_modes];
     for md in 0..n_modes {
         for k in 0..n {
             let mut a = 0.0;
             let mut v = 0.0;
+            let mut e = 0.0;
             for s in 0..n_motors {
                 let f = structure.frame[md][s];
                 a += f * cap.acc[s][k];
                 v += f * cap.vel[s][k];
+                e += f * cap.ferr[s][k];
             }
             acc_mode_raw[md][k] = a;
             vel_mode_raw[md][k] = v;
             cs_raw[md][k] = coulomb_sign(v);
+            ferr_mode_raw[md][k] = e;
         }
     }
 
@@ -374,6 +383,7 @@ pub fn prep(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> Prepped
     let cs_mode = filt(&cs_raw);
     let snap_mode = filt(&snap_raw);
     let torque = filt(&torque);
+    let ferr_mode = filt(&ferr_mode_raw);
     let extra: Vec<Vec<Vec<f64>>> = match opts.ripple_period_mm {
         None => Vec::new(),
         Some(period) => {
@@ -439,6 +449,7 @@ pub fn prep(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> Prepped
         snap_mode,
         cs_mode,
         torque,
+        ferr_mode,
         extra,
         valid,
         delay_s: lag as f64 * dt,

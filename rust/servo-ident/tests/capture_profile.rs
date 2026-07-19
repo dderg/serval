@@ -53,6 +53,7 @@ fn steady_accel_mask_keeps_plateau_drops_ramp() {
         vel: vec![vec![0.0; n]],
         vel_act: vec![vec![0.0; n]],
         torque: vec![vec![5.0; n]],
+        ferr: vec![vec![0.0; n]],
     };
     let keep_mask = steady_accel_keep(&cap.t, &cap.acc, &PlateauOptions::default());
     let kept: Vec<f64> = (0..cap.t.len())
@@ -87,6 +88,7 @@ fn tracking_mask_drops_stiction_and_overshoot() {
         vel: vec![vel],
         vel_act: vec![vel_act],
         torque: vec![vec![100.0; n]],
+        ferr: vec![vec![0.0; n]],
     };
     // tol = 0.2 * 300 = 60 mm/s: the first cycles of the stuck phase pass
     // (commanded velocity still small), the rest of the stick and the whole

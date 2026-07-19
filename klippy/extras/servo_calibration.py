@@ -150,6 +150,9 @@ DYNAMICS_TERM_KEYS = {
     "VISCOUS": "viscous",
     "COULOMB": "coulomb",
 }
+TUNE_RELATIVE_CLAMP = 0.4
+TUNE_MASS_FLOOR_FRACTION = 0.10
+TUNE_COULOMB_ZERO_FLOOR_STEP = 5.0
 GOLDEN_RATIO_CONJ = (math.sqrt(5.0) - 1.0) / 2.0
 
 
@@ -413,6 +416,34 @@ def dynamics_torque_changes(
         )
         changes.append(delta / ref)
     return changes
+
+
+def dynamics_tune_step(
+    value: float,
+    gradient: float,
+    step_frac: float,
+    prev: tuple[float, float] | None,
+    zero_floor_step: float = 0.0,
+) -> float:
+    """One SERVO_TUNE_DYNAMICS update for a single (term, mode) ferr-fit
+    coefficient: a positive gradient means the term is too low (ferr grows
+    WITH the regressor, so the feedforward under-feeds), so the first
+    probe steps by step_frac*|value| in sign(gradient) (or
+    zero_floor_step, when value is exactly zero, so a zero-valued term
+    can still probe a direction); every later probe secants to the
+    empirical (value, gradient) zero-crossing between this probe and the
+    previous one. Callers own clamping the result."""
+    if prev is None:
+        magnitude = zero_floor_step if value == 0.0 else step_frac * abs(value)
+        sign = 1.0 if gradient > 0.0 else -1.0 if gradient < 0.0 else 0.0
+        return value + sign * magnitude
+    prev_value, prev_gradient = prev
+    if gradient == prev_gradient:
+        raise ValueError(
+            "degenerate secant sensitivity: gradient stayed %.6g across "
+            "probes %.6g -> %.6g" % (gradient, prev_value, value)
+        )
+    return value - gradient * (value - prev_value) / (gradient - prev_gradient)
 
 
 def _frame_column_lambda(first: list[float], second: list[float]) -> int:
@@ -1349,6 +1380,7 @@ class ServoCalibration:
             "SERVO_APPLY_GAINS",
             "SERVO_CALIBRATE_GAINS",
             "SERVO_REFINE_DYNAMICS",
+            "SERVO_TUNE_DYNAMICS",
             "SERVO_SWEEP_INERTIA",
             "SERVO_SWEEP_ACCEL",
             "SERVO_AUTOTUNE",
@@ -3171,6 +3203,7 @@ class ServoCalibration:
         out_path: str,
         torque: float | None,
         inertia: float | None,
+        response: str | None = None,
     ) -> list[str]:
         argv = [
             self._servo_cal(gcmd),
@@ -3197,6 +3230,8 @@ class ServoCalibration:
                 "--rotor-inertia-kgm2",
                 "%g" % (inertia,),
             ]
+        if response is not None:
+            argv += ["--response", response]
         return argv
 
     def _run_fit(
@@ -3752,6 +3787,362 @@ class ServoCalibration:
     def cmd_SERVO_FIT_DYNAMICS(self, gcmd: Any) -> None:
         torque, inertia = self._motor(gcmd, required=False)
         self._run_fit(gcmd, gcmd.get("NAME", "ident"), torque, inertia)
+
+    def _reject_tune_dynamics_params(self, gcmd: Any) -> None:
+        stale = [
+            p
+            for p in ("ACCELS", "SPEEDS", "PATTERN")
+            if gcmd.get(p, None) is not None
+        ]
+        if stale:
+            raise gcmd.error(
+                "%s: SERVO_TUNE_DYNAMICS always drives the XY pattern "
+                "excitation at MAX_ACCEL/MAX_SPEED - it has no excitation "
+                "matrix and no PATTERN toggle to override" % (", ".join(stale),)
+            )
+
+    def _load_ferr_fit(self, gcmd: Any, path: str) -> dict[str, Any]:
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, ValueError) as e:
+            raise gcmd.error(
+                "servo-cal fit --response ferr produced an unusable result "
+                "%s: %s" % (path, e)
+            )
+        if data.get("version") != 1:
+            raise gcmd.error(
+                "ferr fit %s: unsupported version %r (expected 1)"
+                % (path, data.get("version"))
+            )
+        return data
+
+    cmd_SERVO_TUNE_DYNAMICS_help = (
+        "Iterative, signed, closed-loop dynamics tuner on coupled_xy: each "
+        "round captures one XY pattern run at MAX_ACCEL/MAX_SPEED, then "
+        "servo-cal regresses the per-mode FOLLOWING ERROR (not the "
+        "drive-reported torque) against the same commanded-kinematics "
+        "regressor [accel, vel, sign(vel)] SERVO_FIT_DYNAMICS uses. The "
+        "sign of each coefficient says which way the command path is "
+        "wrong as seen by the closed loop: a positive mass coefficient "
+        "means ferr grows WITH commanded accel, i.e. the feedforward "
+        "under-feeds during accel (mass too low on the command path); "
+        "viscous/coulomb read the same way against vel/sign(vel). Each "
+        "round steps every TERMS coefficient still outside SIGMA stderrs "
+        "of zero - sign-probe on the first round, secant on the empirical "
+        "sensitivity afterwards (relative change clamped to 40%% per "
+        "round; mass is floored at 10%% of its baseline value and a "
+        "second push below that floor aborts as a degenerate fit) - and "
+        "streams the updated model straight to the running endpoint "
+        "(no restart) before the next round. Stops and writes a new "
+        "dynamics TOML the moment every coefficient is statistically "
+        "zero, leaving the tuned model LIVE (point [ethercat_node] "
+        "dynamics_profile at it and RESTART to keep it past a klippy "
+        "restart). If ROUNDS runs out unconverged the live model is "
+        "restored to the baseline and the command fails loudly with the "
+        "last coefficient table - no partially-tuned profile is ever "
+        "written. A torque_saturated verdict flag aborts and restores "
+        "the baseline the same way; resonance_detected only warns (a "
+        "feedforward retune does not move the loop's resonances). The "
+        "baseline is PROFILE= or the node-level [ethercat_node] "
+        "dynamics_profile (per-motor profiles are not supported). Params "
+        "MAX_ACCEL MAX_SPEED ROUNDS (6) STEP (0.15) SIGMA (3.0) TERMS "
+        "(mass,viscous,coulomb) NAME (tune) PROFILE SERVOS BOUND SMALL_SIZE"
+    )
+
+    def cmd_SERVO_TUNE_DYNAMICS(self, gcmd: Any) -> None:
+        if tomllib is None:
+            raise gcmd.error(
+                "SERVO_TUNE_DYNAMICS requires Python 3.11+ (tomllib)"
+            )
+        self._reject_tune_dynamics_params(gcmd)
+        kin = self._kin()
+        if not kin.coupled_xy():
+            raise gcmd.error(
+                "SERVO_TUNE_DYNAMICS requires coupled_xy kinematics - the "
+                "ferr regression needs the mode-space frame"
+            )
+        plan = self._fit_plan(gcmd)
+        node = self._refine_dynamics_node(gcmd, plan["servos"])
+        handle = node.get_engine_handle()
+        if handle is None:
+            raise gcmd.error(
+                "ethercat_node %s has no engine handle" % (node.name,)
+            )
+        engine = self.printer.lookup_object("motion_engine")
+        profile_path, baseline = self._load_baseline_dynamics(gcmd, node)
+        baseline_modes = baseline["modes"]
+        if len(baseline_modes) != 2 or not {"x", "y"} <= set(baseline_modes):
+            raise gcmd.error(
+                "SERVO_TUNE_DYNAMICS needs a 2-mode profile with x and y "
+                "modes; profile %s has modes %s"
+                % (profile_path, baseline_modes)
+            )
+        terms = [
+            t.strip().upper()
+            for t in gcmd.get("TERMS", "MASS,VISCOUS,COULOMB").split(",")
+            if t.strip()
+        ]
+        if not terms or any(t not in DYNAMICS_TERM_KEYS for t in terms):
+            raise gcmd.error(
+                "TERMS must be a comma list drawn from MASS, VISCOUS, "
+                "COULOMB (got %r)" % (gcmd.get("TERMS", ""),)
+            )
+        max_accel = gcmd.get_float("MAX_ACCEL", max(self.accels), above=0.0)
+        max_speed = gcmd.get_float("MAX_SPEED", max(self.speeds), above=0.0)
+        rounds = gcmd.get_int("ROUNDS", 6, minval=2)
+        step_frac = gcmd.get_float("STEP", 0.15, minval=0.02, maxval=0.5)
+        sigma = gcmd.get_float("SIGMA", 3.0, above=0.0)
+        name = gcmd.get("NAME", "tune")
+        dwell = self.dwell_ms
+        iterations = self.iterations
+        speeds = [max_speed / 2.0, max_speed]
+        points, start_x, start_y, pattern_plan = self._pattern_geometry_params(
+            gcmd
+        )
+        stroke_plan = {
+            "max_accel": max_accel,
+            "max_speed": max_speed,
+            "speeds": speeds,
+            "rounds": rounds,
+            "step": step_frac,
+            "sigma": sigma,
+            "terms": [t.lower() for t in terms],
+            "iterations": iterations,
+            "dwell_ms": dwell,
+        }
+        stroke_plan.update(pattern_plan)
+        run = self._begin_run(
+            gcmd,
+            "dynamics_tune",
+            name,
+            plan["axis"],
+            plan["servos"],
+            stroke_plan,
+            plan["rails"],
+        )
+
+        def capture_round(step: str) -> None:
+            self._start_capture(step, plan["servos"])
+            self._goto_xy(start_x, start_y, dwell)
+            for speed in speeds:
+                servo_strokes.emit_pattern(
+                    self.gcode,
+                    points,
+                    start_x,
+                    start_y,
+                    speed,
+                    max_accel,
+                    iterations,
+                    dwell,
+                )
+            self._stop_capture()
+            run.record_step(SweepStep(step, {"accel": max_accel}, []))
+
+        current = _copy_dynamics(baseline)
+        probes: dict[str, dict[str, list[tuple[float, float]]]] = {
+            term: {mode: [] for mode in plan["modes"]} for term in terms
+        }
+        rounds_history: list[dict[str, Any]] = []
+        applied = False
+        success = False
+        last_report = ""
+        try:
+            out_path = self._dynamics_out_path(gcmd, run, name)
+            self._prep("X", dwell)
+            self._prep("Y", dwell)
+            self._pattern_reach_report(
+                gcmd, points, start_x, start_y, [max_accel], speeds
+            )
+            for round_i in range(rounds):
+                send_dynamics_model(engine, handle, current)
+                applied = True
+                step = "tune_r%d" % (round_i,)
+                capture_round(step)
+                results = self._run_analyze(gcmd, run, incremental=True)
+                flags = set(self._step_flags(results, step))
+                if "torque_saturated" in flags:
+                    raise gcmd.error(
+                        "step %s hit the torque rail - clipped strokes "
+                        "cannot score a ferr fit, aborting "
+                        "SERVO_TUNE_DYNAMICS" % (step,)
+                    )
+                if "resonance_detected" in flags:
+                    gcmd.respond_info(
+                        "WARNING step %s flagged resonance_detected - "
+                        "continuing (feedforward tuning does not move the "
+                        "loop's resonances)" % (step,)
+                    )
+                ferr_out = os.path.join(
+                    run.run_dir, "ferr_r%d.json" % (round_i,)
+                )
+                argv = self._fit_argv_for(
+                    gcmd,
+                    plan,
+                    run.step_scap(step),
+                    ferr_out,
+                    None,
+                    None,
+                    response="ferr",
+                )
+                self._run(gcmd, argv, 120.0)
+                ferr = self._load_ferr_fit(gcmd, ferr_out)
+                if ferr.get("modes") != plan["modes"]:
+                    raise gcmd.error(
+                        "servo-cal fit --response ferr modes %s do not "
+                        "match the requested modes %s"
+                        % (ferr.get("modes"), plan["modes"])
+                    )
+                coef = ferr["coef"]
+                stderr_map = ferr["stderr"]
+                values_after = {
+                    DYNAMICS_TERM_KEYS[t]: list(current[DYNAMICS_TERM_KEYS[t]])
+                    for t in terms
+                }
+                all_converged = True
+                round_lines = []
+                for term in terms:
+                    key = DYNAMICS_TERM_KEYS[term]
+                    for fit_idx, mode in enumerate(plan["modes"]):
+                        baseline_idx = baseline_modes.index(mode)
+                        g = coef[key][fit_idx]
+                        se = stderr_map[key][fit_idx]
+                        before = current[key][baseline_idx]
+                        if abs(g) <= sigma * se:
+                            after = before
+                        else:
+                            all_converged = False
+                            history = probes[term][mode]
+                            prev_probe = history[-1] if history else None
+                            floor_step = (
+                                TUNE_COULOMB_ZERO_FLOOR_STEP
+                                if term == "COULOMB"
+                                else 0.0
+                            )
+                            try:
+                                candidate = dynamics_tune_step(
+                                    before, g, step_frac, prev_probe, floor_step
+                                )
+                            except ValueError as e:
+                                raise gcmd.error(str(e))
+                            history.append((before, g))
+                            if before != 0.0:
+                                span = TUNE_RELATIVE_CLAMP * abs(before)
+                                candidate = min(
+                                    max(candidate, before - span), before + span
+                                )
+                            if term == "MASS":
+                                floor = (
+                                    TUNE_MASS_FLOOR_FRACTION
+                                    * baseline[key][baseline_idx]
+                                )
+                                if candidate < floor:
+                                    if before <= floor * (1.0 + 1e-9):
+                                        raise gcmd.error(
+                                            "mode %s mass update collapses "
+                                            "below the %.0f%% baseline floor "
+                                            "(%.6g) for the second time - "
+                                            "the secant sensitivity is "
+                                            "degenerate"
+                                            % (
+                                                mode,
+                                                100.0
+                                                * TUNE_MASS_FLOOR_FRACTION,
+                                                floor,
+                                            )
+                                        )
+                                    candidate = floor
+                            after = candidate
+                            values_after[key][baseline_idx] = after
+                        round_lines.append(
+                            "mode %s %s: g=%+.4g (se %.4g) %.6g -> %.6g"
+                            % (mode, term.lower(), g, se, before, after)
+                        )
+                report = " | ".join(round_lines)
+                gcmd.respond_info("round %d: %s" % (round_i, report))
+                last_report = report
+                rounds_history.append(
+                    {
+                        "round": round_i,
+                        "coef": {
+                            DYNAMICS_TERM_KEYS[t]: list(
+                                coef[DYNAMICS_TERM_KEYS[t]]
+                            )
+                            for t in terms
+                        },
+                        "stderr": {
+                            DYNAMICS_TERM_KEYS[t]: list(
+                                stderr_map[DYNAMICS_TERM_KEYS[t]]
+                            )
+                            for t in terms
+                        },
+                        "ferr_rms": list(ferr.get("ferr_rms", [])),
+                        "samples": ferr.get("samples"),
+                        "values": {
+                            DYNAMICS_TERM_KEYS[t]: list(
+                                values_after[DYNAMICS_TERM_KEYS[t]]
+                            )
+                            for t in terms
+                        },
+                    }
+                )
+                for term in terms:
+                    key = DYNAMICS_TERM_KEYS[term]
+                    current[key] = list(values_after[key])
+                if all_converged:
+                    success = True
+                    break
+            if not success:
+                raise gcmd.error(
+                    "SERVO_TUNE_DYNAMICS did not converge in %d rounds - "
+                    "coefficients remain outside %.1f-sigma of zero: %s"
+                    % (rounds, sigma, last_report)
+                )
+            with open(out_path, "w") as f:
+                f.write(
+                    render_fit_dynamics_toml(
+                        current,
+                        current,
+                        [t.lower() for t in terms],
+                        run.run_dir,
+                    )
+                )
+            run.manifest["dynamics_tune"] = {
+                "terms": [t.lower() for t in terms],
+                "max_accel": max_accel,
+                "max_speed": max_speed,
+                "sigma": sigma,
+                "step": step_frac,
+                "rounds": rounds_history,
+                "converged": True,
+                "profile": out_path,
+            }
+            run.write()
+            structured_log.event(
+                "calibration",
+                "dynamics_tune",
+                run_dir=run.run_dir,
+                rounds=len(rounds_history),
+                profile=out_path,
+            )
+            gcmd.respond_info(
+                "SERVO_TUNE_DYNAMICS converged in %d rounds | tuned "
+                "dynamics profile: %s | tuned model stays live until "
+                "RESTART - point [ethercat_node %s] dynamics_profile at "
+                "it to keep it | run %s"
+                % (len(rounds_history), out_path, node.name, run.run_dir)
+            )
+        finally:
+            try:
+                if applied and not success:
+                    send_dynamics_model(engine, handle, baseline)
+                    gcmd.respond_info(
+                        "live dynamics model restored to baseline %s"
+                        % (profile_path,)
+                    )
+            finally:
+                self._restore()
+                self._active_run = None
 
     cmd_SERVO_CALIBRATE_INERTIA_RATIO_help = (
         "Step 2 of servo tuning - identify the load inertia and print the "
