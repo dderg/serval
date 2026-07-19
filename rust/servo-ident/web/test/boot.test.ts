@@ -158,6 +158,13 @@ test("run data is cached in the query client, keyed by the fixture run", () => {
   expect(runsQ.detailData(RUN_NAME)).toBeDefined();
   expect(client.queryClient.getQueryData(runsQ.runKeys.plot(RUN_NAME))).toBeDefined();
 });
+test("an unchanged runs refetch retries a missing detail", async () => {
+  client.queryClient.removeQueries({ queryKey: runsQ.runKeys.detail(RUN_NAME) });
+  expect(runsQ.detailData(RUN_NAME)).toBeUndefined();
+  await loadRuns();
+  expect(runsQ.detailData(RUN_NAME)).toBeDefined();
+});
+
 
 function runsQuery() {
   const q = client.queryClient.getQueryCache().find({ queryKey: runsQ.runKeys.all });

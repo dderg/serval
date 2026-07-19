@@ -120,8 +120,8 @@ async function fetchRuns(): Promise<RunSummary[]> {
     console.error(e);
     throw e;
   }
-  if (runsUnchanged(prev, runs)) return prev;
   await Promise.all(runs.map((r) => ensureDetail(r).catch((e) => console.error(e))));
+  if (runsUnchanged(prev, runs)) return prev;
   return runs;
 }
 

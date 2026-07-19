@@ -1,6 +1,6 @@
 import { el, shortTime } from "./api";
 import { html } from "htm/preact";
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import { useQuery } from "@tanstack/preact-query";
 import { useStore } from "./store";
 import { ConsolePanel, setConsoleValue } from "./console";
@@ -315,6 +315,9 @@ function MacroDoc({ name, text, initiallyOpen }: { name: string; text: string; i
   const { prose, params } = splitMacroHelp(text);
   const items = params ? parseParamsTail(params) : [];
   const [open, setOpen] = useState(initiallyOpen);
+  useEffect(() => {
+    if (initiallyOpen) setOpen(true);
+  }, [initiallyOpen]);
   const summary = firstSentence(prose);
   return html`<details class="macro-doc" id=${`doc-${name}`} open=${open}
     onToggle=${(e: Event) => setOpen((e.currentTarget as HTMLDetailsElement).open)}>
@@ -334,17 +337,19 @@ function DocsPanel() {
   const commands = data?.commands ?? null;
   const pending = query.isFetching;
   const error = query.error ? String(query.error) : null;
-  const target = docsDeepLinkTarget();
+  const [target, setTarget] = useState(docsDeepLinkTarget());
   const retry = () => {
     query.refetch();
   };
-  const scrolled = useRef(false);
   useEffect(() => {
-    if (scrolled.current || !target || !commands || !commands[target]) return;
-    const entry = el(`doc-${target}`);
-    if (entry) entry.scrollIntoView?.({ block: "start" });
-    scrolled.current = true;
-  }, [commands]);
+    const updateTarget = () => setTarget(docsDeepLinkTarget());
+    window.addEventListener("hashchange", updateTarget);
+    return () => window.removeEventListener("hashchange", updateTarget);
+  }, []);
+  useEffect(() => {
+    if (!target || !commands || !commands[target]) return;
+    el(`doc-${target}`)?.scrollIntoView?.({ block: "start" });
+  }, [target, commands]);
 
   let status;
   if (commands && !data?.cached) {

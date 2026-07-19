@@ -26,6 +26,9 @@ fi
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 SRC="$HERE/config/servo-cal"
 
+ssh "$TARGET" "cd ~/klipper && PATH=\$HOME/.cargo/bin:\$PATH \
+    cargo build --profile snapshot --manifest-path rust/Cargo.toml -p servo-ident"
+
 ssh "$TARGET" "mkdir -p ~/servo-cal"
 scp "$SRC/servo-cal-launcher.sh" "$TARGET:servo-cal/servo-cal-launcher.sh"
 sed -e "s|^User=pi$|User=$REMOTE_USER|" \

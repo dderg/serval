@@ -3,7 +3,7 @@ import { useEffect, useRef } from "preact/hooks";
 import { useQuery, useQueries } from "@tanstack/preact-query";
 import { shortTime } from "./api";
 import { detailData, pageRuns, runData } from "./queries/runs";
-import { ensureStrain, strainKey } from "./queries/strain";
+import { ensureStrain, strainViewKey } from "./queries/strain";
 import { hidpiCanvasContext, mixColor } from "./charts-core";
 import { timeSeriesPlot } from "./uplot-chart";
 import { loadRerunForm } from "./drive";
@@ -605,7 +605,7 @@ function StrainMapSection({ name, data, error }: { name: string | null; data: St
   const compareNames = [...state.strain.compare];
   const compareQueries = useQueries({
     queries: compareNames.map((cn) => ({
-      queryKey: [...strainKey(cn), "view"],
+      queryKey: strainViewKey(cn),
       queryFn: () => ensureStrain(cn),
       enabled: data != null && data.lines.length > 0,
     })),
@@ -753,7 +753,7 @@ function StrainMain({ def }: { def: PageDef }) {
   }, [namesSig]);
   const name = state.strain.selected;
   const selected = useQuery({
-    queryKey: [...strainKey(name ?? ""), "view"],
+    queryKey: strainViewKey(name ?? ""),
     queryFn: () => ensureStrain(name as string),
     enabled: name != null,
   });

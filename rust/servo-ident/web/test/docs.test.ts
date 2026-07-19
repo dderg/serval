@@ -1,4 +1,5 @@
 import { beforeEach, expect, test } from "bun:test";
+import { act } from "preact/test-utils";
 import { registerDom } from "./dom";
 
 registerDom();
@@ -161,6 +162,19 @@ test("a #/docs/<macro> deep link opens exactly that macro's details", async () =
   expect((document.getElementById("doc-SERVO_HELPER") as HTMLDetailsElement).open).toBe(true);
   expect((document.getElementById("doc-SERVO_APPLY_GAINS") as HTMLDetailsElement).open).toBe(false);
 });
+test("changing docs deep links opens the new target without remounting", async () => {
+  location.hash = "#/docs/servo_helper";
+  await mount();
+  const apply = document.getElementById("doc-SERVO_APPLY_GAINS") as HTMLDetailsElement;
+  expect(apply.open).toBe(false);
+  location.hash = "#/docs/servo_apply_gains";
+  await act(async () => {
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+    await settle();
+  });
+  expect(apply.open).toBe(true);
+});
+
 
 test("a manual details toggle survives a store-driven rerender", async () => {
   await mount();

@@ -9,7 +9,7 @@ registerDom();
 const strain = await import("../src/strain");
 const { queryClient, QueryRoot } = await import("../src/queries/client");
 const { html, render } = await import("htm/preact");
-const { strainKey } = await import("../src/queries/strain");
+const { strainKey, strainViewKey } = await import("../src/queries/strain");
 const { runKeys } = await import("../src/queries/runs");
 const { state, PAGE_DEFS } = await import("../src/state");
 
@@ -66,7 +66,7 @@ function seedRuns(names: string[]): RunSummary[] {
 
 function seedStrain(run: RunSummary, data: StrainMap) {
   queryClient.setQueryData(strainKey(run.name), { mtime_utc: run.mtime_utc, data });
-  queryClient.setQueryData([...strainKey(run.name), "view"], data);
+  queryClient.setQueryData(strainViewKey(run.name), data);
 }
 
 let container: HTMLElement;
@@ -122,6 +122,13 @@ test("StrainPage renders the run selector, summary, heatmaps, profiles, and DC b
   expect(scale).toBeTruthy();
   expect(scale!.querySelector(".hint")!.textContent).toContain("elastic differential torque");
 });
+test("the strain view query key changes with the run revision", () => {
+  const [run] = seedRuns(["strain_a"]);
+  const initialKey = strainViewKey(run.name);
+  queryClient.setQueryData(runKeys.all, [{ ...run, mtime_utc: "2026-01-01T00:01:00Z" }]);
+  expect(strainViewKey(run.name)).not.toEqual(initialKey);
+});
+
 
 test("selecting a run auto-falls back to the first run and prunes stale compares", async () => {
   const runs = seedRuns(["strain_a", "strain_b"]);
@@ -139,7 +146,7 @@ test("the field toggle redraws on the friction scale without refetching the stra
   state.strain.selected = "strain_a";
   await mount();
 
-  const viewKey = [...strainKey("strain_a"), "view"];
+  const viewKey = strainViewKey("strain_a");
   const before = queryClient.getQueryData(viewKey);
 
   const friction = container.querySelector<HTMLButtonElement>('button[data-field="friction"]')!;

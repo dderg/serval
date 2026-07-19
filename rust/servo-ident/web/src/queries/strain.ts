@@ -4,6 +4,8 @@ import { queryClient } from "./client";
 import { runData, runKeys } from "./runs";
 
 export const strainKey = (name: string) => [...runKeys.run(name), "strain"] as const;
+export const strainViewKey = (name: string) =>
+  [...strainKey(name), "view", runData(name)?.mtime_utc ?? null] as const;
 
 interface StrainCacheEntry {
   mtime_utc: string | null;
