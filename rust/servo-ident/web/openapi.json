@@ -1,0 +1,2458 @@
+{
+  "components": {
+    "responses": {
+      "BadRequest": {
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "description": "A query parameter or request body could not be parsed."
+      },
+      "NotFound": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiError"
+            }
+          }
+        },
+        "description": "The requested resource does not exist."
+      },
+      "ServerError": {
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "description": "The server failed to read, parse, or compute the response."
+      }
+    },
+    "schemas": {
+      "AccelResult": {
+        "properties": {
+          "present": {
+            "type": "boolean"
+          },
+          "psd_peaks": {
+            "items": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "format": "double",
+                  "type": "number"
+                },
+                {
+                  "format": "double",
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "present",
+          "psd_peaks"
+        ],
+        "type": "object"
+      },
+      "ApiError": {
+        "additionalProperties": false,
+        "description": "JSON error body: a single human-readable reason.",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "type": "object"
+      },
+      "Applied": {
+        "properties": {
+          "addr": {
+            "type": "string"
+          },
+          "servo": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "value": true
+        },
+        "required": [
+          "servo",
+          "addr",
+          "type",
+          "value"
+        ],
+        "type": "object"
+      },
+      "Combined": {
+        "properties": {
+          "cross_ferr_peak_mm": {
+            "format": "double",
+            "type": "number"
+          },
+          "on_ferr_peak_mm": {
+            "format": "double",
+            "type": "number"
+          },
+          "on_ferr_rms_mm": {
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "on_ferr_peak_mm",
+          "on_ferr_rms_mm",
+          "cross_ferr_peak_mm"
+        ],
+        "type": "object"
+      },
+      "DeleteResponse": {
+        "properties": {
+          "deleted": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "deleted"
+        ],
+        "type": "object"
+      },
+      "DifferentialMode": {
+        "properties": {
+          "coherence": {
+            "format": "double",
+            "type": "number"
+          },
+          "damping": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "freq_hz": {
+            "format": "double",
+            "type": "number"
+          },
+          "gain": {
+            "format": "double",
+            "type": "number"
+          },
+          "gain_db": {
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "freq_hz",
+          "gain",
+          "gain_db",
+          "coherence"
+        ],
+        "type": "object"
+      },
+      "DifferentialResult": {
+        "properties": {
+          "modes": {
+            "items": {
+              "$ref": "#/components/schemas/DifferentialMode"
+            },
+            "type": "array"
+          },
+          "pair": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "segments": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pair",
+          "segments",
+          "modes"
+        ],
+        "type": "object"
+      },
+      "DriveResult": {
+        "properties": {
+          "metrics": {
+            "$ref": "#/components/schemas/Metrics"
+          },
+          "psd_peaks": {
+            "items": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "format": "double",
+                  "type": "number"
+                },
+                {
+                  "format": "double",
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "resonance": {
+            "$ref": "#/components/schemas/Resonance"
+          }
+        },
+        "required": [
+          "metrics",
+          "psd_peaks",
+          "resonance"
+        ],
+        "type": "object"
+      },
+      "DriveStateParam": {
+        "properties": {
+          "addr": {
+            "type": "string"
+          },
+          "c_code": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "group": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "options": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string"
+          },
+          "unit": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "c_code",
+          "addr",
+          "type",
+          "unit",
+          "group",
+          "description"
+        ],
+        "type": "object"
+      },
+      "DriveStatePayload": {
+        "properties": {
+          "config_pins": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            "type": "object"
+          },
+          "created_utc": {
+            "type": "string"
+          },
+          "motors": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "format": "int64",
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            "type": "object"
+          },
+          "params": {
+            "items": {
+              "$ref": "#/components/schemas/DriveStateParam"
+            },
+            "type": "array"
+          },
+          "slots": {
+            "additionalProperties": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "type": "object"
+          },
+          "spatial": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SpatialFrame"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "created_utc",
+          "params",
+          "motors",
+          "config_pins",
+          "slots"
+        ],
+        "type": "object"
+      },
+      "LiveCapture": {
+        "properties": {
+          "age_s": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size_bytes": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "size_bytes"
+        ],
+        "type": "object"
+      },
+      "LiveStatus": {
+        "properties": {
+          "capture": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LiveCapture"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "Manifest": {
+        "description": "Run manifest as written by the Python capture tooling: a typed view of the fields the dashboard reads, with additional producer fields permitted.",
+        "properties": {
+          "ambient": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManifestAmbient"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "axis": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "command": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "experiment": {
+            "type": "string"
+          },
+          "motors": {
+            "items": {
+              "$ref": "#/components/schemas/ManifestMotor"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/ManifestStep"
+            },
+            "type": "array"
+          },
+          "stroke_plan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StrokePlan"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tag": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "experiment",
+          "steps"
+        ],
+        "type": "object"
+      },
+      "ManifestAmbient": {
+        "properties": {
+          "journal_params": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "type": [
+                  "number",
+                  "string"
+                ]
+              },
+              "type": "object"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "notches": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "$ref": "#/components/schemas/NotchStateValue"
+              },
+              "type": "object"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "ManifestMotor": {
+        "properties": {
+          "counts_per_mm": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "counts_per_mm"
+        ],
+        "type": "object"
+      },
+      "ManifestStep": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "swept": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "swept"
+        ],
+        "type": "object"
+      },
+      "Metrics": {
+        "properties": {
+          "ferr_crosscheck_max": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ff_torque_offset_max": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "ff_velocity_offset_max": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "moves": {
+            "items": {
+              "$ref": "#/components/schemas/Move"
+            },
+            "type": "array"
+          },
+          "samples": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "torque": {
+            "$ref": "#/components/schemas/TorqueSummary"
+          },
+          "torque_saturation_pct": {
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "samples",
+          "moves",
+          "torque_saturation_pct",
+          "torque",
+          "ferr_crosscheck_max"
+        ],
+        "type": "object"
+      },
+      "Move": {
+        "properties": {
+          "direction": {
+            "format": "int8",
+            "maximum": 127,
+            "minimum": -128,
+            "type": "integer"
+          },
+          "end_ms": {
+            "format": "double",
+            "type": "number"
+          },
+          "ferr_mean_moving": {
+            "format": "double",
+            "type": "number"
+          },
+          "ferr_peak": {
+            "format": "double",
+            "type": "number"
+          },
+          "ferr_rms": {
+            "format": "double",
+            "type": "number"
+          },
+          "move": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "overshoot": {
+            "format": "double",
+            "type": "number"
+          },
+          "settle_ms": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "settle_window_truncated": {
+            "type": "boolean"
+          },
+          "start_ms": {
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "move",
+          "start_ms",
+          "end_ms",
+          "direction",
+          "ferr_mean_moving",
+          "ferr_peak",
+          "ferr_rms",
+          "overshoot",
+          "settle_window_truncated"
+        ],
+        "type": "object"
+      },
+      "NotchStateValue": {
+        "anyOf": [
+          {
+            "additionalProperties": {
+              "type": [
+                "number",
+                "string"
+              ]
+            },
+            "type": "object"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "string"
+          }
+        ]
+      },
+      "NoteBody": {
+        "properties": {
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "note"
+        ],
+        "type": "object"
+      },
+      "NoteResponse": {
+        "properties": {
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "note"
+        ],
+        "type": "object"
+      },
+      "PlotAccel": {
+        "properties": {
+          "magnitude": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "t_s": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "t_s",
+          "magnitude"
+        ],
+        "type": "object"
+      },
+      "PlotCombined": {
+        "properties": {
+          "cross_ferr_mm": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "on_ferr_mm": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "on_ferr_mm",
+          "cross_ferr_mm"
+        ],
+        "type": "object"
+      },
+      "PlotDifferential": {
+        "properties": {
+          "band": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "format": "double",
+                "type": "number"
+              },
+              {
+                "format": "double",
+                "type": "number"
+              }
+            ],
+            "type": "array"
+          },
+          "coherence": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "coherence_min": {
+            "format": "double",
+            "type": "number"
+          },
+          "freq_hz": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "mag_db": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "modes": {
+            "items": {
+              "$ref": "#/components/schemas/DifferentialMode"
+            },
+            "type": "array"
+          },
+          "phase_deg": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "torque_db": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "freq_hz",
+          "mag_db",
+          "phase_deg",
+          "coherence",
+          "torque_db",
+          "coherence_min",
+          "band",
+          "modes"
+        ],
+        "type": "object"
+      },
+      "PlotDrive": {
+        "properties": {
+          "ferr_counts": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "torque_per_mille": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "ferr_counts",
+          "torque_per_mille"
+        ],
+        "type": "object"
+      },
+      "PlotPath": {
+        "properties": {
+          "act_x_mm": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "act_y_mm": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "cmd_x_mm": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "cmd_y_mm": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "cmd_x_mm",
+          "cmd_y_mm",
+          "act_x_mm",
+          "act_y_mm"
+        ],
+        "type": "object"
+      },
+      "PlotPsd": {
+        "properties": {
+          "accel": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlotPsdAccel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cartesian": {
+            "additionalProperties": {
+              "items": {
+                "format": "double",
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "freq_hz": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "per_drive": {
+            "additionalProperties": {
+              "items": {
+                "format": "double",
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "freq_hz",
+          "per_drive"
+        ],
+        "type": "object"
+      },
+      "PlotPsdAccel": {
+        "properties": {
+          "freq_hz": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "psd": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "psd_x": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "psd_y": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "psd_z": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "freq_hz",
+          "psd",
+          "psd_x",
+          "psd_y",
+          "psd_z"
+        ],
+        "type": "object"
+      },
+      "PlotRingdown": {
+        "properties": {
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/PlotRingdownSource"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "sources"
+        ],
+        "type": "object"
+      },
+      "PlotRingdownSource": {
+        "properties": {
+          "fs_hz": {
+            "format": "double",
+            "type": "number"
+          },
+          "modes": {
+            "items": {
+              "$ref": "#/components/schemas/RingdownMode"
+            },
+            "type": "array"
+          },
+          "psd": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "psd_freq_hz": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "source": {
+            "type": "string"
+          },
+          "tails": {
+            "items": {
+              "$ref": "#/components/schemas/PlotRingdownTail"
+            },
+            "type": "array"
+          },
+          "unit": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "unit",
+          "fs_hz",
+          "modes",
+          "psd_freq_hz",
+          "psd",
+          "tails"
+        ],
+        "type": "object"
+      },
+      "PlotRingdownTail": {
+        "properties": {
+          "start_s": {
+            "format": "double",
+            "type": "number"
+          },
+          "value": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "start_s",
+          "value"
+        ],
+        "type": "object"
+      },
+      "PlotSeries": {
+        "properties": {
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/PlotStep"
+            },
+            "type": "array"
+          },
+          "version": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "steps"
+        ],
+        "type": "object"
+      },
+      "PlotStep": {
+        "properties": {
+          "accel": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlotAccel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "combined": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlotCombined"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "differential": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlotDifferential"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "drives": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/PlotDrive"
+            },
+            "type": "object"
+          },
+          "fs_hz": {
+            "format": "double",
+            "type": "number"
+          },
+          "moving": {
+            "items": {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "format": "double",
+                  "type": "number"
+                },
+                {
+                  "format": "double",
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlotPath"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "psd": {
+            "$ref": "#/components/schemas/PlotPsd"
+          },
+          "ringdown": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlotRingdown"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "stride": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "t_s": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "fs_hz",
+          "stride",
+          "t_s",
+          "moving",
+          "drives",
+          "psd"
+        ],
+        "type": "object"
+      },
+      "Resonance": {
+        "properties": {
+          "detected": {
+            "type": "boolean"
+          },
+          "peak_hz": {
+            "format": "double",
+            "type": "number"
+          },
+          "ratio": {
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "detected",
+          "ratio",
+          "peak_hz"
+        ],
+        "type": "object"
+      },
+      "Results": {
+        "properties": {
+          "fs_hz": {
+            "format": "double",
+            "type": "number"
+          },
+          "settle_band_counts": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/StepResult"
+            },
+            "type": "array"
+          },
+          "torque_limit_per_mille": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "verdict": {
+            "$ref": "#/components/schemas/Verdict"
+          },
+          "version": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "fs_hz",
+          "settle_band_counts",
+          "torque_limit_per_mille",
+          "steps",
+          "verdict"
+        ],
+        "type": "object"
+      },
+      "RingdownMode": {
+        "properties": {
+          "amp": {
+            "format": "double",
+            "type": "number"
+          },
+          "cycles": {
+            "format": "double",
+            "type": "number"
+          },
+          "disp_um": {
+            "format": "double",
+            "type": "number"
+          },
+          "fit_start_ms": {
+            "format": "double",
+            "type": "number"
+          },
+          "freq_hz": {
+            "format": "double",
+            "type": "number"
+          },
+          "r2": {
+            "format": "double",
+            "type": "number"
+          },
+          "tails": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "zeta": {
+            "format": "double",
+            "type": "number"
+          },
+          "zeta_hi": {
+            "format": "double",
+            "type": "number"
+          },
+          "zeta_lo": {
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "freq_hz",
+          "zeta",
+          "zeta_lo",
+          "zeta_hi",
+          "amp",
+          "disp_um",
+          "tails",
+          "cycles",
+          "r2",
+          "fit_start_ms"
+        ],
+        "type": "object"
+      },
+      "RingdownResult": {
+        "properties": {
+          "guard_ms": {
+            "format": "double",
+            "type": "number"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/RingdownSource"
+            },
+            "type": "array"
+          },
+          "window_ms": {
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "required": [
+          "guard_ms",
+          "window_ms",
+          "sources"
+        ],
+        "type": "object"
+      },
+      "RingdownSource": {
+        "properties": {
+          "modes": {
+            "items": {
+              "$ref": "#/components/schemas/RingdownMode"
+            },
+            "type": "array"
+          },
+          "noise_floor": {
+            "format": "double",
+            "type": "number"
+          },
+          "source": {
+            "type": "string"
+          },
+          "tails": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unit": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "unit",
+          "tails",
+          "noise_floor",
+          "modes"
+        ],
+        "type": "object"
+      },
+      "RunPath": {
+        "properties": {
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/RunPathStep"
+            },
+            "type": "array"
+          },
+          "version": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "steps"
+        ],
+        "type": "object"
+      },
+      "RunPathStep": {
+        "properties": {
+          "n_records": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "$ref": "#/components/schemas/PlotPath"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "n_records",
+          "truncated",
+          "path"
+        ],
+        "type": "object"
+      },
+      "RunSummary": {
+        "properties": {
+          "axis": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "experiment": {
+            "type": "string"
+          },
+          "has_results": {
+            "type": "boolean"
+          },
+          "mtime_utc": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tag": {
+            "type": "string"
+          },
+          "verdict": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VerdictSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "mtime_utc",
+          "experiment",
+          "tag",
+          "has_results"
+        ],
+        "type": "object"
+      },
+      "SpatialFrame": {
+        "description": "Motor-space -> cartesian position map for the live spatial view, the\nSERVO_DUMP_TUNING mirror of `servo_strokes.spatial_frame`: `axes` are\nmotor names (frame columns), each column folds the motor's invert sign\nin, so `mode_pos[k] = sum(frame[k][s] * drive_frame_pos_mm[s])`.",
+        "properties": {
+          "axes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "frame": {
+            "items": {
+              "items": {
+                "format": "double",
+                "type": "number"
+              },
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "modes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "modes",
+          "axes",
+          "frame"
+        ],
+        "type": "object"
+      },
+      "StepResult": {
+        "properties": {
+          "accel": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccelResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "combined": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Combined"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "differential": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DifferentialResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "drives": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/DriveResult"
+            },
+            "type": "object"
+          },
+          "flags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "ringdown": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RingdownResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "name",
+          "drives",
+          "flags"
+        ],
+        "type": "object"
+      },
+      "StrainBelt": {
+        "properties": {
+          "elastic": {
+            "items": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": "array"
+          },
+          "friction": {
+            "items": {
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "type": "array"
+          },
+          "pair": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pair",
+          "elastic",
+          "friction"
+        ],
+        "type": "object"
+      },
+      "StrainLine": {
+        "properties": {
+          "belts": {
+            "items": {
+              "$ref": "#/components/schemas/StrainBelt"
+            },
+            "type": "array"
+          },
+          "bin_centers": {
+            "items": {
+              "format": "double",
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "name": {
+            "type": "string"
+          },
+          "swept": true
+        },
+        "required": [
+          "name",
+          "swept",
+          "bin_centers",
+          "belts"
+        ],
+        "type": "object"
+      },
+      "StrainMap": {
+        "properties": {
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/StrainLine"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "lines"
+        ],
+        "type": "object"
+      },
+      "StrokePlan": {
+        "properties": {
+          "accel": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "amplitude": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "belt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cruise_ms": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "duration": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "dwell_ms": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "freq_end": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "freq_start": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "iterations": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "line_spacing": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "ramp": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "speed": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "speeds": {
+            "items": {
+              "type": "number"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "x_end": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "x_start": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "y_end": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "y_start": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "zero_sync": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "TorqueSummary": {
+        "properties": {
+          "longest_burst_ms": {
+            "format": "double",
+            "type": "number"
+          },
+          "moving_samples": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "peak": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "peak_pct_rated": {
+            "format": "double",
+            "type": "number"
+          },
+          "rail_detected": {
+            "type": "boolean"
+          },
+          "rail_level": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "rail_ms": {
+            "format": "double",
+            "type": "number"
+          },
+          "rail_pct_moving": {
+            "format": "double",
+            "type": "number"
+          },
+          "rail_samples": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "peak",
+          "peak_pct_rated",
+          "moving_samples",
+          "rail_detected",
+          "rail_level",
+          "rail_samples",
+          "rail_pct_moving",
+          "rail_ms",
+          "longest_burst_ms"
+        ],
+        "type": "object"
+      },
+      "Verdict": {
+        "properties": {
+          "apply": {
+            "items": {
+              "$ref": "#/components/schemas/Applied"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "flags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "recommended_step": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "reason",
+          "flags"
+        ],
+        "type": "object"
+      },
+      "VerdictSummary": {
+        "properties": {
+          "flags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "recommended_step": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "reason",
+          "flags"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "servo-cal serve API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/drive_state": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DriveStatePayload"
+                }
+              }
+            },
+            "description": "drive_state.json plus an added age_s field."
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "summary": "Tuning-panel drive state with a fresh age_s field."
+      }
+    },
+    "/api/live": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiveStatus"
+                }
+              }
+            },
+            "description": "Live capture status."
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "summary": "Newest flat capture with its current size and age."
+      }
+    },
+    "/api/live/{name}": {
+      "get": {
+        "parameters": [
+          {
+            "description": "Capture file name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Byte offset to resume from, or \"end\" for the aligned EOF.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "description": "Incremental slice of an in-progress capture (records plus the next byte offset); an ad-hoc shape with no complete Rust producer type.",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Capture tail slice."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "summary": "Incremental tail of an in-progress capture."
+      }
+    },
+    "/api/live_tap": {
+      "get": {
+        "parameters": [
+          {
+            "description": "Only return cycles strictly newer than this counter.",
+            "in": "query",
+            "name": "since_cycle",
+            "required": false,
+            "schema": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "description": "Live tap poll result, discriminated by status: connecting while the tap session is opening, unreachable when the last connect attempt failed, streaming once samples flow.",
+                  "discriminator": {
+                    "propertyName": "status"
+                  },
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "status": {
+                          "const": "connecting",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "title": "LiveTapConnecting",
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "const": "unreachable",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "reason"
+                      ],
+                      "title": "LiveTapUnreachable",
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "counts_per_mm": {
+                          "items": {
+                            "format": "double",
+                            "type": "number"
+                          },
+                          "type": "array"
+                        },
+                        "cycle_ns": {
+                          "format": "uint64",
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "drive_names": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        },
+                        "drives": {
+                          "additionalProperties": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "ferr": {
+                                "items": {
+                                  "format": "int64",
+                                  "type": "integer"
+                                },
+                                "type": "array"
+                              },
+                              "pos": {
+                                "items": {
+                                  "format": "int64",
+                                  "type": "integer"
+                                },
+                                "type": "array"
+                              },
+                              "target": {
+                                "items": {
+                                  "format": "int64",
+                                  "type": "integer"
+                                },
+                                "type": "array"
+                              },
+                              "torque": {
+                                "items": {
+                                  "format": "int64",
+                                  "type": "integer"
+                                },
+                                "type": "array"
+                              }
+                            },
+                            "required": [
+                              "ferr",
+                              "torque",
+                              "target",
+                              "pos"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "object"
+                        },
+                        "first_cycle": {
+                          "oneOf": [
+                            {
+                              "format": "uint64",
+                              "minimum": 0,
+                              "type": "integer"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "fs_hz": {
+                          "format": "double",
+                          "type": "number"
+                        },
+                        "moving": {
+                          "items": {
+                            "type": "boolean"
+                          },
+                          "type": "array"
+                        },
+                        "next_cycle": {
+                          "format": "uint64",
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "status": {
+                          "const": "streaming",
+                          "type": "string"
+                        },
+                        "stride": {
+                          "format": "uint64",
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "timing": {
+                          "oneOf": [
+                            {
+                              "additionalProperties": false,
+                              "properties": {
+                                "late_frames": {
+                                  "format": "uint32",
+                                  "minimum": 0,
+                                  "type": "integer"
+                                },
+                                "lateness_ns": {
+                                  "format": "int32",
+                                  "type": "integer"
+                                },
+                                "skips": {
+                                  "format": "uint32",
+                                  "minimum": 0,
+                                  "type": "integer"
+                                }
+                              },
+                              "required": [
+                                "skips",
+                                "late_frames",
+                                "lateness_ns"
+                              ],
+                              "type": "object"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "fs_hz",
+                        "cycle_ns",
+                        "drive_names",
+                        "counts_per_mm",
+                        "next_cycle",
+                        "timing"
+                      ],
+                      "title": "LiveTapStreaming",
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Live tap snapshot."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          }
+        },
+        "summary": "Poll the live tap ring since a cycle counter."
+      }
+    },
+    "/api/openapi.json": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "description": "This OpenAPI 3.1 document.",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The OpenAPI document."
+          }
+        },
+        "summary": "This OpenAPI 3.1 document."
+      }
+    },
+    "/api/runs": {
+      "get": {
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RunSummary"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Run summaries, newest first."
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "summary": "List runs, newest first."
+      }
+    },
+    "/api/runs/{name}": {
+      "delete": {
+        "parameters": [
+          {
+            "description": "Run directory name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteResponse"
+                }
+              }
+            },
+            "description": "The deleted run name."
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "summary": "Delete a run directory and everything in it."
+      }
+    },
+    "/api/runs/{name}/analyze": {
+      "post": {
+        "parameters": [
+          {
+            "description": "Run directory name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Results"
+                }
+              }
+            },
+            "description": "Analysis results."
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "summary": "Analyze a run on demand, returning its results."
+      }
+    },
+    "/api/runs/{name}/manifest": {
+      "get": {
+        "parameters": [
+          {
+            "description": "Run directory name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Manifest"
+                }
+              }
+            },
+            "description": "The run manifest, verbatim."
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "summary": "Raw run manifest."
+      }
+    },
+    "/api/runs/{name}/note": {
+      "post": {
+        "parameters": [
+          {
+            "description": "Run directory name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NoteBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NoteResponse"
+                }
+              }
+            },
+            "description": "The stored note (empty when cleared)."
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "summary": "Set or clear a run's note."
+      }
+    },
+    "/api/runs/{name}/path": {
+      "get": {
+        "parameters": [
+          {
+            "description": "Run directory name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunPath"
+                }
+              }
+            },
+            "description": "Toolpath steps."
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "summary": "Full-resolution toolpath for a run."
+      }
+    },
+    "/api/runs/{name}/plot_series": {
+      "get": {
+        "parameters": [
+          {
+            "description": "Run directory name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlotSeries"
+                }
+              }
+            },
+            "description": "Plot series."
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "summary": "Plot series for a run."
+      }
+    },
+    "/api/runs/{name}/results": {
+      "get": {
+        "parameters": [
+          {
+            "description": "Run directory name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Results"
+                }
+              }
+            },
+            "description": "Analysis results."
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "summary": "Analysis results for a run."
+      }
+    },
+    "/api/runs/{name}/strain": {
+      "get": {
+        "parameters": [
+          {
+            "description": "Run directory name.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StrainMap"
+                }
+              }
+            },
+            "description": "Strain map."
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "summary": "Strain map for a strain_map run."
+      }
+    }
+  }
+}

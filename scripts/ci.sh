@@ -65,7 +65,7 @@ job_web() {
     cd "$RUST/servo-ident/web" \
         && "$bun" install --frozen-lockfile \
         && "$bun" run check \
-        && "$bun" test
+        && "$bun" run test
 }
 
 job_rust_test() {

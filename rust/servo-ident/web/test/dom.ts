@@ -92,7 +92,7 @@ function installFetchStub(): { unmatched: string[] } {
     [/\/printer\/gcode\/help$/, () => json(JSON.stringify({ result: {} }))],
   ];
   globalThis.fetch = (async (input: RequestInfo | URL) => {
-    const url = String(input);
+    const url = input instanceof Request ? input.url : String(input);
     const path = url.startsWith("http") ? new URL(url).pathname : url.split("?")[0];
     for (const [re, respond] of routes) {
       if (re.test(path)) return respond();
@@ -110,4 +110,49 @@ function indexHtmlBody(): string {
   return body[1].replace(/<script[\s\S]*?<\/script>/g, "");
 }
 
-export { registerDom, installFetchStub, indexHtmlBody, fixtureJson, RUN_NAME };
+function nextFrame(): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  requestAnimationFrame(() => resolve());
+  return promise;
+}
+
+function nextTask(): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const channel = new MessageChannel();
+  channel.port1.onmessage = () => resolve();
+  channel.port2.postMessage(0);
+  return promise;
+}
+
+async function settleDom(rounds = 1): Promise<void> {
+  for (let i = 0; i < rounds; i++) {
+    await nextFrame();
+    await nextTask();
+  }
+}
+
+function installDomHarness() {
+  const intervals: Timer[] = [];
+  const realSetInterval = globalThis.setInterval;
+  (globalThis as Record<string, unknown>).setInterval = ((fn: TimerHandler, ms?: number) => {
+    const id = realSetInterval(fn as () => void, ms ?? 0);
+    intervals.push(id);
+    return id;
+  }) as typeof setInterval;
+  const consoleErrors: unknown[][] = [];
+  const realConsoleError = console.error;
+  console.error = (...args: unknown[]) => {
+    consoleErrors.push(args);
+    realConsoleError(...args);
+  };
+  return {
+    consoleErrors,
+    cleanup() {
+      for (const id of intervals) clearInterval(id);
+      globalThis.setInterval = realSetInterval;
+      console.error = realConsoleError;
+    },
+  };
+}
+
+export { registerDom, installFetchStub, installDomHarness, indexHtmlBody, fixtureJson, nextFrame, nextTask, settleDom, RUN_NAME };

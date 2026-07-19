@@ -1,96 +1,59 @@
-// Server payload types. Everything the Rust side derives `JsonSchema` on is
-// generated into ./generated/ by ts-rs (freshness-guarded by the
-// `ts_bindings` cargo test); the shapes below are only the payloads Rust
-// reads loosely (manifest passthrough, live tap, strain) and thin
-// server-side compositions like the drive_state `age_s` field.
+import type { components, paths } from "./api/openapi.generated";
 
-import type { DriveStatePayload } from "./generated/DriveStatePayload";
-import type { Results } from "./generated/Results";
+type Schema = components["schemas"];
+type DifferentialMode = Schema["DifferentialMode"];
+type FrfMode = DifferentialMode;
+type DifferentialResult = Schema["DifferentialResult"];
+type DriveResult = Schema["DriveResult"];
+type ResultDrive = DriveResult;
+type DriveStateParam = Schema["DriveStateParam"];
+type DriveParam = DriveStateParam;
+type LiveCapture = Schema["LiveCapture"];
+type LiveStatus = Schema["LiveStatus"];
+type SpatialFrame = Schema["SpatialFrame"];
+type Metrics = Schema["Metrics"];
+type DriveMetrics = Metrics;
+type Move = Schema["Move"];
+type MoveMetrics = Move;
+type NoteResponse = Schema["NoteResponse"];
+type NotePayload = NoteResponse;
+type PlotDifferential = Schema["PlotDifferential"];
+type DifferentialPlot = PlotDifferential;
+type PlotPsd = Schema["PlotPsd"];
+type PsdData = PlotPsd;
+type PlotRingdown = Schema["PlotRingdown"];
+type RingdownPlot = PlotRingdown;
+type PlotRingdownSource = Schema["PlotRingdownSource"];
+type RingdownSource = PlotRingdownSource;
+type PlotPath = Schema["PlotPath"];
+type PlotSeries = Schema["PlotSeries"];
+type PlotStep = Schema["PlotStep"];
+type Results = Schema["Results"];
+type RingdownMode = Schema["RingdownMode"];
+type RunPath = Schema["RunPath"];
+type RunPathStep = Schema["RunPathStep"];
+type RunSummary = Schema["RunSummary"];
+type StepResult = Schema["StepResult"];
+type ResultStep = StepResult;
+type TorqueSummary = Schema["TorqueSummary"];
+type TorqueMetrics = TorqueSummary;
+type VerdictSummary = Schema["VerdictSummary"];
+type StrainBelt = Schema["StrainBelt"];
+type StrainLine = Schema["StrainLine"];
+type StrainMap = Schema["StrainMap"];
+type StrainData = StrainMap;
+type DriveStatePayload = Schema["DriveStatePayload"];
+type DriveState = DriveStatePayload & { age_s: number };
 
-export type { DifferentialMode, DifferentialMode as FrfMode } from "./generated/DifferentialMode";
-export type { DifferentialResult } from "./generated/DifferentialResult";
-export type { DriveResult, DriveResult as ResultDrive } from "./generated/DriveResult";
-export type { DriveStateParam, DriveStateParam as DriveParam } from "./generated/DriveStateParam";
-export type { LiveCapture } from "./generated/LiveCapture";
-export type { LiveStatus } from "./generated/LiveStatus";
-export type { SpatialFrame } from "./generated/SpatialFrame";
-export type { Metrics, Metrics as DriveMetrics } from "./generated/Metrics";
-export type { Move, Move as MoveMetrics } from "./generated/Move";
-export type { NoteResponse, NoteResponse as NotePayload } from "./generated/NoteResponse";
-export type { PlotDifferential, PlotDifferential as DifferentialPlot } from "./generated/PlotDifferential";
-export type { PlotPsd, PlotPsd as PsdData } from "./generated/PlotPsd";
-export type { PlotRingdown, PlotRingdown as RingdownPlot } from "./generated/PlotRingdown";
-export type {
-  PlotRingdownSource,
-  PlotRingdownSource as RingdownSource,
-} from "./generated/PlotRingdownSource";
-export type { PlotPath } from "./generated/PlotPath";
-export type { PlotSeries } from "./generated/PlotSeries";
-export type { PlotStep } from "./generated/PlotStep";
-export type { Results } from "./generated/Results";
-export type { RingdownMode } from "./generated/RingdownMode";
-export type { RunPath } from "./generated/RunPath";
-export type { RunPathStep } from "./generated/RunPathStep";
-export type { RunSummary } from "./generated/RunSummary";
-export type { StepResult, StepResult as ResultStep } from "./generated/StepResult";
-export type { TorqueSummary, TorqueSummary as TorqueMetrics } from "./generated/TorqueSummary";
-export type { VerdictSummary } from "./generated/VerdictSummary";
+// --- Manifest family: aliases into the generated OpenAPI `Manifest` contract
+// (schema-only Rust types in `openapi.rs`) ---
 
-// `handle_drive_state` serves `DriveStatePayload` from disk plus a
-// server-computed `age_s`.
-export type DriveState = DriveStatePayload & { age_s: number };
-
-// --- Payloads Rust does not model with schemars (manifest is a raw file
-// passthrough; live tap and strain are hand-built JSON) ---
-
-interface ManifestMotor {
-  name: string;
-  counts_per_mm: number | null;
-}
-
-interface StrokePlan {
-  speed?: number | null;
-  accel?: number | null;
-  iterations?: number | null;
-  line_spacing?: number | null;
-  x_start?: number | null;
-  x_end?: number | null;
-  y_start?: number | null;
-  y_end?: number | null;
-  dwell_ms?: number | null;
-  zero_sync?: boolean | null;
-  belt?: string | null;
-  freq_start?: number | null;
-  freq_end?: number | null;
-  amplitude?: number | null;
-  duration?: number | null;
-  ramp?: number | null;
-  cruise_ms?: number | null;
-  speeds?: number[] | null;
-}
-
-interface ManifestStep {
-  name: string;
-  swept: Record<string, number> | null;
-}
-
-type NotchStateValue = Record<string, number | string> | number | string;
-
-interface ManifestAmbient {
-  journal_params?: Record<string, Record<string, number | string>> | null;
-  notches?: Record<string, Record<string, NotchStateValue>> | null;
-}
-
-interface Manifest {
-  experiment: string;
-  command?: string | null;
-  tag?: string | null;
-  axis?: string | null;
-  stroke_plan?: StrokePlan | null;
-  steps: ManifestStep[];
-  motors?: ManifestMotor[] | null;
-  ambient?: ManifestAmbient | null;
-}
+type ManifestMotor = components["schemas"]["ManifestMotor"];
+type StrokePlan = components["schemas"]["StrokePlan"];
+type ManifestStep = components["schemas"]["ManifestStep"];
+type NotchStateValue = components["schemas"]["NotchStateValue"];
+type ManifestAmbient = components["schemas"]["ManifestAmbient"];
+type Manifest = components["schemas"]["Manifest"];
 
 interface RunDetail {
   mtime_utc: string;
@@ -99,39 +62,60 @@ interface RunDetail {
   results: Results | null;
 }
 
-interface LiveTapPayload {
-  status: string;
-  reason?: string | null;
-  fs_hz: number;
-  drive_names?: string[] | null;
-  counts_per_mm?: number[] | null;
-  first_cycle: number;
-  next_cycle: number;
-  stride: number;
-  drives?: Record<string, { ferr: number[]; torque: number[]; target: number[]; pos: number[] }> | null;
-  timing?: { skips: number; late_frames: number; lateness_ns: number } | null;
-}
+type LiveTapPayload =
+  paths["/api/live_tap"]["get"]["responses"][200]["content"]["application/json"];
+
+type LiveTapStreaming = Extract<LiveTapPayload, { status: "streaming" }>;
+
+type LiveStatusPayload =
+  paths["/api/live"]["get"]["responses"][200]["content"]["application/json"];
 
 type StrainField = "elastic" | "friction";
 
-interface StrainBelt {
-  pair: string;
-  elastic: (number | null)[];
-  friction: (number | null)[];
-}
-
-interface StrainLine {
-  name: string;
-  swept: Record<string, number> | null;
-  bin_centers: number[];
-  belts: StrainBelt[];
-}
-
-interface StrainData {
-  lines: StrainLine[];
-}
-
 export type {
+  DifferentialMode,
+  FrfMode,
+  DifferentialResult,
+  DriveResult,
+  ResultDrive,
+  DriveStateParam,
+  DriveParam,
+  LiveCapture,
+  LiveStatus,
+  SpatialFrame,
+  Metrics,
+  DriveMetrics,
+  Move,
+  MoveMetrics,
+  NoteResponse,
+  NotePayload,
+  PlotDifferential,
+  DifferentialPlot,
+  PlotPsd,
+  PsdData,
+  PlotRingdown,
+  RingdownPlot,
+  PlotRingdownSource,
+  RingdownSource,
+  PlotPath,
+  PlotSeries,
+  PlotStep,
+  Results,
+  RingdownMode,
+  RunPath,
+  RunPathStep,
+  RunSummary,
+  StepResult,
+  ResultStep,
+  TorqueSummary,
+  TorqueMetrics,
+  VerdictSummary,
+  StrainBelt,
+  StrainLine,
+  StrainMap,
+  StrainData,
+  DriveStatePayload,
+  DriveState,
   ManifestMotor,
   StrokePlan,
   ManifestStep,
@@ -140,8 +124,7 @@ export type {
   Manifest,
   RunDetail,
   LiveTapPayload,
+  LiveTapStreaming,
+  LiveStatusPayload,
   StrainField,
-  StrainBelt,
-  StrainLine,
-  StrainData,
 };

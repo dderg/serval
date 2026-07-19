@@ -1,4 +1,6 @@
-import { el, payloadUnchanged, runDataSig } from "./api";
+import { html } from "htm/preact";
+import { el, payloadUnchanged } from "./api";
+import { detailData, runDataSig } from "./queries/runs";
 import {
   fillFilterChips,
   mixColor,
@@ -10,15 +12,20 @@ import {
   ferrUnitAvailability,
   resolvedFerrUnit,
   syncFerrUnitUi,
+  ferrUnitToggleHtml,
+  SectionHead,
 } from "./charts-core";
 import { psdPlot, timeSeriesPlot } from "./uplot-chart";
 import type { FixedY, FreqMarker, Mark, PsdTrace, TimeTrace } from "./uplot-chart";
-import type { DriveMetrics, Manifest, PlotSeries, PlotStep, TorqueMetrics } from "./wire";
+import type { DriveResult, Manifest, PlotSeries, PlotStep } from "./api/runs";
 import { redrawCharts } from "./peaks";
 import { runColor } from "./runs";
-import { motorView, motorViewPerMotor } from "./shell";
-import { RESONANCE_BAND_HZ, state } from "./state";
+import { motorView, motorViewPerMotor, motorViewToggleHtml } from "./shell";
+import { PSD_MAX_FREQ_CHOICES_HZ, RESONANCE_BAND_HZ, state } from "./state";
 import type { FerrUnit } from "./units";
+
+type DriveMetrics = DriveResult["metrics"];
+type TorqueMetrics = DriveMetrics["torque"];
 
 // --- tracking metrics table -----------------------------------------------
 //
@@ -156,7 +163,7 @@ function metricsTableRows(names: string[], steps: string[]): MetricsRow[] {
   const view = motorView();
   const rows: MetricsRow[] = [];
   for (const name of names) {
-    const detail = state.details.get(name);
+    const detail = detailData(name);
     if (!detail || !detail.results) continue;
     for (const step of detail.results.steps) {
       if (!steps.includes(step.name)) continue;
@@ -274,7 +281,7 @@ interface SweepSeries {
 function sweepMetricsSeries(names: string[]): SweepSeries[] {
   const series: SweepSeries[] = [];
   for (const name of names) {
-    const detail = state.details.get(name);
+    const detail = detailData(name);
     if (!detail || !detail.results || !detail.manifest) continue;
     const key = sweptAxisKey(detail.manifest);
     if (!key) continue;
@@ -455,7 +462,7 @@ function psdFerrTraces(names: string[], plots: PlotSeries[], steps: string[], un
 const CARTESIAN_UM2_PER_MM2 = 1e6;
 
 function uniformCountsPerMm(runName: string): number {
-  const detail = state.details.get(runName);
+  const detail = detailData(runName);
   const motors = (detail && detail.manifest && detail.manifest.motors) || [];
   const values = [
     ...new Set(motors.map((m) => m.counts_per_mm).filter((v): v is number => v != null && v > 0)),
@@ -750,5 +757,55 @@ function fillStepChips(container: HTMLElement, stepNames: string[]) {
   );
 }
 
+function MetricsSection() {
+  const tools =
+    motorViewToggleHtml("worst drive", true) +
+    `<span class="note">worst move of each step — ` +
+    `overshoot/settle measured over the dwell after each move</span>`;
+  return html`<section class="metrics-section">
+    <${SectionHead} title="tracking metrics" tools=${tools} />
+    <div id="metrics-table"></div>
+  </section>`;
+}
+
+function SweepMetricsSection() {
+  const tools =
+    motorViewToggleHtml("worst drive", true) +
+    `<span class="note">● solid: overshoot, dashed: ferr rms, ` +
+    `dotted: ferr peak; red rung: step flagged resonance/torque</span>`;
+  return html`<section class="sweep-metrics-section">
+    <${SectionHead} title="metrics vs gain" tools=${tools} />
+    <div class="charts" id="sweep-metrics-chart"></div>
+  </section>`;
+}
+
+function PsdSection() {
+  const psdMax =
+    `<label class="note">to <select id="psd-max-freq">` +
+    PSD_MAX_FREQ_CHOICES_HZ.map(
+      (f) => `<option value="${f}"${f === psdMaxFreqHz() ? " selected" : ""}>${f}</option>`
+    ).join("") +
+    `</select> Hz</label>`;
+  const tools =
+    motorViewToggleHtml("avg", false, true) +
+    psdMax +
+    ferrUnitToggleHtml("psd") +
+    `<div class="chips" id="psd-step-chips"></div>`;
+  return html`<section class="psd-section">
+    <${SectionHead} title="following-error PSD" tools=${tools} />
+    <div class="charts" id="psd-charts"></div>
+  </section>`;
+}
+
+function AccelPsdSection() {
+  const tools =
+    `<span class="note">per-axis accelerometer spectra; solid: x+y+z total</span>` +
+    `<div class="chips" id="accel-axis-chips"></div>`;
+  return html`<section class="accel-psd-section" id="accel-psd-section" hidden>
+    <${SectionHead} title="accel PSD" tools=${tools} />
+    <div class="charts" id="accel-psd-charts"></div>
+  </section>`;
+}
+
 export type { MetricsRow, PsdBoxOpts, SweepSeries };
-export { driveMoveSummary, settleCellHtml, torqueCellHtml, metricsDriveRow, foldDriveRows, metricsTableRows, heatCellStyle, renderMetricsTable, sweptAxisKey, sweepMetricsSeries, renderSweepMetricsChart, driveRamp, psdFerrScaled, psdDrivePairs, psdFerrTraces, uniformCountsPerMm, psdCartesianScaled, psdCartesianTraces, psdAccelTraces, renderAccelPsdChart, fmtLinear, psdBox, renderPsdChart, visibleStepNames, renderStepChips, renderMotorChips, fillStepChips };
+export { driveMoveSummary, settleCellHtml, torqueCellHtml, metricsDriveRow, foldDriveRows, metricsTableRows, heatCellStyle, renderMetricsTable, sweptAxisKey, sweepMetricsSeries, renderSweepMetricsChart, driveRamp, psdFerrScaled, psdDrivePairs, psdFerrTraces, uniformCountsPerMm, psdCartesianScaled, psdCartesianTraces, psdAccelTraces, renderAccelPsdChart, fmtLinear, psdBox, renderPsdChart, visibleStepNames, renderStepChips, renderMotorChips, fillStepChips, MetricsSection, SweepMetricsSection, PsdSection, AccelPsdSection };

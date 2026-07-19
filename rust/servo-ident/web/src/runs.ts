@@ -1,20 +1,34 @@
-import { html, render, useEffect, useRef, useState } from "htm/preact/standalone";
-import type { VNode } from "preact";
-import { api, ensureDetail, ambientDiff, el, pageRuns, shortTime } from "./api";
-import { loadRerunForm } from "./drive";
+import { html } from "htm/preact";
+import { useEffect, useRef, useState } from "preact/hooks";
+import { useQuery } from "@tanstack/preact-query";
+import { ambientDiff, el, resetRenderState, shortTime } from "./api";
+import {
+  runsData,
+  detailData,
+  pageRuns,
+  runsQuery,
+  useSaveNote,
+  useDeleteRun,
+  useAnalyzeRun,
+} from "./queries/runs";
+import { ConsolePanel } from "./console";
+import { DrivePanel, loadRerunForm } from "./drive";
 import { redrawCharts } from "./peaks";
-import { currentPageDef } from "./shell";
+import { renderSentLog } from "./moonraker";
+import { LaunchpadPad } from "./launchpad";
+import {
+  MetricsSection,
+  SweepMetricsSection,
+  PsdSection,
+  AccelPsdSection,
+} from "./metrics";
+import { FrfSection, RingdownSection } from "./dynamics";
+import { SectionHead, TimeDomainSection, PathSection } from "./charts-core";
+import { applyAccordionState, bindAnalysisControls, currentPageDef } from "./shell";
 import { PALETTE, INITIAL_SELECTED_RUNS, state } from "./state";
 import { notify, useStore } from "./store";
 import type { PageDef } from "./state";
-import type { NotePayload, RunSummary } from "./wire";
-
-// --- runs table ---------------------------------------------------------------
-//
-// Preact owns #journal-body: renderRuns() mounts the table component into it
-// once per page build, and every later call just notifies the store — the
-// component re-renders from state with keyed rows, so an in-progress note
-// edit keeps its input and focus across the periodic refresh.
+import type { RunSummary } from "./api/runs";
 
 function toggleRunSelection(run: RunSummary, ev: MouseEvent) {
   if (!run.has_results) return;
@@ -40,7 +54,7 @@ function toggleRunSelection(run: RunSummary, ev: MouseEvent) {
     }
   }
   syncRunColors();
-  renderRuns();
+  notify();
   redrawCharts();
 }
 
@@ -52,7 +66,7 @@ function togglePin(run: RunSummary) {
     state.selected.add(run.name);
   }
   syncRunColors();
-  renderRuns();
+  notify();
   redrawCharts();
 }
 
@@ -78,14 +92,11 @@ function DotCell({ run }: { run: RunSummary }) {
   return html`<td>${swatch}${pin}</td>`;
 }
 
-/// Click-to-edit note cell: shows the saved note (or a faint "add note…"
-/// hint), swaps to an input on click, saves to POST /api/runs/<name>/note
-/// on Enter/blur, and cancels on Escape. Clicks stop propagating so
-/// editing a note never toggles the row's chart selection.
 function NoteCell({ run }: { run: RunSummary }) {
   const [editing, setEditing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const doneRef = useRef(false);
+  const note = useSaveNote();
   useEffect(() => {
     if (editing && inputRef.current) inputRef.current.focus();
   }, [editing]);
@@ -107,7 +118,7 @@ function NoteCell({ run }: { run: RunSummary }) {
     doneRef.current = true;
     const text = inputRef.current.value;
     setEditing(false);
-    if (save) saveNote(run, text);
+    if (save) note.mutate({ name: run.name, text });
   };
   return html`<td class="run-note" onClick=${(e: MouseEvent) => e.stopPropagation()}>
     <input
@@ -150,6 +161,8 @@ function closeContextMenu() {
 function ContextMenu() {
   useStore();
   const ref = useRef<HTMLDivElement>(null);
+  const del = useDeleteRun();
+  const analyze = useAnalyzeRun();
   useEffect(() => {
     if (!menu.run) return;
     const onPointerDown = (ev: MouseEvent) => {
@@ -173,7 +186,7 @@ function ContextMenu() {
   if (!menu.run) return null;
   const run = menu.run;
   const pinned = state.pinned.has(run.name);
-  const detail = state.details.get(run.name);
+  const detail = detailData(run.name);
   const width = Math.max(document.documentElement.clientWidth - 8, 0);
   const height = Math.max(document.documentElement.clientHeight - 8, 0);
   const style = {
@@ -200,28 +213,21 @@ function ContextMenu() {
   return html`<div class="context-menu" style=${style} ref=${ref}>
     ${run.has_results ? item(pinned ? "unpin" : "pin", () => togglePin(run)) : null}
     ${item("→ console", () => loadRerunForm(run.name), { disabled: !detail?.manifest })}
-    ${!run.has_results ? item("analyze", () => triggerAnalyze(run.name)) : null}
-    ${item("delete", () => deleteRun(run), { danger: true })}
+    ${!run.has_results ? item("analyze", () => analyze.mutate(run.name)) : null}
+    ${item("delete", () => del.mutate(run.name), { danger: true })}
   </div>`;
 }
 
-let mountedMenuHost: HTMLElement | null = null;
-
-function ensureContextMenuMounted() {
-  if (mountedMenuHost) return;
-  const host = document.createElement("div");
-  document.body.appendChild(host);
-  mountedMenuHost = host;
-  render(html`<${ContextMenu} />`, host);
-}
 
 function RunRow({ run, def }: { run: RunSummary; def: PageDef }) {
-  const globalIdx = state.runs.indexOf(run);
-  const detail = state.details.get(run.name);
+  const analyze = useAnalyzeRun();
+  const runs = runsData();
+  const globalIdx = runs.findIndex((r) => r.name === run.name);
+  const detail = detailData(run.name);
   const manifest = detail && detail.manifest;
   const prevManifest =
-    globalIdx + 1 < state.runs.length
-      ? (state.details.get(state.runs[globalIdx + 1].name)?.manifest ?? null)
+    globalIdx >= 0 && globalIdx + 1 < runs.length
+      ? (detailData(runs[globalIdx + 1].name)?.manifest ?? null)
       : null;
   const diff = manifest ? ambientDiff(prevManifest, manifest) : "";
   const cls = [
@@ -235,7 +241,6 @@ function RunRow({ run, def }: { run: RunSummary; def: PageDef }) {
     onClick=${(ev: MouseEvent) => toggleRunSelection(run, ev)}
     onContextMenu=${(ev: MouseEvent) => {
       ev.preventDefault();
-      ensureContextMenuMounted();
       openContextMenu(run, ev.clientX, ev.clientY);
     }}
   >
@@ -264,7 +269,7 @@ function RunRow({ run, def }: { run: RunSummary; def: PageDef }) {
         : html`<button
             onClick=${(e: MouseEvent) => {
               e.stopPropagation();
-              triggerAnalyze(run.name);
+              analyze.mutate(run.name);
             }}
           >
             analyze
@@ -276,77 +281,112 @@ function RunRow({ run, def }: { run: RunSummary; def: PageDef }) {
 function RunsTable() {
   useStore();
   const def = currentPageDef();
-  const runs = def.journal ? state.runs : pageRuns(def);
+  const runs = def.journal ? runsData() : pageRuns(def);
   return runs.map((run) => html`<${RunRow} key=${run.name} run=${run} def=${def} />`);
 }
 
-let mountedRunsBody: HTMLElement | null = null;
 
-function renderRuns() {
-  const tbody = el("journal-body");
-  if (!tbody) return;
-  if (mountedRunsBody !== tbody) {
-    if (mountedRunsBody) render(null as unknown as VNode, mountedRunsBody);
-    mountedRunsBody = tbody;
-    render(html`<${RunsTable} />`, tbody);
-  }
-  notify();
+function RunsBody() {
+  useQuery({ ...runsQuery(), notifyOnChangeProps: ["data"] });
+  return html`<${RunsTable} />`;
 }
 
-/// The note shows up the moment Enter is pressed, then the POST confirms
-/// (or a refresh rolls back) in the background.
-function applyNoteLocally(name: string, note: string | null) {
-  const current = state.runs.find((r) => r.name === name);
-  if (current) current.note = note;
-  renderRuns();
+function usePageBootstrap(withCharts: boolean) {
+  useEffect(() => {
+    resetRenderState();
+    bindAnalysisControls();
+    renderSentLog();
+    applyAccordionState();
+    if (withCharts) void redrawCharts();
+  }, []);
 }
 
-async function saveNote(run: RunSummary, text: string) {
-  applyNoteLocally(run.name, text.trim() || null);
-  try {
-    const saved: NotePayload = await api(`/api/runs/${encodeURIComponent(run.name)}/note`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ note: text }),
-    });
-    applyNoteLocally(run.name, saved.note || null);
-  } catch (e) {
-    console.error(e);
-    alert(`saving note failed: ${e instanceof Error ? e.message : e}`);
-    await refresh();
-  }
+function TunePage() {
+  const def = currentPageDef();
+  usePageBootstrap(true);
+  const runsNote = `<span class="note">${
+    def.experiments ? def.experiments.join(", ") : "all experiments"
+  } — click a row to chart it</span>`;
+  return html`<div class="workspace">
+      <main class="analysis">
+        <section class="runs-section">
+          <${SectionHead} title="runs" tools=${runsNote} />
+          <div class="table-wrap runs-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th></th><th>time</th><th>tag</th>
+                  <th>ambient diff vs previous</th><th>note</th><th></th>
+                </tr>
+              </thead>
+              <tbody id="journal-body"><${RunsBody} /></tbody>
+            </table>
+          </div>
+        </section>
+        <${MetricsSection} />
+        <${SweepMetricsSection} />
+        <${PathSection} />
+        <${FrfSection} />
+        <${RingdownSection} />
+        <${PsdSection} />
+        <${AccelPsdSection} />
+        <${TimeDomainSection} />
+      </main>
+      <aside class="controls">
+        <section class="panel">
+          <div class="section-head"><h2>drive tuning</h2></div>
+          <div id="drive-panel"><${DrivePanel} /></div>
+        </section>
+        <${ConsolePanel} templates=${def.templates} />
+        <${LaunchpadPad} />
+      </aside>
+    </div>
+    <${ContextMenu} />`;
 }
 
-async function deleteRun(run: RunSummary) {
-  try {
-    await api(`/api/runs/${encodeURIComponent(run.name)}`, { method: "DELETE" });
-  } catch (e) {
-    console.error(e);
-    alert(`deleting ${run.name} failed: ${e instanceof Error ? e.message : e}`);
-    return;
+function JournalPage() {
+  usePageBootstrap(false);
+  return html`<div class="workspace single">
+      <main class="analysis">
+        <section class="runs-section">
+          <div class="section-head"><h2>journal — every run</h2></div>
+          <div class="table-wrap journal-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th></th><th>time</th><th>experiment/tag</th>
+                  <th>ambient diff vs previous</th><th>note</th><th></th>
+                </tr>
+              </thead>
+              <tbody id="journal-body"><${RunsBody} /></tbody>
+            </table>
+          </div>
+        </section>
+        <${ConsolePanel} />
+        <${LaunchpadPad} />
+      </main>
+    </div>
+    <${ContextMenu} />`;
+}
+
+export async function reconcileRuns(runs: RunSummary[]) {
+  const known = new Set(runs.map((r) => r.name));
+  for (const name of [...state.selected]) {
+    if (!known.has(name)) state.selected.delete(name);
   }
-  state.runs = state.runs.filter((r) => r.name !== run.name);
-  state.selected.delete(run.name);
-  state.pinned.delete(run.name);
-  state.details.delete(run.name);
-  state.plotSeries.delete(run.name);
+  for (const name of [...state.pinned]) {
+    if (!known.has(name)) state.pinned.delete(name);
+  }
+  autoSelectInitialRuns();
   syncRunColors();
-  renderRuns();
-  redrawCharts();
-}
-
-async function triggerAnalyze(name: string) {
-  await api(`/api/runs/${encodeURIComponent(name)}/analyze`, { method: "POST" });
-  await refresh();
+  notify();
+  await redrawCharts();
 }
 
 function selectedRunNames() {
-  return state.runs.filter((r) => state.selected.has(r.name)).map((r) => r.name);
+  return runsData().filter((r) => state.selected.has(r.name)).map((r) => r.name);
 }
 
-/// Colors stick to runs for as long as they stay selected: deselecting one
-/// frees its color without touching anyone else's, and a newly selected run
-/// takes the least-used palette color instead of everything reshuffling.
 function syncRunColors() {
   for (const name of [...state.runColors.keys()]) {
     if (!state.selected.has(name)) state.runColors.delete(name);
@@ -368,12 +408,9 @@ function runColor(name: string): string {
   return color;
 }
 
-/// First data load: preselect the newest few analyzed runs and prefill the
-/// sweep command from the newest one, so the charts and the re-run box are
-/// populated before any clicking.
 function autoSelectInitialRuns() {
   if (state.autoSelected) return;
-  const withResults = state.runs.filter((r) => r.has_results);
+  const withResults = runsData().filter((r) => r.has_results);
   if (!withResults.length) return;
   state.autoSelected = true;
   for (const run of withResults.slice(0, INITIAL_SELECTED_RUNS)) {
@@ -382,21 +419,5 @@ function autoSelectInitialRuns() {
   if (!state.console.text) loadRerunForm(withResults[0].name);
 }
 
-async function refresh() {
-  const runs: RunSummary[] = await api("/api/runs");
-  state.runs = runs;
-  await Promise.all(runs.map((r) => ensureDetail(r).catch((e) => console.error(e))));
-  const known = new Set(runs.map((r) => r.name));
-  for (const name of [...state.selected]) {
-    if (!known.has(name)) state.selected.delete(name);
-  }
-  for (const name of [...state.pinned]) {
-    if (!known.has(name)) state.pinned.delete(name);
-  }
-  autoSelectInitialRuns();
-  syncRunColors();
-  renderRuns();
-  await redrawCharts();
-}
-
-export { renderRuns, applyNoteLocally, saveNote, deleteRun, triggerAnalyze, selectedRunNames, syncRunColors, leastUsedColor, runColor, autoSelectInitialRuns, refresh };
+export { selectedRunNames, runColor, TunePage, JournalPage };
+export { startRunsPolling } from "./queries/runs";

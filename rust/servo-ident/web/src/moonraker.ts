@@ -3,6 +3,8 @@ import { setConsoleValue } from "./console";
 import { fetchMacroHelp } from "./docs";
 import { state } from "./state";
 import type { SentEntry } from "./state";
+import { getGcodeStore, postEmergencyStop, postGcodeScript } from "./api/moonraker";
+import { moonrakerHealthCache, fetchMoonrakerHealth, invalidateMacroHelp } from "./queries/moonraker";
 
 // --- moonraker plumbing + session log ---------------------------------------
 
@@ -16,15 +18,16 @@ function moonrakerUrl(): string {
 async function pollMoonrakerHealth() {
   const badge = el("moonraker-health");
   if (!badge) return;
+  const base = moonrakerUrl();
+  const prev = moonrakerHealthCache(base);
   try {
-    const resp = await fetch(`${moonrakerUrl()}/server/info`);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const info = (await resp.json()).result;
+    const health = await fetchMoonrakerHealth(base);
     badge.className = "mr-health ok";
-    badge.textContent = `klippy ${info.klippy_state || "unknown"}`;
-    const ks = info.klippy_state || "unknown";
-    if (ks === "ready" && state.help.klippyState !== "ready") fetchMacroHelp();
-    state.help.klippyState = ks;
+    badge.textContent = `klippy ${health.klippyState}`;
+    if (health.klippyState === "ready" && prev?.klippyState !== "ready") {
+      invalidateMacroHelp(base);
+      fetchMacroHelp();
+    }
   } catch (e) {
     badge.className = "mr-health err";
     badge.textContent = "moonraker unreachable — bad URL, moonraker down, or origin missing from cors_domains";
@@ -36,8 +39,8 @@ async function pollMoonrakerHealth() {
 async function emergencyStop() {
   const entry: SentEntry = { time: new Date().toISOString(), label: "e-stop", lines: ["emergency_stop"], results: [] };
   try {
-    const resp = await fetch(`${moonrakerUrl()}/printer/emergency_stop`, { method: "POST" });
-    entry.results.push({ ok: resp.ok, status: resp.status });
+    const r = await postEmergencyStop(moonrakerUrl());
+    entry.results.push({ ok: r.ok, status: r.status });
   } catch (e) {
     entry.results.push({ ok: false, status: 0 });
   }
@@ -97,19 +100,15 @@ function renderSentLog() {
 /// Timestamps in Moonraker's gcode store are server clock, so diffing
 /// against its own latest entry needs no client/server clock agreement.
 async function latestGcodeStoreTime(base: string): Promise<number> {
-  const resp = await fetch(`${base}/server/gcode_store?count=1`);
-  if (!resp.ok) throw new Error(`gcode_store HTTP ${resp.status}`);
-  const store = (await resp.json()).result.gcode_store;
+  const store = await getGcodeStore(base, 1);
   return store.length ? store[store.length - 1].time : 0;
 }
 
 async function fetchGcodeResponses(base: string, sinceTime: number): Promise<string[]> {
-  const resp = await fetch(`${base}/server/gcode_store?count=500`);
-  if (!resp.ok) throw new Error(`gcode_store HTTP ${resp.status}`);
-  const store = (await resp.json()).result.gcode_store;
+  const store = await getGcodeStore(base, 500);
   return store
-    .filter((e: { type: string; time: number }) => e.type === "response" && e.time > sinceTime)
-    .map((e: { message: string }) => e.message);
+    .filter((e) => e.type === "response" && e.time > sinceTime)
+    .map((e) => e.message);
 }
 
 /// Sends `lines` (already-built gcode) through the shared Moonraker
@@ -125,7 +124,6 @@ async function runGcode(lines: string[], label: string) {
   const entry: SentEntry = { time: new Date().toISOString(), label, lines: [], results: [], responses: [] };
   state.sentLog.push(entry);
   for (const line of lines) {
-    const url = `${base}/printer/gcode/script?script=${encodeURIComponent(line)}`;
     entry.lines.push(line);
     let sentAt: number | null = null;
     try {
@@ -135,13 +133,12 @@ async function runGcode(lines: string[], label: string) {
     }
     let ok = false;
     try {
-      const resp = await fetch(url, { method: "POST" });
-      const text = await resp.text();
-      if (!resp.ok && statusEl) {
-        statusEl.innerHTML += `<div class="status-err">${line} -> HTTP ${resp.status} ${text.slice(0, 200)}</div>`;
+      const r = await postGcodeScript(base, line);
+      if (!r.ok && statusEl) {
+        statusEl.innerHTML += `<div class="status-err">${line} -> HTTP ${r.status} ${r.text.slice(0, 200)}</div>`;
       }
-      ok = resp.ok;
-      entry.results.push({ ok: resp.ok, status: resp.status });
+      ok = r.ok;
+      entry.results.push({ ok: r.ok, status: r.status });
     } catch (e) {
       if (statusEl) statusEl.innerHTML += `<div class="status-err">${line} -> ${e}</div>`;
       entry.results.push({ ok: false, status: 0 });
