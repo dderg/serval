@@ -13,6 +13,10 @@ path = "src/bin/servo-ident.rs"
 name = "servo-cal"
 path = "src/bin/servo-cal.rs"
 
+[[bin]]
+name = "servo-openapi"
+path = "src/bin/servo-openapi.rs"
+
 [dependencies]
 flate2 = "1"
 libm = { version = "0.2", default-features = false }

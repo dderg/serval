@@ -1,10 +1,13 @@
+import { html } from "htm/preact";
+import { useEffect, useRef } from "preact/hooks";
 import { el } from "./api";
 import { blankCanvas, createPathView, fitViewport, tickStepMm } from "./path-view";
-import type { Viewport } from "./path-view";
+import type { PathView, Viewport } from "./path-view";
 import { liveDrawCount, state } from "./state";
 import type { LiveSeries } from "./state";
-import { queryClient, queryKeys } from "./query-client";
-import type { SpatialFrame, DriveState } from "./wire";
+import { driveStateData } from "./queries/drive";
+import { useStore } from "./store";
+import type { SpatialFrame } from "./wire";
 
 // --- live spatial view -------------------------------------------------------
 //
@@ -143,7 +146,7 @@ function drawSpatialView() {
   const canvas = el<HTMLCanvasElement>("live-spatial-canvas");
   if (!canvas) return;
   liveView.bind(canvas, el("live-spatial-fit"), drawSpatialView);
-  const drive = queryClient.getQueryData<DriveState>(queryKeys.driveState);
+  const drive = driveStateData();
   const coeffs = spatialCoeffs(drive?.spatial, drive?.slots, state.live.countsPerMm);
   if (typeof coeffs === "string") {
     blankCanvas(canvas);
@@ -175,5 +178,74 @@ function drawSpatialView() {
   setNote(`${deviationText([cmdX, cmdY, actX, actY])}${zoomHint}`);
 }
 
-export { spatialCoeffs, projectRow, fitViewport, tickStepMm, drawSpatialView };
+interface LiveSpatialSectionProps {
+  frozen: boolean;
+  freezeTruncated: boolean;
+  onToggleFreeze: () => void;
+}
+
+function LiveSpatialSection({ frozen, freezeTruncated, onToggleFreeze }: LiveSpatialSectionProps) {
+  useStore();
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const fitRef = useRef<HTMLButtonElement>(null);
+  const noteRef = useRef<HTMLSpanElement>(null);
+  const viewRef = useRef<PathView | null>(null);
+  if (!viewRef.current) viewRef.current = createPathView();
+  const view = viewRef.current;
+  const setNote = (text: string) => {
+    if (noteRef.current) noteRef.current.textContent = text;
+  };
+  const redraw = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const drive = driveStateData();
+    const coeffs = spatialCoeffs(drive?.spatial, drive?.slots, state.live.countsPerMm);
+    if (typeof coeffs === "string") {
+      blankCanvas(canvas);
+      setNote(coeffs);
+      return;
+    }
+    const n = liveDrawCount();
+    const cmdX = projectRow(coeffs.x, state.live.perDrive, n, "target");
+    const cmdY = projectRow(coeffs.y, state.live.perDrive, n, "target");
+    const actX = projectRow(coeffs.x, state.live.perDrive, n, "pos");
+    const actY = projectRow(coeffs.y, state.live.perDrive, n, "pos");
+    const rendered = view.render(canvas, [
+      { xs: cmdX, ys: cmdY, color: CMD_COLOR, width: 1.25 },
+      { xs: actX, ys: actY, color: ACT_COLOR, width: 1.25 },
+    ]);
+    if (!rendered) {
+      setNote("waiting for samples…");
+      return;
+    }
+    const { ctx, view: vp, w, h } = rendered;
+    drawMarker(ctx, vp, w, h, lastPoint(cmdX, cmdY), CMD_COLOR, false);
+    drawMarker(ctx, vp, w, h, lastPoint(actX, actY), ACT_COLOR, true);
+    drawLegend(ctx, w);
+    const zoomHint = view.isManual()
+      ? ""
+      : " — ctrl+wheel zooms, scroll or drag pans, double-click refits";
+    setNote(`${deviationText([cmdX, cmdY, actX, actY])}${zoomHint}`);
+  };
+  const redrawRef = useRef(redraw);
+  redrawRef.current = redraw;
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    view.bind(canvas, fitRef.current, () => redrawRef.current());
+    redrawRef.current();
+  });
+  const badge = frozen
+    ? freezeTruncated
+      ? "FROZEN — buffer cap hit, oldest frozen samples dropped"
+      : "FROZEN"
+    : "";
+  return html`<section class="live-section">
+    <div class="section-head"><h2>live toolpath — commanded vs actual</h2></div>
+    <div class="section-tools"><button id="live-freeze-btn" title="space toggles" onClick=${onToggleFreeze}>${frozen ? "resume" : "freeze"}</button><span class="note live-timing-bad" id="live-freeze-badge">${badge}</span><button id="live-spatial-fit" ref=${fitRef}>fit</button><span class="note" id="live-spatial-note" ref=${noteRef}>waiting for the tap…</span></div>
+    <div class="spatial-box"><canvas id="live-spatial-canvas" ref=${canvasRef}></canvas></div>
+  </section>`;
+}
+
+export { spatialCoeffs, projectRow, fitViewport, tickStepMm, drawSpatialView, LiveSpatialSection };
 export type { SpatialCoeffs, Viewport };

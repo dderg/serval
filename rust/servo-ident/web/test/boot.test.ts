@@ -1,7 +1,10 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { registerDom, installFetchStub, indexHtmlBody, RUN_NAME } from "./dom";
 import type * as ApiMod from "../src/api";
-import type * as QueryMod from "../src/query-client";
+import type * as ClientMod from "../src/queries/client";
+import type * as RunsQueryMod from "../src/queries/runs";
+import type * as PathQueryMod from "../src/queries/path";
+import type * as StrainQueryMod from "../src/queries/strain";
 import type * as RunsMod from "../src/runs";
 
 registerDom();
@@ -36,12 +39,16 @@ async function settle() {
 }
 
 let api: typeof ApiMod;
-let query: typeof QueryMod;
+let client: typeof ClientMod;
+let runsQ: typeof RunsQueryMod;
+let pathQ: typeof PathQueryMod;
+let strainQ: typeof StrainQueryMod;
 let runs: typeof RunsMod;
 
 async function loadRuns() {
   await settle();
-  await query.queryClient.refetchQueries({ queryKey: query.queryKeys.runs, type: "all" });
+  await client.queryClient.refetchQueries({ queryKey: runsQ.runKeys.all, type: "all" });
+  await settle();
   await settle();
 }
 
@@ -52,13 +59,19 @@ beforeAll(async () => {
   // is registered and the fixture DOM + fetch stub exist. Static imports would
   // execute before this setup — the loading order is the whole point here.
   api = await import("../src/api");
-  query = await import("../src/query-client");
+  client = await import("../src/queries/client");
+  runsQ = await import("../src/queries/runs");
+  pathQ = await import("../src/queries/path");
+  strainQ = await import("../src/queries/strain");
   runs = await import("../src/runs");
   await import("../src/boot");
   await loadRuns();
 });
 
-afterAll(() => {
+afterAll(async () => {
+  const { render } = await import("htm/preact");
+  const app = document.getElementById("app");
+  if (app) render(null, app);
   for (const id of intervals) clearInterval(id);
   console.error = realConsoleError;
 });
@@ -116,13 +129,13 @@ test("an unchanged runs refetch causes no drive/journal churn and keeps active i
 });
 
 test("a newly appeared run shows up on the next query poll", async () => {
-  const existing = api.runsData();
+  const existing = runsQ.runsData();
   const newRun = { ...existing[0], name: "cal_attempt4", has_results: false, verdict: null, note: null };
   const stubFetch = globalThis.fetch;
   const json = (body: string) =>
     new Response(body, { status: 200, headers: { "Content-Type": "application/json" } });
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = String(input);
+    const url = input instanceof Request ? input.url : String(input);
     const path = url.startsWith("http") ? new URL(url).pathname : url.split("?")[0];
     if (path === "/api/runs") return json(JSON.stringify([...existing, newRun]));
     if (path === `/api/runs/${newRun.name}/manifest`) return json("null");
@@ -131,7 +144,7 @@ test("a newly appeared run shows up on the next query poll", async () => {
   try {
     await loadRuns();
     expect(consoleErrors).toEqual([]);
-    expect(api.runsData().some((r) => r.name === newRun.name)).toBe(true);
+    expect(runsQ.runsData().some((r) => r.name === newRun.name)).toBe(true);
     expect(document.querySelectorAll("#journal-body tr").length).toBe(2);
   } finally {
     globalThis.fetch = stubFetch;
@@ -141,13 +154,13 @@ test("a newly appeared run shows up on the next query poll", async () => {
 });
 
 test("run data is cached in the query client, keyed by the fixture run", () => {
-  expect(api.runsData().map((r) => r.name)).toEqual([RUN_NAME]);
-  expect(api.detailData(RUN_NAME)).toBeDefined();
-  expect(query.queryClient.getQueryData(query.queryKeys.plotSeries(RUN_NAME))).toBeDefined();
+  expect(runsQ.runsData().map((r) => r.name)).toEqual([RUN_NAME]);
+  expect(runsQ.detailData(RUN_NAME)).toBeDefined();
+  expect(client.queryClient.getQueryData(runsQ.runKeys.plot(RUN_NAME))).toBeDefined();
 });
 
 function runsQuery() {
-  const q = query.queryClient.getQueryCache().find({ queryKey: query.queryKeys.runs });
+  const q = client.queryClient.getQueryCache().find({ queryKey: runsQ.runKeys.all });
   expect(q).toBeDefined();
   return q!;
 }
@@ -169,16 +182,71 @@ test("startRunsPolling is idempotent — a second call adds no observer", () => 
 });
 
 test("deleting a run drops every ['runs', name] cache, not just detail and plot", async () => {
-  const cache = query.queryClient.getQueryCache();
-  query.queryClient.setQueryData(query.queryKeys.runDetail(RUN_NAME), { probe: "detail" });
-  query.queryClient.setQueryData(query.queryKeys.plotSeries(RUN_NAME), { probe: "plot" });
-  query.queryClient.setQueryData(query.queryKeys.runPath(RUN_NAME), { probe: "path" });
-  query.queryClient.setQueryData(query.queryKeys.strain(RUN_NAME), { probe: "strain" });
-  query.queryClient.removeQueries({ queryKey: ["runs", RUN_NAME] });
+  const cache = client.queryClient.getQueryCache();
+  client.queryClient.setQueryData(runsQ.runKeys.detail(RUN_NAME), { probe: "detail" });
+  client.queryClient.setQueryData(runsQ.runKeys.plot(RUN_NAME), { probe: "plot" });
+  client.queryClient.setQueryData(pathQ.runPathKey(RUN_NAME), { probe: "path" });
+  client.queryClient.setQueryData(strainQ.strainKey(RUN_NAME), { probe: "strain" });
+  client.queryClient.removeQueries({ queryKey: ["runs", RUN_NAME] });
   await settle();
-  expect(cache.find({ queryKey: query.queryKeys.runDetail(RUN_NAME) })).toBeUndefined();
-  expect(cache.find({ queryKey: query.queryKeys.plotSeries(RUN_NAME) })).toBeUndefined();
-  expect(cache.find({ queryKey: query.queryKeys.runPath(RUN_NAME) })).toBeUndefined();
-  expect(cache.find({ queryKey: query.queryKeys.strain(RUN_NAME) })).toBeUndefined();
-  expect(cache.find({ queryKey: query.queryKeys.runs })).toBeDefined();
+  expect(cache.find({ queryKey: runsQ.runKeys.detail(RUN_NAME) })).toBeUndefined();
+  expect(cache.find({ queryKey: runsQ.runKeys.plot(RUN_NAME) })).toBeUndefined();
+  expect(cache.find({ queryKey: pathQ.runPathKey(RUN_NAME) })).toBeUndefined();
+  expect(cache.find({ queryKey: strainQ.strainKey(RUN_NAME) })).toBeUndefined();
+  expect(cache.find({ queryKey: runsQ.runKeys.all })).toBeDefined();
+});
+
+async function goto(page: string) {
+  location.hash = `#/${page}`;
+  window.dispatchEvent(new Event("hashchange"));
+  await settle();
+  await settle();
+}
+
+test("one App mount: hash routing swaps page components under a single persistent topbar", async () => {
+  expect(document.querySelectorAll("#app").length).toBe(1);
+  expect(document.querySelectorAll("header.topbar").length).toBe(1);
+  expect(document.querySelectorAll("#page-root").length).toBe(1);
+  const topbar = document.querySelector("header.topbar");
+  const pageRoot = document.getElementById("page-root");
+
+  await goto("journal");
+  expect(document.querySelector(".journal-wrap")).not.toBeNull();
+  expect(document.getElementById("metrics-table")).toBeNull();
+
+  await goto("docs");
+  expect(document.querySelector(".docs-section")).not.toBeNull();
+  expect(document.getElementById("launchpad-body")).not.toBeNull();
+
+  await goto("strain");
+  expect(document.getElementById("strain-run-body")).not.toBeNull();
+
+  await goto("live");
+  expect(document.querySelector(".live-section")).not.toBeNull();
+
+  await goto("tune");
+  expect(document.querySelector(".metrics-section")).not.toBeNull();
+  expect(document.getElementById("psd-charts")).not.toBeNull();
+
+  expect(document.querySelector("header.topbar") === topbar).toBe(true);
+  expect(document.getElementById("page-root") === pageRoot).toBe(true);
+  expect(document.querySelectorAll("header.topbar").length).toBe(1);
+  expect(consoleErrors).toEqual([]);
+});
+
+test("repeated route changes do not accumulate query observers or destroy session query data", async () => {
+  const runData = client.queryClient.getQueryData(runsQ.runKeys.all);
+  await goto("tune");
+  const observersBefore = runsQuery().getObserversCount();
+  for (let i = 0; i < 3; i++) {
+    await goto("journal");
+    await goto("tune");
+  }
+  expect(runsQuery().getObserversCount()).toBe(observersBefore);
+  const pollers = runsQuery().observers.filter((o) => o.options.refetchInterval === 5000);
+  expect(pollers.length).toBe(1);
+  expect(document.querySelectorAll("header.topbar").length).toBe(1);
+  expect(document.querySelectorAll("#moonraker-url").length).toBe(1);
+  expect(client.queryClient.getQueryData(runsQ.runKeys.all)).toBe(runData);
+  expect(consoleErrors).toEqual([]);
 });

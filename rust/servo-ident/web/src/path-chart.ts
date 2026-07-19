@@ -1,10 +1,11 @@
-import { api, el, runData } from "./api";
+import { el } from "./api";
 import { fillFilterChips, mixColor } from "./charts-core";
 import { createPathView, nearestTrace } from "./path-view";
 import type { PathTrace } from "./path-view";
-import { queryClient, queryKeys } from "./query-client";
+import { ensureFullPaths, freshPathError, isPathPending, readyFullPaths } from "./queries/path";
 import { PALETTE, state } from "./state";
-import type { PlotPath, PlotSeries, RunPath } from "./wire";
+import type { PlotPath } from "./wire";
+import type { PlotSeries, RunPath } from "./api/runs";
 
 // --- run toolpath chart (tune page) ------------------------------------------
 //
@@ -18,8 +19,8 @@ import type { PlotPath, PlotSeries, RunPath } from "./wire";
 //
 // plot_series carries a ~4000-point preview of each step's path; the first
 // time the section is visible for a selected run, the full-resolution path
-// is fetched from /api/runs/<name>/path (cached per run mtime under
-// queryKeys.runPath) and the traces are rebuilt once from it. Until it lands —
+// is fetched and cached per run mtime by queries/path (ensureFullPaths)
+// and the traces are rebuilt once from it. Until it lands —
 // or if the fetch fails — the preview keeps rendering, with the load state
 // surfaced in the section note.
 
@@ -31,12 +32,6 @@ const HOVER_REACH_PX = 8;
 const HOVER_DIM = 0.6;
 const HOVER_WIDTH_BONUS = 0.75;
 const BG_COLOR = "#0d1117";
-
-interface PathCacheEntry {
-  mtime_utc: string | null;
-  data: RunPath | null;
-  error: string | null;
-}
 
 interface PathEntry {
   run: string;
@@ -105,7 +100,6 @@ function pathTraces(
 }
 
 const runView = createPathView();
-const pendingFetches = new Set<string>();
 let pairFilter: Set<string> | null = null;
 let lastRender: { names: string[]; plots: PlotSeries[]; steps: string[] } | null = null;
 let unfoldListenerBound = false;
@@ -113,58 +107,14 @@ let hoverListenersBound = false;
 let current: { entries: PathEntry[]; statusNote: string } = { entries: [], statusNote: "" };
 let hover: { entryIndex: number; px: number; py: number } | null = null;
 
-function freshFullEntry(name: string): PathCacheEntry | null {
-  const run = runData(name);
-  const cached = queryClient.getQueryData<PathCacheEntry>(queryKeys.runPath(name));
-  if (cached && run && cached.mtime_utc === run.mtime_utc) return cached;
-  return null;
-}
-
-function readyFullPaths(names: string[]): Map<string, RunPath> {
-  const map = new Map<string, RunPath>();
-  for (const name of names) {
-    const entry = freshFullEntry(name);
-    if (entry && entry.data) map.set(name, entry.data);
-  }
-  return map;
-}
-
 function rerenderLast() {
   if (lastRender) renderPathChart(lastRender.names, lastRender.plots, lastRender.steps);
 }
 
-function ensureFullPaths(names: string[]) {
-  for (const name of names) {
-    if (freshFullEntry(name) || pendingFetches.has(name)) continue;
-    pendingFetches.add(name);
-    const run = runData(name);
-    const mtime = run ? run.mtime_utc : null;
-    api<RunPath>(`/api/runs/${encodeURIComponent(name)}/path`)
-      .then((data) => {
-        queryClient.setQueryData<PathCacheEntry>(queryKeys.runPath(name), {
-          mtime_utc: mtime,
-          data,
-          error: null,
-        });
-      })
-      .catch((e) => {
-        queryClient.setQueryData<PathCacheEntry>(queryKeys.runPath(name), {
-          mtime_utc: mtime,
-          data: null,
-          error: String(e),
-        });
-      })
-      .finally(() => {
-        pendingFetches.delete(name);
-        rerenderLast();
-      });
-  }
-}
-
 function fullResNote(names: string[], full: Map<string, RunPath>): string {
-  if (names.some((n) => pendingFetches.has(n))) return " — loading full-resolution path…";
-  const failed = names.map(freshFullEntry).find((e) => e && e.error);
-  if (failed) return ` — full-res path failed (showing preview): ${failed.error}`;
+  if (names.some(isPathPending)) return " — loading full-resolution path…";
+  const failed = names.map(freshPathError).find((e) => e);
+  if (failed) return ` — full-res path failed (showing preview): ${failed}`;
   if ([...full.values()].some((rp) => rp.steps.some((s) => s.truncated))) {
     return " — full-res path truncated by the server point cap";
   }
@@ -304,7 +254,7 @@ function renderPathChart(names: string[], plots: PlotSeries[], steps: string[]) 
   bindUnfoldListener();
   bindHoverListeners(canvas);
   const namesWithPath = names.filter((name, i) => plots[i].steps.some((s) => s.path));
-  if (!section.classList.contains("collapsed")) ensureFullPaths(namesWithPath);
+  if (!section.classList.contains("collapsed")) ensureFullPaths(namesWithPath, rerenderLast);
   current = { entries, statusNote: fullResNote(namesWithPath, full) };
   hover = null;
   renderLegend(canvas);

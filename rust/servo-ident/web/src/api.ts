@@ -1,36 +1,15 @@
-import { state } from "./state";
-import { queryClient, queryKeys } from "./query-client";
-import type { Manifest, ManifestAmbient, NotchStateValue, PlotSeries, Results, RunDetail, RunSummary } from "./wire";
-import type { PageDef } from "./state";
-
-async function api<T = unknown>(path: string, opts?: RequestInit): Promise<T> {
-  const resp = await fetch(path, opts);
-  const text = await resp.text();
-  if (!resp.ok) {
-    throw new Error(`${path}: HTTP ${resp.status}: ${text}`);
-  }
-  return (text.length ? JSON.parse(text) : null) as T;
-}
+import type { ManifestAmbient, NotchStateValue } from "./wire";
+import type { Manifest } from "./api/runs";
 
 function el<T extends HTMLElement = HTMLElement>(id: string): T | null {
   return document.getElementById(id) as T | null;
 }
 
-/// Same lookup for elements the current page is guaranteed to have —
-/// a missing id is a template bug, so it throws instead of returning null.
 function mustEl<T extends HTMLElement = HTMLElement>(id: string): T {
   const found = el<T>(id);
   if (!found) throw new Error(`#${id}: element missing from the page`);
   return found;
 }
-
-// --- render gating ----------------------------------------------------------
-//
-// Every periodic render short-circuits through payloadUnchanged: a section
-// whose inputs serialize to the same signature as its last render keeps its
-// DOM (and any in-progress interaction) untouched. renderPage wipes the DOM
-// wholesale, so it calls resetRenderState to drop every signature and let
-// registered hooks discard DOM-bound caches.
 
 const renderSigs = new Map<string, string>();
 const renderResetHooks: (() => void)[] = [];
@@ -49,57 +28,6 @@ function onRenderReset(hook: () => void): void {
 function resetRenderState(): void {
   renderSigs.clear();
   for (const hook of renderResetHooks) hook();
-}
-
-function runsData(): RunSummary[] {
-  return queryClient.getQueryData<RunSummary[]>(queryKeys.runs) ?? [];
-}
-
-function runData(name: string): RunSummary | undefined {
-  return runsData().find((r) => r.name === name);
-}
-
-function runDataSig(names: string[]) {
-  return names.map((n) => {
-    const run = runData(n);
-    return [n, run ? run.mtime_utc : null, state.runColors.get(n) || null];
-  });
-}
-
-// --- run data ---------------------------------------------------------------
-
-function detailData(name: string): RunDetail | undefined {
-  return queryClient.getQueryData<RunDetail>(queryKeys.runDetail(name));
-}
-
-async function ensureDetail(run: RunSummary): Promise<RunDetail> {
-  const cached = detailData(run.name);
-  if (cached && cached.mtime_utc === run.mtime_utc && cached.has_results === run.has_results) {
-    return cached;
-  }
-  const manifest = await api<Manifest | null>(`/api/runs/${encodeURIComponent(run.name)}/manifest`);
-  const results = run.has_results
-    ? await api<Results | null>(`/api/runs/${encodeURIComponent(run.name)}/results`)
-    : null;
-  const detail: RunDetail = {
-    mtime_utc: run.mtime_utc,
-    has_results: run.has_results,
-    manifest,
-    results,
-  };
-  queryClient.setQueryData(queryKeys.runDetail(run.name), detail);
-  return detail;
-}
-
-async function ensurePlotSeries(name: string): Promise<PlotSeries> {
-  const run = runData(name);
-  const cached = queryClient.getQueryData<{ mtime_utc: string | null; data: PlotSeries }>(
-    queryKeys.plotSeries(name),
-  );
-  if (cached && run && cached.mtime_utc === run.mtime_utc) return cached.data;
-  const data = await api<PlotSeries>(`/api/runs/${encodeURIComponent(name)}/plot_series`);
-  queryClient.setQueryData(queryKeys.plotSeries(name), { mtime_utc: run ? run.mtime_utc : null, data });
-  return data;
 }
 
 type FlatAmbient = Record<string, Record<string, number | string | NotchStateValue>>;
@@ -136,9 +64,6 @@ function motorCount(journal: FlatAmbient): number {
 }
 
 function ambientDiff(prevManifest: Manifest | null, curManifest: Manifest | null): string {
-  // Notch state only diffs when both runs recorded it - a null/legacy
-  // previous manifest would otherwise flood the column with ?->value
-  // lines for every notch field.
   const bothNotches = !!(ambientNotches(prevManifest) && ambientNotches(curManifest));
   const prev = flatAmbient(prevManifest, bothNotches);
   const cur = flatAmbient(curManifest, bothNotches);
@@ -162,15 +87,9 @@ function ambientDiff(prevManifest: Manifest | null, curManifest: Manifest | null
   return parts.join(", ");
 }
 
-function pageRuns(def: PageDef): RunSummary[] {
-  const experiments = def.experiments;
-  if (!experiments) return runsData();
-  return runsData().filter((r) => experiments.includes(r.experiment));
-}
-
 function shortTime(mtimeUtc: string): string {
   const m = /T(\d{2}:\d{2}:\d{2})/.exec(mtimeUtc);
   return m ? m[1] : mtimeUtc;
 }
 
-export { api, el, mustEl, payloadUnchanged, onRenderReset, resetRenderState, runsData, runData, runDataSig, detailData, ensureDetail, ensurePlotSeries, journalParams, ambientNotches, flatAmbient, motorCount, ambientDiff, pageRuns, shortTime };
+export { el, mustEl, payloadUnchanged, onRenderReset, resetRenderState, journalParams, ambientNotches, flatAmbient, motorCount, ambientDiff, shortTime };

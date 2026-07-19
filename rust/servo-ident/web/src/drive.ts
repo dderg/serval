@@ -1,11 +1,11 @@
-import { html, render } from "htm/preact";
-import { useQuery } from "@tanstack/preact-query";
-import { api, detailData, el, mustEl } from "./api";
+import { html } from "htm/preact";
+import { el, mustEl } from "./api";
+import { detailData } from "./queries/runs";
 import { MotorValues, valuesAgree } from "./motor-values";
 import type { MotorValueEntry } from "./motor-values";
 import { setConsoleValue } from "./console";
 import { runGcode } from "./moonraker";
-import { queryClient, queryKeys, QueryRoot } from "./query-client";
+import { driveData, currentDriveAgeS, fetchDriveState, useDriveState } from "./queries/drive";
 import { currentPageDef } from "./shell";
 import { state } from "./state";
 import { notify, useStore } from "./store";
@@ -29,8 +29,8 @@ import type { VNode } from "preact";
 // changed-cell diffing, SERVO_TUNE line building (always with an explicit
 // MOTORS= list) — the logic a Rust test asserts is present and exercisable
 // without a browser; the preact components that render the grid follow.
-// Preact owns #drive-panel: renderDriveGroups() mounts once per page build,
-// then every state mutation just notifies the store.
+// Preact owns #drive-panel via <${DrivePanel} />; every state mutation just
+// notifies the store.
 
 const GROUP_ORDER = ["gains", "filters", "notch", "speed_observer", "disturbance_observer"];
 const OTHER_GROUP = "other";
@@ -66,14 +66,6 @@ function pinnedEntries(configPins: DriveState["config_pins"], cCode: string): Re
     if (Object.prototype.hasOwnProperty.call(pins, cCode)) out[motor] = pins[cCode];
   }
   return out;
-}
-
-/// Effective raw value of one grid cell: the session's pending edit if any,
-/// else the drive's reading from the last dump.
-function driveData(): DriveState {
-  const data = queryClient.getQueryData<DriveState>(queryKeys.driveState);
-  if (!data) throw new Error("drive state not loaded");
-  return data;
 }
 
 function cellRaw(param: DriveParam, motor: string): number {
@@ -140,13 +132,6 @@ function formatAge(ageS: number): string {
   return `${m}m${s}s`;
 }
 
-function currentDriveAgeS(): number | null {
-  const data = queryClient.getQueryData<DriveState>(queryKeys.driveState);
-  const updatedAt = queryClient.getQueryState(queryKeys.driveState)?.dataUpdatedAt;
-  if (!data || !updatedAt) return null;
-  return data.age_s + (Date.now() - updatedAt) / 1000;
-}
-
 /// The refresh button must render even with no drive state at all —
 /// SERVO_DUMP_TUNING is what creates drive_state.json in the first place,
 /// so hiding the button behind loaded data would deadlock a fresh bench.
@@ -178,7 +163,7 @@ function stageCellEdit(param: DriveParam, motorSel: string, rawText: string) {
   const existing = { ...(state.drive.pending[param.name] || {}) };
   for (const m of targets) existing[m] = raw;
   state.drive.pending[param.name] = existing;
-  renderDriveGroups();
+  notify();
 }
 
 function paramMotorEntries(param: DriveParam): MotorValueEntry[] {
@@ -198,7 +183,7 @@ function ParamMotorValues({ param }: { param: DriveParam }) {
     onToggleExpanded=${(open: boolean) => {
       if (open) state.drive.expandedParams.add(param.name);
       else state.drive.expandedParams.delete(param.name);
-      renderDriveGroups();
+      notify();
     }}
     onStage=${(motorSel: string, text: string) => stageCellEdit(param, motorSel, text)}
   />`;
@@ -329,23 +314,34 @@ function DriveGroups() {
 
 function DrivePanel() {
   useStore();
-  const { data, error } = useQuery({
-    queryKey: queryKeys.driveState,
-    queryFn: () => api<DriveState>("/api/drive_state"),
-  });
+  const { data, error } = useDriveState();
   const changed = data ? diffChangedParams(data.params, data.motors, state.drive.pending) : [];
   const lines = buildServoTuneCommands(changed);
+  let driveContent: VNode;
+  if (error) {
+    driveContent = html`<p class="status-err">drive state failed to load: ${String(
+      (error as Error).message ?? error
+    )}</p>`;
+  } else if (data) {
+    driveContent = html`<${DriveGroups} />`;
+  } else {
+    driveContent = html`<p class="note">
+      no drive state yet — press refresh in the top bar to read every mapped parameter off
+      the drives (SERVO_DUMP_TUNING)
+    </p>`;
+  }
+
+  let pendingCountText: string;
+  if (!data) {
+    pendingCountText = "";
+  } else if (lines.length) {
+    pendingCountText = `${lines.length} write(s) pending`;
+  } else {
+    pendingCountText = "no changes pending";
+  }
+
   return html`<div id="drive-groups">
-      ${error
-        ? html`<p class="status-err">drive state failed to load: ${String(
-            (error as Error).message ?? error
-          )}</p>`
-        : data
-          ? html`<${DriveGroups} />`
-          : html`<p class="note">
-              no drive state yet — press refresh in the top bar to read every mapped parameter off
-              the drives (SERVO_DUMP_TUNING)
-            </p>`}
+      ${driveContent}
     </div>
     <div id="pending-preview" class="pending-preview">
       ${lines.map((l) => html`<div key=${l} class="pending-line">${l}</div>`)}
@@ -354,30 +350,10 @@ function DrivePanel() {
       <button id="drive-apply-btn" disabled=${lines.length === 0} onClick=${applyDriveChanges}>
         apply
       </button>
-      <span class="note" id="drive-changed-count">
-        ${data ? (lines.length ? `${lines.length} write(s) pending` : "no changes pending") : ""}
-      </span>
+      <span class="note" id="drive-changed-count">${pendingCountText}</span>
     </div>`;
 }
 
-let mountedDrivePanel: HTMLElement | null = null;
-
-function renderDriveGroups() {
-  const container = el("drive-panel");
-  if (container && mountedDrivePanel !== container) {
-    if (mountedDrivePanel) render(null as unknown as VNode, mountedDrivePanel);
-    mountedDrivePanel = container;
-    render(html`<${QueryRoot}><${DrivePanel} /><//>`, container);
-  }
-  notify();
-}
-
-function fetchDriveState(): Promise<DriveState> {
-  return queryClient.fetchQuery({
-    queryKey: queryKeys.driveState,
-    queryFn: () => api<DriveState>("/api/drive_state"),
-  });
-}
 
 async function refreshDriveState() {
   const statusEl = el("drive-refresh-status");
@@ -396,7 +372,7 @@ async function refreshDriveState() {
     if (data.age_s < priorAge) {
       state.drive.pending = {};
       renderDriveBanner();
-      renderDriveGroups();
+      notify();
       return;
     }
   }
@@ -417,7 +393,7 @@ async function applyDriveChanges() {
   await fetchDriveState();
   state.drive.pending = {};
   renderDriveBanner();
-  renderDriveGroups();
+  notify();
 }
 
 // --- sweep re-run ---------------------------------------------------------
@@ -500,4 +476,4 @@ function loadRerunForm(name: string) {
   setConsoleValue(reconstructCommand(detail.manifest), false);
 }
 
-export { GROUP_ORDER, OTHER_GROUP, RETIRED_PARAMS, DRIVE_REFRESH_POLL_MS, DRIVE_REFRESH_TIMEOUT_MS, paramGroupSection, groupParams, motorNames, motorRawValues, valuesAgree, pinnedEntries, cellRaw, diffChangedParams, buildServoTuneCommands, paramByName, formatAge, currentDriveAgeS, renderDriveBanner, shortMotorLabel, stageCellEdit, NOTCH_ROW_KINDS, notchMatrix, renderDriveGroups, refreshDriveState, applyDriveChanges, displayParamName, strokeSuffix, reconstructCommand, loadRerunForm, fetchDriveState };
+export { GROUP_ORDER, OTHER_GROUP, RETIRED_PARAMS, DRIVE_REFRESH_POLL_MS, DRIVE_REFRESH_TIMEOUT_MS, paramGroupSection, groupParams, motorNames, motorRawValues, valuesAgree, pinnedEntries, cellRaw, diffChangedParams, buildServoTuneCommands, paramByName, formatAge, renderDriveBanner, shortMotorLabel, stageCellEdit, NOTCH_ROW_KINDS, notchMatrix, refreshDriveState, applyDriveChanges, displayParamName, strokeSuffix, reconstructCommand, loadRerunForm, DrivePanel };

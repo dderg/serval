@@ -92,7 +92,7 @@ function installFetchStub(): { unmatched: string[] } {
     [/\/printer\/gcode\/help$/, () => json(JSON.stringify({ result: {} }))],
   ];
   globalThis.fetch = (async (input: RequestInfo | URL) => {
-    const url = String(input);
+    const url = input instanceof Request ? input.url : String(input);
     const path = url.startsWith("http") ? new URL(url).pathname : url.split("?")[0];
     for (const [re, respond] of routes) {
       if (re.test(path)) return respond();

@@ -1,13 +1,21 @@
-import { api, el, mustEl, payloadUnchanged } from "./api";
-import { drawSpatialView } from "./spatial";
+import { html } from "htm/preact";
+import { useEffect, useRef } from "preact/hooks";
+import { useQuery } from "@tanstack/preact-query";
+import { el, mustEl, payloadUnchanged } from "./api";
+import { drawSpatialView, LiveSpatialSection } from "./spatial";
 import { timeSeriesPlot } from "./uplot-chart";
 import { formatAge } from "./drive";
 import { runGcode } from "./moonraker";
 import { PALETTE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, LIVE_UNIT_KEY, state } from "./state";
+import { notify, useStore } from "./store";
 import type { LiveSeries } from "./state";
 import type { FixedY, TimeSeriesPlot, TimeTrace } from "./uplot-chart";
-import type { DriveState, LiveStatus, LiveTapPayload } from "./wire";
-import { queryClient, queryKeys } from "./query-client";
+import type { LiveStatusPayload, LiveTapPayload, LiveTapStreaming } from "./wire";
+import { queryClient } from "./queries/client";
+import { getLiveStatus, getLiveTap } from "./api/live";
+import { liveStatusQuery } from "./queries/live";
+import { driveStateData } from "./queries/drive";
+import type { ComponentChildren } from "preact";
 
 // --- live tap ------------------------------------------------------------------
 //
@@ -36,7 +44,7 @@ function updateFreezeUi() {
   }
 }
 
-function setFrozen(frozen: boolean) {
+function freezeState(frozen: boolean) {
   state.live.frozen = frozen;
   if (frozen) {
     const last = state.live.t.length ? state.live.t[state.live.t.length - 1] : 0;
@@ -47,9 +55,18 @@ function setFrozen(frozen: boolean) {
     state.live.freezeEndT = null;
     state.live.freezeTruncated = false;
     trimLiveWindow();
-    drawLiveCharts();
   }
+}
+
+function setFrozen(frozen: boolean) {
+  freezeState(frozen);
+  if (!frozen) drawLiveCharts();
   updateFreezeUi();
+}
+
+function toggleLiveFreeze() {
+  freezeState(!state.live.frozen);
+  notify();
 }
 
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -91,46 +108,13 @@ function syncLiveUnitUi(availability: { ok: boolean; missing: string[] }) {
 
 let freezeKeyBound = false;
 
-function bindLiveEvents() {
-  mustEl("live-start-btn").addEventListener("click", () => {
-    const line = mustEl<HTMLInputElement>("live-start-command").value.trim();
-    if (line) runGcode([line], "live");
-  });
-  mustEl("live-stop-btn").addEventListener("click", () => runGcode(["SERVO_CAPTURE_STOP"], "live"));
-  mustEl("live-freeze-btn").addEventListener("click", () => setFrozen(!state.live.frozen));
-  const umBtn = mustEl<HTMLButtonElement>("live-unit-um");
-  umBtn.addEventListener("click", () => {
-    if (!umBtn.disabled) setLiveUnit("µm");
-  });
-  mustEl("live-unit-counts").addEventListener("click", () => setLiveUnit("counts"));
-  if (!freezeKeyBound) {
-    freezeKeyBound = true;
-    document.addEventListener("keydown", (e) => {
-      if (e.code !== "Space" || e.repeat || isTypingTarget(e.target)) return;
-      if (!el("live-freeze-btn")) return;
-      e.preventDefault();
-      setFrozen(!state.live.frozen);
-    });
-  }
-  const slider = mustEl<HTMLInputElement>("live-window");
-  slider.addEventListener("input", () => {
-    state.live.windowS = Number(slider.value);
-    mustEl("live-window-value").textContent = `${state.live.windowS} s`;
-    trimLiveWindow();
-    if (!state.live.frozen) drawLiveCharts();
-  });
-}
 
 async function pollLiveFileStatus() {
   const label = el("live-file-status");
   if (!label) return;
-  let status: LiveStatus;
+  let status: Awaited<ReturnType<typeof getLiveStatus>>;
   try {
-    status = await queryClient.fetchQuery<LiveStatus>({
-      queryKey: queryKeys.liveStatus,
-      queryFn: () => api("/api/live"),
-      staleTime: 0,
-    });
+    status = await queryClient.fetchQuery(liveStatusQuery());
   } catch (e) {
     label.textContent = String(e);
     return;
@@ -140,10 +124,14 @@ async function pollLiveFileStatus() {
     return;
   }
   const cap = status.capture;
-  const growing = cap.age_s !== null && cap.age_s < 3;
+  if (cap.name == null || cap.size_bytes == null) {
+    label.textContent = "capture status unavailable";
+    return;
+  }
+  const growing = cap.age_s != null && cap.age_s < 3;
   label.textContent = growing
     ? `recording ${cap.name} — ${(cap.size_bytes / 1024).toFixed(0)} KiB`
-    : `last: ${cap.name} (${cap.age_s === null ? "?" : formatAge(cap.age_s)} ago)`;
+    : `last: ${cap.name} (${cap.age_s == null ? "?" : formatAge(cap.age_s)} ago)`;
 }
 
 /// Header badge on every tab: a slow, cursor-less poll returns only the
@@ -153,7 +141,7 @@ export async function pollRtHealth() {
   const badge = el("rt-health");
   if (!badge) return;
   try {
-    const payload: LiveTapPayload = await api("/api/live_tap");
+    const payload = await getLiveTap();
     const t = payload.status === "streaming" ? payload.timing : null;
     if (!t) {
       badge.textContent = "";
@@ -172,8 +160,7 @@ async function pollLiveTap() {
   if (state.live.polling) return;
   state.live.polling = true;
   try {
-    const query = state.live.cursor === null ? "" : `?since_cycle=${state.live.cursor}`;
-    const payload: LiveTapPayload = await api(`/api/live_tap${query}`);
+    const payload = await getLiveTap(state.live.cursor === null ? undefined : state.live.cursor);
     const label = el("live-status");
     if (payload.status !== "streaming") {
       if (label) {
@@ -203,7 +190,7 @@ async function pollLiveTap() {
   }
 }
 
-function appendTapSamples(payload: LiveTapPayload) {
+function appendTapSamples(payload: LiveTapStreaming) {
   state.live.cursor = payload.next_cycle;
   state.live.fsHz = payload.fs_hz;
   (payload.drive_names || []).forEach((name, i) => {
@@ -213,7 +200,11 @@ function appendTapSamples(payload: LiveTapPayload) {
   const drives = Object.keys(tapDrives);
   const n = drives.length ? tapDrives[drives[0]].ferr.length : 0;
   if (!n) return;
-  if (state.live.cycle0 === null) state.live.cycle0 = payload.first_cycle;
+  if (payload.first_cycle == null || payload.stride == null) {
+    throw new Error("live tap streaming samples missing first_cycle or stride");
+  }
+  const firstCycle = payload.first_cycle;
+  if (state.live.cycle0 === null) state.live.cycle0 = firstCycle;
   const cycle0 = state.live.cycle0;
   for (const drive of drives) {
     if (!state.live.perDrive[drive]) {
@@ -228,7 +219,7 @@ function appendTapSamples(payload: LiveTapPayload) {
   const stride = payload.stride;
   const gapThreshold = stride * 3;
   for (let i = 0; i < n; i++) {
-    const cycle = payload.first_cycle + i * stride;
+    const cycle = firstCycle + i * stride;
     if (state.live.lastCycle !== null && cycle - state.live.lastCycle > gapThreshold) {
       state.live.t.push((state.live.lastCycle + stride - cycle0) / payload.fs_hz);
       for (const drive of drives) {
@@ -279,7 +270,7 @@ function trimLiveWindow() {
 /// klippy's motor names); drive_state.json's slots map recovers the
 /// motor name when a dump has run.
 function liveDriveLabel(tapName: string): string {
-  const drive = queryClient.getQueryData<DriveState>(queryKeys.driveState);
+  const drive = driveStateData();
   const slots = drive && drive.slots;
   if (!slots) return tapName;
   const match = /^slot(\d+)$/.exec(tapName);
@@ -421,29 +412,309 @@ function drawLiveCharts() {
   );
 }
 
-function startLivePolling() {
-  state.live.cursor = null;
-  state.live.cycle0 = null;
-  state.live.lastCycle = null;
-  state.live.t = [];
-  state.live.perDrive = {};
-  state.live.countsPerMm = {};
-  state.live.frozen = false;
-  state.live.freezeStartT = null;
-  state.live.freezeEndT = null;
-  state.live.freezeTruncated = false;
-  updateFreezeUi();
-  pollLiveFileStatus();
-  pollLiveTap();
-  state.live.timers = [
-    setInterval(pollLiveFileStatus, LIVE_STATUS_POLL_MS),
-    setInterval(pollLiveTap, LIVE_TAIL_POLL_MS),
-  ];
+
+
+const liveTapUi = { statusText: "connecting to the telemetry tap…", statusBad: false };
+
+function formatLiveStatus(payload: LiveTapPayload): { text: string; bad: boolean } {
+  if (payload.status !== "streaming") {
+    return {
+      text:
+        payload.status === "unreachable"
+          ? `telemetry tap unreachable — ${payload.reason}`
+          : "connecting to the telemetry tap…",
+      bad: false,
+    };
+  }
+  const t = payload.timing;
+  const health = t
+    ? ` — skipped cycles ${t.skips} · late frames ${t.late_frames} · margin ${(-t.lateness_ns / 1000).toFixed(0)} µs`
+    : "";
+  return {
+    text: `streaming at ${(payload.fs_hz / 1000).toFixed(1)} kHz${health}`,
+    bad: !!t && (t.skips > 0 || t.late_frames > 0),
+  };
 }
 
-function stopLivePolling() {
-  for (const id of state.live.timers) clearInterval(id);
-  state.live.timers = [];
+function formatLiveFileStatus(status: LiveStatusPayload): string {
+  if (!status.capture) return "nothing recorded yet";
+  const cap = status.capture;
+  if (cap.name == null || cap.size_bytes == null) return "capture status unavailable";
+  const growing = cap.age_s != null && cap.age_s < 3;
+  return growing
+    ? `recording ${cap.name} — ${(cap.size_bytes / 1024).toFixed(0)} KiB`
+    : `last: ${cap.name} (${cap.age_s == null ? "?" : formatAge(cap.age_s)} ago)`;
 }
 
-export { bindLiveEvents, pollLiveFileStatus, pollLiveTap, appendTapSamples, trimLiveWindow, liveDriveLabel, ensureLiveChartBoxes, drawLiveChartGroup, drawLiveCharts, startLivePolling, stopLivePolling, setFrozen, ferrDisplayScale, ferrUnitAvailability, loadLiveUnit, setLiveUnit, FREEZE_BUFFER_MAX_S };
+interface LiveChartGroupData {
+  display: Record<string, (number | null)[]>;
+  peaks: Record<string, number>;
+  yMin: number;
+  yMax: number;
+}
+
+function computeLiveChartGroup(
+  drives: string[],
+  channel: keyof LiveSeries,
+  scale: Record<string, number> | null
+): LiveChartGroupData | null {
+  let yMin = Infinity;
+  let yMax = -Infinity;
+  const peaks: Record<string, number> = {};
+  const display: Record<string, (number | null)[]> = {};
+  for (const d of drives) {
+    const k = scale ? scale[d] : 1;
+    const values = state.live.perDrive[d][channel];
+    display[d] = scale ? values.map((v) => (v === null ? null : v * k)) : values;
+    let peak = 0;
+    for (const v of display[d]) {
+      if (v === null) continue;
+      if (v < yMin) yMin = v;
+      if (v > yMax) yMax = v;
+      const mag = Math.abs(v);
+      if (mag > peak) peak = mag;
+    }
+    peaks[d] = peak;
+  }
+  if (!isFinite(yMin)) return null;
+  return { display, peaks, yMin, yMax };
+}
+
+function chooseLiveUnit(unit: "µm" | "counts") {
+  localStorage.setItem(LIVE_UNIT_KEY, unit);
+  notify();
+}
+
+async function pollLiveTapTick() {
+  if (state.live.polling) return;
+  state.live.polling = true;
+  try {
+    const payload = await getLiveTap(state.live.cursor === null ? undefined : state.live.cursor);
+    const status = formatLiveStatus(payload);
+    liveTapUi.statusText = status.text;
+    liveTapUi.statusBad = status.bad;
+    if (payload.status === "streaming") appendTapSamples(payload);
+    notify();
+  } catch (e) {
+    liveTapUi.statusText = String(e);
+    liveTapUi.statusBad = false;
+    notify();
+  } finally {
+    state.live.polling = false;
+  }
+}
+
+function useLiveTap() {
+  useEffect(() => {
+    state.live.cursor = null;
+    state.live.cycle0 = null;
+    state.live.lastCycle = null;
+    state.live.t = [];
+    state.live.perDrive = {};
+    state.live.countsPerMm = {};
+    state.live.frozen = false;
+    state.live.freezeStartT = null;
+    state.live.freezeEndT = null;
+    state.live.freezeTruncated = false;
+    liveTapUi.statusText = "connecting to the telemetry tap…";
+    liveTapUi.statusBad = false;
+    pollLiveTapTick();
+    const id = setInterval(pollLiveTapTick, LIVE_TAIL_POLL_MS);
+    return () => clearInterval(id);
+  }, []);
+}
+
+function useFreezeKeyboard() {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code !== "Space" || e.repeat || isTypingTarget(e.target)) return;
+      e.preventDefault();
+      toggleLiveFreeze();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+}
+
+interface LivePlotData {
+  t: number[];
+  y: (number | null)[];
+}
+
+interface ChartBoxProps {
+  drive: string;
+  idPrefix: string;
+  color: string;
+  yLabel: string;
+  plotData: LivePlotData | null;
+  fixedY: FixedY | null;
+  peakText: string;
+}
+
+function ChartBox({ drive, idPrefix, color, yLabel, plotData, fixedY, peakText }: ChartBoxProps) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const plotRef = useRef<TimeSeriesPlot | null>(null);
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || state.live.frozen || !plotData) return;
+    const trace: TimeTrace = { t: plotData.t, y: plotData.y, color };
+    let plot = plotRef.current;
+    if (plot && !plot.u.root.isConnected) {
+      plot.u.destroy();
+      plot = null;
+      plotRef.current = null;
+    }
+    if (!plot) {
+      plotRef.current = timeSeriesPlot(host, {
+        width: host.parentElement?.clientWidth || 860,
+        height: 130,
+        yLabel,
+        fixedY,
+        traces: [trace],
+      });
+    } else {
+      plot.setTraces([trace], fixedY);
+    }
+  });
+  useEffect(
+    () => () => {
+      if (plotRef.current) {
+        plotRef.current.u.destroy();
+        plotRef.current = null;
+      }
+    },
+    []
+  );
+  return html`<div class="chart-box"><h3><span class="swatch" style=${{ background: color }}></span><span id=${`${idPrefix}-name-${drive}`}>${liveDriveLabel(drive)}</span> <span class="note" id=${`${idPrefix}-peak-${drive}`}>${peakText}</span></h3><div id=${`${idPrefix}-plot-${drive}`} ref=${hostRef}></div></div>`;
+}
+
+interface LiveChartGroupProps {
+  containerId: string;
+  idPrefix: string;
+  channel: keyof LiveSeries;
+  yLabel: string;
+  peakFmt: (peak: number) => string;
+  scale: Record<string, number> | null;
+  drives: string[];
+  placeholder: ComponentChildren;
+}
+
+function LiveChartGroup({
+  containerId,
+  idPrefix,
+  channel,
+  yLabel,
+  peakFmt,
+  scale,
+  drives,
+  placeholder,
+}: LiveChartGroupProps) {
+  const group = drives.length ? computeLiveChartGroup(drives, channel, scale) : null;
+  const boxes = drives.map((d, i) => {
+    const color = PALETTE[i % PALETTE.length];
+    const plotData = group ? { t: state.live.t, y: group.display[d] } : null;
+    const fixedY = group ? { yMin: group.yMin, yMax: group.yMax } : null;
+    const peakText = group ? peakFmt(group.peaks[d]) : "";
+    return html`<${ChartBox}
+      key=${d}
+      drive=${d}
+      idPrefix=${idPrefix}
+      color=${color}
+      yLabel=${yLabel}
+      plotData=${plotData}
+      fixedY=${fixedY}
+      peakText=${peakText}
+    />`;
+  });
+  return html`<div class="charts" id=${containerId}>${drives.length ? boxes : placeholder}</div>`;
+}
+
+function LiveFerrSection({ drives }: { drives: string[] }) {
+  const availability = ferrUnitAvailability(drives);
+  const pref = loadLiveUnit();
+  const wanted = pref === "µm" && availability.ok ? "µm" : "counts";
+  const ferr = ferrDisplayScale(drives, wanted);
+  const peakFmt =
+    ferr.unit === "µm"
+      ? (p: number) => `peak |ferr| ${p.toFixed(1)} µm`
+      : (p: number) => `peak |ferr| ${p} counts`;
+  const onWindowInput = (e: Event) => {
+    state.live.windowS = Number((e.target as HTMLInputElement).value);
+    trimLiveWindow();
+    notify();
+  };
+  return html`<section class="live-section">
+    <div class="section-head"><h2>live following error — per motor</h2></div>
+    <div class="section-tools">
+      <span class="chips live-unit-chips"><button class=${availability.ok && pref === "µm" ? "chip active" : "chip"} id="live-unit-um" data-unit="µm" disabled=${!availability.ok} onClick=${() => availability.ok && chooseLiveUnit("µm")}>µm</button><button class=${!availability.ok || pref === "counts" ? "chip active" : "chip"} id="live-unit-counts" data-unit="counts" onClick=${() => chooseLiveUnit("counts")}>counts</button></span>
+      <span class="note" id="live-unit-hint">${availability.ok ? "" : `counts_per_mm missing for ${availability.missing.join(", ")}`}</span>
+      <label class="live-window">window <input type="range" id="live-window" min="1" max="30" step="1" value=${state.live.windowS} onInput=${onWindowInput} /><span id="live-window-value">${state.live.windowS} s</span></label>
+      <span class=${liveTapUi.statusBad ? "note live-timing-bad" : "note"} id="live-status">${liveTapUi.statusText}</span>
+    </div>
+    <${LiveChartGroup}
+      containerId="live-charts"
+      idPrefix="live"
+      channel="ferr"
+      yLabel=${`ferr (${ferr.unit})`}
+      peakFmt=${peakFmt}
+      scale=${ferr.scale}
+      drives=${drives}
+      placeholder=${html`<p class="note">streams straight from the drives the moment the tap answers — no capture, no file</p>`}
+    />
+  </section>`;
+}
+
+function LiveTorqueSection({ drives }: { drives: string[] }) {
+  return html`<section class="live-section">
+    <div class="section-head"><h2>live actual torque — per motor</h2></div>
+    <${LiveChartGroup}
+      containerId="live-torque-charts"
+      idPrefix="live-torque"
+      channel="torque"
+      yLabel="torque (% rated)"
+      peakFmt=${(p: number) => `peak |torque| ${p.toFixed(1)}%`}
+      scale=${null}
+      drives=${drives}
+      placeholder=${null}
+    />
+  </section>`;
+}
+
+function RecordPanel() {
+  const { data, error } = useQuery({ ...liveStatusQuery(), refetchInterval: LIVE_STATUS_POLL_MS });
+  const statusText = error ? String(error) : data ? formatLiveFileStatus(data) : "";
+  const cmdRef = useRef<HTMLInputElement>(null);
+  const record = () => {
+    const line = cmdRef.current?.value.trim();
+    if (line) runGcode([line], "live");
+  };
+  return html`<section class="sweep">
+    <div class="section-head"><h2>record to file</h2><span class="note" id="live-file-status">${statusText}</span></div>
+    <div class="row"><input ref=${cmdRef} type="text" id="live-start-command" defaultValue="SERVO_CAPTURE_START NAME=live AXIS=X" /><button id="live-start-btn" onClick=${record}>record</button><button id="live-stop-btn" onClick=${() => runGcode(["SERVO_CAPTURE_STOP"], "live")}>stop</button></div>
+    <p class="note">viewing needs no recording. record when you want an analyzable .scap in the captures root; stop finalizes it.</p>
+  </section>`;
+}
+
+function LivePage({ aside }: { aside?: ComponentChildren }) {
+  useStore();
+  useLiveTap();
+  useFreezeKeyboard();
+  const drives = state.live.t.length ? Object.keys(state.live.perDrive).sort() : [];
+  return html`<div class="workspace">
+    <main class="analysis">
+      <${LiveSpatialSection}
+        frozen=${state.live.frozen}
+        freezeTruncated=${state.live.freezeTruncated}
+        onToggleFreeze=${toggleLiveFreeze}
+      />
+      <${LiveFerrSection} drives=${drives} />
+      <${LiveTorqueSection} drives=${drives} />
+    </main>
+    <aside class="controls">
+      <${RecordPanel} />
+      ${aside ?? null}
+    </aside>
+  </div>`;
+}
+
+export { pollLiveFileStatus, pollLiveTap, appendTapSamples, trimLiveWindow, liveDriveLabel, ensureLiveChartBoxes, drawLiveChartGroup, drawLiveCharts, setFrozen, ferrDisplayScale, ferrUnitAvailability, loadLiveUnit, setLiveUnit, FREEZE_BUFFER_MAX_S, LivePage, RecordPanel, formatLiveStatus, formatLiveFileStatus, computeLiveChartGroup };

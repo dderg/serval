@@ -173,11 +173,11 @@ fn app_js_defines_the_strain_map_functions() {
         "function strainGroups(",
         "function strainColor(",
         "function drawStrainHeatmap(",
-        "function strainProfileBox(",
-        "function drawStrainDcBars(",
-        "function renderStrainCharts(",
+        "function HeatmapCanvas(",
+        "function ProfileChart(",
+        "function DcBarsCanvas(",
         "\"strain_map\"",
-        "/strain`",
+        "function getRunStrain(",
     ];
     for needle in required {
         assert!(

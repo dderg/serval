@@ -12,6 +12,7 @@ pub mod live;
 pub mod live_stream;
 pub mod metrics;
 pub mod model;
+pub mod openapi;
 pub mod pipeline;
 pub mod prep;
 pub mod profile_out;

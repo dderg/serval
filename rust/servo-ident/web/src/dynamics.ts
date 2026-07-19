@@ -1,5 +1,7 @@
-import { detailData, el, mustEl, payloadUnchanged, runDataSig, onRenderReset } from "./api";
-import { mixColor } from "./charts-core";
+import { el, mustEl, payloadUnchanged, onRenderReset } from "./api";
+import { detailData, runDataSig } from "./queries/runs";
+import { html } from "htm/preact";
+import { mixColor, SectionHead } from "./charts-core";
 import { psdBox, visibleStepNames } from "./metrics";
 import type { PsdBoxOpts } from "./metrics";
 import { timeSeriesPlot } from "./uplot-chart";
@@ -7,7 +9,12 @@ import type { TimeSeriesPlot } from "./uplot-chart";
 import { runColor } from "./runs";
 import { RINGDOWN_PSD_PLOT_MAX_HZ, state } from "./state";
 import type { TimeTrace, PsdTrace } from "./uplot-chart";
-import type { DifferentialPlot, DifferentialResult, FrfMode, PlotSeries, PlotStep, RingdownMode, RingdownSource } from "./wire";
+import type { DifferentialResult, PlotSeries, PlotStep } from "./api/runs";
+
+type DifferentialPlot = NonNullable<PlotStep["differential"]>;
+type FrfMode = DifferentialResult["modes"][number];
+type RingdownSource = NonNullable<PlotStep["ringdown"]>["sources"][number];
+type RingdownMode = RingdownSource["modes"][number];
 
 // --- differential belt FRF -----------------------------------
 
@@ -529,4 +536,22 @@ function renderRingdownCharts(names: string[], plots: PlotSeries[]) {
   meta.textContent = metaParts.join(" · ");
 }
 
-export { FRF_BOXES, differentialSeries, frfTraces, frfModeMarkers, frfModeTableHtml, differentialResultStep, renderFrfCharts, ringdownModeTableHtml, fftPow2Js, welchPsdJs, ringdownTailColor, ringdownTailTraces, ringdownFullPsdTraces, createRingdownChart, updateRingdownChart, ringdownSelectionPsdTraces, ringdownModeMarkers, renderRingdownCharts };
+function FrfSection() {
+  const tools = `<span class="note" id="frf-meta"></span>`;
+  return html`<section class="frf-section" id="frf-section" hidden>
+    <${SectionHead} title="differential belt FRF" tools=${tools} />
+    <div class="charts" id="frf-charts"></div>
+    <div id="frf-modes"></div>
+  </section>`;
+}
+
+function RingdownSection() {
+  const tools = `<span class="note" id="ringdown-meta"></span>`;
+  return html`<section class="ringdown-section" id="ringdown-section" hidden>
+    <${SectionHead} title="ring-down after stop" tools=${tools} />
+    <div class="charts" id="ringdown-charts"></div>
+    <div id="ringdown-modes"></div>
+  </section>`;
+}
+
+export { FRF_BOXES, differentialSeries, frfTraces, frfModeMarkers, frfModeTableHtml, differentialResultStep, renderFrfCharts, ringdownModeTableHtml, fftPow2Js, welchPsdJs, ringdownTailColor, ringdownTailTraces, ringdownFullPsdTraces, createRingdownChart, updateRingdownChart, ringdownSelectionPsdTraces, ringdownModeMarkers, renderRingdownCharts, FrfSection, RingdownSection };

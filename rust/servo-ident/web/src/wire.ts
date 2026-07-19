@@ -1,11 +1,12 @@
 // Server payload types. Everything the Rust side derives `JsonSchema` on is
 // generated into ./generated/ by ts-rs (freshness-guarded by the
 // `ts_bindings` cargo test); the shapes below are only the payloads Rust
-// reads loosely (manifest passthrough, live tap, strain) and thin
-// server-side compositions like the drive_state `age_s` field.
+// reads loosely (strain) and thin server-side compositions like the
+// drive_state `age_s` field.
 
 import type { DriveStatePayload } from "./generated/DriveStatePayload";
 import type { Results } from "./generated/Results";
+import type { components, paths } from "./api/openapi.generated";
 
 export type { DifferentialMode, DifferentialMode as FrfMode } from "./generated/DifferentialMode";
 export type { DifferentialResult } from "./generated/DifferentialResult";
@@ -35,62 +36,23 @@ export type { RunSummary } from "./generated/RunSummary";
 export type { StepResult, StepResult as ResultStep } from "./generated/StepResult";
 export type { TorqueSummary, TorqueSummary as TorqueMetrics } from "./generated/TorqueSummary";
 export type { VerdictSummary } from "./generated/VerdictSummary";
+export type { StrainBelt } from "./generated/StrainBelt";
+export type { StrainLine } from "./generated/StrainLine";
+export type { StrainMap, StrainMap as StrainData } from "./generated/StrainMap";
 
 // `handle_drive_state` serves `DriveStatePayload` from disk plus a
 // server-computed `age_s`.
 export type DriveState = DriveStatePayload & { age_s: number };
 
-// --- Payloads Rust does not model with schemars (manifest is a raw file
-// passthrough; live tap and strain are hand-built JSON) ---
+// --- Manifest family: aliases into the generated OpenAPI `Manifest` contract
+// (schema-only Rust types in `openapi.rs`) ---
 
-interface ManifestMotor {
-  name: string;
-  counts_per_mm: number | null;
-}
-
-interface StrokePlan {
-  speed?: number | null;
-  accel?: number | null;
-  iterations?: number | null;
-  line_spacing?: number | null;
-  x_start?: number | null;
-  x_end?: number | null;
-  y_start?: number | null;
-  y_end?: number | null;
-  dwell_ms?: number | null;
-  zero_sync?: boolean | null;
-  belt?: string | null;
-  freq_start?: number | null;
-  freq_end?: number | null;
-  amplitude?: number | null;
-  duration?: number | null;
-  ramp?: number | null;
-  cruise_ms?: number | null;
-  speeds?: number[] | null;
-}
-
-interface ManifestStep {
-  name: string;
-  swept: Record<string, number> | null;
-}
-
-type NotchStateValue = Record<string, number | string> | number | string;
-
-interface ManifestAmbient {
-  journal_params?: Record<string, Record<string, number | string>> | null;
-  notches?: Record<string, Record<string, NotchStateValue>> | null;
-}
-
-interface Manifest {
-  experiment: string;
-  command?: string | null;
-  tag?: string | null;
-  axis?: string | null;
-  stroke_plan?: StrokePlan | null;
-  steps: ManifestStep[];
-  motors?: ManifestMotor[] | null;
-  ambient?: ManifestAmbient | null;
-}
+type ManifestMotor = components["schemas"]["ManifestMotor"];
+type StrokePlan = components["schemas"]["StrokePlan"];
+type ManifestStep = components["schemas"]["ManifestStep"];
+type NotchStateValue = components["schemas"]["NotchStateValue"];
+type ManifestAmbient = components["schemas"]["ManifestAmbient"];
+type Manifest = components["schemas"]["Manifest"];
 
 interface RunDetail {
   mtime_utc: string;
@@ -99,37 +61,15 @@ interface RunDetail {
   results: Results | null;
 }
 
-interface LiveTapPayload {
-  status: string;
-  reason?: string | null;
-  fs_hz: number;
-  drive_names?: string[] | null;
-  counts_per_mm?: number[] | null;
-  first_cycle: number;
-  next_cycle: number;
-  stride: number;
-  drives?: Record<string, { ferr: number[]; torque: number[]; target: number[]; pos: number[] }> | null;
-  timing?: { skips: number; late_frames: number; lateness_ns: number } | null;
-}
+type LiveTapPayload =
+  paths["/api/live_tap"]["get"]["responses"][200]["content"]["application/json"];
+
+type LiveTapStreaming = Extract<LiveTapPayload, { status: "streaming" }>;
+
+type LiveStatusPayload =
+  paths["/api/live"]["get"]["responses"][200]["content"]["application/json"];
 
 type StrainField = "elastic" | "friction";
-
-interface StrainBelt {
-  pair: string;
-  elastic: (number | null)[];
-  friction: (number | null)[];
-}
-
-interface StrainLine {
-  name: string;
-  swept: Record<string, number> | null;
-  bin_centers: number[];
-  belts: StrainBelt[];
-}
-
-interface StrainData {
-  lines: StrainLine[];
-}
 
 export type {
   ManifestMotor,
@@ -140,8 +80,7 @@ export type {
   Manifest,
   RunDetail,
   LiveTapPayload,
+  LiveTapStreaming,
+  LiveStatusPayload,
   StrainField,
-  StrainBelt,
-  StrainLine,
-  StrainData,
 };

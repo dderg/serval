@@ -1,4 +1,4 @@
-import { ensurePlotSeries, pageRuns } from "./api";
+import { ensurePlotSeries, pageRuns } from "./queries/runs";
 import { drawTimeDomain } from "./charts-core";
 import { renderFrfCharts, renderRingdownCharts } from "./dynamics";
 import { renderMetricsTable, renderSweepMetricsChart, renderPsdChart, renderAccelPsdChart, visibleStepNames, renderStepChips, renderMotorChips } from "./metrics";
@@ -6,18 +6,14 @@ import { renderPathChart } from "./path-chart";
 import { selectedRunNames } from "./runs";
 import { currentPageDef } from "./shell";
 import { state } from "./state";
-import { redrawStrain } from "./strain";
-import type { PlotSeries } from "./wire";
+import type { PlotSeries } from "./api/runs";
 
 /// Redraw the current page's chart sections from the run selection. Plot
 /// series are cached per run mtime, so reselecting is cheap.
 async function redrawCharts() {
   const def = currentPageDef();
   if (def.journal) return;
-  if (def.strain) {
-    await redrawStrain();
-    return;
-  }
+  if (def.strain) return;
   const names = selectedRunNames();
   const plots: PlotSeries[] = [];
   const okNames: string[] = [];

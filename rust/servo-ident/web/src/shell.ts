@@ -1,16 +1,18 @@
-import { el, mustEl, resetRenderState } from "./api";
-import { psdMaxFreqHz, ferrUnitToggleHtml, bindFerrUnitToggle } from "./charts-core";
-import { bindConsole, setConsoleValue } from "./console";
-import { fetchMacroHelp, macroHelpNeedsFetch, docsShellHtml, renderDocsList } from "./docs";
-import { renderDriveGroups } from "./drive";
-import { bindLaunchpad, launchpadSectionHtml } from "./launchpad";
-import { bindLiveEvents, startLivePolling, stopLivePolling } from "./live";
-import { renderSentLog } from "./moonraker";
+import { html } from "htm/preact";
+import { useEffect, useRef, useState } from "preact/hooks";
+import { el } from "./api";
+import { bindFerrUnitToggle } from "./charts-core";
+import { ConsolePanel } from "./console";
+import { fetchMacroHelp, loadCachedMacroHelp, DocsPage } from "./docs";
+import { renderDriveBanner } from "./drive";
+import { LaunchpadPad } from "./launchpad";
+import { pollRtHealth, LivePage } from "./live";
+import { pollMoonrakerHealth, emergencyStop } from "./moonraker";
 import { redrawCharts } from "./peaks";
-import { renderRuns } from "./runs";
-import { PSD_MAX_FREQ_KEY, MOTOR_VIEW_KEY, PSD_MAX_FREQ_CHOICES_HZ, PAGE_DEFS, DEFAULT_PAGE, state } from "./state";
+import { TunePage, JournalPage } from "./runs";
+import { MOONRAKER_KEY, MOONRAKER_HEALTH_POLL_MS, RT_HEALTH_POLL_MS, PSD_MAX_FREQ_KEY, MOTOR_VIEW_KEY, PAGE_DEFS, DEFAULT_PAGE, state } from "./state";
 import type { PageDef } from "./state";
-import { strainShellHtml, redrawStrain } from "./strain";
+import { StrainPage } from "./strain";
 
 // --- page shell ---------------------------------------------------------------
 
@@ -23,52 +25,7 @@ function pageFromHash() {
   return m && PAGE_DEFS[m[1]] ? m[1] : DEFAULT_PAGE;
 }
 
-function renderTabs() {
-  const nav = mustEl("page-tabs");
-  nav.innerHTML = Object.entries(PAGE_DEFS)
-    .map(
-      ([key, def]) =>
-        `<a href="#/${key}" class="tab${key === state.page ? " active" : ""}">${def.label}</a>`
-    )
-    .join("");
-}
 
-function controlsSectionsHtml(def: PageDef): string {
-  const parts: string[] = [];
-  if (def.groups) {
-    parts.push(
-      `<section class="panel">` +
-        `<div class="section-head"><h2>drive tuning</h2></div>` +
-        `<div id="drive-panel"></div>` +
-        `</section>`
-    );
-  }
-  parts.push(consoleSectionHtml(def));
-  parts.push(launchpadSectionHtml());
-  return parts.join("");
-}
-
-function consoleSectionHtml(def: Partial<PageDef>): string {
-  const templates = (def.templates || [])
-    .map(
-      (t, i) =>
-        `<button class="template-btn" data-template="${i}" title="${t.title}">${t.label}</button>`
-    )
-    .join("");
-  return (
-    `<section class="session">` +
-    `<div class="section-head"><h2>console</h2>` +
-    `<span class="note" id="form-run-name"></span>${templates}</div>` +
-    `<div id="sent-log" class="sent-log"></div>` +
-    `<div id="run-status" class="status-line"></div>` +
-    `<div class="console-line"><span class="console-prompt">›</span>` +
-    `<textarea id="console-input" rows="1" spellcheck="false" ` +
-    `placeholder="g-code — enter runs, tab completes, ↑/↓ history, ctrl+r search"></textarea></div>` +
-    `<div id="console-search" class="console-search"></div>` +
-    `<div id="console-help" class="console-help"></div>` +
-    `</section>`
-  );
-}
 
 /// The charts that fold drives into one trace (avg PSD, worst-drive sweep
 /// metrics, combined time domain) all obey this one switch; per-motor
@@ -128,179 +85,7 @@ function sectionHeadHtml(title: string, toolsHtml: string | null): string {
   );
 }
 
-function analysisSectionsHtml(def: PageDef): string {
-  const parts: string[] = [];
-  parts.push(
-    `<section class="runs-section">` +
-      sectionHeadHtml(
-        "runs",
-        `<span class="note">${def.experiments ? def.experiments.join(", ") : "all experiments"} — click a row to chart it</span>`
-      ) +
-      `<div class="table-wrap runs-wrap"><table><thead><tr>` +
-      `<th></th><th>time</th><th>tag</th><th>ambient diff vs previous</th><th>note</th><th></th>` +
-      `</tr></thead><tbody id="journal-body"></tbody></table></div>` +
-      `</section>`
-  );
-  if (def.metrics) {
-    parts.push(
-      `<section class="metrics-section">` +
-        sectionHeadHtml(
-          "tracking metrics",
-          motorViewToggleHtml("worst drive", true) +
-            `<span class="note">worst move of each step — ` +
-            `overshoot/settle measured over the dwell after each move</span>`
-        ) +
-        `<div id="metrics-table"><p class="note">select runs above</p></div>` +
-        `</section>`
-    );
-  }
-  if (def.sweepChart) {
-    parts.push(
-      `<section class="sweep-metrics-section">` +
-        sectionHeadHtml(
-          "metrics vs gain",
-          motorViewToggleHtml("worst drive", true) +
-            `<span class="note">● solid: overshoot, dashed: ferr rms, ` +
-            `dotted: ferr peak; red rung: step flagged resonance/torque</span>`
-        ) +
-        `<div class="charts" id="sweep-metrics-chart"><p class="note">select runs above</p></div>` +
-        `</section>`
-    );
-  }
-  if (def.charts && def.charts.includes("path")) {
-    parts.push(
-      `<section class="path-section" id="path-section" hidden>` +
-        sectionHeadHtml(
-          "toolpath — commanded vs actual",
-          `<button id="path-fit">fit</button>` +
-            `<span class="note" id="path-note"></span>`
-        ) +
-        `<div class="chips" id="path-legend"></div>` +
-        `<div class="spatial-box"><canvas id="path-canvas"></canvas></div>` +
-        `</section>`
-    );
-  }
-  if (def.charts && def.charts.includes("frf")) {
-    parts.push(
-      `<section class="frf-section" id="frf-section" hidden>` +
-        sectionHeadHtml("differential belt FRF", `<span class="note" id="frf-meta"></span>`) +
-        `<div class="charts" id="frf-charts"></div>` +
-        `<div id="frf-modes"></div>` +
-        `</section>`
-    );
-  }
-  if (def.charts && def.charts.includes("ringdown")) {
-    parts.push(
-      `<section class="ringdown-section" id="ringdown-section" hidden>` +
-        sectionHeadHtml(
-          "ring-down after stop",
-          `<span class="note" id="ringdown-meta"></span>`
-        ) +
-        `<div class="charts" id="ringdown-charts"></div>` +
-        `<div id="ringdown-modes"></div>` +
-        `</section>`
-    );
-  }
-  if (def.charts && def.charts.includes("psd")) {
-    parts.push(
-      `<section class="psd-section">` +
-        sectionHeadHtml(
-          "following-error PSD",
-          motorViewToggleHtml("avg", false, true) +
-            `<label class="note">to <select id="psd-max-freq">` +
-            PSD_MAX_FREQ_CHOICES_HZ.map(
-              (f) =>
-                `<option value="${f}"${f === psdMaxFreqHz() ? " selected" : ""}>${f}</option>`
-            ).join("") +
-            `</select> Hz</label>` +
-            ferrUnitToggleHtml("psd") +
-            `<div class="chips" id="psd-step-chips"></div>`
-        ) +
-        `<div class="charts" id="psd-charts"><p class="note">select runs above</p></div>` +
-        `</section>`
-    );
-    parts.push(
-      `<section class="accel-psd-section" id="accel-psd-section" hidden>` +
-        sectionHeadHtml(
-          "accel PSD",
-          `<span class="note">per-axis accelerometer spectra; solid: x+y+z total</span>` +
-            `<div class="chips" id="accel-axis-chips"></div>`
-        ) +
-        `<div class="charts" id="accel-psd-charts"></div>` +
-        `</section>`
-    );
-  }
-  if (def.charts && def.charts.includes("time")) {
-    parts.push(
-      `<section class="time-section">` +
-        sectionHeadHtml(
-          "time domain — following error",
-          motorViewToggleHtml("combined") +
-            ferrUnitToggleHtml("time") +
-            `<div class="chips" id="time-motor-chips"></div>` +
-            `<div class="chips" id="time-step-chips"></div>`
-        ) +
-        `<div class="charts" id="charts"><p class="note">select runs above</p></div>` +
-        `</section>`
-    );
-  }
-  return parts.join("");
-}
 
-function liveShellHtml() {
-  return (
-    `<div class="workspace">` +
-    `<main class="analysis">` +
-    `<section class="live-section">` +
-    sectionHeadHtml(
-      "live toolpath — commanded vs actual",
-      `<button id="live-freeze-btn" title="space toggles">freeze</button>` +
-        `<span class="note live-timing-bad" id="live-freeze-badge"></span>` +
-        `<button id="live-spatial-fit">fit</button>` +
-        `<span class="note" id="live-spatial-note">waiting for the tap…</span>`
-    ) +
-    `<div class="spatial-box"><canvas id="live-spatial-canvas"></canvas></div>` +
-    `</section>` +
-    `<section class="live-section">` +
-    sectionHeadHtml(
-      "live following error — per motor",
-      `<span class="chips live-unit-chips">` +
-        `<button class="chip" id="live-unit-um" data-unit="µm">µm</button>` +
-        `<button class="chip" id="live-unit-counts" data-unit="counts">counts</button>` +
-        `</span>` +
-        `<span class="note" id="live-unit-hint"></span>` +
-        `<label class="live-window">window ` +
-        `<input type="range" id="live-window" min="1" max="30" step="1" value="${state.live.windowS}">` +
-        `<span id="live-window-value">${state.live.windowS} s</span></label>` +
-        `<span class="note" id="live-status">connecting to the telemetry tap…</span>`
-    ) +
-    `<div class="charts" id="live-charts">` +
-    `<p class="note">streams straight from the drives the moment the tap answers — ` +
-    `no capture, no file</p>` +
-    `</div>` +
-    `</section>` +
-    `<section class="live-section">` +
-    `<div class="section-head"><h2>live actual torque — per motor</h2></div>` +
-    `<div class="charts" id="live-torque-charts"></div>` +
-    `</section>` +
-    `</main>` +
-    `<aside class="controls">` +
-    `<section class="sweep">` +
-    `<div class="section-head"><h2>record to file</h2>` +
-    `<span class="note" id="live-file-status"></span></div>` +
-    `<div class="row"><input type="text" id="live-start-command" ` +
-    `value="SERVO_CAPTURE_START NAME=live AXIS=X">` +
-    `<button id="live-start-btn">record</button>` +
-    `<button id="live-stop-btn">stop</button></div>` +
-    `<p class="note">viewing needs no recording. record when you want an ` +
-    `analyzable .scap in the captures root; stop finalizes it.</p>` +
-    `</section>` +
-    consoleSectionHtml({}) +
-    launchpadSectionHtml() +
-    `</aside>` +
-    `</div>`
-  );
-}
 
 /// Collapsible analysis sections (accordion). Each `.analysis .section-head`
 /// holds only the section's h2 and is the sole click target; it toggles a
@@ -351,71 +136,6 @@ function bindAccordionToggle() {
   });
 }
 
-function renderPage() {
-  resetRenderState();
-  renderTabs();
-  const def = currentPageDef();
-  const root = mustEl("page-root");
-  stopLivePolling();
-  if (def.live) {
-    root.innerHTML = liveShellHtml();
-    bindPageEvents();
-    bindLiveEvents();
-    renderSentLog();
-    startLivePolling();
-    applyAccordionState();
-    return;
-  }
-  if (def.strain) {
-    root.innerHTML = strainShellHtml(def);
-    bindPageEvents();
-    document.querySelectorAll<HTMLButtonElement>("button.strain-field-btn").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        state.strain.field = btn.dataset.field === "friction" ? "friction" : "elastic";
-        redrawStrain();
-      });
-    });
-    renderSentLog();
-    redrawStrain();
-    applyAccordionState();
-    return;
-  }
-  if (def.docs) {
-    root.innerHTML = docsShellHtml();
-    bindPageEvents();
-    renderDocsList();
-    renderSentLog();
-    applyAccordionState();
-    if (macroHelpNeedsFetch()) fetchMacroHelp();
-    return;
-  }
-  if (def.journal) {
-    root.innerHTML =
-      `<div class="workspace single">` +
-      `<main class="analysis">` +
-      `<section class="runs-section">` +
-      `<div class="section-head"><h2>journal — every run</h2></div>` +
-      `<div class="table-wrap journal-wrap"><table><thead><tr>` +
-      `<th></th><th>time</th><th>experiment/tag</th><th>ambient diff vs previous</th><th>note</th><th></th>` +
-      `</tr></thead><tbody id="journal-body"></tbody></table></div>` +
-      `</section>` +
-      consoleSectionHtml({}) +
-      launchpadSectionHtml() +
-      `</main></div>`;
-  } else {
-    root.innerHTML =
-      `<div class="workspace">` +
-      `<main class="analysis">${analysisSectionsHtml(def)}</main>` +
-      `<aside class="controls">${controlsSectionsHtml(def)}</aside>` +
-      `</div>`;
-  }
-  bindPageEvents();
-  renderRuns();
-  renderDriveGroups();
-  renderSentLog();
-  redrawCharts();
-  applyAccordionState();
-}
 
 /// Drag handles on every header cell of the run tables. The first drag
 /// freezes the browser's auto layout into explicit widths and switches the
@@ -451,9 +171,7 @@ function makeColumnsResizable(table: HTMLTableElement) {
   });
 }
 
-function bindPageEvents() {
-  bindConsole();
-  bindLaunchpad();
+function bindAnalysisControls() {
   document
     .querySelectorAll<HTMLTableElement>(".runs-wrap table, .journal-wrap table")
     .forEach(makeColumnsResizable);
@@ -473,17 +191,87 @@ function bindPageEvents() {
       redrawCharts();
     });
   });
-  const def = currentPageDef();
-  document.querySelectorAll<HTMLButtonElement>("button.template-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const t = (def.templates || [])[Number(btn.dataset.template)];
-      if (t) {
-        setConsoleValue(t.command, true);
-        const label = el("form-run-name");
-        if (label) label.textContent = "template — edit values before running";
-      }
-    });
-  });
 }
 
-export { currentPageDef, pageFromHash, renderTabs, controlsSectionsHtml, consoleSectionHtml, motorView, motorViewPerMotor, motorViewEffective, motorViewToggleHtml, syncMotorViewChips, sectionHeadHtml, analysisSectionsHtml, liveShellHtml, ACCORDION_KEY, loadCollapsedSections, sectionLabel, applyAccordionState, bindAccordionToggle, renderPage, makeColumnsResizable, bindPageEvents };
+function useRoute(): string {
+  const [page, setPage] = useState(pageFromHash);
+  useEffect(() => {
+    const onHash = () => setPage(pageFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  return page;
+}
+
+function Tabs() {
+  const page = useRoute();
+  return html`<nav class="tabs" id="page-tabs">
+    ${Object.entries(PAGE_DEFS).map(
+      ([key, def]) =>
+        html`<a key=${key} href=${`#/${key}`} class=${key === page ? "tab active" : "tab"}>${def.label}</a>`
+    )}
+  </nav>`;
+}
+
+function Topbar() {
+  const urlRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const input = urlRef.current;
+    if (input) input.value = localStorage.getItem(MOONRAKER_KEY) || `http://${location.hostname}:7125`;
+    loadCachedMacroHelp();
+    fetchMacroHelp();
+    pollMoonrakerHealth();
+    pollRtHealth();
+    renderDriveBanner();
+    const mr = setInterval(pollMoonrakerHealth, MOONRAKER_HEALTH_POLL_MS);
+    const rt = setInterval(pollRtHealth, RT_HEALTH_POLL_MS);
+    const banner = setInterval(renderDriveBanner, 1000);
+    return () => {
+      clearInterval(mr);
+      clearInterval(rt);
+      clearInterval(banner);
+    };
+  }, []);
+  const onUrlChange = () => {
+    const input = urlRef.current;
+    if (!input) return;
+    localStorage.setItem(MOONRAKER_KEY, input.value);
+    pollMoonrakerHealth();
+    fetchMacroHelp();
+  };
+  return html`<header class="topbar">
+    <h1>servo-cal</h1>
+    <${Tabs} />
+    <label class="moonraker">moonraker
+      <input ref=${urlRef} type="text" id="moonraker-url" size="24" onChange=${onUrlChange} />
+    </label>
+    <span id="moonraker-health" class="mr-health" title="checked every few seconds via GET /server/info"></span>
+    <span id="rt-health" class="rt-health" title="EtherCAT endpoint RT-loop health from the live telemetry tap: cycles skipped, frames past the SYNC0 latch, and the current frame margin"></span>
+    <div id="drive-state-banner" class="banner"></div>
+    <button id="estop-btn" class="estop" title="emergency stop — POST /printer/emergency_stop, fires on the first click" onClick=${emergencyStop}>STOP</button>
+  </header>`;
+}
+
+function PageOutlet() {
+  const page = useRoute();
+  state.page = PAGE_DEFS[page] ? page : DEFAULT_PAGE;
+  const def = currentPageDef();
+  if (def.strain) return html`<${StrainPage} def=${def} />`;
+  if (def.live)
+    return html`<${LivePage}
+      aside=${html`<${ConsolePanel} templates=${def.templates} /><${LaunchpadPad} />`}
+    />`;
+  if (def.journal) return html`<${JournalPage} />`;
+  if (def.docs) return html`<${DocsPage} />`;
+  return html`<${TunePage} />`;
+}
+
+function App() {
+  useEffect(() => {
+    bindAccordionToggle();
+  }, []);
+  return html`<${Topbar} />
+    <div id="page-root"><${PageOutlet} /></div>`;
+}
+
+export { App, currentPageDef, pageFromHash, motorView, motorViewPerMotor, motorViewEffective, motorViewToggleHtml, syncMotorViewChips, sectionHeadHtml, ACCORDION_KEY, loadCollapsedSections, sectionLabel, applyAccordionState, bindAccordionToggle, makeColumnsResizable, bindAnalysisControls };

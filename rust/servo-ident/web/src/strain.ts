@@ -1,16 +1,27 @@
-import { api, detailData, el, mustEl, pageRuns, runData, shortTime } from "./api";
+import { html } from "htm/preact";
+import { useEffect, useRef } from "preact/hooks";
+import { useQuery, useQueries } from "@tanstack/preact-query";
+import { shortTime } from "./api";
+import { detailData, pageRuns, runData } from "./queries/runs";
+import { ensureStrain, strainKey } from "./queries/strain";
 import { hidpiCanvasContext, mixColor } from "./charts-core";
 import { timeSeriesPlot } from "./uplot-chart";
 import { loadRerunForm } from "./drive";
-import { currentPageDef, controlsSectionsHtml, sectionHeadHtml } from "./shell";
+import { ConsolePanel } from "./console";
+import { LaunchpadPad } from "./launchpad";
+import { applyAccordionState } from "./shell";
 import { PALETTE, state } from "./state";
-import { queryClient, queryKeys } from "./query-client";
+import { notify, useStore } from "./store";
 import type { PageDef } from "./state";
-import type { StrainData, StrainField, StrainLine, StrokePlan } from "./wire";
+import type { StrokePlan, StrainField } from "./wire";
+import type { StrainMap as StrainData, RunSummary } from "./api/runs";
+import type { VNode } from "preact";
+
+type StrainLine = StrainData["lines"][number];
 
 // --- strain map (strain page) -------------------------------------------------
 //
-// Renders GET /api/runs/<name>/strain: per raster line, the elastic
+// Renders getRunStrain: per raster line, the elastic
 // (direction-symmetric) differential belt torque binned along the sweep.
 // All four heatmaps (belt × sweep orientation) draw in BED coordinates —
 // horizontal = bed x, vertical = bed y increasing upward, square aspect —
@@ -25,63 +36,6 @@ const STRAIN_HEAT_PAD = { l: 40, r: 8, t: 16, b: 26 };
 const STRAIN_HEAT_CANVAS_W = 430;
 const STRAIN_LINE_SPACING_FALLBACK_MM = 20;
 
-function strainShellHtml(def: PageDef): string {
-  return (
-    `<div class="workspace">` +
-    `<main class="analysis">` +
-    `<section class="runs-section">` +
-    sectionHeadHtml(
-      "strain runs",
-      `<span class="note">strain_map — click to map, shift+click a second run to diff (matching dimensions)</span>`
-    ) +
-    `<div class="table-wrap runs-wrap"><table><thead><tr>` +
-    `<th>time</th><th>tag</th><th></th>` +
-    `</tr></thead><tbody id="strain-run-body"></tbody></table></div>` +
-    `</section>` +
-    `<section>` +
-    sectionHeadHtml(
-      "strain map",
-      `<button class="strain-field-btn" data-field="elastic">elastic</button>` +
-        `<button class="strain-field-btn" data-field="friction" ` +
-        `title="the direction-dependent half: (forward - backward)/2 — what a position-keyed offset cannot cancel">friction</button>` +
-        `<span class="note" id="strain-summary"></span>`
-    ) +
-    `<div id="strain-heatmaps" class="strain-grid"></div>` +
-    `<div id="strain-scale"></div>` +
-    `</section>` +
-    `<section>` +
-    sectionHeadHtml(
-      "per-line elastic profiles",
-      `<span class="note">one polyline per raster line, in bed coordinates</span>`
-    ) +
-    `<div class="charts" id="strain-profiles"></div>` +
-    `</section>` +
-    `<section>` +
-    sectionHeadHtml(
-      "per-line DC offset — mean elastic",
-      `<span class="note">a line-to-line offset is trapped preload, not local strain</span>`
-    ) +
-    `<div class="strain-grid" id="strain-dc"></div>` +
-    `</section>` +
-    `</main>` +
-    `<aside class="controls">${controlsSectionsHtml(def)}</aside>` +
-    `</div>`
-  );
-}
-
-async function ensureStrain(name: string): Promise<StrainData> {
-  const run = runData(name);
-  const cached = queryClient.getQueryData<{ mtime_utc: string | null; data: StrainData }>(
-    queryKeys.strain(name)
-  );
-  if (cached && run && cached.mtime_utc === run.mtime_utc) return cached.data;
-  const data = await api<StrainData>(`/api/runs/${encodeURIComponent(name)}/strain`);
-  queryClient.setQueryData(queryKeys.strain(name), {
-    mtime_utc: run ? run.mtime_utc : null,
-    data,
-  });
-  return data;
-}
 
 function runTag(name: string): string {
   const r = runData(name);
@@ -129,71 +83,8 @@ function strainSignature(data: StrainData): string {
   });
 }
 
-let strainRunsSubscribed = false;
 
-function ensureStrainRunsSubscription() {
-  if (strainRunsSubscribed) return;
-  strainRunsSubscribed = true;
-  queryClient.getQueryCache().subscribe((event) => {
-    if (!el("strain-run-body")) return;
-    const key = event.query.queryKey;
-    if (key.length === queryKeys.runs.length && key.every((part: unknown, i: number) => part === queryKeys.runs[i])) {
-      void redrawStrain();
-    }
-  });
-}
 
-function renderStrainRuns() {
-  ensureStrainRunsSubscription();
-  const tbody = el("strain-run-body");
-  if (!tbody) return;
-  const runs = pageRuns(currentPageDef());
-  if (!runs.some((r) => r.name === state.strain.selected)) {
-    state.strain.selected = runs.length ? runs[0].name : null;
-  }
-  const known = new Set(runs.map((r) => r.name));
-  for (const name of [...state.strain.compare]) {
-    if (!known.has(name)) state.strain.compare.delete(name);
-  }
-  tbody.innerHTML = "";
-  for (const run of runs) {
-    const tr = document.createElement("tr");
-    tr.classList.add("selectable");
-    if (run.name === state.strain.selected) tr.classList.add("selected");
-    if (state.strain.compare.has(run.name)) tr.classList.add("compare");
-    tr.addEventListener("click", (ev: MouseEvent) => {
-      if (ev.shiftKey) {
-        if (run.name === state.strain.selected) return;
-        if (state.strain.compare.has(run.name)) state.strain.compare.delete(run.name);
-        else state.strain.compare.add(run.name);
-      } else {
-        state.strain.selected = run.name;
-        state.strain.compare.clear();
-      }
-      redrawStrain();
-    });
-    const timeTd = document.createElement("td");
-    timeTd.textContent = shortTime(run.mtime_utc);
-    timeTd.title = `${run.name} — ${run.mtime_utc}`;
-    tr.appendChild(timeTd);
-    const tagTd = document.createElement("td");
-    tagTd.textContent = runTag(run.name);
-    tr.appendChild(tagTd);
-    const actionTd = document.createElement("td");
-    actionTd.className = "actions";
-    const prefillBtn = document.createElement("button");
-    prefillBtn.textContent = "→ console";
-    prefillBtn.title = "prefill the console with this run's command";
-    prefillBtn.disabled = !detailData(run.name)?.manifest;
-    prefillBtn.addEventListener("click", (e: MouseEvent) => {
-      e.stopPropagation();
-      loadRerunForm(run.name);
-    });
-    actionTd.appendChild(prefillBtn);
-    tr.appendChild(actionTd);
-    tbody.appendChild(tr);
-  }
-}
 
 function strainColor(t: number): string {
   const clamped = Math.max(-1, Math.min(1, t));
@@ -203,7 +94,9 @@ function strainColor(t: number): string {
 }
 
 function sweptEntry(line: StrainLine): [string, number] {
-  const entries = Object.entries(line.swept || {});
+  const swept = line.swept;
+  if (!swept || typeof swept !== "object") return ["?", 0];
+  const entries = Object.entries(swept);
   return entries.length ? (entries[0] as [string, number]) : ["?", 0];
 }
 
@@ -363,77 +256,8 @@ function drawStrainHeatmap(canvas: HTMLCanvasElement, group: StrainGroup, beltId
   ctx.fillText("bed y (mm)", pad.l, 11);
 }
 
-function strainHeatmapBox(title: string, group: StrainGroup, beltIdx: number, vmax: number, geo: StrainGeo): HTMLDivElement {
-  const box = document.createElement("div");
-  box.className = "chart-box";
-  const head = document.createElement("h3");
-  head.textContent = title;
-  box.appendChild(head);
-  const canvas = document.createElement("canvas");
-  const pad = STRAIN_HEAT_PAD;
-  const plotW = STRAIN_HEAT_CANVAS_W - pad.l - pad.r;
-  const plotH = plotW * ((geo.yhi - geo.ylo) / (geo.xhi - geo.xlo));
-  canvas.width = STRAIN_HEAT_CANVAS_W;
-  canvas.height = Math.round(pad.t + pad.b + plotH);
-  box.appendChild(canvas);
-  drawStrainHeatmap(canvas, group, beltIdx, vmax, geo);
-  return box;
-}
 
-function strainScaleHtml(vmax: number): string {
-  const stops: string[] = [];
-  for (let i = 0; i <= 8; i++) stops.push(strainColor(i / 4 - 1));
-  const what =
-    state.strain.field === "friction"
-      ? "friction (direction-dependent) differential torque"
-      : "elastic differential torque";
-  return (
-    `<div class="strain-scale"><span>−${vmax.toFixed(1)}%</span>` +
-    `<span class="bar" style="background:linear-gradient(90deg,${stops.join(",")})"></span>` +
-    `<span>+${vmax.toFixed(1)}%</span>` +
-    `<span class="hint">${what}, % rated — null bins stay dark</span></div>`
-  );
-}
 
-function strainProfileBox(title: string, beltIdx: number, group: StrainGroup, vmax: number, geo: StrainGeo): HTMLDivElement {
-  const box = document.createElement("div");
-  box.className = "chart-box";
-  const head = document.createElement("h3");
-  head.textContent = title;
-  box.appendChild(head);
-  const plotHost = document.createElement("div");
-  box.appendChild(plotHost);
-  const lines = group.lines;
-  const sweepOrigin = group.orientation === "x" ? geo.x0 : geo.y0;
-  const ramp = (i: number) =>
-    mixColor(
-      PALETTE[beltIdx % PALETTE.length],
-      "#ffffff",
-      lines.length > 1 ? (0.65 * i) / (lines.length - 1) : 0
-    );
-  const traces = lines.map((line, i) => ({
-    t: line.bin_centers.map((c) => sweepOrigin + c),
-    y: line.belts[beltIdx][state.strain.field],
-    color: ramp(i),
-  }));
-  timeSeriesPlot(plotHost, {
-    width: 860,
-    height: 300,
-    yLabel: `${state.strain.field} (%) vs bed ${group.orientation}`,
-    traces,
-    fixedY: { yMin: -vmax, yMax: vmax },
-    xUnit: "mm",
-  });
-  const legend = document.createElement("div");
-  legend.className = "legend";
-  lines.forEach((line, i) => {
-    const item = document.createElement("span");
-    item.innerHTML = `<span class="swatch" style="background:${ramp(i)}"></span>${line.name}`;
-    legend.appendChild(item);
-  });
-  box.appendChild(legend);
-  return box;
-}
 
 function meanElastic(line: StrainLine, beltIdx: number): number | null {
   const kept = line.belts[beltIdx].elastic.filter((v): v is number => v !== null);
@@ -481,23 +305,6 @@ function drawStrainDcBars(canvas: HTMLCanvasElement, labels: string[], values: (
   ctx.fillText("mean elastic (%)", pad.l, 10);
 }
 
-function strainDcBox(title: string, beltIdx: number, lines: StrainLine[]): HTMLDivElement {
-  const box = document.createElement("div");
-  box.className = "chart-box";
-  const head = document.createElement("h3");
-  head.textContent = title;
-  box.appendChild(head);
-  const canvas = document.createElement("canvas");
-  canvas.width = 430;
-  canvas.height = 210;
-  box.appendChild(canvas);
-  drawStrainDcBars(
-    canvas,
-    lines.map(strainLineLabel),
-    lines.map((line) => meanElastic(line, beltIdx))
-  );
-  return box;
-}
 
 /// Shared geometry for a strain map: ordered groups (sweep orientation),
 /// bed-frame extents, and the belt pair names. Diffing two maps reuses the
@@ -511,67 +318,89 @@ function strainGeometry(data: StrainData): { groups: StrainGroup[]; geo: StrainG
   return { groups, geo, pairs };
 }
 
-function renderStrainCharts(data: StrainData) {
-  const heatmaps = mustEl("strain-heatmaps");
-  const profiles = mustEl("strain-profiles");
-  const dc = mustEl("strain-dc");
-  const summary = mustEl("strain-summary");
-  heatmaps.innerHTML = "";
-  profiles.innerHTML = "";
-  dc.innerHTML = "";
-  if (!data.lines.length) {
-    summary.textContent = "run has no lines";
-    mustEl("strain-scale").innerHTML = "";
-    return;
-  }
-  const stats = strainStats(data);
-  const vmax = Math.max(
-    1e-6,
-    state.strain.field === "friction" ? stats.maxFriction : stats.maxElastic
-  );
-  summary.textContent =
-    `max |elastic| ${stats.maxElastic.toFixed(1)}% · ` +
-    `mean |friction| ${stats.meanFriction.toFixed(1)}%`;
-  document.querySelectorAll<HTMLButtonElement>("button.strain-field-btn").forEach((btn) => {
-    btn.disabled = btn.dataset.field === state.strain.field;
-  });
-  mustEl("strain-scale").innerHTML = strainScaleHtml(vmax);
-  const { groups, geo, pairs } = strainGeometry(data);
-  pairs.forEach((pair, beltIdx) => {
-    for (const group of groups) {
-      const title = `${pair} — ${group.title}`;
-      heatmaps.appendChild(strainHeatmapBox(title, group, beltIdx, vmax, geo));
-      profiles.appendChild(strainProfileBox(title, beltIdx, group, vmax, geo));
-      dc.appendChild(strainDcBox(title, beltIdx, group.lines));
+
+function reconcileStrainSelection(runs: RunSummary[]): boolean {
+  let changed = false;
+  if (!runs.some((r) => r.name === state.strain.selected)) {
+    const next = runs.length ? runs[0].name : null;
+    if (state.strain.selected !== next) {
+      state.strain.selected = next;
+      changed = true;
     }
-  });
+  }
+  const known = new Set(runs.map((r) => r.name));
+  for (const name of [...state.strain.compare]) {
+    if (!known.has(name)) {
+      state.strain.compare.delete(name);
+      changed = true;
+    }
+  }
+  return changed;
 }
 
-/// Appends a diverging diff heatmap (selected − compare) per belt×orientation
-/// for every compare run whose strain signature matches the selected run's.
-/// A mismatched run is named in the summary instead of drawn — subtracting
-/// cells only means something when both maps bin the bed identically.
-async function renderStrainDiffs(selectedData: StrainData) {
-  const heatmaps = el("strain-heatmaps");
-  if (!heatmaps || !state.strain.compare.size) return;
-  if (!selectedData || !selectedData.lines.length) return;
+function setStrainField(field: StrainField) {
+  state.strain.field = field;
+  notify();
+}
+
+function onStrainRowClick(name: string, ev: MouseEvent) {
+  if (ev.shiftKey) {
+    if (name === state.strain.selected) return;
+    if (state.strain.compare.has(name)) state.strain.compare.delete(name);
+    else state.strain.compare.add(name);
+  } else {
+    state.strain.selected = name;
+    state.strain.compare.clear();
+  }
+  notify();
+}
+
+interface StrainDiffBox {
+  key: string;
+  title: string;
+  group: StrainGroup;
+  beltIdx: number;
+  vmax: number;
+  geo: StrainGeo;
+}
+
+interface StrainDiffScale {
+  key: string;
+  cmpTag: string;
+  vmax: number;
+}
+
+type StrainDiffNode =
+  | ({ kind: "heat" } & StrainDiffBox)
+  | ({ kind: "scale" } & StrainDiffScale);
+
+interface StrainCompareResult {
+  name: string;
+  data: StrainData | null;
+  error: unknown;
+}
+
+function computeStrainDiffs(
+  selectedData: StrainData,
+  compareResults: StrainCompareResult[]
+): { nodes: StrainDiffNode[]; skips: string[] } {
+  const nodes: StrainDiffNode[] = [];
+  const skips: string[] = [];
+  if (!selectedData.lines.length) return { nodes, skips };
   const baseName = state.strain.selected;
-  if (baseName === null) return;
+  if (baseName === null) return { nodes, skips };
   const base = strainGeometry(selectedData);
   const baseSig = strainSignature(selectedData);
   const baseTag = runTag(baseName);
   const field = state.strain.field;
-  const skips: string[] = [];
-  for (const name of [...state.strain.compare]) {
-    let cmp: StrainData;
-    try {
-      cmp = await ensureStrain(name);
-    } catch (e) {
-      skips.push(`${runTag(name)}: ${String(e)}`);
+  for (const { name, data, error } of compareResults) {
+    if (error) {
+      skips.push(`${runTag(name)}: ${String(error)}`);
       continue;
     }
-    if (state.strain.selected !== baseName || !el("strain-heatmaps")) return;
-    if (!cmp || !cmp.lines.length || strainSignature(cmp) !== baseSig) {
+    const cmp = data;
+    if (!cmp) continue;
+    if (!cmp.lines.length || strainSignature(cmp) !== baseSig) {
       skips.push(`${runTag(name)}: dimensions differ`);
       continue;
     }
@@ -586,7 +415,7 @@ async function renderStrainDiffs(selectedData: StrainData) {
       }
       aligned.push(cg);
     }
-    if (mismatch || aligned.length !== base.groups.length || state.strain.selected !== baseName) {
+    if (mismatch || aligned.length !== base.groups.length) {
       skips.push(`${runTag(name)}: layout mismatch`);
       continue;
     }
@@ -604,59 +433,352 @@ async function renderStrainDiffs(selectedData: StrainData) {
       }
     }
     base.pairs.forEach((pair, beltIdx) => {
-      if (state.strain.selected !== baseName || !el("strain-heatmaps")) return;
       for (let gi = 0; gi < base.groups.length; gi++) {
         const bg = base.groups[gi];
         const cg = aligned[gi];
         const diffLines = bg.lines.map((bl, li) => buildDiffLine(bl, cg.lines[li]));
-        const diffGroup = { orientation: bg.orientation, title: bg.title, lines: diffLines };
-        const title = `Δ ${baseTag} − ${cmpTag} · ${pair} — ${bg.title}`;
-        heatmaps.appendChild(strainHeatmapBox(title, diffGroup, beltIdx, vmaxDiff, base.geo));
+        const diffGroup: StrainGroup = { orientation: bg.orientation, title: bg.title, lines: diffLines };
+        nodes.push({
+          kind: "heat",
+          key: `diff-${cmpTag}-${pair}-${bg.orientation}`,
+          title: `Δ ${baseTag} − ${cmpTag} · ${pair} — ${bg.title}`,
+          group: diffGroup,
+          beltIdx,
+          vmax: vmaxDiff,
+          geo: base.geo,
+        });
       }
     });
-    if (state.strain.selected === baseName && el("strain-heatmaps")) {
-      const scaleEl = document.createElement("div");
-      scaleEl.className = "strain-scale";
-      scaleEl.style.gridColumn = "1 / -1";
-      const stops: string[] = [];
-      for (let i = 0; i <= 8; i++) stops.push(strainColor(i / 4 - 1));
-      scaleEl.innerHTML =
-        `<span>−${vmaxDiff.toFixed(1)}%</span>` +
-        `<span class="bar" style="background:linear-gradient(90deg,${stops.join(",")})"></span>` +
-        `<span>+${vmaxDiff.toFixed(1)}%</span>` +
-        `<span class="hint">Δ scale for ${cmpTag} — ${field}, null bins stay dark</span>`;
-      heatmaps.appendChild(scaleEl);
+    nodes.push({ kind: "scale", key: `diff-scale-${cmpTag}`, cmpTag, vmax: vmaxDiff });
+  }
+  return { nodes, skips };
+}
+
+function HeatmapCanvas({ title, group, beltIdx, vmax, geo }: StrainDiffBox) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  const field = state.strain.field;
+  useEffect(() => {
+    const canvas = ref.current;
+    if (canvas) drawStrainHeatmap(canvas, group, beltIdx, vmax, geo);
+  }, [group, beltIdx, vmax, geo, field]);
+  const pad = STRAIN_HEAT_PAD;
+  const plotW = STRAIN_HEAT_CANVAS_W - pad.l - pad.r;
+  const plotH = plotW * ((geo.yhi - geo.ylo) / (geo.xhi - geo.xlo));
+  const height = Math.round(pad.t + pad.b + plotH);
+  return html`<div class="chart-box">
+    <h3>${title}</h3>
+    <canvas ref=${ref} width=${STRAIN_HEAT_CANVAS_W} height=${height}></canvas>
+  </div>`;
+}
+
+function DcBarsCanvas({ title, labels, values }: { title: string; labels: string[]; values: (number | null)[] }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = ref.current;
+    if (canvas) drawStrainDcBars(canvas, labels, values);
+  }, [labels, values]);
+  return html`<div class="chart-box">
+    <h3>${title}</h3>
+    <canvas ref=${ref} width="430" height="210"></canvas>
+  </div>`;
+}
+
+function profileRamp(beltIdx: number, count: number, i: number): string {
+  return mixColor(
+    PALETTE[beltIdx % PALETTE.length],
+    "#ffffff",
+    count > 1 ? (0.65 * i) / (count - 1) : 0
+  );
+}
+
+function ProfileChart({ title, beltIdx, group, vmax, geo }: StrainDiffBox) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const field = state.strain.field;
+  const lines = group.lines;
+  const sweepOrigin = group.orientation === "x" ? geo.x0 : geo.y0;
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const traces = lines.map((line, i) => ({
+      t: line.bin_centers.map((c) => sweepOrigin + c),
+      y: line.belts[beltIdx][field],
+      color: profileRamp(beltIdx, lines.length, i),
+    }));
+    const plot = timeSeriesPlot(host, {
+      width: 860,
+      height: 300,
+      yLabel: `${field} (%) vs bed ${group.orientation}`,
+      traces,
+      fixedY: { yMin: -vmax, yMax: vmax },
+      xUnit: "mm",
+    });
+    return () => plot.u.destroy();
+  }, [group, beltIdx, vmax, geo, field]);
+  return html`<div class="chart-box">
+    <h3>${title}</h3>
+    <div ref=${hostRef}></div>
+    <div class="legend">
+      ${lines.map(
+        (line, i) => html`<span key=${line.name}
+          ><span class="swatch" style=${`background:${profileRamp(beltIdx, lines.length, i)}`}></span>${line.name}</span
+        >`
+      )}
+    </div>
+  </div>`;
+}
+
+function ScaleBar({ vmax }: { vmax: number }) {
+  const stops: string[] = [];
+  for (let i = 0; i <= 8; i++) stops.push(strainColor(i / 4 - 1));
+  const what =
+    state.strain.field === "friction"
+      ? "friction (direction-dependent) differential torque"
+      : "elastic differential torque";
+  return html`<div class="strain-scale">
+    <span>−${vmax.toFixed(1)}%</span>
+    <span class="bar" style=${`background:linear-gradient(90deg,${stops.join(",")})`}></span>
+    <span>+${vmax.toFixed(1)}%</span>
+    <span class="hint">${what}, % rated — null bins stay dark</span>
+  </div>`;
+}
+
+function DiffScaleBar({ cmpTag, vmax }: { cmpTag: string; vmax: number }) {
+  const stops: string[] = [];
+  for (let i = 0; i <= 8; i++) stops.push(strainColor(i / 4 - 1));
+  return html`<div class="strain-scale" style="grid-column:1 / -1">
+    <span>−${vmax.toFixed(1)}%</span>
+    <span class="bar" style=${`background:linear-gradient(90deg,${stops.join(",")})`}></span>
+    <span>+${vmax.toFixed(1)}%</span>
+    <span class="hint">Δ scale for ${cmpTag} — ${state.strain.field}, null bins stay dark</span>
+  </div>`;
+}
+
+function StrainRunsTable({ def }: { def: PageDef }) {
+  useStore();
+  const runs = pageRuns(def);
+  return html`<tbody id="strain-run-body">
+    ${runs.map((run) => {
+      const cls = ["selectable"];
+      if (run.name === state.strain.selected) cls.push("selected");
+      if (state.strain.compare.has(run.name)) cls.push("compare");
+      const manifest = detailData(run.name)?.manifest;
+      return html`<tr key=${run.name} class=${cls.join(" ")} onClick=${(ev: MouseEvent) => onStrainRowClick(run.name, ev)}>
+        <td title=${`${run.name} — ${run.mtime_utc}`}>${shortTime(run.mtime_utc)}</td>
+        <td>${runTag(run.name)}</td>
+        <td class="actions">
+          <button
+            title="prefill the console with this run's command"
+            disabled=${!manifest}
+            onClick=${(e: MouseEvent) => {
+              e.stopPropagation();
+              loadRerunForm(run.name);
+            }}
+          >
+            → console
+          </button>
+        </td>
+      </tr>`;
+    })}
+  </tbody>`;
+}
+
+function StrainRunsSection({ def }: { def: PageDef }) {
+  return html`<section class="runs-section">
+    <div class="section-head"><h2>strain runs</h2></div>
+    <div class="section-tools">
+      <span class="note">strain_map — click to map, shift+click a second run to diff (matching dimensions)</span>
+    </div>
+    <div class="table-wrap runs-wrap">
+      <table>
+        <thead>
+          <tr><th>time</th><th>tag</th><th></th></tr>
+        </thead>
+        <${StrainRunsTable} def=${def} />
+      </table>
+    </div>
+  </section>`;
+}
+
+function StrainMapSection({ name, data, error }: { name: string | null; data: StrainData | null; error: unknown }) {
+  useStore();
+  const field = state.strain.field;
+  const compareNames = [...state.strain.compare];
+  const compareQueries = useQueries({
+    queries: compareNames.map((cn) => ({
+      queryKey: [...strainKey(cn), "view"],
+      queryFn: () => ensureStrain(cn),
+      enabled: data != null && data.lines.length > 0,
+    })),
+  });
+
+  let summaryText = "";
+  const heatNodes: VNode[] = [];
+  let scaleNode: VNode | null = null;
+  if (name == null) {
+    summaryText = "no strain_map runs yet — run SERVO_STRAIN_MAP first";
+  } else if (error && !data) {
+    summaryText = String(error);
+  } else if (data && !data.lines.length) {
+    summaryText = "run has no lines";
+  } else if (data) {
+    const stats = strainStats(data);
+    const vmax = Math.max(1e-6, field === "friction" ? stats.maxFriction : stats.maxElastic);
+    summaryText =
+      `max |elastic| ${stats.maxElastic.toFixed(1)}% · ` +
+      `mean |friction| ${stats.meanFriction.toFixed(1)}%`;
+    const { groups, geo, pairs } = strainGeometry(data);
+    pairs.forEach((pair, beltIdx) => {
+      for (const group of groups) {
+        heatNodes.push(
+          html`<${HeatmapCanvas}
+            key=${`m-${pair}-${group.orientation}`}
+            title=${`${pair} — ${group.title}`}
+            group=${group}
+            beltIdx=${beltIdx}
+            vmax=${vmax}
+            geo=${geo}
+          />`
+        );
+      }
+    });
+    scaleNode = html`<${ScaleBar} vmax=${vmax} />`;
+    const compareResults: StrainCompareResult[] = compareNames.map((cn, i) => ({
+      name: cn,
+      data: (compareQueries[i]?.data as StrainData | undefined) ?? null,
+      error: compareQueries[i]?.error ?? null,
+    }));
+    const { nodes, skips } = computeStrainDiffs(data, compareResults);
+    for (const node of nodes) {
+      if (node.kind === "heat") {
+        heatNodes.push(
+          html`<${HeatmapCanvas}
+            key=${node.key}
+            title=${node.title}
+            group=${node.group}
+            beltIdx=${node.beltIdx}
+            vmax=${node.vmax}
+            geo=${node.geo}
+          />`
+        );
+      } else {
+        heatNodes.push(html`<${DiffScaleBar} key=${node.key} cmpTag=${node.cmpTag} vmax=${node.vmax} />`);
+      }
     }
+    if (skips.length) summaryText += `  · skipped: ${skips.join("; ")}`;
   }
-  if (skips.length) {
-    const note = el("strain-summary");
-    if (note) note.textContent += `  · skipped: ${skips.join("; ")}`;
-  }
+
+  return html`<section>
+    <div class="section-head"><h2>strain map</h2></div>
+    <div class="section-tools">
+      <button class="strain-field-btn" data-field="elastic" disabled=${field === "elastic"} onClick=${() => setStrainField("elastic")}>
+        elastic
+      </button>
+      <button
+        class="strain-field-btn"
+        data-field="friction"
+        title="the direction-dependent half: (forward - backward)/2 — what a position-keyed offset cannot cancel"
+        disabled=${field === "friction"}
+        onClick=${() => setStrainField("friction")}
+      >
+        friction
+      </button>
+      <span class="note" id="strain-summary">${summaryText}</span>
+    </div>
+    <div id="strain-heatmaps" class="strain-grid">${heatNodes}</div>
+    <div id="strain-scale">${scaleNode}</div>
+  </section>`;
 }
 
-async function redrawStrain() {
-  renderStrainRuns();
-  if (!el("strain-heatmaps")) return;
-  const summary = mustEl("strain-summary");
+function StrainProfilesSection({ data }: { data: StrainData | null }) {
+  useStore();
+  const field = state.strain.field;
+  const boxes: VNode[] = [];
+  if (data && data.lines.length) {
+    const stats = strainStats(data);
+    const vmax = Math.max(1e-6, field === "friction" ? stats.maxFriction : stats.maxElastic);
+    const { groups, geo, pairs } = strainGeometry(data);
+    pairs.forEach((pair, beltIdx) => {
+      for (const group of groups) {
+        boxes.push(
+          html`<${ProfileChart}
+            key=${`p-${pair}-${group.orientation}`}
+            title=${`${pair} — ${group.title}`}
+            group=${group}
+            beltIdx=${beltIdx}
+            vmax=${vmax}
+            geo=${geo}
+          />`
+        );
+      }
+    });
+  }
+  return html`<section>
+    <div class="section-head"><h2>per-line elastic profiles</h2></div>
+    <div class="section-tools"><span class="note">one polyline per raster line, in bed coordinates</span></div>
+    <div class="charts" id="strain-profiles">${boxes}</div>
+  </section>`;
+}
+
+function StrainDcSection({ data }: { data: StrainData | null }) {
+  useStore();
+  const boxes: VNode[] = [];
+  if (data && data.lines.length) {
+    const { groups, pairs } = strainGeometry(data);
+    pairs.forEach((pair, beltIdx) => {
+      for (const group of groups) {
+        boxes.push(
+          html`<${DcBarsCanvas}
+            key=${`d-${pair}-${group.orientation}`}
+            title=${`${pair} — ${group.title}`}
+            labels=${group.lines.map(strainLineLabel)}
+            values=${group.lines.map((line) => meanElastic(line, beltIdx))}
+          />`
+        );
+      }
+    });
+  }
+  return html`<section>
+    <div class="section-head"><h2>per-line DC offset — mean elastic</h2></div>
+    <div class="section-tools"><span class="note">a line-to-line offset is trapped preload, not local strain</span></div>
+    <div class="strain-grid" id="strain-dc">${boxes}</div>
+  </section>`;
+}
+
+function StrainMain({ def }: { def: PageDef }) {
+  useStore();
+  const runs = pageRuns(def);
+  const namesSig = runs.map((r) => r.name).join("|");
+  useEffect(() => {
+    if (reconcileStrainSelection(runs)) notify();
+  }, [namesSig]);
   const name = state.strain.selected;
-  if (!name) {
-    summary.textContent = "no strain_map runs yet — run SERVO_STRAIN_MAP first";
-    mustEl("strain-heatmaps").innerHTML = "";
-    mustEl("strain-scale").innerHTML = "";
-    mustEl("strain-profiles").innerHTML = "";
-    mustEl("strain-dc").innerHTML = "";
-    return;
-  }
-  let data: StrainData;
-  try {
-    data = await ensureStrain(name);
-  } catch (e) {
-    summary.textContent = String(e);
-    return;
-  }
-  if (state.strain.selected !== name || !el("strain-heatmaps")) return;
-  renderStrainCharts(data);
-  await renderStrainDiffs(data);
+  const selected = useQuery({
+    queryKey: [...strainKey(name ?? ""), "view"],
+    queryFn: () => ensureStrain(name as string),
+    enabled: name != null,
+  });
+  const data = name != null ? ((selected.data as StrainData | undefined) ?? null) : null;
+  const error = name != null ? selected.error : null;
+  return html`<main class="analysis">
+    <${StrainRunsSection} def=${def} />
+    <${StrainMapSection} name=${name} data=${data} error=${error} />
+    <${StrainProfilesSection} data=${data} />
+    <${StrainDcSection} data=${data} />
+  </main>`;
 }
 
-export { STRAIN_NEUTRAL, STRAIN_NEG, STRAIN_POS, STRAIN_HEAT_PAD, STRAIN_HEAT_CANVAS_W, STRAIN_LINE_SPACING_FALLBACK_MM, strainShellHtml, ensureStrain, runTag, buildDiffLine, pointwiseDiff, nulls, strainSignature, renderStrainRuns, strainColor, sweptEntry, strainLineLabel, strainGroups, strainBedGeometry, strainStats, lineBinWidth, drawStrainHeatmap, strainHeatmapBox, strainScaleHtml, strainProfileBox, meanElastic, drawStrainDcBars, strainDcBox, strainGeometry, renderStrainCharts, renderStrainDiffs, redrawStrain };
+function StrainPage({ def }: { def: PageDef }) {
+  useEffect(() => {
+    applyAccordionState();
+  }, []);
+  return html`<div class="workspace">
+    <${StrainMain} def=${def} />
+    <aside class="controls">
+      <${ConsolePanel} templates=${def.templates} />
+      <${LaunchpadPad} />
+    </aside>
+  </div>`;
+}
+
+
+export { STRAIN_NEUTRAL, STRAIN_NEG, STRAIN_POS, STRAIN_HEAT_PAD, STRAIN_HEAT_CANVAS_W, STRAIN_LINE_SPACING_FALLBACK_MM, runTag, buildDiffLine, pointwiseDiff, nulls, strainSignature, strainColor, sweptEntry, strainLineLabel, strainGroups, strainBedGeometry, strainStats, lineBinWidth, drawStrainHeatmap, meanElastic, drawStrainDcBars, strainGeometry, reconcileStrainSelection, computeStrainDiffs, StrainPage };

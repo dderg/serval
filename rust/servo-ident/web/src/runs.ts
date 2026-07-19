@@ -1,18 +1,34 @@
-import { html, render } from "htm/preact";
+import { html } from "htm/preact";
 import { useEffect, useRef, useState } from "preact/hooks";
-import { useQuery, QueryObserver } from "@tanstack/preact-query";
-import type { VNode } from "preact";
-import { api, detailData, ensureDetail, runsData, ambientDiff, el, pageRuns, shortTime } from "./api";
-import { queryClient, queryKeys, QueryRoot } from "./query-client";
-import { loadRerunForm } from "./drive";
+import { useQuery } from "@tanstack/preact-query";
+import { ambientDiff, el, resetRenderState, shortTime } from "./api";
+import {
+  runsData,
+  detailData,
+  pageRuns,
+  runsQuery,
+  useSaveNote,
+  useDeleteRun,
+  useAnalyzeRun,
+} from "./queries/runs";
+import { ConsolePanel } from "./console";
+import { DrivePanel, loadRerunForm } from "./drive";
 import { redrawCharts } from "./peaks";
-import { currentPageDef } from "./shell";
+import { renderSentLog } from "./moonraker";
+import { LaunchpadPad } from "./launchpad";
+import {
+  MetricsSection,
+  SweepMetricsSection,
+  PsdSection,
+  AccelPsdSection,
+} from "./metrics";
+import { FrfSection, RingdownSection } from "./dynamics";
+import { SectionHead, TimeDomainSection, PathSection } from "./charts-core";
+import { applyAccordionState, bindAnalysisControls, currentPageDef } from "./shell";
 import { PALETTE, INITIAL_SELECTED_RUNS, state } from "./state";
 import { notify, useStore } from "./store";
 import type { PageDef } from "./state";
-import type { NotePayload, RunSummary } from "./wire";
-
-const RUNS_POLL_MS = 5000;
+import type { RunSummary } from "./api/runs";
 
 function toggleRunSelection(run: RunSummary, ev: MouseEvent) {
   if (!run.has_results) return;
@@ -38,7 +54,7 @@ function toggleRunSelection(run: RunSummary, ev: MouseEvent) {
     }
   }
   syncRunColors();
-  renderRuns();
+  notify();
   redrawCharts();
 }
 
@@ -50,7 +66,7 @@ function togglePin(run: RunSummary) {
     state.selected.add(run.name);
   }
   syncRunColors();
-  renderRuns();
+  notify();
   redrawCharts();
 }
 
@@ -80,6 +96,7 @@ function NoteCell({ run }: { run: RunSummary }) {
   const [editing, setEditing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const doneRef = useRef(false);
+  const note = useSaveNote();
   useEffect(() => {
     if (editing && inputRef.current) inputRef.current.focus();
   }, [editing]);
@@ -101,7 +118,7 @@ function NoteCell({ run }: { run: RunSummary }) {
     doneRef.current = true;
     const text = inputRef.current.value;
     setEditing(false);
-    if (save) saveNote(run, text);
+    if (save) note.mutate({ name: run.name, text });
   };
   return html`<td class="run-note" onClick=${(e: MouseEvent) => e.stopPropagation()}>
     <input
@@ -144,6 +161,8 @@ function closeContextMenu() {
 function ContextMenu() {
   useStore();
   const ref = useRef<HTMLDivElement>(null);
+  const del = useDeleteRun();
+  const analyze = useAnalyzeRun();
   useEffect(() => {
     if (!menu.run) return;
     const onPointerDown = (ev: MouseEvent) => {
@@ -194,22 +213,14 @@ function ContextMenu() {
   return html`<div class="context-menu" style=${style} ref=${ref}>
     ${run.has_results ? item(pinned ? "unpin" : "pin", () => togglePin(run)) : null}
     ${item("→ console", () => loadRerunForm(run.name), { disabled: !detail?.manifest })}
-    ${!run.has_results ? item("analyze", () => triggerAnalyze(run.name)) : null}
-    ${item("delete", () => deleteRun(run), { danger: true })}
+    ${!run.has_results ? item("analyze", () => analyze.mutate(run.name)) : null}
+    ${item("delete", () => del.mutate(run.name), { danger: true })}
   </div>`;
 }
 
-let mountedMenuHost: HTMLElement | null = null;
-
-function ensureContextMenuMounted() {
-  if (mountedMenuHost) return;
-  const host = document.createElement("div");
-  document.body.appendChild(host);
-  mountedMenuHost = host;
-  render(html`<${ContextMenu} />`, host);
-}
 
 function RunRow({ run, def }: { run: RunSummary; def: PageDef }) {
+  const analyze = useAnalyzeRun();
   const runs = runsData();
   const globalIdx = runs.findIndex((r) => r.name === run.name);
   const detail = detailData(run.name);
@@ -230,7 +241,6 @@ function RunRow({ run, def }: { run: RunSummary; def: PageDef }) {
     onClick=${(ev: MouseEvent) => toggleRunSelection(run, ev)}
     onContextMenu=${(ev: MouseEvent) => {
       ev.preventDefault();
-      ensureContextMenuMounted();
       openContextMenu(run, ev.clientX, ev.clientY);
     }}
   >
@@ -259,7 +269,7 @@ function RunRow({ run, def }: { run: RunSummary; def: PageDef }) {
         : html`<button
             onClick=${(e: MouseEvent) => {
               e.stopPropagation();
-              triggerAnalyze(run.name);
+              analyze.mutate(run.name);
             }}
           >
             analyze
@@ -275,50 +285,91 @@ function RunsTable() {
   return runs.map((run) => html`<${RunRow} key=${run.name} run=${run} def=${def} />`);
 }
 
-async function fetchRuns(): Promise<RunSummary[]> {
-  const prev = runsData();
-  let runs: RunSummary[];
-  try {
-    runs = await api<RunSummary[]>("/api/runs");
-  } catch (e) {
-    console.error(e);
-    throw e;
-  }
-  if (runsUnchanged(prev, runs)) return prev;
-  await Promise.all(runs.map((r) => ensureDetail(r).catch((e) => console.error(e))));
-  queryClient.setQueryData(queryKeys.runs, runs);
-  await reconcileRuns(runs);
-  return runs;
+
+function RunsBody() {
+  useQuery({ ...runsQuery(), notifyOnChangeProps: ["data"] });
+  return html`<${RunsTable} />`;
 }
 
-function runsUnchanged(prev: RunSummary[], next: RunSummary[]): boolean {
-  return (
-    next.length === prev.length &&
-    next.every((run, i) => {
-      const current = prev[i];
-      const verdictsMatch =
-        run.verdict === current.verdict ||
-        (run.verdict !== null &&
-          current.verdict !== null &&
-          run.verdict.recommended_step === current.verdict.recommended_step &&
-          run.verdict.reason === current.verdict.reason &&
-          run.verdict.flags.length === current.verdict.flags.length &&
-          run.verdict.flags.every((flag, j) => flag === current.verdict!.flags[j]));
-      return (
-        run.name === current.name &&
-        run.mtime_utc === current.mtime_utc &&
-        run.experiment === current.experiment &&
-        run.tag === current.tag &&
-        run.axis === current.axis &&
-        run.has_results === current.has_results &&
-        verdictsMatch &&
-        run.note === current.note
-      );
-    })
-  );
+function usePageBootstrap(withCharts: boolean) {
+  useEffect(() => {
+    resetRenderState();
+    bindAnalysisControls();
+    renderSentLog();
+    applyAccordionState();
+    if (withCharts) void redrawCharts();
+  }, []);
 }
 
-async function reconcileRuns(runs: RunSummary[]) {
+function TunePage() {
+  const def = currentPageDef();
+  usePageBootstrap(true);
+  const runsNote = `<span class="note">${
+    def.experiments ? def.experiments.join(", ") : "all experiments"
+  } — click a row to chart it</span>`;
+  return html`<div class="workspace">
+      <main class="analysis">
+        <section class="runs-section">
+          <${SectionHead} title="runs" tools=${runsNote} />
+          <div class="table-wrap runs-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th></th><th>time</th><th>tag</th>
+                  <th>ambient diff vs previous</th><th>note</th><th></th>
+                </tr>
+              </thead>
+              <tbody id="journal-body"><${RunsBody} /></tbody>
+            </table>
+          </div>
+        </section>
+        <${MetricsSection} />
+        <${SweepMetricsSection} />
+        <${PathSection} />
+        <${FrfSection} />
+        <${RingdownSection} />
+        <${PsdSection} />
+        <${AccelPsdSection} />
+        <${TimeDomainSection} />
+      </main>
+      <aside class="controls">
+        <section class="panel">
+          <div class="section-head"><h2>drive tuning</h2></div>
+          <div id="drive-panel"><${DrivePanel} /></div>
+        </section>
+        <${ConsolePanel} templates=${def.templates} />
+        <${LaunchpadPad} />
+      </aside>
+    </div>
+    <${ContextMenu} />`;
+}
+
+function JournalPage() {
+  usePageBootstrap(false);
+  return html`<div class="workspace single">
+      <main class="analysis">
+        <section class="runs-section">
+          <div class="section-head"><h2>journal — every run</h2></div>
+          <div class="table-wrap journal-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th></th><th>time</th><th>experiment/tag</th>
+                  <th>ambient diff vs previous</th><th>note</th><th></th>
+                </tr>
+              </thead>
+              <tbody id="journal-body"><${RunsBody} /></tbody>
+            </table>
+          </div>
+        </section>
+        <${ConsolePanel} />
+        <${LaunchpadPad} />
+      </main>
+    </div>
+    <${ContextMenu} />`;
+}
+
+export async function reconcileRuns(runs: RunSummary[]) {
   const known = new Set(runs.map((r) => r.name));
   for (const name of [...state.selected]) {
     if (!known.has(name)) state.selected.delete(name);
@@ -330,82 +381,6 @@ async function reconcileRuns(runs: RunSummary[]) {
   syncRunColors();
   notify();
   await redrawCharts();
-}
-
-function RunsRoot() {
-  useQuery({
-    queryKey: queryKeys.runs,
-    queryFn: fetchRuns,
-    notifyOnChangeProps: ["data"],
-  });
-  return html`<${RunsTable} />`;
-}
-
-let runsObserver: QueryObserver<RunSummary[]> | null = null;
-
-function startRunsPolling() {
-  if (runsObserver) return;
-  runsObserver = new QueryObserver<RunSummary[]>(queryClient, {
-    queryKey: queryKeys.runs,
-    queryFn: fetchRuns,
-    refetchInterval: RUNS_POLL_MS,
-    refetchIntervalInBackground: false,
-  });
-  runsObserver.subscribe(() => {});
-}
-
-let mountedRunsBody: HTMLElement | null = null;
-
-function renderRuns() {
-  const tbody = el("journal-body");
-  if (!tbody) return;
-  if (mountedRunsBody !== tbody) {
-    if (mountedRunsBody) render(null as unknown as VNode, mountedRunsBody);
-    mountedRunsBody = tbody;
-    render(html`<${QueryRoot}><${RunsRoot} /><//>`, tbody);
-  }
-  notify();
-}
-
-async function saveNote(run: RunSummary, text: string) {
-  const optimistic = text.trim() || null;
-  queryClient.setQueryData<RunSummary[]>(queryKeys.runs, (runs) =>
-    runs ? runs.map((r) => (r.name === run.name ? { ...r, note: optimistic } : r)) : runs
-  );
-  try {
-    const saved = await api<NotePayload>(`/api/runs/${encodeURIComponent(run.name)}/note`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ note: text }),
-    });
-    queryClient.setQueryData<RunSummary[]>(queryKeys.runs, (runs) =>
-      runs ? runs.map((r) => (r.name === run.name ? { ...r, note: saved.note || null } : r)) : runs
-    );
-  } catch (e) {
-    console.error(e);
-    alert(`saving note failed: ${e instanceof Error ? e.message : e}`);
-    await queryClient.invalidateQueries({ queryKey: queryKeys.runs });
-  }
-}
-
-async function deleteRun(run: RunSummary) {
-  try {
-    await api(`/api/runs/${encodeURIComponent(run.name)}`, { method: "DELETE" });
-  } catch (e) {
-    console.error(e);
-    alert(`deleting ${run.name} failed: ${e instanceof Error ? e.message : e}`);
-    return;
-  }
-  queryClient.removeQueries({ queryKey: ["runs", run.name] });
-  const remaining = runsData().filter((r) => r.name !== run.name);
-  queryClient.setQueryData(queryKeys.runs, remaining);
-  await reconcileRuns(remaining);
-  await queryClient.invalidateQueries({ queryKey: queryKeys.runs });
-}
-
-async function triggerAnalyze(name: string) {
-  await api(`/api/runs/${encodeURIComponent(name)}/analyze`, { method: "POST" });
-  await queryClient.invalidateQueries({ queryKey: queryKeys.runs });
 }
 
 function selectedRunNames() {
@@ -444,4 +419,5 @@ function autoSelectInitialRuns() {
   if (!state.console.text) loadRerunForm(withResults[0].name);
 }
 
-export { renderRuns, selectedRunNames, runColor, startRunsPolling };
+export { selectedRunNames, runColor, TunePage, JournalPage };
+export { startRunsPolling } from "./queries/runs";

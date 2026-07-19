@@ -11,6 +11,7 @@ use ts_rs::{Config, TS};
 use servo_ident::demo::DriveStatePayload;
 use servo_ident::results::{PlotSeries, Results};
 use servo_ident::serve::{DeleteResponse, LiveStatus, NoteResponse, RunPath, RunSummary};
+use servo_ident::strain::StrainMap;
 
 fn export_all(out_dir: &Path) {
     let cfg = Config::new().with_out_dir(out_dir).with_large_int("number");
@@ -22,6 +23,7 @@ fn export_all(out_dir: &Path) {
     LiveStatus::export_all(&cfg).expect("export LiveStatus");
     RunPath::export_all(&cfg).expect("export RunPath");
     DriveStatePayload::export_all(&cfg).expect("export DriveStatePayload");
+    StrainMap::export_all(&cfg).expect("export StrainMap");
 }
 
 fn collect_files(root: &Path, dir: &Path, files: &mut BTreeMap<String, String>) {

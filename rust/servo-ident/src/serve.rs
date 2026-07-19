@@ -285,9 +285,9 @@ fn handle_analyze(captures_root: &Path, name: &str) -> Response {
     )
 }
 
-#[derive(Deserialize)]
-struct NoteBody {
-    note: String,
+#[derive(Deserialize, JsonSchema)]
+pub struct NoteBody {
+    pub note: String,
 }
 
 #[derive(Serialize, JsonSchema, TS)]
@@ -570,6 +570,9 @@ pub fn handle(captures_root: &Path, req: &Request) -> Response {
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     match (req.method.as_str(), segments.as_slice()) {
         ("GET", []) => asset_response(assets::index_html()),
+        ("GET", ["api", "openapi.json"]) => {
+            Response::json(200, crate::openapi::document().to_string())
+        }
         ("GET", ["api", "runs"]) => handle_list(captures_root),
         ("GET", ["api", "drive_state"]) => handle_drive_state(captures_root),
         ("GET", ["api", "live"]) => handle_live_status(captures_root),
