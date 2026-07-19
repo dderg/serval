@@ -1,10 +1,10 @@
-use std::io::{ErrorKind, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mcu_transport::demux::{Demuxer, Frame};
 
@@ -19,7 +19,10 @@ use crate::wire::{decode_command, Command};
 pub struct FrameServer {
     cmd_rx: Receiver<Command>,
     writer_rx: Receiver<UnixStream>,
-    writer: Option<UnixStream>,
+    writer: Option<Box<dyn Write + Send>>,
+    pending: Vec<u8>,
+    pending_since: Option<Instant>,
+    pending_max: usize,
     session_ended: Arc<AtomicBool>,
     closed: Arc<AtomicBool>,
 }
@@ -33,6 +36,29 @@ impl core::fmt::Debug for FrameServer {
 }
 
 const READER_POLL: Duration = Duration::from_millis(2);
+
+const MAX_PENDING_BYTES: usize = 2 * 1024 * 1024;
+const PENDING_STALL_DEADLINE: Duration = Duration::from_secs(5);
+
+enum WriteStep {
+    Done,
+    Blocked,
+    Failed(io::Error),
+}
+
+fn nb_write_all<W: Write + ?Sized>(writer: &mut W, buf: &[u8]) -> (usize, WriteStep) {
+    let mut off = 0;
+    while off < buf.len() {
+        match writer.write(&buf[off..]) {
+            Ok(0) => return (off, WriteStep::Blocked),
+            Ok(n) => off += n,
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == ErrorKind::WouldBlock => return (off, WriteStep::Blocked),
+            Err(e) => return (off, WriteStep::Failed(e)),
+        }
+    }
+    (off, WriteStep::Done)
+}
 
 struct ReaderShared {
     cmd_tx: Sender<Command>,
@@ -66,18 +92,23 @@ impl FrameServer {
             cmd_rx,
             writer_rx,
             writer: None,
+            pending: Vec::new(),
+            pending_since: None,
+            pending_max: 0,
             session_ended,
             closed,
         })
     }
 
-    /// Pick up the writer half once the reader thread has accepted a client.
+    /// Pick up the writer half once the reader thread has accepted a client,
+    /// then service any buffered backpressure so a transient host stall drains.
     pub fn pump(&mut self) {
         if self.writer.is_none() {
             if let Ok(w) = self.writer_rx.try_recv() {
-                self.writer = Some(w);
+                self.writer = Some(Box::new(w));
             }
         }
+        self.flush_pending();
     }
 
     pub fn pop_command(&mut self) -> Option<Command> {
@@ -94,13 +125,20 @@ impl FrameServer {
     }
 
     pub fn respond(&mut self, frame: &[u8]) {
-        if let Some(stream) = self.writer.as_mut() {
-            if let Err(e) = stream.write_all(frame) {
-                eprintln!("ec-rt: write error: {e}");
-                self.writer = None;
-                self.session_ended.store(true, Ordering::Release);
+        if self.writer.is_none() {
+            return;
+        }
+        if !self.pending.is_empty() {
+            self.flush_pending();
+            if self.writer.is_none() {
+                return;
+            }
+            if !self.pending.is_empty() {
+                self.stash(frame);
+                return;
             }
         }
+        self.write_frame(frame);
     }
 
     pub fn client_connected(&self) -> bool {
@@ -117,9 +155,171 @@ impl FrameServer {
             self.session_ended.store(true, Ordering::Release);
             return;
         }
+        self.flush_pending();
         self.respond(frame);
         self.writer = None;
+        self.clear_pending();
         self.session_ended.store(true, Ordering::Release);
+    }
+
+    fn write_frame(&mut self, frame: &[u8]) {
+        let (sent, step) = {
+            let writer = self.writer.as_mut().expect("write_frame requires a writer");
+            nb_write_all(writer, frame)
+        };
+        match step {
+            WriteStep::Done => {}
+            WriteStep::Blocked => self.stash(&frame[sent..]),
+            WriteStep::Failed(e) => self.fail_write(e),
+        }
+    }
+
+    fn flush_pending(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        if self.writer.is_none() {
+            self.clear_pending();
+            return;
+        }
+        let (sent, step) = {
+            let writer = self
+                .writer
+                .as_mut()
+                .expect("flush_pending requires a writer");
+            nb_write_all(writer, &self.pending)
+        };
+        match step {
+            WriteStep::Done => {
+                self.pending.clear();
+                self.finish_episode();
+            }
+            WriteStep::Blocked => {
+                if sent > 0 {
+                    self.pending.drain(..sent);
+                }
+                self.enforce_pending_limits();
+            }
+            WriteStep::Failed(e) => self.fail_write(e),
+        }
+    }
+
+    fn stash(&mut self, bytes: &[u8]) {
+        self.pending.extend_from_slice(bytes);
+        self.start_episode_if_needed();
+        self.enforce_pending_limits();
+    }
+
+    fn start_episode_if_needed(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let pending_bytes = self.pending.len();
+        if self.pending_since.is_none() {
+            self.pending_since = Some(Instant::now());
+            self.pending_max = pending_bytes;
+            eprintln!("ec-rt: bridge socket full — buffering ({pending_bytes} bytes)");
+            tracing::warn!(
+                subsystem = "ethercat",
+                event = "bridge_backpressure",
+                pending_bytes,
+                "bridge socket full; buffering frames"
+            );
+        } else if pending_bytes > self.pending_max {
+            self.pending_max = pending_bytes;
+        }
+    }
+
+    fn finish_episode(&mut self) {
+        if let Some(since) = self.pending_since.take() {
+            let stalled_ms = since.elapsed().as_millis() as u64;
+            let max_pending_bytes = self.pending_max;
+            self.pending_max = 0;
+            eprintln!(
+                "ec-rt: bridge backpressure recovered (peak {max_pending_bytes} bytes over {stalled_ms} ms)"
+            );
+            tracing::info!(
+                subsystem = "ethercat",
+                event = "bridge_backpressure_recovered",
+                max_pending_bytes,
+                stalled_ms,
+                "bridge write backlog drained; session healthy"
+            );
+        }
+    }
+
+    fn enforce_pending_limits(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let pending_bytes = self.pending.len();
+        let stalled = self.pending_since.map_or(Duration::ZERO, |t| t.elapsed());
+        if pending_bytes > MAX_PENDING_BYTES || stalled > PENDING_STALL_DEADLINE {
+            let stalled_ms = stalled.as_millis() as u64;
+            eprintln!(
+                "ec-rt: bridge write backlog exceeded limits — ending session ({pending_bytes} bytes, {stalled_ms} ms)"
+            );
+            tracing::error!(
+                subsystem = "ethercat",
+                event = "bridge_stalled",
+                pending_bytes,
+                stalled_ms,
+                "bridge write backlog exceeded limits — ending session"
+            );
+            self.writer = None;
+            self.clear_pending();
+            self.session_ended.store(true, Ordering::Release);
+        }
+    }
+
+    fn fail_write(&mut self, e: io::Error) {
+        eprintln!("ec-rt: write error: {e}");
+        tracing::error!(
+            subsystem = "ethercat",
+            event = "bridge_write_error",
+            error = %e,
+            "bridge write failed — ending session"
+        );
+        self.writer = None;
+        self.clear_pending();
+        self.session_ended.store(true, Ordering::Release);
+    }
+
+    fn clear_pending(&mut self) {
+        self.pending.clear();
+        self.pending_since = None;
+        self.pending_max = 0;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_writer_for_test(writer: Box<dyn Write + Send>) -> Self {
+        let (_cmd_tx, cmd_rx) = channel();
+        let (_writer_tx, writer_rx) = channel();
+        Self {
+            cmd_rx,
+            writer_rx,
+            writer: Some(writer),
+            pending: Vec::new(),
+            pending_since: None,
+            pending_max: 0,
+            session_ended: Arc::new(AtomicBool::new(false)),
+            closed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn backpressure_active(&self) -> bool {
+        self.pending_since.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_pending_since(&mut self, when: Instant) {
+        self.pending_since = Some(when);
     }
 }
 
@@ -206,3 +406,7 @@ fn read_loop(mut stream: UnixStream, shared: &ReaderShared) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "server_tests.rs"]
+mod server_tests;

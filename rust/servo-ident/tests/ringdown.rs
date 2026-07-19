@@ -415,13 +415,15 @@ fn ringdown_run_dir_recovers_frequency_and_damping() {
         .ringdown
         .as_ref()
         .expect("plot step carries ringdown series");
-    let accel_plot = pr
-        .sources
-        .iter()
-        .find(|s| s.source == "accel_x")
-        .expect("accel_x plot source");
-    assert_eq!(accel_plot.tails.len(), 2, "both tails plotted");
-    assert!(!accel_plot.psd_freq_hz.is_empty());
+    for axis in ["accel_x", "accel_y", "accel_z"] {
+        let accel_plot = pr
+            .sources
+            .iter()
+            .find(|s| s.source == axis)
+            .unwrap_or_else(|| panic!("{axis} plot source"));
+        assert_eq!(accel_plot.tails.len(), 2, "{axis} tails plotted");
+        assert!(!accel_plot.psd_freq_hz.is_empty(), "{axis} PSD plotted");
+    }
     for s in &pr.sources {
         assert!(s.fs_hz > 0.0, "plot source carries its sample rate");
         for tail in &s.tails {
