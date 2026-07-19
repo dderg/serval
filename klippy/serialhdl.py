@@ -29,6 +29,8 @@ MCU_TIMER_HORIZON = 1 << 30
 # late-arrival crash can be split into generated-late vs delivered-late.
 DEADLINE_MARGIN_WARN = 0.150
 
+REACTOR_STALL_LOG_S = 0.5
+
 
 class EngineCommandChannel:
     def __init__(self, reactor, warn_prefix="", mcu=None):
@@ -37,6 +39,8 @@ class EngineCommandChannel:
         self.mcu = mcu
         self.engine_mcu = mcu.engine_mcu if mcu is not None else None
         self._event_poller_timer = None
+        self._poller_expected_wake = None
+        self._poller_stall_logged = False
         self._engine_detached = False
         self.msgparser = msgproto.MessageParser(warn_prefix=warn_prefix)
         self.lock = threading.Lock()
@@ -136,6 +140,20 @@ class EngineCommandChannel:
     def _engine_event_poller(self, eventtime):
         if self.engine_mcu is None or not self.engine_mcu.is_claimed():
             return self.reactor.NEVER
+        expected_wake = self._poller_expected_wake
+        if expected_wake is not None:
+            lateness = eventtime - expected_wake
+            if lateness > REACTOR_STALL_LOG_S:
+                if not self._poller_stall_logged:
+                    structured_log.event(
+                        "mcu-comms",
+                        "reactor_poller_late",
+                        level=logging.WARNING,
+                        late_s=round(lateness, 3),
+                    )
+                    self._poller_stall_logged = True
+            else:
+                self._poller_stall_logged = False
         now = eventtime
         for _ in range(32):
             try:
@@ -165,7 +183,9 @@ class EngineCommandChannel:
             else:
                 continue
             self._engine_dispatch_named_event(ev, name, now)
-        return eventtime + 0.001
+        next_wake = eventtime + 0.001
+        self._poller_expected_wake = next_wake
+        return next_wake
 
     def _error(self, msg, *params):
         raise error(self.warn_prefix + (msg % params))
@@ -205,6 +225,8 @@ class EngineCommandChannel:
         self.msgparser = msgparser
         self.register_response(self.handle_unknown, "#unknown")
         self.register_response(lambda params: None, "kalico_status_v6")
+        self._poller_expected_wake = None
+        self._poller_stall_logged = False
         self._event_poller_timer = self.reactor.register_timer(
             self._engine_event_poller, self.reactor.NOW
         )
