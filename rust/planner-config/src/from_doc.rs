@@ -142,6 +142,40 @@ pub fn read_motion_settings(
     ))
 }
 
+/// Build the full `PlannerConfig` from parsed settings, running every
+/// validation the planner performs — axis registry, motor mapping,
+/// post-processor chain compilation, cartesian limits. Called both at
+/// config-read time (so a bad chain halts klippy with a config error
+/// instead of failing at connect) and at `init_planner`, so the two
+/// cannot drift.
+pub fn planner_config_from_settings(
+    settings: &MotionSettings,
+) -> Result<crate::PlannerConfig, String> {
+    let kinematics = settings
+        .kinematics
+        .as_ref()
+        .ok_or("[kinematics] section is required")?;
+    let axis_registry =
+        crate::AxisRegistry::try_new(settings.axes.clone()).map_err(|e| e.to_string())?;
+    axis_registry
+        .validate_motor_mapping(&kinematics.claimed_axes())
+        .map_err(|e| e.to_string())?;
+    let post_processor_set =
+        crate::PostProcessorSet::try_new(&axis_registry, &settings.post_processors)
+            .map_err(|e| e.to_string())?;
+    settings.cartesian.validate()?;
+
+    let mut cfg = crate::PlannerConfig::default();
+    cfg.axis_registry = axis_registry;
+    cfg.cartesian = settings.cartesian;
+    cfg.post_processors = post_processor_set;
+    cfg.max_extrude_only_velocity = settings.max_extrude_only_velocity;
+    cfg.max_extrude_only_accel = settings.max_extrude_only_accel;
+    cfg.fit_tolerance_mm = settings.fit_tolerance_mm;
+    cfg.fit_tolerance_accel_mm_s2 = settings.fit_tolerance_accel_mm_s2;
+    Ok(cfg)
+}
+
 fn is_legacy_stepper_role_section(name: &str) -> bool {
     let Some(suffix) = name.strip_prefix("stepper_") else {
         return false;

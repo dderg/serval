@@ -4,7 +4,7 @@ use super::{
     require_positive,
 };
 use crate::lock_ext::LockExt;
-use config::from_doc::{MotionSettings, read_motion_settings};
+use config::from_doc::{planner_config_from_settings, read_motion_settings};
 use pyo3::FromPyObject;
 
 fn unsupported_curve(py: Python<'_>, message: &'static str) -> PyResult<()> {
@@ -28,38 +28,6 @@ impl McuTopology {
             max_motor_velocity: self.max_motor_velocity,
         }
     }
-}
-
-fn planner_config_from_settings(settings: &MotionSettings) -> PyResult<config::PlannerConfig> {
-    let kinematics = settings
-        .kinematics
-        .as_ref()
-        .ok_or_else(|| PyValueError::new_err("[kinematics] section is required"))?;
-    let axis_registry = config::AxisRegistry::try_new(settings.axes.clone())
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-    axis_registry
-        .validate_motor_mapping(&kinematics.claimed_axes())
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-    let post_processor_set =
-        config::PostProcessorSet::try_new(&axis_registry, &settings.post_processors)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-    settings
-        .cartesian
-        .validate()
-        .map_err(PyValueError::new_err)?;
-
-    let mut cfg = config::PlannerConfig::default();
-    cfg.axis_registry = axis_registry;
-    cfg.cartesian = settings.cartesian;
-    cfg.post_processors = post_processor_set;
-    cfg.max_extrude_only_velocity = settings.max_extrude_only_velocity;
-    cfg.max_extrude_only_accel = settings.max_extrude_only_accel;
-    cfg.fit_tolerance_mm = settings.fit_tolerance_mm;
-    cfg.fit_tolerance_accel_mm_s2 = settings.fit_tolerance_accel_mm_s2;
-    Ok(cfg)
 }
 
 #[pymethods]
@@ -114,7 +82,7 @@ impl PyMotionEngine {
         let doc = config_doc::Document::parse(config_text, "<config>")
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (settings, _consumed) = read_motion_settings(&doc).map_err(PyValueError::new_err)?;
-        let cfg = planner_config_from_settings(&settings)?;
+        let cfg = planner_config_from_settings(&settings).map_err(PyValueError::new_err)?;
         *self.planner_config.lock_ok() = cfg.clone();
 
         let mcus: Vec<McuTopologyInput> = mcus.into_iter().map(McuTopology::into_core).collect();

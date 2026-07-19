@@ -78,7 +78,7 @@ class EtherCatNode:
                 "must be a positive integer multiple of %d us"
                 % (self.name, self.cycle_us, CYCLE_US_QUANTUM)
             )
-        self.dynamics_profile = config.get("dynamics_profile", None)
+        self.dynamics_profile = servo_axis.read_dynamics_profile_option(config)
         self.late_tolerance_us = config.getfloat("late_tolerance_us", 0.0)
         self.engine_handle = None
         self._counts_per_mm = None

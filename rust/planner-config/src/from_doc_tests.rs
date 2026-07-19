@@ -381,3 +381,46 @@ fn kinematics_options_reported_as_consumed() {
         Some(ConsumedValue::Text("stepper".to_owned()))
     );
 }
+
+fn corexy_with_x_axis_body(x_axis_body: &str, pp_sections: &str) -> String {
+    format!(
+        "{MINIMAL}\
+         [kinematics]\ntype: corexy\naxis_x: x\naxis_y: y\naxis_z: z\n\
+         a_motors: a\nb_motors: b\nz_motors: z0\n\
+         [axis x]\n{x_axis_body}[axis y]\n[axis z]\n\
+         [motor a]\ndrive: stepper\n[motor b]\ndrive: stepper\n\
+         [motor z0]\ndrive: stepper\n{pp_sections}"
+    )
+}
+
+fn planner_config_err(cfg: &str) -> String {
+    crate::from_doc::planner_config_from_settings(&settings(cfg)).expect_err("must fail")
+}
+
+#[test]
+fn valid_topology_builds_planner_config_at_read_time() {
+    let cfg = corexy_with_x_axis_body(
+        "post_processors: is\n",
+        "[post_processor is]\ntype: smooth_bell\nsmooth_time: 0.016\n",
+    );
+    crate::from_doc::planner_config_from_settings(&settings(&cfg)).expect("valid config");
+}
+
+#[test]
+fn two_kernels_on_one_axis_rejected_at_read_time() {
+    let err = planner_config_err(&corexy_with_x_axis_body(
+        "post_processors: bell, shaper_x\n",
+        "[post_processor bell]\ntype: smooth_bell\nsmooth_time: 0.016\n\
+         [post_processor shaper_x]\ntype: smooth_mzv\nfrequency_hz: 50\n",
+    ));
+    assert!(err.contains("second kernel post-processor"), "{err}");
+}
+
+#[test]
+fn inverse_without_kernel_rejected_at_read_time() {
+    let err = planner_config_err(&corexy_with_x_axis_body(
+        "post_processors: belt\n",
+        "[post_processor belt]\ntype: mode_inverse\nfrequency_hz: 131\ndamping_ratio: 0.05\n",
+    ));
+    assert!(err.contains("belt"), "{err}");
+}
