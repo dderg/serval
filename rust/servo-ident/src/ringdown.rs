@@ -27,6 +27,7 @@ pub const PEAK_OVER_MEDIAN: f64 = 6.0;
 pub const MIN_FIT_CYCLES: f64 = 3.0;
 pub const MIN_FIT_R2: f64 = 0.5;
 const MIN_PHASE_R2: f64 = 0.9;
+const MODE_OVER_NOISE: f64 = 2.0;
 const MAX_PLOT_TAILS: usize = 8;
 
 #[derive(Debug, Clone, Copy)]
@@ -423,6 +424,21 @@ pub fn aggregate_modes(per_tail: &[Vec<DecayFit>], unit_is_accel: bool) -> Vec<R
     modes
 }
 
+/// Drop fitted "modes" whose starting amplitude sits below the source's
+/// broadband quiet-tail level: band-isolated noise wearing a decay envelope,
+/// not a resonance. At low frequencies the 1/ω² display conversion then
+/// inflates such a fit into a headline (a 15 Hz "75 µm" verdict was fitted
+/// from an accel channel whose own floor exceeded the mode's implied
+/// acceleration). The gate compares native units against the broadband
+/// floor — the per-band floor the envelope fit terminates on is far lower
+/// and cannot catch this.
+pub fn gate_modes(modes: Vec<RingdownMode>, noise_floor: f64) -> Vec<RingdownMode> {
+    modes
+        .into_iter()
+        .filter(|m| m.amp > MODE_OVER_NOISE * noise_floor)
+        .collect()
+}
+
 /// Post-stop sample ranges: from each motion segment's end (plus guard) to
 /// the next segment start, capped at `max_len`. All ranges are then cropped
 /// to the shortest so every tail shares one length (uniform PSD grids).
@@ -539,8 +555,8 @@ fn analyze_source(
     for p in psd_acc.iter_mut() {
         *p /= n_tails as f64;
     }
-    let modes = aggregate_modes(&per_tail_fits, unit_is_accel);
     let noise_floor = late_window_rms(&input.tails);
+    let modes = gate_modes(aggregate_modes(&per_tail_fits, unit_is_accel), noise_floor);
 
     let mut plot_tails = Vec::new();
     if input.plot_tails {
