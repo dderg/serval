@@ -128,6 +128,7 @@ fn run_fit_with(
         acc_mode: pick(&pp.acc_mode),
         vel_mode: pick(&pp.vel_mode),
         cs_mode: pick(&pp.cs_mode),
+        snap_mode: vec![],
         torque: pick(&pp.torque),
         extra: pp.extra.iter().map(|cols| pick(cols)).collect(),
     };
@@ -265,10 +266,11 @@ fn in_band_residual_excludes_out_of_band_pollution() {
         acc_mode: pp.acc_mode.clone(),
         vel_mode: pp.vel_mode.clone(),
         cs_mode: pp.cs_mode.clone(),
+        snap_mode: vec![],
         torque: pp.torque.clone(),
         extra: pp.extra.clone(),
     };
-    let res = residual_by_motor(&full, &r.params, &r.extra_params);
+    let res = residual_by_motor(&full, &r.params, &r.snap_params, &r.extra_params);
     let track = tracking_keep(&cap.vel, &cap.vel_act, &TrackingOptions::default());
     let plateau = steady_accel_keep(&cap.t, &cap.acc, &PlateauOptions::default());
     let keep: Vec<bool> = (0..cap.t.len())

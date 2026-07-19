@@ -62,6 +62,13 @@ pub struct Prepped {
     /// Mode-space channels: `[mode][sample]`, frame-projected then filtered.
     pub acc_mode: Vec<Vec<f64>>,
     pub vel_mode: Vec<Vec<f64>>,
+    /// Second time-derivative of the mode acceleration (snap), from a
+    /// central second difference of the raw projected accel, then filtered
+    /// like every other channel. Raw it is an impulse train at the jerk
+    /// breakpoints; the shared zero-phase kernel turns both it and the
+    /// torque it explains into the same band-limited pair, which is what
+    /// makes the regression consistent.
+    pub snap_mode: Vec<Vec<f64>>,
     /// Per-mode coulomb sign column (sign of the RAW mode velocity, then
     /// filtered like every other channel).
     pub cs_mode: Vec<Vec<f64>>,
@@ -240,6 +247,17 @@ pub fn prep(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> Prepped
         }
     }
 
+    let mut snap_raw = vec![vec![0.0; n]; n_modes];
+    for md in 0..n_modes {
+        for seg in &segs {
+            for k in seg.start + 1..seg.end.saturating_sub(1) {
+                snap_raw[md][k] = (acc_mode_raw[md][k + 1] - 2.0 * acc_mode_raw[md][k]
+                    + acc_mode_raw[md][k - 1])
+                    / (dt * dt);
+            }
+        }
+    }
+
     let max_lag = (opts.max_delay_s / dt).round() as usize;
     let lag = if max_lag > 0 {
         estimate_delay_samples(&cap.acc, &cap.torque, &segs, max_lag)
@@ -277,6 +295,7 @@ pub fn prep(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> Prepped
     let acc_mode = filt(&acc_mode_raw);
     let vel_mode = filt(&vel_mode_raw);
     let cs_mode = filt(&cs_raw);
+    let snap_mode = filt(&snap_raw);
     let torque = filt(&torque);
     let extra: Vec<Vec<Vec<f64>>> = match opts.ripple_period_mm {
         None => Vec::new(),
@@ -337,6 +356,7 @@ pub fn prep(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> Prepped
         t: cap.t.clone(),
         acc_mode,
         vel_mode,
+        snap_mode,
         cs_mode,
         torque,
         extra,

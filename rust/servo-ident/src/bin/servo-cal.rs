@@ -291,8 +291,21 @@ fn cmd_fit(args: &[String]) {
         "fit: {} samples/motor, rms residual {:.2} (0.1% rated), condition {:.1e}",
         r.samples, r.rms_residual, r.condition
     );
+    for (m, (c, mode)) in r.snap_params.iter().zip(&modes).enumerate() {
+        let se = r
+            .param_stderr
+            .get(structure.param_count() + m)
+            .copied()
+            .unwrap_or(f64::NAN);
+        let fz = if r.params.mass[m] > 0.0 && *c < 0.0 {
+            (r.params.mass[m] / -c).sqrt() / (2.0 * std::f64::consts::PI)
+        } else {
+            f64::NAN
+        };
+        eprintln!("snap (mode {mode}): {c:.3e} ± {se:.1e} (implied fz upper bound {fz:.0} Hz)",);
+    }
     let full = full_fit_input(&structure, &prepared);
-    let full_residual = residual_by_motor(&full, &r.params, &r.extra_params);
+    let full_residual = residual_by_motor(&full, &r.params, &r.snap_params, &r.extra_params);
     if prep_opts.cutoff_hz > 0.0 {
         let inband = band_limited_rms(
             &full_residual,
@@ -344,7 +357,7 @@ fn cmd_fit(args: &[String]) {
         return;
     }
 
-    let per_motor = residual_by_motor(&input, &r.params, &r.extra_params);
+    let per_motor = residual_by_motor(&input, &r.params, &r.snap_params, &r.extra_params);
     let rms: Vec<f64> = per_motor
         .iter()
         .map(|res| (res.iter().map(|e| e * e).sum::<f64>() / res.len() as f64).sqrt())

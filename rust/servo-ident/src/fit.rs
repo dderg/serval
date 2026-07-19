@@ -11,6 +11,13 @@ pub struct FitInput {
     /// Per-mode coulomb sign regressor column, filtered identically to
     /// acc_mode/vel_mode/torque.
     pub cs_mode: Vec<Vec<f64>>,
+    /// Per-mode snap (d²a/dt²) regressor column, filtered identically to
+    /// the other channels. Empty disables the term; non-empty appends one
+    /// coefficient per mode after the structure parameters. The coefficient
+    /// is the two-mass compliance correction (≈ ±J_l/ω_z²): it absorbs the
+    /// in-band ω² rise of apparent inertia so the mass column stays the
+    /// rigid-body mass instead of drifting with the excitation spectrum.
+    pub snap_mode: Vec<Vec<f64>>,
     /// Measured torque per motor/slot (0.1% rated units).
     pub torque: Vec<Vec<f64>>,
     /// Extra per-motor regressor columns (extra[motor][column][sample]) —
@@ -59,6 +66,9 @@ pub enum FitError {
 #[derive(Debug)]
 pub struct FitResult {
     pub params: PhysicalParams,
+    /// Fitted per-mode snap coefficients (empty when the snap column was
+    /// disabled), in torque-units·s²/mm.
+    pub snap_params: Vec<f64>,
     /// Fitted coefficients of the extra nuisance columns, per motor.
     pub extra_params: Vec<Vec<f64>>,
     /// In-sample RMS (0.1% rated units); optimism bias is negligible for
@@ -82,6 +92,14 @@ struct Accum {
     col_norm2: Vec<f64>,
 }
 
+fn snap_count(input: &FitInput) -> usize {
+    if input.snap_mode.is_empty() {
+        0
+    } else {
+        input.structure.mode_count()
+    }
+}
+
 fn full_row(input: &FitInput, motor: usize, k: usize, p: usize) -> Vec<f64> {
     let s = &input.structure;
     let n_modes = s.mode_count();
@@ -89,11 +107,16 @@ fn full_row(input: &FitInput, motor: usize, k: usize, p: usize) -> Vec<f64> {
     let vel_k: Vec<f64> = (0..n_modes).map(|m| input.vel_mode[m][k]).collect();
     let cs_k: Vec<f64> = (0..n_modes).map(|m| input.cs_mode[m][k]).collect();
     let mut row = s.row(motor, &acc_k, &vel_k, &cs_k);
+    let ns = snap_count(input);
     let e = input.extra.first().map_or(0, Vec::len);
     row.resize(p, 0.0);
     let base = s.param_count();
+    for m in 0..ns {
+        row[base + m] = s.frame[m][motor] * input.snap_mode[m][k];
+    }
+    let extra_base = base + ns;
     for (j, col) in input.extra.get(motor).into_iter().flatten().enumerate() {
-        row[base + motor * e + j] = col[k];
+        row[extra_base + motor * e + j] = col[k];
     }
     row
 }
@@ -158,13 +181,17 @@ fn solve_scaled(acc: &Accum, p: usize) -> Result<(Vec<f64>, f64, Vec<f64>), FitE
 pub fn residual_by_motor(
     input: &FitInput,
     params: &PhysicalParams,
+    snap_params: &[f64],
     extra_params: &[Vec<f64>],
 ) -> Vec<Vec<f64>> {
     let s = &input.structure;
     let n_motors = s.axis_count();
+    let ns = snap_count(input);
+    assert_eq!(snap_params.len(), ns, "snap coefficient count");
     let e = input.extra.first().map_or(0, Vec::len);
-    let p = s.param_count() + n_motors * e;
+    let p = s.param_count() + ns + n_motors * e;
     let mut theta = s.pack(params);
+    theta.extend_from_slice(snap_params);
     for coeffs in extra_params {
         assert_eq!(coeffs.len(), e, "extra coefficient count");
         theta.extend_from_slice(coeffs);
@@ -249,6 +276,16 @@ pub fn fit(input: &FitInput, opts: &FitOptions) -> Result<FitResult, FitError> {
             return Err(FitError::ShapeMismatch("mode sample count"));
         }
     }
+    if !input.snap_mode.is_empty() {
+        if input.snap_mode.len() != n_modes {
+            return Err(FitError::ShapeMismatch("snap channel count"));
+        }
+        for c in &input.snap_mode {
+            if c.len() != n_samples {
+                return Err(FitError::ShapeMismatch("snap sample count"));
+            }
+        }
+    }
     for m in 0..n_motors {
         if input.torque[m].len() != n_samples {
             return Err(FitError::ShapeMismatch("torque sample count"));
@@ -276,7 +313,8 @@ pub fn fit(input: &FitInput, opts: &FitOptions) -> Result<FitResult, FitError> {
             }
         }
     }
-    let p = s.param_count() + n_motors * e;
+    let ns = snap_count(input);
+    let p = s.param_count() + ns + n_motors * e;
     let mut acc = accumulate(input, p, None);
     for k in 0..s.param_count() {
         if acc.col_norm2[k] == 0.0 {
@@ -322,11 +360,14 @@ pub fn fit(input: &FitInput, opts: &FitOptions) -> Result<FitResult, FitError> {
     let param_stderr = stderr_from(&acc, &scale, sigma2, p);
 
     let base = s.param_count();
+    let snap_params = theta[base..base + ns].to_vec();
+    let extra_base = base + ns;
     let extra_params: Vec<Vec<f64>> = (0..n_motors)
-        .map(|m| theta[base + m * e..base + (m + 1) * e].to_vec())
+        .map(|m| theta[extra_base + m * e..extra_base + (m + 1) * e].to_vec())
         .collect();
     Ok(FitResult {
         params: s.unpack(&theta[..base]),
+        snap_params,
         extra_params,
         rms_residual: rms,
         param_stderr,

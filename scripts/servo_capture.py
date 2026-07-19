@@ -23,13 +23,31 @@ DTYPE_MAP = {
     "u16": "<u2",
     "i16": "<i2",
     "i32": "<i4",
+    "u32": "<u4",
     "u64": "<u8",
     "f32": "<f4",
 }
 SUPPORTED_VERSIONS = (1, 2)
 FLAG_MOTION_ACTIVE = 1 << 1
 SETTLE_HOLD_MS = 50
-RECORD_PREFIX_SIZE = 9
+GLOBAL_CHANNELS = (
+    "cycle_index",
+    "flags",
+    "skip_count",
+    "late_frames",
+    "frame_lateness_ns",
+)
+
+
+def _record_prefix_size(channels):
+    ends = [
+        c["offset"] + np.dtype(DTYPE_MAP[c["dtype"]]).itemsize
+        for c in channels
+        if c["name"] in GLOBAL_CHANNELS
+    ]
+    if not ends:
+        raise SystemExit("capture header lists no global channels")
+    return max(ends)
 
 
 def resolve_newest_capture(captures_dir, name):
@@ -73,7 +91,8 @@ def load_capture(path, drive=None):
         if n_drives == 0:
             raise SystemExit("%s header lists no drives" % (path,))
         record_size = header["record_size"]
-        body_size = record_size - RECORD_PREFIX_SIZE
+        prefix_size = _record_prefix_size(header["channels"])
+        body_size = record_size - prefix_size
         if body_size <= 0 or body_size % n_drives:
             raise SystemExit(
                 "record_size %d is not aligned to %d drive block(s)"
@@ -84,7 +103,7 @@ def load_capture(path, drive=None):
         names, formats, offsets = [], [], []
         for c in header["channels"]:
             off = c["offset"]
-            if off >= RECORD_PREFIX_SIZE:
+            if off >= prefix_size:
                 off += drive_idx * block_size
             fmt = DTYPE_MAP[c["dtype"]]
             if off + np.dtype(fmt).itemsize > record_size:

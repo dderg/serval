@@ -169,7 +169,7 @@ fn main() {
         r.samples, r.rms_residual, r.condition
     );
     let full = full_fit_input(&structure, &prepared);
-    let full_residual = residual_by_motor(&full, &r.params, &r.extra_params);
+    let full_residual = residual_by_motor(&full, &r.params, &r.snap_params, &r.extra_params);
     if prep_opts.cutoff_hz > 0.0 {
         let inband = band_limited_rms(
             &full_residual,
@@ -182,11 +182,19 @@ fn main() {
             prep_opts.cutoff_hz, inband
         );
     }
-    let mut names: Vec<String> = Vec::with_capacity(3 * modes.len());
+    let mut names: Vec<String> = Vec::with_capacity(4 * modes.len());
     for m in &modes {
         names.push(format!("mass_{m}"));
         names.push(format!("viscous_{m}"));
         names.push(format!("coulomb_{m}"));
+    }
+    for m in &modes {
+        if !r.snap_params.is_empty() {
+            names.push(format!("snap_{m}"));
+        }
+    }
+    for (m, c) in modes.iter().zip(&r.snap_params) {
+        eprintln!("  snap_{m}: {c:.3e}");
     }
     for (name, se) in names.iter().zip(&r.param_stderr) {
         eprintln!("  stderr {name}: {se:.4}");
@@ -243,7 +251,7 @@ fn main() {
         return;
     }
 
-    let per_motor = residual_by_motor(&input, &r.params, &r.extra_params);
+    let per_motor = residual_by_motor(&input, &r.params, &r.snap_params, &r.extra_params);
     let rms: Vec<f64> = per_motor
         .iter()
         .map(|res| (res.iter().map(|e| e * e).sum::<f64>() / res.len() as f64).sqrt())
