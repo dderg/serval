@@ -1,18 +1,4 @@
 #!/bin/sh
-# servo-cal dashboard launcher. Lives OUTSIDE the repo (~/servo-cal/) because
-# the repo checkout is branch-switched by the flash scripts and this file
-# must survive a switch to a branch that predates servo-cal.
-#
-# Behavior, driven by the systemd unit's Restart=always:
-#   - checked-out branch has no rust/servo-ident -> idle and re-check
-#     (the unit stays green, nothing serves)
-#   - branch has it -> cargo build --profile snapshot -p servo-ident, then serve
-#   - HEAD moves (flash script pull / checkout) or the server dies ->
-#     exit, systemd relaunches, the new code gets rebuilt and served
-#
-# Overridable: KLIPPER_DIR, SERVO_CAL_DIR, SERVO_CAL_PORT, SERVO_CAL_HOST.
-# The binary's own default bind is 127.0.0.1; the service exists to be
-# reached from a browser on the LAN, so the launcher defaults to 0.0.0.0.
 set -eu
 
 KLIPPER=${KLIPPER_DIR:-"$HOME/klipper"}
@@ -35,20 +21,36 @@ fi
 
 PATH="$HOME/.cargo/bin:$PATH"
 export PATH
-start_rev=$(head_rev)
-echo "servo-cal: building at $start_rev"
-cargo build --profile snapshot --manifest-path "$KLIPPER/rust/Cargo.toml" -p servo-ident
+server=
+built_rev=
 
-"$KLIPPER/rust/target/snapshot/servo-cal" serve \
-    --dir "$CAPTURES" --port "$PORT" --host "$HOST" &
-server=$!
-trap 'kill "$server" 2>/dev/null || true' EXIT INT TERM
+stop_server() {
+    if [ -n "$server" ]; then
+        kill "$server" 2>/dev/null || true
+        wait "$server" 2>/dev/null || true
+    fi
+}
 
-while kill -0 "$server" 2>/dev/null; do
-    if [ "$(head_rev)" != "$start_rev" ]; then
-        echo "servo-cal: HEAD moved from $start_rev; exiting so systemd rebuilds"
-        exit 0
+trap stop_server EXIT INT TERM
+
+while true; do
+    target_rev=$(head_rev)
+    if [ "$target_rev" != "$built_rev" ]; then
+        echo "servo-cal: building at $target_rev"
+        cargo build --profile snapshot --manifest-path "$KLIPPER/rust/Cargo.toml" -p servo-ident
+        if [ "$(head_rev)" != "$target_rev" ]; then
+            continue
+        fi
+        built_rev=$target_rev
+        stop_server
+        "$KLIPPER/rust/target/snapshot/servo-cal" serve \
+            --dir "$CAPTURES" --port "$PORT" --host "$HOST" &
+        server=$!
+    fi
+
+    if ! kill -0 "$server" 2>/dev/null; then
+        wait "$server"
+        exit $?
     fi
     sleep "$RECHECK_HEAD_S"
 done
-wait "$server"
