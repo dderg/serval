@@ -764,6 +764,43 @@ def test_fit_dynamics_iterates_pattern_captures_until_convergence():
     assert any("converged in 2 rounds" in r for r in gcmd.responses)
 
 
+def test_fit_dynamics_accels_sweep_identifies_without_applying():
+    sc, gcode = make_calibration(awd_rails())
+    sc.bounds = {"X": (20.0, 280.0), "Y": (20.0, 280.0)}
+    sc.fake_fit_params = [(0.010, 0.004, 1.0), (0.012, 0.004, 1.0)]
+    gcmd = FakeGcmd(ACCELS="8000,16000", MAX_SPEED="600")
+    sc.cmd_SERVO_FIT_DYNAMICS(gcmd)
+    assert _capture_paths(sc) == [
+        "step_fit_a8000.scap",
+        "step_fit_a16000.scap",
+    ]
+    argv = _fit_argv(gcode)
+    caps = [argv[i + 1] for i, a in enumerate(argv) if a == "--capture"]
+    assert [os.path.basename(c) for c in caps] == ["step_fit_a16000.scap"]
+    engine = sc.printer.lookup_object("motion_engine")
+    assert engine.dynamics_calls == []
+    plan = _manifest_for(sc)["stroke_plan"]
+    assert plan["accels"] == [8000.0, 16000.0]
+    sweep = _manifest_for(sc)["dynamics_sweep"]
+    assert sweep["accels"] == [8000.0, 16000.0]
+    assert sweep["mass"]["x"] == [0.010, 0.012]
+    assert any("mode x mass(accel):" in r for r in gcmd.responses)
+    assert any("torque-weighted change" in r for r in gcmd.responses)
+    assert any("nothing was applied" in r for r in gcmd.responses)
+
+
+def test_fit_dynamics_accels_sweep_rejects_iterative_params():
+    sc, _gcode = make_calibration(awd_rails())
+    with pytest.raises(RuntimeError, match="identify-only sweep"):
+        sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd(ACCELS="8000,16000", TOL="0.05"))
+
+
+def test_fit_dynamics_accels_sweep_rejects_unordered_accels():
+    sc, _gcode = make_calibration(awd_rails())
+    with pytest.raises(RuntimeError, match="ascending"):
+        sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd(ACCELS="16000,8000"))
+
+
 def _pattern_scripts(gcode):
     return [
         s
@@ -892,12 +929,13 @@ def test_torque_changes_reject_degenerate_and_mismatched_fits():
 def test_fit_dynamics_rejects_the_excitation_matrix_params():
     sc, _ = make_calibration(awd_rails())
     for params in (
-        {"ACCELS": "5000"},
         {"SPEEDS": "100"},
         {"PATTERN": "1"},
     ):
         with pytest.raises(RuntimeError, match="MAX_ACCEL/MAX_SPEED"):
             sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd(**params))
+    with pytest.raises(RuntimeError, match="ascending"):
+        sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd(ACCELS="5000"))
 
 
 @requires_tomllib

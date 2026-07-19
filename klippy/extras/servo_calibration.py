@@ -3061,10 +3061,15 @@ class ServoCalibration:
         "excitation ceiling) between rounds. It then re-identifies once at "
         "MAX_ACCEL: a converged model that shifts more than DRIFT there is "
         "a fit artifact, not physics, and the command aborts with the "
-        "numbers. No ACCELS/SPEEDS matrix: give the calibration envelope as "
+        "numbers. No SPEEDS matrix: give the calibration envelope as "
         "MAX_ACCEL/MAX_SPEED limits (e.g. capped below ringing; defaults "
         "are the config grid maxima) - convergence rounds run at half "
-        "MAX_ACCEL, speeds at half and full MAX_SPEED. The live model is "
+        "MAX_ACCEL, speeds at half and full MAX_SPEED. ACCELS=<comma list> "
+        "runs an identify-only sweep instead: one capture + fit per accel "
+        "under whatever model is currently live (nothing is streamed or "
+        "applied), reporting mass per accel and the torque-weighted change "
+        "between neighbours - the m(accel) curve that says whether the "
+        "model extrapolates. The live model is "
         "restored to the configured dynamics_profile afterwards (also on "
         "failure); without one the last fitted model stays live until "
         "RESTART. TERMS picks what the applied/written model keeps "
@@ -3202,6 +3207,8 @@ class ServoCalibration:
         inertia: float | None,
     ) -> tuple[ExperimentRun, str, str]:
         if self._kin().coupled_xy():
+            if gcmd.get("ACCELS", None) is not None:
+                return self._run_fit_sweep(gcmd, name, torque, inertia)
             return self._run_fit_iterative(gcmd, name, torque, inertia)
         return self._run_fit_grid(gcmd, name, torque, inertia)
 
@@ -3241,15 +3248,14 @@ class ServoCalibration:
 
     def _reject_fit_grid_params(self, gcmd: Any) -> None:
         stale = [
-            p
-            for p in ("ACCELS", "SPEEDS", "PATTERN")
-            if gcmd.get(p, None) is not None
+            p for p in ("SPEEDS", "PATTERN") if gcmd.get(p, None) is not None
         ]
         if stale:
             raise gcmd.error(
                 "%s: the iterative fit has no excitation matrix and always "
                 "runs the XY pattern - give the calibration envelope as "
-                "MAX_ACCEL/MAX_SPEED limits" % (", ".join(stale),)
+                "MAX_ACCEL/MAX_SPEED limits, or ACCELS=<comma list> for an "
+                "identify-only sweep" % (", ".join(stale),)
             )
 
     def _validate_fit_slots(
@@ -3579,6 +3585,168 @@ class ServoCalibration:
             finally:
                 self._restore()
                 self._active_run = None
+        return run, text, out_path
+
+    def _run_fit_sweep(
+        self,
+        gcmd: Any,
+        name: str,
+        torque: float | None,
+        inertia: float | None,
+    ) -> tuple[ExperimentRun, str, str]:
+        """Identify-only m(accel) curve: one pattern capture + fit per
+        ACCELS entry, run under whatever dynamics model is currently live
+        (nothing is streamed), so the points differ only in accel."""
+        if tomllib is None:
+            raise gcmd.error(
+                "SERVO_FIT_DYNAMICS requires Python 3.11+ (tomllib)"
+            )
+        stale = [
+            p
+            for p in (
+                "SPEEDS",
+                "PATTERN",
+                "TOL",
+                "DRIFT",
+                "MAX_ROUNDS",
+                "MAX_ACCEL",
+                "TERMS",
+            )
+            if gcmd.get(p, None) is not None
+        ]
+        if stale:
+            raise gcmd.error(
+                "%s: ACCELS runs an identify-only sweep - it takes only "
+                "MAX_SPEED, ITERATIONS, DWELL_MS, NAME, SERVOS and the "
+                "pattern geometry" % (", ".join(stale),)
+            )
+        self._reject_pattern_stroke_bounds(gcmd)
+        plan = self._fit_plan(gcmd)
+        raw = gcmd.get("ACCELS")
+        try:
+            accels = [float(v) for v in raw.split(",") if v.strip()]
+        except ValueError:
+            raise gcmd.error(
+                "ACCELS must be a comma list of accelerations (got %r)" % (raw,)
+            )
+        if (
+            len(accels) < 2
+            or any(a <= 0.0 for a in accels)
+            or sorted(accels) != accels
+            or len(set(accels)) != len(accels)
+        ):
+            raise gcmd.error(
+                "ACCELS wants at least two distinct ascending positive "
+                "accelerations (got %r)" % (raw,)
+            )
+        max_speed = gcmd.get_float("MAX_SPEED", max(self.speeds), above=0.0)
+        iterations = gcmd.get_int("ITERATIONS", self.iterations, minval=1)
+        dwell = gcmd.get_int("DWELL_MS", self.dwell_ms, minval=0)
+        speeds = [max_speed / 2.0, max_speed]
+        points, start_x, start_y, pattern_plan = self._pattern_geometry_params(
+            gcmd
+        )
+        stroke_plan = {
+            "accels": accels,
+            "max_speed": max_speed,
+            "speeds": speeds,
+            "iterations": iterations,
+            "dwell_ms": dwell,
+        }
+        stroke_plan.update(pattern_plan)
+        run = self._begin_run(
+            gcmd,
+            "dynamics_sweep",
+            name,
+            plan["axis"],
+            plan["servos"],
+            stroke_plan,
+            plan["rails"],
+        )
+        text = ""
+        out_path = ""
+        try:
+            self._prep("X", dwell)
+            self._prep("Y", dwell)
+            self._pattern_reach_report(
+                gcmd, points, start_x, start_y, accels, speeds
+            )
+            fits: list[tuple[float, dict[str, Any]]] = []
+            for accel in accels:
+                step = "fit_a%d" % (round(accel),)
+                self._start_capture(step, plan["servos"])
+                self._goto_xy(start_x, start_y, dwell)
+                for speed in speeds:
+                    servo_strokes.emit_pattern(
+                        self.gcode,
+                        points,
+                        start_x,
+                        start_y,
+                        speed,
+                        accel,
+                        iterations,
+                        dwell,
+                    )
+                self._stop_capture()
+                run.record_step(SweepStep(step, {"accel": accel}, []))
+                out_path = os.path.join(
+                    run.run_dir, "dynamics_%s.toml" % (step,)
+                )
+                fitted, text = self._fit_round(
+                    gcmd, plan, run, step, out_path, torque, inertia
+                )
+                fits.append((accel, fitted))
+                gcmd.respond_info(
+                    "accel %.0f: %s"
+                    % (accel, self._dynamics_params_line(fitted))
+                )
+            for (a0, f0), (a1, f1) in zip(fits, fits[1:]):
+                try:
+                    change = max(dynamics_torque_changes(f0, f1, a1, max_speed))
+                except ValueError as e:
+                    raise gcmd.error(str(e))
+                gcmd.respond_info(
+                    "accel %.0f -> %.0f: torque-weighted change %.1f%%"
+                    % (a0, a1, 100.0 * change)
+                )
+            modes = fits[0][1]["modes"]
+            curve = {
+                mode: [f[1]["mass"][k] for f in fits]
+                for k, mode in enumerate(modes)
+            }
+            for mode in modes:
+                masses = curve[mode]
+                lo, hi = min(masses), max(masses)
+                gcmd.respond_info(
+                    "mode %s mass(accel): %s | spread %.1f%%"
+                    % (
+                        mode,
+                        ", ".join(
+                            "%.0f: %.5g" % (a, m)
+                            for (a, _f), m in zip(fits, masses)
+                        ),
+                        200.0 * (hi - lo) / (hi + lo),
+                    )
+                )
+            run.manifest["dynamics_sweep"] = {
+                "accels": accels,
+                "mass": curve,
+                "max_speed": max_speed,
+            }
+            run.write()
+            structured_log.event(
+                "calibration",
+                "dynamics_sweep",
+                run_dir=run.run_dir,
+                accels=accels,
+            )
+            gcmd.respond_info(
+                "identify-only sweep done - nothing was applied | run %s"
+                % (run.run_dir,)
+            )
+        finally:
+            self._restore()
+            self._active_run = None
         return run, text, out_path
 
     def cmd_SERVO_FIT_DYNAMICS(self, gcmd: Any) -> None:
