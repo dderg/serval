@@ -11,6 +11,21 @@ MAX_TORQUE_PCT_6072H = 400.0
 ENGINE_FF_LEAD_CYCLES_MAX = 40
 
 
+def read_dynamics_profile_option(config, option="dynamics_profile"):
+    path = config.get(option, None)
+    if path is None:
+        return None
+    try:
+        with open(path, "rb"):
+            pass
+    except OSError as e:
+        raise config.error(
+            "[%s] %s: cannot read dynamics profile '%s': %s"
+            % (config.get_name(), option, path, e)
+        )
+    return path
+
+
 class ServoVirtualEndstop:
     """Servo axis as a virtual endstop. arm/disarm are benign; the real
     device-side arming is the provider's trip_move_begin/trip_move_end."""
@@ -119,7 +134,7 @@ class ServoMotor:
         self.max_torque = motor_config.getfloat(
             "max_torque", None, above=0.0, maxval=MAX_TORQUE_PCT_6072H
         )
-        self.dynamics_profile = motor_config.get("dynamics_profile", None)
+        self.dynamics_profile = read_dynamics_profile_option(motor_config)
         try:
             self.sdo_params = servo_param.parse_params_block(
                 motor_config.get("params", "")

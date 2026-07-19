@@ -59,6 +59,10 @@ fn read_motion_settings(
     let doc = config_doc::Document::parse(config_text, "<config>").map_err(config_err)?;
     let (settings, consumed) =
         planner_config::from_doc::read_motion_settings(&doc).map_err(ConfigError::new_err)?;
+    if settings.kinematics.is_some() {
+        planner_config::from_doc::planner_config_from_settings(&settings)
+            .map_err(ConfigError::new_err)?;
+    }
     let c = settings.cartesian;
     let cartesian = (
         c.max_velocity,

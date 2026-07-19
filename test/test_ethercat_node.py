@@ -264,3 +264,45 @@ def test_find_motors_returns_every_drive_on_this_node_with_its_lane():
         (0, "motor_a1"),
         (1, "motor_b"),
     ]
+
+
+class FakeOptionConfig:
+    error = FakeConfigError
+
+    def __init__(self, value):
+        self._value = value
+
+    def get(self, option, default=None):
+        del option, default
+        return self._value
+
+    def get_name(self):
+        return "ethercat_node node_x"
+
+
+def test_dynamics_profile_option_absent_reads_none():
+    from klippy.extras import servo_axis
+
+    assert (
+        servo_axis.read_dynamics_profile_option(FakeOptionConfig(None)) is None
+    )
+
+
+def test_dynamics_profile_option_missing_file_is_config_error(tmp_path):
+    from klippy.extras import servo_axis
+
+    missing = str(tmp_path / "nope.toml")
+    with pytest.raises(FakeConfigError) as e:
+        servo_axis.read_dynamics_profile_option(FakeOptionConfig(missing))
+    assert "cannot read dynamics profile" in str(e.value)
+    assert missing in str(e.value)
+
+
+def test_dynamics_profile_option_existing_file_passes(tmp_path):
+    from klippy.extras import servo_axis
+
+    path = tmp_path / "dyn.toml"
+    path.write_text("version = 6\n")
+    assert servo_axis.read_dynamics_profile_option(
+        FakeOptionConfig(str(path))
+    ) == str(path)
