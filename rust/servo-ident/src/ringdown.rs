@@ -890,19 +890,6 @@ pub fn compute_step_ringdown(
             }
             per_axis_tails.push(tails);
         }
-        let mut best_axis = 0usize;
-        let mut best_rms = -1.0f64;
-        for (i, tails) in per_axis_tails.iter().enumerate() {
-            let rms: f64 = tails
-                .iter()
-                .map(|tl| tl.iter().map(|&v| v * v).sum::<f64>() / tl.len() as f64)
-                .sum::<f64>()
-                .sqrt();
-            if rms > best_rms {
-                best_rms = rms;
-                best_axis = i;
-            }
-        }
         for (i, tails) in per_axis_tails.into_iter().enumerate() {
             let starts_s: Vec<f64> = stops.iter().map(|&s| s + opts.guard_s - t[0]).collect();
             sources.push(SourceInput {
@@ -911,7 +898,7 @@ pub fn compute_step_ringdown(
                 fs: accel_fs,
                 tails,
                 starts_s,
-                plot_tails: i == best_axis,
+                plot_tails: true,
             });
         }
     }

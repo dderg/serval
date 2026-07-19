@@ -17,7 +17,7 @@ import type { DriveMetrics, Manifest, PlotSeries, PlotStep, TorqueMetrics } from
 import { redrawCharts } from "./peaks";
 import { runColor } from "./runs";
 import { motorView, motorViewPerMotor } from "./shell";
-import { PALETTE, RESONANCE_BAND_HZ, state } from "./state";
+import { RESONANCE_BAND_HZ, state } from "./state";
 import type { FerrUnit } from "./units";
 
 // --- tracking metrics table -----------------------------------------------
@@ -199,30 +199,35 @@ function renderMetricsTable(names: string[], steps: string[]) {
     bounds[c] = { min: Math.min(...values), max: Math.max(...values) };
   }
   const heat = (c: HeatColumn, r: MetricsRow) => heatCellStyle(r[c], bounds[c].min, bounds[c].max);
-  const stepColors = new Map<string, string>();
-  for (const r of rows) {
-    if (!stepColors.has(r.step)) {
-      stepColors.set(r.step, PALETTE[stepColors.size % PALETTE.length]);
-    }
+  const rowsByRun = new Map<string, MetricsRow[]>();
+  for (const row of rows) {
+    const runRows = rowsByRun.get(row.run);
+    if (runRows) runRows.push(row);
+    else rowsByRun.set(row.run, [row]);
   }
-  const body = rows
-    .map((r, i) => {
-      const swatch = `<span class="swatch" style="background:${runColor(r.run)}"></span>`;
-      const stepColor = stepColors.get(r.step)!;
-      const prev = rows[i - 1];
-      const groupStart = !prev || prev.run !== r.run || prev.step !== r.step;
-      return (
-        `<tr${groupStart && i > 0 ? ' class="group-start"' : ""}>` +
-        `<td class="run-cell" style="border-left:3px solid ${stepColor};padding-left:6px" ` +
-        `title="${r.run}">${swatch}${r.run}</td>` +
-        `<td style="color:${stepColor}">${r.step}</td><td>${r.drive}</td>` +
-        `<td class="num"${heat("ferrPeakUm", r)}>${r.ferrPeakUm.toFixed(1)}</td>` +
-        `<td class="num"${heat("ferrRmsUm", r)}>${r.ferrRmsUm.toFixed(1)}</td>` +
-        `<td class="num"${heat("overshootUm", r)}>${r.overshootUm.toFixed(1)}</td>` +
-        `<td class="num">${settleCellHtml(r.settle)}</td>` +
-        `<td class="num">${torqueCellHtml(r.torque)}</td></tr>`
-      );
-    })
+  const body = [...rowsByRun.entries()]
+    .map(([run, runRows], runIndex) =>
+      runRows
+        .map((r, rowIndex) => {
+          const runCell =
+            rowIndex === 0
+              ? `<td class="run-cell" rowspan="${runRows.length}" ` +
+                `style="border-left:3px solid ${runColor(run)};padding-left:6px" ` +
+                `title="${run}"><span class="swatch" style="background:${runColor(run)}"></span>${run}</td>`
+              : "";
+          return (
+            `<tr${runIndex > 0 && rowIndex === 0 ? ' class="group-start"' : ""}>` +
+            runCell +
+            `<td>${r.step}</td><td>${r.drive}</td>` +
+            `<td class="num"${heat("ferrPeakUm", r)}>${r.ferrPeakUm.toFixed(1)}</td>` +
+            `<td class="num"${heat("ferrRmsUm", r)}>${r.ferrRmsUm.toFixed(1)}</td>` +
+            `<td class="num"${heat("overshootUm", r)}>${r.overshootUm.toFixed(1)}</td>` +
+            `<td class="num">${settleCellHtml(r.settle)}</td>` +
+            `<td class="num">${torqueCellHtml(r.torque)}</td></tr>`
+          );
+        })
+        .join("")
+    )
     .join("");
   container.innerHTML =
     `<table class="metrics-table"><thead><tr>` +

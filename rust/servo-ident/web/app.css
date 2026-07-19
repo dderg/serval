@@ -421,6 +421,7 @@ table.metrics-table td.run-cell {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+table.metrics-table td.run-cell[rowspan] { vertical-align: top; padding-top: 4px; }
 table.metrics-table tr.group-start td { border-top: 6px solid transparent; }
 
 /* --- differential belt FRF (dynamics page) ----------------------------- */
