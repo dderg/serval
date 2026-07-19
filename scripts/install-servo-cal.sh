@@ -38,5 +38,5 @@ ssh "$TARGET" "chmod +x ~/servo-cal/servo-cal-launcher.sh && \
     sleep 2 && systemctl status servo-cal --no-pager -n 5"
 
 echo
-echo "dashboard: http://${TARGET#*@}:8085 (once the first build finishes)"
+echo "dashboard: http://${TARGET#*@}:8085"
 echo "reminder: moonraker.conf needs cors_domains: http://${TARGET#*@}:8085"
