@@ -226,6 +226,35 @@ impl<S: PieceSink> Pump<S> {
                 }
             }
         }
+        if !pieces.is_empty() {
+            if let Some((ack_now, freq)) = (self.callbacks.mcu_clock_of)(key.mcu_id) {
+                if freq > 0.0 {
+                    let (first, _) = &pieces[0];
+                    let margin_s = (first.start_time as i64 - ack_now as i64) as f64 / freq;
+                    let warn_floor = crate::anchor::LOW_MARGIN_WARN_SECS - pump_past_guard_secs();
+                    if margin_s < warn_floor {
+                        tracing::warn!(
+                            subsystem = "motion",
+                            event = "pump_enqueue_low_lead",
+                            mcu = key.mcu_id,
+                            axis = key.axis,
+                            margin_us = margin_s * 1e6,
+                            start_time = first.start_time,
+                            ack_now,
+                            ?epoch,
+                            lead_secs,
+                            source_line,
+                            n_pieces = pieces.len(),
+                            first_is_hold = super::sched::is_hold_piece(first),
+                            first_duration_s = f64::from(first.duration),
+                            "[pump-enqueue] pieces arrived with less lead than \
+                             the low-margin floor — -308 precursor, with \
+                             provenance"
+                        );
+                    }
+                }
+            }
+        }
         let ring_depth = (self.callbacks.ring_depth_of)(key);
         // Hold merging is off during drip cohorts: their release floor is
         // piece-count-based and coalescing would starve it. Without a synced
@@ -463,10 +492,18 @@ impl<S: PieceSink> Pump<S> {
             if freq > 0.0 {
                 let guard_ticks = (pump_past_guard_secs() * freq) as u64;
                 for af in bundle {
-                    for piece in &af.pieces {
+                    for (piece_idx, piece) in af.pieces.iter().enumerate() {
                         if piece.start_time + guard_ticks < mcu_now {
                             let deficit_us =
                                 ((mcu_now - piece.start_time) as f64 / freq * 1e6) as u64;
+                            let key = AxisKey {
+                                mcu_id,
+                                axis: af.axis,
+                            };
+                            let (queue_lead_secs, queue_pending, queue_staged_motion) =
+                                self.queues.get(&key).map_or((f64::NAN, 0, 0), |q| {
+                                    (q.lead_secs, q.pieces.len(), q.staged_motion)
+                                });
                             tracing::error!(
                                 subsystem = "motion",
                                 event = "pump_piece_in_past",
@@ -476,6 +513,14 @@ impl<S: PieceSink> Pump<S> {
                                 mcu_now,
                                 deficit_us,
                                 context,
+                                piece_idx,
+                                is_hold = super::sched::is_hold_piece(piece),
+                                duration_s = f64::from(piece.duration),
+                                coeff_count = piece.coeff_count,
+                                queue_lead_secs,
+                                queue_pending,
+                                queue_staged_motion,
+                                cohort_active = self.cohort.is_some(),
                                 "[pump-guard] piece already in the MCU's past {context} — failing loud on host before the MCU/endpoint trips -308"
                             );
                             eprintln!(
