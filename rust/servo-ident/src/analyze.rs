@@ -761,8 +761,7 @@ pub fn compute_verdict(
         }),
         "dynamics_tune" => Ok(Verdict {
             recommended_step: None,
-            reason: "parameter steps are computed host-side by SERVO_TUNE_DYNAMICS"
-                .to_string(),
+            reason: "parameter steps are computed host-side by SERVO_TUNE_DYNAMICS".to_string(),
             flags: Vec::new(),
             apply: None,
         }),
