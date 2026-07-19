@@ -28,11 +28,16 @@ pub struct PrepOptions {
     /// Zero-phase low-pass cutoff applied to both sides of the regression
     /// (Hz), and used for the in-band residual report. 0 disables filtering.
     pub cutoff_hz: f64,
-    /// Samples within this distance of a velocity-deadband sample of an
-    /// active mode are dropped: breakaway/landing stiction transients are
-    /// unmodeled. A mode idle for a whole segment (an axis-aligned stroke
-    /// leaves the other mode at exactly zero) blanks nothing — it is not
-    /// reversing, and its coulomb column is zero there anyway.
+    /// Samples within this distance of a velocity reversal of an active
+    /// mode are dropped: breakaway/landing stiction transients and the
+    /// coulomb sign-flip loop transient are unmodeled. A reversal is a
+    /// sample inside the coulomb deadband OR a sign flip between adjacent
+    /// samples - at high accel the velocity steps over the deadband
+    /// entirely between samples (12 mm/s per sample at 50 k mm/s2 and
+    /// 4 kHz), which used to leave every zigzag reversal unblanked. A mode
+    /// idle for a whole segment (an axis-aligned stroke leaves the other
+    /// mode at exactly zero) blanks nothing — it is not reversing, and its
+    /// coulomb column is zero there anyway.
     pub blank_reversal_s: f64,
     /// Search range for the accel→torque delay. 0 disables alignment.
     pub max_delay_s: f64,
@@ -413,7 +418,10 @@ pub fn prep(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> Prepped
                 continue;
             }
             for k in seg.clone() {
-                if vel_mode_raw[md][k].abs() <= COULOMB_DEADBAND_MM_S {
+                let in_deadband = vel_mode_raw[md][k].abs() <= COULOMB_DEADBAND_MM_S;
+                let crosses =
+                    k + 1 < seg.end && vel_mode_raw[md][k] * vel_mode_raw[md][k + 1] < 0.0;
+                if in_deadband || crosses {
                     let lo = k.saturating_sub(blank).max(seg.start);
                     let hi = (k + blank + 1).min(seg.end);
                     for v in valid.iter_mut().take(hi).skip(lo) {

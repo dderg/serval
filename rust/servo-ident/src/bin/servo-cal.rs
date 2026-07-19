@@ -179,7 +179,7 @@ fn cmd_analyze(args: &[String]) {
     analyze_run(Path::new(dir), incremental).unwrap_or_else(|e| die(&e));
 }
 
-const FIT_KEYS: [&str; 18] = [
+const FIT_KEYS: [&str; 19] = [
     "--capture",
     "--frame",
     "--modes",
@@ -198,6 +198,7 @@ const FIT_KEYS: [&str; 18] = [
     "--settle-ms",
     "--max-mode-vel",
     "--min-mode-vel",
+    "--dump-rows",
 ];
 
 fn reject_unknown_fit_flags(args: &[String]) {
@@ -327,6 +328,13 @@ fn cmd_fit(args: &[String]) {
     }
 
     let mut input = fit_input(&structure, &prepared);
+    let mut kept_t: Vec<f64> = fit_cap
+        .t
+        .iter()
+        .zip(&prepared.keep)
+        .filter(|(_, &k)| k)
+        .map(|(&t, _)| t)
+        .collect();
     let max_a = opt_f64(args, "--max-mode-accel");
     let max_v = opt_f64(args, "--max-mode-vel");
     let min_v = opt_f64(args, "--min-mode-vel");
@@ -357,11 +365,49 @@ fn cmd_fit(args: &[String]) {
         for cols in &mut input.extra {
             pick(cols);
         }
+        kept_t = rows.iter().map(|&i| kept_t[i]).collect();
         eprintln!(
             "row gates (accel <= {max_a:?}, vel <= {max_v:?}, vel >= {min_v:?}): \
              kept {}/{n_before} fit rows",
             rows.len()
         );
+    }
+    if let Some(path) = arg(args, "--dump-rows") {
+        let n = input.acc_mode.first().map_or(0, Vec::len);
+        assert_eq!(kept_t.len(), n, "kept timestamps must align with fit rows");
+        let mut out = String::from("t,");
+        for (name, chans) in [
+            ("acc", &input.acc_mode),
+            ("vel", &input.vel_mode),
+            ("cs", &input.cs_mode),
+            ("snap", &input.snap_mode),
+            ("tq", &input.torque),
+        ] {
+            for i in 0..chans.len() {
+                out.push_str(&format!("{name}_{i},"));
+            }
+        }
+        out.pop();
+        out.push('\n');
+        for k in 0..n {
+            let mut row = format!("{},", kept_t[k]);
+            for chans in [
+                &input.acc_mode,
+                &input.vel_mode,
+                &input.cs_mode,
+                &input.snap_mode,
+                &input.torque,
+            ] {
+                for c in chans.iter() {
+                    row.push_str(&format!("{},", c[k]));
+                }
+            }
+            row.pop();
+            row.push('\n');
+            out.push_str(&row);
+        }
+        std::fs::write(&path, out).unwrap_or_else(|e| die(&format!("write {path}: {e}")));
+        eprintln!("kept fit rows dumped to {path}");
     }
     let r = fit(&input, &FitOptions::default()).unwrap_or_else(|e| {
         eprintln!("servo-cal: refusing to emit a profile: {e:?}");

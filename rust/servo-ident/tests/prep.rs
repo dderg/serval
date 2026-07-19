@@ -477,3 +477,39 @@ fn modal_snap_recovers_the_injected_compliance_term() {
         r.snap_params[0]
     );
 }
+
+/// At high accel the velocity steps over the coulomb deadband between
+/// samples (12 mm/s per sample at 50k mm/s2, 4 kHz), so no sample lands
+/// inside it - reversal blanking must key on the sign flip itself, or every
+/// zigzag reversal's loop transient enters the fit (which biased mass ~35%
+/// low on the bench).
+#[test]
+fn reversal_blanking_catches_deadband_skipping_flips() {
+    let accel = 50_000.0;
+    let n = 400;
+    let mid = 200.5;
+    let t: Vec<f64> = (0..n).map(|k| k as f64 * DT).collect();
+    let acc = vec![vec![-accel; n]];
+    let vel: Vec<f64> = (0..n).map(|k| (mid - k as f64) * DT * accel).collect();
+    assert!(
+        vel.iter().all(|v| v.abs() > 1.0),
+        "the reversal must skip the deadband for this test to bite"
+    );
+    let cap = Capture {
+        t,
+        acc,
+        vel: vec![vel.clone()],
+        vel_act: vec![vel],
+        torque: vec![vec![0.0; n]],
+    };
+    let pp = prep(&cap, &identity(), &PrepOptions::default());
+    let blank = (0.03 / DT) as usize;
+    for k in 200 - blank + 1..200 + blank {
+        assert!(
+            !pp.valid[k],
+            "sample {k} beside the sign flip must be blanked"
+        );
+    }
+    assert!(pp.valid[60], "samples between warmup and blank stay valid");
+    assert!(pp.valid[340], "samples after the blanked window stay valid");
+}
