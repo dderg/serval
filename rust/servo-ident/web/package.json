@@ -7,7 +7,7 @@
     "build": "bun build index.html --outdir \"${SERVO_WEB_OUTDIR:-dist}\" --sourcemap=linked",
     "check": "tsc --noEmit",
     "generate:openapi": "openapi-typescript openapi.json --output src/api/openapi.generated.ts",
-    "test": "bun test --max-concurrency=1"
+    "test": "for f in test/*.test.ts; do bun test \"$f\" || exit 1; done"
   },
   "dependencies": {
     "@tanstack/preact-query": "^5",
