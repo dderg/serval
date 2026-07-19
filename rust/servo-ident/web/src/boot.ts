@@ -1,51 +1,10 @@
+import { html, render } from "htm/preact";
 import { mustEl } from "./api";
-import { fetchMacroHelp, loadCachedMacroHelp } from "./docs";
-import { renderDriveBanner, loadDriveState } from "./drive";
-import { pollRtHealth } from "./live";
-import { pollMoonrakerHealth, emergencyStop } from "./moonraker";
-import { refresh } from "./runs";
-import { pageFromHash, bindAccordionToggle, renderPage } from "./shell";
-import { REFRESH_MS, MOONRAKER_KEY, MOONRAKER_HEALTH_POLL_MS, RT_HEALTH_POLL_MS, state } from "./state";
+import { QueryRoot } from "./queries/client";
+import { fetchDriveState } from "./queries/drive";
+import { startRunsPolling, reconcileRuns } from "./runs";
+import { App } from "./shell";
 
-// --- boot -------------------------------------------------------------------
-
-function initShell() {
-  mustEl("estop-btn").addEventListener("click", emergencyStop);
-  const input = mustEl<HTMLInputElement>("moonraker-url");
-  input.value = localStorage.getItem(MOONRAKER_KEY) || `http://${location.hostname}:7125`;
-  input.addEventListener("change", () => {
-    localStorage.setItem(MOONRAKER_KEY, input.value);
-    pollMoonrakerHealth();
-    fetchMacroHelp();
-  });
-  loadCachedMacroHelp();
-  fetchMacroHelp();
-  pollMoonrakerHealth();
-  setInterval(pollMoonrakerHealth, MOONRAKER_HEALTH_POLL_MS);
-  pollRtHealth();
-  setInterval(pollRtHealth, RT_HEALTH_POLL_MS);
-  bindAccordionToggle();
-  window.addEventListener("hashchange", () => {
-    state.page = pageFromHash();
-    renderPage();
-  });
-  state.page = pageFromHash();
-  renderPage();
-}
-
-async function tick() {
-  try {
-    await refresh();
-  } catch (e) {
-    console.error(e);
-  }
-  renderDriveBanner();
-}
-
-initShell();
-tick();
-loadDriveState();
-setInterval(tick, REFRESH_MS);
-setInterval(renderDriveBanner, 1000);
-
-export { initShell, tick };
+render(html`<${QueryRoot}><${App} /><//>`, mustEl("app"));
+startRunsPolling((runs) => void reconcileRuns(runs));
+fetchDriveState().catch((err) => console.error("drive state prefetch failed", err));

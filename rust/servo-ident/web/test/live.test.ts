@@ -1,9 +1,21 @@
 import { beforeEach, expect, test } from "bun:test";
 import { registerDom } from "./dom";
+import { liveStatusQuery, liveStatusKey } from "../src/queries/live";
+import { getLiveStatus } from "../src/api/live";
+import type { LiveStatusPayload, LiveTapPayload } from "../src/wire";
 
 registerDom();
 
-const { trimLiveWindow, ferrDisplayScale, ferrUnitAvailability, setFrozen, FREEZE_BUFFER_MAX_S } = await import(
+const {
+  trimLiveWindow,
+  ferrDisplayScale,
+  ferrUnitAvailability,
+  setFrozen,
+  FREEZE_BUFFER_MAX_S,
+  formatLiveStatus,
+  formatLiveFileStatus,
+  computeLiveChartGroup,
+} = await import(
   "../src/live"
 );
 const { liveDrawCount, state } = await import("../src/state");
@@ -125,4 +137,108 @@ test("ferrUnitAvailability reports the drives missing counts_per_mm", () => {
 
 test("ferrUnitAvailability is not ok with an empty drive set", () => {
   expect(ferrUnitAvailability([])).toEqual({ ok: false, missing: [] });
+});
+
+test("live status query config is colocated on the shared key and reuses the live transport", () => {
+  const opts = liveStatusQuery();
+  expect(opts.queryKey).toBe(liveStatusKey);
+  expect(opts.queryKey).toEqual(["live", "status"]);
+  expect(opts.queryFn).toBe(getLiveStatus);
+  expect(opts.staleTime).toBe(0);
+});
+
+test("formatLiveStatus reports streaming rate with a healthy timing tail", () => {
+  const payload = {
+    status: "streaming",
+    fs_hz: 20000,
+    timing: { skips: 0, late_frames: 0, lateness_ns: -2000 },
+  } as unknown as LiveTapPayload;
+  expect(formatLiveStatus(payload)).toEqual({
+    text: "streaming at 20.0 kHz — skipped cycles 0 · late frames 0 · margin 2 µs",
+    bad: false,
+  });
+});
+
+test("formatLiveStatus flags streaming as bad when cycles skip or frames run late", () => {
+  const payload = {
+    status: "streaming",
+    fs_hz: 20000,
+    timing: { skips: 3, late_frames: 0, lateness_ns: -2000 },
+  } as unknown as LiveTapPayload;
+  const status = formatLiveStatus(payload);
+  expect(status.bad).toBe(true);
+  expect(status.text).toContain("skipped cycles 3");
+});
+
+test("formatLiveStatus drops the timing tail when no timing is present", () => {
+  const payload = { status: "streaming", fs_hz: 20000, timing: null } as unknown as LiveTapPayload;
+  expect(formatLiveStatus(payload)).toEqual({ text: "streaming at 20.0 kHz", bad: false });
+});
+
+test("formatLiveStatus surfaces the reason when the tap is unreachable", () => {
+  const payload = { status: "unreachable", reason: "no socket" } as unknown as LiveTapPayload;
+  expect(formatLiveStatus(payload)).toEqual({
+    text: "telemetry tap unreachable — no socket",
+    bad: false,
+  });
+});
+
+test("formatLiveStatus falls back to the connecting copy before the tap answers", () => {
+  const payload = { status: "connecting" } as unknown as LiveTapPayload;
+  expect(formatLiveStatus(payload)).toEqual({
+    text: "connecting to the telemetry tap…",
+    bad: false,
+  });
+});
+
+test("computeLiveChartGroup returns raw values, peak magnitude, and shared y-extent", () => {
+  state.live.perDrive = {
+    slot0: { ferr: [1, -3, 2, null], torque: [], target: [], pos: [] },
+  };
+  const group = computeLiveChartGroup(["slot0"], "ferr", null);
+  expect(group).toEqual({
+    display: { slot0: [1, -3, 2, null] },
+    peaks: { slot0: 3 },
+    yMin: -3,
+    yMax: 2,
+  });
+});
+
+test("computeLiveChartGroup applies a per-drive scale to values, peaks, and extent", () => {
+  state.live.perDrive = {
+    slot0: { ferr: [1, -3, 2, null], torque: [], target: [], pos: [] },
+  };
+  const group = computeLiveChartGroup(["slot0"], "ferr", { slot0: 2 });
+  expect(group).toEqual({
+    display: { slot0: [2, -6, 4, null] },
+    peaks: { slot0: 6 },
+    yMin: -6,
+    yMax: 4,
+  });
+});
+
+test("computeLiveChartGroup returns null when no finite samples exist", () => {
+  state.live.perDrive = {
+    slot0: { ferr: [null, null], torque: [], target: [], pos: [] },
+  };
+  expect(computeLiveChartGroup(["slot0"], "ferr", null)).toBeNull();
+});
+
+test("formatLiveFileStatus reports nothing recorded until a capture exists", () => {
+  expect(formatLiveFileStatus({ capture: null } as LiveStatusPayload)).toBe("nothing recorded yet");
+});
+
+test("formatLiveFileStatus shows a growing capture as recording with its size", () => {
+  const status = { capture: { name: "live.scap", size_bytes: 2048, age_s: 1 } } as LiveStatusPayload;
+  expect(formatLiveFileStatus(status)).toBe("recording live.scap — 2 KiB");
+});
+
+test("formatLiveFileStatus shows a stale capture as the last file with its age", () => {
+  const status = { capture: { name: "live.scap", size_bytes: 2048, age_s: 5 } } as LiveStatusPayload;
+  expect(formatLiveFileStatus(status)).toBe("last: live.scap (5s ago)");
+});
+
+test("formatLiveFileStatus reports unavailable when the capture name is missing", () => {
+  const status = { capture: { name: null, size_bytes: 100, age_s: 1 } } as LiveStatusPayload;
+  expect(formatLiveFileStatus(status)).toBe("capture status unavailable");
 });

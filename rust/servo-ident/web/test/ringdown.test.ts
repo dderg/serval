@@ -1,6 +1,6 @@
 import { beforeAll, expect, test } from "bun:test";
 import { registerDom } from "./dom";
-import type { PlotRingdownSource } from "../src/generated/PlotRingdownSource";
+import type { PlotRingdownSource } from "../src/wire";
 
 registerDom();
 

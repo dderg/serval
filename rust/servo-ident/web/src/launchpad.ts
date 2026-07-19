@@ -1,6 +1,7 @@
-import { el } from "./api";
+import { html } from "htm/preact";
+import { useState } from "preact/hooks";
 import { setConsoleValue } from "./console";
-import { escapeHtml, renderSentLog, runGcode } from "./moonraker";
+import { renderSentLog, runGcode } from "./moonraker";
 
 // --- launchpad: a friendly form pad for the calibration macros --------------
 
@@ -381,172 +382,108 @@ function loadSelected(): string | null {
   return name && MACROS[name] ? name : null;
 }
 
-function paramFieldHtml(p: LpParam, value: string): string {
-  const meta = [
-    p.dflt ? `default ${escapeHtml(p.dflt)}` : "",
-    p.unit ? escapeHtml(p.unit) : "",
-    p.hint ? escapeHtml(p.hint) : "",
-  ]
-    .filter(Boolean)
-    .join(" · ");
-  const req = p.required ? `<span class="lp-req" title="required">*</span>` : "";
-  let control: string;
+
+function LpParamField({ p, value, onValue }: { p: LpParam; value: string; onValue: (v: string) => void }) {
+  const meta = [p.dflt ? `default ${p.dflt}` : "", p.unit ?? "", p.hint ?? ""].filter(Boolean).join(" · ");
+  let control;
   if (p.type === "enum" && p.choices) {
-    const blank = p.required ? "" : `<option value=""></option>`;
-    const opts = p.choices
-      .map((c) => `<option value="${escapeHtml(c)}"${c === value ? " selected" : ""}>${escapeHtml(c)}</option>`)
-      .join("");
-    control = `<select class="cell-input" data-lp-param="${p.name}">${blank}${opts}</select>`;
+    const blank = p.required ? null : html`<option value=""></option>`;
+    control = html`<select class="cell-input" data-lp-param=${p.name} value=${value}
+      onChange=${(e: Event) => onValue((e.currentTarget as HTMLSelectElement).value)}>
+      ${blank}${p.choices.map((c) => html`<option key=${c} value=${c}>${c}</option>`)}
+    </select>`;
   } else {
     const placeholder = p.dflt ?? (p.required ? "required" : "");
-    control =
-      `<input type="text" class="cell-input" data-lp-param="${p.name}" ` +
-      `value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}">`;
+    control = html`<input type="text" class="cell-input" data-lp-param=${p.name} value=${value}
+      placeholder=${placeholder}
+      onInput=${(e: Event) => onValue((e.currentTarget as HTMLInputElement).value)} />`;
   }
-  return (
-    `<div class="lp-field">` +
-    `<label>${escapeHtml(p.name)}${req}</label>` +
-    control +
-    (meta ? `<span class="lp-meta">${meta}</span>` : "") +
-    `</div>`
-  );
+  return html`<div class="lp-field">
+    <label>${p.name}${p.required ? html`<span class="lp-req" title="required">*</span>` : null}</label>
+    ${control}
+    ${meta ? html`<span class="lp-meta">${meta}</span>` : null}
+  </div>`;
 }
 
-function formHtml(macro: LpMacro, values: Record<string, string>): string {
-  return (
-    `<div class="section-head"><h2>${escapeHtml(macro.name)}</h2>` +
-    `<span class="note">${escapeHtml(macro.blurb)}</span></div>` +
-    `<div class="lp-fields">${macro.params.map((p) => paramFieldHtml(p, values[p.name] ?? "")).join("")}</div>` +
-    `<div class="lp-preview-row">` +
-    `<code class="lp-preview" id="launchpad-preview"></code>` +
-    `<div class="lp-actions">` +
-    `<button id="launchpad-copy" title="drop this line into the console">to console</button>` +
-    `<button id="launchpad-run" title="send this line over moonraker">run</button>` +
-    `</div></div>` +
-    `<div class="lp-missing note" id="launchpad-missing"></div>`
-  );
-}
-
-function listHtml(): string {
+function LpList({ onSelect }: { onSelect: (name: string) => void }) {
   return LAUNCHPAD_GROUPS.map(
-    (g) =>
-      `<div class="lp-group"><h3>${escapeHtml(g.label)}</h3><div class="lp-list">` +
-      g.macros
-        .map(
-          (m) =>
-            `<button class="lp-item" data-lp-macro="${m.name}" title="${escapeHtml(m.blurb)}">` +
-            `${escapeHtml(m.name)}</button>`
-        )
-        .join("") +
-      `</div></div>`
-  ).join("");
-}
-
-function detailHtml(macro: LpMacro, values: Record<string, string>): string {
-  return (
-    `<div class="lp-detail">` +
-    `<button class="lp-back" id="launchpad-back">← all macros</button>` +
-    formHtml(macro, values) +
-    `</div>`
+    (g) => html`<div key=${g.label} class="lp-group">
+      <h3>${g.label}</h3>
+      <div class="lp-list">
+        ${g.macros.map(
+          (m) => html`<button key=${m.name} class="lp-item" data-lp-macro=${m.name} title=${m.blurb}
+            onClick=${() => onSelect(m.name)}>${m.name}</button>`
+        )}
+      </div>
+    </div>`
   );
 }
 
-function launchpadSectionHtml(): string {
-  return (
-    `<section class="launchpad-panel">` +
-    `<div class="section-head"><h2>calibration launchpad</h2></div>` +
-    `<div id="launchpad-body"></div>` +
-    `</section>`
+function LaunchpadPad() {
+  const [selected, setSelected] = useState<string | null>(() => loadSelected());
+  const [values, setValues] = useState<Record<string, string>>(() =>
+    selected ? loadValues()[selected] ?? {} : {}
   );
-}
 
-function readFormValues(): Record<string, string> {
-  const values: Record<string, string> = {};
-  document.querySelectorAll<HTMLInputElement | HTMLSelectElement>("#launchpad-body [data-lp-param]").forEach((f) => {
-    const name = f.dataset.lpParam;
-    if (name) values[name] = f.value;
-  });
-  return values;
-}
+  const select = (name: string) => {
+    if (!MACROS[name]) throw new Error(`launchpad: unknown macro ${name}`);
+    setSelected(name);
+    localStorage.setItem(SELECTED_KEY, name);
+    setValues(loadValues()[name] ?? {});
+  };
+  const back = () => {
+    setSelected(null);
+    localStorage.removeItem(SELECTED_KEY);
+    setValues({});
+  };
 
-let selectedMacro: string | null = null;
-
-function persistCurrent(values: Record<string, string>) {
-  if (!selectedMacro) return;
-  const all = loadValues();
-  all[selectedMacro] = values;
-  saveValues(all);
-}
-
-function updatePreview() {
-  const macro = selectedMacro ? MACROS[selectedMacro] : null;
-  if (!macro) return;
-  const values = readFormValues();
-  const preview = el("launchpad-preview");
-  const line = buildCommand(macro, values);
-  if (preview) preview.textContent = line;
-  const missing = missingRequired(macro, values);
-  const missingEl = el("launchpad-missing");
-  if (missingEl) {
-    missingEl.textContent = missing.length ? `fill required: ${missing.join(", ")}` : "";
+  let body;
+  if (selected) {
+    const macro = MACROS[selected];
+    const setField = (name: string, value: string) => {
+      const next = { ...values, [name]: value };
+      setValues(next);
+      const all = loadValues();
+      all[selected] = next;
+      saveValues(all);
+    };
+    const line = buildCommand(macro, values);
+    const missing = missingRequired(macro, values);
+    const copy = () => {
+      if (line) setConsoleValue(line, true);
+    };
+    const run = async () => {
+      if (missing.length) return;
+      await runGcode([line], "launchpad");
+      renderSentLog();
+    };
+    body = html`<div class="lp-detail">
+      <button class="lp-back" id="launchpad-back" onClick=${back}>← all macros</button>
+      <div class="section-head"><h2>${macro.name}</h2><span class="note">${macro.blurb}</span></div>
+      <div class="lp-fields">
+        ${macro.params.map(
+          (p) => html`<${LpParamField} key=${p.name} p=${p} value=${values[p.name] ?? ""}
+            onValue=${(v: string) => setField(p.name, v)} />`
+        )}
+      </div>
+      <div class="lp-preview-row">
+        <code class="lp-preview" id="launchpad-preview">${line}</code>
+        <div class="lp-actions">
+          <button id="launchpad-copy" title="drop this line into the console" onClick=${copy}>to console</button>
+          <button id="launchpad-run" title="send this line over moonraker" disabled=${missing.length > 0}
+            onClick=${run}>run</button>
+        </div>
+      </div>
+      <div class="lp-missing note" id="launchpad-missing">${missing.length ? `fill required: ${missing.join(", ")}` : ""}</div>
+    </div>`;
+  } else {
+    body = html`<${LpList} onSelect=${select} />`;
   }
-  const run = el<HTMLButtonElement>("launchpad-run");
-  if (run) run.disabled = missing.length > 0;
-  persistCurrent(values);
+
+  return html`<section class="launchpad-panel">
+    <div class="section-head"><h2>calibration launchpad</h2></div>
+    <div id="launchpad-body">${body}</div>
+  </section>`;
 }
 
-function renderList() {
-  selectedMacro = null;
-  localStorage.removeItem(SELECTED_KEY);
-  const body = el("launchpad-body");
-  if (body) body.innerHTML = listHtml();
-}
-
-function selectMacro(name: string) {
-  if (!MACROS[name]) throw new Error(`launchpad: unknown macro ${name}`);
-  selectedMacro = name;
-  localStorage.setItem(SELECTED_KEY, name);
-  const body = el("launchpad-body");
-  if (body) body.innerHTML = detailHtml(MACROS[name], loadValues()[name] ?? {});
-  updatePreview();
-}
-
-function bindLaunchpad() {
-  const body = el("launchpad-body");
-  if (!body) return;
-  body.addEventListener("input", updatePreview);
-  body.addEventListener("change", updatePreview);
-  body.addEventListener("click", (ev) => {
-    const target = ev.target as HTMLElement;
-    const item = target.closest<HTMLElement>(".lp-item");
-    if (item && item.dataset.lpMacro) {
-      selectMacro(item.dataset.lpMacro);
-      return;
-    }
-    if (target.closest("#launchpad-back")) {
-      renderList();
-      return;
-    }
-    if (target.id === "launchpad-copy") onCopy();
-    if (target.id === "launchpad-run") onRun();
-  });
-  selectedMacro = loadSelected();
-  if (selectedMacro) selectMacro(selectedMacro);
-  else renderList();
-}
-
-function onCopy() {
-  const line = el("launchpad-preview")?.textContent ?? "";
-  if (line) setConsoleValue(line, true);
-}
-
-async function onRun() {
-  const macro = selectedMacro ? MACROS[selectedMacro] : null;
-  if (!macro) return;
-  const values = readFormValues();
-  if (missingRequired(macro, values).length) return;
-  await runGcode([buildCommand(macro, values)], "launchpad");
-  renderSentLog();
-}
-
-export { LAUNCHPAD_GROUPS, buildCommand, missingRequired, launchpadSectionHtml, bindLaunchpad };
+export { LAUNCHPAD_GROUPS, buildCommand, missingRequired, LaunchpadPad };

@@ -1,13 +1,5 @@
-import { html } from "htm/preact/standalone";
-
-// --- per-motor value component ---------------------------------------------
-//
-// The one widget every per-motor drive parameter renders through. Collapsed
-// it shows a single "all motors" value; when the motors disagree the
-// collapsed field reads "mixed" and the toggle carries the per-motor spread.
-// Expanding shows one field per motor plus the set-all field. Editable mode
-// stages raw register values through `onStage("*"| motor, text)`; omitting
-// `onStage` renders the same layout read-only.
+import { html } from "htm/preact";
+import { useEffect, useState } from "preact/hooks";
 
 interface MotorValueEntry {
   motor: string;
@@ -50,14 +42,20 @@ interface ValueFieldProps {
 }
 
 function ValueField({ cls, title, value, placeholder, options, onCommit }: ValueFieldProps) {
+  const formattedValue = value === null ? "" : String(value);
+  const [draft, setDraft] = useState(formattedValue);
+  const [editing, setEditing] = useState(false);
+  useEffect(() => {
+    if (!editing) setDraft(formattedValue);
+  }, [editing, formattedValue]);
   if (!onCommit) {
     return html`<span class=${[...cls, "readonly"].join(" ")} title=${title}>
       ${value === null ? placeholder : options ? (options[String(value)] ?? value) : value}
     </span>`;
   }
-  const onChange = (e: Event) => onCommit((e.target as HTMLInputElement).value);
   if (options) {
-    return html`<select class=${cls.join(" ")} title=${title} value=${value === null ? "" : String(value)} onChange=${onChange}>
+    return html`<select class=${cls.join(" ")} title=${title} value=${formattedValue}
+      onChange=${(e: Event) => onCommit((e.target as HTMLSelectElement).value)}>
       <option value="" disabled>${placeholder}</option>
       ${Object.entries(options).map(([v, label]) => html`<option key=${v} value=${v}>${v}: ${label}</option>`)}
     </select>`;
@@ -66,10 +64,13 @@ function ValueField({ cls, title, value, placeholder, options, onCommit }: Value
     type="number"
     step="1"
     class=${cls.join(" ")}
-    value=${value === null ? "" : value}
+    value=${draft}
     placeholder=${placeholder}
     title=${title}
-    onChange=${onChange}
+    onInput=${(e: Event) => setDraft((e.target as HTMLInputElement).value)}
+    onChange=${(e: Event) => onCommit((e.target as HTMLInputElement).value)}
+    onFocus=${() => setEditing(true)}
+    onBlur=${() => setEditing(false)}
   />`;
 }
 

@@ -8,19 +8,7 @@
 </head>
 <body>
 
-<header class="topbar">
-  <h1>servo-cal</h1>
-  <nav class="tabs" id="page-tabs"></nav>
-  <label class="moonraker">moonraker
-    <input type="text" id="moonraker-url" size="24">
-  </label>
-  <span id="moonraker-health" class="mr-health" title="checked every few seconds via GET /server/info"></span>
-  <span id="rt-health" class="rt-health" title="EtherCAT endpoint RT-loop health from the live telemetry tap: cycles skipped, frames past the SYNC0 latch, and the current frame margin"></span>
-  <div id="drive-state-banner" class="banner"></div>
-  <button id="estop-btn" class="estop" title="emergency stop — POST /printer/emergency_stop, fires on the first click">STOP</button>
-</header>
-
-<div id="page-root"></div>
+<div id="app"></div>
 
 <script type="module" src="./src/boot.ts"></script>
 </body>

@@ -7,10 +7,12 @@ const { uniformCountsPerMm, psdCartesianScaled, psdCartesianTraces } = await imp
   "../src/metrics"
 );
 const { state, PALETTE, PSD_MAX_FREQ_KEY } = await import("../src/state");
+const { queryClient } = await import("../src/queries/client");
+const { runKeys } = await import("../src/queries/runs");
 import type { PlotSeries, PlotStep } from "../src/wire";
 
 function seedRun(name: string, cpms: (number | null)[]) {
-  state.details.set(name, {
+  queryClient.setQueryData(runKeys.detail(name), {
     mtime_utc: "",
     has_results: false,
     manifest: {
@@ -23,7 +25,6 @@ function seedRun(name: string, cpms: (number | null)[]) {
 }
 
 beforeEach(() => {
-  state.details.clear();
   state.runColors.clear();
   state.runColors.set("run1", PALETTE[0]);
   localStorage.setItem(PSD_MAX_FREQ_KEY, "500");

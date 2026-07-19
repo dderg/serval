@@ -84,33 +84,36 @@ test("tickStepMm picks 1-2-5 steps near the target spacing", () => {
 test("drawSpatialView renders from tap samples and reports the live deviation", async () => {
   const { drawSpatialView } = await import("../src/spatial");
   const { appendTapSamples } = await import("../src/live");
-  const { state } = await import("../src/state");
+  const { queryClient } = await import("../src/queries/client");
+  const { driveKey } = await import("../src/queries/drive");
 
-  // `state` and `document` are process-wide singletons shared with every
-  // other test file bun runs in this process — mutating them here without
-  // restoring leaks into whichever file happens to run next (order is not
-  // alphabetical in CI), so a later file's own render can see this stub
-  // instead of its real data. Always undo on the way out.
+  // `document` and the query cache are process-wide singletons shared with
+  // every other test file bun runs in this process — mutating them here
+  // without restoring leaks into whichever file happens to run next (order
+  // is not alphabetical in CI), so a later file's own render can see this
+  // stub instead of its real data. Always undo on the way out.
   const originalBody = document.body.innerHTML;
-  const originalDriveData = state.drive.data;
+  const originalDriveState = queryClient.getQueryData(driveKey);
   try {
     document.body.innerHTML =
       `<button id="live-spatial-fit">fit</button>` +
       `<span id="live-spatial-note"></span>` +
       `<canvas id="live-spatial-canvas"></canvas>`;
-    state.drive.data = {
+    queryClient.setQueryData(driveKey, {
       spatial: COREXY,
       slots: SLOTS,
-    } as (typeof state.drive)["data"];
+    });
 
     appendTapSamples({
       status: "streaming",
       fs_hz: 4000,
+      cycle_ns: 250000,
       drive_names: ["slot0", "slot1"],
       counts_per_mm: [1000, 1000],
       first_cycle: 10,
       next_cycle: 12,
       stride: 1,
+      timing: null,
       drives: {
         // commanded a=[0,1,2]mm b=0; actual b lags by 1mm on the last sample
         slot0: { ferr: [0, 0, 0], torque: [0, 0, 0], target: [0, 1000, 2000], pos: [0, 1000, 2000] },
@@ -123,6 +126,10 @@ test("drawSpatialView renders from tap samples and reports the live deviation", 
     expect(note).toContain("dev 707 µm");
   } finally {
     document.body.innerHTML = originalBody;
-    state.drive.data = originalDriveData;
+    if (originalDriveState === undefined) {
+      queryClient.removeQueries({ queryKey: driveKey });
+    } else {
+      queryClient.setQueryData(driveKey, originalDriveState);
+    }
   }
 });

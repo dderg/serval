@@ -1,11 +1,13 @@
-import { el, payloadUnchanged, runDataSig } from "./api";
+import { html } from "htm/preact";
+import { el, payloadUnchanged } from "./api";
+import { detailData, runDataSig, runsData } from "./queries/runs";
 import { driveRamp } from "./metrics";
 import { runColor } from "./runs";
-import { motorViewPerMotor } from "./shell";
+import { motorViewPerMotor, motorViewToggleHtml } from "./shell";
 import { PALETTE, PSD_MAX_FREQ_KEY, PSD_MAX_FREQ_CHOICES_HZ, PSD_MAX_FREQ_DEFAULT_HZ, state } from "./state";
 import { timeSeriesPlot } from "./uplot-chart";
 import type { TimeTrace } from "./uplot-chart";
-import type { PlotSeries, PlotStep } from "./wire";
+import type { PlotSeries, PlotStep } from "./api/runs";
 import { loadFerrUnit, setFerrUnit } from "./units";
 import type { FerrUnit } from "./units";
 
@@ -191,7 +193,7 @@ function drawTimeDomain(names: string[], plots: PlotSeries[], steps: string[]) {
 
 function newestSelectedRunName(names: string[]): string {
   const selected = new Set(names);
-  const found = state.runs.find((r) => selected.has(r.name));
+  const found = runsData().find((r) => selected.has(r.name));
   return found ? found.name : names[0];
 }
 
@@ -203,7 +205,7 @@ function peakStep(names: string[], plots: PlotSeries[], steps: string[]): { newe
   const present = plot
     ? steps.filter((s) => plot.steps.some((x) => x.name === s))
     : [];
-  const detail = state.details.get(newest);
+  const detail = detailData(newest);
   const recommended = detail && detail.results && detail.results.verdict.recommended_step;
   const step =
     recommended && present.includes(recommended)
@@ -336,7 +338,7 @@ function psdToAmplitude(freq: number[], psd: number[]): number[] {
 }
 
 function countsPerMmOrNull(runName: string, driveName: string): number | null {
-  const detail = state.details.get(runName);
+  const detail = detailData(runName);
   const motors = (detail && detail.manifest && detail.manifest.motors) || [];
   const motor = motors.find((m) => m.name === driveName);
   return motor && motor.counts_per_mm ? motor.counts_per_mm : null;
@@ -346,6 +348,34 @@ function countsPerMm(runName: string, driveName: string): number {
   const v = countsPerMmOrNull(runName, driveName);
   if (v === null) throw new Error(`${runName}: manifest has no counts_per_mm for ${driveName}`);
   return v;
+}
+
+function SectionHead({ title, tools }: { title: string; tools?: string }) {
+  return html`<div class="section-head"><h2>${title}</h2></div>
+    ${tools != null
+      ? html`<div class="section-tools" dangerouslySetInnerHTML=${{ __html: tools }}></div>`
+      : null}`;
+}
+
+function TimeDomainSection() {
+  const tools =
+    motorViewToggleHtml("combined") +
+    ferrUnitToggleHtml("time") +
+    `<div class="chips" id="time-motor-chips"></div>` +
+    `<div class="chips" id="time-step-chips"></div>`;
+  return html`<section class="time-section">
+    <${SectionHead} title="time domain — following error" tools=${tools} />
+    <div class="charts" id="charts"></div>
+  </section>`;
+}
+
+function PathSection() {
+  const tools = `<button id="path-fit">fit</button><span class="note" id="path-note"></span>`;
+  return html`<section class="path-section" id="path-section" hidden>
+    <${SectionHead} title="toolpath — commanded vs actual" tools=${tools} />
+    <div class="chips" id="path-legend"></div>
+    <div class="spatial-box"><canvas id="path-canvas"></canvas></div>
+  </section>`;
 }
 
 export type { PickedSeries, FilterChipItem };
@@ -370,4 +400,7 @@ export {
   ferrUnitToggleHtml,
   syncFerrUnitUi,
   bindFerrUnitToggle,
+  SectionHead,
+  TimeDomainSection,
+  PathSection,
 };
