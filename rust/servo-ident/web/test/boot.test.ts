@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { registerDom, installFetchStub, indexHtmlBody, RUN_NAME } from "./dom";
+import { registerDom, installFetchStub, installDomHarness, indexHtmlBody, settleDom, RUN_NAME } from "./dom";
 import type * as ApiMod from "../src/api";
 import type * as ClientMod from "../src/queries/client";
 import type * as RunsQueryMod from "../src/queries/runs";
@@ -9,34 +9,8 @@ import type * as RunsMod from "../src/runs";
 
 registerDom();
 const { unmatched } = installFetchStub();
-
-const intervals: Timer[] = [];
-const realSetInterval = globalThis.setInterval;
-(globalThis as Record<string, unknown>).setInterval = ((fn: TimerHandler, ms?: number) => {
-  const id = realSetInterval(fn as () => void, ms ?? 0);
-  intervals.push(id);
-  return id;
-}) as typeof setInterval;
-
-const consoleErrors: unknown[][] = [];
-const realConsoleError = console.error;
-console.error = (...args: unknown[]) => {
-  consoleErrors.push(args);
-  realConsoleError(...args);
-};
-
-const raf = () => new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
-const macrotask = () =>
-  new Promise((resolve) => {
-    const channel = new MessageChannel();
-    channel.port1.onmessage = () => resolve(null);
-    channel.port2.postMessage(0);
-  });
-
-async function settle() {
-  await raf();
-  await macrotask();
-}
+const { consoleErrors, cleanup } = installDomHarness();
+const settle = () => settleDom();
 
 let api: typeof ApiMod;
 let client: typeof ClientMod;
@@ -72,8 +46,7 @@ afterAll(async () => {
   const { render } = await import("htm/preact");
   const app = document.getElementById("app");
   if (app) render(null, app);
-  for (const id of intervals) clearInterval(id);
-  console.error = realConsoleError;
+  cleanup();
 });
 
 test("boot renders the shell without errors", () => {

@@ -1,6 +1,6 @@
 import { beforeEach, expect, test } from "bun:test";
 import { act } from "preact/test-utils";
-import { registerDom } from "./dom";
+import { registerDom, settleDom } from "./dom";
 
 registerDom();
 
@@ -46,26 +46,7 @@ globalThis.fetch = (async (input: RequestInfo | URL) => {
   return new Response(`no route ${url}`, { status: 404 });
 }) as typeof fetch;
 
-function raf(): Promise<void> {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  requestAnimationFrame(() => resolve());
-  return promise;
-}
-
-function macrotask(): Promise<void> {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  const channel = new MessageChannel();
-  channel.port1.onmessage = () => resolve();
-  channel.port2.postMessage(0);
-  return promise;
-}
-
-async function settle() {
-  for (let i = 0; i < 4; i++) {
-    await raf();
-    await macrotask();
-  }
-}
+const settle = () => settleDom(4);
 
 let docsHost: HTMLElement | null = null;
 
@@ -204,8 +185,7 @@ test("while the first fetch is in flight the status reads as fetching", async ()
   const gate = Promise.withResolvers<void>();
   gcodeHelpDefer = gate.promise;
   renderDocs();
-  await raf();
-  await macrotask();
+  await settleDom();
   expect(document.getElementById("docs-status")!.textContent).toContain("fetching from klippy");
   gate.resolve();
   await settle();

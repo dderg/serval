@@ -9,7 +9,6 @@ use std::path::Path;
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
-use ts_rs::TS;
 
 use crate::results::Manifest;
 use crate::scap::Scap;
@@ -17,14 +16,14 @@ use crate::scap::Scap;
 pub const BIN_MM: f64 = 2.0;
 const MOVING_MM_PER_CYCLE: f64 = 1e-4;
 
-#[derive(Debug, Serialize, JsonSchema, TS)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct StrainBelt {
     pub pair: String,
     pub elastic: Vec<Option<f64>>,
     pub friction: Vec<Option<f64>>,
 }
 
-#[derive(Debug, Serialize, JsonSchema, TS)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct StrainLine {
     pub name: String,
     pub swept: Value,
@@ -32,7 +31,7 @@ pub struct StrainLine {
     pub belts: Vec<StrainBelt>,
 }
 
-#[derive(Debug, Serialize, JsonSchema, TS)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct StrainMap {
     pub lines: Vec<StrainLine>,
 }

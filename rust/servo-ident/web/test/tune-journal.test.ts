@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { registerDom, installFetchStub, indexHtmlBody, RUN_NAME } from "./dom";
+import { registerDom, installFetchStub, installDomHarness, indexHtmlBody, nextFrame, settleDom, RUN_NAME } from "./dom";
 import type * as ApiMod from "../src/api";
 import type * as ClientMod from "../src/queries/client";
 import type * as RunsQueryMod from "../src/queries/runs";
@@ -37,37 +37,11 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   return baseFetch(req);
 }) as typeof fetch;
 
-const intervals: Timer[] = [];
-const realSetInterval = globalThis.setInterval;
-(globalThis as Record<string, unknown>).setInterval = ((fn: TimerHandler, ms?: number) => {
-  const id = realSetInterval(fn as () => void, ms ?? 0);
-  intervals.push(id);
-  return id;
-}) as typeof setInterval;
+const { consoleErrors, cleanup } = installDomHarness();
 
-const consoleErrors: unknown[][] = [];
-const realConsoleError = console.error;
-console.error = (...args: unknown[]) => {
-  consoleErrors.push(args);
-  realConsoleError(...args);
-};
-
-const raf = () => {
-  const { promise, resolve } = Promise.withResolvers<null>();
-  requestAnimationFrame(() => resolve(null));
-  return promise;
-};
-const macrotask = () => {
-  const { promise, resolve } = Promise.withResolvers<null>();
-  const channel = new MessageChannel();
-  channel.port1.onmessage = () => resolve(null);
-  channel.port2.postMessage(0);
-  return promise;
-};
 async function settle() {
-  await raf();
-  await macrotask();
-  await raf();
+  await settleDom();
+  await nextFrame();
 }
 
 let html: typeof htmlTag;
@@ -121,8 +95,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   render(null as unknown as VNode, pageRoot());
-  for (const id of intervals) clearInterval(id);
-  console.error = realConsoleError;
+  cleanup();
   globalThis.fetch = baseFetch;
 });
 

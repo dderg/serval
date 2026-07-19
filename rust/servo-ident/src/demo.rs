@@ -21,7 +21,6 @@ use core::f64::consts::PI;
 use flate2::read::GzDecoder;
 use schemars::JsonSchema;
 use serde::Serialize;
-use ts_rs::TS;
 
 use crate::analyze::{build_run, write_run_outputs};
 use crate::metrics::target_motion_segments;
@@ -266,7 +265,7 @@ const DEMO_DISAGREEING_VALUE: i64 = 400;
 /// the mechanism end-to-end.
 const DEMO_PINNED_C_CODES: [&str; 0] = [];
 
-#[derive(Debug, Serialize, JsonSchema, TS)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct DriveStateParam {
     name: String,
     c_code: String,
@@ -303,14 +302,14 @@ impl From<&DemoPanelParam> for DriveStateParam {
 /// SERVO_DUMP_TUNING mirror of `servo_strokes.spatial_frame`: `axes` are
 /// motor names (frame columns), each column folds the motor's invert sign
 /// in, so `mode_pos[k] = sum(frame[k][s] * drive_frame_pos_mm[s])`.
-#[derive(Debug, Serialize, JsonSchema, TS)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct SpatialFrame {
     modes: Vec<String>,
     axes: Vec<String>,
     frame: Vec<Vec<f64>>,
 }
 
-#[derive(Debug, Serialize, JsonSchema, TS)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct DriveStatePayload {
     version: i64,
     created_utc: String,
@@ -518,7 +517,7 @@ fn inject_decaying_resonance(bytes: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-#[derive(Debug, Serialize, JsonSchema, TS)]
+#[derive(Debug, Serialize, JsonSchema)]
 struct DemoStrokePlan {
     start: f64,
     end: f64,
@@ -528,7 +527,7 @@ struct DemoStrokePlan {
     dwell_ms: i64,
 }
 
-#[derive(Debug, Serialize, JsonSchema, TS)]
+#[derive(Debug, Serialize, JsonSchema)]
 struct DemoMotorSpec {
     name: &'static str,
     invert: bool,
@@ -563,14 +562,14 @@ const DEMO_MOTOR_SPECS: [DemoMotorSpec; 4] = [
     },
 ];
 
-#[derive(Debug, Serialize, JsonSchema, TS)]
+#[derive(Debug, Serialize, JsonSchema)]
 struct DemoSweptGains {
     position: i64,
     speed: i64,
     integral: i64,
 }
 
-#[derive(Debug, Serialize, JsonSchema, TS)]
+#[derive(Debug, Serialize, JsonSchema)]
 struct DemoStep {
     name: &'static str,
     swept: DemoSweptGains,
@@ -579,7 +578,7 @@ struct DemoStep {
     accel: &'static str,
 }
 
-#[derive(Debug, Serialize, JsonSchema, TS)]
+#[derive(Debug, Serialize, JsonSchema)]
 struct DemoParamWrite {
     servo: &'static str,
     addr: &'static str,
@@ -587,13 +586,13 @@ struct DemoParamWrite {
     time_utc: String,
 }
 
-#[derive(Debug, Serialize, JsonSchema, TS)]
+#[derive(Debug, Serialize, JsonSchema)]
 struct DemoAmbient {
     journal_params: BTreeMap<String, BTreeMap<String, i64>>,
     param_writes_since_last_run: Vec<DemoParamWrite>,
 }
 
-#[derive(Debug, Serialize, JsonSchema, TS)]
+#[derive(Debug, Serialize, JsonSchema)]
 struct DemoManifest {
     version: i64,
     experiment: &'static str,

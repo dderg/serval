@@ -1,8 +1,8 @@
 import { html } from "htm/preact";
 import { useEffect, useRef } from "preact/hooks";
 import { useQuery } from "@tanstack/preact-query";
-import { el, mustEl, payloadUnchanged } from "./api";
-import { drawSpatialView, LiveSpatialSection } from "./spatial";
+import { el, mustEl } from "./api";
+import { LiveSpatialSection } from "./spatial";
 import { timeSeriesPlot } from "./uplot-chart";
 import { formatAge } from "./drive";
 import { runGcode } from "./moonraker";
@@ -11,8 +11,7 @@ import { notify, useStore } from "./store";
 import type { LiveSeries } from "./state";
 import type { FixedY, TimeSeriesPlot, TimeTrace } from "./uplot-chart";
 import type { LiveStatusPayload, LiveTapPayload, LiveTapStreaming } from "./wire";
-import { queryClient } from "./queries/client";
-import { getLiveStatus, getLiveTap } from "./api/live";
+import { getLiveTap } from "./api/live";
 import { liveStatusQuery } from "./queries/live";
 import { driveStateData } from "./queries/drive";
 import type { ComponentChildren } from "preact";
@@ -31,18 +30,6 @@ import type { ComponentChildren } from "preact";
 
 const FREEZE_BUFFER_MAX_S = 180;
 
-function updateFreezeUi() {
-  const btn = el("live-freeze-btn");
-  if (btn) btn.textContent = state.live.frozen ? "resume" : "freeze";
-  const badge = el("live-freeze-badge");
-  if (badge) {
-    badge.textContent = state.live.frozen
-      ? state.live.freezeTruncated
-        ? "FROZEN — buffer cap hit, oldest frozen samples dropped"
-        : "FROZEN"
-      : "";
-  }
-}
 
 function freezeState(frozen: boolean) {
   state.live.frozen = frozen;
@@ -60,8 +47,6 @@ function freezeState(frozen: boolean) {
 
 function setFrozen(frozen: boolean) {
   freezeState(frozen);
-  if (!frozen) drawLiveCharts();
-  updateFreezeUi();
 }
 
 function toggleLiveFreeze() {
@@ -83,56 +68,15 @@ function loadLiveUnit(): "µm" | "counts" {
   return localStorage.getItem(LIVE_UNIT_KEY) === "counts" ? "counts" : "µm";
 }
 
-function setLiveUnit(unit: "µm" | "counts") {
-  localStorage.setItem(LIVE_UNIT_KEY, unit);
-  drawLiveCharts();
-}
 
 function ferrUnitAvailability(drives: string[]): { ok: boolean; missing: string[] } {
   const missing = drives.filter((d) => !state.live.countsPerMm[d]);
   return { ok: drives.length > 0 && missing.length === 0, missing };
 }
 
-function syncLiveUnitUi(availability: { ok: boolean; missing: string[] }) {
-  const pref = loadLiveUnit();
-  const umBtn = el<HTMLButtonElement>("live-unit-um");
-  const countsBtn = el<HTMLButtonElement>("live-unit-counts");
-  const hint = el("live-unit-hint");
-  if (umBtn) {
-    umBtn.disabled = !availability.ok;
-    umBtn.classList.toggle("active", availability.ok && pref === "µm");
-  }
-  if (countsBtn) countsBtn.classList.toggle("active", !availability.ok || pref === "counts");
-  if (hint) hint.textContent = availability.ok ? "" : `counts_per_mm missing for ${availability.missing.join(", ")}`;
-}
-
-let freezeKeyBound = false;
 
 
-async function pollLiveFileStatus() {
-  const label = el("live-file-status");
-  if (!label) return;
-  let status: Awaited<ReturnType<typeof getLiveStatus>>;
-  try {
-    status = await queryClient.fetchQuery(liveStatusQuery());
-  } catch (e) {
-    label.textContent = String(e);
-    return;
-  }
-  if (!status.capture) {
-    label.textContent = "nothing recorded yet";
-    return;
-  }
-  const cap = status.capture;
-  if (cap.name == null || cap.size_bytes == null) {
-    label.textContent = "capture status unavailable";
-    return;
-  }
-  const growing = cap.age_s != null && cap.age_s < 3;
-  label.textContent = growing
-    ? `recording ${cap.name} — ${(cap.size_bytes / 1024).toFixed(0)} KiB`
-    : `last: ${cap.name} (${cap.age_s == null ? "?" : formatAge(cap.age_s)} ago)`;
-}
+
 
 /// Header badge on every tab: a slow, cursor-less poll returns only the
 /// attach payload (cursor + timing, no samples), so it costs nothing beyond
@@ -156,39 +100,6 @@ export async function pollRtHealth() {
   }
 }
 
-async function pollLiveTap() {
-  if (state.live.polling) return;
-  state.live.polling = true;
-  try {
-    const payload = await getLiveTap(state.live.cursor === null ? undefined : state.live.cursor);
-    const label = el("live-status");
-    if (payload.status !== "streaming") {
-      if (label) {
-        label.textContent =
-          payload.status === "unreachable"
-            ? `telemetry tap unreachable — ${payload.reason}`
-            : "connecting to the telemetry tap…";
-      }
-      return;
-    }
-    if (label) {
-      const t = payload.timing;
-      const health = t
-        ? ` — skipped cycles ${t.skips} · late frames ${t.late_frames} · margin ${(-t.lateness_ns / 1000).toFixed(0)} µs`
-        : "";
-      label.textContent = `streaming at ${(payload.fs_hz / 1000).toFixed(1)} kHz${health}`;
-      label.classList.toggle("live-timing-bad", !!t && (t.skips > 0 || t.late_frames > 0));
-    }
-    appendTapSamples(payload);
-    if (state.live.frozen) updateFreezeUi();
-    else drawLiveCharts();
-  } catch (e) {
-    const label = el("live-status");
-    if (label) label.textContent = String(e);
-  } finally {
-    state.live.polling = false;
-  }
-}
 
 function appendTapSamples(payload: LiveTapStreaming) {
   state.live.cursor = payload.next_cycle;
@@ -282,49 +193,8 @@ function liveDriveLabel(tapName: string): string {
   return tapName;
 }
 
-function ensureLiveChartBoxes(containerId: string, idPrefix: string, drives: string[]): boolean {
-  const container = el(containerId);
-  if (!container) return false;
-  if (!payloadUnchanged(`live-boxes-${containerId}`, drives)) {
-    container.innerHTML = drives
-      .map(
-        (d, i) =>
-          `<div class="chart-box">` +
-          `<h3><span class="swatch" style="background:${PALETTE[i % PALETTE.length]}"></span>` +
-          `<span id="${idPrefix}-name-${d}">${liveDriveLabel(d)}</span> ` +
-          `<span class="note" id="${idPrefix}-peak-${d}"></span></h3>` +
-          `<div id="${idPrefix}-plot-${d}"></div>` +
-          `</div>`
-      )
-      .join("");
-  }
-  return true;
-}
 
-const livePlots = new Map<string, { plot: TimeSeriesPlot }>();
 
-function livePlotFor(hostId: string, yLabel: string, trace: TimeTrace, fixedY: FixedY): TimeSeriesPlot | null {
-  const host = el(hostId);
-  if (!host) return null;
-  const existing = livePlots.get(hostId);
-  if (existing) {
-    if (existing.plot.u.root.isConnected) {
-      existing.plot.setTraces([trace], fixedY);
-      return existing.plot;
-    }
-    existing.plot.u.destroy();
-    livePlots.delete(hostId);
-  }
-  const plot = timeSeriesPlot(host, {
-    width: host.parentElement?.clientWidth || 860,
-    height: 130,
-    yLabel,
-    fixedY,
-    traces: [trace],
-  });
-  livePlots.set(hostId, { plot });
-  return plot;
-}
 
 function ferrDisplayScale(
   drives: string[],
@@ -337,80 +207,7 @@ function ferrDisplayScale(
   };
 }
 
-function drawLiveChartGroup(
-  containerId: string,
-  idPrefix: string,
-  drives: string[],
-  channel: keyof LiveSeries,
-  yLabel: string,
-  peakFmt: (peak: number) => string,
-  scale: Record<string, number> | null = null
-) {
-  if (!ensureLiveChartBoxes(containerId, idPrefix, drives)) return;
-  let yMin = Infinity;
-  let yMax = -Infinity;
-  const peaks: Record<string, number> = {};
-  const display: Record<string, (number | null)[]> = {};
-  for (const d of drives) {
-    const k = scale ? scale[d] : 1;
-    const values = state.live.perDrive[d][channel];
-    display[d] = scale ? values.map((v) => (v === null ? null : v * k)) : values;
-    let peak = 0;
-    for (const v of display[d]) {
-      if (v === null) continue;
-      if (v < yMin) yMin = v;
-      if (v > yMax) yMax = v;
-      const mag = Math.abs(v);
-      if (mag > peak) peak = mag;
-    }
-    peaks[d] = peak;
-  }
-  if (!isFinite(yMin)) return;
-  drives.forEach((d, i) => {
-    livePlotFor(
-      `${idPrefix}-plot-${d}`,
-      yLabel,
-      {
-        t: state.live.t,
-        y: display[d],
-        color: PALETTE[i % PALETTE.length],
-      },
-      { yMin, yMax }
-    );
-    const name = el(`${idPrefix}-name-${d}`);
-    if (name) name.textContent = liveDriveLabel(d);
-    const label = el(`${idPrefix}-peak-${d}`);
-    if (label) label.textContent = peakFmt(peaks[d]);
-  });
-}
 
-function drawLiveCharts() {
-  drawSpatialView();
-  if (!state.live.t.length) return;
-  const drives = Object.keys(state.live.perDrive).sort();
-  if (!drives.length) return;
-  const availability = ferrUnitAvailability(drives);
-  syncLiveUnitUi(availability);
-  const wanted = loadLiveUnit() === "µm" && availability.ok ? "µm" : "counts";
-  const ferr = ferrDisplayScale(drives, wanted);
-  drawLiveChartGroup(
-    "live-charts",
-    "live",
-    drives,
-    "ferr",
-    `ferr (${ferr.unit})`,
-    ferr.unit === "µm" ? (p) => `peak |ferr| ${p.toFixed(1)} µm` : (p) => `peak |ferr| ${p} counts`,
-    ferr.scale
-  );
-  drawLiveChartGroup(
-    "live-torque-charts",
-    "live-torque",
-    drives,
-    "torque",
-    "torque (% rated)",
-    (p) => `peak |torque| ${p.toFixed(1)}%`
-  );
-}
 
 
 
@@ -717,4 +514,4 @@ function LivePage({ aside }: { aside?: ComponentChildren }) {
   </div>`;
 }
 
-export { pollLiveFileStatus, pollLiveTap, appendTapSamples, trimLiveWindow, liveDriveLabel, ensureLiveChartBoxes, drawLiveChartGroup, drawLiveCharts, setFrozen, ferrDisplayScale, ferrUnitAvailability, loadLiveUnit, setLiveUnit, FREEZE_BUFFER_MAX_S, LivePage, RecordPanel, formatLiveStatus, formatLiveFileStatus, computeLiveChartGroup };
+export { appendTapSamples, trimLiveWindow, liveDriveLabel, setFrozen, ferrDisplayScale, ferrUnitAvailability, loadLiveUnit, FREEZE_BUFFER_MAX_S, LivePage, RecordPanel, formatLiveStatus, formatLiveFileStatus, computeLiveChartGroup };

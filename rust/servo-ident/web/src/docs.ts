@@ -98,23 +98,6 @@ function parseParamsTail(tail: string): ParamsTailItem[] {
   return items;
 }
 
-function paramChipsHtml(items: ParamsTailItem[]): string {
-  const known = macroHelpData(moonrakerUrl())?.commands || {};
-  return items
-    .map((it) => {
-      if (it.kind === "text") {
-        return `<span class="param-text">${escapeHtml(it.text)}</span>`;
-      }
-      let label = escapeHtml(it.name);
-      if (it.choices) label += `<span class="param-extra">=${escapeHtml(it.choices)}</span>`;
-      if (it.dflt) label += ` <span class="param-extra">(${escapeHtml(it.dflt)})</span>`;
-      if (known[it.name]) {
-        return `<a class="chip param-chip xref" href="#/docs/${it.name}">${label}</a>`;
-      }
-      return `<span class="chip param-chip">${label}</span>`;
-    })
-    .join("");
-}
 
 
 function docsDeepLinkTarget() {
@@ -127,22 +110,6 @@ function firstSentence(prose: string): string {
   return cut < 0 ? prose : prose.slice(0, cut + 1);
 }
 
-function macroDocHtml(name: string, text: string, open: boolean): string {
-  const { prose, params } = splitMacroHelp(text);
-  const items = params ? parseParamsTail(params) : [];
-  return (
-    `<details class="macro-doc" id="doc-${escapeHtml(name)}"${open ? " open" : ""}>` +
-    `<summary><span class="macro-name">${escapeHtml(name)}</span>` +
-    `<span class="hint" title="${escapeHtml(firstSentence(prose))}">` +
-    `${escapeHtml(firstSentence(prose))}</span></summary>` +
-    `<div class="macro-body">` +
-    `<p class="macro-prose">${escapeHtml(prose)}</p>` +
-    (items.length
-      ? `<div class="chips param-chips">${paramChipsHtml(items)}</div>`
-      : "") +
-    `</div></details>`
-  );
-}
 
 
 function consoleCaretLine(input: HTMLTextAreaElement) {
@@ -391,4 +358,4 @@ function DocsPage() {
 }
 
 
-export { fetchMacroHelp, loadCachedMacroHelp, splitMacroHelp, parseParamsTail, paramChipsHtml, docsDeepLinkTarget, firstSentence, macroDocHtml, consoleCaretLine, lineCommand, macroParamNames, consoleCompletion, longestCommonPrefix, consoleTabComplete, renderConsoleHelp, ParamChips, MacroDoc, DocsPanel, DocsPage };
+export { fetchMacroHelp, loadCachedMacroHelp, splitMacroHelp, parseParamsTail, docsDeepLinkTarget, firstSentence, consoleCaretLine, lineCommand, macroParamNames, consoleCompletion, longestCommonPrefix, consoleTabComplete, renderConsoleHelp, ParamChips, MacroDoc, DocsPanel, DocsPage };

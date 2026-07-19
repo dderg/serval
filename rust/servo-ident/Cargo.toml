@@ -23,7 +23,6 @@ libm = { version = "0.2", default-features = false }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
-ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }
 
 [dev-dependencies]
 jsonschema = { version = "0.48", default-features = false }

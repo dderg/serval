@@ -1,48 +1,49 @@
-// Server payload types. Everything the Rust side derives `JsonSchema` on is
-// generated into ./generated/ by ts-rs (freshness-guarded by the
-// `ts_bindings` cargo test); the shapes below are only the payloads Rust
-// reads loosely (strain) and thin server-side compositions like the
-// drive_state `age_s` field.
-
-import type { DriveStatePayload } from "./generated/DriveStatePayload";
-import type { Results } from "./generated/Results";
 import type { components, paths } from "./api/openapi.generated";
 
-export type { DifferentialMode, DifferentialMode as FrfMode } from "./generated/DifferentialMode";
-export type { DifferentialResult } from "./generated/DifferentialResult";
-export type { DriveResult, DriveResult as ResultDrive } from "./generated/DriveResult";
-export type { DriveStateParam, DriveStateParam as DriveParam } from "./generated/DriveStateParam";
-export type { LiveCapture } from "./generated/LiveCapture";
-export type { LiveStatus } from "./generated/LiveStatus";
-export type { SpatialFrame } from "./generated/SpatialFrame";
-export type { Metrics, Metrics as DriveMetrics } from "./generated/Metrics";
-export type { Move, Move as MoveMetrics } from "./generated/Move";
-export type { NoteResponse, NoteResponse as NotePayload } from "./generated/NoteResponse";
-export type { PlotDifferential, PlotDifferential as DifferentialPlot } from "./generated/PlotDifferential";
-export type { PlotPsd, PlotPsd as PsdData } from "./generated/PlotPsd";
-export type { PlotRingdown, PlotRingdown as RingdownPlot } from "./generated/PlotRingdown";
-export type {
-  PlotRingdownSource,
-  PlotRingdownSource as RingdownSource,
-} from "./generated/PlotRingdownSource";
-export type { PlotPath } from "./generated/PlotPath";
-export type { PlotSeries } from "./generated/PlotSeries";
-export type { PlotStep } from "./generated/PlotStep";
-export type { Results } from "./generated/Results";
-export type { RingdownMode } from "./generated/RingdownMode";
-export type { RunPath } from "./generated/RunPath";
-export type { RunPathStep } from "./generated/RunPathStep";
-export type { RunSummary } from "./generated/RunSummary";
-export type { StepResult, StepResult as ResultStep } from "./generated/StepResult";
-export type { TorqueSummary, TorqueSummary as TorqueMetrics } from "./generated/TorqueSummary";
-export type { VerdictSummary } from "./generated/VerdictSummary";
-export type { StrainBelt } from "./generated/StrainBelt";
-export type { StrainLine } from "./generated/StrainLine";
-export type { StrainMap, StrainMap as StrainData } from "./generated/StrainMap";
-
-// `handle_drive_state` serves `DriveStatePayload` from disk plus a
-// server-computed `age_s`.
-export type DriveState = DriveStatePayload & { age_s: number };
+type Schema = components["schemas"];
+type DifferentialMode = Schema["DifferentialMode"];
+type FrfMode = DifferentialMode;
+type DifferentialResult = Schema["DifferentialResult"];
+type DriveResult = Schema["DriveResult"];
+type ResultDrive = DriveResult;
+type DriveStateParam = Schema["DriveStateParam"];
+type DriveParam = DriveStateParam;
+type LiveCapture = Schema["LiveCapture"];
+type LiveStatus = Schema["LiveStatus"];
+type SpatialFrame = Schema["SpatialFrame"];
+type Metrics = Schema["Metrics"];
+type DriveMetrics = Metrics;
+type Move = Schema["Move"];
+type MoveMetrics = Move;
+type NoteResponse = Schema["NoteResponse"];
+type NotePayload = NoteResponse;
+type PlotDifferential = Schema["PlotDifferential"];
+type DifferentialPlot = PlotDifferential;
+type PlotPsd = Schema["PlotPsd"];
+type PsdData = PlotPsd;
+type PlotRingdown = Schema["PlotRingdown"];
+type RingdownPlot = PlotRingdown;
+type PlotRingdownSource = Schema["PlotRingdownSource"];
+type RingdownSource = PlotRingdownSource;
+type PlotPath = Schema["PlotPath"];
+type PlotSeries = Schema["PlotSeries"];
+type PlotStep = Schema["PlotStep"];
+type Results = Schema["Results"];
+type RingdownMode = Schema["RingdownMode"];
+type RunPath = Schema["RunPath"];
+type RunPathStep = Schema["RunPathStep"];
+type RunSummary = Schema["RunSummary"];
+type StepResult = Schema["StepResult"];
+type ResultStep = StepResult;
+type TorqueSummary = Schema["TorqueSummary"];
+type TorqueMetrics = TorqueSummary;
+type VerdictSummary = Schema["VerdictSummary"];
+type StrainBelt = Schema["StrainBelt"];
+type StrainLine = Schema["StrainLine"];
+type StrainMap = Schema["StrainMap"];
+type StrainData = StrainMap;
+type DriveStatePayload = Schema["DriveStatePayload"];
+type DriveState = DriveStatePayload & { age_s: number };
 
 // --- Manifest family: aliases into the generated OpenAPI `Manifest` contract
 // (schema-only Rust types in `openapi.rs`) ---
@@ -72,6 +73,49 @@ type LiveStatusPayload =
 type StrainField = "elastic" | "friction";
 
 export type {
+  DifferentialMode,
+  FrfMode,
+  DifferentialResult,
+  DriveResult,
+  ResultDrive,
+  DriveStateParam,
+  DriveParam,
+  LiveCapture,
+  LiveStatus,
+  SpatialFrame,
+  Metrics,
+  DriveMetrics,
+  Move,
+  MoveMetrics,
+  NoteResponse,
+  NotePayload,
+  PlotDifferential,
+  DifferentialPlot,
+  PlotPsd,
+  PsdData,
+  PlotRingdown,
+  RingdownPlot,
+  PlotRingdownSource,
+  RingdownSource,
+  PlotPath,
+  PlotSeries,
+  PlotStep,
+  Results,
+  RingdownMode,
+  RunPath,
+  RunPathStep,
+  RunSummary,
+  StepResult,
+  ResultStep,
+  TorqueSummary,
+  TorqueMetrics,
+  VerdictSummary,
+  StrainBelt,
+  StrainLine,
+  StrainMap,
+  StrainData,
+  DriveStatePayload,
+  DriveState,
   ManifestMotor,
   StrokePlan,
   ManifestStep,
