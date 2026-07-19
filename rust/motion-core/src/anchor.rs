@@ -1,6 +1,11 @@
 pub(crate) const CONTIGUITY_EPS: f64 = 1e-6;
 pub const DEFAULT_LEAD_SECS: f64 = 0.25;
 
+/// A continuing stream whose next segment starts closer to the playhead than
+/// this is one pipeline hiccup away from a -308 PieceStartInPast: worth a
+/// warn with the full anchor state while the stream is still alive.
+pub const LOW_MARGIN_WARN_SECS: f64 = 0.020;
+
 /// How a segment relates to the anchored stream it lands in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamEpoch {
@@ -82,6 +87,21 @@ impl Anchor {
                 } else if underrun {
                     StreamEpoch::Reanchor
                 } else {
+                    let margin_s = t0 + seg_t_start - host_now;
+                    if margin_s < LOW_MARGIN_WARN_SECS {
+                        tracing::warn!(
+                            subsystem = "motion",
+                            event = "anchor_low_margin",
+                            margin_s,
+                            host_now,
+                            t0,
+                            seg_t_start,
+                            seg_t_end,
+                            last_t_end = self.last_t_end,
+                            "[anchor] continuation margin below warn floor — \
+                             segment start is nearly at the playhead"
+                        );
+                    }
                     StreamEpoch::Continuation
                 }
             }
@@ -94,7 +114,18 @@ impl Anchor {
             };
             self.t0 = Some(host_now + self.lead_secs - seg_t_start);
             let t0 = self.t0.unwrap();
-            tracing::info!(host_now, t0, seg_t_start, condition, "[anchor-decision]");
+            tracing::info!(
+                subsystem = "motion",
+                event = "anchor_decision",
+                host_now,
+                t0,
+                seg_t_start,
+                seg_t_end,
+                lead_secs = self.lead_secs,
+                last_t_end = self.last_t_end,
+                condition,
+                "[anchor-decision] fresh anchor"
+            );
         }
         self.last_t_end = seg_t_end;
         (self.t0.unwrap(), epoch)
