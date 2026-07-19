@@ -6,7 +6,8 @@ import { runGcode } from "./moonraker";
 import { PALETTE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, LIVE_UNIT_KEY, state } from "./state";
 import type { LiveSeries } from "./state";
 import type { FixedY, TimeSeriesPlot, TimeTrace } from "./uplot-chart";
-import type { LiveStatus, LiveTapPayload } from "./wire";
+import type { DriveState, LiveStatus, LiveTapPayload } from "./wire";
+import { queryClient, queryKeys } from "./query-client";
 
 // --- live tap ------------------------------------------------------------------
 //
@@ -125,7 +126,11 @@ async function pollLiveFileStatus() {
   if (!label) return;
   let status: LiveStatus;
   try {
-    status = await api("/api/live");
+    status = await queryClient.fetchQuery<LiveStatus>({
+      queryKey: queryKeys.liveStatus,
+      queryFn: () => api("/api/live"),
+      staleTime: 0,
+    });
   } catch (e) {
     label.textContent = String(e);
     return;
@@ -274,7 +279,8 @@ function trimLiveWindow() {
 /// klippy's motor names); drive_state.json's slots map recovers the
 /// motor name when a dump has run.
 function liveDriveLabel(tapName: string): string {
-  const slots = state.drive.data && state.drive.data.slots;
+  const drive = queryClient.getQueryData<DriveState>(queryKeys.driveState);
+  const slots = drive && drive.slots;
   if (!slots) return tapName;
   const match = /^slot(\d+)$/.exec(tapName);
   if (!match) return tapName;

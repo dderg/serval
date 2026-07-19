@@ -1,4 +1,4 @@
-import { el, mustEl, payloadUnchanged, runDataSig, onRenderReset } from "./api";
+import { detailData, el, mustEl, payloadUnchanged, runDataSig, onRenderReset } from "./api";
 import { mixColor } from "./charts-core";
 import { psdBox, visibleStepNames } from "./metrics";
 import type { PsdBoxOpts } from "./metrics";
@@ -76,7 +76,7 @@ function frfModeTableHtml(modes: FrfMode[]): string {
 
 function differentialResultStep(runName: string | null, stepName: string): DifferentialResult | null {
   if (runName === null) return null;
-  const detail = state.details.get(runName);
+  const detail = detailData(runName);
   const step =
     detail && detail.results && detail.results.steps.find((s) => s.name === stepName);
   return (step && step.differential) || null;

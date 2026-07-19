@@ -5,6 +5,7 @@
     "": {
       "name": "servo-ident-web",
       "dependencies": {
+        "@tanstack/preact-query": "^5",
         "htm": "3.1.1",
         "preact": "~10.29.0",
         "uplot": "1.6.32",
@@ -18,6 +19,10 @@
   },
   "packages": {
     "@happy-dom/global-registrator": ["@happy-dom/global-registrator@20.10.6", "", { "dependencies": { "@types/node": ">=20.0.0", "happy-dom": "^20.10.6" } }, "sha512-Nu/IjRkkNxmeG2ywWsyJSO4d1BrWTqVzxCPL+gXj0b97klhmjd6wLzt6Bx/laNpkZ3WLW7zNCqmtMIbIlahqug=="],
+
+    "@tanstack/preact-query": ["@tanstack/preact-query@5.101.2", "", { "dependencies": { "@tanstack/query-core": "5.101.2" }, "peerDependencies": { "preact": "^10.0.0" } }, "sha512-a/7wGijVrosYbMtbUPncNc5dNdA2qBBGSkpLUBNoIZN4bUmgMBFNli1c0mKbY75qvLxsuSPuyAbPZo/RROd8jw=="],
+
+    "@tanstack/query-core": ["@tanstack/query-core@5.101.2", "", {}, "sha512-hH5MLoJhF7KaIGd7q3xTXGXvslI+GYlM1Z/35aSHHWaCJWB7XvTSHYuV3eM7tw+aE0mT/xMro4M4Q9rCGHT0lw=="],
 
     "@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
 

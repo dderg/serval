@@ -1,7 +1,7 @@
 import { el, mustEl, resetRenderState } from "./api";
 import { psdMaxFreqHz, ferrUnitToggleHtml, bindFerrUnitToggle } from "./charts-core";
 import { bindConsole, setConsoleValue } from "./console";
-import { fetchMacroHelp, docsShellHtml, renderDocsList } from "./docs";
+import { fetchMacroHelp, macroHelpNeedsFetch, docsShellHtml, renderDocsList } from "./docs";
 import { renderDriveGroups } from "./drive";
 import { bindLaunchpad, launchpadSectionHtml } from "./launchpad";
 import { bindLiveEvents, startLivePolling, stopLivePolling } from "./live";
@@ -386,7 +386,7 @@ function renderPage() {
     renderDocsList();
     renderSentLog();
     applyAccordionState();
-    if (!state.help.commands || state.help.cached) fetchMacroHelp();
+    if (macroHelpNeedsFetch()) fetchMacroHelp();
     return;
   }
   if (def.journal) {

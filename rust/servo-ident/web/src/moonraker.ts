@@ -3,11 +3,23 @@ import { setConsoleValue } from "./console";
 import { fetchMacroHelp } from "./docs";
 import { state } from "./state";
 import type { SentEntry } from "./state";
+import { queryClient, queryKeys } from "./query-client";
 
 // --- moonraker plumbing + session log ---------------------------------------
 
 function moonrakerUrl(): string {
   return mustEl<HTMLInputElement>("moonraker-url").value.replace(/\/+$/, "");
+}
+
+interface MoonrakerHealth {
+  klippyState: string;
+}
+
+async function fetchMoonrakerHealth(base: string): Promise<MoonrakerHealth> {
+  const resp = await fetch(`${base}/server/info`);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const info = (await resp.json()).result;
+  return { klippyState: info.klippy_state || "unknown" };
 }
 
 /// Every button on every page posts G-code through Moonraker, so a broken
@@ -16,15 +28,20 @@ function moonrakerUrl(): string {
 async function pollMoonrakerHealth() {
   const badge = el("moonraker-health");
   if (!badge) return;
+  const base = moonrakerUrl();
+  const prev = queryClient.getQueryData<MoonrakerHealth>(queryKeys.moonrakerHealth(base));
   try {
-    const resp = await fetch(`${moonrakerUrl()}/server/info`);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const info = (await resp.json()).result;
+    const health = await queryClient.fetchQuery({
+      queryKey: queryKeys.moonrakerHealth(base),
+      queryFn: () => fetchMoonrakerHealth(base),
+      staleTime: 0,
+    });
     badge.className = "mr-health ok";
-    badge.textContent = `klippy ${info.klippy_state || "unknown"}`;
-    const ks = info.klippy_state || "unknown";
-    if (ks === "ready" && state.help.klippyState !== "ready") fetchMacroHelp();
-    state.help.klippyState = ks;
+    badge.textContent = `klippy ${health.klippyState}`;
+    if (health.klippyState === "ready" && prev?.klippyState !== "ready") {
+      queryClient.invalidateQueries({ queryKey: queryKeys.macroHelp(base) });
+      fetchMacroHelp();
+    }
   } catch (e) {
     badge.className = "mr-health err";
     badge.textContent = "moonraker unreachable — bad URL, moonraker down, or origin missing from cors_domains";

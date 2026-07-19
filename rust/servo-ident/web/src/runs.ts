@@ -1,6 +1,9 @@
-import { html, render, useEffect, useRef, useState } from "htm/preact/standalone";
+import { html, render } from "htm/preact";
+import { useEffect, useRef, useState } from "preact/hooks";
+import { useQuery, QueryObserver } from "@tanstack/preact-query";
 import type { VNode } from "preact";
-import { api, ensureDetail, ambientDiff, el, pageRuns, shortTime } from "./api";
+import { api, detailData, ensureDetail, runsData, ambientDiff, el, pageRuns, shortTime } from "./api";
+import { queryClient, queryKeys, QueryRoot } from "./query-client";
 import { loadRerunForm } from "./drive";
 import { redrawCharts } from "./peaks";
 import { currentPageDef } from "./shell";
@@ -9,12 +12,7 @@ import { notify, useStore } from "./store";
 import type { PageDef } from "./state";
 import type { NotePayload, RunSummary } from "./wire";
 
-// --- runs table ---------------------------------------------------------------
-//
-// Preact owns #journal-body: renderRuns() mounts the table component into it
-// once per page build, and every later call just notifies the store — the
-// component re-renders from state with keyed rows, so an in-progress note
-// edit keeps its input and focus across the periodic refresh.
+const RUNS_POLL_MS = 5000;
 
 function toggleRunSelection(run: RunSummary, ev: MouseEvent) {
   if (!run.has_results) return;
@@ -78,10 +76,6 @@ function DotCell({ run }: { run: RunSummary }) {
   return html`<td>${swatch}${pin}</td>`;
 }
 
-/// Click-to-edit note cell: shows the saved note (or a faint "add note…"
-/// hint), swaps to an input on click, saves to POST /api/runs/<name>/note
-/// on Enter/blur, and cancels on Escape. Clicks stop propagating so
-/// editing a note never toggles the row's chart selection.
 function NoteCell({ run }: { run: RunSummary }) {
   const [editing, setEditing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -173,7 +167,7 @@ function ContextMenu() {
   if (!menu.run) return null;
   const run = menu.run;
   const pinned = state.pinned.has(run.name);
-  const detail = state.details.get(run.name);
+  const detail = detailData(run.name);
   const width = Math.max(document.documentElement.clientWidth - 8, 0);
   const height = Math.max(document.documentElement.clientHeight - 8, 0);
   const style = {
@@ -216,12 +210,13 @@ function ensureContextMenuMounted() {
 }
 
 function RunRow({ run, def }: { run: RunSummary; def: PageDef }) {
-  const globalIdx = state.runs.indexOf(run);
-  const detail = state.details.get(run.name);
+  const runs = runsData();
+  const globalIdx = runs.findIndex((r) => r.name === run.name);
+  const detail = detailData(run.name);
   const manifest = detail && detail.manifest;
   const prevManifest =
-    globalIdx + 1 < state.runs.length
-      ? (state.details.get(state.runs[globalIdx + 1].name)?.manifest ?? null)
+    globalIdx >= 0 && globalIdx + 1 < runs.length
+      ? (detailData(runs[globalIdx + 1].name)?.manifest ?? null)
       : null;
   const diff = manifest ? ambientDiff(prevManifest, manifest) : "";
   const cls = [
@@ -276,8 +271,87 @@ function RunRow({ run, def }: { run: RunSummary; def: PageDef }) {
 function RunsTable() {
   useStore();
   const def = currentPageDef();
-  const runs = def.journal ? state.runs : pageRuns(def);
+  const runs = def.journal ? runsData() : pageRuns(def);
   return runs.map((run) => html`<${RunRow} key=${run.name} run=${run} def=${def} />`);
+}
+
+async function fetchRuns(): Promise<RunSummary[]> {
+  const prev = runsData();
+  let runs: RunSummary[];
+  try {
+    runs = await api<RunSummary[]>("/api/runs");
+  } catch (e) {
+    console.error(e);
+    throw e;
+  }
+  if (runsUnchanged(prev, runs)) return prev;
+  await Promise.all(runs.map((r) => ensureDetail(r).catch((e) => console.error(e))));
+  queryClient.setQueryData(queryKeys.runs, runs);
+  await reconcileRuns(runs);
+  return runs;
+}
+
+function runsUnchanged(prev: RunSummary[], next: RunSummary[]): boolean {
+  return (
+    next.length === prev.length &&
+    next.every((run, i) => {
+      const current = prev[i];
+      const verdictsMatch =
+        run.verdict === current.verdict ||
+        (run.verdict !== null &&
+          current.verdict !== null &&
+          run.verdict.recommended_step === current.verdict.recommended_step &&
+          run.verdict.reason === current.verdict.reason &&
+          run.verdict.flags.length === current.verdict.flags.length &&
+          run.verdict.flags.every((flag, j) => flag === current.verdict!.flags[j]));
+      return (
+        run.name === current.name &&
+        run.mtime_utc === current.mtime_utc &&
+        run.experiment === current.experiment &&
+        run.tag === current.tag &&
+        run.axis === current.axis &&
+        run.has_results === current.has_results &&
+        verdictsMatch &&
+        run.note === current.note
+      );
+    })
+  );
+}
+
+async function reconcileRuns(runs: RunSummary[]) {
+  const known = new Set(runs.map((r) => r.name));
+  for (const name of [...state.selected]) {
+    if (!known.has(name)) state.selected.delete(name);
+  }
+  for (const name of [...state.pinned]) {
+    if (!known.has(name)) state.pinned.delete(name);
+  }
+  autoSelectInitialRuns();
+  syncRunColors();
+  notify();
+  await redrawCharts();
+}
+
+function RunsRoot() {
+  useQuery({
+    queryKey: queryKeys.runs,
+    queryFn: fetchRuns,
+    notifyOnChangeProps: ["data"],
+  });
+  return html`<${RunsTable} />`;
+}
+
+let runsObserver: QueryObserver<RunSummary[]> | null = null;
+
+function startRunsPolling() {
+  if (runsObserver) return;
+  runsObserver = new QueryObserver<RunSummary[]>(queryClient, {
+    queryKey: queryKeys.runs,
+    queryFn: fetchRuns,
+    refetchInterval: RUNS_POLL_MS,
+    refetchIntervalInBackground: false,
+  });
+  runsObserver.subscribe(() => {});
 }
 
 let mountedRunsBody: HTMLElement | null = null;
@@ -288,32 +362,29 @@ function renderRuns() {
   if (mountedRunsBody !== tbody) {
     if (mountedRunsBody) render(null as unknown as VNode, mountedRunsBody);
     mountedRunsBody = tbody;
-    render(html`<${RunsTable} />`, tbody);
+    render(html`<${QueryRoot}><${RunsRoot} /><//>`, tbody);
   }
   notify();
 }
 
-/// The note shows up the moment Enter is pressed, then the POST confirms
-/// (or a refresh rolls back) in the background.
-function applyNoteLocally(name: string, note: string | null) {
-  const current = state.runs.find((r) => r.name === name);
-  if (current) current.note = note;
-  renderRuns();
-}
-
 async function saveNote(run: RunSummary, text: string) {
-  applyNoteLocally(run.name, text.trim() || null);
+  const optimistic = text.trim() || null;
+  queryClient.setQueryData<RunSummary[]>(queryKeys.runs, (runs) =>
+    runs ? runs.map((r) => (r.name === run.name ? { ...r, note: optimistic } : r)) : runs
+  );
   try {
-    const saved: NotePayload = await api(`/api/runs/${encodeURIComponent(run.name)}/note`, {
+    const saved = await api<NotePayload>(`/api/runs/${encodeURIComponent(run.name)}/note`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ note: text }),
     });
-    applyNoteLocally(run.name, saved.note || null);
+    queryClient.setQueryData<RunSummary[]>(queryKeys.runs, (runs) =>
+      runs ? runs.map((r) => (r.name === run.name ? { ...r, note: saved.note || null } : r)) : runs
+    );
   } catch (e) {
     console.error(e);
     alert(`saving note failed: ${e instanceof Error ? e.message : e}`);
-    await refresh();
+    await queryClient.invalidateQueries({ queryKey: queryKeys.runs });
   }
 }
 
@@ -325,28 +396,22 @@ async function deleteRun(run: RunSummary) {
     alert(`deleting ${run.name} failed: ${e instanceof Error ? e.message : e}`);
     return;
   }
-  state.runs = state.runs.filter((r) => r.name !== run.name);
-  state.selected.delete(run.name);
-  state.pinned.delete(run.name);
-  state.details.delete(run.name);
-  state.plotSeries.delete(run.name);
-  syncRunColors();
-  renderRuns();
-  redrawCharts();
+  queryClient.removeQueries({ queryKey: ["runs", run.name] });
+  const remaining = runsData().filter((r) => r.name !== run.name);
+  queryClient.setQueryData(queryKeys.runs, remaining);
+  await reconcileRuns(remaining);
+  await queryClient.invalidateQueries({ queryKey: queryKeys.runs });
 }
 
 async function triggerAnalyze(name: string) {
   await api(`/api/runs/${encodeURIComponent(name)}/analyze`, { method: "POST" });
-  await refresh();
+  await queryClient.invalidateQueries({ queryKey: queryKeys.runs });
 }
 
 function selectedRunNames() {
-  return state.runs.filter((r) => state.selected.has(r.name)).map((r) => r.name);
+  return runsData().filter((r) => state.selected.has(r.name)).map((r) => r.name);
 }
 
-/// Colors stick to runs for as long as they stay selected: deselecting one
-/// frees its color without touching anyone else's, and a newly selected run
-/// takes the least-used palette color instead of everything reshuffling.
 function syncRunColors() {
   for (const name of [...state.runColors.keys()]) {
     if (!state.selected.has(name)) state.runColors.delete(name);
@@ -368,12 +433,9 @@ function runColor(name: string): string {
   return color;
 }
 
-/// First data load: preselect the newest few analyzed runs and prefill the
-/// sweep command from the newest one, so the charts and the re-run box are
-/// populated before any clicking.
 function autoSelectInitialRuns() {
   if (state.autoSelected) return;
-  const withResults = state.runs.filter((r) => r.has_results);
+  const withResults = runsData().filter((r) => r.has_results);
   if (!withResults.length) return;
   state.autoSelected = true;
   for (const run of withResults.slice(0, INITIAL_SELECTED_RUNS)) {
@@ -382,21 +444,4 @@ function autoSelectInitialRuns() {
   if (!state.console.text) loadRerunForm(withResults[0].name);
 }
 
-async function refresh() {
-  const runs: RunSummary[] = await api("/api/runs");
-  state.runs = runs;
-  await Promise.all(runs.map((r) => ensureDetail(r).catch((e) => console.error(e))));
-  const known = new Set(runs.map((r) => r.name));
-  for (const name of [...state.selected]) {
-    if (!known.has(name)) state.selected.delete(name);
-  }
-  for (const name of [...state.pinned]) {
-    if (!known.has(name)) state.pinned.delete(name);
-  }
-  autoSelectInitialRuns();
-  syncRunColors();
-  renderRuns();
-  await redrawCharts();
-}
-
-export { renderRuns, applyNoteLocally, saveNote, deleteRun, triggerAnalyze, selectedRunNames, syncRunColors, leastUsedColor, runColor, autoSelectInitialRuns, refresh };
+export { renderRuns, selectedRunNames, runColor, startRunsPolling };

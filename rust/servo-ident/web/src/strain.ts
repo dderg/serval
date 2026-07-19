@@ -1,9 +1,10 @@
-import { api, el, mustEl, pageRuns, shortTime } from "./api";
+import { api, detailData, el, mustEl, pageRuns, runData, shortTime } from "./api";
 import { hidpiCanvasContext, mixColor } from "./charts-core";
 import { timeSeriesPlot } from "./uplot-chart";
 import { loadRerunForm } from "./drive";
 import { currentPageDef, controlsSectionsHtml, sectionHeadHtml } from "./shell";
 import { PALETTE, state } from "./state";
+import { queryClient, queryKeys } from "./query-client";
 import type { PageDef } from "./state";
 import type { StrainData, StrainField, StrainLine, StrokePlan } from "./wire";
 
@@ -69,16 +70,21 @@ function strainShellHtml(def: PageDef): string {
 }
 
 async function ensureStrain(name: string): Promise<StrainData> {
-  const run = state.runs.find((r) => r.name === name);
-  const cached = state.strain.cache.get(name);
+  const run = runData(name);
+  const cached = queryClient.getQueryData<{ mtime_utc: string | null; data: StrainData }>(
+    queryKeys.strain(name)
+  );
   if (cached && run && cached.mtime_utc === run.mtime_utc) return cached.data;
-  const data: StrainData = await api(`/api/runs/${encodeURIComponent(name)}/strain`);
-  state.strain.cache.set(name, { mtime_utc: run ? run.mtime_utc : null, data });
+  const data = await api<StrainData>(`/api/runs/${encodeURIComponent(name)}/strain`);
+  queryClient.setQueryData(queryKeys.strain(name), {
+    mtime_utc: run ? run.mtime_utc : null,
+    data,
+  });
   return data;
 }
 
 function runTag(name: string): string {
-  const r = state.runs.find((x) => x.name === name);
+  const r = runData(name);
   return r ? `${r.tag}${r.axis ? " " + r.axis : ""}` : name;
 }
 
@@ -123,7 +129,22 @@ function strainSignature(data: StrainData): string {
   });
 }
 
+let strainRunsSubscribed = false;
+
+function ensureStrainRunsSubscription() {
+  if (strainRunsSubscribed) return;
+  strainRunsSubscribed = true;
+  queryClient.getQueryCache().subscribe((event) => {
+    if (!el("strain-run-body")) return;
+    const key = event.query.queryKey;
+    if (key.length === queryKeys.runs.length && key.every((part: unknown, i: number) => part === queryKeys.runs[i])) {
+      void redrawStrain();
+    }
+  });
+}
+
 function renderStrainRuns() {
+  ensureStrainRunsSubscription();
   const tbody = el("strain-run-body");
   if (!tbody) return;
   const runs = pageRuns(currentPageDef());
@@ -163,7 +184,7 @@ function renderStrainRuns() {
     const prefillBtn = document.createElement("button");
     prefillBtn.textContent = "→ console";
     prefillBtn.title = "prefill the console with this run's command";
-    prefillBtn.disabled = !state.details.get(run.name)?.manifest;
+    prefillBtn.disabled = !detailData(run.name)?.manifest;
     prefillBtn.addEventListener("click", (e: MouseEvent) => {
       e.stopPropagation();
       loadRerunForm(run.name);
@@ -483,7 +504,7 @@ function strainDcBox(title: string, beltIdx: number, lines: StrainLine[]): HTMLD
 /// selected run's geometry since both must match its signature to compare.
 function strainGeometry(data: StrainData): { groups: StrainGroup[]; geo: StrainGeo; pairs: string[] } {
   const groups = strainGroups(data);
-  const detail = state.strain.selected ? state.details.get(state.strain.selected) : undefined;
+  const detail = state.strain.selected ? detailData(state.strain.selected) : undefined;
   const plan = (detail && detail.manifest && detail.manifest.stroke_plan) || {};
   const geo = strainBedGeometry(groups, plan);
   const pairs = data.lines[0].belts.map((b) => b.pair);

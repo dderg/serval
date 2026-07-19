@@ -3,7 +3,9 @@ import { registerDom } from "./dom";
 
 registerDom();
 
-const { GROUP_ORDER, RETIRED_PARAMS, groupParams, paramGroupSection } = await import("../src/drive");
+const { GROUP_ORDER, RETIRED_PARAMS, groupParams, paramGroupSection, cellRaw, paramByName, currentDriveAgeS } =
+  await import("../src/drive");
+const { queryClient, queryKeys } = await import("../src/query-client");
 const fixture = JSON.parse(
   await Bun.file(new URL("./fixtures/drive_state.json", import.meta.url).pathname).text()
 );
@@ -51,4 +53,17 @@ test("the shipped fixture carries no retired params and no load group", () => {
     "integral_time",
   ]);
   expect(sections.get("other")!).toEqual([]);
+});
+
+test("drive reads come from the shared query cache, not state", () => {
+  queryClient.setQueryData(queryKeys.driveState, fixture);
+  const param = paramByName("position_gain");
+  expect(param.c_code).toBe("C01.00");
+  expect(cellRaw(param, "motor_a")).toBe(fixture.motors.motor_a["C01.00"]);
+  const age = currentDriveAgeS();
+  expect(age).not.toBeNull();
+  expect(age!).toBeGreaterThanOrEqual(fixture.age_s);
+  expect(age!).toBeLessThan(fixture.age_s + 5);
+  queryClient.removeQueries({ queryKey: queryKeys.driveState });
+  expect(currentDriveAgeS()).toBeNull();
 });

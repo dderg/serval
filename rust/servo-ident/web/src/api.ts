@@ -1,16 +1,15 @@
 import { state } from "./state";
-import type { Manifest, ManifestAmbient, NotchStateValue, PlotSeries, RunSummary } from "./wire";
+import { queryClient, queryKeys } from "./query-client";
+import type { Manifest, ManifestAmbient, NotchStateValue, PlotSeries, Results, RunDetail, RunSummary } from "./wire";
 import type { PageDef } from "./state";
 
-async function api(path: string, opts?: RequestInit): Promise<any> {
-  // TODO(bindings): callers cast this; typed endpoint wrappers arrive with
-  // the generated wire bindings.
+async function api<T = unknown>(path: string, opts?: RequestInit): Promise<T> {
   const resp = await fetch(path, opts);
   const text = await resp.text();
   if (!resp.ok) {
     throw new Error(`${path}: HTTP ${resp.status}: ${text}`);
   }
-  return text.length ? JSON.parse(text) : null;
+  return (text.length ? JSON.parse(text) : null) as T;
 }
 
 function el<T extends HTMLElement = HTMLElement>(id: string): T | null {
@@ -52,41 +51,54 @@ function resetRenderState(): void {
   for (const hook of renderResetHooks) hook();
 }
 
+function runsData(): RunSummary[] {
+  return queryClient.getQueryData<RunSummary[]>(queryKeys.runs) ?? [];
+}
+
+function runData(name: string): RunSummary | undefined {
+  return runsData().find((r) => r.name === name);
+}
+
 function runDataSig(names: string[]) {
   return names.map((n) => {
-    const run = state.runs.find((r) => r.name === n);
+    const run = runData(n);
     return [n, run ? run.mtime_utc : null, state.runColors.get(n) || null];
   });
 }
 
 // --- run data ---------------------------------------------------------------
 
-function detailIsFresh(name: string, run: RunSummary): boolean {
-  const cached = state.details.get(name);
-  if (!cached) return false;
-  return cached.mtime_utc === run.mtime_utc && cached.has_results === run.has_results;
+function detailData(name: string): RunDetail | undefined {
+  return queryClient.getQueryData<RunDetail>(queryKeys.runDetail(name));
 }
 
-async function ensureDetail(run: RunSummary): Promise<void> {
-  if (detailIsFresh(run.name, run)) return;
-  const manifest = await api(`/api/runs/${encodeURIComponent(run.name)}/manifest`);
+async function ensureDetail(run: RunSummary): Promise<RunDetail> {
+  const cached = detailData(run.name);
+  if (cached && cached.mtime_utc === run.mtime_utc && cached.has_results === run.has_results) {
+    return cached;
+  }
+  const manifest = await api<Manifest | null>(`/api/runs/${encodeURIComponent(run.name)}/manifest`);
   const results = run.has_results
-    ? await api(`/api/runs/${encodeURIComponent(run.name)}/results`)
+    ? await api<Results | null>(`/api/runs/${encodeURIComponent(run.name)}/results`)
     : null;
-  state.details.set(run.name, {
+  const detail: RunDetail = {
     mtime_utc: run.mtime_utc,
     has_results: run.has_results,
     manifest,
     results,
-  });
+  };
+  queryClient.setQueryData(queryKeys.runDetail(run.name), detail);
+  return detail;
 }
 
 async function ensurePlotSeries(name: string): Promise<PlotSeries> {
-  const run = state.runs.find((r) => r.name === name);
-  const cached = state.plotSeries.get(name);
+  const run = runData(name);
+  const cached = queryClient.getQueryData<{ mtime_utc: string | null; data: PlotSeries }>(
+    queryKeys.plotSeries(name),
+  );
   if (cached && run && cached.mtime_utc === run.mtime_utc) return cached.data;
-  const data: PlotSeries = await api(`/api/runs/${encodeURIComponent(name)}/plot_series`);
-  state.plotSeries.set(name, { mtime_utc: run ? run.mtime_utc : null, data });
+  const data = await api<PlotSeries>(`/api/runs/${encodeURIComponent(name)}/plot_series`);
+  queryClient.setQueryData(queryKeys.plotSeries(name), { mtime_utc: run ? run.mtime_utc : null, data });
   return data;
 }
 
@@ -152,8 +164,8 @@ function ambientDiff(prevManifest: Manifest | null, curManifest: Manifest | null
 
 function pageRuns(def: PageDef): RunSummary[] {
   const experiments = def.experiments;
-  if (!experiments) return state.runs;
-  return state.runs.filter((r) => experiments.includes(r.experiment));
+  if (!experiments) return runsData();
+  return runsData().filter((r) => experiments.includes(r.experiment));
 }
 
 function shortTime(mtimeUtc: string): string {
@@ -161,4 +173,4 @@ function shortTime(mtimeUtc: string): string {
   return m ? m[1] : mtimeUtc;
 }
 
-export { api, el, mustEl, payloadUnchanged, onRenderReset, resetRenderState, runDataSig, detailIsFresh, ensureDetail, ensurePlotSeries, journalParams, ambientNotches, flatAmbient, motorCount, ambientDiff, pageRuns, shortTime };
+export { api, el, mustEl, payloadUnchanged, onRenderReset, resetRenderState, runsData, runData, runDataSig, detailData, ensureDetail, ensurePlotSeries, journalParams, ambientNotches, flatAmbient, motorCount, ambientDiff, pageRuns, shortTime };

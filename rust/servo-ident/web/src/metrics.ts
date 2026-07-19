@@ -1,4 +1,4 @@
-import { el, payloadUnchanged, runDataSig } from "./api";
+import { detailData, el, payloadUnchanged, runDataSig } from "./api";
 import {
   fillFilterChips,
   mixColor,
@@ -156,7 +156,7 @@ function metricsTableRows(names: string[], steps: string[]): MetricsRow[] {
   const view = motorView();
   const rows: MetricsRow[] = [];
   for (const name of names) {
-    const detail = state.details.get(name);
+    const detail = detailData(name);
     if (!detail || !detail.results) continue;
     for (const step of detail.results.steps) {
       if (!steps.includes(step.name)) continue;
@@ -269,7 +269,7 @@ interface SweepSeries {
 function sweepMetricsSeries(names: string[]): SweepSeries[] {
   const series: SweepSeries[] = [];
   for (const name of names) {
-    const detail = state.details.get(name);
+    const detail = detailData(name);
     if (!detail || !detail.results || !detail.manifest) continue;
     const key = sweptAxisKey(detail.manifest);
     if (!key) continue;
@@ -450,7 +450,7 @@ function psdFerrTraces(names: string[], plots: PlotSeries[], steps: string[], un
 const CARTESIAN_UM2_PER_MM2 = 1e6;
 
 function uniformCountsPerMm(runName: string): number {
-  const detail = state.details.get(runName);
+  const detail = detailData(runName);
   const motors = (detail && detail.manifest && detail.manifest.motors) || [];
   const values = [
     ...new Set(motors.map((m) => m.counts_per_mm).filter((v): v is number => v != null && v > 0)),

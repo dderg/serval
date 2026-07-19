@@ -6,12 +6,13 @@ registerDom();
 const { countsPerMmOrNull, countsPerMm, ferrUnitAvailability, pickSeries } = await import(
   "../src/charts-core"
 );
-const { state, MOTOR_VIEW_KEY, LIVE_UNIT_KEY } = await import("../src/state");
+const { MOTOR_VIEW_KEY, LIVE_UNIT_KEY } = await import("../src/state");
 const { setFerrUnit } = await import("../src/units");
+const { queryClient, queryKeys } = await import("../src/query-client");
 import type { PlotStep } from "../src/wire";
 
 function seedRun(name: string, motors: { name: string; counts_per_mm: number | null }[]) {
-  state.details.set(name, {
+  queryClient.setQueryData(queryKeys.runDetail(name), {
     mtime_utc: "",
     has_results: false,
     manifest: { experiment: "x", steps: [], motors },
@@ -20,7 +21,6 @@ function seedRun(name: string, motors: { name: string; counts_per_mm: number | n
 }
 
 beforeEach(() => {
-  state.details.clear();
   localStorage.removeItem(MOTOR_VIEW_KEY);
   localStorage.removeItem(LIVE_UNIT_KEY);
 });

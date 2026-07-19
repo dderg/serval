@@ -1,4 +1,4 @@
-import { el, payloadUnchanged, runDataSig } from "./api";
+import { detailData, el, payloadUnchanged, runDataSig, runsData } from "./api";
 import { driveRamp } from "./metrics";
 import { runColor } from "./runs";
 import { motorViewPerMotor } from "./shell";
@@ -191,7 +191,7 @@ function drawTimeDomain(names: string[], plots: PlotSeries[], steps: string[]) {
 
 function newestSelectedRunName(names: string[]): string {
   const selected = new Set(names);
-  const found = state.runs.find((r) => selected.has(r.name));
+  const found = runsData().find((r) => selected.has(r.name));
   return found ? found.name : names[0];
 }
 
@@ -203,7 +203,7 @@ function peakStep(names: string[], plots: PlotSeries[], steps: string[]): { newe
   const present = plot
     ? steps.filter((s) => plot.steps.some((x) => x.name === s))
     : [];
-  const detail = state.details.get(newest);
+  const detail = detailData(newest);
   const recommended = detail && detail.results && detail.results.verdict.recommended_step;
   const step =
     recommended && present.includes(recommended)
@@ -336,7 +336,7 @@ function psdToAmplitude(freq: number[], psd: number[]): number[] {
 }
 
 function countsPerMmOrNull(runName: string, driveName: string): number | null {
-  const detail = state.details.get(runName);
+  const detail = detailData(runName);
   const motors = (detail && detail.manifest && detail.manifest.motors) || [];
   const motor = motors.find((m) => m.name === driveName);
   return motor && motor.counts_per_mm ? motor.counts_per_mm : null;

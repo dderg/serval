@@ -1,13 +1,11 @@
 import { mustEl } from "./api";
 import { fetchMacroHelp, loadCachedMacroHelp } from "./docs";
-import { renderDriveBanner, loadDriveState } from "./drive";
+import { renderDriveBanner, fetchDriveState } from "./drive";
 import { pollRtHealth } from "./live";
 import { pollMoonrakerHealth, emergencyStop } from "./moonraker";
-import { refresh } from "./runs";
+import { startRunsPolling } from "./runs";
 import { pageFromHash, bindAccordionToggle, renderPage } from "./shell";
-import { REFRESH_MS, MOONRAKER_KEY, MOONRAKER_HEALTH_POLL_MS, RT_HEALTH_POLL_MS, state } from "./state";
-
-// --- boot -------------------------------------------------------------------
+import { MOONRAKER_KEY, MOONRAKER_HEALTH_POLL_MS, RT_HEALTH_POLL_MS, state } from "./state";
 
 function initShell() {
   mustEl("estop-btn").addEventListener("click", emergencyStop);
@@ -33,19 +31,10 @@ function initShell() {
   renderPage();
 }
 
-async function tick() {
-  try {
-    await refresh();
-  } catch (e) {
-    console.error(e);
-  }
-  renderDriveBanner();
-}
-
 initShell();
-tick();
-loadDriveState();
-setInterval(tick, REFRESH_MS);
+startRunsPolling();
+fetchDriveState().catch((err) => console.error("drive state prefetch failed", err));
+renderDriveBanner();
 setInterval(renderDriveBanner, 1000);
 
-export { initShell, tick };
+export { initShell };

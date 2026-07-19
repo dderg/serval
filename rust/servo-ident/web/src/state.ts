@@ -1,14 +1,5 @@
-import type {
-  DriveState,
-  PlotSeries,
-  RunDetail,
-  RunPath,
-  RunSummary,
-  StrainData,
-  StrainField,
-} from "./wire";
+import type { StrainField } from "./wire";
 
-const REFRESH_MS = 5000;
 const MOONRAKER_KEY = "servoCalMoonrakerUrl";
 const CONSOLE_HISTORY_KEY = "servoCalConsoleHistory";
 const HELP_CACHE_KEY = "servoCalGcodeHelp";
@@ -154,17 +145,9 @@ interface ConsoleState {
   search: ConsoleSearch | null;
 }
 
-interface PathFullEntry {
-  mtime_utc: string | null;
-  data: RunPath | null;
-  error: string | null;
-}
-
 type PendingEdits = Record<string, Record<string, number>>;
 
 interface DrivePanelState {
-  data: DriveState | null;
-  fetchedAtMs: number | null;
   pending: PendingEdits;
   expandedParams: Set<string>;
 }
@@ -204,7 +187,6 @@ function liveDrawCount(): number {
 interface StrainPageState {
   selected: string | null;
   compare: Set<string>;
-  cache: Map<string, { mtime_utc: string | null; data: StrainData }>;
   field: StrainField;
 }
 
@@ -216,21 +198,8 @@ interface SentEntry {
   responses?: string[][];
 }
 
-interface HelpState {
-  commands: Record<string, string> | null;
-  fetchedUtc: string | null;
-  cached: boolean;
-  error: string | null;
-  pending: boolean;
-  klippyState: string | null;
-}
-
 interface AppState {
   page: string;
-  runs: RunSummary[];
-  details: Map<string, RunDetail>;
-  plotSeries: Map<string, { mtime_utc: string | null; data: PlotSeries }>;
-  pathFull: Map<string, PathFullEntry>;
   selected: Set<string>;
   pinned: Set<string>;
   runColors: Map<string, string>;
@@ -243,67 +212,51 @@ interface AppState {
   live: LiveState;
   strain: StrainPageState;
   sentLog: SentEntry[];
-  help: HelpState;
 }
 
 const state: AppState = {
   page: DEFAULT_PAGE,
-  runs: [],
-  details: new Map(), // name -> {mtime_utc, has_results, manifest, results}
-  plotSeries: new Map(), // name -> {mtime_utc, data}
-  pathFull: new Map(), // name -> {mtime_utc, data, error} from /api/runs/<name>/path
   selected: new Set(),
-  pinned: new Set(), // runs that stay selected when a plain click switches runs
-  runColors: new Map(), // run name -> palette color, kept while the run stays selected
+  pinned: new Set(),
+  runColors: new Map(),
   autoSelected: false,
-  stepFilter: null, // null = every step; otherwise a Set of visible step names
-  motorFilter: null, // null = every motor; only consulted in per-motor view
-  accelAxisFilter: null, // null = total + every axis; otherwise a Set of visible accel PSD trace keys
+  stepFilter: null,
+  motorFilter: null,
+  accelAxisFilter: null,
   console: {
-    text: "", // current input line, survives page switches
+    text: "",
     history: loadConsoleHistory(),
-    cursor: null, // history index while navigating; null = editing a fresh line
-    draft: "", // the fresh line stashed when history navigation starts
-    search: null, // {query, pos, saved, failed} while ctrl+r reverse search is live
+    cursor: null,
+    draft: "",
+    search: null,
   },
   drive: {
-    data: null, // last /api/drive_state response (params, motors, config_pins, age_s)
-    fetchedAtMs: null, // Date.now() when data was fetched, for a client-ticking age display
-    pending: {}, // param name -> {motor: raw} — edits not yet applied
-    expandedParams: new Set(), // param names whose MotorValues cell shows per-motor fields
+    pending: {},
+    expandedParams: new Set(),
   },
   live: {
-    cursor: null, // last next_cycle from /api/live_tap; null = attach now
+    cursor: null,
     fsHz: null,
-    cycle0: null, // first streamed cycle_index — the chart's t=0
-    lastCycle: null, // cycle_index of the last kept sample, for gap breaks
-    t: [], // seconds since stream start, one per kept point
-    perDrive: {}, // tap drive name -> {ferr, torque, target, pos} arrays (null = gap break)
-    countsPerMm: {}, // tap drive name -> counts_per_mm from the tap header
-    windowS: 10, // seconds kept and drawn, set by the slider
-    timers: [], // interval ids cleared on page switch
+    cycle0: null,
+    lastCycle: null,
+    t: [],
+    perDrive: {},
+    countsPerMm: {},
+    windowS: 10,
+    timers: [],
     polling: false,
     frozen: false,
-    freezeStartT: null, // window start at freeze time; trim never drops past it
-    freezeEndT: null, // last sample time at freeze; frozen draws stop here
-    freezeTruncated: false, // set when the frozen buffer hit its cap and lost samples
+    freezeStartT: null,
+    freezeEndT: null,
+    freezeTruncated: false,
   },
   strain: {
-    selected: null, // run name shown on the strain page; auto-picks the newest
-    compare: new Set(), // extra run names diffed against `selected` when dimensions match
-    cache: new Map(), // name -> {mtime_utc, data} from /api/runs/<name>/strain
-    field: "elastic", // which half to chart: elastic (fwd+back)/2 or friction (fwd-back)/2
+    selected: null,
+    compare: new Set(),
+    field: "elastic",
   },
-  sentLog: [], // {time, label, lines, results} — every G-code batch sent this session
-  help: {
-    commands: null, // SERVO_* name -> cmd_*_help string, straight from klippy
-    fetchedUtc: null,
-    cached: false, // true when `commands` came from localStorage, not a live fetch
-    error: null,
-    pending: false,
-    klippyState: null, // last /server/info klippy_state, to refetch after a RESTART
-  },
+  sentLog: [],
 };
 
-export type { PageDef, PageTemplate, ConsoleSearch, SentEntry, LiveSeries, PendingEdits, PathFullEntry };
-export { REFRESH_MS, MOONRAKER_KEY, CONSOLE_HISTORY_KEY, HELP_CACHE_KEY, CONSOLE_HISTORY_MAX, PALETTE, RESONANCE_BAND_HZ, RINGDOWN_PSD_PLOT_MAX_HZ, PSD_MAX_FREQ_KEY, MOTOR_VIEW_KEY, LIVE_UNIT_KEY, PSD_MAX_FREQ_CHOICES_HZ, PSD_MAX_FREQ_DEFAULT_HZ, INITIAL_SELECTED_RUNS, PAGE_DEFS, DEFAULT_PAGE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, MOONRAKER_HEALTH_POLL_MS, RT_HEALTH_POLL_MS, loadConsoleHistory, liveDrawCount, state };
+export type { PageDef, PageTemplate, ConsoleSearch, SentEntry, LiveSeries, PendingEdits };
+export { MOONRAKER_KEY, CONSOLE_HISTORY_KEY, HELP_CACHE_KEY, CONSOLE_HISTORY_MAX, PALETTE, RESONANCE_BAND_HZ, RINGDOWN_PSD_PLOT_MAX_HZ, PSD_MAX_FREQ_KEY, MOTOR_VIEW_KEY, LIVE_UNIT_KEY, PSD_MAX_FREQ_CHOICES_HZ, PSD_MAX_FREQ_DEFAULT_HZ, INITIAL_SELECTED_RUNS, PAGE_DEFS, DEFAULT_PAGE, LIVE_STATUS_POLL_MS, LIVE_TAIL_POLL_MS, MOONRAKER_HEALTH_POLL_MS, RT_HEALTH_POLL_MS, loadConsoleHistory, liveDrawCount, state };

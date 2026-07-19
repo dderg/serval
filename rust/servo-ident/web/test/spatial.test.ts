@@ -84,24 +84,24 @@ test("tickStepMm picks 1-2-5 steps near the target spacing", () => {
 test("drawSpatialView renders from tap samples and reports the live deviation", async () => {
   const { drawSpatialView } = await import("../src/spatial");
   const { appendTapSamples } = await import("../src/live");
-  const { state } = await import("../src/state");
+  const { queryClient, queryKeys } = await import("../src/query-client");
 
-  // `state` and `document` are process-wide singletons shared with every
-  // other test file bun runs in this process — mutating them here without
-  // restoring leaks into whichever file happens to run next (order is not
-  // alphabetical in CI), so a later file's own render can see this stub
-  // instead of its real data. Always undo on the way out.
+  // `document` and the query cache are process-wide singletons shared with
+  // every other test file bun runs in this process — mutating them here
+  // without restoring leaks into whichever file happens to run next (order
+  // is not alphabetical in CI), so a later file's own render can see this
+  // stub instead of its real data. Always undo on the way out.
   const originalBody = document.body.innerHTML;
-  const originalDriveData = state.drive.data;
+  const originalDriveState = queryClient.getQueryData(queryKeys.driveState);
   try {
     document.body.innerHTML =
       `<button id="live-spatial-fit">fit</button>` +
       `<span id="live-spatial-note"></span>` +
       `<canvas id="live-spatial-canvas"></canvas>`;
-    state.drive.data = {
+    queryClient.setQueryData(queryKeys.driveState, {
       spatial: COREXY,
       slots: SLOTS,
-    } as (typeof state.drive)["data"];
+    });
 
     appendTapSamples({
       status: "streaming",
@@ -123,6 +123,10 @@ test("drawSpatialView renders from tap samples and reports the live deviation", 
     expect(note).toContain("dev 707 µm");
   } finally {
     document.body.innerHTML = originalBody;
-    state.drive.data = originalDriveData;
+    if (originalDriveState === undefined) {
+      queryClient.removeQueries({ queryKey: queryKeys.driveState });
+    } else {
+      queryClient.setQueryData(queryKeys.driveState, originalDriveState);
+    }
   }
 });

@@ -1,10 +1,11 @@
-import { html, render } from "htm/preact/standalone";
-import { api, el, mustEl } from "./api";
+import { html, render } from "htm/preact";
+import { useQuery } from "@tanstack/preact-query";
+import { api, detailData, el, mustEl } from "./api";
 import { MotorValues, valuesAgree } from "./motor-values";
 import type { MotorValueEntry } from "./motor-values";
 import { setConsoleValue } from "./console";
 import { runGcode } from "./moonraker";
-import { refresh } from "./runs";
+import { queryClient, queryKeys, QueryRoot } from "./query-client";
 import { currentPageDef } from "./shell";
 import { state } from "./state";
 import { notify, useStore } from "./store";
@@ -70,7 +71,7 @@ function pinnedEntries(configPins: DriveState["config_pins"], cCode: string): Re
 /// Effective raw value of one grid cell: the session's pending edit if any,
 /// else the drive's reading from the last dump.
 function driveData(): DriveState {
-  const data = state.drive.data;
+  const data = queryClient.getQueryData<DriveState>(queryKeys.driveState);
   if (!data) throw new Error("drive state not loaded");
   return data;
 }
@@ -140,8 +141,10 @@ function formatAge(ageS: number): string {
 }
 
 function currentDriveAgeS(): number | null {
-  if (!state.drive.data || state.drive.fetchedAtMs === null) return null;
-  return state.drive.data.age_s + (Date.now() - state.drive.fetchedAtMs) / 1000;
+  const data = queryClient.getQueryData<DriveState>(queryKeys.driveState);
+  const updatedAt = queryClient.getQueryState(queryKeys.driveState)?.dataUpdatedAt;
+  if (!data || !updatedAt) return null;
+  return data.age_s + (Date.now() - updatedAt) / 1000;
 }
 
 /// The refresh button must render even with no drive state at all —
@@ -326,16 +329,23 @@ function DriveGroups() {
 
 function DrivePanel() {
   useStore();
-  const data = state.drive.data;
+  const { data, error } = useQuery({
+    queryKey: queryKeys.driveState,
+    queryFn: () => api<DriveState>("/api/drive_state"),
+  });
   const changed = data ? diffChangedParams(data.params, data.motors, state.drive.pending) : [];
   const lines = buildServoTuneCommands(changed);
   return html`<div id="drive-groups">
-      ${data
-        ? html`<${DriveGroups} />`
-        : html`<p class="note">
-            no drive state yet — press refresh in the top bar to read every mapped parameter off
-            the drives (SERVO_DUMP_TUNING)
-          </p>`}
+      ${error
+        ? html`<p class="status-err">drive state failed to load: ${String(
+            (error as Error).message ?? error
+          )}</p>`
+        : data
+          ? html`<${DriveGroups} />`
+          : html`<p class="note">
+              no drive state yet — press refresh in the top bar to read every mapped parameter off
+              the drives (SERVO_DUMP_TUNING)
+            </p>`}
     </div>
     <div id="pending-preview" class="pending-preview">
       ${lines.map((l) => html`<div key=${l} class="pending-line">${l}</div>`)}
@@ -357,23 +367,16 @@ function renderDriveGroups() {
   if (container && mountedDrivePanel !== container) {
     if (mountedDrivePanel) render(null as unknown as VNode, mountedDrivePanel);
     mountedDrivePanel = container;
-    render(html`<${DrivePanel} />`, container);
+    render(html`<${QueryRoot}><${DrivePanel} /><//>`, container);
   }
   notify();
 }
 
-async function loadDriveState() {
-  try {
-    const data: DriveState = await api("/api/drive_state");
-    state.drive.data = data;
-    state.drive.fetchedAtMs = Date.now();
-  } catch (e) {
-    state.drive.data = null;
-    console.error(e);
-  }
-  state.drive.pending = {};
-  renderDriveBanner();
-  renderDriveGroups();
+function fetchDriveState(): Promise<DriveState> {
+  return queryClient.fetchQuery({
+    queryKey: queryKeys.driveState,
+    queryFn: () => api<DriveState>("/api/drive_state"),
+  });
 }
 
 async function refreshDriveState() {
@@ -386,13 +389,11 @@ async function refreshDriveState() {
     await new Promise((resolve) => setTimeout(resolve, DRIVE_REFRESH_POLL_MS));
     let data: DriveState;
     try {
-      data = await api("/api/drive_state");
+      data = await fetchDriveState();
     } catch (e) {
       continue;
     }
     if (data.age_s < priorAge) {
-      state.drive.data = data;
-      state.drive.fetchedAtMs = Date.now();
       state.drive.pending = {};
       renderDriveBanner();
       renderDriveGroups();
@@ -413,7 +414,10 @@ async function applyDriveChanges() {
   const lines = buildServoTuneCommands(changed);
   if (!lines.length) return;
   await runGcode(lines, "apply");
-  await loadDriveState();
+  await fetchDriveState();
+  state.drive.pending = {};
+  renderDriveBanner();
+  renderDriveGroups();
 }
 
 // --- sweep re-run ---------------------------------------------------------
@@ -489,11 +493,11 @@ function reconstructCommand(manifest: Manifest): string {
 }
 
 function loadRerunForm(name: string) {
-  const detail = state.details.get(name);
+  const detail = detailData(name);
   if (!detail || !detail.manifest) return;
   const label = el("form-run-name");
   if (label) label.textContent = `from ${name}`;
   setConsoleValue(reconstructCommand(detail.manifest), false);
 }
 
-export { GROUP_ORDER, OTHER_GROUP, RETIRED_PARAMS, DRIVE_REFRESH_POLL_MS, DRIVE_REFRESH_TIMEOUT_MS, paramGroupSection, groupParams, motorNames, motorRawValues, valuesAgree, pinnedEntries, cellRaw, diffChangedParams, buildServoTuneCommands, paramByName, formatAge, currentDriveAgeS, renderDriveBanner, shortMotorLabel, stageCellEdit, NOTCH_ROW_KINDS, notchMatrix, renderDriveGroups, loadDriveState, refreshDriveState, applyDriveChanges, displayParamName, strokeSuffix, reconstructCommand, loadRerunForm };
+export { GROUP_ORDER, OTHER_GROUP, RETIRED_PARAMS, DRIVE_REFRESH_POLL_MS, DRIVE_REFRESH_TIMEOUT_MS, paramGroupSection, groupParams, motorNames, motorRawValues, valuesAgree, pinnedEntries, cellRaw, diffChangedParams, buildServoTuneCommands, paramByName, formatAge, currentDriveAgeS, renderDriveBanner, shortMotorLabel, stageCellEdit, NOTCH_ROW_KINDS, notchMatrix, renderDriveGroups, refreshDriveState, applyDriveChanges, displayParamName, strokeSuffix, reconstructCommand, loadRerunForm, fetchDriveState };

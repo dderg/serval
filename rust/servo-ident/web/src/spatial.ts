@@ -3,7 +3,8 @@ import { blankCanvas, createPathView, fitViewport, tickStepMm } from "./path-vie
 import type { Viewport } from "./path-view";
 import { liveDrawCount, state } from "./state";
 import type { LiveSeries } from "./state";
-import type { SpatialFrame } from "./wire";
+import { queryClient, queryKeys } from "./query-client";
+import type { SpatialFrame, DriveState } from "./wire";
 
 // --- live spatial view -------------------------------------------------------
 //
@@ -142,11 +143,8 @@ function drawSpatialView() {
   const canvas = el<HTMLCanvasElement>("live-spatial-canvas");
   if (!canvas) return;
   liveView.bind(canvas, el("live-spatial-fit"), drawSpatialView);
-  const coeffs = spatialCoeffs(
-    state.drive.data?.spatial,
-    state.drive.data?.slots,
-    state.live.countsPerMm
-  );
+  const drive = queryClient.getQueryData<DriveState>(queryKeys.driveState);
+  const coeffs = spatialCoeffs(drive?.spatial, drive?.slots, state.live.countsPerMm);
   if (typeof coeffs === "string") {
     blankCanvas(canvas);
     setNote(coeffs);

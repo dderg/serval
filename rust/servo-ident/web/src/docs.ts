@@ -3,60 +3,81 @@ import { setConsoleValue } from "./console";
 import { moonrakerUrl, escapeHtml } from "./moonraker";
 import { launchpadSectionHtml } from "./launchpad";
 import { consoleSectionHtml } from "./shell";
-import { HELP_CACHE_KEY, state } from "./state";
+import { queryClient, queryKeys } from "./query-client";
+import { HELP_CACHE_KEY } from "./state";
 
 // --- macro docs -----------------------------------------------------------------
 
-/// The macro documentation IS klippy's cmd_*_help strings, fetched from the
-/// running instance over Moonraker's /printer/gcode/help — so it can never
-/// drift from the code that executes the command. localStorage keeps the
-/// last good copy readable while klippy is down, which is exactly when a
-/// failed run sends you looking for the docs.
-async function fetchMacroHelp() {
-  const h = state.help;
-  if (h.pending) return;
-  h.pending = true;
-  try {
-    const resp = await fetch(`${moonrakerUrl()}/printer/gcode/help`);
-    if (!resp.ok) throw new Error(`gcode/help HTTP ${resp.status}`);
-    const all: Record<string, string> = (await resp.json()).result;
-    const commands: Record<string, string> = {};
-    for (const [name, text] of Object.entries(all)) {
-      if (name.startsWith("SERVO_")) commands[name] = text;
-    }
-    h.commands = commands;
-    h.fetchedUtc = new Date().toISOString();
-    h.cached = false;
-    h.error = null;
-    localStorage.setItem(
-      HELP_CACHE_KEY,
-      JSON.stringify({ fetched_utc: h.fetchedUtc, commands })
-    );
-  } catch (e) {
-    h.error = String(e);
-    if (!h.commands) loadCachedMacroHelp();
-  } finally {
-    h.pending = false;
-  }
-  renderDocsList();
-  renderConsoleHelp();
+interface MacroHelp {
+  commands: Record<string, string>;
+  fetchedUtc: string | null;
+  cached: boolean;
 }
 
-/// The catch only forgives corrupt localStorage JSON, same contract as
-/// loadConsoleHistory.
-function loadCachedMacroHelp() {
+function cachedMacroHelp(): MacroHelp | undefined {
   const raw = localStorage.getItem(HELP_CACHE_KEY);
-  if (!raw) return;
+  if (!raw) return undefined;
   let parsed;
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    return;
+    return undefined;
   }
-  if (!parsed || typeof parsed.commands !== "object" || parsed.commands === null) return;
-  state.help.commands = parsed.commands;
-  state.help.fetchedUtc = parsed.fetched_utc || null;
-  state.help.cached = true;
+  if (!parsed || typeof parsed.commands !== "object" || parsed.commands === null) return undefined;
+  return { commands: parsed.commands, fetchedUtc: parsed.fetched_utc || null, cached: true };
+}
+
+async function fetchMacroHelpData(base: string): Promise<MacroHelp> {
+  const resp = await fetch(`${base}/printer/gcode/help`);
+  if (!resp.ok) throw new Error(`gcode/help HTTP ${resp.status}`);
+  const all: Record<string, string> = (await resp.json()).result;
+  const commands: Record<string, string> = {};
+  for (const [name, text] of Object.entries(all)) {
+    if (name.startsWith("SERVO_")) commands[name] = text;
+  }
+  const fetchedUtc = new Date().toISOString();
+  localStorage.setItem(HELP_CACHE_KEY, JSON.stringify({ fetched_utc: fetchedUtc, commands }));
+  return { commands, fetchedUtc, cached: false };
+}
+
+function macroHelpOptions(base: string) {
+  return {
+    queryKey: queryKeys.macroHelp(base),
+    queryFn: () => fetchMacroHelpData(base),
+    initialData: cachedMacroHelp,
+    staleTime: 0,
+  };
+}
+
+function macroHelpData(): MacroHelp | undefined {
+  return queryClient.getQueryData<MacroHelp>(queryKeys.macroHelp(moonrakerUrl()));
+}
+
+function macroHelpView(): { data: MacroHelp | undefined; pending: boolean; error: string | null } {
+  const st = queryClient.getQueryState<MacroHelp>(queryKeys.macroHelp(moonrakerUrl()));
+  return {
+    data: st?.data,
+    pending: st?.fetchStatus === "fetching",
+    error: st?.error ? String(st.error) : null,
+  };
+}
+
+function macroHelpNeedsFetch(): boolean {
+  const data = macroHelpData();
+  return !data || data.cached;
+}
+
+async function fetchMacroHelp() {
+  await queryClient.fetchQuery(macroHelpOptions(moonrakerUrl())).catch(() => {});
+  renderDocsList();
+  renderConsoleHelp();
+}
+
+function loadCachedMacroHelp() {
+  const base = moonrakerUrl();
+  if (queryClient.getQueryData(queryKeys.macroHelp(base))) return;
+  const cached = cachedMacroHelp();
+  if (cached) queryClient.setQueryData(queryKeys.macroHelp(base), cached);
 }
 
 /// Every cmd_*_help string ends in a "Params NAME (default) ..." tail — the
@@ -138,7 +159,7 @@ function parseParamsTail(tail: string): ParamsTailItem[] {
 }
 
 function paramChipsHtml(items: ParamsTailItem[]): string {
-  const known = state.help.commands || {};
+  const known = macroHelpData()?.commands || {};
   return items
     .map((it) => {
       if (it.kind === "text") {
@@ -200,34 +221,35 @@ function macroDocHtml(name: string, text: string, open: boolean): string {
 function renderDocsList() {
   const list = el("docs-list");
   if (!list) return;
-  const h = state.help;
+  const { data, pending, error } = macroHelpView();
+  const commands = data?.commands ?? null;
   const status = el("docs-status");
   if (status) {
-    if (h.commands && !h.cached) {
+    if (commands && !data?.cached) {
       status.textContent =
-        `the running klippy's cmd_*_help strings, fetched ${h.fetchedUtc ? shortTime(h.fetchedUtc) : "?"}`;
-    } else if (h.commands) {
+        `the running klippy's cmd_*_help strings, fetched ${data?.fetchedUtc ? shortTime(data.fetchedUtc) : "?"}`;
+    } else if (commands) {
       status.innerHTML =
-        `cached copy${h.fetchedUtc ? ` from ${shortTime(h.fetchedUtc)}` : ""} — ` +
+        `cached copy${data?.fetchedUtc ? ` from ${shortTime(data.fetchedUtc)}` : ""} — ` +
         `klippy unreachable <button id="docs-retry">retry</button>`;
-    } else if (h.pending) {
+    } else if (pending) {
       status.textContent = "fetching from klippy…";
     } else {
       status.innerHTML =
-        `${escapeHtml(h.error || "not fetched yet")} <button id="docs-retry">retry</button>`;
+        `${escapeHtml(error || "not fetched yet")} <button id="docs-retry">retry</button>`;
     }
   }
-  if (!h.commands) {
+  if (!commands) {
     list.innerHTML = `<p class="note">no macro help yet — is klippy up and the moonraker URL right?</p>`;
   } else {
     const target = docsDeepLinkTarget();
-    if (!payloadUnchanged("docs-list", { commands: h.commands, target })) {
+    if (!payloadUnchanged("docs-list", { commands, target })) {
       const firstRender = !list.dataset.rendered;
-      list.innerHTML = Object.entries(h.commands)
+      list.innerHTML = Object.entries(commands)
         .map(([name, text]) => macroDocHtml(name, text, name === target))
         .join("");
       list.dataset.rendered = "1";
-      if (firstRender && target && h.commands[target]) {
+      if (firstRender && target && commands[target]) {
         const entry = el(`doc-${target}`);
         if (entry) entry.scrollIntoView({ block: "start" });
       }
@@ -251,7 +273,7 @@ function lineCommand(line: string): string {
 }
 
 function macroParamNames(cmdName: string): string[] | null {
-  const known = state.help.commands || {};
+  const known = macroHelpData()?.commands || {};
   const text = known[cmdName];
   if (!text) return null;
   const { params } = splitMacroHelp(text);
@@ -267,8 +289,8 @@ function macroParamNames(cmdName: string): string[] | null {
 /// complete there.
 function consoleCompletion(input: HTMLTextAreaElement): ConsoleCompletion {
   const none: ConsoleCompletion = { candidates: [], lineStart: 0, tokenStart: 0, tokenLen: 0, suffix: "" };
-  const h = state.help;
-  if (!h.commands) return none;
+  const commands = macroHelpData()?.commands;
+  if (!commands) return none;
   const { line, start, caretInLine } = consoleCaretLine(input);
   const tokenStart = line.lastIndexOf(" ", caretInLine - 1) + 1;
   const token = line.slice(tokenStart, caretInLine);
@@ -279,7 +301,7 @@ function consoleCompletion(input: HTMLTextAreaElement): ConsoleCompletion {
     if (!up.length) return none;
     return {
       ...common,
-      candidates: Object.keys(h.commands).filter((n) => n.startsWith(up)),
+      candidates: Object.keys(commands).filter((n) => n.startsWith(up)),
       suffix: " ",
     };
   }
@@ -334,17 +356,18 @@ function renderConsoleHelp() {
     box.innerHTML = "";
     return;
   }
-  const h = state.help;
-  if (!h.commands) {
-    if (!h.pending && !h.error) fetchMacroHelp();
+  const { data, pending, error } = macroHelpView();
+  const commands = data?.commands;
+  if (!commands) {
+    if (!pending && !error) fetchMacroHelp();
     box.innerHTML = `<div class="hint">${
-      h.error ? `macro help unavailable — ${escapeHtml(h.error)}` : "fetching macro help…"
+      error ? `macro help unavailable — ${escapeHtml(error)}` : "fetching macro help…"
     }</div>`;
     return;
   }
-  const helpText = h.commands[first];
+  const helpText = commands[first];
   if (!helpText) {
-    const matches = Object.keys(h.commands).filter((n) => n.startsWith(first));
+    const matches = Object.keys(commands).filter((n) => n.startsWith(first));
     box.innerHTML = matches.length
       ? `<div class="console-help-cands">${matches.map(escapeHtml).join("  ")}</div>`
       : "";
@@ -379,9 +402,9 @@ function renderConsoleHelp() {
     `<div class="console-help-desc"><a href="#/docs/${first}" ` +
     `title="open in the docs tab">${first}</a>` +
     `<span class="dim"> — ${escapeHtml(prose)}</span>` +
-    (h.cached ? `<span class="hint"> (cached — klippy unreachable)</span>` : "") +
+    (data?.cached ? `<span class="hint"> (cached — klippy unreachable)</span>` : "") +
     `</div>` +
     (usage ? `<div class="console-help-usage">${usage}</div>` : "");
 }
 
-export { fetchMacroHelp, loadCachedMacroHelp, splitMacroHelp, parseParamsTail, paramChipsHtml, docsShellHtml, docsDeepLinkTarget, firstSentence, macroDocHtml, renderDocsList, consoleCaretLine, lineCommand, macroParamNames, consoleCompletion, longestCommonPrefix, consoleTabComplete, renderConsoleHelp };
+export { fetchMacroHelp, loadCachedMacroHelp, macroHelpNeedsFetch, splitMacroHelp, parseParamsTail, paramChipsHtml, docsShellHtml, docsDeepLinkTarget, firstSentence, macroDocHtml, renderDocsList, consoleCaretLine, lineCommand, macroParamNames, consoleCompletion, longestCommonPrefix, consoleTabComplete, renderConsoleHelp };
