@@ -126,11 +126,11 @@ pub fn segments(t: &[f64], dt: f64) -> Vec<std::ops::Range<usize>> {
 }
 
 /// Bilinear-transform coefficients `[b0, b1, b2, a1, a2]` (a0 normalized
-/// out) for the unit-DC-gain resonance H_z(s) = wz^2 / (s^2 + 2 zeta wz s
-/// + wz^2), the RBJ low-pass with Q = 1/(2 zeta). Causal on purpose: the
-/// physical belt force is causally related to commanded snap, and the
-/// zero-phase band filter applied identically to every channel afterwards
-/// preserves that relation.
+/// out) for the unit-DC-gain resonance
+/// H_z(s) = wz^2 / (s^2 + 2 zeta wz s + wz^2), the RBJ low-pass with
+/// Q = 1/(2 zeta). Causal on purpose: the physical belt force is causally
+/// related to commanded snap, and the zero-phase band filter applied
+/// identically to every channel afterwards preserves that relation.
 pub fn modal_biquad(freq_hz: f64, zeta: f64, dt: f64) -> [f64; 5] {
     assert!(
         freq_hz > 0.0 && dt > 0.0,
