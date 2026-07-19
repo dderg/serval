@@ -9,7 +9,12 @@
 //!   fit --capture <file.scap> --frame "r0;r1" --modes x[,y] --axes a[,b,...]
 //!       --out profile.toml [--rated-torque-nm T --rotor-inertia-kgm2 J
 //!       --rotation-distance-mm D --cutoff-hz C --blank-ms B --max-delay-ms M
-//!       --ripple-period-mm P]
+//!       --ripple-period-mm P --modal <mode>:<fz_hz>:<zeta> ...
+//!       --settle-ms S --max-mode-accel A --max-mode-vel V --min-mode-vel V]
+//!       (--modal shapes that mode's snap column through the
+//!       ringdown-measured resonance; the row gates and the settle override
+//!       are operating-point probes - fit subsets to localize where a
+//!       parameter drift lives)
 //!   serve --dir <captures_root> [--port 8085] [--host 127.0.0.1]
 //!       [--live-sock /tmp/kalico-ethercat.sock.live]
 //!   demo <out-dir> [--fixtures <dir>]
@@ -18,6 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use servo_ident::analyze::{analyze_capture, analyze_run, dump_csv, print_step};
+use servo_ident::capture::PlateauOptions;
 use servo_ident::demo::{build_demo, default_fixtures_dir};
 use servo_ident::fit::residual_by_motor;
 use servo_ident::fit::{fit, FitOptions};
@@ -173,7 +179,7 @@ fn cmd_analyze(args: &[String]) {
     analyze_run(Path::new(dir), incremental).unwrap_or_else(|e| die(&e));
 }
 
-const FIT_KEYS: [&str; 14] = [
+const FIT_KEYS: [&str; 18] = [
     "--capture",
     "--frame",
     "--modes",
@@ -188,6 +194,10 @@ const FIT_KEYS: [&str; 14] = [
     "--ripple-period-mm",
     "--drive",
     "--modal",
+    "--max-mode-accel",
+    "--settle-ms",
+    "--max-mode-vel",
+    "--min-mode-vel",
 ];
 
 fn reject_unknown_fit_flags(args: &[String]) {
@@ -285,7 +295,11 @@ fn cmd_fit(args: &[String]) {
 
     let cap = Scap::load(&capture_path).unwrap_or_else(|e| die(&e));
     let fit_cap = scap_to_capture(&cap, &axes).unwrap_or_else(|e| die(&e));
-    let (prepared, stats) = prepare(&fit_cap, &structure, &prep_opts);
+    let mut plateau_opts = PlateauOptions::default();
+    if let Some(v) = opt_f64(args, "--settle-ms") {
+        plateau_opts.settle_s = v / 1000.0;
+    }
+    let (prepared, stats) = prepare(&fit_cap, &structure, &prep_opts, &plateau_opts);
     eprintln!(
         "prep: {} segments, delay {:.2} ms; prep+tracking kept {}/{}, \
          +steady-accel plateaus kept {}/{}",
@@ -312,7 +326,43 @@ fn cmd_fit(args: &[String]) {
         std::process::exit(2);
     }
 
-    let input = fit_input(&structure, &prepared);
+    let mut input = fit_input(&structure, &prepared);
+    let max_a = opt_f64(args, "--max-mode-accel");
+    let max_v = opt_f64(args, "--max-mode-vel");
+    let min_v = opt_f64(args, "--min-mode-vel");
+    if max_a.is_some() || max_v.is_some() || min_v.is_some() {
+        let n_before = input.acc_mode.first().map_or(0, Vec::len);
+        let row_peak = |cols: &[Vec<f64>], i: usize| -> f64 {
+            cols.iter().fold(0.0_f64, |m, c| m.max(c[i].abs()))
+        };
+        let rows: Vec<usize> = (0..n_before)
+            .filter(|&i| {
+                let a = row_peak(&input.acc_mode, i);
+                let v = row_peak(&input.vel_mode, i);
+                max_a.is_none_or(|lim| a <= lim)
+                    && max_v.is_none_or(|lim| v <= lim)
+                    && min_v.is_none_or(|lim| v >= lim)
+            })
+            .collect();
+        let pick = |cols: &mut Vec<Vec<f64>>| {
+            for c in cols.iter_mut() {
+                *c = rows.iter().map(|&i| c[i]).collect();
+            }
+        };
+        pick(&mut input.acc_mode);
+        pick(&mut input.vel_mode);
+        pick(&mut input.cs_mode);
+        pick(&mut input.snap_mode);
+        pick(&mut input.torque);
+        for cols in &mut input.extra {
+            pick(cols);
+        }
+        eprintln!(
+            "row gates (accel <= {max_a:?}, vel <= {max_v:?}, vel >= {min_v:?}): \
+             kept {}/{n_before} fit rows",
+            rows.len()
+        );
+    }
     let r = fit(&input, &FitOptions::default()).unwrap_or_else(|e| {
         eprintln!("servo-cal: refusing to emit a profile: {e:?}");
         std::process::exit(2);

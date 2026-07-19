@@ -21,11 +21,16 @@ pub struct PrepStats {
     pub kept: usize,
 }
 
-pub fn prepare(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> (Prepared, PrepStats) {
+pub fn prepare(
+    cap: &Capture,
+    structure: &Structure,
+    opts: &PrepOptions,
+    plateau_opts: &PlateauOptions,
+) -> (Prepared, PrepStats) {
     let pp = prep(cap, structure, opts);
     let total = cap.t.len();
     let track = tracking_keep(&cap.vel, &cap.vel_act, &TrackingOptions::default());
-    let plateau = steady_accel_keep(&cap.t, &cap.acc, &PlateauOptions::default());
+    let plateau = steady_accel_keep(&cap.t, &cap.acc, plateau_opts);
     let keep: Vec<bool> = (0..total)
         .map(|k| pp.valid[k] && track[k] && plateau[k])
         .collect();

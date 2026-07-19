@@ -4,7 +4,7 @@
 //!   [--rated-torque-nm T --rotor-inertia-kgm2 J --rotation-distance-mm D]
 #![allow(clippy::exit)]
 
-use servo_ident::capture::{parse_capture_csv, Capture};
+use servo_ident::capture::{parse_capture_csv, Capture, PlateauOptions};
 use servo_ident::fit::residual_by_motor;
 use servo_ident::fit::{fit, FitOptions};
 use servo_ident::model::Structure;
@@ -131,7 +131,7 @@ fn main() {
         eprintln!("servo-ident: capture {capture_path} invalid: {e:?}");
         std::process::exit(1);
     });
-    let (prepared, stats) = prepare(&cap, &structure, &prep_opts);
+    let (prepared, stats) = prepare(&cap, &structure, &prep_opts, &PlateauOptions::default());
     eprintln!(
         "prep: {} segments, delay {:.2} ms; prep+tracking kept {}/{}, \
          +steady-accel plateaus kept {}/{}",
