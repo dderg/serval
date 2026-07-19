@@ -79,9 +79,7 @@ class EtherCatNode:
                 % (self.name, self.cycle_us, CYCLE_US_QUANTUM)
             )
         self.dynamics_profile = servo_axis.read_dynamics_profile_option(config)
-        self.late_tolerance_us = config.getfloat(
-            "late_tolerance_us", None, minval=0.0
-        )
+        self.late_tolerance_us = config.getfloat("late_tolerance_us", 0.0)
         self.engine_handle = None
         self._counts_per_mm = None
         self._slot_by_motor = {}
