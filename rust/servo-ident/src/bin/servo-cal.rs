@@ -27,7 +27,7 @@ use servo_ident::live_stream::{LiveTap, DEFAULT_IDLE_TIMEOUT, DEFAULT_TAP_SOCKET
 use servo_ident::metrics::{DEFAULT_SETTLE_BAND_COUNTS, DEFAULT_TORQUE_LIMIT_PER_MILLE};
 use servo_ident::model::Structure;
 use servo_ident::pipeline::{fit_input, full_fit_input, prepare};
-use servo_ident::prep::{band_limited_rms, PrepOptions};
+use servo_ident::prep::{band_limited_rms, ModalMode, PrepOptions};
 use servo_ident::profile_out::{c0006_recommendation, render_profile};
 use servo_ident::scap::Scap;
 use servo_ident::serve;
@@ -173,7 +173,7 @@ fn cmd_analyze(args: &[String]) {
     analyze_run(Path::new(dir), incremental).unwrap_or_else(|e| die(&e));
 }
 
-const FIT_KEYS: [&str; 13] = [
+const FIT_KEYS: [&str; 14] = [
     "--capture",
     "--frame",
     "--modes",
@@ -187,6 +187,7 @@ const FIT_KEYS: [&str; 13] = [
     "--max-delay-ms",
     "--ripple-period-mm",
     "--drive",
+    "--modal",
 ];
 
 fn reject_unknown_fit_flags(args: &[String]) {
@@ -252,6 +253,35 @@ fn cmd_fit(args: &[String]) {
     }
     prep_opts.ripple_period_mm =
         opt_f64(args, "--ripple-period-mm").or_else(|| opt_f64(args, "--rotation-distance-mm"));
+    for (key, value) in args[2..].chunks(2).filter_map(|c| match c {
+        [k, v] if k == "--modal" => Some((k, v)),
+        _ => None,
+    }) {
+        let _ = key;
+        let parts: Vec<&str> = value.split(':').collect();
+        let [mode_name, fz, zeta] = parts.as_slice() else {
+            die(&format!(
+                "--modal wants <mode>:<freq_hz>:<zeta>, got {value:?}"
+            ));
+        };
+        let mode = modes
+            .iter()
+            .position(|m| m == mode_name)
+            .unwrap_or_else(|| {
+                die(&format!(
+                    "--modal mode {mode_name:?} not in --modes {modes:?}"
+                ))
+            });
+        prep_opts.modal.push(ModalMode {
+            mode,
+            freq_hz: fz
+                .parse()
+                .unwrap_or_else(|_| die(&format!("--modal frequency {fz:?} is not a number"))),
+            zeta: zeta
+                .parse()
+                .unwrap_or_else(|_| die(&format!("--modal zeta {zeta:?} is not a number"))),
+        });
+    }
 
     let cap = Scap::load(&capture_path).unwrap_or_else(|e| die(&e));
     let fit_cap = scap_to_capture(&cap, &axes).unwrap_or_else(|e| die(&e));
@@ -297,12 +327,32 @@ fn cmd_fit(args: &[String]) {
             .get(structure.param_count() + m)
             .copied()
             .unwrap_or(f64::NAN);
-        let fz = if r.params.mass[m] > 0.0 && *c < 0.0 {
-            (r.params.mass[m] / -c).sqrt() / (2.0 * std::f64::consts::PI)
-        } else {
-            f64::NAN
-        };
-        eprintln!("snap (mode {mode}): {c:.3e} ± {se:.1e} (implied fz upper bound {fz:.0} Hz)",);
+        match prep_opts.modal.iter().find(|mm| mm.mode == m) {
+            Some(mm) => {
+                let wz = 2.0 * std::f64::consts::PI * mm.freq_hz;
+                let coupled = c * wz * wz;
+                let frac = if r.params.mass[m] > 0.0 {
+                    100.0 * coupled / r.params.mass[m]
+                } else {
+                    f64::NAN
+                };
+                eprintln!(
+                    "modal snap (mode {mode}, fz {:.1} Hz zeta {:.3}): {c:.3e} ± {se:.1e} \
+                     — coupled mass {coupled:.3e} ({frac:.1}% of fitted mass)",
+                    mm.freq_hz, mm.zeta
+                );
+            }
+            None => {
+                let fz = if r.params.mass[m] > 0.0 && *c < 0.0 {
+                    (r.params.mass[m] / -c).sqrt() / (2.0 * std::f64::consts::PI)
+                } else {
+                    f64::NAN
+                };
+                eprintln!(
+                    "snap (mode {mode}): {c:.3e} ± {se:.1e} (implied fz upper bound {fz:.0} Hz)",
+                );
+            }
+        }
     }
     let full = full_fit_input(&structure, &prepared);
     let full_residual = residual_by_motor(&full, &r.params, &r.snap_params, &r.extra_params);

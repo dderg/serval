@@ -3,7 +3,10 @@ use servo_ident::capture::{
 };
 use servo_ident::fit::{fit, residual_by_motor, FitInput, FitOptions};
 use servo_ident::model::Structure;
-use servo_ident::prep::{band_limited_rms, median_dt, prep, segments, sinc_kernel, PrepOptions};
+use servo_ident::prep::{
+    band_limited_rms, biquad_in_place, median_dt, modal_biquad, prep, segments, sinc_kernel,
+    ModalMode, PrepOptions,
+};
 
 const DT: f64 = 0.00025;
 
@@ -369,4 +372,108 @@ fn a_mode_active_in_the_segment_still_blanks_its_deadband() {
         "deadband samples of active modes must be blanked"
     );
     assert!(pp.valid[n / 2], "sample far from any crossing was blanked");
+}
+
+#[test]
+fn modal_biquad_has_unit_dc_gain_and_resonant_peak() {
+    let (fz, zeta) = (100.0, 0.04);
+    let coef = modal_biquad(fz, zeta, DT);
+    let mut step = vec![1.0; 8000];
+    biquad_in_place(&mut step, coef);
+    assert!((step[7999] - 1.0).abs() < 1e-6, "DC gain must be 1");
+    let n = 80000;
+    let mut sine: Vec<f64> = (0..n)
+        .map(|k| libm::sin(2.0 * std::f64::consts::PI * fz * k as f64 * DT))
+        .collect();
+    biquad_in_place(&mut sine, coef);
+    let peak = sine[n / 2..].iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
+    let q = 1.0 / (2.0 * zeta);
+    assert!(
+        (peak - q).abs() / q < 0.05,
+        "gain at fz must be ~Q={q}, got {peak}"
+    );
+}
+
+/// Torque carries a modal-filtered snap component (belt compliance ringing
+/// through the measured resonance). The modal-shaped fit must recover the
+/// rigid mass unbiased AND the compliance coefficient - the failure mode it
+/// guards is exactly the accel-dependent mass drift.
+#[test]
+fn modal_snap_recovers_the_injected_compliance_term() {
+    let (fz, zeta, c_snap) = (90.0, 0.05, 3.0e-8);
+    let (m, b, coul) = (0.008, 0.09, 205.0);
+    let (t, acc, vel) = strokes(10000.0, 500.0, 0.4, 8);
+    let n = t.len();
+    let mut snap = vec![0.0; n];
+    for seg in segments(&t, DT) {
+        for k in seg.start + 1..seg.end.saturating_sub(1) {
+            snap[k] = (acc[k + 1] - 2.0 * acc[k] + acc[k - 1]) / (DT * DT);
+        }
+    }
+    let mut modal = snap.clone();
+    let coef = modal_biquad(fz, zeta, DT);
+    for seg in segments(&t, DT) {
+        biquad_in_place(&mut modal[seg], coef);
+    }
+    let torque: Vec<f64> = (0..n)
+        .map(|k| {
+            let cs = if vel[k] > 0.5 {
+                coul
+            } else if vel[k] < -0.5 {
+                -coul
+            } else {
+                0.0
+            };
+            (m * acc[k] + b * vel[k] + cs + c_snap * modal[k] + 2.0 * white(k)).round()
+        })
+        .collect();
+    let cap = Capture {
+        t,
+        acc: vec![acc],
+        vel: vec![vel.clone()],
+        vel_act: vec![vel],
+        torque: vec![torque],
+    };
+    let structure = identity();
+    let opts = PrepOptions {
+        max_delay_s: 0.0,
+        modal: vec![ModalMode {
+            mode: 0,
+            freq_hz: fz,
+            zeta,
+        }],
+        ..PrepOptions::default()
+    };
+    let pp = prep(&cap, &structure, &opts);
+    let track = tracking_keep(&cap.vel, &cap.vel_act, &TrackingOptions::default());
+    let plateau = steady_accel_keep(&cap.t, &cap.acc, &PlateauOptions::default());
+    let keep: Vec<usize> = (0..cap.t.len())
+        .filter(|&k| pp.valid[k] && track[k] && plateau[k])
+        .collect();
+    assert!(keep.len() > 1000, "mask kept only {} samples", keep.len());
+    let pick = |cols: &[Vec<f64>]| -> Vec<Vec<f64>> {
+        cols.iter()
+            .map(|c| keep.iter().map(|&k| c[k]).collect())
+            .collect()
+    };
+    let input = FitInput {
+        structure,
+        acc_mode: pick(&pp.acc_mode),
+        vel_mode: pick(&pp.vel_mode),
+        cs_mode: pick(&pp.cs_mode),
+        snap_mode: pick(&pp.snap_mode),
+        torque: pick(&pp.torque),
+        extra: pp.extra.iter().map(|cols| pick(cols)).collect(),
+    };
+    let r = fit(&input, &FitOptions::default()).unwrap();
+    assert!(
+        (r.params.mass[0] - m).abs() / m < 0.02,
+        "mass {} vs {m} - modal term must keep mass unbiased",
+        r.params.mass[0]
+    );
+    assert!(
+        (r.snap_params[0] - c_snap).abs() / c_snap < 0.1,
+        "snap coefficient {} vs injected {c_snap}",
+        r.snap_params[0]
+    );
 }

@@ -41,6 +41,22 @@ pub struct PrepOptions {
     /// eccentricity ripple — in-band and stroke-locked, hence a mass-bias
     /// if ignored — is absorbed by nuisance coefficients instead.
     pub ripple_period_mm: Option<f64>,
+    /// Ringdown-measured resonances shaping the snap column per mode: the
+    /// snap regressor is passed through H_z(s) = wz^2/(s^2 + 2 zeta wz s +
+    /// wz^2), keeping the exact snap asymptote below the mode, rolling off
+    /// above it (where raw snap amplifies junk the plant never responds
+    /// to), and carrying the mode's own post-transition ring into the
+    /// steady-accel windows the fit keeps - raw snap is zero there while
+    /// the physical belt force keeps ringing.
+    pub modal: Vec<ModalMode>,
+}
+
+/// One ringdown-measured mode: `mode` indexes the frame's mode list.
+#[derive(Debug, Clone, Copy)]
+pub struct ModalMode {
+    pub mode: usize,
+    pub freq_hz: f64,
+    pub zeta: f64,
 }
 
 impl Default for PrepOptions {
@@ -50,6 +66,7 @@ impl Default for PrepOptions {
             blank_reversal_s: 0.03,
             max_delay_s: 0.005,
             ripple_period_mm: None,
+            modal: Vec::new(),
         }
     }
 }
@@ -106,6 +123,49 @@ pub fn segments(t: &[f64], dt: f64) -> Vec<std::ops::Range<usize>> {
     }
     out.push(start..t.len());
     out
+}
+
+/// Bilinear-transform coefficients `[b0, b1, b2, a1, a2]` (a0 normalized
+/// out) for the unit-DC-gain resonance H_z(s) = wz^2 / (s^2 + 2 zeta wz s
+/// + wz^2), the RBJ low-pass with Q = 1/(2 zeta). Causal on purpose: the
+/// physical belt force is causally related to commanded snap, and the
+/// zero-phase band filter applied identically to every channel afterwards
+/// preserves that relation.
+pub fn modal_biquad(freq_hz: f64, zeta: f64, dt: f64) -> [f64; 5] {
+    assert!(
+        freq_hz > 0.0 && dt > 0.0,
+        "modal frequency must be positive"
+    );
+    assert!(
+        freq_hz * dt < 0.45,
+        "modal frequency {freq_hz} Hz too close to Nyquist at dt {dt}"
+    );
+    assert!(zeta > 0.0 && zeta < 1.0, "modal zeta {zeta} outside (0, 1)");
+    let w0 = 2.0 * std::f64::consts::PI * freq_hz * dt;
+    let (sin_w0, cos_w0) = (libm::sin(w0), libm::cos(w0));
+    let alpha = sin_w0 * zeta;
+    let a0 = 1.0 + alpha;
+    [
+        (1.0 - cos_w0) / 2.0 / a0,
+        (1.0 - cos_w0) / a0,
+        (1.0 - cos_w0) / 2.0 / a0,
+        -2.0 * cos_w0 / a0,
+        (1.0 - alpha) / a0,
+    ]
+}
+
+/// Direct-form-II-transposed biquad over one segment, state zeroed at the
+/// segment start (segments are separated by dwells far longer than the
+/// mode's decay).
+pub fn biquad_in_place(chan: &mut [f64], [b0, b1, b2, a1, a2]: [f64; 5]) {
+    let (mut z1, mut z2) = (0.0, 0.0);
+    for v in chan.iter_mut() {
+        let x = *v;
+        let y = b0 * x + z1;
+        z1 = b1 * x + z2 - a1 * y;
+        z2 = b2 * x - a2 * y;
+        *v = y;
+    }
 }
 
 /// Odd-length Hann-windowed-sinc low-pass with unit DC gain. Symmetric, so
@@ -255,6 +315,18 @@ pub fn prep(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> Prepped
                     + acc_mode_raw[md][k - 1])
                     / (dt * dt);
             }
+        }
+    }
+    for m in &opts.modal {
+        assert!(
+            m.mode < n_modes,
+            "modal mode index {} out of range ({} modes)",
+            m.mode,
+            n_modes
+        );
+        let coef = modal_biquad(m.freq_hz, m.zeta, dt);
+        for seg in &segs {
+            biquad_in_place(&mut snap_raw[m.mode][seg.clone()], coef);
         }
     }
 
