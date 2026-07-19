@@ -197,9 +197,9 @@ fn snap_column_separates_compliance_from_mass() {
             (35.0, 20000.0)
         };
         let w = 2.0 * std::f64::consts::PI * f;
-        acc.push(amp * (w * t).sin());
-        vel.push(-amp / w * (w * t).cos() + amp / w);
-        snap.push(-amp * w * w * (w * t).sin());
+        acc.push(amp * libm::sin(w * t));
+        vel.push(-amp / w * libm::cos(w * t) + amp / w);
+        snap.push(-amp * w * w * libm::sin(w * t));
     }
     let cs: Vec<f64> = vel.iter().map(|&v| coulomb_sign(v)).collect();
     let torque: Vec<f64> = (0..acc.len())
