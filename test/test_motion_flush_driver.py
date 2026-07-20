@@ -1,4 +1,5 @@
 import pytest
+from fakes import FakeConfig, FakePrinter
 
 from klippy import engine_wait
 from klippy.extras.output_pin import GCodeRequestQueue
@@ -206,23 +207,9 @@ def test_m106_queued_request_drains_on_idle_printer():
     motion = _make_motion([mcu], reactor)
     shim = ToolheadShim(motion)
 
-    class FakePrinter:
-        def get_reactor(self):
-            return reactor
-
-        def register_event_handler(self, event, handler):
-            pass
-
-    class FakeConfig:
-        def __init__(self, printer):
-            self._printer = printer
-
-        def get_printer(self):
-            return self._printer
-
     applied = []
     gcrq = GCodeRequestQueue(
-        FakeConfig(FakePrinter()),
+        FakeConfig(FakePrinter(reactor=reactor)),
         mcu,
         lambda print_time, value: applied.append((print_time, value)),
     )

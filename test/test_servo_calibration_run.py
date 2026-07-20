@@ -4,56 +4,36 @@ import sys
 import tempfile
 
 import pytest
+from fakes import FakeConfig, FakeKin, FakeNode, FakeReactor, FakeToolhead
+from fakes import FakeEngine as _FakeEngine
+from fakes import FakeGcmd as _FakeGcmd
+from fakes import FakeGcode as _FakeGcode
+from fakes import FakePrinter as _FakePrinter
+from fakes import FakeServoCapture as _FakeServoCapture
 
 from klippy.extras import servo_axis, servo_calibration, servo_param
 
 
-class FakeServoCapture:
-    def __init__(self):
-        self.captures = []
+class FakeGcode(_FakeGcode):
+    error = RuntimeError
 
-    def start_capture_to(self, path, servos):
-        self.captures.append((path, list(servos)))
 
+class FakeServoCapture(_FakeServoCapture):
     def stop_capture(self):
-        return self.captures[-1][0], 1000, 250
+        self.events.append("capture_stop")
+        return self.starts[-1][0], 1000, 250
 
 
-class FakeGcode:
+class FakeGcmd(_FakeGcmd):
     error = RuntimeError
-
-    def __init__(self):
-        self.commands = {}
-        self.scripts = []
-        self.responses = []
-
-    def register_command(self, name, func, desc=None):
-        self.commands[name] = func
-
-    def run_script_from_command(self, script):
-        self.scripts.append(script)
-
-    def respond_info(self, msg):
-        self.responses.append(msg)
-
-
-class FakeGcmd:
-    error = RuntimeError
-
-    def __init__(self, **params):
-        self._params = params
-        self.responses = []
 
     def get_commandline(self):
         return "FAKE_CMD " + " ".join(
-            "%s=%s" % kv for kv in self._params.items()
+            "%s=%s" % kv for kv in self.params.items()
         )
 
-    def get(self, name, default=None):
-        return self._params.get(name, default)
-
     def get_int(self, name, default=None, minval=None, maxval=None):
-        return int(self._params.get(name, default))
+        return int(self.params.get(name, default))
 
     def get_float(
         self,
@@ -64,104 +44,29 @@ class FakeGcmd:
         above=None,
         below=None,
     ):
-        value = self._params.get(name, default)
+        value = self.params.get(name, default)
         return None if value is None else float(value)
 
-    def respond_info(self, msg):
-        self.responses.append(msg)
 
-
-class FakeKin:
-    kind = "corexy"
-
-    def __init__(self, rails):
-        self.rails = rails
-
-    def coupled_xy(self):
-        return True
-
-
-class FakeToolhead:
-    def __init__(self, kin):
-        self.kin = kin
-
-    def get_kinematics(self):
-        return self.kin
-
-
-class FakeNode:
-    def __init__(self, name, handle, slots):
-        self.name = name
-        self._handle = handle
-        self._slots = slots
-
-    def get_engine_handle(self):
-        return self._handle
-
-    def get_slot_for_motor(self, motor_name):
-        return self._slots[motor_name]
-
-
-class FakeEngine:
+class FakeEngine(_FakeEngine):
     def __init__(self, values=None):
+        super().__init__()
         self._values = values or {}
 
     def sdo_read(self, handle, slot, index, subindex):
+        self.calls.append(("sdo_read", handle, slot, index, subindex))
         return 2, self._values.get((index, subindex), 7)
 
 
-class FakeReactor:
-    def __init__(self):
-        self._t = 0.0
-
-    def monotonic(self):
-        self._t += 0.001
-        return self._t
-
-    def pause(self, until):
-        self._t = until
-
-
-class FakePrinter:
+class FakePrinter(_FakePrinter):
     command_error = RuntimeError
-    _sentinel = object()
 
-    def __init__(self, objs):
-        self._objs = objs
-        self._reactor = FakeReactor()
-
-    def get_reactor(self):
-        return self._reactor
-
-    def lookup_object(self, name, default=_sentinel):
-        if name in self._objs:
-            return self._objs[name]
-        if default is not self._sentinel:
-            return default
-        raise KeyError(name)
-
-
-class FakeConfig:
-    def __init__(self, printer):
-        self._printer = printer
-
-    def get_printer(self):
-        return self._printer
-
-    def get(self, name, default=None):
-        return default
-
-    def getlist(self, name, default=None):
-        return default
-
-    def getfloat(self, name, default=None, **kw):
-        return default
-
-    def getfloatlist(self, name, default=None):
-        return default
-
-    def getint(self, name, default=None, **kw):
-        return default
+    def __init__(self, objects=None, reactor=None, shutdown=False):
+        super().__init__(
+            objects,
+            reactor if reactor is not None else FakeReactor(tick=0.001),
+            shutdown,
+        )
 
 
 def _motor(name, node_name, chain_index, invert=False):
@@ -189,10 +94,14 @@ def make_sc(handle=1, engine_values=None, verdict=None):
         _rail("x", [_motor("motor_a", "n", 0)]),
         _rail("y", [_motor("motor_b", "n", 1, invert=True)]),
     ]
-    node = FakeNode("ethercat_node n", handle, {"motor_a": 0, "motor_b": 1})
+    node = FakeNode(
+        name="ethercat_node n",
+        handle=handle,
+        slots={"motor_a": 0, "motor_b": 1},
+    )
     objs = {
         "gcode": gcode,
-        "toolhead": FakeToolhead(FakeKin(rails)),
+        "toolhead": FakeToolhead(FakeKin(rails, kind="corexy")),
         "servo_capture": FakeServoCapture(),
         "motion_engine": FakeEngine(engine_values),
         "ethercat_node n": node,
@@ -225,7 +134,7 @@ def make_sc(handle=1, engine_values=None, verdict=None):
 
 def _manifest(sc):
     run_dir = os.path.dirname(
-        sc.printer.lookup_object("servo_capture").captures[0][0]
+        sc.printer.lookup_object("servo_capture").starts[0][0]
     )
     with open(os.path.join(run_dir, "manifest.json")) as f:
         return json.load(f)
@@ -332,7 +241,7 @@ def test_verdict_one_liner_names_step_and_run_dir():
     gcmd = FakeGcmd(AXIS="X")
     sc.cmd_SERVO_MEASURE_TRACKING(gcmd)
     run_dir = os.path.dirname(
-        sc.printer.lookup_object("servo_capture").captures[0][0]
+        sc.printer.lookup_object("servo_capture").starts[0][0]
     )
     assert gcmd.responses == [
         "verdict: cal_p1280_s800_i1562 (highest clean gain) | run %s"
@@ -400,10 +309,12 @@ def make_sc_apply(engine_values=None, verdict=None, verdict_flags=()):
         _rail("x", [_motor("motor_a", "n", 0)]),
         _rail("y", [_motor("motor_b", "n", 1, invert=True)]),
     ]
-    node = FakeNode("ethercat_node n", 1, {"motor_a": 0, "motor_b": 1})
+    node = FakeNode(
+        name="ethercat_node n", handle=1, slots={"motor_a": 0, "motor_b": 1}
+    )
     objs = {
         "gcode": gcode,
-        "toolhead": FakeToolhead(FakeKin(rails)),
+        "toolhead": FakeToolhead(FakeKin(rails, kind="corexy")),
         "servo_capture": FakeServoCapture(),
         "motion_engine": FakeEngine(engine_values),
         "ethercat_node n": node,
@@ -677,12 +588,12 @@ def test_strain_map_raster_records_one_capture_per_line():
     servo_param.drain_param_writes()
     sc, gcode = make_sc()
     sync = FakeServoSync()
-    sc.printer._objs["servo_sync"] = sync
+    sc.printer.add_object("servo_sync", sync)
     sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
     gcmd = FakeGcmd(LINE_SPACING="120", SPEED="50", ACCEL="1000")
     sc.cmd_SERVO_MEASURE_STRAIN_MAP(gcmd)
     assert sync.runs == [None]
-    caps = sc.printer.lookup_object("servo_capture").captures
+    caps = sc.printer.lookup_object("servo_capture").starts
     names = [os.path.basename(path) for path, _servos in caps]
     assert names == [
         "step_xline_y030.scap",
@@ -769,9 +680,9 @@ class FakeStrainComp:
 def test_strain_response_steps_each_pair_along_one_line_and_fits():
     servo_param.drain_param_writes()
     sc, _gcode = make_sc()
-    sc.printer._objs["servo_sync"] = FakeServoSync()
+    sc.printer.add_object("servo_sync", FakeServoSync())
     comp = FakeStrainComp()
-    sc.printer._objs["servo_strain_comp"] = comp
+    sc.printer.add_object("servo_strain_comp", comp)
     sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
     sc.cmd_SERVO_MEASURE_STRAIN_RESPONSE(FakeGcmd(STEP_UM="50"))
     steps = [0.0, 50.0, -50.0, 100.0, -100.0]
@@ -782,7 +693,7 @@ def test_strain_response_steps_each_pair_along_one_line_and_fits():
         + [(1, 0.0)]
     )
     assert comp.cleared == 1
-    caps = sc.printer.lookup_object("servo_capture").captures
+    caps = sc.printer.lookup_object("servo_capture").starts
     names = [os.path.basename(path) for path, _servos in caps]
     assert names == [
         "step_belt%s_step%d.scap" % (belt, i) for belt in "ab" for i in range(5)
@@ -853,10 +764,12 @@ def test_load_config_pulls_in_servo_tuning():
     rails = [_rail("x", [_motor("motor_a", "n", 0)])]
     objs = {
         "gcode": FakeGcode(),
-        "toolhead": FakeToolhead(FakeKin(rails)),
+        "toolhead": FakeToolhead(FakeKin(rails, kind="corexy")),
         "servo_capture": FakeServoCapture(),
         "motion_engine": FakeEngine(),
-        "ethercat_node n": FakeNode("ethercat_node n", 1, {"motor_a": 0}),
+        "ethercat_node n": FakeNode(
+            name="ethercat_node n", handle=1, slots={"motor_a": 0}
+        ),
     }
 
     class RecordingPrinter(FakePrinter):
@@ -929,11 +842,11 @@ class FakeTuner:
 def make_tune_sc(rho_seq):
     servo_param.drain_param_writes()
     sc, _gcode = make_sc()
-    sc.printer._objs["servo_sync"] = FakeServoSync()
+    sc.printer.add_object("servo_sync", FakeServoSync())
     comp = FakeStrainComp()
     comp.tuner = FakeTuner(rho_seq)
     comp.begin_tune = lambda gcmd, run_raw, spacing: comp.tuner
-    sc.printer._objs["servo_strain_comp"] = comp
+    sc.printer.add_object("servo_strain_comp", comp)
     sc.bounds = {"X": (30.0, 270.0), "Y": (30.0, 270.0)}
     return sc, comp
 
@@ -945,7 +858,7 @@ def test_tune_loops_xy_lines_until_converged():
     assert tuner.rebuilds == 2
     assert tuner.applied == [[0.66, 0.66]]
     assert tuner.stored == 1
-    caps = sc.printer.lookup_object("servo_capture").captures
+    caps = sc.printer.lookup_object("servo_capture").starts
     names = [os.path.basename(path) for path, _servos in caps]
     assert names == [
         "step_iter0_x.scap",
@@ -1042,7 +955,7 @@ def test_pattern_gain_sweep_drives_xy_and_records_pattern_plan():
     assert plan["pattern"]["small_size"] == 20.0
     assert plan["pattern"]["segments"] == 21
     assert "start" not in plan
-    captures = sc.printer.lookup_object("servo_capture").captures
+    captures = sc.printer.lookup_object("servo_capture").starts
     assert captures[0][1] == ["motor_a", "motor_b"]
     pattern_scripts = [
         s

@@ -1,50 +1,17 @@
 import pytest
+from fakes import FakeGcmd as FakeGcmdBase
+from fakes import FakeGcode as FakeGcodeBase
+from fakes import FakeKin
 
 from klippy.extras import servo_axis, servo_strokes
 
 
-class FakeGcode:
+class FakeGcode(FakeGcodeBase):
     error = RuntimeError
 
-    def __init__(self):
-        self.scripts = []
 
-    def run_script_from_command(self, script):
-        self.scripts.append(script)
-
-
-class FakeGcmd:
+class FakeGcmd(FakeGcmdBase):
     error = RuntimeError
-
-    def __init__(self, **params):
-        self._params = params
-
-    def get(self, name, default=None):
-        return self._params.get(name, default)
-
-    def get_int(self, name, default=None, minval=None, maxval=None):
-        return int(self._params.get(name, default))
-
-    def get_float(
-        self,
-        name,
-        default=None,
-        minval=None,
-        maxval=None,
-        above=None,
-        below=None,
-    ):
-        value = self._params.get(name, default)
-        return None if value is None else float(value)
-
-
-class FakeKin:
-    def __init__(self, rails, coupled=True):
-        self.rails = rails
-        self._coupled = coupled
-
-    def coupled_xy(self):
-        return self._coupled
 
 
 def _motor(name, node_name="node", chain_index=0):
@@ -73,7 +40,7 @@ def cartesian_kin():
             _rail("x", [_motor("motor_x")]),
             _rail("y", [_motor("motor_y")]),
         ],
-        coupled=False,
+        coupled_xy=False,
     )
 
 
@@ -83,7 +50,7 @@ def corexy_kin():
             _rail("x", [_motor("motor_a")]),
             _rail("y", [_motor("motor_b")]),
         ],
-        coupled=True,
+        coupled_xy=True,
     )
 
 
@@ -253,7 +220,7 @@ def test_spatial_frame_corexy_folds_invert_and_halves_belts():
             _rail("x", [_motor("motor_a")]),
             _rail("y", [inverted_b]),
         ],
-        coupled=True,
+        coupled_xy=True,
     )
     assert servo_strokes.spatial_frame(kin) == {
         "modes": ["x", "y"],
@@ -274,7 +241,7 @@ def test_spatial_frame_corexy_awd_scales_by_drives_per_belt():
             ),
             _rail("y", [_motor("motor_b")]),
         ],
-        coupled=True,
+        coupled_xy=True,
     )
     assert servo_strokes.spatial_frame(kin) == {
         "modes": ["x", "y"],
@@ -294,7 +261,7 @@ def test_spatial_frame_cartesian_maps_each_rail_to_its_mode():
 def test_spatial_frame_cartesian_skips_non_servo_lanes():
     kin = FakeKin(
         [object(), _rail("y", [_motor("motor_y")])],
-        coupled=False,
+        coupled_xy=False,
     )
     assert servo_strokes.spatial_frame(kin) == {
         "modes": ["y"],
@@ -304,9 +271,11 @@ def test_spatial_frame_cartesian_skips_non_servo_lanes():
 
 
 def test_spatial_frame_none_without_servo_xy_rails():
-    assert servo_strokes.spatial_frame(FakeKin([], coupled=False)) is None
+    assert servo_strokes.spatial_frame(FakeKin([], coupled_xy=False)) is None
     assert (
-        servo_strokes.spatial_frame(FakeKin([object(), object()], coupled=True))
+        servo_strokes.spatial_frame(
+            FakeKin([object(), object()], coupled_xy=True)
+        )
         is None
     )
 

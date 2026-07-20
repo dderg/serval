@@ -4,6 +4,17 @@ import sys
 import tempfile
 
 import pytest
+from fakes import (
+    FakeConfig,
+    FakeKin,
+    FakeNode,
+    FakeToolhead,
+)
+from fakes import FakeEngine as _FakeEngine
+from fakes import FakeGcmd as _FakeGcmd
+from fakes import FakeGcode as _FakeGcode
+from fakes import FakePrinter as _FakePrinter
+from fakes import FakeServoCapture as _FakeServoCapture
 
 from klippy.extras import servo_axis, servo_calibration
 
@@ -39,146 +50,45 @@ def _write_fit_profile(argv, mass=0.02, viscous=0.004, coulomb=1.0):
         f.write("\n".join(lines) + "\n")
 
 
-class FakeServoCapture:
+class FakeServoCapture(_FakeServoCapture):
     def __init__(self):
+        super().__init__()
         self.captures = []
 
     def start_capture_to(self, path, servos):
+        super().start_capture_to(path, servos)
         self.captures.append((path, list(servos)))
 
     def stop_capture(self):
+        super().stop_capture()
         return self.captures[-1][0], 1000, 250
 
 
-class FakeGcode:
+class FakeGcode(_FakeGcode):
     error = RuntimeError
 
-    def __init__(self):
-        self.commands = {}
-        self.scripts = []
 
-    def register_command(self, name, func, desc=None):
-        self.commands[name] = func
-
-    def run_script_from_command(self, script):
-        self.scripts.append(script)
-
-
-class FakeGcmd:
+class FakeGcmd(_FakeGcmd):
     error = RuntimeError
 
-    def __init__(self, **params):
-        self._params = params
-        self.responses = []
 
-    def get_commandline(self):
-        return "FAKE_CMD " + " ".join(
-            "%s=%s" % kv for kv in self._params.items()
-        )
-
-    def get(self, name, default=None):
-        return self._params.get(name, default)
-
-    def get_int(self, name, default=None, minval=None, maxval=None):
-        return int(self._params.get(name, default))
-
-    def get_float(
-        self,
-        name,
-        default=None,
-        minval=None,
-        maxval=None,
-        above=None,
-        below=None,
-    ):
-        value = self._params.get(name, default)
-        return None if value is None else float(value)
-
-    def respond_info(self, msg):
-        self.responses.append(msg)
-
-
-class FakeKin:
-    kind = "corexy"
-
-    def __init__(self, rails):
-        self.rails = rails
-
-    def coupled_xy(self):
-        return True
-
-
-class FakeToolhead:
-    def __init__(self, kin):
-        self.kin = kin
-
-    def get_kinematics(self):
-        return self.kin
-
-
-class FakeNode:
-    def __init__(self, name, handle, slots):
-        self.name = name
-        self._handle = handle
-        self._slots = slots
-
-    def get_engine_handle(self):
-        return self._handle
-
-    def get_slot_for_motor(self, motor_name):
-        return self._slots[motor_name]
-
-    def get_dynamics_profile(self):
-        return None
-
-    def get_drive_count(self):
-        return len(self._slots)
-
-
-class FakeEngine:
+class FakeEngine(_FakeEngine):
     def __init__(self, values=None):
+        super().__init__()
         self._values = values or {}
         self.dynamics_calls = []
 
     def sdo_read(self, handle, slot, index, subindex):
+        self.calls.append(("sdo_read", handle, slot, index, subindex))
         return 2, self._values.get((index, subindex), 7)
 
     def set_dynamics_model(self, *args):
+        self.calls.append(("set_dynamics_model",) + args)
         self.dynamics_calls.append(args)
 
 
-class FakePrinter:
+class FakePrinter(_FakePrinter):
     command_error = RuntimeError
-
-    def __init__(self, objs):
-        self._objs = objs
-
-    def lookup_object(self, name):
-        return self._objs[name]
-
-
-class FakeConfig:
-    def __init__(self, printer, values=None):
-        self._printer = printer
-        self._values = values or {}
-
-    def get_printer(self):
-        return self._printer
-
-    def get(self, name, default=None):
-        return self._values.get(name, default)
-
-    def getlist(self, name, default=None):
-        return self._values.get(name, default)
-
-    def getfloat(self, name, default=None, **kw):
-        return self._values.get(name, default)
-
-    def getfloatlist(self, name, default=None):
-        return self._values.get(name, default)
-
-    def getint(self, name, default=None, **kw):
-        return self._values.get(name, default)
 
 
 def _motor(name, node_name, chain_index, invert=False):
@@ -267,10 +177,14 @@ def make_autotune(
         _rail("x", [_motor("motor_a", "n", 0)]),
         _rail("y", [_motor("motor_b", "n", 1, invert=True)]),
     ]
-    node = FakeNode("ethercat_node n", 1, {"motor_a": 0, "motor_b": 1})
+    node = FakeNode(
+        handle=1,
+        slots={"motor_a": 0, "motor_b": 1},
+        name="ethercat_node n",
+    )
     objs = {
         "gcode": gcode,
-        "toolhead": FakeToolhead(FakeKin(rails)),
+        "toolhead": FakeToolhead(FakeKin(rails, kind="corexy")),
         "servo_capture": FakeServoCapture(),
         "motion_engine": FakeEngine(engine_values or dict(GOOD_ENGINE_VALUES)),
         "ethercat_node n": node,

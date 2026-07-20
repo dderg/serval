@@ -1,38 +1,10 @@
 import types
 
 import pytest
+from fakes import FakeConfigError, FakeRail
+from fakes import FakeEngine as _FakeEngine
 
 from klippy.extras import ethercat_node
-
-
-class FakeConfigError(Exception):
-    pass
-
-
-class FakeRail:
-    def __init__(
-        self,
-        motor_name,
-        chain_index,
-        ff_config=(False, 30.0, 0),
-        dynamics_profile=None,
-    ):
-        self._motor_name = motor_name
-        self._chain_index = chain_index
-        self._ff_config = ff_config
-        self._dynamics_profile = dynamics_profile
-
-    def get_motor_name(self):
-        return self._motor_name
-
-    def get_chain_index(self):
-        return self._chain_index
-
-    def get_ff_config(self):
-        return self._ff_config
-
-    def get_dynamics_profile(self):
-        return self._dynamics_profile
 
 
 def _node(rails):
@@ -42,12 +14,22 @@ def _node(rails):
 
 
 def test_validate_chain_accepts_distinct_indices():
-    node, rails = _node([(0, FakeRail("x", 0)), (2, FakeRail("y", 1))])
+    node, rails = _node(
+        [
+            (0, FakeRail(motor_name="x", chain_index=0)),
+            (2, FakeRail(motor_name="y", chain_index=1)),
+        ]
+    )
     ethercat_node.EtherCatNode._validate_chain(node, rails)
 
 
 def test_validate_chain_rejects_duplicate_index():
-    node, rails = _node([(0, FakeRail("x", 0)), (1, FakeRail("y", 0))])
+    node, rails = _node(
+        [
+            (0, FakeRail(motor_name="x", chain_index=0)),
+            (1, FakeRail(motor_name="y", chain_index=0)),
+        ]
+    )
     with pytest.raises(FakeConfigError) as e:
         ethercat_node.EtherCatNode._validate_chain(node, rails)
     assert "share ethercat_chain_index=0" in str(e.value)
@@ -56,7 +38,7 @@ def test_validate_chain_rejects_duplicate_index():
 
 def test_validate_chain_rejects_out_of_range_index():
     bad = ethercat_node.EC_RT_MAX_SLAVES
-    node, rails = _node([(0, FakeRail("x", bad))])
+    node, rails = _node([(0, FakeRail(motor_name="x", chain_index=bad))])
     with pytest.raises(FakeConfigError) as e:
         ethercat_node.EtherCatNode._validate_chain(node, rails)
     assert "exceeds" in str(e.value)
@@ -65,8 +47,18 @@ def test_validate_chain_rejects_out_of_range_index():
 def test_validate_chain_accepts_per_motor_ff_differences():
     node, rails = _node(
         [
-            (0, FakeRail("x", 0, ff_config=(False, 30.0, 0))),
-            (1, FakeRail("y", 1, ff_config=(True, 60.0, 2))),
+            (
+                0,
+                FakeRail(
+                    motor_name="x", chain_index=0, ff_config=(False, 30.0, 0)
+                ),
+            ),
+            (
+                1,
+                FakeRail(
+                    motor_name="y", chain_index=1, ff_config=(True, 60.0, 2)
+                ),
+            ),
         ]
     )
     ethercat_node.EtherCatNode._validate_chain(node, rails)
@@ -81,15 +73,34 @@ def _dyn_node(rails, node_profile=None):
 
 
 def test_validate_dynamics_none_configured_is_ok():
-    node, rails = _dyn_node([(0, FakeRail("x", 0)), (1, FakeRail("y", 1))])
+    node, rails = _dyn_node(
+        [
+            (0, FakeRail(motor_name="x", chain_index=0)),
+            (1, FakeRail(motor_name="y", chain_index=1)),
+        ]
+    )
     ethercat_node.EtherCatNode._validate_dynamics_profiles(node, rails)
 
 
 def test_validate_dynamics_per_servo_all_set_is_ok():
     node, rails = _dyn_node(
         [
-            (0, FakeRail("x", 0, dynamics_profile="/cfg/x.toml")),
-            (1, FakeRail("y", 1, dynamics_profile="/cfg/y.toml")),
+            (
+                0,
+                FakeRail(
+                    motor_name="x",
+                    chain_index=0,
+                    dynamics_profile="/cfg/x.toml",
+                ),
+            ),
+            (
+                1,
+                FakeRail(
+                    motor_name="y",
+                    chain_index=1,
+                    dynamics_profile="/cfg/y.toml",
+                ),
+            ),
         ]
     )
     ethercat_node.EtherCatNode._validate_dynamics_profiles(node, rails)
@@ -98,8 +109,15 @@ def test_validate_dynamics_per_servo_all_set_is_ok():
 def test_validate_dynamics_rejects_node_and_per_servo_mix():
     node, rails = _dyn_node(
         [
-            (0, FakeRail("x", 0, dynamics_profile="/cfg/x.toml")),
-            (1, FakeRail("y", 1)),
+            (
+                0,
+                FakeRail(
+                    motor_name="x",
+                    chain_index=0,
+                    dynamics_profile="/cfg/x.toml",
+                ),
+            ),
+            (1, FakeRail(motor_name="y", chain_index=1)),
         ],
         node_profile="/cfg/node.toml",
     )
@@ -111,8 +129,15 @@ def test_validate_dynamics_rejects_node_and_per_servo_mix():
 def test_validate_dynamics_rejects_partial_per_servo():
     node, rails = _dyn_node(
         [
-            (0, FakeRail("x", 0, dynamics_profile="/cfg/x.toml")),
-            (1, FakeRail("y", 1)),
+            (
+                0,
+                FakeRail(
+                    motor_name="x",
+                    chain_index=0,
+                    dynamics_profile="/cfg/x.toml",
+                ),
+            ),
+            (1, FakeRail(motor_name="y", chain_index=1)),
         ]
     )
     with pytest.raises(FakeConfigError) as e:
@@ -120,10 +145,7 @@ def test_validate_dynamics_rejects_partial_per_servo():
     assert "missing on: y" in str(e.value)
 
 
-class FakeEngine:
-    def __init__(self):
-        self.calls = []
-
+class FakeEngine(_FakeEngine):
     def set_torque(self, handle, value, print_time):
         self.calls.append((handle, value, print_time))
 
@@ -171,8 +193,18 @@ def test_set_motor_torque_without_engine_handle_raises():
 def test_coupled_uniformity_rejects_mismatched_ff_lead():
     node, rails = _dyn_node(
         [
-            (0, FakeRail("x", 0, ff_config=(True, 30.0, 500.0))),
-            (1, FakeRail("y", 1, ff_config=(True, 30.0, 0.0))),
+            (
+                0,
+                FakeRail(
+                    motor_name="x", chain_index=0, ff_config=(True, 30.0, 500.0)
+                ),
+            ),
+            (
+                1,
+                FakeRail(
+                    motor_name="y", chain_index=1, ff_config=(True, 30.0, 0.0)
+                ),
+            ),
         ],
         node_profile="/cfg/node.toml",
     )
@@ -185,8 +217,18 @@ def test_coupled_uniformity_rejects_mismatched_ff_lead():
 def test_coupled_uniformity_rejects_mismatched_velocity_ff():
     node, rails = _dyn_node(
         [
-            (0, FakeRail("x", 0, ff_config=(True, 30.0, 0))),
-            (1, FakeRail("y", 1, ff_config=(False, 30.0, 0))),
+            (
+                0,
+                FakeRail(
+                    motor_name="x", chain_index=0, ff_config=(True, 30.0, 0)
+                ),
+            ),
+            (
+                1,
+                FakeRail(
+                    motor_name="y", chain_index=1, ff_config=(False, 30.0, 0)
+                ),
+            ),
         ],
         node_profile="/cfg/node.toml",
     )
@@ -198,8 +240,18 @@ def test_coupled_uniformity_rejects_mismatched_velocity_ff():
 def test_coupled_uniformity_rejects_mismatched_torque_clamp():
     node, rails = _dyn_node(
         [
-            (0, FakeRail("x", 0, ff_config=(True, 30.0, 0))),
-            (1, FakeRail("y", 1, ff_config=(True, 60.0, 0))),
+            (
+                0,
+                FakeRail(
+                    motor_name="x", chain_index=0, ff_config=(True, 30.0, 0)
+                ),
+            ),
+            (
+                1,
+                FakeRail(
+                    motor_name="y", chain_index=1, ff_config=(True, 60.0, 0)
+                ),
+            ),
         ],
         node_profile="/cfg/node.toml",
     )
@@ -211,8 +263,18 @@ def test_coupled_uniformity_rejects_mismatched_torque_clamp():
 def test_coupled_uniformity_allows_identical_ff_config():
     node, rails = _dyn_node(
         [
-            (0, FakeRail("x", 0, ff_config=(True, 30.0, 2))),
-            (1, FakeRail("y", 1, ff_config=(True, 30.0, 2))),
+            (
+                0,
+                FakeRail(
+                    motor_name="x", chain_index=0, ff_config=(True, 30.0, 2)
+                ),
+            ),
+            (
+                1,
+                FakeRail(
+                    motor_name="y", chain_index=1, ff_config=(True, 30.0, 2)
+                ),
+            ),
         ],
         node_profile="/cfg/node.toml",
     )
@@ -222,8 +284,18 @@ def test_coupled_uniformity_allows_identical_ff_config():
 def test_coupled_uniformity_allows_mismatch_on_independent_motors():
     node, rails = _dyn_node(
         [
-            (0, FakeRail("x", 0, ff_config=(True, 30.0, 3))),
-            (1, FakeRail("y", 1, ff_config=(False, 60.0, 0))),
+            (
+                0,
+                FakeRail(
+                    motor_name="x", chain_index=0, ff_config=(True, 30.0, 3)
+                ),
+            ),
+            (
+                1,
+                FakeRail(
+                    motor_name="y", chain_index=1, ff_config=(False, 60.0, 0)
+                ),
+            ),
         ]
     )
     ethercat_node.EtherCatNode._validate_coupled_uniformity(node, rails)

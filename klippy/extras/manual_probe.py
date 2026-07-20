@@ -142,11 +142,7 @@ class ManualProbeHelper:
         if toolhead_pos == self.last_toolhead_pos:
             return self.last_kinematics_pos
         self.toolhead.flush_step_generation()
-        kin = self.toolhead.get_kinematics()
-        kin_spos = {
-            s.get_name(): s.get_commanded_position() for s in kin.get_steppers()
-        }
-        kin_pos = kin.calc_position(kin_spos)
+        kin_pos = list(toolhead_pos[:3])
         self.last_toolhead_pos = toolhead_pos
         self.last_kinematics_pos = kin_pos
         return kin_pos

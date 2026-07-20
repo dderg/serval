@@ -1,4 +1,5 @@
 import pytest
+from fakes import FakeEngine, FakeGcmd, FakeToolhead
 
 from klippy.extras import homing as homing_mod
 
@@ -58,34 +59,6 @@ def test_homing_max_travel_endstop_inside_range():
     )
 
 
-class FakeToolhead:
-    def __init__(self, pos):
-        self.pos = list(pos)
-        self.events = []
-
-    def get_position(self):
-        return list(self.pos)
-
-    def set_position(self, newpos, homing_axes=None):
-        self.pos = list(newpos)
-        self.events.append(("set_position", list(newpos)))
-
-    def move(self, newpos, speed):
-        self.pos = list(newpos)
-        self.events.append(("move", list(newpos), speed))
-
-    def wait_moves(self):
-        self.events.append(("wait_moves",))
-
-
-class FakeEngine:
-    def __init__(self):
-        self.finalize_calls = []
-
-    def finalize_homed_axis(self, handle, axis, pos):
-        self.finalize_calls.append((handle, axis, pos))
-
-
 def _hi(min_home_dist=15.0, speed=50.0, retract_speed=25.0, retract_dist=5.0):
     from klippy.rail import HomingInfo
 
@@ -104,7 +77,7 @@ def _hi(min_home_dist=15.0, speed=50.0, retract_speed=25.0, retract_dist=5.0):
 
 def test_commit_and_seed_seeds_post_retract_position():
     axis = 0
-    toolhead = FakeToolhead([0.0, 0.0, 0.0])
+    toolhead = FakeToolhead(position=[0.0, 0.0, 0.0])
     engine = FakeEngine()
     hi = _hi(retract_dist=5.0)
     homing_mod._commit_and_seed(
@@ -120,11 +93,11 @@ def test_commit_and_seed_seeds_post_retract_position():
         servo_handle="h",
     )
     assert toolhead.get_position()[axis] == 15.0
-    assert engine.finalize_calls == [("h", 0, [15.0, 0.0, 0.0])]
+    assert engine.calls == [("finalize_homed_axis", "h", 0, [15.0, 0.0, 0.0])]
 
 
 def test_commit_and_seed_no_servo_does_not_seed():
-    toolhead = FakeToolhead([0.0, 0.0, 0.0])
+    toolhead = FakeToolhead(position=[0.0, 0.0, 0.0])
     engine = FakeEngine()
     homing_mod._commit_and_seed(
         toolhead,
@@ -138,11 +111,7 @@ def test_commit_and_seed_no_servo_does_not_seed():
         provider=None,
         servo_handle=None,
     )
-    assert engine.finalize_calls == []
-
-
-class FakeGcmd:
-    error = RuntimeError
+    assert engine.calls == []
 
 
 def _approach_script(toolhead, axis, traveled_per_call, overshoot=0.0):
@@ -165,10 +134,10 @@ def _approach_script(toolhead, axis, traveled_per_call, overshoot=0.0):
 
 def test_no_rehome_when_first_travel_exceeds_min():
     axis = 0
-    toolhead = FakeToolhead([0.0, 0.0, 0.0])
+    toolhead = FakeToolhead(position=[0.0, 0.0, 0.0])
     approach, calls = _approach_script(toolhead, axis, [100.0])
     trip, final = homing_mod._run_homing_attempts(
-        FakeGcmd(),
+        FakeGcmd(error=RuntimeError),
         toolhead,
         axis,
         1.0,
@@ -185,10 +154,10 @@ def test_no_rehome_when_first_travel_exceeds_min():
 
 def test_rehome_backoff_stays_within_axis_bounds():
     axis = 0
-    toolhead = FakeToolhead([0.0, 0.0, 0.0])
+    toolhead = FakeToolhead(position=[0.0, 0.0, 0.0])
     approach, calls = _approach_script(toolhead, axis, [2.0, 20.0])
     trip, final = homing_mod._run_homing_attempts(
-        FakeGcmd(),
+        FakeGcmd(error=RuntimeError),
         toolhead,
         axis,
         1.0,
@@ -206,19 +175,19 @@ def test_rehome_backoff_stays_within_axis_bounds():
     # Backoff is computed from the endstop position (20) minus min_home_dist
     # (15), landing at +5 inside the axis range rather than a negative
     # raw-frame coordinate.
-    assert ("move", [5.0, 0.0, 0.0], 25.0) in toolhead.events
-    assert ("set_position", [20.0, 0.0, 0.0]) in toolhead.events
+    assert ("move", [5.0, 0.0, 0.0], 25.0) in toolhead.calls
+    assert ("set_position", [20.0, 0.0, 0.0], (0,)) in toolhead.calls
     assert trip[axis] == 25.0
 
 
 def test_rehome_backoff_within_bounds_for_min_endstop():
     axis = 0
-    toolhead = FakeToolhead([0.0, 0.0, 0.0])
+    toolhead = FakeToolhead(position=[0.0, 0.0, 0.0])
     approach, calls = _approach_script(toolhead, axis, [-2.0, -20.0])
     hi = _hi(min_home_dist=15.0)
     hi = hi._replace(positive_dir=False, position_endstop=0.0)
     homing_mod._run_homing_attempts(
-        FakeGcmd(),
+        FakeGcmd(error=RuntimeError),
         toolhead,
         axis,
         -1.0,
@@ -230,16 +199,16 @@ def test_rehome_backoff_within_bounds_for_min_endstop():
         approach=approach,
     )
     # Min endstop at 0, direction -1: backoff = 0 - (-1)*15 = +15, in range.
-    assert ("move", [15.0, 0.0, 0.0], 25.0) in toolhead.events
+    assert ("move", [15.0, 0.0, 0.0], 25.0) in toolhead.calls
 
 
 def test_rehome_then_still_early_raises():
     axis = 0
-    toolhead = FakeToolhead([0.0, 0.0, 0.0])
+    toolhead = FakeToolhead(position=[0.0, 0.0, 0.0])
     approach, calls = _approach_script(toolhead, axis, [2.0, 1.0])
     with pytest.raises(RuntimeError, match="early homing trigger"):
         homing_mod._run_homing_attempts(
-            FakeGcmd(),
+            FakeGcmd(error=RuntimeError),
             toolhead,
             axis,
             1.0,
@@ -255,10 +224,10 @@ def test_rehome_then_still_early_raises():
 
 def test_min_home_dist_zero_never_rehomes():
     axis = 0
-    toolhead = FakeToolhead([0.0, 0.0, 0.0])
+    toolhead = FakeToolhead(position=[0.0, 0.0, 0.0])
     approach, calls = _approach_script(toolhead, axis, [0.0])
     homing_mod._run_homing_attempts(
-        FakeGcmd(),
+        FakeGcmd(error=RuntimeError),
         toolhead,
         axis,
         1.0,

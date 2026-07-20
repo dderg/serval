@@ -1,4 +1,5 @@
 import pytest
+from fakes import FakeGcmd
 
 from klippy import configfile, motion_setup
 from klippy.motion import Motion
@@ -73,20 +74,6 @@ class CaptureEngine:
         return (300.0, 3000.0, 0.02)
 
 
-class FakeGcmd:
-    error = ConfigError
-
-    def __init__(self, **params):
-        self.params = params
-        self.responses = []
-
-    def get_float(self, key, default=None, **kwargs):
-        return self.params.get(key, default)
-
-    def respond_info(self, msg):
-        self.responses.append(msg)
-
-
 def make_motion():
     m = Motion.__new__(Motion)
     m._max_velocity = 300.0
@@ -99,13 +86,15 @@ def make_motion():
 
 def test_set_velocity_limit_corner_deviation_passes_through():
     m = make_motion()
-    m.cmd_SET_VELOCITY_LIMIT(FakeGcmd(CORNER_DEVIATION=0.05))
+    m.cmd_SET_VELOCITY_LIMIT(FakeGcmd(CORNER_DEVIATION=0.05, error=ConfigError))
     assert m.engine.corner_deviation_calls == [0.05]
 
 
 def test_set_velocity_limit_scv_converts_at_configured_max_accel():
     m = make_motion()
-    m.cmd_SET_VELOCITY_LIMIT(FakeGcmd(SQUARE_CORNER_VELOCITY=8.0))
+    m.cmd_SET_VELOCITY_LIMIT(
+        FakeGcmd(SQUARE_CORNER_VELOCITY=8.0, error=ConfigError)
+    )
     assert m.engine.corner_deviation_calls == [
         pytest.approx(motion_setup.corner_deviation_from_scv(8.0, 3000.0))
     ]
@@ -115,14 +104,18 @@ def test_set_velocity_limit_rejects_both_corner_keys():
     m = make_motion()
     with pytest.raises(ConfigError, match="exactly one"):
         m.cmd_SET_VELOCITY_LIMIT(
-            FakeGcmd(SQUARE_CORNER_VELOCITY=8.0, CORNER_DEVIATION=0.05)
+            FakeGcmd(
+                SQUARE_CORNER_VELOCITY=8.0,
+                CORNER_DEVIATION=0.05,
+                error=ConfigError,
+            )
         )
     assert m.engine.corner_deviation_calls == []
 
 
 def test_set_velocity_limit_report_includes_both_corner_values():
     m = make_motion()
-    gcmd = FakeGcmd()
+    gcmd = FakeGcmd(error=ConfigError)
     m.cmd_SET_VELOCITY_LIMIT(gcmd)
     assert len(gcmd.responses) == 1
     assert "corner_deviation=0.02" in gcmd.responses[0]

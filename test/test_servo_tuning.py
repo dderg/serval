@@ -1,12 +1,18 @@
 import json
 
 import pytest
+from fakes import (
+    FakeConfigError,
+    FakeGcode,
+    FakeKin,
+    FakeNode,
+    FakeToolhead,
+)
+from fakes import FakeEngine as _FakeEngine
+from fakes import FakeGcmd as _FakeGcmd
+from fakes import FakePrinter as _FakePrinter
 
 from klippy.extras import servo_axis, servo_param, servo_tuning
-
-
-class FakeConfigError(Exception):
-    pass
 
 
 @pytest.fixture(autouse=True)
@@ -115,33 +121,13 @@ def test_tuning_profile_missing_file_is_config_error():
     assert "not found" in msg
 
 
-class FakeGcmd:
+class FakeGcmd(_FakeGcmd):
     error = RuntimeError
 
-    def __init__(self, **params):
-        self._params = params
-        self.responses = []
 
-    def get_commandline(self):
-        return "FAKE_CMD " + " ".join(
-            "%s=%s" % kv for kv in self._params.items()
-        )
-
-    def get(self, name, default=None):
-        return self._params.get(name, default)
-
-    def get_int(self, name, default=None, **kw):
-        val = self._params.get(name, default)
-        if val is None:
-            return default
-        return int(val)
-
-    def respond_info(self, msg):
-        self.responses.append(msg)
-
-
-class FakeReadEngine:
+class FakeReadEngine(_FakeEngine):
     def __init__(self, values, fail_addrs=None):
+        super().__init__()
         self.values = values
         self.fail_addrs = fail_addrs or set()
 
@@ -151,44 +137,10 @@ class FakeReadEngine:
         return self.values[(index, subindex)]
 
 
-class FakeNode:
-    name = "node_x"
-
-    def __init__(self, handle=7, slots=None):
-        self._h = handle
-        self._slots = slots or {}
-
-    def get_engine_handle(self):
-        return self._h
-
-    def get_slot_for_motor(self, motor_name):
-        return self._slots.get(motor_name, 0)
-
-
-class FakeKin:
-    def __init__(self, rails):
-        self.rails = rails
-
-    def coupled_xy(self):
-        return False
-
-
-class FakeToolhead:
-    def __init__(self, kin):
-        self.kin = kin
-
-    def get_kinematics(self):
-        return self.kin
-
-
-class FakePrinter:
-    command_error = RuntimeError
-
+class FakePrinter(_FakePrinter):
     def __init__(self, objs):
-        self._objs = objs
-
-    def lookup_object(self, name):
-        return self._objs[name]
+        super().__init__(objs)
+        self.objects = objs
 
 
 READBACK = {
@@ -487,14 +439,6 @@ class FakeTuningConfig:
         return FakeConfigError(msg)
 
 
-class FakeGCode:
-    def __init__(self):
-        self.registered = {}
-
-    def register_command(self, name, func, desc=None):
-        self.registered[name] = func
-
-
 class FakeMotor:
     def __init__(self, motor_name, node_name, sdo_params=(), chain_index=0):
         self._motor_name = motor_name
@@ -566,8 +510,9 @@ def _full_readback(overrides=None):
     return values
 
 
-class FakeWriteEngine:
+class FakeWriteEngine(_FakeEngine):
     def __init__(self, mismatch_addr=None, fail_addrs=None):
+        super().__init__()
         self.writes = []
         self.mismatch_addr = mismatch_addr
         self.fail_addrs = fail_addrs or set()
@@ -605,7 +550,7 @@ def _two_motor_printer(engine, node=None, sdo_params_by_motor=None):
         "toolhead": FakeToolhead(FakeKin([rail])),
         "ethercat_node node_x": node,
         "motion_engine": engine,
-        "gcode": FakeGCode(),
+        "gcode": FakeGcode(),
     }
     return objs, motor_a, motor_b
 
@@ -862,7 +807,7 @@ def test_tune_no_engine_handle_is_error():
 
 def test_extra_params_parsed_and_appended(tmp_path):
     printer = FakePrinter(
-        {"gcode": FakeGCode(), "toolhead": FakeToolhead(FakeKin([]))}
+        {"gcode": FakeGcode(), "toolhead": FakeToolhead(FakeKin([]))}
     )
     config = FakeTuningConfig(
         printer,
@@ -878,7 +823,7 @@ def test_extra_params_parsed_and_appended(tmp_path):
 
 def test_extra_params_bad_line_is_config_error():
     printer = FakePrinter(
-        {"gcode": FakeGCode(), "toolhead": FakeToolhead(FakeKin([]))}
+        {"gcode": FakeGcode(), "toolhead": FakeToolhead(FakeKin([]))}
     )
     config = FakeTuningConfig(
         printer, values={"extra_params": "bad_line_too_few_fields\n"}
@@ -889,7 +834,7 @@ def test_extra_params_bad_line_is_config_error():
 
 def test_extra_params_bad_type_is_config_error():
     printer = FakePrinter(
-        {"gcode": FakeGCode(), "toolhead": FakeToolhead(FakeKin([]))}
+        {"gcode": FakeGcode(), "toolhead": FakeToolhead(FakeKin([]))}
     )
     config = FakeTuningConfig(
         printer,
@@ -901,7 +846,7 @@ def test_extra_params_bad_type_is_config_error():
 
 def test_extra_params_duplicate_name_is_config_error():
     printer = FakePrinter(
-        {"gcode": FakeGCode(), "toolhead": FakeToolhead(FakeKin([]))}
+        {"gcode": FakeGcode(), "toolhead": FakeToolhead(FakeKin([]))}
     )
     config = FakeTuningConfig(
         printer,

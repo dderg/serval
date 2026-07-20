@@ -1,31 +1,19 @@
 import pytest
+from fakes import FakeCommandError, FakeMcu
+from fakes import FakeEngine as _FakeEngine
+from fakes import FakePrinter as _FakePrinter
+from fakes import FakeReactor as _FakeReactor
 
 from klippy import motion
 
 
-class FakeCommandError(Exception):
-    pass
+def FakePrinter(reactor, shutdown=False):
+    return _FakePrinter(reactor=reactor, shutdown=shutdown)
 
 
-class FakePrinter:
-    command_error = FakeCommandError
-
-    def __init__(self, reactor, shutdown=False):
-        self._reactor = reactor
-        self._shutdown = shutdown
-
-    def get_reactor(self):
-        return self._reactor
-
-    def is_shutdown(self):
-        return self._shutdown
-
-
-class FakeReactor:
-    NOW = 0.0
-
+class FakeReactor(_FakeReactor):
     def __init__(self, step=0.5):
-        self.now = 0.0
+        super().__init__(now=0.0, tick=0.0)
         self.step = step
         self.pauses = 0
 
@@ -35,19 +23,16 @@ class FakeReactor:
     def pause(self, wake_time):
         self.pauses += 1
         self.now = max(wake_time, self.now + self.step)
-
-
-class FakeMcu:
-    def estimated_print_time(self, eventtime):
-        return eventtime
+        return self.now
 
 
 # Mirrors the bridge's entry gate: submit_move pushes into a fixed-capacity
 # entry channel and reports full when the number of in-flight moves reaches the
 # capacity. In-flight moves drain as the wall clock (reactor) advances;
 # `stalled` pins them so the channel never frees.
-class FakeEngine:
+class FakeEngine(_FakeEngine):
     def __init__(self, reactor, in_flight=0, capacity=64, stalled=False):
+        super().__init__()
         self.reactor = reactor
         self._in_flight0 = in_flight
         self._t0 = reactor.now

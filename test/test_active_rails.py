@@ -1,51 +1,41 @@
+from fakes import FakeKin as FakeKinBase
+from fakes import FakeRail, FakeStepper
+from fakes import FakeToolhead as FakeToolheadBase
+
 from klippy.motion import Motion
 from klippy.motion_kinematics import _LinearKinematics
 
 
-class FakeStepper:
-    def __init__(self, name):
-        self._name = name
-        self._active_callbacks = []
-
-    def add_active_callback(self, cb):
-        self._active_callbacks.append(cb)
-
-    def get_name(self, short=False):
-        return self._name
-
-
-class FakeRail:
-    def __init__(self, name, steppers):
-        self._name = name
-        self._steppers = steppers
-
-    def get_name(self, short=False):
-        return self._name if short else "stepper_" + self._name
-
-    def get_steppers(self):
-        return self._steppers
-
-
-class FakeKin:
+class FakeKin(FakeKinBase):
     active_rails = _LinearKinematics.active_rails
 
     def __init__(self, kind, rails):
-        self.kind = kind
-        self.rails = rails
-        self._lanes = [(0, "x", []), (1, "y", []), (2, "z", [])]
-
-    def coupled_xy(self):
-        return self.kind == "corexy"
-
-    def get_steppers(self):
-        return [s for rail in self.rails for s in rail.get_steppers()]
+        super().__init__(rails=rails, kind=kind)
 
 
 def make_kin(kind):
     rails = [
-        FakeRail("x", [FakeStepper("stepper_x"), FakeStepper("stepper_x1")]),
-        FakeRail("y", [FakeStepper("stepper_y"), FakeStepper("stepper_y1")]),
-        FakeRail("z", [FakeStepper("stepper_z"), FakeStepper("stepper_z1")]),
+        FakeRail(
+            name="stepper_x",
+            steppers=[
+                FakeStepper(name="stepper_x"),
+                FakeStepper(name="stepper_x1"),
+            ],
+        ),
+        FakeRail(
+            name="stepper_y",
+            steppers=[
+                FakeStepper(name="stepper_y"),
+                FakeStepper(name="stepper_y1"),
+            ],
+        ),
+        FakeRail(
+            name="stepper_z",
+            steppers=[
+                FakeStepper(name="stepper_z"),
+                FakeStepper(name="stepper_z1"),
+            ],
+        ),
     ]
     return FakeKin(kind, rails)
 
@@ -69,19 +59,20 @@ def test_cartesian_rails_are_independent():
     assert rail_names(kin.active_rails(0.0, 0.0, 5.0)) == ["z"]
 
 
-class FakeToolhead:
+class FakeToolhead(FakeToolheadBase):
     _fire_active_callbacks = Motion._fire_active_callbacks
 
     def __init__(self, kin, follower_steppers=()):
-        self.kin = kin
-        self.follower_steppers = list(follower_steppers)
-        self._clock = 100.0
-        self.move_time_calls = 0
+        super().__init__(
+            kin=kin,
+            follower_steppers=follower_steppers,
+            last_move_time=100.0,
+            move_time_step=0.090,
+        )
 
-    def get_last_move_time(self):
-        self.move_time_calls += 1
-        self._clock += 0.090
-        return self._clock
+    @property
+    def move_time_calls(self):
+        return sum(1 for c in self.calls if c[0] == "get_last_move_time")
 
 
 def arm_callbacks(steppers):
@@ -137,7 +128,7 @@ def test_corexy_x_move_enables_both_gantry_steppers_not_z():
 
 def test_extruder_move_enables_follower_not_kinematic_steppers():
     kin = make_kin("cartesian")
-    follower = FakeStepper("motor_e")
+    follower = FakeStepper(name="motor_e")
     fired = arm_callbacks(all_steppers(kin) + [follower])
     FakeToolhead(kin, follower_steppers=[follower])._fire_active_callbacks(
         (0.0, 0.0, 0.0, 4.0)
@@ -147,7 +138,7 @@ def test_extruder_move_enables_follower_not_kinematic_steppers():
 
 def test_pure_kinematic_move_leaves_follower_disabled():
     kin = make_kin("cartesian")
-    follower = FakeStepper("motor_e")
+    follower = FakeStepper(name="motor_e")
     fired = arm_callbacks(all_steppers(kin) + [follower])
     FakeToolhead(kin, follower_steppers=[follower])._fire_active_callbacks(
         (0.0, 0.0, 5.0, 0.0)

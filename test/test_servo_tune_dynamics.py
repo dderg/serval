@@ -4,6 +4,17 @@ import sys
 import tempfile
 
 import pytest
+from fakes import (
+    FakeConfig,
+    FakeGcode,
+    FakeKin,
+    FakeNode,
+    FakeServoCapture,
+    FakeToolhead,
+)
+from fakes import FakeEngine as _FakeEngine
+from fakes import FakeGcmd as _FakeGcmd
+from fakes import FakePrinter as _FakePrinter
 
 from klippy.extras import servo_axis, servo_calibration
 
@@ -31,159 +42,19 @@ BASELINE_VISCOUS = [0.004, 0.005]
 BASELINE_COULOMB = [1.0, 1.5]
 
 
-class FakeServoCapture:
-    def __init__(self):
-        self.captures = []
-
-    def start_capture_to(self, path, servos):
-        self.captures.append((path, list(servos)))
-
-    def stop_capture(self):
-        return self.captures[-1][0], 1000, 250
-
-
-class FakeGcode:
+class FakeGcmd(_FakeGcmd):
     error = RuntimeError
 
-    def __init__(self):
-        self.commands = {}
-        self.scripts = []
 
-    def register_command(self, name, func, desc=None):
-        self.commands[name] = func
-
-    def run_script_from_command(self, script):
-        self.scripts.append(script)
-
-
-class FakeGcmd:
-    error = RuntimeError
-
-    def __init__(self, **params):
-        self._params = params
-        self.responses = []
-
-    def get_commandline(self):
-        return "FAKE_CMD " + " ".join(
-            "%s=%s" % kv for kv in self._params.items()
-        )
-
-    def get(self, name, default=None):
-        return self._params.get(name, default)
-
-    def get_int(self, name, default=None, minval=None, maxval=None):
-        return int(self._params.get(name, default))
-
-    def get_float(
-        self,
-        name,
-        default=None,
-        minval=None,
-        maxval=None,
-        above=None,
-        below=None,
-    ):
-        value = self._params.get(name, default)
-        value = None if value is None else float(value)
-        if value is not None:
-            if minval is not None and value < minval:
-                raise self.error(
-                    "%s must be at least %s (got %s)" % (name, minval, value)
-                )
-            if maxval is not None and value > maxval:
-                raise self.error(
-                    "%s must be at most %s (got %s)" % (name, maxval, value)
-                )
-            if above is not None and value <= above:
-                raise self.error(
-                    "%s must be above %s (got %s)" % (name, above, value)
-                )
-        return value
-
-    def respond_info(self, msg):
-        self.responses.append(msg)
-
-
-class FakeKin:
-    def __init__(self, rails, coupled=True):
-        self.rails = rails
-        self._coupled = coupled
-
-    def coupled_xy(self):
-        return self._coupled
-
-
-class FakeToolhead:
-    def __init__(self, kin):
-        self.kin = kin
-
-    def get_kinematics(self):
-        return self.kin
-
-
-class FakePrinter:
+class FakePrinter(_FakePrinter):
     command_error = RuntimeError
 
-    def __init__(self, objs):
-        self._objs = objs
 
-    def lookup_object(self, name):
-        return self._objs[name]
-
-
-class FakeConfig:
-    def __init__(self, printer):
-        self._printer = printer
-
-    def get_printer(self):
-        return self._printer
-
-    def get(self, name, default=None):
-        return default
-
-    def getlist(self, name, default=None):
-        return default
-
-    def getfloat(self, name, default=None, **kw):
-        return default
-
-    def getfloatlist(self, name, default=None):
-        return default
-
-    def getint(self, name, default=None, **kw):
-        return default
-
-
-class FakeNode:
-    def __init__(self, name, slots, handle=1, profile=None):
-        self.name = name
-        self._slots = slots
-        self._handle = handle
-        self.dynamics_profile = profile
-
-    def get_engine_handle(self):
-        return self._handle
-
-    def get_slot_for_motor(self, motor_name):
-        return self._slots[motor_name]
-
-    def get_dynamics_profile(self):
-        return self.dynamics_profile
-
-    def get_drive_count(self):
-        return len(self._slots)
-
-    def get_cycle_us(self):
-        return 250
-
-
-class FakeEngine:
+class FakeEngine(_FakeEngine):
     def __init__(self):
+        super().__init__(sdo_read=(2, 7))
         self.dynamics_calls = []
         self.ff_lead_calls = []
-
-    def sdo_read(self, handle, slot, index, subindex):
-        return 2, 7
 
     def set_dynamics_model(self, *args):
         self.dynamics_calls.append(args)
@@ -304,13 +175,13 @@ def make_calibration(
             node_slots.setdefault(m.node_name, {})[m.motor_name] = m.chain_index
     objs = {
         "gcode": gcode,
-        "toolhead": FakeToolhead(FakeKin(rails, coupled)),
+        "toolhead": FakeToolhead(FakeKin(rails=rails, coupled_xy=coupled)),
         "servo_capture": FakeServoCapture(),
         "motion_engine": FakeEngine(),
     }
     for node_name, slots in node_slots.items():
         objs["ethercat_node " + node_name] = FakeNode(
-            node_name, slots, profile=node_profile
+            name=node_name, slots=slots, handle=1, dynamics_profile=node_profile
         )
     sc = servo_calibration.ServoCalibration(FakeConfig(FakePrinter(objs)))
     sc.captures_root = tempfile.mkdtemp()
@@ -396,7 +267,7 @@ def make_calibration(
 
 def _manifest_for(sc):
     run_dir = os.path.dirname(
-        sc.printer.lookup_object("servo_capture").captures[0][0]
+        sc.printer.lookup_object("servo_capture").starts[0][0]
     )
     with open(os.path.join(run_dir, "manifest.json")) as f:
         return json.load(f)

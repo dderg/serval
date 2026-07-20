@@ -1,15 +1,12 @@
 import pytest
+from fakes import FakeEngine, FakeGcmd, FakePrinter, FakeReactor
+from fakes import FakeToolhead as _FakeToolhead
 
 from klippy.extras.homing import Homing
 
 
 class ArmReached(Exception):
     """Sentinel proving trip_move armed the endstop instead of erroring."""
-
-
-class FakeGcmd:
-    def error(self, msg):
-        return RuntimeError(msg)
 
 
 class FakeEndstop:
@@ -32,43 +29,31 @@ class FakeEndstop:
         raise ArmReached()
 
 
-class FakeReactor:
-    def monotonic(self):
-        return 0.0
-
-    def pause(self, waketime):
-        pass
-
-
-class FakePrinter:
-    def get_reactor(self):
-        return FakeReactor()
-
-
-class FakeEngine:
-    def motion_drained(self):
-        return True
-
-
-class FakeToolhead:
+class FakeToolhead(_FakeToolhead):
     def __init__(self, endstop):
+        super().__init__(position=[0.0, 0.0, 0.0, 0.0])
         self.endstop = endstop
 
     def wait_moves(self):
+        super().wait_moves()
         self.endstop.calls.append("wait_moves")
         self.endstop.queued_motion_pending = False
-
-    def get_position(self):
-        return [0.0, 0.0, 0.0, 0.0]
 
 
 def run_trip_move(endstop):
     homing = Homing.__new__(Homing)
-    homing.printer = FakePrinter()
+    homing.printer = FakePrinter(reactor=FakeReactor())
     toolhead = FakeToolhead(endstop)
     entry = {"endstop": endstop, "provider": None}
     homing.trip_move(
-        FakeGcmd(), toolhead, FakeEngine(), 2, -1, 5.0, 40.0, entry
+        FakeGcmd(error=RuntimeError),
+        toolhead,
+        FakeEngine(),
+        2,
+        -1,
+        5.0,
+        40.0,
+        entry,
     )
 
 

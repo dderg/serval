@@ -1,44 +1,18 @@
 import pytest
+from fakes import FakeMcu, FakeReactor
+from fakes import FakePrinter as FakePrinterBase
 
 from klippy.mcu import MIN_SCHEDULE_LEAD, MCU_digital_out
 
 
-class FakeReactor:
-    def monotonic(self):
-        return 1000.0
-
-
-class FakePrinter:
+class FakePrinter(FakePrinterBase):
     command_error = RuntimeError
 
-    def get_reactor(self):
-        return FakeReactor()
-
-    def lookup_object(self, name):
-        assert name == "mcu"
-        return FakeMcu(est_print_time=100.0)
-
-
-class FakeClockSync:
-    def dump_debug(self):
-        return "fake clocksync"
-
-
-class FakeMcu:
-    non_critical_disconnected = False
-
-    def __init__(self, est_print_time):
-        self._est = est_print_time
-        self._clocksync = FakeClockSync()
-
-    def get_name(self):
-        return "fake"
-
-    def estimated_print_time(self, eventtime):
-        return self._est
-
-    def print_time_to_clock(self, print_time):
-        return int(print_time * 1e6)
+    def __init__(self):
+        super().__init__(
+            objects={"mcu": FakeMcu(name="fake", est_print_time=100.0)},
+            reactor=FakeReactor(now=1000.0),
+        )
 
 
 class FakeCmd:
@@ -52,7 +26,7 @@ class FakeCmd:
 def make_pin(est_print_time):
     pin = MCU_digital_out.__new__(MCU_digital_out)
     pin._printer = FakePrinter()
-    pin._mcu = FakeMcu(est_print_time)
+    pin._mcu = FakeMcu(name="fake", est_print_time=est_print_time)
     pin._pin = "PF15"
     pin._invert = 0
     pin._oid = 9

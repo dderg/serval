@@ -1,4 +1,13 @@
 import pytest
+from fakes import (
+    FakeCommandError,
+    FakeGcode,
+    FakeMotion,
+    FakeToolhead,
+)
+from fakes import (
+    FakePrinter as FakePrinterBase,
+)
 
 from klippy.extras import extruder_stepper
 from klippy.kinematics.extruder import PrinterExtruder
@@ -52,33 +61,7 @@ class FakeHeaters:
         return FakeHeater(self._can_extrude)
 
 
-class FakeGcode:
-    def register_command(self, *a, **k):
-        pass
-
-    def register_mux_command(self, *a, **k):
-        pass
-
-
-class FakeToolhead:
-    def __init__(self):
-        self.extruder = None
-
-    def get_max_velocity(self):
-        return 300.0, 3000.0
-
-    def set_extruder(self, extruder, pos):
-        self.extruder = extruder
-
-
-class FakeMotion:
-    def __init__(self, axis_sections):
-        self.axis_sections = axis_sections
-
-
-class FakePrinter:
-    command_error = ConfigError
-
+class FakePrinter(FakePrinterBase):
     def __init__(self, axis_sections=None, can_extrude=True):
         if axis_sections is None:
             axis_sections = [
@@ -87,18 +70,14 @@ class FakePrinter:
                 ("z", [], ["z"], []),
                 ("e", ["x", "y", "z"], ["e"], []),
             ]
-        self.objects = {
-            "heaters": FakeHeaters(can_extrude),
-            "gcode": FakeGcode(),
-            "toolhead": FakeToolhead(),
-            "motion": FakeMotion(axis_sections),
-        }
-
-    def load_object(self, config, name):
-        return self.objects[name]
-
-    def lookup_object(self, name, default=None):
-        return self.objects.get(name, default)
+        super().__init__(
+            objects={
+                "heaters": FakeHeaters(can_extrude),
+                "gcode": FakeGcode(),
+                "toolhead": FakeToolhead(),
+                "motion": FakeMotion(axis_sections=axis_sections),
+            }
+        )
 
 
 def make_extruder_section(
@@ -180,7 +159,7 @@ def test_extruder_check_move_cold_extrude_rejected():
     section = make_extruder_section(can_extrude=False)
     pe = PrinterExtruder(section, 0)
     move = FakeMove(axes_d=[0.0, 0.0, 0.0, 1.0], axes_r=[0.0, 0.0, 0.0, 1.0])
-    with pytest.raises(ConfigError, match="minimum temp"):
+    with pytest.raises(FakeCommandError, match="minimum temp"):
         pe.check_move(move)
 
 
