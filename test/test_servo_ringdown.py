@@ -4,115 +4,26 @@ import sys
 import tempfile
 
 import pytest
+from fakes import (
+    FakeConfig,
+    FakeGcode,
+    FakeKin,
+    FakeNode,
+    FakeServoCapture,
+    FakeToolhead,
+)
+from fakes import FakeEngine as _FakeEngine
+from fakes import FakeGcmd as _FakeGcmd
+from fakes import FakePrinter as _FakePrinter
 
 from klippy.extras import servo_axis, servo_calibration
 
 
-class FakeServoCapture:
-    def __init__(self):
-        self.captures = []
-
-    def start_capture_to(self, path, servos):
-        self.captures.append((path, list(servos)))
-
-    def stop_capture(self):
-        return self.captures[-1][0], 1000, 250
-
-
-class FakeGcode:
-    def __init__(self):
-        self.commands = {}
-        self.scripts = []
-
-    def register_command(self, name, func, desc=None):
-        self.commands[name] = func
-
-    def run_script_from_command(self, script):
-        self.scripts.append(script)
-
+class FakeGcmd(_FakeGcmd):
     error = RuntimeError
 
 
-class FakeGcmd:
-    error = RuntimeError
-
-    def __init__(self, **params):
-        self._params = params
-        self.responses = []
-
-    def get_commandline(self):
-        return "FAKE_CMD " + " ".join(
-            "%s=%s" % kv for kv in self._params.items()
-        )
-
-    def get(self, name, default=None):
-        return self._params.get(name, default)
-
-    def get_int(self, name, default=None, minval=None, maxval=None):
-        value = int(self._params.get(name, default))
-        if minval is not None and value < minval:
-            raise self.error("%s=%d below minimum %d" % (name, value, minval))
-        return value
-
-    def get_float(
-        self,
-        name,
-        default=None,
-        minval=None,
-        maxval=None,
-        above=None,
-        below=None,
-    ):
-        return float(self._params.get(name, default))
-
-    def respond_info(self, msg):
-        self.responses.append(msg)
-
-
-class FakeKin:
-    def __init__(self, rails, coupled=True):
-        self.rails = rails
-        self._coupled = coupled
-
-    def coupled_xy(self):
-        return self._coupled
-
-    def get_kinematics(self):
-        return self
-
-    def get_status(self, eventtime):
-        return {"homed_axes": "xyz"}
-
-
-class FakeToolhead:
-    def __init__(self, kin):
-        self.kin = kin
-        self.move_time = 100.0
-
-    def get_kinematics(self):
-        return self.kin
-
-    def get_last_move_time(self):
-        self.move_time += 1.25
-        return self.move_time
-
-
-class FakeNode:
-    def __init__(self, name, slots):
-        self.name = name
-        self._slots = slots
-
-    def get_engine_handle(self):
-        return 1
-
-    def get_slot_for_motor(self, motor_name):
-        return self._slots[motor_name]
-
-
-class FakeEngine:
-    def __init__(self):
-        self.calls = []
-
+class FakeEngine(_FakeEngine):
     def sdo_read(self, handle, slot, index, subindex):
         return 2, 7
 
@@ -120,10 +31,10 @@ class FakeEngine:
         return 3000.0, 25000.0, 0.05
 
     def set_post_processor_bypass(self, enabled):
-        self.calls.append(("bypass", enabled))
+        return self._call("bypass", enabled)
 
     def set_jerk_override(self, jerk):
-        self.calls.append(("jerk", jerk))
+        return self._call("jerk", jerk)
 
 
 class FakeAccelClient:
@@ -152,37 +63,8 @@ class FakeAccelChip:
         return client
 
 
-class FakePrinter:
+class FakePrinter(_FakePrinter):
     command_error = RuntimeError
-
-    def __init__(self, objs):
-        self._objs = objs
-
-    def lookup_object(self, name):
-        return self._objs[name]
-
-
-class FakeConfig:
-    def __init__(self, printer):
-        self._printer = printer
-
-    def get_printer(self):
-        return self._printer
-
-    def get(self, name, default=None):
-        return default
-
-    def getlist(self, name, default=None):
-        return default
-
-    def getfloat(self, name, default=None, **kw):
-        return default
-
-    def getfloatlist(self, name, default=None):
-        return default
-
-    def getint(self, name, default=None, **kw):
-        return default
 
 
 def _make_rail(motor, node_name, axis, invert=False):
@@ -208,15 +90,15 @@ def make_calibration(coupled=True):
     ]
     objs = {
         "gcode": gcode,
-        "toolhead": FakeToolhead(FakeKin(rails, coupled)),
+        "toolhead": FakeToolhead(FakeKin(rails=rails, coupled_xy=coupled)),
         "servo_capture": FakeServoCapture(),
         "motion_engine": FakeEngine(),
         "adxl345 tool": FakeAccelChip(),
         "ethercat_node drive_a": FakeNode(
-            "ethercat_node drive_a", {"motor_a": 0}
+            handle=1, slots={"motor_a": 0}, name="ethercat_node drive_a"
         ),
         "ethercat_node drive_b": FakeNode(
-            "ethercat_node drive_b", {"motor_b": 0}
+            handle=1, slots={"motor_b": 0}, name="ethercat_node drive_b"
         ),
     }
     sc = servo_calibration.ServoCalibration(FakeConfig(FakePrinter(objs)))
@@ -249,7 +131,7 @@ def _cap(sc):
 
 
 def _manifest_for(sc):
-    run_dir = os.path.dirname(_cap(sc).captures[0][0])
+    run_dir = os.path.dirname(_cap(sc).starts[0][0])
     with open(os.path.join(run_dir, "manifest.json")) as f:
         return json.load(f)
 
@@ -345,7 +227,7 @@ def test_bypass_and_jerk_wrap_the_strokes_and_restore():
 
 def test_bypass_and_jerk_restore_on_failure():
     sc, gcode = make_calibration()
-    sc.printer._objs["adxl345 tool"] = FakeAccelChip(valid=False)
+    sc.printer.add_object("adxl345 tool", FakeAccelChip(valid=False))
     with pytest.raises(RuntimeError, match="no data"):
         sc.cmd_SERVO_MEASURE_RINGDOWN(
             FakeGcmd(AXIS="X", SPEEDS="250", ACCEL_CHIP="adxl345 tool")
@@ -392,14 +274,14 @@ def test_accel_chip_capture_recorded_in_manifest():
     manifest = _manifest_for(sc)
     step = manifest["steps"][0]
     assert step["accel"] == "step_ringdown_v250_accel.csv"
-    run_dir = os.path.dirname(_cap(sc).captures[0][0])
+    run_dir = os.path.dirname(_cap(sc).starts[0][0])
     assert os.path.exists(os.path.join(run_dir, step["accel"]))
 
 
 def test_diagonal_axis_captures_one_belt():
     sc, gcode = make_calibration()
     sc.cmd_SERVO_MEASURE_RINGDOWN(FakeGcmd(AXIS="A", SPEEDS="250"))
-    assert _cap(sc).captures[0][1] == ["motor_a"]
+    assert _cap(sc).starts[0][1] == ["motor_a"]
     manifest = _manifest_for(sc)
     assert manifest["belts"] is None, "diagonal runs must not combine belts"
 
@@ -409,14 +291,14 @@ def test_corexy_x_records_belts_for_the_combined_source():
     sc.cmd_SERVO_MEASURE_RINGDOWN(FakeGcmd(AXIS="X", SPEEDS="250"))
     manifest = _manifest_for(sc)
     assert manifest["belts"] is not None
-    servos = _cap(sc).captures[0][1]
+    servos = _cap(sc).starts[0][1]
     assert "motor_a" in servos and "motor_b" in servos
 
 
 def test_analyze_invoked_on_the_run_dir():
     sc, gcode = make_calibration()
     sc.cmd_SERVO_MEASURE_RINGDOWN(FakeGcmd(AXIS="X", SPEEDS="250"))
-    run_dir = os.path.dirname(_cap(sc).captures[0][0])
+    run_dir = os.path.dirname(_cap(sc).starts[0][0])
     analyze = [
         argv
         for s in gcode.scripts

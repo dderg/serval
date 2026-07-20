@@ -211,3 +211,15 @@ class FakeConfig:
             parser=str,
             note_valid=note_valid,
         )
+
+    def getfloatlist(
+        self, option, default=_UNSET, sep=",", count=None, note_valid=True
+    ):
+        return self.getlists(
+            option,
+            default,
+            seps=(sep,),
+            count=count,
+            parser=float,
+            note_valid=note_valid,
+        )

@@ -4,139 +4,45 @@ import sys
 import tempfile
 
 import pytest
+from fakes import (
+    FakeConfig,
+    FakeEngine,
+    FakeKin,
+    FakeNode,
+    FakeToolhead,
+)
+from fakes import FakeGcmd as _FakeGcmd
+from fakes import FakeGcode as _FakeGcode
+from fakes import FakePrinter as _FakePrinter
+from fakes import FakeServoCapture as _FakeServoCapture
 
 from klippy.extras import servo_axis, servo_calibration
 
 
-class FakeServoCapture:
+class FakeGcode(_FakeGcode):
+    error = RuntimeError
+
+
+class FakeServoCapture(_FakeServoCapture):
     def __init__(self):
+        super().__init__()
         self.captures = []
 
     def start_capture_to(self, path, servos):
+        super().start_capture_to(path, servos)
         self.captures.append((path, list(servos)))
 
     def stop_capture(self):
+        super().stop_capture()
         return self.captures[-1][0], 1000, 250
 
 
-class FakeGcode:
-    def __init__(self):
-        self.commands = {}
-        self.scripts = []
-
-    def register_command(self, name, func, desc=None):
-        self.commands[name] = func
-
-    def run_script_from_command(self, script):
-        self.scripts.append(script)
-
+class FakeGcmd(_FakeGcmd):
     error = RuntimeError
 
 
-class FakeGcmd:
-    error = RuntimeError
-
-    def __init__(self, **params):
-        self._params = params
-        self.responses = []
-
-    def get_commandline(self):
-        return "FAKE_CMD " + " ".join(
-            "%s=%s" % kv for kv in self._params.items()
-        )
-
-    def get(self, name, default=None):
-        return self._params.get(name, default)
-
-    def get_int(self, name, default=None, minval=None, maxval=None):
-        return int(self._params.get(name, default))
-
-    def get_float(
-        self,
-        name,
-        default=None,
-        minval=None,
-        maxval=None,
-        above=None,
-        below=None,
-    ):
-        return float(self._params.get(name, default))
-
-    def respond_info(self, msg):
-        self.responses.append(msg)
-
-
-class FakeKin:
-    def __init__(self, rails, coupled=True):
-        self.rails = rails
-        self._coupled = coupled
-
-    def coupled_xy(self):
-        return self._coupled
-
-    def get_kinematics(self):
-        return self
-
-    def get_status(self, eventtime):
-        return {"homed_axes": "xyz"}
-
-
-class FakeToolhead:
-    def __init__(self, kin):
-        self.kin = kin
-
-    def get_kinematics(self):
-        return self.kin
-
-
-class FakeNode:
-    def __init__(self, name, slots):
-        self.name = name
-        self._slots = slots
-
-    def get_engine_handle(self):
-        return 1
-
-    def get_slot_for_motor(self, motor_name):
-        return self._slots[motor_name]
-
-
-class FakeEngine:
-    def sdo_read(self, handle, slot, index, subindex):
-        return 2, 7
-
-
-class FakePrinter:
+class FakePrinter(_FakePrinter):
     command_error = RuntimeError
-
-    def __init__(self, objs):
-        self._objs = objs
-
-    def lookup_object(self, name):
-        return self._objs[name]
-
-
-class FakeConfig:
-    def __init__(self, printer):
-        self._printer = printer
-
-    def get_printer(self):
-        return self._printer
-
-    def get(self, name, default=None):
-        return default
-
-    def getlist(self, name, default=None):
-        return default
-
-    def getfloat(self, name, default=None, **kw):
-        return default
-
-    def getfloatlist(self, name, default=None):
-        return default
-
-    def getint(self, name, default=None, **kw):
-        return default
 
 
 def _make_rail(motor, node_name, axis, invert=False):
@@ -162,14 +68,14 @@ def make_calibration(coupled=True):
     ]
     objs = {
         "gcode": gcode,
-        "toolhead": FakeToolhead(FakeKin(rails, coupled)),
+        "toolhead": FakeToolhead(FakeKin(rails, coupled_xy=coupled)),
         "servo_capture": FakeServoCapture(),
-        "motion_engine": FakeEngine(),
+        "motion_engine": FakeEngine(sdo_read=(2, 7)),
         "ethercat_node drive_a": FakeNode(
-            "ethercat_node drive_a", {"motor_a": 0}
+            handle=1, slots={"motor_a": 0}, name="ethercat_node drive_a"
         ),
         "ethercat_node drive_b": FakeNode(
-            "ethercat_node drive_b", {"motor_b": 0}
+            handle=1, slots={"motor_b": 0}, name="ethercat_node drive_b"
         ),
     }
     sc = servo_calibration.ServoCalibration(FakeConfig(FakePrinter(objs)))

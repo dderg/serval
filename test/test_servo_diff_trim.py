@@ -60,7 +60,9 @@ def make_diff_trim(config_values=None, rails=None):
         "configfile": FakeConfigfile(),
     }
     for node_name, slots in node_slots.items():
-        objs["ethercat_node " + node_name] = FakeNode(node_name, slots)
+        objs["ethercat_node " + node_name] = FakeNode(
+            name=node_name, slots=slots, handle=7
+        )
     printer = EventFakePrinter(objs)
     trim = servo_diff_trim.ServoDiffTrim(
         FakeConfigWithValues(printer, config_values or {})

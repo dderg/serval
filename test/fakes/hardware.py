@@ -258,7 +258,14 @@ class FakePins:
 
 
 class FakeNode:
-    def __init__(self, handle=0, slots=None, name="node_x", cycle_us=250):
+    def __init__(
+        self,
+        handle=0,
+        slots=None,
+        name="node_x",
+        cycle_us=250,
+        dynamics_profile=None,
+    ):
         self.name = name
         self._handle = handle
         self._slots = dict(slots) if slots else {}
@@ -267,9 +274,16 @@ class FakeNode:
         self.waiter_calls = 0
         self.calls = []
         self._cycle_us = cycle_us
+        self.dynamics_profile = dynamics_profile
 
     def get_engine_handle(self):
         return self._handle
+
+    def get_dynamics_profile(self):
+        return self.dynamics_profile
+
+    def get_drive_count(self):
+        return len(self._slots)
 
     def get_slot_for_motor(self, motor_name):
         return self._slots.get(motor_name)
