@@ -213,7 +213,7 @@ the profile re-applies; configs stay constant-valued and git-diffable.
 
 ## Part 5 — one sweep engine, one stroke planner (klippy)
 
-**Sweep engine** in `klippy/extras/servo_calibration.py`: a sweep is
+**Sweep engine** in `klippy/extras/servo_calibration/`: a sweep is
 `(parameter adapter, values, stroke plan)`. Parameter adapters own
 apply/readback/revert for their knob:
 

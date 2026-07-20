@@ -43,7 +43,7 @@ funding = "https://docs.kalico.gg/Sponsors.html"
 # klippy estate is untyped legacy and stays out of scope deliberately.
 [tool.basedpyright]
 include = [
-  "klippy/extras/servo_calibration.py",
+  "klippy/extras/servo_calibration",
   "klippy/extras/servo_strokes.py",
   "klippy/extras/servo_tuning.py",
   "klippy/extras/servo_param.py",
