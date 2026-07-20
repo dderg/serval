@@ -152,7 +152,7 @@ DYNAMICS_TERM_KEYS = {
 }
 TUNE_RELATIVE_CLAMP = 0.4
 TUNE_MASS_FLOOR_FRACTION = 0.10
-TUNE_COULOMB_ZERO_FLOOR_STEP = 5.0
+TUNE_ZERO_FLOOR_STEPS = {"VISCOUS": 0.05, "COULOMB": 5.0}
 GOLDEN_RATIO_CONJ = (math.sqrt(5.0) - 1.0) / 2.0
 
 
@@ -4008,17 +4008,19 @@ class ServoCalibration:
                         g = coef[key][fit_idx]
                         se = stderr_map[key][fit_idx]
                         before = current[key][baseline_idx]
+                        note = ""
                         if abs(g) <= sigma * se:
                             after = before
+                        elif term != "MASS" and before == 0.0 and g < 0.0:
+                            after = before
+                            note = " (bounded at 0: loop wants negative %s)" % (
+                                term.lower(),
+                            )
                         else:
                             all_converged = False
                             history = probes[term][mode]
                             prev_probe = history[-1] if history else None
-                            floor_step = (
-                                TUNE_COULOMB_ZERO_FLOOR_STEP
-                                if term == "COULOMB"
-                                else 0.0
-                            )
+                            floor_step = TUNE_ZERO_FLOOR_STEPS.get(term, 0.0)
                             try:
                                 candidate = dynamics_tune_step(
                                     before, g, step_frac, prev_probe, floor_step
@@ -4052,11 +4054,13 @@ class ServoCalibration:
                                             )
                                         )
                                     candidate = floor
+                            elif candidate < 0.0:
+                                candidate = 0.0
                             after = candidate
                             values_after[key][baseline_idx] = after
                         round_lines.append(
-                            "mode %s %s: g=%+.4g (se %.4g) %.6g -> %.6g"
-                            % (mode, term.lower(), g, se, before, after)
+                            "mode %s %s: g=%+.4g (se %.4g) %.6g -> %.6g%s"
+                            % (mode, term.lower(), g, se, before, after, note)
                         )
                 report = " | ".join(round_lines)
                 gcmd.respond_info("round %d: %s" % (round_i, report))

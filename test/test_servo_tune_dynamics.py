@@ -396,6 +396,63 @@ def test_tune_dynamics_secant_uses_the_two_probes():
     assert len(tune["rounds"]) == 3
 
 
+ZERO_FRICTION_TOML = """\
+version = 6
+axes = ["motor_a", "motor_b"]
+modes = ["x", "y"]
+frame = [[0.5, 0.5], [0.5, -0.5]]
+mass = [0.020, 0.030]
+viscous = [0.0, 0.0]
+coulomb = [0.0, 0.0]
+"""
+
+
+def test_tune_dynamics_negative_coulomb_on_zero_baseline_bounds_at_zero():
+    sc, _gcode, _path = make_calibration(profile_text=ZERO_FRICTION_TOML)
+    engine = sc.printer.lookup_object("motion_engine")
+    sc.fake_ferr_queue = [
+        _ferr_json(coulomb=(-2e-5, -5e-6), coulomb_se=(1e-9, 1e-9)),
+    ]
+    gcmd = FakeGcmd()
+    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
+    assert any("converged in 1 rounds" in r for r in gcmd.responses)
+    assert any("bounded at 0" in r for r in gcmd.responses)
+    for call in engine.dynamics_calls:
+        assert all(c >= 0.0 for c in call[4])
+        assert all(v >= 0.0 for v in call[3])
+    tune = _manifest_for(sc)["dynamics_tune"]
+    assert tune["rounds"][0]["values"]["coulomb"] == [0.0, 0.0]
+
+
+def test_tune_dynamics_positive_viscous_on_zero_baseline_probes_up():
+    sc, _gcode, _path = make_calibration(profile_text=ZERO_FRICTION_TOML)
+    sc.fake_ferr_queue = [
+        _ferr_json(viscous=(5e-7, 0.0), viscous_se=(1e-9, 1e-9)),
+        _ferr_json(),
+    ]
+    gcmd = FakeGcmd(TERMS="VISCOUS", ROUNDS=3)
+    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
+    tune = _manifest_for(sc)["dynamics_tune"]
+    assert tune["rounds"][0]["values"]["viscous"][0] == pytest.approx(
+        servo_calibration.TUNE_ZERO_FLOOR_STEPS["VISCOUS"]
+    )
+    assert tune["rounds"][0]["values"]["viscous"][1] == 0.0
+
+
+def test_tune_dynamics_secant_never_streams_negative_friction():
+    sc, _gcode, _path = make_calibration()
+    engine = sc.printer.lookup_object("motion_engine")
+    sc.fake_ferr_queue = [
+        _ferr_json(coulomb=(5e-6, 0.0), coulomb_se=(1e-9, 1e-9)),
+        _ferr_json(coulomb=(4.9e-6, 0.0), coulomb_se=(1e-9, 1e-9)),
+        _ferr_json(),
+    ]
+    gcmd = FakeGcmd(TERMS="COULOMB", ROUNDS=4)
+    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
+    for call in engine.dynamics_calls:
+        assert all(c >= 0.0 for c in call[4])
+
+
 def test_tune_dynamics_exhausted_rounds_restores_baseline_and_raises():
     sc, _gcode, _path = make_calibration()
     engine = sc.printer.lookup_object("motion_engine")
