@@ -764,6 +764,7 @@ def test_fit_dynamics_iterates_pattern_captures_until_convergence():
     assert any("converged in 2 rounds" in r for r in gcmd.responses)
 
 
+@requires_tomllib
 def test_fit_dynamics_accels_sweep_identifies_without_applying():
     sc, gcode = make_calibration(awd_rails())
     sc.bounds = {"X": (20.0, 280.0), "Y": (20.0, 280.0)}
@@ -789,12 +790,14 @@ def test_fit_dynamics_accels_sweep_identifies_without_applying():
     assert any("nothing was applied" in r for r in gcmd.responses)
 
 
+@requires_tomllib
 def test_fit_dynamics_accels_sweep_rejects_iterative_params():
     sc, _gcode = make_calibration(awd_rails())
     with pytest.raises(RuntimeError, match="identify-only sweep"):
         sc.cmd_SERVO_FIT_DYNAMICS(FakeGcmd(ACCELS="8000,16000", TOL="0.05"))
 
 
+@requires_tomllib
 def test_fit_dynamics_accels_sweep_rejects_unordered_accels():
     sc, _gcode = make_calibration(awd_rails())
     with pytest.raises(RuntimeError, match="ascending"):

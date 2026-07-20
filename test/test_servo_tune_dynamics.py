@@ -585,6 +585,7 @@ def test_tune_dynamics_requires_ferr_rms_raw_from_the_binary():
         sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd())
 
 
+@requires_tomllib
 def test_tune_dynamics_rejects_non_coupled_kinematics():
     sc, _gcode, _path = make_calibration(
         rails=single_drive_rails(), coupled=False
@@ -593,6 +594,7 @@ def test_tune_dynamics_rejects_non_coupled_kinematics():
         sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd())
 
 
+@requires_tomllib
 def test_tune_dynamics_requires_a_baseline_profile():
     sc, _gcode, _path = make_calibration(configure_profile=False)
     with pytest.raises(RuntimeError, match="dynamics_profile|PROFILE"):
