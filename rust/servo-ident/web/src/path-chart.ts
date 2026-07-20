@@ -170,16 +170,16 @@ function drawPairMarkers(entries: PathEntry[], rendered: RenderedView) {
     ctx.stroke();
     ctx.setLineDash([]);
   }
-  for (const [pt, filled] of [
-    [here, true],
-    [there, false],
+  for (const [pt, entry] of [
+    [here, e],
+    [there, sibling],
   ] as const) {
-    if (!pt) continue;
+    if (!pt || !entry) continue;
     ctx.beginPath();
     ctx.arc(pt.x, pt.y, 3.5, 0, Math.PI * 2);
-    ctx.fillStyle = filled ? e.trace.color : BG_COLOR;
+    ctx.fillStyle = entry.kind === "actual" ? entry.trace.color : BG_COLOR;
     ctx.fill();
-    ctx.strokeStyle = e.trace.color;
+    ctx.strokeStyle = entry.trace.color;
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }
@@ -195,8 +195,9 @@ function drawHoverReadout(entries: PathEntry[]) {
   const text = `${e.label} — ${e.kind}`;
   ctx.font = "11px monospace";
   const tw = ctx.measureText(text).width;
-  const bx = Math.min(hover.px + 12, w - tw - 14);
-  const by = Math.max(hover.py - 12, 18);
+  const cursorNearTopRight = hover.px > w - tw - 40 && hover.py < 40;
+  const bx = cursorNearTopRight ? 9 : w - tw - 14;
+  const by = 18;
   ctx.fillStyle = "rgba(13, 17, 23, 0.85)";
   ctx.fillRect(bx - 5, by - 12, tw + 10, 17);
   ctx.strokeStyle = e.trace.color;
