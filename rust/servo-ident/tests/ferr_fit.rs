@@ -228,7 +228,6 @@ fn render_ferr_json_fails_loudly_on_mode_count_mismatch() {
     let _ = render_ferr_json(&structure, &["x", "y"], &r, &[0.0, 0.0]);
 }
 
-
 /// A command->telemetry timing skew turns `alpha*acc(t-d)` into
 /// `alpha*acc(t) - alpha*d*jerk(t)`: without a jerk column the second term
 /// correlates with accel over corner-rich excitation and lands in the mass

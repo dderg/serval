@@ -343,8 +343,7 @@ pub fn prep(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> Prepped
     for md in 0..n_modes {
         for seg in &segs {
             for k in seg.start + 1..seg.end.saturating_sub(1) {
-                jerk_raw[md][k] =
-                    (acc_mode_raw[md][k + 1] - acc_mode_raw[md][k - 1]) / (2.0 * dt);
+                jerk_raw[md][k] = (acc_mode_raw[md][k + 1] - acc_mode_raw[md][k - 1]) / (2.0 * dt);
             }
         }
     }

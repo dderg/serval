@@ -574,10 +574,7 @@ pub fn fit_ferr(input: &FitInput, opts: &FitOptions) -> Result<FerrFitResult, Fi
     }
 
     let (jerk_params, jerk_stderr) = if jerk {
-        (
-            theta[base..].to_vec(),
-            param_stderr_full[base..].to_vec(),
-        )
+        (theta[base..].to_vec(), param_stderr_full[base..].to_vec())
     } else {
         (Vec::new(), Vec::new())
     };
