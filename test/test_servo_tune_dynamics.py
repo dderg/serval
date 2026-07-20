@@ -220,6 +220,7 @@ def _ferr_json(
     viscous_se=(1e-6, 1e-6),
     coulomb_se=(1e-6, 1e-6),
     ferr_rms=(0.01, 0.01),
+    ferr_rms_raw=(0.002, 0.002),
     samples=500,
 ):
     return {
@@ -236,8 +237,37 @@ def _ferr_json(
             "coulomb": list(coulomb_se),
         },
         "ferr_rms": list(ferr_rms),
+        "ferr_rms_raw": list(ferr_rms_raw),
         "samples": samples,
     }
+
+
+def quadratic_rms(
+    mass_opt=BASELINE_MASS,
+    viscous_opt=BASELINE_VISCOUS,
+    coulomb_opt=BASELINE_COULOMB,
+    floor=(0.0015, 0.0015),
+    curvature=(0.05, 0.05),
+):
+    """Per-mode rms objective for the fake bench: a parabola over the
+    normalized distance of every term from its optimum, so the tuner has
+    a real minimum to find and cross-term probes move the score."""
+
+    def rms(mass, viscous, coulomb):
+        out = []
+        for k in range(2):
+            d2 = 0.0
+            for vals, opts in (
+                (mass, mass_opt),
+                (viscous, viscous_opt),
+                (coulomb, coulomb_opt),
+            ):
+                scale = max(abs(opts[k]), 1e-9)
+                d2 += ((vals[k] - opts[k]) / scale) ** 2
+            out.append(floor[k] + curvature[k] * d2)
+        return out
+
+    return rms
 
 
 def make_calibration(
@@ -278,6 +308,12 @@ def make_calibration(
 
     sc.fake_ferr_queue = []
     sc.fake_flags_by_step = {}
+    sc.fake_rms_fn = quadratic_rms()
+    sc.fake_coef_hints = {
+        "mass": (0.0, 0.0),
+        "viscous": (0.0, 0.0),
+        "coulomb": (0.0, 0.0),
+    }
 
     def fake_run(gcmd, argv, timeout):
         gcode.scripts.append(("RUN", argv, timeout))
@@ -300,11 +336,19 @@ def make_calibration(
             return ""
         if len(argv) >= 2 and argv[1] == "fit":
             out_path = argv[argv.index("--out") + 1]
-            payload = (
-                sc.fake_ferr_queue.pop(0)
-                if sc.fake_ferr_queue
-                else _ferr_json()
-            )
+            if sc.fake_ferr_queue:
+                payload = sc.fake_ferr_queue.pop(0)
+            else:
+                engine = sc.printer.lookup_object("motion_engine")
+                _h, _frame, mass, viscous, coulomb, _ps, _ds = (
+                    engine.dynamics_calls[-1]
+                )
+                payload = _ferr_json(
+                    mass=sc.fake_coef_hints["mass"],
+                    viscous=sc.fake_coef_hints["viscous"],
+                    coulomb=sc.fake_coef_hints["coulomb"],
+                    ferr_rms_raw=sc.fake_rms_fn(mass, viscous, coulomb),
+                )
             with open(out_path, "w") as f:
                 json.dump(payload, f)
             return ""
@@ -322,282 +366,253 @@ def _manifest_for(sc):
         return json.load(f)
 
 
-def test_tune_dynamics_converges_immediately_leaves_model_live_writes_profile():
+RLS = servo_calibration.RmsLineSearch
+
+
+def drive(search, rms_fn, budget=50):
+    for _ in range(budget):
+        if search.done:
+            return
+        search.feed(rms_fn(search.trial))
+    raise AssertionError("search did not finish in %d probes" % budget)
+
+
+def test_line_search_marches_to_a_higher_minimum():
+    def obj(v):
+        return 1.0 + (v - 0.040) ** 2
+
+    s = RLS(0.020, obj(0.020), step=0.003, tol=1e-9, hint=1.0)
+    drive(s, obj)
+    assert s.improved
+    assert s.best == pytest.approx(0.040, rel=0.05)
+    assert s.best_rms <= obj(0.020)
+
+
+def test_line_search_flips_a_wrong_hint():
+    def obj(v):
+        return 1.0 + (v - 0.010) ** 2
+
+    s = RLS(0.020, obj(0.020), step=0.002, tol=1e-9, hint=1.0)
+    drive(s, obj)
+    assert s.improved
+    assert s.best == pytest.approx(0.010, rel=0.1)
+
+
+def test_line_search_converges_at_start_when_already_optimal():
+    def obj(v):
+        return 1.0 + (v - 0.020) ** 2
+
+    s = RLS(0.020, obj(0.020), step=0.003, tol=1e-9)
+    drive(s, obj)
+    assert s.best == pytest.approx(0.020, rel=0.06)
+    # both first probes fail, the parabola may still polish the start
+    assert len(s.history) <= 5
+
+
+def test_line_search_ignores_improvement_below_tol():
+    def obj(v):
+        return 1.0 - 0.001 * v
+
+    s = RLS(0.020, obj(0.020), step=0.003, tol=1.0)
+    drive(s, obj)
+    assert not s.improved
+    assert s.best == 0.020
+
+
+def test_line_search_bounds_at_zero_when_hint_points_negative():
+    s = RLS(0.0, 1.0, step=5.0, tol=1e-9, lo=0.0, hint=-1.0)
+    assert s.done
+    assert s.best == 0.0
+    assert "bounded" in s.note
+
+
+def test_line_search_zero_start_probes_up_and_escapes():
+    def obj(v):
+        return 1.0 + (v - 10.0) ** 2 / 100.0
+
+    s = RLS(0.0, obj(0.0), step=5.0, tol=1e-9, lo=0.0, hint=1.0)
+    drive(s, obj)
+    assert s.best == pytest.approx(10.0, rel=0.2)
+
+
+def test_line_search_respects_lower_bound_mid_march():
+    def obj(v):
+        return 1.0 + v
+
+    s = RLS(0.020, obj(0.020), step=0.05, tol=1e-9, lo=0.002, hint=-1.0)
+    drive(s, obj)
+    assert s.best == 0.002
+    assert "bounded" in s.note or "no further" in s.note
+
+
+def test_line_search_rejects_feed_without_trial():
+    s = RLS(0.0, 1.0, step=5.0, tol=1e-9, lo=0.0, hint=-1.0)
+    assert s.done
+    with pytest.raises(ValueError, match="without an outstanding trial"):
+        s.feed(1.0)
+
+
+@requires_tomllib
+def test_tune_dynamics_already_optimal_converges_and_writes_baseline():
     sc, gcode, _path = make_calibration()
     engine = sc.printer.lookup_object("motion_engine")
     gcmd = FakeGcmd()
     sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
-    assert any("converged in 1 rounds" in r for r in gcmd.responses)
-    assert len(engine.dynamics_calls) == 1
-    assert engine.dynamics_calls[0][2] == BASELINE_MASS
-    assert engine.dynamics_calls[0][3] == BASELINE_VISCOUS
-    assert engine.dynamics_calls[0][4] == BASELINE_COULOMB
-    assert not any("restored to baseline" in r for r in gcmd.responses)
+    assert any("converged in" in r for r in gcmd.responses)
     tune = _manifest_for(sc)["dynamics_tune"]
     assert tune["converged"] is True
-    assert len(tune["rounds"]) == 1
-    with open(tune["profile"]) as f:
-        written = servo_calibration.parse_dynamics_profile(f.read())
-    assert written["mass"] == BASELINE_MASS
-    assert written["viscous"] == BASELINE_VISCOUS
-    assert written["coulomb"] == BASELINE_COULOMB
+    with open(tune["profile"], "rb") as f:
+        prof = tomllib.load(f)
+    assert prof["mass"] == pytest.approx(BASELINE_MASS, rel=0.06)
+    assert prof["viscous"] == pytest.approx(BASELINE_VISCOUS, rel=0.06)
+    assert prof["coulomb"] == pytest.approx(BASELINE_COULOMB, rel=0.06)
+    # winner is streamed and left live
+    _h, _f, mass, viscous, coulomb, _ps, _ds = engine.dynamics_calls[-1]
+    assert mass == pytest.approx(prof["mass"])
+    assert viscous == pytest.approx(prof["viscous"])
+    assert coulomb == pytest.approx(prof["coulomb"])
 
 
-def test_tune_dynamics_positive_mass_coefficient_increases_mass():
+@requires_tomllib
+def test_tune_dynamics_finds_a_higher_mass_minimum():
     sc, _gcode, _path = make_calibration()
-    sc.fake_ferr_queue = [
-        _ferr_json(
-            mass=(5e-6, 0.0),
-            mass_se=(1e-9, 1e-9),
-        ),
-        _ferr_json(),
-    ]
+    sc.fake_rms_fn = quadratic_rms(mass_opt=[0.030, 0.045])
+    gcmd = FakeGcmd(TERMS="MASS")
+    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
+    tune = _manifest_for(sc)["dynamics_tune"]
+    with open(tune["profile"], "rb") as f:
+        prof = tomllib.load(f)
+    assert prof["mass"][0] == pytest.approx(0.030, rel=0.15)
+    assert prof["mass"][1] == pytest.approx(0.045, rel=0.15)
+    assert prof["viscous"] == pytest.approx(BASELINE_VISCOUS)
+    assert prof["coulomb"] == pytest.approx(BASELINE_COULOMB)
+
+
+@requires_tomllib
+def test_tune_dynamics_walks_mass_down_when_rms_says_lower():
+    sc, _gcode, _path = make_calibration()
+    sc.fake_rms_fn = quadratic_rms(mass_opt=[0.014, 0.022])
+    # correlation hint says UP - exactly the bench pathology; rms must win
+    sc.fake_coef_hints["mass"] = (2.5e-8, 2.7e-8)
+    gcmd = FakeGcmd(TERMS="MASS")
+    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
+    tune = _manifest_for(sc)["dynamics_tune"]
+    with open(tune["profile"], "rb") as f:
+        prof = tomllib.load(f)
+    assert prof["mass"][0] == pytest.approx(0.014, rel=0.2)
+    assert prof["mass"][1] == pytest.approx(0.022, rel=0.2)
+
+
+@requires_tomllib
+def test_tune_dynamics_budget_exhaustion_restores_baseline_and_raises():
+    sc, _gcode, _path = make_calibration()
+    engine = sc.printer.lookup_object("motion_engine")
+
+    # monotone objective: every mass increase keeps improving
+    def endless_descent(m, v, c):
+        return [
+            max(0.0001, 0.01 - 0.05 * m[0]),
+            max(0.0001, 0.01 - 0.05 * m[1]),
+        ]
+
+    sc.fake_rms_fn = endless_descent
     gcmd = FakeGcmd(TERMS="MASS", ROUNDS=3)
-    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
-    tune = _manifest_for(sc)["dynamics_tune"]
-    round0 = tune["rounds"][0]
-    assert round0["values"]["mass"][0] > BASELINE_MASS[0]
-    assert round0["values"]["mass"][1] == BASELINE_MASS[1]
-
-
-def test_tune_dynamics_negative_mass_coefficient_decreases_mass():
-    sc, _gcode, _path = make_calibration()
-    sc.fake_ferr_queue = [
-        _ferr_json(
-            mass=(-5e-6, 0.0),
-            mass_se=(1e-9, 1e-9),
-        ),
-        _ferr_json(),
-    ]
-    gcmd = FakeGcmd(TERMS="MASS", ROUNDS=3)
-    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
-    tune = _manifest_for(sc)["dynamics_tune"]
-    round0 = tune["rounds"][0]
-    assert round0["values"]["mass"][0] < BASELINE_MASS[0]
-
-
-def test_tune_dynamics_secant_uses_the_two_probes():
-    sc, _gcode, _path = make_calibration()
-    sc.fake_ferr_queue = [
-        _ferr_json(mass=(5e-6, 0.0), mass_se=(1e-9, 1e-9)),
-        _ferr_json(mass=(-2e-6, 0.0), mass_se=(1e-9, 1e-9)),
-        _ferr_json(),
-    ]
-    gcmd = FakeGcmd(TERMS="MASS", ROUNDS=4)
-    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
-    tune = _manifest_for(sc)["dynamics_tune"]
-    v0 = BASELINE_MASS[0]
-    v1 = tune["rounds"][0]["values"]["mass"][0]
-    g0 = 5e-6
-    g1 = -2e-6
-    expected_v2 = v1 - g1 * (v1 - v0) / (g1 - g0)
-    v2 = tune["rounds"][1]["values"]["mass"][0]
-    assert v2 == pytest.approx(expected_v2)
-    assert len(tune["rounds"]) == 3
-
-
-ZERO_FRICTION_TOML = """\
-version = 6
-axes = ["motor_a", "motor_b"]
-modes = ["x", "y"]
-frame = [[0.5, 0.5], [0.5, -0.5]]
-mass = [0.020, 0.030]
-viscous = [0.0, 0.0]
-coulomb = [0.0, 0.0]
-"""
-
-
-def test_tune_dynamics_negative_coulomb_on_zero_baseline_bounds_at_zero():
-    sc, _gcode, _path = make_calibration(profile_text=ZERO_FRICTION_TOML)
-    engine = sc.printer.lookup_object("motion_engine")
-    sc.fake_ferr_queue = [
-        _ferr_json(coulomb=(-2e-3, -5e-4), coulomb_se=(1e-9, 1e-9)),
-    ]
-    gcmd = FakeGcmd()
-    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
-    assert any("converged in 1 rounds" in r for r in gcmd.responses)
-    assert any("bounded at 0" in r for r in gcmd.responses)
-    for call in engine.dynamics_calls:
-        assert all(c >= 0.0 for c in call[4])
-        assert all(v >= 0.0 for v in call[3])
-    tune = _manifest_for(sc)["dynamics_tune"]
-    assert tune["rounds"][0]["values"]["coulomb"] == [0.0, 0.0]
-
-
-def test_tune_dynamics_positive_viscous_on_zero_baseline_probes_up():
-    sc, _gcode, _path = make_calibration(profile_text=ZERO_FRICTION_TOML)
-    sc.fake_ferr_queue = [
-        _ferr_json(viscous=(5e-6, 0.0), viscous_se=(1e-9, 1e-9)),
-        _ferr_json(),
-    ]
-    gcmd = FakeGcmd(TERMS="VISCOUS", ROUNDS=3, MAX_SPEED=1000)
-    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
-    tune = _manifest_for(sc)["dynamics_tune"]
-    assert tune["rounds"][0]["values"]["viscous"][0] == pytest.approx(
-        servo_calibration.TUNE_ZERO_FLOOR_STEPS["VISCOUS"]
-    )
-    assert tune["rounds"][0]["values"]["viscous"][1] == 0.0
-
-
-def test_tune_dynamics_sub_encoder_count_coefficients_converge():
-    sc, _gcode, _path = make_calibration()
-    sc.fake_ferr_queue = [
-        _ferr_json(
-            mass=(7.5e-9, 1.76e-8),
-            mass_se=(6.4e-10, 6.7e-10),
-            viscous=(6.8e-8, 1.1e-7),
-            viscous_se=(7.8e-9, 7.7e-9),
-            coulomb=(-1.5e-5, -2.5e-6),
-            coulomb_se=(3.7e-6, 3.7e-6),
-        ),
-        _ferr_json(mass=(7.5e-9, 9e-9), mass_se=(6.4e-10, 6.7e-10)),
-    ]
-    gcmd = FakeGcmd(MAX_ACCEL=25000, MAX_SPEED=1000)
-    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
-    assert any("converged in 2 rounds" in r for r in gcmd.responses)
-    assert any("within tolerance" in r for r in gcmd.responses)
-    tune = _manifest_for(sc)["dynamics_tune"]
-    assert tune["converged"] is True
-    round0 = tune["rounds"][0]["values"]
-    assert round0["mass"][0] == BASELINE_MASS[0]
-    assert round0["mass"][1] > BASELINE_MASS[1]
-    assert round0["viscous"] == BASELINE_VISCOUS
-    assert round0["coulomb"] == BASELINE_COULOMB
-
-
-def test_tune_dynamics_tolerance_scales_with_the_envelope():
-    sc, _gcode, _path = make_calibration()
-    sc.fake_ferr_queue = [
-        _ferr_json(mass=(7.5e-9, 0.0), mass_se=(6.4e-10, 6.7e-10)),
-        _ferr_json(),
-    ]
-    gcmd = FakeGcmd(TERMS="MASS", ROUNDS=3, MAX_ACCEL=100000)
-    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
-    tune = _manifest_for(sc)["dynamics_tune"]
-    assert tune["rounds"][0]["values"]["mass"][0] > BASELINE_MASS[0]
-
-
-def test_tune_dynamics_secant_never_streams_negative_friction():
-    sc, _gcode, _path = make_calibration()
-    engine = sc.printer.lookup_object("motion_engine")
-    sc.fake_ferr_queue = [
-        _ferr_json(coulomb=(5e-6, 0.0), coulomb_se=(1e-9, 1e-9)),
-        _ferr_json(coulomb=(4.9e-6, 0.0), coulomb_se=(1e-9, 1e-9)),
-        _ferr_json(),
-    ]
-    gcmd = FakeGcmd(TERMS="COULOMB", ROUNDS=4)
-    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
-    for call in engine.dynamics_calls:
-        assert all(c >= 0.0 for c in call[4])
-
-
-def test_tune_dynamics_exhausted_rounds_restores_baseline_and_raises():
-    sc, _gcode, _path = make_calibration()
-    engine = sc.printer.lookup_object("motion_engine")
-    sc.fake_ferr_queue = [
-        _ferr_json(mass=(5e-6, 0.0), mass_se=(1e-9, 1e-9)),
-        _ferr_json(mass=(4e-6, 0.0), mass_se=(1e-9, 1e-9)),
-    ]
-    gcmd = FakeGcmd(TERMS="MASS", ROUNDS=2)
-    with pytest.raises(RuntimeError, match="did not converge in 2 rounds"):
+    with pytest.raises(RuntimeError, match="capture budget"):
         sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
-    assert engine.dynamics_calls[-1][2] == BASELINE_MASS
-    assert any("restored to baseline" in r for r in gcmd.responses)
-    manifest = _manifest_for(sc)
-    assert "dynamics_tune" not in manifest
+    _h, _f, mass, viscous, coulomb, _ps, _ds = engine.dynamics_calls[-1]
+    assert mass == pytest.approx(BASELINE_MASS)
+    assert viscous == pytest.approx(BASELINE_VISCOUS)
+    assert coulomb == pytest.approx(BASELINE_COULOMB)
 
 
-def test_tune_dynamics_torque_saturated_restores_baseline_and_raises():
+@requires_tomllib
+def test_tune_dynamics_torque_rail_aborts_and_restores_baseline():
     sc, _gcode, _path = make_calibration()
     engine = sc.printer.lookup_object("motion_engine")
-    sc.fake_flags_by_step = {"tune_r0": ["torque_saturated"]}
-    gcmd = FakeGcmd()
+    sc.fake_flags_by_step["tune_r0"] = ["torque_saturated"]
     with pytest.raises(RuntimeError, match="torque rail"):
-        sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
-    assert engine.dynamics_calls[-1][2] == BASELINE_MASS
-    assert engine.dynamics_calls[-1][3] == BASELINE_VISCOUS
-    assert engine.dynamics_calls[-1][4] == BASELINE_COULOMB
-    manifest = _manifest_for(sc)
-    assert "dynamics_tune" not in manifest
+        sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd())
+    _h, _f, mass, _v, _c, _ps, _ds = engine.dynamics_calls[-1]
+    assert mass == pytest.approx(BASELINE_MASS)
 
 
-def test_tune_dynamics_resonance_detected_warns_and_continues():
+@requires_tomllib
+def test_tune_dynamics_resonance_flag_warns_and_continues():
     sc, _gcode, _path = make_calibration()
-    sc.fake_flags_by_step = {"tune_r0": ["resonance_detected"]}
+    sc.fake_flags_by_step["tune_r0"] = ["resonance_detected"]
     gcmd = FakeGcmd()
     sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
     assert any("resonance_detected" in r for r in gcmd.responses)
-    assert any("converged in 1 rounds" in r for r in gcmd.responses)
+    assert any("converged in" in r for r in gcmd.responses)
 
 
-def test_tune_dynamics_rejects_excitation_matrix_params():
+@requires_tomllib
+def test_tune_dynamics_zero_coulomb_stays_bounded_when_worse():
+    zero_coulomb = BASELINE_TOML.replace(
+        "coulomb = [1.0, 1.5]", "coulomb = [0.0, 0.0]"
+    )
+    sc, _gcode, _path = make_calibration(profile_text=zero_coulomb)
+    sc.fake_rms_fn = quadratic_rms(coulomb_opt=[0.0, 0.0])
+    gcmd = FakeGcmd(TERMS="COULOMB")
+    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
+    tune = _manifest_for(sc)["dynamics_tune"]
+    with open(tune["profile"], "rb") as f:
+        prof = tomllib.load(f)
+    assert prof["coulomb"] == pytest.approx([0.0, 0.0], abs=1e-9)
+
+
+@requires_tomllib
+def test_tune_dynamics_zero_viscous_probes_off_the_floor():
+    zero_viscous = BASELINE_TOML.replace(
+        "viscous = [0.004, 0.005]", "viscous = [0.0, 0.0]"
+    )
+    sc, _gcode, _path = make_calibration(profile_text=zero_viscous)
+    sc.fake_rms_fn = quadratic_rms(viscous_opt=[0.08, 0.10])
+    gcmd = FakeGcmd(TERMS="VISCOUS")
+    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
+    tune = _manifest_for(sc)["dynamics_tune"]
+    with open(tune["profile"], "rb") as f:
+        prof = tomllib.load(f)
+    assert prof["viscous"][0] > 0.0
+    assert prof["viscous"][1] > 0.0
+
+
+@requires_tomllib
+def test_tune_dynamics_reuses_measurements_instead_of_recapturing():
     sc, _gcode, _path = make_calibration()
-    for params in (
-        {"ACCELS": "8000,16000"},
-        {"SPEEDS": "100"},
-        {"PATTERN": "1"},
-    ):
-        with pytest.raises(RuntimeError, match="excitation"):
-            sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(**params))
+    gcmd = FakeGcmd()
+    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
+    tune = _manifest_for(sc)["dynamics_tune"]
+    keys = [json.dumps(r["values"], sort_keys=True) for r in tune["rounds"]]
+    assert len(keys) == len(set(keys)), "same model captured twice"
+
+
+@requires_tomllib
+def test_tune_dynamics_requires_ferr_rms_raw_from_the_binary():
+    sc, _gcode, _path = make_calibration()
+    stale = _ferr_json()
+    del stale["ferr_rms_raw"]
+    sc.fake_ferr_queue = [stale]
+    with pytest.raises(RuntimeError, match="ferr_rms_raw"):
+        sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd())
 
 
 def test_tune_dynamics_rejects_non_coupled_kinematics():
-    sc, _gcode, _path = make_calibration(coupled=False)
+    sc, _gcode, _path = make_calibration(
+        rails=single_drive_rails(), coupled=False
+    )
     with pytest.raises(RuntimeError, match="coupled_xy"):
         sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd())
 
 
 def test_tune_dynamics_requires_a_baseline_profile():
     sc, _gcode, _path = make_calibration(configure_profile=False)
-    with pytest.raises(RuntimeError, match="no baseline dynamics profile"):
+    with pytest.raises(RuntimeError, match="dynamics_profile|PROFILE"):
         sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd())
 
 
-def test_tune_dynamics_terms_mass_only_touches_mass_vectors():
+def test_tune_dynamics_rejects_excitation_matrix_params():
     sc, _gcode, _path = make_calibration()
-    sc.fake_ferr_queue = [
-        _ferr_json(
-            mass=(5e-6, 0.0),
-            viscous=(5e-6, 0.0),
-            coulomb=(5e-6, 0.0),
-            mass_se=(1e-9, 1e-9),
-            viscous_se=(1e-9, 1e-9),
-            coulomb_se=(1e-9, 1e-9),
-        ),
-        _ferr_json(mass=(0.0, 0.0), mass_se=(1e-9, 1e-9)),
-    ]
-    engine = sc.printer.lookup_object("motion_engine")
-    gcmd = FakeGcmd(TERMS="MASS", ROUNDS=3)
-    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
-    assert engine.dynamics_calls[-1][2] != BASELINE_MASS
-    assert engine.dynamics_calls[-1][3] == BASELINE_VISCOUS
-    assert engine.dynamics_calls[-1][4] == BASELINE_COULOMB
-    tune = _manifest_for(sc)["dynamics_tune"]
-    assert tune["terms"] == ["mass"]
-    assert "viscous" not in tune["rounds"][0]["coef"]
-
-
-def test_tune_dynamics_step_dynamics_step_first_probe_and_secant():
-    assert servo_calibration.dynamics_tune_step(
-        0.02, 5e-6, 0.15, None
-    ) == pytest.approx(0.02 + 0.15 * 0.02)
-    assert servo_calibration.dynamics_tune_step(
-        0.02, -5e-6, 0.15, None
-    ) == pytest.approx(0.02 - 0.15 * 0.02)
-    assert servo_calibration.dynamics_tune_step(
-        1.0, 3e-6, 0.15, None, zero_floor_step=5.0
-    ) == pytest.approx(1.15)
-    assert servo_calibration.dynamics_tune_step(
-        0.0, 3e-6, 0.15, None, zero_floor_step=5.0
-    ) == pytest.approx(5.0)
-    assert servo_calibration.dynamics_tune_step(
-        0.0, -3e-6, 0.15, None, zero_floor_step=5.0
-    ) == pytest.approx(-5.0)
-    v1, g1 = 0.023, -2e-6
-    v0, g0 = 0.02, 5e-6
-    expected = v1 - g1 * (v1 - v0) / (g1 - g0)
-    assert servo_calibration.dynamics_tune_step(
-        v1, g1, 0.15, (v0, g0)
-    ) == pytest.approx(expected)
-    with pytest.raises(ValueError, match="degenerate"):
-        servo_calibration.dynamics_tune_step(0.023, 5e-6, 0.15, (0.02, 5e-6))
+    for params in ({"ACCELS": "5000"}, {"SPEEDS": "100"}, {"PATTERN": "1"}):
+        with pytest.raises(RuntimeError):
+            sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(**params))

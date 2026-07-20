@@ -59,6 +59,7 @@ pub fn fit_input(structure: &Structure, prepared: &Prepared) -> FitInput {
         snap_mode: prepared.pp.snap_mode.iter().map(|c| select(c)).collect(),
         torque: prepared.pp.torque.iter().map(|c| select(c)).collect(),
         ferr_mode: prepared.pp.ferr_mode.iter().map(|c| select(c)).collect(),
+        jerk_mode: prepared.pp.jerk_mode.iter().map(|c| select(c)).collect(),
         extra: prepared
             .pp
             .extra
@@ -77,6 +78,7 @@ pub fn full_fit_input(structure: &Structure, prepared: &Prepared) -> FitInput {
         snap_mode: prepared.pp.snap_mode.clone(),
         torque: prepared.pp.torque.clone(),
         ferr_mode: prepared.pp.ferr_mode.clone(),
+        jerk_mode: prepared.pp.jerk_mode.clone(),
         extra: prepared.pp.extra.clone(),
     }
 }

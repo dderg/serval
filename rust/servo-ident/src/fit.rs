@@ -27,6 +27,16 @@ pub struct FitInput {
     /// error is already a mode-space quantity, so no `Structure::row`
     /// frame projection is needed on the response side.
     pub ferr_mode: Vec<Vec<f64>>,
+    /// Per-mode jerk (da/dt) nuisance column for `fit_ferr`, filtered
+    /// identically to the other channels. Empty disables the term;
+    /// non-empty appends one coefficient per mode after the structure
+    /// parameters. Command→telemetry timing skew δ turns the ferr mass
+    /// response `m·a(t-δ)` into `m·a(t) - m·δ·j(t)`: without this column
+    /// the `-m·δ·j` part correlates with accel over corner-rich patterns
+    /// and biases the mass coefficient, so the tuning loop converges to
+    /// the wrong mass. The coefficient (≈ `-m·δ`) is reported, never
+    /// applied. The torque fit ignores this channel.
+    pub jerk_mode: Vec<Vec<f64>>,
     /// Extra per-motor regressor columns (extra[motor][column][sample]) —
     /// nuisance channels like the pulley-eccentricity sin/cos pair. Each
     /// motor must carry the same column count. Their coefficients absorb
@@ -402,6 +412,13 @@ pub struct FerrFitResult {
     /// Standard error per raw theta parameter, packed like
     /// `Structure::unpack` (`[mass_0, viscous_0, coulomb_0, mass_1, ...]`).
     pub param_stderr: Vec<f64>,
+    /// Fitted per-mode jerk nuisance coefficients (empty when the jerk
+    /// column was disabled), in mm per (mm/s³). For a pure command→ferr
+    /// timing skew δ the value is `-mass·δ`, so `-jerk[k] / mass[k]`
+    /// measures the skew in seconds. Absorbed, never applied.
+    pub jerk: Vec<f64>,
+    /// Standard error per jerk coefficient (same shape as `jerk`).
+    pub jerk_stderr: Vec<f64>,
     /// Per-mode RMS following error after fitting (mm).
     pub ferr_rms: Vec<f64>,
     /// λmax/λmin of the column-scaled Gram matrix.
@@ -410,12 +427,19 @@ pub struct FerrFitResult {
     pub samples: usize,
 }
 
+fn ferr_jerk_enabled(input: &FitInput) -> bool {
+    !input.jerk_mode.is_empty()
+}
+
 fn ferr_row(input: &FitInput, mode: usize, k: usize, p: usize) -> Vec<f64> {
     let mut row = vec![0.0; p];
     let base = 3 * mode;
     row[base] = input.acc_mode[mode][k];
     row[base + 1] = input.vel_mode[mode][k];
     row[base + 2] = input.cs_mode[mode][k];
+    if ferr_jerk_enabled(input) {
+        row[3 * input.structure.mode_count() + mode] = input.jerk_mode[mode][k];
+    }
     row
 }
 
@@ -460,7 +484,8 @@ fn residuals_ferr(input: &FitInput, theta: &[f64], p: usize) -> Vec<f64> {
     out
 }
 
-/// Fits `input.ferr_mode` per mode against `[acc_mode, vel_mode, cs_mode]`,
+/// Fits `input.ferr_mode` per mode against `[acc_mode, vel_mode, cs_mode]`
+/// plus the per-mode jerk nuisance column (when `jerk_mode` is non-empty),
 /// reusing the same scaled-Gram solve, Huber IRLS reweighting and stderr
 /// machinery `fit` uses for the torque response. Unlike `fit`, there is no
 /// snap or extra nuisance column and no torque-saturation gate — the
@@ -479,21 +504,28 @@ pub fn fit_ferr(input: &FitInput, opts: &FitOptions) -> Result<FerrFitResult, Fi
     if n_samples == 0 {
         return Err(FitError::ShapeMismatch("no samples"));
     }
+    let jerk = ferr_jerk_enabled(input);
+    if jerk && input.jerk_mode.len() != n_modes {
+        return Err(FitError::ShapeMismatch("jerk mode channel count"));
+    }
     for m in 0..n_modes {
         if input.acc_mode[m].len() != n_samples
             || input.vel_mode[m].len() != n_samples
             || input.cs_mode[m].len() != n_samples
             || input.ferr_mode[m].len() != n_samples
+            || (jerk && input.jerk_mode[m].len() != n_samples)
         {
             return Err(FitError::ShapeMismatch("mode sample count"));
         }
     }
 
-    let p = s.param_count();
+    let base = s.param_count();
+    let p = base + if jerk { n_modes } else { 0 };
     let mut acc = accumulate_ferr(input, p, None);
     for k in 0..p {
         if acc.col_norm2[k] == 0.0 {
-            return Err(FitError::UnexcitedMode { mode: k / 3 });
+            let mode = if k < base { k / 3 } else { k - base };
+            return Err(FitError::UnexcitedMode { mode });
         }
     }
     let (mut theta, condition, mut scale) = solve_scaled(&acc, p)?;
@@ -528,7 +560,7 @@ pub fn fit_ferr(input: &FitInput, opts: &FitOptions) -> Result<FerrFitResult, Fi
     }
     let dof = (wsum - p as f64).max(1.0);
     let sigma2 = wsq / dof;
-    let param_stderr = stderr_from(&acc, &scale, sigma2, p);
+    let param_stderr_full = stderr_from(&acc, &scale, sigma2, p);
 
     let mut ferr_rms = vec![0.0; n_modes];
     for (mode, out) in ferr_rms.iter_mut().enumerate() {
@@ -541,9 +573,19 @@ pub fn fit_ferr(input: &FitInput, opts: &FitOptions) -> Result<FerrFitResult, Fi
         *out = (sum_sq / n_samples as f64).sqrt();
     }
 
+    let (jerk_params, jerk_stderr) = if jerk {
+        (
+            theta[base..].to_vec(),
+            param_stderr_full[base..].to_vec(),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
     Ok(FerrFitResult {
-        params: s.unpack(&theta),
-        param_stderr,
+        params: s.unpack(&theta[..base]),
+        param_stderr: param_stderr_full[..base].to_vec(),
+        jerk: jerk_params,
+        jerk_stderr,
         ferr_rms,
         condition,
         samples: n_samples,

@@ -396,6 +396,7 @@ fn cmd_fit(args: &[String]) {
         pick(&mut input.snap_mode);
         pick(&mut input.torque);
         pick(&mut input.ferr_mode);
+        pick(&mut input.jerk_mode);
         for cols in &mut input.extra {
             pick(cols);
         }
@@ -444,7 +445,25 @@ fn cmd_fit(args: &[String]) {
         eprintln!("kept fit rows dumped to {path}");
     }
     if response == "ferr" {
-        run_ferr_fit(&structure, &modes, &input, &req(args, "--out"));
+        let raw_rms: Vec<f64> = structure
+            .frame
+            .iter()
+            .map(|row| {
+                let n = fit_cap.t.len();
+                let sum_sq: f64 = (0..n)
+                    .map(|k| {
+                        let e: f64 = row
+                            .iter()
+                            .zip(&fit_cap.ferr)
+                            .map(|(f, chan)| f * chan[k])
+                            .sum();
+                        e * e
+                    })
+                    .sum();
+                (sum_sq / n as f64).sqrt()
+            })
+            .collect();
+        run_ferr_fit(&structure, &modes, &input, &raw_rms, &req(args, "--out"));
         return;
     }
     let r = fit(&input, &FitOptions::default()).unwrap_or_else(|e| {
@@ -552,7 +571,13 @@ fn cmd_fit(args: &[String]) {
     eprintln!("profile written to {out}");
 }
 
-fn run_ferr_fit(structure: &Structure, modes: &[&str], input: &FitInput, out_path: &str) {
+fn run_ferr_fit(
+    structure: &Structure,
+    modes: &[&str],
+    input: &FitInput,
+    raw_rms: &[f64],
+    out_path: &str,
+) {
     let r = fit_ferr(input, &FitOptions::default()).unwrap_or_else(|e| {
         eprintln!("servo-cal: refusing to emit a ferr fit: {e:?}");
         std::process::exit(2);
@@ -560,7 +585,7 @@ fn run_ferr_fit(structure: &Structure, modes: &[&str], input: &FitInput, out_pat
     for (k, mode) in modes.iter().enumerate() {
         eprintln!(
             "ferr-fit mode {mode}: mass={:+.3e} (se {:.2e}) viscous={:+.3e} (se {:.2e}) \
-             coulomb={:+.3e} (se {:.2e}) rms={:.3e}mm samples={}",
+             coulomb={:+.3e} (se {:.2e}) rms={:.3e}mm raw_rms={:.3e}mm samples={}",
             r.params.mass[k],
             r.param_stderr[3 * k],
             r.params.viscous[k],
@@ -568,10 +593,23 @@ fn run_ferr_fit(structure: &Structure, modes: &[&str], input: &FitInput, out_pat
             r.params.coulomb[k],
             r.param_stderr[3 * k + 2],
             r.ferr_rms[k],
+            raw_rms[k],
             r.samples,
         );
+        if let Some(j) = r.jerk.get(k) {
+            let skew_us = if r.params.mass[k] != 0.0 {
+                -j / r.params.mass[k] * 1e6
+            } else {
+                f64::NAN
+            };
+            eprintln!(
+                "ferr-fit mode {mode}: jerk={j:+.3e} (se {:.2e}, implied \
+                 command->ferr skew {skew_us:+.0} us)",
+                r.jerk_stderr[k],
+            );
+        }
     }
-    let json = render_ferr_json(structure, modes, &r);
+    let json = render_ferr_json(structure, modes, &r, raw_rms);
     std::fs::write(out_path, json).unwrap_or_else(|e| die(&format!("write {out_path}: {e}")));
     eprintln!("ferr fit written to {out_path}");
 }

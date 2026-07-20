@@ -135,6 +135,7 @@ fn run_fit_with(
         snap_mode: vec![],
         torque: pick(&pp.torque),
         ferr_mode: pick(&pp.ferr_mode),
+        jerk_mode: pick(&pp.jerk_mode),
         extra: pp.extra.iter().map(|cols| pick(cols)).collect(),
     };
     (fit(&input, fit_opts).unwrap(), pp.delay_s)
@@ -274,6 +275,7 @@ fn in_band_residual_excludes_out_of_band_pollution() {
         snap_mode: vec![],
         torque: pp.torque.clone(),
         ferr_mode: pp.ferr_mode.clone(),
+        jerk_mode: pp.jerk_mode.clone(),
         extra: pp.extra.clone(),
     };
     let res = residual_by_motor(&full, &r.params, &r.snap_params, &r.extra_params);
@@ -470,6 +472,7 @@ fn modal_snap_recovers_the_injected_compliance_term() {
         snap_mode: pick(&pp.snap_mode),
         torque: pick(&pp.torque),
         ferr_mode: pick(&pp.ferr_mode),
+        jerk_mode: pick(&pp.jerk_mode),
         extra: pp.extra.iter().map(|cols| pick(cols)).collect(),
     };
     let r = fit(&input, &FitOptions::default()).unwrap();

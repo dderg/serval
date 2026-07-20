@@ -73,8 +73,44 @@ fn synth_ferr(frame: &[Vec<f64>], alpha: &[f64], gamma: &[f64]) -> FitInput {
         snap_mode: vec![],
         torque: vec![],
         ferr_mode,
+        jerk_mode: vec![],
         extra: Vec::new(),
     }
+}
+
+fn jerk_from_acc(acc_mode: &[Vec<f64>], dt: f64) -> Vec<Vec<f64>> {
+    acc_mode
+        .iter()
+        .map(|a| {
+            let n = a.len();
+            (0..n)
+                .map(|k| {
+                    if k == 0 || k + 1 == n {
+                        0.0
+                    } else {
+                        (a[k + 1] - a[k - 1]) / (2.0 * dt)
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Delay every mode's ferr response by `shift` samples relative to the
+/// commanded kinematics: `ferr = alpha * acc(t - shift*dt)`.
+fn synth_shifted_ferr(frame: &[Vec<f64>], alpha: &[f64], shift: usize) -> FitInput {
+    let mut input = synth_ferr(frame, alpha, &vec![0.0; frame.len()]);
+    for (m, col) in input.ferr_mode.iter_mut().enumerate() {
+        let n = col.len();
+        for k in (shift..n).rev() {
+            let base = alpha[m] * input.acc_mode[m][k - shift];
+            col[k] = small_noise(base, k + 13 * m, 0.02);
+        }
+        for v in col.iter_mut().take(shift) {
+            *v = 0.0;
+        }
+    }
+    input
 }
 
 #[test]
@@ -149,11 +185,13 @@ fn render_ferr_json_matches_the_documented_contract_shape() {
             coulomb: vec![0.01, -0.02],
         },
         param_stderr: vec![4.5e-10, 1.0e-5, 2.0e-3, 3.0e-10, 8.0e-6, 1.5e-3],
+        jerk: vec![-2.0e-8, 1.0e-8],
+        jerk_stderr: vec![1.0e-9, 1.5e-9],
         ferr_rms: vec![0.012, 0.009],
         condition: 12.3,
         samples: 4321,
     };
-    let json = render_ferr_json(&structure, &["x", "y"], &r);
+    let json = render_ferr_json(&structure, &["x", "y"], &r, &[0.0034, 0.0044]);
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["version"], 1);
     assert_eq!(v["modes"], serde_json::json!(["x", "y"]));
@@ -163,7 +201,10 @@ fn render_ferr_json_matches_the_documented_contract_shape() {
     assert_eq!(v["stderr"]["mass"], serde_json::json!([4.5e-10, 3.0e-10]));
     assert_eq!(v["stderr"]["viscous"], serde_json::json!([1.0e-5, 8.0e-6]));
     assert_eq!(v["stderr"]["coulomb"], serde_json::json!([2.0e-3, 1.5e-3]));
+    assert_eq!(v["jerk"], serde_json::json!([-2.0e-8, 1.0e-8]));
+    assert_eq!(v["jerk_stderr"], serde_json::json!([1.0e-9, 1.5e-9]));
     assert_eq!(v["ferr_rms"], serde_json::json!([0.012, 0.009]));
+    assert_eq!(v["ferr_rms_raw"], serde_json::json!([0.0034, 0.0044]));
     assert_eq!(v["samples"], 4321);
 }
 
@@ -178,9 +219,72 @@ fn render_ferr_json_fails_loudly_on_mode_count_mismatch() {
             coulomb: vec![0.0],
         },
         param_stderr: vec![0.0, 0.0, 0.0],
+        jerk: vec![],
+        jerk_stderr: vec![],
         ferr_rms: vec![0.0],
         condition: 1.0,
         samples: 1,
     };
-    let _ = render_ferr_json(&structure, &["x", "y"], &r);
+    let _ = render_ferr_json(&structure, &["x", "y"], &r, &[0.0, 0.0]);
+}
+
+
+/// A command->telemetry timing skew turns `alpha*acc(t-d)` into
+/// `alpha*acc(t) - alpha*d*jerk(t)`: without a jerk column the second term
+/// correlates with accel over corner-rich excitation and lands in the mass
+/// coefficient as bias, which is exactly the failure mode that walked the
+/// bench tuner to 2x the rms-optimal mass. The jerk nuisance column must
+/// absorb it.
+#[test]
+fn jerk_column_absorbs_command_to_ferr_timing_skew() {
+    let frame = vec![vec![0.5, 0.5], vec![0.5, -0.5]];
+    let alpha = [2.0e-5, -1.5e-5];
+    let dt = 0.001;
+    let shift = 2;
+    let biased = synth_shifted_ferr(&frame, &alpha, shift);
+    let rb = fit_ferr(&biased, &FitOptions::default()).unwrap();
+    let mut debiased = biased.clone();
+    debiased.jerk_mode = jerk_from_acc(&biased.acc_mode, dt);
+    let rd = fit_ferr(&debiased, &FitOptions::default()).unwrap();
+    let _ = rb;
+    for k in 0..2 {
+        let debiased_err = (rd.params.mass[k] - alpha[k]).abs() / alpha[k].abs();
+        assert!(
+            debiased_err < 0.1,
+            "mode {k}: de-biased mass {} vs truth {}",
+            rd.params.mass[k],
+            alpha[k]
+        );
+        let expected_jerk = -alpha[k] * shift as f64 * dt;
+        assert_eq!(
+            rd.jerk[k].signum(),
+            expected_jerk.signum(),
+            "mode {k}: jerk coef {} sign vs expected -alpha*delta = {expected_jerk}",
+            rd.jerk[k]
+        );
+    }
+}
+
+#[test]
+fn unshifted_ferr_keeps_jerk_statistically_zero_and_mass_unbiased() {
+    let frame = vec![vec![0.5, 0.5], vec![0.5, -0.5]];
+    let alpha = [2.0e-5, -1.5e-5];
+    let gamma = [0.08, -0.05];
+    let mut input = synth_ferr(&frame, &alpha, &gamma);
+    input.jerk_mode = jerk_from_acc(&input.acc_mode, 0.001);
+    let r = fit_ferr(&input, &FitOptions::default()).unwrap();
+    for k in 0..2 {
+        assert!(
+            (r.params.mass[k] - alpha[k]).abs() < 0.15 * alpha[k].abs(),
+            "mass[{k}] = {} vs truth {}",
+            r.params.mass[k],
+            alpha[k]
+        );
+        assert!(
+            r.jerk[k].abs() < 4.0 * r.jerk_stderr[k],
+            "mode {k} jerk = {} not statistically zero (se {})",
+            r.jerk[k],
+            r.jerk_stderr[k]
+        );
+    }
 }

@@ -73,6 +73,7 @@ fn synth(frame: &[Vec<f64>], mass: &[f64], viscous: &[f64], coulomb: &[f64]) -> 
         snap_mode: vec![],
         torque,
         ferr_mode: vec![],
+        jerk_mode: vec![],
         extra: Vec::new(),
     }
 }
@@ -128,6 +129,7 @@ fn refuses_unexcited_mode() {
         snap_mode: vec![],
         torque: vec![vec![1.0; n]],
         ferr_mode: vec![],
+        jerk_mode: vec![],
         extra: Vec::new(),
     };
     assert!(matches!(
@@ -147,6 +149,7 @@ fn refuses_collinear_excitation() {
         snap_mode: vec![],
         torque: vec![vec![1.0; n]],
         ferr_mode: vec![],
+        jerk_mode: vec![],
         extra: Vec::new(),
     };
     assert!(matches!(
@@ -172,6 +175,7 @@ fn refuses_saturated_torque() {
         snap_mode: vec![],
         torque: vec![torque],
         ferr_mode: vec![],
+        jerk_mode: vec![],
         extra: Vec::new(),
     };
     assert!(matches!(
@@ -222,6 +226,7 @@ fn snap_column_separates_compliance_from_mass() {
         snap_mode: vec![snap.clone()],
         torque: vec![torque.clone()],
         ferr_mode: vec![],
+        jerk_mode: vec![],
         extra: Vec::new(),
     };
     let r = fit(&with_snap, &FitOptions::default()).unwrap();

@@ -101,6 +101,14 @@ pub struct Prepped {
     /// following error is a state of the closed loop, not a torque-report
     /// artifact, so there is no accel→torque lag to remove from it.
     pub ferr_mode: Vec<Vec<f64>>,
+    /// Per-mode jerk (da/dt) regressor column, filtered identically to the
+    /// other channels. Nuisance column for the ferr fit: any timing skew
+    /// between the commanded kinematics and the telemetry ferr samples
+    /// makes `a(t-δ) ≈ a(t) - δ·j(t)`, so without this column the skew
+    /// lands in the mass coefficient as a constant bias and the tuning
+    /// loop nulls the correlation at the wrong mass. Its coefficient is
+    /// `-m·δ` — dividing by the fitted mass measures the skew itself.
+    pub jerk_mode: Vec<Vec<f64>>,
     /// Pulley-angle sin/cos nuisance columns per motor (empty when
     /// `ripple_period_mm` is unset), filtered like every other channel.
     pub extra: Vec<Vec<Vec<f64>>>,
@@ -331,6 +339,15 @@ pub fn prep(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> Prepped
             }
         }
     }
+    let mut jerk_raw = vec![vec![0.0; n]; n_modes];
+    for md in 0..n_modes {
+        for seg in &segs {
+            for k in seg.start + 1..seg.end.saturating_sub(1) {
+                jerk_raw[md][k] =
+                    (acc_mode_raw[md][k + 1] - acc_mode_raw[md][k - 1]) / (2.0 * dt);
+            }
+        }
+    }
     for m in &opts.modal {
         assert!(
             m.mode < n_modes,
@@ -384,6 +401,7 @@ pub fn prep(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> Prepped
     let snap_mode = filt(&snap_raw);
     let torque = filt(&torque);
     let ferr_mode = filt(&ferr_mode_raw);
+    let jerk_mode = filt(&jerk_raw);
     let extra: Vec<Vec<Vec<f64>>> = match opts.ripple_period_mm {
         None => Vec::new(),
         Some(period) => {
@@ -450,6 +468,7 @@ pub fn prep(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> Prepped
         cs_mode,
         torque,
         ferr_mode,
+        jerk_mode,
         extra,
         valid,
         delay_s: lag as f64 * dt,

@@ -31,11 +31,27 @@ struct FerrFitJson {
     modes: Vec<String>,
     coef: FerrCoefficients,
     stderr: FerrCoefficients,
+    /// Per-mode jerk nuisance coefficients (absorbed, never applied);
+    /// `-jerk[k] / coef.mass[k]` is the implied command→ferr timing skew
+    /// in seconds. Empty when the jerk column was disabled.
+    jerk: Vec<f64>,
+    jerk_stderr: Vec<f64>,
+    /// Per-mode RMS of the in-band residual after subtracting the fitted
+    /// model, over the fit's masked samples (mm).
     ferr_rms: Vec<f64>,
+    /// Per-mode RMS of the RAW following error over the whole capture —
+    /// unfiltered, unmasked (mm). This is the tuning loop's objective:
+    /// the number the operator actually experiences as tracking error.
+    ferr_rms_raw: Vec<f64>,
     samples: usize,
 }
 
-pub fn render_ferr_json(structure: &Structure, modes: &[&str], r: &FerrFitResult) -> String {
+pub fn render_ferr_json(
+    structure: &Structure,
+    modes: &[&str],
+    r: &FerrFitResult,
+    ferr_rms_raw: &[f64],
+) -> String {
     assert_eq!(
         modes.len(),
         structure.mode_count(),
@@ -43,6 +59,7 @@ pub fn render_ferr_json(structure: &Structure, modes: &[&str], r: &FerrFitResult
     );
     let n = modes.len();
     assert_eq!(r.param_stderr.len(), 3 * n, "one stderr triple per mode");
+    assert_eq!(ferr_rms_raw.len(), n, "one raw rms per mode");
     let stderr = FerrCoefficients {
         mass: (0..n).map(|k| r.param_stderr[3 * k]).collect(),
         viscous: (0..n).map(|k| r.param_stderr[3 * k + 1]).collect(),
@@ -57,7 +74,10 @@ pub fn render_ferr_json(structure: &Structure, modes: &[&str], r: &FerrFitResult
             coulomb: r.params.coulomb.clone(),
         },
         stderr,
+        jerk: r.jerk.clone(),
+        jerk_stderr: r.jerk_stderr.clone(),
         ferr_rms: r.ferr_rms.clone(),
+        ferr_rms_raw: ferr_rms_raw.to_vec(),
         samples: r.samples,
     };
     serde_json::to_string_pretty(&json).expect("ferr fit result serializes to JSON")
