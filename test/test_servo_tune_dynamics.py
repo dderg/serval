@@ -510,28 +510,6 @@ def test_tune_dynamics_walks_mass_down_when_rms_says_lower():
 
 
 @requires_tomllib
-def test_tune_dynamics_budget_exhaustion_restores_baseline_and_raises():
-    sc, _gcode, _path = make_calibration()
-    engine = sc.printer.lookup_object("motion_engine")
-
-    # monotone objective: every mass increase keeps improving
-    def endless_descent(m, v, c):
-        return [
-            max(0.0001, 0.01 - 0.05 * m[0]),
-            max(0.0001, 0.01 - 0.05 * m[1]),
-        ]
-
-    sc.fake_rms_fn = endless_descent
-    gcmd = FakeGcmd(TERMS="MASS", ROUNDS=3)
-    with pytest.raises(RuntimeError, match="capture budget"):
-        sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
-    _h, _f, mass, viscous, coulomb, _ps, _ds = engine.dynamics_calls[-1]
-    assert mass == pytest.approx(BASELINE_MASS)
-    assert viscous == pytest.approx(BASELINE_VISCOUS)
-    assert coulomb == pytest.approx(BASELINE_COULOMB)
-
-
-@requires_tomllib
 def test_tune_dynamics_torque_rail_aborts_and_restores_baseline():
     sc, _gcode, _path = make_calibration()
     engine = sc.printer.lookup_object("motion_engine")

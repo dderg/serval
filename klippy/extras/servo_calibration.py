@@ -3952,13 +3952,13 @@ class ServoCalibration:
         "of its baseline. Passes over the terms repeat until a full "
         "pass improves nothing, then the best model is written as a "
         "dynamics TOML and left LIVE (point [ethercat_node] "
-        "dynamics_profile at it and RESTART to keep it). ROUNDS is the "
-        "total capture budget - running out restores the baseline and "
-        "fails loudly, writing nothing. torque_saturated aborts and "
-        "restores the same way; resonance_detected only warns. The "
+        "dynamics_profile at it and RESTART to keep it). There is no "
+        "round budget: the search runs until it converges (kill it if "
+        "it overstays). torque_saturated aborts, restores the baseline "
+        "and writes nothing; resonance_detected only warns. The "
         "baseline is PROFILE= or the node-level [ethercat_node] "
         "dynamics_profile (per-motor profiles are not supported). Params "
-        "MAX_ACCEL MAX_SPEED ROUNDS (24) STEP (0.15) TOL_UM (0.05) "
+        "MAX_ACCEL MAX_SPEED STEP (0.15) TOL_UM (0.05) "
         "TERMS (mass,viscous,coulomb) NAME (tune) PROFILE SERVOS BOUND "
         "SMALL_SIZE"
     )
@@ -4003,7 +4003,6 @@ class ServoCalibration:
             )
         max_accel = gcmd.get_float("MAX_ACCEL", max(self.accels), above=0.0)
         max_speed = gcmd.get_float("MAX_SPEED", max(self.speeds), above=0.0)
-        rounds = gcmd.get_int("ROUNDS", 24, minval=3)
         step_frac = gcmd.get_float("STEP", 0.15, minval=0.02, maxval=0.5)
         tol_mm = 1e-3 * gcmd.get_float("TOL_UM", 0.05, above=0.0)
         name = gcmd.get("NAME", "tune")
@@ -4017,7 +4016,6 @@ class ServoCalibration:
             "max_accel": max_accel,
             "max_speed": max_speed,
             "speeds": speeds,
-            "rounds": rounds,
             "step": step_frac,
             "tol_um": tol_mm * 1e3,
             "terms": [t.lower() for t in terms],
@@ -4135,12 +4133,6 @@ class ServoCalibration:
                 cache_key = model_key(trial)
                 cached = measured.get(cache_key)
                 if cached is None:
-                    if round_i >= rounds:
-                        raise gcmd.error(
-                            "SERVO_TUNE_DYNAMICS ran out of its %d-capture "
-                            "budget while tuning %s - raise ROUNDS or "
-                            "narrow TERMS" % (rounds, term)
-                        )
                     applied = True
                     cached = measure(round_i, trial)
                     measured[cache_key] = cached
