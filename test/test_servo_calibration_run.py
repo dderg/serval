@@ -1014,3 +1014,13 @@ def test_pattern_apply_verifies_on_x_axis_strokes():
     assert any(
         "verification runs single-axis X strokes" in r for r in gcmd.responses
     )
+
+
+def test_repo_root_resolves_to_the_repository_root():
+    # The package refactor moved this code one directory deeper; a stale
+    # __file__ hop count pointed REPO_ROOT at klippy/, so the servo-cal
+    # binary path became klippy/rust/target/... on the bench.
+    root = servo_calibration.REPO_ROOT
+    assert os.path.isdir(os.path.join(root, "klippy"))
+    assert os.path.isdir(os.path.join(root, "rust"))
+    assert os.path.basename(root) != "klippy"
