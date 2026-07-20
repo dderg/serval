@@ -73,16 +73,32 @@ fn validate_spatial_shape(spatial: &ManifestSpatial) -> Result<(), String> {
     Ok(())
 }
 
+/// A capture record's `target_counts` is the tx setpoint the drive latches at
+/// the NEXT SYNC0, while its `position_actual` was sampled at the PREVIOUS
+/// latch, and CSP reaches a latched setpoint one cycle later — so at equal
+/// indices actual trails commanded by exactly two cycles even at zero servo
+/// error. Verified on bench captures: `target[k-2] - actual[k] -
+/// following_error[k]` closes to encoder noise, and only at shift 2.
+pub const TARGET_TO_ACTUAL_SKEW_CYCLES: usize = 2;
+
+fn skewed_len(n_records: usize) -> usize {
+    n_records.saturating_sub(TARGET_TO_ACTUAL_SKEW_CYCLES)
+}
+
 pub fn xy_path(cap: &Scap, spatial: &ManifestSpatial) -> Result<Option<PlotPath>, String> {
-    xy_path_at(cap, spatial, &path_indices(cap.n_records, MAX_PATH_POINTS))
+    xy_path_at(
+        cap,
+        spatial,
+        &path_indices(skewed_len(cap.n_records), MAX_PATH_POINTS),
+    )
 }
 
 pub fn xy_path_full(
     cap: &Scap,
     spatial: &ManifestSpatial,
 ) -> Result<Option<(PlotPath, bool)>, String> {
-    let idxs = path_indices(cap.n_records, MAX_FULL_PATH_POINTS);
-    let truncated = idxs.len() < cap.n_records;
+    let idxs = path_indices(skewed_len(cap.n_records), MAX_FULL_PATH_POINTS);
+    let truncated = idxs.len() < skewed_len(cap.n_records);
     let Some(mut path) = xy_path_at(cap, spatial, &idxs)? else {
         return Ok(None);
     };
@@ -136,8 +152,9 @@ fn xy_path_at(
         for (j, &k) in idxs.iter().enumerate() {
             path.cmd_x_mm[j] += cx * target[k] as f64;
             path.cmd_y_mm[j] += cy * target[k] as f64;
-            path.act_x_mm[j] += cx * actual[k] as f64;
-            path.act_y_mm[j] += cy * actual[k] as f64;
+            let ka = k + TARGET_TO_ACTUAL_SKEW_CYCLES;
+            path.act_x_mm[j] += cx * actual[ka] as f64;
+            path.act_y_mm[j] += cy * actual[ka] as f64;
         }
     }
     Ok(Some(path))
