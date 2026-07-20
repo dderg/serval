@@ -12,7 +12,7 @@ pub struct SlaveCfg {
     pub max_torque_tenth_pct: Option<u16>,
     pub velocity_ff: bool,
     pub torque_clamp_tenths: i16,
-    pub ff_lead_cycles: f64,
+    pub ff_lead_us: f64,
     pub invert: bool,
     pub dynamics_profile: Option<String>,
 }
@@ -27,24 +27,22 @@ fn default_cfg(pos: i32) -> SlaveCfg {
         max_torque_tenth_pct: None,
         velocity_ff: false,
         torque_clamp_tenths: 300,
-        ff_lead_cycles: 0.0,
+        ff_lead_us: 0.0,
         invert: false,
         dynamics_profile: None,
     }
 }
 
-const FF_LEAD_CYCLES_MAX: f64 = 40.0;
+const FF_LEAD_US_MAX: f64 = 10_000.0;
 
-fn parse_ff_lead_cycles(v: &str) -> Result<f64, String> {
-    let cycles: f64 = v
+fn parse_ff_lead_us(v: &str) -> Result<f64, String> {
+    let us: f64 = v
         .parse()
-        .map_err(|_| "--ff-lead-cycles not a number".to_string())?;
-    if !(0.0..=FF_LEAD_CYCLES_MAX).contains(&cycles) {
-        return Err(format!(
-            "--ff-lead-cycles {cycles} outside [0, {FF_LEAD_CYCLES_MAX}]"
-        ));
+        .map_err(|_| "--ff-lead-us not a number".to_string())?;
+    if !(0.0..=FF_LEAD_US_MAX).contains(&us) {
+        return Err(format!("--ff-lead-us {us} outside [0, {FF_LEAD_US_MAX}]"));
     }
-    Ok(cycles)
+    Ok(us)
 }
 
 fn parse_clamp_tenths(v: &str) -> Result<i16, String> {
@@ -75,8 +73,8 @@ pub fn parse_slaves(args: &[String]) -> Result<Vec<SlaveCfg>, String> {
         if let Some(v) = arg_val(args, "--torque-clamp-pct") {
             cfg.torque_clamp_tenths = parse_clamp_tenths(&v)?;
         }
-        if let Some(v) = arg_val(args, "--ff-lead-cycles") {
-            cfg.ff_lead_cycles = parse_ff_lead_cycles(&v)?;
+        if let Some(v) = arg_val(args, "--ff-lead-us") {
+            cfg.ff_lead_us = parse_ff_lead_us(&v)?;
         }
         cfg.dynamics_profile = arg_val(args, "--slave-dynamics-profile");
         return Ok(vec![cfg]);
@@ -116,7 +114,7 @@ pub fn parse_slaves(args: &[String]) -> Result<Vec<SlaveCfg>, String> {
             | "--following-error-counts"
             | "--max-torque-tenth-pct"
             | "--torque-clamp-pct"
-            | "--ff-lead-cycles"
+            | "--ff-lead-us"
             | "--slave-dynamics-profile") => {
                 let v = args
                     .get(i + 1)
@@ -147,8 +145,8 @@ pub fn parse_slaves(args: &[String]) -> Result<Vec<SlaveCfg>, String> {
                                 "--following-error-counts not a number".to_string()
                             })?);
                     }
-                    "--ff-lead-cycles" => {
-                        cur.ff_lead_cycles = parse_ff_lead_cycles(v)?;
+                    "--ff-lead-us" => {
+                        cur.ff_lead_us = parse_ff_lead_us(v)?;
                     }
                     "--max-torque-tenth-pct" => {
                         cur.max_torque_tenth_pct = Some(

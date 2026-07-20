@@ -431,10 +431,10 @@ endpoint (no restart) and measured with one tracking capture of the full
 `COULOMB` (friction error peaks at breakaway, right at the start of the
 window), and mean per-move **ferr_rms** for `VISCOUS` (viscous error
 shows up as cruise following error). The analyzer's per-move error window starts
-`ff_lead_cycles` samples **before** the commanded move (torque
-feedforward is sent that many cycles early, so its error signature
-lands ahead of the position command; the run manifest carries the
-value) and runs **through the settle duration**, so ferr_peak/ferr_rms
+the FF lead **before** the commanded move (torque feedforward is sent
+that far ahead, so its error signature lands ahead of the position
+command; the run manifest carries `ff_lead_us` and the analyzer scales
+it by the capture rate) and runs **through the settle duration**, so ferr_peak/ferr_rms
 cover FF lead-in, in-move tracking, and endpoint overshoot alike (for
 every command that reads these metrics, not just the refine);
 `overshoot` remains reported separately as the post-move-only peak. On

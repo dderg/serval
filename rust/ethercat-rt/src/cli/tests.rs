@@ -300,31 +300,31 @@ fn slave_dynamics_profile_defaults_none() {
 }
 
 #[test]
-fn ff_lead_cycles_binds_per_slave_group_and_defaults_zero() {
+fn ff_lead_us_binds_per_slave_group_and_defaults_zero() {
     let slaves = parse_slaves(&args(&[
         "--slave",
         "0",
-        "--ff-lead-cycles",
-        "3",
+        "--ff-lead-us",
+        "250",
         "--slave",
         "1",
     ]))
     .unwrap();
-    assert_eq!(slaves[0].ff_lead_cycles, 3.0);
-    assert_eq!(slaves[1].ff_lead_cycles, 0.0);
+    assert_eq!(slaves[0].ff_lead_us, 250.0);
+    assert_eq!(slaves[1].ff_lead_us, 0.0);
 }
 
 #[test]
-fn ff_lead_cycles_legacy_form_and_range_check() {
-    let slaves = parse_slaves(&args(&["--ff-lead-cycles", "2"])).unwrap();
-    assert_eq!(slaves[0].ff_lead_cycles, 2.0);
-    assert!(parse_slaves(&args(&["--ff-lead-cycles", "41"])).is_err());
-    assert!(parse_slaves(&args(&["--ff-lead-cycles", "-1"])).is_err());
+fn ff_lead_us_legacy_form_and_range_check() {
+    let slaves = parse_slaves(&args(&["--ff-lead-us", "500"])).unwrap();
+    assert_eq!(slaves[0].ff_lead_us, 500.0);
+    assert!(parse_slaves(&args(&["--ff-lead-us", "10001"])).is_err());
+    assert!(parse_slaves(&args(&["--ff-lead-us", "-1"])).is_err());
 }
 
 #[test]
-fn ff_lead_cycles_accepts_fractional_and_rejects_garbage() {
-    let slaves = parse_slaves(&args(&["--ff-lead-cycles", "1.5"])).unwrap();
-    assert_eq!(slaves[0].ff_lead_cycles, 1.5);
-    assert!(parse_slaves(&args(&["--ff-lead-cycles", "x"])).is_err());
+fn ff_lead_us_accepts_fractional_and_rejects_garbage() {
+    let slaves = parse_slaves(&args(&["--ff-lead-us", "312.5"])).unwrap();
+    assert_eq!(slaves[0].ff_lead_us, 312.5);
+    assert!(parse_slaves(&args(&["--ff-lead-us", "x"])).is_err());
 }

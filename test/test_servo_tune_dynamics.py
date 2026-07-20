@@ -192,7 +192,7 @@ class FakeEngine:
         self.ff_lead_calls.append((handle, slot, lead_ns))
 
 
-def _motor(name, node_name, chain_index, invert=False, ff_lead_cycles=1.0):
+def _motor(name, node_name, chain_index, invert=False, ff_lead_us=250.0):
     m = servo_axis.ServoMotor.__new__(servo_axis.ServoMotor)
     m.motor_name = name
     m.node_name = node_name
@@ -202,7 +202,7 @@ def _motor(name, node_name, chain_index, invert=False, ff_lead_cycles=1.0):
     m.encoder_counts_per_rev = 131072
     m.velocity_ff = True
     m.ff_max_torque = 30.0
-    m.ff_lead_cycles = ff_lead_cycles
+    m.ff_lead_us = ff_lead_us
     return m
 
 
@@ -691,9 +691,6 @@ def test_tune_dynamics_lead_converges_to_the_rms_optimum():
     sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
     tune = _manifest_for(sc)["dynamics_tune"]
     assert tune["lead_us"] == pytest.approx(375.0, abs=40.0)
-    assert tune["lead_cycles"] == pytest.approx(
-        tune["lead_us"] / 250.0, rel=1e-9
-    )
     # the winner is streamed to every slot and left live
     final = [c for c in engine.ff_lead_calls[-2:]]
     assert {slot for _h, slot, _ns in final} == {0, 1}
@@ -701,7 +698,7 @@ def test_tune_dynamics_lead_converges_to_the_rms_optimum():
         ns == pytest.approx(tune["lead_us"] * 1e3, abs=1.0)
         for _h, _s, ns in final
     )
-    assert any("ff_lead_cycles" in r for r in gcmd.responses)
+    assert any("ff_lead_us" in r for r in gcmd.responses)
 
 
 @requires_tomllib
@@ -735,8 +732,8 @@ def test_tune_dynamics_abort_restores_the_configured_lead():
 @requires_tomllib
 def test_tune_dynamics_lead_requires_one_shared_config_value():
     rails = [
-        _rail("x", [_motor("motor_a", "xy_drives", 0, ff_lead_cycles=1.0)]),
-        _rail("y", [_motor("motor_b", "xy_drives", 1, ff_lead_cycles=2.0)]),
+        _rail("x", [_motor("motor_a", "xy_drives", 0, ff_lead_us=250.0)]),
+        _rail("y", [_motor("motor_b", "xy_drives", 1, ff_lead_us=500.0)]),
     ]
     sc, _gcode, _path = make_calibration(rails=rails)
     with pytest.raises(RuntimeError, match="disagree"):

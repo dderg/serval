@@ -940,7 +940,7 @@ fn build_run_reusing(
                     manifest.belts.as_deref(),
                     manifest.axis.as_deref(),
                     accel_path.as_deref(),
-                    manifest.ff_lead_cycles as usize,
+                    manifest.ff_lead_samples(cap.fs()),
                     manifest.spatial.as_ref(),
                 )?
             }

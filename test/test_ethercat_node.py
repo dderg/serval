@@ -171,15 +171,15 @@ def test_set_motor_torque_without_engine_handle_raises():
 def test_coupled_uniformity_rejects_mismatched_ff_lead():
     node, rails = _dyn_node(
         [
-            (0, FakeRail("x", 0, ff_config=(True, 30.0, 2))),
-            (1, FakeRail("y", 1, ff_config=(True, 30.0, 0))),
+            (0, FakeRail("x", 0, ff_config=(True, 30.0, 500.0))),
+            (1, FakeRail("y", 1, ff_config=(True, 30.0, 0.0))),
         ],
         node_profile="/cfg/node.toml",
     )
     with pytest.raises(FakeConfigError) as e:
         ethercat_node.EtherCatNode._validate_coupled_uniformity(node, rails)
-    assert "ff_lead_cycles must be identical" in str(e.value)
-    assert "x=2" in str(e.value) and "y=0" in str(e.value)
+    assert "ff_lead_us must be identical" in str(e.value)
+    assert "x=500.0" in str(e.value) and "y=0.0" in str(e.value)
 
 
 def test_coupled_uniformity_rejects_mismatched_velocity_ff():

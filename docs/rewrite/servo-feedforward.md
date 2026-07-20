@@ -80,7 +80,7 @@ encoder_counts_per_rev: 131072  # A6-EC: 131072
 #velocity_ff: True              # stream 60B1h velocity feedforward (kinematic, no profile)
 #dynamics_profile: dynamics_x.toml  # path to profile TOML; enables 60B2h torque FF
 #ff_max_torque: 30.0          # torque-offset ceiling, % of rated (0, 400], default 30.0
-#ff_lead_cycles: 0              # sample FF offsets this many DC cycles ahead, [0, 40]
+#ff_lead_us: 0.0                # sample FF offsets this far ahead, microseconds [0, 10000]
 #invert_direction: True         # reverse the drive (default False)
 ```
 
@@ -124,22 +124,24 @@ count in each `StatusHeartbeat` (`ff_saturation_count`). Saturation during
 aggressive tuning is expected; persistent saturation on a steady print is a
 miscalibrated profile.
 
-`ff_lead_cycles` (int, default `0`, range [0, 40]): dead-time compensation for
-the feedforward path. The 60B1h/60B2h offsets are sampled this many DC cycles
-ahead of the position target, so the torque they command lands when the
-trajectory demands it instead of one command-to-torque latency later. The
-position target itself is untouched. Measure the latency first (cross-correlate
-`torque_actual` against `torque_offset` in a tracking capture), then set the
-lead to the transport share of it — leading past the true latency flips the
-sign of the edge error. Lookahead past the end of the streamed trajectory, or
-into a dwell gap, reads as a stationary target (zero FF), which is the same
+`ff_lead_us` (float, default `0.0`, range [0, 10000]): dead-time compensation
+for the feedforward path, in microseconds. The 60B1h/60B2h offsets are sampled
+this far ahead of the position target, so the torque they command lands when
+the trajectory demands it instead of one command-to-torque latency later. The
+position target itself is untouched. The value is continuous — the endpoint
+peeks the commanded curve at an arbitrary future nanosecond, so it is not
+quantized to whole DC cycles — and `SERVO_TUNE_DYNAMICS TERMS=LEAD` finds it
+empirically (or measure it by cross-correlating `torque_actual` against
+`torque_offset` in a tracking capture); leading past the true latency flips
+the sign of the edge error. Lookahead past the end of the streamed trajectory,
+or into a dwell gap, reads as a stationary target (zero FF), which is the same
 thing the un-led path converges to. The option is per-motor because the
 latency it compensates is a per-drive property.
 
 On a coupled node (node-level `dynamics_profile`) every motor's torque FF
 mixes all motors' commanded kinematics, so asymmetry in the FF path skews the
 shared model instead of tuning one motor. The per-motor FF options —
-`velocity_ff`, `ff_max_torque`, `ff_lead_cycles` (the
+`velocity_ff`, `ff_max_torque`, `ff_lead_us` (the
 `COUPLED_UNIFORM_OPTIONS` list in `ethercat_node.py`) — must therefore be
 identical across the node's motors; a mismatch is a config error.
 

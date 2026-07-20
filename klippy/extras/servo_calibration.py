@@ -1549,14 +1549,14 @@ class ServoCalibration:
             "counts_per_mm": motor.get_counts_per_mm(),
         }
 
-    def _ff_lead_cycles(self, gcmd: Any, motors: list[Any]) -> int:
-        leads = {getattr(m, "ff_lead_cycles", 0) for m in motors}
+    def _ff_lead_us(self, gcmd: Any, motors: list[Any]) -> float:
+        leads = {getattr(m, "ff_lead_us", 0.0) for m in motors}
         if len(leads) > 1:
             raise gcmd.error(
-                "motors disagree on ff_lead_cycles (%s); the analyzer "
+                "motors disagree on ff_lead_us (%s); the analyzer "
                 "needs a single per-run value" % (sorted(leads),)
             )
-        return leads.pop() if leads else 0
+        return leads.pop() if leads else 0.0
 
     def _belts(self, rails: list[Any] | None) -> str | None:
         if not rails:
@@ -1631,7 +1631,7 @@ class ServoCalibration:
             "session_id": structured_log.get_session(),
             "stroke_plan": stroke_plan,
             "motors": [self._motor_manifest(m) for m in motors],
-            "ff_lead_cycles": self._ff_lead_cycles(gcmd, motors),
+            "ff_lead_us": self._ff_lead_us(gcmd, motors),
             "belts": self._belts(belts_rails),
             "spatial": servo_strokes.spatial_frame(kin),
             "steps": [],
@@ -3967,7 +3967,7 @@ class ServoCalibration:
         "the mean of both modes' rms, first direction from the summed "
         "onset bias (positive = FF lands late = probe up), floored at "
         "zero with a half-cycle floor step. The tuned lead stays live "
-        "until RESTART; persist it via ff_lead_cycles (the converged "
+        "until RESTART; persist it via ff_lead_us (the converged "
         "report prints the value). Passes over the terms repeat until a "
         "full pass improves nothing, then the best model is written as "
         "a dynamics TOML and left LIVE (point [ethercat_node] "
@@ -4037,16 +4037,14 @@ class ServoCalibration:
                 raise gcmd.error(
                     "SERVO_TUNE_DYNAMICS TERMS=LEAD tunes one shared "
                     "feedforward lead, but the servos disagree on "
-                    "ff_lead_cycles: %s"
+                    "ff_lead_us: %s"
                     % (
                         ", ".join(
                             "%s=%g" % kv for kv in sorted(config_leads.items())
                         ),
                     )
                 )
-            configured_lead_s = (
-                next(iter(config_leads.values())) * cycle_us * 1e-6
-            )
+            configured_lead_s = next(iter(config_leads.values())) * 1e-6
         max_accel = gcmd.get_float("MAX_ACCEL", max(self.accels), above=0.0)
         max_speed = gcmd.get_float("MAX_SPEED", max(self.speeds), above=0.0)
         step_frac = gcmd.get_float("STEP", 0.15, minval=0.02, maxval=0.5)
@@ -4370,9 +4368,6 @@ class ServoCalibration:
                 "rounds": rounds_history,
                 "search": search_summaries,
                 "lead_us": current_lead * 1e6 if lead_enabled else None,
-                "lead_cycles": (
-                    current_lead / (cycle_us * 1e-6) if lead_enabled else None
-                ),
                 "converged": True,
                 "profile": out_path,
             }
@@ -4386,11 +4381,10 @@ class ServoCalibration:
             )
             lead_note = ""
             if lead_enabled:
-                lead_cycles = current_lead / (cycle_us * 1e-6)
                 lead_note = (
-                    " | tuned ff lead %.1fus - set ff_lead_cycles: %.3f "
+                    " | tuned ff lead %.1fus - set ff_lead_us: %.1f "
                     "on the servo motors to keep it"
-                    % (current_lead * 1e6, lead_cycles)
+                    % (current_lead * 1e6, current_lead * 1e6)
                 )
             gcmd.respond_info(
                 "SERVO_TUNE_DYNAMICS converged in %d captures | tuned "

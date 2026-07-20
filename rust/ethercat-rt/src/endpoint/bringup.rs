@@ -192,7 +192,7 @@ impl SlaveColumns {
             torque_clamp_tenths: slaves.iter().map(|s| s.torque_clamp_tenths).collect(),
             ff_lead_ns: slaves
                 .iter()
-                .map(|s| (s.ff_lead_cycles * cycle_us as f64 * 1000.0).round() as u64)
+                .map(|s| (s.ff_lead_us * 1000.0).round() as u64)
                 .collect(),
             jump_log_counts,
         }
