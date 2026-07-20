@@ -3914,13 +3914,15 @@ class ServoCalibration:
                 "ferr fit %s: unsupported version %r (expected 1)"
                 % (path, data.get("version"))
             )
-        raw = data.get("ferr_rms_raw")
-        if not isinstance(raw, list) or len(raw) != len(data.get("modes", [])):
-            raise gcmd.error(
-                "ferr fit %s has no per-mode ferr_rms_raw - rebuild "
-                "servo-cal (make servo-cal), the binary predates the "
-                "rms-objective tuner" % (path,)
-            )
+        n_modes = len(data.get("modes", []))
+        for key in ("ferr_rms_raw", "onset_bias"):
+            vec = data.get(key)
+            if not isinstance(vec, list) or len(vec) != n_modes:
+                raise gcmd.error(
+                    "ferr fit %s has no per-mode %s - rebuild servo-cal "
+                    "(make servo-cal), the binary predates the "
+                    "rms-objective tuner" % (path, key)
+                )
         return data
 
     cmd_SERVO_TUNE_DYNAMICS_help = (
@@ -3935,8 +3937,13 @@ class ServoCalibration:
         "hint and diagnostic: on the bench its zero landed at 2.2x the "
         "rms-optimal mass while tracking got worse every round.) Terms "
         "tune one at a time in TERMS order, both modes per capture, each "
-        "as a 1-D line search: first probe follows the correlation's "
-        "sign, a failed first probe flips once, the step grows while rms "
+        "as a 1-D line search: the mass probe's first direction follows "
+        "the ONSET BIAS (mean sign(accel)*ferr right after each accel "
+        "step - the manual heuristic: only the first excursion when "
+        "torque lands carries clean command-path sign, before the "
+        "drive's own compensation reacts; positive = under-fed), other "
+        "terms follow their regression coefficient's sign; a failed "
+        "first probe flips once, the step grows while rms "
         "improves by more than TOL_UM (relative change capped at 40%% "
         "per probe), and the first non-improving probe triggers one "
         "parabolic refine through the bracket; ties go to the best "
@@ -4100,6 +4107,7 @@ class ServoCalibration:
                 "rms": [float(v) for v in ferr["ferr_rms_raw"]],
                 "coef": ferr["coef"],
                 "stderr": ferr["stderr"],
+                "onset": [float(v) for v in ferr["onset_bias"]],
                 "samples": ferr.get("samples"),
             }
 
@@ -4139,12 +4147,13 @@ class ServoCalibration:
                     rms = cached["rms"]
                     label = "baseline" if searches is None else term.lower()
                     line = " | ".join(
-                        "%s %s=%.6g rms=%.2fum (g=%+.3g)"
+                        "%s %s=%.6g rms=%.2fum (onset %+.2fum, g=%+.3g)"
                         % (
                             mode,
                             key,
                             trial[key][baseline_modes.index(mode)],
                             rms[fit_idx] * 1e3,
+                            cached["onset"][fit_idx] * 1e3,
                             cached["coef"][key][fit_idx],
                         )
                         for fit_idx, mode in enumerate(plan["modes"])
@@ -4163,6 +4172,7 @@ class ServoCalibration:
                             "ferr_rms_raw": list(rms),
                             "coef": dict(cached["coef"]),
                             "stderr": dict(cached["stderr"]),
+                            "onset_bias": list(cached["onset"]),
                             "samples": cached["samples"],
                         }
                     )
@@ -4184,6 +4194,8 @@ class ServoCalibration:
                                 else TUNE_ZERO_FLOOR_STEPS[term]
                             )
                         hint = float(cached["coef"][key][fit_idx])
+                        if term == "MASS" and cached["onset"][fit_idx] != 0.0:
+                            hint = cached["onset"][fit_idx]
                         searches[mode] = RmsLineSearch(
                             value,
                             rms[fit_idx],

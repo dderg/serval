@@ -499,3 +499,59 @@ pub fn band_limited_rms(residual: &[Vec<f64>], t: &[f64], keep: &[bool], cutoff_
     assert!(count > 0, "band_limited_rms: no kept samples");
     (sq / count as f64).sqrt()
 }
+
+/// The operator's manual tuning heuristic, made a number: the mean of
+/// `sign(accel) * ferr` over a short window right after every commanded
+/// accel transition, per mode, on RAW unfiltered channels. Only the first
+/// excursion when torque is applied carries clean command-path sign
+/// information - everything after it is the drive's own compensation
+/// (disturbance observer, integrator) reacting, which is why whole-capture
+/// ferr regressions can point the wrong way. Positive bias = the plant
+/// initially lags the command when torque steps in (feedforward
+/// under-feeds, mass too low); negative = it initially overshoots
+/// (over-fed). Returns per-mode bias (mm) and the total onset windows
+/// scored; zero windows yields a 0.0 bias for that mode.
+pub fn onset_bias(
+    acc_mode: &[Vec<f64>],
+    ferr_mode: &[Vec<f64>],
+    dt: f64,
+    window_s: f64,
+) -> (Vec<f64>, usize) {
+    assert!(dt > 0.0, "onset_bias: dt must be positive");
+    assert!(window_s > 0.0, "onset_bias: window must be positive");
+    assert_eq!(acc_mode.len(), ferr_mode.len(), "mode channel count");
+    let window = ((window_s / dt).round() as usize).max(1);
+    let mut biases = Vec::with_capacity(acc_mode.len());
+    let mut total_windows = 0usize;
+    for (acc, ferr) in acc_mode.iter().zip(ferr_mode) {
+        assert_eq!(acc.len(), ferr.len(), "mode sample count");
+        let amax = acc.iter().fold(0.0_f64, |m, a| m.max(a.abs()));
+        if amax == 0.0 {
+            biases.push(0.0);
+            continue;
+        }
+        let step_thresh = 0.25 * amax;
+        let active_thresh = 0.1 * amax;
+        let mut sum = 0.0;
+        let mut count = 0usize;
+        let mut k = 1;
+        while k < acc.len() {
+            let stepped = (acc[k] - acc[k - 1]).abs() > step_thresh;
+            if !stepped || acc[k].abs() < active_thresh {
+                k += 1;
+                continue;
+            }
+            total_windows += 1;
+            let sign = acc[k].signum();
+            let mut j = k;
+            while j < acc.len().min(k + window) && (acc[j] - acc[k]).abs() <= step_thresh {
+                sum += sign * ferr[j];
+                count += 1;
+                j += 1;
+            }
+            k = j;
+        }
+        biases.push(if count == 0 { 0.0 } else { sum / count as f64 });
+    }
+    (biases, total_windows)
+}

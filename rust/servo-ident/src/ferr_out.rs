@@ -43,6 +43,15 @@ struct FerrFitJson {
     /// unfiltered, unmasked (mm). This is the tuning loop's objective:
     /// the number the operator actually experiences as tracking error.
     ferr_rms_raw: Vec<f64>,
+    /// Per-mode mean of `sign(accel)·ferr` over short windows right after
+    /// each commanded accel transition (mm), raw channels — the operator's
+    /// manual heuristic: only the FIRST excursion when torque is applied
+    /// carries clean command-path sign, before the drive's own
+    /// compensation reacts. Positive = under-fed (mass too low), negative
+    /// = over-fed. The tuner's direction hint for the mass search.
+    onset_bias: Vec<f64>,
+    /// Accel-transition windows the onset bias was scored over.
+    onset_windows: usize,
     samples: usize,
 }
 
@@ -51,6 +60,8 @@ pub fn render_ferr_json(
     modes: &[&str],
     r: &FerrFitResult,
     ferr_rms_raw: &[f64],
+    onset_bias: &[f64],
+    onset_windows: usize,
 ) -> String {
     assert_eq!(
         modes.len(),
@@ -60,6 +71,7 @@ pub fn render_ferr_json(
     let n = modes.len();
     assert_eq!(r.param_stderr.len(), 3 * n, "one stderr triple per mode");
     assert_eq!(ferr_rms_raw.len(), n, "one raw rms per mode");
+    assert_eq!(onset_bias.len(), n, "one onset bias per mode");
     let stderr = FerrCoefficients {
         mass: (0..n).map(|k| r.param_stderr[3 * k]).collect(),
         viscous: (0..n).map(|k| r.param_stderr[3 * k + 1]).collect(),
@@ -78,6 +90,8 @@ pub fn render_ferr_json(
         jerk_stderr: r.jerk_stderr.clone(),
         ferr_rms: r.ferr_rms.clone(),
         ferr_rms_raw: ferr_rms_raw.to_vec(),
+        onset_bias: onset_bias.to_vec(),
+        onset_windows,
         samples: r.samples,
     };
     serde_json::to_string_pretty(&json).expect("ferr fit result serializes to JSON")

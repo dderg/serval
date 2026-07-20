@@ -40,7 +40,7 @@ use servo_ident::live_stream::{LiveTap, DEFAULT_IDLE_TIMEOUT, DEFAULT_TAP_SOCKET
 use servo_ident::metrics::{DEFAULT_SETTLE_BAND_COUNTS, DEFAULT_TORQUE_LIMIT_PER_MILLE};
 use servo_ident::model::Structure;
 use servo_ident::pipeline::{fit_input, full_fit_input, prepare};
-use servo_ident::prep::{band_limited_rms, ModalMode, PrepOptions};
+use servo_ident::prep::{band_limited_rms, median_dt, onset_bias, ModalMode, PrepOptions};
 use servo_ident::profile_out::{c0006_recommendation, render_profile};
 use servo_ident::scap::Scap;
 use servo_ident::serve;
@@ -445,25 +445,35 @@ fn cmd_fit(args: &[String]) {
         eprintln!("kept fit rows dumped to {path}");
     }
     if response == "ferr" {
-        let raw_rms: Vec<f64> = structure
-            .frame
+        let n = fit_cap.t.len();
+        let project = |chans: &[Vec<f64>]| -> Vec<Vec<f64>> {
+            structure
+                .frame
+                .iter()
+                .map(|row| {
+                    (0..n)
+                        .map(|k| row.iter().zip(chans).map(|(f, chan)| f * chan[k]).sum())
+                        .collect()
+                })
+                .collect()
+        };
+        let ferr_raw = project(&fit_cap.ferr);
+        let acc_raw = project(&fit_cap.acc);
+        let raw_rms: Vec<f64> = ferr_raw
             .iter()
-            .map(|row| {
-                let n = fit_cap.t.len();
-                let sum_sq: f64 = (0..n)
-                    .map(|k| {
-                        let e: f64 = row
-                            .iter()
-                            .zip(&fit_cap.ferr)
-                            .map(|(f, chan)| f * chan[k])
-                            .sum();
-                        e * e
-                    })
-                    .sum();
-                (sum_sq / n as f64).sqrt()
-            })
+            .map(|e| (e.iter().map(|v| v * v).sum::<f64>() / n as f64).sqrt())
             .collect();
-        run_ferr_fit(&structure, &modes, &input, &raw_rms, &req(args, "--out"));
+        let dt = median_dt(&fit_cap.t);
+        let (onset, onset_windows) = onset_bias(&acc_raw, &ferr_raw, dt, 0.008);
+        run_ferr_fit(
+            &structure,
+            &modes,
+            &input,
+            &raw_rms,
+            &onset,
+            onset_windows,
+            &req(args, "--out"),
+        );
         return;
     }
     let r = fit(&input, &FitOptions::default()).unwrap_or_else(|e| {
@@ -576,6 +586,8 @@ fn run_ferr_fit(
     modes: &[&str],
     input: &FitInput,
     raw_rms: &[f64],
+    onset: &[f64],
+    onset_windows: usize,
     out_path: &str,
 ) {
     let r = fit_ferr(input, &FitOptions::default()).unwrap_or_else(|e| {
@@ -596,6 +608,18 @@ fn run_ferr_fit(
             raw_rms[k],
             r.samples,
         );
+        eprintln!(
+            "ferr-fit mode {mode}: onset bias {:+.2}um over {onset_windows} \
+             accel steps ({})",
+            onset[k] * 1e3,
+            if onset[k] > 0.0 {
+                "initially lags - feedforward under-feeds"
+            } else if onset[k] < 0.0 {
+                "initially overshoots - feedforward over-feeds"
+            } else {
+                "no onset signal"
+            },
+        );
         if let Some(j) = r.jerk.get(k) {
             let skew_us = if r.params.mass[k] != 0.0 {
                 -j / r.params.mass[k] * 1e6
@@ -609,7 +633,7 @@ fn run_ferr_fit(
             );
         }
     }
-    let json = render_ferr_json(structure, modes, &r, raw_rms);
+    let json = render_ferr_json(structure, modes, &r, raw_rms, onset, onset_windows);
     std::fs::write(out_path, json).unwrap_or_else(|e| die(&format!("write {out_path}: {e}")));
     eprintln!("ferr fit written to {out_path}");
 }

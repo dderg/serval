@@ -221,6 +221,8 @@ def _ferr_json(
     coulomb_se=(1e-6, 1e-6),
     ferr_rms=(0.01, 0.01),
     ferr_rms_raw=(0.002, 0.002),
+    onset_bias=(0.0, 0.0),
+    onset_windows=8,
     samples=500,
 ):
     return {
@@ -238,6 +240,8 @@ def _ferr_json(
         },
         "ferr_rms": list(ferr_rms),
         "ferr_rms_raw": list(ferr_rms_raw),
+        "onset_bias": list(onset_bias),
+        "onset_windows": onset_windows,
         "samples": samples,
     }
 
@@ -314,6 +318,7 @@ def make_calibration(
         "viscous": (0.0, 0.0),
         "coulomb": (0.0, 0.0),
     }
+    sc.fake_onset_fn = lambda mass, viscous, coulomb: (0.0, 0.0)
 
     def fake_run(gcmd, argv, timeout):
         gcode.scripts.append(("RUN", argv, timeout))
@@ -348,6 +353,7 @@ def make_calibration(
                     viscous=sc.fake_coef_hints["viscous"],
                     coulomb=sc.fake_coef_hints["coulomb"],
                     ferr_rms_raw=sc.fake_rms_fn(mass, viscous, coulomb),
+                    onset_bias=sc.fake_onset_fn(mass, viscous, coulomb),
                 )
             with open(out_path, "w") as f:
                 json.dump(payload, f)
@@ -616,3 +622,36 @@ def test_tune_dynamics_rejects_excitation_matrix_params():
     for params in ({"ACCELS": "5000"}, {"SPEEDS": "100"}, {"PATTERN": "1"}):
         with pytest.raises(RuntimeError):
             sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(**params))
+
+
+@requires_tomllib
+def test_tune_dynamics_onset_bias_steers_the_first_mass_probe():
+    sc, _gcode, _path = make_calibration()
+    sc.fake_rms_fn = quadratic_rms(mass_opt=[0.014, 0.022])
+    # regression coefficient claims under-fed (the bench pathology) but the
+    # onset excursion says over-fed - the onset must win the direction call
+    sc.fake_coef_hints["mass"] = (2.5e-8, 2.7e-8)
+    sc.fake_onset_fn = lambda mass, viscous, coulomb: (
+        -0.001 if mass[0] > 0.014 else 0.001,
+        -0.001 if mass[1] > 0.022 else 0.001,
+    )
+    gcmd = FakeGcmd(TERMS="MASS")
+    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
+    tune = _manifest_for(sc)["dynamics_tune"]
+    first_probe = tune["rounds"][1]["values"]["mass"]
+    assert first_probe[0] < BASELINE_MASS[0], "onset says down, probe went up"
+    assert first_probe[1] < BASELINE_MASS[1]
+    with open(tune["profile"], "rb") as f:
+        prof = tomllib.load(f)
+    assert prof["mass"][0] == pytest.approx(0.014, rel=0.2)
+    assert prof["mass"][1] == pytest.approx(0.022, rel=0.2)
+
+
+@requires_tomllib
+def test_tune_dynamics_requires_onset_bias_from_the_binary():
+    sc, _gcode, _path = make_calibration()
+    stale = _ferr_json()
+    del stale["onset_bias"]
+    sc.fake_ferr_queue = [stale]
+    with pytest.raises(RuntimeError, match="onset_bias"):
+        sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd())

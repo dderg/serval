@@ -191,7 +191,14 @@ fn render_ferr_json_matches_the_documented_contract_shape() {
         condition: 12.3,
         samples: 4321,
     };
-    let json = render_ferr_json(&structure, &["x", "y"], &r, &[0.0034, 0.0044]);
+    let json = render_ferr_json(
+        &structure,
+        &["x", "y"],
+        &r,
+        &[0.0034, 0.0044],
+        &[0.0012, -0.0007],
+        42,
+    );
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["version"], 1);
     assert_eq!(v["modes"], serde_json::json!(["x", "y"]));
@@ -205,6 +212,8 @@ fn render_ferr_json_matches_the_documented_contract_shape() {
     assert_eq!(v["jerk_stderr"], serde_json::json!([1.0e-9, 1.5e-9]));
     assert_eq!(v["ferr_rms"], serde_json::json!([0.012, 0.009]));
     assert_eq!(v["ferr_rms_raw"], serde_json::json!([0.0034, 0.0044]));
+    assert_eq!(v["onset_bias"], serde_json::json!([0.0012, -0.0007]));
+    assert_eq!(v["onset_windows"], 42);
     assert_eq!(v["samples"], 4321);
 }
 
@@ -225,7 +234,7 @@ fn render_ferr_json_fails_loudly_on_mode_count_mismatch() {
         condition: 1.0,
         samples: 1,
     };
-    let _ = render_ferr_json(&structure, &["x", "y"], &r, &[0.0, 0.0]);
+    let _ = render_ferr_json(&structure, &["x", "y"], &r, &[0.0, 0.0], &[0.0, 0.0], 0);
 }
 
 /// A command->telemetry timing skew turns `alpha*acc(t-d)` into
@@ -286,4 +295,52 @@ fn unshifted_ferr_keeps_jerk_statistically_zero_and_mass_unbiased() {
             r.jerk_stderr[k]
         );
     }
+}
+
+#[test]
+fn onset_bias_reads_the_first_excursion_sign_per_mode() {
+    use servo_ident::prep::onset_bias;
+    let dt = 0.001;
+    let n = 400;
+    let mut acc = vec![0.0; n];
+    // two accel steps: +8000 at 50, -8000 at 200
+    for k in 50..150 {
+        acc[k] = 8000.0;
+    }
+    for k in 200..300 {
+        acc[k] = -8000.0;
+    }
+    // mode 0 lags at torque application (under-fed): ferr follows sign(a)
+    // for the first 5 ms of every step, then the "drive compensation"
+    // reverses it - the whole-capture mean is ~0, the onset is not.
+    let mut lag = vec![0.0; n];
+    let mut over = vec![0.0; n];
+    for (start, s) in [(50usize, 1.0f64), (200, -1.0)] {
+        for k in start..start + 5 {
+            lag[k] = 0.004 * s;
+            over[k] = -0.004 * s;
+        }
+        for k in start + 5..start + 100 {
+            lag[k] = -0.0002 * s;
+            over[k] = 0.0002 * s;
+        }
+    }
+    let (bias, windows) = onset_bias(&[acc.clone(), acc], &[lag, over], dt, 0.008);
+    assert_eq!(windows, 4, "two steps per mode");
+    assert!(
+        bias[0] > 0.001,
+        "lagging mode must read under-fed: {bias:?}"
+    );
+    assert!(
+        bias[1] < -0.001,
+        "overshooting mode must read over-fed: {bias:?}"
+    );
+}
+
+#[test]
+fn onset_bias_is_zero_without_excitation() {
+    use servo_ident::prep::onset_bias;
+    let (bias, windows) = onset_bias(&[vec![0.0; 100]], &[vec![0.5; 100]], 0.001, 0.008);
+    assert_eq!(windows, 0);
+    assert_eq!(bias, vec![0.0]);
 }
