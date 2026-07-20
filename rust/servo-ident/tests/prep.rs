@@ -599,6 +599,38 @@ fn cruise_arrival_fires_once_per_trapezoid() {
         "one cruise arrival per single trapezoid stroke"
     );
 }
+/// The same trapezoid ends in a stop: exactly one lead window, opening
+/// where |vel| falls through 5% of vmax on the final decel — the
+/// corner-exit lobe location. The accel ramp start must NOT trigger.
+#[test]
+fn lead_stop_window_fires_once_at_the_stop() {
+    let dt = 0.001;
+    let a = 10_000.0;
+    let vmax = 100.0;
+    let mut acc = Vec::new();
+    let mut vel = Vec::new();
+    let ramp = 10;
+    for k in 0..ramp {
+        acc.push(a);
+        vel.push(vmax * (k as f64 + 1.0) / ramp as f64);
+    }
+    for _ in 0..20 {
+        acc.push(0.0);
+        vel.push(vmax);
+    }
+    for k in 0..ramp {
+        acc.push(-a);
+        vel.push(vmax * (1.0 - (k as f64 + 1.0) / ramp as f64));
+    }
+    for _ in 0..15 {
+        acc.push(0.0);
+        vel.push(0.0);
+    }
+    let ferr = vec![0.02; acc.len()];
+    let lead = transient_rms(TransientKind::Lead, &[acc], &[vel], &[ferr], dt, 0.008);
+    assert_eq!(lead[0].windows, 1, "one decel-to-stop per stroke");
+    assert!(lead[0].rms.is_some());
+}
 
 /// Commanded velocity that flips sign three times triggers three coulomb
 /// windows, and the aggregate/sigma math over constant per-window ferr is

@@ -494,6 +494,14 @@ fn cmd_fit(args: &[String]) {
             dt,
             window_s,
         );
+        let lead_rms = transient_rms(
+            TransientKind::Lead,
+            &acc_raw,
+            &vel_raw,
+            &ferr_raw,
+            dt,
+            0.020,
+        );
         run_ferr_fit(
             &structure,
             &modes,
@@ -504,6 +512,7 @@ fn cmd_fit(args: &[String]) {
             &mass_rms,
             &viscous_rms,
             &coulomb_rms,
+            &lead_rms,
             &req(args, "--out"),
         );
         return;
@@ -623,6 +632,7 @@ fn run_ferr_fit(
     mass_rms: &[TransientRms],
     viscous_rms: &[TransientRms],
     coulomb_rms: &[TransientRms],
+    lead_rms: &[TransientRms],
     out_path: &str,
 ) {
     let r = fit_ferr(input, &FitOptions::default()).unwrap_or_else(|e| {
@@ -672,6 +682,7 @@ fn run_ferr_fit(
         ("mass", mass_rms),
         ("viscous", viscous_rms),
         ("coulomb", coulomb_rms),
+        ("lead", lead_rms),
     ] {
         let per_mode: Vec<String> = modes
             .iter()
@@ -693,6 +704,7 @@ fn run_ferr_fit(
         mass_rms,
         viscous_rms,
         coulomb_rms,
+        lead_rms,
     );
     std::fs::write(out_path, json).unwrap_or_else(|e| die(&format!("write {out_path}: {e}")));
     eprintln!("ferr fit written to {out_path}");

@@ -650,6 +650,32 @@ fn reversal_windows(vel: &[f64], window: usize) -> Vec<std::ops::Range<usize>> {
     }
     windows
 }
+/// Decel-to-stop windows for one mode: a window opens where commanded
+/// `|vel|` falls through `0.05·vmax` from above — the final approach of a
+/// stop, e.g. the lateral mode exiting a corner onto a straight. Bench
+/// captures show command-path timing error (ff lead) integrates into a
+/// direction-locked overshoot lobe exactly here, peaking ~5 ms after the
+/// stop and gone by ~20 ms; the shared accel-onset windows dilute it.
+/// Windows do not overlap — the scan resumes past each window's end.
+fn stop_windows(vel: &[f64], window: usize) -> Vec<std::ops::Range<usize>> {
+    let vmax = vel.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    if vmax == 0.0 {
+        return Vec::new();
+    }
+    let stop_thresh = 0.05 * vmax;
+    let mut windows = Vec::new();
+    let mut k = 1;
+    while k < vel.len() {
+        if vel[k - 1].abs() >= stop_thresh && vel[k].abs() < stop_thresh {
+            let end = (k + window).min(vel.len());
+            windows.push(k..end);
+            k = end;
+        } else {
+            k += 1;
+        }
+    }
+    windows
+}
 
 /// Which commanded transient the transient-rms objective scores over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -662,6 +688,8 @@ pub enum TransientKind {
     Viscous,
     /// Commanded-velocity sign reversals (coulomb authority).
     Coulomb,
+    /// Decel-to-stop exits (command-path timing / ff lead authority).
+    Lead,
 }
 
 /// Per-mode transient following-error statistics.
@@ -707,6 +735,7 @@ pub fn transient_rms(
             TransientKind::Mass => accel_onset_windows(acc, window),
             TransientKind::Viscous => cruise_arrival_windows(acc, vel, window),
             TransientKind::Coulomb => reversal_windows(vel, window),
+            TransientKind::Lead => stop_windows(vel, window),
         };
         out.push(aggregate_transient(ferr, &windows));
     }

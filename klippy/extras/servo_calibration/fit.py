@@ -757,11 +757,12 @@ class DynamicsFitCommands(RefineCommands):
                 "servo-cal fit --response ferr produced an unusable result "
                 "%s: %s" % (path, e)
             )
-        if data.get("version") != 2:
+        if data.get("version") != 3:
             raise gcmd.error(
-                "ferr fit %s: unsupported version %r (expected 2) - rebuild "
+                "ferr fit %s: unsupported version %r (expected 3) - rebuild "
                 "servo-cal (make servo-cal), the binary predates the "
-                "transient-window rms objective" % (path, data.get("version"))
+                "per-term transient-window rms objective"
+                % (path, data.get("version"))
             )
         n_modes = len(data.get("modes", []))
         for key in ("ferr_rms_raw", "onset_bias"):
@@ -779,7 +780,7 @@ class DynamicsFitCommands(RefineCommands):
                 "(make servo-cal), the binary predates the transient-window "
                 "rms objective" % (path,)
             )
-        for term in ("mass", "viscous", "coulomb"):
+        for term in ("mass", "viscous", "coulomb", "lead"):
             entry = ff.get(term)
             if not isinstance(entry, dict):
                 raise gcmd.error(
@@ -826,7 +827,9 @@ class DynamicsFitCommands(RefineCommands):
         "one shared node-global value (seconds, continuous - the "
         "endpoint peeks the command ring at an arbitrary future "
         "nanosecond, so it is not quantized to whole cycles): scored on "
-        "the mean of both modes' rms, first direction from the summed "
+        "the mean of both modes' decel-to-stop window rms (corner exits "
+        "- where timing error integrates into a direction-locked "
+        "overshoot lobe), first direction from the summed "
         "onset bias (positive = FF lands late = probe up), floored at "
         "zero with a half-cycle floor step. The tuned lead stays live "
         "until RESTART; the written dynamics TOML always carries "
@@ -1066,7 +1069,7 @@ class DynamicsFitCommands(RefineCommands):
                             )
                 cache_key = model_key(trial, trial_lead)
                 cached = measured.get(cache_key)
-                ff_key = "mass" if is_lead else term.lower()
+                ff_key = term.lower()
                 if cached is None:
                     applied = True
                     cached = measure(round_i, trial, trial_lead)

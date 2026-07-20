@@ -228,6 +228,18 @@ fn render_ferr_json_matches_the_documented_contract_shape() {
             windows: 2,
         },
     ];
+    let lead = vec![
+        TransientRms {
+            rms: Some(0.0042),
+            sigma: Some(0.0004),
+            windows: 12,
+        },
+        TransientRms {
+            rms: Some(0.0031),
+            sigma: Some(0.0002),
+            windows: 11,
+        },
+    ];
     let json = render_ferr_json(
         &structure,
         &["x", "y"],
@@ -238,9 +250,10 @@ fn render_ferr_json_matches_the_documented_contract_shape() {
         &mass,
         &viscous,
         &coulomb,
+        &lead,
     );
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(v["version"], 2);
+    assert_eq!(v["version"], 3);
     assert_eq!(v["modes"], serde_json::json!(["x", "y"]));
     assert_eq!(v["coef"]["mass"], serde_json::json!([1.23e-8, -4.5e-9]));
     assert_eq!(v["coef"]["viscous"], serde_json::json!([2.0e-4, -1.0e-4]));
@@ -287,6 +300,18 @@ fn render_ferr_json_matches_the_documented_contract_shape() {
         v["ferr_rms_ff"]["coulomb"]["windows"],
         serde_json::json!([0, 2])
     );
+    assert_eq!(
+        v["ferr_rms_ff"]["lead"]["rms"],
+        serde_json::json!([0.0042, 0.0031])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["lead"]["sigma"],
+        serde_json::json!([0.0004, 0.0002])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["lead"]["windows"],
+        serde_json::json!([12, 11])
+    );
 }
 
 #[test]
@@ -314,6 +339,7 @@ fn render_ferr_json_fails_loudly_on_mode_count_mismatch() {
         &[0.0, 0.0],
         &[0.0, 0.0],
         0,
+        &empty,
         &empty,
         &empty,
         &empty,

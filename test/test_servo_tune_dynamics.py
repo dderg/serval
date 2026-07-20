@@ -124,10 +124,10 @@ def _ferr_json(
             "sigma": list(ff_sigma),
             "windows": list(ff_windows),
         }
-        for term in ("mass", "viscous", "coulomb")
+        for term in ("mass", "viscous", "coulomb", "lead")
     }
     return {
-        "version": 2,
+        "version": 3,
         "modes": list(modes),
         "coef": {
             "mass": list(mass),

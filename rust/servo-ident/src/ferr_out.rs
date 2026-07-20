@@ -38,14 +38,16 @@ struct FerrTransientTerm {
 
 /// Transient-scoped RMS objective: the RAW following error scored only over
 /// the short windows each command-path term actually controls. The tuning
-/// loop's acceptance test reads these, not the whole-capture rms. `mass`
-/// also carries the lead term (a pure onset phenomenon), so there is no
-/// separate lead entry.
+/// loop's acceptance test reads these, not the whole-capture rms. `lead`
+/// scores the decel-to-stop windows where command-path timing error
+/// integrates into a direction-locked overshoot lobe — bench captures show
+/// the corner-exit deviation lives there, not in the shared accel onsets.
 #[derive(Debug, Serialize)]
 struct FerrRmsFf {
     mass: FerrTransientTerm,
     viscous: FerrTransientTerm,
     coulomb: FerrTransientTerm,
+    lead: FerrTransientTerm,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,7 +69,7 @@ struct FerrFitJson {
     /// the number the operator actually experiences as tracking error.
     ferr_rms_raw: Vec<f64>,
     /// Transient-scoped RAW ferr rms per command-path term (the acceptance
-    /// objective); see `FerrRmsFf`. `mass` carries the lead term too.
+    /// objective); see `FerrRmsFf`.
     ferr_rms_ff: FerrRmsFf,
     /// Per-mode mean of `sign(accel)·ferr` over short windows right after
     /// each commanded accel transition (mm), raw channels — the operator's
@@ -91,6 +93,7 @@ pub fn render_ferr_json(
     mass_rms: &[TransientRms],
     viscous_rms: &[TransientRms],
     coulomb_rms: &[TransientRms],
+    lead_rms: &[TransientRms],
 ) -> String {
     assert_eq!(
         modes.len(),
@@ -115,7 +118,7 @@ pub fn render_ferr_json(
         coulomb: (0..n).map(|k| r.param_stderr[3 * k + 2]).collect(),
     };
     let json = FerrFitJson {
-        version: 2,
+        version: 3,
         modes: modes.iter().map(|m| (*m).to_string()).collect(),
         coef: FerrCoefficients {
             mass: r.params.mass.clone(),
@@ -132,6 +135,7 @@ pub fn render_ferr_json(
             mass: transient_term(mass_rms),
             viscous: transient_term(viscous_rms),
             coulomb: transient_term(coulomb_rms),
+            lead: transient_term(lead_rms),
         },
         onset_windows,
         samples: r.samples,
