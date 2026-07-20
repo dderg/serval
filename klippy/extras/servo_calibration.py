@@ -427,12 +427,15 @@ class RmsLineSearch:
     demoted to direction hints and diagnostics. Protocol: construct with
     the already-measured start point, run the trial in `trial`, `feed` the
     measured rms, repeat until `done`; `best` then holds the winner.
-    First probe follows `hint`'s sign, a failed first probe flips once, a
-    march grows the step (capped at `clamp` of the current value) while
-    the rms keeps improving by more than `tol`, and the first
-    non-improving trial triggers a single parabolic refine through the
-    bracket around the best point. Trials clamp to `lo`; a trial that
-    lands on an already-measured value ends the search."""
+    First probe follows `hint`'s sign - except starting AT the lower
+    bound, where down is unactionable and the probe goes up regardless
+    (a zero-valued friction term with a downhill regression hint would
+    otherwise finish with zero probes, untested); a failed first probe
+    flips once, a march grows the step (capped at `clamp` of the current
+    value) while the rms keeps improving by more than `tol`, and the
+    first non-improving trial triggers a single parabolic refine through
+    the bracket around the best point. Trials clamp to `lo`; a trial
+    that lands on an already-measured value ends the search."""
 
     def __init__(
         self,
@@ -456,7 +459,7 @@ class RmsLineSearch:
         self.tol = tol
         self.lo = lo
         self.step = step
-        self.direction = 1.0 if hint >= 0.0 else -1.0
+        self.direction = 1.0 if hint >= 0.0 or value == lo else -1.0
         self.grow = grow
         self.clamp = clamp
         self.history: list[tuple[float, float]] = [(value, rms)]

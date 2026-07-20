@@ -425,11 +425,14 @@ def test_line_search_ignores_improvement_below_tol():
     assert s.best == 0.020
 
 
-def test_line_search_bounds_at_zero_when_hint_points_negative():
+def test_line_search_at_floor_probes_up_despite_negative_hint():
     s = RLS(0.0, 1.0, step=5.0, tol=1e-9, lo=0.0, hint=-1.0)
+    assert not s.done, "a floor start must earn at least one probe"
+    assert s.trial == pytest.approx(5.0)
+    s.feed(2.0)
     assert s.done
     assert s.best == 0.0
-    assert "bounded" in s.note
+    assert not s.improved
 
 
 def test_line_search_zero_start_probes_up_and_escapes():
@@ -453,6 +456,7 @@ def test_line_search_respects_lower_bound_mid_march():
 
 def test_line_search_rejects_feed_without_trial():
     s = RLS(0.0, 1.0, step=5.0, tol=1e-9, lo=0.0, hint=-1.0)
+    s.feed(2.0)
     assert s.done
     with pytest.raises(ValueError, match="without an outstanding trial"):
         s.feed(1.0)
