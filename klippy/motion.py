@@ -7,6 +7,7 @@ import time
 from . import (
     configfile,
     engine_wait,
+    motion_debug,
     motion_kinematics,
     motion_setup,
     structured_log,
@@ -15,22 +16,6 @@ from .extras import servo_axis
 from .kinematics import extruder
 
 REACTOR_YIELD_INTERVAL = 0.020
-
-
-def _open_sim_control():
-    sock_dir = os.environ.get("MCU_SIM_SOCK_DIR")
-    if not sock_dir:
-        return None
-    sock_path = os.path.join(sock_dir, "sim_control")
-    if not os.path.exists(sock_path):
-        return None
-    try:
-        from tools.sim.emulators.sim_control_client import (
-            SimControlClient,
-        )
-    except ImportError:
-        return None
-    return SimControlClient(sock_path)
 
 
 class EngineWakeup:
@@ -167,37 +152,7 @@ class Motion:
             desc=self.cmd_SET_POST_PROCESSOR_help,
         )
         gcode.register_command("M204", self.cmd_M204)
-        gcode.register_command(
-            "MCU_SIM_STEP_COUNT",
-            self.cmd_MCU_SIM_STEP_COUNT,
-            desc="[sim] Query cumulative step count for a stepper OID",
-        )
-        gcode.register_command(
-            "MCU_SIM_AXIS_STEPS",
-            self.cmd_MCU_SIM_AXIS_STEPS,
-            desc="[sim] Query configured steps_per_mm for an axis OID",
-        )
-        gcode.register_command(
-            "MCU_SIM_AXIS_ACCUM",
-            self.cmd_MCU_SIM_AXIS_ACCUM,
-            desc="[sim] Query step accumulator for an axis OID",
-        )
-        gcode.register_command(
-            "MCU_SIM_ENDSTOP_SET_PIN",
-            self.cmd_MCU_SIM_ENDSTOP_SET_PIN,
-            desc="[sim] Drive a Linux-MCU GPIO level (test fixture)",
-        )
-        gcode.register_command(
-            "MCU_SIM_MOTION_STATE",
-            self.cmd_MCU_SIM_MOTION_STATE,
-            desc="[sim] Query commanded motion state at a past print_time",
-        )
-        gcode.register_command(
-            "DIAG_DUMP",
-            self.cmd_DIAG_DUMP,
-            desc="Emit the live MCU diag snapshot (cause discriminators + "
-            "event ring) to the structured-log store; no reset required",
-        )
+        motion_debug.MotionDebugCommands(self, gcode)
 
         for module_name in (
             "gcode_move",
@@ -273,95 +228,18 @@ class Motion:
         duration_ms,
         ramp_ms,
     ):
-        from .extras.resonance_buzz import buzz_axis_to_motor_mask
+        from .extras import resonance_buzz
 
-        stepper_mask = axis_mask
-        sent = False
-        servo_targets = {}
-        if self.kin is not None:
-            for lane_idx, _axis_name, _motors in self.kin.lanes():
-                rail = self.kin.rails[lane_idx]
-                if not isinstance(rail, servo_axis.ServoRail):
-                    continue
-                rail_mask, _ = buzz_axis_to_motor_mask(rail.axis, False)
-                if not (axis_mask & rail_mask):
-                    continue
-                stepper_mask &= ~rail_mask
-                node = self.printer.lookup_object(
-                    "ethercat_node " + rail.get_node_name(), None
-                )
-                handle = node.get_engine_handle() if node is not None else None
-                if handle is None:
-                    raise self.printer.command_error(
-                        "RESONANCE_BUZZ: servo axis %s has no live EtherCAT "
-                        "engine handle" % rail.axis
-                    )
-                slot_masks = servo_targets.setdefault(handle, [0, 0])
-                for motor in rail.get_motors():
-                    slot = node.get_slot_for_motor(motor.get_motor_name())
-                    if slot is None:
-                        raise self.printer.command_error(
-                            "RESONANCE_BUZZ: servo motor %s has no claim "
-                            "slot on ethercat node %s"
-                            % (motor.get_motor_name(), rail.get_node_name())
-                        )
-                    slot_bit = 1 << slot
-                    if slot_masks[0] & slot_bit:
-                        raise self.printer.command_error(
-                            "RESONANCE_BUZZ: servo motor %s maps to EtherCAT "
-                            "slot %d which is already claimed by another "
-                            "buzzed axis on the same node"
-                            % (motor.get_motor_name(), slot)
-                        )
-                    slot_masks[0] |= slot_bit
-                    if sign_mask & rail_mask:
-                        slot_masks[1] |= slot_bit
-        for handle, (slot_mask, slot_sign_mask) in servo_targets.items():
-            self.engine.resonance_buzz(
-                handle,
-                slot_mask,
-                slot_sign_mask,
-                freq_start_millihz,
-                freq_end_millihz,
-                amplitude_nm,
-                duration_ms,
-                ramp_ms,
-            )
-            sent = True
-        if stepper_mask:
-            stepper_sent = False
-            for mcu_obj in self._engine_mcus():
-                try:
-                    cmd = mcu_obj.lookup_command(
-                        "kalico_resonance_buzz axis_mask=%c sign_mask=%c"
-                        " freq_start_millihz=%u freq_end_millihz=%u amplitude_nm=%u"
-                        " duration_ms=%u ramp_ms=%u"
-                    )
-                except Exception:
-                    continue
-                cmd.send(
-                    [
-                        stepper_mask,
-                        sign_mask,
-                        freq_start_millihz,
-                        freq_end_millihz,
-                        amplitude_nm,
-                        duration_ms,
-                        ramp_ms,
-                    ]
-                )
-                stepper_sent = True
-            if not stepper_sent:
-                raise self.printer.command_error(
-                    "No engine MCU advertises kalico_resonance_buzz; rebuild and "
-                    "reflash MCU firmware with CONFIG_RUNTIME=y"
-                )
-            sent = True
-        if not sent:
-            raise self.printer.command_error(
-                "RESONANCE_BUZZ: no target engine for axis_mask=0x%02x"
-                % axis_mask
-            )
+        return resonance_buzz.submit_buzz(
+            self,
+            axis_mask,
+            sign_mask,
+            freq_start_millihz,
+            freq_end_millihz,
+            amplitude_nm,
+            duration_ms,
+            ramp_ms,
+        )
 
     def set_extruder(self, extruder, extrude_pos):
         self.extruder = extruder
@@ -1004,145 +882,6 @@ class Motion:
 
     def _configure_axes_per_mcu(self, engine_mcus):
         return motion_setup.configure_axes_per_mcu(self, engine_mcus)
-
-    def cmd_DIAG_DUMP(self, gcmd):
-        sent = []
-        for name, mcu_obj in self.printer.lookup_objects(module="mcu"):
-            try:
-                cmd = mcu_obj.lookup_command("runtime_diag_dump")
-            except Exception:
-                continue
-            cmd.send([])
-            sent.append(name)
-        if sent:
-            gcmd.respond_info(
-                "DIAG_DUMP: requested live diag from %s "
-                "(see printer_data/logs/events/<mcu>.jsonl)"
-                % (", ".join(sent),)
-            )
-        else:
-            gcmd.respond_info("DIAG_DUMP: no MCU exposes runtime_diag_dump")
-
-    def cmd_MCU_SIM_MOTION_STATE(self, gcmd):
-        print_time = gcmd.get_float("PRINT_TIME", None)
-        t_ago = gcmd.get_float("T_AGO", None)
-        if (print_time is None) == (t_ago is None):
-            raise gcmd.error("specify exactly one of PRINT_TIME or T_AGO")
-        if t_ago is not None:
-            print_time = self.get_last_move_time() - t_ago
-        if self.engine is None:
-            raise gcmd.error("motion_engine not available")
-        state = self.engine.motion_state_at(self.mcu, print_time=print_time)
-        parts = [
-            "%s: pos=%.6f vel=%.6f accel=%.6f" % (name, p, v, a)
-            for name, (p, v, a) in sorted(state.items())
-        ]
-        gcmd.respond_info(
-            "motion_state @%.6f: %s" % (print_time, " | ".join(parts))
-        )
-
-    def cmd_MCU_SIM_STEP_COUNT(self, gcmd):
-        oid = gcmd.get_int("OID", 0, minval=0)
-        if self.mcu is None:
-            raise gcmd.error("mcu not available")
-        handle = self.mcu.get_engine_handle()
-        if handle is None:
-            raise gcmd.error("engine handle not set")
-        try:
-            resp = self.engine.engine_call(
-                handle,
-                "runtime_sim_stepper_count_query oid=%d" % oid,
-                "runtime_sim_stepper_count_response",
-                timeout_s=5.0,
-            )
-            count = resp.get("count", 0)
-            gcmd.respond_info(
-                "[engine-async] MCU_SIM_STEP_COUNT oid=%d count=%d"
-                % (oid, count)
-            )
-        except Exception as e:
-            raise gcmd.error("step count query failed: %s" % e)
-
-    def cmd_MCU_SIM_AXIS_STEPS(self, gcmd):
-        oid = gcmd.get_int("OID", 0, minval=0, maxval=3)
-        if self.mcu is None:
-            raise gcmd.error("mcu not available")
-        handle = self.mcu.get_engine_handle()
-        if handle is None:
-            raise gcmd.error("engine handle not set")
-        try:
-            resp = self.engine.engine_call(
-                handle,
-                "runtime_sim_axis_steps_query oid=%d" % oid,
-                "runtime_sim_axis_steps_response",
-                timeout_s=5.0,
-            )
-            milli = resp.get("milli_spm", 0)
-            gcmd.respond_info(
-                "[engine-async] MCU_SIM_AXIS_STEPS oid=%d "
-                "steps_per_mm=%.3f" % (oid, milli / 1000.0)
-            )
-        except Exception as e:
-            raise gcmd.error("axis steps query failed: %s" % e)
-
-    def cmd_MCU_SIM_AXIS_ACCUM(self, gcmd):
-        oid = gcmd.get_int("OID", 0, minval=0, maxval=3)
-        if self.mcu is None:
-            raise gcmd.error("mcu not available")
-        handle = self.mcu.get_engine_handle()
-        if handle is None:
-            raise gcmd.error("engine handle not set")
-        try:
-            resp = self.engine.engine_call(
-                handle,
-                "runtime_sim_axis_accum_query oid=%d" % oid,
-                "runtime_sim_axis_accum_response",
-                timeout_s=5.0,
-            )
-            milli = resp.get("milli", 0)
-            gcmd.respond_info(
-                "[engine-async] MCU_SIM_AXIS_ACCUM oid=%d accum=%.3f"
-                % (oid, milli / 1000.0)
-            )
-        except Exception as e:
-            raise gcmd.error("axis accum query failed: %s" % e)
-
-    def cmd_MCU_SIM_ENDSTOP_SET_PIN(self, gcmd):
-        gpio = gcmd.get_int("GPIO", minval=0, maxval=0xFFFF)
-        level = gcmd.get_int("LEVEL", minval=0, maxval=1)
-        client = _open_sim_control()
-        if client is not None:
-            MAX_GPIO_LINES = 288
-            chip_id = gpio // MAX_GPIO_LINES
-            line = gpio % MAX_GPIO_LINES
-            try:
-                with client:
-                    client.set_gpio_input(
-                        chip=chip_id,
-                        line=line,
-                        value=level,
-                    )
-                gcmd.respond_info(
-                    "MCU_SIM_ENDSTOP_SET_PIN gpio=%d level=%d -> ok (shim)"
-                    % (gpio, level)
-                )
-                return
-            except Exception as e:
-                raise gcmd.error("set_gpio_input failed: %s" % e)
-        if self.mcu is None:
-            raise gcmd.error("no MCU available for sim endstop set_pin")
-        handle = self.mcu.get_engine_handle()
-        try:
-            self.engine.engine_send(
-                handle,
-                "runtime_sim_endstop_set_pin gpio=%d level=%d" % (gpio, level),
-            )
-            gcmd.respond_info(
-                "MCU_SIM_ENDSTOP_SET_PIN gpio=%d level=%d -> ok (fw)"
-                % (gpio, level)
-            )
-        except Exception as e:
-            raise gcmd.error("runtime_sim_endstop_set_pin failed: %s" % e)
 
 
 class ToolheadShim:
