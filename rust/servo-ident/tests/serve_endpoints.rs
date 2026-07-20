@@ -532,10 +532,11 @@ fn path_endpoint_serves_full_resolution_xy_per_step() {
         let cap =
             servo_ident::scap::Scap::load(run_dirs[0].join(&cap_name).to_str().unwrap()).unwrap();
         assert_eq!(n_records, cap.n_records);
+        let paired = cap.n_records - servo_ident::analyze::TARGET_TO_ACTUAL_SKEW_CYCLES;
         for series in ["cmd_x_mm", "cmd_y_mm", "act_x_mm", "act_y_mm"] {
             let full_len = full["path"][series].as_array().unwrap().len();
             let preview_len = preview["path"][series].as_array().unwrap().len();
-            assert_eq!(full_len, cap.n_records, "{cap_name} {series}");
+            assert_eq!(full_len, paired, "{cap_name} {series}");
             assert!(
                 full_len > preview_len,
                 "{cap_name} {series}: full {full_len} not denser than preview {preview_len}"
