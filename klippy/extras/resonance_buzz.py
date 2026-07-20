@@ -26,6 +26,113 @@ def buzz_axis_to_motor_mask(axis, coupled):
     return mapping[axis]
 
 
+def _servo_buzz_targets(motion, axis_mask, sign_mask):
+    from . import servo_axis
+
+    stepper_mask = axis_mask
+    servo_targets = {}
+    if motion.kin is not None:
+        for lane_idx, _axis_name, _motors in motion.kin.lanes():
+            rail = motion.kin.rails[lane_idx]
+            if not isinstance(rail, servo_axis.ServoRail):
+                continue
+            rail_mask, _ = buzz_axis_to_motor_mask(rail.axis, False)
+            if not (axis_mask & rail_mask):
+                continue
+            stepper_mask &= ~rail_mask
+            node = motion.printer.lookup_object(
+                "ethercat_node " + rail.get_node_name(), None
+            )
+            handle = node.get_engine_handle() if node is not None else None
+            if handle is None:
+                raise motion.printer.command_error(
+                    "RESONANCE_BUZZ: servo axis %s has no live EtherCAT "
+                    "engine handle" % rail.axis
+                )
+            slot_masks = servo_targets.setdefault(handle, [0, 0])
+            for motor in rail.get_motors():
+                slot = node.get_slot_for_motor(motor.get_motor_name())
+                if slot is None:
+                    raise motion.printer.command_error(
+                        "RESONANCE_BUZZ: servo motor %s has no claim "
+                        "slot on ethercat node %s"
+                        % (motor.get_motor_name(), rail.get_node_name())
+                    )
+                slot_bit = 1 << slot
+                if slot_masks[0] & slot_bit:
+                    raise motion.printer.command_error(
+                        "RESONANCE_BUZZ: servo motor %s maps to EtherCAT "
+                        "slot %d which is already claimed by another "
+                        "buzzed axis on the same node"
+                        % (motor.get_motor_name(), slot)
+                    )
+                slot_masks[0] |= slot_bit
+                if sign_mask & rail_mask:
+                    slot_masks[1] |= slot_bit
+    return stepper_mask, servo_targets
+
+
+def submit_buzz(
+    motion,
+    axis_mask,
+    sign_mask,
+    freq_start_millihz,
+    freq_end_millihz,
+    amplitude_nm,
+    duration_ms,
+    ramp_ms,
+):
+    stepper_mask, servo_targets = _servo_buzz_targets(
+        motion, axis_mask, sign_mask
+    )
+    sent = False
+    for handle, (slot_mask, slot_sign_mask) in servo_targets.items():
+        motion.engine.resonance_buzz(
+            handle,
+            slot_mask,
+            slot_sign_mask,
+            freq_start_millihz,
+            freq_end_millihz,
+            amplitude_nm,
+            duration_ms,
+            ramp_ms,
+        )
+        sent = True
+    if stepper_mask:
+        stepper_sent = False
+        for mcu_obj in motion._engine_mcus():
+            try:
+                cmd = mcu_obj.lookup_command(
+                    "kalico_resonance_buzz axis_mask=%c sign_mask=%c"
+                    " freq_start_millihz=%u freq_end_millihz=%u amplitude_nm=%u"
+                    " duration_ms=%u ramp_ms=%u"
+                )
+            except Exception:
+                continue
+            cmd.send(
+                [
+                    stepper_mask,
+                    sign_mask,
+                    freq_start_millihz,
+                    freq_end_millihz,
+                    amplitude_nm,
+                    duration_ms,
+                    ramp_ms,
+                ]
+            )
+            stepper_sent = True
+        if not stepper_sent:
+            raise motion.printer.command_error(
+                "No engine MCU advertises kalico_resonance_buzz; rebuild and "
+                "reflash MCU firmware with CONFIG_RUNTIME=y"
+            )
+        sent = True
+    if not sent:
+        raise motion.printer.command_error(
+            "RESONANCE_BUZZ: no target engine for axis_mask=0x%02x" % axis_mask
+        )
+
+
 def servo_buzz_motor_names(printer, axis_name):
     from . import servo_axis
 
