@@ -12,7 +12,7 @@ pub struct SlaveCfg {
     pub max_torque_tenth_pct: Option<u16>,
     pub velocity_ff: bool,
     pub torque_clamp_tenths: i16,
-    pub ff_lead_cycles: u32,
+    pub ff_lead_cycles: f64,
     pub invert: bool,
     pub dynamics_profile: Option<String>,
 }
@@ -27,19 +27,19 @@ fn default_cfg(pos: i32) -> SlaveCfg {
         max_torque_tenth_pct: None,
         velocity_ff: false,
         torque_clamp_tenths: 300,
-        ff_lead_cycles: 0,
+        ff_lead_cycles: 0.0,
         invert: false,
         dynamics_profile: None,
     }
 }
 
-const FF_LEAD_CYCLES_MAX: u32 = 40;
+const FF_LEAD_CYCLES_MAX: f64 = 40.0;
 
-fn parse_ff_lead_cycles(v: &str) -> Result<u32, String> {
-    let cycles: u32 = v
+fn parse_ff_lead_cycles(v: &str) -> Result<f64, String> {
+    let cycles: f64 = v
         .parse()
-        .map_err(|_| "--ff-lead-cycles not a non-negative integer".to_string())?;
-    if cycles > FF_LEAD_CYCLES_MAX {
+        .map_err(|_| "--ff-lead-cycles not a number".to_string())?;
+    if !(0.0..=FF_LEAD_CYCLES_MAX).contains(&cycles) {
         return Err(format!(
             "--ff-lead-cycles {cycles} outside [0, {FF_LEAD_CYCLES_MAX}]"
         ));

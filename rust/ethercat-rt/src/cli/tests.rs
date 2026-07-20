@@ -310,14 +310,21 @@ fn ff_lead_cycles_binds_per_slave_group_and_defaults_zero() {
         "1",
     ]))
     .unwrap();
-    assert_eq!(slaves[0].ff_lead_cycles, 3);
-    assert_eq!(slaves[1].ff_lead_cycles, 0);
+    assert_eq!(slaves[0].ff_lead_cycles, 3.0);
+    assert_eq!(slaves[1].ff_lead_cycles, 0.0);
 }
 
 #[test]
 fn ff_lead_cycles_legacy_form_and_range_check() {
     let slaves = parse_slaves(&args(&["--ff-lead-cycles", "2"])).unwrap();
-    assert_eq!(slaves[0].ff_lead_cycles, 2);
+    assert_eq!(slaves[0].ff_lead_cycles, 2.0);
     assert!(parse_slaves(&args(&["--ff-lead-cycles", "41"])).is_err());
     assert!(parse_slaves(&args(&["--ff-lead-cycles", "-1"])).is_err());
+}
+
+#[test]
+fn ff_lead_cycles_accepts_fractional_and_rejects_garbage() {
+    let slaves = parse_slaves(&args(&["--ff-lead-cycles", "1.5"])).unwrap();
+    assert_eq!(slaves[0].ff_lead_cycles, 1.5);
+    assert!(parse_slaves(&args(&["--ff-lead-cycles", "x"])).is_err());
 }

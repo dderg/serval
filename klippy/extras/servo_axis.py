@@ -109,8 +109,8 @@ class ServoMotor:
         self.ff_max_torque = motor_config.getfloat(
             "ff_max_torque", 30.0, above=0.0, maxval=MAX_TORQUE_PCT_6072H
         )
-        self.ff_lead_cycles = motor_config.getint(
-            "ff_lead_cycles", 0, minval=0, maxval=ENGINE_FF_LEAD_CYCLES_MAX
+        self.ff_lead_cycles = motor_config.getfloat(
+            "ff_lead_cycles", 0.0, minval=0.0, maxval=ENGINE_FF_LEAD_CYCLES_MAX
         )
         self.invert_direction = motor_config.getboolean(
             "invert_direction", False

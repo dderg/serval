@@ -491,6 +491,31 @@ impl PyMotionEngine {
         }
         Ok(())
     }
+    fn set_ff_lead(&self, py: Python<'_>, mcu_handle: u32, slot: u8, lead_ns: u64) -> PyResult<()> {
+        let conn = self.ethercat_conn(mcu_handle, "set_ff_lead")?;
+        tracing::info!(
+            subsystem = "engine",
+            event = "servo_set_ff_lead",
+            mcu_handle,
+            slot,
+            lead_ns,
+            "servo feedforward lead"
+        );
+        let result = py
+            .detach(|| {
+                crate::servo_torque::send_set_ff_lead(
+                    &conn,
+                    mcu_protocol::messages::SetFfLead { slot, lead_ns },
+                )
+            })
+            .map_err(PyRuntimeError::new_err)?;
+        if result != 0 {
+            return Err(PyRuntimeError::new_err(format!(
+                "set_ff_lead: endpoint rejected (result {result})"
+            )));
+        }
+        Ok(())
+    }
     #[allow(clippy::too_many_arguments)]
     fn set_strain_comp(
         &self,

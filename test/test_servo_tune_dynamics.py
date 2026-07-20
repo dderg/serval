@@ -173,10 +173,14 @@ class FakeNode:
     def get_drive_count(self):
         return len(self._slots)
 
+    def get_cycle_us(self):
+        return 250
+
 
 class FakeEngine:
     def __init__(self):
         self.dynamics_calls = []
+        self.ff_lead_calls = []
 
     def sdo_read(self, handle, slot, index, subindex):
         return 2, 7
@@ -184,8 +188,11 @@ class FakeEngine:
     def set_dynamics_model(self, *args):
         self.dynamics_calls.append(args)
 
+    def set_ff_lead(self, handle, slot, lead_ns):
+        self.ff_lead_calls.append((handle, slot, lead_ns))
 
-def _motor(name, node_name, chain_index, invert=False):
+
+def _motor(name, node_name, chain_index, invert=False, ff_lead_cycles=1.0):
     m = servo_axis.ServoMotor.__new__(servo_axis.ServoMotor)
     m.motor_name = name
     m.node_name = node_name
@@ -193,6 +200,9 @@ def _motor(name, node_name, chain_index, invert=False):
     m.invert_direction = invert
     m.rotation_distance = 40.0
     m.encoder_counts_per_rev = 131072
+    m.velocity_ff = True
+    m.ff_max_torque = 30.0
+    m.ff_lead_cycles = ff_lead_cycles
     return m
 
 
@@ -319,6 +329,8 @@ def make_calibration(
         "coulomb": (0.0, 0.0),
     }
     sc.fake_onset_fn = lambda mass, viscous, coulomb: (0.0, 0.0)
+    sc.fake_lead_penalty_fn = lambda lead_s: (0.0, 0.0)
+    sc.fake_lead_onset_fn = lambda lead_s: (0.0, 0.0)
 
     def fake_run(gcmd, argv, timeout):
         gcode.scripts.append(("RUN", argv, timeout))
@@ -348,12 +360,30 @@ def make_calibration(
                 _h, _frame, mass, viscous, coulomb, _ps, _ds = (
                     engine.dynamics_calls[-1]
                 )
+                lead_s = (
+                    engine.ff_lead_calls[-1][2] * 1e-9
+                    if engine.ff_lead_calls
+                    else 250e-6
+                )
+                lead_pen = sc.fake_lead_penalty_fn(lead_s)
+                lead_onset = sc.fake_lead_onset_fn(lead_s)
                 payload = _ferr_json(
                     mass=sc.fake_coef_hints["mass"],
                     viscous=sc.fake_coef_hints["viscous"],
                     coulomb=sc.fake_coef_hints["coulomb"],
-                    ferr_rms_raw=sc.fake_rms_fn(mass, viscous, coulomb),
-                    onset_bias=sc.fake_onset_fn(mass, viscous, coulomb),
+                    ferr_rms_raw=[
+                        b + p
+                        for b, p in zip(
+                            sc.fake_rms_fn(mass, viscous, coulomb), lead_pen
+                        )
+                    ],
+                    onset_bias=[
+                        o + lo
+                        for o, lo in zip(
+                            sc.fake_onset_fn(mass, viscous, coulomb),
+                            lead_onset,
+                        )
+                    ],
                 )
             with open(out_path, "w") as f:
                 json.dump(payload, f)
@@ -571,7 +601,10 @@ def test_tune_dynamics_reuses_measurements_instead_of_recapturing():
     gcmd = FakeGcmd()
     sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
     tune = _manifest_for(sc)["dynamics_tune"]
-    keys = [json.dumps(r["values"], sort_keys=True) for r in tune["rounds"]]
+    keys = [
+        json.dumps((r["values"], r["lead_us"]), sort_keys=True)
+        for r in tune["rounds"]
+    ]
     assert len(keys) == len(set(keys)), "same model captured twice"
 
 
@@ -639,3 +672,72 @@ def test_tune_dynamics_requires_onset_bias_from_the_binary():
     sc.fake_ferr_queue = [stale]
     with pytest.raises(RuntimeError, match="onset_bias"):
         sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd())
+
+
+def _lead_quadratic(opt_s, curvature=0.05, scale=250e-6):
+    def penalty(lead_s):
+        d2 = ((lead_s - opt_s) / scale) ** 2
+        return (curvature * d2, curvature * d2)
+
+    return penalty
+
+
+@requires_tomllib
+def test_tune_dynamics_lead_converges_to_the_rms_optimum():
+    sc, _gcode, _path = make_calibration()
+    engine = sc.printer.lookup_object("motion_engine")
+    sc.fake_lead_penalty_fn = _lead_quadratic(375e-6)
+    gcmd = FakeGcmd(TERMS="LEAD")
+    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
+    tune = _manifest_for(sc)["dynamics_tune"]
+    assert tune["lead_us"] == pytest.approx(375.0, abs=40.0)
+    assert tune["lead_cycles"] == pytest.approx(
+        tune["lead_us"] / 250.0, rel=1e-9
+    )
+    # the winner is streamed to every slot and left live
+    final = [c for c in engine.ff_lead_calls[-2:]]
+    assert {slot for _h, slot, _ns in final} == {0, 1}
+    assert all(
+        ns == pytest.approx(tune["lead_us"] * 1e3, abs=1.0)
+        for _h, _s, ns in final
+    )
+    assert any("ff_lead_cycles" in r for r in gcmd.responses)
+
+
+@requires_tomllib
+def test_tune_dynamics_lead_onset_steers_the_first_probe():
+    sc, _gcode, _path = make_calibration()
+    # negative onset = FF lands early = the first lead probe must go DOWN
+    sc.fake_lead_penalty_fn = _lead_quadratic(150e-6)
+    sc.fake_lead_onset_fn = lambda lead_s: (
+        (-0.001, -0.001) if lead_s > 150e-6 else (0.001, 0.001)
+    )
+    sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(TERMS="LEAD"))
+    tune = _manifest_for(sc)["dynamics_tune"]
+    assert tune["rounds"][1]["lead_us"] < 250.0, (
+        "onset says early, probe went up"
+    )
+    assert tune["lead_us"] == pytest.approx(150.0, abs=40.0)
+
+
+@requires_tomllib
+def test_tune_dynamics_abort_restores_the_configured_lead():
+    sc, _gcode, _path = make_calibration()
+    engine = sc.printer.lookup_object("motion_engine")
+    sc.fake_flags_by_step["tune_r1"] = ["torque_saturated"]
+    with pytest.raises(RuntimeError, match="torque rail"):
+        sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(TERMS="LEAD"))
+    restored = engine.ff_lead_calls[-2:]
+    assert {slot for _h, slot, _ns in restored} == {0, 1}
+    assert all(ns == 250_000 for _h, _s, ns in restored)
+
+
+@requires_tomllib
+def test_tune_dynamics_lead_requires_one_shared_config_value():
+    rails = [
+        _rail("x", [_motor("motor_a", "xy_drives", 0, ff_lead_cycles=1.0)]),
+        _rail("y", [_motor("motor_b", "xy_drives", 1, ff_lead_cycles=2.0)]),
+    ]
+    sc, _gcode, _path = make_calibration(rails=rails)
+    with pytest.raises(RuntimeError, match="disagree"):
+        sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(TERMS="LEAD"))

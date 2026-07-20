@@ -17,7 +17,7 @@ fn drive() -> EthercatDrive {
         max_torque_tenth_pct: None,
         velocity_ff: false,
         ff_max_torque: 30.0,
-        ff_lead_cycles: 0,
+        ff_lead_cycles: 0.0,
         invert_direction: false,
         dynamics_profile: None,
     }
@@ -87,7 +87,7 @@ fn endpoint_args_per_drive_ff_flags() {
                 rotation_distance: 50.0,
                 velocity_ff: true,
                 ff_max_torque: 25.0,
-                ff_lead_cycles: 2,
+                ff_lead_cycles: 2.0,
                 ..drive()
             },
             EthercatDrive {
@@ -427,7 +427,7 @@ fn endpoint_args_emit_ff_lead_cycles_only_when_nonzero() {
                 rotation_distance: 50.0,
                 velocity_ff: true,
                 ff_max_torque: 25.0,
-                ff_lead_cycles: 2,
+                ff_lead_cycles: 1.5,
                 ..drive()
             },
             EthercatDrive {
@@ -446,5 +446,5 @@ fn endpoint_args_emit_ff_lead_cycles_only_when_nonzero() {
         .filter(|(i, a)| *a == "--ff-lead-cycles" && args.get(i + 1).is_some())
         .map(|(i, _)| &args[i + 1])
         .collect();
-    assert_eq!(leads, vec!["2"]);
+    assert_eq!(leads, vec!["1.5"]);
 }

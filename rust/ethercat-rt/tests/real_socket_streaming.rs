@@ -98,7 +98,8 @@ fn run_endpoint(socket_path: String, faulted: Arc<AtomicBool>) {
                 | Command::SetDiffDamper { .. }
                 | Command::SetDiffTrim { .. }
                 | Command::SetStrainComp { .. }
-                | Command::SetDynamicsModel { .. } => {}
+                | Command::SetDynamicsModel { .. }
+                | Command::SetFfLead { .. } => {}
             }
         }
 

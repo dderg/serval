@@ -69,6 +69,8 @@ pub enum MessageKind {
     SetDiffTrimResponse = 0x008B,
     SetDynamicsModel = 0x008C,
     SetDynamicsModelResponse = 0x008D,
+    SetFfLead = 0x008E,
+    SetFfLeadResponse = 0x008F,
 }
 
 impl MessageKind {
@@ -122,6 +124,8 @@ impl MessageKind {
             0x008B => Self::SetDiffTrimResponse,
             0x008C => Self::SetDynamicsModel,
             0x008D => Self::SetDynamicsModelResponse,
+            0x008E => Self::SetFfLead,
+            0x008F => Self::SetFfLeadResponse,
             _ => return None,
         })
     }
@@ -968,6 +972,47 @@ impl Encode for SetDynamicsModelResponse {
 }
 
 impl Decode for SetDynamicsModelResponse {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            result: get_i32(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetFfLead {
+    pub slot: u8,
+    pub lead_ns: u64,
+}
+
+impl Encode for SetFfLead {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_u8(out, self.slot);
+        put_u64(out, self.lead_ns);
+    }
+}
+
+impl Decode for SetFfLead {
+    fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
+        Ok(Self {
+            slot: get_u8(c)?,
+            lead_ns: get_u64(c)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetFfLeadResponse {
+    pub result: i32,
+}
+
+impl Encode for SetFfLeadResponse {
+    fn encode(&self, out: &mut Vec<u8>) {
+        put_i32(out, self.result);
+    }
+}
+
+impl Decode for SetFfLeadResponse {
     fn decode_from(c: &mut Cursor<'_>) -> Result<Self, DecodeError> {
         Ok(Self {
             result: get_i32(c)?,

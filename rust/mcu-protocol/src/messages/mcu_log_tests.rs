@@ -58,7 +58,12 @@ fn mcu_log_is_event_kind() {
         MessageKind::from_u16(0x008D),
         Some(MessageKind::SetDynamicsModelResponse)
     );
-    assert_eq!(MessageKind::from_u16(0x008E), None);
+    assert_eq!(MessageKind::from_u16(0x008E), Some(MessageKind::SetFfLead));
+    assert_eq!(
+        MessageKind::from_u16(0x008F),
+        Some(MessageKind::SetFfLeadResponse)
+    );
+    assert_eq!(MessageKind::from_u16(0x0090), None);
 }
 
 #[test]

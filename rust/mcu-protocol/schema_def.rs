@@ -552,6 +552,25 @@ const SCHEMA_MESSAGES: &[SchemaMessage] = &[
             SchemaField { name: "result", ty: "i32" },
         ],
     },
+    SchemaMessage {
+        type_tag: 0x008E,
+        name: "SetFfLead",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "slot", ty: "u8" },
+            SchemaField { name: "lead_ns", ty: "u64" },
+        ],
+    },
+    SchemaMessage {
+        type_tag: 0x008F,
+        name: "SetFfLeadResponse",
+        version: 1,
+        channel: "control",
+        fields: &[
+            SchemaField { name: "result", ty: "i32" },
+        ],
+    },
 ];
 
 /// Bootstrap type tags that the C header must define alongside the schema
