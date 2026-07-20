@@ -1,33 +1,20 @@
+from fakes import FakeEngine, FakeGcode, FakeMcu, FakePrinter, FakeReactor
+from fakes import FakeToolhead as FakeToolheadBase
+
 from klippy import motion
 from klippy.extras.idle_timeout import IdleTimeout
 
 
-class FakeMcu:
-    def estimated_print_time(self, eventtime):
-        return eventtime
-
-    def get_engine_handle(self):
-        return 0
-
-
-class FakeEngine:
-    def __init__(self, frontier):
-        self.frontier = frontier
-
-    def frontier_print_time(self, mcu_handle):
-        return self.frontier
-
-
-class FakeToolhead:
+class FakeToolhead(FakeToolheadBase):
     check_busy = motion.Motion.check_busy
 
     def __init__(self, frontier):
-        self.mcu = FakeMcu()
-        self.engine = FakeEngine(frontier)
-        self._planner_ready = True
+        super().__init__(
+            mcu=FakeMcu(), engine=FakeEngine(frontier_print_time=frontier)
+        )
 
     def get_last_move_time(self):
-        return self.engine.frontier
+        return self.engine.frontier_print_time(self.mcu.get_engine_handle())
 
 
 def test_busy_while_motion_is_queued_in_the_engine():
@@ -57,40 +44,9 @@ def test_idle_time_grows_after_motion_drains():
     assert est_later - print_time_later == 700.0
 
 
-class FakeMutex:
-    def test(self):
-        return False
-
-
-class FakeGcode:
-    def __init__(self):
-        self.scripts = []
-
-    def get_mutex(self):
-        return FakeMutex()
-
-    def run_script(self, script):
-        self.scripts.append(script)
-
-
 class FakeTemplate:
     def render(self):
         return "M84"
-
-
-class FakePrinter:
-    def __init__(self):
-        self.events = []
-
-    def is_shutdown(self):
-        return False
-
-    def send_event(self, name, *args):
-        self.events.append(name)
-
-
-class FakeReactor:
-    NEVER = float("inf")
 
 
 def make_idle_timeout(toolhead):

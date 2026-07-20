@@ -1,39 +1,7 @@
 import pytest
+from fakes import FakeCommandError, FakePrinter
 
 from klippy import engine_wait
-
-
-class FakeCommandError(Exception):
-    pass
-
-
-class FakeReactor:
-    def __init__(self):
-        self.now = 0.0
-        self.pauses = []
-
-    def monotonic(self):
-        return self.now
-
-    def pause(self, waketime):
-        self.pauses.append(waketime)
-        self.now = max(self.now, waketime)
-
-
-class FakePrinter:
-    command_error = FakeCommandError
-
-    def __init__(self, shutdown_after_pauses=None):
-        self.reactor = FakeReactor()
-        self._shutdown_after_pauses = shutdown_after_pauses
-
-    def get_reactor(self):
-        return self.reactor
-
-    def is_shutdown(self):
-        if self._shutdown_after_pauses is None:
-            return False
-        return len(self.reactor.pauses) >= self._shutdown_after_pauses
 
 
 def test_returns_result_without_pausing_when_immediately_done():
@@ -76,11 +44,17 @@ def test_timeout_raises_engine_wait_timeout():
 
 
 def test_shutdown_aborts_the_wait():
-    printer = FakePrinter(shutdown_after_pauses=2)
+    printer = FakePrinter()
+    calls = [0]
+
+    def poll():
+        calls[0] += 1
+        if calls[0] > 2:
+            printer.invoke_shutdown("test shutdown")
+        return None
+
     with pytest.raises(FakeCommandError, match="shutdown while waiting"):
-        engine_wait.wait_for(
-            printer, lambda: None, "stuck", engine_wait.UNBOUNDED
-        )
+        engine_wait.wait_for(printer, poll, "stuck", engine_wait.UNBOUNDED)
 
 
 def test_slow_wait_emits_structured_log_events(monkeypatch):

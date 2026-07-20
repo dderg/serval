@@ -16,6 +16,34 @@ Log entry shapes:
     ("timer-", callback_name)                reactor timer unregistered
 """
 
+from fakes import FakeConfig as _CanonicalFakeConfig
+from fakes import FakeEnableLine, FakeGcode, FakePins, FakeStepper
+from fakes import FakeMcu as _CanonicalFakeMcu
+from fakes import FakePrinter as _CanonicalFakePrinter
+from fakes import FakeReactor as _CanonicalFakeReactor
+from fakes import FakeStepperEnable as _CanonicalFakeStepperEnable
+
+__all__ = [
+    "CommandError",
+    "ConfigError",
+    "FakeCommand",
+    "FakeConfig",
+    "FakeCurrentHelper",
+    "FakeEnableLine",
+    "FakeForceMove",
+    "FakeGcode",
+    "FakeMCU",
+    "FakeMcuTmc",
+    "FakePins",
+    "FakePrinter",
+    "FakeQueryCommand",
+    "FakeReactor",
+    "FakeStepper",
+    "FakeStepperEnable",
+    "ops",
+    "writes",
+]
+
 
 class CommandError(Exception):
     pass
@@ -25,72 +53,43 @@ class ConfigError(Exception):
     pass
 
 
-_REQUIRED = object()
-
-
-class FakeReactor:
-    NOW = 0.0
-    NEVER = 9999999999999999.0
+class FakeReactor(_CanonicalFakeReactor):
+    """A static-clock reactor whose timer churn is recorded into the wire
+    log, so tests can assert health-check timers start/stop in lockstep
+    with the driver enable state.
+    """
 
     def __init__(self, wire_log):
+        super().__init__(now=100.0, tick=0.0)
         self._log = wire_log
-        self.time = 100.0
-        self.timers = []
-        self.callbacks = []
 
-    def monotonic(self):
-        return self.time
-
-    def pause(self, waketime):
-        self.time = max(self.time, waketime)
-
-    def register_timer(self, callback, waketime=NEVER):
-        timer = [callback, waketime]
-        self.timers.append(timer)
+    def register_timer(self, callback, waketime=_CanonicalFakeReactor.NEVER):
+        timer_handler = super().register_timer(callback, waketime)
         self._log.append(("timer+", callback.__name__))
-        return timer
+        return timer_handler
 
-    def unregister_timer(self, timer):
-        self.timers.remove(timer)
-        self._log.append(("timer-", timer[0].__name__))
-
-    def update_timer(self, timer, waketime):
-        timer[1] = waketime
-
-    def register_callback(self, callback, waketime=NOW):
-        self.callbacks.append(callback)
+    def unregister_timer(self, timer_handler):
+        super().unregister_timer(timer_handler)
+        self._log.append(("timer-", timer_handler[0].__name__))
 
     def run_callbacks(self):
         callbacks, self.callbacks = self.callbacks, []
         for cb in callbacks:
-            cb(self.time)
+            cb(self.now)
 
 
-class FakePrinter:
+class FakePrinter(_CanonicalFakePrinter):
+    """A printer that fires events directly (rather than queuing them) and
+    keeps every handler registered per event, since several TMC driver
+    instances share one printer in the phase-stepping group tests.
+    """
+
     command_error = CommandError
     config_error = ConfigError
 
     def __init__(self, wire_log):
-        self.reactor = FakeReactor(wire_log)
-        self.objects = {}
-        self.event_handlers = {}
+        super().__init__(reactor=FakeReactor(wire_log))
         self.shutdowns = []
-
-    def get_reactor(self):
-        return self.reactor
-
-    def add_object(self, name, obj):
-        self.objects[name] = obj
-
-    def lookup_object(self, name, default=_REQUIRED):
-        if name in self.objects:
-            return self.objects[name]
-        if default is not _REQUIRED:
-            return default
-        raise ConfigError("test harness has no printer object %r" % (name,))
-
-    def load_object(self, config, name):
-        return self.lookup_object(name)
 
     def register_event_handler(self, event, handler):
         self.event_handlers.setdefault(event, []).append(handler)
@@ -102,68 +101,18 @@ class FakePrinter:
     def invoke_shutdown(self, msg):
         self.shutdowns.append(msg)
 
-    def get_start_args(self):
-        return {}
 
-
-class FakeConfig:
+class FakeConfig(_CanonicalFakeConfig):
     error = ConfigError
 
     def __init__(self, name, options, printer, sections):
-        self._name = name
-        self._options = dict(options)
-        self._printer = printer
-        self._sections = sections
-        sections[name] = self
-
-    def get_name(self):
-        return self._name
-
-    def get_printer(self):
-        return self._printer
-
-    def has_section(self, name):
-        return name in self._sections
-
-    def getsection(self, name):
-        if name not in self._sections:
-            raise ConfigError("no config section [%s]" % (name,))
-        return self._sections[name]
-
-    def _fetch(self, key, default):
-        if key in self._options:
-            return self._options[key]
-        if default is _REQUIRED:
-            raise ConfigError(
-                "missing required option %r in [%s]" % (key, self._name)
-            )
-        return default
-
-    def get(self, key, default=_REQUIRED, *_args, **_kwargs):
-        return self._fetch(key, default)
-
-    def getint(self, key, default=_REQUIRED, *_args, **_kwargs):
-        value = self._fetch(key, default)
-        return None if value is None else int(value)
-
-    def getfloat(self, key, default=_REQUIRED, *_args, **_kwargs):
-        value = self._fetch(key, default)
-        return None if value is None else float(value)
-
-    def getboolean(self, key, default=_REQUIRED, *_args, **_kwargs):
-        value = self._fetch(key, default)
-        return None if value is None else bool(value)
-
-    def getchoice(self, key, choices, default=_REQUIRED):
-        value = self._fetch(key, default)
-        if value not in choices and all(isinstance(c, int) for c in choices):
-            value = int(value)
-        if value not in choices:
-            raise ConfigError(
-                "option %r in [%s]: %r is not a valid choice"
-                % (key, self._name, value)
-            )
-        return choices[value]
+        super().__init__(
+            printer=printer,
+            name=name,
+            values=options,
+            sections=sections,
+            error=ConfigError,
+        )
 
 
 class FakeCommand:
@@ -187,16 +136,16 @@ class FakeQueryCommand:
         return self._mcu.next_query_response(self._name, self._oid)
 
 
-class FakeMCU:
-    """The raw-command seam: lookup_command / lookup_query_command."""
+class FakeMCU(_CanonicalFakeMcu):
+    """The raw-command seam: lookup_command / lookup_query_command build
+    wire-log-recording command objects, and script_query/next_query_response
+    serve scripted responses for register-adjacent raw queries.
+    """
 
     def __init__(self, wire_log):
+        super().__init__()
         self._log = wire_log
-        self.non_critical_disconnected = False
         self._query_scripts = {}
-
-    def get_name(self):
-        return "mcu"
 
     def lookup_command(self, msgformat):
         return FakeCommand(msgformat.split()[0], self._log)
@@ -274,47 +223,9 @@ class FakeMcuTmc:
         return value
 
 
-class FakeGCode:
-    def __init__(self):
-        self.mux_commands = []
-
-    def register_mux_command(self, cmd, key, value, func, desc=None):
-        self.mux_commands.append((cmd, value))
-
-
-class FakeEnableLine:
-    def __init__(self, dedicated=True):
-        self._dedicated = dedicated
-        self.state_callback = None
-
-    def register_state_callback(self, callback):
-        self.state_callback = callback
-
-    def has_dedicated_enable(self):
-        return self._dedicated
-
-
-class FakeStepperEnable:
+class FakeStepperEnable(_CanonicalFakeStepperEnable):
     def __init__(self, enable_line):
-        self._enable_line = enable_line
-
-    def lookup_enable(self, name):
-        return self._enable_line
-
-
-class FakeStepper:
-    def __init__(self, pulse_duration=0.0000001, step_both_edge=True):
-        self._pulse = (pulse_duration, step_both_edge)
-        self.current_helper = None
-
-    def set_tmc_current_helper(self, helper):
-        self.current_helper = helper
-
-    def setup_default_pulse_duration(self, pulse_duration, step_both_edge):
-        pass
-
-    def get_pulse_duration(self):
-        return self._pulse
+        super().__init__(enable_line=enable_line)
 
 
 class FakeForceMove:
@@ -328,14 +239,6 @@ class FakeForceMove:
 class FakeCurrentHelper:
     def get_current(self):
         return (0.8, 0.5, 0.5, 2.0, 0.8)
-
-
-class FakePins:
-    def __init__(self):
-        self.chips = {}
-
-    def register_chip(self, name, chip):
-        self.chips[name] = chip
 
 
 def writes(wire_log):

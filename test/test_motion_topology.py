@@ -1,75 +1,39 @@
+from fakes import (
+    FakeKin as FakeKinBase,
+)
+from fakes import (
+    FakeMcu,
+    FakePrinter,
+    FakeRail,
+    FakeStepper,
+)
+
 from klippy.motion import Motion
 from klippy.motion_kinematics import _LinearKinematics
-
-
-class FakeMcu:
-    def __init__(self, handle):
-        self._handle = handle
-
-    def get_engine_handle(self):
-        return self._handle
-
-
-class FakeStepper:
-    def __init__(self, name, handle):
-        self._name = name
-        self._mcu = FakeMcu(handle)
-
-    def get_name(self, short=False):
-        return self._name
-
-    def get_mcu(self):
-        return self._mcu
-
-    def get_pulse_duration(self):
-        return 0.000002, False
-
-    def get_step_dist(self):
-        return 0.0125
-
 
 FAKE_STEPPER_VELOCITY_CEILING = 0.5 / (0.000001 + 0.000002) * 0.0125
 
 
-class FakeRail:
-    def __init__(self, steppers):
-        self._steppers = steppers
-
-    def get_steppers(self):
-        return list(self._steppers)
-
-
-class FakeKin:
+class FakeKin(FakeKinBase):
     coupled_xy = _LinearKinematics.coupled_xy
     mcu_tag = _LinearKinematics.mcu_tag
     claimed_axes = _LinearKinematics.claimed_axes
 
     def __init__(self, kind, lane_handles):
-        self.kind = kind
-        self._lanes = [
+        lanes = [
             (i, axis, ["m_" + axis])
             for i, (axis, _h) in enumerate(lane_handles)
         ]
-        self.rails = [
-            FakeRail([FakeStepper("stepper_" + axis, h)])
+        rails = [
+            FakeRail(steppers=[FakeStepper(name="stepper_" + axis, handle=h)])
             for axis, h in lane_handles
         ]
-
-    def lanes(self):
-        return self._lanes
+        super().__init__(rails=rails, kind=kind, lanes=lanes)
 
 
 class FakeForceMove:
     def __init__(self, steppers):
         self.steppers = steppers
-
-
-class FakePrinter:
-    def __init__(self, objs):
-        self._objs = objs
-
-    def lookup_object(self, name, default=None):
-        return self._objs.get(name, default)
 
 
 SPATIAL_AXES = [("x", 11), ("y", 11), ("z", 11)]
@@ -91,11 +55,11 @@ def make_motion(kind, lane_handles, follower=None, fm_present=True):
         name, motor_name, handle = follower
         motion.axis_sections.append((name, ["x"], [motor_name], []))
         followers.append((name, [motor_name], 3))
-        steppers[motor_name] = FakeStepper(motor_name, handle)
+        steppers[motor_name] = FakeStepper(name=motor_name, handle=handle)
     motion.kinematics_decl = (kind, lanes, followers)
     fm = FakeForceMove(steppers) if fm_present else None
     objs = {} if fm is None else {"force_move": fm}
-    motion.printer = FakePrinter(objs)
+    motion.printer = FakePrinter(objects=objs)
     return motion
 
 
@@ -148,8 +112,8 @@ def test_follower_declared_before_spatial_axes_does_not_clobber_lane_slot():
     motion = Motion.__new__(Motion)
     motion.kin = FakeKin("corexy", SPATIAL_AXES)
     motion.kinematics_decl = _corexy_decl_with_follower()
-    fm = FakeForceMove({"extruder": FakeStepper("extruder", 11)})
-    motion.printer = FakePrinter({"force_move": fm})
+    fm = FakeForceMove({"extruder": FakeStepper(name="extruder", handle=11)})
+    motion.printer = FakePrinter(objects={"force_move": fm})
 
     slot_steppers = motion._build_slot_steppers()
 
@@ -168,8 +132,10 @@ def _motion_with_follower_first(follower_handle):
     motion = Motion.__new__(Motion)
     motion.kin = FakeKin("corexy", SPATIAL_AXES)
     motion.kinematics_decl = _corexy_decl_with_follower()
-    fm = FakeForceMove({"extruder": FakeStepper("extruder", follower_handle)})
-    motion.printer = FakePrinter({"force_move": fm})
+    fm = FakeForceMove(
+        {"extruder": FakeStepper(name="extruder", handle=follower_handle)}
+    )
+    motion.printer = FakePrinter(objects={"force_move": fm})
     return motion
 
 
@@ -201,8 +167,7 @@ def test_init_planner_passes_config_text_and_topology():
     engine = CaptureEngine()
     motion.engine = engine
 
-    mcu = FakeMcu(11)
-    motion.printer._objs["__mcus"] = [("mcu", mcu)]
+    mcu = FakeMcu(handle=11)
 
     def lookup_objects(module=None):
         if module == "mcu":

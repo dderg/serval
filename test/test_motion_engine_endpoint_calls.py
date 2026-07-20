@@ -1,36 +1,19 @@
 import pytest
+from fakes import FakePrinter
+from fakes import FakeReactor as _FakeReactor
 
 from klippy.motion_engine import MotionEngineWrapper
 
 
-class FakeReactor:
+class FakeReactor(_FakeReactor):
     def __init__(self):
-        self._time = 100.0
+        super().__init__(now=100.0)
         self.pauses = 0
-
-    def monotonic(self):
-        return self._time
 
     def pause(self, waketime):
         self.pauses += 1
-        self._time = waketime
-
-
-class FakeCommandError(Exception):
-    pass
-
-
-class FakePrinter:
-    command_error = FakeCommandError
-
-    def __init__(self, reactor):
-        self._reactor = reactor
-
-    def get_reactor(self):
-        return self._reactor
-
-    def is_shutdown(self):
-        return False
+        self.now = waketime
+        return self.now
 
 
 class FakeNativeEngine:
@@ -60,7 +43,7 @@ def _make_wrapper(native):
     wrapper = MotionEngineWrapper.__new__(MotionEngineWrapper)
     wrapper._engine = native
     wrapper._reactor = FakeReactor()
-    wrapper._printer = FakePrinter(wrapper._reactor)
+    wrapper._printer = FakePrinter(reactor=wrapper._reactor)
     return wrapper
 
 

@@ -1,4 +1,6 @@
 import pytest
+from fakes import FakeEngine as _FakeEngine
+from fakes import FakeKin, FakeMcu, FakePrinter, FakeReactor
 
 from klippy import gcode
 from klippy.kinematics import extruder as extruder_mod
@@ -44,56 +46,16 @@ LEGACY_METHODS = [
 EVENTTIME = 100.0
 
 
-class FakeKin:
-    def __init__(self, ranges):
-        self._ranges = ranges
-        self.limits = [(1.0, -1.0)] * 3
-
-    def get_status(self, eventtime):
-        from klippy import gcode as gcode_mod
-
-        (x_min, x_max), (y_min, y_max), (z_min, z_max) = self._ranges
-        homed = "".join(
-            a
-            for i, a in enumerate("xyz")
-            if self.limits[i][0] <= self.limits[i][1]
-        )
-        return {
-            "homed_axes": homed,
-            "axis_minimum": gcode_mod.Coord(x_min, y_min, z_min, 0.0),
-            "axis_maximum": gcode_mod.Coord(x_max, y_max, z_max, 0.0),
-        }
-
-
-class FakeMcu:
-    def estimated_print_time(self, eventtime):
-        return eventtime + 1.0
-
-    def get_engine_handle(self):
-        return 0
-
-
-class FakePrinter:
-    def __init__(self):
-        self.objects = {}
-
-    def add_object(self, name, obj):
-        self.objects[name] = obj
-
-    def lookup_object(self, name, default=None):
-        return self.objects.get(name, default)
-
-
 @pytest.fixture
 def toolhead_fixture():
     printer = FakePrinter()
 
-    kin = FakeKin([(0.0, 200.0), (0.0, 200.0), (0.0, 250.0)])
+    kin = FakeKin(get_status_ranges=[(0.0, 200.0), (0.0, 200.0), (0.0, 250.0)])
 
     toolhead = Motion.__new__(Motion)
     toolhead.printer = printer
     toolhead.kin = kin
-    toolhead.mcu = FakeMcu()
+    toolhead.mcu = FakeMcu(print_time_offset=1.0)
     toolhead.Coord = gcode.Coord
     toolhead.commanded_pos = [0.0, 0.0, 0.0, 0.0]
     toolhead.print_time = 0.0
@@ -123,21 +85,17 @@ def test_toolhead_method_surface_complete(toolhead_fixture):
     assert missing == []
 
 
-class _RecordingEngine:
+class _RecordingEngine(_FakeEngine):
     def __init__(self, duration):
+        super().__init__(
+            motion_lead_secs=0.25,
+            fence_start=1,
+            fence_print_time_poll=0.0,
+        )
         self._duration = duration
         self.last_call = None
         self.dwells = []
         self.waits = 0
-
-    def motion_lead_secs(self):
-        return 0.25
-
-    def fence_start(self, force):
-        return 1
-
-    def fence_print_time_poll(self, fence_id, mcu_handle):
-        return 0.0
 
     def wait_moves(self):
         self.waits += 1
@@ -160,34 +118,13 @@ class _RecordingEngine:
         return self._duration
 
 
-class _FixedReactor:
-    def monotonic(self):
-        return 100.0
-
-
-class _NoopPrinter:
-    command_error = RuntimeError
-
-    def __init__(self, reactor):
-        self._reactor = reactor
-
-    def get_reactor(self):
-        return self._reactor
-
-    def is_shutdown(self):
-        return False
-
-    def send_event(self, *args, **kwargs):
-        return None
-
-
 def _make_correction_toolhead(duration):
     th = Motion.__new__(Motion)
-    th.mcu = FakeMcu()  # estimated_print_time(t) = t + 1.0
+    th.mcu = FakeMcu(print_time_offset=1.0)
     th.kin = None
-    th.reactor = _FixedReactor()
+    th.reactor = FakeReactor(now=100.0)
     th.engine = _RecordingEngine(duration)
-    th.printer = _NoopPrinter(th.reactor)
+    th.printer = FakePrinter(reactor=th.reactor)
     th.motion_lead = 0.25
     th._engine_wakeup = None
     return th

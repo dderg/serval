@@ -1,6 +1,7 @@
 import logging
 
 import pytest
+from fakes import FakeConfig, FakeGcode, FakePrinter, FakeReactor
 
 from klippy import structured_log
 from klippy.extras.print_stats import PrintStats
@@ -32,49 +33,6 @@ class FakeGCodeMove:
         }
 
 
-class FakeGCode:
-    def register_command(self, name, func, desc=None):
-        pass
-
-
-class FakeReactor:
-    def __init__(self):
-        self.now = 0.0
-
-    def monotonic(self):
-        return self.now
-
-
-class FakePrinter:
-    def __init__(self):
-        self.reactor = FakeReactor()
-        self.gcode_move = FakeGCodeMove()
-        self.gcode = FakeGCode()
-        self.events = []
-
-    def get_reactor(self):
-        return self.reactor
-
-    def load_object(self, config, name):
-        assert name == "gcode_move"
-        return self.gcode_move
-
-    def lookup_object(self, name):
-        assert name == "gcode"
-        return self.gcode
-
-    def send_event(self, name, *args):
-        self.events.append(name)
-
-
-class FakeConfig:
-    def __init__(self, printer):
-        self.printer = printer
-
-    def get_printer(self):
-        return self.printer
-
-
 @pytest.fixture(autouse=True)
 def _reset_print_context():
     structured_log.clear_print()
@@ -96,7 +54,10 @@ def capture():
 
 @pytest.fixture
 def print_stats():
-    printer = FakePrinter()
+    printer = FakePrinter(
+        objects={"gcode_move": FakeGCodeMove(), "gcode": FakeGcode()},
+        reactor=FakeReactor(),
+    )
     config = FakeConfig(printer)
     return PrintStats(config)
 

@@ -1,58 +1,32 @@
 import pytest
+from fakes import FakeEngine, FakeKin
+from fakes import FakeMotion as _FakeMotion
 
 from klippy import motion
 
 
-class FakeKin:
-    def __init__(self, dirty):
-        self._dirty = list(dirty)
-        self.cleared = []
-
-    def parked_dirty_axes(self):
-        return list(self._dirty)
-
-    def clear_parked_dirty(self, axes):
-        self.cleared.append(list(axes))
-
-
-class FakeEngine:
-    def __init__(self, measured, raises=None):
-        self._measured = measured
-        self._raises = raises
-        self.queries = 0
-
-    def query_motor_positions(self):
-        self.queries += 1
-        if self._raises is not None:
-            raise self._raises
-        return self._measured
-
-
-class FakeMotion:
+class FakeMotion(_FakeMotion):
     resync_parked_servos = motion.Motion.resync_parked_servos
 
     def __init__(self, dirty, measured, raises=None):
-        self.kin = FakeKin(dirty)
-        self.engine = FakeEngine(measured, raises)
-        self.commanded_pos = [10.0, 20.0, 30.0, 4.0]
-        self.set_position_calls = []
-
-    def set_position(self, newpos, homing_axes=()):
-        self.set_position_calls.append((list(newpos), tuple(homing_axes)))
-        self.commanded_pos[:] = newpos
+        super().__init__(
+            kin=FakeKin(parked_dirty=dirty),
+            engine=FakeEngine(query_motor_positions=measured, raises=raises),
+            commanded_pos=[10.0, 20.0, 30.0, 4.0],
+        )
 
 
 def test_resync_no_dirty_axes_does_not_query():
     m = FakeMotion(dirty=[], measured={})
     m.resync_parked_servos()
-    assert m.engine.queries == 0
+    assert len(m.engine.calls) == 0
     assert m.set_position_calls == []
 
 
 def test_resync_dirty_z_reseats_only_z():
     m = FakeMotion(dirty=[2], measured={"z": (123.5, 0.0)})
     m.resync_parked_servos()
-    assert m.engine.queries == 1
+    assert len(m.engine.calls) == 1
     newpos, homing_axes = m.set_position_calls[0]
     assert newpos == [10.0, 20.0, 123.5, 4.0]
     assert homing_axes == ()
@@ -90,11 +64,8 @@ class FakeExtruder:
 
 class _SubmitEngine(FakeEngine):
     def __init__(self, measured):
-        super().__init__(measured)
+        super().__init__(query_motor_positions=measured)
         self.moves = []
-
-    def get_last_move_time(self):
-        return 0.0
 
     def submit_move(self, dx, dy, dz, de, feedrate):
         self.moves.append((dx, dy, dz, de, feedrate))
@@ -105,15 +76,14 @@ class MoveMotion(FakeMotion):
     move_curve = motion.Motion.move_curve
     _fire_active_callbacks = motion.Motion._fire_active_callbacks
 
-    max_accel = 1000.0
-    max_velocity = 100.0
-    max_z_velocity = 100.0
-
     def __init__(self, dirty, measured):
         super().__init__(dirty, measured)
-        self.kin = _MoveKin(dirty)
+        self.kin = _MoveKin(parked_dirty=dirty)
         self.engine = _SubmitEngine(measured)
         self.extruder = FakeExtruder()
+        self.max_accel = 1000.0
+        self.max_velocity = 100.0
+        self.max_z_velocity = 100.0
 
     def _axis_limit(self, axis, kind):
         return 100.0
@@ -132,7 +102,7 @@ def test_move_resyncs_before_computing_deltas():
     m = MoveMotion(dirty=[2], measured={"z": (123.5, 0.0)})
     m.commanded_pos = [10.0, 20.0, 30.0, 4.0]
     m.move([10.0, 20.0, 140.0, 4.0], 50.0)
-    assert m.engine.queries == 1
+    assert len(m.engine.calls) == 1
     dx, dy, dz, de, _feedrate = m.engine.moves[0]
     assert (dx, dy) == (0.0, 0.0)
     assert dz == pytest.approx(140.0 - 123.5)
@@ -148,7 +118,7 @@ def test_move_curve_resyncs_before_computing_deltas():
         submitted.append((dx, dy, dz, de, feedrate))
 
     m.move_curve([10.0, 20.0, 140.0, 4.0], [], submit, 50.0)
-    assert m.engine.queries == 1
+    assert len(m.engine.calls) == 1
     dx, dy, dz, de, _feedrate = submitted[0]
     assert (dx, dy) == (0.0, 0.0)
     assert dz == pytest.approx(140.0 - 123.5)

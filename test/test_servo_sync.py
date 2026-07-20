@@ -1,152 +1,53 @@
 import pytest
+from fakes import (
+    FakeConfig,
+    FakeGcode,
+    FakeKin,
+    FakeNode,
+    FakePrinter,
+)
+from fakes import (
+    FakeEngine as FakeEngineBase,
+)
+from fakes import (
+    FakeGcmd as FakeGcmdBase,
+)
+from fakes import (
+    FakeToolhead as FakeToolheadBase,
+)
 
 from klippy.extras import servo_axis, servo_sync
 
-
-class FakeReactor:
-    def __init__(self):
-        self._t = 0.0
-        self.pauses = []
-
-    def monotonic(self):
-        self._t += 0.001
-        return self._t
-
-    def pause(self, until):
-        self.pauses.append(until - self._t)
-        self._t = until
+DEFAULT_TORQUES = [80, -78, 40, -38, 3, -2, 1, -1]
 
 
-class FakeGcode:
-    def __init__(self):
-        self.commands = {}
-
-    def register_command(self, name, func, desc=None):
-        self.commands[name] = func
-
-
-class FakeToolhead:
-    def __init__(self, kin):
-        self._kin = kin
-        self.wait_moves_calls = 0
-        self.print_time_waits = []
-
-    def get_kinematics(self):
-        return self._kin
-
-    def wait_moves(self):
-        self.wait_moves_calls += 1
-
-    def wait_until_print_time(self, print_time):
-        self.print_time_waits.append(print_time)
-
-    def get_last_move_time(self):
-        return 12.5
-
-
-class FakeKin:
-    def __init__(self, rails, lane_names):
-        self.rails = rails
-        self._lane_names = lane_names
-        self.parked = []
-
-    def lanes(self):
-        return [(i, name, []) for i, name in enumerate(self._lane_names)]
-
-    def mark_servo_parked(self, axes):
-        self.parked.append(tuple(axes))
-
-
-class FakeNode:
-    def __init__(self, name, handle, slots):
-        self.name = name
-        self._handle = handle
-        self._slots = slots
-        self._torque_motors = set()
-        self.torque_calls = []
-        self.waiter_calls = 0
-
-    def get_engine_handle(self):
-        return self._handle
-
-    def get_slot_for_motor(self, motor_name):
-        return self._slots[motor_name]
-
-    def set_motor_torque(self, motor_name, value, print_time):
-        self.torque_calls.append((motor_name, value, print_time))
-        if value:
-            first = not self._torque_motors
-            self._torque_motors.add(motor_name)
-            if first:
-
-                def waiter():
-                    self.waiter_calls += 1
-
-                return waiter
-        else:
-            self._torque_motors.discard(motor_name)
-        return None
-
-
-class FakeEngine:
-    def __init__(self, torques=None):
-        self.sdo_reads = []
-        self._torques = list(
-            torques if torques is not None else [80, -78, 40, -38, 3, -2, 1, -1]
-        )
-
-    def motion_drained(self):
-        return True
-
-    def sdo_read(self, handle, slot, index, subindex):
-        self.sdo_reads.append((handle, slot, index, subindex))
-        raw = self._torques.pop(0)
-        return (2, raw & 0xFFFF)
-
-
-class FakePrinter:
-    command_error = RuntimeError
-
-    def __init__(self, objs):
-        self._objs = objs
-        self._reactor = FakeReactor()
-
-    def lookup_object(self, name):
-        return self._objs[name]
-
-    def get_reactor(self):
-        return self._reactor
-
-    def is_shutdown(self):
-        return False
-
-
-class FakeConfig:
-    def __init__(self, printer):
-        self._printer = printer
-
-    def get_printer(self):
-        return self._printer
-
-    def getfloat(self, name, default, **kw):
-        return default
-
-
-class FakeGcmd:
+class FakeGcmd(FakeGcmdBase):
     error = RuntimeError
 
-    def __init__(self, **params):
-        self._params = params
-        self.responses = []
 
-    def get(self, name, default=None):
-        return self._params.get(name, default)
+class FakeEngine(FakeEngineBase):
+    def __init__(self, torques=None):
+        torques = (
+            list(torques) if torques is not None else list(DEFAULT_TORQUES)
+        )
+        super().__init__(sdo_read=[(2, t & 0xFFFF) for t in torques])
 
-    def get_float(self, name, default=None, **kw):
-        return float(self._params.get(name, default))
+    @property
+    def sdo_reads(self):
+        return [c[1:] for c in self.calls if c[0] == "sdo_read"]
 
-    def respond_info(self, msg):
-        self.responses.append(msg)
+
+class FakeToolhead(FakeToolheadBase):
+    def __init__(self, kin):
+        super().__init__(kin=kin, last_move_time=12.5)
+
+    @property
+    def wait_moves_calls(self):
+        return sum(1 for c in self.calls if c[0] == "wait_moves")
+
+    @property
+    def print_time_waits(self):
+        return [c[1] for c in self.calls if c[0] == "wait_until_print_time"]
 
 
 def make_motor(name, node_name):
@@ -174,14 +75,17 @@ def make_sync(engine=None, rails=None, lane_names=("x", "y")):
             make_rail("y", ["motor_b", "motor_b1"]),
         ]
     node = FakeNode(
-        "xy_drives",
-        7,
-        {"motor_a": 0, "motor_a1": 1, "motor_b": 2, "motor_b1": 3},
+        handle=7,
+        slots={"motor_a": 0, "motor_a1": 1, "motor_b": 2, "motor_b1": 3},
+        name="xy_drives",
     )
-    kin = FakeKin(rails, lane_names)
+    kin = FakeKin(
+        rails=rails,
+        lanes=[(i, name, []) for i, name in enumerate(lane_names)],
+    )
     toolhead = FakeToolhead(kin)
     printer = FakePrinter(
-        {
+        objects={
             "toolhead": toolhead,
             "motion_engine": engine,
             "ethercat_node xy_drives": node,
