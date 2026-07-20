@@ -1,7 +1,7 @@
 """Stroke plans for servo calibration: kinematics-derived move sequences.
 
 Consults the active kinematics (`coupled_xy()`, `rails`) so no command in
-`servo_calibration.py` re-derives which drives move for a given axis or
+`servo_calibration` re-derives which drives move for a given axis or
 CoreXY diagonal. A `StrokePlan` is plain data - a coordinate callback plus
 the servo/motor list a caller needs to capture and prep.
 """
