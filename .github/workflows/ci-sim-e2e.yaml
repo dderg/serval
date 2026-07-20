@@ -21,8 +21,8 @@ jobs:
       # Shards run on separate runners, so tests inside each shard stay
       # sequential (klippy's real-clock timing budgets flake under CPU
       # contention) while the suite parallelizes across machines. Shards
-      # are balanced by measured test-file duration; the "rest" shard
-      # ignores every pinned file, so new test files run there without
+      # are balanced by measured test-file duration. The fallback "rest"
+      # shard ignores every pinned file, so new test files run there without
       # touching this matrix.
       matrix:
         include:
@@ -38,6 +38,11 @@ jobs:
               tools/sim/tests/test_beacon.py
               tools/sim/tests/test_beacon_scan_path.py
               tools/sim/tests/test_bed_mesh_transform.py
+          - shard: rest-pinned
+            targets: >-
+              tools/sim/tests/test_heaters_fans.py
+              tools/sim/tests/test_phase_stepping.py
+              tools/sim/tests/test_probe_calibrate.py
           - shard: rest
             targets: >-
               tools/sim/tests
@@ -48,6 +53,9 @@ jobs:
               --ignore=tools/sim/tests/test_beacon.py
               --ignore=tools/sim/tests/test_beacon_scan_path.py
               --ignore=tools/sim/tests/test_bed_mesh_transform.py
+              --ignore=tools/sim/tests/test_heaters_fans.py
+              --ignore=tools/sim/tests/test_phase_stepping.py
+              --ignore=tools/sim/tests/test_probe_calibrate.py
     name: sim-e2e (${{ matrix.shard }})
     steps:
       - uses: actions/checkout@v4
