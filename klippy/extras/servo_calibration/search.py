@@ -47,7 +47,11 @@ class RmsLineSearch:
     established, so a 1-sigma win inside it is real more often than not,
     and the march's 2-sigma gate left genuine few-percent refinements
     permanently stuck on the incumbent - the bench pinned ff lead to its
-    first march probe for a whole day this way). Trials clamp to `lo`; a
+    first march probe for a whole day this way). A REFINE_Z-only accept
+    moves `best` but does NOT set `improved`: `improved` means the full
+    2-sigma gate was cleared and is what the tune's outer pass loop keys
+    on - counting sub-noise polish as pass improvement made the bench
+    orbit one lead value for 50 captures. Trials clamp to `lo`; a
     trial that lands on an already-measured value ends the search."""
 
     def __init__(
@@ -128,12 +132,17 @@ class RmsLineSearch:
         sigma = _checked_sigma(sigma)
         value = self.trial
         self.history.append((value, rms, sigma))
-        z = REFINE_Z if self._refine_probes else Z
-        if rms < self.best_rms - z * math.hypot(sigma, self.best_sigma):
+        deadband = math.hypot(sigma, self.best_sigma)
+        significant = rms < self.best_rms - Z * deadband
+        accepted = significant or (
+            self._refine_probes > 0
+            and rms < self.best_rms - REFINE_Z * deadband
+        )
+        if accepted:
             self.best = value
             self.best_rms = rms
             self.best_sigma = sigma
-            self.improved = True
+            self.improved = self.improved or significant
             if self._refine_probes:
                 self._refine_or_finish("refined to the bracket minimum")
                 return

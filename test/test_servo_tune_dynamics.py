@@ -355,13 +355,15 @@ def test_line_search_deadband_rejects_sub_2sigma_but_accepts_beyond():
     assert clean.best == pytest.approx(2.0)
 
 
-def test_line_search_refine_accepts_between_one_and_two_sigma():
+def test_line_search_refine_polishes_between_one_and_two_sigma():
     # the incumbent trap: the true optimum sits between the march probes
     # and its improvement clears 1 sigma but not 2. The march gate (2
     # sigma) must reject the flanking probes, yet the bracket refine (1
     # sigma) must still claim the vertex instead of pinning the start
-    # value forever - the bench kept ff lead stuck on its first march
-    # probe for a day because refine used the full 2-sigma gate.
+    # value forever. But sub-2-sigma polish must NOT count as `improved`
+    # - the tune's outer loop repeats passes while anything improved, and
+    # treating noise-level polish as improvement made the bench orbit a
+    # single lead value for 50 captures.
     sigma = 0.012
 
     def obj(v):
@@ -369,9 +371,9 @@ def test_line_search_refine_accepts_between_one_and_two_sigma():
 
     s = RLS(0.020, obj(0.020), sigma=sigma, step=0.003, hint=1.0)
     drive(s, obj, sigma=sigma)
-    assert s.improved
     assert s.best == pytest.approx(0.0215, rel=0.01)
     assert s.note == "refined to the bracket minimum"
+    assert not s.improved, "sub-2-sigma polish must not drive another pass"
 
 
 def test_line_search_refine_probe_budget_is_bounded():
