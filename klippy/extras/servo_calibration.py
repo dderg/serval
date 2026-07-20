@@ -3827,16 +3827,21 @@ class ServoCalibration:
         "wrong as seen by the closed loop: a positive mass coefficient "
         "means ferr grows WITH commanded accel, i.e. the feedforward "
         "under-feeds during accel (mass too low on the command path); "
-        "viscous/coulomb read the same way against vel/sign(vel). Each "
-        "round steps every TERMS coefficient still outside SIGMA stderrs "
-        "of zero - sign-probe on the first round, secant on the empirical "
+        "viscous/coulomb read the same way against vel/sign(vel). A term "
+        "is converged when its worst-case ferr contribution over the "
+        "excitation envelope (|coef| x MAX_ACCEL for mass, x MAX_SPEED "
+        "for viscous, x 1 for coulomb) is within TOL_UM microns - "
+        "default 0.3um, about one encoder count - or when the "
+        "coefficient is already inside SIGMA stderrs of zero (nothing "
+        "left to measure). Every unconverged term steps each round: "
+        "sign-probe on the first round, secant on the empirical "
         "sensitivity afterwards (relative change clamped to 40%% per "
         "round; mass is floored at 10%% of its baseline value and a "
         "second push below that floor aborts as a degenerate fit) - and "
-        "streams the updated model straight to the running endpoint "
+        "the updated model streams straight to the running endpoint "
         "(no restart) before the next round. Stops and writes a new "
-        "dynamics TOML the moment every coefficient is statistically "
-        "zero, leaving the tuned model LIVE (point [ethercat_node] "
+        "dynamics TOML the moment every term converges, leaving the "
+        "tuned model LIVE (point [ethercat_node] "
         "dynamics_profile at it and RESTART to keep it past a klippy "
         "restart). If ROUNDS runs out unconverged the live model is "
         "restored to the baseline and the command fails loudly with the "
@@ -3846,8 +3851,9 @@ class ServoCalibration:
         "feedforward retune does not move the loop's resonances). The "
         "baseline is PROFILE= or the node-level [ethercat_node] "
         "dynamics_profile (per-motor profiles are not supported). Params "
-        "MAX_ACCEL MAX_SPEED ROUNDS (6) STEP (0.15) SIGMA (3.0) TERMS "
-        "(mass,viscous,coulomb) NAME (tune) PROFILE SERVOS BOUND SMALL_SIZE"
+        "MAX_ACCEL MAX_SPEED ROUNDS (6) STEP (0.15) SIGMA (3.0) TOL_UM "
+        "(0.3) TERMS (mass,viscous,coulomb) NAME (tune) PROFILE SERVOS "
+        "BOUND SMALL_SIZE"
     )
 
     def cmd_SERVO_TUNE_DYNAMICS(self, gcmd: Any) -> None:
@@ -3893,6 +3899,8 @@ class ServoCalibration:
         rounds = gcmd.get_int("ROUNDS", 6, minval=2)
         step_frac = gcmd.get_float("STEP", 0.15, minval=0.02, maxval=0.5)
         sigma = gcmd.get_float("SIGMA", 3.0, above=0.0)
+        tol_mm = 1e-3 * gcmd.get_float("TOL_UM", 0.3, above=0.0)
+        term_scales = {"MASS": max_accel, "VISCOUS": max_speed, "COULOMB": 1.0}
         name = gcmd.get("NAME", "tune")
         dwell = self.dwell_ms
         iterations = self.iterations
@@ -3907,6 +3915,7 @@ class ServoCalibration:
             "rounds": rounds,
             "step": step_frac,
             "sigma": sigma,
+            "tol_um": tol_mm * 1e3,
             "terms": [t.lower() for t in terms],
             "iterations": iterations,
             "dwell_ms": dwell,
@@ -4008,9 +4017,14 @@ class ServoCalibration:
                         g = coef[key][fit_idx]
                         se = stderr_map[key][fit_idx]
                         before = current[key][baseline_idx]
+                        ferr_mm = abs(g) * term_scales[term]
                         note = ""
-                        if abs(g) <= sigma * se:
+                        if ferr_mm <= tol_mm:
                             after = before
+                            note = " (within tolerance)"
+                        elif abs(g) <= sigma * se:
+                            after = before
+                            note = " (below measurement noise)"
                         elif term != "MASS" and before == 0.0 and g < 0.0:
                             after = before
                             note = " (bounded at 0: loop wants negative %s)" % (
@@ -4059,8 +4073,18 @@ class ServoCalibration:
                             after = candidate
                             values_after[key][baseline_idx] = after
                         round_lines.append(
-                            "mode %s %s: g=%+.4g (se %.4g) %.6g -> %.6g%s"
-                            % (mode, term.lower(), g, se, before, after, note)
+                            "mode %s %s: g=%+.4g (se %.4g, %.2fum) "
+                            "%.6g -> %.6g%s"
+                            % (
+                                mode,
+                                term.lower(),
+                                g,
+                                se,
+                                ferr_mm * 1e3,
+                                before,
+                                after,
+                                note,
+                            )
                         )
                 report = " | ".join(round_lines)
                 gcmd.respond_info("round %d: %s" % (round_i, report))
@@ -4099,8 +4123,8 @@ class ServoCalibration:
             if not success:
                 raise gcmd.error(
                     "SERVO_TUNE_DYNAMICS did not converge in %d rounds - "
-                    "coefficients remain outside %.1f-sigma of zero: %s"
-                    % (rounds, sigma, last_report)
+                    "terms remain above the %.2fum ferr tolerance: %s"
+                    % (rounds, tol_mm * 1e3, last_report)
                 )
             with open(out_path, "w") as f:
                 f.write(

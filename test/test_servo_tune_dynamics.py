@@ -411,7 +411,7 @@ def test_tune_dynamics_negative_coulomb_on_zero_baseline_bounds_at_zero():
     sc, _gcode, _path = make_calibration(profile_text=ZERO_FRICTION_TOML)
     engine = sc.printer.lookup_object("motion_engine")
     sc.fake_ferr_queue = [
-        _ferr_json(coulomb=(-2e-5, -5e-6), coulomb_se=(1e-9, 1e-9)),
+        _ferr_json(coulomb=(-2e-3, -5e-4), coulomb_se=(1e-9, 1e-9)),
     ]
     gcmd = FakeGcmd()
     sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
@@ -427,16 +427,54 @@ def test_tune_dynamics_negative_coulomb_on_zero_baseline_bounds_at_zero():
 def test_tune_dynamics_positive_viscous_on_zero_baseline_probes_up():
     sc, _gcode, _path = make_calibration(profile_text=ZERO_FRICTION_TOML)
     sc.fake_ferr_queue = [
-        _ferr_json(viscous=(5e-7, 0.0), viscous_se=(1e-9, 1e-9)),
+        _ferr_json(viscous=(5e-6, 0.0), viscous_se=(1e-9, 1e-9)),
         _ferr_json(),
     ]
-    gcmd = FakeGcmd(TERMS="VISCOUS", ROUNDS=3)
+    gcmd = FakeGcmd(TERMS="VISCOUS", ROUNDS=3, MAX_SPEED=1000)
     sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
     tune = _manifest_for(sc)["dynamics_tune"]
     assert tune["rounds"][0]["values"]["viscous"][0] == pytest.approx(
         servo_calibration.TUNE_ZERO_FLOOR_STEPS["VISCOUS"]
     )
     assert tune["rounds"][0]["values"]["viscous"][1] == 0.0
+
+
+def test_tune_dynamics_sub_encoder_count_coefficients_converge():
+    sc, _gcode, _path = make_calibration()
+    sc.fake_ferr_queue = [
+        _ferr_json(
+            mass=(7.5e-9, 1.76e-8),
+            mass_se=(6.4e-10, 6.7e-10),
+            viscous=(6.8e-8, 1.1e-7),
+            viscous_se=(7.8e-9, 7.7e-9),
+            coulomb=(-1.5e-5, -2.5e-6),
+            coulomb_se=(3.7e-6, 3.7e-6),
+        ),
+        _ferr_json(mass=(7.5e-9, 9e-9), mass_se=(6.4e-10, 6.7e-10)),
+    ]
+    gcmd = FakeGcmd(MAX_ACCEL=25000, MAX_SPEED=1000)
+    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
+    assert any("converged in 2 rounds" in r for r in gcmd.responses)
+    assert any("within tolerance" in r for r in gcmd.responses)
+    tune = _manifest_for(sc)["dynamics_tune"]
+    assert tune["converged"] is True
+    round0 = tune["rounds"][0]["values"]
+    assert round0["mass"][0] == BASELINE_MASS[0]
+    assert round0["mass"][1] > BASELINE_MASS[1]
+    assert round0["viscous"] == BASELINE_VISCOUS
+    assert round0["coulomb"] == BASELINE_COULOMB
+
+
+def test_tune_dynamics_tolerance_scales_with_the_envelope():
+    sc, _gcode, _path = make_calibration()
+    sc.fake_ferr_queue = [
+        _ferr_json(mass=(7.5e-9, 0.0), mass_se=(6.4e-10, 6.7e-10)),
+        _ferr_json(),
+    ]
+    gcmd = FakeGcmd(TERMS="MASS", ROUNDS=3, MAX_ACCEL=100000)
+    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
+    tune = _manifest_for(sc)["dynamics_tune"]
+    assert tune["rounds"][0]["values"]["mass"][0] > BASELINE_MASS[0]
 
 
 def test_tune_dynamics_secant_never_streams_negative_friction():
