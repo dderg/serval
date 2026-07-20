@@ -355,6 +355,40 @@ def test_line_search_deadband_rejects_sub_2sigma_but_accepts_beyond():
     assert clean.best == pytest.approx(2.0)
 
 
+def test_line_search_refine_accepts_between_one_and_two_sigma():
+    # the incumbent trap: the true optimum sits between the march probes
+    # and its improvement clears 1 sigma but not 2. The march gate (2
+    # sigma) must reject the flanking probes, yet the bracket refine (1
+    # sigma) must still claim the vertex instead of pinning the start
+    # value forever - the bench kept ff lead stuck on its first march
+    # probe for a day because refine used the full 2-sigma gate.
+    sigma = 0.012
+
+    def obj(v):
+        return 1.0 + 1e4 * (v - 0.0215) ** 2
+
+    s = RLS(0.020, obj(0.020), sigma=sigma, step=0.003, hint=1.0)
+    drive(s, obj, sigma=sigma)
+    assert s.improved
+    assert s.best == pytest.approx(0.0215, rel=0.01)
+    assert s.note == "refined to the bracket minimum"
+
+
+def test_line_search_refine_probe_budget_is_bounded():
+    # a refine probe that keeps producing fresh vertices must stop after
+    # MAX_REFINE_PROBES captures instead of iterating forever.
+    sigma = 0.012
+
+    def obj(v):
+        return 1.0 + 1e4 * (v - 0.02151234) ** 2 + 1e-7 * v
+
+    s = RLS(0.020, obj(0.020), sigma=sigma, step=0.003, hint=1.0)
+    drive(s, obj, sigma=sigma)
+    assert s.done
+    refine_probes = len(s.history) - 4
+    assert refine_probes <= servo_calibration.search.MAX_REFINE_PROBES
+
+
 def test_line_search_rejects_null_or_nan_sigma():
     with pytest.raises(ValueError, match="sigma"):
         RLS(0.0, 1.0, sigma=None, step=5.0)

@@ -8,6 +8,8 @@ from .dynamics import TUNE_RELATIVE_CLAMP
 GOLDEN_RATIO_CONJ = (math.sqrt(5.0) - 1.0) / 2.0
 
 Z = 2.0
+REFINE_Z = 1.0
+MAX_REFINE_PROBES = 3
 
 
 def _checked_sigma(sigma: float) -> float:
@@ -39,9 +41,14 @@ class RmsLineSearch:
     hint would otherwise finish with zero probes, untested); a failed
     first probe flips once, a march grows the step (capped at `clamp` of
     the current value) while the rms keeps clearing the deadband, and the
-    first non-improving trial triggers a single parabolic refine through
-    the bracket around the best point. Trials clamp to `lo`; a trial that
-    lands on an already-measured value ends the search."""
+    first non-improving trial starts an iterative parabolic refine through
+    the bracket around the best point: up to MAX_REFINE_PROBES vertex
+    probes, each accepted at the looser REFINE_Z (the bracket is already
+    established, so a 1-sigma win inside it is real more often than not,
+    and the march's 2-sigma gate left genuine few-percent refinements
+    permanently stuck on the incumbent - the bench pinned ff lead to its
+    first march probe for a whole day this way). Trials clamp to `lo`; a
+    trial that lands on an already-measured value ends the search."""
 
     def __init__(
         self,
@@ -74,7 +81,7 @@ class RmsLineSearch:
         self.note = ""
         self.improved = False
         self._flipped = False
-        self._refining = False
+        self._refine_probes = 0
         self._advance_from(value)
 
     def _tried(self, value: float) -> bool:
@@ -121,13 +128,14 @@ class RmsLineSearch:
         sigma = _checked_sigma(sigma)
         value = self.trial
         self.history.append((value, rms, sigma))
-        if rms < self.best_rms - Z * math.hypot(sigma, self.best_sigma):
+        z = REFINE_Z if self._refine_probes else Z
+        if rms < self.best_rms - z * math.hypot(sigma, self.best_sigma):
             self.best = value
             self.best_rms = rms
             self.best_sigma = sigma
             self.improved = True
-            if self._refining:
-                self._finish("refined to the bracket minimum")
+            if self._refine_probes:
+                self._refine_or_finish("refined to the bracket minimum")
                 return
             cap = self.clamp * abs(value)
             self.step = (
@@ -137,23 +145,29 @@ class RmsLineSearch:
             )
             self._advance_from(value)
             return
-        if self._refining:
-            self._finish("refine did not beat the bracket best")
+        if self._refine_probes:
+            self._refine_or_finish("refine did not beat the bracket best")
             return
         if not self.improved and not self._flipped:
             self._flipped = True
             self.direction = -self.direction
             self._advance_from(self.best)
             return
+        self._refine_or_finish(
+            "no further improvement"
+            if self.improved
+            else "start already optimal"
+        )
+
+    def _refine_or_finish(self, note: str) -> None:
+        if self._refine_probes >= MAX_REFINE_PROBES:
+            self._finish(note)
+            return
         vertex = self._parabolic_vertex()
         if vertex is None or self._tried(vertex):
-            self._finish(
-                "no further improvement"
-                if self.improved
-                else "start already optimal"
-            )
+            self._finish(note)
             return
-        self._refining = True
+        self._refine_probes += 1
         self.trial = vertex
 
 
