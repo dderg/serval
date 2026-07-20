@@ -226,14 +226,37 @@ static void flush_outputs(void) {
  * arrival, not transmit. Overrun skips stay on the grid
  * (reanchor_if_stale), so the half-cycle latch phase holds all run. */
 #define WIRE_FLIGHT_NS 3000
+
+/* Per-cycle stage breakdown of the last rt_exchange, for attributing a
+ * frame-timing spike: wake_late = how far past the grid tick the thread
+ * actually woke (kernel scheduling latency), recv = ecrt receive + domain
+ * process (the polled macb RX path), send = output flush + DC sync + queue
+ * + ecrt send (the TX path). Whole-exchange totals alone cannot separate a
+ * late wakeup from a slow bus path. */
+static int64_t g_last_wake_late_ns;
+static int64_t g_last_recv_ns;
+static int64_t g_last_send_ns;
+
+void ec_rt_cycle_stage_ns(int64_t *wake_late, int64_t *recv, int64_t *send) {
+    if (wake_late) *wake_late = g_last_wake_late_ns;
+    if (recv) *recv = g_last_recv_ns;
+    if (send) *send = g_last_send_ns;
+}
+
 static int rt_exchange(int64_t *toff) {
     add_ts(&g_ts, g_cycle_ns);
     reanchor_if_stale();
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &g_ts, NULL);
+    struct timespec woke;
+    clock_gettime(CLOCK_MONOTONIC, &woke);
+    g_last_wake_late_ns = TIMESPEC2NS(woke) - TIMESPEC2NS(g_ts);
 
     ecrt_master_application_time(g_master, TIMESPEC2NS(g_ts));
     ecrt_master_receive(g_master);
     ecrt_domain_process(g_domain);
+    struct timespec received;
+    clock_gettime(CLOCK_MONOTONIC, &received);
+    g_last_recv_ns = TIMESPEC2NS(received) - TIMESPEC2NS(woke);
 
     flush_outputs();
     ecrt_master_sync_reference_clock(g_master);
@@ -243,6 +266,7 @@ static int rt_exchange(int64_t *toff) {
 
     struct timespec sent;
     clock_gettime(CLOCK_MONOTONIC, &sent);
+    g_last_send_ns = TIMESPEC2NS(sent) - TIMESPEC2NS(received);
     int64_t lateness_ns =
         TIMESPEC2NS(sent) + WIRE_FLIGHT_NS - (TIMESPEC2NS(g_ts) + g_cycle_ns / 2);
 
