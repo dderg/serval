@@ -7,32 +7,48 @@ from .dynamics import TUNE_RELATIVE_CLAMP
 
 GOLDEN_RATIO_CONJ = (math.sqrt(5.0) - 1.0) / 2.0
 
+Z = 2.0
+
+
+def _checked_sigma(sigma: float) -> float:
+    if sigma is None or math.isnan(sigma):
+        raise ValueError("sigma must be a finite number (got %r)" % (sigma,))
+    if sigma < 0.0:
+        raise ValueError("sigma must be non-negative (got %r)" % (sigma,))
+    return sigma
+
 
 class RmsLineSearch:
     """Empirical 1-D descent for one (term, mode) of SERVO_TUNE_DYNAMICS:
-    the objective is the MEASURED wide-band following-error rms of that
-    mode, not a fitted correlation - the bench showed the ferr/accel
-    correlation nulls far from the rms minimum (its zero walked mass to
-    2.2x baseline while raw rms rose every round), so correlations are
-    demoted to direction hints and diagnostics. Protocol: construct with
-    the already-measured start point, run the trial in `trial`, `feed` the
-    measured rms, repeat until `done`; `best` then holds the winner.
-    First probe follows `hint`'s sign - except starting AT the lower
-    bound, where down is unactionable and the probe goes up regardless
-    (a zero-valued friction term with a downhill regression hint would
-    otherwise finish with zero probes, untested); a failed first probe
-    flips once, a march grows the step (capped at `clamp` of the current
-    value) while the rms keeps improving by more than `tol`, and the
+    the objective is the MEASURED transient-window following-error rms of
+    that mode - the rms taken only over the short windows right after each
+    commanded transition, where feedforward has authority before the inner
+    servo loop (disturbance observer + integrator) corrects the excursion.
+    Whole-capture rms diluted these transients ~10x and was blind to what
+    FF controls; the correlation nulls far from the rms minimum (the bench
+    walked mass to 2.2x baseline while raw rms rose every round), so
+    correlations are demoted to direction hints and diagnostics. Protocol:
+    construct with the already-measured start point, run the trial in
+    `trial`, `feed` the measured (rms, sigma), repeat until `done`; `best`
+    then holds the winner. An improvement counts only when it clears a 2-
+    sigma deadband measured from the per-window rms scatter
+    (rms < best_rms - Z*hypot(sigma, best_sigma)) - there is no fixed
+    tolerance knob. First probe follows `hint`'s sign - except starting AT
+    the lower bound, where down is unactionable and the probe goes up
+    regardless (a zero-valued friction term with a downhill regression
+    hint would otherwise finish with zero probes, untested); a failed
+    first probe flips once, a march grows the step (capped at `clamp` of
+    the current value) while the rms keeps clearing the deadband, and the
     first non-improving trial triggers a single parabolic refine through
-    the bracket around the best point. Trials clamp to `lo`; a trial
-    that lands on an already-measured value ends the search."""
+    the bracket around the best point. Trials clamp to `lo`; a trial that
+    lands on an already-measured value ends the search."""
 
     def __init__(
         self,
         value: float,
         rms: float,
+        sigma: float,
         step: float,
-        tol: float,
         lo: float = 0.0,
         hint: float = 1.0,
         grow: float = 1.6,
@@ -46,13 +62,13 @@ class RmsLineSearch:
             )
         self.best = value
         self.best_rms = rms
-        self.tol = tol
+        self.best_sigma = _checked_sigma(sigma)
         self.lo = lo
         self.step = step
         self.direction = 1.0 if hint >= 0.0 or value == lo else -1.0
         self.grow = grow
         self.clamp = clamp
-        self.history: list[tuple[float, float]] = [(value, rms)]
+        self.history: list[tuple[float, float, float]] = [(value, rms, sigma)]
         self.trial: float | None = None
         self.done = False
         self.note = ""
@@ -63,7 +79,8 @@ class RmsLineSearch:
 
     def _tried(self, value: float) -> bool:
         return any(
-            abs(value - v) <= 1e-12 + 1e-9 * abs(value) for v, _ in self.history
+            abs(value - v) <= 1e-12 + 1e-9 * abs(value)
+            for v, _r, _s in self.history
         )
 
     def _finish(self, note: str) -> None:
@@ -84,10 +101,10 @@ class RmsLineSearch:
     def _parabolic_vertex(self) -> float | None:
         points = sorted(self.history, key=lambda p: p[0])
         for i in range(1, len(points) - 1):
-            v0, r0 = points[i]
+            v0, r0, _s0 = points[i]
             if v0 != self.best:
                 continue
-            (va, ra), (vb, rb) = points[i - 1], points[i + 1]
+            (va, ra, _sa), (vb, rb, _sb) = points[i - 1], points[i + 1]
             num = (v0 - va) ** 2 * (r0 - rb) - (v0 - vb) ** 2 * (r0 - ra)
             den = (v0 - va) * (r0 - rb) - (v0 - vb) * (r0 - ra)
             if den == 0.0:
@@ -98,14 +115,16 @@ class RmsLineSearch:
             return max(vertex, self.lo)
         return None
 
-    def feed(self, rms: float) -> None:
+    def feed(self, rms: float, sigma: float) -> None:
         if self.done or self.trial is None:
             raise ValueError("feed() without an outstanding trial")
+        sigma = _checked_sigma(sigma)
         value = self.trial
-        self.history.append((value, rms))
-        if rms < self.best_rms - self.tol:
+        self.history.append((value, rms, sigma))
+        if rms < self.best_rms - Z * math.hypot(sigma, self.best_sigma):
             self.best = value
             self.best_rms = rms
+            self.best_sigma = sigma
             self.improved = True
             if self._refining:
                 self._finish("refined to the bracket minimum")

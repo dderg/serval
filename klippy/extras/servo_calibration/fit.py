@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 
 from .refine import RefineCommands
@@ -27,6 +28,7 @@ from .dynamics import (
     send_ff_lead,
 )
 from .search import RmsLineSearch
+from .search import Z as ACCEPT_Z
 from .sweep import ExperimentRun, SweepStep
 
 
@@ -755,10 +757,11 @@ class DynamicsFitCommands(RefineCommands):
                 "servo-cal fit --response ferr produced an unusable result "
                 "%s: %s" % (path, e)
             )
-        if data.get("version") != 1:
+        if data.get("version") != 2:
             raise gcmd.error(
-                "ferr fit %s: unsupported version %r (expected 1)"
-                % (path, data.get("version"))
+                "ferr fit %s: unsupported version %r (expected 2) - rebuild "
+                "servo-cal (make servo-cal), the binary predates the "
+                "transient-window rms objective" % (path, data.get("version"))
             )
         n_modes = len(data.get("modes", []))
         for key in ("ferr_rms_raw", "onset_bias"):
@@ -769,6 +772,27 @@ class DynamicsFitCommands(RefineCommands):
                     "(make servo-cal), the binary predates the "
                     "rms-objective tuner" % (path, key)
                 )
+        ff = data.get("ferr_rms_ff")
+        if not isinstance(ff, dict):
+            raise gcmd.error(
+                "ferr fit %s has no ferr_rms_ff dict - rebuild servo-cal "
+                "(make servo-cal), the binary predates the transient-window "
+                "rms objective" % (path,)
+            )
+        for term in ("mass", "viscous", "coulomb"):
+            entry = ff.get(term)
+            if not isinstance(entry, dict):
+                raise gcmd.error(
+                    "ferr fit %s: ferr_rms_ff[%r] is missing or not a dict"
+                    % (path, term)
+                )
+            for field in ("rms", "sigma", "windows"):
+                vec = entry.get(field)
+                if not isinstance(vec, list) or len(vec) != n_modes:
+                    raise gcmd.error(
+                        "ferr fit %s: ferr_rms_ff[%r][%r] must be a list of "
+                        "%d per-mode values" % (path, term, field, n_modes)
+                    )
         return data
 
     cmd_SERVO_TUNE_DYNAMICS_help = (
@@ -776,9 +800,11 @@ class DynamicsFitCommands(RefineCommands):
         "descent that MEASURES tracking error instead of trusting a "
         "fitted correlation. Each round streams the trial model to the "
         "running endpoint (no restart), captures one XY pattern run at "
-        "MAX_ACCEL/MAX_SPEED, and scores each mode by the raw wide-band "
-        "rms of its following error over the whole capture - the number "
-        "the operator actually experiences. (The ferr/accel regression "
+        "MAX_ACCEL/MAX_SPEED, and scores each mode by the TRANSIENT-WINDOW "
+        "rms of its following error - the excursion in the short window "
+        "right after each commanded transition, where feedforward has "
+        "authority before the inner servo loop corrects it (whole-capture "
+        "rms diluted these transients ~10x). (The ferr/accel regression "
         "is still fitted and reported per round, but only as a direction "
         "hint and diagnostic: on the bench its zero landed at 2.2x the "
         "rms-optimal mass while tracking got worse every round.) Terms "
@@ -789,9 +815,10 @@ class DynamicsFitCommands(RefineCommands):
         "torque lands carries clean command-path sign, before the "
         "drive's own compensation reacts; positive = under-fed), other "
         "terms follow their regression coefficient's sign; a failed "
-        "first probe flips once, the step grows while rms "
-        "improves by more than TOL_UM (relative change capped at 40%% "
-        "per probe), and the first non-improving probe triggers one "
+        "first probe flips once, the step grows while the rms clears a "
+        "2-sigma deadband measured from per-window scatter (relative "
+        "change capped at 40%% per probe), and the first non-improving "
+        "probe triggers one "
         "parabolic refine through the bracket; ties go to the best "
         "measured value. Viscous/coulomb are floored at zero (a "
         "zero-valued term probes up by a fixed floor step), mass at 10%% "
@@ -813,8 +840,8 @@ class DynamicsFitCommands(RefineCommands):
         "and configured lead and writes nothing; resonance_detected "
         "only warns. The baseline is PROFILE= or the node-level "
         "[ethercat_node] dynamics_profile (per-motor profiles are not "
-        "supported). Params MAX_ACCEL MAX_SPEED STEP (0.15) TOL_UM "
-        "(0.05) TERMS (mass,viscous,coulomb,lead) NAME (tune) PROFILE "
+        "supported). Params MAX_ACCEL MAX_SPEED STEP (0.15) TERMS "
+        "(mass,viscous,coulomb,lead) NAME (tune) PROFILE "
         "SERVOS BOUND SMALL_SIZE"
     )
 
@@ -863,7 +890,6 @@ class DynamicsFitCommands(RefineCommands):
         max_accel = gcmd.get_float("MAX_ACCEL", max(self.accels), above=0.0)
         max_speed = gcmd.get_float("MAX_SPEED", max(self.speeds), above=0.0)
         step_frac = gcmd.get_float("STEP", 0.15, minval=0.02, maxval=0.5)
-        tol_mm = 1e-3 * gcmd.get_float("TOL_UM", 0.05, above=0.0)
         name = gcmd.get("NAME", "tune")
         dwell = self.dwell_ms
         iterations = self.iterations
@@ -876,7 +902,8 @@ class DynamicsFitCommands(RefineCommands):
             "max_speed": max_speed,
             "speeds": speeds,
             "step": step_frac,
-            "tol_um": tol_mm * 1e3,
+            "objective": "transient_rms",
+            "accept_z": ACCEPT_Z,
             "terms": [t.lower() for t in terms],
             "iterations": iterations,
             "dwell_ms": dwell,
@@ -971,11 +998,42 @@ class DynamicsFitCommands(RefineCommands):
             return {
                 "round": round_i,
                 "rms": [float(v) for v in ferr["ferr_rms_raw"]],
+                "ff": ferr["ferr_rms_ff"],
                 "coef": ferr["coef"],
                 "stderr": ferr["stderr"],
                 "onset": [float(v) for v in ferr["onset_bias"]],
                 "samples": ferr.get("samples"),
             }
+
+        def term_objective(
+            cached: dict[str, Any], ff_key: str
+        ) -> tuple[list[float], list[float]]:
+            entry = cached["ff"].get(ff_key)
+            if entry is None:
+                raise gcmd.error(
+                    "ferr fit has no ferr_rms_ff[%r] to score" % (ff_key,)
+                )
+            rms_v = entry["rms"]
+            sigma_v = entry["sigma"]
+            windows_v = entry["windows"]
+            for fit_idx, mode in enumerate(plan["modes"]):
+                if not windows_v[fit_idx] or rms_v[fit_idx] is None:
+                    raise gcmd.error(
+                        "term %s mode %s has no transient windows - the "
+                        "excitation never triggered it, feedforward cannot "
+                        "be scored" % (ff_key, mode)
+                    )
+                if sigma_v[fit_idx] is None:
+                    raise gcmd.error(
+                        "term %s mode %s has fewer than 2 transient windows "
+                        "so its per-window scatter (sigma) is unmeasurable - "
+                        "cannot apply the 2-sigma acceptance test"
+                        % (ff_key, mode)
+                    )
+            return (
+                [float(r) for r in rms_v],
+                [float(s) for s in sigma_v],
+            )
 
         try:
             out_path = self._dynamics_out_path(gcmd, run, name)
@@ -1008,16 +1066,19 @@ class DynamicsFitCommands(RefineCommands):
                             )
                 cache_key = model_key(trial, trial_lead)
                 cached = measured.get(cache_key)
+                ff_key = "mass" if is_lead else term.lower()
                 if cached is None:
                     applied = True
                     cached = measure(round_i, trial, trial_lead)
                     measured[cache_key] = cached
+                    obj_rms, obj_sigma = term_objective(cached, ff_key)
                     rms = cached["rms"]
                     label = "baseline" if searches is None else term.lower()
                     if is_lead:
+                        n_modes = len(obj_rms)
                         line = "xy lead=%.1fus rms=%.2fum (onset %+.2fum)" % (
                             trial_lead * 1e6,
-                            sum(rms) / len(rms) * 1e3,
+                            sum(obj_rms) / n_modes * 1e3,
                             sum(cached["onset"]) * 1e3,
                         )
                     else:
@@ -1027,7 +1088,7 @@ class DynamicsFitCommands(RefineCommands):
                                 mode,
                                 key,
                                 trial[key][baseline_modes.index(mode)],
-                                rms[fit_idx] * 1e3,
+                                obj_rms[fit_idx] * 1e3,
                                 cached["onset"][fit_idx] * 1e3,
                                 cached["coef"][key][fit_idx],
                             )
@@ -1049,6 +1110,7 @@ class DynamicsFitCommands(RefineCommands):
                                 trial_lead * 1e6 if lead_enabled else None
                             ),
                             "ferr_rms_raw": list(rms),
+                            "ferr_rms_ff": cached["ff"],
                             "coef": dict(cached["coef"]),
                             "stderr": dict(cached["stderr"]),
                             "onset_bias": list(cached["onset"]),
@@ -1056,7 +1118,8 @@ class DynamicsFitCommands(RefineCommands):
                         }
                     )
                     round_i += 1
-                rms = cached["rms"]
+                else:
+                    obj_rms, obj_sigma = term_objective(cached, ff_key)
                 if searches is None:
                     searches = {}
                     if is_lead:
@@ -1066,11 +1129,12 @@ class DynamicsFitCommands(RefineCommands):
                             if current_lead > 0.0
                             else 0.5 * cycle_us * 1e-6
                         )
+                        n_modes = len(obj_rms)
                         searches["xy"] = RmsLineSearch(
                             current_lead,
-                            sum(rms) / len(rms),
+                            sum(obj_rms) / n_modes,
+                            math.hypot(*obj_sigma) / n_modes,
                             step_size,
-                            tol_mm,
                             lo=0.0,
                             hint=hint if hint != 0.0 else 1.0,
                         )
@@ -1099,21 +1163,25 @@ class DynamicsFitCommands(RefineCommands):
                                 hint = cached["onset"][fit_idx]
                             searches[mode] = RmsLineSearch(
                                 value,
-                                rms[fit_idx],
+                                obj_rms[fit_idx],
+                                obj_sigma[fit_idx],
                                 step_size,
-                                tol_mm,
                                 lo=lo,
                                 hint=hint if hint != 0.0 else 1.0,
                             )
                 elif is_lead:
                     search = searches["xy"]
                     if not search.done:
-                        search.feed(sum(rms) / len(rms))
+                        n_modes = len(obj_rms)
+                        search.feed(
+                            sum(obj_rms) / n_modes,
+                            math.hypot(*obj_sigma) / n_modes,
+                        )
                 else:
                     for fit_idx, mode in enumerate(plan["modes"]):
                         search = searches[mode]
                         if not search.done:
-                            search.feed(rms[fit_idx])
+                            search.feed(obj_rms[fit_idx], obj_sigma[fit_idx])
                 if all(search.done for search in searches.values()):
                     lines = []
                     for mode, search in searches.items():
@@ -1146,6 +1214,7 @@ class DynamicsFitCommands(RefineCommands):
                                 "mode": mode,
                                 "best": search.best,
                                 "best_rms": search.best_rms,
+                                "best_sigma": search.best_sigma,
                                 "improved": search.improved,
                                 "note": search.note,
                                 "probes": len(search.history) - 1,
@@ -1180,7 +1249,8 @@ class DynamicsFitCommands(RefineCommands):
                 "max_accel": max_accel,
                 "max_speed": max_speed,
                 "step": step_frac,
-                "tol_um": tol_mm * 1e3,
+                "objective": "transient_rms",
+                "accept_z": ACCEPT_Z,
                 "rounds": rounds_history,
                 "search": search_summaries,
                 "lead_us": current_lead * 1e6 if lead_enabled else None,

@@ -115,9 +115,19 @@ def _ferr_json(
     onset_bias=(0.0, 0.0),
     onset_windows=8,
     samples=500,
+    ff_sigma=(1e-9, 1e-9),
+    ff_windows=(8, 8),
 ):
+    ff = {
+        term: {
+            "rms": list(ferr_rms_raw),
+            "sigma": list(ff_sigma),
+            "windows": list(ff_windows),
+        }
+        for term in ("mass", "viscous", "coulomb")
+    }
     return {
-        "version": 1,
+        "version": 2,
         "modes": list(modes),
         "coef": {
             "mass": list(mass),
@@ -131,6 +141,7 @@ def _ferr_json(
         },
         "ferr_rms": list(ferr_rms),
         "ferr_rms_raw": list(ferr_rms_raw),
+        "ferr_rms_ff": ff,
         "onset_bias": list(onset_bias),
         "onset_windows": onset_windows,
         "samples": samples,
@@ -286,11 +297,11 @@ def _manifest_for(sc):
 RLS = servo_calibration.RmsLineSearch
 
 
-def drive(search, rms_fn, budget=50):
+def drive(search, rms_fn, sigma=0.0, budget=50):
     for _ in range(budget):
         if search.done:
             return
-        search.feed(rms_fn(search.trial))
+        search.feed(rms_fn(search.trial), sigma)
     raise AssertionError("search did not finish in %d probes" % budget)
 
 
@@ -298,7 +309,7 @@ def test_line_search_marches_to_a_higher_minimum():
     def obj(v):
         return 1.0 + (v - 0.040) ** 2
 
-    s = RLS(0.020, obj(0.020), step=0.003, tol=1e-9, hint=1.0)
+    s = RLS(0.020, obj(0.020), sigma=0.0, step=0.003, hint=1.0)
     drive(s, obj)
     assert s.improved
     assert s.best == pytest.approx(0.040, rel=0.05)
@@ -309,7 +320,7 @@ def test_line_search_flips_a_wrong_hint():
     def obj(v):
         return 1.0 + (v - 0.010) ** 2
 
-    s = RLS(0.020, obj(0.020), step=0.002, tol=1e-9, hint=1.0)
+    s = RLS(0.020, obj(0.020), sigma=0.0, step=0.002, hint=1.0)
     drive(s, obj)
     assert s.improved
     assert s.best == pytest.approx(0.010, rel=0.1)
@@ -319,28 +330,44 @@ def test_line_search_converges_at_start_when_already_optimal():
     def obj(v):
         return 1.0 + (v - 0.020) ** 2
 
-    s = RLS(0.020, obj(0.020), step=0.003, tol=1e-9)
+    s = RLS(0.020, obj(0.020), sigma=0.0, step=0.003)
     drive(s, obj)
     assert s.best == pytest.approx(0.020, rel=0.06)
     # both first probes fail, the parabola may still polish the start
     assert len(s.history) <= 5
 
 
-def test_line_search_ignores_improvement_below_tol():
-    def obj(v):
-        return 1.0 - 0.001 * v
+def test_line_search_deadband_rejects_sub_2sigma_but_accepts_beyond():
+    # identical absolute improvement (0.010), different measured scatter:
+    # the noisy probe sits inside the 2-sigma deadband and is rejected;
+    # the clean probe clears it and wins - the whole point of dropping the
+    # fixed TOL_UM knob for a measured-noise gate.
+    noisy = RLS(1.0, 1.000, sigma=0.010, step=1.0, lo=0.0, hint=1.0)
+    assert noisy.trial == pytest.approx(2.0)
+    noisy.feed(0.990, 0.010)
+    assert not noisy.improved
+    assert noisy.best == 1.0
 
-    s = RLS(0.020, obj(0.020), step=0.003, tol=1.0)
-    drive(s, obj)
-    assert not s.improved
-    assert s.best == 0.020
+    clean = RLS(1.0, 1.000, sigma=0.0005, step=1.0, lo=0.0, hint=1.0)
+    assert clean.trial == pytest.approx(2.0)
+    clean.feed(0.990, 0.0005)
+    assert clean.improved
+    assert clean.best == pytest.approx(2.0)
+
+
+def test_line_search_rejects_null_or_nan_sigma():
+    with pytest.raises(ValueError, match="sigma"):
+        RLS(0.0, 1.0, sigma=None, step=5.0)
+    s = RLS(0.0, 1.0, sigma=0.0, step=5.0, hint=1.0)
+    with pytest.raises(ValueError, match="sigma"):
+        s.feed(0.5, float("nan"))
 
 
 def test_line_search_at_floor_probes_up_despite_negative_hint():
-    s = RLS(0.0, 1.0, step=5.0, tol=1e-9, lo=0.0, hint=-1.0)
+    s = RLS(0.0, 1.0, sigma=0.0, step=5.0, lo=0.0, hint=-1.0)
     assert not s.done, "a floor start must earn at least one probe"
     assert s.trial == pytest.approx(5.0)
-    s.feed(2.0)
+    s.feed(2.0, 0.0)
     assert s.done
     assert s.best == 0.0
     assert not s.improved
@@ -350,7 +377,7 @@ def test_line_search_zero_start_probes_up_and_escapes():
     def obj(v):
         return 1.0 + (v - 10.0) ** 2 / 100.0
 
-    s = RLS(0.0, obj(0.0), step=5.0, tol=1e-9, lo=0.0, hint=1.0)
+    s = RLS(0.0, obj(0.0), sigma=0.0, step=5.0, lo=0.0, hint=1.0)
     drive(s, obj)
     assert s.best == pytest.approx(10.0, rel=0.2)
 
@@ -359,18 +386,18 @@ def test_line_search_respects_lower_bound_mid_march():
     def obj(v):
         return 1.0 + v
 
-    s = RLS(0.020, obj(0.020), step=0.05, tol=1e-9, lo=0.002, hint=-1.0)
+    s = RLS(0.020, obj(0.020), sigma=0.0, step=0.05, lo=0.002, hint=-1.0)
     drive(s, obj)
     assert s.best == 0.002
     assert "bounded" in s.note or "no further" in s.note
 
 
 def test_line_search_rejects_feed_without_trial():
-    s = RLS(0.0, 1.0, step=5.0, tol=1e-9, lo=0.0, hint=-1.0)
-    s.feed(2.0)
+    s = RLS(0.0, 1.0, sigma=0.0, step=5.0, lo=0.0, hint=-1.0)
+    s.feed(2.0, 0.0)
     assert s.done
     with pytest.raises(ValueError, match="without an outstanding trial"):
-        s.feed(1.0)
+        s.feed(1.0, 0.0)
 
 
 @requires_tomllib
@@ -497,6 +524,65 @@ def test_tune_dynamics_requires_ferr_rms_raw_from_the_binary():
     sc.fake_ferr_queue = [stale]
     with pytest.raises(RuntimeError, match="ferr_rms_raw"):
         sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd())
+
+
+@requires_tomllib
+def test_tune_dynamics_rejects_version_1_ferr_json():
+    sc, _gcode, _path = make_calibration()
+    stale = _ferr_json()
+    stale["version"] = 1
+    del stale["ferr_rms_ff"]
+    sc.fake_ferr_queue = [stale]
+    with pytest.raises(RuntimeError, match="version"):
+        sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd())
+
+
+@requires_tomllib
+def test_tune_dynamics_requires_ferr_rms_ff_from_the_binary():
+    sc, _gcode, _path = make_calibration()
+    stale = _ferr_json()
+    del stale["ferr_rms_ff"]
+    sc.fake_ferr_queue = [stale]
+    with pytest.raises(RuntimeError, match="ferr_rms_ff"):
+        sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd())
+
+
+@requires_tomllib
+def test_tune_dynamics_fails_when_tuned_term_has_no_transient_windows():
+    sc, _gcode, _path = make_calibration()
+    stale = _ferr_json(ff_windows=(0, 0), ff_sigma=(None, None))
+    for term in ("mass", "viscous", "coulomb"):
+        stale["ferr_rms_ff"][term]["rms"] = [None, None]
+    sc.fake_ferr_queue = [stale]
+    with pytest.raises(RuntimeError, match="transient windows"):
+        sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd())
+
+
+@requires_tomllib
+def test_tune_dynamics_fails_when_tuned_term_sigma_is_null():
+    sc, _gcode, _path = make_calibration()
+    stale = _ferr_json(ff_windows=(1, 1), ff_sigma=(None, None))
+    sc.fake_ferr_queue = [stale]
+    with pytest.raises(RuntimeError, match="sigma|scatter"):
+        sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd())
+
+
+@requires_tomllib
+def test_tune_dynamics_ignores_removed_tol_um_param():
+    sc, _gcode, _path = make_calibration()
+    sc.fake_rms_fn = quadratic_rms(mass_opt=[0.030, 0.045])
+    # TOL_UM used to gate acceptance and default to 0.05um; it is gone now.
+    # A huge value must be silently ignored, not stop the search early.
+    gcmd = FakeGcmd(TERMS="MASS", TOL_UM="999")
+    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
+    tune = _manifest_for(sc)["dynamics_tune"]
+    assert "tol_um" not in tune
+    assert tune["objective"] == "transient_rms"
+    assert tune["accept_z"] == pytest.approx(2.0)
+    with open(tune["profile"], "rb") as f:
+        prof = tomllib.load(f)
+    assert prof["mass"][0] == pytest.approx(0.030, rel=0.15)
+    assert prof["mass"][1] == pytest.approx(0.045, rel=0.15)
 
 
 @requires_tomllib

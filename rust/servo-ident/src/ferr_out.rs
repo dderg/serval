@@ -17,12 +17,35 @@ use serde::Serialize;
 
 use crate::fit::FerrFitResult;
 use crate::model::Structure;
+use crate::prep::TransientRms;
 
 #[derive(Debug, Serialize)]
 struct FerrCoefficients {
     mass: Vec<f64>,
     viscous: Vec<f64>,
     coulomb: Vec<f64>,
+}
+
+/// Per-term transient following-error statistics, one array entry per mode.
+/// `rms`/`sigma` serialize to `null` where the term had too few windows to
+/// score (see `TransientRms`).
+#[derive(Debug, Serialize)]
+struct FerrTransientTerm {
+    rms: Vec<Option<f64>>,
+    sigma: Vec<Option<f64>>,
+    windows: Vec<usize>,
+}
+
+/// Transient-scoped RMS objective: the RAW following error scored only over
+/// the short windows each command-path term actually controls. The tuning
+/// loop's acceptance test reads these, not the whole-capture rms. `mass`
+/// also carries the lead term (a pure onset phenomenon), so there is no
+/// separate lead entry.
+#[derive(Debug, Serialize)]
+struct FerrRmsFf {
+    mass: FerrTransientTerm,
+    viscous: FerrTransientTerm,
+    coulomb: FerrTransientTerm,
 }
 
 #[derive(Debug, Serialize)]
@@ -43,6 +66,9 @@ struct FerrFitJson {
     /// unfiltered, unmasked (mm). This is the tuning loop's objective:
     /// the number the operator actually experiences as tracking error.
     ferr_rms_raw: Vec<f64>,
+    /// Transient-scoped RAW ferr rms per command-path term (the acceptance
+    /// objective); see `FerrRmsFf`. `mass` carries the lead term too.
+    ferr_rms_ff: FerrRmsFf,
     /// Per-mode mean of `sign(accel)·ferr` over short windows right after
     /// each commanded accel transition (mm), raw channels — the operator's
     /// manual heuristic: only the FIRST excursion when torque is applied
@@ -62,6 +88,9 @@ pub fn render_ferr_json(
     ferr_rms_raw: &[f64],
     onset_bias: &[f64],
     onset_windows: usize,
+    mass_rms: &[TransientRms],
+    viscous_rms: &[TransientRms],
+    coulomb_rms: &[TransientRms],
 ) -> String {
     assert_eq!(
         modes.len(),
@@ -72,13 +101,21 @@ pub fn render_ferr_json(
     assert_eq!(r.param_stderr.len(), 3 * n, "one stderr triple per mode");
     assert_eq!(ferr_rms_raw.len(), n, "one raw rms per mode");
     assert_eq!(onset_bias.len(), n, "one onset bias per mode");
+    let transient_term = |results: &[TransientRms]| -> FerrTransientTerm {
+        assert_eq!(results.len(), n, "one transient-rms entry per mode");
+        FerrTransientTerm {
+            rms: results.iter().map(|t| t.rms).collect(),
+            sigma: results.iter().map(|t| t.sigma).collect(),
+            windows: results.iter().map(|t| t.windows).collect(),
+        }
+    };
     let stderr = FerrCoefficients {
         mass: (0..n).map(|k| r.param_stderr[3 * k]).collect(),
         viscous: (0..n).map(|k| r.param_stderr[3 * k + 1]).collect(),
         coulomb: (0..n).map(|k| r.param_stderr[3 * k + 2]).collect(),
     };
     let json = FerrFitJson {
-        version: 1,
+        version: 2,
         modes: modes.iter().map(|m| (*m).to_string()).collect(),
         coef: FerrCoefficients {
             mass: r.params.mass.clone(),
@@ -91,6 +128,11 @@ pub fn render_ferr_json(
         ferr_rms: r.ferr_rms.clone(),
         ferr_rms_raw: ferr_rms_raw.to_vec(),
         onset_bias: onset_bias.to_vec(),
+        ferr_rms_ff: FerrRmsFf {
+            mass: transient_term(mass_rms),
+            viscous: transient_term(viscous_rms),
+            coulomb: transient_term(coulomb_rms),
+        },
         onset_windows,
         samples: r.samples,
     };

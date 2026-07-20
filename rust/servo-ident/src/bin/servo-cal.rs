@@ -40,7 +40,10 @@ use servo_ident::live_stream::{LiveTap, DEFAULT_IDLE_TIMEOUT, DEFAULT_TAP_SOCKET
 use servo_ident::metrics::{DEFAULT_SETTLE_BAND_COUNTS, DEFAULT_TORQUE_LIMIT_PER_MILLE};
 use servo_ident::model::Structure;
 use servo_ident::pipeline::{fit_input, full_fit_input, prepare};
-use servo_ident::prep::{band_limited_rms, median_dt, onset_bias, ModalMode, PrepOptions};
+use servo_ident::prep::{
+    band_limited_rms, median_dt, onset_bias, transient_rms, ModalMode, PrepOptions, TransientKind,
+    TransientRms,
+};
 use servo_ident::profile_out::{c0006_recommendation, render_profile};
 use servo_ident::scap::Scap;
 use servo_ident::serve;
@@ -459,12 +462,38 @@ fn cmd_fit(args: &[String]) {
         };
         let ferr_raw = project(&fit_cap.ferr);
         let acc_raw = project(&fit_cap.acc);
+        let vel_raw = project(&fit_cap.vel);
         let raw_rms: Vec<f64> = ferr_raw
             .iter()
             .map(|e| (e.iter().map(|v| v * v).sum::<f64>() / n as f64).sqrt())
             .collect();
         let dt = median_dt(&fit_cap.t);
         let (onset, onset_windows) = onset_bias(&acc_raw, &ferr_raw, dt, 0.008);
+        let window_s = 0.008;
+        let mass_rms = transient_rms(
+            TransientKind::Mass,
+            &acc_raw,
+            &vel_raw,
+            &ferr_raw,
+            dt,
+            window_s,
+        );
+        let viscous_rms = transient_rms(
+            TransientKind::Viscous,
+            &acc_raw,
+            &vel_raw,
+            &ferr_raw,
+            dt,
+            window_s,
+        );
+        let coulomb_rms = transient_rms(
+            TransientKind::Coulomb,
+            &acc_raw,
+            &vel_raw,
+            &ferr_raw,
+            dt,
+            window_s,
+        );
         run_ferr_fit(
             &structure,
             &modes,
@@ -472,6 +501,9 @@ fn cmd_fit(args: &[String]) {
             &raw_rms,
             &onset,
             onset_windows,
+            &mass_rms,
+            &viscous_rms,
+            &coulomb_rms,
             &req(args, "--out"),
         );
         return;
@@ -588,6 +620,9 @@ fn run_ferr_fit(
     raw_rms: &[f64],
     onset: &[f64],
     onset_windows: usize,
+    mass_rms: &[TransientRms],
+    viscous_rms: &[TransientRms],
+    coulomb_rms: &[TransientRms],
     out_path: &str,
 ) {
     let r = fit_ferr(input, &FitOptions::default()).unwrap_or_else(|e| {
@@ -633,7 +668,32 @@ fn run_ferr_fit(
             );
         }
     }
-    let json = render_ferr_json(structure, modes, &r, raw_rms, onset, onset_windows);
+    for (label, term) in [
+        ("mass", mass_rms),
+        ("viscous", viscous_rms),
+        ("coulomb", coulomb_rms),
+    ] {
+        let per_mode: Vec<String> = modes
+            .iter()
+            .zip(term)
+            .map(|(mode, t)| match t.rms {
+                Some(rms) => format!("{mode}={:.3e}mm/{}w", rms, t.windows),
+                None => format!("{mode}=none/{}w", t.windows),
+            })
+            .collect();
+        eprintln!("ferr-fit transient {label}: {}", per_mode.join(" "));
+    }
+    let json = render_ferr_json(
+        structure,
+        modes,
+        &r,
+        raw_rms,
+        onset,
+        onset_windows,
+        mass_rms,
+        viscous_rms,
+        coulomb_rms,
+    );
     std::fs::write(out_path, json).unwrap_or_else(|e| die(&format!("write {out_path}: {e}")));
     eprintln!("ferr fit written to {out_path}");
 }
