@@ -50,14 +50,12 @@ def test_validate_chain_accepts_per_motor_ff_differences():
             (
                 0,
                 FakeRail(
-                    motor_name="x", chain_index=0, ff_config=(False, 30.0, 0)
+                    motor_name="x", chain_index=0, ff_config=(False, 30.0)
                 ),
             ),
             (
                 1,
-                FakeRail(
-                    motor_name="y", chain_index=1, ff_config=(True, 60.0, 2)
-                ),
+                FakeRail(motor_name="y", chain_index=1, ff_config=(True, 60.0)),
             ),
         ]
     )
@@ -190,43 +188,17 @@ def test_set_motor_torque_without_engine_handle_raises():
         ethercat_node.EtherCatNode.set_motor_torque(node, "x", True, 1.0)
 
 
-def test_coupled_uniformity_rejects_mismatched_ff_lead():
-    node, rails = _dyn_node(
-        [
-            (
-                0,
-                FakeRail(
-                    motor_name="x", chain_index=0, ff_config=(True, 30.0, 500.0)
-                ),
-            ),
-            (
-                1,
-                FakeRail(
-                    motor_name="y", chain_index=1, ff_config=(True, 30.0, 0.0)
-                ),
-            ),
-        ],
-        node_profile="/cfg/node.toml",
-    )
-    with pytest.raises(FakeConfigError) as e:
-        ethercat_node.EtherCatNode._validate_coupled_uniformity(node, rails)
-    assert "ff_lead_us must be identical" in str(e.value)
-    assert "x=500.0" in str(e.value) and "y=0.0" in str(e.value)
-
-
 def test_coupled_uniformity_rejects_mismatched_velocity_ff():
     node, rails = _dyn_node(
         [
             (
                 0,
-                FakeRail(
-                    motor_name="x", chain_index=0, ff_config=(True, 30.0, 0)
-                ),
+                FakeRail(motor_name="x", chain_index=0, ff_config=(True, 30.0)),
             ),
             (
                 1,
                 FakeRail(
-                    motor_name="y", chain_index=1, ff_config=(False, 30.0, 0)
+                    motor_name="y", chain_index=1, ff_config=(False, 30.0)
                 ),
             ),
         ],
@@ -242,15 +214,11 @@ def test_coupled_uniformity_rejects_mismatched_torque_clamp():
         [
             (
                 0,
-                FakeRail(
-                    motor_name="x", chain_index=0, ff_config=(True, 30.0, 0)
-                ),
+                FakeRail(motor_name="x", chain_index=0, ff_config=(True, 30.0)),
             ),
             (
                 1,
-                FakeRail(
-                    motor_name="y", chain_index=1, ff_config=(True, 60.0, 0)
-                ),
+                FakeRail(motor_name="y", chain_index=1, ff_config=(True, 60.0)),
             ),
         ],
         node_profile="/cfg/node.toml",
@@ -265,15 +233,11 @@ def test_coupled_uniformity_allows_identical_ff_config():
         [
             (
                 0,
-                FakeRail(
-                    motor_name="x", chain_index=0, ff_config=(True, 30.0, 2)
-                ),
+                FakeRail(motor_name="x", chain_index=0, ff_config=(True, 30.0)),
             ),
             (
                 1,
-                FakeRail(
-                    motor_name="y", chain_index=1, ff_config=(True, 30.0, 2)
-                ),
+                FakeRail(motor_name="y", chain_index=1, ff_config=(True, 30.0)),
             ),
         ],
         node_profile="/cfg/node.toml",
@@ -286,14 +250,12 @@ def test_coupled_uniformity_allows_mismatch_on_independent_motors():
         [
             (
                 0,
-                FakeRail(
-                    motor_name="x", chain_index=0, ff_config=(True, 30.0, 3)
-                ),
+                FakeRail(motor_name="x", chain_index=0, ff_config=(True, 30.0)),
             ),
             (
                 1,
                 FakeRail(
-                    motor_name="y", chain_index=1, ff_config=(False, 60.0, 0)
+                    motor_name="y", chain_index=1, ff_config=(False, 60.0)
                 ),
             ),
         ]

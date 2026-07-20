@@ -141,10 +141,6 @@ fn push_drive_flags(args: &mut Vec<String>, d: &EthercatDrive) {
     }
     args.push("--torque-clamp-pct".into());
     args.push(d.ff_max_torque.to_string());
-    if d.ff_lead_us > 0.0 {
-        args.push("--ff-lead-us".into());
-        args.push(d.ff_lead_us.to_string());
-    }
     if let Some(profile) = &d.dynamics_profile {
         args.push("--slave-dynamics-profile".into());
         args.push(profile.to_string());

@@ -25,6 +25,7 @@ DYNAMICS_TERM_KEYS = {
 TUNE_RELATIVE_CLAMP = 0.4
 TUNE_MASS_FLOOR_FRACTION = 0.10
 TUNE_ZERO_FLOOR_STEPS = {"VISCOUS": 0.05, "COULOMB": 5.0}
+FF_LEAD_US_MAX = 10_000.0
 
 
 def parse_dynamics_profile(text: str) -> dict[str, Any]:
@@ -73,6 +74,17 @@ def parse_dynamics_profile(text: str) -> dict[str, Any]:
             raise ValueError(
                 "profile %s must list %d per-mode values" % (key, n_modes)
             )
+    ff_lead_us = data.get("ff_lead_us", 0.0)
+    if (
+        isinstance(ff_lead_us, bool)
+        or not isinstance(ff_lead_us, (int, float))
+        or not math.isfinite(ff_lead_us)
+        or not (0.0 <= ff_lead_us <= FF_LEAD_US_MAX)
+    ):
+        raise ValueError(
+            "profile ff_lead_us must be a finite number in [0, %g] (got %r)"
+            % (FF_LEAD_US_MAX, ff_lead_us)
+        )
     numbers = [v for row in frame for v in row]
     for key in ("mass", "viscous", "coulomb"):
         numbers += data[key]
@@ -104,6 +116,7 @@ def parse_dynamics_profile(text: str) -> dict[str, Any]:
         "mass": [float(v) for v in data["mass"]],
         "viscous": [float(v) for v in data["viscous"]],
         "coulomb": [float(v) for v in data["coulomb"]],
+        "ff_lead_us": float(ff_lead_us),
         "pairs": pairs,
     }
 
@@ -535,6 +548,7 @@ def render_fit_dynamics_toml(
     fitted: dict[str, Any],
     terms: list[str],
     run_dir: str,
+    lead_us: float,
 ) -> str:
     def num(v: float) -> str:
         if not math.isfinite(v):
@@ -552,6 +566,7 @@ def render_fit_dynamics_toml(
         "mass = %s" % (vec(applied["mass"]),),
         "viscous = %s" % (vec(applied["viscous"]),),
         "coulomb = %s" % (vec(applied["coulomb"]),),
+        "ff_lead_us = %s" % (num(lead_us),),
         "applied_terms = %s" % (json.dumps([t.lower() for t in terms]),),
     ]
     for key in ("mass", "viscous", "coulomb"):

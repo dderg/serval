@@ -121,7 +121,7 @@ class FakeRail:
         steppers=None,
         motor_name=None,
         chain_index=None,
-        ff_config=(False, 30.0, 0),
+        ff_config=(False, 30.0),
         dynamics_profile=None,
     ):
         self._name = name

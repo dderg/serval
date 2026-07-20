@@ -17,7 +17,6 @@ fn drive() -> EthercatDrive {
         max_torque_tenth_pct: None,
         velocity_ff: false,
         ff_max_torque: 30.0,
-        ff_lead_us: 0.0,
         invert_direction: false,
         dynamics_profile: None,
     }
@@ -87,7 +86,6 @@ fn endpoint_args_per_drive_ff_flags() {
                 rotation_distance: 50.0,
                 velocity_ff: true,
                 ff_max_torque: 25.0,
-                ff_lead_us: 2.0,
                 ..drive()
             },
             EthercatDrive {
@@ -411,40 +409,4 @@ fn handshake_connect_refused_is_not_immediately_fatal() {
             "handshake must retry past ConnectionRefused, not fail immediately; got: {msg}"
         );
     }
-}
-
-#[test]
-fn endpoint_args_emit_ff_lead_us_only_when_nonzero() {
-    let args = endpoint_args(
-        "eth0",
-        "/tmp/x.sock",
-        250,
-        None,
-        None,
-        None,
-        &[
-            EthercatDrive {
-                rotation_distance: 50.0,
-                velocity_ff: true,
-                ff_max_torque: 25.0,
-                ff_lead_us: 1.5,
-                ..drive()
-            },
-            EthercatDrive {
-                chain_index: 1,
-                axis: 2,
-                counts_per_mm: 2000.0,
-                ff_max_torque: 60.0,
-                invert_direction: true,
-                ..drive()
-            },
-        ],
-    );
-    let leads: Vec<&String> = args
-        .iter()
-        .enumerate()
-        .filter(|(i, a)| *a == "--ff-lead-us" && args.get(i + 1).is_some())
-        .map(|(i, _)| &args[i + 1])
-        .collect();
-    assert_eq!(leads, vec!["1.5"]);
 }

@@ -35,6 +35,17 @@ frame = [[0.5, 0.5], [0.5, -0.5]]
 mass = [0.020, 0.030]
 viscous = [0.004, 0.005]
 coulomb = [1.0, 1.5]
+ff_lead_us = 250.0
+"""
+
+NO_LEAD_BASELINE_TOML = """\
+version = 6
+axes = ["motor_a", "motor_b"]
+modes = ["x", "y"]
+frame = [[0.5, 0.5], [0.5, -0.5]]
+mass = [0.020, 0.030]
+viscous = [0.004, 0.005]
+coulomb = [1.0, 1.5]
 """
 
 BASELINE_MASS = [0.020, 0.030]
@@ -63,7 +74,7 @@ class FakeEngine(_FakeEngine):
         self.ff_lead_calls.append((handle, slot, lead_ns))
 
 
-def _motor(name, node_name, chain_index, invert=False, ff_lead_us=250.0):
+def _motor(name, node_name, chain_index, invert=False):
     m = servo_axis.ServoMotor.__new__(servo_axis.ServoMotor)
     m.motor_name = name
     m.node_name = node_name
@@ -73,7 +84,6 @@ def _motor(name, node_name, chain_index, invert=False, ff_lead_us=250.0):
     m.encoder_counts_per_rev = 131072
     m.velocity_ff = True
     m.ff_max_torque = 30.0
-    m.ff_lead_us = ff_lead_us
     return m
 
 
@@ -569,7 +579,7 @@ def test_tune_dynamics_lead_converges_to_the_rms_optimum():
         ns == pytest.approx(tune["lead_us"] * 1e3, abs=1.0)
         for _h, _s, ns in final
     )
-    assert any("ff_lead_us" in r for r in gcmd.responses)
+    assert any("carried in the tuned profile" in r for r in gcmd.responses)
 
 
 @requires_tomllib
@@ -601,11 +611,30 @@ def test_tune_dynamics_abort_restores_the_configured_lead():
 
 
 @requires_tomllib
-def test_tune_dynamics_lead_requires_one_shared_config_value():
-    rails = [
-        _rail("x", [_motor("motor_a", "xy_drives", 0, ff_lead_us=250.0)]),
-        _rail("y", [_motor("motor_b", "xy_drives", 1, ff_lead_us=500.0)]),
-    ]
-    sc, _gcode, _path = make_calibration(rails=rails)
-    with pytest.raises(RuntimeError, match="disagree"):
-        sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(TERMS="LEAD"))
+def test_tune_dynamics_lead_toml_matches_manifest():
+    sc, _gcode, _path = make_calibration()
+    sc.fake_lead_penalty_fn = _lead_quadratic(375e-6)
+    sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(TERMS="LEAD"))
+    tune = _manifest_for(sc)["dynamics_tune"]
+    with open(tune["profile"], "rb") as f:
+        prof = tomllib.load(f)
+    assert prof["ff_lead_us"] == pytest.approx(tune["lead_us"])
+
+
+@requires_tomllib
+def test_tune_dynamics_mass_only_passes_baseline_lead_through():
+    sc, _gcode, _path = make_calibration()
+    sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(TERMS="MASS"))
+    tune = _manifest_for(sc)["dynamics_tune"]
+    with open(tune["profile"], "rb") as f:
+        prof = tomllib.load(f)
+    assert prof["ff_lead_us"] == pytest.approx(250.0)
+
+
+@requires_tomllib
+def test_tune_dynamics_lead_defaults_to_zero_when_profile_omits_it():
+    sc, _gcode, _path = make_calibration(profile_text=NO_LEAD_BASELINE_TOML)
+    sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(TERMS="LEAD"))
+    tune = _manifest_for(sc)["dynamics_tune"]
+    assert tune["rounds"][0]["lead_us"] == pytest.approx(0.0)
+    assert tune["rounds"][1]["lead_us"] > 0.0

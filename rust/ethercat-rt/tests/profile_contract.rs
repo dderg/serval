@@ -111,3 +111,37 @@ fn paired_fitter_profile_preserves_pair_force_and_loads_provenance() {
     assert!((first - 15.0 - 0.2 * (2.0 * 15.0) / 2.0).abs() < 1e-6);
     assert!((0.25 * (first + second) - 7.5).abs() < 1e-6);
 }
+
+#[test]
+fn profile_with_ff_lead_lands_in_the_endpoints_per_slot_lead() {
+    let text = "\
+version = 6
+axes = [\"a\", \"b\"]
+modes = [\"x\", \"y\"]
+frame = [[1.0, 0.0], [0.0, 1.0]]
+mass = [0.05, 0.06]
+viscous = [0.01, 0.02]
+coulomb = [1.0, 1.5]
+ff_lead_us = 300.0
+";
+    let m = DynamicsModel::from_toml_str(text).expect("profile with ff_lead_us must load");
+    assert_eq!(m.ff_lead_ns(), vec![300_000, 300_000]);
+}
+
+#[test]
+fn timing_only_profile_with_zero_viscous_and_coulomb_loads() {
+    let text = "\
+version = 6
+axes = [\"x\"]
+modes = [\"x\"]
+frame = [[1.0]]
+mass = [0.001]
+viscous = [0.0]
+coulomb = [0.0]
+ff_lead_us = 120.0
+";
+    let m = DynamicsModel::from_toml_str(text).expect("timing-only profile must load");
+    assert_eq!(m.ff_lead_ns(), vec![120_000]);
+    let tau = m.torque_ff(0, &[1000.0], &[0.0]);
+    assert!((tau - 1.0).abs() < 1e-6, "{tau}");
+}

@@ -302,6 +302,9 @@ class DynamicsFitCommands(RefineCommands):
         restore = None
         if node.get_dynamics_profile() is not None:
             _path, restore = self._load_baseline_dynamics(gcmd, node)
+        baseline_lead_us = (
+            restore.get("ff_lead_us", 0.0) if restore is not None else 0.0
+        )
         max_accel = gcmd.get_float("MAX_ACCEL", max(self.accels), above=0.0)
         max_speed = gcmd.get_float("MAX_SPEED", max(self.speeds), above=0.0)
         tol = gcmd.get_float("TOL", 0.05, above=0.0)
@@ -504,7 +507,11 @@ class DynamicsFitCommands(RefineCommands):
             with open(out_path, "w") as f:
                 f.write(
                     render_fit_dynamics_toml(
-                        verified, verified_full, terms, run.run_dir
+                        verified,
+                        verified_full,
+                        terms,
+                        run.run_dir,
+                        baseline_lead_us,
                     )
                 )
             run.manifest["dynamics_fit"] = {
@@ -795,8 +802,9 @@ class DynamicsFitCommands(RefineCommands):
         "the mean of both modes' rms, first direction from the summed "
         "onset bias (positive = FF lands late = probe up), floored at "
         "zero with a half-cycle floor step. The tuned lead stays live "
-        "until RESTART; persist it via ff_lead_us (the converged "
-        "report prints the value). Passes over the terms repeat until a "
+        "until RESTART; the written dynamics TOML always carries "
+        "ff_lead_us (tuned when LEAD is in TERMS, else the baseline "
+        "value passes through). Passes over the terms repeat until a "
         "full pass improves nothing, then the best model is written as "
         "a dynamics TOML and left LIVE (point [ethercat_node] "
         "dynamics_profile at it and RESTART to keep it). There is no "
@@ -851,28 +859,7 @@ class DynamicsFitCommands(RefineCommands):
             )
         lead_enabled = "LEAD" in terms
         cycle_us = node.get_cycle_us()
-        configured_lead_s = 0.0
-        if lead_enabled:
-            from .. import servo_axis
-
-            config_leads = {}
-            for servo in plan["servos"]:
-                _rail, motor = servo_axis.resolve_servo_motor(
-                    self.printer, servo, "SERVO_TUNE_DYNAMICS"
-                )
-                config_leads[servo] = float(motor.get_ff_config()[2])
-            if len(set(config_leads.values())) != 1:
-                raise gcmd.error(
-                    "SERVO_TUNE_DYNAMICS TERMS=LEAD tunes one shared "
-                    "feedforward lead, but the servos disagree on "
-                    "ff_lead_us: %s"
-                    % (
-                        ", ".join(
-                            "%s=%g" % kv for kv in sorted(config_leads.items())
-                        ),
-                    )
-                )
-            configured_lead_s = next(iter(config_leads.values())) * 1e-6
+        configured_lead_s = baseline.get("ff_lead_us", 0.0) * 1e-6
         max_accel = gcmd.get_float("MAX_ACCEL", max(self.accels), above=0.0)
         max_speed = gcmd.get_float("MAX_SPEED", max(self.speeds), above=0.0)
         step_frac = gcmd.get_float("STEP", 0.15, minval=0.02, maxval=0.5)
@@ -1185,6 +1172,7 @@ class DynamicsFitCommands(RefineCommands):
                         current,
                         [t.lower() for t in terms if t != "LEAD"],
                         run.run_dir,
+                        current_lead * 1e6,
                     )
                 )
             run.manifest["dynamics_tune"] = {
@@ -1210,9 +1198,8 @@ class DynamicsFitCommands(RefineCommands):
             lead_note = ""
             if lead_enabled:
                 lead_note = (
-                    " | tuned ff lead %.1fus - set ff_lead_us: %.1f "
-                    "on the servo motors to keep it"
-                    % (current_lead * 1e6, current_lead * 1e6)
+                    " | tuned ff lead %.1fus - carried in the tuned profile"
+                    % (current_lead * 1e6,)
                 )
             gcmd.respond_info(
                 "SERVO_TUNE_DYNAMICS converged in %d captures | tuned "
