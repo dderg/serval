@@ -18,6 +18,7 @@ fn raw_absolute_value_precedes_segment_filtering() {
         vel: vec![vec![0.0; n], vec![0.0; n]],
         vel_act: vec![vec![0.0; n], vec![0.0; n]],
         torque: vec![vec![0.0; n], vec![0.0; n]],
+        ferr: vec![vec![0.0; n], vec![0.0; n]],
     };
     let predictor = belt_force_magnitude(&structure, &params, &cap, 0, 60.0);
     assert!(predictor.iter().all(|value| (*value - 1.0).abs() < 1.0e-12));

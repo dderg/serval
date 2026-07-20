@@ -26,6 +26,9 @@ fi
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 SRC="$HERE/config/servo-cal"
 
+ssh "$TARGET" "cd ~/klipper && PATH=\$HOME/.cargo/bin:\$PATH \
+    cargo build --profile snapshot --manifest-path rust/Cargo.toml -p servo-ident"
+
 ssh "$TARGET" "mkdir -p ~/servo-cal"
 scp "$SRC/servo-cal-launcher.sh" "$TARGET:servo-cal/servo-cal-launcher.sh"
 sed -e "s|^User=pi$|User=$REMOTE_USER|" \
@@ -38,5 +41,5 @@ ssh "$TARGET" "chmod +x ~/servo-cal/servo-cal-launcher.sh && \
     sleep 2 && systemctl status servo-cal --no-pager -n 5"
 
 echo
-echo "dashboard: http://${TARGET#*@}:8085 (once the first build finishes)"
+echo "dashboard: http://${TARGET#*@}:8085"
 echo "reminder: moonraker.conf needs cors_domains: http://${TARGET#*@}:8085"

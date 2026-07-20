@@ -9,7 +9,8 @@ use serde_json::json;
 use servo_ident::analyze::{analyze_run, build_run, build_run_incremental};
 use servo_ident::results::{RingdownMode, RingdownResult, RingdownSource};
 use servo_ident::ringdown::{
-    aggregate_modes, analyze_tail, informative_plot_len, ringdown_verdict_reason, tail_ranges,
+    aggregate_modes, analyze_tail, gate_modes, informative_plot_len, ringdown_verdict_reason,
+    tail_ranges,
 };
 
 const FS: f64 = 4000.0;
@@ -145,6 +146,23 @@ fn tail_ranges_are_uniform_and_capped() {
     // 1040..min(1040+600, 1500) = 1040..1500 (460 long) — both crop to 460.
     assert_eq!(ranges[0], 240..700);
     assert_eq!(ranges[1], 1040..1500);
+}
+
+/// The 15.3 Hz regression: an accel channel whose broadband floor exceeds
+/// the fitted mode's own amplitude must not report that mode — the 1/w^2
+/// display conversion would otherwise inflate band-isolated noise into the
+/// dominant-looking "mode" of the run.
+#[test]
+fn sub_noise_modes_are_gated_out_in_native_units() {
+    let real = mode(111.7, 0.03, 2500.0, 6);
+    let noise_artifact = mode(15.3, 0.061, 690.0, 5);
+    let gated = gate_modes(vec![noise_artifact, real], 1148.0);
+    assert_eq!(gated.len(), 1, "only the above-floor mode survives");
+    assert!((gated[0].freq_hz - 111.7).abs() < 1e-9);
+    assert!(
+        gate_modes(vec![mode(15.3, 0.061, 690.0, 5)], 300.0).len() == 1,
+        "the same fit on a quieter channel is a real mode"
+    );
 }
 
 fn mode(freq_hz: f64, zeta: f64, disp_um: f64, tails: usize) -> RingdownMode {

@@ -7,6 +7,37 @@ import pytest
 
 from klippy.extras import servo_axis, servo_calibration
 
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
+
+pytestmark = pytest.mark.skipif(
+    tomllib is None,
+    reason="SERVO_AUTOTUNE's iterative fit stage requires tomllib (3.11+)",
+)
+
+
+def _write_fit_profile(argv, mass=0.02, viscous=0.004, coulomb=1.0):
+    def flag(key):
+        return argv[argv.index(key) + 1]
+
+    axes = flag("--axes").split(",")
+    modes = flag("--modes").split(",")
+    frame = flag("--frame").split(";")
+    n = len(modes)
+    lines = [
+        "version = 6",
+        "axes = [%s]" % (", ".join('"%s"' % a for a in axes),),
+        "modes = [%s]" % (", ".join('"%s"' % m for m in modes),),
+        "frame = [%s]" % (", ".join("[%s]" % row for row in frame),),
+        "mass = [%s]" % (", ".join("%r" % mass for _ in range(n)),),
+        "viscous = [%s]" % (", ".join("%r" % viscous for _ in range(n)),),
+        "coulomb = [%s]" % (", ".join("%r" % coulomb for _ in range(n)),),
+    ]
+    with open(flag("--out"), "w") as f:
+        f.write("\n".join(lines) + "\n")
+
 
 class FakeServoCapture:
     def __init__(self):
@@ -97,13 +128,23 @@ class FakeNode:
     def get_slot_for_motor(self, motor_name):
         return self._slots[motor_name]
 
+    def get_dynamics_profile(self):
+        return None
+
+    def get_drive_count(self):
+        return len(self._slots)
+
 
 class FakeEngine:
     def __init__(self, values=None):
         self._values = values or {}
+        self.dynamics_calls = []
 
     def sdo_read(self, handle, slot, index, subindex):
         return 2, self._values.get((index, subindex), 7)
+
+    def set_dynamics_model(self, *args):
+        self.dynamics_calls.append(args)
 
 
 class FakePrinter:
@@ -274,6 +315,7 @@ def make_autotune(
     def fake_run(gcmd, argv, timeout):
         gcode.scripts.append(("RUN", argv, timeout))
         if argv[1] == "fit":
+            _write_fit_profile(argv)
             return "recommended C00.06 (light direction): 85%\n"
         assert argv[1] == "analyze"
         run_dir = argv[2]

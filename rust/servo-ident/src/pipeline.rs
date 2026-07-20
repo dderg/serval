@@ -21,11 +21,16 @@ pub struct PrepStats {
     pub kept: usize,
 }
 
-pub fn prepare(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> (Prepared, PrepStats) {
+pub fn prepare(
+    cap: &Capture,
+    structure: &Structure,
+    opts: &PrepOptions,
+    plateau_opts: &PlateauOptions,
+) -> (Prepared, PrepStats) {
     let pp = prep(cap, structure, opts);
     let total = cap.t.len();
     let track = tracking_keep(&cap.vel, &cap.vel_act, &TrackingOptions::default());
-    let plateau = steady_accel_keep(&cap.t, &cap.acc, &PlateauOptions::default());
+    let plateau = steady_accel_keep(&cap.t, &cap.acc, plateau_opts);
     let keep: Vec<bool> = (0..total)
         .map(|k| pp.valid[k] && track[k] && plateau[k])
         .collect();
@@ -51,7 +56,10 @@ pub fn fit_input(structure: &Structure, prepared: &Prepared) -> FitInput {
         acc_mode: prepared.pp.acc_mode.iter().map(|c| select(c)).collect(),
         vel_mode: prepared.pp.vel_mode.iter().map(|c| select(c)).collect(),
         cs_mode: prepared.pp.cs_mode.iter().map(|c| select(c)).collect(),
+        snap_mode: prepared.pp.snap_mode.iter().map(|c| select(c)).collect(),
         torque: prepared.pp.torque.iter().map(|c| select(c)).collect(),
+        ferr_mode: prepared.pp.ferr_mode.iter().map(|c| select(c)).collect(),
+        jerk_mode: prepared.pp.jerk_mode.iter().map(|c| select(c)).collect(),
         extra: prepared
             .pp
             .extra
@@ -67,7 +75,10 @@ pub fn full_fit_input(structure: &Structure, prepared: &Prepared) -> FitInput {
         acc_mode: prepared.pp.acc_mode.clone(),
         vel_mode: prepared.pp.vel_mode.clone(),
         cs_mode: prepared.pp.cs_mode.clone(),
+        snap_mode: prepared.pp.snap_mode.clone(),
         torque: prepared.pp.torque.clone(),
+        ferr_mode: prepared.pp.ferr_mode.clone(),
+        jerk_mode: prepared.pp.jerk_mode.clone(),
         extra: prepared.pp.extra.clone(),
     }
 }

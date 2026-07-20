@@ -32,6 +32,31 @@ fn underrun_reanchors_forward_instead_of_aborting() {
         "t0_new={t0_new}"
     );
 }
+#[test]
+fn thin_margin_continuation_reanchors_instead_of_racing_transport() {
+    let mut a = Anchor::new();
+    let (t0_first, _) = a.anchor_segment(0.0, 1.0, 100.0);
+    // Post-homing seam on the bench: the segment start is still (barely)
+    // ahead of the playhead, but closer than transport latency can cover —
+    // continuing here latched a -308 PieceStartInPast at the drive.
+    let host_now = t0_first + 1.0 - 0.5 * LOW_MARGIN_WARN_SECS;
+    let (t0_new, epoch) = a.anchor_segment(1.0, 2.0, host_now);
+    assert_eq!(epoch, StreamEpoch::Reanchor, "thin margin must re-anchor");
+    assert!(
+        (t0_new + 1.0 - (host_now + DEFAULT_LEAD_SECS)).abs() < 1e-9,
+        "t0_new={t0_new}"
+    );
+}
+
+#[test]
+fn margin_above_the_floor_stays_a_continuation() {
+    let mut a = Anchor::new();
+    let (t0_first, _) = a.anchor_segment(0.0, 1.0, 100.0);
+    let host_now = t0_first + 1.0 - 2.0 * LOW_MARGIN_WARN_SECS;
+    let (t0_next, epoch) = a.anchor_segment(1.0, 2.0, host_now);
+    assert_eq!(epoch, StreamEpoch::Continuation);
+    assert_eq!(t0_first, t0_next);
+}
 
 #[test]
 fn backward_jump_reanchors() {

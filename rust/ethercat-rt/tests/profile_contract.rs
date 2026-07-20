@@ -25,6 +25,44 @@ fn fitter_rendered_profile_loads_and_evaluates() {
 }
 
 #[test]
+fn coulomb_ramps_through_the_fit_deadband_instead_of_stepping() {
+    let p = PhysicalParams {
+        mass: vec![0.01],
+        viscous: vec![0.0],
+        coulomb: vec![10.0],
+    };
+    let text = render_profile(&p, &["x"], &["x"], &[vec![1.0]], &[0.0], &[]);
+    let m = DynamicsModel::from_toml_str(&text).expect("profile must load");
+    let deadband = ethercat_rt::dynamics::COULOMB_DEADBAND_MM_S;
+    assert_eq!(
+        deadband as f64,
+        servo_ident::model::COULOMB_DEADBAND_MM_S,
+        "runtime ramp deadband must match the fit's coulomb_sign exclusion"
+    );
+    assert_eq!(m.torque_ff(0, &[0.0], &[0.0]), 0.0);
+    let half = m.torque_ff(0, &[0.0], &[deadband / 2.0]);
+    assert!(
+        (half - 5.0).abs() < 1e-4,
+        "mid-deadband must be c/2: {half}"
+    );
+    let edge = m.torque_ff(0, &[0.0], &[deadband]);
+    assert!(
+        (edge - 10.0).abs() < 1e-4,
+        "deadband edge must be full c: {edge}"
+    );
+    let above = m.torque_ff(0, &[0.0], &[deadband * 4.0]);
+    assert!(
+        (above - 10.0).abs() < 1e-4,
+        "above deadband stays full c: {above}"
+    );
+    let rev = m.torque_ff(0, &[0.0], &[-deadband / 4.0]);
+    assert!(
+        (rev + 2.5).abs() < 1e-4,
+        "ramp must be odd-symmetric: {rev}"
+    );
+}
+
+#[test]
 fn integer_valued_fit_results_still_load() {
     let p = PhysicalParams {
         mass: vec![2.0],

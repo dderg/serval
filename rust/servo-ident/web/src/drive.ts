@@ -1,10 +1,11 @@
-import { html, render } from "htm/preact/standalone";
-import { api, el, mustEl } from "./api";
+import { html } from "htm/preact";
+import { el, mustEl } from "./api";
+import { detailData } from "./queries/runs";
 import { MotorValues, valuesAgree } from "./motor-values";
 import type { MotorValueEntry } from "./motor-values";
 import { setConsoleValue } from "./console";
 import { runGcode } from "./moonraker";
-import { refresh } from "./runs";
+import { driveData, currentDriveAgeS, fetchDriveState, useDriveState } from "./queries/drive";
 import { currentPageDef } from "./shell";
 import { state } from "./state";
 import { notify, useStore } from "./store";
@@ -28,8 +29,8 @@ import type { VNode } from "preact";
 // changed-cell diffing, SERVO_TUNE line building (always with an explicit
 // MOTORS= list) — the logic a Rust test asserts is present and exercisable
 // without a browser; the preact components that render the grid follow.
-// Preact owns #drive-panel: renderDriveGroups() mounts once per page build,
-// then every state mutation just notifies the store.
+// Preact owns #drive-panel via <${DrivePanel} />; every state mutation just
+// notifies the store.
 
 const GROUP_ORDER = ["gains", "filters", "notch", "speed_observer", "disturbance_observer"];
 const OTHER_GROUP = "other";
@@ -65,14 +66,6 @@ function pinnedEntries(configPins: DriveState["config_pins"], cCode: string): Re
     if (Object.prototype.hasOwnProperty.call(pins, cCode)) out[motor] = pins[cCode];
   }
   return out;
-}
-
-/// Effective raw value of one grid cell: the session's pending edit if any,
-/// else the drive's reading from the last dump.
-function driveData(): DriveState {
-  const data = state.drive.data;
-  if (!data) throw new Error("drive state not loaded");
-  return data;
 }
 
 function cellRaw(param: DriveParam, motor: string): number {
@@ -139,11 +132,6 @@ function formatAge(ageS: number): string {
   return `${m}m${s}s`;
 }
 
-function currentDriveAgeS(): number | null {
-  if (!state.drive.data || state.drive.fetchedAtMs === null) return null;
-  return state.drive.data.age_s + (Date.now() - state.drive.fetchedAtMs) / 1000;
-}
-
 /// The refresh button must render even with no drive state at all —
 /// SERVO_DUMP_TUNING is what creates drive_state.json in the first place,
 /// so hiding the button behind loaded data would deadlock a fresh bench.
@@ -175,7 +163,7 @@ function stageCellEdit(param: DriveParam, motorSel: string, rawText: string) {
   const existing = { ...(state.drive.pending[param.name] || {}) };
   for (const m of targets) existing[m] = raw;
   state.drive.pending[param.name] = existing;
-  renderDriveGroups();
+  notify();
 }
 
 function paramMotorEntries(param: DriveParam): MotorValueEntry[] {
@@ -195,7 +183,7 @@ function ParamMotorValues({ param }: { param: DriveParam }) {
     onToggleExpanded=${(open: boolean) => {
       if (open) state.drive.expandedParams.add(param.name);
       else state.drive.expandedParams.delete(param.name);
-      renderDriveGroups();
+      notify();
     }}
     onStage=${(motorSel: string, text: string) => stageCellEdit(param, motorSel, text)}
   />`;
@@ -326,16 +314,34 @@ function DriveGroups() {
 
 function DrivePanel() {
   useStore();
-  const data = state.drive.data;
+  const { data, error } = useDriveState();
   const changed = data ? diffChangedParams(data.params, data.motors, state.drive.pending) : [];
   const lines = buildServoTuneCommands(changed);
+  let driveContent: VNode;
+  if (error) {
+    driveContent = html`<p class="status-err">drive state failed to load: ${String(
+      (error as Error).message ?? error
+    )}</p>`;
+  } else if (data) {
+    driveContent = html`<${DriveGroups} />`;
+  } else {
+    driveContent = html`<p class="note">
+      no drive state yet — press refresh in the top bar to read every mapped parameter off
+      the drives (SERVO_DUMP_TUNING)
+    </p>`;
+  }
+
+  let pendingCountText: string;
+  if (!data) {
+    pendingCountText = "";
+  } else if (lines.length) {
+    pendingCountText = `${lines.length} write(s) pending`;
+  } else {
+    pendingCountText = "no changes pending";
+  }
+
   return html`<div id="drive-groups">
-      ${data
-        ? html`<${DriveGroups} />`
-        : html`<p class="note">
-            no drive state yet — press refresh in the top bar to read every mapped parameter off
-            the drives (SERVO_DUMP_TUNING)
-          </p>`}
+      ${driveContent}
     </div>
     <div id="pending-preview" class="pending-preview">
       ${lines.map((l) => html`<div key=${l} class="pending-line">${l}</div>`)}
@@ -344,37 +350,10 @@ function DrivePanel() {
       <button id="drive-apply-btn" disabled=${lines.length === 0} onClick=${applyDriveChanges}>
         apply
       </button>
-      <span class="note" id="drive-changed-count">
-        ${data ? (lines.length ? `${lines.length} write(s) pending` : "no changes pending") : ""}
-      </span>
+      <span class="note" id="drive-changed-count">${pendingCountText}</span>
     </div>`;
 }
 
-let mountedDrivePanel: HTMLElement | null = null;
-
-function renderDriveGroups() {
-  const container = el("drive-panel");
-  if (container && mountedDrivePanel !== container) {
-    if (mountedDrivePanel) render(null as unknown as VNode, mountedDrivePanel);
-    mountedDrivePanel = container;
-    render(html`<${DrivePanel} />`, container);
-  }
-  notify();
-}
-
-async function loadDriveState() {
-  try {
-    const data: DriveState = await api("/api/drive_state");
-    state.drive.data = data;
-    state.drive.fetchedAtMs = Date.now();
-  } catch (e) {
-    state.drive.data = null;
-    console.error(e);
-  }
-  state.drive.pending = {};
-  renderDriveBanner();
-  renderDriveGroups();
-}
 
 async function refreshDriveState() {
   const statusEl = el("drive-refresh-status");
@@ -386,16 +365,14 @@ async function refreshDriveState() {
     await new Promise((resolve) => setTimeout(resolve, DRIVE_REFRESH_POLL_MS));
     let data: DriveState;
     try {
-      data = await api("/api/drive_state");
+      data = await fetchDriveState();
     } catch (e) {
       continue;
     }
     if (data.age_s < priorAge) {
-      state.drive.data = data;
-      state.drive.fetchedAtMs = Date.now();
       state.drive.pending = {};
       renderDriveBanner();
-      renderDriveGroups();
+      notify();
       return;
     }
   }
@@ -413,7 +390,10 @@ async function applyDriveChanges() {
   const lines = buildServoTuneCommands(changed);
   if (!lines.length) return;
   await runGcode(lines, "apply");
-  await loadDriveState();
+  await fetchDriveState();
+  state.drive.pending = {};
+  renderDriveBanner();
+  notify();
 }
 
 // --- sweep re-run ---------------------------------------------------------
@@ -489,11 +469,11 @@ function reconstructCommand(manifest: Manifest): string {
 }
 
 function loadRerunForm(name: string) {
-  const detail = state.details.get(name);
+  const detail = detailData(name);
   if (!detail || !detail.manifest) return;
   const label = el("form-run-name");
   if (label) label.textContent = `from ${name}`;
   setConsoleValue(reconstructCommand(detail.manifest), false);
 }
 
-export { GROUP_ORDER, OTHER_GROUP, RETIRED_PARAMS, DRIVE_REFRESH_POLL_MS, DRIVE_REFRESH_TIMEOUT_MS, paramGroupSection, groupParams, motorNames, motorRawValues, valuesAgree, pinnedEntries, cellRaw, diffChangedParams, buildServoTuneCommands, paramByName, formatAge, currentDriveAgeS, renderDriveBanner, shortMotorLabel, stageCellEdit, NOTCH_ROW_KINDS, notchMatrix, renderDriveGroups, loadDriveState, refreshDriveState, applyDriveChanges, displayParamName, strokeSuffix, reconstructCommand, loadRerunForm };
+export { GROUP_ORDER, OTHER_GROUP, RETIRED_PARAMS, DRIVE_REFRESH_POLL_MS, DRIVE_REFRESH_TIMEOUT_MS, paramGroupSection, groupParams, motorNames, motorRawValues, valuesAgree, pinnedEntries, cellRaw, diffChangedParams, buildServoTuneCommands, paramByName, formatAge, renderDriveBanner, shortMotorLabel, stageCellEdit, NOTCH_ROW_KINDS, notchMatrix, refreshDriveState, applyDriveChanges, displayParamName, strokeSuffix, reconstructCommand, loadRerunForm, DrivePanel };

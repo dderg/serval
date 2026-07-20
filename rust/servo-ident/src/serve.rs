@@ -11,7 +11,6 @@ use std::time::SystemTime;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 use crate::analyze::{build_run, write_run_outputs, xy_path_full};
 use crate::assets;
@@ -23,7 +22,7 @@ use crate::scap::Scap;
 use crate::strain;
 use crate::time_fmt::iso8601_utc;
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct VerdictSummary {
     pub recommended_step: Option<String>,
     pub reason: String,
@@ -35,7 +34,7 @@ struct ResultsVerdictOnly {
     verdict: VerdictSummary,
 }
 
-#[derive(Debug, Serialize, JsonSchema, TS)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct RunSummary {
     pub name: String,
     pub mtime_utc: String,
@@ -47,7 +46,7 @@ pub struct RunSummary {
     pub note: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct RunPathStep {
     pub name: String,
     pub n_records: usize,
@@ -55,7 +54,7 @@ pub struct RunPathStep {
     pub path: PlotPath,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, TS)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct RunPath {
     pub version: i64,
     pub steps: Vec<RunPathStep>,
@@ -285,12 +284,12 @@ fn handle_analyze(captures_root: &Path, name: &str) -> Response {
     )
 }
 
-#[derive(Deserialize)]
-struct NoteBody {
-    note: String,
+#[derive(Deserialize, JsonSchema)]
+pub struct NoteBody {
+    pub note: String,
 }
 
-#[derive(Serialize, JsonSchema, TS)]
+#[derive(Serialize, JsonSchema)]
 pub struct NoteResponse<'a> {
     pub note: &'a str,
 }
@@ -332,7 +331,7 @@ fn handle_note(captures_root: &Path, name: &str, body: &[u8]) -> Response {
     )
 }
 
-#[derive(Serialize, JsonSchema, TS)]
+#[derive(Serialize, JsonSchema)]
 pub struct DeleteResponse<'a> {
     pub deleted: &'a str,
 }
@@ -457,14 +456,14 @@ fn handle_strain(captures_root: &Path, name: &str) -> Response {
     Response::json(200, body)
 }
 
-#[derive(Serialize, JsonSchema, TS)]
+#[derive(Serialize, JsonSchema)]
 pub struct LiveCapture<'a> {
     pub name: Option<&'a str>,
     pub size_bytes: u64,
     pub age_s: Option<f64>,
 }
 
-#[derive(Serialize, JsonSchema, TS)]
+#[derive(Serialize, JsonSchema)]
 pub struct LiveStatus<'a> {
     pub capture: Option<LiveCapture<'a>>,
 }
@@ -570,6 +569,9 @@ pub fn handle(captures_root: &Path, req: &Request) -> Response {
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     match (req.method.as_str(), segments.as_slice()) {
         ("GET", []) => asset_response(assets::index_html()),
+        ("GET", ["api", "openapi.json"]) => {
+            Response::json(200, crate::openapi::document().to_string())
+        }
         ("GET", ["api", "runs"]) => handle_list(captures_root),
         ("GET", ["api", "drive_state"]) => handle_drive_state(captures_root),
         ("GET", ["api", "live"]) => handle_live_status(captures_root),

@@ -91,7 +91,7 @@ pub enum Command {
     },
     SetStrainComp {
         correlation_id: u32,
-        msg: SetStrainComp,
+        prepared: crate::strain_comp::PreparedStrainComp,
     },
     SetDynamicsModel {
         correlation_id: u32,
@@ -229,7 +229,7 @@ pub fn decode_command(channel: u8, payload: &[u8]) -> Result<Command, DecodeCmdE
             let msg = SetStrainComp::decode(body).map_err(|_| DecodeCmdError::BadBody)?;
             Ok(Command::SetStrainComp {
                 correlation_id: cid,
-                msg,
+                prepared: crate::strain_comp::PreparedStrainComp::prepare(&msg),
             })
         }
         Some(MessageKind::SetDynamicsModel) => {

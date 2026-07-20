@@ -141,6 +141,18 @@ fn dynamics_refine_defers_to_the_host_macro() {
 }
 
 #[test]
+fn dynamics_tune_defers_to_the_host_macro() {
+    let v = compute_verdict(
+        "dynamics_tune",
+        &[step_result("a", &[])],
+        &[manifest_step("a", json!({"accel": 25000.0}))],
+    )
+    .unwrap();
+    assert_eq!(v.recommended_step, None);
+    assert!(v.reason.contains("SERVO_TUNE_DYNAMICS"));
+}
+
+#[test]
 fn unknown_experiment_fails_loud() {
     assert!(compute_verdict("bogus", &[], &[]).is_err());
 }

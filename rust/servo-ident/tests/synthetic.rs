@@ -70,7 +70,10 @@ fn synth(frame: &[Vec<f64>], mass: &[f64], viscous: &[f64], coulomb: &[f64]) -> 
         acc_mode,
         vel_mode,
         cs_mode,
+        snap_mode: vec![],
         torque,
+        ferr_mode: vec![],
+        jerk_mode: vec![],
         extra: Vec::new(),
     }
 }
@@ -123,7 +126,10 @@ fn refuses_unexcited_mode() {
         acc_mode: vec![vec![0.0; n]],
         vel_mode: vec![vec![100.0; n]],
         cs_mode: vec![vec![1.0; n]],
+        snap_mode: vec![],
         torque: vec![vec![1.0; n]],
+        ferr_mode: vec![],
+        jerk_mode: vec![],
         extra: Vec::new(),
     };
     assert!(matches!(
@@ -140,7 +146,10 @@ fn refuses_collinear_excitation() {
         acc_mode: vec![vec![500.0; n]],
         vel_mode: vec![vec![100.0; n]],
         cs_mode: vec![vec![1.0; n]],
+        snap_mode: vec![],
         torque: vec![vec![1.0; n]],
+        ferr_mode: vec![],
+        jerk_mode: vec![],
         extra: Vec::new(),
     };
     assert!(matches!(
@@ -163,11 +172,85 @@ fn refuses_saturated_torque() {
         acc_mode: vec![acc],
         vel_mode: vec![vel],
         cs_mode: vec![cs],
+        snap_mode: vec![],
         torque: vec![torque],
+        ferr_mode: vec![],
+        jerk_mode: vec![],
         extra: Vec::new(),
     };
     assert!(matches!(
         fit(&input, &FitOptions::default()),
         Err(FitError::SaturatedTorque { .. })
     ));
+}
+
+/// Two-mass compliance shows up as torque correlated with snap (d²a/dt²).
+/// With the snap column enabled the fit recovers the rigid mass and the
+/// compliance coefficient separately; without it the ω² term aliases into
+/// mass and drags it with the excitation spectrum — the drift the column
+/// exists to prevent.
+#[test]
+fn snap_column_separates_compliance_from_mass() {
+    let frame = vec![vec![1.0]];
+    let (mass_true, c_true) = (0.02, -2.0e-7);
+    let dt = 0.001;
+    let mut acc = Vec::new();
+    let mut vel = Vec::new();
+    let mut snap = Vec::new();
+    for k in 0..8000 {
+        let t = k as f64 * dt;
+        let (f, amp) = if k < 4000 {
+            (8.0, 20000.0)
+        } else {
+            (35.0, 20000.0)
+        };
+        let w = 2.0 * std::f64::consts::PI * f;
+        acc.push(amp * libm::sin(w * t));
+        vel.push(-amp / w * libm::cos(w * t) + amp / w);
+        snap.push(-amp * w * w * libm::sin(w * t));
+    }
+    let cs: Vec<f64> = vel.iter().map(|&v| coulomb_sign(v)).collect();
+    let torque: Vec<f64> = (0..acc.len())
+        .map(|k| {
+            noisy(
+                mass_true * acc[k] + 0.004 * vel[k] + 1.0 * cs[k] + c_true * snap[k],
+                k,
+            )
+        })
+        .collect();
+    let with_snap = FitInput {
+        structure: Structure::new(frame.clone()),
+        acc_mode: vec![acc.clone()],
+        vel_mode: vec![vel.clone()],
+        cs_mode: vec![cs.clone()],
+        snap_mode: vec![snap.clone()],
+        torque: vec![torque.clone()],
+        ferr_mode: vec![],
+        jerk_mode: vec![],
+        extra: Vec::new(),
+    };
+    let r = fit(&with_snap, &FitOptions::default()).unwrap();
+    assert!(
+        (r.params.mass[0] - mass_true).abs() < 0.02 * mass_true,
+        "mass with snap column = {} vs {mass_true}",
+        r.params.mass[0]
+    );
+    assert!(
+        (r.snap_params[0] - c_true).abs() < 0.05 * c_true.abs(),
+        "snap coefficient = {} vs {c_true}",
+        r.snap_params[0]
+    );
+
+    let without = FitInput {
+        snap_mode: vec![],
+        ..with_snap
+    };
+    let r0 = fit(&without, &FitOptions::default()).unwrap();
+    assert!(
+        r0.params.mass[0] > 1.05 * mass_true,
+        "without the snap column the ω² rise must alias into mass \
+         (got {} vs true {mass_true})",
+        r0.params.mass[0]
+    );
+    assert!(r0.snap_params.is_empty());
 }

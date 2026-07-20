@@ -28,11 +28,16 @@ pub struct PrepOptions {
     /// Zero-phase low-pass cutoff applied to both sides of the regression
     /// (Hz), and used for the in-band residual report. 0 disables filtering.
     pub cutoff_hz: f64,
-    /// Samples within this distance of a velocity-deadband sample of an
-    /// active mode are dropped: breakaway/landing stiction transients are
-    /// unmodeled. A mode idle for a whole segment (an axis-aligned stroke
-    /// leaves the other mode at exactly zero) blanks nothing — it is not
-    /// reversing, and its coulomb column is zero there anyway.
+    /// Samples within this distance of a velocity reversal of an active
+    /// mode are dropped: breakaway/landing stiction transients and the
+    /// coulomb sign-flip loop transient are unmodeled. A reversal is a
+    /// sample inside the coulomb deadband OR a sign flip between adjacent
+    /// samples - at high accel the velocity steps over the deadband
+    /// entirely between samples (12 mm/s per sample at 50 k mm/s2 and
+    /// 4 kHz), which used to leave every zigzag reversal unblanked. A mode
+    /// idle for a whole segment (an axis-aligned stroke leaves the other
+    /// mode at exactly zero) blanks nothing — it is not reversing, and its
+    /// coulomb column is zero there anyway.
     pub blank_reversal_s: f64,
     /// Search range for the accel→torque delay. 0 disables alignment.
     pub max_delay_s: f64,
@@ -41,6 +46,22 @@ pub struct PrepOptions {
     /// eccentricity ripple — in-band and stroke-locked, hence a mass-bias
     /// if ignored — is absorbed by nuisance coefficients instead.
     pub ripple_period_mm: Option<f64>,
+    /// Ringdown-measured resonances shaping the snap column per mode: the
+    /// snap regressor is passed through H_z(s) = wz^2/(s^2 + 2 zeta wz s +
+    /// wz^2), keeping the exact snap asymptote below the mode, rolling off
+    /// above it (where raw snap amplifies junk the plant never responds
+    /// to), and carrying the mode's own post-transition ring into the
+    /// steady-accel windows the fit keeps - raw snap is zero there while
+    /// the physical belt force keeps ringing.
+    pub modal: Vec<ModalMode>,
+}
+
+/// One ringdown-measured mode: `mode` indexes the frame's mode list.
+#[derive(Debug, Clone, Copy)]
+pub struct ModalMode {
+    pub mode: usize,
+    pub freq_hz: f64,
+    pub zeta: f64,
 }
 
 impl Default for PrepOptions {
@@ -50,6 +71,7 @@ impl Default for PrepOptions {
             blank_reversal_s: 0.03,
             max_delay_s: 0.005,
             ripple_period_mm: None,
+            modal: Vec::new(),
         }
     }
 }
@@ -62,11 +84,31 @@ pub struct Prepped {
     /// Mode-space channels: `[mode][sample]`, frame-projected then filtered.
     pub acc_mode: Vec<Vec<f64>>,
     pub vel_mode: Vec<Vec<f64>>,
+    /// Second time-derivative of the mode acceleration (snap), from a
+    /// central second difference of the raw projected accel, then filtered
+    /// like every other channel. Raw it is an impulse train at the jerk
+    /// breakpoints; the shared zero-phase kernel turns both it and the
+    /// torque it explains into the same band-limited pair, which is what
+    /// makes the regression consistent.
+    pub snap_mode: Vec<Vec<f64>>,
     /// Per-mode coulomb sign column (sign of the RAW mode velocity, then
     /// filtered like every other channel).
     pub cs_mode: Vec<Vec<f64>>,
     /// Measured torque per motor/slot, delay-aligned and filtered.
     pub torque: Vec<Vec<f64>>,
+    /// Following error (mm), frame-projected into mode space exactly like
+    /// `acc_mode`/`vel_mode` and filtered identically. Not delay-aligned —
+    /// following error is a state of the closed loop, not a torque-report
+    /// artifact, so there is no accel→torque lag to remove from it.
+    pub ferr_mode: Vec<Vec<f64>>,
+    /// Per-mode jerk (da/dt) regressor column, filtered identically to the
+    /// other channels. Nuisance column for the ferr fit: any timing skew
+    /// between the commanded kinematics and the telemetry ferr samples
+    /// makes `a(t-δ) ≈ a(t) - δ·j(t)`, so without this column the skew
+    /// lands in the mass coefficient as a constant bias and the tuning
+    /// loop nulls the correlation at the wrong mass. Its coefficient is
+    /// `-m·δ` — dividing by the fitted mass measures the skew itself.
+    pub jerk_mode: Vec<Vec<f64>>,
     /// Pulley-angle sin/cos nuisance columns per motor (empty when
     /// `ripple_period_mm` is unset), filtered like every other channel.
     pub extra: Vec<Vec<Vec<f64>>>,
@@ -99,6 +141,49 @@ pub fn segments(t: &[f64], dt: f64) -> Vec<std::ops::Range<usize>> {
     }
     out.push(start..t.len());
     out
+}
+
+/// Bilinear-transform coefficients `[b0, b1, b2, a1, a2]` (a0 normalized
+/// out) for the unit-DC-gain resonance
+/// H_z(s) = wz^2 / (s^2 + 2 zeta wz s + wz^2), the RBJ low-pass with
+/// Q = 1/(2 zeta). Causal on purpose: the physical belt force is causally
+/// related to commanded snap, and the zero-phase band filter applied
+/// identically to every channel afterwards preserves that relation.
+pub fn modal_biquad(freq_hz: f64, zeta: f64, dt: f64) -> [f64; 5] {
+    assert!(
+        freq_hz > 0.0 && dt > 0.0,
+        "modal frequency must be positive"
+    );
+    assert!(
+        freq_hz * dt < 0.45,
+        "modal frequency {freq_hz} Hz too close to Nyquist at dt {dt}"
+    );
+    assert!(zeta > 0.0 && zeta < 1.0, "modal zeta {zeta} outside (0, 1)");
+    let w0 = 2.0 * std::f64::consts::PI * freq_hz * dt;
+    let (sin_w0, cos_w0) = (libm::sin(w0), libm::cos(w0));
+    let alpha = sin_w0 * zeta;
+    let a0 = 1.0 + alpha;
+    [
+        (1.0 - cos_w0) / 2.0 / a0,
+        (1.0 - cos_w0) / a0,
+        (1.0 - cos_w0) / 2.0 / a0,
+        -2.0 * cos_w0 / a0,
+        (1.0 - alpha) / a0,
+    ]
+}
+
+/// Direct-form-II-transposed biquad over one segment, state zeroed at the
+/// segment start (segments are separated by dwells far longer than the
+/// mode's decay).
+pub fn biquad_in_place(chan: &mut [f64], [b0, b1, b2, a1, a2]: [f64; 5]) {
+    let (mut z1, mut z2) = (0.0, 0.0);
+    for v in chan.iter_mut() {
+        let x = *v;
+        let y = b0 * x + z1;
+        z1 = b1 * x + z2 - a1 * y;
+        z2 = b2 * x - a2 * y;
+        *v = y;
+    }
 }
 
 /// Odd-length Hann-windowed-sinc low-pass with unit DC gain. Symmetric, so
@@ -225,18 +310,53 @@ pub fn prep(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> Prepped
     let mut acc_mode_raw = vec![vec![0.0; n]; n_modes];
     let mut vel_mode_raw = vec![vec![0.0; n]; n_modes];
     let mut cs_raw = vec![vec![0.0; n]; n_modes];
+    let mut ferr_mode_raw = vec![vec![0.0; n]; n_modes];
     for md in 0..n_modes {
         for k in 0..n {
             let mut a = 0.0;
             let mut v = 0.0;
+            let mut e = 0.0;
             for s in 0..n_motors {
                 let f = structure.frame[md][s];
                 a += f * cap.acc[s][k];
                 v += f * cap.vel[s][k];
+                e += f * cap.ferr[s][k];
             }
             acc_mode_raw[md][k] = a;
             vel_mode_raw[md][k] = v;
             cs_raw[md][k] = coulomb_sign(v);
+            ferr_mode_raw[md][k] = e;
+        }
+    }
+
+    let mut snap_raw = vec![vec![0.0; n]; n_modes];
+    for md in 0..n_modes {
+        for seg in &segs {
+            for k in seg.start + 1..seg.end.saturating_sub(1) {
+                snap_raw[md][k] = (acc_mode_raw[md][k + 1] - 2.0 * acc_mode_raw[md][k]
+                    + acc_mode_raw[md][k - 1])
+                    / (dt * dt);
+            }
+        }
+    }
+    let mut jerk_raw = vec![vec![0.0; n]; n_modes];
+    for md in 0..n_modes {
+        for seg in &segs {
+            for k in seg.start + 1..seg.end.saturating_sub(1) {
+                jerk_raw[md][k] = (acc_mode_raw[md][k + 1] - acc_mode_raw[md][k - 1]) / (2.0 * dt);
+            }
+        }
+    }
+    for m in &opts.modal {
+        assert!(
+            m.mode < n_modes,
+            "modal mode index {} out of range ({} modes)",
+            m.mode,
+            n_modes
+        );
+        let coef = modal_biquad(m.freq_hz, m.zeta, dt);
+        for seg in &segs {
+            biquad_in_place(&mut snap_raw[m.mode][seg.clone()], coef);
         }
     }
 
@@ -277,7 +397,10 @@ pub fn prep(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> Prepped
     let acc_mode = filt(&acc_mode_raw);
     let vel_mode = filt(&vel_mode_raw);
     let cs_mode = filt(&cs_raw);
+    let snap_mode = filt(&snap_raw);
     let torque = filt(&torque);
+    let ferr_mode = filt(&ferr_mode_raw);
+    let jerk_mode = filt(&jerk_raw);
     let extra: Vec<Vec<Vec<f64>>> = match opts.ripple_period_mm {
         None => Vec::new(),
         Some(period) => {
@@ -322,7 +445,10 @@ pub fn prep(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> Prepped
                 continue;
             }
             for k in seg.clone() {
-                if vel_mode_raw[md][k].abs() <= COULOMB_DEADBAND_MM_S {
+                let in_deadband = vel_mode_raw[md][k].abs() <= COULOMB_DEADBAND_MM_S;
+                let crosses =
+                    k + 1 < seg.end && vel_mode_raw[md][k] * vel_mode_raw[md][k + 1] < 0.0;
+                if in_deadband || crosses {
                     let lo = k.saturating_sub(blank).max(seg.start);
                     let hi = (k + blank + 1).min(seg.end);
                     for v in valid.iter_mut().take(hi).skip(lo) {
@@ -337,8 +463,11 @@ pub fn prep(cap: &Capture, structure: &Structure, opts: &PrepOptions) -> Prepped
         t: cap.t.clone(),
         acc_mode,
         vel_mode,
+        snap_mode,
         cs_mode,
         torque,
+        ferr_mode,
+        jerk_mode,
         extra,
         valid,
         delay_s: lag as f64 * dt,
@@ -369,4 +498,60 @@ pub fn band_limited_rms(residual: &[Vec<f64>], t: &[f64], keep: &[bool], cutoff_
     }
     assert!(count > 0, "band_limited_rms: no kept samples");
     (sq / count as f64).sqrt()
+}
+
+/// The operator's manual tuning heuristic, made a number: the mean of
+/// `sign(accel) * ferr` over a short window right after every commanded
+/// accel transition, per mode, on RAW unfiltered channels. Only the first
+/// excursion when torque is applied carries clean command-path sign
+/// information - everything after it is the drive's own compensation
+/// (disturbance observer, integrator) reacting, which is why whole-capture
+/// ferr regressions can point the wrong way. Positive bias = the plant
+/// initially lags the command when torque steps in (feedforward
+/// under-feeds, mass too low); negative = it initially overshoots
+/// (over-fed). Returns per-mode bias (mm) and the total onset windows
+/// scored; zero windows yields a 0.0 bias for that mode.
+pub fn onset_bias(
+    acc_mode: &[Vec<f64>],
+    ferr_mode: &[Vec<f64>],
+    dt: f64,
+    window_s: f64,
+) -> (Vec<f64>, usize) {
+    assert!(dt > 0.0, "onset_bias: dt must be positive");
+    assert!(window_s > 0.0, "onset_bias: window must be positive");
+    assert_eq!(acc_mode.len(), ferr_mode.len(), "mode channel count");
+    let window = ((window_s / dt).round() as usize).max(1);
+    let mut biases = Vec::with_capacity(acc_mode.len());
+    let mut total_windows = 0usize;
+    for (acc, ferr) in acc_mode.iter().zip(ferr_mode) {
+        assert_eq!(acc.len(), ferr.len(), "mode sample count");
+        let amax = acc.iter().fold(0.0_f64, |m, a| m.max(a.abs()));
+        if amax == 0.0 {
+            biases.push(0.0);
+            continue;
+        }
+        let step_thresh = 0.25 * amax;
+        let active_thresh = 0.1 * amax;
+        let mut sum = 0.0;
+        let mut count = 0usize;
+        let mut k = 1;
+        while k < acc.len() {
+            let stepped = (acc[k] - acc[k - 1]).abs() > step_thresh;
+            if !stepped || acc[k].abs() < active_thresh {
+                k += 1;
+                continue;
+            }
+            total_windows += 1;
+            let sign = acc[k].signum();
+            let mut j = k;
+            while j < acc.len().min(k + window) && (acc[j] - acc[k]).abs() <= step_thresh {
+                sum += sign * ferr[j];
+                count += 1;
+                j += 1;
+            }
+            k = j;
+        }
+        biases.push(if count == 0 { 0.0 } else { sum / count as f64 });
+    }
+    (biases, total_windows)
 }

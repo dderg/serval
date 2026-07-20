@@ -2,8 +2,11 @@ pub(crate) const CONTIGUITY_EPS: f64 = 1e-6;
 pub const DEFAULT_LEAD_SECS: f64 = 0.25;
 
 /// A continuing stream whose next segment starts closer to the playhead than
-/// this is one pipeline hiccup away from a -308 PieceStartInPast: worth a
-/// warn with the full anchor state while the stream is still alive.
+/// this cannot reliably reach the drive before its start time (transport +
+/// send latency ate a 1.5 ms margin on the bench, latching a -308
+/// PieceStartInPast drive fault at the post-homing continuation). Such a
+/// segment is the same hazard as an underrun and takes the same recovery:
+/// re-anchor forward with full lead — a stutter, not a crash.
 pub const LOW_MARGIN_WARN_SECS: f64 = 0.020;
 
 /// How a segment relates to the anchored stream it lands in.
@@ -55,12 +58,14 @@ impl Anchor {
     /// `t0 + seg_t_start` and `fresh` marks a (re)anchor.
     ///
     /// The timeline floats ahead of the playhead and is only re-anchored when it
-    /// must be: the first segment, a backward jump (idle restart), or a genuine
+    /// must be: the first segment, a backward jump (idle restart), a genuine
     /// **underrun** — the playhead has overrun where this segment was scheduled
-    /// (the producer fell behind playback). On underrun we re-anchor forward and
+    /// (the producer fell behind playback) — or a continuation whose margin to
+    /// the playhead is below `LOW_MARGIN_WARN_SECS`, which transport latency
+    /// would turn into a -308 at the drive. Both re-anchor forward and
     /// continue, a brief stutter, rather than aborting the print; mainline's
-    /// stall-not-crash behaviour. A healthy stream never underruns because the
-    /// committed frontier stays `buffer_time` ahead of the playhead.
+    /// stall-not-crash behaviour. A healthy stream never gets near the floor
+    /// because the committed frontier stays `buffer_time` ahead of the playhead.
     pub fn anchor_segment(
         &mut self,
         seg_t_start: f64,
@@ -70,25 +75,21 @@ impl Anchor {
         let epoch = match self.t0 {
             None => StreamEpoch::Reposition,
             Some(t0) => {
-                let timeline_reset = seg_t_start + CONTIGUITY_EPS < self.last_t_end;
-                let underrun = !timeline_reset && t0 + seg_t_start < host_now;
-                if underrun {
-                    tracing::warn!(
-                        subsystem = "motion",
-                        event = "anchor_underrun",
-                        gap_s = host_now - (t0 + seg_t_start),
-                        seg_t_start,
-                        "[anchor-underrun] playhead overran the committed end; \
-                         re-anchoring forward (stutter)"
-                    );
-                }
-                if timeline_reset {
+                if seg_t_start + CONTIGUITY_EPS < self.last_t_end {
                     StreamEpoch::Reposition
-                } else if underrun {
-                    StreamEpoch::Reanchor
                 } else {
                     let margin_s = t0 + seg_t_start - host_now;
-                    if margin_s < LOW_MARGIN_WARN_SECS {
+                    if margin_s < 0.0 {
+                        tracing::warn!(
+                            subsystem = "motion",
+                            event = "anchor_underrun",
+                            gap_s = -margin_s,
+                            seg_t_start,
+                            "[anchor-underrun] playhead overran the committed end; \
+                             re-anchoring forward (stutter)"
+                        );
+                        StreamEpoch::Reanchor
+                    } else if margin_s < LOW_MARGIN_WARN_SECS {
                         tracing::warn!(
                             subsystem = "motion",
                             event = "anchor_low_margin",
@@ -98,11 +99,14 @@ impl Anchor {
                             seg_t_start,
                             seg_t_end,
                             last_t_end = self.last_t_end,
-                            "[anchor] continuation margin below warn floor — \
-                             segment start is nearly at the playhead"
+                            "[anchor] continuation margin below the transport \
+                             floor — re-anchoring forward (stutter) instead of \
+                             racing a -308"
                         );
+                        StreamEpoch::Reanchor
+                    } else {
+                        StreamEpoch::Continuation
                     }
-                    StreamEpoch::Continuation
                 }
             }
         };

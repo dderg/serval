@@ -26,6 +26,8 @@
 //! re-anchoring at a field extreme can double the worst-case residual. A
 //! SERVO_SYNC at the map's zero point restores the calibrated anchor.
 
+use mcu_protocol::messages::SetStrainComp;
+
 pub const ERR_COMP_BAD_SLOT: i32 = -856;
 pub const ERR_COMP_BAD_GRID: i32 = -857;
 pub const ERR_COMP_BAD_LANE: i32 = -858;
@@ -108,10 +110,110 @@ impl PairComp {
 /// With re-anchoring, the applied offset can reach the grid's full span
 /// (sample minus anchor sample), so the span — not just each value — must
 /// stay inside the offset budget.
-fn grid_span_um(values_um: &[i16]) -> i32 {
+fn grid_span_um(values_um: &[i32]) -> i32 {
     let lo = values_um.iter().copied().min().unwrap_or(0);
     let hi = values_um.iter().copied().max().unwrap_or(0);
-    i32::from(hi) - i32::from(lo)
+    hi - lo
+}
+
+/// Everything O(nx*ny) about a SetStrainComp — grid validation and the
+/// um -> mm conversion — done on the socket reader thread at decode time.
+/// A 113x109 map measured ~500 us when this ran in the RT dispatch (two
+/// whole DC cycles, a latched frame-timing fault); `install` is left with
+/// O(1) state checks and a Vec move.
+#[derive(Debug)]
+pub struct PreparedStrainComp {
+    pub slot_a: u8,
+    pub slot_b: u8,
+    pub lane_a: u8,
+    pub lane_b: u8,
+    pub kinematics: u8,
+    pub nx: u16,
+    pub ny: u16,
+    pub x0: f64,
+    pub y0: f64,
+    pub dx: f64,
+    pub dy: f64,
+    pub wire_values: usize,
+    pub grid_rc: i32,
+    pub values_mm: Vec<f64>,
+}
+
+impl PreparedStrainComp {
+    pub fn prepare(msg: &SetStrainComp) -> Self {
+        Self::from_values(
+            msg.slot_a,
+            msg.slot_b,
+            msg.lane_a,
+            msg.lane_b,
+            msg.kinematics,
+            msg.nx,
+            msg.ny,
+            f64::from(msg.x0),
+            f64::from(msg.y0),
+            f64::from(msg.dx),
+            f64::from(msg.dy),
+            &msg.values_um,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_values(
+        slot_a: u8,
+        slot_b: u8,
+        lane_a: u8,
+        lane_b: u8,
+        kinematics: u8,
+        nx: u16,
+        ny: u16,
+        x0: f64,
+        y0: f64,
+        dx: f64,
+        dy: f64,
+        values_um: &[i32],
+    ) -> Self {
+        let (nxu, nyu) = (usize::from(nx), usize::from(ny));
+        let clearing = nxu == 0 || nyu == 0;
+        let grid_ok = !clearing
+            && nxu <= MAX_COMP_GRID_DIM
+            && nyu <= MAX_COMP_GRID_DIM
+            && nxu * nyu <= MAX_COMP_GRID_VALUES
+            && values_um.len() == nxu * nyu
+            && dx > 0.0
+            && dy > 0.0
+            && x0.is_finite()
+            && y0.is_finite()
+            && values_um
+                .iter()
+                .all(|v| v.abs() <= i32::from(MAX_COMP_OFFSET_UM))
+            && grid_span_um(values_um) <= i32::from(MAX_COMP_OFFSET_UM);
+        let grid_rc = if clearing || grid_ok {
+            0
+        } else {
+            ERR_COMP_BAD_GRID
+        };
+        let values_mm = if grid_ok {
+            values_um.iter().map(|&v| f64::from(v) * 1e-3).collect()
+        } else {
+            Vec::new()
+        };
+        Self {
+            slot_a,
+            slot_b,
+            lane_a,
+            lane_b,
+            kinematics,
+            nx,
+            ny,
+            x0,
+            y0,
+            dx,
+            dy,
+            wire_values: values_um.len(),
+            grid_rc,
+            values_mm,
+        }
+    }
 }
 
 pub struct StrainCompBank {
@@ -128,6 +230,7 @@ impl StrainCompBank {
         }
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub fn set(
         &mut self,
@@ -145,13 +248,26 @@ impl StrainCompBank {
         dy: f64,
         values_um: &[i16],
     ) -> i32 {
-        let (a, b) = (usize::from(slot_a), usize::from(slot_b));
+        let values: Vec<i32> = values_um.iter().map(|&v| i32::from(v)).collect();
+        self.install(
+            num_slaves,
+            PreparedStrainComp::from_values(
+                slot_a, slot_b, lane_a, lane_b, kinematics, nx, ny, x0, y0, dx, dy, &values,
+            ),
+        )
+    }
+
+    /// RT-thread half of a SetStrainComp: state-dependent checks (slot and
+    /// lane bounds, pair ownership, applied-offset carryover) and a Vec
+    /// move. All O(nx*ny) work already happened in `PreparedStrainComp`.
+    pub fn install(&mut self, num_slaves: usize, prepared: PreparedStrainComp) -> i32 {
+        let (a, b) = (usize::from(prepared.slot_a), usize::from(prepared.slot_b));
         if a == b || a >= num_slaves || b >= num_slaves {
             return ERR_COMP_BAD_SLOT;
         }
         let same_pair =
             |c: &PairComp| (c.slot_a, c.slot_b) == (a, b) || (c.slot_a, c.slot_b) == (b, a);
-        let (nx, ny) = (usize::from(nx), usize::from(ny));
+        let (nx, ny) = (usize::from(prepared.nx), usize::from(prepared.ny));
         if nx == 0 || ny == 0 {
             // Clearing must not drop the applied offset on the floor — the
             // last written targets would keep it baked in as a standing
@@ -162,21 +278,15 @@ impl StrainCompBank {
             }
             return 0;
         }
-        if kinematics != KIN_COREXY && kinematics != KIN_CARTESIAN {
+        if prepared.kinematics != KIN_COREXY && prepared.kinematics != KIN_CARTESIAN {
             return ERR_COMP_BAD_KINEMATICS;
         }
-        if usize::from(lane_a) >= num_slaves || usize::from(lane_b) >= num_slaves {
+        if usize::from(prepared.lane_a) >= num_slaves || usize::from(prepared.lane_b) >= num_slaves
+        {
             return ERR_COMP_BAD_LANE;
         }
-        if nx > MAX_COMP_GRID_DIM
-            || ny > MAX_COMP_GRID_DIM
-            || nx * ny > MAX_COMP_GRID_VALUES
-            || values_um.len() != nx * ny
-            || !(dx > 0.0 && dy > 0.0 && x0.is_finite() && y0.is_finite())
-            || values_um.iter().any(|v| v.abs() > MAX_COMP_OFFSET_UM)
-            || grid_span_um(values_um) > i32::from(MAX_COMP_OFFSET_UM)
-        {
-            return ERR_COMP_BAD_GRID;
+        if prepared.grid_rc != 0 {
+            return prepared.grid_rc;
         }
         if self
             .comps
@@ -198,16 +308,16 @@ impl StrainCompBank {
         self.comps.push(PairComp {
             slot_a: a,
             slot_b: b,
-            lane_a: usize::from(lane_a),
-            lane_b: usize::from(lane_b),
-            kinematics,
+            lane_a: usize::from(prepared.lane_a),
+            lane_b: usize::from(prepared.lane_b),
+            kinematics: prepared.kinematics,
             nx,
             ny,
-            x0,
-            y0,
-            dx,
-            dy,
-            values_mm: values_um.iter().map(|&v| f64::from(v) * 1e-3).collect(),
+            x0: prepared.x0,
+            y0: prepared.y0,
+            dx: prepared.dx,
+            dy: prepared.dy,
+            values_mm: prepared.values_mm,
             target_mm: applied,
             applied_mm: applied,
             anchor_xy,

@@ -1,7 +1,10 @@
 import { el } from "./api";
+import { html } from "htm/preact";
+import { useEffect, useRef } from "preact/hooks";
 import { consoleTabComplete, renderConsoleHelp } from "./docs";
-import { runGcode } from "./moonraker";
+import { runGcode, renderSentLog } from "./moonraker";
 import { CONSOLE_HISTORY_KEY, CONSOLE_HISTORY_MAX, state } from "./state";
+import type { PageTemplate } from "./state";
 
 // --- console ------------------------------------------------------------------
 
@@ -12,21 +15,55 @@ function pushConsoleHistory(entry: string) {
   localStorage.setItem(CONSOLE_HISTORY_KEY, JSON.stringify(hist));
 }
 
-function bindConsole() {
-  const input = el<HTMLTextAreaElement>("console-input");
-  if (!input) return;
+function attachConsoleListeners(input: HTMLTextAreaElement): () => void {
   input.value = state.console.text;
   autosizeConsole(input);
-  input.addEventListener("input", () => {
+  const onInput = () => {
     state.console.text = input.value;
     autosizeConsole(input);
     renderConsoleHelp();
-  });
+  };
+  const onBlur = () => exitConsoleSearch(true);
+  input.addEventListener("input", onInput);
   input.addEventListener("keyup", renderConsoleHelp);
   input.addEventListener("click", renderConsoleHelp);
   input.addEventListener("keydown", consoleKeydown);
-  input.addEventListener("blur", () => exitConsoleSearch(true));
+  input.addEventListener("blur", onBlur);
   renderConsoleHelp();
+  return () => {
+    input.removeEventListener("input", onInput);
+    input.removeEventListener("keyup", renderConsoleHelp);
+    input.removeEventListener("click", renderConsoleHelp);
+    input.removeEventListener("keydown", consoleKeydown);
+    input.removeEventListener("blur", onBlur);
+  };
+}
+
+
+function ConsolePanel({ templates }: { templates?: PageTemplate[] }) {
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    renderSentLog();
+    const input = inputRef.current;
+    if (!input) return;
+    return attachConsoleListeners(input);
+  }, []);
+  const applyTemplate = (t: PageTemplate) => {
+    setConsoleValue(t.command, true);
+    const label = el("form-run-name");
+    if (label) label.textContent = "template — edit values before running";
+  };
+  return html`<section class="session">
+    <div class="section-head"><h2>console</h2><span class="note" id="form-run-name"></span>${(templates ?? []).map(
+      (t, i) =>
+        html`<button key=${i} class="template-btn" data-template=${i} title=${t.title} onClick=${() => applyTemplate(t)}>${t.label}</button>`
+    )}</div>
+    <div id="sent-log" class="sent-log"></div>
+    <div id="run-status" class="status-line"></div>
+    <div class="console-line"><span class="console-prompt">›</span><textarea id="console-input" ref=${inputRef} rows="1" spellcheck="false" placeholder="g-code — enter runs, tab completes, ↑/↓ history, ctrl+r search"></textarea></div>
+    <div id="console-search" class="console-search"></div>
+    <div id="console-help" class="console-help"></div>
+  </section>`;
 }
 
 function autosizeConsole(input: HTMLTextAreaElement) {
@@ -195,4 +232,4 @@ async function submitConsole() {
   await runGcode(lines, "console");
 }
 
-export { pushConsoleHistory, bindConsole, autosizeConsole, setConsoleValue, caretOnFirstLine, caretOnLastLine, consoleKeydown, historyStep, consoleSearchKeydown, searchHistory, exitConsoleSearch, renderConsoleSearch, submitConsole };
+export { pushConsoleHistory, ConsolePanel, autosizeConsole, setConsoleValue, caretOnFirstLine, caretOnLastLine, consoleKeydown, historyStep, consoleSearchKeydown, searchHistory, exitConsoleSearch, renderConsoleSearch, submitConsole };

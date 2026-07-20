@@ -7,9 +7,20 @@
 //!       [--dump-csv <path>]        write per-drive raw series CSV
 //!       [--combine <spec> --axis X] add the CoreXY belt combine
 //!   fit --capture <file.scap> --frame "r0;r1" --modes x[,y] --axes a[,b,...]
+//!       [--response <torque|ferr>] (default torque)
 //!       --out profile.toml [--rated-torque-nm T --rotor-inertia-kgm2 J
 //!       --rotation-distance-mm D --cutoff-hz C --blank-ms B --max-delay-ms M
-//!       --ripple-period-mm P]
+//!       --ripple-period-mm P --modal <mode>:<fz_hz>:<zeta> ...
+//!       --settle-ms S --max-mode-accel A --max-mode-vel V --min-mode-vel V]
+//!       (--modal shapes that mode's snap column through the
+//!       ringdown-measured resonance; the row gates and the settle override
+//!       are operating-point probes - fit subsets to localize where a
+//!       parameter drift lives)
+//!       --response ferr regresses following error (mm) instead of torque
+//!       against the same commanded-kinematics columns: `--out` then writes
+//!       a JSON coefficient report (see `ferr_out::render_ferr_json`), no
+//!       profile is rendered, and exactly one --capture is required (same
+//!       as torque). `fit --help` prints this usage block.
 //!   serve --dir <captures_root> [--port 8085] [--host 127.0.0.1]
 //!       [--live-sock /tmp/kalico-ethercat.sock.live]
 //!   demo <out-dir> [--fixtures <dir>]
@@ -18,16 +29,18 @@
 use std::path::{Path, PathBuf};
 
 use servo_ident::analyze::{analyze_capture, analyze_run, dump_csv, print_step};
+use servo_ident::capture::PlateauOptions;
 use servo_ident::demo::{build_demo, default_fixtures_dir};
+use servo_ident::ferr_out::render_ferr_json;
 use servo_ident::fit::residual_by_motor;
-use servo_ident::fit::{fit, FitOptions};
+use servo_ident::fit::{fit, fit_ferr, FitInput, FitOptions};
 use servo_ident::fit_driver::scap_to_capture;
 use servo_ident::http;
 use servo_ident::live_stream::{LiveTap, DEFAULT_IDLE_TIMEOUT, DEFAULT_TAP_SOCKET};
 use servo_ident::metrics::{DEFAULT_SETTLE_BAND_COUNTS, DEFAULT_TORQUE_LIMIT_PER_MILLE};
 use servo_ident::model::Structure;
 use servo_ident::pipeline::{fit_input, full_fit_input, prepare};
-use servo_ident::prep::{band_limited_rms, PrepOptions};
+use servo_ident::prep::{band_limited_rms, median_dt, onset_bias, ModalMode, PrepOptions};
 use servo_ident::profile_out::{c0006_recommendation, render_profile};
 use servo_ident::scap::Scap;
 use servo_ident::serve;
@@ -173,11 +186,27 @@ fn cmd_analyze(args: &[String]) {
     analyze_run(Path::new(dir), incremental).unwrap_or_else(|e| die(&e));
 }
 
-const FIT_KEYS: [&str; 13] = [
+const FIT_USAGE: &str = "\
+usage: servo-cal fit --capture <file.scap> --frame \"r0;r1\" --modes x[,y] \\
+    --axes a[,b,...] [--response <torque|ferr>] --out <path>
+    [--rated-torque-nm T --rotor-inertia-kgm2 J --rotation-distance-mm D
+     --cutoff-hz C --blank-ms B --max-delay-ms M --ripple-period-mm P
+     --modal <mode>:<fz_hz>:<zeta> ... --settle-ms S --max-mode-accel A
+     --max-mode-vel V --min-mode-vel V --dump-rows <path>]
+
+--response defaults to torque (regress measured torque, write a profile
+TOML). --response ferr regresses following error (mm) instead, against the
+same commanded-kinematics columns; --out then writes a JSON coefficient
+report instead of a profile, and exactly one --capture is required (same
+as torque).
+";
+
+const FIT_KEYS: [&str; 20] = [
     "--capture",
     "--frame",
     "--modes",
     "--axes",
+    "--response",
     "--out",
     "--rated-torque-nm",
     "--rotor-inertia-kgm2",
@@ -187,6 +216,12 @@ const FIT_KEYS: [&str; 13] = [
     "--max-delay-ms",
     "--ripple-period-mm",
     "--drive",
+    "--modal",
+    "--max-mode-accel",
+    "--settle-ms",
+    "--max-mode-vel",
+    "--min-mode-vel",
+    "--dump-rows",
 ];
 
 fn reject_unknown_fit_flags(args: &[String]) {
@@ -215,7 +250,17 @@ fn parse_frame(spec: &str) -> Vec<Vec<f64>> {
 }
 
 fn cmd_fit(args: &[String]) {
+    if args.iter().any(|a| a == "--help") {
+        eprint!("{FIT_USAGE}");
+        return;
+    }
     reject_unknown_fit_flags(args);
+    let response = arg(args, "--response").unwrap_or_else(|| "torque".to_string());
+    if response != "torque" && response != "ferr" {
+        die(&format!(
+            "--response must be \"torque\" or \"ferr\", got {response:?}"
+        ));
+    }
     let frame = parse_frame(&req(args, "--frame"));
     let modes_arg = req(args, "--modes");
     let modes: Vec<&str> = modes_arg.split(',').map(str::trim).collect();
@@ -252,10 +297,43 @@ fn cmd_fit(args: &[String]) {
     }
     prep_opts.ripple_period_mm =
         opt_f64(args, "--ripple-period-mm").or_else(|| opt_f64(args, "--rotation-distance-mm"));
+    for (key, value) in args[2..].chunks(2).filter_map(|c| match c {
+        [k, v] if k == "--modal" => Some((k, v)),
+        _ => None,
+    }) {
+        let _ = key;
+        let parts: Vec<&str> = value.split(':').collect();
+        let [mode_name, fz, zeta] = parts.as_slice() else {
+            die(&format!(
+                "--modal wants <mode>:<freq_hz>:<zeta>, got {value:?}"
+            ));
+        };
+        let mode = modes
+            .iter()
+            .position(|m| m == mode_name)
+            .unwrap_or_else(|| {
+                die(&format!(
+                    "--modal mode {mode_name:?} not in --modes {modes:?}"
+                ))
+            });
+        prep_opts.modal.push(ModalMode {
+            mode,
+            freq_hz: fz
+                .parse()
+                .unwrap_or_else(|_| die(&format!("--modal frequency {fz:?} is not a number"))),
+            zeta: zeta
+                .parse()
+                .unwrap_or_else(|_| die(&format!("--modal zeta {zeta:?} is not a number"))),
+        });
+    }
 
     let cap = Scap::load(&capture_path).unwrap_or_else(|e| die(&e));
     let fit_cap = scap_to_capture(&cap, &axes).unwrap_or_else(|e| die(&e));
-    let (prepared, stats) = prepare(&fit_cap, &structure, &prep_opts);
+    let mut plateau_opts = PlateauOptions::default();
+    if let Some(v) = opt_f64(args, "--settle-ms") {
+        plateau_opts.settle_s = v / 1000.0;
+    }
+    let (prepared, stats) = prepare(&fit_cap, &structure, &prep_opts, &plateau_opts);
     eprintln!(
         "prep: {} segments, delay {:.2} ms; prep+tracking kept {}/{}, \
          +steady-accel plateaus kept {}/{}",
@@ -282,7 +360,122 @@ fn cmd_fit(args: &[String]) {
         std::process::exit(2);
     }
 
-    let input = fit_input(&structure, &prepared);
+    let mut input = fit_input(&structure, &prepared);
+    let mut kept_t: Vec<f64> = fit_cap
+        .t
+        .iter()
+        .zip(&prepared.keep)
+        .filter(|(_, &k)| k)
+        .map(|(&t, _)| t)
+        .collect();
+    let max_a = opt_f64(args, "--max-mode-accel");
+    let max_v = opt_f64(args, "--max-mode-vel");
+    let min_v = opt_f64(args, "--min-mode-vel");
+    if max_a.is_some() || max_v.is_some() || min_v.is_some() {
+        let n_before = input.acc_mode.first().map_or(0, Vec::len);
+        let row_peak = |cols: &[Vec<f64>], i: usize| -> f64 {
+            cols.iter().fold(0.0_f64, |m, c| m.max(c[i].abs()))
+        };
+        let rows: Vec<usize> = (0..n_before)
+            .filter(|&i| {
+                let a = row_peak(&input.acc_mode, i);
+                let v = row_peak(&input.vel_mode, i);
+                max_a.is_none_or(|lim| a <= lim)
+                    && max_v.is_none_or(|lim| v <= lim)
+                    && min_v.is_none_or(|lim| v >= lim)
+            })
+            .collect();
+        let pick = |cols: &mut Vec<Vec<f64>>| {
+            for c in cols.iter_mut() {
+                *c = rows.iter().map(|&i| c[i]).collect();
+            }
+        };
+        pick(&mut input.acc_mode);
+        pick(&mut input.vel_mode);
+        pick(&mut input.cs_mode);
+        pick(&mut input.snap_mode);
+        pick(&mut input.torque);
+        pick(&mut input.ferr_mode);
+        pick(&mut input.jerk_mode);
+        for cols in &mut input.extra {
+            pick(cols);
+        }
+        kept_t = rows.iter().map(|&i| kept_t[i]).collect();
+        eprintln!(
+            "row gates (accel <= {max_a:?}, vel <= {max_v:?}, vel >= {min_v:?}): \
+             kept {}/{n_before} fit rows",
+            rows.len()
+        );
+    }
+    if let Some(path) = arg(args, "--dump-rows") {
+        let n = input.acc_mode.first().map_or(0, Vec::len);
+        assert_eq!(kept_t.len(), n, "kept timestamps must align with fit rows");
+        let mut out = String::from("t,");
+        for (name, chans) in [
+            ("acc", &input.acc_mode),
+            ("vel", &input.vel_mode),
+            ("cs", &input.cs_mode),
+            ("snap", &input.snap_mode),
+            ("tq", &input.torque),
+        ] {
+            for i in 0..chans.len() {
+                out.push_str(&format!("{name}_{i},"));
+            }
+        }
+        out.pop();
+        out.push('\n');
+        for k in 0..n {
+            let mut row = format!("{},", kept_t[k]);
+            for chans in [
+                &input.acc_mode,
+                &input.vel_mode,
+                &input.cs_mode,
+                &input.snap_mode,
+                &input.torque,
+            ] {
+                for c in chans.iter() {
+                    row.push_str(&format!("{},", c[k]));
+                }
+            }
+            row.pop();
+            row.push('\n');
+            out.push_str(&row);
+        }
+        std::fs::write(&path, out).unwrap_or_else(|e| die(&format!("write {path}: {e}")));
+        eprintln!("kept fit rows dumped to {path}");
+    }
+    if response == "ferr" {
+        let n = fit_cap.t.len();
+        let project = |chans: &[Vec<f64>]| -> Vec<Vec<f64>> {
+            structure
+                .frame
+                .iter()
+                .map(|row| {
+                    (0..n)
+                        .map(|k| row.iter().zip(chans).map(|(f, chan)| f * chan[k]).sum())
+                        .collect()
+                })
+                .collect()
+        };
+        let ferr_raw = project(&fit_cap.ferr);
+        let acc_raw = project(&fit_cap.acc);
+        let raw_rms: Vec<f64> = ferr_raw
+            .iter()
+            .map(|e| (e.iter().map(|v| v * v).sum::<f64>() / n as f64).sqrt())
+            .collect();
+        let dt = median_dt(&fit_cap.t);
+        let (onset, onset_windows) = onset_bias(&acc_raw, &ferr_raw, dt, 0.008);
+        run_ferr_fit(
+            &structure,
+            &modes,
+            &input,
+            &raw_rms,
+            &onset,
+            onset_windows,
+            &req(args, "--out"),
+        );
+        return;
+    }
     let r = fit(&input, &FitOptions::default()).unwrap_or_else(|e| {
         eprintln!("servo-cal: refusing to emit a profile: {e:?}");
         std::process::exit(2);
@@ -291,8 +484,41 @@ fn cmd_fit(args: &[String]) {
         "fit: {} samples/motor, rms residual {:.2} (0.1% rated), condition {:.1e}",
         r.samples, r.rms_residual, r.condition
     );
+    for (m, (c, mode)) in r.snap_params.iter().zip(&modes).enumerate() {
+        let se = r
+            .param_stderr
+            .get(structure.param_count() + m)
+            .copied()
+            .unwrap_or(f64::NAN);
+        match prep_opts.modal.iter().find(|mm| mm.mode == m) {
+            Some(mm) => {
+                let wz = 2.0 * std::f64::consts::PI * mm.freq_hz;
+                let coupled = c * wz * wz;
+                let frac = if r.params.mass[m] > 0.0 {
+                    100.0 * coupled / r.params.mass[m]
+                } else {
+                    f64::NAN
+                };
+                eprintln!(
+                    "modal snap (mode {mode}, fz {:.1} Hz zeta {:.3}): {c:.3e} ± {se:.1e} \
+                     — coupled mass {coupled:.3e} ({frac:.1}% of fitted mass)",
+                    mm.freq_hz, mm.zeta
+                );
+            }
+            None => {
+                let fz = if r.params.mass[m] > 0.0 && *c < 0.0 {
+                    (r.params.mass[m] / -c).sqrt() / (2.0 * std::f64::consts::PI)
+                } else {
+                    f64::NAN
+                };
+                eprintln!(
+                    "snap (mode {mode}): {c:.3e} ± {se:.1e} (implied fz upper bound {fz:.0} Hz)",
+                );
+            }
+        }
+    }
     let full = full_fit_input(&structure, &prepared);
-    let full_residual = residual_by_motor(&full, &r.params, &r.extra_params);
+    let full_residual = residual_by_motor(&full, &r.params, &r.snap_params, &r.extra_params);
     if prep_opts.cutoff_hz > 0.0 {
         let inband = band_limited_rms(
             &full_residual,
@@ -344,7 +570,7 @@ fn cmd_fit(args: &[String]) {
         return;
     }
 
-    let per_motor = residual_by_motor(&input, &r.params, &r.extra_params);
+    let per_motor = residual_by_motor(&input, &r.params, &r.snap_params, &r.extra_params);
     let rms: Vec<f64> = per_motor
         .iter()
         .map(|res| (res.iter().map(|e| e * e).sum::<f64>() / res.len() as f64).sqrt())
@@ -353,4 +579,61 @@ fn cmd_fit(args: &[String]) {
     let out = req(args, "--out");
     std::fs::write(&out, profile).unwrap_or_else(|e| die(&format!("write {out}: {e}")));
     eprintln!("profile written to {out}");
+}
+
+fn run_ferr_fit(
+    structure: &Structure,
+    modes: &[&str],
+    input: &FitInput,
+    raw_rms: &[f64],
+    onset: &[f64],
+    onset_windows: usize,
+    out_path: &str,
+) {
+    let r = fit_ferr(input, &FitOptions::default()).unwrap_or_else(|e| {
+        eprintln!("servo-cal: refusing to emit a ferr fit: {e:?}");
+        std::process::exit(2);
+    });
+    for (k, mode) in modes.iter().enumerate() {
+        eprintln!(
+            "ferr-fit mode {mode}: mass={:+.3e} (se {:.2e}) viscous={:+.3e} (se {:.2e}) \
+             coulomb={:+.3e} (se {:.2e}) rms={:.3e}mm raw_rms={:.3e}mm samples={}",
+            r.params.mass[k],
+            r.param_stderr[3 * k],
+            r.params.viscous[k],
+            r.param_stderr[3 * k + 1],
+            r.params.coulomb[k],
+            r.param_stderr[3 * k + 2],
+            r.ferr_rms[k],
+            raw_rms[k],
+            r.samples,
+        );
+        eprintln!(
+            "ferr-fit mode {mode}: onset bias {:+.2}um over {onset_windows} \
+             accel steps ({})",
+            onset[k] * 1e3,
+            if onset[k] > 0.0 {
+                "initially lags - feedforward under-feeds"
+            } else if onset[k] < 0.0 {
+                "initially overshoots - feedforward over-feeds"
+            } else {
+                "no onset signal"
+            },
+        );
+        if let Some(j) = r.jerk.get(k) {
+            let skew_us = if r.params.mass[k] != 0.0 {
+                -j / r.params.mass[k] * 1e6
+            } else {
+                f64::NAN
+            };
+            eprintln!(
+                "ferr-fit mode {mode}: jerk={j:+.3e} (se {:.2e}, implied \
+                 command->ferr skew {skew_us:+.0} us)",
+                r.jerk_stderr[k],
+            );
+        }
+    }
+    let json = render_ferr_json(structure, modes, &r, raw_rms, onset, onset_windows);
+    std::fs::write(out_path, json).unwrap_or_else(|e| die(&format!("write {out_path}: {e}")));
+    eprintln!("ferr fit written to {out_path}");
 }
