@@ -87,12 +87,18 @@ class RefineCommands(MeasureCommands):
     def _load_baseline_dynamics(
         self, gcmd: Any, node: Any
     ) -> tuple[str, dict[str, Any]]:
-        profile_path = gcmd.get("PROFILE", None) or node.get_dynamics_profile()
+        explicit = gcmd.get("PROFILE", None)
+        profile_path = explicit or node.get_live_dynamics_profile()
         if profile_path is None:
             raise gcmd.error(
                 "no baseline dynamics profile - set dynamics_profile on "
                 "[ethercat_node %s] or pass PROFILE= (per-motor profiles "
                 "are not supported by SERVO_REFINE_DYNAMICS)" % (node.name,)
+            )
+        if explicit is None and profile_path != node.get_dynamics_profile():
+            gcmd.respond_info(
+                "baseline: %s (model left live by the previous tune, not "
+                "the configured dynamics_profile)" % (profile_path,)
             )
         profile_path = os.path.expanduser(profile_path)
         try:
@@ -566,6 +572,7 @@ class RefineCommands(MeasureCommands):
             try:
                 if any(a.applied for a in adapters):
                     adapters[0].revert()
+                    node.set_live_dynamics_profile(profile_path)
                     gcmd.respond_info(
                         "live dynamics model restored to baseline %s"
                         % (profile_path,)

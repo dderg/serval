@@ -148,7 +148,7 @@ class CalibrationHost:
             node = self.printer.lookup_object(
                 "ethercat_node " + get_node_name()
             )
-            profile_path = node.get_dynamics_profile()
+            profile_path = node.get_live_dynamics_profile()
             if profile_path is None:
                 leads.add(0.0)
                 continue

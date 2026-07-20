@@ -302,8 +302,10 @@ class DynamicsFitCommands(RefineCommands):
             )
         engine = self.printer.lookup_object("motion_engine")
         restore = None
-        if node.get_dynamics_profile() is not None:
-            _path, restore = self._load_baseline_dynamics(gcmd, node)
+        restore_path = None
+        fit_written_path = None
+        if node.get_live_dynamics_profile() is not None:
+            restore_path, restore = self._load_baseline_dynamics(gcmd, node)
         baseline_lead_us = (
             restore.get("ff_lead_us", 0.0) if restore is not None else 0.0
         )
@@ -516,6 +518,7 @@ class DynamicsFitCommands(RefineCommands):
                         baseline_lead_us,
                     )
                 )
+            fit_written_path = out_path
             run.manifest["dynamics_fit"] = {
                 "rounds": rounds_run,
                 "converged_change": last_change,
@@ -555,11 +558,13 @@ class DynamicsFitCommands(RefineCommands):
                 if applied:
                     if restore is not None:
                         send_dynamics_model(engine, handle, restore)
+                        node.set_live_dynamics_profile(restore_path)
                         gcmd.respond_info(
-                            "live dynamics model restored to configured "
-                            "baseline"
+                            "live dynamics model restored to baseline %s"
+                            % (restore_path,)
                         )
                     else:
+                        node.set_live_dynamics_profile(fit_written_path)
                         gcmd.respond_info(
                             "WARNING: no dynamics_profile configured - the "
                             "last fitted model stays live until RESTART"
@@ -841,9 +846,11 @@ class DynamicsFitCommands(RefineCommands):
         "round budget: the search runs until it converges (kill it if "
         "it overstays). torque_saturated aborts, restores the baseline "
         "and configured lead and writes nothing; resonance_detected "
-        "only warns. The baseline is PROFILE= or the node-level "
+        "only warns. The baseline is PROFILE=, else the model left LIVE "
+        "by the previous tune this session, else the node-level "
         "[ethercat_node] dynamics_profile (per-motor profiles are not "
-        "supported). Params MAX_ACCEL MAX_SPEED STEP (0.15) TERMS "
+        "supported) - chained tunes refine each other's output, not the "
+        "configured profile. Params MAX_ACCEL MAX_SPEED STEP (0.15) TERMS "
         "(mass,viscous,coulomb,lead) NAME (tune) PROFILE "
         "SERVOS BOUND SMALL_SIZE"
     )
@@ -1247,6 +1254,7 @@ class DynamicsFitCommands(RefineCommands):
                         current_lead * 1e6,
                     )
                 )
+            node.set_live_dynamics_profile(out_path)
             run.manifest["dynamics_tune"] = {
                 "terms": [t.lower() for t in terms],
                 "max_accel": max_accel,
@@ -1299,6 +1307,7 @@ class DynamicsFitCommands(RefineCommands):
                             plan["servos"],
                             configured_lead_s,
                         )
+                    node.set_live_dynamics_profile(profile_path)
                     gcmd.respond_info(
                         "live dynamics model restored to baseline %s"
                         % (profile_path,)

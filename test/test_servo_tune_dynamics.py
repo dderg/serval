@@ -422,6 +422,28 @@ def test_tune_dynamics_already_optimal_converges_and_writes_baseline():
 
 
 @requires_tomllib
+def test_tune_dynamics_chains_from_the_previous_tune_not_the_config():
+    sc, _gcode, config_path = make_calibration()
+    sc.fake_rms_fn = quadratic_rms(mass_opt=[0.030, 0.045])
+    node = sc.printer.lookup_object("ethercat_node xy_drives")
+    sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(TERMS="MASS"))
+    first = _manifest_for(sc)["dynamics_tune"]
+    assert node.get_live_dynamics_profile() == first["profile"]
+    assert first["profile"] != config_path
+    sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(TERMS="MASS", NAME="tune2"))
+    run_dir = os.path.dirname(
+        sc.printer.lookup_object("servo_capture").starts[-1][0]
+    )
+    with open(os.path.join(run_dir, "manifest.json")) as f:
+        second = json.load(f)["dynamics_tune"]
+    with open(first["profile"], "rb") as f:
+        first_prof = tomllib.load(f)
+    assert second["rounds"][0]["values"]["mass"] == pytest.approx(
+        first_prof["mass"]
+    ), "second tune must start from the first tune's live result"
+
+
+@requires_tomllib
 def test_tune_dynamics_finds_a_higher_mass_minimum():
     sc, _gcode, _path = make_calibration()
     sc.fake_rms_fn = quadratic_rms(mass_opt=[0.030, 0.045])
