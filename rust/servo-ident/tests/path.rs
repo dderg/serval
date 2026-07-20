@@ -35,13 +35,29 @@ const COREXY_FRAME: [&[f64]; 2] = [&[0.5, -0.5], &[0.5, 0.5]];
 
 #[test]
 fn maps_counts_to_cartesian_mm_through_the_frame() {
-    let cap = corexy_capture(&[(0, 0, 0, 0), (2000, 1000, -500, 500)]);
+    // actual trails commanded by exactly TARGET_TO_ACTUAL_SKEW_CYCLES (=2)
+    // records on the wire; the path pairs cmd[k] with act[k+2] so a
+    // perfectly tracking drive overlays exactly.
+    let cap = corexy_capture(&[
+        (0, 0, 0, 0),
+        (2000, 0, -500, 0),
+        (2000, 0, -500, 0),
+        (2000, 1000, -500, 500),
+    ]);
     let sp = spatial(&["x", "y"], &["motor_a", "motor_b"], &COREXY_FRAME);
     let path = xy_path(&cap, &sp).unwrap().unwrap();
     assert_eq!(path.cmd_x_mm, vec![0.0, 0.5 * 2.0 - 0.5 * -1.0]);
     assert_eq!(path.cmd_y_mm, vec![0.0, 0.5 * 2.0 + 0.5 * -1.0]);
     assert_eq!(path.act_x_mm, vec![0.0, 0.5 * 1.0 - 0.5 * 1.0]);
     assert_eq!(path.act_y_mm, vec![0.0, 0.5 * 1.0 + 0.5 * 1.0]);
+}
+
+#[test]
+fn short_captures_yield_an_empty_path_not_a_panic() {
+    let cap = corexy_capture(&[(0, 0, 0, 0), (1, 1, 1, 1)]);
+    let sp = spatial(&["x", "y"], &["motor_a", "motor_b"], &COREXY_FRAME);
+    let path = xy_path(&cap, &sp).unwrap().unwrap();
+    assert!(path.cmd_x_mm.is_empty());
 }
 
 #[test]
