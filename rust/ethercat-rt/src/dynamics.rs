@@ -1,5 +1,11 @@
 use serde::Deserialize;
 
+/// Must equal `servo_ident::model::COULOMB_DEADBAND_MM_S` — the fit excludes
+/// |v| below this from the coulomb regression, so the runtime ramps through
+/// it (enforced by the profile_contract test; servo-ident stays dev-only
+/// here to keep host-side analysis out of the RT endpoint).
+pub const COULOMB_DEADBAND_MM_S: f32 = 0.5;
+
 pub const ERR_DYNAMICS_BAD_DIM: i32 = -861;
 pub const ERR_DYNAMICS_REJECTED: i32 = -862;
 
@@ -271,7 +277,7 @@ impl DynamicsModel {
             let v_mode: f32 = row.iter().zip(vel_mm_s).map(|(f, v)| f * v).sum();
             let mut mode_force = self.mass[k] * a_mode + self.viscous[k] * v_mode;
             if with_coulomb {
-                mode_force += self.coulomb[k] * strict_sign(v_mode);
+                mode_force += self.coulomb[k] * coulomb_ramp(v_mode);
             }
             tau += row[slot] * mode_force;
             if let Some(pair) = pair {
@@ -405,14 +411,16 @@ fn derive_lambda(
     }
 }
 
-fn strict_sign(v: f32) -> f32 {
-    if v > 0.0 {
-        1.0
-    } else if v < 0.0 {
-        -1.0
-    } else {
-        0.0
-    }
+/// The fit estimates coulomb with `coulomb_sign`'s ±COULOMB_DEADBAND_MM_S
+/// exclusion zone — it makes no claim about friction below that velocity,
+/// where the physical regime is presliding (elastic, far below kinetic).
+/// Applying full ±c down to v=0 with a hard sign therefore over-pushes a
+/// stopping axis through its last half mm/s and then steps the torque by c
+/// in one cycle at the stop — a wobble impulse the loop must absorb. Ramping
+/// through the same deadband keeps the applied model identical to the fitted
+/// one above it and degrades into bounded viscous damping inside it.
+fn coulomb_ramp(v: f32) -> f32 {
+    (v / COULOMB_DEADBAND_MM_S).clamp(-1.0, 1.0)
 }
 
 fn frame_rows_independent(frame: &[f64], n_modes: usize, n_slots: usize) -> bool {

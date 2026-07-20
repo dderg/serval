@@ -605,3 +605,59 @@ fn set_dynamics_model_response_frame_round_trips() {
     let r = SetDynamicsModelResponse::decode(body).unwrap();
     assert_eq!(r.result, -862);
 }
+
+#[test]
+fn set_strain_comp_decodes_into_a_prepared_map() {
+    let msg = SetStrainComp {
+        slot_a: 0,
+        slot_b: 1,
+        lane_a: 0,
+        lane_b: 1,
+        kinematics: 0,
+        nx: 2,
+        ny: 2,
+        x0: 0.0,
+        y0: 0.0,
+        dx: 1.0,
+        dy: 1.0,
+        values_um: vec![0, 100, -100, 50],
+    };
+    let payload = frame_payload(MessageKind::SetStrainComp, 9, &msg.encoded_to_vec());
+    match decode_command(0, &payload).unwrap() {
+        Command::SetStrainComp {
+            correlation_id: 9,
+            prepared,
+        } => {
+            assert_eq!(prepared.grid_rc, 0);
+            assert_eq!(prepared.wire_values, 4);
+            assert_eq!(prepared.values_mm, vec![0.0, 0.1, -0.1, 0.05]);
+        }
+        other => panic!("expected SetStrainComp, got {other:?}"),
+    }
+}
+
+#[test]
+fn set_strain_comp_decode_rejects_an_oversized_offset() {
+    let msg = SetStrainComp {
+        slot_a: 0,
+        slot_b: 1,
+        lane_a: 0,
+        lane_b: 1,
+        kinematics: 0,
+        nx: 1,
+        ny: 2,
+        x0: 0.0,
+        y0: 0.0,
+        dx: 1.0,
+        dy: 1.0,
+        values_um: vec![0, 501],
+    };
+    let payload = frame_payload(MessageKind::SetStrainComp, 10, &msg.encoded_to_vec());
+    match decode_command(0, &payload).unwrap() {
+        Command::SetStrainComp { prepared, .. } => {
+            assert_eq!(prepared.grid_rc, crate::strain_comp::ERR_COMP_BAD_GRID);
+            assert!(prepared.values_mm.is_empty());
+        }
+        other => panic!("expected SetStrainComp, got {other:?}"),
+    }
+}

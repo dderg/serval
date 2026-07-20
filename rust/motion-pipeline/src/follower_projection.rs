@@ -383,16 +383,25 @@ impl FollowerState {
         }
     }
 
+    /// A span shorter than the odometer's float resolution cannot advance
+    /// `s_ingested_end` (`s0 + len` rounds back to `s0`); pushing it would
+    /// mint a zero-width span whose `e_at(s1)` is 0/0, poisoning every
+    /// later span's cumulative `e0`. Its extrusion is below one odometer
+    /// ulp, so dropping it drops nothing representable.
     fn push_span(&mut self, len: f64, r0: f64, r1: f64) {
+        let s1 = self.s_ingested_end + len;
+        if s1 == self.s_ingested_end {
+            return;
+        }
         let e0 = self.spans.last().map_or(0.0, |span| span.e_at(span.s1));
         self.spans.push(RatioSpan {
             s0: self.s_ingested_end,
-            s1: self.s_ingested_end + len,
+            s1,
             r0,
             r1,
             e0,
         });
-        self.s_ingested_end += len;
+        self.s_ingested_end = s1;
     }
 
     fn prune_spans(&mut self) {
@@ -667,3 +676,6 @@ fn adaptive_simpson(
     adaptive_simpson(f, a, m, fa, flm, fm, left, 0.5 * tol, depth - 1)
         + adaptive_simpson(f, m, b, fm, frm, fb, right, 0.5 * tol, depth - 1)
 }
+
+#[cfg(test)]
+mod tests;

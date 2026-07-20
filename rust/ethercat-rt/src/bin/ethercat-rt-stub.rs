@@ -479,11 +479,11 @@ fn main() {
                 }
                 Command::SetStrainComp {
                     correlation_id,
-                    msg,
+                    prepared,
                 } => {
                     eprintln!(
                         "ec-rt-stub: SetStrainComp slots=({},{}) grid={}x{}",
-                        msg.slot_a, msg.slot_b, msg.nx, msg.ny
+                        prepared.slot_a, prepared.slot_b, prepared.nx, prepared.ny
                     );
                     server.respond(&set_strain_comp_response_frame(correlation_id, 0));
                 }

@@ -39,6 +39,7 @@ pub fn scap_to_capture(cap: &Scap, axes: &[&str]) -> Result<Capture, String> {
     let mut vel = Vec::with_capacity(axes.len());
     let mut vel_act = Vec::with_capacity(axes.len());
     let mut torque = Vec::with_capacity(axes.len());
+    let mut ferr = Vec::with_capacity(axes.len());
     for &name in axes {
         let idx = cap
             .drive_index(name)
@@ -48,10 +49,12 @@ pub fn scap_to_capture(cap: &Scap, axes: &[&str]) -> Result<Capture, String> {
         let vel_cmd = cap.read_f64(idx, "vel_cmd")?;
         let velocity_actual = cap.read_f64(idx, "velocity_actual")?;
         let torque_actual = cap.read_f64(idx, "torque_actual")?;
+        let following_error = cap.read_f64(idx, "following_error")?;
         acc.push(keep.iter().map(|&k| accel_cmd[k]).collect());
         vel.push(keep.iter().map(|&k| vel_cmd[k]).collect());
         vel_act.push(keep.iter().map(|&k| velocity_actual[k] / cpm).collect());
         torque.push(keep.iter().map(|&k| torque_actual[k]).collect());
+        ferr.push(keep.iter().map(|&k| following_error[k] / cpm).collect());
     }
     Ok(Capture {
         t,
@@ -59,5 +62,6 @@ pub fn scap_to_capture(cap: &Scap, axes: &[&str]) -> Result<Capture, String> {
         vel,
         vel_act,
         torque,
+        ferr,
     })
 }

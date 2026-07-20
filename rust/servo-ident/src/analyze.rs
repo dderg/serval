@@ -759,6 +759,12 @@ pub fn compute_verdict(
             flags: Vec::new(),
             apply: None,
         }),
+        "dynamics_tune" => Ok(Verdict {
+            recommended_step: None,
+            reason: "parameter steps are computed host-side by SERVO_TUNE_DYNAMICS".to_string(),
+            flags: Vec::new(),
+            apply: None,
+        }),
         "differential" => {
             let first = steps
                 .first()

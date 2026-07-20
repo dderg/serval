@@ -71,8 +71,10 @@ with `cargo build --profile snapshot -p servo-ident` (from `rust/`).
    tuned gains.
 3. **`SERVO_APPLY_GAINS`** then **`SERVO_CALIBRATE_GAINS`** — find the loop
    gains.
-4. **`SERVO_FIT_DYNAMICS`** — fit the dynamic profile at the final gains and
-   point `dynamics_profile` at it to enable torque feedforward.
+4. **`SERVO_FIT_DYNAMICS`** — identify the dynamic profile at the final gains
+   (iteratively, with the candidate feedforward live in the loop on
+   `coupled_xy`) and point `dynamics_profile` at it to enable torque
+   feedforward.
 5. **`SERVO_REFINE_DYNAMICS`** — empirically refine the fitted profile on the
    running endpoint (mass first, then viscous, then coulomb) when the
    regression fit varies with the excitation grid; point `dynamics_profile`
@@ -353,26 +355,64 @@ Params: `AXIS` (X) `START` `END` `X_START` `X_END` `Y_START` `Y_END` `ACCELS`
 ## Fit / inertia-ratio commands
 
 #### SERVO_FIT_DYNAMICS
-Runs the `SERVO_MEASURE_INERTIA` grid, fits one mass/viscous/coulomb triple
-per Cartesian mode (see the model in
-[servo-feedforward.md](servo-feedforward.md)), and writes a timestamped
+Identifies one mass/viscous/coulomb triple per Cartesian mode (see the model
+in [servo-feedforward.md](servo-feedforward.md)) and writes a timestamped
 feedforward profile. Optional `TORQUE_NM` + `INERTIA_KGM2` also print the
-recommended C00.06. The active kinematics decides the frame the fit and the
-profile share:
+recommended C00.06. The active kinematics decides both the frame and the
+identification strategy:
 
-- **`coupled_xy` kinematics**: runs the X+Y grid over every belt drive and
-  fits the x and y modes through the frame matrix built from the kinematics'
-  slot order and invert flags (passed to the fitter as `--frame`/`--modes`;
-  on AWD each belt's drives share its columns and all four drives must sit
-  on one node). The resulting profile goes on
-  `[ethercat_node] dynamics_profile` (node-level, coupled) rather than
-  per-motor.
-- **cartesian kinematics**: fits a single mode with an identity frame. On a
-  multi-drive (AWD) axis `DRIVE=` picks which drive the scalar fit
-  describes — required there, since the capture records every drive.
+- **`coupled_xy` kinematics**: iterative closed-loop identification. Each
+  round runs the `TEST_SPEED`-style XY pattern (always — there is no
+  `PATTERN` option) at half `MAX_ACCEL` with speeds at half and full
+  `MAX_SPEED`, fits the mode-space model through the frame built from the
+  kinematics' slot order and invert flags, then **streams the fitted model
+  into the running endpoint** and re-captures with the feedforward active:
+  with FF in the loop the drives actually track the command, so regressing
+  measured torque against *commanded* kinematics loses its bias, and each
+  round's fit is cleaner than the last. Rounds stop when the parameters move
+  less than `TOL` between fits — measured as a **torque-weighted** change
+  (`|Δm|·a + |Δb|·v + |Δc|` against the model's total feedforward at the
+  excitation ceiling), so a physically negligible flap of a near-zero term
+  cannot block convergence. The converged model is then re-identified once
+  at full `MAX_ACCEL`: parameters that shift more than `DRIFT` there were an
+  artifact of the low-accel operating point, not physics, and the command
+  aborts with both parameter sets. There is no `ACCELS`×`SPEEDS` matrix —
+  give the calibration envelope as `MAX_ACCEL`/`MAX_SPEED` limits (e.g.
+  capped below ringing; they default to the config grid maxima). The live
+  model is restored to the configured `dynamics_profile` afterwards, also
+  on failure; without one the last fitted model stays live until RESTART.
+  The written profile comes from the `MAX_ACCEL` verification fit and goes
+  on `[ethercat_node] dynamics_profile` (node-level, coupled).
 
-Params: as `SERVO_MEASURE_INERTIA` plus `TORQUE_NM` `INERTIA_KGM2` `NAME`
-(ident) `DRIVE`. Captures the grid into a run directory and runs
+  **`TERMS` — identify rich, apply minimal.** All three terms are always
+  *regressed* (the friction columns are nuisance regressors that keep the
+  mass estimate unbiased — drop them from the model and friction torque
+  leaks into mass), but only the `TERMS` list (default `MASS`) is
+  *applied* and written; the rest are zeroed in the profile and recorded
+  as `fitted_viscous`/`fitted_coulomb` provenance keys. Mass-only is the
+  default because acceleration torque is the one demand the loops cannot
+  supply without position error, while with `velocity_ff` on the drive the
+  speed-loop integrator already covers viscous and coulomb torque at all
+  but reversal transients — and an over- or mis-fitted friction FF (full
+  coulomb applied through the near-zero-velocity regime the fit never
+  measures) actively injects error at every stop. Enable
+  `TERMS=MASS,COULOMB` (or the full triple) only when the recorded
+  fitted values are consistently large *and* tracking shows a reversal
+  signature that the mass-only model leaves behind. Convergence and the
+  `DRIFT` gate are evaluated on the applied model only, so a wandering
+  nuisance term cannot block an otherwise settled identification.
+  Params: `TERMS` (MASS) `MAX_ACCEL` `MAX_SPEED` `TOL` (0.05) `DRIFT`
+  (0.15) `MAX_ROUNDS` (4) `ITERATIONS` `DWELL_MS` `BOUND` `SMALL_SIZE`
+  `NAME` (ident) `SERVOS` `TORQUE_NM` `INERTIA_KGM2`.
+- **cartesian kinematics**: single-shot fit of one mode with an identity
+  frame over the `SERVO_MEASURE_INERTIA` grid (a per-motor candidate cannot
+  be streamed into a multi-drive node, so the closed-loop iteration does
+  not apply). On a multi-drive (AWD) axis `DRIVE=` picks which drive the
+  scalar fit describes — required there, since the capture records every
+  drive. Params: as `SERVO_MEASURE_INERTIA` plus `TORQUE_NM` `INERTIA_KGM2`
+  `NAME` `DRIVE`.
+
+Both paths capture into a run directory and run
 `servo-cal fit --capture <step>.scap`; the profile lands in
 `~/printer_data/config/servo_dynamics/dynamics_<name>_<stamp>.toml` and a new
 fit never overwrites an existing profile.

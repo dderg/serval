@@ -24,8 +24,8 @@ use crate::wire::{
 };
 use mcu_protocol::messages::{
     ArmSensorlessEndstop, PushPieces, ResonanceBuzz, SdoRead, SdoReadResponse, SdoWrite,
-    SdoWriteResponse, SetDiffDamper, SetDiffTrim, SetDriveLimits, SetDynamicsModel, SetStrainComp,
-    SetTorque, StartCapture, StopCaptureResponse,
+    SdoWriteResponse, SetDiffDamper, SetDiffTrim, SetDriveLimits, SetDynamicsModel, SetTorque,
+    StartCapture, StopCaptureResponse,
 };
 
 /// Command execution shares the RT thread with the DC exchange, so it must
@@ -199,9 +199,9 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
             }
             Command::SetStrainComp {
                 correlation_id,
-                msg,
+                prepared,
             } => {
-                handle_set_strain_comp(ctx, correlation_id, msg);
+                handle_set_strain_comp(ctx, correlation_id, prepared);
             }
             Command::SetDynamicsModel {
                 correlation_id,
@@ -704,62 +704,52 @@ fn handle_set_diff_trim(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetDiff
         .respond(&set_diff_trim_response_frame(correlation_id, rc));
 }
 
-fn handle_set_strain_comp(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetStrainComp) {
+fn handle_set_strain_comp(
+    ctx: &mut EndpointCtx,
+    correlation_id: u32,
+    prepared: crate::strain_comp::PreparedStrainComp,
+) {
+    let (slot_a, slot_b) = (prepared.slot_a, prepared.slot_b);
+    let (lane_a, lane_b) = (prepared.lane_a, prepared.lane_b);
+    let (kinematics, nx, ny) = (prepared.kinematics, prepared.nx, prepared.ny);
+    let (x0, y0, dx, dy) = (prepared.x0, prepared.y0, prepared.dx, prepared.dy);
+    let wire_values = prepared.wire_values;
     let lane_missing = |lane: u8| !ctx.slave_axes.iter().any(|&a| a == lane);
-    let rc = if msg.nx > 0 && msg.ny > 0 && (lane_missing(msg.lane_a) || lane_missing(msg.lane_b)) {
+    let rc = if nx > 0 && ny > 0 && (lane_missing(lane_a) || lane_missing(lane_b)) {
         crate::rt_eprintln!(
             "ec-rt: SetStrainComp lanes ({}, {}) not present in slave_axes {:?}",
-            msg.lane_a,
-            msg.lane_b,
+            lane_a,
+            lane_b,
             ctx.slave_axes
         );
         ERR_COMP_BAD_LANE
     } else {
-        let values: Vec<i16> = msg
-            .values_um
-            .iter()
-            .map(|&v| v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16)
-            .collect();
-        ctx.comp.set(
-            ctx.num_slaves,
-            msg.slot_a,
-            msg.slot_b,
-            msg.lane_a,
-            msg.lane_b,
-            msg.kinematics,
-            msg.nx,
-            msg.ny,
-            f64::from(msg.x0),
-            f64::from(msg.y0),
-            f64::from(msg.dx),
-            f64::from(msg.dy),
-            &values,
-        )
+        ctx.comp.install(ctx.num_slaves, prepared)
     };
     crate::rt_eprintln!(
         "ec-rt: SetStrainComp slots=({},{}) lanes=({},{}) kin={} grid={}x{} \
          origin=({}, {}) spacing=({}, {}) values={} rc={rc}",
-        msg.slot_a,
-        msg.slot_b,
-        msg.lane_a,
-        msg.lane_b,
-        msg.kinematics,
-        msg.nx,
-        msg.ny,
-        msg.x0,
-        msg.y0,
-        msg.dx,
-        msg.dy,
-        msg.values_um.len(),
+        slot_a,
+        slot_b,
+        lane_a,
+        lane_b,
+        kinematics,
+        nx,
+        ny,
+        x0,
+        y0,
+        dx,
+        dy,
+        wire_values,
     );
     tracing::info!(
         subsystem = "ethercat",
         event = "set_strain_comp",
-        slot_a = msg.slot_a,
-        slot_b = msg.slot_b,
-        nx = msg.nx,
-        ny = msg.ny,
-        values = msg.values_um.len(),
+        slot_a,
+        slot_b,
+        nx,
+        ny,
+        values = wire_values,
         rc,
         "strain compensation map reconfigured"
     );
