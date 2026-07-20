@@ -9,6 +9,8 @@ pub const COULOMB_DEADBAND_MM_S: f32 = 0.5;
 pub const ERR_DYNAMICS_BAD_DIM: i32 = -861;
 pub const ERR_DYNAMICS_REJECTED: i32 = -862;
 
+const FF_LEAD_US_MAX: f64 = 10_000.0;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PairTable {
@@ -30,6 +32,8 @@ struct ProfileFile {
     fit_rms_residual: Vec<f64>,
     #[serde(default)]
     pair: Vec<PairTable>,
+    #[serde(default)]
+    ff_lead_us: f64,
     #[serde(flatten)]
     extra: toml::Table,
 }
@@ -56,6 +60,7 @@ pub enum ProfileError {
     Dim(&'static str),
     NotFinite(&'static str),
     NonPositive(&'static str),
+    FfLeadOutOfRange(f64),
     ZeroFrameRow(usize),
     FrameRankDeficient,
     ForbiddenField(&'static str),
@@ -77,6 +82,7 @@ pub struct DynamicsModel {
     mass: Vec<f32>,
     viscous: Vec<f32>,
     coulomb: Vec<f32>,
+    ff_lead_us: Vec<f64>,
     pairs: Vec<Pair>,
 }
 
@@ -127,7 +133,16 @@ impl DynamicsModel {
             });
         }
         Self::validated(
-            n_slots, n_modes, f.axes, f.modes, frame, f.mass, f.viscous, f.coulomb, &pairs,
+            n_slots,
+            n_modes,
+            f.axes,
+            f.modes,
+            frame,
+            f.mass,
+            f.viscous,
+            f.coulomb,
+            f.ff_lead_us,
+            &pairs,
         )
     }
 
@@ -152,6 +167,7 @@ impl DynamicsModel {
             widen(mass),
             widen(viscous),
             widen(coulomb),
+            0.0,
             pairs,
         )
     }
@@ -166,6 +182,7 @@ impl DynamicsModel {
         mass: Vec<f64>,
         viscous: Vec<f64>,
         coulomb: Vec<f64>,
+        ff_lead_us: f64,
         pairs: &[PairSpec],
     ) -> Result<Self, ProfileError> {
         if axes.len() != n_slots {
@@ -216,6 +233,9 @@ impl DynamicsModel {
                 return Err(ProfileError::NonPositive("coulomb must be non-negative"));
             }
         }
+        if !ff_lead_us.is_finite() || !(0.0..=FF_LEAD_US_MAX).contains(&ff_lead_us) {
+            return Err(ProfileError::FfLeadOutOfRange(ff_lead_us));
+        }
         let pairs = resolve_pairs(&frame, n_slots, n_modes, pairs)?;
         for k in 0..n_modes {
             let row = &frame[k * n_slots..][..n_slots];
@@ -236,6 +256,7 @@ impl DynamicsModel {
             mass: mass.iter().map(|&v| v as f32).collect(),
             viscous: viscous.iter().map(|&v| v as f32).collect(),
             coulomb: coulomb.iter().map(|&v| v as f32).collect(),
+            ff_lead_us: vec![ff_lead_us; n_slots],
             pairs,
         })
     }
@@ -312,6 +333,7 @@ impl DynamicsModel {
         let mut coulomb = Vec::with_capacity(n_modes);
         let mut axes = Vec::with_capacity(n_slots);
         let mut modes = Vec::with_capacity(n_modes);
+        let mut ff_lead_us = Vec::with_capacity(n_slots);
         let mut pairs = Vec::new();
         let mut slot_base = 0usize;
         let mut mode_base = 0usize;
@@ -327,6 +349,7 @@ impl DynamicsModel {
             }
             for s in 0..p.n_slots {
                 axes.push(p.axes[s].clone());
+                ff_lead_us.push(p.ff_lead_us[s]);
             }
             for pair in &p.pairs {
                 pairs.push(Pair {
@@ -348,8 +371,16 @@ impl DynamicsModel {
             mass,
             viscous,
             coulomb,
+            ff_lead_us,
             pairs,
         })
+    }
+
+    pub fn ff_lead_ns(&self) -> Vec<u64> {
+        self.ff_lead_us
+            .iter()
+            .map(|&us| (us * 1000.0).round() as u64)
+            .collect()
     }
 }
 

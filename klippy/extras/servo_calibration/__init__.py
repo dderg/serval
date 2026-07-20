@@ -66,6 +66,7 @@ from .dynamics import (
     scale_dynamics,
     scale_dynamics_mode,
     send_dynamics_model,
+    send_ff_lead,
 )
 from .fit import DynamicsFitCommands
 from .gains import GainCommands
@@ -183,6 +184,7 @@ __all__ = [
     "scale_dynamics",
     "scale_dynamics_mode",
     "send_dynamics_model",
+    "send_ff_lead",
     "structured_log",
     "tomllib",
     "validate_gain_values",

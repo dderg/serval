@@ -51,6 +51,40 @@ fn torque_ff_scalar() {
 }
 
 #[test]
+fn ff_lead_us_absent_defaults_to_zero() {
+    let m = DynamicsModel::from_toml_str(SCALAR).unwrap();
+    assert_eq!(m.ff_lead_ns(), vec![0]);
+}
+
+#[test]
+fn ff_lead_us_present_broadcasts_to_every_slot() {
+    let with_lead = format!("{COREXY}\nff_lead_us = 500.0\n");
+    let m = DynamicsModel::from_toml_str(&with_lead).unwrap();
+    assert_eq!(m.ff_lead_ns(), vec![500_000, 500_000]);
+}
+
+#[test]
+fn ff_lead_us_accepts_fractional_microseconds() {
+    let with_lead = format!("{SCALAR}\nff_lead_us = 100.25\n");
+    let m = DynamicsModel::from_toml_str(&with_lead).unwrap();
+    assert_eq!(m.ff_lead_ns(), vec![100_250]);
+}
+
+#[test]
+fn ff_lead_us_rejects_out_of_range_values() {
+    let negative = format!("{SCALAR}\nff_lead_us = -1.0\n");
+    assert!(matches!(
+        DynamicsModel::from_toml_str(&negative),
+        Err(ProfileError::FfLeadOutOfRange(v)) if v == -1.0
+    ));
+    let too_high = format!("{SCALAR}\nff_lead_us = 10001.0\n");
+    assert!(matches!(
+        DynamicsModel::from_toml_str(&too_high),
+        Err(ProfileError::FfLeadOutOfRange(v)) if v == 10001.0
+    ));
+}
+
+#[test]
 fn torque_ff_reverse_coulomb_is_symmetric_and_zero_at_rest() {
     let m = DynamicsModel::from_toml_str(SCALAR).unwrap();
     let rev = m.torque_ff(0, &[0.0], &[-100.0]);

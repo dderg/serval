@@ -12,7 +12,7 @@ VERDICT_ABORT_FLAGS = frozenset({"torque_saturated", "resonance_detected"})
 
 
 REPO_ROOT = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
 DEFAULT_CAPTURES_ROOT = "~/printer_data/logs/servo_captures"
 DEFAULT_DYNAMICS_DIR = "~/printer_data/config/servo_dynamics"

@@ -80,7 +80,6 @@ encoder_counts_per_rev: 131072  # A6-EC: 131072
 #velocity_ff: True              # stream 60B1h velocity feedforward (kinematic, no profile)
 #dynamics_profile: dynamics_x.toml  # path to profile TOML; enables 60B2h torque FF
 #ff_max_torque: 30.0          # torque-offset ceiling, % of rated (0, 400], default 30.0
-#ff_lead_cycles: 0              # sample FF offsets this many DC cycles ahead, [0, 40]
 #invert_direction: True         # reverse the drive (default False)
 ```
 
@@ -124,24 +123,12 @@ count in each `StatusHeartbeat` (`ff_saturation_count`). Saturation during
 aggressive tuning is expected; persistent saturation on a steady print is a
 miscalibrated profile.
 
-`ff_lead_cycles` (int, default `0`, range [0, 40]): dead-time compensation for
-the feedforward path. The 60B1h/60B2h offsets are sampled this many DC cycles
-ahead of the position target, so the torque they command lands when the
-trajectory demands it instead of one command-to-torque latency later. The
-position target itself is untouched. Measure the latency first (cross-correlate
-`torque_actual` against `torque_offset` in a tracking capture), then set the
-lead to the transport share of it — leading past the true latency flips the
-sign of the edge error. Lookahead past the end of the streamed trajectory, or
-into a dwell gap, reads as a stationary target (zero FF), which is the same
-thing the un-led path converges to. The option is per-motor because the
-latency it compensates is a per-drive property.
-
 On a coupled node (node-level `dynamics_profile`) every motor's torque FF
 mixes all motors' commanded kinematics, so asymmetry in the FF path skews the
 shared model instead of tuning one motor. The per-motor FF options —
-`velocity_ff`, `ff_max_torque`, `ff_lead_cycles` (the
-`COUPLED_UNIFORM_OPTIONS` list in `ethercat_node.py`) — must therefore be
-identical across the node's motors; a mismatch is a config error.
+`velocity_ff`, `ff_max_torque` (the `COUPLED_UNIFORM_OPTIONS` list in
+`ethercat_node.py`) — must therefore be identical across the node's motors;
+a mismatch is a config error.
 
 ## Dynamics profile TOML
 
@@ -160,11 +147,29 @@ mass = [0.0123, 0.0119]      # m per mode, (0.1% rated)/(mm/s²)
 viscous = [0.09, 0.11]       # b per mode
 coulomb = [160.0, 175.0]     # c per mode, symmetric magnitude
 fit_rms_residual = [0.8, 0.7, 0.8, 0.9]  # per motor, 0.1% rated — fit quality, informational
+ff_lead_us = 0.0             # optional; dead-time compensation, microseconds [0, 10000], default 0.0
 
 [[pair]]                                  # optional; one record per AWD belt
 slots = ["motor_a", "motor_a1"]           # order defines the coefficient sign
 direction_split = -0.125                  # signed, finite, abs(value) < 0.5
 ```
+
+`ff_lead_us` (float, default `0.0`, range `[0, 10000]`): dead-time
+compensation for the feedforward path, in microseconds. The 60B1h/60B2h
+offsets are sampled this far ahead of the position target, so the torque
+they command lands when the trajectory demands it instead of one
+command-to-torque latency later. The position target itself is untouched.
+The value is continuous — the endpoint peeks the commanded curve at an
+arbitrary future nanosecond, so it is not quantized to whole DC cycles —
+and `SERVO_TUNE_DYNAMICS TERMS=LEAD` finds it empirically (or measure it
+by cross-correlating `torque_actual` against `torque_offset` in a
+tracking capture); leading past the true latency flips the sign of the
+edge error. Lookahead past the end of the streamed trajectory, or into a
+dwell gap, reads as a stationary target (zero FF — the same zero-order
+hold the un-led path converges to). A profile may carry only
+`ff_lead_us` with zero `viscous`/`coulomb` (`mass` stays positive) — a
+timing-only profile that compensates dead time without contributing any
+meaningful torque feedforward.
 
 Validation rules (any failure = hard claim error):
 - `version` must equal 6 — older profiles are not supported; refit with
@@ -178,6 +183,7 @@ Validation rules (any failure = hard claim error):
   with exactly equal or opposite frame columns; `direction_split` is finite
   and has absolute value below `0.5`
 - `n_slots` must equal the endpoint's slot count
+- `ff_lead_us`, when present, must be finite and within `[0, 10000]`
 
 ## Identification workflow
 

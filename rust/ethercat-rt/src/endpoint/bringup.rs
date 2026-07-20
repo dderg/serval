@@ -165,7 +165,11 @@ struct SlaveColumns {
 }
 
 impl SlaveColumns {
-    fn from(slaves: &[SlaveCfg], cycle_us: i64) -> Self {
+    fn from(
+        slaves: &[SlaveCfg],
+        cycle_us: i64,
+        dynamics: Option<&crate::dynamics::DynamicsModel>,
+    ) -> Self {
         let cmd_counts_per_mm: Vec<f64> = slaves
             .iter()
             .map(|s| {
@@ -190,10 +194,9 @@ impl SlaveColumns {
             axes: slaves.iter().map(|s| s.axis).collect(),
             velocity_ff: slaves.iter().map(|s| s.velocity_ff).collect(),
             torque_clamp_tenths: slaves.iter().map(|s| s.torque_clamp_tenths).collect(),
-            ff_lead_ns: slaves
-                .iter()
-                .map(|s| u64::from(s.ff_lead_cycles) * (cycle_us as u64) * 1000)
-                .collect(),
+            ff_lead_ns: dynamics
+                .map(|d| d.ff_lead_ns())
+                .unwrap_or_else(|| vec![0u64; slaves.len()]),
             jump_log_counts,
         }
     }
@@ -272,7 +275,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
 
     let num_slaves = slaves.len();
     let mut drive: Box<dyn DriveChain> = Box::new(FfiDriveChain);
-    let columns = SlaveColumns::from(&slaves, cycle_us);
+    let columns = SlaveColumns::from(&slaves, cycle_us, dynamics.as_ref());
 
     let cycle_ns = cycle_us * 1000;
     let telemetry_period = u64::try_from(cycle_us)

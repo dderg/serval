@@ -72,10 +72,26 @@ pub struct Manifest {
     #[serde(default)]
     pub stroke_plan: Value,
     #[serde(default)]
+    pub ff_lead_us: f64,
+    /// Legacy manifests recorded the lead as whole DC cycles; the capture
+    /// samples once per cycle, so the value doubles as a sample count.
+    #[serde(default)]
     pub ff_lead_cycles: u64,
     #[serde(default)]
     pub spatial: Option<ManifestSpatial>,
     pub steps: Vec<Step>,
+}
+
+impl Manifest {
+    /// FF-lead window offset in capture samples: the µs field scaled by the
+    /// capture rate, falling back to the legacy whole-cycle count.
+    pub fn ff_lead_samples(&self, fs: f64) -> usize {
+        if self.ff_lead_us > 0.0 {
+            (self.ff_lead_us * 1e-6 * fs).round() as usize
+        } else {
+            self.ff_lead_cycles as usize
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]

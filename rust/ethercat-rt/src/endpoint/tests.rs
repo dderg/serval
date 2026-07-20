@@ -870,6 +870,70 @@ fn seed_completes_immediately_on_an_empty_ring() {
     assert_eq!(anchor_mm, 2.0);
 }
 
+fn connect_test_client(ctx: &mut EndpointCtx, name: &str) -> std::os::unix::net::UnixStream {
+    let sock = std::env::temp_dir().join(format!("ec-rt-test-{}-{name}.sock", std::process::id()));
+    let client = std::os::unix::net::UnixStream::connect(&sock).expect("connect test client");
+    client
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .expect("set read timeout");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !ctx.server.client_connected() {
+        ctx.server.pump();
+        assert!(
+            std::time::Instant::now() < deadline,
+            "server never accepted the test client"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    client
+}
+
+fn read_set_ff_lead_response(
+    client: &mut std::os::unix::net::UnixStream,
+) -> mcu_protocol::messages::SetFfLeadResponse {
+    use std::io::Read;
+    let mut buf = [0u8; 256];
+    let n = client.read(&mut buf).expect("read response");
+    let (chan, payload) = mcu_transport::frame::decode_frame(&buf[..n]).expect("decode frame");
+    assert_eq!(chan, mcu_transport::frame::CHANNEL_CONTROL);
+    let (hdr, body) =
+        mcu_transport::wire_helpers::decode_message_header(payload).expect("decode header");
+    assert_eq!(
+        mcu_protocol::messages::MessageKind::from_u16(hdr.kind_raw),
+        Some(mcu_protocol::messages::MessageKind::SetFfLeadResponse)
+    );
+    mcu_protocol::messages::SetFfLeadResponse::decode(body).expect("decode response")
+}
+
+#[test]
+fn handle_set_ff_lead_updates_slot_and_responds_ok() {
+    let name = "ff-lead-ok";
+    let mut ctx = test_ctx(name);
+    let mut client = connect_test_client(&mut ctx, name);
+    let msg = mcu_protocol::messages::SetFfLead {
+        slot: 0,
+        lead_ns: 12_345,
+    };
+    super::commands::handle_set_ff_lead(&mut ctx, 9, msg);
+    assert_eq!(ctx.ff_lead_ns[0], 12_345);
+    assert_eq!(ctx.ff_lead_ns[1], 0);
+    assert_eq!(read_set_ff_lead_response(&mut client).result, 0);
+}
+
+#[test]
+fn handle_set_ff_lead_invalid_slot_leaves_vector_untouched() {
+    let name = "ff-lead-bad-slot";
+    let mut ctx = test_ctx(name);
+    let mut client = connect_test_client(&mut ctx, name);
+    let msg = mcu_protocol::messages::SetFfLead {
+        slot: NUM_SLAVES as u8,
+        lead_ns: 999,
+    };
+    super::commands::handle_set_ff_lead(&mut ctx, 3, msg);
+    assert_eq!(ctx.ff_lead_ns, vec![0; NUM_SLAVES]);
+    assert_eq!(read_set_ff_lead_response(&mut client).result, -309);
+}
+
 #[test]
 fn late_frame_is_counted_but_not_faulted_without_tolerance() {
     let mut ctx = test_ctx("late-no-tol");

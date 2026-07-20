@@ -820,7 +820,7 @@ def main(argv=None):
         "(default 1400); samples at/above it count as railed",
     )
     p.add_argument(
-        "--ff-lead-cycles",
+        "--ff-lead-samples",
         type=int,
         default=0,
         help="cycles the host sends torque feedforward ahead of the "
@@ -894,7 +894,7 @@ def main(argv=None):
             args.settle_band,
             args.torque_limit,
             fs=fs,
-            ff_lead_samples=args.ff_lead_cycles,
+            ff_lead_samples=args.ff_lead_samples,
         )
         _print_metrics(m, counts_per_mm)
         if args.fft:

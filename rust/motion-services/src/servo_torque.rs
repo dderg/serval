@@ -6,8 +6,9 @@ use mcu_protocol::messages::{
     ArmSensorlessEndstop, ArmSensorlessEndstopResponse, MessageKind, ResonanceBuzz,
     ResonanceBuzzResponse, RestoreDriveLimits, RestoreDriveLimitsResponse, SeedServoHome,
     SeedServoHomeResponse, SetDiffDamper, SetDiffDamperResponse, SetDiffTrim, SetDiffTrimResponse,
-    SetDriveLimits, SetDriveLimitsResponse, SetDynamicsModel, SetDynamicsModelResponse,
-    SetStrainComp, SetStrainCompResponse, SetTorque, SetTorqueResponse, StopResponse,
+    SetDriveLimits, SetDriveLimitsResponse, SetDynamicsModel, SetDynamicsModelResponse, SetFfLead,
+    SetFfLeadResponse, SetStrainComp, SetStrainCompResponse, SetTorque, SetTorqueResponse,
+    StopResponse,
 };
 
 use crate::servo_call::mcu_typed_call;
@@ -159,6 +160,21 @@ pub fn send_set_diff_damper(conn: &McuSerialConn, damper: SetDiffDamper) -> Resu
         MessageKind::SetDiffDamperResponse,
         body,
         SET_DIFF_DAMPER_TIMEOUT,
+    )?;
+    Ok(r.result)
+}
+
+const SET_FF_LEAD_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub fn send_set_ff_lead(conn: &McuSerialConn, lead: SetFfLead) -> Result<i32, String> {
+    let body = lead.encoded_to_vec();
+    let r: SetFfLeadResponse = mcu_typed_call(
+        conn,
+        "SetFfLead",
+        MessageKind::SetFfLead,
+        MessageKind::SetFfLeadResponse,
+        body,
+        SET_FF_LEAD_TIMEOUT,
     )?;
     Ok(r.result)
 }

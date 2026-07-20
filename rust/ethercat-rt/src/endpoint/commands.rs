@@ -19,13 +19,14 @@ use crate::wire::{
     resume_stream_response_frame, runtime_caps_response_frame, sdo_read_response_frame,
     sdo_write_response_frame, seed_servo_home_response_frame, set_diff_damper_response_frame,
     set_diff_trim_response_frame, set_drive_limits_response_frame,
-    set_dynamics_model_response_frame, set_strain_comp_response_frame, set_torque_response_frame,
-    start_capture_response_frame, stop_capture_response_frame, stop_response_frame, Command,
+    set_dynamics_model_response_frame, set_ff_lead_response_frame, set_strain_comp_response_frame,
+    set_torque_response_frame, start_capture_response_frame, stop_capture_response_frame,
+    stop_response_frame, Command,
 };
 use mcu_protocol::messages::{
     ArmSensorlessEndstop, PushPieces, ResonanceBuzz, SdoRead, SdoReadResponse, SdoWrite,
-    SdoWriteResponse, SetDiffDamper, SetDiffTrim, SetDriveLimits, SetDynamicsModel, SetTorque,
-    StartCapture, StopCaptureResponse,
+    SdoWriteResponse, SetDiffDamper, SetDiffTrim, SetDriveLimits, SetDynamicsModel, SetFfLead,
+    SetTorque, StartCapture, StopCaptureResponse,
 };
 
 /// Command execution shares the RT thread with the DC exchange, so it must
@@ -54,6 +55,7 @@ fn command_name(cmd: &Command) -> &'static str {
         Command::SetDiffTrim { .. } => "SetDiffTrim",
         Command::SetStrainComp { .. } => "SetStrainComp",
         Command::SetDynamicsModel { .. } => "SetDynamicsModel",
+        Command::SetFfLead { .. } => "SetFfLead",
         Command::SdoRead { .. } => "SdoRead",
         Command::SdoWrite { .. } => "SdoWrite",
         Command::QueryMotorState { .. } => "QueryMotorState",
@@ -208,6 +210,12 @@ pub(super) fn dispatch_commands(ctx: &mut EndpointCtx) -> ControlFlow<()> {
                 msg,
             } => {
                 handle_set_dynamics_model(ctx, correlation_id, msg);
+            }
+            Command::SetFfLead {
+                correlation_id,
+                msg,
+            } => {
+                handle_set_ff_lead(ctx, correlation_id, msg);
             }
             Command::SdoRead {
                 correlation_id,
@@ -399,6 +407,34 @@ fn handle_set_drive_limits(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetD
             restore: false,
         });
     }
+}
+
+pub(super) fn handle_set_ff_lead(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetFfLead) {
+    let num_slaves = ctx.num_slaves;
+    if msg.slot as usize >= num_slaves {
+        crate::rt_eprintln!(
+            "ec-rt: SetFfLead for slot {} but only {num_slaves} slave(s)",
+            msg.slot
+        );
+        ctx.server
+            .respond(&set_ff_lead_response_frame(correlation_id, -309));
+        return;
+    }
+    ctx.ff_lead_ns[msg.slot as usize] = msg.lead_ns;
+    crate::rt_eprintln!(
+        "ec-rt: SetFfLead slot={} lead_ns={} rc=0",
+        msg.slot,
+        msg.lead_ns
+    );
+    tracing::info!(
+        subsystem = "ethercat",
+        event = "set_ff_lead",
+        slot = msg.slot,
+        lead_ns = msg.lead_ns,
+        "feedforward lead updated"
+    );
+    ctx.server
+        .respond(&set_ff_lead_response_frame(correlation_id, 0));
 }
 
 fn handle_restore_drive_limits(ctx: &mut EndpointCtx, correlation_id: u32, slot: u8) {

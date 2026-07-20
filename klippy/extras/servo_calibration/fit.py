@@ -24,6 +24,7 @@ from .dynamics import (
     parse_dynamics_profile,
     render_fit_dynamics_toml,
     send_dynamics_model,
+    send_ff_lead,
 )
 from .search import RmsLineSearch
 from .sweep import ExperimentRun, SweepStep
@@ -301,6 +302,9 @@ class DynamicsFitCommands(RefineCommands):
         restore = None
         if node.get_dynamics_profile() is not None:
             _path, restore = self._load_baseline_dynamics(gcmd, node)
+        baseline_lead_us = (
+            restore.get("ff_lead_us", 0.0) if restore is not None else 0.0
+        )
         max_accel = gcmd.get_float("MAX_ACCEL", max(self.accels), above=0.0)
         max_speed = gcmd.get_float("MAX_SPEED", max(self.speeds), above=0.0)
         tol = gcmd.get_float("TOL", 0.05, above=0.0)
@@ -503,7 +507,11 @@ class DynamicsFitCommands(RefineCommands):
             with open(out_path, "w") as f:
                 f.write(
                     render_fit_dynamics_toml(
-                        verified, verified_full, terms, run.run_dir
+                        verified,
+                        verified_full,
+                        terms,
+                        run.run_dir,
+                        baseline_lead_us,
                     )
                 )
             run.manifest["dynamics_fit"] = {
@@ -787,18 +795,27 @@ class DynamicsFitCommands(RefineCommands):
         "parabolic refine through the bracket; ties go to the best "
         "measured value. Viscous/coulomb are floored at zero (a "
         "zero-valued term probes up by a fixed floor step), mass at 10%% "
-        "of its baseline. Passes over the terms repeat until a full "
-        "pass improves nothing, then the best model is written as a "
-        "dynamics TOML and left LIVE (point [ethercat_node] "
+        "of its baseline. TERMS=LEAD tunes the feedforward LEAD TIME as "
+        "one shared node-global value (seconds, continuous - the "
+        "endpoint peeks the command ring at an arbitrary future "
+        "nanosecond, so it is not quantized to whole cycles): scored on "
+        "the mean of both modes' rms, first direction from the summed "
+        "onset bias (positive = FF lands late = probe up), floored at "
+        "zero with a half-cycle floor step. The tuned lead stays live "
+        "until RESTART; the written dynamics TOML always carries "
+        "ff_lead_us (tuned when LEAD is in TERMS, else the baseline "
+        "value passes through). Passes over the terms repeat until a "
+        "full pass improves nothing, then the best model is written as "
+        "a dynamics TOML and left LIVE (point [ethercat_node] "
         "dynamics_profile at it and RESTART to keep it). There is no "
         "round budget: the search runs until it converges (kill it if "
         "it overstays). torque_saturated aborts, restores the baseline "
-        "and writes nothing; resonance_detected only warns. The "
-        "baseline is PROFILE= or the node-level [ethercat_node] "
-        "dynamics_profile (per-motor profiles are not supported). Params "
-        "MAX_ACCEL MAX_SPEED STEP (0.15) TOL_UM (0.05) "
-        "TERMS (mass,viscous,coulomb) NAME (tune) PROFILE SERVOS BOUND "
-        "SMALL_SIZE"
+        "and configured lead and writes nothing; resonance_detected "
+        "only warns. The baseline is PROFILE= or the node-level "
+        "[ethercat_node] dynamics_profile (per-motor profiles are not "
+        "supported). Params MAX_ACCEL MAX_SPEED STEP (0.15) TOL_UM "
+        "(0.05) TERMS (mass,viscous,coulomb,lead) NAME (tune) PROFILE "
+        "SERVOS BOUND SMALL_SIZE"
     )
 
     def cmd_SERVO_TUNE_DYNAMICS(self, gcmd: Any) -> None:
@@ -831,14 +848,18 @@ class DynamicsFitCommands(RefineCommands):
             )
         terms = [
             t.strip().upper()
-            for t in gcmd.get("TERMS", "MASS,VISCOUS,COULOMB").split(",")
+            for t in gcmd.get("TERMS", "MASS,VISCOUS,COULOMB,LEAD").split(",")
             if t.strip()
         ]
-        if not terms or any(t not in DYNAMICS_TERM_KEYS for t in terms):
+        allowed_terms = set(DYNAMICS_TERM_KEYS) | {"LEAD"}
+        if not terms or any(t not in allowed_terms for t in terms):
             raise gcmd.error(
                 "TERMS must be a comma list drawn from MASS, VISCOUS, "
-                "COULOMB (got %r)" % (gcmd.get("TERMS", ""),)
+                "COULOMB, LEAD (got %r)" % (gcmd.get("TERMS", ""),)
             )
+        lead_enabled = "LEAD" in terms
+        cycle_us = node.get_cycle_us()
+        configured_lead_s = baseline.get("ff_lead_us", 0.0) * 1e-6
         max_accel = gcmd.get_float("MAX_ACCEL", max(self.accels), above=0.0)
         max_speed = gcmd.get_float("MAX_SPEED", max(self.speeds), above=0.0)
         step_frac = gcmd.get_float("STEP", 0.15, minval=0.02, maxval=0.5)
@@ -859,6 +880,7 @@ class DynamicsFitCommands(RefineCommands):
             "terms": [t.lower() for t in terms],
             "iterations": iterations,
             "dwell_ms": dwell,
+            "lead_us": configured_lead_s * 1e6 if lead_enabled else None,
         }
         stroke_plan.update(pattern_plan)
         run = self._begin_run(
@@ -889,21 +911,29 @@ class DynamicsFitCommands(RefineCommands):
             run.record_step(SweepStep(step, {"accel": max_accel}, []))
 
         current = _copy_dynamics(baseline)
+        current_lead = configured_lead_s
         rounds_history: list[dict[str, Any]] = []
         search_summaries: list[dict[str, Any]] = []
         measured: dict[tuple[float, ...], dict[str, Any]] = {}
         applied = False
         success = False
 
-        def model_key(values: Mapping[str, Any]) -> tuple[float, ...]:
-            return tuple(
+        def model_key(
+            values: Mapping[str, Any], lead_s: float
+        ) -> tuple[float, ...]:
+            coeffs = tuple(
                 float(v)
                 for term in ("MASS", "VISCOUS", "COULOMB")
                 for v in values[DYNAMICS_TERM_KEYS[term]]
             )
+            return coeffs + (round(lead_s * 1e9),)
 
-        def measure(round_i: int, trial: dict[str, Any]) -> dict[str, Any]:
+        def measure(
+            round_i: int, trial: dict[str, Any], lead_s: float
+        ) -> dict[str, Any]:
             send_dynamics_model(engine, handle, trial)
+            if lead_enabled:
+                send_ff_lead(engine, handle, node, plan["servos"], lead_s)
             step = "tune_r%d" % (round_i,)
             capture_round(step)
             results = self._run_analyze(gcmd, run, incremental=True)
@@ -960,34 +990,49 @@ class DynamicsFitCommands(RefineCommands):
             round_i = 0
             while True:
                 term = terms[phase_idx]
-                key = DYNAMICS_TERM_KEYS[term]
+                is_lead = term == "LEAD"
+                key = None if is_lead else DYNAMICS_TERM_KEYS[term]
                 trial = _copy_dynamics(current)
+                trial_lead = current_lead
                 if searches is not None:
-                    for mode, search in searches.items():
-                        idx = baseline_modes.index(mode)
-                        trial[key][idx] = (
+                    if is_lead:
+                        search = searches["xy"]
+                        trial_lead = (
                             search.best if search.done else search.trial
                         )
-                cache_key = model_key(trial)
+                    else:
+                        for mode, search in searches.items():
+                            idx = baseline_modes.index(mode)
+                            trial[key][idx] = (
+                                search.best if search.done else search.trial
+                            )
+                cache_key = model_key(trial, trial_lead)
                 cached = measured.get(cache_key)
                 if cached is None:
                     applied = True
-                    cached = measure(round_i, trial)
+                    cached = measure(round_i, trial, trial_lead)
                     measured[cache_key] = cached
                     rms = cached["rms"]
                     label = "baseline" if searches is None else term.lower()
-                    line = " | ".join(
-                        "%s %s=%.6g rms=%.2fum (onset %+.2fum, g=%+.3g)"
-                        % (
-                            mode,
-                            key,
-                            trial[key][baseline_modes.index(mode)],
-                            rms[fit_idx] * 1e3,
-                            cached["onset"][fit_idx] * 1e3,
-                            cached["coef"][key][fit_idx],
+                    if is_lead:
+                        line = "xy lead=%.1fus rms=%.2fum (onset %+.2fum)" % (
+                            trial_lead * 1e6,
+                            sum(rms) / len(rms) * 1e3,
+                            sum(cached["onset"]) * 1e3,
                         )
-                        for fit_idx, mode in enumerate(plan["modes"])
-                    )
+                    else:
+                        line = " | ".join(
+                            "%s %s=%.6g rms=%.2fum (onset %+.2fum, g=%+.3g)"
+                            % (
+                                mode,
+                                key,
+                                trial[key][baseline_modes.index(mode)],
+                                rms[fit_idx] * 1e3,
+                                cached["onset"][fit_idx] * 1e3,
+                                cached["coef"][key][fit_idx],
+                            )
+                            for fit_idx, mode in enumerate(plan["modes"])
+                        )
                     gcmd.respond_info("r%d [%s] %s" % (round_i, label, line))
                     rounds_history.append(
                         {
@@ -998,7 +1043,11 @@ class DynamicsFitCommands(RefineCommands):
                                     trial[DYNAMICS_TERM_KEYS[t]]
                                 )
                                 for t in terms
+                                if t != "LEAD"
                             },
+                            "lead_us": (
+                                trial_lead * 1e6 if lead_enabled else None
+                            ),
                             "ferr_rms_raw": list(rms),
                             "coef": dict(cached["coef"]),
                             "stderr": dict(cached["stderr"]),
@@ -1010,30 +1059,56 @@ class DynamicsFitCommands(RefineCommands):
                 rms = cached["rms"]
                 if searches is None:
                     searches = {}
-                    for fit_idx, mode in enumerate(plan["modes"]):
-                        idx = baseline_modes.index(mode)
-                        value = current[key][idx]
-                        if term == "MASS":
-                            lo = TUNE_MASS_FLOOR_FRACTION * baseline[key][idx]
-                            step_size = step_frac * abs(value)
-                        else:
-                            lo = 0.0
-                            step_size = (
-                                step_frac * abs(value)
-                                if value != 0.0
-                                else TUNE_ZERO_FLOOR_STEPS[term]
-                            )
-                        hint = float(cached["coef"][key][fit_idx])
-                        if term == "MASS" and cached["onset"][fit_idx] != 0.0:
-                            hint = cached["onset"][fit_idx]
-                        searches[mode] = RmsLineSearch(
-                            value,
-                            rms[fit_idx],
+                    if is_lead:
+                        hint = sum(cached["onset"])
+                        step_size = (
+                            step_frac * current_lead
+                            if current_lead > 0.0
+                            else 0.5 * cycle_us * 1e-6
+                        )
+                        searches["xy"] = RmsLineSearch(
+                            current_lead,
+                            sum(rms) / len(rms),
                             step_size,
                             tol_mm,
-                            lo=lo,
+                            lo=0.0,
                             hint=hint if hint != 0.0 else 1.0,
                         )
+                    else:
+                        for fit_idx, mode in enumerate(plan["modes"]):
+                            idx = baseline_modes.index(mode)
+                            value = current[key][idx]
+                            if term == "MASS":
+                                lo = (
+                                    TUNE_MASS_FLOOR_FRACTION
+                                    * baseline[key][idx]
+                                )
+                                step_size = step_frac * abs(value)
+                            else:
+                                lo = 0.0
+                                step_size = (
+                                    step_frac * abs(value)
+                                    if value != 0.0
+                                    else TUNE_ZERO_FLOOR_STEPS[term]
+                                )
+                            hint = float(cached["coef"][key][fit_idx])
+                            if (
+                                term == "MASS"
+                                and cached["onset"][fit_idx] != 0.0
+                            ):
+                                hint = cached["onset"][fit_idx]
+                            searches[mode] = RmsLineSearch(
+                                value,
+                                rms[fit_idx],
+                                step_size,
+                                tol_mm,
+                                lo=lo,
+                                hint=hint if hint != 0.0 else 1.0,
+                            )
+                elif is_lead:
+                    search = searches["xy"]
+                    if not search.done:
+                        search.feed(sum(rms) / len(rms))
                 else:
                     for fit_idx, mode in enumerate(plan["modes"]):
                         search = searches[mode]
@@ -1042,18 +1117,29 @@ class DynamicsFitCommands(RefineCommands):
                 if all(search.done for search in searches.values()):
                     lines = []
                     for mode, search in searches.items():
-                        idx = baseline_modes.index(mode)
-                        current[key][idx] = search.best
                         pass_improved = pass_improved or search.improved
-                        lines.append(
-                            "%s %.6g @ %.2fum (%s)"
-                            % (
-                                mode,
-                                search.best,
-                                search.best_rms * 1e3,
-                                search.note,
+                        if is_lead:
+                            current_lead = search.best
+                            lines.append(
+                                "xy %.1fus @ %.2fum (%s)"
+                                % (
+                                    search.best * 1e6,
+                                    search.best_rms * 1e3,
+                                    search.note,
+                                )
                             )
-                        )
+                        else:
+                            idx = baseline_modes.index(mode)
+                            current[key][idx] = search.best
+                            lines.append(
+                                "%s %.6g @ %.2fum (%s)"
+                                % (
+                                    mode,
+                                    search.best,
+                                    search.best_rms * 1e3,
+                                    search.note,
+                                )
+                            )
                         search_summaries.append(
                             {
                                 "term": term.lower(),
@@ -1077,13 +1163,16 @@ class DynamicsFitCommands(RefineCommands):
                         phase_idx = 0
                         pass_improved = False
             send_dynamics_model(engine, handle, current)
+            if lead_enabled:
+                send_ff_lead(engine, handle, node, plan["servos"], current_lead)
             with open(out_path, "w") as f:
                 f.write(
                     render_fit_dynamics_toml(
                         current,
                         current,
-                        [t.lower() for t in terms],
+                        [t.lower() for t in terms if t != "LEAD"],
                         run.run_dir,
+                        current_lead * 1e6,
                     )
                 )
             run.manifest["dynamics_tune"] = {
@@ -1094,6 +1183,7 @@ class DynamicsFitCommands(RefineCommands):
                 "tol_um": tol_mm * 1e3,
                 "rounds": rounds_history,
                 "search": search_summaries,
+                "lead_us": current_lead * 1e6 if lead_enabled else None,
                 "converged": True,
                 "profile": out_path,
             }
@@ -1105,17 +1195,37 @@ class DynamicsFitCommands(RefineCommands):
                 rounds=len(rounds_history),
                 profile=out_path,
             )
+            lead_note = ""
+            if lead_enabled:
+                lead_note = (
+                    " | tuned ff lead %.1fus - carried in the tuned profile"
+                    % (current_lead * 1e6,)
+                )
             gcmd.respond_info(
                 "SERVO_TUNE_DYNAMICS converged in %d captures | tuned "
                 "dynamics profile: %s | tuned model stays live until "
                 "RESTART - point [ethercat_node %s] dynamics_profile at "
-                "it to keep it | run %s"
-                % (len(rounds_history), out_path, node.name, run.run_dir)
+                "it to keep it%s | run %s"
+                % (
+                    len(rounds_history),
+                    out_path,
+                    node.name,
+                    lead_note,
+                    run.run_dir,
+                )
             )
         finally:
             try:
                 if applied and not success:
                     send_dynamics_model(engine, handle, baseline)
+                    if lead_enabled:
+                        send_ff_lead(
+                            engine,
+                            handle,
+                            node,
+                            plan["servos"],
+                            configured_lead_s,
+                        )
                     gcmd.respond_info(
                         "live dynamics model restored to baseline %s"
                         % (profile_path,)

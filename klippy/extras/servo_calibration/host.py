@@ -17,6 +17,7 @@ from .common import (
     _git_rev,
     _utc_now,
 )
+from .dynamics import parse_dynamics_profile
 from .params import NOTCH_MODE_ADDR, NOTCH_READBACK, SYNC_LOSS_COUNT_ADDR
 from .sweep import ExperimentRun, SweepEngine, SweepStep, _OverrideGcmd
 
@@ -137,14 +138,36 @@ class CalibrationHost:
             "counts_per_mm": motor.get_counts_per_mm(),
         }
 
-    def _ff_lead_cycles(self, gcmd: Any, motors: list[Any]) -> int:
-        leads = {getattr(m, "ff_lead_cycles", 0) for m in motors}
+    def _ff_lead_us(self, gcmd: Any, motors: list[Any]) -> float:
+        leads = set()
+        for motor in motors:
+            get_node_name = getattr(motor, "get_node_name", None)
+            if get_node_name is None:
+                leads.add(0.0)
+                continue
+            node = self.printer.lookup_object(
+                "ethercat_node " + get_node_name()
+            )
+            profile_path = node.get_dynamics_profile()
+            if profile_path is None:
+                leads.add(0.0)
+                continue
+            profile_path = os.path.expanduser(profile_path)
+            try:
+                with open(profile_path) as f:
+                    profile = parse_dynamics_profile(f.read())
+            except (OSError, ValueError) as e:
+                raise gcmd.error(
+                    "failed to load dynamics profile %s: %s" % (profile_path, e)
+                )
+            leads.add(profile.get("ff_lead_us", 0.0))
         if len(leads) > 1:
             raise gcmd.error(
-                "motors disagree on ff_lead_cycles (%s); the analyzer "
-                "needs a single per-run value" % (sorted(leads),)
+                "motors span dynamics profiles that disagree on "
+                "ff_lead_us (%s); the analyzer needs a single "
+                "per-run value" % (sorted(leads),)
             )
-        return leads.pop() if leads else 0
+        return leads.pop() if leads else 0.0
 
     def _belts(self, rails: list[Any] | None) -> str | None:
         if not rails:
@@ -219,7 +242,7 @@ class CalibrationHost:
             "session_id": structured_log.get_session(),
             "stroke_plan": stroke_plan,
             "motors": [self._motor_manifest(m) for m in motors],
-            "ff_lead_cycles": self._ff_lead_cycles(gcmd, motors),
+            "ff_lead_us": self._ff_lead_us(gcmd, motors),
             "belts": self._belts(belts_rails),
             "spatial": servo_strokes.spatial_frame(kin),
             "steps": [],

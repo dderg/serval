@@ -2,8 +2,8 @@ use super::*;
 use mcu_protocol::messages::{
     MotorStateResponse, ResonanceBuzz, RestoreDriveLimits, RestoreDriveLimitsResponse,
     ResumeStreamResponse, SdoRead, SdoReadResponse, SdoWrite, SdoWriteResponse, SeedServoHome,
-    SeedServoHomeResponse, SetDriveLimits, SetDriveLimitsResponse, SlaveState, SlaveStatus,
-    StartCapture, StartCaptureResponse, StopCaptureResponse, StopResponse,
+    SeedServoHomeResponse, SetDriveLimits, SetDriveLimitsResponse, SetFfLead, SetFfLeadResponse,
+    SlaveState, SlaveStatus, StartCapture, StartCaptureResponse, StopCaptureResponse, StopResponse,
 };
 use mcu_transport::demux::{Demuxer, Frame};
 use mcu_transport::frame::decode_frame;
@@ -660,4 +660,37 @@ fn set_strain_comp_decode_rejects_an_oversized_offset() {
         }
         other => panic!("expected SetStrainComp, got {other:?}"),
     }
+}
+
+#[test]
+fn decodes_set_ff_lead_command() {
+    let msg = SetFfLead {
+        slot: 1,
+        lead_ns: 500_000,
+    };
+    let payload = frame_payload(MessageKind::SetFfLead, 40, &msg.encoded_to_vec());
+    match decode_command(0, &payload).unwrap() {
+        Command::SetFfLead {
+            correlation_id: 40,
+            msg: m,
+        } => {
+            assert_eq!(m.slot, 1);
+            assert_eq!(m.lead_ns, 500_000);
+        }
+        other => panic!("expected SetFfLead, got {other:?}"),
+    }
+}
+
+#[test]
+fn set_ff_lead_response_frame_round_trips() {
+    let frame = set_ff_lead_response_frame(41, -309);
+    let (chan, payload) = decode_frame(&frame).unwrap();
+    assert_eq!(chan, CHANNEL_CONTROL);
+    let (hdr, body) = decode_message_header(payload).unwrap();
+    assert_eq!(hdr.correlation_id, 41);
+    assert_eq!(
+        MessageKind::from_u16(hdr.kind_raw),
+        Some(MessageKind::SetFfLeadResponse)
+    );
+    assert_eq!(SetFfLeadResponse::decode(body).unwrap().result, -309);
 }
