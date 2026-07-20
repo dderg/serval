@@ -1,7 +1,7 @@
 import { el } from "./api";
 import { fillFilterChips, mixColor } from "./charts-core";
 import { createPathView, nearestTrace } from "./path-view";
-import type { PathTrace } from "./path-view";
+import type { PathTrace, RenderedView, Viewport } from "./path-view";
 import { ensureFullPaths, freshPathError, isPathPending, readyFullPaths } from "./queries/path";
 import { PALETTE, state } from "./state";
 import type { PlotPath } from "./wire";
@@ -105,7 +105,7 @@ let lastRender: { names: string[]; plots: PlotSeries[]; steps: string[] } | null
 let unfoldListenerBound = false;
 let hoverListenersBound = false;
 let current: { entries: PathEntry[]; statusNote: string } = { entries: [], statusNote: "" };
-let hover: { entryIndex: number; px: number; py: number } | null = null;
+let hover: { entryIndex: number; pointIndex: number; px: number; py: number } | null = null;
 
 function rerenderLast() {
   if (lastRender) renderPathChart(lastRender.names, lastRender.plots, lastRender.steps);
@@ -137,12 +137,61 @@ function styledTraces(entries: PathEntry[]): PathTrace[] {
   });
 }
 
+function tracePointPx(
+  trace: PathTrace,
+  pointIndex: number,
+  view: Viewport,
+  w: number,
+  h: number
+): { x: number; y: number } | null {
+  if (pointIndex >= trace.xs.length) return null;
+  const mx = trace.xs[pointIndex];
+  const my = trace.ys[pointIndex];
+  if (mx === null || my === null) return null;
+  return { x: (mx - view.cx) / view.mmPerPx + w / 2, y: h / 2 - (my - view.cy) / view.mmPerPx };
+}
+
+function drawPairMarkers(entries: PathEntry[], rendered: RenderedView) {
+  if (!hover) return;
+  const e = entries[hover.entryIndex];
+  const { ctx, view, w, h } = rendered;
+  const sibling = entries.find(
+    (s) => s !== e && s.run === e.run && s.step === e.step && s.kind !== e.kind
+  );
+  const here = tracePointPx(e.trace, hover.pointIndex, view, w, h);
+  const there = sibling ? tracePointPx(sibling.trace, hover.pointIndex, view, w, h) : null;
+  if (here && there) {
+    ctx.strokeStyle = e.trace.color;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 3]);
+    ctx.beginPath();
+    ctx.moveTo(here.x, here.y);
+    ctx.lineTo(there.x, there.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  for (const [pt, filled] of [
+    [here, true],
+    [there, false],
+  ] as const) {
+    if (!pt) continue;
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = filled ? e.trace.color : BG_COLOR;
+    ctx.fill();
+    ctx.strokeStyle = e.trace.color;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+}
+
 function drawHoverReadout(entries: PathEntry[]) {
   if (!hover) return;
   const rendered = runView.lastRendered();
   if (!rendered) return;
   const e = entries[hover.entryIndex];
   const { ctx, w } = rendered;
+  drawPairMarkers(entries, rendered);
   const text = `${e.label} — ${e.kind}`;
   ctx.font = "11px monospace";
   const tw = ctx.measureText(text).width;
@@ -188,7 +237,7 @@ function updateHover(canvas: HTMLCanvasElement, e: MouseEvent | null) {
       py,
       HOVER_REACH_PX
     );
-    if (hit) next = { entryIndex: hit.traceIndex, px, py };
+    if (hit) next = { entryIndex: hit.traceIndex, pointIndex: hit.pointIndex, px, py };
   }
   const changed =
     (hover === null) !== (next === null) ||
