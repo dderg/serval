@@ -289,6 +289,7 @@ function drawTrace(
 
 interface TraceHit {
   traceIndex: number;
+  pointIndex: number;
   distPx: number;
   mmX: number;
   mmY: number;
@@ -321,7 +322,9 @@ function nearestTrace(
   traces.forEach((trace, traceIndex) => {
     const prepared = prepareTrace(trace);
     if (!prepared.bounds) return;
-    const { xs, ys } = pickLevel(prepared, view);
+    const level = pickLevel(prepared, view);
+    const { xs, ys } = level;
+    const stride = LOD_STRIDE ** prepared.levels.indexOf(level);
     let prevX = NaN;
     let prevY = NaN;
     for (let i = 0; i < xs.length; i++) {
@@ -345,7 +348,7 @@ function nearestTrace(
           const dSq = segmentDistSq(px, py, ax, ay, bx, by);
           if (dSq < bestDistSq) {
             bestDistSq = dSq;
-            best = { traceIndex, distPx: Math.sqrt(dSq), mmX: x, mmY: y };
+            best = { traceIndex, pointIndex: i * stride, distPx: Math.sqrt(dSq), mmX: x, mmY: y };
           }
         }
       }
