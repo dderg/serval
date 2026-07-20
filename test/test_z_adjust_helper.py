@@ -1,20 +1,9 @@
 import pytest
+from fakes import FakeConfig, FakeGcode, FakePrinter, FakeStepper
+from fakes import FakeToolhead as FakeToolheadBase
 
 from klippy.extras.z_tilt import ZAdjustHelper as ZTiltHelper
 from klippy.extras.z_tilt_ng import ZAdjustHelper as ZTiltNgHelper
-
-
-class FakeStepper:
-    def __init__(self, name):
-        self._name = name
-
-    def get_name(self):
-        return self._name
-
-
-class FakeGcode:
-    def respond_info(self, msg):
-        pass
 
 
 class FakeForceMoveRecorder:
@@ -26,73 +15,60 @@ class FakeForceMoveRecorder:
         self.calls.append(dict(name=name, dist=dist, speed=speed, accel=accel))
 
 
-class FakeToolhead:
+class FakeToolhead(FakeToolheadBase):
     def __init__(self, max_accel=500.0):
-        self._max_accel = max_accel
+        super().__init__(
+            position=[150.0, 150.0, 30.0, 0.0], max_axis_accel=max_accel
+        )
         self.wait_moves_called = 0
-        self.position = [150.0, 150.0, 30.0, 0.0]
         self.set_position_calls = []
 
-    def get_max_axis_accel(self, axis_idx):
-        return self._max_accel
-
     def wait_moves(self):
+        super().wait_moves()
         self.wait_moves_called += 1
 
-    def get_position(self):
-        return list(self.position)
-
-    def set_position(self, newpos):
-        self.position = list(newpos)
+    def set_position(self, newpos, homing_axes=()):
+        super().set_position(newpos, homing_axes)
         self.set_position_calls.append(list(newpos))
-
-
-class FakeConfig:
-    pass
-
-
-class FakePrinter:
-    def __init__(self, force_move, toolhead):
-        self._force_move = force_move
-        self._toolhead = toolhead
-        self._gcode = FakeGcode()
-
-    def load_object(self, config, name):
-        if name == "force_move":
-            return self._force_move
-        raise KeyError(name)
-
-    def lookup_object(self, name, default=None):
-        mapping = {
-            "gcode": self._gcode,
-            "toolhead": self._toolhead,
-        }
-        return mapping.get(name, default)
 
 
 def make_z_tilt_helper(z_names, max_accel=500.0):
     fm = FakeForceMoveRecorder()
     toolhead = FakeToolhead(max_accel=max_accel)
-    printer = FakePrinter(fm, toolhead)
+    gcode = FakeGcode()
+    printer = FakePrinter(
+        objects={
+            "toolhead": toolhead,
+            "gcode": gcode,
+            "force_move": fm,
+        }
+    )
     config = FakeConfig()
 
     helper = ZTiltHelper.__new__(ZTiltHelper)
     helper.printer = printer
     helper.config = config
-    helper.z_steppers = [FakeStepper(n) for n in z_names]
+    helper.z_steppers = [FakeStepper(name=n) for n in z_names]
     return helper, fm, toolhead
 
 
 def make_z_tilt_ng_helper(z_names, max_accel=500.0):
     fm = FakeForceMoveRecorder()
     toolhead = FakeToolhead(max_accel=max_accel)
-    printer = FakePrinter(fm, toolhead)
+    gcode = FakeGcode()
+    printer = FakePrinter(
+        objects={
+            "toolhead": toolhead,
+            "gcode": gcode,
+            "force_move": fm,
+        }
+    )
     config = FakeConfig()
 
     helper = ZTiltNgHelper.__new__(ZTiltNgHelper)
     helper.printer = printer
     helper.config = config
-    helper.z_steppers = [FakeStepper(n) for n in z_names]
+    helper.z_steppers = [FakeStepper(name=n) for n in z_names]
     return helper, fm, toolhead
 
 

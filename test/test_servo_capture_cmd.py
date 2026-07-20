@@ -1,89 +1,43 @@
 import pytest
+from fakes import (
+    FakeConfig,
+    FakeGcode,
+    FakeKin,
+    FakeNode,
+    FakeToolhead,
+)
+from fakes import (
+    FakeEngine as _FakeEngine,
+)
+from fakes import (
+    FakeGcmd as _FakeGcmd,
+)
+from fakes import (
+    FakePrinter as _FakePrinter,
+)
 
 from klippy.extras import servo_axis, servo_capture
 
 
-class FakeGcode:
-    def __init__(self):
-        self.commands = {}
-
-    def register_command(self, name, func, desc=None):
-        assert name not in self.commands
-        self.commands[name] = func
-
-
-class FakeNode:
-    def __init__(self, handle, slots=None):
-        self._h = handle
-        self._slots = slots if slots is not None else {}
-
-    def get_engine_handle(self):
-        return self._h
-
-    def get_slot_for_motor(self, motor_name):
-        return self._slots.get(motor_name)
-
-    def get_cycle_us(self):
-        return 250
-
-
-class FakeEngine:
+class FakeEngine(_FakeEngine):
     def __init__(self, stop_result=(0, 1234, None)):
-        self.start_calls = []
-        self.stop_calls = []
-        self._stop_result = stop_result
+        super().__init__(stop_servo_capture=stop_result)
 
-    def start_servo_capture(self, handle, path, started_utc, drives):
-        self.start_calls.append((handle, path, started_utc, drives))
+    @property
+    def start_calls(self):
+        return [c[1:] for c in self.calls if c[0] == "start_servo_capture"]
 
-    def stop_servo_capture(self, handle):
-        self.stop_calls.append(handle)
-        return self._stop_result
-
-
-class FakeKin:
-    def __init__(self, rails):
-        self.rails = rails
+    @property
+    def stop_calls(self):
+        return [c[1] for c in self.calls if c[0] == "stop_servo_capture"]
 
 
-class FakeToolhead:
-    def __init__(self, kin):
-        self.kin = kin
-
-    def get_kinematics(self):
-        return self.kin
-
-
-class FakePrinter:
+class FakePrinter(_FakePrinter):
     command_error = RuntimeError
 
-    def __init__(self, objs):
-        self._objs = objs
 
-    def lookup_object(self, name):
-        return self._objs[name]
-
-
-class FakeConfig:
-    def __init__(self, printer):
-        self._printer = printer
-
-    def get_printer(self):
-        return self._printer
-
-
-class FakeGcmd:
+class FakeGcmd(_FakeGcmd):
     error = RuntimeError
-
-    def __init__(self, **params):
-        self._params = params
-        self.responses = []
-
-    def get(self, name, default=None):
-        return self._params.get(name, default)
-
-    def respond_info(self, msg):
-        self.responses.append(msg)
 
 
 def make_servo_motor(motor_name, node_name):
@@ -251,11 +205,11 @@ def test_stop_after_node_vanished_clears_state_and_skips_engine():
     sc, gcode, engine = make_capture()
     gcode.commands["SERVO_CAPTURE_START"](FakeGcmd())
     fake_node = node_of(sc)
-    fake_node._h = None
+    fake_node._handle = None
     with pytest.raises(RuntimeError, match="vanished"):
         gcode.commands["SERVO_CAPTURE_STOP"](FakeGcmd())
     assert engine.stop_calls == []
-    fake_node._h = 7
+    fake_node._handle = 7
     assert_fresh_start_possible(gcode)
     assert len(engine.start_calls) == 2
 

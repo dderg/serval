@@ -5,51 +5,20 @@ sys.path.insert(
     0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 )
 
+from fakes import FakeEngine, FakePrinter  # noqa: E402
+
 from klippy.engine_mcu import EngineMcu  # noqa: E402
 from klippy.serialhdl import EngineCommandChannel, error  # noqa: E402
 
 TRANSPORT_CLOSED = RuntimeError("engine_send: transport closed")
 
 
-class FakeEngine:
-    def __init__(self, exc=None):
-        self.exc = exc
-        self.sent = []
-        self.calls = []
-        self.clock_polls = 0
-
-    def engine_send(self, handle, msg):
-        if self.exc is not None:
-            raise self.exc
-        self.sent.append((handle, msg))
-
-    def engine_call(self, handle, msg, response):
-        if self.exc is not None:
-            raise self.exc
-        self.calls.append((handle, msg, response))
-        return {}
-
-    def engine_get_clock_async(self, handle):
-        if self.exc is not None:
-            raise self.exc
-        self.clock_polls += 1
-
-    def claim_mcu(self, name, serial_path, baud):
-        return 7
-
-
-class FakePrinter:
-    def __init__(self, engine):
-        self._engine = engine
-
-    def lookup_object(self, name, default=None):
-        return self._engine
-
-
 def _reader(engine):
     sr = EngineCommandChannel.__new__(EngineCommandChannel)
     sr.mcu = None
-    sr.engine_mcu = EngineMcu(FakePrinter(engine), "mcu")
+    sr.engine_mcu = EngineMcu(
+        FakePrinter(objects={"motion_engine": engine}), "mcu"
+    )
     sr.engine_mcu.claim("", 0)
     sr._engine_detached = False
     sr.warn_prefix = ""
@@ -69,13 +38,13 @@ def test_non_drop_error_left_alone():
 
 
 def test_send_swallows_drop():
-    sr = _reader(FakeEngine(exc=TRANSPORT_CLOSED))
+    sr = _reader(FakeEngine(raises=TRANSPORT_CLOSED))
     sr.send(b"x")
     assert sr._engine_detached is True
 
 
 def test_send_reraises_unrelated_runtime_error():
-    sr = _reader(FakeEngine(exc=RuntimeError("boom")))
+    sr = _reader(FakeEngine(raises=RuntimeError("boom")))
     try:
         sr.send(b"x")
         raise AssertionError("expected RuntimeError")
@@ -85,7 +54,7 @@ def test_send_reraises_unrelated_runtime_error():
 
 
 def test_send_with_response_raises_mainline_error_on_drop():
-    sr = _reader(FakeEngine(exc=TRANSPORT_CLOSED))
+    sr = _reader(FakeEngine(raises=TRANSPORT_CLOSED))
     try:
         sr.send_with_response(b"x", "resp")
         raise AssertionError("expected serialhdl.error")
@@ -95,7 +64,7 @@ def test_send_with_response_raises_mainline_error_on_drop():
 
 
 def test_engine_get_clock_async_swallows_drop():
-    sr = _reader(FakeEngine(exc=TRANSPORT_CLOSED))
+    sr = _reader(FakeEngine(raises=TRANSPORT_CLOSED))
     sr.engine_get_clock_async()
     assert sr._engine_detached is True
 

@@ -4,6 +4,13 @@ import sys
 import tempfile
 
 import pytest
+from fakes import FakeConfig, FakeNode, FakeReactor, FakeToolhead
+from fakes import FakeEngine as _FakeEngine
+from fakes import FakeGcmd as _FakeGcmd
+from fakes import FakeGcode as _FakeGcode
+from fakes import FakeKin as _FakeKin
+from fakes import FakePrinter as _FakePrinter
+from fakes import FakeServoCapture as _FakeServoCapture
 
 from klippy.extras import servo_axis, servo_calibration, servo_strokes
 
@@ -18,48 +25,26 @@ requires_tomllib = pytest.mark.skipif(
 )
 
 
-class FakeServoCapture:
-    def __init__(self):
-        self.captures = []
+class FakeGcode(_FakeGcode):
+    error = RuntimeError
 
-    def start_capture_to(self, path, servos):
-        self.captures.append((path, list(servos)))
 
+class FakeServoCapture(_FakeServoCapture):
     def stop_capture(self):
-        return self.captures[-1][0], 1000, 250
+        self.events.append("capture_stop")
+        return self.starts[-1][0], 1000, 250
 
 
-class FakeGcode:
+class FakeGcmd(_FakeGcmd):
     error = RuntimeError
-
-    def __init__(self):
-        self.commands = {}
-        self.scripts = []
-
-    def register_command(self, name, func, desc=None):
-        self.commands[name] = func
-
-    def run_script_from_command(self, script):
-        self.scripts.append(script)
-
-
-class FakeGcmd:
-    error = RuntimeError
-
-    def __init__(self, **params):
-        self._params = params
-        self.responses = []
 
     def get_commandline(self):
         return "FAKE_CMD " + " ".join(
-            "%s=%s" % kv for kv in self._params.items()
+            "%s=%s" % kv for kv in self.params.items()
         )
 
-    def get(self, name, default=None):
-        return self._params.get(name, default)
-
     def get_int(self, name, default=None, minval=None, maxval=None):
-        return int(self._params.get(name, default))
+        return int(self.params.get(name, default))
 
     def get_float(
         self,
@@ -70,65 +55,17 @@ class FakeGcmd:
         above=None,
         below=None,
     ):
-        value = self._params.get(name, default)
+        value = self.params.get(name, default)
         return None if value is None else float(value)
 
-    def respond_info(self, msg):
-        self.responses.append(msg)
 
-
-class FakeKin:
+class FakeKin(_FakeKin):
     def __init__(self, rails, coupled=True):
-        self.rails = rails
-        self._coupled = coupled
-
-    def coupled_xy(self):
-        return self._coupled
+        super().__init__(rails, coupled_xy=coupled)
 
 
-class FakeToolhead:
-    def __init__(self, kin):
-        self.kin = kin
-
-    def get_kinematics(self):
-        return self.kin
-
-
-class FakePrinter:
+class FakePrinter(_FakePrinter):
     command_error = RuntimeError
-
-    def __init__(self, objs, reactor=None):
-        self._objs = objs
-        self._reactor = reactor
-
-    def lookup_object(self, name):
-        return self._objs[name]
-
-    def get_reactor(self):
-        return self._reactor
-
-
-class FakeConfig:
-    def __init__(self, printer):
-        self._printer = printer
-
-    def get_printer(self):
-        return self._printer
-
-    def get(self, name, default=None):
-        return default
-
-    def getlist(self, name, default=None):
-        return default
-
-    def getfloat(self, name, default=None, **kw):
-        return default
-
-    def getfloatlist(self, name, default=None):
-        return default
-
-    def getint(self, name, default=None, **kw):
-        return default
 
 
 def _motor(name, node_name, chain_index, invert=False):
@@ -150,55 +87,33 @@ def _rail(axis, motors):
     return rail
 
 
-class FakeNode:
-    def __init__(self, name, slots, handle=7):
-        self.name = name
-        self._slots = slots
-        self._handle = handle
-        self.dynamics_profile = None
-
-    def get_engine_handle(self):
-        return self._handle
-
-    def get_slot_for_motor(self, motor_name):
-        return self._slots[motor_name]
-
-    def get_dynamics_profile(self):
-        return self.dynamics_profile
-
-    def get_drive_count(self):
-        return len(self._slots)
-
-
-class FakeEngine:
+class FakeEngine(_FakeEngine):
     def __init__(self):
+        super().__init__()
         self.buzzes = []
         self.dampers = []
         self.trims = []
         self.dynamics_calls = []
 
     def sdo_read(self, handle, slot, index, subindex):
+        self.calls.append(("sdo_read", handle, slot, index, subindex))
         return 2, 7
 
     def resonance_buzz(self, *args):
+        self.calls.append(("resonance_buzz",) + args)
         self.buzzes.append(args)
 
     def set_diff_damper(self, *args):
+        self.calls.append(("set_diff_damper",) + args)
         self.dampers.append(args)
 
     def set_diff_trim(self, *args):
+        self.calls.append(("set_diff_trim",) + args)
         self.trims.append(args)
 
     def set_dynamics_model(self, *args):
+        self.calls.append(("set_dynamics_model",) + args)
         self.dynamics_calls.append(args)
-
-
-class FakeReactor:
-    def monotonic(self):
-        return 0.0
-
-    def pause(self, waketime):
-        pass
 
 
 def make_calibration(rails, coupled=True, extra_objs=None, reactor=None):
@@ -214,7 +129,9 @@ def make_calibration(rails, coupled=True, extra_objs=None, reactor=None):
         for m in rail.motors:
             node_slots.setdefault(m.node_name, {})[m.motor_name] = m.chain_index
     for node_name, slots in node_slots.items():
-        objs["ethercat_node " + node_name] = FakeNode(node_name, slots)
+        objs["ethercat_node " + node_name] = FakeNode(
+            name=node_name, slots=slots, handle=7
+        )
     objs.update(extra_objs or {})
     sc = servo_calibration.ServoCalibration(
         FakeConfig(FakePrinter(objs, reactor))
@@ -288,11 +205,11 @@ def _cap(sc):
 
 
 def _capture_servos(sc):
-    return [servos for _p, servos in _cap(sc).captures]
+    return [servos for _p, servos in _cap(sc).starts]
 
 
 def _manifest_for(sc):
-    run_dir = os.path.dirname(_cap(sc).captures[0][0])
+    run_dir = os.path.dirname(_cap(sc).starts[0][0])
     with open(os.path.join(run_dir, "manifest.json")) as f:
         return json.load(f)
 
@@ -559,7 +476,7 @@ def test_measure_inertia_corexy_servos_override():
 def make_differential_calibration():
     slots = {"motor_a": 0, "motor_a1": 1, "motor_b": 2, "motor_b1": 3}
     engine = FakeEngine()
-    node = FakeNode("xy_drives", slots)
+    node = FakeNode(name="xy_drives", slots=slots, handle=7)
     sc, gcode = make_calibration(
         awd_rails(),
         extra_objs={
@@ -614,7 +531,7 @@ def test_differential_belt_b_records_inverts_and_analyzes_run_dir():
     runs = [s for s in gcode.scripts if isinstance(s, tuple) and s[0] == "RUN"]
     argv = runs[-1][1]
     assert argv[1] == "analyze"
-    assert argv[2] == os.path.dirname(_cap(sc).captures[0][0])
+    assert argv[2] == os.path.dirname(_cap(sc).starts[0][0])
 
 
 def test_differential_rejects_single_drive_belts():
@@ -737,7 +654,7 @@ def test_calibrate_inertia_ratio_cartesian_rejects_corexy_only_params():
 def _capture_paths(sc):
     return [
         os.path.basename(p)
-        for p, _s in sc.printer.lookup_object("servo_capture").captures
+        for p, _s in sc.printer.lookup_object("servo_capture").starts
     ]
 
 

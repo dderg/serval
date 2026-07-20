@@ -1,3 +1,5 @@
+from fakes import FakeKin, FakeNode, FakePrinter
+
 from klippy.extras import servo_axis
 from klippy.extras.stepper_enable import EnableTracking, StepperEnablePin
 from klippy.motion import Motion
@@ -38,25 +40,9 @@ def test_enable_tracking_drives_torque_line_like_a_stepper():
     assert line.calls[-1] == (14.5, 1)
 
 
-class FakeNode:
-    def __init__(self):
-        self.calls = []
-
-    def set_motor_torque(self, motor_name, value, print_time):
-        self.calls.append((motor_name, value, print_time))
-
-
-class FakePrinter:
-    def __init__(self, objs):
-        self._objs = objs
-
-    def lookup_object(self, name):
-        return self._objs[name]
-
-
 def test_torque_line_delegates_to_node_with_motor_name():
     node = FakeNode()
-    printer = FakePrinter({"ethercat_node node_y": node})
+    printer = FakePrinter(objects={"ethercat_node node_y": node})
     line = servo_axis.MotionTorqueLine(printer, "node_y", "servo_x")
     line.set_digital(20.0, 1)
     line.set_digital(21.0, 0)
@@ -71,17 +57,6 @@ def test_servo_rail_active_callback_contract():
     fired = []
     rail.add_active_callback(fired.append)
     assert rail._active_callbacks == [fired.append]
-
-
-class FakeKin:
-    def __init__(self, rails):
-        self.rails = rails
-
-    def get_steppers(self):
-        return []
-
-    def active_rails(self, dx, dy, dz):
-        return []
 
 
 def make_servo_rail(axis):
@@ -107,7 +82,8 @@ def test_servo_fires_on_any_motion_regardless_of_its_own_axis():
     rail = make_servo_rail("x")
     fired = []
     rail.add_active_callback(fired.append)
-    th = FakeToolhead(FakeKin([rail]))
+    kin = FakeKin(rails=[rail], active_rails_result=[], get_steppers_result=[])
+    th = FakeToolhead(kin)
     assert th._fire_active_callbacks((0.0, 0.0, 0.0, 1.0)) is True
     assert fired == [42.0]
     assert th._fire_active_callbacks((0.0, 0.0, 0.0, 1.0)) is False
@@ -121,6 +97,7 @@ def test_servo_pass_uses_toolhead_print_time():
     rail = make_servo_rail("z")
     fired = []
     rail.add_active_callback(fired.append)
-    th = FakeToolhead(FakeKin([rail]))
+    kin = FakeKin(rails=[rail], active_rails_result=[], get_steppers_result=[])
+    th = FakeToolhead(kin)
     assert th._fire_active_callbacks((1.0, 0.0, 0.0, 0.0)) is True
     assert fired == [42.0]

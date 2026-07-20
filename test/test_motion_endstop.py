@@ -1,4 +1,5 @@
 import pytest
+from fakes import FakeEngine, FakeMcu, FakePrinter
 
 from klippy.motion_endstop import (
     PROVIDER_ID_FIRST,
@@ -18,13 +19,15 @@ class FakeCommand:
         return self.response
 
 
-class FakeMcu:
-    def __init__(self):
-        self.oids = 0
-        self.config_cmds = []
-        self.config_callbacks = []
-        self.query_cmd = FakeCommand()
-        self.state_cmd = FakeCommand(
+class FakeRemoteMcu:
+    def get_engine_handle(self):
+        return 42
+
+
+def _fake_mcu():
+    return FakeMcu(
+        query_cmd=FakeCommand(),
+        state_cmd=FakeCommand(
             {
                 "oid": 0,
                 "armed": 0,
@@ -32,38 +35,8 @@ class FakeMcu:
                 "tripped": 0,
                 "trip_clock": 0,
             }
-        )
-
-    def create_oid(self):
-        oid = self.oids
-        self.oids += 1
-        return oid
-
-    def register_config_callback(self, cb):
-        self.config_callbacks.append(cb)
-
-    def add_config_cmd(self, cmd):
-        self.config_cmds.append(cmd)
-
-    def lookup_command(self, template):
-        return self.query_cmd
-
-    def lookup_query_command(self, template, response, oid=None):
-        return self.state_cmd
-
-    def seconds_to_clock(self, seconds):
-        return int(seconds * 1_000_000)
-
-
-class FakePrinter:
-    def __init__(self):
-        self.objects = {}
-
-    def add_object(self, name, obj):
-        self.objects[name] = obj
-
-    def lookup_object(self, name, default=None):
-        return self.objects.get(name, default)
+        ),
+    )
 
 
 def _pin_params(mcu, pin="PA8", invert=0, pullup=1):
@@ -83,7 +56,7 @@ def _connected(mcu, endstop):
 
 
 def test_config_cmd_emitted():
-    mcu = FakeMcu()
+    mcu = _fake_mcu()
     _connected(mcu, MotionEndstop(_pin_params(mcu), 3))
     assert mcu.config_cmds == [
         "config_endstop oid=0 endstop_id=3 pin=PA8 pull_up=1 invert=0"
@@ -91,7 +64,7 @@ def test_config_cmd_emitted():
 
 
 def test_is_triggered_applies_invert():
-    mcu = FakeMcu()
+    mcu = _fake_mcu()
     endstop = _connected(mcu, MotionEndstop(_pin_params(mcu, invert=1), 3))
     mcu.state_cmd.response = {"oid": 0, "armed": 0, "pin_value": 0}
     assert endstop.is_triggered() is True
@@ -100,21 +73,21 @@ def test_is_triggered_applies_invert():
 
 
 def test_arm_sends_rest_ticks():
-    mcu = FakeMcu()
+    mcu = _fake_mcu()
     endstop = _connected(mcu, MotionEndstop(_pin_params(mcu), 3))
     endstop.arm(0.001)
     assert mcu.query_cmd.sent == [[0, 1000]]
 
 
 def test_query_endstop_matches_is_triggered():
-    mcu = FakeMcu()
+    mcu = _fake_mcu()
     endstop = _connected(mcu, MotionEndstop(_pin_params(mcu), 3))
     mcu.state_cmd.response = {"oid": 0, "armed": 0, "pin_value": 1}
     assert endstop.query_endstop(0.0) is endstop.is_triggered() is True
 
 
 def test_arm_zero_period_rejected():
-    mcu = FakeMcu()
+    mcu = _fake_mcu()
     endstop = _connected(mcu, MotionEndstop(_pin_params(mcu), 3))
     with pytest.raises(ValueError, match="rest_ticks"):
         endstop.arm(0.0)
@@ -122,7 +95,7 @@ def test_arm_zero_period_rejected():
 
 
 def test_query_trip_state_not_tripped():
-    mcu = FakeMcu()
+    mcu = _fake_mcu()
     es = MotionEndstop(_pin_params(mcu), 7)
     for cb in mcu.config_callbacks:
         cb()
@@ -130,7 +103,7 @@ def test_query_trip_state_not_tripped():
 
 
 def test_query_trip_state_tripped_returns_latched_clock():
-    mcu = FakeMcu()
+    mcu = _fake_mcu()
     es = MotionEndstop(_pin_params(mcu), 7)
     for cb in mcu.config_callbacks:
         cb()
@@ -154,22 +127,6 @@ def test_provider_ids_allocate_sequentially():
     assert allocate_provider_id(printer) == PROVIDER_ID_FIRST + 2
 
 
-class FakeEngine:
-    def __init__(self):
-        self.calls = []
-
-    def arm_remote_trigger(self, mcu_handle, trsync_oid, endstop_id):
-        self.calls.append(("arm", mcu_handle, trsync_oid, endstop_id))
-
-    def disarm_remote_trigger(self, endstop_id):
-        self.calls.append(("disarm", endstop_id))
-
-
-class FakeRemoteMcu:
-    def get_engine_handle(self):
-        return 42
-
-
 def _remote_setup():
     printer = FakePrinter()
     engine = FakeEngine()
@@ -188,8 +145,8 @@ def test_remote_endstop_arm_and_disarm_delegate_to_engine():
     es.arm(0.001)
     es.disarm()
     assert engine.calls == [
-        ("arm", 42, 9, es.endstop_id),
-        ("disarm", es.endstop_id),
+        ("arm_remote_trigger", 42, 9, es.endstop_id),
+        ("disarm_remote_trigger", es.endstop_id),
     ]
 
 

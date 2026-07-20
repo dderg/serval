@@ -1,4 +1,5 @@
 import pytest
+from fakes import FakeGcmd
 
 from klippy.extras.homing import (
     _homed_axis_position,
@@ -6,11 +7,6 @@ from klippy.extras.homing import (
     _verify_latched_trip,
 )
 from klippy.extras.sim_remote_endstop import trip_to_stop_travel
-
-
-class FakeGcmd:
-    def error(self, msg):
-        return RuntimeError(msg)
 
 
 class FakeLatchEndstop:
@@ -27,23 +23,25 @@ class FakeRemoteEndstop:
 
 def test_verify_passes_on_matching_low32():
     es = FakeLatchEndstop(True, 0xDEADBEEF)
-    _verify_latched_trip(FakeGcmd(), 2, es, 0x1_DEAD_BEEF)
+    _verify_latched_trip(FakeGcmd(error=RuntimeError), 2, es, 0x1_DEAD_BEEF)
 
 
 def test_verify_raises_on_clock_mismatch():
     es = FakeLatchEndstop(True, 0x1111)
     with pytest.raises(RuntimeError, match="latch/doorbell clock mismatch"):
-        _verify_latched_trip(FakeGcmd(), 2, es, 0x2222)
+        _verify_latched_trip(FakeGcmd(error=RuntimeError), 2, es, 0x2222)
 
 
 def test_verify_raises_when_latch_not_tripped():
     es = FakeLatchEndstop(False, 0)
     with pytest.raises(RuntimeError, match="latch shows no trip"):
-        _verify_latched_trip(FakeGcmd(), 2, es, 0x2222)
+        _verify_latched_trip(FakeGcmd(error=RuntimeError), 2, es, 0x2222)
 
 
 def test_verify_skips_endstops_without_latch():
-    _verify_latched_trip(FakeGcmd(), 2, FakeRemoteEndstop(), 0x2222)
+    _verify_latched_trip(
+        FakeGcmd(error=RuntimeError), 2, FakeRemoteEndstop(), 0x2222
+    )
 
 
 def test_no_trigger_message_plain():

@@ -1,33 +1,17 @@
 import os
 
 import pytest
+from fakes import (
+    FakeConfig,
+    FakeGcmd,
+    FakeGcode,
+    FakeKin,
+    FakePrinter,
+    FakeServoCapture,
+    FakeToolhead,
+)
 
 from klippy.extras import resonance_tester
-
-
-class FakeGcmd:
-    error = RuntimeError
-
-    def __init__(self, **params):
-        self._params = params
-        self.responses = []
-
-    def get(self, name, default=None):
-        return self._params.get(name, default)
-
-    def get_float(self, name, default=None, **kw):
-        return self._params.get(name, default)
-
-    def respond_info(self, msg):
-        self.responses.append(msg)
-
-
-class FakeGcode:
-    def __init__(self):
-        self.commands = {}
-
-    def register_command(self, name, func, desc=None):
-        self.commands[name] = func
 
 
 class FakeAclient:
@@ -68,21 +52,6 @@ class FakeBuzz:
         return args[5]
 
 
-class FakeServoCapture:
-    def __init__(self, events):
-        self.events = events
-        self.starts = []
-
-    def start_capture_to(self, path, servos):
-        self.events.append("capture_start")
-        self.starts.append((path, list(servos)))
-        return path
-
-    def stop_capture(self):
-        self.events.append("capture_stop")
-        return ("/tmp/fake.scap", 4321, 250.0)
-
-
 class FakeServoMotor:
     def __init__(self, name):
         self._name = name
@@ -100,94 +69,6 @@ def _servo_rail(axis, motor_names):
     return rail
 
 
-class FakeServoKin:
-    def __init__(self, rails):
-        self.rails = rails
-
-    def lanes(self):
-        return [
-            (lane_idx, rail.axis, rail.motors)
-            for lane_idx, rail in enumerate(self.rails)
-        ]
-
-    def coupled_xy(self):
-        return True
-
-
-class FakeToolhead:
-    def __init__(self):
-        self.moves = []
-        self.dwells = []
-        self.waited = 0
-        self._kin = object()
-
-    def get_kinematics(self):
-        return self._kin
-
-    def manual_move(self, point, speed):
-        self.moves.append((point, speed))
-
-    def wait_moves(self):
-        self.waited += 1
-
-    def dwell(self, t):
-        self.dwells.append(t)
-
-
-class FakeReactor:
-    def monotonic(self):
-        return 0.0
-
-    def pause(self, waketime):
-        pass
-
-
-class FakePrinter:
-    config_error = RuntimeError
-    command_error = RuntimeError
-
-    def __init__(self):
-        self._objs = {}
-        self.event_handlers = {}
-        self._reactor = FakeReactor()
-
-    def get_reactor(self):
-        return self._reactor
-
-    def lookup_object(self, name, default="__raise__"):
-        if name in self._objs:
-            return self._objs[name]
-        if default == "__raise__":
-            raise KeyError(name)
-        return default
-
-    def register_event_handler(self, event, cb):
-        self.event_handlers[event] = cb
-
-    def load_object(self, config, name, default="__raise__"):
-        return self.lookup_object(name, default)
-
-
-class FakeConfig:
-    error = RuntimeError
-
-    def __init__(self, printer, values):
-        self._printer = printer
-        self._values = values
-
-    def get_printer(self):
-        return self._printer
-
-    def get(self, name, default=None):
-        return self._values.get(name, default)
-
-    def getfloat(self, name, default=None, **kw):
-        return self._values.get(name, default)
-
-    def getlists(self, name, default=None, **kw):
-        return self._values.get(name, default)
-
-
 def make_tester(values=None):
     printer = FakePrinter()
     gcode = FakeGcode()
@@ -195,52 +76,54 @@ def make_tester(values=None):
     buzz = FakeBuzz()
     buzz.events = events
     toolhead = FakeToolhead()
-    printer._objs["gcode"] = gcode
-    printer._objs["resonance_buzz"] = buzz
-    printer._objs["servo_capture"] = FakeServoCapture(events)
-    printer._objs["toolhead"] = toolhead
+    printer.objects["gcode"] = gcode
+    printer.objects["resonance_buzz"] = buzz
+    printer.objects["servo_capture"] = FakeServoCapture(events)
+    printer.objects["toolhead"] = toolhead
     cfg_values = {"accel_chip": "adxl345"}
     if values:
         cfg_values.update(values)
-    tester = resonance_tester.ResonanceTester(FakeConfig(printer, cfg_values))
+    tester = resonance_tester.ResonanceTester(
+        FakeConfig(printer, values=cfg_values)
+    )
     return tester, printer, buzz, toolhead
 
 
 def test_registers_commands():
     _, printer, _, _ = make_tester()
-    gcode = printer._objs["gcode"]
+    gcode = printer.objects["gcode"]
     assert "TEST_RESONANCES" in gcode.commands
     assert "SHAPER_CALIBRATE" in gcode.commands
     assert "MEASURE_AXES_NOISE" in gcode.commands
 
 
 def test_parse_axis_cardinal():
-    gcmd = FakeGcmd()
+    gcmd = FakeGcmd(error=RuntimeError)
     for name in ("x", "y", "z", "X", "Z"):
         axis = resonance_tester._parse_axis(gcmd, name)
         assert axis.buzz_axis() == name.lower()
 
 
 def test_parse_axis_pure_vectors_map_to_named_axes():
-    gcmd = FakeGcmd()
+    gcmd = FakeGcmd(error=RuntimeError)
     assert resonance_tester._parse_axis(gcmd, "1,0").buzz_axis() == "x"
     assert resonance_tester._parse_axis(gcmd, "0,1").buzz_axis() == "y"
 
 
 def test_parse_axis_diagonal_not_implemented():
-    gcmd = FakeGcmd()
+    gcmd = FakeGcmd(error=RuntimeError)
     with pytest.raises(RuntimeError, match="diagonal buzz is not implemented"):
         resonance_tester._parse_axis(gcmd, "1,1")
 
 
 def test_parse_axis_bad_format():
-    gcmd = FakeGcmd()
+    gcmd = FakeGcmd(error=RuntimeError)
     with pytest.raises(RuntimeError, match="Invalid format"):
         resonance_tester._parse_axis(gcmd, "bogus")
 
 
 def test_parse_axis_missing_is_required():
-    gcmd = FakeGcmd()
+    gcmd = FakeGcmd(error=RuntimeError)
     with pytest.raises(RuntimeError, match="AXIS parameter is required"):
         resonance_tester._parse_axis(gcmd, None)
 
@@ -249,7 +132,7 @@ def test_run_test_excites_axis_and_captures():
     tester, printer, buzz, toolhead = make_tester()
     chip = FakeChip("adxl345")
     tester.accel_chips = [("xy", chip)]
-    gcmd = FakeGcmd()
+    gcmd = FakeGcmd(error=RuntimeError)
     sweep = tester._parse_sweep(gcmd)
     axes = [resonance_tester.TestAxis("x")]
 
@@ -265,7 +148,7 @@ def test_run_test_skips_chip_that_does_not_match_axis():
     tester, printer, buzz, toolhead = make_tester()
     x_chip = FakeChip("adxl_x")
     tester.accel_chips = [("x", x_chip)]
-    gcmd = FakeGcmd()
+    gcmd = FakeGcmd(error=RuntimeError)
     sweep = tester._parse_sweep(gcmd)
 
     tester._run_test(gcmd, [resonance_tester.TestAxis("y")], None, sweep)
@@ -278,7 +161,7 @@ def test_run_test_writes_raw_data_when_named():
     tester, printer, buzz, toolhead = make_tester()
     chip = FakeChip("adxl345")
     tester.accel_chips = [("xy", chip)]
-    gcmd = FakeGcmd()
+    gcmd = FakeGcmd(error=RuntimeError)
     sweep = tester._parse_sweep(gcmd)
 
     tester._run_test(
@@ -307,7 +190,7 @@ def test_raw_data_header_carries_graph_max_freq():
     )
     chip = FakeChip("adxl345")
     tester.accel_chips = [("xy", chip)]
-    gcmd = FakeGcmd()
+    gcmd = FakeGcmd(error=RuntimeError)
     sweep = tester._parse_sweep(gcmd)
 
     tester._run_test(
@@ -329,14 +212,17 @@ def test_run_test_brackets_servo_capture_around_buzz():
     tester, printer, buzz, toolhead = make_tester()
     chip = FakeChip("beacon")
     tester.accel_chips = [("xy", chip)]
-    toolhead._kin = FakeServoKin(
-        [
-            _servo_rail("x", ["motor_a", "motor_a1"]),
-            _servo_rail("y", ["motor_b", "motor_b1"]),
-        ]
+    rails = [
+        _servo_rail("x", ["motor_a", "motor_a1"]),
+        _servo_rail("y", ["motor_b", "motor_b1"]),
+    ]
+    toolhead.kin = FakeKin(
+        rails=rails,
+        lanes=[(i, rail.axis, rail.motors) for i, rail in enumerate(rails)],
+        coupled_xy=True,
     )
-    scap = printer._objs["servo_capture"]
-    gcmd = FakeGcmd()
+    scap = printer.objects["servo_capture"]
+    gcmd = FakeGcmd(error=RuntimeError)
     sweep = tester._parse_sweep(gcmd)
 
     tester._run_test(
@@ -360,8 +246,8 @@ def test_run_test_brackets_servo_capture_around_buzz():
 def test_run_test_skips_servo_capture_without_servo_rails():
     tester, printer, buzz, toolhead = make_tester()
     tester.accel_chips = [("xy", FakeChip("adxl345"))]
-    scap = printer._objs["servo_capture"]
-    gcmd = FakeGcmd()
+    scap = printer.objects["servo_capture"]
+    gcmd = FakeGcmd(error=RuntimeError)
     sweep = tester._parse_sweep(gcmd)
 
     tester._run_test(gcmd, [resonance_tester.TestAxis("x")], None, sweep)
@@ -373,7 +259,7 @@ def test_run_test_skips_servo_capture_without_servo_rails():
 def test_run_test_moves_to_probe_point():
     tester, printer, buzz, toolhead = make_tester()
     tester.accel_chips = [("xy", FakeChip("adxl345"))]
-    gcmd = FakeGcmd()
+    gcmd = FakeGcmd(error=RuntimeError)
     sweep = tester._parse_sweep(gcmd)
 
     tester._run_test(
@@ -384,4 +270,7 @@ def test_run_test_moves_to_probe_point():
         test_point=[10.0, 20.0, 5.0],
     )
 
-    assert toolhead.moves == [([10.0, 20.0, 5.0], tester.move_speed)]
+    manual_moves = [c for c in toolhead.calls if c[0] == "manual_move"]
+    assert manual_moves == [
+        ("manual_move", (10.0, 20.0, 5.0), tester.move_speed)
+    ]

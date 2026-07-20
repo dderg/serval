@@ -1,21 +1,15 @@
 import types
 
+from fakes import FakeGcmd, FakeKin
 
-class FakeKin:
-    def __init__(self):
-        self.checked = []
 
-    def parked_dirty_axes(self):
-        return []
-
-    def check_move(self, move):
-        self.checked.append(tuple(move.end_pos))
-        # simulate a bed of +/-100 in X/Y, +/-50 in Z
-        ep = move.end_pos
-        if not (
-            -100 <= ep[0] <= 100 and -100 <= ep[1] <= 100 and -50 <= ep[2] <= 50
-        ):
-            raise RuntimeError("out of range")
+def _bed_bounds_check(move):
+    # simulate a bed of +/-100 in X/Y, +/-50 in Z
+    ep = move.end_pos
+    if not (
+        -100 <= ep[0] <= 100 and -100 <= ep[1] <= 100 and -50 <= ep[2] <= 50
+    ):
+        raise RuntimeError("out of range")
 
 
 def make_motion():
@@ -27,7 +21,7 @@ def make_motion():
     m._max_accel = 3000.0
     m._corner_deviation = 0.0034517796864424596
     m._planner_ready = False
-    m.kin = FakeKin()
+    m.kin = FakeKin(check_move_fn=_bed_bounds_check)
     m.extruder = types.SimpleNamespace(check_move=lambda mv: None)
     m.engine = types.SimpleNamespace(
         calls=[],
@@ -84,39 +78,20 @@ def make_gcode_move():
     return g
 
 
-class FakeGcmd:
-    def error(self, msg):
-        return RuntimeError(msg)
-
-
 def test_transform_gate_passes_when_identity():
     g = make_gcode_move()
     # identity: transformed == raw -> no raise
-    g._reject_curve_if_transform_active(FakeGcmd())
+    g._reject_curve_if_transform_active(FakeGcmd(error=RuntimeError))
 
 
 def test_transform_gate_rejects_when_active():
     g = make_gcode_move()
     g.position_with_transform = lambda: [0.0, 2.0, 0.0, 0.0]  # bent in Y
     try:
-        g._reject_curve_if_transform_active(FakeGcmd())
+        g._reject_curve_if_transform_active(FakeGcmd(error=RuntimeError))
         assert False, "expected rejection"
     except RuntimeError as e:
         assert "active move transform" in str(e)
-
-
-class ParamGcmd:
-    def __init__(self, params):
-        self._p = params
-
-    def get_command_parameters(self):
-        return self._p
-
-    def get_commandline(self):
-        return "G5 " + " ".join("%s%s" % kv for kv in self._p.items())
-
-    def error(self, msg):
-        return RuntimeError(msg)
 
 
 def make_full_gcode_move():
@@ -146,7 +121,11 @@ def make_full_gcode_move():
 def test_cmd_g5_requires_p_and_q():
     g = make_full_gcode_move()
     try:
-        g.cmd_G5(ParamGcmd({"X": "10", "Y": "0", "I": "2", "J": "2"}))
+        g.cmd_G5(
+            FakeGcmd(
+                {"X": "10", "Y": "0", "I": "2", "J": "2"}, error=RuntimeError
+            )
+        )
         assert False
     except RuntimeError as e:
         assert "P and Q" in str(e)
@@ -155,8 +134,9 @@ def test_cmd_g5_requires_p_and_q():
 def test_cmd_g5_calls_move_curve_with_interior_points():
     g = make_full_gcode_move()
     g.cmd_G5(
-        ParamGcmd(
-            {"X": "10", "Y": "0", "I": "2", "J": "4", "P": "-3", "Q": "4"}
+        FakeGcmd(
+            {"X": "10", "Y": "0", "I": "2", "J": "4", "P": "-3", "Q": "4"},
+            error=RuntimeError,
         )
     )
     assert g.curve_calls, "move_curve should be invoked"
@@ -180,7 +160,9 @@ def test_cmd_g5_chained_omits_ij_and_forwards_none():
     g.printer = types.SimpleNamespace(
         lookup_object=lambda name, default=None: objs[name]
     )
-    g.cmd_G5(ParamGcmd({"X": "10", "Y": "0", "P": "-3", "Q": "4"}))
+    g.cmd_G5(
+        FakeGcmd({"X": "10", "Y": "0", "P": "-3", "Q": "4"}, error=RuntimeError)
+    )
     (args, _kwargs) = g.curve_calls[0]
     _newpos, interior, submit, _speed = args
     # chained: only P2, no P1
@@ -202,7 +184,12 @@ def test_cmd_g5_chained_omits_ij_and_forwards_none():
 def test_cmd_g5_rejects_i_without_j():
     g = make_full_gcode_move()
     try:
-        g.cmd_G5(ParamGcmd({"X": "10", "Y": "0", "I": "1", "P": "0", "Q": "0"}))
+        g.cmd_G5(
+            FakeGcmd(
+                {"X": "10", "Y": "0", "I": "1", "P": "0", "Q": "0"},
+                error=RuntimeError,
+            )
+        )
         assert False
     except RuntimeError as e:
         assert "both be present or both omitted" in str(e)
@@ -211,7 +198,7 @@ def test_cmd_g5_rejects_i_without_j():
 def test_cmd_g5_1_requires_i_or_j():
     g = make_full_gcode_move()
     try:
-        g.cmd_G5_1(ParamGcmd({"X": "10", "Y": "0"}))
+        g.cmd_G5_1(FakeGcmd({"X": "10", "Y": "0"}, error=RuntimeError))
         assert False
     except RuntimeError as e:
         assert "I and/or J" in str(e)
@@ -219,7 +206,9 @@ def test_cmd_g5_1_requires_i_or_j():
 
 def test_cmd_g5_1_dispatches_quadratic():
     g = make_full_gcode_move()
-    g.cmd_G5_1(ParamGcmd({"X": "10", "Y": "0", "I": "5", "J": "5"}))
+    g.cmd_G5_1(
+        FakeGcmd({"X": "10", "Y": "0", "I": "5", "J": "5"}, error=RuntimeError)
+    )
     assert g.curve_calls
     (args, _kwargs) = g.curve_calls[0]
     newpos, interior, _submit, _speed = args

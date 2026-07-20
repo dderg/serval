@@ -1,4 +1,6 @@
 import pytest
+from fakes import FakeKin, FakeRail, FakeStepper
+from fakes import FakeToolhead as FakeToolheadBase
 
 from klippy.extras.stepper_enable import EnableTracking, StepperEnablePin
 from klippy.mcu import MIN_SCHEDULE_LEAD
@@ -8,40 +10,11 @@ MOTION_LEAD = 0.25
 TMC_ENABLE_WORK_SECS = 0.170
 
 
-class FakeStepper:
-    def __init__(self, name):
-        self._name = name
-        self._active_callbacks = []
-
-    def add_active_callback(self, cb):
-        self._active_callbacks.append(cb)
-
-    def get_name(self, short=False):
-        return self._name
-
-
-class FakeRail:
-    def __init__(self, steppers):
-        self._steppers = steppers
-
-    def get_steppers(self):
-        return self._steppers
-
-
-class FakeKin:
-    def __init__(self, rails):
-        self.rails = rails
-
-    def active_rails(self, dx, dy, dz):
-        return self.rails
-
-
-class FakeToolhead:
+class FakeToolhead(FakeToolheadBase):
     _fire_active_callbacks = Motion._fire_active_callbacks
 
     def __init__(self, kin):
-        self.kin = kin
-        self.follower_steppers = []
+        super().__init__(kin=kin)
         self.clock = 1000.0
 
     def get_last_move_time(self):
@@ -69,8 +42,11 @@ class FakeMcuDigitalOut:
 
 
 def make_z_gantry(toolhead_kin_pins=3, failing_pin=None):
-    steppers = [FakeStepper("motor_z%d" % i) for i in range(toolhead_kin_pins)]
-    th = FakeToolhead(FakeKin([FakeRail(steppers)]))
+    steppers = [
+        FakeStepper(name="motor_z%d" % i) for i in range(toolhead_kin_pins)
+    ]
+    rails = [FakeRail(steppers=steppers)]
+    th = FakeToolhead(FakeKin(rails=rails, active_rails_result=rails))
     pins = []
     for i, s in enumerate(steppers):
         mcu_pin = FakeMcuDigitalOut(
@@ -102,7 +78,8 @@ class FakeServoTorqueLine:
 def test_servo_drive_enable_wait_does_not_erode_schedule_lead():
     servo_rail = FakeStepper("servo_x")
     z_stepper = FakeStepper("motor_z")
-    th = FakeToolhead(FakeKin([FakeRail([servo_rail]), FakeRail([z_stepper])]))
+    rails = [FakeRail(steppers=[servo_rail]), FakeRail(steppers=[z_stepper])]
+    th = FakeToolhead(FakeKin(rails=rails, active_rails_result=rails))
     torque_line = FakeServoTorqueLine(th)
     EnableTracking(servo_rail, StepperEnablePin(torque_line, 0))
     z_pin = FakeMcuDigitalOut(th, "PF15")

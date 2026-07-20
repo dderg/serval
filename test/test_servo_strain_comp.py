@@ -3,83 +3,33 @@ import math
 import struct
 
 import pytest
+from fakes import (
+    FakeConfig,
+    FakeGcode,
+    FakeKin,
+    FakeNode,
+    FakePrinter,
+    FakeReactor,
+    FakeToolhead,
+)
+from fakes import FakeEngine as _FakeEngine
+from fakes import FakeGcmd as _FakeGcmd
 
 from klippy.extras import servo_axis, servo_strain_comp
 
 
-class FakeReactor:
-    def __init__(self):
-        self._t = 0.0
-        self.pauses = []
-
-    def monotonic(self):
-        self._t += 0.001
-        return self._t
-
-    def pause(self, until):
-        self.pauses.append(until - self._t)
-        self._t = until
-
-
-class FakeGcode:
-    def __init__(self):
-        self.commands = {}
-
-    def register_command(self, name, func, desc=None):
-        self.commands[name] = func
-
-
-class FakeToolhead:
-    def __init__(self, kin):
-        self._kin = kin
-
-    def get_kinematics(self):
-        return self._kin
-
-    def wait_moves(self):
-        pass
-
-
-class FakeKin:
-    def __init__(self, rails):
-        self.rails = rails
-
-    def lanes(self):
-        return [
-            (i, r.get_name(short=True), []) for i, r in enumerate(self.rails)
-        ]
-
-    def coupled_xy(self):
-        return True
-
-
-class FakeNode:
-    def __init__(self, name, handle, slots):
-        self.name = name
-        self._handle = handle
-        self._slots = slots
-
-    def get_engine_handle(self):
-        return self._handle
-
-    def get_slot_for_motor(self, motor_name):
-        return self._slots[motor_name]
-
-
-class FakeEngine:
+class FakeEngine(_FakeEngine):
     """set_strain_comp records uploads; sdo_read simulates belt pairs whose
     differential torque responds linearly to the applied constant offset —
     directly on the offset pair (stiffness) and through the gantry on the
     other pair (cross, %/mm)."""
 
     def __init__(self, stiffness_pct_per_mm=200.0, cross_pct_per_mm=0.0):
+        super().__init__()
         self.stiffness = stiffness_pct_per_mm
         self.cross = cross_pct_per_mm
         self.uploads = []
         self.applied_um = {}
-
-    def motion_drained(self):
-        return True
 
     def set_strain_comp(self, handle, slot_a, slot_b, *args):
         values = args[-1]
@@ -101,56 +51,15 @@ class FakeEngine:
         return (2, raw)
 
 
-class FakePrinter:
-    command_error = RuntimeError
-
-    def __init__(self, objs):
-        self._objs = objs
-        self._reactor = FakeReactor()
-
-    def lookup_object(self, name):
-        return self._objs[name]
-
-    def get_reactor(self):
-        return self._reactor
-
-    def is_shutdown(self):
-        return False
-
-
-class FakeConfig:
-    def __init__(self, printer, map_file):
-        self._printer = printer
-        self._map_file = map_file
-
-    def get_printer(self):
-        return self._printer
-
-    def get(self, name, default=None):
-        if name == "map_file":
-            return self._map_file
-        return default
-
-
-class FakeGcmd:
+class FakeGcmd(_FakeGcmd):
     error = RuntimeError
 
-    def __init__(self, **params):
-        self._params = params
-        self.responses = []
-
-    def get(self, name, default=None):
-        return self._params.get(name, default)
+    def get_int(self, name, default=None, **kw):
+        return int(self.params.get(name, default))
 
     def get_float(self, name, default=None, **kw):
-        value = self._params.get(name, default)
+        value = self.params.get(name, default)
         return None if value is None else float(value)
-
-    def get_int(self, name, default=None, **kw):
-        return int(self._params.get(name, default))
-
-    def respond_info(self, msg):
-        self.responses.append(msg)
 
 
 def make_motor(name, chain_index):
@@ -178,17 +87,29 @@ def make_comp(tmp_path, engine=None):
         make_rail("x", [make_motor("m_a", 0), make_motor("m_a1", 1)]),
         make_rail("y", [make_motor("m_b", 2), make_motor("m_b1", 3)]),
     ]
-    node = FakeNode("xy_drives", 7, {"m_a": 0, "m_a1": 1, "m_b": 2, "m_b1": 3})
+    node = FakeNode(
+        name="xy_drives",
+        handle=7,
+        slots={"m_a": 0, "m_a1": 1, "m_b": 2, "m_b1": 3},
+    )
+    kin = FakeKin(
+        rails=rails,
+        lanes=[(i, r.get_name(short=True), []) for i, r in enumerate(rails)],
+        coupled_xy=True,
+    )
     printer = FakePrinter(
         {
-            "toolhead": FakeToolhead(FakeKin(rails)),
+            "toolhead": FakeToolhead(kin=kin),
             "motion_engine": engine,
             "ethercat_node xy_drives": node,
             "gcode": FakeGcode(),
-        }
+        },
+        reactor=FakeReactor(tick=0.001),
     )
     map_file = str(tmp_path / "strain_comp.json")
-    sc = servo_strain_comp.ServoStrainComp(FakeConfig(printer, map_file))
+    sc = servo_strain_comp.ServoStrainComp(
+        FakeConfig(printer, values={"map_file": map_file})
+    )
     return sc, engine
 
 

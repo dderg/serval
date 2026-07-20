@@ -1,41 +1,6 @@
-import contextlib
+from fakes import FakeReactor
 
 import klippy.printer
-
-
-class FakeReactor:
-    NOW = 0.0
-    NEVER = 9999999999.0
-
-    def register_callback(self, callback, waketime=NOW):
-        return None
-
-    def register_async_callback(self, callback, waketime=NOW):
-        return None
-
-    def register_fd(self, fd, read_callback, write_callback=None):
-        return object()
-
-    def unregister_fd(self, handle):
-        return None
-
-    def register_timer(self, callback, waketime=NEVER):
-        return object()
-
-    def unregister_timer(self, handle):
-        return None
-
-    def mutex(self, is_locked=False):
-        return contextlib.nullcontext()
-
-    def monotonic(self):
-        return 0.0
-
-    def run(self):
-        return None
-
-    def get_gc_stats(self):
-        return (0, 0, 0)
 
 
 def make_failed_connect_printer(monkeypatch):

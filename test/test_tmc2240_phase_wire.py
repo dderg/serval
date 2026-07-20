@@ -12,7 +12,7 @@ from tmc_wire_harness import (
     ConfigError,
     FakeConfig,
     FakeEnableLine,
-    FakeGCode,
+    FakeGcode,
     FakeMCU,
     FakeMcuTmc,
     FakePins,
@@ -48,7 +48,7 @@ class Rig:
         self.mcu = FakeMCU(self.wire)
         self.printer = FakePrinter(self.wire)
         self.printer.add_object("pins", FakePins())
-        self.printer.add_object("gcode", FakeGCode())
+        self.printer.add_object("gcode", FakeGcode())
         self.printer.add_object(
             "stepper_enable", FakeStepperEnable(FakeEnableLine())
         )

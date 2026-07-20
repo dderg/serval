@@ -8,13 +8,14 @@ init, stepper-enable, stepper-disable.
 """
 
 import pytest
+from fakes import FakeToolhead
 from tmc_wire_harness import (
     CommandError,
     FakeConfig,
     FakeCurrentHelper,
     FakeEnableLine,
     FakeForceMove,
-    FakeGCode,
+    FakeGcode,
     FakeMcuTmc,
     FakePrinter,
     FakeStepper,
@@ -36,7 +37,7 @@ class Rig:
     def __init__(self, dedicated_enable=True, step_both_edge=True):
         self.wire = []
         self.printer = FakePrinter(self.wire)
-        self.gcode = FakeGCode()
+        self.gcode = FakeGcode()
         self.enable_line = FakeEnableLine(dedicated=dedicated_enable)
         self.stepper = FakeStepper(step_both_edge=step_both_edge)
         self.printer.add_object("gcode", self.gcode)
@@ -179,7 +180,7 @@ def test_enable_without_reset_detection_always_replays_the_registers():
     wire = []
     printer = FakePrinter(wire)
     enable_line = FakeEnableLine(dedicated=True)
-    printer.add_object("gcode", FakeGCode())
+    printer.add_object("gcode", FakeGcode())
     printer.add_object("stepper_enable", FakeStepperEnable(enable_line))
     printer.add_object("force_move", FakeForceMove(FakeStepper()))
     sections = {}
@@ -202,15 +203,10 @@ def test_enable_without_reset_detection_always_replays_the_registers():
     assert printer.shutdowns == []
 
 
-class FakeToolhead:
-    def get_last_move_time(self):
-        return 12.0
-
-
 def test_init_tmc_replays_the_desired_config_stamped_at_print_time():
     rig = Rig()
     rig.boot()
-    rig.printer.add_object("toolhead", FakeToolhead())
+    rig.printer.add_object("toolhead", FakeToolhead(last_move_time=12.0))
     del rig.wire[:]
     rig.helper.cmd_INIT_TMC(None)
     assert writes(rig.wire) == [

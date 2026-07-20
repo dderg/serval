@@ -1,10 +1,7 @@
 import pytest
+from fakes import FakeConfig, FakeConfigError, FakeMcu, FakePrinter
 
 from klippy import stepper
-
-
-class FakeError(Exception):
-    pass
 
 
 class FakePinParams:
@@ -24,111 +21,24 @@ class FakePins:
         return FakePinParams(pin, self.chip)
 
 
-class FakeMCU:
-    def __init__(self, printer):
-        self._printer = printer
-        self._oid = 0
-
-    def create_oid(self):
-        self._oid += 1
-        return self._oid
-
-    def register_config_callback(self, cb):
-        pass
-
-    def get_printer(self):
-        return self._printer
-
-
 class FakeRegistrar:
     def register_stepper(self, config, mcu_stepper):
         pass
 
 
-class FakePrinter:
+class LocalFakePrinter(FakePrinter):
     def __init__(self):
-        self.mcu = FakeMCU(self)
+        super().__init__()
+        self.mcu = FakeMcu(printer=self)
         self.pins = FakePins(self.mcu)
-        self._objects = {"pins": self.pins}
+        self.objects["pins"] = self.pins
 
-    def lookup_object(self, name):
-        return self._objects[name]
-
-    def load_object(self, config, name):
-        return self._objects.setdefault(name, FakeRegistrar())
-
-    config_error = FakeError
-
-
-_UNSET = object()
-
-
-class FakeConfig:
-    def __init__(self, printer, name, values):
-        self._printer = printer
-        self._name = name
-        self._values = values
-        self.error = FakeError
-
-    def get_name(self):
-        return self._name
-
-    def get_printer(self):
-        return self._printer
-
-    def _raw(self, option, default):
-        if option in self._values:
-            return self._values[option]
-        if default is _UNSET:
-            raise FakeError(
-                "Option '%s' missing in [%s]" % (option, self._name)
-            )
-        return default
-
-    def get(self, option, default=_UNSET, note_valid=True):
-        return self._raw(option, default)
-
-    def getfloat(
-        self,
-        option,
-        default=_UNSET,
-        minval=None,
-        maxval=None,
-        above=None,
-        below=None,
-        note_valid=True,
-    ):
-        val = self._raw(option, default)
-        if val is None:
-            return None
-        return float(val)
-
-    def getint(self, option, default=_UNSET, minval=None, note_valid=True):
-        val = self._raw(option, default)
-        if val is None:
-            return None
-        return int(val)
-
-    def getboolean(self, option, default=_UNSET, note_valid=True):
-        val = self._raw(option, default)
-        if val is None or isinstance(val, bool):
-            return val
-        return str(val).strip().lower() in ("1", "true", "yes", "on")
-
-    def getlists(
-        self,
-        option,
-        default=_UNSET,
-        seps=(",",),
-        count=None,
-        parser=str,
-        note_valid=True,
-    ):
-        return self._raw(option, default)
+    def load_object(self, config, name, default=None):
+        return self.objects.setdefault(name, FakeRegistrar())
 
 
 def make_axis_rail(axis_values, motor_values):
-    printer = FakePrinter()
+    printer = LocalFakePrinter()
     axis_name = axis_values.pop("__name__")
     axis_config = FakeConfig(printer, axis_name, axis_values)
     motor_specs = []
@@ -208,7 +118,7 @@ def test_axis_rail_defers_endstops_to_central_homing():
 
 
 def test_homing_keys_on_motor_section_rejected():
-    with pytest.raises(FakeError):
+    with pytest.raises(FakeConfigError):
         make_axis_rail(
             {
                 "__name__": "axis x",

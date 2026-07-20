@@ -1,20 +1,19 @@
 import pytest
+from fakes import (
+    FakeConfig,
+    FakeError,
+    FakeMcu,
+    FakeMotion,
+)
+from fakes import (
+    FakePins as _FakePinsBase,
+)
+from fakes import (
+    FakePrinter as _FakePrinterBase,
+)
 
 from klippy import motion_kinematics
 from klippy.extras import servo_axis
-
-
-class FakeError(Exception):
-    pass
-
-
-class FakePinParams:
-    def __init__(self, pin, chip):
-        self.pin = pin
-        self.chip = chip
-
-    def __getitem__(self, key):
-        return {"pin": self.pin, "invert": False, "chip": self.chip}[key]
 
 
 class FakeMCUEndstop:
@@ -26,32 +25,10 @@ class FakeMCUEndstop:
         self.steppers.append(stepper)
 
 
-class FakePins:
-    def __init__(self, chip):
-        self.chip = chip
-
-    def lookup_pin(self, pin, can_invert=False, can_pullup=False):
-        return FakePinParams(pin, self.chip)
-
+class FakePins(_FakePinsBase):
     def setup_pin(self, pin_type, pin_desc):
         assert pin_type == "endstop"
         return FakeMCUEndstop(pin_desc)
-
-
-class FakeMCU:
-    def __init__(self, printer):
-        self._printer = printer
-        self._oid = 0
-
-    def create_oid(self):
-        self._oid += 1
-        return self._oid
-
-    def register_config_callback(self, cb):
-        pass
-
-    def get_printer(self):
-        return self._printer
 
 
 class FakeRegistrar:
@@ -64,158 +41,15 @@ class FakeHoming:
         pass
 
 
-class FakePrinter:
-    def __init__(self):
-        self.mcu = FakeMCU(self)
-        self.pins = FakePins(self.mcu)
-        self._objects = {"pins": self.pins, "homing": FakeHoming()}
-        self.event_handlers = []
-
-    def lookup_object(self, name):
-        return self._objects[name]
-
-    def load_object(self, config, name):
-        return self._objects.setdefault(name, FakeRegistrar())
-
-    def register_event_handler(self, event, handler):
-        self.event_handlers.append((event, handler))
-
+class FakePrinter(_FakePrinterBase):
     config_error = FakeError
 
-
-_UNSET = object()
-
-
-class FakeConfig:
-    def __init__(self, printer, sections):
-        self._printer = printer
-        self._sections = sections
-        self.error = FakeError
-
-    def get_printer(self):
-        return self._printer
-
-    def has_section(self, name):
-        return name in self._sections
-
-    def get_prefix_sections(self, prefix):
-        return [
-            FakeSection(self._printer, name, self._sections[name])
-            for name in self._sections
-            if name.startswith(prefix)
-        ]
-
-    def getsection(self, name):
-        if name not in self._sections:
-            raise FakeError("no section [%s]" % name)
-        return FakeSection(self._printer, name, self._sections[name])
-
-
-class FakeSection:
-    def __init__(self, printer, name, values):
-        self._printer = printer
-        self._name = name
-        self._values = values
-        self.error = FakeError
-
-    def get_name(self):
-        return self._name
-
-    def get_printer(self):
-        return self._printer
-
-    def lookup_object(self, name):
-        return self._printer.lookup_object(name)
-
-    def _raw(self, option, default):
-        if option in self._values:
-            return self._values[option]
-        if default is _UNSET:
-            raise FakeError(
-                "Option '%s' missing in [%s]" % (option, self._name)
-            )
-        return default
-
-    def get(self, option, default=_UNSET, note_valid=True):
-        return self._raw(option, default)
-
-    def getfloat(
-        self,
-        option,
-        default=_UNSET,
-        minval=None,
-        maxval=None,
-        above=None,
-        below=None,
-        note_valid=True,
-    ):
-        val = self._raw(option, default)
-        if val is None:
-            return None
-        return float(val)
-
-    def getint(self, option, default=_UNSET, minval=None, note_valid=True):
-        val = self._raw(option, default)
-        if val is None:
-            return None
-        return int(val)
-
-    def getboolean(self, option, default=_UNSET, note_valid=True):
-        val = self._raw(option, default)
-        if val is None or isinstance(val, bool):
-            return val
-        return str(val).strip().lower() in ("1", "true", "yes", "on")
-
-    def getchoice(self, option, choices, default=_UNSET, note_valid=True):
-        val = self._raw(option, default)
-        if val not in choices:
-            raise FakeError(
-                "Choice '%s' for option '%s' in [%s] is not valid"
-                % (val, option, self._name)
-            )
-        return choices[val]
-
-    def getlist(
-        self,
-        option,
-        default=_UNSET,
-        seps=(",",),
-        count=None,
-        note_valid=True,
-    ):
-        val = self._raw(option, default)
-        if val is None:
-            return None
-        if isinstance(val, (list, tuple)):
-            return list(val)
-        return [p.strip() for p in val.split(",") if p.strip()]
-
-    def getlists(
-        self,
-        option,
-        default=_UNSET,
-        seps=(",",),
-        count=None,
-        parser=str,
-        note_valid=True,
-    ):
-        return self._raw(option, default)
-
-
-class FakeEngine:
     def __init__(self):
-        self.set_position_calls = []
+        super().__init__(objects={"homing": FakeHoming()})
+        self.add_object("pins", FakePins(chip=FakeMcu(printer=self)))
 
-    def set_position(self, x, y, z):
-        self.set_position_calls.append((x, y, z))
-
-
-class FakeMotion:
-    def __init__(self, axis_sections=()):
-        self.engine = FakeEngine()
-        self.axis_sections = list(axis_sections)
-        self.max_z_velocity = 10.0
-        self.max_z_accel = 100.0
+    def load_object(self, config, name):
+        return self.objects.setdefault(name, FakeRegistrar())
 
 
 def motor_section(**extra):
@@ -311,7 +145,7 @@ def read_native_decl(sections):
 
 def make_kin(sections):
     printer = FakePrinter()
-    config = FakeConfig(printer, sections)
+    config = FakeConfig(printer, sections=sections, error=FakeError)
     motion = FakeMotion()
     motion.kinematics_decl = read_native_decl(sections)
     return motion_kinematics.load_kinematics(config, motion)
