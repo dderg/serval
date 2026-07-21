@@ -24,6 +24,14 @@ pub(super) trait DriveChain {
         0
     }
 
+    /// (wake_late_ns, recv_ns, process_ns, send_ns) of the last exchange —
+    /// the stage breakdown that attributes a frame-timing spike to kernel
+    /// wakeup latency vs the polled bus receive vs domain processing vs the
+    /// send path.
+    fn cycle_stage_ns(&self) -> (i64, i64, i64, i64) {
+        (0, 0, 0, 0)
+    }
+
     fn shutdown_and_exit(&mut self) -> ! {
         self.disable_all();
         self.shutdown();
@@ -53,6 +61,11 @@ impl DriveChain for FfiDriveChain {
 
     fn reanchor_count(&self) -> u32 {
         unsafe { ffi::ec_rt_reanchor_count() }
+    }
+    fn cycle_stage_ns(&self) -> (i64, i64, i64, i64) {
+        let (mut wake_late, mut recv, mut process, mut send) = (0i64, 0i64, 0i64, 0i64);
+        unsafe { ffi::ec_rt_cycle_stage_ns(&mut wake_late, &mut recv, &mut process, &mut send) };
+        (wake_late, recv, process, send)
     }
 
     fn enable_all(&mut self) -> i32 {
