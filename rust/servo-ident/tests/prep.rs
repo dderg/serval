@@ -4,8 +4,8 @@ use servo_ident::capture::{
 use servo_ident::fit::{fit, residual_by_motor, FitInput, FitOptions};
 use servo_ident::model::Structure;
 use servo_ident::prep::{
-    band_limited_rms, biquad_in_place, median_dt, modal_biquad, prep, segments, sinc_kernel,
-    ModalMode, PrepOptions,
+    band_limited_rms, biquad_in_place, direction_split, frame_pairs, median_dt, modal_biquad,
+    onset_bias, prep, segments, sinc_kernel, transient_rms, ModalMode, PrepOptions, TransientKind,
 };
 
 const DT: f64 = 0.00025;
@@ -523,4 +523,315 @@ fn reversal_blanking_catches_deadband_skipping_flips() {
     }
     assert!(pp.valid[60], "samples between warmup and blank stay valid");
     assert!(pp.valid[340], "samples after the blanked window stay valid");
+}
+
+/// Stepped accel: `TransientKind::Mass` opens one window per accel/decel
+/// phase start — the same transitions `onset_bias` scores on a stepped
+/// trace, minus re-triggers inside a phase.
+#[test]
+fn mass_transient_fires_once_per_accel_phase() {
+    let dt = 0.001;
+    let a = 10_000.0;
+    let acc = vec![
+        0.0, 0.0, a, a, a, 0.0, 0.0, -a, -a, -a, 0.0, 0.0, a, a, a, 0.0,
+    ];
+    let vel: Vec<f64> = (0..acc.len()).map(|k| k as f64).collect();
+    let ferr: Vec<f64> = (0..acc.len()).map(|k| 0.1 * (k % 3) as f64 - 0.1).collect();
+    let mass = transient_rms(TransientKind::Mass, &[acc], &[vel], &[ferr], dt, 0.002);
+    assert_eq!(mass[0].windows, 3, "three accel phases, one window each");
+}
+
+/// Jerk-limited ramp: accel never steps by 0.25·amax between consecutive
+/// samples, so the onset_bias step detector stays blind — but the mass
+/// objective must still score the phase (the Trident Y mode on the real
+/// tune pattern is exactly this shape: onset windows 0, yet accel peaks
+/// at full amplitude).
+#[test]
+fn mass_transient_fires_on_jerk_limited_ramps() {
+    let dt = 0.001;
+    let a = 10_000.0;
+    let n = 40;
+    let ramp = 20;
+    let acc: Vec<f64> = (0..n)
+        .map(|k| {
+            if k < ramp {
+                a * k as f64 / ramp as f64
+            } else {
+                a * (n - 1 - k) as f64 / ramp as f64
+            }
+        })
+        .collect();
+    let vel: Vec<f64> = (0..n).map(|k| k as f64).collect();
+    let ferr = vec![0.05; n];
+    let (_, onset_windows) = onset_bias(&[acc.clone()], &[ferr.clone()], dt, 0.008);
+    assert_eq!(onset_windows, 0, "the step detector must be blind here");
+    let mass = transient_rms(TransientKind::Mass, &[acc], &[vel], &[ferr], dt, 0.008);
+    assert_eq!(mass[0].windows, 1, "one activity onset for the ramp");
+    assert!(mass[0].rms.is_some());
+}
+
+/// Ramp to cruise then decel to rest: exactly one accel→cruise handoff
+/// while the mode is still moving.
+#[test]
+fn cruise_arrival_fires_once_per_trapezoid() {
+    let dt = 0.001;
+    let a = 10_000.0;
+    let vmax = 100.0;
+    let mut acc = Vec::new();
+    let mut vel = Vec::new();
+    let ramp = 10;
+    for k in 0..ramp {
+        acc.push(a);
+        vel.push(vmax * (k as f64 + 1.0) / ramp as f64);
+    }
+    for _ in 0..20 {
+        acc.push(0.0);
+        vel.push(vmax);
+    }
+    for k in 0..ramp {
+        acc.push(-a);
+        vel.push(vmax * (1.0 - (k as f64 + 1.0) / ramp as f64));
+    }
+    let ferr = vec![0.02; acc.len()];
+    let viscous = transient_rms(TransientKind::Viscous, &[acc], &[vel], &[ferr], dt, 0.008);
+    assert_eq!(
+        viscous[0].windows, 1,
+        "one cruise arrival per single trapezoid stroke"
+    );
+}
+/// The same trapezoid ends in a stop: exactly one lead window, opening
+/// where |vel| falls through 5% of vmax on the final decel — the
+/// corner-exit lobe location. The accel ramp start must NOT trigger.
+#[test]
+fn lead_stop_window_fires_once_at_the_stop() {
+    let dt = 0.001;
+    let a = 10_000.0;
+    let vmax = 100.0;
+    let mut acc = Vec::new();
+    let mut vel = Vec::new();
+    let ramp = 10;
+    for k in 0..ramp {
+        acc.push(a);
+        vel.push(vmax * (k as f64 + 1.0) / ramp as f64);
+    }
+    for _ in 0..20 {
+        acc.push(0.0);
+        vel.push(vmax);
+    }
+    for k in 0..ramp {
+        acc.push(-a);
+        vel.push(vmax * (1.0 - (k as f64 + 1.0) / ramp as f64));
+    }
+    for _ in 0..15 {
+        acc.push(0.0);
+        vel.push(0.0);
+    }
+    let ferr = vec![0.02; acc.len()];
+    let lead = transient_rms(TransientKind::Lead, &[acc], &[vel], &[ferr], dt, 0.008);
+    assert_eq!(lead[0].windows, 1, "one decel-to-stop per stroke");
+    assert!(lead[0].rms.is_some());
+}
+
+/// Commanded velocity that flips sign three times triggers three coulomb
+/// windows, and the aggregate/sigma math over constant per-window ferr is
+/// the textbook sample-std standard error.
+#[test]
+fn reversal_windows_and_sigma_math_on_known_values() {
+    let dt = 0.001;
+    let n = 40;
+    let mut vel = vec![0.0; n];
+    for (k, v) in vel.iter_mut().enumerate() {
+        *v = match k / 10 {
+            0 | 2 => 1.0,
+            _ => -1.0,
+        };
+    }
+    let acc = vec![0.0; n];
+    let mut ferr = vec![0.0; n];
+    for (start, val) in [(10, 3.0), (20, 4.0), (30, 5.0)] {
+        for s in ferr.iter_mut().take(start + 3).skip(start) {
+            *s = val;
+        }
+    }
+    let coulomb = transient_rms(TransientKind::Coulomb, &[acc], &[vel], &[ferr], dt, 0.003);
+    let t = &coulomb[0];
+    assert_eq!(t.windows, 3, "three sign reversals");
+    let rms = t.rms.expect("rms present with three windows");
+    assert!(
+        (rms - (150.0_f64 / 9.0).sqrt()).abs() < 1e-9,
+        "sample-weighted rms over all window samples: got {rms}"
+    );
+    let sigma = t.sigma.expect("sigma present with three windows");
+    assert!(
+        (sigma - (1.0 / 3.0_f64).sqrt()).abs() < 1e-9,
+        "sigma = std(3,4,5)/sqrt(3) = 1/sqrt(3): got {sigma}"
+    );
+}
+
+/// No trigger at all: rms and sigma are both null.
+#[test]
+fn no_windows_yields_null_rms() {
+    let n = 20;
+    let vel = vec![1.0; n];
+    let acc = vec![0.0; n];
+    let ferr = vec![0.5; n];
+    let coulomb = transient_rms(
+        TransientKind::Coulomb,
+        &[acc],
+        &[vel],
+        &[ferr],
+        0.001,
+        0.003,
+    );
+    assert_eq!(coulomb[0].windows, 0);
+    assert_eq!(coulomb[0].rms, None);
+    assert_eq!(coulomb[0].sigma, None);
+}
+
+/// A single window has a defined rms but no sample standard deviation, so
+/// sigma is null.
+#[test]
+fn single_window_yields_null_sigma() {
+    let n = 20;
+    let mut vel = vec![1.0; n];
+    for v in vel.iter_mut().skip(10) {
+        *v = -1.0;
+    }
+    let acc = vec![0.0; n];
+    let ferr = vec![0.7; n];
+    let coulomb = transient_rms(
+        TransientKind::Coulomb,
+        &[acc],
+        &[vel],
+        &[ferr],
+        0.001,
+        0.003,
+    );
+    assert_eq!(coulomb[0].windows, 1, "one reversal");
+    assert!(coulomb[0].rms.is_some(), "rms defined for one window");
+    assert_eq!(coulomb[0].sigma, None, "sigma null below two windows");
+}
+
+#[test]
+fn frame_pairs_reads_equal_and_opposite_columns() {
+    let equal = frame_pairs(&[vec![0.5, 0.5], vec![0.5, 0.5]]);
+    assert_eq!(equal, vec![([0, 1], 1.0)], "equal columns -> lambda +1");
+
+    let opposite = frame_pairs(&[vec![0.5, -0.5], vec![0.5, -0.5]]);
+    assert_eq!(
+        opposite,
+        vec![([0, 1], -1.0)],
+        "sign-flipped columns -> lambda -1"
+    );
+}
+
+#[test]
+fn frame_pairs_omits_unpartnered_axes() {
+    let pairs = frame_pairs(&[vec![1.0, 0.0, 0.5], vec![0.0, 1.0, 0.5]]);
+    assert_eq!(
+        pairs,
+        Vec::<([usize; 2], f64)>::new(),
+        "no two columns are equal or opposite"
+    );
+}
+
+#[test]
+fn frame_pairs_greedy_leaves_each_axis_in_at_most_one_pair() {
+    let pairs = frame_pairs(&[vec![0.5, 0.5, 0.5], vec![0.5, 0.5, 0.5]]);
+    assert_eq!(
+        pairs,
+        vec![([0, 1], 1.0)],
+        "three equal columns pair the first two; the third is unpartnered"
+    );
+}
+
+fn direction_ferr(bias: f64, reps: usize, len: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut vel = Vec::new();
+    let mut ferr = Vec::new();
+    for r in 0..reps {
+        let sign = if r % 2 == 0 { 1.0 } else { -1.0 };
+        for _ in 0..len {
+            vel.push(sign);
+            ferr.push(sign * bias);
+        }
+    }
+    (vel, ferr)
+}
+
+#[test]
+fn direction_split_q_is_positive_when_motor_i_lags_by_direction() {
+    let frame = vec![vec![1.0, 1.0]];
+    let (vel_i, ferr_i) = direction_ferr(0.01, 8, 40);
+    let ferr_j = vec![0.0; ferr_i.len()];
+    let vel_j = vec![0.0; vel_i.len()];
+    let out = direction_split(&frame, &[ferr_i, ferr_j], &[vel_i, vel_j]);
+    assert_eq!(out.len(), 1, "one pair");
+    let d = &out[0];
+    assert_eq!(d.pair, [0, 1]);
+    assert_eq!(d.lambda, 1.0);
+    assert!(
+        d.q > 0.0,
+        "positive bias in +dir yields positive q: {}",
+        d.q
+    );
+    assert!((d.q - 0.005).abs() < 1e-9, "q = mean_+/2 = 0.005: {}", d.q);
+    assert!((d.rms - d.q.abs()).abs() < 1e-12, "rms = |q|");
+    assert_eq!(d.windows, 8, "eight direction runs scored");
+    assert!(
+        d.sigma.is_some(),
+        "sigma defined with 4 windows per direction"
+    );
+}
+
+#[test]
+fn direction_split_respects_lambda_on_opposite_columns() {
+    let frame = vec![vec![1.0, -1.0]];
+    let (vel_i, ferr_i) = direction_ferr(0.01, 8, 40);
+    let ferr_j: Vec<f64> = ferr_i.iter().map(|e| 0.6 * e).collect();
+    let vel_j = vec![0.0; vel_i.len()];
+    let out = direction_split(&frame, &[ferr_i, ferr_j], &[vel_i, vel_j]);
+    let d = &out[0];
+    assert_eq!(d.lambda, -1.0);
+    assert!(
+        (d.q - 0.008).abs() < 1e-9,
+        "d = (ferr_i - lambda*ferr_j)/2 = (ferr_i + 0.6*ferr_i)/2 = 0.8*ferr_i, q=0.008: {}",
+        d.q
+    );
+}
+
+#[test]
+fn direction_split_sigma_null_below_two_windows_per_direction() {
+    let frame = vec![vec![1.0, 1.0]];
+    let (vel_i, ferr_i) = direction_ferr(0.01, 3, 40);
+    let ferr_j = vec![0.0; ferr_i.len()];
+    let vel_j = vec![0.0; vel_i.len()];
+    let out = direction_split(&frame, &[ferr_i, ferr_j], &[vel_i, vel_j]);
+    let d = &out[0];
+    assert_eq!(d.windows, 3, "two + runs, one - run");
+    assert_eq!(
+        d.sigma, None,
+        "sigma null with a single window in one direction"
+    );
+}
+
+#[test]
+fn direction_split_drops_runs_below_minimum_window() {
+    let frame = vec![vec![1.0, 1.0]];
+    let (vel_i, ferr_i) = direction_ferr(0.01, 6, 10);
+    let ferr_j = vec![0.0; ferr_i.len()];
+    let vel_j = vec![0.0; vel_i.len()];
+    let out = direction_split(&frame, &[ferr_i, ferr_j], &[vel_i, vel_j]);
+    assert_eq!(
+        out[0].windows, 0,
+        "runs of 10 samples fall below the 20-sample floor"
+    );
+}
+
+#[test]
+fn direction_split_emits_no_entries_when_frame_has_no_pairs() {
+    let frame = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+    let ferr = vec![vec![0.0; 4], vec![0.0; 4]];
+    let vel = vec![vec![1.0; 4], vec![1.0; 4]];
+    let out = direction_split(&frame, &ferr, &vel);
+    assert!(out.is_empty(), "no pairs -> no direction-split entries");
 }

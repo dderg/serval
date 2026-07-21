@@ -11,12 +11,6 @@ except ImportError:
 from collections.abc import Mapping
 from typing import Any
 
-DYNAMICS_METRIC_BY_TERM = {
-    "MASS": "ferr_peak",
-    "VISCOUS": "ferr_rms",
-    "COULOMB": "ferr_peak",
-    "DIRECTION_SPLIT": "ferr_mean_direction_imbalance",
-}
 DYNAMICS_TERM_KEYS = {
     "MASS": "mass",
     "VISCOUS": "viscous",
@@ -205,30 +199,6 @@ def _copy_dynamics(profile: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def scale_dynamics(
-    profile: dict[str, Any], term: str, scale: float
-) -> dict[str, Any]:
-    key = DYNAMICS_TERM_KEYS.get(term)
-    if key is None:
-        raise ValueError("unknown dynamics term %r" % (term,))
-    scaled = _copy_dynamics(profile)
-    scaled[key] = [v * scale for v in profile[key]]
-    return scaled
-
-
-def scale_dynamics_mode(
-    profile: dict[str, Any], term: str, mode_index: int, scale: float
-) -> dict[str, Any]:
-    key = DYNAMICS_TERM_KEYS.get(term)
-    if key is None:
-        raise ValueError("unknown dynamics term %r" % (term,))
-    scaled = _copy_dynamics(profile)
-    values = list(profile[key])
-    values[mode_index] = values[mode_index] * scale
-    scaled[key] = values
-    return scaled
-
-
 def add_dynamics_direction_split(
     profile: dict[str, Any], pair_index: int, delta: float
 ) -> dict[str, Any]:
@@ -328,141 +298,6 @@ def _equal_or_opposite_columns(a: list[float], b: list[float]) -> bool:
     return True
 
 
-def _direction_split_lambda(profile: dict[str, Any], slots: list[str]) -> int:
-    axis_index = {name: i for i, name in enumerate(profile["axes"])}
-    try:
-        first_index, second_index = (axis_index[name] for name in slots)
-    except (KeyError, ValueError) as e:
-        raise ValueError(
-            "direction-split pair must name two profile slots (got %r)"
-            % (slots,)
-        ) from e
-    columns = [list(column) for column in zip(*profile["frame"])]
-    try:
-        return _frame_column_lambda(columns[first_index], columns[second_index])
-    except ValueError as e:
-        raise ValueError(
-            "direction-split pair %s has invalid frame columns: %s" % (slots, e)
-        ) from e
-
-
-def _direction_split_moves(
-    step_name: str, drive_name: str, step_drives: Mapping[str, Any]
-) -> dict[Any, Mapping[str, Any]]:
-    if drive_name not in step_drives:
-        raise ValueError(
-            "step %s is missing direction-split drive %s"
-            % (step_name, drive_name)
-        )
-    moves = (step_drives[drive_name].get("metrics") or {}).get("moves") or []
-    indexed = {}
-    for move in moves:
-        if not isinstance(move, Mapping):
-            raise ValueError(
-                "step %s drive %s has a malformed move entry %r"
-                % (step_name, drive_name, move)
-            )
-        window = []
-        for window_key in ("start_ms", "end_ms"):
-            value = move.get(window_key)
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(value)
-            ):
-                raise ValueError(
-                    "step %s drive %s move %r has invalid %s %r"
-                    % (
-                        step_name,
-                        drive_name,
-                        move.get("move"),
-                        window_key,
-                        value,
-                    )
-                )
-            window.append(value)
-        window = tuple(window)
-        if window in indexed:
-            raise ValueError(
-                "step %s drive %s repeats move window %r"
-                % (step_name, drive_name, window)
-            )
-        indexed[window] = move
-    return indexed
-
-
-def direction_split_candidate_metrics(
-    profile: dict[str, Any], step: Mapping[str, Any], slots: list[str]
-) -> dict[str, float]:
-    if len(slots) != 2:
-        raise ValueError(
-            "direction-split scoring requires two slots (got %r)" % (slots,)
-        )
-    step_name = str(step.get("name", "<unnamed>"))
-    pair_lambda = _direction_split_lambda(profile, slots)
-    step_drives = step.get("drives") or {}
-    first_moves = _direction_split_moves(step_name, slots[0], step_drives)
-    second_moves = _direction_split_moves(step_name, slots[1], step_drives)
-    shared_windows = sorted(first_moves.keys() & second_moves.keys())
-    directional_q: dict[int, list[float]] = {1: [], -1: []}
-    for window in shared_windows:
-        first = first_moves[window]
-        second = second_moves[window]
-        first_direction = first.get("direction")
-        second_direction = second.get("direction")
-        if first_direction not in (-1, 1):
-            raise ValueError(
-                "step %s drive %s move window %r has nonmoving direction %r"
-                % (step_name, slots[0], window, first_direction)
-            )
-        if second_direction not in (-1, 1):
-            raise ValueError(
-                "step %s drive %s move window %r has nonmoving direction %r"
-                % (step_name, slots[1], window, second_direction)
-            )
-        expected_direction = pair_lambda * first_direction
-        if second_direction != expected_direction:
-            raise ValueError(
-                "step %s pair %s move window %r directions do not match lambda %d: "
-                "%r vs %r"
-                % (
-                    step_name,
-                    slots,
-                    window,
-                    pair_lambda,
-                    first_direction,
-                    second_direction,
-                )
-            )
-        for drive_name, move in zip(slots, (first, second)):
-            value = move.get("ferr_mean_moving")
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(value)
-            ):
-                raise ValueError(
-                    "step %s drive %s move window %r has invalid "
-                    "ferr_mean_moving %r"
-                    % (step_name, drive_name, window, value)
-                )
-        q = first["ferr_mean_moving"] - pair_lambda * second["ferr_mean_moving"]
-        directional_q[first_direction].append(q)
-    missing = [direction for direction, q in directional_q.items() if not q]
-    if missing:
-        raise ValueError(
-            "step %s pair %s needs moves in both first-drive directions; "
-            "missing %s" % (step_name, slots, missing)
-        )
-    q_plus = sum(directional_q[1]) / len(directional_q[1])
-    q_minus = sum(directional_q[-1]) / len(directional_q[-1])
-    return {
-        "q_plus": q_plus,
-        "q_minus": q_minus,
-        "ferr_mean_direction_imbalance": abs(q_plus + q_minus) / 2.0,
-    }
-
-
 def discover_dynamics_pairs(profile: dict[str, Any]) -> list[dict[str, Any]]:
     columns = [list(col) for col in zip(*profile["frame"])]
     remaining = set(range(len(columns)))
@@ -492,55 +327,6 @@ def discover_dynamics_pairs(profile: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
     return pairs
-
-
-def render_dynamics_toml(
-    profile: dict[str, Any],
-    source: str,
-    term: str,
-    scales: dict[str, float],
-    run_dir: str,
-) -> str:
-    def num(v: float) -> str:
-        if not math.isfinite(v):
-            raise ValueError("refusing to render non-finite value %r" % (v,))
-        return repr(float(v))
-
-    def vec(values: list[float]) -> str:
-        return "[%s]" % (", ".join(num(v) for v in values),)
-
-    lines = [
-        "version = 6",
-        "axes = %s" % (json.dumps(profile["axes"]),),
-        "modes = %s" % (json.dumps(profile["modes"]),),
-        "frame = [%s]" % (", ".join(vec(row) for row in profile["frame"]),),
-        "mass = %s" % (vec(profile["mass"]),),
-        "viscous = %s" % (vec(profile["viscous"]),),
-        "coulomb = %s" % (vec(profile["coulomb"]),),
-        "refined_source = %s" % (json.dumps(source),),
-        "refined_term = %s" % (json.dumps(term.lower()),),
-    ]
-    provenance_key = (
-        "refined_delta" if term == "DIRECTION_SPLIT" else "refined_scale"
-    )
-    for suffix, scale in sorted(scales.items()):
-        lines.append(
-            "%s%s = %s"
-            % (
-                provenance_key,
-                "_%s" % (suffix,) if suffix else "",
-                num(scale),
-            )
-        )
-    lines.append("refined_run = %s" % (json.dumps(run_dir),))
-    for pair in profile.get("pairs", []):
-        lines += [
-            "",
-            "[[pair]]",
-            "slots = %s" % (json.dumps(pair["slots"]),),
-            "direction_split = %s" % (num(pair["direction_split"]),),
-        ]
-    return "\n".join(lines) + "\n"
 
 
 def render_fit_dynamics_toml(

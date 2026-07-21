@@ -48,6 +48,25 @@ viscous = [0.004, 0.005]
 coulomb = [1.0, 1.5]
 """
 
+AWD_TOML = """\
+version = 6
+axes = ["motor_a", "motor_a1", "motor_b", "motor_b1"]
+modes = ["x", "y"]
+frame = [[0.25, 0.25, -0.25, 0.25], [0.25, 0.25, 0.25, -0.25]]
+mass = [0.020, 0.030]
+viscous = [0.004, 0.005]
+coulomb = [1.0, 1.5]
+ff_lead_us = 250.0
+
+[[pair]]
+slots = ["motor_a", "motor_a1"]
+direction_split = 0.05
+
+[[pair]]
+slots = ["motor_b", "motor_b1"]
+direction_split = -0.1
+"""
+
 BASELINE_MASS = [0.020, 0.030]
 BASELINE_VISCOUS = [0.004, 0.005]
 BASELINE_COULOMB = [1.0, 1.5]
@@ -102,6 +121,22 @@ def single_drive_rails(node="xy_drives"):
     ]
 
 
+def awd_rails(node="xy_drives"):
+    return [
+        _rail(
+            "x",
+            [_motor("motor_a1", node, 1), _motor("motor_a", node, 0)],
+        ),
+        _rail(
+            "y",
+            [
+                _motor("motor_b", node, 2, invert=True),
+                _motor("motor_b1", node, 3),
+            ],
+        ),
+    ]
+
+
 def _ferr_json(
     modes=("x", "y"),
     mass=(0.0, 0.0),
@@ -115,9 +150,35 @@ def _ferr_json(
     onset_bias=(0.0, 0.0),
     onset_windows=8,
     samples=500,
+    ff_sigma=(1e-9, 1e-9),
+    ff_windows=(8, 8),
+    split_q=(),
+    split_sigma=None,
+    split_windows=None,
 ):
+    ff = {
+        term: {
+            "rms": list(ferr_rms_raw),
+            "sigma": list(ff_sigma),
+            "windows": list(ff_windows),
+        }
+        for term in ("mass", "viscous", "coulomb", "lead")
+    }
+    n_pairs = len(split_q)
+    ff["direction_split"] = {
+        "pairs": [[2 * i, 2 * i + 1] for i in range(n_pairs)],
+        "lambda": [1.0] * n_pairs,
+        "q": list(split_q),
+        "rms": [abs(v) for v in split_q],
+        "sigma": (
+            list(split_sigma) if split_sigma is not None else [2.1e-5] * n_pairs
+        ),
+        "windows": (
+            list(split_windows) if split_windows is not None else [14] * n_pairs
+        ),
+    }
     return {
-        "version": 1,
+        "version": 3,
         "modes": list(modes),
         "coef": {
             "mass": list(mass),
@@ -131,6 +192,7 @@ def _ferr_json(
         },
         "ferr_rms": list(ferr_rms),
         "ferr_rms_raw": list(ferr_rms_raw),
+        "ferr_rms_ff": ff,
         "onset_bias": list(onset_bias),
         "onset_windows": onset_windows,
         "samples": samples,
@@ -212,6 +274,7 @@ def make_calibration(
     sc.fake_onset_fn = lambda mass, viscous, coulomb: (0.0, 0.0)
     sc.fake_lead_penalty_fn = lambda lead_s: (0.0, 0.0)
     sc.fake_lead_onset_fn = lambda lead_s: (0.0, 0.0)
+    sc.fake_split_fn = lambda ds: ()
 
     def fake_run(gcmd, argv, timeout):
         gcode.scripts.append(("RUN", argv, timeout))
@@ -265,6 +328,7 @@ def make_calibration(
                             lead_onset,
                         )
                     ],
+                    split_q=sc.fake_split_fn(_ds),
                 )
             with open(out_path, "w") as f:
                 json.dump(payload, f)
@@ -286,11 +350,11 @@ def _manifest_for(sc):
 RLS = servo_calibration.RmsLineSearch
 
 
-def drive(search, rms_fn, budget=50):
+def drive(search, rms_fn, sigma=0.0, budget=50):
     for _ in range(budget):
         if search.done:
             return
-        search.feed(rms_fn(search.trial))
+        search.feed(rms_fn(search.trial), sigma)
     raise AssertionError("search did not finish in %d probes" % budget)
 
 
@@ -298,7 +362,7 @@ def test_line_search_marches_to_a_higher_minimum():
     def obj(v):
         return 1.0 + (v - 0.040) ** 2
 
-    s = RLS(0.020, obj(0.020), step=0.003, tol=1e-9, hint=1.0)
+    s = RLS(0.020, obj(0.020), sigma=0.0, step=0.003, hint=1.0)
     drive(s, obj)
     assert s.improved
     assert s.best == pytest.approx(0.040, rel=0.05)
@@ -309,7 +373,7 @@ def test_line_search_flips_a_wrong_hint():
     def obj(v):
         return 1.0 + (v - 0.010) ** 2
 
-    s = RLS(0.020, obj(0.020), step=0.002, tol=1e-9, hint=1.0)
+    s = RLS(0.020, obj(0.020), sigma=0.0, step=0.002, hint=1.0)
     drive(s, obj)
     assert s.improved
     assert s.best == pytest.approx(0.010, rel=0.1)
@@ -319,28 +383,80 @@ def test_line_search_converges_at_start_when_already_optimal():
     def obj(v):
         return 1.0 + (v - 0.020) ** 2
 
-    s = RLS(0.020, obj(0.020), step=0.003, tol=1e-9)
+    s = RLS(0.020, obj(0.020), sigma=0.0, step=0.003)
     drive(s, obj)
     assert s.best == pytest.approx(0.020, rel=0.06)
     # both first probes fail, the parabola may still polish the start
     assert len(s.history) <= 5
 
 
-def test_line_search_ignores_improvement_below_tol():
-    def obj(v):
-        return 1.0 - 0.001 * v
+def test_line_search_deadband_rejects_sub_2sigma_but_accepts_beyond():
+    # identical absolute improvement (0.010), different measured scatter:
+    # the noisy probe sits inside the 2-sigma deadband and is rejected;
+    # the clean probe clears it and wins - the whole point of dropping the
+    # fixed TOL_UM knob for a measured-noise gate.
+    noisy = RLS(1.0, 1.000, sigma=0.010, step=1.0, lo=0.0, hint=1.0)
+    assert noisy.trial == pytest.approx(2.0)
+    noisy.feed(0.990, 0.010)
+    assert not noisy.improved
+    assert noisy.best == 1.0
 
-    s = RLS(0.020, obj(0.020), step=0.003, tol=1.0)
-    drive(s, obj)
-    assert not s.improved
-    assert s.best == 0.020
+    clean = RLS(1.0, 1.000, sigma=0.0005, step=1.0, lo=0.0, hint=1.0)
+    assert clean.trial == pytest.approx(2.0)
+    clean.feed(0.990, 0.0005)
+    assert clean.improved
+    assert clean.best == pytest.approx(2.0)
+
+
+def test_line_search_refine_polishes_between_one_and_two_sigma():
+    # the incumbent trap: the true optimum sits between the march probes
+    # and its improvement clears 1 sigma but not 2. The march gate (2
+    # sigma) must reject the flanking probes, yet the bracket refine (1
+    # sigma) must still claim the vertex instead of pinning the start
+    # value forever. But sub-2-sigma polish must NOT count as `improved`
+    # - the tune's outer loop repeats passes while anything improved, and
+    # treating noise-level polish as improvement made the bench orbit a
+    # single lead value for 50 captures.
+    sigma = 0.012
+
+    def obj(v):
+        return 1.0 + 1e4 * (v - 0.0215) ** 2
+
+    s = RLS(0.020, obj(0.020), sigma=sigma, step=0.003, hint=1.0)
+    drive(s, obj, sigma=sigma)
+    assert s.best == pytest.approx(0.0215, rel=0.01)
+    assert s.note == "refined to the bracket minimum"
+    assert not s.improved, "sub-2-sigma polish must not drive another pass"
+
+
+def test_line_search_refine_probe_budget_is_bounded():
+    # a refine probe that keeps producing fresh vertices must stop after
+    # MAX_REFINE_PROBES captures instead of iterating forever.
+    sigma = 0.012
+
+    def obj(v):
+        return 1.0 + 1e4 * (v - 0.02151234) ** 2 + 1e-7 * v
+
+    s = RLS(0.020, obj(0.020), sigma=sigma, step=0.003, hint=1.0)
+    drive(s, obj, sigma=sigma)
+    assert s.done
+    refine_probes = len(s.history) - 4
+    assert refine_probes <= servo_calibration.search.MAX_REFINE_PROBES
+
+
+def test_line_search_rejects_null_or_nan_sigma():
+    with pytest.raises(ValueError, match="sigma"):
+        RLS(0.0, 1.0, sigma=None, step=5.0)
+    s = RLS(0.0, 1.0, sigma=0.0, step=5.0, hint=1.0)
+    with pytest.raises(ValueError, match="sigma"):
+        s.feed(0.5, float("nan"))
 
 
 def test_line_search_at_floor_probes_up_despite_negative_hint():
-    s = RLS(0.0, 1.0, step=5.0, tol=1e-9, lo=0.0, hint=-1.0)
+    s = RLS(0.0, 1.0, sigma=0.0, step=5.0, lo=0.0, hint=-1.0)
     assert not s.done, "a floor start must earn at least one probe"
     assert s.trial == pytest.approx(5.0)
-    s.feed(2.0)
+    s.feed(2.0, 0.0)
     assert s.done
     assert s.best == 0.0
     assert not s.improved
@@ -350,7 +466,7 @@ def test_line_search_zero_start_probes_up_and_escapes():
     def obj(v):
         return 1.0 + (v - 10.0) ** 2 / 100.0
 
-    s = RLS(0.0, obj(0.0), step=5.0, tol=1e-9, lo=0.0, hint=1.0)
+    s = RLS(0.0, obj(0.0), sigma=0.0, step=5.0, lo=0.0, hint=1.0)
     drive(s, obj)
     assert s.best == pytest.approx(10.0, rel=0.2)
 
@@ -359,18 +475,18 @@ def test_line_search_respects_lower_bound_mid_march():
     def obj(v):
         return 1.0 + v
 
-    s = RLS(0.020, obj(0.020), step=0.05, tol=1e-9, lo=0.002, hint=-1.0)
+    s = RLS(0.020, obj(0.020), sigma=0.0, step=0.05, lo=0.002, hint=-1.0)
     drive(s, obj)
     assert s.best == 0.002
     assert "bounded" in s.note or "no further" in s.note
 
 
 def test_line_search_rejects_feed_without_trial():
-    s = RLS(0.0, 1.0, step=5.0, tol=1e-9, lo=0.0, hint=-1.0)
-    s.feed(2.0)
+    s = RLS(0.0, 1.0, sigma=0.0, step=5.0, lo=0.0, hint=-1.0)
+    s.feed(2.0, 0.0)
     assert s.done
     with pytest.raises(ValueError, match="without an outstanding trial"):
-        s.feed(1.0)
+        s.feed(1.0, 0.0)
 
 
 @requires_tomllib
@@ -392,6 +508,28 @@ def test_tune_dynamics_already_optimal_converges_and_writes_baseline():
     assert mass == pytest.approx(prof["mass"])
     assert viscous == pytest.approx(prof["viscous"])
     assert coulomb == pytest.approx(prof["coulomb"])
+
+
+@requires_tomllib
+def test_tune_dynamics_chains_from_the_previous_tune_not_the_config():
+    sc, _gcode, config_path = make_calibration()
+    sc.fake_rms_fn = quadratic_rms(mass_opt=[0.030, 0.045])
+    node = sc.printer.lookup_object("ethercat_node xy_drives")
+    sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(TERMS="MASS"))
+    first = _manifest_for(sc)["dynamics_tune"]
+    assert node.get_live_dynamics_profile() == first["profile"]
+    assert first["profile"] != config_path
+    sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(TERMS="MASS", NAME="tune2"))
+    run_dir = os.path.dirname(
+        sc.printer.lookup_object("servo_capture").starts[-1][0]
+    )
+    with open(os.path.join(run_dir, "manifest.json")) as f:
+        second = json.load(f)["dynamics_tune"]
+    with open(first["profile"], "rb") as f:
+        first_prof = tomllib.load(f)
+    assert second["rounds"][0]["values"]["mass"] == pytest.approx(
+        first_prof["mass"]
+    ), "second tune must start from the first tune's live result"
 
 
 @requires_tomllib
@@ -497,6 +635,65 @@ def test_tune_dynamics_requires_ferr_rms_raw_from_the_binary():
     sc.fake_ferr_queue = [stale]
     with pytest.raises(RuntimeError, match="ferr_rms_raw"):
         sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd())
+
+
+@requires_tomllib
+def test_tune_dynamics_rejects_version_1_ferr_json():
+    sc, _gcode, _path = make_calibration()
+    stale = _ferr_json()
+    stale["version"] = 1
+    del stale["ferr_rms_ff"]
+    sc.fake_ferr_queue = [stale]
+    with pytest.raises(RuntimeError, match="version"):
+        sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd())
+
+
+@requires_tomllib
+def test_tune_dynamics_requires_ferr_rms_ff_from_the_binary():
+    sc, _gcode, _path = make_calibration()
+    stale = _ferr_json()
+    del stale["ferr_rms_ff"]
+    sc.fake_ferr_queue = [stale]
+    with pytest.raises(RuntimeError, match="ferr_rms_ff"):
+        sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd())
+
+
+@requires_tomllib
+def test_tune_dynamics_fails_when_tuned_term_has_no_transient_windows():
+    sc, _gcode, _path = make_calibration()
+    stale = _ferr_json(ff_windows=(0, 0), ff_sigma=(None, None))
+    for term in ("mass", "viscous", "coulomb"):
+        stale["ferr_rms_ff"][term]["rms"] = [None, None]
+    sc.fake_ferr_queue = [stale]
+    with pytest.raises(RuntimeError, match="transient windows"):
+        sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd())
+
+
+@requires_tomllib
+def test_tune_dynamics_fails_when_tuned_term_sigma_is_null():
+    sc, _gcode, _path = make_calibration()
+    stale = _ferr_json(ff_windows=(1, 1), ff_sigma=(None, None))
+    sc.fake_ferr_queue = [stale]
+    with pytest.raises(RuntimeError, match="sigma|scatter"):
+        sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd())
+
+
+@requires_tomllib
+def test_tune_dynamics_ignores_removed_tol_um_param():
+    sc, _gcode, _path = make_calibration()
+    sc.fake_rms_fn = quadratic_rms(mass_opt=[0.030, 0.045])
+    # TOL_UM used to gate acceptance and default to 0.05um; it is gone now.
+    # A huge value must be silently ignored, not stop the search early.
+    gcmd = FakeGcmd(TERMS="MASS", TOL_UM="999")
+    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
+    tune = _manifest_for(sc)["dynamics_tune"]
+    assert "tol_um" not in tune
+    assert tune["objective"] == "transient_rms"
+    assert tune["accept_z"] == pytest.approx(2.0)
+    with open(tune["profile"], "rb") as f:
+        prof = tomllib.load(f)
+    assert prof["mass"][0] == pytest.approx(0.030, rel=0.15)
+    assert prof["mass"][1] == pytest.approx(0.045, rel=0.15)
 
 
 @requires_tomllib
@@ -638,3 +835,125 @@ def test_tune_dynamics_lead_defaults_to_zero_when_profile_omits_it():
     tune = _manifest_for(sc)["dynamics_tune"]
     assert tune["rounds"][0]["lead_us"] == pytest.approx(0.0)
     assert tune["rounds"][1]["lead_us"] > 0.0
+
+
+def _awd_split_pairs(prof):
+    return {p["slots"][0]: p["direction_split"] for p in prof["pair"]}
+
+
+@requires_tomllib
+def test_tune_dynamics_direction_split_converges_each_pair():
+    sc, _gcode, _path = make_calibration(
+        rails=awd_rails(), profile_text=AWD_TOML
+    )
+    # positive-slope convention: increasing a pair's split raises q, so a
+    # pair sits at its optimum where q crosses zero; the two pairs have
+    # different optima to prove the searches are independent.
+    sc.fake_split_fn = lambda ds: (
+        0.05 * (ds[0] - 0.20),
+        0.05 * (ds[1] + 0.25),
+    )
+    gcmd = FakeGcmd(TERMS="DIRECTION_SPLIT")
+    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
+    assert any("converged in" in r for r in gcmd.responses)
+    tune = _manifest_for(sc)["dynamics_tune"]
+    with open(tune["profile"], "rb") as f:
+        prof = tomllib.load(f)
+    pairs = _awd_split_pairs(prof)
+    assert pairs["motor_a"] == pytest.approx(0.20, abs=0.03)
+    assert pairs["motor_b"] == pytest.approx(-0.25, abs=0.03)
+
+
+@requires_tomllib
+def test_tune_dynamics_direction_split_missing_entry_errors():
+    sc, _gcode, _path = make_calibration(
+        rails=awd_rails(), profile_text=AWD_TOML
+    )
+    stale = _ferr_json(split_q=(0.01, 0.01))
+    del stale["ferr_rms_ff"]["direction_split"]
+    sc.fake_ferr_queue = [stale]
+    with pytest.raises(RuntimeError, match="rebuild"):
+        sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(TERMS="DIRECTION_SPLIT"))
+
+
+@requires_tomllib
+def test_tune_dynamics_direction_split_null_sigma_errors():
+    sc, _gcode, _path = make_calibration(
+        rails=awd_rails(), profile_text=AWD_TOML
+    )
+    stale = _ferr_json(
+        split_q=(0.01, 0.01),
+        split_sigma=(None, None),
+        split_windows=(3, 3),
+    )
+    sc.fake_ferr_queue = [stale]
+    with pytest.raises(RuntimeError, match="sigma|scatter"):
+        sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(TERMS="DIRECTION_SPLIT"))
+
+
+@requires_tomllib
+def test_tune_dynamics_direction_split_zero_windows_errors():
+    sc, _gcode, _path = make_calibration(
+        rails=awd_rails(), profile_text=AWD_TOML
+    )
+    stale = _ferr_json(split_q=(0.01, 0.01), split_windows=(0, 0))
+    sc.fake_ferr_queue = [stale]
+    with pytest.raises(RuntimeError, match="windows"):
+        sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(TERMS="DIRECTION_SPLIT"))
+
+
+@requires_tomllib
+def test_tune_dynamics_direction_split_upper_clamp_finishes():
+    sc, _gcode, _path = make_calibration(
+        rails=awd_rails(), profile_text=AWD_TOML
+    )
+    # optima past the +-0.45 bracket: the search must stop at the clamp
+    # with a note, never raising or tripping the abs(value) < 0.5 guard.
+    sc.fake_split_fn = lambda ds: (
+        0.05 * (ds[0] - 0.9),
+        0.05 * (ds[1] - 0.9),
+    )
+    gcmd = FakeGcmd(TERMS="DIRECTION_SPLIT")
+    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
+    assert any("converged in" in r for r in gcmd.responses)
+    assert any("bounded at 0.45" in r for r in gcmd.responses)
+    tune = _manifest_for(sc)["dynamics_tune"]
+    with open(tune["profile"], "rb") as f:
+        prof = tomllib.load(f)
+    pairs = _awd_split_pairs(prof)
+    assert pairs["motor_a"] == pytest.approx(0.45, abs=1e-6)
+    assert pairs["motor_b"] == pytest.approx(0.45, abs=1e-6)
+
+
+@requires_tomllib
+def test_tune_dynamics_direction_split_chains_forward():
+    sc, _gcode, _config = make_calibration(
+        rails=awd_rails(), profile_text=AWD_TOML
+    )
+    sc.fake_split_fn = lambda ds: (
+        0.05 * (ds[0] - 0.20),
+        0.05 * (ds[1] + 0.25),
+    )
+    sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(TERMS="DIRECTION_SPLIT"))
+    first = _manifest_for(sc)["dynamics_tune"]
+    with open(first["profile"], "rb") as f:
+        first_pairs = _awd_split_pairs(tomllib.load(f))
+    sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(TERMS="DIRECTION_SPLIT", NAME="tune2"))
+    run_dir = os.path.dirname(
+        sc.printer.lookup_object("servo_capture").starts[-1][0]
+    )
+    with open(os.path.join(run_dir, "manifest.json")) as f:
+        second = json.load(f)["dynamics_tune"]
+    baseline_pairs = {
+        p["slots"][0]: p["direction_split"]
+        for p in second["rounds"][0]["direction_split"]
+    }
+    assert baseline_pairs["motor_a"] == pytest.approx(first_pairs["motor_a"])
+    assert baseline_pairs["motor_b"] == pytest.approx(first_pairs["motor_b"])
+
+
+def test_servo_refine_dynamics_command_is_removed():
+    sc, gcode, _path = make_calibration()
+    assert "SERVO_REFINE_DYNAMICS" not in gcode.commands
+    assert "SERVO_TUNE_DYNAMICS" in gcode.commands
+    assert not hasattr(sc, "cmd_SERVO_REFINE_DYNAMICS")

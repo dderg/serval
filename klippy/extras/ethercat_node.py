@@ -77,6 +77,7 @@ class EtherCatNode:
                 % (self.name, self.cycle_us, CYCLE_US_QUANTUM)
             )
         self.dynamics_profile = servo_axis.read_dynamics_profile_option(config)
+        self.live_dynamics_profile = None
         self.late_tolerance_us = config.getfloat("late_tolerance_us", 0.0)
         self.engine_handle = None
         self._counts_per_mm = None
@@ -324,6 +325,12 @@ class EtherCatNode:
 
     def get_dynamics_profile(self):
         return self.dynamics_profile
+
+    def set_live_dynamics_profile(self, path):
+        self.live_dynamics_profile = path
+
+    def get_live_dynamics_profile(self):
+        return self.live_dynamics_profile or self.dynamics_profile
 
     def set_motor_torque(self, motor_name, value, print_time):
         if self.engine_handle is None:

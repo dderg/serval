@@ -275,12 +275,19 @@ class FakeNode:
         self.calls = []
         self._cycle_us = cycle_us
         self.dynamics_profile = dynamics_profile
+        self.live_dynamics_profile = None
 
     def get_engine_handle(self):
         return self._handle
 
     def get_dynamics_profile(self):
         return self.dynamics_profile
+
+    def set_live_dynamics_profile(self, path):
+        self.live_dynamics_profile = path
+
+    def get_live_dynamics_profile(self):
+        return self.live_dynamics_profile or self.dynamics_profile
 
     def get_drive_count(self):
         return len(self._slots)

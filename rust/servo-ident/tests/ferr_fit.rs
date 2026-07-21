@@ -1,6 +1,7 @@
 use servo_ident::ferr_out::render_ferr_json;
 use servo_ident::fit::{fit_ferr, FerrFitResult, FitInput, FitOptions};
 use servo_ident::model::{coulomb_sign, PhysicalParams, Structure};
+use servo_ident::prep::{DirectionSplit, TransientRms};
 
 fn triangle(a: f64, t1: f64, dt: f64, reps: usize) -> (Vec<f64>, Vec<f64>) {
     let mut acc = Vec::new();
@@ -191,6 +192,72 @@ fn render_ferr_json_matches_the_documented_contract_shape() {
         condition: 12.3,
         samples: 4321,
     };
+    let mass = vec![
+        TransientRms {
+            rms: Some(0.0021),
+            sigma: Some(0.0003),
+            windows: 5,
+        },
+        TransientRms {
+            rms: Some(0.0018),
+            sigma: None,
+            windows: 1,
+        },
+    ];
+    let viscous = vec![
+        TransientRms {
+            rms: Some(0.0011),
+            sigma: Some(0.0002),
+            windows: 4,
+        },
+        TransientRms {
+            rms: Some(0.0009),
+            sigma: Some(0.0001),
+            windows: 3,
+        },
+    ];
+    let coulomb = vec![
+        TransientRms {
+            rms: None,
+            sigma: None,
+            windows: 0,
+        },
+        TransientRms {
+            rms: Some(0.0007),
+            sigma: Some(0.00005),
+            windows: 2,
+        },
+    ];
+    let lead = vec![
+        TransientRms {
+            rms: Some(0.0042),
+            sigma: Some(0.0004),
+            windows: 12,
+        },
+        TransientRms {
+            rms: Some(0.0031),
+            sigma: Some(0.0002),
+            windows: 11,
+        },
+    ];
+    let split = vec![
+        DirectionSplit {
+            pair: [0, 1],
+            lambda: 1.0,
+            q: 1.9e-4,
+            rms: 1.9e-4,
+            sigma: Some(2.1e-5),
+            windows: 14,
+        },
+        DirectionSplit {
+            pair: [2, 3],
+            lambda: -1.0,
+            q: -0.7e-4,
+            rms: 0.7e-4,
+            sigma: None,
+            windows: 3,
+        },
+    ];
     let json = render_ferr_json(
         &structure,
         &["x", "y"],
@@ -198,9 +265,14 @@ fn render_ferr_json_matches_the_documented_contract_shape() {
         &[0.0034, 0.0044],
         &[0.0012, -0.0007],
         42,
+        &mass,
+        &viscous,
+        &coulomb,
+        &lead,
+        &split,
     );
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(v["version"], 1);
+    assert_eq!(v["version"], 3);
     assert_eq!(v["modes"], serde_json::json!(["x", "y"]));
     assert_eq!(v["coef"]["mass"], serde_json::json!([1.23e-8, -4.5e-9]));
     assert_eq!(v["coef"]["viscous"], serde_json::json!([2.0e-4, -1.0e-4]));
@@ -215,6 +287,74 @@ fn render_ferr_json_matches_the_documented_contract_shape() {
     assert_eq!(v["onset_bias"], serde_json::json!([0.0012, -0.0007]));
     assert_eq!(v["onset_windows"], 42);
     assert_eq!(v["samples"], 4321);
+    assert_eq!(
+        v["ferr_rms_ff"]["mass"]["rms"],
+        serde_json::json!([0.0021, 0.0018])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["mass"]["sigma"],
+        serde_json::json!([0.0003, null])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["mass"]["windows"],
+        serde_json::json!([5, 1])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["viscous"]["rms"],
+        serde_json::json!([0.0011, 0.0009])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["viscous"]["sigma"],
+        serde_json::json!([0.0002, 0.0001])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["coulomb"]["rms"],
+        serde_json::json!([null, 0.0007])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["coulomb"]["sigma"],
+        serde_json::json!([null, 0.00005])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["coulomb"]["windows"],
+        serde_json::json!([0, 2])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["lead"]["rms"],
+        serde_json::json!([0.0042, 0.0031])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["lead"]["sigma"],
+        serde_json::json!([0.0004, 0.0002])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["lead"]["windows"],
+        serde_json::json!([12, 11])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["direction_split"]["pairs"],
+        serde_json::json!([[0, 1], [2, 3]])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["direction_split"]["lambda"],
+        serde_json::json!([1.0, -1.0])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["direction_split"]["q"],
+        serde_json::json!([1.9e-4, -0.7e-4])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["direction_split"]["rms"],
+        serde_json::json!([1.9e-4, 0.7e-4])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["direction_split"]["sigma"],
+        serde_json::json!([2.1e-5, null])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["direction_split"]["windows"],
+        serde_json::json!([14, 3])
+    );
 }
 
 #[test]
@@ -234,7 +374,21 @@ fn render_ferr_json_fails_loudly_on_mode_count_mismatch() {
         condition: 1.0,
         samples: 1,
     };
-    let _ = render_ferr_json(&structure, &["x", "y"], &r, &[0.0, 0.0], &[0.0, 0.0], 0);
+    let empty: Vec<TransientRms> = vec![];
+    let no_split: Vec<DirectionSplit> = vec![];
+    let _ = render_ferr_json(
+        &structure,
+        &["x", "y"],
+        &r,
+        &[0.0, 0.0],
+        &[0.0, 0.0],
+        0,
+        &empty,
+        &empty,
+        &empty,
+        &empty,
+        &no_split,
+    );
 }
 
 /// A command->telemetry timing skew turns `alpha*acc(t-d)` into

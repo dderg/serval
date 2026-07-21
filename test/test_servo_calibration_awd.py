@@ -987,4 +987,4 @@ def test_fit_dynamics_restores_the_configured_baseline_model():
     engine = sc.printer.lookup_object("motion_engine")
     assert engine.dynamics_calls[-1][2] == [0.5, 0.5]
     assert engine.dynamics_calls[-1][4] == [9.0, 9.0]
-    assert any("restored to configured baseline" in r for r in gcmd.responses)
+    assert any("restored to baseline" in r for r in gcmd.responses)
