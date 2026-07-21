@@ -1,1 +1,0 @@
-[{"name": "cal_attempt3_20260718_075159", "mtime_utc": "2026-07-18T07:51:59Z", "experiment": "gain_sweep", "tag": "cal_attempt3", "axis": "X", "has_results": true, "verdict": {"recommended_step": "s700", "reason": "highest gain step without resonance or torque rail", "flags": []}, "note": null}]

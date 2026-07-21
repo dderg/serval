@@ -1,18 +1,75 @@
 import pytest
-from test_servo_calibration_awd import (
+from fakes import (
     FakeConfig,
-    FakeEngine,
-    FakeGcmd,
     FakeGcode,
     FakeKin,
     FakeNode,
     FakePrinter,
     FakeToolhead,
-    awd_rails,
-    single_drive_rails,
 )
+from fakes import FakeEngine as _FakeEngine
+from fakes import FakeGcmd as _FakeGcmd
 
-from klippy.extras import servo_diff_trim
+from klippy.extras import servo_axis, servo_diff_trim
+
+
+class FakeGcmd(_FakeGcmd):
+    error = RuntimeError
+
+
+class FakeEngine(_FakeEngine):
+    def __init__(self):
+        super().__init__()
+        self.trims = []
+
+    def set_diff_trim(self, *args):
+        self.calls.append(("set_diff_trim",) + args)
+        self.trims.append(args)
+
+
+def _motor(name, node_name, chain_index, invert=False):
+    m = servo_axis.ServoMotor.__new__(servo_axis.ServoMotor)
+    m.motor_name = name
+    m.node_name = node_name
+    m.chain_index = chain_index
+    m.invert_direction = invert
+    m.rotation_distance = 40.0
+    m.encoder_counts_per_rev = 131072
+    return m
+
+
+def _rail(axis, motors):
+    rail = servo_axis.ServoRail.__new__(servo_axis.ServoRail)
+    rail.name = "axis " + axis
+    rail.axis = axis
+    rail.motors = motors
+    return rail
+
+
+def awd_rails(node="xy_drives", node_b=None):
+    return [
+        _rail(
+            "x",
+            [
+                _motor("motor_a1", node, 1),
+                _motor("motor_a", node, 0),
+            ],
+        ),
+        _rail(
+            "y",
+            [
+                _motor("motor_b", node_b or node, 2, invert=True),
+                _motor("motor_b1", node_b or node, 3),
+            ],
+        ),
+    ]
+
+
+def single_drive_rails():
+    return [
+        _rail("x", [_motor("motor_a", "xy_drives", 0)]),
+        _rail("y", [_motor("motor_b", "xy_drives", 1)]),
+    ]
 
 
 class FakeConfigWithValues(FakeConfig):
@@ -55,7 +112,9 @@ def make_diff_trim(config_values=None, rails=None):
             node_slots.setdefault(m.node_name, {})[m.motor_name] = m.chain_index
     objs = {
         "gcode": FakeGcode(),
-        "toolhead": FakeToolhead(FakeKin(rails or awd_rails())),
+        "toolhead": FakeToolhead(
+            FakeKin(rails or awd_rails(), coupled_xy=True)
+        ),
         "motion_engine": engine,
         "configfile": FakeConfigfile(),
     }
