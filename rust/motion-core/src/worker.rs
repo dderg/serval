@@ -11,6 +11,7 @@ use motion_pipeline::{StreamConfig, setup_stages};
 
 use crate::types::AxisKey;
 
+mod cpu_watch;
 mod dispatch;
 mod ingress;
 mod pump_sink;
@@ -216,6 +217,7 @@ pub fn setup_pipeline(
             );
         })
         .expect("spawn push-pieces-pump thread");
+    cpu_watch::spawn(pump_data.clone());
     let frontier: Arc<CommittedFrontier> = Arc::default();
     let sink = PumpSink {
         router: dispatch.router,
