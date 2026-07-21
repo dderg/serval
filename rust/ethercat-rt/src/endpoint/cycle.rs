@@ -58,12 +58,14 @@ pub(super) fn run_cycle(ctx: &mut EndpointCtx) -> ControlFlow<()> {
     let (wkc, toff) = ctx.drive.cycle();
     let exchange_ns = exchange.elapsed().as_nanos() as i64;
 
-    let (wake_late_ns, recv_ns, send_ns) = ctx.drive.cycle_stage_ns();
+    let (wake_late_ns, recv_ns, process_ns, send_ns) = ctx.drive.cycle_stage_ns();
     ctx.last_wake_late_ns = wake_late_ns;
     ctx.last_recv_ns = recv_ns;
+    ctx.last_process_ns = process_ns;
     ctx.last_send_ns = send_ns;
     ctx.wake_late_max_ns = ctx.wake_late_max_ns.max(wake_late_ns);
     ctx.recv_max_ns = ctx.recv_max_ns.max(recv_ns);
+    ctx.process_max_ns = ctx.process_max_ns.max(process_ns);
     ctx.send_max_ns = ctx.send_max_ns.max(send_ns);
     ctx.last_lateness_ns = toff;
     police_frame_timing(ctx, toff);
@@ -605,6 +607,7 @@ pub(super) fn police_frame_timing(ctx: &mut EndpointCtx, lateness_ns: i64) {
             prev_exchange_ns = ctx.prev_exchange_ns,
             wake_late_ns = ctx.last_wake_late_ns,
             recv_ns = ctx.last_recv_ns,
+            process_ns = ctx.last_process_ns,
             send_ns = ctx.last_send_ns,
             "cycle overran a full period and skipped forward on the grid — \
              the drives coasted on a stale target for the missed cycles \
@@ -647,6 +650,7 @@ pub(super) fn police_frame_timing(ctx: &mut EndpointCtx, lateness_ns: i64) {
         prev_exchange_ns = ctx.prev_exchange_ns,
         wake_late_ns = ctx.last_wake_late_ns,
         recv_ns = ctx.last_recv_ns,
+        process_ns = ctx.last_process_ns,
         send_ns = ctx.last_send_ns,
         "frame timing exceeded the configured late tolerance — parking"
     );
@@ -826,11 +830,13 @@ fn emit_periodic_telemetry(ctx: &mut EndpointCtx, wkc: i32, toff: i64) {
             event = "cycle_stage_max",
             wake_late_max_ns = ctx.wake_late_max_ns,
             recv_max_ns = ctx.recv_max_ns,
+            process_max_ns = ctx.process_max_ns,
             send_max_ns = ctx.send_max_ns,
             "worst exchange stage durations since the last telemetry beat"
         );
         ctx.wake_late_max_ns = i64::MIN;
         ctx.recv_max_ns = i64::MIN;
+        ctx.process_max_ns = i64::MIN;
         ctx.send_max_ns = i64::MIN;
         if ctx.gate.state() == TorqueState::Faulted {
             let latched_drive_err = ctx.latched_drive_err;

@@ -91,9 +91,11 @@ pub struct EndpointCtx {
     prev_exchange_ns: i64,
     last_wake_late_ns: i64,
     last_recv_ns: i64,
+    last_process_ns: i64,
     last_send_ns: i64,
     wake_late_max_ns: i64,
     recv_max_ns: i64,
+    process_max_ns: i64,
     send_max_ns: i64,
 }
 
