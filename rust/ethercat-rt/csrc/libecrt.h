@@ -32,22 +32,22 @@
  * Phase 1 stops at PRE-OP for every slave (PDO maps, CSP mode, sync types, FF
  * routing written); the caller does its session SDO work there, where the
  * drives expect no process data. Phase 2 starts SYNC0, walks every slave to
- * OPERATIONAL, and parks each at CiA402 Ready-to-Switch-On (no torque);
- * ec_rt_enable() applies torque per slave. From phase 2 on, every wait between
- * exchanges must go through ec_rt_cycle — pausing process data in OP trips the
- * drives' sync-loss monitor (ErC1.1). 0 or an EC_RT_ERR_* above; a missing or
- * mismatched configured position fails loudly naming its slot. */
+ * OPERATIONAL, and parks each at CiA402 Ready-to-Switch-On (no torque).
+ * ec_rt_enable_all() applies torque across the chain. From phase 2 on, every
+ * wait between exchanges must go through ec_rt_cycle — pausing process data in
+ * OP trips the drives' sync-loss monitor (ErC1.1). 0 or an EC_RT_ERR_* above;
+ * a missing or mismatched configured position fails loudly naming its slot. */
 int  ec_rt_bringup_preop(const char *ifname, int64_t cycle_ns, int rt_cpu, int rt_prio,
                          const int32_t *slave_positions, int num_slaves);
 int  ec_rt_bringup_finish(void);
 
-/* Drive slot `slave`'s CiA402 enable state machine to Operation Enabled while
- * holding every other slave at its current safe state. */
-int  ec_rt_enable(int slave);
+/* Drive every slot's CiA402 enable state machine to Operation Enabled in
+ * lockstep. */
+int  ec_rt_enable_all(void);
 
 /* Drive-frame via CiA-402 homing method 35 ("current position is home", no
- * motion) on slot `slave`. Self-contained DC loop (like ec_rt_enable): pulses
- * 6040h bit 4 and polls 6041h bit 12/13 for that slave while the rest hold.
+ * motion) on slot `slave`. Self-contained DC loop: pulses 6040h bit 4 and
+ * polls 6041h bit 12/13 for that slave while the rest hold.
  * Preconditions: mode-of-operation already switched to Homing (6060h=6,
  * confirmed via 6061h) with 6098h=35 and 607Ch=offset staged off-loop, and the
  * drive operation-enabled. 0 = homing attained; EC_RT_ERR_HOMING_* on
@@ -113,9 +113,9 @@ int ec_rt_park_cycle(int64_t *toff_ns);
 /* Refresh AL state for slot `slave`: state (EC_STATE_*) and ALstatuscode. */
 void ec_rt_al_status(int slave, uint16_t *state, uint16_t *alstatuscode);
 
-/* controlword = 0x0006 (disable voltage path) on slot `slave`, held a few
- * cycles while the rest of the domain keeps cycling. */
-void ec_rt_disable(int slave);
+/* Drive every slot to controlword 0x0006 (disable voltage) in lockstep while
+ * holding target position at actual position and clearing offsets. */
+void ec_rt_disable_all(void);
 
 void ec_rt_dump_al_state(void);
 

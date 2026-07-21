@@ -90,7 +90,7 @@ pub(super) fn apply_tick_action(ctx: &mut EndpointCtx, apply_time: u64, all_ring
         TickAction::None => {}
         TickAction::ExecuteDisable => {
             eprintln!("ec-rt: scheduled torque disable executing");
-            ctx.drive.disable_all(ctx.num_slaves);
+            ctx.drive.disable_all();
             ctx.gate.disable_finished();
             for c in &mut ctx.cmaps {
                 *c = None;
@@ -107,7 +107,7 @@ pub(super) fn apply_tick_action(ctx: &mut EndpointCtx, apply_time: u64, all_ring
                 "ec-rt: torque-gate fault code={code} — pieces present without torque, exiting"
             );
             respond_fault_heartbeat(ctx, ENGINE_STATE_FAULT, 0);
-            ctx.drive.shutdown_and_exit(ctx.num_slaves);
+            ctx.drive.shutdown_and_exit();
         }
     }
 }
@@ -491,7 +491,7 @@ fn fault_non_finite_torque(ctx: &mut EndpointCtx, slot: usize, acc: f32, vel: f3
          (acc={acc} vel={vel}) — disabling"
     );
     respond_fault_heartbeat(ctx, ENGINE_STATE_FAULT, 0);
-    ctx.drive.shutdown_and_exit(ctx.num_slaves);
+    ctx.drive.shutdown_and_exit();
 }
 
 fn handle_ring_fault(ctx: &mut EndpointCtx) {
@@ -520,7 +520,7 @@ fn handle_ring_fault(ctx: &mut EndpointCtx) {
         {
             let _ = retired;
             eprintln!("ec-rt: disabling drives (hw safety backstop)");
-            ctx.drive.shutdown_and_exit(ctx.num_slaves);
+            ctx.drive.shutdown_and_exit();
         }
 
         #[cfg(not(feature = "hw"))]

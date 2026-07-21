@@ -139,7 +139,7 @@ pub fn run(ctx: &mut EndpointCtx) {
         }
     }
 
-    ctx.drive.disable_all(ctx.num_slaves);
+    ctx.drive.disable_all();
     ctx.drive.shutdown();
     eprintln!("ec-rt: shutdown complete");
 }
