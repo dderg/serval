@@ -8,8 +8,6 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use servo_ident::scap::Scap;
-
 use super::*;
 use crate::capture::{CaptureRecord, DriveSample};
 
@@ -87,52 +85,6 @@ fn read_exact_with_deadline(stream: &mut UnixStream, n: usize) -> Vec<u8> {
         filled += got;
     }
     buf
-}
-
-#[test]
-fn stream_decodes_with_the_dashboard_scap_parser() {
-    let path = temp_socket("decode");
-    let tap =
-        LiveTap::spawn(path.to_str().unwrap(), two_drive_config(), 250_000).expect("spawn tap");
-    assert!(!tap.has_subscriber());
-
-    let mut client = UnixStream::connect(&path).expect("connect");
-    let header = read_header_line(&mut client);
-    let parsed: serde_json::Value =
-        serde_json::from_slice(&header[..header.len() - 1]).expect("header is one JSON line");
-    assert_eq!(parsed["version"], 2);
-    assert_eq!(parsed["cycle_ns"], 250_000);
-    assert_eq!(parsed["drives"][0]["name"], "slot0");
-    assert_eq!(parsed["drives"][1]["name"], "slot1");
-    let record_size = parsed["record_size"].as_u64().unwrap() as usize;
-
-    assert!(
-        wait_until(2000, || tap.has_subscriber()),
-        "subscriber flag must flip once the header is out"
-    );
-
-    for i in 0..5u64 {
-        tap.push(record(1000 + i, 10 + i as i32, -(10 + i as i32)));
-    }
-    let mut stitched = header;
-    stitched.extend_from_slice(&read_exact_with_deadline(&mut client, 5 * record_size));
-
-    let cap = Scap::from_bytes(&stitched).expect("dashboard parser accepts the stream");
-    assert_eq!(cap.n_records, 5);
-    assert_eq!(cap.drive_names(), &["slot0", "slot1"]);
-    assert_eq!(
-        cap.read_i64(0, "cycle_index").unwrap(),
-        vec![1000, 1001, 1002, 1003, 1004]
-    );
-    assert_eq!(
-        cap.read_i64(0, "following_error").unwrap(),
-        vec![10, 11, 12, 13, 14]
-    );
-    assert_eq!(
-        cap.read_i64(1, "following_error").unwrap(),
-        vec![-10, -11, -12, -13, -14]
-    );
-    assert_eq!(cap.read_i64(1, "torque_actual").unwrap(), vec![-100; 5]);
 }
 
 #[test]

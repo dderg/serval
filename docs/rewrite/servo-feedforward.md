@@ -1,8 +1,7 @@
 # Servo feedforward + identification
 
-> See also:
-> [`servo-calibration.md`](servo-calibration.md) for the full `SERVO_*` command
-> and script reference.
+> See also the [serval-dashboard](https://github.com/dderg/serval-dashboard)
+> repository for the full `SERVO_*` calibration command and script reference.
 
 ## The dynamics model
 
@@ -190,9 +189,10 @@ Validation rules (any failure = hard claim error):
 The whole loop is driven from the console by the `SERVO_*` commands the
 `[servo_calibration]` extension registers (add a bare `[servo_calibration]`
 to `printer.cfg`; the motor datasheet values, safe stroke window, drive
-names, and excitation grid go in that section as overridable defaults). One-
-time prerequisite: build the fitter on the host with
-`cargo build --profile snapshot -p servo-ident` (from `rust/`).
+names, and excitation grid go in that section as overridable defaults). That
+extension and the host-side fitter live in the
+[serval-dashboard](https://github.com/dderg/serval-dashboard) repository;
+install it and build the fitter per its README before running the workflow.
 
 ### Step 1 — excite, capture, and fit in one command
 
@@ -237,8 +237,8 @@ Restart klippy. The endpoint loads and validates the profile at claim time.
 ### Step 2½ — optional empirical refinement
 
 The regression fit can vary with the excitation grid's speeds and
-accelerations. `SERVO_REFINE_DYNAMICS` (see
-[servo-calibration.md](servo-calibration.md)) refines the loaded profile
+accelerations. `SERVO_REFINE_DYNAMICS` (see the
+[serval-dashboard](https://github.com/dderg/serval-dashboard) repository)
 empirically: it streams scaled candidate models into the running endpoint,
 measures tracking per candidate, converges on the best value by golden-section
 search, and writes the winning profile as a new TOML. The three common-mode

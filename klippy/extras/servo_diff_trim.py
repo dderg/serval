@@ -9,7 +9,7 @@
 # legitimate (commanded feedforward, direction- and position-dependent
 # load). A SERVO_SYNC or torque drop resets the offset — the release is the
 # new zero.
-from . import servo_strokes
+from . import servo_axis
 
 MAX_GAIN = 2.0
 OFFSET_UM_CEILING = 500.0
@@ -53,7 +53,7 @@ class ServoDiffTrim:
 
     def _set_belt(self, gcmd, belt, max_offset_um):
         kin = self.printer.lookup_object("toolhead").get_kinematics()
-        pair_names, _motors, handle, slots = servo_strokes.belt_pair(
+        pair_names, _motors, handle, slots = servo_axis.belt_pair(
             self.printer, gcmd, kin, belt, "SERVO_DIFF_TRIM"
         )
         engine = self.printer.lookup_object("motion_engine")

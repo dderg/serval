@@ -18,7 +18,6 @@ members = [
     "mcu-transport",
     "mcu-protocol",
     "ethercat-rt",
-    "servo-ident",
     "piece-sink-harness",
 ]
 exclude = ["gcode/fuzz", "snapshot-viewer", "motion-playground"]

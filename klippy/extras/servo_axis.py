@@ -407,3 +407,75 @@ def register_torque_enable(printer, config, rail):
     printer.load_object(config, "stepper_enable").register_motor(
         rail.get_name(), rail, enable
     )
+
+
+def rail_motors_in_slot_order(rail):
+    return sorted(rail.get_motors(), key=lambda motor: motor.get_chain_index())
+
+
+def corexy_fit_layout(gcmd, kin):
+    if not kin.coupled_xy():
+        raise gcmd.error(
+            "corexy fit layout requires coupled_xy kinematics; the active "
+            "kinematics is cartesian"
+        )
+    rails = list(kin.rails[:2])
+    if not all(isinstance(rail, ServoRail) for rail in rails):
+        raise gcmd.error("CoreXY XY rails must be servo rails")
+    pairs = [
+        [motor.get_motor_name() for motor in rail_motors_in_slot_order(rail)]
+        for rail in rails
+    ]
+    sizes = {len(pair) for pair in pairs}
+    servos = [name for pair in pairs for name in pair]
+    if sizes == {1}:
+        return {"servos": servos, "pairs": None}
+    if sizes == {2}:
+        nodes = {
+            motor.get_node_name()
+            for rail in rails
+            for motor in rail.get_motors()
+        }
+        if len(nodes) != 1:
+            raise gcmd.error(
+                "AWD corexy fit needs all four drives on one ethercat node "
+                "(a coupled dynamics profile is per node); got nodes: %s"
+                % (", ".join(sorted(nodes)),)
+            )
+        return {
+            "servos": servos,
+            "pairs": ";".join(",".join(pair) for pair in pairs),
+        }
+    raise gcmd.error(
+        "corexy fit needs one or two drives per belt on both belts, got %s"
+        % (
+            "; ".join(
+                "%s: %s" % (rail.get_name(short=True), ", ".join(pair))
+                for rail, pair in zip(rails, pairs)
+            ),
+        )
+    )
+
+
+def belt_pair(printer, gcmd, kin, belt, cmd_name):
+    layout = corexy_fit_layout(gcmd, kin)
+    if layout["pairs"] is None:
+        raise gcmd.error(
+            "%s needs two drives per belt "
+            "(AWD); this printer has one drive per belt" % (cmd_name,)
+        )
+    pair_names = layout["pairs"].split(";")["AB".index(belt)].split(",")
+    motors = [
+        resolve_servo_motor(printer, name, cmd_name)[1] for name in pair_names
+    ]
+    node = printer.lookup_object("ethercat_node " + motors[0].get_node_name())
+    handle = node.get_engine_handle()
+    if handle is None:
+        raise gcmd.error(
+            "belt %s drives have no live EtherCAT engine handle "
+            "(node not claimed)" % (belt,)
+        )
+    slots = [
+        node.get_slot_for_motor(motor.get_motor_name()) for motor in motors
+    ]
+    return pair_names, motors, handle, slots

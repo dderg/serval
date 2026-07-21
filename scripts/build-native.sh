@@ -4,8 +4,7 @@
 # Builds and installs everything klippy needs on the machine it runs on:
 #   klippy/_config_doc.so     config parser (klippy refuses to start without it)
 #   klippy/_motion_engine.so  motion engine cdylib
-# and, when requested or auto-detected, the bench-side binaries:
-#   rust/target/snapshot/servo-ident
+# and, when requested or auto-detected, the bench-side EtherCAT endpoint:
 #   rust/target/release/ethercat-rt        (--ethercat hw; needs IgH libs)
 #   rust/target/release/ethercat-rt-stub   (--ethercat stub)
 #
@@ -16,7 +15,7 @@
 #   --fast         motion engine under the `snapshot` cargo profile
 #                  (float-identical, much faster rebuilds; snapshot dev loop)
 #   --config-only  just klippy/_config_doc.so (python-only environments)
-#   --bench        servo-ident + EtherCAT endpoint (hw if /opt/etherlab
+#   --bench        EtherCAT endpoint (hw if /opt/etherlab
 #                  exists, else stub) on top of the default artifacts
 #   --ethercat     override the --bench EtherCAT auto-detection
 #
@@ -58,9 +57,6 @@ require klippy/_config_doc.so
 require klippy/_motion_engine.so
 
 if [ "$BENCH" = 1 ]; then
-    make -f Makefile.rust servo-ident
-    require rust/target/snapshot/servo-ident
-
     if [ "$ETHERCAT" = auto ]; then
         if [ -d /opt/etherlab ]; then ETHERCAT=hw; else ETHERCAT=stub; fi
     fi
