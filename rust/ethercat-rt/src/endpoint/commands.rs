@@ -296,24 +296,13 @@ fn handle_push_pieces(ctx: &mut EndpointCtx, correlation_id: u32, msg: PushPiece
     ));
 }
 
-fn handle_set_torque(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetTorque) {
-    let num_slaves = ctx.num_slaves;
+pub(super) fn handle_set_torque(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetTorque) {
     match ctx.gate.on_set_torque(msg.value != 0, msg.execute_at_ns) {
         CommandAction::Enable => {
-            let mut enable_rc = 0;
-            for s in 0..num_slaves {
-                let rc = ctx.drive.enable(s);
-                if rc != 0 {
-                    crate::rt_eprintln!("ec-rt: slot {s} CiA402 enable failed rc={rc}");
-                    enable_rc = rc;
-                    break;
-                }
-            }
+            let enable_rc = ctx.drive.enable_all();
             ctx.gate.enable_finished(enable_rc == 0);
             if enable_rc == 0 {
-                crate::rt_eprintln!(
-                    "ec-rt: torque enabled (CiA402 operation enabled, {num_slaves} slave(s))"
-                );
+                crate::rt_eprintln!("ec-rt: torque enabled (CiA402 operation enabled)");
                 ctx.server
                     .respond(&set_torque_response_frame(correlation_id, 0));
             } else {
@@ -324,7 +313,7 @@ fn handle_set_torque(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetTorque)
                     correlation_id,
                     ERR_ENABLE_FAILED,
                 ));
-                ctx.drive.shutdown_and_exit(num_slaves);
+                ctx.drive.shutdown_and_exit();
             }
         }
         CommandAction::ScheduleDisable => {
@@ -346,7 +335,7 @@ fn handle_set_torque(ctx: &mut EndpointCtx, correlation_id: u32, msg: SetTorque)
             );
             ctx.server
                 .respond(&set_torque_response_frame(correlation_id, code));
-            ctx.drive.shutdown_and_exit(num_slaves);
+            ctx.drive.shutdown_and_exit();
         }
     }
 }
