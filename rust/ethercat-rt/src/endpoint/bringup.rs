@@ -532,9 +532,11 @@ pub fn bringup(args: Args) -> EndpointCtx {
         prev_exchange_ns: 0,
         last_wake_late_ns: 0,
         last_recv_ns: 0,
+        last_process_ns: 0,
         last_send_ns: 0,
         wake_late_max_ns: i64::MIN,
         recv_max_ns: i64::MIN,
+        process_max_ns: i64::MIN,
         send_max_ns: i64::MIN,
     }
 }
