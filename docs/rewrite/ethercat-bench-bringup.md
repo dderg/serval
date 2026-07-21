@@ -253,8 +253,8 @@ endpoint: rust/target/release/ethercat-rt-stub
 
 ## Servo telemetry capture (multi-drive)
 
-The full `SERVO_*` calibration command and script reference is
-[`servo-calibration.md`](servo-calibration.md).
+The full `SERVO_*` calibration command and script reference lives in the
+[serval-dashboard](https://github.com/dderg/serval-dashboard) repository.
 
 `SERVO_CAPTURE_START AXIS=<axis>` records the servo on that axis on its
 `[ethercat_node]`, even when the node carries several drives — the host resolves the

@@ -1,9 +1,7 @@
 use serde::Deserialize;
 
-/// Must equal `servo_ident::model::COULOMB_DEADBAND_MM_S` — the fit excludes
-/// |v| below this from the coulomb regression, so the runtime ramps through
-/// it (enforced by the profile_contract test; servo-ident stays dev-only
-/// here to keep host-side analysis out of the RT endpoint).
+/// Must match the serval-dashboard fitter's coulomb deadband: the fit excludes
+/// |v| below this from the coulomb regression, so the runtime ramps through it.
 pub const COULOMB_DEADBAND_MM_S: f32 = 0.5;
 
 pub const ERR_DYNAMICS_BAD_DIM: i32 = -861;
