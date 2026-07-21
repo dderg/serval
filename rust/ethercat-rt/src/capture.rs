@@ -16,13 +16,13 @@ pub const ERR_CAPTURE_BAD_ARG: i32 = -324;
 pub const ERR_CAPTURE_BAD_DRIVE_LIST: i32 = -325;
 pub const ERR_CAPTURE_CHANNEL_NOT_READY: i32 = -326;
 
-/// Sized to hold a full calibration stroke at the 4 kHz DC cycle even if the
-/// writer stalls for ~33 s. Sized after the 2026-07-21 bench overflow: after
-/// ~1.7 GB of sustained tune captures the SD card's wear-leveling GC plus a
-/// multi-second host-wide stall starved the (SCHED_OTHER) writer past the old
-/// 16 s / 65536-slot budget. Periodic fsync is also off the drain path now
-/// (see `run_session`), so this is headroom for pure scheduler starvation.
-pub const CAPTURE_RING_CAPACITY: usize = 131_072;
+/// Sized to hold a full calibration stroke (~55k records at the 4 kHz DC
+/// cycle) even if the SD card stalls for the stroke's whole duration —
+/// observed contention from journald/Vector/VictoriaLogs on the same card
+/// cut writer throughput to ~60% for 10+ seconds (2026-07-12 bench).
+/// Periodic fsync no longer blocks the drain loop (see `run_session`) after
+/// a multi-second SD GC pause overflowed this ring on the 2026-07-21 bench.
+pub const CAPTURE_RING_CAPACITY: usize = 65536;
 
 pub const MAX_DRIVES: usize = EC_RT_MAX_SLAVES;
 pub const RECORD_PREFIX_SIZE: usize = 21;
