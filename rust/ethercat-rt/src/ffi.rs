@@ -38,7 +38,7 @@ extern "C" {
 
     pub fn ec_rt_bringup_finish() -> c_int;
 
-    pub fn ec_rt_enable(slave: c_int) -> c_int;
+    pub fn ec_rt_enable_all() -> c_int;
 
     pub fn ec_rt_dump_al_state();
 
@@ -93,7 +93,7 @@ extern "C" {
         abort_code: *mut u32,
     ) -> c_int;
 
-    pub fn ec_rt_disable(slave: c_int);
+    pub fn ec_rt_disable_all();
 
     pub fn ec_rt_shutdown();
 

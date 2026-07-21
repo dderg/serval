@@ -427,7 +427,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
                 event = "claim_handshake_timeout",
                 "bridge did not send ClaimHandshake within 5 s; aborting"
             );
-            drive.shutdown_and_exit(num_slaves);
+            drive.shutdown_and_exit();
         }
     }
     tracing::info!(

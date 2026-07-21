@@ -11,7 +11,12 @@
 //! to position_actual only where the rotor genuinely moved uncommanded
 //! (torque cycle, drive fault, sync coast).
 
-use mcu_protocol::{Decode, Encode};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+
+use mcu_protocol::{messages::SetTorque, Decode, Encode};
 use runtime::piece_ring::PieceEntry;
 
 use super::cycle::compute_motion_targets;
@@ -84,10 +89,10 @@ impl DriveChain for TrackingLagDrive {
         }
         (0, 0)
     }
-    fn enable(&mut self, _slot: usize) -> i32 {
+    fn enable_all(&mut self) -> i32 {
         0
     }
-    fn disable(&mut self, _slot: usize) {}
+    fn disable_all(&mut self) {}
     fn shutdown(&mut self) {}
     fn set_target_position(&mut self, slot: usize, counts: i32) {
         self.targets[slot] = counts;
@@ -119,6 +124,57 @@ impl DriveChain for TrackingLagDrive {
     fn dump_al_state(&self) {}
 }
 
+struct TransitionCounts {
+    enable: AtomicUsize,
+    disable: AtomicUsize,
+}
+
+struct RecordingDrive {
+    transitions: Arc<TransitionCounts>,
+}
+
+impl RecordingDrive {
+    fn new(transitions: Arc<TransitionCounts>) -> Self {
+        Self { transitions }
+    }
+}
+
+impl DriveChain for RecordingDrive {
+    fn cycle_time_ns(&self) -> u64 {
+        0
+    }
+    fn cycle(&mut self) -> (i32, i64) {
+        (0, 0)
+    }
+    fn enable_all(&mut self) -> i32 {
+        self.transitions.enable.fetch_add(1, Ordering::SeqCst);
+        0
+    }
+    fn disable_all(&mut self) {
+        self.transitions.disable.fetch_add(1, Ordering::SeqCst);
+    }
+    fn shutdown(&mut self) {}
+    fn set_target_position(&mut self, _slot: usize, _counts: i32) {}
+    fn set_velocity_offset(&mut self, _slot: usize, _counts_per_s: i32) {}
+    fn set_torque_offset(&mut self, _slot: usize, _tenths_pct: i16) {}
+    fn position_actual(&self, _slot: usize) -> i32 {
+        0
+    }
+    fn velocity_actual(&self, _slot: usize) -> i32 {
+        0
+    }
+    fn torque_actual(&self, _slot: usize) -> i16 {
+        0
+    }
+    fn error_code(&self, _slot: usize) -> u16 {
+        0
+    }
+    fn telemetry(&self, _slot: usize) -> EcTelemetry {
+        EcTelemetry::default()
+    }
+    fn dump_al_state(&self) {}
+}
+
 struct NoSdo;
 
 impl SdoBus for NoSdo {
@@ -134,7 +190,7 @@ fn test_ctx(name: &str) -> EndpointCtx {
     test_ctx_with_drive(name, TrackingLagDrive::at_rest())
 }
 
-fn test_ctx_with_drive(name: &str, drive: TrackingLagDrive) -> EndpointCtx {
+fn test_ctx_with_drive(name: &str, drive: impl DriveChain + 'static) -> EndpointCtx {
     let sock = std::env::temp_dir().join(format!("ec-rt-test-{}-{name}.sock", std::process::id()));
     let mut gate = TorqueGate::new();
     let _ = gate.on_set_torque(true, 0);
@@ -208,6 +264,60 @@ fn test_ctx_with_drive(name: &str, drive: TrackingLagDrive) -> EndpointCtx {
         last_pre_work_ns: 0,
         prev_exchange_ns: 0,
     }
+}
+
+#[test]
+fn set_torque_enable_uses_one_chain_transition_for_two_slaves() {
+    let transitions = Arc::new(TransitionCounts {
+        enable: AtomicUsize::new(0),
+        disable: AtomicUsize::new(0),
+    });
+    let mut ctx = test_ctx_with_drive(
+        "torque-enable-lockstep",
+        RecordingDrive::new(Arc::clone(&transitions)),
+    );
+    ctx.gate = TorqueGate::new();
+
+    super::commands::handle_set_torque(
+        &mut ctx,
+        1,
+        SetTorque {
+            value: 1,
+            execute_at_ns: 0,
+        },
+    );
+
+    assert_eq!(ctx.gate.state(), TorqueState::Enabled);
+    assert_eq!(transitions.enable.load(Ordering::SeqCst), 1);
+    assert_eq!(transitions.disable.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn scheduled_torque_disable_uses_one_chain_transition_for_two_slaves() {
+    let transitions = Arc::new(TransitionCounts {
+        enable: AtomicUsize::new(0),
+        disable: AtomicUsize::new(0),
+    });
+    let mut ctx = test_ctx_with_drive(
+        "torque-disable-lockstep",
+        RecordingDrive::new(Arc::clone(&transitions)),
+    );
+
+    super::commands::handle_set_torque(
+        &mut ctx,
+        1,
+        SetTorque {
+            value: 0,
+            execute_at_ns: 5,
+        },
+    );
+    assert_eq!(ctx.gate.state(), TorqueState::Enabled);
+
+    super::cycle::apply_tick_action(&mut ctx, 5, true);
+
+    assert_eq!(ctx.gate.state(), TorqueState::Parked);
+    assert_eq!(transitions.enable.load(Ordering::SeqCst), 0);
+    assert_eq!(transitions.disable.load(Ordering::SeqCst), 1);
 }
 
 fn piece(start_ns: u64, duration_s: f32, coeffs: &[f32]) -> PieceEntry {

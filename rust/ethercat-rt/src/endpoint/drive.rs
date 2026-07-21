@@ -7,8 +7,8 @@ use crate::ffi::EcTelemetry;
 pub(super) trait DriveChain {
     fn cycle_time_ns(&self) -> u64;
     fn cycle(&mut self) -> (i32, i64);
-    fn enable(&mut self, slot: usize) -> i32;
-    fn disable(&mut self, slot: usize);
+    fn enable_all(&mut self) -> i32;
+    fn disable_all(&mut self);
     fn shutdown(&mut self);
     fn set_target_position(&mut self, slot: usize, counts: i32);
     fn set_velocity_offset(&mut self, slot: usize, counts_per_s: i32);
@@ -24,14 +24,8 @@ pub(super) trait DriveChain {
         0
     }
 
-    fn disable_all(&mut self, num_slaves: usize) {
-        for s in 0..num_slaves {
-            self.disable(s);
-        }
-    }
-
-    fn shutdown_and_exit(&mut self, num_slaves: usize) -> ! {
-        self.disable_all(num_slaves);
+    fn shutdown_and_exit(&mut self) -> ! {
+        self.disable_all();
         self.shutdown();
         std::process::exit(1);
     }
@@ -61,12 +55,12 @@ impl DriveChain for FfiDriveChain {
         unsafe { ffi::ec_rt_reanchor_count() }
     }
 
-    fn enable(&mut self, slot: usize) -> i32 {
-        unsafe { ffi::ec_rt_enable(c_slot(slot)) }
+    fn enable_all(&mut self) -> i32 {
+        unsafe { ffi::ec_rt_enable_all() }
     }
 
-    fn disable(&mut self, slot: usize) {
-        unsafe { ffi::ec_rt_disable(c_slot(slot)) }
+    fn disable_all(&mut self) {
+        unsafe { ffi::ec_rt_disable_all() }
     }
 
     fn shutdown(&mut self) {

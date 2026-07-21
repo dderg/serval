@@ -618,49 +618,113 @@ int ec_rt_bringup_finish(void) {
  * which a power cycle would otherwise do for free. */
 #define ENABLE_SWITCHED_ON_DWELL 200
 
-int ec_rt_enable(int slave) {
-    check_idx(slave);
-    slave_t *sl = &g_slaves[slave];
-    /*
-     * CiA402 enable state machine — masks/values match the CiA402 table:
-     *   sw & 0x004F == 0x0040 => Switch-On Disabled: issue 0x0006
-     *   sw & 0x006F == 0x0021 => Ready-to-Switch-On: issue 0x0007
-     *   sw & 0x006F == 0x0023 => Switched-On:        dwell, then issue 0x000F
-     *   sw & 0x006F == 0x0027 => Operation Enabled:  done
-     *   sw & 0x0008           => Fault: pulse fault-reset on bit 7
-     */
+static void stage_enable_phase(uint16_t controlword) {
+    for (int s = 0; s < g_num_slaves; s++) {
+        slave_t *sl = &g_slaves[s];
+        sl->tx.controlword = controlword;
+        sl->tx.target_position = EC_READ_S32(g_pd + sl->i_position_actual);
+        sl->tx.velocity_offset = 0;
+        sl->tx.torque_offset = 0;
+    }
+}
+
+static int cia402_enable_state(uint16_t sw) {
+    if (sw & 0x0008) return -1;
+    if ((sw & 0x004F) == 0x0040) return 1;
+    if ((sw & 0x006F) == 0x0021) return 1;
+    if ((sw & 0x006F) == 0x0023) return 1;
+    if ((sw & 0x006F) == 0x0027) return 1;
+    return 0;
+}
+
+static int all_statuswords_are(uint16_t mask, uint16_t value) {
+    for (int s = 0; s < g_num_slaves; s++) {
+        slave_t *sl = &g_slaves[s];
+        uint16_t sw = EC_READ_U16(g_pd + sl->i_statusword);
+        if (cia402_enable_state(sw) != 1) {
+            fprintf(stderr,
+                    "ec_rt: chain enable rejected slot %d statusword=0x%04x err=0x%04x\n",
+                    s, sw, EC_READ_U16(g_pd + sl->i_error_code));
+            return -1;
+        }
+    }
+    for (int s = 0; s < g_num_slaves; s++)
+        if ((EC_READ_U16(g_pd + g_slaves[s].i_statusword) & mask) != value)
+            return 0;
+    return 1;
+}
+
+int ec_rt_enable_all(void) {
+    enum {
+        ENABLE_SHUTDOWN,
+        ENABLE_SWITCH_ON,
+        ENABLE_DWELL,
+        ENABLE_OPERATION,
+    } phase = ENABLE_SHUTDOWN;
     int64_t toff = 0;
     int64_t switched_on_dwell = 0;
+
     for (int64_t pc = 0; pc < 3000; pc++) {
-        stage_hold_others(slave);
-        uint16_t sw = EC_READ_U16(g_pd + sl->i_statusword);
-        sl->tx.target_position = EC_READ_S32(g_pd + sl->i_position_actual);
-        if (sw & 0x0008) {
-            sl->tx.controlword = fault_reset_pulse(pc);
-        } else if ((sw & 0x004F) == 0x0040) {
-            sl->tx.controlword = 0x0006;
-        } else if ((sw & 0x006F) == 0x0021) {
-            sl->tx.controlword = 0x0007;
-        } else if ((sw & 0x006F) == 0x0023) {
-            if (switched_on_dwell < ENABLE_SWITCHED_ON_DWELL) {
-                sl->tx.controlword = 0x0007;
-                switched_on_dwell++;
-            } else {
-                sl->tx.controlword = 0x000F;
-            }
-        } else if ((sw & 0x006F) == 0x0027) {
-            sl->tx.controlword = 0x000F;
-            rt_exchange(&toff);
-            sl->enabled = 1;
-            fprintf(stderr,
-                    "ec_rt: slot %d operation-enabled (switched-on dwell=%lld, sw=0x%04x err=0x%04x)\n",
-                    slave, (long long)switched_on_dwell, sw,
-                    EC_READ_U16(g_pd + sl->i_error_code));
-            return 0;
-        } else {
-            sl->tx.controlword = 0x0000;
+        switch (phase) {
+        case ENABLE_SHUTDOWN:
+            stage_enable_phase(0x0006);
+            break;
+        case ENABLE_SWITCH_ON:
+        case ENABLE_DWELL:
+            stage_enable_phase(0x0007);
+            break;
+        case ENABLE_OPERATION:
+            stage_enable_phase(0x000F);
+            break;
         }
         rt_exchange(&toff);
+
+        if (phase == ENABLE_DWELL) switched_on_dwell++;
+        int state;
+        switch (phase) {
+        case ENABLE_SHUTDOWN:
+            state = all_statuswords_are(0x006F, 0x0021);
+            if (state < 0) return EC_RT_ERR_CIA402_TIMEOUT;
+            if (state) phase = ENABLE_SWITCH_ON;
+            break;
+        case ENABLE_SWITCH_ON:
+            state = all_statuswords_are(0x006F, 0x0023);
+            if (state < 0) return EC_RT_ERR_CIA402_TIMEOUT;
+            if (state) phase = ENABLE_DWELL;
+            break;
+        case ENABLE_DWELL:
+            state = all_statuswords_are(0x006F, 0x0023);
+            if (state < 0) return EC_RT_ERR_CIA402_TIMEOUT;
+            if (state) {
+                if (switched_on_dwell == ENABLE_SWITCHED_ON_DWELL)
+                    phase = ENABLE_OPERATION;
+            } else {
+                switched_on_dwell = 0;
+                phase = ENABLE_SWITCH_ON;
+            }
+            break;
+        case ENABLE_OPERATION:
+            state = all_statuswords_are(0x006F, 0x0027);
+            if (state < 0) return EC_RT_ERR_CIA402_TIMEOUT;
+            if (!state) break;
+            for (int s = 0; s < g_num_slaves; s++) {
+                slave_t *sl = &g_slaves[s];
+                sl->enabled = 1;
+                fprintf(stderr,
+                        "ec_rt: slot %d operation-enabled (switched-on dwell=%lld, sw=0x%04x err=0x%04x)\n",
+                        s, (long long)switched_on_dwell,
+                        EC_READ_U16(g_pd + sl->i_statusword),
+                        EC_READ_U16(g_pd + sl->i_error_code));
+            }
+            return 0;
+        }
+    }
+    for (int s = 0; s < g_num_slaves; s++) {
+        slave_t *sl = &g_slaves[s];
+        fprintf(stderr,
+                "ec_rt: chain enable timeout slot %d statusword=0x%04x err=0x%04x\n",
+                s, EC_READ_U16(g_pd + sl->i_statusword),
+                EC_READ_U16(g_pd + sl->i_error_code));
     }
     return EC_RT_ERR_CIA402_TIMEOUT;
 }
@@ -797,12 +861,10 @@ int ec_rt_sdo_write(int slave, uint16_t index, uint8_t sub, const uint8_t *buf, 
 
 /*
  * CiA-402 homing-method-35 ("current position is home") drive-frame on one
- * slave, run as a self-contained DC loop the way ec_rt_enable() runs its enable
- * loop: every wait goes through rt_exchange so process data never pauses, and
- * the other slaves are held steady. Preconditions (staged off-loop by the
- * caller): mode = Homing (6061h reads 6), 6098h = 35, 607Ch = offset, drive
- * operation-enabled. 6040h bit 4 (0x10) rising edge starts homing and stays set;
- * 6041h bit 12 = attained, bit 13 = error.
+ * slave, run as a self-contained DC loop while the other slaves hold steady.
+ * Preconditions (staged off-loop by the caller): mode = Homing (6061h reads 6),
+ * 6098h = 35, 607Ch = offset, drive operation-enabled. 6040h bit 4 (0x10)
+ * rising edge starts homing and stays set; 6041h bit 12 = attained, bit 13 = error.
  */
 int ec_rt_run_homing(int slave) {
     check_idx(slave);
@@ -881,16 +943,16 @@ void ec_rt_al_status(int slave, uint16_t *state, uint16_t *alstatuscode) {
     *alstatuscode = read_al_status_code(sl);
 }
 
-void ec_rt_disable(int slave) {
-    check_idx(slave);
-    slave_t *sl = &g_slaves[slave];
-    sl->enabled = 0;
+void ec_rt_disable_all(void) {
     for (int i = 0; i < 100; i++) {
-        stage_hold_others(slave);
-        sl->tx.controlword = 0x0006;
-        sl->tx.target_position = EC_READ_S32(g_pd + sl->i_position_actual);
-        sl->tx.velocity_offset = 0;
-        sl->tx.torque_offset = 0;
+        for (int s = 0; s < g_num_slaves; s++) {
+            slave_t *sl = &g_slaves[s];
+            sl->enabled = 0;
+            sl->tx.controlword = 0x0006;
+            sl->tx.target_position = EC_READ_S32(g_pd + sl->i_position_actual);
+            sl->tx.velocity_offset = 0;
+            sl->tx.torque_offset = 0;
+        }
         int64_t t = 0;
         rt_exchange(&t);
     }
