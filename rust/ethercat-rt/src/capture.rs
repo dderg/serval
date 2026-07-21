@@ -16,11 +16,13 @@ pub const ERR_CAPTURE_BAD_ARG: i32 = -324;
 pub const ERR_CAPTURE_BAD_DRIVE_LIST: i32 = -325;
 pub const ERR_CAPTURE_CHANNEL_NOT_READY: i32 = -326;
 
-/// Sized to hold a full calibration stroke (~55k records at the 4 kHz DC
-/// cycle) even if the SD card stalls for the stroke's whole duration —
-/// observed contention from journald/Vector/VictoriaLogs on the same card
-/// cut writer throughput to ~60% for 10+ seconds (2026-07-12 bench).
-pub const CAPTURE_RING_CAPACITY: usize = 65536;
+/// Sized to hold a full calibration stroke at the 4 kHz DC cycle even if the
+/// writer stalls for ~33 s. Sized after the 2026-07-21 bench overflow: after
+/// ~1.7 GB of sustained tune captures the SD card's wear-leveling GC plus a
+/// multi-second host-wide stall starved the (SCHED_OTHER) writer past the old
+/// 16 s / 65536-slot budget. Periodic fsync is also off the drain path now
+/// (see `run_session`), so this is headroom for pure scheduler starvation.
+pub const CAPTURE_RING_CAPACITY: usize = 131_072;
 
 pub const MAX_DRIVES: usize = EC_RT_MAX_SLAVES;
 pub const RECORD_PREFIX_SIZE: usize = 21;
@@ -504,6 +506,7 @@ impl PendingStop {
 
 fn service_loop(control: Receiver<IoMsg>, spares: &Sender<RecordChannel>, capacity: usize) {
     demote_to_normal_scheduling();
+    let (sync_tx, sync_handle) = spawn_syncer();
     while let Ok(msg) = control.recv() {
         match msg {
             IoMsg::Finalize { reply, .. } => {
@@ -524,7 +527,13 @@ fn service_loop(control: Receiver<IoMsg>, spares: &Sender<RecordChannel>, capaci
                 let session = match open_session(&path) {
                     Ok(file) => {
                         let _ = reply.send(0);
-                        Some(run_session(file, header_json(&cfg), hook, records))
+                        Some(run_session(
+                            file,
+                            header_json(&cfg),
+                            hook,
+                            records,
+                            &sync_tx,
+                        ))
                     }
                     Err(rc) => {
                         let _ = reply.send(rc);
@@ -546,6 +555,30 @@ fn service_loop(control: Receiver<IoMsg>, spares: &Sender<RecordChannel>, capaci
             }
         }
     }
+    drop(sync_tx);
+    let _ = sync_handle.join();
+}
+
+/// One persistent fsync offload thread ("capture-sync"): the writer hands it
+/// a dup'd fd once per `WRITER_SYNC_INTERVAL` and never blocks on storage
+/// flush latency itself — a blocking `sync_data` on a busy SD card can take
+/// multiple seconds (wear-leveling GC), which on 2026-07-21 stalled the drain
+/// loop past the ring budget and killed a 62-round tune with -323. Depth-1
+/// channel: while one fsync is in flight further requests are dropped, the
+/// next interval retries. Background fsync errors are ignored; the final
+/// inline fsync in `run_session` still reports them before the stop resolves.
+fn spawn_syncer() -> (SyncSender<File>, JoinHandle<()>) {
+    let (tx, rx) = sync_channel::<File>(1);
+    let handle = std::thread::Builder::new()
+        .name("capture-sync".into())
+        .stack_size(IO_THREAD_STACK)
+        .spawn(move || {
+            while let Ok(file) = rx.recv() {
+                let _ = file.sync_data();
+            }
+        })
+        .expect("spawn capture-sync thread");
+    (tx, handle)
 }
 
 fn open_session(path: &PathBuf) -> Result<File, i32> {
@@ -564,6 +597,7 @@ fn run_session(
     header: String,
     hook: WriterHook,
     rx: Receiver<CaptureRecord>,
+    syncer: &SyncSender<File>,
 ) -> Result<u64, (u64, String)> {
     let mut file = BufWriter::with_capacity(WRITE_BUFFER_SIZE, file);
     file.write_all(header.as_bytes())
@@ -596,9 +630,9 @@ fn run_session(
         if last_sync.elapsed() >= WRITER_SYNC_INTERVAL {
             file.flush()
                 .map_err(|e| (written, format!("capture flush: {e}")))?;
-            file.get_ref()
-                .sync_data()
-                .map_err(|e| (written, format!("capture fsync: {e}")))?;
+            if let Ok(dup) = file.get_ref().try_clone() {
+                let _ = syncer.try_send(dup);
+            }
             last_sync = Instant::now();
         }
     }
