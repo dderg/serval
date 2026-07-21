@@ -776,3 +776,147 @@ fn aggregate_transient(ferr: &[f64], windows: &[std::ops::Range<usize>]) -> Tran
         windows: per_window.len(),
     }
 }
+
+/// Minimum contiguous same-direction moving-sample run scored as one
+/// direction-split window.
+pub const MIN_DIRECTION_WINDOW: usize = 20;
+
+/// One AWD pair scored for its direction-split objective — the even (common)
+/// component of the following-error differential between the pair's two
+/// motors, split by commanded-velocity direction. `pair` holds the two axis
+/// indices (into the `--axes` order); `lambda` is `+1` when the pair's frame
+/// columns are equal, `-1` when opposite.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DirectionSplit {
+    pub pair: [usize; 2],
+    pub lambda: f64,
+    /// Signed even directional differential (mm): the objective the tuner
+    /// drives to zero. `q = (mean m_w over +dir windows - mean over -dir
+    /// windows) / 2`, where each window mean `m_w` averages
+    /// `(ferr_i - lambda·ferr_j)/2`.
+    pub q: f64,
+    /// `|q|`, the minimized objective in the same units as the other terms.
+    pub rms: f64,
+    /// Standard error of `q`; `None` when either direction had fewer than
+    /// two scored windows (the sample variance is undefined).
+    pub sigma: Option<f64>,
+    /// Total direction-run windows scored for the pair.
+    pub windows: usize,
+}
+
+/// Infer AWD axis pairs from a frame matrix (rows = modes, columns = axes):
+/// two columns pair when they are elementwise equal (`lambda = +1`) or exact
+/// negatives (`lambda = -1`) within `1e-9`. Greedy and left-to-right, so each
+/// axis lands in at most one pair; axes with no partner are omitted.
+pub fn frame_pairs(frame: &[Vec<f64>]) -> Vec<([usize; 2], f64)> {
+    const TOL: f64 = 1.0e-9;
+    let n_axes = frame.first().map_or(0, Vec::len);
+    let column = |slot: usize| frame.iter().map(move |row| row[slot]);
+    let mut pairs = Vec::new();
+    let mut consumed = vec![false; n_axes];
+    for i in 0..n_axes {
+        if consumed[i] {
+            continue;
+        }
+        for j in i + 1..n_axes {
+            if consumed[j] {
+                continue;
+            }
+            let equal = column(i).zip(column(j)).all(|(a, b)| (a - b).abs() <= TOL);
+            let opposite = column(i).zip(column(j)).all(|(a, b)| (a + b).abs() <= TOL);
+            let lambda = if equal {
+                1.0
+            } else if opposite {
+                -1.0
+            } else {
+                continue;
+            };
+            pairs.push(([i, j], lambda));
+            consumed[i] = true;
+            consumed[j] = true;
+            break;
+        }
+    }
+    pairs
+}
+
+/// Score every AWD pair inferred from `frame` for its direction-split
+/// objective. `ferr` and `vel` are RAW per-motor channels in `--axes` order;
+/// an empty result means the frame carries no pairs.
+pub fn direction_split(
+    frame: &[Vec<f64>],
+    ferr: &[Vec<f64>],
+    vel: &[Vec<f64>],
+) -> Vec<DirectionSplit> {
+    frame_pairs(frame)
+        .into_iter()
+        .map(|(pair, lambda)| {
+            direction_split_pair(pair, lambda, &ferr[pair[0]], &ferr[pair[1]], &vel[pair[0]])
+        })
+        .collect()
+}
+
+fn direction_split_pair(
+    pair: [usize; 2],
+    lambda: f64,
+    ferr_i: &[f64],
+    ferr_j: &[f64],
+    vel_i: &[f64],
+) -> DirectionSplit {
+    let n = vel_i.len();
+    let vmax = vel_i.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    let gate = 0.02 * vmax;
+    let mut plus = Vec::new();
+    let mut minus = Vec::new();
+    let mut k = 0;
+    while k < n {
+        if vel_i[k].abs() <= gate {
+            k += 1;
+            continue;
+        }
+        let sign = vel_i[k].signum();
+        let start = k;
+        while k < n && vel_i[k].abs() > gate && vel_i[k].signum() == sign {
+            k += 1;
+        }
+        if k - start >= MIN_DIRECTION_WINDOW {
+            let mean = (start..k)
+                .map(|s| (ferr_i[s] - lambda * ferr_j[s]) / 2.0)
+                .sum::<f64>()
+                / (k - start) as f64;
+            if sign > 0.0 {
+                plus.push(mean);
+            } else {
+                minus.push(mean);
+            }
+        }
+    }
+    let mean = |w: &[f64]| -> f64 {
+        if w.is_empty() {
+            0.0
+        } else {
+            w.iter().sum::<f64>() / w.len() as f64
+        }
+    };
+    let variance = |w: &[f64], m: f64| -> Option<f64> {
+        (w.len() >= 2)
+            .then(|| w.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (w.len() - 1) as f64)
+    };
+    let mean_plus = mean(&plus);
+    let mean_minus = mean(&minus);
+    let q = (mean_plus - mean_minus) / 2.0;
+    let sigma = match (variance(&plus, mean_plus), variance(&minus, mean_minus)) {
+        (Some(vp), Some(vm)) => {
+            Some(0.5 * (vp / plus.len() as f64 + vm / minus.len() as f64).sqrt())
+        }
+        _ => None,
+    };
+    DirectionSplit {
+        pair,
+        lambda,
+        q,
+        rms: q.abs(),
+        sigma,
+        windows: plus.len() + minus.len(),
+    }
+}

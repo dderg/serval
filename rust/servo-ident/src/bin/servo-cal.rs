@@ -41,8 +41,8 @@ use servo_ident::metrics::{DEFAULT_SETTLE_BAND_COUNTS, DEFAULT_TORQUE_LIMIT_PER_
 use servo_ident::model::Structure;
 use servo_ident::pipeline::{fit_input, full_fit_input, prepare};
 use servo_ident::prep::{
-    band_limited_rms, median_dt, onset_bias, transient_rms, ModalMode, PrepOptions, TransientKind,
-    TransientRms,
+    band_limited_rms, direction_split, median_dt, onset_bias, transient_rms, DirectionSplit,
+    ModalMode, PrepOptions, TransientKind, TransientRms,
 };
 use servo_ident::profile_out::{c0006_recommendation, render_profile};
 use servo_ident::scap::Scap;
@@ -502,9 +502,11 @@ fn cmd_fit(args: &[String]) {
             dt,
             0.020,
         );
+        let split = direction_split(&structure.frame, &fit_cap.ferr, &fit_cap.vel);
         run_ferr_fit(
             &structure,
             &modes,
+            &axes,
             &input,
             &raw_rms,
             &onset,
@@ -513,6 +515,7 @@ fn cmd_fit(args: &[String]) {
             &viscous_rms,
             &coulomb_rms,
             &lead_rms,
+            &split,
             &req(args, "--out"),
         );
         return;
@@ -625,6 +628,7 @@ fn cmd_fit(args: &[String]) {
 fn run_ferr_fit(
     structure: &Structure,
     modes: &[&str],
+    axes: &[&str],
     input: &FitInput,
     raw_rms: &[f64],
     onset: &[f64],
@@ -633,6 +637,7 @@ fn run_ferr_fit(
     viscous_rms: &[TransientRms],
     coulomb_rms: &[TransientRms],
     lead_rms: &[TransientRms],
+    split: &[DirectionSplit],
     out_path: &str,
 ) {
     let r = fit_ferr(input, &FitOptions::default()).unwrap_or_else(|e| {
@@ -694,6 +699,17 @@ fn run_ferr_fit(
             .collect();
         eprintln!("ferr-fit transient {label}: {}", per_mode.join(" "));
     }
+    for d in split {
+        let (a, b) = (axes[d.pair[0]], axes[d.pair[1]]);
+        let sigma = match d.sigma {
+            Some(s) => format!("{s:.2e}"),
+            None => "none".to_string(),
+        };
+        eprintln!(
+            "ferr-fit direction_split pair {a}/{b} (lambda {:+.0}): q={:+.3e} sigma={sigma} ({}w)",
+            d.lambda, d.q, d.windows,
+        );
+    }
     let json = render_ferr_json(
         structure,
         modes,
@@ -705,6 +721,7 @@ fn run_ferr_fit(
         viscous_rms,
         coulomb_rms,
         lead_rms,
+        split,
     );
     std::fs::write(out_path, json).unwrap_or_else(|e| die(&format!("write {out_path}: {e}")));
     eprintln!("ferr fit written to {out_path}");

@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 import math
-from typing import Callable
 
 from .dynamics import TUNE_RELATIVE_CLAMP
-
-GOLDEN_RATIO_CONJ = (math.sqrt(5.0) - 1.0) / 2.0
 
 Z = 2.0
 REFINE_Z = 1.0
@@ -61,6 +58,7 @@ class RmsLineSearch:
         sigma: float,
         step: float,
         lo: float = 0.0,
+        hi: float = math.inf,
         hint: float = 1.0,
         grow: float = 1.6,
         clamp: float = TUNE_RELATIVE_CLAMP,
@@ -71,10 +69,15 @@ class RmsLineSearch:
             raise ValueError(
                 "start value %.6g below lower bound %.6g" % (value, lo)
             )
+        if value > hi:
+            raise ValueError(
+                "start value %.6g above upper bound %.6g" % (value, hi)
+            )
         self.best = value
         self.best_rms = rms
         self.best_sigma = _checked_sigma(sigma)
         self.lo = lo
+        self.hi = hi
         self.step = step
         self.direction = 1.0 if hint >= 0.0 or value == lo else -1.0
         self.grow = grow
@@ -100,10 +103,12 @@ class RmsLineSearch:
         self.note = note
 
     def _advance_from(self, value: float) -> None:
-        trial = max(value + self.direction * self.step, self.lo)
+        trial = min(max(value + self.direction * self.step, self.lo), self.hi)
         if self._tried(trial):
             if trial == self.lo:
                 self._finish("bounded at %.6g" % (self.lo,))
+            elif trial == self.hi:
+                self._finish("bounded at %.6g" % (self.hi,))
             else:
                 self._finish("no further improvement")
             return
@@ -123,7 +128,7 @@ class RmsLineSearch:
             vertex = v0 - 0.5 * num / den
             if not va < vertex < vb:
                 return None
-            return max(vertex, self.lo)
+            return min(max(vertex, self.lo), self.hi)
         return None
 
     def feed(self, rms: float, sigma: float) -> None:
@@ -178,57 +183,3 @@ class RmsLineSearch:
             return
         self._refine_probes += 1
         self.trial = vertex
-
-
-class _GssBudgetExhausted(Exception):
-    pass
-
-
-def golden_section_search(
-    evaluate: Callable[[float], float],
-    lo: float,
-    hi: float,
-    tol: float,
-    max_evals: int,
-) -> tuple[float, float, list[tuple[float, float]]]:
-    """Minimize evaluate() over [lo, hi]; probes are cached on round(x, 4)
-    so re-probes are free, and the search stops once the bracket is
-    narrower than tol or max_evals distinct probes have run. Returns the
-    measured best probe (argmin over the cache), not the bracket midpoint -
-    under measurement noise the point actually measured best is the only
-    defensible pick."""
-    if not math.isfinite(lo) or not math.isfinite(hi) or not lo < hi:
-        raise ValueError("bracket must satisfy finite LO < HI")
-    if tol <= 0.0:
-        raise ValueError("TOL must be > 0")
-    if max_evals < 3:
-        raise ValueError("MAX_EVALS must be at least 3")
-    cache: dict[float, float] = {}
-
-    def probe(x: float) -> float:
-        key = round(x, 4)
-        if key in cache:
-            return cache[key]
-        if len(cache) >= max_evals:
-            raise _GssBudgetExhausted()
-        cache[key] = evaluate(key)
-        return cache[key]
-
-    a, b = lo, hi
-    try:
-        c = b - GOLDEN_RATIO_CONJ * (b - a)
-        d = a + GOLDEN_RATIO_CONJ * (b - a)
-        fc, fd = probe(c), probe(d)
-        while b - a > tol:
-            if fc <= fd:
-                b, d, fd = d, c, fc
-                c = b - GOLDEN_RATIO_CONJ * (b - a)
-                fc = probe(c)
-            else:
-                a, c, fc = c, d, fd
-                d = a + GOLDEN_RATIO_CONJ * (b - a)
-                fd = probe(d)
-    except _GssBudgetExhausted:
-        pass
-    best_scale, best_score = min(cache.items(), key=lambda kv: (kv[1], kv[0]))
-    return best_scale, best_score, sorted(cache.items())

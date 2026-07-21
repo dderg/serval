@@ -78,7 +78,6 @@ class CalibrationHost:
             "SERVO_SET_INERTIA_RATIO",
             "SERVO_APPLY_GAINS",
             "SERVO_CALIBRATE_GAINS",
-            "SERVO_REFINE_DYNAMICS",
             "SERVO_TUNE_DYNAMICS",
             "SERVO_SWEEP_INERTIA",
             "SERVO_SWEEP_ACCEL",
@@ -337,34 +336,6 @@ class CalibrationHost:
         raise self.printer.command_error(
             "step %r missing from results.json" % (step_name,)
         )
-
-    def _step_metric_mean(
-        self,
-        gcmd: Any,
-        results: dict[str, Any],
-        step_name: str,
-        metric: str,
-    ) -> float:
-        """Mean of one per-move metric over the named step's drives - the
-        refinement objective, so mean (not max): lower variance under stroke
-        noise, and constant per-drive offsets do not move the argmin."""
-        for step in results.get("steps") or []:
-            if step.get("name") != step_name:
-                continue
-            step_drives = step.get("drives") or {}
-            values = [
-                move[metric]
-                for drive in step_drives.values()
-                for move in (drive.get("metrics") or {}).get("moves") or []
-                if metric in move
-            ]
-            if not values:
-                raise gcmd.error(
-                    "step %s carries no %r move metrics in results.json"
-                    % (step_name, metric)
-                )
-            return sum(values) / len(values)
-        raise gcmd.error("step %r missing from results.json" % (step_name,))
 
     def _step_flags(self, results: dict[str, Any], step_name: str) -> list[str]:
         for step in results.get("steps") or []:

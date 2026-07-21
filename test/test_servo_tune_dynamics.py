@@ -48,6 +48,25 @@ viscous = [0.004, 0.005]
 coulomb = [1.0, 1.5]
 """
 
+AWD_TOML = """\
+version = 6
+axes = ["motor_a", "motor_a1", "motor_b", "motor_b1"]
+modes = ["x", "y"]
+frame = [[0.25, 0.25, -0.25, 0.25], [0.25, 0.25, 0.25, -0.25]]
+mass = [0.020, 0.030]
+viscous = [0.004, 0.005]
+coulomb = [1.0, 1.5]
+ff_lead_us = 250.0
+
+[[pair]]
+slots = ["motor_a", "motor_a1"]
+direction_split = 0.05
+
+[[pair]]
+slots = ["motor_b", "motor_b1"]
+direction_split = -0.1
+"""
+
 BASELINE_MASS = [0.020, 0.030]
 BASELINE_VISCOUS = [0.004, 0.005]
 BASELINE_COULOMB = [1.0, 1.5]
@@ -102,6 +121,22 @@ def single_drive_rails(node="xy_drives"):
     ]
 
 
+def awd_rails(node="xy_drives"):
+    return [
+        _rail(
+            "x",
+            [_motor("motor_a1", node, 1), _motor("motor_a", node, 0)],
+        ),
+        _rail(
+            "y",
+            [
+                _motor("motor_b", node, 2, invert=True),
+                _motor("motor_b1", node, 3),
+            ],
+        ),
+    ]
+
+
 def _ferr_json(
     modes=("x", "y"),
     mass=(0.0, 0.0),
@@ -117,6 +152,9 @@ def _ferr_json(
     samples=500,
     ff_sigma=(1e-9, 1e-9),
     ff_windows=(8, 8),
+    split_q=(),
+    split_sigma=None,
+    split_windows=None,
 ):
     ff = {
         term: {
@@ -125,6 +163,19 @@ def _ferr_json(
             "windows": list(ff_windows),
         }
         for term in ("mass", "viscous", "coulomb", "lead")
+    }
+    n_pairs = len(split_q)
+    ff["direction_split"] = {
+        "pairs": [[2 * i, 2 * i + 1] for i in range(n_pairs)],
+        "lambda": [1.0] * n_pairs,
+        "q": list(split_q),
+        "rms": [abs(v) for v in split_q],
+        "sigma": (
+            list(split_sigma) if split_sigma is not None else [2.1e-5] * n_pairs
+        ),
+        "windows": (
+            list(split_windows) if split_windows is not None else [14] * n_pairs
+        ),
     }
     return {
         "version": 3,
@@ -223,6 +274,7 @@ def make_calibration(
     sc.fake_onset_fn = lambda mass, viscous, coulomb: (0.0, 0.0)
     sc.fake_lead_penalty_fn = lambda lead_s: (0.0, 0.0)
     sc.fake_lead_onset_fn = lambda lead_s: (0.0, 0.0)
+    sc.fake_split_fn = lambda ds: ()
 
     def fake_run(gcmd, argv, timeout):
         gcode.scripts.append(("RUN", argv, timeout))
@@ -276,6 +328,7 @@ def make_calibration(
                             lead_onset,
                         )
                     ],
+                    split_q=sc.fake_split_fn(_ds),
                 )
             with open(out_path, "w") as f:
                 json.dump(payload, f)
@@ -782,3 +835,125 @@ def test_tune_dynamics_lead_defaults_to_zero_when_profile_omits_it():
     tune = _manifest_for(sc)["dynamics_tune"]
     assert tune["rounds"][0]["lead_us"] == pytest.approx(0.0)
     assert tune["rounds"][1]["lead_us"] > 0.0
+
+
+def _awd_split_pairs(prof):
+    return {p["slots"][0]: p["direction_split"] for p in prof["pair"]}
+
+
+@requires_tomllib
+def test_tune_dynamics_direction_split_converges_each_pair():
+    sc, _gcode, _path = make_calibration(
+        rails=awd_rails(), profile_text=AWD_TOML
+    )
+    # positive-slope convention: increasing a pair's split raises q, so a
+    # pair sits at its optimum where q crosses zero; the two pairs have
+    # different optima to prove the searches are independent.
+    sc.fake_split_fn = lambda ds: (
+        0.05 * (ds[0] - 0.20),
+        0.05 * (ds[1] + 0.25),
+    )
+    gcmd = FakeGcmd(TERMS="DIRECTION_SPLIT")
+    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
+    assert any("converged in" in r for r in gcmd.responses)
+    tune = _manifest_for(sc)["dynamics_tune"]
+    with open(tune["profile"], "rb") as f:
+        prof = tomllib.load(f)
+    pairs = _awd_split_pairs(prof)
+    assert pairs["motor_a"] == pytest.approx(0.20, abs=0.03)
+    assert pairs["motor_b"] == pytest.approx(-0.25, abs=0.03)
+
+
+@requires_tomllib
+def test_tune_dynamics_direction_split_missing_entry_errors():
+    sc, _gcode, _path = make_calibration(
+        rails=awd_rails(), profile_text=AWD_TOML
+    )
+    stale = _ferr_json(split_q=(0.01, 0.01))
+    del stale["ferr_rms_ff"]["direction_split"]
+    sc.fake_ferr_queue = [stale]
+    with pytest.raises(RuntimeError, match="rebuild"):
+        sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(TERMS="DIRECTION_SPLIT"))
+
+
+@requires_tomllib
+def test_tune_dynamics_direction_split_null_sigma_errors():
+    sc, _gcode, _path = make_calibration(
+        rails=awd_rails(), profile_text=AWD_TOML
+    )
+    stale = _ferr_json(
+        split_q=(0.01, 0.01),
+        split_sigma=(None, None),
+        split_windows=(3, 3),
+    )
+    sc.fake_ferr_queue = [stale]
+    with pytest.raises(RuntimeError, match="sigma|scatter"):
+        sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(TERMS="DIRECTION_SPLIT"))
+
+
+@requires_tomllib
+def test_tune_dynamics_direction_split_zero_windows_errors():
+    sc, _gcode, _path = make_calibration(
+        rails=awd_rails(), profile_text=AWD_TOML
+    )
+    stale = _ferr_json(split_q=(0.01, 0.01), split_windows=(0, 0))
+    sc.fake_ferr_queue = [stale]
+    with pytest.raises(RuntimeError, match="windows"):
+        sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(TERMS="DIRECTION_SPLIT"))
+
+
+@requires_tomllib
+def test_tune_dynamics_direction_split_upper_clamp_finishes():
+    sc, _gcode, _path = make_calibration(
+        rails=awd_rails(), profile_text=AWD_TOML
+    )
+    # optima past the +-0.45 bracket: the search must stop at the clamp
+    # with a note, never raising or tripping the abs(value) < 0.5 guard.
+    sc.fake_split_fn = lambda ds: (
+        0.05 * (ds[0] - 0.9),
+        0.05 * (ds[1] - 0.9),
+    )
+    gcmd = FakeGcmd(TERMS="DIRECTION_SPLIT")
+    sc.cmd_SERVO_TUNE_DYNAMICS(gcmd)
+    assert any("converged in" in r for r in gcmd.responses)
+    assert any("bounded at 0.45" in r for r in gcmd.responses)
+    tune = _manifest_for(sc)["dynamics_tune"]
+    with open(tune["profile"], "rb") as f:
+        prof = tomllib.load(f)
+    pairs = _awd_split_pairs(prof)
+    assert pairs["motor_a"] == pytest.approx(0.45, abs=1e-6)
+    assert pairs["motor_b"] == pytest.approx(0.45, abs=1e-6)
+
+
+@requires_tomllib
+def test_tune_dynamics_direction_split_chains_forward():
+    sc, _gcode, _config = make_calibration(
+        rails=awd_rails(), profile_text=AWD_TOML
+    )
+    sc.fake_split_fn = lambda ds: (
+        0.05 * (ds[0] - 0.20),
+        0.05 * (ds[1] + 0.25),
+    )
+    sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(TERMS="DIRECTION_SPLIT"))
+    first = _manifest_for(sc)["dynamics_tune"]
+    with open(first["profile"], "rb") as f:
+        first_pairs = _awd_split_pairs(tomllib.load(f))
+    sc.cmd_SERVO_TUNE_DYNAMICS(FakeGcmd(TERMS="DIRECTION_SPLIT", NAME="tune2"))
+    run_dir = os.path.dirname(
+        sc.printer.lookup_object("servo_capture").starts[-1][0]
+    )
+    with open(os.path.join(run_dir, "manifest.json")) as f:
+        second = json.load(f)["dynamics_tune"]
+    baseline_pairs = {
+        p["slots"][0]: p["direction_split"]
+        for p in second["rounds"][0]["direction_split"]
+    }
+    assert baseline_pairs["motor_a"] == pytest.approx(first_pairs["motor_a"])
+    assert baseline_pairs["motor_b"] == pytest.approx(first_pairs["motor_b"])
+
+
+def test_servo_refine_dynamics_command_is_removed():
+    sc, gcode, _path = make_calibration()
+    assert "SERVO_REFINE_DYNAMICS" not in gcode.commands
+    assert "SERVO_TUNE_DYNAMICS" in gcode.commands
+    assert not hasattr(sc, "cmd_SERVO_REFINE_DYNAMICS")

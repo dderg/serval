@@ -17,7 +17,7 @@ use serde::Serialize;
 
 use crate::fit::FerrFitResult;
 use crate::model::Structure;
-use crate::prep::TransientRms;
+use crate::prep::{DirectionSplit, TransientRms};
 
 #[derive(Debug, Serialize)]
 struct FerrCoefficients {
@@ -48,6 +48,19 @@ struct FerrRmsFf {
     viscous: FerrTransientTerm,
     coulomb: FerrTransientTerm,
     lead: FerrTransientTerm,
+    direction_split: FerrDirectionSplit,
+}
+
+/// Per-AWD-pair direction-split objective (see `prep::direction_split`), one
+/// array entry per pair. Empty arrays when the frame carries no pairs.
+#[derive(Debug, Serialize)]
+struct FerrDirectionSplit {
+    pairs: Vec<[usize; 2]>,
+    lambda: Vec<f64>,
+    q: Vec<f64>,
+    rms: Vec<f64>,
+    sigma: Vec<Option<f64>>,
+    windows: Vec<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -94,6 +107,7 @@ pub fn render_ferr_json(
     viscous_rms: &[TransientRms],
     coulomb_rms: &[TransientRms],
     lead_rms: &[TransientRms],
+    direction_split: &[DirectionSplit],
 ) -> String {
     assert_eq!(
         modes.len(),
@@ -136,6 +150,14 @@ pub fn render_ferr_json(
             viscous: transient_term(viscous_rms),
             coulomb: transient_term(coulomb_rms),
             lead: transient_term(lead_rms),
+            direction_split: FerrDirectionSplit {
+                pairs: direction_split.iter().map(|d| d.pair).collect(),
+                lambda: direction_split.iter().map(|d| d.lambda).collect(),
+                q: direction_split.iter().map(|d| d.q).collect(),
+                rms: direction_split.iter().map(|d| d.rms).collect(),
+                sigma: direction_split.iter().map(|d| d.sigma).collect(),
+                windows: direction_split.iter().map(|d| d.windows).collect(),
+            },
         },
         onset_windows,
         samples: r.samples,

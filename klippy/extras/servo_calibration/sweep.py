@@ -14,7 +14,6 @@ from typing import Any, Callable
 
 from .. import servo_param
 from .common import ApplyResult, _applied
-from .dynamics import send_dynamics_model
 from .params import GAIN_PARAMS, INERTIA_RATIO_ADDR
 
 
@@ -220,59 +219,6 @@ class MotionAccelAdapter:
 
     def revert(self) -> None:
         pass
-
-
-class DynamicsModelAdapter:
-    """SERVO_REFINE_DYNAMICS: streams a scaled copy of the baseline dynamics
-    model into the running endpoint per step; revert re-sends the baseline
-    (the message is an idempotent full replacement)."""
-
-    def __init__(
-        self,
-        engine: Any,
-        handle: int,
-        baseline: dict[str, Any],
-        scale_fn: Callable[[dict[str, Any], float], dict[str, Any]],
-        label: str,
-        tag: str,
-        value_name: str = "scale",
-    ):
-        self._engine = engine
-        self._handle = handle
-        self.baseline = baseline
-        self._scale_fn = scale_fn
-        self.label = label
-        self.tag = tag
-        self.value_name = value_name
-        self.applied = False
-
-    def step_name(self, scale: float) -> str:
-        return "%s_%s_s%04d" % (self.tag, self.label, round(scale * 1000))
-
-    def describe(
-        self, i: int, scale: float, total: int, servos: list[str]
-    ) -> str:
-        return "dynamics %s eval %d: %s %.4f on %s" % (
-            self.label,
-            i + 1,
-            self.value_name,
-            scale,
-            ", ".join(servos),
-        )
-
-    def scaled(self, scale: float) -> dict[str, Any]:
-        return self._scale_fn(self.baseline, scale)
-
-    def apply(self, scale: float) -> ApplyResult:
-        self._send(self.scaled(scale))
-        self.applied = True
-        return {self.value_name: scale}, []
-
-    def revert(self) -> None:
-        self._send(self.baseline)
-
-    def _send(self, profile: dict[str, Any]) -> None:
-        send_dynamics_model(self._engine, self._handle, profile)
 
 
 class SweepEngine:

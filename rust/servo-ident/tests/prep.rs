@@ -4,8 +4,8 @@ use servo_ident::capture::{
 use servo_ident::fit::{fit, residual_by_motor, FitInput, FitOptions};
 use servo_ident::model::Structure;
 use servo_ident::prep::{
-    band_limited_rms, biquad_in_place, median_dt, modal_biquad, onset_bias, prep, segments,
-    sinc_kernel, transient_rms, ModalMode, PrepOptions, TransientKind,
+    band_limited_rms, biquad_in_place, direction_split, frame_pairs, median_dt, modal_biquad,
+    onset_bias, prep, segments, sinc_kernel, transient_rms, ModalMode, PrepOptions, TransientKind,
 };
 
 const DT: f64 = 0.00025;
@@ -710,4 +710,128 @@ fn single_window_yields_null_sigma() {
     assert_eq!(coulomb[0].windows, 1, "one reversal");
     assert!(coulomb[0].rms.is_some(), "rms defined for one window");
     assert_eq!(coulomb[0].sigma, None, "sigma null below two windows");
+}
+
+#[test]
+fn frame_pairs_reads_equal_and_opposite_columns() {
+    let equal = frame_pairs(&[vec![0.5, 0.5], vec![0.5, 0.5]]);
+    assert_eq!(equal, vec![([0, 1], 1.0)], "equal columns -> lambda +1");
+
+    let opposite = frame_pairs(&[vec![0.5, -0.5], vec![0.5, -0.5]]);
+    assert_eq!(
+        opposite,
+        vec![([0, 1], -1.0)],
+        "sign-flipped columns -> lambda -1"
+    );
+}
+
+#[test]
+fn frame_pairs_omits_unpartnered_axes() {
+    let pairs = frame_pairs(&[vec![1.0, 0.0, 0.5], vec![0.0, 1.0, 0.5]]);
+    assert_eq!(
+        pairs,
+        Vec::<([usize; 2], f64)>::new(),
+        "no two columns are equal or opposite"
+    );
+}
+
+#[test]
+fn frame_pairs_greedy_leaves_each_axis_in_at_most_one_pair() {
+    let pairs = frame_pairs(&[vec![0.5, 0.5, 0.5], vec![0.5, 0.5, 0.5]]);
+    assert_eq!(
+        pairs,
+        vec![([0, 1], 1.0)],
+        "three equal columns pair the first two; the third is unpartnered"
+    );
+}
+
+fn direction_ferr(bias: f64, reps: usize, len: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut vel = Vec::new();
+    let mut ferr = Vec::new();
+    for r in 0..reps {
+        let sign = if r % 2 == 0 { 1.0 } else { -1.0 };
+        for _ in 0..len {
+            vel.push(sign);
+            ferr.push(sign * bias);
+        }
+    }
+    (vel, ferr)
+}
+
+#[test]
+fn direction_split_q_is_positive_when_motor_i_lags_by_direction() {
+    let frame = vec![vec![1.0, 1.0]];
+    let (vel_i, ferr_i) = direction_ferr(0.01, 8, 40);
+    let ferr_j = vec![0.0; ferr_i.len()];
+    let vel_j = vec![0.0; vel_i.len()];
+    let out = direction_split(&frame, &[ferr_i, ferr_j], &[vel_i, vel_j]);
+    assert_eq!(out.len(), 1, "one pair");
+    let d = &out[0];
+    assert_eq!(d.pair, [0, 1]);
+    assert_eq!(d.lambda, 1.0);
+    assert!(
+        d.q > 0.0,
+        "positive bias in +dir yields positive q: {}",
+        d.q
+    );
+    assert!((d.q - 0.005).abs() < 1e-9, "q = mean_+/2 = 0.005: {}", d.q);
+    assert!((d.rms - d.q.abs()).abs() < 1e-12, "rms = |q|");
+    assert_eq!(d.windows, 8, "eight direction runs scored");
+    assert!(
+        d.sigma.is_some(),
+        "sigma defined with 4 windows per direction"
+    );
+}
+
+#[test]
+fn direction_split_respects_lambda_on_opposite_columns() {
+    let frame = vec![vec![1.0, -1.0]];
+    let (vel_i, ferr_i) = direction_ferr(0.01, 8, 40);
+    let ferr_j: Vec<f64> = ferr_i.iter().map(|e| 0.6 * e).collect();
+    let vel_j = vec![0.0; vel_i.len()];
+    let out = direction_split(&frame, &[ferr_i, ferr_j], &[vel_i, vel_j]);
+    let d = &out[0];
+    assert_eq!(d.lambda, -1.0);
+    assert!(
+        (d.q - 0.008).abs() < 1e-9,
+        "d = (ferr_i - lambda*ferr_j)/2 = (ferr_i + 0.6*ferr_i)/2 = 0.8*ferr_i, q=0.008: {}",
+        d.q
+    );
+}
+
+#[test]
+fn direction_split_sigma_null_below_two_windows_per_direction() {
+    let frame = vec![vec![1.0, 1.0]];
+    let (vel_i, ferr_i) = direction_ferr(0.01, 3, 40);
+    let ferr_j = vec![0.0; ferr_i.len()];
+    let vel_j = vec![0.0; vel_i.len()];
+    let out = direction_split(&frame, &[ferr_i, ferr_j], &[vel_i, vel_j]);
+    let d = &out[0];
+    assert_eq!(d.windows, 3, "two + runs, one - run");
+    assert_eq!(
+        d.sigma, None,
+        "sigma null with a single window in one direction"
+    );
+}
+
+#[test]
+fn direction_split_drops_runs_below_minimum_window() {
+    let frame = vec![vec![1.0, 1.0]];
+    let (vel_i, ferr_i) = direction_ferr(0.01, 6, 10);
+    let ferr_j = vec![0.0; ferr_i.len()];
+    let vel_j = vec![0.0; vel_i.len()];
+    let out = direction_split(&frame, &[ferr_i, ferr_j], &[vel_i, vel_j]);
+    assert_eq!(
+        out[0].windows, 0,
+        "runs of 10 samples fall below the 20-sample floor"
+    );
+}
+
+#[test]
+fn direction_split_emits_no_entries_when_frame_has_no_pairs() {
+    let frame = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+    let ferr = vec![vec![0.0; 4], vec![0.0; 4]];
+    let vel = vec![vec![1.0; 4], vec![1.0; 4]];
+    let out = direction_split(&frame, &ferr, &vel);
+    assert!(out.is_empty(), "no pairs -> no direction-split entries");
 }

@@ -4,8 +4,6 @@ import json
 import math
 import os
 
-from .refine import RefineCommands
-
 try:
     import tomllib
 except ImportError:
@@ -21,18 +19,22 @@ from .dynamics import (
     TUNE_MASS_FLOOR_FRACTION,
     TUNE_ZERO_FLOOR_STEPS,
     _copy_dynamics,
+    _equal_or_opposite_columns,
+    add_dynamics_direction_split,
+    discover_dynamics_pairs,
     dynamics_torque_changes,
     parse_dynamics_profile,
     render_fit_dynamics_toml,
     send_dynamics_model,
     send_ff_lead,
 )
+from .measure import MeasureCommands
 from .search import RmsLineSearch
 from .search import Z as ACCEPT_Z
 from .sweep import ExperimentRun, SweepStep
 
 
-class DynamicsFitCommands(RefineCommands):
+class DynamicsFitCommands(MeasureCommands):
     cmd_SERVO_FIT_DYNAMICS_help = (
         "Identify axis dynamics for torque feedforward. On coupled_xy this "
         "is an iterative closed-loop identification: it runs the "
@@ -74,6 +76,129 @@ class DynamicsFitCommands(RefineCommands):
         "MAX_SPEED TOL (0.05) DRIFT (0.15) MAX_ROUNDS (4) ITERATIONS "
         "DWELL_MS BOUND SMALL_SIZE NAME SERVOS TORQUE_NM INERTIA_KGM2"
     )
+
+    def _dynamics_node(self, gcmd: Any, servos: list[str]) -> Any:
+        nodes = {}
+        for servo in servos:
+            node, _slot = self._resolve_node_slot(servo)
+            nodes[node.name] = node
+        if len(nodes) != 1:
+            raise gcmd.error(
+                "servos %s span multiple ethercat nodes (%s) - the dynamics "
+                "model is per-node" % (servos, sorted(nodes))
+            )
+        return nodes.popitem()[1]
+
+    def _load_baseline_dynamics(
+        self, gcmd: Any, node: Any
+    ) -> tuple[str, dict[str, Any]]:
+        explicit = gcmd.get("PROFILE", None)
+        profile_path = explicit or node.get_live_dynamics_profile()
+        if profile_path is None:
+            raise gcmd.error(
+                "no baseline dynamics profile - set dynamics_profile on "
+                "[ethercat_node %s] or pass PROFILE= (per-motor profiles "
+                "are not supported)" % (node.name,)
+            )
+        if explicit is None and profile_path != node.get_dynamics_profile():
+            gcmd.respond_info(
+                "baseline: %s (model left live by the previous tune, not "
+                "the configured dynamics_profile)" % (profile_path,)
+            )
+        profile_path = os.path.expanduser(profile_path)
+        try:
+            with open(profile_path) as f:
+                baseline = parse_dynamics_profile(f.read())
+        except (OSError, ValueError) as e:
+            raise gcmd.error(
+                "failed to load dynamics profile %s: %s" % (profile_path, e)
+            )
+        if len(baseline["axes"]) != node.get_drive_count():
+            raise gcmd.error(
+                "profile %s describes %d axes but node %s has %d drives"
+                % (
+                    profile_path,
+                    len(baseline["axes"]),
+                    node.name,
+                    node.get_drive_count(),
+                )
+            )
+        for profile_slot, motor in enumerate(baseline["axes"]):
+            node_slot = node.get_slot_for_motor(motor)
+            if node_slot is None:
+                raise gcmd.error(
+                    "profile %s axis %r is not a motor on node %s"
+                    % (profile_path, motor, node.name)
+                )
+            if node_slot != profile_slot:
+                raise gcmd.error(
+                    "profile %s axis %r is at slot %d, but node %s maps it "
+                    "to slot %d"
+                    % (profile_path, motor, profile_slot, node.name, node_slot)
+                )
+        return profile_path, baseline
+
+    def _direction_split_baseline(
+        self, gcmd: Any, kin: Any, baseline: dict[str, Any]
+    ) -> dict[str, Any]:
+        if baseline.get("pairs"):
+            return baseline
+        pair_slots = None
+        if kin.coupled_xy():
+            layout = servo_strokes.corexy_fit_layout(gcmd, kin)
+            pair_slots = layout["pairs"]
+        derived = _copy_dynamics(baseline)
+        if pair_slots is not None:
+            pairs = [part.split(",") for part in pair_slots.split(";") if part]
+            axis_index = {name: i for i, name in enumerate(baseline["axes"])}
+            columns = [list(col) for col in zip(*baseline["frame"])]
+            claimed: set[str] = set()
+            for slots in pairs:
+                if len(slots) != 2:
+                    raise gcmd.error(
+                        "kinematic AWD pair must contain exactly two slots "
+                        "(got %s)" % (slots,)
+                    )
+                if slots[0] == slots[1]:
+                    raise gcmd.error(
+                        "kinematic AWD pair slots must be distinct (got %s)"
+                        % (slots,)
+                    )
+                overlap = claimed.intersection(slots)
+                if overlap:
+                    raise gcmd.error(
+                        "kinematic AWD pairs overlap at slots %s"
+                        % (sorted(overlap),)
+                    )
+                if any(s not in axis_index for s in slots):
+                    raise gcmd.error(
+                        "kinematic AWD pair %s does not match profile axes %s"
+                        % (slots, baseline["axes"])
+                    )
+                claimed.update(slots)
+                first, second = (axis_index[s] for s in slots)
+                if not _equal_or_opposite_columns(
+                    columns[first], columns[second]
+                ):
+                    raise gcmd.error(
+                        "kinematic AWD pair %s does not have equal parallel "
+                        "or antiparallel frame columns" % (slots,)
+                    )
+            derived["pairs"] = [
+                {"slots": slots, "direction_split": 0.0} for slots in pairs
+            ]
+        else:
+            try:
+                derived["pairs"] = discover_dynamics_pairs(baseline)
+            except ValueError as e:
+                raise gcmd.error("cannot derive dynamics pairs: %s" % (e,))
+        if not derived["pairs"]:
+            raise gcmd.error(
+                "TERM=DIRECTION_SPLIT found no explicit [[pair]] tables, "
+                "kinematic AWD pairs, or groups of exactly two equal "
+                "parallel/antiparallel frame columns"
+            )
+        return derived
 
     def _corexy_frame(
         self, gcmd: Any, kin: Any
@@ -294,7 +419,7 @@ class DynamicsFitCommands(RefineCommands):
         self._reject_fit_grid_params(gcmd)
         self._reject_pattern_stroke_bounds(gcmd)
         plan = self._fit_plan(gcmd)
-        node = self._refine_dynamics_node(gcmd, plan["servos"])
+        node = self._dynamics_node(gcmd, plan["servos"])
         handle = node.get_engine_handle()
         if handle is None:
             raise gcmd.error(
@@ -799,6 +924,25 @@ class DynamicsFitCommands(RefineCommands):
                         "ferr fit %s: ferr_rms_ff[%r][%r] must be a list of "
                         "%d per-mode values" % (path, term, field, n_modes)
                     )
+        split = ff.get("direction_split")
+        if not isinstance(split, dict):
+            raise gcmd.error(
+                "ferr fit %s: ferr_rms_ff['direction_split'] is missing or "
+                "not a dict - rebuild servo-cal (make servo-cal), the binary "
+                "predates the direction-split objective" % (path,)
+            )
+        split_fields = [
+            split.get(f)
+            for f in ("pairs", "lambda", "q", "rms", "sigma", "windows")
+        ]
+        if any(not isinstance(v, list) for v in split_fields) or (
+            len({len(v) for v in split_fields}) != 1
+        ):
+            raise gcmd.error(
+                "ferr fit %s: ferr_rms_ff['direction_split'] fields "
+                "pairs/lambda/q/rms/sigma/windows must be equal-length lists "
+                "- rebuild servo-cal (make servo-cal)" % (path,)
+            )
         return data
 
     cmd_SERVO_TUNE_DYNAMICS_help = (
@@ -868,7 +1012,7 @@ class DynamicsFitCommands(RefineCommands):
                 "ferr regression needs the mode-space frame"
             )
         plan = self._fit_plan(gcmd)
-        node = self._refine_dynamics_node(gcmd, plan["servos"])
+        node = self._dynamics_node(gcmd, plan["servos"])
         handle = node.get_engine_handle()
         if handle is None:
             raise gcmd.error(
@@ -888,15 +1032,19 @@ class DynamicsFitCommands(RefineCommands):
             for t in gcmd.get("TERMS", "MASS,VISCOUS,COULOMB,LEAD").split(",")
             if t.strip()
         ]
-        allowed_terms = set(DYNAMICS_TERM_KEYS) | {"LEAD"}
+        allowed_terms = set(DYNAMICS_TERM_KEYS) | {"LEAD", "DIRECTION_SPLIT"}
         if not terms or any(t not in allowed_terms for t in terms):
             raise gcmd.error(
                 "TERMS must be a comma list drawn from MASS, VISCOUS, "
-                "COULOMB, LEAD (got %r)" % (gcmd.get("TERMS", ""),)
+                "COULOMB, LEAD, DIRECTION_SPLIT (got %r)"
+                % (gcmd.get("TERMS", ""),)
             )
         lead_enabled = "LEAD" in terms
         cycle_us = node.get_cycle_us()
         configured_lead_s = baseline.get("ff_lead_us", 0.0) * 1e-6
+        split_enabled = "DIRECTION_SPLIT" in terms
+        if split_enabled:
+            baseline = self._direction_split_baseline(gcmd, kin, baseline)
         max_accel = gcmd.get_float("MAX_ACCEL", max(self.accels), above=0.0)
         max_speed = gcmd.get_float("MAX_SPEED", max(self.speeds), above=0.0)
         step_frac = gcmd.get_float("STEP", 0.15, minval=0.02, maxval=0.5)
@@ -963,7 +1111,11 @@ class DynamicsFitCommands(RefineCommands):
                 for term in ("MASS", "VISCOUS", "COULOMB")
                 for v in values[DYNAMICS_TERM_KEYS[term]]
             )
-            return coeffs + (round(lead_s * 1e9),)
+            splits = tuple(
+                round(float(pair["direction_split"]), 9)
+                for pair in values.get("pairs", [])
+            )
+            return coeffs + splits + (round(lead_s * 1e9),)
 
         def measure(
             round_i: int, trial: dict[str, Any], lead_s: float
@@ -1023,6 +1175,45 @@ class DynamicsFitCommands(RefineCommands):
                 raise gcmd.error(
                     "ferr fit has no ferr_rms_ff[%r] to score" % (ff_key,)
                 )
+            if ff_key == "direction_split":
+                n_pairs = len(current["pairs"])
+                for field in (
+                    "pairs",
+                    "lambda",
+                    "q",
+                    "rms",
+                    "sigma",
+                    "windows",
+                ):
+                    vec = entry.get(field)
+                    if not isinstance(vec, list) or len(vec) != n_pairs:
+                        raise gcmd.error(
+                            "ferr fit direction_split[%r] must be a list of "
+                            "%d per-pair values matching the profile pairs - "
+                            "rebuild servo-cal (make servo-cal)"
+                            % (field, n_pairs)
+                        )
+                for pair_idx, pair in enumerate(current["pairs"]):
+                    label = pair["slots"][0]
+                    if not entry["windows"][pair_idx] or (
+                        entry["rms"][pair_idx] is None
+                    ):
+                        raise gcmd.error(
+                            "direction_split pair %s has no direction-run "
+                            "windows - the excitation never reversed it, "
+                            "feedforward cannot be scored" % (label,)
+                        )
+                    if entry["sigma"][pair_idx] is None:
+                        raise gcmd.error(
+                            "direction_split pair %s has fewer than 2 windows "
+                            "per direction so its scatter (sigma) is "
+                            "unmeasurable - cannot apply the 2-sigma "
+                            "acceptance test" % (label,)
+                        )
+                return (
+                    [float(r) for r in entry["rms"]],
+                    [float(s) for s in entry["sigma"]],
+                )
             rms_v = entry["rms"]
             sigma_v = entry["sigma"]
             windows_v = entry["windows"]
@@ -1059,7 +1250,10 @@ class DynamicsFitCommands(RefineCommands):
             while True:
                 term = terms[phase_idx]
                 is_lead = term == "LEAD"
-                key = None if is_lead else DYNAMICS_TERM_KEYS[term]
+                is_split = term == "DIRECTION_SPLIT"
+                key = (
+                    None if (is_lead or is_split) else DYNAMICS_TERM_KEYS[term]
+                )
                 trial = _copy_dynamics(current)
                 trial_lead = current_lead
                 if searches is not None:
@@ -1068,6 +1262,17 @@ class DynamicsFitCommands(RefineCommands):
                         trial_lead = (
                             search.best if search.done else search.trial
                         )
+                    elif is_split:
+                        for pair_idx, pair in enumerate(current["pairs"]):
+                            search = searches[pair["slots"][0]]
+                            value = search.best if search.done else search.trial
+                            delta = (
+                                value
+                                - trial["pairs"][pair_idx]["direction_split"]
+                            )
+                            trial = add_dynamics_direction_split(
+                                trial, pair_idx, delta
+                            )
                     else:
                         for mode, search in searches.items():
                             idx = baseline_modes.index(mode)
@@ -1090,6 +1295,18 @@ class DynamicsFitCommands(RefineCommands):
                             trial_lead * 1e6,
                             sum(obj_rms) / n_modes * 1e3,
                             sum(cached["onset"]) * 1e3,
+                        )
+                    elif is_split:
+                        split_q = cached["ff"]["direction_split"]["q"]
+                        line = " | ".join(
+                            "%s split=%.4f q=%+.2fum rms=%.2fum"
+                            % (
+                                pair["slots"][0],
+                                trial["pairs"][pair_idx]["direction_split"],
+                                float(split_q[pair_idx]) * 1e3,
+                                obj_rms[pair_idx] * 1e3,
+                            )
+                            for pair_idx, pair in enumerate(current["pairs"])
                         )
                     else:
                         line = " | ".join(
@@ -1114,8 +1331,21 @@ class DynamicsFitCommands(RefineCommands):
                                     trial[DYNAMICS_TERM_KEYS[t]]
                                 )
                                 for t in terms
-                                if t != "LEAD"
+                                if t not in ("LEAD", "DIRECTION_SPLIT")
                             },
+                            "direction_split": (
+                                [
+                                    {
+                                        "slots": list(pair["slots"]),
+                                        "direction_split": pair[
+                                            "direction_split"
+                                        ],
+                                    }
+                                    for pair in trial["pairs"]
+                                ]
+                                if split_enabled
+                                else None
+                            ),
                             "lead_us": (
                                 trial_lead * 1e6 if lead_enabled else None
                             ),
@@ -1148,6 +1378,21 @@ class DynamicsFitCommands(RefineCommands):
                             lo=0.0,
                             hint=hint if hint != 0.0 else 1.0,
                         )
+                    elif is_split:
+                        split_q = cached["ff"]["direction_split"]["q"]
+                        for pair_idx, pair in enumerate(current["pairs"]):
+                            value = pair["direction_split"]
+                            step_size = max(step_frac * abs(value), 0.02)
+                            q = float(split_q[pair_idx])
+                            searches[pair["slots"][0]] = RmsLineSearch(
+                                value,
+                                obj_rms[pair_idx],
+                                obj_sigma[pair_idx],
+                                step_size,
+                                lo=-0.45,
+                                hi=0.45,
+                                hint=-q if q != 0.0 else 1.0,
+                            )
                     else:
                         for fit_idx, mode in enumerate(plan["modes"]):
                             idx = baseline_modes.index(mode)
@@ -1187,6 +1432,11 @@ class DynamicsFitCommands(RefineCommands):
                             sum(obj_rms) / n_modes,
                             math.hypot(*obj_sigma) / n_modes,
                         )
+                elif is_split:
+                    for pair_idx, pair in enumerate(current["pairs"]):
+                        search = searches[pair["slots"][0]]
+                        if not search.done:
+                            search.feed(obj_rms[pair_idx], obj_sigma[pair_idx])
                 else:
                     for fit_idx, mode in enumerate(plan["modes"]):
                         search = searches[mode]
@@ -1194,19 +1444,62 @@ class DynamicsFitCommands(RefineCommands):
                             search.feed(obj_rms[fit_idx], obj_sigma[fit_idx])
                 if all(search.done for search in searches.values()):
                     lines = []
-                    for mode, search in searches.items():
+                    if is_lead:
+                        search = searches["xy"]
                         pass_improved = pass_improved or search.improved
-                        if is_lead:
-                            current_lead = search.best
+                        current_lead = search.best
+                        lines.append(
+                            "xy %.1fus @ %.2fum (%s)"
+                            % (
+                                search.best * 1e6,
+                                search.best_rms * 1e3,
+                                search.note,
+                            )
+                        )
+                        search_summaries.append(
+                            {
+                                "term": "lead",
+                                "mode": "xy",
+                                "best": search.best,
+                                "best_rms": search.best_rms,
+                                "best_sigma": search.best_sigma,
+                                "improved": search.improved,
+                                "note": search.note,
+                                "probes": len(search.history) - 1,
+                            }
+                        )
+                    elif is_split:
+                        for pair_idx, pair in enumerate(current["pairs"]):
+                            search = searches[pair["slots"][0]]
+                            pass_improved = pass_improved or search.improved
+                            current["pairs"][pair_idx]["direction_split"] = (
+                                search.best
+                            )
                             lines.append(
-                                "xy %.1fus @ %.2fum (%s)"
+                                "%s %.4f @ %.2fum (%s)"
                                 % (
-                                    search.best * 1e6,
+                                    pair["slots"][0],
+                                    search.best,
                                     search.best_rms * 1e3,
                                     search.note,
                                 )
                             )
-                        else:
+                            search_summaries.append(
+                                {
+                                    "term": "direction_split",
+                                    "mode": pair["slots"][0],
+                                    "best": search.best,
+                                    "best_rms": search.best_rms,
+                                    "best_sigma": search.best_sigma,
+                                    "improved": search.improved,
+                                    "note": search.note,
+                                    "probes": len(search.history) - 1,
+                                }
+                            )
+                    else:
+                        for fit_idx, mode in enumerate(plan["modes"]):
+                            search = searches[mode]
+                            pass_improved = pass_improved or search.improved
                             idx = baseline_modes.index(mode)
                             current[key][idx] = search.best
                             lines.append(
@@ -1218,18 +1511,18 @@ class DynamicsFitCommands(RefineCommands):
                                     search.note,
                                 )
                             )
-                        search_summaries.append(
-                            {
-                                "term": term.lower(),
-                                "mode": mode,
-                                "best": search.best,
-                                "best_rms": search.best_rms,
-                                "best_sigma": search.best_sigma,
-                                "improved": search.improved,
-                                "note": search.note,
-                                "probes": len(search.history) - 1,
-                            }
-                        )
+                            search_summaries.append(
+                                {
+                                    "term": term.lower(),
+                                    "mode": mode,
+                                    "best": search.best,
+                                    "best_rms": search.best_rms,
+                                    "best_sigma": search.best_sigma,
+                                    "improved": search.improved,
+                                    "note": search.note,
+                                    "probes": len(search.history) - 1,
+                                }
+                            )
                     gcmd.respond_info(
                         "%s settled: %s" % (term.lower(), " | ".join(lines))
                     )

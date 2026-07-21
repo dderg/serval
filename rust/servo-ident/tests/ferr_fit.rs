@@ -1,7 +1,7 @@
 use servo_ident::ferr_out::render_ferr_json;
 use servo_ident::fit::{fit_ferr, FerrFitResult, FitInput, FitOptions};
 use servo_ident::model::{coulomb_sign, PhysicalParams, Structure};
-use servo_ident::prep::TransientRms;
+use servo_ident::prep::{DirectionSplit, TransientRms};
 
 fn triangle(a: f64, t1: f64, dt: f64, reps: usize) -> (Vec<f64>, Vec<f64>) {
     let mut acc = Vec::new();
@@ -240,6 +240,24 @@ fn render_ferr_json_matches_the_documented_contract_shape() {
             windows: 11,
         },
     ];
+    let split = vec![
+        DirectionSplit {
+            pair: [0, 1],
+            lambda: 1.0,
+            q: 1.9e-4,
+            rms: 1.9e-4,
+            sigma: Some(2.1e-5),
+            windows: 14,
+        },
+        DirectionSplit {
+            pair: [2, 3],
+            lambda: -1.0,
+            q: -0.7e-4,
+            rms: 0.7e-4,
+            sigma: None,
+            windows: 3,
+        },
+    ];
     let json = render_ferr_json(
         &structure,
         &["x", "y"],
@@ -251,6 +269,7 @@ fn render_ferr_json_matches_the_documented_contract_shape() {
         &viscous,
         &coulomb,
         &lead,
+        &split,
     );
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["version"], 3);
@@ -312,6 +331,30 @@ fn render_ferr_json_matches_the_documented_contract_shape() {
         v["ferr_rms_ff"]["lead"]["windows"],
         serde_json::json!([12, 11])
     );
+    assert_eq!(
+        v["ferr_rms_ff"]["direction_split"]["pairs"],
+        serde_json::json!([[0, 1], [2, 3]])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["direction_split"]["lambda"],
+        serde_json::json!([1.0, -1.0])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["direction_split"]["q"],
+        serde_json::json!([1.9e-4, -0.7e-4])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["direction_split"]["rms"],
+        serde_json::json!([1.9e-4, 0.7e-4])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["direction_split"]["sigma"],
+        serde_json::json!([2.1e-5, null])
+    );
+    assert_eq!(
+        v["ferr_rms_ff"]["direction_split"]["windows"],
+        serde_json::json!([14, 3])
+    );
 }
 
 #[test]
@@ -332,6 +375,7 @@ fn render_ferr_json_fails_loudly_on_mode_count_mismatch() {
         samples: 1,
     };
     let empty: Vec<TransientRms> = vec![];
+    let no_split: Vec<DirectionSplit> = vec![];
     let _ = render_ferr_json(
         &structure,
         &["x", "y"],
@@ -343,6 +387,7 @@ fn render_ferr_json_fails_loudly_on_mode_count_mismatch() {
         &empty,
         &empty,
         &empty,
+        &no_split,
     );
 }
 
