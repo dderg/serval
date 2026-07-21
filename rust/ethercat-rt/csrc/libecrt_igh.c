@@ -25,6 +25,8 @@
 #include <errno.h>
 #include <time.h>
 #include <sched.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <sys/mman.h>
 #include <ecrt.h>
 
@@ -140,6 +142,29 @@ static void add_ts(struct timespec *ts, int64_t add) {
     if (ts->tv_nsec >= 1000000000LL) { ts->tv_nsec -= 1000000000LL; ts->tv_sec++; }
 }
 
+/* Holding /dev/cpu_dma_latency at 0 pins every core out of deep cpuidle
+ * states for the life of this fd. Without it an idle machine drops into
+ * deep C-states and the RT thread pays the exit latency on wakeup — the
+ * bench park of 2026-07-21 00:03 measured wake_late_ns=174215 on an
+ * otherwise idle system. The fd is intentionally never closed. */
+static int g_cpu_dma_latency_fd = -1;
+
+static int hold_cpu_dma_latency(void) {
+    g_cpu_dma_latency_fd = open("/dev/cpu_dma_latency", O_RDWR);
+    if (g_cpu_dma_latency_fd < 0) {
+        fprintf(stderr, "ec_rt: open /dev/cpu_dma_latency failed: %s — "
+                "grant the endpoint write access\n", strerror(errno));
+        return EC_RT_ERR_RT_QOS;
+    }
+    int32_t zero = 0;
+    if (write(g_cpu_dma_latency_fd, &zero, sizeof(zero)) != sizeof(zero)) {
+        fprintf(stderr, "ec_rt: cpu_dma_latency qos write failed: %s\n",
+                strerror(errno));
+        return EC_RT_ERR_RT_QOS;
+    }
+    return 0;
+}
+
 static int go_realtime(int cpu, int prio) {
     if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
         fprintf(stderr, "ec_rt: mlockall failed: %s — grant CAP_IPC_LOCK\n",
@@ -158,6 +183,8 @@ static int go_realtime(int cpu, int prio) {
                 "CAP_SYS_NICE\n", prio, strerror(errno));
         return EC_RT_ERR_RT_SCHED;
     }
+    int qos = hold_cpu_dma_latency();
+    if (qos != 0) return qos;
     return 0;
 }
 
@@ -226,14 +253,45 @@ static void flush_outputs(void) {
  * arrival, not transmit. Overrun skips stay on the grid
  * (reanchor_if_stale), so the half-cycle latch phase holds all run. */
 #define WIRE_FLIGHT_NS 3000
+
+/* Per-cycle stage breakdown of the last rt_exchange, for attributing a
+ * frame-timing spike: wake_late = how far past the grid tick the thread
+ * actually woke (kernel scheduling latency), recv = ecrt_master_receive
+ * (the polled macb RX path), process = ecrt_domain_process (host-side
+ * datagram-to-image work), send = output flush + DC sync + queue + ecrt
+ * send (the TX path). Whole-exchange totals alone cannot separate a late
+ * wakeup from a slow bus path. */
+static int64_t g_last_wake_late_ns;
+static int64_t g_last_recv_ns;
+static int64_t g_last_process_ns;
+static int64_t g_last_send_ns;
+
+void ec_rt_cycle_stage_ns(int64_t *wake_late, int64_t *recv, int64_t *process,
+                          int64_t *send) {
+    if (wake_late) *wake_late = g_last_wake_late_ns;
+    if (recv) *recv = g_last_recv_ns;
+    if (process) *process = g_last_process_ns;
+    if (send) *send = g_last_send_ns;
+}
+
 static int rt_exchange(int64_t *toff) {
     add_ts(&g_ts, g_cycle_ns);
     reanchor_if_stale();
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &g_ts, NULL);
+    struct timespec woke;
+    clock_gettime(CLOCK_MONOTONIC, &woke);
+    g_last_wake_late_ns = TIMESPEC2NS(woke) - TIMESPEC2NS(g_ts);
 
     ecrt_master_application_time(g_master, TIMESPEC2NS(g_ts));
     ecrt_master_receive(g_master);
+    struct timespec bus_read;
+    clock_gettime(CLOCK_MONOTONIC, &bus_read);
+    g_last_recv_ns = TIMESPEC2NS(bus_read) - TIMESPEC2NS(woke);
+
     ecrt_domain_process(g_domain);
+    struct timespec received;
+    clock_gettime(CLOCK_MONOTONIC, &received);
+    g_last_process_ns = TIMESPEC2NS(received) - TIMESPEC2NS(bus_read);
 
     flush_outputs();
     ecrt_master_sync_reference_clock(g_master);
@@ -243,6 +301,7 @@ static int rt_exchange(int64_t *toff) {
 
     struct timespec sent;
     clock_gettime(CLOCK_MONOTONIC, &sent);
+    g_last_send_ns = TIMESPEC2NS(sent) - TIMESPEC2NS(received);
     int64_t lateness_ns =
         TIMESPEC2NS(sent) + WIRE_FLIGHT_NS - (TIMESPEC2NS(g_ts) + g_cycle_ns / 2);
 
