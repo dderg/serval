@@ -172,3 +172,50 @@ def test_single_drive_axes_are_not_syncable():
     ss, _, _, _ = make_sync(rails=rails)
     with pytest.raises(RuntimeError, match="no belt axis"):
         ss.cmd_SERVO_SYNC(FakeGcmd())
+
+
+def test_retry_recycles_only_the_fighting_axis_then_succeeds():
+    ss, engine, node, _ = make_sync(
+        engine=FakeEngine(
+            torques=[1, -1, 80, -78, 2, -2, 80, -78, 60, -55, 1, -1]
+        )
+    )
+    gcmd = FakeGcmd(RETRIES="1")
+    ss.cmd_SERVO_SYNC(gcmd)
+    assert [r[1] for r in engine.sdo_reads] == [
+        0, 1, 2, 3,
+        0, 1, 2, 3,
+        2, 3,
+        2, 3,
+    ]  # fmt: skip
+    assert [(c[0], c[1]) for c in node.torque_calls] == [
+        ("axis x", False),
+        ("axis y", False),
+        ("axis x", True),
+        ("axis y", True),
+        ("axis y", False),
+        ("axis y", True),
+    ]
+    assert any("retrying release (1/1)" in r for r in gcmd.responses)
+
+
+def test_retries_exhausted_still_errors_loudly():
+    ss, _, _, _ = make_sync(
+        engine=FakeEngine(
+            torques=[0, 0, 0, 0, 80, -78, 90, -88, 0, 0, 0, 0, 60, -55, 88, -86]
+        )
+    )
+    gcmd = FakeGcmd(RETRIES="1")
+    with pytest.raises(RuntimeError, match="and 1 retries"):
+        ss.cmd_SERVO_SYNC(gcmd)
+
+
+def test_retries_config_default_used_without_param():
+    ss, engine, _, _ = make_sync(
+        engine=FakeEngine(
+            torques=[1, -1, 80, -78, 2, -2, 80, -78, 60, -55, 1, -1]
+        )
+    )
+    ss.retries = 1
+    ss.cmd_SERVO_SYNC(FakeGcmd())
+    assert len(engine.sdo_reads) == 12
