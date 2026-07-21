@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn first_segment_lands_lead_ahead() {
     let mut a = Anchor::new();
-    let (t0, epoch) = a.anchor_segment(0.0, 1.0, 100.0);
+    let (t0, epoch) = a.anchor_segment(0.0, 1.0, 100.0, false);
     assert_eq!(epoch, StreamEpoch::Reposition);
     assert!((t0 + 0.0 - (100.0 + DEFAULT_LEAD_SECS)).abs() < 1e-9);
 }
@@ -11,37 +11,44 @@ fn first_segment_lands_lead_ahead() {
 #[test]
 fn contiguous_segment_keeps_t0() {
     let mut a = Anchor::new();
-    let (t0_a, _) = a.anchor_segment(0.0, 1.0, 100.0);
-    let (t0_b, epoch) = a.anchor_segment(1.0, 2.0, 100.9);
+    let (t0_a, _) = a.anchor_segment(0.0, 1.0, 100.0, false);
+    let (t0_b, epoch) = a.anchor_segment(1.0, 2.0, 100.9, false);
     assert_eq!(epoch, StreamEpoch::Continuation);
     assert_eq!(t0_a, t0_b);
 }
 
 #[test]
-fn underrun_reanchors_forward_instead_of_aborting() {
+fn underrun_after_rest_reanchors_as_idle_resume() {
     let mut a = Anchor::new();
-    let (t0_first, _) = a.anchor_segment(0.0, 1.0, 100.0);
-    // Playhead (104.0) has overrun the scheduled start (t0_first + 1.0): a
-    // genuine underrun. The anchor must re-anchor forward, not fail.
-    let (t0_new, epoch) = a.anchor_segment(1.0, 2.0, 104.0);
-    assert_eq!(epoch, StreamEpoch::Reanchor, "underrun must re-anchor");
+    // The first segment brakes to rest: the machine is parked at its end.
+    let (t0_first, _) = a.anchor_segment(0.0, 1.0, 100.0, true);
+    // Playhead (104.0) has overrun the scheduled start (t0_first + 1.0): an
+    // idle gap at rest, not a mid-motion underrun — it must re-anchor.
+    let (t0_new, epoch) = a.anchor_segment(1.0, 2.0, 104.0, false);
+    assert_eq!(epoch, StreamEpoch::Reanchor, "idle resume must re-anchor");
     assert_ne!(t0_first, t0_new);
-    // The recovered segment lands a lead ahead of the current playhead.
+    // The resumed segment lands a lead ahead of the current playhead.
     assert!(
         (t0_new + 1.0 - (104.0 + DEFAULT_LEAD_SECS)).abs() < 1e-9,
         "t0_new={t0_new}"
     );
 }
+
 #[test]
-fn thin_margin_continuation_reanchors_instead_of_racing_transport() {
+fn thin_margin_after_rest_reanchors_instead_of_racing_transport() {
     let mut a = Anchor::new();
-    let (t0_first, _) = a.anchor_segment(0.0, 1.0, 100.0);
+    let (t0_first, _) = a.anchor_segment(0.0, 1.0, 100.0, true);
     // Post-homing seam on the bench: the segment start is still (barely)
     // ahead of the playhead, but closer than transport latency can cover —
-    // continuing here latched a -308 PieceStartInPast at the drive.
+    // continuing here latched a -308 PieceStartInPast at the drive. The
+    // machine sits at rest after homing, so this re-anchors.
     let host_now = t0_first + 1.0 - 0.5 * LOW_MARGIN_WARN_SECS;
-    let (t0_new, epoch) = a.anchor_segment(1.0, 2.0, host_now);
-    assert_eq!(epoch, StreamEpoch::Reanchor, "thin margin must re-anchor");
+    let (t0_new, epoch) = a.anchor_segment(1.0, 2.0, host_now, false);
+    assert_eq!(
+        epoch,
+        StreamEpoch::Reanchor,
+        "resume from rest must re-anchor"
+    );
     assert!(
         (t0_new + 1.0 - (host_now + DEFAULT_LEAD_SECS)).abs() < 1e-9,
         "t0_new={t0_new}"
@@ -51,9 +58,9 @@ fn thin_margin_continuation_reanchors_instead_of_racing_transport() {
 #[test]
 fn margin_above_the_floor_stays_a_continuation() {
     let mut a = Anchor::new();
-    let (t0_first, _) = a.anchor_segment(0.0, 1.0, 100.0);
+    let (t0_first, _) = a.anchor_segment(0.0, 1.0, 100.0, false);
     let host_now = t0_first + 1.0 - 2.0 * LOW_MARGIN_WARN_SECS;
-    let (t0_next, epoch) = a.anchor_segment(1.0, 2.0, host_now);
+    let (t0_next, epoch) = a.anchor_segment(1.0, 2.0, host_now, false);
     assert_eq!(epoch, StreamEpoch::Continuation);
     assert_eq!(t0_first, t0_next);
 }
@@ -61,8 +68,8 @@ fn margin_above_the_floor_stays_a_continuation() {
 #[test]
 fn backward_jump_reanchors() {
     let mut a = Anchor::new();
-    let (t0_a, _) = a.anchor_segment(0.0, 5.0, 100.0);
-    let (t0_b, epoch) = a.anchor_segment(0.0, 1.0, 130.0);
+    let (t0_a, _) = a.anchor_segment(0.0, 5.0, 100.0, false);
+    let (t0_b, epoch) = a.anchor_segment(0.0, 1.0, 130.0, false);
     assert_eq!(epoch, StreamEpoch::Reposition);
     assert_ne!(t0_a, t0_b);
     assert!((t0_b - (130.0 + DEFAULT_LEAD_SECS)).abs() < 1e-9);
@@ -71,14 +78,15 @@ fn backward_jump_reanchors() {
 #[test]
 fn backward_jump_takes_priority_over_underrun() {
     // A backward jump (idle restart) that is also "late" re-anchors as a clean
-    // restart, not an underrun stutter.
+    // restart, not an underrun — even when the last segment ended mid-motion,
+    // because the reposition legitimately redefines the timeline.
     let mut a = Anchor::new();
-    let _ = a.anchor_segment(0.0, 5.0, 100.0);
-    let (t0_new, epoch) = a.anchor_segment(0.0, 1.0, 130.0);
+    let _ = a.anchor_segment(0.0, 5.0, 100.0, false);
+    let (t0_new, epoch) = a.anchor_segment(0.0, 1.0, 130.0, false);
     assert_eq!(
         epoch,
         StreamEpoch::Reposition,
-        "backward jump must re-anchor as a clean restart, not an underrun stutter"
+        "backward jump must re-anchor as a clean restart, not an underrun"
     );
     assert!(
         (t0_new - (130.0 + DEFAULT_LEAD_SECS)).abs() < 1e-9,
@@ -108,17 +116,17 @@ fn grounded_queued_secs(t0: f64, frontier_stream_t: f64, host_now: f64) -> f64 {
 fn grounded_frontier_reports_real_queued_seconds_after_reanchor() {
     let mut a = Anchor::new();
 
-    // Deep into a long print: stream time sits near 500 s.
-    let _ = a.anchor_segment(500.0, 501.0, 100.0);
+    // Deep into a long print: stream time sits near 500 s, braking to rest.
+    let _ = a.anchor_segment(500.0, 501.0, 100.0, true);
 
-    // Idle gap: the playhead (host clock) overran the committed end, then the
-    // queue refills. The first post-gap commit underruns and re-anchors.
+    // Idle gap at rest: the playhead (host clock) overran the committed end,
+    // then the queue refills. The first post-gap commit re-anchors.
     let host_now = 130.0;
-    let (t0, epoch) = a.anchor_segment(501.0, 502.0, host_now);
-    assert!(epoch.is_fresh(), "idle-gap underrun must re-anchor");
+    let (t0, epoch) = a.anchor_segment(501.0, 502.0, host_now, false);
+    assert!(epoch.is_fresh(), "idle-gap resume must re-anchor");
 
     // Queue keeps filling contiguously; the frontier advances, t0 holds.
-    let (t0_cont, epoch2) = a.anchor_segment(502.0, 505.0, host_now + 0.5);
+    let (t0_cont, epoch2) = a.anchor_segment(502.0, 505.0, host_now + 0.5, false);
     assert_eq!(epoch2, StreamEpoch::Continuation);
     assert_eq!(t0, t0_cont);
 
@@ -146,9 +154,9 @@ fn grounding_cancels_the_stream_time_baseline() {
     // baseline. The ungrounded form (frontier - host_now) would differ by ~500.
     let queued_at = |baseline: f64| {
         let mut a = Anchor::new();
-        let _ = a.anchor_segment(baseline, baseline + 1.0, 100.0);
+        let _ = a.anchor_segment(baseline, baseline + 1.0, 100.0, true);
         let host_now = 130.0;
-        let (t0, epoch) = a.anchor_segment(baseline + 1.0, baseline + 3.0, host_now);
+        let (t0, epoch) = a.anchor_segment(baseline + 1.0, baseline + 3.0, host_now, false);
         assert!(epoch.is_fresh());
         grounded_queued_secs(t0, baseline + 3.0, host_now)
     };
