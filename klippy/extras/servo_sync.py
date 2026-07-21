@@ -33,13 +33,15 @@ class ServoSync:
         "re-adopts the measured carriage position (exactly like after M84), "
         "so nothing is lost or rehomed. AXIS=X|Y releases one pair; "
         "TORQUE_OK sets the residual-fight error threshold; SETTLE "
-        "overrides the relax time in seconds."
+        "overrides the relax time in seconds; RETRIES re-runs the release "
+        "for still-fighting axes before erroring."
     )
 
     def __init__(self, config):
         self.printer = config.get_printer()
         self.torque_ok_pct = config.getfloat("torque_ok", 3.0, above=0.0)
         self.settle_time = config.getfloat("settle_time", 1.0, above=0.0)
+        self.retries = config.getint("retries", 0, minval=0)
         gcode = self.printer.lookup_object("gcode")
         gcode.register_command(
             "SERVO_SYNC", self.cmd_SERVO_SYNC, desc=self.cmd_SERVO_SYNC_help
@@ -128,22 +130,9 @@ class ServoSync:
             )
         return "axis %s released: %s" % (entry.axis_name(), "; ".join(parts))
 
-    def run(self, gcmd, axis_filter=None, torque_ok_pct=None, settle=None):
-        if torque_ok_pct is None:
-            torque_ok_pct = self.torque_ok_pct
-        if settle is None:
-            settle = self.settle_time
-        axes = self._syncable_axes(gcmd, axis_filter)
-        toolhead = self.printer.lookup_object("toolhead")
-        engine = self.printer.lookup_object("motion_engine")
-        toolhead.wait_moves()
-        self._drain_motion(gcmd, engine)
-        by_node = {}
-        for entry in axes:
-            by_node.setdefault(id(entry.node), (entry.node, []))[1].append(
-                entry
-            )
-        residual = []
+    def _release(self, gcmd, toolhead, engine, by_node, settle, torque_ok_pct):
+        residual_entries = []
+        residual_motors = []
         for node, entries in by_node.values():
             handle = self._node_handle(gcmd, node)
             baseline = self._read_torques(engine, handle, entries)
@@ -167,15 +156,61 @@ class ServoSync:
             final = self._read_torques(engine, handle, entries)
             for entry in entries:
                 gcmd.respond_info(self._describe(entry, baseline, final))
-                for slot, motor in entry.slot_motors():
-                    if abs(final[slot]) > torque_ok_pct * 10.0:
-                        residual.append(motor.get_motor_name())
+                fighting = [
+                    motor.get_motor_name()
+                    for slot, motor in entry.slot_motors()
+                    if abs(final[slot]) > torque_ok_pct * 10.0
+                ]
+                if fighting:
+                    residual_entries.append(entry)
+                    residual_motors.extend(fighting)
+        return residual_entries, residual_motors
+
+    def run(
+        self,
+        gcmd,
+        axis_filter=None,
+        torque_ok_pct=None,
+        settle=None,
+        retries=None,
+    ):
+        if torque_ok_pct is None:
+            torque_ok_pct = self.torque_ok_pct
+        if settle is None:
+            settle = self.settle_time
+        if retries is None:
+            retries = self.retries
+        entries = self._syncable_axes(gcmd, axis_filter)
+        toolhead = self.printer.lookup_object("toolhead")
+        engine = self.printer.lookup_object("motion_engine")
+        toolhead.wait_moves()
+        self._drain_motion(gcmd, engine)
+        residual = []
+        for attempt in range(retries + 1):
+            by_node = {}
+            for entry in entries:
+                by_node.setdefault(id(entry.node), (entry.node, []))[1].append(
+                    entry
+                )
+            entries, residual = self._release(
+                gcmd, toolhead, engine, by_node, settle, torque_ok_pct
+            )
+            if not residual:
+                break
+            if attempt < retries:
+                gcmd.respond_info(
+                    "SERVO_SYNC: %s still fighting, retrying release (%d/%d)"
+                    % (", ".join(residual), attempt + 1, retries)
+                )
         toolhead.get_kinematics().mark_servo_parked((0, 1))
         if residual:
             raise gcmd.error(
-                "SERVO_SYNC: %s still fighting after release — "
+                "SERVO_SYNC: %s still fighting after release%s — "
                 "did the torque cycle execute? (mechanical binding?)"
-                % ", ".join(residual)
+                % (
+                    ", ".join(residual),
+                    " and %d retries" % retries if retries else "",
+                )
             )
 
     def cmd_SERVO_SYNC(self, gcmd):
@@ -187,6 +222,7 @@ class ServoSync:
             axis_filter,
             torque_ok_pct=gcmd.get_float("TORQUE_OK", self.torque_ok_pct),
             settle=gcmd.get_float("SETTLE", self.settle_time, above=0.0),
+            retries=gcmd.get_int("RETRIES", self.retries, minval=0),
         )
 
 
