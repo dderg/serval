@@ -135,6 +135,14 @@ files by hand. It carries the 6.18.33 file set (`macb.h`, `macb_main.c`,
 different kernel, see
 [Obtaining or regenerating `ec_macb`](#obtaining-or-regenerating-ec_macb) — but note
 the driver is pinned to 6.18.33 for a reason.
+Before building, qualify the source revision. Use the exact fork revision shipped
+with this guide when one is published. Until the guide publishes one, inspect the
+checkout and verify that it implements both the persistent-RX contract below and
+the `timing`/`timing_reset` debugfs interface described in
+[Validate the real-time path](#validate-the-real-time-path). A branch name alone
+is not that qualification; do not substitute an arbitrary or invented commit
+SHA.
+
 
 ## Step 3 — Build and install the master
 
@@ -268,10 +276,15 @@ ethercat master                               # "Ethernet devices … Link: UP"
 ## Step 5 — RT capabilities for the endpoint
 
 The endpoint's DC loop **must** run `SCHED_FIFO`, `mlockall`, pinned to the
-isolated core — otherwise it aborts the claim loudly (no silent `SCHED_OTHER`
-fallback). Grant the capabilities on the klipper service so the spawned endpoint
-inherits them (ambient caps survive endpoint rebuilds, unlike a per-inode file
-`setcap`). `/etc/systemd/system/klipper.service.d/10-ethercat-rt.conf`:
+selected RT CPU — otherwise it aborts the claim loudly (no silent
+`SCHED_OTHER` fallback). This is host configuration to validate the completed
+driver contract; it cannot make an unbounded driver cyclic path safe. CPU
+isolation excludes ordinary scheduler competition, but does not isolate shared
+allocator, DMA, memory, or interconnect paths.
+
+Grant the capabilities on the klipper service so the spawned endpoint inherits
+them (ambient caps survive endpoint rebuilds, unlike a per-inode file `setcap`).
+`/etc/systemd/system/klipper.service.d/10-ethercat-rt.conf`:
 
 ```ini
 [Service]
@@ -313,17 +326,51 @@ A `[ethercat_node]` is the EtherCAT bus/master, not an axis — one node carries
 one or more drives, each selected by its `ethercat_chain_index`. Name it for the
 bus (`node`), not an axis.
 
-### Verify RT is actually in force
+### Validate the real-time path
 
-A warm restart only proves the caps took; only a **cold reboot** proves the loop
-holds cadence under boot load. With the servo claimed:
+Validate the installed system only after the native driver satisfies the bounded
+cyclic-path contract; host tuning is not a substitute for that contract. First
+confirm that the claimed endpoint has the intended scheduling policy and CPU
+affinity. Then run a representative workload that combines CPU pressure, memory
+pressure, and I/O activity while the bus is active, including a cold-boot run.
+
+The driver exposes per-queue timing snapshots at
+`/sys/kernel/debug/<platform-device-name>/timing`, where
+`<platform-device-name>` is the MAC platform device name. Reset its accumulated
+statistics by writing any nonempty value to
+`/sys/kernel/debug/<platform-device-name>/timing_reset`. Each output row has the
+columns `queue stage count average_ns max_ns`; its stage is one of
+`tx_complete`, `rx_drain`, `dma_sync_for_cpu`, `ecdev_receive`, or `rx_rearm`.
+
+For each A/B measurement, reset the counters:
 
 ```sh
-pid=$(pgrep -f release/ethercat-rt)
-chrt -p "$pid"                          # SCHED_FIFO priority 80
-grep Cpus_allowed_list /proc/$pid/status  # the isolated core (e.g. 3)
-sudo journalctl -b | grep -c 'al=0x001a'  # 0  (any hits = DC sync loss)
+timing_dir=/sys/kernel/debug/<platform-device-name>
+printf '1\n' | sudo tee "$timing_dir/timing_reset" >/dev/null
 ```
+
+Run the fixed representative workload without reading either timing file or
+resetting the counters. After it finishes, read the snapshot exactly once:
+
+```sh
+cat "$timing_dir/timing"
+```
+
+Timing collection uses trylocks, so a sample can be skipped if a concurrent read
+or reset holds the relevant lock. The snapshot is per queue, not an atomic
+device-wide snapshot. Avoiding reads and resets during the workload makes that
+sampling behavior explicit; retain each run's rows and compare like queues and
+stages.
+
+Establish driver causation only if repeated A/B runs hold the kernel, endpoint
+configuration, CPU placement, and shaper workload fixed, and show a consistent
+change in the relevant `tx_complete`, `rx_drain`, `dma_sync_for_cpu`,
+`ecdev_receive`, or `rx_rearm` maxima. Correlate any missed deadline or drive
+synchronization fault with the affected measured stage, while distinguishing a
+host scheduling delay from a receive/send-path delay. Eliminating faults alone
+does not prove that the driver caused the improvement. Do not prescribe universal
+host isolation or IRQ tuning until the dominant measured stage is known; choose
+host-specific settings from that evidence.
 
 ---
 
@@ -347,16 +394,43 @@ and accept that you are off the tested path.
 
 ## Obtaining or regenerating `ec_macb`
 
-The driver was ported from the Pi 4 `genet` native-driver recipe. The hooks are
-**additive and gated by `get_ecdev(bp)`** so a non-EtherCAT load is unaffected:
+The driver was ported from the Pi 4 `genet` native-driver recipe. Its EtherCAT
+hooks are **additive and gated by `get_ecdev(bp)`**, so the ordinary `macb`
+network path remains unchanged.
+
+### Bounded cyclic-path contract
+This contract applies only to the `ec_macb` source qualified in Step 2 and
+installed in Steps 2–3. Older or unqualified `ec_macb` builds must not be
+presumed to provide it.
+
+In EtherCAT mode, a successful device open means the complete RX ring has
+already been provisioned: every cyclic RX buffer is allocated and persistently
+DMA-mapped before the ring is made active. Provisioning is all-or-nothing; if a
+buffer or mapping cannot be obtained, open fails rather than exposing a
+partially provisioned ring.
+
+`ec_poll` performs no allocation, free, DMA map, or DMA unmap for a received
+frame. For each descriptor, it transfers DMA ownership to the CPU and performs
+the device-to-CPU synchronization before inspecting or delivering the frame.
+`ecdev_receive(...)` completes its frame copy synchronously; only then may the
+driver perform the CPU-to-device synchronization, return ownership to DMA, and
+rearm the descriptor. Thus a cyclic RX buffer remains valid for the full
+delivery call and is never reallocated or remapped between cycles.
+
+The cyclic poller is the user `ethercat-rt` thread: it calls
+`ecrt_master_receive()` and `ecrt_master_send()`, which directly poll the native
+driver. `EtherCAT-OP` is an administrative master-FSM/datagram-injection
+operation, not that cyclic `ec_macb` poll thread.
+
+The remaining EtherCAT hooks are:
 
 - **Registration** — `ecdev_offer(dev, ec_poll, THIS_MODULE)` before
   `macb_init()` (macb requests IRQs there); `register_netdev` → `ecdev_open`.
 - **No IRQ / NAPI in EtherCAT mode** — the master polls, so `devm_request_irq`,
   the link-up IER enable, and `napi_enable`/scheduling are gated off.
-- **TX/RX** — TX keeps the DMA map but never frees the skb (persistent ring); RX
-  hands the raw frame (MAC header intact, before `eth_type_trans`) to
-  `ecdev_receive(...)`.
+- **TX** — TX keeps the DMA map and persistent ring ownership.
+- **RX** — delivers the raw frame (MAC header intact, before `eth_type_trans`)
+  to `ecdev_receive(...)` using the preallocated RX ring.
 - **Link** — phylink `mac_link_up/down` → `ecdev_set_link(...)`.
 - **`ec_poll`** — per cycle: `macb_tx_complete()` + `gem_rx()` for every queue.
 - Driver `.name` → `ec_macb`.
@@ -374,7 +448,7 @@ add them to `Makefile.am`. Full detail is in `devices/macb/PORTING-NOTES.md`.
 | `linux-headers-…-rt : Depends: gcc-14-for-host but it is not installable` | building on bookworm | upgrade to trixie (the 6.18 kernel + `gcc-14` live there) |
 | `ec_macb` won't bind / `eth0` still a normal netdev | the builtin `macb` grabbed the NIC, or NetworkManager re-claimed it | run `ethercat-macb-up.sh` (driver_override + unbind); mark `eth0` unmanaged in NM |
 | endpoint aborts claim `rc=-10/-11/-12` | missing `CAP_IPC_LOCK` / isolated core / `CAP_SYS_NICE` | install the klipper RT drop-in (Step 5); confirm the isolated core exists |
-| drive latches `ErC1.1` / `0x8700` / `al=0x001a`, "works once connected" | DC loop not truly `SCHED_FIFO` on an isolated core under cold-boot load | verify RT (Step 5); **power-cycle the drive** to clear the latch, then fix the RT cause |
+| drive latches `ErC1.1` / `0x8700` / `al=0x001a`, "works once connected" | missed DC cadence; the cause may be a late wake or delay in receive, process, or send | run the A/B timing procedure; attribute a receive-path contribution only when the measured `tx_complete`, `rx_drain`, `dma_sync_for_cpu`, `ecdev_receive`, or `rx_rearm` data supports it before changing host or EtherCAT settings; **power-cycle the drive** to clear the latch |
 | bringup `rc=-2` "no slaves responding" | drive powered off or cable | power the drive, check the cable, `FIRMWARE_RESTART` |
 
 ## See also
