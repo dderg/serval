@@ -161,6 +161,51 @@ impl<'a> ShapedSignal<'a> {
         acc
     }
 
+    /// `(eval, deriv, second_deriv)` at `t` in one pass: the three kernels
+    /// share piece boundaries (differentiation preserves them), so the cut
+    /// merge and every `eval_input` sample — the expensive part on dense
+    /// micro-segment windows — are computed once instead of three times.
+    /// Accumulation mirrors `convolve` op for op, so each component is
+    /// bit-identical to the separate `eval`/`deriv`/`second_deriv` calls.
+    pub fn eval_pva(&self, t: f64) -> (f64, f64, f64) {
+        let mut cuts = self.cuts.borrow_mut();
+        self.merge_cuts(t, &mut cuts);
+
+        let mut kernel_idx = 0usize;
+        let (mut p, mut v, mut a) = (0.0_f64, 0.0_f64, 0.0_f64);
+        for w in cuts.windows(2) {
+            let (lo, hi) = (w[0], w[1]);
+            let half = 0.5 * (hi - lo);
+            if half <= 0.0 {
+                continue;
+            }
+            let mid = 0.5 * (lo + hi);
+            while kernel_idx + 1 < self.kernel.pieces.len()
+                && self.kernel.pieces[kernel_idx].u_end <= mid
+            {
+                kernel_idx += 1;
+            }
+            let k = &self.kernel.pieces[kernel_idx];
+            let kd = &self.d_kernel.pieces[kernel_idx];
+            let kdd = &self.dd_kernel.pieces[kernel_idx];
+            let (mut sp, mut sv, mut sa) = (0.0_f64, 0.0_f64, 0.0_f64);
+            for (node, weight) in GAUSS_NODES.iter().zip(&GAUSS_WEIGHTS) {
+                let tau = nurbs::fmadd(*node, half, mid);
+                let f = weight * (self.eval_input)(t - tau);
+                sp += f * k.evaluate(tau);
+                sv += f * kd.evaluate(tau);
+                sa += f * kdd.evaluate(tau);
+            }
+            p += sp * half;
+            v += sv * half;
+            a += sa * half;
+        }
+        for &(tau, jump) in &self.d_kernel_jumps {
+            a += jump * (self.eval_input)(t - tau);
+        }
+        (p, v, a)
+    }
+
     /// Merge the kernel-piece boundaries (ascending by construction) with the
     /// in-window input breaks (`t - b` is ascending over `input_breaks`
     /// iterated in reverse), deduplicating on the fly — no per-call sort.
