@@ -104,3 +104,108 @@ fn unstable_freq_resets_stability_count() {
     }
     assert!(!est.synced());
 }
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn seeded(last_clock: u64, clock_avg: f64, time_avg: f64) -> ClockSyncEstimator {
+    let mut est =
+        ClockSyncEstimator::new(DECAY, RTT_AGE, SYNC_STABLE_FREQ_PPM, SYNC_STABLE_SAMPLES);
+    est.set_last_clock(last_clock);
+    est.set_clock_avg(clock_avg);
+    est.set_time_avg(time_avg);
+    est.set_prediction_variance((0.001 * MCU_FREQ).powi(2));
+    est
+}
+
+/// `ClockSync.connect` seeds `last_clock`/`clock_avg` from `get_uptime` and then
+/// drives an 8-sample priming loop; convergence must latch inside it exactly as
+/// the pre-refactor Python did, even with the large 64-bit clock seed.
+#[test]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn connect_priming_with_seeded_clock_latches() {
+    let t0 = 1000.0_f64;
+    let c0 = (MCU_FREQ * t0) as u64;
+    let mut est = seeded(c0, c0 as f64, t0);
+    let mut prev_freq = MCU_FREQ;
+    let mut t = t0;
+    for _ in 0..8 {
+        t += 0.05;
+        let clock = c0 + (MCU_FREQ * (t - t0)) as u64;
+        if let Some(e) = est.handle_clock(
+            (clock & 0xFFFF_FFFF) as u32,
+            t,
+            t + 0.0002,
+            MCU_FREQ,
+            prev_freq,
+        ) {
+            prev_freq = e.freq;
+        }
+    }
+    assert!(
+        est.synced(),
+        "connect() priming loop must latch, count={}",
+        est.sync_stable_count()
+    );
+}
+
+/// A sample stream that carries the low 32 bits across a `2^32` boundary must
+/// reconstruct the full 64-bit clock and keep advancing the latch.
+#[test]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn wraparound_reconstruction_advances_latch() {
+    let c0 = (1u64 << 32) - (MCU_FREQ * 0.4) as u64;
+    let mut est = seeded(c0, c0 as f64, 0.0);
+    let mut prev_freq = MCU_FREQ;
+    let mut t = 0.0_f64;
+    let mut full = c0;
+    for _ in 0..8 {
+        t += 0.1;
+        full = c0 + (MCU_FREQ * t) as u64;
+        if let Some(e) = est.handle_clock(
+            (full & 0xFFFF_FFFF) as u32,
+            t,
+            t + 0.0002,
+            MCU_FREQ,
+            prev_freq,
+        ) {
+            prev_freq = e.freq;
+        }
+    }
+    assert_eq!(
+        est.last_clock(),
+        full,
+        "32-bit low word must reconstruct the 64-bit clock across the wrap"
+    );
+    assert!(est.synced());
+}
+
+/// A periodic `clock` sample that arrived without engine wire stamps reaches the
+/// estimator with `sent_time == 0` (serialhdl drops it that way). It must update
+/// `last_clock`, return `None`, and leave the stability count untouched so the
+/// latch resumes across the gap — matching `if not sent_time: return`.
+#[test]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn zero_sent_time_sample_is_dropped_without_touching_latch() {
+    let mut est = make_estimator();
+    let mut prev_freq = MCU_FREQ;
+    feed_exact(&mut est, &mut prev_freq, 1.0);
+    let count = est.sync_stable_count();
+    let dropped = est.handle_clock(raw_low(MCU_FREQ * 1.05), 0.0, 0.0, MCU_FREQ, prev_freq);
+    assert!(dropped.is_none(), "unstamped clock sample must be dropped");
+    assert_eq!(
+        est.last_clock(),
+        (MCU_FREQ * 1.05) as u64,
+        "last_clock still advances on a dropped sample"
+    );
+    assert_eq!(
+        est.sync_stable_count(),
+        count,
+        "a dropped sample must not disturb the stability count"
+    );
+    feed_exact(&mut est, &mut prev_freq, 2.0);
+    feed_exact(&mut est, &mut prev_freq, 3.0);
+    assert!(est.synced(), "latch resumes across the dropped sample");
+}
