@@ -105,6 +105,12 @@ pub struct DynamicsModel {
     /// G·accel is the rotor position lead (mm), G·jerk the velocity-offset
     /// extra, G·snap the accel extra the torque model must see.
     comp_g: Option<Vec<f32>>,
+    /// Right pseudo-inverse rows `W = (F·Fᵀ)⁻¹·F` (row-major, n_modes ×
+    /// n_slots). `F⁺ = Fᵀ(FFᵀ)⁻¹ = Wᵀ`, so the pin lifts a mode torque to
+    /// slot torques through `slot[s] = Σ_k W[k][s]·τ_k` — the minimum-norm
+    /// slot torque realizing the per-mode force. A raw `Fᵀ` lift (frame_row)
+    /// is attenuated by `F·Fᵀ` (0.25·I on the AWD CoreXY frame ⇒ 4× under).
+    pinv: Vec<f32>,
     ff_lead_us: Vec<f64>,
     /// Per-mode pin-rotor virtual mass (kg); zeros = pin disabled for that
     /// mode. A nonzero entry switches the mode from position-lead (B) to
@@ -373,6 +379,11 @@ impl DynamicsModel {
             .collect();
         let comp_g = build_comp_g(&frame, &comp_compliance, n_modes, n_slots)
             .map(|g| g.iter().map(|&v| v as f32).collect());
+        // The pin lifts mode torque to slots through F⁺ = Fᵀ(FFᵀ)⁻¹; a
+        // validated full-row-rank frame always yields it.
+        let pinv: Vec<f32> = frame_pinv(&frame, n_modes, n_slots)
+            .map(|w| w.iter().map(|&v| v as f32).collect())
+            .unwrap_or_default();
         let frame: Vec<f32> = frame.iter().map(|&v| v as f32).collect();
         Ok(Self {
             n_slots,
@@ -385,6 +396,7 @@ impl DynamicsModel {
             coulomb: coulomb.iter().map(|&v| v as f32).collect(),
             compliance: compliance.iter().map(|&v| v as f32).collect(),
             comp_g,
+            pinv,
             ff_lead_us: vec![ff_lead_us; n_slots],
             pin_mass: pin_mass.iter().map(|&v| v as f32).collect(),
             pin_zeta: pin_zeta.iter().map(|&v| v as f32).collect(),
@@ -415,10 +427,21 @@ impl DynamicsModel {
     }
 
     /// Frame row for mode `mode` (length `n_slots`): the per-slot weights
-    /// that project slot kinematics into the mode and lift the mode's torque
-    /// back onto the slots. The pin oscillator uses it for both directions.
+    /// that project slot kinematics into the mode (`a_mode = F·a_slot`). The
+    /// pin uses it for the accel projection and the residual demod, but lifts
+    /// its mode torque back to slots through `pin_lift_row` (F⁺), not this.
     pub fn frame_row(&self, mode: usize) -> &[f32] {
         &self.frame[mode * self.n_slots..][..self.n_slots]
+    }
+
+    /// Pin torque lift row for mode `mode` (length `n_slots`): the per-slot
+    /// weights `W[mode][s]` of `F⁺ = Fᵀ(FFᵀ)⁻¹`. Lifting a mode torque `τ`
+    /// via `slot[s] += W[mode][s]·τ` produces the minimum-norm slot torque
+    /// whose mode-space effect (`F·slot`) is exactly `τ`. The plain `Fᵀ`
+    /// lift is attenuated by `F·Fᵀ` — 0.25·I on the AWD CoreXY frame, i.e.
+    /// 4× under — so the pin must use this, mirroring the compliance G.
+    pub fn pin_lift_row(&self, mode: usize) -> &[f32] {
+        &self.pinv[mode * self.n_slots..][..self.n_slots]
     }
 
     /// Raw per-mode belt compliance 1/ω_b² (s²); retained even for pinned
@@ -565,6 +588,9 @@ impl DynamicsModel {
             .collect();
         let comp_g = build_comp_g(&frame_f64, &comp_compliance, n_modes, n_slots)
             .map(|g| g.iter().map(|&v| v as f32).collect());
+        let pinv: Vec<f32> = frame_pinv(&frame_f64, n_modes, n_slots)
+            .map(|w| w.iter().map(|&v| v as f32).collect())
+            .unwrap_or_default();
         Ok(Self {
             n_slots,
             n_modes,
@@ -576,6 +602,7 @@ impl DynamicsModel {
             coulomb,
             compliance,
             comp_g,
+            pinv,
             ff_lead_us,
             pin_mass,
             pin_zeta,
@@ -607,28 +634,8 @@ fn build_comp_g(
     if compliance.iter().all(|&c| c == 0.0) {
         return None;
     }
-    // gram = F·Fᵀ (n_modes²), SPD by the frame rank validation.
-    let mut gram = vec![0.0f64; n_modes * n_modes];
-    for i in 0..n_modes {
-        let ri = &frame[i * n_slots..][..n_slots];
-        for j in 0..n_modes {
-            let rj = &frame[j * n_slots..][..n_slots];
-            gram[i * n_modes + j] = ri.iter().zip(rj).map(|(a, b)| a * b).sum();
-        }
-    }
-    // W = (FFᵀ)⁻¹·F  (n_modes × n_slots), one Cholesky solve per column.
-    let l = cholesky_factor(&gram, n_modes)?;
-    let mut w = vec![0.0f64; n_modes * n_slots];
-    let mut rhs = vec![0.0f64; n_modes];
-    for t in 0..n_slots {
-        for k in 0..n_modes {
-            rhs[k] = frame[k * n_slots + t];
-        }
-        let col = cholesky_solve(&l, n_modes, &rhs);
-        for k in 0..n_modes {
-            w[k * n_slots + t] = col[k];
-        }
-    }
+    // W = (FFᵀ)⁻¹·F  (n_modes × n_slots), the right-pseudo-inverse rows.
+    let w = frame_pinv(frame, n_modes, n_slots)?;
     // G[s][t] = Σ_k F[k][s]·c_k·W[k][t]
     let mut g = vec![0.0f64; n_slots * n_slots];
     for k in 0..n_modes {
@@ -647,6 +654,37 @@ fn build_comp_g(
         }
     }
     Some(g)
+}
+
+/// Right pseudo-inverse rows `W = (F·Fᵀ)⁻¹·F` (row-major n_modes × n_slots)
+/// of the validated, full-row-rank frame — one Cholesky solve per slot
+/// column against the SPD Gram matrix `F·Fᵀ`. `F⁺ = Fᵀ(FFᵀ)⁻¹ = Wᵀ`; both
+/// the compliance G and the pin torque lift use these rows so a mode
+/// quantity lifts to the minimum-norm slot vector. None on a non-positive
+/// pivot (cannot happen for a rank-validated frame).
+fn frame_pinv(frame: &[f64], n_modes: usize, n_slots: usize) -> Option<Vec<f64>> {
+    // gram = F·Fᵀ (n_modes²), SPD by the frame rank validation.
+    let mut gram = vec![0.0f64; n_modes * n_modes];
+    for i in 0..n_modes {
+        let ri = &frame[i * n_slots..][..n_slots];
+        for j in 0..n_modes {
+            let rj = &frame[j * n_slots..][..n_slots];
+            gram[i * n_modes + j] = ri.iter().zip(rj).map(|(a, b)| a * b).sum();
+        }
+    }
+    let l = cholesky_factor(&gram, n_modes)?;
+    let mut w = vec![0.0f64; n_modes * n_slots];
+    let mut rhs = vec![0.0f64; n_modes];
+    for t in 0..n_slots {
+        for k in 0..n_modes {
+            rhs[k] = frame[k * n_slots + t];
+        }
+        let col = cholesky_solve(&l, n_modes, &rhs);
+        for k in 0..n_modes {
+            w[k * n_slots + t] = col[k];
+        }
+    }
+    Some(w)
 }
 
 /// Lower-triangular Cholesky factor of an SPD matrix; None on a

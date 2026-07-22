@@ -1688,3 +1688,241 @@ fn pin_residual_demod_converges_and_stays_bounded() {
         "non-pinned mode must carry no residual"
     );
 }
+
+// ---- CoreXY frame quantitative cancellation ----------------------------
+//
+// The identity-frame pin tests above cannot detect a frame-normalization
+// error: with F = I both the accel projection (F) and the torque lift round
+// trip to unity. A real CoreXY frame has |F·Fᵀ| < 1 (0.25·I on the bench's
+// 4-slot AWD frame), so a naive Fᵀ torque lift lands 4× short. These tests
+// drive the pin through a real frame and check, per mode, that the emitted
+// slot torque realizes the intended mode-space cancellation (F·slot = τ_pin)
+// — the quantity a downstream two-mass load actually feels.
+
+/// Drive a per-cycle slot-accel sequence `acc_seq` into a pin model built from
+/// an explicit frame, alongside one identity single-mode reference oscillator
+/// per mode (the ground-truth mode torque `τ_pin`). Returns, per mode and per
+/// cycle, the achieved mode-space cancellation `F·slot_torque` and the
+/// reference `τ_pin`. A correct lift makes the two equal; a plain Fᵀ lift
+/// attenuates `F·slot` by `F·Fᵀ`.
+fn pin_frame_cancellation(
+    frame: &[f32],
+    n_modes: usize,
+    n_slots: usize,
+    mass: &[f32],
+    compliance: &[f32],
+    pin_mass: &[f32],
+    pin_zeta: &[f32],
+    acc_seq: &[Vec<f32>],
+) -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+    use crate::dynamics::DynamicsModel;
+    let zeros_m = vec![0.0f32; n_modes];
+    let model = DynamicsModel::from_parts(
+        n_slots,
+        n_modes,
+        frame,
+        mass,
+        &zeros_m,
+        &zeros_m,
+        compliance,
+        pin_mass,
+        pin_zeta,
+        0.0,
+        &[],
+    )
+    .unwrap();
+    let mut pin = super::cycle::PinState::build(&model, CYCLE_NS as i64);
+    // One identity (1 slot, 1 mode) reference per mode: its slot torque IS the
+    // mode torque, since the identity lift is unity.
+    let mut refs: Vec<super::cycle::PinState> = (0..n_modes)
+        .map(|k| {
+            let m = DynamicsModel::from_parts(
+                1,
+                1,
+                &[1.0],
+                &[mass[k]],
+                &[0.0],
+                &[0.0],
+                &[compliance[k]],
+                &[pin_mass[k]],
+                &[pin_zeta[k]],
+                0.0,
+                &[],
+            )
+            .unwrap();
+            super::cycle::PinState::build(&m, CYCLE_NS as i64)
+        })
+        .collect();
+    let cycles = acc_seq.len();
+    let mut achieved = vec![Vec::with_capacity(cycles); n_modes];
+    let mut reference = vec![Vec::with_capacity(cycles); n_modes];
+    for acc in acc_seq {
+        pin.step(acc, &vec![0.0f32; n_slots], true);
+        for k in 0..n_modes {
+            // The reference sees the exact mode accel the coupled pin projects.
+            let a_cmd: f32 = model.frame_row(k).iter().zip(acc).map(|(f, a)| f * a).sum();
+            let f_slot: f32 = model
+                .frame_row(k)
+                .iter()
+                .enumerate()
+                .map(|(s, f)| f * pin.slot_torque_at(s))
+                .sum();
+            achieved[k].push(f_slot);
+            refs[k].step(&[a_cmd], &[0.0], true);
+            reference[k].push(refs[k].slot_torque_at(0));
+        }
+    }
+    (achieved, reference)
+}
+
+/// Peak-to-peak of a damped locked-rotor load oscillator (`m_L·ÿ = -k_b·y -
+/// c·ẏ + u`) driven ZOH by the per-cycle residual mode force `u`, measured
+/// over the tail. The pinned load feels the belt reaction the pin fails to
+/// cancel, so a fully-cancelling pin leaves a flat load.
+fn load_ring(force: &[f32], fb: f64, zeta: f64, m_l: f32) -> f32 {
+    let w = 2.0 * std::f64::consts::PI * fb;
+    let dt = CYCLE_NS as f64 * 1e-9;
+    let sub = 40usize;
+    let h = dt / sub as f64;
+    let (mut y, mut v) = (0.0f64, 0.0f64);
+    let (mut lo, mut hi) = (0.0f64, 0.0f64);
+    for (i, &u) in force.iter().enumerate() {
+        for _ in 0..sub {
+            let acc = -w * w * y - 2.0 * zeta * w * v + f64::from(u) / f64::from(m_l);
+            v += acc * h;
+            y += v * h;
+        }
+        if i > force.len() / 3 {
+            lo = lo.min(y);
+            hi = hi.max(y);
+        }
+    }
+    (hi - lo) as f32
+}
+
+/// Assert, for a given frame, that the pin realizes mode-exact cancellation on
+/// EVERY mode: the emitted slot torque maps back (F·slot) to the intended
+/// τ_pin within 10%, and a simulated two-mass load ring drops by >85% versus
+/// pin-off. A frame-normalization error (Fᵀ lift → 4× short on AWD) or a
+/// per-mode sign flip fails both checks.
+fn assert_pin_cancels_every_mode(
+    frame: &[f32],
+    n_modes: usize,
+    n_slots: usize,
+    mass: &[f32],
+    fb: &[f64],
+    pin_frac: &[f32],
+) {
+    let compliance: Vec<f32> = fb
+        .iter()
+        .map(|f| (1.0 / (2.0 * std::f64::consts::PI * f).powi(2)) as f32)
+        .collect();
+    let pin_mass: Vec<f32> = mass.iter().zip(pin_frac).map(|(m, f)| m * f).collect();
+    let pin_zeta = vec![0.08f32; n_modes];
+    // Model handle for the F⁺ excitation columns (min-norm slot accel that
+    // realizes a pure mode-k acceleration).
+    let model = crate::dynamics::DynamicsModel::from_parts(
+        n_slots,
+        n_modes,
+        frame,
+        mass,
+        &vec![0.0f32; n_modes],
+        &vec![0.0f32; n_modes],
+        &compliance,
+        &pin_mass,
+        &pin_zeta,
+        0.0,
+        &[],
+    )
+    .unwrap();
+    let dt = CYCLE_NS as f64 * 1e-9;
+    const CYCLES: usize = 900;
+    let rms = |s: &[f32]| (s.iter().map(|x| x * x).sum::<f32>() / s.len() as f32).sqrt();
+    for k in 0..n_modes {
+        // Sustained on-notch sinusoid confined to mode k: the pinned mode rings
+        // at Q, giving a large τ_pin to test the cancellation against.
+        let wb = 2.0 * std::f64::consts::PI * fb[k];
+        let lift = model.pin_lift_row(k).to_vec();
+        let acc_seq: Vec<Vec<f32>> = (0..CYCLES)
+            .map(|c| {
+                let s = (1000.0 * (wb * c as f64 * dt).sin()) as f32;
+                lift.iter().map(|w| w * s).collect()
+            })
+            .collect();
+        let (achieved, reference) = pin_frame_cancellation(
+            frame,
+            n_modes,
+            n_slots,
+            mass,
+            &compliance,
+            &pin_mass,
+            &pin_zeta,
+            &acc_seq,
+        );
+        // Steady-state tail only (skip the ring build-up).
+        let tail = CYCLES / 3;
+        let a = &achieved[k][tail..];
+        let r = &reference[k][tail..];
+        // The driven mode must genuinely ring, else the test proves nothing.
+        let ref_rms = rms(r);
+        assert!(
+            ref_rms > 1.0,
+            "mode {k} reference torque too small: {ref_rms}"
+        );
+        // (1) F·slot == τ_pin within 10% — catches the frame-normalization
+        //     gain deficit (Fᵀ lift → 4× short on AWD) AND a per-mode sign
+        //     flip (which drives the error to ~2× the reference).
+        let err: Vec<f32> = a.iter().zip(r).map(|(x, y)| x - y).collect();
+        let rel = rms(&err) / ref_rms;
+        assert!(
+            rel < 0.10,
+            "mode {k}: emitted slot torque must map to τ_pin within 10%, got {:.1}% \
+             (F·slot RMS {:.3} vs τ_pin RMS {:.3})",
+            rel * 100.0,
+            rms(a),
+            ref_rms
+        );
+        // (2) simulated two-mass load ring: residual = τ_pin − F·slot drives
+        //     the load; pin-off feels the whole belt reaction (τ_pin).
+        let residual: Vec<f32> = r.iter().zip(a).map(|(x, y)| x - y).collect();
+        let ring_off = load_ring(r, fb[k], 0.08, pin_mass[k]);
+        let ring_on = load_ring(&residual, fb[k], 0.08, pin_mass[k]);
+        let reduction = 1.0 - ring_on / ring_off;
+        assert!(
+            reduction > 0.85,
+            "mode {k}: load ring must drop >85% with the pin, got {:.1}% \
+             (off {ring_off:.4} on {ring_on:.4})",
+            reduction * 100.0
+        );
+    }
+}
+
+/// Bench 4-slot AWD CoreXY frame (drive invert signs folded in, hence the
+/// asymmetric per-row signs): F·Fᵀ = 0.25·I, so a naive Fᵀ pin lift lands 4×
+/// short on BOTH modes. The correct F⁺ lift cancels each mode exactly.
+#[test]
+fn pin_corexy_awd_cancels_both_modes() {
+    // frame rows: x = [.25,-.25,-.25,-.25], y = [.25,-.25,.25,.25]
+    let frame = [0.25, -0.25, -0.25, -0.25, 0.25, -0.25, 0.25, 0.25];
+    assert_pin_cancels_every_mode(
+        &frame,
+        2,
+        4,
+        &[0.00453, 0.00747],
+        &[216.8, 131.5],
+        // load fraction 1 − (f_b/f_peak)²
+        &[
+            1.0 - (216.8f32 / 313.5).powi(2),
+            1.0 - (131.5f32 / 215.8).powi(2),
+        ],
+    );
+}
+
+/// Symmetric 2×2 CoreXY frame ([[.5,.5],[.5,-.5]] convention): F·Fᵀ = 0.5·I,
+/// so a naive Fᵀ lift lands 2× short. Transpose-symmetric, so it hides a
+/// pure transpose bug but still exposes the normalization deficit.
+#[test]
+fn pin_corexy_symmetric_cancels_both_modes() {
+    let frame = [0.5, 0.5, 0.5, -0.5];
+    assert_pin_cancels_every_mode(&frame, 2, 2, &[0.020, 0.020], &[131.5, 131.5], &[0.6, 0.6]);
+}

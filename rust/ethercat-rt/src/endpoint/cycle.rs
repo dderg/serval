@@ -1053,7 +1053,8 @@ struct PinMode {
     pin_mass: f32,
     neg_omega2: f32,     // -ω_b²
     two_zeta_omega: f32, // 2ζω_b
-    frame_row: Vec<f32>, // length n_slots: projects slots↔mode
+    frame_row: Vec<f32>, // length n_slots: projects slot kinematics → mode
+    lift_row: Vec<f32>,  // length n_slots: F⁺ row lifting mode torque → slots
     // DC-cycle transition x' = Ad·x + Bd·a_cmd (ZOH forcing).
     a11: f32,
     a12: f32,
@@ -1120,6 +1121,7 @@ impl PinState {
                 neg_omega2: -(omega * omega) as f32,
                 two_zeta_omega: (2.0 * zeta * omega) as f32,
                 frame_row: model.frame_row(k).to_vec(),
+                lift_row: model.pin_lift_row(k).to_vec(),
                 a11: ad[0] as f32,
                 a12: ad[1] as f32,
                 a21: ad[2] as f32,
@@ -1207,7 +1209,11 @@ impl PinState {
             let d_lead = m.l11 * m.d + m.l12 * m.v;
             let v_lead = m.l21 * m.d + m.l22 * m.v;
             let tau_pin = m.pin_mass * (m.neg_omega2 * d_lead - m.two_zeta_omega * v_lead - a_cmd);
-            for (t, f) in self.slot_torque.iter_mut().zip(&m.frame_row) {
+            // Lift the mode torque to slots through F⁺ (lift_row), NOT Fᵀ
+            // (frame_row): the pin torque's mode-space effect is F·slot, so a
+            // plain Fᵀ lift is attenuated by F·Fᵀ (0.25·I on the AWD CoreXY
+            // frame ⇒ 4× under). F⁺ = Fᵀ(FFᵀ)⁻¹ makes F·slot = τ_pin exactly.
+            for (t, f) in self.slot_torque.iter_mut().zip(&m.lift_row) {
                 *t += f * tau_pin;
             }
             // Residual: mode-projected following error demodulated against the
