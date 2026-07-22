@@ -548,5 +548,15 @@ pub fn bringup(args: Args) -> EndpointCtx {
         post_cycle_max_ns: i64::MIN,
         inter_exchange_max_ns: i64::MIN,
         last_nivcsw: 0,
+        last_fault_ns: 0,
+        last_capture_ns: 0,
+        last_wkc_ns: 0,
+        last_heartbeat_ns: 0,
+        last_telemetry_ns: 0,
+        fault_max_ns: i64::MIN,
+        capture_max_ns: i64::MIN,
+        wkc_max_ns: i64::MIN,
+        heartbeat_max_ns: i64::MIN,
+        telemetry_max_ns: i64::MIN,
     }
 }
