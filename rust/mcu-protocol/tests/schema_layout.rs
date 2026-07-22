@@ -413,6 +413,7 @@ fn set_dynamics_model_matches_schema_layout() {
         mass: vec![0.0123, 0.0119],
         viscous: vec![0.0045, 0.0044],
         coulomb: vec![1.2, 1.1],
+        compliance: vec![1.76e-5, 7.0e-6],
         pairs: vec![DynamicsPair {
             first: 0,
             second: 1,

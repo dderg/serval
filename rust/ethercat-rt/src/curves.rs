@@ -133,12 +133,21 @@ impl AxisRing {
         Some((pos, vel, acc))
     }
 
-    /// Commanded (vel, acc) at a future instant, read-only: feedforward lead
-    /// samples ahead of the position cursor, so this must never retire ring
-    /// entries — it walks unretired pieces and caches its own armed copy.
-    /// A gap between pieces or a time past the stream end is a stationary
-    /// target: (0, 0).
-    pub fn peek_vel_acc(&mut self, t_ns: u64) -> (f32, f32) {
+    /// Analytic (jerk, snap) of the piece `sample` just armed for `now_ns`.
+    /// Valid only right after a successful `sample` at the same instant;
+    /// with no armed piece the target is stationary: (0, 0).
+    pub fn jerk_snap(&self, now_ns: u64) -> (f32, f32) {
+        self.armed
+            .as_ref()
+            .map_or((0.0, 0.0), |p| p.eval_jerk_snap(now_ns))
+    }
+
+    /// Commanded (vel, acc, jerk, snap) at a future instant, read-only:
+    /// feedforward lead samples ahead of the position cursor, so this must
+    /// never retire ring entries — it walks unretired pieces and caches its
+    /// own armed copy. A gap between pieces or a time past the stream end is
+    /// a stationary target: all zeros.
+    pub fn peek_kin(&mut self, t_ns: u64) -> (f32, f32, f32, f32) {
         let covers = |p: &ArmedPiece| t_ns >= p.piece_start_cycles && t_ns < p.piece_end_cycles;
         if !self.lookahead_armed.as_ref().is_some_and(covers) {
             self.lookahead_armed = match &self.armed {
@@ -147,8 +156,11 @@ impl AxisRing {
             };
         }
         match &self.lookahead_armed {
-            Some(p) => (p.eval_pos_vel(t_ns).1, p.eval_accel(t_ns)),
-            None => (0.0, 0.0),
+            Some(p) => {
+                let (jrk, snp) = p.eval_jerk_snap(t_ns);
+                (p.eval_pos_vel(t_ns).1, p.eval_accel(t_ns), jrk, snp)
+            }
+            None => (0.0, 0.0, 0.0, 0.0),
         }
     }
 

@@ -145,6 +145,7 @@ frame = [[0.25, -0.25, -0.25, -0.25],                  # F, modes × slots — b
 mass = [0.0123, 0.0119]      # m per mode, (0.1% rated)/(mm/s²)
 viscous = [0.09, 0.11]       # b per mode
 coulomb = [160.0, 175.0]     # c per mode, symmetric magnitude
+compliance = [0.0, 1.76e-5]  # optional (version 7); 1/ω_b² per mode, s²
 fit_rms_residual = [0.8, 0.7, 0.8, 0.9]  # per motor, 0.1% rated — fit quality, informational
 ff_lead_us = 0.0             # optional; dead-time compensation, microseconds [0, 10000], default 0.0
 
@@ -152,6 +153,46 @@ ff_lead_us = 0.0             # optional; dead-time compensation, microseconds [0
 slots = ["motor_a", "motor_a1"]           # order defines the coefficient sign
 direction_split = -0.125                  # signed, finite, abs(value) < 0.5
 ```
+
+`compliance` (per-mode, s², version 7 only): the belt-compliance
+correction `1/ω_b²`, where `ω_b = 2π·f_b` is the **locked-rotor** belt
+frequency of that mode — the frequency the carriage rings at when the
+rotor does not move. It is *not* the coupled frequency a plain ringdown
+measures (there the rotor recoils on the position-loop spring in series
+with the belt, which reads low); using the raw coupled frequency
+over-corrects.
+
+With a nonzero compliance the endpoint inverts the two-mass plant per DC
+cycle: the load obeys `m·ẍ_L = k_b(x_m − x_L)`, so the rotor trajectory
+that makes the carriage follow the commanded curve exactly is
+
+```
+x_m = x + a/ω_b²        (position target lead)
+v_m = v + j/ω_b²        (60B1h velocity offset)
+a_m = a + s/ω_b²        (accel the 60B2h torque model sees)
+```
+
+where j and s are the trajectory's analytic jerk and snap (evaluated from
+the streamed Chebyshev pieces — never finite-differenced). The rotor
+deliberately leads the command during acceleration by exactly the belt
+stretch the accel will consume, so the belt force stays the smooth `m·a`
+and the carriage never rings *from commanded motion*. Residual excitation
+the command didn't cause (cogging, friction reversals, model error) still
+rings at the old coupled frequency — keep a light input shaper or the
+belt damper for that. On a coupled node the per-mode terms compose
+through the frame: the endpoint applies `G = F⁺·diag(compliance)·F` in
+slot space, so per-axis f_b values map correctly onto CoreXY motors.
+
+The position lead lives in the same transient offset channel as the trim
+and strain compensation — it is never baked into the streamed target
+anchor, and it is exactly zero at constant velocity and at rest. It is
+bounded by `max_accel/ω_b²` (tens of µm), and the snap term through the
+torque path is clamped by `ff_max_torque` like every other torque FF
+contribution. The correction needs accel-smooth trajectories: with a
+`smooth_bell`/`smooth_mzv` shaper kernel the snap term is bounded and
+small; with raw trapezoids the jerk impulses would step the target.
+A buzz excitation suppresses the correction for its duration (a buzz has
+no ring piece behind it, so its jerk/snap are undefined).
 
 `ff_lead_us` (float, default `0.0`, range `[0, 10000]`): dead-time
 compensation for the feedforward path, in microseconds. The 60B1h/60B2h
@@ -171,13 +212,15 @@ timing-only profile that compensates dead time without contributing any
 meaningful torque feedforward.
 
 Validation rules (any failure = hard claim error):
-- `version` must equal 6 — older profiles are not supported; refit with
-  `SERVO_FIT_DYNAMICS`.
+- `version` must equal 6 or 7 — older profiles are not supported; refit
+  with `SERVO_FIT_DYNAMICS`. `compliance` requires version 7.
 - `axes` must contain unique, non-empty strings
 - `frame` must be `n_modes × n_slots` with `n_slots = len(axes)`,
   `n_modes = len(modes)`, `1 ≤ n_modes ≤ n_slots`, every row nonzero, rows
   linearly independent
 - `mass` entries > 0; `viscous` and `coulomb` entries ≥ 0; all values finite
+- `compliance` entries, when present, must be finite, ≥ 0, and at most
+  `6.4e-4` s² (a mode softer than 20 Hz is a typo, not a belt)
 - each optional `pair` names two distinct, otherwise-unused `axes` entries
   with exactly equal or opposite frame columns; `direction_split` is finite
   and has absolute value below `0.5`

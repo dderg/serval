@@ -792,7 +792,8 @@ pub(super) fn handle_set_dynamics_model(
     let dims_consistent = msg.frame.len() == modes * slots
         && msg.mass.len() == modes
         && msg.viscous.len() == modes
-        && msg.coulomb.len() == modes;
+        && msg.coulomb.len() == modes
+        && msg.compliance.len() == modes;
     let rc = if slots != ctx.num_slaves || !dims_consistent {
         crate::rt_eprintln!(
             "ec-rt: SetDynamicsModel slots_count={} modes_count={} \
@@ -821,6 +822,7 @@ pub(super) fn handle_set_dynamics_model(
             &msg.mass,
             &msg.viscous,
             &msg.coulomb,
+            &msg.compliance,
             &pairs,
         ) {
             Ok(model) => {

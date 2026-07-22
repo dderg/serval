@@ -9,6 +9,10 @@ pub const ERR_DYNAMICS_REJECTED: i32 = -862;
 
 const FF_LEAD_US_MAX: f64 = 10_000.0;
 
+/// Compliance ceiling: 1/(2π·20 Hz)² — a mode softer than 20 Hz is not a
+/// belt-stretch correction, it's a typo (units are s², value = 1/ω_b²).
+pub const COMPLIANCE_MAX_S2: f64 = 6.4e-4;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PairTable {
@@ -25,6 +29,8 @@ struct ProfileFile {
     mass: Vec<f64>,
     viscous: Vec<f64>,
     coulomb: Vec<f64>,
+    #[serde(default)]
+    compliance: Vec<f64>,
     #[serde(default)]
     #[allow(dead_code)]
     fit_rms_residual: Vec<f64>,
@@ -59,6 +65,7 @@ pub enum ProfileError {
     NotFinite(&'static str),
     NonPositive(&'static str),
     FfLeadOutOfRange(f64),
+    ComplianceOutOfRange(f64),
     ZeroFrameRow(usize),
     FrameRankDeficient,
     ForbiddenField(&'static str),
@@ -80,6 +87,13 @@ pub struct DynamicsModel {
     mass: Vec<f32>,
     viscous: Vec<f32>,
     coulomb: Vec<f32>,
+    /// Per-mode belt compliance 1/ω_b² (s²); zeros = disabled.
+    compliance: Vec<f32>,
+    /// Slot-space correction matrix G = F⁺·diag(compliance)·F (row-major,
+    /// n_slots × n_slots), present only when some compliance is nonzero.
+    /// G·accel is the rotor position lead (mm), G·jerk the velocity-offset
+    /// extra, G·snap the accel extra the torque model must see.
+    comp_g: Option<Vec<f32>>,
     ff_lead_us: Vec<f64>,
     pairs: Vec<Pair>,
 }
@@ -87,8 +101,13 @@ pub struct DynamicsModel {
 impl DynamicsModel {
     pub fn from_toml_str(s: &str) -> Result<Self, ProfileError> {
         let f: ProfileFile = toml::from_str(s).map_err(|e| ProfileError::Parse(e.to_string()))?;
-        if f.version != 6 {
+        if f.version != 6 && f.version != 7 {
             return Err(ProfileError::Version(f.version));
+        }
+        if f.version == 6 && !f.compliance.is_empty() {
+            return Err(ProfileError::ForbiddenField(
+                "compliance requires version 7",
+            ));
         }
         for field in ["direction_split", "orientation"] {
             if f.extra.contains_key(field) {
@@ -139,6 +158,7 @@ impl DynamicsModel {
             f.mass,
             f.viscous,
             f.coulomb,
+            f.compliance,
             f.ff_lead_us,
             &pairs,
         )
@@ -151,6 +171,7 @@ impl DynamicsModel {
         mass: &[f32],
         viscous: &[f32],
         coulomb: &[f32],
+        compliance: &[f32],
         pairs: &[PairSpec],
     ) -> Result<Self, ProfileError> {
         let axes = (0..n_slots).map(|i| format!("slot{i}")).collect();
@@ -165,6 +186,7 @@ impl DynamicsModel {
             widen(mass),
             widen(viscous),
             widen(coulomb),
+            widen(compliance),
             0.0,
             pairs,
         )
@@ -180,6 +202,7 @@ impl DynamicsModel {
         mass: Vec<f64>,
         viscous: Vec<f64>,
         coulomb: Vec<f64>,
+        compliance: Vec<f64>,
         ff_lead_us: f64,
         pairs: &[PairSpec],
     ) -> Result<Self, ProfileError> {
@@ -231,6 +254,19 @@ impl DynamicsModel {
                 return Err(ProfileError::NonPositive("coulomb must be non-negative"));
             }
         }
+        let compliance = if compliance.is_empty() {
+            vec![0.0f64; n_modes]
+        } else {
+            compliance
+        };
+        if compliance.len() != n_modes {
+            return Err(ProfileError::Dim("compliance length must equal modes"));
+        }
+        for &c in &compliance {
+            if !c.is_finite() || !(0.0..=COMPLIANCE_MAX_S2).contains(&c) {
+                return Err(ProfileError::ComplianceOutOfRange(c));
+            }
+        }
         if !ff_lead_us.is_finite() || !(0.0..=FF_LEAD_US_MAX).contains(&ff_lead_us) {
             return Err(ProfileError::FfLeadOutOfRange(ff_lead_us));
         }
@@ -244,6 +280,8 @@ impl DynamicsModel {
         if !frame_rows_independent(&frame, n_modes, n_slots) {
             return Err(ProfileError::FrameRankDeficient);
         }
+        let comp_g = build_comp_g(&frame, &compliance, n_modes, n_slots)
+            .map(|g| g.iter().map(|&v| v as f32).collect());
         let frame: Vec<f32> = frame.iter().map(|&v| v as f32).collect();
         Ok(Self {
             n_slots,
@@ -254,9 +292,36 @@ impl DynamicsModel {
             mass: mass.iter().map(|&v| v as f32).collect(),
             viscous: viscous.iter().map(|&v| v as f32).collect(),
             coulomb: coulomb.iter().map(|&v| v as f32).collect(),
+            compliance: compliance.iter().map(|&v| v as f32).collect(),
+            comp_g,
             ff_lead_us: vec![ff_lead_us; n_slots],
             pairs,
         })
+    }
+
+    /// True when the profile carries a nonzero belt-compliance term.
+    pub fn has_compliance(&self) -> bool {
+        self.comp_g.is_some()
+    }
+
+    /// `out[s] = (G·input)[s]` — the slot-space compliance correction.
+    /// Feed drive-frame accel for the position lead (mm), jerk for the
+    /// 60B1h velocity-offset extra (mm/s), snap for the accel extra the
+    /// torque model must see (mm/s²). Zeroes `out` when compliance is off.
+    pub fn compliance_apply(&self, input: &[f32], out: &mut [f32]) {
+        assert_eq!(input.len(), self.n_slots);
+        assert_eq!(out.len(), self.n_slots);
+        let Some(g) = &self.comp_g else {
+            out.fill(0.0);
+            return;
+        };
+        for (s, o) in out.iter_mut().enumerate() {
+            *o = g[s * self.n_slots..][..self.n_slots]
+                .iter()
+                .zip(input)
+                .map(|(gv, x)| gv * x)
+                .sum();
+        }
     }
 
     pub fn torque_ff(&self, slot: usize, acc_mm_s2: &[f32], vel_mm_s: &[f32]) -> f32 {
@@ -329,6 +394,7 @@ impl DynamicsModel {
         let mut mass = Vec::with_capacity(n_modes);
         let mut viscous = Vec::with_capacity(n_modes);
         let mut coulomb = Vec::with_capacity(n_modes);
+        let mut compliance = Vec::with_capacity(n_modes);
         let mut axes = Vec::with_capacity(n_slots);
         let mut modes = Vec::with_capacity(n_modes);
         let mut ff_lead_us = Vec::with_capacity(n_slots);
@@ -343,6 +409,7 @@ impl DynamicsModel {
                 mass.push(p.mass[k]);
                 viscous.push(p.viscous[k]);
                 coulomb.push(p.coulomb[k]);
+                compliance.push(p.compliance[k]);
                 modes.push(p.modes[k].clone());
             }
             for s in 0..p.n_slots {
@@ -360,6 +427,10 @@ impl DynamicsModel {
             slot_base += p.n_slots;
             mode_base += p.n_modes;
         }
+        let frame_f64: Vec<f64> = frame.iter().map(|&v| f64::from(v)).collect();
+        let compliance_f64: Vec<f64> = compliance.iter().map(|&v| f64::from(v)).collect();
+        let comp_g = build_comp_g(&frame_f64, &compliance_f64, n_modes, n_slots)
+            .map(|g| g.iter().map(|&v| v as f32).collect());
         Ok(Self {
             n_slots,
             n_modes,
@@ -369,6 +440,8 @@ impl DynamicsModel {
             mass,
             viscous,
             coulomb,
+            compliance,
+            comp_g,
             ff_lead_us,
             pairs,
         })
@@ -380,6 +453,107 @@ impl DynamicsModel {
             .map(|&us| (us * 1000.0).round() as u64)
             .collect()
     }
+}
+
+/// `G = F⁺·diag(c)·F` in slot space (row-major n_slots × n_slots), where
+/// `F⁺ = Fᵀ(FFᵀ)⁻¹` is the right pseudo-inverse of the (validated,
+/// full-row-rank) frame. Feeding G a slot kinematics vector projects it into
+/// modes, scales each mode by its compliance, and lifts the result back to
+/// the slots — the minimum-norm slot motion producing exactly the required
+/// per-mode carriage lead. Returns None when every compliance is zero.
+fn build_comp_g(
+    frame: &[f64],
+    compliance: &[f64],
+    n_modes: usize,
+    n_slots: usize,
+) -> Option<Vec<f64>> {
+    if compliance.iter().all(|&c| c == 0.0) {
+        return None;
+    }
+    // gram = F·Fᵀ (n_modes²), SPD by the frame rank validation.
+    let mut gram = vec![0.0f64; n_modes * n_modes];
+    for i in 0..n_modes {
+        let ri = &frame[i * n_slots..][..n_slots];
+        for j in 0..n_modes {
+            let rj = &frame[j * n_slots..][..n_slots];
+            gram[i * n_modes + j] = ri.iter().zip(rj).map(|(a, b)| a * b).sum();
+        }
+    }
+    // W = (FFᵀ)⁻¹·F  (n_modes × n_slots), one Cholesky solve per column.
+    let l = cholesky_factor(&gram, n_modes)?;
+    let mut w = vec![0.0f64; n_modes * n_slots];
+    let mut rhs = vec![0.0f64; n_modes];
+    for t in 0..n_slots {
+        for k in 0..n_modes {
+            rhs[k] = frame[k * n_slots + t];
+        }
+        let col = cholesky_solve(&l, n_modes, &rhs);
+        for k in 0..n_modes {
+            w[k * n_slots + t] = col[k];
+        }
+    }
+    // G[s][t] = Σ_k F[k][s]·c_k·W[k][t]
+    let mut g = vec![0.0f64; n_slots * n_slots];
+    for k in 0..n_modes {
+        let c = compliance[k];
+        if c == 0.0 {
+            continue;
+        }
+        for s in 0..n_slots {
+            let fks = frame[k * n_slots + s];
+            if fks == 0.0 {
+                continue;
+            }
+            for t in 0..n_slots {
+                g[s * n_slots + t] += fks * c * w[k * n_slots + t];
+            }
+        }
+    }
+    Some(g)
+}
+
+/// Lower-triangular Cholesky factor of an SPD matrix; None on a
+/// non-positive pivot (cannot happen for a validated frame Gram matrix,
+/// but never panic in the claim path).
+fn cholesky_factor(m: &[f64], n: usize) -> Option<Vec<f64>> {
+    let mut l = vec![0.0f64; n * n];
+    for i in 0..n {
+        for j in 0..=i {
+            let mut sum = m[i * n + j];
+            for k in 0..j {
+                sum -= l[i * n + k] * l[j * n + k];
+            }
+            if i == j {
+                if sum <= 0.0 {
+                    return None;
+                }
+                l[i * n + i] = sum.sqrt();
+            } else {
+                l[i * n + j] = sum / l[j * n + j];
+            }
+        }
+    }
+    Some(l)
+}
+
+fn cholesky_solve(l: &[f64], n: usize, b: &[f64]) -> Vec<f64> {
+    let mut y = vec![0.0f64; n];
+    for i in 0..n {
+        let mut sum = b[i];
+        for k in 0..i {
+            sum -= l[i * n + k] * y[k];
+        }
+        y[i] = sum / l[i * n + i];
+    }
+    let mut x = vec![0.0f64; n];
+    for i in (0..n).rev() {
+        let mut sum = y[i];
+        for k in (i + 1)..n {
+            sum -= l[k * n + i] * x[k];
+        }
+        x[i] = sum / l[i * n + i];
+    }
+    x
 }
 
 fn resolve_pairs(

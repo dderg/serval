@@ -625,6 +625,7 @@ impl PyMotionEngine {
         mass: Vec<f32>,
         viscous: Vec<f32>,
         coulomb: Vec<f32>,
+        compliance: Vec<f32>,
         pairs: Vec<u32>,
         direction_split: Vec<f32>,
     ) -> PyResult<()> {
@@ -634,12 +635,13 @@ impl PyMotionEngine {
                 "set_dynamics_model: at least one mode required".to_string(),
             ));
         }
-        if viscous.len() != modes || coulomb.len() != modes {
+        if viscous.len() != modes || coulomb.len() != modes || compliance.len() != modes {
             return Err(PyRuntimeError::new_err(format!(
                 "set_dynamics_model: per-mode length mismatch (mass {modes}, \
-                 viscous {}, coulomb {})",
+                 viscous {}, coulomb {}, compliance {})",
                 viscous.len(),
-                coulomb.len()
+                coulomb.len(),
+                compliance.len()
             )));
         }
         if frame.len() % modes != 0 {
@@ -683,6 +685,7 @@ impl PyMotionEngine {
                         mass,
                         viscous,
                         coulomb,
+                        compliance,
                         pairs: wire_pairs,
                     },
                 )

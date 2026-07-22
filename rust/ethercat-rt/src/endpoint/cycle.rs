@@ -173,15 +173,28 @@ pub(super) fn compute_motion_targets(
     // so they outlive the feedforward block to reach the capture record.
     let mut all_acc = vec![0f32; num_slaves];
     let mut all_vel = vec![0f32; num_slaves];
+    // Jerk/snap feed only the compliance correction: the corrected rotor
+    // trajectory x+c·a needs v+c·j on 60B1h and a+c·s in the torque model.
+    let mut all_jrk = vec![0f32; num_slaves];
+    let mut all_snp = vec![0f32; num_slaves];
     if ctx.gate.state() != TorqueState::Enabled && ctx.buzz.active() {
         ctx.buzz.clear();
         crate::rt_eprintln!("ec-rt: buzz cleared — torque gate left Enabled mid-buzz");
     }
     if ctx.gate.state() == TorqueState::Enabled {
         let mut lane_mm = vec![None; num_slaves];
-        let sp_counts =
-            sample_slot_targets(ctx, apply_time, &mut all_acc, &mut all_vel, &mut lane_mm);
-        motion_active = emit_slot_commands(ctx, &sp_counts, &lane_mm, &all_acc, &all_vel);
+        let sp_counts = sample_slot_targets(
+            ctx,
+            apply_time,
+            &mut all_acc,
+            &mut all_vel,
+            &mut all_jrk,
+            &mut all_snp,
+            &mut lane_mm,
+        );
+        motion_active = emit_slot_commands(
+            ctx, &sp_counts, &lane_mm, &all_acc, &all_vel, &all_jrk, &all_snp,
+        );
     } else {
         ctx.damper.reset_filters();
         ctx.trim.reset();
@@ -198,11 +211,14 @@ pub(super) fn compute_motion_targets(
 
 // The coupled torque model needs every axis' accel/vel before any
 // one slot's feedforward can be computed, so sample all slots first.
+#[allow(clippy::too_many_arguments)]
 fn sample_slot_targets(
     ctx: &mut EndpointCtx,
     apply_time: u64,
     all_acc: &mut [f32],
     all_vel: &mut [f32],
+    all_jrk: &mut [f32],
+    all_snp: &mut [f32],
     lane_mm: &mut [Option<f64>],
 ) -> Vec<Option<i32>> {
     let num_slaves = ctx.num_slaves;
@@ -257,13 +273,21 @@ fn sample_slot_targets(
         };
         if let Some((counts, vel_mm_s, acc_mm_s2)) = sampled {
             sp_counts[s] = Some(counts);
-            let (ff_vel, ff_acc) = if ctx.ff_lead_ns[s] > 0 && !buzz_was_active {
-                ctx.rings[s].peek_vel_acc(apply_time + ctx.ff_lead_ns[s])
+            // A buzz has no ring piece behind it, so its jerk/snap are
+            // unknown — leave them zero; the compliance correction is
+            // gated off during a buzz anyway.
+            let (ff_vel, ff_acc, ff_jrk, ff_snp) = if buzz_was_active {
+                (vel_mm_s, acc_mm_s2, 0.0, 0.0)
+            } else if ctx.ff_lead_ns[s] > 0 {
+                ctx.rings[s].peek_kin(apply_time + ctx.ff_lead_ns[s])
             } else {
-                (vel_mm_s, acc_mm_s2)
+                let (jrk, snp) = ctx.rings[s].jerk_snap(apply_time);
+                (vel_mm_s, acc_mm_s2, jrk, snp)
             };
             all_vel[s] = ff_vel;
             all_acc[s] = ff_acc;
+            all_jrk[s] = ff_jrk;
+            all_snp[s] = ff_snp;
         }
     }
     sp_counts
@@ -391,12 +415,15 @@ fn comp_offset_counts(ctx: &mut EndpointCtx, lane_mm: &[Option<f64>]) -> Vec<i32
     counts
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_slot_commands(
     ctx: &mut EndpointCtx,
     sp_counts: &[Option<i32>],
     lane_mm: &[Option<f64>],
     all_acc: &[f32],
     all_vel: &[f32],
+    all_jrk: &[f32],
+    all_snp: &[f32],
 ) -> bool {
     let num_slaves = ctx.num_slaves;
     let mut motion_active = false;
@@ -408,26 +435,70 @@ fn emit_slot_commands(
     // so the model must be evaluated on drive-frame vectors — flipping
     // only the output torque by the slot's own sign would negate the
     // off-diagonal coupling terms whenever the drives' inverts differ.
-    let drive_dir = |s: usize| ctx.cmd_counts_per_mm.get(s).map_or(1.0, |c| c.signum()) as f32;
-    let (acc_drive, vel_drive): (Vec<f32>, Vec<f32>) = (0..num_slaves)
-        .map(|s| (drive_dir(s) * all_acc[s], drive_dir(s) * all_vel[s]))
-        .unzip();
+    let dirs: Vec<f32> = (0..num_slaves)
+        .map(|s| ctx.cmd_counts_per_mm.get(s).map_or(1.0, |c| c.signum()) as f32)
+        .collect();
+    let dir_mul = |v: &[f32]| -> Vec<f32> { v.iter().zip(&dirs).map(|(x, d)| x * d).collect() };
+    let acc_drive = dir_mul(all_acc);
+    let vel_drive = dir_mul(all_vel);
     // Coulomb is a mode-space quantity, so a buzz on any slot flips the sign
     // of a mode velocity that other slots share; drop Coulomb for every slot
     // whenever the buzz drives any slot this cycle.
     let buzz_active = ctx.buzz.active();
+    // Belt-compliance correction: the rotor leads the trajectory by
+    // G·accel so the carriage — one belt stretch behind — lands exactly
+    // on it. The corrected rotor kinematics are v+G·j and a+G·s, so the
+    // velocity offset and the torque model see the corrected vectors.
+    // Skipped during a buzz: its micrometre excitation has no ring piece
+    // (jerk/snap unknown) and must stay a pure position wiggle.
+    let compliance = ctx
+        .dynamics
+        .as_ref()
+        .filter(|m| m.has_compliance() && !buzz_active)
+        .map(|model| {
+            let jrk_drive = dir_mul(all_jrk);
+            let snp_drive = dir_mul(all_snp);
+            let mut pos_lead = vec![0f32; num_slaves];
+            let mut vel_extra = vec![0f32; num_slaves];
+            let mut acc_extra = vec![0f32; num_slaves];
+            model.compliance_apply(&acc_drive, &mut pos_lead);
+            model.compliance_apply(&jrk_drive, &mut vel_extra);
+            model.compliance_apply(&snp_drive, &mut acc_extra);
+            (pos_lead, vel_extra, acc_extra)
+        });
+    let (acc_ff, vel_ff): (Vec<f32>, Vec<f32>) = match &compliance {
+        Some((_, vel_extra, acc_extra)) => (
+            acc_drive
+                .iter()
+                .zip(acc_extra)
+                .map(|(a, e)| a + e)
+                .collect(),
+            vel_drive
+                .iter()
+                .zip(vel_extra)
+                .map(|(v, e)| v + e)
+                .collect(),
+        ),
+        None => (acc_drive.clone(), vel_drive.clone()),
+    };
     for s in 0..num_slaves {
         if let Some(counts) = sp_counts[s] {
             let vel_offset = if ctx.velocity_ff[s] {
-                (f64::from(all_vel[s]) * ctx.cmd_counts_per_mm[s]).round() as i32
+                // Drive-frame extra × cmd cpm needs the drive sign folded
+                // back in: extra·dir·cpm = extra·|cpm|.
+                let extra = compliance
+                    .as_ref()
+                    .map_or(0.0, |(_, vel_extra, _)| vel_extra[s] * dirs[s]);
+                ((f64::from(all_vel[s]) + f64::from(extra)) * ctx.cmd_counts_per_mm[s]).round()
+                    as i32
             } else {
                 0
             };
             let raw_ff = ctx.dynamics.as_ref().map(|model| {
                 if buzz_active {
-                    model.torque_ff_without_coulomb(s, &acc_drive, &vel_drive)
+                    model.torque_ff_without_coulomb(s, &acc_ff, &vel_ff)
                 } else {
-                    model.torque_ff(s, &acc_drive, &vel_drive)
+                    model.torque_ff(s, &acc_ff, &vel_ff)
                 }
             });
             let torque_offset = match raw_ff {
@@ -462,7 +533,18 @@ fn emit_slot_commands(
             }
             ctx.last_counts[s] = Some(counts);
             ctx.last_streamed_target[s] = Some(counts);
-            let offset = trim_counts[s].wrapping_add(comp_counts[s]);
+            let lead_counts = match &compliance {
+                Some((pos_lead, _, _)) => {
+                    if !pos_lead[s].is_finite() {
+                        fault_non_finite_torque(ctx, s, all_acc[s], all_vel[s]);
+                    }
+                    mm_to_counts(f64::from(pos_lead[s] * dirs[s]), ctx.cmd_counts_per_mm[s])
+                }
+                None => 0i32,
+            };
+            let offset = trim_counts[s]
+                .wrapping_add(comp_counts[s])
+                .wrapping_add(lead_counts);
             ctx.drive
                 .set_target_position(s, counts.wrapping_add(offset));
             ctx.last_written_offset[s] = offset;

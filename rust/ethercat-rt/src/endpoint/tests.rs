@@ -46,6 +46,7 @@ struct TrackingLagDrive {
     drift_counts_per_cycle: Vec<f64>,
     drifted_counts: Vec<f64>,
     torque_offsets: Vec<i16>,
+    velocity_offsets: Vec<i32>,
     torques: Vec<i16>,
 }
 
@@ -62,6 +63,7 @@ impl TrackingLagDrive {
             drift_counts_per_cycle,
             drifted_counts: vec![0.0; NUM_SLAVES],
             torque_offsets: vec![0; NUM_SLAVES],
+            velocity_offsets: vec![0; NUM_SLAVES],
             torques: vec![0; NUM_SLAVES],
         }
     }
@@ -97,7 +99,9 @@ impl DriveChain for TrackingLagDrive {
     fn set_target_position(&mut self, slot: usize, counts: i32) {
         self.targets[slot] = counts;
     }
-    fn set_velocity_offset(&mut self, _slot: usize, _counts_per_s: i32) {}
+    fn set_velocity_offset(&mut self, slot: usize, counts_per_s: i32) {
+        self.velocity_offsets[slot] = counts_per_s;
+    }
     fn set_torque_offset(&mut self, slot: usize, tenths_pct: i16) {
         self.torque_offsets[slot] = tenths_pct;
     }
@@ -118,6 +122,7 @@ impl DriveChain for TrackingLagDrive {
             target_position: self.targets[slot],
             position_actual: self.position_actual(slot),
             torque_offset: self.torque_offsets[slot],
+            velocity_offset: self.velocity_offsets[slot],
             ..EcTelemetry::default()
         }
     }
@@ -852,6 +857,7 @@ fn dynamics_msg(mass0: f32) -> mcu_protocol::messages::SetDynamicsModel {
         mass: vec![mass0, 0.030],
         viscous: vec![0.004, 0.004],
         coulomb: vec![1.0, 1.0],
+        compliance: vec![0.0, 0.0],
         pairs: vec![],
     }
 }
@@ -865,6 +871,7 @@ fn set_dynamics_model_installs_wire_pair_and_evaluates_it() {
     msg.mass = vec![0.030];
     msg.viscous = vec![0.0];
     msg.coulomb = vec![0.0];
+    msg.compliance = vec![0.0];
     msg.pairs = vec![mcu_protocol::messages::DynamicsPair {
         first: 0,
         second: 1,
@@ -890,6 +897,7 @@ fn set_dynamics_model_rejects_zero_pair_first_column() {
     msg.mass = vec![0.030];
     msg.viscous = vec![0.0];
     msg.coulomb = vec![0.0];
+    msg.compliance = vec![0.0];
     msg.pairs = vec![mcu_protocol::messages::DynamicsPair {
         first: 0,
         second: 1,
@@ -1109,4 +1117,124 @@ fn cycle_skip_faults_even_when_lateness_is_within_tolerance() {
     super::cycle::police_frame_timing(&mut ctx, -100_000);
     assert_eq!(ctx.gate.state(), TorqueState::Faulted);
     assert_eq!(ctx.latched_drive_err, super::cycle::CYCLE_SKIP_FAULT_CODE);
+}
+
+// ---- belt-compliance correction ----------------------------------------
+
+const IDENTITY_V7: &str = r#"
+version = 7
+axes = ["x", "y"]
+modes = ["x", "y"]
+frame = [[1.0, 0.0], [0.0, 1.0]]
+mass = [0.020, 0.020]
+viscous = [0.0, 0.0]
+coulomb = [0.0, 0.0]
+compliance = [1.0e-5, 1.0e-5]
+"#;
+
+fn compliance_ctx(name: &str, with_compliance: bool) -> EndpointCtx {
+    let mut ctx = test_ctx(name);
+    let toml = if with_compliance {
+        IDENTITY_V7.to_string()
+    } else {
+        IDENTITY_V7.replace("compliance = [1.0e-5, 1.0e-5]", "compliance = [0.0, 0.0]")
+    };
+    ctx.dynamics = Some(crate::dynamics::DynamicsModel::from_toml_str(&toml).unwrap());
+    ctx.torque_clamp_tenths = vec![3000; NUM_SLAVES];
+    ctx
+}
+
+/// A pure-T2 piece has constant accel: d²/du²·T2 = 4, so
+/// accel = 4·C2·(2/duration)².
+const T2_C: f32 = 0.625; // accel = 4·0.625·400 = 1000 mm/s² at d = 0.1 s
+/// A pure-T3 piece has constant jerk: d³/du³·T3 = 24, so
+/// jerk = 24·C3·(2/duration)³.
+const T3_C: f32 = 0.125; // jerk = 24·0.125·8000 = 24000 mm/s³ at d = 0.1 s
+/// A pure-T4 piece has constant snap: d⁴/du⁴·T4 = 192, so
+/// snap = 192·C4·(2/duration)⁴.
+const T4_C: f32 = 0.0625; // snap = 192·0.0625·160000 = 1.92e6 mm/s⁴ at d = 0.1 s
+
+#[test]
+fn compliance_leads_the_target_by_accel_over_omega_squared() {
+    let mut on = compliance_ctx("comp-pos-on", true);
+    let mut off = compliance_ctx("comp-pos-off", false);
+    let entry = piece(1_000_000, 0.1, &[0.0, 0.0, T2_C]);
+    push_all(&mut on, entry);
+    push_all(&mut off, entry);
+    run_cycles(&mut on, 1_000_000, 51_000_000);
+    run_cycles(&mut off, 1_000_000, 51_000_000);
+    let lead = targets(&on)[0] - targets(&off)[0];
+    // c·a·cpm = 1e-5 · 1000 · 3276.8 ≈ 33 counts
+    let want = (1.0e-5 * 1000.0 * COUNTS_PER_MM as f32).round() as i32;
+    assert!(
+        (lead - want).abs() <= 1,
+        "compliance lead {lead} counts, want ~{want}"
+    );
+    assert_eq!(
+        targets(&on)[1] - targets(&off)[1],
+        lead,
+        "identity frame: both slots lead identically"
+    );
+}
+
+#[test]
+fn compliance_adds_jerk_term_to_the_velocity_offset() {
+    let mut on = compliance_ctx("comp-vel-on", true);
+    let mut off = compliance_ctx("comp-vel-off", false);
+    on.velocity_ff = vec![true; NUM_SLAVES];
+    off.velocity_ff = vec![true; NUM_SLAVES];
+    let entry = piece(1_000_000, 0.1, &[0.0, 0.0, 0.0, T3_C]);
+    push_all(&mut on, entry);
+    push_all(&mut off, entry);
+    run_cycles(&mut on, 1_000_000, 51_000_000);
+    run_cycles(&mut off, 1_000_000, 51_000_000);
+    let d_on = on.drive.telemetry(0).velocity_offset;
+    let d_off = off.drive.telemetry(0).velocity_offset;
+    // c·j·cpm = 1e-5 · 24000 · 3276.8 ≈ 786 counts/s
+    let want = (1.0e-5 * 24000.0 * COUNTS_PER_MM as f32).round();
+    let got = f64::from(d_on - d_off);
+    assert!(
+        (got - f64::from(want)).abs() <= 2.0,
+        "jerk velocity-offset extra {got}, want ~{want}"
+    );
+}
+
+#[test]
+fn compliance_adds_snap_term_to_the_torque_offset() {
+    let mut on = compliance_ctx("comp-tau-on", true);
+    let mut off = compliance_ctx("comp-tau-off", false);
+    let entry = piece(1_000_000, 0.1, &[0.0, 0.0, 0.0, 0.0, T4_C]);
+    push_all(&mut on, entry);
+    push_all(&mut off, entry);
+    run_cycles(&mut on, 1_000_000, 51_000_000);
+    run_cycles(&mut off, 1_000_000, 51_000_000);
+    let d_on = on.drive.telemetry(0).torque_offset;
+    let d_off = off.drive.telemetry(0).torque_offset;
+    // mass·c·snap = 0.020 · 1e-5 · 1.92e6 ≈ 0.384 → rounds within ±1 tenth-%
+    let want = 0.020 * 1.0e-5 * 1.92e6;
+    let got = f64::from(d_on - d_off);
+    assert!(
+        (got - want).abs() <= 1.0,
+        "snap torque extra {got}, want ~{want}"
+    );
+}
+
+#[test]
+fn compliance_offset_is_zero_at_constant_velocity_and_never_baked_in() {
+    let mut on = compliance_ctx("comp-cruise", true);
+    let mut off = compliance_ctx("comp-cruise-off", false);
+    let entry = piece(1_000_000, 0.1, &[5.0, 5.0]); // constant velocity
+    push_all(&mut on, entry);
+    push_all(&mut off, entry);
+    run_cycles(&mut on, 1_000_000, 51_000_000);
+    run_cycles(&mut off, 1_000_000, 51_000_000);
+    assert_eq!(
+        targets(&on),
+        targets(&off),
+        "zero accel ⇒ zero lead — cruise targets must be bit-identical"
+    );
+    assert_eq!(
+        on.last_streamed_target, off.last_streamed_target,
+        "the lead must live in the offset channel, not the streamed anchor"
+    );
 }

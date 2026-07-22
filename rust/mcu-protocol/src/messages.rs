@@ -483,6 +483,7 @@ pub struct SetDynamicsModel {
     pub mass: Vec<f32>,
     pub viscous: Vec<f32>,
     pub coulomb: Vec<f32>,
+    pub compliance: Vec<f32>,
     pub pairs: Vec<DynamicsPair>,
 }
 
@@ -494,9 +495,16 @@ impl Encode for SetDynamicsModel {
         assert_eq!(self.mass.len(), modes);
         assert_eq!(self.viscous.len(), modes);
         assert_eq!(self.coulomb.len(), modes);
+        assert_eq!(self.compliance.len(), modes);
         put_u8(out, self.slots_count);
         put_u8(out, self.modes_count);
-        for vec in [&self.frame, &self.mass, &self.viscous, &self.coulomb] {
+        for vec in [
+            &self.frame,
+            &self.mass,
+            &self.viscous,
+            &self.coulomb,
+            &self.compliance,
+        ] {
             for v in vec {
                 put_f32(out, *v);
             }
@@ -541,6 +549,7 @@ impl Decode for SetDynamicsModel {
         let mass = get_f32_vec(c, modes)?;
         let viscous = get_f32_vec(c, modes)?;
         let coulomb = get_f32_vec(c, modes)?;
+        let compliance = get_f32_vec(c, modes)?;
         let pairs_count = get_u8(c)?;
         let mut pairs = Vec::with_capacity(pairs_count as usize);
         for _ in 0..pairs_count {
@@ -557,6 +566,7 @@ impl Decode for SetDynamicsModel {
             mass,
             viscous,
             coulomb,
+            compliance,
             pairs,
         })
     }

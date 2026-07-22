@@ -207,6 +207,7 @@ fn from_parts_agrees_with_toml_parse() {
         &[0.004, 0.004],
         &[1.0, 1.0],
         &[],
+        &[],
     )
     .unwrap();
     assert_eq!(parts.n_slots, 2);
@@ -227,15 +228,15 @@ fn from_parts_rejects_each_invariant_violation() {
     let frame = [0.5, 0.5, 0.5, -0.5];
     let mode2 = [0.004, 0.004];
     assert!(matches!(
-        DynamicsModel::from_parts(0, 0, &[], &[], &[], &[], &[]),
+        DynamicsModel::from_parts(0, 0, &[], &[], &[], &[], &[], &[]),
         Err(ProfileError::Dim(_))
     ));
     assert!(matches!(
-        DynamicsModel::from_parts(2, 2, &frame[..3], &[0.04, 0.08], &mode2, &mode2, &[]),
+        DynamicsModel::from_parts(2, 2, &frame[..3], &[0.04, 0.08], &mode2, &mode2, &[], &[]),
         Err(ProfileError::Dim(_))
     ));
     assert!(matches!(
-        DynamicsModel::from_parts(2, 2, &frame, &[0.04], &mode2, &mode2, &[]),
+        DynamicsModel::from_parts(2, 2, &frame, &[0.04], &mode2, &mode2, &[], &[]),
         Err(ProfileError::Dim(_))
     ));
     assert!(matches!(
@@ -246,16 +247,26 @@ fn from_parts_rejects_each_invariant_violation() {
             &[0.04, 0.08],
             &mode2,
             &mode2,
+            &[],
             &[]
         ),
         Err(ProfileError::FrameRankDeficient)
     ));
     assert!(matches!(
-        DynamicsModel::from_parts(2, 2, &frame, &[0.0, 0.08], &mode2, &mode2, &[]),
+        DynamicsModel::from_parts(2, 2, &frame, &[0.0, 0.08], &mode2, &mode2, &[], &[]),
         Err(ProfileError::NonPositive(_))
     ));
     assert!(matches!(
-        DynamicsModel::from_parts(2, 2, &frame, &[0.04, 0.08], &[f32::NAN, 0.004], &mode2, &[]),
+        DynamicsModel::from_parts(
+            2,
+            2,
+            &frame,
+            &[0.04, 0.08],
+            &[f32::NAN, 0.004],
+            &mode2,
+            &[],
+            &[]
+        ),
         Err(ProfileError::NotFinite(_))
     ));
 }
@@ -321,7 +332,8 @@ fn opposite_pair_columns_preserve_generalized_force() {
         direction_split: 0.2,
     };
     let model =
-        DynamicsModel::from_parts(2, 1, &[0.5, -0.5], &[0.04], &[0.0], &[0.0], &[pair]).unwrap();
+        DynamicsModel::from_parts(2, 1, &[0.5, -0.5], &[0.04], &[0.0], &[0.0], &[], &[pair])
+            .unwrap();
     let acc = [1000.0, -1000.0];
     let first = model.torque_ff(0, &acc, &[0.0, 0.0]);
     let second = model.torque_ff(1, &acc, &[0.0, 0.0]);
@@ -353,7 +365,8 @@ fn pair_validation_rejects_invalid_contracts() {
             &vectors[..1],
             &[0.0],
             &[0.0],
-            &[spec],
+            &[],
+            &[spec]
         )
         .is_err());
     }
@@ -365,7 +378,8 @@ fn pair_validation_rejects_invalid_contracts() {
             &vectors[..1],
             &[0.0],
             &[0.0],
-            &[pair(0, 1, 0.1), pair(1, 2, 0.1)],
+            &[],
+            &[pair(0, 1, 0.1), pair(1, 2, 0.1)]
         ),
         Err(ProfileError::PairSlot(_))
     ));
@@ -377,7 +391,8 @@ fn pair_validation_rejects_invalid_contracts() {
             &vectors[..1],
             &[0.0],
             &[0.0],
-            &[pair(0, 1, 0.1)],
+            &[],
+            &[pair(0, 1, 0.1)]
         ),
         Err(ProfileError::PairNotParallel(0))
     ));
@@ -436,11 +451,12 @@ fn pair_rejects_zero_first_frame_column() {
             &[0.04],
             &[0.0],
             &[0.0],
+            &[],
             &[PairSpec {
                 first: 0,
                 second: 1,
                 direction_split: 0.1,
-            }],
+            }]
         ),
         Err(ProfileError::PairFirstColumnZero(0))
     ));
@@ -470,4 +486,92 @@ fn torque_ff_without_coulomb_keeps_the_linear_terms() {
     assert!((linear - expect).abs() < 1e-4, "{linear} vs {expect}");
     let full = m.torque_ff(0, &[1000.0], &[100.0]);
     assert!((full - (expect + 1.2)).abs() < 1e-4, "{full}");
+}
+
+const COREXY_V7: &str = r#"
+version = 7
+axes = ["a", "b"]
+modes = ["x", "y"]
+frame = [[0.5, 0.5], [0.5, -0.5]]
+mass = [0.040, 0.080]
+viscous = [0.004, 0.004]
+coulomb = [1.0, 1.0]
+compliance = [7.0e-6, 1.76e-5]
+fit_rms_residual = [0.5, 0.5]
+"#;
+
+#[test]
+fn v7_compliance_parses_and_projects_through_the_frame() {
+    let m = DynamicsModel::from_toml_str(COREXY_V7).unwrap();
+    assert!(m.has_compliance());
+    let (cx, cy) = (7.0e-6f32, 1.76e-5f32);
+    // G = F⁺·diag(c)·F with orthogonal CoreXY rows: a pure slot-a accel
+    // splits evenly into both modes, so the slot leads mix the two
+    // compliances: out = [(cx+cy)/2, (cx-cy)/2] · a.
+    let mut out = [0.0f32; 2];
+    m.compliance_apply(&[1000.0, 0.0], &mut out);
+    let want0 = (cx + cy) / 2.0 * 1000.0;
+    let want1 = (cx - cy) / 2.0 * 1000.0;
+    assert!((out[0] - want0).abs() < 1e-6, "{out:?} vs {want0}");
+    assert!((out[1] - want1).abs() < 1e-6, "{out:?} vs {want1}");
+    // A pure x-mode accel pattern (both slots equal) must lead by exactly
+    // cx·a on both slots — the y mode sees zero of it.
+    m.compliance_apply(&[2000.0, 2000.0], &mut out);
+    assert!((out[0] - cx * 2000.0).abs() < 1e-6, "{out:?}");
+    assert!((out[1] - cx * 2000.0).abs() < 1e-6, "{out:?}");
+}
+
+#[test]
+fn v6_still_parses_and_reports_no_compliance() {
+    let m = DynamicsModel::from_toml_str(COREXY).unwrap();
+    assert!(!m.has_compliance());
+    let mut out = [9.9f32; 2];
+    m.compliance_apply(&[1000.0, 0.0], &mut out);
+    assert_eq!(out, [0.0, 0.0], "no-compliance apply must zero the output");
+}
+
+#[test]
+fn v7_all_zero_compliance_is_disabled() {
+    let zeroed = COREXY_V7.replace("compliance = [7.0e-6, 1.76e-5]", "compliance = [0.0, 0.0]");
+    let m = DynamicsModel::from_toml_str(&zeroed).unwrap();
+    assert!(!m.has_compliance());
+}
+
+#[test]
+fn compliance_on_v6_profile_is_rejected() {
+    let v6 = COREXY_V7.replace("version = 7", "version = 6");
+    assert!(matches!(
+        DynamicsModel::from_toml_str(&v6),
+        Err(ProfileError::ForbiddenField(_))
+    ));
+}
+
+#[test]
+fn compliance_validation_rejects_bad_values() {
+    for bad in [
+        "[7.0e-6]",
+        "[-1.0e-6, 1.0e-6]",
+        "[nan, 1.0e-6]",
+        "[1.0e-2, 1.0e-6]",
+    ] {
+        let s = COREXY_V7.replace("[7.0e-6, 1.76e-5]", bad);
+        let r = DynamicsModel::from_toml_str(&s);
+        assert!(r.is_err(), "compliance {bad} must be rejected");
+    }
+}
+
+#[test]
+fn block_diagonal_concatenates_compliance() {
+    let x = format!(
+        "{}\ncompliance = [1.0e-5]\n",
+        SCALAR.replace("version = 6", "version = 7")
+    );
+    let y = DynamicsModel::from_toml_str(SCALAR_Y).unwrap();
+    let x = DynamicsModel::from_toml_str(&x).unwrap();
+    let node = DynamicsModel::block_diagonal(vec![x, y]).unwrap();
+    assert!(node.has_compliance());
+    let mut out = [0.0f32; 2];
+    node.compliance_apply(&[1000.0, 1000.0], &mut out);
+    assert!((out[0] - 1.0e-5 * 1000.0).abs() < 1e-6, "{out:?}");
+    assert_eq!(out[1], 0.0, "y profile has no compliance term");
 }
