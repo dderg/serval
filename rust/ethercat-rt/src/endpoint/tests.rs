@@ -1657,8 +1657,8 @@ fn pin_residual_demod_converges_and_stays_bounded() {
         let t = n as f64 * dt;
         // Mode x (slot 0, pinned) sees the on-notch ring; slot 1 (non-pinned)
         // carries a nonzero following error that must never leak to a residual.
-        let ferr0 = (amp * (wd * t + phi).cos()) as f32;
-        let ferr1 = (amp * (wd * t).sin()) as f32;
+        let ferr0 = (amp * libm::cos(wd * t + phi)) as f32;
+        let ferr1 = (amp * libm::sin(wd * t)) as f32;
         peak_ferr = peak_ferr.max(ferr0.abs());
         ctx.pin.step(&acc, &[ferr0, ferr1], true);
         let (re, im) = ctx.pin.residual_for_slot(0);
@@ -1845,7 +1845,7 @@ fn assert_pin_cancels_every_mode(
         let lift = model.pin_lift_row(k).to_vec();
         let acc_seq: Vec<Vec<f32>> = (0..CYCLES)
             .map(|c| {
-                let s = (1000.0 * (wb * c as f64 * dt).sin()) as f32;
+                let s = (1000.0 * libm::sin(wb * c as f64 * dt)) as f32;
                 lift.iter().map(|w| w * s).collect()
             })
             .collect();
