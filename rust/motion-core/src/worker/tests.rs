@@ -1001,3 +1001,38 @@ fn beacon_scan_path_live_worker_velocity_stays_bounded() {
         "{overspeed} segments tripped the motor step ceiling"
     );
 }
+
+fn seg_ending_at_velocity(v_end: f64) -> ShapedSegment {
+    // Cubic Bezier over u in [0,1]: end velocity = 3 * (b3 - b2).
+    let bern = [0.0, 0.0, 1.0 - v_end / 3.0, 1.0];
+    let piece = nurbs::bezier::BezierPiece::from_bernstein(&bern, 0.0_f64, 1.0_f64);
+    let axis = nurbs::bezier::bezier_pieces_to_nurbs(&[piece]);
+    ShapedSegment {
+        axes: vec![axis],
+        followers: vec![],
+        spatial_path: false,
+        t_start: 0.0,
+        t_end: 1.0,
+        motor_mask: 0,
+        source_line: 0,
+    }
+}
+
+#[test]
+fn kernel_settle_tail_velocity_is_physical_rest() {
+    // The shaper's kernel-settle tails end around 3e-5 mm/s (measured at the
+    // manual-probe seam). Classifying that as "in motion" turned a benign
+    // at-rest idle gap into a fatal mid-motion underrun.
+    assert!(pump_sink::segment_ends_at_rest(&seg_ending_at_velocity(
+        3e-5
+    )));
+}
+
+#[test]
+fn genuine_motion_at_segment_end_is_not_rest() {
+    // Real mid-stream seams end at >= 0.5 mm/s; those must keep the fatal
+    // underrun verdict armed.
+    assert!(!pump_sink::segment_ends_at_rest(&seg_ending_at_velocity(
+        0.5
+    )));
+}

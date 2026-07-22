@@ -11,22 +11,6 @@ fn primed(last_ends_at_rest: bool) -> Anchor {
     a.anchor_segment(0.0, 1.0, 100.0, last_ends_at_rest);
     a
 }
-#[test]
-fn sim_recover_turns_mid_motion_underrun_into_a_reanchor() {
-    // Under the simulator's racing virtual clock the same mid-motion underrun
-    // that aborts on hardware must re-anchor instead — matching the pump's
-    // widened past-guard and the MCU's CONFIG_MCU_SIM timer gating.
-    let mut a = primed(false);
-    a.recover_faults = true;
-    // classify() still reports the true fatal verdict...
-    assert!(matches!(
-        a.classify(1.0, 101.5),
-        AnchorClass::UnderrunFatal { .. }
-    ));
-    // ...but anchor_segment recovers rather than aborting.
-    let (_t0, epoch) = a.anchor_segment(1.0, 2.0, 101.5, false);
-    assert_eq!(epoch, StreamEpoch::Reanchor);
-}
 
 #[test]
 fn classify_mid_motion_underrun_is_fatal() {

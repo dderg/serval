@@ -184,11 +184,13 @@ impl SegmentSink for PumpSink {
 
 /// Whether every axis of the segment has zero velocity at its end — the
 /// machine is parked there, so a later resume may re-anchor instead of
-/// faulting. Hold segments are exactly constant; brake-to-rest tails end at
-/// an exact zero, so the epsilon only absorbs floating-point noise.
-const REST_VELOCITY_EPS: f64 = 1e-6;
+/// faulting. The threshold is physical rest, not float noise: the shaper's
+/// kernel-settle tails end around 3e-5 mm/s (measured at the manual-probe
+/// seam), while genuinely mid-motion seams end at ≥0.5 mm/s. Anything below
+/// 1e-3 mm/s cannot produce a discontinuity a step could express.
+const REST_VELOCITY_EPS: f64 = 1e-3;
 
-fn segment_ends_at_rest(seg: &ShapedSegment) -> bool {
+pub(super) fn segment_ends_at_rest(seg: &ShapedSegment) -> bool {
     seg.axes.iter().all(|axis| {
         let Some(&u_end) = axis.knots().last() else {
             return true;
