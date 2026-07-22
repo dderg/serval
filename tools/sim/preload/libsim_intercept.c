@@ -14,6 +14,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 // THREADING MODEL
@@ -112,11 +113,16 @@ struct auto_endstop {
     int toward_sign;
     int latch_armed;
     int triggered;
+    unsigned long step_count;
+    uint64_t first_step_vtime_ns;
+    uint64_t last_step_vtime_ns;
+    unsigned long long sum_step_vtime_ns;
+    unsigned long long sum_step_cycles;
+    unsigned long long sum_index_cycles;
     long min_pos, max_pos;
 };
 static struct auto_endstop auto_endstops[MAX_AUTO_ENDSTOPS];
 static pthread_mutex_t auto_endstop_mtx = PTHREAD_MUTEX_INITIALIZER;
-
 __attribute__((constructor(101)))
 static void iio_init(void) {
     for (int i = 0; i < MAX_IIO_CHANNELS; i++) iio_values[i] = DEFAULT_ADC_VALUE;
@@ -262,6 +268,70 @@ static void control_handle_line(int client_fd, char *line) {
         send_resp(client_fd, buf);
         return;
     }
+    if (strncmp(line, "get_step_times", 14) == 0) {
+        long line_off;
+        if (parse_kv(line, "line", &line_off) < 0) {
+            send_resp(client_fd, "error: parse error\n");
+            return;
+        }
+        unsigned long count = 0;
+        uint64_t first_ns = 0, last_ns = 0;
+        unsigned long long sum_ns = 0, sum_cycles = 0, sum_index_cycles = 0;
+        int hit = 0;
+        pthread_mutex_lock(&auto_endstop_mtx);
+        for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
+            if (auto_endstops[i].active
+                && auto_endstops[i].step_line == (int)line_off) {
+                count = auto_endstops[i].step_count;
+                first_ns = auto_endstops[i].first_step_vtime_ns;
+                last_ns = auto_endstops[i].last_step_vtime_ns;
+                sum_ns = auto_endstops[i].sum_step_vtime_ns;
+                sum_cycles = auto_endstops[i].sum_step_cycles;
+                sum_index_cycles = auto_endstops[i].sum_index_cycles;
+                hit = 1;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&auto_endstop_mtx);
+        if (!hit) {
+            send_resp(client_fd, "error: no step tracker for line\n");
+            return;
+        }
+        char buf[288];
+        snprintf(buf, sizeof(buf),
+                 "count=%lu first_ns=%llu last_ns=%llu sum_ns=%llu "
+                 "sum_cycles=%llu sum_index_cycles=%llu\n", count,
+                 (unsigned long long)first_ns,
+                 (unsigned long long)last_ns, sum_ns, sum_cycles,
+                 sum_index_cycles);
+        send_resp(client_fd, buf);
+        return;
+    }
+    if (strncmp(line, "reset_step_times", 16) == 0) {
+        long line_off;
+        if (parse_kv(line, "line", &line_off) < 0) {
+            send_resp(client_fd, "error: parse error\n");
+            return;
+        }
+        int hit = 0;
+        pthread_mutex_lock(&auto_endstop_mtx);
+        for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
+            struct auto_endstop *ae = &auto_endstops[i];
+            if (ae->active && ae->step_line == (int)line_off) {
+                ae->step_count = 0;
+                ae->first_step_vtime_ns = 0;
+                ae->last_step_vtime_ns = 0;
+                ae->sum_step_vtime_ns = 0;
+                ae->sum_step_cycles = 0;
+                ae->sum_index_cycles = 0;
+                hit = 1;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&auto_endstop_mtx);
+        send_resp(client_fd, hit ? "ok\n" : "error: no step tracker for line\n");
+        return;
+    }
     if (strncmp(line, "get_steps", 9) == 0) {
         long line_off;
         if (parse_kv(line, "line", &line_off) < 0) {
@@ -331,9 +401,30 @@ static void control_handle_line(int client_fd, char *line) {
     send_resp(client_fd, "error: unknown verb\n");
 }
 
+static void *control_client_loop(void *arg) {
+    int client = (int)(intptr_t)arg;
+    char buf[1024];
+    size_t pos = 0;
+    while (1) {
+        ssize_t n = real_read(client, buf + pos, sizeof(buf) - pos - 1);
+        if (n <= 0) break;
+        pos += n;
+        buf[pos] = '\0';
+        char *nl;
+        while ((nl = memchr(buf, '\n', pos)) != NULL) {
+            *nl = '\0';
+            control_handle_line(client, buf);
+            size_t len = nl - buf + 1;
+            memmove(buf, nl + 1, pos - len);
+            pos -= len;
+        }
+    }
+    real_close(client);
+    return NULL;
+}
+
 static void *control_accept_loop(void *unused) {
     (void)unused;
-    char buf[1024];
     while (1) {
         int client = accept(control_listen_fd, NULL, NULL);
         if (client < 0) {
@@ -341,22 +432,14 @@ static void *control_accept_loop(void *unused) {
             LOG("control accept failed: %s", strerror(errno));
             return NULL;
         }
-        size_t pos = 0;
-        while (1) {
-            ssize_t n = real_read(client, buf + pos, sizeof(buf) - pos - 1);
-            if (n <= 0) break;
-            pos += n;
-            buf[pos] = '\0';
-            char *nl;
-            while ((nl = memchr(buf, '\n', pos)) != NULL) {
-                *nl = '\0';
-                control_handle_line(client, buf);
-                size_t len = nl - buf + 1;
-                memmove(buf, nl + 1, pos - len);
-                pos -= len;
-            }
+        pthread_t client_thread;
+        if (pthread_create(&client_thread, NULL, control_client_loop,
+                           (void *)(intptr_t)client) != 0) {
+            LOG("control client pthread_create failed");
+            real_close(client);
+            continue;
         }
-        real_close(client);
+        pthread_detach(client_thread);
     }
 }
 
@@ -587,13 +670,24 @@ static int gpio_handle_get_linehandle(int chip_fd, struct gpiohandle_request *re
     return 0;
 }
 
-static void auto_endstop_advance(int chip_id, int offset, long delta) {
+static void auto_endstop_advance(int chip_id, int offset, long delta,
+                                 uint64_t step_ns, uint64_t step_cycle) {
     static long last_log_pos[MAX_AUTO_ENDSTOPS];
+    uint64_t now_ns = step_ns;
     pthread_mutex_lock(&auto_endstop_mtx);
     for (int i = 0; i < MAX_AUTO_ENDSTOPS; i++) {
         struct auto_endstop *ae = &auto_endstops[i];
         if (!ae->active) continue;
         if (ae->step_chip != chip_id || ae->step_line != offset) continue;
+        if (!ae->step_count) ae->first_step_vtime_ns = now_ns;
+        ae->last_step_vtime_ns = now_ns;
+        ae->sum_step_vtime_ns += (unsigned long long)labs(delta) * now_ns;
+        unsigned long m = (unsigned long)labs(delta);
+        unsigned long long base = ae->step_count;
+        ae->sum_step_cycles += (unsigned long long)m * step_cycle;
+        ae->sum_index_cycles +=
+            (m * base + m * (m - 1) / 2) * step_cycle;
+        ae->step_count += m;
         ae->pos += delta;
         if (ae->pos < ae->min_pos) ae->min_pos = ae->pos;
         if (ae->pos > ae->max_pos) ae->max_pos = ae->pos;
@@ -638,10 +732,12 @@ static void auto_endstop_advance(int chip_id, int offset, long delta) {
 // of step pulses without going through the GPIO ioctl path. The tick
 // thread populates the Rust step queues and calls this for each step
 // via dlsym(RTLD_DEFAULT, "sim_intercept_notify_step"). n_steps is
-// signed: the sign carries the step direction.
+// signed: the sign carries the step direction. sched_vtime_ns is the
+// step's scheduled sub-sample virtual time (see runtime_tick_host.c).
 __attribute__((visibility("default")))
-void sim_intercept_notify_step(int chip, int line, int32_t n_steps) {
-    auto_endstop_advance(chip, line, (long)n_steps);
+void sim_intercept_notify_step(int chip, int line, int32_t n_steps,
+                               uint64_t sched_vtime_ns, uint64_t sched_cycle) {
+    auto_endstop_advance(chip, line, (long)n_steps, sched_vtime_ns, sched_cycle);
 }
 
 static int gpio_handle_set_values(int line_fd, struct gpiohandle_data *data) {

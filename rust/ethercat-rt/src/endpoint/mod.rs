@@ -46,6 +46,7 @@ pub struct EndpointCtx {
     ff_lead_ns: Vec<u64>,
     jump_log_counts: Vec<i64>,
     cycle_ns: i64,
+    group_delay_ns: u64,
     telemetry_period: u64,
     dynamics: Option<DynamicsModel>,
     run_limits: Vec<(u32, u16)>,

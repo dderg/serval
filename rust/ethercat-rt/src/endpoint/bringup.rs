@@ -271,6 +271,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
         mailbox_cpu,
         dynamics,
         late_tolerance_ns,
+        group_delay_ns,
     } = args;
 
     let num_slaves = slaves.len();
@@ -488,6 +489,7 @@ pub fn bringup(args: Args) -> EndpointCtx {
         ff_lead_ns,
         jump_log_counts,
         cycle_ns,
+        group_delay_ns,
         telemetry_period,
         dynamics,
         run_limits,

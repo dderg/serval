@@ -79,6 +79,9 @@ class EtherCatNode:
         self.dynamics_profile = servo_axis.read_dynamics_profile_option(config)
         self.live_dynamics_profile = None
         self.late_tolerance_us = config.getfloat("late_tolerance_us", 0.0)
+        self.group_delay_us = config.getfloat(
+            "group_delay_us", default=float(self.cycle_us), minval=0.0
+        )
         self.engine_handle = None
         self._counts_per_mm = None
         self._slot_by_motor = {}
@@ -232,6 +235,7 @@ class EtherCatNode:
                 self.dynamics_profile,
                 drives,
                 late_tolerance_us=self.late_tolerance_us,
+                group_delay_us=self.group_delay_us,
             )
         except RuntimeError as e:
             raise self.printer.config_error(str(e))

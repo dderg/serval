@@ -47,6 +47,16 @@ class MotionDebugCommands:
             desc="[sim] Query commanded motion state at a past print_time",
         )
         gcode.register_command(
+            "MCU_SIM_CONSTANT_MOVE",
+            self.cmd_MCU_SIM_CONSTANT_MOVE,
+            desc="[sim] Submit a constant-velocity single-motor move",
+        )
+        gcode.register_command(
+            "MCU_SIM_ARMED_WINDOW",
+            self.cmd_MCU_SIM_ARMED_WINDOW,
+            desc="[sim] Report the armed piece MCU-clock window for an axis",
+        )
+        gcode.register_command(
             "DIAG_DUMP",
             self.cmd_DIAG_DUMP,
             desc="Emit the live MCU diag snapshot (cause discriminators + "
@@ -70,6 +80,48 @@ class MotionDebugCommands:
             )
         else:
             gcmd.respond_info("DIAG_DUMP: no MCU exposes runtime_diag_dump")
+
+    def cmd_MCU_SIM_ARMED_WINDOW(self, gcmd):
+        motion = self.motion
+        if motion.engine is None:
+            raise gcmd.error("motion_engine not available")
+        mcu_name = gcmd.get("MCU")
+        axis = gcmd.get_int("AXIS", minval=0)
+        mcu_obj = self.printer.lookup_object("mcu " + mcu_name, None)
+        if mcu_obj is None and mcu_name in ("mcu", ""):
+            mcu_obj = self.printer.lookup_object("mcu")
+        if mcu_obj is None:
+            raise gcmd.error("unknown MCU '%s'" % mcu_name)
+        handle = mcu_obj.get_engine_handle()
+        if handle is None:
+            raise gcmd.error("MCU '%s' has no engine handle" % mcu_name)
+        resp = motion.engine.engine_call(
+            handle,
+            "runtime_sim_axis_window axis=%d" % axis,
+            "runtime_sim_axis_window_response",
+            timeout_s=5.0,
+        )
+        start = resp["start_lo"] | (resp["start_hi"] << 32)
+        end = resp["end_lo"] | (resp["end_hi"] << 32)
+        gcmd.respond_info(
+            "MCU_SIM_ARMED_WINDOW mcu=%s axis=%d armed=%d occupancy=%d "
+            "start=%d end=%d"
+            % (mcu_name, axis, resp["armed"], resp["occupancy"], start, end)
+        )
+
+    def cmd_MCU_SIM_CONSTANT_MOVE(self, gcmd):
+        name = gcmd.get("STEPPER")
+        distance = gcmd.get_float("DISTANCE")
+        velocity = gcmd.get_float("VELOCITY", above=0.0)
+        toolhead = self.printer.lookup_object("toolhead")
+        mcu_id, axis_idx, motor_idx = toolhead.get_motor_binding(name)
+        self.motion.submit_nudge(
+            mcu_id, axis_idx, motor_idx, distance, velocity, 0.0
+        )
+        gcmd.respond_info(
+            "MCU_SIM_CONSTANT_MOVE stepper=%s distance=%.9f velocity=%.9f"
+            % (name, distance, velocity)
+        )
 
     def cmd_MCU_SIM_MOTION_STATE(self, gcmd):
         motion = self.motion
