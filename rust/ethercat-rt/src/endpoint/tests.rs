@@ -1409,6 +1409,12 @@ fn pin_mode_holds_rotor_in_two_mass_sim() {
         sign_changes >= 3,
         "pin torque must oscillate at f_b: {sign_changes} sign changes"
     );
+    // The non-pinned mode (slot 1) carries no residual.
+    assert_eq!(
+        pinned.pin.residual_for_slot(1),
+        (0.0, 0.0),
+        "non-pinned mode must carry no residual"
+    );
 }
 
 /// Per-mode replacement: a pinned mode drops its position lead while a
@@ -1625,5 +1631,60 @@ fn pin_lead_advances_phase() {
     assert!(
         cross_leaded < cross_unled,
         "pin lead must advance the phase: leaded {cross_leaded} vs unled {cross_unled}"
+    );
+}
+
+/// Residual demodulator regression: under a sustained on-notch ring in the
+/// pinned mode's following error the demodulated (re, im) phasor must
+/// converge to a steady value bounded by the ring amplitude — never diverge
+/// (the unclamped low-pass coefficient once let α≥2 blow the accumulator up
+/// to ~1e33 with the phase snapping between 0 and −90°).
+#[test]
+fn pin_residual_demod_converges_and_stays_bounded() {
+    let mut ctx = pin_ctx("pin-residual-demod", PIN_IDENTITY);
+    let dt = CYCLE_NS as f64 * 1e-9;
+    // Two-mass belt notch from PIN_IDENTITY: ω_b = 1/√compliance, ζ = 0.1.
+    let omega = 1.0 / (1.0e-5f64).sqrt();
+    let zeta = 0.1f64;
+    let wd = omega * (1.0 - zeta * zeta).sqrt();
+    let amp = 0.05f64; // 0.05 mm sub-mm belt ring
+    let phi = 0.7f64;
+    const CYCLES: usize = 12_000; // 3 s at 250 µs
+    let acc = [0.0f32; NUM_SLAVES];
+    let mut mag = Vec::with_capacity(CYCLES);
+    let mut peak_ferr = 0.0f32;
+    for n in 0..CYCLES {
+        let t = n as f64 * dt;
+        // Mode x (slot 0, pinned) sees the on-notch ring; slot 1 (non-pinned)
+        // carries a nonzero following error that must never leak to a residual.
+        let ferr0 = (amp * (wd * t + phi).cos()) as f32;
+        let ferr1 = (amp * (wd * t).sin()) as f32;
+        peak_ferr = peak_ferr.max(ferr0.abs());
+        ctx.pin.step(&acc, &[ferr0, ferr1], true);
+        let (re, im) = ctx.pin.residual_for_slot(0);
+        mag.push(re.hypot(im));
+    }
+    // (iii) nonzero: the on-notch ring demodulates to a steady phasor.
+    let last = *mag.last().unwrap();
+    assert!(last > 0.1 * amp as f32, "residual must be nonzero: {last}");
+    // (i) converges: last-100 mean within 20% of the mean 0.5 s (2000 cy) earlier.
+    let mean = |s: &[f32]| s.iter().sum::<f32>() / s.len() as f32;
+    let late = mean(&mag[CYCLES - 100..]);
+    let early = mean(&mag[CYCLES - 2100..CYCLES - 2000]);
+    assert!(
+        (late - early).abs() <= 0.2 * early,
+        "residual must converge: late {late} vs early {early}"
+    );
+    // (ii) bounded by the ring order: never exceeds 10× the peak following error.
+    let peak_res = mag.iter().fold(0.0f32, |m, &x| m.max(x));
+    assert!(
+        peak_res < 10.0 * peak_ferr,
+        "residual must stay bounded by the ring amplitude: {peak_res} vs peak ferr {peak_ferr}"
+    );
+    // The non-pinned mode carries a nonzero following error but zero residual.
+    assert_eq!(
+        ctx.pin.residual_for_slot(1),
+        (0.0, 0.0),
+        "non-pinned mode must carry no residual"
     );
 }

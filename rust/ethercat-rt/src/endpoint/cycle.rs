@@ -1091,6 +1091,10 @@ pub(super) struct PinState {
 impl PinState {
     /// Residual demodulator low-pass time constant.
     const RES_TAU_S: f64 = 0.25;
+    /// Physical ceiling on the demodulated residual (mm). The belt-resonance
+    /// following error is a sub-mm ring; anything past this is a numeric
+    /// runaway, so the accumulator saturates here rather than blowing up.
+    const RES_CEIL_MM: f32 = 10.0;
 
     /// Build the bank for `model`, precomputing every pinned mode's exact
     /// transition coefficients from ω_b, ζ, the DC cycle, and the lead.
@@ -1137,7 +1141,9 @@ impl PinState {
         let lp_alpha = if modes.is_empty() {
             0.0
         } else {
-            (dt / Self::RES_TAU_S) as f32
+            // Leaky-integrator pole is 1-α; α must stay inside (0,1] or the
+            // accumulator diverges (α≥2 flips sign every cycle and blows up).
+            (dt / Self::RES_TAU_S).clamp(f64::MIN_POSITIVE, 1.0) as f32
         };
         Self {
             modes,
@@ -1213,6 +1219,8 @@ impl PinState {
             let (sin, cos) = m.theta.sin_cos();
             m.res_re += alpha * (ferr_mode * cos - m.res_re);
             m.res_im += alpha * (ferr_mode * -sin - m.res_im);
+            m.res_re = m.res_re.clamp(-Self::RES_CEIL_MM, Self::RES_CEIL_MM);
+            m.res_im = m.res_im.clamp(-Self::RES_CEIL_MM, Self::RES_CEIL_MM);
             // Advance one DC cycle with ZOH forcing, then the phasor.
             let d_next = m.a11 * m.d + m.a12 * m.v + m.b1 * a_cmd;
             let v_next = m.a21 * m.d + m.a22 * m.v + m.b2 * a_cmd;
